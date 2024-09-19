@@ -1,133 +1,61 @@
-# tracebloc AKS Chart Deployment Guide for Azure AKS
+**Overview:**   
 
-This guide will walk you through the process of deploying the tracebloc application to your Azure Kubernetes Service (AKS) cluster using the **tracebloc AKS Chart**.
+This guide explains how to deploy the tracebloc application to your Kubernetes cluster using a **Helm Chart**. The app includes the tracebloc runtime, which runs experiments and sends results to the tracebloc backend. 
 
-## Prerequisites
+  
 
-1. An active Azure subscription.
-2. Azure CLI installed and configured.
-3. kubectl installed and configured to connect to your AKS cluster.
-4. Helm 3.x installed on your local machine.
-5. Access to the tracebloc AKS chart repository.
+**Prerequisites:** 
 
-## Step 1: Connect to Your AKS Cluster
+- You need `kubectl` installed and connected to your Kubernetes cluster. 
 
-Ensure you're connected to your AKS cluster:
+- `Helm 3.x` must be installed on your machine. 
 
-```bash
-az aks get-credentials --resource-group <your-resource-group> --name <your-aks-cluster-name>
-```
+  
 
-Verify the connection:
+**Network Requirements:** 
 
-```bash
-kubectl get nodes
-```
+- Communication with the tracebloc backend is one-way (client requests data only). 
 
-## Step 2: Add the tracebloc Helm Repository
+- Port 443 must be open to send experiment data through Azure Service Bus (AmqpOverWebsocket). 
 
-Add the tracebloc Helm repository to your local Helm installation:
+- The client only communicates with the tracebloc backend, sharing experiment metrics and weight files. 
 
-```bash
-helm repo add tracebloc https://tracebloc.github.io/client/
-helm repo update
-```
+  
 
-## Step 3: Configure Values
+**Cluster Requirements:** 
 
-Create a `values.yaml` file to customize the tracebloc deployment. You can start with the default values and modify as needed:
+- We recommend that each node in the cluster has at least 50 GB of RAM and 20 CPU cores. 
 
-```bash
-helm show values tracebloc/tracebloc-aks-chart > values.yaml
-```
+  
 
-Edit `values.yaml` to set your specific configuration. Pay special attention to:
+**Data Storage:** 
 
-- `env`: Set to your desired environment (e.g., "dev", "stg", "prod").
-- `jobsManager.tag`: Set the correct image tag.
-- `jobsManager.env`: Configure environment-specific variables.
-- `storageClass`: Verify this matches your AKS storage class.
-- `mysql`: set the name for the mysql hostname.
-- `dockerRegistry`: Ensure this matches your docker Container Registry credentials.
+- Training data, models, and weight files will be stored on persistent volumes. 
 
+  
 
+**Required Configuration:** 
 
+- Docker credentials (username, password) 
 
-## Step 4: Create Necessary Secrets
+- Client credentials (client ID, username, password) 
 
-Create secrets for sensitive information (replace with your actual values):
+- Service Bus connection string 
 
-```bash
-kubectl create secret generic tracebloc-secrets \
-  --from-literal=EDGE_PASSWORD=<your-edge-password> \
-  --from-literal=CONNECTION_STRING=<your-connection-string> \
-  --from-literal=AZURE_STORAGE_CONNECTION_STRING=<your-storage-connection-string>
-```
+- Azure Storage connection string 
 
+  
 
-## Step 5: Install the Helm Chart
+For these configurations, email us at info@tracebloc.io. 
 
-Install the tracebloc AKS chart using your custom values:
+  
 
-```bash
-helm install tracebloc tracebloc/tracebloc-aks-chart -f values.yaml
-```
+**Deployment Options:** 
 
-## Step 6: Verify the Deployment
+- [AKS (Azure Kubernetes Service)](./docs/aks.md)
 
-Check the status of your pods:
+- EKS (Coming soon)
 
-```bash
-kubectl get pods
-```
-You should see the mysql and jobs manager pods.
+- Bare Metal (Coming soon) 
 
-
-Verify services are running:
-
-```bash
-kubectl get services
-```
-
-## Step 7: Access the Application
-
-Depending on your ingress configuration, you may need to set up an ingress controller or use a LoadBalancer service to access the application externally.
-
-## Troubleshooting
-
-- If pods are not starting, check the logs:
-  ```bash
-  kubectl logs <pod-name>
-  ```
-- For persistent volume issues, check the PVC status:
-  ```bash
-  kubectl get pvc
-  ```
-- For general Helm issues, use:
-  ```bash
-  helm list
-  helm status tracebloc
-  ```
-
-## Upgrading
-
-To upgrade your tracebloc deployment:
-
-1. Update your `values.yaml` file with any new configurations.
-2. Run the upgrade command:
-   ```bash
-   helm upgrade tracebloc tracebloc/tracebloc-aks-chart -f values.yaml
-   ```
-
-## Uninstalling
-
-To remove the tracebloc deployment:
-
-```bash
-helm uninstall tracebloc
-```
-
-Note: This will not delete PVCs or secrets. Delete them manually if needed.
-
-For more information or support, please contact tracebloc support or refer to the official documentation.
-
+  
