@@ -9,6 +9,6 @@ entries:
     name: tracebloc-aks-chart
     type: application
     urls:
-    - https://tracebloc.github.io/tracebloc-helm-charts/tracebloc-aks-chart-0.1.2.tgz
+    - https://tracebloc.github.io/client/tracebloc-aks-chart-0.1.2.tgz
     version: 0.1.2
 generated: "2024-09-19T11:56:15.675206+05:00"
