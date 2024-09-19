@@ -1,13 +1,10 @@
-# Environment setting (e.g., "dev", "staging", "prod")
-env: "dev"
-
 # Configuration for the jobs manager
 jobsManager:
   # Docker image tag for the jobs manager
   tag: latest
   # Environment variables for the jobs manager
   env:
-    # Current environment (should match the top-level 'env')
+    # Environment setting (e.g., "dev", "staging", "prod")
     EDGE_ENV: "dev"
     # Unique identifier for this edge deployment
     EDGE_ID: "16"
