@@ -1,0 +1,107 @@
+# Environment setting (e.g., "dev", "staging", "prod")
+env: "dev"
+
+# Configuration for the jobs manager
+jobsManager:
+  # Docker image tag for the jobs manager
+  tag: latest
+  # Environment variables for the jobs manager
+  env:
+    # Current environment (should match the top-level 'env')
+    EDGE_ENV: "dev"
+    # Unique identifier for this edge deployment
+    EDGE_ID: "16"
+    # Username for edge authentication
+    EDGE_USERNAME: "testedge"
+    # Name of the shared Persistent Volume Claim.
+    EDGE_PVC: "shared-data-pvc-16"
+    # Name of the Persistent Volume Claim for logs
+    EDGE_LOGS_PVC: "logs-pvc-dev-16"
+    # Hostname of the MySQL database
+    MYSQL_HOST: "mysql-16"
+    # Azure Service Bus topic name
+    TOPIC: "edge_16"
+    # Azure Service Bus subscription name
+    SUBSCRIPTION: "edge_16_sub"
+    # Path to store auto-related images
+    AUTO_IMAGES_PATH: "/data/shared/auto_data/Images/"
+    # Path to store cancer-related images
+    CANCER_IMAGES_PATH: "/data/shared/cancer_data/processed_images/"
+    # Path to store Airbus-related images
+    AIRBUS_IMAGES_PATH: "/data/shared/airbus_data/processed_images/"
+    # Path to store VOC (Visual Object Classes) images
+    VOC_IMAGES_PATH: "/data/shared/objdet_data/processed_images/"
+    # Path to store HPE (Human Pose Estimation) data
+    HPE_IMAGES_PATH: "/data/shared/hpe_data/"
+    # Azure Storage file share name
+    AZURE_STORAGE_SHARE_NAME: "xrayjsonfiles"
+
+# Node selector for pod scheduling
+nodeSelector:
+  # Label key-value pair for node selection
+  type: system
+
+# Azure File storage class configuration
+storageClass:
+  # Name of the storage class
+  name: tb-azurefile
+  # Name of the storage provisioner
+  provisioner: file.csi.azure.com
+  # Whether to allow volume expansion
+  allowVolumeExpansion: true
+  # Additional parameters for the storage class
+  parameters:
+    # Azure storage account type
+    skuName: Standard_LRS
+
+# Configuration for shared images PVC
+sharedImages:
+  # Name of the PVC for shared images
+  name: shared-pvc-16
+  # Size of the PVC for shared images
+  storage: 50Gi
+
+# Configuration for logs PVC
+logsPvc:
+  # Name of the PVC for logs
+  name: logs-pvc-16
+  # Size of the PVC for logs
+  storage: 10Gi
+
+# Configuration for MySQL PVC
+mysqlPvc:
+  # Name of the PVC for MySQL data
+  name: mysql-pvc-16
+  # Size of the PVC for MySQL data
+  storage: 2Gi
+
+# MySQL deployment configuration
+mysql:
+  # Name of the MySQL deployment
+  name: mysql-16
+
+# Cluster Role configuration for RBAC
+clusterRole:
+  # Name of the Cluster Role
+  name: jobs-manage-rbac
+  # Namespace for the Cluster Role Binding
+  namespace: default
+  # Subjects (ServiceAccounts) bound to this Cluster Role
+  subjects:
+    - kind: ServiceAccount
+      name: default
+      namespace: default
+
+
+# Docker registry configuration
+dockerRegistry:
+  # Name of the Kubernetes Secret for Docker registry credentials
+  secretName: regcred
+  # Docker registry server URL
+  server: https://index.docker.io/v1/
+  # Docker registry username
+  username: lukastracebloc
+  # Docker registry password or access token (consider using Kubernetes Secrets for this)
+  password: pass
+  # Email associated with the Docker registry account
+  email: xyz@tracebloc.io
