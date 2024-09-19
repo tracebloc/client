@@ -29,7 +29,7 @@ kubectl get nodes
 Add the tracebloc Helm repository to your local Helm installation:
 
 ```bash
-helm repo add tracebloc <tracebloc-helm-repo-url>
+helm repo add tracebloc https://tracebloc.github.io/tracebloc-helm-charts/
 helm repo update
 ```
 
