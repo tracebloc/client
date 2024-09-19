@@ -35,11 +35,7 @@ jobsManager:
     HPE_IMAGES_PATH: "/data/shared/hpe_data/"
     # Azure Storage file share name
     AZURE_STORAGE_SHARE_NAME: "xrayjsonfiles"
-
-# Node selector for pod scheduling
-nodeSelector:
-  # Label key-value pair for node selection
-  type: system
+    
 
 # Azure File storage class configuration
 storageClass:
