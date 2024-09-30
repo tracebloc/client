@@ -10,12 +10,6 @@ jobsManager:
     EDGE_ID: "16"
     # Username for edge authentication
     EDGE_USERNAME: "testedge"
-    # Name of the shared Persistent Volume Claim.
-    EDGE_PVC: "shared-data-pvc-16"
-    # Name of the Persistent Volume Claim for logs
-    EDGE_LOGS_PVC: "logs-pvc-dev-16"
-    # Hostname of the MySQL database
-    MYSQL_HOST: "mysql-16"
     # Azure Service Bus topic name
     TOPIC: "edge_16"
     # Azure Service Bus subscription name
