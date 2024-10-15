@@ -16,16 +16,16 @@ jobsManager:
     SUBSCRIPTION: "edge_16_sub"
     # Path to store auto-related images
     AUTO_IMAGES_PATH: "/data/shared/auto_data/Images/"
-    # Path to store cancer-related images
-    CANCER_IMAGES_PATH: "/data/shared/cancer_data/processed_images/"
-    # Path to store Airbus-related images
-    AIRBUS_IMAGES_PATH: "/data/shared/airbus_data/processed_images/"
-    # Path to store VOC (Visual Object Classes) images
-    VOC_IMAGES_PATH: "/data/shared/objdet_data/processed_images/"
-    # Path to store HPE (Human Pose Estimation) data
-    HPE_IMAGES_PATH: "/data/shared/hpe_data/"
     # Azure Storage file share name
     AZURE_STORAGE_SHARE_NAME: "xrayjsonfiles"
+    # proxy hostname.
+    HTTP_PROXY_HOST: 
+    # proxy port.
+    HTTP_PROXY_PORT: 
+    # username used for proxy authentication if needed.
+    HTTP_PROXY_USERNAME: 
+    # password used for proxy authentication if needed.
+    HTTP_PROXY_PASSWORD: 
     
 
 # Azure File storage class configuration
