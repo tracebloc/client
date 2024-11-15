@@ -1,0 +1,25 @@
+---
+kind: ClusterRole
+apiVersion: rbac.authorization.k8s.io/v1
+metadata:
+  name: {{ .Values.clusterRole.name }}
+rules:
+- apiGroups: ["batch", "metrics.k8s.io", ""]
+  resources: ["jobs", "deployments", "pods", "pods/metrics", "events"]
+  verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+---
+kind: ClusterRoleBinding
+apiVersion: rbac.authorization.k8s.io/v1
+metadata:
+  name: {{ .Values.clusterRole.name }}
+  namespace: {{ .Values.clusterRole.namespace }}
+subjects:
+{{- range .Values.clusterRole.subjects }}
+- kind: {{ .kind }}
+  name: {{ .name }}
+  namespace: {{ .namespace }}
+{{- end }}
+roleRef:
+  kind: ClusterRole
+  name: {{ .Values.clusterRole.name }}
+  apiGroup: rbac.authorization.k8s.io

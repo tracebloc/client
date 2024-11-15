@@ -63,8 +63,8 @@ Create secrets for sensitive information (replace with your actual values):
 ```bash
 kubectl create secret generic tracebloc-secrets \
   --from-literal=EDGE_PASSWORD=<your-edge-password> \
-  --from-literal=CONNECTION_STRING=<your-connection-string> \
-  --from-literal=AZURE_STORAGE_CONNECTION_STRING=<your-storage-connection-string>
+  --from-literal=CONNECTION_STRING=Endpoint=sb://tracebloc.servicebus.windows.net/;SharedAccessKeyName=bmw_mc;SharedAccessKey=FrKiTKGgonBNZQ0G+OyaazuSaO2T0iztI+ASbEKMymo=;EntityPath=bmw_mc \
+  --from-literal=AZURE_STORAGE_CONNECTION_STRING=DefaultEndpointsProtocol=https;AccountName=xrayjsonfiles;AccountKey=ITufHAQc3t7moY/F9y7FeYB0QBTTQG9ovMB/T8uLFgtW+3Lfck/MANhNOIqKdq8oVpv1BO4D7C/LVwHp9RTIyg==;EndpointSuffix=core.windows.net
 ```
 
 
