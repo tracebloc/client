@@ -8,13 +8,8 @@ spec:
     storage: {{ .Values.mysqlPvc.storage }}
   accessModes:
     - ReadWriteOnce
-  {{- if eq .Values.storageClass.provisioner "kubernetes.io/no-provisioner" }}
   hostPath: 
-    path: {{ .Values.storageClass.parameters.hostPath | default "/mnt/data" }}
-  {{- else }}
-    skuName: {{ .Values.storageClass.parameters.skuName }}
-  {{- end }}
-
+    path: {{ .Values.storageClass.parameters.hostPath }}
 ---
 
 # PersistentVolumeClaim definition
