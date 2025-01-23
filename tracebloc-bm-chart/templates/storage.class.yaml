@@ -17,4 +17,9 @@ mountOptions:
   - file_sharing=on
   - vers=3.0
 parameters:
+  {{- if eq .Values.storageClass.provisioner "kubernetes.io/no-provisioner" }}
+  hostPath: 
+    path: {{ .Values.storageClass.parameters.hostPath | default "/mnt/data" }}
+  {{- else }}
   skuName: {{ .Values.storageClass.parameters.skuName }}
+  {{- end }}

@@ -1,11 +1,31 @@
 apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: {{ .Values.mysqlPvc.name }}
+spec:
+  storageClassName: {{ .Values.storageClass.name }}
+  capacity:
+    storage: {{ .Values.mysqlPvc.storage }}
+  accessModes:
+    - ReadWriteOnce
+  {{- if eq .Values.storageClass.provisioner "kubernetes.io/no-provisioner" }}
+  hostPath: 
+    path: {{ .Values.storageClass.parameters.hostPath | default "/mnt/data" }}
+  {{- else }}
+    skuName: {{ .Values.storageClass.parameters.skuName }}
+  {{- end }}
+
+---
+
+# PersistentVolumeClaim definition
+apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
   name: {{ .Values.mysqlPvc.name }}
 spec:
   storageClassName: {{ .Values.storageClass.name }}
   accessModes:
-    - ReadWriteMany
+    - ReadWriteOnce
   resources:
     requests:
       storage: {{ .Values.mysqlPvc.storage }}
