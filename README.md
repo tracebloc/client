@@ -2,8 +2,8 @@
 
 This guide explains how to deploy the tracebloc application to your Kubernetes cluster using a **Helm Chart**. The app includes the tracebloc runtime, which runs experiments and sends results to the tracebloc backend. 
 
-  
 
+  
 **Prerequisites:** 
 
 - You need `kubectl` installed and connected to your Kubernetes cluster. 
