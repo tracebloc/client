@@ -3,7 +3,7 @@ entries:
   tracebloc-aks-chart:
   - apiVersion: v2
     appVersion: 1.20.0
-    created: "2025-01-22T11:27:24.192927+05:00"
+    created: "2025-01-23T14:17:23.277532+05:00"
     description: A Helm chart for tracebloc Kubernetes
     digest: fc763d2370eaf4a8effac3713008f676aaf2c52e8250c98407b9f5f0cda3658c
     name: tracebloc-aks-chart
@@ -13,7 +13,7 @@ entries:
     version: 0.1.4
   - apiVersion: v2
     appVersion: 1.19.0
-    created: "2025-01-22T11:27:24.192156+05:00"
+    created: "2025-01-23T14:17:23.276779+05:00"
     description: A Helm chart for tracebloc Kubernetes
     digest: 05d02386642341951ca55041b1ce6e1b47ffe8ec61ad98954eb225f5bbfcb439
     name: tracebloc-aks-chart
@@ -23,7 +23,7 @@ entries:
     version: 0.1.3
   - apiVersion: v2
     appVersion: 1.18.0
-    created: "2025-01-22T11:27:24.191553+05:00"
+    created: "2025-01-23T14:17:23.275887+05:00"
     description: A Helm chart for tracebloc Kubernetes
     digest: e23f9ccf44d3955c46de2f3dbc3b8a9078910ab9c050c32b634b7bb763ef6afd
     name: tracebloc-aks-chart
@@ -33,10 +33,20 @@ entries:
     version: 0.1.2
   tracebloc-bm-chart:
   - apiVersion: v2
-    appVersion: 1.22.0
-    created: "2025-01-22T11:27:24.193389+05:00"
+    appVersion: 1.23.0
+    created: "2025-01-23T14:17:23.278412+05:00"
     description: A Helm chart for tracebloc Kubernetes
-    digest: 2f01001d51ce592ab6403e564a95bd29732b16dafe97aec5fd82f66a6bd62e37
+    digest: 168fa602fe13e528ae46133f9078776915036a15836e5c49853e7f2b802ad258
+    name: tracebloc-bm-chart
+    type: application
+    urls:
+    - https://tracebloc.github.io/client/tracebloc-bm-chart-0.1.7.tgz
+    version: 0.1.7
+  - apiVersion: v2
+    appVersion: 1.23.0
+    created: "2025-01-23T14:17:23.277988+05:00"
+    description: A Helm chart for tracebloc Kubernetes
+    digest: f93059d15370e745210fa163d8f3e11050c296f9ae94b0cc19742e20d4afc241
     name: tracebloc-bm-chart
     type: application
     urls:
@@ -45,7 +55,7 @@ entries:
   tracebloc-eks-chart:
   - apiVersion: v2
     appVersion: 1.21.0
-    created: "2025-01-22T11:27:24.193931+05:00"
+    created: "2025-01-23T14:17:23.278957+05:00"
     description: A Helm chart for tracebloc Kubernetes
     digest: a1c6b1e79c7fb313a6d00abbad6378a22997d7ef432996cd57af0d628bd93806
     name: tracebloc-eks-chart
@@ -53,4 +63,4 @@ entries:
     urls:
     - https://tracebloc.github.io/client/tracebloc-eks-chart-0.1.5.tgz
     version: 0.1.5
-generated: "2025-01-22T11:27:24.186297+05:00"
+generated: "2025-01-23T14:17:23.270551+05:00"
