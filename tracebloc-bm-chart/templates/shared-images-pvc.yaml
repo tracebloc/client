@@ -1,26 +1,26 @@
 apiVersion: v1
 kind: PersistentVolume
 metadata:
-  name: {{ .Values.sharedImages.name }}
+  name: {{ .Values.sharedData.name }}
 spec:
   storageClassName: {{ .Values.storageClass.name }}
   capacity:
-    storage: {{ .Values.sharedImages.storage }}
+    storage: {{ .Values.sharedData.storage }}
   accessModes:
     - ReadWriteOnce
   hostPath: 
-    path: {{ .Values.sharedImages.hostPath }}
+    path: {{ .Values.sharedData.hostPath }}
 ---
 
 # PersistentVolumeClaim definition
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
-  name: {{ .Values.sharedImages.name }}
+  name: {{ .Values.sharedData.name }}
 spec:
   storageClassName: {{ .Values.storageClass.name }}
   accessModes:
     - ReadWriteOnce
   resources:
     requests:
-      storage: {{ .Values.sharedImages.storage }}
+      storage: {{ .Values.sharedData.storage }}

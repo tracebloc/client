@@ -3,6 +3,11 @@ kind: ClusterRole
 apiVersion: rbac.authorization.k8s.io/v1
 metadata:
   name: {{ .Values.clusterRole.name }}
+  annotations:
+    meta.helm.sh/release-name: {{ .Release.Name }}
+    meta.helm.sh/release-namespace: {{ .Release.Namespace }}
+  labels:
+    app.kubernetes.io/managed-by: {{ .Release.Service }}
 rules:
 - apiGroups: ["batch", "metrics.k8s.io", ""]
   resources: ["jobs", "deployments", "pods", "pods/metrics", "events"]
@@ -12,7 +17,11 @@ kind: ClusterRoleBinding
 apiVersion: rbac.authorization.k8s.io/v1
 metadata:
   name: {{ .Values.clusterRole.name }}
-  namespace: {{ .Values.clusterRole.namespace }}
+  annotations:
+    meta.helm.sh/release-name: {{ .Release.Name }}
+    meta.helm.sh/release-namespace: {{ .Release.Namespace }}
+  labels:
+    app.kubernetes.io/managed-by: {{ .Release.Service }}
 subjects:
 {{- range .Values.clusterRole.subjects }}
 - kind: {{ .kind }}

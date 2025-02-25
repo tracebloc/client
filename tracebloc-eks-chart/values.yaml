@@ -1,7 +1,10 @@
+#namespace for tracebloc client
+namespace: tracebloc-16
+
 # Configuration for the jobs manager
 jobsManager:
   # Docker image tag for the jobs manager
-  tag: latest
+  tag: dev
   # Environment variables for the jobs manager
   env:
     # Environment setting (e.g., "dev", "staging", "prod")
@@ -15,7 +18,7 @@ jobsManager:
     # username used for proxy authentication if needed.
     HTTP_PROXY_USERNAME: 
     # password used for proxy authentication if needed.
-    HTTP_PROXY_PASSWORD:
+    HTTP_PROXY_PASSWORD: 
     # Optional: resource requests for the job
     RESOURCE_REQUESTS: "cpu=50m,memory=207084Ki" 
     # Optional: resource limits for the job
@@ -26,58 +29,70 @@ jobsManager:
     GPU_LIMITS: "nvidia.com/gpu=1"
     
 
-# Azure File storage class configuration
+# AWS EFS storage class configuration
 storageClass:
   # Set to false if you want to use existing storage class
   create: true
   # Name of the storage class
-  name: tb-azurefile
+  name: tb-awsefs
   # Name of the storage provisioner
-  provisioner: file.csi.azure.com
+  provisioner: efs.csi.aws.com
   # Whether to allow volume expansion
   allowVolumeExpansion: true
+  # When to create volume
+  volumeBindingMode: Immediate
+  # Whether to keep EFS volume when PV is deleted
+  reclaimPolicy: Retain
   # Additional parameters for the storage class
   parameters:
-    # Azure storage account type
-    skuName: Standard_LRS
+    # EFS filesystem ID
+    fileSystemId: fs-0000
 
 # Configuration for shared data PVC
 sharedData:
   # Name of the PVC for shared data
-  name: shared-pvc-16
+  name: shared-pvc
   # Size of the PVC for shared data
   storage: 50Gi
 
 # Configuration for logs PVC
 logsPvc:
   # Name of the PVC for logs
-  name: logs-pvc-16
+  name: logs-pvc
   # Size of the PVC for logs
   storage: 10Gi
 
 # Configuration for MySQL PVC
 mysqlPvc:
   # Name of the PVC for MySQL data
-  name: mysql-pvc-16
+  name: mysql-pvc
   # Size of the PVC for MySQL data
   storage: 2Gi
 
 # MySQL deployment configuration
 mysql:
   # Name of the MySQL deployment
-  name: mysql-16
+  name: mysql
 
 # Cluster Role configuration for RBAC
 clusterRole:
+  # Name of the Cluster Role
+  name: jobs-manager-rbac
   # Set to false if you want to use existing RBAC resources
   create: true
-  # Name of the Cluster Role
-  name: jobs-manage-rbac
 
+# Secrets configuration
+secrets:
+  # Edge password
+  edgePassword: ""
+  # Connection string
+  connectionString: ""
+  # Azure storage connection string
+  azureStorageConnectionString: ""
 
 # Docker registry configuration
 dockerRegistry:
-  # Whether to create the secret or use existing secret
+ # Whether to create the secret or use existing secret
   create: true
   # Name of the Kubernetes Secret for Docker registry credentials
   secretName: regcred
@@ -86,6 +101,6 @@ dockerRegistry:
   # Docker registry username
   username: xyz
   # Docker registry password or access token (consider using Kubernetes Secrets for this)
-  password: xyz
+  password: pass
   # Email associated with the Docker registry account
   email: xyz@tracebloc.io

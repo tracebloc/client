@@ -55,28 +55,15 @@ Edit `values.yaml` to set your specific configuration. Pay special attention to:
 
 
 
-
-## Step 4: Create Necessary Secrets
-
-Create secrets for sensitive information (replace with your actual values):
-
-```bash
-kubectl create secret generic tracebloc-secrets \
-  --from-literal=EDGE_PASSWORD=<your-edge-password> \
-  --from-literal=CONNECTION_STRING=Endpoint=sb://tracebloc.servicebus.windows.net/;SharedAccessKeyName=bmw_mc;SharedAccessKey=FrKiTKGgonBNZQ0G+OyaazuSaO2T0iztI+ASbEKMymo=;EntityPath=bmw_mc \
-  --from-literal=AZURE_STORAGE_CONNECTION_STRING=DefaultEndpointsProtocol=https;AccountName=xrayjsonfiles;AccountKey=ITufHAQc3t7moY/F9y7FeYB0QBTTQG9ovMB/T8uLFgtW+3Lfck/MANhNOIqKdq8oVpv1BO4D7C/LVwHp9RTIyg==;EndpointSuffix=core.windows.net
-```
-
-
-## Step 5: Install the Helm Chart
+## Step 4: Install the Helm Chart
 
 Install the tracebloc AKS chart using your custom values:
 
 ```bash
-helm install tracebloc tracebloc/tracebloc-aks-chart -f values.yaml
+helm install tracebloc tracebloc/tracebloc-aks-chart --namespace tracebloc --create-namespace -f values.yaml
 ```
 
-## Step 6: Verify the Deployment
+## Step 5: Verify the Deployment
 
 Check the status of your pods:
 
@@ -92,7 +79,7 @@ Verify services are running:
 kubectl get services
 ```
 
-## Step 7: Access the Application
+## Step 6: Access the Application
 
 Depending on your ingress configuration, you may need to set up an ingress controller or use a LoadBalancer service to access the application externally.
 
@@ -133,4 +120,3 @@ helm uninstall tracebloc
 Note: This will not delete PVCs or secrets. Delete them manually if needed.
 
 For more information or support, please contact tracebloc support or refer to the official documentation.
-

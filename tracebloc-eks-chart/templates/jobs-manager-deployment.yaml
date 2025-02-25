@@ -2,6 +2,7 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: {{ .Release.Name }}-jobs-manager
+  namespace: {{ .Release.Namespace }}
 spec:
   selector:
     matchLabels:
@@ -33,7 +34,7 @@ spec:
               name: tracebloc-secrets
               key: AZURE_STORAGE_CONNECTION_STRING
         - name: EDGE_PVC
-          value: "{{ .Values.sharedImages.name}}"
+          value: "{{ .Values.sharedData.name}}"
         - name: EDGE_LOGS_PVC
           value: "{{ .Values.logsPvc.name}}"
         - name: MYSQL_HOST

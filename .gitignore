@@ -114,4 +114,7 @@ venv.bak/
 # mypy
 .mypy_cache/
 .vscode/settings.json
-*values*.yaml
+/values*.yaml
+secret-values.yaml
+test-template.yaml
+eks.diff
