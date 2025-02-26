@@ -1,36 +1,36 @@
 apiVersion: v1
 entries:
-  tracebloc-aks-chart:
+  aks:
   - apiVersion: v2
-    appVersion: 1.24.0
-    created: "2025-02-25T18:19:20.736167+05:00"
+    appVersion: 1.24.1
+    created: "2025-02-26T11:38:42.890607+05:00"
     description: A Helm chart for tracebloc Kubernetes
-    digest: 2c36f60a6424df0ce74fcaad97610400304b0c2f9334455d85e77575947e8feb
-    name: tracebloc-aks-chart
+    digest: 4bd8c427bc0cec25286b924fceabdc4dc357cf971abd97734ec239314e23661a
+    name: aks
     type: application
     urls:
-    - https://tracebloc.github.io/client/tracebloc-aks-chart-0.1.9.tgz
-    version: 0.1.9
-  tracebloc-bm-chart:
+    - https://tracebloc.github.io/client/aks-0.2.0.tgz
+    version: 0.2.0
+  baremetal:
   - apiVersion: v2
-    appVersion: 1.24.0
-    created: "2025-02-25T18:19:20.736695+05:00"
+    appVersion: 1.24.1
+    created: "2025-02-26T11:38:42.891066+05:00"
     description: A Helm chart for tracebloc Kubernetes
-    digest: 19e49e0dbc72a35e2871e579649e819a42509664c269f8dfd0ec6897b7886c76
-    name: tracebloc-bm-chart
+    digest: 267e609b00a80d853ea8c1d3f8a4ff7ff540a6c898722613bc3e8526469f8b0e
+    name: baremetal
     type: application
     urls:
-    - https://tracebloc.github.io/client/tracebloc-bm-chart-0.1.9.tgz
-    version: 0.1.9
-  tracebloc-eks-chart:
+    - https://tracebloc.github.io/client/baremetal-0.2.0.tgz
+    version: 0.2.0
+  eks:
   - apiVersion: v2
-    appVersion: 1.24.0
-    created: "2025-02-25T18:19:20.737095+05:00"
+    appVersion: 1.24.1
+    created: "2025-02-26T11:38:42.891505+05:00"
     description: A Helm chart for tracebloc Kubernetes
-    digest: 6e7372bb948971e10647081190294e1be8e459569e5acedb2bc361cfacfff6b8
-    name: tracebloc-eks-chart
+    digest: 9247af901282bdce562814cebdfff0b8df04422082744e93624961effd6e4699
+    name: eks
     type: application
     urls:
-    - https://tracebloc.github.io/client/tracebloc-eks-chart-0.1.9.tgz
-    version: 0.1.9
-generated: "2025-02-25T18:19:20.734976+05:00"
+    - https://tracebloc.github.io/client/eks-0.2.0.tgz
+    version: 0.2.0
+generated: "2025-02-26T11:38:42.888928+05:00"

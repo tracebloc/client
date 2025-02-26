@@ -1,6 +1,3 @@
-
-
-
 # tracebloc AKS Chart Deployment Guide for Azure AKS
 
 This guide will walk you through the process of deploying the tracebloc application to your Azure Kubernetes Service (AKS) cluster using the **tracebloc AKS Chart**.
@@ -41,7 +38,7 @@ helm repo update
 Create a `values.yaml` file to customize the tracebloc deployment. You can start with the default values and modify as needed:
 
 ```bash
-helm show values tracebloc/tracebloc-aks-chart > values.yaml
+helm show values tracebloc/aks > values.yaml
 ```
 
 Edit `values.yaml` to set your specific configuration. Pay special attention to:
@@ -60,7 +57,7 @@ Edit `values.yaml` to set your specific configuration. Pay special attention to:
 Install the tracebloc AKS chart using your custom values:
 
 ```bash
-helm install tracebloc tracebloc/tracebloc-aks-chart --namespace tracebloc --create-namespace -f values.yaml
+helm install tracebloc tracebloc/aks --namespace tracebloc --create-namespace -f values.yaml
 ```
 
 ## Step 5: Verify the Deployment
@@ -120,3 +117,6 @@ helm uninstall tracebloc
 Note: This will not delete PVCs or secrets. Delete them manually if needed.
 
 For more information or support, please contact tracebloc support or refer to the official documentation.
+
+
+
