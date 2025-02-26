@@ -43,6 +43,28 @@ az aks get-credentials --resource-group <your-resource-group> --name <your-aks-c
 kubectl get nodes
 ```
 
+## Step 1a: Node Labeling
+
+1. List your nodes to identify their names:
+```bash
+kubectl get nodes
+```
+
+2. Assign labels to your nodes for workload targeting:
+```bash
+kubectl label nodes <node-name> trainingset=large
+```
+
+For example:
+```bash
+kubectl label nodes tracebloc1 trainingset=large
+```
+
+3. Verify the label assignment:
+```bash
+kubectl get nodes --show-labels | grep trainingset
+```
+
 ## Step 2: Add the tracebloc Helm Repository
 
 ```bash
