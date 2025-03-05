@@ -22,16 +22,6 @@ spec:
             secretKeyRef:
               name: tracebloc-secrets
               key: EDGE_PASSWORD
-        - name: CONNECTION_STRING
-          valueFrom:
-            secretKeyRef:
-              name: tracebloc-secrets
-              key: CONNECTION_STRING
-        - name: AZURE_STORAGE_CONNECTION_STRING
-          valueFrom:
-            secretKeyRef:
-              name: tracebloc-secrets
-              key: AZURE_STORAGE_CONNECTION_STRING
         - name: EDGE_PVC
           value: "{{ .Values.sharedData.name}}"
         - name: EDGE_LOGS_PVC

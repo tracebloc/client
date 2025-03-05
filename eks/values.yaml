@@ -85,10 +85,8 @@ clusterRole:
 secrets:
   # Edge password
   edgePassword: ""
-  # Connection string
-  connectionString: ""
-  # Azure storage connection string
-  azureStorageConnectionString: ""
+  # Whether to create the secret or use existing secret
+  create: true
 
 # Docker registry configuration
 dockerRegistry:

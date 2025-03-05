@@ -87,6 +87,13 @@ clusterRole:
   # Name of the Cluster Role
   name: jobs-manage-rbac
 
+# Secrets configuration
+secrets:
+  # Whether to create the secret or use existing secret
+  create: true
+  # Name of the Kubernetes Secret for Docker registry credentials
+  name: tracebloc-secrets
+
 
 # Docker registry configuration
 dockerRegistry:
