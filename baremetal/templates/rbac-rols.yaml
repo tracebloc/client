@@ -1,4 +1,4 @@
----
+{{- if .Values.clusterRole.create }}
 kind: ClusterRole
 apiVersion: rbac.authorization.k8s.io/v1
 metadata:
@@ -9,9 +9,9 @@ metadata:
   labels:
     app.kubernetes.io/managed-by: {{ .Release.Service }}
 rules:
-- apiGroups: ["batch", "metrics.k8s.io", ""]
-  resources: ["jobs", "deployments", "pods", "pods/metrics", "events"]
-  verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["batch", "metrics.k8s.io", ""]
+    resources: ["jobs", "deployments", "pods", "pods/metrics", "events"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
 ---
 kind: ClusterRoleBinding
 apiVersion: rbac.authorization.k8s.io/v1
@@ -23,12 +23,11 @@ metadata:
   labels:
     app.kubernetes.io/managed-by: {{ .Release.Service }}
 subjects:
-{{- range .Values.clusterRole.subjects }}
-- kind: {{ .kind }}
-  name: {{ .name }}
-  namespace: {{ .namespace }}
-{{- end }}
+  - kind: ServiceAccount
+    name: default
+    namespace: {{ .Release.Namespace }}
 roleRef:
   kind: ClusterRole
-  name: {{ .Values.clusterRole.name }}
-  apiGroup: rbac.authorization.k8s.io
+    name: {{ .Values.clusterRole.name }}
+    apiGroup: rbac.authorization.k8s.io
+{{- end }}
