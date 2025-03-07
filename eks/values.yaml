@@ -9,7 +9,7 @@ jobsManager:
   env:
     # Environment setting (e.g., "dev", "staging", "prod")
     EDGE_ENV: "dev"
-    # Username for edge authentication
+    # Client ID for edge authentication
     EDGE_USERNAME: "testedge"
     # proxy hostname.
     HTTP_PROXY_HOST: 
