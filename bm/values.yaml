@@ -91,8 +91,8 @@ clusterRole:
 secrets:
   # Whether to create the secret or use existing secret
   create: true
-  # Name of the Kubernetes Secret for Docker registry credentials
-  name: tracebloc-secrets
+  # Edge password
+  edgePassword: ""
 
 
 # Docker registry configuration
