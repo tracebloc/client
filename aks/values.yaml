@@ -6,8 +6,8 @@ jobsManager:
   env:
     # Environment setting (e.g., "dev", "staging", "prod")
     CLIENT_ENV: "dev"
-    # Client Usernam for client authentication
-    CLIENT_USERNAME: "testedge"
+    # Client ID for client authentication
+    CLIENT_ID: "cb90ff14-be2f-45b0-acb3-e0c1d4216ad9"
     # proxy hostname.
     HTTP_PROXY_HOST: 
     # proxy port.
@@ -91,8 +91,8 @@ dockerRegistry:
   # Docker registry server URL
   server: https://index.docker.io/v1/
   # Docker registry username
-  username: xyz
+  username: <docker-username>
   # Docker registry password or access token (consider using Kubernetes Secrets for this)
-  password: xyz
+  password: <docker-token>
   # Email associated with the Docker registry account
-  email: xyz@tracebloc.io
+  email: <docker-email>

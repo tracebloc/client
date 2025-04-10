@@ -52,10 +52,6 @@ For these configurations, email us at info@tracebloc.io.
 
 **Deployment Options:** 
 
-- [AKS (Azure Kubernetes Service)](./docs/aks.md)
-
-- [EKS](./docs/eks.md)
-
-- [Bare Metal (Local Setup)](./docs/bm.md)
+<Link_for_client_setup>
 
   
