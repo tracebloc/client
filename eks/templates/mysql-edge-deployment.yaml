@@ -17,7 +17,7 @@ spec:
         app: {{ .Values.mysql.name }}
     spec:
       containers:
-      - image: tracebloc/mysql-edge
+      - image: tracebloc/mysql-client
         name: {{ .Values.mysql.name }}
         resources:
           requests:

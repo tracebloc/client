@@ -54,8 +54,8 @@ For these configurations, email us at info@tracebloc.io.
 
 - [AKS (Azure Kubernetes Service)](./docs/aks.md)
 
-- EKS (Coming soon)
+- [EKS](./docs/eks.md)
 
-- Bare Metal (Coming soon) 
+- [Bare Metal (Local Setup)](./docs/bm.md)
 
   

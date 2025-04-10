@@ -1,42 +1,42 @@
 ---
 sidebar_position: 2
 ---
-# Deploying the Tracebloc Client on Azure Kubernetes Service (AKS)
+# Deploying the Tracebloc Client on Amazon EKS
 
-This guide walks you through deploying the Tracebloc client in your **Azure Kubernetes Service (AKS)** cluster, using Helm.
+This guide walks you through deploying the Tracebloc client on **Amazon Elastic Kubernetes Service (EKS)** using Helm.
 
 ---
 
 ## 🔧 Prerequisites
 
-Ensure the following tools are installed and configured:
+Ensure the following tools are installed:
 
-| Tool        | Purpose                    | Install Guide |
-|-------------|----------------------------|---------------|
-| Azure CLI   | Manage Azure resources     | [Install Azure CLI](https://docs.microsoft.com/en-us/cli/azure/install-azure-cli) |
-| kubectl     | Manage Kubernetes clusters | [Install kubectl](https://kubernetes.io/docs/tasks/tools/) |
-| Helm 3.x    | Kubernetes package manager | [Install Helm](https://helm.sh/docs/intro/install/) |
+| Tool      | Purpose                    | Install Guide |
+|-----------|----------------------------|---------------|
+| AWS CLI   | Manage AWS services        | [Install AWS CLI](https://docs.aws.amazon.com/cli/latest/userguide/getting-started-install.html) |
+| kubectl   | Manage Kubernetes clusters | [Install kubectl](https://kubernetes.io/docs/tasks/tools/) |
+| Helm 3.x  | Kubernetes package manager | [Install Helm](https://helm.sh/docs/intro/install/) |
 
 You’ll also need:
 
-- An active Azure subscription
-- Client credentials (username, password)
+- An active AWS account
 - Access to the Tracebloc Helm chart
+- Your Tracebloc client credentials
 
 ---
 
 ## 🚀 Deployment Steps
 
-### 1. Connect to Your AKS Cluster
+### 1. Connect to Your EKS Cluster
 
 ```bash
-az aks get-credentials --resource-group <your-resource-group> --name <your-cluster-name>
+aws eks --region <your-region> update-kubeconfig --name <your-eks-cluster-name>
 kubectl get nodes
 ```
 
 ---
 
-### 2. Add Tracebloc Helm Repository
+### 2. Add the Tracebloc Helm Repository
 
 ```bash
 helm repo add tracebloc https://tracebloc.github.io/client/
@@ -45,15 +45,15 @@ helm repo update
 
 ---
 
-### 3. Download and Configure Helm Values
+### 3. Configure Your Deployment
 
-1. Download the default `values.yaml`:
+1. Download the default values:
 
 ```bash
-helm show values tracebloc/aks > values.yaml
+helm show values tracebloc/eks > values.yaml
 ```
 
-2. Open and update the following sections:
+2. Edit the `values.yaml` file and update the following sections:
 
 #### 🔐 Authentication
 
@@ -75,20 +75,23 @@ dockerRegistry:
   email: "your-email"
 ```
 
-#### 💾 Storage Configuration
+#### 💾 Storage Configuration (EBS-backed PVCs)
 
 ```yaml
 sharedData:
   name: shared-data
   storage: 50Gi
+  storageClass: gp2
 
 logsPvc:
   name: logs-pvc
   storage: 10Gi
+  storageClass: gp2
 
 mysqlPvc:
   name: mysql-pvc
   storage: 2Gi
+  storageClass: gp2
 ```
 
 #### ⚙️ Resource Limits
@@ -109,7 +112,7 @@ gpu:
 
 ---
 
-### 4. Create Kubernetes Secrets
+### 4. Create Required Kubernetes Secrets
 
 ```bash
 kubectl create secret generic tracebloc-secrets \
@@ -118,19 +121,19 @@ kubectl create secret generic tracebloc-secrets \
 
 ---
 
-### 5. Create Namespace & Deploy
+### 5. Deploy the Client
 
 ```bash
 kubectl create namespace tracebloc
 
-helm install tracebloc tracebloc/aks \
+helm install tracebloc tracebloc/eks \
   --namespace tracebloc \
   --values values.yaml
 ```
 
 ---
 
-### 6. Verify Deployment
+### 6. Verify the Deployment
 
 ```bash
 kubectl get pods -n tracebloc
@@ -138,7 +141,7 @@ kubectl get services -n tracebloc
 kubectl get pvc -n tracebloc
 ```
 
-All pods should show a `Running` state within a few minutes.
+All pods should be in a `Running` state within a few minutes.
 
 ---
 
@@ -146,8 +149,6 @@ All pods should show a `Running` state within a few minutes.
 
 <details>
 <summary><strong>Pods Not Starting</strong></summary>
-
-- Check logs and pod status:
 
 ```bash
 kubectl get pods -n tracebloc
@@ -180,19 +181,19 @@ kubectl get secret regcred -n tracebloc
 
 ## 🔄 Maintenance
 
-### Upgrade
+### Upgrade the Deployment
 
 ```bash
-helm show values tracebloc/aks > new-values.yaml
-# Edit as needed, then:
-helm upgrade tracebloc tracebloc/aks \
+helm show values tracebloc/eks > new-values.yaml
+# Edit as needed
+helm upgrade tracebloc tracebloc/eks \
   --namespace tracebloc \
   --values new-values.yaml
 ```
 
 ---
 
-### Uninstall
+### Uninstall the Client
 
 ```bash
 helm uninstall tracebloc -n tracebloc
@@ -202,11 +203,11 @@ kubectl delete namespace tracebloc
 
 ---
 
-## 🆘 Need Help?
+## 📬 Need Help?
 
 - 📧 Email: [support@tracebloc.io](mailto:support@tracebloc.io)  
 - 📚 Docs: [Tracebloc Documentation Portal](https://docs.tracebloc.io)
 
 ---
 
-> ⚠️ **Note**: Be sure to replace all placeholders (`your-username`, `your-cluster-name`, etc.) with your actual values.
+> ⚠️ **Note**: Replace all placeholders (`your-username`, `your-password`, `your-region`) with actual values before running commands.

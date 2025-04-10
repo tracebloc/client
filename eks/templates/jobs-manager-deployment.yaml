@@ -18,14 +18,14 @@ spec:
         image: "tracebloc/jobs-manager:{{ .Values.jobsManager.tag }}"
         imagePullPolicy: Always
         env:
-        - name: EDGE_PASSWORD
+        - name: CLIENT_PASSWORD
           valueFrom:
             secretKeyRef:
               name: tracebloc-secrets
-              key: EDGE_PASSWORD
-        - name: EDGE_PVC
+              key: CLIENT_PASSWORD
+        - name: CLIENT_PVC
           value: "{{ .Values.sharedData.name}}"
-        - name: EDGE_LOGS_PVC
+        - name: CLIENT_LOGS_PVC
           value: "{{ .Values.logsPvc.name}}"
         - name: MYSQL_HOST
           value: "{{ .Values.mysql.name}}"
