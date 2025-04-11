@@ -38,20 +38,11 @@ This guide explains how to deploy the tracebloc application to your Kubernetes c
 
 - Docker credentials (username, password) 
 
-- Client credentials (client ID, username, password) 
+- Client credentials (client ID, username, password)
 
-- Service Bus connection string 
 
-- Azure Storage connection string 
+**Deployment**
 
-  
-
-For these configurations, email us at info@tracebloc.io. 
-
-  
-
-**Deployment Options:** 
-
-<Link_for_client_setup>
+For Deployment steps go through `Choose a Deployment Platform` section on Page [Create Your Client](https://traceblocdocsdev.azureedge.net/environment-setup/create-your-client)
 
   
