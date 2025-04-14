@@ -78,8 +78,8 @@ clusterRole:
 secrets:
   # Whether to create the secret or use existing secret
   create: true
-  # Name of the Kubernetes Secret for Docker registry credentials
-  name: tracebloc-secrets
+  # Client password
+  clientPassword: ""
 
 
 # Docker registry configuration

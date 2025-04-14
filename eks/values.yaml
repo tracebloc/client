@@ -83,10 +83,10 @@ clusterRole:
 
 # Secrets configuration
 secrets:
-  # Client password
-  clientPassword: ""
   # Whether to create the secret or use existing secret
   create: true
+  # Client password
+  clientPassword: ""
 
 # Docker registry configuration
 dockerRegistry:
