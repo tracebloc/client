@@ -54,7 +54,7 @@ Tracebloc Client is a Kubernetes-based application that runs experiments and com
    [Create Your Client](https://traceblocdocsdev.azureedge.net/environment-setup/create-your-client)
 
 ## 📜 License
-This project is licensed under the MIT License - see the [LICENSE.txt](LICENSE.txt) file for details.
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
 
 
 ## 📞 Support
