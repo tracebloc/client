@@ -1,48 +1,61 @@
-**Overview:**   
-
-This guide explains how to deploy the tracebloc application to your Kubernetes cluster using a **Helm Chart**. The app includes the tracebloc runtime, which runs experiments and sends results to the tracebloc backend. 
-
-
-  
-**Prerequisites:** 
-
-- You need `kubectl` installed and connected to your Kubernetes cluster. 
-
-- `Helm 3.x` must be installed on your machine. 
-
-  
-
-**Network Requirements:** 
-
-- Communication with the tracebloc backend is one-way (client requests data only). 
-
-- Port 443 must be open to send experiment data through Azure Service Bus (AmqpOverWebsocket). 
-
-- The client only communicates with the tracebloc backend, sharing experiment metrics and weight files. 
-
-  
-
-**Cluster Requirements:** 
-
-- We recommend that each node in the cluster has at least 50 GB of RAM and 20 CPU cores. 
-
-  
-
-**Data Storage:** 
-
-- Training data, models, and weight files will be stored on persistent volumes. 
-
-  
-
-**Required Configuration:** 
-
-- Docker credentials (username, password) 
-
-- Client credentials (client ID, username, password)
+# 🌐 Tracebloc Client
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
 
-**Deployment**
+## 📄 Description
+Tracebloc Client is a Kubernetes-based application that runs experiments and communicates results to the Tracebloc backend. It's designed to handle distributed machine learning workloads efficiently and securely.
 
-For Deployment steps go through `Choose a Deployment Platform` section on Page [Create Your Client](https://traceblocdocsdev.azureedge.net/environment-setup/create-your-client)
+## 🛠️ Tech Stack
+- Kubernetes
+- Helm 3.x
+- Azure Service Bus (AmqpOverWebsocket)
+- Docker
+- Persistent Volume Storage
 
-  
+## 🚀 Installation & Setup
+
+### Prerequisites
+- `kubectl` installed and configured
+- `Helm 3.x` installed
+- Access to a Kubernetes cluster
+
+### System Requirements
+
+#### Network Requirements
+- One-way communication with Tracebloc backend
+- Port 443 open for Azure Service Bus (AmqpOverWebsocket)
+- Secure metric and weight file transmission
+
+#### Cluster Specifications
+- **RAM:** 50 GB (minimum)
+- **CPU:** 20 cores (minimum)
+
+#### Storage
+- Persistent volumes for:
+  - Training data
+  - Models
+  - Weight files
+
+### Required Credentials
+1. Docker Registry Access:
+   - Username
+   - Password
+
+2. Client Authentication:
+   - Client ID
+   - Username
+   - Password
+
+## 📦 Deployment Guide
+
+1. Ensure all prerequisites are met
+2. Configure your credentials
+3. Follow our detailed deployment guide at:
+   [Create Your Client](https://traceblocdocsdev.azureedge.net/environment-setup/create-your-client)
+
+## 📜 License
+This project is licensed under the MIT License - see the [LICENSE.txt](LICENSE.txt) file for details.
+
+
+## 📞 Support
+For additional support or questions, please refer to our documentation or contact the Tracebloc support team.
