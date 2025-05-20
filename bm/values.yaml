@@ -89,7 +89,7 @@ clusterRole:
 secrets:
   # Whether to create the secret or use existing secret
   create: true
-  # Edge password
+  # Client password
   clientPassword: "<Input password created when registering the client>"
 
 
