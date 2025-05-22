@@ -31,7 +31,7 @@ storageClass:
   # Set to false if you want to use existing storage class
   create: true
   # Name of the storage class
-  name: tb-azurefile
+  name: client-storage-class
   # Name of the storage provisioner
   provisioner: file.csi.azure.com
   # Whether to allow volume expansion
@@ -42,30 +42,30 @@ storageClass:
     skuName: Standard_LRS
 
 # Configuration for shared data PVC
-sharedData:
+clientData:
   # Name of the PVC for shared data
-  name: shared-pvc-16
+  name: client-pvc
   # Size of the PVC for shared data
   storage: 50Gi
 
 # Configuration for logs PVC
-logsPvc:
+clientLogsPvc:
   # Name of the PVC for logs
-  name: logs-pvc-16
+  name: client-logs-pvc
   # Size of the PVC for logs
   storage: 10Gi
 
 # Configuration for MySQL PVC
 mysqlPvc:
   # Name of the PVC for MySQL data
-  name: mysql-pvc-16
+  name: mysql-pvc
   # Size of the PVC for MySQL data
   storage: 2Gi
 
 # MySQL deployment configuration
 mysql:
   # Name of the MySQL deployment
-  name: mysql-16
+  name: mysql-client
 
 # Cluster Role configuration for RBAC
 clusterRole:

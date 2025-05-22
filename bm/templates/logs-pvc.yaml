@@ -1,26 +1,26 @@
 apiVersion: v1
 kind: PersistentVolume
 metadata:
-  name: {{ .Values.logsPvc.name }}
+  name: {{ .Values.clientLogsPvc.name }}
 spec:
   storageClassName: {{ .Values.storageClass.name }}
   capacity:
-    storage: {{ .Values.logsPvc.storage }}
+    storage: {{ .Values.clientLogsPvc.storage }}
   accessModes:
     - ReadWriteOnce
   hostPath: 
-    path: {{ .Values.logsPvc.hostPath }}
+    path: {{ .Values.clientLogsPvc.hostPath }}
 ---
 
 # PersistentVolumeClaim definition
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
-  name: {{ .Values.logsPvc.name }}
+  name: {{ .Values.clientLogsPvc.name }}
 spec:
   storageClassName: {{ .Values.storageClass.name }}
   accessModes:
     - ReadWriteOnce
   resources:
     requests:
-      storage: {{ .Values.logsPvc.storage }}
+      storage: {{ .Values.clientLogsPvc.storage }}
