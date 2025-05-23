@@ -26,9 +26,9 @@ spec:
               name: tracebloc-secrets
               key: CLIENT_PASSWORD
         - name: CLIENT_PVC
-          value: "{{ .Values.sharedData.name}}"
+          value: "{{ .Values.clientData.name}}"
         - name: CLIENT_LOGS_PVC
-          value: "{{ .Values.logsPvc.name}}"
+          value: "{{ .Values.clientLogsPvc.name}}"
         - name: MYSQL_HOST
           value: "{{ .Values.mysql.name}}"
         - name: CLIENT_ENV
@@ -44,5 +44,5 @@ spec:
       volumes:
         - name: shared-volume
           persistentVolumeClaim:
-            claimName: {{ .Values.sharedData.name}}
+            claimName: {{ .Values.clientData.name}}
       restartPolicy: Always
