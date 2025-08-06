@@ -14,7 +14,6 @@ parameters:
   directoryPerms: "700"
   uid: "999"
   gid: "999"
-  reuseAccessPoint: "true"
   fileSystemId: {{ .Values.storageClass.parameters.fileSystemId }}
   provisioningMode: efs-ap
 {{- end }}
