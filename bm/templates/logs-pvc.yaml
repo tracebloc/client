@@ -2,6 +2,9 @@ apiVersion: v1
 kind: PersistentVolume
 metadata:
   name: {{ .Values.logsPvc.name }}
+  annotations:
+    "helm.sh/hook": post-install,post-upgrade
+    "helm.sh/hook-weight": "0"
 spec:
   storageClassName: {{ .Values.storageClass.name }}
   capacity:
@@ -17,6 +20,9 @@ apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
   name: {{ .Values.logsPvc.name }}
+  annotations:
+    "helm.sh/hook": post-install,post-upgrade
+    "helm.sh/hook-weight": "0"
 spec:
   storageClassName: {{ .Values.storageClass.name }}
   accessModes:

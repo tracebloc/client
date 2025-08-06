@@ -1,0 +1,35 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: create-directories
+  annotations:
+    "helm.sh/hook": pre-install,pre-upgrade
+    "helm.sh/hook-weight": "-10"
+    "helm.sh/hook-delete-policy": hook-succeeded
+spec:
+  template:
+    spec:
+      containers:
+      - name: create-dirs
+        image: busybox
+        command: ["/bin/sh", "-c"]
+        args:
+        - |
+          mkdir -p {{ .Values.sharedData.hostPath }}
+          mkdir -p {{ .Values.logsPvc.hostPath }}
+          mkdir -p {{ .Values.mysqlPvc.hostPath }}
+          chmod -R 777 {{ .Values.sharedData.hostPath }}
+          chmod -R 777 {{ .Values.logsPvc.hostPath }}
+          chmod -R 777 {{ .Values.mysqlPvc.hostPath }}
+      restartPolicy: OnFailure
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: init-complete
+  annotations:
+    "helm.sh/hook": post-install,post-upgrade
+    "helm.sh/hook-weight": "10"
+    "helm.sh/hook-delete-policy": hook-succeeded
+data:
+  status: "completed" 
