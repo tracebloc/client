@@ -69,7 +69,7 @@ data:
     # binlog_format = ROW
     
     # Error logging
-    log-error = /var/log/mysql/error.log
+    # log-error = /var/log/mysql/error.log
     
     # Slow query logging (optional)
     # slow_query_log = 1
