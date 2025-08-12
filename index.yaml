@@ -3,9 +3,9 @@ entries:
   aks:
   - apiVersion: v2
     appVersion: 1.24.6
-    created: "2025-08-12T15:13:08.556627+05:00"
+    created: "2025-08-12T15:44:12.421242+05:00"
     description: A Helm chart for tracebloc Kubernetes
-    digest: 203271468e607320b459d7b4e08a72d41b011a5dfe2f01bfeb24da71ac989e93
+    digest: a47f34e0bd7c3cf79e9a82bfb4c9a920c3bf93c0a1b74fa91cd72a7faaa05078
     name: aks
     type: application
     urls:
@@ -14,9 +14,9 @@ entries:
   bm:
   - apiVersion: v2
     appVersion: 1.24.6
-    created: "2025-08-12T15:13:08.557106+05:00"
+    created: "2025-08-12T15:44:12.421628+05:00"
     description: A Helm chart for tracebloc Kubernetes
-    digest: 6981f8817ee65cd05c0194cc8781af841a2a14d6ff1e4c02784a129e49a40654
+    digest: 6e9c5a2626799dd997ed63fcb28a2c8c59c68b4dbd82f3a463810fa89e6fc3f7
     name: bm
     type: application
     urls:
@@ -25,12 +25,12 @@ entries:
   eks:
   - apiVersion: v2
     appVersion: 1.24.6
-    created: "2025-08-12T15:13:08.557397+05:00"
+    created: "2025-08-12T15:44:12.421934+05:00"
     description: A Helm chart for tracebloc Kubernetes
-    digest: 804b0af61b94f19b7fde0721b78a4bc8e070bf588077ec1ccc3ec52d01bbce20
+    digest: d94cbb21adb1dc9b991a86a1421d562e463dae2724b9fd1142afaa79d6f2a70d
     name: eks
     type: application
     urls:
     - https://tracebloc.github.io/client/eks-0.2.4.tgz
     version: 0.2.4
-generated: "2025-08-12T15:13:08.555298+05:00"
+generated: "2025-08-12T15:44:12.419739+05:00"

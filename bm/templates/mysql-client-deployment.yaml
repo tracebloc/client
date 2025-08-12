@@ -15,6 +15,13 @@ spec:
       labels:
         app: {{ .Values.mysql.name }}
     spec:
+      initContainers:
+      - name: init-mysql
+        image: busybox:1.35
+        command: ['sh', '-c', 'mkdir -p /var/log/mysql && chown -R 999:999 /var/log/mysql && chmod -R 755 /var/log/mysql']
+        volumeMounts:
+        - name: mysql-logs
+          mountPath: /var/log/mysql/
       containers:
       - image: tracebloc/mysql-client
         name: {{ .Values.mysql.name }}
@@ -30,6 +37,8 @@ spec:
           mountPath: /var/lib/mysql/
         - name: mysql-config
           mountPath: /etc/mysql/conf.d/
+        - name: mysql-logs
+          mountPath: /var/log/mysql/
       imagePullSecrets:
       - name: {{ .Values.dockerRegistry.secretName }}
       volumes:
@@ -39,6 +48,8 @@ spec:
       - name: mysql-config
         configMap:
           name: {{ .Values.mysql.name }}-config
+      - name: mysql-logs
+        emptyDir: {}
 ---
 apiVersion: v1
 kind: ConfigMap
