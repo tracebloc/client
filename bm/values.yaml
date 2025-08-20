@@ -1,7 +1,7 @@
 # Configuration for the jobs manager
 jobsManager:
   # Docker image tag for the jobs manager
-  tag: latest
+  tag: "dev"
   # Environment variables for the jobs manager
   env:
     # Client ID
