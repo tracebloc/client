@@ -1,11 +1,14 @@
+#namespace for client
+namespace: <NAMESPACE_ID>
+
 # Configuration for the jobs manager
 jobsManager:
   # Docker image tag for the jobs manager
-  tag: latest
+  tag: dev
   # Environment variables for the jobs manager
   env:
     # Client ID
-    CLIENT_ID: "<Input Client ID>"
+    CLIENT_ID: "<CLIENT_ID>"
     # Client ENV
     CLIENT_ENV: "dev"
     # Optional: proxy hostname.
@@ -30,7 +33,7 @@ storageClass:
   # Set to false if you want to use existing storage class
   create: true
   # Name of the storage class
-  name: tb-azurefile
+  name: client-storage-class
   # Name of the storage provisioner
   provisioner: manual
   # Whether to allow volume expansion
@@ -45,11 +48,11 @@ storageClass:
     enableSmb: "true"
     # Enable support for macOS
     osType: "darwin"
- 
+
 # Configuration for  data PVC
 sharedData:
   # Name of the PVC for client data
-  name: shared-pvc-16
+  name: client-pvc
   # Size of the PVC for client data
   storage: 50Gi
   # host path for client data
@@ -58,7 +61,7 @@ sharedData:
 # Configuration for logs PVC
 logsPvc:
   # Name of the PVC for logs
-  name: logs-pvc-16
+  name: logs-pvc
   # Size of the PVC for logs
   storage: 10Gi
    # host path for client logs
@@ -67,7 +70,7 @@ logsPvc:
 # Configuration for MySQL PVC
 mysqlPvc:
   # Name of the PVC for MySQL data
-  name: mysql-pvc-16
+  name: mysql-pvc
   # Size of the PVC for MySQL data
   storage: 2Gi
    # host path for MySQL data
@@ -76,7 +79,7 @@ mysqlPvc:
 # MySQL deployment configuration
 mysql:
   # Name of the MySQL deployment
-  name: mysql-16
+  name: mysql-client
 
 # Cluster Role configuration for RBAC
 clusterRole:
@@ -90,7 +93,7 @@ secrets:
   # Whether to create the secret or use existing secret
   create: true
   # Client password
-  clientPassword: "<Input password created when registering the client>"
+  clientPassword: "<CLIENT_PASSWORD>"
 
 
 # Docker registry configuration
@@ -102,8 +105,8 @@ dockerRegistry:
   # Docker registry server URL
   server: https://index.docker.io/v1/
   # Docker registry username
-  username: <Input docker username>
+  username: <DOCKER_USERNAME>
   # Docker registry password or access token (consider using Kubernetes Secrets for this)
-  password: <Input Docker registry password or token>
+  password: <DOCKER_REGISTRY_PASSWORD or DOCKER_REGISTRY_TOKEN>
   # Email associated with the Docker registry account
-  email: <Input docker-email>
+  email: <DOCKER_EMAIL>

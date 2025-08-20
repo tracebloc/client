@@ -1,13 +1,16 @@
+#namespace for client
+namespace: <NAMESPACE_ID>
+
 # Configuration for the jobs manager
 jobsManager:
   # Docker image tag for the jobs manager
-  tag: latest
+  tag: dev
   # Environment variables for the jobs manager
   env:
     # Environment setting (e.g., "dev", "staging", "prod")
     CLIENT_ENV: "dev"
     # Client ID for client authentication
-    CLIENT_ID: "cb90ff14-be2f-45b0-acb3-e0c1d4216ad9"
+    CLIENT_ID: "<CLIENT_ID>"
     # proxy hostname.
     HTTP_PROXY_HOST: 
     # proxy port.
@@ -79,7 +82,7 @@ secrets:
   # Whether to create the secret or use existing secret
   create: true
   # Client password
-  clientPassword: ""
+  clientPassword: "<CLIENT_PASSWORD>"
 
 
 # Docker registry configuration
@@ -91,8 +94,8 @@ dockerRegistry:
   # Docker registry server URL
   server: https://index.docker.io/v1/
   # Docker registry username
-  username: <docker-username>
+  username: <DOCKER_USERNAME>
   # Docker registry password or access token (consider using Kubernetes Secrets for this)
-  password: <docker-token>
+  password: <DOCKER_REGISTRY_PASSWORD or DOCKER_REGISTRY_TOKEN>
   # Email associated with the Docker registry account
-  email: <docker-email>
+  email: <DOCKER_EMAIL>
