@@ -1,5 +1,5 @@
 #namespace for client
-namespace: <NAMESPACE_ID>
+namespace: <NAMESPACE>
 
 # Configuration for the jobs manager
 jobsManager:
