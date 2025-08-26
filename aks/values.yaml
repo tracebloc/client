@@ -47,21 +47,21 @@ storageClass:
 # Configuration for shared data PVC
 sharedData:
   # Name of the PVC for shared data
-  name: shared-pvc-16
+  name: shared-pvc
   # Size of the PVC for shared data
   storage: 50Gi
 
 # Configuration for logs PVC
 logsPvc:
   # Name of the PVC for logs
-  name: logs-pvc-16
+  name: logs-pvc
   # Size of the PVC for logs
   storage: 10Gi
 
 # Configuration for MySQL PVC
 mysqlPvc:
   # Name of the PVC for MySQL data
-  name: mysql-pvc-16
+  name: mysql-pvc
   # Size of the PVC for MySQL data
   storage: 2Gi
 
