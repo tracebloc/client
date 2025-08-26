@@ -31,7 +31,7 @@ jobsManager:
 
 # File storage class configuration
 storageClass:
-  # Set to false if you want to use existing storage class
+  # Set to true to create a new storage class, false to use existing. Be careful not to overwrite existing datafiles by setting it true.
   create: true
   # Name of the storage class
   name: client-storage-class
@@ -47,8 +47,8 @@ storageClass:
     protocol: smb
     # Enable file sharing features
     enableSmb: "true"
-    # Enable support for macOS
-    osType: "darwin"
+    # Enable support for your OS
+    osType: <YOUR_LOCAL_OPERATING_SYSTEM>
 
 # Configuration for  data PVC
 sharedData:
