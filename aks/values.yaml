@@ -68,7 +68,7 @@ mysqlPvc:
 # MySQL deployment configuration
 mysql:
   # Name of the MySQL deployment
-  name: mysql-16
+  name: mysql
 
 # Cluster Role configuration for RBAC
 clusterRole:
