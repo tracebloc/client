@@ -31,7 +31,7 @@ jobsManager:
 
 # AWS EFS storage class configuration
 storageClass:
-  # Set to false if you want to use existing storage class
+  # Set to true to create a new storage class, false to use existing. Be careful not to overwrite existing datafiles by setting it true.
   create: true
   # Name of the storage class
   name: tb-awsefs
