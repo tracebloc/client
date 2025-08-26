@@ -80,7 +80,7 @@ mysqlPvc:
 # MySQL deployment configuration
 mysql:
   # Name of the MySQL deployment has to match the ingestor MYSQL_HOST in ingestor-job.yaml.
-  name: mysql-client
+  name: mysql
 
 # Cluster Role configuration for RBAC
 clusterRole:
