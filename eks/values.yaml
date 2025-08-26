@@ -20,9 +20,9 @@ jobsManager:
     # password used for proxy authentication if needed.
     HTTP_PROXY_PASSWORD: 
     # Optional: resource requests for the job
-    RESOURCE_REQUESTS: "cpu=50m,memory=207084Ki" 
+    RESOURCE_REQUESTS: "cpu=2,memory=8Gi" 
     # Optional: resource limits for the job
-    RESOURCE_LIMITS: "cpu=100m,memory=414168Ki"
+    RESOURCE_LIMITS: "cpu=2,memory=8Gi"
     # Optional: gpu requests for the job
     GPU_REQUESTS: "nvidia.com/gpu=1"
     # Optional: gpu limits for the job
