@@ -48,7 +48,7 @@ storageClass:
     # Enable file sharing features
     enableSmb: "true"
     # Enable support for your OS
-    osType: <YOUR_LOCAL_OPERATING_SYSTEM>
+    osType: <OS_TYPE>
 
 # Configuration for  data PVC
 sharedData:
