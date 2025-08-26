@@ -48,7 +48,7 @@ storageClass:
     # Enable file sharing features
     enableSmb: "true"
     # Enable support for your OS
-    osType: <OS_TYPE>
+    osType: <OS_TYPE> # Use "darwin" for macOS, "linux" for Linux systems, "windows" for Windows
 
 # Configuration for  data PVC
 sharedData:
