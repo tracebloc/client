@@ -20,17 +20,18 @@ jobsManager:
     # Optional: password used for proxy authentication if needed.
     HTTP_PROXY_PASSWORD: 
     # Optional: resource requests for the job
-    RESOURCE_REQUESTS: "cpu=50m,memory=207084Ki" 
+    RESOURCE_REQUESTS: "cpu=2,memory=8Gi" 
     # Optional: resource limits for the job
-    RESOURCE_LIMITS: "cpu=100m,memory=414168Ki"
+    RESOURCE_LIMITS: "cpu=2,memory=8Gi"
     # Optional: gpu requests for the job
     GPU_REQUESTS:
-    # Optional: gpu limits for the job
+    # Optional: gpu requests for the job e.g. "nvidia.com/gpu=1"
     GPU_LIMITS:
+    # Optional: gpu limits for the job e.g. "nvidia.com/gpu=1"
 
 # File storage class configuration
 storageClass:
-  # Set to false if you want to use existing storage class
+  # Set to true to create a new storage class, false to use existing. Be careful not to overwrite existing datafiles by setting it true.
   create: true
   # Name of the storage class
   name: client-storage-class
@@ -46,8 +47,8 @@ storageClass:
     protocol: smb
     # Enable file sharing features
     enableSmb: "true"
-    # Enable support for macOS
-    osType: "darwin"
+    # Enable support for your OS
+    osType: <OS_TYPE> # Use "darwin" for macOS, "linux" for Linux systems, "windows" for Windows
 
 # Configuration for  data PVC
 sharedData:
@@ -78,8 +79,8 @@ mysqlPvc:
 
 # MySQL deployment configuration
 mysql:
-  # Name of the MySQL deployment
-  name: mysql-client
+  # Name of the MySQL deployment has to match the ingestor MYSQL_HOST in ingestor-job.yaml.
+  name: mysql
 
 # Cluster Role configuration for RBAC
 clusterRole:

@@ -20,9 +20,9 @@ jobsManager:
     # password used for proxy authentication if needed.
     HTTP_PROXY_PASSWORD:
     # Optional: resource requests for the job
-    RESOURCE_REQUESTS: "cpu=50m,memory=207084Ki" 
+    RESOURCE_REQUESTS: "cpu=2,memory=8Gi" 
     # Optional: resource limits for the job
-    RESOURCE_LIMITS: "cpu=100m,memory=414168Ki"
+    RESOURCE_LIMITS: "cpu=2,memory=8Gi"
     # Optional: gpu requests for the job
     GPU_REQUESTS: "nvidia.com/gpu=1"
     # Optional: gpu limits for the job
@@ -47,28 +47,28 @@ storageClass:
 # Configuration for shared data PVC
 sharedData:
   # Name of the PVC for shared data
-  name: shared-pvc-16
+  name: shared-pvc
   # Size of the PVC for shared data
   storage: 50Gi
 
 # Configuration for logs PVC
 logsPvc:
   # Name of the PVC for logs
-  name: logs-pvc-16
+  name: logs-pvc
   # Size of the PVC for logs
   storage: 10Gi
 
 # Configuration for MySQL PVC
 mysqlPvc:
   # Name of the PVC for MySQL data
-  name: mysql-pvc-16
+  name: mysql-pvc
   # Size of the PVC for MySQL data
   storage: 2Gi
 
 # MySQL deployment configuration
 mysql:
   # Name of the MySQL deployment
-  name: mysql-16
+  name: mysql
 
 # Cluster Role configuration for RBAC
 clusterRole:
