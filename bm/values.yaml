@@ -29,6 +29,25 @@ jobsManager:
     GPU_LIMITS:
     # Optional: gpu limits for the job e.g. "nvidia.com/gpu=1"
 
+# Configuration for the pods monitor
+podsMonitor:
+  # Docker image tag for the pods monitor
+  tag: dev
+  # Environment variables for the pods monitor
+  env:
+    # Environment setting (e.g., "dev", "staging", "prod")
+    CLIENT_ENV: "dev"
+    # Client Username for client authentication
+    CLIENT_ID: "<CLIENT_ID>"
+    # proxy hostname.
+    HTTP_PROXY_HOST:
+    # proxy port.
+    HTTP_PROXY_PORT:
+    # username used for proxy authentication if needed.
+    HTTP_PROXY_USERNAME:
+    # password used for proxy authentication if needed.
+    HTTP_PROXY_PASSWORD:
+
 # File storage class configuration
 storageClass:
   # Set to true to create a new storage class, false to use existing. Be careful not to overwrite existing datafiles by setting it true.

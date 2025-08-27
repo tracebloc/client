@@ -24,10 +24,28 @@ jobsManager:
     # Optional: resource limits for the job
     RESOURCE_LIMITS: "cpu=2,memory=8Gi"
     # Optional: gpu requests for the job
-    GPU_REQUESTS: "nvidia.com/gpu=1"
+    GPU_REQUESTS: ""
     # Optional: gpu limits for the job
-    GPU_LIMITS: "nvidia.com/gpu=1"
+    GPU_LIMITS: ""
     
+# Configuration for the pods monitor
+podsMonitor:
+  # Docker image tag for the pods monitor
+  tag: dev
+  # Environment variables for the pods monitor
+  env:
+    # Environment setting (e.g., "dev", "staging", "prod")
+    CLIENT_ENV: "dev"
+    # Client Username for client authentication
+    CLIENT_ID: "<CLIENT_ID>"
+    # proxy hostname.
+    HTTP_PROXY_HOST:
+    # proxy port.
+    HTTP_PROXY_PORT:
+    # username used for proxy authentication if needed.
+    HTTP_PROXY_USERNAME:
+    # password used for proxy authentication if needed.
+    HTTP_PROXY_PASSWORD:
 
 # Azure File storage class configuration
 storageClass:
