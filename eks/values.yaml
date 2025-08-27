@@ -36,7 +36,17 @@ podsMonitor:
   env:
     # Environment setting (e.g., "dev", "staging", "prod")
     CLIENT_ENV: "dev"
-    
+    # Client Username for client authentication
+    CLIENT_ID: "<CLIENT_ID>"
+    # proxy hostname.
+    HTTP_PROXY_HOST:
+    # proxy port.
+    HTTP_PROXY_PORT:
+    # username used for proxy authentication if needed.
+    HTTP_PROXY_USERNAME:
+    # password used for proxy authentication if needed.
+    HTTP_PROXY_PASSWORD:
+
 
 # AWS EFS storage class configuration
 storageClass:

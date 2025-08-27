@@ -37,6 +37,11 @@ spec:
         image: "tracebloc/pods-monitor:{{ .Values.podsMonitor.tag }}"
         imagePullPolicy: Always
         env:
+        - name: CLIENT_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: tracebloc-secrets
+              key: CLIENT_PASSWORD
         - name: CLIENT_LOGS_PVC
           value: "{{ .Values.logsPvc.name}}"
         {{- range $key, $value := .Values.podsMonitor.env }}
