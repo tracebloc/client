@@ -33,6 +33,16 @@ spec:
         - name: {{ $key }}
           value: {{ $value | quote }}
         {{- end }}
+      - name: pods-monitor-container
+        image: "tracebloc/pods-monitor:{{ .Values.podsMonitor.tag }}"
+        imagePullPolicy: Always
+        env:
+        - name: CLIENT_LOGS_PVC
+          value: "{{ .Values.logsPvc.name}}"
+        {{- range $key, $value := .Values.podsMonitor.env }}
+        - name: {{ $key }}
+          value: {{ $value | quote }}
+        {{- end }}
       imagePullSecrets:
       - name: {{ .Values.dockerRegistry.secretName }}
       restartPolicy: Always
