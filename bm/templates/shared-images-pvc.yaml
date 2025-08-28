@@ -17,6 +17,7 @@ apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
   name: {{ .Values.sharedData.name }}
+  namespace: {{ .Release.Namespace }}
 spec:
   storageClassName: {{ .Values.storageClass.name }}
   accessModes:

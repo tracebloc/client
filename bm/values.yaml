@@ -1,36 +1,59 @@
+#namespace for client
+namespace: <NAMESPACE>
+
 # Configuration for the jobs manager
 jobsManager:
   # Docker image tag for the jobs manager
-  tag: latest
+  tag: dev
   # Environment variables for the jobs manager
   env:
-    # Environment setting (e.g., "dev", "staging", "prod")
-    EDGE_ENV: "dev"
-    # Client ID for edge authentication
-    EDGE_USERNAME: "testedge"
-    # proxy hostname.
+    # Client ID
+    CLIENT_ID: "<CLIENT_ID>"
+    # Client ENV
+    CLIENT_ENV: "dev"
+    # Optional: proxy hostname.
     HTTP_PROXY_HOST: 
-    # proxy port.
+    # Optional: proxy port.
     HTTP_PROXY_PORT: 
-    # username used for proxy authentication if needed.
+    # Optional: username used for proxy authentication if needed.
     HTTP_PROXY_USERNAME: 
-    # password used for proxy authentication if needed.
+    # Optional: password used for proxy authentication if needed.
     HTTP_PROXY_PASSWORD: 
     # Optional: resource requests for the job
-    RESOURCE_REQUESTS: "cpu=50m,memory=207084Ki" 
+    RESOURCE_REQUESTS: "cpu=2,memory=8Gi" 
     # Optional: resource limits for the job
-    RESOURCE_LIMITS: "cpu=100m,memory=414168Ki"
+    RESOURCE_LIMITS: "cpu=2,memory=8Gi"
     # Optional: gpu requests for the job
-    GPU_REQUESTS: "nvidia.com/gpu=1"
-    # Optional: gpu limits for the job
-    GPU_LIMITS: "nvidia.com/gpu=1"
+    GPU_REQUESTS:
+    # Optional: gpu requests for the job e.g. "nvidia.com/gpu=1"
+    GPU_LIMITS:
+    # Optional: gpu limits for the job e.g. "nvidia.com/gpu=1"
+
+# Configuration for the pods monitor
+podsMonitor:
+  # Docker image tag for the pods monitor
+  tag: dev
+  # Environment variables for the pods monitor
+  env:
+    # Environment setting (e.g., "dev", "staging", "prod")
+    CLIENT_ENV: "dev"
+    # Client Username for client authentication
+    CLIENT_ID: "<CLIENT_ID>"
+    # proxy hostname.
+    HTTP_PROXY_HOST:
+    # proxy port.
+    HTTP_PROXY_PORT:
+    # username used for proxy authentication if needed.
+    HTTP_PROXY_USERNAME:
+    # password used for proxy authentication if needed.
+    HTTP_PROXY_PASSWORD:
 
 # File storage class configuration
 storageClass:
-  # Set to false if you want to use existing storage class
+  # Set to true to create a new storage class, false to use existing. Be careful not to overwrite existing datafiles by setting it true.
   create: true
   # Name of the storage class
-  name: tb-azurefile
+  name: client-storage-class
   # Name of the storage provisioner
   provisioner: manual
   # Whether to allow volume expansion
@@ -43,42 +66,40 @@ storageClass:
     protocol: smb
     # Enable file sharing features
     enableSmb: "true"
-    # Enable support for macOS
-    osType: "darwin"
+    # Enable support for your OS
+    osType: <OS_TYPE> # Use "darwin" for macOS, "linux" for Linux systems, "windows" for Windows
 
-
-# Configuration for shared data PVC
+# Configuration for  data PVC
 sharedData:
-  # Name of the PVC for shared data
-  name: shared-pvc-16
-  # Size of the PVC for shared data
+  # Name of the PVC for client data
+  name: client-pvc
+  # Size of the PVC for client data
   storage: 50Gi
-  # host path for shared data
-  hostPath: /Documents/data/shared-data
-
+  # host path for client data
+  hostPath: "<Input path to data folder>/shared_data"
 
 # Configuration for logs PVC
 logsPvc:
   # Name of the PVC for logs
-  name: logs-pvc-16
+  name: logs-pvc
   # Size of the PVC for logs
   storage: 10Gi
-  # host path for logs
-  hostPath: /Documents/data/logs
+   # host path for client logs
+  hostPath: "<Input path to data folder>/logs"
 
 # Configuration for MySQL PVC
 mysqlPvc:
   # Name of the PVC for MySQL data
-  name: mysql-pvc-16
+  name: mysql-pvc
   # Size of the PVC for MySQL data
   storage: 2Gi
-  # host path for MySQL data
-  hostPath: /Documents/data/mysql
+   # host path for MySQL data
+  hostPath: "<Input path to data folder>/mysql"
 
 # MySQL deployment configuration
 mysql:
-  # Name of the MySQL deployment
-  name: mysql-16
+  # Name of the MySQL deployment has to match the ingestor MYSQL_HOST in ingestor-job.yaml.
+  name: mysql
 
 # Cluster Role configuration for RBAC
 clusterRole:
@@ -91,8 +112,8 @@ clusterRole:
 secrets:
   # Whether to create the secret or use existing secret
   create: true
-  # Edge password
-  edgePassword: ""
+  # Client password
+  clientPassword: "<CLIENT_PASSWORD>"
 
 
 # Docker registry configuration
@@ -104,8 +125,8 @@ dockerRegistry:
   # Docker registry server URL
   server: https://index.docker.io/v1/
   # Docker registry username
-  username: xyz
+  username: <DOCKER_USERNAME>
   # Docker registry password or access token (consider using Kubernetes Secrets for this)
-  password: pass
+  password: <DOCKER_REGISTRY_PASSWORD or DOCKER_REGISTRY_TOKEN>
   # Email associated with the Docker registry account
-  email: xyz@tracebloc.io
+  email: <DOCKER_EMAIL>

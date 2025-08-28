@@ -1,5 +1,5 @@
-#namespace for tracebloc client
-namespace: tracebloc-16
+#namespace for client
+namespace: <NAMESPACE>
 
 # Configuration for the jobs manager
 jobsManager:
@@ -8,9 +8,9 @@ jobsManager:
   # Environment variables for the jobs manager
   env:
     # Environment setting (e.g., "dev", "staging", "prod")
-    EDGE_ENV: "dev"
-    # Client ID for edge authentication
-    EDGE_USERNAME: "testedge"
+    CLIENT_ENV: "dev"
+    # Client Username for client authentication
+    CLIENT_ID: "<CLIENT_ID>"
     # proxy hostname.
     HTTP_PROXY_HOST: 
     # proxy port.
@@ -20,18 +20,37 @@ jobsManager:
     # password used for proxy authentication if needed.
     HTTP_PROXY_PASSWORD: 
     # Optional: resource requests for the job
-    RESOURCE_REQUESTS: "cpu=50m,memory=207084Ki" 
+    RESOURCE_REQUESTS: "cpu=2,memory=8Gi" 
     # Optional: resource limits for the job
-    RESOURCE_LIMITS: "cpu=100m,memory=414168Ki"
+    RESOURCE_LIMITS: "cpu=2,memory=8Gi"
     # Optional: gpu requests for the job
-    GPU_REQUESTS: "nvidia.com/gpu=1"
+    GPU_REQUESTS: ""
     # Optional: gpu limits for the job
-    GPU_LIMITS: "nvidia.com/gpu=1"
-    
+    GPU_LIMITS: ""
+
+# Configuration for the pods monitor
+podsMonitor:
+  # Docker image tag for the pods monitor
+  tag: dev
+  # Environment variables for the pods monitor
+  env:
+    # Environment setting (e.g., "dev", "staging", "prod")
+    CLIENT_ENV: "dev"
+    # Client Username for client authentication
+    CLIENT_ID: "<CLIENT_ID>"
+    # proxy hostname.
+    HTTP_PROXY_HOST:
+    # proxy port.
+    HTTP_PROXY_PORT:
+    # username used for proxy authentication if needed.
+    HTTP_PROXY_USERNAME:
+    # password used for proxy authentication if needed.
+    HTTP_PROXY_PASSWORD:
+
 
 # AWS EFS storage class configuration
 storageClass:
-  # Set to false if you want to use existing storage class
+  # Set to true to create a new storage class, false to use existing. Be careful not to overwrite existing datafiles by setting it true.
   create: true
   # Name of the storage class
   name: tb-awsefs
@@ -46,7 +65,7 @@ storageClass:
   # Additional parameters for the storage class
   parameters:
     # EFS filesystem ID
-    fileSystemId: fs-0000
+    fileSystemId: <FILE_SYSTEM_ID>
 
 # Configuration for shared data PVC
 sharedData:
@@ -83,10 +102,10 @@ clusterRole:
 
 # Secrets configuration
 secrets:
-  # Edge password
-  edgePassword: ""
   # Whether to create the secret or use existing secret
   create: true
+  # Client password
+  clientPassword: "<CLIENT_PASSWORD>"
 
 # Docker registry configuration
 dockerRegistry:
@@ -97,8 +116,8 @@ dockerRegistry:
   # Docker registry server URL
   server: https://index.docker.io/v1/
   # Docker registry username
-  username: xyz
+  username: <DOCKER_USERNAME>
   # Docker registry password or access token (consider using Kubernetes Secrets for this)
-  password: pass
+  password: <DOCKER_REGISTRY_PASSWORD or DOCKER_REGISTRY_TOKEN>
   # Email associated with the Docker registry account
-  email: xyz@tracebloc.io
+  email: <DOCKER_EMAIL>
