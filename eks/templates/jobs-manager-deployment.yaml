@@ -51,3 +51,5 @@ spec:
       imagePullSecrets:
       - name: {{ .Values.dockerRegistry.secretName }}
       restartPolicy: Always
+      nodeSelector:
+        type: system

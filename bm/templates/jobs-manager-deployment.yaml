@@ -57,3 +57,5 @@ spec:
           persistentVolumeClaim:
             claimName: {{ .Values.sharedData.name}}
       restartPolicy: Always
+      nodeSelector:
+        type: system
