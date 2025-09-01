@@ -41,6 +41,8 @@ spec:
           mountPath: /var/log/mysql/
       imagePullSecrets:
       - name: {{ .Values.dockerRegistry.secretName }}
+      nodeSelector:
+        type: system
       volumes:
       - name: mysql-persistent-storage
         persistentVolumeClaim:
