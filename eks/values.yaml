@@ -26,7 +26,7 @@ jobsManager:
     # Optional: gpu requests for the job
     GPU_REQUESTS: "" # for GPU support set "nvidia.com/gpu=1"
     # Optional: gpu limits for the job
-    GPU_LIMITS: "" # for GPU support set ""nvidia.com/gpu=1"
+    GPU_LIMITS: "" # for GPU support set "nvidia.com/gpu=1"
 
 # Configuration for the pods monitor
 podsMonitor:
