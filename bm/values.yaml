@@ -29,6 +29,9 @@ jobsManager:
     GPU_LIMITS:
     # Optional: gpu limits for the job e.g. "nvidia.com/gpu=1"
 
+    # Optional: runtime class name for runing job with gpu (required for k3s)
+    RUNTIME_CLASS_NAME: "nvidia"
+
 # Configuration for the pods monitor
 podsMonitor:
   # Docker image tag for the pods monitor
