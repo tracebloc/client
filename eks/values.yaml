@@ -16,7 +16,7 @@ jobsManager:
     # proxy port.
     HTTP_PROXY_PORT: 
     # username used for proxy authentication if needed.
-    HTTP_PROXY_USERNAME: 
+    HTTP_PROXY_USERNAME:
     # password used for proxy authentication if needed.
     HTTP_PROXY_PASSWORD: 
     # Optional: resource requests for the job
@@ -28,32 +28,13 @@ jobsManager:
     # Optional: gpu limits for the job
     GPU_LIMITS: "" # for GPU support set "nvidia.com/gpu=1"
 
-# Configuration for the pods monitor
-podsMonitor:
-  # Docker image tag for the pods monitor
-  tag: dev
-  # Environment variables for the pods monitor
-  env:
-    # Environment setting (e.g., "dev", "staging", "prod")
-    CLIENT_ENV: "dev"
-    # Client Username for client authentication
-    CLIENT_ID: "<CLIENT_ID>"
-    # proxy hostname.
-    HTTP_PROXY_HOST:
-    # proxy port.
-    HTTP_PROXY_PORT:
-    # username used for proxy authentication if needed.
-    HTTP_PROXY_USERNAME:
-    # password used for proxy authentication if needed.
-    HTTP_PROXY_PASSWORD:
-
 
 # AWS EFS storage class configuration
 storageClass:
   # Set to true to create a new storage class, false to use existing. Be careful not to overwrite existing datafiles by setting it true.
   create: true
   # Name of the storage class
-  name: tb-awsefs
+  name: client-storage-class
   # Name of the storage provisioner
   provisioner: efs.csi.aws.com
   # Whether to allow volume expansion
@@ -68,16 +49,16 @@ storageClass:
     fileSystemId: <FILE_SYSTEM_ID>
 
 # Configuration for shared data PVC
-sharedData:
+clientData:
   # Name of the PVC for shared data
-  name: shared-pvc
+  name: client-pvc
   # Size of the PVC for shared data
   storage: 50Gi
 
 # Configuration for logs PVC
-logsPvc:
+clientLogsPvc:
   # Name of the PVC for logs
-  name: logs-pvc
+  name: client-logs-pvc
   # Size of the PVC for logs
   storage: 10Gi
 
@@ -91,7 +72,7 @@ mysqlPvc:
 # MySQL deployment configuration
 mysql:
   # Name of the MySQL deployment
-  name: mysql
+  name: mysql-client
 
 # Cluster Role configuration for RBAC
 clusterRole:

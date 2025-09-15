@@ -20,39 +20,21 @@ jobsManager:
     # password used for proxy authentication if needed.
     HTTP_PROXY_PASSWORD:
     # Optional: resource requests for the job
-    RESOURCE_REQUESTS: "cpu=2,memory=8Gi" 
+    RESOURCE_REQUESTS: "cpu=2,memory=8Gi"
     # Optional: resource limits for the job
     RESOURCE_LIMITS: "cpu=2,memory=8Gi"
-    # Optional: gpu requests for the job
+    # Optional: gpu requests for the job, example:"nvidia.com/gpu=1"
     GPU_REQUESTS: ""
-    # Optional: gpu limits for the job
+    # Optional: gpu limits for the job, example:"nvidia.com/gpu=1"
     GPU_LIMITS: ""
-    
-# Configuration for the pods monitor
-podsMonitor:
-  # Docker image tag for the pods monitor
-  tag: dev
-  # Environment variables for the pods monitor
-  env:
-    # Environment setting (e.g., "dev", "staging", "prod")
-    CLIENT_ENV: "dev"
-    # Client Username for client authentication
-    CLIENT_ID: "<CLIENT_ID>"
-    # proxy hostname.
-    HTTP_PROXY_HOST:
-    # proxy port.
-    HTTP_PROXY_PORT:
-    # username used for proxy authentication if needed.
-    HTTP_PROXY_USERNAME:
-    # password used for proxy authentication if needed.
-    HTTP_PROXY_PASSWORD:
+
 
 # Azure File storage class configuration
 storageClass:
   # Set to false if you want to use existing storage class
   create: true
   # Name of the storage class
-  name: tb-azurefile
+  name: client-storage-class
   # Name of the storage provisioner
   provisioner: file.csi.azure.com
   # Whether to allow volume expansion
@@ -63,16 +45,16 @@ storageClass:
     skuName: Standard_LRS
 
 # Configuration for shared data PVC
-sharedData:
+clientData:
   # Name of the PVC for shared data
-  name: shared-pvc
+  name: client-pvc
   # Size of the PVC for shared data
   storage: 50Gi
 
 # Configuration for logs PVC
-logsPvc:
+clientLogsPvc:
   # Name of the PVC for logs
-  name: logs-pvc
+  name: client-logs-pvc
   # Size of the PVC for logs
   storage: 10Gi
 
@@ -86,7 +68,7 @@ mysqlPvc:
 # MySQL deployment configuration
 mysql:
   # Name of the MySQL deployment
-  name: mysql
+  name: mysql-client
 
 # Cluster Role configuration for RBAC
 clusterRole:
