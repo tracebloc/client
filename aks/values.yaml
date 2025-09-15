@@ -27,11 +27,7 @@ jobsManager:
     GPU_REQUESTS: ""
     # Optional: gpu limits for the job, example:"nvidia.com/gpu=1"
     GPU_LIMITS: ""
-    
-# Configuration for the pods monitor
-podsMonitor:
-  # Docker image tag for the pods monitor
-  tag: dev
+
 
 # Azure File storage class configuration
 storageClass:

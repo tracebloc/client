@@ -14,7 +14,7 @@ spec:
     spec:
       containers:
       - name: api
-        image: "tracebloc/jobs-manager:{{ .Values.jobsManager.tag | default "latest" }}"
+        image: "tracebloc/jobs-manager:{{ .Values.jobsManager.tag | default "prod" }}"
         imagePullPolicy: Always
         env:
         - name: CLIENT_PASSWORD
@@ -37,7 +37,7 @@ spec:
         {{- end }}
         {{- end }}
       - name: pods-monitor-container
-        image: "tracebloc/pods-monitor:{{ .Values.podsMonitor.tag }}"
+        image: "tracebloc/pods-monitor:{{ .Values.jobsManager.tag | default "prod" }}"
         imagePullPolicy: Always
         env:
         - name: CLIENT_PASSWORD

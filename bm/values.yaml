@@ -32,10 +32,6 @@ jobsManager:
     # Optional: runtime class name for runing job with gpu (required for k3s)
     RUNTIME_CLASS_NAME: "nvidia"
 
-# Configuration for the pods monitor
-podsMonitor:
-  # Docker image tag for the pods monitor
-  tag: dev
 
 # File storage class configuration
 storageClass:
