@@ -1,33 +1,59 @@
+#namespace for client
+namespace: <NAMESPACE>
+
 # Configuration for the jobs manager
 jobsManager:
   # Docker image tag for the jobs manager
-  tag: latest
+  tag: dev
   # Environment variables for the jobs manager
+  env:
+    # Client ID
+    CLIENT_ID: "<CLIENT_ID>"
+    # Client ENV
+    CLIENT_ENV: "dev"
+    # Optional: proxy hostname.
+    HTTP_PROXY_HOST:
+    # Optional: proxy port.
+    HTTP_PROXY_PORT:
+    # Optional: username used for proxy authentication if needed.
+    HTTP_PROXY_USERNAME:
+    # Optional: password used for proxy authentication if needed.
+    HTTP_PROXY_PASSWORD:
+    # Optional: resource requests for the job
+    RESOURCE_REQUESTS: "cpu=2,memory=8Gi"
+    # Optional: resource limits for the job
+    RESOURCE_LIMITS: "cpu=2,memory=8Gi"
+    # Optional: gpu requests for the job
+    GPU_REQUESTS:
+    # Optional: gpu requests for the job e.g. "nvidia.com/gpu=1"
+    GPU_LIMITS:
+    # Optional: gpu limits for the job e.g. "nvidia.com/gpu=1"
+
+    # Optional: runtime class name for runing job with gpu (required for k3s)
+    RUNTIME_CLASS_NAME: "nvidia"
+
+# Configuration for the pods monitor
+podsMonitor:
+  # Docker image tag for the pods monitor
+  tag: dev
+  # Environment variables for the pods monitor
   env:
     # Environment setting (e.g., "dev", "staging", "prod")
     CLIENT_ENV: "dev"
     # Client Username for client authentication
-    CLIENT_ID: "cb90ff14-be2f-45b0-acb3-e0c1d4216ad9"
+    CLIENT_ID: "<CLIENT_ID>"
     # proxy hostname.
-    HTTP_PROXY_HOST: 
+    HTTP_PROXY_HOST:
     # proxy port.
-    HTTP_PROXY_PORT: 
+    HTTP_PROXY_PORT:
     # username used for proxy authentication if needed.
-    HTTP_PROXY_USERNAME: 
+    HTTP_PROXY_USERNAME:
     # password used for proxy authentication if needed.
-    HTTP_PROXY_PASSWORD: 
-    # Optional: resource requests for the job
-    RESOURCE_REQUESTS: "cpu=50m,memory=207084Ki" 
-    # Optional: resource limits for the job
-    RESOURCE_LIMITS: "cpu=100m,memory=414168Ki"
-    # Optional: gpu requests for the job
-    GPU_REQUESTS: "nvidia.com/gpu=1"
-    # Optional: gpu limits for the job
-    GPU_LIMITS: "nvidia.com/gpu=1"
+    HTTP_PROXY_PASSWORD:
 
 # File storage class configuration
 storageClass:
-  # Set to false if you want to use existing storage class
+  # Set to true to create a new storage class, false to use existing. Be careful not to overwrite existing datafiles by setting it true.
   create: true
   # Name of the storage class
   name: client-storage-class
@@ -43,19 +69,18 @@ storageClass:
     protocol: smb
     # Enable file sharing features
     enableSmb: "true"
-    # Enable support for macOS
-    osType: "darwin"
+    # Enable support for your OS
+    osType: <OS_TYPE> # Use "darwin" for macOS, "linux" for Linux systems, "windows" for Windows
 
 
-# Configuration for shared data PVC
+# Configuration for  data PVC
 clientData:
-  # Name of the PVC for shared data
+  # Name of the PVC for client data
   name: client-pvc
-  # Size of the PVC for shared data
+  # Size of the PVC for client data
   storage: 50Gi
-  # host path for shared data
-  hostPath: /Documents/data/client-data
-
+  # host path for client data
+  hostPath: "<Input path to data folder>/shared_data"
 
 # Configuration for logs PVC
 clientLogsPvc:
@@ -63,8 +88,8 @@ clientLogsPvc:
   name: client-logs-pvc
   # Size of the PVC for logs
   storage: 10Gi
-  # host path for logs
-  hostPath: /Documents/data/client-logs
+   # host path for client logs
+  hostPath: "<Input path to data folder>/logs"
 
 # Configuration for MySQL PVC
 mysqlPvc:
@@ -72,12 +97,12 @@ mysqlPvc:
   name: mysql-pvc
   # Size of the PVC for MySQL data
   storage: 2Gi
-  # host path for MySQL data
-  hostPath: /Documents/data/mysql
+   # host path for MySQL data
+  hostPath: "<Input path to data folder>/mysql"
 
 # MySQL deployment configuration
 mysql:
-  # Name of the MySQL deployment
+  # Name of the MySQL deployment has to match the ingestor MYSQL_HOST in ingestor-job.yaml.
   name: mysql-client
 
 # Cluster Role configuration for RBAC
@@ -92,7 +117,7 @@ secrets:
   # Whether to create the secret or use existing secret
   create: true
   # Client password
-  clientPassword: ""
+  clientPassword: "<CLIENT_PASSWORD>"
 
 
 # Docker registry configuration
@@ -103,9 +128,9 @@ dockerRegistry:
   secretName: regcred
   # Docker registry server URL
   server: https://index.docker.io/v1/
-    # Docker registry username
-  username: <docker-username>
+  # Docker registry username
+  username: <DOCKER_USERNAME>
   # Docker registry password or access token (consider using Kubernetes Secrets for this)
-  password: <docker-token>
+  password: <DOCKER_REGISTRY_PASSWORD or DOCKER_REGISTRY_TOKEN>
   # Email associated with the Docker registry account
-  email: <docker-email>
+  email: <DOCKER_EMAIL>

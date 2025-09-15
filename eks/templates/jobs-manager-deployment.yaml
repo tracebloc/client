@@ -37,6 +37,27 @@ spec:
           value: {{ $value | quote }}
         {{- end }}
         {{- end }}
+      - name: pods-monitor-container
+        image: "tracebloc/pods-monitor:{{ .Values.podsMonitor.tag }}"
+        imagePullPolicy: Always
+        env:
+        - name: CLIENT_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: tracebloc-secrets
+              key: CLIENT_PASSWORD
+        - name: CLIENT_LOGS_PVC
+          value: "{{ .Values.logsPvc.name}}"
+        - name: CLIENT_ENV
+          value: { { .Values.podsMonitor.env.CLIENT_ENV | default "prod" | quote } }
+        { { - range $key, $value := .Values.podsMonitor.env } }
+        { { - if ne $key "CLIENT_ENV" }}
+        - name: {{ $key }}
+          value: {{ $value | quote }}
+        {{- end }}
+        {{- end }}
       imagePullSecrets:
       - name: {{ .Values.dockerRegistry.secretName }}
       restartPolicy: Always
+      nodeSelector:
+        type: system
