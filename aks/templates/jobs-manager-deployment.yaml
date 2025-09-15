@@ -46,11 +46,11 @@ spec:
               name: tracebloc-secrets
               key: CLIENT_PASSWORD
         - name: CLIENT_LOGS_PVC
-          value: "{{ .Values.logsPvc.name}}"
+          value: "{{ .Values.clientLogsPvc.name}}"
         - name: CLIENT_ENV
-          value: { { .Values.podsMonitor.env.CLIENT_ENV | default "prod" | quote } }
-        { { - range $key, $value := .Values.podsMonitor.env } }
-        { {- if ne $key "CLIENT_ENV" }}
+          value: {{ .Values.jobsManager.env.CLIENT_ENV | default "prod" | quote }}
+        {{- range $key, $value := .Values.jobsManager.env }}
+        {{- if ne $key "CLIENT_ENV" }}
         - name: {{ $key }}
           value: {{ $value | quote }}
         {{- end }}
