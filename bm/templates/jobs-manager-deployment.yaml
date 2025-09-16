@@ -14,7 +14,7 @@ spec:
     spec:
       containers:
       - name: api
-        image: "tracebloc/pods-monitor:{{ .Values.jobsManager.tag | default "prod" }}"
+        image: "tracebloc/jobs-manager:{{ .Values.jobsManager.tag | default "prod" }}"
         imagePullPolicy: Always
         volumeMounts:
           - name: shared-volume
@@ -52,12 +52,12 @@ spec:
             value: "{{ .Values.clientLogsPvc.name}}"
           - name: CLIENT_ENV
             value: {{ .Values.jobsManager.env.CLIENT_ENV | default "prod" | quote }}
-        {{- range $key, $value := .Values.jobsManager.env }}
-        {{- if ne $key "CLIENT_ENV" }}
-        - name: {{ $key }}
-          value: {{ $value | quote }}
-        {{- end }}
-        {{- end }}
+          {{- range $key, $value := .Values.jobsManager.env }}
+          {{- if ne $key "CLIENT_ENV" }}
+          - name: {{ $key }}
+            value: {{ $value | quote }}
+          {{- end }}
+          {{- end }}
       imagePullSecrets:
       - name: {{ .Values.dockerRegistry.secretName }}
       volumes:

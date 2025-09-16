@@ -15,11 +15,11 @@ spec:
         command: ["/bin/sh", "-c"]
         args:
         - |
-          mkdir -p {{ .Values.sharedData.hostPath }}
-          mkdir -p {{ .Values.logsPvc.hostPath }}
+          mkdir -p {{ .Values.clientData.hostPath }}
+          mkdir -p {{ .Values.clientLogsPvc.hostPath }}
           mkdir -p {{ .Values.mysqlPvc.hostPath }}
-          chmod -R 777 {{ .Values.sharedData.hostPath }}
-          chmod -R 777 {{ .Values.logsPvc.hostPath }}
+          chmod -R 777 {{ .Values.clientData.hostPath }}
+          chmod -R 777 {{ .Values.clientLogsPvc.hostPath }}
           chmod -R 777 {{ .Values.mysqlPvc.hostPath }}
       restartPolicy: OnFailure
 ---
