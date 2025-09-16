@@ -12,15 +12,15 @@ jobsManager:
     # Client ENV
     CLIENT_ENV: "dev"
     # Optional: proxy hostname.
-    HTTP_PROXY_HOST: 
+    HTTP_PROXY_HOST:
     # Optional: proxy port.
-    HTTP_PROXY_PORT: 
+    HTTP_PROXY_PORT:
     # Optional: username used for proxy authentication if needed.
-    HTTP_PROXY_USERNAME: 
+    HTTP_PROXY_USERNAME:
     # Optional: password used for proxy authentication if needed.
-    HTTP_PROXY_PASSWORD: 
+    HTTP_PROXY_PASSWORD:
     # Optional: resource requests for the job
-    RESOURCE_REQUESTS: "cpu=2,memory=8Gi" 
+    RESOURCE_REQUESTS: "cpu=2,memory=8Gi"
     # Optional: resource limits for the job
     RESOURCE_LIMITS: "cpu=2,memory=8Gi"
     # Optional: gpu requests for the job
@@ -32,24 +32,6 @@ jobsManager:
     # Optional: runtime class name for runing job with gpu (required for k3s)
     RUNTIME_CLASS_NAME: "nvidia"
 
-# Configuration for the pods monitor
-podsMonitor:
-  # Docker image tag for the pods monitor
-  tag: dev
-  # Environment variables for the pods monitor
-  env:
-    # Environment setting (e.g., "dev", "staging", "prod")
-    CLIENT_ENV: "dev"
-    # Client Username for client authentication
-    CLIENT_ID: "<CLIENT_ID>"
-    # proxy hostname.
-    HTTP_PROXY_HOST:
-    # proxy port.
-    HTTP_PROXY_PORT:
-    # username used for proxy authentication if needed.
-    HTTP_PROXY_USERNAME:
-    # password used for proxy authentication if needed.
-    HTTP_PROXY_PASSWORD:
 
 # File storage class configuration
 storageClass:
@@ -72,8 +54,9 @@ storageClass:
     # Enable support for your OS
     osType: <OS_TYPE> # Use "darwin" for macOS, "linux" for Linux systems, "windows" for Windows
 
+
 # Configuration for  data PVC
-sharedData:
+clientData:
   # Name of the PVC for client data
   name: client-pvc
   # Size of the PVC for client data
@@ -82,9 +65,9 @@ sharedData:
   hostPath: "<Input path to data folder>/shared_data"
 
 # Configuration for logs PVC
-logsPvc:
+clientLogsPvc:
   # Name of the PVC for logs
-  name: logs-pvc
+  name: client-logs-pvc
   # Size of the PVC for logs
   storage: 10Gi
    # host path for client logs
@@ -102,7 +85,7 @@ mysqlPvc:
 # MySQL deployment configuration
 mysql:
   # Name of the MySQL deployment has to match the ingestor MYSQL_HOST in ingestor-job.yaml.
-  name: mysql
+  name: mysql-client
 
 # Cluster Role configuration for RBAC
 clusterRole:
