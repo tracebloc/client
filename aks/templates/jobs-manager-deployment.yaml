@@ -14,7 +14,7 @@ spec:
     spec:
       containers:
       - name: api
-        image: "tracebloc/jobs-manager:{{ .Values.jobsManager.tag }}"
+        image: "tracebloc/jobs-manager:{{ .Values.jobsManager.tag | default "prod" }}"
         imagePullPolicy: Always
         volumeMounts:
           - name: shared-volume
@@ -26,17 +26,21 @@ spec:
               name: tracebloc-secrets
               key: CLIENT_PASSWORD
         - name: CLIENT_PVC
-          value: "{{ .Values.sharedData.name}}"
+          value: "{{ .Values.clientData.name}}"
         - name: CLIENT_LOGS_PVC
-          value: "{{ .Values.logsPvc.name}}"
+          value: "{{ .Values.clientLogsPvc.name}}"
         - name: MYSQL_HOST
           value: "{{ .Values.mysql.name}}"
+        - name: CLIENT_ENV
+          value: {{ .Values.jobsManager.env.CLIENT_ENV | default "prod" | quote }}
         {{- range $key, $value := .Values.jobsManager.env }}
+        {{- if ne $key "CLIENT_ENV" }}
         - name: {{ $key }}
           value: {{ $value | quote }}
         {{- end }}
+        {{- end }}
       - name: pods-monitor-container
-        image: "tracebloc/pods-monitor:{{ .Values.podsMonitor.tag }}"
+        image: "tracebloc/pods-monitor:{{ .Values.jobsManager.tag | default "prod" }}"
         imagePullPolicy: Always
         env:
         - name: CLIENT_PASSWORD
@@ -45,10 +49,14 @@ spec:
               name: tracebloc-secrets
               key: CLIENT_PASSWORD
         - name: CLIENT_LOGS_PVC
-          value: "{{ .Values.logsPvc.name}}"
-        {{- range $key, $value := .Values.podsMonitor.env }}
+          value: "{{ .Values.clientLogsPvc.name}}"
+        - name: CLIENT_ENV
+          value: {{ .Values.jobsManager.env.CLIENT_ENV | default "prod" | quote }}
+        {{- range $key, $value := .Values.jobsManager.env }}
+        {{- if ne $key "CLIENT_ENV" }}
         - name: {{ $key }}
           value: {{ $value | quote }}
+        {{- end }}
         {{- end }}
       imagePullSecrets:
       - name: {{ .Values.dockerRegistry.secretName }}

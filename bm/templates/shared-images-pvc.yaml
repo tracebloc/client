@@ -1,22 +1,22 @@
 apiVersion: v1
 kind: PersistentVolume
 metadata:
-  name: {{ .Values.sharedData.name }}
+  name: {{ .Values.clientData.name }}
 spec:
   storageClassName: {{ .Values.storageClass.name }}
   capacity:
-    storage: {{ .Values.sharedData.storage }}
+    storage: {{ .Values.clientData.storage }}
   accessModes:
     - ReadWriteOnce
   hostPath: 
-    path: {{ .Values.sharedData.hostPath }}
+    path: {{ .Values.clientData.hostPath }}
 ---
 
 # PersistentVolumeClaim definition
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
-  name: {{ .Values.sharedData.name }}
+  name: {{ .Values.clientData.name }}
   namespace: {{ .Release.Namespace }}
 spec:
   storageClassName: {{ .Values.storageClass.name }}
@@ -24,4 +24,4 @@ spec:
     - ReadWriteOnce
   resources:
     requests:
-      storage: {{ .Values.sharedData.storage }}
+      storage: {{ .Values.clientData.storage }}
