@@ -16,6 +16,9 @@ spec:
       - name: api
         image: "tracebloc/jobs-manager:{{ .Values.jobsManager.tag }}"
         imagePullPolicy: Always
+        volumeMounts:
+          - name: shared-volume
+            mountPath: "/data/shared"
         env:
         - name: CLIENT_PASSWORD
           valueFrom:
@@ -49,6 +52,10 @@ spec:
         {{- end }}
       imagePullSecrets:
       - name: {{ .Values.dockerRegistry.secretName }}
+      volumes:
+        - name: shared-volume
+          persistentVolumeClaim:
+            claimName: {{ .Values.sharedData.name}}
       restartPolicy: Always
       nodeSelector:
         type: system
