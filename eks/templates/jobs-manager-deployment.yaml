@@ -64,7 +64,7 @@ spec:
       volumes:
         - name: shared-volume
           persistentVolumeClaim:
-            claimName: {{ .Values.sharedData.name}}
+            claimName: {{ .Values.clientData.name}}
       restartPolicy: Always
       nodeSelector:
         type: system
