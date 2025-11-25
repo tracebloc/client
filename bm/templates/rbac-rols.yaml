@@ -1,6 +1,6 @@
 {{- if .Values.clusterRole.create }}
-kind: ClusterRole
 apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
 metadata:
   name: {{ .Values.clusterRole.name }}
   annotations:
@@ -9,12 +9,12 @@ metadata:
   labels:
     app.kubernetes.io/managed-by: {{ .Release.Service }}
 rules:
-- apiGroups: ["batch", "metrics.k8s.io", ""]
-  resources: ["jobs", "deployments", "pods", "pods/metrics", "events"]
-  verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["batch", "metrics.k8s.io", ""]
+    resources: ["jobs", "deployments", "pods", "pods/metrics", "events"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
 ---
-kind: ClusterRoleBinding
 apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
 metadata:
   name: {{ .Values.clusterRole.name }}
   annotations:
@@ -30,4 +30,54 @@ roleRef:
   kind: ClusterRole
   name: {{ .Values.clusterRole.name }}
   apiGroup: rbac.authorization.k8s.io
-{{- end }}
+
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: tracebloc-resource-monitor
+  namespace: {{ .Release.Namespace }}
+  annotations:
+    meta.helm.sh/release-name: {{ .Release.Name }}
+    meta.helm.sh/release-namespace: {{ .Release.Namespace }}
+  labels:
+    app.kubernetes.io/managed-by: {{ .Release.Service }}
+    app: tracebloc-resource-monitor
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: tracebloc-resource-monitor
+  annotations:
+    meta.helm.sh/release-name: {{ .Release.Name }}
+    meta.helm.sh/release-namespace: {{ .Release.Namespace }}
+  labels:
+    app.kubernetes.io/managed-by: {{ .Release.Service }}
+    app: tracebloc-resource-monitor
+rules:
+  - apiGroups: [""]
+    resources: ["pods", "pods/log", "nodes", "namespaces"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["metrics.k8s.io"]
+    resources: ["pods", "nodes"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: tracebloc-resource-monitor
+  annotations:
+    meta.helm.sh/release-name: {{ .Release.Name }}
+    meta.helm.sh/release-namespace: {{ .Release.Namespace }}
+  labels:
+    app.kubernetes.io/managed-by: {{ .Release.Service }}
+    app: tracebloc-resource-monitor
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: tracebloc-resource-monitor
+subjects:
+  - kind: ServiceAccount
+    name: tracebloc-resource-monitor
+    namespace: {{ .Release.Namespace }}
+{{- end }} 
