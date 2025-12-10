@@ -10,7 +10,7 @@ metadata:
     app.kubernetes.io/managed-by: {{ .Release.Service }}
 rules:
   - apiGroups: ["batch", "metrics.k8s.io", ""]
-    resources: ["jobs", "deployments", "pods", "pods/metrics", "events"]
+    resources: ["jobs", "deployments", "pods", "pods/metrics", "events", "pods/log", "nodes", "nodes/status", "namespaces"]
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
