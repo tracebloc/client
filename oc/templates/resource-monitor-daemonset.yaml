@@ -20,16 +20,27 @@ spec:
     spec:
       serviceAccountName: tracebloc-resource-monitor
 
+      # Pod Security restricted: runAsNonRoot and seccomp (hostPath still requires namespace exception)
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+
       # Start on all nodes (including tainted/dev/GPU nodes)
       tolerations:
         - operator: "Exists"
 
       containers:
         - name: tracebloc-resource-monitor
-          image: "tracebloc/resource-monitor:{{ .Values.jobsManager.tag | default "prod" }}"
+          image: "docker.io/tracebloc/resource-monitor:{{ .Values.jobsManager.tag | default "prod" }}"
           imagePullPolicy: Always
 
-          # Access host /proc and /sys to read node-level metrics
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+
+          # hostPath required for node metrics; violates PodSecurity restricted. Keep resourceMonitor.enabled: false or relax namespace.
           volumeMounts:
             - name: host-proc
               mountPath: /host/proc

@@ -1,4 +1,6 @@
 {{- if .Values.clusterRole.create }}
+{{- if .Values.clusterRole.useClusterScope }}
+---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
@@ -30,8 +32,60 @@ roleRef:
   kind: ClusterRole
   name: {{ .Values.clusterRole.name }}
   apiGroup: rbac.authorization.k8s.io
-
+{{- else }}
 ---
+# Namespaced RBAC (no cluster-scoped permissions required)
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ .Values.clusterRole.name }}
+  namespace: {{ .Release.Namespace }}
+  annotations:
+    meta.helm.sh/release-name: {{ .Release.Name }}
+    meta.helm.sh/release-namespace: {{ .Release.Namespace }}
+  labels:
+    app.kubernetes.io/managed-by: {{ .Release.Service }}
+rules:
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: [""]
+    resources: ["pods", "events"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: [""]
+    resources: ["pods/log"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["metrics.k8s.io"]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ .Values.clusterRole.name }}
+  namespace: {{ .Release.Namespace }}
+  annotations:
+    meta.helm.sh/release-name: {{ .Release.Name }}
+    meta.helm.sh/release-namespace: {{ .Release.Namespace }}
+  labels:
+    app.kubernetes.io/managed-by: {{ .Release.Service }}
+subjects:
+  - kind: ServiceAccount
+    name: default
+    namespace: {{ .Release.Namespace }}
+roleRef:
+  kind: Role
+  name: {{ .Values.clusterRole.name }}
+  apiGroup: rbac.authorization.k8s.io
+{{- end }}
+{{- end }}
+
+{{- if .Values.resourceMonitor.enabled | default false }}
+---
+# ServiceAccount for resource monitor (created whenever resourceMonitor.enabled, independent of clusterRole.create)
 apiVersion: v1
 kind: ServiceAccount
 metadata:
@@ -43,6 +97,7 @@ metadata:
   labels:
     app.kubernetes.io/managed-by: {{ .Release.Service }}
     app: tracebloc-resource-monitor
+{{- if .Values.clusterRole.useClusterScope | default false }}
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
@@ -80,4 +135,46 @@ subjects:
   - kind: ServiceAccount
     name: tracebloc-resource-monitor
     namespace: {{ .Release.Namespace }}
+{{- else }}
+---
+# Namespaced RBAC for resource monitor (pods in this namespace only; no node metrics)
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: tracebloc-resource-monitor-{{ .Release.Name }}
+  namespace: {{ .Release.Namespace }}
+  annotations:
+    meta.helm.sh/release-name: {{ .Release.Name }}
+    meta.helm.sh/release-namespace: {{ .Release.Namespace }}
+  labels:
+    app.kubernetes.io/managed-by: {{ .Release.Service }}
+    app: tracebloc-resource-monitor
+rules:
+  - apiGroups: [""]
+    resources: ["pods", "pods/log"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["metrics.k8s.io"]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: tracebloc-resource-monitor-{{ .Release.Name }}
+  namespace: {{ .Release.Namespace }}
+  annotations:
+    meta.helm.sh/release-name: {{ .Release.Name }}
+    meta.helm.sh/release-namespace: {{ .Release.Namespace }}
+  labels:
+    app.kubernetes.io/managed-by: {{ .Release.Service }}
+    app: tracebloc-resource-monitor
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: tracebloc-resource-monitor-{{ .Release.Name }}
+subjects:
+  - kind: ServiceAccount
+    name: tracebloc-resource-monitor
+    namespace: {{ .Release.Namespace }}
+{{- end }}
 {{- end }}

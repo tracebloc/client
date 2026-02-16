@@ -15,11 +15,13 @@ spec:
     spec:
       containers:
       - name: api
-        image: "tracebloc/jobs-manager:{{ .Values.jobsManager.tag | default "prod" }}"
+        image: "docker.io/tracebloc/jobs-manager:{{ .Values.jobsManager.tag | default "prod" }}"
         imagePullPolicy: Always
         volumeMounts:
           - name: shared-volume
             mountPath: "/data/shared"
+          - name: logs-volume
+            mountPath: "/data/logs"
         env:
         - name: CLIENT_PASSWORD
           valueFrom:
@@ -41,8 +43,14 @@ spec:
         {{- end }}
         {{- end }}
       - name: pods-monitor-container
-        image: "tracebloc/pods-monitor:{{ .Values.jobsManager.tag | default "prod" }}"
+        image: "docker.io/tracebloc/pods-monitor:{{ .Values.jobsManager.tag | default "prod" }}"
         imagePullPolicy: Always
+        volumeMounts:
+        - name: logs-volume
+          mountPath: "/data/logs"
+        # - name: app-log
+        #   mountPath: "/app/resource-monitor.log"
+        #   subPath: resource-monitor.log
         env:
         - name: CLIENT_PASSWORD
           valueFrom:
@@ -65,6 +73,11 @@ spec:
         - name: shared-volume
           persistentVolumeClaim:
             claimName: {{ .Values.clientData.name}}
+        - name: logs-volume
+          persistentVolumeClaim:
+            claimName: {{ .Values.clientLogsPvc.name }}
+        - name: app-log
+          emptyDir: {}
       restartPolicy: Always
       {{- if .Values.nodeSelector }}
       nodeSelector:

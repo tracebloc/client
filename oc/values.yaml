@@ -56,7 +56,7 @@ clusterRole:
 
 # Resource monitor DaemonSet uses hostPath (violates Pod Security baseline). Set true only if needed and namespace allows it.
 resourceMonitor:
-  enabled: false
+  enabled: true
 
 # Secrets configuration
 secrets:
