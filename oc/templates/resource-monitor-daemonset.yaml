@@ -20,7 +20,7 @@ spec:
     spec:
       serviceAccountName: tracebloc-resource-monitor
 
-      # Pod Security restricted: runAsNonRoot and seccomp (hostPath still requires namespace exception)
+      # Pod-level security context: non-root, seccomp profile enforced
       securityContext:
         runAsNonRoot: true
         seccompProfile:
@@ -40,7 +40,7 @@ spec:
             capabilities:
               drop: ["ALL"]
 
-          # hostPath required for node metrics; violates PodSecurity restricted. Keep resourceMonitor.enabled: false or relax namespace.
+          # hostPath for node metrics — allowed via custom SCC (resource-monitor-scc.yaml)
           volumeMounts:
             - name: host-proc
               mountPath: /host/proc

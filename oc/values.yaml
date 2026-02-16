@@ -54,7 +54,7 @@ clusterRole:
   create: true
   useClusterScope: false
 
-# Resource monitor DaemonSet uses hostPath (violates Pod Security baseline). Set true only if needed and namespace allows it.
+# Resource monitor DaemonSet for node metrics. Creates a custom SCC with hostPath access to /proc and /sys (read-only).
 resourceMonitor:
   enabled: true
 
