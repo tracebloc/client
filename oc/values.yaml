@@ -5,7 +5,6 @@ namespace: <NAMESPACE>
 jobsManager:
   tag: dev
   env:
-    CLIENT_ENV: "dev"
     CLIENT_ID: "<CLIENT_ID>"
     HTTP_PROXY_HOST:
     HTTP_PROXY_PORT:
