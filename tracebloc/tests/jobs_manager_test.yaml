@@ -1,0 +1,105 @@
+suite: Jobs Manager Deployment
+templates:
+  - templates/jobs-manager-deployment.yaml
+set:
+  secrets:
+    create: true
+    clientPassword: "test"
+  dockerRegistry:
+    create: true
+    server: https://index.docker.io/v1/
+    username: test
+    password: test
+    email: test@test.com
+tests:
+  - it: should create a Deployment
+    asserts:
+      - isKind:
+          of: Deployment
+      - equal:
+          path: metadata.name
+          value: RELEASE-NAME-jobs-manager
+
+  - it: should have standard labels
+    asserts:
+      - exists:
+          path: metadata.labels["app.kubernetes.io/name"]
+      - exists:
+          path: metadata.labels["app.kubernetes.io/instance"]
+      - exists:
+          path: metadata.labels["helm.sh/chart"]
+
+  - it: should use dedicated service account
+    asserts:
+      - equal:
+          path: spec.template.spec.serviceAccountName
+          value: RELEASE-NAME-jobs-manager
+
+  - it: should have security context
+    asserts:
+      - equal:
+          path: spec.template.spec.securityContext.runAsNonRoot
+          value: true
+      - equal:
+          path: spec.template.spec.securityContext.seccompProfile.type
+          value: RuntimeDefault
+
+  - it: should drop all capabilities on api container
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].securityContext.allowPrivilegeEscalation
+          value: false
+      - contains:
+          path: spec.template.spec.containers[0].securityContext.capabilities.drop
+          content: "ALL"
+
+  - it: should have resource limits on api container
+    asserts:
+      - isNotEmpty:
+          path: spec.template.spec.containers[0].resources.requests
+      - isNotEmpty:
+          path: spec.template.spec.containers[0].resources.limits
+
+  - it: should reference secret via helper
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].env[0].valueFrom.secretKeyRef.name
+          value: RELEASE-NAME-secrets
+
+  - it: should use docker.io registry by default
+    asserts:
+      - matchRegex:
+          path: spec.template.spec.containers[0].image
+          pattern: "^docker\\.io/tracebloc/"
+
+  - it: should use custom registry when overridden
+    set:
+      imageRegistry: ghcr.io
+    asserts:
+      - matchRegex:
+          path: spec.template.spec.containers[0].image
+          pattern: "^ghcr\\.io/tracebloc/"
+
+  - it: should set JOB_IMAGE_HOST when imageRegistry is set
+    set:
+      imageRegistry: docker.io
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: JOB_IMAGE_HOST
+            value: "docker.io/"
+
+  - it: should render nodeSelector when set
+    set:
+      nodeSelector:
+        type: system
+    asserts:
+      - equal:
+          path: spec.template.spec.nodeSelector.type
+          value: system
+
+  - it: should not render nodeSelector when not set
+    asserts:
+      - isNull:
+          path: spec.template.spec.nodeSelector

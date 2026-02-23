@@ -1,0 +1,107 @@
+suite: RBAC
+templates:
+  - templates/rbac.yaml
+set:
+  secrets:
+    create: true
+    clientPassword: "test"
+  dockerRegistry:
+    create: true
+    server: https://index.docker.io/v1/
+    username: test
+    password: test
+    email: test@test.com
+tests:
+  - it: should create ServiceAccount
+    set:
+      clusterRole:
+        create: true
+        name: jobs-manager-rbac
+        useClusterScope: true
+    documentIndex: 0
+    asserts:
+      - isKind:
+          of: ServiceAccount
+      - equal:
+          path: metadata.name
+          value: RELEASE-NAME-jobs-manager
+
+  - it: should create ClusterRole when useClusterScope is true
+    set:
+      clusterRole:
+        create: true
+        name: jobs-manager-rbac
+        useClusterScope: true
+    documentIndex: 1
+    asserts:
+      - isKind:
+          of: ClusterRole
+      - equal:
+          path: metadata.name
+          value: jobs-manager-rbac
+
+  - it: should create ClusterRoleBinding when useClusterScope is true
+    set:
+      clusterRole:
+        create: true
+        name: jobs-manager-rbac
+        useClusterScope: true
+    documentIndex: 2
+    asserts:
+      - isKind:
+          of: ClusterRoleBinding
+      - equal:
+          path: subjects[0].name
+          value: RELEASE-NAME-jobs-manager
+
+  - it: should create Role when useClusterScope is false
+    set:
+      clusterRole:
+        create: true
+        name: jobs-manager-rbac
+        useClusterScope: false
+    documentIndex: 1
+    asserts:
+      - isKind:
+          of: Role
+
+  - it: should create RoleBinding when useClusterScope is false
+    set:
+      clusterRole:
+        create: true
+        name: jobs-manager-rbac
+        useClusterScope: false
+    documentIndex: 2
+    asserts:
+      - isKind:
+          of: RoleBinding
+
+  - it: should not create RBAC when create is false
+    set:
+      clusterRole:
+        create: false
+        name: jobs-manager-rbac
+    asserts:
+      - hasDocuments:
+          count: 0
+
+  - it: should have least-privilege rules for jobs-manager
+    set:
+      clusterRole:
+        create: true
+        name: jobs-manager-rbac
+        useClusterScope: true
+    documentIndex: 1
+    asserts:
+      - contains:
+          path: rules
+          content:
+            apiGroups: ["batch"]
+            resources: ["jobs"]
+            verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+      - contains:
+          path: rules
+          content:
+            apiGroups: [""]
+            resources: ["pods", "pods/log", "events"]
+            verbs: ["get", "list", "watch"]

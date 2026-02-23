@@ -57,7 +57,7 @@ spec:
         - name: mysql-logs
           mountPath: /var/log/mysql/
       imagePullSecrets:
-      - name: {{ .Values.dockerRegistry.secretName }}
+      - name: {{ include "tracebloc.registrySecretName" . }}
       {{- if .Values.nodeSelector }}
       nodeSelector:
         {{- toYaml .Values.nodeSelector | nindent 8 }}

@@ -25,14 +25,14 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{ .Release.Name }}-jobs-manager
 {{- end }}
 
+{{- define "tracebloc.registrySecretName" -}}
+{{ .Release.Name }}-regcred
+{{- end }}
+
 {{/*
-Image reference with optional registry prefix.
+Image reference — defaults to docker.io when no registry is provided.
 Usage: {{ include "tracebloc.image" (dict "repository" "tracebloc/jobs-manager" "tag" .Values.jobsManager.tag "registry" .Values.imageRegistry) }}
 */}}
 {{- define "tracebloc.image" -}}
-{{- if .registry -}}
-{{ .registry }}/{{ .repository }}:{{ .tag | default "prod" }}
-{{- else -}}
-{{ .repository }}:{{ .tag | default "prod" }}
-{{- end }}
+{{ .registry | default "docker.io" }}/{{ .repository }}:{{ .tag | default "prod" }}
 {{- end }}

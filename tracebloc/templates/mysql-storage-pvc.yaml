@@ -1,14 +1,16 @@
+{{- $name := .Values.mysqlPvc.name | default "mysql-pvc" -}}
+{{- $storage := .Values.mysqlPvc.storage | default "2Gi" -}}
 {{- if .Values.hostPath.enabled }}
 apiVersion: v1
 kind: PersistentVolume
 metadata:
-  name: {{ .Values.mysqlPvc.name }}
+  name: {{ $name }}
   labels:
     {{- include "tracebloc.labels" . | nindent 4 }}
 spec:
   storageClassName: {{ .Values.storageClass.name }}
   capacity:
-    storage: {{ .Values.mysqlPvc.storage }}
+    storage: {{ $storage }}
   accessModes:
     - ReadWriteOnce
   hostPath:
@@ -18,7 +20,7 @@ spec:
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
-  name: {{ .Values.mysqlPvc.name }}
+  name: {{ $name }}
   namespace: {{ .Release.Namespace }}
   annotations:
     "helm.sh/resource-policy": keep
@@ -30,4 +32,4 @@ spec:
     - {{ .Values.pvcAccessMode | default "ReadWriteMany" }}
   resources:
     requests:
-      storage: {{ .Values.mysqlPvc.storage }}
+      storage: {{ $storage }}

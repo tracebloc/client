@@ -1,0 +1,135 @@
+suite: Platform Conditionals
+templates:
+  - templates/shared-images-pvc.yaml
+  - templates/init-container.yaml
+  - templates/resource-monitor-scc.yaml
+  - templates/storage-class.yaml
+set:
+  secrets:
+    create: true
+    clientPassword: "test"
+  dockerRegistry:
+    create: true
+    server: https://index.docker.io/v1/
+    username: test
+    password: test
+    email: test@test.com
+  storageClass:
+    create: false
+    name: test-sc
+tests:
+  # --- hostPath (bare-metal) ---
+  - it: should create PV + PVC when hostPath is enabled
+    template: templates/shared-images-pvc.yaml
+    set:
+      hostPath:
+        enabled: true
+        dataPath: /mnt/data
+        logsPath: /mnt/logs
+        mysqlPath: /mnt/mysql
+    asserts:
+      - hasDocuments:
+          count: 2
+      - isKind:
+          of: PersistentVolume
+        documentIndex: 0
+      - isKind:
+          of: PersistentVolumeClaim
+        documentIndex: 1
+
+  - it: should create only PVC when hostPath is disabled
+    template: templates/shared-images-pvc.yaml
+    set:
+      hostPath:
+        enabled: false
+    asserts:
+      - hasDocuments:
+          count: 1
+      - isKind:
+          of: PersistentVolumeClaim
+
+  - it: should have keep annotation on PVC
+    template: templates/shared-images-pvc.yaml
+    asserts:
+      - equal:
+          path: metadata.annotations["helm.sh/resource-policy"]
+          value: keep
+
+  # --- init Job ---
+  - it: should create init Job for bare-metal
+    template: templates/init-container.yaml
+    set:
+      hostPath:
+        enabled: true
+        dataPath: /mnt/data
+        logsPath: /mnt/logs
+        mysqlPath: /mnt/mysql
+        initJob: true
+    asserts:
+      - hasDocuments:
+          count: 1
+      - isKind:
+          of: Job
+
+  - it: should not create init Job when hostPath disabled
+    template: templates/init-container.yaml
+    set:
+      hostPath:
+        enabled: false
+    asserts:
+      - hasDocuments:
+          count: 0
+
+  # --- SCC (OpenShift) ---
+  - it: should create SCC when openshift.scc.enabled
+    template: templates/resource-monitor-scc.yaml
+    set:
+      resourceMonitor:
+        enabled: true
+      openshift:
+        scc:
+          enabled: true
+    asserts:
+      - hasDocuments:
+          count: 3
+      - isKind:
+          of: SecurityContextConstraints
+        documentIndex: 0
+
+  - it: should not create SCC when openshift.scc.enabled is false
+    template: templates/resource-monitor-scc.yaml
+    set:
+      resourceMonitor:
+        enabled: true
+      openshift:
+        scc:
+          enabled: false
+    asserts:
+      - hasDocuments:
+          count: 0
+
+  # --- StorageClass ---
+  - it: should create StorageClass when create is true
+    template: templates/storage-class.yaml
+    set:
+      storageClass:
+        create: true
+        name: test-sc
+        provisioner: file.csi.azure.com
+        allowVolumeExpansion: true
+    asserts:
+      - isKind:
+          of: StorageClass
+      - equal:
+          path: provisioner
+          value: file.csi.azure.com
+
+  - it: should not create StorageClass when create is false
+    template: templates/storage-class.yaml
+    set:
+      storageClass:
+        create: false
+        name: existing-sc
+    asserts:
+      - hasDocuments:
+          count: 0

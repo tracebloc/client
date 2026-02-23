@@ -1,0 +1,71 @@
+suite: MySQL
+templates:
+  - templates/mysql-deployment.yaml
+  - templates/mysql-configmap.yaml
+  - templates/mysql-service.yaml
+set:
+  secrets:
+    create: true
+    clientPassword: "test"
+  dockerRegistry:
+    create: true
+    server: https://index.docker.io/v1/
+    username: test
+    password: test
+    email: test@test.com
+tests:
+  - it: should create MySQL Deployment
+    template: templates/mysql-deployment.yaml
+    asserts:
+      - isKind:
+          of: Deployment
+      - equal:
+          path: metadata.name
+          value: mysql-client
+      - equal:
+          path: spec.strategy.type
+          value: Recreate
+
+  - it: should have liveness and readiness probes
+    template: templates/mysql-deployment.yaml
+    asserts:
+      - isNotEmpty:
+          path: spec.template.spec.containers[0].livenessProbe
+      - isNotEmpty:
+          path: spec.template.spec.containers[0].readinessProbe
+      - equal:
+          path: spec.template.spec.containers[0].livenessProbe.exec.command[0]
+          value: mysqladmin
+
+  - it: should have resource limits
+    template: templates/mysql-deployment.yaml
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].resources.requests.memory
+          value: 256Mi
+      - equal:
+          path: spec.template.spec.containers[0].resources.limits.memory
+          value: 512Mi
+
+  - it: should create ConfigMap with MySQL config
+    template: templates/mysql-configmap.yaml
+    asserts:
+      - isKind:
+          of: ConfigMap
+      - equal:
+          path: metadata.name
+          value: mysql-client-config
+      - isNotEmpty:
+          path: data["mysql.cnf"]
+
+  - it: should create MySQL Service on port 3306
+    template: templates/mysql-service.yaml
+    asserts:
+      - isKind:
+          of: Service
+      - equal:
+          path: spec.ports[0].port
+          value: 3306
+      - equal:
+          path: spec.selector.app
+          value: mysql-client

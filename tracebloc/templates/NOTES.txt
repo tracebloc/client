@@ -10,9 +10,7 @@ Components:
 Service Account: {{ include "tracebloc.serviceAccountName" . }}
 Secret:          {{ include "tracebloc.secretName" . }}
 RBAC scope:      {{ if .Values.clusterRole.useClusterScope }}Cluster{{ else }}Namespace{{ end }}
-{{- if .Values.imageRegistry }}
-Image registry:  {{ .Values.imageRegistry }}
-{{- end }}
+Image registry:  {{ .Values.imageRegistry | default "docker.io" }}
 {{- if .Values.hostPath.enabled }}
 Storage:         hostPath (bare-metal)
 {{- else }}
@@ -23,9 +21,9 @@ OpenShift SCC:   tracebloc-resource-monitor-{{ .Release.Name }}
 {{- end }}
 
 PVCs (protected with helm.sh/resource-policy: keep):
-  - {{ .Values.clientData.name }}     ({{ .Values.clientData.storage }})
-  - {{ .Values.clientLogsPvc.name }}  ({{ .Values.clientLogsPvc.storage }})
-  - {{ .Values.mysqlPvc.name }}       ({{ .Values.mysqlPvc.storage }})
+  - {{ .Values.clientData.name | default "client-pvc" }}     ({{ .Values.clientData.storage | default "50Gi" }})
+  - {{ .Values.clientLogsPvc.name | default "client-logs-pvc" }}  ({{ .Values.clientLogsPvc.storage | default "10Gi" }})
+  - {{ .Values.mysqlPvc.name | default "mysql-pvc" }}       ({{ .Values.mysqlPvc.storage | default "2Gi" }})
 
 Verify the deployment:
   kubectl get pods -n {{ .Release.Namespace }} -l app.kubernetes.io/instance={{ .Release.Name }}

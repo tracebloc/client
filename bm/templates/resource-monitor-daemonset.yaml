@@ -82,7 +82,7 @@ spec:
       terminationGracePeriodSeconds: 15
 
       imagePullSecrets:
-      - name: {{ .Values.dockerRegistry.secretName }}
+      - name: {{ include "tracebloc.registrySecretName" . }}
       volumes:
         - name: host-proc
           hostPath:

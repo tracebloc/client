@@ -47,15 +47,13 @@ spec:
               name: {{ include "tracebloc.secretName" . }}
               key: CLIENT_PASSWORD
         - name: CLIENT_PVC
-          value: {{ .Values.clientData.name | quote }}
+          value: {{ .Values.clientData.name | default "client-pvc" | quote }}
         - name: CLIENT_LOGS_PVC
-          value: {{ .Values.clientLogsPvc.name | quote }}
+          value: {{ .Values.clientLogsPvc.name | default "client-logs-pvc" | quote }}
         - name: MYSQL_HOST
           value: {{ .Values.mysql.name | quote }}
-        {{- if .Values.imageRegistry }}
         - name: JOB_IMAGE_HOST
-          value: "{{ .Values.imageRegistry }}/"
-        {{- end }}
+          value: "{{ .Values.imageRegistry | default "docker.io" }}/"
         - name: CLIENT_ENV
           value: {{ .Values.jobsManager.env.CLIENT_ENV | default "prod" | quote }}
         {{- range $key, $value := .Values.jobsManager.env }}
@@ -88,11 +86,9 @@ spec:
               name: {{ include "tracebloc.secretName" . }}
               key: CLIENT_PASSWORD
         - name: CLIENT_LOGS_PVC
-          value: {{ .Values.clientLogsPvc.name | quote }}
-        {{- if .Values.imageRegistry }}
+          value: {{ .Values.clientLogsPvc.name | default "client-logs-pvc" | quote }}
         - name: JOB_IMAGE_HOST
-          value: "{{ .Values.imageRegistry }}/"
-        {{- end }}
+          value: "{{ .Values.imageRegistry | default "docker.io" }}/"
         - name: CLIENT_ENV
           value: {{ .Values.jobsManager.env.CLIENT_ENV | default "prod" | quote }}
         {{- range $key, $value := .Values.jobsManager.env }}
@@ -102,14 +98,14 @@ spec:
         {{- end }}
         {{- end }}
       imagePullSecrets:
-      - name: {{ .Values.dockerRegistry.secretName }}
+      - name: {{ include "tracebloc.registrySecretName" . }}
       volumes:
         - name: shared-volume
           persistentVolumeClaim:
-            claimName: {{ .Values.clientData.name }}
+            claimName: {{ .Values.clientData.name | default "client-pvc" }}
         - name: logs-volume
           persistentVolumeClaim:
-            claimName: {{ .Values.clientLogsPvc.name }}
+            claimName: {{ .Values.clientLogsPvc.name | default "client-logs-pvc" }}
       restartPolicy: Always
       {{- if .Values.nodeSelector }}
       nodeSelector:

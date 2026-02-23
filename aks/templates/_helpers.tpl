@@ -24,3 +24,7 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{- define "tracebloc.serviceAccountName" -}}
 {{ .Release.Name }}-jobs-manager
 {{- end }}
+
+{{- define "tracebloc.registrySecretName" -}}
+{{ .Release.Name }}-regcred
+{{- end }}
