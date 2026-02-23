@@ -7,8 +7,6 @@ jobsManager:
   tag: dev
   # Environment variables for the jobs manager
   env:
-    # Environment setting (e.g., "dev", "staging", "prod")
-    CLIENT_ENV: "dev"
     # Client ID for client authentication
     CLIENT_ID: "<CLIENT_ID>"
     # proxy hostname.

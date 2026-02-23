@@ -1,0 +1,108 @@
+{{- if .Values.resourceMonitor.enabled | default false }}
+---
+# Custom SCC that allows hostPath (read-only /proc, /sys) for the resource-monitor DaemonSet.
+# Everything else stays locked down: non-root, no privilege escalation, all caps dropped, seccomp enforced.
+# This is the standard pattern used by node-exporter, cAdvisor, and NVIDIA DCGM.
+apiVersion: security.openshift.io/v1
+kind: SecurityContextConstraints
+metadata:
+  name: tracebloc-resource-monitor-{{ .Release.Name }}
+  annotations:
+    meta.helm.sh/release-name: {{ .Release.Name }}
+    meta.helm.sh/release-namespace: {{ .Release.Namespace }}
+    kubernetes.io/description: >-
+      Minimal SCC for tracebloc-resource-monitor DaemonSet.
+      Allows read-only hostPath mounts to /proc and /sys for node metrics collection.
+  labels:
+    app.kubernetes.io/managed-by: {{ .Release.Service }}
+    app: tracebloc-resource-monitor
+
+# --- Privilege controls (all locked down) ---
+allowPrivilegedContainer: false
+allowPrivilegeEscalation: false
+
+# --- Capabilities ---
+allowedCapabilities: []
+defaultAddCapabilities: []
+requiredDropCapabilities:
+  - ALL
+
+# --- Host access ---
+allowHostNetwork: false
+allowHostPorts: false
+allowHostPID: false
+allowHostIPC: false
+
+# --- hostPath: this is the OpenShift-specific toggle (must be true for hostPath volumes) ---
+allowHostDirVolumePlugin: true
+
+# --- Volume types (hostPath + standard projected types) ---
+volumes:
+  - hostPath
+  - configMap
+  - downwardAPI
+  - emptyDir
+  - persistentVolumeClaim
+  - projected
+  - secret
+
+# --- User / group ---
+runAsUser:
+  type: MustRunAsNonRoot
+seLinuxContext:
+  type: MustRunAs
+fsGroup:
+  type: RunAsAny
+supplementalGroups:
+  type: RunAsAny
+
+# --- Seccomp ---
+seccompProfiles:
+  - runtime/default
+
+# --- Read-only root filesystem ---
+readOnlyRootFilesystem: false
+
+# --- SA binding via users field (traditional approach) ---
+users:
+  - system:serviceaccount:{{ .Release.Namespace }}:tracebloc-resource-monitor
+groups: []
+---
+# RBAC-based SCC binding (modern OpenShift 4.x recommended approach).
+# This ClusterRole + ClusterRoleBinding grants the SA the "use" verb on the custom SCC,
+# which is the reliable way for the SCC admission controller to pick it up.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: tracebloc-resource-monitor-scc-{{ .Release.Name }}
+  annotations:
+    meta.helm.sh/release-name: {{ .Release.Name }}
+    meta.helm.sh/release-namespace: {{ .Release.Namespace }}
+  labels:
+    app.kubernetes.io/managed-by: {{ .Release.Service }}
+    app: tracebloc-resource-monitor
+rules:
+  - apiGroups: ["security.openshift.io"]
+    resources: ["securitycontextconstraints"]
+    resourceNames: ["tracebloc-resource-monitor-{{ .Release.Name }}"]
+    verbs: ["use"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: tracebloc-resource-monitor-scc-{{ .Release.Name }}
+  annotations:
+    meta.helm.sh/release-name: {{ .Release.Name }}
+    meta.helm.sh/release-namespace: {{ .Release.Namespace }}
+  labels:
+    app.kubernetes.io/managed-by: {{ .Release.Service }}
+    app: tracebloc-resource-monitor
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: tracebloc-resource-monitor-scc-{{ .Release.Name }}
+subjects:
+  - kind: ServiceAccount
+    name: tracebloc-resource-monitor
+    namespace: {{ .Release.Namespace }}
+{{- end }}

@@ -1,0 +1,99 @@
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Values.mysql.name }}
+  namespace: {{ .Release.Namespace }}
+spec:
+  selector:
+    matchLabels:
+      app: {{ .Values.mysql.name }}
+  strategy:
+    type: Recreate
+  replicas: 1
+  template:
+    metadata:
+      labels:
+        app: {{ .Values.mysql.name }}
+    spec:
+      initContainers:
+      # Create log dir; no runAsUser so OpenShift restricted-v2 SCC assigns UID from namespace range
+      - name: init-mysql-logs
+        image: busybox:1.35
+        command: ['sh', '-c', 'mkdir -p /var/log/mysql']
+        volumeMounts:
+        - name: mysql-logs
+          mountPath: /var/log/mysql/
+      containers:
+      - image: docker.io/tracebloc/mysql-client:latest
+        name: {{ .Values.mysql.name }}
+        resources:
+          requests:
+            memory: "207084Ki"
+            cpu: "50m"
+        ports:
+        - containerPort: 3306
+          name: {{ .Values.mysql.name }}
+        volumeMounts:
+        - name: mysql-persistent-storage
+          mountPath: /var/lib/mysql/
+        - name: mysql-config
+          mountPath: /etc/mysql/conf.d/
+        - name: mysql-logs
+          mountPath: /var/log/mysql/
+      imagePullSecrets:
+      - name: {{ .Values.dockerRegistry.secretName }}
+      {{- if .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml .Values.nodeSelector | nindent 8 }}
+      {{- end }}
+      volumes:
+      - name: mysql-persistent-storage
+        persistentVolumeClaim:
+          claimName: {{ .Values.mysqlPvc.name }}
+      - name: mysql-config
+        configMap:
+          name: {{ .Values.mysql.name }}-config
+      - name: mysql-logs
+        emptyDir: {}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ .Values.mysql.name }}-config
+  namespace: {{ .Release.Namespace }}
+data:
+  mysql.cnf: |
+    [mysqld]
+    # Increase max_allowed_packet to handle large queries/results
+    max_allowed_packet = 256M
+
+    # Increase other relevant settings for better performance
+    innodb_buffer_pool_size = 128M
+    innodb_log_file_size = 64M
+    innodb_log_buffer_size = 16M
+
+    # Connection settings
+    max_connections = 200
+    wait_timeout = 28800
+    interactive_timeout = 28800
+
+    # Character set
+    character-set-server = utf8mb4
+    collation-server = utf8mb4_unicode_ci
+
+    # Error logging
+    log-error = /var/log/mysql/error.log
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Values.mysql.name }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    run: {{ .Values.mysql.name }}
+spec:
+  ports:
+  - port: 3306
+  selector:
+    app: {{ .Values.mysql.name }}

@@ -9,8 +9,6 @@ jobsManager:
   env:
     # Client ID
     CLIENT_ID: "<CLIENT_ID>"
-    # Client ENV
-    CLIENT_ENV: "dev"
     # Optional: proxy hostname.
     HTTP_PROXY_HOST:
     # Optional: proxy port.

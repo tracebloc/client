@@ -1,0 +1,97 @@
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: tracebloc-resource-monitor
+  namespace: {{ .Release.Namespace }}
+  annotations:
+    meta.helm.sh/release-name: {{ .Release.Name }}
+    meta.helm.sh/release-namespace: {{ .Release.Namespace }}
+  labels:
+    app.kubernetes.io/managed-by: {{ .Release.Service }}
+    app: tracebloc-resource-monitor
+spec:
+  selector:
+    matchLabels:
+      app: tracebloc-resource-monitor
+  template:
+    metadata:
+      labels:
+        app: tracebloc-resource-monitor
+    spec:
+      serviceAccountName: tracebloc-resource-monitor
+
+      # Pod-level security context: non-root, seccomp profile enforced
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+
+      # Start on all nodes (including tainted/dev/GPU nodes)
+      tolerations:
+        - operator: "Exists"
+
+      containers:
+        - name: tracebloc-resource-monitor
+          image: "docker.io/tracebloc/resource-monitor:{{ .Values.jobsManager.tag | default "prod" }}"
+          imagePullPolicy: Always
+
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+
+          # hostPath for node metrics — allowed via custom SCC (resource-monitor-scc.yaml)
+          volumeMounts:
+            - name: host-proc
+              mountPath: /host/proc
+              readOnly: true
+            - name: host-sys
+              mountPath: /host/sys
+              readOnly: true
+
+          env:
+            - name: NVIDIA_VISIBLE_DEVICES
+              value: "all"
+            - name: NVIDIA_DRIVER_CAPABILITIES
+              value: "utility"
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+            - name: NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: MONITOR_INTERVAL
+              value: "30"
+            - name: CLIENT_ENV
+              value: {{ .Values.jobsManager.env.CLIENT_ENV | default "prod" | quote }}
+            - name: CLIENT_ID
+              value: {{ .Values.jobsManager.env.CLIENT_ID | quote }}
+            - name: CLIENT_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: tracebloc-secrets
+                  key: CLIENT_PASSWORD
+
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              cpu: 200m
+              memory: 256Mi
+
+      terminationGracePeriodSeconds: 15
+
+      imagePullSecrets:
+      - name: {{ .Values.dockerRegistry.secretName }}
+      volumes:
+        - name: host-proc
+          hostPath:
+            path: /proc
+            type: Directory
+        - name: host-sys
+          hostPath:
+            path: /sys
+            type: Directory
