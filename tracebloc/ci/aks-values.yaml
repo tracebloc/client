@@ -1,0 +1,28 @@
+# AKS (Azure Kubernetes Service) platform values
+storageClass:
+  create: true
+  provisioner: file.csi.azure.com
+  parameters:
+    skuName: Standard_LRS
+  mountOptions:
+    - dir_mode=0750
+    - file_mode=0640
+    - uid=999
+    - gid=999
+    - mfsymlinks
+    - cache=strict
+    - actimeo=30
+
+clusterRole:
+  useClusterScope: true
+
+nodeSelector:
+  type: system
+
+secrets:
+  clientPassword: "ci-test-password"
+
+dockerRegistry:
+  username: ci-test
+  password: ci-test
+  email: ci@test.com

@@ -71,7 +71,7 @@ spec:
             - name: CLIENT_PASSWORD
               valueFrom:
                 secretKeyRef:
-                  name: tracebloc-secrets
+                  name: {{ include "tracebloc.secretName" . }}
                   key: CLIENT_PASSWORD
 
           resources:

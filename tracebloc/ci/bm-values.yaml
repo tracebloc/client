@@ -1,0 +1,32 @@
+# Bare-metal platform values
+hostPath:
+  enabled: true
+  dataPath: /mnt/tracebloc/shared_data
+  logsPath: /mnt/tracebloc/logs
+  mysqlPath: /mnt/tracebloc/mysql
+  initJob: true
+
+pvcAccessMode: ReadWriteOnce
+
+storageClass:
+  create: true
+  provisioner: kubernetes.io/no-provisioner
+  mountOptions:
+    - dir_mode=0750
+    - file_mode=0640
+    - uid=1000
+    - gid=1000
+
+clusterRole:
+  useClusterScope: true
+
+nodeSelector:
+  type: system
+
+secrets:
+  clientPassword: "ci-test-password"
+
+dockerRegistry:
+  username: ci-test
+  password: ci-test
+  email: ci@test.com

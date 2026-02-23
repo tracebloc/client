@@ -23,6 +23,7 @@ metadata:
   annotations:
     "helm.sh/hook": post-install,post-upgrade
     "helm.sh/hook-weight": "0"
+    "helm.sh/resource-policy": keep
 spec:
   storageClassName: {{ .Values.storageClass.name }}
   accessModes:

@@ -1,0 +1,33 @@
+{{- if .Values.hostPath.enabled }}
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: {{ .Values.mysqlPvc.name }}
+  labels:
+    {{- include "tracebloc.labels" . | nindent 4 }}
+spec:
+  storageClassName: {{ .Values.storageClass.name }}
+  capacity:
+    storage: {{ .Values.mysqlPvc.storage }}
+  accessModes:
+    - ReadWriteOnce
+  hostPath:
+    path: {{ required "hostPath.mysqlPath is required when hostPath.enabled" .Values.hostPath.mysqlPath }}
+---
+{{- end }}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ .Values.mysqlPvc.name }}
+  namespace: {{ .Release.Namespace }}
+  annotations:
+    "helm.sh/resource-policy": keep
+  labels:
+    {{- include "tracebloc.labels" . | nindent 4 }}
+spec:
+  storageClassName: {{ .Values.storageClass.name }}
+  accessModes:
+    - {{ .Values.pvcAccessMode | default "ReadWriteMany" }}
+  resources:
+    requests:
+      storage: {{ .Values.mysqlPvc.storage }}

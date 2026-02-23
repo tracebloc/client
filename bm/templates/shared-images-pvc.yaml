@@ -18,6 +18,8 @@ kind: PersistentVolumeClaim
 metadata:
   name: {{ .Values.clientData.name }}
   namespace: {{ .Release.Namespace }}
+  annotations:
+    "helm.sh/resource-policy": keep
 spec:
   storageClassName: {{ .Values.storageClass.name }}
   accessModes:

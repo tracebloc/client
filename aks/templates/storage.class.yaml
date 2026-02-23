@@ -7,8 +7,8 @@ metadata:
 provisioner: {{ .Values.storageClass.provisioner }}
 allowVolumeExpansion: {{ .Values.storageClass.allowVolumeExpansion }}
 mountOptions:
-  - dir_mode=0777
-  - file_mode=0777
+  - dir_mode=0750
+  - file_mode=0640
   - uid=999
   - gid=999
   - mfsymlinks

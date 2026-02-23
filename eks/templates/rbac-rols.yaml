@@ -1,4 +1,13 @@
 {{- if .Values.clusterRole.create }}
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ include "tracebloc.serviceAccountName" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "tracebloc.labels" . | nindent 4 }}
+---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
@@ -9,9 +18,18 @@ metadata:
   labels:
     app.kubernetes.io/managed-by: {{ .Release.Service }}
 rules:
-  - apiGroups: ["batch", "metrics.k8s.io", ""]
-    resources: ["jobs", "deployments", "pods", "pods/metrics", "events", "pods/log", "nodes", "nodes/status", "namespaces"]
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: [""]
+    resources: ["pods", "pods/log", "events"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["metrics.k8s.io"]
+    resources: ["pods"]
+    verbs: ["get", "list"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
@@ -24,13 +42,12 @@ metadata:
     app.kubernetes.io/managed-by: {{ .Release.Service }}
 subjects:
   - kind: ServiceAccount
-    name: default
+    name: {{ include "tracebloc.serviceAccountName" . }}
     namespace: {{ .Release.Namespace }}
 roleRef:
   kind: ClusterRole
   name: {{ .Values.clusterRole.name }}
   apiGroup: rbac.authorization.k8s.io
-
 ---
 apiVersion: v1
 kind: ServiceAccount
@@ -80,4 +97,4 @@ subjects:
   - kind: ServiceAccount
     name: tracebloc-resource-monitor
     namespace: {{ .Release.Namespace }}
-{{- end }} 
+{{- end }}

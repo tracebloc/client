@@ -1,0 +1,72 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Values.mysql.name }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "tracebloc.labels" . | nindent 4 }}
+    app: {{ .Values.mysql.name }}
+spec:
+  selector:
+    matchLabels:
+      app: {{ .Values.mysql.name }}
+  strategy:
+    type: Recreate
+  replicas: 1
+  template:
+    metadata:
+      labels:
+        app: {{ .Values.mysql.name }}
+    spec:
+      initContainers:
+      - name: init-mysql
+        image: busybox:1.35
+        command: ['sh', '-c', 'mkdir -p /var/log/mysql && chown -R 999:999 /var/log/mysql && chmod -R 755 /var/log/mysql']
+        volumeMounts:
+        - name: mysql-logs
+          mountPath: /var/log/mysql/
+      containers:
+      - image: tracebloc/mysql-client
+        name: {{ .Values.mysql.name }}
+        resources:
+          requests:
+            memory: 256Mi
+            cpu: 100m
+          limits:
+            memory: 512Mi
+            cpu: 500m
+        ports:
+        - containerPort: 3306
+          name: {{ .Values.mysql.name }}
+        livenessProbe:
+          exec:
+            command: ["mysqladmin", "ping", "-h", "localhost"]
+          initialDelaySeconds: 30
+          periodSeconds: 10
+        readinessProbe:
+          exec:
+            command: ["mysqladmin", "ping", "-h", "localhost"]
+          initialDelaySeconds: 10
+          periodSeconds: 5
+        volumeMounts:
+        - name: mysql-persistent-storage
+          mountPath: /var/lib/mysql/
+        - name: mysql-config
+          mountPath: /etc/mysql/conf.d/
+        - name: mysql-logs
+          mountPath: /var/log/mysql/
+      imagePullSecrets:
+      - name: {{ .Values.dockerRegistry.secretName }}
+      {{- if .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml .Values.nodeSelector | nindent 8 }}
+      {{- end }}
+      volumes:
+      - name: mysql-persistent-storage
+        persistentVolumeClaim:
+          claimName: {{ .Values.mysqlPvc.name }}
+      - name: mysql-config
+        configMap:
+          name: {{ .Values.mysql.name }}-config
+      - name: mysql-logs
+        emptyDir: {}

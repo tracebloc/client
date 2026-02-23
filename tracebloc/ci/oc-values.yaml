@@ -1,0 +1,24 @@
+# OpenShift platform values
+imageRegistry: docker.io
+
+storageClass:
+  create: false
+  name: ocs-storagecluster-cephfs
+
+clusterRole:
+  useClusterScope: false
+
+resourceMonitor:
+  enabled: true
+
+openshift:
+  scc:
+    enabled: true
+
+secrets:
+  clientPassword: "ci-test-password"
+
+dockerRegistry:
+  username: ci-test
+  password: ci-test
+  email: ci@test.com

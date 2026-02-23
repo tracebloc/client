@@ -3,6 +3,8 @@ kind: Deployment
 metadata:
   name: {{ .Release.Name }}-jobs-manager
   namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "tracebloc.labels" . | nindent 4 }}
 spec:
   selector:
     matchLabels:
@@ -13,10 +15,22 @@ spec:
       labels:
         app: manager
     spec:
+      serviceAccountName: {{ include "tracebloc.serviceAccountName" . }}
       containers:
       - name: api
         image: "docker.io/tracebloc/jobs-manager:{{ .Values.jobsManager.tag | default "prod" }}"
         imagePullPolicy: Always
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop: ["ALL"]
+        resources:
+          requests:
+            cpu: 100m
+            memory: 256Mi
+          limits:
+            cpu: 500m
+            memory: 512Mi
         volumeMounts:
           - name: shared-volume
             mountPath: "/data/shared"
@@ -26,7 +40,7 @@ spec:
         - name: CLIENT_PASSWORD
           valueFrom:
             secretKeyRef:
-              name: tracebloc-secrets
+              name: {{ include "tracebloc.secretName" . }}
               key: CLIENT_PASSWORD
         - name: CLIENT_PVC
           value: "{{ .Values.clientData.name}}"
@@ -39,7 +53,7 @@ spec:
         - name: CLIENT_ENV
           value: {{ .Values.jobsManager.env.CLIENT_ENV | default "prod" | quote }}
         {{- range $key, $value := .Values.jobsManager.env }}
-        {{- if ne $key "CLIENT_ENV" }}
+        {{- if and (ne $key "CLIENT_ENV") $value }}
         - name: {{ $key }}
           value: {{ $value | quote }}
         {{- end }}
@@ -47,6 +61,17 @@ spec:
       - name: pods-monitor-container
         image: "docker.io/tracebloc/pods-monitor:{{ .Values.jobsManager.tag | default "prod" }}"
         imagePullPolicy: Always
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop: ["ALL"]
+        resources:
+          requests:
+            cpu: 50m
+            memory: 128Mi
+          limits:
+            cpu: 200m
+            memory: 256Mi
         volumeMounts:
         - name: logs-volume
           mountPath: "/data/logs"
@@ -57,7 +82,7 @@ spec:
         - name: CLIENT_PASSWORD
           valueFrom:
             secretKeyRef:
-              name: tracebloc-secrets
+              name: {{ include "tracebloc.secretName" . }}
               key: CLIENT_PASSWORD
         - name: CLIENT_LOGS_PVC
           value: "{{ .Values.clientLogsPvc.name}}"
@@ -66,7 +91,7 @@ spec:
         - name: CLIENT_ENV
           value: {{ .Values.jobsManager.env.CLIENT_ENV | default "prod" | quote }}
         {{- range $key, $value := .Values.jobsManager.env }}
-        {{- if ne $key "CLIENT_ENV" }}
+        {{- if and (ne $key "CLIENT_ENV") $value }}
         - name: {{ $key }}
           value: {{ $value | quote }}
         {{- end }}

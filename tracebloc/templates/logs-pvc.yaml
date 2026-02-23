@@ -1,0 +1,33 @@
+{{- if .Values.hostPath.enabled }}
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: {{ .Values.clientLogsPvc.name }}
+  labels:
+    {{- include "tracebloc.labels" . | nindent 4 }}
+spec:
+  storageClassName: {{ .Values.storageClass.name }}
+  capacity:
+    storage: {{ .Values.clientLogsPvc.storage }}
+  accessModes:
+    - ReadWriteOnce
+  hostPath:
+    path: {{ required "hostPath.logsPath is required when hostPath.enabled" .Values.hostPath.logsPath }}
+---
+{{- end }}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ .Values.clientLogsPvc.name }}
+  namespace: {{ .Release.Namespace }}
+  annotations:
+    "helm.sh/resource-policy": keep
+  labels:
+    {{- include "tracebloc.labels" . | nindent 4 }}
+spec:
+  storageClassName: {{ .Values.storageClass.name }}
+  accessModes:
+    - {{ .Values.pvcAccessMode | default "ReadWriteMany" }}
+  resources:
+    requests:
+      storage: {{ .Values.clientLogsPvc.storage }}
