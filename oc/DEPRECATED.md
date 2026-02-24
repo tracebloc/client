@@ -9,7 +9,6 @@ The unified chart supports AKS, EKS, bare-metal, and OpenShift from a single set
 See [`tracebloc/MIGRATION.md`](../tracebloc/MIGRATION.md) for step-by-step migration instructions.
 
 Key changes for OpenShift:
-- Set `imageRegistry: docker.io` for explicit registry prefix
 - Set `clusterRole.useClusterScope: false` for namespace-scoped RBAC
 - Set `openshift.scc.enabled: true` for the resource monitor SCC
 

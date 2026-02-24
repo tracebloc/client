@@ -31,7 +31,7 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 
 {{/*
 Image reference — defaults to docker.io when no registry is provided.
-Usage: {{ include "tracebloc.image" (dict "repository" "tracebloc/jobs-manager" "tag" .Values.jobsManager.tag "registry" .Values.imageRegistry) }}
+Usage: {{ include "tracebloc.image" (dict "repository" "tracebloc/jobs-manager" "tag" .Values.jobsManager.tag "registry" "docker.io") }}
 */}}
 {{- define "tracebloc.image" -}}
 {{ .registry | default "docker.io" }}/{{ .repository }}:{{ .tag | default "prod" }}

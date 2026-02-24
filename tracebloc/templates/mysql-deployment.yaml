@@ -18,6 +18,7 @@ spec:
       labels:
         app: {{ .Values.mysql.name }}
     spec:
+      terminationGracePeriodSeconds: 60
       initContainers:
       - name: init-mysql-logs
         image: busybox:1.35
@@ -26,7 +27,7 @@ spec:
         - name: mysql-logs
           mountPath: /var/log/mysql/
       containers:
-      - image: {{ include "tracebloc.image" (dict "repository" "tracebloc/mysql-client" "tag" "latest" "registry" .Values.imageRegistry) | quote }}
+      - image: {{ include "tracebloc.image" (dict "repository" "tracebloc/mysql-client" "tag" "latest" "registry" "docker.io") | quote }}
         name: {{ .Values.mysql.name }}
         resources:
           requests:
@@ -57,10 +58,6 @@ spec:
           mountPath: /var/log/mysql/
       imagePullSecrets:
       - name: {{ include "tracebloc.registrySecretName" . }}
-      {{- if .Values.nodeSelector }}
-      nodeSelector:
-        {{- toYaml .Values.nodeSelector | nindent 8 }}
-      {{- end }}
       volumes:
       - name: mysql-persistent-storage
         persistentVolumeClaim:

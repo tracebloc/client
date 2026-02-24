@@ -28,7 +28,7 @@ spec:
         - operator: "Exists"
       containers:
         - name: tracebloc-resource-monitor
-          image: {{ include "tracebloc.image" (dict "repository" "tracebloc/resource-monitor" "tag" .Values.jobsManager.tag "registry" .Values.imageRegistry) | quote }}
+          image: {{ include "tracebloc.image" (dict "repository" "tracebloc/resource-monitor" "tag" .Values.jobsManager.tag "registry" "docker.io") | quote }}
           imagePullPolicy: Always
           securityContext:
             allowPrivilegeEscalation: false

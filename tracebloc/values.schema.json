@@ -4,11 +4,6 @@
   "type": "object",
   "required": ["jobsManager", "mysql", "clusterRole", "secrets", "dockerRegistry"],
   "properties": {
-    "imageRegistry": {
-      "type": "string",
-      "default": "docker.io",
-      "description": "Container registry prefix (defaults to 'docker.io')"
-    },
     "jobsManager": {
       "type": "object",
       "required": ["tag", "env"],
@@ -223,11 +218,6 @@
           }
         }
       }
-    },
-    "nodeSelector": {
-      "type": "object",
-      "additionalProperties": { "type": "string" },
-      "description": "Node selector labels for jobs-manager and MySQL pods"
     },
     "secrets": {
       "type": "object",

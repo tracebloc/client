@@ -37,9 +37,6 @@ storageClass:
 
 clusterRole:
   useClusterScope: true
-
-nodeSelector:
-  type: system
 ```
 
 ### EKS → Unified
@@ -62,9 +59,6 @@ storageClass:
 
 clusterRole:
   useClusterScope: true
-
-nodeSelector:
-  type: system
 ```
 
 ### Bare-Metal → Unified
@@ -101,8 +95,6 @@ clusterRole:
 
 ```yaml
 # values-oc.yaml
-imageRegistry: docker.io
-
 storageClass:
   create: false
   name: ocs-storagecluster-cephfs  # or your existing SC

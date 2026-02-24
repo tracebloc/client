@@ -10,11 +10,17 @@ spec:
     matchLabels:
       app: manager
   replicas: 1
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
   template:
     metadata:
       labels:
         app: manager
     spec:
+      terminationGracePeriodSeconds: 60
       serviceAccountName: {{ include "tracebloc.serviceAccountName" . }}
       securityContext:
         runAsNonRoot: true
@@ -22,7 +28,7 @@ spec:
           type: RuntimeDefault
       containers:
       - name: api
-        image: {{ include "tracebloc.image" (dict "repository" "tracebloc/jobs-manager" "tag" .Values.jobsManager.tag "registry" .Values.imageRegistry) | quote }}
+        image: {{ include "tracebloc.image" (dict "repository" "tracebloc/jobs-manager" "tag" .Values.jobsManager.tag "registry" "docker.io") | quote }}
         imagePullPolicy: Always
         securityContext:
           allowPrivilegeEscalation: false
@@ -53,7 +59,7 @@ spec:
         - name: MYSQL_HOST
           value: {{ .Values.mysql.name | quote }}
         - name: JOB_IMAGE_HOST
-          value: "{{ .Values.imageRegistry | default "docker.io" }}/"
+          value: "docker.io/"
         - name: CLIENT_ENV
           value: {{ .Values.jobsManager.env.CLIENT_ENV | default "prod" | quote }}
         {{- range $key, $value := .Values.jobsManager.env }}
@@ -63,7 +69,7 @@ spec:
         {{- end }}
         {{- end }}
       - name: pods-monitor-container
-        image: {{ include "tracebloc.image" (dict "repository" "tracebloc/pods-monitor" "tag" .Values.jobsManager.tag "registry" .Values.imageRegistry) | quote }}
+        image: {{ include "tracebloc.image" (dict "repository" "tracebloc/pods-monitor" "tag" .Values.jobsManager.tag "registry" "docker.io") | quote }}
         imagePullPolicy: Always
         securityContext:
           allowPrivilegeEscalation: false
@@ -88,7 +94,7 @@ spec:
         - name: CLIENT_LOGS_PVC
           value: {{ .Values.clientLogsPvc.name | default "client-logs-pvc" | quote }}
         - name: JOB_IMAGE_HOST
-          value: "{{ .Values.imageRegistry | default "docker.io" }}/"
+          value: "docker.io/"
         - name: CLIENT_ENV
           value: {{ .Values.jobsManager.env.CLIENT_ENV | default "prod" | quote }}
         {{- range $key, $value := .Values.jobsManager.env }}
@@ -107,7 +113,3 @@ spec:
           persistentVolumeClaim:
             claimName: {{ .Values.clientLogsPvc.name | default "client-logs-pvc" }}
       restartPolicy: Always
-      {{- if .Values.nodeSelector }}
-      nodeSelector:
-        {{- toYaml .Values.nodeSelector | nindent 8 }}
-      {{- end }}

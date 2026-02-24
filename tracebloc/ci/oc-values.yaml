@@ -1,6 +1,4 @@
 # OpenShift platform values
-imageRegistry: docker.io
-
 storageClass:
   create: false
   name: ocs-storagecluster-cephfs

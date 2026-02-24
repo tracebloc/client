@@ -5,9 +5,6 @@
 # Platform-specific behaviour is controlled by the values below.
 # Use per-environment value files (e.g. ci/aks-values.yaml) to override.
 
-# -- Container registry prefix
-imageRegistry: "docker.io"
-
 # -- Jobs manager configuration
 jobsManager:
   tag: dev
@@ -90,10 +87,6 @@ openshift:
   # Create a SecurityContextConstraints allowing hostPath for the resource monitor
   scc:
     enabled: false
-
-# -- Node selector for jobs-manager and MySQL pods
-# nodeSelector:
-#   type: system
 
 # -- Secrets
 secrets:

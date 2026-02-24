@@ -72,17 +72,7 @@ tests:
           path: spec.template.spec.containers[0].image
           pattern: "^docker\\.io/tracebloc/"
 
-  - it: should use custom registry when overridden
-    set:
-      imageRegistry: ghcr.io
-    asserts:
-      - matchRegex:
-          path: spec.template.spec.containers[0].image
-          pattern: "^ghcr\\.io/tracebloc/"
-
-  - it: should set JOB_IMAGE_HOST when imageRegistry is set
-    set:
-      imageRegistry: docker.io
+  - it: should set JOB_IMAGE_HOST to docker.io
     asserts:
       - contains:
           path: spec.template.spec.containers[0].env
@@ -90,16 +80,3 @@ tests:
             name: JOB_IMAGE_HOST
             value: "docker.io/"
 
-  - it: should render nodeSelector when set
-    set:
-      nodeSelector:
-        type: system
-    asserts:
-      - equal:
-          path: spec.template.spec.nodeSelector.type
-          value: system
-
-  - it: should not render nodeSelector when not set
-    asserts:
-      - isNull:
-          path: spec.template.spec.nodeSelector

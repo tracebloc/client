@@ -20,9 +20,6 @@ storageClass:
 clusterRole:
   useClusterScope: true
 
-nodeSelector:
-  type: system
-
 secrets:
   clientPassword: "ci-test-password"
 
