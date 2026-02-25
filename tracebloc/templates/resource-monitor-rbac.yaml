@@ -1,4 +1,4 @@
-{{- if .Values.resourceMonitor.enabled }}
+{{- if ne .Values.resourceMonitor false }}
 ---
 apiVersion: v1
 kind: ServiceAccount
@@ -11,7 +11,7 @@ metadata:
   labels:
     {{- include "tracebloc.labels" . | nindent 4 }}
     app: tracebloc-resource-monitor
-{{- if .Values.clusterRole.useClusterScope }}
+{{- if ne .Values.clusterScope false }}
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole

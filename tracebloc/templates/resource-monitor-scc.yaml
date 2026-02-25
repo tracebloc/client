@@ -1,4 +1,4 @@
-{{- if and .Values.resourceMonitor.enabled .Values.openshift.scc.enabled }}
+{{- if and (ne .Values.resourceMonitor false) .Values.openshift.scc.enabled }}
 ---
 apiVersion: security.openshift.io/v1
 kind: SecurityContextConstraints

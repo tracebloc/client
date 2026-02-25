@@ -1,4 +1,4 @@
-{{- if .Values.resourceMonitor.enabled }}
+{{- if ne .Values.resourceMonitor false }}
 apiVersion: apps/v1
 kind: DaemonSet
 metadata:
@@ -28,7 +28,7 @@ spec:
         - operator: "Exists"
       containers:
         - name: tracebloc-resource-monitor
-          image: {{ include "tracebloc.image" (dict "repository" "tracebloc/resource-monitor" "tag" .Values.jobsManager.tag "registry" "docker.io") | quote }}
+          image: {{ include "tracebloc.image" (dict "repository" "tracebloc/resource-monitor" "tag" .Values.env.CLIENT_ENV "registry" "docker.io") | quote }}
           imagePullPolicy: Always
           securityContext:
             allowPrivilegeEscalation: false
@@ -57,9 +57,12 @@ spec:
             - name: MONITOR_INTERVAL
               value: "30"
             - name: CLIENT_ENV
-              value: {{ .Values.jobsManager.env.CLIENT_ENV | default "prod" | quote }}
+              value: {{ .Values.env.CLIENT_ENV | default "prod" | quote }}
             - name: CLIENT_ID
-              value: {{ .Values.jobsManager.env.CLIENT_ID | quote }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "tracebloc.secretName" . }}
+                  key: CLIENT_ID
             - name: CLIENT_PASSWORD
               valueFrom:
                 secretKeyRef:

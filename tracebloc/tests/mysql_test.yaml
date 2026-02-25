@@ -4,11 +4,9 @@ templates:
   - templates/mysql-configmap.yaml
   - templates/mysql-service.yaml
 set:
-  secrets:
-    create: true
-    clientPassword: "test"
+  clientId: "test-id"
+  clientPassword: "test"
   dockerRegistry:
-    create: true
     server: https://index.docker.io/v1/
     username: test
     password: test

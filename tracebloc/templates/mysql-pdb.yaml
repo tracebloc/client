@@ -1,7 +1,7 @@
 apiVersion: policy/v1
 kind: PodDisruptionBudget
 metadata:
-  name: {{ .Values.mysql.name }}
+  name: mysql-client
   namespace: {{ .Release.Namespace }}
   labels:
     {{- include "tracebloc.labels" . | nindent 4 }}
@@ -9,4 +9,4 @@ spec:
   minAvailable: 1
   selector:
     matchLabels:
-      app: {{ .Values.mysql.name }}
+      app: mysql-client

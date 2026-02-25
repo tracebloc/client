@@ -1,22 +1,22 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: {{ .Values.mysql.name }}
+  name: mysql-client
   namespace: {{ .Release.Namespace }}
   labels:
     {{- include "tracebloc.labels" . | nindent 4 }}
-    app: {{ .Values.mysql.name }}
+    app: mysql-client
 spec:
   selector:
     matchLabels:
-      app: {{ .Values.mysql.name }}
+      app: mysql-client
   strategy:
     type: Recreate
   replicas: 1
   template:
     metadata:
       labels:
-        app: {{ .Values.mysql.name }}
+        app: mysql-client
     spec:
       terminationGracePeriodSeconds: 60
       initContainers:
@@ -28,7 +28,7 @@ spec:
           mountPath: /var/log/mysql/
       containers:
       - image: {{ include "tracebloc.image" (dict "repository" "tracebloc/mysql-client" "tag" "latest" "registry" "docker.io") | quote }}
-        name: {{ .Values.mysql.name }}
+        name: mysql-client
         resources:
           requests:
             memory: 256Mi
@@ -38,7 +38,7 @@ spec:
             cpu: 500m
         ports:
         - containerPort: 3306
-          name: {{ .Values.mysql.name }}
+          name: mysql-client
         livenessProbe:
           exec:
             command: ["mysqladmin", "ping", "-h", "localhost"]
@@ -61,9 +61,9 @@ spec:
       volumes:
       - name: mysql-persistent-storage
         persistentVolumeClaim:
-          claimName: {{ .Values.mysqlPvc.name | default "mysql-pvc" }}
+          claimName: {{ include "tracebloc.mysqlPvc" . }}
       - name: mysql-config
         configMap:
-          name: {{ .Values.mysql.name }}-config
+          name: mysql-client-config
       - name: mysql-logs
         emptyDir: {}

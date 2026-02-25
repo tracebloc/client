@@ -13,11 +13,10 @@ storageClass:
     fileSystemId: fs-0123456789abcdef0
     provisioningMode: efs-ap
 
-clusterRole:
-  useClusterScope: true
+clusterScope: true
 
-secrets:
-  clientPassword: "ci-test-password"
+clientId: "ci-test-id"
+clientPassword: "ci-test-password"
 
 dockerRegistry:
   username: ci-test

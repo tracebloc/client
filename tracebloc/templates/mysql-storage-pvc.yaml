@@ -1,5 +1,5 @@
-{{- $name := .Values.mysqlPvc.name | default "mysql-pvc" -}}
-{{- $storage := .Values.mysqlPvc.storage | default "2Gi" -}}
+{{- $name := include "tracebloc.mysqlPvc" . -}}
+{{- $storage := include "tracebloc.mysqlStorage" . -}}
 {{- if .Values.hostPath.enabled }}
 apiVersion: v1
 kind: PersistentVolume

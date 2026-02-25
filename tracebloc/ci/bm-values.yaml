@@ -17,11 +17,10 @@ storageClass:
     - uid=1000
     - gid=1000
 
-clusterRole:
-  useClusterScope: true
+clusterScope: true
 
-secrets:
-  clientPassword: "ci-test-password"
+clientId: "ci-test-id"
+clientPassword: "ci-test-password"
 
 dockerRegistry:
   username: ci-test

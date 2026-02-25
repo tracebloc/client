@@ -3,18 +3,16 @@ storageClass:
   create: false
   name: ocs-storagecluster-cephfs
 
-clusterRole:
-  useClusterScope: false
+clusterScope: false
 
-resourceMonitor:
-  enabled: true
+resourceMonitor: true
 
 openshift:
   scc:
     enabled: true
 
-secrets:
-  clientPassword: "ci-test-password"
+clientId: "ci-test-id"
+clientPassword: "ci-test-password"
 
 dockerRegistry:
   username: ci-test

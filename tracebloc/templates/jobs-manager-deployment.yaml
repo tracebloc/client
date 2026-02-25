@@ -28,7 +28,7 @@ spec:
           type: RuntimeDefault
       containers:
       - name: api
-        image: {{ include "tracebloc.image" (dict "repository" "tracebloc/jobs-manager" "tag" .Values.jobsManager.tag "registry" "docker.io") | quote }}
+        image: {{ include "tracebloc.image" (dict "repository" "tracebloc/jobs-manager" "tag" .Values.env.CLIENT_ENV "registry" "docker.io") | quote }}
         imagePullPolicy: Always
         securityContext:
           allowPrivilegeEscalation: false
@@ -47,29 +47,44 @@ spec:
           - name: logs-volume
             mountPath: "/data/logs"
         env:
+        - name: CLIENT_ID
+          valueFrom:
+            secretKeyRef:
+              name: {{ include "tracebloc.secretName" . }}
+              key: CLIENT_ID
         - name: CLIENT_PASSWORD
           valueFrom:
             secretKeyRef:
               name: {{ include "tracebloc.secretName" . }}
               key: CLIENT_PASSWORD
         - name: CLIENT_PVC
-          value: {{ .Values.clientData.name | default "client-pvc" | quote }}
+          value: {{ include "tracebloc.clientDataPvc" . | quote }}
         - name: CLIENT_LOGS_PVC
-          value: {{ .Values.clientLogsPvc.name | default "client-logs-pvc" | quote }}
+          value: {{ include "tracebloc.clientLogsPvc" . | quote }}
         - name: MYSQL_HOST
-          value: {{ .Values.mysql.name | quote }}
+          value: "mysql-client"
         - name: JOB_IMAGE_HOST
           value: "docker.io/"
         - name: CLIENT_ENV
-          value: {{ .Values.jobsManager.env.CLIENT_ENV | default "prod" | quote }}
-        {{- range $key, $value := .Values.jobsManager.env }}
-        {{- if and (ne $key "CLIENT_ENV") $value }}
+          value: {{ .Values.env.CLIENT_ENV | default "prod" | quote }}
+        - name: RESOURCE_REQUESTS
+          value: {{ if hasKey .Values.env "RESOURCE_REQUESTS" }}{{ .Values.env.RESOURCE_REQUESTS | quote }}{{ else }}"cpu=2,memory=8Gi"{{ end }}
+        - name: RESOURCE_LIMITS
+          value: {{ if hasKey .Values.env "RESOURCE_LIMITS" }}{{ .Values.env.RESOURCE_LIMITS | quote }}{{ else }}"cpu=2,memory=8Gi"{{ end }}
+        - name: GPU_REQUESTS
+          value: {{ if hasKey .Values.env "GPU_REQUESTS" }}{{ .Values.env.GPU_REQUESTS | quote }}{{ else }}"nvidia.com/gpu=1"{{ end }}
+        - name: GPU_LIMITS
+          value: {{ if hasKey .Values.env "GPU_LIMITS" }}{{ .Values.env.GPU_LIMITS | quote }}{{ else }}"nvidia.com/gpu=1"{{ end }}
+        - name: RUNTIME_CLASS_NAME
+          value: {{ if hasKey .Values.env "RUNTIME_CLASS_NAME" }}{{ .Values.env.RUNTIME_CLASS_NAME | quote }}{{ else }}""{{ end }}
+        {{- range $key, $value := .Values.env }}
+        {{- if and (ne $key "CLIENT_ENV") (ne $key "RESOURCE_REQUESTS") (ne $key "RESOURCE_LIMITS") (ne $key "GPU_REQUESTS") (ne $key "GPU_LIMITS") (ne $key "RUNTIME_CLASS_NAME") (ne $key "CLIENT_ID") $value }}
         - name: {{ $key }}
           value: {{ $value | quote }}
         {{- end }}
         {{- end }}
       - name: pods-monitor-container
-        image: {{ include "tracebloc.image" (dict "repository" "tracebloc/pods-monitor" "tag" .Values.jobsManager.tag "registry" "docker.io") | quote }}
+        image: {{ include "tracebloc.image" (dict "repository" "tracebloc/pods-monitor" "tag" .Values.env.CLIENT_ENV "registry" "docker.io") | quote }}
         imagePullPolicy: Always
         securityContext:
           allowPrivilegeEscalation: false
@@ -86,19 +101,34 @@ spec:
         - name: logs-volume
           mountPath: "/data/logs"
         env:
+        - name: CLIENT_ID
+          valueFrom:
+            secretKeyRef:
+              name: {{ include "tracebloc.secretName" . }}
+              key: CLIENT_ID
         - name: CLIENT_PASSWORD
           valueFrom:
             secretKeyRef:
               name: {{ include "tracebloc.secretName" . }}
               key: CLIENT_PASSWORD
         - name: CLIENT_LOGS_PVC
-          value: {{ .Values.clientLogsPvc.name | default "client-logs-pvc" | quote }}
+          value: {{ include "tracebloc.clientLogsPvc" . | quote }}
         - name: JOB_IMAGE_HOST
           value: "docker.io/"
         - name: CLIENT_ENV
-          value: {{ .Values.jobsManager.env.CLIENT_ENV | default "prod" | quote }}
-        {{- range $key, $value := .Values.jobsManager.env }}
-        {{- if and (ne $key "CLIENT_ENV") $value }}
+          value: {{ .Values.env.CLIENT_ENV | default "prod" | quote }}
+        - name: RESOURCE_REQUESTS
+          value: {{ if hasKey .Values.env "RESOURCE_REQUESTS" }}{{ .Values.env.RESOURCE_REQUESTS | quote }}{{ else }}"cpu=2,memory=8Gi"{{ end }}
+        - name: RESOURCE_LIMITS
+          value: {{ if hasKey .Values.env "RESOURCE_LIMITS" }}{{ .Values.env.RESOURCE_LIMITS | quote }}{{ else }}"cpu=2,memory=8Gi"{{ end }}
+        - name: GPU_REQUESTS
+          value: {{ if hasKey .Values.env "GPU_REQUESTS" }}{{ .Values.env.GPU_REQUESTS | quote }}{{ else }}"nvidia.com/gpu=1"{{ end }}
+        - name: GPU_LIMITS
+          value: {{ if hasKey .Values.env "GPU_LIMITS" }}{{ .Values.env.GPU_LIMITS | quote }}{{ else }}"nvidia.com/gpu=1"{{ end }}
+        - name: RUNTIME_CLASS_NAME
+          value: {{ if hasKey .Values.env "RUNTIME_CLASS_NAME" }}{{ .Values.env.RUNTIME_CLASS_NAME | quote }}{{ else }}""{{ end }}
+        {{- range $key, $value := .Values.env }}
+        {{- if and (ne $key "CLIENT_ENV") (ne $key "RESOURCE_REQUESTS") (ne $key "RESOURCE_LIMITS") (ne $key "GPU_REQUESTS") (ne $key "GPU_LIMITS") (ne $key "RUNTIME_CLASS_NAME") (ne $key "CLIENT_ID") $value }}
         - name: {{ $key }}
           value: {{ $value | quote }}
         {{- end }}
@@ -108,8 +138,8 @@ spec:
       volumes:
         - name: shared-volume
           persistentVolumeClaim:
-            claimName: {{ .Values.clientData.name | default "client-pvc" }}
+            claimName: {{ include "tracebloc.clientDataPvc" . }}
         - name: logs-volume
           persistentVolumeClaim:
-            claimName: {{ .Values.clientLogsPvc.name | default "client-logs-pvc" }}
+            claimName: {{ include "tracebloc.clientLogsPvc" . }}
       restartPolicy: Always

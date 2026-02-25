@@ -1,5 +1,5 @@
-{{- $name := .Values.clientData.name | default "client-pvc" -}}
-{{- $storage := .Values.clientData.storage | default "50Gi" -}}
+{{- $name := include "tracebloc.clientDataPvc" . -}}
+{{- $storage := include "tracebloc.clientDataStorage" . -}}
 {{- if .Values.hostPath.enabled }}
 apiVersion: v1
 kind: PersistentVolume

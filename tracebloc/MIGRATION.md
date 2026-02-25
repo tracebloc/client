@@ -35,8 +35,7 @@ storageClass:
     - cache=strict
     - actimeo=30
 
-clusterRole:
-  useClusterScope: true
+clusterScope: true
 ```
 
 ### EKS → Unified
@@ -57,8 +56,7 @@ storageClass:
     fileSystemId: <YOUR_EFS_FILESYSTEM_ID>
     provisioningMode: efs-ap
 
-clusterRole:
-  useClusterScope: true
+clusterScope: true
 ```
 
 ### Bare-Metal → Unified
@@ -80,8 +78,7 @@ storageClass:
   create: true
   provisioner: kubernetes.io/no-provisioner
 
-clusterRole:
-  useClusterScope: true
+clusterScope: true
 ```
 
 **Old → New mapping:**
@@ -99,8 +96,7 @@ storageClass:
   create: false
   name: ocs-storagecluster-cephfs  # or your existing SC
 
-clusterRole:
-  useClusterScope: false  # namespace-scoped RBAC
+clusterScope: false  # namespace-scoped RBAC
 
 openshift:
   scc:

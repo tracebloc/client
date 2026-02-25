@@ -25,13 +25,42 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{ .Release.Name }}-jobs-manager
 {{- end }}
 
+{{- define "tracebloc.rbacName" -}}
+{{ .Release.Name }}-jobs-manager-rbac
+{{- end }}
+
+{{- define "tracebloc.clientDataPvc" -}}
+client-pvc
+{{- end }}
+
+{{- define "tracebloc.clientDataStorage" -}}
+{{ .Values.pvc.data | default "50Gi" }}
+{{- end }}
+
+{{- define "tracebloc.clientLogsPvc" -}}
+client-logs-pvc
+{{- end }}
+
+{{- define "tracebloc.clientLogsStorage" -}}
+{{ .Values.pvc.logs | default "10Gi" }}
+{{- end }}
+
+{{- define "tracebloc.mysqlPvc" -}}
+mysql-pvc
+{{- end }}
+
+{{- define "tracebloc.mysqlStorage" -}}
+{{ .Values.pvc.mysql | default "2Gi" }}
+{{- end }}
+
 {{- define "tracebloc.registrySecretName" -}}
 {{ .Release.Name }}-regcred
 {{- end }}
 
 {{/*
 Image reference — defaults to docker.io when no registry is provided.
-Usage: {{ include "tracebloc.image" (dict "repository" "tracebloc/jobs-manager" "tag" .Values.jobsManager.tag "registry" "docker.io") }}
+Tag defaults to "prod" when CLIENT_ENV is omitted or empty.
+Usage: {{ include "tracebloc.image" (dict "repository" "tracebloc/jobs-manager" "tag" .Values.env.CLIENT_ENV "registry" "docker.io") }}
 */}}
 {{- define "tracebloc.image" -}}
 {{ .registry | default "docker.io" }}/{{ .repository }}:{{ .tag | default "prod" }}

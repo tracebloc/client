@@ -2,11 +2,9 @@ suite: RBAC
 templates:
   - templates/rbac.yaml
 set:
-  secrets:
-    create: true
-    clientPassword: "test"
+  clientId: "test-id"
+  clientPassword: "test"
   dockerRegistry:
-    create: true
     server: https://index.docker.io/v1/
     username: test
     password: test
@@ -14,10 +12,7 @@ set:
 tests:
   - it: should create ServiceAccount
     set:
-      clusterRole:
-        create: true
-        name: jobs-manager-rbac
-        useClusterScope: true
+      clusterScope: true
     documentIndex: 0
     asserts:
       - isKind:
@@ -26,26 +21,20 @@ tests:
           path: metadata.name
           value: RELEASE-NAME-jobs-manager
 
-  - it: should create ClusterRole when useClusterScope is true
+  - it: should create ClusterRole when clusterScope is true
     set:
-      clusterRole:
-        create: true
-        name: jobs-manager-rbac
-        useClusterScope: true
+      clusterScope: true
     documentIndex: 1
     asserts:
       - isKind:
           of: ClusterRole
       - equal:
           path: metadata.name
-          value: jobs-manager-rbac
+          value: RELEASE-NAME-jobs-manager-rbac
 
-  - it: should create ClusterRoleBinding when useClusterScope is true
+  - it: should create ClusterRoleBinding when clusterScope is true
     set:
-      clusterRole:
-        create: true
-        name: jobs-manager-rbac
-        useClusterScope: true
+      clusterScope: true
     documentIndex: 2
     asserts:
       - isKind:
@@ -54,43 +43,25 @@ tests:
           path: subjects[0].name
           value: RELEASE-NAME-jobs-manager
 
-  - it: should create Role when useClusterScope is false
+  - it: should create Role when clusterScope is false
     set:
-      clusterRole:
-        create: true
-        name: jobs-manager-rbac
-        useClusterScope: false
+      clusterScope: false
     documentIndex: 1
     asserts:
       - isKind:
           of: Role
 
-  - it: should create RoleBinding when useClusterScope is false
+  - it: should create RoleBinding when clusterScope is false
     set:
-      clusterRole:
-        create: true
-        name: jobs-manager-rbac
-        useClusterScope: false
+      clusterScope: false
     documentIndex: 2
     asserts:
       - isKind:
           of: RoleBinding
 
-  - it: should not create RBAC when create is false
-    set:
-      clusterRole:
-        create: false
-        name: jobs-manager-rbac
-    asserts:
-      - hasDocuments:
-          count: 0
-
   - it: should have least-privilege rules for jobs-manager
     set:
-      clusterRole:
-        create: true
-        name: jobs-manager-rbac
-        useClusterScope: true
+      clusterScope: true
     documentIndex: 1
     asserts:
       - contains:

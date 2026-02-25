@@ -2,51 +2,47 @@
   "$schema": "https://json-schema.org/draft-07/schema#",
   "title": "Tracebloc Helm Chart Values",
   "type": "object",
-  "required": ["jobsManager", "mysql", "clusterRole", "secrets", "dockerRegistry"],
+  "required": ["clientId", "clientPassword", "dockerRegistry"],
   "properties": {
-    "jobsManager": {
+    "env": {
       "type": "object",
-      "required": ["tag", "env"],
+      "description": "Environment variables passed to containers",
       "properties": {
-        "tag": {
+        "CLIENT_ENV": {
           "type": "string",
-          "description": "Docker image tag for jobs-manager, pods-monitor, and resource-monitor"
+          "default": "prod",
+          "description": "Environment identifier and Docker image tag (dev, staging, prod). Defaults to 'prod' if not set or empty."
         },
-        "env": {
-          "type": "object",
-          "required": ["CLIENT_ID"],
-          "properties": {
-            "CLIENT_ID": {
-              "type": "string",
-              "minLength": 1,
-              "description": "Client ID for authentication"
-            },
-            "CLIENT_ENV": {
-              "type": "string",
-              "description": "Environment identifier (dev, staging, prod)"
-            },
-            "HTTP_PROXY_HOST": { "type": "string" },
-            "HTTP_PROXY_PORT": { "type": "string" },
-            "HTTP_PROXY_USERNAME": { "type": "string" },
-            "HTTP_PROXY_PASSWORD": { "type": "string" },
-            "RESOURCE_REQUESTS": {
-              "type": "string",
-              "pattern": "^(cpu=\\S+,memory=\\S+)?$",
-              "description": "Resource requests for spawned jobs (e.g. 'cpu=2,memory=8Gi')"
-            },
-            "RESOURCE_LIMITS": {
-              "type": "string",
-              "pattern": "^(cpu=\\S+,memory=\\S+)?$",
-              "description": "Resource limits for spawned jobs"
-            },
-            "GPU_REQUESTS": { "type": "string" },
-            "GPU_LIMITS": { "type": "string" },
-            "RUNTIME_CLASS_NAME": { "type": "string" }
-          },
-          "additionalProperties": {
-            "type": "string"
-          }
-        }
+        "HTTP_PROXY_HOST": { "type": "string" },
+        "HTTP_PROXY_PORT": { "type": "string" },
+        "HTTP_PROXY_USERNAME": { "type": "string" },
+        "HTTP_PROXY_PASSWORD": { "type": "string" },
+        "RESOURCE_REQUESTS": {
+          "type": "string",
+          "default": "cpu=2,memory=8Gi",
+          "pattern": "^(cpu=\\S+,memory=\\S+)?$",
+          "description": "Optional resource requests for spawned jobs (defaults to 'cpu=2,memory=8Gi' if not set)"
+        },
+        "RESOURCE_LIMITS": {
+          "type": "string",
+          "default": "cpu=2,memory=8Gi",
+          "pattern": "^(cpu=\\S+,memory=\\S+)?$",
+          "description": "Optional resource limits for spawned jobs (defaults to 'cpu=2,memory=8Gi' if not set)"
+        },
+        "GPU_REQUESTS": {
+          "type": "string",
+          "default": "nvidia.com/gpu=1",
+          "description": "Optional GPU requests for spawned jobs (defaults to 'nvidia.com/gpu=1' if not set)"
+        },
+        "GPU_LIMITS": {
+          "type": "string",
+          "default": "nvidia.com/gpu=1",
+          "description": "Optional GPU limits for spawned jobs (defaults to 'nvidia.com/gpu=1' if not set)"
+        },
+        "RUNTIME_CLASS_NAME": { "type": "string" }
+      },
+      "additionalProperties": {
+        "type": "string"
       }
     },
     "storageClass": {
@@ -123,87 +119,44 @@
         }
       }
     },
+    "pvc": {
+      "type": "object",
+      "description": "PVC storage sizes",
+      "properties": {
+        "mysql": {
+          "type": "string",
+          "default": "2Gi",
+          "pattern": "^[0-9]+(Gi|Mi|Ti)$",
+          "description": "Storage size for MySQL PVC"
+        },
+        "logs": {
+          "type": "string",
+          "default": "10Gi",
+          "pattern": "^[0-9]+(Gi|Mi|Ti)$",
+          "description": "Storage size for logs PVC"
+        },
+        "data": {
+          "type": "string",
+          "default": "50Gi",
+          "pattern": "^[0-9]+(Gi|Mi|Ti)$",
+          "description": "Storage size for shared data PVC"
+        }
+      }
+    },
     "pvcAccessMode": {
       "type": "string",
       "enum": ["ReadWriteOnce", "ReadWriteMany", "ReadOnlyMany"],
       "description": "Access mode for PVCs"
     },
-    "clientData": {
-      "type": "object",
-      "properties": {
-        "name": {
-          "type": "string",
-          "description": "PVC name for shared data"
-        },
-        "storage": {
-          "type": "string",
-          "description": "Storage size (e.g. '50Gi')"
-        }
-      }
-    },
-    "clientLogsPvc": {
-      "type": "object",
-      "properties": {
-        "name": {
-          "type": "string",
-          "description": "PVC name for logs"
-        },
-        "storage": {
-          "type": "string",
-          "description": "Storage size (e.g. '10Gi')"
-        }
-      }
-    },
-    "mysqlPvc": {
-      "type": "object",
-      "properties": {
-        "name": {
-          "type": "string",
-          "description": "PVC name for MySQL data"
-        },
-        "storage": {
-          "type": "string",
-          "description": "Storage size (e.g. '2Gi')"
-        }
-      }
-    },
-    "mysql": {
-      "type": "object",
-      "required": ["name"],
-      "properties": {
-        "name": {
-          "type": "string",
-          "minLength": 1,
-          "pattern": "^[a-z0-9][a-z0-9-]*$",
-          "description": "MySQL deployment and service name"
-        }
-      }
-    },
-    "clusterRole": {
-      "type": "object",
-      "required": ["create", "name"],
-      "properties": {
-        "create": {
-          "type": "boolean"
-        },
-        "name": {
-          "type": "string",
-          "minLength": 1
-        },
-        "useClusterScope": {
-          "type": "boolean",
-          "description": "Use ClusterRole (true) or namespace-scoped Role (false)"
-        }
-      }
+    "clusterScope": {
+      "type": "boolean",
+      "default": true,
+      "description": "Use ClusterRole (true) or namespace-scoped Role (false). Defaults to true."
     },
     "resourceMonitor": {
-      "type": "object",
-      "properties": {
-        "enabled": {
-          "type": "boolean",
-          "description": "Deploy resource-monitor DaemonSet"
-        }
-      }
+      "type": "boolean",
+      "default": true,
+      "description": "Deploy resource-monitor DaemonSet. Defaults to true."
     },
     "openshift": {
       "type": "object",
@@ -219,28 +172,20 @@
         }
       }
     },
-    "secrets": {
-      "type": "object",
-      "required": ["create", "clientPassword"],
-      "properties": {
-        "create": {
-          "type": "boolean",
-          "description": "Create the Kubernetes Secret (set false to use existing)"
-        },
-        "clientPassword": {
-          "type": "string",
-          "minLength": 1,
-          "description": "Client authentication password"
-        }
-      }
+    "clientId": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Client ID for authentication"
+    },
+    "clientPassword": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Client authentication password"
     },
     "dockerRegistry": {
       "type": "object",
-      "required": ["create"],
+      "required": ["server", "username", "password", "email"],
       "properties": {
-        "create": {
-          "type": "boolean"
-        },
         "server": {
           "type": "string",
           "format": "uri"
@@ -253,17 +198,6 @@
         },
         "email": {
           "type": "string"
-        }
-      },
-      "if": {
-        "properties": { "create": { "const": true } }
-      },
-      "then": {
-        "required": ["create", "server", "username", "password", "email"],
-        "properties": {
-          "username": { "minLength": 1 },
-          "password": { "minLength": 1 },
-          "email": { "minLength": 1 }
         }
       }
     }

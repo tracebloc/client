@@ -2,11 +2,9 @@ suite: Jobs Manager Deployment
 templates:
   - templates/jobs-manager-deployment.yaml
 set:
-  secrets:
-    create: true
-    clientPassword: "test"
+  clientId: "test-id"
+  clientPassword: "test"
   dockerRegistry:
-    create: true
     server: https://index.docker.io/v1/
     username: test
     password: test

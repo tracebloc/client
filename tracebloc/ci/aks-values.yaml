@@ -13,11 +13,10 @@ storageClass:
     - cache=strict
     - actimeo=30
 
-clusterRole:
-  useClusterScope: true
+clusterScope: true
 
-secrets:
-  clientPassword: "ci-test-password"
+clientId: "ci-test-id"
+clientPassword: "ci-test-password"
 
 dockerRegistry:
   username: ci-test
