@@ -9,7 +9,7 @@
 set -euo pipefail
 
 BRANCH="${BRANCH:-main}"
-REPO_RAW="https://raw.githubusercontent.com/tracebloc/client/${BRANCH}"
+REPO_RAW="https://raw.githubusercontent.com/tracebloc/client/tree/${BRANCH}"
 TMPDIR="$(mktemp -d)"
 trap 'rm -rf "$TMPDIR"' EXIT
 
