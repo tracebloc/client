@@ -19,11 +19,19 @@ spec:
         command: ["/bin/sh", "-c"]
         args:
         - |
-          mkdir -p {{ .Values.hostPath.dataPath }}
-          mkdir -p {{ .Values.hostPath.logsPath }}
-          mkdir -p {{ .Values.hostPath.mysqlPath }}
-          chmod -R 777 {{ .Values.hostPath.dataPath }}
-          chmod -R 777 {{ .Values.hostPath.logsPath }}
-          chmod -R 777 {{ .Values.hostPath.mysqlPath }}
+          mkdir -p /mnt/host{{ include "tracebloc.hostPath.data" . }}
+          mkdir -p /mnt/host{{ include "tracebloc.hostPath.logs" . }}
+          mkdir -p /mnt/host{{ include "tracebloc.hostPath.mysql" . }}
+          chmod -R 777 /mnt/host{{ include "tracebloc.hostPath.data" . }}
+          chmod -R 777 /mnt/host{{ include "tracebloc.hostPath.logs" . }}
+          chmod -R 777 /mnt/host{{ include "tracebloc.hostPath.mysql" . }}
+        volumeMounts:
+        - name: host-root
+          mountPath: /mnt/host
+      volumes:
+      - name: host-root
+        hostPath:
+          path: /
+          type: Directory
       restartPolicy: OnFailure
 {{- end }}

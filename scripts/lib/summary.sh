@@ -34,6 +34,7 @@ _print_topology() {
   echo -e "  Servers (control-plane): ${CYAN}$SERVERS${RESET}"
   echo -e "  Agents  (workers)      : ${CYAN}$AGENTS${RESET}"
   echo -e "  Ingress (HTTP/S)       : ${CYAN}localhost:$HTTP_PORT  /  localhost:$HTTPS_PORT${RESET}"
+  echo -e "  Volume mount           : ${CYAN}$HOST_DATA_DIR → /tracebloc${RESET}"
 }
 
 _print_common_commands() {

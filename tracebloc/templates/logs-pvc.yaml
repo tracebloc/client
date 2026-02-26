@@ -14,7 +14,8 @@ spec:
   accessModes:
     - ReadWriteOnce
   hostPath:
-    path: {{ required "hostPath.logsPath is required when hostPath.enabled" .Values.hostPath.logsPath }}
+    path: {{ include "tracebloc.hostPath.logs" . }}
+    type: DirectoryOrCreate
 ---
 {{- end }}
 apiVersion: v1

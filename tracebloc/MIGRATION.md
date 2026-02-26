@@ -84,9 +84,9 @@ clusterScope: true
 **Old → New mapping:**
 | Old key | New key |
 |---------|---------|
-| `clientData.hostPath` | `hostPath.dataPath` |
-| `clientLogsPvc.hostPath` | `hostPath.logsPath` |
-| `mysqlPvc.hostPath` | `hostPath.mysqlPath` |
+| `clientData.hostPath` | `/tracebloc/` + `hostPath.dataDir` (base path is hardcoded) |
+| `clientLogsPvc.hostPath` | `/tracebloc/` + `hostPath.logsDir` (base path is hardcoded) |
+| `mysqlPvc.hostPath` | `/tracebloc/` + `hostPath.mysqlDir` (base path is hardcoded) |
 
 ### OpenShift → Unified
 

@@ -14,7 +14,8 @@ spec:
   accessModes:
     - ReadWriteOnce
   hostPath:
-    path: {{ required "hostPath.mysqlPath is required when hostPath.enabled" .Values.hostPath.mysqlPath }}
+    path: {{ include "tracebloc.hostPath.mysql" . }}
+    type: DirectoryOrCreate
 ---
 {{- end }}
 apiVersion: v1

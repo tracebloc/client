@@ -24,6 +24,7 @@ AGENTS="${AGENTS:-2}"
 K8S_VERSION="${K8S_VERSION:-}"           # empty = latest stable
 HTTP_PORT="${HTTP_PORT:-80}"
 HTTPS_PORT="${HTTPS_PORT:-443}"
+HOST_DATA_DIR="${HOST_DATA_DIR:-$HOME/.tracebloc}"
 
 # ── Runtime globals ──────────────────────────────────────────────────────────
 OS="$(uname -s)"
@@ -43,4 +44,5 @@ print_banner() {
   echo -e "${BOLD}║   macOS & Linux                                               ║${RESET}"
   echo -e "${BOLD}╚═══════════════════════════════════════════════════════════════╝${RESET}"
   info "OS=$OS  Arch=$ARCH  Cluster='$CLUSTER_NAME'  Servers=$SERVERS  Agents=$AGENTS"
+  info "Host data dir: $HOST_DATA_DIR → /tracebloc (inside k3s nodes)"
 }

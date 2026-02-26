@@ -31,6 +31,11 @@ _handle_existing_cluster() {
 }
 
 _create_new_cluster() {
+  if [[ ! -d "$HOST_DATA_DIR" ]]; then
+    info "Creating host data directory: $HOST_DATA_DIR"
+    mkdir -p "$HOST_DATA_DIR"
+  fi
+
   K3D_ARGS=(
     cluster create "$CLUSTER_NAME"
     --servers "$SERVERS"
@@ -38,6 +43,7 @@ _create_new_cluster() {
     --port "${HTTP_PORT}:80@loadbalancer"
     --port "${HTTPS_PORT}:443@loadbalancer"
     --api-port 6550
+    -v "${HOST_DATA_DIR}:/tracebloc@all"
     --wait
   )
 
