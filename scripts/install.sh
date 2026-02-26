@@ -4,14 +4,16 @@
 #
 #  Usage:
 #    curl -fsSL https://raw.githubusercontent.com/tracebloc/client/main/scripts/install.sh | bash
+#    curl -fsSL ... | BRANCH=develop bash
 # =============================================================================
 set -euo pipefail
 
-REPO_RAW="https://raw.githubusercontent.com/tracebloc/client/main"
+BRANCH="${BRANCH:-main}"
+REPO_RAW="https://raw.githubusercontent.com/tracebloc/client/${BRANCH}"
 TMPDIR="$(mktemp -d)"
 trap 'rm -rf "$TMPDIR"' EXIT
 
-echo "⬇  Downloading tracebloc installer..."
+echo "⬇  Downloading tracebloc installer (branch: $BRANCH)..."
 
 mkdir -p "$TMPDIR/lib"
 
