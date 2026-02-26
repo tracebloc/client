@@ -12,8 +12,8 @@ create_cluster() {
     _create_new_cluster
   fi
 
-  k3d kubeconfig merge "$CLUSTER_NAME" --kubeconfig-switch-context >/dev/null
-  success "kubeconfig updated — kubectl now points to '$CLUSTER_NAME'."
+  _merge_kubeconfig
+  _wait_for_api
 }
 
 _handle_existing_cluster() {
@@ -60,4 +60,27 @@ _create_new_cluster() {
 
   k3d "${K3D_ARGS[@]}"
   success "Cluster '$CLUSTER_NAME' created and ready!"
+}
+
+_merge_kubeconfig() {
+  mkdir -p "${HOME}/.kube"
+  export KUBECONFIG="${KUBECONFIG:-${HOME}/.kube/config}"
+  k3d kubeconfig merge "$CLUSTER_NAME" \
+    --kubeconfig-merge-default \
+    --kubeconfig-switch-context \
+    >/dev/null 2>&1
+  success "kubeconfig updated — kubectl now points to '$CLUSTER_NAME'."
+}
+
+_wait_for_api() {
+  info "Waiting for k8s API server to become ready..."
+  local attempt
+  for attempt in {1..30}; do
+    if kubectl cluster-info &>/dev/null 2>&1; then
+      success "API server reachable."
+      return
+    fi
+    sleep 2
+  done
+  error "API server not reachable after 60s. Check: k3d cluster list / docker ps"
 }
