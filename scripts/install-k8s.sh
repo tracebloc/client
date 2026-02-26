@@ -6,7 +6,7 @@
 #  GPUs    : NVIDIA (Linux)  ✓     AMD (Linux) ✓     macOS passthrough ✗
 #
 #  Single-command usage:
-#    curl -fsSL https://your-host/install-k8s.sh | bash
+#    curl -fsSL https://raw.githubusercontent.com/tracebloc/client/main/scripts/install.sh | bash
 #    -- OR --
 #    chmod +x install-k8s.sh && ./install-k8s.sh
 #
