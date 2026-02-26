@@ -1,0 +1,57 @@
+#!/usr/bin/env bash
+# =============================================================================
+#  cluster.sh — k3d cluster creation, start, and kubeconfig merge
+# =============================================================================
+
+create_cluster() {
+  step "Creating k3d Cluster: '$CLUSTER_NAME'"
+
+  if k3d cluster list 2>/dev/null | grep -q "^${CLUSTER_NAME}"; then
+    _handle_existing_cluster
+  else
+    _create_new_cluster
+  fi
+
+  k3d kubeconfig merge "$CLUSTER_NAME" --kubeconfig-switch-context >/dev/null
+  success "kubeconfig updated — kubectl now points to '$CLUSTER_NAME'."
+}
+
+_handle_existing_cluster() {
+  CLUSTER_STATUS=$(k3d cluster list -o json 2>/dev/null \
+    | grep -o '"serversRunning":[0-9]*' | head -1 | grep -o '[0-9]*' \
+    2>/dev/null || echo "0")
+
+  if [[ "$CLUSTER_STATUS" -gt "0" ]]; then
+    success "Cluster '$CLUSTER_NAME' already running — skipping creation."
+  else
+    info "Cluster '$CLUSTER_NAME' exists but is stopped — starting it..."
+    k3d cluster start "$CLUSTER_NAME"
+    success "Cluster started."
+  fi
+}
+
+_create_new_cluster() {
+  K3D_ARGS=(
+    cluster create "$CLUSTER_NAME"
+    --servers "$SERVERS"
+    --agents  "$AGENTS"
+    --port "${HTTP_PORT}:80@loadbalancer"
+    --port "${HTTPS_PORT}:443@loadbalancer"
+    --api-port 6550
+    --wait
+  )
+
+  [[ -n "$K8S_VERSION" ]] && K3D_ARGS+=(--image "rancher/k3s:${K8S_VERSION}")
+
+  if [[ ${#K3D_GPU_FLAGS[@]} -gt 0 ]]; then
+    K3D_ARGS+=("${K3D_GPU_FLAGS[@]}")
+    info "GPU flag(s) active: ${K3D_GPU_FLAGS[*]}"
+    info "Creating cluster with $SERVERS server(s) + $AGENTS agent(s) + GPU passthrough..."
+  else
+    info "Creating cluster with $SERVERS server(s) + $AGENTS agent(s) (CPU-only)..."
+  fi
+  info "(First run pulls the k3s image — takes ~1 min on a fast connection)"
+
+  k3d "${K3D_ARGS[@]}"
+  success "Cluster '$CLUSTER_NAME' created and ready!"
+}
