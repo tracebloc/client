@@ -6,7 +6,7 @@
 
 # ── Package manager detection ────────────────────────────────────────────────
 setup_pm() {
-  if   has apt-get; then PM_UPDATE="sudo apt-get update -qq";           PM_INSTALL="sudo apt-get install -y -q"
+  if   has apt-get; then PM_UPDATE="sudo apt-get update -qq";           PM_INSTALL="sudo apt-get install -y -q -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold"
   elif has dnf;     then PM_UPDATE="sudo dnf makecache -q";             PM_INSTALL="sudo dnf install -y -q"
   elif has yum;     then PM_UPDATE="sudo yum makecache -q";             PM_INSTALL="sudo yum install -y -q"
   elif has zypper;  then PM_UPDATE="sudo zypper refresh -q";            PM_INSTALL="sudo zypper install -y"
@@ -121,6 +121,10 @@ dispatch_gpu_setup() {
 
 # ── Main Linux installer ────────────────────────────────────────────────────
 install_linux() {
+  export DEBIAN_FRONTEND=noninteractive
+  export NEEDRESTART_MODE=a
+  export NEEDRESTART_SUSPEND=1
+
   setup_pm
   install_docker_engine
   install_system_deps
