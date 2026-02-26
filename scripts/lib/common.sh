@@ -18,7 +18,7 @@ step()    { echo -e "\n${BOLD}━━━ $* ━━━${RESET}"; }
 has() { command -v "$1" &>/dev/null; }
 
 # ── Configuration (overridable via env) ──────────────────────────────────────
-CLUSTER_NAME="${CLUSTER_NAME:-k3s-local}"
+CLUSTER_NAME="${CLUSTER_NAME:-tracebloc}"
 SERVERS="${SERVERS:-1}"
 AGENTS="${AGENTS:-1}"
 K8S_VERSION="${K8S_VERSION:-}"           # empty = latest stable
