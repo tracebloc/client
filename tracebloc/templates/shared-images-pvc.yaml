@@ -13,6 +13,9 @@ spec:
     storage: {{ $storage }}
   accessModes:
     - ReadWriteOnce
+  claimRef:
+    name: {{ $name }}
+    namespace: {{ .Release.Namespace }}
   hostPath:
     path: {{ include "tracebloc.hostPath.data" . }}
     type: DirectoryOrCreate
