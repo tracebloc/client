@@ -251,8 +251,17 @@ function Enable-VirtualisationFeatures {
     Err "Please reboot manually, then re-run this script."
   }
 
-  wsl --set-default-version 2 2>&1 | Out-Null
-  Ok "WSL2 set as default."
+  Info "Updating WSL..."
+  $wslUpdate = cmd /c "wsl --update 2>&1"
+  if ($LASTEXITCODE -ne 0) { Warn "WSL update returned non-zero exit code. Continuing..." }
+
+  $wslSet = cmd /c "wsl --set-default-version 2 2>&1"
+  if ($LASTEXITCODE -eq 0) {
+    Ok "WSL2 set as default."
+  } else {
+    Warn "Could not set WSL2 as default: $wslSet"
+    Warn "Try running 'wsl --update' manually, then re-run this script."
+  }
 }
 
 # =============================================================================
