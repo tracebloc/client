@@ -84,22 +84,34 @@ install_docker_desktop() {
 
   # ── Docker already installed — just make sure it's running ────────────────
   if ! docker info &>/dev/null 2>&1; then
-    info "Starting Docker Desktop…"
     open -a Docker
-    sleep 3
+
+    local max_wait=40
+    tput civis 2>/dev/null || true
+    local frames=('⠋' '⠙' '⠹' '⠸' '⠼' '⠴' '⠦' '⠧' '⠇' '⠏')
+    local f=0
+    for i in $(seq 1 $max_wait); do
+      if docker info &>/dev/null 2>&1; then break; fi
+      printf "\r  ${CYAN}%s${RESET} Waiting for Docker Desktop to start…" "${frames[f]}"
+      f=$(( (f + 1) % ${#frames[@]} ))
+      sleep 3
+    done
+    printf "\r\033[K"
+    tput cnorm 2>/dev/null || true
   fi
 
-  local max_wait=40
-  echo -n "  Waiting for Docker engine"
-  for i in $(seq 1 $max_wait); do
-    docker info &>/dev/null 2>&1 && break
-    echo -n "."; sleep 3
-  done; echo ""
-
   if ! docker info &>/dev/null 2>&1; then
-    warn "Docker did not respond within ~$((max_wait * 3))s."
-    warn "Make sure Docker Desktop is running (look for the whale icon in the menu bar)."
-    error "Re-run this script once Docker is ready."
+    echo ""
+    echo -e "  ${BOLD}Docker Desktop isn't responding yet.${RESET}"
+    echo -e "  This usually means it's still starting up. Here's what to check:"
+    echo ""
+    echo -e "    1. Look for the ${CYAN}whale icon${RESET} 🐳 in your menu bar"
+    echo -e "    2. If Docker is open, wait until it says ${CYAN}\"Docker Desktop is running\"${RESET}"
+    echo -e "    3. ${CYAN}Re-run this script${RESET} once it's ready"
+    echo ""
+    echo -e "  ${BOLD}Nothing is broken — Docker just needs a moment.${RESET}"
+    echo ""
+    exit 0
   fi
 
   success "Docker: $(docker --version)"
