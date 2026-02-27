@@ -251,9 +251,18 @@ function Enable-VirtualisationFeatures {
     Err "Please reboot manually, then re-run this script."
   }
 
-  Info "Updating WSL..."
-  $wslUpdate = cmd /c "wsl --update 2>&1"
-  if ($LASTEXITCODE -ne 0) { Warn "WSL update returned non-zero exit code. Continuing..." }
+  Info "Updating WSL (this can take a few minutes on first run)..."
+  $wslJob = Start-Job -ScriptBlock { cmd /c "wsl --update 2>&1" }
+  Write-Host -NoNewline "  Updating"
+  while ($wslJob.State -eq "Running") {
+    Write-Host -NoNewline "."
+    Start-Sleep -Seconds 2
+  }
+  Write-Host ""
+  $wslUpdate = Receive-Job -Job $wslJob
+  $wslExitOk = $wslJob.State -eq "Completed"
+  Remove-Job -Job $wslJob -Force
+  if (-not $wslExitOk) { Warn "WSL update may not have completed cleanly. Continuing..." }
 
   $wslSet = cmd /c "wsl --set-default-version 2 2>&1"
   if ($LASTEXITCODE -eq 0) {
@@ -349,15 +358,23 @@ function Install-NvidiaContainerToolkit {
   Step "NVIDIA Container Toolkit (inside WSL2)"
   Info "Installing nvidia-container-toolkit in the WSL2 environment..."
 
-  $distros = wsl --list --quiet 2>&1 | Where-Object { $_ -match '\w' }
-  if (-not $distros) {
+  # Find a usable WSL2 distro (prefer Ubuntu)
+  $distroRaw = cmd /c "wsl --list --quiet 2>&1"
+  $distros = ($distroRaw -split "`n") | ForEach-Object { $_.Trim() -replace '\x00','' } |
+             Where-Object { $_ -match '^\w' }
+  $wslDistro = ($distros | Where-Object { $_ -match 'Ubuntu' } | Select-Object -First 1)
+  if (-not $wslDistro -and $distros) { $wslDistro = $distros[0] }
+
+  if (-not $wslDistro) {
     Info "No WSL2 distro found -- installing Ubuntu..."
-    wsl --install -d Ubuntu --no-launch 2>&1 | Out-Null
-    wsl --setdefault Ubuntu 2>&1 | Out-Null
+    cmd /c "wsl --install -d Ubuntu --no-launch 2>&1" | Out-Null
+    cmd /c "wsl --setdefault Ubuntu 2>&1" | Out-Null
     Warn "Ubuntu WSL2 installed. Complete first-run setup in a separate terminal:"
     Warn "  Open Ubuntu from Start Menu, set a username/password, then close it."
     Err "Please complete WSL2 Ubuntu setup first, then re-run."
   }
+
+  Info "Using WSL2 distro: $wslDistro"
 
   $nctScript = @'
 #!/bin/bash
@@ -371,7 +388,7 @@ curl -fsSL https://nvidia.github.io/libnvidia-container/stable/deb/nvidia-contai
 sudo apt-get update -qq
 sudo apt-get install -y -q nvidia-container-toolkit
 sudo nvidia-ctk runtime configure --runtime=docker --set-as-default 2>/dev/null || true
-sudo nvidia-ctk runtime configure --runtime=containerd --set-as-default 2>/dev/null || true
+sudo nvidia-ctk runtime configure --runtime=containerd 2>/dev/null || true
 echo "NCT installed successfully."
 '@
 
@@ -379,10 +396,10 @@ echo "NCT installed successfully."
   [System.IO.File]::WriteAllText($scriptPath, $nctScript.Replace("`r`n", "`n"))
   $wslPath = "/mnt/" + ($scriptPath -replace '\\','/' -replace '^([A-Za-z]):/', { $_.Groups[1].Value.ToLower() + '/' })
 
-  wsl bash "$wslPath" 2>&1
+  cmd /c "wsl -d $wslDistro -- /bin/bash `"$wslPath`" 2>&1"
   Remove-Item $scriptPath -Force -ErrorAction SilentlyContinue
 
-  $nctVer = wsl nvidia-ctk --version 2>&1
+  $nctVer = cmd /c "wsl -d $wslDistro -- nvidia-ctk --version 2>&1"
   if ($LASTEXITCODE -eq 0) {
     Ok "NVIDIA Container Toolkit in WSL2: $nctVer"
     $script:K3D_GPU_FLAG = "--gpus=all"
