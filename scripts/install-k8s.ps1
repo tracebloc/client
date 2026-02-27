@@ -1,8 +1,8 @@
 # =============================================================================
-#  install-k8s.ps1  —  One-command Kubernetes + GPU installer  (Windows)
+#  install-k8s.ps1  --  One-command Kubernetes + GPU installer  (Windows)
 #
-#  Engine  : k3d  (k3s inside Docker — lightweight, prod-topology capable)
-#  GPUs    : NVIDIA (via WSL2 passthrough) ✓     AMD ✗ (unsupported on Windows)
+#  Engine  : k3d  (k3s inside Docker -- lightweight, prod-topology capable)
+#  GPUs    : NVIDIA (via WSL2 passthrough)      AMD (unsupported on Windows)
 #
 #  Usage (PowerShell as Administrator):
 #    irm https://raw.githubusercontent.com/tracebloc/client/main/scripts/install.ps1 | iex
@@ -25,7 +25,7 @@
 #Requires -Version 5.1
 param([switch]$Help)
 
-# ── Admin check ──────────────────────────────────────────────────────────────
+# -- Admin check --------------------------------------------------------------
 $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()
            ).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 if (-not $isAdmin) {
@@ -43,7 +43,7 @@ function Info($m)  { Write-Host "[INFO]  $m" -ForegroundColor Cyan }
 function Ok($m)    { Write-Host "[OK]    $m" -ForegroundColor Green }
 function Warn($m)  { Write-Host "[WARN]  $m" -ForegroundColor Yellow }
 function Err($m)   { Write-Host "[ERROR] $m" -ForegroundColor Red; exit 1 }
-function Step($m)  { Write-Host "`n━━━ $m ━━━" -ForegroundColor White }
+function Step($m)  { Write-Host "`n=== $m ===" -ForegroundColor White }
 function Has($cmd) { [bool](Get-Command $cmd -ErrorAction SilentlyContinue) }
 
 function RefreshPath {
@@ -59,10 +59,13 @@ function Invoke-WithRetry {
     [string]$Label = "Operation"
   )
   for ($i = 1; $i -le $MaxAttempts; $i++) {
-    try { return (& $ScriptBlock) }
+    try {
+      $result = & $ScriptBlock
+      return $result
+    }
     catch {
       if ($i -eq $MaxAttempts) { throw }
-      Warn "$Label — attempt $i/$MaxAttempts failed: $_. Retrying in ${DelaySeconds}s..."
+      Warn "$Label -- attempt $i/$MaxAttempts failed: $_. Retrying in ${DelaySeconds}s..."
       Start-Sleep -Seconds $DelaySeconds
     }
   }
@@ -116,10 +119,10 @@ macOS / Linux:
 # =============================================================================
 
 function Confirm-Config {
-  if ($SERVERS -notmatch '^\d+$') { Err "SERVERS must be a positive integer (got '$SERVERS')" }
-  if ($AGENTS  -notmatch '^\d+$') { Err "AGENTS must be a positive integer (got '$AGENTS')" }
-  if ($HTTP_PORT  -notmatch '^\d+$') { Err "HTTP_PORT must be a number (got '$HTTP_PORT')" }
-  if ($HTTPS_PORT -notmatch '^\d+$') { Err "HTTPS_PORT must be a number (got '$HTTPS_PORT')" }
+  if ($SERVERS -notmatch '^\d+$') { Err ("SERVERS must be a positive integer (got '" + $SERVERS + "')") }
+  if ($AGENTS  -notmatch '^\d+$') { Err ("AGENTS must be a positive integer (got '" + $AGENTS + "')") }
+  if ($HTTP_PORT  -notmatch '^\d+$') { Err ("HTTP_PORT must be a number (got '" + $HTTP_PORT + "')") }
+  if ($HTTPS_PORT -notmatch '^\d+$') { Err ("HTTPS_PORT must be a number (got '" + $HTTPS_PORT + "')") }
 }
 
 # =============================================================================
@@ -131,8 +134,12 @@ function Start-InstallLog {
     New-Item -ItemType Directory -Path $HOST_DATA_DIR -Force | Out-Null
   }
   $script:LOG_FILE = "$HOST_DATA_DIR\install-$(Get-Date -Format 'yyyyMMdd-HHmmss').log"
-  Start-Transcript -Path $LOG_FILE -Append | Out-Null
-  Info "Install log: $LOG_FILE"
+  try {
+    Start-Transcript -Path $LOG_FILE -Append | Out-Null
+    Info "Install log: $LOG_FILE"
+  } catch {
+    Warn "Could not start transcript logging: $_"
+  }
 }
 
 # =============================================================================
@@ -141,10 +148,10 @@ function Start-InstallLog {
 
 function Print-Banner {
   Write-Host ""
-  Write-Host "╔═══════════════════════════════════════════════════════════════╗" -ForegroundColor Cyan
-  Write-Host "║   Kubernetes (k3d/k3s) + GPU  One-Command Installer           ║" -ForegroundColor Cyan
-  Write-Host "║   Windows                                                     ║" -ForegroundColor Cyan
-  Write-Host "╚═══════════════════════════════════════════════════════════════╝" -ForegroundColor Cyan
+  Write-Host "+===============================================================+" -ForegroundColor Cyan
+  Write-Host "|   Kubernetes (k3d/k3s) + GPU  One-Command Installer           |" -ForegroundColor Cyan
+  Write-Host "|   Windows                                                     |" -ForegroundColor Cyan
+  Write-Host "+===============================================================+" -ForegroundColor Cyan
   Info "Cluster='$CLUSTER_NAME'  Servers=$SERVERS  Agents=$AGENTS  HTTP=$HTTP_PORT  HTTPS=$HTTPS_PORT"
   Info "Host data dir: $HOST_DATA_DIR"
 }
@@ -155,14 +162,17 @@ function Print-Banner {
 
 function Confirm-NvidiaDriver {
   try {
-    $nvSmi = (Get-Command "nvidia-smi.exe" -ErrorAction SilentlyContinue)?.Source
+    $cmd = Get-Command "nvidia-smi.exe" -ErrorAction SilentlyContinue
+    $nvSmi = if ($cmd) { $cmd.Source } else { $null }
+
     if (-not $nvSmi) {
-      $nvSmi = Get-ChildItem "C:\Windows\System32\DriverStore\FileRepository" `
+      $found = Get-ChildItem "C:\Windows\System32\DriverStore\FileRepository" `
         -Recurse -Filter "nvidia-smi.exe" -ErrorAction SilentlyContinue |
-        Select-Object -First 1 -ExpandProperty FullName
+        Select-Object -First 1
+      $nvSmi = if ($found) { $found.FullName } else { $null }
     }
     if (-not $nvSmi) {
-      Warn "nvidia-smi not found — NVIDIA drivers may not be installed."
+      Warn "nvidia-smi not found -- NVIDIA drivers may not be installed."
       Warn "Download: https://www.nvidia.com/Download/index.aspx"
       return
     }
@@ -171,7 +181,7 @@ function Confirm-NvidiaDriver {
     $majorVer  = [int]($driverVer -replace '\..*', '')
     if ($majorVer -ge 460) {
       $script:NVIDIA_DRIVER_OK = $true
-      Ok "NVIDIA driver $driverVer — WSL2 GPU passthrough supported"
+      Ok "NVIDIA driver $driverVer -- WSL2 GPU passthrough supported"
     } else {
       Warn "NVIDIA driver $driverVer is too old (need 460+)."
       Warn "Download latest: https://www.nvidia.com/Download/index.aspx"
@@ -195,9 +205,9 @@ function Find-Gpu {
         $script:GPU_VENDOR = "amd"; Ok "AMD GPU: $($gpu.Name)"; break
       }
     }
-    if ($GPU_VENDOR -eq "none") { Warn "No discrete GPU found — CPU-only mode." }
+    if ($GPU_VENDOR -eq "none") { Warn "No discrete GPU found -- CPU-only mode." }
   } catch {
-    Warn "GPU detection failed ($_) — continuing in CPU-only mode."
+    Warn "GPU detection failed ($_) -- continuing in CPU-only mode."
   }
 
   if ($GPU_VENDOR -eq "nvidia") { Confirm-NvidiaDriver }
@@ -210,11 +220,11 @@ function Find-Gpu {
 }
 
 # =============================================================================
-#  STEP 1 — WINDOWS VIRTUALISATION FEATURES
+#  STEP 1 -- WINDOWS VIRTUALISATION FEATURES
 # =============================================================================
 
 function Enable-VirtualisationFeatures {
-  Step "Step 1/5 — Enabling Windows Virtualisation Features"
+  Step "Step 1/5 -- Enabling Windows Virtualisation Features"
 
   $rebootNeeded = $false
   $features = @{
@@ -246,11 +256,11 @@ function Enable-VirtualisationFeatures {
 }
 
 # =============================================================================
-#  STEP 2 — WINGET
+#  STEP 2 -- WINGET
 # =============================================================================
 
 function Install-Winget {
-  Step "Step 2/5 — Windows Package Manager (winget)"
+  Step "Step 2/5 -- Windows Package Manager (winget)"
 
   if (Has "winget") { Ok "winget: $(winget --version)"; return }
 
@@ -267,11 +277,11 @@ function Install-Winget {
 }
 
 # =============================================================================
-#  STEP 3 — DOCKER DESKTOP
+#  STEP 3 -- DOCKER DESKTOP
 # =============================================================================
 
 function Install-DockerDesktop {
-  Step "Step 3/5 — Docker Desktop"
+  Step "Step 3/5 -- Docker Desktop"
 
   $dockerExe = "$env:ProgramFiles\Docker\Docker\Docker Desktop.exe"
 
@@ -332,7 +342,7 @@ function Install-NvidiaContainerToolkit {
 
   $distros = wsl --list --quiet 2>&1 | Where-Object { $_ -match '\w' }
   if (-not $distros) {
-    Info "No WSL2 distro found — installing Ubuntu..."
+    Info "No WSL2 distro found -- installing Ubuntu..."
     wsl --install -d Ubuntu --no-launch 2>&1 | Out-Null
     wsl --setdefault Ubuntu 2>&1 | Out-Null
     Warn "Ubuntu WSL2 installed. Complete first-run setup in a separate terminal:"
@@ -368,16 +378,16 @@ echo "NCT installed successfully."
     Ok "NVIDIA Container Toolkit in WSL2: $nctVer"
     $script:K3D_GPU_FLAG = "--gpus=all"
   } else {
-    Warn "Could not verify nvidia-ctk inside WSL2 — GPU support may be limited."
+    Warn "Could not verify nvidia-ctk inside WSL2 -- GPU support may be limited."
   }
 }
 
 # =============================================================================
-#  STEP 4 — KUBECTL
+#  STEP 4 -- KUBECTL
 # =============================================================================
 
 function Install-Kubectl {
-  Step "Step 4/5 — kubectl"
+  Step "Step 4/5 -- kubectl"
 
   if (Has "kubectl") { Ok "kubectl: $(kubectl version --client --short 2>$null)"; return }
 
@@ -393,13 +403,13 @@ function Install-Kubectl {
 }
 
 # =============================================================================
-#  STEP 5 — K3D & HELM
+#  STEP 5 -- K3D AND HELM
 # =============================================================================
 
 function Install-K3dAndHelm {
-  Step "Step 5/5 — k3d & Helm"
+  Step "Step 5/5 -- k3d and Helm"
 
-  # ── k3d ──
+  # -- k3d --
   if (-not (Has "k3d")) {
     if (Has "winget") {
       Info "Installing k3d via winget..."
@@ -422,7 +432,7 @@ function Install-K3dAndHelm {
   }
   Ok "k3d: $(k3d version | Select-Object -First 1)"
 
-  # ── Helm ──
+  # -- Helm --
   if (-not (Has "helm")) {
     if (Has "winget") {
       Info "Installing Helm..."
@@ -431,7 +441,7 @@ function Install-K3dAndHelm {
       RefreshPath
     }
     if (Has "helm") { Ok "helm: $(helm version --short 2>$null)" }
-    else { Warn "Helm not installed — install manually from https://helm.sh/docs/intro/install/" }
+    else { Warn "Helm not installed -- install manually from https://helm.sh/docs/intro/install/" }
   } else {
     Ok "helm: $(helm version --short 2>$null)"
   }
@@ -450,9 +460,9 @@ function New-K3dCluster {
     $running = (k3d cluster list -o json 2>&1 | ConvertFrom-Json |
                 Where-Object { $_.name -eq $CLUSTER_NAME }).serversRunning
     if ($running -gt 0) {
-      Ok "Cluster '$CLUSTER_NAME' already running — skipping creation."
+      Ok "Cluster '$CLUSTER_NAME' already running -- skipping creation."
     } else {
-      Info "Cluster '$CLUSTER_NAME' exists but stopped — starting..."
+      Info "Cluster '$CLUSTER_NAME' exists but stopped -- starting..."
       k3d cluster start $CLUSTER_NAME
       Ok "Cluster started."
     }
@@ -481,19 +491,19 @@ function New-K3dCluster {
 
     $modeMsg = if ($K3D_GPU_FLAG) { "with NVIDIA GPU passthrough" } else { "CPU-only" }
     Info "Creating cluster ($modeMsg): $SERVERS server(s) + $AGENTS agent(s)..."
-    Info "(First run pulls the k3s image — ~1 min on a good connection)"
+    Info "(First run pulls the k3s image -- ~1 min on a good connection)"
 
     & k3d $k3dArgs
-    if ($LASTEXITCODE -ne 0) { Err "k3d cluster creation failed — see output above." }
+    if ($LASTEXITCODE -ne 0) { Err "k3d cluster creation failed -- see output above." }
     Ok "Cluster '$CLUSTER_NAME' created!"
   }
 
   k3d kubeconfig merge $CLUSTER_NAME --kubeconfig-switch-context | Out-Null
-  Ok "kubeconfig updated — kubectl now points to '$CLUSTER_NAME'."
+  Ok "kubeconfig updated -- kubectl now points to '$CLUSTER_NAME'."
 }
 
 # =============================================================================
-#  GPU DEVICE PLUGIN & VERIFICATION
+#  GPU DEVICE PLUGIN AND VERIFICATION
 # =============================================================================
 
 function Install-GpuDevicePlugin {
@@ -527,7 +537,7 @@ function Confirm-GpuNode {
     if ($alloc -match '"nvidia\.com/gpu":"?(\d+)') { $gpuCount = [int]$Matches[1]; break }
   }
 
-  if ($gpuCount -gt 0) { Ok "GPU visible on node — allocatable count: $gpuCount" }
+  if ($gpuCount -gt 0) { Ok "GPU visible on node -- allocatable count: $gpuCount" }
   else { Warn "GPU not yet visible. Re-check: kubectl describe node | Select-String 'nvidia'" }
 }
 
@@ -548,17 +558,17 @@ function Confirm-Cluster {
 
 function Print-Summary {
   Write-Host ""
-  Write-Host "╔═══════════════════════════════════════════════════════════════╗" -ForegroundColor Green
-  Write-Host "║  Kubernetes cluster '$CLUSTER_NAME' is ready!               " -ForegroundColor Green -NoNewline
-  Write-Host "║" -ForegroundColor Green
+  Write-Host "+===============================================================+" -ForegroundColor Green
+  Write-Host "|  Kubernetes cluster '$CLUSTER_NAME' is ready!                  " -ForegroundColor Green -NoNewline
+  Write-Host "|" -ForegroundColor Green
   if ($GPU_VENDOR -eq "nvidia" -and $NVIDIA_DRIVER_OK) {
-    Write-Host "║  NVIDIA GPU support enabled                                 ║" -ForegroundColor Green
+    Write-Host "|  NVIDIA GPU support enabled                                  |" -ForegroundColor Green
   } elseif ($GPU_VENDOR -eq "nvidia" -and -not $NVIDIA_DRIVER_OK) {
-    Write-Host "║  NVIDIA GPU found — update driver to 460+ for GPU support   ║" -ForegroundColor Yellow
+    Write-Host "|  NVIDIA GPU found -- update driver to 460+ for GPU support   |" -ForegroundColor Yellow
   } elseif ($GPU_VENDOR -eq "amd_unsupported") {
-    Write-Host "║  AMD GPU — use Linux host for AMD GPU in Kubernetes         ║" -ForegroundColor Yellow
+    Write-Host "|  AMD GPU -- use Linux host for AMD GPU in Kubernetes         |" -ForegroundColor Yellow
   }
-  Write-Host "╚═══════════════════════════════════════════════════════════════╝" -ForegroundColor Green
+  Write-Host "+===============================================================+" -ForegroundColor Green
 
   Write-Host ""
   Write-Host "  Cluster topology:" -ForegroundColor White
@@ -569,17 +579,17 @@ function Print-Summary {
 
   Write-Host ""
   Write-Host "  Common commands:" -ForegroundColor White
-  Write-Host "  kubectl get nodes -o wide           " -NoNewline -ForegroundColor Cyan; Write-Host "— all cluster nodes"
-  Write-Host "  kubectl get pods -A                 " -NoNewline -ForegroundColor Cyan; Write-Host "— all pods"
-  Write-Host "  kubectl apply -f <manifest.yaml>    " -NoNewline -ForegroundColor Cyan; Write-Host "— deploy your app"
-  Write-Host "  helm install <name> <chart>         " -NoNewline -ForegroundColor Cyan; Write-Host "— deploy via Helm"
+  Write-Host "  kubectl get nodes -o wide           " -NoNewline -ForegroundColor Cyan; Write-Host "-- all cluster nodes"
+  Write-Host "  kubectl get pods -A                 " -NoNewline -ForegroundColor Cyan; Write-Host "-- all pods"
+  Write-Host "  kubectl apply -f <manifest.yaml>    " -NoNewline -ForegroundColor Cyan; Write-Host "-- deploy your app"
+  Write-Host "  helm install <name> <chart>         " -NoNewline -ForegroundColor Cyan; Write-Host "-- deploy via Helm"
 
   Write-Host ""
   Write-Host "  Cluster lifecycle:" -ForegroundColor White
-  Write-Host "  k3d cluster stop   $CLUSTER_NAME   " -NoNewline -ForegroundColor Cyan; Write-Host "— pause"
-  Write-Host "  k3d cluster start  $CLUSTER_NAME   " -NoNewline -ForegroundColor Cyan; Write-Host "— resume"
-  Write-Host "  k3d cluster delete $CLUSTER_NAME   " -NoNewline -ForegroundColor Cyan; Write-Host "— destroy"
-  Write-Host "  k3d cluster list                    " -NoNewline -ForegroundColor Cyan; Write-Host "— all clusters"
+  Write-Host "  k3d cluster stop   $CLUSTER_NAME   " -NoNewline -ForegroundColor Cyan; Write-Host "-- pause"
+  Write-Host "  k3d cluster start  $CLUSTER_NAME   " -NoNewline -ForegroundColor Cyan; Write-Host "-- resume"
+  Write-Host "  k3d cluster delete $CLUSTER_NAME   " -NoNewline -ForegroundColor Cyan; Write-Host "-- destroy"
+  Write-Host "  k3d cluster list                    " -NoNewline -ForegroundColor Cyan; Write-Host "-- all clusters"
 
   if ($GPU_VENDOR -eq "nvidia" -and $NVIDIA_DRIVER_OK) {
     Write-Host ""
