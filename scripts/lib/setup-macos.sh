@@ -23,21 +23,32 @@ install_homebrew() {
 
 install_docker_desktop() {
   step "Step 2/3 — Docker Desktop"
+
   if ! has docker; then
     info "Installing Docker Desktop..."
-    brew install --cask docker
-    open -a Docker
-  elif ! docker info &>/dev/null 2>&1; then
-    info "Starting Docker Desktop..."
-    open -a Docker
+    brew install --cask --force docker
   fi
 
-  echo -n "  Waiting for Docker"
-  for i in {1..40}; do
+  if ! docker info &>/dev/null 2>&1; then
+    info "Starting Docker Desktop..."
+    open -a Docker
+    info "First launch? Accept the Docker license agreement in the UI."
+    sleep 5
+  fi
+
+  local max_wait=60
+  echo -n "  Waiting for Docker engine"
+  for i in $(seq 1 $max_wait); do
     docker info &>/dev/null 2>&1 && break
     echo -n "."; sleep 3
   done; echo ""
-  docker info &>/dev/null 2>&1 || error "Docker didn't start. Open Docker Desktop manually and re-run."
+
+  if ! docker info &>/dev/null 2>&1; then
+    warn "Docker did not start within $((max_wait * 3))s."
+    warn "On first install, open Docker Desktop and accept the license agreement."
+    error "Re-run this script once Docker Desktop is running."
+  fi
+
   success "Docker: $(docker --version)"
 }
 
