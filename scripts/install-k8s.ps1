@@ -359,11 +359,14 @@ function Install-NvidiaContainerToolkit {
   Info "Installing nvidia-container-toolkit in the WSL2 environment..."
 
   # Find a usable WSL2 distro (prefer Ubuntu)
-  $distroRaw = cmd /c "wsl --list --quiet 2>&1"
-  $distros = ($distroRaw -split "`n") | ForEach-Object { $_.Trim() -replace '\x00','' } |
-             Where-Object { $_ -match '^\w' }
+  # WSL outputs UTF-16LE; temporarily switch console encoding to decode it
+  $prevEncoding = [Console]::OutputEncoding
+  [Console]::OutputEncoding = [System.Text.Encoding]::Unicode
+  $distroRaw = wsl --list --quiet 2>$null
+  [Console]::OutputEncoding = $prevEncoding
+  $distros = @($distroRaw | ForEach-Object { "$_".Trim() } | Where-Object { $_ -ne '' -and $_ -match '^\w' })
   $wslDistro = ($distros | Where-Object { $_ -match 'Ubuntu' } | Select-Object -First 1)
-  if (-not $wslDistro -and $distros) { $wslDistro = $distros[0] }
+  if (-not $wslDistro -and $distros.Count -gt 0) { $wslDistro = $distros[0] }
 
   if (-not $wslDistro) {
     Info "No WSL2 distro found -- installing Ubuntu..."
@@ -415,7 +418,7 @@ echo "NCT installed successfully."
 function Install-Kubectl {
   Step "Step 4/5 -- kubectl"
 
-  if (Has "kubectl") { Ok "kubectl: $(kubectl version --client --short 2>$null)"; return }
+  if (Has "kubectl") { Ok "kubectl: $(cmd /c 'kubectl version --client 2>&1' | Select-Object -First 1)"; return }
 
   $kVer = Invoke-WithRetry -Label "kubectl version check" -ScriptBlock {
     (Invoke-WebRequest "https://dl.k8s.io/release/stable.txt" -UseBasicParsing).Content.Trim()
@@ -466,10 +469,10 @@ function Install-K3dAndHelm {
         --accept-package-agreements --accept-source-agreements --silent 2>&1 | Out-Null
       RefreshPath
     }
-    if (Has "helm") { Ok "helm: $(helm version --short 2>$null)" }
+    if (Has "helm") { Ok "helm: $(cmd /c 'helm version --short 2>&1')" }
     else { Warn "Helm not installed -- install manually from https://helm.sh/docs/intro/install/" }
   } else {
-    Ok "helm: $(helm version --short 2>$null)"
+    Ok "helm: $(cmd /c 'helm version --short 2>&1')"
   }
 }
 
