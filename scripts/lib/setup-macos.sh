@@ -23,7 +23,11 @@ install_homebrew() {
 install_docker_desktop() {
   step "Step 2/3 — Docker Desktop"
 
+  local fresh_install=false
+
   if ! has docker; then
+    fresh_install=true
+
     # Detect real hardware — sysctl is immune to Rosetta translation
     local real_arch
     if sysctl -n hw.optional.arm64 2>/dev/null | grep -q '1'; then
@@ -49,27 +53,7 @@ install_docker_desktop() {
     success "Docker Desktop ($real_arch) installed to /Applications."
   fi
 
-  if ! docker info &>/dev/null 2>&1; then
-    info "Starting Docker Desktop..."
-    open -a Docker
-    info "First launch? Accept the Docker license agreement in the UI."
-    sleep 5
-  fi
-
-  local max_wait=60
-  echo -n "  Waiting for Docker engine"
-  for i in $(seq 1 $max_wait); do
-    docker info &>/dev/null 2>&1 && break
-    echo -n "."; sleep 3
-  done; echo ""
-
-  if ! docker info &>/dev/null 2>&1; then
-    warn "Docker did not start within $((max_wait * 3))s."
-    warn "On first install, open Docker Desktop and accept the license agreement."
-    error "Re-run this script once Docker Desktop is running."
-  fi
-
-  # Verify the installed Docker matches real hardware
+  # Verify the installed binary matches real hardware
   local docker_arch
   docker_arch="$(file /Applications/Docker.app/Contents/MacOS/Docker 2>/dev/null || true)"
   if sysctl -n hw.optional.arm64 2>/dev/null | grep -q '1'; then
@@ -77,6 +61,45 @@ install_docker_desktop() {
       warn "Docker binary appears to be Intel (x86_64) on Apple Silicon hardware."
       warn "Remove it and re-run: rm -rf /Applications/Docker.app"
     fi
+  fi
+
+  # ── First-time install: guided pause ──────────────────────────────────────
+  if [[ "$fresh_install" == true ]]; then
+    echo ""
+    echo -e "  ${BOLD}Docker Desktop needs a one-time setup.${RESET}"
+    echo -e "  We'll open it for you now. Here's what to do:"
+    echo ""
+    echo -e "    1. ${CYAN}Accept the license agreement${RESET} in the Docker window"
+    echo -e "    2. ${CYAN}Wait for the whale icon${RESET} 🐳 to appear in your menu bar"
+    echo -e "    3. ${CYAN}Re-run this script${RESET} once Docker is ready"
+    echo ""
+    open -a Docker
+    info "Opening Docker Desktop…"
+    echo ""
+    echo -e "  ${BOLD}This is completely normal — it only happens once.${RESET}"
+    echo -e "  The script will now exit. Re-run it after Docker finishes its setup."
+    echo ""
+    exit 0
+  fi
+
+  # ── Docker already installed — just make sure it's running ────────────────
+  if ! docker info &>/dev/null 2>&1; then
+    info "Starting Docker Desktop…"
+    open -a Docker
+    sleep 3
+  fi
+
+  local max_wait=40
+  echo -n "  Waiting for Docker engine"
+  for i in $(seq 1 $max_wait); do
+    docker info &>/dev/null 2>&1 && break
+    echo -n "."; sleep 3
+  done; echo ""
+
+  if ! docker info &>/dev/null 2>&1; then
+    warn "Docker did not respond within ~$((max_wait * 3))s."
+    warn "Make sure Docker Desktop is running (look for the whale icon in the menu bar)."
+    error "Re-run this script once Docker is ready."
   fi
 
   success "Docker: $(docker --version)"
