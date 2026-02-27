@@ -2,18 +2,29 @@
 # =============================================================================
 #  Bootstrap installer — downloads scripts from GitHub and runs install-k8s.sh
 #
-#  Usage:
+#  Usage (macOS / Linux):
 #    curl -fsSL https://raw.githubusercontent.com/tracebloc/client/main/scripts/install.sh | bash
 #    curl -fsSL ... | BRANCH=develop bash
+#
+#  Windows (PowerShell as Administrator):
+#    irm https://raw.githubusercontent.com/tracebloc/client/main/scripts/install.ps1 | iex
 # =============================================================================
 set -euo pipefail
+
+# ── Platform gate ────────────────────────────────────────────────────────────
+case "$(uname -s)" in
+  MINGW*|MSYS*|CYGWIN*)
+    echo "[ERROR] Windows detected. Use PowerShell instead:"
+    echo "  irm https://raw.githubusercontent.com/tracebloc/client/main/scripts/install.ps1 | iex"
+    exit 1 ;;
+esac
 
 BRANCH="${BRANCH:-main}"
 REPO_RAW="https://raw.githubusercontent.com/tracebloc/client/${BRANCH}"
 TMPDIR="$(mktemp -d)"
 trap 'rm -rf "$TMPDIR"' EXIT
 
-echo "⬇ Downloading tracebloc installer (branch: $BRANCH)..."
+echo "Downloading tracebloc installer (branch: $BRANCH)..."
 
 mkdir -p "$TMPDIR/lib"
 
@@ -30,12 +41,26 @@ FILES=(
   "scripts/lib/summary.sh"
 )
 
+download_with_retry() {
+  local url="$1" dest="$2"
+  local attempt max_attempts=3 delay=5
+  for attempt in 1 2 3; do
+    if curl -fsSL "$url" -o "$dest"; then return 0; fi
+    if [[ $attempt -ge $max_attempts ]]; then
+      echo "[ERROR] Failed to download $url after $max_attempts attempts."
+      exit 1
+    fi
+    echo "[WARN]  Download failed (attempt $attempt/$max_attempts). Retrying in ${delay}s..."
+    sleep "$delay"
+  done
+}
+
 for f in "${FILES[@]}"; do
   dest="$TMPDIR/${f#scripts/}"
-  curl -fsSL "$REPO_RAW/$f" -o "$dest"
+  download_with_retry "$REPO_RAW/$f" "$dest"
 done
 
 chmod +x "$TMPDIR/install-k8s.sh"
 
-echo "🚀  Running installer..."
+echo "Running installer..."
 bash "$TMPDIR/install-k8s.sh" "$@"

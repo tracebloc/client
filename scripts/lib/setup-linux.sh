@@ -30,7 +30,7 @@ install_docker_engine() {
       sudo zypper install -y docker
     else
       info "Installing Docker via get.docker.com..."
-      curl -fsSL https://get.docker.com | sudo bash
+      retry 3 5 bash -c 'curl -fsSL https://get.docker.com | sudo bash'
     fi
     sudo systemctl enable --now docker
     sudo usermod -aG docker "$USER"
@@ -73,10 +73,10 @@ install_system_deps() {
 install_kubectl() {
   step "Step 3/5 — kubectl"
   if ! has kubectl; then
-    KUBE_VER=$(curl -fsSL https://dl.k8s.io/release/stable.txt)
+    KUBE_VER=$(retry 3 5 curl -fsSL https://dl.k8s.io/release/stable.txt)
     info "Downloading kubectl $KUBE_VER..."
-    curl -fsSLO "https://dl.k8s.io/release/${KUBE_VER}/bin/linux/${ARCH_DL}/kubectl"
-    curl -fsSLO "https://dl.k8s.io/release/${KUBE_VER}/bin/linux/${ARCH_DL}/kubectl.sha256"
+    retry 3 5 curl -fsSLO "https://dl.k8s.io/release/${KUBE_VER}/bin/linux/${ARCH_DL}/kubectl"
+    retry 3 5 curl -fsSLO "https://dl.k8s.io/release/${KUBE_VER}/bin/linux/${ARCH_DL}/kubectl.sha256"
     echo "$(cat kubectl.sha256)  kubectl" | sha256sum --check --quiet
     chmod +x kubectl && sudo mv kubectl /usr/local/bin/kubectl
     rm -f kubectl.sha256
@@ -91,7 +91,7 @@ install_k3d() {
   step "Step 4/5 — k3d"
   if ! has k3d; then
     info "Installing k3d..."
-    curl -fsSL https://raw.githubusercontent.com/k3d-io/k3d/main/install.sh | bash
+    retry 3 5 bash -c 'curl -fsSL https://raw.githubusercontent.com/k3d-io/k3d/main/install.sh | bash'
     success "k3d: $(k3d version | head -1)"
   else
     success "k3d: $(k3d version | head -1)"
@@ -103,7 +103,7 @@ install_helm() {
   step "Step 5/5 — Helm"
   if ! has helm; then
     info "Installing Helm..."
-    curl -fsSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
+    retry 3 5 bash -c 'curl -fsSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash'
     success "helm: $(helm version --short 2>/dev/null || echo installed)"
   else
     success "helm: $(helm version --short 2>/dev/null || echo present)"
