@@ -68,6 +68,71 @@ preflight_sudo() {
   ( while sudo -n true 2>/dev/null; do sleep 50; done ) &
 }
 
+# ── Download with live progress bar ───────────────────────────────────────────
+#  Usage:  download_with_progress "https://…/file.dmg" "/tmp/file.dmg" "Downloading Docker Desktop"
+#  Probes total size via HEAD, downloads in background, and monitors the growing
+#  file to render a visual bar with percentage and MB counters.  Works on both
+#  macOS and Linux without stdbuf or GNU coreutils.
+download_with_progress() {
+  local url="$1" dest="$2" label="$3"
+
+  local total_bytes
+  total_bytes=$(curl -fsSLI "$url" 2>/dev/null \
+    | awk 'tolower($0) ~ /content-length/ {gsub(/[^0-9]/,"",$2); print $2}' \
+    | tail -1)
+
+  local total_mb=""
+  if [[ -n "$total_bytes" ]] && (( total_bytes > 0 )) 2>/dev/null; then
+    total_mb=$(awk "BEGIN {printf \"%.0f\", $total_bytes / 1048576}")
+    info "${label} (${total_mb} MB)"
+  else
+    info "$label"
+    total_bytes=0
+  fi
+
+  local logfile="${LOG_FILE:-/tmp/tracebloc-spin.log}"
+  rm -f "$dest"
+
+  curl -fSL -o "$dest" "$url" >> "$logfile" 2>&1 &
+  local curl_pid=$!
+
+  local bar_width=30
+  tput civis 2>/dev/null || true
+
+  while kill -0 "$curl_pid" 2>/dev/null; do
+    if [[ -f "$dest" ]] && (( total_bytes > 0 )); then
+      local cur_bytes
+      cur_bytes=$(wc -c < "$dest" 2>/dev/null || echo 0)
+      cur_bytes=${cur_bytes// /}
+
+      local pct=$(( cur_bytes * 100 / total_bytes ))
+      (( pct > 100 )) && pct=100
+      local filled=$(( pct * bar_width / 100 ))
+      local empty=$(( bar_width - filled ))
+      local cur_mb=$(awk "BEGIN {printf \"%.0f\", $cur_bytes / 1048576}")
+
+      local bar=""
+      for (( j=0; j<filled; j++ )); do bar+="█"; done
+      for (( j=0; j<empty;  j++ )); do bar+="░"; done
+
+      printf "\r  ${CYAN}%s${RESET} %3d%%  %s / %s MB" "$bar" "$pct" "$cur_mb" "$total_mb"
+    fi
+    sleep 0.4
+  done
+
+  wait "$curl_pid"
+  local rc=$?
+
+  if [[ $rc -eq 0 ]] && [[ -n "$total_mb" ]]; then
+    local bar=""
+    for (( j=0; j<bar_width; j++ )); do bar+="█"; done
+    printf "\r  ${CYAN}%s${RESET} 100%%  %s / %s MB\n" "$bar" "$total_mb" "$total_mb"
+  fi
+  printf "\r\033[K"
+  tput cnorm 2>/dev/null || true
+  return $rc
+}
+
 # ── Retry wrapper for flaky network calls ────────────────────────────────────
 #  Usage:  retry 3 5 curl -fsSL https://example.com -o /tmp/file
 #          retry <max_attempts> <delay_seconds> <command...>

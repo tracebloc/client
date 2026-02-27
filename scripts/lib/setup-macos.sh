@@ -41,8 +41,8 @@ install_docker_desktop() {
     local dmg_url="https://desktop.docker.com/mac/main/${real_arch}/Docker.dmg"
     local dmg_path="/tmp/Docker.dmg"
 
-    spin_cmd "Downloading Docker Desktop ($real_arch)…" \
-      retry 3 5 curl -fSL -o "$dmg_path" "$dmg_url"
+    retry 3 5 download_with_progress "$dmg_url" "$dmg_path" \
+      "Downloading Docker Desktop ($real_arch)"
 
     spin_cmd "Installing Docker Desktop…" bash -c \
       "hdiutil attach '$dmg_path' -quiet && \
