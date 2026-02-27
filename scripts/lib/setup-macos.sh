@@ -7,8 +7,7 @@
 install_homebrew() {
   step "Step 1/3 — Homebrew"
   if ! has brew; then
-    info "Installing Homebrew..."
-    NONINTERACTIVE=1 /bin/bash -c \
+    spin_cmd "Installing Homebrew…" env NONINTERACTIVE=1 /bin/bash -c \
       "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
     if [[ "$ARCH" == "arm64" ]] && [[ -f /opt/homebrew/bin/brew ]]; then
       eval "$(/opt/homebrew/bin/brew shellenv)"
@@ -34,16 +33,18 @@ install_docker_desktop() {
     fi
 
     info "Detected hardware architecture: $real_arch"
-    info "Installing Docker Desktop ($real_arch)..."
 
     local dmg_url="https://desktop.docker.com/mac/main/${real_arch}/Docker.dmg"
     local dmg_path="/tmp/Docker.dmg"
 
-    retry 3 5 curl -fSL -o "$dmg_path" "$dmg_url"
-    hdiutil attach "$dmg_path" -quiet
-    cp -R "/Volumes/Docker/Docker.app" /Applications/ 2>/dev/null || true
-    hdiutil detach "/Volumes/Docker" -quiet 2>/dev/null || true
-    rm -f "$dmg_path"
+    spin_cmd "Downloading Docker Desktop ($real_arch)…" \
+      retry 3 5 curl -fSL -o "$dmg_path" "$dmg_url"
+
+    spin_cmd "Installing Docker Desktop…" bash -c \
+      "hdiutil attach '$dmg_path' -quiet && \
+       cp -R '/Volumes/Docker/Docker.app' /Applications/ && \
+       hdiutil detach '/Volumes/Docker' -quiet 2>/dev/null; \
+       rm -f '$dmg_path'"
 
     success "Docker Desktop ($real_arch) installed to /Applications."
   fi
@@ -83,9 +84,27 @@ install_docker_desktop() {
 
 install_macos_cli_tools() {
   step "Step 3/3 — kubectl, k3d & helm"
-  has kubectl || brew install kubectl && success "kubectl: $(kubectl version --client --short 2>/dev/null || echo installed)"
-  has k3d     || brew install k3d    && success "k3d: $(k3d version | head -1)"
-  has helm    || brew install helm   && success "helm: $(helm version --short 2>/dev/null || echo installed)"
+
+  if ! has kubectl; then
+    spin_cmd "Installing kubectl…" brew install kubectl
+    success "kubectl: $(kubectl version --client --short 2>/dev/null || echo installed)"
+  else
+    success "kubectl: $(kubectl version --client --short 2>/dev/null || echo installed)"
+  fi
+
+  if ! has k3d; then
+    spin_cmd "Installing k3d…" brew install k3d
+    success "k3d: $(k3d version | head -1)"
+  else
+    success "k3d: $(k3d version | head -1)"
+  fi
+
+  if ! has helm; then
+    spin_cmd "Installing helm…" brew install helm
+    success "helm: $(helm version --short 2>/dev/null || echo installed)"
+  else
+    success "helm: $(helm version --short 2>/dev/null || echo installed)"
+  fi
 }
 
 install_macos() {

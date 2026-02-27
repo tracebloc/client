@@ -18,6 +18,39 @@ step()    { echo -e "\n${BOLD}━━━ $* ━━━${RESET}"; }
 # ── Utility ──────────────────────────────────────────────────────────────────
 has() { command -v "$1" &>/dev/null; }
 
+# ── Spinner — hides noisy command output behind an animated status line ──────
+#  Usage:  spin <pid> "Installing foo…"
+#  The background process's stdout/stderr should already be redirected to a file
+#  before calling spin. spin waits for the PID to exit and returns its exit code.
+spin() {
+  local pid="$1" msg="$2"
+  local frames=('⠋' '⠙' '⠹' '⠸' '⠼' '⠴' '⠦' '⠧' '⠇' '⠏')
+  local i=0
+
+  tput civis 2>/dev/null || true          # hide cursor
+  while kill -0 "$pid" 2>/dev/null; do
+    printf "\r  ${CYAN}%s${RESET} %s" "${frames[i]}" "$msg"
+    i=$(( (i + 1) % ${#frames[@]} ))
+    sleep 0.12
+  done
+
+  wait "$pid"
+  local rc=$?
+  printf "\r\033[K"                       # clear the spinner line
+  tput cnorm 2>/dev/null || true          # restore cursor
+  return $rc
+}
+
+# ── Convenience wrapper: run a command quietly behind a spinner ───────────────
+#  Usage:  spin_cmd "Installing foo…" brew install --cask docker
+#  stdout/stderr are captured in the LOG_FILE (if set) or /tmp/tracebloc-spin.log
+spin_cmd() {
+  local msg="$1"; shift
+  local logfile="${LOG_FILE:-/tmp/tracebloc-spin.log}"
+  "$@" >> "$logfile" 2>&1 &
+  spin $! "$msg"
+}
+
 # ── Retry wrapper for flaky network calls ────────────────────────────────────
 #  Usage:  retry 3 5 curl -fsSL https://example.com -o /tmp/file
 #          retry <max_attempts> <delay_seconds> <command...>
