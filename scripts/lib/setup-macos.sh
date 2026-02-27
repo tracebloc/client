@@ -25,8 +25,27 @@ install_docker_desktop() {
   step "Step 2/3 — Docker Desktop"
 
   if ! has docker; then
-    info "Installing Docker Desktop..."
-    brew install --cask --force docker
+    # Detect real hardware — sysctl is immune to Rosetta translation
+    local real_arch
+    if sysctl -n hw.optional.arm64 2>/dev/null | grep -q '1'; then
+      real_arch="arm64"
+    else
+      real_arch="amd64"
+    fi
+
+    info "Detected hardware architecture: $real_arch"
+    info "Installing Docker Desktop ($real_arch)..."
+
+    local dmg_url="https://desktop.docker.com/mac/main/${real_arch}/Docker.dmg"
+    local dmg_path="/tmp/Docker.dmg"
+
+    retry 3 5 curl -fSL -o "$dmg_path" "$dmg_url"
+    hdiutil attach "$dmg_path" -quiet
+    cp -R "/Volumes/Docker/Docker.app" /Applications/ 2>/dev/null || true
+    hdiutil detach "/Volumes/Docker" -quiet 2>/dev/null || true
+    rm -f "$dmg_path"
+
+    success "Docker Desktop ($real_arch) installed to /Applications."
   fi
 
   if ! docker info &>/dev/null 2>&1; then
@@ -47,6 +66,16 @@ install_docker_desktop() {
     warn "Docker did not start within $((max_wait * 3))s."
     warn "On first install, open Docker Desktop and accept the license agreement."
     error "Re-run this script once Docker Desktop is running."
+  fi
+
+  # Verify the installed Docker matches real hardware
+  local docker_arch
+  docker_arch="$(file /Applications/Docker.app/Contents/MacOS/Docker 2>/dev/null || true)"
+  if sysctl -n hw.optional.arm64 2>/dev/null | grep -q '1'; then
+    if echo "$docker_arch" | grep -q 'x86_64' && ! echo "$docker_arch" | grep -q 'arm64'; then
+      warn "Docker binary appears to be Intel (x86_64) on Apple Silicon hardware."
+      warn "Remove it and re-run: rm -rf /Applications/Docker.app"
+    fi
   fi
 
   success "Docker: $(docker --version)"

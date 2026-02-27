@@ -64,6 +64,10 @@ validate_config() {
 # ── Runtime globals ──────────────────────────────────────────────────────────
 OS="$(uname -s)"
 ARCH="$(uname -m)"
+# On macOS, override ARCH with real hardware to avoid Rosetta misdetection
+if [[ "$OS" == "Darwin" ]] && sysctl -n hw.optional.arm64 2>/dev/null | grep -q '1'; then
+  ARCH="arm64"
+fi
 [[ "$ARCH" == "x86_64" ]] && ARCH_DL="amd64" || ARCH_DL="arm64"
 
 GPU_VENDOR="none"          # nvidia | amd | apple_silicon | none
