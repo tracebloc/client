@@ -126,6 +126,7 @@ install_linux() {
   export NEEDRESTART_MODE=a
   export NEEDRESTART_SUSPEND=1
 
+  preflight_sudo
   setup_pm
   install_docker_engine
   install_system_deps

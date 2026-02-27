@@ -131,6 +131,7 @@ install_macos_cli_tools() {
 }
 
 install_macos() {
+  preflight_sudo
   install_homebrew
   install_docker_desktop
   install_macos_cli_tools

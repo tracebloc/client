@@ -51,6 +51,23 @@ spin_cmd() {
   spin $! "$msg"
 }
 
+# ── Sudo preflight — warm the credential cache before spinners hide prompts ──
+#  Call once at the start of install_macos / install_linux.  sudo -v caches
+#  credentials for the default timeout (usually 5–15 min), so subsequent sudo
+#  calls inside spin_cmd won't prompt interactively.
+preflight_sudo() {
+  if sudo -n true 2>/dev/null; then
+    return 0
+  fi
+  echo ""
+  info "This installer needs administrator privileges to set up system tools."
+  echo -e "  ${BOLD}You may be prompted for your macOS/Linux password below.${RESET}"
+  echo ""
+  sudo -v || error "Could not obtain administrator privileges. Re-run with a user that has sudo access."
+  # Keep the credential cache alive in the background for long installs
+  ( while sudo -n true 2>/dev/null; do sleep 50; done ) &
+}
+
 # ── Retry wrapper for flaky network calls ────────────────────────────────────
 #  Usage:  retry 3 5 curl -fsSL https://example.com -o /tmp/file
 #          retry <max_attempts> <delay_seconds> <command...>
