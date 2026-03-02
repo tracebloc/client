@@ -200,8 +200,11 @@ validate_config() {
   # HOST_DATA_DIR must be under $HOME and must not be a system path (security)
   local dir="$HOST_DATA_DIR"
   [[ "$dir" != /* ]] && dir="$HOME/$dir"
-  dir="$(cd -P "$dir" 2>/dev/null && pwd)" || true
-  [[ -z "$dir" ]] && error "HOST_DATA_DIR could not be resolved: $HOST_DATA_DIR"
+  # Resolve via parent directory — the target itself may not exist yet on first run
+  local parent
+  parent="$(cd -P "$(dirname "$dir")" 2>/dev/null && pwd)" || true
+  [[ -z "$parent" ]] && error "HOST_DATA_DIR parent directory could not be resolved: $(dirname "$dir")"
+  dir="$parent/$(basename "$dir")"
   case "$dir" in
     /) error "HOST_DATA_DIR cannot be root (/)"
       ;;
