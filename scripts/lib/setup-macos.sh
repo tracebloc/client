@@ -107,15 +107,48 @@ install_docker_desktop() {
   local fresh_install=false
   local need_install=false
 
-  # Check if existing Docker is the wrong architecture and replace it
+  # Check if existing Docker Desktop is for the wrong architecture (either direction)
   if [[ -d "/Applications/Docker.app" ]]; then
     local docker_bin_arch
     docker_bin_arch="$(file /Applications/Docker.app/Contents/MacOS/Docker 2>/dev/null || true)"
-    if [[ "$real_arch" == "arm64" ]] \
-        && echo "$docker_bin_arch" | grep -q 'x86_64' \
-        && ! echo "$docker_bin_arch" | grep -q 'arm64'; then
-      warn "Existing Docker Desktop is Intel (x86_64) but this is Apple Silicon hardware."
-      info "Removing wrong-architecture Docker Desktop…"
+    local docker_is_arm=false
+    local docker_is_intel=false
+    echo "$docker_bin_arch" | grep -q 'arm64' && docker_is_arm=true
+    echo "$docker_bin_arch" | grep -q 'x86_64' && docker_is_intel=true
+
+    local wrong_arch=false
+    if [[ "$real_arch" == "arm64" ]] && [[ "$docker_is_intel" == true ]] && [[ "$docker_is_arm" != true ]]; then
+      wrong_arch=true
+    fi
+    if [[ "$real_arch" == "amd64" ]] && [[ "$docker_is_arm" == true ]]; then
+      wrong_arch=true
+    fi
+
+    if [[ "$wrong_arch" == true ]]; then
+      echo ""
+      if [[ "$real_arch" == "arm64" ]]; then
+        warn "Docker Desktop installed is for Intel (x86_64), but this Mac is Apple Silicon (arm64)."
+        echo -e "  That often causes slow performance, instability, or Docker failing to start."
+      else
+        warn "Docker Desktop installed is for Apple Silicon (arm64), but this Mac is Intel (x86_64)."
+        echo -e "  Docker may not run correctly on this machine."
+      fi
+      echo -e "  ${BOLD}We'll replace it with Docker for your Mac's architecture.${RESET}"
+      echo ""
+
+      if [[ "${TRACEBLOC_DOCKER_ARCH_PROMPT:-0}" == "1" ]]; then
+        local reply
+        read -r -p "  Replace wrong-architecture Docker with native version? [Y/n] " reply || true
+        if [[ -n "$reply" && "$reply" != "y" && "$reply" != "Y" ]]; then
+          echo ""
+          echo -e "  ${BOLD}Skipped.${RESET} To fix later, re-run this installer or install Docker manually for your chip:"
+          echo -e "  ${CYAN}https://docs.docker.com/desktop/install/mac-install/${RESET}"
+          echo ""
+          error "Docker architecture mismatch. Install the correct Docker version and re-run."
+        fi
+      fi
+
+      info "Quitting and removing wrong-architecture Docker Desktop…"
       osascript -e 'quit app "Docker"' 2>/dev/null || true
       sleep 2
       pkill -x "Docker Desktop" 2>/dev/null || true; sleep 1
@@ -123,6 +156,7 @@ install_docker_desktop() {
       rm -rf /Applications/Docker.app
       need_install=true
       fresh_install=true
+      success "Removed. Installing Docker for $real_arch next."
     fi
   fi
 

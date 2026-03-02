@@ -23,6 +23,55 @@ step()    { echo -e "\n${BOLD}━━━ $* ━━━${RESET}"; }
 # ── Utility ──────────────────────────────────────────────────────────────────
 has() { command -v "$1" &>/dev/null; }
 
+# ── macOS: Docker Desktop architecture vs machine (for wrong-arch UX) ────────
+#  Call early on macOS to fail fast with clear instructions if Docker.app
+#  is for the wrong architecture (e.g. Intel Docker on Apple Silicon).
+#  Returns 0 if OK or not applicable; returns 1 and prints message if mismatch.
+check_docker_arch_mac() {
+  [[ "$(uname -s)" != "Darwin" ]] && return 0
+  [[ ! -d "/Applications/Docker.app" ]] && return 0
+
+  local real_arch
+  if sysctl -n hw.optional.arm64 2>/dev/null | grep -q '1'; then
+    real_arch="arm64"
+  else
+    real_arch="amd64"
+  fi
+
+  local docker_bin_arch
+  docker_bin_arch="$(file /Applications/Docker.app/Contents/MacOS/Docker 2>/dev/null || true)"
+  local docker_is_arm=false
+  local docker_is_intel=false
+  echo "$docker_bin_arch" | grep -q 'arm64' && docker_is_arm=true
+  echo "$docker_bin_arch" | grep -q 'x86_64' && docker_is_intel=true
+
+  if [[ "$real_arch" == "arm64" ]] && [[ "$docker_is_intel" == true ]] && [[ "$docker_is_arm" != true ]]; then
+    echo ""
+    echo -e "  ${BOLD}Docker Desktop is for the wrong architecture.${RESET}"
+    echo -e "  This Mac is ${CYAN}Apple Silicon (arm64)${RESET}, but the installed Docker is for ${YELLOW}Intel (x86_64)${RESET}."
+    echo -e "  That can cause poor performance, failures, or Docker not starting."
+    echo ""
+    echo -e "  ${BOLD}Fix:${RESET} Re-run the full installer — it will replace Docker with the native version:"
+    echo -e "    ${CYAN}./install-k8s.sh${RESET}"
+    echo ""
+    return 1
+  fi
+
+  if [[ "$real_arch" == "amd64" ]] && [[ "$docker_is_arm" == true ]]; then
+    echo ""
+    echo -e "  ${BOLD}Docker Desktop is for the wrong architecture.${RESET}"
+    echo -e "  This Mac is ${CYAN}Intel (x86_64)${RESET}, but the installed Docker is for ${YELLOW}Apple Silicon (arm64)${RESET}."
+    echo -e "  Docker may not run correctly."
+    echo ""
+    echo -e "  ${BOLD}Fix:${RESET} Re-run the full installer — it will replace Docker with the native version:"
+    echo -e "    ${CYAN}./install-k8s.sh${RESET}"
+    echo ""
+    return 1
+  fi
+
+  return 0
+}
+
 # ── Spinner — hides noisy command output behind an animated status line ──────
 #  Usage:  spin <pid> "Installing foo…"
 #  The background process's stdout/stderr should already be redirected to a file
@@ -277,6 +326,7 @@ Environment variable overrides:
   HTTP_PORT      Host HTTP  ingress port         (default: 80)
   HTTPS_PORT     Host HTTPS ingress port         (default: 443)
   HOST_DATA_DIR  Persistent data directory       (default: ~/.tracebloc)
+  TRACEBLOC_DOCKER_ARCH_PROMPT=1  (macOS) Prompt before replacing wrong-arch Docker (default: auto-replace)
 
 Windows:
   irm https://raw.githubusercontent.com/tracebloc/client/main/scripts/install.ps1 | iex
