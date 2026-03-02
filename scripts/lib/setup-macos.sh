@@ -156,7 +156,7 @@ install_docker_desktop() {
       sleep 2
       pkill -x "Docker Desktop" 2>/dev/null || true; sleep 1
       pkill -9 -x "Docker Desktop" 2>/dev/null || true; sleep 1
-      rm -rf /Applications/Docker.app
+      sudo rm -rf /Applications/Docker.app
       need_install=true
       fresh_install=true
       success "Removed. Installing Docker for $real_arch next."
