@@ -3,10 +3,19 @@
 #  cluster.sh — k3d cluster creation, start, and kubeconfig merge
 # =============================================================================
 
+# Exact cluster name match (avoids "tracebloc" matching "tracebloc2")
+_cluster_exists() {
+  if command -v jq &>/dev/null; then
+    k3d cluster list -o json 2>/dev/null | jq -e --arg n "$CLUSTER_NAME" '(.[] | select(.name == $n)) != null' >/dev/null 2>&1
+  else
+    k3d cluster list --no-headers 2>/dev/null | awk -v n="$CLUSTER_NAME" '$1 == n { exit 0 } END { exit 1 }'
+  fi
+}
+
 create_cluster() {
   step "Creating k3d Cluster: '$CLUSTER_NAME'"
 
-  if k3d cluster list 2>/dev/null | grep -q "^${CLUSTER_NAME}"; then
+  if _cluster_exists; then
     _handle_existing_cluster
   else
     _create_new_cluster
@@ -17,9 +26,18 @@ create_cluster() {
 }
 
 _handle_existing_cluster() {
-  CLUSTER_STATUS=$(k3d cluster list -o json 2>/dev/null \
-    | grep -o '"serversRunning":[0-9]*' | head -1 | grep -o '[0-9]*' \
-    2>/dev/null || echo "0")
+  # Get serversRunning for this cluster only (jq preferred; fallback to table parsing)
+  CLUSTER_STATUS="0"
+  if command -v jq &>/dev/null; then
+    CLUSTER_STATUS=$(k3d cluster list -o json 2>/dev/null | jq -r --arg n "$CLUSTER_NAME" '.[] | select(.name == $n) | .serversRunning // 0' 2>/dev/null || echo "0")
+  else
+    local line
+    line=$(k3d cluster list --no-headers 2>/dev/null | awk -v n="$CLUSTER_NAME" '$1 == n { print $2; exit }')
+    if [[ -n "$line" ]]; then
+      CLUSTER_STATUS="${line%%/*}"
+    fi
+  fi
+  CLUSTER_STATUS="${CLUSTER_STATUS:-0}"
 
   if [[ "$CLUSTER_STATUS" -gt "0" ]]; then
     success "Cluster '$CLUSTER_NAME' already running — skipping creation."
@@ -47,7 +65,8 @@ _create_new_cluster() {
     --wait
   )
 
-  [[ -n "$K8S_VERSION" ]] && K3D_ARGS+=(--image "rancher/k3s:${K8S_VERSION}")
+  # Empty or "latest" = k3d default; otherwise use pinned image
+  [[ -n "$K8S_VERSION" && "$K8S_VERSION" != "latest" ]] && K3D_ARGS+=(--image "rancher/k3s:${K8S_VERSION}")
 
   if [[ ${#K3D_GPU_FLAGS[@]} -gt 0 ]]; then
     K3D_ARGS+=("${K3D_GPU_FLAGS[@]}")

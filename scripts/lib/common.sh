@@ -174,7 +174,8 @@ setup_log_file() {
 CLUSTER_NAME="${CLUSTER_NAME:-tracebloc}"
 SERVERS="${SERVERS:-1}"
 AGENTS="${AGENTS:-1}"
-K8S_VERSION="${K8S_VERSION:-}"           # empty = latest stable
+# Pinned default; set K8S_VERSION="" to use latest (may break on new k3s releases)
+K8S_VERSION="${K8S_VERSION:-v1.29.4-k3s1}"
 HTTP_PORT="${HTTP_PORT:-80}"
 HTTPS_PORT="${HTTPS_PORT:-443}"
 HOST_DATA_DIR="${HOST_DATA_DIR:-$HOME/.tracebloc}"
@@ -195,6 +196,22 @@ validate_config() {
   (( HTTP_PORT >= 1 && HTTP_PORT <= 65535 ))   || error "HTTP_PORT must be 1-65535 (got '$HTTP_PORT')"
   (( HTTPS_PORT >= 1 && HTTPS_PORT <= 65535 )) || error "HTTPS_PORT must be 1-65535 (got '$HTTPS_PORT')"
   (( HTTP_PORT != HTTPS_PORT )) || error "HTTP_PORT and HTTPS_PORT must be different (both set to $HTTP_PORT)"
+
+  # HOST_DATA_DIR must be under $HOME and must not be a system path (security)
+  local dir="$HOST_DATA_DIR"
+  [[ "$dir" != /* ]] && dir="$HOME/$dir"
+  dir="$(cd -P "$dir" 2>/dev/null && pwd)" || true
+  [[ -z "$dir" ]] && error "HOST_DATA_DIR could not be resolved: $HOST_DATA_DIR"
+  case "$dir" in
+    /) error "HOST_DATA_DIR cannot be root (/)"
+      ;;
+    /etc|/etc/*|/usr|/usr/*|/var|/var/*|/bin|/sbin|/lib|/lib64)
+      error "HOST_DATA_DIR cannot be a system path: $dir"
+      ;;
+  esac
+  [[ "$dir" != "$HOME" && "${dir#$HOME/}" == "$dir" ]] && \
+    error "HOST_DATA_DIR must be under \$HOME (got: $HOST_DATA_DIR)"
+  HOST_DATA_DIR="$dir"
 }
 
 # ── Runtime globals ──────────────────────────────────────────────────────────
@@ -216,7 +233,11 @@ PM_UPDATE=""
 install_cleanup() {
   local exit_code=$?
   [[ -n "${SUDO_KEEPALIVE_PID:-}" ]] && kill "$SUDO_KEEPALIVE_PID" 2>/dev/null || true
-  if [[ $exit_code -ne 0 ]]; then
+  if [[ $exit_code -eq 2 ]]; then
+    echo ""
+    info "Re-run required (exit code 2). Complete the step above, then run the script again."
+    [[ -n "${LOG_FILE:-}" ]] && info "Log: $LOG_FILE"
+  elif [[ $exit_code -ne 0 ]]; then
     echo ""
     warn "Installation failed (exit code: $exit_code)."
     [[ -n "${LOG_FILE:-}" ]] && warn "Check the install log: $LOG_FILE"
@@ -245,7 +266,7 @@ Environment variable overrides:
   CLUSTER_NAME   Cluster name                   (default: tracebloc)
   SERVERS        Control-plane nodes             (default: 1)
   AGENTS         Worker nodes                    (default: 1)
-  K8S_VERSION    k3s image tag (empty = latest)  (default: "")
+  K8S_VERSION    k3s image tag ('' or 'latest' = k3d default)  (default: v1.29.4-k3s1)
   HTTP_PORT      Host HTTP  ingress port         (default: 80)
   HTTPS_PORT     Host HTTPS ingress port         (default: 443)
   HOST_DATA_DIR  Persistent data directory       (default: ~/.tracebloc)

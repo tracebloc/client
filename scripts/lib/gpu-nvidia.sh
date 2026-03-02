@@ -25,8 +25,23 @@ install_nvidia_drivers() {
     fi
   elif has dnf; then
     sudo dnf install -y epel-release 2>/dev/null || true
+    # Detect RHEL/CentOS major and arch for correct NVIDIA repo (rhel8/rhel9, x86_64/aarch64)
+    local rhel_major rhel_arch
+    if [[ -f /etc/os-release ]]; then
+      # shellcheck disable=SC1091
+      . /etc/os-release
+      rhel_major="${VERSION_ID%%.*}"
+      rhel_major="${rhel_major:-9}"
+    else
+      rhel_major="9"
+    fi
+    case "$(uname -m)" in
+      x86_64)  rhel_arch="x86_64" ;;
+      aarch64|arm64) rhel_arch="sbsa" ;;
+      *)       rhel_arch="x86_64" ;;
+    esac
     sudo dnf config-manager --add-repo \
-      https://developer.download.nvidia.com/compute/cuda/repos/rhel9/x86_64/cuda-rhel9.repo 2>/dev/null || true
+      "https://developer.download.nvidia.com/compute/cuda/repos/rhel${rhel_major}/${rhel_arch}/cuda-rhel${rhel_major}.repo" 2>/dev/null || true
     sudo dnf module install -y nvidia-driver:latest-dkms 2>/dev/null || \
       sudo dnf install -y akmod-nvidia || true
   elif has pacman; then
@@ -35,6 +50,10 @@ install_nvidia_drivers() {
 
   warn "Drivers installed — a REBOOT is likely required before they activate."
   warn "After rebooting, re-run this script; driver steps will be skipped automatically."
+  if [[ -n "${TRACEBLOC_SKIP_REBOOT_PROMPT:-}" ]]; then
+    warn "TRACEBLOC_SKIP_REBOOT_PROMPT set — skipping reboot prompt. Reboot manually and re-run (exit 2)."
+    exit 2
+  fi
   read -r -p "  Reboot now? [y/N]: " _choice
   [[ "$_choice" =~ ^[Yy]$ ]] && sudo reboot
   warn "Skipping reboot. GPU steps may fail if the kernel module isn't loaded yet."

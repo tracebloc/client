@@ -23,10 +23,10 @@ _detect_rhel_version() {
   fi
 }
 
-# Scrape the directory listing to find the .deb or .rpm filename
+# Scrape the directory listing to find the .deb or .rpm filename (portable: -oE not -oP)
 _find_package_name() {
   local dir_url="$1" ext="$2"
-  curl -fsSL "$dir_url" | grep -oP "amdgpu-install[^\"<>]*\\.${ext}" | head -1
+  curl -fsSL "$dir_url" | grep -oE "amdgpu-install[^\"<>]*\\.${ext}" | head -1
 }
 
 install_rocm() {

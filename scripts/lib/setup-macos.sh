@@ -118,9 +118,9 @@ install_docker_desktop() {
     info "Opening Docker Desktop…"
     echo ""
     echo -e "  ${BOLD}This is completely normal — it only happens once.${RESET}"
-    echo -e "  The script will now exit. Re-run it after Docker finishes its setup."
+    echo -e "  The script will now exit (code 2 = re-run required). Re-run it after Docker finishes its setup."
     echo ""
-    exit 0
+    exit 2
   fi
 
   # ── Docker already installed — just make sure it's running ────────────────
@@ -152,7 +152,7 @@ install_docker_desktop() {
     echo ""
     echo -e "  ${BOLD}Nothing is broken — Docker just needs a moment.${RESET}"
     echo ""
-    exit 0
+    exit 2
   fi
 
   success "Docker: $(docker --version)"

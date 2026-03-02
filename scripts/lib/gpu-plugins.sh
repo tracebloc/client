@@ -3,8 +3,11 @@
 #  gpu-plugins.sh — k8s GPU device plugin deployment + node verification
 # =============================================================================
 
-readonly NVIDIA_DEVICE_PLUGIN_URL="https://raw.githubusercontent.com/NVIDIA/k8s-device-plugin/v0.14.5/nvidia-device-plugin.yml"
-readonly AMD_DEVICE_PLUGIN_URL="https://raw.githubusercontent.com/RadeonOpenCompute/k8s-device-plugin/master/k8s-ds-amdgpu-dp.yaml"
+readonly NVIDIA_DEVICE_PLUGIN_VERSION="v0.14.5"
+readonly NVIDIA_DEVICE_PLUGIN_URL="https://raw.githubusercontent.com/NVIDIA/k8s-device-plugin/${NVIDIA_DEVICE_PLUGIN_VERSION}/nvidia-device-plugin.yml"
+# Pin to release tag when available; fallback to master in _deploy_amd_plugin if URL fails
+readonly AMD_DEVICE_PLUGIN_VERSION="v1.0.0"
+readonly AMD_DEVICE_PLUGIN_URL="https://raw.githubusercontent.com/RadeonOpenCompute/k8s-device-plugin/${AMD_DEVICE_PLUGIN_VERSION}/k8s-ds-amdgpu-dp.yaml"
 
 deploy_gpu_device_plugin() {
   case "$GPU_VENDOR" in
@@ -14,6 +17,17 @@ deploy_gpu_device_plugin() {
   esac
 }
 
+# Download manifest to temp file and apply (avoids apply -f remote URL; enables future checksum verification)
+_apply_remote_manifest() {
+  local url="$1" label="$2"
+  local tmp_yml
+  tmp_yml="$(mktemp)"
+  trap "rm -f '$tmp_yml'" RETURN
+  retry 3 5 curl -fsSL "$CURL_SECURE" "$url" -o "$tmp_yml" || { rm -f "$tmp_yml"; return 1; }
+  [[ -s "$tmp_yml" ]] || { warn "Downloaded $label manifest is empty"; rm -f "$tmp_yml"; return 1; }
+  kubectl apply -f "$tmp_yml"
+}
+
 _deploy_nvidia_plugin() {
   step "Deploying NVIDIA k8s Device Plugin"
   if kubectl get daemonset -n kube-system nvidia-device-plugin-daemonset &>/dev/null 2>&1; then
@@ -21,8 +35,8 @@ _deploy_nvidia_plugin() {
     return
   fi
 
-  info "Applying NVIDIA device plugin DaemonSet..."
-  kubectl apply -f "$NVIDIA_DEVICE_PLUGIN_URL"
+  info "Downloading and applying NVIDIA device plugin DaemonSet..."
+  _apply_remote_manifest "$NVIDIA_DEVICE_PLUGIN_URL" "NVIDIA device plugin" || error "Failed to deploy NVIDIA device plugin"
   kubectl rollout status daemonset/nvidia-device-plugin-daemonset \
     -n kube-system --timeout=120s \
     || warn "Rollout timed out — plugin may still be pulling. Check: kubectl get pods -n kube-system"
@@ -36,10 +50,15 @@ _deploy_amd_plugin() {
     return
   fi
 
-  info "Applying AMD GPU device plugin DaemonSet..."
-  kubectl apply -f "$AMD_DEVICE_PLUGIN_URL"
-  sleep 5
-  success "AMD device plugin deployed."
+  info "Downloading and applying AMD GPU device plugin DaemonSet..."
+  if _apply_remote_manifest "$AMD_DEVICE_PLUGIN_URL" "AMD device plugin"; then
+    kubectl rollout status daemonset/amdgpu-device-plugin -n kube-system --timeout=120s 2>/dev/null || true
+    success "AMD device plugin deployed."
+  else
+    # Fallback: try master if pinned release missing
+    warn "Pinned AMD plugin ${AMD_DEVICE_PLUGIN_VERSION} failed; trying master..."
+    _apply_remote_manifest "https://raw.githubusercontent.com/RadeonOpenCompute/k8s-device-plugin/master/k8s-ds-amdgpu-dp.yaml" "AMD device plugin (master)" || warn "AMD device plugin deploy failed."
+  fi
 }
 
 # ── Node-level GPU verification ─────────────────────────────────────────────

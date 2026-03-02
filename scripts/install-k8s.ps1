@@ -23,7 +23,7 @@
 # =============================================================================
 
 #Requires -Version 5.1
-param([switch]$Help)
+param([switch]$Help, [switch]$NoReboot)
 
 # -- Admin check --------------------------------------------------------------
 $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()
@@ -98,7 +98,8 @@ function Invoke-WithRetry {
 $CLUSTER_NAME  = if ($env:CLUSTER_NAME)  { $env:CLUSTER_NAME }  else { "tracebloc" }
 $SERVERS       = if ($env:SERVERS)       { $env:SERVERS }       else { "1" }
 $AGENTS        = if ($env:AGENTS)        { $env:AGENTS }        else { "1" }
-$K8S_VERSION   = if ($env:K8S_VERSION)   { $env:K8S_VERSION }   else { "" }
+# Pinned default; set $env:K8S_VERSION = "" to use latest
+$K8S_VERSION   = if ($env:K8S_VERSION)   { $env:K8S_VERSION }   else { "v1.29.4-k3s1" }
 $HTTP_PORT     = if ($env:HTTP_PORT)     { $env:HTTP_PORT }     else { "80" }
 $HTTPS_PORT    = if ($env:HTTPS_PORT)    { $env:HTTPS_PORT }    else { "443" }
 $HOST_DATA_DIR = if ($env:HOST_DATA_DIR) { $env:HOST_DATA_DIR } else { "$env:USERPROFILE\.tracebloc" }
@@ -116,13 +117,14 @@ function Print-Help {
 
 Usage:
   irm https://raw.githubusercontent.com/tracebloc/client/main/scripts/install.ps1 | iex
-  .\install-k8s.ps1 [-Help]
+  .\install-k8s.ps1 [-Help] [-NoReboot]
 
 Environment variable overrides:
   CLUSTER_NAME   Cluster name                   (default: tracebloc)
   SERVERS        Control-plane nodes             (default: 1)
   AGENTS         Worker nodes                    (default: 1)
-  K8S_VERSION    k3s image tag (empty = latest)  (default: "")
+  K8S_VERSION    k3s image tag (empty or 'latest' = k3d default)  (default: v1.29.4-k3s1)
+  -NoReboot      Skip reboot prompt after enabling Windows features (exit 2)
   HTTP_PORT      Host HTTP  ingress port         (default: 80)
   HTTPS_PORT     Host HTTPS ingress port         (default: 443)
   HOST_DATA_DIR  Persistent data directory       (default: ~\.tracebloc)
@@ -153,6 +155,19 @@ function Confirm-Config {
   if ($HTTP_PORT -eq $HTTPS_PORT) {
     Err ("HTTP_PORT and HTTPS_PORT must be different (both set to " + $HTTP_PORT + ")")
   }
+  # HOST_DATA_DIR must be under USERPROFILE and not a system path (security)
+  $dataDir = [System.IO.Path]::GetFullPath($HOST_DATA_DIR)
+  $userProfile = [System.IO.Path]::GetFullPath($env:USERPROFILE)
+  if (-not $dataDir.StartsWith($userProfile, [StringComparison]::OrdinalIgnoreCase)) {
+    Err ("HOST_DATA_DIR must be under USERPROFILE (got: " + $HOST_DATA_DIR + ")")
+  }
+  $forbidden = @("$env:SystemRoot", "${env:SystemRoot}\System32", "$env:ProgramFiles", "${env:ProgramFiles(x86)}")
+  foreach ($f in $forbidden) {
+    if ($f -and $dataDir.StartsWith([System.IO.Path]::GetFullPath($f), [StringComparison]::OrdinalIgnoreCase)) {
+      Err ("HOST_DATA_DIR cannot be a system path: " + $HOST_DATA_DIR)
+    }
+  }
+  $script:HOST_DATA_DIR = $dataDir
 }
 
 # =============================================================================
@@ -281,9 +296,13 @@ function Enable-VirtualisationFeatures {
 
   if ($rebootNeeded) {
     Warn "A reboot is required to finish enabling virtualisation features."
+    if ($NoReboot) {
+      Warn "NoReboot specified. Reboot manually, then re-run this script (exit 2)."
+      exit 2
+    }
     $choice = Read-Host "Reboot now? [y/N]"
     if ($choice -match "^[Yy]$") { Restart-Computer -Force }
-    Err "Please reboot manually, then re-run this script."
+    exit 2
   }
 
   Info "Updating WSL (this can take a few minutes on first run)..."
@@ -552,11 +571,19 @@ function Install-K3dAndHelm {
 function New-K3dCluster {
   Step "Creating k3d Cluster: '$CLUSTER_NAME'"
 
-  $clusterExists = (k3d cluster list 2>&1) -match "^$CLUSTER_NAME"
+  # Exact cluster name match (avoids "tracebloc" matching "tracebloc2")
+  $clusterExists = $false
+  $clusterObj = $null
+  try {
+    $clusterListJson = k3d cluster list -o json 2>&1 | Out-String
+    $clusterObj = $clusterListJson | ConvertFrom-Json | Where-Object { $_.name -eq $CLUSTER_NAME } | Select-Object -First 1
+    $clusterExists = $null -ne $clusterObj
+  } catch {
+    # k3d not installed or JSON parse failed — will create new cluster
+  }
 
   if ($clusterExists) {
-    $running = (k3d cluster list -o json 2>&1 | ConvertFrom-Json |
-                Where-Object { $_.name -eq $CLUSTER_NAME }).serversRunning
+    $running = $clusterObj.serversRunning
     if ($running -gt 0) {
       Ok "Cluster '$CLUSTER_NAME' already running -- skipping creation."
     } else {
@@ -581,7 +608,7 @@ function New-K3dCluster {
       "--wait"
     )
 
-    if ($K8S_VERSION -ne "") { $k3dArgs += @("--image", "rancher/k3s:$K8S_VERSION") }
+    if ($K8S_VERSION -ne "" -and $K8S_VERSION -ne "latest") { $k3dArgs += @("--image", "rancher/k3s:$K8S_VERSION") }
     if ($K3D_GPU_FLAG -ne "") {
       $k3dArgs += $K3D_GPU_FLAG
       Info "GPU flag active: $K3D_GPU_FLAG"
@@ -614,11 +641,20 @@ function Install-GpuDevicePlugin {
     Ok "NVIDIA device plugin already deployed."
   } else {
     $dpUrl = "https://raw.githubusercontent.com/NVIDIA/k8s-device-plugin/v0.14.5/nvidia-device-plugin.yml"
-    Info "Applying NVIDIA device plugin DaemonSet..."
-    kubectl apply -f $dpUrl
-    kubectl rollout status daemonset/nvidia-device-plugin-daemonset `
-      -n kube-system --timeout=120s 2>&1 | Out-Null
-    Ok "NVIDIA device plugin deployed."
+    $dpTmp = [System.IO.Path]::GetTempFileName()
+    try {
+      Invoke-WithRetry -Label "NVIDIA device plugin download" -ScriptBlock {
+        Invoke-WebRequest -Uri $dpUrl -OutFile $dpTmp -UseBasicParsing
+      }
+      if ((Get-Item $dpTmp).Length -gt 0) {
+        kubectl apply -f $dpTmp
+        kubectl rollout status daemonset/nvidia-device-plugin-daemonset `
+          -n kube-system --timeout=120s 2>&1 | Out-Null
+        Ok "NVIDIA device plugin deployed."
+      } else { Err "Downloaded device plugin manifest is empty." }
+    } finally {
+      Remove-Item $dpTmp -Force -ErrorAction SilentlyContinue
+    }
   }
 }
 
