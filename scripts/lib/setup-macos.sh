@@ -105,37 +105,32 @@ install_docker_desktop() {
 
   _kill_lingering_docker
 
-  # ── First-time install: guided pause ──────────────────────────────────────
-  if [[ "$fresh_install" == true ]]; then
-    echo ""
-    echo -e "  ${BOLD}Docker Desktop is installed and needs a one-time setup.${RESET}"
-    echo -e "  We'll open it for you now. In the Docker window:"
-    echo ""
-    echo -e "    1. ${CYAN}Accept the license agreement${RESET}"
-    echo -e "    2. ${CYAN}Wait for the whale icon${RESET} 🐳 in your menu bar"
-    echo -e "    3. ${CYAN}Re-run this script${RESET} once Docker says it's running"
-    echo ""
-    open -a Docker
-    info "Opening Docker Desktop…"
-    echo ""
-    echo -e "  ${GREEN}Next step:${RESET} Complete the setup above, then run the script again."
-    echo ""
-    # Signal to install_cleanup that this is the expected "Docker first-run" exit, not a generic failure
-    export TRACEBLOC_DOCKER_FIRST_RUN_EXIT=1
-    exit 2
-  fi
-
-  # ── Docker already installed — just make sure it's running ────────────────
+  # ── Make sure Docker Desktop is running ──────────────────────────────────
   if ! docker info &>/dev/null 2>&1; then
     open -a Docker
 
-    local max_wait=40
+    if [[ "$fresh_install" == true ]]; then
+      echo ""
+      echo -e "  ${BOLD}Docker Desktop is starting for the first time.${RESET}"
+      echo -e "  Please do the following in the Docker window that just opened:"
+      echo ""
+      echo -e "    ${CYAN}Accept the license agreement${RESET} when prompted"
+      echo ""
+      echo -e "  ${BOLD}The installer will continue automatically once Docker is ready.${RESET}"
+      echo ""
+    else
+      info "Starting Docker Desktop…"
+    fi
+
+    local max_wait=80
+    if [[ "$fresh_install" == true ]]; then max_wait=120; fi
     tput civis 2>/dev/null || true
     local frames=('⠋' '⠙' '⠹' '⠸' '⠼' '⠴' '⠦' '⠧' '⠇' '⠏')
     local f=0
     for i in $(seq 1 $max_wait); do
       if docker info &>/dev/null 2>&1; then break; fi
-      printf "\r  ${CYAN}%s${RESET} Waiting for Docker Desktop to start…" "${frames[f]}"
+      local elapsed=$(( i * 3 ))
+      printf "\r  ${CYAN}%s${RESET} Waiting for Docker Desktop… (%ds)" "${frames[f]}" "$elapsed"
       f=$(( (f + 1) % ${#frames[@]} ))
       sleep 3
     done
@@ -148,13 +143,13 @@ install_docker_desktop() {
     echo -e "  ${BOLD}Docker Desktop isn't responding yet.${RESET}"
     echo -e "  This usually means it's still starting up. Here's what to check:"
     echo ""
-    echo -e "    1. Look for the ${CYAN}whale icon${RESET} 🐳 in your menu bar"
+    echo -e "    1. Look for the ${CYAN}whale icon 🐳${RESET} in your menu bar"
     echo -e "    2. If Docker is open, wait until it says ${CYAN}\"Docker Desktop is running\"${RESET}"
     echo -e "    3. ${CYAN}Re-run this script${RESET} once it's ready"
     echo ""
     echo -e "  ${BOLD}Nothing is broken — Docker just needs a moment.${RESET}"
     echo ""
-    exit 2
+    error "Docker Desktop did not start in time. Re-run this script once Docker is ready."
   fi
 
   success "Docker: $(docker --version)"
