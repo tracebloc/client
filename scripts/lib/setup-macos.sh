@@ -44,8 +44,14 @@ _kill_lingering_docker() {
   fi
 }
 
-_is_headless() {
-  ! pgrep -x WindowServer &>/dev/null
+_has_gui_session() {
+  # /dev/console is owned by the GUI-logged-in user on macOS.
+  # On headless Macs (EC2, CI) or when no user is logged into the desktop,
+  # it's owned by "root". This is more reliable than checking WindowServer,
+  # which runs even on headless EC2 Mac instances.
+  local console_user
+  console_user="$(stat -f '%Su' /dev/console 2>/dev/null || echo '')"
+  [[ -n "$console_user" && "$console_user" != "root" ]]
 }
 
 _install_docker_colima() {
@@ -84,8 +90,8 @@ install_docker_desktop() {
   step "Step 2/3 — Docker"
 
   # On headless Macs (EC2, CI runners), Docker Desktop can't launch.
-  # If Docker is already running (e.g. via VNC session), skip detection.
-  if _is_headless && ! docker info &>/dev/null 2>&1; then
+  # If Docker is already running (e.g. started via VNC earlier), skip detection.
+  if ! _has_gui_session && ! docker info &>/dev/null 2>&1; then
     _install_docker_colima
     return
   fi
