@@ -104,8 +104,9 @@ install_docker_desktop() {
     fi
 
     spin_cmd "Installing Docker Desktop…" bash -c \
-      "hdiutil attach '$dmg_path' -quiet && \
+      "hdiutil attach '$dmg_path' -nobrowse -quiet && \
        cp -R '/Volumes/Docker/Docker.app' /Applications/ && \
+       xattr -cr /Applications/Docker.app && \
        hdiutil detach '/Volumes/Docker' -quiet 2>/dev/null; \
        rm -f '$dmg_path'"
 
