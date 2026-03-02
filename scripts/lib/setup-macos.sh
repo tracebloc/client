@@ -47,19 +47,38 @@ _kill_lingering_docker() {
 install_docker_desktop() {
   step "Step 2/3 — Docker Desktop"
 
+  # Detect real hardware — sysctl is immune to Rosetta translation
+  local real_arch
+  if sysctl -n hw.optional.arm64 2>/dev/null | grep -q '1'; then
+    real_arch="arm64"
+  else
+    real_arch="amd64"
+  fi
+
   local fresh_install=false
+  local need_install=false
 
-  if ! has docker; then
-    # Docker is required for k3d — install automatically when missing
-    fresh_install=true
-
-    # Detect real hardware — sysctl is immune to Rosetta translation
-    local real_arch
-    if sysctl -n hw.optional.arm64 2>/dev/null | grep -q '1'; then
-      real_arch="arm64"
-    else
-      real_arch="amd64"
+  # Check if existing Docker is the wrong architecture and replace it
+  if [[ -d "/Applications/Docker.app" ]]; then
+    local docker_bin_arch
+    docker_bin_arch="$(file /Applications/Docker.app/Contents/MacOS/Docker 2>/dev/null || true)"
+    if [[ "$real_arch" == "arm64" ]] \
+        && echo "$docker_bin_arch" | grep -q 'x86_64' \
+        && ! echo "$docker_bin_arch" | grep -q 'arm64'; then
+      warn "Existing Docker Desktop is Intel (x86_64) but this is Apple Silicon hardware."
+      info "Removing wrong-architecture Docker Desktop…"
+      osascript -e 'quit app "Docker"' 2>/dev/null || true
+      sleep 2
+      pkill -x "Docker Desktop" 2>/dev/null || true; sleep 1
+      pkill -9 -x "Docker Desktop" 2>/dev/null || true; sleep 1
+      rm -rf /Applications/Docker.app
+      need_install=true
+      fresh_install=true
     fi
+  fi
+
+  if ! has docker || [[ "$need_install" == true ]]; then
+    fresh_install=true
 
     info "Detected hardware architecture: $real_arch"
 
@@ -91,16 +110,6 @@ install_docker_desktop() {
        rm -f '$dmg_path'"
 
     success "Docker Desktop ($real_arch) installed to /Applications."
-  fi
-
-  # Verify the installed binary matches real hardware
-  local docker_arch
-  docker_arch="$(file /Applications/Docker.app/Contents/MacOS/Docker 2>/dev/null || true)"
-  if sysctl -n hw.optional.arm64 2>/dev/null | grep -q '1'; then
-    if echo "$docker_arch" | grep -q 'x86_64' && ! echo "$docker_arch" | grep -q 'arm64'; then
-      warn "Docker binary appears to be Intel (x86_64) on Apple Silicon hardware."
-      warn "Remove it and re-run: rm -rf /Applications/Docker.app"
-    fi
   fi
 
   _kill_lingering_docker
