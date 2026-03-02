@@ -4,6 +4,11 @@
 #              retry logic, and log-file setup
 # =============================================================================
 
+# ── Security hardening ───────────────────────────────────────────────────────
+export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:${PATH}"
+umask 077
+readonly CURL_SECURE="--tlsv1.2"
+
 # ── Colours ──────────────────────────────────────────────────────────────────
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'
 CYAN='\033[0;36m'; BOLD='\033[1m'; RESET='\033[0m'
@@ -48,7 +53,13 @@ spin_cmd() {
   local msg="$1"; shift
   local logfile="${LOG_FILE:-/tmp/tracebloc-spin.log}"
   "$@" >> "$logfile" 2>&1 &
-  spin $! "$msg"
+  local pid=$!
+  if ! spin "$pid" "$msg"; then
+    echo -e "${RED}[FAIL]${RESET} $msg" >&2
+    echo "  Last 10 lines of log:" >&2
+    tail -10 "$logfile" >&2
+    return 1
+  fi
 }
 
 # ── Sudo preflight — warm the credential cache before spinners hide prompts ──
@@ -64,8 +75,8 @@ preflight_sudo() {
   echo -e "  ${BOLD}You may be prompted for your macOS/Linux password below.${RESET}"
   echo ""
   sudo -v || error "Could not obtain administrator privileges. Re-run with a user that has sudo access."
-  # Keep the credential cache alive in the background for long installs
   ( while sudo -n true 2>/dev/null; do sleep 50; done ) &
+  SUDO_KEEPALIVE_PID=$!
 }
 
 # ── Download with live progress bar ───────────────────────────────────────────
@@ -170,10 +181,20 @@ HOST_DATA_DIR="${HOST_DATA_DIR:-$HOME/.tracebloc}"
 
 # ── Input validation ────────────────────────────────────────────────────────
 validate_config() {
-  [[ "$SERVERS" =~ ^[0-9]+$ ]] || error "SERVERS must be a positive integer (got '$SERVERS')"
-  [[ "$AGENTS"  =~ ^[0-9]+$ ]] || error "AGENTS must be a positive integer (got '$AGENTS')"
-  [[ "$HTTP_PORT"  =~ ^[0-9]+$ ]] || error "HTTP_PORT must be a number (got '$HTTP_PORT')"
+  [[ -n "${HOME:-}" ]]  || error "\$HOME is not set — cannot determine user home directory"
+  [[ -n "${USER:-}" ]]  || USER="$(whoami)" || error "Cannot determine current user"
+
+  [[ "$CLUSTER_NAME" =~ ^[a-zA-Z][a-zA-Z0-9._-]{0,62}$ ]] \
+    || error "CLUSTER_NAME must start with a letter, contain only [a-zA-Z0-9._-], max 63 chars (got '$CLUSTER_NAME')"
+
+  [[ "$SERVERS" =~ ^[1-9][0-9]*$ ]] || error "SERVERS must be a positive integer >= 1 (got '$SERVERS')"
+  [[ "$AGENTS"  =~ ^[0-9]+$ ]]     || error "AGENTS must be a non-negative integer (got '$AGENTS')"
+
+  [[ "$HTTP_PORT" =~ ^[0-9]+$ ]]  || error "HTTP_PORT must be a number (got '$HTTP_PORT')"
   [[ "$HTTPS_PORT" =~ ^[0-9]+$ ]] || error "HTTPS_PORT must be a number (got '$HTTPS_PORT')"
+  (( HTTP_PORT >= 1 && HTTP_PORT <= 65535 ))   || error "HTTP_PORT must be 1-65535 (got '$HTTP_PORT')"
+  (( HTTPS_PORT >= 1 && HTTPS_PORT <= 65535 )) || error "HTTPS_PORT must be 1-65535 (got '$HTTPS_PORT')"
+  (( HTTP_PORT != HTTPS_PORT )) || error "HTTP_PORT and HTTPS_PORT must be different (both set to $HTTP_PORT)"
 }
 
 # ── Runtime globals ──────────────────────────────────────────────────────────
@@ -190,6 +211,18 @@ NVIDIA_DRIVER_OK=false
 K3D_GPU_FLAGS=()           # extra flags appended to k3d cluster create
 PM_INSTALL=""
 PM_UPDATE=""
+
+# ── Cleanup on exit ──────────────────────────────────────────────────────────
+install_cleanup() {
+  local exit_code=$?
+  [[ -n "${SUDO_KEEPALIVE_PID:-}" ]] && kill "$SUDO_KEEPALIVE_PID" 2>/dev/null || true
+  if [[ $exit_code -ne 0 ]]; then
+    echo ""
+    warn "Installation failed (exit code: $exit_code)."
+    [[ -n "${LOG_FILE:-}" ]] && warn "Check the install log: $LOG_FILE"
+    warn "This installer is safe to re-run — just try again."
+  fi
+}
 
 # ── Banner ───────────────────────────────────────────────────────────────────
 print_banner() {

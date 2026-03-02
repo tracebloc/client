@@ -25,8 +25,17 @@
 
 set -euo pipefail
 
-# ── Resolve script directory (works with symlinks too) ───────────────────────
-SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "$0" 2>/dev/null || echo "$0")")" && pwd)"
+# ── Resolve script directory (works with symlinks and macOS BSD readlink) ────
+_realpath() {
+  local target="$1"
+  while [[ -L "$target" ]]; do
+    local dir; dir="$(cd "$(dirname "$target")" && pwd)"
+    target="$(readlink "$target")"
+    [[ "$target" != /* ]] && target="$dir/$target"
+  done
+  echo "$(cd "$(dirname "$target")" && pwd)/$(basename "$target")"
+}
+SCRIPT_DIR="$(dirname "$(_realpath "$0")")"
 LIB_DIR="${SCRIPT_DIR}/lib"
 
 # ── Source modules ───────────────────────────────────────────────────────────
@@ -39,6 +48,8 @@ source "${LIB_DIR}/setup-linux.sh"
 source "${LIB_DIR}/cluster.sh"
 source "${LIB_DIR}/gpu-plugins.sh"
 source "${LIB_DIR}/summary.sh"
+
+trap install_cleanup EXIT
 
 # ── Main ─────────────────────────────────────────────────────────────────────
 main() {

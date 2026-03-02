@@ -26,7 +26,12 @@ install_docker_engine() {
     elif has zypper; then
       spin_cmd "Installing Docker (openSUSE/SLES)…" sudo zypper install -y docker
     else
-      spin_cmd "Installing Docker…" retry 3 5 bash -c 'curl -fsSL https://get.docker.com | sudo bash'
+      local docker_script
+      docker_script="$(mktemp)"
+      retry 3 5 curl -fsSL $CURL_SECURE https://get.docker.com -o "$docker_script"
+      chmod +x "$docker_script"
+      spin_cmd "Installing Docker…" sudo bash "$docker_script"
+      rm -f "$docker_script"
     fi
     sudo systemctl enable --now docker
     sudo usermod -aG docker "$USER"
@@ -69,17 +74,23 @@ install_system_deps() {
 # ── kubectl ──────────────────────────────────────────────────────────────────
 _fetch_kubectl() {
   local ver="$1" arch="$2"
-  retry 3 5 curl -fsSLO "https://dl.k8s.io/release/${ver}/bin/linux/${arch}/kubectl"
-  retry 3 5 curl -fsSLO "https://dl.k8s.io/release/${ver}/bin/linux/${arch}/kubectl.sha256"
-  echo "$(cat kubectl.sha256)  kubectl" | sha256sum --check --quiet
-  chmod +x kubectl && sudo mv kubectl /usr/local/bin/kubectl
-  rm -f kubectl.sha256
+  local tmpdir
+  tmpdir="$(mktemp -d)"
+  retry 3 5 curl -fsSL $CURL_SECURE \
+    "https://dl.k8s.io/release/${ver}/bin/linux/${arch}/kubectl" -o "${tmpdir}/kubectl"
+  retry 3 5 curl -fsSL $CURL_SECURE \
+    "https://dl.k8s.io/release/${ver}/bin/linux/${arch}/kubectl.sha256" -o "${tmpdir}/kubectl.sha256"
+  echo "$(cat "${tmpdir}/kubectl.sha256")  ${tmpdir}/kubectl" | sha256sum --check --quiet \
+    || { rm -rf "$tmpdir"; error "kubectl checksum verification failed — possible tampering"; }
+  chmod +x "${tmpdir}/kubectl"
+  sudo mv "${tmpdir}/kubectl" /usr/local/bin/kubectl
+  rm -rf "$tmpdir"
 }
 
 install_kubectl() {
   step "Step 3/5 — kubectl"
   if ! has kubectl; then
-    KUBE_VER=$(retry 3 5 curl -fsSL https://dl.k8s.io/release/stable.txt)
+    KUBE_VER=$(retry 3 5 curl -fsSL $CURL_SECURE https://dl.k8s.io/release/stable.txt)
     spin_cmd "Installing kubectl $KUBE_VER…" _fetch_kubectl "$KUBE_VER" "$ARCH_DL"
     success "kubectl $KUBE_VER installed."
   else
@@ -91,9 +102,37 @@ install_kubectl() {
 install_k3d() {
   step "Step 4/5 — k3d"
   if ! has k3d; then
-    spin_cmd "Installing k3d…" \
-      retry 3 5 bash -c 'curl -fsSL https://raw.githubusercontent.com/k3d-io/k3d/main/install.sh | bash'
-    success "k3d: $(k3d version | head -1)"
+    local k3d_ver
+    k3d_ver=$(retry 3 5 curl -fsSL $CURL_SECURE \
+      "https://api.github.com/repos/k3d-io/k3d/releases/latest" \
+      | grep -o '"tag_name":"[^"]*"' | cut -d'"' -f4)
+    [[ -n "$k3d_ver" ]] || error "Could not determine latest k3d version"
+
+    local k3d_url="https://github.com/k3d-io/k3d/releases/download/${k3d_ver}/k3d-linux-${ARCH_DL}"
+    local k3d_tmp
+    k3d_tmp="$(mktemp)"
+    spin_cmd "Downloading k3d ${k3d_ver}…" \
+      retry 3 5 curl -fsSL $CURL_SECURE "$k3d_url" -o "$k3d_tmp"
+
+    local checksums
+    checksums=$(retry 3 5 curl -fsSL $CURL_SECURE \
+      "https://github.com/k3d-io/k3d/releases/download/${k3d_ver}/sha256sum.txt" 2>/dev/null || true)
+    if [[ -n "$checksums" ]]; then
+      local expected actual
+      expected=$(echo "$checksums" | grep "k3d-linux-${ARCH_DL}$" | awk '{print $1}')
+      actual=$(sha256sum "$k3d_tmp" | awk '{print $1}')
+      if [[ -n "$expected" && "$actual" != "$expected" ]]; then
+        rm -f "$k3d_tmp"
+        error "k3d checksum verification failed — possible tampering"
+      fi
+      info "k3d checksum verified."
+    else
+      warn "Could not fetch k3d checksums — skipping verification."
+    fi
+
+    chmod +x "$k3d_tmp"
+    sudo mv "$k3d_tmp" /usr/local/bin/k3d
+    success "k3d ${k3d_ver} installed."
   else
     success "k3d: $(k3d version | head -1)"
   fi
@@ -103,8 +142,13 @@ install_k3d() {
 install_helm() {
   step "Step 5/5 — Helm"
   if ! has helm; then
-    spin_cmd "Installing Helm…" \
-      retry 3 5 bash -c 'curl -fsSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash'
+    local helm_script
+    helm_script="$(mktemp)"
+    retry 3 5 curl -fsSL $CURL_SECURE \
+      https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 -o "$helm_script"
+    chmod +x "$helm_script"
+    spin_cmd "Installing Helm…" bash "$helm_script"
+    rm -f "$helm_script"
     success "helm: $(helm version --short 2>/dev/null || echo installed)"
   else
     success "helm: $(helm version --short 2>/dev/null || echo present)"

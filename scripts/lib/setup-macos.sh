@@ -7,8 +7,12 @@
 install_homebrew() {
   step "Step 1/3 — Homebrew"
   if ! has brew; then
-    spin_cmd "Installing Homebrew…" env NONINTERACTIVE=1 /bin/bash -c \
-      "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+    local brew_script
+    brew_script="$(mktemp)"
+    curl -fsSL $CURL_SECURE https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh \
+      -o "$brew_script"
+    spin_cmd "Installing Homebrew…" env NONINTERACTIVE=1 /bin/bash "$brew_script"
+    rm -f "$brew_script"
     if [[ "$ARCH" == "arm64" ]] && [[ -f /opt/homebrew/bin/brew ]]; then
       eval "$(/opt/homebrew/bin/brew shellenv)"
       grep -q 'homebrew' "$HOME/.zprofile" 2>/dev/null || \
@@ -63,6 +67,21 @@ install_docker_desktop() {
 
     retry 3 5 download_with_progress "$dmg_url" "$dmg_path" \
       "Downloading Docker Desktop ($real_arch)"
+
+    local checksum_url="${dmg_url}.sha256sum"
+    local expected_hash
+    expected_hash=$(curl -fsSL $CURL_SECURE "$checksum_url" 2>/dev/null | awk '{print $1}' || true)
+    if [[ -n "$expected_hash" ]]; then
+      local actual_hash
+      actual_hash=$(shasum -a 256 "$dmg_path" | awk '{print $1}')
+      if [[ "$actual_hash" != "$expected_hash" ]]; then
+        rm -f "$dmg_path"
+        error "Docker Desktop DMG checksum mismatch — download may be corrupted or tampered with"
+      fi
+      success "Docker Desktop checksum verified."
+    else
+      warn "Could not fetch Docker Desktop checksum — skipping verification."
+    fi
 
     spin_cmd "Installing Docker Desktop…" bash -c \
       "hdiutil attach '$dmg_path' -quiet && \

@@ -20,6 +20,7 @@ case "$(uname -s)" in
 esac
 
 BRANCH="${BRANCH:-main}"
+[[ "$BRANCH" =~ ^[a-zA-Z0-9._/-]+$ ]] || { echo "[ERROR] Invalid BRANCH name: $BRANCH"; exit 1; }
 REPO_RAW="https://raw.githubusercontent.com/tracebloc/client/${BRANCH}"
 TMPDIR="$(mktemp -d)"
 trap 'rm -rf "$TMPDIR"' EXIT
@@ -45,7 +46,7 @@ download_with_retry() {
   local url="$1" dest="$2"
   local attempt max_attempts=3 delay=5
   for attempt in 1 2 3; do
-    if curl -fsSL "$url" -o "$dest"; then return 0; fi
+    if curl -fsSL --tlsv1.2 "$url" -o "$dest"; then return 0; fi
     if [[ $attempt -ge $max_attempts ]]; then
       echo "[ERROR] Failed to download $url after $max_attempts attempts."
       exit 1

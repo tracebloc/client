@@ -51,6 +51,26 @@ function RefreshPath {
               [System.Environment]::GetEnvironmentVariable("PATH","User")
 }
 
+function Get-WindowsArch {
+  switch ($env:PROCESSOR_ARCHITECTURE) {
+    "AMD64"  { return "amd64" }
+    "ARM64"  { return "arm64" }
+    default  { Err "Unsupported architecture: $env:PROCESSOR_ARCHITECTURE" }
+  }
+}
+
+function Initialize-ToolDir {
+  $script:TOOL_DIR = "$env:ProgramFiles\tracebloc\bin"
+  if (-not (Test-Path $TOOL_DIR)) {
+    New-Item -ItemType Directory -Path $TOOL_DIR -Force | Out-Null
+  }
+  $machinePath = [Environment]::GetEnvironmentVariable("PATH", "Machine")
+  if ($machinePath -notlike "*$TOOL_DIR*") {
+    [Environment]::SetEnvironmentVariable("PATH", "$machinePath;$TOOL_DIR", "Machine")
+    RefreshPath
+  }
+}
+
 function Invoke-WithRetry {
   param(
     [scriptblock]$ScriptBlock,
@@ -119,10 +139,20 @@ macOS / Linux:
 # =============================================================================
 
 function Confirm-Config {
-  if ($SERVERS -notmatch '^\d+$') { Err ("SERVERS must be a positive integer (got '" + $SERVERS + "')") }
-  if ($AGENTS  -notmatch '^\d+$') { Err ("AGENTS must be a positive integer (got '" + $AGENTS + "')") }
-  if ($HTTP_PORT  -notmatch '^\d+$') { Err ("HTTP_PORT must be a number (got '" + $HTTP_PORT + "')") }
-  if ($HTTPS_PORT -notmatch '^\d+$') { Err ("HTTPS_PORT must be a number (got '" + $HTTPS_PORT + "')") }
+  if ($CLUSTER_NAME -notmatch '^[a-zA-Z][a-zA-Z0-9._-]{0,62}$') {
+    Err ("CLUSTER_NAME must start with a letter, contain only [a-zA-Z0-9._-], max 63 chars (got '" + $CLUSTER_NAME + "')")
+  }
+  if ($SERVERS -notmatch '^[1-9]\d*$') { Err ("SERVERS must be a positive integer >= 1 (got '" + $SERVERS + "')") }
+  if ($AGENTS  -notmatch '^\d+$') { Err ("AGENTS must be a non-negative integer (got '" + $AGENTS + "')") }
+  if ($HTTP_PORT  -notmatch '^\d+$' -or [int]$HTTP_PORT -lt 1 -or [int]$HTTP_PORT -gt 65535) {
+    Err ("HTTP_PORT must be 1-65535 (got '" + $HTTP_PORT + "')")
+  }
+  if ($HTTPS_PORT -notmatch '^\d+$' -or [int]$HTTPS_PORT -lt 1 -or [int]$HTTPS_PORT -gt 65535) {
+    Err ("HTTPS_PORT must be 1-65535 (got '" + $HTTPS_PORT + "')")
+  }
+  if ($HTTP_PORT -eq $HTTPS_PORT) {
+    Err ("HTTP_PORT and HTTPS_PORT must be different (both set to " + $HTTP_PORT + ")")
+  }
 }
 
 # =============================================================================
@@ -230,7 +260,12 @@ function Enable-VirtualisationFeatures {
   $features = @{
     "Microsoft-Windows-Subsystem-Linux" = "WSL2"
     "VirtualMachinePlatform"            = "Virtual Machine Platform"
-    "Microsoft-Hyper-V-All"             = "Hyper-V"
+  }
+  $edition = (Get-CimInstance Win32_OperatingSystem).Caption
+  if ($edition -notmatch "Home") {
+    $features["Microsoft-Hyper-V-All"] = "Hyper-V"
+  } else {
+    Info "Windows Home detected -- Hyper-V not available, using WSL2 backend."
   }
 
   $features.GetEnumerator() | ForEach-Object {
@@ -309,9 +344,10 @@ function Install-DockerDesktop {
       winget install -e --id Docker.DockerDesktop `
         --accept-package-agreements --accept-source-agreements --silent
     } else {
+      $ddArch = Get-WindowsArch
       $installer = "$env:TEMP\DockerDesktopInstaller.exe"
       Invoke-WithRetry -Label "Docker Desktop download" -ScriptBlock {
-        Invoke-WebRequest -Uri "https://desktop.docker.com/win/main/amd64/Docker%20Desktop%20Installer.exe" `
+        Invoke-WebRequest -Uri "https://desktop.docker.com/win/main/$ddArch/Docker%20Desktop%20Installer.exe" `
           -OutFile $installer -UseBasicParsing
       }
       Start-Process -FilePath $installer -ArgumentList "install --quiet --accept-license" -Wait
@@ -395,7 +431,7 @@ sudo nvidia-ctk runtime configure --runtime=containerd 2>/dev/null || true
 echo "NCT installed successfully."
 '@
 
-  $scriptPath = "$env:TEMP\install-nct.sh"
+  $scriptPath = [System.IO.Path]::Combine($env:TEMP, "install-nct-$(Get-Random -Maximum 999999).sh")
   [System.IO.File]::WriteAllText($scriptPath, $nctScript.Replace("`r`n", "`n"))
   $wslPath = "/mnt/" + ($scriptPath -replace '\\','/' -replace '^([A-Za-z]):/', { $_.Groups[1].Value.ToLower() + '/' })
 
@@ -420,15 +456,27 @@ function Install-Kubectl {
 
   if (Has "kubectl") { Ok "kubectl: $(cmd /c 'kubectl version --client 2>&1' | Select-Object -First 1)"; return }
 
+  $arch = Get-WindowsArch
   $kVer = Invoke-WithRetry -Label "kubectl version check" -ScriptBlock {
     (Invoke-WebRequest "https://dl.k8s.io/release/stable.txt" -UseBasicParsing).Content.Trim()
   }
-  Info "Downloading kubectl $kVer..."
+  Info "Downloading kubectl $kVer ($arch)..."
+  $kubectlDest = "$TOOL_DIR\kubectl.exe"
   Invoke-WithRetry -Label "kubectl download" -ScriptBlock {
-    Invoke-WebRequest "https://dl.k8s.io/release/$kVer/bin/windows/amd64/kubectl.exe" `
-      -OutFile "C:\Windows\System32\kubectl.exe" -UseBasicParsing
+    Invoke-WebRequest "https://dl.k8s.io/release/$kVer/bin/windows/$arch/kubectl.exe" `
+      -OutFile $kubectlDest -UseBasicParsing
   }
-  Ok "kubectl $kVer installed."
+  $expectedHash = Invoke-WithRetry -Label "kubectl checksum" -ScriptBlock {
+    (Invoke-WebRequest "https://dl.k8s.io/release/$kVer/bin/windows/$arch/kubectl.exe.sha256" `
+      -UseBasicParsing).Content.Trim()
+  }
+  $actualHash = (Get-FileHash $kubectlDest -Algorithm SHA256).Hash.ToLower()
+  if ($actualHash -ne $expectedHash.ToLower()) {
+    Remove-Item $kubectlDest -Force
+    Err "kubectl checksum verification failed -- possible tampering detected"
+  }
+  RefreshPath
+  Ok "kubectl $kVer installed (checksum verified)."
 }
 
 # =============================================================================
@@ -448,15 +496,36 @@ function Install-K3dAndHelm {
     RefreshPath
 
     if (-not (Has "k3d")) {
-      Info "Downloading k3d binary directly..."
+      $arch = Get-WindowsArch
+      Info "Downloading k3d binary directly ($arch)..."
       $k3dVer = Invoke-WithRetry -Label "k3d version lookup" -ScriptBlock {
         (Invoke-WebRequest "https://api.github.com/repos/k3d-io/k3d/releases/latest" `
           -UseBasicParsing | ConvertFrom-Json).tag_name
       }
+      $k3dDest = "$TOOL_DIR\k3d.exe"
       Invoke-WithRetry -Label "k3d download" -ScriptBlock {
-        Invoke-WebRequest "https://github.com/k3d-io/k3d/releases/download/$k3dVer/k3d-windows-amd64.exe" `
-          -OutFile "C:\Windows\System32\k3d.exe" -UseBasicParsing
+        Invoke-WebRequest "https://github.com/k3d-io/k3d/releases/download/$k3dVer/k3d-windows-$arch.exe" `
+          -OutFile $k3dDest -UseBasicParsing
       }
+      try {
+        $checksums = Invoke-WithRetry -Label "k3d checksums" -ScriptBlock {
+          (Invoke-WebRequest "https://github.com/k3d-io/k3d/releases/download/$k3dVer/sha256sum.txt" `
+            -UseBasicParsing).Content
+        }
+        $expectedHash = ($checksums -split "`n" |
+          Where-Object { $_ -match "k3d-windows-$arch\.exe" }) -replace '\s+.*',''
+        if ($expectedHash) {
+          $actualHash = (Get-FileHash $k3dDest -Algorithm SHA256).Hash.ToLower()
+          if ($actualHash -ne $expectedHash.Trim().ToLower()) {
+            Remove-Item $k3dDest -Force
+            Err "k3d checksum verification failed -- possible tampering detected"
+          }
+          Info "k3d checksum verified."
+        }
+      } catch {
+        Warn "Could not verify k3d checksum: $_"
+      }
+      RefreshPath
     }
   }
   Ok "k3d: $(k3d version | Select-Object -First 1)"
@@ -636,6 +705,7 @@ function Print-Summary {
 if ($Help) { Print-Help }
 
 Confirm-Config
+Initialize-ToolDir
 Start-InstallLog
 Print-Banner
 Find-Gpu

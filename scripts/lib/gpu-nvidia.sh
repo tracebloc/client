@@ -50,8 +50,20 @@ install_nvidia_container_toolkit() {
     info "Installing nvidia-container-toolkit..."
 
     if has apt-get; then
-      curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey \
-        | sudo gpg --dearmor -o /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg
+      local nvidia_gpg_tmp
+      nvidia_gpg_tmp="$(mktemp)"
+      curl -fsSL $CURL_SECURE https://nvidia.github.io/libnvidia-container/gpgkey \
+        -o "$nvidia_gpg_tmp"
+      local nvidia_fp
+      nvidia_fp=$(gpg --with-colons --import-options show-only --import "$nvidia_gpg_tmp" 2>/dev/null \
+        | awk -F: '/^fpr:/{print $10; exit}')
+      if [[ -n "$nvidia_fp" ]]; then
+        info "NVIDIA GPG key fingerprint: $nvidia_fp"
+      else
+        warn "Could not extract GPG key fingerprint — verify manually after install."
+      fi
+      sudo gpg --dearmor -o /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg "$nvidia_gpg_tmp"
+      rm -f "$nvidia_gpg_tmp"
       curl -fsSL https://nvidia.github.io/libnvidia-container/stable/deb/nvidia-container-toolkit.list \
         | sed 's#deb https://#deb [signed-by=/usr/share/keyrings/nvidia-container-toolkit-keyring.gpg] https://#g' \
         | sudo tee /etc/apt/sources.list.d/nvidia-container-toolkit.list >/dev/null
