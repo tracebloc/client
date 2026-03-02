@@ -108,9 +108,12 @@ install_docker_desktop() {
   local need_install=false
 
   # Check if existing Docker Desktop is for the wrong architecture (either direction)
+  # Main executable is com.docker.backend (CFBundleExecutable), not "Docker"
   if [[ -d "/Applications/Docker.app" ]]; then
+    local docker_bin_path="/Applications/Docker.app/Contents/MacOS/com.docker.backend"
+    [[ ! -x "$docker_bin_path" ]] && docker_bin_path="/Applications/Docker.app/Contents/MacOS/Docker"
     local docker_bin_arch
-    docker_bin_arch="$(file /Applications/Docker.app/Contents/MacOS/Docker 2>/dev/null || true)"
+    docker_bin_arch="$(file "$docker_bin_path" 2>/dev/null || true)"
     local docker_is_arm=false
     local docker_is_intel=false
     echo "$docker_bin_arch" | grep -q 'arm64' && docker_is_arm=true
