@@ -11,15 +11,15 @@ verify_cluster() {
 }
 
 print_summary() {
-  echo -e "\n${BOLD}${GREEN}╔═══════════════════════════════════════════════════════════════╗${RESET}"
-  echo -e "${BOLD}${GREEN}║  ✅  Kubernetes cluster '${CLUSTER_NAME}' is ready!              ${RESET}${BOLD}${GREEN}║${RESET}"
+  echo -e "\n${BOLD}${GREEN}╔═══════════════════════════════════════════════════════════════════════╗${RESET}"
+  echo -e "${BOLD}${GREEN}║  ✅  Tracebloc client ready — cluster '${CLUSTER_NAME}'$(printf '%*s' 21 '')║${RESET}"
   [[ "$GPU_VENDOR" == "nvidia" ]] && \
-    echo -e "${BOLD}${GREEN}║  🎮  NVIDIA GPU support enabled                               ║${RESET}"
+    echo -e "${BOLD}${GREEN}║  🎮  NVIDIA GPU support enabled                                  ║${RESET}"
   [[ "$GPU_VENDOR" == "amd" ]] && \
-    echo -e "${BOLD}${GREEN}║  🎮  AMD GPU support enabled                                  ║${RESET}"
+    echo -e "${BOLD}${GREEN}║  🎮  AMD GPU support enabled                                     ║${RESET}"
   [[ "$GPU_VENDOR" == "apple_silicon" ]] && \
-    echo -e "${BOLD}${YELLOW}║  ⚠️   macOS — GPU passthrough unavailable (CPU-only cluster)   ║${RESET}"
-  echo -e "${BOLD}${GREEN}╚═══════════════════════════════════════════════════════════════╝${RESET}"
+    echo -e "${BOLD}${YELLOW}║  ⚠️   macOS — GPU passthrough unavailable (CPU-only cluster)$(printf '%*s' 10 '')║${RESET}"
+  echo -e "${BOLD}${GREEN}╚═══════════════════════════════════════════════════════════════════════╝${RESET}"
 
   _print_topology
   _print_common_commands

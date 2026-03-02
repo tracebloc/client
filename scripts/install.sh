@@ -25,7 +25,7 @@ REPO_RAW="https://raw.githubusercontent.com/tracebloc/client/${BRANCH}"
 TMPDIR="$(mktemp -d)"
 trap 'rm -rf "$TMPDIR"' EXIT
 
-echo "Downloading tracebloc installer (branch: $BRANCH)..."
+echo "Downloading Tracebloc client installer (branch: $BRANCH)..."
 
 mkdir -p "$TMPDIR/lib"
 
@@ -63,5 +63,5 @@ done
 
 chmod +x "$TMPDIR/install-k8s.sh"
 
-echo "Running installer..."
+echo "Running Tracebloc environment setup..."
 bash "$TMPDIR/install-k8s.sh" "$@"

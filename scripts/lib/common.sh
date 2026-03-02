@@ -306,10 +306,19 @@ install_cleanup() {
 
 # ── Banner ───────────────────────────────────────────────────────────────────
 print_banner() {
-  echo -e "\n${BOLD}╔═══════════════════════════════════════════════════════════════╗${RESET}"
-  echo -e "${BOLD}║   Kubernetes (k3d/k3s) + GPU  One-Command Installer           ║${RESET}"
-  echo -e "${BOLD}║   macOS & Linux                                               ║${RESET}"
-  echo -e "${BOLD}╚═══════════════════════════════════════════════════════════════╝${RESET}"
+  echo ""
+  local _w=71
+  echo -e "${CYAN}╔═══════════════════════════════════════════════════════════════════════╗${RESET}"
+  echo -e "${CYAN}║${RESET}$(printf '%*s' "$_w" '')${CYAN}║${RESET}"
+  echo -e "${CYAN}║${RESET}   ${BOLD}tracebloc${RESET} — Client setup$(printf '%*s' 44 '')${CYAN}║${RESET}"
+  echo -e "${CYAN}║${RESET}   ${BOLD}Kubernetes (k3d/k3s) + GPU · One-command installer${RESET}$(printf '%*s' 18 '')${CYAN}║${RESET}"
+  echo -e "${CYAN}║${RESET}   macOS · Linux$(printf '%*s' 55 '')${CYAN}║${RESET}"
+  echo -e "${CYAN}║${RESET}$(printf '%*s' "$_w" '')${CYAN}║${RESET}"
+  echo -e "${CYAN}║${RESET}   Run ML experiments and distributed workloads locally with a$(printf '%*s' 9 '')${CYAN}║${RESET}"
+  echo -e "${CYAN}║${RESET}   production-ready cluster. Connects to the Tracebloc backend.$(printf '%*s' 8 '')${CYAN}║${RESET}"
+  echo -e "${CYAN}║${RESET}$(printf '%*s' "$_w" '')${CYAN}║${RESET}"
+  echo -e "${CYAN}╚═══════════════════════════════════════════════════════════════════════╝${RESET}"
+  echo ""
   info "OS=$OS  Arch=$ARCH  Cluster='$CLUSTER_NAME'  Servers=$SERVERS  Agents=$AGENTS"
   info "Host data dir: $HOST_DATA_DIR → /tracebloc (inside k3s nodes)"
 }
