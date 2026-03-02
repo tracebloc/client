@@ -156,6 +156,8 @@ install_docker_desktop() {
       sleep 2
       pkill -x "Docker Desktop" 2>/dev/null || true; sleep 1
       pkill -9 -x "Docker Desktop" 2>/dev/null || true; sleep 1
+      # sudo required: Docker.app contains protected paths (LoginItems, provisionprofile, etc.)
+      # Official uninstall script is not used here — it can block when run non-interactively.
       sudo rm -rf /Applications/Docker.app
       need_install=true
       fresh_install=true
