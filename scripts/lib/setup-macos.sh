@@ -44,8 +44,51 @@ _kill_lingering_docker() {
   fi
 }
 
+_is_headless() {
+  ! pgrep -x WindowServer &>/dev/null
+}
+
+_install_docker_colima() {
+  info "Headless environment detected (no GUI session) — using Colima as Docker runtime."
+
+  if ! has docker; then
+    spin_cmd "Installing Docker CLI…" brew install docker
+    success "Docker CLI: $(docker --version)"
+  else
+    success "Docker CLI: $(docker --version)"
+  fi
+
+  if ! has colima; then
+    spin_cmd "Installing Colima…" brew install colima
+    success "Colima installed."
+  else
+    success "Colima: $(colima version 2>/dev/null | head -1 || echo installed)"
+  fi
+
+  if docker info &>/dev/null 2>&1; then
+    success "Docker daemon already running."
+    return
+  fi
+
+  info "Starting Colima Docker runtime (first run may take 1-2 minutes)…"
+  spin_cmd "Starting Colima…" colima start --cpu 2 --memory 4 --disk 60
+
+  if ! docker info &>/dev/null 2>&1; then
+    error "Docker daemon (via Colima) did not start. Run 'colima status' to investigate."
+  fi
+
+  success "Docker (Colima): $(docker --version)"
+}
+
 install_docker_desktop() {
-  step "Step 2/3 — Docker Desktop"
+  step "Step 2/3 — Docker"
+
+  # On headless Macs (EC2, CI runners), Docker Desktop can't launch.
+  # If Docker is already running (e.g. via VNC session), skip detection.
+  if _is_headless && ! docker info &>/dev/null 2>&1; then
+    _install_docker_colima
+    return
+  fi
 
   # Detect real hardware — sysctl is immune to Rosetta translation
   local real_arch
