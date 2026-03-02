@@ -20,6 +20,26 @@ install_homebrew() {
   fi
 }
 
+# Kill lingering Docker Desktop processes that block a clean startup.
+# Docker itself emits: "Lingering processes detected. One or more running
+# processes can prevent Docker Desktop startup: Docker Desktop"
+_kill_lingering_docker() {
+  if ! docker info &>/dev/null 2>&1 && pgrep -xq "Docker Desktop"; then
+    warn "Lingering Docker Desktop process detected — cleaning up…"
+    osascript -e 'quit app "Docker"' 2>/dev/null || true
+    sleep 2
+    if pgrep -xq "Docker Desktop"; then
+      pkill -x "Docker Desktop" 2>/dev/null || true
+      sleep 2
+    fi
+    if pgrep -xq "Docker Desktop"; then
+      pkill -9 -x "Docker Desktop" 2>/dev/null || true
+      sleep 1
+    fi
+    success "Lingering Docker process cleared."
+  fi
+}
+
 install_docker_desktop() {
   step "Step 2/3 — Docker Desktop"
 
@@ -62,6 +82,8 @@ install_docker_desktop() {
       warn "Remove it and re-run: rm -rf /Applications/Docker.app"
     fi
   fi
+
+  _kill_lingering_docker
 
   # ── First-time install: guided pause ──────────────────────────────────────
   if [[ "$fresh_install" == true ]]; then
