@@ -50,6 +50,7 @@ install_docker_desktop() {
   local fresh_install=false
 
   if ! has docker; then
+    # Docker is required for k3d — install automatically when missing
     fresh_install=true
 
     # Detect real hardware — sysctl is immune to Rosetta translation
@@ -107,19 +108,20 @@ install_docker_desktop() {
   # ── First-time install: guided pause ──────────────────────────────────────
   if [[ "$fresh_install" == true ]]; then
     echo ""
-    echo -e "  ${BOLD}Docker Desktop needs a one-time setup.${RESET}"
-    echo -e "  We'll open it for you now. Here's what to do:"
+    echo -e "  ${BOLD}Docker Desktop is installed and needs a one-time setup.${RESET}"
+    echo -e "  We'll open it for you now. In the Docker window:"
     echo ""
-    echo -e "    1. ${CYAN}Accept the license agreement${RESET} in the Docker window"
-    echo -e "    2. ${CYAN}Wait for the whale icon${RESET} 🐳 to appear in your menu bar"
-    echo -e "    3. ${CYAN}Re-run this script${RESET} once Docker is ready"
+    echo -e "    1. ${CYAN}Accept the license agreement${RESET}"
+    echo -e "    2. ${CYAN}Wait for the whale icon${RESET} 🐳 in your menu bar"
+    echo -e "    3. ${CYAN}Re-run this script${RESET} once Docker says it's running"
     echo ""
     open -a Docker
     info "Opening Docker Desktop…"
     echo ""
-    echo -e "  ${BOLD}This is completely normal — it only happens once.${RESET}"
-    echo -e "  The script will now exit (code 2 = re-run required). Re-run it after Docker finishes its setup."
+    echo -e "  ${GREEN}Next step:${RESET} Complete the setup above, then run the script again."
     echo ""
+    # Signal to install_cleanup that this is the expected "Docker first-run" exit, not a generic failure
+    export TRACEBLOC_DOCKER_FIRST_RUN_EXIT=1
     exit 2
   fi
 

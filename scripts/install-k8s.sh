@@ -21,6 +21,7 @@
 #    HTTP_PORT=80                default: 80   (host → cluster ingress)
 #    HTTPS_PORT=443              default: 443
 #    HOST_DATA_DIR=~/.tracebloc  default: ~/.tracebloc
+#    TRACEBLOC_SKIP_REBOOT_PROMPT=1 (Linux) skip "Reboot now?" after NVIDIA driver install
 # =============================================================================
 
 set -euo pipefail

@@ -235,7 +235,11 @@ install_cleanup() {
   [[ -n "${SUDO_KEEPALIVE_PID:-}" ]] && kill "$SUDO_KEEPALIVE_PID" 2>/dev/null || true
   if [[ $exit_code -eq 2 ]]; then
     echo ""
-    info "Re-run required (exit code 2). Complete the step above, then run the script again."
+    if [[ -n "${TRACEBLOC_DOCKER_FIRST_RUN_EXIT:-}" ]]; then
+      info "Docker first-time setup: complete the steps above, then run the script again."
+    else
+      info "Re-run required (exit code 2). Complete the step above, then run the script again."
+    fi
     [[ -n "${LOG_FILE:-}" ]] && info "Log: $LOG_FILE"
   elif [[ $exit_code -ne 0 ]]; then
     echo ""
