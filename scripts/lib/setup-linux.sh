@@ -101,41 +101,54 @@ install_kubectl() {
 # ── k3d ──────────────────────────────────────────────────────────────────────
 install_k3d() {
   step "Step 4/5 — k3d"
-  if ! has k3d; then
-    local k3d_ver
-    k3d_ver=$(retry 3 5 curl -fsSL $CURL_SECURE \
-      "https://api.github.com/repos/k3d-io/k3d/releases/latest" \
-      | grep -o '"tag_name":"[^"]*"' | cut -d'"' -f4)
-    [[ -n "$k3d_ver" ]] || error "Could not determine latest k3d version"
-
-    local k3d_url="https://github.com/k3d-io/k3d/releases/download/${k3d_ver}/k3d-linux-${ARCH_DL}"
-    local k3d_tmp
-    k3d_tmp="$(mktemp)"
-    spin_cmd "Downloading k3d ${k3d_ver}…" \
-      retry 3 5 curl -fsSL $CURL_SECURE "$k3d_url" -o "$k3d_tmp"
-
-    local checksums
-    checksums=$(retry 3 5 curl -fsSL $CURL_SECURE \
-      "https://github.com/k3d-io/k3d/releases/download/${k3d_ver}/sha256sum.txt" 2>/dev/null || true)
-    if [[ -n "$checksums" ]]; then
-      local expected actual
-      expected=$(echo "$checksums" | grep "k3d-linux-${ARCH_DL}$" | awk '{print $1}')
-      actual=$(sha256sum "$k3d_tmp" | awk '{print $1}')
-      if [[ -n "$expected" && "$actual" != "$expected" ]]; then
-        rm -f "$k3d_tmp"
-        error "k3d checksum verification failed — possible tampering"
-      fi
-      info "k3d checksum verified."
-    else
-      warn "Could not fetch k3d checksums — skipping verification."
-    fi
-
-    chmod +x "$k3d_tmp"
-    sudo mv "$k3d_tmp" /usr/local/bin/k3d
-    success "k3d ${k3d_ver} installed."
-  else
+  # Fast-path: if k3d is already installed, just report and return.
+  if has k3d; then
     success "k3d: $(k3d version | head -1)"
+    return 0
   fi
+
+  # Prefer distro package on openSUSE/SLES when available.
+  if has zypper; then
+    if spin_cmd "Installing k3d (openSUSE/SLES…)" sudo zypper install -y k3d; then
+      success "k3d: $(k3d version | head -1)"
+      return 0
+    else
+      warn "zypper k3d install failed — falling back to upstream GitHub installer."
+    fi
+  fi
+
+  # Fallback: download latest k3d release directly from GitHub.
+  local k3d_ver
+  k3d_ver=$(retry 3 5 curl -fsSL $CURL_SECURE \
+    "https://api.github.com/repos/k3d-io/k3d/releases/latest" \
+    | grep -o '"tag_name":"[^"]*"' | cut -d'"' -f4)
+  [[ -n "$k3d_ver" ]] || error "Could not determine latest k3d version"
+
+  local k3d_url="https://github.com/k3d-io/k3d/releases/download/${k3d_ver}/k3d-linux-${ARCH_DL}"
+  local k3d_tmp
+  k3d_tmp="$(mktemp)"
+  spin_cmd "Downloading k3d ${k3d_ver}…" \
+    retry 3 5 curl -fsSL $CURL_SECURE "$k3d_url" -o "$k3d_tmp"
+
+  local checksums
+  checksums=$(retry 3 5 curl -fsSL $CURL_SECURE \
+    "https://github.com/k3d-io/k3d/releases/download/${k3d_ver}/sha256sum.txt" 2>/dev/null || true)
+  if [[ -n "$checksums" ]]; then
+    local expected actual
+    expected=$(echo "$checksums" | grep "k3d-linux-${ARCH_DL}$" | awk '{print $1}')
+    actual=$(sha256sum "$k3d_tmp" | awk '{print $1}')
+    if [[ -n "$expected" && "$actual" != "$expected" ]]; then
+      rm -f "$k3d_tmp"
+      error "k3d checksum verification failed — possible tampering"
+    fi
+    info "k3d checksum verified."
+  else
+    warn "Could not fetch k3d checksums — skipping verification."
+  fi
+
+  chmod +x "$k3d_tmp"
+  sudo mv "$k3d_tmp" /usr/local/bin/k3d
+  success "k3d ${k3d_ver} installed."
 }
 
 # ── Helm ─────────────────────────────────────────────────────────────────────
