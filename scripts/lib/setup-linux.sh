@@ -106,14 +106,14 @@ install_k3d() {
     success "k3d: $(k3d version | head -1)"
     return 0
   fi
-
-  # Prefer distro package on openSUSE/SLES when available.
+  # Prefer distro package on openSUSE/SLES when available, but fall back
+  # quietly to the upstream GitHub installer if the package is missing.
   if has zypper; then
-    if spin_cmd "Installing k3d (openSUSE/SLES…)" sudo zypper install -y k3d; then
+    if sudo zypper install -y k3d >> "${LOG_FILE:-/tmp/tracebloc-spin.log}" 2>&1; then
       success "k3d: $(k3d version | head -1)"
       return 0
     else
-      warn "zypper k3d install failed — falling back to upstream GitHub installer."
+      warn "No 'k3d' package found via zypper — falling back to upstream GitHub installer."
     fi
   fi
 
