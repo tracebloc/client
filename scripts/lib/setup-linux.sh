@@ -106,49 +106,19 @@ install_k3d() {
     success "k3d: $(k3d version | head -1)"
     return 0
   fi
-  # Prefer distro package on openSUSE/SLES when available, but fall back
-  # quietly to the upstream GitHub installer if the package is missing.
-  if has zypper; then
-    if sudo zypper install -y k3d >> "${LOG_FILE:-/tmp/tracebloc-spin.log}" 2>&1; then
-      success "k3d: $(k3d version | head -1)"
-      return 0
-    else
-      warn "No 'k3d' package found via zypper — falling back to upstream GitHub installer."
-    fi
+
+  # Use the official k3d installer script, which you confirmed works well:
+  #   curl -s https://raw.githubusercontent.com/k3d-io/k3d/main/install.sh | bash
+  if ! spin_cmd "Installing k3d…" bash -c 'set -euo pipefail; curl -fsSL --tlsv1.2 https://raw.githubusercontent.com/k3d-io/k3d/main/install.sh | bash'; then
+    error "k3d installation failed. See the install log for details."
   fi
 
-  # Fallback: download latest k3d release directly from GitHub.
-  local k3d_ver
-  k3d_ver=$(retry 3 5 curl -fsSL $CURL_SECURE \
-    "https://api.github.com/repos/k3d-io/k3d/releases/latest" \
-    | grep -o '"tag_name":"[^"]*"' | cut -d'"' -f4)
-  [[ -n "$k3d_ver" ]] || error "Could not determine latest k3d version"
-
-  local k3d_url="https://github.com/k3d-io/k3d/releases/download/${k3d_ver}/k3d-linux-${ARCH_DL}"
-  local k3d_tmp
-  k3d_tmp="$(mktemp)"
-  spin_cmd "Downloading k3d ${k3d_ver}…" \
-    retry 3 5 curl -fsSL $CURL_SECURE "$k3d_url" -o "$k3d_tmp"
-
-  local checksums
-  checksums=$(retry 3 5 curl -fsSL $CURL_SECURE \
-    "https://github.com/k3d-io/k3d/releases/download/${k3d_ver}/sha256sum.txt" 2>/dev/null || true)
-  if [[ -n "$checksums" ]]; then
-    local expected actual
-    expected=$(echo "$checksums" | grep "k3d-linux-${ARCH_DL}$" | awk '{print $1}')
-    actual=$(sha256sum "$k3d_tmp" | awk '{print $1}')
-    if [[ -n "$expected" && "$actual" != "$expected" ]]; then
-      rm -f "$k3d_tmp"
-      error "k3d checksum verification failed — possible tampering"
-    fi
-    info "k3d checksum verified."
-  else
-    warn "Could not fetch k3d checksums — skipping verification."
+  # Verify k3d is now available on PATH.
+  if ! has k3d; then
+    error "k3d installation completed but 'k3d' was not found on PATH."
   fi
 
-  chmod +x "$k3d_tmp"
-  sudo mv "$k3d_tmp" /usr/local/bin/k3d
-  success "k3d ${k3d_ver} installed."
+  success "k3d: $(k3d version | head -1)"
 }
 
 # ── Helm ─────────────────────────────────────────────────────────────────────
