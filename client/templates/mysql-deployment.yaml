@@ -19,9 +19,22 @@ spec:
         app: mysql-client
     spec:
       terminationGracePeriodSeconds: 60
+      securityContext:
+        fsGroup: 999
+        fsGroupChangePolicy: "OnRootMismatch"
       initContainers:
+      - name: init-mysql-data
+        image: busybox:1.35
+        securityContext:
+          runAsUser: 0
+        command: ['sh', '-c', 'mkdir -p /var/lib/mysql && chown 999:999 /var/lib/mysql && chmod 755 /var/lib/mysql']
+        volumeMounts:
+        - name: mysql-persistent-storage
+          mountPath: /var/lib/mysql/
       - name: init-mysql-logs
         image: busybox:1.35
+        securityContext:
+          runAsUser: 0
         command: ['sh', '-c', 'mkdir -p /var/log/mysql && chown -R 999:999 /var/log/mysql && chmod -R 755 /var/log/mysql']
         volumeMounts:
         - name: mysql-logs
@@ -34,20 +47,26 @@ spec:
             memory: 256Mi
             cpu: 100m
           limits:
-            memory: 512Mi
-            cpu: 500m
+            memory: 1Gi
+            cpu: 1000m
         ports:
         - containerPort: 3306
           name: mysql-client
+        startupProbe:
+          exec:
+            command: ["mysqladmin", "ping", "-h", "localhost"]
+          initialDelaySeconds: 10
+          periodSeconds: 5
+          failureThreshold: 24
         livenessProbe:
           exec:
             command: ["mysqladmin", "ping", "-h", "localhost"]
-          initialDelaySeconds: 30
+          initialDelaySeconds: 0
           periodSeconds: 10
         readinessProbe:
           exec:
             command: ["mysqladmin", "ping", "-h", "localhost"]
-          initialDelaySeconds: 10
+          initialDelaySeconds: 0
           periodSeconds: 5
         volumeMounts:
         - name: mysql-persistent-storage
