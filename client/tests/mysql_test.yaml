@@ -43,7 +43,7 @@ tests:
           value: 256Mi
       - equal:
           path: spec.template.spec.containers[0].resources.limits.memory
-          value: 512Mi
+          value: 1Gi
 
   - it: should create ConfigMap with MySQL config
     template: templates/mysql-configmap.yaml
