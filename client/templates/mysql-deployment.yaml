@@ -26,7 +26,7 @@ spec:
         image: busybox:1.35
         securityContext:
           runAsUser: 0
-        command: ['sh', '-c', 'mkdir -p /var/lib/mysql && chown -R 999:999 /var/lib/mysql && chmod -R 755 /var/lib/mysql']
+        command: ['sh', '-c', 'mkdir -p /var/lib/mysql && chown 999:999 /var/lib/mysql && chmod 755 /var/lib/mysql']
         volumeMounts:
         - name: mysql-persistent-storage
           mountPath: /var/lib/mysql/
