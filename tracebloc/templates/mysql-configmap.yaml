@@ -1,0 +1,24 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: mysql-client-config
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "tracebloc.labels" . | nindent 4 }}
+data:
+  mysql.cnf: |
+    [mysqld]
+    max_allowed_packet = 256M
+
+    innodb_buffer_pool_size = 128M
+    innodb_log_file_size = 64M
+    innodb_log_buffer_size = 16M
+
+    max_connections = 200
+    wait_timeout = 28800
+    interactive_timeout = 28800
+
+    character-set-server = utf8mb4
+    collation-server = utf8mb4_unicode_ci
+
+    log-error = /var/log/mysql/error.log

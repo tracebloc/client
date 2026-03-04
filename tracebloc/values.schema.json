@@ -1,0 +1,205 @@
+{
+  "$schema": "https://json-schema.org/draft-07/schema#",
+  "title": "Tracebloc Helm Chart Values",
+  "type": "object",
+  "required": ["clientId", "clientPassword", "dockerRegistry"],
+  "properties": {
+    "env": {
+      "type": "object",
+      "description": "Environment variables passed to containers",
+      "properties": {
+        "CLIENT_ENV": {
+          "type": "string",
+          "default": "prod",
+          "description": "Environment identifier and Docker image tag (dev, staging, prod). Defaults to 'prod' if not set or empty."
+        },
+        "HTTP_PROXY_HOST": { "type": "string" },
+        "HTTP_PROXY_PORT": { "type": "string" },
+        "HTTP_PROXY_USERNAME": { "type": "string" },
+        "HTTP_PROXY_PASSWORD": { "type": "string" },
+        "RESOURCE_REQUESTS": {
+          "type": "string",
+          "default": "cpu=2,memory=8Gi",
+          "pattern": "^(cpu=\\S+,memory=\\S+)?$",
+          "description": "Optional resource requests for spawned jobs (defaults to 'cpu=2,memory=8Gi' if not set)"
+        },
+        "RESOURCE_LIMITS": {
+          "type": "string",
+          "default": "cpu=2,memory=8Gi",
+          "pattern": "^(cpu=\\S+,memory=\\S+)?$",
+          "description": "Optional resource limits for spawned jobs (defaults to 'cpu=2,memory=8Gi' if not set)"
+        },
+        "GPU_REQUESTS": {
+          "type": "string",
+          "default": "nvidia.com/gpu=1",
+          "description": "Optional GPU requests for spawned jobs (defaults to 'nvidia.com/gpu=1' if not set)"
+        },
+        "GPU_LIMITS": {
+          "type": "string",
+          "default": "nvidia.com/gpu=1",
+          "description": "Optional GPU limits for spawned jobs (defaults to 'nvidia.com/gpu=1' if not set)"
+        },
+        "RUNTIME_CLASS_NAME": { "type": "string" }
+      },
+      "additionalProperties": {
+        "type": "string"
+      }
+    },
+    "storageClass": {
+      "type": "object",
+      "required": ["create", "name"],
+      "properties": {
+        "create": {
+          "type": "boolean",
+          "description": "Set to false to use an existing StorageClass"
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Name of the StorageClass"
+        },
+        "provisioner": {
+          "type": "string",
+          "description": "CSI provisioner (required when create is true)"
+        },
+        "allowVolumeExpansion": {
+          "type": "boolean"
+        },
+        "volumeBindingMode": {
+          "type": "string",
+          "enum": ["", "Immediate", "WaitForFirstConsumer"]
+        },
+        "reclaimPolicy": {
+          "type": "string",
+          "enum": ["", "Delete", "Retain"]
+        },
+        "mountOptions": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "parameters": {
+          "type": "object",
+          "additionalProperties": true
+        }
+      }
+    },
+    "hostPath": {
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "description": "Enable hostPath PVs (bare-metal only)"
+        },
+        "dataPath": {
+          "type": "string",
+          "description": "Path segment for shared data volume; rendered as /tracebloc/<dataPath>"
+        },
+        "logsPath": {
+          "type": "string",
+          "description": "Path segment for logs volume; rendered as /tracebloc/<logsPath>"
+        },
+        "mysqlPath": {
+          "type": "string",
+          "description": "Path segment for MySQL data volume; rendered as /tracebloc/<mysqlPath>"
+        },
+        "initJob": {
+          "type": "boolean",
+          "description": "Create pre-install Job to set up host directories"
+        }
+      },
+      "if": {
+        "properties": { "enabled": { "const": true } }
+      },
+      "then": {
+        "required": ["dataPath", "logsPath", "mysqlPath"],
+        "properties": {
+          "dataPath": { "minLength": 1 },
+          "logsPath": { "minLength": 1 },
+          "mysqlPath": { "minLength": 1 }
+        }
+      }
+    },
+    "pvc": {
+      "type": "object",
+      "description": "PVC storage sizes",
+      "properties": {
+        "mysql": {
+          "type": "string",
+          "default": "2Gi",
+          "pattern": "^[0-9]+(Gi|Mi|Ti)$",
+          "description": "Storage size for MySQL PVC"
+        },
+        "logs": {
+          "type": "string",
+          "default": "10Gi",
+          "pattern": "^[0-9]+(Gi|Mi|Ti)$",
+          "description": "Storage size for logs PVC"
+        },
+        "data": {
+          "type": "string",
+          "default": "50Gi",
+          "pattern": "^[0-9]+(Gi|Mi|Ti)$",
+          "description": "Storage size for shared data PVC"
+        }
+      }
+    },
+    "pvcAccessMode": {
+      "type": "string",
+      "enum": ["ReadWriteOnce", "ReadWriteMany", "ReadOnlyMany"],
+      "description": "Access mode for PVCs"
+    },
+    "clusterScope": {
+      "type": "boolean",
+      "default": true,
+      "description": "Use ClusterRole (true) or namespace-scoped Role (false). Defaults to true."
+    },
+    "resourceMonitor": {
+      "type": "boolean",
+      "default": true,
+      "description": "Deploy resource-monitor DaemonSet. Defaults to true."
+    },
+    "openshift": {
+      "type": "object",
+      "properties": {
+        "scc": {
+          "type": "object",
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "description": "Create SecurityContextConstraints for resource monitor"
+            }
+          }
+        }
+      }
+    },
+    "clientId": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Client ID for authentication"
+    },
+    "clientPassword": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Client authentication password"
+    },
+    "dockerRegistry": {
+      "type": "object",
+      "required": ["server", "username", "password", "email"],
+      "properties": {
+        "server": {
+          "type": "string",
+          "format": "uri"
+        },
+        "username": {
+          "type": "string"
+        },
+        "password": {
+          "type": "string"
+        },
+        "email": {
+          "type": "string"
+        }
+      }
+    }
+  }
+}

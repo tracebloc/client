@@ -1,14 +1,9 @@
-#namespace for client
-namespace: <NAMESPACE>
-
 # Configuration for the jobs manager
 jobsManager:
   # Docker image tag for the jobs manager
   tag: dev
   # Environment variables for the jobs manager
   env:
-    # Environment setting (e.g., "dev", "staging", "prod")
-    CLIENT_ENV: "dev"
     # Client ID for client authentication
     CLIENT_ID: "<CLIENT_ID>"
     # proxy hostname.
@@ -99,3 +94,11 @@ dockerRegistry:
   password: <DOCKER_REGISTRY_PASSWORD or DOCKER_REGISTRY_TOKEN>
   # Email associated with the Docker registry account
   email: <DOCKER_EMAIL>
+
+# Resource monitor DaemonSet
+resourceMonitor:
+  enabled: true
+
+# Node selector for jobs-manager and MySQL pods
+nodeSelector:
+  type: system

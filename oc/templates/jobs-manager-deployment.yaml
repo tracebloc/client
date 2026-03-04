@@ -1,0 +1,114 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}-jobs-manager
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "tracebloc.labels" . | nindent 4 }}
+spec:
+  selector:
+    matchLabels:
+      app: manager
+  replicas: 1
+  template:
+    metadata:
+      labels:
+        app: manager
+    spec:
+      serviceAccountName: {{ include "tracebloc.serviceAccountName" . }}
+      containers:
+      - name: api
+        image: "docker.io/tracebloc/jobs-manager:{{ .Values.jobsManager.tag | default "prod" }}"
+        imagePullPolicy: Always
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop: ["ALL"]
+        resources:
+          requests:
+            cpu: 100m
+            memory: 256Mi
+          limits:
+            cpu: 500m
+            memory: 512Mi
+        volumeMounts:
+          - name: shared-volume
+            mountPath: "/data/shared"
+          - name: logs-volume
+            mountPath: "/data/logs"
+        env:
+        - name: CLIENT_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: {{ include "tracebloc.secretName" . }}
+              key: CLIENT_PASSWORD
+        - name: CLIENT_PVC
+          value: "{{ .Values.clientData.name}}"
+        - name: CLIENT_LOGS_PVC
+          value: "{{ .Values.clientLogsPvc.name}}"
+        - name: MYSQL_HOST
+          value: "{{ .Values.mysql.name}}"
+        - name: JOB_IMAGE_HOST
+          value: "docker.io/"
+        - name: CLIENT_ENV
+          value: {{ .Values.jobsManager.env.CLIENT_ENV | default "prod" | quote }}
+        {{- range $key, $value := .Values.jobsManager.env }}
+        {{- if and (ne $key "CLIENT_ENV") $value }}
+        - name: {{ $key }}
+          value: {{ $value | quote }}
+        {{- end }}
+        {{- end }}
+      - name: pods-monitor-container
+        image: "docker.io/tracebloc/pods-monitor:{{ .Values.jobsManager.tag | default "prod" }}"
+        imagePullPolicy: Always
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop: ["ALL"]
+        resources:
+          requests:
+            cpu: 50m
+            memory: 128Mi
+          limits:
+            cpu: 200m
+            memory: 256Mi
+        volumeMounts:
+        - name: logs-volume
+          mountPath: "/data/logs"
+        # - name: app-log
+        #   mountPath: "/app/resource-monitor.log"
+        #   subPath: resource-monitor.log
+        env:
+        - name: CLIENT_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: {{ include "tracebloc.secretName" . }}
+              key: CLIENT_PASSWORD
+        - name: CLIENT_LOGS_PVC
+          value: "{{ .Values.clientLogsPvc.name}}"
+        - name: JOB_IMAGE_HOST
+          value: "docker.io/"
+        - name: CLIENT_ENV
+          value: {{ .Values.jobsManager.env.CLIENT_ENV | default "prod" | quote }}
+        {{- range $key, $value := .Values.jobsManager.env }}
+        {{- if and (ne $key "CLIENT_ENV") $value }}
+        - name: {{ $key }}
+          value: {{ $value | quote }}
+        {{- end }}
+        {{- end }}
+      imagePullSecrets:
+      - name: {{ include "tracebloc.registrySecretName" . }}
+      volumes:
+        - name: shared-volume
+          persistentVolumeClaim:
+            claimName: {{ .Values.clientData.name}}
+        - name: logs-volume
+          persistentVolumeClaim:
+            claimName: {{ .Values.clientLogsPvc.name }}
+        - name: app-log
+          emptyDir: {}
+      restartPolicy: Always
+      {{- if .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml .Values.nodeSelector | nindent 8 }}
+      {{- end }}

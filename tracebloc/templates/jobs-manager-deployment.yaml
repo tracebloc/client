@@ -1,0 +1,145 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}-jobs-manager
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "tracebloc.labels" . | nindent 4 }}
+spec:
+  selector:
+    matchLabels:
+      app: manager
+  replicas: 1
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  template:
+    metadata:
+      labels:
+        app: manager
+    spec:
+      terminationGracePeriodSeconds: 60
+      serviceAccountName: {{ include "tracebloc.serviceAccountName" . }}
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+      - name: api
+        image: {{ include "tracebloc.image" (dict "repository" "tracebloc/jobs-manager" "tag" .Values.env.CLIENT_ENV "registry" "docker.io") | quote }}
+        imagePullPolicy: Always
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop: ["ALL"]
+        resources:
+          requests:
+            cpu: 100m
+            memory: 256Mi
+          limits:
+            cpu: 500m
+            memory: 512Mi
+        volumeMounts:
+          - name: shared-volume
+            mountPath: "/data/shared"
+          - name: logs-volume
+            mountPath: "/data/logs"
+        env:
+        - name: CLIENT_ID
+          valueFrom:
+            secretKeyRef:
+              name: {{ include "tracebloc.secretName" . }}
+              key: CLIENT_ID
+        - name: CLIENT_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: {{ include "tracebloc.secretName" . }}
+              key: CLIENT_PASSWORD
+        - name: CLIENT_PVC
+          value: {{ include "tracebloc.clientDataPvc" . | quote }}
+        - name: CLIENT_LOGS_PVC
+          value: {{ include "tracebloc.clientLogsPvc" . | quote }}
+        - name: MYSQL_HOST
+          value: "mysql-client"
+        - name: JOB_IMAGE_HOST
+          value: "docker.io/"
+        - name: CLIENT_ENV
+          value: {{ .Values.env.CLIENT_ENV | default "prod" | quote }}
+        - name: RESOURCE_REQUESTS
+          value: {{ if hasKey .Values.env "RESOURCE_REQUESTS" }}{{ .Values.env.RESOURCE_REQUESTS | quote }}{{ else }}"cpu=2,memory=8Gi"{{ end }}
+        - name: RESOURCE_LIMITS
+          value: {{ if hasKey .Values.env "RESOURCE_LIMITS" }}{{ .Values.env.RESOURCE_LIMITS | quote }}{{ else }}"cpu=2,memory=8Gi"{{ end }}
+        - name: GPU_REQUESTS
+          value: {{ if hasKey .Values.env "GPU_REQUESTS" }}{{ .Values.env.GPU_REQUESTS | quote }}{{ else }}"nvidia.com/gpu=1"{{ end }}
+        - name: GPU_LIMITS
+          value: {{ if hasKey .Values.env "GPU_LIMITS" }}{{ .Values.env.GPU_LIMITS | quote }}{{ else }}"nvidia.com/gpu=1"{{ end }}
+        - name: RUNTIME_CLASS_NAME
+          value: {{ if hasKey .Values.env "RUNTIME_CLASS_NAME" }}{{ .Values.env.RUNTIME_CLASS_NAME | quote }}{{ else }}""{{ end }}
+        {{- range $key, $value := .Values.env }}
+        {{- if and (ne $key "CLIENT_ENV") (ne $key "RESOURCE_REQUESTS") (ne $key "RESOURCE_LIMITS") (ne $key "GPU_REQUESTS") (ne $key "GPU_LIMITS") (ne $key "RUNTIME_CLASS_NAME") (ne $key "CLIENT_ID") $value }}
+        - name: {{ $key }}
+          value: {{ $value | quote }}
+        {{- end }}
+        {{- end }}
+      - name: pods-monitor-container
+        image: {{ include "tracebloc.image" (dict "repository" "tracebloc/pods-monitor" "tag" .Values.env.CLIENT_ENV "registry" "docker.io") | quote }}
+        imagePullPolicy: Always
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop: ["ALL"]
+        resources:
+          requests:
+            cpu: 50m
+            memory: 128Mi
+          limits:
+            cpu: 200m
+            memory: 256Mi
+        volumeMounts:
+        - name: logs-volume
+          mountPath: "/data/logs"
+        env:
+        - name: CLIENT_ID
+          valueFrom:
+            secretKeyRef:
+              name: {{ include "tracebloc.secretName" . }}
+              key: CLIENT_ID
+        - name: CLIENT_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: {{ include "tracebloc.secretName" . }}
+              key: CLIENT_PASSWORD
+        - name: CLIENT_LOGS_PVC
+          value: {{ include "tracebloc.clientLogsPvc" . | quote }}
+        - name: JOB_IMAGE_HOST
+          value: "docker.io/"
+        - name: CLIENT_ENV
+          value: {{ .Values.env.CLIENT_ENV | default "prod" | quote }}
+        - name: RESOURCE_REQUESTS
+          value: {{ if hasKey .Values.env "RESOURCE_REQUESTS" }}{{ .Values.env.RESOURCE_REQUESTS | quote }}{{ else }}"cpu=2,memory=8Gi"{{ end }}
+        - name: RESOURCE_LIMITS
+          value: {{ if hasKey .Values.env "RESOURCE_LIMITS" }}{{ .Values.env.RESOURCE_LIMITS | quote }}{{ else }}"cpu=2,memory=8Gi"{{ end }}
+        - name: GPU_REQUESTS
+          value: {{ if hasKey .Values.env "GPU_REQUESTS" }}{{ .Values.env.GPU_REQUESTS | quote }}{{ else }}"nvidia.com/gpu=1"{{ end }}
+        - name: GPU_LIMITS
+          value: {{ if hasKey .Values.env "GPU_LIMITS" }}{{ .Values.env.GPU_LIMITS | quote }}{{ else }}"nvidia.com/gpu=1"{{ end }}
+        - name: RUNTIME_CLASS_NAME
+          value: {{ if hasKey .Values.env "RUNTIME_CLASS_NAME" }}{{ .Values.env.RUNTIME_CLASS_NAME | quote }}{{ else }}""{{ end }}
+        {{- range $key, $value := .Values.env }}
+        {{- if and (ne $key "CLIENT_ENV") (ne $key "RESOURCE_REQUESTS") (ne $key "RESOURCE_LIMITS") (ne $key "GPU_REQUESTS") (ne $key "GPU_LIMITS") (ne $key "RUNTIME_CLASS_NAME") (ne $key "CLIENT_ID") $value }}
+        - name: {{ $key }}
+          value: {{ $value | quote }}
+        {{- end }}
+        {{- end }}
+      imagePullSecrets:
+      - name: {{ include "tracebloc.registrySecretName" . }}
+      volumes:
+        - name: shared-volume
+          persistentVolumeClaim:
+            claimName: {{ include "tracebloc.clientDataPvc" . }}
+        - name: logs-volume
+          persistentVolumeClaim:
+            claimName: {{ include "tracebloc.clientLogsPvc" . }}
+      restartPolicy: Always

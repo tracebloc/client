@@ -1,0 +1,35 @@
+{{ "\033[1;36m" }}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━{{ "\033[0m" }}
+{{ "\033[1;32m" }} Tracebloc deployed to namespace:{{ "\033[0m" }} {{ "\033[1;33m" }}{{ .Release.Namespace }}{{ "\033[0m" }}
+{{ "\033[1;36m" }}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━{{ "\033[0m" }}
+
+{{ "\033[1;35m" }}Components:{{ "\033[0m" }}
+  - {{ "\033[1;34m" }}Jobs Manager:{{ "\033[0m" }}            {{ "\033[0;33m" }}{{ .Release.Name }}-jobs-manager{{ "\033[0m" }}
+  - {{ "\033[1;34m" }}MySQL Host:{{ "\033[0m" }}                   {{ "\033[0;33m" }}mysql-client{{ "\033[0m" }}
+{{- if ne .Values.resourceMonitor false }}
+  - {{ "\033[1;34m" }}Resource Monitor (DS):{{ "\033[0m" }}   {{ "\033[0;33m" }}tracebloc-resource-monitor{{ "\033[0m" }}
+{{- end }}
+
+{{ "\033[1;35m" }}Configuration:{{ "\033[0m" }}
+  {{ "\033[1;34m" }}Service Account:{{ "\033[0m" }}  {{ "\033[0;33m" }}{{ include "tracebloc.serviceAccountName" . }}{{ "\033[0m" }}
+  {{ "\033[1;34m" }}Secret:{{ "\033[0m" }}           {{ "\033[0;33m" }}{{ include "tracebloc.secretName" . }}{{ "\033[0m" }}
+  {{ "\033[1;34m" }}RBAC scope:{{ "\033[0m" }}       {{ "\033[0;33m" }}{{ if ne .Values.clusterScope false }}Cluster{{ else }}Namespace{{ end }}{{ "\033[0m" }}
+  {{ "\033[1;34m" }}Image registry:{{ "\033[0m" }}   {{ "\033[1;32m" }}docker.io{{ "\033[0m" }}
+{{- if .Values.hostPath.enabled }}
+  {{ "\033[1;34m" }}Storage:{{ "\033[0m" }}          {{ "\033[0;33m" }}hostPath (bare-metal){{ "\033[0m" }}
+{{- else }}
+  {{ "\033[1;34m" }}Storage:{{ "\033[0m" }}          {{ "\033[0;33m" }}dynamic PVC ({{ .Values.storageClass.name }}){{ "\033[0m" }}
+{{- end }}
+{{- if .Values.openshift.scc.enabled }}
+  {{ "\033[1;34m" }}OpenShift SCC:{{ "\033[0m" }}    {{ "\033[0;33m" }}tracebloc-resource-monitor-{{ .Release.Name }}{{ "\033[0m" }}
+{{- end }}
+
+{{ "\033[1;35m" }}PVCs{{ "\033[0m" }} (protected with helm.sh/resource-policy: keep):
+  - {{ "\033[0;36m" }}{{ include "tracebloc.clientDataPvc" . }}{{ "\033[0m" }}     {{ "\033[0;90m" }}({{ include "tracebloc.clientDataStorage" . }}){{ "\033[0m" }}
+  - {{ "\033[0;36m" }}{{ include "tracebloc.clientLogsPvc" . }}{{ "\033[0m" }}  {{ "\033[0;90m" }}({{ include "tracebloc.clientLogsStorage" . }}){{ "\033[0m" }}
+  - {{ "\033[0;36m" }}{{ include "tracebloc.mysqlPvc" . }}{{ "\033[0m" }}       {{ "\033[0;90m" }}({{ include "tracebloc.mysqlStorage" . }}){{ "\033[0m" }}
+
+{{ "\033[1;35m" }}Verify the deployment:{{ "\033[0m" }}
+  {{ "\033[1;32m" }}${{ "\033[0m" }} kubectl get pods -n {{ "\033[0;33m" }}{{ .Release.Namespace }}{{ "\033[0m" }} -l app.kubernetes.io/instance={{ "\033[0;36m" }}{{ .Release.Name }}{{ "\033[0m" }}
+  {{ "\033[1;32m" }}${{ "\033[0m" }} kubectl get pods -n {{ "\033[0;33m" }}{{ .Release.Namespace }}{{ "\033[0m" }} -l app={{ "\033[0;36m" }}manager{{ "\033[0m" }}
+  {{ "\033[1;32m" }}${{ "\033[0m" }} kubectl get pods -n {{ "\033[0;33m" }}{{ .Release.Namespace }}{{ "\033[0m" }} -l app={{ "\033[0;36m" }}mysql-client{{ "\033[0m" }}
+{{ "\033[1;36m" }}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━{{ "\033[0m" }}

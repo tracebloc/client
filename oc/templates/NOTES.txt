@@ -1,0 +1,23 @@
+Tracebloc (OpenShift) has been deployed to namespace: {{ .Release.Namespace }}
+
+Components:
+  - Jobs Manager:   {{ .Release.Name }}-jobs-manager
+  - MySQL:          {{ .Values.mysql.name }}
+{{- if .Values.resourceMonitor.enabled }}
+  - Resource Monitor (DaemonSet): tracebloc-resource-monitor
+{{- end }}
+
+Service Account: {{ include "tracebloc.serviceAccountName" . }}
+Secret:          {{ include "tracebloc.secretName" . }}
+
+RBAC scope: {{ if .Values.clusterRole.useClusterScope }}Cluster{{ else }}Namespace{{ end }}
+
+PVCs (protected with helm.sh/resource-policy: keep):
+  - {{ .Values.clientData.name }}     ({{ .Values.clientData.storage }})
+  - {{ .Values.clientLogsPvc.name }}  ({{ .Values.clientLogsPvc.storage }})
+  - {{ .Values.mysqlPvc.name }}       ({{ .Values.mysqlPvc.storage }})
+
+Verify the deployment:
+  oc get pods -n {{ .Release.Namespace }} -l app.kubernetes.io/instance={{ .Release.Name }}
+  oc get pods -n {{ .Release.Namespace }} -l app=manager
+  oc get pods -n {{ .Release.Namespace }} -l app={{ .Values.mysql.name }}

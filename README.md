@@ -12,7 +12,29 @@ Tracebloc Client is a Kubernetes-based application that runs experiments and com
 - Docker
 - Persistent Volume Storage
 
-## 🚀 Installation & Setup
+## 🚀 Quick Install
+
+Set up a local Kubernetes cluster with GPU support in one command:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/tracebloc/client/main/scripts/install.sh | bash
+```
+
+With custom configuration:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/tracebloc/client/main/scripts/install.sh | \
+  CLUSTER_NAME=myapp AGENTS=3 bash
+```
+
+| Variable | Default | Description |
+|---|---|---|
+| `CLUSTER_NAME` | `k3s-local` | Name of the k3d cluster |
+| `SERVERS` | `1` | Number of control-plane nodes |
+| `AGENTS` | `2` | Number of worker nodes |
+| `K8S_VERSION` | latest stable | k3s version tag |
+| `HTTP_PORT` | `80` | Host port mapped to cluster ingress (HTTP) |
+| `HTTPS_PORT` | `443` | Host port mapped to cluster ingress (HTTPS) |
 
 ### Prerequisites
 - `kubectl` installed and configured
@@ -52,6 +74,10 @@ Tracebloc Client is a Kubernetes-based application that runs experiments and com
 2. Configure your credentials
 3. Follow our detailed deployment guide at:
    [Create Your Client](https://traceblocdocsdev.azureedge.net/environment-setup/create-your-client)
+
+### Installing the tracebloc Helm chart (production)
+
+The **tracebloc** chart is the unified chart for AKS, EKS, bare-metal, and OpenShift. For production-ready install steps (from repo, from `.tgz`, or from source), prerequisites, required values, upgrade, and rollback, see **[docs/INSTALL.md](docs/INSTALL.md)**.
 
 
 
@@ -221,3 +247,4 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 
 ## 📞 Support
 For additional support or questions, please refer to our documentation or contact the Tracebloc support team.
+
