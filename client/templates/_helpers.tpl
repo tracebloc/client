@@ -33,12 +33,20 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 client-pvc
 {{- end }}
 
+{{- define "tracebloc.clientDataPvName" -}}
+{{ .Release.Name }}-data-pv
+{{- end }}
+
 {{- define "tracebloc.clientDataStorage" -}}
 {{ .Values.pvc.data | default "50Gi" }}
 {{- end }}
 
 {{- define "tracebloc.clientLogsPvc" -}}
 client-logs-pvc
+{{- end }}
+
+{{- define "tracebloc.clientLogsPvName" -}}
+{{ .Release.Name }}-logs-pv
 {{- end }}
 
 {{- define "tracebloc.clientLogsStorage" -}}
@@ -49,20 +57,12 @@ client-logs-pvc
 mysql-pvc
 {{- end }}
 
+{{- define "tracebloc.mysqlPvName" -}}
+{{ .Release.Name }}-mysql-pv
+{{- end }}
+
 {{- define "tracebloc.mysqlStorage" -}}
 {{ .Values.pvc.mysql | default "2Gi" }}
-{{- end }}
-
-{{- define "tracebloc.hostPath.data" -}}
-/tracebloc/{{ trimPrefix (toString .Values.hostPath.dataPath) "/" }}
-{{- end }}
-
-{{- define "tracebloc.hostPath.logs" -}}
-/tracebloc/{{ trimPrefix (toString .Values.hostPath.logsPath) "/" }}
-{{- end }}
-
-{{- define "tracebloc.hostPath.mysql" -}}
-/tracebloc/{{ trimPrefix (toString .Values.hostPath.mysqlPath) "/" }}
 {{- end }}
 
 {{- define "tracebloc.registrySecretName" -}}

@@ -1,10 +1,6 @@
-# Bare-metal platform values
+# Bare-metal platform values (PV paths are fixed: /tracebloc/data, /tracebloc/logs, /tracebloc/mysql)
 hostPath:
   enabled: true
-  dataPath: /mnt/tracebloc/shared_data
-  logsPath: /mnt/tracebloc/logs
-  mysqlPath: /mnt/tracebloc/mysql
-  initJob: true
 
 pvcAccessMode: ReadWriteOnce
 

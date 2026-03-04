@@ -88,34 +88,7 @@
       "properties": {
         "enabled": {
           "type": "boolean",
-          "description": "Enable hostPath PVs (bare-metal only)"
-        },
-        "dataPath": {
-          "type": "string",
-          "description": "Path segment for shared data volume; rendered as /tracebloc/<dataPath>"
-        },
-        "logsPath": {
-          "type": "string",
-          "description": "Path segment for logs volume; rendered as /tracebloc/<logsPath>"
-        },
-        "mysqlPath": {
-          "type": "string",
-          "description": "Path segment for MySQL data volume; rendered as /tracebloc/<mysqlPath>"
-        },
-        "initJob": {
-          "type": "boolean",
-          "description": "Create pre-install Job to set up host directories"
-        }
-      },
-      "if": {
-        "properties": { "enabled": { "const": true } }
-      },
-      "then": {
-        "required": ["dataPath", "logsPath", "mysqlPath"],
-        "properties": {
-          "dataPath": { "minLength": 1 },
-          "logsPath": { "minLength": 1 },
-          "mysqlPath": { "minLength": 1 }
+          "description": "Enable hostPath PVs (bare-metal only). PV paths are fixed: /tracebloc/data, /tracebloc/logs, /tracebloc/mysql. Directories are created via hostPath type: DirectoryOrCreate."
         }
       }
     },

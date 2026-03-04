@@ -1,7 +1,6 @@
 suite: Platform Conditionals
 templates:
   - templates/shared-images-pvc.yaml
-  - templates/init-container.yaml
   - templates/resource-monitor-scc.yaml
   - templates/storage-class.yaml
 set:
@@ -23,9 +22,6 @@ tests:
       platform: bm
       hostPath:
         enabled: true
-        dataPath: /mnt/data
-        logsPath: /mnt/logs
-        mysqlPath: /mnt/mysql
     asserts:
       - hasDocuments:
           count: 2
@@ -43,9 +39,6 @@ tests:
       pvcAccessMode: ReadWriteOnce
       hostPath:
         enabled: true
-        dataPath: /mnt/data
-        logsPath: /mnt/logs
-        mysqlPath: /mnt/mysql
     asserts:
       - equal:
           path: spec.accessModes[0]
@@ -77,9 +70,6 @@ tests:
     set:
       hostPath:
         enabled: true
-        dataPath: /mnt/data
-        logsPath: /mnt/logs
-        mysqlPath: /mnt/mysql
     asserts:
       - hasDocuments:
           count: 2
@@ -104,40 +94,6 @@ tests:
       - equal:
           path: metadata.annotations["helm.sh/resource-policy"]
           value: keep
-
-  # --- init Job ---
-  - it: should create init Job when platform is bm
-    template: templates/init-container.yaml
-    set:
-      platform: bm
-      hostPath:
-        enabled: true
-        dataPath: /mnt/data
-        logsPath: /mnt/logs
-        mysqlPath: /mnt/mysql
-        initJob: true
-    asserts:
-      - hasDocuments:
-          count: 1
-      - isKind:
-          of: Job
-
-  - it: should not create init Job when platform is aks
-    template: templates/init-container.yaml
-    set:
-      platform: aks
-    asserts:
-      - hasDocuments:
-          count: 0
-
-  - it: should not create init Job when platform is empty and hostPath disabled
-    template: templates/init-container.yaml
-    set:
-      hostPath:
-        enabled: false
-    asserts:
-      - hasDocuments:
-          count: 0
 
   # --- SCC (OpenShift) ---
   - it: should create SCC when platform is openshift
@@ -226,9 +182,6 @@ tests:
       pvcAccessMode: ReadWriteMany
       hostPath:
         enabled: true
-        dataPath: /mnt/data
-        logsPath: /mnt/logs
-        mysqlPath: /mnt/mysql
     asserts:
       - equal:
           path: spec.accessModes[0]

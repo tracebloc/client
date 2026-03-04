@@ -67,10 +67,6 @@ Key change: `hostPath` section replaces per-PVC `hostPath` values.
 # values-bm.yaml
 hostPath:
   enabled: true
-  dataPath: /path/to/shared_data
-  logsPath: /path/to/logs
-  mysqlPath: /path/to/mysql
-  initJob: true
 
 pvcAccessMode: ReadWriteOnce
 
@@ -81,12 +77,7 @@ storageClass:
 clusterScope: true
 ```
 
-**Old → New mapping:**
-| Old key | New key |
-|---------|---------|
-| `clientData.hostPath` | `/tracebloc/` + `hostPath.dataDir` (base path is hardcoded) |
-| `clientLogsPvc.hostPath` | `/tracebloc/` + `hostPath.logsDir` (base path is hardcoded) |
-| `mysqlPvc.hostPath` | `/tracebloc/` + `hostPath.mysqlDir` (base path is hardcoded) |
+**PV paths (fixed):** When `hostPath.enabled` is true, PVs use `/tracebloc/data`, `/tracebloc/logs`, `/tracebloc/mysql` (e.g. map to `~/.tracebloc/{data,logs,mysql}` when that dir is mounted at `/tracebloc`).
 
 ### OpenShift → Unified
 

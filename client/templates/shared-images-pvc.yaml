@@ -4,7 +4,7 @@
 apiVersion: v1
 kind: PersistentVolume
 metadata:
-  name: {{ $name }}
+  name: {{ include "tracebloc.clientDataPvName" . }}
   labels:
     {{- include "tracebloc.labels" . | nindent 4 }}
 spec:
@@ -17,7 +17,7 @@ spec:
     name: {{ $name }}
     namespace: {{ .Release.Namespace }}
   hostPath:
-    path: {{ include "tracebloc.hostPath.data" . }}
+    path: /tracebloc/data
     type: DirectoryOrCreate
 ---
 {{- end }}
