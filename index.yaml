@@ -3,7 +3,7 @@ entries:
   aks:
   - apiVersion: v2
     appVersion: 1.24.14
-    created: "2026-03-04T13:54:45.162164+05:00"
+    created: "2026-03-04T14:04:21.903885+05:00"
     description: A Helm chart for tracebloc Kubernetes
     digest: bdbad390d1f6949bd735eb0444d5e81b7205f4d6adf6140e52ec5dab41766dd1
     name: aks
@@ -13,7 +13,7 @@ entries:
     version: 1.0.4
   - apiVersion: v2
     appVersion: 1.24.13
-    created: "2026-03-04T13:54:45.161422+05:00"
+    created: "2026-03-04T14:04:21.903528+05:00"
     description: A Helm chart for tracebloc Kubernetes
     digest: 74016e168efff349228b4c09e74f46f870c845b417bf74277365e744f480fa31
     name: aks
@@ -24,7 +24,7 @@ entries:
   bm:
   - apiVersion: v2
     appVersion: 1.24.14
-    created: "2026-03-04T13:54:45.162862+05:00"
+    created: "2026-03-04T14:04:21.904571+05:00"
     description: A Helm chart for tracebloc Kubernetes
     digest: 589bd968bf0863f154ea7d7bfafe67ee49e96a2fdc72a5358283403b35778829
     name: bm
@@ -34,7 +34,7 @@ entries:
     version: 1.0.4
   - apiVersion: v2
     appVersion: 1.24.13
-    created: "2026-03-04T13:54:45.162525+05:00"
+    created: "2026-03-04T14:04:21.904219+05:00"
     description: A Helm chart for tracebloc Kubernetes
     digest: 8133f137f04343ab667928ca748019879cecb91d02ee06dde64fbcb91ffa1880
     name: bm
@@ -45,7 +45,7 @@ entries:
   eks:
   - apiVersion: v2
     appVersion: 1.24.14
-    created: "2026-03-04T13:54:45.163613+05:00"
+    created: "2026-03-04T14:04:21.90517+05:00"
     description: A Helm chart for tracebloc Kubernetes
     digest: 2e3a6bca541db68e1d36102db8c89c5ef4bff82d8963b3893c9aab524be3a635
     name: eks
@@ -55,7 +55,7 @@ entries:
     version: 1.0.4
   - apiVersion: v2
     appVersion: 1.24.13
-    created: "2026-03-04T13:54:45.163197+05:00"
+    created: "2026-03-04T14:04:21.904858+05:00"
     description: A Helm chart for tracebloc Kubernetes
     digest: 222c4e4afe3e12af2c0b4f2621c518780c84eeb3f42ed7d1e5ca81369ab32638
     name: eks
@@ -66,7 +66,7 @@ entries:
   oc:
   - apiVersion: v2
     appVersion: 1.24.14
-    created: "2026-03-04T13:54:45.163975+05:00"
+    created: "2026-03-04T14:04:21.905572+05:00"
     description: A Helm chart for tracebloc on OpenShift
     digest: b7c9ff665dceb56d9ccd74d30bbe6b89247767464b617ff96267cf174ac8a43f
     name: oc
@@ -74,32 +74,4 @@ entries:
     urls:
     - https://tracebloc.github.io/client/oc-1.0.4.tgz
     version: 1.0.4
-  tracebloc:
-  - annotations:
-      category: Machine Learning
-    apiVersion: v2
-    appVersion: 1.24.14
-    created: "2026-03-04T13:54:45.164437+05:00"
-    description: A unified Helm chart for tracebloc on AKS, EKS, bare-metal, and OpenShift
-    digest: 7a4ffa86db94a10b9d61d4dbd687bed1bf615f7d6e97c671d30545a4770a4f1d
-    home: https://github.com/tracebloc/client
-    keywords:
-    - tracebloc
-    - kubernetes
-    - machine-learning
-    - aks
-    - eks
-    - openshift
-    - bare-metal
-    kubeVersion: '>=1.24.0'
-    maintainers:
-    - name: Tracebloc Team
-      url: https://tracebloc.com
-    name: tracebloc
-    sources:
-    - https://github.com/tracebloc/client
-    type: application
-    urls:
-    - https://tracebloc.github.io/client/tracebloc-2.0.1.tgz
-    version: 2.0.1
-generated: "2026-03-04T13:54:45.154875+05:00"
+generated: "2026-03-04T14:04:21.902019+05:00"
