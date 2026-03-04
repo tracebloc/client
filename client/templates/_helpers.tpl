@@ -33,6 +33,10 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 client-pvc
 {{- end }}
 
+{{- define "tracebloc.clientDataPvName" -}}
+{{ .Release.Name }}-data-pv
+{{- end }}
+
 {{- define "tracebloc.clientDataStorage" -}}
 {{ .Values.pvc.data | default "50Gi" }}
 {{- end }}
@@ -41,12 +45,20 @@ client-pvc
 client-logs-pvc
 {{- end }}
 
+{{- define "tracebloc.clientLogsPvName" -}}
+{{ .Release.Name }}-logs-pv
+{{- end }}
+
 {{- define "tracebloc.clientLogsStorage" -}}
 {{ .Values.pvc.logs | default "10Gi" }}
 {{- end }}
 
 {{- define "tracebloc.mysqlPvc" -}}
 mysql-pvc
+{{- end }}
+
+{{- define "tracebloc.mysqlPvName" -}}
+{{ .Release.Name }}-mysql-pv
 {{- end }}
 
 {{- define "tracebloc.mysqlStorage" -}}
