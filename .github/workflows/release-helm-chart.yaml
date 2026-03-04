@@ -1,0 +1,103 @@
+# Production-ready: Package and publish the tracebloc Helm chart.
+# Chart repo used for installation: https://github.com/tracebloc/client
+# Users install with: helm repo add tracebloc https://tracebloc.github.io/client
+# This workflow publishes to this repo's gh-pages; to serve from client repo,
+# copy the generated .tgz and index.yaml to tracebloc/client gh-pages branch.
+name: Release Helm Chart
+
+on:
+  push:
+    tags:
+      - 'tracebloc-v*'
+      - 'v*'
+  release:
+    types: [published]
+
+env:
+  HELM_EXPERIMENTAL_OCI: 0
+
+jobs:
+  release:
+    name: Package and publish tracebloc chart
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write   # push to gh-pages, create release and upload assets on tag
+      pages: write
+      id-token: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Helm
+        uses: azure/setup-helm@v4
+        with:
+          version: v3.15.4
+
+      - name: Lint chart
+        run: helm lint --strict ./tracebloc
+
+      - name: Package tracebloc chart
+        id: package
+        run: |
+          helm package ./tracebloc
+          TGZ=$(ls tracebloc-*.tgz)
+          echo "chart_tgz=$TGZ" >> $GITHUB_OUTPUT
+          echo "Packaged $TGZ"
+
+      - name: Upload chart artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: helm-chart
+          path: ${{ steps.package.outputs.chart_tgz }}
+
+      - name: Configure Git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Fetch existing index (gh-pages)
+        id: fetch
+        run: |
+          if git fetch origin gh-pages 2>/dev/null; then
+            git checkout gh-pages
+            echo "index_exists=true" >> $GITHUB_OUTPUT
+          else
+            git checkout --orphan gh-pages
+            git reset --hard
+            echo "index_exists=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Download chart artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: helm-chart
+
+      - name: Update index and push to gh-pages
+        env:
+          REPO_URL: https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}
+        run: |
+          CHART_TGZ=$(ls tracebloc-*.tgz)
+          if [ "${{ steps.fetch.outputs.index_exists }}" = "true" ] && [ -f index.yaml ]; then
+            helm repo index . --url "$REPO_URL" --merge index.yaml
+          else
+            helm repo index . --url "$REPO_URL"
+          fi
+          git add index.yaml "$CHART_TGZ"
+          git status
+          if git diff --staged --quiet; then
+            echo "No index/tgz changes to commit"
+          else
+            git commit -m "Release $CHART_TGZ"
+            git push origin gh-pages
+          fi
+
+      - name: Upload chart to GitHub Release (on tag)
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: tracebloc-*.tgz
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
