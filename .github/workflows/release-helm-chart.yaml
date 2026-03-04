@@ -60,6 +60,9 @@ jobs:
       - name: Fetch existing index (gh-pages)
         id: fetch
         run: |
+          # Remove any local chart packages before switching branches to avoid
+          # "untracked working tree files would be overwritten" checkout errors.
+          rm -f tracebloc-*.tgz || true
           if git fetch origin gh-pages 2>/dev/null; then
             git checkout gh-pages
             echo "index_exists=true" >> $GITHUB_OUTPUT
