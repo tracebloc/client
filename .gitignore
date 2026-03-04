@@ -117,7 +117,7 @@ venv.bak/
 .vscode/settings.json
 /values*.yaml
 /*/values*.yaml
-!tracebloc/values*.yaml
+!client/values*.yaml
 secret-values.yaml
 test-template.yaml
 eks.diff
@@ -127,5 +127,5 @@ value_files/
 !value_files/README.md
 **/secret-*.yaml
 **/*-secret.yaml
-!**/tracebloc/**/secret-*.yaml
-!**/tracebloc/**/*-secret.yaml
+!**/client/**/secret-*.yaml
+!**/client/**/*-secret.yaml

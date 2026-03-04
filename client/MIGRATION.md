@@ -1,6 +1,6 @@
 # Migration Guide: Per-Platform Charts → Unified `tracebloc` Chart
 
-This guide explains how to migrate from the legacy per-platform charts (`aks/`, `bm/`, `eks/`, `oc/`) to the unified `tracebloc/` chart.
+This guide explains how to migrate from the legacy per-platform charts (`aks/`, `bm/`, `eks/`, `oc/`) to the unified `client/` chart.
 
 ## What Changed
 
@@ -118,7 +118,7 @@ Map old values to the unified schema (see tables above). Credentials stay the sa
 ### 3. Dry-run the upgrade
 
 ```bash
-helm template <release-name> ./tracebloc -n <namespace> -f new-values.yaml > new-manifests.yaml
+helm template <release-name> ./client -n <namespace> -f new-values.yaml > new-manifests.yaml
 ```
 
 Compare with current manifests:
@@ -141,7 +141,7 @@ diff old-manifests.yaml new-manifests.yaml
 helm uninstall <release-name> -n <namespace>
 
 # Install with new chart
-helm install <release-name> ./tracebloc -n <namespace> -f new-values.yaml
+helm install <release-name> ./client -n <namespace> -f new-values.yaml
 ```
 
 > **Important:** PVCs have `helm.sh/resource-policy: keep` so they survive `helm uninstall`. Verify PVCs still exist before installing the new chart.
