@@ -1,0 +1,69 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mysql-client
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "tracebloc.labels" . | nindent 4 }}
+    app: mysql-client
+spec:
+  selector:
+    matchLabels:
+      app: mysql-client
+  strategy:
+    type: Recreate
+  replicas: 1
+  template:
+    metadata:
+      labels:
+        app: mysql-client
+    spec:
+      terminationGracePeriodSeconds: 60
+      initContainers:
+      - name: init-mysql-logs
+        image: busybox:1.35
+        command: ['sh', '-c', 'mkdir -p /var/log/mysql && chown -R 999:999 /var/log/mysql && chmod -R 755 /var/log/mysql']
+        volumeMounts:
+        - name: mysql-logs
+          mountPath: /var/log/mysql/
+      containers:
+      - image: {{ include "tracebloc.image" (dict "repository" "tracebloc/mysql-client" "tag" "latest" "registry" "docker.io") | quote }}
+        name: mysql-client
+        resources:
+          requests:
+            memory: 256Mi
+            cpu: 100m
+          limits:
+            memory: 512Mi
+            cpu: 500m
+        ports:
+        - containerPort: 3306
+          name: mysql-client
+        livenessProbe:
+          exec:
+            command: ["mysqladmin", "ping", "-h", "localhost"]
+          initialDelaySeconds: 30
+          periodSeconds: 10
+        readinessProbe:
+          exec:
+            command: ["mysqladmin", "ping", "-h", "localhost"]
+          initialDelaySeconds: 10
+          periodSeconds: 5
+        volumeMounts:
+        - name: mysql-persistent-storage
+          mountPath: /var/lib/mysql/
+        - name: mysql-config
+          mountPath: /etc/mysql/conf.d/
+        - name: mysql-logs
+          mountPath: /var/log/mysql/
+      imagePullSecrets:
+      - name: {{ include "tracebloc.registrySecretName" . }}
+      volumes:
+      - name: mysql-persistent-storage
+        persistentVolumeClaim:
+          claimName: {{ include "tracebloc.mysqlPvc" . }}
+      - name: mysql-config
+        configMap:
+          name: mysql-client-config
+      - name: mysql-logs
+        emptyDir: {}

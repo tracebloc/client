@@ -1,0 +1,24 @@
+{{- if .Values.storageClass.create }}
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: {{ .Values.storageClass.name }}
+  labels:
+    {{- include "tracebloc.labels" . | nindent 4 }}
+provisioner: {{ required "storageClass.provisioner is required when storageClass.create is true" .Values.storageClass.provisioner }}
+allowVolumeExpansion: {{ .Values.storageClass.allowVolumeExpansion }}
+{{- if .Values.storageClass.reclaimPolicy }}
+reclaimPolicy: {{ .Values.storageClass.reclaimPolicy }}
+{{- end }}
+{{- if .Values.storageClass.volumeBindingMode }}
+volumeBindingMode: {{ .Values.storageClass.volumeBindingMode }}
+{{- end }}
+{{- if .Values.storageClass.mountOptions }}
+mountOptions:
+  {{- toYaml .Values.storageClass.mountOptions | nindent 2 }}
+{{- end }}
+{{- if .Values.storageClass.parameters }}
+parameters:
+  {{- toYaml .Values.storageClass.parameters | nindent 2 }}
+{{- end }}
+{{- end }}

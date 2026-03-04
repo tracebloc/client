@@ -1,3 +1,4 @@
+{{- if .Values.resourceMonitor.enabled }}
 apiVersion: apps/v1
 kind: DaemonSet
 metadata:
@@ -65,7 +66,7 @@ spec:
             - name: CLIENT_PASSWORD
               valueFrom:
                 secretKeyRef:
-                  name: tracebloc-secrets
+                  name: {{ include "tracebloc.secretName" . }}
                   key: CLIENT_PASSWORD
 
           # Keep the container light
@@ -81,7 +82,7 @@ spec:
       terminationGracePeriodSeconds: 15
 
       imagePullSecrets:
-      - name: {{ .Values.dockerRegistry.secretName }}
+      - name: {{ include "tracebloc.registrySecretName" . }}
       volumes:
         - name: host-proc
           hostPath:
@@ -91,3 +92,4 @@ spec:
           hostPath:
             path: /sys
             type: Directory
+{{- end }}

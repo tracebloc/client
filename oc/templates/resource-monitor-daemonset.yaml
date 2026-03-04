@@ -71,7 +71,7 @@ spec:
             - name: CLIENT_PASSWORD
               valueFrom:
                 secretKeyRef:
-                  name: tracebloc-secrets
+                  name: {{ include "tracebloc.secretName" . }}
                   key: CLIENT_PASSWORD
 
           resources:
@@ -85,7 +85,7 @@ spec:
       terminationGracePeriodSeconds: 15
 
       imagePullSecrets:
-      - name: {{ .Values.dockerRegistry.secretName }}
+      - name: {{ include "tracebloc.registrySecretName" . }}
       volumes:
         - name: host-proc
           hostPath:

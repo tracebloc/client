@@ -1,0 +1,84 @@
+# ============================================================
+# Tracebloc Unified Helm Chart — values.yaml
+# ============================================================
+# This chart supports AKS, EKS, bare-metal (bm), and OpenShift (oc).
+# Platform-specific behaviour is controlled by the values below.
+# Use per-environment value files (e.g. ci/aks-values.yaml) to override.
+
+# -- Environment variables passed to containers
+env: {
+  # CLIENT_ENV: prod
+  # Optional proxy settings
+  # HTTP_PROXY_HOST: ""
+  # HTTP_PROXY_PORT: ""
+  # HTTP_PROXY_USERNAME: ""
+  # HTTP_PROXY_PASSWORD: ""
+  # Optional: resource requests for spawned jobs (defaults to "cpu=2,memory=8Gi" if not provided)
+  # RESOURCE_REQUESTS: "cpu=2,memory=8Gi"
+  # Optional: resource limits for spawned jobs (defaults to "cpu=2,memory=8Gi" if not provided)
+  # RESOURCE_LIMITS: "cpu=2,memory=8Gi"
+  # Optional: GPU requests for spawned jobs (defaults to "nvidia.com/gpu=1" if not provided)
+  # GPU_REQUESTS: "nvidia.com/gpu=1"
+  # Optional: GPU limits for spawned jobs (defaults to "nvidia.com/gpu=1" if not provided)
+  # GPU_LIMITS: "nvidia.com/gpu=1"
+  # Optional: runtime class for GPU jobs (defaults to "" if not provided)
+  # RUNTIME_CLASS_NAME: ""
+}
+# -- StorageClass configuration
+# Set create: false to use an existing storage class
+storageClass:
+  create: true
+  name: client-storage-class
+  provisioner: ""
+  allowVolumeExpansion: true
+  # Optional fields — omitted from rendered YAML when empty
+  volumeBindingMode: ""
+  reclaimPolicy: ""
+  mountOptions: []
+  parameters: {}
+
+# -- Bare-metal only: hostPath-backed PersistentVolumes
+# When enabled, a PV + PVC pair is created for each volume.
+# When disabled, only dynamic PVCs are created (AKS/EKS/OC pattern).
+hostPath:
+  enabled: false
+  dataPath: ""
+  logsPath: ""
+  mysqlPath: ""
+  # Pre-install Job to create host directories with correct permissions
+  initJob: true
+
+# -- PVC storage sizes (override per-environment if needed)
+pvc:
+  mysql: 2Gi
+  logs: 10Gi
+  data: 50Gi
+
+# -- PVC access mode (ReadWriteMany for dynamic, ReadWriteOnce for hostPath)
+# Override per-environment if needed
+# pvcAccessMode: ReadWriteMany
+
+
+# -- RBAC scope: true for ClusterRole, false for namespace-scoped Role (recommended for OpenShift without cluster-admin)
+clusterScope: true
+
+# -- Resource monitor DaemonSet (node-level metrics collection)
+resourceMonitor: true
+
+# -- OpenShift-specific settings
+openshift:
+  # Create a SecurityContextConstraints allowing hostPath for the resource monitor
+  scc:
+    enabled: false
+
+# -- Secrets
+clientId: "<CLIENT_ID>"
+clientPassword: "<CLIENT_PASSWORD>"
+
+# -- Docker registry credentials
+# Secret name is auto-generated as {{ .Release.Name }}-regcred
+dockerRegistry:
+  server: https://index.docker.io/v1/
+  username: "<DOCKER_USERNAME>"
+  password: "<DOCKER_REGISTRY_TOKEN>"
+  email: "<DOCKER_EMAIL>"

@@ -1,6 +1,3 @@
-# Namespace for client
-namespace: <NAMESPACE>
-
 # Configuration for the jobs manager
 jobsManager:
   tag: dev

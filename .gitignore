@@ -33,6 +33,7 @@ downloads/
 eggs/
 .eggs/
 lib/
+!scripts/lib/
 lib64/
 parts/
 sdist/
@@ -116,6 +117,15 @@ venv.bak/
 .vscode/settings.json
 /values*.yaml
 /*/values*.yaml
+!tracebloc/values*.yaml
 secret-values.yaml
 test-template.yaml
 eks.diff
+
+# Helm deployment value files (contain environment-specific secrets)
+value_files/
+!value_files/README.md
+**/secret-*.yaml
+**/*-secret.yaml
+!**/tracebloc/**/secret-*.yaml
+!**/tracebloc/**/*-secret.yaml

@@ -1,0 +1,228 @@
+suite: Platform Conditionals
+templates:
+  - templates/shared-images-pvc.yaml
+  - templates/init-container.yaml
+  - templates/resource-monitor-scc.yaml
+  - templates/storage-class.yaml
+set:
+  clientId: "test-id"
+  clientPassword: "test"
+  dockerRegistry:
+    server: https://index.docker.io/v1/
+    username: test
+    password: test
+    email: test@test.com
+  storageClass:
+    create: false
+    name: test-sc
+tests:
+  # --- platform: bm ---
+  - it: should create PV + PVC when platform is bm
+    template: templates/shared-images-pvc.yaml
+    set:
+      platform: bm
+      hostPath:
+        dataPath: /mnt/data
+        logsPath: /mnt/logs
+        mysqlPath: /mnt/mysql
+    asserts:
+      - hasDocuments:
+          count: 2
+      - isKind:
+          of: PersistentVolume
+        documentIndex: 0
+      - isKind:
+          of: PersistentVolumeClaim
+        documentIndex: 1
+
+  - it: should use ReadWriteOnce access mode when platform is bm
+    template: templates/shared-images-pvc.yaml
+    set:
+      platform: bm
+      hostPath:
+        dataPath: /mnt/data
+        logsPath: /mnt/logs
+        mysqlPath: /mnt/mysql
+    asserts:
+      - equal:
+          path: spec.accessModes[0]
+          value: ReadWriteOnce
+        documentIndex: 1
+
+  - it: should create only PVC when platform is not bm
+    template: templates/shared-images-pvc.yaml
+    set:
+      platform: aks
+    asserts:
+      - hasDocuments:
+          count: 1
+      - isKind:
+          of: PersistentVolumeClaim
+
+  - it: should use ReadWriteMany when platform is aks
+    template: templates/shared-images-pvc.yaml
+    set:
+      platform: aks
+    asserts:
+      - equal:
+          path: spec.accessModes[0]
+          value: ReadWriteMany
+
+  # --- hostPath.enabled backward compat ---
+  - it: should create PV + PVC when hostPath.enabled is true (no platform)
+    template: templates/shared-images-pvc.yaml
+    set:
+      hostPath:
+        enabled: true
+        dataPath: /mnt/data
+        logsPath: /mnt/logs
+        mysqlPath: /mnt/mysql
+    asserts:
+      - hasDocuments:
+          count: 2
+      - isKind:
+          of: PersistentVolume
+        documentIndex: 0
+
+  - it: should create only PVC when hostPath.enabled is false (no platform)
+    template: templates/shared-images-pvc.yaml
+    set:
+      hostPath:
+        enabled: false
+    asserts:
+      - hasDocuments:
+          count: 1
+      - isKind:
+          of: PersistentVolumeClaim
+
+  - it: should have keep annotation on PVC
+    template: templates/shared-images-pvc.yaml
+    asserts:
+      - equal:
+          path: metadata.annotations["helm.sh/resource-policy"]
+          value: keep
+
+  # --- init Job ---
+  - it: should create init Job when platform is bm
+    template: templates/init-container.yaml
+    set:
+      platform: bm
+      hostPath:
+        dataPath: /mnt/data
+        logsPath: /mnt/logs
+        mysqlPath: /mnt/mysql
+        initJob: true
+    asserts:
+      - hasDocuments:
+          count: 1
+      - isKind:
+          of: Job
+
+  - it: should not create init Job when platform is aks
+    template: templates/init-container.yaml
+    set:
+      platform: aks
+    asserts:
+      - hasDocuments:
+          count: 0
+
+  - it: should not create init Job when platform is empty and hostPath disabled
+    template: templates/init-container.yaml
+    set:
+      hostPath:
+        enabled: false
+    asserts:
+      - hasDocuments:
+          count: 0
+
+  # --- SCC (OpenShift) ---
+  - it: should create SCC when platform is openshift
+    template: templates/resource-monitor-scc.yaml
+    set:
+      platform: openshift
+      resourceMonitor: true
+    asserts:
+      - hasDocuments:
+          count: 3
+      - isKind:
+          of: SecurityContextConstraints
+        documentIndex: 0
+
+  - it: should not create SCC when platform is aks
+    template: templates/resource-monitor-scc.yaml
+    set:
+      platform: aks
+      resourceMonitor: true
+    asserts:
+      - hasDocuments:
+          count: 0
+
+  - it: should not create SCC when platform is openshift but resourceMonitor disabled
+    template: templates/resource-monitor-scc.yaml
+    set:
+      platform: openshift
+      resourceMonitor: false
+    asserts:
+      - hasDocuments:
+          count: 0
+
+  - it: should not create SCC when platform is empty
+    template: templates/resource-monitor-scc.yaml
+    set:
+      resourceMonitor: true
+    asserts:
+      - hasDocuments:
+          count: 0
+
+  # --- StorageClass ---
+  - it: should create StorageClass when platform is aks
+    template: templates/storage-class.yaml
+    set:
+      platform: aks
+      storageClass:
+        create: true
+        name: test-sc
+        provisioner: file.csi.azure.com
+        allowVolumeExpansion: true
+    asserts:
+      - isKind:
+          of: StorageClass
+      - equal:
+          path: provisioner
+          value: file.csi.azure.com
+
+  - it: should not create StorageClass when platform is openshift
+    template: templates/storage-class.yaml
+    set:
+      platform: openshift
+      storageClass:
+        name: existing-sc
+    asserts:
+      - hasDocuments:
+          count: 0
+
+  - it: should not create StorageClass when create is false (no platform)
+    template: templates/storage-class.yaml
+    set:
+      storageClass:
+        create: false
+        name: existing-sc
+    asserts:
+      - hasDocuments:
+          count: 0
+
+  # --- pvcAccessMode explicit override ---
+  - it: should respect explicit pvcAccessMode even on bm platform
+    template: templates/shared-images-pvc.yaml
+    set:
+      platform: bm
+      pvcAccessMode: ReadWriteMany
+      hostPath:
+        dataPath: /mnt/data
+        logsPath: /mnt/logs
+        mysqlPath: /mnt/mysql
+    asserts:
+      - equal:
+          path: spec.accessModes[0]
+          value: ReadWriteMany
+        documentIndex: 1

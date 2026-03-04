@@ -1,0 +1,24 @@
+# EKS (Amazon Elastic Kubernetes Service) platform values
+storageClass:
+  create: true
+  provisioner: efs.csi.aws.com
+  volumeBindingMode: Immediate
+  reclaimPolicy: Retain
+  mountOptions:
+    - actimeo=30
+  parameters:
+    directoryPerms: "700"
+    uid: "999"
+    gid: "999"
+    fileSystemId: fs-0123456789abcdef0
+    provisioningMode: efs-ap
+
+clusterScope: true
+
+clientId: "ci-test-id"
+clientPassword: "ci-test-password"
+
+dockerRegistry:
+  username: ci-test
+  password: ci-test
+  email: ci@test.com

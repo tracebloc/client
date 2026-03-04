@@ -1,9 +1,11 @@
----
 apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: {{ .Values.mysql.name }}
   namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "tracebloc.labels" . | nindent 4 }}
+    app: {{ .Values.mysql.name }}
 spec:
   selector:
     matchLabels:
@@ -29,11 +31,24 @@ spec:
         name: {{ .Values.mysql.name }}
         resources:
           requests:
-            memory: "207084Ki"
-            cpu: "50m"
+            memory: 256Mi
+            cpu: 100m
+          limits:
+            memory: 512Mi
+            cpu: 500m
         ports:
         - containerPort: 3306
           name: {{ .Values.mysql.name }}
+        livenessProbe:
+          exec:
+            command: ["mysqladmin", "ping", "-h", "localhost"]
+          initialDelaySeconds: 30
+          periodSeconds: 10
+        readinessProbe:
+          exec:
+            command: ["mysqladmin", "ping", "-h", "localhost"]
+          initialDelaySeconds: 10
+          periodSeconds: 5
         volumeMounts:
         - name: mysql-persistent-storage
           mountPath: /var/lib/mysql/
@@ -42,7 +57,7 @@ spec:
         - name: mysql-logs
           mountPath: /var/log/mysql/
       imagePullSecrets:
-      - name: {{ .Values.dockerRegistry.secretName }}
+      - name: {{ include "tracebloc.registrySecretName" . }}
       {{- if .Values.nodeSelector }}
       nodeSelector:
         {{- toYaml .Values.nodeSelector | nindent 8 }}
@@ -56,44 +71,3 @@ spec:
           name: {{ .Values.mysql.name }}-config
       - name: mysql-logs
         emptyDir: {}
----
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: {{ .Values.mysql.name }}-config
-  namespace: {{ .Release.Namespace }}
-data:
-  mysql.cnf: |
-    [mysqld]
-    # Increase max_allowed_packet to handle large queries/results
-    max_allowed_packet = 256M
-
-    # Increase other relevant settings for better performance
-    innodb_buffer_pool_size = 128M
-    innodb_log_file_size = 64M
-    innodb_log_buffer_size = 16M
-
-    # Connection settings
-    max_connections = 200
-    wait_timeout = 28800
-    interactive_timeout = 28800
-
-    # Character set
-    character-set-server = utf8mb4
-    collation-server = utf8mb4_unicode_ci
-
-    # Error logging
-    log-error = /var/log/mysql/error.log
----
-apiVersion: v1
-kind: Service
-metadata:
-  name: {{ .Values.mysql.name }}
-  namespace: {{ .Release.Namespace }}
-  labels:
-    run: {{ .Values.mysql.name }}
-spec:
-  ports:
-  - port: 3306
-  selector:
-    app: {{ .Values.mysql.name }}
