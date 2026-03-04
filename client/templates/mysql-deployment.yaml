@@ -21,6 +21,7 @@ spec:
       terminationGracePeriodSeconds: 60
       securityContext:
         fsGroup: 999
+        fsGroupChangePolicy: "OnRootMismatch"
       initContainers:
       - name: init-mysql-data
         image: busybox:1.35
