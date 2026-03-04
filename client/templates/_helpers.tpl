@@ -65,18 +65,6 @@ mysql-pvc
 {{ .Values.pvc.mysql | default "2Gi" }}
 {{- end }}
 
-{{- define "tracebloc.hostPath.data" -}}
-/tracebloc/{{ trimPrefix (toString .Values.hostPath.dataPath) "/" }}
-{{- end }}
-
-{{- define "tracebloc.hostPath.logs" -}}
-/tracebloc/{{ trimPrefix (toString .Values.hostPath.logsPath) "/" }}
-{{- end }}
-
-{{- define "tracebloc.hostPath.mysql" -}}
-/tracebloc/{{ trimPrefix (toString .Values.hostPath.mysqlPath) "/" }}
-{{- end }}
-
 {{- define "tracebloc.registrySecretName" -}}
 {{ .Release.Name }}-regcred
 {{- end }}

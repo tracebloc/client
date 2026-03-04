@@ -42,12 +42,7 @@ storageClass:
 # When disabled, only dynamic PVCs are created (AKS/EKS/OC pattern).
 hostPath:
   enabled: false
-  # Path segments; when enabled, mounted under /tracebloc/ (e.g. dataPath: shared_data → /tracebloc/shared_data)
-  dataPath: ""
-  logsPath: ""
-  mysqlPath: ""
-  # Pre-install Job to create host directories with correct permissions
-  initJob: true
+  # PV paths are fixed: /tracebloc/data, /tracebloc/logs, /tracebloc/mysql (→ ~/.tracebloc/{data,logs,mysql} when HOST_DATA_DIR is mounted at /tracebloc). Directories are created automatically via hostPath type: DirectoryOrCreate.
 
 # -- PVC storage sizes (override per-environment if needed)
 pvc:

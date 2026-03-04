@@ -17,7 +17,7 @@ spec:
     name: {{ $name }}
     namespace: {{ .Release.Namespace }}
   hostPath:
-    path: {{ include "tracebloc.hostPath.logs" . }}
+    path: /tracebloc/logs
     type: DirectoryOrCreate
 ---
 {{- end }}
