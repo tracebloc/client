@@ -42,6 +42,7 @@ storageClass:
 # When disabled, only dynamic PVCs are created (AKS/EKS/OC pattern).
 hostPath:
   enabled: false
+  # Path segments; when enabled, mounted under /tracebloc/ (e.g. dataPath: shared_data → /tracebloc/shared_data)
   dataPath: ""
   logsPath: ""
   mysqlPath: ""

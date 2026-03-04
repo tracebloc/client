@@ -90,17 +90,17 @@
           "type": "boolean",
           "description": "Enable hostPath PVs (bare-metal only)"
         },
-        "dataDir": {
+        "dataPath": {
           "type": "string",
-          "description": "Subdirectory under /tracebloc for shared data volume"
+          "description": "Path segment for shared data volume; rendered as /tracebloc/<dataPath>"
         },
-        "logsDir": {
+        "logsPath": {
           "type": "string",
-          "description": "Subdirectory under /tracebloc for logs volume"
+          "description": "Path segment for logs volume; rendered as /tracebloc/<logsPath>"
         },
-        "mysqlDir": {
+        "mysqlPath": {
           "type": "string",
-          "description": "Subdirectory under /tracebloc for MySQL data volume"
+          "description": "Path segment for MySQL data volume; rendered as /tracebloc/<mysqlPath>"
         },
         "initJob": {
           "type": "boolean",
@@ -111,11 +111,11 @@
         "properties": { "enabled": { "const": true } }
       },
       "then": {
-        "required": ["dataDir", "logsDir", "mysqlDir"],
+        "required": ["dataPath", "logsPath", "mysqlPath"],
         "properties": {
-          "dataDir": { "minLength": 1 },
-          "logsDir": { "minLength": 1 },
-          "mysqlDir": { "minLength": 1 }
+          "dataPath": { "minLength": 1 },
+          "logsPath": { "minLength": 1 },
+          "mysqlPath": { "minLength": 1 }
         }
       }
     },

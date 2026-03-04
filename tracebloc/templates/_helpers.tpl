@@ -54,15 +54,15 @@ mysql-pvc
 {{- end }}
 
 {{- define "tracebloc.hostPath.data" -}}
-/tracebloc/{{ .Values.hostPath.dataDir }}
+/tracebloc/{{ trimPrefix (toString .Values.hostPath.dataPath) "/" }}
 {{- end }}
 
 {{- define "tracebloc.hostPath.logs" -}}
-/tracebloc/{{ .Values.hostPath.logsDir }}
+/tracebloc/{{ trimPrefix (toString .Values.hostPath.logsPath) "/" }}
 {{- end }}
 
 {{- define "tracebloc.hostPath.mysql" -}}
-/tracebloc/{{ .Values.hostPath.mysqlDir }}
+/tracebloc/{{ trimPrefix (toString .Values.hostPath.mysqlPath) "/" }}
 {{- end }}
 
 {{- define "tracebloc.registrySecretName" -}}

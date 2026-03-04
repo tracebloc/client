@@ -16,12 +16,13 @@ set:
     create: false
     name: test-sc
 tests:
-  # --- platform: bm ---
+  # --- hostPath.enabled (bare-metal) ---
   - it: should create PV + PVC when platform is bm
     template: templates/shared-images-pvc.yaml
     set:
       platform: bm
       hostPath:
+        enabled: true
         dataPath: /mnt/data
         logsPath: /mnt/logs
         mysqlPath: /mnt/mysql
@@ -39,7 +40,9 @@ tests:
     template: templates/shared-images-pvc.yaml
     set:
       platform: bm
+      pvcAccessMode: ReadWriteOnce
       hostPath:
+        enabled: true
         dataPath: /mnt/data
         logsPath: /mnt/logs
         mysqlPath: /mnt/mysql
@@ -68,7 +71,7 @@ tests:
           path: spec.accessModes[0]
           value: ReadWriteMany
 
-  # --- hostPath.enabled backward compat ---
+  # --- hostPath.enabled (no platform) ---
   - it: should create PV + PVC when hostPath.enabled is true (no platform)
     template: templates/shared-images-pvc.yaml
     set:
@@ -108,6 +111,7 @@ tests:
     set:
       platform: bm
       hostPath:
+        enabled: true
         dataPath: /mnt/data
         logsPath: /mnt/logs
         mysqlPath: /mnt/mysql
@@ -141,6 +145,9 @@ tests:
     set:
       platform: openshift
       resourceMonitor: true
+      openshift:
+        scc:
+          enabled: true
     asserts:
       - hasDocuments:
           count: 3
@@ -218,6 +225,7 @@ tests:
       platform: bm
       pvcAccessMode: ReadWriteMany
       hostPath:
+        enabled: true
         dataPath: /mnt/data
         logsPath: /mnt/logs
         mysqlPath: /mnt/mysql
