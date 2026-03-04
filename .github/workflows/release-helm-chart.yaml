@@ -36,12 +36,12 @@ jobs:
           version: v3.15.4
 
       - name: Lint chart
-        run: helm lint --strict ./tracebloc
+        run: helm lint --strict ./client
 
       - name: Package tracebloc chart
         id: package
         run: |
-          helm package ./tracebloc
+          helm package ./client
           TGZ=$(ls -t tracebloc-*.tgz | head -1)
           echo "chart_tgz=$TGZ" >> $GITHUB_OUTPUT
           echo "Packaged $TGZ"

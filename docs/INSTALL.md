@@ -50,7 +50,7 @@ helm install my-tracebloc ./tracebloc-2.0.0.tgz \
 When working from a clone of the repo:
 
 ```bash
-helm install my-tracebloc ./tracebloc \
+helm install my-tracebloc ./client \
   --namespace tracebloc \
   --create-namespace \
   -f my-values.yaml
@@ -85,7 +85,7 @@ dockerRegistry:
   email: "<optional-email>"
 ```
 
-For platform-specific settings (AKS, EKS, bare-metal, OpenShift), see `tracebloc/ci/*-values.yaml` and [MIGRATION.md](../tracebloc/MIGRATION.md).
+For platform-specific settings (AKS, EKS, bare-metal, OpenShift), see `client/ci/*-values.yaml` and [MIGRATION.md](../client/MIGRATION.md).
 
 ---
 
@@ -172,4 +172,4 @@ helm install my-tracebloc tracebloc/tracebloc -n tracebloc -f my-values.yaml
 - [ ] Platform-specific options set (e.g. `storageClass`, `hostPath` for bare-metal, OpenShift `openshift.scc`).
 - [ ] Namespace created or `--create-namespace` used.
 - [ ] Resource requests/limits and storage sizes reviewed in `values.yaml` (e.g. `pvc.mysql`, `pvc.logs`, `pvc.data`).
-- [ ] Lint and template checked: `helm lint ./tracebloc -f my-values.yaml` and `helm template my-tracebloc ./tracebloc -f my-values.yaml`.
+- [ ] Lint and template checked: `helm lint ./client -f my-values.yaml` and `helm template my-tracebloc ./client -f my-values.yaml`.

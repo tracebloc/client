@@ -1,12 +1,12 @@
 # DEPRECATED
 
-This chart (`oc/`) has been superseded by the **unified `tracebloc/` chart**.
+This chart (`oc/`) has been superseded by the **unified `client/` chart**.
 
 The unified chart supports AKS, EKS, bare-metal, and OpenShift from a single set of templates, reducing duplication and maintenance burden.
 
 ## Migration
 
-See [`tracebloc/MIGRATION.md`](../tracebloc/MIGRATION.md) for step-by-step migration instructions.
+See [`client/MIGRATION.md`](../client/MIGRATION.md) for step-by-step migration instructions.
 
 Key changes for OpenShift:
 - Set `clusterRole.useClusterScope: false` for namespace-scoped RBAC
@@ -22,5 +22,5 @@ Key changes for OpenShift:
 Use the unified chart:
 
 ```bash
-helm install <release> ./tracebloc -n <namespace> -f values-oc.yaml
+helm install <release> ./client -n <namespace> -f values-oc.yaml
 ```

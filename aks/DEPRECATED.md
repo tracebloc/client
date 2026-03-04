@@ -1,12 +1,12 @@
 # DEPRECATED
 
-This chart (`aks/`) has been superseded by the **unified `tracebloc/` chart**.
+This chart (`aks/`) has been superseded by the **unified `client/` chart**.
 
 The unified chart supports AKS, EKS, bare-metal, and OpenShift from a single set of templates, reducing duplication and maintenance burden.
 
 ## Migration
 
-See [`tracebloc/MIGRATION.md`](../tracebloc/MIGRATION.md) for step-by-step migration instructions.
+See [`client/MIGRATION.md`](../client/MIGRATION.md) for step-by-step migration instructions.
 
 ## Timeline
 
@@ -18,5 +18,5 @@ See [`tracebloc/MIGRATION.md`](../tracebloc/MIGRATION.md) for step-by-step migra
 Use the unified chart:
 
 ```bash
-helm install <release> ./tracebloc -n <namespace> -f values-aks.yaml
+helm install <release> ./client -n <namespace> -f values-aks.yaml
 ```

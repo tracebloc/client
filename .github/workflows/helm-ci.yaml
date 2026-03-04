@@ -4,12 +4,12 @@ on:
   push:
     branches: [main, openshift]
     paths:
-      - 'tracebloc/**'
+      - 'client/**'
       - '.github/workflows/helm-ci.yaml'
   pull_request:
     branches: [main, openshift]
     paths:
-      - 'tracebloc/**'
+      - 'client/**'
       - '.github/workflows/helm-ci.yaml'
 
 jobs:
@@ -26,9 +26,9 @@ jobs:
 
       - name: Helm lint (strict) — all platforms
         run: |
-          for f in tracebloc/ci/*-values.yaml; do
+          for f in client/ci/*-values.yaml; do
             echo "=== Linting with $f ==="
-            helm lint --strict ./tracebloc -f "$f"
+            helm lint --strict ./client -f "$f"
           done
 
   template:
@@ -47,8 +47,8 @@ jobs:
 
       - name: Helm template — ${{ matrix.platform }}
         run: |
-          helm template test-${{ matrix.platform }} ./tracebloc \
-            -f tracebloc/ci/${{ matrix.platform }}-values.yaml \
+          helm template test-${{ matrix.platform }} ./client \
+            -f client/ci/${{ matrix.platform }}-values.yaml \
             > /tmp/rendered-${{ matrix.platform }}.yaml
           echo "Rendered $(wc -l < /tmp/rendered-${{ matrix.platform }}.yaml) lines"
 
@@ -80,7 +80,7 @@ jobs:
         run: helm plugin install https://github.com/helm-unittest/helm-unittest --version 0.5.2
 
       - name: Run unit tests
-        run: helm unittest ./tracebloc
+        run: helm unittest ./client
 
   schema:
     name: Schema validation
@@ -98,7 +98,7 @@ jobs:
 
       - name: Validate values against schema — ${{ matrix.platform }}
         run: |
-          helm template test-${{ matrix.platform }} ./tracebloc \
-            -f tracebloc/ci/${{ matrix.platform }}-values.yaml \
+          helm template test-${{ matrix.platform }} ./client \
+            -f client/ci/${{ matrix.platform }}-values.yaml \
             > /dev/null
           echo "Schema validation passed for ${{ matrix.platform }}"
