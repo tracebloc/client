@@ -42,7 +42,7 @@ jobs:
         id: package
         run: |
           helm package ./tracebloc
-          TGZ=$(ls tracebloc-*.tgz)
+          TGZ=$(ls -t tracebloc-*.tgz | head -1)
           echo "chart_tgz=$TGZ" >> $GITHUB_OUTPUT
           echo "Packaged $TGZ"
 
@@ -78,18 +78,17 @@ jobs:
         env:
           REPO_URL: https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}
         run: |
-          CHART_TGZ=$(ls tracebloc-*.tgz)
           if [ "${{ steps.fetch.outputs.index_exists }}" = "true" ] && [ -f index.yaml ]; then
             helm repo index . --url "$REPO_URL" --merge index.yaml
           else
             helm repo index . --url "$REPO_URL"
           fi
-          git add index.yaml "$CHART_TGZ"
+          git add index.yaml tracebloc-*.tgz
           git status
           if git diff --staged --quiet; then
             echo "No index/tgz changes to commit"
           else
-            git commit -m "Release $CHART_TGZ"
+            git commit -m "Release helm chart(s): $(ls tracebloc-*.tgz 2>/dev/null | tr '\n' ' ')"
             git push origin gh-pages
           fi
 
