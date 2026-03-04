@@ -4,3 +4,20 @@ description: A unified Helm chart for tracebloc on AKS, EKS, bare-metal, and Ope
 type: application
 version: 2.0.0
 appVersion: "1.24.14"
+keywords:
+  - tracebloc
+  - kubernetes
+  - machine-learning
+  - aks
+  - eks
+  - openshift
+  - bare-metal
+home: https://github.com/tracebloc/client
+sources:
+  - https://github.com/tracebloc/client
+maintainers:
+  - name: Tracebloc Team
+    url: https://tracebloc.com
+kubeVersion: ">=1.24.0"
+annotations:
+  category: Machine Learning

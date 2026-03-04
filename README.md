@@ -75,6 +75,10 @@ curl -fsSL https://raw.githubusercontent.com/tracebloc/client/main/scripts/insta
 3. Follow our detailed deployment guide at:
    [Create Your Client](https://traceblocdocsdev.azureedge.net/environment-setup/create-your-client)
 
+### Installing the tracebloc Helm chart (production)
+
+The **tracebloc** chart is the unified chart for AKS, EKS, bare-metal, and OpenShift. For production-ready install steps (from repo, from `.tgz`, or from source), prerequisites, required values, upgrade, and rollback, see **[docs/INSTALL.md](docs/INSTALL.md)**.
+
 
 
 
