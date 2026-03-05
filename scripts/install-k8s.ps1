@@ -693,7 +693,19 @@ function Get-TraceblocYamlValue {
   $line = Get-Content $Path -ErrorAction SilentlyContinue | Where-Object { $_ -match "^\s*${Key}\s*:" } | Select-Object -First 1
   if (-not $line) { return "" }
   $val = $line -replace "^\s*${Key}\s*:\s*", ""
-  $val = $val.Trim().Trim('"').Trim("'")
+  $val = $val.Trim()
+
+  # Handle quoted YAML scalars and unescape single-quoted style
+  if ($val.StartsWith("'") -and $val.EndsWith("'") -and $val.Length -ge 2) {
+    # Strip surrounding single quotes
+    $val = $val.Substring(1, $val.Length - 2)
+    # YAML single-quoted style uses '' to represent a literal '
+    $val = $val -replace "''", "'"
+  } elseif ($val.StartsWith('"') -and $val.EndsWith('"') -and $val.Length -ge 2) {
+    # Strip surrounding double quotes
+    $val = $val.Substring(1, $val.Length - 2)
+  }
+
   return $val
 }
 
@@ -790,10 +802,6 @@ storageClass:
 
 hostPath:
   enabled: true
-  dataPath: "shared-data"
-  logsPath: "logs"
-  mysqlPath: "mysql"
-  initJob: true
 
 pvc:
   mysql: 2Gi
