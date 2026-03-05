@@ -178,7 +178,19 @@
           "type": "string"
         }
       },
-      "required": ["server", "username", "password", "email"]
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "create": { "const": true }
+            },
+            "required": ["create"]
+          },
+          "then": {
+            "required": ["server", "username", "password", "email"]
+          }
+        }
+      ]
     }
   }
 }
