@@ -177,7 +177,8 @@
         "email": {
           "type": "string"
         }
-      }
+      },
+      "required": ["server", "username", "password", "email"]
     }
   }
 }
