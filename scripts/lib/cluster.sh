@@ -3,13 +3,25 @@
 #  cluster.sh — k3d cluster creation, start, and kubeconfig merge
 # =============================================================================
 
-# Exact cluster name match (avoids "tracebloc" matching "tracebloc2")
+# Exact cluster name match (avoids "tracebloc" matching "tracebloc2").
+# Uses multiple detection methods so re-runs work on all distros (e.g. SUSE where
+# jq may be missing or k3d list output format differs).
 _cluster_exists() {
+  # 1) JSON output (exact name match) when jq is available
   if command -v jq &>/dev/null; then
-    k3d cluster list -o json 2>/dev/null | jq -e --arg n "$CLUSTER_NAME" '(.[] | select(.name == $n)) != null' >/dev/null 2>&1
-  else
-    k3d cluster list --no-headers 2>/dev/null | awk -v n="$CLUSTER_NAME" '$1 == n { exit 0 } END { exit 1 }'
+    if k3d cluster list -o json 2>/dev/null | jq -e --arg n "$CLUSTER_NAME" '(.[] | select(.name == $n)) != null' >/dev/null 2>&1; then
+      return 0
+    fi
   fi
+  # 2) Table format: first column is cluster name (--no-headers)
+  if k3d cluster list --no-headers 2>/dev/null | awk -v n="$CLUSTER_NAME" '$1 == n { exit 0 } END { exit 1 }'; then
+    return 0
+  fi
+  # 3) Fallback: any line whose first column equals CLUSTER_NAME (handles varying table layout)
+  if k3d cluster list 2>/dev/null | grep -qE "^[[:space:]]*${CLUSTER_NAME}[[:space:]]"; then
+    return 0
+  fi
+  return 1
 }
 
 # Ensure host dirs exist so /tracebloc/data, /tracebloc/logs, /tracebloc/mysql exist inside nodes (HOST_DATA_DIR is mounted as /tracebloc).
@@ -82,7 +94,21 @@ _create_new_cluster() {
   fi
   info "(First run pulls the k3s image — takes ~1 min on a fast connection)"
 
-  k3d "${K3D_ARGS[@]}"
+  local create_out create_rc
+  create_out="$(mktemp)"
+  if ! k3d "${K3D_ARGS[@]}" >"$create_out" 2>&1; then
+    create_rc=$?
+    if grep -qi "already exists\|a cluster with that name already exists" "$create_out" 2>/dev/null; then
+      info "Cluster '$CLUSTER_NAME' already exists (detected from k3d message). Using existing cluster."
+      rm -f "$create_out"
+      _handle_existing_cluster
+      return 0
+    fi
+    cat "$create_out" >&2
+    rm -f "$create_out"
+    exit "$create_rc"
+  fi
+  rm -f "$create_out"
   success "Cluster '$CLUSTER_NAME' created and ready!"
 }
 
