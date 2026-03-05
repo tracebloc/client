@@ -61,6 +61,10 @@ main() {
   validate_config
   setup_log_file
   print_banner
+  print_roadmap
+
+  # ── Step 1/4: Check system requirements ──────────────────────────────────
+  step 1 4 "Checking system requirements"
   detect_gpu
 
   case "$OS" in
@@ -72,10 +76,15 @@ main() {
     *)        error "Unsupported OS: $OS" ;;
   esac
 
+  # ── Step 2/4: Set up secure compute environment ──────────────────────────
+  step 2 4 "Setting up secure compute environment"
   create_cluster
   deploy_gpu_device_plugin
   verify_gpu
+
+  # ── Step 3/4 + 4/4 are handled inside install_client_helm ────────────────
   install_client_helm
+
   verify_cluster
   print_summary
 }

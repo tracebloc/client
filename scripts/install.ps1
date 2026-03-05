@@ -14,7 +14,8 @@ $ErrorActionPreference = "Stop"
 
 # ── Platform gate ────────────────────────────────────────────────────────────
 if ($PSVersionTable.PSEdition -eq "Core" -and -not $IsWindows) {
-  Write-Host "[ERROR] This script is for Windows. On macOS / Linux use:" -ForegroundColor Red
+  Write-Host "  " -NoNewline; Write-Host ([char]0x2716) -ForegroundColor Red -NoNewline
+  Write-Host " This script is for Windows. On macOS / Linux use:" -ForegroundColor Red
   Write-Host "  curl -fsSL https://raw.githubusercontent.com/tracebloc/client/main/scripts/install.sh | bash" -ForegroundColor Cyan
   exit 1
 }
@@ -23,7 +24,7 @@ $Branch  = if ($env:BRANCH) { $env:BRANCH } else { "main" }
 $RepoRaw = "https://raw.githubusercontent.com/tracebloc/client/$Branch"
 $TmpDir  = Join-Path $env:TEMP "tracebloc-installer-$(Get-Random)"
 
-Write-Host "Downloading tracebloc installer (branch: $Branch)..." -ForegroundColor Cyan
+Write-Host "  " -NoNewline; Write-Host "Downloading tracebloc installer..." -ForegroundColor DarkGray
 
 New-Item -ItemType Directory -Path $TmpDir -Force | Out-Null
 
@@ -37,16 +38,16 @@ for ($i = 1; $i -le $maxAttempts; $i++) {
     break
   } catch {
     if ($i -eq $maxAttempts) {
-      Write-Host "[ERROR] Failed to download installer after $maxAttempts attempts: $_" -ForegroundColor Red
+      Write-Host "  " -NoNewline; Write-Host ([char]0x2716) -ForegroundColor Red -NoNewline
+      Write-Host " Failed to download installer after $maxAttempts attempts: $_" -ForegroundColor Red
       Remove-Item $TmpDir -Recurse -Force -ErrorAction SilentlyContinue
       exit 1
     }
-    Write-Host "[WARN]  Download failed (attempt $i/$maxAttempts). Retrying in 5s..." -ForegroundColor Yellow
+    Write-Host "  " -NoNewline; Write-Host ([char]0x26A0) -ForegroundColor Yellow -NoNewline
+    Write-Host "  Download failed (attempt $i/$maxAttempts). Retrying in 5s..." -ForegroundColor Yellow
     Start-Sleep -Seconds 5
   }
 }
-
-Write-Host "Running installer..." -ForegroundColor Cyan
 
 try {
   & $ScriptDest @args

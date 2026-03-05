@@ -30,14 +30,14 @@ _find_package_name() {
 }
 
 install_rocm() {
-  step "AMD ROCm"
+  log "AMD ROCm setup"
 
   if has rocm-smi; then
-    success "ROCm already installed: $(rocm-smi --version 2>/dev/null || echo 'version unknown')"
+    success "AMD GPU drivers loaded."
     return
   fi
 
-  info "Installing ROCm..."
+  log "Installing ROCm..."
   if has apt-get; then
     local codename
     codename="$(_detect_ubuntu_codename)"
@@ -48,7 +48,7 @@ install_rocm() {
     deb_name="$(_find_package_name "$deb_dir" "deb")"
     [[ -z "$deb_name" ]] && error "No amdgpu-install .deb found at ${deb_dir}"
 
-    info "Downloading ${deb_name} ..."
+    log "Downloading ${deb_name} ..."
     curl -fsSL "${deb_dir}${deb_name}" -o /tmp/amdgpu-install.deb
     sudo apt-get install -y /tmp/amdgpu-install.deb
     sudo amdgpu-install -y --usecase=rocm
@@ -71,17 +71,18 @@ install_rocm() {
     fi
     [[ -z "$rpm_name" ]] && error "No amdgpu-install .rpm found at ${ROCM_REPO_BASE}/rhel/${rhel_ver}/ (also tried ${el_major}/)"
 
-    info "Installing ${rpm_name} ..."
+    log "Installing ${rpm_name} ..."
     if has dnf; then sudo dnf install -y "${rpm_dir}${rpm_name}"
     else              sudo yum install -y "${rpm_dir}${rpm_name}"; fi
     sudo amdgpu-install -y --usecase=rocm
 
   else
-    warn "Auto ROCm install only supported on Ubuntu/RHEL/CentOS — install manually:"
-    warn "  https://rocm.docs.amd.com/en/latest/deploy/linux/quick_start.html"
+    warn "Automatic GPU driver install only supported on Ubuntu/RHEL/CentOS."
+    hint "Install manually: https://rocm.docs.amd.com/en/latest/deploy/linux/quick_start.html"
     return
   fi
 
   sudo usermod -aG render,video "$USER"
-  success "ROCm installed. A logout/login may be needed for group membership."
+  success "AMD GPU drivers installed."
+  hint "A logout/login may be needed for full GPU access."
 }

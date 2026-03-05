@@ -11,14 +11,26 @@ readonly CURL_SECURE="--tlsv1.2"
 
 # ── Colours ──────────────────────────────────────────────────────────────────
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'
-CYAN='\033[0;36m'; BOLD='\033[1m'; RESET='\033[0m'
+CYAN='\033[0;36m'; BOLD='\033[1m'; DIM='\033[2m'
+WHITE='\033[1;37m'; RESET='\033[0m'
 
 # ── Logging ──────────────────────────────────────────────────────────────────
-info()    { echo -e "${CYAN}[INFO]${RESET}  $*"; }
-success() { echo -e "${GREEN}[OK]${RESET}    $*"; }
-warn()    { echo -e "${YELLOW}[WARN]${RESET}  $*"; }
-error()   { echo -e "${RED}[ERROR]${RESET} $*" >&2; exit 1; }
-step()    { echo -e "\n${BOLD}━━━ $* ━━━${RESET}"; }
+#  info()          — supplementary detail shown to user (dim bullet)
+#  success()       — completed item (green checkmark)
+#  warn()          — non-blocking warning (yellow triangle)
+#  error()         — fatal error (bold red cross, exits)
+#  step()          — major step header: step <n> <total> "label"
+#  log()           — debug only, writes to LOG_FILE, never shown to user
+#  prompt_header() — bold label before user input prompts
+#  hint()          — dim contextual help text
+info()           { echo -e "  ${DIM}·${RESET} $*"; }
+success()        { echo -e "  ${GREEN}✔${RESET} $*"; }
+warn()           { echo -e "  ${YELLOW}⚠${RESET}  $*"; }
+error()          { echo -e "  ${RED}${BOLD}✖ $*${RESET}" >&2; exit 1; }
+step()           { echo -e "\n${BOLD}${CYAN}Step $1/$2${RESET}  ${BOLD}$3${RESET}"; }
+log()            { [[ -n "${LOG_FILE:-}" ]] && echo "[$(date +%H:%M:%S)] $*" >> "$LOG_FILE" 2>/dev/null; return 0; }
+prompt_header()  { echo -e "\n  ${BOLD}${WHITE}$*${RESET}"; }
+hint()           { echo -e "  ${DIM}$*${RESET}"; }
 
 # ── Utility ──────────────────────────────────────────────────────────────────
 has() { command -v "$1" &>/dev/null; }
@@ -50,24 +62,20 @@ check_docker_arch_mac() {
 
   if [[ "$real_arch" == "arm64" ]] && [[ "$docker_is_intel" == true ]] && [[ "$docker_is_arm" != true ]]; then
     echo ""
-    echo -e "  ${BOLD}Docker Desktop is for the wrong architecture.${RESET}"
-    echo -e "  This Mac is ${CYAN}Apple Silicon (arm64)${RESET}, but the installed Docker is for ${YELLOW}Intel (x86_64)${RESET}."
-    echo -e "  That can cause poor performance, failures, or Docker not starting."
+    warn "Docker is installed for the wrong chip (Intel instead of Apple Silicon)."
+    hint "This can cause slow performance or prevent Docker from starting."
     echo ""
-    echo -e "  ${BOLD}Fix:${RESET} Re-run the full installer — it will replace Docker with the native version:"
-    echo -e "    ${CYAN}./install-k8s.sh${RESET}"
+    echo -e "  ${BOLD}Fix:${RESET} Re-run the installer — it will replace Docker with the correct version."
     echo ""
     return 1
   fi
 
   if [[ "$real_arch" == "amd64" ]] && [[ "$docker_is_arm" == true ]]; then
     echo ""
-    echo -e "  ${BOLD}Docker Desktop is for the wrong architecture.${RESET}"
-    echo -e "  This Mac is ${CYAN}Intel (x86_64)${RESET}, but the installed Docker is for ${YELLOW}Apple Silicon (arm64)${RESET}."
-    echo -e "  Docker may not run correctly."
+    warn "Docker is installed for the wrong chip (Apple Silicon instead of Intel)."
+    hint "Docker may not work correctly."
     echo ""
-    echo -e "  ${BOLD}Fix:${RESET} Re-run the full installer — it will replace Docker with the native version:"
-    echo -e "    ${CYAN}./install-k8s.sh${RESET}"
+    echo -e "  ${BOLD}Fix:${RESET} Re-run the installer — it will replace Docker with the correct version."
     echo ""
     return 1
   fi
@@ -107,8 +115,8 @@ spin_cmd() {
   "$@" >> "$logfile" 2>&1 &
   local pid=$!
   if ! spin "$pid" "$msg"; then
-    echo -e "${RED}[FAIL]${RESET} $msg" >&2
-    echo "  Last 10 lines of log:" >&2
+    echo -e "  ${RED}${BOLD}✖ ${msg}${RESET}" >&2
+    echo -e "  ${DIM}Last 10 lines of log:${RESET}" >&2
     tail -10 "$logfile" >&2
     return 1
   fi
@@ -123,8 +131,10 @@ preflight_sudo() {
     return 0
   fi
   echo ""
-  info "This installer needs administrator privileges to set up system tools."
-  echo -e "  ${BOLD}You may be prompted for your macOS/Linux password below.${RESET}"
+  prompt_header "Tracebloc needs administrator permissions to install"
+  hint "Docker and system dependencies."
+  echo ""
+  hint "You may be asked for your password once."
   echo ""
   sudo -v || error "Could not obtain administrator privileges. Re-run with a user that has sudo access."
   ( while sudo -n true 2>/dev/null; do sleep 50; done ) &
@@ -147,9 +157,9 @@ download_with_progress() {
   local total_mb=""
   if [[ -n "$total_bytes" ]] && (( total_bytes > 0 )) 2>/dev/null; then
     total_mb=$(awk "BEGIN {printf \"%.0f\", $total_bytes / 1048576}")
-    info "${label} (${total_mb} MB)"
+    hint "${label} (${total_mb} MB)"
   else
-    info "$label"
+    hint "$label"
     total_bytes=0
   fi
 
@@ -219,7 +229,7 @@ setup_log_file() {
   mkdir -p "$HOST_DATA_DIR"
   LOG_FILE="${HOST_DATA_DIR}/install-$(date +%Y%m%d-%H%M%S).log"
   exec > >(tee -a "$LOG_FILE") 2>&1
-  info "Install log: $LOG_FILE"
+  log "Install log: $LOG_FILE"
 }
 
 # ── Configuration (overridable via env) ──────────────────────────────────────
@@ -291,57 +301,75 @@ install_cleanup() {
   if [[ $exit_code -eq 2 ]]; then
     echo ""
     if [[ -n "${TRACEBLOC_DOCKER_FIRST_RUN_EXIT:-}" ]]; then
-      info "Docker first-time setup: complete the steps above, then run the script again."
+      hint "Docker first-time setup: complete the steps above, then run the script again."
     else
-      info "Re-run required (exit code 2). Complete the step above, then run the script again."
+      hint "Re-run required. Complete the step above, then run the script again."
     fi
-    [[ -n "${LOG_FILE:-}" ]] && info "Log: $LOG_FILE"
+    [[ -n "${LOG_FILE:-}" ]] && hint "Logs: $LOG_FILE"
   elif [[ $exit_code -ne 0 ]]; then
     echo ""
-    warn "Installation failed (exit code: $exit_code)."
-    [[ -n "${LOG_FILE:-}" ]] && warn "Check the install log: $LOG_FILE"
-    warn "This installer is safe to re-run — just try again."
+    warn "Installation did not complete."
+    [[ -n "${LOG_FILE:-}" ]] && hint "Check the install log: $LOG_FILE"
+    hint "This installer is safe to re-run — just try again."
   fi
 }
 
 # ── Banner ───────────────────────────────────────────────────────────────────
 print_banner() {
   echo ""
-  local _w=71
-  echo -e "${CYAN}╔═══════════════════════════════════════════════════════════════════════╗${RESET}"
-  echo -e "${CYAN}║${RESET}$(printf '%*s' "$_w" '')${CYAN}║${RESET}"
-  echo -e "${CYAN}║${RESET}   ${BOLD}tracebloc${RESET} — Client setup$(printf '%*s' 44 '')${CYAN}║${RESET}"
-  echo -e "${CYAN}║${RESET}   ${BOLD}Kubernetes (k3d/k3s) + GPU · One-command installer${RESET}$(printf '%*s' 18 '')${CYAN}║${RESET}"
-  echo -e "${CYAN}║${RESET}   macOS · Linux$(printf '%*s' 55 '')${CYAN}║${RESET}"
-  echo -e "${CYAN}║${RESET}$(printf '%*s' "$_w" '')${CYAN}║${RESET}"
-  echo -e "${CYAN}║${RESET}   Run ML experiments and distributed workloads locally with a$(printf '%*s' 9 '')${CYAN}║${RESET}"
-  echo -e "${CYAN}║${RESET}   production-ready cluster. Connects to the Tracebloc backend.$(printf '%*s' 8 '')${CYAN}║${RESET}"
-  echo -e "${CYAN}║${RESET}$(printf '%*s' "$_w" '')${CYAN}║${RESET}"
-  echo -e "${CYAN}╚═══════════════════════════════════════════════════════════════════════╝${RESET}"
+  echo -e "  ${BOLD}${CYAN}tracebloc${RESET} — client setup"
+  echo -e "  ${DIM}────────────────────────────────────────${RESET}"
   echo ""
-  info "OS=$OS  Arch=$ARCH  Cluster='$CLUSTER_NAME'  Servers=$SERVERS  Agents=$AGENTS"
-  info "Host data dir: $HOST_DATA_DIR → /tracebloc (inside k3s nodes)"
+  echo -e "  Test AI models from external vendors on your"
+  echo -e "  infrastructure — without exposing your data."
+  echo ""
+  echo -e "  ${DIM}This installer sets up a secure compute environment${RESET}"
+  echo -e "  ${DIM}on your machine and connects it to the tracebloc network.${RESET}"
+  echo ""
+  echo -e "  ${DIM}Nothing will be modified outside:${RESET}"
+  echo -e "  ${DIM}  ~/.tracebloc/    (data and config)${RESET}"
+  echo -e "  ${DIM}  Docker           (container runtime)${RESET}"
+  echo ""
+  log "OS=$OS  Arch=$ARCH  Cluster='$CLUSTER_NAME'  Servers=$SERVERS  Agents=$AGENTS"
+  log "Host data dir: $HOST_DATA_DIR → /tracebloc (inside k3s nodes)"
+}
+
+# ── Step roadmap — printed once before install begins ─────────────────────────
+print_roadmap() {
+  echo -e "  ${BOLD}Steps${RESET}"
+  echo -e "  ${DIM}─────${RESET}"
+  echo -e "  ${DIM}1. Check system requirements${RESET}"
+  echo -e "  ${DIM}2. Set up secure compute environment${RESET}"
+  echo -e "  ${DIM}3. Install tracebloc client${RESET}"
+  echo -e "  ${DIM}4. Connect to tracebloc network${RESET}"
+  echo ""
 }
 
 # ── Help ─────────────────────────────────────────────────────────────────────
 print_help() {
   cat <<'HELP'
+tracebloc — client setup
+
+  Set up a secure compute environment on your machine
+  and connect it to the tracebloc network.
+
 Usage:
   curl -fsSL https://raw.githubusercontent.com/tracebloc/client/main/scripts/install.sh | bash
   ./install-k8s.sh [--help]
 
-Environment variable overrides:
+Advanced configuration (environment variables):
   CLUSTER_NAME   Cluster name                   (default: tracebloc)
   SERVERS        Control-plane nodes             (default: 1)
   AGENTS         Worker nodes                    (default: 1)
-  K8S_VERSION    k3s image tag ('' or 'latest' = k3d default)  (default: v1.29.4-k3s1)
-  HTTP_PORT      Host HTTP  ingress port         (default: 80)
-  HTTPS_PORT     Host HTTPS ingress port         (default: 443)
+  K8S_VERSION    k3s image tag                   (default: v1.29.4-k3s1)
+  HTTP_PORT      Host HTTP  port                 (default: 80)
+  HTTPS_PORT     Host HTTPS port                 (default: 443)
   HOST_DATA_DIR  Persistent data directory       (default: ~/.tracebloc)
-  TRACEBLOC_DOCKER_ARCH_PROMPT=1  (macOS) Prompt before replacing wrong-arch Docker (default: auto-replace)
 
 Windows:
   irm https://raw.githubusercontent.com/tracebloc/client/main/scripts/install.ps1 | iex
+
+Learn more: https://docs.tracebloc.io
 HELP
   exit 0
 }

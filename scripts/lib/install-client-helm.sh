@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # =============================================================================
-#  install-client-helm.sh — Install Tracebloc client Helm chart (step 6)
-#  Generates values from defaults + user prompts (namespace, clientId, clientPassword)
+#  install-client-helm.sh — Install Tracebloc client (steps 3 & 4)
+#  Generates values from defaults + user prompts (workspace, clientId, clientPassword)
 #  and GPU detection. Values file is written to HOST_DATA_DIR/values.yaml.
 # =============================================================================
 
@@ -9,8 +9,6 @@ TRACEBLOC_HELM_REPO_URL="https://tracebloc.github.io/client"
 TRACEBLOC_HELM_REPO_NAME="tracebloc"
 TRACEBLOC_CHART_NAME="client"
 
-# Ensure helm binary is executable (fixes Linux "Permission denied" exit 126 when
-# get-helm-3 installs to /usr/local/bin/helm with restrictive permissions).
 _ensure_helm_runnable() {
   if helm version --short &>/dev/null; then
     return 0
@@ -18,22 +16,19 @@ _ensure_helm_runnable() {
   local helm_bin
   helm_bin="$(command -v helm 2>/dev/null)" || true
   if [[ -z "$helm_bin" || ! -f "$helm_bin" ]]; then
-    error "Helm is not installed or not on PATH. Re-run the installer to install Helm."
+    error "Installation tools are not available. Re-run the installer."
   fi
   if [[ ! -x "$helm_bin" ]]; then
-    warn "Helm at $helm_bin is not executable (common on Linux after install). Fixing..."
+    log "Helm at $helm_bin is not executable — fixing permissions"
     if sudo chmod 755 "$helm_bin" 2>/dev/null; then
-      success "Helm is now executable. Continuing."
+      log "Helm permissions fixed."
       return 0
     fi
-    error "Could not make Helm executable. Run manually: sudo chmod 755 $helm_bin"
+    error "Could not fix tool permissions. Run manually: sudo chmod 755 $helm_bin"
   fi
-  # Executable but still failing (e.g. noexec mount or libs)
-  error "Helm could not be run. Try: sudo chmod 755 $helm_bin then re-run this script."
+  error "Installation tools could not be run. Try: sudo chmod 755 $helm_bin then re-run this script."
 }
 
-# Extract a key's value from a simple YAML file (handles "value", 'value', or value)
-# For single-quoted YAML values, unescapes '' back to ' so credentials round-trip correctly.
 _extract_yaml_value() {
   local file="$1" key="$2"
   local line
@@ -52,8 +47,29 @@ _extract_yaml_value() {
   printf '%s' "$line"
 }
 
+# Sanitize workspace name to comply with DNS-1123 (lowercase, alphanumeric + hyphens)
+_sanitize_workspace_name() {
+  local input="$1"
+  local sanitized
+  sanitized=$(printf '%s' "$input" | tr '[:upper:]' '[:lower:]')
+  sanitized="${sanitized// /-}"
+  sanitized="${sanitized//_/-}"
+  sanitized=$(printf '%s' "$sanitized" | sed 's/[^a-z0-9-]//g')
+  sanitized=$(printf '%s' "$sanitized" | sed 's/--*/-/g')
+  sanitized=$(printf '%s' "$sanitized" | sed 's/^-//; s/-$//')
+  if [[ -z "$sanitized" ]]; then
+    sanitized="default"
+  fi
+  if [[ ${#sanitized} -gt 63 ]]; then
+    sanitized="${sanitized:0:63}"
+    sanitized=$(printf '%s' "$sanitized" | sed 's/-$//')
+  fi
+  printf '%s' "$sanitized"
+}
+
 install_client_helm() {
-  step "Installing Tracebloc client Helm chart"
+  # ── Step 3/4: Install tracebloc client ───────────────────────────────────
+  step 3 4 "Installing tracebloc client"
 
   _ensure_tracebloc_dirs
   local values_file="${HOST_DATA_DIR}/values.yaml"
@@ -64,9 +80,9 @@ install_client_helm() {
   local default_client_password=""
 
   if [[ -f "$values_file" ]]; then
-    info "Existing values file found: $values_file"
+    hint "Previous configuration found."
     while true; do
-      read -r -p "Use values from it as defaults? [Y/n]: " use_existing
+      read -r -p "  Use previous settings as defaults? [Y/n]: " use_existing
       use_existing="$(echo "${use_existing}" | tr '[:upper:]' '[:lower:]')"
       [[ "$use_existing" == "y" || "$use_existing" == "yes" || "$use_existing" == "n" || "$use_existing" == "no" || -z "$use_existing" ]] && break
       warn "Please enter y or n."
@@ -74,57 +90,71 @@ install_client_helm() {
     if [[ "$use_existing" == "y" || "$use_existing" == "yes" || -z "$use_existing" ]]; then
       default_client_id=$(_extract_yaml_value "$values_file" "clientId")
       default_client_password=$(_extract_yaml_value "$values_file" "clientPassword")
-      [[ -n "$default_client_id" ]] && info "Using existing clientId as default."
-      [[ -n "$default_client_password" ]] && info "Using existing clientPassword as default."
+      [[ -n "$default_client_id" ]] && log "Using existing clientId as default."
+      [[ -n "$default_client_password" ]] && log "Using existing clientPassword as default."
     fi
   fi
 
-  # ── Prompt for user inputs ─────────────────────────────────────────────────
-  info "Enter values for the Tracebloc client installation:"
-  read -r -p "Namespace [${default_namespace}]: " TB_NAMESPACE_INPUT
-  TB_NAMESPACE="${TB_NAMESPACE_INPUT:-$default_namespace}"
+  # ── Workspace name prompt ────────────────────────────────────────────────
+  prompt_header "Choose a workspace name"
+  hint "This identifies your tracebloc client on this machine."
+  echo ""
+  hint "Examples: berlin-team, vision-lab, ml-mardan"
+  echo ""
+  read -r -p "  Workspace name [${default_namespace}]: " TB_NAMESPACE_INPUT
+  local raw_name="${TB_NAMESPACE_INPUT:-$default_namespace}"
+  TB_NAMESPACE=$(_sanitize_workspace_name "$raw_name")
 
+  if [[ "$TB_NAMESPACE" != "$raw_name" ]]; then
+    info "Using workspace: ${BOLD}${TB_NAMESPACE}${RESET}"
+  fi
+
+  # ── Step 4/4: Connect to tracebloc network ──────────────────────────────
+  step 4 4 "Connect to tracebloc network"
+
+  prompt_header "To connect this machine, you need a tracebloc client."
+  hint "A client links your secure environment to the tracebloc"
+  hint "platform so vendors can submit models for evaluation."
   echo ""
-  step "Client ID & Password"
-  echo -e "${BOLD}${YELLOW}Need credentials? Create a client at: ${RESET}${BOLD}\033[1;37mhttps://ai.tracebloc.io/clients${RESET}"
-  echo -e "${BOLD}${YELLOW}Setting up a client is free.${RESET}"
+  hint "Create one here (free):"
+  echo -e "    ${BOLD}${WHITE}https://ai.tracebloc.io/clients${RESET}"
   echo ""
+
   if [[ -n "$default_client_id" ]]; then
-    read -r -p "Client ID [${default_client_id}]: " TB_CLIENT_ID_INPUT
+    read -r -p "  Client ID [${default_client_id}]: " TB_CLIENT_ID_INPUT
     TB_CLIENT_ID="${TB_CLIENT_ID_INPUT:-$default_client_id}"
   else
-    read -r -p "Client ID: " TB_CLIENT_ID
+    read -r -p "  Client ID: " TB_CLIENT_ID
   fi
   [[ -z "$TB_CLIENT_ID" ]] && error "Client ID cannot be empty."
 
   if [[ -n "$default_client_password" ]]; then
-    read -r -s -p "Client password [press Enter to keep existing]: " TB_CLIENT_PASSWORD_INPUT
+    read -r -s -p "  Client password [press Enter to keep existing]: " TB_CLIENT_PASSWORD_INPUT
     echo ""
     TB_CLIENT_PASSWORD="${TB_CLIENT_PASSWORD_INPUT:-$default_client_password}"
   else
-    read -r -s -p "Client password: " TB_CLIENT_PASSWORD
+    read -r -s -p "  Client password: " TB_CLIENT_PASSWORD
     echo ""
   fi
   [[ -z "$TB_CLIENT_PASSWORD" ]] && error "Client password cannot be empty."
 
-  # Escape single quotes for YAML: ' -> ''
   TB_CLIENT_PASSWORD_ESCAPED="${TB_CLIENT_PASSWORD//\'/\'\'}"
 
-  # ── GPU limits: nvidia.com/gpu=1 if NVIDIA GPU available, else "" ──────────
+  # ── GPU limits ──────────────────────────────────────────────────────────
   local gpu_val
   if [[ "${GPU_VENDOR:-}" == "nvidia" ]]; then
     gpu_val="nvidia.com/gpu=1"
-    info "NVIDIA GPU detected — setting GPU_LIMITS and GPU_REQUESTS to nvidia.com/gpu=1"
+    log "NVIDIA GPU detected — setting GPU_LIMITS and GPU_REQUESTS to nvidia.com/gpu=1"
   else
     gpu_val=""
-    info "No NVIDIA GPU — GPU_LIMITS and GPU_REQUESTS left empty"
+    log "No NVIDIA GPU — GPU_LIMITS and GPU_REQUESTS left empty"
   fi
 
-  # ── Write generated values.yaml to .tracebloc ──────────────────────────────
-  info "Writing values to $values_file"
+  # ── Write generated values.yaml ─────────────────────────────────────────
+  log "Writing values to $values_file"
   cat <<EOF > "$values_file"
 # ============================================================
-# Generated by install-k8s.sh — Tracebloc client Helm values
+# Generated by tracebloc installer — client configuration
 # ============================================================
 
 env:
@@ -160,25 +190,36 @@ clientPassword: '$TB_CLIENT_PASSWORD_ESCAPED'
 EOF
 
   chmod 600 "$values_file" 2>/dev/null || true
-  success "Values file written to $values_file"
+  log "Values file written to $values_file"
 
-  # ── Ensure helm is executable (Linux: get-helm-3 may install with wrong perms) ─
   _ensure_helm_runnable
 
-  # ── Add repo and install ───────────────────────────────────────────────────
+  # ── Add repo and install (all output goes to log) ───────────────────────
   if ! helm repo list 2>/dev/null | grep -q "^${TRACEBLOC_HELM_REPO_NAME}[[:space:]]"; then
-    info "Adding Helm repo: $TRACEBLOC_HELM_REPO_URL"
-    helm repo add "$TRACEBLOC_HELM_REPO_NAME" "$TRACEBLOC_HELM_REPO_URL"
+    log "Adding Helm repo: $TRACEBLOC_HELM_REPO_URL"
+    helm repo add "$TRACEBLOC_HELM_REPO_NAME" "$TRACEBLOC_HELM_REPO_URL" >> "${LOG_FILE:-/dev/null}" 2>&1
   fi
-  info "Updating Helm repos..."
-  helm repo update
+  log "Updating Helm repos..."
+  helm repo update >> "${LOG_FILE:-/dev/null}" 2>&1
 
-  info "Installing $TB_NAMESPACE from $TRACEBLOC_HELM_REPO_NAME/$TRACEBLOC_CHART_NAME in namespace '$TB_NAMESPACE'..."
-  helm upgrade --install "$TB_NAMESPACE" "$TRACEBLOC_HELM_REPO_NAME/$TRACEBLOC_CHART_NAME" \
+  echo ""
+  log "Installing $TB_NAMESPACE from $TRACEBLOC_HELM_REPO_NAME/$TRACEBLOC_CHART_NAME in namespace '$TB_NAMESPACE'..."
+
+  local helm_log
+  helm_log="$(mktemp)"
+  if ! helm upgrade --install "$TB_NAMESPACE" "$TRACEBLOC_HELM_REPO_NAME/$TRACEBLOC_CHART_NAME" \
     --namespace "$TB_NAMESPACE" \
     --create-namespace \
-    --values "$values_file"
+    --values "$values_file" > "$helm_log" 2>&1; then
+    log "Helm install failed — output:"
+    cat "$helm_log" >> "${LOG_FILE:-/dev/null}" 2>/dev/null
+    cat "$helm_log" >&2
+    rm -f "$helm_log"
+    error "Client installation failed. Check the log for details: ${LOG_FILE:-}"
+  fi
+  cat "$helm_log" >> "${LOG_FILE:-/dev/null}" 2>/dev/null
+  rm -f "$helm_log"
 
-  success "Tracebloc client Helm chart installed in namespace '$TB_NAMESPACE'."
-  info "Values file: $values_file"
+  success "Connected to tracebloc"
+  log "Values file: $values_file"
 }

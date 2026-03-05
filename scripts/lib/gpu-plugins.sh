@@ -13,7 +13,7 @@ deploy_gpu_device_plugin() {
   case "$GPU_VENDOR" in
     nvidia) _deploy_nvidia_plugin ;;
     amd)    _deploy_amd_plugin ;;
-    *)      info "No GPU device plugin needed." ;;
+    *)      log "No GPU device plugin needed." ;;
   esac
 }
 
@@ -29,35 +29,34 @@ _apply_remote_manifest() {
 }
 
 _deploy_nvidia_plugin() {
-  step "Deploying NVIDIA k8s Device Plugin"
+  log "Deploying NVIDIA k8s device plugin"
   if kubectl get daemonset -n kube-system nvidia-device-plugin-daemonset &>/dev/null 2>&1; then
-    success "NVIDIA device plugin already present."
+    success "GPU acceleration enabled."
     return
   fi
 
-  info "Downloading and applying NVIDIA device plugin DaemonSet..."
-  _apply_remote_manifest "$NVIDIA_DEVICE_PLUGIN_URL" "NVIDIA device plugin" || error "Failed to deploy NVIDIA device plugin"
+  log "Downloading and applying NVIDIA device plugin DaemonSet..."
+  _apply_remote_manifest "$NVIDIA_DEVICE_PLUGIN_URL" "NVIDIA device plugin" || error "Failed to enable GPU acceleration."
   kubectl rollout status daemonset/nvidia-device-plugin-daemonset \
     -n kube-system --timeout=120s \
-    || warn "Rollout timed out — plugin may still be pulling. Check: kubectl get pods -n kube-system"
-  success "NVIDIA device plugin deployed."
+    || warn "GPU setup still in progress — it may take a moment to finish."
+  success "GPU acceleration enabled."
 }
 
 _deploy_amd_plugin() {
-  step "Deploying AMD GPU k8s Device Plugin"
+  log "Deploying AMD GPU k8s device plugin"
   if kubectl get daemonset -n kube-system amdgpu-device-plugin &>/dev/null 2>&1; then
-    success "AMD device plugin already present."
+    success "GPU acceleration enabled."
     return
   fi
 
-  info "Downloading and applying AMD GPU device plugin DaemonSet..."
+  log "Downloading and applying AMD GPU device plugin DaemonSet..."
   if _apply_remote_manifest "$AMD_DEVICE_PLUGIN_URL" "AMD device plugin"; then
     kubectl rollout status daemonset/amdgpu-device-plugin -n kube-system --timeout=120s 2>/dev/null || true
-    success "AMD device plugin deployed."
+    success "GPU acceleration enabled."
   else
-    # Fallback: try master if pinned release missing
-    warn "Pinned AMD plugin ${AMD_DEVICE_PLUGIN_VERSION} failed; trying master..."
-    _apply_remote_manifest "https://raw.githubusercontent.com/RadeonOpenCompute/k8s-device-plugin/master/k8s-ds-amdgpu-dp.yaml" "AMD device plugin (master)" || warn "AMD device plugin deploy failed."
+    log "Pinned AMD plugin ${AMD_DEVICE_PLUGIN_VERSION} failed; trying master..."
+    _apply_remote_manifest "https://raw.githubusercontent.com/RadeonOpenCompute/k8s-device-plugin/master/k8s-ds-amdgpu-dp.yaml" "AMD device plugin (master)" || warn "GPU acceleration setup may need manual attention."
   fi
 }
 
@@ -65,8 +64,7 @@ _deploy_amd_plugin() {
 verify_gpu() {
   [[ "$GPU_VENDOR" != "nvidia" && "$GPU_VENDOR" != "amd" ]] && return
 
-  step "Verifying GPU on Node"
-  info "Waiting up to 90s for GPU to appear as allocatable resource..."
+  log "Verifying GPU on node..."
 
   for i in {1..18}; do
     RAW=$(kubectl get nodes -o json 2>/dev/null \
@@ -74,12 +72,11 @@ verify_gpu() {
       | sed 's/"//g; s/\s*:\s*/=/g' | head -5 \
       2>/dev/null || echo "")
     if [[ -n "$RAW" ]]; then
-      success "GPU visible on node: $RAW"
+      success "GPU verified and available."
+      log "GPU resource on node: $RAW"
       return
     fi
-    sleep 5; printf "."
+    sleep 5
   done
-  echo ""
-  warn "GPU resource not yet visible. The device plugin may still be initialising."
-  warn "Re-check with: kubectl describe node | grep -A5 Allocatable"
+  warn "GPU may still be initializing. Check back shortly."
 }
