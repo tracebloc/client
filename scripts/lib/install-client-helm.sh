@@ -10,6 +10,7 @@ TRACEBLOC_HELM_REPO_NAME="tracebloc"
 TRACEBLOC_CHART_NAME="client"
 
 # Extract a key's value from a simple YAML file (handles "value", 'value', or value)
+# For single-quoted YAML values, unescapes '' back to ' so credentials round-trip correctly.
 _extract_yaml_value() {
   local file="$1" key="$2"
   local line
@@ -17,16 +18,21 @@ _extract_yaml_value() {
   [[ -z "$line" ]] && return
   line="${line#*:}"
   line="${line#"${line%%[![:space:]]*}"}"
-  line="${line#\"}"; line="${line%\"}"
-  line="${line#\'}"; line="${line%\'}"
+  if [[ "$line" == \'*\' ]]; then
+    line="${line#\'}"
+    line="${line%\'}"
+    line="${line//\'\'/\'}"
+  else
+    line="${line#\"}"
+    line="${line%\"}"
+  fi
   printf '%s' "$line"
 }
 
 install_client_helm() {
   step "Installing Tracebloc client Helm chart"
 
-  mkdir -p "$HOST_DATA_DIR" "$HOST_DATA_DIR/data" "$HOST_DATA_DIR/logs" "$HOST_DATA_DIR/mysql"
-  chmod -R 777 "$HOST_DATA_DIR/data" "$HOST_DATA_DIR/logs" "$HOST_DATA_DIR/mysql" 2>/dev/null || true
+  _ensure_tracebloc_dirs
   local values_file="${HOST_DATA_DIR}/values.yaml"
 
   local use_existing=""
