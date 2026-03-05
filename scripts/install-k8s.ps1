@@ -731,6 +731,11 @@ function Install-ClientHelm {
   $nsInput = Read-Host $namespacePrompt
   $TB_NAMESPACE = if ($nsInput) { $nsInput } else { $defaultNamespace }
 
+  Write-Host ""
+  Step "Client ID & Password"
+  Write-Host "Need credentials? Create a client at: " -NoNewline; Write-Host "https://ai.tracebloc.io/clients" -ForegroundColor Yellow
+  Write-Host "Setting up a client is free." -ForegroundColor Yellow
+  Write-Host ""
   if ($defaultClientId) {
     $idInput = Read-Host "Client ID [$defaultClientId]"
     $TB_CLIENT_ID = if ($idInput) { $idInput } else { $defaultClientId }

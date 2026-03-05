@@ -55,6 +55,11 @@ install_client_helm() {
   read -r -p "Namespace [${default_namespace}]: " TB_NAMESPACE_INPUT
   TB_NAMESPACE="${TB_NAMESPACE_INPUT:-$default_namespace}"
 
+  echo ""
+  step "Client ID & Password"
+  echo -e "${BOLD}${YELLOW}Need credentials? Create a client at: https://ai.tracebloc.io/clients${RESET}"
+  echo -e "${BOLD}${YELLOW}Setting up a client is free.${RESET}"
+  echo ""
   if [[ -n "$default_client_id" ]]; then
     read -r -p "Client ID [${default_client_id}]: " TB_CLIENT_ID_INPUT
     TB_CLIENT_ID="${TB_CLIENT_ID_INPUT:-$default_client_id}"
