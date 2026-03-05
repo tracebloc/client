@@ -9,6 +9,29 @@ TRACEBLOC_HELM_REPO_URL="https://tracebloc.github.io/client"
 TRACEBLOC_HELM_REPO_NAME="tracebloc"
 TRACEBLOC_CHART_NAME="client"
 
+# Ensure helm binary is executable (fixes Linux "Permission denied" exit 126 when
+# get-helm-3 installs to /usr/local/bin/helm with restrictive permissions).
+_ensure_helm_runnable() {
+  if helm version --short &>/dev/null; then
+    return 0
+  fi
+  local helm_bin
+  helm_bin="$(command -v helm 2>/dev/null)" || true
+  if [[ -z "$helm_bin" || ! -f "$helm_bin" ]]; then
+    error "Helm is not installed or not on PATH. Re-run the installer to install Helm."
+  fi
+  if [[ ! -x "$helm_bin" ]]; then
+    warn "Helm at $helm_bin is not executable (common on Linux after install). Fixing..."
+    if sudo chmod 755 "$helm_bin" 2>/dev/null; then
+      success "Helm is now executable. Continuing."
+      return 0
+    fi
+    error "Could not make Helm executable. Run manually: sudo chmod 755 $helm_bin"
+  fi
+  # Executable but still failing (e.g. noexec mount or libs)
+  error "Helm could not be run. Try: sudo chmod 755 $helm_bin then re-run this script."
+}
+
 # Extract a key's value from a simple YAML file (handles "value", 'value', or value)
 # For single-quoted YAML values, unescapes '' back to ' so credentials round-trip correctly.
 _extract_yaml_value() {
@@ -138,6 +161,9 @@ EOF
 
   chmod 600 "$values_file" 2>/dev/null || true
   success "Values file written to $values_file"
+
+  # ── Ensure helm is executable (Linux: get-helm-3 may install with wrong perms) ─
+  _ensure_helm_runnable
 
   # ── Add repo and install ───────────────────────────────────────────────────
   if ! helm repo list 2>/dev/null | grep -q "^${TRACEBLOC_HELM_REPO_NAME}[[:space:]]"; then

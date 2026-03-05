@@ -122,6 +122,17 @@ install_k3d() {
 }
 
 # ── Helm ─────────────────────────────────────────────────────────────────────
+# Ensure helm binary is executable (get-helm-3 can install to /usr/local/bin with
+# restrictive perms on some Linux distros, causing "Permission denied" exit 126).
+_ensure_helm_executable() {
+  local helm_bin
+  helm_bin="$(command -v helm 2>/dev/null)" || true
+  if [[ -n "$helm_bin" && -f "$helm_bin" && ! -x "$helm_bin" ]]; then
+    info "Making Helm executable (fixing permissions)..."
+    sudo chmod 755 "$helm_bin" 2>/dev/null || true
+  fi
+}
+
 install_helm() {
   step "Step 5/5 — Helm"
   if ! has helm; then
@@ -132,8 +143,10 @@ install_helm() {
     chmod +x "$helm_script"
     spin_cmd "Installing Helm…" bash "$helm_script"
     rm -f "$helm_script"
+    _ensure_helm_executable
     success "helm: $(helm version --short 2>/dev/null || echo installed)"
   else
+    _ensure_helm_executable
     success "helm: $(helm version --short 2>/dev/null || echo present)"
   fi
 }
