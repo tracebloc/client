@@ -6,12 +6,12 @@
 # ── Drivers ──────────────────────────────────────────────────────────────────
 install_nvidia_drivers() {
   if $NVIDIA_DRIVER_OK; then
-    success "NVIDIA drivers already loaded."
+    success "NVIDIA drivers loaded."
     return
   fi
 
-  step "Installing NVIDIA Drivers"
-  warn "NVIDIA GPU present but drivers are missing — attempting auto-install..."
+  log "Installing NVIDIA drivers..."
+  warn "NVIDIA GPU detected but drivers are missing — installing now..."
 
   $PM_UPDATE
   if has apt-get; then
@@ -48,25 +48,25 @@ install_nvidia_drivers() {
     $PM_INSTALL nvidia nvidia-utils
   fi
 
-  warn "Drivers installed — a REBOOT is likely required before they activate."
-  warn "After rebooting, re-run this script; driver steps will be skipped automatically."
+  warn "GPU drivers installed — a reboot is likely required."
+  hint "After rebooting, re-run the installer. Driver steps will be skipped."
   if [[ -n "${TRACEBLOC_SKIP_REBOOT_PROMPT:-}" ]]; then
-    warn "TRACEBLOC_SKIP_REBOOT_PROMPT set — skipping reboot prompt. Reboot manually and re-run (exit 2)."
+    log "TRACEBLOC_SKIP_REBOOT_PROMPT set — skipping reboot prompt."
     exit 2
   fi
   read -r -p "  Reboot now? [y/N]: " _choice
   [[ "$_choice" =~ ^[Yy]$ ]] && sudo reboot
-  warn "Skipping reboot. GPU steps may fail if the kernel module isn't loaded yet."
+  warn "Skipping reboot. GPU may not be available until you restart."
 }
 
 # ── Container Toolkit ────────────────────────────────────────────────────────
 install_nvidia_container_toolkit() {
-  step "NVIDIA Container Toolkit"
+  log "Setting up NVIDIA container toolkit"
 
   if has nvidia-ctk && nvidia-ctk --version &>/dev/null 2>&1; then
-    success "NVIDIA Container Toolkit already installed."
+    log "NVIDIA Container Toolkit already installed."
   else
-    info "Installing nvidia-container-toolkit..."
+    log "Installing nvidia-container-toolkit..."
 
     if has apt-get; then
       local nvidia_gpg_tmp
@@ -77,9 +77,9 @@ install_nvidia_container_toolkit() {
       nvidia_fp=$(gpg --with-colons --import-options show-only --import "$nvidia_gpg_tmp" 2>/dev/null \
         | awk -F: '/^fpr:/{print $10; exit}')
       if [[ -n "$nvidia_fp" ]]; then
-        info "NVIDIA GPG key fingerprint: $nvidia_fp"
+        log "NVIDIA GPG key fingerprint: $nvidia_fp"
       else
-        warn "Could not extract GPG key fingerprint — verify manually after install."
+        log "Could not extract GPG key fingerprint — verify manually after install."
       fi
       sudo gpg --dearmor -o /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg "$nvidia_gpg_tmp"
       rm -f "$nvidia_gpg_tmp"
@@ -99,21 +99,21 @@ install_nvidia_container_toolkit() {
       elif has paru; then paru -S --noconfirm nvidia-container-toolkit
       else warn "AUR helper not found — install nvidia-container-toolkit from AUR manually."; fi
     fi
-    success "NVIDIA Container Toolkit installed."
+    log "NVIDIA Container Toolkit installed."
   fi
 
-  info "Setting NVIDIA as the default Docker runtime..."
+  log "Setting NVIDIA as the default Docker runtime..."
   sudo nvidia-ctk runtime configure --runtime=docker --set-as-default
   sudo systemctl restart docker
   sleep 3
 
-  info "Configuring containerd NVIDIA runtime (for k3s nodes inside k3d)..."
+  log "Configuring containerd NVIDIA runtime..."
   sudo nvidia-ctk runtime configure --runtime=containerd --set-as-default 2>/dev/null || true
 
   if docker run --rm --gpus all nvidia/cuda:12.3.1-base-ubuntu22.04 nvidia-smi &>/dev/null; then
-    success "Docker GPU smoke-test passed"
+    log "Docker GPU smoke-test passed"
   else
-    warn "Docker GPU smoke-test skipped (image may need pulling). Continuing..."
+    log "Docker GPU smoke-test skipped (image may need pulling). Continuing..."
   fi
 
   K3D_GPU_FLAGS=("--gpus=all")

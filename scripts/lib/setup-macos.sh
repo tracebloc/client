@@ -5,7 +5,6 @@
 # =============================================================================
 
 install_homebrew() {
-  step "Step 1/3 — Homebrew"
   if ! has brew; then
     local brew_script
     brew_script="$(mktemp)"
@@ -20,16 +19,13 @@ install_homebrew() {
     fi
     success "Homebrew installed."
   else
-    success "Homebrew: $(brew --version | head -1)"
+    success "Homebrew"
   fi
 }
 
-# Kill lingering Docker Desktop processes that block a clean startup.
-# Docker itself emits: "Lingering processes detected. One or more running
-# processes can prevent Docker Desktop startup: Docker Desktop"
 _kill_lingering_docker() {
   if ! docker info &>/dev/null 2>&1 && pgrep -xq "Docker Desktop"; then
-    warn "Lingering Docker Desktop process detected — cleaning up…"
+    log "Lingering Docker Desktop process detected — cleaning up…"
     osascript -e 'quit app "Docker"' 2>/dev/null || true
     sleep 2
     if pgrep -xq "Docker Desktop"; then
@@ -40,7 +36,7 @@ _kill_lingering_docker() {
       pkill -9 -x "Docker Desktop" 2>/dev/null || true
       sleep 1
     fi
-    success "Lingering Docker process cleared."
+    log "Lingering Docker process cleared."
   fi
 }
 
@@ -55,39 +51,34 @@ _has_gui_session() {
 }
 
 _install_docker_colima() {
-  info "Headless environment detected (no GUI session) — using Colima as Docker runtime."
+  log "Headless environment detected (no GUI session) — using Colima as Docker runtime."
 
   if ! has docker; then
-    spin_cmd "Installing Docker CLI…" brew install docker
-    success "Docker CLI: $(docker --version)"
+    spin_cmd "Installing Docker…" brew install docker
+    success "Docker"
   else
-    success "Docker CLI: $(docker --version)"
+    success "Docker"
   fi
 
   if ! has colima; then
-    spin_cmd "Installing Colima…" brew install colima
-    success "Colima installed."
-  else
-    success "Colima: $(colima version 2>/dev/null | head -1 || echo installed)"
+    spin_cmd "Installing container runtime…" brew install colima
   fi
 
   if docker info &>/dev/null 2>&1; then
-    success "Docker daemon already running."
+    success "Docker running."
     return
   fi
 
-  info "Starting Colima Docker runtime (first run may take 1-2 minutes)…"
-  spin_cmd "Starting Colima…" colima start --cpu 2 --memory 4 --disk 60
+  spin_cmd "Starting Docker runtime…" colima start --cpu 2 --memory 4 --disk 60
 
   if ! docker info &>/dev/null 2>&1; then
-    error "Docker daemon (via Colima) did not start. Run 'colima status' to investigate."
+    error "Docker did not start. Try running 'colima status' to investigate."
   fi
 
-  success "Docker (Colima): $(docker --version)"
+  success "Docker running."
 }
 
 install_docker_desktop() {
-  step "Step 2/3 — Docker"
 
   # On headless Macs (EC2, CI runners), Docker Desktop can't launch.
   # If Docker is already running (e.g. started via VNC earlier), skip detection.
@@ -130,13 +121,13 @@ install_docker_desktop() {
     if [[ "$wrong_arch" == true ]]; then
       echo ""
       if [[ "$real_arch" == "arm64" ]]; then
-        warn "Docker Desktop installed is for Intel (x86_64), but this Mac is Apple Silicon (arm64)."
-        echo -e "  That often causes slow performance, instability, or Docker failing to start."
+        warn "Docker is installed for the wrong chip (Intel instead of Apple Silicon)."
+        hint "This can cause slow performance or prevent Docker from starting."
       else
-        warn "Docker Desktop installed is for Apple Silicon (arm64), but this Mac is Intel (x86_64)."
-        echo -e "  Docker may not run correctly on this machine."
+        warn "Docker is installed for the wrong chip (Apple Silicon instead of Intel)."
+        hint "Docker may not work correctly."
       fi
-      echo -e "  ${BOLD}We'll replace it with Docker for your Mac's architecture.${RESET}"
+      echo -e "  ${BOLD}We'll replace it with the correct version for your Mac.${RESET}"
       echo ""
 
       if [[ "${TRACEBLOC_DOCKER_ARCH_PROMPT:-0}" == "1" ]]; then
@@ -144,14 +135,13 @@ install_docker_desktop() {
         read -r -p "  Replace wrong-architecture Docker with native version? [Y/n] " reply || true
         if [[ -n "$reply" && "$reply" != "y" && "$reply" != "Y" ]]; then
           echo ""
-          echo -e "  ${BOLD}Skipped.${RESET} To fix later, re-run this installer or install Docker manually for your chip:"
-          echo -e "  ${CYAN}https://docs.docker.com/desktop/install/mac-install/${RESET}"
+          echo -e "  ${BOLD}Skipped.${RESET} To fix later, re-run this installer."
           echo ""
-          error "Docker architecture mismatch. Install the correct Docker version and re-run."
+          error "Docker version mismatch. Install the correct version and re-run."
         fi
       fi
 
-      info "Quitting and removing wrong-architecture Docker Desktop…"
+      log "Quitting and removing wrong-architecture Docker Desktop…"
       osascript -e 'quit app "Docker"' 2>/dev/null || true
       sleep 2
       pkill -x "Docker Desktop" 2>/dev/null || true; sleep 1
@@ -161,14 +151,14 @@ install_docker_desktop() {
       sudo rm -rf /Applications/Docker.app
       need_install=true
       fresh_install=true
-      success "Removed. Installing Docker for $real_arch next."
+      success "Removed. Installing correct Docker version."
     fi
   fi
 
   if ! has docker || [[ "$need_install" == true ]]; then
     fresh_install=true
 
-    info "Detected hardware architecture: $real_arch"
+    log "Detected hardware architecture: $real_arch"
 
     local dmg_url="https://desktop.docker.com/mac/main/${real_arch}/Docker.dmg"
     local dmg_path="/tmp/Docker.dmg"
@@ -186,9 +176,9 @@ install_docker_desktop() {
         rm -f "$dmg_path"
         error "Docker Desktop DMG checksum mismatch — download may be corrupted or tampered with"
       fi
-      success "Docker Desktop checksum verified."
+      log "Docker Desktop checksum verified."
     else
-      warn "Could not fetch Docker Desktop checksum — skipping verification."
+      log "Could not fetch Docker Desktop checksum — skipping verification."
     fi
 
     spin_cmd "Installing Docker Desktop…" bash -c \
@@ -198,7 +188,7 @@ install_docker_desktop() {
        hdiutil detach '/Volumes/Docker' -quiet 2>/dev/null; \
        rm -f '$dmg_path'"
 
-    success "Docker Desktop ($real_arch) installed to /Applications."
+    log "Docker Desktop ($real_arch) installed to /Applications."
   fi
 
   _kill_lingering_docker
@@ -217,7 +207,7 @@ install_docker_desktop() {
       echo -e "  ${BOLD}The installer will continue automatically once Docker is ready.${RESET}"
       echo ""
     else
-      info "Starting Docker Desktop…"
+      log "Starting Docker Desktop…"
     fi
 
     local max_wait=80
@@ -250,32 +240,26 @@ install_docker_desktop() {
     error "Docker Desktop did not start in time. Re-run this script once Docker is ready."
   fi
 
-  success "Docker: $(docker --version)"
+  success "Docker"
 }
 
 install_macos_cli_tools() {
-  step "Step 3/3 — kubectl, k3d & helm"
-
   if ! has kubectl; then
-    spin_cmd "Installing kubectl…" brew install kubectl
-    success "kubectl: $(kubectl version --client --short 2>/dev/null || echo installed)"
-  else
-    success "kubectl: $(kubectl version --client --short 2>/dev/null || echo installed)"
+    spin_cmd "Installing system tools…" brew install kubectl
   fi
+  log "kubectl: $(kubectl version --client --short 2>/dev/null || echo installed)"
 
   if ! has k3d; then
-    spin_cmd "Installing k3d…" brew install k3d
-    success "k3d: $(k3d version | head -1)"
-  else
-    success "k3d: $(k3d version | head -1)"
+    spin_cmd "Installing system tools…" brew install k3d
   fi
+  log "k3d: $(k3d version | head -1 2>/dev/null || echo installed)"
 
   if ! has helm; then
-    spin_cmd "Installing helm…" brew install helm
-    success "helm: $(helm version --short 2>/dev/null || echo installed)"
-  else
-    success "helm: $(helm version --short 2>/dev/null || echo installed)"
+    spin_cmd "Installing system tools…" brew install helm
   fi
+  log "helm: $(helm version --short 2>/dev/null || echo installed)"
+
+  success "System tools"
 }
 
 install_macos() {

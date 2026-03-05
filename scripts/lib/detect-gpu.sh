@@ -4,24 +4,30 @@
 # =============================================================================
 
 detect_gpu() {
-  step "GPU Detection"
+  log "GPU detection starting — OS=$OS ARCH=$ARCH"
 
   if [[ "$OS" == "Darwin" ]]; then
     if [[ "$ARCH" == "arm64" ]]; then
       GPU_VENDOR="apple_silicon"
-      warn "Apple Silicon GPU detected — k3d/Docker does not support Metal GPU passthrough."
+      echo ""
+      warn "Apple Silicon detected."
+      info "GPU acceleration is not yet available on macOS."
+      info "Your environment will run in CPU mode."
+      echo ""
+      hint "For GPU-accelerated model training,"
+      hint "deploy tracebloc on a Linux machine with NVIDIA GPUs."
     else
-      warn "Intel Mac — no GPU passthrough available in k3d on macOS."
+      warn "Intel Mac detected."
+      info "Your environment will run in CPU mode."
     fi
-    info "Kubernetes will be installed in CPU-only mode. For GPU workloads, use a Linux host."
     return
   fi
 
   if has nvidia-smi && nvidia-smi &>/dev/null 2>&1; then
     GPU_VENDOR="nvidia"
     NVIDIA_DRIVER_OK=true
-    success "NVIDIA GPU: $(nvidia-smi --query-gpu=name --format=csv,noheader | head -1)"
-    success "Driver    : $(nvidia-smi --query-gpu=driver_version --format=csv,noheader | head -1)"
+    success "NVIDIA GPU detected: $(nvidia-smi --query-gpu=name --format=csv,noheader | head -1)"
+    log "Driver: $(nvidia-smi --query-gpu=driver_version --format=csv,noheader | head -1)"
     return
   fi
 
@@ -29,21 +35,21 @@ detect_gpu() {
     if lspci 2>/dev/null | grep -qi "NVIDIA"; then
       GPU_VENDOR="nvidia"
       NVIDIA_DRIVER_OK=false
-      warn "NVIDIA GPU detected via lspci — drivers not yet installed."
+      warn "NVIDIA GPU detected — drivers not yet installed."
       return
     fi
     if lspci 2>/dev/null | grep -qi "AMD.*VGA\|Advanced Micro Devices.*VGA\|Radeon"; then
       GPU_VENDOR="amd"
-      success "AMD GPU: $(lspci 2>/dev/null | grep -i 'Radeon\|AMD.*VGA' | head -1)"
+      success "AMD GPU detected: $(lspci 2>/dev/null | grep -i 'Radeon\|AMD.*VGA' | head -1)"
       return
     fi
   fi
 
   if [[ -d /proc/driver/nvidia ]]; then
     GPU_VENDOR="nvidia"; NVIDIA_DRIVER_OK=true
-    success "NVIDIA GPU detected via /proc/driver."
+    success "NVIDIA GPU detected."
     return
   fi
 
-  warn "No discrete GPU found — CPU-only mode."
+  info "No GPU detected. Your environment will run in CPU mode."
 }

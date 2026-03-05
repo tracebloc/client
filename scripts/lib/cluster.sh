@@ -32,7 +32,7 @@ _ensure_tracebloc_dirs() {
 }
 
 create_cluster() {
-  step "Creating k3d Cluster: '$CLUSTER_NAME'"
+  log "Creating k3d cluster: '$CLUSTER_NAME'"
 
   _ensure_tracebloc_dirs
 
@@ -47,7 +47,6 @@ create_cluster() {
 }
 
 _handle_existing_cluster() {
-  # Get serversRunning for this cluster only (jq preferred; fallback to table parsing)
   CLUSTER_STATUS="0"
   if command -v jq &>/dev/null; then
     CLUSTER_STATUS=$(k3d cluster list -o json 2>/dev/null | jq -r --arg n "$CLUSTER_NAME" '.[] | select(.name == $n) | .serversRunning // 0' 2>/dev/null || echo "0")
@@ -61,16 +60,15 @@ _handle_existing_cluster() {
   CLUSTER_STATUS="${CLUSTER_STATUS:-0}"
 
   if [[ "$CLUSTER_STATUS" -gt "0" ]]; then
-    success "Cluster '$CLUSTER_NAME' already running — skipping creation."
+    success "Compute environment already running."
   else
-    info "Cluster '$CLUSTER_NAME' exists but is stopped — starting it..."
+    log "Cluster '$CLUSTER_NAME' exists but is stopped — starting it..."
     k3d cluster start "$CLUSTER_NAME"
-    success "Cluster started."
+    success "Compute environment started."
   fi
 }
 
 _create_new_cluster() {
-  # HOST_DATA_DIR and data/logs/mysql subdirs already created by _ensure_tracebloc_dirs
   K3D_ARGS=(
     cluster create "$CLUSTER_NAME"
     --servers "$SERVERS"
@@ -82,34 +80,35 @@ _create_new_cluster() {
     --wait
   )
 
-  # Empty or "latest" = k3d default; otherwise use pinned image
   [[ -n "$K8S_VERSION" && "$K8S_VERSION" != "latest" ]] && K3D_ARGS+=(--image "rancher/k3s:${K8S_VERSION}")
 
   if [[ ${#K3D_GPU_FLAGS[@]} -gt 0 ]]; then
     K3D_ARGS+=("${K3D_GPU_FLAGS[@]}")
-    info "GPU flag(s) active: ${K3D_GPU_FLAGS[*]}"
-    info "Creating cluster with $SERVERS server(s) + $AGENTS agent(s) + GPU passthrough..."
+    log "GPU flag(s) active: ${K3D_GPU_FLAGS[*]}"
+    log "Creating cluster with $SERVERS server(s) + $AGENTS agent(s) + GPU passthrough..."
   else
-    info "Creating cluster with $SERVERS server(s) + $AGENTS agent(s) (CPU-only)..."
+    log "Creating cluster with $SERVERS server(s) + $AGENTS agent(s) (CPU-only)..."
   fi
-  info "(First run pulls the k3s image — takes ~1 min on a fast connection)"
+  hint "First run may take 1-2 minutes to download components."
 
   local create_out create_rc
   create_out="$(mktemp)"
   if ! k3d "${K3D_ARGS[@]}" >"$create_out" 2>&1; then
     create_rc=$?
     if grep -qi "already exists\|a cluster with that name already exists" "$create_out" 2>/dev/null; then
-      info "Cluster '$CLUSTER_NAME' already exists (detected from k3d message). Using existing cluster."
+      log "Cluster '$CLUSTER_NAME' already exists (detected from k3d message). Using existing cluster."
       rm -f "$create_out"
       _handle_existing_cluster
       return 0
     fi
+    cat "$create_out" >> "${LOG_FILE:-/dev/null}" 2>/dev/null
     cat "$create_out" >&2
     rm -f "$create_out"
     exit "$create_rc"
   fi
+  cat "$create_out" >> "${LOG_FILE:-/dev/null}" 2>/dev/null
   rm -f "$create_out"
-  success "Cluster '$CLUSTER_NAME' created and ready!"
+  success "Compute environment ready."
 }
 
 _merge_kubeconfig() {
@@ -119,18 +118,29 @@ _merge_kubeconfig() {
     --kubeconfig-merge-default \
     --kubeconfig-switch-context \
     >/dev/null 2>&1
-  success "kubeconfig updated — kubectl now points to '$CLUSTER_NAME'."
+  log "kubeconfig updated — kubectl now points to '$CLUSTER_NAME'."
 }
 
 _wait_for_api() {
-  info "Waiting for k8s API server to become ready..."
-  local attempt
-  for attempt in {1..30}; do
+  local logfile="${LOG_FILE:-/tmp/tracebloc-spin.log}"
+  local attempt max=30
+  log "Waiting for API server to become ready..."
+
+  tput civis 2>/dev/null || true
+  local frames=('⠋' '⠙' '⠹' '⠸' '⠼' '⠴' '⠦' '⠧' '⠇' '⠏')
+  local f=0
+  for attempt in $(seq 1 $max); do
     if kubectl cluster-info &>/dev/null 2>&1; then
-      success "API server reachable."
+      printf "\r\033[K"
+      tput cnorm 2>/dev/null || true
+      success "Compute environment online."
       return
     fi
+    printf "\r  ${CYAN}%s${RESET} Starting compute environment..." "${frames[f]}"
+    f=$(( (f + 1) % ${#frames[@]} ))
     sleep 2
   done
-  error "API server not reachable after 60s. Check: k3d cluster list / docker ps"
+  printf "\r\033[K"
+  tput cnorm 2>/dev/null || true
+  error "Compute environment did not start within 60s. Check Docker and try again."
 }

@@ -1,8 +1,9 @@
 # =============================================================================
-#  install-k8s.ps1  --  One-command Kubernetes + GPU installer  (Windows)
+#  install-k8s.ps1  --  tracebloc client installer  (Windows)
 #
-#  Engine  : k3d  (k3s inside Docker -- lightweight, prod-topology capable)
-#  GPUs    : NVIDIA (via WSL2 passthrough)      AMD (unsupported on Windows)
+#  Sets up a secure compute environment and connects it to the tracebloc
+#  network so external AI vendors can submit models for evaluation on
+#  your infrastructure — without exposing your data.
 #
 #  Usage (PowerShell as Administrator):
 #    irm https://raw.githubusercontent.com/tracebloc/client/main/scripts/install.ps1 | iex
@@ -30,22 +31,25 @@ param([switch]$Help, [switch]$NoReboot)
 $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()
            ).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 if (-not $isAdmin) {
-  Write-Host "[ERROR] Run this script as Administrator (right-click > Run as Administrator)." -ForegroundColor Red
+  Write-Host "  " -NoNewline; Write-Host ([char]0x2716) -ForegroundColor Red -NoNewline; Write-Host " Run this script as Administrator (right-click > Run as Administrator)." -ForegroundColor Red
   exit 1
 }
 
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 
 # =============================================================================
-#  HELPERS
+#  HELPERS — logging functions matching bash UX
 # =============================================================================
 
-function Info($m)  { Write-Host "[INFO]  $m" -ForegroundColor Cyan }
-function Ok($m)    { Write-Host "[OK]    $m" -ForegroundColor Green }
-function Warn($m)  { Write-Host "[WARN]  $m" -ForegroundColor Yellow }
-function Err($m)   { Write-Host "[ERROR] $m" -ForegroundColor Red; exit 1 }
-function Step($m)  { Write-Host "`n=== $m ===" -ForegroundColor White }
-function Has($cmd) { [bool](Get-Command $cmd -ErrorAction SilentlyContinue) }
+function Info($m)          { Write-Host "  " -NoNewline; Write-Host ([char]0x00B7) -ForegroundColor DarkGray -NoNewline; Write-Host " $m" -ForegroundColor DarkGray }
+function Ok($m)            { Write-Host "  " -NoNewline; Write-Host ([char]0x2714) -ForegroundColor Green -NoNewline; Write-Host " $m" }
+function Warn($m)          { Write-Host "  " -NoNewline; Write-Host ([char]0x26A0) -ForegroundColor Yellow -NoNewline; Write-Host "  $m" -ForegroundColor Yellow }
+function Err($m)           { Write-Host "  " -NoNewline; Write-Host ([char]0x2716) -ForegroundColor Red -NoNewline; Write-Host " $m" -ForegroundColor Red; exit 1 }
+function Step($n, $t, $l)  { Write-Host ""; Write-Host "Step $n/$t" -ForegroundColor Cyan -NoNewline; Write-Host "  $l" -ForegroundColor White }
+function Log($m)           { if ($script:LOG_FILE) { Add-Content -Path $script:LOG_FILE -Value "[$(Get-Date -Format 'HH:mm:ss')] $m" -ErrorAction SilentlyContinue } }
+function PromptHeader($m)  { Write-Host ""; Write-Host "  $m" -ForegroundColor White }
+function Hint($m)          { Write-Host "  $m" -ForegroundColor DarkGray }
+function Has($cmd)         { [bool](Get-Command $cmd -ErrorAction SilentlyContinue) }
 
 function RefreshPath {
   $env:PATH = [System.Environment]::GetEnvironmentVariable("PATH","Machine") + ";" +
@@ -86,29 +90,42 @@ function Invoke-WithRetry {
     }
     catch {
       if ($i -eq $MaxAttempts) { throw }
-      Warn "$Label -- attempt $i/$MaxAttempts failed: $_. Retrying in ${DelaySeconds}s..."
+      Warn "$Label -- attempt $i/$MaxAttempts failed. Retrying in ${DelaySeconds}s..."
       Start-Sleep -Seconds $DelaySeconds
     }
   }
 }
 
+# Sanitize workspace name to comply with DNS-1123
+function ConvertTo-WorkspaceName {
+  param([string]$Input_)
+  $sanitized = $Input_.ToLower()
+  $sanitized = $sanitized -replace '\s', '-'
+  $sanitized = $sanitized -replace '_', '-'
+  $sanitized = $sanitized -replace '[^a-z0-9-]', ''
+  $sanitized = $sanitized -replace '-+', '-'
+  $sanitized = $sanitized.Trim('-')
+  if (-not $sanitized) { $sanitized = "default" }
+  if ($sanitized.Length -gt 63) { $sanitized = $sanitized.Substring(0, 63).TrimEnd('-') }
+  return $sanitized
+}
+
 # =============================================================================
-#  CONFIGURATION  (aligned with bash common.sh)
+#  CONFIGURATION
 # =============================================================================
 
 $CLUSTER_NAME  = if ($env:CLUSTER_NAME)  { $env:CLUSTER_NAME }  else { "tracebloc" }
 $SERVERS       = if ($env:SERVERS)       { $env:SERVERS }       else { "1" }
 $AGENTS        = if ($env:AGENTS)        { $env:AGENTS }        else { "1" }
-# Pinned default; set $env:K8S_VERSION = "" to use latest
 $K8S_VERSION   = if ($env:K8S_VERSION)   { $env:K8S_VERSION }   else { "v1.29.4-k3s1" }
 $HTTP_PORT     = if ($env:HTTP_PORT)     { $env:HTTP_PORT }     else { "80" }
 $HTTPS_PORT    = if ($env:HTTPS_PORT)    { $env:HTTPS_PORT }    else { "443" }
 $HOST_DATA_DIR = if ($env:HOST_DATA_DIR) { $env:HOST_DATA_DIR } else { "$env:USERPROFILE\.tracebloc" }
-$CLIENT_ENV    = $env:CLIENT_ENV   # if not set, do not add CLIENT_ENV to env in values
+$CLIENT_ENV    = $env:CLIENT_ENV
 
-$GPU_VENDOR       = "none"    # nvidia | amd | amd_unsupported | none
+$GPU_VENDOR       = "none"
 $NVIDIA_DRIVER_OK = $false
-$K3D_GPU_FLAG     = ""        # "--gpus=all" when NVIDIA is ready
+$K3D_GPU_FLAG     = ""
 
 # =============================================================================
 #  HELP
@@ -117,23 +134,29 @@ $K3D_GPU_FLAG     = ""        # "--gpus=all" when NVIDIA is ready
 function Print-Help {
   Write-Host @"
 
+tracebloc -- client setup
+
+  Set up a secure compute environment on your machine
+  and connect it to the tracebloc network.
+
 Usage:
   irm https://raw.githubusercontent.com/tracebloc/client/main/scripts/install.ps1 | iex
   .\install-k8s.ps1 [-Help] [-NoReboot]
 
-Environment variable overrides:
+Advanced configuration (environment variables):
   CLUSTER_NAME   Cluster name                   (default: tracebloc)
   SERVERS        Control-plane nodes             (default: 1)
   AGENTS         Worker nodes                    (default: 1)
-  K8S_VERSION    k3s image tag (empty or 'latest' = k3d default)  (default: v1.29.4-k3s1)
-  -NoReboot      Skip reboot prompt after enabling Windows features (exit 2)
-  HTTP_PORT      Host HTTP  ingress port         (default: 80)
-  HTTPS_PORT     Host HTTPS ingress port         (default: 443)
+  K8S_VERSION    k3s image tag                   (default: v1.29.4-k3s1)
+  -NoReboot      Skip reboot prompt after enabling Windows features
+  HTTP_PORT      Host HTTP  port                 (default: 80)
+  HTTPS_PORT     Host HTTPS port                 (default: 443)
   HOST_DATA_DIR  Persistent data directory       (default: ~\.tracebloc)
-  CLIENT_ENV     Client env (e.g. prod, dev); if not set, not added to values
 
 macOS / Linux:
   curl -fsSL https://raw.githubusercontent.com/tracebloc/client/main/scripts/install.sh | bash
+
+Learn more: https://docs.tracebloc.io
 
 "@
   exit 0
@@ -158,7 +181,6 @@ function Confirm-Config {
   if ($HTTP_PORT -eq $HTTPS_PORT) {
     Err ("HTTP_PORT and HTTPS_PORT must be different (both set to " + $HTTP_PORT + ")")
   }
-  # HOST_DATA_DIR must be under USERPROFILE and not a system path (security)
   $dataDir = [System.IO.Path]::GetFullPath($HOST_DATA_DIR)
   $userProfile = [System.IO.Path]::GetFullPath($env:USERPROFILE)
   if (-not $dataDir.StartsWith($userProfile, [StringComparison]::OrdinalIgnoreCase)) {
@@ -184,9 +206,9 @@ function Start-InstallLog {
   $script:LOG_FILE = "$HOST_DATA_DIR\install-$(Get-Date -Format 'yyyyMMdd-HHmmss').log"
   try {
     Start-Transcript -Path $LOG_FILE -Append | Out-Null
-    Info "Install log: $LOG_FILE"
+    Log "Install log: $LOG_FILE"
   } catch {
-    Warn "Could not start transcript logging: $_"
+    Log "Could not start transcript logging: $_"
   }
 }
 
@@ -196,12 +218,31 @@ function Start-InstallLog {
 
 function Print-Banner {
   Write-Host ""
-  Write-Host "+===============================================================+" -ForegroundColor Cyan
-  Write-Host "|   Kubernetes (k3d/k3s) + GPU  One-Command Installer           |" -ForegroundColor Cyan
-  Write-Host "|   Windows                                                     |" -ForegroundColor Cyan
-  Write-Host "+===============================================================+" -ForegroundColor Cyan
-  Info "Cluster='$CLUSTER_NAME'  Servers=$SERVERS  Agents=$AGENTS  HTTP=$HTTP_PORT  HTTPS=$HTTPS_PORT"
-  Info "Host data dir: $HOST_DATA_DIR"
+  Write-Host "  " -NoNewline; Write-Host "tracebloc" -ForegroundColor Cyan -NoNewline; Write-Host " -- client setup"
+  Write-Host "  " -NoNewline; Write-Host ([string]([char]0x2500) * 40) -ForegroundColor DarkGray
+  Write-Host ""
+  Write-Host "  Test AI models from external vendors on your"
+  Write-Host "  infrastructure -- without exposing your data."
+  Write-Host ""
+  Hint "This installer sets up a secure compute environment"
+  Hint "on your machine and connects it to the tracebloc network."
+  Write-Host ""
+  Hint "Nothing will be modified outside:"
+  Hint "  ~\.tracebloc\    (data and config)"
+  Hint "  Docker           (container runtime)"
+  Write-Host ""
+  Log "Cluster='$CLUSTER_NAME'  Servers=$SERVERS  Agents=$AGENTS  HTTP=$HTTP_PORT  HTTPS=$HTTPS_PORT"
+  Log "Host data dir: $HOST_DATA_DIR"
+}
+
+function Print-Roadmap {
+  Write-Host "  Steps" -ForegroundColor White
+  Hint ([string]([char]0x2500) * 5)
+  Hint "1. Check system requirements"
+  Hint "2. Set up secure compute environment"
+  Hint "3. Install tracebloc client"
+  Hint "4. Connect to tracebloc network"
+  Write-Host ""
 }
 
 # =============================================================================
@@ -220,8 +261,8 @@ function Confirm-NvidiaDriver {
       $nvSmi = if ($found) { $found.FullName } else { $null }
     }
     if (-not $nvSmi) {
-      Warn "nvidia-smi not found -- NVIDIA drivers may not be installed."
-      Warn "Download: https://www.nvidia.com/Download/index.aspx"
+      Warn "NVIDIA drivers may not be installed."
+      Hint "Download: https://www.nvidia.com/Download/index.aspx"
       return
     }
 
@@ -229,10 +270,10 @@ function Confirm-NvidiaDriver {
     $majorVer  = [int]($driverVer -replace '\..*', '')
     if ($majorVer -ge 460) {
       $script:NVIDIA_DRIVER_OK = $true
-      Ok "NVIDIA driver $driverVer -- WSL2 GPU passthrough supported"
+      Ok "NVIDIA GPU ready (driver $driverVer)"
     } else {
       Warn "NVIDIA driver $driverVer is too old (need 460+)."
-      Warn "Download latest: https://www.nvidia.com/Download/index.aspx"
+      Hint "Download latest: https://www.nvidia.com/Download/index.aspx"
     }
   } catch {
     Warn "Could not verify NVIDIA driver: $_"
@@ -240,40 +281,40 @@ function Confirm-NvidiaDriver {
 }
 
 function Find-Gpu {
-  Step "GPU Detection"
+  Log "GPU detection starting"
 
   try {
     $gpus = Get-CimInstance Win32_VideoController |
             Where-Object { $_.Name -notmatch "Microsoft|Basic|VirtualBox" }
     foreach ($gpu in $gpus) {
       if ($gpu.Name -match "NVIDIA") {
-        $script:GPU_VENDOR = "nvidia"; Ok "NVIDIA GPU: $($gpu.Name)"; break
+        $script:GPU_VENDOR = "nvidia"; Ok "NVIDIA GPU detected: $($gpu.Name)"; break
       }
       if ($gpu.Name -match "AMD|Radeon") {
-        $script:GPU_VENDOR = "amd"; Ok "AMD GPU: $($gpu.Name)"; break
+        $script:GPU_VENDOR = "amd"; Ok "AMD GPU detected: $($gpu.Name)"; break
       }
     }
-    if ($GPU_VENDOR -eq "none") { Warn "No discrete GPU found -- CPU-only mode." }
+    if ($GPU_VENDOR -eq "none") { Info "No GPU detected. Your environment will run in CPU mode." }
   } catch {
-    Warn "GPU detection failed ($_) -- continuing in CPU-only mode."
+    Info "No GPU detected. Your environment will run in CPU mode."
+    Log "GPU detection failed: $_"
   }
 
   if ($GPU_VENDOR -eq "nvidia") { Confirm-NvidiaDriver }
 
   if ($GPU_VENDOR -eq "amd") {
-    Warn "AMD GPU detected but GPU passthrough via Docker Desktop on Windows is not supported."
-    Warn "For AMD GPU in Kubernetes, use a Linux host with the bash installer instead."
+    Warn "AMD GPU detected."
+    Info "GPU acceleration is not available via Docker Desktop on Windows."
+    Hint "For AMD GPU workloads, deploy tracebloc on a Linux machine."
     $script:GPU_VENDOR = "amd_unsupported"
   }
 }
 
 # =============================================================================
-#  STEP 1 -- WINDOWS VIRTUALISATION FEATURES
+#  WINDOWS VIRTUALISATION FEATURES
 # =============================================================================
 
 function Enable-VirtualisationFeatures {
-  Step "Step 1/5 -- Enabling Windows Virtualisation Features"
-
   $rebootNeeded = $false
   $features = @{
     "Microsoft-Windows-Subsystem-Linux" = "WSL2"
@@ -283,63 +324,63 @@ function Enable-VirtualisationFeatures {
   if ($edition -notmatch "Home") {
     $features["Microsoft-Hyper-V-All"] = "Hyper-V"
   } else {
-    Info "Windows Home detected -- Hyper-V not available, using WSL2 backend."
+    Log "Windows Home detected -- Hyper-V not available, using WSL2 backend."
   }
 
   $features.GetEnumerator() | ForEach-Object {
     $state = (Get-WindowsOptionalFeature -Online -FeatureName $_.Key -ErrorAction SilentlyContinue).State
     if ($state -ne "Enabled") {
-      Info "Enabling $($_.Value)..."
+      Log "Enabling $($_.Value)..."
       Enable-WindowsOptionalFeature -Online -FeatureName $_.Key -NoRestart | Out-Null
       $rebootNeeded = $true
     } else {
-      Ok "$($_.Value) already enabled."
+      Log "$($_.Value) already enabled."
     }
   }
 
   if ($rebootNeeded) {
-    Warn "A reboot is required to finish enabling virtualisation features."
+    Warn "A reboot is required to finish enabling system features."
     if ($NoReboot) {
-      Warn "NoReboot specified. Reboot manually, then re-run this script (exit 2)."
+      Hint "Reboot manually, then re-run this script."
       exit 2
     }
-    $choice = Read-Host "Reboot now? [y/N]"
+    $choice = Read-Host "  Reboot now? [y/N]"
     if ($choice -match "^[Yy]$") { Restart-Computer -Force }
     exit 2
   }
 
-  Info "Updating WSL (this can take a few minutes on first run)..."
+  Ok "System features"
+
+  Log "Updating WSL..."
   $wslJob = Start-Job -ScriptBlock { cmd /c "wsl --update 2>&1" }
-  Write-Host -NoNewline "  Updating"
+  Write-Host -NoNewline "  "
   while ($wslJob.State -eq "Running") {
-    Write-Host -NoNewline "."
+    Write-Host -NoNewline "." -ForegroundColor DarkGray
     Start-Sleep -Seconds 2
   }
   Write-Host ""
   $wslUpdate = Receive-Job -Job $wslJob
   $wslExitOk = $wslJob.State -eq "Completed"
   Remove-Job -Job $wslJob -Force
-  if (-not $wslExitOk) { Warn "WSL update may not have completed cleanly. Continuing..." }
+  if (-not $wslExitOk) { Log "WSL update may not have completed cleanly." }
 
   $wslSet = cmd /c "wsl --set-default-version 2 2>&1"
   if ($LASTEXITCODE -eq 0) {
-    Ok "WSL2 set as default."
+    Log "WSL2 set as default."
   } else {
-    Warn "Could not set WSL2 as default: $wslSet"
-    Warn "Try running 'wsl --update' manually, then re-run this script."
+    Warn "Could not set WSL2 as default."
+    Hint "Try running 'wsl --update' manually, then re-run this script."
   }
 }
 
 # =============================================================================
-#  STEP 2 -- WINGET
+#  WINGET
 # =============================================================================
 
 function Install-Winget {
-  Step "Step 2/5 -- Windows Package Manager (winget)"
+  if (Has "winget") { Log "winget: $(winget --version)"; return }
 
-  if (Has "winget") { Ok "winget: $(winget --version)"; return }
-
-  Info "Installing winget..."
+  Log "Installing winget..."
   $url  = "https://github.com/microsoft/winget-cli/releases/latest/download/Microsoft.DesktopAppInstaller_8wekyb3d8bbwe.msixbundle"
   $dest = "$env:TEMP\winget-installer.msixbundle"
   Invoke-WithRetry -Label "winget download" -ScriptBlock {
@@ -348,27 +389,24 @@ function Install-Winget {
   Add-AppxPackage -Path $dest
   Remove-Item $dest -Force -ErrorAction SilentlyContinue
   RefreshPath
-  Ok "winget installed."
+  Log "winget installed."
 }
 
 # =============================================================================
-#  STEP 3 -- DOCKER DESKTOP
+#  DOCKER DESKTOP
 # =============================================================================
 
 function Install-DockerDesktop {
-  Step "Step 3/5 -- Docker Desktop"
-
   $dockerExe = "$env:ProgramFiles\Docker\Docker\Docker Desktop.exe"
 
   if (-not (Test-Path $dockerExe)) {
-    Info "Installing Docker Desktop..."
     if (Has "winget") {
       winget install -e --id Docker.DockerDesktop `
         --accept-package-agreements --accept-source-agreements --silent
     } else {
       $ddArch = Get-WindowsArch
       $installer = "$env:TEMP\DockerDesktopInstaller.exe"
-      Invoke-WithRetry -Label "Docker Desktop download" -ScriptBlock {
+      Invoke-WithRetry -Label "Docker download" -ScriptBlock {
         Invoke-WebRequest -Uri "https://desktop.docker.com/win/main/$ddArch/Docker%20Desktop%20Installer.exe" `
           -OutFile $installer -UseBasicParsing
       }
@@ -376,34 +414,44 @@ function Install-DockerDesktop {
       Remove-Item $installer -Force -ErrorAction SilentlyContinue
     }
     RefreshPath
-    Ok "Docker Desktop installed."
   }
 
   $dockerRunning = $false
   try { docker info 2>&1 | Out-Null; $dockerRunning = ($LASTEXITCODE -eq 0) } catch {}
 
   if (-not $dockerRunning) {
-    Info "Starting Docker Desktop..."
     Start-Process $dockerExe -ErrorAction SilentlyContinue
-    Info "First launch? Accept the Docker license agreement in the UI."
 
     $maxWait = 60
-    Write-Host -NoNewline "  Waiting for Docker engine"
+    Write-Host -NoNewline "  "
+    $frames = @([char]0x2807, [char]0x2819, [char]0x2839, [char]0x2838, [char]0x283C, [char]0x2834, [char]0x2826, [char]0x2827, [char]0x2847, [char]0x280F)
+    $f = 0
     for ($i = 1; $i -le $maxWait; $i++) {
       Start-Sleep -Seconds 3
       try { docker info 2>&1 | Out-Null; if ($LASTEXITCODE -eq 0) { $dockerRunning = $true; break } } catch {}
-      Write-Host -NoNewline "."
+      Write-Host "`r  " -NoNewline
+      Write-Host $frames[$f] -ForegroundColor Cyan -NoNewline
+      Write-Host " Waiting for Docker..." -NoNewline
+      $f = ($f + 1) % $frames.Count
     }
-    Write-Host ""
+    Write-Host "`r                                    `r" -NoNewline
 
     if (-not $dockerRunning) {
-      Warn "Docker did not start within $($maxWait * 3)s."
-      Warn "On first install, open Docker Desktop and accept the license agreement."
-      Err "Re-run this script once Docker Desktop is running."
+      Write-Host ""
+      Warn "Docker is not responding yet."
+      Hint "This usually means it's still starting up."
+      Write-Host ""
+      Hint "1. Look for the Docker whale icon in your system tray"
+      Hint "2. If Docker is open, wait until it says 'Docker Desktop is running'"
+      Hint "3. Re-run this script once it's ready"
+      Write-Host ""
+      Hint "Nothing is broken -- Docker just needs a moment."
+      Write-Host ""
+      Err "Docker did not start in time. Re-run this script once Docker is ready."
     }
   }
 
-  Ok "Docker running: $(docker --version)"
+  Ok "Docker"
 }
 
 # =============================================================================
@@ -413,11 +461,8 @@ function Install-DockerDesktop {
 function Install-NvidiaContainerToolkit {
   if ($GPU_VENDOR -ne "nvidia" -or -not $NVIDIA_DRIVER_OK) { return }
 
-  Step "NVIDIA Container Toolkit (inside WSL2)"
-  Info "Installing nvidia-container-toolkit in the WSL2 environment..."
+  Log "Setting up NVIDIA container toolkit in WSL2"
 
-  # Find a usable WSL2 distro (prefer Ubuntu)
-  # WSL outputs UTF-16LE; temporarily switch console encoding to decode it
   $prevEncoding = [Console]::OutputEncoding
   [Console]::OutputEncoding = [System.Text.Encoding]::Unicode
   $distroRaw = wsl --list --quiet 2>$null
@@ -427,15 +472,15 @@ function Install-NvidiaContainerToolkit {
   if (-not $wslDistro -and $distros.Count -gt 0) { $wslDistro = $distros[0] }
 
   if (-not $wslDistro) {
-    Info "No WSL2 distro found -- installing Ubuntu..."
+    Log "No WSL2 distro found -- installing Ubuntu..."
     cmd /c "wsl --install -d Ubuntu --no-launch 2>&1" | Out-Null
     cmd /c "wsl --setdefault Ubuntu 2>&1" | Out-Null
-    Warn "Ubuntu WSL2 installed. Complete first-run setup in a separate terminal:"
-    Warn "  Open Ubuntu from Start Menu, set a username/password, then close it."
+    Warn "Ubuntu WSL2 installed."
+    Hint "Complete first-run setup: open Ubuntu from Start Menu, set a username/password."
     Err "Please complete WSL2 Ubuntu setup first, then re-run."
   }
 
-  Info "Using WSL2 distro: $wslDistro"
+  Log "Using WSL2 distro: $wslDistro"
 
   $nctScript = @'
 #!/bin/bash
@@ -462,56 +507,48 @@ echo "NCT installed successfully."
 
   $nctVer = cmd /c "wsl -d $wslDistro -- nvidia-ctk --version 2>&1"
   if ($LASTEXITCODE -eq 0) {
-    Ok "NVIDIA Container Toolkit in WSL2: $nctVer"
+    Log "NVIDIA Container Toolkit in WSL2: $nctVer"
     $script:K3D_GPU_FLAG = "--gpus=all"
   } else {
-    Warn "Could not verify nvidia-ctk inside WSL2 -- GPU support may be limited."
+    Warn "GPU setup may need manual attention."
   }
 }
 
 # =============================================================================
-#  STEP 4 -- KUBECTL
+#  SYSTEM TOOLS (kubectl, k3d, helm)
 # =============================================================================
 
 function Install-Kubectl {
-  Step "Step 4/5 -- kubectl"
-
-  if (Has "kubectl") { Ok "kubectl: $(cmd /c 'kubectl version --client 2>&1' | Select-Object -First 1)"; return }
+  if (Has "kubectl") { Log "kubectl: $(cmd /c 'kubectl version --client 2>&1' | Select-Object -First 1)"; return }
 
   $arch = Get-WindowsArch
-  $kVer = Invoke-WithRetry -Label "kubectl version check" -ScriptBlock {
+  $kVer = Invoke-WithRetry -Label "version check" -ScriptBlock {
     (Invoke-WebRequest "https://dl.k8s.io/release/stable.txt" -UseBasicParsing).Content.Trim()
   }
-  Info "Downloading kubectl $kVer ($arch)..."
+  Log "Downloading kubectl $kVer ($arch)..."
   $kubectlDest = "$TOOL_DIR\kubectl.exe"
-  Invoke-WithRetry -Label "kubectl download" -ScriptBlock {
+  Invoke-WithRetry -Label "download" -ScriptBlock {
     Invoke-WebRequest "https://dl.k8s.io/release/$kVer/bin/windows/$arch/kubectl.exe" `
       -OutFile $kubectlDest -UseBasicParsing
   }
-  $expectedHash = Invoke-WithRetry -Label "kubectl checksum" -ScriptBlock {
+  $expectedHash = Invoke-WithRetry -Label "checksum" -ScriptBlock {
     (Invoke-WebRequest "https://dl.k8s.io/release/$kVer/bin/windows/$arch/kubectl.exe.sha256" `
       -UseBasicParsing).Content.Trim()
   }
   $actualHash = (Get-FileHash $kubectlDest -Algorithm SHA256).Hash.ToLower()
   if ($actualHash -ne $expectedHash.ToLower()) {
     Remove-Item $kubectlDest -Force
-    Err "kubectl checksum verification failed -- possible tampering detected"
+    Err "System tool checksum verification failed."
   }
   RefreshPath
-  Ok "kubectl $kVer installed (checksum verified)."
+  Log "kubectl $kVer installed."
 }
 
-# =============================================================================
-#  STEP 5 -- K3D AND HELM
-# =============================================================================
-
 function Install-K3dAndHelm {
-  Step "Step 5/6 -- k3d and Helm"
-
   # -- k3d --
   if (-not (Has "k3d")) {
     if (Has "winget") {
-      Info "Installing k3d via winget..."
+      Log "Installing k3d via winget..."
       winget install -e --id Rancher.k3d `
         --accept-package-agreements --accept-source-agreements --silent 2>&1 | Out-Null
     }
@@ -519,7 +556,7 @@ function Install-K3dAndHelm {
 
     if (-not (Has "k3d")) {
       $arch = Get-WindowsArch
-      Info "Downloading k3d binary directly ($arch)..."
+      Log "Downloading k3d binary directly ($arch)..."
       $k3dVer = Invoke-WithRetry -Label "k3d version lookup" -ScriptBlock {
         (Invoke-WebRequest "https://api.github.com/repos/k3d-io/k3d/releases/latest" `
           -UseBasicParsing | ConvertFrom-Json).tag_name
@@ -540,31 +577,31 @@ function Install-K3dAndHelm {
           $actualHash = (Get-FileHash $k3dDest -Algorithm SHA256).Hash.ToLower()
           if ($actualHash -ne $expectedHash.Trim().ToLower()) {
             Remove-Item $k3dDest -Force
-            Err "k3d checksum verification failed -- possible tampering detected"
+            Err "System tool checksum verification failed."
           }
-          Info "k3d checksum verified."
+          Log "k3d checksum verified."
         }
       } catch {
-        Warn "Could not verify k3d checksum: $_"
+        Log "Could not verify k3d checksum: $_"
       }
       RefreshPath
     }
   }
-  Ok "k3d: $(k3d version | Select-Object -First 1)"
+  Log "k3d: $(k3d version | Select-Object -First 1)"
 
   # -- Helm --
   if (-not (Has "helm")) {
     if (Has "winget") {
-      Info "Installing Helm..."
+      Log "Installing Helm..."
       winget install -e --id Helm.Helm `
         --accept-package-agreements --accept-source-agreements --silent 2>&1 | Out-Null
       RefreshPath
     }
-    if (Has "helm") { Ok "helm: $(cmd /c 'helm version --short 2>&1')" }
-    else { Warn "Helm not installed -- install manually from https://helm.sh/docs/intro/install/" }
-  } else {
-    Ok "helm: $(cmd /c 'helm version --short 2>&1')"
+    if (-not (Has "helm")) { Warn "Helm not installed -- install manually from https://helm.sh/docs/intro/install/" }
   }
+  Log "helm: $(cmd /c 'helm version --short 2>&1')"
+
+  Ok "System tools"
 }
 
 # =============================================================================
@@ -572,31 +609,27 @@ function Install-K3dAndHelm {
 # =============================================================================
 
 function New-K3dCluster {
-  Step "Creating k3d Cluster: '$CLUSTER_NAME'"
+  Log "Creating k3d cluster: '$CLUSTER_NAME'"
 
-  # Exact cluster name match (avoids "tracebloc" matching "tracebloc2")
   $clusterExists = $false
   $clusterObj = $null
   try {
     $clusterListJson = k3d cluster list -o json 2>&1 | Out-String
     $clusterObj = $clusterListJson | ConvertFrom-Json | Where-Object { $_.name -eq $CLUSTER_NAME } | Select-Object -First 1
     $clusterExists = $null -ne $clusterObj
-  } catch {
-    # k3d not installed or JSON parse failed — will create new cluster
-  }
+  } catch {}
 
   if ($clusterExists) {
     $running = $clusterObj.serversRunning
     if ($running -gt 0) {
-      Ok "Cluster '$CLUSTER_NAME' already running -- skipping creation."
+      Ok "Compute environment already running."
     } else {
-      Info "Cluster '$CLUSTER_NAME' exists but stopped -- starting..."
+      Log "Cluster '$CLUSTER_NAME' exists but stopped -- starting..."
       k3d cluster start $CLUSTER_NAME
-      Ok "Cluster started."
+      Ok "Compute environment started."
     }
   } else {
     if (-not (Test-Path $HOST_DATA_DIR)) {
-      Info "Creating host data directory: $HOST_DATA_DIR"
       New-Item -ItemType Directory -Path $HOST_DATA_DIR -Force | Out-Null
     }
 
@@ -614,20 +647,19 @@ function New-K3dCluster {
     if ($K8S_VERSION -ne "" -and $K8S_VERSION -ne "latest") { $k3dArgs += @("--image", "rancher/k3s:$K8S_VERSION") }
     if ($K3D_GPU_FLAG -ne "") {
       $k3dArgs += $K3D_GPU_FLAG
-      Info "GPU flag active: $K3D_GPU_FLAG"
+      Log "GPU flag active: $K3D_GPU_FLAG"
     }
 
-    $modeMsg = if ($K3D_GPU_FLAG) { "with NVIDIA GPU passthrough" } else { "CPU-only" }
-    Info "Creating cluster ($modeMsg): $SERVERS server(s) + $AGENTS agent(s)..."
-    Info "(First run pulls the k3s image -- ~1 min on a good connection)"
+    Log "Creating cluster: $SERVERS server(s) + $AGENTS agent(s)..."
+    Hint "First run may take 1-2 minutes to download components."
 
     & k3d $k3dArgs
-    if ($LASTEXITCODE -ne 0) { Err "k3d cluster creation failed -- see output above." }
-    Ok "Cluster '$CLUSTER_NAME' created!"
+    if ($LASTEXITCODE -ne 0) { Err "Failed to create compute environment." }
+    Ok "Compute environment ready."
   }
 
   k3d kubeconfig merge $CLUSTER_NAME --kubeconfig-switch-context | Out-Null
-  Ok "kubeconfig updated -- kubectl now points to '$CLUSTER_NAME'."
+  Log "kubeconfig updated -- kubectl now points to '$CLUSTER_NAME'."
 }
 
 # =============================================================================
@@ -637,24 +669,24 @@ function New-K3dCluster {
 function Install-GpuDevicePlugin {
   if ($GPU_VENDOR -ne "nvidia" -or -not $NVIDIA_DRIVER_OK -or $K3D_GPU_FLAG -eq "") { return }
 
-  Step "Deploying NVIDIA k8s Device Plugin"
+  Log "Deploying NVIDIA k8s device plugin"
 
   $dpExists = kubectl get daemonset -n kube-system nvidia-device-plugin-daemonset 2>&1
   if ($LASTEXITCODE -eq 0) {
-    Ok "NVIDIA device plugin already deployed."
+    Ok "GPU acceleration enabled."
   } else {
     $dpUrl = "https://raw.githubusercontent.com/NVIDIA/k8s-device-plugin/v0.14.5/nvidia-device-plugin.yml"
     $dpTmp = [System.IO.Path]::GetTempFileName()
     try {
-      Invoke-WithRetry -Label "NVIDIA device plugin download" -ScriptBlock {
+      Invoke-WithRetry -Label "GPU plugin download" -ScriptBlock {
         Invoke-WebRequest -Uri $dpUrl -OutFile $dpTmp -UseBasicParsing
       }
       if ((Get-Item $dpTmp).Length -gt 0) {
         kubectl apply -f $dpTmp
         kubectl rollout status daemonset/nvidia-device-plugin-daemonset `
           -n kube-system --timeout=120s 2>&1 | Out-Null
-        Ok "NVIDIA device plugin deployed."
-      } else { Err "Downloaded device plugin manifest is empty." }
+        Ok "GPU acceleration enabled."
+      } else { Err "Failed to enable GPU acceleration." }
     } finally {
       Remove-Item $dpTmp -Force -ErrorAction SilentlyContinue
     }
@@ -664,8 +696,7 @@ function Install-GpuDevicePlugin {
 function Confirm-GpuNode {
   if ($GPU_VENDOR -ne "nvidia" -or -not $NVIDIA_DRIVER_OK -or $K3D_GPU_FLAG -eq "") { return }
 
-  Step "Verifying GPU Node Resource"
-  Info "Waiting up to 90s for GPU to appear as allocatable..."
+  Log "Verifying GPU on node..."
 
   $gpuCount = 0
   for ($i = 1; $i -le 18; $i++) {
@@ -674,18 +705,21 @@ function Confirm-GpuNode {
     if ($alloc -match '"nvidia\.com/gpu":"?(\d+)') { $gpuCount = [int]$Matches[1]; break }
   }
 
-  if ($gpuCount -gt 0) { Ok "GPU visible on node -- allocatable count: $gpuCount" }
-  else { Warn "GPU not yet visible. Re-check: kubectl describe node | Select-String 'nvidia'" }
+  if ($gpuCount -gt 0) {
+    Ok "GPU verified and available."
+    Log "Allocatable GPU count: $gpuCount"
+  } else {
+    Warn "GPU may still be initializing. Check back shortly."
+  }
 }
 
 # =============================================================================
-#  STEP 6 -- INSTALL TRACEBLOC CLIENT HELM CHART
+#  INSTALL TRACEBLOC CLIENT
 # =============================================================================
 
 $TRACEBLOC_HELM_REPO_URL = "https://tracebloc.github.io/client"
 $TRACEBLOC_HELM_REPO_NAME = "tracebloc"
 $TRACEBLOC_CHART_NAME = "client"
-
 
 function Get-TraceblocYamlValue {
   param([string]$Path, [string]$Key)
@@ -695,14 +729,10 @@ function Get-TraceblocYamlValue {
   $val = $line -replace "^\s*${Key}\s*:\s*", ""
   $val = $val.Trim()
 
-  # Handle quoted YAML scalars and unescape single-quoted style
   if ($val.StartsWith("'") -and $val.EndsWith("'") -and $val.Length -ge 2) {
-    # Strip surrounding single quotes
     $val = $val.Substring(1, $val.Length - 2)
-    # YAML single-quoted style uses '' to represent a literal '
     $val = $val -replace "''", "'"
   } elseif ($val.StartsWith('"') -and $val.EndsWith('"') -and $val.Length -ge 2) {
-    # Strip surrounding double quotes
     $val = $val.Substring(1, $val.Length - 2)
   }
 
@@ -710,7 +740,8 @@ function Get-TraceblocYamlValue {
 }
 
 function Install-ClientHelm {
-  Step "Step 6/6 -- Installing Tracebloc client Helm chart"
+  # -- Step 3/4: Install tracebloc client --
+  Step 3 4 "Installing tracebloc client"
 
   if (-not (Test-Path $HOST_DATA_DIR)) {
     New-Item -ItemType Directory -Path $HOST_DATA_DIR -Force | Out-Null
@@ -722,9 +753,9 @@ function Install-ClientHelm {
   $defaultClientPassword = ""
 
   if (Test-Path $valuesFile) {
-    Info "Existing values file found: $valuesFile"
+    Hint "Previous configuration found."
     do {
-      $useExisting = Read-Host "Use values from it as defaults? [Y/n]"
+      $useExisting = Read-Host "  Use previous settings as defaults? [Y/n]"
       $useExisting = if ($useExisting) { $useExisting.Trim().ToLowerInvariant() } else { "y" }
       if ($useExisting -eq "y" -or $useExisting -eq "yes" -or $useExisting -eq "n" -or $useExisting -eq "no" -or $useExisting -eq "") { break }
       Warn "Please enter y or n."
@@ -733,31 +764,46 @@ function Install-ClientHelm {
     if ($useExisting -eq "y" -or $useExisting -eq "yes" -or $useExisting -eq "") {
       $defaultClientId = Get-TraceblocYamlValue -Path $valuesFile -Key "clientId"
       $defaultClientPassword = Get-TraceblocYamlValue -Path $valuesFile -Key "clientPassword"
-      if ($defaultClientId) { Info "Using existing clientId as default." }
-      if ($defaultClientPassword) { Info "Using existing clientPassword as default." }
+      if ($defaultClientId) { Log "Using existing clientId as default." }
+      if ($defaultClientPassword) { Log "Using existing clientPassword as default." }
     }
   }
 
-  Info "Enter values for the Tracebloc client installation:"
-  $namespacePrompt = if ($defaultNamespace) { "Namespace [$defaultNamespace]" } else { "Namespace [default]" }
-  $nsInput = Read-Host $namespacePrompt
-  $TB_NAMESPACE = if ($nsInput) { $nsInput } else { $defaultNamespace }
+  # -- Workspace name prompt --
+  PromptHeader "Choose a workspace name"
+  Hint "This identifies your tracebloc client on this machine."
+  Write-Host ""
+  Hint "Examples: myteam, vision-lab, lukas"
+  Write-Host ""
+  $nsInput = Read-Host "  Workspace name [$defaultNamespace]"
+  $rawName = if ($nsInput) { $nsInput } else { $defaultNamespace }
+  $TB_NAMESPACE = ConvertTo-WorkspaceName -Input_ $rawName
 
+  if ($TB_NAMESPACE -ne $rawName) {
+    Info "Using workspace: $TB_NAMESPACE"
+  }
+
+  # -- Step 4/4: Connect to tracebloc network --
+  Step 4 4 "Connect to tracebloc network"
+
+  PromptHeader "To connect this machine, you need a tracebloc client."
+  Hint "A client links your secure environment to the tracebloc"
+  Hint "platform so vendors can submit models for evaluation."
   Write-Host ""
-  Step "Client ID & Password"
-  Write-Host "Need credentials? Create a client at: " -NoNewline; Write-Host "https://ai.tracebloc.io/clients" -ForegroundColor White
-  Write-Host "Setting up a client is free." -ForegroundColor Yellow
+  Hint "Create one here (free):"
+  Write-Host "    " -NoNewline; Write-Host "https://ai.tracebloc.io/clients" -ForegroundColor White
   Write-Host ""
+
   if ($defaultClientId) {
-    $idInput = Read-Host "Client ID [$defaultClientId]"
+    $idInput = Read-Host "  Client ID [$defaultClientId]"
     $TB_CLIENT_ID = if ($idInput) { $idInput } else { $defaultClientId }
   } else {
-    $TB_CLIENT_ID = Read-Host "Client ID"
+    $TB_CLIENT_ID = Read-Host "  Client ID"
   }
   if (-not $TB_CLIENT_ID) { Err "Client ID cannot be empty." }
 
   if ($defaultClientPassword) {
-    $pwInput = Read-Host "Client password [press Enter to keep existing]" -AsSecureString
+    $pwInput = Read-Host "  Client password [press Enter to keep existing]" -AsSecureString
     if ($pwInput -and $pwInput.Length -gt 0) {
       $BSTR = [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($pwInput)
       try { $TB_CLIENT_PASSWORD = [System.Runtime.InteropServices.Marshal]::PtrToStringAuto($BSTR) } finally { [System.Runtime.InteropServices.Marshal]::ZeroFreeBSTR($BSTR) }
@@ -765,7 +811,7 @@ function Install-ClientHelm {
       $TB_CLIENT_PASSWORD = $defaultClientPassword
     }
   } else {
-    $pwInput = Read-Host "Client password" -AsSecureString
+    $pwInput = Read-Host "  Client password" -AsSecureString
     $BSTR = [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($pwInput)
     try { $TB_CLIENT_PASSWORD = [System.Runtime.InteropServices.Marshal]::PtrToStringAuto($BSTR) } finally { [System.Runtime.InteropServices.Marshal]::ZeroFreeBSTR($BSTR) }
   }
@@ -776,12 +822,12 @@ function Install-ClientHelm {
   $gpuVal = ""
   if ($GPU_VENDOR -eq "nvidia" -and $NVIDIA_DRIVER_OK) {
     $gpuVal = "nvidia.com/gpu=1"
-    Info "NVIDIA GPU detected -- setting GPU_LIMITS and GPU_REQUESTS to nvidia.com/gpu=1"
+    Log "NVIDIA GPU -- setting GPU_LIMITS and GPU_REQUESTS to nvidia.com/gpu=1"
   } else {
-    Info "No NVIDIA GPU -- GPU_LIMITS and GPU_REQUESTS left empty"
+    Log "No NVIDIA GPU -- GPU_LIMITS and GPU_REQUESTS left empty"
   }
 
-  Info "Writing values to $valuesFile"
+  Log "Writing values to $valuesFile"
   $envBlock = "env:`n"
   if ($CLIENT_ENV) {
     $envBlock += "  CLIENT_ENV: $CLIENT_ENV`n"
@@ -818,33 +864,33 @@ clientPassword: '$passwordEscaped'
 "@
   $valuesContent = @"
 # ============================================================
-# Generated by install-k8s.ps1 -- Tracebloc client Helm values
+# Generated by tracebloc installer -- client configuration
 # ============================================================
 
 $envBlock
 "@
   Set-Content -Path $valuesFile -Value $valuesContent -Encoding UTF8
-  Ok "Values file written to $valuesFile"
+  Log "Values file written to $valuesFile"
 
   $repoList = helm repo list 2>&1 | Out-String
   if ($repoList -notmatch [regex]::Escape($TRACEBLOC_HELM_REPO_NAME)) {
-    Info "Adding Helm repo: $TRACEBLOC_HELM_REPO_URL"
-    helm repo add $TRACEBLOC_HELM_REPO_NAME $TRACEBLOC_HELM_REPO_URL
-    if ($LASTEXITCODE -ne 0) { Err "Failed to add Helm repo." }
+    Log "Adding Helm repo: $TRACEBLOC_HELM_REPO_URL"
+    helm repo add $TRACEBLOC_HELM_REPO_NAME $TRACEBLOC_HELM_REPO_URL 2>&1 | Out-Null
+    if ($LASTEXITCODE -ne 0) { Err "Failed to connect to tracebloc." }
   }
-  Info "Updating Helm repos..."
-  helm repo update
-  if ($LASTEXITCODE -ne 0) { Warn "helm repo update had issues -- continuing." }
+  Log "Updating Helm repos..."
+  helm repo update 2>&1 | Out-Null
 
-  Info "Installing $TB_NAMESPACE from $TRACEBLOC_HELM_REPO_NAME/$TRACEBLOC_CHART_NAME in namespace '$TB_NAMESPACE'..."
+  Write-Host ""
+  Log "Installing $TB_NAMESPACE from $TRACEBLOC_HELM_REPO_NAME/$TRACEBLOC_CHART_NAME in namespace '$TB_NAMESPACE'..."
   helm upgrade --install $TB_NAMESPACE "$TRACEBLOC_HELM_REPO_NAME/$TRACEBLOC_CHART_NAME" `
     --namespace $TB_NAMESPACE `
     --create-namespace `
-    --values $valuesFile
-  if ($LASTEXITCODE -ne 0) { Err "Helm install failed -- see output above." }
+    --values $valuesFile 2>&1 | Out-Null
+  if ($LASTEXITCODE -ne 0) { Err "Client installation failed. Check the log for details: $LOG_FILE" }
 
-  Ok "Tracebloc client Helm chart installed in namespace '$TB_NAMESPACE'."
-  Info "Values file: $valuesFile"
+  Ok "Connected to tracebloc"
+  Log "Values file: $valuesFile"
 }
 
 # =============================================================================
@@ -852,10 +898,12 @@ $envBlock
 # =============================================================================
 
 function Confirm-Cluster {
-  Step "Cluster Status"
-  kubectl cluster-info
-  Write-Host ""
-  kubectl get nodes -o wide
+  Log "--- Cluster Status ---"
+  $clusterInfo = kubectl cluster-info 2>&1 | Out-String
+  Log $clusterInfo
+  $nodes = kubectl get nodes -o wide 2>&1 | Out-String
+  Log $nodes
+  Log "--- End Cluster Status ---"
 }
 
 # =============================================================================
@@ -863,47 +911,57 @@ function Confirm-Cluster {
 # =============================================================================
 
 function Print-Summary {
+  $mode = "CPU"
+  if ($GPU_VENDOR -eq "nvidia" -and $NVIDIA_DRIVER_OK) { $mode = "NVIDIA GPU" }
+  elseif ($GPU_VENDOR -eq "nvidia" -and -not $NVIDIA_DRIVER_OK) { $mode = "CPU (NVIDIA driver update needed)" }
+
   Write-Host ""
-  Write-Host "+===============================================================+" -ForegroundColor Green
-  Write-Host "|  Kubernetes cluster '$CLUSTER_NAME' is ready!                  " -ForegroundColor Green -NoNewline
-  Write-Host "|" -ForegroundColor Green
+  Write-Host "  " -NoNewline; Write-Host ([string]([char]0x2501) * 46) -ForegroundColor Green
+  Write-Host ""
+  Write-Host "  " -NoNewline; Write-Host "tracebloc client installed successfully" -ForegroundColor Green
+  Write-Host ""
+  Write-Host "  " -NoNewline; Write-Host "Workspace" -ForegroundColor White -NoNewline; Write-Host " : " -NoNewline; Write-Host $TB_NAMESPACE -ForegroundColor Cyan
+  Write-Host "  " -NoNewline; Write-Host "Mode     " -ForegroundColor White -NoNewline; Write-Host " : " -NoNewline; Write-Host $mode -ForegroundColor Cyan
+  Write-Host ""
+  Hint "This machine is now a secure compute environment"
+  Hint "on the tracebloc network. External AI vendors can"
+  Hint "submit models to be trained and evaluated here --"
+  Hint "your data never leaves your infrastructure."
+  Write-Host ""
+  Write-Host "  What to do next" -ForegroundColor White
+  Write-Host ""
+  Write-Host "  1. " -NoNewline; Write-Host "Open the tracebloc dashboard"
+  Write-Host "     " -NoNewline; Write-Host "https://ai.tracebloc.io" -ForegroundColor Cyan
+  Write-Host ""
+  Write-Host "  2. " -NoNewline; Write-Host "Ingest your training and test data"
+  Write-Host ""
+  Write-Host "  3. " -NoNewline; Write-Host "Define your first AI use case and"
+  Write-Host "     invite vendors to submit models"
+  Write-Host ""
+  Hint "Need help?  https://docs.tracebloc.io"
+  Hint "Logs:       ~\.tracebloc\"
+  Write-Host ""
+  Write-Host "  " -NoNewline; Write-Host ([string]([char]0x2501) * 46) -ForegroundColor Green
+  Write-Host ""
+
+  # Advanced info for log only
+  Log ""
+  Log "=== Advanced Info (for debugging) ==="
+  Log "Cluster topology: Servers=$SERVERS  Agents=$AGENTS"
+  Log "Ingress: localhost:$HTTP_PORT / localhost:$HTTPS_PORT"
+  Log "Volume mount: $HOST_DATA_DIR -> /tracebloc"
+  Log ""
+  Log "Useful commands:"
+  Log "  kubectl get nodes -o wide"
+  Log "  kubectl get pods -A"
+  Log "  kubectl get pods -n $TB_NAMESPACE"
+  Log "  k3d cluster stop $CLUSTER_NAME"
+  Log "  k3d cluster start $CLUSTER_NAME"
+  Log "  k3d cluster delete $CLUSTER_NAME"
   if ($GPU_VENDOR -eq "nvidia" -and $NVIDIA_DRIVER_OK) {
-    Write-Host "|  NVIDIA GPU support enabled                                  |" -ForegroundColor Green
-  } elseif ($GPU_VENDOR -eq "nvidia" -and -not $NVIDIA_DRIVER_OK) {
-    Write-Host "|  NVIDIA GPU found -- update driver to 460+ for GPU support   |" -ForegroundColor Yellow
-  } elseif ($GPU_VENDOR -eq "amd_unsupported") {
-    Write-Host "|  AMD GPU -- use Linux host for AMD GPU in Kubernetes         |" -ForegroundColor Yellow
+    Log '  GPU test: kubectl run gpu-test --rm -it --image=nvidia/cuda:12.3.1-base-ubuntu22.04 --limits="nvidia.com/gpu=1" -- nvidia-smi'
   }
-  Write-Host "+===============================================================+" -ForegroundColor Green
-
-  Write-Host ""
-  Write-Host "  Cluster topology:" -ForegroundColor White
-  Write-Host "  Servers (control-plane) : $SERVERS" -ForegroundColor Cyan
-  Write-Host "  Agents  (workers)       : $AGENTS" -ForegroundColor Cyan
-  Write-Host "  Ingress                 : localhost:$HTTP_PORT  /  localhost:$HTTPS_PORT" -ForegroundColor Cyan
-  Write-Host "  Data dir                : $HOST_DATA_DIR -> /tracebloc (inside k3s nodes)" -ForegroundColor Cyan
-
-  Write-Host ""
-  Write-Host "  Common commands:" -ForegroundColor White
-  Write-Host "  kubectl get nodes -o wide           " -NoNewline -ForegroundColor Cyan; Write-Host "-- all cluster nodes"
-  Write-Host "  kubectl get pods -A                 " -NoNewline -ForegroundColor Cyan; Write-Host "-- all pods"
-  Write-Host "  kubectl apply -f <manifest.yaml>    " -NoNewline -ForegroundColor Cyan; Write-Host "-- deploy your app"
-  Write-Host "  helm install <name> <chart>         " -NoNewline -ForegroundColor Cyan; Write-Host "-- deploy via Helm"
-
-  Write-Host ""
-  Write-Host "  Cluster lifecycle:" -ForegroundColor White
-  Write-Host "  k3d cluster stop   $CLUSTER_NAME   " -NoNewline -ForegroundColor Cyan; Write-Host "-- pause"
-  Write-Host "  k3d cluster start  $CLUSTER_NAME   " -NoNewline -ForegroundColor Cyan; Write-Host "-- resume"
-  Write-Host "  k3d cluster delete $CLUSTER_NAME   " -NoNewline -ForegroundColor Cyan; Write-Host "-- destroy"
-  Write-Host "  k3d cluster list                    " -NoNewline -ForegroundColor Cyan; Write-Host "-- all clusters"
-
-  if ($GPU_VENDOR -eq "nvidia" -and $NVIDIA_DRIVER_OK) {
-    Write-Host ""
-    Write-Host "  GPU quick-test:" -ForegroundColor White
-    Write-Host '  kubectl run gpu-test --rm -it --image=nvidia/cuda:12.3.1-base-ubuntu22.04 --limits="nvidia.com/gpu=1" -- nvidia-smi' -ForegroundColor Cyan
-  }
-
-  Write-Host ""
+  Log "=== End Advanced Info ==="
 }
 
 # =============================================================================
@@ -916,6 +974,10 @@ Confirm-Config
 Initialize-ToolDir
 Start-InstallLog
 Print-Banner
+Print-Roadmap
+
+# -- Step 1/4: Check system requirements --
+Step 1 4 "Checking system requirements"
 Find-Gpu
 Enable-VirtualisationFeatures
 Install-Winget
@@ -923,10 +985,16 @@ Install-DockerDesktop
 Install-NvidiaContainerToolkit
 Install-Kubectl
 Install-K3dAndHelm
+
+# -- Step 2/4: Set up secure compute environment --
+Step 2 4 "Setting up secure compute environment"
 New-K3dCluster
 Install-GpuDevicePlugin
 Confirm-GpuNode
+
+# -- Steps 3/4 + 4/4 handled inside Install-ClientHelm --
 Install-ClientHelm
+
 Confirm-Cluster
 Print-Summary
 
