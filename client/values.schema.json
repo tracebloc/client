@@ -156,8 +156,8 @@
       "description": "Client authentication password"
     },
     "dockerRegistry": {
-      "type": "object",
-      "description": "Optional. Omit entirely for public images (no secret or imagePullSecrets). Only create when set and create is true.",
+      "type": ["object", "null"],
+      "description": "Optional. Omit entirely or set null for public images (no secret or imagePullSecrets). Only create when set and create is true.",
       "properties": {
         "create": {
           "type": "boolean",
