@@ -17,14 +17,14 @@ Tracebloc Client is a Kubernetes-based application that runs experiments and com
 Set up a local Kubernetes cluster with GPU support in one command:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/tracebloc/client/main/scripts/install.sh | bash
+bash <(curl -fsSL https://raw.githubusercontent.com/tracebloc/client/main/scripts/install.sh)
 ```
 
-With custom configuration:
+With custom configuration (environment variables are optional and can be combined as needed):
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/tracebloc/client/main/scripts/install.sh | \
-  CLUSTER_NAME=myapp AGENTS=3 bash
+CLUSTER_NAME=myapp AGENTS=3 \
+  bash <(curl -fsSL https://raw.githubusercontent.com/tracebloc/client/main/scripts/install.sh)
 ```
 
 | Variable | Default | Description |
