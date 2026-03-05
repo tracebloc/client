@@ -76,8 +76,10 @@ spec:
               cpu: 200m
               memory: 256Mi
       terminationGracePeriodSeconds: 15
+      {{- if include "tracebloc.useImagePullSecrets" . }}
       imagePullSecrets:
       - name: {{ include "tracebloc.registrySecretName" . }}
+      {{- end }}
       volumes:
         - name: host-proc
           hostPath:

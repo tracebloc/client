@@ -1,0 +1,3 @@
+# Use this values file to test public images (no registry secret).
+# When dockerRegistry is null, no registry secret is created and no imagePullSecrets are added.
+dockerRegistry: null

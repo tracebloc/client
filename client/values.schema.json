@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft-07/schema#",
   "title": "Tracebloc Helm Chart Values",
   "type": "object",
-  "required": ["clientId", "clientPassword", "dockerRegistry"],
+  "required": ["clientId", "clientPassword"],
   "properties": {
     "env": {
       "type": "object",
@@ -156,9 +156,14 @@
       "description": "Client authentication password"
     },
     "dockerRegistry": {
-      "type": "object",
-      "required": ["server", "username", "password", "email"],
+      "type": ["object", "null"],
+      "description": "Optional. Omit entirely or set null for public images (no secret or imagePullSecrets). Only create when set and create is true.",
       "properties": {
+        "create": {
+          "type": "boolean",
+          "default": false,
+          "description": "When true, create registry secret and add imagePullSecrets to workloads. Omit dockerRegistry or set false for public images."
+        },
         "server": {
           "type": "string",
           "format": "uri"

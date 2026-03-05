@@ -8,7 +8,7 @@ metadata:
   labels:
     {{- include "tracebloc.labels" . | nindent 4 }}
 spec:
-  storageClassName: {{ .Values.storageClass.name }}
+  storageClassName: {{ include "tracebloc.storageClassName" . }}
   capacity:
     storage: {{ $storage }}
   accessModes:
@@ -31,7 +31,7 @@ metadata:
   labels:
     {{- include "tracebloc.labels" . | nindent 4 }}
 spec:
-  storageClassName: {{ .Values.storageClass.name }}
+  storageClassName: {{ include "tracebloc.storageClassName" . }}
   accessModes:
     - {{ .Values.pvcAccessMode | default "ReadWriteMany" }}
   resources:

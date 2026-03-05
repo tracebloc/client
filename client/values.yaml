@@ -25,10 +25,12 @@ env: {
   # RUNTIME_CLASS_NAME: ""
 }
 # -- StorageClass configuration
-# Set create: false to use an existing storage class
+# When create: true, the StorageClass name is release-unique (e.g. "<release-name>-storage-class")
+# so each release gets its own class and Helm ownership conflicts are avoided.
+# Set create: false to use an existing storage class; then name must match that class.
 storageClass:
   create: true
-  name: client-storage-class
+  name: client-storage-class  # only used when create: false
   provisioner: ""
   allowVolumeExpansion: true
   # Optional fields — omitted from rendered YAML when empty
@@ -71,10 +73,12 @@ openshift:
 clientId: "<CLIENT_ID>"
 clientPassword: "<CLIENT_PASSWORD>"
 
-# -- Docker registry credentials
-# Secret name is auto-generated as {{ .Release.Name }}-regcred
-dockerRegistry:
-  server: https://index.docker.io/v1/
-  username: "<DOCKER_USERNAME>"
-  password: "<DOCKER_REGISTRY_TOKEN>"
-  email: "<DOCKER_EMAIL>"
+# -- Docker registry credentials (optional; only used when dockerRegistry is set and create is true)
+# Omit dockerRegistry entirely, or set create: false, for public images (no imagePullSecrets).
+# When create is true, secret name is {{ .Release.Name }}-regcred.
+# dockerRegistry:
+#   create: true
+#   server: https://index.docker.io/v1/
+#   username: "<DOCKER_USERNAME>"
+#   password: "<DOCKER_REGISTRY_TOKEN>"
+#   email: "<DOCKER_EMAIL>"
