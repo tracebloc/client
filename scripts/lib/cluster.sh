@@ -12,8 +12,16 @@ _cluster_exists() {
   fi
 }
 
+# Ensure host dirs exist so /tracebloc/data, /tracebloc/logs, /tracebloc/mysql exist inside nodes (HOST_DATA_DIR is mounted as /tracebloc)
+_ensure_tracebloc_dirs() {
+  mkdir -p "$HOST_DATA_DIR" "$HOST_DATA_DIR/data" "$HOST_DATA_DIR/logs" "$HOST_DATA_DIR/mysql"
+  chmod -R 777 "$HOST_DATA_DIR" 2>/dev/null || true
+}
+
 create_cluster() {
   step "Creating k3d Cluster: '$CLUSTER_NAME'"
+
+  _ensure_tracebloc_dirs
 
   if _cluster_exists; then
     _handle_existing_cluster
@@ -49,11 +57,7 @@ _handle_existing_cluster() {
 }
 
 _create_new_cluster() {
-  if [[ ! -d "$HOST_DATA_DIR" ]]; then
-    info "Creating host data directory: $HOST_DATA_DIR"
-    mkdir -p "$HOST_DATA_DIR"
-  fi
-
+  # HOST_DATA_DIR and data/logs/mysql subdirs already created by _ensure_tracebloc_dirs
   K3D_ARGS=(
     cluster create "$CLUSTER_NAME"
     --servers "$SERVERS"

@@ -18,7 +18,7 @@
   {{ "\033[1;34m" }}Storage:{{ "\033[0m" }}          {{ "\033[0;33m" }}hostPath (bare-metal){{ "\033[0m" }}
   {{ "\033[1;34m" }}Host dirs:{{ "\033[0m" }}        {{ "\033[0;33m" }}/tracebloc/data, /tracebloc/logs, /tracebloc/mysql (on the node){{ "\033[0m" }}
 {{- else }}
-  {{ "\033[1;34m" }}Storage:{{ "\033[0m" }}          {{ "\033[0;33m" }}dynamic PVC ({{ .Values.storageClass.name }}){{ "\033[0m" }}
+  {{ "\033[1;34m" }}Storage:{{ "\033[0m" }}          {{ "\033[0;33m" }}dynamic PVC ({{ include "tracebloc.storageClassName" . }}){{ "\033[0m" }}
 {{- end }}
 {{- if .Values.openshift.scc.enabled }}
   {{ "\033[1;34m" }}OpenShift SCC:{{ "\033[0m" }}    {{ "\033[0;33m" }}tracebloc-resource-monitor-{{ .Release.Name }}{{ "\033[0m" }}

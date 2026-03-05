@@ -75,8 +75,10 @@ spec:
           mountPath: /etc/mysql/conf.d/
         - name: mysql-logs
           mountPath: /var/log/mysql/
+      {{- if include "tracebloc.useImagePullSecrets" . }}
       imagePullSecrets:
       - name: {{ include "tracebloc.registrySecretName" . }}
+      {{- end }}
       volumes:
       - name: mysql-persistent-storage
         persistentVolumeClaim:

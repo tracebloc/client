@@ -70,6 +70,26 @@ mysql-pvc
 {{- end }}
 
 {{/*
+  StorageClass name: when storageClass.create is true, use a release-unique name
+  so each release gets its own StorageClass (avoids Helm ownership conflicts).
+  When create is false, use the user-provided storageClass.name for an existing class.
+*/}}
+{{- define "tracebloc.storageClassName" -}}
+{{- if .Values.storageClass.create -}}
+{{ .Release.Name }}-storage-class
+{{- else -}}
+{{ .Values.storageClass.name }}
+{{- end -}}
+{{- end -}}
+
+{{/* Whether to create registry secret and add imagePullSecrets. Only when dockerRegistry is present and create is true; omit dockerRegistry or set create: false for public images. */}}
+{{- define "tracebloc.useImagePullSecrets" -}}
+{{- if and .Values.dockerRegistry (default false .Values.dockerRegistry.create) -}}
+true
+{{- end -}}
+{{- end }}
+
+{{/*
 Image reference — defaults to docker.io when no registry is provided.
 Tag defaults to "prod" when CLIENT_ENV is omitted or empty.
 Usage: {{ include "tracebloc.image" (dict "repository" "tracebloc/jobs-manager" "tag" .Values.env.CLIENT_ENV "registry" "docker.io") }}
