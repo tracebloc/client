@@ -221,6 +221,12 @@ helm template eks eks/ --namespace test-namespace | \
 
 ## Troubleshooting
 
+### Docker / k3d "permission denied" (Linux)
+If `k3d cluster list` or `docker` fails with `permission denied` on the Docker socket:
+- Your user must be in the `docker` group. The installer adds you; if you run commands in a terminal opened before that, the group is not active yet.
+- **Quick fix:** run `newgrp docker` in that terminal (or open a new terminal), then run `k3d cluster list` or re-run the installer.
+- Or log out and log back in so the `docker` group is applied to your session.
+
 ### Template rendering errors:
 - Check for unclosed `{{ }}` blocks
 - Verify all referenced values exist in values.yaml
