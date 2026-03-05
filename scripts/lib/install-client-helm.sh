@@ -26,7 +26,7 @@ install_client_helm() {
   step "Installing Tracebloc client Helm chart"
 
   mkdir -p "$HOST_DATA_DIR" "$HOST_DATA_DIR/data" "$HOST_DATA_DIR/logs" "$HOST_DATA_DIR/mysql"
-  chmod -R 777 "$HOST_DATA_DIR" 2>/dev/null || true
+  chmod -R 777 "$HOST_DATA_DIR/data" "$HOST_DATA_DIR/logs" "$HOST_DATA_DIR/mysql" 2>/dev/null || true
   local values_file="${HOST_DATA_DIR}/values.yaml"
 
   local use_existing=""
@@ -57,7 +57,7 @@ install_client_helm() {
 
   echo ""
   step "Client ID & Password"
-  echo -e "${BOLD}${YELLOW}Need credentials? Create a client at: https://ai.tracebloc.io/clients${RESET}"
+  echo -e "${BOLD}${YELLOW}Need credentials? Create a client at: ${RESET}${BOLD}\033[1;37mhttps://ai.tracebloc.io/clients${RESET}"
   echo -e "${BOLD}${YELLOW}Setting up a client is free.${RESET}"
   echo ""
   if [[ -n "$default_client_id" ]]; then
@@ -130,6 +130,7 @@ clientPassword: '$TB_CLIENT_PASSWORD_ESCAPED'
 
 EOF
 
+  chmod 600 "$values_file" 2>/dev/null || true
   success "Values file written to $values_file"
 
   # ── Add repo and install ───────────────────────────────────────────────────

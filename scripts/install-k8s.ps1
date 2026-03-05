@@ -733,7 +733,7 @@ function Install-ClientHelm {
 
   Write-Host ""
   Step "Client ID & Password"
-  Write-Host "Need credentials? Create a client at: " -NoNewline; Write-Host "https://ai.tracebloc.io/clients" -ForegroundColor Yellow
+  Write-Host "Need credentials? Create a client at: " -NoNewline; Write-Host "https://ai.tracebloc.io/clients" -ForegroundColor White
   Write-Host "Setting up a client is free." -ForegroundColor Yellow
   Write-Host ""
   if ($defaultClientId) {

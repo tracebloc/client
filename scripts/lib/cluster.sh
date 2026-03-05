@@ -12,10 +12,11 @@ _cluster_exists() {
   fi
 }
 
-# Ensure host dirs exist so /tracebloc/data, /tracebloc/logs, /tracebloc/mysql exist inside nodes (HOST_DATA_DIR is mounted as /tracebloc)
+# Ensure host dirs exist so /tracebloc/data, /tracebloc/logs, /tracebloc/mysql exist inside nodes (HOST_DATA_DIR is mounted as /tracebloc).
+# Only chmod the container data subdirs; do not make HOST_DATA_DIR or files like values.yaml world-readable.
 _ensure_tracebloc_dirs() {
   mkdir -p "$HOST_DATA_DIR" "$HOST_DATA_DIR/data" "$HOST_DATA_DIR/logs" "$HOST_DATA_DIR/mysql"
-  chmod -R 777 "$HOST_DATA_DIR" 2>/dev/null || true
+  chmod -R 777 "$HOST_DATA_DIR/data" "$HOST_DATA_DIR/logs" "$HOST_DATA_DIR/mysql" 2>/dev/null || true
 }
 
 create_cluster() {
