@@ -30,7 +30,6 @@ echo "Downloading Tracebloc client installer (branch: $BRANCH)..."
 
 mkdir -p "$TMPDIR/lib"
 
-echo $TMPDIR
 FILES=(
   "scripts/install-k8s.sh"
   "scripts/lib/common.sh"
