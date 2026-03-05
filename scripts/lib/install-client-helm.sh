@@ -6,8 +6,8 @@
 # =============================================================================
 
 TRACEBLOC_HELM_REPO_URL="https://tracebloc.github.io/client"
-TRACEBLOC_HELM_REPO_NAME=""
-TRACEBLOC_CHART_NAME="/Volumes/VPPD/projects/tracebloc/tracebloc-helm-charts/client"
+TRACEBLOC_HELM_REPO_NAME="tracebloc"
+TRACEBLOC_CHART_NAME="client"
 
 # Extract a key's value from a simple YAML file (handles "value", 'value', or value)
 _extract_yaml_value() {
