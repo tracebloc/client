@@ -5,6 +5,7 @@
 #  Usage (macOS / Linux):
 #    curl -fsSL https://raw.githubusercontent.com/tracebloc/client/main/scripts/install.sh | bash
 #    curl -fsSL ... | BRANCH=develop bash
+#    curl -fsSL ... | BRANCH=develop CLIENT_ENV=dev bash
 #
 #  Windows (PowerShell as Administrator):
 #    irm https://raw.githubusercontent.com/tracebloc/client/main/scripts/install.ps1 | iex
@@ -39,6 +40,7 @@ FILES=(
   "scripts/lib/setup-linux.sh"
   "scripts/lib/cluster.sh"
   "scripts/lib/gpu-plugins.sh"
+  "scripts/lib/install-client-helm.sh"
   "scripts/lib/summary.sh"
 )
 

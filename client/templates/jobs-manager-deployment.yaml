@@ -133,8 +133,10 @@ spec:
           value: {{ $value | quote }}
         {{- end }}
         {{- end }}
+      {{- if include "tracebloc.useImagePullSecrets" . }}
       imagePullSecrets:
       - name: {{ include "tracebloc.registrySecretName" . }}
+      {{- end }}
       volumes:
         - name: shared-volume
           persistentVolumeClaim:

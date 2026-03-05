@@ -21,6 +21,7 @@
 #    HTTP_PORT=80                default: 80   (host → cluster ingress)
 #    HTTPS_PORT=443              default: 443
 #    HOST_DATA_DIR=~/.tracebloc  default: ~/.tracebloc
+#    CLIENT_ENV=dev              optional; if not set, CLIENT_ENV is not added to env in values
 #    TRACEBLOC_SKIP_REBOOT_PROMPT=1 (Linux) skip "Reboot now?" after NVIDIA driver install
 # =============================================================================
 
@@ -48,6 +49,7 @@ source "${LIB_DIR}/setup-macos.sh"
 source "${LIB_DIR}/setup-linux.sh"
 source "${LIB_DIR}/cluster.sh"
 source "${LIB_DIR}/gpu-plugins.sh"
+source "${LIB_DIR}/install-client-helm.sh"
 source "${LIB_DIR}/summary.sh"
 
 trap install_cleanup EXIT
@@ -73,6 +75,7 @@ main() {
   create_cluster
   deploy_gpu_device_plugin
   verify_gpu
+  install_client_helm
   verify_cluster
   print_summary
 }

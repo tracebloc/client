@@ -20,6 +20,7 @@
 #    $env:HTTP_PORT     = "80"             default: 80
 #    $env:HTTPS_PORT    = "443"            default: 443
 #    $env:HOST_DATA_DIR = "C:\data"        default: $env:USERPROFILE\.tracebloc
+#    $env:CLIENT_ENV    = "dev"            optional; if not set, CLIENT_ENV is not added to env in values
 # =============================================================================
 
 #Requires -Version 5.1
@@ -103,6 +104,7 @@ $K8S_VERSION   = if ($env:K8S_VERSION)   { $env:K8S_VERSION }   else { "v1.29.4-
 $HTTP_PORT     = if ($env:HTTP_PORT)     { $env:HTTP_PORT }     else { "80" }
 $HTTPS_PORT    = if ($env:HTTPS_PORT)    { $env:HTTPS_PORT }    else { "443" }
 $HOST_DATA_DIR = if ($env:HOST_DATA_DIR) { $env:HOST_DATA_DIR } else { "$env:USERPROFILE\.tracebloc" }
+$CLIENT_ENV    = $env:CLIENT_ENV   # if not set, do not add CLIENT_ENV to env in values
 
 $GPU_VENDOR       = "none"    # nvidia | amd | amd_unsupported | none
 $NVIDIA_DRIVER_OK = $false
@@ -128,6 +130,7 @@ Environment variable overrides:
   HTTP_PORT      Host HTTP  ingress port         (default: 80)
   HTTPS_PORT     Host HTTPS ingress port         (default: 443)
   HOST_DATA_DIR  Persistent data directory       (default: ~\.tracebloc)
+  CLIENT_ENV     Client env (e.g. prod, dev); if not set, not added to values
 
 macOS / Linux:
   curl -fsSL https://raw.githubusercontent.com/tracebloc/client/main/scripts/install.sh | bash
@@ -503,7 +506,7 @@ function Install-Kubectl {
 # =============================================================================
 
 function Install-K3dAndHelm {
-  Step "Step 5/5 -- k3d and Helm"
+  Step "Step 5/6 -- k3d and Helm"
 
   # -- k3d --
   if (-not (Has "k3d")) {
@@ -676,6 +679,175 @@ function Confirm-GpuNode {
 }
 
 # =============================================================================
+#  STEP 6 -- INSTALL TRACEBLOC CLIENT HELM CHART
+# =============================================================================
+
+$TRACEBLOC_HELM_REPO_URL = "https://tracebloc.github.io/client"
+$TRACEBLOC_HELM_REPO_NAME = "tracebloc"
+$TRACEBLOC_CHART_NAME = "client"
+
+
+function Get-TraceblocYamlValue {
+  param([string]$Path, [string]$Key)
+  if (-not (Test-Path $Path)) { return "" }
+  $line = Get-Content $Path -ErrorAction SilentlyContinue | Where-Object { $_ -match "^\s*${Key}\s*:" } | Select-Object -First 1
+  if (-not $line) { return "" }
+  $val = $line -replace "^\s*${Key}\s*:\s*", ""
+  $val = $val.Trim()
+
+  # Handle quoted YAML scalars and unescape single-quoted style
+  if ($val.StartsWith("'") -and $val.EndsWith("'") -and $val.Length -ge 2) {
+    # Strip surrounding single quotes
+    $val = $val.Substring(1, $val.Length - 2)
+    # YAML single-quoted style uses '' to represent a literal '
+    $val = $val -replace "''", "'"
+  } elseif ($val.StartsWith('"') -and $val.EndsWith('"') -and $val.Length -ge 2) {
+    # Strip surrounding double quotes
+    $val = $val.Substring(1, $val.Length - 2)
+  }
+
+  return $val
+}
+
+function Install-ClientHelm {
+  Step "Step 6/6 -- Installing Tracebloc client Helm chart"
+
+  if (-not (Test-Path $HOST_DATA_DIR)) {
+    New-Item -ItemType Directory -Path $HOST_DATA_DIR -Force | Out-Null
+  }
+  $valuesFile = Join-Path $HOST_DATA_DIR "values.yaml"
+
+  $defaultNamespace = "default"
+  $defaultClientId = ""
+  $defaultClientPassword = ""
+
+  if (Test-Path $valuesFile) {
+    Info "Existing values file found: $valuesFile"
+    do {
+      $useExisting = Read-Host "Use values from it as defaults? [Y/n]"
+      $useExisting = if ($useExisting) { $useExisting.Trim().ToLowerInvariant() } else { "y" }
+      if ($useExisting -eq "y" -or $useExisting -eq "yes" -or $useExisting -eq "n" -or $useExisting -eq "no" -or $useExisting -eq "") { break }
+      Warn "Please enter y or n."
+    } while ($true)
+
+    if ($useExisting -eq "y" -or $useExisting -eq "yes" -or $useExisting -eq "") {
+      $defaultClientId = Get-TraceblocYamlValue -Path $valuesFile -Key "clientId"
+      $defaultClientPassword = Get-TraceblocYamlValue -Path $valuesFile -Key "clientPassword"
+      if ($defaultClientId) { Info "Using existing clientId as default." }
+      if ($defaultClientPassword) { Info "Using existing clientPassword as default." }
+    }
+  }
+
+  Info "Enter values for the Tracebloc client installation:"
+  $namespacePrompt = if ($defaultNamespace) { "Namespace [$defaultNamespace]" } else { "Namespace [default]" }
+  $nsInput = Read-Host $namespacePrompt
+  $TB_NAMESPACE = if ($nsInput) { $nsInput } else { $defaultNamespace }
+
+  Write-Host ""
+  Step "Client ID & Password"
+  Write-Host "Need credentials? Create a client at: " -NoNewline; Write-Host "https://ai.tracebloc.io/clients" -ForegroundColor White
+  Write-Host "Setting up a client is free." -ForegroundColor Yellow
+  Write-Host ""
+  if ($defaultClientId) {
+    $idInput = Read-Host "Client ID [$defaultClientId]"
+    $TB_CLIENT_ID = if ($idInput) { $idInput } else { $defaultClientId }
+  } else {
+    $TB_CLIENT_ID = Read-Host "Client ID"
+  }
+  if (-not $TB_CLIENT_ID) { Err "Client ID cannot be empty." }
+
+  if ($defaultClientPassword) {
+    $pwInput = Read-Host "Client password [press Enter to keep existing]" -AsSecureString
+    if ($pwInput -and $pwInput.Length -gt 0) {
+      $BSTR = [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($pwInput)
+      try { $TB_CLIENT_PASSWORD = [System.Runtime.InteropServices.Marshal]::PtrToStringAuto($BSTR) } finally { [System.Runtime.InteropServices.Marshal]::ZeroFreeBSTR($BSTR) }
+    } else {
+      $TB_CLIENT_PASSWORD = $defaultClientPassword
+    }
+  } else {
+    $pwInput = Read-Host "Client password" -AsSecureString
+    $BSTR = [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($pwInput)
+    try { $TB_CLIENT_PASSWORD = [System.Runtime.InteropServices.Marshal]::PtrToStringAuto($BSTR) } finally { [System.Runtime.InteropServices.Marshal]::ZeroFreeBSTR($BSTR) }
+  }
+  if (-not $TB_CLIENT_PASSWORD) { Err "Client password cannot be empty." }
+
+  $passwordEscaped = $TB_CLIENT_PASSWORD -replace "'", "''"
+
+  $gpuVal = ""
+  if ($GPU_VENDOR -eq "nvidia" -and $NVIDIA_DRIVER_OK) {
+    $gpuVal = "nvidia.com/gpu=1"
+    Info "NVIDIA GPU detected -- setting GPU_LIMITS and GPU_REQUESTS to nvidia.com/gpu=1"
+  } else {
+    Info "No NVIDIA GPU -- GPU_LIMITS and GPU_REQUESTS left empty"
+  }
+
+  Info "Writing values to $valuesFile"
+  $envBlock = "env:`n"
+  if ($CLIENT_ENV) {
+    $envBlock += "  CLIENT_ENV: $CLIENT_ENV`n"
+  }
+  $envBlock += @"
+  RESOURCE_LIMITS: "cpu=2,memory=8Gi"
+  RESOURCE_REQUESTS: "cpu=2,memory=8Gi"
+  GPU_LIMITS: "$gpuVal"
+  GPU_REQUESTS: "$gpuVal"
+  RUNTIME_CLASS_NAME: ""
+
+storageClass:
+  create: true
+  name: client-storage-class
+  provisioner: manual
+  allowVolumeExpansion: true
+  parameters: {}
+
+hostPath:
+  enabled: true
+
+pvc:
+  mysql: 2Gi
+  logs: 10Gi
+  data: 50Gi
+
+pvcAccessMode: ReadWriteOnce
+
+clusterScope: true
+
+clientId: "$TB_CLIENT_ID"
+clientPassword: '$passwordEscaped'
+
+"@
+  $valuesContent = @"
+# ============================================================
+# Generated by install-k8s.ps1 -- Tracebloc client Helm values
+# ============================================================
+
+$envBlock
+"@
+  Set-Content -Path $valuesFile -Value $valuesContent -Encoding UTF8
+  Ok "Values file written to $valuesFile"
+
+  $repoList = helm repo list 2>&1 | Out-String
+  if ($repoList -notmatch [regex]::Escape($TRACEBLOC_HELM_REPO_NAME)) {
+    Info "Adding Helm repo: $TRACEBLOC_HELM_REPO_URL"
+    helm repo add $TRACEBLOC_HELM_REPO_NAME $TRACEBLOC_HELM_REPO_URL
+    if ($LASTEXITCODE -ne 0) { Err "Failed to add Helm repo." }
+  }
+  Info "Updating Helm repos..."
+  helm repo update
+  if ($LASTEXITCODE -ne 0) { Warn "helm repo update had issues -- continuing." }
+
+  Info "Installing $TB_NAMESPACE from $TRACEBLOC_HELM_REPO_NAME/$TRACEBLOC_CHART_NAME in namespace '$TB_NAMESPACE'..."
+  helm upgrade --install $TB_NAMESPACE "$TRACEBLOC_HELM_REPO_NAME/$TRACEBLOC_CHART_NAME" `
+    --namespace $TB_NAMESPACE `
+    --create-namespace `
+    --values $valuesFile
+  if ($LASTEXITCODE -ne 0) { Err "Helm install failed -- see output above." }
+
+  Ok "Tracebloc client Helm chart installed in namespace '$TB_NAMESPACE'."
+  Info "Values file: $valuesFile"
+}
+
+# =============================================================================
 #  CLUSTER VERIFICATION
 # =============================================================================
 
@@ -754,6 +926,7 @@ Install-K3dAndHelm
 New-K3dCluster
 Install-GpuDevicePlugin
 Confirm-GpuNode
+Install-ClientHelm
 Confirm-Cluster
 Print-Summary
 
