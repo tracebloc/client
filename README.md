@@ -1,9 +1,9 @@
-# 🌐 Tracebloc Client
+# 🌐 tracebloc Client
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
 
 ## 📄 Description
-Tracebloc Client is a Kubernetes-based application that runs experiments and communicates results to the Tracebloc backend. It's designed to handle distributed machine learning workloads efficiently and securely.
+tracebloc Client is a Kubernetes-based application that runs experiments and communicates results to the tracebloc backend. It's designed to handle distributed machine learning workloads efficiently and securely.
 
 ## 🛠️ Tech Stack
 - Kubernetes
@@ -14,17 +14,33 @@ Tracebloc Client is a Kubernetes-based application that runs experiments and com
 
 ## 🚀 Quick Install
 
-Set up a local Kubernetes cluster with GPU support in one command:
+Set up a local Kubernetes cluster with GPU support in one command.
+
+**Bash (Linux / macOS / WSL):**
 
 ```bash
 bash <(curl -fsSL https://raw.githubusercontent.com/tracebloc/client/main/scripts/install.sh)
 ```
 
+**PowerShell (Windows):**
+
+```powershell
+irm https://raw.githubusercontent.com/tracebloc/client/main/scripts/install.sh | iex
+```
+
 With custom configuration (environment variables are optional and can be combined as needed):
+
+**Bash:**
 
 ```bash
 CLUSTER_NAME=myapp AGENTS=3 \
   bash <(curl -fsSL https://raw.githubusercontent.com/tracebloc/client/main/scripts/install.sh)
+```
+
+**PowerShell:**
+
+```powershell
+$env:CLUSTER_NAME = "myapp"; $env:AGENTS = "3"; irm https://raw.githubusercontent.com/tracebloc/client/main/scripts/install.sh | iex
 ```
 
 | Variable | Default | Description |
@@ -44,7 +60,7 @@ CLUSTER_NAME=myapp AGENTS=3 \
 ### System Requirements
 
 #### Network Requirements
-- One-way communication with Tracebloc backend
+- One-way communication with tracebloc backend
 - Port 443 open for Azure Service Bus (AmqpOverWebsocket)
 - Secure metric and weight file transmission
 
@@ -88,6 +104,8 @@ The **tracebloc** chart is the unified chart for AKS, EKS, bare-metal, and OpenS
 
 ### 1. Lint the Chart
 Checks for common issues, best practices, and potential problems:
+
+**Bash / PowerShell:**
 ```bash
 helm lint eks/
 ```
@@ -100,6 +118,8 @@ helm lint eks/
 
 ### 2. Render Templates (Dry Run)
 Renders all templates with your values to check for syntax errors:
+
+**Bash / PowerShell:**
 ```bash
 helm template eks eks/ --namespace test-namespace
 ```
@@ -117,7 +137,14 @@ helm template eks eks/ --namespace test-namespace --debug
 
 ### 3. Validate Kubernetes Manifests
 Validates that the rendered YAML is valid Kubernetes:
+
+**Bash:**
 ```bash
+helm template eks eks/ --namespace test-namespace | kubectl apply --dry-run=client -f -
+```
+
+**PowerShell:**
+```powershell
 helm template eks eks/ --namespace test-namespace | kubectl apply --dry-run=client -f -
 ```
 
@@ -128,6 +155,8 @@ helm template eks eks/ --namespace test-namespace | kubectl apply --dry-run=clie
 
 ### 4. Test Installation (Dry Run)
 Simulates an installation without actually deploying:
+
+**Bash / PowerShell:**
 ```bash
 helm install test-release eks/ --namespace test-namespace --dry-run --debug
 ```
@@ -139,6 +168,8 @@ helm install test-release eks/ --namespace test-namespace --dry-run --debug
 
 ### 5. Package the Chart
 Creates a chart package to verify it can be packaged:
+
+**Bash / PowerShell:**
 ```bash
 helm package eks/
 ```
@@ -150,13 +181,27 @@ helm package eks/
 
 ### 6. Check for Placeholder Values
 Search for placeholder values that need to be replaced:
+
+**Bash:**
 ```bash
 helm template eks eks/ --namespace test-namespace | grep -E "<.*>"
 ```
 
+**PowerShell:**
+```powershell
+helm template eks eks/ --namespace test-namespace | Select-String -Pattern "<.*>"
+```
+
 Or check values.yaml directly:
+
+**Bash:**
 ```bash
 grep -E "<.*>" eks/values.yaml
+```
+
+**PowerShell:**
+```powershell
+Select-String -Path eks/values.yaml -Pattern "<.*>"
 ```
 
 ## Common Issues to Check
@@ -191,6 +236,8 @@ grep -E "<.*>" eks/values.yaml
 ## Testing with Different Values
 
 Test your chart with different value files:
+
+**Bash / PowerShell:**
 ```bash
 # Test with custom values
 helm template eks eks/ -f values-16-dev.yaml --namespace dev
@@ -201,31 +248,59 @@ helm template eks eks/ -f values.yaml -f values-16-dev.yaml --namespace dev
 
 ## Advanced Validation
 
-### Validate against Kubernetes schema:
+### Validate against Kubernetes schema
+
+**Bash:**
 ```bash
 helm template eks eks/ --namespace test-namespace | \
   kubectl apply --dry-run=server -f -
 ```
 
-### Check for deprecated APIs:
+**PowerShell:**
+```powershell
+helm template eks eks/ --namespace test-namespace | kubectl apply --dry-run=server -f -
+```
+
+### Check for deprecated APIs
+
+**Bash:**
 ```bash
 helm template eks eks/ --namespace test-namespace | \
   kubectl convert --local -f - 2>&1 | grep -i deprecated
 ```
 
-### View all rendered resources:
+**PowerShell:**
+```powershell
+helm template eks eks/ --namespace test-namespace | kubectl convert --local -f - 2>&1 | Select-String -Pattern "deprecated" -CaseSensitive:$false
+```
+
+### View all rendered resources
+
+**Bash:**
 ```bash
 helm template eks eks/ --namespace test-namespace | \
   kubectl get -f - --dry-run=client -o name
 ```
 
+**PowerShell:**
+```powershell
+helm template eks eks/ --namespace test-namespace | kubectl get -f - --dry-run=client -o name
+```
+
 ## Troubleshooting
 
-### Docker / k3d "permission denied" (Linux)
+### Docker / k3d "permission denied" (Linux / WSL)
 If `k3d cluster list` or `docker` fails with `permission denied` on the Docker socket:
 - Your user must be in the `docker` group. The installer adds you; if you run commands in a terminal opened before that, the group is not active yet.
-- **Quick fix:** run `newgrp docker` in that terminal (or open a new terminal), then run `k3d cluster list` or re-run the installer.
+- **Quick fix (Bash):** run `newgrp docker` in that terminal (or open a new terminal), then run `k3d cluster list` or re-run the installer.
 - Or log out and log back in so the `docker` group is applied to your session.
+
+### PowerShell execution policy (Windows)
+If `irm ... | iex` fails with a script execution error, allow scripts for the current user:
+```powershell
+Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser
+```
+Then re-run the Quick Install command.
 
 ### Template rendering errors:
 - Check for unclosed `{{ }}` blocks
@@ -252,5 +327,5 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 
 
 ## 📞 Support
-For additional support or questions, please refer to our documentation or contact the Tracebloc support team.
+For additional support or questions, please refer to our documentation or contact the tracebloc support team.
 
