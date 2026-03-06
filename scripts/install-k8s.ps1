@@ -417,7 +417,7 @@ function Install-DockerDesktop {
   }
 
   $dockerRunning = $false
-  try { docker info 2>&1 | Out-Null; $dockerRunning = ($LASTEXITCODE -eq 0) } catch {}
+  docker info *>$null 2>&1; if ($LASTEXITCODE -eq 0) { $dockerRunning = $true }
 
   if (-not $dockerRunning) {
     Start-Process $dockerExe -ErrorAction SilentlyContinue
@@ -428,7 +428,7 @@ function Install-DockerDesktop {
     $f = 0
     for ($i = 1; $i -le $maxWait; $i++) {
       Start-Sleep -Seconds 3
-      try { docker info 2>&1 | Out-Null; if ($LASTEXITCODE -eq 0) { $dockerRunning = $true; break } } catch {}
+      docker info *>$null 2>&1; if ($LASTEXITCODE -eq 0) { $dockerRunning = $true; break }
       Write-Host "`r  " -NoNewline
       Write-Host $frames[$f] -ForegroundColor Cyan -NoNewline
       Write-Host " Waiting for Docker..." -NoNewline
