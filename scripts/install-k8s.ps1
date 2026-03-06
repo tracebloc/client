@@ -417,8 +417,10 @@ function Install-DockerDesktop {
   }
 
   $dockerRunning = $false
-  $dkOut = (docker info --format '{{.ID}}' 2>$null) | Out-String
-  if (-not [string]::IsNullOrWhiteSpace($dkOut)) { $dockerRunning = $true }
+  try {
+    $dkOut = (docker info --format '{{.ID}}' 2>$null) | Out-String
+    if (-not [string]::IsNullOrWhiteSpace($dkOut)) { $dockerRunning = $true }
+  } catch {}
 
   if (-not $dockerRunning) {
     Start-Process $dockerExe -ErrorAction SilentlyContinue
@@ -429,8 +431,10 @@ function Install-DockerDesktop {
     $f = 0
     for ($i = 1; $i -le $maxWait; $i++) {
       Start-Sleep -Seconds 3
-      $dkOut = (docker info --format '{{.ID}}' 2>$null) | Out-String
-      if (-not [string]::IsNullOrWhiteSpace($dkOut)) { $dockerRunning = $true; break }
+      try {
+        $dkOut = (docker info --format '{{.ID}}' 2>$null) | Out-String
+        if (-not [string]::IsNullOrWhiteSpace($dkOut)) { $dockerRunning = $true; break }
+      } catch {}
       Write-Host "`r  " -NoNewline
       Write-Host $frames[$f] -ForegroundColor Cyan -NoNewline
       Write-Host " Waiting for Docker..." -NoNewline
@@ -964,6 +968,7 @@ function Print-Summary {
   Write-Host ""
   Hint "Need help?  https://docs.tracebloc.io"
   Hint "Logs:       ~\.tracebloc\"
+  Hint "Data:       /tracebloc/$TB_NAMESPACE"
   Write-Host ""
   Write-Host "  " -NoNewline; Write-Host ([string]([char]0x2501) * 46) -ForegroundColor Green
   Write-Host ""
