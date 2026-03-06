@@ -113,10 +113,6 @@ install_k3d() {
   fi
   rm -f "$k3d_script"
 
-  if [[ -f /usr/local/bin/k3d && ! -x /usr/local/bin/k3d ]]; then
-    sudo chmod +x /usr/local/bin/k3d
-  fi
-
   if ! has k3d; then
     error "System tool installation completed but not found on PATH."
   fi
