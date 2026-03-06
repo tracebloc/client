@@ -417,7 +417,7 @@ function Install-DockerDesktop {
   }
 
   $dockerRunning = $false
-  docker info *>$null 2>&1; if ($LASTEXITCODE -eq 0) { $dockerRunning = $true }
+  $null = (docker info 2>&1); if ($LASTEXITCODE -eq 0) { $dockerRunning = $true }
 
   if (-not $dockerRunning) {
     Start-Process $dockerExe -ErrorAction SilentlyContinue
@@ -428,7 +428,7 @@ function Install-DockerDesktop {
     $f = 0
     for ($i = 1; $i -le $maxWait; $i++) {
       Start-Sleep -Seconds 3
-      docker info *>$null 2>&1; if ($LASTEXITCODE -eq 0) { $dockerRunning = $true; break }
+      $null = (docker info 2>&1); if ($LASTEXITCODE -eq 0) { $dockerRunning = $true; break }
       Write-Host "`r  " -NoNewline
       Write-Host $frames[$f] -ForegroundColor Cyan -NoNewline
       Write-Host " Waiting for Docker..." -NoNewline
@@ -549,8 +549,8 @@ function Install-K3dAndHelm {
   if (-not (Has "k3d")) {
     if (Has "winget") {
       Log "Installing k3d via winget..."
-      winget install -e --id Rancher.k3d `
-        --accept-package-agreements --accept-source-agreements --silent 2>&1 | Out-Null
+      $null = (winget install -e --id Rancher.k3d `
+        --accept-package-agreements --accept-source-agreements --silent 2>&1)
     }
     RefreshPath
 
@@ -593,8 +593,8 @@ function Install-K3dAndHelm {
   if (-not (Has "helm")) {
     if (Has "winget") {
       Log "Installing Helm..."
-      winget install -e --id Helm.Helm `
-        --accept-package-agreements --accept-source-agreements --silent 2>&1 | Out-Null
+      $null = (winget install -e --id Helm.Helm `
+        --accept-package-agreements --accept-source-agreements --silent 2>&1)
       RefreshPath
     }
     if (-not (Has "helm")) { Warn "Helm not installed -- install manually from https://helm.sh/docs/intro/install/" }
@@ -683,8 +683,8 @@ function Install-GpuDevicePlugin {
       }
       if ((Get-Item $dpTmp).Length -gt 0) {
         kubectl apply -f $dpTmp
-        kubectl rollout status daemonset/nvidia-device-plugin-daemonset `
-          -n kube-system --timeout=120s 2>&1 | Out-Null
+        $null = (kubectl rollout status daemonset/nvidia-device-plugin-daemonset `
+          -n kube-system --timeout=120s 2>&1)
         Ok "GPU acceleration enabled."
       } else { Err "Failed to enable GPU acceleration." }
     } finally {
@@ -872,21 +872,21 @@ $envBlock
   Set-Content -Path $valuesFile -Value $valuesContent -Encoding UTF8
   Log "Values file written to $valuesFile"
 
-  $repoList = helm repo list 2>&1 | Out-String
+  $repoList = (helm repo list 2>&1) | Out-String
   if ($repoList -notmatch [regex]::Escape($TRACEBLOC_HELM_REPO_NAME)) {
     Log "Adding Helm repo: $TRACEBLOC_HELM_REPO_URL"
-    helm repo add $TRACEBLOC_HELM_REPO_NAME $TRACEBLOC_HELM_REPO_URL 2>&1 | Out-Null
+    $null = (helm repo add $TRACEBLOC_HELM_REPO_NAME $TRACEBLOC_HELM_REPO_URL 2>&1)
     if ($LASTEXITCODE -ne 0) { Err "Failed to connect to tracebloc." }
   }
   Log "Updating Helm repos..."
-  helm repo update 2>&1 | Out-Null
+  $null = (helm repo update 2>&1)
 
   Write-Host ""
   Log "Installing $TB_NAMESPACE from $TRACEBLOC_HELM_REPO_NAME/$TRACEBLOC_CHART_NAME in namespace '$TB_NAMESPACE'..."
-  helm upgrade --install $TB_NAMESPACE "$TRACEBLOC_HELM_REPO_NAME/$TRACEBLOC_CHART_NAME" `
+  $null = (helm upgrade --install $TB_NAMESPACE "$TRACEBLOC_HELM_REPO_NAME/$TRACEBLOC_CHART_NAME" `
     --namespace $TB_NAMESPACE `
     --create-namespace `
-    --values $valuesFile 2>&1 | Out-Null
+    --values $valuesFile 2>&1)
   if ($LASTEXITCODE -ne 0) { Err "Client installation failed. Check the log for details: $LOG_FILE" }
 
   Ok "Connected to tracebloc"
