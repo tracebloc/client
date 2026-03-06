@@ -594,12 +594,34 @@ function Install-K3dAndHelm {
   # -- Helm --
   if (-not (Has "helm")) {
     if (Has "winget") {
-      Log "Installing Helm..."
+      Log "Installing Helm via winget..."
       $null = (winget install -e --id Helm.Helm `
         --accept-package-agreements --accept-source-agreements --silent 2>&1)
       RefreshPath
     }
-    if (-not (Has "helm")) { Warn "Helm not installed -- install manually from https://helm.sh/docs/intro/install/" }
+
+    if (-not (Has "helm")) {
+      $arch = Get-WindowsArch
+      Log "Downloading Helm binary directly ($arch)..."
+      $helmVer = Invoke-WithRetry -Label "helm version lookup" -ScriptBlock {
+        (Invoke-WebRequest "https://api.github.com/repos/helm/helm/releases/latest" `
+          -UseBasicParsing | ConvertFrom-Json).tag_name
+      }
+      $helmZip = "$env:TEMP\helm-$helmVer-windows-$arch.zip"
+      Invoke-WithRetry -Label "helm download" -ScriptBlock {
+        Invoke-WebRequest "https://get.helm.sh/helm-$helmVer-windows-$arch.zip" `
+          -OutFile $helmZip -UseBasicParsing
+      }
+      $helmExtract = "$env:TEMP\helm-extract"
+      if (Test-Path $helmExtract) { Remove-Item $helmExtract -Recurse -Force }
+      Expand-Archive -Path $helmZip -DestinationPath $helmExtract -Force
+      Copy-Item "$helmExtract\windows-$arch\helm.exe" "$TOOL_DIR\helm.exe" -Force
+      Remove-Item $helmZip -Force -ErrorAction SilentlyContinue
+      Remove-Item $helmExtract -Recurse -Force -ErrorAction SilentlyContinue
+      RefreshPath
+    }
+
+    if (-not (Has "helm")) { Err "Helm could not be installed. Install manually from https://helm.sh/docs/intro/install/ and re-run." }
   }
   Log "helm: $(cmd /c 'helm version --short 2>&1')"
 
