@@ -166,8 +166,16 @@ install_linux() {
   setup_pm
   install_docker_engine
   install_system_deps
+
+  # umask 077 (set in common.sh) would make binaries in /usr/local/bin/
+  # executable only by root — relax to 022 for system tool installs
+  local _saved_umask
+  _saved_umask=$(umask)
+  umask 022
   install_kubectl
   install_k3d
   install_helm
+  umask "$_saved_umask"
+
   dispatch_gpu_setup
 }
