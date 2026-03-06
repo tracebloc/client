@@ -41,6 +41,7 @@ print_summary() {
   echo ""
   echo -e "  ${DIM}Need help?${RESET}  ${CYAN}https://docs.tracebloc.io${RESET}"
   echo -e "  ${DIM}Logs:${RESET}       ${DIM}~/.tracebloc/${RESET}"
+  echo -e "  ${DIM}Data:${RESET}       ${DIM}/tracebloc/${TB_NAMESPACE:-default}${RESET}"
   echo ""
   echo -e "  ${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}"
   echo ""

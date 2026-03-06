@@ -17,7 +17,7 @@ spec:
     name: {{ $name }}
     namespace: {{ .Release.Namespace }}
   hostPath:
-    path: /tracebloc/data
+    path: /tracebloc/{{ .Release.Name }}/data
     type: DirectoryOrCreate
 ---
 {{- end }}

@@ -417,7 +417,10 @@ function Install-DockerDesktop {
   }
 
   $dockerRunning = $false
-  docker info *>$null 2>&1; if ($LASTEXITCODE -eq 0) { $dockerRunning = $true }
+  try {
+    $dkOut = (docker info --format '{{.ID}}' 2>$null) | Out-String
+    if (-not [string]::IsNullOrWhiteSpace($dkOut)) { $dockerRunning = $true }
+  } catch {}
 
   if (-not $dockerRunning) {
     Start-Process $dockerExe -ErrorAction SilentlyContinue
@@ -428,7 +431,10 @@ function Install-DockerDesktop {
     $f = 0
     for ($i = 1; $i -le $maxWait; $i++) {
       Start-Sleep -Seconds 3
-      docker info *>$null 2>&1; if ($LASTEXITCODE -eq 0) { $dockerRunning = $true; break }
+      try {
+        $dkOut = (docker info --format '{{.ID}}' 2>$null) | Out-String
+        if (-not [string]::IsNullOrWhiteSpace($dkOut)) { $dockerRunning = $true; break }
+      } catch {}
       Write-Host "`r  " -NoNewline
       Write-Host $frames[$f] -ForegroundColor Cyan -NoNewline
       Write-Host " Waiting for Docker..." -NoNewline
@@ -549,8 +555,8 @@ function Install-K3dAndHelm {
   if (-not (Has "k3d")) {
     if (Has "winget") {
       Log "Installing k3d via winget..."
-      winget install -e --id Rancher.k3d `
-        --accept-package-agreements --accept-source-agreements --silent 2>&1 | Out-Null
+      $null = (winget install -e --id Rancher.k3d `
+        --accept-package-agreements --accept-source-agreements --silent 2>&1)
     }
     RefreshPath
 
@@ -592,12 +598,34 @@ function Install-K3dAndHelm {
   # -- Helm --
   if (-not (Has "helm")) {
     if (Has "winget") {
-      Log "Installing Helm..."
-      winget install -e --id Helm.Helm `
-        --accept-package-agreements --accept-source-agreements --silent 2>&1 | Out-Null
+      Log "Installing Helm via winget..."
+      $null = (winget install -e --id Helm.Helm `
+        --accept-package-agreements --accept-source-agreements --silent 2>&1)
       RefreshPath
     }
-    if (-not (Has "helm")) { Warn "Helm not installed -- install manually from https://helm.sh/docs/intro/install/" }
+
+    if (-not (Has "helm")) {
+      $arch = Get-WindowsArch
+      Log "Downloading Helm binary directly ($arch)..."
+      $helmVer = Invoke-WithRetry -Label "helm version lookup" -ScriptBlock {
+        (Invoke-WebRequest "https://api.github.com/repos/helm/helm/releases/latest" `
+          -UseBasicParsing | ConvertFrom-Json).tag_name
+      }
+      $helmZip = "$env:TEMP\helm-$helmVer-windows-$arch.zip"
+      Invoke-WithRetry -Label "helm download" -ScriptBlock {
+        Invoke-WebRequest "https://get.helm.sh/helm-$helmVer-windows-$arch.zip" `
+          -OutFile $helmZip -UseBasicParsing
+      }
+      $helmExtract = "$env:TEMP\helm-extract"
+      if (Test-Path $helmExtract) { Remove-Item $helmExtract -Recurse -Force }
+      Expand-Archive -Path $helmZip -DestinationPath $helmExtract -Force
+      Copy-Item "$helmExtract\windows-$arch\helm.exe" "$TOOL_DIR\helm.exe" -Force
+      Remove-Item $helmZip -Force -ErrorAction SilentlyContinue
+      Remove-Item $helmExtract -Recurse -Force -ErrorAction SilentlyContinue
+      RefreshPath
+    }
+
+    if (-not (Has "helm")) { Err "Helm could not be installed. Install manually from https://helm.sh/docs/intro/install/ and re-run." }
   }
   Log "helm: $(cmd /c 'helm version --short 2>&1')"
 
@@ -683,8 +711,8 @@ function Install-GpuDevicePlugin {
       }
       if ((Get-Item $dpTmp).Length -gt 0) {
         kubectl apply -f $dpTmp
-        kubectl rollout status daemonset/nvidia-device-plugin-daemonset `
-          -n kube-system --timeout=120s 2>&1 | Out-Null
+        $null = (kubectl rollout status daemonset/nvidia-device-plugin-daemonset `
+          -n kube-system --timeout=120s 2>&1)
         Ok "GPU acceleration enabled."
       } else { Err "Failed to enable GPU acceleration." }
     } finally {
@@ -872,21 +900,21 @@ $envBlock
   Set-Content -Path $valuesFile -Value $valuesContent -Encoding UTF8
   Log "Values file written to $valuesFile"
 
-  $repoList = helm repo list 2>&1 | Out-String
+  $repoList = (helm repo list 2>&1) | Out-String
   if ($repoList -notmatch [regex]::Escape($TRACEBLOC_HELM_REPO_NAME)) {
     Log "Adding Helm repo: $TRACEBLOC_HELM_REPO_URL"
-    helm repo add $TRACEBLOC_HELM_REPO_NAME $TRACEBLOC_HELM_REPO_URL 2>&1 | Out-Null
+    $null = (helm repo add $TRACEBLOC_HELM_REPO_NAME $TRACEBLOC_HELM_REPO_URL 2>&1)
     if ($LASTEXITCODE -ne 0) { Err "Failed to connect to tracebloc." }
   }
   Log "Updating Helm repos..."
-  helm repo update 2>&1 | Out-Null
+  $null = (helm repo update 2>&1)
 
   Write-Host ""
   Log "Installing $TB_NAMESPACE from $TRACEBLOC_HELM_REPO_NAME/$TRACEBLOC_CHART_NAME in namespace '$TB_NAMESPACE'..."
-  helm upgrade --install $TB_NAMESPACE "$TRACEBLOC_HELM_REPO_NAME/$TRACEBLOC_CHART_NAME" `
+  $null = (helm upgrade --install $TB_NAMESPACE "$TRACEBLOC_HELM_REPO_NAME/$TRACEBLOC_CHART_NAME" `
     --namespace $TB_NAMESPACE `
     --create-namespace `
-    --values $valuesFile 2>&1 | Out-Null
+    --values $valuesFile 2>&1)
   if ($LASTEXITCODE -ne 0) { Err "Client installation failed. Check the log for details: $LOG_FILE" }
 
   Ok "Connected to tracebloc"
@@ -940,6 +968,7 @@ function Print-Summary {
   Write-Host ""
   Hint "Need help?  https://docs.tracebloc.io"
   Hint "Logs:       ~\.tracebloc\"
+  Hint "Data:       /tracebloc/$TB_NAMESPACE"
   Write-Host ""
   Write-Host "  " -NoNewline; Write-Host ([string]([char]0x2501) * 46) -ForegroundColor Green
   Write-Host ""
