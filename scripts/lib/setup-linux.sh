@@ -101,9 +101,17 @@ install_k3d() {
     return 0
   fi
 
-  if ! spin_cmd "Installing system tools…" bash -c 'set -euo pipefail; curl -fsSL --tlsv1.2 https://raw.githubusercontent.com/k3d-io/k3d/main/install.sh | bash'; then
+  local k3d_script
+  k3d_script="$(mktemp)"
+  retry 3 5 curl -fsSL $CURL_SECURE \
+    https://raw.githubusercontent.com/k3d-io/k3d/main/install.sh -o "$k3d_script"
+  chmod +x "$k3d_script"
+
+  if ! spin_cmd "Installing system tools…" sudo bash "$k3d_script"; then
+    rm -f "$k3d_script"
     error "System tool installation failed. See the install log for details."
   fi
+  rm -f "$k3d_script"
 
   if ! has k3d; then
     error "System tool installation completed but not found on PATH."
@@ -158,8 +166,16 @@ install_linux() {
   setup_pm
   install_docker_engine
   install_system_deps
+
+  # umask 077 (set in common.sh) would make binaries in /usr/local/bin/
+  # executable only by root — relax to 022 for system tool installs
+  local _saved_umask
+  _saved_umask=$(umask)
+  umask 022
   install_kubectl
   install_k3d
   install_helm
+  umask "$_saved_umask"
+
   dispatch_gpu_setup
 }
