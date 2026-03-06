@@ -101,8 +101,20 @@ install_k3d() {
     return 0
   fi
 
-  if ! spin_cmd "Installing system tools…" bash -c 'set -euo pipefail; curl -fsSL --tlsv1.2 https://raw.githubusercontent.com/k3d-io/k3d/main/install.sh | bash'; then
+  local k3d_script
+  k3d_script="$(mktemp)"
+  retry 3 5 curl -fsSL $CURL_SECURE \
+    https://raw.githubusercontent.com/k3d-io/k3d/main/install.sh -o "$k3d_script"
+  chmod +x "$k3d_script"
+
+  if ! spin_cmd "Installing system tools…" sudo bash "$k3d_script"; then
+    rm -f "$k3d_script"
     error "System tool installation failed. See the install log for details."
+  fi
+  rm -f "$k3d_script"
+
+  if [[ -f /usr/local/bin/k3d && ! -x /usr/local/bin/k3d ]]; then
+    sudo chmod +x /usr/local/bin/k3d
   fi
 
   if ! has k3d; then
