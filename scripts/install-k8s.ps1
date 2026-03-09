@@ -687,6 +687,12 @@ function New-K3dCluster {
   }
 
   k3d kubeconfig merge $CLUSTER_NAME --kubeconfig-switch-context | Out-Null
+
+  $kubeConfigPath = "$env:USERPROFILE\.kube\config"
+  if (Test-Path $kubeConfigPath) {
+    (Get-Content $kubeConfigPath) -replace 'host\.docker\.internal', '127.0.0.1' | Set-Content $kubeConfigPath -Encoding UTF8
+  }
+
   Log "kubeconfig updated -- kubectl now points to '$CLUSTER_NAME'."
 }
 
@@ -911,11 +917,12 @@ $envBlock
 
   Write-Host ""
   Log "Installing $TB_NAMESPACE from $TRACEBLOC_HELM_REPO_NAME/$TRACEBLOC_CHART_NAME in namespace '$TB_NAMESPACE'..."
-  $null = (helm upgrade --install $TB_NAMESPACE "$TRACEBLOC_HELM_REPO_NAME/$TRACEBLOC_CHART_NAME" `
+  $helmOutput = (helm upgrade --install $TB_NAMESPACE "$TRACEBLOC_HELM_REPO_NAME/$TRACEBLOC_CHART_NAME" `
     --namespace $TB_NAMESPACE `
     --create-namespace `
-    --values $valuesFile 2>&1)
-  if ($LASTEXITCODE -ne 0) { Err "Client installation failed. Check the log for details: $LOG_FILE" }
+    --values $valuesFile 2>&1) | Out-String
+  Log "Helm Output: $helmOutput"
+  if ($LASTEXITCODE -ne 0) { Err "Client installation failed. Helm output:`n$helmOutput`nCheck the log for details: $LOG_FILE" }
 
   Ok "Connected to tracebloc"
   Log "Values file: $valuesFile"
