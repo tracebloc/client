@@ -354,22 +354,36 @@ function Enable-VirtualisationFeatures {
   Log "Updating WSL..."
   $wslJob = Start-Job -ScriptBlock { cmd /c "wsl --update 2>&1" }
   Write-Host -NoNewline "  "
-  while ($wslJob.State -eq "Running") {
+  $wslTimeoutSec = 90
+  $wslElapsed = 0
+  while ($wslJob.State -eq "Running" -and $wslElapsed -lt $wslTimeoutSec) {
     Write-Host -NoNewline "." -ForegroundColor DarkGray
     Start-Sleep -Seconds 2
+    $wslElapsed += 2
   }
   Write-Host ""
-  $wslUpdate = Receive-Job -Job $wslJob
-  $wslExitOk = $wslJob.State -eq "Completed"
+  if ($wslJob.State -eq "Running") {
+    Stop-Job $wslJob
+    Log "WSL update timed out after ${wslTimeoutSec}s -- skipping."
+    Warn "WSL update is taking too long. Skipping for now."
+    Hint "Run 'wsl --update' manually after installation."
+  } else {
+    $wslUpdate = Receive-Job -Job $wslJob
+    $wslExitOk = $wslJob.State -eq "Completed"
+    if (-not $wslExitOk) { Log "WSL update may not have completed cleanly." }
+  }
   Remove-Job -Job $wslJob -Force
-  if (-not $wslExitOk) { Log "WSL update may not have completed cleanly." }
 
-  $wslSet = cmd /c "wsl --set-default-version 2 2>&1"
-  if ($LASTEXITCODE -eq 0) {
+  $wslSetJob = Start-Job -ScriptBlock { cmd /c "wsl --set-default-version 2 2>&1" }
+  $wslSetDone = $wslSetJob | Wait-Job -Timeout 20
+  if ($wslSetDone) {
+    Receive-Job $wslSetJob | Out-Null
+    Remove-Job $wslSetJob -Force
     Log "WSL2 set as default."
   } else {
+    Stop-Job $wslSetJob; Remove-Job $wslSetJob -Force
     Warn "Could not set WSL2 as default."
-    Hint "Try running 'wsl --update' manually, then re-run this script."
+    Hint "Try running 'wsl --set-default-version 2' manually."
   }
 }
 
@@ -469,10 +483,23 @@ function Install-NvidiaContainerToolkit {
 
   Log "Setting up NVIDIA container toolkit in WSL2"
 
-  $prevEncoding = [Console]::OutputEncoding
-  [Console]::OutputEncoding = [System.Text.Encoding]::Unicode
-  $distroRaw = wsl --list --quiet 2>$null
-  [Console]::OutputEncoding = $prevEncoding
+  $wslListJob = Start-Job -ScriptBlock {
+    $prevEncoding = [Console]::OutputEncoding
+    [Console]::OutputEncoding = [System.Text.Encoding]::Unicode
+    $raw = wsl --list --quiet 2>$null
+    [Console]::OutputEncoding = $prevEncoding
+    return $raw
+  }
+  $wslListDone = $wslListJob | Wait-Job -Timeout 30
+  if (-not $wslListDone) {
+    Stop-Job $wslListJob; Remove-Job $wslListJob -Force
+    Warn "WSL did not respond in time. Skipping GPU container toolkit."
+    Hint "Run 'wsl --update' manually, then re-run this script for GPU support."
+    return
+  }
+  $distroRaw = Receive-Job $wslListJob
+  Remove-Job $wslListJob -Force
+
   $distros = @($distroRaw | ForEach-Object { "$_".Trim() } | Where-Object { $_ -ne '' -and $_ -match '^\w' })
   $wslDistro = ($distros | Where-Object { $_ -match 'Ubuntu' } | Select-Object -First 1)
   if (-not $wslDistro -and $distros.Count -gt 0) { $wslDistro = $distros[0] }
@@ -481,9 +508,10 @@ function Install-NvidiaContainerToolkit {
     Log "No WSL2 distro found -- installing Ubuntu..."
     cmd /c "wsl --install -d Ubuntu --no-launch 2>&1" | Out-Null
     cmd /c "wsl --setdefault Ubuntu 2>&1" | Out-Null
-    Warn "Ubuntu WSL2 installed."
-    Hint "Complete first-run setup: open Ubuntu from Start Menu, set a username/password."
-    Err "Please complete WSL2 Ubuntu setup first, then re-run."
+    Warn "Ubuntu WSL2 installed but needs first-run setup."
+    Hint "Open Ubuntu from the Start Menu and set a username/password."
+    Hint "Then re-run this script for GPU support."
+    return
   }
 
   Log "Using WSL2 distro: $wslDistro"
@@ -508,14 +536,40 @@ echo "NCT installed successfully."
   [System.IO.File]::WriteAllText($scriptPath, $nctScript.Replace("`r`n", "`n"))
   $wslPath = "/mnt/" + ($scriptPath -replace '\\','/' -replace '^([A-Za-z]):/', { $_.Groups[1].Value.ToLower() + '/' })
 
-  cmd /c "wsl -d $wslDistro -- /bin/bash `"$wslPath`" 2>&1"
+  $nctInstallJob = Start-Job -ScriptBlock {
+    param($d, $p)
+    cmd /c "wsl -d $d -- /bin/bash `"$p`" 2>&1"
+  } -ArgumentList $wslDistro, $wslPath
+
+  $nctDone = $nctInstallJob | Wait-Job -Timeout 180
+  if (-not $nctDone) {
+    Stop-Job $nctInstallJob; Remove-Job $nctInstallJob -Force
+    Remove-Item $scriptPath -Force -ErrorAction SilentlyContinue
+    Warn "GPU container toolkit installation timed out."
+    Hint "You can set it up manually inside WSL later."
+    return
+  }
+  Receive-Job $nctInstallJob | Out-Null
+  Remove-Job $nctInstallJob -Force
   Remove-Item $scriptPath -Force -ErrorAction SilentlyContinue
 
-  $nctVer = cmd /c "wsl -d $wslDistro -- nvidia-ctk --version 2>&1"
-  if ($LASTEXITCODE -eq 0) {
-    Log "NVIDIA Container Toolkit in WSL2: $nctVer"
-    $script:K3D_GPU_FLAG = "--gpus=all"
+  $verJob = Start-Job -ScriptBlock {
+    param($d)
+    cmd /c "wsl -d $d -- nvidia-ctk --version 2>&1"
+  } -ArgumentList $wslDistro
+
+  $verDone = $verJob | Wait-Job -Timeout 15
+  if ($verDone) {
+    $nctVer = (Receive-Job $verJob | Out-String).Trim()
+    Remove-Job $verJob -Force
+    if ($nctVer -and $nctVer -notmatch 'error|not found') {
+      Log "NVIDIA Container Toolkit in WSL2: $nctVer"
+      $script:K3D_GPU_FLAG = "--gpus=all"
+    } else {
+      Warn "GPU setup may need manual attention."
+    }
   } else {
+    Stop-Job $verJob; Remove-Job $verJob -Force
     Warn "GPU setup may need manual attention."
   }
 }
@@ -679,10 +733,41 @@ function New-K3dCluster {
     }
 
     Log "Creating cluster: $SERVERS server(s) + $AGENTS agent(s)..."
-    Hint "First run may take 1-2 minutes to download components."
+    Hint "First run may take a few minutes to download components."
 
-    & k3d $k3dArgs
-    if ($LASTEXITCODE -ne 0) { Err "Failed to create compute environment." }
+    $k3dExe = (Get-Command k3d -ErrorAction SilentlyContinue).Source
+    if (-not $k3dExe) { $k3dExe = "k3d" }
+    $k3dArgString = ($k3dArgs | ForEach-Object {
+      if ($_ -match '[\s@]') { "`"$_`"" } else { $_ }
+    }) -join " "
+    $k3dOutLog = Join-Path $env:TEMP "k3d-create-$(Get-Random).log"
+    $k3dErrLog = Join-Path $env:TEMP "k3d-create-err-$(Get-Random).log"
+
+    $k3dProc = Start-Process -FilePath $k3dExe -ArgumentList $k3dArgString `
+      -NoNewWindow -PassThru `
+      -RedirectStandardOutput $k3dOutLog `
+      -RedirectStandardError $k3dErrLog
+
+    $frames = @([char]0x2807, [char]0x2819, [char]0x2839, [char]0x2838, [char]0x283C, [char]0x2834, [char]0x2826, [char]0x2827, [char]0x2847, [char]0x280F)
+    $f = 0
+    Write-Host -NoNewline "  "
+    while (-not $k3dProc.HasExited) {
+      Write-Host "`r  " -NoNewline
+      Write-Host $frames[$f] -ForegroundColor Cyan -NoNewline
+      Write-Host " Creating compute environment..." -NoNewline
+      $f = ($f + 1) % $frames.Count
+      Start-Sleep -Seconds 2
+    }
+    Write-Host "`r                                                   `r" -NoNewline
+
+    $k3dExitCode = $k3dProc.ExitCode
+    $k3dStdout = if (Test-Path $k3dOutLog) { Get-Content $k3dOutLog -Raw -ErrorAction SilentlyContinue } else { "" }
+    $k3dStderr = if (Test-Path $k3dErrLog) { Get-Content $k3dErrLog -Raw -ErrorAction SilentlyContinue } else { "" }
+    Remove-Item $k3dOutLog, $k3dErrLog -Force -ErrorAction SilentlyContinue
+    if ($k3dStdout) { Log "k3d stdout: $k3dStdout" }
+    if ($k3dStderr) { Log "k3d stderr: $k3dStderr" }
+
+    if ($k3dExitCode -ne 0) { Err "Failed to create compute environment." }
     Ok "Compute environment ready."
   }
 
