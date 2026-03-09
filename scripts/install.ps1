@@ -50,7 +50,7 @@ for ($i = 1; $i -le $maxAttempts; $i++) {
 }
 
 try {
-  & $ScriptDest @args
+  powershell.exe -ExecutionPolicy Bypass -File $ScriptDest @args
 } finally {
   Remove-Item $TmpDir -Recurse -Force -ErrorAction SilentlyContinue
 }
