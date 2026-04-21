@@ -1,0 +1,53 @@
+{{/*
+  Optional Namespace resource with Pod Security Admission labels.
+
+  Default is OFF (namespace.create: false). The chart assumes the operator
+  pre-created the namespace via `kubectl create namespace` or
+  `helm install --create-namespace`.
+
+  Set namespace.create: true ONLY on greenfield installs to have the chart
+  template the Namespace with Pod Security Admission labels applied:
+
+    pod-security.kubernetes.io/warn:  restricted   (kubectl warnings)
+    pod-security.kubernetes.io/audit: restricted   (audit-log events)
+    pod-security.kubernetes.io/enforce: <off>      (does NOT reject pods)
+
+  Enforce mode is deliberately left unset by default -- the mysql init
+  containers (runAsUser: 0) and the resource-monitor DaemonSet (hostPath
+  mounts) violate the restricted profile and would be rejected. Customers
+  can opt into enforce once those are refactored or moved to a separate
+  namespace; `warn` + `audit` give useful visibility in the meantime.
+
+  helm.sh/resource-policy: keep ensures `helm uninstall` does NOT delete
+  the namespace (which would take PVC-backed data with it).
+
+  See README for labelling an EXISTING namespace via kubectl.
+*/}}
+{{- if .Values.namespace.create }}
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: {{ .Release.Namespace }}
+  annotations:
+    helm.sh/resource-policy: keep
+  labels:
+    {{- include "tracebloc.labels" . | nindent 4 }}
+    {{- with .Values.namespace.podSecurity.warn }}
+    pod-security.kubernetes.io/warn: {{ . | quote }}
+    {{- end }}
+    {{- with .Values.namespace.podSecurity.warnVersion }}
+    pod-security.kubernetes.io/warn-version: {{ . | quote }}
+    {{- end }}
+    {{- with .Values.namespace.podSecurity.audit }}
+    pod-security.kubernetes.io/audit: {{ . | quote }}
+    {{- end }}
+    {{- with .Values.namespace.podSecurity.auditVersion }}
+    pod-security.kubernetes.io/audit-version: {{ . | quote }}
+    {{- end }}
+    {{- with .Values.namespace.podSecurity.enforce }}
+    pod-security.kubernetes.io/enforce: {{ . | quote }}
+    {{- end }}
+    {{- with .Values.namespace.podSecurity.enforceVersion }}
+    pod-security.kubernetes.io/enforce-version: {{ . | quote }}
+    {{- end }}
+{{- end }}
