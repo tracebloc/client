@@ -11,6 +11,18 @@ openshift:
   scc:
     enabled: true
 
+# NetworkPolicy: OpenShift OVN-Kubernetes enforces by default.
+# DNS selector + in-cluster CIDRs differ from the Kubernetes defaults.
+networkPolicy:
+  training:
+    enabled: true
+    dnsNamespace: openshift-dns
+    dnsSelector:
+      dns.operator.openshift.io/daemonset-dns: default
+    clusterCidrs:
+      - "10.128.0.0/14"   # OpenShift default pod CIDR
+      - "172.30.0.0/16"   # OpenShift default service CIDR
+
 clientId: "ci-test-id"
 clientPassword: "ci-test-password"
 

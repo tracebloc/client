@@ -69,6 +69,35 @@ openshift:
   scc:
     enabled: false
 
+# -- NetworkPolicy hardening for training pods.
+# Training pods run untrusted ML code; this denies ingress and restricts
+# egress to DNS + external HTTPS only (blocks pod-to-pod, MySQL, K8s API).
+# Requires a CNI that enforces NetworkPolicy:
+#   AKS:   needs "Azure NPM" (--network-policy azure) or Calico at cluster create
+#   EKS:   needs Calico or Cilium add-on (AWS VPC CNI alone does NOT enforce)
+#   bm:    needs Calico / Cilium / kube-router (Flannel alone does NOT enforce)
+#   OC:    OVN-Kubernetes enforces by default
+# Leave `enabled: false` on clusters without an enforcing CNI — silently
+# having no protection is worse than explicitly disabling it.
+networkPolicy:
+  training:
+    enabled: true
+    dnsNamespace: kube-system
+    # CoreDNS pod selector — varies per platform. Override in ci/<platform>-values.yaml.
+    # When empty, the template falls back to {k8s-app: kube-dns}, which works
+    # on AKS / EKS / kind / kubeadm / most standard distros.
+    # OpenShift requires explicit override: see client/ci/oc-values.yaml.
+    # Helm merges map values, so to change the selector you MUST set
+    # dnsSelector to the complete desired map (not just additions).
+    dnsSelector: {}
+    # In-cluster CIDRs to block for pod-to-pod egress.
+    # The defaults cover common pod+service CIDR combinations. Override if your
+    # cluster uses different CIDRs (e.g. OpenShift defaults: 10.128.0.0/14 + 172.30.0.0/16).
+    clusterCidrs:
+      - "10.0.0.0/8"
+      - "172.16.0.0/12"
+      - "192.168.0.0/16"
+
 # -- Secrets
 clientId: "<CLIENT_ID>"
 clientPassword: "<CLIENT_PASSWORD>"

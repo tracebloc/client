@@ -15,6 +15,14 @@ storageClass:
 
 clusterScope: true
 
+# NetworkPolicy: EKS with the default AWS VPC CNI does NOT enforce
+# NetworkPolicy. Leaving this disabled is the safe default — a policy that
+# isn't enforced gives a false sense of security. Customers running
+# Calico or Cilium as an add-on should override this to enabled: true.
+networkPolicy:
+  training:
+    enabled: false
+
 clientId: "ci-test-id"
 clientPassword: "ci-test-password"
 

@@ -15,6 +15,13 @@ storageClass:
 
 clusterScope: true
 
+# NetworkPolicy: AKS requires the cluster to be created with Azure NPM
+# (`--network-policy azure`) or with Calico to enforce NetworkPolicies.
+# Leave enabled here; document the cluster-creation requirement in README.
+networkPolicy:
+  training:
+    enabled: true
+
 clientId: "ci-test-id"
 clientPassword: "ci-test-password"
 
