@@ -15,6 +15,13 @@ storageClass:
 
 clusterScope: true
 
+# NetworkPolicy: bare-metal enforcement depends on the CNI installed.
+# Calico / Cilium / kube-router enforce. Flannel alone does NOT.
+# Leave enabled here; customers on Flannel-only installations must override.
+networkPolicy:
+  training:
+    enabled: true
+
 clientId: "ci-test-id"
 clientPassword: "ci-test-password"
 

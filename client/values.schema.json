@@ -183,6 +183,42 @@
         }
       }
     },
+    "networkPolicy": {
+      "type": "object",
+      "description": "NetworkPolicy egress lockdown for untrusted training pods. Requires a CNI that enforces NetworkPolicy.",
+      "properties": {
+        "training": {
+          "type": "object",
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "default": true,
+              "description": "Create the training-egress NetworkPolicy. Set false on clusters without an enforcing CNI."
+            },
+            "dnsNamespace": {
+              "type": "string",
+              "default": "kube-system",
+              "description": "Namespace where the cluster DNS service runs"
+            },
+            "dnsSelector": {
+              "type": "object",
+              "description": "Pod labels selecting the cluster DNS service. AKS/EKS/kubeadm: {k8s-app: kube-dns}. OpenShift: {dns.operator.openshift.io/daemonset-dns: default}",
+              "additionalProperties": {
+                "type": "string"
+              }
+            },
+            "clusterCidrs": {
+              "type": "array",
+              "description": "In-cluster pod+service CIDRs to block pod-to-pod egress on port 443. Override to match your cluster CIDRs.",
+              "items": {
+                "type": "string",
+                "pattern": "^[0-9.]+/[0-9]+$"
+              }
+            }
+          }
+        }
+      }
+    },
     "clientId": {
       "type": "string",
       "minLength": 1,

@@ -1,0 +1,67 @@
+{{/*
+  Training pod egress lockdown.
+
+  Training pods run untrusted ML code uploaded by external data scientists.
+  This NetworkPolicy:
+    1. Denies all ingress to training pods (nothing should connect TO them).
+    2. Allows DNS to the cluster's DNS service.
+    3. Allows TCP/443 egress to addresses OUTSIDE the cluster CIDRs only —
+       blocking pod-to-pod, MySQL, K8s API, jobs-manager pod IPs, etc.
+
+  Selects pods by label tracebloc.io/workload=training. The jobs-manager
+  injects this label when spawning each training Job (see client-runtime
+  jobs_manager._prepare_job_config).
+
+  Requires a CNI that enforces NetworkPolicy. Not enforced by:
+    - kindnet (minikube / KIND)
+    - flannel (without kube-router add-on)
+    - AWS VPC CNI (without Calico add-on)
+  See values.yaml networkPolicy.training.enabled for platform notes.
+*/}}
+{{- if .Values.networkPolicy.training.enabled }}
+{{- $dnsSelector := .Values.networkPolicy.training.dnsSelector }}
+{{- if not $dnsSelector }}{{ $dnsSelector = dict "k8s-app" "kube-dns" }}{{- end }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ .Release.Name }}-training-egress
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "tracebloc.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      tracebloc.io/workload: training
+  policyTypes:
+    - Ingress
+    - Egress
+  # Deny all ingress — no one should connect TO a training pod.
+  ingress: []
+  egress:
+    # 1. DNS to the cluster's DNS service.
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ .Values.networkPolicy.training.dnsNamespace | default "kube-system" }}
+          podSelector:
+            matchLabels:
+              {{- toYaml $dnsSelector | nindent 14 }}
+      ports:
+        - port: 53
+          protocol: UDP
+        - port: 53
+          protocol: TCP
+    # 2. External HTTPS — everything NOT in the cluster's pod/service CIDRs.
+    #    Training pods call backend, Azure Service Bus, App Insights, etc.
+    #    This blocks pod-to-pod, ClusterIPs, MySQL, jobs-manager, K8s API.
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              {{- range .Values.networkPolicy.training.clusterCidrs }}
+              - {{ . | quote }}
+              {{- end }}
+      ports:
+        - port: 443
+          protocol: TCP
+{{- end }}
