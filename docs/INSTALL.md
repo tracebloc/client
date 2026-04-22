@@ -12,6 +12,8 @@ This guide covers installing the **tracebloc** unified Helm chart (AKS, EKS, bar
 - Required credentials (see [Required configuration](#required-configuration))
 - A CNI that enforces NetworkPolicy if you want the training-pod egress lockdown to actually block traffic — see [SECURITY.md § Per-platform caveats](SECURITY.md#5-per-platform-caveats)
 
+**Migrating from another chart?** Read [MIGRATIONS.md](MIGRATIONS.md) first. Skipping the pre-flight `resource-policy: keep` check can delete your PVCs during uninstall, even if you live-annotated them.
+
 ---
 
 ## 1. Add the Helm repository (recommended for production)
