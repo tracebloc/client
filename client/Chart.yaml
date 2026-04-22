@@ -18,6 +18,6 @@ sources:
 maintainers:
   - name: Tracebloc Team
     url: https://tracebloc.com
-kubeVersion: ">=1.24.0"
+kubeVersion: ">=1.24.0-0"
 annotations:
   category: Machine Learning

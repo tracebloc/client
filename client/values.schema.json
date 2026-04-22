@@ -145,6 +145,44 @@
         }
       }
     },
+    "namespace": {
+      "type": "object",
+      "description": "Optional chart-managed Namespace resource with Pod Security Admission labels",
+      "properties": {
+        "create": {
+          "type": "boolean",
+          "default": false,
+          "description": "When true, the chart templates a Namespace with PSA labels and helm.sh/resource-policy: keep. Only use on greenfield installs."
+        },
+        "podSecurity": {
+          "type": "object",
+          "description": "Pod Security Admission labels. Enforce is OFF by default; mysql init + resource-monitor currently violate restricted.",
+          "properties": {
+            "warn": {
+              "type": "string",
+              "enum": ["", "privileged", "baseline", "restricted"]
+            },
+            "warnVersion": {
+              "type": "string"
+            },
+            "audit": {
+              "type": "string",
+              "enum": ["", "privileged", "baseline", "restricted"]
+            },
+            "auditVersion": {
+              "type": "string"
+            },
+            "enforce": {
+              "type": "string",
+              "enum": ["", "privileged", "baseline", "restricted"]
+            },
+            "enforceVersion": {
+              "type": "string"
+            }
+          }
+        }
+      }
+    },
     "networkPolicy": {
       "type": "object",
       "description": "NetworkPolicy egress lockdown for untrusted training pods. Requires a CNI that enforces NetworkPolicy.",

@@ -69,6 +69,38 @@ openshift:
   scc:
     enabled: false
 
+# -- Namespace management
+# Default: OFF -- the chart assumes the operator pre-created the namespace via
+#   kubectl create namespace <name>
+# or
+#   helm install --create-namespace -n <name> ...
+#
+# Set namespace.create: true ONLY on greenfield installs. The chart then
+# templates the Namespace with Pod Security Admission labels applied and
+# `helm.sh/resource-policy: keep` so uninstall does not delete your data.
+#
+# For EXISTING namespaces, leave create: false and apply the labels yourself:
+#   kubectl label namespace <name> \
+#     pod-security.kubernetes.io/warn=restricted \
+#     pod-security.kubernetes.io/audit=restricted
+#
+# Enforce mode is deliberately left OFF by default -- the mysql init
+# container and the resource-monitor DaemonSet violate the restricted
+# profile (runAsUser: 0 and hostPath respectively). Opting into enforce
+# before those are refactored will break the chart.
+namespace:
+  create: false
+  podSecurity:
+    # Kubectl warnings for pods that violate the profile
+    warn: restricted
+    warnVersion: "latest"
+    # Audit-log events for pods that violate the profile
+    audit: restricted
+    auditVersion: "latest"
+    # Pod rejection (leave empty by default; see note above)
+    enforce: ""
+    enforceVersion: ""
+
 # -- NetworkPolicy hardening for training pods.
 # Training pods run untrusted ML code; this denies ingress and restricts
 # egress to DNS + external HTTPS only (blocks pod-to-pod, MySQL, K8s API).

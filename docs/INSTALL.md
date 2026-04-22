@@ -129,6 +129,44 @@ kubectl get pods -n tracebloc -l app=mysql-client
 
 ---
 
+## Namespace Pod Security Admission labels
+
+Training Jobs run untrusted user-supplied ML code. In addition to the per-pod `securityContext` the chart already applies, you can layer on Kubernetes [Pod Security Admission](https://kubernetes.io/docs/concepts/security/pod-security-admission/) labels on the release namespace for defense-in-depth.
+
+The chart supports two paths:
+
+### New (greenfield) install — chart creates the namespace
+
+Set `namespace.create: true` in your values file. The chart will template a `Namespace` resource with:
+
+- `pod-security.kubernetes.io/warn: restricted` — kubectl warnings on violations
+- `pod-security.kubernetes.io/audit: restricted` — audit-log events on violations
+- `helm.sh/resource-policy: keep` — `helm uninstall` leaves the namespace and its data intact
+
+Default profile for warn/audit is `restricted`. Enforce (hard rejection) is deliberately left off — the mysql init container runs as UID 0 and the resource-monitor DaemonSet uses `hostPath`; both would be rejected under `restricted` enforcement.
+
+```yaml
+# my-values.yaml
+namespace:
+  create: true
+  podSecurity:
+    warn: restricted
+    audit: restricted
+    # enforce: "" — leave off until mysql + resource-monitor are refactored
+```
+
+### Existing namespace — apply labels with kubectl
+
+If the namespace already exists (pre-created by `kubectl create namespace` or `helm install --create-namespace`), leave `namespace.create: false` (the default) and apply the labels yourself:
+
+```bash
+kubectl label namespace tracebloc \
+  pod-security.kubernetes.io/warn=restricted \
+  pod-security.kubernetes.io/audit=restricted
+```
+
+---
+
 ## Publishing the chart (maintainers)
 
 The chart repository used for installation is **[tracebloc/client](https://github.com/tracebloc/client)**. Charts are served from that repo’s GitHub Pages at `https://tracebloc.github.io/client`.
