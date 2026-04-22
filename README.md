@@ -95,6 +95,10 @@ $env:CLUSTER_NAME = "myapp"; $env:AGENTS = "3"; irm https://raw.githubuserconten
 
 The **tracebloc** chart is the unified chart for AKS, EKS, bare-metal, and OpenShift. For production-ready install steps (from repo, from `.tgz`, or from source), prerequisites, required values, upgrade, and rollback, see **[docs/INSTALL.md](docs/INSTALL.md)**.
 
+### Security
+
+For the threat model, defense layers, per-platform caveats, operator responsibilities, and verification steps, see **[docs/SECURITY.md](docs/SECURITY.md)**. The chart ships hardened defaults against untrusted user-submitted ML code; deployment still requires a CNI that enforces NetworkPolicy — that file explains exactly what to check.
+
 
 
 

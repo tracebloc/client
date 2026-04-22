@@ -10,6 +10,7 @@ This guide covers installing the **tracebloc** unified Helm chart (AKS, EKS, bar
 - **kubectl** configured for the cluster
 - **Helm 3.x**
 - Required credentials (see [Required configuration](#required-configuration))
+- A CNI that enforces NetworkPolicy if you want the training-pod egress lockdown to actually block traffic — see [SECURITY.md § Per-platform caveats](SECURITY.md#5-per-platform-caveats)
 
 ---
 
