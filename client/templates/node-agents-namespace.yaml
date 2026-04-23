@@ -1,0 +1,34 @@
+{{/*
+  Dedicated namespace for node-level agents (tracebloc-resource-monitor).
+
+  The resource-monitor DaemonSet mounts hostPath /proc and /sys to collect
+  node metrics; Pod Security Admission's `restricted` profile bans hostPath
+  volumes outright, so the DaemonSet cannot be made compliant in a
+  restricted namespace. Isolating it in its own `privileged` namespace
+  lets the release namespace (jobs-manager, mysql, training pods) run
+  under `enforce: restricted` once the other blockers are resolved.
+
+  Gated on:
+    nodeAgents.namespace.create   - skip when managing the namespace out-of-band
+    resourceMonitor != false      - skip when the DaemonSet is disabled
+
+  helm.sh/resource-policy: keep ensures `helm uninstall` does NOT delete
+  the namespace. The namespace itself carries no persistent data, but
+  keeping it avoids recreating the PSA labels on every reinstall and
+  prevents race conditions where a DaemonSet from a concurrent install
+  lands in the not-yet-relabelled namespace.
+*/}}
+{{- if and (ne .Values.resourceMonitor false) .Values.nodeAgents.namespace.create }}
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: {{ .Values.nodeAgents.namespace.name }}
+  annotations:
+    helm.sh/resource-policy: keep
+  labels:
+    {{- include "tracebloc.labels" . | nindent 4 }}
+    app: tracebloc-node-agents
+    pod-security.kubernetes.io/enforce: privileged
+    pod-security.kubernetes.io/warn: privileged
+    pod-security.kubernetes.io/audit: privileged
+{{- end }}

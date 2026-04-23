@@ -13,10 +13,12 @@
     pod-security.kubernetes.io/enforce: <off>      (does NOT reject pods)
 
   Enforce mode is deliberately left unset by default -- the mysql init
-  containers (runAsUser: 0) and the resource-monitor DaemonSet (hostPath
-  mounts) violate the restricted profile and would be rejected. Customers
-  can opt into enforce once those are refactored or moved to a separate
-  namespace; `warn` + `audit` give useful visibility in the meantime.
+  containers still run as UID 0 and would be rejected. The resource-monitor
+  DaemonSet (hostPath mounts) previously blocked enforce too, but now lives
+  in the dedicated `nodeAgents.namespace.name` namespace (privileged PSA),
+  so it no longer constrains this namespace. Customers can opt into enforce
+  once the mysql init is refactored; `warn` + `audit` give useful visibility
+  in the meantime.
 
   helm.sh/resource-policy: keep ensures `helm uninstall` does NOT delete
   the namespace (which would take PVC-backed data with it).

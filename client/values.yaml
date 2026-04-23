@@ -63,6 +63,26 @@ clusterScope: true
 # -- Resource monitor DaemonSet (node-level metrics collection)
 resourceMonitor: true
 
+# -- Node-level agents (currently: tracebloc-resource-monitor DaemonSet).
+# The resource-monitor needs hostPath /proc and /sys to read node metrics,
+# which Pod Security Admission's `restricted` profile bans outright. Rather
+# than diluting the release namespace's PSA profile, node-agents get their
+# own `privileged` namespace so the rest of the workload can run under
+# `enforce: restricted` unblocked.
+#
+# namespace.create: true  -- chart templates the namespace with PSA
+#                            privileged + helm.sh/resource-policy: keep.
+# namespace.create: false -- operator creates the namespace out-of-band
+#                            (e.g. pre-existing cluster, shared namespace,
+#                            or GitOps tool manages it). The chart still
+#                            deploys the DaemonSet, SA, and RBAC into
+#                            namespace.name; it must exist already with
+#                            privileged PSA labels.
+nodeAgents:
+  namespace:
+    create: true
+    name: tracebloc-node-agents
+
 # -- OpenShift-specific settings
 openshift:
   # Create a SecurityContextConstraints allowing hostPath for the resource monitor
@@ -85,9 +105,12 @@ openshift:
 #     pod-security.kubernetes.io/audit=restricted
 #
 # Enforce mode is deliberately left OFF by default -- the mysql init
-# container and the resource-monitor DaemonSet violate the restricted
-# profile (runAsUser: 0 and hostPath respectively). Opting into enforce
-# before those are refactored will break the chart.
+# container still violates the restricted profile (runAsUser: 0). The
+# resource-monitor DaemonSet previously violated `restricted` via its
+# hostPath mounts, but now runs in its own privileged node-agents
+# namespace (see nodeAgents below), so it no longer blocks enforcing
+# restricted on the release namespace. Flip enforce to `restricted`
+# only after the mysql init refactor lands.
 namespace:
   create: false
   podSecurity:

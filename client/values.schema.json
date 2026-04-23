@@ -131,6 +131,28 @@
       "default": true,
       "description": "Deploy resource-monitor DaemonSet. Defaults to true."
     },
+    "nodeAgents": {
+      "type": "object",
+      "description": "Dedicated namespace for node-level agents (resource-monitor). Isolates hostPath-using DaemonSets from the restricted release namespace.",
+      "properties": {
+        "namespace": {
+          "type": "object",
+          "required": ["name"],
+          "properties": {
+            "create": {
+              "type": "boolean",
+              "default": true,
+              "description": "When true, the chart templates the node-agents Namespace with privileged PSA labels. Set false when the namespace is managed out-of-band."
+            },
+            "name": {
+              "type": "string",
+              "minLength": 1,
+              "description": "Name of the namespace that hosts node-level agents. Must exist before install if create is false."
+            }
+          }
+        }
+      }
+    },
     "openshift": {
       "type": "object",
       "properties": {

@@ -1,0 +1,152 @@
+suite: Node-agents namespace + resource-monitor placement
+templates:
+  - templates/node-agents-namespace.yaml
+  - templates/resource-monitor-daemonset.yaml
+  - templates/resource-monitor-rbac.yaml
+  - templates/resource-monitor-scc.yaml
+release:
+  namespace: tracebloc-templates
+set:
+  clientId: "test-id"
+  clientPassword: "test"
+tests:
+  # --- node-agents namespace template ---
+  - it: should render the node-agents namespace by default
+    template: templates/node-agents-namespace.yaml
+    asserts:
+      - hasDocuments:
+          count: 1
+      - isKind:
+          of: Namespace
+      - equal:
+          path: metadata.name
+          value: tracebloc-node-agents
+
+  - it: should apply privileged PSA labels on all three modes
+    template: templates/node-agents-namespace.yaml
+    asserts:
+      - equal:
+          path: metadata.labels["pod-security.kubernetes.io/enforce"]
+          value: privileged
+      - equal:
+          path: metadata.labels["pod-security.kubernetes.io/warn"]
+          value: privileged
+      - equal:
+          path: metadata.labels["pod-security.kubernetes.io/audit"]
+          value: privileged
+
+  - it: should carry the keep annotation so uninstall preserves the namespace
+    template: templates/node-agents-namespace.yaml
+    asserts:
+      - equal:
+          path: metadata.annotations["helm.sh/resource-policy"]
+          value: keep
+
+  - it: should not render when nodeAgents.namespace.create is false
+    template: templates/node-agents-namespace.yaml
+    set:
+      nodeAgents:
+        namespace:
+          create: false
+          name: pre-existing-ns
+    asserts:
+      - hasDocuments:
+          count: 0
+
+  - it: should not render when resourceMonitor is disabled
+    template: templates/node-agents-namespace.yaml
+    set:
+      resourceMonitor: false
+    asserts:
+      - hasDocuments:
+          count: 0
+
+  - it: should honour a custom namespace name
+    template: templates/node-agents-namespace.yaml
+    set:
+      nodeAgents:
+        namespace:
+          create: true
+          name: my-agents
+    asserts:
+      - equal:
+          path: metadata.name
+          value: my-agents
+
+  # --- resource-monitor DaemonSet placement ---
+  - it: should deploy DaemonSet into the node-agents namespace, not release namespace
+    template: templates/resource-monitor-daemonset.yaml
+    asserts:
+      - equal:
+          path: metadata.namespace
+          value: tracebloc-node-agents
+
+  - it: should follow a custom node-agents namespace name
+    template: templates/resource-monitor-daemonset.yaml
+    set:
+      nodeAgents:
+        namespace:
+          create: true
+          name: my-agents
+    asserts:
+      - equal:
+          path: metadata.namespace
+          value: my-agents
+
+  # --- resource-monitor RBAC placement ---
+  - it: should place the ServiceAccount in the node-agents namespace
+    template: templates/resource-monitor-rbac.yaml
+    documentIndex: 0
+    asserts:
+      - isKind:
+          of: ServiceAccount
+      - equal:
+          path: metadata.namespace
+          value: tracebloc-node-agents
+
+  - it: should bind the ClusterRoleBinding subject to the node-agents namespace
+    template: templates/resource-monitor-rbac.yaml
+    set:
+      clusterScope: true
+    documentIndex: 2
+    asserts:
+      - isKind:
+          of: ClusterRoleBinding
+      - equal:
+          path: subjects[0].namespace
+          value: tracebloc-node-agents
+
+  - it: should place namespace-scoped Role + RoleBinding in the node-agents namespace when clusterScope is false
+    template: templates/resource-monitor-rbac.yaml
+    set:
+      clusterScope: false
+    asserts:
+      - equal:
+          path: metadata.namespace
+          value: tracebloc-node-agents
+        documentIndex: 1
+      - equal:
+          path: metadata.namespace
+          value: tracebloc-node-agents
+        documentIndex: 2
+      - equal:
+          path: subjects[0].namespace
+          value: tracebloc-node-agents
+        documentIndex: 2
+
+  # --- OpenShift SCC ---
+  - it: should reference the node-agents ServiceAccount in the SCC users list
+    template: templates/resource-monitor-scc.yaml
+    set:
+      openshift:
+        scc:
+          enabled: true
+    asserts:
+      - equal:
+          path: users[0]
+          value: system:serviceaccount:tracebloc-node-agents:tracebloc-resource-monitor
+        documentIndex: 0
+      - equal:
+          path: subjects[0].namespace
+          value: tracebloc-node-agents
+        documentIndex: 2
