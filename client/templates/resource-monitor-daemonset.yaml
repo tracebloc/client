@@ -3,7 +3,7 @@ apiVersion: apps/v1
 kind: DaemonSet
 metadata:
   name: tracebloc-resource-monitor
-  namespace: {{ .Release.Namespace }}
+  namespace: {{ .Values.nodeAgents.namespace.name }}
   annotations:
     meta.helm.sh/release-name: {{ .Release.Name }}
     meta.helm.sh/release-namespace: {{ .Release.Namespace }}
@@ -50,10 +50,11 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: spec.nodeName
+            # The monitor queries workloads in the release namespace, not its
+            # own node-agents namespace — use the release namespace literal
+            # rather than the Downward API pod namespace.
             - name: NAMESPACE
-              valueFrom:
-                fieldRef:
-                  fieldPath: metadata.namespace
+              value: {{ .Release.Namespace | quote }}
             - name: MONITOR_INTERVAL
               value: "30"
             - name: CLIENT_ENV
