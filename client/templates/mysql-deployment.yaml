@@ -22,26 +22,34 @@ spec:
       securityContext:
         fsGroup: 999
         fsGroupChangePolicy: "OnRootMismatch"
+      {{- if .Values.hostPath.enabled }}
+      # kubelet does not apply fsGroup to hostPath volumes
+      # (kubernetes/kubernetes#138411), so bare-metal installs need a
+      # privileged bootstrap to chown /var/lib/mysql to 999:999. CSI-backed
+      # deployments (EKS/AKS/OC) skip this and rely on fsGroup.
       initContainers:
       - name: init-mysql-data
         image: busybox:1.35
         securityContext:
           runAsUser: 0
-        command: ['sh', '-c', 'mkdir -p /var/lib/mysql && chown 999:999 /var/lib/mysql && chmod 755 /var/lib/mysql']
+        command: ['sh', '-c', 'chown 999:999 /var/lib/mysql && chmod 755 /var/lib/mysql']
         volumeMounts:
         - name: mysql-persistent-storage
           mountPath: /var/lib/mysql/
-      - name: init-mysql-logs
-        image: busybox:1.35
-        securityContext:
-          runAsUser: 0
-        command: ['sh', '-c', 'mkdir -p /var/log/mysql && chown -R 999:999 /var/log/mysql && chmod -R 755 /var/log/mysql']
-        volumeMounts:
-        - name: mysql-logs
-          mountPath: /var/log/mysql/
+      {{- end }}
       containers:
       - image: {{ include "tracebloc.image" (dict "repository" "tracebloc/mysql-client" "tag" "latest" "registry" "docker.io") | quote }}
         name: mysql-client
+        securityContext:
+          runAsNonRoot: true
+          runAsUser: 999
+          runAsGroup: 999
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+          seccompProfile:
+            type: RuntimeDefault
         resources:
           requests:
             memory: 256Mi
