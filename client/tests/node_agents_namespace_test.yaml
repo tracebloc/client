@@ -4,6 +4,8 @@ templates:
   - templates/resource-monitor-daemonset.yaml
   - templates/resource-monitor-rbac.yaml
   - templates/resource-monitor-scc.yaml
+  - templates/secrets.yaml
+  - templates/docker-registry-secret.yaml
 release:
   namespace: tracebloc-templates
 set:
@@ -116,23 +118,130 @@ tests:
           path: subjects[0].namespace
           value: tracebloc-node-agents
 
-  - it: should place namespace-scoped Role + RoleBinding in the node-agents namespace when clusterScope is false
+  - it: should keep namespace-scoped Role + RoleBinding in the release namespace when clusterScope is false, with SA subject in node-agents
     template: templates/resource-monitor-rbac.yaml
     set:
       clusterScope: false
     asserts:
+      # Role must grant access where the monitored workloads live (release ns)
+      - isKind:
+          of: Role
+        documentIndex: 1
+      - equal:
+          path: metadata.namespace
+          value: tracebloc-templates
+        documentIndex: 1
+      # RoleBinding sits in the release ns so it applies the Role there
+      - isKind:
+          of: RoleBinding
+        documentIndex: 2
+      - equal:
+          path: metadata.namespace
+          value: tracebloc-templates
+        documentIndex: 2
+      # ...but the subject SA lives in the node-agents namespace
+      - equal:
+          path: subjects[0].namespace
+          value: tracebloc-node-agents
+        documentIndex: 2
+
+  # --- Secret mirroring (cross-namespace Secrets are not supported by Kubernetes) ---
+  - it: should mirror the tracebloc Opaque Secret into the node-agents namespace by default
+    template: templates/secrets.yaml
+    asserts:
+      - hasDocuments:
+          count: 2
+      - isKind:
+          of: Secret
+        documentIndex: 0
+      - equal:
+          path: metadata.namespace
+          value: tracebloc-templates
+        documentIndex: 0
+      - isKind:
+          of: Secret
+        documentIndex: 1
       - equal:
           path: metadata.namespace
           value: tracebloc-node-agents
         documentIndex: 1
       - equal:
+          path: metadata.name
+          value: RELEASE-NAME-secrets
+        documentIndex: 1
+      - isNotEmpty:
+          path: data.CLIENT_ID
+        documentIndex: 1
+      - isNotEmpty:
+          path: data.CLIENT_PASSWORD
+        documentIndex: 1
+
+  - it: should not mirror the tracebloc Secret when resourceMonitor is disabled
+    template: templates/secrets.yaml
+    set:
+      resourceMonitor: false
+    asserts:
+      - hasDocuments:
+          count: 1
+      - equal:
+          path: metadata.namespace
+          value: tracebloc-templates
+
+  - it: should not mirror the tracebloc Secret when node-agents namespace equals release namespace
+    template: templates/secrets.yaml
+    set:
+      nodeAgents:
+        namespace:
+          create: false
+          name: tracebloc-templates
+    asserts:
+      - hasDocuments:
+          count: 1
+      - equal:
+          path: metadata.namespace
+          value: tracebloc-templates
+
+  - it: should mirror the docker registry Secret into the node-agents namespace when in use
+    template: templates/docker-registry-secret.yaml
+    set:
+      dockerRegistry:
+        create: true
+        server: https://index.docker.io/v1/
+        username: u
+        password: p
+        email: e@e.com
+    asserts:
+      - hasDocuments:
+          count: 2
+      - equal:
+          path: metadata.namespace
+          value: tracebloc-templates
+        documentIndex: 0
+      - equal:
           path: metadata.namespace
           value: tracebloc-node-agents
-        documentIndex: 2
+        documentIndex: 1
       - equal:
-          path: subjects[0].namespace
-          value: tracebloc-node-agents
-        documentIndex: 2
+          path: type
+          value: kubernetes.io/dockerconfigjson
+        documentIndex: 1
+
+  - it: should not mirror the docker registry Secret when resourceMonitor is disabled
+    template: templates/docker-registry-secret.yaml
+    set:
+      resourceMonitor: false
+      dockerRegistry:
+        create: true
+        server: https://index.docker.io/v1/
+        username: u
+        password: p
+        email: e@e.com
+    asserts:
+      - hasDocuments:
+          count: 1
+      - equal:
+          path: metadata.namespace
+          value: tracebloc-templates
 
   # --- OpenShift SCC ---
   - it: should reference the node-agents ServiceAccount in the SCC users list

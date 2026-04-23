@@ -51,11 +51,15 @@ subjects:
     namespace: {{ .Values.nodeAgents.namespace.name }}
 {{- else }}
 ---
+# Role + RoleBinding live in the RELEASE namespace so the resource-monitor
+# can list pods/logs where the actual workloads run. The RoleBinding
+# subject points at the ServiceAccount in the node-agents namespace
+# (cross-namespace bindings are valid; the Role scope is what matters).
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
   name: tracebloc-resource-monitor-{{ .Release.Name }}
-  namespace: {{ .Values.nodeAgents.namespace.name }}
+  namespace: {{ .Release.Namespace }}
   annotations:
     meta.helm.sh/release-name: {{ .Release.Name }}
     meta.helm.sh/release-namespace: {{ .Release.Namespace }}
@@ -74,7 +78,7 @@ apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
   name: tracebloc-resource-monitor-{{ .Release.Name }}
-  namespace: {{ .Values.nodeAgents.namespace.name }}
+  namespace: {{ .Release.Namespace }}
   annotations:
     meta.helm.sh/release-name: {{ .Release.Name }}
     meta.helm.sh/release-namespace: {{ .Release.Namespace }}
