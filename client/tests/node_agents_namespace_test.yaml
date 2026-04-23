@@ -63,6 +63,17 @@ tests:
       - hasDocuments:
           count: 0
 
+  - it: should not render when node-agents ns name equals release namespace
+    template: templates/node-agents-namespace.yaml
+    set:
+      nodeAgents:
+        namespace:
+          create: true
+          name: tracebloc-templates
+    asserts:
+      - hasDocuments:
+          count: 0
+
   - it: should honour a custom namespace name
     template: templates/node-agents-namespace.yaml
     set:
@@ -94,6 +105,31 @@ tests:
       - equal:
           path: metadata.namespace
           value: my-agents
+
+  - it: should set NAMESPACE env to the release namespace literal, not the Downward API pod namespace
+    template: templates/resource-monitor-daemonset.yaml
+    set:
+      nodeAgents:
+        namespace:
+          create: true
+          name: tracebloc-node-agents
+    asserts:
+      # The monitor watches workloads in the release namespace, so NAMESPACE must
+      # resolve to the release ns, NOT the pod's own (node-agents) namespace.
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: NAMESPACE
+            value: tracebloc-templates
+      # Guard against regressing to the Downward API form, which would now point
+      # at the node-agents namespace and break pod/log lookups.
+      - notContains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: NAMESPACE
+            valueFrom:
+              fieldRef:
+                fieldPath: metadata.namespace
 
   # --- resource-monitor RBAC placement ---
   - it: should place the ServiceAccount in the node-agents namespace
