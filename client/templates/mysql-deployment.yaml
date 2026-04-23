@@ -45,6 +45,7 @@ spec:
           runAsUser: 999
           runAsGroup: 999
           allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
           capabilities:
             drop:
             - ALL
@@ -83,6 +84,16 @@ spec:
           mountPath: /etc/mysql/conf.d/
         - name: mysql-logs
           mountPath: /var/log/mysql/
+        # Writable scratch dirs required by mysqld under readOnlyRootFilesystem:
+        # /var/run/mysqld -> pid file + unix socket
+        # /tmp            -> temp tables, sort buffers, LOAD DATA staging
+        # /var/lib/mysql-files -> default secure_file_priv; mysqld touches it at start
+        - name: mysql-run
+          mountPath: /var/run/mysqld
+        - name: mysql-tmp
+          mountPath: /tmp
+        - name: mysql-files
+          mountPath: /var/lib/mysql-files
       {{- if include "tracebloc.useImagePullSecrets" . }}
       imagePullSecrets:
       - name: {{ include "tracebloc.registrySecretName" . }}
@@ -95,4 +106,10 @@ spec:
         configMap:
           name: mysql-client-config
       - name: mysql-logs
+        emptyDir: {}
+      - name: mysql-run
+        emptyDir: {}
+      - name: mysql-tmp
+        emptyDir: {}
+      - name: mysql-files
         emptyDir: {}
