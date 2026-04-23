@@ -102,15 +102,18 @@ openshift:
 # For EXISTING namespaces, leave create: false and apply the labels yourself:
 #   kubectl label namespace <name> \
 #     pod-security.kubernetes.io/warn=restricted \
-#     pod-security.kubernetes.io/audit=restricted
+#     pod-security.kubernetes.io/audit=restricted \
+#     pod-security.kubernetes.io/enforce=restricted
 #
-# Enforce mode is deliberately left OFF by default -- the mysql init
-# container still violates the restricted profile (runAsUser: 0). The
-# resource-monitor DaemonSet previously violated `restricted` via its
-# hostPath mounts, but now runs in its own privileged node-agents
-# namespace (see nodeAgents below), so it no longer blocks enforcing
-# restricted on the release namespace. Flip enforce to `restricted`
-# only after the mysql init refactor lands.
+# enforce=restricted is the default for CSI-backed deployments (EKS/AKS/OC).
+# The mysql init-container has been refactored so it only renders on bare-metal
+# (hostPath.enabled=true); see client/templates/mysql-deployment.yaml.
+# The resource-monitor DaemonSet lives in its own privileged node-agents
+# namespace (nodeAgents.namespace above), so it does not constrain this one.
+# Bare-metal installs override enforce to "" via ci/bm-values.yaml because
+# kubelet does not apply fsGroup to hostPath volumes
+# (kubernetes/kubernetes#138411), so the privileged init-mysql-data chown
+# container is still needed there and would be rejected by restricted.
 namespace:
   create: false
   podSecurity:
@@ -120,9 +123,9 @@ namespace:
     # Audit-log events for pods that violate the profile
     audit: restricted
     auditVersion: "latest"
-    # Pod rejection (leave empty by default; see note above)
-    enforce: ""
-    enforceVersion: ""
+    # Pod rejection -- restricted by default on CSI; bare-metal must override to ""
+    enforce: restricted
+    enforceVersion: "latest"
 
 # -- NetworkPolicy hardening for training pods.
 # Training pods run untrusted ML code; this denies ingress and restricts
