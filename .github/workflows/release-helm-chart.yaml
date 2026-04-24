@@ -36,7 +36,13 @@ jobs:
           version: v3.15.4
 
       - name: Lint chart
-        run: helm lint --strict ./client
+        # Use a CI values file so `--strict` sees non-empty clientId /
+        # clientPassword (the defaults in values.yaml are deliberately empty
+        # to force operators to supply real credentials, and the schema
+        # enforces minLength:1). Exhaustive multi-platform linting happens in
+        # helm-ci.yaml on every PR — here we just need the chart to lint
+        # cleanly for packaging.
+        run: helm lint --strict ./client -f client/ci/eks-values.yaml
 
       - name: Package tracebloc chart
         id: package
