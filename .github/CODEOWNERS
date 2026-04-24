@@ -1,0 +1,8 @@
+# Narrow CODEOWNERS — security backstop only.
+# Author picks reviewers for everything else; this just ensures a security-aware
+# co-approver on a small set of files where a regression would be expensive.
+
+/client/templates/                                      @saadqbal
+/client/values.schema.json                              @saadqbal
+/client/values.yaml                                     @saadqbal
+/docs/SECURITY.md                                       @saadqbal
