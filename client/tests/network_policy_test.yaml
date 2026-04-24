@@ -14,6 +14,20 @@ tests:
       - hasDocuments:
           count: 0
 
+  # The minItems:1 guard on clusterCidrs must be scoped via `if: enabled=true`
+  # in values.schema.json. Without the scope, an operator running on a
+  # non-enforcing CNI (sets enabled: false) and omitting clusterCidrs gets a
+  # schema error even though the policy is off.
+  - it: should not render and should not fail schema when disabled with empty clusterCidrs
+    set:
+      networkPolicy:
+        training:
+          enabled: false
+          clusterCidrs: []
+    asserts:
+      - hasDocuments:
+          count: 0
+
   - it: should fail when enabled with an empty clusterCidrs list
     # The JSON schema's minItems:1 constraint short-circuits the template-side
     # fail guard; both gates are kept as defense-in-depth (the template guard
