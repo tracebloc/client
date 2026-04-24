@@ -18,8 +18,6 @@
 #    $env:SERVERS       = "1"              default: 1  (control-plane nodes)
 #    $env:AGENTS        = "1"              default: 1  (worker nodes)
 #    $env:K8S_VERSION   = "v1.29.4-k3s1"  default: latest
-#    $env:HTTP_PORT     = "80"             default: 80
-#    $env:HTTPS_PORT    = "443"            default: 443
 #    $env:HOST_DATA_DIR = "C:\data"        default: $env:USERPROFILE\.tracebloc
 #    $env:CLIENT_ENV    = "dev"            optional; if not set, CLIENT_ENV is not added to env in values
 # =============================================================================
@@ -118,8 +116,6 @@ $CLUSTER_NAME  = if ($env:CLUSTER_NAME)  { $env:CLUSTER_NAME }  else { "traceblo
 $SERVERS       = if ($env:SERVERS)       { $env:SERVERS }       else { "1" }
 $AGENTS        = if ($env:AGENTS)        { $env:AGENTS }        else { "1" }
 $K8S_VERSION   = if ($env:K8S_VERSION)   { $env:K8S_VERSION }   else { "v1.29.4-k3s1" }
-$HTTP_PORT     = if ($env:HTTP_PORT)     { $env:HTTP_PORT }     else { "80" }
-$HTTPS_PORT    = if ($env:HTTPS_PORT)    { $env:HTTPS_PORT }    else { "443" }
 $HOST_DATA_DIR = if ($env:HOST_DATA_DIR) { $env:HOST_DATA_DIR } else { "$env:USERPROFILE\.tracebloc" }
 $CLIENT_ENV    = $env:CLIENT_ENV
 
@@ -149,8 +145,6 @@ Advanced configuration (environment variables):
   AGENTS         Worker nodes                    (default: 1)
   K8S_VERSION    k3s image tag                   (default: v1.29.4-k3s1)
   -NoReboot      Skip reboot prompt after enabling Windows features
-  HTTP_PORT      Host HTTP  port                 (default: 80)
-  HTTPS_PORT     Host HTTPS port                 (default: 443)
   HOST_DATA_DIR  Persistent data directory       (default: ~\.tracebloc)
 
 macOS / Linux:
@@ -172,15 +166,6 @@ function Confirm-Config {
   }
   if ($SERVERS -notmatch '^[1-9]\d*$') { Err ("SERVERS must be a positive integer >= 1 (got '" + $SERVERS + "')") }
   if ($AGENTS  -notmatch '^\d+$') { Err ("AGENTS must be a non-negative integer (got '" + $AGENTS + "')") }
-  if ($HTTP_PORT  -notmatch '^\d+$' -or [int]$HTTP_PORT -lt 1 -or [int]$HTTP_PORT -gt 65535) {
-    Err ("HTTP_PORT must be 1-65535 (got '" + $HTTP_PORT + "')")
-  }
-  if ($HTTPS_PORT -notmatch '^\d+$' -or [int]$HTTPS_PORT -lt 1 -or [int]$HTTPS_PORT -gt 65535) {
-    Err ("HTTPS_PORT must be 1-65535 (got '" + $HTTPS_PORT + "')")
-  }
-  if ($HTTP_PORT -eq $HTTPS_PORT) {
-    Err ("HTTP_PORT and HTTPS_PORT must be different (both set to " + $HTTP_PORT + ")")
-  }
   $dataDir = [System.IO.Path]::GetFullPath($HOST_DATA_DIR)
   $userProfile = [System.IO.Path]::GetFullPath($env:USERPROFILE)
   if (-not $dataDir.StartsWith($userProfile, [StringComparison]::OrdinalIgnoreCase)) {
@@ -231,7 +216,7 @@ function Print-Banner {
   Hint "  ~\.tracebloc\    (data and config)"
   Hint "  Docker           (container runtime)"
   Write-Host ""
-  Log "Cluster='$CLUSTER_NAME'  Servers=$SERVERS  Agents=$AGENTS  HTTP=$HTTP_PORT  HTTPS=$HTTPS_PORT"
+  Log "Cluster='$CLUSTER_NAME'  Servers=$SERVERS  Agents=$AGENTS"
   Log "Host data dir: $HOST_DATA_DIR"
 }
 
@@ -715,14 +700,20 @@ function New-K3dCluster {
       New-Item -ItemType Directory -Path $HOST_DATA_DIR -Force | Out-Null
     }
 
+    # The tracebloc client is outbound-only: jobs-manager + pods-monitor dial
+    # out to the platform, and the only in-cluster Service (mysql-client) is
+    # ClusterIP. Disable k3s components that exist solely to handle inbound
+    # traffic or duplicate chart-provided resources.
     $k3dArgs = @(
       "cluster", "create", $CLUSTER_NAME,
       "--servers", $SERVERS,
       "--agents",  $AGENTS,
-      "--port",    "${HTTP_PORT}:80@loadbalancer",
-      "--port",    "${HTTPS_PORT}:443@loadbalancer",
       "--api-port","6550",
       "-v",        "${HOST_DATA_DIR}:/tracebloc@all",
+      "--k3s-arg", "--disable=traefik@server:*",
+      "--k3s-arg", "--disable=servicelb@server:*",
+      "--k3s-arg", "--disable=metrics-server@server:*",
+      "--k3s-arg", "--disable=local-storage@server:*",
       "--wait"
     )
 
@@ -1069,7 +1060,6 @@ function Print-Summary {
   Log ""
   Log "=== Advanced Info (for debugging) ==="
   Log "Cluster topology: Servers=$SERVERS  Agents=$AGENTS"
-  Log "Ingress: localhost:$HTTP_PORT / localhost:$HTTPS_PORT"
   Log "Volume mount: $HOST_DATA_DIR -> /tracebloc"
   Log ""
   Log "Useful commands:"

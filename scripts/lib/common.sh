@@ -238,8 +238,6 @@ SERVERS="${SERVERS:-1}"
 AGENTS="${AGENTS:-1}"
 # Pinned default; set K8S_VERSION="" to use latest (may break on new k3s releases)
 K8S_VERSION="${K8S_VERSION:-v1.29.4-k3s1}"
-HTTP_PORT="${HTTP_PORT:-80}"
-HTTPS_PORT="${HTTPS_PORT:-443}"
 HOST_DATA_DIR="${HOST_DATA_DIR:-$HOME/.tracebloc}"
 
 # ── Input validation ────────────────────────────────────────────────────────
@@ -252,12 +250,6 @@ validate_config() {
 
   [[ "$SERVERS" =~ ^[1-9][0-9]*$ ]] || error "SERVERS must be a positive integer >= 1 (got '$SERVERS')"
   [[ "$AGENTS"  =~ ^[0-9]+$ ]]     || error "AGENTS must be a non-negative integer (got '$AGENTS')"
-
-  [[ "$HTTP_PORT" =~ ^[0-9]+$ ]]  || error "HTTP_PORT must be a number (got '$HTTP_PORT')"
-  [[ "$HTTPS_PORT" =~ ^[0-9]+$ ]] || error "HTTPS_PORT must be a number (got '$HTTPS_PORT')"
-  (( HTTP_PORT >= 1 && HTTP_PORT <= 65535 ))   || error "HTTP_PORT must be 1-65535 (got '$HTTP_PORT')"
-  (( HTTPS_PORT >= 1 && HTTPS_PORT <= 65535 )) || error "HTTPS_PORT must be 1-65535 (got '$HTTPS_PORT')"
-  (( HTTP_PORT != HTTPS_PORT )) || error "HTTP_PORT and HTTPS_PORT must be different (both set to $HTTP_PORT)"
 
   # HOST_DATA_DIR must be under $HOME and must not be a system path (security)
   local dir="$HOST_DATA_DIR"
@@ -362,8 +354,6 @@ Advanced configuration (environment variables):
   SERVERS        Control-plane nodes             (default: 1)
   AGENTS         Worker nodes                    (default: 1)
   K8S_VERSION    k3s image tag                   (default: v1.29.4-k3s1)
-  HTTP_PORT      Host HTTP  port                 (default: 80)
-  HTTPS_PORT     Host HTTPS port                 (default: 443)
   HOST_DATA_DIR  Persistent data directory       (default: ~/.tracebloc)
 
 Windows:

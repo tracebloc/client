@@ -74,6 +74,18 @@ install_client_helm() {
   _ensure_tracebloc_dirs
   local values_file="${HOST_DATA_DIR}/values.yaml"
 
+  # ── Dev-mode override: caller-supplied values file ───────────────────────
+  # When TRACEBLOC_VALUES_FILE is set, skip prompts and values.yaml generation
+  # and use the provided file as-is. Used for local testing against an
+  # unreleased chart (pair with TRACEBLOC_CHART_PATH).
+  if [[ -n "${TRACEBLOC_VALUES_FILE:-}" ]]; then
+    [[ -f "$TRACEBLOC_VALUES_FILE" ]] || error "TRACEBLOC_VALUES_FILE not found: $TRACEBLOC_VALUES_FILE"
+    values_file="$TRACEBLOC_VALUES_FILE"
+    TB_NAMESPACE="${TB_NAMESPACE:-default}"
+    info "Dev mode: using caller-provided values file"
+    log "Using values file: $values_file (namespace: $TB_NAMESPACE)"
+  else
+
   local use_existing=""
   local default_namespace="default"
   local default_client_id=""
@@ -191,23 +203,33 @@ EOF
 
   chmod 600 "$values_file" 2>/dev/null || true
   log "Values file written to $values_file"
+  fi
 
   _ensure_helm_runnable
 
-  # ── Add repo and install (all output goes to log) ───────────────────────
-  if ! helm repo list 2>/dev/null | grep -q "^${TRACEBLOC_HELM_REPO_NAME}[[:space:]]"; then
-    log "Adding Helm repo: $TRACEBLOC_HELM_REPO_URL"
-    helm repo add "$TRACEBLOC_HELM_REPO_NAME" "$TRACEBLOC_HELM_REPO_URL" >> "${LOG_FILE:-/dev/null}" 2>&1
+  # ── Resolve chart reference: local path (dev) or remote repo (default) ──
+  local chart_ref
+  if [[ -n "${TRACEBLOC_CHART_PATH:-}" ]]; then
+    [[ -d "$TRACEBLOC_CHART_PATH" ]] || error "TRACEBLOC_CHART_PATH not found: $TRACEBLOC_CHART_PATH"
+    chart_ref="$TRACEBLOC_CHART_PATH"
+    info "Dev mode: using local chart at $chart_ref"
+    log "Using local chart: $chart_ref"
+  else
+    if ! helm repo list 2>/dev/null | grep -q "^${TRACEBLOC_HELM_REPO_NAME}[[:space:]]"; then
+      log "Adding Helm repo: $TRACEBLOC_HELM_REPO_URL"
+      helm repo add "$TRACEBLOC_HELM_REPO_NAME" "$TRACEBLOC_HELM_REPO_URL" >> "${LOG_FILE:-/dev/null}" 2>&1
+    fi
+    log "Updating Helm repos..."
+    helm repo update >> "${LOG_FILE:-/dev/null}" 2>&1
+    chart_ref="$TRACEBLOC_HELM_REPO_NAME/$TRACEBLOC_CHART_NAME"
   fi
-  log "Updating Helm repos..."
-  helm repo update >> "${LOG_FILE:-/dev/null}" 2>&1
 
   echo ""
-  log "Installing $TB_NAMESPACE from $TRACEBLOC_HELM_REPO_NAME/$TRACEBLOC_CHART_NAME in namespace '$TB_NAMESPACE'..."
+  log "Installing $TB_NAMESPACE from $chart_ref in namespace '$TB_NAMESPACE'..."
 
   local helm_log
   helm_log="$(mktemp)"
-  if ! helm upgrade --install "$TB_NAMESPACE" "$TRACEBLOC_HELM_REPO_NAME/$TRACEBLOC_CHART_NAME" \
+  if ! helm upgrade --install "$TB_NAMESPACE" "$chart_ref" \
     --namespace "$TB_NAMESPACE" \
     --create-namespace \
     --values "$values_file" > "$helm_log" 2>&1; then
