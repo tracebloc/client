@@ -712,7 +712,6 @@ function New-K3dCluster {
       "-v",        "${HOST_DATA_DIR}:/tracebloc@all",
       "--k3s-arg", "--disable=traefik@server:*",
       "--k3s-arg", "--disable=servicelb@server:*",
-      "--k3s-arg", "--disable=metrics-server@server:*",
       "--k3s-arg", "--disable=local-storage@server:*",
       "--wait"
     )
