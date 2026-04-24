@@ -29,16 +29,29 @@ spec:
       # deployments (EKS/AKS/OC) skip this and rely on fsGroup.
       initContainers:
       - name: init-mysql-data
-        image: busybox:1.35
+        image: {{ include "tracebloc.image" (dict "repository" "library/busybox" "tag" .Values.images.busybox.tag "digest" .Values.images.busybox.digest "registry" "docker.io") | quote }}
+        # Must run as root to chown the hostPath mount; kubelet does not apply
+        # fsGroup to hostPath volumes (kubernetes/kubernetes#138411).
+        # Scope privilege tightly: only CHOWN is needed, no privilege escalation,
+        # read-only root fs, default seccomp.
         securityContext:
           runAsUser: 0
+          runAsNonRoot: false
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop: ["ALL"]
+            add: ["CHOWN"]
+          seccompProfile:
+            type: RuntimeDefault
         command: ['sh', '-c', 'chown 999:999 /var/lib/mysql && chmod 755 /var/lib/mysql']
         volumeMounts:
         - name: mysql-persistent-storage
           mountPath: /var/lib/mysql/
       {{- end }}
       containers:
-      - image: {{ include "tracebloc.image" (dict "repository" "tracebloc/mysql-client" "tag" "latest" "registry" "docker.io") | quote }}
+      - image: {{ include "tracebloc.image" (dict "repository" "tracebloc/mysql-client" "tag" (.Values.images.mysqlClient.tag | default "prod") "digest" .Values.images.mysqlClient.digest "registry" "docker.io") | quote }}
+        imagePullPolicy: IfNotPresent
         name: mysql-client
         securityContext:
           runAsNonRoot: true

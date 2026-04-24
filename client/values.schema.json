@@ -241,15 +241,69 @@
         }
       }
     },
+    "images": {
+      "type": "object",
+      "description": "Container image pinning. Prefer digest over tag for immutability.",
+      "properties": {
+        "jobsManager": {
+          "type": "object",
+          "properties": {
+            "digest": {
+              "type": "string",
+              "pattern": "^(sha256:[a-f0-9]{64})?$",
+              "description": "Optional image digest (sha256:...). When set, overrides the tag."
+            }
+          }
+        },
+        "podsMonitor": {
+          "type": "object",
+          "properties": {
+            "digest": {
+              "type": "string",
+              "pattern": "^(sha256:[a-f0-9]{64})?$"
+            }
+          }
+        },
+        "mysqlClient": {
+          "type": "object",
+          "properties": {
+            "tag": {
+              "type": "string",
+              "not": { "const": "latest" },
+              "description": "Image tag for mysql-client. Empty falls back to env.CLIENT_ENV. Must not be \"latest\"."
+            },
+            "digest": {
+              "type": "string",
+              "pattern": "^(sha256:[a-f0-9]{64})?$"
+            }
+          }
+        },
+        "busybox": {
+          "type": "object",
+          "properties": {
+            "tag": {
+              "type": "string",
+              "not": { "const": "latest" }
+            },
+            "digest": {
+              "type": "string",
+              "pattern": "^(sha256:[a-f0-9]{64})?$"
+            }
+          }
+        }
+      }
+    },
     "clientId": {
       "type": "string",
       "minLength": 1,
-      "description": "Client ID for authentication"
+      "not": { "pattern": "^<.*>$" },
+      "description": "Client ID for authentication. Must be a real value, not a placeholder like <CLIENT_ID>."
     },
     "clientPassword": {
       "type": "string",
       "minLength": 1,
-      "description": "Client authentication password"
+      "not": { "pattern": "^<.*>$" },
+      "description": "Client authentication password. Must be a real value, not a placeholder like <CLIENT_PASSWORD>."
     },
     "dockerRegistry": {
       "type": ["object", "null"],
