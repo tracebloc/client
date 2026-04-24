@@ -231,11 +231,22 @@
             },
             "clusterCidrs": {
               "type": "array",
-              "description": "In-cluster pod+service CIDRs to block pod-to-pod egress on port 443. Override to match your cluster CIDRs.",
+              "description": "In-cluster pod+service CIDRs to block pod-to-pod egress on port 443. Override to match your cluster CIDRs. Must be non-empty when networkPolicy.training.enabled is true — an empty list renders `except: null` and Kubernetes treats that as no exceptions, silently allowing unrestricted in-cluster egress.",
               "items": {
                 "type": "string",
                 "pattern": "^[0-9.]+/[0-9]+$"
               }
+            }
+          },
+          "if": {
+            "properties": {
+              "enabled": { "const": true }
+            },
+            "required": ["enabled"]
+          },
+          "then": {
+            "properties": {
+              "clusterCidrs": { "minItems": 1 }
             }
           }
         }

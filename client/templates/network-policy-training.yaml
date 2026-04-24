@@ -19,6 +19,9 @@
   See values.yaml networkPolicy.training.enabled for platform notes.
 */}}
 {{- if .Values.networkPolicy.training.enabled }}
+{{- if not .Values.networkPolicy.training.clusterCidrs }}
+{{- fail "networkPolicy.training.enabled is true but networkPolicy.training.clusterCidrs is empty. An empty list renders `except: null`, which Kubernetes treats as no exceptions — training pods would get unrestricted port-443 egress to MySQL, the K8s API, jobs-manager, and other in-cluster destinations. Set the list to your cluster's pod+service CIDRs, or disable the policy." }}
+{{- end }}
 {{- $dnsSelector := .Values.networkPolicy.training.dnsSelector }}
 {{- if not $dnsSelector }}{{ $dnsSelector = dict "k8s-app" "kube-dns" }}{{- end }}
 apiVersion: networking.k8s.io/v1

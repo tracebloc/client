@@ -42,8 +42,16 @@ spec:
         - operator: "Exists"
       containers:
         - name: tracebloc-resource-monitor
-          image: {{ include "tracebloc.image" (dict "repository" "tracebloc/resource-monitor" "tag" .Values.env.CLIENT_ENV "digest" .Values.images.resourceMonitor.digest "registry" "docker.io") | quote }}
-          imagePullPolicy: {{ if .Values.images.resourceMonitor.digest }}IfNotPresent{{ else }}Always{{ end }}
+          {{- /*
+            images.resourceMonitor was added in 1.0.7; older releases that
+            upgrade via `helm upgrade --reuse-values` won't have the block in
+            their stored values, so read it defensively (nested `default dict`
+            tolerates a missing `images` map AND a missing `resourceMonitor`
+            entry). `dig` is not usable here — it rejects chartutil.Values.
+          */}}
+          {{- $rmDigest := (default (dict) (default (dict) .Values.images).resourceMonitor).digest | default "" }}
+          image: {{ include "tracebloc.image" (dict "repository" "tracebloc/resource-monitor" "tag" .Values.env.CLIENT_ENV "digest" $rmDigest "registry" "docker.io") | quote }}
+          imagePullPolicy: {{ if $rmDigest }}IfNotPresent{{ else }}Always{{ end }}
           securityContext:
             allowPrivilegeEscalation: false
             capabilities:
