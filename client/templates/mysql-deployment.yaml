@@ -32,8 +32,10 @@ spec:
         image: {{ include "tracebloc.image" (dict "repository" "library/busybox" "tag" .Values.images.busybox.tag "digest" .Values.images.busybox.digest "registry" "docker.io") | quote }}
         # Must run as root to chown the hostPath mount; kubelet does not apply
         # fsGroup to hostPath volumes (kubernetes/kubernetes#138411).
-        # Scope privilege tightly: only CHOWN is needed, no privilege escalation,
-        # read-only root fs, default seccomp.
+        # Scope privilege tightly: only CHOWN is needed — no FOWNER, so do not
+        # chmod here. On re-install the dir is already owned by 999, and
+        # chmod-by-non-owner without CAP_FOWNER returns EPERM (kubelet creates
+        # the dir 0755 via DirectoryOrCreate, so chmod was a no-op anyway).
         securityContext:
           runAsUser: 0
           runAsNonRoot: false
@@ -44,7 +46,7 @@ spec:
             add: ["CHOWN"]
           seccompProfile:
             type: RuntimeDefault
-        command: ['sh', '-c', 'chown 999:999 /var/lib/mysql && chmod 755 /var/lib/mysql']
+        command: ['sh', '-c', 'chown 999:999 /var/lib/mysql']
         volumeMounts:
         - name: mysql-persistent-storage
           mountPath: /var/lib/mysql/
