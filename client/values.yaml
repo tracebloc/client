@@ -181,6 +181,8 @@ images:
     digest: ""
   podsMonitor:
     digest: ""
+  resourceMonitor:
+    digest: ""
   mysqlClient:
     # mysql-client is only published under the "prod" tag — it has no dev/
     # staging variants, so we decouple it from env.CLIENT_ENV. Override only

@@ -42,8 +42,8 @@ spec:
         - operator: "Exists"
       containers:
         - name: tracebloc-resource-monitor
-          image: {{ include "tracebloc.image" (dict "repository" "tracebloc/resource-monitor" "tag" .Values.env.CLIENT_ENV "registry" "docker.io") | quote }}
-          imagePullPolicy: Always
+          image: {{ include "tracebloc.image" (dict "repository" "tracebloc/resource-monitor" "tag" .Values.env.CLIENT_ENV "digest" .Values.images.resourceMonitor.digest "registry" "docker.io") | quote }}
+          imagePullPolicy: {{ if .Values.images.resourceMonitor.digest }}IfNotPresent{{ else }}Always{{ end }}
           securityContext:
             allowPrivilegeEscalation: false
             capabilities:
