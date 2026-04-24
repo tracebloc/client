@@ -75,8 +75,11 @@ _create_new_cluster() {
   # or duplicate chart-provided resources:
   #   traefik        — no Ingress resources in the chart
   #   servicelb      — no LoadBalancer Services
-  #   metrics-server — chart ships its own tracebloc-resource-monitor DaemonSet
   #   local-storage  — chart creates its own StorageClass (client-storage-class)
+  #
+  # metrics-server is kept: the tracebloc-resource-monitor DaemonSet queries
+  # the metrics.k8s.io API for node CPU/memory; without it the DaemonSet
+  # crash-loops with 404s against /apis/metrics.k8s.io/v1beta1.
   K3D_ARGS=(
     cluster create "$CLUSTER_NAME"
     --servers "$SERVERS"
@@ -85,7 +88,6 @@ _create_new_cluster() {
     -v "${HOST_DATA_DIR}:/tracebloc@all"
     --k3s-arg "--disable=traefik@server:*"
     --k3s-arg "--disable=servicelb@server:*"
-    --k3s-arg "--disable=metrics-server@server:*"
     --k3s-arg "--disable=local-storage@server:*"
     --wait
   )
