@@ -60,8 +60,41 @@ pvc:
 # -- RBAC scope: true for ClusterRole, false for namespace-scoped Role (recommended for OpenShift without cluster-admin)
 clusterScope: true
 
-# -- Resource monitor DaemonSet (node-level metrics collection)
+# -- Resource monitor DaemonSet (node-level metrics collection).
+# REQUIRES metrics-server (https://github.com/kubernetes-sigs/metrics-server):
+# the DaemonSet polls /apis/metrics.k8s.io/v1beta1 for node CPU/memory and
+# crash-loops with 404s when metrics-server is missing. The chart's
+# resource-monitor-daemonset.yaml has a pre-install `lookup` that fails the
+# release up front so misconfiguration surfaces loudly. Platform notes:
+#   k3d / k3s: metrics-server bundled by default (installer keeps it enabled).
+#   AKS:       metrics-server enabled by default.
+#   EKS:       NOT installed by default — `kubectl apply -f \
+#              https://github.com/kubernetes-sigs/metrics-server/releases/latest/download/components.yaml`
+#   OC:        uses the built-in OpenShift metrics stack.
+#   kubeadm / bare-metal: install metrics-server manually; add
+#              --kubelet-insecure-tls on clusters with self-signed kubelet certs.
+# Set to false on clusters where metrics-server cannot be installed.
 resourceMonitor: true
+
+# -- Node-level agents (currently: tracebloc-resource-monitor DaemonSet).
+# The resource-monitor needs hostPath /proc and /sys to read node metrics,
+# which Pod Security Admission's `restricted` profile bans outright. Rather
+# than diluting the release namespace's PSA profile, node-agents get their
+# own `privileged` namespace so the rest of the workload can run under
+# `enforce: restricted` unblocked.
+#
+# namespace.create: true  -- chart templates the namespace with PSA
+#                            privileged + helm.sh/resource-policy: keep.
+# namespace.create: false -- operator creates the namespace out-of-band
+#                            (e.g. pre-existing cluster, shared namespace,
+#                            or GitOps tool manages it). The chart still
+#                            deploys the DaemonSet, SA, and RBAC into
+#                            namespace.name; it must exist already with
+#                            privileged PSA labels.
+nodeAgents:
+  namespace:
+    create: true
+    name: tracebloc-node-agents
 
 # -- OpenShift-specific settings
 openshift:
@@ -69,9 +102,104 @@ openshift:
   scc:
     enabled: false
 
+# -- Namespace management
+# Default: OFF -- the chart assumes the operator pre-created the namespace via
+#   kubectl create namespace <name>
+# or
+#   helm install --create-namespace -n <name> ...
+#
+# Set namespace.create: true ONLY on greenfield installs. The chart then
+# templates the Namespace with Pod Security Admission labels applied and
+# `helm.sh/resource-policy: keep` so uninstall does not delete your data.
+#
+# For EXISTING namespaces, leave create: false and apply the labels yourself:
+#   kubectl label namespace <name> \
+#     pod-security.kubernetes.io/warn=restricted \
+#     pod-security.kubernetes.io/audit=restricted \
+#     pod-security.kubernetes.io/enforce=restricted
+#
+# enforce=restricted is the default for CSI-backed deployments (EKS/AKS/OC).
+# The mysql init-container has been refactored so it only renders on bare-metal
+# (hostPath.enabled=true); see client/templates/mysql-deployment.yaml.
+# The resource-monitor DaemonSet lives in its own privileged node-agents
+# namespace (nodeAgents.namespace above), so it does not constrain this one.
+# Bare-metal installs override enforce to "" via ci/bm-values.yaml because
+# kubelet does not apply fsGroup to hostPath volumes
+# (kubernetes/kubernetes#138411), so the privileged init-mysql-data chown
+# container is still needed there and would be rejected by restricted.
+namespace:
+  create: false
+  podSecurity:
+    # Kubectl warnings for pods that violate the profile
+    warn: restricted
+    warnVersion: "latest"
+    # Audit-log events for pods that violate the profile
+    audit: restricted
+    auditVersion: "latest"
+    # Pod rejection -- restricted by default on CSI; bare-metal must override to ""
+    enforce: restricted
+    enforceVersion: "latest"
+
+# -- NetworkPolicy hardening for training pods.
+# Training pods run untrusted ML code; this denies ingress and restricts
+# egress to DNS + external HTTPS only (blocks pod-to-pod, MySQL, K8s API).
+# Requires a CNI that enforces NetworkPolicy:
+#   AKS:   needs "Azure NPM" (--network-policy azure) or Calico at cluster create
+#   EKS:   needs Calico or Cilium add-on (AWS VPC CNI alone does NOT enforce)
+#   bm:    needs Calico / Cilium / kube-router (Flannel alone does NOT enforce)
+#   OC:    OVN-Kubernetes enforces by default
+# Leave `enabled: false` on clusters without an enforcing CNI — silently
+# having no protection is worse than explicitly disabling it.
+networkPolicy:
+  training:
+    enabled: true
+    dnsNamespace: kube-system
+    # CoreDNS pod selector — varies per platform. Override in ci/<platform>-values.yaml.
+    # When empty, the template falls back to {k8s-app: kube-dns}, which works
+    # on AKS / EKS / kind / kubeadm / most standard distros.
+    # OpenShift requires explicit override: see client/ci/oc-values.yaml.
+    # Helm merges map values, so to change the selector you MUST set
+    # dnsSelector to the complete desired map (not just additions).
+    dnsSelector: {}
+    # In-cluster CIDRs to block for pod-to-pod egress.
+    # The defaults cover common pod+service CIDR combinations. Override if your
+    # cluster uses different CIDRs (e.g. OpenShift defaults: 10.128.0.0/14 + 172.30.0.0/16).
+    clusterCidrs:
+      - "10.0.0.0/8"
+      - "172.16.0.0/12"
+      - "192.168.0.0/16"
+
+# -- Container image pinning.
+# For each image, set `digest` to a sha256 (e.g. "sha256:abc123...") to pin
+# the image by content hash. Digest pinning is strongly preferred: tags are
+# mutable, so registry swaps can silently change what you run. When `digest`
+# is set the tag field is ignored and imagePullPolicy drops to IfNotPresent.
+# Leave `digest` empty to fall back to tag-based pulls (CLIENT_ENV for
+# tracebloc images, `tag` for busybox/mysql-client).
+images:
+  jobsManager:
+    digest: ""
+  podsMonitor:
+    digest: ""
+  resourceMonitor:
+    digest: ""
+  mysqlClient:
+    # mysql-client is only published under the "prod" tag — it has no dev/
+    # staging variants, so we decouple it from env.CLIENT_ENV. Override only
+    # if you are publishing your own fork with a different tag. Never use
+    # "latest"; pin via digest instead.
+    tag: ""
+    digest: ""
+  busybox:
+    tag: "1.35"
+    digest: ""
+
 # -- Secrets
-clientId: "<CLIENT_ID>"
-clientPassword: "<CLIENT_PASSWORD>"
+# These MUST be set via --set, a values file, or an external secret manager.
+# The defaults are intentionally empty; deployment fails fast if they are not
+# overridden. Do NOT commit real credentials to version control.
+clientId: ""
+clientPassword: ""
 
 # -- Docker registry credentials (optional; only used when dockerRegistry is set and create is true)
 # Omit dockerRegistry entirely, or set create: false, for public images (no imagePullSecrets).

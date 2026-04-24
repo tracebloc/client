@@ -10,6 +10,9 @@ This guide covers installing the **tracebloc** unified Helm chart (AKS, EKS, bar
 - **kubectl** configured for the cluster
 - **Helm 3.x**
 - Required credentials (see [Required configuration](#required-configuration))
+- A CNI that enforces NetworkPolicy if you want the training-pod egress lockdown to actually block traffic — see [SECURITY.md § Per-platform caveats](SECURITY.md#5-per-platform-caveats)
+
+**Migrating from another chart?** Read [MIGRATIONS.md](MIGRATIONS.md) first. Skipping the pre-flight `resource-policy: keep` check can delete your PVCs during uninstall, even if you live-annotated them.
 
 ---
 
@@ -125,6 +128,68 @@ helm status my-tracebloc -n tracebloc
 kubectl get pods -n tracebloc -l app.kubernetes.io/instance=my-tracebloc
 kubectl get pods -n tracebloc -l app=manager
 kubectl get pods -n tracebloc -l app=mysql-client
+```
+
+---
+
+## Namespace Pod Security Admission labels
+
+Training Jobs run untrusted user-supplied ML code. In addition to the per-pod `securityContext` the chart already applies, you can layer on Kubernetes [Pod Security Admission](https://kubernetes.io/docs/concepts/security/pod-security-admission/) labels on the release namespace for defense-in-depth.
+
+The chart supports two paths:
+
+### New (greenfield) install — chart creates the namespace
+
+Set `namespace.create: true` in your values file. The chart will template a `Namespace` resource with:
+
+- `pod-security.kubernetes.io/warn: restricted` — kubectl warnings on violations
+- `pod-security.kubernetes.io/audit: restricted` — audit-log events on violations
+- `helm.sh/resource-policy: keep` — `helm uninstall` leaves the namespace and its data intact
+
+Default profile for warn/audit is `restricted`. Enforce (hard rejection) is deliberately left off — the mysql init container runs as UID 0 and would be rejected. The resource-monitor DaemonSet previously blocked enforce too (it uses `hostPath`), but now lives in its own dedicated privileged namespace (`nodeAgents.namespace.name`, default `tracebloc-node-agents`), so it no longer constrains the release namespace.
+
+```yaml
+# my-values.yaml
+namespace:
+  create: true
+  podSecurity:
+    warn: restricted
+    audit: restricted
+    # enforce: "" — leave off until the mysql init is refactored
+```
+
+### Node-agents namespace (resource-monitor)
+
+The `tracebloc-resource-monitor` DaemonSet mounts `hostPath` volumes (`/proc`, `/sys`) which Pod Security Admission's `restricted` profile bans outright. The chart isolates it in a dedicated **privileged** namespace (default `tracebloc-node-agents`) so it does not constrain the restricted profile on the release namespace.
+
+```yaml
+# my-values.yaml (defaults shown)
+nodeAgents:
+  namespace:
+    create: true                 # set false if managing the namespace out-of-band
+    name: tracebloc-node-agents
+```
+
+When `create: false`, create the namespace yourself with the required PSA labels:
+
+```bash
+kubectl create namespace tracebloc-node-agents
+kubectl label namespace tracebloc-node-agents \
+  pod-security.kubernetes.io/enforce=privileged \
+  pod-security.kubernetes.io/warn=privileged \
+  pod-security.kubernetes.io/audit=privileged
+```
+
+**Upgrading an existing release** (where the DaemonSet currently lives in the release namespace): Helm will delete the old DaemonSet / ServiceAccount / RoleBinding from the release namespace and recreate them in the node-agents namespace. Expect a brief gap in node metrics during the upgrade (DaemonSet rollout time; ~15s terminationGracePeriod + pod startup). The ClusterRole/ClusterRoleBinding keep the same name and are updated in place.
+
+### Existing namespace — apply labels with kubectl
+
+If the namespace already exists (pre-created by `kubectl create namespace` or `helm install --create-namespace`), leave `namespace.create: false` (the default) and apply the labels yourself:
+
+```bash
+kubectl label namespace tracebloc \
+  pod-security.kubernetes.io/warn=restricted \
+  pod-security.kubernetes.io/audit=restricted
 ```
 
 ---

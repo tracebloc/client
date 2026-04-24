@@ -28,8 +28,8 @@ spec:
           type: RuntimeDefault
       containers:
       - name: api
-        image: {{ include "tracebloc.image" (dict "repository" "tracebloc/jobs-manager" "tag" .Values.env.CLIENT_ENV "registry" "docker.io") | quote }}
-        imagePullPolicy: Always
+        image: {{ include "tracebloc.image" (dict "repository" "tracebloc/jobs-manager" "tag" .Values.env.CLIENT_ENV "digest" .Values.images.jobsManager.digest "registry" "docker.io") | quote }}
+        imagePullPolicy: {{ if .Values.images.jobsManager.digest }}IfNotPresent{{ else }}Always{{ end }}
         securityContext:
           allowPrivilegeEscalation: false
           capabilities:
@@ -84,8 +84,8 @@ spec:
         {{- end }}
         {{- end }}
       - name: pods-monitor-container
-        image: {{ include "tracebloc.image" (dict "repository" "tracebloc/pods-monitor" "tag" .Values.env.CLIENT_ENV "registry" "docker.io") | quote }}
-        imagePullPolicy: Always
+        image: {{ include "tracebloc.image" (dict "repository" "tracebloc/pods-monitor" "tag" .Values.env.CLIENT_ENV "digest" .Values.images.podsMonitor.digest "registry" "docker.io") | quote }}
+        imagePullPolicy: {{ if .Values.images.podsMonitor.digest }}IfNotPresent{{ else }}Always{{ end }}
         securityContext:
           allowPrivilegeEscalation: false
           capabilities:

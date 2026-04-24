@@ -2,6 +2,15 @@
 hostPath:
   enabled: true
 
+# enforce=restricted rejects the privileged init-mysql-data chown container
+# that hostPath installs require (kubelet does not apply fsGroup to hostPath
+# volumes -- kubernetes/kubernetes#138411). warn+audit stay on so violations
+# are still visible.
+namespace:
+  podSecurity:
+    enforce: ""
+    enforceVersion: ""
+
 pvcAccessMode: ReadWriteOnce
 
 storageClass:
@@ -14,6 +23,13 @@ storageClass:
     - gid=1000
 
 clusterScope: true
+
+# NetworkPolicy: bare-metal enforcement depends on the CNI installed.
+# Calico / Cilium / kube-router enforce. Flannel alone does NOT.
+# Leave enabled here; customers on Flannel-only installations must override.
+networkPolicy:
+  training:
+    enabled: true
 
 clientId: "ci-test-id"
 clientPassword: "ci-test-password"

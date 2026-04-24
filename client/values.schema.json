@@ -131,6 +131,28 @@
       "default": true,
       "description": "Deploy resource-monitor DaemonSet. Defaults to true."
     },
+    "nodeAgents": {
+      "type": "object",
+      "description": "Dedicated namespace for node-level agents (resource-monitor). Isolates hostPath-using DaemonSets from the restricted release namespace.",
+      "properties": {
+        "namespace": {
+          "type": "object",
+          "required": ["name"],
+          "properties": {
+            "create": {
+              "type": "boolean",
+              "default": true,
+              "description": "When true, the chart templates the node-agents Namespace with privileged PSA labels. Set false when the namespace is managed out-of-band."
+            },
+            "name": {
+              "type": "string",
+              "minLength": 1,
+              "description": "Name of the namespace that hosts node-level agents. Must exist before install if create is false."
+            }
+          }
+        }
+      }
+    },
     "openshift": {
       "type": "object",
       "properties": {
@@ -145,15 +167,163 @@
         }
       }
     },
+    "namespace": {
+      "type": "object",
+      "description": "Optional chart-managed Namespace resource with Pod Security Admission labels",
+      "properties": {
+        "create": {
+          "type": "boolean",
+          "default": false,
+          "description": "When true, the chart templates a Namespace with PSA labels and helm.sh/resource-policy: keep. Only use on greenfield installs."
+        },
+        "podSecurity": {
+          "type": "object",
+          "description": "Pod Security Admission labels. Enforce is OFF by default; mysql init + resource-monitor currently violate restricted.",
+          "properties": {
+            "warn": {
+              "type": "string",
+              "enum": ["", "privileged", "baseline", "restricted"]
+            },
+            "warnVersion": {
+              "type": "string"
+            },
+            "audit": {
+              "type": "string",
+              "enum": ["", "privileged", "baseline", "restricted"]
+            },
+            "auditVersion": {
+              "type": "string"
+            },
+            "enforce": {
+              "type": "string",
+              "enum": ["", "privileged", "baseline", "restricted"]
+            },
+            "enforceVersion": {
+              "type": "string"
+            }
+          }
+        }
+      }
+    },
+    "networkPolicy": {
+      "type": "object",
+      "description": "NetworkPolicy egress lockdown for untrusted training pods. Requires a CNI that enforces NetworkPolicy.",
+      "properties": {
+        "training": {
+          "type": "object",
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "default": true,
+              "description": "Create the training-egress NetworkPolicy. Set false on clusters without an enforcing CNI."
+            },
+            "dnsNamespace": {
+              "type": "string",
+              "default": "kube-system",
+              "description": "Namespace where the cluster DNS service runs"
+            },
+            "dnsSelector": {
+              "type": "object",
+              "description": "Pod labels selecting the cluster DNS service. AKS/EKS/kubeadm: {k8s-app: kube-dns}. OpenShift: {dns.operator.openshift.io/daemonset-dns: default}",
+              "additionalProperties": {
+                "type": "string"
+              }
+            },
+            "clusterCidrs": {
+              "type": "array",
+              "description": "In-cluster pod+service CIDRs to block pod-to-pod egress on port 443. Override to match your cluster CIDRs. Must be non-empty when networkPolicy.training.enabled is true — an empty list renders `except: null` and Kubernetes treats that as no exceptions, silently allowing unrestricted in-cluster egress.",
+              "items": {
+                "type": "string",
+                "pattern": "^[0-9.]+/[0-9]+$"
+              }
+            }
+          },
+          "if": {
+            "properties": {
+              "enabled": { "const": true }
+            },
+            "required": ["enabled"]
+          },
+          "then": {
+            "properties": {
+              "clusterCidrs": { "minItems": 1 }
+            }
+          }
+        }
+      }
+    },
+    "images": {
+      "type": "object",
+      "description": "Container image pinning. Prefer digest over tag for immutability.",
+      "properties": {
+        "jobsManager": {
+          "type": "object",
+          "properties": {
+            "digest": {
+              "type": "string",
+              "pattern": "^(sha256:[a-f0-9]{64})?$",
+              "description": "Optional image digest (sha256:...). When set, overrides the tag."
+            }
+          }
+        },
+        "podsMonitor": {
+          "type": "object",
+          "properties": {
+            "digest": {
+              "type": "string",
+              "pattern": "^(sha256:[a-f0-9]{64})?$"
+            }
+          }
+        },
+        "resourceMonitor": {
+          "type": "object",
+          "properties": {
+            "digest": {
+              "type": "string",
+              "pattern": "^(sha256:[a-f0-9]{64})?$"
+            }
+          }
+        },
+        "mysqlClient": {
+          "type": "object",
+          "properties": {
+            "tag": {
+              "type": "string",
+              "not": { "const": "latest" },
+              "description": "Image tag for mysql-client. Empty falls back to env.CLIENT_ENV. Must not be \"latest\"."
+            },
+            "digest": {
+              "type": "string",
+              "pattern": "^(sha256:[a-f0-9]{64})?$"
+            }
+          }
+        },
+        "busybox": {
+          "type": "object",
+          "properties": {
+            "tag": {
+              "type": "string",
+              "not": { "const": "latest" }
+            },
+            "digest": {
+              "type": "string",
+              "pattern": "^(sha256:[a-f0-9]{64})?$"
+            }
+          }
+        }
+      }
+    },
     "clientId": {
       "type": "string",
       "minLength": 1,
-      "description": "Client ID for authentication"
+      "not": { "pattern": "^<.*>$" },
+      "description": "Client ID for authentication. Must be a real value, not a placeholder like <CLIENT_ID>."
     },
     "clientPassword": {
       "type": "string",
       "minLength": 1,
-      "description": "Client authentication password"
+      "not": { "pattern": "^<.*>$" },
+      "description": "Client authentication password. Must be a real value, not a placeholder like <CLIENT_PASSWORD>."
     },
     "dockerRegistry": {
       "type": ["object", "null"],

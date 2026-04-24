@@ -69,14 +69,26 @@ _handle_existing_cluster() {
 }
 
 _create_new_cluster() {
+  # The tracebloc client is outbound-only: jobs-manager + pods-monitor dial out
+  # to the platform, and the only in-cluster Service (mysql-client) is ClusterIP.
+  # So we disable k3s components that exist solely to handle inbound traffic
+  # or duplicate chart-provided resources:
+  #   traefik        — no Ingress resources in the chart
+  #   servicelb      — no LoadBalancer Services
+  #   local-storage  — chart creates its own StorageClass (client-storage-class)
+  #
+  # metrics-server is kept: the tracebloc-resource-monitor DaemonSet queries
+  # the metrics.k8s.io API for node CPU/memory; without it the DaemonSet
+  # crash-loops with 404s against /apis/metrics.k8s.io/v1beta1.
   K3D_ARGS=(
     cluster create "$CLUSTER_NAME"
     --servers "$SERVERS"
     --agents  "$AGENTS"
-    --port "${HTTP_PORT}:80@loadbalancer"
-    --port "${HTTPS_PORT}:443@loadbalancer"
     --api-port 6550
     -v "${HOST_DATA_DIR}:/tracebloc@all"
+    --k3s-arg "--disable=traefik@server:*"
+    --k3s-arg "--disable=servicelb@server:*"
+    --k3s-arg "--disable=local-storage@server:*"
     --wait
   )
 

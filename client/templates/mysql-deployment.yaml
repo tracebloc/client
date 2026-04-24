@@ -22,26 +22,50 @@ spec:
       securityContext:
         fsGroup: 999
         fsGroupChangePolicy: "OnRootMismatch"
+      {{- if .Values.hostPath.enabled }}
+      # kubelet does not apply fsGroup to hostPath volumes
+      # (kubernetes/kubernetes#138411), so bare-metal installs need a
+      # privileged bootstrap to chown /var/lib/mysql to 999:999. CSI-backed
+      # deployments (EKS/AKS/OC) skip this and rely on fsGroup.
       initContainers:
       - name: init-mysql-data
-        image: busybox:1.35
+        image: {{ include "tracebloc.image" (dict "repository" "library/busybox" "tag" .Values.images.busybox.tag "digest" .Values.images.busybox.digest "registry" "docker.io") | quote }}
+        # Must run as root to chown the hostPath mount; kubelet does not apply
+        # fsGroup to hostPath volumes (kubernetes/kubernetes#138411).
+        # Scope privilege tightly: only CHOWN is needed — no FOWNER, so do not
+        # chmod here. On re-install the dir is already owned by 999, and
+        # chmod-by-non-owner without CAP_FOWNER returns EPERM (kubelet creates
+        # the dir 0755 via DirectoryOrCreate, so chmod was a no-op anyway).
         securityContext:
           runAsUser: 0
-        command: ['sh', '-c', 'mkdir -p /var/lib/mysql && chown 999:999 /var/lib/mysql && chmod 755 /var/lib/mysql']
+          runAsNonRoot: false
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop: ["ALL"]
+            add: ["CHOWN"]
+          seccompProfile:
+            type: RuntimeDefault
+        command: ['sh', '-c', 'chown 999:999 /var/lib/mysql']
         volumeMounts:
         - name: mysql-persistent-storage
           mountPath: /var/lib/mysql/
-      - name: init-mysql-logs
-        image: busybox:1.35
-        securityContext:
-          runAsUser: 0
-        command: ['sh', '-c', 'mkdir -p /var/log/mysql && chown -R 999:999 /var/log/mysql && chmod -R 755 /var/log/mysql']
-        volumeMounts:
-        - name: mysql-logs
-          mountPath: /var/log/mysql/
+      {{- end }}
       containers:
-      - image: {{ include "tracebloc.image" (dict "repository" "tracebloc/mysql-client" "tag" "latest" "registry" "docker.io") | quote }}
+      - image: {{ include "tracebloc.image" (dict "repository" "tracebloc/mysql-client" "tag" (.Values.images.mysqlClient.tag | default "prod") "digest" .Values.images.mysqlClient.digest "registry" "docker.io") | quote }}
+        imagePullPolicy: IfNotPresent
         name: mysql-client
+        securityContext:
+          runAsNonRoot: true
+          runAsUser: 999
+          runAsGroup: 999
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop:
+            - ALL
+          seccompProfile:
+            type: RuntimeDefault
         resources:
           requests:
             memory: 256Mi
@@ -75,6 +99,16 @@ spec:
           mountPath: /etc/mysql/conf.d/
         - name: mysql-logs
           mountPath: /var/log/mysql/
+        # Writable scratch dirs required by mysqld under readOnlyRootFilesystem:
+        # /var/run/mysqld -> pid file + unix socket
+        # /tmp            -> temp tables, sort buffers, LOAD DATA staging
+        # /var/lib/mysql-files -> default secure_file_priv; mysqld touches it at start
+        - name: mysql-run
+          mountPath: /var/run/mysqld
+        - name: mysql-tmp
+          mountPath: /tmp
+        - name: mysql-files
+          mountPath: /var/lib/mysql-files
       {{- if include "tracebloc.useImagePullSecrets" . }}
       imagePullSecrets:
       - name: {{ include "tracebloc.registrySecretName" . }}
@@ -87,4 +121,10 @@ spec:
         configMap:
           name: mysql-client-config
       - name: mysql-logs
+        emptyDir: {}
+      - name: mysql-run
+        emptyDir: {}
+      - name: mysql-tmp
+        emptyDir: {}
+      - name: mysql-files
         emptyDir: {}

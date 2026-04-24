@@ -91,9 +91,17 @@ true
 
 {{/*
 Image reference — defaults to docker.io when no registry is provided.
-Tag defaults to "prod" when CLIENT_ENV is omitted or empty.
-Usage: {{ include "tracebloc.image" (dict "repository" "tracebloc/jobs-manager" "tag" .Values.env.CLIENT_ENV "registry" "docker.io") }}
+When `digest` (sha256:...) is set, renders registry/repo@digest (immutable pin,
+preferred for security). Otherwise falls back to registry/repo:tag, where tag
+defaults to "prod" when CLIENT_ENV is omitted or empty.
+Usage: {{ include "tracebloc.image" (dict "repository" "tracebloc/jobs-manager" "tag" .Values.env.CLIENT_ENV "digest" .Values.images.jobsManager.digest "registry" "docker.io") }}
 */}}
 {{- define "tracebloc.image" -}}
-{{ .registry | default "docker.io" }}/{{ .repository }}:{{ .tag | default "prod" }}
+{{- $registry := .registry | default "docker.io" -}}
+{{- $digest := .digest | default "" -}}
+{{- if $digest -}}
+{{ $registry }}/{{ .repository }}@{{ $digest }}
+{{- else -}}
+{{ $registry }}/{{ .repository }}:{{ .tag | default "prod" }}
+{{- end -}}
 {{- end }}

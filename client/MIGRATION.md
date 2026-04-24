@@ -137,6 +137,29 @@ helm install <release-name> ./client -n <namespace> -f new-values.yaml
 
 > **Important:** PVCs have `helm.sh/resource-policy: keep` so they survive `helm uninstall`. Verify PVCs still exist before installing the new chart.
 
+### 6. Clean up pre-Helm `resource-monitor` remnants
+
+Some early-era edges were installed with a `resource-monitor` DaemonSet deployed via raw `kubectl apply` — **before** the per-platform charts existed. The live manifest has no Helm ownership annotations (`meta.helm.sh/release-*`), and its pods are named `resource-monitor-<suffix>` (not `tracebloc-resource-monitor-<suffix>`).
+
+The unified chart's `tracebloc-resource-monitor` DaemonSet supersedes it. After migrating, delete the legacy resources so the namespace has a single node-level agent and isn't carrying an unmanaged, hostPath-mounting pod that blocks PSA `enforce=restricted`:
+
+```bash
+# Check whether your cluster has the legacy DS
+kubectl -n <namespace> get ds resource-monitor 2>/dev/null
+
+# If present, delete it and its cluster-scoped RBAC (all four names are exact).
+# The ClusterRole/Binding are global — verify they aren't shared by any other workload first:
+kubectl get clusterrolebinding resource-monitor -o jsonpath='{.subjects}'
+# Expect a single subject: ServiceAccount/resource-monitor in <namespace>.
+
+kubectl -n <namespace> delete ds resource-monitor
+kubectl -n <namespace> delete sa resource-monitor
+kubectl delete clusterrolebinding resource-monitor
+kubectl delete clusterrole resource-monitor
+```
+
+The chart-managed `tracebloc-resource-monitor` keeps running throughout; no rollout is triggered.
+
 ## Rollback
 
 The old charts remain in `aks/`, `bm/`, `eks/`, `oc/` and can be used at any time:

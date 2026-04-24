@@ -1,0 +1,42 @@
+suite: Resource-monitor DaemonSet
+templates:
+  - templates/resource-monitor-daemonset.yaml
+set:
+  clientId: "test-id"
+  clientPassword: "test"
+tests:
+  - it: should render with tag fallback when no digest is set
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].image
+          value: "docker.io/tracebloc/resource-monitor:prod"
+      - equal:
+          path: spec.template.spec.containers[0].imagePullPolicy
+          value: Always
+
+  - it: should pin by digest when images.resourceMonitor.digest is set
+    set:
+      images:
+        resourceMonitor:
+          digest: "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].image
+          value: "docker.io/tracebloc/resource-monitor@sha256:0000000000000000000000000000000000000000000000000000000000000000"
+      - equal:
+          path: spec.template.spec.containers[0].imagePullPolicy
+          value: IfNotPresent
+
+  # Regression guard: `helm upgrade --reuse-values` from <1.0.7 carries forward
+  # stored values that never included images.resourceMonitor. The template must
+  # tolerate the whole images map being missing without nil-pointer.
+  - it: should render when images block is entirely absent
+    set:
+      images: null
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].image
+          value: "docker.io/tracebloc/resource-monitor:prod"
+      - equal:
+          path: spec.template.spec.containers[0].imagePullPolicy
+          value: Always

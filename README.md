@@ -44,6 +44,10 @@ Your infrastructure
 - **Multi-framework support** — PyTorch, TensorFlow, custom containers
 - **Hardware scheduling** — CPUs, GPUs, TPUs via Kubernetes-native orchestration
 
+## Security
+
+For the threat model, defense layers, per-platform caveats, operator responsibilities, and verification steps, see **[docs/SECURITY.md](docs/SECURITY.md)**. The chart ships hardened defaults against untrusted user-submitted ML code; deployment still requires a CNI that enforces NetworkPolicy — that file explains exactly what to check.
+
 ## Deploy
 
 ```bash

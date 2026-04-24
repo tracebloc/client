@@ -1,0 +1,121 @@
+suite: Namespace PSA labels
+templates:
+  - templates/namespace.yaml
+set:
+  clientId: "test-id"
+  clientPassword: "test"
+tests:
+  - it: should not render when namespace.create is false
+    set:
+      namespace:
+        create: false
+    asserts:
+      - hasDocuments:
+          count: 0
+
+  - it: should render Namespace with keep annotation when create is true
+    set:
+      namespace:
+        create: true
+        podSecurity:
+          warn: restricted
+          warnVersion: "latest"
+          audit: restricted
+          auditVersion: "latest"
+    asserts:
+      - hasDocuments:
+          count: 1
+      - isKind:
+          of: Namespace
+      - equal:
+          path: metadata.annotations["helm.sh/resource-policy"]
+          value: keep
+
+  - it: should apply warn + audit restricted labels by default
+    set:
+      namespace:
+        create: true
+        podSecurity:
+          warn: restricted
+          warnVersion: "latest"
+          audit: restricted
+          auditVersion: "latest"
+    asserts:
+      - equal:
+          path: metadata.labels["pod-security.kubernetes.io/warn"]
+          value: restricted
+      - equal:
+          path: metadata.labels["pod-security.kubernetes.io/audit"]
+          value: restricted
+
+  - it: should include version labels when provided
+    set:
+      namespace:
+        create: true
+        podSecurity:
+          warn: restricted
+          warnVersion: "v1.29"
+          audit: restricted
+          auditVersion: "v1.29"
+    asserts:
+      - equal:
+          path: metadata.labels["pod-security.kubernetes.io/warn-version"]
+          value: v1.29
+      - equal:
+          path: metadata.labels["pod-security.kubernetes.io/audit-version"]
+          value: v1.29
+
+  - it: should omit enforce label when enforce is empty
+    set:
+      namespace:
+        create: true
+        podSecurity:
+          warn: restricted
+          audit: restricted
+          enforce: ""
+    asserts:
+      - notExists:
+          path: metadata.labels["pod-security.kubernetes.io/enforce"]
+
+  - it: should include enforce label when explicitly set
+    set:
+      namespace:
+        create: true
+        podSecurity:
+          warn: restricted
+          audit: restricted
+          enforce: restricted
+          enforceVersion: "latest"
+    asserts:
+      - equal:
+          path: metadata.labels["pod-security.kubernetes.io/enforce"]
+          value: restricted
+
+  - it: should allow baseline profile instead of restricted
+    set:
+      namespace:
+        create: true
+        podSecurity:
+          warn: baseline
+          audit: baseline
+    asserts:
+      - equal:
+          path: metadata.labels["pod-security.kubernetes.io/warn"]
+          value: baseline
+      - equal:
+          path: metadata.labels["pod-security.kubernetes.io/audit"]
+          value: baseline
+
+  - it: should name the namespace after the release namespace
+    release:
+      namespace: my-custom-ns
+    set:
+      namespace:
+        create: true
+        podSecurity:
+          warn: restricted
+          audit: restricted
+    asserts:
+      - equal:
+          path: metadata.name
+          value: my-custom-ns

@@ -1,9 +1,23 @@
 {{- if ne .Values.resourceMonitor false }}
+{{/*
+  Pre-flight: resource-monitor polls the metrics.k8s.io API. Without
+  metrics-server registered, the DaemonSet crash-loops with 404s. We probe
+  kube-system via `lookup` first — that returns empty during `helm template`
+  (no cluster access), so offline rendering isn't blocked. On a real install
+  where lookup can see the cluster, we require metrics-server up front.
+*/}}
+{{- $probe := lookup "v1" "Namespace" "" "kube-system" -}}
+{{- if $probe -}}
+{{- $metrics := lookup "apiregistration.k8s.io/v1" "APIService" "" "v1beta1.metrics.k8s.io" -}}
+{{- if not $metrics -}}
+{{- fail "resourceMonitor is enabled but the metrics.k8s.io/v1beta1 API is not registered. Install metrics-server (https://github.com/kubernetes-sigs/metrics-server) or set resourceMonitor: false. See SECURITY.md." -}}
+{{- end -}}
+{{- end }}
 apiVersion: apps/v1
 kind: DaemonSet
 metadata:
   name: tracebloc-resource-monitor
-  namespace: {{ .Release.Namespace }}
+  namespace: {{ .Values.nodeAgents.namespace.name }}
   annotations:
     meta.helm.sh/release-name: {{ .Release.Name }}
     meta.helm.sh/release-namespace: {{ .Release.Namespace }}
@@ -28,8 +42,16 @@ spec:
         - operator: "Exists"
       containers:
         - name: tracebloc-resource-monitor
-          image: {{ include "tracebloc.image" (dict "repository" "tracebloc/resource-monitor" "tag" .Values.env.CLIENT_ENV "registry" "docker.io") | quote }}
-          imagePullPolicy: Always
+          {{- /*
+            images.resourceMonitor was added in 1.0.7; older releases that
+            upgrade via `helm upgrade --reuse-values` won't have the block in
+            their stored values, so read it defensively (nested `default dict`
+            tolerates a missing `images` map AND a missing `resourceMonitor`
+            entry). `dig` is not usable here — it rejects chartutil.Values.
+          */}}
+          {{- $rmDigest := (default (dict) (default (dict) .Values.images).resourceMonitor).digest | default "" }}
+          image: {{ include "tracebloc.image" (dict "repository" "tracebloc/resource-monitor" "tag" .Values.env.CLIENT_ENV "digest" $rmDigest "registry" "docker.io") | quote }}
+          imagePullPolicy: {{ if $rmDigest }}IfNotPresent{{ else }}Always{{ end }}
           securityContext:
             allowPrivilegeEscalation: false
             capabilities:
@@ -50,10 +72,11 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: spec.nodeName
+            # The monitor queries workloads in the release namespace, not its
+            # own node-agents namespace — use the release namespace literal
+            # rather than the Downward API pod namespace.
             - name: NAMESPACE
-              valueFrom:
-                fieldRef:
-                  fieldPath: metadata.namespace
+              value: {{ .Release.Namespace | quote }}
             - name: MONITOR_INTERVAL
               value: "30"
             - name: CLIENT_ENV
