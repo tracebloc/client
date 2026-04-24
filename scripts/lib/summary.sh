@@ -53,7 +53,6 @@ _log_advanced_info() {
   log ""
   log "=== Advanced Info (for debugging) ==="
   log "Cluster topology: Servers=$SERVERS  Agents=$AGENTS"
-  log "Ingress: localhost:$HTTP_PORT / localhost:$HTTPS_PORT"
   log "Volume mount: $HOST_DATA_DIR → /tracebloc"
   log ""
   log "Useful commands:"

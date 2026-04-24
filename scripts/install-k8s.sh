@@ -18,8 +18,6 @@
 #    SERVERS=1                   default: 1  (control-plane nodes)
 #    AGENTS=1                    default: 1  (worker nodes)
 #    K8S_VERSION=v1.29.4-k3s1   default: latest stable k3s
-#    HTTP_PORT=80                default: 80   (host → cluster ingress)
-#    HTTPS_PORT=443              default: 443
 #    HOST_DATA_DIR=~/.tracebloc  default: ~/.tracebloc
 #    CLIENT_ENV=dev              optional; if not set, CLIENT_ENV is not added to env in values
 #    TRACEBLOC_SKIP_REBOOT_PROMPT=1 (Linux) skip "Reboot now?" after NVIDIA driver install
