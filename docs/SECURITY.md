@@ -92,7 +92,7 @@ The customer deploys a single Helm chart (this repo) that creates, in their clus
 - **jobs-manager** (Deployment) — long-running listener on Azure Service Bus; spawns training `Job` objects in response to backend messages.
 - **pods-monitor** (sidecar in jobs-manager) — watches training pod lifecycle.
 - **mysql-client** (Deployment) — local MySQL for dataset metadata.
-- **resource-monitor** (DaemonSet) — per-node metrics collection.
+- **resource-monitor** (DaemonSet) — per-node metrics collection. Requires `metrics-server` (polls `/apis/metrics.k8s.io/v1beta1`); the chart fails the install up front if it's missing. Disable via `resourceMonitor: false` on clusters where metrics-server cannot be installed.
 - Supporting: ServiceAccount, RBAC Role/ClusterRole, PVCs, Secrets, optional NetworkPolicy, optional Namespace.
 
 When the backend assigns an experiment to this edge, jobs-manager creates a Kubernetes `Job`. The resulting pod runs a training image (`tracebloc/client-<category>-<arch>`) that executes the uploaded user code.

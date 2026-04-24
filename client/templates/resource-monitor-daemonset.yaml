@@ -1,4 +1,18 @@
 {{- if ne .Values.resourceMonitor false }}
+{{/*
+  Pre-flight: resource-monitor polls the metrics.k8s.io API. Without
+  metrics-server registered, the DaemonSet crash-loops with 404s. We probe
+  kube-system via `lookup` first — that returns empty during `helm template`
+  (no cluster access), so offline rendering isn't blocked. On a real install
+  where lookup can see the cluster, we require metrics-server up front.
+*/}}
+{{- $probe := lookup "v1" "Namespace" "" "kube-system" -}}
+{{- if $probe -}}
+{{- $metrics := lookup "apiregistration.k8s.io/v1" "APIService" "" "v1beta1.metrics.k8s.io" -}}
+{{- if not $metrics -}}
+{{- fail "resourceMonitor is enabled but the metrics.k8s.io/v1beta1 API is not registered. Install metrics-server (https://github.com/kubernetes-sigs/metrics-server) or set resourceMonitor: false. See SECURITY.md." -}}
+{{- end -}}
+{{- end }}
 apiVersion: apps/v1
 kind: DaemonSet
 metadata:

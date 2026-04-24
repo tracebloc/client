@@ -60,7 +60,20 @@ pvc:
 # -- RBAC scope: true for ClusterRole, false for namespace-scoped Role (recommended for OpenShift without cluster-admin)
 clusterScope: true
 
-# -- Resource monitor DaemonSet (node-level metrics collection)
+# -- Resource monitor DaemonSet (node-level metrics collection).
+# REQUIRES metrics-server (https://github.com/kubernetes-sigs/metrics-server):
+# the DaemonSet polls /apis/metrics.k8s.io/v1beta1 for node CPU/memory and
+# crash-loops with 404s when metrics-server is missing. The chart's
+# resource-monitor-daemonset.yaml has a pre-install `lookup` that fails the
+# release up front so misconfiguration surfaces loudly. Platform notes:
+#   k3d / k3s: metrics-server bundled by default (installer keeps it enabled).
+#   AKS:       metrics-server enabled by default.
+#   EKS:       NOT installed by default — `kubectl apply -f \
+#              https://github.com/kubernetes-sigs/metrics-server/releases/latest/download/components.yaml`
+#   OC:        uses the built-in OpenShift metrics stack.
+#   kubeadm / bare-metal: install metrics-server manually; add
+#              --kubelet-insecure-tls on clusters with self-signed kubelet certs.
+# Set to false on clusters where metrics-server cannot be installed.
 resourceMonitor: true
 
 # -- Node-level agents (currently: tracebloc-resource-monitor DaemonSet).
