@@ -222,7 +222,7 @@ pod-security.kubernetes.io/audit: restricted
 
 `warn` surfaces violations in `kubectl` output; `audit` writes them to the cluster audit log. These are **visibility**, not enforcement — a tripwire against accidental regressions in pod specs.
 
-`enforce: restricted` is deliberately NOT applied by default because two of the chart's own trusted workloads would be rejected under restricted (see §8.5). Customers who refactor or segregate those can flip enforce on via `namespace.podSecurity.enforce: restricted`.
+`enforce: restricted` is on by default on CSI-backed deployments (EKS/AKS/OC); bare-metal overrides it off via `ci/bm-values.yaml`. See §6.6 and §8.5.
 
 ---
 
@@ -307,6 +307,15 @@ If any assertion reads the wrong way, the CNI is not enforcing — investigate b
 The chart only creates a `Namespace` resource when `namespace.create: true` is explicitly set, and only on greenfield installs. If the namespace was pre-created by `kubectl create namespace` or `helm install --create-namespace`, apply the labels yourself:
 
 ```bash
+# CSI-backed deployments (EKS/AKS/OC): enforce is safe.
+kubectl label namespace <ns> \
+  pod-security.kubernetes.io/warn=restricted \
+  pod-security.kubernetes.io/audit=restricted \
+  pod-security.kubernetes.io/enforce=restricted
+
+# Bare-metal (hostPath): skip enforce -- the privileged init-mysql-data
+# chown container required on hostPath (kubernetes/kubernetes#138411)
+# would be rejected. warn+audit still give visibility.
 kubectl label namespace <ns> \
   pod-security.kubernetes.io/warn=restricted \
   pod-security.kubernetes.io/audit=restricted
@@ -320,12 +329,11 @@ If PSA is active, watch for audit events and kubectl warnings indicating a pod s
 
 Chart versions bundle specific Dockerfile + jobs-manager builds. Mixing an old chart with new images or vice-versa may leave hardening gaps. Prefer `helm install` from a pinned chart version and coordinate upgrades.
 
-### 6.6 Upgrade path: refactor before `enforce: restricted`
+### 6.6 `enforce: restricted` on bare-metal
 
-If the customer wants `pod-security.kubernetes.io/enforce: restricted` on the release namespace (true rejection of non-conforming pods), two chart workloads must first be adjusted:
+`enforce: restricted` is the chart default for CSI-backed deployments. Bare-metal installs (`hostPath.enabled: true`) cannot use enforce because the privileged `init-mysql-data` container — required because kubelet does not apply `fsGroup` to hostPath volumes ([kubernetes/kubernetes#138411](https://github.com/kubernetes/kubernetes/issues/138411)) — would be rejected. `ci/bm-values.yaml` overrides `namespace.podSecurity.enforce` to `""` accordingly. `warn` and `audit` remain on so violations are still logged.
 
-1. **mysql-client** init containers run as `runAsUser: 0` to chown the MySQL PVC. Switch to `fsGroup: 999` on the pod spec and drop the init container — works on most storage classes, test on your specific CSI driver.
-2. **resource-monitor** DaemonSet mounts `hostPath: /proc` and `/sys`. There is no clean way to preserve its function under `restricted`; options are to disable the resource monitor, accept baseline-level admission for that pod, or move it to a separate privileged namespace.
+Node-level agents (`tracebloc-resource-monitor` DaemonSet) run in a separate namespace (`tracebloc-node-agents`) at `enforce: privileged` — they legitimately need hostPath access to `/proc` / `/sys` / cgroups. The release namespace stays clean.
 
 ---
 
@@ -423,9 +431,9 @@ Six task types still run on the legacy `common/ping.py` architecture and write w
 
 Adding a migrated category to `READONLY_ROOTFS_CATEGORIES` in the jobs-manager is the only code change needed to promote it once migrated. A separate engineering team owns the migration.
 
-### 8.5 PSA `enforce: restricted` is not default — **platform team**
+### 8.5 PSA `enforce: restricted` on bare-metal — **operator**
 
-See §6.6. Two chart workloads (mysql init containers, resource-monitor DaemonSet) violate the restricted profile. Refactoring them unlocks full admission-time enforcement. Currently audit/warn only.
+`enforce: restricted` is the chart default for CSI-backed deployments (EKS/AKS/OC). Bare-metal installs cannot use enforce because kubelet does not apply `fsGroup` to hostPath volumes ([kubernetes/kubernetes#138411](https://github.com/kubernetes/kubernetes/issues/138411)), forcing the chart to render a privileged `init-mysql-data` chown container on the hostPath path. `ci/bm-values.yaml` overrides enforce to `""` so the install works; `warn` and `audit` remain on. If / when upstream fixes the hostPath fsGroup gap (or the chart moves to a rootless mysql image that doesn't need the chown), bare-metal can join the enforce default.
 
 ### 8.6 NetworkPolicy silent no-op on unsupported CNI — **operator**
 

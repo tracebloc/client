@@ -8,17 +8,18 @@
   Set namespace.create: true ONLY on greenfield installs to have the chart
   template the Namespace with Pod Security Admission labels applied:
 
-    pod-security.kubernetes.io/warn:  restricted   (kubectl warnings)
-    pod-security.kubernetes.io/audit: restricted   (audit-log events)
-    pod-security.kubernetes.io/enforce: <off>      (does NOT reject pods)
+    pod-security.kubernetes.io/warn:    restricted   (kubectl warnings)
+    pod-security.kubernetes.io/audit:   restricted   (audit-log events)
+    pod-security.kubernetes.io/enforce: restricted   (rejects violating pods)
 
-  Enforce mode is deliberately left unset by default -- the mysql init
-  containers still run as UID 0 and would be rejected. The resource-monitor
-  DaemonSet (hostPath mounts) previously blocked enforce too, but now lives
-  in the dedicated `nodeAgents.namespace.name` namespace (privileged PSA),
-  so it no longer constrains this namespace. Customers can opt into enforce
-  once the mysql init is refactored; `warn` + `audit` give useful visibility
-  in the meantime.
+  enforce=restricted is the default for CSI-backed deployments (EKS/AKS/OC).
+  The mysql init-container has been gated on hostPath.enabled, and the
+  resource-monitor DaemonSet was moved to the dedicated nodeAgents
+  namespace (privileged PSA), so the release namespace no longer has
+  workloads that violate restricted. Bare-metal installs override enforce
+  to "" via ci/bm-values.yaml because kubelet does not apply fsGroup to
+  hostPath volumes (kubernetes/kubernetes#138411), so init-mysql-data is
+  still required there and would be rejected; warn+audit remain on.
 
   helm.sh/resource-policy: keep ensures `helm uninstall` does NOT delete
   the namespace (which would take PVC-backed data with it).
