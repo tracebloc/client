@@ -14,6 +14,19 @@ tests:
       - hasDocuments:
           count: 0
 
+  - it: should fail when enabled with an empty clusterCidrs list
+    # The JSON schema's minItems:1 constraint short-circuits the template-side
+    # fail guard; both gates are kept as defense-in-depth (the template guard
+    # catches `helm template --validate=false` and other schema-bypass paths).
+    set:
+      networkPolicy:
+        training:
+          enabled: true
+          clusterCidrs: []
+    asserts:
+      - failedTemplate:
+          errorPattern: "networkPolicy\\.training\\.clusterCidrs: Array must have at least 1 items"
+
   - it: should render a NetworkPolicy when enabled
     set:
       networkPolicy:
