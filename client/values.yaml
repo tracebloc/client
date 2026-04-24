@@ -156,9 +156,35 @@ networkPolicy:
       - "172.16.0.0/12"
       - "192.168.0.0/16"
 
+# -- Container image pinning.
+# For each image, set `digest` to a sha256 (e.g. "sha256:abc123...") to pin
+# the image by content hash. Digest pinning is strongly preferred: tags are
+# mutable, so registry swaps can silently change what you run. When `digest`
+# is set the tag field is ignored and imagePullPolicy drops to IfNotPresent.
+# Leave `digest` empty to fall back to tag-based pulls (CLIENT_ENV for
+# tracebloc images, `tag` for busybox/mysql-client).
+images:
+  jobsManager:
+    digest: ""
+  podsMonitor:
+    digest: ""
+  mysqlClient:
+    # mysql-client is only published under the "prod" tag — it has no dev/
+    # staging variants, so we decouple it from env.CLIENT_ENV. Override only
+    # if you are publishing your own fork with a different tag. Never use
+    # "latest"; pin via digest instead.
+    tag: ""
+    digest: ""
+  busybox:
+    tag: "1.35"
+    digest: ""
+
 # -- Secrets
-clientId: "<CLIENT_ID>"
-clientPassword: "<CLIENT_PASSWORD>"
+# These MUST be set via --set, a values file, or an external secret manager.
+# The defaults are intentionally empty; deployment fails fast if they are not
+# overridden. Do NOT commit real credentials to version control.
+clientId: ""
+clientPassword: ""
 
 # -- Docker registry credentials (optional; only used when dockerRegistry is set and create is true)
 # Omit dockerRegistry entirely, or set create: false, for public images (no imagePullSecrets).
