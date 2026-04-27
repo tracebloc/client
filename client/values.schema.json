@@ -379,12 +379,19 @@
     },
     "priorityClass": {
       "type": "object",
-      "description": "Cluster-scoped PriorityClass for tracebloc data-plane workloads (mysql).",
+      "description": "Cluster-scoped PriorityClass for tracebloc data-plane workloads (mysql). An empty `name` disables the priorityClassName reference on the mysql pod entirely (mysql falls back to default priority 0 — only set this if you explicitly want no OOM protection from the scheduler).",
       "properties": {
         "create": { "type": "boolean", "default": true },
-        "name":   { "type": "string", "minLength": 1, "default": "tracebloc-data-plane" },
+        "name":   { "type": "string", "default": "tracebloc-data-plane" },
         "value":  { "type": "integer", "minimum": 0, "maximum": 1000000000, "default": 1000000 }
-      }
+      },
+      "allOf": [
+        {
+          "$comment": "If we are templating the PriorityClass resource, name must not be empty.",
+          "if":   { "properties": { "create": { "const": true } } },
+          "then": { "properties": { "name": { "minLength": 1 } } }
+        }
+      ]
     },
     "podDisruptionBudget": {
       "type": "object",

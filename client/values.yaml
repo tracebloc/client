@@ -236,8 +236,15 @@ resources:
 # release uninstall does not yank it from sibling releases that share it.
 # Value 1,000,000 sits well above default (0) so the scheduler will preempt
 # noisy training jobs to keep mysql scheduled, but well below
-# system-cluster-critical (2,000,000,000). Set create: false on clusters
-# where you manage PriorityClasses out-of-band (GitOps, shared platform).
+# system-cluster-critical (2,000,000,000).
+#
+# create: false  — chart does not template the PriorityClass; you (or your
+#                  GitOps tool / shared platform) manage it out-of-band.
+#                  The mysql pod still references `name`, so make sure the
+#                  PriorityClass exists at install time.
+# name: ""       — disable the priorityClassName reference entirely. mysql
+#                  falls back to the cluster default priority (0) and loses
+#                  the OOM-protection this chart's mysql tuning relies on.
 priorityClass:
   create: true
   name: tracebloc-data-plane

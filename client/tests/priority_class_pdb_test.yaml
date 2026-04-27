@@ -49,6 +49,16 @@ tests:
       - hasDocuments:
           count: 0
 
+  - it: schema should reject create=true with an empty name
+    template: templates/priority-class.yaml
+    set:
+      priorityClass:
+        create: true
+        name: ""
+    asserts:
+      - failedTemplate:
+          errorPattern: "name: String length must be greater than or equal to 1"
+
   - it: should create the mysql PDB by default
     template: templates/mysql-pdb.yaml
     asserts:

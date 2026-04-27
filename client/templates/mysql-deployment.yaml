@@ -19,8 +19,15 @@ spec:
         app: mysql-client
     spec:
       terminationGracePeriodSeconds: 60
-      {{- if .Values.priorityClass.create }}
-      priorityClassName: {{ .Values.priorityClass.name | quote }}
+      {{- /*
+        Reference the PriorityClass whenever a name is set, regardless of
+        priorityClass.create. Operators on GitOps / shared-platform setups
+        manage the PriorityClass out-of-band (create: false) but still want
+        the pod to reference it — gating on `create` would silently strip
+        the OOM protection this chart's mysql tuning relies on.
+      */}}
+      {{- with .Values.priorityClass.name }}
+      priorityClassName: {{ . | quote }}
       {{- end }}
       securityContext:
         fsGroup: 999
@@ -81,6 +88,15 @@ spec:
             cpu: {{ .Values.resources.mysql.requests.cpu | default "250m" | quote }}
           limits:
             memory: {{ .Values.resources.mysql.limits.memory | default "1Gi" | quote }}
+            {{- /*
+              CPU limit is intentionally unset by default (see comment block
+              above). Schema permits it, so honour an explicit override here
+              instead of silently dropping it. Operators flipping this on
+              should know what they're doing.
+            */}}
+            {{- with .Values.resources.mysql.limits.cpu }}
+            cpu: {{ . | quote }}
+            {{- end }}
         ports:
         - containerPort: 3306
           name: mysql-client

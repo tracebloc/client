@@ -68,14 +68,45 @@ tests:
           path: spec.template.spec.priorityClassName
           value: tracebloc-data-plane
 
-  - it: should NOT set priorityClassName when priorityClass.create is false
+  - it: should keep priorityClassName when create=false (externally managed PriorityClass)
     template: templates/mysql-deployment.yaml
     set:
       priorityClass:
         create: false
+        name: tracebloc-data-plane
+    asserts:
+      - equal:
+          path: spec.template.spec.priorityClassName
+          value: tracebloc-data-plane
+
+  - it: should drop priorityClassName only when name is empty
+    template: templates/mysql-deployment.yaml
+    set:
+      priorityClass:
+        # Schema rejects create=true with empty name (no point templating a
+        # nameless PriorityClass), so disable creation as well to model the
+        # "no PriorityClass at all" path.
+        create: false
+        name: ""
     asserts:
       - notExists:
           path: spec.template.spec.priorityClassName
+
+  - it: should render an explicit mysql cpu limit when operator opts in
+    template: templates/mysql-deployment.yaml
+    set:
+      resources:
+        mysql:
+          limits:
+            cpu: "1500m"
+            memory: "2Gi"
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].resources.limits.cpu
+          value: 1500m
+      - equal:
+          path: spec.template.spec.containers[0].resources.limits.memory
+          value: 2Gi
 
   - it: should create ConfigMap with MySQL config
     template: templates/mysql-configmap.yaml
