@@ -227,6 +227,10 @@ EOF
   echo ""
   log "Installing $TB_NAMESPACE from $chart_ref in namespace '$TB_NAMESPACE'..."
 
+  # Pre-create per-release hostPath dirs so they're owned by the host user, not
+  # root:root from kubelet's DirectoryOrCreate. See _ensure_release_dirs.
+  _ensure_release_dirs "$TB_NAMESPACE"
+
   local helm_log
   helm_log="$(mktemp)"
   if ! helm upgrade --install "$TB_NAMESPACE" "$chart_ref" \
