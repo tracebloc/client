@@ -313,6 +313,97 @@
         }
       }
     },
+    "resources": {
+      "type": "object",
+      "description": "Container resource requests and limits for mysql, jobs-manager, and pods-monitor. See values.yaml for the rationale behind the defaults.",
+      "properties": {
+        "mysql": {
+          "type": "object",
+          "properties": {
+            "requests": {
+              "type": "object",
+              "properties": {
+                "cpu":    { "type": "string", "pattern": "^[0-9]+m?$" },
+                "memory": { "type": "string", "pattern": "^[0-9]+(Ki|Mi|Gi|Ti)$" }
+              }
+            },
+            "limits": {
+              "type": "object",
+              "description": "CPU limit deliberately omitted in defaults — throttling causes InnoDB lock-wait timeouts.",
+              "properties": {
+                "cpu":    { "type": "string", "pattern": "^[0-9]+m?$" },
+                "memory": { "type": "string", "pattern": "^[0-9]+(Ki|Mi|Gi|Ti)$" }
+              }
+            }
+          }
+        },
+        "jobsManager": {
+          "type": "object",
+          "properties": {
+            "requests": {
+              "type": "object",
+              "properties": {
+                "cpu":    { "type": "string", "pattern": "^[0-9]+m?$" },
+                "memory": { "type": "string", "pattern": "^[0-9]+(Ki|Mi|Gi|Ti)$" }
+              }
+            },
+            "limits": {
+              "type": "object",
+              "properties": {
+                "cpu":    { "type": "string", "pattern": "^[0-9]+m?$" },
+                "memory": { "type": "string", "pattern": "^[0-9]+(Ki|Mi|Gi|Ti)$" }
+              }
+            }
+          }
+        },
+        "podsMonitor": {
+          "type": "object",
+          "properties": {
+            "requests": {
+              "type": "object",
+              "properties": {
+                "cpu":    { "type": "string", "pattern": "^[0-9]+m?$" },
+                "memory": { "type": "string", "pattern": "^[0-9]+(Ki|Mi|Gi|Ti)$" }
+              }
+            },
+            "limits": {
+              "type": "object",
+              "properties": {
+                "cpu":    { "type": "string", "pattern": "^[0-9]+m?$" },
+                "memory": { "type": "string", "pattern": "^[0-9]+(Ki|Mi|Gi|Ti)$" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "priorityClass": {
+      "type": "object",
+      "description": "Cluster-scoped PriorityClass for tracebloc data-plane workloads (mysql).",
+      "properties": {
+        "create": { "type": "boolean", "default": true },
+        "name":   { "type": "string", "minLength": 1, "default": "tracebloc-data-plane" },
+        "value":  { "type": "integer", "minimum": 0, "maximum": 1000000000, "default": 1000000 }
+      }
+    },
+    "podDisruptionBudget": {
+      "type": "object",
+      "description": "PodDisruptionBudgets for chart-managed Deployments.",
+      "properties": {
+        "mysql": {
+          "type": "object",
+          "properties": {
+            "create": { "type": "boolean", "default": true }
+          }
+        },
+        "jobsManager": {
+          "type": "object",
+          "properties": {
+            "create": { "type": "boolean", "default": true }
+          }
+        }
+      }
+    },
     "clientId": {
       "type": "string",
       "minLength": 1,

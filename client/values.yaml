@@ -194,6 +194,65 @@ images:
     tag: "1.35"
     digest: ""
 
+# -- Container resource requests and limits.
+# Tuned in v1.1.0 after the prod investigation showed mysql being killed
+# every ~12 minutes when jobs-manager (under-resourced, BestEffort QoS in
+# older releases) ate node memory and triggered the kernel OOM killer.
+#
+# mysql: requests.memory == limits.memory pins the cgroup memory budget so
+# mysqld is never the largest victim during node-level OOM. CPU limit is
+# intentionally OMITTED (no `limits.cpu` field below) — CPU throttling
+# causes InnoDB lock-wait timeouts and is a far more common cause of
+# mysql crashes than a noisy CPU neighbour. PriorityClass + PDB cover
+# eviction.
+#
+# jobs-manager: 256Mi was too tight under load; bumped to 512Mi/1Gi so
+# the Service Bus client + pod watcher have headroom before OOM.
+resources:
+  mysql:
+    requests:
+      cpu: "250m"
+      memory: "1Gi"
+    limits:
+      memory: "1Gi"
+      # No cpu limit — see comment above.
+  jobsManager:
+    requests:
+      cpu: "100m"
+      memory: "512Mi"
+    limits:
+      cpu: "1000m"
+      memory: "1Gi"
+  podsMonitor:
+    requests:
+      cpu: "50m"
+      memory: "256Mi"
+    limits:
+      cpu: "500m"
+      memory: "512Mi"
+
+# -- PriorityClass for the data-plane (mysql).
+# Cluster-scoped resource. Created with helm.sh/resource-policy: keep so a
+# release uninstall does not yank it from sibling releases that share it.
+# Value 1,000,000 sits well above default (0) so the scheduler will preempt
+# noisy training jobs to keep mysql scheduled, but well below
+# system-cluster-critical (2,000,000,000). Set create: false on clusters
+# where you manage PriorityClasses out-of-band (GitOps, shared platform).
+priorityClass:
+  create: true
+  name: tracebloc-data-plane
+  value: 1000000
+
+# -- PodDisruptionBudgets.
+# mysql is single-replica; minAvailable: 1 blocks voluntary disruptions
+# (drains, surge upgrades, autoscaler scale-down) while only one mysql
+# pod exists. Disable if you run a multi-replica mysql managed externally.
+podDisruptionBudget:
+  mysql:
+    create: true
+  jobsManager:
+    create: true
+
 # -- Secrets
 # These MUST be set via --set, a values file, or an external secret manager.
 # The defaults are intentionally empty; deployment fails fast if they are not

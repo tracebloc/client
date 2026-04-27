@@ -1,3 +1,4 @@
+{{- if .Values.podDisruptionBudget.jobsManager.create }}
 apiVersion: policy/v1
 kind: PodDisruptionBudget
 metadata:
@@ -6,7 +7,12 @@ metadata:
   labels:
     {{- include "tracebloc.labels" . | nindent 4 }}
 spec:
-  maxUnavailable: 1
+  # Single-replica deployment: maxUnavailable: 1 is a no-op (the only pod
+  # can always go away). Use minAvailable: 1 to actually block voluntary
+  # disruptions while replicas == 1. Disable when running multi-replica
+  # jobs-manager managed externally.
+  minAvailable: 1
   selector:
     matchLabels:
       app: manager
+{{- end }}

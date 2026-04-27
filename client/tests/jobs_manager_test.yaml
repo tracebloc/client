@@ -57,6 +57,19 @@ tests:
           path: spec.template.spec.containers[0].resources.requests
       - isNotEmpty:
           path: spec.template.spec.containers[0].resources.limits
+      # v1.1.0 floor: 512Mi/1Gi for api, after the prod OOM investigation.
+      - equal:
+          path: spec.template.spec.containers[0].resources.requests.memory
+          value: 512Mi
+      - equal:
+          path: spec.template.spec.containers[0].resources.limits.memory
+          value: 1Gi
+      - equal:
+          path: spec.template.spec.containers[1].resources.requests.memory
+          value: 256Mi
+      - equal:
+          path: spec.template.spec.containers[1].resources.limits.memory
+          value: 512Mi
 
   - it: should reference secret via helper
     asserts:

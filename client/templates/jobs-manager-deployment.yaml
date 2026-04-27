@@ -34,13 +34,18 @@ spec:
           allowPrivilegeEscalation: false
           capabilities:
             drop: ["ALL"]
+        # 256Mi was too tight under load: on a busy cluster the Service Bus
+        # client + pod-event watcher push RSS over 256Mi within minutes, the
+        # pod becomes the OOM-killer's preferred target on the node, and
+        # mysqld dies as collateral. 512Mi/1Gi covers steady state with
+        # headroom; revisit if heap profiling shows the working set growing.
         resources:
           requests:
-            cpu: 100m
-            memory: 256Mi
+            cpu: {{ .Values.resources.jobsManager.requests.cpu | default "100m" | quote }}
+            memory: {{ .Values.resources.jobsManager.requests.memory | default "512Mi" | quote }}
           limits:
-            cpu: 500m
-            memory: 512Mi
+            cpu: {{ .Values.resources.jobsManager.limits.cpu | default "1000m" | quote }}
+            memory: {{ .Values.resources.jobsManager.limits.memory | default "1Gi" | quote }}
         volumeMounts:
           - name: shared-volume
             mountPath: "/data/shared"
@@ -92,11 +97,11 @@ spec:
             drop: ["ALL"]
         resources:
           requests:
-            cpu: 50m
-            memory: 128Mi
+            cpu: {{ .Values.resources.podsMonitor.requests.cpu | default "50m" | quote }}
+            memory: {{ .Values.resources.podsMonitor.requests.memory | default "256Mi" | quote }}
           limits:
-            cpu: 200m
-            memory: 256Mi
+            cpu: {{ .Values.resources.podsMonitor.limits.cpu | default "500m" | quote }}
+            memory: {{ .Values.resources.podsMonitor.limits.memory | default "512Mi" | quote }}
         volumeMounts:
         - name: logs-volume
           mountPath: "/data/logs"

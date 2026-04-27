@@ -1,0 +1,88 @@
+suite: PriorityClass and PodDisruptionBudget
+templates:
+  - templates/priority-class.yaml
+  - templates/mysql-pdb.yaml
+  - templates/jobs-manager-pdb.yaml
+set:
+  clientId: "test-id"
+  clientPassword: "test"
+tests:
+  - it: should create the data-plane PriorityClass by default
+    template: templates/priority-class.yaml
+    asserts:
+      - isKind:
+          of: PriorityClass
+      - equal:
+          path: metadata.name
+          value: tracebloc-data-plane
+      - equal:
+          path: value
+          value: 1000000
+      - equal:
+          path: metadata.annotations["helm.sh/resource-policy"]
+          value: keep
+      - equal:
+          path: globalDefault
+          value: false
+
+  - it: should respect a custom PriorityClass name and value
+    template: templates/priority-class.yaml
+    set:
+      priorityClass:
+        create: true
+        name: tb-prio
+        value: 500000
+    asserts:
+      - equal:
+          path: metadata.name
+          value: tb-prio
+      - equal:
+          path: value
+          value: 500000
+
+  - it: should not render PriorityClass when create is false
+    template: templates/priority-class.yaml
+    set:
+      priorityClass:
+        create: false
+    asserts:
+      - hasDocuments:
+          count: 0
+
+  - it: should create the mysql PDB by default
+    template: templates/mysql-pdb.yaml
+    asserts:
+      - isKind:
+          of: PodDisruptionBudget
+      - equal:
+          path: metadata.name
+          value: mysql-client
+      - equal:
+          path: spec.minAvailable
+          value: 1
+      - equal:
+          path: spec.selector.matchLabels.app
+          value: mysql-client
+
+  - it: should not render mysql PDB when disabled
+    template: templates/mysql-pdb.yaml
+    set:
+      podDisruptionBudget:
+        mysql:
+          create: false
+    asserts:
+      - hasDocuments:
+          count: 0
+
+  - it: jobs-manager PDB should use minAvailable (not maxUnavailable) to actually protect a 1-replica deployment
+    templates:
+      - templates/jobs-manager-pdb.yaml
+    template: templates/jobs-manager-pdb.yaml
+    asserts:
+      - isKind:
+          of: PodDisruptionBudget
+      - equal:
+          path: spec.minAvailable
+          value: 1
+      - notExists:
+          path: spec.maxUnavailable

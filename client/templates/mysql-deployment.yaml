@@ -19,6 +19,9 @@ spec:
         app: mysql-client
     spec:
       terminationGracePeriodSeconds: 60
+      {{- if .Values.priorityClass.create }}
+      priorityClassName: {{ .Values.priorityClass.name | quote }}
+      {{- end }}
       securityContext:
         fsGroup: 999
         fsGroupChangePolicy: "OnRootMismatch"
@@ -66,32 +69,46 @@ spec:
             - ALL
           seccompProfile:
             type: RuntimeDefault
+        # requests.memory == limits.memory pins the cgroup memory budget so
+        # mysqld is never the largest victim during node-level OOM. CPU limit
+        # is intentionally omitted: throttled CPU causes InnoDB lock-wait
+        # timeouts (mysqld can't service heartbeats) and is a far more common
+        # cause of mysql crashes than a noisy neighbour. PriorityClass +
+        # PodDisruptionBudget cover the eviction angle instead.
         resources:
           requests:
-            memory: 256Mi
-            cpu: 100m
+            memory: {{ .Values.resources.mysql.requests.memory | default "1Gi" | quote }}
+            cpu: {{ .Values.resources.mysql.requests.cpu | default "250m" | quote }}
           limits:
-            memory: 1Gi
-            cpu: 1000m
+            memory: {{ .Values.resources.mysql.limits.memory | default "1Gi" | quote }}
         ports:
         - containerPort: 3306
           name: mysql-client
+        # timeoutSeconds defaults to 1; under CPU contention `mysqladmin ping`
+        # routinely needs >1s to even spawn, which kubelet reports as a probe
+        # failure and kills the container. 5s is generous enough to survive
+        # transient CPU pressure but still catch a real hang within ~25s.
         startupProbe:
           exec:
             command: ["mysqladmin", "ping", "-h", "localhost"]
           initialDelaySeconds: 10
           periodSeconds: 5
+          timeoutSeconds: 5
           failureThreshold: 24
         livenessProbe:
           exec:
             command: ["mysqladmin", "ping", "-h", "localhost"]
           initialDelaySeconds: 0
           periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 5
         readinessProbe:
           exec:
             command: ["mysqladmin", "ping", "-h", "localhost"]
           initialDelaySeconds: 0
           periodSeconds: 5
+          timeoutSeconds: 3
+          failureThreshold: 3
         volumeMounts:
         - name: mysql-persistent-storage
           mountPath: /var/lib/mysql/
