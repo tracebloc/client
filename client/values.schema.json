@@ -387,9 +387,14 @@
       },
       "allOf": [
         {
-          "$comment": "If we are templating the PriorityClass resource, name must not be empty.",
-          "if":   { "properties": { "create": { "const": true } } },
-          "then": { "properties": { "name": { "minLength": 1 } } }
+          "$comment": "If we are templating the PriorityClass resource, name must not be empty. `required: [create]` is needed because draft-07 `properties` only validates keys that are present — without it, omitting `create` passes the `if` vacuously and unconditionally enforces `then`. Same pattern as dockerRegistry below.",
+          "if": {
+            "properties": { "create": { "const": true } },
+            "required": ["create"]
+          },
+          "then": {
+            "properties": { "name": { "minLength": 1 } }
+          }
         }
       ]
     },
