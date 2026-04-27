@@ -1,3 +1,4 @@
+{{- if .Values.podDisruptionBudget.mysql.create }}
 apiVersion: policy/v1
 kind: PodDisruptionBudget
 metadata:
@@ -5,8 +6,16 @@ metadata:
   namespace: {{ .Release.Namespace }}
   labels:
     {{- include "tracebloc.labels" . | nindent 4 }}
+    app: mysql-client
 spec:
+  # Single-replica deployment; minAvailable: 1 blocks *voluntary* disruptions
+  # (node drains, surge upgrades, cluster-autoscaler scale-downs) while the
+  # only mysql pod is, well, the only mysql pod. Involuntary kills (kernel
+  # OOM, node failure) still happen — PriorityClass + memory parity cover
+  # those. Set podDisruptionBudget.mysql.create=false on multi-replica
+  # setups managed externally.
   minAvailable: 1
   selector:
     matchLabels:
       app: mysql-client
+{{- end }}

@@ -313,6 +313,109 @@
         }
       }
     },
+    "resources": {
+      "type": "object",
+      "description": "Container resource requests and limits for mysql, jobs-manager, and pods-monitor. See values.yaml for the rationale behind the defaults.",
+      "properties": {
+        "mysql": {
+          "type": "object",
+          "properties": {
+            "requests": {
+              "type": "object",
+              "properties": {
+                "cpu":    { "type": "string", "pattern": "^[0-9]+m?$" },
+                "memory": { "type": "string", "pattern": "^[0-9]+(Ki|Mi|Gi|Ti)$" }
+              }
+            },
+            "limits": {
+              "type": "object",
+              "description": "CPU limit deliberately omitted in defaults — throttling causes InnoDB lock-wait timeouts.",
+              "properties": {
+                "cpu":    { "type": "string", "pattern": "^[0-9]+m?$" },
+                "memory": { "type": "string", "pattern": "^[0-9]+(Ki|Mi|Gi|Ti)$" }
+              }
+            }
+          }
+        },
+        "jobsManager": {
+          "type": "object",
+          "properties": {
+            "requests": {
+              "type": "object",
+              "properties": {
+                "cpu":    { "type": "string", "pattern": "^[0-9]+m?$" },
+                "memory": { "type": "string", "pattern": "^[0-9]+(Ki|Mi|Gi|Ti)$" }
+              }
+            },
+            "limits": {
+              "type": "object",
+              "properties": {
+                "cpu":    { "type": "string", "pattern": "^[0-9]+m?$" },
+                "memory": { "type": "string", "pattern": "^[0-9]+(Ki|Mi|Gi|Ti)$" }
+              }
+            }
+          }
+        },
+        "podsMonitor": {
+          "type": "object",
+          "properties": {
+            "requests": {
+              "type": "object",
+              "properties": {
+                "cpu":    { "type": "string", "pattern": "^[0-9]+m?$" },
+                "memory": { "type": "string", "pattern": "^[0-9]+(Ki|Mi|Gi|Ti)$" }
+              }
+            },
+            "limits": {
+              "type": "object",
+              "properties": {
+                "cpu":    { "type": "string", "pattern": "^[0-9]+m?$" },
+                "memory": { "type": "string", "pattern": "^[0-9]+(Ki|Mi|Gi|Ti)$" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "priorityClass": {
+      "type": "object",
+      "description": "Cluster-scoped PriorityClass for tracebloc data-plane workloads (mysql). An empty `name` disables the priorityClassName reference on the mysql pod entirely (mysql falls back to default priority 0 — only set this if you explicitly want no OOM protection from the scheduler).",
+      "properties": {
+        "create": { "type": "boolean", "default": true },
+        "name":   { "type": "string", "default": "tracebloc-data-plane" },
+        "value":  { "type": "integer", "minimum": 0, "maximum": 1000000000, "default": 1000000 }
+      },
+      "allOf": [
+        {
+          "$comment": "If we are templating the PriorityClass resource, name must not be empty. `required: [create]` is needed because draft-07 `properties` only validates keys that are present — without it, omitting `create` passes the `if` vacuously and unconditionally enforces `then`. Same pattern as dockerRegistry below.",
+          "if": {
+            "properties": { "create": { "const": true } },
+            "required": ["create"]
+          },
+          "then": {
+            "properties": { "name": { "minLength": 1 } }
+          }
+        }
+      ]
+    },
+    "podDisruptionBudget": {
+      "type": "object",
+      "description": "PodDisruptionBudgets for chart-managed Deployments.",
+      "properties": {
+        "mysql": {
+          "type": "object",
+          "properties": {
+            "create": { "type": "boolean", "default": true }
+          }
+        },
+        "jobsManager": {
+          "type": "object",
+          "properties": {
+            "create": { "type": "boolean", "default": true }
+          }
+        }
+      }
+    },
     "clientId": {
       "type": "string",
       "minLength": 1,
