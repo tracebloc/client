@@ -35,15 +35,78 @@ tests:
           path: spec.template.spec.containers[0].livenessProbe.exec.command[0]
           value: mysqladmin
 
-  - it: should have resource limits
+  - it: should have memory parity (requests == limits) and no cpu limit on mysql
     template: templates/mysql-deployment.yaml
     asserts:
       - equal:
           path: spec.template.spec.containers[0].resources.requests.memory
-          value: 256Mi
+          value: 1Gi
       - equal:
           path: spec.template.spec.containers[0].resources.limits.memory
           value: 1Gi
+      - equal:
+          path: spec.template.spec.containers[0].resources.requests.cpu
+          value: 250m
+      # CPU limit deliberately unset — InnoDB lock-wait timeouts under throttling.
+      - notExists:
+          path: spec.template.spec.containers[0].resources.limits.cpu
+
+  - it: "liveness probe should tolerate CPU pressure (timeoutSeconds 5)"
+    template: templates/mysql-deployment.yaml
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].livenessProbe.timeoutSeconds
+          value: 5
+      - equal:
+          path: spec.template.spec.containers[0].livenessProbe.failureThreshold
+          value: 5
+
+  - it: should reference the data-plane PriorityClass when enabled
+    template: templates/mysql-deployment.yaml
+    asserts:
+      - equal:
+          path: spec.template.spec.priorityClassName
+          value: tracebloc-data-plane
+
+  - it: should keep priorityClassName when create=false (externally managed PriorityClass)
+    template: templates/mysql-deployment.yaml
+    set:
+      priorityClass:
+        create: false
+        name: tracebloc-data-plane
+    asserts:
+      - equal:
+          path: spec.template.spec.priorityClassName
+          value: tracebloc-data-plane
+
+  - it: should drop priorityClassName only when name is empty
+    template: templates/mysql-deployment.yaml
+    set:
+      priorityClass:
+        # Schema rejects create=true with empty name (no point templating a
+        # nameless PriorityClass), so disable creation as well to model the
+        # "no PriorityClass at all" path.
+        create: false
+        name: ""
+    asserts:
+      - notExists:
+          path: spec.template.spec.priorityClassName
+
+  - it: should render an explicit mysql cpu limit when operator opts in
+    template: templates/mysql-deployment.yaml
+    set:
+      resources:
+        mysql:
+          limits:
+            cpu: "1500m"
+            memory: "2Gi"
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].resources.limits.cpu
+          value: 1500m
+      - equal:
+          path: spec.template.spec.containers[0].resources.limits.memory
+          value: 2Gi
 
   - it: should create ConfigMap with MySQL config
     template: templates/mysql-configmap.yaml

@@ -31,6 +31,20 @@ _ensure_tracebloc_dirs() {
   chmod -R 777 "$HOST_DATA_DIR/data" "$HOST_DATA_DIR/logs" "$HOST_DATA_DIR/mysql" 2>/dev/null || true
 }
 
+# Pre-create the per-release host dirs the chart's hostPath PVs bind to.
+# The PVs use /tracebloc/<release>/{data,logs,mysql}, which maps back to
+# $HOST_DATA_DIR/<release>/{data,logs,mysql} on the host via the k3d -v mount.
+# Without pre-creating these as the host user, kubelet's DirectoryOrCreate
+# makes them root:root 0755 and the host user can't drop training data into
+# /data/shared.
+_ensure_release_dirs() {
+  local release="$1"
+  [[ -z "$release" ]] && return 0
+  local base="$HOST_DATA_DIR/$release"
+  mkdir -p "$base/data" "$base/logs" "$base/mysql"
+  chmod -R 777 "$base/data" "$base/logs" "$base/mysql" 2>/dev/null || true
+}
+
 create_cluster() {
   log "Creating k3d cluster: '$CLUSTER_NAME'"
 
