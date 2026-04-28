@@ -17,3 +17,7 @@ If the annotation is missing from the stored manifest for any resource you need 
 ## Default branch
 
 Integration branch for this repo (and all tracebloc repos) is `develop`, not `main`. Target PRs at `develop`.
+
+## PR conventions
+
+Every PR you create must be assigned to `saadqbal` (Asad). Pass `--assignee @me` on `gh pr create`, or `--assignee saadqbal` if running unauthenticated. No exceptions — orphaned PRs without an assignee fall through the review queue.
