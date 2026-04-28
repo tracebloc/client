@@ -29,11 +29,17 @@ CTX="${CTX:-arn:aws:eks:eu-central-1:872515254613:cluster/tracebloc-clients-prod
 CHART_PATH="${CHART_PATH:-./client}"
 BACKUP_VAULT="${BACKUP_VAULT:-aws/efs/automatic-backup-vault}"
 BACKUP_ROLE="${BACKUP_ROLE:-arn:aws:iam::872515254613:role/TraceblocBackupOnDemandRole}"
-EFS_FS="${EFS_FS_OVERRIDE:-fs-06b3faf51675ff9f9}"
 
 [[ -f "$CONFIG" ]] || { echo "missing $CONFIG — copy tenant-config.example.env, fill it in" >&2; exit 2; }
 # shellcheck disable=SC1090
 source "$CONFIG"
+
+# EFS_FS comes from the sourced config. Allow EFS_FS_OVERRIDE as a
+# post-source env knob so operators can target a non-default filesystem
+# without editing the config — pre-source assignment was a no-op because
+# `source` unconditionally re-sets EFS_FS from the config file.
+[[ -n "${EFS_FS_OVERRIDE:-}" ]] && EFS_FS="$EFS_FS_OVERRIDE"
+[[ -n "${EFS_FS:-}" ]] || { echo "EFS_FS must be set in $CONFIG or via EFS_FS_OVERRIDE env" >&2; exit 2; }
 
 # MYSQL_ROOT_PW must come from the env or tenant-config.env. It's the
 # legacy image-baked root password that mysqldump needs. Refuse to run
