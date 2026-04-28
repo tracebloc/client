@@ -38,7 +38,13 @@ source "$CONFIG"
 # MYSQL_ROOT_PW must come from the env or tenant-config.env. It's the
 # legacy image-baked root password that mysqldump needs. Refuse to run
 # without it rather than hardcode a default — keeps secrets out of git.
+# Also reject the literal __PLACEHOLDER__ shipped in the example so an
+# unfilled config fails fast here instead of mid-Phase-1 with an opaque
+# "Access denied" from mysqldump inside kubectl exec.
 [[ -n "${MYSQL_ROOT_PW:-}" ]] || { echo "MYSQL_ROOT_PW must be set in $CONFIG or env" >&2; exit 2; }
+case "$MYSQL_ROOT_PW" in
+  *__*__*) echo "MYSQL_ROOT_PW still contains placeholder __...__ — set the real legacy mysql root password in $CONFIG" >&2; exit 2 ;;
+esac
 
 # Pluck the requested tenant's row out of TENANTS
 ACTION="${1:-}"; TARGET="${2:-}"
@@ -204,8 +210,17 @@ phase2() {
   cur=""
   while :; do
     cur=$(kctx -n "$NS" get pod -l 'app in (mysql-client,manager)' --no-headers 2>/dev/null)
-    ready=$(echo "$cur" | awk '$2 ~ /^[0-9]+\/[0-9]+$/ && $3 == "Running" {split($2,a,"/"); if (a[1]==a[2]) print "ok"}' | wc -l | tr -d ' ')
-    total=$(echo "$cur" | grep -c .)
+    # cur is empty in the routine post-install window before pods exist.
+    # Guard explicitly: `grep -c .` exits 1 on no matches, which under
+    # `set -euo pipefail` would terminate the script on the first iteration
+    # instead of looping until the deadline. `echo "" | wc -l` returns 1
+    # (echo adds a trailing newline), so we can't lean on wc alone either.
+    if [[ -z "$cur" ]]; then
+      total=0; ready=0
+    else
+      ready=$(echo "$cur" | awk '$2 ~ /^[0-9]+\/[0-9]+$/ && $3 == "Running" {split($2,a,"/"); if (a[1]==a[2]) print "ok"}' | wc -l | tr -d ' ')
+      total=$(echo "$cur" | wc -l | tr -d ' ')
+    fi
     [[ $total -ge 2 && $ready -eq $total ]] && break
     if [[ $(date +%s) -ge $deadline ]]; then
       echo "TIMEOUT — pods not Ready after ${READY_TIMEOUT}s. Current state:" >&2
