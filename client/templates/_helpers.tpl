@@ -25,6 +25,18 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{ .Release.Name }}-jobs-manager
 {{- end }}
 
+{{/*
+  Release-scoped name for the resource-monitor DaemonSet, ServiceAccount,
+  ClusterRoleBinding subject, and selector/pod labels. Multiple releases
+  on the same cluster share the tracebloc-node-agents namespace; before
+  this naming, two releases collided on the literal `tracebloc-resource-monitor`
+  name and Helm refused the second install with "exists, not owned".
+  See the v1.2.0 release notes / hasan-prod migration case study.
+*/}}
+{{- define "tracebloc.resourceMonitorName" -}}
+{{ .Release.Name }}-resource-monitor
+{{- end }}
+
 {{- define "tracebloc.rbacName" -}}
 {{ .Release.Name }}-jobs-manager-rbac
 {{- end }}
