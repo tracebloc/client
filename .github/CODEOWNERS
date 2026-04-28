@@ -1,7 +1,10 @@
-# Narrow CODEOWNERS — security backstop only.
-# Author picks reviewers for everything else; this just ensures a security-aware
-# co-approver on a small set of files where a regression would be expensive.
+# Default reviewer: each PR auto-requests the squad lead listed here.
+# Either reviewer can approve to satisfy branch protection (1 approval required).
+# Specific paths below override this default for security-sensitive code.
 
+*    @saadqbal @saqlainsyed007
+
+# === Narrow security CODEOWNERS (preserved from prior PRs) ===
 /client/templates/                                      @saadqbal
 /client/values.schema.json                              @saadqbal
 /client/values.yaml                                     @saadqbal
