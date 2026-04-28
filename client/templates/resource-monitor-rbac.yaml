@@ -3,14 +3,14 @@
 apiVersion: v1
 kind: ServiceAccount
 metadata:
-  name: tracebloc-resource-monitor
+  name: {{ include "tracebloc.resourceMonitorName" . }}
   namespace: {{ .Values.nodeAgents.namespace.name }}
   annotations:
     meta.helm.sh/release-name: {{ .Release.Name }}
     meta.helm.sh/release-namespace: {{ .Release.Namespace }}
   labels:
     {{- include "tracebloc.labels" . | nindent 4 }}
-    app: tracebloc-resource-monitor
+    app: {{ include "tracebloc.resourceMonitorName" . }}
 {{- if ne .Values.clusterScope false }}
 ---
 apiVersion: rbac.authorization.k8s.io/v1
@@ -22,7 +22,7 @@ metadata:
     meta.helm.sh/release-namespace: {{ .Release.Namespace }}
   labels:
     {{- include "tracebloc.labels" . | nindent 4 }}
-    app: tracebloc-resource-monitor
+    app: {{ include "tracebloc.resourceMonitorName" . }}
 rules:
   - apiGroups: [""]
     resources: ["pods", "pods/log", "nodes", "nodes/status", "namespaces"]
@@ -40,14 +40,14 @@ metadata:
     meta.helm.sh/release-namespace: {{ .Release.Namespace }}
   labels:
     {{- include "tracebloc.labels" . | nindent 4 }}
-    app: tracebloc-resource-monitor
+    app: {{ include "tracebloc.resourceMonitorName" . }}
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
   name: tracebloc-resource-monitor-{{ .Release.Name }}
 subjects:
   - kind: ServiceAccount
-    name: tracebloc-resource-monitor
+    name: {{ include "tracebloc.resourceMonitorName" . }}
     namespace: {{ .Values.nodeAgents.namespace.name }}
 {{- else }}
 ---
@@ -65,7 +65,7 @@ metadata:
     meta.helm.sh/release-namespace: {{ .Release.Namespace }}
   labels:
     {{- include "tracebloc.labels" . | nindent 4 }}
-    app: tracebloc-resource-monitor
+    app: {{ include "tracebloc.resourceMonitorName" . }}
 rules:
   - apiGroups: [""]
     resources: ["pods", "pods/log"]
@@ -84,14 +84,14 @@ metadata:
     meta.helm.sh/release-namespace: {{ .Release.Namespace }}
   labels:
     {{- include "tracebloc.labels" . | nindent 4 }}
-    app: tracebloc-resource-monitor
+    app: {{ include "tracebloc.resourceMonitorName" . }}
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: Role
   name: tracebloc-resource-monitor-{{ .Release.Name }}
 subjects:
   - kind: ServiceAccount
-    name: tracebloc-resource-monitor
+    name: {{ include "tracebloc.resourceMonitorName" . }}
     namespace: {{ .Values.nodeAgents.namespace.name }}
 {{- end }}
 {{- end }}

@@ -1,11 +1,15 @@
 suite: Resource-monitor DaemonSet
 templates:
   - templates/resource-monitor-daemonset.yaml
+  - templates/resource-monitor-rbac.yaml
 set:
   clientId: "test-id"
   clientPassword: "test"
+release:
+  name: stg
 tests:
   - it: should render with tag fallback when no digest is set
+    template: templates/resource-monitor-daemonset.yaml
     asserts:
       - equal:
           path: spec.template.spec.containers[0].image
@@ -15,6 +19,7 @@ tests:
           value: Always
 
   - it: should pin by digest when images.resourceMonitor.digest is set
+    template: templates/resource-monitor-daemonset.yaml
     set:
       images:
         resourceMonitor:
@@ -31,6 +36,7 @@ tests:
   # stored values that never included images.resourceMonitor. The template must
   # tolerate the whole images map being missing without nil-pointer.
   - it: should render when images block is entirely absent
+    template: templates/resource-monitor-daemonset.yaml
     set:
       images: null
     asserts:
@@ -40,3 +46,71 @@ tests:
       - equal:
           path: spec.template.spec.containers[0].imagePullPolicy
           value: Always
+
+  # v1.2.0: every shared-namespace resource that used to be literally named
+  # `tracebloc-resource-monitor` is now release-scoped to `<release>-resource-monitor`,
+  # so multiple releases on one cluster can each run their own DaemonSet without
+  # colliding. Selector + pod label also have to be release-scoped or two
+  # DaemonSets in tracebloc-node-agents would each grab the other's pods.
+  - it: DaemonSet name + selector + serviceAccountName are release-scoped
+    template: templates/resource-monitor-daemonset.yaml
+    asserts:
+      - equal:
+          path: metadata.name
+          value: stg-resource-monitor
+      - equal:
+          path: spec.selector.matchLabels.app
+          value: stg-resource-monitor
+      - equal:
+          path: spec.template.metadata.labels.app
+          value: stg-resource-monitor
+      - equal:
+          path: spec.template.spec.serviceAccountName
+          value: stg-resource-monitor
+
+  - it: ServiceAccount name is release-scoped
+    template: templates/resource-monitor-rbac.yaml
+    documentIndex: 0
+    asserts:
+      - isKind:
+          of: ServiceAccount
+      - equal:
+          path: metadata.name
+          value: stg-resource-monitor
+
+  - it: ClusterRoleBinding subject points at the release-scoped SA
+    template: templates/resource-monitor-rbac.yaml
+    documentIndex: 2
+    asserts:
+      - isKind:
+          of: ClusterRoleBinding
+      - equal:
+          path: subjects[0].name
+          value: stg-resource-monitor
+
+  - it: a different release renders a non-colliding DaemonSet name
+    template: templates/resource-monitor-daemonset.yaml
+    release:
+      name: hasan-prod
+    asserts:
+      - equal:
+          path: metadata.name
+          value: hasan-prod-resource-monitor
+      - equal:
+          path: spec.selector.matchLabels.app
+          value: hasan-prod-resource-monitor
+      - equal:
+          path: spec.template.spec.serviceAccountName
+          value: hasan-prod-resource-monitor
+
+  - it: a different release renders a non-colliding ServiceAccount name
+    template: templates/resource-monitor-rbac.yaml
+    release:
+      name: hasan-prod
+    documentIndex: 0
+    asserts:
+      - isKind:
+          of: ServiceAccount
+      - equal:
+          path: metadata.name
+          value: hasan-prod-resource-monitor
