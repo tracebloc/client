@@ -111,6 +111,78 @@ tests:
           of: SecurityContextConstraints
         documentIndex: 0
 
+  # Regression: pre-1.2.2 the SCC template hard-coded "tracebloc-resource-monitor"
+  # in users[0] and the ClusterRoleBinding subjects[0].name, while the
+  # rest of the chart had moved to release-scoped names. On OpenShift this
+  # meant the SCC granted permissions to a non-existent SA and the
+  # DaemonSet pods could not start. These tests lock the rename in place.
+  - it: SCC users[0] points at the release-scoped ServiceAccount
+    template: templates/resource-monitor-scc.yaml
+    release:
+      name: stg
+    set:
+      platform: openshift
+      resourceMonitor: true
+      openshift:
+        scc:
+          enabled: true
+      nodeAgents:
+        namespace:
+          name: tracebloc-node-agents
+    documentIndex: 0
+    asserts:
+      - isKind:
+          of: SecurityContextConstraints
+      - equal:
+          path: users[0]
+          value: system:serviceaccount:tracebloc-node-agents:stg-resource-monitor
+
+  - it: SCC ClusterRoleBinding subject points at the release-scoped SA
+    template: templates/resource-monitor-scc.yaml
+    release:
+      name: hasan-prod
+    set:
+      platform: openshift
+      resourceMonitor: true
+      openshift:
+        scc:
+          enabled: true
+      nodeAgents:
+        namespace:
+          name: tracebloc-node-agents
+    documentIndex: 2
+    asserts:
+      - isKind:
+          of: ClusterRoleBinding
+      - equal:
+          path: subjects[0].name
+          value: hasan-prod-resource-monitor
+      - equal:
+          path: subjects[0].namespace
+          value: tracebloc-node-agents
+
+  - it: two releases produce non-colliding SCC SA references
+    template: templates/resource-monitor-scc.yaml
+    release:
+      name: cisco
+    set:
+      platform: openshift
+      resourceMonitor: true
+      openshift:
+        scc:
+          enabled: true
+      nodeAgents:
+        namespace:
+          name: tracebloc-node-agents
+    documentIndex: 0
+    asserts:
+      # Different release => different SA in users[]; combined with the
+      # two cases above (stg + hasan-prod) this proves uniqueness across
+      # any pair on the same cluster.
+      - equal:
+          path: users[0]
+          value: system:serviceaccount:tracebloc-node-agents:cisco-resource-monitor
+
   - it: should not create SCC when platform is aks
     template: templates/resource-monitor-scc.yaml
     set:
