@@ -12,7 +12,7 @@ The mandatory pre-flight check before any `helm uninstall` that is part of a mig
 helm get manifest <release> -n <ns> | grep -B2 -A1 'resource-policy'
 ```
 
-If the annotation is missing from the stored manifest for any resource you need to preserve, do not proceed with `helm uninstall` until you've applied Option A, B, or C from `docs/MIGRATIONS.md`. Do not assume live annotations will work.
+If the annotation is missing from the stored manifest for any resource you need to preserve, do not proceed with `helm uninstall` until you've applied **Option A or Option C** from `docs/MIGRATIONS.md`. (Option B in the doc is a cautionary tale labelled "DOES NOT WORK" — stripping live Helm ownership labels does not prevent uninstall from deleting the resource. Both production migrations to date were bitten by variants of "modify the live resource, expect uninstall to respect it." Assume that pattern will keep failing.)
 
 ## Default branch
 
