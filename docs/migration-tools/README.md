@@ -63,7 +63,7 @@ The generated `values.yaml` ships with several `*.create: false` toggles that ar
 
 | Field | Why |
 |---|---|
-| `resourceMonitor: false` | Until the chart fix that release-scopes `tracebloc-resource-monitor` SA + DaemonSet (`client-1.2.0`) is published. The shared name collides between releases. Stg's DaemonSet runs on every node and collects metrics; per-tenant `CLIENT_ID` metric streams come back when the tenant is upgraded to `client-1.2.0+` with `resourceMonitor: true`. |
+| `resourceMonitor: false` | Conservative default. The release-scoped resource-monitor names landed in `client-1.2.0` — on that version or later you can flip this to `true` and each tenant gets its own DaemonSet + per-`CLIENT_ID` metric stream without colliding with sibling releases on the same cluster. Older charts (<1.2.0) collide on the literal `tracebloc-resource-monitor` ServiceAccount when a second release tries to install; if you happen to be installing one of those, leave this `false` and stg's DaemonSet covers metrics on every node. |
 | `priorityClass.create: false` | `tracebloc-data-plane` was created cluster-scoped by the stg migration. Subsequent installs reference it. |
 | `nodeAgents.namespace.create: false` | `tracebloc-node-agents` exists cluster-wide from stg. |
 | `namespace.create: false` | Each tenant namespace pre-exists from the legacy release. |

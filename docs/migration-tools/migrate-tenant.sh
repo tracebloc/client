@@ -246,7 +246,7 @@ phase2() {
   kctx -n "$NS" exec "$MYSQL_POD" -- mysql -uroot -p"${MYSQL_ROOT_PW}" \
     -e "USE training_test_datasets; SELECT TABLE_NAME, TABLE_ROWS FROM information_schema.tables WHERE TABLE_SCHEMA='training_test_datasets' ORDER BY TABLE_ROWS DESC LIMIT 5;" 2>&1 | grep -v -E "Warning|Defaulted"
 
-  banner "mysql v1.1.0 spec sanity"
+  banner "mysql spec sanity (v1.1.0+ shape: Burstable QoS, mem parity, no cpu limit, liveness timeout 5s)"
   kctx -n "$NS" get pod -l app=mysql-client -o jsonpath='QoS={.items[0].status.qosClass} priorityClassName={.items[0].spec.priorityClassName} memReq={.items[0].spec.containers[0].resources.requests.memory} memLim={.items[0].spec.containers[0].resources.limits.memory} cpuLim="{.items[0].spec.containers[0].resources.limits.cpu}" liveTimeout={.items[0].spec.containers[0].livenessProbe.timeoutSeconds} restarts={.items[0].status.containerStatuses[0].restartCount}{"\n"}'
   echo
   echo "DONE — soak for 24h, then watch for kill-loop recurrence:"

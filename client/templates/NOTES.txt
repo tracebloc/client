@@ -6,7 +6,7 @@
   - {{ "\033[1;34m" }}Jobs Manager:{{ "\033[0m" }}            {{ "\033[0;33m" }}{{ .Release.Name }}-jobs-manager{{ "\033[0m" }}
   - {{ "\033[1;34m" }}MySQL Host:{{ "\033[0m" }}                   {{ "\033[0;33m" }}mysql-client{{ "\033[0m" }}
 {{- if ne .Values.resourceMonitor false }}
-  - {{ "\033[1;34m" }}Resource Monitor (DS):{{ "\033[0m" }}   {{ "\033[0;33m" }}tracebloc-resource-monitor{{ "\033[0m" }}
+  - {{ "\033[1;34m" }}Resource Monitor (DS):{{ "\033[0m" }}   {{ "\033[0;33m" }}{{ include "tracebloc.resourceMonitorName" . }}{{ "\033[0m" }}
 {{- end }}
 
 {{ "\033[1;35m" }}Configuration:{{ "\033[0m" }}

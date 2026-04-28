@@ -1,0 +1,38 @@
+suite: NOTES.txt
+templates:
+  - templates/NOTES.txt
+release:
+  name: stg
+set:
+  clientId: "test-id"
+  clientPassword: "test"
+tests:
+  - it: should print release-scoped resource-monitor name (was hardcoded pre-1.2.3)
+    asserts:
+      - matchRegexRaw:
+          pattern: "stg-resource-monitor"
+      # Regression guard: pre-1.2.3, line 9 hardcoded the literal name
+      # `tracebloc-resource-monitor` followed immediately by the ANSI
+      # reset sequence (no release suffix). The fix routes through the
+      # tracebloc.resourceMonitorName helper, so the bare literal can't
+      # appear with a colour-reset directly behind it. The OpenShift SCC
+      # line further down is `tracebloc-resource-monitor-<release>`, so
+      # this pattern won't false-match against it.
+      - notMatchRegexRaw:
+          pattern: 'tracebloc-resource-monitor[^-A-Za-z0-9]'
+
+  - it: a different release renders a different resource-monitor name
+    release:
+      name: hasan-prod
+    asserts:
+      - matchRegexRaw:
+          pattern: "hasan-prod-resource-monitor"
+      - notMatchRegexRaw:
+          pattern: 'tracebloc-resource-monitor[^-A-Za-z0-9]'
+
+  - it: should NOT print the resource monitor line when disabled
+    set:
+      resourceMonitor: false
+    asserts:
+      - notMatchRegexRaw:
+          pattern: "Resource Monitor \\(DS\\)"

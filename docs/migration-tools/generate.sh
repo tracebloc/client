@@ -26,6 +26,19 @@ source "$CONFIG"
 : "${RESOURCE_LIMITS:?must be set in $CONFIG}"
 : "${TENANTS:?must be set in $CONFIG}"
 
+# Pull the chart version + name from Chart.yaml so the pre-create PVCs ship
+# with labels matching whatever release is about to be installed. Hardcoding
+# `1.1.0` here (as the original drop did) silently drifts every time the
+# chart bumps and confuses later debugging — Helm adoption keys on the
+# release-name annotation so adoption itself works, but `kubectl get pvc -L
+# helm.sh/chart` lies until the next upgrade reconciles labels.
+CHART_YAML="${CHART_YAML:-$(dirname "$0")/../../client/Chart.yaml}"
+[[ -f "$CHART_YAML" ]] || { echo "missing $CHART_YAML — set CHART_YAML or run from the repo" >&2; exit 2; }
+CHART_NAME=$(awk -F': *' '$1=="name"{print $2; exit}' "$CHART_YAML")
+CHART_VERSION=$(awk -F': *' '$1=="version"{print $2; exit}' "$CHART_YAML")
+[[ -n "$CHART_NAME" && -n "$CHART_VERSION" ]] || { echo "could not parse chart name/version from $CHART_YAML" >&2; exit 2; }
+echo "using chart ${CHART_NAME}-${CHART_VERSION} for label stamping"
+
 # Globals that ship with __PLACEHOLDER__ values in the example config.
 # Catch them once up front before per-row processing.
 case "$DOCKER_PASSWORD" in
@@ -104,8 +117,10 @@ pvcAccessMode: ReadWriteMany
 
 clusterScope: true
 
-# Flip to true once client-1.2.0 (release-scoped resource-monitor names) is
-# the chart you install. Until then this collides with the stg release's SA.
+# Default false until you have verified the chart you're installing has
+# release-scoped resource-monitor names (client-1.2.0+). Older charts
+# collide on the literal tracebloc-resource-monitor SA name when more
+# than one release shares a cluster. Flip to true on 1.2.0+.
 resourceMonitor: false
 
 nodeAgents:
@@ -171,9 +186,9 @@ metadata:
   labels:
     app.kubernetes.io/name: client
     app.kubernetes.io/instance: $RELEASE
-    app.kubernetes.io/version: "1.1.0"
+    app.kubernetes.io/version: "$CHART_VERSION"
     app.kubernetes.io/managed-by: Helm
-    helm.sh/chart: client-1.1.0
+    helm.sh/chart: $CHART_NAME-$CHART_VERSION
   annotations:
     helm.sh/resource-policy: keep
     meta.helm.sh/release-name: $RELEASE
@@ -194,9 +209,9 @@ metadata:
   labels:
     app.kubernetes.io/name: client
     app.kubernetes.io/instance: $RELEASE
-    app.kubernetes.io/version: "1.1.0"
+    app.kubernetes.io/version: "$CHART_VERSION"
     app.kubernetes.io/managed-by: Helm
-    helm.sh/chart: client-1.1.0
+    helm.sh/chart: $CHART_NAME-$CHART_VERSION
   annotations:
     helm.sh/resource-policy: keep
     meta.helm.sh/release-name: $RELEASE
@@ -217,9 +232,9 @@ metadata:
   labels:
     app.kubernetes.io/name: client
     app.kubernetes.io/instance: $RELEASE
-    app.kubernetes.io/version: "1.1.0"
+    app.kubernetes.io/version: "$CHART_VERSION"
     app.kubernetes.io/managed-by: Helm
-    helm.sh/chart: client-1.1.0
+    helm.sh/chart: $CHART_NAME-$CHART_VERSION
   annotations:
     helm.sh/resource-policy: keep
     meta.helm.sh/release-name: $RELEASE
