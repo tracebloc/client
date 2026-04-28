@@ -26,6 +26,12 @@ source "$CONFIG"
 : "${RESOURCE_LIMITS:?must be set in $CONFIG}"
 : "${TENANTS:?must be set in $CONFIG}"
 
+# Globals that ship with __PLACEHOLDER__ values in the example config.
+# Catch them once up front before per-row processing.
+case "$DOCKER_PASSWORD" in
+  *__*__*) echo "DOCKER_PASSWORD still contains placeholder __...__ — set the real Docker Hub PAT in $CONFIG" >&2; exit 2 ;;
+esac
+
 # Parse TENANTS line by line, ignoring comments + blank lines.
 while IFS= read -r LINE; do
   LINE="${LINE# }"; LINE="${LINE% }"
@@ -46,9 +52,15 @@ while IFS= read -r LINE; do
   done
 
   # Refuse to expand placeholders accidentally left in tenant-config.env.
-  case "${CLIENT_ID}${CLIENT_PASSWORD}${PV_MYSQL}" in
-    *__*__*) echo "row $TENANT still contains placeholder __...__ — fill in real values in $CONFIG" >&2; exit 2 ;;
-  esac
+  # Every per-row field that ships with __PLACEHOLDER__ markers gets checked
+  # individually so the error message names the offending field. Without this
+  # the literal __FOO__ ends up in values.yaml/pvcs.yaml and surfaces later
+  # as an opaque kubectl apply / helm install failure.
+  for v in CLIENT_ID CLIENT_PASSWORD SC_NAME PV_MYSQL PV_LOGS PV_DATA; do
+    case "${!v}" in
+      *__*__*) echo "row $TENANT field $v still contains placeholder __...__ — fill in real values in $CONFIG" >&2; exit 2 ;;
+    esac
+  done
 
   OUT=/tmp/tracebloc-migration-$TENANT
   mkdir -p "$OUT"
