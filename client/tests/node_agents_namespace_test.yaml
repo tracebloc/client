@@ -289,7 +289,11 @@ tests:
     asserts:
       - equal:
           path: users[0]
-          value: system:serviceaccount:tracebloc-node-agents:tracebloc-resource-monitor
+          # v1.2.2: SA in users[] is release-scoped (was the hard-coded
+          # tracebloc-resource-monitor before, which on OpenShift granted
+          # SCC permissions to a SA that no longer existed after the
+          # v1.2.0 rename — DaemonSet pods would not start).
+          value: system:serviceaccount:tracebloc-node-agents:RELEASE-NAME-resource-monitor
         documentIndex: 0
       - equal:
           path: subjects[0].namespace

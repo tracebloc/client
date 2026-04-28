@@ -8,11 +8,11 @@ metadata:
     meta.helm.sh/release-name: {{ .Release.Name }}
     meta.helm.sh/release-namespace: {{ .Release.Namespace }}
     kubernetes.io/description: >-
-      Minimal SCC for tracebloc-resource-monitor DaemonSet.
+      Minimal SCC for the tracebloc resource-monitor DaemonSet.
       Allows read-only hostPath mounts to /proc and /sys for node metrics collection.
   labels:
     {{- include "tracebloc.labels" . | nindent 4 }}
-    app: tracebloc-resource-monitor
+    app: {{ include "tracebloc.resourceMonitorName" . }}
 allowPrivilegedContainer: false
 allowPrivilegeEscalation: false
 allowedCapabilities: []
@@ -44,7 +44,7 @@ seccompProfiles:
   - runtime/default
 readOnlyRootFilesystem: false
 users:
-  - system:serviceaccount:{{ .Values.nodeAgents.namespace.name }}:tracebloc-resource-monitor
+  - system:serviceaccount:{{ .Values.nodeAgents.namespace.name }}:{{ include "tracebloc.resourceMonitorName" . }}
 groups: []
 ---
 apiVersion: rbac.authorization.k8s.io/v1
@@ -56,7 +56,7 @@ metadata:
     meta.helm.sh/release-namespace: {{ .Release.Namespace }}
   labels:
     {{- include "tracebloc.labels" . | nindent 4 }}
-    app: tracebloc-resource-monitor
+    app: {{ include "tracebloc.resourceMonitorName" . }}
 rules:
   - apiGroups: ["security.openshift.io"]
     resources: ["securitycontextconstraints"]
@@ -72,13 +72,13 @@ metadata:
     meta.helm.sh/release-namespace: {{ .Release.Namespace }}
   labels:
     {{- include "tracebloc.labels" . | nindent 4 }}
-    app: tracebloc-resource-monitor
+    app: {{ include "tracebloc.resourceMonitorName" . }}
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
   name: tracebloc-resource-monitor-scc-{{ .Release.Name }}
 subjects:
   - kind: ServiceAccount
-    name: tracebloc-resource-monitor
+    name: {{ include "tracebloc.resourceMonitorName" . }}
     namespace: {{ .Values.nodeAgents.namespace.name }}
 {{- end }}

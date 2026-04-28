@@ -16,24 +16,24 @@
 apiVersion: apps/v1
 kind: DaemonSet
 metadata:
-  name: tracebloc-resource-monitor
+  name: {{ include "tracebloc.resourceMonitorName" . }}
   namespace: {{ .Values.nodeAgents.namespace.name }}
   annotations:
     meta.helm.sh/release-name: {{ .Release.Name }}
     meta.helm.sh/release-namespace: {{ .Release.Namespace }}
   labels:
     {{- include "tracebloc.labels" . | nindent 4 }}
-    app: tracebloc-resource-monitor
+    app: {{ include "tracebloc.resourceMonitorName" . }}
 spec:
   selector:
     matchLabels:
-      app: tracebloc-resource-monitor
+      app: {{ include "tracebloc.resourceMonitorName" . }}
   template:
     metadata:
       labels:
-        app: tracebloc-resource-monitor
+        app: {{ include "tracebloc.resourceMonitorName" . }}
     spec:
-      serviceAccountName: tracebloc-resource-monitor
+      serviceAccountName: {{ include "tracebloc.resourceMonitorName" . }}
       securityContext:
         runAsNonRoot: true
         seccompProfile:
