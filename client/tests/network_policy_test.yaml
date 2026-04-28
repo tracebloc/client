@@ -171,6 +171,29 @@ tests:
             port: 443
             protocol: TCP
 
+  - it: should allow TCP 3306 egress to the in-namespace mysql-client pod
+    set:
+      networkPolicy:
+        training:
+          enabled: true
+          dnsNamespace: kube-system
+          dnsSelector:
+            k8s-app: kube-dns
+          clusterCidrs:
+            - 10.0.0.0/8
+    asserts:
+      - equal:
+          path: spec.egress[2].to[0]
+          value:
+            podSelector:
+              matchLabels:
+                app: mysql-client
+      - contains:
+          path: spec.egress[2].ports
+          content:
+            port: 3306
+            protocol: TCP
+
   - it: should support OpenShift DNS selector override
     set:
       networkPolicy:

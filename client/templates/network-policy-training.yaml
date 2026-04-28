@@ -6,7 +6,14 @@
     1. Denies all ingress to training pods (nothing should connect TO them).
     2. Allows DNS to the cluster's DNS service.
     3. Allows TCP/443 egress to addresses OUTSIDE the cluster CIDRs only —
-       blocking pod-to-pod, MySQL, K8s API, jobs-manager pod IPs, etc.
+       blocking pod-to-pod, K8s API, jobs-manager pod IPs, etc.
+    4. Allows TCP/3306 egress to the in-namespace mysql-client pod.
+       Training pods load their training dataset via
+       core/utils/database.py::load_dataframe_from_sql_table; without this
+       rule the connect fails with "Can't connect to MySQL server (111)"
+       and the job CrashLoopBackOffs before the first batch.
+       Scoped by podSelector (app=mysql-client) so it stays tight to the
+       chart's own mysql pod and does not open the namespace generally.
 
   Selects pods by label tracebloc.io/workload=training. The jobs-manager
   injects this label when spawning each training Job (see client-runtime
@@ -56,7 +63,8 @@ spec:
           protocol: TCP
     # 2. External HTTPS — everything NOT in the cluster's pod/service CIDRs.
     #    Training pods call backend, Azure Service Bus, App Insights, etc.
-    #    This blocks pod-to-pod, ClusterIPs, MySQL, jobs-manager, K8s API.
+    #    This blocks pod-to-pod, ClusterIPs, jobs-manager, K8s API. MySQL is
+    #    explicitly re-permitted by the next rule.
     - to:
         - ipBlock:
             cidr: 0.0.0.0/0
@@ -66,5 +74,15 @@ spec:
               {{- end }}
       ports:
         - port: 443
+          protocol: TCP
+    # 3. MySQL — training pods read the training dataset from the
+    #    in-namespace mysql-client pod. podSelector with no namespaceSelector
+    #    matches pods in the same namespace as this NetworkPolicy.
+    - to:
+        - podSelector:
+            matchLabels:
+              app: mysql-client
+      ports:
+        - port: 3306
           protocol: TCP
 {{- end }}
