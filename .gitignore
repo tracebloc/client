@@ -129,3 +129,7 @@ value_files/
 **/*-secret.yaml
 !**/client/**/secret-*.yaml
 !**/client/**/*-secret.yaml
+
+# Tenant migration tools — populated config carries Docker Hub PAT and
+# per-tenant CLIENT_PASSWORD. Only the .example.env template is committed.
+docs/migration-tools/tenant-config.env
