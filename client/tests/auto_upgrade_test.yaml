@@ -51,9 +51,14 @@ tests:
       - matchRegex:
           path: data["auto-upgrade.sh"]
           pattern: "helm upgrade"
+      # Must be --reset-then-reuse-values, NOT plain --reuse-values:
+      # --reuse-values re-uses the last release's computed values, so any
+      # new keys added to values.yaml in a future chart version silently
+      # fail to render with nil-pointer template errors. Verified on a
+      # dev-cluster 1.1.0 -> 1.3.0 dry-run during the #69 verification.
       - matchRegex:
           path: data["auto-upgrade.sh"]
-          pattern: "--reuse-values"
+          pattern: "--reset-then-reuse-values"
       # Regression guard: the script MUST use sort -V (semver), not lexical
       # string compare. A naive string compare would block 1.10.x upgrades
       # because "1.10.0" < "1.9.0" lexically.

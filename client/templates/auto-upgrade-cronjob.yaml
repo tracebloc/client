@@ -69,10 +69,19 @@ data:
     fi
 
     log "upgrading $CURRENT -> $LATEST"
+    # --reset-then-reuse-values (helm 3.14+) is critical here: --reuse-values
+    # alone re-uses the LAST RELEASE'S COMPUTED VALUES, so any new keys added
+    # to values.yaml in the upgraded chart (e.g. a future autoUpgrade.foo
+    # default) would silently fail to render with nil-pointer template errors
+    # — verified on a dev-cluster 1.1.0 -> 1.3.0 dry-run when shipping #69.
+    # --reset-then-reuse-values resets to the new chart's defaults first, then
+    # layers the customer's user-supplied values on top, so operator overrides
+    # (clientId, dockerRegistry creds, autoUpgrade.enabled=false, etc.) are
+    # preserved while new defaults flow through.
     helm upgrade "$RELEASE_NAME" "${REPO_NAME}/${CHART_NAME}" \
       --namespace "$RELEASE_NAMESPACE" \
       --version "$LATEST" \
-      --reuse-values \
+      --reset-then-reuse-values \
       --wait \
       --timeout "$UPGRADE_TIMEOUT"
     log "upgrade complete: $CURRENT -> $LATEST"
