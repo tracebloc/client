@@ -162,9 +162,18 @@ The chart-managed `tracebloc-resource-monitor` keeps running throughout; no roll
 
 ## Rollback
 
-The old charts remain in `aks/`, `bm/`, `eks/`, `oc/` and can be used at any time:
+The legacy per-platform chart directories (`aks/`, `bm/`, `eks/`, `oc/`) were
+removed from the repo in #70 once the unified chart had been validated across
+every supported platform. If you must install one of those legacy charts,
+recover the directory from git history at the deletion commit:
 
 ```bash
-helm uninstall <release-name> -n <namespace>
+# find the SHA where the legacy dirs were last present
+git log --diff-filter=D --summary -- aks bm eks oc | head
+git checkout <pre-delete-sha> -- aks bm eks oc
 helm install <release-name> ./<old-chart> -n <namespace> -f old-values.yaml
 ```
+
+In practice, rolling back *within* the unified chart family is the safer
+path — `helm rollback <release-name> <revision>` keeps the cluster on a
+chart it has been exercising.
