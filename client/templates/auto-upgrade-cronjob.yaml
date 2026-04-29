@@ -1,0 +1,160 @@
+{{- if .Values.autoUpgrade.enabled }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "tracebloc.autoUpgradeName" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "tracebloc.labels" . | nindent 4 }}
+    app.kubernetes.io/component: auto-upgrade
+data:
+  auto-upgrade.sh: |
+    #!/bin/sh
+    # Self-upgrade loop. See client/values.yaml `autoUpgrade` for the
+    # design + trust boundary discussion. Parsing is awk-only on purpose:
+    # the upstream alpine/helm image ships without jq and we don't want to
+    # apk-add at runtime under a runAsNonRoot pod.
+    set -eu
+
+    # Helm needs writable cache/config/data dirs. The Pod runs with
+    # readOnlyRootFilesystem: true, so point Helm at the emptyDir mounted
+    # at /tmp.
+    export HOME=/tmp
+    export HELM_CACHE_HOME=/tmp/.helm/cache
+    export HELM_CONFIG_HOME=/tmp/.helm/config
+    export HELM_DATA_HOME=/tmp/.helm/data
+    mkdir -p "$HELM_CACHE_HOME" "$HELM_CONFIG_HOME" "$HELM_DATA_HOME"
+
+    log() { printf '[auto-upgrade] %s\n' "$*"; }
+
+    log "release=$RELEASE_NAME namespace=$RELEASE_NAMESPACE repo=$REPO_URL"
+
+    helm repo add "$REPO_NAME" "$REPO_URL" >/dev/null
+    helm repo update "$REPO_NAME" >/dev/null
+
+    # Latest published version. Helm orders search results newest-first,
+    # so the first `version:` line in the YAML output is the latest.
+    LATEST="$(helm search repo "${REPO_NAME}/${CHART_NAME}" -o yaml \
+      | awk '/^[[:space:]]*version:/ {print $2; exit}')"
+
+    # Currently deployed chart version. `helm list -o yaml` emits
+    # `chart: client-<version>` for the matching release.
+    CURRENT_CHART="$(helm list -n "$RELEASE_NAMESPACE" \
+      --filter "^${RELEASE_NAME}\$" -o yaml \
+      | awk '/^[[:space:]]*chart:/ {print $2; exit}')"
+    CURRENT="${CURRENT_CHART#${CHART_NAME}-}"
+
+    if [ -z "$LATEST" ]; then
+      log "ERROR: could not resolve latest chart version from $REPO_URL"
+      exit 1
+    fi
+    if [ -z "$CURRENT" ] || [ "$CURRENT" = "$CURRENT_CHART" ]; then
+      log "ERROR: could not parse deployed chart version (got '$CURRENT_CHART')"
+      exit 1
+    fi
+
+    log "current=$CURRENT latest=$LATEST"
+
+    if [ "$LATEST" = "$CURRENT" ]; then
+      log "already at latest; nothing to do"
+      exit 0
+    fi
+
+    # Semver-aware compare via `sort -V` so 1.10.0 > 1.9.0.
+    NEWER="$(printf '%s\n%s\n' "$CURRENT" "$LATEST" | sort -V | tail -n 1)"
+    if [ "$NEWER" != "$LATEST" ]; then
+      log "deployed version is ahead of repo (current=$CURRENT > latest=$LATEST); skipping"
+      exit 0
+    fi
+
+    log "upgrading $CURRENT -> $LATEST"
+    helm upgrade "$RELEASE_NAME" "${REPO_NAME}/${CHART_NAME}" \
+      --namespace "$RELEASE_NAMESPACE" \
+      --version "$LATEST" \
+      --reuse-values \
+      --wait \
+      --timeout "$UPGRADE_TIMEOUT"
+    log "upgrade complete: $CURRENT -> $LATEST"
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: {{ include "tracebloc.autoUpgradeName" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "tracebloc.labels" . | nindent 4 }}
+    app.kubernetes.io/component: auto-upgrade
+spec:
+  schedule: {{ .Values.autoUpgrade.schedule | quote }}
+  suspend: {{ .Values.autoUpgrade.suspend }}
+  # Forbid: never run two upgrade attempts at once. A long upgrade that
+  # crosses the next scheduled tick should not stack a second `helm upgrade`
+  # on top of itself.
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: {{ .Values.autoUpgrade.successfulJobsHistoryLimit }}
+  failedJobsHistoryLimit: {{ .Values.autoUpgrade.failedJobsHistoryLimit }}
+  startingDeadlineSeconds: {{ .Values.autoUpgrade.startingDeadlineSeconds }}
+  jobTemplate:
+    spec:
+      backoffLimit: 2
+      template:
+        metadata:
+          labels:
+            {{- include "tracebloc.selectorLabels" . | nindent 12 }}
+            app.kubernetes.io/component: auto-upgrade
+        spec:
+          serviceAccountName: {{ include "tracebloc.autoUpgradeName" . }}
+          restartPolicy: OnFailure
+          {{- if include "tracebloc.useImagePullSecrets" . }}
+          imagePullSecrets:
+            - name: {{ include "tracebloc.registrySecretName" . }}
+          {{- end }}
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1000
+            runAsGroup: 1000
+            fsGroup: 1000
+            seccompProfile:
+              type: RuntimeDefault
+          containers:
+            - name: helm
+              image: "{{ .Values.autoUpgrade.image.repository }}:{{ .Values.autoUpgrade.image.tag }}"
+              imagePullPolicy: {{ .Values.autoUpgrade.image.pullPolicy }}
+              # `helm` is the entrypoint on alpine/helm; override so we run
+              # our script instead.
+              command: ["/bin/sh", "/scripts/auto-upgrade.sh"]
+              env:
+                - name: RELEASE_NAME
+                  value: {{ .Release.Name | quote }}
+                - name: RELEASE_NAMESPACE
+                  value: {{ .Release.Namespace | quote }}
+                - name: REPO_URL
+                  value: {{ .Values.autoUpgrade.repoUrl | quote }}
+                - name: REPO_NAME
+                  value: {{ .Values.autoUpgrade.repoName | quote }}
+                - name: CHART_NAME
+                  value: {{ .Values.autoUpgrade.chartName | quote }}
+                - name: UPGRADE_TIMEOUT
+                  value: {{ .Values.autoUpgrade.timeout | quote }}
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                capabilities:
+                  drop: ["ALL"]
+              resources:
+                {{- toYaml .Values.autoUpgrade.resources | nindent 16 }}
+              volumeMounts:
+                - name: scripts
+                  mountPath: /scripts
+                  readOnly: true
+                - name: tmp
+                  mountPath: /tmp
+          volumes:
+            - name: scripts
+              configMap:
+                name: {{ include "tracebloc.autoUpgradeName" . }}
+                defaultMode: 0555
+            - name: tmp
+              emptyDir: {}
+{{- end }}

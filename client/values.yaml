@@ -276,3 +276,66 @@ clientPassword: ""
 #   username: "<DOCKER_USERNAME>"
 #   password: "<DOCKER_REGISTRY_TOKEN>"
 #   email: "<DOCKER_EMAIL>"
+
+# -- Self-upgrade CronJob (closes tracebloc/client#69).
+# Runs `helm upgrade --reuse-values` against this release on a schedule, so
+# customers do not stay frozen on the version they first installed and miss
+# security fixes / stability work shipped after their install.
+#
+# How it works:
+#   - A CronJob in this namespace runs `helm repo update` against repoUrl,
+#     compares the latest published chart version to the deployed revision,
+#     and upgrades when the published version is newer (semver compare via
+#     `sort -V`, so 1.10 > 1.9 — not a string compare).
+#   - --reuse-values is passed, so secrets (clientId, clientPassword,
+#     dockerRegistry creds) and any operator overrides are preserved.
+#   - imagePullPolicy on tracebloc images is `Always` when no digest is
+#     pinned, so the chart upgrade also picks up new image content for the
+#     floating prod/dev tags as pods restart.
+#
+# Trust boundary: the CronJob's ServiceAccount is bound to the built-in
+# `cluster-admin` ClusterRole, so it can apply any resource the chart
+# templates (PriorityClass / StorageClass / ClusterRoleBinding / Namespace
+# are all cluster-scoped). Anything that compromises this Pod or the chart
+# repo at repoUrl effectively gets cluster-admin. Mitigations:
+#   - repoUrl defaults to GitHub Pages over HTTPS (publish controlled by
+#     the tracebloc team via the gh-pages branch).
+#   - Set autoUpgrade.enabled: false to opt out and run upgrades manually
+#     under your own approval gate.
+#
+# Disabled-on-this-cluster check after install:
+#   kubectl get cronjob -n <namespace> -l app.kubernetes.io/component=auto-upgrade
+autoUpgrade:
+  # Default ON: the entire point of #69 is that customers freeze on the
+  # version they installed. Defaulting off would recreate that exact bug.
+  enabled: true
+  # Daily at 02:23 UTC. The off-hour minute spreads load across the
+  # tracebloc.github.io/client GitHub Pages origin.
+  schedule: "23 2 * * *"
+  # Helm chart repo to poll. Override only when mirroring internally.
+  repoUrl: "https://tracebloc.github.io/client"
+  repoName: "tracebloc"
+  chartName: "client"
+  # `helm upgrade --wait --timeout`. Bare-metal first-pull of mysql/jobs-manager
+  # images can take several minutes; 10m gives PVC bind + image pull headroom
+  # without holding the slot all night if something is genuinely wedged.
+  timeout: "10m"
+  # CronJob spec knobs. Override per-cluster if needed.
+  suspend: false
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 5
+  startingDeadlineSeconds: 600
+  # Pod image: helm CLI only. alpine/helm is small and the tag pins the
+  # helm version, so behaviour cannot drift if upstream re-tags.
+  image:
+    repository: alpine/helm
+    tag: "3.16.4"
+    pullPolicy: IfNotPresent
+  # Tiny — the pod is mostly idle waiting on network + helm I/O.
+  resources:
+    requests:
+      cpu: "50m"
+      memory: "128Mi"
+    limits:
+      cpu: "500m"
+      memory: "256Mi"
