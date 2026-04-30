@@ -1,0 +1,39 @@
+{{- if .Values.autoUpgrade.enabled }}
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ include "tracebloc.autoUpgradeName" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "tracebloc.labels" . | nindent 4 }}
+    app.kubernetes.io/component: auto-upgrade
+---
+{{/*
+  Bound to the built-in cluster-admin ClusterRole rather than a chart-defined
+  narrow role. The chart already creates cluster-scoped resources (PriorityClass,
+  StorageClass, ClusterRole/Binding, optionally Namespace), so a curated role
+  would have to enumerate every resource the chart ever templates — adding a
+  new resource kind in a future version would silently break upgrades on
+  already-deployed clients with no signal.
+  See autoUpgrade comment in values.yaml for the trust-boundary discussion.
+*/}}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "tracebloc.autoUpgradeName" . }}
+  annotations:
+    meta.helm.sh/release-name: {{ .Release.Name }}
+    meta.helm.sh/release-namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "tracebloc.labels" . | nindent 4 }}
+    app.kubernetes.io/component: auto-upgrade
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "tracebloc.autoUpgradeName" . }}
+    namespace: {{ .Release.Namespace }}
+roleRef:
+  kind: ClusterRole
+  name: cluster-admin
+  apiGroup: rbac.authorization.k8s.io
+{{- end }}

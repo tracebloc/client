@@ -2,6 +2,45 @@
 
 This guide explains how to migrate from the legacy per-platform charts (`aks/`, `bm/`, `eks/`, `oc/`) to the unified `client/` chart.
 
+## Upgrading to 1.3.0 — self-upgrade CronJob lands on by default
+
+Releases of 1.3.0+ install a `<release>-auto-upgrade` CronJob that polls
+`https://tracebloc.github.io/client` daily and runs
+`helm upgrade --reset-then-reuse-values` when a newer chart version is
+published. This closes [tracebloc/client#69](https://github.com/tracebloc/client/issues/69) —
+older deployed clients stop drifting from the latest secure / stable release.
+
+> **Operator note for the 1.x → 1.3.0 jump.** Use `--reset-then-reuse-values`
+> on the *manual* upgrade command too, not plain `--reuse-values`. The new
+> `autoUpgrade` block was added in 1.3.0; with `--reuse-values` Helm reuses
+> the last release's *computed* values, which don't contain `autoUpgrade`,
+> and the new templates fail with `nil pointer evaluating interface {}.enabled`.
+> Once you're on 1.3.0+ the CronJob handles future bumps with the correct
+> flag itself.
+>
+> ```bash
+> helm upgrade <release> tracebloc/client \
+>   -n <namespace> --version 1.3.0 \
+>   --reset-then-reuse-values
+> ```
+
+The upgrader's ServiceAccount is bound to the built-in `cluster-admin`
+ClusterRole because the chart already templates cluster-scoped resources
+(`PriorityClass`, `StorageClass`, `ClusterRole`/`Binding`, optionally
+`Namespace`); a curated narrower role would silently break the day a future
+chart version adds a new resource kind.
+
+To opt out and keep the manual approval gate you had on 1.2.x:
+
+```yaml
+# values-overrides.yaml
+autoUpgrade:
+  enabled: false
+```
+
+Or for a one-shot pause without removing the resources, set
+`autoUpgrade.suspend: true`.
+
 ## What Changed
 
 | Legacy | Unified |
