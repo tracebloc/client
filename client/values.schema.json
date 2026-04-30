@@ -428,6 +428,95 @@
       "not": { "pattern": "^<.*>$" },
       "description": "Client authentication password. Must be a real value, not a placeholder like <CLIENT_PASSWORD>."
     },
+    "autoUpgrade": {
+      "type": "object",
+      "description": "Self-upgrade CronJob (issue tracebloc/client#69). Polls the helm repo at autoUpgrade.repoUrl daily and runs `helm upgrade --reuse-values` when a newer chart version is published. Disable to keep the release pinned to its install-time chart version.",
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "When false, no CronJob, ServiceAccount, or ClusterRoleBinding is rendered and the release will not self-upgrade."
+        },
+        "schedule": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Cron expression in the controller's timezone (UTC unless the cluster overrides it)."
+        },
+        "repoUrl": {
+          "type": "string",
+          "format": "uri",
+          "description": "Helm chart repository URL polled for newer versions."
+        },
+        "repoName": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Local alias used by `helm repo add` inside the upgrade Pod."
+        },
+        "chartName": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Chart name as published in the repo's index.yaml (the `name` field, not the directory)."
+        },
+        "timeout": {
+          "type": "string",
+          "pattern": "^[0-9]+(s|m|h)$",
+          "description": "Passed to `helm upgrade --timeout`. Allow enough headroom for image pull + PVC bind on slow infra."
+        },
+        "suspend": {
+          "type": "boolean",
+          "default": false,
+          "description": "CronJob.spec.suspend. Set true to pause without removing the resources."
+        },
+        "successfulJobsHistoryLimit": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "failedJobsHistoryLimit": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "startingDeadlineSeconds": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "image": {
+          "type": "object",
+          "required": ["repository", "tag"],
+          "properties": {
+            "repository": { "type": "string", "minLength": 1 },
+            "tag": {
+              "type": "string",
+              "minLength": 1,
+              "not": { "const": "latest" },
+              "description": "Pin the helm version. `latest` is rejected — auto-upgrade behaviour must not drift."
+            },
+            "pullPolicy": {
+              "type": "string",
+              "enum": ["Always", "IfNotPresent", "Never"]
+            }
+          }
+        },
+        "resources": {
+          "type": "object",
+          "properties": {
+            "requests": {
+              "type": "object",
+              "properties": {
+                "cpu":    { "type": "string", "pattern": "^[0-9]+m?$" },
+                "memory": { "type": "string", "pattern": "^[0-9]+(Ki|Mi|Gi|Ti)$" }
+              }
+            },
+            "limits": {
+              "type": "object",
+              "properties": {
+                "cpu":    { "type": "string", "pattern": "^[0-9]+m?$" },
+                "memory": { "type": "string", "pattern": "^[0-9]+(Ki|Mi|Gi|Ti)$" }
+              }
+            }
+          }
+        }
+      }
+    },
     "dockerRegistry": {
       "type": ["object", "null"],
       "description": "Optional. Omit entirely or set null for public images (no secret or imagePullSecrets). Only create when set and create is true.",

@@ -82,6 +82,16 @@ mysql-pvc
 {{- end }}
 
 {{/*
+  Release-scoped name shared by the auto-upgrade CronJob, ServiceAccount,
+  ClusterRoleBinding, and the ConfigMap holding the upgrade script. Kept
+  in one helper so the four resources stay in lockstep — the CRB references
+  the SA by name, and the CronJob mounts the ConfigMap by name.
+*/}}
+{{- define "tracebloc.autoUpgradeName" -}}
+{{ .Release.Name }}-auto-upgrade
+{{- end }}
+
+{{/*
   StorageClass name: when storageClass.create is true, use a release-unique name
   so each release gets its own StorageClass (avoids Helm ownership conflicts).
   When create is false, use the user-provided storageClass.name for an existing class.

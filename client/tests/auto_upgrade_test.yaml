@@ -1,0 +1,191 @@
+suite: auto-upgrade CronJob and RBAC
+templates:
+  - templates/auto-upgrade-cronjob.yaml
+  - templates/auto-upgrade-rbac.yaml
+release:
+  name: stg
+  namespace: tracebloc
+set:
+  clientId: "test-id"
+  clientPassword: "test"
+tests:
+  - it: cronjob template renders ConfigMap + CronJob by default
+    template: templates/auto-upgrade-cronjob.yaml
+    asserts:
+      - hasDocuments:
+          count: 2
+
+  - it: rbac template renders ServiceAccount + ClusterRoleBinding by default
+    template: templates/auto-upgrade-rbac.yaml
+    asserts:
+      - hasDocuments:
+          count: 2
+
+  - it: cronjob template renders nothing when autoUpgrade.enabled=false
+    template: templates/auto-upgrade-cronjob.yaml
+    set:
+      autoUpgrade:
+        enabled: false
+    asserts:
+      - hasDocuments:
+          count: 0
+
+  - it: rbac template renders nothing when autoUpgrade.enabled=false
+    template: templates/auto-upgrade-rbac.yaml
+    set:
+      autoUpgrade:
+        enabled: false
+    asserts:
+      - hasDocuments:
+          count: 0
+
+  - it: ConfigMap holds the upgrade script
+    template: templates/auto-upgrade-cronjob.yaml
+    documentIndex: 0
+    asserts:
+      - isKind:
+          of: ConfigMap
+      - equal:
+          path: metadata.name
+          value: stg-auto-upgrade
+      - matchRegex:
+          path: data["auto-upgrade.sh"]
+          pattern: "helm upgrade"
+      # Must be --reset-then-reuse-values, NOT plain --reuse-values:
+      # --reuse-values re-uses the last release's computed values, so any
+      # new keys added to values.yaml in a future chart version silently
+      # fail to render with nil-pointer template errors. Verified on a
+      # dev-cluster 1.1.0 -> 1.3.0 dry-run during the #69 verification.
+      - matchRegex:
+          path: data["auto-upgrade.sh"]
+          pattern: "--reset-then-reuse-values"
+      # Regression guard: the script MUST use sort -V (semver), not lexical
+      # string compare. A naive string compare would block 1.10.x upgrades
+      # because "1.10.0" < "1.9.0" lexically.
+      - matchRegex:
+          path: data["auto-upgrade.sh"]
+          pattern: "sort -V"
+
+  - it: CronJob has the right schedule, concurrency, and SA wiring
+    template: templates/auto-upgrade-cronjob.yaml
+    documentIndex: 1
+    asserts:
+      - isKind:
+          of: CronJob
+      - equal:
+          path: metadata.name
+          value: stg-auto-upgrade
+      - equal:
+          path: spec.schedule
+          value: "23 2 * * *"
+      - equal:
+          path: spec.concurrencyPolicy
+          value: Forbid
+      - equal:
+          path: spec.jobTemplate.spec.template.spec.serviceAccountName
+          value: stg-auto-upgrade
+      - equal:
+          path: spec.jobTemplate.spec.template.spec.restartPolicy
+          value: OnFailure
+
+  - it: CronJob env carries release identity to the upgrade script
+    template: templates/auto-upgrade-cronjob.yaml
+    documentIndex: 1
+    asserts:
+      - contains:
+          path: spec.jobTemplate.spec.template.spec.containers[0].env
+          content:
+            name: RELEASE_NAME
+            value: stg
+      - contains:
+          path: spec.jobTemplate.spec.template.spec.containers[0].env
+          content:
+            name: RELEASE_NAMESPACE
+            value: tracebloc
+      - contains:
+          path: spec.jobTemplate.spec.template.spec.containers[0].env
+          content:
+            name: REPO_URL
+            value: https://tracebloc.github.io/client
+
+  - it: CronJob pod satisfies PSA restricted (runAsNonRoot, dropped caps, RO root, seccomp)
+    template: templates/auto-upgrade-cronjob.yaml
+    documentIndex: 1
+    asserts:
+      - equal:
+          path: spec.jobTemplate.spec.template.spec.securityContext.runAsNonRoot
+          value: true
+      - equal:
+          path: spec.jobTemplate.spec.template.spec.securityContext.seccompProfile.type
+          value: RuntimeDefault
+      - equal:
+          path: spec.jobTemplate.spec.template.spec.containers[0].securityContext.allowPrivilegeEscalation
+          value: false
+      - equal:
+          path: spec.jobTemplate.spec.template.spec.containers[0].securityContext.readOnlyRootFilesystem
+          value: true
+      - equal:
+          path: spec.jobTemplate.spec.template.spec.containers[0].securityContext.capabilities.drop[0]
+          value: ALL
+
+  - it: ServiceAccount and ClusterRoleBinding bind to cluster-admin
+    template: templates/auto-upgrade-rbac.yaml
+    asserts:
+      - hasDocuments:
+          count: 2
+      - isKind:
+          of: ServiceAccount
+        documentIndex: 0
+      - equal:
+          path: metadata.name
+          value: stg-auto-upgrade
+        documentIndex: 0
+      - isKind:
+          of: ClusterRoleBinding
+        documentIndex: 1
+      - equal:
+          path: roleRef.name
+          value: cluster-admin
+        documentIndex: 1
+      - equal:
+          path: subjects[0].name
+          value: stg-auto-upgrade
+        documentIndex: 1
+
+  - it: should accept operator overrides for schedule, image, and timeout
+    template: templates/auto-upgrade-cronjob.yaml
+    documentIndex: 1
+    set:
+      autoUpgrade:
+        enabled: true
+        schedule: "0 4 * * 0"
+        timeout: "30m"
+        image:
+          repository: my-mirror/helm
+          tag: "3.16.4"
+          pullPolicy: Always
+    asserts:
+      - equal:
+          path: spec.schedule
+          value: "0 4 * * 0"
+      - equal:
+          path: spec.jobTemplate.spec.template.spec.containers[0].image
+          value: my-mirror/helm:3.16.4
+      - equal:
+          path: spec.jobTemplate.spec.template.spec.containers[0].imagePullPolicy
+          value: Always
+      - contains:
+          path: spec.jobTemplate.spec.template.spec.containers[0].env
+          content:
+            name: UPGRADE_TIMEOUT
+            value: "30m"
+
+  - it: schema rejects image.tag=latest (auto-upgrade behaviour must not drift)
+    template: templates/auto-upgrade-cronjob.yaml
+    set:
+      autoUpgrade:
+        image:
+          tag: "latest"
+    asserts:
+      - failedTemplate:
+          errorPattern: "must not be valid against schema"
