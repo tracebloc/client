@@ -10,6 +10,10 @@ Releases of 1.3.0+ install a `<release>-auto-upgrade` CronJob that polls
 published. This closes [tracebloc/client#69](https://github.com/tracebloc/client/issues/69) —
 older deployed clients stop drifting from the latest secure / stable release.
 
+> **Verified end-to-end on `tb-client-dev-templates` during the 1.3.1 release**:
+> a `tracebloc` release at 1.3.0 self-upgraded to 1.3.1 within a single
+> CronJob tick after publish, with no operator intervention.
+
 > **Operator note for the 1.x → 1.3.0 jump.** Use `--reset-then-reuse-values`
 > on the *manual* upgrade command too, not plain `--reuse-values`. The new
 > `autoUpgrade` block was added in 1.3.0; with `--reuse-values` Helm reuses
