@@ -1,0 +1,72 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}-requests-proxy
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "tracebloc.labels" . | nindent 4 }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: requests-proxy
+  template:
+    metadata:
+      labels:
+        app: requests-proxy
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: proxy
+          image: {{ include "tracebloc.image" (dict "repository" "tracebloc/jobs-manager" "tag" .Values.env.CLIENT_ENV "digest" .Values.images.requestsProxy.digest "registry" "docker.io") | quote }}
+          imagePullPolicy: {{ if .Values.images.requestsProxy.digest }}IfNotPresent{{ else }}Always{{ end }}
+          workingDir: /app
+          command: ["python", "-m", "gunicorn"]
+          args:
+            - "--bind=0.0.0.0:8888"
+            # The proxy stores registered pod tokens in process-local memory,
+            # so it must run as a single worker unless the registry moves to
+            # shared storage.
+            - "--workers=1"
+            - "--worker-tmp-dir=/dev/shm"
+            - "--threads=4"
+            - "--graceful-timeout=30"
+            - "--timeout=60"
+            - "--access-logfile=-"
+            - "--error-logfile=-"
+            - "requests_proxy_server:create_app()"
+          ports:
+            - containerPort: 8888
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1001
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+            readOnlyRootFilesystem: true
+          resources:
+            requests:
+              cpu: {{ .Values.resources.requestsProxy.requests.cpu | default "100m" | quote }}
+              memory: {{ .Values.resources.requestsProxy.requests.memory | default "256Mi" | quote }}
+            limits:
+              cpu: {{ .Values.resources.requestsProxy.limits.cpu | default "500m" | quote }}
+              memory: {{ .Values.resources.requestsProxy.limits.memory | default "512Mi" | quote }}
+          env:
+            - name: REQUESTS_PROXY_ADMIN_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Release.Name }}-requests-proxy-admin
+                  key: token
+            - name: EXPERIMENTS_QUEUE_NAME
+              value: "experiments"
+            - name: FLOPS_QUEUE_NAME
+              value: "flops"
+      {{- if include "tracebloc.useImagePullSecrets" . }}
+      imagePullSecrets:
+        - name: {{ include "tracebloc.registrySecretName" . }}
+      {{- end }}
+      restartPolicy: Always

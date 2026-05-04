@@ -183,6 +183,8 @@ images:
     digest: ""
   resourceMonitor:
     digest: ""
+  requestsProxy:
+    digest: ""
   mysqlClient:
     # mysql-client is only published under the "prod" tag — it has no dev/
     # staging variants, so we decouple it from env.CLIENT_ENV. Override only
@@ -230,6 +232,13 @@ resources:
     limits:
       cpu: "500m"
       memory: "512Mi"
+  requestsProxy:
+    requests:
+      cpu: "100m"
+      memory: "256Mi"
+    limits:
+      cpu: "500m"
+      memory: "512Mi"
 
 # -- PriorityClass for the data-plane (mysql).
 # Cluster-scoped resource. Created with helm.sh/resource-policy: keep so a
@@ -266,6 +275,13 @@ podDisruptionBudget:
 # overridden. Do NOT commit real credentials to version control.
 clientId: ""
 clientPassword: ""
+
+# -- Admin token for the requests-proxy service.
+# Auto-generated on first install (equivalent to `openssl rand -hex 32`) and
+# preserved across upgrades via lookup. Override with --set requestsProxyAdminToken=...
+# only when you need a specific value (e.g. restoring a known token).
+# Do NOT commit real tokens to version control.
+requestsProxyAdminToken: ""
 
 # -- Docker registry credentials (optional; only used when dockerRegistry is set and create is true)
 # Omit dockerRegistry entirely, or set create: false, for public images (no imagePullSecrets).
