@@ -220,9 +220,9 @@ tests:
       - hasDocuments:
           count: 2
       - equal:
-          documentIndex: 0
           path: metadata.namespace
           value: tracebloc-templates
+        documentIndex: 0
 
   - it: should not mirror the tracebloc Secret when node-agents namespace equals release namespace
     template: templates/secrets.yaml
@@ -235,9 +235,9 @@ tests:
       - hasDocuments:
           count: 2
       - equal:
-          documentIndex: 0
           path: metadata.namespace
           value: tracebloc-templates
+        documentIndex: 0
 
   - it: should mirror the docker registry Secret into the node-agents namespace when in use
     template: templates/docker-registry-secret.yaml
