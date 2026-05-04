@@ -277,9 +277,9 @@ clientId: ""
 clientPassword: ""
 
 # -- Admin token for the requests-proxy service.
-# Auto-generated on first install (equivalent to `openssl rand -hex 32`) and
-# preserved across upgrades via lookup. Override with --set requestsProxyAdminToken=...
-# only when you need a specific value (e.g. restoring a known token).
+# Optional. If set, this value overrides any existing requests-proxy admin
+# secret on install or upgrade. When left empty, the chart reuses the current
+# secret if present or generates a new token on first install.
 # Do NOT commit real tokens to version control.
 requestsProxyAdminToken: ""
 
