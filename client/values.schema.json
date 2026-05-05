@@ -460,6 +460,23 @@
       "type": "string",
       "description": "Optional admin token override for the requests-proxy service."
     },
+    "requestsProxy": {
+      "type": "object",
+      "description": "Requests-proxy stateless auth (HC-1 + CR-1/CR-2). The keys Secret, revoked ConfigMap, and RBAC always render; statelessTokens controls whether the runtime path is enabled.",
+      "properties": {
+        "statelessTokens": {
+          "type": "boolean",
+          "default": false,
+          "description": "When true, jobs-manager mints HMAC-signed JWTs and the proxy verifies them. When false, legacy register-token behaviour is preserved."
+        },
+        "tokenTtlSeconds": {
+          "type": "integer",
+          "minimum": 60,
+          "default": 7776000,
+          "description": "JWT exp lifetime in seconds. Default 7776000 (90d) aligns with the quarterly key-rotation cadence."
+        }
+      }
+    },
     "autoUpgrade": {
       "type": "object",
       "description": "Self-upgrade CronJob (issue tracebloc/client#69). Polls the helm repo at autoUpgrade.repoUrl daily and runs `helm upgrade --reuse-values` when a newer chart version is published. Disable to keep the release pinned to its install-time chart version.",

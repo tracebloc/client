@@ -283,6 +283,19 @@ clientPassword: ""
 # Do NOT commit real tokens to version control.
 requestsProxyAdminToken: ""
 
+# -- Requests-proxy stateless auth (HC-1 + CR-1 / CR-2).
+# When statelessTokens is true, jobs-manager mints HMAC-signed JWTs and the
+# proxy verifies them against the keys mounted from <release>-requests-proxy-keys.
+# Default false during the rollout window — the chart still renders the
+# keys Secret, revoked ConfigMap, and RBAC even when disabled, so flipping
+# this flag is a one-line `helm upgrade --set` operation.
+# tokenTtlSeconds is the JWT `exp` lifetime; 7776000s (90d) aligns with the
+# quarterly key-rotation cadence so `exp` only fires before rotation if a
+# rotation is skipped (defence-in-depth).
+requestsProxy:
+  statelessTokens: false
+  tokenTtlSeconds: 7776000
+
 # -- Docker registry credentials (optional; only used when dockerRegistry is set and create is true)
 # Omit dockerRegistry entirely, or set create: false, for public images (no imagePullSecrets).
 # When create is true, secret name is {{ .Release.Name }}-regcred.

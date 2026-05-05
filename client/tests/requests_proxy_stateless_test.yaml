@@ -1,0 +1,188 @@
+suite: Requests-proxy stateless auth (HC-1)
+templates:
+  - templates/requests-proxy-keys-secret.yaml
+  - templates/requests-proxy-revoked-configmap.yaml
+  - templates/rbac.yaml
+  - templates/jobs-manager-deployment.yaml
+  - templates/requests-proxy-deployment.yaml
+set:
+  clientId: "test-client"
+  clientPassword: "test-pass"
+  storageClass:
+    create: false
+    name: "existing-sc"
+tests:
+  # ---------- keys Secret ----------
+  - it: should render keys Secret with active=v1 and a v1 key on first install
+    template: templates/requests-proxy-keys-secret.yaml
+    asserts:
+      - isKind:
+          of: Secret
+      - equal:
+          path: metadata.name
+          value: RELEASE-NAME-requests-proxy-keys
+      - equal:
+          path: metadata.annotations["helm.sh/resource-policy"]
+          value: keep
+      - equal:
+          path: metadata.labels["app.kubernetes.io/component"]
+          value: requests-proxy
+      - equal:
+          path: data.active
+          value: djE=  # b64("v1")
+      - isNotEmpty:
+          path: data.v1
+      - matchRegex:
+          path: data.v1
+          # 64 raw chars → 88 b64 chars (no padding when len%3==1; here 64%3==1 → ends with =)
+          pattern: "^[A-Za-z0-9+/]+=*$"
+
+  # ---------- revoked ConfigMap ----------
+  - it: should render revoked ConfigMap with empty list on first install
+    template: templates/requests-proxy-revoked-configmap.yaml
+    asserts:
+      - isKind:
+          of: ConfigMap
+      - equal:
+          path: metadata.name
+          value: RELEASE-NAME-requests-proxy-revoked
+      - equal:
+          path: metadata.annotations["helm.sh/resource-policy"]
+          value: keep
+      - equal:
+          path: data["revoked.json"]
+          value: "[]"
+
+  # ---------- RBAC ----------
+  - it: should grant jobs-manager get/update/patch on the revoked ConfigMap (clusterScope=true)
+    template: templates/rbac.yaml
+    asserts:
+      - contains:
+          path: rules
+          content:
+            apiGroups: [""]
+            resources: ["configmaps"]
+            resourceNames: ["RELEASE-NAME-requests-proxy-revoked"]
+            verbs: ["get", "update", "patch"]
+        documentIndex: 1  # ClusterRole
+      - contains:
+          path: rules
+          content:
+            apiGroups: [""]
+            resources: ["secrets"]
+            resourceNames: ["RELEASE-NAME-requests-proxy-keys"]
+            verbs: ["get"]
+        documentIndex: 1
+
+  - it: should grant the same rules in namespace-scoped Role when clusterScope=false
+    template: templates/rbac.yaml
+    set:
+      clusterScope: false
+    asserts:
+      - contains:
+          path: rules
+          content:
+            apiGroups: [""]
+            resources: ["configmaps"]
+            resourceNames: ["RELEASE-NAME-requests-proxy-revoked"]
+            verbs: ["get", "update", "patch"]
+        documentIndex: 1  # Role
+      - contains:
+          path: rules
+          content:
+            apiGroups: [""]
+            resources: ["secrets"]
+            resourceNames: ["RELEASE-NAME-requests-proxy-keys"]
+            verbs: ["get"]
+        documentIndex: 1
+
+  # ---------- jobs-manager deployment ----------
+  - it: should mount keys volume and inject stateless env vars on jobs-manager
+    template: templates/jobs-manager-deployment.yaml
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].volumeMounts
+          content:
+            name: requests-proxy-keys
+            mountPath: "/etc/proxy/keys"
+            readOnly: true
+      - contains:
+          path: spec.template.spec.volumes
+          content:
+            name: requests-proxy-keys
+            secret:
+              secretName: RELEASE-NAME-requests-proxy-keys
+              defaultMode: 0400
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: REVOKED_CONFIGMAP_NAME
+            value: "RELEASE-NAME-requests-proxy-revoked"
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: REQUESTS_PROXY_TOKEN_TTL_SECONDS
+            value: "7776000"
+
+  - it: should set REQUESTS_PROXY_STATELESS=1 on jobs-manager when flag is true
+    template: templates/jobs-manager-deployment.yaml
+    set:
+      requestsProxy:
+        statelessTokens: true
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: REQUESTS_PROXY_STATELESS
+            value: "1"
+
+  - it: should leave REQUESTS_PROXY_STATELESS empty on jobs-manager by default
+    template: templates/jobs-manager-deployment.yaml
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: REQUESTS_PROXY_STATELESS
+            value: ""
+
+  # ---------- proxy deployment ----------
+  - it: should mount keys + revoked volumes and inject env on the proxy
+    template: templates/requests-proxy-deployment.yaml
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].volumeMounts
+          content:
+            name: requests-proxy-keys
+            mountPath: "/etc/proxy/keys"
+            readOnly: true
+      - contains:
+          path: spec.template.spec.containers[0].volumeMounts
+          content:
+            name: requests-proxy-revoked
+            mountPath: "/etc/proxy/revoked"
+            readOnly: true
+      - contains:
+          path: spec.template.spec.volumes
+          content:
+            name: requests-proxy-keys
+            secret:
+              secretName: RELEASE-NAME-requests-proxy-keys
+              defaultMode: 0400
+      - contains:
+          path: spec.template.spec.volumes
+          content:
+            name: requests-proxy-revoked
+            configMap:
+              name: RELEASE-NAME-requests-proxy-revoked
+
+  - it: should set REQUESTS_PROXY_STATELESS=1 on the proxy when flag is true
+    template: templates/requests-proxy-deployment.yaml
+    set:
+      requestsProxy:
+        statelessTokens: true
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: REQUESTS_PROXY_STATELESS
+            value: "1"

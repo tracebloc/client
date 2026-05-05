@@ -51,6 +51,9 @@ spec:
             mountPath: "/data/shared"
           - name: logs-volume
             mountPath: "/data/logs"
+          - name: requests-proxy-keys
+            mountPath: "/etc/proxy/keys"
+            readOnly: true
         env:
         - name: CLIENT_ID
           valueFrom:
@@ -67,6 +70,19 @@ spec:
             secretKeyRef:
               name: {{ .Release.Name }}-requests-proxy-admin
               key: token
+        # Stateless requests-proxy auth (CR-2). The runtime path is enabled
+        # by REQUESTS_PROXY_STATELESS=1; otherwise legacy register-token
+        # behaviour is unchanged.
+        - name: REQUESTS_PROXY_STATELESS
+          value: {{ ternary "1" "" .Values.requestsProxy.statelessTokens | quote }}
+        - name: RELEASE_NAME
+          value: {{ .Release.Name | quote }}
+        - name: NAMESPACE
+          value: {{ .Release.Namespace | quote }}
+        - name: REQUESTS_PROXY_TOKEN_TTL_SECONDS
+          value: {{ .Values.requestsProxy.tokenTtlSeconds | default 7776000 | int | quote }}
+        - name: REVOKED_CONFIGMAP_NAME
+          value: {{ printf "%s-requests-proxy-revoked" .Release.Name | quote }}
         - name: CLIENT_PVC
           value: {{ include "tracebloc.clientDataPvc" . | quote }}
         - name: CLIENT_LOGS_PVC
@@ -154,4 +170,8 @@ spec:
         - name: logs-volume
           persistentVolumeClaim:
             claimName: {{ include "tracebloc.clientLogsPvc" . }}
+        - name: requests-proxy-keys
+          secret:
+            secretName: {{ .Release.Name }}-requests-proxy-keys
+            defaultMode: 0400
       restartPolicy: Always

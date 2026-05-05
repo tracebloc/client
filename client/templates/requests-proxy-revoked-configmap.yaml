@@ -1,0 +1,31 @@
+{{/*
+  Revoked-jti list for the requests-proxy stateless auth path. Jobs-manager
+  appends entries on stop_job and prunes entries whose K8s Job no longer
+  exists (CR-2). The proxy mounts this ConfigMap and polls revoked.json
+  every 10s to refresh its in-memory revocation set (CR-1).
+
+  Lookup pattern preserves the existing data on chart upgrade — without it,
+  every `helm upgrade` would reset the list to [] and silently re-authorize
+  every previously-revoked job until its key rotation cycle expires.
+
+  resource-policy: keep — same reasoning as the keys Secret. A stray
+  uninstall must not wipe outstanding revocations.
+*/}}
+{{- $cmName := printf "%s-requests-proxy-revoked" .Release.Name -}}
+{{- $existing := lookup "v1" "ConfigMap" .Release.Namespace $cmName -}}
+{{- $revoked := "[]" -}}
+{{- if and $existing $existing.data (index $existing.data "revoked.json") -}}
+{{- $revoked = index $existing.data "revoked.json" -}}
+{{- end -}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ $cmName }}
+  namespace: {{ .Release.Namespace }}
+  annotations:
+    helm.sh/resource-policy: keep
+  labels:
+    {{- include "tracebloc.labels" . | nindent 4 }}
+    app.kubernetes.io/component: requests-proxy
+data:
+  revoked.json: {{ $revoked | quote }}

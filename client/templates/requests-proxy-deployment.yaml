@@ -41,6 +41,13 @@ spec:
             - "requests_proxy_server:create_app()"
           ports:
             - containerPort: 8888
+          volumeMounts:
+            - name: requests-proxy-keys
+              mountPath: "/etc/proxy/keys"
+              readOnly: true
+            - name: requests-proxy-revoked
+              mountPath: "/etc/proxy/revoked"
+              readOnly: true
           securityContext:
             runAsNonRoot: true
             runAsUser: 1001
@@ -61,6 +68,16 @@ spec:
                 secretKeyRef:
                   name: {{ .Release.Name }}-requests-proxy-admin
                   key: token
+            # Stateless requests-proxy auth (CR-1). When REQUESTS_PROXY_STATELESS=1
+            # the proxy verifies HMAC-signed JWTs from /etc/proxy/keys/ and reads
+            # /etc/proxy/revoked/revoked.json instead of using its in-memory
+            # registered-token map. Otherwise legacy behaviour is unchanged.
+            - name: REQUESTS_PROXY_STATELESS
+              value: {{ ternary "1" "" .Values.requestsProxy.statelessTokens | quote }}
+            - name: RELEASE_NAME
+              value: {{ .Release.Name | quote }}
+            - name: NAMESPACE
+              value: {{ .Release.Namespace | quote }}
             - name: EXPERIMENTS_QUEUE_NAME
               value: "experiments"
             - name: FLOPS_QUEUE_NAME
@@ -69,4 +86,12 @@ spec:
       imagePullSecrets:
         - name: {{ include "tracebloc.registrySecretName" . }}
       {{- end }}
+      volumes:
+        - name: requests-proxy-keys
+          secret:
+            secretName: {{ .Release.Name }}-requests-proxy-keys
+            defaultMode: 0400
+        - name: requests-proxy-revoked
+          configMap:
+            name: {{ .Release.Name }}-requests-proxy-revoked
       restartPolicy: Always
