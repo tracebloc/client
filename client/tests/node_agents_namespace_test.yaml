@@ -186,7 +186,7 @@ tests:
     template: templates/secrets.yaml
     asserts:
       - hasDocuments:
-          count: 2
+          count: 3
       - isKind:
           of: Secret
         documentIndex: 0
@@ -196,21 +196,21 @@ tests:
         documentIndex: 0
       - isKind:
           of: Secret
-        documentIndex: 1
+        documentIndex: 2
       - equal:
           path: metadata.namespace
           value: tracebloc-node-agents
-        documentIndex: 1
+        documentIndex: 2
       - equal:
           path: metadata.name
           value: RELEASE-NAME-secrets
-        documentIndex: 1
+        documentIndex: 2
       - isNotEmpty:
           path: data.CLIENT_ID
-        documentIndex: 1
+        documentIndex: 2
       - isNotEmpty:
           path: data.CLIENT_PASSWORD
-        documentIndex: 1
+        documentIndex: 2
 
   - it: should not mirror the tracebloc Secret when resourceMonitor is disabled
     template: templates/secrets.yaml
@@ -218,10 +218,11 @@ tests:
       resourceMonitor: false
     asserts:
       - hasDocuments:
-          count: 1
+          count: 2
       - equal:
           path: metadata.namespace
           value: tracebloc-templates
+        documentIndex: 0
 
   - it: should not mirror the tracebloc Secret when node-agents namespace equals release namespace
     template: templates/secrets.yaml
@@ -232,10 +233,11 @@ tests:
           name: tracebloc-templates
     asserts:
       - hasDocuments:
-          count: 1
+          count: 2
       - equal:
           path: metadata.namespace
           value: tracebloc-templates
+        documentIndex: 0
 
   - it: should mirror the docker registry Secret into the node-agents namespace when in use
     template: templates/docker-registry-secret.yaml
