@@ -50,18 +50,29 @@ For the threat model, defense layers, per-platform caveats, operator responsibil
 
 ## Deploy
 
+This repo ships the **tracebloc** unified Helm chart (currently `v1.3.1`) — one chart for AKS, EKS, bare-metal, and OpenShift.
+
 ```bash
-docker pull tracebloc/client:latest
+helm repo add tracebloc https://tracebloc.github.io/client
+helm repo update
+helm install my-tracebloc tracebloc/tracebloc \
+  --namespace tracebloc --create-namespace \
+  -f my-values.yaml
 ```
 
-Deployment varies by infrastructure. Follow the guide for your setup:
+Full deployment guide → **[docs/INSTALL.md](docs/INSTALL.md)** (prerequisites, required values, upgrade & rollback, air-gapped install).
 
-- [Deployment overview](https://docs.tracebloc.io/environment-setup/deployment-overview)
-- [Local — Linux](https://docs.tracebloc.io/environment-setup/local-linux)
-- [Local — macOS](https://docs.tracebloc.io/environment-setup/local-macos)
-- [AWS](https://docs.tracebloc.io/environment-setup/aws)
+| Topic | Where to look |
+|---|---|
+| Production install + required values | [docs/INSTALL.md](docs/INSTALL.md) |
+| Threat model & operator responsibilities | [docs/SECURITY.md](docs/SECURITY.md) |
+| Migrating from `eks-1.0.x` / `aks-*` charts to `client-1.x` | [docs/MIGRATIONS.md](docs/MIGRATIONS.md) |
+| Per-tenant migration runbook | [docs/migration-tools/README.md](docs/migration-tools/README.md) |
+| Per-platform value mapping | [client/MIGRATION.md](client/MIGRATION.md) |
 
-Full documentation → [docs.tracebloc.io](https://docs.tracebloc.io/)
+Platform-specific walkthroughs: [Linux](https://docs.tracebloc.io/environment-setup/local-deployment-guide-linux) · [macOS](https://docs.tracebloc.io/environment-setup/local-deployment-guide-macos) · [EKS](https://docs.tracebloc.io/environment-setup/eks-client-deployment-guide) · [Azure / AKS](https://docs.tracebloc.io/environment-setup/azure-deployment-guide)
+
+> **NetworkPolicy required.** The chart's training-pod egress lockdown only takes effect on a CNI that enforces NetworkPolicy. See [SECURITY.md § Per-platform caveats](docs/SECURITY.md#5-per-platform-caveats).
 
 ## Links
 
