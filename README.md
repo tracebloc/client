@@ -59,13 +59,13 @@ A single command provisions a Kubernetes cluster, auto-detects and installs GPU 
 **macOS / Linux**
 
 ```bash
-bash <(curl -fsSL tracebloc.io/i.sh)
+bash <(curl -fsSL https://tracebloc.io/i.sh)
 ```
 
 **Windows** *(PowerShell as Administrator)*
 
 ```powershell
-irm tracebloc.io/i.ps1 | iex
+irm https://tracebloc.io/i.ps1 | iex
 ```
 
 The installer pulls helper scripts from this repo at runtime — see [`scripts/install-k8s.sh`](scripts/install-k8s.sh) and [`scripts/install-k8s.ps1`](scripts/install-k8s.ps1).
