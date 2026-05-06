@@ -54,7 +54,7 @@ This repo ships the **tracebloc** unified Helm chart (currently `v1.3.1`) — on
 
 ### Quick install
 
-A single command provisions a local Kubernetes cluster, auto-detects and installs GPU drivers (NVIDIA or AMD), and deploys the tracebloc client. Best for evaluation, local dev, and first-time installs.
+A single command provisions a Kubernetes cluster, auto-detects and installs GPU drivers (NVIDIA or AMD), and deploys the tracebloc client. Use this when you don't already have a cluster — the result is a full client install, not a demo.
 
 **macOS / Linux**
 
@@ -70,9 +70,9 @@ irm tracebloc.io/i.ps1 | iex
 
 The installer pulls helper scripts from this repo at runtime — see [`scripts/install-k8s.sh`](scripts/install-k8s.sh) and [`scripts/install-k8s.ps1`](scripts/install-k8s.ps1).
 
-### Helm install (production)
+### Helm install
 
-For existing production clusters:
+For existing Kubernetes clusters:
 
 ```bash
 helm repo add tracebloc https://tracebloc.github.io/client
