@@ -5,10 +5,15 @@ This guide explains how to migrate from the legacy per-platform charts (`aks/`, 
 ## Upgrading to 1.3.0 — self-upgrade CronJob lands on by default
 
 Releases of 1.3.0+ install a `<release>-auto-upgrade` CronJob that polls
-`https://tracebloc.github.io/client` daily and runs
+`https://tracebloc.github.io/client` and runs
 `helm upgrade --reset-then-reuse-values` when a newer chart version is
 published. This closes [tracebloc/client#69](https://github.com/tracebloc/client/issues/69) —
 older deployed clients stop drifting from the latest secure / stable release.
+
+The default cadence is **hourly at :23 UTC** as of 1.3.2 (was daily at 02:23
+UTC in 1.3.0 / 1.3.1). The off-hour minute spreads load across the
+`tracebloc.github.io/client` GitHub Pages origin. Operators who want a
+different schedule can override `autoUpgrade.schedule`.
 
 > **Verified end-to-end on `tb-client-dev-templates` during the 1.3.1 release**:
 > a `tracebloc` release at 1.3.0 self-upgraded to 1.3.1 within a single
