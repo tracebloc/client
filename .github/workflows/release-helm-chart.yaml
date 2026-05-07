@@ -6,10 +6,6 @@
 name: Release Helm Chart
 
 on:
-  push:
-    tags:
-      - 'client-v*'
-      - 'v*'
   release:
     types: [published]
 
