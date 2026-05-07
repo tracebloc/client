@@ -325,9 +325,9 @@ autoUpgrade:
   # Default ON: the entire point of #69 is that customers freeze on the
   # version they installed. Defaulting off would recreate that exact bug.
   enabled: true
-  # Daily at 02:23 UTC. The off-hour minute spreads load across the
+  # Hourly at :23. The off-hour minute spreads load across the
   # tracebloc.github.io/client GitHub Pages origin.
-  schedule: "23 2 * * *"
+  schedule: "23 * * * *"
   # Helm chart repo to poll. Override only when mirroring internally.
   repoUrl: "https://tracebloc.github.io/client"
   repoName: "tracebloc"
