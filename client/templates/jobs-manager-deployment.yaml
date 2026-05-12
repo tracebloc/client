@@ -73,6 +73,8 @@ spec:
           value: {{ include "tracebloc.clientLogsPvc" . | quote }}
         - name: MYSQL_HOST
           value: "mysql-client"
+        - name: REQUESTS_PROXY_URL
+          value: "http://requests-proxy-service:8888"
         - name: JOB_IMAGE_HOST
           value: "docker.io/"
         - name: CLIENT_ENV
