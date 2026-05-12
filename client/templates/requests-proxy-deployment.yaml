@@ -61,6 +61,8 @@ spec:
                 secretKeyRef:
                   name: {{ .Release.Name }}-requests-proxy-admin
                   key: token
+            - name: MYSQL_HOST
+              value: "mysql-client"
             - name: EXPERIMENTS_QUEUE_NAME
               value: "experiments"
             - name: FLOPS_QUEUE_NAME
