@@ -276,13 +276,6 @@ podDisruptionBudget:
 clientId: ""
 clientPassword: ""
 
-# -- Admin token for the requests-proxy service.
-# Optional. If set, this value overrides any existing requests-proxy admin
-# secret on install or upgrade. When left empty, the chart reuses the current
-# secret if present or generates a new token on first install.
-# Do NOT commit real tokens to version control.
-requestsProxyAdminToken: ""
-
 # -- Docker registry credentials (optional; only used when dockerRegistry is set and create is true)
 # Omit dockerRegistry entirely, or set create: false, for public images (no imagePullSecrets).
 # When create is true, secret name is {{ .Release.Name }}-regcred.

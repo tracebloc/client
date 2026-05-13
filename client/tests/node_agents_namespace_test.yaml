@@ -186,7 +186,7 @@ tests:
     template: templates/secrets.yaml
     asserts:
       - hasDocuments:
-          count: 3
+          count: 2
       - isKind:
           of: Secret
         documentIndex: 0
@@ -196,21 +196,21 @@ tests:
         documentIndex: 0
       - isKind:
           of: Secret
-        documentIndex: 2
+        documentIndex: 1
       - equal:
           path: metadata.namespace
           value: tracebloc-node-agents
-        documentIndex: 2
+        documentIndex: 1
       - equal:
           path: metadata.name
           value: RELEASE-NAME-secrets
-        documentIndex: 2
+        documentIndex: 1
       - isNotEmpty:
           path: data.CLIENT_ID
-        documentIndex: 2
+        documentIndex: 1
       - isNotEmpty:
           path: data.CLIENT_PASSWORD
-        documentIndex: 2
+        documentIndex: 1
 
   - it: should not mirror the tracebloc Secret when resourceMonitor is disabled
     template: templates/secrets.yaml
@@ -218,7 +218,7 @@ tests:
       resourceMonitor: false
     asserts:
       - hasDocuments:
-          count: 2
+          count: 1
       - equal:
           path: metadata.namespace
           value: tracebloc-templates
@@ -233,7 +233,7 @@ tests:
           name: tracebloc-templates
     asserts:
       - hasDocuments:
-          count: 2
+          count: 1
       - equal:
           path: metadata.namespace
           value: tracebloc-templates
