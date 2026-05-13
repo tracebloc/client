@@ -56,11 +56,6 @@ spec:
               cpu: {{ .Values.resources.requestsProxy.limits.cpu | default "500m" | quote }}
               memory: {{ .Values.resources.requestsProxy.limits.memory | default "512Mi" | quote }}
           env:
-            - name: REQUESTS_PROXY_ADMIN_TOKEN
-              valueFrom:
-                secretKeyRef:
-                  name: {{ .Release.Name }}-requests-proxy-admin
-                  key: token
             - name: MYSQL_HOST
               value: "mysql-client"
             - name: EXPERIMENTS_QUEUE_NAME
