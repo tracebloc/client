@@ -22,8 +22,8 @@ spec:
           type: RuntimeDefault
       containers:
         - name: proxy
-          image: {{ include "tracebloc.image" (dict "repository" "tracebloc/jobs-manager" "tag" .Values.env.CLIENT_ENV "digest" .Values.images.requestsProxy.digest "registry" "docker.io") | quote }}
-          imagePullPolicy: {{ if .Values.images.requestsProxy.digest }}IfNotPresent{{ else }}Always{{ end }}
+          image: {{ include "tracebloc.image" (dict "repository" "tracebloc/jobs-manager" "tag" .Values.env.CLIENT_ENV "digest" (dig "requestsProxy" "digest" "" .Values.images) "registry" "docker.io") | quote }}
+          imagePullPolicy: Always
           workingDir: /app
           command: ["python", "-m", "gunicorn"]
           args:
@@ -50,11 +50,11 @@ spec:
             readOnlyRootFilesystem: true
           resources:
             requests:
-              cpu: {{ .Values.resources.requestsProxy.requests.cpu | default "100m" | quote }}
-              memory: {{ .Values.resources.requestsProxy.requests.memory | default "256Mi" | quote }}
+              cpu: 100m
+              memory: 256Mi
             limits:
-              cpu: {{ .Values.resources.requestsProxy.limits.cpu | default "500m" | quote }}
-              memory: {{ .Values.resources.requestsProxy.limits.memory | default "512Mi" | quote }}
+              cpu: 1000m
+              memory: 512Mi
           env:
             - name: MYSQL_HOST
               value: "mysql-client"
