@@ -232,13 +232,6 @@ resources:
     limits:
       cpu: "500m"
       memory: "512Mi"
-  requestsProxy:
-    requests:
-      cpu: "100m"
-      memory: "256Mi"
-    limits:
-      cpu: "500m"
-      memory: "512Mi"
 
 # -- PriorityClass for the data-plane (mysql).
 # Cluster-scoped resource. Created with helm.sh/resource-policy: keep so a
