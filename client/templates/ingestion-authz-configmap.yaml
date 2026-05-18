@@ -17,7 +17,17 @@ metadata:
 data:
   ingestion-authz.yaml: |
     allowed:
-    {{- range .Values.ingestionAuthz.allowed }}
+    {{- /*
+        Nil-guarded chain: an upgrade with `--reuse-values` from a
+        pre-#123 release won't have `.Values.ingestionAuthz` in its
+        stored values, and an unguarded `.Values.ingestionAuthz.allowed`
+        crashes with "nil pointer evaluating interface {}.allowed".
+        `default dict` + `default list` collapse the missing parent /
+        missing child to an empty list, which renders as `allowed: []`
+        — fail-safe (the authz policy then denies every caller, which
+        is correct: there's no policy until the operator sets one).
+    */ -}}
+    {{- range default list (default dict .Values.ingestionAuthz).allowed }}
       - service_account: {{ .service_account | quote }}
         namespace: {{ .namespace | default $.Release.Namespace | quote }}
         table_prefixes:
