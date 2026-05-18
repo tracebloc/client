@@ -33,8 +33,7 @@ spec:
     spec:
       # The hook talks to one in-cluster endpoint with one specific SA
       # token. Hardened defaults match the tracebloc client chart's
-      # training-pod template — non-root, all caps dropped, no API
-      # token auto-mount.
+      # training-pod template — non-root, all caps dropped.
       automountServiceAccountToken: true  # we DO need the SA token to authenticate the POST
       serviceAccountName: {{ include "ingestor.serviceAccountName" . }}
       restartPolicy: Never
@@ -59,65 +58,46 @@ spec:
               value: {{ .Values.jobsManager.endpoint | quote }}
             - name: SUBMIT_PATH
               value: {{ .Values.jobsManager.submitPath | quote }}
-            - name: IMAGE_DIGEST
-              value: {{ required "image.digest must be a sha256: digest of the ghcr.io/tracebloc/ingestor image" .Values.image.digest | quote }}
-            - name: IDEMPOTENCY_KEY
-              value: {{ include "ingestor.idempotencyKey" . | quote }}
           command: ["/bin/sh", "-c"]
           # The script:
           #   1. Reads the SA token from the projected volume (k8s adds
           #      it automatically when automountServiceAccountToken: true).
-          #   2. Reads the ingest.yaml from the mounted ConfigMap.
-          #   3. Composes the JSON body with Python (the curl image has
-          #      python3 available; jq is the alternative but adds a
-          #      JSON-escape edge case for multi-line YAML).
-          #   4. POSTs, captures HTTP status + body. Non-2xx fails the
-          #      Job, which fails the helm install with the response
-          #      body visible in the install output.
+          #   2. POSTs the pre-rendered JSON body from
+          #      /etc/ingest/body.json — Helm built the JSON at template
+          #      time so the script doesn't have to construct or escape
+          #      anything itself. Earlier versions used a python3 / jq
+          #      escape pipeline at runtime; both failed in different
+          #      ways (curlimages/curl strips python3 from the runtime
+          #      layer, and shell-side JSON escaping a multi-line YAML
+          #      scalar is its own bug farm). Bugbot caught both.
+          #   3. Non-2xx fails the Job, which fails the helm install with
+          #      the response body visible in the install output.
           args:
             - |
               set -eu
 
               TOKEN_PATH=/var/run/secrets/kubernetes.io/serviceaccount/token
-              INGEST_YAML=/etc/ingest/ingest.yaml
+              BODY_FILE=/etc/ingest/body.json
 
               if [ ! -r "$TOKEN_PATH" ]; then
                 echo "ERROR: SA token not found at $TOKEN_PATH" >&2
                 exit 1
               fi
-              if [ ! -r "$INGEST_YAML" ]; then
-                echo "ERROR: ingest.yaml not found at $INGEST_YAML — ConfigMap mount failed" >&2
+              if [ ! -r "$BODY_FILE" ]; then
+                echo "ERROR: request body not found at $BODY_FILE — ConfigMap mount failed" >&2
                 exit 1
               fi
 
-              TOKEN="$(cat "$TOKEN_PATH")"
-              INGEST_CONFIG="$(cat "$INGEST_YAML")"
-
-              # Compose the JSON body. We use python3 to handle YAML
-              # body's newlines / quotes correctly; the curlimages/curl
-              # image ships with python3.
-              BODY=$(python3 -c "
-              import json, os
-              print(json.dumps({
-                  'ingest_config': os.environ['INGEST_CONFIG'],
-                  'idempotency_key': os.environ['IDEMPOTENCY_KEY'],
-                  'image_digest': os.environ['IMAGE_DIGEST'],
-              }))
-              " INGEST_CONFIG="$INGEST_CONFIG" \
-                  IDEMPOTENCY_KEY="$IDEMPOTENCY_KEY" \
-                  IMAGE_DIGEST="$IMAGE_DIGEST")
-
               URL="${JOBS_MANAGER_ENDPOINT}${SUBMIT_PATH}"
               echo "POST $URL"
-              echo "  idempotency_key=$IDEMPOTENCY_KEY"
-              echo "  image_digest=$IMAGE_DIGEST"
+              echo "Body source: $BODY_FILE"
 
               HTTP_STATUS=$(curl -sS -o /tmp/resp.json -w "%{http_code}" \
                 --max-time {{ .Values.hookTimeoutSeconds | default 30 }} \
                 -X POST "$URL" \
-                -H "Authorization: Bearer $TOKEN" \
+                -H "Authorization: Bearer $(cat "$TOKEN_PATH")" \
                 -H "Content-Type: application/json" \
-                --data-binary "$BODY")
+                --data-binary "@$BODY_FILE")
 
               echo "HTTP $HTTP_STATUS"
               echo "Response:"

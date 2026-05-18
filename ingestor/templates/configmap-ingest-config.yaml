@@ -1,12 +1,17 @@
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  # Holds the customer's ingest.yaml between `helm install` rendering and
-  # the post-install hook's POST. Created by Helm; removed on Helm
-  # uninstall. The resulting ingestor Job (created by jobs-manager) does
-  # NOT depend on this ConfigMap — jobs-manager creates its own
-  # per-Job-named ConfigMap before spawning the Job — so deleting this
-  # one mid-run does not interrupt ingestion.
+  # Holds the customer's ingest.yaml and the pre-rendered JSON body that
+  # the post-install hook POSTs. Both keys are populated at helm-template
+  # time; the runtime hook never has to construct JSON itself, which
+  # eliminates an entire class of shell-escaping bugs (bugbot caught the
+  # original python3-based encoder).
+  #
+  # Lifecycle: created by `helm install`, removed by `helm uninstall`.
+  # The resulting ingestor Job (created by jobs-manager) does NOT depend
+  # on this ConfigMap — jobs-manager creates its own per-Job-named
+  # ConfigMap before spawning the Job — so deleting this one mid-run
+  # does not interrupt ingestion.
   name: {{ include "ingestor.configMapName" . }}
   namespace: {{ .Release.Namespace }}
   labels:
@@ -17,9 +22,24 @@ metadata:
     # resources; lower runs first.
     helm.sh/hook: post-install,post-upgrade
     helm.sh/hook-weight: "0"
-    # Survive delete via "before-hook-creation" semantics: a re-install
-    # under the same release re-creates the CM cleanly. We don't keep it
-    # around after uninstall — Helm's default lifecycle removes it.
 data:
+  # Verbatim ingest.yaml body (useful for `kubectl get cm <name> -o yaml`
+  # debugging). The left-trim action delimiter (dash inside the action
+  # braces) eats the whitespace before the action so we don't render a
+  # leading blank line into the block scalar — bugbot caught this on
+  # the first pass; without the trim, the customer's YAML got a leading
+  # "\n" prefix that block-scalar parsers tolerate but is still wrong.
   ingest.yaml: |-
-    {{ required "ingestConfig must be set (use --set-file ingestConfig=path/to/ingest.yaml)" .Values.ingestConfig | nindent 4 }}
+    {{- required "ingestConfig must be set (use --set-file ingestConfig=path/to/ingest.yaml)" .Values.ingestConfig | nindent 4 }}
+  # Pre-rendered JSON body that the post-install hook POSTs to
+  # jobs-manager. Computed at helm-template time so the hook is a
+  # one-line `curl --data-binary @body.json` — no python, no jq, no
+  # shell-escaping the multi-line YAML scalar. The required-value gates
+  # below fire here so a missing digest or ingest config fails
+  # templating (and therefore `helm install`) with a clear message
+  # before any cluster state is touched.
+  body.json: |-
+    {{- $cfg := required "ingestConfig must be set (use --set-file ingestConfig=path/to/ingest.yaml)" .Values.ingestConfig -}}
+    {{- $digest := required "image.digest must be a sha256: digest of the ghcr.io/tracebloc/ingestor image (see the data-ingestors GitHub Release for current digests)" .Values.image.digest -}}
+    {{- $key := include "ingestor.idempotencyKey" . -}}
+    {{- dict "ingest_config" $cfg "idempotency_key" $key "image_digest" $digest | toJson | nindent 4 }}
