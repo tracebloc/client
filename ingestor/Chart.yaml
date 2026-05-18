@@ -1,0 +1,24 @@
+apiVersion: v2
+name: ingestor
+description: |
+  Helm chart for submitting a tracebloc data-ingestion run. Renders a
+  customer's ingest.yaml into a ConfigMap and runs a post-install hook
+  that POSTs it to jobs-manager's /internal/submit-ingestion-run.
+  jobs-manager validates the YAML, mints a backend token, and creates
+  the ingestor Job directly — this chart owns the config + hook
+  artifacts, not the resulting Job or its data.
+type: application
+version: 0.1.0
+appVersion: "0.3.0-rc1"
+keywords:
+  - tracebloc
+  - kubernetes
+  - data-ingestion
+home: https://github.com/tracebloc/client/tree/develop/ingestor
+sources:
+  - https://github.com/tracebloc/client
+  - https://github.com/tracebloc/data-ingestors
+  - https://github.com/tracebloc/client-runtime
+maintainers:
+  - name: tracebloc
+    email: support@tracebloc.io

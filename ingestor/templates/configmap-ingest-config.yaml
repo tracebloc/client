@@ -1,0 +1,25 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  # Holds the customer's ingest.yaml between `helm install` rendering and
+  # the post-install hook's POST. Created by Helm; removed on Helm
+  # uninstall. The resulting ingestor Job (created by jobs-manager) does
+  # NOT depend on this ConfigMap — jobs-manager creates its own
+  # per-Job-named ConfigMap before spawning the Job — so deleting this
+  # one mid-run does not interrupt ingestion.
+  name: {{ include "ingestor.configMapName" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "ingestor.labels" . | nindent 4 }}
+  annotations:
+    # Hook ordering: this ConfigMap must exist before the post-install
+    # hook Job mounts it. helm.sh/hook-weight orders sibling hook
+    # resources; lower runs first.
+    helm.sh/hook: post-install,post-upgrade
+    helm.sh/hook-weight: "0"
+    # Survive delete via "before-hook-creation" semantics: a re-install
+    # under the same release re-creates the CM cleanly. We don't keep it
+    # around after uninstall — Helm's default lifecycle removes it.
+data:
+  ingest.yaml: |-
+    {{ required "ingestConfig must be set (use --set-file ingestConfig=path/to/ingest.yaml)" .Values.ingestConfig | nindent 4 }}
