@@ -179,6 +179,15 @@ networkPolicy:
 images:
   jobsManager:
     digest: ""
+  # client-runtime#40 / client#125: the ingestor image is spawned by
+  # jobs-manager at ingestion-submission time, not as a long-lived pod.
+  # Setting `digest` here surfaces it into jobs-manager as the
+  # `INGESTOR_IMAGE_DIGEST` env; the auto-upgrade flow then keeps it
+  # current. Customers can override per-install via the ingestor
+  # subchart's `image.digest` (for pinning / debugging), but the
+  # dominant path uses this value.
+  ingestor:
+    digest: ""
   podsMonitor:
     digest: ""
   resourceMonitor:

@@ -18,14 +18,24 @@
 ingestConfig: ""
 
 # -- Image of the official tracebloc/ingestor that will run the dataset.
+#
+# Default behaviour (client-runtime#40 / client#125): leave `digest`
+# empty and let the cluster's auto-upgrade flow pick the version.
+# jobs-manager reads `INGESTOR_IMAGE_DIGEST` (set by the tracebloc
+# client chart's `images.ingestor.digest` value) and uses it when
+# spawning the ingestor Job. New ingestor releases roll out
+# automatically when the cluster's daily auto-upgrade cronjob bumps the
+# chart — no per-dataset chart change needed.
+#
+# Set `digest` here ONLY when you need to pin a specific version, e.g.
+# reproducing an older run or testing a new release before cluster-wide
+# rollout. Must be the full canonical sha256 digest; tags are rejected.
 image:
   # Repository defaults to the GHCR-published image. Customers running an
   # air-gapped mirror override this.
   repository: ghcr.io/tracebloc/ingestor
-  # Digest pinning is REQUIRED — jobs-manager rejects tag-form inputs
-  # outright (see client-runtime#21's image_digest validation). Set this
-  # to the digest published in the data-ingestors GitHub Release for the
-  # version you want to ingest with.
+  # Optional override. Empty (default) means "use whatever the cluster
+  # is currently rolling". When set must be sha256:<64 lowercase hex>.
   digest: ""
 
 # -- jobs-manager Service hostname + port to POST to. Defaults assume

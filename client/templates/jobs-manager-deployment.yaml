@@ -82,6 +82,15 @@ spec:
           value: {{ include "tracebloc.clientLogsPvc" . | quote }}
         - name: MYSQL_HOST
           value: "mysql-client"
+        # client-runtime#40: default ingestor image digest for the
+        # POST /internal/submit-ingestion-run endpoint. Auto-upgrade
+        # keeps this current; the ingestor subchart no longer requires
+        # the customer to pin a digest. Nil-guarded so `--reuse-values`
+        # from a pre-this-PR release doesn't crash templating on the
+        # missing `images.ingestor` key — empty value means jobs-manager
+        # accepts only request-body overrides and returns 503 if absent.
+        - name: INGESTOR_IMAGE_DIGEST
+          value: {{ (default dict .Values.images.ingestor).digest | default "" | quote }}
         - name: REQUESTS_PROXY_URL
           value: "http://requests-proxy-service:8888"
         - name: JOB_IMAGE_HOST
