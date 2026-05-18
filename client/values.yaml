@@ -341,3 +341,29 @@ autoUpgrade:
     limits:
       cpu: "500m"
       memory: "256Mi"
+
+# ============================================================
+# Ingestion endpoint authorization (client-runtime#21)
+# ============================================================
+# jobs-manager's POST /internal/submit-ingestion-run authenticates callers
+# via Kubernetes TokenReview, then authorizes against this policy. Mapping
+# is (namespace, service_account) → list of allowed table-name prefixes;
+# "*" means any table.
+#
+# Default: allow the ingestor subchart's SA (named after that release) to
+# ingest into any table. Customers tighten via overrides — e.g.:
+#
+#   ingestionAuthz:
+#     allowed:
+#       - service_account: my-dataset-ingestor
+#         namespace: tracebloc
+#         table_prefixes: ["chest_xrays_", "tumors_"]
+ingestionAuthz:
+  allowed:
+    # Default: the ingestor subchart's SA (named "ingestor") in the same
+    # namespace as the tracebloc release can ingest into any table. The
+    # `namespace` field is optional; when omitted the ConfigMap template
+    # substitutes `.Release.Namespace`. Customers tighten by adding more
+    # specific entries with explicit `namespace` and `table_prefixes`.
+    - service_account: ingestor
+      table_prefixes: ["*"]

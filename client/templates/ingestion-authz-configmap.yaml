@@ -1,0 +1,27 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  # client-runtime#21: defines which ServiceAccount(s) may call
+  # POST /internal/submit-ingestion-run on jobs-manager, scoped to which
+  # tables. Mounted into jobs-manager at /etc/tracebloc/ingestion-authz.yaml
+  # and read at startup (see submit_ingestion_run.load_authz_policy).
+  #
+  # Each entry in `ingestionAuthz.allowed` maps a (namespace, service_account)
+  # to a list of table-name prefixes. Omit `namespace` to default to the
+  # release's namespace — the common case where the ingestor subchart is
+  # installed alongside the tracebloc client.
+  name: {{ .Release.Name }}-ingestion-authz
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "tracebloc.labels" . | nindent 4 }}
+data:
+  ingestion-authz.yaml: |
+    allowed:
+    {{- range .Values.ingestionAuthz.allowed }}
+      - service_account: {{ .service_account | quote }}
+        namespace: {{ .namespace | default $.Release.Namespace | quote }}
+        table_prefixes:
+        {{- range .table_prefixes }}
+          - {{ . | quote }}
+        {{- end }}
+    {{- end }}

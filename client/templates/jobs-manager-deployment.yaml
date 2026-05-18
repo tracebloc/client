@@ -46,11 +46,25 @@ spec:
           limits:
             cpu: {{ .Values.resources.jobsManager.limits.cpu | default "1000m" | quote }}
             memory: {{ .Values.resources.jobsManager.limits.memory | default "1Gi" | quote }}
+        ports:
+          # client-runtime#21: POST /internal/submit-ingestion-run. The
+          # ingestor subchart's post-install hook hits this through the
+          # jobs-manager Service. Cluster-internal only.
+          - name: http
+            containerPort: 8080
+            protocol: TCP
         volumeMounts:
           - name: shared-volume
             mountPath: "/data/shared"
           - name: logs-volume
             mountPath: "/data/logs"
+          # ingestion-authz policy read by jobs-manager at startup. The
+          # subPath mount means an authz update via `helm upgrade` is
+          # picked up on the next jobs-manager restart, not hot-reloaded.
+          - name: ingestion-authz
+            mountPath: /etc/tracebloc/ingestion-authz.yaml
+            subPath: ingestion-authz.yaml
+            readOnly: true
         env:
         - name: CLIENT_ID
           valueFrom:
@@ -151,4 +165,7 @@ spec:
         - name: logs-volume
           persistentVolumeClaim:
             claimName: {{ include "tracebloc.clientLogsPvc" . }}
+        - name: ingestion-authz
+          configMap:
+            name: {{ .Release.Name }}-ingestion-authz
       restartPolicy: Always
