@@ -30,6 +30,21 @@ rules:
   - apiGroups: ["metrics.k8s.io"]
     resources: ["pods"]
     verbs: ["get", "list"]
+  # client-runtime#21: jobs-manager's POST /internal/submit-ingestion-run
+  # endpoint authenticates callers (the ingestor subchart's post-install
+  # hook) via TokenReview, then creates a per-run ConfigMap (ingest.yaml)
+  # and Secret (BACKEND_TOKEN) before spawning the ingestor Job.
+  #
+  # TokenReview is a cluster-scoped Kubernetes API; the create verb cannot
+  # be granted by a namespace Role. This means the ingestion endpoint
+  # requires ``clusterScope: true``. The else branch below intentionally
+  # omits it.
+  - apiGroups: ["authentication.k8s.io"]
+    resources: ["tokenreviews"]
+    verbs: ["create"]
+  - apiGroups: [""]
+    resources: ["configmaps", "secrets"]
+    verbs: ["create"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
@@ -73,6 +88,14 @@ rules:
   - apiGroups: ["metrics.k8s.io"]
     resources: ["pods"]
     verbs: ["get", "list"]
+  # client-runtime#21: ingestion endpoint creates a per-run ConfigMap
+  # (ingest.yaml) and Secret (BACKEND_TOKEN) before spawning the Job.
+  # TokenReview is omitted here (cluster-scoped API; not grantable by a
+  # namespace Role). Customers using clusterScope: false won't be able
+  # to authenticate ingestion calls — see the ClusterRole branch above.
+  - apiGroups: [""]
+    resources: ["configmaps", "secrets"]
+    verbs: ["create"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
