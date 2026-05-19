@@ -5,9 +5,10 @@ A thin chart that submits one data-ingestion run to your tracebloc client cluste
 ```bash
 helm install my-dataset tracebloc/ingestor \
   --namespace tracebloc \
-  --set-file ingestConfig=./my-ingest.yaml \
-  --set image.digest=sha256:<digest>
+  --set-file ingestConfig=./my-ingest.yaml
 ```
+
+**The ingestor image is managed centrally** by the tracebloc client chart's auto-upgrade flow — you don't need to pin a digest for each install. New ingestor releases roll out automatically when the cluster's daily auto-upgrade cronjob (`autoUpgrade.enabled: true` in the client chart) bumps the chart version. See [Pinning a specific image version](#pinning-a-specific-image-version) below for the override path.
 
 ## What this chart owns
 
@@ -28,9 +29,9 @@ helm install my-dataset tracebloc/ingestor \
 1. `helm install` renders `ConfigMap/<release>-config` containing the customer's `ingest.yaml` body.
 2. Helm fires the `post-install` hook: a Job that runs as the chart's ServiceAccount.
 3. The hook reads its SA token from the projected volume and the `ingest.yaml` from the ConfigMap mount.
-4. The hook POSTs `{ ingest_config, idempotency_key, image_digest }` to `jobs-manager:8080/internal/submit-ingestion-run`.
+4. The hook POSTs `{ ingest_config, idempotency_key }` (and `image_digest` if you explicitly pinned one) to `jobs-manager:8080/internal/submit-ingestion-run`.
 5. **jobs-manager** validates the SA token via Kubernetes TokenReview, then checks the (SA, table) pair against the cluster's `ingestionAuthz` policy (a ConfigMap rendered by the parent `tracebloc/client` chart).
-6. If authorized, jobs-manager validates the YAML against the `ingest.v1` JSON schema, mints a backend token, creates the per-run ConfigMap + Secret + Job, records the run for idempotency, and returns `201` (or `200` if this idempotency_key has been seen before).
+6. If authorized, jobs-manager validates the YAML against the `ingest.v1` JSON schema, resolves the image digest (the body's value if you pinned one, otherwise the cluster's configured default from `INGESTOR_IMAGE_DIGEST`), mints a backend token, creates the per-run ConfigMap + Secret + Job, records the run for idempotency, and returns `201` (or `200` if this idempotency_key has been seen before).
 7. The hook treats `2xx` as success and exits 0; `helm install` reports success. Non-`2xx` exits 1 and `helm install` fails with the response body in the output.
 
 The customer never builds an image. The customer never writes a Dockerfile. The customer writes ~8 lines of YAML.
@@ -40,7 +41,18 @@ The customer never builds an image. The customer never writes a Dockerfile. The 
 | Value | Description |
 |---|---|
 | `ingestConfig` | The full `ingest.yaml` body. **Set via `--set-file`** — the body almost always contains YAML special characters that don't survive `--set`. |
-| `image.digest` | A `sha256:<64-hex>` digest of a `ghcr.io/tracebloc/ingestor` release. Tags are rejected by jobs-manager. See the [data-ingestors releases page](https://github.com/tracebloc/data-ingestors/releases) for current digests. |
+
+## Pinning a specific image version
+
+The dominant install path leaves `image.digest` empty and lets jobs-manager pick the cluster's current ingestor version (set by the parent client chart's `images.ingestor.digest`, kept current by the auto-upgrade cronjob). Override only when you have a specific reason:
+
+| Scenario | What to do |
+|---|---|
+| Reproducing an older ingestion run for audit / debugging | `--set image.digest=sha256:<old-digest>` |
+| Testing a new ingestor release before cluster-wide rollout | `--set image.digest=sha256:<new-digest>` ahead of the auto-upgrade tick |
+| Air-gapped mirror with frozen versions | Use both `--set image.repository=...` and `--set image.digest=sha256:...` |
+
+When set, the digest must be the full canonical form (`sha256:` + 64 lowercase hex chars). Tags like `v0.3.0` are rejected by jobs-manager. See the [data-ingestors releases page](https://github.com/tracebloc/data-ingestors/releases) for current digests.
 
 ## Frequently-overridden values
 

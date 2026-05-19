@@ -179,6 +179,21 @@ networkPolicy:
 images:
   jobsManager:
     digest: ""
+  # client-runtime#40 / client#125: the ingestor image is spawned by
+  # jobs-manager at ingestion-submission time, not as a long-lived pod.
+  # Setting `digest` here surfaces it into jobs-manager as the
+  # `INGESTOR_IMAGE_DIGEST` env; the auto-upgrade flow then keeps it
+  # current. Customers can override per-install via the ingestor
+  # subchart's `image.digest` (for pinning / debugging), but the
+  # dominant path uses this value.
+  #
+  # Initial value: ghcr.io/tracebloc/ingestor@<v0.3.0-rc1 digest>. Bump
+  # this on each ingestor release; chart `version` in Chart.yaml must
+  # also bump so the auto-upgrade cronjob detects the change. Future
+  # automation in tracebloc/data-ingestors (release-image.yml) can
+  # raise a PR to this file when a new image is published.
+  ingestor:
+    digest: "sha256:e6639b084d0d377072dc908db376050914ebd49c730ddaa13f838d10f5482ea9"
   podsMonitor:
     digest: ""
   resourceMonitor:
