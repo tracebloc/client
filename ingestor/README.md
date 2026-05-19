@@ -61,7 +61,7 @@ When set, the digest must be the full canonical form (`sha256:` + 64 lowercase h
 | `jobsManager.endpoint` | `http://jobs-manager.<release-namespace>.svc.cluster.local:8080` (auto-resolved) | The ingestor release and the parent `tracebloc/client` release live in different namespaces, or you're testing against a port-forward. |
 | `serviceAccount.name` | `ingestor` | The cluster's `ingestionAuthz` policy expects a different SA name. (Default matches the parent chart's default.) |
 | `image.repository` | `ghcr.io/tracebloc/ingestor` | Air-gapped mirror. |
-| `idempotencyKey` | `<release>-<revision>` | You want strict at-most-once semantics across re-installs under the same release name. |
+| `idempotencyKey` | `<release>-<unix-epoch>` (regenerated every install) | You want strict at-most-once semantics across reinstalls of the same release name — pass a stable UUID so jobs-manager replays the original run instead of starting a new one. |
 | `hookTimeoutSeconds` | `30` | Slow networks or large schemas. |
 
 See `values.yaml` for the full set.
