@@ -26,6 +26,20 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{- end }}
 
 {{/*
+  Name of the shared ServiceAccount the parent chart creates for ingestor
+  subchart releases. Single source of truth — used by:
+    - templates/ingestor-serviceaccount.yaml (creates the SA)
+    - templates/ingestion-authz-configmap.yaml (default authz entry)
+  The ingestor subchart's post-install hook runs as this SA; jobs-manager
+  validates its token via TokenReview against `ingestionAuthz.allowed`.
+  Nil-guarded: pre-#129 stored values from `--reuse-values` upgrades won't
+  have `ingestionAuthz.serviceAccountName`, so default to "ingestor".
+*/}}
+{{- define "tracebloc.ingestorServiceAccountName" -}}
+{{- (default dict .Values.ingestionAuthz).serviceAccountName | default "ingestor" -}}
+{{- end }}
+
+{{/*
   Release-scoped name for the resource-monitor DaemonSet, ServiceAccount,
   ClusterRoleBinding subject, and selector/pod labels. Multiple releases
   on the same cluster share the tracebloc-node-agents namespace; before

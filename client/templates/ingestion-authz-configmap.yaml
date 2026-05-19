@@ -26,9 +26,15 @@ data:
         missing child to an empty list, which renders as `allowed: []`
         — fail-safe (the authz policy then denies every caller, which
         is correct: there's no policy until the operator sets one).
+
+        Per-entry `service_account` is nil-guarded to fall back to
+        `ingestionAuthz.serviceAccountName` (#129) so the default
+        values.yaml entry doesn't need to repeat the SA name — change
+        the name in one place and both the SA template + this policy
+        pick it up.
     */ -}}
     {{- range default list (default dict .Values.ingestionAuthz).allowed }}
-      - service_account: {{ .service_account | quote }}
+      - service_account: {{ .service_account | default (include "tracebloc.ingestorServiceAccountName" $) | quote }}
         namespace: {{ .namespace | default $.Release.Namespace | quote }}
         table_prefixes:
         {{- range .table_prefixes }}
