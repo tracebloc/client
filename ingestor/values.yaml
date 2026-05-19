@@ -79,11 +79,14 @@ hookResources:
     cpu: "100m"
     memory: "64Mi"
 
-# -- Idempotency key used by jobs-manager to dedupe submissions. Derived
-# from the Helm release name + revision by default so a `helm upgrade`
-# under the same release submits a fresh run. Override to a stable UUID
-# if you want strict at-most-once semantics across reinstalls of the
-# same release name.
+# -- Idempotency key used by jobs-manager to dedupe submissions.
+# Defaults to `<release>-<unix-epoch>` so each install is a fresh run —
+# including reinstalls under the same release name. (A revision-derived
+# default would collide on `helm uninstall && helm install`, because
+# Helm resets revisions to 1 on the next install; jobs-manager would
+# then reject the second attempt with a 409 if anything dedupe-relevant
+# changed in between.) Override to a stable UUID only when you want
+# at-most-once semantics across reinstalls of the same release name.
 idempotencyKey: ""
 
 # -- How long the post-install hook waits for the POST to return before
