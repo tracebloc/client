@@ -10,13 +10,27 @@ helm install my-dataset tracebloc/ingestor \
 
 **The ingestor image is managed centrally** by the tracebloc client chart's auto-upgrade flow — you don't need to pin a digest for each install. New ingestor releases roll out automatically when the cluster's daily auto-upgrade cronjob (`autoUpgrade.enabled: true` in the client chart) bumps the chart version. See [Pinning a specific image version](#pinning-a-specific-image-version) below for the override path.
 
+## Prerequisites
+
+> **Install the `tracebloc/client` parent chart (1.3.4 or newer) into the
+> target namespace before installing this chart.** The parent chart
+> creates the `ingestor` ServiceAccount this chart's post-install hook
+> runs as, and renders the `ingestionAuthz` ConfigMap that authorizes
+> it. Without those preconditions the hook either has no SA to mount
+> or fails authentication at jobs-manager.
+
+The SA is shared by every `tracebloc/ingestor` release in the namespace
+— that's the point. Before 0.2.0 this chart created the SA itself,
+which broke as soon as a second ingestor release tried to install
+([tracebloc/client#129](https://github.com/tracebloc/client/issues/129)).
+
 ## What this chart owns
 
 | Resource | Owner | Lifecycle |
 |---|---|---|
 | `ConfigMap/<release>-config` (holds `ingest.yaml`) | this chart | created by `helm install`, deleted by `helm uninstall` |
 | `Job/<release>-submit` (post-install hook that POSTs) | this chart | created post-install, removed before each `helm upgrade` |
-| `ServiceAccount/<serviceAccount.name>` | this chart (optional, default true) | created by `helm install`, deleted by `helm uninstall` |
+| `ServiceAccount/<serviceAccount.name>` | **parent `tracebloc/client` chart** (as of 0.2.0; this chart can still create it via `serviceAccount.create: true` when targeting a pre-1.3.4 parent) | tied to the parent client release |
 | `ConfigMap/ingest-config-<hash>` (per-run, mounted into the ingestor Pod) | **jobs-manager** | created by jobs-manager on accept; not managed by Helm |
 | `Secret/ingest-token-<hash>` (per-run, holds `BACKEND_TOKEN`) | **jobs-manager** | same |
 | `Job/ingest-job-<hash>` (the actual ingestor) | **jobs-manager** | same |
@@ -85,7 +99,7 @@ kubectl -n tracebloc logs -l tracebloc.io/ingestion-run --tail=-1
 helm uninstall my-dataset --namespace tracebloc
 ```
 
-Removes the chart's ConfigMap + hook Job + ServiceAccount. Does **not** remove the running ingestor Job, its outputs, or the metadata posted to the backend — those are owned by jobs-manager and the cluster respectively.
+Removes the chart's ConfigMap + hook Job. The shared `ingestor` ServiceAccount is owned by the parent `tracebloc/client` release (as of 0.2.0) and stays put for other ingestor releases in the namespace. Does **not** remove the running ingestor Job, its outputs, or the metadata posted to the backend — those are owned by jobs-manager and the cluster respectively.
 
 To cancel an in-flight run, work with jobs-manager directly:
 
