@@ -38,11 +38,15 @@ image:
   # is currently rolling". When set must be sha256:<64 lowercase hex>.
   digest: ""
 
-# -- jobs-manager Service hostname + port to POST to. Defaults assume
-# the tracebloc client chart's release name is "tracebloc". Override if
-# you've named it differently (e.g., "my-tracebloc.<namespace>.svc...").
+# -- jobs-manager Service hostname + port to POST to. When left empty
+# (default), the post-install hook resolves the endpoint to
+# `http://jobs-manager.<release-namespace>.svc.cluster.local:8080`,
+# which is correct for the common case where the ingestor release is
+# installed in the same namespace as the tracebloc client release.
+# Override only when the two releases live in different namespaces, or
+# when you need a non-standard port/host (e.g., port-forward testing).
 jobsManager:
-  endpoint: http://jobs-manager.tracebloc.svc.cluster.local:8080
+  endpoint: ""
   # The path on jobs-manager that accepts ingestion submissions. Stable
   # API; only change if you're testing against a forked jobs-manager.
   submitPath: /internal/submit-ingestion-run

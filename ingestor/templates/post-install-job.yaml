@@ -54,8 +54,15 @@ spec:
           resources:
             {{- toYaml .Values.hookResources | nindent 12 }}
           env:
+            # client#127: default to the jobs-manager Service in this
+            # release's own namespace rather than hardcoding "tracebloc".
+            # Releases in any other namespace would otherwise hit
+            # `curl: Could not resolve host` at the hook. Customers
+            # whose ingestor release sits in a different namespace from
+            # the tracebloc release set `jobsManager.endpoint`
+            # explicitly to override.
             - name: JOBS_MANAGER_ENDPOINT
-              value: {{ .Values.jobsManager.endpoint | quote }}
+              value: {{ .Values.jobsManager.endpoint | default (printf "http://jobs-manager.%s.svc.cluster.local:8080" .Release.Namespace) | quote }}
             - name: SUBMIT_PATH
               value: {{ .Values.jobsManager.submitPath | quote }}
           command: ["/bin/sh", "-c"]
