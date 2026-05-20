@@ -88,6 +88,10 @@ Full deployment guide → **[docs/INSTALL.md](docs/INSTALL.md)** (prerequisites,
 
 Once the client is running, get a dataset into your cluster's local MySQL with ~8 lines of YAML and a single `helm install`. No Dockerfile, no Python script — the platform owns the official image, you describe what you want ingested.
 
+The flow is two steps. **First**, stage your raw files on the cluster's shared PVC (`client-pvc` by default, mounted at `/data/shared/` inside the ingestor Pod). The chart doesn't transport data into the cluster — it points at data the cluster can already see. The simplest pattern is a throwaway `kubectl cp` Pod that mounts the PVC; the chart README links the manifest.
+
+**Second**, describe the dataset and install:
+
 ```yaml
 # my-cats-dogs.yaml
 apiVersion: tracebloc.io/v1
@@ -106,9 +110,9 @@ helm install my-cats-dogs tracebloc/ingestor \
   --set-file ingestConfig=./my-cats-dogs.yaml
 ```
 
-The ingestor runs once, validates your data, copies files to the shared PVC, inserts rows into the cluster's MySQL, sends metadata to the tracebloc backend — then exits. The chart artifacts (ConfigMap + post-install hook Job) become inert; nothing keeps running. Repeat per dataset.
+The ingestor runs once, validates the data, copies files into the destination directory on the PVC, inserts rows into the cluster's MySQL, sends metadata to the tracebloc backend — then exits. The chart artifacts (ConfigMap + post-install hook Job) become inert; nothing keeps running. Repeat per dataset.
 
-Full ingestor docs → **[ingestor/README.md](ingestor/README.md)** (every supported category, the schema, the update model, verification, override knobs).
+Full ingestor docs → **[ingestor/README.md](ingestor/README.md)** (data staging patterns, every supported category, the schema, the update model, verification, override knobs).
 
 | Topic | Where to look |
 |---|---|

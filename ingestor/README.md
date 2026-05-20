@@ -24,6 +24,75 @@ The SA is shared by every `tracebloc/ingestor` release in the namespace
 which broke as soon as a second ingestor release tried to install
 ([tracebloc/client#129](https://github.com/tracebloc/client/issues/129)).
 
+## Stage your data on the shared PVC
+
+This chart **does not transport data into the cluster.** It points at data already accessible to the cluster's shared PVC (`client-pvc` by default, mounted at `/data/shared/` inside every pod that uses it, including the ingestor Pod that jobs-manager spawns).
+
+Before running `helm install tracebloc/ingestor`, you need your raw files (the CSV plus any images / texts / annotations / masks / sequences the category requires) under `/data/shared/<your-prefix>/` on that PVC. The `csv:`, `images:` (etc.) paths in your `ingest.yaml` are paths *inside the ingestor Pod's filesystem*, which is the PVC mount.
+
+How to stage depends on dataset size and your environment. Two common patterns:
+
+### Pattern 1: `kubectl cp` via a pvc-shell pod (small datasets, one-off)
+
+Spin up a throwaway pod that mounts the PVC, copy files in, tear it down:
+
+```yaml
+# /tmp/pvc-shell.yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: pvc-shell
+  namespace: tracebloc
+spec:
+  restartPolicy: Never
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 65534
+    seccompProfile:
+      type: RuntimeDefault
+  containers:
+    - name: shell
+      image: alpine:3.19
+      command: ["sleep", "3600"]
+      securityContext:
+        allowPrivilegeEscalation: false
+        capabilities:
+          drop: ["ALL"]
+      volumeMounts:
+        - name: shared
+          mountPath: /data/shared
+  volumes:
+    - name: shared
+      persistentVolumeClaim:
+        claimName: client-pvc
+```
+
+```bash
+kubectl apply -f /tmp/pvc-shell.yaml
+kubectl -n tracebloc wait --for=condition=Ready pod/pvc-shell --timeout=60s
+
+kubectl -n tracebloc exec pvc-shell -- \
+  mkdir -p /data/shared/my-dataset/images
+
+kubectl -n tracebloc cp ./local-images/   pvc-shell:/data/shared/my-dataset/
+kubectl -n tracebloc cp ./local-labels.csv pvc-shell:/data/shared/my-dataset/labels.csv
+
+# Verify what landed
+kubectl -n tracebloc exec pvc-shell -- ls /data/shared/my-dataset/
+
+kubectl -n tracebloc delete pod pvc-shell
+```
+
+Now `csv: /data/shared/my-dataset/labels.csv` + `images: /data/shared/my-dataset/images/` in your `ingest.yaml` will resolve.
+
+### Pattern 2: Init container with cloud-storage sync (production / large datasets)
+
+For datasets too large to `kubectl cp` (and any production workflow with versioned data), run a one-shot Pod whose init or main container pulls from S3 / GCS / Azure Blob into the PVC. Customers typically wire this into their CI / GitOps tool so the data syncs before the ingestion `helm install` runs. The chart itself stays out of this — it's a precondition, not a chart responsibility.
+
+### Where the PVC name comes from
+
+The default `client-pvc` is set by the parent client chart's PVC block (see `values.yaml#pvc`). If your install renamed it, the ingestor Pod will mount whatever the parent chart configured via `CLIENT_PVC` on jobs-manager. In the rare case of a custom name, `kubectl -n tracebloc get pvc` shows what's actually bound, and that's the value to use as `claimName:` in the pvc-shell manifest above.
+
 ## What this chart owns
 
 | Resource | Owner | Lifecycle |

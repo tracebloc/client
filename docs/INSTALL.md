@@ -248,7 +248,9 @@ helm install my-tracebloc tracebloc/client -n tracebloc -f my-values.yaml
 
 With the client running, the typical follow-up is to land a dataset in the cluster's local MySQL so training jobs can read it. The `tracebloc/ingestor` subchart wraps that flow — customers describe the dataset in ~8 lines of YAML and run a single `helm install`. No Dockerfile, no Python script.
 
-Example: ingest a cats-vs-dogs image classification dataset already staged on the shared PVC at `/data/shared/cats-dogs/`:
+The chart **does not transport data into the cluster** — it points at data already accessible on the cluster's shared PVC (`client-pvc` by default, mounted at `/data/shared/` inside the ingestor Pod). Stage your CSV + image / text / annotation files there first; the ingestor chart README documents the `kubectl cp` pattern and production sync alternatives.
+
+Example: once you've staged a cats-vs-dogs image classification dataset under `/data/shared/cats-dogs/` on the PVC, the `ingest.yaml` describes what's there:
 
 ```yaml
 # my-cats-dogs.yaml
