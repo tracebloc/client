@@ -8,7 +8,7 @@ description: |
   the ingestor Job directly — this chart owns the config + hook
   artifacts, not the resulting Job or its data.
 type: application
-version: 0.1.1
+version: 0.2.0
 appVersion: "0.3.0-rc1"
 keywords:
   - tracebloc
