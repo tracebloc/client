@@ -50,7 +50,7 @@ For the threat model, defense layers, per-platform caveats, operator responsibil
 
 ## Deploy
 
-This repo ships the **tracebloc** unified Helm chart (currently `v1.3.1`) — one chart for AKS, EKS, bare-metal, and OpenShift.
+This repo ships the **tracebloc** unified Helm chart (currently `v1.3.5`) — one chart for AKS, EKS, bare-metal, and OpenShift.
 
 ### Quick install
 
@@ -77,16 +77,48 @@ For existing Kubernetes clusters:
 ```bash
 helm repo add tracebloc https://tracebloc.github.io/client
 helm repo update
-helm install my-tracebloc tracebloc/tracebloc \
+helm install my-tracebloc tracebloc/client \
   --namespace tracebloc --create-namespace \
   -f my-values.yaml
 ```
 
 Full deployment guide → **[docs/INSTALL.md](docs/INSTALL.md)** (prerequisites, required values, upgrade & rollback, air-gapped install).
 
+## Ingest a dataset
+
+Once the client is running, get a dataset into your cluster's local MySQL with ~8 lines of YAML and a single `helm install`. No Dockerfile, no Python script — the platform owns the official image, you describe what you want ingested.
+
+The flow is two steps. **First**, stage your raw files on the cluster's shared PVC (`client-pvc` by default, mounted at `/data/shared/` inside the ingestor Pod). The chart doesn't transport data into the cluster — it points at data the cluster can already see. The simplest pattern is a throwaway `kubectl cp` Pod that mounts the PVC; the chart README links the manifest.
+
+**Second**, describe the dataset and install:
+
+```yaml
+# my-cats-dogs.yaml
+apiVersion: tracebloc.io/v1
+kind: IngestConfig
+category: image_classification
+table: cats_dogs_train
+intent: train
+csv: /data/shared/cats-dogs/labels.csv
+images: /data/shared/cats-dogs/images/
+label: label
+```
+
+```bash
+helm install my-cats-dogs tracebloc/ingestor \
+  --namespace tracebloc \
+  --set-file ingestConfig=./my-cats-dogs.yaml
+```
+
+The ingestor runs once, validates the data, copies files into the destination directory on the PVC, inserts rows into the cluster's MySQL, sends metadata to the tracebloc backend — then exits. The chart artifacts (ConfigMap + post-install hook Job) become inert; nothing keeps running. Repeat per dataset.
+
+Full ingestor docs → **[ingestor/README.md](ingestor/README.md)** (data staging patterns, every supported category, the schema, the update model, verification, override knobs).
+
 | Topic | Where to look |
 |---|---|
 | Production install + required values | [docs/INSTALL.md](docs/INSTALL.md) |
+| Ingest a dataset (declarative YAML) | [ingestor/README.md](ingestor/README.md) |
+| Available ingestion categories + example YAMLs | [tracebloc/data-ingestors templates](https://github.com/tracebloc/data-ingestors/tree/master/templates) |
 | Threat model & operator responsibilities | [docs/SECURITY.md](docs/SECURITY.md) |
 | Migrating from `eks-1.0.x` / `aks-*` charts to `client-1.x` | [docs/MIGRATIONS.md](docs/MIGRATIONS.md) |
 | Per-tenant migration runbook | [docs/migration-tools/README.md](docs/migration-tools/README.md) |
