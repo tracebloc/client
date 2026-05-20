@@ -5,11 +5,13 @@ on:
     branches: [main, openshift]
     paths:
       - 'client/**'
+      - 'ingestor/**'
       - '.github/workflows/helm-ci.yaml'
   pull_request:
     branches: [main, openshift]
     paths:
       - 'client/**'
+      - 'ingestor/**'
       - '.github/workflows/helm-ci.yaml'
 
 jobs:
@@ -24,12 +26,23 @@ jobs:
         with:
           version: v3.15.4
 
-      - name: Helm lint (strict) — all platforms
+      - name: Helm lint (strict) — parent client chart, all platforms
         run: |
           for f in client/ci/*-values.yaml; do
-            echo "=== Linting with $f ==="
+            echo "=== Linting client with $f ==="
             helm lint --strict ./client -f "$f"
           done
+
+      - name: Helm lint (strict) — ingestor subchart
+        # The ingestor subchart has no per-platform CI values files because
+        # its templates don't branch on platform — they only render a
+        # ConfigMap + Job + SA. The chart's one required value
+        # (`ingestConfig`) is supplied by customers at install time via
+        # `--set-file`; missing it during lint emits an INFO, not a FAIL,
+        # so plain `helm lint --strict ./ingestor` exercises the templates
+        # cleanly. See #135 for why we lint it here at all (publish workflow
+        # now packages both charts).
+        run: helm lint --strict ./ingestor
 
   template:
     name: Template render
