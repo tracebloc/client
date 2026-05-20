@@ -187,13 +187,15 @@ images:
   # subchart's `image.digest` (for pinning / debugging), but the
   # dominant path uses this value.
   #
-  # Initial value: ghcr.io/tracebloc/ingestor@<v0.3.0-rc1 digest>. Bump
-  # this on each ingestor release; chart `version` in Chart.yaml must
+  # Bumped to v0.3.0 (2026-05-20) — first production-ready release of
+  # the declarative-YAML ingestor with schema-packaging, image-validator,
+  # and file-transfer fixes from tracebloc/data-ingestors#106.
+  # Bump this on each ingestor release; chart `version` in Chart.yaml must
   # also bump so the auto-upgrade cronjob detects the change. Future
   # automation in tracebloc/data-ingestors (release-image.yml) can
   # raise a PR to this file when a new image is published.
   ingestor:
-    digest: "sha256:e6639b084d0d377072dc908db376050914ebd49c730ddaa13f838d10f5482ea9"
+    digest: "sha256:463e236748708a5e3564569eec9173ea8cb3bcf515992d4939c5b610f3807a4a"
   podsMonitor:
     digest: ""
   resourceMonitor:
