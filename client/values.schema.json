@@ -293,6 +293,16 @@
             }
           }
         },
+        "ingestor": {
+          "type": "object",
+          "properties": {
+            "digest": {
+              "type": "string",
+              "pattern": "^(sha256:[a-f0-9]{64})?$",
+              "description": "Optional canonical ghcr.io/tracebloc/ingestor digest (sha256:<64 hex>). Surfaced into jobs-manager as the INGESTOR_IMAGE_DIGEST env so the customer-facing tracebloc/ingestor subchart can pick it up without per-install overrides. Empty disables the default and forces customers to --set image.digest on each ingestor subchart install."
+            }
+          }
+        },
         "mysqlClient": {
           "type": "object",
           "properties": {
