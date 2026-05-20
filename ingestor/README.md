@@ -50,6 +50,20 @@ which broke as soon as a second ingestor release tried to install
 
 The customer never builds an image. The customer never writes a Dockerfile. The customer writes ~8 lines of YAML.
 
+## How updates work
+
+The ingestor has two independent update lifecycles, and customers usually only need to think about one.
+
+**Image: always current, automatically.** New `ghcr.io/tracebloc/ingestor` releases roll out to your cluster via the parent `tracebloc/client` chart's auto-upgrade cronjob (`autoUpgrade.enabled: true`, default). The cronjob runs `helm repo update` + `helm upgrade tracebloc/client` daily, which writes the new digest into the `INGESTOR_IMAGE_DIGEST` env on the running `tracebloc-jobs-manager` deployment. Your next `helm install tracebloc/ingestor ...` uses the new image automatically — no digest to pin, no version to track, no redeploy of anything you've already installed.
+
+**Chart: refresh your local cache before each install.** Helm's repo cache on _your workstation_ is independent of the cluster. The cluster's cronjob can refresh its own cache, but it cannot reach your laptop. Run `helm repo update` before each install to pick up new chart features (new values, new templates, new defaults). A stale cache still works — it just locks you out of chart-level options added since you last refreshed. **The image you run does not depend on the chart version**: jobs-manager picks the current `INGESTOR_IMAGE_DIGEST` regardless of which subchart version submitted the request.
+
+This stratification is intentional. The image picks up bugfixes and security patches without anyone restating their dataset configs; the chart only changes when there's a real protocol or UX shift.
+
+### What about previously-installed ingestor releases?
+
+Nothing to upgrade. The chart is fire-and-forget: each `helm install` POSTs once to jobs-manager, the ingestor Job runs to completion, and the chart artifacts (ConfigMap + completed hook Job) become inert. There's no controller to update, no deployment to roll, no scheduled work to bump. `helm upgrade <release>` would replay the same submission as a 200 no-op (the idempotency key was stamped at install time and is preserved under `--reuse-values`).
+
 ## Required values
 
 | Value | Description |
