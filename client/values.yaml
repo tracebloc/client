@@ -365,8 +365,9 @@ autoUpgrade:
 # is (namespace, service_account) → list of allowed table-name prefixes;
 # "*" means any table.
 #
-# Default: allow the ingestor subchart's SA (named after that release) to
-# ingest into any table. Customers tighten via overrides — e.g.:
+# Default: allow the ingestor subchart's SA (created below by this chart,
+# named `ingestionAuthz.serviceAccountName`) to ingest into any table.
+# Customers tighten via overrides — e.g.:
 #
 #   ingestionAuthz:
 #     allowed:
@@ -374,11 +375,18 @@ autoUpgrade:
 #         namespace: tracebloc
 #         table_prefixes: ["chest_xrays_", "tumors_"]
 ingestionAuthz:
+  # -- Name of the shared ServiceAccount this chart creates for ingestor
+  # subchart releases (client#129). Single source of truth: the SA
+  # template and the default `allowed` entry below both read this value.
+  # Override only if the name "ingestor" collides with something in your
+  # namespace; the matching ingestor subchart's `serviceAccount.name`
+  # must be updated to the same value.
+  serviceAccountName: ingestor
   allowed:
-    # Default: the ingestor subchart's SA (named "ingestor") in the same
-    # namespace as the tracebloc release can ingest into any table. The
-    # `namespace` field is optional; when omitted the ConfigMap template
+    # Default: the SA named `ingestionAuthz.serviceAccountName` above, in
+    # the same namespace as this release, can ingest into any table. When
+    # `service_account` is omitted the ConfigMap template substitutes
+    # `ingestionAuthz.serviceAccountName`; when `namespace` is omitted it
     # substitutes `.Release.Namespace`. Customers tighten by adding more
-    # specific entries with explicit `namespace` and `table_prefixes`.
-    - service_account: ingestor
-      table_prefixes: ["*"]
+    # specific entries with explicit fields.
+    - table_prefixes: ["*"]

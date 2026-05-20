@@ -31,15 +31,19 @@ Naming:
 {{- end -}}
 
 {{- /*
-Resolved idempotency key. Defaults to "<release>-<revision>" so each
-helm install / upgrade submits a fresh run; explicit override is
-honored verbatim.
+Resolved idempotency key. Defaults to "<release>-<unix-epoch>" so each
+install is a fresh run — including reinstalls under the same release
+name, where Helm restarts revisions at 1 and a revision-derived key
+would collide with the previous attempt and trip jobs-manager's
+"already used with a different image_digest or table" guard. Explicit
+override is honored verbatim; set it to a stable UUID only when you
+want at-most-once semantics across reinstalls.
 */ -}}
 {{- define "ingestor.idempotencyKey" -}}
 {{- if .Values.idempotencyKey -}}
 {{ .Values.idempotencyKey }}
 {{- else -}}
-{{ printf "%s-%d" .Release.Name .Release.Revision }}
+{{ printf "%s-%s" .Release.Name (now | unixEpoch) }}
 {{- end -}}
 {{- end -}}
 
