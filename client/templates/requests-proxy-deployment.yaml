@@ -48,13 +48,28 @@ spec:
             capabilities:
               drop: ["ALL"]
             readOnlyRootFilesystem: true
+          {{- /* Nil-guard the whole resources.requestsProxy chain. A
+                 helm upgrade --reuse-values from a release predating this
+                 field (any 1.3.x ≤ 1.3.5) won't have it in stored values,
+                 and the direct path .Values.resources.requestsProxy... on
+                 a nil parent dict crashes with "nil pointer evaluating
+                 interface{}.requests". Default-through-dict idiom lets
+                 missing values fall through to the inline literals.
+                 The trailing dash on `{{-` strips the newline AFTER
+                 readOnlyRootFilesystem; we deliberately do NOT use `-}}`
+                 on the last `:=` so the newline before `resources:` is
+                 preserved (an earlier version of this guard ate the
+                 newline and rendered `readOnlyRootFilesystem: trueresources:`). */ -}}
+          {{- $rp := default dict (default dict .Values.resources).requestsProxy }}
+          {{- $rpReq := default dict $rp.requests }}
+          {{- $rpLim := default dict $rp.limits }}
           resources:
             requests:
-              cpu: 100m
-              memory: 256Mi
+              cpu: {{ $rpReq.cpu | default "100m" | quote }}
+              memory: {{ $rpReq.memory | default "256Mi" | quote }}
             limits:
-              cpu: 1000m
-              memory: 512Mi
+              cpu: {{ $rpLim.cpu | default "1000m" | quote }}
+              memory: {{ $rpLim.memory | default "512Mi" | quote }}
           env:
             - name: MYSQL_HOST
               value: "mysql-client"

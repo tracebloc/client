@@ -249,6 +249,17 @@ resources:
     limits:
       cpu: "500m"
       memory: "512Mi"
+  # requests-proxy serves the Service Bus / backend communication path and
+  # is mostly idle (a few req/min). 100m/256Mi requests with headroom for
+  # the occasional burst; revisit if heap profiling shows growth. Schema
+  # at values.schema.json#resources.requestsProxy validates overrides.
+  requestsProxy:
+    requests:
+      cpu: "100m"
+      memory: "256Mi"
+    limits:
+      cpu: "1000m"
+      memory: "512Mi"
 
 # -- PriorityClass for the data-plane (mysql).
 # Cluster-scoped resource. Created with helm.sh/resource-policy: keep so a

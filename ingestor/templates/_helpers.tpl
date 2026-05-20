@@ -31,19 +31,48 @@ Naming:
 {{- end -}}
 
 {{- /*
-Resolved idempotency key. Defaults to "<release>-<unix-epoch>" so each
-install is a fresh run — including reinstalls under the same release
-name, where Helm restarts revisions at 1 and a revision-derived key
-would collide with the previous attempt and trip jobs-manager's
-"already used with a different image_digest or table" guard. Explicit
-override is honored verbatim; set it to a stable UUID only when you
-want at-most-once semantics across reinstalls.
+Resolved idempotency key.
+
+Default behavior:
+  - First helm install: stamp a fresh "<release>-<unix-epoch>" key.
+  - helm upgrade of the same release: REUSE the existing key by looking
+    up the post-install hook ConfigMap from the previous render. This
+    preserves replay semantics — jobs-manager sees the same key on
+    upgrade and returns 200 (replay) rather than spawning a new run.
+  - helm install after uninstall: lookup misses (ConfigMap was deleted
+    on uninstall), so we fall through to a fresh now-based key. No
+    collision with the previous run because the epoch differs.
+
+Earlier versions defaulted to `now | unixEpoch` on every render. That
+worked for installs but accidentally created a NEW key on
+`helm upgrade --reuse-values` (Helm preserves the stored value `""`,
+not the previously-rendered key, so the template re-evaluates `now`).
+The result: customers running `helm upgrade` thinking it was a no-op
+got duplicate ingestion runs. Bugbot caught it on PR #137. See #139.
+
+Helm template (no cluster connection) returns empty for lookup, so
+local previews always re-stamp with a fresh key — matches the
+in-cluster install path the first time around.
+
+Explicit override is honored verbatim; set `idempotencyKey` to a
+stable UUID when you want strict at-most-once semantics across
+uninstall/reinstall cycles.
 */ -}}
 {{- define "ingestor.idempotencyKey" -}}
 {{- if .Values.idempotencyKey -}}
 {{ .Values.idempotencyKey }}
 {{- else -}}
+{{- $existing := lookup "v1" "ConfigMap" .Release.Namespace (include "ingestor.configMapName" .) -}}
+{{- /* The ConfigMap key is literally "body.json" (a single key with a dot in
+       its name, not a nested path), so use `index` rather than dot-access.
+       The fromJson call then parses the JSON body and we read its
+       idempotency_key field. Guards against missing data map (e.g. an
+       in-flight create) by defaulting through `dict`. */ -}}
+{{- if and $existing (hasKey ($existing.data | default dict) "body.json") -}}
+{{- (fromJson (index $existing.data "body.json")).idempotency_key -}}
+{{- else -}}
 {{ printf "%s-%s" .Release.Name (now | unixEpoch) }}
+{{- end -}}
 {{- end -}}
 {{- end -}}
 
