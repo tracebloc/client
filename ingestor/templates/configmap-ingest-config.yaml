@@ -1,0 +1,53 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  # Holds the customer's ingest.yaml and the pre-rendered JSON body that
+  # the post-install hook POSTs. Both keys are populated at helm-template
+  # time; the runtime hook never has to construct JSON itself, which
+  # eliminates an entire class of shell-escaping bugs (bugbot caught the
+  # original python3-based encoder).
+  #
+  # Lifecycle: created by `helm install`, removed by `helm uninstall`.
+  # The resulting ingestor Job (created by jobs-manager) does NOT depend
+  # on this ConfigMap — jobs-manager creates its own per-Job-named
+  # ConfigMap before spawning the Job — so deleting this one mid-run
+  # does not interrupt ingestion.
+  name: {{ include "ingestor.configMapName" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "ingestor.labels" . | nindent 4 }}
+  annotations:
+    # Hook ordering: this ConfigMap must exist before the post-install
+    # hook Job mounts it. helm.sh/hook-weight orders sibling hook
+    # resources; lower runs first.
+    helm.sh/hook: post-install,post-upgrade
+    helm.sh/hook-weight: "0"
+data:
+  # Verbatim ingest.yaml body (useful for `kubectl get cm <name> -o yaml`
+  # debugging). The left-trim action delimiter (dash inside the action
+  # braces) eats the whitespace before the action so we don't render a
+  # leading blank line into the block scalar — bugbot caught this on
+  # the first pass; without the trim, the customer's YAML got a leading
+  # "\n" prefix that block-scalar parsers tolerate but is still wrong.
+  ingest.yaml: |-
+    {{- required "ingestConfig must be set (use --set-file ingestConfig=path/to/ingest.yaml)" .Values.ingestConfig | nindent 4 }}
+  # Pre-rendered JSON body that the post-install hook POSTs to
+  # jobs-manager. Computed at helm-template time so the hook is a
+  # one-line `curl --data-binary @body.json` — no python, no jq, no
+  # shell-escaping the multi-line YAML scalar.
+  #
+  # `image_digest` is OPTIONAL in the POST body (client-runtime#40):
+  # when omitted, jobs-manager uses the cluster's configured default
+  # (set by the tracebloc client chart's `images.ingestor.digest`,
+  # kept current by the auto-upgrade flow). Including it here only
+  # when the customer explicitly pinned via `--set image.digest=...`
+  # means the dominant install path tracks the cluster's current
+  # version automatically; the override path is preserved.
+  body.json: |-
+    {{- $cfg := required "ingestConfig must be set (use --set-file ingestConfig=path/to/ingest.yaml)" .Values.ingestConfig -}}
+    {{- $key := include "ingestor.idempotencyKey" . -}}
+    {{- $body := dict "ingest_config" $cfg "idempotency_key" $key -}}
+    {{- if .Values.image.digest -}}
+      {{- $_ := set $body "image_digest" .Values.image.digest -}}
+    {{- end -}}
+    {{- $body | toJson | nindent 4 }}

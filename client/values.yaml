@@ -179,9 +179,28 @@ networkPolicy:
 images:
   jobsManager:
     digest: ""
+  # client-runtime#40 / client#125: the ingestor image is spawned by
+  # jobs-manager at ingestion-submission time, not as a long-lived pod.
+  # Setting `digest` here surfaces it into jobs-manager as the
+  # `INGESTOR_IMAGE_DIGEST` env; the auto-upgrade flow then keeps it
+  # current. Customers can override per-install via the ingestor
+  # subchart's `image.digest` (for pinning / debugging), but the
+  # dominant path uses this value.
+  #
+  # Bumped to v0.3.0 (2026-05-20) — first production-ready release of
+  # the declarative-YAML ingestor with schema-packaging, image-validator,
+  # and file-transfer fixes from tracebloc/data-ingestors#106.
+  # Bump this on each ingestor release; chart `version` in Chart.yaml must
+  # also bump so the auto-upgrade cronjob detects the change. Future
+  # automation in tracebloc/data-ingestors (release-image.yml) can
+  # raise a PR to this file when a new image is published.
+  ingestor:
+    digest: "sha256:463e236748708a5e3564569eec9173ea8cb3bcf515992d4939c5b610f3807a4a"
   podsMonitor:
     digest: ""
   resourceMonitor:
+    digest: ""
+  requestsProxy:
     digest: ""
   mysqlClient:
     # mysql-client is only published under the "prod" tag — it has no dev/
@@ -229,6 +248,17 @@ resources:
       memory: "256Mi"
     limits:
       cpu: "500m"
+      memory: "512Mi"
+  # requests-proxy serves the Service Bus / backend communication path and
+  # is mostly idle (a few req/min). 100m/256Mi requests with headroom for
+  # the occasional burst; revisit if heap profiling shows growth. Schema
+  # at values.schema.json#resources.requestsProxy validates overrides.
+  requestsProxy:
+    requests:
+      cpu: "100m"
+      memory: "256Mi"
+    limits:
+      cpu: "1000m"
       memory: "512Mi"
 
 # -- PriorityClass for the data-plane (mysql).
@@ -339,3 +369,37 @@ autoUpgrade:
     limits:
       cpu: "500m"
       memory: "256Mi"
+
+# ============================================================
+# Ingestion endpoint authorization (client-runtime#21)
+# ============================================================
+# jobs-manager's POST /internal/submit-ingestion-run authenticates callers
+# via Kubernetes TokenReview, then authorizes against this policy. Mapping
+# is (namespace, service_account) → list of allowed table-name prefixes;
+# "*" means any table.
+#
+# Default: allow the ingestor subchart's SA (created below by this chart,
+# named `ingestionAuthz.serviceAccountName`) to ingest into any table.
+# Customers tighten via overrides — e.g.:
+#
+#   ingestionAuthz:
+#     allowed:
+#       - service_account: my-dataset-ingestor
+#         namespace: tracebloc
+#         table_prefixes: ["chest_xrays_", "tumors_"]
+ingestionAuthz:
+  # -- Name of the shared ServiceAccount this chart creates for ingestor
+  # subchart releases (client#129). Single source of truth: the SA
+  # template and the default `allowed` entry below both read this value.
+  # Override only if the name "ingestor" collides with something in your
+  # namespace; the matching ingestor subchart's `serviceAccount.name`
+  # must be updated to the same value.
+  serviceAccountName: ingestor
+  allowed:
+    # Default: the SA named `ingestionAuthz.serviceAccountName` above, in
+    # the same namespace as this release, can ingest into any table. When
+    # `service_account` is omitted the ConfigMap template substitutes
+    # `ingestionAuthz.serviceAccountName`; when `namespace` is omitted it
+    # substitutes `.Release.Namespace`. Customers tighten by adding more
+    # specific entries with explicit fields.
+    - table_prefixes: ["*"]

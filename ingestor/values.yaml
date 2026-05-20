@@ -1,0 +1,110 @@
+# ============================================================
+# tracebloc/ingestor — values.yaml
+# ============================================================
+# Customer-facing chart. The dominant install is:
+#
+#   helm install my-dataset tracebloc/ingestor --namespace tracebloc \
+#     --set-file ingestConfig=./my-ingest.yaml \
+#     --set image.digest=sha256:<the digest from a tracebloc/ingestor release>
+#
+# The chart submits the YAML to jobs-manager; jobs-manager owns the
+# resulting Job. `helm uninstall` removes the ConfigMap + hook but
+# leaves the Job and ingested data alone (see README.md).
+
+# -- The ingest.yaml body. REQUIRED. Set via --set-file ingestConfig=path/to/ingest.yaml
+# or by overriding in a values file. Validated by jobs-manager against the
+# v1 schema from tracebloc/data-ingestors#44; install fails with a
+# line-numbered error if invalid.
+ingestConfig: ""
+
+# -- Image of the official tracebloc/ingestor that will run the dataset.
+#
+# Default behaviour (client-runtime#40 / client#125): leave `digest`
+# empty and let the cluster's auto-upgrade flow pick the version.
+# jobs-manager reads `INGESTOR_IMAGE_DIGEST` (set by the tracebloc
+# client chart's `images.ingestor.digest` value) and uses it when
+# spawning the ingestor Job. New ingestor releases roll out
+# automatically when the cluster's daily auto-upgrade cronjob bumps the
+# chart — no per-dataset chart change needed.
+#
+# Set `digest` here ONLY when you need to pin a specific version, e.g.
+# reproducing an older run or testing a new release before cluster-wide
+# rollout. Must be the full canonical sha256 digest; tags are rejected.
+image:
+  # Repository defaults to the GHCR-published image. Customers running an
+  # air-gapped mirror override this.
+  repository: ghcr.io/tracebloc/ingestor
+  # Optional override. Empty (default) means "use whatever the cluster
+  # is currently rolling". When set must be sha256:<64 lowercase hex>.
+  digest: ""
+
+# -- jobs-manager Service hostname + port to POST to. When left empty
+# (default), the post-install hook resolves the endpoint to
+# `http://jobs-manager.<release-namespace>.svc.cluster.local:8080`,
+# which is correct for the common case where the ingestor release is
+# installed in the same namespace as the tracebloc client release.
+# Override only when the two releases live in different namespaces, or
+# when you need a non-standard port/host (e.g., port-forward testing).
+jobsManager:
+  endpoint: ""
+  # The path on jobs-manager that accepts ingestion submissions. Stable
+  # API; only change if you're testing against a forked jobs-manager.
+  submitPath: /internal/submit-ingestion-run
+
+# -- ServiceAccount that the post-install hook runs as. Its token is the
+# credential jobs-manager validates via TokenReview, and the SA's name +
+# namespace are matched against the ingestionAuthz policy in the
+# tracebloc client release.
+#
+# As of 0.2.0 (tracebloc/client#129) the SA is owned by the parent
+# `tracebloc/client` chart (templated as `ingestor` by default, or
+# whatever `ingestionAuthz.serviceAccountName` resolves to). The SA is
+# shared by every ingestor subchart release in the namespace, so per-
+# release ownership here collided with Helm on concurrent installs and
+# made uninstalls rip the SA out from under sibling releases.
+#
+# Default: `create: false`. The chart consumes the existing SA created
+# by the parent client release. The `name` value is still required so
+# the post-install hook Job knows which SA's token to mount.
+#
+# Override `create: true` ONLY when running against a parent client
+# chart older than 1.3.4 that didn't yet own the SA — in that case make
+# sure no other ingestor release in the same namespace also has
+# `create: true`, or you'll reproduce client#129.
+serviceAccount:
+  create: false
+  name: ingestor
+
+# -- Image for the post-install hook Job itself (a thin curl wrapper).
+# Pinned by digest for reproducibility; bumping is a separate chart
+# release.
+hookImage:
+  # curlimages/curl is small, official, and pinned by tag here for
+  # readability. Customers who need digest pinning override this.
+  repository: curlimages/curl
+  tag: "8.10.1"
+  pullPolicy: IfNotPresent
+
+# -- Resources for the post-install hook. Tiny — it makes one POST.
+hookResources:
+  requests:
+    cpu: "10m"
+    memory: "32Mi"
+  limits:
+    cpu: "100m"
+    memory: "64Mi"
+
+# -- Idempotency key used by jobs-manager to dedupe submissions.
+# Defaults to `<release>-<unix-epoch>` so each install is a fresh run —
+# including reinstalls under the same release name. (A revision-derived
+# default would collide on `helm uninstall && helm install`, because
+# Helm resets revisions to 1 on the next install; jobs-manager would
+# then reject the second attempt with a 409 if anything dedupe-relevant
+# changed in between.) Override to a stable UUID only when you want
+# at-most-once semantics across reinstalls of the same release name.
+idempotencyKey: ""
+
+# -- How long the post-install hook waits for the POST to return before
+# failing the install. Includes jobs-manager schema validation +
+# k8s API calls; usually completes in <2s.
+hookTimeoutSeconds: 30

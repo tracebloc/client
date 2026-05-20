@@ -118,6 +118,11 @@ venv.bak/
 /values*.yaml
 /*/values*.yaml
 !client/values*.yaml
+# The ingestor subchart's values.yaml is part of the chart shipped to
+# customers — must be tracked despite matching the `/*/values*.yaml`
+# anti-leak pattern above (which exists to keep operator-local values
+# files out of the repo).
+!ingestor/values.yaml
 secret-values.yaml
 test-template.yaml
 eks.diff

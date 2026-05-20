@@ -6,10 +6,6 @@
 name: Release Helm Chart
 
 on:
-  push:
-    tags:
-      - 'client-v*'
-      - 'v*'
   release:
     types: [published]
 
@@ -26,8 +22,14 @@ jobs:
       id-token: write
     steps:
       - name: Checkout
+        # Pin ref to the release tag rather than letting checkout default to
+        # github.ref, which intermittently arrives empty on release-triggered
+        # runs (actions/runner#2788, still open). An empty default would cause
+        # checkout to fall back to the repo default branch and package the
+        # chart from the wrong commit.
         uses: actions/checkout@v4
         with:
+          ref: ${{ github.event.release.tag_name }}
           fetch-depth: 0
 
       - name: Set up Helm
@@ -35,28 +37,44 @@ jobs:
         with:
           version: v3.15.4
 
-      - name: Lint chart
-        # Use a CI values file so `--strict` sees non-empty clientId /
-        # clientPassword (the defaults in values.yaml are deliberately empty
-        # to force operators to supply real credentials, and the schema
-        # enforces minLength:1). Exhaustive multi-platform linting happens in
-        # helm-ci.yaml on every PR — here we just need the chart to lint
-        # cleanly for packaging.
-        run: helm lint --strict ./client -f client/ci/eks-values.yaml
+      - name: Lint charts
+        # The parent `client` chart needs a CI values file so `--strict` sees
+        # non-empty clientId / clientPassword (the defaults in values.yaml are
+        # deliberately empty to force operators to supply real credentials, and
+        # the schema enforces minLength:1). The `ingestor` subchart needs no
+        # values file — its only required value (ingestConfig) emits an INFO
+        # level, not FAIL, when missing, and customers always supply it via
+        # --set-file at install time.
+        # Exhaustive multi-platform linting happens in helm-ci.yaml on every
+        # PR — here we just need both charts to lint cleanly for packaging.
+        run: |
+          helm lint --strict ./client -f client/ci/eks-values.yaml
+          helm lint --strict ./ingestor
 
-      - name: Package tracebloc chart
+      - name: Package tracebloc charts
         id: package
+        # Package BOTH the parent client chart AND the ingestor subchart.
+        # Customers run two flavors of install:
+        #   1. `helm install tracebloc/client ...` — bootstraps the cluster.
+        #   2. `helm install tracebloc/ingestor ...` — per-dataset ingestion.
+        # Both must resolve from the same helm repo, so both .tgz files need
+        # to live alongside each other in gh-pages and be referenced in a
+        # single shared index.yaml. Earlier versions packaged only `./client`
+        # and the second install path failed with "chart not found" — see #135.
         run: |
           helm package ./client
-          TGZ=$(ls -t client-*.tgz | head -1)
-          echo "chart_tgz=$TGZ" >> $GITHUB_OUTPUT
-          echo "Packaged $TGZ"
+          helm package ./ingestor
+          echo "Packaged:"
+          ls -la *.tgz
 
-      - name: Upload chart artifact
+      - name: Upload chart artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: helm-chart
-          path: ${{ steps.package.outputs.chart_tgz }}
+          name: helm-charts
+          # Glob picks up both client-*.tgz and ingestor-*.tgz.
+          path: |
+            client-*.tgz
+            ingestor-*.tgz
 
       - name: Configure Git
         run: |
@@ -68,7 +86,8 @@ jobs:
         run: |
           # Remove any local chart packages before switching branches to avoid
           # "untracked working tree files would be overwritten" checkout errors.
-          rm -f client-*.tgz || true
+          # Cover both chart name prefixes — see Package step above.
+          rm -f client-*.tgz ingestor-*.tgz || true
           if git fetch origin gh-pages 2>/dev/null; then
             git checkout gh-pages
             echo "index_exists=true" >> $GITHUB_OUTPUT
@@ -78,34 +97,45 @@ jobs:
             echo "index_exists=false" >> $GITHUB_OUTPUT
           fi
 
-      - name: Download chart artifact
+      - name: Download chart artifacts
         uses: actions/download-artifact@v4
         with:
-          name: helm-chart
+          name: helm-charts
 
       - name: Update index and push to gh-pages
         env:
           REPO_URL: https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}
         run: |
+          # `helm repo index .` indexes every .tgz in the working dir, so both
+          # client-*.tgz and ingestor-*.tgz get listed in the shared
+          # index.yaml. Customers then resolve `tracebloc/client` and
+          # `tracebloc/ingestor` from the same repo URL.
           if [ "${{ steps.fetch.outputs.index_exists }}" = "true" ] && [ -f index.yaml ]; then
             helm repo index . --url "$REPO_URL" --merge index.yaml
           else
             helm repo index . --url "$REPO_URL"
           fi
-          git add index.yaml client-*.tgz
+          git add index.yaml client-*.tgz ingestor-*.tgz
           git status
           if git diff --staged --quiet; then
             echo "No index/tgz changes to commit"
           else
-            git commit -m "Release helm chart(s): $(ls client-*.tgz 2>/dev/null | tr '\n' ' ')"
+            git commit -m "Release helm chart(s): $(ls client-*.tgz ingestor-*.tgz 2>/dev/null | tr '\n' ' ')"
             git push origin gh-pages
           fi
 
-      - name: Upload chart to GitHub Release (on tag)
-        if: startsWith(github.ref, 'refs/tags/')
+      - name: Upload charts to GitHub Release
+        # Pin tag_name from the release event payload rather than relying on
+        # github.ref / github.ref_name, which intermittently arrive empty on
+        # release-triggered runs (actions/runner#2788, still open).
+        # Attach BOTH chart tgzs so downloaders pinning a specific release
+        # tag can pull either chart's exact bytes from this release page.
         uses: softprops/action-gh-release@v2
         with:
-          files: client-*.tgz
+          tag_name: ${{ github.event.release.tag_name }}
+          files: |
+            client-*.tgz
+            ingestor-*.tgz
           generate_release_notes: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

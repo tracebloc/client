@@ -1,0 +1,84 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}-requests-proxy
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "tracebloc.labels" . | nindent 4 }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: requests-proxy
+  template:
+    metadata:
+      labels:
+        app: requests-proxy
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: proxy
+          image: {{ include "tracebloc.image" (dict "repository" "tracebloc/jobs-manager" "tag" .Values.env.CLIENT_ENV "digest" (dig "requestsProxy" "digest" "" .Values.images) "registry" "docker.io") | quote }}
+          imagePullPolicy: Always
+          workingDir: /app
+          command: ["python", "-m", "gunicorn"]
+          args:
+            - "--bind=0.0.0.0:8888"
+            # The proxy stores registered pod tokens in process-local memory,
+            # so it must run as a single worker unless the registry moves to
+            # shared storage.
+            - "--workers=1"
+            - "--worker-tmp-dir=/dev/shm"
+            - "--threads=4"
+            - "--graceful-timeout=30"
+            - "--timeout=60"
+            - "--access-logfile=-"
+            - "--error-logfile=-"
+            - "requests_proxy_server:create_app()"
+          ports:
+            - containerPort: 8888
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1001
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+            readOnlyRootFilesystem: true
+          {{- /* Nil-guard the whole resources.requestsProxy chain. A
+                 helm upgrade --reuse-values from a release predating this
+                 field (any 1.3.x ≤ 1.3.5) won't have it in stored values,
+                 and the direct path .Values.resources.requestsProxy... on
+                 a nil parent dict crashes with "nil pointer evaluating
+                 interface{}.requests". Default-through-dict idiom lets
+                 missing values fall through to the inline literals.
+                 The trailing dash on `{{-` strips the newline AFTER
+                 readOnlyRootFilesystem; we deliberately do NOT use `-}}`
+                 on the last `:=` so the newline before `resources:` is
+                 preserved (an earlier version of this guard ate the
+                 newline and rendered `readOnlyRootFilesystem: trueresources:`). */ -}}
+          {{- $rp := default dict (default dict .Values.resources).requestsProxy }}
+          {{- $rpReq := default dict $rp.requests }}
+          {{- $rpLim := default dict $rp.limits }}
+          resources:
+            requests:
+              cpu: {{ $rpReq.cpu | default "100m" | quote }}
+              memory: {{ $rpReq.memory | default "256Mi" | quote }}
+            limits:
+              cpu: {{ $rpLim.cpu | default "1000m" | quote }}
+              memory: {{ $rpLim.memory | default "512Mi" | quote }}
+          env:
+            - name: MYSQL_HOST
+              value: "mysql-client"
+            - name: EXPERIMENTS_QUEUE_NAME
+              value: "experiments"
+            - name: FLOPS_QUEUE_NAME
+              value: "flops"
+      {{- if include "tracebloc.useImagePullSecrets" . }}
+      imagePullSecrets:
+        - name: {{ include "tracebloc.registrySecretName" . }}
+      {{- end }}
+      restartPolicy: Always

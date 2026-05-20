@@ -1,0 +1,43 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  # client-runtime#21: defines which ServiceAccount(s) may call
+  # POST /internal/submit-ingestion-run on jobs-manager, scoped to which
+  # tables. Mounted into jobs-manager at /etc/tracebloc/ingestion-authz.yaml
+  # and read at startup (see submit_ingestion_run.load_authz_policy).
+  #
+  # Each entry in `ingestionAuthz.allowed` maps a (namespace, service_account)
+  # to a list of table-name prefixes. Omit `namespace` to default to the
+  # release's namespace — the common case where the ingestor subchart is
+  # installed alongside the tracebloc client.
+  name: {{ .Release.Name }}-ingestion-authz
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "tracebloc.labels" . | nindent 4 }}
+data:
+  ingestion-authz.yaml: |
+    allowed:
+    {{- /*
+        Nil-guarded chain: an upgrade with `--reuse-values` from a
+        pre-#123 release won't have `.Values.ingestionAuthz` in its
+        stored values, and an unguarded `.Values.ingestionAuthz.allowed`
+        crashes with "nil pointer evaluating interface {}.allowed".
+        `default dict` + `default list` collapse the missing parent /
+        missing child to an empty list, which renders as `allowed: []`
+        — fail-safe (the authz policy then denies every caller, which
+        is correct: there's no policy until the operator sets one).
+
+        Per-entry `service_account` is nil-guarded to fall back to
+        `ingestionAuthz.serviceAccountName` (#129) so the default
+        values.yaml entry doesn't need to repeat the SA name — change
+        the name in one place and both the SA template + this policy
+        pick it up.
+    */ -}}
+    {{- range default list (default dict .Values.ingestionAuthz).allowed }}
+      - service_account: {{ .service_account | default (include "tracebloc.ingestorServiceAccountName" $) | quote }}
+        namespace: {{ .namespace | default $.Release.Namespace | quote }}
+        table_prefixes:
+        {{- range .table_prefixes }}
+          - {{ . | quote }}
+        {{- end }}
+    {{- end }}
