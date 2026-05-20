@@ -33,7 +33,7 @@ helm repo add tracebloc https://tracebloc.github.io/client
 helm repo update
 
 # Install with a release name and namespace
-helm install my-tracebloc tracebloc/tracebloc \
+helm install my-tracebloc tracebloc/client \
   --namespace tracebloc \
   --create-namespace \
   -f my-values.yaml
@@ -104,7 +104,7 @@ For platform-specific settings (AKS, EKS, bare-metal, OpenShift), see `client/ci
 ```bash
 # Upgrade to a new chart version (repo install)
 helm repo update
-helm upgrade my-tracebloc tracebloc/tracebloc -n tracebloc -f my-values.yaml
+helm upgrade my-tracebloc tracebloc/client -n tracebloc -f my-values.yaml
 
 # Upgrade when using a tgz
 helm upgrade my-tracebloc ./tracebloc-2.0.1.tgz -n tracebloc -f my-values.yaml
@@ -228,7 +228,7 @@ After that, users can run:
 
 ```bash
 helm repo add tracebloc https://tracebloc.github.io/client
-helm install my-tracebloc tracebloc/tracebloc -n tracebloc -f my-values.yaml
+helm install my-tracebloc tracebloc/client -n tracebloc -f my-values.yaml
 ```
 
 ---
@@ -241,3 +241,37 @@ helm install my-tracebloc tracebloc/tracebloc -n tracebloc -f my-values.yaml
 - [ ] Namespace created or `--create-namespace` used.
 - [ ] Resource requests/limits and storage sizes reviewed in `values.yaml` (e.g. `pvc.mysql`, `pvc.logs`, `pvc.data`).
 - [ ] Lint and template checked: `helm lint ./client -f my-values.yaml` and `helm template my-tracebloc ./client -f my-values.yaml`.
+
+---
+
+## Next: ingest your first dataset
+
+With the client running, the typical follow-up is to land a dataset in the cluster's local MySQL so training jobs can read it. The `tracebloc/ingestor` subchart wraps that flow — customers describe the dataset in ~8 lines of YAML and run a single `helm install`. No Dockerfile, no Python script.
+
+The chart **does not transport data into the cluster** — it points at data already accessible on the cluster's shared PVC (`client-pvc` by default, mounted at `/data/shared/` inside the ingestor Pod). Stage your CSV + image / text / annotation files there first; the ingestor chart README documents the `kubectl cp` pattern and production sync alternatives.
+
+Example: once you've staged a cats-vs-dogs image classification dataset under `/data/shared/cats-dogs/` on the PVC, the `ingest.yaml` describes what's there:
+
+```yaml
+# my-cats-dogs.yaml
+apiVersion: tracebloc.io/v1
+kind: IngestConfig
+category: image_classification
+table: cats_dogs_train
+intent: train
+csv: /data/shared/cats-dogs/labels.csv
+images: /data/shared/cats-dogs/images/
+label: label
+```
+
+```bash
+helm install my-cats-dogs tracebloc/ingestor \
+  --namespace tracebloc \
+  --set-file ingestConfig=./my-cats-dogs.yaml
+```
+
+The ingestor runs once: validates the data, copies files into the destination directory on the PVC, inserts rows into MySQL, sends metadata to the tracebloc backend, then exits. Repeat per dataset.
+
+Full ingestor documentation, including the schema for every supported category, the auto-update model that keeps the ingestor image current without per-install overrides, and verification commands → **[ingestor/README.md](../ingestor/README.md)**.
+
+Category-specific YAML examples (image classification, object detection, tabular regression, semantic segmentation, text classification, masked language modeling, etc.) → **[tracebloc/data-ingestors templates](https://github.com/tracebloc/data-ingestors/tree/master/templates)**.
