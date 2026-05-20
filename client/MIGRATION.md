@@ -2,6 +2,76 @@
 
 This guide explains how to migrate from the legacy per-platform charts (`aks/`, `bm/`, `eks/`, `oc/`) to the unified `client/` chart.
 
+## Upgrading to 1.3.4 — parent chart owns the shared ingestor ServiceAccount
+
+[#129](https://github.com/tracebloc/client/issues/129): the ingestor
+ServiceAccount has moved from the `tracebloc/ingestor` subchart into this
+parent chart. Background: the SA is shared by every ingestor subchart
+release in a namespace, but per-release Helm ownership meant two concurrent
+`helm install tracebloc/ingestor` calls collided with "cannot import into
+current release", and uninstalling the first release ripped the SA out
+from under all the others. With the SA in the parent chart, every
+ingestor release in the namespace shares it cleanly and `helm uninstall`
+of any individual ingestor release leaves it alone.
+
+> **The matching ingestor subchart change** ships as
+> `tracebloc/ingestor` **0.2.0** — `serviceAccount.create` default
+> flipped from `true` to `false`. Upgrade the subchart releases in
+> lockstep with the parent so they stop trying to own the SA.
+
+### When you need to adopt an existing SA
+
+If you already have a `tracebloc/ingestor` 0.1.0 release installed in the
+same namespace as this `tracebloc/client` release, `kubectl get sa
+ingestor -n <ns> -o jsonpath='{.metadata.annotations.meta\.helm\.sh/release-name}'`
+returns that subchart release's name. Plain `helm upgrade tracebloc/client`
+to 1.3.4 will fail with `Unable to continue with update: ServiceAccount
+"ingestor" ... exists and cannot be imported into the current release`.
+
+Transfer Helm ownership before upgrading:
+
+```bash
+# 1. Identify the values you need.
+NAMESPACE=<your-tracebloc-namespace>
+CLIENT_RELEASE=<your-client-release-name>          # e.g. "tracebloc"
+SA_NAME=ingestor                                    # or ingestionAuthz.serviceAccountName if overridden
+
+# 2. Re-annotate the SA so Helm sees the parent client release as its owner.
+kubectl annotate sa "$SA_NAME" -n "$NAMESPACE" \
+  meta.helm.sh/release-name="$CLIENT_RELEASE" \
+  meta.helm.sh/release-namespace="$NAMESPACE" \
+  --overwrite
+
+kubectl label sa "$SA_NAME" -n "$NAMESPACE" \
+  app.kubernetes.io/managed-by=Helm \
+  --overwrite
+
+# 3. Now run the upgrade — Helm adopts the SA on next reconcile.
+helm upgrade "$CLIENT_RELEASE" tracebloc/client \
+  -n "$NAMESPACE" --version 1.3.4 --reset-then-reuse-values
+
+# 4. Upgrade each ingestor subchart release to 0.2.0 so it stops trying
+#    to create the SA itself. The flipped default does this for you, but
+#    use --reset-then-reuse-values so pre-0.2.0 stored values don't
+#    re-apply serviceAccount.create=true.
+helm upgrade <ingestor-release> tracebloc/ingestor \
+  -n "$NAMESPACE" --version 0.2.0 --reset-then-reuse-values
+```
+
+If no ingestor 0.1.0 release exists in the namespace yet, you don't have
+to do anything — the parent chart creates the SA on first install of
+1.3.4 and subsequent ingestor 0.2.0 releases consume it.
+
+### `--reuse-values` upgrade path
+
+Operators using plain `--reuse-values` (or the auto-upgrade cronjob
+prior to 1.3.0, which used that flag) won't get the new
+`ingestionAuthz.serviceAccountName` default. The chart's template
+defaults the value to `"ingestor"` when absent, so the SA is created
+with the expected name and existing `allowed` entries keep matching.
+No template-level breakage; this is the same nil-guard pattern as
+[#124](https://github.com/tracebloc/client/pull/124).
+
 ## Upgrading to 1.3.0 — self-upgrade CronJob lands on by default
 
 Releases of 1.3.0+ install a `<release>-auto-upgrade` CronJob that polls

@@ -1,0 +1,69 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}-requests-proxy
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "tracebloc.labels" . | nindent 4 }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: requests-proxy
+  template:
+    metadata:
+      labels:
+        app: requests-proxy
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: proxy
+          image: {{ include "tracebloc.image" (dict "repository" "tracebloc/jobs-manager" "tag" .Values.env.CLIENT_ENV "digest" (dig "requestsProxy" "digest" "" .Values.images) "registry" "docker.io") | quote }}
+          imagePullPolicy: Always
+          workingDir: /app
+          command: ["python", "-m", "gunicorn"]
+          args:
+            - "--bind=0.0.0.0:8888"
+            # The proxy stores registered pod tokens in process-local memory,
+            # so it must run as a single worker unless the registry moves to
+            # shared storage.
+            - "--workers=1"
+            - "--worker-tmp-dir=/dev/shm"
+            - "--threads=4"
+            - "--graceful-timeout=30"
+            - "--timeout=60"
+            - "--access-logfile=-"
+            - "--error-logfile=-"
+            - "requests_proxy_server:create_app()"
+          ports:
+            - containerPort: 8888
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1001
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+            readOnlyRootFilesystem: true
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: 1000m
+              memory: 512Mi
+          env:
+            - name: MYSQL_HOST
+              value: "mysql-client"
+            - name: EXPERIMENTS_QUEUE_NAME
+              value: "experiments"
+            - name: FLOPS_QUEUE_NAME
+              value: "flops"
+      {{- if include "tracebloc.useImagePullSecrets" . }}
+      imagePullSecrets:
+        - name: {{ include "tracebloc.registrySecretName" . }}
+      {{- end }}
+      restartPolicy: Always

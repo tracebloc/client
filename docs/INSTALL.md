@@ -207,7 +207,7 @@ The chart repository used for installation is **[tracebloc/client](https://githu
 
 To make the chart available via `helm repo add tracebloc https://tracebloc.github.io/client`:
 
-1. **In the repo that hosts the chart (e.g. tracebloc/client or tracebloc-helm-charts):**  
+1. **In the tracebloc/client repo:**
    Enable **GitHub Pages** → **Settings** → **Pages** → **Source**: branch `gh-pages` (root).
 
 2. **Create a release or push a tag**  
@@ -224,16 +224,12 @@ To make the chart available via `helm repo add tracebloc https://tracebloc.githu
 
 4. **First time only:** ensure the `gh-pages` branch exists. The workflow creates it if missing.
 
-5. **If you develop in a different repo** (e.g. tracebloc-helm-charts): run the release workflow there to build the chart, then copy the generated `tracebloc-<version>.tgz` and updated `index.yaml` into the **tracebloc/client** repo’s `gh-pages` branch so the chart is served at `https://tracebloc.github.io/client`.
-
 After that, users can run:
 
 ```bash
 helm repo add tracebloc https://tracebloc.github.io/client
 helm install my-tracebloc tracebloc/tracebloc -n tracebloc -f my-values.yaml
 ```
-
-**Note:** If the chart is developed in a different repo (e.g. `tracebloc-helm-charts`), run the release workflow there to produce the `.tgz` and `index.yaml`, then copy the packaged chart and updated index into the `tracebloc/client` repo’s `gh-pages` branch (or run the same release workflow from the client repo) so the chart is served at `https://tracebloc.github.io/client`.
 
 ---
 
