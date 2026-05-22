@@ -39,6 +39,12 @@ data:
     # the Docker-Content-Digest header for both manifest-v2 single-arch and
     # the OCI / multi-arch index variants, but only when the client signals
     # support; omit one and registries that return that variant will 404.
+    #
+    # The media types are sent as a SINGLE comma-separated Accept header
+    # per the Docker registry v2 spec and the HTTP semantics RFC 7230 §3.2.2
+    # (which allows the syntactically-equivalent multi-line form, but the
+    # registry's documented form is the single-header one; some proxies
+    # have been observed dropping or reordering repeated Accept headers).
     get_latest_digest() {
       _repo="$1"
       _token="$(get_token "$_repo")"
@@ -53,10 +59,7 @@ data:
       # lowercase-by-spec (sha256:<64 hex>), so tr never mangles the value.
       curl -fsSI --max-time 10 \
         -H "Authorization: Bearer $_token" \
-        -H "Accept: application/vnd.docker.distribution.manifest.v2+json" \
-        -H "Accept: application/vnd.docker.distribution.manifest.list.v2+json" \
-        -H "Accept: application/vnd.oci.image.manifest.v1+json" \
-        -H "Accept: application/vnd.oci.image.index.v1+json" \
+        -H "Accept: application/vnd.docker.distribution.manifest.v2+json,application/vnd.docker.distribution.manifest.list.v2+json,application/vnd.oci.image.manifest.v1+json,application/vnd.oci.image.index.v1+json" \
         "https://registry-1.docker.io/v2/${_repo}/manifests/${IMAGE_TAG}" \
         | tr '[:upper:]' '[:lower:]' \
         | awk '/^docker-content-digest:/ {print $2}' \

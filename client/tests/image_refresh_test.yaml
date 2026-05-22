@@ -114,13 +114,22 @@ tests:
       # Regression guard: the script must HEAD the manifest with all four
       # Accept media types (v2 + list-v2 + OCI manifest + OCI index).
       # Dropping any one of these silently breaks digest resolution for
-      # registries that serve only that media type.
+      # registries that serve only that media type. They MUST be in a
+      # single comma-separated Accept header — per the Docker registry
+      # v2 spec, and because some proxies have been observed dropping
+      # or reordering repeated Accept headers (caught in PR #155 review,
+      # bugbot medium severity).
       - matchRegex:
           path: data["image-refresh.sh"]
           pattern: "vnd.docker.distribution.manifest.list.v2"
       - matchRegex:
           path: data["image-refresh.sh"]
           pattern: "vnd.oci.image.index.v1"
+      # The four media types must appear in ONE `-H "Accept: ...,...,..."`
+      # header. This regex matches all four joined by commas on one line.
+      - matchRegex:
+          path: data["image-refresh.sh"]
+          pattern: 'Accept: application/vnd\.docker\.distribution\.manifest\.v2\+json,application/vnd\.docker\.distribution\.manifest\.list\.v2\+json,application/vnd\.oci\.image\.manifest\.v1\+json,application/vnd\.oci\.image\.index\.v1\+json'
       # Regression guard: case-fold the response headers with tr BEFORE
       # awk. alpine/k8s ships BusyBox awk, which silently ignores gawk's
       # IGNORECASE=1; a mixed-case `Docker-Content-Digest` from an
@@ -238,14 +247,15 @@ tests:
           value: stg-image-refresh
         documentIndex: 2
 
-  - it: Role grants only pods/get,list and deployments/get,patch,watch
-    # `watch` on deployments is REQUIRED — `kubectl rollout status` does a
-    # ListWatch on the deployment resource to wait for rollout completion.
-    # Without it the call hangs in a reflector error loop until --timeout
-    # fires (kubectl#580), marking every successful restart as a failed
-    # Job. Caught in PR #155 review. Lock the full verb set with equal,
-    # not contains, so a future refactor that drops `watch` fails loudly
-    # instead of silently regressing.
+  - it: Role grants only pods/get,list and deployments/get,list,patch,watch
+    # A ListWatch reflector (which `kubectl rollout status` uses on the
+    # deployment) needs BOTH `list` (initial sync) and `watch`
+    # (incremental updates). Drop either and the call hangs in a 403
+    # retry loop until --timeout fires (kubectl#580), marking every
+    # successful restart as a failed Job. Both verbs caught in PR #155
+    # review. Lock the full verb set with equal, not contains, so a
+    # future refactor that drops either one fails loudly instead of
+    # silently regressing.
     template: templates/image-refresh-rbac.yaml
     documentIndex: 1
     asserts:
@@ -260,7 +270,7 @@ tests:
           value:
             apiGroups: ["apps"]
             resources: ["deployments"]
-            verbs: ["get", "patch", "watch"]
+            verbs: ["get", "list", "patch", "watch"]
 
   - it: should accept operator overrides for schedule, image, and timeout
     template: templates/image-refresh-cronjob.yaml
