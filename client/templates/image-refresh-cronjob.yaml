@@ -77,6 +77,38 @@ data:
         | tr -d '\r\n'
     }
 
+    # For multi-arch tags: GET the manifest body and extract every
+    # per-platform manifest digest. This handles the runtime/registry
+    # asymmetry from kubernetes/kubernetes#108689 + #115199 — Docker Hub's
+    # HEAD on a multi-arch tag returns the INDEX digest, but containerd
+    # records the PLATFORM-specific manifest digest in containerStatuses
+    # imageID. The two will never match directly; instead, we check
+    # whether running ∈ {all per-platform digests in the index}.
+    #
+    # An OCI/Docker index's only sha256: references live inside
+    # `manifests[].digest`, so a plain `grep -oE 'sha256:[a-f0-9]{64}'`
+    # on the body suffices — no jq needed (which keeps the script's
+    # parsing dependencies the same as the auto-upgrade pattern).
+    # Single-arch manifests have sha256: refs inside `config` and
+    # `layers`, NOT manifest digests — so we gate this on the presence
+    # of a `"manifests"` key, which only the index/list bodies carry.
+    get_index_digests() {
+      _repo="$1"
+      _token="$(get_token "$_repo")"
+      if [ -z "$_token" ]; then
+        return 1
+      fi
+      _body="$(curl -fsS --max-time 10 \
+        -H "Authorization: Bearer $_token" \
+        -H "Accept: application/vnd.docker.distribution.manifest.v2+json,application/vnd.docker.distribution.manifest.list.v2+json,application/vnd.oci.image.manifest.v1+json,application/vnd.oci.image.index.v1+json" \
+        "https://registry-1.docker.io/v2/${_repo}/manifests/${IMAGE_TAG}")"
+      # Only enumerate digests for index/list bodies. For single-platform
+      # manifests, the top-level HEAD digest is already authoritative.
+      if printf '%s' "$_body" | grep -q '"manifests"'; then
+        printf '%s' "$_body" | grep -oE 'sha256:[a-f0-9]{64}'
+      fi
+    }
+
     restart_needed=0
 
     # Each entry: "<docker-hub-repo>|<container-name-in-pod>|<digest-pin-flag>".
@@ -115,11 +147,29 @@ data:
       log "  latest=$latest"
       log "  running=$running"
 
-      if [ "$latest" != "$running" ]; then
+      if [ "$latest" = "$running" ]; then
+        log "  digests match"
+        continue
+      fi
+
+      # Top-level mismatch. Could be a genuine update OR a multi-arch
+      # asymmetry where `latest` is the index digest and `running` is a
+      # per-platform manifest digest. Disambiguate by fetching the index
+      # body and checking whether running ∈ per-platform digests.
+      log "  top-level mismatch; checking multi-arch index for match"
+      _matched=0
+      for _d in $(get_index_digests "$repo" || true); do
+        if [ "$_d" = "$running" ]; then
+          _matched=1
+          break
+        fi
+      done
+
+      if [ "$_matched" -eq 1 ]; then
+        log "  running matches a per-platform manifest digest in the index; up to date"
+      else
         log "  digest changed -> restart needed"
         restart_needed=1
-      else
-        log "  digests match"
       fi
     done
 

@@ -130,6 +130,25 @@ tests:
       - matchRegex:
           path: data["image-refresh.sh"]
           pattern: 'Accept: application/vnd\.docker\.distribution\.manifest\.v2\+json,application/vnd\.docker\.distribution\.manifest\.list\.v2\+json,application/vnd\.oci\.image\.manifest\.v1\+json,application/vnd\.oci\.image\.index\.v1\+json'
+      # Regression guard: multi-arch tags publish a manifest list/index
+      # at the tag. Docker Hub's HEAD returns the INDEX digest, but
+      # containerd records the PLATFORM manifest digest in the pod's
+      # imageID (kubernetes/kubernetes#108689 + #115199). The two will
+      # never match directly. The script must fall back to GET-ing the
+      # index body and checking whether running ∈ per-platform digests,
+      # otherwise multi-arch images would trigger a restart on every
+      # 15-minute tick. Caught in PR #155 review (bugbot, medium).
+      - matchRegex:
+          path: data["image-refresh.sh"]
+          pattern: "get_index_digests"
+      # The fallback only kicks in for index/list bodies. Gate on
+      # `"manifests"` key presence — single-platform manifest bodies
+      # don't have that key and would otherwise yield layer/config
+      # digests (which are NOT manifest digests) and trigger a never-
+      # matching false-positive restart.
+      - matchRegex:
+          path: data["image-refresh.sh"]
+          pattern: 'grep -q .{0,3}"manifests"'
       # Regression guard: case-fold the response headers with tr BEFORE
       # awk. alpine/k8s ships BusyBox awk, which silently ignores gawk's
       # IGNORECASE=1; a mixed-case `Docker-Content-Digest` from an
