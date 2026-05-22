@@ -1,0 +1,56 @@
+{{- if include "tracebloc.imageRefreshEnabled" . }}
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ include "tracebloc.imageRefreshName" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "tracebloc.labels" . | nindent 4 }}
+    app.kubernetes.io/component: image-refresh
+---
+{{/*
+  Namespace-scoped Role — narrower than autoUpgrade's cluster-admin binding
+  on purpose. This CronJob only needs to read pod imageIDs (to compare the
+  running digest) and patch the jobs-manager Deployment (to trigger a
+  rollout restart). All resources live in {{ .Release.Namespace }}, so no
+  cluster scope is required. A compromise of this Pod is bounded to
+  kicking the jobs-manager Deployment in this one namespace.
+*/}}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "tracebloc.imageRefreshName" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "tracebloc.labels" . | nindent 4 }}
+    app.kubernetes.io/component: image-refresh
+rules:
+  # Read the running pod's container imageIDs to extract the active digest.
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list"]
+  # `kubectl rollout restart` patches the deployment's pod template
+  # annotations (kubectl.kubernetes.io/restartedAt). `rollout status`
+  # reads the deployment.
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["get", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "tracebloc.imageRefreshName" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "tracebloc.labels" . | nindent 4 }}
+    app.kubernetes.io/component: image-refresh
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "tracebloc.imageRefreshName" . }}
+    namespace: {{ .Release.Namespace }}
+roleRef:
+  kind: Role
+  name: {{ include "tracebloc.imageRefreshName" . }}
+  apiGroup: rbac.authorization.k8s.io
+{{- end }}

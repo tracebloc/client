@@ -370,6 +370,83 @@ autoUpgrade:
       cpu: "500m"
       memory: "256Mi"
 
+# -- Image-refresh CronJob (closes tracebloc/client#154).
+# Auto-restarts the jobs-manager Deployment when a new image digest is
+# published to Docker Hub under the floating CLIENT_ENV tag. Without this,
+# `imagePullPolicy: Always` only pulls on pod creation — running pods stay
+# on the old image until someone manually `kubectl rollout restart`s them,
+# which is exactly the customer-runs-no-commands UX we want to avoid.
+#
+# How it works:
+#   - A CronJob in this namespace polls Docker Hub's registry API for the
+#     current manifest digest of tracebloc/jobs-manager:<CLIENT_ENV> and
+#     tracebloc/pods-monitor:<CLIENT_ENV> (both containers share one
+#     deployment), compares each to the running pod's container imageID,
+#     and runs `kubectl rollout restart deployment/<release>-jobs-manager`
+#     only when at least one digest differs. Pulls happen on the new pod
+#     because the deployment already has imagePullPolicy: Always for the
+#     floating-tag path.
+#   - Idle-cheap: on every tick where Docker Hub has not republished, both
+#     digests match and the script exits without touching the deployment.
+#   - Anonymous Docker Hub pulls are rate-limited (100 / 6h / IP). The
+#     default 15-minute schedule yields ~4 manifest HEAD requests per hour
+#     per image — well under the limit even when the cluster shares an
+#     egress IP with other workloads.
+#
+# Pinned-digest interaction: if BOTH images.jobsManager.digest and
+# images.podsMonitor.digest are set, the chart skips rendering this
+# CronJob entirely — digest pinning is an explicit opt-out from drift,
+# and auto-restart would defeat the purpose. If only one is pinned the
+# CronJob still runs but the script skips the pinned image at runtime.
+#
+# Trust boundary: this CronJob's ServiceAccount is bound to a
+# namespace-scoped Role (get pods, get/patch deployments in the release
+# namespace only). Much narrower than autoUpgrade — a compromise of this
+# Pod can only kick the jobs-manager Deployment, not deploy arbitrary
+# resources. The script reaches out only to docker.io's public registry
+# endpoints; if your cluster requires egress through a proxy, set
+# HTTPS_PROXY via env or disable this CronJob.
+#
+# Disabled-on-this-cluster check after install:
+#   kubectl get cronjob -n <namespace> -l app.kubernetes.io/component=image-refresh
+imageRefresh:
+  # Default ON: the whole point of #154 is that customers don't have to
+  # run any commands when we publish a new jobs-manager image.
+  enabled: true
+  # Every 15 minutes at minute :07. The off-hour minute spreads load
+  # across Docker Hub's registry-1 origin; 15m balances drift latency
+  # against the 100/6h anonymous pull-rate limit (2 images × 4/hr = 8/hr,
+  # well under the cap even shared with other workloads on the same IP).
+  schedule: "7,22,37,52 * * * *"
+  # `kubectl rollout status --timeout`. Generous; jobs-manager image pulls
+  # on bare-metal first-boot can take minutes, and the CronJob slot
+  # shouldn't hold all night if a rollout genuinely wedges.
+  rolloutTimeout: "10m"
+  # CronJob spec knobs. Override per-cluster if needed.
+  suspend: false
+  # Lower history limits than autoUpgrade — this Job runs ~96x/day, the
+  # successful runs aren't interesting and 1 is enough for an at-a-glance
+  # "last run succeeded" check.
+  successfulJobsHistoryLimit: 1
+  failedJobsHistoryLimit: 3
+  startingDeadlineSeconds: 300
+  # Pod image: needs `sh`, `kubectl`, and `curl`. alpine/k8s ships all
+  # three in a small image and we pin the tag so behaviour cannot drift
+  # if upstream re-tags.
+  image:
+    repository: alpine/k8s
+    tag: "1.30.5"
+    pullPolicy: IfNotPresent
+  # Tiny — the pod is mostly idle waiting on network I/O for the digest
+  # HEADs and the rollout-status watch.
+  resources:
+    requests:
+      cpu: "20m"
+      memory: "64Mi"
+    limits:
+      cpu: "200m"
+      memory: "128Mi"
+
 # ============================================================
 # Ingestion endpoint authorization (client-runtime#21)
 # ============================================================

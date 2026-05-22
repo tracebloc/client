@@ -106,6 +106,35 @@ mysql-pvc
 {{- end }}
 
 {{/*
+  Release-scoped name shared by the image-refresh CronJob, ServiceAccount,
+  Role, RoleBinding, and ConfigMap. Same lockstep reasoning as
+  tracebloc.autoUpgradeName above. Distinct from auto-upgrade because the
+  two CronJobs have different cadences, different RBAC scopes (image-refresh
+  is namespace-scoped, auto-upgrade is cluster-admin), and customers may
+  reasonably disable one but not the other.
+*/}}
+{{- define "tracebloc.imageRefreshName" -}}
+{{ .Release.Name }}-image-refresh
+{{- end }}
+
+{{/*
+  Whether the image-refresh CronJob has anything to do. When BOTH
+  jobs-manager and pods-monitor are digest-pinned, the customer has
+  explicitly opted into reproducible pinning and we must not fight that
+  by restarting on tag changes. In that case we render nothing — no
+  CronJob, no RBAC, no ConfigMap. If only one is pinned, the other can
+  still drift, so the CronJob is rendered and the script skips the
+  pinned image at runtime via env flags.
+*/}}
+{{- define "tracebloc.imageRefreshEnabled" -}}
+{{- if not .Values.imageRefresh.enabled -}}
+{{- else if and .Values.images.jobsManager.digest .Values.images.podsMonitor.digest -}}
+{{- else -}}
+true
+{{- end -}}
+{{- end }}
+
+{{/*
   StorageClass name: when storageClass.create is true, use a release-unique name
   so each release gets its own StorageClass (avoids Helm ownership conflicts).
   When create is false, use the user-provided storageClass.name for an existing class.
