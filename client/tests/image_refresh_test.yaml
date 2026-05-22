@@ -149,6 +149,19 @@ tests:
       - matchRegex:
           path: data["image-refresh.sh"]
           pattern: 'grep -q .{0,3}"manifests"'
+      # Regression guard: get_index_digests must distinguish transient
+      # failure (return 1) from successfully-fetched-but-single-platform
+      # (return 0 + empty stdout). The caller's `if !` check turns a
+      # transient into a `continue` (skip tick), not a restart. Asserting
+      # the WARN/skip log line keeps the asymmetric-failure regression
+      # caught by bugbot from creeping back in. (Caught in PR #155 review,
+      # medium severity.)
+      - matchRegex:
+          path: data["image-refresh.sh"]
+          pattern: 'if ! _index_digests='
+      - matchRegex:
+          path: data["image-refresh.sh"]
+          pattern: "could not fetch index body"
       # Regression guard: case-fold the response headers with tr BEFORE
       # awk. alpine/k8s ships BusyBox awk, which silently ignores gawk's
       # IGNORECASE=1; a mixed-case `Docker-Content-Digest` from an
