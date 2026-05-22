@@ -273,3 +273,26 @@ tests:
     asserts:
       - failedTemplate:
           errorPattern: "must not be valid against schema"
+
+  - it: cronjob template renders nothing (no crash) when imageRefresh key is entirely absent
+    # Regression guard for the --reuse-values upgrade path. Customers who
+    # upgrade with `helm upgrade --reuse-values --version 1.4.0` (instead
+    # of the autoUpgrade-recommended --reset-then-reuse-values) replay
+    # stored 1.3.x values that have NO `imageRefresh` block at all. The
+    # template must degrade silently (no resources rendered) rather than
+    # crash with nil-pointer — see the "nil-guard every new top-level
+    # value key" rule in CLAUDE.md.
+    template: templates/image-refresh-cronjob.yaml
+    set:
+      imageRefresh: null
+    asserts:
+      - hasDocuments:
+          count: 0
+
+  - it: rbac template renders nothing (no crash) when imageRefresh key is entirely absent
+    template: templates/image-refresh-rbac.yaml
+    set:
+      imageRefresh: null
+    asserts:
+      - hasDocuments:
+          count: 0
