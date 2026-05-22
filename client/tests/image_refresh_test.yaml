@@ -121,6 +121,25 @@ tests:
       - matchRegex:
           path: data["image-refresh.sh"]
           pattern: "vnd.oci.image.index.v1"
+      # Regression guard: case-fold the response headers with tr BEFORE
+      # awk. alpine/k8s ships BusyBox awk, which silently ignores gawk's
+      # IGNORECASE=1; a mixed-case `Docker-Content-Digest` from an
+      # HTTP/1.1 proxy would then never match the lowercase pattern and
+      # the script would silently never restart on new image publishes.
+      # Caught in PR #155 review (bugbot, medium severity).
+      - matchRegex:
+          path: data["image-refresh.sh"]
+          pattern: "tr '\\[:upper:\\]' '\\[:lower:\\]'"
+      # And: no `BEGIN{IGNORECASE=1}` block in awk. Together with the tr
+      # above, this is what makes case-folding actually correct on
+      # BusyBox. If a future refactor adds the gawk-only IGNORECASE
+      # action back to awk code, that's a code smell suggesting the tr
+      # has been dropped; fail the test loudly so the regression is
+      # caught. Regex targets `BEGIN{IGNORECASE` specifically so the
+      # word `IGNORECASE` is still free to appear in prose comments.
+      - notMatchRegex:
+          path: data["image-refresh.sh"]
+          pattern: "BEGIN[{ ]IGNORECASE"
 
   - it: CronJob has the right schedule, concurrency, and SA wiring
     template: templates/image-refresh-cronjob.yaml
