@@ -10,12 +10,12 @@ metadata:
     app.kubernetes.io/component: image-refresh
 ---
 {{/*
-  Namespace-scoped Role — narrower than autoUpgrade's cluster-admin binding
-  on purpose. This CronJob only needs to read pod imageIDs (to compare the
-  running digest) and patch the jobs-manager Deployment (to trigger a
-  rollout restart). All resources live in {{ .Release.Namespace }}, so no
-  cluster scope is required. A compromise of this Pod is bounded to
-  kicking the jobs-manager Deployment in this one namespace.
+  Namespace-scoped Role — narrower than autoUpgrade's cluster-admin
+  binding on purpose. This CronJob only touches the jobs-manager
+  Deployment in {{ .Release.Namespace }}: read it to compare the recorded
+  refresh digest, and patch it for `rollout restart` + annotation
+  update. No pods, no other resources, no cluster scope. A compromise
+  of this Pod is bounded to kicking and annotating one Deployment.
 */}}
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
@@ -26,17 +26,13 @@ metadata:
     {{- include "tracebloc.labels" . | nindent 4 }}
     app.kubernetes.io/component: image-refresh
 rules:
-  # Read the running pod's container imageIDs to extract the active digest.
-  - apiGroups: [""]
-    resources: ["pods"]
-    verbs: ["get", "list"]
-  # `kubectl rollout restart` patches the deployment's pod template
-  # annotations (kubectl.kubernetes.io/restartedAt). `rollout status`
-  # uses a ListWatch on the deployment to wait for rollout completion;
-  # a ListWatch reflector needs BOTH `list` (initial sync) and `watch`
-  # (incremental updates). Missing either one drops the call into a
-  # 403 retry loop until --timeout fires (kubectl#580), marking every
-  # successful restart as a failed Job. Both caught in PR #155 review.
+  # `kubectl rollout restart` + `kubectl annotate` are both patches on
+  # the deployment. `rollout status` uses a ListWatch on the deployment
+  # to wait for completion; a ListWatch reflector needs BOTH `list`
+  # (initial sync) and `watch` (incremental updates). Missing either
+  # one drops the call into a 403 retry loop until --timeout fires
+  # (kubectl#580), marking every successful restart as a failed Job.
+  # Both caught in PR #155 review.
   - apiGroups: ["apps"]
     resources: ["deployments"]
     verbs: ["get", "list", "patch", "watch"]

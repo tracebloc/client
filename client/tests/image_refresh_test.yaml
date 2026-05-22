@@ -105,82 +105,74 @@ tests:
           path: data["image-refresh.sh"]
           pattern: "registry-1.docker.io"
       # Regression guard: the digest-pinned skip MUST stay in the script.
-      # Without it a customer who pins one image would still get restarts
-      # when the OTHER image changes, which is fine — but a future
-      # refactor must not drop the pin check for the pinned image itself.
       - matchRegex:
           path: data["image-refresh.sh"]
           pattern: "pinned by digest in values"
-      # Regression guard: the script must HEAD the manifest with all four
-      # Accept media types (v2 + list-v2 + OCI manifest + OCI index).
-      # Dropping any one of these silently breaks digest resolution for
-      # registries that serve only that media type. They MUST be in a
-      # single comma-separated Accept header — per the Docker registry
-      # v2 spec, and because some proxies have been observed dropping
-      # or reordering repeated Accept headers (caught in PR #155 review,
-      # bugbot medium severity).
-      - matchRegex:
-          path: data["image-refresh.sh"]
-          pattern: "vnd.docker.distribution.manifest.list.v2"
-      - matchRegex:
-          path: data["image-refresh.sh"]
-          pattern: "vnd.oci.image.index.v1"
-      # The four media types must appear in ONE `-H "Accept: ...,...,..."`
-      # header. This regex matches all four joined by commas on one line.
+      # Regression guard: the script must HEAD the manifest with all
+      # four Accept media types in a SINGLE comma-separated Accept
+      # header per the Docker registry v2 spec (some proxies have been
+      # observed dropping repeated Accept headers — caught in PR #155
+      # review, bugbot medium severity).
       - matchRegex:
           path: data["image-refresh.sh"]
           pattern: 'Accept: application/vnd\.docker\.distribution\.manifest\.v2\+json,application/vnd\.docker\.distribution\.manifest\.list\.v2\+json,application/vnd\.oci\.image\.manifest\.v1\+json,application/vnd\.oci\.image\.index\.v1\+json'
-      # Regression guard: multi-arch tags publish a manifest list/index
-      # at the tag. Docker Hub's HEAD returns the INDEX digest, but
-      # containerd records the PLATFORM manifest digest in the pod's
-      # imageID (kubernetes/kubernetes#108689 + #115199). The two will
-      # never match directly. The script must fall back to GET-ing the
-      # index body and checking whether running ∈ per-platform digests,
-      # otherwise multi-arch images would trigger a restart on every
-      # 15-minute tick. Caught in PR #155 review (bugbot, medium).
-      - matchRegex:
-          path: data["image-refresh.sh"]
-          pattern: "get_index_digests"
-      # The fallback only kicks in for index/list bodies. Gate on
-      # `"manifests"` key presence — single-platform manifest bodies
-      # don't have that key and would otherwise yield layer/config
-      # digests (which are NOT manifest digests) and trigger a never-
-      # matching false-positive restart.
-      - matchRegex:
-          path: data["image-refresh.sh"]
-          pattern: 'grep -q .{0,3}"manifests"'
-      # Regression guard: get_index_digests must distinguish transient
-      # failure (return 1) from successfully-fetched-but-single-platform
-      # (return 0 + empty stdout). The caller's `if !` check turns a
-      # transient into a `continue` (skip tick), not a restart. Asserting
-      # the WARN/skip log line keeps the asymmetric-failure regression
-      # caught by bugbot from creeping back in. (Caught in PR #155 review,
-      # medium severity.)
-      - matchRegex:
-          path: data["image-refresh.sh"]
-          pattern: 'if ! _index_digests='
-      - matchRegex:
-          path: data["image-refresh.sh"]
-          pattern: "could not fetch index body"
-      # Regression guard: case-fold the response headers with tr BEFORE
-      # awk. alpine/k8s ships BusyBox awk, which silently ignores gawk's
+      # Regression guard: case-fold response headers with tr BEFORE awk.
+      # alpine/k8s ships BusyBox awk which silently ignores gawk's
       # IGNORECASE=1; a mixed-case `Docker-Content-Digest` from an
-      # HTTP/1.1 proxy would then never match the lowercase pattern and
-      # the script would silently never restart on new image publishes.
-      # Caught in PR #155 review (bugbot, medium severity).
+      # HTTP/1.1 proxy would otherwise never match. Caught in PR #155
+      # review (bugbot medium severity).
       - matchRegex:
           path: data["image-refresh.sh"]
           pattern: "tr '\\[:upper:\\]' '\\[:lower:\\]'"
-      # And: no `BEGIN{IGNORECASE=1}` block in awk. Together with the tr
-      # above, this is what makes case-folding actually correct on
-      # BusyBox. If a future refactor adds the gawk-only IGNORECASE
-      # action back to awk code, that's a code smell suggesting the tr
-      # has been dropped; fail the test loudly so the regression is
-      # caught. Regex targets `BEGIN{IGNORECASE` specifically so the
-      # word `IGNORECASE` is still free to appear in prose comments.
       - notMatchRegex:
           path: data["image-refresh.sh"]
           pattern: "BEGIN[{ ]IGNORECASE"
+      # Regression guard: log() MUST write to stderr (>&2) so log lines
+      # cannot pollute command-substitution capture sites like
+      # `latest="$(get_latest_digest "$repo")"`. Caught in PR #155
+      # review (bugbot medium severity).
+      - matchRegex:
+          path: data["image-refresh.sh"]
+          pattern: 'log\(\) \{ printf .*>&2'
+      # Regression guards for the annotation-based comparison model.
+      # Source of truth is `tracebloc.io/last-refreshed-*-digest`
+      # annotations on the deployment, NOT the pod's
+      # containerStatuses[].imageID. This shape is deliberate — it
+      # sidesteps imageID format variance across runtimes and the
+      # multi-arch index-vs-platform-digest divergence. A future
+      # refactor that re-introduces imageID comparison would re-
+      # introduce that whole class of bugs.
+      - matchRegex:
+          path: data["image-refresh.sh"]
+          pattern: "tracebloc\\.io/last-refreshed-jobs-manager-digest"
+      - matchRegex:
+          path: data["image-refresh.sh"]
+          pattern: "tracebloc\\.io/last-refreshed-pods-monitor-digest"
+      # The script must NOT reach into pod containerStatuses to read
+      # imageIDs — that's the runtime-variant data shape we explicitly
+      # designed around. Pattern targets the only call shape that could
+      # do it (`kubectl get pod`) rather than the words, so the design-
+      # rationale comments are free to keep mentioning containerStatuses
+      # / imageID as history.
+      - notMatchRegex:
+          path: data["image-refresh.sh"]
+          pattern: "kubectl get pod"
+      # First-observation contract: when an annotation is absent
+      # (recorded is empty), the script must record the current digest
+      # WITHOUT triggering a restart. A spurious first-tick restart
+      # would churn the deployment on every fresh install.
+      - matchRegex:
+          path: data["image-refresh.sh"]
+          pattern: "first observation; recording without restart"
+      # Order-of-operations contract: `rollout restart` + `rollout
+      # status` MUST run before `kubectl annotate`. If we annotated
+      # first and the rollout then failed, the next tick would see
+      # recorded == latest and skip — leaving the deployment frozen
+      # on the old image with no signal. The test asserts that the
+      # rollout block appears in the script BEFORE the annotate block.
+      - matchRegex:
+          path: data["image-refresh.sh"]
+          pattern: '(?s)kubectl rollout restart.*kubectl annotate deployment'
 
   - it: CronJob has the right schedule, concurrency, and SA wiring
     template: templates/image-refresh-cronjob.yaml
@@ -252,7 +244,14 @@ tests:
           path: spec.jobTemplate.spec.template.spec.containers[0].securityContext.capabilities.drop[0]
           value: ALL
 
-  - it: Role is namespace-scoped with minimum verbs (no cluster-admin)
+  - it: Role is namespace-scoped, deployments-only (no pods, no cluster-admin)
+    # The annotation pattern eliminated the need to read pods entirely —
+    # the script reads the recorded digest from a deployment annotation,
+    # not from containerStatuses[].imageID. Tightening RBAC to just
+    # apps/deployments shrinks the blast radius of a compromised refresh
+    # Pod to one resource type in one namespace. Lock the rule list
+    # with `equal` so a regression that adds back a pods rule (or worse,
+    # a cluster role) fails loudly.
     template: templates/image-refresh-rbac.yaml
     asserts:
       - hasDocuments:
@@ -267,9 +266,13 @@ tests:
       - isKind:
           of: Role
         documentIndex: 1
-      # Regression guard: Role MUST be namespace-scoped (kind: Role, not
-      # ClusterRole). The narrower trust boundary is the entire reason for
-      # using a separate RBAC bundle from autoUpgrade.
+      - equal:
+          path: rules
+          value:
+            - apiGroups: ["apps"]
+              resources: ["deployments"]
+              verbs: ["get", "list", "patch", "watch"]
+        documentIndex: 1
       - equal:
           path: roleRef.kind
           value: Role
@@ -278,31 +281,6 @@ tests:
           path: subjects[0].name
           value: stg-image-refresh
         documentIndex: 2
-
-  - it: Role grants only pods/get,list and deployments/get,list,patch,watch
-    # A ListWatch reflector (which `kubectl rollout status` uses on the
-    # deployment) needs BOTH `list` (initial sync) and `watch`
-    # (incremental updates). Drop either and the call hangs in a 403
-    # retry loop until --timeout fires (kubectl#580), marking every
-    # successful restart as a failed Job. Both verbs caught in PR #155
-    # review. Lock the full verb set with equal, not contains, so a
-    # future refactor that drops either one fails loudly instead of
-    # silently regressing.
-    template: templates/image-refresh-rbac.yaml
-    documentIndex: 1
-    asserts:
-      - equal:
-          path: rules[0]
-          value:
-            apiGroups: [""]
-            resources: ["pods"]
-            verbs: ["get", "list"]
-      - equal:
-          path: rules[1]
-          value:
-            apiGroups: ["apps"]
-            resources: ["deployments"]
-            verbs: ["get", "list", "patch", "watch"]
 
   - it: should accept operator overrides for schedule, image, and timeout
     template: templates/image-refresh-cronjob.yaml
@@ -343,13 +321,13 @@ tests:
           errorPattern: "must not be valid against schema"
 
   - it: cronjob template renders nothing (no crash) when imageRefresh key is entirely absent
-    # Regression guard for the --reuse-values upgrade path. Customers who
-    # upgrade with `helm upgrade --reuse-values --version 1.4.0` (instead
-    # of the autoUpgrade-recommended --reset-then-reuse-values) replay
-    # stored 1.3.x values that have NO `imageRefresh` block at all. The
-    # template must degrade silently (no resources rendered) rather than
-    # crash with nil-pointer — see the "nil-guard every new top-level
-    # value key" rule in CLAUDE.md.
+    # Regression guard for the --reuse-values upgrade path. Customers
+    # who upgrade with `helm upgrade --reuse-values --version 1.4.0`
+    # (instead of the autoUpgrade-recommended --reset-then-reuse-values)
+    # replay stored 1.3.x values that have NO `imageRefresh` block at
+    # all. The template must degrade silently (no resources rendered)
+    # rather than crash with nil-pointer — see the "nil-guard every new
+    # top-level value key" rule in CLAUDE.md.
     template: templates/image-refresh-cronjob.yaml
     set:
       imageRefresh: null

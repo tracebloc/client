@@ -11,16 +11,41 @@ metadata:
 data:
   image-refresh.sh: |
     #!/bin/sh
-    # Compares the latest manifest digest on Docker Hub against the running
-    # container's digest for jobs-manager and pods-monitor. If either has
-    # changed, rolls the deployment. See `imageRefresh` in values.yaml for
-    # the design + trust-boundary discussion.
+    # Polls Docker Hub for new manifest digests of tracebloc/jobs-manager
+    # and tracebloc/pods-monitor under the floating CLIENT_ENV tag, and
+    # rolls the jobs-manager Deployment whenever a published digest
+    # differs from the one we last successfully rolled to.
     #
-    # Parsing is sed/awk-only on purpose: alpine/k8s ships jq, but keeping
-    # the script jq-free means it survives image swaps to leaner bases.
+    # Source of truth: an annotation on the deployment itself
+    # (`tracebloc.io/last-refreshed-<image>-digest`) records the digest
+    # the last successful refresh restarted to. We compare what the
+    # registry publishes today to that recorded value, NOT to the running
+    # pod's containerStatuses[].imageID. This sidesteps:
+    #   * imageID format variation across container runtimes
+    #     (kubernetes/kubernetes#108689 + #115199 — containerd records
+    #     platform-specific manifest digests, dockershim records other
+    #     things, value is documented as inconsistent).
+    #   * multi-arch manifest-list vs platform-manifest divergence — the
+    #     registry returns the index digest under the tag, the runtime
+    #     records a per-platform digest, the two never match.
+    # Both classes of bug disappear when the comparison is "what the
+    # registry says today" vs "what we wrote into the annotation last
+    # time we acted on a change."
+    #
+    # First-tick contract: when an annotation is absent, we record the
+    # current digest WITHOUT restarting. The customer just installed (or
+    # someone manually wiped the annotation) — no evidence of drift, so
+    # no churn. Subsequent ticks compare to the recorded value normally.
+    #
+    # Parsing is sed/awk-only on purpose: alpine/k8s ships jq, but
+    # keeping the script jq-free means it survives image swaps to leaner
+    # bases — same constraint as the auto-upgrade script in this chart.
+    #
+    # All log() output goes to stderr so it can never pollute a
+    # command-substitution capture site like `latest="$(...)"`.
     set -eu
 
-    log() { printf '[image-refresh] %s\n' "$*"; }
+    log() { printf '[image-refresh] %s\n' "$*" >&2; }
 
     log "release=$RELEASE_NAME namespace=$RELEASE_NAMESPACE tag=$IMAGE_TAG deployment=$DEPLOYMENT_NAME"
 
@@ -34,17 +59,20 @@ data:
         | tr -d '\r\n'
     }
 
-    # Resolve the manifest digest for repo:tag from Docker Hub. We HEAD the
-    # manifest endpoint with all four Accept media types — registries serve
-    # the Docker-Content-Digest header for both manifest-v2 single-arch and
-    # the OCI / multi-arch index variants, but only when the client signals
-    # support; omit one and registries that return that variant will 404.
+    # Resolve the manifest digest for repo:tag from Docker Hub. We HEAD
+    # the manifest endpoint with all four manifest media types in a
+    # single comma-separated Accept header (registry v2 spec form; some
+    # TLS-terminating proxies have been observed dropping repeated
+    # Accept headers). The value returned in Docker-Content-Digest is
+    # whatever the registry serves for that tag — for multi-arch tags
+    # the index digest, for single-arch the manifest digest. Both work
+    # here because we compare to OUR annotation, not to a runtime
+    # imageID; consistency tick-over-tick is all we need.
     #
-    # The media types are sent as a SINGLE comma-separated Accept header
-    # per the Docker registry v2 spec and the HTTP semantics RFC 7230 §3.2.2
-    # (which allows the syntactically-equivalent multi-line form, but the
-    # registry's documented form is the single-header one; some proxies
-    # have been observed dropping or reordering repeated Accept headers).
+    # Case-fold with tr BEFORE awk: alpine/k8s ships BusyBox awk which
+    # silently ignores gawk's IGNORECASE=1, and the header case differs
+    # between HTTP/1.1 and HTTP/2. Digest values are lowercase-by-spec
+    # (sha256:<64 hex>) so the value is unaffected.
     get_latest_digest() {
       _repo="$1"
       _token="$(get_token "$_repo")"
@@ -52,11 +80,6 @@ data:
         log "  WARN: could not fetch auth token for $_repo"
         return 1
       fi
-      # Header case varies by transport: HTTP/2 mandates lowercase but
-      # HTTP/1.1 over a TLS-terminating proxy can return mixed case.
-      # alpine/k8s ships BusyBox awk, which silently ignores gawk's
-      # IGNORECASE=1, so we case-fold with tr BEFORE awk. Digests are
-      # lowercase-by-spec (sha256:<64 hex>), so tr never mangles the value.
       curl -fsSI --max-time 10 \
         -H "Authorization: Bearer $_token" \
         -H "Accept: application/vnd.docker.distribution.manifest.v2+json,application/vnd.docker.distribution.manifest.list.v2+json,application/vnd.oci.image.manifest.v1+json,application/vnd.oci.image.index.v1+json" \
@@ -66,82 +89,35 @@ data:
         | tr -d '\r\n'
     }
 
-    # Read the running pod's imageID for a specific container by name.
-    # imageID format is `<registry>/<repo>@sha256:...`; we trim the prefix
-    # so it can be compared directly against the registry's digest.
-    get_running_digest() {
-      _container="$1"
-      kubectl get pod -n "$RELEASE_NAMESPACE" -l app=manager \
-        -o jsonpath="{.items[0].status.containerStatuses[?(@.name=='${_container}')].imageID}" \
-        | sed 's|.*@||' \
+    # Read an annotation value off the deployment. Empty output means
+    # the annotation is absent (first observation) — distinct from an
+    # explicit empty string, which the chart never writes.
+    get_annotation() {
+      _key="$1"
+      # jsonpath treats '.' / '/' as separators; brace-escape the key.
+      kubectl get deployment -n "$RELEASE_NAMESPACE" "$DEPLOYMENT_NAME" \
+        -o "jsonpath={.metadata.annotations['$_key']}" \
         | tr -d '\r\n'
     }
 
-    # For multi-arch tags: GET the manifest body and extract every
-    # per-platform manifest digest. This handles the runtime/registry
-    # asymmetry from kubernetes/kubernetes#108689 + #115199 — Docker Hub's
-    # HEAD on a multi-arch tag returns the INDEX digest, but containerd
-    # records the PLATFORM-specific manifest digest in containerStatuses
-    # imageID. The two will never match directly; instead, we check
-    # whether running ∈ {all per-platform digests in the index}.
-    #
-    # An OCI/Docker index's only sha256: references live inside
-    # `manifests[].digest`, so a plain `grep -oE 'sha256:[a-f0-9]{64}'`
-    # on the body suffices — no jq needed (which keeps the script's
-    # parsing dependencies the same as the auto-upgrade pattern).
-    # Single-arch manifests have sha256: refs inside `config` and
-    # `layers`, NOT manifest digests — so we gate this on the presence
-    # of a `"manifests"` key, which only the index/list bodies carry.
-    #
-    # Exit status MUST distinguish transient failure from
-    # "successfully-fetched-but-single-platform" so the caller can decide
-    # whether to skip the tick (transient) or proceed with the top-level
-    # HEAD digest as authoritative (single-platform). Treating empty
-    # output as "no match" would cause every transient network blip to
-    # spuriously restart the deployment — caught in PR #155 review
-    # (bugbot, medium severity).
-    #   return 0 + (possibly empty) stdout = fetched OK; caller may
-    #                                        treat empty as "single-arch
-    #                                        body, HEAD digest is final".
-    #   return 1                            = transient; caller should
-    #                                        skip this tick.
-    get_index_digests() {
-      _repo="$1"
-      _token="$(get_token "$_repo")"
-      if [ -z "$_token" ]; then
-        return 1
-      fi
-      if ! _body="$(curl -fsS --max-time 10 \
-        -H "Authorization: Bearer $_token" \
-        -H "Accept: application/vnd.docker.distribution.manifest.v2+json,application/vnd.docker.distribution.manifest.list.v2+json,application/vnd.oci.image.manifest.v1+json,application/vnd.oci.image.index.v1+json" \
-        "https://registry-1.docker.io/v2/${_repo}/manifests/${IMAGE_TAG}")"; then
-        return 1
-      fi
-      # Only enumerate digests for index/list bodies. For single-platform
-      # manifests, the top-level HEAD digest is already authoritative.
-      if printf '%s' "$_body" | grep -q '"manifests"'; then
-        printf '%s' "$_body" | grep -oE 'sha256:[a-f0-9]{64}'
-      fi
-      return 0
-    }
-
     restart_needed=0
+    annotate_args=""
 
-    # Each entry: "<docker-hub-repo>|<container-name-in-pod>|<digest-pin-flag>".
-    # digest-pin-flag is "1" when values pin the image by digest — the
-    # deployment uses imagePullPolicy: IfNotPresent for that container and
-    # restarting on tag drift would fight the customer's opt-in pinning.
+    # Each entry: "<docker-hub-repo>|<annotation-key>|<digest-pin-flag>".
+    # digest-pin-flag is "1" when values.images.*.digest is set — the
+    # deployment uses imagePullPolicy: IfNotPresent for that container
+    # and auto-refresh must not fight the customer's opt-in pinning.
     set -- \
-      "tracebloc/jobs-manager|api|${JOBS_MANAGER_PINNED}" \
-      "tracebloc/pods-monitor|pods-monitor-container|${PODS_MONITOR_PINNED}"
+      "tracebloc/jobs-manager|tracebloc.io/last-refreshed-jobs-manager-digest|${JOBS_MANAGER_PINNED}" \
+      "tracebloc/pods-monitor|tracebloc.io/last-refreshed-pods-monitor-digest|${PODS_MONITOR_PINNED}"
 
     for entry in "$@"; do
       repo="${entry%%|*}"
       rest="${entry#*|}"
-      container="${rest%%|*}"
+      key="${rest%%|*}"
       pinned="${rest#*|}"
 
-      log "checking ${repo}:${IMAGE_TAG} (container=${container})"
+      log "checking ${repo}:${IMAGE_TAG} (annotation=${key})"
 
       if [ "$pinned" = "1" ]; then
         log "  pinned by digest in values; skipping (auto-refresh disabled for this image)"
@@ -154,69 +130,51 @@ data:
         continue
       fi
 
-      running="$(get_running_digest "$container" || true)"
-      if [ -z "$running" ]; then
-        log "  WARN: could not read running digest for container=$container; skipping"
-        continue
-      fi
+      recorded="$(get_annotation "$key" || true)"
 
       log "  latest=$latest"
-      log "  running=$running"
+      log "  recorded=${recorded:-<unset>}"
 
-      if [ "$latest" = "$running" ]; then
-        log "  digests match"
-        continue
-      fi
-
-      # Top-level mismatch. Could be a genuine update OR a multi-arch
-      # asymmetry where `latest` is the index digest and `running` is a
-      # per-platform manifest digest. Disambiguate by fetching the index
-      # body and checking whether running ∈ per-platform digests.
-      #
-      # Critically, capture the exit status of get_index_digests
-      # separately from its stdout: a transient GET failure (timeout,
-      # rate-limit, token failure) must skip the tick, NOT fall through
-      # to restart_needed=1. Treating "empty output" as "no match" would
-      # turn every network blip into a spurious deployment restart.
-      log "  top-level mismatch; checking multi-arch index for match"
-      if ! _index_digests="$(get_index_digests "$repo")"; then
-        log "  WARN: could not fetch index body (rate-limited or transient); skipping this tick to avoid spurious restart"
-        continue
-      fi
-
-      _matched=0
-      if [ -n "$_index_digests" ]; then
-        # Multi-arch index body — check membership.
-        for _d in $_index_digests; do
-          if [ "$_d" = "$running" ]; then
-            _matched=1
-            break
-          fi
-        done
-      fi
-      # If _index_digests is empty here, the response was a single-platform
-      # manifest body (no "manifests" key). The top-level HEAD digest was
-      # already authoritative for that case, and we know it didn't match —
-      # so falling through to restart_needed=1 is correct.
-
-      if [ "$_matched" -eq 1 ]; then
-        log "  running matches a per-platform manifest digest in the index; up to date"
+      if [ -z "$recorded" ]; then
+        # First-observation path: record without restarting. We have no
+        # evidence the running pod is on an older digest, and a spurious
+        # restart on install would surprise operators.
+        log "  first observation; recording without restart"
+        annotate_args="$annotate_args ${key}=${latest}"
+      elif [ "$recorded" = "$latest" ]; then
+        log "  digest unchanged since last refresh; no-op"
       else
-        log "  digest changed -> restart needed"
+        log "  digest changed (${recorded} -> ${latest}); restart needed"
+        annotate_args="$annotate_args ${key}=${latest}"
         restart_needed=1
       fi
     done
 
-    if [ "$restart_needed" -eq 0 ]; then
-      log "all images up to date; nothing to do"
-      exit 0
+    # Order matters: rollout FIRST, annotate AFTER `rollout status`
+    # succeeds. If the rollout fails or times out, we leave the
+    # annotation stale so the next tick retries the same digest. If we
+    # annotated first and then the rollout failed, the next tick would
+    # see recorded == latest and skip — leaving the deployment frozen
+    # on the old image with no signal that anything went wrong.
+    if [ "$restart_needed" -eq 1 ]; then
+      log "rolling restart of deployment/${DEPLOYMENT_NAME}"
+      kubectl rollout restart -n "$RELEASE_NAMESPACE" "deployment/${DEPLOYMENT_NAME}"
+      kubectl rollout status  -n "$RELEASE_NAMESPACE" "deployment/${DEPLOYMENT_NAME}" \
+        --timeout="$ROLLOUT_TIMEOUT"
+      log "rollout complete"
     fi
 
-    log "rolling restart of deployment/${DEPLOYMENT_NAME}"
-    kubectl rollout restart -n "$RELEASE_NAMESPACE" "deployment/${DEPLOYMENT_NAME}"
-    kubectl rollout status  -n "$RELEASE_NAMESPACE" "deployment/${DEPLOYMENT_NAME}" \
-      --timeout="$ROLLOUT_TIMEOUT"
-    log "rollout complete"
+    # Apply all pending annotation updates in a single kubectl call.
+    # Both restart-then-annotate (after a successful rollout) and
+    # first-observation (without restart) go through here.
+    if [ -n "$annotate_args" ]; then
+      log "updating deployment annotations:$annotate_args"
+      # shellcheck disable=SC2086  # word-split annotate_args intentional
+      kubectl annotate deployment -n "$RELEASE_NAMESPACE" "$DEPLOYMENT_NAME" \
+        $annotate_args --overwrite
+    else
+      log "nothing to record or restart"
+    fi
 ---
 apiVersion: batch/v1
 kind: CronJob

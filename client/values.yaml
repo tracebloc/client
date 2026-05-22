@@ -372,26 +372,36 @@ autoUpgrade:
 
 # -- Image-refresh CronJob (closes tracebloc/client#154).
 # Auto-restarts the jobs-manager Deployment when a new image digest is
-# published to Docker Hub under the floating CLIENT_ENV tag. Without this,
-# `imagePullPolicy: Always` only pulls on pod creation — running pods stay
-# on the old image until someone manually `kubectl rollout restart`s them,
-# which is exactly the customer-runs-no-commands UX we want to avoid.
+# published to Docker Hub under the floating CLIENT_ENV tag. Without
+# this, `imagePullPolicy: Always` only pulls on pod creation — running
+# pods stay on the old image until someone manually
+# `kubectl rollout restart`s them, which is exactly the
+# customer-runs-no-commands UX we want to avoid.
 #
 # How it works:
-#   - A CronJob in this namespace polls Docker Hub's registry API for the
-#     current manifest digest of tracebloc/jobs-manager:<CLIENT_ENV> and
-#     tracebloc/pods-monitor:<CLIENT_ENV> (both containers share one
-#     deployment), compares each to the running pod's container imageID,
-#     and runs `kubectl rollout restart deployment/<release>-jobs-manager`
-#     only when at least one digest differs. Pulls happen on the new pod
-#     because the deployment already has imagePullPolicy: Always for the
-#     floating-tag path.
-#   - Idle-cheap: on every tick where Docker Hub has not republished, both
-#     digests match and the script exits without touching the deployment.
-#   - Anonymous Docker Hub pulls are rate-limited (100 / 6h / IP). The
-#     default 15-minute schedule yields ~4 manifest HEAD requests per hour
-#     per image — well under the limit even when the cluster shares an
-#     egress IP with other workloads.
+#   - A CronJob in this namespace polls Docker Hub for the current
+#     manifest digest of tracebloc/jobs-manager:<CLIENT_ENV> and
+#     tracebloc/pods-monitor:<CLIENT_ENV> (both containers live in one
+#     deployment).
+#   - The script compares each fetched digest to an annotation on the
+#     deployment (`tracebloc.io/last-refreshed-<image>-digest`) that
+#     records the digest the LAST successful refresh restarted to. Not
+#     to the running pod's imageID — that value's format varies across
+#     container runtimes (kubernetes/kubernetes#108689 + #115199) and
+#     diverges from the registry's index digest on multi-arch tags.
+#     The annotation makes the comparison entirely server-vs-our-record
+#     with no client-side runtime variation in the loop.
+#   - On a real change: `kubectl rollout restart` + `kubectl rollout
+#     status` to wait for completion, then patch the annotation to the
+#     new digest. (Order matters — annotating first would let a failed
+#     rollout silently freeze the deployment.)
+#   - First observation (annotation absent on a fresh install): record
+#     the current digest without restarting. No evidence of drift, no
+#     reason to churn the pod.
+#   - Idle-cheap: when the recorded digest matches today's digest, the
+#     script exits without touching the deployment. Steady state is one
+#     HEAD per image per tick, well under Docker Hub's 100/6h anonymous
+#     pull-rate limit.
 #
 # Pinned-digest interaction: if BOTH images.jobsManager.digest and
 # images.podsMonitor.digest are set, the chart skips rendering this
@@ -400,15 +410,21 @@ autoUpgrade:
 # CronJob still runs but the script skips the pinned image at runtime.
 #
 # Trust boundary: this CronJob's ServiceAccount is bound to a
-# namespace-scoped Role (get pods, get/patch deployments in the release
-# namespace only). Much narrower than autoUpgrade — a compromise of this
-# Pod can only kick the jobs-manager Deployment, not deploy arbitrary
-# resources. The script reaches out only to docker.io's public registry
-# endpoints; if your cluster requires egress through a proxy, set
-# HTTPS_PROXY via env or disable this CronJob.
+# namespace-scoped Role with get/list/patch/watch on the deployment
+# resource ONLY (no pods, no other resources, no cluster scope). Much
+# narrower than autoUpgrade — a compromise of this Pod can only kick
+# and annotate the jobs-manager Deployment in this one namespace. The
+# script reaches out only to docker.io's public registry endpoints; if
+# your cluster requires egress through a proxy, set HTTPS_PROXY via env
+# or disable this CronJob.
 #
 # Disabled-on-this-cluster check after install:
 #   kubectl get cronjob -n <namespace> -l app.kubernetes.io/component=image-refresh
+#
+# Inspect what the controller has recorded so far:
+#   kubectl get deployment <release>-jobs-manager -n <namespace> \
+#     -o jsonpath='{.metadata.annotations}' | tr ',' '\n' \
+#     | grep tracebloc.io/last-refreshed
 imageRefresh:
   # Default ON: the whole point of #154 is that customers don't have to
   # run any commands when we publish a new jobs-manager image.
