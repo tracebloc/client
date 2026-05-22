@@ -219,22 +219,29 @@ tests:
           value: stg-image-refresh
         documentIndex: 2
 
-  - it: Role grants only pods/get,list and deployments/get,patch
+  - it: Role grants only pods/get,list and deployments/get,patch,watch
+    # `watch` on deployments is REQUIRED — `kubectl rollout status` does a
+    # ListWatch on the deployment resource to wait for rollout completion.
+    # Without it the call hangs in a reflector error loop until --timeout
+    # fires (kubectl#580), marking every successful restart as a failed
+    # Job. Caught in PR #155 review. Lock the full verb set with equal,
+    # not contains, so a future refactor that drops `watch` fails loudly
+    # instead of silently regressing.
     template: templates/image-refresh-rbac.yaml
     documentIndex: 1
     asserts:
-      - contains:
-          path: rules
-          content:
+      - equal:
+          path: rules[0]
+          value:
             apiGroups: [""]
             resources: ["pods"]
             verbs: ["get", "list"]
-      - contains:
-          path: rules
-          content:
+      - equal:
+          path: rules[1]
+          value:
             apiGroups: ["apps"]
             resources: ["deployments"]
-            verbs: ["get", "patch"]
+            verbs: ["get", "patch", "watch"]
 
   - it: should accept operator overrides for schedule, image, and timeout
     template: templates/image-refresh-cronjob.yaml

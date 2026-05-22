@@ -32,10 +32,13 @@ rules:
     verbs: ["get", "list"]
   # `kubectl rollout restart` patches the deployment's pod template
   # annotations (kubectl.kubernetes.io/restartedAt). `rollout status`
-  # reads the deployment.
+  # uses a ListWatch on the deployment to wait for rollout completion;
+  # without `watch` it enters a reflector error loop (kubectl#580) and
+  # hangs until --timeout fires, marking every successful restart as a
+  # failed Job. Caught in PR #155 review.
   - apiGroups: ["apps"]
     resources: ["deployments"]
-    verbs: ["get", "patch"]
+    verbs: ["get", "patch", "watch"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
