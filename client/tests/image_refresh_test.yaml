@@ -148,6 +148,19 @@ tests:
       - matchRegex:
           path: data["image-refresh.sh"]
           pattern: "tracebloc\\.io/last-refreshed-pods-monitor-digest"
+      # Regression guard: read annotations with jq, not kubectl
+      # bracket-notation jsonpath. kubectl-go's jsonpath parser returns
+      # empty for `annotations['key.with.dots']` — verified on
+      # alpine/k8s 1.30.5 in dev-cluster smoke test. Switching to
+      # `kubectl get -o json | jq` made the read work.
+      - matchRegex:
+          path: data["image-refresh.sh"]
+          pattern: "jq -r --arg k"
+      # And the script must NOT regress back to bracket-notation
+      # jsonpath for reading annotations.
+      - notMatchRegex:
+          path: data["image-refresh.sh"]
+          pattern: "annotations\\[.\\$_key.\\]"
       # The script must NOT reach into pod containerStatuses to read
       # imageIDs — that's the runtime-variant data shape we explicitly
       # designed around. Pattern targets the only call shape that could
