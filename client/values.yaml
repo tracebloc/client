@@ -203,29 +203,23 @@ images:
   #     stays as a fallback for greenfield installs; ongoing rollouts
   #     are owned by image-refresh.
   #   * Bumping `digest` below in a future chart release IS still valid
-  #     — helm will re-sync the env to the new pinned value on the
-  #     next upgrade. Image-refresh will reconverge on the registry
+  #     and remains the explicit-baseline path (#161 was the first
+  #     example: v0.3.0 → v0.3.1 for the MLM tokenizer + metadata
+  #     parity fixes; see commit history for the rationale on any
+  #     given bump). Helm will re-sync the env to the new pinned value
+  #     on the next upgrade. Image-refresh reconverges on the registry
   #     digest on its next tick if the two differ.
-  #
-  # Pin behaviour (treat as opt-out from auto-refresh): if the customer
-  # OVERRIDES this value via --set-file or values-override file (not
-  # just receives it as a chart default), image-refresh has no way to
-  # tell that apart from "chart shipped this value" — both look like
-  # `images.ingestor.digest` is set. The auto-refresh logic uses the
-  # presence/absence of the chart value as its opt-in signal; if you
-  # need hard pinning, also disable image-refresh entirely
-  # (imageRefresh.enabled: false) so the live env can't be overwritten.
   #
   # Customers can also override per-install via the ingestor subchart's
   # `image.digest` for one-off testing, independent of this value.
   ingestor:
-    # Initial baseline digest. v0.3.0 — first production-ready release
-    # of the declarative-YAML ingestor with schema-packaging,
-    # image-validator, and file-transfer fixes from
-    # tracebloc/data-ingestors#106. Bump only when greenfield installs
-    # should start on a different version; ongoing rollouts are managed
-    # by image-refresh.
-    digest: "sha256:463e236748708a5e3564569eec9173ea8cb3bcf515992d4939c5b610f3807a4a"
+    # Current baseline digest: v0.3.1 (2026-05-25, from #161). Patch on
+    # top of v0.3.0 carrying customer-impacting fixes —
+    # tracebloc/data-ingestors#108 (tokenizer.json copy for MLM
+    # datasets) and #119 (per-category metadata parity for tabular +
+    # keypoint). Bump only when greenfield installs should start on a
+    # different version; ongoing rollouts are managed by image-refresh.
+    digest: "sha256:a0861ea9fbf4653279351ee30af9ebe2b75fcacd391923b681631312f4a85ee4"
     # Floating tag polled by image-refresh. `latest` is rejected by
     # the schema — image-refresh behaviour must not drift. Override
     # if your environment uses a different tag convention.
