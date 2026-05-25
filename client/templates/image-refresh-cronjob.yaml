@@ -92,12 +92,21 @@ data:
     # Read an annotation value off the deployment. Empty output means
     # the annotation is absent (first observation) — distinct from an
     # explicit empty string, which the chart never writes.
+    #
+    # Uses jq because kubectl-go's jsonpath parser returns empty for
+    # bracket-notation keys that contain `.` or `/` — verified on
+    # alpine/k8s 1.30.5 against a real annotation with key
+    # `tracebloc.io/last-refreshed-jobs-manager-digest`. Dot-escape
+    # syntax (`.tracebloc\.io/...`) is the other working form, but jq
+    # is unambiguous and won't surprise us on future kubectl versions.
+    # alpine/k8s ships jq, so adding one jq call doesn't pull a new
+    # dependency (the script remains awk/sed/grep elsewhere; jq is
+    # used ONLY for this read because JSON-with-dotted-keys is what
+    # actually motivates jq's existence).
     get_annotation() {
       _key="$1"
-      # jsonpath treats '.' / '/' as separators; brace-escape the key.
-      kubectl get deployment -n "$RELEASE_NAMESPACE" "$DEPLOYMENT_NAME" \
-        -o "jsonpath={.metadata.annotations['$_key']}" \
-        | tr -d '\r\n'
+      kubectl get deployment -n "$RELEASE_NAMESPACE" "$DEPLOYMENT_NAME" -o json \
+        | jq -r --arg k "$_key" '.metadata.annotations[$k] // empty'
     }
 
     restart_needed=0
