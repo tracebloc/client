@@ -361,7 +361,31 @@ data:
             --timeout="$ROLLOUT_TIMEOUT"
           log "  ingestor env re-applied"
         else
-          log "  digest unchanged and spec env matches; no-op"
+          # Annotation, registry, and spec env all match. Normally
+          # this is a healthy no-op. But: a previous tick's
+          # env-drift branch could have committed a `kubectl set env`
+          # whose subsequent `kubectl rollout status` then failed
+          # (set -eu aborted the script). The spec change persisted
+          # past the abort, so on this tick annotation, registry,
+          # and spec env all match — but the actual rollout is
+          # stuck and running pods may be on a stale image. Without
+          # an explicit rollout-health check here, the no-op branch
+          # would silently mask that stuck state forever.
+          #
+          # `kubectl rollout status` is a near-instant no-op on a
+          # healthy deployment (returns immediately when there's no
+          # active rollout), so the cost on the happy path is
+          # negligible. On a stuck deployment it times out, `set -eu`
+          # aborts, and the Job is visibly failed in `kubectl get
+          # cronjob`. The operator then sees that image-refresh is
+          # stuck and can investigate (the underlying cause —
+          # broken image, registry-pull failure — is outside what
+          # image-refresh can autonomously fix).
+          # Caught in PR #162 review (bugbot, medium severity).
+          log "  digest unchanged and spec env matches; verifying deployment health"
+          kubectl rollout status -n "$RELEASE_NAMESPACE" "deployment/${DEPLOYMENT_NAME}" \
+            --timeout="$ROLLOUT_TIMEOUT"
+          log "  fully in sync; no-op"
         fi
       fi
     fi
