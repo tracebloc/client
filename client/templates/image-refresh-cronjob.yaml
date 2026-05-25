@@ -32,17 +32,30 @@ data:
     #      INGESTOR_IMAGE_DIGEST env var on the api container.
     #      Action on change: `kubectl set env` to patch the env var,
     #      which triggers a natural rollout via ReplicaSet rotation —
-    #      no explicit `rollout restart` needed. Source of truth: the
-    #      live env value itself (no annotation needed; the env IS the
-    #      digest jobs-manager will use when spawning the next Job).
+    #      no explicit `rollout restart` needed.
+    #      Source of truth: same as class 1 — a deployment annotation
+    #      (`tracebloc.io/last-refreshed-ingestor-digest`) records the
+    #      last successfully-rolled digest. Originally this class read
+    #      the live env directly, but that broke rollout-failure-retry
+    #      semantics (`set env` commits the spec before `rollout status`
+    #      waits, so a failed rollout would leave the spec matching the
+    #      registry while old pods kept the old env — next tick saw no
+    #      drift and skipped, leaving the deployment stuck). Annotation
+    #      is updated as the LAST step of each successful refresh; a
+    #      failed rollout leaves the annotation stale and the next tick
+    #      retries. (PR #159 review, bugbot.)
     #
     # First-tick contract:
-    #   * Class 1 (annotation missing): record current digest WITHOUT
-    #     restarting — no evidence of drift, no reason to churn pods.
-    #   * Class 2: the env is non-empty by chart default (otherwise
-    #     jobs-manager would 503 on every ingestion submit), so there
-    #     is no "first observation" empty-state. Each tick is a
-    #     normal compare-and-patch-if-different.
+    #   * Class 1 (annotation missing): record current registry digest
+    #     WITHOUT restarting — no evidence of drift, no reason to churn
+    #     pods.
+    #   * Class 2 (annotation missing): adopt the spec env's
+    #     chart-default value as the baseline annotation, no env change.
+    #     Same don't-churn-on-install principle. Empty spec env
+    #     (corrupted state, manual edit, stale --reuse-values from a
+    #     pre-1.4.1 chart) is treated as a change-needed signal — fill
+    #     from registry on first tick, because an empty value would
+    #     cause jobs-manager to 503 on every ingestion submit.
     #
     # Parsing: awk/sed/grep + jq. jq used only where JSON-with-dotted-
     # keys or container/env-array filtering motivates it; the rest

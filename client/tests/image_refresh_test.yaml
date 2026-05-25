@@ -270,6 +270,15 @@ tests:
       - matchRegex:
           path: data["image-refresh.sh"]
           pattern: '(?s)kubectl set env.*rollout status.*kubectl annotate.*last-refreshed-ingestor-digest'
+      # First-observation positive test for ingestor: when no
+      # annotation exists yet AND the spec env is non-empty, the
+      # script must adopt the spec env as the baseline (don't-churn-
+      # on-install). Locks the branch that #159 review flagged as
+      # untested. Empty-spec-env branch is covered by the existing
+      # "would 503" regex above.
+      - matchRegex:
+          path: data["image-refresh.sh"]
+          pattern: 'first observation; adopting spec env'
 
   - it: CronJob has the right schedule, concurrency, and SA wiring
     template: templates/image-refresh-cronjob.yaml
