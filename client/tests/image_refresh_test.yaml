@@ -214,11 +214,10 @@ tests:
           pattern: '(?s)kubectl rollout restart.*kubectl annotate deployment'
       # #158 regression guards for ingestor (class-2) handling.
       # Different action than jobs-manager/pods-monitor: ingestor uses
-      # `kubectl set env` on the api container's INGESTOR_IMAGE_DIGEST,
-      # NOT `kubectl rollout restart` + annotation. Both registry hosts
-      # must appear (docker.io for class-1 via auth.docker.io;
-      # ghcr.io for class-2). The set-env action triggers a natural
-      # rollout via ReplicaSet rotation.
+      # `kubectl set env` on the api container's INGESTOR_IMAGE_DIGEST.
+      # Both registry hosts must appear (docker.io for class-1 via
+      # auth.docker.io; ghcr.io for class-2). The set-env action
+      # triggers a natural rollout via ReplicaSet rotation.
       - matchRegex:
           path: data["image-refresh.sh"]
           pattern: "kubectl set env"
@@ -231,10 +230,10 @@ tests:
       - matchRegex:
           path: data["image-refresh.sh"]
           pattern: "auth\\.docker\\.io"
-      # Ingestor source-of-truth is the live env (no annotation):
       # `get_container_env` reads
       # spec.template.spec.containers[name=api].env[name=$e].value.
-      # Going via jq again because the same kubectl jsonpath
+      # Used on first-observation to adopt the chart-default env as
+      # baseline. Via jq because the same kubectl jsonpath
       # bracket-notation issues from #156 apply to array-of-objects
       # filtering with nested fields.
       - matchRegex:
@@ -253,6 +252,24 @@ tests:
       - matchRegex:
           path: data["image-refresh.sh"]
           pattern: 'ingestor\.autoRefresh: false in values'
+      # Ingestor uses an annotation as source of truth, NOT the live
+      # spec env. Caught in PR #159 review (bugbot, medium severity):
+      # if spec env were source of truth, a failed rollout after
+      # `kubectl set env` would leave the spec matching the registry
+      # while old ReplicaSet pods kept running with the old env. The
+      # next tick would see no drift and skip, leaving the deployment
+      # stuck. With annotation as source of truth, the annotation is
+      # updated ONLY after `rollout status` succeeds — a failed
+      # rollout leaves annotation stale → next tick retries.
+      - matchRegex:
+          path: data["image-refresh.sh"]
+          pattern: "tracebloc\\.io/last-refreshed-ingestor-digest"
+      # Order-of-operations for ingestor: set env → wait → annotate.
+      # The annotate MUST come last so a failed rollout leaves the
+      # annotation stale and the next tick retries.
+      - matchRegex:
+          path: data["image-refresh.sh"]
+          pattern: '(?s)kubectl set env.*rollout status.*kubectl annotate.*last-refreshed-ingestor-digest'
 
   - it: CronJob has the right schedule, concurrency, and SA wiring
     template: templates/image-refresh-cronjob.yaml
