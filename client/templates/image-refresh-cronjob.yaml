@@ -1,0 +1,277 @@
+{{- if include "tracebloc.imageRefreshEnabled" . }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "tracebloc.imageRefreshName" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "tracebloc.labels" . | nindent 4 }}
+    app.kubernetes.io/component: image-refresh
+data:
+  image-refresh.sh: |
+    #!/bin/sh
+    # Polls Docker Hub for new manifest digests of tracebloc/jobs-manager
+    # and tracebloc/pods-monitor under the floating CLIENT_ENV tag, and
+    # rolls the jobs-manager Deployment whenever a published digest
+    # differs from the one we last successfully rolled to.
+    #
+    # Source of truth: an annotation on the deployment itself
+    # (`tracebloc.io/last-refreshed-<image>-digest`) records the digest
+    # the last successful refresh restarted to. We compare what the
+    # registry publishes today to that recorded value, NOT to the running
+    # pod's containerStatuses[].imageID. This sidesteps:
+    #   * imageID format variation across container runtimes
+    #     (kubernetes/kubernetes#108689 + #115199 — containerd records
+    #     platform-specific manifest digests, dockershim records other
+    #     things, value is documented as inconsistent).
+    #   * multi-arch manifest-list vs platform-manifest divergence — the
+    #     registry returns the index digest under the tag, the runtime
+    #     records a per-platform digest, the two never match.
+    # Both classes of bug disappear when the comparison is "what the
+    # registry says today" vs "what we wrote into the annotation last
+    # time we acted on a change."
+    #
+    # First-tick contract: when an annotation is absent, we record the
+    # current digest WITHOUT restarting. The customer just installed (or
+    # someone manually wiped the annotation) — no evidence of drift, so
+    # no churn. Subsequent ticks compare to the recorded value normally.
+    #
+    # Parsing is sed/awk-only on purpose: alpine/k8s ships jq, but
+    # keeping the script jq-free means it survives image swaps to leaner
+    # bases — same constraint as the auto-upgrade script in this chart.
+    #
+    # All log() output goes to stderr so it can never pollute a
+    # command-substitution capture site like `latest="$(...)"`.
+    set -eu
+
+    log() { printf '[image-refresh] %s\n' "$*" >&2; }
+
+    log "release=$RELEASE_NAME namespace=$RELEASE_NAMESPACE tag=$IMAGE_TAG deployment=$DEPLOYMENT_NAME"
+
+    # Get an anonymous pull-scope token for one repository on Docker Hub.
+    get_token() {
+      _repo="$1"
+      # tr cleanup handles the trailing newline some curl builds emit.
+      curl -fsS --max-time 10 \
+        "https://auth.docker.io/token?service=registry.docker.io&scope=repository:${_repo}:pull" \
+        | sed -n 's/.*"token":"\([^"]*\)".*/\1/p' \
+        | tr -d '\r\n'
+    }
+
+    # Resolve the manifest digest for repo:tag from Docker Hub. We HEAD
+    # the manifest endpoint with all four manifest media types in a
+    # single comma-separated Accept header (registry v2 spec form; some
+    # TLS-terminating proxies have been observed dropping repeated
+    # Accept headers). The value returned in Docker-Content-Digest is
+    # whatever the registry serves for that tag — for multi-arch tags
+    # the index digest, for single-arch the manifest digest. Both work
+    # here because we compare to OUR annotation, not to a runtime
+    # imageID; consistency tick-over-tick is all we need.
+    #
+    # Case-fold with tr BEFORE awk: alpine/k8s ships BusyBox awk which
+    # silently ignores gawk's IGNORECASE=1, and the header case differs
+    # between HTTP/1.1 and HTTP/2. Digest values are lowercase-by-spec
+    # (sha256:<64 hex>) so the value is unaffected.
+    get_latest_digest() {
+      _repo="$1"
+      _token="$(get_token "$_repo")"
+      if [ -z "$_token" ]; then
+        log "  WARN: could not fetch auth token for $_repo"
+        return 1
+      fi
+      curl -fsSI --max-time 10 \
+        -H "Authorization: Bearer $_token" \
+        -H "Accept: application/vnd.docker.distribution.manifest.v2+json,application/vnd.docker.distribution.manifest.list.v2+json,application/vnd.oci.image.manifest.v1+json,application/vnd.oci.image.index.v1+json" \
+        "https://registry-1.docker.io/v2/${_repo}/manifests/${IMAGE_TAG}" \
+        | tr '[:upper:]' '[:lower:]' \
+        | awk '/^docker-content-digest:/ {print $2}' \
+        | tr -d '\r\n'
+    }
+
+    # Read an annotation value off the deployment. Empty output means
+    # the annotation is absent (first observation) — distinct from an
+    # explicit empty string, which the chart never writes.
+    get_annotation() {
+      _key="$1"
+      # jsonpath treats '.' / '/' as separators; brace-escape the key.
+      kubectl get deployment -n "$RELEASE_NAMESPACE" "$DEPLOYMENT_NAME" \
+        -o "jsonpath={.metadata.annotations['$_key']}" \
+        | tr -d '\r\n'
+    }
+
+    restart_needed=0
+    annotate_args=""
+
+    # Each entry: "<docker-hub-repo>|<annotation-key>|<digest-pin-flag>".
+    # digest-pin-flag is "1" when values.images.*.digest is set — the
+    # deployment uses imagePullPolicy: IfNotPresent for that container
+    # and auto-refresh must not fight the customer's opt-in pinning.
+    set -- \
+      "tracebloc/jobs-manager|tracebloc.io/last-refreshed-jobs-manager-digest|${JOBS_MANAGER_PINNED}" \
+      "tracebloc/pods-monitor|tracebloc.io/last-refreshed-pods-monitor-digest|${PODS_MONITOR_PINNED}"
+
+    for entry in "$@"; do
+      repo="${entry%%|*}"
+      rest="${entry#*|}"
+      key="${rest%%|*}"
+      pinned="${rest#*|}"
+
+      log "checking ${repo}:${IMAGE_TAG} (annotation=${key})"
+
+      if [ "$pinned" = "1" ]; then
+        log "  pinned by digest in values; skipping (auto-refresh disabled for this image)"
+        continue
+      fi
+
+      latest="$(get_latest_digest "$repo" || true)"
+      if [ -z "$latest" ]; then
+        log "  WARN: could not resolve latest digest (rate-limited or transient); skipping this tick"
+        continue
+      fi
+
+      recorded="$(get_annotation "$key" || true)"
+
+      log "  latest=$latest"
+      log "  recorded=${recorded:-<unset>}"
+
+      if [ -z "$recorded" ]; then
+        # First-observation path: record without restarting. We have no
+        # evidence the running pod is on an older digest, and a spurious
+        # restart on install would surprise operators.
+        log "  first observation; recording without restart"
+        annotate_args="$annotate_args ${key}=${latest}"
+      elif [ "$recorded" = "$latest" ]; then
+        log "  digest unchanged since last refresh; no-op"
+      else
+        log "  digest changed (${recorded} -> ${latest}); restart needed"
+        annotate_args="$annotate_args ${key}=${latest}"
+        restart_needed=1
+      fi
+    done
+
+    # Order matters: rollout FIRST, annotate AFTER `rollout status`
+    # succeeds. If the rollout fails or times out, we leave the
+    # annotation stale so the next tick retries the same digest. If we
+    # annotated first and then the rollout failed, the next tick would
+    # see recorded == latest and skip — leaving the deployment frozen
+    # on the old image with no signal that anything went wrong.
+    if [ "$restart_needed" -eq 1 ]; then
+      log "rolling restart of deployment/${DEPLOYMENT_NAME}"
+      kubectl rollout restart -n "$RELEASE_NAMESPACE" "deployment/${DEPLOYMENT_NAME}"
+      kubectl rollout status  -n "$RELEASE_NAMESPACE" "deployment/${DEPLOYMENT_NAME}" \
+        --timeout="$ROLLOUT_TIMEOUT"
+      log "rollout complete"
+    fi
+
+    # Apply all pending annotation updates in a single kubectl call.
+    # Both restart-then-annotate (after a successful rollout) and
+    # first-observation (without restart) go through here.
+    if [ -n "$annotate_args" ]; then
+      log "updating deployment annotations:$annotate_args"
+      # shellcheck disable=SC2086  # word-split annotate_args intentional
+      kubectl annotate deployment -n "$RELEASE_NAMESPACE" "$DEPLOYMENT_NAME" \
+        $annotate_args --overwrite
+    else
+      log "nothing to record or restart"
+    fi
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: {{ include "tracebloc.imageRefreshName" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "tracebloc.labels" . | nindent 4 }}
+    app.kubernetes.io/component: image-refresh
+spec:
+  schedule: {{ .Values.imageRefresh.schedule | quote }}
+  suspend: {{ .Values.imageRefresh.suspend }}
+  # Forbid: never run two checks at once. A long rollout that crosses the
+  # next scheduled tick must not stack a second `rollout restart` on top
+  # of itself — that would orphan the in-flight rollout's new ReplicaSet.
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: {{ .Values.imageRefresh.successfulJobsHistoryLimit }}
+  failedJobsHistoryLimit: {{ .Values.imageRefresh.failedJobsHistoryLimit }}
+  startingDeadlineSeconds: {{ .Values.imageRefresh.startingDeadlineSeconds }}
+  jobTemplate:
+    spec:
+      backoffLimit: 2
+      template:
+        metadata:
+          labels:
+            {{- include "tracebloc.selectorLabels" . | nindent 12 }}
+            app.kubernetes.io/component: image-refresh
+        spec:
+          serviceAccountName: {{ include "tracebloc.imageRefreshName" . }}
+          restartPolicy: OnFailure
+          {{- if include "tracebloc.useImagePullSecrets" . }}
+          imagePullSecrets:
+            - name: {{ include "tracebloc.registrySecretName" . }}
+          {{- end }}
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1000
+            runAsGroup: 1000
+            fsGroup: 1000
+            seccompProfile:
+              type: RuntimeDefault
+          containers:
+            - name: refresh
+              image: "{{ .Values.imageRefresh.image.repository }}:{{ .Values.imageRefresh.image.tag }}"
+              imagePullPolicy: {{ .Values.imageRefresh.image.pullPolicy }}
+              # alpine/k8s entrypoint is kubectl; override to run our script.
+              command: ["/bin/sh", "/scripts/image-refresh.sh"]
+              env:
+                # alpine/k8s's kubectl writes a discovery cache under
+                # $HOME/.kube. The pod runs uid 1000 with
+                # readOnlyRootFilesystem, so point HOME at the writable
+                # emptyDir mounted at /home/kubectl.
+                - name: HOME
+                  value: "/home/kubectl"
+                - name: RELEASE_NAME
+                  value: {{ .Release.Name | quote }}
+                - name: RELEASE_NAMESPACE
+                  value: {{ .Release.Namespace | quote }}
+                - name: DEPLOYMENT_NAME
+                  value: {{ printf "%s-jobs-manager" .Release.Name | quote }}
+                - name: IMAGE_TAG
+                  value: {{ .Values.env.CLIENT_ENV | default "prod" | quote }}
+                - name: ROLLOUT_TIMEOUT
+                  value: {{ .Values.imageRefresh.rolloutTimeout | quote }}
+                # Per-image opt-out flags. When the operator pins by digest
+                # in values.images.*.digest, skip that image — auto-refresh
+                # is incompatible with the reproducibility contract digest
+                # pinning provides.
+                - name: JOBS_MANAGER_PINNED
+                  value: {{ ternary "1" "0" (not (empty .Values.images.jobsManager.digest)) | quote }}
+                - name: PODS_MONITOR_PINNED
+                  value: {{ ternary "1" "0" (not (empty .Values.images.podsMonitor.digest)) | quote }}
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                capabilities:
+                  drop: ["ALL"]
+              resources:
+                {{- toYaml .Values.imageRefresh.resources | nindent 16 }}
+              volumeMounts:
+                - name: scripts
+                  mountPath: /scripts
+                  readOnly: true
+                - name: tmp
+                  mountPath: /tmp
+                # alpine/k8s's kubectl writes a cache under $HOME (default
+                # /root). The pod runs as uid 1000 with readOnlyRootFilesystem,
+                # so HOME=/home/kubectl needs to be writable; emptyDir mount.
+                - name: home
+                  mountPath: /home/kubectl
+          volumes:
+            - name: scripts
+              configMap:
+                name: {{ include "tracebloc.imageRefreshName" . }}
+                defaultMode: 0555
+            - name: tmp
+              emptyDir: {}
+            - name: home
+              emptyDir: {}
+{{- end }}

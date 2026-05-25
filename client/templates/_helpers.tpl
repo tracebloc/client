@@ -106,6 +106,49 @@ mysql-pvc
 {{- end }}
 
 {{/*
+  Release-scoped name shared by the image-refresh CronJob, ServiceAccount,
+  Role, RoleBinding, and ConfigMap. Same lockstep reasoning as
+  tracebloc.autoUpgradeName above. Distinct from auto-upgrade because the
+  two CronJobs have different cadences, different RBAC scopes (image-refresh
+  is namespace-scoped, auto-upgrade is cluster-admin), and customers may
+  reasonably disable one but not the other.
+*/}}
+{{- define "tracebloc.imageRefreshName" -}}
+{{ .Release.Name }}-image-refresh
+{{- end }}
+
+{{/*
+  Whether the image-refresh CronJob has anything to do. When BOTH
+  jobs-manager and pods-monitor are digest-pinned, the customer has
+  explicitly opted into reproducible pinning and we must not fight that
+  by restarting on tag changes. In that case we render nothing — no
+  CronJob, no RBAC, no ConfigMap. If only one is pinned, the other can
+  still drift, so the CronJob is rendered and the script skips the
+  pinned image at runtime via env flags.
+
+  Nil-guarded with `default dict` on every dereference: this is a new
+  top-level key in 1.4.0, and a customer who runs
+  `helm upgrade --reuse-values` (instead of the recommended
+  --reset-then-reuse-values that autoUpgrade itself uses) would replay
+  stored 1.3.x values that have no `imageRefresh` block. Without the
+  guard, `.Values.imageRefresh.enabled` would still nil-coalesce safely,
+  but `.Values.images.jobsManager.digest` could crash if `.Values.images`
+  were ever absent. Belt-and-suspenders — see the "nil-guard every new
+  top-level value key" rule in CLAUDE.md.
+*/}}
+{{- define "tracebloc.imageRefreshEnabled" -}}
+{{- $ir := default dict .Values.imageRefresh -}}
+{{- $imgs := default dict .Values.images -}}
+{{- $jm := default dict $imgs.jobsManager -}}
+{{- $pm := default dict $imgs.podsMonitor -}}
+{{- if not $ir.enabled -}}
+{{- else if and $jm.digest $pm.digest -}}
+{{- else -}}
+true
+{{- end -}}
+{{- end }}
+
+{{/*
   StorageClass name: when storageClass.create is true, use a release-unique name
   so each release gets its own StorageClass (avoids Helm ownership conflicts).
   When create is false, use the user-provided storageClass.name for an existing class.
