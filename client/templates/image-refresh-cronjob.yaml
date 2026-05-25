@@ -57,6 +57,17 @@ data:
     #     from registry on first tick, because an empty value would
     #     cause jobs-manager to 503 on every ingestion submit.
     #
+    # Class-2 drift recovery (each tick): in addition to comparing the
+    # annotation to the registry, we ALSO compare it to the live spec
+    # env. External actors — `kubectl rollout undo`, `kubectl edit`,
+    # certain `helm upgrade` flag combinations, GitOps reconcilers —
+    # can revert the spec env without touching the annotation. Without
+    # the env check, an `annotation == registry → no-op` branch would
+    # silently leave the deployment on a stale env forever. When env
+    # drift is detected (annotation == registry but spec env differs),
+    # we re-apply the annotation's value to the spec; we don't update
+    # the annotation, since it was already correct.
+    #
     # Parsing: awk/sed/grep + jq. jq used only where JSON-with-dotted-
     # keys or container/env-array filtering motivates it; the rest
     # stays in pure shell so the script survives image swaps to leaner
@@ -277,15 +288,24 @@ data:
         log "  WARN: could not resolve latest digest (rate-limited or transient); skipping this tick"
       else
         recorded_ingestor="$(get_annotation "tracebloc.io/last-refreshed-ingestor-digest" || true)"
+        # Always read spec env too — the annotation alone isn't enough
+        # because external actors can revert the spec without touching
+        # the annotation: `kubectl rollout undo`, `kubectl edit
+        # deployment`, certain `helm upgrade` flag combinations, or a
+        # GitOps tool reconciling to its source. Without this read the
+        # annotation-matches-registry no-op branch would silently leave
+        # the deployment on a stale env forever. Caught in PR #159
+        # review (bugbot, medium severity).
+        current_ingestor="$(get_container_env "api" "INGESTOR_IMAGE_DIGEST" || true)"
         log "  latest=$latest_ingestor"
         log "  recorded=${recorded_ingestor:-<unset>}"
+        log "  current=${current_ingestor:-<empty>}"
 
         if [ -z "$recorded_ingestor" ]; then
           # First observation. Adopt the spec env as the baseline if
           # it's non-empty — same don't-churn-on-install principle as
           # Pass 1. If it's empty (corrupted state), fall through to
           # the change-detected path so we fill it from registry.
-          current_ingestor="$(get_container_env "api" "INGESTOR_IMAGE_DIGEST" || true)"
           if [ -n "$current_ingestor" ]; then
             log "  first observation; adopting spec env ($current_ingestor) as baseline, no env change"
             kubectl annotate deployment -n "$RELEASE_NAMESPACE" "$DEPLOYMENT_NAME" \
@@ -300,14 +320,12 @@ data:
               "tracebloc.io/last-refreshed-ingestor-digest=${latest_ingestor}" --overwrite
             log "  ingestor refresh complete"
           fi
-        elif [ "$recorded_ingestor" = "$latest_ingestor" ]; then
-          log "  digest unchanged since last refresh; no-op"
-        else
+        elif [ "$recorded_ingestor" != "$latest_ingestor" ]; then
+          # Registry drift: the floating tag has moved. Set env to the
+          # new registry digest, wait for rollout, then annotate. Order
+          # matters: annotate is LAST so a failed rollout leaves the
+          # annotation stale and next tick retries (e7cf829).
           log "  digest changed (${recorded_ingestor} -> ${latest_ingestor}); set env + wait for rollout"
-          # Order: set env → wait for rollout status → annotate. If
-          # the rollout fails or times out, `set -eu` aborts before
-          # the annotate. Next tick sees recorded != latest and
-          # retries the same digest.
           kubectl set env -n "$RELEASE_NAMESPACE" "deployment/${DEPLOYMENT_NAME}" \
             -c api "INGESTOR_IMAGE_DIGEST=${latest_ingestor}"
           kubectl rollout status -n "$RELEASE_NAMESPACE" "deployment/${DEPLOYMENT_NAME}" \
@@ -315,6 +333,21 @@ data:
           kubectl annotate deployment -n "$RELEASE_NAMESPACE" "$DEPLOYMENT_NAME" \
             "tracebloc.io/last-refreshed-ingestor-digest=${latest_ingestor}" --overwrite
           log "  ingestor refresh complete"
+        elif [ "$current_ingestor" != "$recorded_ingestor" ]; then
+          # Env drift: registry hasn't moved (recorded == latest), but
+          # the spec env has been reverted externally to something else
+          # (could be empty, the chart default after --reuse-values, or
+          # an older digest from rollout undo). Re-apply the recorded
+          # value so the live deployment matches what we last decided.
+          # No annotate — the recorded value is already correct.
+          log "  spec env drifted (recorded=${recorded_ingestor} but current=${current_ingestor:-<empty>}); re-applying recorded value"
+          kubectl set env -n "$RELEASE_NAMESPACE" "deployment/${DEPLOYMENT_NAME}" \
+            -c api "INGESTOR_IMAGE_DIGEST=${recorded_ingestor}"
+          kubectl rollout status -n "$RELEASE_NAMESPACE" "deployment/${DEPLOYMENT_NAME}" \
+            --timeout="$ROLLOUT_TIMEOUT"
+          log "  ingestor env re-applied"
+        else
+          log "  digest unchanged and spec env matches; no-op"
         fi
       fi
     fi

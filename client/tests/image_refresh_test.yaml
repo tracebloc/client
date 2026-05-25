@@ -279,6 +279,23 @@ tests:
       - matchRegex:
           path: data["image-refresh.sh"]
           pattern: 'first observation; adopting spec env'
+      # Env-drift recovery (#159 bugbot follow-up): the no-op branch
+      # MUST also read the spec env, not just compare annotation to
+      # registry. External actors (kubectl rollout undo, kubectl edit,
+      # GitOps reconciler) can revert the env without touching the
+      # annotation. Without the second comparison, drift would go
+      # undetected indefinitely.
+      - matchRegex:
+          path: data["image-refresh.sh"]
+          pattern: 'spec env drifted'
+      # The drift-recovery branch must re-apply the RECORDED value to
+      # the spec env, not the registry value (registry already matches
+      # recorded by definition of this branch). And it must NOT update
+      # the annotation — the recorded value is already correct, so an
+      # annotate is dead-write churn.
+      - matchRegex:
+          path: data["image-refresh.sh"]
+          pattern: 'INGESTOR_IMAGE_DIGEST=\$\{recorded_ingestor\}'
 
   - it: CronJob has the right schedule, concurrency, and SA wiring
     template: templates/image-refresh-cronjob.yaml
