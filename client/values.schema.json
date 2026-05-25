@@ -555,6 +555,80 @@
         }
       }
     },
+    "imageRefresh": {
+      "type": "object",
+      "description": "Image-refresh CronJob (issue tracebloc/client#154). Polls Docker Hub for jobs-manager and pods-monitor digests under the floating CLIENT_ENV tag and rolls the deployment when a new image is published. Disable to keep the running image in place until manual restart.",
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "When false, no CronJob, ServiceAccount, Role, or RoleBinding is rendered. The deployment will not auto-refresh on new image pushes."
+        },
+        "schedule": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Cron expression. Keep the tick rate compatible with Docker Hub's 100/6h anonymous pull-rate limit (each tick HEADs two manifests)."
+        },
+        "rolloutTimeout": {
+          "type": "string",
+          "pattern": "^[0-9]+(s|m|h)$",
+          "description": "Passed to `kubectl rollout status --timeout`. Allow headroom for bare-metal image pull."
+        },
+        "suspend": {
+          "type": "boolean",
+          "default": false,
+          "description": "CronJob.spec.suspend. Set true to pause without removing the resources."
+        },
+        "successfulJobsHistoryLimit": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "failedJobsHistoryLimit": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "startingDeadlineSeconds": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "image": {
+          "type": "object",
+          "required": ["repository", "tag"],
+          "properties": {
+            "repository": { "type": "string", "minLength": 1 },
+            "tag": {
+              "type": "string",
+              "minLength": 1,
+              "not": { "const": "latest" },
+              "description": "Pin the alpine/k8s version. `latest` is rejected — image-refresh behaviour must not drift."
+            },
+            "pullPolicy": {
+              "type": "string",
+              "enum": ["Always", "IfNotPresent", "Never"]
+            }
+          }
+        },
+        "resources": {
+          "type": "object",
+          "properties": {
+            "requests": {
+              "type": "object",
+              "properties": {
+                "cpu":    { "type": "string", "pattern": "^[0-9]+m?$" },
+                "memory": { "type": "string", "pattern": "^[0-9]+(Ki|Mi|Gi|Ti)$" }
+              }
+            },
+            "limits": {
+              "type": "object",
+              "properties": {
+                "cpu":    { "type": "string", "pattern": "^[0-9]+m?$" },
+                "memory": { "type": "string", "pattern": "^[0-9]+(Ki|Mi|Gi|Ti)$" }
+              }
+            }
+          }
+        }
+      }
+    },
     "dockerRegistry": {
       "type": ["object", "null"],
       "description": "Optional. Omit entirely or set null for public images (no secret or imagePullSecrets). Only create when set and create is true.",

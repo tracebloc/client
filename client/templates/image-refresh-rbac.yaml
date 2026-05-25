@@ -1,0 +1,56 @@
+{{- if include "tracebloc.imageRefreshEnabled" . }}
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ include "tracebloc.imageRefreshName" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "tracebloc.labels" . | nindent 4 }}
+    app.kubernetes.io/component: image-refresh
+---
+{{/*
+  Namespace-scoped Role — narrower than autoUpgrade's cluster-admin
+  binding on purpose. This CronJob only touches the jobs-manager
+  Deployment in {{ .Release.Namespace }}: read it to compare the recorded
+  refresh digest, and patch it for `rollout restart` + annotation
+  update. No pods, no other resources, no cluster scope. A compromise
+  of this Pod is bounded to kicking and annotating one Deployment.
+*/}}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "tracebloc.imageRefreshName" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "tracebloc.labels" . | nindent 4 }}
+    app.kubernetes.io/component: image-refresh
+rules:
+  # `kubectl rollout restart` + `kubectl annotate` are both patches on
+  # the deployment. `rollout status` uses a ListWatch on the deployment
+  # to wait for completion; a ListWatch reflector needs BOTH `list`
+  # (initial sync) and `watch` (incremental updates). Missing either
+  # one drops the call into a 403 retry loop until --timeout fires
+  # (kubectl#580), marking every successful restart as a failed Job.
+  # Both caught in PR #155 review.
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["get", "list", "patch", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "tracebloc.imageRefreshName" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "tracebloc.labels" . | nindent 4 }}
+    app.kubernetes.io/component: image-refresh
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "tracebloc.imageRefreshName" . }}
+    namespace: {{ .Release.Namespace }}
+roleRef:
+  kind: Role
+  name: {{ include "tracebloc.imageRefreshName" . }}
+  apiGroup: rbac.authorization.k8s.io
+{{- end }}
