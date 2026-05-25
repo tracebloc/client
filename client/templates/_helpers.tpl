@@ -118,22 +118,26 @@ mysql-pvc
 {{- end }}
 
 {{/*
-  Whether the image-refresh CronJob has anything to do. When BOTH
-  jobs-manager and pods-monitor are digest-pinned, the customer has
-  explicitly opted into reproducible pinning and we must not fight that
-  by restarting on tag changes. In that case we render nothing — no
-  CronJob, no RBAC, no ConfigMap. If only one is pinned, the other can
-  still drift, so the CronJob is rendered and the script skips the
-  pinned image at runtime via env flags.
+  Whether the image-refresh CronJob has anything to do. When ALL THREE
+  managed images (jobs-manager, pods-monitor, ingestor) are
+  digest-pinned, the operator has explicitly opted into reproducible
+  pinning for every image this CronJob would refresh, so we render
+  nothing — no CronJob, no RBAC, no ConfigMap. When at least one is
+  unpinned, the CronJob is rendered and the script skips the pinned
+  images at runtime via env flags.
 
-  Nil-guarded with `default dict` on every dereference: this is a new
-  top-level key in 1.4.0, and a customer who runs
+  Three pins because #158 added ingestor refresh on top of #154's
+  jobs-manager + pods-monitor. Keep this list in sync if more images
+  come under auto-refresh in future.
+
+  Nil-guarded with `default dict` on every dereference: these are
+  newer top-level keys, and a customer who runs
   `helm upgrade --reuse-values` (instead of the recommended
-  --reset-then-reuse-values that autoUpgrade itself uses) would replay
-  stored 1.3.x values that have no `imageRefresh` block. Without the
-  guard, `.Values.imageRefresh.enabled` would still nil-coalesce safely,
-  but `.Values.images.jobsManager.digest` could crash if `.Values.images`
-  were ever absent. Belt-and-suspenders — see the "nil-guard every new
+  --reset-then-reuse-values that autoUpgrade itself uses) could replay
+  stored values from before the keys existed. Without the guard,
+  `.Values.imageRefresh.enabled` would still nil-coalesce safely, but
+  `.Values.images.<image>.digest` could crash if `.Values.images` were
+  ever absent. Belt-and-suspenders — see the "nil-guard every new
   top-level value key" rule in CLAUDE.md.
 */}}
 {{- define "tracebloc.imageRefreshEnabled" -}}
@@ -141,8 +145,27 @@ mysql-pvc
 {{- $imgs := default dict .Values.images -}}
 {{- $jm := default dict $imgs.jobsManager -}}
 {{- $pm := default dict $imgs.podsMonitor -}}
+{{- $in := default dict $imgs.ingestor -}}
+{{/*
+  Per-image pin signals (each one means "skip auto-refresh for this image"):
+  * jobs-manager / pods-monitor: digest set (non-empty) — same signal as
+    the deployment uses to switch imagePullPolicy to IfNotPresent.
+  * ingestor: explicit `autoRefresh: false` flag — asymmetric because
+    ingestor.digest must be non-empty for jobs-manager to work, so we
+    can't use digest-presence as the signal there.
+*/}}
+{{- $jmPinned := $jm.digest -}}
+{{- $pmPinned := $pm.digest -}}
+{{/*
+  Can't use `default true $in.autoRefresh` here — Go templates treat
+  the bool `false` as falsy, so `default true false` returns `true`
+  and flips the pin state on the explicit-disable case. Instead test
+  for the literal `false` directly; absence (nil) and explicit `true`
+  both fall through to "not pinned".
+*/}}
+{{- $inPinned := eq $in.autoRefresh false -}}
 {{- if not $ir.enabled -}}
-{{- else if and $jm.digest $pm.digest -}}
+{{- else if and (and $jmPinned $pmPinned) $inPinned -}}
 {{- else -}}
 true
 {{- end -}}
