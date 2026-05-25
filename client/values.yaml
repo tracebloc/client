@@ -187,15 +187,28 @@ images:
   # subchart's `image.digest` (for pinning / debugging), but the
   # dominant path uses this value.
   #
-  # Bumped to v0.3.0 (2026-05-20) — first production-ready release of
-  # the declarative-YAML ingestor with schema-packaging, image-validator,
-  # and file-transfer fixes from tracebloc/data-ingestors#106.
+  # Bumped to v0.3.1 (2026-05-25) — patch on top of v0.3.0 carrying two
+  # customer-impacting fixes:
+  #   * tracebloc/data-ingestors#108 — copy tokenizer.json to the
+  #     training pod for MLM datasets. Without this fix, the client
+  #     fell back to bert-base-uncased (vocab=30522), which exceeded
+  #     user models' nn.Embedding and crashed training with a CUDA
+  #     device-side assert.
+  #   * tracebloc/data-ingestors#119 — close YAML-vs-template parity
+  #     gaps in per-category metadata (tabular number_of_columns,
+  #     keypoint target_size / number_of_keypoints, tabular na_values).
+  #     Backend metadata diverged silently depending on ingestion path.
+  # First release exercised by the digest-level smoke probes from
+  # tracebloc/data-ingestors#96 (schema-load + entrypoint resolution
+  # before cosign signing).
   # Bump this on each ingestor release; chart `version` in Chart.yaml must
   # also bump so the auto-upgrade cronjob detects the change. Future
   # automation in tracebloc/data-ingestors (release-image.yml) can
-  # raise a PR to this file when a new image is published.
+  # raise a PR to this file when a new image is published — see
+  # client#159 for the runtime-side variant (image-refresh CronJob)
+  # that will obsolete this manual-bump pattern altogether.
   ingestor:
-    digest: "sha256:463e236748708a5e3564569eec9173ea8cb3bcf515992d4939c5b610f3807a4a"
+    digest: "sha256:a0861ea9fbf4653279351ee30af9ebe2b75fcacd391923b681631312f4a85ee4"
   podsMonitor:
     digest: ""
   resourceMonitor:
