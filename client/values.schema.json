@@ -299,7 +299,18 @@
             "digest": {
               "type": "string",
               "pattern": "^(sha256:[a-f0-9]{64})?$",
-              "description": "Optional canonical ghcr.io/tracebloc/ingestor digest (sha256:<64 hex>). Surfaced into jobs-manager as the INGESTOR_IMAGE_DIGEST env so the customer-facing tracebloc/ingestor subchart can pick it up without per-install overrides. Empty disables the default and forces customers to --set image.digest on each ingestor subchart install."
+              "description": "Canonical ghcr.io/tracebloc/ingestor digest (sha256:<64 hex>). Initial value baked into the chart; image-refresh dynamically updates the live env from this baseline (#158). Must be non-empty — an empty value would cause jobs-manager to 503 on every ingestion submission."
+            },
+            "tag": {
+              "type": "string",
+              "minLength": 1,
+              "not": { "const": "latest" },
+              "description": "Floating ghcr.io/tracebloc/ingestor tag polled by image-refresh. `latest` is rejected — image-refresh behaviour must not drift."
+            },
+            "autoRefresh": {
+              "type": "boolean",
+              "default": true,
+              "description": "Per-image opt-out for image-refresh. Default true. Set false to lock the env at `digest` — image-refresh skips this image. Asymmetric with jobsManager/podsMonitor (which use digest='' as the opt-in signal) because ingestor's digest must be non-empty for jobs-manager to function."
             }
           }
         },
