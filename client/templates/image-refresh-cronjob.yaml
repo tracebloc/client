@@ -308,6 +308,20 @@ data:
           # the change-detected path so we fill it from registry.
           if [ -n "$current_ingestor" ]; then
             log "  first observation; adopting spec env ($current_ingestor) as baseline, no env change"
+            # Verify the deployment is in a stable state BEFORE
+            # annotating. The bug this guards against: a previous
+            # tick's empty-spec-fill branch can succeed at `kubectl
+            # set env` (which commits to etcd) but fail at `kubectl
+            # rollout status` and abort. The annotation stays unset.
+            # Next tick lands here — current_ingestor is non-empty
+            # because the spec committed — and without this status
+            # check, we would record success on a stuck rollout while
+            # running pods stayed on the old/empty env. Caught in PR
+            # #159 review (bugbot, high severity). `rollout status`
+            # is a near-instant no-op on a healthy deployment, so
+            # this adds essentially zero latency on the happy path.
+            kubectl rollout status -n "$RELEASE_NAMESPACE" "deployment/${DEPLOYMENT_NAME}" \
+              --timeout="$ROLLOUT_TIMEOUT"
             kubectl annotate deployment -n "$RELEASE_NAMESPACE" "$DEPLOYMENT_NAME" \
               "tracebloc.io/last-refreshed-ingestor-digest=${current_ingestor}" --overwrite
           else

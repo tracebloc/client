@@ -279,6 +279,17 @@ tests:
       - matchRegex:
           path: data["image-refresh.sh"]
           pattern: 'first observation; adopting spec env'
+      # Adopt-as-baseline branch MUST run `kubectl rollout status`
+      # before `kubectl annotate`. Caught in #159 review (bugbot,
+      # high severity): if a previous tick's empty-spec-fill set env
+      # and then rollout failed, this tick would find current_ingestor
+      # non-empty (spec already committed) but the deployment stuck.
+      # Annotating without waiting would record success on a stuck
+      # rollout. The status check is near-instant on a healthy
+      # deployment, so the cost on the happy path is negligible.
+      - matchRegex:
+          path: data["image-refresh.sh"]
+          pattern: '(?s)adopting spec env.*rollout status.*kubectl annotate.*last-refreshed-ingestor-digest=\$\{current_ingestor\}'
       # Env-drift recovery (#159 bugbot follow-up): the no-op branch
       # MUST also read the spec env, not just compare annotation to
       # registry. External actors (kubectl rollout undo, kubectl edit,
