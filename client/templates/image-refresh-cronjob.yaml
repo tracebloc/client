@@ -11,79 +11,131 @@ metadata:
 data:
   image-refresh.sh: |
     #!/bin/sh
-    # Polls Docker Hub for new manifest digests of tracebloc/jobs-manager
-    # and tracebloc/pods-monitor under the floating CLIENT_ENV tag, and
-    # rolls the jobs-manager Deployment whenever a published digest
-    # differs from the one we last successfully rolled to.
+    # Polls registries for new manifest digests and reconciles them onto
+    # the jobs-manager Deployment. Handles two image classes with
+    # different reconciliation semantics:
     #
-    # Source of truth: an annotation on the deployment itself
-    # (`tracebloc.io/last-refreshed-<image>-digest`) records the digest
-    # the last successful refresh restarted to. We compare what the
-    # registry publishes today to that recorded value, NOT to the running
-    # pod's containerStatuses[].imageID. This sidesteps:
-    #   * imageID format variation across container runtimes
-    #     (kubernetes/kubernetes#108689 + #115199 — containerd records
-    #     platform-specific manifest digests, dockershim records other
-    #     things, value is documented as inconsistent).
-    #   * multi-arch manifest-list vs platform-manifest divergence — the
-    #     registry returns the index digest under the tag, the runtime
-    #     records a per-platform digest, the two never match.
-    # Both classes of bug disappear when the comparison is "what the
-    # registry says today" vs "what we wrote into the annotation last
-    # time we acted on a change."
+    #   1. Long-running container images (jobs-manager, pods-monitor) on
+    #      docker.io under the floating CLIENT_ENV tag (#154).
+    #      Action on change: `kubectl rollout restart` the deployment.
+    #      Source of truth: an annotation on the deployment metadata
+    #      (`tracebloc.io/last-refreshed-<image>-digest`) — comparing
+    #      the registry digest to an annotation we wrote ourselves
+    #      sidesteps imageID format variation across container runtimes
+    #      (kubernetes/kubernetes#108689 + #115199) and multi-arch
+    #      manifest-list vs platform-manifest divergence.
     #
-    # First-tick contract: when an annotation is absent, we record the
-    # current digest WITHOUT restarting. The customer just installed (or
-    # someone manually wiped the annotation) — no evidence of drift, so
-    # no churn. Subsequent ticks compare to the recorded value normally.
+    #   2. Spawned-Job image (ingestor) on ghcr.io under
+    #      images.ingestor.tag (#158). This image isn't a container in
+    #      the jobs-manager pod — it's the image jobs-manager USES when
+    #      spawning each ingestion Job, surfaced via the
+    #      INGESTOR_IMAGE_DIGEST env var on the api container.
+    #      Action on change: `kubectl set env` to patch the env var,
+    #      which triggers a natural rollout via ReplicaSet rotation —
+    #      no explicit `rollout restart` needed.
+    #      Source of truth: same as class 1 — a deployment annotation
+    #      (`tracebloc.io/last-refreshed-ingestor-digest`) records the
+    #      last successfully-rolled digest. Originally this class read
+    #      the live env directly, but that broke rollout-failure-retry
+    #      semantics (`set env` commits the spec before `rollout status`
+    #      waits, so a failed rollout would leave the spec matching the
+    #      registry while old pods kept the old env — next tick saw no
+    #      drift and skipped, leaving the deployment stuck). Annotation
+    #      is updated as the LAST step of each successful refresh; a
+    #      failed rollout leaves the annotation stale and the next tick
+    #      retries. (PR #159 review, bugbot.)
     #
-    # Parsing is sed/awk-only on purpose: alpine/k8s ships jq, but
-    # keeping the script jq-free means it survives image swaps to leaner
+    # First-tick contract:
+    #   * Class 1 (annotation missing): record current registry digest
+    #     WITHOUT restarting — no evidence of drift, no reason to churn
+    #     pods.
+    #   * Class 2 (annotation missing): adopt the spec env's
+    #     chart-default value as the baseline annotation, no env change.
+    #     Same don't-churn-on-install principle. Empty spec env
+    #     (corrupted state, manual edit, stale --reuse-values from a
+    #     pre-1.4.1 chart) is treated as a change-needed signal — fill
+    #     from registry on first tick, because an empty value would
+    #     cause jobs-manager to 503 on every ingestion submit.
+    #
+    # Class-2 drift recovery (each tick): in addition to comparing the
+    # annotation to the registry, we ALSO compare it to the live spec
+    # env. External actors — `kubectl rollout undo`, `kubectl edit`,
+    # certain `helm upgrade` flag combinations, GitOps reconcilers —
+    # can revert the spec env without touching the annotation. Without
+    # the env check, an `annotation == registry → no-op` branch would
+    # silently leave the deployment on a stale env forever. When env
+    # drift is detected (annotation == registry but spec env differs),
+    # we re-apply the annotation's value to the spec; we don't update
+    # the annotation, since it was already correct.
+    #
+    # Parsing: awk/sed/grep + jq. jq used only where JSON-with-dotted-
+    # keys or container/env-array filtering motivates it; the rest
+    # stays in pure shell so the script survives image swaps to leaner
     # bases — same constraint as the auto-upgrade script in this chart.
     #
-    # All log() output goes to stderr so it can never pollute a
-    # command-substitution capture site like `latest="$(...)"`.
+    # All log() output goes to stderr so it never pollutes
+    # command-substitution capture sites like `latest="$(...)"`.
     set -eu
 
     log() { printf '[image-refresh] %s\n' "$*" >&2; }
 
-    log "release=$RELEASE_NAME namespace=$RELEASE_NAMESPACE tag=$IMAGE_TAG deployment=$DEPLOYMENT_NAME"
+    log "release=$RELEASE_NAME namespace=$RELEASE_NAMESPACE deployment=$DEPLOYMENT_NAME"
+    log "  client images: tracebloc/{jobs-manager,pods-monitor} on docker.io under tag=$IMAGE_TAG"
+    log "  ingestor image: tracebloc/ingestor on ghcr.io under tag=$INGESTOR_TAG (pinned=$INGESTOR_PINNED)"
 
-    # Get an anonymous pull-scope token for one repository on Docker Hub.
+    # Get an anonymous pull-scope token for one repository on a
+    # registry. Both docker.io and ghcr.io support anonymous tokens for
+    # public images; only the issuer URL differs. tr cleanup handles
+    # the trailing newline some curl builds emit.
     get_token() {
-      _repo="$1"
-      # tr cleanup handles the trailing newline some curl builds emit.
-      curl -fsS --max-time 10 \
-        "https://auth.docker.io/token?service=registry.docker.io&scope=repository:${_repo}:pull" \
+      _repo="$1"; _registry="$2"
+      case "$_registry" in
+        docker.io)
+          _url="https://auth.docker.io/token?service=registry.docker.io&scope=repository:${_repo}:pull"
+          ;;
+        ghcr.io)
+          _url="https://ghcr.io/token?service=ghcr.io&scope=repository:${_repo}:pull"
+          ;;
+        *)
+          log "  WARN: unknown registry $_registry"
+          return 1
+          ;;
+      esac
+      curl -fsS --max-time 10 "$_url" \
         | sed -n 's/.*"token":"\([^"]*\)".*/\1/p' \
         | tr -d '\r\n'
     }
 
-    # Resolve the manifest digest for repo:tag from Docker Hub. We HEAD
+    # Resolve the manifest digest for repo:tag on a registry. We HEAD
     # the manifest endpoint with all four manifest media types in a
     # single comma-separated Accept header (registry v2 spec form; some
     # TLS-terminating proxies have been observed dropping repeated
     # Accept headers). The value returned in Docker-Content-Digest is
     # whatever the registry serves for that tag — for multi-arch tags
     # the index digest, for single-arch the manifest digest. Both work
-    # here because we compare to OUR annotation, not to a runtime
-    # imageID; consistency tick-over-tick is all we need.
+    # here because we compare to OUR annotation (or live env), not to a
+    # runtime imageID; tick-over-tick consistency is all we need.
     #
     # Case-fold with tr BEFORE awk: alpine/k8s ships BusyBox awk which
     # silently ignores gawk's IGNORECASE=1, and the header case differs
     # between HTTP/1.1 and HTTP/2. Digest values are lowercase-by-spec
     # (sha256:<64 hex>) so the value is unaffected.
     get_latest_digest() {
-      _repo="$1"
-      _token="$(get_token "$_repo")"
+      _repo="$1"; _tag="$2"; _registry="$3"
+      _token="$(get_token "$_repo" "$_registry")"
       if [ -z "$_token" ]; then
-        log "  WARN: could not fetch auth token for $_repo"
+        log "  WARN: could not fetch auth token for $_registry/$_repo"
         return 1
       fi
+      case "$_registry" in
+        docker.io) _host="registry-1.docker.io" ;;
+        ghcr.io)   _host="ghcr.io" ;;
+        *)         log "  WARN: unknown registry host: $_registry"; return 1 ;;
+      esac
       curl -fsSI --max-time 10 \
         -H "Authorization: Bearer $_token" \
         -H "Accept: application/vnd.docker.distribution.manifest.v2+json,application/vnd.docker.distribution.manifest.list.v2+json,application/vnd.oci.image.manifest.v1+json,application/vnd.oci.image.index.v1+json" \
-        "https://registry-1.docker.io/v2/${_repo}/manifests/${IMAGE_TAG}" \
+        "https://${_host}/v2/${_repo}/manifests/${_tag}" \
         | tr '[:upper:]' '[:lower:]' \
         | awk '/^docker-content-digest:/ {print $2}' \
         | tr -d '\r\n'
@@ -94,28 +146,40 @@ data:
     # explicit empty string, which the chart never writes.
     #
     # Uses jq because kubectl-go's jsonpath parser returns empty for
-    # bracket-notation keys that contain `.` or `/` — verified on
-    # alpine/k8s 1.30.5 against a real annotation with key
-    # `tracebloc.io/last-refreshed-jobs-manager-digest`. Dot-escape
-    # syntax (`.tracebloc\.io/...`) is the other working form, but jq
-    # is unambiguous and won't surprise us on future kubectl versions.
-    # alpine/k8s ships jq, so adding one jq call doesn't pull a new
-    # dependency (the script remains awk/sed/grep elsewhere; jq is
-    # used ONLY for this read because JSON-with-dotted-keys is what
-    # actually motivates jq's existence).
+    # bracket-notation keys that contain `.` or `/` (#156).
     get_annotation() {
       _key="$1"
       kubectl get deployment -n "$RELEASE_NAMESPACE" "$DEPLOYMENT_NAME" -o json \
         | jq -r --arg k "$_key" '.metadata.annotations[$k] // empty'
     }
 
+    # Read a container's env var value off the deployment. jq filter
+    # walks containers[name=$c].env[name=$e].value; returns empty
+    # string when the env var is absent OR explicitly empty (we treat
+    # both the same — the script's caller decides if empty is an
+    # error state).
+    get_container_env() {
+      _container="$1"; _env="$2"
+      kubectl get deployment -n "$RELEASE_NAMESPACE" "$DEPLOYMENT_NAME" -o json \
+        | jq -r --arg c "$_container" --arg e "$_env" '
+            .spec.template.spec.containers[]
+            | select(.name == $c)
+            | (.env // [])[]
+            | select(.name == $e)
+            | .value // empty
+          '
+    }
+
+    # =================================================================
+    # Pass 1 — class-1 images: jobs-manager + pods-monitor.
+    # docker.io, floating CLIENT_ENV tag, annotation-based source of
+    # truth, action = kubectl rollout restart.
+    # =================================================================
+
     restart_needed=0
     annotate_args=""
 
-    # Each entry: "<docker-hub-repo>|<annotation-key>|<digest-pin-flag>".
-    # digest-pin-flag is "1" when values.images.*.digest is set — the
-    # deployment uses imagePullPolicy: IfNotPresent for that container
-    # and auto-refresh must not fight the customer's opt-in pinning.
+    # Each entry: "<docker-hub-repo>|<annotation-key>|<pin-flag>".
     set -- \
       "tracebloc/jobs-manager|tracebloc.io/last-refreshed-jobs-manager-digest|${JOBS_MANAGER_PINNED}" \
       "tracebloc/pods-monitor|tracebloc.io/last-refreshed-pods-monitor-digest|${PODS_MONITOR_PINNED}"
@@ -133,7 +197,7 @@ data:
         continue
       fi
 
-      latest="$(get_latest_digest "$repo" || true)"
+      latest="$(get_latest_digest "$repo" "$IMAGE_TAG" "docker.io" || true)"
       if [ -z "$latest" ]; then
         log "  WARN: could not resolve latest digest (rate-limited or transient); skipping this tick"
         continue
@@ -145,9 +209,9 @@ data:
       log "  recorded=${recorded:-<unset>}"
 
       if [ -z "$recorded" ]; then
-        # First-observation path: record without restarting. We have no
-        # evidence the running pod is on an older digest, and a spurious
-        # restart on install would surprise operators.
+        # First-observation path: record without restarting. No evidence
+        # the running pod is on an older digest; a spurious restart on
+        # install would surprise operators.
         log "  first observation; recording without restart"
         annotate_args="$annotate_args ${key}=${latest}"
       elif [ "$recorded" = "$latest" ]; then
@@ -160,11 +224,9 @@ data:
     done
 
     # Order matters: rollout FIRST, annotate AFTER `rollout status`
-    # succeeds. If the rollout fails or times out, we leave the
-    # annotation stale so the next tick retries the same digest. If we
-    # annotated first and then the rollout failed, the next tick would
-    # see recorded == latest and skip — leaving the deployment frozen
-    # on the old image with no signal that anything went wrong.
+    # succeeds. Annotating first would let a failed rollout silently
+    # freeze the deployment on the old image (next tick sees
+    # recorded == latest and skips).
     if [ "$restart_needed" -eq 1 ]; then
       log "rolling restart of deployment/${DEPLOYMENT_NAME}"
       kubectl rollout restart -n "$RELEASE_NAMESPACE" "deployment/${DEPLOYMENT_NAME}"
@@ -173,17 +235,162 @@ data:
       log "rollout complete"
     fi
 
-    # Apply all pending annotation updates in a single kubectl call.
-    # Both restart-then-annotate (after a successful rollout) and
-    # first-observation (without restart) go through here.
     if [ -n "$annotate_args" ]; then
       log "updating deployment annotations:$annotate_args"
       # shellcheck disable=SC2086  # word-split annotate_args intentional
       kubectl annotate deployment -n "$RELEASE_NAMESPACE" "$DEPLOYMENT_NAME" \
         $annotate_args --overwrite
-    else
-      log "nothing to record or restart"
     fi
+
+    # =================================================================
+    # Pass 2 — class-2 image: ingestor.
+    # ghcr.io, floating INGESTOR_TAG, annotation-based source of truth,
+    # action = kubectl set env (which triggers a natural rollout via
+    # ReplicaSet rotation — no explicit `rollout restart` needed).
+    #
+    # Why annotation (not spec env) is the source of truth, despite
+    # the env being a more direct read of "what jobs-manager will use
+    # next": rollout-failure-then-retry safety. `kubectl set env`
+    # commits the new spec to etcd BEFORE `kubectl rollout status`
+    # waits for the rollout to complete. If the rollout times out or
+    # the new ReplicaSet's pods fail to come up, `set -eu` aborts the
+    # script — but the spec already matches the registry, so on the
+    # next tick `get_container_env` returns the new digest, compares
+    # equal to the registry, and skips, leaving the OLD ReplicaSet's
+    # pods running indefinitely with the old env. Caught in PR #159
+    # review (bugbot, medium severity).
+    #
+    # With the annotation guarding the success path, the same
+    # rollout-then-annotate ordering as Pass 1 applies: annotate is
+    # the LAST step, only runs if `rollout status` succeeded. A failed
+    # rollout leaves the annotation stale → next tick sees mismatch
+    # → retries.
+    #
+    # First observation: there's no annotation yet but the chart has
+    # ALREADY populated INGESTOR_IMAGE_DIGEST with the chart-default
+    # digest (must be non-empty or jobs-manager 503s on every
+    # ingestion submit). We adopt that spec env as the recorded
+    # baseline — same "don't churn on install" principle as the
+    # jobs-manager first-observation contract. The corner case where
+    # the spec env is empty (corrupted state, manual kubectl edit,
+    # or stale chart values from --reuse-values) is handled by
+    # treating empty as a change-needed signal and filling from
+    # registry on first tick.
+    # =================================================================
+
+    log "checking ghcr.io/tracebloc/ingestor:${INGESTOR_TAG} (env=INGESTOR_IMAGE_DIGEST on container=api)"
+
+    if [ "$INGESTOR_PINNED" = "1" ]; then
+      log "  ingestor.autoRefresh: false in values; skipping (operator opted into pinning)"
+    else
+      latest_ingestor="$(get_latest_digest "tracebloc/ingestor" "$INGESTOR_TAG" "ghcr.io" || true)"
+      if [ -z "$latest_ingestor" ]; then
+        log "  WARN: could not resolve latest digest (rate-limited or transient); skipping this tick"
+      else
+        recorded_ingestor="$(get_annotation "tracebloc.io/last-refreshed-ingestor-digest" || true)"
+        # Always read spec env too — the annotation alone isn't enough
+        # because external actors can revert the spec without touching
+        # the annotation: `kubectl rollout undo`, `kubectl edit
+        # deployment`, certain `helm upgrade` flag combinations, or a
+        # GitOps tool reconciling to its source. Without this read the
+        # annotation-matches-registry no-op branch would silently leave
+        # the deployment on a stale env forever. Caught in PR #159
+        # review (bugbot, medium severity).
+        current_ingestor="$(get_container_env "api" "INGESTOR_IMAGE_DIGEST" || true)"
+        log "  latest=$latest_ingestor"
+        log "  recorded=${recorded_ingestor:-<unset>}"
+        log "  current=${current_ingestor:-<empty>}"
+
+        if [ -z "$recorded_ingestor" ]; then
+          # First observation. Adopt the spec env as the baseline if
+          # it's non-empty — same don't-churn-on-install principle as
+          # Pass 1. If it's empty (corrupted state), fall through to
+          # the change-detected path so we fill it from registry.
+          if [ -n "$current_ingestor" ]; then
+            log "  first observation; adopting spec env ($current_ingestor) as baseline, no env change"
+            # Verify the deployment is in a stable state BEFORE
+            # annotating. The bug this guards against: a previous
+            # tick's empty-spec-fill branch can succeed at `kubectl
+            # set env` (which commits to etcd) but fail at `kubectl
+            # rollout status` and abort. The annotation stays unset.
+            # Next tick lands here — current_ingestor is non-empty
+            # because the spec committed — and without this status
+            # check, we would record success on a stuck rollout while
+            # running pods stayed on the old/empty env. Caught in PR
+            # #159 review (bugbot, high severity). `rollout status`
+            # is a near-instant no-op on a healthy deployment, so
+            # this adds essentially zero latency on the happy path.
+            kubectl rollout status -n "$RELEASE_NAMESPACE" "deployment/${DEPLOYMENT_NAME}" \
+              --timeout="$ROLLOUT_TIMEOUT"
+            kubectl annotate deployment -n "$RELEASE_NAMESPACE" "$DEPLOYMENT_NAME" \
+              "tracebloc.io/last-refreshed-ingestor-digest=${current_ingestor}" --overwrite
+          else
+            log "  first observation; spec env empty (would 503 on ingestion submit); filling from registry"
+            kubectl set env -n "$RELEASE_NAMESPACE" "deployment/${DEPLOYMENT_NAME}" \
+              -c api "INGESTOR_IMAGE_DIGEST=${latest_ingestor}"
+            kubectl rollout status -n "$RELEASE_NAMESPACE" "deployment/${DEPLOYMENT_NAME}" \
+              --timeout="$ROLLOUT_TIMEOUT"
+            kubectl annotate deployment -n "$RELEASE_NAMESPACE" "$DEPLOYMENT_NAME" \
+              "tracebloc.io/last-refreshed-ingestor-digest=${latest_ingestor}" --overwrite
+            log "  ingestor refresh complete"
+          fi
+        elif [ "$recorded_ingestor" != "$latest_ingestor" ]; then
+          # Registry drift: the floating tag has moved. Set env to the
+          # new registry digest, wait for rollout, then annotate. Order
+          # matters: annotate is LAST so a failed rollout leaves the
+          # annotation stale and next tick retries (e7cf829).
+          log "  digest changed (${recorded_ingestor} -> ${latest_ingestor}); set env + wait for rollout"
+          kubectl set env -n "$RELEASE_NAMESPACE" "deployment/${DEPLOYMENT_NAME}" \
+            -c api "INGESTOR_IMAGE_DIGEST=${latest_ingestor}"
+          kubectl rollout status -n "$RELEASE_NAMESPACE" "deployment/${DEPLOYMENT_NAME}" \
+            --timeout="$ROLLOUT_TIMEOUT"
+          kubectl annotate deployment -n "$RELEASE_NAMESPACE" "$DEPLOYMENT_NAME" \
+            "tracebloc.io/last-refreshed-ingestor-digest=${latest_ingestor}" --overwrite
+          log "  ingestor refresh complete"
+        elif [ "$current_ingestor" != "$recorded_ingestor" ]; then
+          # Env drift: registry hasn't moved (recorded == latest), but
+          # the spec env has been reverted externally to something else
+          # (could be empty, the chart default after --reuse-values, or
+          # an older digest from rollout undo). Re-apply the recorded
+          # value so the live deployment matches what we last decided.
+          # No annotate — the recorded value is already correct.
+          log "  spec env drifted (recorded=${recorded_ingestor} but current=${current_ingestor:-<empty>}); re-applying recorded value"
+          kubectl set env -n "$RELEASE_NAMESPACE" "deployment/${DEPLOYMENT_NAME}" \
+            -c api "INGESTOR_IMAGE_DIGEST=${recorded_ingestor}"
+          kubectl rollout status -n "$RELEASE_NAMESPACE" "deployment/${DEPLOYMENT_NAME}" \
+            --timeout="$ROLLOUT_TIMEOUT"
+          log "  ingestor env re-applied"
+        else
+          # Annotation, registry, and spec env all match. Normally
+          # this is a healthy no-op. But: a previous tick's
+          # env-drift branch could have committed a `kubectl set env`
+          # whose subsequent `kubectl rollout status` then failed
+          # (set -eu aborted the script). The spec change persisted
+          # past the abort, so on this tick annotation, registry,
+          # and spec env all match — but the actual rollout is
+          # stuck and running pods may be on a stale image. Without
+          # an explicit rollout-health check here, the no-op branch
+          # would silently mask that stuck state forever.
+          #
+          # `kubectl rollout status` is a near-instant no-op on a
+          # healthy deployment (returns immediately when there's no
+          # active rollout), so the cost on the happy path is
+          # negligible. On a stuck deployment it times out, `set -eu`
+          # aborts, and the Job is visibly failed in `kubectl get
+          # cronjob`. The operator then sees that image-refresh is
+          # stuck and can investigate (the underlying cause —
+          # broken image, registry-pull failure — is outside what
+          # image-refresh can autonomously fix).
+          # Caught in PR #162 review (bugbot, medium severity).
+          log "  digest unchanged and spec env matches; verifying deployment health"
+          kubectl rollout status -n "$RELEASE_NAMESPACE" "deployment/${DEPLOYMENT_NAME}" \
+            --timeout="$ROLLOUT_TIMEOUT"
+          log "  fully in sync; no-op"
+        fi
+      fi
+    fi
+
+    log "tick complete"
 ---
 apiVersion: batch/v1
 kind: CronJob
@@ -248,14 +455,35 @@ spec:
                   value: {{ .Values.env.CLIENT_ENV | default "prod" | quote }}
                 - name: ROLLOUT_TIMEOUT
                   value: {{ .Values.imageRefresh.rolloutTimeout | quote }}
-                # Per-image opt-out flags. When the operator pins by digest
-                # in values.images.*.digest, skip that image — auto-refresh
-                # is incompatible with the reproducibility contract digest
-                # pinning provides.
+                # Per-image opt-out flags. For class-1 images (jobs-manager
+                # / pods-monitor), pinning is signalled by setting
+                # `images.<image>.digest` to a non-empty value — same
+                # signal the deployment uses to switch imagePullPolicy
+                # to IfNotPresent. For the class-2 image (ingestor) the
+                # signal is the explicit `images.ingestor.autoRefresh:
+                # false` flag, because ingestor.digest must be non-empty
+                # for jobs-manager to function (see values.yaml comment
+                # block). All three guards are nil-safe.
                 - name: JOBS_MANAGER_PINNED
-                  value: {{ ternary "1" "0" (not (empty .Values.images.jobsManager.digest)) | quote }}
+                  value: {{ ternary "1" "0" (not (empty (default dict (default dict .Values.images).jobsManager).digest)) | quote }}
                 - name: PODS_MONITOR_PINNED
-                  value: {{ ternary "1" "0" (not (empty .Values.images.podsMonitor.digest)) | quote }}
+                  value: {{ ternary "1" "0" (not (empty (default dict (default dict .Values.images).podsMonitor).digest)) | quote }}
+                # `default true ...` would mishandle the explicit-false
+                # case because Go templates treat `false` as falsy and
+                # `default` overrides it. Test `eq <value> false`
+                # directly — absence (nil) and explicit `true` both
+                # fall through to "not pinned" (value="0").
+                - name: INGESTOR_PINNED
+                  value: {{ ternary "1" "0" (eq (default dict (default dict .Values.images).ingestor).autoRefresh false) | quote }}
+                # Floating ghcr.io tag polled for ingestor digest changes.
+                # The `default "0.3"` fallback handles --reuse-values
+                # upgrades from pre-v1.4.1 stored manifests that lack
+                # the key entirely. Must stay in sync with the chart
+                # default in values.yaml — both `prod` (the original
+                # default) would 404 on ghcr.io since the team uses
+                # semver-style float tags. Caught in PR #162 review.
+                - name: INGESTOR_TAG
+                  value: {{ (default dict (default dict .Values.images).ingestor).tag | default "0.3" | quote }}
               securityContext:
                 allowPrivilegeEscalation: false
                 readOnlyRootFilesystem: true

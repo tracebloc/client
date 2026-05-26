@@ -181,21 +181,64 @@ images:
     digest: ""
   # client-runtime#40 / client#125: the ingestor image is spawned by
   # jobs-manager at ingestion-submission time, not as a long-lived pod.
-  # Setting `digest` here surfaces it into jobs-manager as the
-  # `INGESTOR_IMAGE_DIGEST` env; the auto-upgrade flow then keeps it
-  # current. Customers can override per-install via the ingestor
-  # subchart's `image.digest` (for pinning / debugging), but the
-  # dominant path uses this value.
+  # The digest surfaces into jobs-manager as the INGESTOR_IMAGE_DIGEST
+  # env var, which it uses when spawning each ingestion Job.
   #
-  # Bumped to v0.3.0 (2026-05-20) — first production-ready release of
-  # the declarative-YAML ingestor with schema-packaging, image-validator,
-  # and file-transfer fixes from tracebloc/data-ingestors#106.
-  # Bump this on each ingestor release; chart `version` in Chart.yaml must
-  # also bump so the auto-upgrade cronjob detects the change. Future
-  # automation in tracebloc/data-ingestors (release-image.yml) can
-  # raise a PR to this file when a new image is published.
+  # Lifecycle from v1.4.1 (#158):
+  #   * The pinned `digest` below is the INITIAL value baked into the
+  #     chart at release time — fresh installs land on this. Keep it
+  #     non-empty so jobs-manager is usable from the moment the pod
+  #     starts (an empty value would cause 503s on ingestion-submit
+  #     until the next image-refresh tick).
+  #   * The image-refresh CronJob then polls
+  #     `ghcr.io/tracebloc/ingestor:<tag below>` on its schedule and
+  #     updates the LIVE deployment's INGESTOR_IMAGE_DIGEST env via
+  #     `kubectl set env` whenever the registry serves a new digest.
+  #     Each new ingestor image push to the floating tag is picked up
+  #     within ~15 min — no chart release required for ingestor image
+  #     bumps.
+  #   * Helm's 3-way merge preserves image-refresh's writes across
+  #     future `helm upgrade`s as long as the chart's pinned `digest`
+  #     below doesn't change between chart versions. The pinned value
+  #     stays as a fallback for greenfield installs; ongoing rollouts
+  #     are owned by image-refresh.
+  #   * Bumping `digest` below in a future chart release IS still valid
+  #     and remains the explicit-baseline path (#161 was the first
+  #     example: v0.3.0 → v0.3.1 for the MLM tokenizer + metadata
+  #     parity fixes; see commit history for the rationale on any
+  #     given bump). Helm will re-sync the env to the new pinned value
+  #     on the next upgrade. Image-refresh reconverges on the registry
+  #     digest on its next tick if the two differ.
+  #
+  # Customers can also override per-install via the ingestor subchart's
+  # `image.digest` for one-off testing, independent of this value.
   ingestor:
-    digest: "sha256:463e236748708a5e3564569eec9173ea8cb3bcf515992d4939c5b610f3807a4a"
+    # Current baseline digest: v0.3.1 (2026-05-25, from #161). Patch on
+    # top of v0.3.0 carrying customer-impacting fixes —
+    # tracebloc/data-ingestors#108 (tokenizer.json copy for MLM
+    # datasets) and #119 (per-category metadata parity for tabular +
+    # keypoint). Bump only when greenfield installs should start on a
+    # different version; ongoing rollouts are managed by image-refresh.
+    digest: "sha256:a0861ea9fbf4653279351ee30af9ebe2b75fcacd391923b681631312f4a85ee4"
+    # Floating tag polled by image-refresh. The team's ghcr.io
+    # publishing convention uses semver-style float tags — `0` tracks
+    # the latest 0.x, `0.3` tracks the latest 0.3.x patch. Default is
+    # `0.3` (patch-only auto-track): a future 0.4 release will NOT be
+    # picked up automatically; the chart's pinned `digest` would need
+    # to bump and either explicitly move the chart's default tag to
+    # `0.4` or an operator would override here. Pick `0` if you want
+    # auto-tracking of minor releases too. `latest` is rejected by
+    # the schema — image-refresh behaviour must not drift.
+    tag: "0.3"
+    # Per-image opt-out for image-refresh. Default true (auto-refresh
+    # active). Set to false to lock the env at the `digest` value above
+    # — image-refresh will skip this image and leave the deployment's
+    # INGESTOR_IMAGE_DIGEST env alone. Used by operators who need
+    # reproducible pinning for debugging, certification, or air-gapped
+    # mirroring. Unlike jobs-manager (where setting `digest` itself is
+    # the opt-in to pinning), ingestor needs an explicit flag because
+    # its `digest` must be non-empty for jobs-manager to function.
+    autoRefresh: true
   podsMonitor:
     digest: ""
   resourceMonitor:
