@@ -307,6 +307,19 @@ tests:
       - matchRegex:
           path: data["image-refresh.sh"]
           pattern: 'INGESTOR_IMAGE_DIGEST=\$\{recorded_ingestor\}'
+      # No-op branch must verify rollout health, NOT just exit. A
+      # previous tick's env-drift `kubectl set env` could have
+      # committed a spec change whose `rollout status` then failed
+      # — annotation/registry/spec env all match (set env's spec
+      # write persists past the abort) but pods may be stuck. The
+      # health check makes that stuck state visible as a failed Job.
+      # Caught in PR #162 review (bugbot, medium severity).
+      - matchRegex:
+          path: data["image-refresh.sh"]
+          pattern: 'verifying deployment health'
+      - matchRegex:
+          path: data["image-refresh.sh"]
+          pattern: '(?s)digest unchanged and spec env matches.*kubectl rollout status'
 
   - it: CronJob has the right schedule, concurrency, and SA wiring
     template: templates/image-refresh-cronjob.yaml
@@ -357,12 +370,14 @@ tests:
           content:
             name: IMAGE_TAG
             value: prod
-      # #158: ingestor-specific env vars.
+      # #158: ingestor-specific env vars. Default tag is "0.3"
+      # (matches team's ghcr.io publishing convention — see the
+      # dedicated test below for rationale).
       - contains:
           path: spec.jobTemplate.spec.template.spec.containers[0].env
           content:
             name: INGESTOR_TAG
-            value: prod
+            value: "0.3"
       - contains:
           path: spec.jobTemplate.spec.template.spec.containers[0].env
           content:
@@ -389,6 +404,50 @@ tests:
           content:
             name: INGESTOR_PINNED
             value: "1"
+
+  - it: ingestor INGESTOR_TAG defaults to "0.3" (semver float tag — team's ghcr.io publishing convention)
+    # Original default was "prod" which doesn't exist on the team's
+    # ghcr.io/tracebloc/ingestor repo. Caught in PR #162 review
+    # (bugbot, medium severity) — auto-refresh silently no-op'd
+    # every tick because manifest resolution 404'd. The team's
+    # actual publishing convention uses semver-style float tags
+    # (`0`, `0.3`); `0.3` is the conservative default (patch-only
+    # auto-track) and matches what dev was tested with.
+    template: templates/image-refresh-cronjob.yaml
+    documentIndex: 1
+    asserts:
+      - contains:
+          path: spec.jobTemplate.spec.template.spec.containers[0].env
+          content:
+            name: INGESTOR_TAG
+            value: "0.3"
+      # Regression guard: must NOT regress back to `prod`.
+      - notContains:
+          path: spec.jobTemplate.spec.template.spec.containers[0].env
+          content:
+            name: INGESTOR_TAG
+            value: prod
+
+  - it: ingestor INGESTOR_TAG falls back to "0.3" (not "prod") when images.ingestor.tag is absent
+    # Simulates a --reuse-values upgrade from a pre-v1.4.1 stored
+    # manifest that has no images.ingestor.tag key. The chart-default
+    # path (handled by the test above) renders "0.3" because the
+    # default flows through; this test exercises the RUNTIME FALLBACK
+    # inside the template (`| default "X"`) when the key is missing
+    # from stored values. Both paths must converge on "0.3".
+    # Caught in PR #162 review (bugbot, medium severity).
+    template: templates/image-refresh-cronjob.yaml
+    documentIndex: 1
+    set:
+      images:
+        ingestor:
+          tag: null
+    asserts:
+      - contains:
+          path: spec.jobTemplate.spec.template.spec.containers[0].env
+          content:
+            name: INGESTOR_TAG
+            value: "0.3"
 
   - it: ingestor INGESTOR_TAG is overridable
     template: templates/image-refresh-cronjob.yaml
