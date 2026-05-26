@@ -476,8 +476,14 @@ spec:
                 - name: INGESTOR_PINNED
                   value: {{ ternary "1" "0" (eq (default dict (default dict .Values.images).ingestor).autoRefresh false) | quote }}
                 # Floating ghcr.io tag polled for ingestor digest changes.
+                # The `default "0.3"` fallback handles --reuse-values
+                # upgrades from pre-v1.4.1 stored manifests that lack
+                # the key entirely. Must stay in sync with the chart
+                # default in values.yaml — both `prod` (the original
+                # default) would 404 on ghcr.io since the team uses
+                # semver-style float tags. Caught in PR #162 review.
                 - name: INGESTOR_TAG
-                  value: {{ (default dict (default dict .Values.images).ingestor).tag | default "prod" | quote }}
+                  value: {{ (default dict (default dict .Values.images).ingestor).tag | default "0.3" | quote }}
               securityContext:
                 allowPrivilegeEscalation: false
                 readOnlyRootFilesystem: true

@@ -428,6 +428,27 @@ tests:
             name: INGESTOR_TAG
             value: prod
 
+  - it: ingestor INGESTOR_TAG falls back to "0.3" (not "prod") when images.ingestor.tag is absent
+    # Simulates a --reuse-values upgrade from a pre-v1.4.1 stored
+    # manifest that has no images.ingestor.tag key. The chart-default
+    # path (handled by the test above) renders "0.3" because the
+    # default flows through; this test exercises the RUNTIME FALLBACK
+    # inside the template (`| default "X"`) when the key is missing
+    # from stored values. Both paths must converge on "0.3".
+    # Caught in PR #162 review (bugbot, medium severity).
+    template: templates/image-refresh-cronjob.yaml
+    documentIndex: 1
+    set:
+      images:
+        ingestor:
+          tag: null
+    asserts:
+      - contains:
+          path: spec.jobTemplate.spec.template.spec.containers[0].env
+          content:
+            name: INGESTOR_TAG
+            value: "0.3"
+
   - it: ingestor INGESTOR_TAG is overridable
     template: templates/image-refresh-cronjob.yaml
     documentIndex: 1
