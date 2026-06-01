@@ -965,7 +965,9 @@ function Get-TraceblocYamlValue {
 # Resolve the backend base URL the same way jobs-manager does
 # (client-runtime/controller.py: CLIENT_ENV -> backend), defaulting to prod.
 function Get-BackendUrl {
-  switch ($env:CLIENT_ENV) {
+  # Quote the value so a truly-unset CLIENT_ENV ($null) coerces to "" and the
+  # default (prod) branch reliably fires across PowerShell versions.
+  switch ("$env:CLIENT_ENV") {
     "dev"   { return "https://dev-api.tracebloc.io/" }
     "stg"   { return "https://stg-api.tracebloc.io/" }
     default { return "https://api.tracebloc.io/" }

@@ -86,7 +86,7 @@ setup() {
 
 @test "_pf_connectivity: tool host probed (warn-only) when the tool is missing" {
   _pf_probe_url() { case "$1" in *get.docker.com*) echo blocked ;; *) echo ok ;; esac; }
-  has() { return 1; }
+  has() { [[ "$1" == "curl" ]]; }   # curl present (probing possible), other tools missing
   OS=Linux
   run _pf_connectivity
   [[ "$output" == *"get.docker.com"* ]]
@@ -186,4 +186,13 @@ setup() {
   run _pf_ncpu;         [[ "$output" =~ ^[0-9]+$ ]]
   run _pf_total_mem_kb; [[ "$output" =~ ^[0-9]+$ ]]
   run _pf_free_kb /;    [[ "$output" =~ ^[0-9]+$ ]]
+}
+
+# Code review: curl absent must SKIP connectivity (curl is installed downstream),
+# not hard-fail with a misleading "egress blocked".
+@test "_pf_connectivity: no curl -> warn + skip, not a hard fail" {
+  has() { return 1; }
+  run _pf_connectivity
+  [[ "$output" == *"Skipping connectivity"* ]]
+  PF_HARD_FAIL=0; _pf_connectivity >/dev/null 2>&1; [ "$PF_HARD_FAIL" -eq 0 ]
 }

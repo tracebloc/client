@@ -291,8 +291,10 @@ _create_new_cluster() {
 
   local create_out create_rc
   create_out="$(mktemp)"
-  k3d "${K3D_ARGS[@]}" >"$create_out" 2>&1
-  create_rc=$?
+  # Capture the exit code WITHOUT tripping `set -e`: a bare failing command here
+  # would abort the script immediately, skipping the 'already exists' reuse path,
+  # the error dump, and the temp-dir cleanup below.
+  k3d "${K3D_ARGS[@]}" >"$create_out" 2>&1 && create_rc=0 || create_rc=$?
   [[ -n "$proxy_cfg" ]] && rm -rf "${proxy_cfg%/*}"
   if [[ $create_rc -ne 0 ]]; then
     if grep -qi "already exists\|a cluster with that name already exists" "$create_out" 2>/dev/null; then
