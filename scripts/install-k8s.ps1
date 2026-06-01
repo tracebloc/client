@@ -681,6 +681,63 @@ function Install-K3dAndHelm {
 #  CLUSTER CREATION
 # =============================================================================
 
+# --- Corporate-proxy support (mirrors scripts/lib/cluster.sh) ----------------
+# Cluster-internal destinations that must never be routed through a corporate
+# proxy: loopback, all RFC1918 private ranges (the k3s pod CIDR 10.42.0.0/16,
+# service CIDR 10.43.0.0/16, the k3d docker network and node IPs), and the
+# in-cluster DNS suffixes. Echoes host NO_PROXY/no_proxy unioned with these
+# defaults, de-duplicated with host entries first.
+function Get-EffectiveNoProxy {
+  $defaults = @('localhost','127.0.0.1','0.0.0.0','10.0.0.0/8','172.16.0.0/12','192.168.0.0/16','.svc','.svc.cluster.local','.cluster.local','host.k3d.internal')
+  $existing = if ($env:NO_PROXY) { $env:NO_PROXY } elseif ($env:no_proxy) { $env:no_proxy } else { '' }
+  $seen = @{}
+  $out  = New-Object System.Collections.Generic.List[string]
+  foreach ($tok in (($existing -split ',') + $defaults)) {
+    $t = $tok.Trim()
+    if ($t -ne '' -and -not $seen.ContainsKey($t)) { $seen[$t] = $true; $out.Add($t) }
+  }
+  return ($out -join ',')
+}
+
+# Build a k3d config file carrying proxy env as structured YAML entries and
+# return its path ($null when no HTTP(S) proxy is set). We use --config rather
+# than --env KEY=VALUE@FILTER because k3d splits the --env flag on '@', which
+# corrupts authenticated-proxy URLs (http://user:pass@host); the YAML env list
+# preserves them. NO_PROXY is always emitted (auto-augmented) so in-cluster
+# traffic bypasses the proxy. Written UTF-8 without BOM (Windows PowerShell 5.1
+# would otherwise prepend a BOM that breaks the YAML parser). Caller removes the
+# parent temp dir.
+function Write-K3dProxyConfig {
+  $haveHttp = $env:HTTP_PROXY -or $env:HTTPS_PROXY -or $env:http_proxy -or $env:https_proxy
+  if (-not $haveHttp) { return $null }
+
+  $noProxy = Get-EffectiveNoProxy
+  $tmpDir  = Join-Path ([System.IO.Path]::GetTempPath()) ("tracebloc-k3d-" + [System.IO.Path]::GetRandomFileName())
+  New-Item -ItemType Directory -Path $tmpDir -Force | Out-Null
+  $cfg = Join-Path $tmpDir "config.yaml"
+
+  $lines = New-Object System.Collections.Generic.List[string]
+  $lines.Add('apiVersion: k3d.io/v1alpha5')
+  $lines.Add('kind: Simple')
+  $lines.Add('env:')
+  foreach ($name in @('HTTP_PROXY','HTTPS_PROXY','http_proxy','https_proxy')) {
+    $val = [Environment]::GetEnvironmentVariable($name)
+    if ($val) {
+      $lines.Add('  - envVar: "' + $name + '=' + $val + '"')
+      $lines.Add('    nodeFilters:')
+      $lines.Add('      - all')
+    }
+  }
+  foreach ($name in @('NO_PROXY','no_proxy')) {
+    $lines.Add('  - envVar: "' + $name + '=' + $noProxy + '"')
+    $lines.Add('    nodeFilters:')
+    $lines.Add('      - all')
+  }
+  $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+  [System.IO.File]::WriteAllLines($cfg, $lines, $utf8NoBom)
+  return $cfg
+}
+
 function New-K3dCluster {
   Log "Creating k3d cluster: '$CLUSTER_NAME'"
 
@@ -701,6 +758,19 @@ function New-K3dCluster {
       k3d cluster start $CLUSTER_NAME
       Ok "Compute environment started."
     }
+
+    # Gap C parity: an externally-created cluster may bind its API to 0.0.0.0;
+    # warn (the kubeconfig rewrite below still normalizes it to 127.0.0.1, so
+    # reuse works). Silent if the serverlb can't be inspected.
+    try {
+      $binds = (docker inspect "k3d-$CLUSTER_NAME-serverlb" --format '{{range $p, $c := .NetworkSettings.Ports}}{{range $c}}{{.HostIp}} {{end}}{{end}}' 2>$null | Out-String)
+      if ($binds -match '0\.0\.0\.0' -and $binds -notmatch '127\.0\.0\.1') {
+        Warn "The existing '$CLUSTER_NAME' cluster binds its API to 0.0.0.0 (created outside this installer)."
+        Hint "This installer binds clusters to 127.0.0.1; behind a corporate proxy a 0.0.0.0 bind can be intercepted."
+        Hint "Your kubeconfig is normalized to 127.0.0.1 so reuse works. If kubectl is still intercepted, rebuild it:"
+        Hint "  k3d cluster delete $CLUSTER_NAME  (then re-run this installer)."
+      }
+    } catch {}
   } else {
     if (-not (Test-Path $HOST_DATA_DIR)) {
       New-Item -ItemType Directory -Path $HOST_DATA_DIR -Force | Out-Null
@@ -714,7 +784,7 @@ function New-K3dCluster {
       "cluster", "create", $CLUSTER_NAME,
       "--servers", $SERVERS,
       "--agents",  $AGENTS,
-      "--api-port","6550",
+      "--api-port","127.0.0.1:6550",
       "-v",        "${HOST_DATA_DIR}:/tracebloc@all",
       "--k3s-arg", "--disable=traefik@server:*",
       "--k3s-arg", "--disable=servicelb@server:*",
@@ -726,6 +796,16 @@ function New-K3dCluster {
     if ($K3D_GPU_FLAG -ne "") {
       $k3dArgs += $K3D_GPU_FLAG
       Log "GPU flag active: $K3D_GPU_FLAG"
+    }
+
+    # Corporate-proxy propagation (mirrors scripts/lib/cluster.sh): pass proxy
+    # env via a k3d --config file so authenticated proxies survive and NO_PROXY
+    # is auto-augmented with the cluster-internal ranges (prevents in-cluster
+    # misroute + the create-time --wait hang).
+    $proxyCfg = Write-K3dProxyConfig
+    if ($proxyCfg) {
+      $k3dArgs += @("--config", $proxyCfg)
+      Log "Propagating proxy settings to k3d nodes (authenticated proxies supported; NO_PROXY auto-augmented)."
     }
 
     Log "Creating cluster: $SERVERS server(s) + $AGENTS agent(s)..."
@@ -760,6 +840,7 @@ function New-K3dCluster {
     $k3dStdout = if (Test-Path $k3dOutLog) { Get-Content $k3dOutLog -Raw -ErrorAction SilentlyContinue } else { "" }
     $k3dStderr = if (Test-Path $k3dErrLog) { Get-Content $k3dErrLog -Raw -ErrorAction SilentlyContinue } else { "" }
     Remove-Item $k3dOutLog, $k3dErrLog -Force -ErrorAction SilentlyContinue
+    if ($proxyCfg) { Remove-Item (Split-Path $proxyCfg -Parent) -Recurse -Force -ErrorAction SilentlyContinue }
     if ($k3dStdout) { Log "k3d stdout: $k3dStdout" }
     if ($k3dStderr) { Log "k3d stderr: $k3dStderr" }
 
@@ -771,7 +852,16 @@ function New-K3dCluster {
 
   $kubeConfigPath = "$env:USERPROFILE\.kube\config"
   if (Test-Path $kubeConfigPath) {
-    (Get-Content $kubeConfigPath) -replace 'host\.docker\.internal', '127.0.0.1' | Set-Content $kubeConfigPath -Encoding UTF8
+    (Get-Content $kubeConfigPath) `
+      -replace 'host\.docker\.internal', '127.0.0.1' `
+      -replace 'https://0\.0\.0\.0:', 'https://127.0.0.1:' | Set-Content $kubeConfigPath -Encoding UTF8
+  }
+
+  # Ensure THIS installer's own kubectl bypasses the proxy for the cluster API
+  # (127.0.0.1) + in-cluster ranges (mirrors cluster.sh::_export_host_no_proxy).
+  if ($env:HTTP_PROXY -or $env:HTTPS_PROXY -or $env:http_proxy -or $env:https_proxy) {
+    $env:NO_PROXY = Get-EffectiveNoProxy
+    $env:no_proxy = $env:NO_PROXY
   }
 
   Log "kubeconfig updated -- kubectl now points to '$CLUSTER_NAME'."
