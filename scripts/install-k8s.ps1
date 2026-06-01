@@ -122,6 +122,8 @@ $CLIENT_ENV    = $env:CLIENT_ENV
 $GPU_VENDOR       = "none"
 $NVIDIA_DRIVER_OK = $false
 $K3D_GPU_FLAG     = ""
+$ReadyTimeout     = if ($env:READY_TIMEOUT) { $env:READY_TIMEOUT } else { "300" }
+$script:ClientState = "starting"
 
 # =============================================================================
 #  HELP
@@ -848,6 +850,39 @@ function Get-TraceblocYamlValue {
   return $val
 }
 
+# Resolve the backend base URL the same way jobs-manager does
+# (client-runtime/controller.py: CLIENT_ENV -> backend), defaulting to prod.
+function Get-BackendUrl {
+  switch ($env:CLIENT_ENV) {
+    "dev"   { return "https://dev-api.tracebloc.io/" }
+    "stg"   { return "https://stg-api.tracebloc.io/" }
+    default { return "https://api.tracebloc.io/" }
+  }
+}
+
+# Validate the entered Client ID / password against the backend's
+# api-token-auth/ endpoint -- the same call jobs-manager makes at runtime.
+# Returns: valid | invalid | inactive | unverified.
+function Test-Credentials {
+  param([string]$ClientId, [string]$ClientPassword)
+  $backend = Get-BackendUrl
+  try {
+    $resp = Invoke-WebRequest -Uri "${backend}api-token-auth/" -Method Post `
+      -Body @{ username = $ClientId; password = $ClientPassword } `
+      -TimeoutSec 60 -UseBasicParsing -ErrorAction Stop
+    if ($resp.StatusCode -eq 200) { return "valid" }
+    return "unverified"
+  } catch {
+    $code = $null
+    if ($_.Exception.Response) { $code = [int]$_.Exception.Response.StatusCode }
+    switch ($code) {
+      400     { return "invalid" }
+      401     { return "inactive" }
+      default { return "unverified" }   # 429 throttled, connection failure, 5xx, …
+    }
+  }
+}
+
 function Install-ClientHelm {
   # -- Step 3/4: Install tracebloc client --
   Step 3 4 "Installing tracebloc client"
@@ -887,6 +922,7 @@ function Install-ClientHelm {
   $nsInput = Read-Host "  Workspace name [$defaultNamespace]"
   $rawName = if ($nsInput) { $nsInput } else { $defaultNamespace }
   $TB_NAMESPACE = ConvertTo-WorkspaceName -Input_ $rawName
+  $script:TB_NAMESPACE = $TB_NAMESPACE   # share with Wait-ForClientReady / Print-Summary
 
   if ($TB_NAMESPACE -ne $rawName) {
     Info "Using workspace: $TB_NAMESPACE"
@@ -903,28 +939,53 @@ function Install-ClientHelm {
   Write-Host "    " -NoNewline; Write-Host "https://ai.tracebloc.io/clients" -ForegroundColor White
   Write-Host ""
 
-  if ($defaultClientId) {
-    $idInput = Read-Host "  Client ID [$defaultClientId]"
-    $TB_CLIENT_ID = if ($idInput) { $idInput } else { $defaultClientId }
-  } else {
-    $TB_CLIENT_ID = Read-Host "  Client ID"
-  }
-  if (-not $TB_CLIENT_ID) { Err "Client ID cannot be empty." }
+  # Collect + verify credentials. The entered Client ID / password are checked
+  # against the backend (the same api-token-auth/ call jobs-manager makes)
+  # before we deploy, so a wrong credential is caught here -- with a re-prompt --
+  # instead of surfacing later as a silently crash-looping pod.
+  $credAttempt = 0; $credMax = 5
+  while ($true) {
+    if ($defaultClientId) {
+      $idInput = Read-Host "  Client ID [$defaultClientId]"
+      $TB_CLIENT_ID = if ($idInput) { $idInput } else { $defaultClientId }
+    } else {
+      $TB_CLIENT_ID = Read-Host "  Client ID"
+    }
+    if (-not $TB_CLIENT_ID) { Warn "Client ID cannot be empty."; continue }
 
-  if ($defaultClientPassword) {
-    $pwInput = Read-Host "  Client password [press Enter to keep existing]" -AsSecureString
-    if ($pwInput -and $pwInput.Length -gt 0) {
+    if ($defaultClientPassword) {
+      $pwInput = Read-Host "  Client password [press Enter to keep existing]" -AsSecureString
+      if ($pwInput -and $pwInput.Length -gt 0) {
+        $BSTR = [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($pwInput)
+        try { $TB_CLIENT_PASSWORD = [System.Runtime.InteropServices.Marshal]::PtrToStringAuto($BSTR) } finally { [System.Runtime.InteropServices.Marshal]::ZeroFreeBSTR($BSTR) }
+      } else {
+        $TB_CLIENT_PASSWORD = $defaultClientPassword
+      }
+    } else {
+      $pwInput = Read-Host "  Client password" -AsSecureString
       $BSTR = [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($pwInput)
       try { $TB_CLIENT_PASSWORD = [System.Runtime.InteropServices.Marshal]::PtrToStringAuto($BSTR) } finally { [System.Runtime.InteropServices.Marshal]::ZeroFreeBSTR($BSTR) }
-    } else {
-      $TB_CLIENT_PASSWORD = $defaultClientPassword
     }
-  } else {
-    $pwInput = Read-Host "  Client password" -AsSecureString
-    $BSTR = [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($pwInput)
-    try { $TB_CLIENT_PASSWORD = [System.Runtime.InteropServices.Marshal]::PtrToStringAuto($BSTR) } finally { [System.Runtime.InteropServices.Marshal]::ZeroFreeBSTR($BSTR) }
+    if (-not $TB_CLIENT_PASSWORD) { Warn "Client password cannot be empty."; continue }
+
+    Info "Verifying credentials with tracebloc..."
+    $credStatus = Test-Credentials -ClientId $TB_CLIENT_ID -ClientPassword $TB_CLIENT_PASSWORD
+    if ($credStatus -eq "valid") { Ok "Credentials verified."; break }
+    elseif ($credStatus -eq "inactive") { Err "This tracebloc account is not active yet. Check your email for the activation link, then re-run." }
+    elseif ($credStatus -eq "unverified") {
+      Warn "Couldn't reach tracebloc to verify your credentials right now - continuing."
+      Hint "If they are wrong, your client will stay offline at https://ai.tracebloc.io/clients after install."
+      break
+    } else {
+      Warn "That Client ID / password was rejected by tracebloc - please re-enter."
+      Hint "Find your credentials at https://ai.tracebloc.io/clients"
+    }
+
+    $credAttempt++
+    if ($credAttempt -ge $credMax) { Err "Too many failed attempts. Double-check your credentials at https://ai.tracebloc.io/clients and re-run." }
+    # Force active re-entry on retry (don't silently reuse a rejected default).
+    $defaultClientId = ""; $defaultClientPassword = ""
   }
-  if (-not $TB_CLIENT_PASSWORD) { Err "Client password cannot be empty." }
 
   $passwordEscaped = $TB_CLIENT_PASSWORD -replace "'", "''"
 
@@ -1013,46 +1074,117 @@ function Confirm-Cluster {
   Log $clusterInfo
   $nodes = kubectl get nodes -o wide 2>&1 | Out-String
   Log $nodes
+  $pods = kubectl get pods -n $script:TB_NAMESPACE -o wide 2>&1 | Out-String
+  Log $pods
   Log "--- End Cluster Status ---"
+}
+
+# ── Readiness gate (#716) ─────────────────────────────────────────────────
+# helm install only *applies* manifests; it does not wait for pods. Wait for the
+# client's workloads to actually become Ready and set $script:ClientState so the
+# summary reports the truth: connected | starting | bad_creds | image_pull | crash
+function Wait-ForClientReady {
+  $ns = $script:TB_NAMESPACE
+  $deploys = @("mysql-client", "$ns-jobs-manager", "$ns-requests-proxy")
+  $deadline = (Get-Date).AddSeconds([int]$ReadyTimeout)
+  $allReady = $true
+
+  Write-Host ""
+  Info "Waiting for the client to start - first run downloads images, this can take a few minutes..."
+  foreach ($d in $deploys) {
+    $remaining = [int]((New-TimeSpan -Start (Get-Date) -End $deadline).TotalSeconds)
+    if ($remaining -lt 10) { $remaining = 10 }
+    & kubectl rollout status "deployment/$d" -n $ns "--timeout=${remaining}s" 2>&1 | Out-Null
+    if ($LASTEXITCODE -eq 0) {
+      Ok ("{0} ready" -f ($d -replace "^$ns-", ""))
+    } else {
+      $allReady = $false
+      break
+    }
+  }
+
+  Confirm-Cluster
+  if ($allReady) { $script:ClientState = "connected" }
+  else { $script:ClientState = (Get-NotReadyState -Namespace $ns) }
+}
+
+# Classify why the client isn't Ready, for an accurate message. Returns a state.
+function Get-NotReadyState {
+  param([string]$Namespace)
+  # Wrong credentials: jobs-manager authenticates to the backend on startup and
+  # crash-loops when rejected -- surfaced as an auth error in its logs.
+  $jmLogs = (& kubectl logs -n $Namespace "deployment/$Namespace-jobs-manager" --all-containers --tail=50 2>$null | Out-String)
+  if ($jmLogs -match '(?i)authentication failed|unable to log in') { return "bad_creds" }
+  $pods = (& kubectl get pods -n $Namespace 2>$null | Out-String)
+  if ($pods -match '(?i)ImagePullBackOff|ErrImagePull|InvalidImageName') { return "image_pull" }
+  if ($pods -match '(?i)CrashLoopBackOff') { return "crash" }
+  return "starting"
 }
 
 # =============================================================================
 #  SUMMARY
 # =============================================================================
 
+# Reports the outcome based on $script:ClientState (set by Wait-ForClientReady).
+# The "secure compute environment / your data never leaves" claim is printed
+# ONLY when the client is verifiably connected -- never on a partial/failed run.
 function Print-Summary {
   $mode = "CPU"
   if ($GPU_VENDOR -eq "nvidia" -and $NVIDIA_DRIVER_OK) { $mode = "NVIDIA GPU" }
   elseif ($GPU_VENDOR -eq "nvidia" -and -not $NVIDIA_DRIVER_OK) { $mode = "CPU (NVIDIA driver update needed)" }
+  $ns = $script:TB_NAMESPACE
+  $line = [string]([char]0x2501) * 46
 
   Write-Host ""
-  Write-Host "  " -NoNewline; Write-Host ([string]([char]0x2501) * 46) -ForegroundColor Green
-  Write-Host ""
-  Write-Host "  " -NoNewline; Write-Host "tracebloc client installed successfully" -ForegroundColor Green
-  Write-Host ""
-  Write-Host "  " -NoNewline; Write-Host "Workspace" -ForegroundColor White -NoNewline; Write-Host " : " -NoNewline; Write-Host $TB_NAMESPACE -ForegroundColor Cyan
-  Write-Host "  " -NoNewline; Write-Host "Mode     " -ForegroundColor White -NoNewline; Write-Host " : " -NoNewline; Write-Host $mode -ForegroundColor Cyan
-  Write-Host ""
-  Hint "This machine is now a secure compute environment"
-  Hint "on the tracebloc network. External AI vendors can"
-  Hint "submit models to be trained and evaluated here --"
-  Hint "your data never leaves your infrastructure."
-  Write-Host ""
-  Write-Host "  What to do next" -ForegroundColor White
-  Write-Host ""
-  Write-Host "  1. " -NoNewline; Write-Host "Open the tracebloc dashboard"
-  Write-Host "     " -NoNewline; Write-Host "https://ai.tracebloc.io" -ForegroundColor Cyan
-  Write-Host ""
-  Write-Host "  2. " -NoNewline; Write-Host "Ingest your training and test data"
-  Write-Host ""
-  Write-Host "  3. " -NoNewline; Write-Host "Define your first AI use case and"
-  Write-Host "     invite vendors to submit models"
-  Write-Host ""
-  Hint "Need help?  https://docs.tracebloc.io"
-  Hint "Logs:       ~\.tracebloc\"
-  Hint "Data:       /tracebloc/$TB_NAMESPACE"
-  Write-Host ""
-  Write-Host "  " -NoNewline; Write-Host ([string]([char]0x2501) * 46) -ForegroundColor Green
+  switch ($script:ClientState) {
+    "connected" {
+      Write-Host "  $line" -ForegroundColor Green
+      Write-Host ""
+      Write-Host "  " -NoNewline; Write-Host "$([char]0x2714) Connected to tracebloc" -ForegroundColor Green
+      Write-Host ""
+      Write-Host "  Workspace : " -NoNewline; Write-Host $ns -ForegroundColor Cyan
+      Write-Host "  Mode      : " -NoNewline; Write-Host $mode -ForegroundColor Cyan
+      Write-Host ""
+      Write-Host "  Your client is live. Confirm it shows as Online:"
+      Write-Host "    https://ai.tracebloc.io/clients" -ForegroundColor Cyan
+      Write-Host ""
+      Hint "Models that vendors submit train on this machine -- your data never leaves it."
+      Write-Host ""
+      Write-Host "  What to do next" -ForegroundColor White
+      Write-Host "  1. Ingest your training and test data"
+      Write-Host "  2. Define your first AI use case and invite vendors"
+      Write-Host ""
+      Hint "Dashboard: https://ai.tracebloc.io   Logs: ~\.tracebloc\   Data: /tracebloc/$ns"
+      Write-Host ""
+      Write-Host "  $line" -ForegroundColor Green
+    }
+    "starting" {
+      Write-Host "  " -NoNewline; Write-Host "$([char]0x26A0)  Almost there - tracebloc is installed but still starting." -ForegroundColor Yellow
+      Write-Host ""
+      Write-Host "  Components are still downloading/starting (first run can take a few minutes)."
+      Write-Host "  Check progress:   kubectl get pods -n $ns" -ForegroundColor Cyan
+      Write-Host ""
+      Write-Host "  Your client will show as Online at https://ai.tracebloc.io/clients once it finishes."
+      Hint "Re-running this installer is safe."
+    }
+    "bad_creds" {
+      Write-Host "  " -NoNewline; Write-Host "$([char]0x2716) Couldn't connect - your Client ID or password was rejected." -ForegroundColor Red
+      Write-Host ""
+      Write-Host "  The environment installed, but tracebloc refused those credentials."
+      Write-Host "    1. Re-check them at https://ai.tracebloc.io/clients" -ForegroundColor Cyan
+      Write-Host "    2. Re-run this installer (safe to re-run)"
+    }
+    default {
+      $reason = "a component didn't start"
+      if ($script:ClientState -eq "image_pull") { $reason = "an image couldn't be pulled" }
+      if ($script:ClientState -eq "crash")      { $reason = "a container is restarting (crash loop)" }
+      Write-Host "  " -NoNewline; Write-Host "$([char]0x2716) Setup didn't finish - $reason." -ForegroundColor Red
+      Write-Host ""
+      Write-Host "  Inspect:  kubectl get pods -n $ns" -ForegroundColor Cyan
+      Write-Host "  Logs:     ~\.tracebloc\install-*.log"
+      Hint "Re-running this installer is safe."
+    }
+  }
   Write-Host ""
 
   # Advanced info for log only
@@ -1105,7 +1237,11 @@ Confirm-GpuNode
 # -- Steps 3/4 + 4/4 handled inside Install-ClientHelm --
 Install-ClientHelm
 
-Confirm-Cluster
+# Verify the client actually came up before reporting anything
+Wait-ForClientReady
 Print-Summary
 
 try { Stop-Transcript | Out-Null } catch {}
+
+# Exit code reflects reality: connected/starting are OK; failures are non-zero.
+if ($script:ClientState -ne "connected" -and $script:ClientState -ne "starting") { exit 1 }
