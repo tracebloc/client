@@ -98,7 +98,7 @@ _create_new_cluster() {
     cluster create "$CLUSTER_NAME"
     --servers "$SERVERS"
     --agents  "$AGENTS"
-    --api-port 6550
+    --api-port 127.0.0.1:6550
     -v "${HOST_DATA_DIR}:/tracebloc@all"
     --k3s-arg "--disable=traefik@server:*"
     --k3s-arg "--disable=servicelb@server:*"
@@ -116,6 +116,16 @@ _create_new_cluster() {
     log "Creating cluster with $SERVERS server(s) + $AGENTS agent(s) (CPU-only)..."
   fi
   hint "First run may take 1-2 minutes to download components."
+
+  # Propagate corporate proxy env vars so k3s/k3d containers can reach external
+  # registries behind HTTP/HTTPS proxies (hospital/banking/government tenants).
+  # Loop checks both upper- and lower-case forms — apps in containers read either.
+  for var in HTTP_PROXY HTTPS_PROXY NO_PROXY http_proxy https_proxy no_proxy; do
+    if [[ -n "${!var:-}" ]]; then
+      K3D_ARGS+=(--env "${var}=${!var}@all")
+      log "Propagating ${var} to k3d nodes."
+    fi
+  done
 
   local create_out create_rc
   create_out="$(mktemp)"
@@ -144,6 +154,18 @@ _merge_kubeconfig() {
     --kubeconfig-merge-default \
     --kubeconfig-switch-context \
     >/dev/null 2>&1
+
+  # Defensive normalization: k3d may still emit 0.0.0.0 server URLs into the
+  # kubeconfig (older k3d versions, or pre-existing entries from previous
+  # installs). Behind a corporate HTTP/HTTPS proxy, 0.0.0.0 gets intercepted
+  # and kubectl fails. Anchored to `https://0.0.0.0:` so CIDR ranges and other
+  # 0.0.0.0 occurrences elsewhere in the file are left untouched.
+  if [[ -f "$KUBECONFIG" ]] && grep -q 'https://0\.0\.0\.0:' "$KUBECONFIG"; then
+    sed -i.bak 's|https://0\.0\.0\.0:|https://127.0.0.1:|g' "$KUBECONFIG"
+    rm -f "${KUBECONFIG}.bak"
+    log "Normalized kubeconfig server URL: 0.0.0.0 → 127.0.0.1 (corporate-proxy safety)."
+  fi
+
   log "kubeconfig updated — kubectl now points to '$CLUSTER_NAME'."
 }
 
@@ -168,5 +190,8 @@ _wait_for_api() {
   done
   printf "\r\033[K"
   tput cnorm 2>/dev/null || true
-  error "Compute environment did not start within 60s. Check Docker and try again."
+  error "kubectl cluster-info failed for 60s. Cluster reports running, but the API is unreachable. Possible causes:
+   (a) Docker daemon stopped (run 'docker ps' to verify);
+   (b) corporate HTTP/HTTPS proxy intercepting localhost — ensure NO_PROXY includes '127.0.0.1,localhost';
+   (c) kubeconfig has 0.0.0.0 — try: sed -i 's|0.0.0.0|127.0.0.1|g' ~/.kube/config"
 }
