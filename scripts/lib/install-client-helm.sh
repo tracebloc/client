@@ -44,22 +44,35 @@ _extract_yaml_value() {
     line="${line#\"}"
     line="${line%\"}"
   fi
-  # Strip C0 controls + DEL on extract — defends against self-perpetuation when
-  # a previous run wrote a corrupted value (see #168). UTF-8 (0x80+) preserved.
-  printf '%s' "$line" | tr -d '\000-\037\177'
+  # Defend against self-perpetuation: a previous corrupted save may have the
+  # bracketed-paste markers and/or C0 controls (#168). _strip_paste_garbage
+  # handles both. UTF-8 (0x80+) preserved.
+  _strip_paste_garbage "$line"
 }
 
-# Strip C0 control characters (0x00-0x1F) and DEL (0x7F) from credential input.
+# Strip bracketed-paste markers and C0 control characters from a value.
 # Bracketed-paste-enabled terminals wrap pasted text in ESC[200~ ... ESC[201~
-# (ESC = 0x1B); without stripping, these bytes land in values.yaml and Helm
-# rejects the file ("yaml: control characters are not allowed"). UTF-8 bytes
-# (0x80+) are preserved so passwords with international characters work.
+# (ESC = 0x1B). Stripping ESC alone leaves the literal `[200~` / `[201~`
+# remnants visible in the value, so match both the full ESC-prefixed form and
+# the standalone-marker form. UTF-8 bytes (0x80+) preserved.
+_strip_paste_garbage() {
+  local s="$1"
+  s="${s//$'\e'\[200\~/}"
+  s="${s//$'\e'\[201\~/}"
+  s="${s//\[200\~/}"
+  s="${s//\[201\~/}"
+  printf '%s' "$s" | tr -d '\000-\037\177'
+}
+
+# Sanitize a user-entered credential. Calls _strip_paste_garbage and notifies
+# the user on stderr (NOT stdout — this function is called from inside $(...),
+# so stdout is captured into the credential value itself).
 _sanitize_credential() {
   local input="$1"
   local clean
-  clean=$(printf '%s' "$input" | tr -d '\000-\037\177')
+  clean=$(_strip_paste_garbage "$input")
   if [[ "$clean" != "$input" ]]; then
-    warn "Stripped non-printable characters from input (likely paste-mode escape codes)."
+    warn "Stripped non-printable / paste-mode characters from input." >&2
   fi
   printf '%s' "$clean"
 }
