@@ -50,12 +50,17 @@ source "${LIB_DIR}/cluster.sh"
 source "${LIB_DIR}/gpu-plugins.sh"
 source "${LIB_DIR}/install-client-helm.sh"
 source "${LIB_DIR}/summary.sh"
+source "${LIB_DIR}/diagnose.sh"
 
 trap install_cleanup EXIT
 
 # ── Main ─────────────────────────────────────────────────────────────────────
 main() {
   [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]] && print_help
+  # Support bundle: collect redacted diagnostics and exit, before any install
+  # work (so it works even when the install is broken). Clear the EXIT trap so
+  # the post-install cleanup message doesn't fire after a diagnose run.
+  [[ "${1:-}" == "--diagnose" ]] && { trap - EXIT; run_diagnose; exit $?; }
 
   validate_config
   setup_log_file

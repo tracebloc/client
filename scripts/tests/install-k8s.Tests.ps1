@@ -8,6 +8,8 @@ BeforeAll {
   # Stubs so Pester can mock external commands that the functions invoke.
   function kubectl { }
   function docker { }
+  function helm { }
+  function k3d { }
 }
 
 Describe "Get-BackendUrl" {
@@ -376,5 +378,46 @@ Describe "Set-ClusterAutostart" {
     Mock docker { }
     Set-ClusterAutostart
     Should -Invoke docker -Times 0 -Exactly
+  }
+}
+
+# --- diagnose support bundle (mirrors scripts/lib/diagnose.sh) ---------------
+Describe "Edit-Redaction" {
+  It "redacts clientPassword / proxy creds / token; keeps clientId + NO_PROXY" {
+    $f = Join-Path $TestDrive "v.txt"
+    @"
+clientId: "abc-123"
+clientPassword: 'S3cr3tP@ss'
+HTTP_PROXY=http://user:s3cr3t@proxy:8080
+token: ghp_SECRET
+NO_PROXY=localhost,127.0.0.1
+"@ | Set-Content $f
+    Edit-Redaction $f
+    $c = Get-Content $f -Raw
+    $c | Should -Not -Match 'S3cr3tP@ss'
+    $c | Should -Not -Match 's3cr3t'
+    $c | Should -Not -Match 'ghp_SECRET'
+    $c | Should -Match 'abc-123'
+    $c | Should -Match '127\.0\.0\.1'
+  }
+  It "missing file -> no throw" {
+    { Edit-Redaction (Join-Path $TestDrive "nope.txt") } | Should -Not -Throw
+  }
+}
+
+Describe "Invoke-DiagnoseBundle" {
+  It "produces a bundle and a seeded secret does NOT survive in it" {
+    $HOST_DATA_DIR = Join-Path $TestDrive "tb"
+    New-Item -ItemType Directory -Path $HOST_DATA_DIR -Force | Out-Null
+    "clientPassword: 'LEAKME123'" | Set-Content (Join-Path $HOST_DATA_DIR "values.yaml")
+    Mock kubectl { "" }; Mock docker { "" }; Mock helm { "" }; Mock k3d { "" }
+    Mock Get-WindowsArch { "amd64" }   # avoid the PROCESSOR_ARCHITECTURE Err off-Windows
+    { Invoke-DiagnoseBundle } | Should -Not -Throw
+    $zip = Get-ChildItem $HOST_DATA_DIR -Filter 'tracebloc-diagnose-*.zip' | Select-Object -First 1
+    $zip | Should -Not -BeNullOrEmpty
+    $ex = Join-Path $TestDrive "ex"
+    Expand-Archive -Path $zip.FullName -DestinationPath $ex -Force
+    $all = (Get-ChildItem $ex -Recurse -File | ForEach-Object { Get-Content $_.FullName -Raw }) -join "`n"
+    $all | Should -Not -Match 'LEAKME123'
   }
 }

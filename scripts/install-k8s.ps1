@@ -23,7 +23,7 @@
 # =============================================================================
 
 #Requires -Version 5.1
-param([switch]$Help, [switch]$NoReboot)
+param([switch]$Help, [switch]$NoReboot, [switch]$Diagnose)
 
 # -- Admin check --------------------------------------------------------------
 # $env:TB_PESTER lets the test suite dot-source this file to load the functions
@@ -1429,12 +1429,96 @@ function Test-Preflight {
 }
 
 # =============================================================================
+#  DIAGNOSE — `-Diagnose` support bundle (mirrors scripts/lib/diagnose.sh)
+# =============================================================================
+
+# Redact secrets from a file IN PLACE. Applied to every collected file before
+# archiving. Single-quoted replacement strings keep $1 literal for the regex.
+# Written UTF-8 without BOM.
+function Edit-Redaction([string]$Path) {
+  if (-not (Test-Path $Path)) { return }
+  try {
+    $t = Get-Content -Path $Path -Raw -ErrorAction Stop
+    $t = $t -replace '(?i)(client[_-]?password\s*[:=]\s*).*', '$1[REDACTED]'
+    $t = $t -replace '([a-zA-Z][a-zA-Z0-9+.-]*://)[^:/@\s]+:[^@/\s]+@', '$1[REDACTED]@'
+    $t = $t -replace '(?i)(password\s*=\s*)[^\s&"]*', '$1[REDACTED]'
+    $t = $t -replace '(?i)((token|secret|authorization|api[_-]?key)\s*[:=]\s*).*', '$1[REDACTED]'
+    $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+    [System.IO.File]::WriteAllText($Path, $t, $utf8NoBom)
+  } catch {}
+}
+
+function Invoke-DiagnoseBundle {
+  $ts = Get-Date -Format 'yyyyMMdd-HHmmss'
+  $base = if ($HOST_DATA_DIR) { $HOST_DATA_DIR } else { "$env:USERPROFILE\.tracebloc" }
+  $cn = if ($CLUSTER_NAME) { $CLUSTER_NAME } else { "tracebloc" }
+  New-Item -ItemType Directory -Path $base -Force -ErrorAction SilentlyContinue | Out-Null
+  $work = Join-Path ([System.IO.Path]::GetTempPath()) ("tracebloc-diag-" + [System.IO.Path]::GetRandomFileName())
+  $d = Join-Path $work "tracebloc-diagnose-$ts"
+  New-Item -ItemType Directory -Path (Join-Path $d "logs") -Force | Out-Null
+
+  Info "Collecting diagnostics -- this is safe; credentials are redacted before the file is written."
+
+  # Namespace discovery (TB_NAMESPACE isn't set on a standalone diagnose run).
+  $ns = $TB_NAMESPACE
+  if (-not $ns) {
+    $jm = kubectl get pods -A 2>$null | Select-String '\-jobs-manager' | Select-Object -First 1
+    if ($jm) { $ns = ($jm.ToString().Trim() -split '\s+')[0] }
+  }
+  if (-not $ns) { $ns = "default" }
+
+  # host / versions
+  $h = @("# tracebloc diagnose ($ts)", "OS: Windows  ARCH: $(Get-WindowsArch)",
+         "CLIENT_ENV: $($env:CLIENT_ENV)  CLUSTER_NAME: $cn  NAMESPACE: $ns", "## versions",
+         (k3d version 2>&1 | Out-String), (kubectl version --client 2>&1 | Out-String),
+         (helm version --short 2>&1 | Out-String), (docker version 2>&1 | Out-String))
+  try { $cs = Get-CimInstance Win32_ComputerSystem -ErrorAction Stop; $h += "CPUs=$($cs.NumberOfLogicalProcessors)  MemBytes=$($cs.TotalPhysicalMemory)" } catch {}
+  ($h -join "`n") | Out-File (Join-Path $d "00-host.txt") -Encoding utf8
+
+  ((docker ps -a --filter "name=k3d-$cn-" 2>&1 | Out-String) + "`n" + (k3d cluster list 2>&1 | Out-String)) | Out-File (Join-Path $d "01-docker.txt") -Encoding utf8
+
+  if (Get-Command kubectl -ErrorAction SilentlyContinue) {
+    (@("## nodes", (kubectl get nodes -o wide 2>&1 | Out-String),
+       "## pods", (kubectl get pods -A -o wide 2>&1 | Out-String),
+       "## events", (kubectl get events -A 2>&1 | Out-String)) -join "`n") | Out-File (Join-Path $d "02-kubectl.txt") -Encoding utf8
+    foreach ($w in @("mysql-client", "$ns-jobs-manager", "$ns-requests-proxy")) {
+      kubectl logs -n $ns "deploy/$w" --all-containers --tail=500 2>&1 | Out-File (Join-Path $d "logs/$w.log") -Encoding utf8
+    }
+  }
+  if (Get-Command helm -ErrorAction SilentlyContinue) {
+    (@("## helm list", (helm list -A 2>&1 | Out-String), "## values", (helm get values $ns -n $ns 2>&1 | Out-String)) -join "`n") | Out-File (Join-Path $d "04-helm.txt") -Encoding utf8
+  }
+
+  Get-ChildItem -Path $base -Filter "install-*.log" -ErrorAction SilentlyContinue | ForEach-Object { Copy-Item $_.FullName (Join-Path $d $_.Name) -ErrorAction SilentlyContinue }
+  if (Test-Path "$base\values.yaml") { Copy-Item "$base\values.yaml" (Join-Path $d "values.yaml") -ErrorAction SilentlyContinue }
+
+  (("## proxy env`n") + ((@("HTTP_PROXY","HTTPS_PROXY","NO_PROXY") | ForEach-Object { "$_=" + [Environment]::GetEnvironmentVariable($_) }) -join "`n")) | Out-File (Join-Path $d "05-proxy.txt") -Encoding utf8
+
+  # REDACT every collected file, THEN archive.
+  Get-ChildItem -Path $d -Recurse -File | ForEach-Object { Edit-Redaction $_.FullName }
+  $bundle = Join-Path $base "tracebloc-diagnose-$ts.zip"
+  if (Test-Path $bundle) { Remove-Item $bundle -Force -ErrorAction SilentlyContinue }
+  Compress-Archive -Path $d -DestinationPath $bundle -Force -ErrorAction SilentlyContinue
+  Remove-Item $work -Recurse -Force -ErrorAction SilentlyContinue
+
+  Write-Host ""
+  if (Test-Path $bundle) {
+    Ok "Diagnostics saved (credentials redacted):"
+    Write-Host "    $bundle"
+    Hint "Send this file to tracebloc support -- it has logs + status with passwords removed."
+  } else {
+    Write-Host "  Could not create the diagnostics archive." -ForegroundColor Red
+  }
+}
+
+# =============================================================================
 #  MAIN
 # =============================================================================
 
 if (-not $env:TB_PESTER) {
 
 if ($Help) { Print-Help }
+if ($Diagnose) { Invoke-DiagnoseBundle; exit 0 }
 
 Confirm-Config
 Initialize-ToolDir
