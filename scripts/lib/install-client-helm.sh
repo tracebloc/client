@@ -44,7 +44,50 @@ _extract_yaml_value() {
     line="${line#\"}"
     line="${line%\"}"
   fi
-  printf '%s' "$line"
+  # Defend against self-perpetuation: a previous corrupted save may have the
+  # bracketed-paste markers and/or C0 controls (#168). _strip_paste_garbage
+  # handles both. UTF-8 (0x80+) preserved.
+  _strip_paste_garbage "$line"
+}
+
+# Strip ANSI escape sequences and C0 control characters from a value.
+# `read -r -s` captures whatever the terminal sends — this can include:
+#   • bracketed-paste wrappers:  ESC[200~ ... ESC[201~
+#   • arrow keys / cursor moves: ESC[A/B/C/D, ESC[1;5C, ESC[3~ (Delete), …
+#   • function keys, modifier combos, mode-switch sequences
+# All follow the ANSI CSI shape:  ESC '[' <params> <final-byte>
+# where params ∈ [0-9;] and final ∈ [A-Za-z~]. Strip them iteratively to
+# handle consecutive sequences (e.g. paste-wrappers).
+#
+# Also handles the post-corruption case where ESC was stripped by an earlier
+# (buggy) sanitizer but the literal `[200~`/`[201~` markers survived. Only
+# self-heals the two well-defined bracketed-paste markers — generic `[X]`
+# shapes could plausibly be real password content.
+#
+# UTF-8 bytes (0x80+) preserved so international characters survive.
+_strip_paste_garbage() {
+  local s="$1"
+  local esc=$'\e'
+  local csi_pattern="${esc}\\[[0-9;]*[A-Za-z~]"
+  while [[ "$s" =~ $csi_pattern ]]; do
+    s="${s/${BASH_REMATCH[0]}/}"
+  done
+  s="${s//\[200\~/}"
+  s="${s//\[201\~/}"
+  printf '%s' "$s" | tr -d '\000-\037\177'
+}
+
+# Sanitize a user-entered credential. Calls _strip_paste_garbage and notifies
+# the user on stderr (NOT stdout — this function is called from inside $(...),
+# so stdout is captured into the credential value itself).
+_sanitize_credential() {
+  local input="$1"
+  local clean
+  clean=$(_strip_paste_garbage "$input")
+  if [[ "$clean" != "$input" ]]; then
+    warn "Stripped non-printable / paste-mode characters from input." >&2
+  fi
+  printf '%s' "$clean"
 }
 
 # Sanitize workspace name to comply with DNS-1123 (lowercase, alphanumeric + hyphens)
@@ -138,6 +181,7 @@ install_client_helm() {
   else
     read -r -p "  Client ID: " TB_CLIENT_ID
   fi
+  TB_CLIENT_ID=$(_sanitize_credential "$TB_CLIENT_ID")
   [[ -z "$TB_CLIENT_ID" ]] && error "Client ID cannot be empty."
 
   if [[ -n "$default_client_password" ]]; then
@@ -148,6 +192,7 @@ install_client_helm() {
     read -r -s -p "  Client password: " TB_CLIENT_PASSWORD
     echo ""
   fi
+  TB_CLIENT_PASSWORD=$(_sanitize_credential "$TB_CLIENT_PASSWORD")
   [[ -z "$TB_CLIENT_PASSWORD" ]] && error "Client password cannot be empty."
 
   TB_CLIENT_PASSWORD_ESCAPED="${TB_CLIENT_PASSWORD//\'/\'\'}"
