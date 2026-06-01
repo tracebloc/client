@@ -23,6 +23,23 @@ This guide covers installing the **tracebloc** unified Helm chart (AKS, EKS, bar
 
 ---
 
+## Network requirements (egress allowlist)
+
+The standalone installer runs a **preflight** check that verifies this connectivity before doing any work, and fails fast (naming the blocked host) if egress is missing. On a locked-down VM, allow outbound **HTTPS (443)** to:
+
+| Host | Why |
+|---|---|
+| `registry-1.docker.io` (Docker Hub) | k3s, mysql-client, busybox + the tracebloc client images |
+| `ghcr.io` | k3d node images + the ingestor image |
+| `api.tracebloc.io` (`dev-api`/`stg-api` for non-prod) | client credential check + the running client's platform connection |
+| `tracebloc.github.io` | the tracebloc Helm chart repository |
+
+On **Linux**, the installer also fetches tooling from `get.docker.com`, `raw.githubusercontent.com`, `dl.k8s.io`, and `get.helm.sh` — but only when Docker / k3d / kubectl / Helm aren't already installed.
+
+**Behind a corporate proxy?** Set `HTTP_PROXY` / `HTTPS_PROXY` before running (the installer auto-augments `NO_PROXY` with the cluster-internal ranges). A **TLS-inspecting** proxy additionally needs its corporate CA trusted on the VM, or HTTPS to the hosts above will fail certificate validation.
+
+---
+
 ## 1. Add the Helm repository (recommended for production)
 
 The chart repository is hosted at [tracebloc/client](https://github.com/tracebloc/client). After the chart is published (see [Publishing the chart](#publishing-the-chart)), add the repo and install from it so you get versioning and `helm upgrade` support.
