@@ -193,5 +193,5 @@ _wait_for_api() {
   error "kubectl cluster-info failed for 60s. Cluster reports running, but the API is unreachable. Possible causes:
    (a) Docker daemon stopped (run 'docker ps' to verify);
    (b) corporate HTTP/HTTPS proxy intercepting localhost — ensure NO_PROXY includes '127.0.0.1,localhost';
-   (c) kubeconfig has 0.0.0.0 — try: sed -i 's|0.0.0.0|127.0.0.1|g' ~/.kube/config"
+   (c) kubeconfig has 0.0.0.0 — try: sed -i.bak 's|0.0.0.0|127.0.0.1|g' ~/.kube/config && rm ~/.kube/config.bak"
 }
