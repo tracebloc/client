@@ -161,3 +161,29 @@ setup() {
   run run_preflight
   [ "$status" -eq 0 ]
 }
+
+# ── real _pf_probe_url + readers (setup() stubs them; re-source for the real ones) ──
+@test "_pf_probe_url: maps curl outcomes to tokens" {
+  source "${BATS_TEST_DIRNAME}/../lib/preflight.sh"   # restore the real function
+  has() { return 0; }                                  # 'has curl' true
+  curl() { return 6; };             run _pf_probe_url https://x; [ "$output" = "dns" ]
+  curl() { return 7; };             run _pf_probe_url https://x; [ "$output" = "refused" ]
+  curl() { return 28; };            run _pf_probe_url https://x; [ "$output" = "timeout" ]
+  curl() { return 60; };            run _pf_probe_url https://x; [ "$output" = "tls" ]
+  curl() { printf '200'; return 0;};run _pf_probe_url https://x; [ "$output" = "ok" ]
+}
+
+@test "_pf_probe_url: missing curl -> nocurl" {
+  source "${BATS_TEST_DIRNAME}/../lib/preflight.sh"
+  has() { return 1; }
+  run _pf_probe_url https://x
+  [ "$output" = "nocurl" ]
+}
+
+@test "_pf readers return a number on this host" {
+  source "${BATS_TEST_DIRNAME}/../lib/preflight.sh"
+  OS="$(uname -s)"
+  run _pf_ncpu;         [[ "$output" =~ ^[0-9]+$ ]]
+  run _pf_total_mem_kb; [[ "$output" =~ ^[0-9]+$ ]]
+  run _pf_free_kb /;    [[ "$output" =~ ^[0-9]+$ ]]
+}

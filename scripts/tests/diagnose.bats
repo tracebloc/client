@@ -71,3 +71,23 @@ setup() {
   [ "$status" -eq 0 ]
   [[ "$output" == *"Diagnostics saved"* ]]
 }
+
+@test "run_diagnose: exercises the cluster-data collection when tools are present" {
+  has() { return 0; }                       # kubectl/docker/helm "present"
+  kubectl() {
+    case "$*" in
+      *"get pods -A"*) printf 'default   default-jobs-manager-abc   1/1   Running\n' ;;
+      *)               printf 'kubectl %s\n' "$*" ;;
+    esac
+  }
+  docker() { printf 'docker %s\n' "$*"; }
+  helm()   { printf 'helm %s\n' "$*"; }
+  run run_diagnose
+  [ "$status" -eq 0 ]
+  tgz="$(ls "$HOST_DATA_DIR"/tracebloc-diagnose-*.tgz 2>/dev/null | head -1)"
+  [ -n "$tgz" ]
+  # the kubectl + helm + per-workload-log collection branches ran
+  tar -tzf "$tgz" | grep -q '02-kubectl.txt'
+  tar -tzf "$tgz" | grep -q '04-helm.txt'
+  tar -tzf "$tgz" | grep -q 'logs/mysql-client.log'
+}
