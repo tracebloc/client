@@ -85,28 +85,38 @@ _handle_existing_cluster() {
 }
 
 # k3d bakes --env flags into containers at create time; they cannot be added
-# to a running cluster. If the host shell has proxy vars set but the existing
-# cluster was created without proxy propagation, image pulls behind a corporate
-# proxy will fail. Detect and prompt the user to delete + recreate.
+# to a running cluster. Per-var check: for each proxy var set on the host,
+# verify the cluster has it. Detect NO_PROXY-only drift too (an older cluster
+# may have HTTP_PROXY baked in but be missing a NO_PROXY the host has since
+# added — without it, in-cluster traffic to .svc/.cluster.local or 127.0.0.1
+# can get routed through the proxy).
 # Silent no-op if Docker isn't running, the server container can't be inspected,
 # or the host has no proxy env set.
 _check_existing_cluster_proxy() {
-  local host_has=false
-  for var in HTTP_PROXY HTTPS_PROXY http_proxy https_proxy; do
-    [[ -n "${!var:-}" ]] && { host_has=true; break; }
+  local host_vars=()
+  for var in HTTP_PROXY HTTPS_PROXY NO_PROXY http_proxy https_proxy no_proxy; do
+    [[ -n "${!var:-}" ]] && host_vars+=("$var")
   done
-  [[ "$host_has" == false ]] && return 0
+  [[ ${#host_vars[@]} -eq 0 ]] && return 0
 
   local server_container="k3d-${CLUSTER_NAME}-server-0"
   local cluster_env
   cluster_env=$(docker inspect "$server_container" --format '{{range .Config.Env}}{{println .}}{{end}}' 2>/dev/null) || return 0
   [[ -z "$cluster_env" ]] && return 0
 
-  if ! echo "$cluster_env" | grep -Eq '^(HTTP_PROXY|HTTPS_PROXY|http_proxy|https_proxy)='; then
+  local missing=()
+  for var in "${host_vars[@]}"; do
+    if ! echo "$cluster_env" | grep -Eq "^${var}="; then
+      missing+=("$var")
+    fi
+  done
+
+  if [[ ${#missing[@]} -gt 0 ]]; then
     echo ""
-    warn "Host has proxy env set, but the existing '$CLUSTER_NAME' cluster was created without proxy propagation."
+    warn "Host has proxy env set, but the existing '$CLUSTER_NAME' cluster is missing: ${missing[*]}."
     hint "k3d bakes --env flags into containers at create time — they can't be added to a running cluster."
-    hint "If image pulls fail, recreate the cluster:  k3d cluster delete $CLUSTER_NAME && re-run this installer."
+    hint "If image pulls fail or in-cluster traffic misroutes, recreate the cluster:"
+    hint "  k3d cluster delete $CLUSTER_NAME  &&  re-run this installer."
     echo ""
   fi
 }
@@ -229,8 +239,14 @@ _wait_for_api() {
   done
   printf "\r\033[K"
   tput cnorm 2>/dev/null || true
+
+  # Surface the actual kubeconfig path. KUBECONFIG can be colon-separated
+  # (kubectl supports a list); point at the first entry — users with custom
+  # multi-file layouts can adapt the sed command themselves.
+  local kc="${KUBECONFIG:-${HOME}/.kube/config}"
+  kc="${kc%%:*}"
   error "kubectl cluster-info failed for 60s. Cluster reports running, but the API is unreachable. Possible causes:
    (a) Docker daemon stopped (run 'docker ps' to verify);
    (b) corporate HTTP/HTTPS proxy intercepting localhost — ensure NO_PROXY includes '127.0.0.1,localhost';
-   (c) kubeconfig has 0.0.0.0 — try: sed -i.bak 's|0.0.0.0|127.0.0.1|g' ~/.kube/config && rm ~/.kube/config.bak"
+   (c) kubeconfig has 0.0.0.0 — try: sed -i.bak 's|0.0.0.0|127.0.0.1|g' ${kc} && rm ${kc}.bak"
 }
