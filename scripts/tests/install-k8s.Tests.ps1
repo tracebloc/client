@@ -400,6 +400,18 @@ NO_PROXY=localhost,127.0.0.1
     $c | Should -Match 'abc-123'
     $c | Should -Match '127\.0\.0\.1'
   }
+  It "redacts any *password key (dockerRegistry password, HTTP_PROXY_PASSWORD)" {
+    $f = Join-Path $TestDrive "g.txt"
+    @"
+dockerRegistry:
+  password: dckr_REGTOKEN
+HTTP_PROXY_PASSWORD: PROXYPW123
+"@ | Set-Content $f
+    Edit-Redaction $f
+    $c = Get-Content $f -Raw
+    $c | Should -Not -Match 'dckr_REGTOKEN'
+    $c | Should -Not -Match 'PROXYPW123'
+  }
   It "missing file -> no throw" {
     { Edit-Redaction (Join-Path $TestDrive "nope.txt") } | Should -Not -Throw
   }

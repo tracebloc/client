@@ -1439,9 +1439,10 @@ function Edit-Redaction([string]$Path) {
   if (-not (Test-Path $Path)) { return }
   try {
     $t = Get-Content -Path $Path -Raw -ErrorAction Stop
-    $t = $t -replace '(?i)(client[_-]?password\s*[:=]\s*).*', '$1[REDACTED]'
+    # First rule redacts ANY *password key (clientPassword, dockerRegistry
+    # password, HTTP_PROXY_PASSWORD, ...) in : or = form, not just clientPassword.
+    $t = $t -replace '(?i)([A-Za-z0-9_.-]*password\s*[:=]\s*).*', '$1[REDACTED]'
     $t = $t -replace '([a-zA-Z][a-zA-Z0-9+.-]*://)[^:/@\s]+:[^@/\s]+@', '$1[REDACTED]@'
-    $t = $t -replace '(?i)(password\s*=\s*)[^\s&"]*', '$1[REDACTED]'
     $t = $t -replace '(?i)((token|secret|authorization|api[_-]?key)\s*[:=]\s*).*', '$1[REDACTED]'
     $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
     [System.IO.File]::WriteAllText($Path, $t, $utf8NoBom)

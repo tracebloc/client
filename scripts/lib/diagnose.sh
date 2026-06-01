@@ -20,11 +20,14 @@
 _redact_file() {
   local f="$1"
   [[ -f "$f" ]] || return 0
+  # Case-insensitive via explicit classes (BSD/macOS sed has no `I` flag). The
+  # first rule redacts ANY *password key (clientPassword, dockerRegistry
+  # `password:`, HTTP_PROXY_PASSWORD, …) in either `:` or `=` form — not just
+  # clientPassword — so registry/proxy/db passwords don't leak into the bundle.
   sed -i.bak -E \
-    -e 's/([Cc]lient[_-]?[Pp]assword[[:space:]]*[:=][[:space:]]*).*/\1[REDACTED]/' \
+    -e 's/([A-Za-z0-9_.-]*[Pp][Aa][Ss][Ss][Ww][Oo][Rr][Dd][[:space:]]*[:=][[:space:]]*).*/\1[REDACTED]/' \
     -e 's#([a-zA-Z][a-zA-Z0-9+.-]*://)[^:/@[:space:]]+:[^@/[:space:]]+@#\1[REDACTED]@#g' \
-    -e 's/([Pp]assword[[:space:]]*=[[:space:]]*)[^[:space:]&"]*/\1[REDACTED]/g' \
-    -e 's/(([Tt]oken|[Ss]ecret|[Aa]uthorization|[Aa]pi[_-]?[Kk]ey)[[:space:]]*[:=][[:space:]]*).*/\1[REDACTED]/' \
+    -e 's/(([Tt][Oo][Kk][Ee][Nn]|[Ss][Ee][Cc][Rr][Ee][Tt]|[Aa][Uu][Tt][Hh][Oo][Rr][Ii][Zz][Aa][Tt][Ii][Oo][Nn]|[Aa][Pp][Ii][_-]?[Kk][Ee][Yy])[[:space:]]*[:=][[:space:]]*).*/\1[REDACTED]/' \
     "$f" 2>/dev/null
   rm -f "${f}.bak" 2>/dev/null
 }
@@ -121,10 +124,13 @@ run_diagnose() {
 
   # ── helm (redacted afterwards) ──
   if has helm; then
+    # NOTE: deliberately NOT collecting `helm get manifest` — it renders the
+    # Secret objects with base64-encoded credentials (CLIENT_PASSWORD,
+    # .dockerconfigjson), which the text redaction can't see. `helm get values`
+    # (input values, redacted) + the kubectl output already cover triage.
     {
       echo "## helm list -A";          helm list -A 2>&1
       echo; echo "## helm get values $ns"; helm get values "$ns" -n "$ns" 2>&1
-      echo; echo "## helm get manifest $ns (truncated)"; helm get manifest "$ns" -n "$ns" 2>&1 | head -200
     } > "$d/04-helm.txt" 2>&1
   fi
 
