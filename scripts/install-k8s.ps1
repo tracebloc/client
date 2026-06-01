@@ -26,14 +26,18 @@
 param([switch]$Help, [switch]$NoReboot)
 
 # -- Admin check --------------------------------------------------------------
-$isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()
-           ).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
-if (-not $isAdmin) {
-  Write-Host "  " -NoNewline; Write-Host ([char]0x2716) -ForegroundColor Red -NoNewline; Write-Host " Run this script as Administrator (right-click > Run as Administrator)." -ForegroundColor Red
-  exit 1
-}
+# $env:TB_PESTER lets the test suite dot-source this file to load the functions
+# without triggering the admin gate (which throws off-Windows) or running main.
+if (-not $env:TB_PESTER) {
+  $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()
+             ).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+  if (-not $isAdmin) {
+    Write-Host "  " -NoNewline; Write-Host ([char]0x2716) -ForegroundColor Red -NoNewline; Write-Host " Run this script as Administrator (right-click > Run as Administrator)." -ForegroundColor Red
+    exit 1
+  }
 
-[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+  [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+}
 
 # =============================================================================
 #  HELPERS — logging functions matching bash UX
@@ -1210,6 +1214,8 @@ function Print-Summary {
 #  MAIN
 # =============================================================================
 
+if (-not $env:TB_PESTER) {
+
 if ($Help) { Print-Help }
 
 Confirm-Config
@@ -1245,3 +1251,5 @@ try { Stop-Transcript | Out-Null } catch {}
 
 # Exit code reflects reality: connected/starting are OK; failures are non-zero.
 if ($script:ClientState -ne "connected" -and $script:ClientState -ne "starting") { exit 1 }
+
+}  # end TB_PESTER guard (skipped when the test suite dot-sources this file)
