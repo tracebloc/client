@@ -80,6 +80,73 @@ _handle_existing_cluster() {
     k3d cluster start "$CLUSTER_NAME"
     success "Compute environment started."
   fi
+
+  _check_existing_cluster_proxy
+}
+
+# k3d bakes --env flags into containers at create time; they cannot be added
+# to a running cluster. Per-var check: for each proxy var set on the host,
+# verify the cluster has it. Detect NO_PROXY-only drift too (an older cluster
+# may have HTTP_PROXY baked in but be missing a NO_PROXY the host has since
+# added — without it, in-cluster traffic to .svc/.cluster.local or 127.0.0.1
+# can get routed through the proxy).
+# Silent no-op if Docker isn't running, the server container can't be inspected,
+# or the host has no proxy env set.
+_check_existing_cluster_proxy() {
+  # Partition host proxy vars into two buckets:
+  #   • drift_candidates — values without '@' that would propagate cleanly;
+  #                        the cluster should have these, flag if missing.
+  #   • at_skipped       — values with '@' that _create_new_cluster refused
+  #                        to propagate (k3d's KEY=VALUE@FILTER conflict).
+  #                        Recreating wouldn't help — needs a different
+  #                        remedy (strip creds, use auth proxy).
+  local drift_candidates=() at_skipped=()
+  for var in HTTP_PROXY HTTPS_PROXY NO_PROXY http_proxy https_proxy no_proxy; do
+    local val="${!var:-}"
+    [[ -z "$val" ]] && continue
+    if [[ "$val" == *"@"* ]]; then
+      at_skipped+=("$var")
+    else
+      drift_candidates+=("$var")
+    fi
+  done
+
+  # @-skipped vars get their own warning that fires on every re-run (the
+  # create-time skip warning in _create_new_cluster doesn't fire on the
+  # existing-cluster path). Recreate alone won't bake them, so guide the
+  # user toward the remedies that actually work.
+  if [[ ${#at_skipped[@]} -gt 0 ]]; then
+    echo ""
+    warn "Proxy env on host contains '@' (likely embedded credentials): ${at_skipped[*]}."
+    hint "k3d's --env KEY=VALUE@FILTER syntax can't carry an '@' in the value, so these"
+    hint "are not propagated into the cluster. If image pulls fail:"
+    hint "  • strip credentials from the URL (configure auth inside the cluster), or"
+    hint "  • point HTTP(S)_PROXY at a credential-less local auth-proxy that fronts the corporate proxy."
+    echo ""
+  fi
+
+  [[ ${#drift_candidates[@]} -eq 0 ]] && return 0
+
+  local server_container="k3d-${CLUSTER_NAME}-server-0"
+  local cluster_env
+  cluster_env=$(docker inspect "$server_container" --format '{{range .Config.Env}}{{println .}}{{end}}' 2>/dev/null) || return 0
+  [[ -z "$cluster_env" ]] && return 0
+
+  local missing=()
+  for var in "${drift_candidates[@]}"; do
+    if ! echo "$cluster_env" | grep -Eq "^${var}="; then
+      missing+=("$var")
+    fi
+  done
+
+  if [[ ${#missing[@]} -gt 0 ]]; then
+    echo ""
+    warn "Host has proxy env set, but the existing '$CLUSTER_NAME' cluster is missing: ${missing[*]}."
+    hint "k3d bakes --env flags into containers at create time — they can't be added to a running cluster."
+    hint "If image pulls fail or in-cluster traffic misroutes, recreate the cluster:"
+    hint "  k3d cluster delete $CLUSTER_NAME  &&  re-run this installer."
+    echo ""
+  fi
 }
 
 _create_new_cluster() {
@@ -98,7 +165,7 @@ _create_new_cluster() {
     cluster create "$CLUSTER_NAME"
     --servers "$SERVERS"
     --agents  "$AGENTS"
-    --api-port 6550
+    --api-port 127.0.0.1:6550
     -v "${HOST_DATA_DIR}:/tracebloc@all"
     --k3s-arg "--disable=traefik@server:*"
     --k3s-arg "--disable=servicelb@server:*"
@@ -116,6 +183,26 @@ _create_new_cluster() {
     log "Creating cluster with $SERVERS server(s) + $AGENTS agent(s) (CPU-only)..."
   fi
   hint "First run may take 1-2 minutes to download components."
+
+  # Propagate corporate proxy env vars so k3s/k3d containers can reach external
+  # registries behind HTTP/HTTPS proxies (hospital/banking/government tenants).
+  # Loop checks both upper- and lower-case forms — apps in containers read either.
+  # k3d's --env syntax is KEY=VALUE@NODEFILTER; an embedded '@' in VALUE (e.g.
+  # credentials in URL: http://user:pass@host) collides with the filter
+  # delimiter and breaks `k3d cluster create`. Detect and skip with a warning;
+  # the user can strip creds and re-run, or supply creds via another mechanism.
+  for var in HTTP_PROXY HTTPS_PROXY NO_PROXY http_proxy https_proxy no_proxy; do
+    val="${!var:-}"
+    if [[ -n "$val" ]]; then
+      if [[ "$val" == *"@"* ]]; then
+        warn "Skipping ${var} propagation: value contains '@' (embedded credentials are not supported by k3d's --env filter syntax)."
+        hint "Strip credentials from the URL, or configure proxy auth inside the cluster after install."
+        continue
+      fi
+      K3D_ARGS+=(--env "${var}=${val}@all")
+      log "Propagating ${var} to k3d nodes."
+    fi
+  done
 
   local create_out create_rc
   create_out="$(mktemp)"
@@ -144,6 +231,25 @@ _merge_kubeconfig() {
     --kubeconfig-merge-default \
     --kubeconfig-switch-context \
     >/dev/null 2>&1
+
+  # Defensive normalization: k3d may still emit 0.0.0.0 server URLs into the
+  # kubeconfig (older k3d versions, or pre-existing entries from previous
+  # installs). Behind a corporate HTTP/HTTPS proxy, 0.0.0.0 gets intercepted
+  # and kubectl fails. Anchored to `https://0.0.0.0:` so CIDR ranges and other
+  # 0.0.0.0 occurrences elsewhere in the file are left untouched.
+  #
+  # KUBECONFIG can be colon-separated (kubectl path-list semantics); k3d's
+  # --kubeconfig-merge-default writes into the first entry (or ~/.kube/config
+  # if KUBECONFIG is unset). Target the same file or the rewrite would be
+  # skipped by -f on multi-file layouts.
+  local kc_target="${KUBECONFIG:-${HOME}/.kube/config}"
+  kc_target="${kc_target%%:*}"
+  if [[ -f "$kc_target" ]] && grep -q 'https://0\.0\.0\.0:' "$kc_target"; then
+    sed -i.bak 's|https://0\.0\.0\.0:|https://127.0.0.1:|g' "$kc_target"
+    rm -f "${kc_target}.bak"
+    log "Normalized kubeconfig server URL: 0.0.0.0 → 127.0.0.1 in $kc_target (corporate-proxy safety)."
+  fi
+
   log "kubeconfig updated — kubectl now points to '$CLUSTER_NAME'."
 }
 
@@ -168,5 +274,14 @@ _wait_for_api() {
   done
   printf "\r\033[K"
   tput cnorm 2>/dev/null || true
-  error "Compute environment did not start within 60s. Check Docker and try again."
+
+  # Surface the actual kubeconfig path. KUBECONFIG can be colon-separated
+  # (kubectl supports a list); point at the first entry — users with custom
+  # multi-file layouts can adapt the sed command themselves.
+  local kc="${KUBECONFIG:-${HOME}/.kube/config}"
+  kc="${kc%%:*}"
+  error "kubectl cluster-info failed for 60s. Cluster reports running, but the API is unreachable. Possible causes:
+   (a) Docker daemon stopped (run 'docker ps' to verify);
+   (b) corporate HTTP/HTTPS proxy intercepting localhost — ensure NO_PROXY includes '127.0.0.1,localhost';
+   (c) kubeconfig has 0.0.0.0 — try: sed -i.bak 's|0.0.0.0|127.0.0.1|g' ${kc} && rm ${kc}.bak"
 }
