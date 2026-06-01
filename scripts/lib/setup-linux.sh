@@ -24,6 +24,15 @@ install_docker_engine() {
       spin_cmd "Installing Docker…" sudo pacman -S --noconfirm docker
     elif has zypper; then
       spin_cmd "Installing Docker…" sudo zypper install -y docker
+    elif [[ -f /etc/os-release ]] && grep -qiE '^ID="?(almalinux|rocky|ol|oracle)"?' /etc/os-release; then
+      # get.docker.com rejects RHEL rebuilds (almalinux/rocky/ol) with
+      # "Unsupported distribution". Install docker-ce from Docker's official
+      # CentOS repo instead — it is RHEL-compatible and works on these distros.
+      spin_cmd "Installing Docker…" bash -c '
+        set -e
+        sudo dnf -y -q install dnf-plugins-core
+        sudo dnf config-manager --add-repo https://download.docker.com/linux/centos/docker-ce.repo
+        sudo dnf -y -q install docker-ce docker-ce-cli containerd.io'
     else
       local docker_script
       docker_script="$(mktemp)"
@@ -54,9 +63,13 @@ install_docker_engine() {
 
 # ── System dependencies ─────────────────────────────────────────────────────
 install_system_deps() {
+  # conntrack binary ships under different package names per distro:
+  #   Debian/Ubuntu (apt) → "conntrack";  RHEL/SUSE/Arch (dnf/yum/zypper/pacman) → "conntrack-tools"
+  local conntrack_pkg="conntrack-tools"
+  has apt-get && conntrack_pkg="conntrack"
   MISSING_PKGS=()
   has curl      || MISSING_PKGS+=(curl)
-  has conntrack || MISSING_PKGS+=(conntrack-tools)
+  has conntrack || MISSING_PKGS+=("$conntrack_pkg")
   if [[ ${#MISSING_PKGS[@]} -gt 0 ]]; then
     spin_cmd "Updating package index…" $PM_UPDATE
     for pkg in "${MISSING_PKGS[@]}"; do
@@ -107,7 +120,11 @@ install_k3d() {
     https://raw.githubusercontent.com/k3d-io/k3d/main/install.sh -o "$k3d_script"
   chmod +x "$k3d_script"
 
-  if ! spin_cmd "Installing system tools…" sudo bash "$k3d_script"; then
+  # Preserve PATH through sudo: the k3d install script verifies itself with
+  # `command -v k3d` after copying the binary into /usr/local/bin. On RHEL-family
+  # distros sudo's secure_path excludes /usr/local/bin, so that check fails and
+  # the script aborts with "k3d not found". `sudo env PATH=$PATH` keeps it visible.
+  if ! spin_cmd "Installing system tools…" sudo env "PATH=$PATH" bash "$k3d_script"; then
     rm -f "$k3d_script"
     error "System tool installation failed. See the install log for details."
   fi
