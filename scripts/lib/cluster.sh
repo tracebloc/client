@@ -93,18 +93,39 @@ _handle_existing_cluster() {
 # Silent no-op if Docker isn't running, the server container can't be inspected,
 # or the host has no proxy env set.
 _check_existing_cluster_proxy() {
-  local host_vars=()
+  # Partition host proxy vars into two buckets:
+  #   • drift_candidates — values without '@' that would propagate cleanly;
+  #                        the cluster should have these, flag if missing.
+  #   • at_skipped       — values with '@' that _create_new_cluster refused
+  #                        to propagate (k3d's KEY=VALUE@FILTER conflict).
+  #                        Recreating wouldn't help — needs a different
+  #                        remedy (strip creds, use auth proxy).
+  local drift_candidates=() at_skipped=()
   for var in HTTP_PROXY HTTPS_PROXY NO_PROXY http_proxy https_proxy no_proxy; do
     local val="${!var:-}"
     [[ -z "$val" ]] && continue
-    # Mirror _create_new_cluster: values containing '@' aren't propagated to
-    # k3d (filter-syntax conflict), so recreating the cluster wouldn't bake
-    # them either. Excluding them keeps the warning honest — we only flag
-    # vars where the "delete + recreate" advice will actually resolve drift.
-    [[ "$val" == *"@"* ]] && continue
-    host_vars+=("$var")
+    if [[ "$val" == *"@"* ]]; then
+      at_skipped+=("$var")
+    else
+      drift_candidates+=("$var")
+    fi
   done
-  [[ ${#host_vars[@]} -eq 0 ]] && return 0
+
+  # @-skipped vars get their own warning that fires on every re-run (the
+  # create-time skip warning in _create_new_cluster doesn't fire on the
+  # existing-cluster path). Recreate alone won't bake them, so guide the
+  # user toward the remedies that actually work.
+  if [[ ${#at_skipped[@]} -gt 0 ]]; then
+    echo ""
+    warn "Proxy env on host contains '@' (likely embedded credentials): ${at_skipped[*]}."
+    hint "k3d's --env KEY=VALUE@FILTER syntax can't carry an '@' in the value, so these"
+    hint "are not propagated into the cluster. If image pulls fail:"
+    hint "  • strip credentials from the URL (configure auth inside the cluster), or"
+    hint "  • point HTTP(S)_PROXY at a credential-less local auth-proxy that fronts the corporate proxy."
+    echo ""
+  fi
+
+  [[ ${#drift_candidates[@]} -eq 0 ]] && return 0
 
   local server_container="k3d-${CLUSTER_NAME}-server-0"
   local cluster_env
@@ -112,7 +133,7 @@ _check_existing_cluster_proxy() {
   [[ -z "$cluster_env" ]] && return 0
 
   local missing=()
-  for var in "${host_vars[@]}"; do
+  for var in "${drift_candidates[@]}"; do
     if ! echo "$cluster_env" | grep -Eq "^${var}="; then
       missing+=("$var")
     fi
