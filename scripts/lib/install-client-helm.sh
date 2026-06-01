@@ -44,7 +44,24 @@ _extract_yaml_value() {
     line="${line#\"}"
     line="${line%\"}"
   fi
-  printf '%s' "$line"
+  # Strip C0 controls + DEL on extract — defends against self-perpetuation when
+  # a previous run wrote a corrupted value (see #168). UTF-8 (0x80+) preserved.
+  printf '%s' "$line" | tr -d '\000-\037\177'
+}
+
+# Strip C0 control characters (0x00-0x1F) and DEL (0x7F) from credential input.
+# Bracketed-paste-enabled terminals wrap pasted text in ESC[200~ ... ESC[201~
+# (ESC = 0x1B); without stripping, these bytes land in values.yaml and Helm
+# rejects the file ("yaml: control characters are not allowed"). UTF-8 bytes
+# (0x80+) are preserved so passwords with international characters work.
+_sanitize_credential() {
+  local input="$1"
+  local clean
+  clean=$(printf '%s' "$input" | tr -d '\000-\037\177')
+  if [[ "$clean" != "$input" ]]; then
+    warn "Stripped non-printable characters from input (likely paste-mode escape codes)."
+  fi
+  printf '%s' "$clean"
 }
 
 # Sanitize workspace name to comply with DNS-1123 (lowercase, alphanumeric + hyphens)
@@ -138,6 +155,7 @@ install_client_helm() {
   else
     read -r -p "  Client ID: " TB_CLIENT_ID
   fi
+  TB_CLIENT_ID=$(_sanitize_credential "$TB_CLIENT_ID")
   [[ -z "$TB_CLIENT_ID" ]] && error "Client ID cannot be empty."
 
   if [[ -n "$default_client_password" ]]; then
@@ -148,6 +166,7 @@ install_client_helm() {
     read -r -s -p "  Client password: " TB_CLIENT_PASSWORD
     echo ""
   fi
+  TB_CLIENT_PASSWORD=$(_sanitize_credential "$TB_CLIENT_PASSWORD")
   [[ -z "$TB_CLIENT_PASSWORD" ]] && error "Client password cannot be empty."
 
   TB_CLIENT_PASSWORD_ESCAPED="${TB_CLIENT_PASSWORD//\'/\'\'}"
