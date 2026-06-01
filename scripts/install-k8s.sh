@@ -83,8 +83,16 @@ main() {
   # ── Step 3/4 + 4/4 are handled inside install_client_helm ────────────────
   install_client_helm
 
-  verify_cluster
+  # ── Verify the client actually came up before reporting anything ─────────
+  wait_for_client_ready
   print_summary
+
+  # Exit code reflects reality: connected/starting are OK; failures are non-zero
+  # so re-runs and automation can tell the difference.
+  case "${CLIENT_STATE:-}" in
+    connected|starting) ;;
+    *) exit 1 ;;
+  esac
 }
 
 main "$@"

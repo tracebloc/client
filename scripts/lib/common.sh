@@ -299,10 +299,14 @@ install_cleanup() {
     fi
     [[ -n "${LOG_FILE:-}" ]] && hint "Logs: $LOG_FILE"
   elif [[ $exit_code -ne 0 ]]; then
-    echo ""
-    warn "Installation did not complete."
-    [[ -n "${LOG_FILE:-}" ]] && hint "Check the install log: $LOG_FILE"
-    hint "This installer is safe to re-run — just try again."
+    # If print_summary already reported a specific outcome (CLIENT_STATE set),
+    # don't tack on a second, generic "did not complete" message.
+    if [[ -z "${CLIENT_STATE:-}" ]]; then
+      echo ""
+      warn "Installation did not complete."
+      [[ -n "${LOG_FILE:-}" ]] && hint "Check the install log: $LOG_FILE"
+      hint "This installer is safe to re-run — just try again."
+    fi
   fi
 }
 
