@@ -125,9 +125,40 @@ create_cluster() {
     _create_new_cluster
   fi
 
+  ensure_cluster_autostart
   _merge_kubeconfig
   _export_host_no_proxy
   _wait_for_api
+}
+
+# Guarantee the cluster returns after a host reboot. On Linux this already works
+# by default — k3d sets `--restart unless-stopped` on its node containers and the
+# Docker install enables docker.service on boot — but we harden both so it holds
+# even on a re-run where Docker was installed-but-disabled, or for an externally-
+# created cluster. On macOS/Windows the restart policy is set too, but Docker
+# Desktop must be configured to start on login (the summary tells the user).
+# Opt out with TRACEBLOC_NO_AUTOSTART=1.
+ensure_cluster_autostart() {
+  if [[ -n "${TRACEBLOC_NO_AUTOSTART:-}" ]]; then return 0; fi
+
+  local nodes node
+  nodes=$(docker ps -a --filter "name=k3d-${CLUSTER_NAME}-" --format '{{.Names}}' 2>/dev/null) || return 0
+  if [[ -n "$nodes" ]]; then
+    for node in $nodes; do
+      docker update --restart unless-stopped "$node" >/dev/null 2>&1 || true
+    done
+    log "Set restart=unless-stopped on k3d nodes so the cluster returns after a reboot."
+  fi
+
+  # On Linux, make sure Docker itself starts on boot. The fresh-install path only
+  # enables docker.service when Docker was absent; this also covers the
+  # installed-but-disabled re-run case. Idempotent.
+  if [[ "$OS" == "Linux" ]] && has systemctl; then
+    if sudo systemctl enable docker >/dev/null 2>&1; then
+      log "Ensured docker.service is enabled on boot."
+    fi
+  fi
+  return 0
 }
 
 _handle_existing_cluster() {

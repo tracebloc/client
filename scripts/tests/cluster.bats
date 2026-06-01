@@ -160,3 +160,44 @@ setup() {
   run _check_existing_cluster_proxy
   [[ "$output" == *"missing: HTTP_PROXY"* ]]
 }
+
+# ── ensure_cluster_autostart (reboot persistence) ───────────────────────────
+@test "ensure_cluster_autostart: unless-stopped per node + enables docker (Linux)" {
+  OS=Linux
+  docker() { if [[ "$1 $2" == "ps -a" ]]; then printf '%s\n' "k3d-tracebloc-server-0" "k3d-tracebloc-serverlb"; else record "docker $*"; fi; }
+  sudo()   { record "sudo $*"; }
+  has()    { return 0; }
+  ensure_cluster_autostart
+  run mock_calls
+  [[ "$output" == *"docker update --restart unless-stopped k3d-tracebloc-server-0"* ]]
+  [[ "$output" == *"docker update --restart unless-stopped k3d-tracebloc-serverlb"* ]]
+  [[ "$output" == *"sudo systemctl enable docker"* ]]
+}
+
+@test "ensure_cluster_autostart: macOS does not enable docker.service" {
+  OS=Darwin
+  docker() { if [[ "$1 $2" == "ps -a" ]]; then echo "k3d-tracebloc-server-0"; else record "docker $*"; fi; }
+  sudo()   { record "sudo $*"; }
+  has()    { return 0; }
+  ensure_cluster_autostart
+  run mock_calls
+  [[ "$output" == *"docker update --restart unless-stopped"* ]]
+  [[ "$output" != *"systemctl enable docker"* ]]
+}
+
+@test "ensure_cluster_autostart: TRACEBLOC_NO_AUTOSTART -> no-op" {
+  OS=Linux
+  docker() { if [[ "$1 $2" == "ps -a" ]]; then echo "k3d-tracebloc-server-0"; else record "docker $*"; fi; }
+  sudo()   { record "sudo $*"; }
+  TRACEBLOC_NO_AUTOSTART=1 ensure_cluster_autostart
+  run mock_calls
+  [ -z "$output" ]
+}
+
+@test "ensure_cluster_autostart: no nodes -> no docker update" {
+  OS=Darwin
+  docker() { if [[ "$1 $2" == "ps -a" ]]; then echo ""; else record "docker $*"; fi; }
+  ensure_cluster_autostart
+  run mock_calls
+  [[ "$output" != *"docker update"* ]]
+}

@@ -738,6 +738,22 @@ function Write-K3dProxyConfig {
   return $cfg
 }
 
+# Guarantee the cluster returns after a reboot: ensure the k3d node containers
+# restart when Docker starts. k3d already sets unless-stopped; this is defensive
+# and also covers externally-created clusters. On Windows the remaining piece is
+# Docker Desktop starting on login, which the summary tells the user to enable.
+# Opt out with TRACEBLOC_NO_AUTOSTART=1.
+function Set-ClusterAutostart {
+  if ($env:TRACEBLOC_NO_AUTOSTART) { return }
+  try {
+    $nodes = docker ps -a --filter "name=k3d-$CLUSTER_NAME-" --format "{{.Names}}" 2>$null
+    foreach ($n in $nodes) {
+      if ($n) { docker update --restart unless-stopped $n 2>&1 | Out-Null }
+    }
+    if ($nodes) { Log "Set restart=unless-stopped on k3d nodes (auto-restart after reboot)." }
+  } catch {}
+}
+
 function New-K3dCluster {
   Log "Creating k3d cluster: '$CLUSTER_NAME'"
 
@@ -865,6 +881,8 @@ function New-K3dCluster {
   }
 
   Log "kubeconfig updated -- kubectl now points to '$CLUSTER_NAME'."
+
+  Set-ClusterAutostart
 }
 
 # =============================================================================
@@ -1243,6 +1261,8 @@ function Print-Summary {
       Write-Host "    https://ai.tracebloc.io/clients" -ForegroundColor Cyan
       Write-Host ""
       Hint "Models that vendors submit train on this machine -- your data never leaves it."
+      Write-Host ""
+      Hint "After a reboot, start Docker Desktop to bring your client back (enable 'Start Docker Desktop when you sign in' in Settings -> General to automate)."
       Write-Host ""
       Write-Host "  What to do next" -ForegroundColor White
       Write-Host "  1. Ingest your training and test data"

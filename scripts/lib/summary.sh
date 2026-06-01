@@ -70,6 +70,17 @@ _diagnose_not_ready() {
 # Reports the outcome based on CLIENT_STATE (set by wait_for_client_ready).
 # The "secure compute environment / your data never leaves" claim is printed
 # ONLY when the client is verifiably connected — never on a partial/failed run.
+# One-line note in the success summary so the user knows the client survives a
+# reboot — automatic on Linux; needs Docker Desktop start-on-login on macOS/Win.
+_reboot_note() {
+  if [[ "$OS" == "Linux" ]]; then
+    echo -e "  ${GREEN}✔${RESET} ${DIM}Survives reboot — Docker and your client restart automatically.${RESET}"
+  else
+    echo -e "  ${DIM}After a reboot, start Docker Desktop to bring your client back —${RESET}"
+    echo -e "  ${DIM}enable Settings → General → \"Start Docker Desktop when you sign in\" to automate.${RESET}"
+  fi
+}
+
 print_summary() {
   local mode="CPU"
   [[ "$GPU_VENDOR" == "nvidia" ]] && mode="NVIDIA GPU"
@@ -92,6 +103,8 @@ print_summary() {
       echo ""
       echo -e "  ${DIM}Models that vendors submit train on this machine —${RESET}"
       echo -e "  ${DIM}your data never leaves it.${RESET}"
+      echo ""
+      _reboot_note
       echo ""
       echo -e "  ${BOLD}What to do next${RESET}"
       echo -e "  ${WHITE}1.${RESET} Ingest your training and test data"
