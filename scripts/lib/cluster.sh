@@ -95,7 +95,14 @@ _handle_existing_cluster() {
 _check_existing_cluster_proxy() {
   local host_vars=()
   for var in HTTP_PROXY HTTPS_PROXY NO_PROXY http_proxy https_proxy no_proxy; do
-    [[ -n "${!var:-}" ]] && host_vars+=("$var")
+    local val="${!var:-}"
+    [[ -z "$val" ]] && continue
+    # Mirror _create_new_cluster: values containing '@' aren't propagated to
+    # k3d (filter-syntax conflict), so recreating the cluster wouldn't bake
+    # them either. Excluding them keeps the warning honest — we only flag
+    # vars where the "delete + recreate" advice will actually resolve drift.
+    [[ "$val" == *"@"* ]] && continue
+    host_vars+=("$var")
   done
   [[ ${#host_vars[@]} -eq 0 ]] && return 0
 
@@ -209,10 +216,17 @@ _merge_kubeconfig() {
   # installs). Behind a corporate HTTP/HTTPS proxy, 0.0.0.0 gets intercepted
   # and kubectl fails. Anchored to `https://0.0.0.0:` so CIDR ranges and other
   # 0.0.0.0 occurrences elsewhere in the file are left untouched.
-  if [[ -f "$KUBECONFIG" ]] && grep -q 'https://0\.0\.0\.0:' "$KUBECONFIG"; then
-    sed -i.bak 's|https://0\.0\.0\.0:|https://127.0.0.1:|g' "$KUBECONFIG"
-    rm -f "${KUBECONFIG}.bak"
-    log "Normalized kubeconfig server URL: 0.0.0.0 → 127.0.0.1 (corporate-proxy safety)."
+  #
+  # KUBECONFIG can be colon-separated (kubectl path-list semantics); k3d's
+  # --kubeconfig-merge-default writes into the first entry (or ~/.kube/config
+  # if KUBECONFIG is unset). Target the same file or the rewrite would be
+  # skipped by -f on multi-file layouts.
+  local kc_target="${KUBECONFIG:-${HOME}/.kube/config}"
+  kc_target="${kc_target%%:*}"
+  if [[ -f "$kc_target" ]] && grep -q 'https://0\.0\.0\.0:' "$kc_target"; then
+    sed -i.bak 's|https://0\.0\.0\.0:|https://127.0.0.1:|g' "$kc_target"
+    rm -f "${kc_target}.bak"
+    log "Normalized kubeconfig server URL: 0.0.0.0 → 127.0.0.1 in $kc_target (corporate-proxy safety)."
   fi
 
   log "kubeconfig updated — kubectl now points to '$CLUSTER_NAME'."
