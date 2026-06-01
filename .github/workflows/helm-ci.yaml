@@ -2,13 +2,13 @@ name: Helm Chart CI
 
 on:
   push:
-    branches: [main, openshift]
+    branches: [main, develop, openshift]
     paths:
       - 'client/**'
       - 'ingestor/**'
       - '.github/workflows/helm-ci.yaml'
   pull_request:
-    branches: [main, openshift]
+    branches: [main, develop, openshift]
     paths:
       - 'client/**'
       - 'ingestor/**'
