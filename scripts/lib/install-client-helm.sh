@@ -50,15 +50,28 @@ _extract_yaml_value() {
   _strip_paste_garbage "$line"
 }
 
-# Strip bracketed-paste markers and C0 control characters from a value.
-# Bracketed-paste-enabled terminals wrap pasted text in ESC[200~ ... ESC[201~
-# (ESC = 0x1B). Stripping ESC alone leaves the literal `[200~` / `[201~`
-# remnants visible in the value, so match both the full ESC-prefixed form and
-# the standalone-marker form. UTF-8 bytes (0x80+) preserved.
+# Strip ANSI escape sequences and C0 control characters from a value.
+# `read -r -s` captures whatever the terminal sends — this can include:
+#   • bracketed-paste wrappers:  ESC[200~ ... ESC[201~
+#   • arrow keys / cursor moves: ESC[A/B/C/D, ESC[1;5C, ESC[3~ (Delete), …
+#   • function keys, modifier combos, mode-switch sequences
+# All follow the ANSI CSI shape:  ESC '[' <params> <final-byte>
+# where params ∈ [0-9;] and final ∈ [A-Za-z~]. Strip them iteratively to
+# handle consecutive sequences (e.g. paste-wrappers).
+#
+# Also handles the post-corruption case where ESC was stripped by an earlier
+# (buggy) sanitizer but the literal `[200~`/`[201~` markers survived. Only
+# self-heals the two well-defined bracketed-paste markers — generic `[X]`
+# shapes could plausibly be real password content.
+#
+# UTF-8 bytes (0x80+) preserved so international characters survive.
 _strip_paste_garbage() {
   local s="$1"
-  s="${s//$'\e'\[200\~/}"
-  s="${s//$'\e'\[201\~/}"
+  local esc=$'\e'
+  local csi_pattern="${esc}\\[[0-9;]*[A-Za-z~]"
+  while [[ "$s" =~ $csi_pattern ]]; do
+    s="${s/${BASH_REMATCH[0]}/}"
+  done
   s="${s//\[200\~/}"
   s="${s//\[201\~/}"
   printf '%s' "$s" | tr -d '\000-\037\177'
