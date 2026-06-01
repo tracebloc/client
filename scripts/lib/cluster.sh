@@ -80,6 +80,35 @@ _handle_existing_cluster() {
     k3d cluster start "$CLUSTER_NAME"
     success "Compute environment started."
   fi
+
+  _check_existing_cluster_proxy
+}
+
+# k3d bakes --env flags into containers at create time; they cannot be added
+# to a running cluster. If the host shell has proxy vars set but the existing
+# cluster was created without proxy propagation, image pulls behind a corporate
+# proxy will fail. Detect and prompt the user to delete + recreate.
+# Silent no-op if Docker isn't running, the server container can't be inspected,
+# or the host has no proxy env set.
+_check_existing_cluster_proxy() {
+  local host_has=false
+  for var in HTTP_PROXY HTTPS_PROXY http_proxy https_proxy; do
+    [[ -n "${!var:-}" ]] && { host_has=true; break; }
+  done
+  [[ "$host_has" == false ]] && return 0
+
+  local server_container="k3d-${CLUSTER_NAME}-server-0"
+  local cluster_env
+  cluster_env=$(docker inspect "$server_container" --format '{{range .Config.Env}}{{println .}}{{end}}' 2>/dev/null) || return 0
+  [[ -z "$cluster_env" ]] && return 0
+
+  if ! echo "$cluster_env" | grep -Eq '^(HTTP_PROXY|HTTPS_PROXY|http_proxy|https_proxy)='; then
+    echo ""
+    warn "Host has proxy env set, but the existing '$CLUSTER_NAME' cluster was created without proxy propagation."
+    hint "k3d bakes --env flags into containers at create time — they can't be added to a running cluster."
+    hint "If image pulls fail, recreate the cluster:  k3d cluster delete $CLUSTER_NAME && re-run this installer."
+    echo ""
+  fi
 }
 
 _create_new_cluster() {
@@ -120,9 +149,19 @@ _create_new_cluster() {
   # Propagate corporate proxy env vars so k3s/k3d containers can reach external
   # registries behind HTTP/HTTPS proxies (hospital/banking/government tenants).
   # Loop checks both upper- and lower-case forms — apps in containers read either.
+  # k3d's --env syntax is KEY=VALUE@NODEFILTER; an embedded '@' in VALUE (e.g.
+  # credentials in URL: http://user:pass@host) collides with the filter
+  # delimiter and breaks `k3d cluster create`. Detect and skip with a warning;
+  # the user can strip creds and re-run, or supply creds via another mechanism.
   for var in HTTP_PROXY HTTPS_PROXY NO_PROXY http_proxy https_proxy no_proxy; do
-    if [[ -n "${!var:-}" ]]; then
-      K3D_ARGS+=(--env "${var}=${!var}@all")
+    val="${!var:-}"
+    if [[ -n "$val" ]]; then
+      if [[ "$val" == *"@"* ]]; then
+        warn "Skipping ${var} propagation: value contains '@' (embedded credentials are not supported by k3d's --env filter syntax)."
+        hint "Strip credentials from the URL, or configure proxy auth inside the cluster after install."
+        continue
+      fi
+      K3D_ARGS+=(--env "${var}=${val}@all")
       log "Propagating ${var} to k3d nodes."
     fi
   done
