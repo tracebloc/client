@@ -56,6 +56,14 @@ echo "── assert: all nodes reach Ready ──"
 kubectl wait --for=condition=Ready nodes --all --timeout=180s
 kubectl get nodes -o wide
 
+echo "── wait for the default ServiceAccount (created async after node Ready) ──"
+# kubectl run binds the pod to default/default; on fast runners that can race the
+# service-account controller ("serviceaccount default not found"). Wait for it.
+for _ in $(seq 1 30); do
+  kubectl get serviceaccount default -n default >/dev/null 2>&1 && break
+  sleep 2
+done
+
 echo "── assert: the cluster can pull, schedule, and run a public workload ──"
 kubectl run e2e-probe --image=nginx:alpine --restart=Never
 kubectl wait --for=condition=Ready pod/e2e-probe --timeout=180s
