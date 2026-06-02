@@ -230,3 +230,60 @@ Describe "Confirm-Cluster" {
     { Confirm-Cluster } | Should -Not -Throw
   }
 }
+
+# --- Corporate-proxy hardening (Windows parity with scripts/lib/cluster.sh) ---
+Describe "Get-EffectiveNoProxy" {
+  AfterEach { $env:NO_PROXY = $null; $env:no_proxy = $null }
+  It "empty host NO_PROXY -> cluster-internal defaults" {
+    $env:NO_PROXY = $null; $env:no_proxy = $null
+    $r = Get-EffectiveNoProxy
+    $r | Should -Match '127\.0\.0\.1'
+    $r | Should -Match '10\.0\.0\.0/8'
+    $r | Should -Match '\.svc'
+    $r | Should -Match 'host\.k3d\.internal'
+  }
+  It "host entries kept first and de-duplicated" {
+    $env:NO_PROXY = "foo.com,127.0.0.1"
+    $r = Get-EffectiveNoProxy
+    $r | Should -BeLike "foo.com,127.0.0.1,*"
+    ([regex]::Matches($r, '127\.0\.0\.1')).Count | Should -Be 1
+  }
+  It "lowercase no_proxy is honoured" {
+    $env:NO_PROXY = $null; $env:no_proxy = "bar.internal"
+    Get-EffectiveNoProxy | Should -BeLike "bar.internal,*"
+  }
+}
+
+Describe "Write-K3dProxyConfig" {
+  AfterEach {
+    $env:HTTP_PROXY = $null; $env:HTTPS_PROXY = $null
+    $env:http_proxy = $null; $env:https_proxy = $null
+    $env:NO_PROXY = $null;   $env:no_proxy = $null
+  }
+  It "no proxy set -> returns null" {
+    Write-K3dProxyConfig | Should -BeNullOrEmpty
+  }
+  It "auth creds preserved (Gap A) + augmented NO_PROXY (Gap B), written without a BOM" {
+    $env:HTTP_PROXY = "http://user:pass@proxy.example.com:8080"
+    $env:NO_PROXY   = "corp.internal"
+    $cfg = Write-K3dProxyConfig
+    $cfg | Should -Not -BeNullOrEmpty
+    Test-Path $cfg | Should -BeTrue
+    $content = Get-Content $cfg -Raw
+    $content | Should -Match 'apiVersion: k3d.io/v1alpha5'
+    $content | Should -Match 'HTTP_PROXY=http://user:pass@proxy.example.com:8080'
+    $content | Should -Match 'NO_PROXY=corp.internal,'
+    $content | Should -Match 'NO_PROXY=[^"]*127\.0\.0\.1'
+    # UTF-8 without BOM — Windows PowerShell 5.1 would otherwise prepend EF BB BF
+    # and break the YAML parser.
+    $bytes = [System.IO.File]::ReadAllBytes($cfg)
+    ($bytes[0] -eq 0xEF -and $bytes[1] -eq 0xBB -and $bytes[2] -eq 0xBF) | Should -BeFalse
+    Remove-Item (Split-Path $cfg -Parent) -Recurse -Force
+  }
+  It "HTTP_PROXY only still emits augmented NO_PROXY" {
+    $env:HTTP_PROXY = "http://proxy:8080"
+    $cfg = Write-K3dProxyConfig
+    (Get-Content $cfg -Raw) | Should -Match 'NO_PROXY=[^"]*127\.0\.0\.1'
+    Remove-Item (Split-Path $cfg -Parent) -Recurse -Force
+  }
+}
