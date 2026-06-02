@@ -23,17 +23,21 @@
 # =============================================================================
 
 #Requires -Version 5.1
-param([switch]$Help, [switch]$NoReboot)
+param([switch]$Help, [switch]$NoReboot, [switch]$Diagnose)
 
 # -- Admin check --------------------------------------------------------------
-$isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()
-           ).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
-if (-not $isAdmin) {
-  Write-Host "  " -NoNewline; Write-Host ([char]0x2716) -ForegroundColor Red -NoNewline; Write-Host " Run this script as Administrator (right-click > Run as Administrator)." -ForegroundColor Red
-  exit 1
-}
+# $env:TB_PESTER lets the test suite dot-source this file to load the functions
+# without triggering the admin gate (which throws off-Windows) or running main.
+if (-not $env:TB_PESTER) {
+  $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()
+             ).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+  if (-not $isAdmin) {
+    Write-Host "  " -NoNewline; Write-Host ([char]0x2716) -ForegroundColor Red -NoNewline; Write-Host " Run this script as Administrator (right-click > Run as Administrator)." -ForegroundColor Red
+    exit 1
+  }
 
-[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+  [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+}
 
 # =============================================================================
 #  HELPERS — logging functions matching bash UX
@@ -122,6 +126,8 @@ $CLIENT_ENV    = $env:CLIENT_ENV
 $GPU_VENDOR       = "none"
 $NVIDIA_DRIVER_OK = $false
 $K3D_GPU_FLAG     = ""
+$ReadyTimeout     = if ($env:READY_TIMEOUT) { $env:READY_TIMEOUT } else { "300" }
+$script:ClientState = "starting"
 
 # =============================================================================
 #  HELP
@@ -675,6 +681,79 @@ function Install-K3dAndHelm {
 #  CLUSTER CREATION
 # =============================================================================
 
+# --- Corporate-proxy support (mirrors scripts/lib/cluster.sh) ----------------
+# Cluster-internal destinations that must never be routed through a corporate
+# proxy: loopback, all RFC1918 private ranges (the k3s pod CIDR 10.42.0.0/16,
+# service CIDR 10.43.0.0/16, the k3d docker network and node IPs), and the
+# in-cluster DNS suffixes. Echoes host NO_PROXY/no_proxy unioned with these
+# defaults, de-duplicated with host entries first.
+function Get-EffectiveNoProxy {
+  $defaults = @('localhost','127.0.0.1','0.0.0.0','10.0.0.0/8','172.16.0.0/12','192.168.0.0/16','.svc','.svc.cluster.local','.cluster.local','host.k3d.internal')
+  $existing = if ($env:NO_PROXY) { $env:NO_PROXY } elseif ($env:no_proxy) { $env:no_proxy } else { '' }
+  $seen = @{}
+  $out  = New-Object System.Collections.Generic.List[string]
+  foreach ($tok in (($existing -split ',') + $defaults)) {
+    $t = $tok.Trim()
+    if ($t -ne '' -and -not $seen.ContainsKey($t)) { $seen[$t] = $true; $out.Add($t) }
+  }
+  return ($out -join ',')
+}
+
+# Build a k3d config file carrying proxy env as structured YAML entries and
+# return its path ($null when no HTTP(S) proxy is set). We use --config rather
+# than --env KEY=VALUE@FILTER because k3d splits the --env flag on '@', which
+# corrupts authenticated-proxy URLs (http://user:pass@host); the YAML env list
+# preserves them. NO_PROXY is always emitted (auto-augmented) so in-cluster
+# traffic bypasses the proxy. Written UTF-8 without BOM (Windows PowerShell 5.1
+# would otherwise prepend a BOM that breaks the YAML parser). Caller removes the
+# parent temp dir.
+function Write-K3dProxyConfig {
+  $haveHttp = $env:HTTP_PROXY -or $env:HTTPS_PROXY -or $env:http_proxy -or $env:https_proxy
+  if (-not $haveHttp) { return $null }
+
+  $noProxy = Get-EffectiveNoProxy
+  $tmpDir  = Join-Path ([System.IO.Path]::GetTempPath()) ("tracebloc-k3d-" + [System.IO.Path]::GetRandomFileName())
+  New-Item -ItemType Directory -Path $tmpDir -Force | Out-Null
+  $cfg = Join-Path $tmpDir "config.yaml"
+
+  $lines = New-Object System.Collections.Generic.List[string]
+  $lines.Add('apiVersion: k3d.io/v1alpha5')
+  $lines.Add('kind: Simple')
+  $lines.Add('env:')
+  foreach ($name in @('HTTP_PROXY','HTTPS_PROXY','http_proxy','https_proxy')) {
+    $val = [Environment]::GetEnvironmentVariable($name)
+    if ($val) {
+      $lines.Add('  - envVar: "' + $name + '=' + $val + '"')
+      $lines.Add('    nodeFilters:')
+      $lines.Add('      - all')
+    }
+  }
+  foreach ($name in @('NO_PROXY','no_proxy')) {
+    $lines.Add('  - envVar: "' + $name + '=' + $noProxy + '"')
+    $lines.Add('    nodeFilters:')
+    $lines.Add('      - all')
+  }
+  $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+  [System.IO.File]::WriteAllLines($cfg, $lines, $utf8NoBom)
+  return $cfg
+}
+
+# Guarantee the cluster returns after a reboot: ensure the k3d node containers
+# restart when Docker starts. k3d already sets unless-stopped; this is defensive
+# and also covers externally-created clusters. On Windows the remaining piece is
+# Docker Desktop starting on login, which the summary tells the user to enable.
+# Opt out with TRACEBLOC_NO_AUTOSTART=1.
+function Set-ClusterAutostart {
+  if ($env:TRACEBLOC_NO_AUTOSTART) { return }
+  try {
+    $nodes = docker ps -a --filter "name=k3d-$CLUSTER_NAME-" --format "{{.Names}}" 2>$null
+    foreach ($n in $nodes) {
+      if ($n) { docker update --restart unless-stopped $n 2>&1 | Out-Null }
+    }
+    if ($nodes) { Log "Set restart=unless-stopped on k3d nodes (auto-restart after reboot)." }
+  } catch {}
+}
+
 function New-K3dCluster {
   Log "Creating k3d cluster: '$CLUSTER_NAME'"
 
@@ -695,6 +774,19 @@ function New-K3dCluster {
       k3d cluster start $CLUSTER_NAME
       Ok "Compute environment started."
     }
+
+    # Gap C parity: an externally-created cluster may bind its API to 0.0.0.0;
+    # warn (the kubeconfig rewrite below still normalizes it to 127.0.0.1, so
+    # reuse works). Silent if the serverlb can't be inspected.
+    try {
+      $binds = (docker inspect "k3d-$CLUSTER_NAME-serverlb" --format '{{range $p, $c := .NetworkSettings.Ports}}{{range $c}}{{.HostIp}} {{end}}{{end}}' 2>$null | Out-String)
+      if ($binds -match '0\.0\.0\.0' -and $binds -notmatch '127\.0\.0\.1') {
+        Warn "The existing '$CLUSTER_NAME' cluster binds its API to 0.0.0.0 (created outside this installer)."
+        Hint "This installer binds clusters to 127.0.0.1; behind a corporate proxy a 0.0.0.0 bind can be intercepted."
+        Hint "Your kubeconfig is normalized to 127.0.0.1 so reuse works. If kubectl is still intercepted, rebuild it:"
+        Hint "  k3d cluster delete $CLUSTER_NAME  (then re-run this installer)."
+      }
+    } catch {}
   } else {
     if (-not (Test-Path $HOST_DATA_DIR)) {
       New-Item -ItemType Directory -Path $HOST_DATA_DIR -Force | Out-Null
@@ -708,7 +800,7 @@ function New-K3dCluster {
       "cluster", "create", $CLUSTER_NAME,
       "--servers", $SERVERS,
       "--agents",  $AGENTS,
-      "--api-port","6550",
+      "--api-port","127.0.0.1:6550",
       "-v",        "${HOST_DATA_DIR}:/tracebloc@all",
       "--k3s-arg", "--disable=traefik@server:*",
       "--k3s-arg", "--disable=servicelb@server:*",
@@ -720,6 +812,16 @@ function New-K3dCluster {
     if ($K3D_GPU_FLAG -ne "") {
       $k3dArgs += $K3D_GPU_FLAG
       Log "GPU flag active: $K3D_GPU_FLAG"
+    }
+
+    # Corporate-proxy propagation (mirrors scripts/lib/cluster.sh): pass proxy
+    # env via a k3d --config file so authenticated proxies survive and NO_PROXY
+    # is auto-augmented with the cluster-internal ranges (prevents in-cluster
+    # misroute + the create-time --wait hang).
+    $proxyCfg = Write-K3dProxyConfig
+    if ($proxyCfg) {
+      $k3dArgs += @("--config", $proxyCfg)
+      Log "Propagating proxy settings to k3d nodes (authenticated proxies supported; NO_PROXY auto-augmented)."
     }
 
     Log "Creating cluster: $SERVERS server(s) + $AGENTS agent(s)..."
@@ -754,6 +856,7 @@ function New-K3dCluster {
     $k3dStdout = if (Test-Path $k3dOutLog) { Get-Content $k3dOutLog -Raw -ErrorAction SilentlyContinue } else { "" }
     $k3dStderr = if (Test-Path $k3dErrLog) { Get-Content $k3dErrLog -Raw -ErrorAction SilentlyContinue } else { "" }
     Remove-Item $k3dOutLog, $k3dErrLog -Force -ErrorAction SilentlyContinue
+    if ($proxyCfg) { Remove-Item (Split-Path $proxyCfg -Parent) -Recurse -Force -ErrorAction SilentlyContinue }
     if ($k3dStdout) { Log "k3d stdout: $k3dStdout" }
     if ($k3dStderr) { Log "k3d stderr: $k3dStderr" }
 
@@ -765,10 +868,21 @@ function New-K3dCluster {
 
   $kubeConfigPath = "$env:USERPROFILE\.kube\config"
   if (Test-Path $kubeConfigPath) {
-    (Get-Content $kubeConfigPath) -replace 'host\.docker\.internal', '127.0.0.1' | Set-Content $kubeConfigPath -Encoding UTF8
+    (Get-Content $kubeConfigPath) `
+      -replace 'host\.docker\.internal', '127.0.0.1' `
+      -replace 'https://0\.0\.0\.0:', 'https://127.0.0.1:' | Set-Content $kubeConfigPath -Encoding UTF8
+  }
+
+  # Ensure THIS installer's own kubectl bypasses the proxy for the cluster API
+  # (127.0.0.1) + in-cluster ranges (mirrors cluster.sh::_export_host_no_proxy).
+  if ($env:HTTP_PROXY -or $env:HTTPS_PROXY -or $env:http_proxy -or $env:https_proxy) {
+    $env:NO_PROXY = Get-EffectiveNoProxy
+    $env:no_proxy = $env:NO_PROXY
   }
 
   Log "kubeconfig updated -- kubectl now points to '$CLUSTER_NAME'."
+
+  Set-ClusterAutostart
 }
 
 # =============================================================================
@@ -848,6 +962,41 @@ function Get-TraceblocYamlValue {
   return $val
 }
 
+# Resolve the backend base URL the same way jobs-manager does
+# (client-runtime/controller.py: CLIENT_ENV -> backend), defaulting to prod.
+function Get-BackendUrl {
+  # Quote the value so a truly-unset CLIENT_ENV ($null) coerces to "" and the
+  # default (prod) branch reliably fires across PowerShell versions.
+  switch ("$env:CLIENT_ENV") {
+    "dev"   { return "https://dev-api.tracebloc.io/" }
+    "stg"   { return "https://stg-api.tracebloc.io/" }
+    default { return "https://api.tracebloc.io/" }
+  }
+}
+
+# Validate the entered Client ID / password against the backend's
+# api-token-auth/ endpoint -- the same call jobs-manager makes at runtime.
+# Returns: valid | invalid | inactive | unverified.
+function Test-Credentials {
+  param([string]$ClientId, [string]$ClientPassword)
+  $backend = Get-BackendUrl
+  try {
+    $resp = Invoke-WebRequest -Uri "${backend}api-token-auth/" -Method Post `
+      -Body @{ username = $ClientId; password = $ClientPassword } `
+      -TimeoutSec 60 -UseBasicParsing -ErrorAction Stop
+    if ($resp.StatusCode -eq 200) { return "valid" }
+    return "unverified"
+  } catch {
+    $code = $null
+    if ($_.Exception.Response) { $code = [int]$_.Exception.Response.StatusCode }
+    switch ($code) {
+      400     { return "invalid" }
+      401     { return "inactive" }
+      default { return "unverified" }   # 429 throttled, connection failure, 5xx, …
+    }
+  }
+}
+
 function Install-ClientHelm {
   # -- Step 3/4: Install tracebloc client --
   Step 3 4 "Installing tracebloc client"
@@ -887,6 +1036,7 @@ function Install-ClientHelm {
   $nsInput = Read-Host "  Workspace name [$defaultNamespace]"
   $rawName = if ($nsInput) { $nsInput } else { $defaultNamespace }
   $TB_NAMESPACE = ConvertTo-WorkspaceName -Input_ $rawName
+  $script:TB_NAMESPACE = $TB_NAMESPACE   # share with Wait-ForClientReady / Print-Summary
 
   if ($TB_NAMESPACE -ne $rawName) {
     Info "Using workspace: $TB_NAMESPACE"
@@ -903,28 +1053,53 @@ function Install-ClientHelm {
   Write-Host "    " -NoNewline; Write-Host "https://ai.tracebloc.io/clients" -ForegroundColor White
   Write-Host ""
 
-  if ($defaultClientId) {
-    $idInput = Read-Host "  Client ID [$defaultClientId]"
-    $TB_CLIENT_ID = if ($idInput) { $idInput } else { $defaultClientId }
-  } else {
-    $TB_CLIENT_ID = Read-Host "  Client ID"
-  }
-  if (-not $TB_CLIENT_ID) { Err "Client ID cannot be empty." }
+  # Collect + verify credentials. The entered Client ID / password are checked
+  # against the backend (the same api-token-auth/ call jobs-manager makes)
+  # before we deploy, so a wrong credential is caught here -- with a re-prompt --
+  # instead of surfacing later as a silently crash-looping pod.
+  $credAttempt = 0; $credMax = 5
+  while ($true) {
+    if ($defaultClientId) {
+      $idInput = Read-Host "  Client ID [$defaultClientId]"
+      $TB_CLIENT_ID = if ($idInput) { $idInput } else { $defaultClientId }
+    } else {
+      $TB_CLIENT_ID = Read-Host "  Client ID"
+    }
+    if (-not $TB_CLIENT_ID) { Warn "Client ID cannot be empty."; continue }
 
-  if ($defaultClientPassword) {
-    $pwInput = Read-Host "  Client password [press Enter to keep existing]" -AsSecureString
-    if ($pwInput -and $pwInput.Length -gt 0) {
+    if ($defaultClientPassword) {
+      $pwInput = Read-Host "  Client password [press Enter to keep existing]" -AsSecureString
+      if ($pwInput -and $pwInput.Length -gt 0) {
+        $BSTR = [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($pwInput)
+        try { $TB_CLIENT_PASSWORD = [System.Runtime.InteropServices.Marshal]::PtrToStringAuto($BSTR) } finally { [System.Runtime.InteropServices.Marshal]::ZeroFreeBSTR($BSTR) }
+      } else {
+        $TB_CLIENT_PASSWORD = $defaultClientPassword
+      }
+    } else {
+      $pwInput = Read-Host "  Client password" -AsSecureString
       $BSTR = [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($pwInput)
       try { $TB_CLIENT_PASSWORD = [System.Runtime.InteropServices.Marshal]::PtrToStringAuto($BSTR) } finally { [System.Runtime.InteropServices.Marshal]::ZeroFreeBSTR($BSTR) }
-    } else {
-      $TB_CLIENT_PASSWORD = $defaultClientPassword
     }
-  } else {
-    $pwInput = Read-Host "  Client password" -AsSecureString
-    $BSTR = [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($pwInput)
-    try { $TB_CLIENT_PASSWORD = [System.Runtime.InteropServices.Marshal]::PtrToStringAuto($BSTR) } finally { [System.Runtime.InteropServices.Marshal]::ZeroFreeBSTR($BSTR) }
+    if (-not $TB_CLIENT_PASSWORD) { Warn "Client password cannot be empty."; continue }
+
+    Info "Verifying credentials with tracebloc..."
+    $credStatus = Test-Credentials -ClientId $TB_CLIENT_ID -ClientPassword $TB_CLIENT_PASSWORD
+    if ($credStatus -eq "valid") { Ok "Credentials verified."; break }
+    elseif ($credStatus -eq "inactive") { Err "This tracebloc account is not active yet. Check your email for the activation link, then re-run." }
+    elseif ($credStatus -eq "unverified") {
+      Warn "Couldn't reach tracebloc to verify your credentials right now - continuing."
+      Hint "If they are wrong, your client will stay offline at https://ai.tracebloc.io/clients after install."
+      break
+    } else {
+      Warn "That Client ID / password was rejected by tracebloc - please re-enter."
+      Hint "Find your credentials at https://ai.tracebloc.io/clients"
+    }
+
+    $credAttempt++
+    if ($credAttempt -ge $credMax) { Err "Too many failed attempts. Double-check your credentials at https://ai.tracebloc.io/clients and re-run." }
+    # Force active re-entry on retry (don't silently reuse a rejected default).
+    $defaultClientId = ""; $defaultClientPassword = ""
   }
-  if (-not $TB_CLIENT_PASSWORD) { Err "Client password cannot be empty." }
 
   $passwordEscaped = $TB_CLIENT_PASSWORD -replace "'", "''"
 
@@ -1013,46 +1188,119 @@ function Confirm-Cluster {
   Log $clusterInfo
   $nodes = kubectl get nodes -o wide 2>&1 | Out-String
   Log $nodes
+  $pods = kubectl get pods -n $script:TB_NAMESPACE -o wide 2>&1 | Out-String
+  Log $pods
   Log "--- End Cluster Status ---"
+}
+
+# ── Readiness gate (#716) ─────────────────────────────────────────────────
+# helm install only *applies* manifests; it does not wait for pods. Wait for the
+# client's workloads to actually become Ready and set $script:ClientState so the
+# summary reports the truth: connected | starting | bad_creds | image_pull | crash
+function Wait-ForClientReady {
+  $ns = $script:TB_NAMESPACE
+  $deploys = @("mysql-client", "$ns-jobs-manager", "$ns-requests-proxy")
+  $deadline = (Get-Date).AddSeconds([int]$ReadyTimeout)
+  $allReady = $true
+
+  Write-Host ""
+  Info "Waiting for the client to start - first run downloads images, this can take a few minutes..."
+  foreach ($d in $deploys) {
+    $remaining = [int]((New-TimeSpan -Start (Get-Date) -End $deadline).TotalSeconds)
+    if ($remaining -lt 10) { $remaining = 10 }
+    & kubectl rollout status "deployment/$d" -n $ns "--timeout=${remaining}s" 2>&1 | Out-Null
+    if ($LASTEXITCODE -eq 0) {
+      Ok ("{0} ready" -f ($d -replace "^$ns-", ""))
+    } else {
+      $allReady = $false
+      break
+    }
+  }
+
+  Confirm-Cluster
+  if ($allReady) { $script:ClientState = "connected" }
+  else { $script:ClientState = (Get-NotReadyState -Namespace $ns) }
+}
+
+# Classify why the client isn't Ready, for an accurate message. Returns a state.
+function Get-NotReadyState {
+  param([string]$Namespace)
+  # Wrong credentials: jobs-manager authenticates to the backend on startup and
+  # crash-loops when rejected -- surfaced as an auth error in its logs.
+  $jmLogs = (& kubectl logs -n $Namespace "deployment/$Namespace-jobs-manager" --all-containers --tail=50 2>$null | Out-String)
+  if ($jmLogs -match '(?i)authentication failed|unable to log in') { return "bad_creds" }
+  $pods = (& kubectl get pods -n $Namespace 2>$null | Out-String)
+  if ($pods -match '(?i)ImagePullBackOff|ErrImagePull|InvalidImageName') { return "image_pull" }
+  if ($pods -match '(?i)CrashLoopBackOff') { return "crash" }
+  return "starting"
 }
 
 # =============================================================================
 #  SUMMARY
 # =============================================================================
 
+# Reports the outcome based on $script:ClientState (set by Wait-ForClientReady).
+# The "secure compute environment / your data never leaves" claim is printed
+# ONLY when the client is verifiably connected -- never on a partial/failed run.
 function Print-Summary {
   $mode = "CPU"
   if ($GPU_VENDOR -eq "nvidia" -and $NVIDIA_DRIVER_OK) { $mode = "NVIDIA GPU" }
   elseif ($GPU_VENDOR -eq "nvidia" -and -not $NVIDIA_DRIVER_OK) { $mode = "CPU (NVIDIA driver update needed)" }
+  $ns = $script:TB_NAMESPACE
+  $line = [string]([char]0x2501) * 46
 
   Write-Host ""
-  Write-Host "  " -NoNewline; Write-Host ([string]([char]0x2501) * 46) -ForegroundColor Green
-  Write-Host ""
-  Write-Host "  " -NoNewline; Write-Host "tracebloc client installed successfully" -ForegroundColor Green
-  Write-Host ""
-  Write-Host "  " -NoNewline; Write-Host "Workspace" -ForegroundColor White -NoNewline; Write-Host " : " -NoNewline; Write-Host $TB_NAMESPACE -ForegroundColor Cyan
-  Write-Host "  " -NoNewline; Write-Host "Mode     " -ForegroundColor White -NoNewline; Write-Host " : " -NoNewline; Write-Host $mode -ForegroundColor Cyan
-  Write-Host ""
-  Hint "This machine is now a secure compute environment"
-  Hint "on the tracebloc network. External AI vendors can"
-  Hint "submit models to be trained and evaluated here --"
-  Hint "your data never leaves your infrastructure."
-  Write-Host ""
-  Write-Host "  What to do next" -ForegroundColor White
-  Write-Host ""
-  Write-Host "  1. " -NoNewline; Write-Host "Open the tracebloc dashboard"
-  Write-Host "     " -NoNewline; Write-Host "https://ai.tracebloc.io" -ForegroundColor Cyan
-  Write-Host ""
-  Write-Host "  2. " -NoNewline; Write-Host "Ingest your training and test data"
-  Write-Host ""
-  Write-Host "  3. " -NoNewline; Write-Host "Define your first AI use case and"
-  Write-Host "     invite vendors to submit models"
-  Write-Host ""
-  Hint "Need help?  https://docs.tracebloc.io"
-  Hint "Logs:       ~\.tracebloc\"
-  Hint "Data:       /tracebloc/$TB_NAMESPACE"
-  Write-Host ""
-  Write-Host "  " -NoNewline; Write-Host ([string]([char]0x2501) * 46) -ForegroundColor Green
+  switch ($script:ClientState) {
+    "connected" {
+      Write-Host "  $line" -ForegroundColor Green
+      Write-Host ""
+      Write-Host "  " -NoNewline; Write-Host "$([char]0x2714) Connected to tracebloc" -ForegroundColor Green
+      Write-Host ""
+      Write-Host "  Workspace : " -NoNewline; Write-Host $ns -ForegroundColor Cyan
+      Write-Host "  Mode      : " -NoNewline; Write-Host $mode -ForegroundColor Cyan
+      Write-Host ""
+      Write-Host "  Your client is live. Confirm it shows as Online:"
+      Write-Host "    https://ai.tracebloc.io/clients" -ForegroundColor Cyan
+      Write-Host ""
+      Hint "Models that vendors submit train on this machine -- your data never leaves it."
+      Write-Host ""
+      Hint "After a reboot, start Docker Desktop to bring your client back (enable 'Start Docker Desktop when you sign in' in Settings -> General to automate)."
+      Write-Host ""
+      Write-Host "  What to do next" -ForegroundColor White
+      Write-Host "  1. Ingest your training and test data"
+      Write-Host "  2. Define your first AI use case and invite vendors"
+      Write-Host ""
+      Hint "Dashboard: https://ai.tracebloc.io   Logs: ~\.tracebloc\   Data: /tracebloc/$ns"
+      Write-Host ""
+      Write-Host "  $line" -ForegroundColor Green
+    }
+    "starting" {
+      Write-Host "  " -NoNewline; Write-Host "$([char]0x26A0)  Almost there - tracebloc is installed but still starting." -ForegroundColor Yellow
+      Write-Host ""
+      Write-Host "  Components are still downloading/starting (first run can take a few minutes)."
+      Write-Host "  Check progress:   kubectl get pods -n $ns" -ForegroundColor Cyan
+      Write-Host ""
+      Write-Host "  Your client will show as Online at https://ai.tracebloc.io/clients once it finishes."
+      Hint "Re-running this installer is safe."
+    }
+    "bad_creds" {
+      Write-Host "  " -NoNewline; Write-Host "$([char]0x2716) Couldn't connect - your Client ID or password was rejected." -ForegroundColor Red
+      Write-Host ""
+      Write-Host "  The environment installed, but tracebloc refused those credentials."
+      Write-Host "    1. Re-check them at https://ai.tracebloc.io/clients" -ForegroundColor Cyan
+      Write-Host "    2. Re-run this installer (safe to re-run)"
+    }
+    default {
+      $reason = "a component didn't start"
+      if ($script:ClientState -eq "image_pull") { $reason = "an image couldn't be pulled" }
+      if ($script:ClientState -eq "crash")      { $reason = "a container is restarting (crash loop)" }
+      Write-Host "  " -NoNewline; Write-Host "$([char]0x2716) Setup didn't finish - $reason." -ForegroundColor Red
+      Write-Host ""
+      Write-Host "  Inspect:  kubectl get pods -n $ns" -ForegroundColor Cyan
+      Write-Host "  Logs:     ~\.tracebloc\install-*.log"
+      Hint "Re-running this installer is safe."
+    }
+  }
   Write-Host ""
 
   # Advanced info for log only
@@ -1075,10 +1323,205 @@ function Print-Summary {
 }
 
 # =============================================================================
+#  PREFLIGHT — fail-fast environment checks (mirrors scripts/lib/preflight.sh)
+# =============================================================================
+
+# Non-exiting failure line (Err exits; preflight must finish all checks first).
+function Write-PfFail($m) { Write-Host "  " -NoNewline; Write-Host ([char]0x2716) -ForegroundColor Red -NoNewline; Write-Host " $m" -ForegroundColor Red }
+
+# Probe a URL for reachability. Returns: ok|tls|dns|timeout|blocked. Any HTTP
+# response (incl. 401/403/404) = reachable (TLS + HTTP completed). Honors the
+# system / HTTP_PROXY proxy automatically.
+function Test-PfUrl([string]$Url) {
+  try {
+    Invoke-WebRequest -Uri $Url -Method Head -TimeoutSec 8 -UseBasicParsing -ErrorAction Stop | Out-Null
+    return "ok"
+  } catch {
+    if ($null -ne $_.Exception.Response) { return "ok" }   # reached the server, got an HTTP error
+    $m = "$($_.Exception.Message)"
+    if ($m -match 'trust|SSL|certificate|TLS|secure channel') { return "tls" }
+    if ($m -match 'resolve|name or service|known')            { return "dns" }
+    if ($m -match 'timed out|timeout')                        { return "timeout" }
+    return "blocked"
+  }
+}
+
+# Free GB on the drive holding $HOST_DATA_DIR (or C:); $null if undeterminable
+# (e.g. non-Windows under Pester — tests mock this).
+function Get-PfFreeGb {
+  try {
+    $qualifier = (Split-Path -Qualifier $HOST_DATA_DIR -ErrorAction SilentlyContinue)
+    if (-not $qualifier) { $qualifier = "C:" }
+    $d = Get-CimInstance Win32_LogicalDisk -Filter "DeviceID='$qualifier'" -ErrorAction Stop
+    return [math]::Floor($d.FreeSpace / 1GB)
+  } catch { return $null }
+}
+
+function Get-PfMemGb {
+  try { return [math]::Floor((Get-CimInstance Win32_ComputerSystem -ErrorAction Stop).TotalPhysicalMemory / 1GB) }
+  catch { return $null }
+}
+
+function Get-PfCpu {
+  try { return [int](Get-CimInstance Win32_ComputerSystem -ErrorAction Stop).NumberOfLogicalProcessors }
+  catch { if ($env:NUMBER_OF_PROCESSORS) { return [int]$env:NUMBER_OF_PROCESSORS } else { return $null } }
+}
+
+function Test-Preflight {
+  if ($env:TRACEBLOC_SKIP_PREFLIGHT) { Info "Preflight checks skipped (TRACEBLOC_SKIP_PREFLIGHT set)."; return }
+
+  $minDiskGb  = if ($env:PF_MIN_DISK_GB)  { [int]$env:PF_MIN_DISK_GB }  else { 5 }
+  $warnDiskGb = if ($env:PF_WARN_DISK_GB) { [int]$env:PF_WARN_DISK_GB } else { 20 }
+  $warnMemGb  = if ($env:PF_WARN_MEM_GB)  { [int]$env:PF_WARN_MEM_GB }  else { 4 }
+  $minCpu     = if ($env:PF_MIN_CPU)      { [int]$env:PF_MIN_CPU }      else { 2 }
+  $hardFail   = 0
+
+  # Architecture — the tracebloc client images (e.g. mysql-client) are amd64-only.
+  $arch = Get-WindowsArch
+  if ($arch -eq "amd64") {
+    Ok "Architecture: amd64"
+  } elseif ($env:TRACEBLOC_ALLOW_ARM64) {
+    Warn "Architecture: $arch - proceeding (TRACEBLOC_ALLOW_ARM64 set); amd64-only images may crash if emulation is unavailable."
+  } else {
+    Info "Architecture: $arch - Docker Desktop runs the amd64 client images under emulation (slower, but works)."
+  }
+
+  $cpu = Get-PfCpu
+  if      ($null -eq $cpu)   { Warn "CPU: couldn't determine core count (skipping)." }
+  elseif  ($cpu -lt $minCpu) { Warn "CPU: $cpu core(s) - recommended >= $minCpu." }
+  else                       { Ok "CPU: $cpu cores" }
+
+  $mem = Get-PfMemGb
+  if      ($null -eq $mem)      { Warn "Memory: couldn't determine total RAM (skipping)." }
+  elseif  ($mem -lt $warnMemGb) { Warn "Memory: $mem GB total - recommended >= $warnMemGb GB; k3s + training may run out of memory." }
+  else                          { Ok "Memory: $mem GB" }
+
+  $disk = Get-PfFreeGb
+  if      ($null -eq $disk)        { Warn "Disk: couldn't determine free space (skipping)." }
+  elseif  ($disk -lt $minDiskGb)   { Write-PfFail "Disk: only $disk GB free - need >= $minDiskGb GB."; $hardFail++; Hint "Free up space or attach a larger disk, then re-run." }
+  elseif  ($disk -lt $warnDiskGb)  { Warn "Disk: $disk GB free - recommended >= $warnDiskGb GB; images + data may fill it." }
+  else                             { Ok "Disk: $disk GB free" }
+
+  Info "Checking outbound connectivity to required services..."
+  $backendHost = (Get-BackendUrl) -replace '^https?://','' -replace '/$',''
+  $criticals = @(
+    @{ label = "Docker Hub (registry-1.docker.io)";           url = "https://registry-1.docker.io/v2/" },
+    @{ label = "GitHub Container Registry (ghcr.io)";         url = "https://ghcr.io/" },
+    @{ label = "tracebloc API ($backendHost)";                url = "https://$backendHost/" },
+    @{ label = "tracebloc Helm charts (tracebloc.github.io)"; url = "https://tracebloc.github.io/" }
+  )
+  $tlsSeen = $false; $cfail = 0
+  foreach ($c in $criticals) {
+    $status = Test-PfUrl $c.url
+    if ($status -ne "ok") { $status = Test-PfUrl $c.url }   # one retry for transient blips
+    if ($status -eq "ok") { Ok "$($c.label) reachable" }
+    else {
+      Write-PfFail "$($c.label) unreachable ($status)"
+      $hardFail++; $cfail++
+      if ($status -eq "tls") { $tlsSeen = $true }
+    }
+  }
+  if ($tlsSeen)    { Hint "A TLS/certificate error usually means a break-and-inspect (TLS-inspecting) proxy whose corporate CA isn't trusted here - see the proxy notes." }
+  if ($cfail -gt 0){ Hint "Allow HTTPS (443) egress to: registry-1.docker.io, ghcr.io, $backendHost, tracebloc.github.io - or configure your corporate proxy." }
+
+  if ($hardFail -gt 0) {
+    Write-Host ""
+    Err "Preflight failed - resolve the items above and re-run. (Override at your own risk with `$env:TRACEBLOC_SKIP_PREFLIGHT=1.)"
+  }
+}
+
+# =============================================================================
+#  DIAGNOSE — `-Diagnose` support bundle (mirrors scripts/lib/diagnose.sh)
+# =============================================================================
+
+# Redact secrets from a file IN PLACE. Applied to every collected file before
+# archiving. Single-quoted replacement strings keep $1 literal for the regex.
+# Written UTF-8 without BOM.
+function Edit-Redaction([string]$Path) {
+  if (-not (Test-Path $Path)) { return }
+  try {
+    $t = Get-Content -Path $Path -Raw -ErrorAction Stop
+    # First rule redacts ANY *password key (clientPassword, dockerRegistry
+    # password, HTTP_PROXY_PASSWORD, ...) in : or = form, not just clientPassword.
+    $t = $t -replace '(?i)([A-Za-z0-9_.-]*password\s*[:=]\s*).*', '$1[REDACTED]'
+    $t = $t -replace '([a-zA-Z][a-zA-Z0-9+.-]*://)[^:/@\s]+:[^@/\s]+@', '$1[REDACTED]@'
+    $t = $t -replace '(?i)((token|secret|authorization|api[_-]?key)\s*[:=]\s*).*', '$1[REDACTED]'
+    $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+    [System.IO.File]::WriteAllText($Path, $t, $utf8NoBom)
+  } catch {}
+}
+
+function Invoke-DiagnoseBundle {
+  $ts = Get-Date -Format 'yyyyMMdd-HHmmss'
+  $base = if ($HOST_DATA_DIR) { $HOST_DATA_DIR } else { "$env:USERPROFILE\.tracebloc" }
+  $cn = if ($CLUSTER_NAME) { $CLUSTER_NAME } else { "tracebloc" }
+  New-Item -ItemType Directory -Path $base -Force -ErrorAction SilentlyContinue | Out-Null
+  $work = Join-Path ([System.IO.Path]::GetTempPath()) ("tracebloc-diag-" + [System.IO.Path]::GetRandomFileName())
+  $d = Join-Path $work "tracebloc-diagnose-$ts"
+  New-Item -ItemType Directory -Path (Join-Path $d "logs") -Force | Out-Null
+
+  Info "Collecting diagnostics -- this is safe; credentials are redacted before the file is written."
+
+  # Namespace discovery (TB_NAMESPACE isn't set on a standalone diagnose run).
+  $ns = $TB_NAMESPACE
+  if (-not $ns) {
+    $jm = kubectl get pods -A 2>$null | Select-String '\-jobs-manager' | Select-Object -First 1
+    if ($jm) { $ns = ($jm.ToString().Trim() -split '\s+')[0] }
+  }
+  if (-not $ns) { $ns = "default" }
+
+  # host / versions
+  $h = @("# tracebloc diagnose ($ts)", "OS: Windows  ARCH: $(Get-WindowsArch)",
+         "CLIENT_ENV: $($env:CLIENT_ENV)  CLUSTER_NAME: $cn  NAMESPACE: $ns", "## versions",
+         (k3d version 2>&1 | Out-String), (kubectl version --client 2>&1 | Out-String),
+         (helm version --short 2>&1 | Out-String), (docker version 2>&1 | Out-String))
+  try { $cs = Get-CimInstance Win32_ComputerSystem -ErrorAction Stop; $h += "CPUs=$($cs.NumberOfLogicalProcessors)  MemBytes=$($cs.TotalPhysicalMemory)" } catch {}
+  ($h -join "`n") | Out-File (Join-Path $d "00-host.txt") -Encoding utf8
+
+  ((docker ps -a --filter "name=k3d-$cn-" 2>&1 | Out-String) + "`n" + (k3d cluster list 2>&1 | Out-String)) | Out-File (Join-Path $d "01-docker.txt") -Encoding utf8
+
+  if (Get-Command kubectl -ErrorAction SilentlyContinue) {
+    (@("## nodes", (kubectl get nodes -o wide 2>&1 | Out-String),
+       "## pods", (kubectl get pods -A -o wide 2>&1 | Out-String),
+       "## events", (kubectl get events -A 2>&1 | Out-String)) -join "`n") | Out-File (Join-Path $d "02-kubectl.txt") -Encoding utf8
+    foreach ($w in @("mysql-client", "$ns-jobs-manager", "$ns-requests-proxy")) {
+      kubectl logs -n $ns "deploy/$w" --all-containers --tail=500 2>&1 | Out-File (Join-Path $d "logs/$w.log") -Encoding utf8
+    }
+  }
+  if (Get-Command helm -ErrorAction SilentlyContinue) {
+    (@("## helm list", (helm list -A 2>&1 | Out-String), "## values", (helm get values $ns -n $ns 2>&1 | Out-String)) -join "`n") | Out-File (Join-Path $d "04-helm.txt") -Encoding utf8
+  }
+
+  Get-ChildItem -Path $base -Filter "install-*.log" -ErrorAction SilentlyContinue | ForEach-Object { Copy-Item $_.FullName (Join-Path $d $_.Name) -ErrorAction SilentlyContinue }
+  if (Test-Path "$base\values.yaml") { Copy-Item "$base\values.yaml" (Join-Path $d "values.yaml") -ErrorAction SilentlyContinue }
+
+  (("## proxy env`n") + ((@("HTTP_PROXY","HTTPS_PROXY","NO_PROXY") | ForEach-Object { "$_=" + [Environment]::GetEnvironmentVariable($_) }) -join "`n")) | Out-File (Join-Path $d "05-proxy.txt") -Encoding utf8
+
+  # REDACT every collected file, THEN archive.
+  Get-ChildItem -Path $d -Recurse -File | ForEach-Object { Edit-Redaction $_.FullName }
+  $bundle = Join-Path $base "tracebloc-diagnose-$ts.zip"
+  if (Test-Path $bundle) { Remove-Item $bundle -Force -ErrorAction SilentlyContinue }
+  Compress-Archive -Path $d -DestinationPath $bundle -Force -ErrorAction SilentlyContinue
+  Remove-Item $work -Recurse -Force -ErrorAction SilentlyContinue
+
+  Write-Host ""
+  if (Test-Path $bundle) {
+    Ok "Diagnostics saved (credentials redacted):"
+    Write-Host "    $bundle"
+    Hint "Send this file to tracebloc support -- it has logs + status with passwords removed."
+  } else {
+    Write-Host "  Could not create the diagnostics archive." -ForegroundColor Red
+  }
+}
+
+# =============================================================================
 #  MAIN
 # =============================================================================
 
+if (-not $env:TB_PESTER) {
+
 if ($Help) { Print-Help }
+if ($Diagnose) { Invoke-DiagnoseBundle; exit 0 }
 
 Confirm-Config
 Initialize-ToolDir
@@ -1088,6 +1531,7 @@ Print-Roadmap
 
 # -- Step 1/4: Check system requirements --
 Step 1 4 "Checking system requirements"
+Test-Preflight
 Find-Gpu
 Enable-VirtualisationFeatures
 Install-Winget
@@ -1105,7 +1549,13 @@ Confirm-GpuNode
 # -- Steps 3/4 + 4/4 handled inside Install-ClientHelm --
 Install-ClientHelm
 
-Confirm-Cluster
+# Verify the client actually came up before reporting anything
+Wait-ForClientReady
 Print-Summary
 
 try { Stop-Transcript | Out-Null } catch {}
+
+# Exit code reflects reality: connected/starting are OK; failures are non-zero.
+if ($script:ClientState -ne "connected" -and $script:ClientState -ne "starting") { exit 1 }
+
+}  # end TB_PESTER guard (skipped when the test suite dot-sources this file)

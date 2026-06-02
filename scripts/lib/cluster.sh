@@ -45,6 +45,75 @@ _ensure_release_dirs() {
   chmod -R 777 "$base/data" "$base/logs" "$base/mysql" 2>/dev/null || true
 }
 
+# --- Corporate-proxy support (authenticated proxies + NO_PROXY hardening) ----
+# Cluster-internal destinations that must NEVER be routed through a corporate
+# proxy: loopback, all RFC1918 private ranges (covers the k3s pod CIDR
+# 10.42.0.0/16, the service CIDR 10.43.0.0/16, the k3d docker network and node
+# IPs in one shot), and the in-cluster DNS suffixes. Sending this traffic out to
+# the proxy misroutes in-cluster calls AND makes `k3d cluster create --wait`
+# hang. We union these into whatever NO_PROXY the host set. (A tenant that needs
+# a *proxied* private-IP destination can narrow this; tracebloc itself only
+# pulls from public registries + dials public api.tracebloc.io, so the broad
+# bypass is safe for the isolated VM the client runs on.)
+TB_NO_PROXY_DEFAULTS="localhost,127.0.0.1,0.0.0.0,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,.svc,.svc.cluster.local,.cluster.local,host.k3d.internal"
+
+# Echo an effective NO_PROXY = host NO_PROXY/no_proxy ∪ TB_NO_PROXY_DEFAULTS,
+# de-duplicated with first-seen order preserved (host entries first).
+_augment_no_proxy() {
+  local existing="${NO_PROXY:-${no_proxy:-}}"
+  printf '%s,%s' "$existing" "$TB_NO_PROXY_DEFAULTS" \
+    | awk -v RS=',' '{ gsub(/[ \t\r\n]/, ""); if ($0 != "" && !seen[$0]++) printf "%s%s", (n++ ? "," : ""), $0 }'
+}
+
+# Build a k3d config file that carries the proxy env vars as structured YAML
+# entries, and echo its path. We use --config rather than --env KEY=VALUE@FILTER
+# because k3d splits the --env flag on '@', which corrupts authenticated-proxy
+# URLs (http://user:pass@host); the YAML env list has no such ambiguity, so
+# credentials survive intact. NO_PROXY is always emitted (auto-augmented) when a
+# proxy is present, so in-cluster traffic bypasses the proxy even if the host
+# set only HTTP_PROXY. Echoes nothing when the host has no HTTP(S) proxy set.
+_write_k3d_proxy_config() {
+  local var have_http=""
+  for var in HTTP_PROXY HTTPS_PROXY http_proxy https_proxy; do
+    [[ -n "${!var:-}" ]] && have_http=1
+  done
+  [[ -z "$have_http" ]] && return 0
+
+  local no_proxy_val; no_proxy_val="$(_augment_no_proxy)"
+  # mktemp -d with trailing X's is portable across GNU + BSD/macOS mktemp; a
+  # plain file template with a '.yaml' suffix is not (BSD needs trailing X's),
+  # and k3d/viper needs the '.yaml' extension to parse the config — so the file
+  # lives inside a temp dir. Caller removes the dir.
+  local td; td="$(mktemp -d "${TMPDIR:-/tmp}/tracebloc-k3d-XXXXXX")" || return 0
+  local cfg="$td/config.yaml"
+  {
+    echo "apiVersion: k3d.io/v1alpha5"
+    echo "kind: Simple"
+    echo "env:"
+    for var in HTTP_PROXY HTTPS_PROXY http_proxy https_proxy; do
+      [[ -z "${!var:-}" ]] && continue
+      printf '  - envVar: "%s=%s"\n    nodeFilters:\n      - all\n' "$var" "${!var}"
+    done
+    printf '  - envVar: "NO_PROXY=%s"\n    nodeFilters:\n      - all\n' "$no_proxy_val"
+    printf '  - envVar: "no_proxy=%s"\n    nodeFilters:\n      - all\n' "$no_proxy_val"
+  } > "$cfg"
+  echo "$cfg"
+}
+
+# When a proxy is configured, ensure THIS installer's own kubectl/helm/curl
+# bypass it for the cluster API (127.0.0.1) and the in-cluster ranges. Go
+# already auto-bypasses loopback, but exporting NO_PROXY also covers helm/curl.
+_export_host_no_proxy() {
+  local var
+  for var in HTTP_PROXY HTTPS_PROXY http_proxy https_proxy; do
+    if [[ -n "${!var:-}" ]]; then
+      local aug; aug="$(_augment_no_proxy)"
+      export NO_PROXY="$aug" no_proxy="$aug"
+      return 0
+    fi
+  done
+}
+
 create_cluster() {
   log "Creating k3d cluster: '$CLUSTER_NAME'"
 
@@ -56,8 +125,40 @@ create_cluster() {
     _create_new_cluster
   fi
 
+  ensure_cluster_autostart
   _merge_kubeconfig
+  _export_host_no_proxy
   _wait_for_api
+}
+
+# Guarantee the cluster returns after a host reboot. On Linux this already works
+# by default — k3d sets `--restart unless-stopped` on its node containers and the
+# Docker install enables docker.service on boot — but we harden both so it holds
+# even on a re-run where Docker was installed-but-disabled, or for an externally-
+# created cluster. On macOS/Windows the restart policy is set too, but Docker
+# Desktop must be configured to start on login (the summary tells the user).
+# Opt out with TRACEBLOC_NO_AUTOSTART=1.
+ensure_cluster_autostart() {
+  if [[ -n "${TRACEBLOC_NO_AUTOSTART:-}" ]]; then return 0; fi
+
+  local nodes node
+  nodes=$(docker ps -a --filter "name=k3d-${CLUSTER_NAME}-" --format '{{.Names}}' 2>/dev/null) || return 0
+  if [[ -n "$nodes" ]]; then
+    for node in $nodes; do
+      docker update --restart unless-stopped "$node" >/dev/null 2>&1 || true
+    done
+    log "Set restart=unless-stopped on k3d nodes so the cluster returns after a reboot."
+  fi
+
+  # On Linux, make sure Docker itself starts on boot. The fresh-install path only
+  # enables docker.service when Docker was absent; this also covers the
+  # installed-but-disabled re-run case. Idempotent.
+  if [[ "$OS" == "Linux" ]] && has systemctl; then
+    if sudo systemctl enable docker >/dev/null 2>&1; then
+      log "Ensured docker.service is enabled on boot."
+    fi
+  fi
+  return 0
 }
 
 _handle_existing_cluster() {
@@ -82,50 +183,21 @@ _handle_existing_cluster() {
   fi
 
   _check_existing_cluster_proxy
+  _check_existing_cluster_bind
 }
 
-# k3d bakes --env flags into containers at create time; they cannot be added
-# to a running cluster. Per-var check: for each proxy var set on the host,
-# verify the cluster has it. Detect NO_PROXY-only drift too (an older cluster
-# may have HTTP_PROXY baked in but be missing a NO_PROXY the host has since
-# added — without it, in-cluster traffic to .svc/.cluster.local or 127.0.0.1
-# can get routed through the proxy).
-# Silent no-op if Docker isn't running, the server container can't be inspected,
-# or the host has no proxy env set.
+# k3d bakes proxy env into containers at create time; it cannot be added to a
+# running cluster. For each proxy var set on the host, verify the existing
+# cluster has it, and warn (with the recreate remedy) on drift. Authenticated
+# proxies are now propagated like any other var (via _write_k3d_proxy_config),
+# so there is no longer a separate '@' bucket. Silent no-op if Docker isn't
+# running, the server container can't be inspected, or no proxy env is set.
 _check_existing_cluster_proxy() {
-  # Partition host proxy vars into two buckets:
-  #   • drift_candidates — values without '@' that would propagate cleanly;
-  #                        the cluster should have these, flag if missing.
-  #   • at_skipped       — values with '@' that _create_new_cluster refused
-  #                        to propagate (k3d's KEY=VALUE@FILTER conflict).
-  #                        Recreating wouldn't help — needs a different
-  #                        remedy (strip creds, use auth proxy).
-  local drift_candidates=() at_skipped=()
+  local var candidates=()
   for var in HTTP_PROXY HTTPS_PROXY NO_PROXY http_proxy https_proxy no_proxy; do
-    local val="${!var:-}"
-    [[ -z "$val" ]] && continue
-    if [[ "$val" == *"@"* ]]; then
-      at_skipped+=("$var")
-    else
-      drift_candidates+=("$var")
-    fi
+    [[ -n "${!var:-}" ]] && candidates+=("$var")
   done
-
-  # @-skipped vars get their own warning that fires on every re-run (the
-  # create-time skip warning in _create_new_cluster doesn't fire on the
-  # existing-cluster path). Recreate alone won't bake them, so guide the
-  # user toward the remedies that actually work.
-  if [[ ${#at_skipped[@]} -gt 0 ]]; then
-    echo ""
-    warn "Proxy env on host contains '@' (likely embedded credentials): ${at_skipped[*]}."
-    hint "k3d's --env KEY=VALUE@FILTER syntax can't carry an '@' in the value, so these"
-    hint "are not propagated into the cluster. If image pulls fail:"
-    hint "  • strip credentials from the URL (configure auth inside the cluster), or"
-    hint "  • point HTTP(S)_PROXY at a credential-less local auth-proxy that fronts the corporate proxy."
-    echo ""
-  fi
-
-  [[ ${#drift_candidates[@]} -eq 0 ]] && return 0
+  [[ ${#candidates[@]} -eq 0 ]] && return 0
 
   local server_container="k3d-${CLUSTER_NAME}-server-0"
   local cluster_env
@@ -133,17 +205,35 @@ _check_existing_cluster_proxy() {
   [[ -z "$cluster_env" ]] && return 0
 
   local missing=()
-  for var in "${drift_candidates[@]}"; do
-    if ! echo "$cluster_env" | grep -Eq "^${var}="; then
-      missing+=("$var")
-    fi
+  for var in "${candidates[@]}"; do
+    echo "$cluster_env" | grep -Eq "^${var}=" || missing+=("$var")
   done
 
   if [[ ${#missing[@]} -gt 0 ]]; then
     echo ""
     warn "Host has proxy env set, but the existing '$CLUSTER_NAME' cluster is missing: ${missing[*]}."
-    hint "k3d bakes --env flags into containers at create time — they can't be added to a running cluster."
+    hint "k3d bakes proxy settings into containers at create time — they can't be added to a running cluster."
     hint "If image pulls fail or in-cluster traffic misroutes, recreate the cluster:"
+    hint "  k3d cluster delete $CLUSTER_NAME  &&  re-run this installer."
+    echo ""
+  fi
+}
+
+# An externally-created cluster may bind its API to 0.0.0.0 rather than the
+# 127.0.0.1 this installer uses. _merge_kubeconfig normalizes the kubeconfig
+# (→127.0.0.1) so reuse still works, but we warn so the user understands their
+# cluster differs and how to rebuild it loopback-bound if a TLS/HTTP proxy still
+# intercepts external kubectl. Silent no-op if the serverlb can't be inspected.
+_check_existing_cluster_bind() {
+  local binds
+  binds=$(docker inspect "k3d-${CLUSTER_NAME}-serverlb" \
+    --format '{{range $p, $conf := .NetworkSettings.Ports}}{{range $conf}}{{.HostIp}} {{end}}{{end}}' 2>/dev/null) || return 0
+  [[ -z "$binds" ]] && return 0
+  if grep -qw '0\.0\.0\.0' <<<"$binds" && ! grep -qw '127\.0\.0\.1' <<<"$binds"; then
+    echo ""
+    warn "The existing '$CLUSTER_NAME' cluster binds its API to 0.0.0.0 (created outside this installer)."
+    hint "This installer binds clusters to 127.0.0.1; behind a corporate proxy a 0.0.0.0 bind can be intercepted."
+    hint "Your kubeconfig is normalized to 127.0.0.1 so reuse works. If kubectl is still intercepted, rebuild it:"
     hint "  k3d cluster delete $CLUSTER_NAME  &&  re-run this installer."
     echo ""
   fi
@@ -184,30 +274,29 @@ _create_new_cluster() {
   fi
   hint "First run may take 1-2 minutes to download components."
 
-  # Propagate corporate proxy env vars so k3s/k3d containers can reach external
-  # registries behind HTTP/HTTPS proxies (hospital/banking/government tenants).
-  # Loop checks both upper- and lower-case forms — apps in containers read either.
-  # k3d's --env syntax is KEY=VALUE@NODEFILTER; an embedded '@' in VALUE (e.g.
-  # credentials in URL: http://user:pass@host) collides with the filter
-  # delimiter and breaks `k3d cluster create`. Detect and skip with a warning;
-  # the user can strip creds and re-run, or supply creds via another mechanism.
-  for var in HTTP_PROXY HTTPS_PROXY NO_PROXY http_proxy https_proxy no_proxy; do
-    val="${!var:-}"
-    if [[ -n "$val" ]]; then
-      if [[ "$val" == *"@"* ]]; then
-        warn "Skipping ${var} propagation: value contains '@' (embedded credentials are not supported by k3d's --env filter syntax)."
-        hint "Strip credentials from the URL, or configure proxy auth inside the cluster after install."
-        continue
-      fi
-      K3D_ARGS+=(--env "${var}=${val}@all")
-      log "Propagating ${var} to k3d nodes."
-    fi
-  done
+  # Propagate corporate proxy env so k3s/containerd can reach external registries
+  # behind an HTTP/HTTPS proxy (hospital/banking/government tenants). Passed via a
+  # k3d --config file rather than --env: k3d splits --env on '@', which corrupts
+  # authenticated-proxy URLs (http://user:pass@host), whereas the YAML env list in
+  # a config file preserves them. NO_PROXY is auto-augmented with the cluster-
+  # internal ranges so in-cluster traffic never traverses the proxy (which would
+  # otherwise misroute it and hang `k3d cluster create --wait`). k3d merges the
+  # --config env with these CLI flags (verified on k3d v5.8.3).
+  local proxy_cfg
+  proxy_cfg="$(_write_k3d_proxy_config)"
+  if [[ -n "$proxy_cfg" ]]; then
+    K3D_ARGS+=(--config "$proxy_cfg")
+    log "Propagating proxy settings to k3d nodes (authenticated proxies supported; NO_PROXY auto-augmented)."
+  fi
 
   local create_out create_rc
   create_out="$(mktemp)"
-  if ! k3d "${K3D_ARGS[@]}" >"$create_out" 2>&1; then
-    create_rc=$?
+  # Capture the exit code WITHOUT tripping `set -e`: a bare failing command here
+  # would abort the script immediately, skipping the 'already exists' reuse path,
+  # the error dump, and the temp-dir cleanup below.
+  k3d "${K3D_ARGS[@]}" >"$create_out" 2>&1 && create_rc=0 || create_rc=$?
+  [[ -n "$proxy_cfg" ]] && rm -rf "${proxy_cfg%/*}"
+  if [[ $create_rc -ne 0 ]]; then
     if grep -qi "already exists\|a cluster with that name already exists" "$create_out" 2>/dev/null; then
       log "Cluster '$CLUSTER_NAME' already exists (detected from k3d message). Using existing cluster."
       rm -f "$create_out"
@@ -282,6 +371,6 @@ _wait_for_api() {
   kc="${kc%%:*}"
   error "kubectl cluster-info failed for 60s. Cluster reports running, but the API is unreachable. Possible causes:
    (a) Docker daemon stopped (run 'docker ps' to verify);
-   (b) corporate HTTP/HTTPS proxy intercepting localhost — ensure NO_PROXY includes '127.0.0.1,localhost';
+   (b) corporate HTTP/HTTPS proxy intercepting localhost — this installer auto-adds 127.0.0.1/localhost + private ranges to NO_PROXY; a custom proxy wrapper may still override it;
    (c) kubeconfig has 0.0.0.0 — try: sed -i.bak 's|0.0.0.0|127.0.0.1|g' ${kc} && rm ${kc}.bak"
 }

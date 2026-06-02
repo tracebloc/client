@@ -299,10 +299,14 @@ install_cleanup() {
     fi
     [[ -n "${LOG_FILE:-}" ]] && hint "Logs: $LOG_FILE"
   elif [[ $exit_code -ne 0 ]]; then
-    echo ""
-    warn "Installation did not complete."
-    [[ -n "${LOG_FILE:-}" ]] && hint "Check the install log: $LOG_FILE"
-    hint "This installer is safe to re-run — just try again."
+    # If print_summary already reported a specific outcome (CLIENT_STATE set),
+    # don't tack on a second, generic "did not complete" message.
+    if [[ -z "${CLIENT_STATE:-}" ]]; then
+      echo ""
+      warn "Installation did not complete."
+      [[ -n "${LOG_FILE:-}" ]] && hint "Check the install log: $LOG_FILE"
+      hint "This installer is safe to re-run — just try again."
+    fi
   fi
 }
 
@@ -347,7 +351,13 @@ tracebloc — client setup
 
 Usage:
   curl -fsSL https://raw.githubusercontent.com/tracebloc/client/main/scripts/install.sh | bash
-  ./install-k8s.sh [--help]
+  ./install-k8s.sh [--help] [--diagnose]
+
+Commands:
+  --diagnose     Collect a redacted support bundle (logs + cluster/host status)
+                 into ~/.tracebloc/tracebloc-diagnose-<timestamp>.tgz and exit.
+                 Run this if something went wrong, then send the file to support
+                 (passwords and proxy credentials are removed before it is written).
 
 Advanced configuration (environment variables):
   CLUSTER_NAME   Cluster name                   (default: tracebloc)

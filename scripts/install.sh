@@ -33,6 +33,7 @@ mkdir -p "$TMPDIR/lib"
 FILES=(
   "scripts/install-k8s.sh"
   "scripts/lib/common.sh"
+  "scripts/lib/preflight.sh"
   "scripts/lib/detect-gpu.sh"
   "scripts/lib/gpu-nvidia.sh"
   "scripts/lib/gpu-amd.sh"
@@ -42,6 +43,7 @@ FILES=(
   "scripts/lib/gpu-plugins.sh"
   "scripts/lib/install-client-helm.sh"
   "scripts/lib/summary.sh"
+  "scripts/lib/diagnose.sh"
 )
 
 download_with_retry() {

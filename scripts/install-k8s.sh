@@ -40,6 +40,7 @@ LIB_DIR="${SCRIPT_DIR}/lib"
 
 # ── Source modules ───────────────────────────────────────────────────────────
 source "${LIB_DIR}/common.sh"
+source "${LIB_DIR}/preflight.sh"
 source "${LIB_DIR}/detect-gpu.sh"
 source "${LIB_DIR}/gpu-nvidia.sh"
 source "${LIB_DIR}/gpu-amd.sh"
@@ -49,12 +50,17 @@ source "${LIB_DIR}/cluster.sh"
 source "${LIB_DIR}/gpu-plugins.sh"
 source "${LIB_DIR}/install-client-helm.sh"
 source "${LIB_DIR}/summary.sh"
+source "${LIB_DIR}/diagnose.sh"
 
 trap install_cleanup EXIT
 
 # ── Main ─────────────────────────────────────────────────────────────────────
 main() {
   [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]] && print_help
+  # Support bundle: collect redacted diagnostics and exit, before any install
+  # work (so it works even when the install is broken). Clear the EXIT trap so
+  # the post-install cleanup message doesn't fire after a diagnose run.
+  [[ "${1:-}" == "--diagnose" ]] && { trap - EXIT; run_diagnose; exit $?; }
 
   validate_config
   setup_log_file
@@ -63,6 +69,7 @@ main() {
 
   # ── Step 1/4: Check system requirements ──────────────────────────────────
   step 1 4 "Checking system requirements"
+  run_preflight
   detect_gpu
 
   case "$OS" in
@@ -83,8 +90,16 @@ main() {
   # ── Step 3/4 + 4/4 are handled inside install_client_helm ────────────────
   install_client_helm
 
-  verify_cluster
+  # ── Verify the client actually came up before reporting anything ─────────
+  wait_for_client_ready
   print_summary
+
+  # Exit code reflects reality: connected/starting are OK; failures are non-zero
+  # so re-runs and automation can tell the difference.
+  case "${CLIENT_STATE:-}" in
+    connected|starting) ;;
+    *) exit 1 ;;
+  esac
 }
 
 main "$@"

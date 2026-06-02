@@ -115,3 +115,7 @@ jobs:
             -f client/ci/${{ matrix.platform }}-values.yaml \
             > /dev/null
           echo "Schema validation passed for ${{ matrix.platform }}"
+
+  # Installer script tests (bats + Pester) + the cross-distro prerequisite matrix
+  # live in their own workflow: .github/workflows/installer-tests.yaml
+  # (triggered on scripts/** changes).
