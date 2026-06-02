@@ -55,11 +55,11 @@ jobs:
           # below for visibility but don't fail the gate.
           shellcheck --severity=error --shell=bash \
             scripts/install.sh scripts/install-k8s.sh scripts/lib/*.sh \
-            scripts/tests/distro-prereqs.sh
+            scripts/tests/distro-prereqs.sh scripts/tests/e2e-cluster.sh
           echo "── shellcheck warnings (advisory, non-blocking) ──"
           shellcheck --severity=warning --shell=bash \
             scripts/install.sh scripts/install-k8s.sh scripts/lib/*.sh \
-            scripts/tests/distro-prereqs.sh || true
+            scripts/tests/distro-prereqs.sh scripts/tests/e2e-cluster.sh || true
 
       - name: PSScriptAnalyzer (PowerShell installer)
         shell: pwsh
@@ -140,3 +140,21 @@ jobs:
         run: |
           docker run --rm -v "$PWD:/src:ro" -w /src "$DISTRO" \
             bash scripts/tests/distro-prereqs.sh
+
+  e2e-cluster:
+    # Highest-fidelity check CI can run: brings up an ACTUAL k3d cluster via the
+    # installer's own create_cluster() on a real kernel (Docker is preinstalled
+    # on the runner), proves it can schedule + run a public workload, then tears
+    # down. Stops BEFORE the tracebloc helm install / backend registration (those
+    # need private images + real credentials), so it needs no secrets. Runs on
+    # both amd64 and arm64 Ubuntu runners (arm64 is free on this public repo).
+    name: E2E cluster (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, ubuntu-24.04, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Bring up a real k3d cluster + run a workload
+        run: bash scripts/tests/e2e-cluster.sh
