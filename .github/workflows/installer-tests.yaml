@@ -35,11 +35,14 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: bash -n (syntax) on every script
+      - name: bash -n (syntax) on every shell script
         run: |
-          find scripts -type f \( -name '*.sh' -o -name '*.bats' \) -print0 \
+          # .bats files are bats DSL (@test "name" { … }), not valid bash — they are
+          # syntax-checked by actually running them in the unit-bash job. Parse the
+          # real shell scripts here.
+          find scripts -type f -name '*.sh' -print0 \
             | while IFS= read -r -d '' f; do bash -n "$f" || exit 1; done
-          echo "all scripts parse"
+          echo "all shell scripts parse"
 
       - name: ShellCheck (libs + entrypoints)
         run: |

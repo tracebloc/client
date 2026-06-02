@@ -118,14 +118,18 @@ Describe "Get-WindowsArch" {
 
 Describe "Confirm-Config" {
   It "valid config passes + sets HOST_DATA_DIR" {
-    $env:USERPROFILE = $env:HOME
-    $CLUSTER_NAME = "tracebloc"; $SERVERS = "1"; $AGENTS = "1"; $HOST_DATA_DIR = "$env:HOME/.tracebloc"
+    # $env:HOME is empty on Windows (it uses USERPROFILE) — derive a profile dir
+    # valid on both OSes, else GetFullPath in Confirm-Config throws "path is empty".
+    $prof = if ($env:USERPROFILE) { $env:USERPROFILE } elseif ($env:HOME) { $env:HOME } else { [System.IO.Path]::GetTempPath() }
+    $env:USERPROFILE = $prof
+    $CLUSTER_NAME = "tracebloc"; $SERVERS = "1"; $AGENTS = "1"; $HOST_DATA_DIR = Join-Path $prof ".tracebloc"
     { Confirm-Config } | Should -Not -Throw
   }
   It "invalid CLUSTER_NAME -> Err" {
     Mock Err { throw "err" }
-    $env:USERPROFILE = $env:HOME
-    $CLUSTER_NAME = "1bad"; $SERVERS = "1"; $AGENTS = "1"; $HOST_DATA_DIR = "$env:HOME/x"
+    $prof = if ($env:USERPROFILE) { $env:USERPROFILE } elseif ($env:HOME) { $env:HOME } else { [System.IO.Path]::GetTempPath() }
+    $env:USERPROFILE = $prof
+    $CLUSTER_NAME = "1bad"; $SERVERS = "1"; $AGENTS = "1"; $HOST_DATA_DIR = Join-Path $prof "x"
     { Confirm-Config } | Should -Throw
   }
 }
