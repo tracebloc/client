@@ -55,11 +55,11 @@ jobs:
           # below for visibility but don't fail the gate.
           shellcheck --severity=error --shell=bash \
             scripts/install.sh scripts/install-k8s.sh scripts/lib/*.sh \
-            scripts/tests/distro-prereqs.sh scripts/tests/e2e-cluster.sh
+            scripts/tests/distro-prereqs.sh scripts/tests/e2e-cluster.sh scripts/tests/e2e-proxy.sh
           echo "── shellcheck warnings (advisory, non-blocking) ──"
           shellcheck --severity=warning --shell=bash \
             scripts/install.sh scripts/install-k8s.sh scripts/lib/*.sh \
-            scripts/tests/distro-prereqs.sh scripts/tests/e2e-cluster.sh || true
+            scripts/tests/distro-prereqs.sh scripts/tests/e2e-cluster.sh scripts/tests/e2e-proxy.sh || true
 
       - name: PSScriptAnalyzer (PowerShell installer)
         shell: pwsh
@@ -158,3 +158,17 @@ jobs:
       - uses: actions/checkout@v4
       - name: Bring up a real k3d cluster + run a workload
         run: bash scripts/tests/e2e-cluster.sh
+
+  e2e-proxy:
+    # Authenticated corporate-proxy E2E (the Charité/hospital archetype): stands
+    # up a squid that REQUIRES basic auth, brings the cluster up with the
+    # installer's proxy config pointed at it as user:pass@host, and proves the
+    # nodes pull a workload image THROUGH the authed proxy (the squid log shows an
+    # authenticated auth.docker.io CONNECT, which only a real pull makes). Guards
+    # the #172/#174 proxy hardening end-to-end. Single runner (arch-agnostic). No secrets.
+    name: E2E auth-proxy (squid)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Cluster up through an authenticated proxy
+        run: bash scripts/tests/e2e-proxy.sh
