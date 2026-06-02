@@ -41,20 +41,42 @@ install_docker_engine() {
       spin_cmd "Installing Docker…" sudo bash "$docker_script"
       rm -f "$docker_script"
     fi
-    sudo systemctl enable --now docker
+    # Enable for boot only (no --now): starting is handled below, where a start
+    # failure is diagnosed instead of aborting the whole script under `set -e`.
+    sudo systemctl enable docker >/dev/null 2>&1 || true
     sudo usermod -aG docker "$USER"
     success "Docker"
   else
     success "Docker"
   fi
 
+  # Clear any failed/throttled state from a previous attempt first — a crashed
+  # daemon leaves the unit in "Start request repeated too quickly", which makes
+  # systemctl refuse a plain start (so a bare re-run can never recover). Both
+  # commands are best-effort; the `docker info` check below is the real gate.
+  sudo systemctl reset-failed docker 2>/dev/null || true
   sudo systemctl start docker 2>/dev/null || true
 
   if ! docker info &>/dev/null 2>&1; then
+    # (a) Group not active in THIS shell yet → re-exec under the docker group.
     if [[ -z "${_K3S_INSTALL_REEXEC:-}" ]] && id -nG "$USER" 2>/dev/null | grep -qw docker; then
       SELF="$(readlink -f "$0" 2>/dev/null || echo "$0")"
       log "Docker group not yet active in this session — re-executing script..."
       exec sg docker -c "_K3S_INSTALL_REEXEC=1 bash '$SELF'"
+    fi
+    # (b) The daemon itself isn't running → a Docker/host problem, not a group
+    # one. Surface Docker's OWN error (a 'log out and back in' hint would just
+    # send the user in circles, as it can't fix a crashing daemon).
+    if ! sudo systemctl is-active --quiet docker 2>/dev/null; then
+      echo ""
+      warn "Docker is installed, but its daemon won't start — this is a Docker/host issue, not tracebloc."
+      hint "Common causes on RHEL/AlmaLinux: SELinux or iptables/nftables init, an overlay"
+      hint "storage-driver problem, or too little space on /var/lib/docker. Docker's own error:"
+      { sudo systemctl status docker.service --no-pager -l 2>&1 | tail -6
+        sudo journalctl -u docker.service --no-pager 2>/dev/null \
+          | grep -iE 'level=(error|fatal)|failed to|cannot |unable |no such' | tail -12; } | sed 's/^/    /'
+      echo ""
+      error "Start Docker manually (fix the error above), then re-run this installer."
     fi
     error "Could not connect to Docker. Try logging out and back in, then re-run the script."
   fi

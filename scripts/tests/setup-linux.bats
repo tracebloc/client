@@ -135,3 +135,18 @@ setup() {
   run mock_calls
   [ -z "$output" ]
 }
+
+# ── install_docker_engine: dead daemon vs group-not-active (Asad's Alma9 case) ──
+@test "install_docker_engine: daemon won't start -> Docker's error, not the group hint" {
+  PRESENT_CMDS="docker"          # docker present -> skip install
+  docker() { return 1; }         # docker info fails
+  id() { echo "testuser"; }      # NOT in docker group -> no sg re-exec
+  sudo() {
+    case "$*" in *"is-active"*) return 1 ;; esac   # daemon not active
+    record "sudo $*"; return 0
+  }
+  run install_docker_engine
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"daemon won't start"* ]]
+  [[ "$output" != *"logging out"* ]]               # the misleading group hint is NOT used
+}
