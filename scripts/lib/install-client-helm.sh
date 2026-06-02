@@ -110,6 +110,35 @@ _sanitize_workspace_name() {
   printf '%s' "$sanitized"
 }
 
+# ── Credential verification (#717) ────────────────────────────────────────
+# Resolve the backend base URL the same way jobs-manager does
+# (client-runtime/controller.py: CLIENT_ENV → backend), defaulting to prod.
+_backend_url() {
+  case "${CLIENT_ENV:-prod}" in
+    dev) printf 'https://dev-api.tracebloc.io/' ;;
+    stg) printf 'https://stg-api.tracebloc.io/' ;;
+    *)   printf 'https://api.tracebloc.io/' ;;
+  esac
+}
+
+# Validate the entered Client ID / password against the backend's
+# api-token-auth/ endpoint — the same call jobs-manager makes at runtime —
+# using curl (already a dependency). Echoes: valid | invalid | inactive | unverified.
+verify_credentials() {
+  local client_id="$1" client_password="$2" backend code
+  backend="$(_backend_url)"
+  code=$(curl -sS -m 60 -o /dev/null -w '%{http_code}' \
+    --data-urlencode "username=${client_id}" \
+    --data-urlencode "password=${client_password}" \
+    "${backend}api-token-auth/" 2>/dev/null) || code="000"
+  case "$code" in
+    200) printf 'valid' ;;
+    400) printf 'invalid' ;;
+    401) printf 'inactive' ;;
+    *)   printf 'unverified' ;;   # 429 throttled, 000 unreachable, 5xx, …
+  esac
+}
+
 install_client_helm() {
   # ── Step 3/4: Install tracebloc client ───────────────────────────────────
   step 3 4 "Installing tracebloc client"
@@ -175,25 +204,56 @@ install_client_helm() {
   echo -e "    ${BOLD}${WHITE}https://ai.tracebloc.io/clients${RESET}"
   echo ""
 
-  if [[ -n "$default_client_id" ]]; then
-    read -r -p "  Client ID [${default_client_id}]: " TB_CLIENT_ID_INPUT
-    TB_CLIENT_ID="${TB_CLIENT_ID_INPUT:-$default_client_id}"
-  else
-    read -r -p "  Client ID: " TB_CLIENT_ID
-  fi
-  TB_CLIENT_ID=$(_sanitize_credential "$TB_CLIENT_ID")
-  [[ -z "$TB_CLIENT_ID" ]] && error "Client ID cannot be empty."
+  # Collect + verify credentials. The entered Client ID / password are checked
+  # against the backend (the same api-token-auth/ call jobs-manager makes)
+  # before we deploy, so a wrong credential is caught here — with a re-prompt —
+  # instead of surfacing later as a silently crash-looping pod.
+  local _cred_attempt=0 _cred_max=5 _cred_status
+  while true; do
+    if [[ -n "$default_client_id" ]]; then
+      read -r -p "  Client ID [${default_client_id}]: " TB_CLIENT_ID_INPUT
+      TB_CLIENT_ID="${TB_CLIENT_ID_INPUT:-$default_client_id}"
+    else
+      read -r -p "  Client ID: " TB_CLIENT_ID
+    fi
+    TB_CLIENT_ID=$(_sanitize_credential "$TB_CLIENT_ID")
+    if [[ -z "$TB_CLIENT_ID" ]]; then warn "Client ID cannot be empty."; continue; fi
 
-  if [[ -n "$default_client_password" ]]; then
-    read -r -s -p "  Client password [press Enter to keep existing]: " TB_CLIENT_PASSWORD_INPUT
-    echo ""
-    TB_CLIENT_PASSWORD="${TB_CLIENT_PASSWORD_INPUT:-$default_client_password}"
-  else
-    read -r -s -p "  Client password: " TB_CLIENT_PASSWORD
-    echo ""
-  fi
-  TB_CLIENT_PASSWORD=$(_sanitize_credential "$TB_CLIENT_PASSWORD")
-  [[ -z "$TB_CLIENT_PASSWORD" ]] && error "Client password cannot be empty."
+    if [[ -n "$default_client_password" ]]; then
+      read -r -s -p "  Client password [press Enter to keep existing]: " TB_CLIENT_PASSWORD_INPUT
+      echo ""
+      TB_CLIENT_PASSWORD="${TB_CLIENT_PASSWORD_INPUT:-$default_client_password}"
+    else
+      read -r -s -p "  Client password: " TB_CLIENT_PASSWORD
+      echo ""
+    fi
+    TB_CLIENT_PASSWORD=$(_sanitize_credential "$TB_CLIENT_PASSWORD")
+    if [[ -z "$TB_CLIENT_PASSWORD" ]]; then warn "Client password cannot be empty."; continue; fi
+
+    info "Verifying credentials with tracebloc…"
+    _cred_status=$(verify_credentials "$TB_CLIENT_ID" "$TB_CLIENT_PASSWORD")
+    case "$_cred_status" in
+      valid)
+        success "Credentials verified."
+        break ;;
+      invalid)
+        warn "That Client ID / password was rejected by tracebloc — please re-enter."
+        hint "Find your credentials at https://ai.tracebloc.io/clients" ;;
+      inactive)
+        error "This tracebloc account is not active yet. Check your email for the activation link, then re-run." ;;
+      unverified)
+        warn "Couldn't reach tracebloc to verify your credentials right now — continuing."
+        hint "If they are wrong, your client will stay offline at https://ai.tracebloc.io/clients after install."
+        break ;;
+    esac
+
+    _cred_attempt=$((_cred_attempt + 1))
+    if [[ $_cred_attempt -ge $_cred_max ]]; then
+      error "Too many failed attempts. Double-check your credentials at https://ai.tracebloc.io/clients and re-run."
+    fi
+    # Force an active re-entry on retry (don't silently reuse a rejected default).
+    default_client_id=""; default_client_password=""
+  done
 
   TB_CLIENT_PASSWORD_ESCAPED="${TB_CLIENT_PASSWORD//\'/\'\'}"
 
