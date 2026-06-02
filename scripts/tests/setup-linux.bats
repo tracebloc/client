@@ -150,3 +150,15 @@ setup() {
   [[ "$output" == *"daemon won't start"* ]]
   [[ "$output" != *"logging out"* ]]               # the misleading group hint is NOT used
 }
+
+# Asad's root cause: minimal AlmaLinux lacks xt_addrtype -> dockerd bridge init fails.
+@test "_ensure_kernel_modules: modprobes modules + installs kernel-modules on a load failure" {
+  has() { [[ "$1" == "dnf" ]]; }
+  sudo() { record "sudo $*"; case "$*" in *modprobe*) return 1 ;; esac; return 0; }
+  spin_cmd() { record "$*"; return 0; }
+  run _ensure_kernel_modules
+  run mock_calls
+  [[ "$output" == *"modprobe overlay"* ]]
+  [[ "$output" == *"modprobe xt_addrtype"* ]]
+  [[ "$output" == *"kernel-modules-"* ]]           # RHEL fallback install fired
+}

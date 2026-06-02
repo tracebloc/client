@@ -14,6 +14,26 @@ setup_pm() {
   else error "No supported package manager found."; fi
 }
 
+# ── Kernel modules Docker + k3s need ─────────────────────────────────────────
+# Docker's bridge driver programs iptables NAT rules using the `addrtype` match
+# (xt_addrtype), and k3s needs br_netfilter + overlay. Minimal RHEL/AlmaLinux
+# cloud images (e.g. AWS EC2) ship kernel-modules-core but NOT the full
+# kernel-modules package that carries these, so dockerd dies on startup with
+# "iptables … addrtype … missing kernel module". Load them — installing the
+# matching kernel-modules package on RHEL-family if a load fails — and persist
+# for reboots. Best-effort + idempotent; harmless where the modules already exist.
+_ensure_kernel_modules() {
+  local mods="overlay br_netfilter xt_addrtype iptable_nat ip_tables"
+  local m missing=""
+  for m in $mods; do sudo modprobe "$m" 2>/dev/null || missing=1; done
+  if [[ -n "$missing" ]] && has dnf; then
+    spin_cmd "Installing kernel modules for Docker/k3s…" \
+      sudo dnf install -y -q "kernel-modules-$(uname -r)" || true
+    for m in $mods; do sudo modprobe "$m" 2>/dev/null || true; done
+  fi
+  printf '%s\n' $mods | sudo tee /etc/modules-load.d/tracebloc.conf >/dev/null 2>&1 || true
+}
+
 # ── Docker Engine ────────────────────────────────────────────────────────────
 install_docker_engine() {
   if ! has docker; then
@@ -50,6 +70,10 @@ install_docker_engine() {
     success "Docker"
   fi
 
+  # Load the kernel modules dockerd's bridge driver + k3s need BEFORE starting,
+  # so minimal RHEL/AlmaLinux images don't fail with the "addrtype" iptables error.
+  _ensure_kernel_modules
+
   # Clear any failed/throttled state from a previous attempt first — a crashed
   # daemon leaves the unit in "Start request repeated too quickly", which makes
   # systemctl refuse a plain start (so a bare re-run can never recover). Both
@@ -70,8 +94,9 @@ install_docker_engine() {
     if ! sudo systemctl is-active --quiet docker 2>/dev/null; then
       echo ""
       warn "Docker is installed, but its daemon won't start — this is a Docker/host issue, not tracebloc."
-      hint "Common causes on RHEL/AlmaLinux: SELinux or iptables/nftables init, an overlay"
-      hint "storage-driver problem, or too little space on /var/lib/docker. Docker's own error:"
+      hint "If the error below mentions 'addrtype' / 'missing kernel module', the host lacks the"
+      hint "netfilter modules Docker needs — try:  sudo dnf install -y kernel-modules-\$(uname -r) && sudo reboot"
+      hint "Other causes: SELinux, an overlay storage-driver issue, or low /var/lib/docker disk. Docker's error:"
       { sudo systemctl status docker.service --no-pager -l 2>&1 | tail -6
         sudo journalctl -u docker.service --no-pager 2>/dev/null \
           | grep -iE 'level=(error|fatal)|failed to|cannot |unable |no such' | tail -12; } | sed 's/^/    /'
