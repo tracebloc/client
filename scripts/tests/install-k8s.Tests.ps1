@@ -7,6 +7,7 @@ BeforeAll {
   . "$PSScriptRoot/../install-k8s.ps1"
   # Stubs so Pester can mock external commands that the functions invoke.
   function kubectl { }
+  function docker { }
 }
 
 Describe "Get-BackendUrl" {
@@ -357,5 +358,23 @@ Describe "Test-Preflight" {
     Mock Get-WindowsArch { "arm64" }
     Mock Test-PfUrl { "ok" }
     { Test-Preflight } | Should -Not -Throw
+  }
+}
+
+# --- reboot persistence (Set-ClusterAutostart) -------------------------------
+Describe "Set-ClusterAutostart" {
+  AfterEach { $env:TRACEBLOC_NO_AUTOSTART = $null }
+  It "sets unless-stopped on each k3d node" {
+    Mock docker {
+      if (($args -join ' ') -match 'ps -a') { return @("k3d-tracebloc-server-0", "k3d-tracebloc-serverlb") }
+    }
+    Set-ClusterAutostart
+    Should -Invoke docker -ParameterFilter { ($args -join ' ') -match 'update --restart unless-stopped' } -Times 2
+  }
+  It "TRACEBLOC_NO_AUTOSTART -> no docker calls" {
+    $env:TRACEBLOC_NO_AUTOSTART = "1"
+    Mock docker { }
+    Set-ClusterAutostart
+    Should -Invoke docker -Times 0 -Exactly
   }
 }

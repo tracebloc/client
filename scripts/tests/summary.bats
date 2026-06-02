@@ -91,3 +91,24 @@ setup() {
   [[ "$output" == *"crash loop"* ]]
   [[ "$output" != *"data never leaves"* ]]
 }
+
+# ── _reboot_note (reboot persistence) ───────────────────────────────────────
+@test "_reboot_note: Linux -> survives-reboot line" {
+  OS=Linux
+  run _reboot_note
+  [[ "$output" == *"Survives reboot"* ]]
+  [[ "$output" != *"Docker Desktop"* ]]
+}
+
+@test "_reboot_note: macOS -> Docker Desktop start-on-login instruction" {
+  OS=Darwin
+  run _reboot_note
+  [[ "$output" == *"Docker Desktop"* ]]
+  [[ "$output" == *"sign in"* ]]
+}
+
+@test "print_summary connected: includes the reboot note" {
+  CLIENT_STATE=connected; OS=Linux
+  run print_summary
+  [[ "$output" == *"Survives reboot"* ]]
+}
