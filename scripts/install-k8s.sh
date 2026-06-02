@@ -40,6 +40,7 @@ LIB_DIR="${SCRIPT_DIR}/lib"
 
 # ── Source modules ───────────────────────────────────────────────────────────
 source "${LIB_DIR}/common.sh"
+source "${LIB_DIR}/preflight.sh"
 source "${LIB_DIR}/detect-gpu.sh"
 source "${LIB_DIR}/gpu-nvidia.sh"
 source "${LIB_DIR}/gpu-amd.sh"
@@ -63,6 +64,7 @@ main() {
 
   # ── Step 1/4: Check system requirements ──────────────────────────────────
   step 1 4 "Checking system requirements"
+  run_preflight
   detect_gpu
 
   case "$OS" in

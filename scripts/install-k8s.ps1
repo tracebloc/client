@@ -1301,6 +1301,114 @@ function Print-Summary {
 }
 
 # =============================================================================
+#  PREFLIGHT — fail-fast environment checks (mirrors scripts/lib/preflight.sh)
+# =============================================================================
+
+# Non-exiting failure line (Err exits; preflight must finish all checks first).
+function Write-PfFail($m) { Write-Host "  " -NoNewline; Write-Host ([char]0x2716) -ForegroundColor Red -NoNewline; Write-Host " $m" -ForegroundColor Red }
+
+# Probe a URL for reachability. Returns: ok|tls|dns|timeout|blocked. Any HTTP
+# response (incl. 401/403/404) = reachable (TLS + HTTP completed). Honors the
+# system / HTTP_PROXY proxy automatically.
+function Test-PfUrl([string]$Url) {
+  try {
+    Invoke-WebRequest -Uri $Url -Method Head -TimeoutSec 8 -UseBasicParsing -ErrorAction Stop | Out-Null
+    return "ok"
+  } catch {
+    if ($null -ne $_.Exception.Response) { return "ok" }   # reached the server, got an HTTP error
+    $m = "$($_.Exception.Message)"
+    if ($m -match 'trust|SSL|certificate|TLS|secure channel') { return "tls" }
+    if ($m -match 'resolve|name or service|known')            { return "dns" }
+    if ($m -match 'timed out|timeout')                        { return "timeout" }
+    return "blocked"
+  }
+}
+
+# Free GB on the drive holding $HOST_DATA_DIR (or C:); $null if undeterminable
+# (e.g. non-Windows under Pester — tests mock this).
+function Get-PfFreeGb {
+  try {
+    $qualifier = (Split-Path -Qualifier $HOST_DATA_DIR -ErrorAction SilentlyContinue)
+    if (-not $qualifier) { $qualifier = "C:" }
+    $d = Get-CimInstance Win32_LogicalDisk -Filter "DeviceID='$qualifier'" -ErrorAction Stop
+    return [math]::Floor($d.FreeSpace / 1GB)
+  } catch { return $null }
+}
+
+function Get-PfMemGb {
+  try { return [math]::Floor((Get-CimInstance Win32_ComputerSystem -ErrorAction Stop).TotalPhysicalMemory / 1GB) }
+  catch { return $null }
+}
+
+function Get-PfCpu {
+  try { return [int](Get-CimInstance Win32_ComputerSystem -ErrorAction Stop).NumberOfLogicalProcessors }
+  catch { if ($env:NUMBER_OF_PROCESSORS) { return [int]$env:NUMBER_OF_PROCESSORS } else { return $null } }
+}
+
+function Test-Preflight {
+  if ($env:TRACEBLOC_SKIP_PREFLIGHT) { Info "Preflight checks skipped (TRACEBLOC_SKIP_PREFLIGHT set)."; return }
+
+  $minDiskGb  = if ($env:PF_MIN_DISK_GB)  { [int]$env:PF_MIN_DISK_GB }  else { 5 }
+  $warnDiskGb = if ($env:PF_WARN_DISK_GB) { [int]$env:PF_WARN_DISK_GB } else { 20 }
+  $warnMemGb  = if ($env:PF_WARN_MEM_GB)  { [int]$env:PF_WARN_MEM_GB }  else { 4 }
+  $minCpu     = if ($env:PF_MIN_CPU)      { [int]$env:PF_MIN_CPU }      else { 2 }
+  $hardFail   = 0
+
+  # Architecture — the tracebloc client images (e.g. mysql-client) are amd64-only.
+  $arch = Get-WindowsArch
+  if ($arch -eq "amd64") {
+    Ok "Architecture: amd64"
+  } elseif ($env:TRACEBLOC_ALLOW_ARM64) {
+    Warn "Architecture: $arch - proceeding (TRACEBLOC_ALLOW_ARM64 set); amd64-only images may crash if emulation is unavailable."
+  } else {
+    Info "Architecture: $arch - Docker Desktop runs the amd64 client images under emulation (slower, but works)."
+  }
+
+  $cpu = Get-PfCpu
+  if      ($null -eq $cpu)   { Warn "CPU: couldn't determine core count (skipping)." }
+  elseif  ($cpu -lt $minCpu) { Warn "CPU: $cpu core(s) - recommended >= $minCpu." }
+  else                       { Ok "CPU: $cpu cores" }
+
+  $mem = Get-PfMemGb
+  if      ($null -eq $mem)      { Warn "Memory: couldn't determine total RAM (skipping)." }
+  elseif  ($mem -lt $warnMemGb) { Warn "Memory: $mem GB total - recommended >= $warnMemGb GB; k3s + training may run out of memory." }
+  else                          { Ok "Memory: $mem GB" }
+
+  $disk = Get-PfFreeGb
+  if      ($null -eq $disk)        { Warn "Disk: couldn't determine free space (skipping)." }
+  elseif  ($disk -lt $minDiskGb)   { Write-PfFail "Disk: only $disk GB free - need >= $minDiskGb GB."; $hardFail++; Hint "Free up space or attach a larger disk, then re-run." }
+  elseif  ($disk -lt $warnDiskGb)  { Warn "Disk: $disk GB free - recommended >= $warnDiskGb GB; images + data may fill it." }
+  else                             { Ok "Disk: $disk GB free" }
+
+  Info "Checking outbound connectivity to required services..."
+  $backendHost = (Get-BackendUrl) -replace '^https?://','' -replace '/$',''
+  $criticals = @(
+    @{ label = "Docker Hub (registry-1.docker.io)";           url = "https://registry-1.docker.io/v2/" },
+    @{ label = "GitHub Container Registry (ghcr.io)";         url = "https://ghcr.io/" },
+    @{ label = "tracebloc API ($backendHost)";                url = "https://$backendHost/" },
+    @{ label = "tracebloc Helm charts (tracebloc.github.io)"; url = "https://tracebloc.github.io/" }
+  )
+  $tlsSeen = $false; $cfail = 0
+  foreach ($c in $criticals) {
+    $status = Test-PfUrl $c.url
+    if ($status -ne "ok") { $status = Test-PfUrl $c.url }   # one retry for transient blips
+    if ($status -eq "ok") { Ok "$($c.label) reachable" }
+    else {
+      Write-PfFail "$($c.label) unreachable ($status)"
+      $hardFail++; $cfail++
+      if ($status -eq "tls") { $tlsSeen = $true }
+    }
+  }
+  if ($tlsSeen)    { Hint "A TLS/certificate error usually means a break-and-inspect (TLS-inspecting) proxy whose corporate CA isn't trusted here - see the proxy notes." }
+  if ($cfail -gt 0){ Hint "Allow HTTPS (443) egress to: registry-1.docker.io, ghcr.io, $backendHost, tracebloc.github.io - or configure your corporate proxy." }
+
+  if ($hardFail -gt 0) {
+    Write-Host ""
+    Err "Preflight failed - resolve the items above and re-run. (Override at your own risk with `$env:TRACEBLOC_SKIP_PREFLIGHT=1.)"
+  }
+}
+
+# =============================================================================
 #  MAIN
 # =============================================================================
 
@@ -1316,6 +1424,7 @@ Print-Roadmap
 
 # -- Step 1/4: Check system requirements --
 Step 1 4 "Checking system requirements"
+Test-Preflight
 Find-Gpu
 Enable-VirtualisationFeatures
 Install-Winget

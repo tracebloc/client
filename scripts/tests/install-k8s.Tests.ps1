@@ -287,3 +287,75 @@ Describe "Write-K3dProxyConfig" {
     Remove-Item (Split-Path $cfg -Parent) -Recurse -Force
   }
 }
+
+# --- Preflight checks (mirrors scripts/lib/preflight.sh) ---------------------
+Describe "Test-PfUrl" {
+  It "HTTP 200 -> ok" {
+    Mock Invoke-WebRequest { [pscustomobject]@{ StatusCode = 200 } }
+    Test-PfUrl "https://x" | Should -Be "ok"
+  }
+  It "HTTP error response (server reached) -> ok" {
+    Mock Invoke-WebRequest {
+      $ex = [System.Exception]::new("HTTP 401")
+      Add-Member -InputObject $ex -NotePropertyName Response -NotePropertyValue ([pscustomobject]@{ StatusCode = 401 }) -Force
+      throw $ex
+    }
+    Test-PfUrl "https://x" | Should -Be "ok"
+  }
+  It "TLS / certificate error -> tls" {
+    Mock Invoke-WebRequest { throw [System.Exception]::new("The SSL certificate could not be validated - trust failure") }
+    Test-PfUrl "https://x" | Should -Be "tls"
+  }
+  It "connection failure -> blocked" {
+    Mock Invoke-WebRequest { throw [System.Exception]::new("Unable to connect to the remote server") }
+    Test-PfUrl "https://x" | Should -Be "blocked"
+  }
+}
+
+# Get-CimInstance is a Windows-only cmdlet (CimCmdlets module) — it can't be
+# mocked on Linux/macOS pwsh, so these run only on Windows (a Windows reviewer /
+# Windows CI). Off-Windows the readers safely return $null (the catch), which
+# Test-Preflight handles as "couldn't determine (skipping)".
+Describe "Get-Pf* resource readers" -Skip:(-not $IsWindows) {
+  It "Get-PfCpu reads logical processors" {
+    Mock Get-CimInstance { [pscustomobject]@{ NumberOfLogicalProcessors = 4 } }
+    Get-PfCpu | Should -Be 4
+  }
+  It "Get-PfMemGb reads total RAM in GB" {
+    Mock Get-CimInstance { [pscustomobject]@{ TotalPhysicalMemory = 8GB } }
+    Get-PfMemGb | Should -Be 8
+  }
+  It "Get-PfFreeGb reads free disk in GB" {
+    Mock Get-CimInstance { [pscustomobject]@{ FreeSpace = 50GB } }
+    Get-PfFreeGb | Should -Be 50
+  }
+}
+
+Describe "Test-Preflight" {
+  BeforeEach {
+    Mock Err { throw "preflight-failed" }      # Err exits; make it throwable to assert
+    Mock Get-PfCpu { 4 }; Mock Get-PfMemGb { 8 }; Mock Get-PfFreeGb { 50 }
+    Mock Get-WindowsArch { "amd64" }
+  }
+  AfterEach { $env:TRACEBLOC_SKIP_PREFLIGHT = $null; $env:TRACEBLOC_ALLOW_ARM64 = $null }
+
+  It "healthy environment -> does not throw" {
+    Mock Test-PfUrl { "ok" }
+    { Test-Preflight } | Should -Not -Throw
+  }
+  It "a critical host blocked -> fails (Err throws)" {
+    Mock Test-PfUrl { "blocked" }
+    { Test-Preflight } | Should -Throw
+  }
+  It "TRACEBLOC_SKIP_PREFLIGHT -> skipped, no probing" {
+    $env:TRACEBLOC_SKIP_PREFLIGHT = "1"
+    Mock Test-PfUrl { "blocked" }
+    { Test-Preflight } | Should -Not -Throw
+    Should -Invoke Test-PfUrl -Exactly -Times 0
+  }
+  It "arm64 -> info, not a hard fail (Docker Desktop emulates)" {
+    Mock Get-WindowsArch { "arm64" }
+    Mock Test-PfUrl { "ok" }
+    { Test-Preflight } | Should -Not -Throw
+  }
+}
