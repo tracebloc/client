@@ -16,22 +16,41 @@ setup_pm() {
 
 # ── Kernel modules Docker + k3s need ─────────────────────────────────────────
 # Docker's bridge driver programs iptables NAT rules using the `addrtype` match
-# (xt_addrtype), and k3s needs br_netfilter + overlay. Minimal RHEL/AlmaLinux
-# cloud images (e.g. AWS EC2) ship kernel-modules-core but NOT the full
-# kernel-modules package that carries these, so dockerd dies on startup with
-# "iptables … addrtype … missing kernel module". Load them — installing the
-# matching kernel-modules package on RHEL-family if a load fails — and persist
-# for reboots. Best-effort + idempotent; harmless where the modules already exist.
+# (xt_addrtype), and k3s needs br_netfilter + overlay. On minimal RHEL/AlmaLinux
+# cloud images (e.g. AWS EC2) these netfilter modules ship in kernel-modules-EXTRA,
+# which is NOT installed by default (the base kernel-modules package does NOT
+# carry xt_addrtype/iptable_nat/br_netfilter) — so dockerd dies on startup with
+# "iptables … addrtype … missing kernel module". Install kernel-modules-extra,
+# (re)load the modules, and persist them for reboots. Best-effort + idempotent.
+#
+# Caveat: kernel-modules-extra is only published for the repo's CURRENT kernel.
+# If the running kernel is older (image hasn't been rebooted into the latest
+# kernel yet), dnf installs the modules for the NEW kernel and they can't be
+# modprobe'd until a reboot. We flag that (KMODS_REBOOT_REQUIRED) so the caller
+# can tell the user to reboot + re-run; the modules-load.d entry then activates
+# them on boot.
 _ensure_kernel_modules() {
   local mods="overlay br_netfilter xt_addrtype iptable_nat ip_tables"
   local m missing=""
   for m in $mods; do sudo modprobe "$m" 2>/dev/null || missing=1; done
   if [[ -n "$missing" ]] && has dnf; then
+    # The netfilter modules live in kernel-modules-extra, NOT the base
+    # kernel-modules package. Install unversioned so dnf pulls the extra set
+    # (and a matching newer kernel, if the repo has moved on) for the current repo.
     spin_cmd "Installing kernel modules for Docker/k3s…" \
-      sudo dnf install -y -q "kernel-modules-$(uname -r)" || true
-    for m in $mods; do sudo modprobe "$m" 2>/dev/null || true; done
+      sudo dnf install -y -q kernel-modules-extra || true
+    missing=""
+    for m in $mods; do sudo modprobe "$m" 2>/dev/null || missing=1; done
   fi
   printf '%s\n' $mods | sudo tee /etc/modules-load.d/tracebloc.conf >/dev/null 2>&1 || true
+
+  # Still unloadable, but the module file exists for a DIFFERENT (installed but
+  # not-yet-booted) kernel → a reboot will bring it in via modules-load.d.
+  if [[ -n "$missing" ]] \
+     && ! find "/lib/modules/$(uname -r)" -name 'xt_addrtype.ko*' 2>/dev/null | grep -q . \
+     &&   find /lib/modules                -name 'xt_addrtype.ko*' 2>/dev/null | grep -q .; then
+    KMODS_REBOOT_REQUIRED=1
+  fi
 }
 
 # ── Docker Engine ────────────────────────────────────────────────────────────
@@ -93,9 +112,19 @@ install_docker_engine() {
     # send the user in circles, as it can't fix a crashing daemon).
     if ! sudo systemctl is-active --quiet docker 2>/dev/null; then
       echo ""
+      # Modules were just installed for a newer, not-yet-booted kernel → the only
+      # remedy is a reboot; a re-run without it would loop on the same failure.
+      if [[ -n "${KMODS_REBOOT_REQUIRED:-}" ]]; then
+        warn "Docker can't start yet: the netfilter kernel modules it needs were just installed"
+        hint "for a newer kernel that isn't running. Reboot to load it, then re-run this installer:"
+        hint "    sudo reboot"
+        hint "(The modules are pinned in /etc/modules-load.d/tracebloc.conf and load automatically on boot.)"
+        echo ""
+        error "Reboot required to finish Docker setup. Reboot, then re-run this installer."
+      fi
       warn "Docker is installed, but its daemon won't start — this is a Docker/host issue, not tracebloc."
       hint "If the error below mentions 'addrtype' / 'missing kernel module', the host lacks the"
-      hint "netfilter modules Docker needs — try:  sudo dnf install -y kernel-modules-\$(uname -r) && sudo reboot"
+      hint "netfilter modules Docker needs — try:  sudo dnf install -y kernel-modules-extra && sudo reboot"
       hint "Other causes: SELinux, an overlay storage-driver issue, or low /var/lib/docker disk. Docker's error:"
       { sudo systemctl status docker.service --no-pager -l 2>&1 | tail -6
         sudo journalctl -u docker.service --no-pager 2>/dev/null \
