@@ -8,6 +8,8 @@ BeforeAll {
   # Stubs so Pester can mock external commands that the functions invoke.
   function kubectl { }
   function docker { }
+  function helm { }
+  function k3d { }
 }
 
 Describe "Get-BackendUrl" {
@@ -116,14 +118,18 @@ Describe "Get-WindowsArch" {
 
 Describe "Confirm-Config" {
   It "valid config passes + sets HOST_DATA_DIR" {
-    $env:USERPROFILE = $env:HOME
-    $CLUSTER_NAME = "tracebloc"; $SERVERS = "1"; $AGENTS = "1"; $HOST_DATA_DIR = "$env:HOME/.tracebloc"
+    # $env:HOME is empty on Windows (it uses USERPROFILE) — derive a profile dir
+    # valid on both OSes, else GetFullPath in Confirm-Config throws "path is empty".
+    $prof = if ($env:USERPROFILE) { $env:USERPROFILE } elseif ($env:HOME) { $env:HOME } else { [System.IO.Path]::GetTempPath() }
+    $env:USERPROFILE = $prof
+    $CLUSTER_NAME = "tracebloc"; $SERVERS = "1"; $AGENTS = "1"; $HOST_DATA_DIR = Join-Path $prof ".tracebloc"
     { Confirm-Config } | Should -Not -Throw
   }
   It "invalid CLUSTER_NAME -> Err" {
     Mock Err { throw "err" }
-    $env:USERPROFILE = $env:HOME
-    $CLUSTER_NAME = "1bad"; $SERVERS = "1"; $AGENTS = "1"; $HOST_DATA_DIR = "$env:HOME/x"
+    $prof = if ($env:USERPROFILE) { $env:USERPROFILE } elseif ($env:HOME) { $env:HOME } else { [System.IO.Path]::GetTempPath() }
+    $env:USERPROFILE = $prof
+    $CLUSTER_NAME = "1bad"; $SERVERS = "1"; $AGENTS = "1"; $HOST_DATA_DIR = Join-Path $prof "x"
     { Confirm-Config } | Should -Throw
   }
 }
@@ -376,5 +382,58 @@ Describe "Set-ClusterAutostart" {
     Mock docker { }
     Set-ClusterAutostart
     Should -Invoke docker -Times 0 -Exactly
+  }
+}
+
+# --- diagnose support bundle (mirrors scripts/lib/diagnose.sh) ---------------
+Describe "Edit-Redaction" {
+  It "redacts clientPassword / proxy creds / token; keeps clientId + NO_PROXY" {
+    $f = Join-Path $TestDrive "v.txt"
+    @"
+clientId: "abc-123"
+clientPassword: 'S3cr3tP@ss'
+HTTP_PROXY=http://user:s3cr3t@proxy:8080
+token: ghp_SECRET
+NO_PROXY=localhost,127.0.0.1
+"@ | Set-Content $f
+    Edit-Redaction $f
+    $c = Get-Content $f -Raw
+    $c | Should -Not -Match 'S3cr3tP@ss'
+    $c | Should -Not -Match 's3cr3t'
+    $c | Should -Not -Match 'ghp_SECRET'
+    $c | Should -Match 'abc-123'
+    $c | Should -Match '127\.0\.0\.1'
+  }
+  It "redacts any *password key (dockerRegistry password, HTTP_PROXY_PASSWORD)" {
+    $f = Join-Path $TestDrive "g.txt"
+    @"
+dockerRegistry:
+  password: dckr_REGTOKEN
+HTTP_PROXY_PASSWORD: PROXYPW123
+"@ | Set-Content $f
+    Edit-Redaction $f
+    $c = Get-Content $f -Raw
+    $c | Should -Not -Match 'dckr_REGTOKEN'
+    $c | Should -Not -Match 'PROXYPW123'
+  }
+  It "missing file -> no throw" {
+    { Edit-Redaction (Join-Path $TestDrive "nope.txt") } | Should -Not -Throw
+  }
+}
+
+Describe "Invoke-DiagnoseBundle" {
+  It "produces a bundle and a seeded secret does NOT survive in it" {
+    $HOST_DATA_DIR = Join-Path $TestDrive "tb"
+    New-Item -ItemType Directory -Path $HOST_DATA_DIR -Force | Out-Null
+    "clientPassword: 'LEAKME123'" | Set-Content (Join-Path $HOST_DATA_DIR "values.yaml")
+    Mock kubectl { "" }; Mock docker { "" }; Mock helm { "" }; Mock k3d { "" }
+    Mock Get-WindowsArch { "amd64" }   # avoid the PROCESSOR_ARCHITECTURE Err off-Windows
+    { Invoke-DiagnoseBundle } | Should -Not -Throw
+    $zip = Get-ChildItem $HOST_DATA_DIR -Filter 'tracebloc-diagnose-*.zip' | Select-Object -First 1
+    $zip | Should -Not -BeNullOrEmpty
+    $ex = Join-Path $TestDrive "ex"
+    Expand-Archive -Path $zip.FullName -DestinationPath $ex -Force
+    $all = (Get-ChildItem $ex -Recurse -File | ForEach-Object { Get-Content $_.FullName -Raw }) -join "`n"
+    $all | Should -Not -Match 'LEAKME123'
   }
 }

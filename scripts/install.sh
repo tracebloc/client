@@ -43,6 +43,7 @@ FILES=(
   "scripts/lib/gpu-plugins.sh"
   "scripts/lib/install-client-helm.sh"
   "scripts/lib/summary.sh"
+  "scripts/lib/diagnose.sh"
 )
 
 download_with_retry() {

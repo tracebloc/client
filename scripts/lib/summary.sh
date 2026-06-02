@@ -18,7 +18,10 @@ _log_cluster_status() {
 # CLIENT_STATE so the summary reports the truth instead of an unconditional
 # "installed successfully":
 #   connected | starting | bad_creds | image_pull | crash
-CLIENT_STATE="starting"
+# Empty until wait_for_client_ready runs — so install_cleanup can distinguish an
+# early failure (before the readiness gate, CLIENT_STATE still empty) from a
+# reported outcome, and still print the "check the log / safe to re-run" hint.
+CLIENT_STATE=""
 READY_TIMEOUT="${READY_TIMEOUT:-300}"
 
 wait_for_client_ready() {

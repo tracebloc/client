@@ -71,6 +71,22 @@ setup() {
   run mock_calls
   [[ "$output" != *"Installing conntrack"* ]]
 }
+# Caught by the cross-distro CI matrix on Amazon Linux 2023: helm's get-helm-3
+# needs openssl (checksum) + tar (unpack), absent on minimal cloud images.
+@test "install_system_deps: ensures openssl + tar (helm needs them on minimal images)" {
+  PRESENT_CMDS="dnf curl conntrack"   # openssl + tar absent
+  run install_system_deps
+  run mock_calls
+  [[ "$output" == *"Installing openssl"* ]]
+  [[ "$output" == *"Installing tar"* ]]
+}
+@test "install_system_deps: openssl + tar already present -> not reinstalled" {
+  PRESENT_CMDS="apt-get curl conntrack openssl tar"
+  run install_system_deps
+  run mock_calls
+  [[ "$output" != *"Installing openssl"* ]]
+  [[ "$output" != *"Installing tar"* ]]
+}
 
 # ── install_docker_engine: branch selection ────────────────────────────────
 @test "install_docker_engine: Amazon Linux -> dnf docker" {
@@ -134,4 +150,31 @@ setup() {
   [ "$status" -eq 0 ]
   run mock_calls
   [ -z "$output" ]
+}
+
+# ── install_docker_engine: dead daemon vs group-not-active (Asad's Alma9 case) ──
+@test "install_docker_engine: daemon won't start -> Docker's error, not the group hint" {
+  PRESENT_CMDS="docker"          # docker present -> skip install
+  docker() { return 1; }         # docker info fails
+  id() { echo "testuser"; }      # NOT in docker group -> no sg re-exec
+  sudo() {
+    case "$*" in *"is-active"*) return 1 ;; esac   # daemon not active
+    record "sudo $*"; return 0
+  }
+  run install_docker_engine
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"daemon won't start"* ]]
+  [[ "$output" != *"logging out"* ]]               # the misleading group hint is NOT used
+}
+
+# Asad's root cause: minimal AlmaLinux lacks xt_addrtype -> dockerd bridge init fails.
+@test "_ensure_kernel_modules: modprobes modules + installs kernel-modules on a load failure" {
+  has() { [[ "$1" == "dnf" ]]; }
+  sudo() { record "sudo $*"; case "$*" in *modprobe*) return 1 ;; esac; return 0; }
+  spin_cmd() { record "$*"; return 0; }
+  run _ensure_kernel_modules
+  run mock_calls
+  [[ "$output" == *"modprobe overlay"* ]]
+  [[ "$output" == *"modprobe xt_addrtype"* ]]
+  [[ "$output" == *"kernel-modules-"* ]]           # RHEL fallback install fired
 }

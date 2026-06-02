@@ -170,6 +170,13 @@ _pf_disk() {
 
 _pf_connectivity() {
   info "Checking outbound connectivity to required services..."
+  # Can't probe without curl — and on the direct ./install-k8s.sh path the
+  # installer hasn't installed it yet. Skip with a warning rather than hard-fail
+  # with a misleading "egress blocked" (curl is installed downstream).
+  if ! has curl; then
+    warn "Skipping connectivity check — curl isn't available yet (the installer will add it)."
+    return 0
+  fi
   local backend_host cfail=0 tls_seen=0 c label url status
   backend_host="$(_pf_backend_host)"
 
