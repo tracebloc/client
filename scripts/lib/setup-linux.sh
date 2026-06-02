@@ -117,6 +117,12 @@ install_system_deps() {
   MISSING_PKGS=()
   has curl      || MISSING_PKGS+=(curl)
   has conntrack || MISSING_PKGS+=("$conntrack_pkg")
+  # helm's get-helm-3 verifies its download checksum with openssl and unpacks a
+  # tarball with tar; minimal cloud images (Amazon Linux 2023, minimal RHEL) ship
+  # neither, so the Helm install fails. Ensure both (package names are uniform
+  # across apt/dnf/yum/zypper/pacman, unlike conntrack).
+  has openssl   || MISSING_PKGS+=(openssl)
+  has tar       || MISSING_PKGS+=(tar)
   if [[ ${#MISSING_PKGS[@]} -gt 0 ]]; then
     spin_cmd "Updating package index…" $PM_UPDATE
     for pkg in "${MISSING_PKGS[@]}"; do

@@ -71,6 +71,22 @@ setup() {
   run mock_calls
   [[ "$output" != *"Installing conntrack"* ]]
 }
+# Caught by the cross-distro CI matrix on Amazon Linux 2023: helm's get-helm-3
+# needs openssl (checksum) + tar (unpack), absent on minimal cloud images.
+@test "install_system_deps: ensures openssl + tar (helm needs them on minimal images)" {
+  PRESENT_CMDS="dnf curl conntrack"   # openssl + tar absent
+  run install_system_deps
+  run mock_calls
+  [[ "$output" == *"Installing openssl"* ]]
+  [[ "$output" == *"Installing tar"* ]]
+}
+@test "install_system_deps: openssl + tar already present -> not reinstalled" {
+  PRESENT_CMDS="apt-get curl conntrack openssl tar"
+  run install_system_deps
+  run mock_calls
+  [[ "$output" != *"Installing openssl"* ]]
+  [[ "$output" != *"Installing tar"* ]]
+}
 
 # ── install_docker_engine: branch selection ────────────────────────────────
 @test "install_docker_engine: Amazon Linux -> dnf docker" {

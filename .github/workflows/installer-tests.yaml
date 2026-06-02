@@ -1,0 +1,130 @@
+name: Installer tests
+
+# Validates the curl/PowerShell installer (scripts/) across the breadth of
+# environments a customer might actually have:
+#   • static    — shellcheck + bash -n + PSScriptAnalyzer
+#   • unit-bash  — bats (mocked) for the bash installer
+#   • unit-pester— Pester for the PowerShell installer, on Linux AND real Windows
+#   • distro-prereqs — runs the REAL Linux prerequisite-install path (package
+#                  manager, system deps, Docker branch, kernel modules, kubectl/
+#                  k3d/helm) inside a fresh container for each major distro family.
+#                  This is what catches "works on Ubuntu, breaks on minimal RHEL"
+#                  bugs that mocked unit tests can't see.
+on:
+  push:
+    branches: [main, develop, openshift]
+    paths:
+      - 'scripts/**'
+      - '.github/workflows/installer-tests.yaml'
+  pull_request:
+    branches: [main, develop, openshift]
+    paths:
+      - 'scripts/**'
+      - '.github/workflows/installer-tests.yaml'
+  schedule:
+    - cron: '0 3 * * 1'   # Mondays 03:00 UTC — catch drift as distro base images move
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  static:
+    name: Static analysis
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: bash -n (syntax) on every script
+        run: |
+          find scripts -type f \( -name '*.sh' -o -name '*.bats' \) -print0 \
+            | while IFS= read -r -d '' f; do bash -n "$f" || exit 1; done
+          echo "all scripts parse"
+
+      - name: ShellCheck (libs + entrypoints)
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq shellcheck
+          shellcheck --version | grep version
+          shellcheck --severity=warning --shell=bash \
+            scripts/install.sh scripts/install-k8s.sh scripts/lib/*.sh \
+            scripts/tests/distro-prereqs.sh
+
+      - name: PSScriptAnalyzer (PowerShell installer)
+        shell: pwsh
+        run: |
+          Set-PSRepository PSGallery -InstallationPolicy Trusted
+          Install-Module PSScriptAnalyzer -Force -SkipPublisherCheck -Scope CurrentUser
+          $issues = Invoke-ScriptAnalyzer -Path scripts/install-k8s.ps1 -Severity Error,Warning
+          if ($issues) { $issues | Format-Table -AutoSize }
+          $errs = @($issues | Where-Object { $_.Severity -eq 'Error' })
+          if ($errs.Count -gt 0) { Write-Error "PSScriptAnalyzer: $($errs.Count) error(s)"; exit 1 }
+          Write-Host "no PSScriptAnalyzer errors"
+
+  unit-bash:
+    name: bats (bash unit, mocked)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install bats
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq bats
+      - name: Run bats
+        run: bats scripts/tests/*.bats
+
+  unit-pester:
+    # Pester on Linux pwsh (fast) AND real Windows — the .ps1 installer's actual
+    # target. fail-fast:false so a Windows-only surprise doesn't mask Linux signal.
+    name: Pester (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run Pester
+        shell: pwsh
+        env:
+          TB_PESTER: "1"
+        run: |
+          Set-PSRepository PSGallery -InstallationPolicy Trusted
+          Install-Module Pester -MinimumVersion 5.5.0 -Force -SkipPublisherCheck -Scope CurrentUser
+          Import-Module Pester -MinimumVersion 5.5.0 -Force
+          $cfg = New-PesterConfiguration
+          $cfg.Run.Path = "scripts/tests/install-k8s.Tests.ps1"
+          $cfg.Run.Exit = $true
+          $cfg.Output.Verbosity = "Detailed"
+          Invoke-Pester -Configuration $cfg
+
+  distro-prereqs:
+    # Runs the installer's REAL Linux prerequisite path in a fresh container for
+    # each distro family. Proves the package-manager / Docker / conntrack / helm
+    # branches all resolve and install — the layer where every installer bug we
+    # have shipped lived (#718 PATH, #719 RHEL docker-ce, #720 conntrack-tools,
+    # the AlmaLinux kernel-modules gap, the Amazon Linux openssl/tar gap).
+    # It does NOT start dockerd or create a cluster — that needs a real kernel +
+    # systemd, covered by local VMs and (optionally) a future e2e job. Arch is
+    # omitted: its official image is x86-only and bare containers need keyring
+    # bootstrapping; the pacman branch is covered by the bats unit test.
+    name: Prereqs — ${{ matrix.distro }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        distro:
+          - 'ubuntu:22.04'        # apt / get.docker.com — most common server
+          - 'ubuntu:24.04'        # newest LTS
+          - 'debian:12'           # apt
+          - 'almalinux:9'         # dnf + docker-ce repo (RHEL rebuild, #719)
+          - 'almalinux:8'         # older RHEL rebuild
+          - 'rockylinux:9'        # the other RHEL rebuild
+          - 'amazonlinux:2023'    # dnf + 'docker' pkg — common AWS default
+          - 'fedora:latest'       # dnf, falls through to get.docker.com
+          - 'opensuse/leap:15.6'  # zypper
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install prerequisites in ${{ matrix.distro }}
+        env:
+          DISTRO: ${{ matrix.distro }}
+        run: |
+          docker run --rm -v "$PWD:/src:ro" -w /src "$DISTRO" \
+            bash scripts/tests/distro-prereqs.sh
