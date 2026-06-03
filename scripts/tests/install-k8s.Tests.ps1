@@ -228,6 +228,37 @@ Describe "Install-ClientHelm" {
     Install-ClientHelm
     (Get-Content "$HOST_DATA_DIR/values.yaml" -Raw) | Should -Match 'clientId: "previd"'
   }
+  It "blocks a DIFFERENT client already installed" {
+    $HOST_DATA_DIR = "$TestDrive/d5"
+    Mock Err { throw "err" }
+    Mock Read-Host {
+      param([string]$Prompt, [switch]$AsSecureString)
+      if ($Prompt -match 'password') { return (ConvertTo-SecureString "pw" -AsPlainText -Force) }
+      return "newclient"
+    }
+    Mock Test-Credentials { "valid" }
+    Mock helm {
+      if ($args -contains "get") { 'clientId: "otherclient"'; $global:LASTEXITCODE = 0; return }
+      $global:LASTEXITCODE = 0
+    }
+    { Install-ClientHelm } | Should -Throw
+    Should -Not -Invoke helm -ParameterFilter { $args -contains "upgrade" }
+  }
+  It "same client re-run is allowed (upgrade in place)" {
+    $HOST_DATA_DIR = "$TestDrive/d6"
+    Mock Read-Host {
+      param([string]$Prompt, [switch]$AsSecureString)
+      if ($Prompt -match 'password') { return (ConvertTo-SecureString "pw" -AsPlainText -Force) }
+      return "sameid"
+    }
+    Mock Test-Credentials { "valid" }
+    Mock helm {
+      if ($args -contains "get") { 'clientId: "sameid"'; $global:LASTEXITCODE = 0; return }
+      $global:LASTEXITCODE = 0
+    }
+    Install-ClientHelm
+    Should -Invoke helm -ParameterFilter { $args -contains "upgrade" }
+  }
 }
 
 Describe "Confirm-Cluster" {

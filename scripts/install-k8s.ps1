@@ -1006,7 +1006,6 @@ function Install-ClientHelm {
   }
   $valuesFile = Join-Path $HOST_DATA_DIR "values.yaml"
 
-  $defaultNamespace = "default"
   $defaultClientId = ""
   $defaultClientPassword = ""
 
@@ -1027,20 +1026,14 @@ function Install-ClientHelm {
     }
   }
 
-  # -- Workspace name prompt --
-  PromptHeader "Choose a workspace name"
-  Hint "This identifies your tracebloc client on this machine."
-  Write-Host ""
-  Hint "Examples: myteam, vision-lab, lukas"
-  Write-Host ""
-  $nsInput = Read-Host "  Workspace name [$defaultNamespace]"
-  $rawName = if ($nsInput) { $nsInput } else { $defaultNamespace }
-  $TB_NAMESPACE = ConvertTo-WorkspaceName -Input_ $rawName
+  # -- Namespace (fixed; not prompted) --
+  # The on-prem client is one-per-machine and is identified to the backend by
+  # its credentials (clientId), not by this name -- so we don't ask the user to
+  # invent one. It's just the local k8s namespace / Helm release name.
+  # Advanced / GitOps setups can override with TB_NAMESPACE=<name>.
+  $rawNs = if ($env:TB_NAMESPACE) { $env:TB_NAMESPACE } else { "tracebloc" }
+  $TB_NAMESPACE = ConvertTo-WorkspaceName -Input_ $rawNs
   $script:TB_NAMESPACE = $TB_NAMESPACE   # share with Wait-ForClientReady / Print-Summary
-
-  if ($TB_NAMESPACE -ne $rawName) {
-    Info "Using workspace: $TB_NAMESPACE"
-  }
 
   # -- Step 4/4: Connect to tracebloc network --
   Step 4 4 "Connect to tracebloc network"
@@ -1099,6 +1092,32 @@ function Install-ClientHelm {
     if ($credAttempt -ge $credMax) { Err "Too many failed attempts. Double-check your credentials at https://ai.tracebloc.io/clients and re-run." }
     # Force active re-entry on retry (don't silently reuse a rejected default).
     $defaultClientId = ""; $defaultClientPassword = ""
+  }
+
+  # -- One-client-per-machine guard --
+  # A machine runs exactly one tracebloc client: it shares this cluster and the
+  # host's CPU/RAM/GPU, and the platform counts each client as separate
+  # capacity. If a DIFFERENT client is already installed here, a re-install
+  # would silently re-point the machine -- so we stop and let the operator
+  # decide. The same clientId is a normal re-run/upgrade and passes through.
+  $existingVals = (helm get values $TB_NAMESPACE -n $TB_NAMESPACE 2>$null) | Out-String
+  if ($LASTEXITCODE -eq 0 -and $existingVals -match 'clientId:\s*"([^"]+)"') {
+    $existingId = $Matches[1].Trim()
+    if ($existingId -and $existingId -ne $TB_CLIENT_ID) {
+      Write-Host ""
+      Warn "This machine already runs the tracebloc client '$existingId'."
+      Hint "tracebloc runs one client per machine -- it shares this cluster and host"
+      Hint "resources, and the platform counts each client as separate capacity."
+      Write-Host ""
+      Hint "You entered a different Client ID ('$TB_CLIENT_ID'). Pick one:"
+      Hint "  - Repair / update '$existingId'  -> re-run with that same Client ID"
+      Hint "  - Switch to '$TB_CLIENT_ID'       -> remove the current client first:"
+      Hint "        k3d cluster delete $CLUSTER_NAME   (wipes this client + its local data)"
+      Hint "      then re-run this installer"
+      Hint "  - Run both clients                -> install on a separate machine"
+      Write-Host ""
+      Err "Refusing to replace the existing client. See the options above."
+    }
   }
 
   $passwordEscaped = $TB_CLIENT_PASSWORD -replace "'", "''"
