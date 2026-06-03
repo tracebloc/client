@@ -61,8 +61,18 @@ tests:
           path: spec.template.spec.containers[0].livenessProbe.failureThreshold
           value: 5
 
-  - it: should reference the data-plane PriorityClass when enabled
+  - it: should NOT set priorityClassName by default (PriorityClass dropped)
     template: templates/mysql-deployment.yaml
+    asserts:
+      - notExists:
+          path: spec.template.spec.priorityClassName
+
+  - it: should reference the PriorityClass when a name is set
+    template: templates/mysql-deployment.yaml
+    set:
+      priorityClass:
+        create: true
+        name: tracebloc-data-plane
     asserts:
       - equal:
           path: spec.template.spec.priorityClassName
