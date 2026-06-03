@@ -44,7 +44,12 @@ rules:
     verbs: ["create"]
   - apiGroups: [""]
     resources: ["configmaps", "secrets"]
-    verbs: ["create"]
+    # `get` is required by jobs-manager's orphan-resource verify path
+    # (client-runtime#52) and the missing-row self-heal (client-runtime#54):
+    # on a create-409 it reads the existing ConfigMap/Secret to confirm the
+    # content matches before reusing it. Without `get`, those reads return
+    # Forbidden and the endpoint 500s instead of the intended 409/replay.
+    verbs: ["create", "get"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
@@ -95,7 +100,12 @@ rules:
   # to authenticate ingestion calls — see the ClusterRole branch above.
   - apiGroups: [""]
     resources: ["configmaps", "secrets"]
-    verbs: ["create"]
+    # `get` is required by jobs-manager's orphan-resource verify path
+    # (client-runtime#52) and the missing-row self-heal (client-runtime#54):
+    # on a create-409 it reads the existing ConfigMap/Secret to confirm the
+    # content matches before reusing it. Without `get`, those reads return
+    # Forbidden and the endpoint 500s instead of the intended 409/replay.
+    verbs: ["create", "get"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
