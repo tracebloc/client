@@ -1100,24 +1100,35 @@ function Install-ClientHelm {
   # capacity. If a DIFFERENT client is already installed here, a re-install
   # would silently re-point the machine -- so we stop and let the operator
   # decide. The same clientId is a normal re-run/upgrade and passes through.
-  $existingVals = (helm get values $TB_NAMESPACE -n $TB_NAMESPACE 2>$null) | Out-String
-  if ($LASTEXITCODE -eq 0 -and $existingVals -match 'clientId:\s*"([^"]+)"') {
-    $existingId = $Matches[1].Trim()
-    if ($existingId -and $existingId -ne $TB_CLIENT_ID) {
-      Write-Host ""
-      Warn "This machine already runs the tracebloc client '$existingId'."
-      Hint "tracebloc runs one client per machine -- it shares this cluster and host"
-      Hint "resources, and the platform counts each client as separate capacity."
-      Write-Host ""
-      Hint "You entered a different Client ID ('$TB_CLIENT_ID'). Pick one:"
-      Hint "  - Repair / update '$existingId'  -> re-run with that same Client ID"
-      Hint "  - Switch to '$TB_CLIENT_ID'       -> remove the current client first:"
-      Hint "        k3d cluster delete $CLUSTER_NAME   (wipes this client + its local data)"
-      Hint "      then re-run this installer"
-      Hint "  - Run both clients                -> install on a separate machine"
-      Write-Host ""
-      Err "Refusing to replace the existing client. See the options above."
-    }
+  # Check ANY namespace: a fresh install lands in 'tracebloc', but an install
+  # from an older installer version may be in a different namespace. Enumerate
+  # client-chart releases and read each clientId (ConvertFrom-Json -- no jq).
+  $existingId = ""; $existingNs = ""
+  $listJson = (helm list -A -o json 2>$null) | Out-String
+  if ($LASTEXITCODE -eq 0 -and $listJson.Trim()) {
+    try {
+      foreach ($rel in ($listJson | ConvertFrom-Json)) {
+        if ($rel.chart -and $rel.chart.StartsWith("client-")) {
+          $vals = (helm get values $rel.name -n $rel.namespace 2>$null) | Out-String
+          if ($vals -match 'clientId:\s*"([^"]+)"') { $existingId = $Matches[1].Trim(); $existingNs = $rel.namespace; break }
+        }
+      }
+    } catch { }
+  }
+  if ($existingId -and $existingId -ne $TB_CLIENT_ID) {
+    Write-Host ""
+    Warn "This machine already runs the tracebloc client '$existingId' (namespace '$existingNs')."
+    Hint "tracebloc runs one client per machine -- it shares this cluster and host"
+    Hint "resources, and the platform counts each client as separate capacity."
+    Write-Host ""
+    Hint "You entered a different Client ID ('$TB_CLIENT_ID'). Pick one:"
+    Hint "  - Repair / update '$existingId'  -> re-run with that same Client ID"
+    Hint "  - Switch to '$TB_CLIENT_ID'       -> remove the current client first:"
+    Hint "        k3d cluster delete $CLUSTER_NAME   (wipes this client + its local data)"
+    Hint "      then re-run this installer"
+    Hint "  - Run both clients                -> install on a separate machine"
+    Write-Host ""
+    Err "Refusing to replace the existing client. See the options above."
   }
 
   $passwordEscaped = $TB_CLIENT_PASSWORD -replace "'", "''"

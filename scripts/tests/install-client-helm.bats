@@ -231,6 +231,7 @@ setup() {
   _ensure_helm_runnable() { :; }
   # an existing release reports a different clientId -> must block before upgrade
   helm() {
+    if [ "$1" = list ]; then echo '[{"name":"oldrel","namespace":"default","chart":"client-1.4.3"}]'; return 0; fi
     if [ "$1" = get ] && [ "$2" = values ]; then echo 'clientId: "otherclient"'; return 0; fi
     record "helm $*"; return 0
   }
@@ -249,6 +250,7 @@ setup() {
   _ensure_release_dirs() { :; }
   _ensure_helm_runnable() { :; }
   helm() {
+    if [ "$1" = list ]; then echo '[{"name":"tracebloc","namespace":"tracebloc","chart":"client-1.4.3"}]'; return 0; fi
     if [ "$1" = get ] && [ "$2" = values ]; then echo 'clientId: "sameid"'; return 0; fi
     record "helm $*"; return 0
   }

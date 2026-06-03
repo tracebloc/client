@@ -238,6 +238,7 @@ Describe "Install-ClientHelm" {
     }
     Mock Test-Credentials { "valid" }
     Mock helm {
+      if ($args -contains "list") { '[{"name":"oldrel","namespace":"default","chart":"client-1.4.3"}]'; $global:LASTEXITCODE = 0; return }
       if ($args -contains "get") { 'clientId: "otherclient"'; $global:LASTEXITCODE = 0; return }
       $global:LASTEXITCODE = 0
     }
@@ -253,6 +254,7 @@ Describe "Install-ClientHelm" {
     }
     Mock Test-Credentials { "valid" }
     Mock helm {
+      if ($args -contains "list") { '[{"name":"tracebloc","namespace":"tracebloc","chart":"client-1.4.3"}]'; $global:LASTEXITCODE = 0; return }
       if ($args -contains "get") { 'clientId: "sameid"'; $global:LASTEXITCODE = 0; return }
       $global:LASTEXITCODE = 0
     }

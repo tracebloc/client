@@ -253,15 +253,27 @@ install_client_helm() {
   # capacity. If a DIFFERENT client is already installed here, a re-install
   # would silently re-point the machine — so we stop and let the operator
   # decide. The same clientId is a normal re-run/upgrade and passes through.
-  local _existing_vals existing_id=""
-  _existing_vals="$(mktemp)"
-  if helm get values "$TB_NAMESPACE" -n "$TB_NAMESPACE" > "$_existing_vals" 2>/dev/null; then
-    existing_id="$(_extract_yaml_value "$_existing_vals" "clientId")"
+  # Check ANY namespace: a fresh install lands in `tracebloc`, but an install
+  # from an older installer version may be in a different namespace. Enumerate
+  # client-chart releases and read each clientId. jq is already used elsewhere
+  # in the installer; if it's somehow absent, fall back to the `tracebloc` ns.
+  local existing_id="" existing_ns="" _gvf _rel _ns _id
+  _gvf="$(mktemp)"
+  if has jq; then
+    while IFS=$'\t' read -r _rel _ns; do
+      [[ -z "$_rel" ]] && continue
+      if helm get values "$_rel" -n "$_ns" > "$_gvf" 2>/dev/null; then
+        _id="$(_extract_yaml_value "$_gvf" clientId)"
+        [[ -n "$_id" ]] && { existing_id="$_id"; existing_ns="$_ns"; break; }
+      fi
+    done < <(helm list -A -o json 2>/dev/null | jq -r '.[] | select((.chart // "") | startswith("client-")) | "\(.name)\t\(.namespace)"')
+  elif helm get values "$TB_NAMESPACE" -n "$TB_NAMESPACE" > "$_gvf" 2>/dev/null; then
+    existing_id="$(_extract_yaml_value "$_gvf" clientId)"; existing_ns="$TB_NAMESPACE"
   fi
-  rm -f "$_existing_vals"
+  rm -f "$_gvf"
   if [[ -n "$existing_id" && "$existing_id" != "$TB_CLIENT_ID" ]]; then
     echo ""
-    warn "This machine already runs the tracebloc client '${existing_id}'."
+    warn "This machine already runs the tracebloc client '${existing_id}' (namespace '${existing_ns}')."
     hint "tracebloc runs one client per machine — it shares this cluster and host"
     hint "resources, and the platform counts each client as separate capacity."
     echo ""
