@@ -213,13 +213,14 @@ images:
   # Customers can also override per-install via the ingestor subchart's
   # `image.digest` for one-off testing, independent of this value.
   ingestor:
-    # Current baseline digest: v0.3.1 (2026-05-25, from #161). Patch on
-    # top of v0.3.0 carrying customer-impacting fixes —
-    # tracebloc/data-ingestors#108 (tokenizer.json copy for MLM
-    # datasets) and #119 (per-category metadata parity for tabular +
-    # keypoint). Bump only when greenfield installs should start on a
+    # Current baseline digest: v0.3.2 (2026-06-03, from #184). Patch on
+    # top of v0.3.1 carrying customer-impacting fixes —
+    # tracebloc/data-ingestors#139 (MLM tokenizer fix, relaxed PascalVOC
+    # `difficult` flag, reserved-id guard; closes #137 / #135) — plus the
+    # first multi-arch image (amd64 + arm64, #24) so arm64 nodes can run
+    # the ingestor. Bump only when greenfield installs should start on a
     # different version; ongoing rollouts are managed by image-refresh.
-    digest: "sha256:a0861ea9fbf4653279351ee30af9ebe2b75fcacd391923b681631312f4a85ee4"
+    digest: "sha256:d361fa778554ab171adcc2671eaf109c32f3d2af339c7920a2d38d102ce53678"
     # Floating tag polled by image-refresh. The team's ghcr.io
     # publishing convention uses semver-style float tags — `0` tracks
     # the latest 0.x, `0.3` tracks the latest 0.3.x patch. Default is
