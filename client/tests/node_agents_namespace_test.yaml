@@ -154,28 +154,30 @@ tests:
           path: subjects[0].namespace
           value: tracebloc-node-agents
 
-  - it: should keep namespace-scoped Role + RoleBinding in the release namespace when clusterScope is false, with SA subject in node-agents
+  - it: should still render a cluster-scoped ClusterRole + ClusterRoleBinding when clusterScope is false, with SA subject in node-agents
     template: templates/resource-monitor-rbac.yaml
     set:
       clusterScope: false
     asserts:
-      # Role must grant access where the monitored workloads live (release ns)
+      # Per-node monitoring relies on list_pod_for_all_namespaces (a cluster-scoped
+      # verb a namespaced Role can never satisfy) and reads its own pod in the
+      # node-agents namespace, so resource-monitor RBAC is intentionally decoupled
+      # from clusterScope -- it is ALWAYS cluster-scoped. clusterScope still gates
+      # the training/jobs isolation footprint elsewhere.
       - isKind:
-          of: Role
+          of: ClusterRole
         documentIndex: 1
-      - equal:
+      # Cluster-scoped resources carry no metadata.namespace
+      - isNull:
           path: metadata.namespace
-          value: tracebloc-templates
         documentIndex: 1
-      # RoleBinding sits in the release ns so it applies the Role there
       - isKind:
-          of: RoleBinding
+          of: ClusterRoleBinding
         documentIndex: 2
-      - equal:
+      - isNull:
           path: metadata.namespace
-          value: tracebloc-templates
         documentIndex: 2
-      # ...but the subject SA lives in the node-agents namespace
+      # ...but the subject SA still lives in the node-agents namespace
       - equal:
           path: subjects[0].namespace
           value: tracebloc-node-agents
