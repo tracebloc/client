@@ -220,6 +220,13 @@ images:
     # first multi-arch image (amd64 + arm64, #24) so arm64 nodes can run
     # the ingestor. Bump only when greenfield installs should start on a
     # different version; ongoing rollouts are managed by image-refresh.
+    #
+    # This digest MUST be a multi-arch index (linux/amd64 + linux/arm64).
+    # jobs-manager spawns the ingestor Job by this pinned digest, so an
+    # amd64-only pin breaks ingestion on arm64 hosts (Apple Silicon,
+    # Graviton) with "no match for platform" / ImagePullBackOff (#186; the
+    # amd64-only v0.3.1 pin in #160 was the regression). Enforced by the
+    # `ingestor-multiarch` job in .github/workflows/helm-ci.yaml.
     digest: "sha256:d361fa778554ab171adcc2671eaf109c32f3d2af339c7920a2d38d102ce53678"
     # Floating tag polled by image-refresh. The team's ghcr.io
     # publishing convention uses semver-style float tags — `0` tracks

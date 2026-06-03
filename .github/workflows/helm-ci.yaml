@@ -116,6 +116,30 @@ jobs:
             > /dev/null
           echo "Schema validation passed for ${{ matrix.platform }}"
 
+  ingestor-multiarch:
+    # Guard: the chart's PINNED ingestor digest must be a multi-arch index
+    # (linux/amd64 + linux/arm64). Greenfield installs spawn the ingestor from this
+    # pinned digest (before image-refresh ticks), so an amd64-only pin breaks data
+    # ingestion on arm64 hosts (Apple Silicon, Graviton) with ImagePullBackOff. This
+    # would have caught #160 (which pinned the amd64-only v0.3.1). See client#186.
+    name: Pinned ingestor digest is multi-arch
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Assert images.ingestor.digest supports linux/amd64 + linux/arm64
+        run: |
+          digest=$(yq '.images.ingestor.digest' client/values.yaml)
+          echo "Pinned ingestor digest: $digest"
+          if [ -z "$digest" ] || [ "$digest" = "null" ]; then
+            echo "::error::images.ingestor.digest is empty — it must be a pinned multi-arch digest."; exit 1
+          fi
+          plats=$(docker buildx imagetools inspect "ghcr.io/tracebloc/ingestor@$digest" 2>&1 \
+            | awk '/Platform:/{print $2}' | grep -v '^unknown' | sort -u)
+          echo "Platforms: $(echo "$plats" | paste -sd' ' -)"
+          echo "$plats" | grep -qx 'linux/arm64' || { echo "::error::Pinned ingestor digest is NOT multi-arch (no linux/arm64). arm64 installs (Apple Silicon, Graviton) would fail ingestion with 'no match for platform' / ImagePullBackOff. Pin a multi-arch :0.x index. See client#186 / #160."; exit 1; }
+          echo "$plats" | grep -qx 'linux/amd64' || { echo "::error::Pinned ingestor digest is missing linux/amd64."; exit 1; }
+          echo "OK — pinned ingestor digest is multi-arch (amd64 + arm64)."
+
   # Installer script tests (bats + Pester) + the cross-distro prerequisite matrix
   # live in their own workflow: .github/workflows/installer-tests.yaml
   # (triggered on scripts/** changes).
