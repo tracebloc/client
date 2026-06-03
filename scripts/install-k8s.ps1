@@ -112,6 +112,15 @@ function ConvertTo-WorkspaceName {
   return $sanitized
 }
 
+# Best-effort chart version of the installed client release (e.g. "1.4.4");
+# empty if not found / cluster unreachable. Greps helm's CHART column.
+function Get-ChartVersion {
+  param([string]$Namespace = "tracebloc")
+  $out = (helm list -n $Namespace 2>$null) | Out-String
+  if ($out -match 'client-([0-9][^\s]*)') { return $Matches[1] }
+  return ""
+}
+
 # =============================================================================
 #  CONFIGURATION
 # =============================================================================
@@ -1287,6 +1296,8 @@ function Print-Summary {
       Write-Host "  " -NoNewline; Write-Host "$([char]0x2714) Connected to tracebloc" -ForegroundColor Green
       Write-Host ""
       Write-Host "  Workspace : " -NoNewline; Write-Host $ns -ForegroundColor Cyan
+      $cver = Get-ChartVersion -Namespace $ns; if (-not $cver) { $cver = "unknown" }
+      Write-Host "  Version   : " -NoNewline; Write-Host $cver -ForegroundColor Cyan
       Write-Host "  Mode      : " -NoNewline; Write-Host $mode -ForegroundColor Cyan
       Write-Host ""
       Write-Host "  Your client is live. Confirm it shows as Online:"
@@ -1490,8 +1501,6 @@ function Invoke-DiagnoseBundle {
   $d = Join-Path $work "tracebloc-diagnose-$ts"
   New-Item -ItemType Directory -Path (Join-Path $d "logs") -Force | Out-Null
 
-  Info "Collecting diagnostics -- this is safe; credentials are redacted before the file is written."
-
   # Namespace discovery (TB_NAMESPACE isn't set on a standalone diagnose run).
   $ns = $TB_NAMESPACE
   if (-not $ns) {
@@ -1500,9 +1509,14 @@ function Invoke-DiagnoseBundle {
   }
   if (-not $ns) { $ns = "default" }
 
+  # Surface the client version first -- the #1 thing support needs to know.
+  $cver = Get-ChartVersion -Namespace $ns; if (-not $cver) { $cver = "unknown" }
+  Info "tracebloc client version: $cver   (namespace: $ns)"
+  Info "Collecting diagnostics -- this is safe; credentials are redacted before the file is written."
+
   # host / versions
   $h = @("# tracebloc diagnose ($ts)", "OS: Windows  ARCH: $(Get-WindowsArch)",
-         "CLIENT_ENV: $($env:CLIENT_ENV)  CLUSTER_NAME: $cn  NAMESPACE: $ns", "## versions",
+         "CLIENT_ENV: $($env:CLIENT_ENV)  CLUSTER_NAME: $cn  NAMESPACE: $ns", "CLIENT VERSION: $cver", "## versions",
          (k3d version 2>&1 | Out-String), (kubectl version --client 2>&1 | Out-String),
          (helm version --short 2>&1 | Out-String), (docker version 2>&1 | Out-String))
   try { $cs = Get-CimInstance Win32_ComputerSystem -ErrorAction Stop; $h += "CPUs=$($cs.NumberOfLogicalProcessors)  MemBytes=$($cs.TotalPhysicalMemory)" } catch {}

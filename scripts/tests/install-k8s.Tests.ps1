@@ -98,6 +98,13 @@ Describe "Print-Summary" {
     $out = Print-Summary 6>&1 | Out-String
     $out | Should -Match "crash loop"
   }
+  It "connected: shows the client version" {
+    $script:ClientState = "connected"
+    Mock helm { "tracebloc tracebloc 1 now deployed client-1.4.4 1.4.4" }
+    $out = Print-Summary 6>&1 | Out-String
+    $out | Should -Match "Version"
+    $out | Should -Match "1\.4\.4"
+  }
 }
 
 Describe "ConvertTo-WorkspaceName" {
