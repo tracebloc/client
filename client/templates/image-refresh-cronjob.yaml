@@ -83,6 +83,12 @@ data:
     log "  client images: tracebloc/{jobs-manager,pods-monitor} on docker.io under tag=$IMAGE_TAG"
     log "  ingestor image: tracebloc/ingestor on ghcr.io under tag=$INGESTOR_TAG (pinned=$INGESTOR_PINNED)"
 
+    # Consecutive failed ghcr ingestor-digest resolves before image-refresh
+    # escalates from WARN+skip to a failed Job (#186 #2). The chart injects
+    # this from imageRefresh.ingestorResolveFailureThreshold; default here
+    # too so a hand-edited CronJob missing the env var still runs under -u.
+    : "${INGESTOR_RESOLVE_FAIL_THRESHOLD:=3}"
+
     # Get an anonymous pull-scope token for one repository on a
     # registry. Both docker.io and ghcr.io support anonymous tokens for
     # public images; only the issuer URL differs. tr cleanup handles
@@ -284,9 +290,50 @@ data:
       log "  ingestor.autoRefresh: false in values; skipping (operator opted into pinning)"
     else
       latest_ingestor="$(get_latest_digest "tracebloc/ingestor" "$INGESTOR_TAG" "ghcr.io" || true)"
+      ingestor_fail_key="tracebloc.io/ingestor-refresh-consecutive-failures"
+      ingestor_err_key="tracebloc.io/ingestor-refresh-last-error"
       if [ -z "$latest_ingestor" ]; then
-        log "  WARN: could not resolve latest digest (rate-limited or transient); skipping this tick"
+        # Could not resolve the ingestor digest from ghcr.io. A transient
+        # blip (rate-limit, momentary DNS) and a PERSISTENT failure (egress
+        # to ghcr.io firewalled, the ghcr token endpoint blocked, a proxy
+        # that allowlists docker.io but not ghcr.io) are indistinguishable
+        # on a single tick — so COUNT consecutive failures and escalate
+        # once they cross the threshold, instead of skipping silently
+        # forever. #186 (#2): berlin-team sat on the amd64-only baseline
+        # because every ingestor tick hit this branch while the docker.io
+        # images (jobs-manager, pods-monitor) refreshed fine — the CronJob
+        # looked healthy and nothing surfaced the ghcr failure.
+        prev_fails="$(get_annotation "$ingestor_fail_key" || true)"
+        case "$prev_fails" in ''|*[!0-9]*) prev_fails=0 ;; esac
+        if [ "$prev_fails" -ge "$INGESTOR_RESOLVE_FAIL_THRESHOLD" ]; then
+          # Already escalated on an earlier tick; stay loud (fail the Job)
+          # without inflating the counter — it caps at the threshold.
+          log "  ERROR: still cannot resolve ghcr.io/tracebloc/ingestor:${INGESTOR_TAG} (>= ${INGESTOR_RESOLVE_FAIL_THRESHOLD} consecutive failures). Ingestor digest is NOT auto-refreshing; ingestion may be stuck on a stale image. Check egress to ghcr.io and its token endpoint from this namespace. See client#186."
+          exit 1
+        fi
+        fails=$((prev_fails + 1))
+        kubectl annotate deployment -n "$RELEASE_NAMESPACE" "$DEPLOYMENT_NAME" \
+          "${ingestor_fail_key}=${fails}" --overwrite
+        if [ "$fails" -ge "$INGESTOR_RESOLVE_FAIL_THRESHOLD" ]; then
+          # Persistent. Record a human-readable last-error and fail the Job
+          # so it surfaces in `kubectl get cronjob` and monitoring — the
+          # same "failed Job = operator-visible" idiom Pass 2's stuck-
+          # rollout check already relies on.
+          kubectl annotate deployment -n "$RELEASE_NAMESPACE" "$DEPLOYMENT_NAME" \
+            "${ingestor_err_key}=could not resolve ghcr.io/tracebloc/ingestor:${INGESTOR_TAG} for ${fails} consecutive ticks" --overwrite
+          log "  ERROR: could not resolve ghcr.io/tracebloc/ingestor:${INGESTOR_TAG} for ${fails} consecutive ticks (threshold ${INGESTOR_RESOLVE_FAIL_THRESHOLD}). Ingestor digest is NOT auto-refreshing; ingestion may be stuck on a stale image (e.g. an amd64-only baseline on arm64 nodes). Check egress to ghcr.io and its token endpoint from this namespace. Failing the Job so this surfaces in monitoring. See client#186."
+          exit 1
+        fi
+        log "  WARN: could not resolve latest ingestor digest (failure ${fails}/${INGESTOR_RESOLVE_FAIL_THRESHOLD}; transient?); skipping this tick"
       else
+        # Resolved OK. Clear any prior failure streak so a recovered
+        # registry/egress blip doesn't leave a stale failure annotation
+        # (and a future failure starts counting from zero again).
+        if [ -n "$(get_annotation "$ingestor_fail_key" || true)" ]; then
+          log "  ingestor digest resolved; clearing prior failure streak"
+          kubectl annotate deployment -n "$RELEASE_NAMESPACE" "$DEPLOYMENT_NAME" \
+            "${ingestor_fail_key}-" "${ingestor_err_key}-" >/dev/null 2>&1 || true
+        fi
         recorded_ingestor="$(get_annotation "tracebloc.io/last-refreshed-ingestor-digest" || true)"
         # Always read spec env too — the annotation alone isn't enough
         # because external actors can revert the spec without touching
@@ -484,6 +531,13 @@ spec:
                 # semver-style float tags. Caught in PR #162 review.
                 - name: INGESTOR_TAG
                   value: {{ (default dict (default dict .Values.images).ingestor).tag | default "0.3" | quote }}
+                # Consecutive failed ghcr ingestor-digest resolves before
+                # image-refresh stops silently skipping and fails the Job
+                # loudly (#186 #2). nil-guarded with a `default 3` fallback
+                # so --reuse-values upgrades from pre-this-PR stored
+                # manifests (which lack the key) still render.
+                - name: INGESTOR_RESOLVE_FAIL_THRESHOLD
+                  value: {{ (default dict .Values.imageRefresh).ingestorResolveFailureThreshold | default 3 | quote }}
               securityContext:
                 allowPrivilegeEscalation: false
                 readOnlyRootFilesystem: true

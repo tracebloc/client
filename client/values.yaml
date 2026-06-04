@@ -489,6 +489,17 @@ imageRefresh:
   # on bare-metal first-boot can take minutes, and the CronJob slot
   # shouldn't hold all night if a rollout genuinely wedges.
   rolloutTimeout: "10m"
+  # Consecutive failed ghcr.io ingestor-digest resolves before image-refresh
+  # stops silently skipping and fails the Job loudly (visible in
+  # `kubectl get cronjob` / monitoring, plus a `tracebloc.io/ingestor-refresh-
+  # last-error` annotation on the jobs-manager deployment). Default 3 ≈ 45 min
+  # at the 15-min schedule: long enough to ride out a transient registry blip,
+  # short enough to surface a persistent egress/proxy failure (e.g. a cluster
+  # that reaches docker.io but not ghcr.io — the #186 (#2) root cause). A
+  # failed resolve BELOW this count still just WARNs and skips the tick.
+  # Raise it for flakier egress; set it very high to keep the old
+  # skip-forever behaviour. Only affects the ingestor (ghcr) image.
+  ingestorResolveFailureThreshold: 3
   # CronJob spec knobs. Override per-cluster if needed.
   suspend: false
   # Lower history limits than autoUpgrade — this Job runs ~96x/day, the
