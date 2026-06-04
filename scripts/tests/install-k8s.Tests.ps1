@@ -112,6 +112,31 @@ Describe "ConvertTo-WorkspaceName" {
   It "all-invalid -> default" { ConvertTo-WorkspaceName -Input_ "@@@" | Should -Be "default" }
 }
 
+Describe "Install-TraceblocCli" {
+  # Step 5 of the installer: install the tracebloc CLI via its own released
+  # installer, run in a CHILD powershell process. The load-bearing property is
+  # NON-FATAL — a failure must Warn (not throw), since the client is already up.
+  BeforeEach {
+    Mock RefreshPath {}
+    Mock Has { $false }   # tracebloc not already on PATH
+  }
+  It "non-fatal: warns (does not throw) when the CLI installer exits non-zero" {
+    Mock Start-Process { [pscustomobject]@{ ExitCode = 1 } }
+    $out = Install-TraceblocCli 6>&1 | Out-String
+    $out | Should -Match "Couldn't install the tracebloc CLI"
+  }
+  It "non-fatal: warns (does not throw) when Start-Process itself throws" {
+    Mock Start-Process { throw "network down" }
+    $out = Install-TraceblocCli 6>&1 | Out-String
+    $out | Should -Match "Couldn't install the tracebloc CLI"
+  }
+  It "reports success when the CLI installer exits 0" {
+    Mock Start-Process { [pscustomobject]@{ ExitCode = 0 } }
+    $out = Install-TraceblocCli 6>&1 | Out-String
+    $out | Should -Match "tracebloc CLI installed"
+  }
+}
+
 Describe "Get-WindowsArch" {
   AfterEach { $env:PROCESSOR_ARCHITECTURE = "AMD64" }
   It "AMD64 -> amd64" { $env:PROCESSOR_ARCHITECTURE = "AMD64"; Get-WindowsArch | Should -Be "amd64" }

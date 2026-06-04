@@ -51,7 +51,14 @@ source "${LIB_DIR}/setup-linux.sh"
 source "${LIB_DIR}/cluster.sh"
 source "${LIB_DIR}/gpu-plugins.sh"
 source "${LIB_DIR}/install-client-helm.sh"
-source "${LIB_DIR}/install-cli.sh"
+# install-cli.sh may be absent if an older bootstrap copy (e.g. a not-yet-
+# updated tracebloc.io/i.sh, whose FILES list is hand-maintained) didn't fetch
+# it. Guard the source so a stale bootstrap degrades gracefully (Step 5 is
+# skipped) instead of aborting the whole installer under `set -e`. Use an `if`
+# block, NOT `[[ -f … ]] && source` — a false `&&` test trips `set -e`.
+if [[ -f "${LIB_DIR}/install-cli.sh" ]]; then
+  source "${LIB_DIR}/install-cli.sh"
+fi
 source "${LIB_DIR}/summary.sh"
 source "${LIB_DIR}/diagnose.sh"
 
@@ -97,8 +104,11 @@ main() {
   wait_for_client_ready
 
   # ── Step 5/5: install the tracebloc CLI. Non-fatal — the client is already
-  #    connected at this point, so a CLI hiccup warns but never fails the run. ─
-  install_tracebloc_cli
+  #    connected, so a CLI hiccup warns but never fails the run. Guarded on the
+  #    function being defined, in case a stale bootstrap didn't fetch the lib. ─
+  if declare -F install_tracebloc_cli >/dev/null 2>&1; then
+    install_tracebloc_cli
+  fi
 
   print_summary
 
