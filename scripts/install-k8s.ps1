@@ -112,6 +112,15 @@ function ConvertTo-WorkspaceName {
   return $sanitized
 }
 
+# Best-effort chart version of the installed client release (e.g. "1.4.4");
+# empty if not found / cluster unreachable. Greps helm's CHART column.
+function Get-ChartVersion {
+  param([string]$Namespace = "tracebloc")
+  $out = (helm list -n $Namespace 2>$null) | Out-String
+  if ($out -match 'client-([0-9][^\s]*)') { return $Matches[1] }
+  return ""
+}
+
 # =============================================================================
 #  CONFIGURATION
 # =============================================================================
@@ -1006,7 +1015,6 @@ function Install-ClientHelm {
   }
   $valuesFile = Join-Path $HOST_DATA_DIR "values.yaml"
 
-  $defaultNamespace = "default"
   $defaultClientId = ""
   $defaultClientPassword = ""
 
@@ -1027,20 +1035,14 @@ function Install-ClientHelm {
     }
   }
 
-  # -- Workspace name prompt --
-  PromptHeader "Choose a workspace name"
-  Hint "This identifies your tracebloc client on this machine."
-  Write-Host ""
-  Hint "Examples: myteam, vision-lab, lukas"
-  Write-Host ""
-  $nsInput = Read-Host "  Workspace name [$defaultNamespace]"
-  $rawName = if ($nsInput) { $nsInput } else { $defaultNamespace }
-  $TB_NAMESPACE = ConvertTo-WorkspaceName -Input_ $rawName
+  # -- Namespace (fixed; not prompted) --
+  # The on-prem client is one-per-machine and is identified to the backend by
+  # its credentials (clientId), not by this name -- so we don't ask the user to
+  # invent one. It's just the local k8s namespace / Helm release name.
+  # Advanced / GitOps setups can override with TB_NAMESPACE=<name>.
+  $rawNs = if ($env:TB_NAMESPACE) { $env:TB_NAMESPACE } else { "tracebloc" }
+  $TB_NAMESPACE = ConvertTo-WorkspaceName -Input_ $rawNs
   $script:TB_NAMESPACE = $TB_NAMESPACE   # share with Wait-ForClientReady / Print-Summary
-
-  if ($TB_NAMESPACE -ne $rawName) {
-    Info "Using workspace: $TB_NAMESPACE"
-  }
 
   # -- Step 4/4: Connect to tracebloc network --
   Step 4 4 "Connect to tracebloc network"
@@ -1099,6 +1101,43 @@ function Install-ClientHelm {
     if ($credAttempt -ge $credMax) { Err "Too many failed attempts. Double-check your credentials at https://ai.tracebloc.io/clients and re-run." }
     # Force active re-entry on retry (don't silently reuse a rejected default).
     $defaultClientId = ""; $defaultClientPassword = ""
+  }
+
+  # -- One-client-per-machine guard --
+  # A machine runs exactly one tracebloc client: it shares this cluster and the
+  # host's CPU/RAM/GPU, and the platform counts each client as separate
+  # capacity. If a DIFFERENT client is already installed here, a re-install
+  # would silently re-point the machine -- so we stop and let the operator
+  # decide. The same clientId is a normal re-run/upgrade and passes through.
+  # Check ANY namespace: a fresh install lands in 'tracebloc', but an install
+  # from an older installer version may be in a different namespace. Enumerate
+  # client-chart releases and read each clientId (ConvertFrom-Json -- no jq).
+  $existingId = ""; $existingNs = ""
+  $listJson = (helm list -A -o json 2>$null) | Out-String
+  if ($LASTEXITCODE -eq 0 -and $listJson.Trim()) {
+    try {
+      foreach ($rel in ($listJson | ConvertFrom-Json)) {
+        if ($rel.chart -and $rel.chart.StartsWith("client-")) {
+          $vals = (helm get values $rel.name -n $rel.namespace 2>$null) | Out-String
+          if ($vals -match 'clientId:\s*"([^"]+)"') { $existingId = $Matches[1].Trim(); $existingNs = $rel.namespace; break }
+        }
+      }
+    } catch { }
+  }
+  if ($existingId -and $existingId -ne $TB_CLIENT_ID) {
+    Write-Host ""
+    Warn "This machine already runs the tracebloc client '$existingId' (namespace '$existingNs')."
+    Hint "tracebloc runs one client per machine -- it shares this cluster and host"
+    Hint "resources, and the platform counts each client as separate capacity."
+    Write-Host ""
+    Hint "You entered a different Client ID ('$TB_CLIENT_ID'). Pick one:"
+    Hint "  - Repair / update '$existingId'  -> re-run with that same Client ID"
+    Hint "  - Switch to '$TB_CLIENT_ID'       -> remove the current client first:"
+    Hint "        k3d cluster delete $CLUSTER_NAME   (wipes this client + its local data)"
+    Hint "      then re-run this installer"
+    Hint "  - Run both clients                -> install on a separate machine"
+    Write-Host ""
+    Err "Refusing to replace the existing client. See the options above."
   }
 
   $passwordEscaped = $TB_CLIENT_PASSWORD -replace "'", "''"
@@ -1257,6 +1296,8 @@ function Print-Summary {
       Write-Host "  " -NoNewline; Write-Host "$([char]0x2714) Connected to tracebloc" -ForegroundColor Green
       Write-Host ""
       Write-Host "  Workspace : " -NoNewline; Write-Host $ns -ForegroundColor Cyan
+      $cver = Get-ChartVersion -Namespace $ns; if (-not $cver) { $cver = "unknown" }
+      Write-Host "  Version   : " -NoNewline; Write-Host $cver -ForegroundColor Cyan
       Write-Host "  Mode      : " -NoNewline; Write-Host $mode -ForegroundColor Cyan
       Write-Host ""
       Write-Host "  Your client is live. Confirm it shows as Online:"
@@ -1460,8 +1501,6 @@ function Invoke-DiagnoseBundle {
   $d = Join-Path $work "tracebloc-diagnose-$ts"
   New-Item -ItemType Directory -Path (Join-Path $d "logs") -Force | Out-Null
 
-  Info "Collecting diagnostics -- this is safe; credentials are redacted before the file is written."
-
   # Namespace discovery (TB_NAMESPACE isn't set on a standalone diagnose run).
   $ns = $TB_NAMESPACE
   if (-not $ns) {
@@ -1470,9 +1509,14 @@ function Invoke-DiagnoseBundle {
   }
   if (-not $ns) { $ns = "default" }
 
+  # Surface the client version first -- the #1 thing support needs to know.
+  $cver = Get-ChartVersion -Namespace $ns; if (-not $cver) { $cver = "unknown" }
+  Info "tracebloc client version: $cver   (namespace: $ns)"
+  Info "Collecting diagnostics -- this is safe; credentials are redacted before the file is written."
+
   # host / versions
   $h = @("# tracebloc diagnose ($ts)", "OS: Windows  ARCH: $(Get-WindowsArch)",
-         "CLIENT_ENV: $($env:CLIENT_ENV)  CLUSTER_NAME: $cn  NAMESPACE: $ns", "## versions",
+         "CLIENT_ENV: $($env:CLIENT_ENV)  CLUSTER_NAME: $cn  NAMESPACE: $ns", "CLIENT VERSION: $cver", "## versions",
          (k3d version 2>&1 | Out-String), (kubectl version --client 2>&1 | Out-String),
          (helm version --short 2>&1 | Out-String), (docker version 2>&1 | Out-String))
   try { $cs = Get-CimInstance Win32_ComputerSystem -ErrorAction Stop; $h += "CPUs=$($cs.NumberOfLogicalProcessors)  MemBytes=$($cs.TotalPhysicalMemory)" } catch {}

@@ -15,6 +15,8 @@
 #
 #  Environment variable overrides (optional):
 #    CLUSTER_NAME=myapp          default: tracebloc
+#    TB_NAMESPACE=myns           default: tracebloc  (k8s namespace + local label;
+#                                not prompted — the client is identified by its credentials)
 #    SERVERS=1                   default: 1  (control-plane nodes)
 #    AGENTS=1                    default: 1  (worker nodes)
 #    K8S_VERSION=v1.29.4-k3s1   default: latest stable k3s

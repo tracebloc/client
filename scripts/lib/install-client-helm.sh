@@ -153,13 +153,12 @@ install_client_helm() {
   if [[ -n "${TRACEBLOC_VALUES_FILE:-}" ]]; then
     [[ -f "$TRACEBLOC_VALUES_FILE" ]] || error "TRACEBLOC_VALUES_FILE not found: $TRACEBLOC_VALUES_FILE"
     values_file="$TRACEBLOC_VALUES_FILE"
-    TB_NAMESPACE="${TB_NAMESPACE:-default}"
+    TB_NAMESPACE="${TB_NAMESPACE:-tracebloc}"
     info "Dev mode: using caller-provided values file"
     log "Using values file: $values_file (namespace: $TB_NAMESPACE)"
   else
 
   local use_existing=""
-  local default_namespace="default"
   local default_client_id=""
   local default_client_password=""
 
@@ -179,19 +178,12 @@ install_client_helm() {
     fi
   fi
 
-  # ── Workspace name prompt ────────────────────────────────────────────────
-  prompt_header "Choose a workspace name"
-  hint "This identifies your tracebloc client on this machine."
-  echo ""
-  hint "Examples: berlin-team, vision-lab, ml-mardan"
-  echo ""
-  read -r -p "  Workspace name [${default_namespace}]: " TB_NAMESPACE_INPUT
-  local raw_name="${TB_NAMESPACE_INPUT:-$default_namespace}"
-  TB_NAMESPACE=$(_sanitize_workspace_name "$raw_name")
-
-  if [[ "$TB_NAMESPACE" != "$raw_name" ]]; then
-    info "Using workspace: ${BOLD}${TB_NAMESPACE}${RESET}"
-  fi
+  # ── Namespace (fixed; not prompted) ──────────────────────────────────────
+  # The on-prem client is one-per-machine and is identified to the backend by
+  # its credentials (clientId), not by this name — so we don't ask the user to
+  # invent one. It's just the local k8s namespace / Helm release name.
+  # Advanced / GitOps setups can override with TB_NAMESPACE=<name>.
+  TB_NAMESPACE=$(_sanitize_workspace_name "${TB_NAMESPACE:-tracebloc}")
 
   # ── Step 4/4: Connect to tracebloc network ──────────────────────────────
   step 4 4 "Connect to tracebloc network"
@@ -254,6 +246,46 @@ install_client_helm() {
     # Force an active re-entry on retry (don't silently reuse a rejected default).
     default_client_id=""; default_client_password=""
   done
+
+  # ── One-client-per-machine guard ─────────────────────────────────────────
+  # A machine runs exactly one tracebloc client: it shares this cluster and the
+  # host's CPU/RAM/GPU, and the platform counts each client as separate
+  # capacity. If a DIFFERENT client is already installed here, a re-install
+  # would silently re-point the machine — so we stop and let the operator
+  # decide. The same clientId is a normal re-run/upgrade and passes through.
+  # Check ANY namespace: a fresh install lands in `tracebloc`, but an install
+  # from an older installer version may be in a different namespace. Enumerate
+  # client-chart releases and read each clientId. jq is already used elsewhere
+  # in the installer; if it's somehow absent, fall back to the `tracebloc` ns.
+  local existing_id="" existing_ns="" _gvf _rel _ns _id
+  _gvf="$(mktemp)"
+  if has jq; then
+    while IFS=$'\t' read -r _rel _ns; do
+      [[ -z "$_rel" ]] && continue
+      if helm get values "$_rel" -n "$_ns" > "$_gvf" 2>/dev/null; then
+        _id="$(_extract_yaml_value "$_gvf" clientId)"
+        [[ -n "$_id" ]] && { existing_id="$_id"; existing_ns="$_ns"; break; }
+      fi
+    done < <(helm list -A -o json 2>/dev/null | jq -r '.[] | select((.chart // "") | startswith("client-")) | "\(.name)\t\(.namespace)"')
+  elif helm get values "$TB_NAMESPACE" -n "$TB_NAMESPACE" > "$_gvf" 2>/dev/null; then
+    existing_id="$(_extract_yaml_value "$_gvf" clientId)"; existing_ns="$TB_NAMESPACE"
+  fi
+  rm -f "$_gvf"
+  if [[ -n "$existing_id" && "$existing_id" != "$TB_CLIENT_ID" ]]; then
+    echo ""
+    warn "This machine already runs the tracebloc client '${existing_id}' (namespace '${existing_ns}')."
+    hint "tracebloc runs one client per machine — it shares this cluster and host"
+    hint "resources, and the platform counts each client as separate capacity."
+    echo ""
+    hint "You entered a different Client ID ('${TB_CLIENT_ID}'). Pick one:"
+    hint "  • Repair / update '${existing_id}'  →  re-run with that same Client ID"
+    hint "  • Switch to '${TB_CLIENT_ID}'        →  remove the current client first:"
+    hint "        k3d cluster delete ${CLUSTER_NAME:-tracebloc}   (wipes this client + its local data)"
+    hint "      then re-run this installer"
+    hint "  • Run both clients                   →  install on a separate machine"
+    echo ""
+    error "Refusing to replace the existing client. See the options above."
+  fi
 
   TB_CLIENT_PASSWORD_ESCAPED="${TB_CLIENT_PASSWORD//\'/\'\'}"
 

@@ -49,8 +49,6 @@ run_diagnose() {
   if [[ -z "$outdir" || ! -d "$outdir" ]]; then echo "  diagnose: cannot create a temp directory" >&2; return 1; fi
   d="$outdir/tracebloc-diagnose-$ts"; mkdir -p "$d/logs"
 
-  info "Collecting diagnostics — this is safe; credentials are redacted before the file is written."
-
   # Namespace discovery — TB_NAMESPACE isn't set on a standalone diagnose run,
   # so find the namespace of the jobs-manager pod (falls back to "default").
   ns="${TB_NAMESPACE:-}"
@@ -59,12 +57,18 @@ run_diagnose() {
   fi
   [[ -z "$ns" ]] && ns="default"
 
+  # Surface the client version first — the #1 thing support needs to know.
+  local cver; cver="$(_chart_version "$ns")"
+  info "tracebloc client version: ${cver:-unknown}   (namespace: $ns)"
+  info "Collecting diagnostics — this is safe; credentials are redacted before the file is written."
+
   # ── host / versions ──
   {
     echo "# tracebloc diagnose ($ts)"
     echo "OS:   $(uname -s) $(uname -r)"
     echo "ARCH: $(uname -m)"
     echo "CLIENT_ENV: ${CLIENT_ENV:-<unset>}   CLUSTER_NAME: $cn   NAMESPACE: $ns"
+    echo "CLIENT VERSION: ${cver:-unknown}"
     echo; echo "## versions"
     has k3d     && k3d version
     has kubectl && kubectl version --client 2>/dev/null
