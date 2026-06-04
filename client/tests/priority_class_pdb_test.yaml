@@ -7,8 +7,18 @@ set:
   clientId: "test-id"
   clientPassword: "test"
 tests:
-  - it: should create the data-plane PriorityClass by default
+  - it: should NOT render the PriorityClass by default (dropped)
     template: templates/priority-class.yaml
+    asserts:
+      - hasDocuments:
+          count: 0
+
+  - it: should render the PriorityClass when explicitly enabled
+    template: templates/priority-class.yaml
+    set:
+      priorityClass:
+        create: true
+        name: tracebloc-data-plane
     asserts:
       - isKind:
           of: PriorityClass

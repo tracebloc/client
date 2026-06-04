@@ -126,13 +126,13 @@ setup() {
   _ensure_helm_runnable() { :; }
   helm() { record "helm $*"; return 0; }
   verify_credentials() { printf valid; }
-  run install_client_helm <<< $'myws\nmyid\nmypw'
+  run install_client_helm <<< $'myid\nmypw'
   [ "$status" -eq 0 ]
   [[ "$output" == *"Credentials verified"* ]]
   [[ "$output" == *"Connected to tracebloc"* ]]
   grep -q 'clientId: "myid"' "$HOST_DATA_DIR/values.yaml"
   grep -q "clientPassword: 'mypw'" "$HOST_DATA_DIR/values.yaml"
-  mock_calls | grep -q "helm upgrade --install myws"
+  mock_calls | grep -q "helm upgrade --install tracebloc"
 }
 
 @test "install_client_helm: re-prompts on invalid, then accepts valid" {
@@ -145,7 +145,7 @@ setup() {
     local n; n=$(cat "$BATS_TEST_TMPDIR/n" 2>/dev/null || echo 0); n=$((n+1)); echo "$n" >"$BATS_TEST_TMPDIR/n"
     if [ "$n" -ge 2 ]; then printf valid; else printf invalid; fi
   }
-  run install_client_helm <<< $'myws\nbadid\nbadpw\ngoodid\ngoodpw'
+  run install_client_helm <<< $'badid\nbadpw\ngoodid\ngoodpw'
   [ "$status" -eq 0 ]
   [[ "$output" == *"rejected"* ]]
   [[ "$output" == *"Credentials verified"* ]]
@@ -159,7 +159,7 @@ setup() {
   _ensure_helm_runnable() { :; }
   helm() { record "helm $*"; return 0; }
   verify_credentials() { printf inactive; }
-  run install_client_helm <<< $'myws\nmyid\nmypw'
+  run install_client_helm <<< $'myid\nmypw'
   [ "$status" -ne 0 ]
   [[ "$output" == *"not active"* ]]
   run mock_calls
@@ -173,7 +173,7 @@ setup() {
   _ensure_helm_runnable() { :; }
   helm() { record "helm $*"; return 0; }
   verify_credentials() { printf unverified; }
-  run install_client_helm <<< $'myws\nmyid\nmypw'
+  run install_client_helm <<< $'myid\nmypw'
   [ "$status" -eq 0 ]
   [[ "$output" == *"Couldn't reach tracebloc"* ]]
   run mock_calls
@@ -202,8 +202,8 @@ setup() {
   _ensure_helm_runnable() { :; }
   helm() { record "helm $*"; return 0; }
   verify_credentials() { printf valid; }
-  # use-previous=y, workspace=myws, ClientID=Enter(keep previd), password=Enter(keep prevpw)
-  run install_client_helm <<< $'y\nmyws\n\n\n'
+  # use-previous=y, ClientID=Enter(keep previd), password=Enter(keep prevpw)
+  run install_client_helm <<< $'y\n\n\n'
   [ "$status" -eq 0 ]
   grep -q 'clientId: "previd"' "$HOST_DATA_DIR/values.yaml"
   grep -q "clientPassword: 'prevpw'" "$HOST_DATA_DIR/values.yaml"
@@ -216,9 +216,47 @@ setup() {
   _ensure_helm_runnable() { :; }
   helm() { record "helm $*"; return 0; }
   verify_credentials() { printf invalid; }
-  run install_client_helm <<< $'myws\ni1\np1\ni2\np2\ni3\np3\ni4\np4\ni5\np5'
+  run install_client_helm <<< $'i1\np1\ni2\np2\ni3\np3\ni4\np4\ni5\np5'
   [ "$status" -ne 0 ]
   [[ "$output" == *"Too many failed attempts"* ]]
   run mock_calls
   [[ "$output" != *"helm upgrade"* ]]
+}
+
+# ── One-client-per-machine guard ────────────────────────────────────────────
+@test "install_client_helm: blocks a DIFFERENT client already installed" {
+  HOST_DATA_DIR="$BATS_TEST_TMPDIR/data"; mkdir -p "$HOST_DATA_DIR"
+  _ensure_tracebloc_dirs() { :; }
+  _ensure_release_dirs() { :; }
+  _ensure_helm_runnable() { :; }
+  # an existing release reports a different clientId -> must block before upgrade
+  helm() {
+    if [ "$1" = list ]; then echo '[{"name":"oldrel","namespace":"default","chart":"client-1.4.3"}]'; return 0; fi
+    if [ "$1" = get ] && [ "$2" = values ]; then echo 'clientId: "otherclient"'; return 0; fi
+    record "helm $*"; return 0
+  }
+  verify_credentials() { printf valid; }
+  run install_client_helm <<< $'newclient\nmypw'
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"already runs the tracebloc client 'otherclient'"* ]]
+  [[ "$output" == *"one client per machine"* ]]
+  run mock_calls
+  [[ "$output" != *"helm upgrade"* ]]
+}
+
+@test "install_client_helm: same client re-run is allowed (upgrade in place)" {
+  HOST_DATA_DIR="$BATS_TEST_TMPDIR/data"; mkdir -p "$HOST_DATA_DIR"
+  _ensure_tracebloc_dirs() { :; }
+  _ensure_release_dirs() { :; }
+  _ensure_helm_runnable() { :; }
+  helm() {
+    if [ "$1" = list ]; then echo '[{"name":"tracebloc","namespace":"tracebloc","chart":"client-1.4.3"}]'; return 0; fi
+    if [ "$1" = get ] && [ "$2" = values ]; then echo 'clientId: "sameid"'; return 0; fi
+    record "helm $*"; return 0
+  }
+  verify_credentials() { printf valid; }
+  run install_client_helm <<< $'sameid\nmypw'
+  [ "$status" -eq 0 ]
+  run mock_calls
+  [[ "$output" == *"helm upgrade --install tracebloc"* ]]
 }

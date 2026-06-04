@@ -89,6 +89,7 @@ print_summary() {
   [[ "$GPU_VENDOR" == "nvidia" ]] && mode="NVIDIA GPU"
   [[ "$GPU_VENDOR" == "amd" ]] && mode="AMD GPU"
   local ns="${TB_NAMESPACE:-default}"
+  local cver; cver="$(_chart_version "$ns")"
   local line="━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
   echo ""
@@ -99,6 +100,7 @@ print_summary() {
       echo -e "  ${BOLD}${GREEN}✔ Connected to tracebloc${RESET}"
       echo ""
       echo -e "  ${BOLD}Workspace${RESET} : ${CYAN}${ns}${RESET}"
+      echo -e "  ${BOLD}Version${RESET}   : ${CYAN}${cver:-unknown}${RESET}"
       echo -e "  ${BOLD}Mode${RESET}      : ${CYAN}${mode}${RESET}"
       echo ""
       echo -e "  Your client is live. Confirm it shows as ${BOLD}🟢 Online${RESET}:"

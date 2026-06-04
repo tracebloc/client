@@ -104,3 +104,14 @@ setup() {
   # Finding 2 (security review): `helm get manifest` (base64 Secrets) is NOT collected
   ! tar -xzOf "$tgz" 2>/dev/null | grep -q 'get manifest'
 }
+
+@test "run_diagnose: surfaces + records the client version" {
+  has() { case "$1" in helm) return 0 ;; *) return 1 ;; esac; }   # only helm present
+  helm() { echo "tracebloc tracebloc 1 now deployed client-1.4.4 1.4.4"; }
+  run run_diagnose
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"client version: 1.4.4"* ]]
+  tgz="$(ls "$HOST_DATA_DIR"/tracebloc-diagnose-*.tgz 2>/dev/null | head -1)"
+  [ -n "$tgz" ]
+  tar -xzOf "$tgz" 2>/dev/null | grep -q 'CLIENT VERSION: 1.4.4'
+}

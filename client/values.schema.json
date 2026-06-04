@@ -585,6 +585,12 @@
           "pattern": "^[0-9]+(s|m|h)$",
           "description": "Passed to `kubectl rollout status --timeout`. Allow headroom for bare-metal image pull."
         },
+        "ingestorResolveFailureThreshold": {
+          "type": "integer",
+          "minimum": 1,
+          "default": 3,
+          "description": "Consecutive failed ghcr.io ingestor-digest resolves before image-refresh fails the Job loudly instead of silently skipping. See #186 (#2). Higher tolerates flakier egress; very high keeps the old skip-forever behaviour."
+        },
         "suspend": {
           "type": "boolean",
           "default": false,

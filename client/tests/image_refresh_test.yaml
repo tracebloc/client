@@ -463,6 +463,56 @@ tests:
             name: INGESTOR_TAG
             value: staging
 
+  - it: ingestor INGESTOR_RESOLVE_FAIL_THRESHOLD defaults to "3" (#186 #2)
+    # Below this many consecutive ghcr resolve failures, image-refresh
+    # WARNs + skips; at/above it the script fails the Job loudly instead
+    # of silently leaving jobs-manager on a stale digest.
+    template: templates/image-refresh-cronjob.yaml
+    documentIndex: 1
+    asserts:
+      - contains:
+          path: spec.jobTemplate.spec.template.spec.containers[0].env
+          content:
+            name: INGESTOR_RESOLVE_FAIL_THRESHOLD
+            value: "3"
+
+  - it: ingestor INGESTOR_RESOLVE_FAIL_THRESHOLD falls back to "3" when imageRefresh key is absent
+    # --reuse-values upgrade from a pre-this-PR stored manifest lacks the
+    # key; the template's `| default 3` must still render a usable value.
+    template: templates/image-refresh-cronjob.yaml
+    documentIndex: 1
+    set:
+      imageRefresh:
+        ingestorResolveFailureThreshold: null
+    asserts:
+      - contains:
+          path: spec.jobTemplate.spec.template.spec.containers[0].env
+          content:
+            name: INGESTOR_RESOLVE_FAIL_THRESHOLD
+            value: "3"
+
+  - it: ingestor INGESTOR_RESOLVE_FAIL_THRESHOLD is overridable
+    template: templates/image-refresh-cronjob.yaml
+    documentIndex: 1
+    set:
+      imageRefresh:
+        ingestorResolveFailureThreshold: 5
+    asserts:
+      - contains:
+          path: spec.jobTemplate.spec.template.spec.containers[0].env
+          content:
+            name: INGESTOR_RESOLVE_FAIL_THRESHOLD
+            value: "5"
+
+  - it: schema rejects ingestorResolveFailureThreshold below 1
+    template: templates/image-refresh-cronjob.yaml
+    set:
+      imageRefresh:
+        ingestorResolveFailureThreshold: 0
+    asserts:
+      - failedTemplate:
+          errorPattern: "must not be valid against schema|Must be greater than or equal to 1"
+
   - it: schema rejects ingestor.tag=latest
     template: templates/image-refresh-cronjob.yaml
     set:

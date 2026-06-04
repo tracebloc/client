@@ -64,6 +64,14 @@ setup() {
   [[ "$output" == *"data never leaves"* ]]
 }
 
+@test "print_summary connected: shows the client version" {
+  CLIENT_STATE=connected
+  helm() { echo "tracebloc tracebloc 1 now deployed client-1.4.4 1.4.4"; }
+  run print_summary
+  [[ "$output" == *"Version"* ]]
+  [[ "$output" == *"1.4.4"* ]]
+}
+
 @test "print_summary starting: 'still starting', no trust claim" {
   CLIENT_STATE=starting
   run print_summary

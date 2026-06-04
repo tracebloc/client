@@ -11,7 +11,24 @@ metadata:
   labels:
     {{- include "tracebloc.labels" . | nindent 4 }}
     app: {{ include "tracebloc.resourceMonitorName" . }}
-{{- if ne .Values.clusterScope false }}
+{{/*
+  Per-node monitoring is INTRINSICALLY cluster-scoped, so the resource-monitor
+  always needs a ClusterRole -- it is deliberately NOT gated on .Values.clusterScope.
+  The code path that requires it:
+    * resource_monitor.py uses core_v1_api.list_pod_for_all_namespaces(
+        field_selector="spec.nodeName=<node>") to enumerate every pod on the node.
+      list_pod_for_all_namespaces is a CLUSTER-SCOPED list verb that a namespaced
+      Role can never satisfy (it 403s -> CrashLoopBackOff).
+    * It also read_namespaced_pod()s its OWN pod, which lives in
+      .Values.nodeAgents.namespace.name (NOT .Release.Namespace), so a Role scoped
+      to the release namespace would miss it too.
+  This ClusterRole is strictly READ-ONLY (get/list/watch on pod/node metadata +
+  metrics); it grants no write/exec/secret access. clusterScope continues to gate
+  the training/jobs isolation footprint elsewhere -- it must not cripple node
+  telemetry by leaving the DaemonSet without the permissions it cannot run without.
+  If a deployment genuinely cannot allow any cluster-scoped read, disable the
+  monitor entirely via .Values.resourceMonitor=false rather than deploying it broken.
+*/}}
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
@@ -49,49 +66,4 @@ subjects:
   - kind: ServiceAccount
     name: {{ include "tracebloc.resourceMonitorName" . }}
     namespace: {{ .Values.nodeAgents.namespace.name }}
-{{- else }}
----
-# Role + RoleBinding live in the RELEASE namespace so the resource-monitor
-# can list pods/logs where the actual workloads run. The RoleBinding
-# subject points at the ServiceAccount in the node-agents namespace
-# (cross-namespace bindings are valid; the Role scope is what matters).
-apiVersion: rbac.authorization.k8s.io/v1
-kind: Role
-metadata:
-  name: tracebloc-resource-monitor-{{ .Release.Name }}
-  namespace: {{ .Release.Namespace }}
-  annotations:
-    meta.helm.sh/release-name: {{ .Release.Name }}
-    meta.helm.sh/release-namespace: {{ .Release.Namespace }}
-  labels:
-    {{- include "tracebloc.labels" . | nindent 4 }}
-    app: {{ include "tracebloc.resourceMonitorName" . }}
-rules:
-  - apiGroups: [""]
-    resources: ["pods", "pods/log"]
-    verbs: ["get", "list", "watch"]
-  - apiGroups: ["metrics.k8s.io"]
-    resources: ["pods"]
-    verbs: ["get", "list", "watch"]
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: RoleBinding
-metadata:
-  name: tracebloc-resource-monitor-{{ .Release.Name }}
-  namespace: {{ .Release.Namespace }}
-  annotations:
-    meta.helm.sh/release-name: {{ .Release.Name }}
-    meta.helm.sh/release-namespace: {{ .Release.Namespace }}
-  labels:
-    {{- include "tracebloc.labels" . | nindent 4 }}
-    app: {{ include "tracebloc.resourceMonitorName" . }}
-roleRef:
-  apiGroup: rbac.authorization.k8s.io
-  kind: Role
-  name: tracebloc-resource-monitor-{{ .Release.Name }}
-subjects:
-  - kind: ServiceAccount
-    name: {{ include "tracebloc.resourceMonitorName" . }}
-    namespace: {{ .Values.nodeAgents.namespace.name }}
-{{- end }}
 {{- end }}

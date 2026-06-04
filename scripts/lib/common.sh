@@ -35,6 +35,15 @@ hint()           { echo -e "  ${DIM}$*${RESET}"; }
 # ── Utility ──────────────────────────────────────────────────────────────────
 has() { command -v "$1" &>/dev/null; }
 
+# Best-effort chart version of the installed client release in namespace $1
+# (e.g. "1.4.4"); empty if not found / cluster unreachable. Greps helm's CHART
+# column ("client-<ver>"), so it needs no jq.
+_chart_version() {
+  local ns="${1:-${TB_NAMESPACE:-tracebloc}}"
+  has helm || return 0
+  helm list -n "$ns" 2>/dev/null | grep -oE 'client-[0-9][^[:space:]]*' | head -1 | sed 's/^client-//'
+}
+
 # ── macOS: Docker Desktop architecture vs machine (for wrong-arch UX) ────────
 #  Call early on macOS to fail fast with clear instructions if Docker.app
 #  is for the wrong architecture (e.g. Intel Docker on Apple Silicon).
@@ -361,6 +370,7 @@ Commands:
 
 Advanced configuration (environment variables):
   CLUSTER_NAME   Cluster name                   (default: tracebloc)
+  TB_NAMESPACE   Namespace / workspace label    (default: tracebloc)
   SERVERS        Control-plane nodes             (default: 1)
   AGENTS         Worker nodes                    (default: 1)
   K8S_VERSION    k3s image tag                   (default: v1.29.4-k3s1)

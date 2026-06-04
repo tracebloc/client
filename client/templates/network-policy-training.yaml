@@ -85,4 +85,19 @@ spec:
       ports:
         - port: 3306
           protocol: TCP
+    # 4. requests-proxy — training pods POST epoch results / FLOPs to the
+    #    in-namespace requests-proxy on 8888 (so they never hold Service Bus
+    #    credentials). Rule 2 blocks this ClusterIP egress, so re-permit it
+    #    explicitly, exactly like MySQL above. Without this rule every
+    #    experiment CrashLoopBackOffs at the first epoch finalize with
+    #    "requests-proxy-service:8888 ... Connection refused" (client#196).
+    #    Service selector + port: templates/requests-proxy-service.yaml
+    #    (app=requests-proxy, 8888).
+    - to:
+        - podSelector:
+            matchLabels:
+              app: requests-proxy
+      ports:
+        - port: 8888
+          protocol: TCP
 {{- end }}
