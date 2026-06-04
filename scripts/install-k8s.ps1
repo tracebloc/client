@@ -1590,17 +1590,22 @@ function Install-TraceblocCli {
   try {
     $p = Start-Process -FilePath "powershell.exe" `
       -ArgumentList @("-NoProfile","-ExecutionPolicy","Bypass","-Command","irm '$TRACEBLOC_CLI_INSTALL_URL' | iex") `
-      -NoNewWindow -Wait -PassThru `
+      -NoNewWindow -PassThru `
       -RedirectStandardOutput $cliOut -RedirectStandardError $cliErr
+    # Caching .Handle before the process exits, then WaitForExit(), makes
+    # .ExitCode reliable. (The -Wait -PassThru form can leave .ExitCode $null
+    # with redirected output; -PassThru + Handle + WaitForExit does not.)
+    $null = $p.Handle
+    $p.WaitForExit()
     foreach ($f in @($cliOut, $cliErr)) {
       if (Test-Path $f) { Get-Content $f -ErrorAction SilentlyContinue | ForEach-Object { Log $_ } }
     }
-    # Start-Process -Wait -PassThru with redirected output can leave .ExitCode
-    # $null on Windows, so don't trust it alone: refresh PATH and treat the CLI
-    # actually being resolvable as the source of truth, with ExitCode as a
-    # secondary signal.
-    RefreshPath
-    if ((Has "tracebloc") -or ($null -ne $p -and $p.ExitCode -eq 0)) {
+    # Installer exit status is the SOLE source of truth, mirroring the bash step
+    # (`if sh installer; then …`). Do NOT also accept "tracebloc already on PATH"
+    # as success — a failed re-install on a machine that already had the CLI
+    # would then be misreported as a success.
+    if ($p.ExitCode -eq 0) {
+      RefreshPath
       Ok "tracebloc CLI installed -- open a new terminal so it's on your PATH."
     } else {
       Warn "Couldn't install the tracebloc CLI automatically -- your client is set up fine."
