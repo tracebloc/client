@@ -77,6 +77,15 @@ spec:
               value: "experiments"
             - name: FLOPS_QUEUE_NAME
               value: "flops"
+            # client-runtime#79: shared HMAC secret used to VERIFY the per-pod
+            # bearer token statelessly (signature + expiry), the same key the
+            # jobs-manager uses to mint it. When present, the proxy skips the
+            # pod_tokens table entirely.
+            - name: POD_TOKEN_SIGNING_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "tracebloc.secretName" . }}
+                  key: POD_TOKEN_SIGNING_SECRET
       {{- if include "tracebloc.useImagePullSecrets" . }}
       imagePullSecrets:
         - name: {{ include "tracebloc.registrySecretName" . }}

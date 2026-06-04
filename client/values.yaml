@@ -349,6 +349,26 @@ podDisruptionBudget:
 clientId: ""
 clientPassword: ""
 
+# -- Pod-proxy token signing (client-runtime#79)
+# Shared HMAC secret used by the jobs-manager to MINT and the requests-proxy to
+# VERIFY the per-pod REQUESTS_PROXY_TOKEN. When set (non-empty), the proxy
+# validates tokens statelessly (signature + expiry) and the legacy pod_tokens
+# table is not used — eliminating the token-revoke-while-live race class.
+#
+# Leave empty to AUTO-GENERATE a stable secret: the chart generates one on
+# first install and reuses it on every subsequent upgrade (via `lookup`), so
+# tokens minted before an upgrade still verify after. Set explicitly only to
+# pin a known value or to rotate (rotating invalidates all live tokens at once,
+# forcing pods to be respawned). Never injected into training pods.
+podTokenSigningSecret: ""
+
+# -- Backstop lifetime (seconds) for a signed pod-proxy token. The real bound
+# on a token's usefulness is the pod lifecycle (the pod is deleted on stop);
+# this just caps a leaked token. Set to comfortably exceed the longest expected
+# training-job duration, or a long-running job will 401 mid-run when its token
+# expires. Default 7 days.
+podTokenTtlSeconds: 604800
+
 # -- Docker registry credentials (optional; only used when dockerRegistry is set and create is true)
 # Omit dockerRegistry entirely, or set create: false, for public images (no imagePullSecrets).
 # When create is true, secret name is {{ .Release.Name }}-regcred.
