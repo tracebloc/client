@@ -2,7 +2,7 @@
 
 This guide covers installing the **tracebloc** unified Helm chart (AKS, EKS, bare-metal, OpenShift) in a production-ready way.
 
-> **Don't have a Kubernetes cluster yet?** The standalone installer provisions a cluster, installs GPU drivers, and deploys a full tracebloc client in a single command:
+> **Don't have a Kubernetes cluster yet?** The standalone installer provisions a cluster, installs GPU drivers, deploys a full tracebloc client, and installs the [tracebloc CLI](https://github.com/tracebloc/cli) — in a single command:
 >
 > - **macOS / Linux:** `bash <(curl -fsSL https://tracebloc.io/i.sh)`
 > - **Windows:** `irm https://tracebloc.io/i.ps1 | iex` *(PowerShell as Administrator)*

@@ -54,7 +54,7 @@ This repo ships the **tracebloc** unified Helm chart (currently `v1.3.5`) — on
 
 ### Quick install
 
-A single command provisions a Kubernetes cluster, auto-detects and installs GPU drivers (NVIDIA or AMD), and deploys the tracebloc client. Use this when you don't already have a cluster — the result is a full client install, not a demo.
+A single command provisions a Kubernetes cluster, auto-detects and installs GPU drivers (NVIDIA or AMD), deploys the tracebloc client, and installs the [tracebloc CLI](https://github.com/tracebloc/cli) (`tracebloc dataset push`). Use this when you don't already have a cluster — the result is a full client install, not a demo.
 
 **macOS / Linux**
 

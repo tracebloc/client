@@ -51,6 +51,14 @@ source "${LIB_DIR}/setup-linux.sh"
 source "${LIB_DIR}/cluster.sh"
 source "${LIB_DIR}/gpu-plugins.sh"
 source "${LIB_DIR}/install-client-helm.sh"
+# install-cli.sh may be absent if an older bootstrap copy (e.g. a not-yet-
+# updated tracebloc.io/i.sh, whose FILES list is hand-maintained) didn't fetch
+# it. Guard the source so a stale bootstrap degrades gracefully (Step 5 is
+# skipped) instead of aborting the whole installer under `set -e`. Use an `if`
+# block, NOT `[[ -f … ]] && source` — a false `&&` test trips `set -e`.
+if [[ -f "${LIB_DIR}/install-cli.sh" ]]; then
+  source "${LIB_DIR}/install-cli.sh"
+fi
 source "${LIB_DIR}/summary.sh"
 source "${LIB_DIR}/diagnose.sh"
 
@@ -70,7 +78,7 @@ main() {
   print_roadmap
 
   # ── Step 1/4: Check system requirements ──────────────────────────────────
-  step 1 4 "Checking system requirements"
+  step 1 5 "Checking system requirements"
   run_preflight
   detect_gpu
 
@@ -84,16 +92,24 @@ main() {
   esac
 
   # ── Step 2/4: Set up secure compute environment ──────────────────────────
-  step 2 4 "Setting up secure compute environment"
+  step 2 5 "Setting up secure compute environment"
   create_cluster
   deploy_gpu_device_plugin
   verify_gpu
 
-  # ── Step 3/4 + 4/4 are handled inside install_client_helm ────────────────
+  # ── Step 3/5 + 4/5 are handled inside install_client_helm ────────────────
   install_client_helm
 
   # ── Verify the client actually came up before reporting anything ─────────
   wait_for_client_ready
+
+  # ── Step 5/5: install the tracebloc CLI. Non-fatal — the client is already
+  #    connected, so a CLI hiccup warns but never fails the run. Guarded on the
+  #    function being defined, in case a stale bootstrap didn't fetch the lib. ─
+  if declare -F install_tracebloc_cli >/dev/null 2>&1; then
+    install_tracebloc_cli
+  fi
+
   print_summary
 
   # Exit code reflects reality: connected/starting are OK; failures are non-zero

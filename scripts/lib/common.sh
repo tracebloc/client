@@ -347,6 +347,7 @@ print_roadmap() {
   echo -e "  ${DIM}2. Set up secure compute environment${RESET}"
   echo -e "  ${DIM}3. Install tracebloc client${RESET}"
   echo -e "  ${DIM}4. Connect to tracebloc network${RESET}"
+  echo -e "  ${DIM}5. Install the tracebloc CLI${RESET}"
   echo ""
 }
 

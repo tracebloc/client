@@ -242,6 +242,7 @@ function Print-Roadmap {
   Hint "2. Set up secure compute environment"
   Hint "3. Install tracebloc client"
   Hint "4. Connect to tracebloc network"
+  Hint "5. Install the tracebloc CLI"
   Write-Host ""
 }
 
@@ -1008,7 +1009,7 @@ function Test-Credentials {
 
 function Install-ClientHelm {
   # -- Step 3/4: Install tracebloc client --
-  Step 3 4 "Installing tracebloc client"
+  Step 3 5 "Installing tracebloc client"
 
   if (-not (Test-Path $HOST_DATA_DIR)) {
     New-Item -ItemType Directory -Path $HOST_DATA_DIR -Force | Out-Null
@@ -1045,7 +1046,7 @@ function Install-ClientHelm {
   $script:TB_NAMESPACE = $TB_NAMESPACE   # share with Wait-ForClientReady / Print-Summary
 
   # -- Step 4/4: Connect to tracebloc network --
-  Step 4 4 "Connect to tracebloc network"
+  Step 4 5 "Connect to tracebloc network"
 
   PromptHeader "To connect this machine, you need a tracebloc client."
   Hint "A client links your secure environment to the tracebloc"
@@ -1308,7 +1309,8 @@ function Print-Summary {
       Hint "After a reboot, start Docker Desktop to bring your client back (enable 'Start Docker Desktop when you sign in' in Settings -> General to automate)."
       Write-Host ""
       Write-Host "  What to do next" -ForegroundColor White
-      Write-Host "  1. Ingest your training and test data"
+      Write-Host "  1. Ingest your training and test data with the tracebloc CLI:"
+      Write-Host "       tracebloc dataset push ./data" -ForegroundColor Cyan
       Write-Host "  2. Define your first AI use case and invite vendors"
       Write-Host ""
       Hint "Dashboard: https://ai.tracebloc.io   Logs: ~\.tracebloc\   Data: /tracebloc/$ns"
@@ -1559,6 +1561,66 @@ function Invoke-DiagnoseBundle {
 }
 
 # =============================================================================
+#  INSTALL TRACEBLOC CLI (Step 5)
+# =============================================================================
+# Installs the `tracebloc` CLI via its own released installer (tracebloc/cli),
+# which downloads the right build for this OS/arch and verifies it (SHA256 +
+# cosign signature). Lets the user push datasets to the client they just set
+# up:  tracebloc dataset push ./data
+#
+# NON-FATAL: runs after the client is connected, so a CLI-install hiccup warns
+# and moves on. The CLI's own installer sets $ErrorActionPreference='Stop' and
+# exits on failure, so we run it in a CHILD powershell process — its exit can
+# never abort THIS installer.
+$TRACEBLOC_CLI_INSTALL_URL = "https://github.com/tracebloc/cli/releases/latest/download/install.ps1"
+
+function Install-TraceblocCli {
+  Step 5 5 "Install the tracebloc CLI"
+
+  if (Has "tracebloc") {
+    Info "tracebloc CLI already present -- re-running its installer to pick up the latest."
+  }
+  Info "Installing the tracebloc CLI (dataset push / cluster info / dataset rm)..."
+
+  # [System.IO.Path]::GetTempPath() is cross-platform (%TEMP% on Windows, /tmp
+  # on Linux); $env:TEMP is null under Linux pwsh, which the ubuntu Pester run
+  # exercises.
+  $cliOut = Join-Path ([System.IO.Path]::GetTempPath()) "tracebloc-cli-install-$(Get-Random).log"
+  $cliErr = "$cliOut.err"
+  try {
+    $p = Start-Process -FilePath "powershell.exe" `
+      -ArgumentList @("-NoProfile","-ExecutionPolicy","Bypass","-Command","irm '$TRACEBLOC_CLI_INSTALL_URL' | iex") `
+      -NoNewWindow -PassThru `
+      -RedirectStandardOutput $cliOut -RedirectStandardError $cliErr
+    # Caching .Handle before the process exits, then WaitForExit(), makes
+    # .ExitCode reliable. (The -Wait -PassThru form can leave .ExitCode $null
+    # with redirected output; -PassThru + Handle + WaitForExit does not.)
+    $null = $p.Handle
+    $p.WaitForExit()
+    foreach ($f in @($cliOut, $cliErr)) {
+      if (Test-Path $f) { Get-Content $f -ErrorAction SilentlyContinue | ForEach-Object { Log $_ } }
+    }
+    # Installer exit status is the SOLE source of truth, mirroring the bash step
+    # (`if sh installer; then …`). Do NOT also accept "tracebloc already on PATH"
+    # as success — a failed re-install on a machine that already had the CLI
+    # would then be misreported as a success.
+    if ($p.ExitCode -eq 0) {
+      RefreshPath
+      Ok "tracebloc CLI installed -- open a new terminal so it's on your PATH."
+    } else {
+      Warn "Couldn't install the tracebloc CLI automatically -- your client is set up fine."
+      Hint "Install it later:  irm $TRACEBLOC_CLI_INSTALL_URL | iex"
+    }
+  } catch {
+    Warn "Couldn't install the tracebloc CLI automatically -- your client is set up fine."
+    Hint "Install it later:  irm $TRACEBLOC_CLI_INSTALL_URL | iex"
+    Log "CLI install failed: $_"
+  } finally {
+    Remove-Item $cliOut, $cliErr -Force -ErrorAction SilentlyContinue
+  }
+}
+
+# =============================================================================
 #  MAIN
 # =============================================================================
 
@@ -1573,8 +1635,8 @@ Start-InstallLog
 Print-Banner
 Print-Roadmap
 
-# -- Step 1/4: Check system requirements --
-Step 1 4 "Checking system requirements"
+# -- Step 1/5: Check system requirements --
+Step 1 5 "Checking system requirements"
 Test-Preflight
 Find-Gpu
 Enable-VirtualisationFeatures
@@ -1584,17 +1646,21 @@ Install-NvidiaContainerToolkit
 Install-Kubectl
 Install-K3dAndHelm
 
-# -- Step 2/4: Set up secure compute environment --
-Step 2 4 "Setting up secure compute environment"
+# -- Step 2/5: Set up secure compute environment --
+Step 2 5 "Setting up secure compute environment"
 New-K3dCluster
 Install-GpuDevicePlugin
 Confirm-GpuNode
 
-# -- Steps 3/4 + 4/4 handled inside Install-ClientHelm --
+# -- Steps 3/5 + 4/5 handled inside Install-ClientHelm --
 Install-ClientHelm
 
 # Verify the client actually came up before reporting anything
 Wait-ForClientReady
+
+# -- Step 5/5: install the tracebloc CLI (non-fatal; client is already up) --
+Install-TraceblocCli
+
 Print-Summary
 
 try { Stop-Transcript | Out-Null } catch {}
