@@ -51,6 +51,7 @@ source "${LIB_DIR}/setup-linux.sh"
 source "${LIB_DIR}/cluster.sh"
 source "${LIB_DIR}/gpu-plugins.sh"
 source "${LIB_DIR}/install-client-helm.sh"
+source "${LIB_DIR}/install-cli.sh"
 source "${LIB_DIR}/summary.sh"
 source "${LIB_DIR}/diagnose.sh"
 
@@ -70,7 +71,7 @@ main() {
   print_roadmap
 
   # ── Step 1/4: Check system requirements ──────────────────────────────────
-  step 1 4 "Checking system requirements"
+  step 1 5 "Checking system requirements"
   run_preflight
   detect_gpu
 
@@ -84,16 +85,21 @@ main() {
   esac
 
   # ── Step 2/4: Set up secure compute environment ──────────────────────────
-  step 2 4 "Setting up secure compute environment"
+  step 2 5 "Setting up secure compute environment"
   create_cluster
   deploy_gpu_device_plugin
   verify_gpu
 
-  # ── Step 3/4 + 4/4 are handled inside install_client_helm ────────────────
+  # ── Step 3/5 + 4/5 are handled inside install_client_helm ────────────────
   install_client_helm
 
   # ── Verify the client actually came up before reporting anything ─────────
   wait_for_client_ready
+
+  # ── Step 5/5: install the tracebloc CLI. Non-fatal — the client is already
+  #    connected at this point, so a CLI hiccup warns but never fails the run. ─
+  install_tracebloc_cli
+
   print_summary
 
   # Exit code reflects reality: connected/starting are OK; failures are non-zero
