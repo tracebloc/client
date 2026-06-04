@@ -42,6 +42,7 @@ FILES=(
   "scripts/lib/cluster.sh"
   "scripts/lib/gpu-plugins.sh"
   "scripts/lib/install-client-helm.sh"
+  "scripts/lib/install-cli.sh"
   "scripts/lib/summary.sh"
   "scripts/lib/diagnose.sh"
 )

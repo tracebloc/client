@@ -112,6 +112,54 @@ Describe "ConvertTo-WorkspaceName" {
   It "all-invalid -> default" { ConvertTo-WorkspaceName -Input_ "@@@" | Should -Be "default" }
 }
 
+Describe "Install-TraceblocCli" {
+  # Step 5 of the installer: install the tracebloc CLI via its own released
+  # installer, run in a CHILD powershell process. The load-bearing property is
+  # NON-FATAL — a failure must Warn (not throw), since the client is already up.
+  BeforeEach {
+    Mock RefreshPath {}
+    Mock Has { $false }   # tracebloc not already on PATH
+  }
+  # Fake the System.Diagnostics.Process that Start-Process -PassThru returns:
+  # the function caches .Handle, calls .WaitForExit(), then reads .ExitCode.
+  It "non-fatal: warns (does not throw) when the CLI installer exits non-zero" {
+    Mock Start-Process {
+      $o = [pscustomobject]@{ ExitCode = 1 }
+      $o | Add-Member ScriptProperty Handle { [IntPtr]::Zero }
+      $o | Add-Member ScriptMethod WaitForExit { }
+      $o
+    }
+    $out = Install-TraceblocCli 6>&1 | Out-String
+    $out | Should -Match "Couldn't install the tracebloc CLI"
+  }
+  It "non-fatal: warns (does not throw) when Start-Process itself throws" {
+    Mock Start-Process { throw "network down" }
+    $out = Install-TraceblocCli 6>&1 | Out-String
+    $out | Should -Match "Couldn't install the tracebloc CLI"
+  }
+  It "reports success only when the installer exits 0" {
+    Mock Start-Process {
+      $o = [pscustomobject]@{ ExitCode = 0 }
+      $o | Add-Member ScriptProperty Handle { [IntPtr]::Zero }
+      $o | Add-Member ScriptMethod WaitForExit { }
+      $o
+    }
+    $out = Install-TraceblocCli 6>&1 | Out-String
+    $out | Should -Match "tracebloc CLI installed"
+  }
+  It "warns on a failed re-install even when a CLI is already on PATH" {
+    Mock Start-Process {
+      $o = [pscustomobject]@{ ExitCode = 1 }
+      $o | Add-Member ScriptProperty Handle { [IntPtr]::Zero }
+      $o | Add-Member ScriptMethod WaitForExit { }
+      $o
+    }
+    Mock Has { $true }    # a CLI is already present, but the installer failed…
+    $out = Install-TraceblocCli 6>&1 | Out-String
+    $out | Should -Match "Couldn't install the tracebloc CLI"   # …so it must still warn
+  }
+}
+
 Describe "Get-WindowsArch" {
   AfterEach { $env:PROCESSOR_ARCHITECTURE = "AMD64" }
   It "AMD64 -> amd64" { $env:PROCESSOR_ARCHITECTURE = "AMD64"; Get-WindowsArch | Should -Be "amd64" }

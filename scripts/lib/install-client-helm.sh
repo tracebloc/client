@@ -141,7 +141,7 @@ verify_credentials() {
 
 install_client_helm() {
   # ── Step 3/4: Install tracebloc client ───────────────────────────────────
-  step 3 4 "Installing tracebloc client"
+  step 3 5 "Installing tracebloc client"
 
   _ensure_tracebloc_dirs
   local values_file="${HOST_DATA_DIR}/values.yaml"
@@ -186,7 +186,7 @@ install_client_helm() {
   TB_NAMESPACE=$(_sanitize_workspace_name "${TB_NAMESPACE:-tracebloc}")
 
   # ── Step 4/4: Connect to tracebloc network ──────────────────────────────
-  step 4 4 "Connect to tracebloc network"
+  step 4 5 "Connect to tracebloc network"
 
   prompt_header "To connect this machine, you need a tracebloc client."
   hint "A client links your secure environment to the tracebloc"
