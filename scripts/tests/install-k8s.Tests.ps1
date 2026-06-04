@@ -135,6 +135,12 @@ Describe "Install-TraceblocCli" {
     $out = Install-TraceblocCli 6>&1 | Out-String
     $out | Should -Match "tracebloc CLI installed"
   }
+  It "reports success when ExitCode is null but tracebloc resolves (Windows -Wait quirk)" {
+    Mock Start-Process { [pscustomobject]@{ ExitCode = $null } }
+    Mock Has { $true }
+    $out = Install-TraceblocCli 6>&1 | Out-String
+    $out | Should -Match "tracebloc CLI installed"
+  }
 }
 
 Describe "Get-WindowsArch" {

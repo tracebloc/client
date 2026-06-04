@@ -26,7 +26,11 @@ install_tracebloc_cli() {
   step 5 5 "Install the tracebloc CLI"
 
   if has tracebloc; then
-    info "tracebloc CLI already present ($(tracebloc version 2>/dev/null | head -1)) — re-running its installer to pick up the latest."
+    # Version is cosmetic — never let a failing `tracebloc version` (or SIGPIPE
+    # from `head` closing the pipe, under `set -o pipefail`) abort this step.
+    # `local` masks the status and `|| true` keeps any captured value.
+    local ver="$(tracebloc version 2>/dev/null | head -1 || true)"
+    info "tracebloc CLI already present${ver:+ ($ver)} — re-running its installer to pick up the latest."
   fi
 
   info "Installing the tracebloc CLI (dataset push / cluster info / dataset rm)…"
@@ -48,7 +52,8 @@ install_tracebloc_cli() {
   #    guidance) when /usr/local/bin isn't writable.
   if sh "$installer" >> "${LOG_FILE:-/dev/null}" 2>&1; then
     if has tracebloc; then
-      success "tracebloc CLI installed ($(tracebloc version 2>/dev/null | head -1))."
+      local ver="$(tracebloc version 2>/dev/null | head -1 || true)"
+      success "tracebloc CLI installed${ver:+ ($ver)}."
     else
       success "tracebloc CLI installed — open a new terminal so it's on your PATH."
     fi

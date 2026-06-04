@@ -1595,8 +1595,12 @@ function Install-TraceblocCli {
     foreach ($f in @($cliOut, $cliErr)) {
       if (Test-Path $f) { Get-Content $f -ErrorAction SilentlyContinue | ForEach-Object { Log $_ } }
     }
-    if ($p.ExitCode -eq 0) {
-      RefreshPath
+    # Start-Process -Wait -PassThru with redirected output can leave .ExitCode
+    # $null on Windows, so don't trust it alone: refresh PATH and treat the CLI
+    # actually being resolvable as the source of truth, with ExitCode as a
+    # secondary signal.
+    RefreshPath
+    if ((Has "tracebloc") -or ($null -ne $p -and $p.ExitCode -eq 0)) {
       Ok "tracebloc CLI installed -- open a new terminal so it's on your PATH."
     } else {
       Warn "Couldn't install the tracebloc CLI automatically -- your client is set up fine."
