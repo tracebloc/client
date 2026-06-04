@@ -1582,7 +1582,10 @@ function Install-TraceblocCli {
   }
   Info "Installing the tracebloc CLI (dataset push / cluster info / dataset rm)..."
 
-  $cliOut = Join-Path $env:TEMP "tracebloc-cli-install-$(Get-Random).log"
+  # [System.IO.Path]::GetTempPath() is cross-platform (%TEMP% on Windows, /tmp
+  # on Linux); $env:TEMP is null under Linux pwsh, which the ubuntu Pester run
+  # exercises.
+  $cliOut = Join-Path ([System.IO.Path]::GetTempPath()) "tracebloc-cli-install-$(Get-Random).log"
   $cliErr = "$cliOut.err"
   try {
     $p = Start-Process -FilePath "powershell.exe" `
