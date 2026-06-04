@@ -1,0 +1,59 @@
+name: Standard checks
+
+# Emits the org-standard required status checks **Lint** and **Unit tests** for
+# this (shell / Helm) repo, so branch-protection rules that require those exact
+# contexts are satisfied and PRs can merge.
+#
+# IMPORTANT — deliberately NOT path-filtered. A *required* status check must
+# report on EVERY PR to the protected branch; if it were gated on `paths:`, a PR
+# that didn't touch those paths would never produce the check and would sit
+# forever at "Expected — waiting for status to be reported", blocking the merge.
+#
+# These jobs reuse the same proven steps as `installer-tests.yaml`'s deeper
+# suite (which keeps the broader coverage: PSScriptAnalyzer, Pester on Windows,
+# distro-prereqs, e2e). If the two ever feel redundant, fold the deep suite's
+# names into these and drop the duplicates — but keep SOMETHING reporting
+# `Lint` + `Unit tests` unconditionally.
+
+on:
+  push:
+    branches: [main, develop, openshift]
+  pull_request:
+    branches: [main, develop, openshift]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: bash -n (syntax) on every shell script
+        run: |
+          find scripts -type f -name '*.sh' -print0 \
+            | while IFS= read -r -d '' f; do bash -n "$f" || exit 1; done
+          echo "all shell scripts parse"
+
+      - name: ShellCheck (libs + entrypoints), error severity
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq shellcheck
+          shellcheck --version | grep version
+          shellcheck --severity=error --shell=bash \
+            scripts/install.sh scripts/install-k8s.sh scripts/lib/*.sh \
+            scripts/tests/distro-prereqs.sh scripts/tests/e2e-cluster.sh scripts/tests/e2e-proxy.sh
+
+  unit-tests:
+    name: Unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install bats
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq bats
+
+      - name: Run bats (bash unit suite, mocked)
+        run: bats scripts/tests/*.bats
