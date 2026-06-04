@@ -17,7 +17,8 @@ setup() {
   warn()    { echo "WARN: $*"; }
   hint()    { :; }
   has()     { return 1; }   # default: tracebloc not present
-  CURL_SECURE="--tlsv1.2"
+  # CURL_SECURE is set readonly by common.sh (loaded via load_lib); don't
+  # reassign it. curl is mocked in every test below, so its value is moot.
   LOG_FILE="$(mktemp)"
 }
 
