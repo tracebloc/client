@@ -383,6 +383,11 @@ EOF
   cat "$helm_log" >> "${LOG_FILE:-/dev/null}" 2>/dev/null
   rm -f "$helm_log"
 
+  # Point the kubeconfig's current context at the client namespace, so kubectl and
+  # the tracebloc CLI default to it with no -n / --namespace flag. Best-effort:
+  # a failure here must not abort an otherwise-successful install.
+  kubectl config set-context --current --namespace "$TB_NAMESPACE" >/dev/null 2>&1 || true
+
   success "Connected to tracebloc"
   log "Values file: $values_file"
 }
