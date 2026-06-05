@@ -1,0 +1,125 @@
+suite: Ingestion Authz ConfigMap
+# Covers templates/ingestion-authz-configmap.yaml — the authorization policy
+# that decides which ServiceAccount(s) may call
+# POST /internal/submit-ingestion-run on jobs-manager, scoped to table-name
+# prefixes (client-runtime#21). This is a security-relevant template: the
+# rendered policy is the single source of truth jobs-manager loads at startup,
+# so the fail-safe deny-all behaviour and the SA-name / namespace fallbacks
+# must hold.
+templates:
+  - templates/ingestion-authz-configmap.yaml
+set:
+  clientId: "test-id"
+  clientPassword: "test"
+tests:
+  - it: renders a ConfigMap with the release-scoped name and namespace
+    asserts:
+      - isKind:
+          of: ConfigMap
+      - equal:
+          path: metadata.name
+          value: RELEASE-NAME-ingestion-authz
+      - equal:
+          path: metadata.namespace
+          value: NAMESPACE
+
+  - it: stamps the standard tracebloc labels
+    asserts:
+      - equal:
+          path: metadata.labels["app.kubernetes.io/name"]
+          value: client
+      - equal:
+          path: metadata.labels["app.kubernetes.io/managed-by"]
+          value: Helm
+
+  - it: renders the default policy entry with the default SA, release namespace and wildcard prefix
+    # values.yaml ships a single default entry `- table_prefixes: ["*"]`,
+    # which the template fills in with the default SA name and the release
+    # namespace.
+    asserts:
+      - matchRegex:
+          path: data["ingestion-authz.yaml"]
+          pattern: 'service_account: "ingestor"'
+      - matchRegex:
+          path: data["ingestion-authz.yaml"]
+          pattern: 'namespace: "NAMESPACE"'
+      - matchRegex:
+          path: data["ingestion-authz.yaml"]
+          pattern: '- "\*"'
+
+  - it: renders an explicit entry verbatim with multiple table prefixes
+    set:
+      ingestionAuthz:
+        allowed:
+          - service_account: my-dataset-ingestor
+            namespace: tracebloc
+            table_prefixes: ["chest_xrays_", "tumors_"]
+    asserts:
+      - matchRegex:
+          path: data["ingestion-authz.yaml"]
+          pattern: 'service_account: "my-dataset-ingestor"'
+      - matchRegex:
+          path: data["ingestion-authz.yaml"]
+          pattern: 'namespace: "tracebloc"'
+      - matchRegex:
+          path: data["ingestion-authz.yaml"]
+          pattern: '- "chest_xrays_"'
+      - matchRegex:
+          path: data["ingestion-authz.yaml"]
+          pattern: '- "tumors_"'
+
+  - it: falls back to ingestionAuthz.serviceAccountName when an entry omits service_account
+    # Per-entry service_account is nil-guarded (#129) to the shared SA name so
+    # the operator changes it in one place. Here the custom SA name must flow
+    # into the policy even though the entry itself doesn't repeat it.
+    set:
+      ingestionAuthz:
+        serviceAccountName: custom-ingestor
+        allowed:
+          - table_prefixes: ["x_"]
+    asserts:
+      - matchRegex:
+          path: data["ingestion-authz.yaml"]
+          pattern: 'service_account: "custom-ingestor"'
+
+  - it: defaults a per-entry omitted namespace to the release namespace
+    set:
+      ingestionAuthz:
+        allowed:
+          - service_account: scoped-sa
+            table_prefixes: ["y_"]
+    asserts:
+      - matchRegex:
+          path: data["ingestion-authz.yaml"]
+          pattern: 'service_account: "scoped-sa"'
+      - matchRegex:
+          path: data["ingestion-authz.yaml"]
+          pattern: 'namespace: "NAMESPACE"'
+
+  - it: fail-safe deny-all when ingestionAuthz is absent from a --reuse-values upgrade
+    # Simulates a pre-#123 stored values dict (no .Values.ingestionAuthz). The
+    # nil-guarded chain must collapse to an empty `allowed:` list rather than
+    # panicking — and an empty policy denies every caller, which is the correct
+    # fail-safe default.
+    set:
+      ingestionAuthz: null
+    asserts:
+      - matchRegex:
+          path: data["ingestion-authz.yaml"]
+          pattern: 'allowed:'
+      - notMatchRegex:
+          path: data["ingestion-authz.yaml"]
+          pattern: 'service_account'
+
+  - it: fail-safe deny-all when ingestionAuthz.allowed is empty
+    set:
+      ingestionAuthz:
+        serviceAccountName: ingestor
+        allowed: []
+    asserts:
+      - matchRegex:
+          path: data["ingestion-authz.yaml"]
+          pattern: 'allowed:'
+      - notMatchRegex:
+          path: data["ingestion-authz.yaml"]
+          pattern: 'service_account'
