@@ -3,6 +3,19 @@
 #  setup-linux.sh — Linux prerequisites: package manager, Docker Engine,
 #                   system deps, kubectl, k3d, helm, GPU dispatch
 # =============================================================================
+#
+# ── Progress contract: no silent op longer than a few seconds ────────────────
+# Anything that can block for more than ~5s MUST stay visibly alive — either a
+# spin_cmd spinner (animates while a backgrounded command runs) or an explicit
+# heartbeat (see wait_apt_lock below). A blocked step with no output reads as a
+# freeze and gets aborted by users. Known long ops in the install journey:
+#   • apt/dnf install + index update   → spin_cmd (animated)
+#   • waiting on the dpkg/apt lock      → wait_apt_lock (heartbeat, NOT a spinner;
+#                                         a spinner over a blocked apt is exactly
+#                                         the freeze we are fixing — see #740)
+#   • Docker / k3d / helm downloads     → spin_cmd / download_with_progress
+#   • container image pulls, CLI pod    → handled in cluster.sh / install-cli.sh
+# Rule of thumb: if a reader can't tell a step from a hang, it needs a heartbeat.
 
 # ── Package manager detection ────────────────────────────────────────────────
 setup_pm() {
@@ -19,6 +32,72 @@ setup_pm() {
   elif has zypper;  then PM_UPDATE="sudo zypper refresh";               PM_INSTALL="sudo zypper install -y"
   elif has pacman;  then PM_UPDATE="sudo pacman -Sy --noconfirm";       PM_INSTALL="sudo pacman -S --noconfirm"
   else error "No supported package manager found."; fi
+}
+
+# ── apt lock — wait VISIBLY instead of letting a spinner hide a blocked apt ───
+# On a fresh cloud VM, unattended-upgrades / apt-daily grab the dpkg frontend
+# lock for the first few minutes after boot. apt-get then silently blocks on it.
+# Run under spin_cmd (output redirected, animated) the install looks frozen for
+# minutes and users abort ("still pulling conntrack" — see #740). Probe the lock
+# directly and surface the wait BEFORE we hand apt to the spinner.
+
+# True (0) while ANY apt/dpkg lock is held by another process; false otherwise.
+# Split out as its own function so it can be stubbed at the boundary in tests
+# (the bats suite can't take a real kernel lock). Uses fuser (psmisc, present on
+# Debian/Ubuntu base images); if fuser is missing we can't probe → report "free"
+# so we never block on an unknowable state, and let apt's own waiting take over.
+_apt_lock_held() {
+  has fuser || return 1
+  local f
+  for f in /var/lib/dpkg/lock-frontend /var/lib/apt/lists/lock /var/lib/dpkg/lock; do
+    # fuser exits 0 only when at least one PID has the file open. stderr carries
+    # the PID list, so silence it; we only care about the exit status.
+    if fuser "$f" >/dev/null 2>&1; then return 0; fi
+  done
+  return 1
+}
+
+# Best-effort: which service is most likely holding it, for the timeout hint.
+_apt_lock_holder_hint() {
+  if pgrep -a unattended-upgr >/dev/null 2>&1; then echo "unattended-upgrades"
+  elif pgrep -a apt          >/dev/null 2>&1;  then echo "apt-daily"
+  else echo "another package manager"; fi
+}
+
+# Block until the apt lock clears or TRACEBLOC_APT_LOCK_TIMEOUT seconds elapse,
+# emitting a clear message + a periodic heartbeat so it is obviously alive.
+# Returns 0 if the lock cleared (or was never held), 1 on timeout. apt-only.
+wait_apt_lock() {
+  has apt-get || return 0          # apt path only; other PMs out of scope (#740)
+  _apt_lock_held || return 0       # fast path: lock is free, say nothing
+
+  local timeout="${TRACEBLOC_APT_LOCK_TIMEOUT:-300}"
+  local interval=5 waited=0
+
+  info "Waiting for the system package lock — unattended-upgrades can hold it for"
+  hint "a few minutes on a fresh VM. This is normal; the installer is not stuck."
+
+  while _apt_lock_held; do
+    if (( waited >= timeout )); then
+      local holder; holder="$(_apt_lock_holder_hint)"
+      echo ""
+      warn "The system package lock is still held after ${timeout}s (likely ${holder})."
+      hint "Continuing anyway — apt will queue behind it. If the next step stalls,"
+      hint "let the background update finish, then re-run this installer. To inspect:"
+      hint "    sudo lsof /var/lib/dpkg/lock-frontend"
+      hint "    systemctl status unattended-upgrades apt-daily.service 2>/dev/null"
+      return 1
+    fi
+    # Heartbeat on the same line so the screen doesn't scroll, with an elapsed
+    # counter that visibly ticks (proof of life, not a frozen spinner).
+    printf "\r  ${DIM}· still waiting for the package lock… %ds${RESET}" "$waited"
+    sleep "$interval"
+    waited=$(( waited + interval ))
+  done
+
+  printf "\r\033[K"                 # clear the heartbeat line
+  info "System package lock released — continuing."
+  return 0
 }
 
 # ── Kernel modules Docker + k3s need ─────────────────────────────────────────
@@ -162,6 +241,10 @@ install_system_deps() {
   has openssl   || MISSING_PKGS+=(openssl)
   has tar       || MISSING_PKGS+=(tar)
   if [[ ${#MISSING_PKGS[@]} -gt 0 ]]; then
+    # Surface a held dpkg lock BEFORE the spinner hides it (apt-only no-op
+    # elsewhere). Without this, a fresh-VM unattended-upgrades hold makes the
+    # update/install below look frozen for minutes → users abort (#740).
+    wait_apt_lock
     spin_cmd "Updating package index…" $PM_UPDATE
     for pkg in "${MISSING_PKGS[@]}"; do
       spin_cmd "Installing $pkg…" $PM_INSTALL "$pkg" || \

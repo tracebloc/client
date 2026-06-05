@@ -180,6 +180,83 @@ setup() {
   [[ "$output" != *"logging out"* ]]               # the misleading group hint is NOT used
 }
 
+# ── wait_apt_lock: visible wait on a held dpkg lock (#740) ─────────────────
+# A fresh-VM unattended-upgrades hold makes apt block silently under the
+# spinner → perceived freeze → users abort. wait_apt_lock surfaces the wait
+# with a heartbeat and is bounded (proceed-or-timeout), never an infinite spin.
+#
+# The bats sandbox can't take a real kernel lock, so we mock at the function
+# boundary: _apt_lock_held is the single lock probe, and we make it report
+# "held" for the first N calls then "free" (simulating unattended-upgrades
+# releasing the lock). `sleep` is stubbed so the loop doesn't actually wait.
+
+# (a) lock clears after a few probes → emits wait message, then proceeds.
+@test "wait_apt_lock: held lock emits a visible wait, then proceeds when it clears" {
+  PRESENT_CMDS="apt-get"
+  sleep() { :; }                         # don't actually wait between probes
+  # locked for the first 2 probes, free afterwards
+  _LOCK_PROBES=0
+  _apt_lock_held() { _LOCK_PROBES=$((_LOCK_PROBES + 1)); [ "$_LOCK_PROBES" -le 2 ]; }
+  run wait_apt_lock
+  [ "$status" -eq 0 ]                     # proceeded (lock cleared)
+  [[ "$output" == *"Waiting for the system package lock"* ]]   # (a) wait message
+  [[ "$output" == *"released"* ]]         # (b) noticed it cleared and continued
+}
+
+# (b) lock NEVER clears → bounded timeout: warns with guidance, returns 1,
+# does NOT loop forever. Tiny timeout keeps the test instant.
+@test "wait_apt_lock: never-clearing lock times out cleanly (no infinite spin)" {
+  PRESENT_CMDS="apt-get"
+  sleep() { :; }
+  _apt_lock_held() { return 0; }          # held forever
+  pgrep() { return 1; }                    # holder-hint probe: generic fallback
+  TRACEBLOC_APT_LOCK_TIMEOUT=10            # short bound for the test
+  run wait_apt_lock
+  [ "$status" -eq 1 ]                       # timed out (did not hang)
+  [[ "$output" == *"still held after 10s"* ]]
+  [[ "$output" == *"re-run this installer"* ]]   # actionable guidance
+}
+
+# (c) lock free from the start → completely silent fast-path (no noise on the
+# common case where nothing holds the lock).
+@test "wait_apt_lock: free lock is a silent no-op" {
+  PRESENT_CMDS="apt-get"
+  _apt_lock_held() { return 1; }           # never held
+  run wait_apt_lock
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]                         # nothing printed
+}
+
+# (d) non-apt package manager → no-op (scope is apt-only, #740). Even if a lock
+# probe WOULD report held, dnf/yum/etc. must not wait on the apt lock.
+@test "wait_apt_lock: non-apt distro skips the apt lock wait entirely" {
+  PRESENT_CMDS="dnf"                       # apt-get absent
+  _apt_lock_held() { return 0; }           # would block IF it were ever probed
+  run wait_apt_lock
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+}
+
+# install_system_deps must run the lock wait BEFORE the spinner that would
+# otherwise hide a blocked apt. Assert the wait fires (apt path, lock held once).
+@test "install_system_deps: waits on the apt lock before the install spinner (#740)" {
+  PRESENT_CMDS="apt-get curl"             # apt present, conntrack missing → installs
+  sleep() { :; }
+  _LOCK_PROBES=0
+  _apt_lock_held() { _LOCK_PROBES=$((_LOCK_PROBES + 1)); [ "$_LOCK_PROBES" -le 1 ]; }
+  run install_system_deps
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Waiting for the system package lock"* ]]
+}
+
+# _apt_lock_held: with no fuser available we cannot probe → report "free" so we
+# never block on an unknowable state (apt's own waiting then takes over).
+@test "_apt_lock_held: no fuser -> reports free (does not block)" {
+  has() { [ "$1" != fuser ]; }            # everything present except fuser
+  run _apt_lock_held
+  [ "$status" -ne 0 ]                       # "free" (non-zero = lock not held)
+}
+
 # Asad's root cause: minimal AlmaLinux lacks xt_addrtype -> dockerd bridge init fails.
 @test "_ensure_kernel_modules: modprobes modules + installs kernel-modules on a load failure" {
   has() { [[ "$1" == "dnf" ]]; }
