@@ -527,7 +527,9 @@ curl -fsSL https://nvidia.github.io/libnvidia-container/stable/deb/nvidia-contai
   | sed 's#deb https://#deb [signed-by=/usr/share/keyrings/nvidia-container-toolkit-keyring.gpg] https://#g' \
   | sudo tee /etc/apt/sources.list.d/nvidia-container-toolkit.list >/dev/null
 sudo apt-get update -qq
-sudo apt-get install -y -q nvidia-container-toolkit
+# needrestart on WSL Ubuntu would open a hidden prompt in this captured job and
+# stall to the 180s timeout; DEBIAN_FRONTEND/NEEDRESTART_MODE keep apt non-interactive.
+sudo env DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a apt-get install -y -q nvidia-container-toolkit
 sudo nvidia-ctk runtime configure --runtime=docker --set-as-default 2>/dev/null || true
 sudo nvidia-ctk runtime configure --runtime=containerd 2>/dev/null || true
 echo "NCT installed successfully."
