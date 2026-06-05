@@ -1214,6 +1214,10 @@ $envBlock
   Log "Helm Output: $helmOutput"
   if ($LASTEXITCODE -ne 0) { Err "Client installation failed. Helm output:`n$helmOutput`nCheck the log for details: $LOG_FILE" }
 
+  # Point kubeconfig's current context at the client namespace so kubectl + the
+  # tracebloc CLI default to it (no -n / --namespace needed). Best-effort.
+  kubectl config set-context --current --namespace $TB_NAMESPACE 2>$null | Out-Null
+
   Ok "Connected to tracebloc"
   Log "Values file: $valuesFile"
 }
