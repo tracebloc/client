@@ -6,7 +6,14 @@
 
 # ── Package manager detection ────────────────────────────────────────────────
 setup_pm() {
-  if   has apt-get; then PM_UPDATE="sudo apt-get update -qq";           PM_INSTALL="sudo apt-get install -y -q -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold"
+  # apt note: Ubuntu 22.04+ ships needrestart, which hooks `apt-get install` and
+  # opens an interactive "restart services?" prompt that `-y` does NOT suppress.
+  # Run inside spin_cmd (stdout/stderr redirected, process backgrounded) that
+  # prompt is invisible and blocks reading the TTY → SIGTTIN → the install hangs
+  # forever ("still pulling conntrack"). DEBIAN_FRONTEND=noninteractive +
+  # NEEDRESTART_MODE=a make apt fully non-interactive; they are passed *through*
+  # `sudo env` because sudo resets the environment by default.
+  if   has apt-get; then PM_UPDATE="sudo apt-get update -qq";           PM_INSTALL="sudo env DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a apt-get install -y -q -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold"
   elif has dnf;     then PM_UPDATE="sudo dnf makecache -q";             PM_INSTALL="sudo dnf install -y -q"
   elif has yum;     then PM_UPDATE="sudo yum makecache -q";             PM_INSTALL="sudo yum install -y -q"
   elif has zypper;  then PM_UPDATE="sudo zypper refresh";               PM_INSTALL="sudo zypper install -y"
@@ -77,7 +84,9 @@ install_docker_engine() {
       docker_script="$(mktemp)"
       retry 3 5 curl -fsSL $CURL_SECURE https://get.docker.com -o "$docker_script"
       chmod +x "$docker_script"
-      spin_cmd "Installing Docker…" sudo bash "$docker_script"
+      # Same needrestart guard as setup_pm: get.docker.com runs `apt-get install`
+      # internally, so under spin_cmd it can hit the same hidden prompt and hang.
+      spin_cmd "Installing Docker…" sudo env DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a bash "$docker_script"
       rm -f "$docker_script"
     fi
     # Enable for boot only (no --now): starting is handled below, where a start

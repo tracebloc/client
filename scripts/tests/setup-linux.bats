@@ -39,6 +39,16 @@ setup() {
   setup_pm
   [[ "$PM_INSTALL" == *"apt-get install"* ]]
 }
+# Ubuntu 22.04+ needrestart opens a hidden "restart services?" prompt under
+# spin_cmd that `-y` doesn't suppress → the install hangs. apt must be fully
+# non-interactive, with the env passed through `sudo env` (sudo resets env).
+@test "setup_pm: apt is non-interactive (needrestart/debconf guard)" {
+  PRESENT_CMDS="apt-get"
+  setup_pm
+  [[ "$PM_INSTALL" == *"DEBIAN_FRONTEND=noninteractive"* ]]
+  [[ "$PM_INSTALL" == *"NEEDRESTART_MODE=a"* ]]
+  [[ "$PM_INSTALL" == *"sudo env"* ]]
+}
 @test "setup_pm: dnf detected" {
   PRESENT_CMDS="dnf"
   setup_pm
@@ -119,6 +129,9 @@ setup() {
   run install_docker_engine
   run mock_calls
   [[ "$output" == *"get.docker.com"* ]]
+  # the convenience script runs apt-get internally → must be non-interactive too
+  [[ "$output" == *"DEBIAN_FRONTEND=noninteractive"* ]]
+  [[ "$output" == *"NEEDRESTART_MODE=a"* ]]
 }
 @test "install_docker_engine: docker already present -> no install" {
   PRESENT_CMDS="docker"; TEST_DISTRO=ubuntu
