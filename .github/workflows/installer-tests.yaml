@@ -63,11 +63,11 @@ jobs:
           # below for visibility but don't fail the gate.
           shellcheck --severity=error --shell=bash \
             scripts/install.sh scripts/install-k8s.sh scripts/gen-manifest.sh scripts/lib/*.sh \
-            scripts/tests/distro-prereqs.sh scripts/tests/e2e-cluster.sh scripts/tests/e2e-proxy.sh scripts/tests/e2e-auto-upgrade.sh scripts/tests/check-drift.sh
+            scripts/tests/check-drift.sh scripts/tests/distro-prereqs.sh scripts/tests/e2e-auto-upgrade.sh scripts/tests/e2e-cluster.sh scripts/tests/e2e-journey.sh scripts/tests/e2e-proxy.sh scripts/tests/path-persist.sh
           echo "── shellcheck warnings (advisory, non-blocking) ──"
           shellcheck --severity=warning --shell=bash \
             scripts/install.sh scripts/install-k8s.sh scripts/gen-manifest.sh scripts/lib/*.sh \
-            scripts/tests/distro-prereqs.sh scripts/tests/e2e-cluster.sh scripts/tests/e2e-proxy.sh scripts/tests/e2e-auto-upgrade.sh scripts/tests/check-drift.sh || true
+            scripts/tests/check-drift.sh scripts/tests/distro-prereqs.sh scripts/tests/e2e-auto-upgrade.sh scripts/tests/e2e-cluster.sh scripts/tests/e2e-journey.sh scripts/tests/e2e-proxy.sh scripts/tests/path-persist.sh || true
 
       - name: Installer manifest is current (supply-chain, R8)
         # The bootstrap verifies each sub-script against scripts/manifest.sha256
@@ -202,3 +202,64 @@ jobs:
       - uses: actions/checkout@v4
       - name: Cluster up through an authenticated proxy
         run: bash scripts/tests/e2e-proxy.sh
+
+  path-persist:
+    # Fresh-shell PATH-persistence guard for the tracebloc CLI — the cheap, wide
+    # leg. Installs cli/install.sh in a plain container per distro, then opens a
+    # BRAND-NEW login AND non-login shell for each of bash/zsh/fish and asserts
+    # `tracebloc` resolves + `tracebloc version` runs. This is the cell that goes
+    # RED on the pre-fix installer and GREEN on the fixed one (a fresh non-login
+    # bash reads ~/.bashrc, not ~/.profile) — the regression guard for the whole
+    # PATH class that distro-prereqs / e2e-cluster can't see (they assert in the
+    # same shell that ran the installer). No cluster, no Docker-in-Docker, no
+    # creds. The script iterates shell × mode INSIDE the container; distro is the
+    # matrix axis (it installs zsh/fish in-container where a package exists).
+    name: PATH persist — ${{ matrix.distro }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        distro:
+          - 'ubuntu:22.04'        # most common server
+          - 'ubuntu:24.04'        # newest LTS
+          - 'debian:12'           # apt
+          - 'fedora:latest'       # dnf
+          - 'almalinux:9'         # RHEL rebuild
+          - 'opensuse/leap:15.6'  # zypper
+          - 'alpine:3'            # busybox sh + apk (optional, minimal)
+    steps:
+      - uses: actions/checkout@v4
+      - name: Fresh-shell PATH check in ${{ matrix.distro }}
+        env:
+          DISTRO: ${{ matrix.distro }}
+          # Override TRACEBLOC_CLI_REF here to point at a specific cli install.sh
+          # (URL or, for the cross-repo cli-side caller, a local path). Default
+          # lives in the script while cli#61's PATH fix is unreleased.
+          TRACEBLOC_CLI_REF: ${{ vars.TRACEBLOC_CLI_REF }}
+        run: |
+          docker run --rm \
+            -e TRACEBLOC_CLI_REF \
+            -v "$PWD:/src:ro" -w /src "$DISTRO" \
+            bash scripts/tests/path-persist.sh
+
+  e2e-journey:
+    # Leg 2 — the full last-mile journey on a real cluster: create_cluster() →
+    # install the CLI via cli/install.sh → apply a CREDENTIAL-FREE stub the CLI
+    # discovers (a *-jobs-manager Deployment with the chart's labels + an
+    # `ingestor` SA) → assert `tracebloc cluster info` succeeds AND resolves from
+    # a fresh shell → `dataset push --dry-run` smoke. No private images, no
+    # secrets (the stub stands in for the parent release). Heavier than Leg 1
+    # (boots a real k3d cluster), so — mirroring cli's e2e.yml — it runs on the
+    # nightly schedule + workflow_dispatch, and on a PR ONLY when it carries the
+    # `e2e` label. amd64, like e2e-cluster.
+    name: E2E last-mile journey (amd64)
+    runs-on: ubuntu-latest
+    if: >-
+      github.event_name != 'pull_request' ||
+      contains(github.event.pull_request.labels.*.name, 'e2e')
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install → CLI → cluster info (fresh shell) → dataset push --dry-run
+        env:
+          TRACEBLOC_CLI_REF: ${{ vars.TRACEBLOC_CLI_REF }}
+        run: bash scripts/tests/e2e-journey.sh
