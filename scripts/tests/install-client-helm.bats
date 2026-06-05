@@ -135,6 +135,19 @@ setup() {
   mock_calls | grep -q "helm upgrade --install tracebloc"
 }
 
+@test "install_client_helm: points kubeconfig at the client namespace (so the CLI needs no -n)" {
+  HOST_DATA_DIR="$BATS_TEST_TMPDIR/data"; mkdir -p "$HOST_DATA_DIR"
+  _ensure_tracebloc_dirs() { :; }
+  _ensure_release_dirs() { :; }
+  _ensure_helm_runnable() { :; }
+  helm() { return 0; }
+  kubectl() { record "kubectl $*"; return 0; }
+  verify_credentials() { printf valid; }
+  run install_client_helm <<< $'myid\nmypw'
+  [ "$status" -eq 0 ]
+  mock_calls | grep -q "kubectl config set-context --current --namespace tracebloc"
+}
+
 @test "install_client_helm: re-prompts on invalid, then accepts valid" {
   HOST_DATA_DIR="$BATS_TEST_TMPDIR/data"; mkdir -p "$HOST_DATA_DIR"
   _ensure_tracebloc_dirs() { :; }
