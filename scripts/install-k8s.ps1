@@ -1580,6 +1580,42 @@ function Invoke-DiagnoseBundle {
 # never abort THIS installer.
 $TRACEBLOC_CLI_INSTALL_URL = "https://github.com/tracebloc/cli/releases/latest/download/install.ps1"
 
+# Where the CLI's own Windows installer drops the binary + adds to the *user*
+# PATH (see cli's install.ps1) — the dir we point at if a fresh shell can't
+# find it yet.
+$TRACEBLOC_CLI_INSTALL_DIR = (Join-Path $env:LOCALAPPDATA "Programs\tracebloc")
+
+# Post-install self-verification (#738). Proves the CLI is usable from a FRESH
+# terminal and prints a VERIFIED next command — or, if a new shell wouldn't
+# find it yet, the exact Windows-correct fix (the install dir + open a new
+# window) rather than a vague "open a new terminal". The CLI installer edits the
+# user-scope PATH in the registry, so RefreshPath (re-reading Machine+User PATH)
+# is the faithful "fresh terminal" probe here — there is no `source ~/.rc`
+# analogue on Windows. ALWAYS non-fatal: the client is connected by Step 5.
+function Test-TraceblocCli {
+  # Pull the persisted (registry) PATH into THIS process — same env a brand-new
+  # PowerShell window would start with.
+  try { RefreshPath } catch { Log "RefreshPath failed during CLI verify: $_" }
+
+  if (Has "tracebloc") {
+    # `tracebloc version` is the real proof; cosmetic, never fatal. The canonical
+    # "tracebloc dataset push ./data" next step lives in Print-Summary's "What to
+    # do next" — don't duplicate it; just confirm the verdict.
+    $ver = ""
+    try { $ver = (& tracebloc version 2>$null | Select-Object -First 1) } catch { $ver = "" }
+    if ($ver) { Ok "tracebloc CLI installed ($ver) -- verified on your PATH." }
+    else      { Ok "tracebloc CLI installed -- verified on your PATH." }
+    return
+  }
+
+  # Installed, but not resolvable from a fresh shell yet. The installer added it
+  # to the user PATH, so a NEW window will have it; tell the user exactly where
+  # it is and how to use it now (so the summary's command works from a new window).
+  Ok "tracebloc CLI installed -- open a new PowerShell window to use it."
+  Hint "  Installed to: $TRACEBLOC_CLI_INSTALL_DIR"
+  Hint "  Or use it now via:  & `"$TRACEBLOC_CLI_INSTALL_DIR\tracebloc.exe`" dataset push .\data"
+}
+
 function Install-TraceblocCli {
   Step 5 5 "Install the tracebloc CLI"
 
@@ -1611,8 +1647,9 @@ function Install-TraceblocCli {
     # as success — a failed re-install on a machine that already had the CLI
     # would then be misreported as a success.
     if ($p.ExitCode -eq 0) {
-      RefreshPath
-      Ok "tracebloc CLI installed -- open a new terminal so it's on your PATH."
+      # Self-verify usability from a fresh terminal and print a verified next
+      # command (or the Windows-correct fix). Non-fatal.
+      Test-TraceblocCli
     } else {
       Warn "Couldn't install the tracebloc CLI automatically -- your client is set up fine."
       Hint "Install it later:  irm $TRACEBLOC_CLI_INSTALL_URL | iex"

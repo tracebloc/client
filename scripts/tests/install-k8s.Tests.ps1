@@ -160,6 +160,35 @@ Describe "Install-TraceblocCli" {
   }
 }
 
+Describe "Test-TraceblocCli" {
+  # Post-install self-verification (#738). Proves the CLI is usable from a fresh
+  # terminal and prints a VERIFIED next command, or the Windows-correct fix if a
+  # new shell wouldn't find it. Load-bearing property: NON-FATAL (never throws).
+  BeforeEach { Mock RefreshPath {} }
+
+  It "fresh-shell success: reports a VERIFIED verdict, not 'open a new terminal so'" {
+    Mock Has { $true }                       # a fresh shell resolves tracebloc
+    Mock tracebloc { "tracebloc 0.2.0" }
+    $out = Test-TraceblocCli 6>&1 | Out-String
+    $out | Should -Match "verified on your PATH"
+    $out | Should -Match "0.2.0"             # real proof via `tracebloc version`
+    $out | Should -Not -Match "open a new terminal so"   # the old, useless line is gone
+  }
+
+  It "CLI-missing-from-fresh-shell: prints an actionable hint (install dir)" {
+    Mock Has { $false }                      # installed, but not yet resolvable
+    $out = Test-TraceblocCli 6>&1 | Out-String
+    $out | Should -Match "open a new PowerShell window"
+    $out | Should -Match "Installed to:"     # the exact location, not a vague hint
+  }
+
+  It "non-fatal: does not throw even if RefreshPath blows up" {
+    Mock RefreshPath { throw "registry unavailable" }
+    Mock Has { $false }
+    { Test-TraceblocCli 6>&1 | Out-Null } | Should -Not -Throw
+  }
+}
+
 Describe "Get-WindowsArch" {
   AfterEach { $env:PROCESSOR_ARCHITECTURE = "AMD64" }
   It "AMD64 -> amd64" { $env:PROCESSOR_ARCHITECTURE = "AMD64"; Get-WindowsArch | Should -Be "amd64" }
