@@ -49,6 +49,14 @@ setup() {
   [[ "$PM_INSTALL" == *"NEEDRESTART_MODE=a"* ]]
   [[ "$PM_INSTALL" == *"sudo env"* ]]
 }
+# apt must WAIT (bounded) for the dpkg lock instead of hanging forever behind
+# apt-daily/unattended-upgrades on a freshly-booted host (#210).
+@test "setup_pm: apt waits for the dpkg lock with a bounded timeout (#210)" {
+  PRESENT_CMDS="apt-get"
+  setup_pm
+  [[ "$PM_INSTALL" == *"DPkg::Lock::Timeout="* ]]
+  [[ "$PM_UPDATE"  == *"DPkg::Lock::Timeout="* ]]
+}
 @test "setup_pm: dnf detected" {
   PRESENT_CMDS="dnf"
   setup_pm
