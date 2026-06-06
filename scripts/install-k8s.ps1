@@ -769,6 +769,9 @@ function Set-ClusterAutostart {
 function New-K3dCluster {
   Log "Creating k3d cluster: '$CLUSTER_NAME'"
 
+  # Docker is up now (unlike at preflight); re-check the runtime's real memory budget.
+  Test-PreflightRuntimeMem
+
   $clusterExists = $false
   $clusterObj = $null
   try {
@@ -1406,12 +1409,33 @@ function Get-PfFreeGb {
   } catch { return $null }
 }
 
+# Memory/CPU as the container runtime sees it (the Docker Desktop / WSL2 VM budget,
+# which is what the pods actually get — smaller than the host). $null if the daemon
+# is down or the value is junk, so callers fall back to the host (CIM) reader.
+function Get-PfRuntimeMemGb {
+  try {
+    $v = ((docker info --format '{{.MemTotal}}' 2>$null) | Out-String).Trim()
+    if ($v -match '^\d+$' -and [int64]$v -gt 0) { return [math]::Floor([int64]$v / 1GB) }
+  } catch {}
+  return $null
+}
+function Get-PfRuntimeCpu {
+  try {
+    $v = ((docker info --format '{{.NCPU}}' 2>$null) | Out-String).Trim()
+    if ($v -match '^\d+$' -and [int]$v -gt 0) { return [int]$v }
+  } catch {}
+  return $null
+}
+
+# Prefer the runtime view, fall back to the host (CIM).
 function Get-PfMemGb {
+  $r = Get-PfRuntimeMemGb; if ($null -ne $r) { return $r }
   try { return [math]::Floor((Get-CimInstance Win32_ComputerSystem -ErrorAction Stop).TotalPhysicalMemory / 1GB) }
   catch { return $null }
 }
 
 function Get-PfCpu {
+  $r = Get-PfRuntimeCpu; if ($null -ne $r) { return $r }
   try { return [int](Get-CimInstance Win32_ComputerSystem -ErrorAction Stop).NumberOfLogicalProcessors }
   catch { if ($env:NUMBER_OF_PROCESSORS) { return [int]$env:NUMBER_OF_PROCESSORS } else { return $null } }
 }
@@ -1419,10 +1443,13 @@ function Get-PfCpu {
 function Test-Preflight {
   if ($env:TRACEBLOC_SKIP_PREFLIGHT) { Info "Preflight checks skipped (TRACEBLOC_SKIP_PREFLIGHT set)."; return }
 
-  $minDiskGb  = if ($env:PF_MIN_DISK_GB)  { [int]$env:PF_MIN_DISK_GB }  else { 5 }
+  $minDiskGb  = if ($env:PF_MIN_DISK_GB)  { [int]$env:PF_MIN_DISK_GB }  else { 10 }
   $warnDiskGb = if ($env:PF_WARN_DISK_GB) { [int]$env:PF_WARN_DISK_GB } else { 20 }
-  $warnMemGb  = if ($env:PF_WARN_MEM_GB)  { [int]$env:PF_WARN_MEM_GB }  else { 4 }
+  $minMemGb   = if ($env:PF_MIN_MEM_GB)   { [int]$env:PF_MIN_MEM_GB }   else { 5 }
+  $warnMemGb  = if ($env:PF_WARN_MEM_GB)  { [int]$env:PF_WARN_MEM_GB }  else { 8 }
+  $recMemGb   = if ($env:PF_REC_MEM_GB)   { [int]$env:PF_REC_MEM_GB }   else { 16 }
   $minCpu     = if ($env:PF_MIN_CPU)      { [int]$env:PF_MIN_CPU }      else { 2 }
+  $recCpu     = if ($env:PF_REC_CPU)      { [int]$env:PF_REC_CPU }      else { 4 }
   $hardFail   = 0
 
   # Architecture — the tracebloc client images (e.g. mysql-client) are amd64-only.
@@ -1437,12 +1464,22 @@ function Test-Preflight {
 
   $cpu = Get-PfCpu
   if      ($null -eq $cpu)   { Warn "CPU: couldn't determine core count (skipping)." }
-  elseif  ($cpu -lt $minCpu) { Warn "CPU: $cpu core(s) - recommended >= $minCpu." }
+  elseif  ($cpu -lt $minCpu) { Warn "CPU: $cpu core(s) - below the $minCpu-core minimum; mysql may hit lock-wait timeouts. $recCpu+ recommended to train." }
+  elseif  ($cpu -lt $recCpu) { Warn "CPU: $cpu cores - fine to run; $recCpu+ recommended to train locally." }
   else                       { Ok "CPU: $cpu cores" }
 
+  # Memory is warn-only on Windows: at preflight the Docker Desktop / WSL2 daemon may
+  # be down (so this is host RAM); the post-Docker re-check sees the real VM budget.
   $mem = Get-PfMemGb
   if      ($null -eq $mem)      { Warn "Memory: couldn't determine total RAM (skipping)." }
-  elseif  ($mem -lt $warnMemGb) { Warn "Memory: $mem GB total - recommended >= $warnMemGb GB; k3s + training may run out of memory." }
+  elseif  ($mem -lt $minMemGb)  {
+    Warn "Memory: $mem GB - below the $minMemGb GB the client needs; it will OOM."
+    Hint "Docker Desktop -> Settings -> Resources -> Memory: raise to >= $warnMemGb GB ($recMemGb GB to train), then re-run."
+  }
+  elseif  ($mem -lt $warnMemGb) {
+    Warn "Memory: $mem GB - enough to run, but training (~8 GB/job) may OOM; $recMemGb GB recommended to train locally."
+    Hint "Docker Desktop -> Settings -> Resources -> Memory >= $recMemGb GB to train."
+  }
   else                          { Ok "Memory: $mem GB" }
 
   $disk = Get-PfFreeGb
@@ -1476,6 +1513,22 @@ function Test-Preflight {
   if ($hardFail -gt 0) {
     Write-Host ""
     Err "Preflight failed - resolve the items above and re-run. (Override at your own risk with `$env:TRACEBLOC_SKIP_PREFLIGHT=1.)"
+  }
+}
+
+# Re-evaluate memory once Docker is confirmed up. Test-Preflight runs before Docker
+# Desktop starts, so its read may have been host RAM, not the (smaller) Docker VM
+# budget. Called from New-K3dCluster. WARN-only — the user has already waited for
+# Docker, so aborting here would be jarring.
+function Test-PreflightRuntimeMem {
+  if ($env:TRACEBLOC_SKIP_PREFLIGHT) { return }
+  $mem = Get-PfRuntimeMemGb
+  if ($null -eq $mem) { return }
+  $warnMemGb = if ($env:PF_WARN_MEM_GB) { [int]$env:PF_WARN_MEM_GB } else { 8 }
+  $recMemGb  = if ($env:PF_REC_MEM_GB)  { [int]$env:PF_REC_MEM_GB }  else { 16 }
+  if ($mem -lt $warnMemGb) {
+    Warn "Docker is running with $mem GB - recommended >= $warnMemGb GB ($recMemGb GB to train); the client may OOM under load."
+    Hint "Docker Desktop -> Settings -> Resources -> Memory >= $warnMemGb GB, then re-install."
   }
 }
 

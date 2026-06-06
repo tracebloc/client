@@ -119,6 +119,10 @@ create_cluster() {
 
   _ensure_tracebloc_dirs
 
+  # Docker is up now (unlike at preflight time), so re-check the runtime's real
+  # memory budget — a too-small Docker VM (Mac/Win) surfaces before we build out.
+  _pf_recheck_runtime_mem || true
+
   if _cluster_exists; then
     _handle_existing_cluster
   else
