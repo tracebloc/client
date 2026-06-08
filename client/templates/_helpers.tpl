@@ -207,3 +207,41 @@ Usage: {{ include "tracebloc.image" (dict "repository" "tracebloc/jobs-manager" 
 {{ $registry }}/{{ .repository }}:{{ .tag | default "prod" }}
 {{- end -}}
 {{- end }}
+
+{{/*
+tracebloc.proxyEnv — corporate-proxy env for egress-needing workloads.
+Derives HTTP(S)_PROXY + an auto-augmented NO_PROXY from .Values.env.HTTP_PROXY_*
+so workload pods can reach the backend / registries through a corporate proxy.
+Renders nothing when HTTP_PROXY_HOST is unset (non-proxy installs unchanged).
+NO_PROXY always carries the cluster-internal ranges so in-cluster + MySQL
+traffic never traverses the proxy (mirrors scripts/lib/cluster.sh defaults).
+Usage inside a container's env: list:
+  {{- include "tracebloc.proxyEnv" . | nindent 8 }}
+*/}}
+{{- define "tracebloc.proxyEnv" -}}
+{{- if .Values.env.HTTP_PROXY_HOST }}
+{{- $host := .Values.env.HTTP_PROXY_HOST -}}
+{{- $port := .Values.env.HTTP_PROXY_PORT | default "" -}}
+{{- $user := .Values.env.HTTP_PROXY_USERNAME | default "" -}}
+{{- $pass := .Values.env.HTTP_PROXY_PASSWORD | default "" -}}
+{{- $hostport := $host -}}
+{{- if $port }}{{- $hostport = printf "%s:%v" $host $port -}}{{- end -}}
+{{- $cred := "" -}}
+{{- if $user }}{{- $cred = printf "%s:%s@" $user $pass -}}{{- end -}}
+{{- $url := printf "http://%s%s" $cred $hostport -}}
+{{- $noProxy := "localhost,127.0.0.1,0.0.0.0,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,.svc,.svc.cluster.local,.cluster.local,host.k3d.internal" -}}
+{{- with .Values.env.NO_PROXY }}{{- $noProxy = printf "%s,%s" . $noProxy -}}{{- end }}
+- name: HTTP_PROXY
+  value: {{ $url | quote }}
+- name: HTTPS_PROXY
+  value: {{ $url | quote }}
+- name: http_proxy
+  value: {{ $url | quote }}
+- name: https_proxy
+  value: {{ $url | quote }}
+- name: NO_PROXY
+  value: {{ $noProxy | quote }}
+- name: no_proxy
+  value: {{ $noProxy | quote }}
+{{- end }}
+{{- end -}}
