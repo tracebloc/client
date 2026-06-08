@@ -313,6 +313,11 @@ $([ -n "${CLIENT_ENV:-}" ] && printf '  CLIENT_ENV: "%s"\n' "$CLIENT_ENV")
   GPU_LIMITS: "$gpu_val"
   GPU_REQUESTS: "$gpu_val"
   RUNTIME_CLASS_NAME: ""
+  # client-runtime#92: installer-provisioned k3d is a fixed single-host cluster
+  # that cannot autoscale, so jobs-manager applies the hard CPU-or-GPU rule —
+  # a Pending GPU pod is downgraded to CPU rather than waiting for a GPU node
+  # that will never arrive.
+  SINGLE_NODE: "true"
 
 storageClass:
   create: true
