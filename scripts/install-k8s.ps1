@@ -1582,8 +1582,13 @@ $TRACEBLOC_CLI_INSTALL_URL = "https://github.com/tracebloc/cli/releases/latest/d
 
 # Where the CLI's own Windows installer drops the binary + adds to the *user*
 # PATH (see cli's install.ps1) — the dir we point at if a fresh shell can't
-# find it yet.
-$TRACEBLOC_CLI_INSTALL_DIR = (Join-Path $env:LOCALAPPDATA "Programs\tracebloc")
+# find it yet. Guard the Join-Path: $env:LOCALAPPDATA is null when the Pester
+# suite dot-sources this script on Linux CI, and Join-Path throws on a null
+# -Path (aborting the whole test container). The value is only ever USED on
+# Windows (in Test-TraceblocCli), so "" is a fine non-Windows load-time placeholder.
+$TRACEBLOC_CLI_INSTALL_DIR = if ($env:LOCALAPPDATA) {
+  Join-Path $env:LOCALAPPDATA "Programs\tracebloc"
+} else { "" }
 
 # Post-install self-verification (#738). Proves the CLI is usable from a FRESH
 # terminal and prints a VERIFIED next command — or, if a new shell wouldn't

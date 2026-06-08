@@ -10,6 +10,8 @@ BeforeAll {
   function docker { }
   function helm { }
   function k3d { }
+  function tracebloc { }   # Test-TraceblocCli (#738) calls `& tracebloc version`;
+                           # Pester can only Mock a command that already exists.
 }
 
 Describe "Get-BackendUrl" {
