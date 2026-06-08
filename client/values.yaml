@@ -213,12 +213,15 @@ images:
   # Customers can also override per-install via the ingestor subchart's
   # `image.digest` for one-off testing, independent of this value.
   ingestor:
-    # Current baseline digest: v0.3.2 (2026-06-03, from #184). Patch on
-    # top of v0.3.1 carrying customer-impacting fixes —
-    # tracebloc/data-ingestors#139 (MLM tokenizer fix, relaxed PascalVOC
-    # `difficult` flag, reserved-id guard; closes #137 / #135) — plus the
-    # first multi-arch image (amd64 + arm64, #24) so arm64 nodes can run
-    # the ingestor. Bump only when greenfield installs should start on a
+    # Current baseline digest: v0.3.6 (2026-06-08, from #227). Skips
+    # 0.3.3–0.3.5 to land on the latest 0.3.x patch, carrying the
+    # cumulative NULL / empty-value ingestion fixes on top of v0.3.2 —
+    # tracebloc/data-ingestors#150 (stop counting missing values as
+    # "non-numeric" in DataValidator — the regression a customer hit on
+    # the stale 0.3.2 baseline), #167 / #168 / #170 / #172 (VARCHAR/CHAR/
+    # TEXT, DATE/TIME, JSON null + empty-string tolerance) and #176 / #179
+    # (null-like values round-trip end-to-end as SQL NULL; Python bool not
+    # stringified). Bump only when greenfield installs should start on a
     # different version; ongoing rollouts are managed by image-refresh.
     #
     # This digest MUST be a multi-arch index (linux/amd64 + linux/arm64).
@@ -227,7 +230,7 @@ images:
     # Graviton) with "no match for platform" / ImagePullBackOff (#186; the
     # amd64-only v0.3.1 pin in #160 was the regression). Enforced by the
     # `ingestor-multiarch` job in .github/workflows/helm-ci.yaml.
-    digest: "sha256:d361fa778554ab171adcc2671eaf109c32f3d2af339c7920a2d38d102ce53678"
+    digest: "sha256:dfdaa7e633a8df0f46b403e9422eba5c16bdb7d9c39047e6d3738f9e38fbdba8"
     # Floating tag polled by image-refresh. The team's ghcr.io
     # publishing convention uses semver-style float tags — `0` tracks
     # the latest 0.x, `0.3` tracks the latest 0.3.x patch. Default is
