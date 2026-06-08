@@ -14,6 +14,9 @@ setup() {
   _pf_free_kb() { echo $((50 * 1024 * 1024)); }       # 50 GB
   _pf_total_mem_kb() { echo $((8 * 1024 * 1024)); }   # 8 GB
   _pf_ncpu() { echo 4; }
+  _pf_runtime_mem_kb() { echo ""; }   # daemon "down" in tests → selectors/src use host
+  _pf_runtime_ncpu() { echo ""; }
+  _pf_avail_mem_kb() { echo $((50 * 1024 * 1024)); }   # 50 GB available (Linux warn off)
   _pf_amd64_emulation_available() { return 0; }
   docker() { return 1; }   # keep _pf_docker_root off the real daemon
   has() { return 0; }      # pretend tools present (conds empty) unless overridden
@@ -118,14 +121,47 @@ setup() {
   PF_HARD_FAIL=0; _pf_disk >/dev/null; [ "$PF_HARD_FAIL" -eq 0 ]
 }
 
-@test "_pf_memory: low RAM -> warn" {
-  _pf_total_mem_kb() { echo $((2 * 1024 * 1024)); }
-  run _pf_memory; [[ "$output" == *"recommended"* ]]
+@test "_pf_memory: below floor on Linux -> hard fail + resize hint" {
+  OS=Linux; _pf_total_mem_kb() { echo $((3 * 1024 * 1024)); }   # 3 GB
+  run _pf_memory; [[ "$output" == *"to run the tracebloc client"* ]]
+  PF_HARD_FAIL=0; _pf_memory >/dev/null 2>&1; [ "$PF_HARD_FAIL" -eq 1 ]
+}
+
+@test "_pf_memory: between floor and warn -> warn, no hard fail" {
+  OS=Linux; _pf_total_mem_kb() { echo $((6 * 1024 * 1024)); }   # 6 GB
+  run _pf_memory; [[ "$output" == *"recommended to train"* ]]
+  PF_HARD_FAIL=0; _pf_memory >/dev/null 2>&1; [ "$PF_HARD_FAIL" -eq 0 ]
 }
 
 @test "_pf_memory: ample RAM -> success" {
-  _pf_total_mem_kb() { echo $((8 * 1024 * 1024)); }
-  run _pf_memory; [[ "$output" == *"8 GB"* ]]
+  OS=Linux; _pf_total_mem_kb() { echo $((16 * 1024 * 1024)); }
+  run _pf_memory; [[ "$output" == *"16 GB"* ]]
+  PF_HARD_FAIL=0; _pf_memory >/dev/null 2>&1; [ "$PF_HARD_FAIL" -eq 0 ]
+}
+
+@test "_pf_memory: macOS below floor -> WARN only, never hard fail" {
+  OS=Darwin; _pf_total_mem_kb() { echo $((3 * 1024 * 1024)); }
+  run _pf_memory; [[ "$output" == *"Settings"* ]]
+  PF_HARD_FAIL=0; _pf_memory >/dev/null 2>&1; [ "$PF_HARD_FAIL" -eq 0 ]
+}
+
+@test "_pf_memory: 64 MiB grace -> a hair under the floor still passes" {
+  OS=Linux; _pf_total_mem_kb() { echo $(( 5 * 1024 * 1024 - 1000 )); }   # ~5 GB minus a bit
+  PF_HARD_FAIL=0; _pf_memory >/dev/null 2>&1; [ "$PF_HARD_FAIL" -eq 0 ]
+}
+
+@test "_pf_memory: PF_MIN_MEM_GB override relaxes the floor" {
+  OS=Linux; PF_MIN_MEM_GB=2; PF_WARN_MEM_GB=2
+  _pf_total_mem_kb() { echo $((3 * 1024 * 1024)); }   # 3 GB now passes
+  run _pf_memory; [[ "$output" == *"3 GB"* ]]
+  PF_HARD_FAIL=0; _pf_memory >/dev/null 2>&1; [ "$PF_HARD_FAIL" -eq 0 ]
+}
+
+@test "_pf_memory: Linux MemAvailable tight -> extra warn (total fine)" {
+  OS=Linux; _pf_total_mem_kb() { echo $((16 * 1024 * 1024)); }   # total fine
+  _pf_avail_mem_kb() { echo $((2 * 1024 * 1024)); }              # only 2 GB free now
+  run _pf_memory; [[ "$output" == *"available right now"* ]]
+  PF_HARD_FAIL=0; _pf_memory >/dev/null 2>&1; [ "$PF_HARD_FAIL" -eq 0 ]
 }
 
 @test "_pf_cpu: too few cores -> warn" {
@@ -136,6 +172,56 @@ setup() {
 @test "_pf_cpu: enough cores -> success" {
   _pf_ncpu() { echo 4; }
   run _pf_cpu; [[ "$output" == *"4 cores"* ]]
+}
+
+@test "_pf_cpu: between min and recommended -> warn (train), no hard fail" {
+  _pf_ncpu() { echo 3; }
+  run _pf_cpu; [[ "$output" == *"recommended to train"* ]]
+  PF_HARD_FAIL=0; _pf_cpu >/dev/null; [ "$PF_HARD_FAIL" -eq 0 ]   # CPU never hard-fails
+}
+
+# ── selectors: container-runtime view preferred, host fallback ───────────────
+@test "_pf_total_mem_kb: prefers runtime view over host (the Mac trap)" {
+  source "${BATS_TEST_DIRNAME}/../lib/preflight.sh"   # restore the real selectors
+  _pf_runtime_mem_kb() { echo $((4 * 1024 * 1024)); }    # Docker VM = 4 GB
+  _pf_host_mem_kb()    { echo $((36 * 1024 * 1024)); }   # host = 36 GB
+  run _pf_total_mem_kb; [ "$output" -eq $((4 * 1024 * 1024)) ]
+}
+
+@test "_pf_total_mem_kb: falls back to host when runtime empty" {
+  source "${BATS_TEST_DIRNAME}/../lib/preflight.sh"
+  _pf_runtime_mem_kb() { echo ""; }
+  _pf_host_mem_kb()    { echo $((8 * 1024 * 1024)); }
+  run _pf_total_mem_kb; [ "$output" -eq $((8 * 1024 * 1024)) ]
+}
+
+@test "_pf_ncpu: prefers runtime, falls back to host" {
+  source "${BATS_TEST_DIRNAME}/../lib/preflight.sh"
+  _pf_runtime_ncpu() { echo 2; }; _pf_host_ncpu() { echo 16; }
+  run _pf_ncpu; [ "$output" -eq 2 ]
+  _pf_runtime_ncpu() { echo ""; }
+  run _pf_ncpu; [ "$output" -eq 16 ]
+}
+
+@test "_pf_runtime_mem_kb: junk/zero MemTotal -> empty (forces fallback)" {
+  source "${BATS_TEST_DIRNAME}/../lib/preflight.sh"
+  has() { return 0; }
+  docker() { case "$*" in *MemTotal*) echo 0 ;; *) return 0 ;; esac; }
+  run _pf_runtime_mem_kb; [ -z "$output" ]
+}
+
+# ── _pf_recheck_runtime_mem (post-Docker, warn-only) ─────────────────────────
+@test "_pf_recheck_runtime_mem: small Docker VM -> warn, never hard fail" {
+  source "${BATS_TEST_DIRNAME}/../lib/preflight.sh"
+  OS=Linux; _pf_runtime_mem_kb() { echo $((4 * 1024 * 1024)); }   # 4 GB Docker VM
+  run _pf_recheck_runtime_mem; [[ "$output" == *"Docker is running with 4 GB"* ]]
+  PF_HARD_FAIL=0; _pf_recheck_runtime_mem >/dev/null 2>&1; [ "$PF_HARD_FAIL" -eq 0 ]
+}
+
+@test "_pf_recheck_runtime_mem: daemon not reporting -> silent no-op" {
+  source "${BATS_TEST_DIRNAME}/../lib/preflight.sh"
+  _pf_runtime_mem_kb() { echo ""; }
+  run _pf_recheck_runtime_mem; [ -z "$output" ]
 }
 
 # ── run_preflight orchestration ──────────────────────────────────────────────

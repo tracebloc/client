@@ -33,6 +33,8 @@ source "$LIB/common.sh"
 source "$LIB/setup-linux.sh"
 # shellcheck source=/dev/null
 source "$LIB/cluster.sh"
+# shellcheck source=/dev/null
+source "$LIB/preflight.sh"   # provides _pf_recheck_runtime_mem (called by create_cluster)
 
 cleanup() { k3d cluster delete "$CLUSTER_NAME" >/dev/null 2>&1 || true; }
 trap cleanup EXIT

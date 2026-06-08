@@ -6,12 +6,45 @@
 
 # ── Package manager detection ────────────────────────────────────────────────
 setup_pm() {
-  if   has apt-get; then PM_UPDATE="sudo apt-get update -qq";           PM_INSTALL="sudo apt-get install -y -q -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold"
+  # apt note: Ubuntu 22.04+ ships needrestart, which hooks `apt-get install` and
+  # opens an interactive "restart services?" prompt that `-y` does NOT suppress.
+  # Run inside spin_cmd (stdout/stderr redirected, process backgrounded) that
+  # prompt is invisible and blocks reading the TTY → SIGTTIN → the install hangs
+  # forever ("still pulling conntrack"). DEBIAN_FRONTEND=noninteractive +
+  # NEEDRESTART_MODE=a make apt fully non-interactive; they are passed *through*
+  # `sudo env` because sudo resets the environment by default.
+  #
+  # apt also waits *indefinitely* on the dpkg lock while apt-daily / unattended-
+  # upgrades hold it on a freshly-booted host (#210); -o DPkg::Lock::Timeout=600
+  # bounds that wait so the install fails with a clear error rather than hanging
+  # silently behind the spinner.
+  if   has apt-get; then PM_UPDATE="sudo apt-get update -qq -o DPkg::Lock::Timeout=600"; PM_INSTALL="sudo env DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a apt-get install -y -q -o DPkg::Lock::Timeout=600 -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold"
   elif has dnf;     then PM_UPDATE="sudo dnf makecache -q";             PM_INSTALL="sudo dnf install -y -q"
   elif has yum;     then PM_UPDATE="sudo yum makecache -q";             PM_INSTALL="sudo yum install -y -q"
   elif has zypper;  then PM_UPDATE="sudo zypper refresh";               PM_INSTALL="sudo zypper install -y"
   elif has pacman;  then PM_UPDATE="sudo pacman -Sy --noconfirm";       PM_INSTALL="sudo pacman -S --noconfirm"
   else error "No supported package manager found."; fi
+}
+
+# ── Wait out apt/dpkg lock holders before our apt calls ──────────────────────
+# On a freshly-installed/booted Debian/Ubuntu host, the apt-daily and
+# unattended-upgrades systemd units grab the dpkg lock at boot and can hold it
+# for several minutes (longer when a kernel/security batch is pending). apt-get
+# then blocks on the lock, and because we run it behind spin_cmd the
+# "Waiting for cache lock…" line is hidden in the log — the installer looks
+# frozen (#210). Surface the wait with a visible spinner and bound it; the
+# per-command DPkg::Lock::Timeout (setup_pm) is the backstop if a holder appears
+# mid-run. No-op when apt or fuser is absent, or when the lock is already free.
+apt_wait_for_lock() {
+  has apt-get && has fuser || return 0
+  local locks="/var/lib/dpkg/lock-frontend /var/lib/dpkg/lock /var/lib/apt/lists/lock"
+  sudo fuser $locks >/dev/null 2>&1 || return 0   # free already → silent fast path
+  spin_cmd "Waiting for background system updates to finish…" bash -c '
+    waited=0
+    while sudo fuser /var/lib/dpkg/lock-frontend /var/lib/dpkg/lock /var/lib/apt/lists/lock >/dev/null 2>&1; do
+      [ "$waited" -ge 600 ] && exit 0
+      sleep 5; waited=$((waited + 5))
+    done' || true
 }
 
 # ── Kernel modules Docker + k3s need ─────────────────────────────────────────
@@ -77,7 +110,9 @@ install_docker_engine() {
       docker_script="$(mktemp)"
       retry 3 5 curl -fsSL $CURL_SECURE https://get.docker.com -o "$docker_script"
       chmod +x "$docker_script"
-      spin_cmd "Installing Docker…" sudo bash "$docker_script"
+      # Same needrestart guard as setup_pm: get.docker.com runs `apt-get install`
+      # internally, so under spin_cmd it can hit the same hidden prompt and hang.
+      spin_cmd "Installing Docker…" sudo env DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a bash "$docker_script"
       rm -f "$docker_script"
     fi
     # Enable for boot only (no --now): starting is handled below, where a start
@@ -263,6 +298,7 @@ install_linux() {
 
   preflight_sudo
   setup_pm
+  apt_wait_for_lock          # don't fight apt-daily/unattended-upgrades for the lock
   install_docker_engine
   install_system_deps
 

@@ -1,0 +1,37 @@
+name: Drift checks
+
+# Source-of-truth drift: values duplicated across files (the backend API hosts)
+# or coupled across artifacts (the chart's workload names <-> the names the
+# readiness-wait and --diagnose bundle grep for). Mocked unit tests can't see
+# these — a rename ships green and breaks in the field. This guards both sides.
+# Triggers on scripts/ OR client/ because either side moving is the drift.
+on:
+  push:
+    branches: [main, develop, openshift]
+    paths:
+      - 'scripts/**'
+      - 'client/**'
+      - '.github/workflows/drift-checks.yaml'
+  pull_request:
+    branches: [main, develop, openshift]
+    paths:
+      - 'scripts/**'
+      - 'client/**'
+      - '.github/workflows/drift-checks.yaml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  drift:
+    name: Source-of-truth drift
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Helm
+        uses: azure/setup-helm@v4
+        with:
+          version: v3.15.4
+      - name: check-drift
+        run: bash scripts/tests/check-drift.sh

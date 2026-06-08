@@ -119,6 +119,11 @@ create_cluster() {
 
   _ensure_tracebloc_dirs
 
+  # Docker is up now (unlike at preflight time), so re-check the runtime's real
+  # memory budget — a too-small Docker VM (Mac/Win) surfaces before we build out.
+  # Guarded: cluster.sh can be sourced without preflight.sh (e.g. the e2e harness).
+  if declare -F _pf_recheck_runtime_mem >/dev/null 2>&1; then _pf_recheck_runtime_mem || true; fi
+
   if _cluster_exists; then
     _handle_existing_cluster
   else
