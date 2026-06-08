@@ -453,6 +453,45 @@ Describe "Test-Preflight" {
     Mock Test-PfUrl { "ok" }
     { Test-Preflight } | Should -Not -Throw
   }
+  It "memory below floor -> warn-only on Windows (does not throw)" {
+    Mock Test-PfUrl { "ok" }; Mock Get-PfMemGb { 3 }
+    { Test-Preflight } | Should -Not -Throw
+  }
+  It "PF_MIN_MEM_GB override relaxes the floor" {
+    Mock Test-PfUrl { "ok" }; Mock Get-PfMemGb { 3 }; $env:PF_MIN_MEM_GB = "2"
+    { Test-Preflight } | Should -Not -Throw
+    $env:PF_MIN_MEM_GB = $null
+  }
+}
+
+Describe "Get-Pf* runtime (Docker VM) view preference" {
+  It "Get-PfMemGb prefers docker MemTotal over the host" {
+    Mock docker { '8589934592' }          # 8 GiB, in bytes
+    Get-PfMemGb | Should -Be 8
+  }
+  It "Get-PfCpu prefers docker NCPU over the host" {
+    Mock docker { '2' }
+    Get-PfCpu | Should -Be 2
+  }
+  It "Get-PfRuntimeMemGb: junk value -> null (forces host fallback)" {
+    Mock docker { 'lots' }
+    Get-PfRuntimeMemGb | Should -BeNullOrEmpty
+  }
+  It "Get-PfRuntimeMemGb: docker errors -> null" {
+    Mock docker { throw "daemon down" }
+    Get-PfRuntimeMemGb | Should -BeNullOrEmpty
+  }
+}
+
+Describe "Test-PreflightRuntimeMem (post-Docker, warn-only)" {
+  It "small Docker VM -> warns, does not throw" {
+    Mock Get-PfRuntimeMemGb { 4 }
+    { Test-PreflightRuntimeMem } | Should -Not -Throw
+  }
+  It "daemon not reporting (null) -> no-op, does not throw" {
+    Mock Get-PfRuntimeMemGb { $null }
+    { Test-PreflightRuntimeMem } | Should -Not -Throw
+  }
 }
 
 # --- reboot persistence (Set-ClusterAutostart) -------------------------------

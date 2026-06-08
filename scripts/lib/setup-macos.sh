@@ -69,7 +69,9 @@ _install_docker_colima() {
     return
   fi
 
-  spin_cmd "Starting Docker runtime…" colima start --cpu 2 --memory 4 --disk 60
+  # Colima VM sizing must clear the preflight floor — the client needs ~5 GB just
+  # to run (control plane + k3s + OS), 16 GB to train locally. Overridable per box.
+  spin_cmd "Starting Docker runtime…" colima start --cpu "${COLIMA_CPU:-4}" --memory "${COLIMA_MEMORY:-6}" --disk "${COLIMA_DISK:-60}"
 
   if ! docker info &>/dev/null 2>&1; then
     error "Docker did not start. Try running 'colima status' to investigate."
