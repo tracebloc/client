@@ -1,3 +1,5 @@
+{{- /* #229: these env keys are owned by tracebloc.proxyEnv, which emits HTTP(S)_PROXY and a merged, cluster-safe NO_PROXY. Exclude them from the generic .Values.env passthrough below so a user-set NO_PROXY (or proxy var) is not re-emitted UNMERGED after proxyEnv — Kubernetes keeps the LAST duplicate env, which would drop the cluster-internal NO_PROXY entries and route in-cluster traffic through the proxy. */ -}}
+{{- $proxyKeys := list "HTTP_PROXY_HOST" "HTTP_PROXY_PORT" "HTTP_PROXY_USERNAME" "HTTP_PROXY_PASSWORD" "NO_PROXY" "no_proxy" "HTTP_PROXY" "HTTPS_PROXY" "http_proxy" "https_proxy" -}}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -149,7 +151,7 @@ spec:
         - name: SINGLE_NODE
           value: {{ if hasKey .Values.env "SINGLE_NODE" }}{{ .Values.env.SINGLE_NODE | quote }}{{ else }}{{ (default dict .Values.hostPath).enabled | default false | quote }}{{ end }}
         {{- range $key, $value := .Values.env }}
-        {{- if and (ne $key "CLIENT_ENV") (ne $key "RESOURCE_REQUESTS") (ne $key "RESOURCE_LIMITS") (ne $key "GPU_REQUESTS") (ne $key "GPU_LIMITS") (ne $key "RUNTIME_CLASS_NAME") (ne $key "SINGLE_NODE") (ne $key "CLIENT_ID") $value }}
+        {{- if and (ne $key "CLIENT_ENV") (ne $key "RESOURCE_REQUESTS") (ne $key "RESOURCE_LIMITS") (ne $key "GPU_REQUESTS") (ne $key "GPU_LIMITS") (ne $key "RUNTIME_CLASS_NAME") (ne $key "SINGLE_NODE") (ne $key "CLIENT_ID") (not (has $key $proxyKeys)) $value }}
         - name: {{ $key }}
           value: {{ $value | quote }}
         {{- end }}
@@ -206,7 +208,7 @@ spec:
         - name: SINGLE_NODE
           value: {{ if hasKey .Values.env "SINGLE_NODE" }}{{ .Values.env.SINGLE_NODE | quote }}{{ else }}{{ (default dict .Values.hostPath).enabled | default false | quote }}{{ end }}
         {{- range $key, $value := .Values.env }}
-        {{- if and (ne $key "CLIENT_ENV") (ne $key "RESOURCE_REQUESTS") (ne $key "RESOURCE_LIMITS") (ne $key "GPU_REQUESTS") (ne $key "GPU_LIMITS") (ne $key "RUNTIME_CLASS_NAME") (ne $key "SINGLE_NODE") (ne $key "CLIENT_ID") $value }}
+        {{- if and (ne $key "CLIENT_ENV") (ne $key "RESOURCE_REQUESTS") (ne $key "RESOURCE_LIMITS") (ne $key "GPU_REQUESTS") (ne $key "GPU_LIMITS") (ne $key "RUNTIME_CLASS_NAME") (ne $key "SINGLE_NODE") (ne $key "CLIENT_ID") (not (has $key $proxyKeys)) $value }}
         - name: {{ $key }}
           value: {{ $value | quote }}
         {{- end }}

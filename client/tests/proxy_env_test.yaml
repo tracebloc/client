@@ -95,3 +95,27 @@ tests:
       - contains:
           path: spec.template.spec.containers[0].env
           content: {name: HTTP_PROXY, value: "http://bob:pw@proxy.example.com:8080"}
+  # ===== #229 regression: a custom NO_PROXY must not be re-emitted UNMERGED =====
+  # tracebloc.proxyEnv merges the user's NO_PROXY with the cluster-internal
+  # defaults. The generic .Values.env passthrough must NOT re-emit the bare
+  # user value afterwards — k8s keeps the LAST duplicate env, so an unmerged
+  # copy would win and route in-cluster traffic (mysql, requests-proxy) through
+  # the proxy. Guards both jobs-manager containers (api + pods-monitor).
+  - it: a custom NO_PROXY is merged once, never re-emitted unmerged (jobs-manager)
+    template: templates/jobs-manager-deployment.yaml
+    set: {env.HTTP_PROXY_HOST: proxy.example.com, env.HTTP_PROXY_PORT: "8080", env.NO_PROXY: "myinternal.example"}
+    asserts:
+      # api container: only the merged value (custom + cluster-internal) is present
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content: {name: NO_PROXY, value: "myinternal.example,localhost,127.0.0.1,0.0.0.0,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,.svc,.svc.cluster.local,.cluster.local,host.k3d.internal"}
+      - notContains:
+          path: spec.template.spec.containers[0].env
+          content: {name: NO_PROXY, value: "myinternal.example"}
+      # pods-monitor container: same guarantee
+      - contains:
+          path: spec.template.spec.containers[1].env
+          content: {name: NO_PROXY, value: "myinternal.example,localhost,127.0.0.1,0.0.0.0,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,.svc,.svc.cluster.local,.cluster.local,host.k3d.internal"}
+      - notContains:
+          path: spec.template.spec.containers[1].env
+          content: {name: NO_PROXY, value: "myinternal.example"}
