@@ -15,7 +15,9 @@ setup() {
   info()    { :; }
   success() { echo "SUCCESS: $*"; }
   warn()    { echo "WARN: $*"; }
-  hint()    { :; }
+  # hint() carries the actionable PATH-fix lines (#738), so echo it (like
+  # success/warn) instead of silencing — the verification tests assert on it.
+  hint()    { echo "HINT: $*"; }
   has()     { return 1; }   # default: tracebloc not present
   # CURL_SECURE is set readonly by common.sh (loaded via load_lib); don't
   # reassign it. curl is mocked in every test below, so its value is moot.
@@ -38,11 +40,86 @@ setup() {
 }
 
 @test "install_tracebloc_cli: success path reports installed" {
-  curl()      { : > "${@: -1}"; return 0; }
-  sh()        { return 0; }
-  has()       { return 0; }              # tracebloc now resolvable
-  tracebloc() { echo "tracebloc 0.2.0"; }
+  curl()             { : > "${@: -1}"; return 0; }
+  sh()               { return 0; }
+  has()              { return 0; }       # tracebloc now resolvable
+  _cli_on_fresh_path() { return 0; }     # a fresh terminal finds it (don't spawn real shells)
+  tracebloc()        { echo "tracebloc 0.2.0"; }
   run install_tracebloc_cli
   [ "$status" -eq 0 ]
   [[ "$output" == *"SUCCESS: tracebloc CLI installed"* ]]
+}
+
+# ── Self-verification (#738) ────────────────────────────────────────────────
+# After install, prove the CLI is usable from a FRESH terminal and print a
+# verified next command; if a new shell wouldn't find it, print the EXACT
+# shell-correct PATH fix instead of a generic "open a new terminal". Always
+# non-fatal (return 0) — the client is already connected by Step 5.
+
+@test "install_tracebloc_cli: fresh-shell success reports a VERIFIED verdict (not 'open a new terminal')" {
+  curl()             { : > "${@: -1}"; return 0; }
+  sh()               { return 0; }
+  _cli_on_fresh_path() { return 0; }     # a brand-new terminal resolves tracebloc
+  tracebloc()        { echo "tracebloc 0.2.0"; }
+  run install_tracebloc_cli
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"verified on your PATH"* ]]          # explicit proof, not hope
+  [[ "$output" == *"0.2.0"* ]]                          # real proof via `tracebloc version`
+  [[ "$output" != *"open a new terminal"* ]]            # the old, useless message is gone
+  # The canonical dataset-push next step lives in summary.sh — don't duplicate it
+  # here on the verified path (#738: "don't duplicate; keep consistent").
+  [[ "$output" != *"tracebloc dataset push"* ]]
+}
+
+@test "install_tracebloc_cli: CLI-missing-from-fresh-shell prints an actionable, shell-correct PATH hint" {
+  curl()             { : > "${@: -1}"; return 0; }
+  sh()               { return 0; }
+  _cli_on_fresh_path() { return 1; }     # installed, but a fresh terminal does NOT find it
+  SHELL="/bin/zsh"; OS="Linux"          # zsh → ~/.zshrc (rc routing under test)
+  run install_tracebloc_cli
+  [ "$status" -eq 0 ]
+  # Append the exact PATH line to the rc, THEN source it — fixes this terminal
+  # and every new one (the old code printed a bare `export` + a `source` of an
+  # rc that didn't contain the line, so nothing persisted).
+  [[ "$output" == *"echo 'export PATH=\"$HOME/.local/bin:\$PATH\"' >> $HOME/.zshrc"* ]]
+  [[ "$output" == *"source $HOME/.zshrc"* ]]                       # the right rc for zsh
+  [[ "$output" != *"open a new terminal"* ]]                       # never the generic line
+}
+
+@test "install_tracebloc_cli: fish gets a fish-correct fix (fish_add_path, no source needed)" {
+  curl()             { : > "${@: -1}"; return 0; }
+  sh()               { return 0; }
+  _cli_on_fresh_path() { return 1; }
+  SHELL="/usr/bin/fish"; OS="Linux"
+  run install_tracebloc_cli
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"fish_add_path \"$HOME/.local/bin\""* ]]        # fish's idiom, not POSIX export
+  [[ "$output" != *"export PATH"* ]]                               # never a POSIX export for fish
+  # fish_add_path persists (universal var) AND applies to the running shell, so
+  # fish users must NOT be told to `source` anything (the old guidance did).
+  [[ "$output" != *"source "* ]]
+}
+
+@test "install_tracebloc_cli: verification failure is still NON-FATAL (status 0)" {
+  curl()             { : > "${@: -1}"; return 0; }
+  sh()               { return 0; }
+  # The whole verification step explodes — must NOT abort the install.
+  _cli_on_fresh_path() { return 2; }
+  _cli_rc_for_shell()  { return 7; }     # even if rc resolution itself errors
+  run install_tracebloc_cli
+  [ "$status" -eq 0 ]
+}
+
+@test "install_tracebloc_cli: NON-FATAL even under the orchestrator's set -e" {
+  # The real installer sources this under `set -e`; a verification hiccup must
+  # never abort an otherwise-good install. Reproduce that exact condition.
+  curl()             { : > "${@: -1}"; return 0; }
+  sh()               { return 0; }
+  _cli_on_fresh_path() { return 1; }     # CLI not on a fresh PATH (failure branch)
+  _cli_rc_for_shell()  { return 7; }     # and rc resolution itself errors
+  set -e
+  install_tracebloc_cli
+  local rc=$?
+  set +e
+  [ "$rc" -eq 0 ]
 }
