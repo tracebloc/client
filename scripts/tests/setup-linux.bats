@@ -19,18 +19,23 @@ setup() {
   docker()    { return 0; }   # `docker info` succeeds → skip the sg-docker re-exec
   id()        { echo "testuser docker"; }
   curl()      { record "curl $*"; return 0; }
-  # Simulate /etc/os-release matching per TEST_DISTRO; delegate other greps.
-  grep() {
-    if [[ "$*" == *"/etc/os-release"* ]]; then
-      case "$TEST_DISTRO" in
-        amzn) [[ "$*" == *amzn* ]] ;;
-        alma) [[ "$*" == *almalinux* ]] ;;
-        *)    return 1 ;;
-      esac
-      return
-    fi
-    command grep "$@"
+
+  # macOS has no /etc/os-release, and a bash `[[ -f ]]` file-test can't be mocked
+  # the way `grep` can — so install_docker_engine's amzn/RHEL-clone branches
+  # short-circuited off-Linux and fell through to get.docker.com. Write a real
+  # os-release fixture for $TEST_DISTRO and point the function at it via
+  # TB_OS_RELEASE_FILE, so its distro detection (real `[[ -f ]]` + real `grep`)
+  # is exercised on every dev host. Re-call after changing TEST_DISTRO in a test.
+  write_os_release() {
+    : "${TB_OS_RELEASE_FILE:=$(mktemp)}"
+    case "$TEST_DISTRO" in
+      amzn) printf '%s\n' 'NAME="Amazon Linux"' 'ID="amzn"'      'VERSION_ID="2023"'  ;;
+      alma) printf '%s\n' 'NAME="AlmaLinux"'    'ID="almalinux"' 'VERSION_ID="9.4"'   ;;
+      *)    printf '%s\n' 'NAME="Ubuntu"'        'ID=ubuntu'      'VERSION_ID="22.04"' ;;
+    esac >"$TB_OS_RELEASE_FILE"
+    export TB_OS_RELEASE_FILE
   }
+  write_os_release   # default ($TEST_DISTRO=ubuntu); tests re-call for amzn/alma
 }
 
 # ── setup_pm ───────────────────────────────────────────────────────────────
@@ -108,7 +113,7 @@ setup() {
 
 # ── install_docker_engine: branch selection ────────────────────────────────
 @test "install_docker_engine: Amazon Linux -> dnf docker" {
-  PRESENT_CMDS="dnf"; TEST_DISTRO=amzn
+  PRESENT_CMDS="dnf"; TEST_DISTRO=amzn; write_os_release
   run install_docker_engine
   run mock_calls
   [[ "$output" == *"dnf install -y docker"* ]]
@@ -126,7 +131,7 @@ setup() {
   [[ "$output" == *"zypper install -y docker"* ]]
 }
 @test "install_docker_engine: RHEL clone (#719) -> docker-ce dnf repo" {
-  PRESENT_CMDS=""; TEST_DISTRO=alma
+  PRESENT_CMDS=""; TEST_DISTRO=alma; write_os_release
   run install_docker_engine
   run mock_calls
   [[ "$output" == *"docker-ce.repo"* ]]
