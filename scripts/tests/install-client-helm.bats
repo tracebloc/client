@@ -342,7 +342,8 @@ setup() {
   HTTP_PROXY="http://proxy.charite.de:8080"; NO_PROXY=".charite.de"
   run install_client_helm <<< $'myid\nmypw'
   [ "$status" -eq 0 ]
-  [[ "$output" == *"Corporate proxy detected"* ]]
+  # NB: the "Corporate proxy detected" notice goes through log(), which the test
+  # harness routes to /dev/null — so assert on the generated file, not $output.
   grep -q 'HTTP_PROXY_HOST: "proxy.charite.de"' "$HOST_DATA_DIR/values.yaml"
   grep -q 'HTTP_PROXY_PORT: "8080"' "$HOST_DATA_DIR/values.yaml"
   grep -q 'NO_PROXY: ".charite.de"' "$HOST_DATA_DIR/values.yaml"
