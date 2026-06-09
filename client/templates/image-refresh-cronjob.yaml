@@ -486,6 +486,7 @@ spec:
               # alpine/k8s entrypoint is kubectl; override to run our script.
               command: ["/bin/sh", "/scripts/image-refresh.sh"]
               env:
+              {{- include "tracebloc.proxyEnv" . | nindent 16 }}
                 # alpine/k8s's kubectl writes a discovery cache under
                 # $HOME/.kube. The pod runs uid 1000 with
                 # readOnlyRootFilesystem, so point HOME at the writable

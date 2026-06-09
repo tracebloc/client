@@ -1,0 +1,97 @@
+suite: Corporate-proxy env injection (backend#768 — guards proxy-blind workloads)
+templates:
+  - templates/jobs-manager-deployment.yaml
+  - templates/requests-proxy-deployment.yaml
+  - templates/image-refresh-cronjob.yaml
+  - templates/auto-upgrade-cronjob.yaml
+set:
+  clientId: "test-id"
+  clientPassword: "test"
+tests:
+  # ===== WITHOUT a proxy: non-proxy installs must be unchanged (no HTTP_PROXY env) =====
+  - it: jobs-manager api has no HTTP_PROXY env by default
+    template: templates/jobs-manager-deployment.yaml
+    asserts:
+      - notContains:
+          path: spec.template.spec.containers[0].env
+          content: {name: HTTP_PROXY}
+          any: true
+  - it: jobs-manager pods-monitor has no HTTP_PROXY env by default
+    template: templates/jobs-manager-deployment.yaml
+    asserts:
+      - notContains:
+          path: spec.template.spec.containers[1].env
+          content: {name: HTTP_PROXY}
+          any: true
+  - it: requests-proxy has no HTTP_PROXY env by default
+    template: templates/requests-proxy-deployment.yaml
+    asserts:
+      - notContains:
+          path: spec.template.spec.containers[0].env
+          content: {name: HTTP_PROXY}
+          any: true
+  - it: image-refresh has no HTTP_PROXY env by default
+    template: templates/image-refresh-cronjob.yaml
+    documentSelector: {path: kind, value: CronJob}
+    asserts:
+      - notContains:
+          path: spec.jobTemplate.spec.template.spec.containers[0].env
+          content: {name: HTTP_PROXY}
+          any: true
+  - it: auto-upgrade has no HTTP_PROXY env by default
+    template: templates/auto-upgrade-cronjob.yaml
+    documentSelector: {path: kind, value: CronJob}
+    asserts:
+      - notContains:
+          path: spec.jobTemplate.spec.template.spec.containers[0].env
+          content: {name: HTTP_PROXY}
+          any: true
+  # ===== WITH a proxy: every egress workload carries HTTP_PROXY + cluster-safe NO_PROXY =====
+  - it: jobs-manager api gets HTTP_PROXY + cluster-safe NO_PROXY when a proxy is set
+    template: templates/jobs-manager-deployment.yaml
+    set: {env.HTTP_PROXY_HOST: proxy.example.com, env.HTTP_PROXY_PORT: "8080"}
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content: {name: HTTP_PROXY, value: "http://proxy.example.com:8080"}
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content: {name: NO_PROXY, value: "localhost,127.0.0.1,0.0.0.0,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,.svc,.svc.cluster.local,.cluster.local,host.k3d.internal"}
+  - it: jobs-manager pods-monitor gets HTTP_PROXY when a proxy is set
+    template: templates/jobs-manager-deployment.yaml
+    set: {env.HTTP_PROXY_HOST: proxy.example.com, env.HTTP_PROXY_PORT: "8080"}
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[1].env
+          content: {name: HTTP_PROXY, value: "http://proxy.example.com:8080"}
+  - it: requests-proxy gets HTTP_PROXY when a proxy is set
+    template: templates/requests-proxy-deployment.yaml
+    set: {env.HTTP_PROXY_HOST: proxy.example.com, env.HTTP_PROXY_PORT: "8080"}
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content: {name: HTTP_PROXY, value: "http://proxy.example.com:8080"}
+  - it: image-refresh gets HTTP_PROXY when a proxy is set
+    template: templates/image-refresh-cronjob.yaml
+    documentSelector: {path: kind, value: CronJob}
+    set: {env.HTTP_PROXY_HOST: proxy.example.com, env.HTTP_PROXY_PORT: "8080"}
+    asserts:
+      - contains:
+          path: spec.jobTemplate.spec.template.spec.containers[0].env
+          content: {name: HTTP_PROXY, value: "http://proxy.example.com:8080"}
+  - it: auto-upgrade gets HTTP_PROXY when a proxy is set
+    template: templates/auto-upgrade-cronjob.yaml
+    documentSelector: {path: kind, value: CronJob}
+    set: {env.HTTP_PROXY_HOST: proxy.example.com, env.HTTP_PROXY_PORT: "8080"}
+    asserts:
+      - contains:
+          path: spec.jobTemplate.spec.template.spec.containers[0].env
+          content: {name: HTTP_PROXY, value: "http://proxy.example.com:8080"}
+  # ===== authenticated proxy: credentials embed in the URL =====
+  - it: an authenticated proxy embeds the credentials in the proxy URL
+    template: templates/jobs-manager-deployment.yaml
+    set: {env.HTTP_PROXY_HOST: proxy.example.com, env.HTTP_PROXY_PORT: "8080", env.HTTP_PROXY_USERNAME: bob, env.HTTP_PROXY_PASSWORD: pw}
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content: {name: HTTP_PROXY, value: "http://bob:pw@proxy.example.com:8080"}

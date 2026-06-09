@@ -71,6 +71,7 @@ spec:
               cpu: {{ $rpLim.cpu | default "1000m" | quote }}
               memory: {{ $rpLim.memory | default "512Mi" | quote }}
           env:
+          {{- include "tracebloc.proxyEnv" . | nindent 12 }}
             - name: MYSQL_HOST
               value: "mysql-client"
             - name: EXPERIMENTS_QUEUE_NAME

@@ -66,6 +66,7 @@ spec:
             subPath: ingestion-authz.yaml
             readOnly: true
         env:
+        {{- include "tracebloc.proxyEnv" . | nindent 8 }}
         - name: CLIENT_ID
           valueFrom:
             secretKeyRef:
@@ -154,6 +155,7 @@ spec:
         - name: logs-volume
           mountPath: "/data/logs"
         env:
+        {{- include "tracebloc.proxyEnv" . | nindent 8 }}
         - name: CLIENT_ID
           valueFrom:
             secretKeyRef:
