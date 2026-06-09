@@ -204,3 +204,67 @@ setup() {
   [[ "$output" == *"modprobe xt_addrtype"* ]]
   [[ "$output" == *"kernel-modules-"* ]]           # RHEL fallback install fired
 }
+
+# ── _configure_docker_proxy (#244: host proxy -> dockerd systemd drop-in) ────
+# These tests run `sudo` as a pass-through so tee/cat/mkdir actually touch a
+# temp drop-in dir (TB_DOCKER_DROPIN_DIR), letting us assert the file content.
+@test "_configure_docker_proxy: no host proxy -> no drop-in written" {
+  unset HTTP_PROXY HTTPS_PROXY http_proxy https_proxy NO_PROXY no_proxy
+  PRESENT_CMDS="systemctl"
+  TB_DOCKER_DROPIN_DIR="$BATS_TEST_TMPDIR/dropin"
+  sudo() { "$@"; }
+  run _configure_docker_proxy
+  [ "$status" -eq 0 ]
+  [ ! -e "$TB_DOCKER_DROPIN_DIR/http-proxy.conf" ]
+}
+
+@test "_configure_docker_proxy: not systemd-managed -> no-op" {
+  PRESENT_CMDS=""                                  # has systemctl -> false
+  HTTP_PROXY="http://proxy.corp:3128"
+  TB_DOCKER_DROPIN_DIR="$BATS_TEST_TMPDIR/dropin"
+  sudo() { "$@"; }
+  run _configure_docker_proxy
+  [ "$status" -eq 0 ]
+  [ ! -e "$TB_DOCKER_DROPIN_DIR/http-proxy.conf" ]
+}
+
+@test "_configure_docker_proxy: host proxy -> writes dockerd drop-in (HTTP/HTTPS/NO_PROXY)" {
+  unset HTTPS_PROXY http_proxy https_proxy no_proxy
+  PRESENT_CMDS="systemctl"
+  HTTP_PROXY="http://proxy.corp:3128"; NO_PROXY="localhost,.corp"
+  TB_DOCKER_DROPIN_DIR="$BATS_TEST_TMPDIR/dropin"
+  sudo() { "$@"; }
+  systemctl() { return 1; }                        # is-active false (fresh) -> no restart
+  run _configure_docker_proxy
+  [ "$status" -eq 0 ]
+  f="$TB_DOCKER_DROPIN_DIR/http-proxy.conf"
+  [ -f "$f" ]
+  grep -q 'Environment="HTTP_PROXY=http://proxy.corp:3128"' "$f"
+  grep -q 'Environment="HTTPS_PROXY=http://proxy.corp:3128"' "$f"
+  grep -q 'Environment="NO_PROXY=localhost,.corp"' "$f"
+}
+
+@test "_configure_docker_proxy: authenticated proxy URL preserved verbatim" {
+  unset HTTPS_PROXY http_proxy https_proxy NO_PROXY no_proxy
+  PRESENT_CMDS="systemctl"
+  HTTP_PROXY="http://user:p@ss@proxy.corp:3128"
+  TB_DOCKER_DROPIN_DIR="$BATS_TEST_TMPDIR/dropin"
+  sudo() { "$@"; }
+  systemctl() { return 1; }
+  run _configure_docker_proxy
+  grep -q 'Environment="HTTP_PROXY=http://user:p@ss@proxy.corp:3128"' "$TB_DOCKER_DROPIN_DIR/http-proxy.conf"
+}
+
+@test "_configure_docker_proxy: idempotent -> unchanged config does not restart docker" {
+  unset HTTPS_PROXY http_proxy https_proxy NO_PROXY no_proxy
+  PRESENT_CMDS="systemctl"
+  HTTP_PROXY="http://proxy.corp:3128"
+  TB_DOCKER_DROPIN_DIR="$BATS_TEST_TMPDIR/dropin"
+  sudo() { "$@"; }
+  systemctl() { record "systemctl $*"; return 0; }  # is-active -> true (running)
+  _configure_docker_proxy                           # 1st: writes (+restart, since active)
+  : > "$MOCK_CALLS"                                 # reset records
+  run _configure_docker_proxy                       # 2nd: unchanged -> early return
+  run mock_calls
+  [[ "$output" != *"restart docker"* ]]
+}
