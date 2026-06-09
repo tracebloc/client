@@ -2,6 +2,44 @@
 
 This guide explains how to migrate from the legacy per-platform charts (`aks/`, `bm/`, `eks/`, `oc/`) to the unified `client/` chart.
 
+## Upgrading to 1.5.1 — single-node gating of the GPU→CPU pending fallback
+
+[client-runtime#92](https://github.com/tracebloc/client-runtime/issues/92) /
+[#222](https://github.com/tracebloc/client/issues/222): jobs-manager's
+GPU→CPU fallback (a GPU pod stuck `Pending` past the scheduling-overdue
+interval is stopped and respun as a CPU job) is now gated on a new
+`env.SINGLE_NODE` flag.
+
+**Why:** on a multi-node / elastic cluster (EKS cluster-autoscaler / Karpenter,
+AKS) a `Pending` GPU pod usually just means a GPU node is still autoscaling in
+(3–10 min). Downgrading to CPU after ~180s is premature — it silently moves a
+GPU experiment onto CPU and drives the stop→respin token churn behind the
+[client-runtime#80](https://github.com/tracebloc/client-runtime/issues/80) 401
+race. On a fixed single-node cluster (installer-provisioned k3d) GPU presence is
+known at install time and no node will autoscale in, so the fallback is correct.
+
+**What you need to do: nothing for most clusters.** `SINGLE_NODE` defaults to
+`hostPath.enabled`, so the behavior tracks your existing topology across the
+hands-off auto-upgrade:
+
+| Deployment | `hostPath.enabled` | `SINGLE_NODE` default | Behavior |
+|---|---|---|---|
+| Installer k3d / bare-metal single-host | `true` | `"true"` | GPU→CPU fallback **on** (unchanged) |
+| EKS / AKS / OpenShift (dynamic PVC) | `false` | `"false"` | Pending GPU pods left for the autoscaler |
+
+- **EKS/AKS/OpenShift** automatically stop the premature downgrade on the next
+  auto-upgrade — no value change needed.
+- **The installer** now writes `env.SINGLE_NODE: "true"` explicitly for new k3d
+  installs, so they don't depend on the heuristic.
+- **A fixed multi-node bare-metal cluster** (e.g. an NFS-backed cluster with
+  `hostPath.enabled: false`) that *wants* the hard CPU/GPU fallback must set it
+  explicitly: `env.SINGLE_NODE: "true"`. Must be a quoted string.
+
+`SINGLE_NODE` requires the matching jobs-manager image (it ships in the same
+release train). During the brief window where image-refresh rolls the new image
+before this chart upgrade injects the var, an absent `SINGLE_NODE` is treated as
+single-node (fallback on), so a single-node cluster is never regressed mid-rollout.
+
 ## Upgrading to 1.3.4 — parent chart owns the shared ingestor ServiceAccount
 
 [#129](https://github.com/tracebloc/client/issues/129): the ingestor

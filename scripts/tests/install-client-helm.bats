@@ -132,6 +132,9 @@ setup() {
   [[ "$output" == *"Connected to tracebloc"* ]]
   grep -q 'clientId: "myid"' "$HOST_DATA_DIR/values.yaml"
   grep -q "clientPassword: 'mypw'" "$HOST_DATA_DIR/values.yaml"
+  # client-runtime#92: installer-provisioned k3d is a fixed single-host cluster,
+  # so it declares SINGLE_NODE=true -> jobs-manager applies the hard CPU/GPU rule.
+  grep -q 'SINGLE_NODE: "true"' "$HOST_DATA_DIR/values.yaml"
   mock_calls | grep -q "helm upgrade --install tracebloc"
 }
 
