@@ -104,23 +104,30 @@ spec:
         # routinely needs >1s to even spawn, which kubelet reports as a probe
         # failure and kills the container. 5s is generous enough to survive
         # transient CPU pressure but still catch a real hang within ~25s.
+        #
+        # Probe over TCP (-h 127.0.0.1), NOT the unix socket (-h localhost):
+        # the mysql-client image writes its socket to /var/lib/mysql/mysql.sock,
+        # not the client default /var/run/mysqld/mysqld.sock, so a socket-based
+        # `mysqladmin ping` can't reach a perfectly healthy mysqld — the startup
+        # probe then exhausts and the kubelet kill-loops the DB. TCP is immune to
+        # where the image places the socket. Do not change back to `localhost`.
         startupProbe:
           exec:
-            command: ["mysqladmin", "ping", "-h", "localhost"]
+            command: ["mysqladmin", "ping", "-h", "127.0.0.1"]
           initialDelaySeconds: 10
           periodSeconds: 5
           timeoutSeconds: 5
           failureThreshold: 24
         livenessProbe:
           exec:
-            command: ["mysqladmin", "ping", "-h", "localhost"]
+            command: ["mysqladmin", "ping", "-h", "127.0.0.1"]
           initialDelaySeconds: 0
           periodSeconds: 10
           timeoutSeconds: 5
           failureThreshold: 5
         readinessProbe:
           exec:
-            command: ["mysqladmin", "ping", "-h", "localhost"]
+            command: ["mysqladmin", "ping", "-h", "127.0.0.1"]
           initialDelaySeconds: 0
           periodSeconds: 5
           timeoutSeconds: 3
