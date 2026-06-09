@@ -144,3 +144,42 @@ tests:
             name: INGESTOR_IMAGE_TAG
             value: "0.4"
 
+  # client-runtime#92: SINGLE_NODE gates jobs-manager's GPU->CPU pending
+  # fallback; it defaults to hostPath.enabled so managed (dynamic-PVC)
+  # clusters never auto-downgrade while installer/bare-metal single-host
+  # clusters keep the hard rule.
+  - it: should default SINGLE_NODE to "false" on managed (hostPath disabled) clusters
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: SINGLE_NODE
+            value: "false"
+
+  - it: should set SINGLE_NODE to "true" when hostPath is enabled
+    set:
+      hostPath:
+        enabled: true
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: SINGLE_NODE
+            value: "true"
+
+  - it: should let an explicit env.SINGLE_NODE override the hostPath-derived default
+    set:
+      hostPath:
+        enabled: true
+      env:
+        SINGLE_NODE: "false"
+    asserts:
+      # explicit "false" wins over hostPath.enabled=true, and is emitted
+      # exactly once (not duplicated by the generic env range).
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: SINGLE_NODE
+            value: "false"
+          count: 1
+

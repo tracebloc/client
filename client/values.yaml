@@ -23,6 +23,21 @@ env: {
   # GPU_LIMITS: "nvidia.com/gpu=1"
   # Optional: runtime class for GPU jobs (defaults to "" if not provided)
   # RUNTIME_CLASS_NAME: ""
+  # Optional: single-node (fixed, non-elastic) cluster flag — gates
+  # jobs-manager's GPU->CPU pending-job fallback (client-runtime#92).
+  #   "true"  -> a GPU pod stuck Pending past the scheduling-overdue interval
+  #              is downgraded to a CPU job. Correct on a fixed single-host
+  #              cluster (installer k3d / bare-metal) where GPU presence is
+  #              known at install time and no node will autoscale in.
+  #   "false" -> a Pending GPU pod is left for the autoscaler/backend. Correct
+  #              for EKS/AKS/OpenShift, where a GPU node may still be
+  #              provisioning and a premature downgrade breaks the run.
+  # If unset, DEFAULTS to hostPath.enabled (true on installer-provisioned
+  # single-host clusters, false on managed dynamic-PVC clusters), so existing
+  # clusters keep correct behaviour across auto-upgrade without re-running the
+  # installer. Set explicitly to override (e.g. a fixed multi-node bare-metal
+  # cluster that wants the fallback). Must be a quoted string.
+  # SINGLE_NODE: "true"
 }
 # -- StorageClass configuration
 # When create: true, the StorageClass name is release-unique (e.g. "<release-name>-storage-class")

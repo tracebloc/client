@@ -135,8 +135,20 @@ spec:
           value: {{ if hasKey .Values.env "GPU_LIMITS" }}{{ .Values.env.GPU_LIMITS | quote }}{{ else }}"nvidia.com/gpu=1"{{ end }}
         - name: RUNTIME_CLASS_NAME
           value: {{ if hasKey .Values.env "RUNTIME_CLASS_NAME" }}{{ .Values.env.RUNTIME_CLASS_NAME | quote }}{{ else }}""{{ end }}
+        # client-runtime#92: gates jobs-manager's GPU->CPU pending-job fallback.
+        # Default tracks hostPath.enabled — a fixed single-host cluster
+        # (installer-provisioned k3d / bare-metal hostPath) applies the hard
+        # CPU-or-GPU rule (downgrade a Pending GPU pod to CPU); managed
+        # dynamic-PVC clusters (EKS/AKS/OpenShift, hostPath.enabled=false) leave
+        # a Pending GPU pod for the autoscaler instead of prematurely
+        # downgrading. An explicit env.SINGLE_NODE always wins. Emitted as a
+        # quoted string (schema: env.additionalProperties is string); the
+        # runtime parses true/false. hostPath is nil-guarded so a pre-this-key
+        # --reset-then-reuse-values upgrade can't crash templating.
+        - name: SINGLE_NODE
+          value: {{ if hasKey .Values.env "SINGLE_NODE" }}{{ .Values.env.SINGLE_NODE | quote }}{{ else }}{{ (default dict .Values.hostPath).enabled | default false | quote }}{{ end }}
         {{- range $key, $value := .Values.env }}
-        {{- if and (ne $key "CLIENT_ENV") (ne $key "RESOURCE_REQUESTS") (ne $key "RESOURCE_LIMITS") (ne $key "GPU_REQUESTS") (ne $key "GPU_LIMITS") (ne $key "RUNTIME_CLASS_NAME") (ne $key "CLIENT_ID") $value }}
+        {{- if and (ne $key "CLIENT_ENV") (ne $key "RESOURCE_REQUESTS") (ne $key "RESOURCE_LIMITS") (ne $key "GPU_REQUESTS") (ne $key "GPU_LIMITS") (ne $key "RUNTIME_CLASS_NAME") (ne $key "SINGLE_NODE") (ne $key "CLIENT_ID") $value }}
         - name: {{ $key }}
           value: {{ $value | quote }}
         {{- end }}
@@ -185,8 +197,14 @@ spec:
           value: {{ if hasKey .Values.env "GPU_LIMITS" }}{{ .Values.env.GPU_LIMITS | quote }}{{ else }}"nvidia.com/gpu=1"{{ end }}
         - name: RUNTIME_CLASS_NAME
           value: {{ if hasKey .Values.env "RUNTIME_CLASS_NAME" }}{{ .Values.env.RUNTIME_CLASS_NAME | quote }}{{ else }}""{{ end }}
+        # Kept in sync with the api container (client-runtime#92). pods-monitor
+        # does not consume SINGLE_NODE, but injecting it here keeps both env
+        # blocks + their range-exclusion lists symmetric, matching how
+        # GPU_REQUESTS et al. are already handled.
+        - name: SINGLE_NODE
+          value: {{ if hasKey .Values.env "SINGLE_NODE" }}{{ .Values.env.SINGLE_NODE | quote }}{{ else }}{{ (default dict .Values.hostPath).enabled | default false | quote }}{{ end }}
         {{- range $key, $value := .Values.env }}
-        {{- if and (ne $key "CLIENT_ENV") (ne $key "RESOURCE_REQUESTS") (ne $key "RESOURCE_LIMITS") (ne $key "GPU_REQUESTS") (ne $key "GPU_LIMITS") (ne $key "RUNTIME_CLASS_NAME") (ne $key "CLIENT_ID") $value }}
+        {{- if and (ne $key "CLIENT_ENV") (ne $key "RESOURCE_REQUESTS") (ne $key "RESOURCE_LIMITS") (ne $key "GPU_REQUESTS") (ne $key "GPU_LIMITS") (ne $key "RUNTIME_CLASS_NAME") (ne $key "SINGLE_NODE") (ne $key "CLIENT_ID") $value }}
         - name: {{ $key }}
           value: {{ $value | quote }}
         {{- end }}
