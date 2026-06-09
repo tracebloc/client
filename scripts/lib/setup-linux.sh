@@ -88,15 +88,19 @@ _ensure_kernel_modules() {
 
 # ── Docker Engine ────────────────────────────────────────────────────────────
 install_docker_engine() {
+  # os-release path is overridable (TB_OS_RELEASE_FILE) so the distro detection
+  # below stays testable on hosts without one — e.g. macOS dev machines, where a
+  # bash `[[ -f ]]` file-test can't be mocked the way a command like `grep` can.
+  local os_release="${TB_OS_RELEASE_FILE:-/etc/os-release}"
   if ! has docker; then
-    if [[ -f /etc/os-release ]] && grep -qi 'amzn\|amazon' /etc/os-release; then
+    if [[ -f "$os_release" ]] && grep -qi 'amzn\|amazon' "$os_release"; then
       if has dnf; then spin_cmd "Installing Docker…" sudo dnf install -y docker
       else              spin_cmd "Installing Docker…" sudo yum install -y docker; fi
     elif has pacman; then
       spin_cmd "Installing Docker…" sudo pacman -S --noconfirm docker
     elif has zypper; then
       spin_cmd "Installing Docker…" sudo zypper install -y docker
-    elif [[ -f /etc/os-release ]] && grep -qiE '^ID="?(almalinux|rocky|ol|oracle)"?' /etc/os-release; then
+    elif [[ -f "$os_release" ]] && grep -qiE '^ID="?(almalinux|rocky|ol|oracle)"?' "$os_release"; then
       # get.docker.com rejects RHEL rebuilds (almalinux/rocky/ol) with
       # "Unsupported distribution". Install docker-ce from Docker's official
       # CentOS repo instead — it is RHEL-compatible and works on these distros.
