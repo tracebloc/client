@@ -242,6 +242,7 @@ setup() {
   grep -q 'Environment="HTTP_PROXY=http://proxy.corp:3128"' "$f"
   grep -q 'Environment="HTTPS_PROXY=http://proxy.corp:3128"' "$f"
   grep -q 'Environment="NO_PROXY=localhost,.corp"' "$f"
+  grep -qF '# Managed by tracebloc installer' "$f"   # marker → safe to remove later
 }
 
 @test "_configure_docker_proxy: authenticated proxy URL preserved verbatim" {
@@ -267,4 +268,34 @@ setup() {
   run _configure_docker_proxy                       # 2nd: unchanged -> early return
   run mock_calls
   [[ "$output" != *"restart docker"* ]]
+}
+
+# Bugbot #245: proxy removed since last run -> the stale drop-in we wrote must
+# be deleted, else dockerd keeps pulling through a proxy that no longer exists.
+@test "_configure_docker_proxy: host proxy removed -> deletes our stale drop-in" {
+  unset HTTP_PROXY HTTPS_PROXY http_proxy https_proxy NO_PROXY no_proxy
+  PRESENT_CMDS="systemctl"
+  TB_DOCKER_DROPIN_DIR="$BATS_TEST_TMPDIR/dropin"
+  mkdir -p "$TB_DOCKER_DROPIN_DIR"
+  printf '# Managed by tracebloc installer (#244)\n[Service]\nEnvironment="HTTP_PROXY=http://old:3128"\n' \
+    > "$TB_DOCKER_DROPIN_DIR/http-proxy.conf"
+  sudo() { "$@"; }
+  systemctl() { return 1; }                         # not active -> no restart
+  run _configure_docker_proxy
+  [ "$status" -eq 0 ]
+  [ ! -e "$TB_DOCKER_DROPIN_DIR/http-proxy.conf" ]  # ours -> removed
+}
+
+@test "_configure_docker_proxy: host proxy removed -> leaves a foreign drop-in untouched" {
+  unset HTTP_PROXY HTTPS_PROXY http_proxy https_proxy NO_PROXY no_proxy
+  PRESENT_CMDS="systemctl"
+  TB_DOCKER_DROPIN_DIR="$BATS_TEST_TMPDIR/dropin"
+  mkdir -p "$TB_DOCKER_DROPIN_DIR"
+  printf '[Service]\nEnvironment="HTTP_PROXY=http://it-managed:3128"\n' \
+    > "$TB_DOCKER_DROPIN_DIR/http-proxy.conf"      # no tracebloc marker
+  sudo() { "$@"; }
+  run _configure_docker_proxy
+  [ "$status" -eq 0 ]
+  [ -f "$TB_DOCKER_DROPIN_DIR/http-proxy.conf" ]   # NOT ours -> left alone
+  grep -q 'it-managed' "$TB_DOCKER_DROPIN_DIR/http-proxy.conf"
 }
