@@ -123,9 +123,9 @@ The customer never builds an image. The customer never writes a Dockerfile. The 
 
 The ingestor has two independent update lifecycles, and customers usually only need to think about one.
 
-**Image: always current, automatically.** New `ghcr.io/tracebloc/ingestor` releases roll out to your cluster via the parent `tracebloc/client` chart's auto-upgrade cronjob (`autoUpgrade.enabled: true`, default). The cronjob runs `helm repo update` + `helm upgrade tracebloc/client` daily, which writes the new digest into the `INGESTOR_IMAGE_DIGEST` env on the running `tracebloc-jobs-manager` deployment. Your next `helm install tracebloc/ingestor ...` uses the new image automatically — no digest to pin, no version to track, no redeploy of anything you've already installed.
+**Image: always current, automatically.** jobs-manager spawns each ingestion Job by the floating `ghcr.io/tracebloc/ingestor` tag with `imagePullPolicy: Always`, so every run resolves the current published image at spawn time. New ingestor releases under that tag are picked up on your next ingestion — no digest to pin, no version to track, and no redeploy of anything you've already installed. A cluster `helm upgrade` cannot revert the image, because there is no pinned digest to reset (the failure mode the old `INGESTOR_IMAGE_DIGEST`-pinning design had).
 
-**Chart: refresh your local cache before each install.** Helm's repo cache on _your workstation_ is independent of the cluster. The cluster's cronjob can refresh its own cache, but it cannot reach your laptop. Run `helm repo update` before each install to pick up new chart features (new values, new templates, new defaults). A stale cache still works — it just locks you out of chart-level options added since you last refreshed. **The image you run does not depend on the chart version**: jobs-manager picks the current `INGESTOR_IMAGE_DIGEST` regardless of which subchart version submitted the request.
+**Chart: refresh your local cache before each install.** Helm's repo cache on _your workstation_ is independent of the cluster. Run `helm repo update` before each install to pick up new chart features (new values, new templates, new defaults). A stale cache still works — it just locks you out of chart-level options added since you last refreshed. **The image you run does not depend on the chart version**: jobs-manager spawns the current image by floating tag regardless of which subchart version submitted the request.
 
 This stratification is intentional. The image picks up bugfixes and security patches without anyone restating their dataset configs; the chart only changes when there's a real protocol or UX shift.
 
@@ -141,12 +141,12 @@ Nothing to upgrade. The chart is fire-and-forget: each `helm install` POSTs once
 
 ## Pinning a specific image version
 
-The dominant install path leaves `image.digest` empty and lets jobs-manager pick the cluster's current ingestor version (set by the parent client chart's `images.ingestor.digest`, kept current by the auto-upgrade cronjob). Override only when you have a specific reason:
+The dominant install path leaves `image.digest` empty and lets jobs-manager spawn the cluster's current ingestor version by its floating tag (`imagePullPolicy: Always`). Override only when you have a specific reason:
 
 | Scenario | What to do |
 |---|---|
 | Reproducing an older ingestion run for audit / debugging | `--set image.digest=sha256:<old-digest>` |
-| Testing a new ingestor release before cluster-wide rollout | `--set image.digest=sha256:<new-digest>` ahead of the auto-upgrade tick |
+| Testing a new ingestor release before cluster-wide rollout | `--set image.digest=sha256:<new-digest>` |
 | Air-gapped mirror with frozen versions | Use both `--set image.repository=...` and `--set image.digest=sha256:...` |
 
 When set, the digest must be the full canonical form (`sha256:` + 64 lowercase hex chars). Tags like `v0.3.0` are rejected by jobs-manager. See the [data-ingestors releases page](https://github.com/tracebloc/data-ingestors/releases) for current digests.

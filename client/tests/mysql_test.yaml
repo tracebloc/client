@@ -140,3 +140,41 @@ tests:
       - equal:
           path: spec.selector.app
           value: mysql-client
+
+  # --- Regression guards (backend#767): the kill-loop was a healthy mysqld
+  # killed by a probe pointed at the wrong socket. Lock the probe to TCP so a
+  # future edit (or an image socket-path change) can't reintroduce it. ---
+  - it: all three probes must use TCP (127.0.0.1), never the unix socket (-h localhost)
+    template: templates/mysql-deployment.yaml
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].startupProbe.exec.command
+          content: "127.0.0.1"
+      - contains:
+          path: spec.template.spec.containers[0].livenessProbe.exec.command
+          content: "127.0.0.1"
+      - contains:
+          path: spec.template.spec.containers[0].readinessProbe.exec.command
+          content: "127.0.0.1"
+      - notContains:
+          path: spec.template.spec.containers[0].startupProbe.exec.command
+          content: "localhost"
+      - notContains:
+          path: spec.template.spec.containers[0].livenessProbe.exec.command
+          content: "localhost"
+      - notContains:
+          path: spec.template.spec.containers[0].readinessProbe.exec.command
+          content: "localhost"
+  - it: mysqld keeps its writable scratch mounts under readOnlyRootFilesystem (socket/pid dir + tmp)
+    template: templates/mysql-deployment.yaml
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].volumeMounts
+          content:
+            name: mysql-run
+            mountPath: /var/run/mysqld
+      - contains:
+          path: spec.template.spec.containers[0].volumeMounts
+          content:
+            name: mysql-tmp
+            mountPath: /tmp

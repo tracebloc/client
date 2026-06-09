@@ -134,6 +134,7 @@ spec:
               # our script instead.
               command: ["/bin/sh", "/scripts/auto-upgrade.sh"]
               env:
+              {{- include "tracebloc.proxyEnv" . | nindent 16 }}
                 - name: RELEASE_NAME
                   value: {{ .Release.Name | quote }}
                 - name: RELEASE_NAMESPACE

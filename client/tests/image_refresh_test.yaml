@@ -39,12 +39,13 @@ tests:
       - hasDocuments:
           count: 0
 
-  - it: cronjob template renders nothing when ALL THREE images are pinned
-    # All three managed images opted out → nothing for image-refresh to
-    # do. ingestor's pin signal is `autoRefresh: false` (asymmetric
-    # with the other two, where `digest != ""` is the signal — see
-    # values.yaml comment for why ingestor needs an explicit flag).
-    # #158 — auto-refresh ingestor.
+  - it: cronjob template renders nothing when both class-1 images are pinned
+    # jobs-manager + pods-monitor are the only images this CronJob
+    # refreshes — the ingestor is spawned by jobs-manager from a floating
+    # tag, not refreshed here. When both class-1 images are digest-pinned
+    # there is nothing left to reconcile, so the CronJob renders nothing.
+    # A pinned image is signalled by a non-empty `digest` — the same
+    # signal the deployment uses to switch imagePullPolicy to IfNotPresent.
     template: templates/image-refresh-cronjob.yaml
     set:
       images:
@@ -52,13 +53,11 @@ tests:
           digest: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
         podsMonitor:
           digest: "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
-        ingestor:
-          autoRefresh: false
     asserts:
       - hasDocuments:
           count: 0
 
-  - it: rbac template renders nothing when ALL THREE images are pinned
+  - it: rbac template renders nothing when both class-1 images are pinned
     template: templates/image-refresh-rbac.yaml
     set:
       images:
@@ -66,23 +65,24 @@ tests:
           digest: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
         podsMonitor:
           digest: "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
-        ingestor:
-          autoRefresh: false
     asserts:
       - hasDocuments:
           count: 0
 
-  - it: cronjob STILL renders when only jobs-manager + pods-monitor pinned (ingestor unpinned)
-    # Regression guard for the asymmetric pin signal. After #158, BOTH
-    # jobs-manager AND pods-monitor pinned is NOT sufficient to skip
-    # rendering — ingestor still needs auto-refresh.
+  - it: cronjob STILL renders when the ingestor is pinned but a class-1 image is not
+    # Regression guard: the ingestor no longer gates this CronJob. Setting
+    # any ingestor field (here a pinned digest) must NOT make the CronJob
+    # disappear — as long as a class-1 image (here pods-monitor) can still
+    # drift, the CronJob must render. This is the inverse of the old
+    # "ingestor keeps the CronJob alive" behaviour, retired with the
+    # floating-tag migration.
     template: templates/image-refresh-cronjob.yaml
     set:
       images:
         jobsManager:
           digest: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-        podsMonitor:
-          digest: "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        ingestor:
+          digest: "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
     asserts:
       - hasDocuments:
           count: 2
@@ -109,7 +109,9 @@ tests:
           content:
             name: PODS_MONITOR_PINNED
             value: "0"
-      - contains:
+      # The ingestor is no longer wired into this CronJob — no
+      # INGESTOR_PINNED / INGESTOR_TAG / INGESTOR_RESOLVE_FAIL_THRESHOLD env.
+      - notContains:
           path: spec.jobTemplate.spec.template.spec.containers[0].env
           content:
             name: INGESTOR_PINNED
@@ -212,114 +214,25 @@ tests:
       - matchRegex:
           path: data["image-refresh.sh"]
           pattern: '(?s)kubectl rollout restart.*kubectl annotate deployment'
-      # #158 regression guards for ingestor (class-2) handling.
-      # Different action than jobs-manager/pods-monitor: ingestor uses
-      # `kubectl set env` on the api container's INGESTOR_IMAGE_DIGEST.
-      # Both registry hosts must appear (docker.io for class-1 via
-      # auth.docker.io; ghcr.io for class-2). The set-env action
-      # triggers a natural rollout via ReplicaSet rotation.
-      - matchRegex:
-          path: data["image-refresh.sh"]
-          pattern: "kubectl set env"
-      - matchRegex:
+      # The ingestor is spawned by jobs-manager from a floating tag and is
+      # no longer reconciled by this script — the entire class-2 pass was
+      # removed (no `kubectl set env` on INGESTOR_IMAGE_DIGEST, no ghcr.io
+      # poll for the spawned image, no last-refreshed-ingestor-digest
+      # annotation, no get_container_env helper). These guards lock the
+      # removal so a refactor can't quietly reintroduce the revert-prone
+      # mechanism the floating tag replaced. (The script's design-rationale
+      # comments still mention the retired mechanism as history, so these
+      # target the actual code shapes — the env assignment, the helper
+      # name, the annotation key — not the words.)
+      - notMatchRegex:
           path: data["image-refresh.sh"]
           pattern: 'INGESTOR_IMAGE_DIGEST='
-      - matchRegex:
-          path: data["image-refresh.sh"]
-          pattern: "ghcr\\.io"
-      - matchRegex:
-          path: data["image-refresh.sh"]
-          pattern: "auth\\.docker\\.io"
-      # `get_container_env` reads
-      # spec.template.spec.containers[name=api].env[name=$e].value.
-      # Used on first-observation to adopt the chart-default env as
-      # baseline. Via jq because the same kubectl jsonpath
-      # bracket-notation issues from #156 apply to array-of-objects
-      # filtering with nested fields.
-      - matchRegex:
+      - notMatchRegex:
           path: data["image-refresh.sh"]
           pattern: "get_container_env"
-      - matchRegex:
+      - notMatchRegex:
           path: data["image-refresh.sh"]
-          pattern: 'select\(\.name == \$c\)'
-      # Empty-env handling: jobs-manager 503s if INGESTOR_IMAGE_DIGEST
-      # is empty, so a fresh deployment where the env got reset must
-      # be re-filled from the registry rather than left empty.
-      - matchRegex:
-          path: data["image-refresh.sh"]
-          pattern: "would 503 on ingestion submit"
-      # Per-image opt-out flag for ingestor — INGESTOR_PINNED=1 → skip.
-      - matchRegex:
-          path: data["image-refresh.sh"]
-          pattern: 'ingestor\.autoRefresh: false in values'
-      # Ingestor uses an annotation as source of truth, NOT the live
-      # spec env. Caught in PR #159 review (bugbot, medium severity):
-      # if spec env were source of truth, a failed rollout after
-      # `kubectl set env` would leave the spec matching the registry
-      # while old ReplicaSet pods kept running with the old env. The
-      # next tick would see no drift and skip, leaving the deployment
-      # stuck. With annotation as source of truth, the annotation is
-      # updated ONLY after `rollout status` succeeds — a failed
-      # rollout leaves annotation stale → next tick retries.
-      - matchRegex:
-          path: data["image-refresh.sh"]
-          pattern: "tracebloc\\.io/last-refreshed-ingestor-digest"
-      # Order-of-operations for ingestor: set env → wait → annotate.
-      # The annotate MUST come last so a failed rollout leaves the
-      # annotation stale and the next tick retries.
-      - matchRegex:
-          path: data["image-refresh.sh"]
-          pattern: '(?s)kubectl set env.*rollout status.*kubectl annotate.*last-refreshed-ingestor-digest'
-      # First-observation positive test for ingestor: when no
-      # annotation exists yet AND the spec env is non-empty, the
-      # script must adopt the spec env as the baseline (don't-churn-
-      # on-install). Locks the branch that #159 review flagged as
-      # untested. Empty-spec-env branch is covered by the existing
-      # "would 503" regex above.
-      - matchRegex:
-          path: data["image-refresh.sh"]
-          pattern: 'first observation; adopting spec env'
-      # Adopt-as-baseline branch MUST run `kubectl rollout status`
-      # before `kubectl annotate`. Caught in #159 review (bugbot,
-      # high severity): if a previous tick's empty-spec-fill set env
-      # and then rollout failed, this tick would find current_ingestor
-      # non-empty (spec already committed) but the deployment stuck.
-      # Annotating without waiting would record success on a stuck
-      # rollout. The status check is near-instant on a healthy
-      # deployment, so the cost on the happy path is negligible.
-      - matchRegex:
-          path: data["image-refresh.sh"]
-          pattern: '(?s)adopting spec env.*rollout status.*kubectl annotate.*last-refreshed-ingestor-digest=\$\{current_ingestor\}'
-      # Env-drift recovery (#159 bugbot follow-up): the no-op branch
-      # MUST also read the spec env, not just compare annotation to
-      # registry. External actors (kubectl rollout undo, kubectl edit,
-      # GitOps reconciler) can revert the env without touching the
-      # annotation. Without the second comparison, drift would go
-      # undetected indefinitely.
-      - matchRegex:
-          path: data["image-refresh.sh"]
-          pattern: 'spec env drifted'
-      # The drift-recovery branch must re-apply the RECORDED value to
-      # the spec env, not the registry value (registry already matches
-      # recorded by definition of this branch). And it must NOT update
-      # the annotation — the recorded value is already correct, so an
-      # annotate is dead-write churn.
-      - matchRegex:
-          path: data["image-refresh.sh"]
-          pattern: 'INGESTOR_IMAGE_DIGEST=\$\{recorded_ingestor\}'
-      # No-op branch must verify rollout health, NOT just exit. A
-      # previous tick's env-drift `kubectl set env` could have
-      # committed a spec change whose `rollout status` then failed
-      # — annotation/registry/spec env all match (set env's spec
-      # write persists past the abort) but pods may be stuck. The
-      # health check makes that stuck state visible as a failed Job.
-      # Caught in PR #162 review (bugbot, medium severity).
-      - matchRegex:
-          path: data["image-refresh.sh"]
-          pattern: 'verifying deployment health'
-      - matchRegex:
-          path: data["image-refresh.sh"]
-          pattern: '(?s)digest unchanged and spec env matches.*kubectl rollout status'
+          pattern: "last-refreshed-ingestor-digest"
 
   - it: CronJob has the right schedule, concurrency, and SA wiring
     template: templates/image-refresh-cronjob.yaml
@@ -370,148 +283,10 @@ tests:
           content:
             name: IMAGE_TAG
             value: prod
-      # #158: ingestor-specific env vars. Default tag is "0.3"
-      # (matches team's ghcr.io publishing convention — see the
-      # dedicated test below for rationale).
-      - contains:
-          path: spec.jobTemplate.spec.template.spec.containers[0].env
-          content:
-            name: INGESTOR_TAG
-            value: "0.3"
-      - contains:
-          path: spec.jobTemplate.spec.template.spec.containers[0].env
-          content:
-            name: INGESTOR_PINNED
-            value: "0"
-
-  - it: ingestor INGESTOR_PINNED flag flips to "1" when autoRefresh=false
-    # The asymmetric pin signal: ingestor uses `autoRefresh: false`
-    # rather than `digest != ""` (which is the signal for jobs-manager
-    # / pods-monitor) because ingestor.digest must always be non-empty
-    # for jobs-manager to function. Caught a bug during #158 dev: the
-    # naive `default true autoRefresh` rendering treats explicit
-    # `false` as falsy and flips back to true. Test pins the corrected
-    # `eq value false` idiom.
-    template: templates/image-refresh-cronjob.yaml
-    documentIndex: 1
-    set:
-      images:
-        ingestor:
-          autoRefresh: false
-    asserts:
-      - contains:
-          path: spec.jobTemplate.spec.template.spec.containers[0].env
-          content:
-            name: INGESTOR_PINNED
-            value: "1"
-
-  - it: ingestor INGESTOR_TAG defaults to "0.3" (semver float tag — team's ghcr.io publishing convention)
-    # Original default was "prod" which doesn't exist on the team's
-    # ghcr.io/tracebloc/ingestor repo. Caught in PR #162 review
-    # (bugbot, medium severity) — auto-refresh silently no-op'd
-    # every tick because manifest resolution 404'd. The team's
-    # actual publishing convention uses semver-style float tags
-    # (`0`, `0.3`); `0.3` is the conservative default (patch-only
-    # auto-track) and matches what dev was tested with.
-    template: templates/image-refresh-cronjob.yaml
-    documentIndex: 1
-    asserts:
-      - contains:
-          path: spec.jobTemplate.spec.template.spec.containers[0].env
-          content:
-            name: INGESTOR_TAG
-            value: "0.3"
-      # Regression guard: must NOT regress back to `prod`.
-      - notContains:
-          path: spec.jobTemplate.spec.template.spec.containers[0].env
-          content:
-            name: INGESTOR_TAG
-            value: prod
-
-  - it: ingestor INGESTOR_TAG falls back to "0.3" (not "prod") when images.ingestor.tag is absent
-    # Simulates a --reuse-values upgrade from a pre-v1.4.1 stored
-    # manifest that has no images.ingestor.tag key. The chart-default
-    # path (handled by the test above) renders "0.3" because the
-    # default flows through; this test exercises the RUNTIME FALLBACK
-    # inside the template (`| default "X"`) when the key is missing
-    # from stored values. Both paths must converge on "0.3".
-    # Caught in PR #162 review (bugbot, medium severity).
-    template: templates/image-refresh-cronjob.yaml
-    documentIndex: 1
-    set:
-      images:
-        ingestor:
-          tag: null
-    asserts:
-      - contains:
-          path: spec.jobTemplate.spec.template.spec.containers[0].env
-          content:
-            name: INGESTOR_TAG
-            value: "0.3"
-
-  - it: ingestor INGESTOR_TAG is overridable
-    template: templates/image-refresh-cronjob.yaml
-    documentIndex: 1
-    set:
-      images:
-        ingestor:
-          tag: "staging"
-    asserts:
-      - contains:
-          path: spec.jobTemplate.spec.template.spec.containers[0].env
-          content:
-            name: INGESTOR_TAG
-            value: staging
-
-  - it: ingestor INGESTOR_RESOLVE_FAIL_THRESHOLD defaults to "3" (#186 #2)
-    # Below this many consecutive ghcr resolve failures, image-refresh
-    # WARNs + skips; at/above it the script fails the Job loudly instead
-    # of silently leaving jobs-manager on a stale digest.
-    template: templates/image-refresh-cronjob.yaml
-    documentIndex: 1
-    asserts:
-      - contains:
-          path: spec.jobTemplate.spec.template.spec.containers[0].env
-          content:
-            name: INGESTOR_RESOLVE_FAIL_THRESHOLD
-            value: "3"
-
-  - it: ingestor INGESTOR_RESOLVE_FAIL_THRESHOLD falls back to "3" when imageRefresh key is absent
-    # --reuse-values upgrade from a pre-this-PR stored manifest lacks the
-    # key; the template's `| default 3` must still render a usable value.
-    template: templates/image-refresh-cronjob.yaml
-    documentIndex: 1
-    set:
-      imageRefresh:
-        ingestorResolveFailureThreshold: null
-    asserts:
-      - contains:
-          path: spec.jobTemplate.spec.template.spec.containers[0].env
-          content:
-            name: INGESTOR_RESOLVE_FAIL_THRESHOLD
-            value: "3"
-
-  - it: ingestor INGESTOR_RESOLVE_FAIL_THRESHOLD is overridable
-    template: templates/image-refresh-cronjob.yaml
-    documentIndex: 1
-    set:
-      imageRefresh:
-        ingestorResolveFailureThreshold: 5
-    asserts:
-      - contains:
-          path: spec.jobTemplate.spec.template.spec.containers[0].env
-          content:
-            name: INGESTOR_RESOLVE_FAIL_THRESHOLD
-            value: "5"
-
-  - it: schema rejects ingestorResolveFailureThreshold below 1
-    template: templates/image-refresh-cronjob.yaml
-    set:
-      imageRefresh:
-        ingestorResolveFailureThreshold: 0
-    asserts:
-      - failedTemplate:
-          errorPattern: "must not be valid against schema|Must be greater than or equal to 1"
+      # The ingestor is spawned by jobs-manager from a floating tag, so this
+      # CronJob no longer carries INGESTOR_TAG / INGESTOR_PINNED /
+      # INGESTOR_RESOLVE_FAIL_THRESHOLD env (the dedicated ingestor-env tests
+      # were removed with the class-2 pass).
 
   - it: schema rejects ingestor.tag=latest
     template: templates/image-refresh-cronjob.yaml

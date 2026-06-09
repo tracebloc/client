@@ -117,28 +117,49 @@ jobs:
           echo "Schema validation passed for ${{ matrix.platform }}"
 
   ingestor-multiarch:
-    # Guard: the chart's PINNED ingestor digest must be a multi-arch index
-    # (linux/amd64 + linux/arm64). Greenfield installs spawn the ingestor from this
-    # pinned digest (before image-refresh ticks), so an amd64-only pin breaks data
-    # ingestion on arm64 hosts (Apple Silicon, Graviton) with ImagePullBackOff. This
-    # would have caught #160 (which pinned the amd64-only v0.3.1). See client#186.
-    name: Pinned ingestor digest is multi-arch
+    # Guard: the ingestor image the cluster spawns must be a multi-arch index
+    # (linux/amd64 + linux/arm64), or arm64 hosts (Apple Silicon, Graviton)
+    # fail data ingestion with "no match for platform" / ImagePullBackOff.
+    # jobs-manager spawns ingestion Jobs by the floating tag
+    # `images.ingestor.tag` (imagePullPolicy=Always) by DEFAULT, so that tag
+    # must be multi-arch. If an operator opts into pinning via
+    # `images.ingestor.digest` (empty by default), the pinned digest must be
+    # multi-arch too. This would have caught #160 (the amd64-only v0.3.1 pin).
+    # See client#186.
+    name: Spawned ingestor image is multi-arch
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Assert images.ingestor.digest supports linux/amd64 + linux/arm64
+      - name: Assert the ingestor tag (and pinned digest, if any) is multi-arch
         run: |
+          repo=$(yq '.images.ingestor.repository' client/values.yaml)
+          if [ -z "$repo" ] || [ "$repo" = "null" ]; then repo="ghcr.io/tracebloc/ingestor"; fi
+          tag=$(yq '.images.ingestor.tag' client/values.yaml)
           digest=$(yq '.images.ingestor.digest' client/values.yaml)
-          echo "Pinned ingestor digest: $digest"
-          if [ -z "$digest" ] || [ "$digest" = "null" ]; then
-            echo "::error::images.ingestor.digest is empty — it must be a pinned multi-arch digest."; exit 1
+
+          assert_multiarch() {
+            ref="$1"; label="$2"
+            echo "Inspecting $label: $ref"
+            plats=$(docker buildx imagetools inspect "$ref" 2>&1 \
+              | awk '/Platform:/{print $2}' | grep -v '^unknown' | sort -u)
+            echo "Platforms: $(echo "$plats" | paste -sd' ' -)"
+            echo "$plats" | grep -qx 'linux/arm64' || { echo "::error::$label ($ref) is NOT multi-arch (no linux/arm64). arm64 installs (Apple Silicon, Graviton) would fail ingestion with 'no match for platform' / ImagePullBackOff. See client#186 / #160."; exit 1; }
+            echo "$plats" | grep -qx 'linux/amd64' || { echo "::error::$label ($ref) is missing linux/amd64."; exit 1; }
+            echo "OK — $label is multi-arch (amd64 + arm64)."
+          }
+
+          # The floating tag is the default spawn target — always validate it.
+          if [ -z "$tag" ] || [ "$tag" = "null" ]; then
+            echo "::error::images.ingestor.tag is empty — the chart must define a floating tag to spawn by."; exit 1
           fi
-          plats=$(docker buildx imagetools inspect "ghcr.io/tracebloc/ingestor@$digest" 2>&1 \
-            | awk '/Platform:/{print $2}' | grep -v '^unknown' | sort -u)
-          echo "Platforms: $(echo "$plats" | paste -sd' ' -)"
-          echo "$plats" | grep -qx 'linux/arm64' || { echo "::error::Pinned ingestor digest is NOT multi-arch (no linux/arm64). arm64 installs (Apple Silicon, Graviton) would fail ingestion with 'no match for platform' / ImagePullBackOff. Pin a multi-arch :0.x index. See client#186 / #160."; exit 1; }
-          echo "$plats" | grep -qx 'linux/amd64' || { echo "::error::Pinned ingestor digest is missing linux/amd64."; exit 1; }
-          echo "OK — pinned ingestor digest is multi-arch (amd64 + arm64)."
+          assert_multiarch "${repo}:${tag}" "floating tag"
+
+          # A pinned digest is opt-in (empty by default). When set, it must be multi-arch too.
+          if [ -n "$digest" ] && [ "$digest" != "null" ]; then
+            assert_multiarch "${repo}@${digest}" "pinned digest"
+          else
+            echo "images.ingestor.digest empty (default) — spawning by floating tag; no pinned digest to check."
+          fi
 
   # Installer script tests (bats + Pester) + the cross-distro prerequisite matrix
   # live in their own workflow: .github/workflows/installer-tests.yaml

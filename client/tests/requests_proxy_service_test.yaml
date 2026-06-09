@@ -1,0 +1,76 @@
+suite: requests-proxy Service
+templates:
+  - templates/requests-proxy-service.yaml
+set:
+  clientId: "test-id"
+  clientPassword: "test"
+tests:
+  - it: should render a single Service document
+    asserts:
+      - hasDocuments:
+          count: 1
+      - isKind:
+          of: Service
+
+  - it: should name the Service requests-proxy-service (stable in-cluster name contract)
+    asserts:
+      - equal:
+          path: metadata.name
+          value: requests-proxy-service
+
+  - it: should be ClusterIP only (no external exposure of the egress proxy)
+    asserts:
+      - equal:
+          path: spec.type
+          value: ClusterIP
+
+  - it: should not be a NodePort or LoadBalancer
+    asserts:
+      - notEqual:
+          path: spec.type
+          value: NodePort
+      - notEqual:
+          path: spec.type
+          value: LoadBalancer
+
+  - it: should select the requests-proxy pods via app=requests-proxy
+    asserts:
+      - equal:
+          path: spec.selector.app
+          value: requests-proxy
+
+  - it: should expose the proxy HTTP port 8888 over TCP
+    asserts:
+      - equal:
+          path: spec.ports[0].name
+          value: http
+      - equal:
+          path: spec.ports[0].port
+          value: 8888
+      - equal:
+          path: spec.ports[0].targetPort
+          value: 8888
+      - equal:
+          path: spec.ports[0].protocol
+          value: TCP
+      - lengthEqual:
+          path: spec.ports
+          count: 1
+
+  - it: should carry the app=requests-proxy label and standard chart labels
+    asserts:
+      - equal:
+          path: metadata.labels.app
+          value: requests-proxy
+      - isNotNullOrEmpty:
+          path: metadata.labels["app.kubernetes.io/managed-by"]
+      - isNotNullOrEmpty:
+          path: metadata.labels["helm.sh/chart"]
+
+  - it: should live in the release namespace
+    release:
+      namespace: my-custom-ns
+    asserts:
+      - equal:
+          path: metadata.namespace
+          value: my-custom-ns
