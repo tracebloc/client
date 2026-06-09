@@ -100,11 +100,21 @@ _verify_tracebloc_cli() {
   # `|| true` so a hiccup in rc-resolution can't trip the orchestrator's set -e.
   local rc; rc="$(_cli_rc_for_shell || true)"
   local export_line; export_line="$(_cli_path_export_line || true)"
-  success "tracebloc CLI installed — one step to put it on your PATH in this terminal:"
-  hint "  ${export_line}"
-  hint "  source ${rc}"
-  info "After that, the 'tracebloc dataset push ./data' step below will work here."
-  info "(New terminals pick it up automatically once ${rc} has the line above.)"
+  local sh_name; sh_name="$(basename "${SHELL:-/bin/sh}")"
+  success "tracebloc CLI installed — put it on your PATH:"
+  if [[ "$sh_name" == "fish" ]]; then
+    # fish_add_path persists (a universal var) AND applies to this shell — no
+    # `source` needed, unlike a POSIX rc edit.
+    hint "  ${export_line}"
+  else
+    # Append the line to the rc, then load it: fixes THIS terminal and every
+    # new one in a single copy-pasteable step (the old code printed a bare
+    # `export` that fixed only this shell, then `source`d an rc that didn't
+    # yet contain the line — so nothing persisted).
+    hint "  echo '${export_line}' >> ${rc}"
+    hint "  source ${rc}"
+  fi
+  info "Then the 'tracebloc dataset push ./data' step below will work."
   return 0
 }
 
