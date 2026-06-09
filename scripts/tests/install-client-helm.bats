@@ -8,6 +8,9 @@ setup() {
   MOCK_CALLS="$(mktemp)"
   GPU_VENDOR=none
   CLIENT_ENV=""
+  # A proxy inherited from the CI runner would otherwise leak proxy keys into
+  # the generated values.yaml and make the proxy assertions non-deterministic.
+  unset HTTP_PROXY HTTPS_PROXY NO_PROXY http_proxy https_proxy no_proxy
 }
 
 # ── _backend_url ───────────────────────────────────────────────────────────
@@ -275,4 +278,88 @@ setup() {
   [ "$status" -eq 0 ]
   run mock_calls
   [[ "$output" == *"helm upgrade --install tracebloc"* ]]
+}
+
+# ── _chart_proxy_env_yaml (#242: host proxy -> split chart keys) ─────────────
+@test "_chart_proxy_env_yaml: no proxy on host -> empty" {
+  run _chart_proxy_env_yaml
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+}
+
+@test "_chart_proxy_env_yaml: host:port -> HTTP_PROXY_HOST + HTTP_PROXY_PORT" {
+  HTTP_PROXY="http://proxy.charite.de:8080"
+  run _chart_proxy_env_yaml
+  [[ "$output" == *'HTTP_PROXY_HOST: "proxy.charite.de"'* ]]
+  [[ "$output" == *'HTTP_PROXY_PORT: "8080"'* ]]
+  [[ "$output" != *"HTTP_PROXY_USERNAME"* ]]
+}
+
+@test "_chart_proxy_env_yaml: prefers HTTPS_PROXY when HTTP_PROXY unset" {
+  HTTPS_PROXY="http://proxy.example.com:3128"
+  run _chart_proxy_env_yaml
+  [[ "$output" == *'HTTP_PROXY_HOST: "proxy.example.com"'* ]]
+  [[ "$output" == *'HTTP_PROXY_PORT: "3128"'* ]]
+}
+
+@test "_chart_proxy_env_yaml: authenticated proxy -> username/password split" {
+  HTTPS_PROXY="http://user:s3cr3t@proxy.example.com:3128"
+  run _chart_proxy_env_yaml
+  [[ "$output" == *'HTTP_PROXY_HOST: "proxy.example.com"'* ]]
+  [[ "$output" == *'HTTP_PROXY_PORT: "3128"'* ]]
+  [[ "$output" == *'HTTP_PROXY_USERNAME: "user"'* ]]
+  [[ "$output" == *'HTTP_PROXY_PASSWORD: "s3cr3t"'* ]]
+}
+
+@test "_chart_proxy_env_yaml: '@' in password tolerated (split on last @)" {
+  http_proxy="http://user:p@ss@proxy.example.com:8080"
+  run _chart_proxy_env_yaml
+  [[ "$output" == *'HTTP_PROXY_HOST: "proxy.example.com"'* ]]
+  [[ "$output" == *'HTTP_PROXY_PASSWORD: "p@ss"'* ]]
+}
+
+@test "_chart_proxy_env_yaml: no port -> HTTP_PROXY_HOST only, no PORT line" {
+  HTTP_PROXY="http://proxy.example.com"
+  run _chart_proxy_env_yaml
+  [[ "$output" == *'HTTP_PROXY_HOST: "proxy.example.com"'* ]]
+  [[ "$output" != *"HTTP_PROXY_PORT"* ]]
+}
+
+@test "_chart_proxy_env_yaml: passes host NO_PROXY through (proxyEnv unions cluster ranges)" {
+  HTTP_PROXY="http://proxy:8080"; NO_PROXY="myinternal.example,.corp"
+  run _chart_proxy_env_yaml
+  [[ "$output" == *'NO_PROXY: "myinternal.example,.corp"'* ]]
+}
+
+# ── install_client_helm: host proxy propagated into the generated values ────
+@test "install_client_helm: host proxy -> values.yaml carries split proxy keys" {
+  HOST_DATA_DIR="$BATS_TEST_TMPDIR/data"; mkdir -p "$HOST_DATA_DIR"
+  _ensure_tracebloc_dirs() { :; }
+  _ensure_release_dirs() { :; }
+  _ensure_helm_runnable() { :; }
+  helm() { record "helm $*"; return 0; }
+  verify_credentials() { printf valid; }
+  HTTP_PROXY="http://proxy.charite.de:8080"; NO_PROXY=".charite.de"
+  run install_client_helm <<< $'myid\nmypw'
+  [ "$status" -eq 0 ]
+  # NB: the "Corporate proxy detected" notice goes through log(), which the test
+  # harness routes to /dev/null — so assert on the generated file, not $output.
+  grep -q 'HTTP_PROXY_HOST: "proxy.charite.de"' "$HOST_DATA_DIR/values.yaml"
+  grep -q 'HTTP_PROXY_PORT: "8080"' "$HOST_DATA_DIR/values.yaml"
+  grep -q 'NO_PROXY: ".charite.de"' "$HOST_DATA_DIR/values.yaml"
+  # injection must not corrupt the rest of the env: block / file
+  grep -q 'clientId: "myid"' "$HOST_DATA_DIR/values.yaml"
+  grep -q 'SINGLE_NODE: "true"' "$HOST_DATA_DIR/values.yaml"
+}
+
+@test "install_client_helm: no host proxy -> no proxy keys in values.yaml" {
+  HOST_DATA_DIR="$BATS_TEST_TMPDIR/data"; mkdir -p "$HOST_DATA_DIR"
+  _ensure_tracebloc_dirs() { :; }
+  _ensure_release_dirs() { :; }
+  _ensure_helm_runnable() { :; }
+  helm() { record "helm $*"; return 0; }
+  verify_credentials() { printf valid; }
+  run install_client_helm <<< $'myid\nmypw'
+  [ "$status" -eq 0 ]
+  ! grep -q 'HTTP_PROXY_HOST' "$HOST_DATA_DIR/values.yaml"
 }
