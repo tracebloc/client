@@ -119,3 +119,29 @@ tests:
       - notContains:
           path: spec.template.spec.containers[1].env
           content: {name: NO_PROXY, value: "myinternal.example"}
+  # ===== #238 regression: a directly-set env.HTTP_PROXY survives when HTTP_PROXY_HOST is UNSET =====
+  # Before 1.6.0 a corporate proxy was configured by setting env.HTTP_PROXY (a
+  # full URL) directly; tracebloc.proxyEnv (the HTTP_PROXY_HOST-driven helper)
+  # did not exist. The #229 proxy-key exclusion must therefore stay INACTIVE
+  # when HTTP_PROXY_HOST is unset — otherwise the passthrough drops the user's
+  # HTTP_PROXY and their backend/registry egress breaks on upgrade to 1.6.0.
+  # proxyEnv renders nothing here, so the generic passthrough is the sole (and
+  # correct) source: the direct values pass through verbatim, NO_PROXY unmerged.
+  - it: a directly-set env.HTTP_PROXY survives when HTTP_PROXY_HOST is unset (jobs-manager)
+    template: templates/jobs-manager-deployment.yaml
+    set: {env.HTTP_PROXY: "http://corp-proxy.example.com:3128", env.NO_PROXY: "myinternal.example"}
+    asserts:
+      # api container: directly-set proxy vars pass through (proxyEnv inactive)
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content: {name: HTTP_PROXY, value: "http://corp-proxy.example.com:3128"}
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content: {name: NO_PROXY, value: "myinternal.example"}
+      # pods-monitor container: same
+      - contains:
+          path: spec.template.spec.containers[1].env
+          content: {name: HTTP_PROXY, value: "http://corp-proxy.example.com:3128"}
+      - contains:
+          path: spec.template.spec.containers[1].env
+          content: {name: NO_PROXY, value: "myinternal.example"}

@@ -1,5 +1,8 @@
-{{- /* #229: these env keys are owned by tracebloc.proxyEnv, which emits HTTP(S)_PROXY and a merged, cluster-safe NO_PROXY. Exclude them from the generic .Values.env passthrough below so a user-set NO_PROXY (or proxy var) is not re-emitted UNMERGED after proxyEnv — Kubernetes keeps the LAST duplicate env, which would drop the cluster-internal NO_PROXY entries and route in-cluster traffic through the proxy. */ -}}
-{{- $proxyKeys := list "HTTP_PROXY_HOST" "HTTP_PROXY_PORT" "HTTP_PROXY_USERNAME" "HTTP_PROXY_PASSWORD" "NO_PROXY" "no_proxy" "HTTP_PROXY" "HTTPS_PROXY" "http_proxy" "https_proxy" -}}
+{{- /* #229/#238: when HTTP_PROXY_HOST is set, tracebloc.proxyEnv owns these keys — it emits HTTP(S)_PROXY and a merged, cluster-safe NO_PROXY. Exclude them from the generic .Values.env passthrough below so a user-set NO_PROXY (or proxy var) is not re-emitted UNMERGED after proxyEnv — Kubernetes keeps the LAST duplicate env, which would drop the cluster-internal NO_PROXY entries and route in-cluster traffic through the proxy. When HTTP_PROXY_HOST is UNSET, proxyEnv renders nothing, so the exclusion list stays empty and the passthrough still emits a directly-set env.HTTP_PROXY / NO_PROXY — the pre-1.6.0 way to configure a corporate proxy. Dropping those unconditionally was an upgrade regression (#238): gate the exclusion on proxyEnv being active. */ -}}
+{{- $proxyKeys := list -}}
+{{- if .Values.env.HTTP_PROXY_HOST -}}
+{{- $proxyKeys = list "HTTP_PROXY_HOST" "HTTP_PROXY_PORT" "HTTP_PROXY_USERNAME" "HTTP_PROXY_PASSWORD" "NO_PROXY" "no_proxy" "HTTP_PROXY" "HTTPS_PROXY" "http_proxy" "https_proxy" -}}
+{{- end -}}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
