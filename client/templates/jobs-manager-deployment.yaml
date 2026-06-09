@@ -94,13 +94,30 @@ spec:
           value: {{ include "tracebloc.clientLogsPvc" . | quote }}
         - name: MYSQL_HOST
           value: "mysql-client"
-        # client-runtime#40: default ingestor image digest for the
-        # POST /internal/submit-ingestion-run endpoint. Auto-upgrade
-        # keeps this current; the ingestor subchart no longer requires
-        # the customer to pin a digest. Nil-guarded so `--reuse-values`
-        # from a pre-this-PR release doesn't crash templating on the
-        # missing `images.ingestor` key — empty value means jobs-manager
-        # accepts only request-body overrides and returns 503 if absent.
+        # Ingestor image wiring for the POST /internal/submit-ingestion-run
+        # endpoint. jobs-manager spawns each ingestion Job from these values
+        # (see client-runtime submit_ingestion_run._build_image_reference).
+        #
+        # Default (digest empty): spawn by the floating tag with
+        # imagePullPolicy=Always, so every ingestion Job resolves the current
+        # published ingestor digest at spawn time — exactly how training pods
+        # are spawned. There is no chart-pinned digest to keep current, so a
+        # `helm upgrade` that resets values can no longer revert the ingestor
+        # image (the regression behind the customer "non-numeric" report). The
+        # image-refresh CronJob no longer touches the ingestor — its class-2
+        # pass was retired in favour of this.
+        #
+        # Pinning is opt-in: set `images.ingestor.digest` to a canonical
+        # multi-arch digest to lock every ingestion Job to that exact image
+        # (imagePullPolicy then drops to IfNotPresent for reproducibility —
+        # debugging a release before rollout, certification, air-gapped repro).
+        # Repository + tag are overridable for private mirrors. All three are
+        # nil-guarded so `--reuse-values` from a release that predates the
+        # `images.ingestor` key still renders.
+        - name: INGESTOR_IMAGE_REPOSITORY
+          value: {{ (default dict .Values.images.ingestor).repository | default "ghcr.io/tracebloc/ingestor" | quote }}
+        - name: INGESTOR_IMAGE_TAG
+          value: {{ (default dict .Values.images.ingestor).tag | default "0.3" | quote }}
         - name: INGESTOR_IMAGE_DIGEST
           value: {{ (default dict .Values.images.ingestor).digest | default "" | quote }}
         - name: REQUESTS_PROXY_URL

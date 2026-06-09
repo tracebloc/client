@@ -196,75 +196,59 @@ images:
     digest: ""
   # client-runtime#40 / client#125: the ingestor image is spawned by
   # jobs-manager at ingestion-submission time, not as a long-lived pod.
-  # The digest surfaces into jobs-manager as the INGESTOR_IMAGE_DIGEST
-  # env var, which it uses when spawning each ingestion Job.
+  # jobs-manager builds the image reference from the three keys below
+  # (repository / tag / digest) and spawns each ingestion Job from it —
+  # see client-runtime submit_ingestion_run._build_image_reference.
   #
-  # Lifecycle from v1.4.1 (#158):
-  #   * The pinned `digest` below is the INITIAL value baked into the
-  #     chart at release time — fresh installs land on this. Keep it
-  #     non-empty so jobs-manager is usable from the moment the pod
-  #     starts (an empty value would cause 503s on ingestion-submit
-  #     until the next image-refresh tick).
-  #   * The image-refresh CronJob then polls
-  #     `ghcr.io/tracebloc/ingestor:<tag below>` on its schedule and
-  #     updates the LIVE deployment's INGESTOR_IMAGE_DIGEST env via
-  #     `kubectl set env` whenever the registry serves a new digest.
-  #     Each new ingestor image push to the floating tag is picked up
-  #     within ~15 min — no chart release required for ingestor image
-  #     bumps.
-  #   * Helm's 3-way merge preserves image-refresh's writes across
-  #     future `helm upgrade`s as long as the chart's pinned `digest`
-  #     below doesn't change between chart versions. The pinned value
-  #     stays as a fallback for greenfield installs; ongoing rollouts
-  #     are owned by image-refresh.
-  #   * Bumping `digest` below in a future chart release IS still valid
-  #     and remains the explicit-baseline path (#161 was the first
-  #     example: v0.3.0 → v0.3.1 for the MLM tokenizer + metadata
-  #     parity fixes; see commit history for the rationale on any
-  #     given bump). Helm will re-sync the env to the new pinned value
-  #     on the next upgrade. Image-refresh reconverges on the registry
-  #     digest on its next tick if the two differ.
+  # Default mechanism (revert-proof, always-current):
+  #   * `digest` empty → jobs-manager spawns each ingestion Job by the
+  #     floating `tag` with imagePullPolicy=Always. The kubelet resolves
+  #     the tag's current digest on every spawn (a cheap manifest check;
+  #     already-present layers are reused), so the cluster always runs the
+  #     current published ingestor release. This mirrors how training pods
+  #     are spawned and is immune to a `helm upgrade` resetting values —
+  #     the failure mode that the old pinned-digest + image-refresh design
+  #     suffered (a customer was stuck on a stale baseline after upgrade,
+  #     surfacing as a "non-numeric" validation error on data that a newer
+  #     ingestor handled correctly).
+  #   * New ingestor releases under the same `tag` are picked up on the
+  #     next ingestion submit — no chart release, no CronJob, no
+  #     `kubectl set env`. The image-refresh CronJob's ingestor (class-2)
+  #     pass was retired; image-refresh now only rolls the long-lived
+  #     jobs-manager pod.
   #
-  # Customers can also override per-install via the ingestor subchart's
-  # `image.digest` for one-off testing, independent of this value.
+  # Opt-in pinning (reproducibility):
+  #   * Set `digest` to a canonical digest to lock every ingestion Job to
+  #     that exact image; jobs-manager then uses imagePullPolicy=IfNotPresent.
+  #     Use for debugging a release before rollout, certification, or
+  #     air-gapped repro. A single request can also be pinned via the submit
+  #     endpoint's `image_digest` body field, independent of this value.
+  #   * A pinned `digest` MUST be a multi-arch index (linux/amd64 +
+  #     linux/arm64): an amd64-only pin breaks ingestion on arm64 hosts
+  #     (Apple Silicon, Graviton) with "no match for platform" /
+  #     ImagePullBackOff (#186; the amd64-only v0.3.1 pin in #160 was the
+  #     original regression). The same applies to the floating `tag` — the
+  #     team publishes the tag as a multi-arch index. Enforced by the
+  #     `ingestor-multiarch` job in .github/workflows/helm-ci.yaml.
   ingestor:
-    # Current baseline digest: v0.3.6 (2026-06-08, from #227). Skips
-    # 0.3.3–0.3.5 to land on the latest 0.3.x patch, carrying the
-    # cumulative NULL / empty-value ingestion fixes on top of v0.3.2 —
-    # tracebloc/data-ingestors#150 (stop counting missing values as
-    # "non-numeric" in DataValidator — the regression a customer hit on
-    # the stale 0.3.2 baseline), #167 / #168 / #170 / #172 (VARCHAR/CHAR/
-    # TEXT, DATE/TIME, JSON null + empty-string tolerance) and #176 / #179
-    # (null-like values round-trip end-to-end as SQL NULL; Python bool not
-    # stringified). Bump only when greenfield installs should start on a
-    # different version; ongoing rollouts are managed by image-refresh.
-    #
-    # This digest MUST be a multi-arch index (linux/amd64 + linux/arm64).
-    # jobs-manager spawns the ingestor Job by this pinned digest, so an
-    # amd64-only pin breaks ingestion on arm64 hosts (Apple Silicon,
-    # Graviton) with "no match for platform" / ImagePullBackOff (#186; the
-    # amd64-only v0.3.1 pin in #160 was the regression). Enforced by the
-    # `ingestor-multiarch` job in .github/workflows/helm-ci.yaml.
-    digest: "sha256:dfdaa7e633a8df0f46b403e9422eba5c16bdb7d9c39047e6d3738f9e38fbdba8"
-    # Floating tag polled by image-refresh. The team's ghcr.io
-    # publishing convention uses semver-style float tags — `0` tracks
-    # the latest 0.x, `0.3` tracks the latest 0.3.x patch. Default is
-    # `0.3` (patch-only auto-track): a future 0.4 release will NOT be
-    # picked up automatically; the chart's pinned `digest` would need
-    # to bump and either explicitly move the chart's default tag to
-    # `0.4` or an operator would override here. Pick `0` if you want
-    # auto-tracking of minor releases too. `latest` is rejected by
-    # the schema — image-refresh behaviour must not drift.
+    # Image repository. Override for a private mirror / air-gapped registry
+    # (which must host the same `tag` / `digest`). Surfaces into jobs-manager
+    # as INGESTOR_IMAGE_REPOSITORY.
+    repository: "ghcr.io/tracebloc/ingestor"
+    # Floating tag spawned by default (imagePullPolicy=Always). The team's
+    # ghcr.io publishing convention uses semver-style float tags — `0` tracks
+    # the latest 0.x, `0.3` tracks the latest 0.3.x patch. `0.3` (patch-only
+    # auto-track) is the default: a future 0.4 release will NOT be picked up
+    # until this is moved to `0.4` (or set to `0` for minor auto-track too).
+    # `latest` is rejected by the schema.
     tag: "0.3"
-    # Per-image opt-out for image-refresh. Default true (auto-refresh
-    # active). Set to false to lock the env at the `digest` value above
-    # — image-refresh will skip this image and leave the deployment's
-    # INGESTOR_IMAGE_DIGEST env alone. Used by operators who need
-    # reproducible pinning for debugging, certification, or air-gapped
-    # mirroring. Unlike jobs-manager (where setting `digest` itself is
-    # the opt-in to pinning), ingestor needs an explicit flag because
-    # its `digest` must be non-empty for jobs-manager to function.
-    autoRefresh: true
+    # Opt-in pin. Empty (default) = spawn by the floating `tag` above. Set to
+    # a canonical multi-arch digest to lock all ingestion Jobs to one exact
+    # image (see the comment block above). Last known-good baseline, for easy
+    # pinning: v0.3.6 (cumulative NULL / empty-value ingestion fixes —
+    # data-ingestors#150/#167/#168/#170/#172/#176/#179):
+    #   sha256:dfdaa7e633a8df0f46b403e9422eba5c16bdb7d9c39047e6d3738f9e38fbdba8
+    digest: ""
   podsMonitor:
     digest: ""
   resourceMonitor:
@@ -528,17 +512,6 @@ imageRefresh:
   # on bare-metal first-boot can take minutes, and the CronJob slot
   # shouldn't hold all night if a rollout genuinely wedges.
   rolloutTimeout: "10m"
-  # Consecutive failed ghcr.io ingestor-digest resolves before image-refresh
-  # stops silently skipping and fails the Job loudly (visible in
-  # `kubectl get cronjob` / monitoring, plus a `tracebloc.io/ingestor-refresh-
-  # last-error` annotation on the jobs-manager deployment). Default 3 ≈ 45 min
-  # at the 15-min schedule: long enough to ride out a transient registry blip,
-  # short enough to surface a persistent egress/proxy failure (e.g. a cluster
-  # that reaches docker.io but not ghcr.io — the #186 (#2) root cause). A
-  # failed resolve BELOW this count still just WARNs and skips the tick.
-  # Raise it for flakier egress; set it very high to keep the old
-  # skip-forever behaviour. Only affects the ingestor (ghcr) image.
-  ingestorResolveFailureThreshold: 3
   # CronJob spec knobs. Override per-cluster if needed.
   suspend: false
   # Lower history limits than autoUpgrade — this Job runs ~96x/day, the

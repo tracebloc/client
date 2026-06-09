@@ -299,22 +299,23 @@
         },
         "ingestor": {
           "type": "object",
+          "description": "Image used for spawned ingestion Jobs. jobs-manager builds the reference from repository/tag/digest (client-runtime submit_ingestion_run). Default (digest empty): spawn by the floating tag with imagePullPolicy=Always, so each Job resolves the current published digest at spawn — revert-proof across `helm upgrade`, mirroring how training pods are spawned. Set digest to pin (IfNotPresent).",
           "properties": {
-            "digest": {
+            "repository": {
               "type": "string",
-              "pattern": "^(sha256:[a-f0-9]{64})?$",
-              "description": "Canonical ghcr.io/tracebloc/ingestor digest (sha256:<64 hex>). Initial value baked into the chart; image-refresh dynamically updates the live env from this baseline (#158). Must be non-empty — an empty value would cause jobs-manager to 503 on every ingestion submission."
+              "minLength": 1,
+              "description": "Ingestor image repository. Override for a private mirror / air-gapped registry (must host the same tag/digest). Surfaces into jobs-manager as INGESTOR_IMAGE_REPOSITORY. Default ghcr.io/tracebloc/ingestor."
             },
             "tag": {
               "type": "string",
               "minLength": 1,
               "not": { "const": "latest" },
-              "description": "Floating ghcr.io/tracebloc/ingestor tag polled by image-refresh. `latest` is rejected — image-refresh behaviour must not drift."
+              "description": "Floating ghcr.io/tracebloc/ingestor tag spawned by default (imagePullPolicy=Always). `latest` is rejected — spawn behaviour must not drift. Surfaces as INGESTOR_IMAGE_TAG."
             },
-            "autoRefresh": {
-              "type": "boolean",
-              "default": true,
-              "description": "Per-image opt-out for image-refresh. Default true. Set false to lock the env at `digest` — image-refresh skips this image. Asymmetric with jobsManager/podsMonitor (which use digest='' as the opt-in signal) because ingestor's digest must be non-empty for jobs-manager to function."
+            "digest": {
+              "type": "string",
+              "pattern": "^(sha256:[a-f0-9]{64})?$",
+              "description": "Optional opt-in pin (sha256:<64 hex>). Empty (default) = spawn by the floating `tag`. When set, every ingestion Job runs this exact image with imagePullPolicy=IfNotPresent (reproducibility). A pinned digest must be a multi-arch index (#186). Surfaces as INGESTOR_IMAGE_DIGEST."
             }
           }
         },
@@ -588,12 +589,6 @@
           "type": "string",
           "pattern": "^[0-9]+(s|m|h)$",
           "description": "Passed to `kubectl rollout status --timeout`. Allow headroom for bare-metal image pull."
-        },
-        "ingestorResolveFailureThreshold": {
-          "type": "integer",
-          "minimum": 1,
-          "default": 3,
-          "description": "Consecutive failed ghcr.io ingestor-digest resolves before image-refresh fails the Job loudly instead of silently skipping. See #186 (#2). Higher tolerates flakier egress; very high keeps the old skip-forever behaviour."
         },
         "suspend": {
           "type": "boolean",

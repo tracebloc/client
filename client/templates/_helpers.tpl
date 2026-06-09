@@ -145,27 +145,20 @@ mysql-pvc
 {{- $imgs := default dict .Values.images -}}
 {{- $jm := default dict $imgs.jobsManager -}}
 {{- $pm := default dict $imgs.podsMonitor -}}
-{{- $in := default dict $imgs.ingestor -}}
 {{/*
-  Per-image pin signals (each one means "skip auto-refresh for this image"):
-  * jobs-manager / pods-monitor: digest set (non-empty) — same signal as
-    the deployment uses to switch imagePullPolicy to IfNotPresent.
-  * ingestor: explicit `autoRefresh: false` flag — asymmetric because
-    ingestor.digest must be non-empty for jobs-manager to work, so we
-    can't use digest-presence as the signal there.
+  Per-image pin signal (means "skip auto-refresh for this image"):
+  jobs-manager / pods-monitor are pinned when `digest` is set (non-empty) —
+  the same signal the deployment uses to switch imagePullPolicy to
+  IfNotPresent. The ingestor is no longer refreshed by this CronJob (it is
+  spawned by jobs-manager from a floating tag — see the
+  image-refresh-cronjob.yaml header and submit_ingestion_run in
+  client-runtime), so the CronJob exists only to refresh the two class-1
+  images: when BOTH are pinned there is nothing left for it to do.
 */}}
 {{- $jmPinned := $jm.digest -}}
 {{- $pmPinned := $pm.digest -}}
-{{/*
-  Can't use `default true $in.autoRefresh` here — Go templates treat
-  the bool `false` as falsy, so `default true false` returns `true`
-  and flips the pin state on the explicit-disable case. Instead test
-  for the literal `false` directly; absence (nil) and explicit `true`
-  both fall through to "not pinned".
-*/}}
-{{- $inPinned := eq $in.autoRefresh false -}}
 {{- if not $ir.enabled -}}
-{{- else if and (and $jmPinned $pmPinned) $inPinned -}}
+{{- else if and $jmPinned $pmPinned -}}
 {{- else -}}
 true
 {{- end -}}

@@ -91,6 +91,59 @@ tests:
             name: JOB_IMAGE_HOST
             value: "docker.io/"
 
+  - it: spawns the ingestor by floating tag by default (revert-proof across helm upgrade)
+    # Default (no pinned digest): jobs-manager spawns each ingestion Job by
+    # the floating tag with imagePullPolicy=Always, so the cluster always
+    # runs the current published ingestor and a `helm upgrade` that resets
+    # values cannot revert it. Wires REPOSITORY + TAG + an empty DIGEST into
+    # client-runtime submit_ingestion_run._build_image_reference.
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: INGESTOR_IMAGE_REPOSITORY
+            value: "ghcr.io/tracebloc/ingestor"
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: INGESTOR_IMAGE_TAG
+            value: "0.3"
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: INGESTOR_IMAGE_DIGEST
+            value: ""
+
+  - it: pins the ingestor digest when images.ingestor.digest is set (opt-in reproducibility)
+    set:
+      images:
+        ingestor:
+          digest: "sha256:dfdaa7e633a8df0f46b403e9422eba5c16bdb7d9c39047e6d3738f9e38fbdba8"
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: INGESTOR_IMAGE_DIGEST
+            value: "sha256:dfdaa7e633a8df0f46b403e9422eba5c16bdb7d9c39047e6d3738f9e38fbdba8"
+
+  - it: ingestor repository + tag are overridable for a private mirror / air-gapped registry
+    set:
+      images:
+        ingestor:
+          repository: "private.registry/ingestor"
+          tag: "0.4"
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: INGESTOR_IMAGE_REPOSITORY
+            value: "private.registry/ingestor"
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: INGESTOR_IMAGE_TAG
+            value: "0.4"
+
   # client-runtime#92: SINGLE_NODE gates jobs-manager's GPU->CPU pending
   # fallback; it defaults to hostPath.enabled so managed (dynamic-PVC)
   # clusters never auto-downgrade while installer/bare-metal single-host
