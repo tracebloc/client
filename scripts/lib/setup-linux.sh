@@ -86,6 +86,77 @@ _ensure_kernel_modules() {
   fi
 }
 
+# ── Corporate-proxy support for the host Docker daemon (#244) ────────────────
+# dockerd pulls the k3d node image (rancher/k3s) and other images via the HOST
+# daemon, which does NOT inherit the shell's HTTP_PROXY — it reads a systemd
+# drop-in instead. Without it, `k3d cluster create` fails on a strict proxy-only
+# host with "failed to pull rancher/k3s … i/o timeout", BEFORE the client is
+# ever installed. Mirrors cluster.sh (k3d node env, #166) and
+# install-client-helm.sh (chart values, #242): when the host has a proxy,
+# propagate it to every layer that needs it. Idempotent — only restarts dockerd
+# when the drop-in content actually changes, so a re-run never bounces a running
+# cluster; and if the host proxy is later REMOVED, a re-run deletes the drop-in
+# we wrote (tagged with a marker) so dockerd stops routing pulls through a dead
+# proxy, while a foreign http-proxy.conf is left untouched. (Linux/systemd only;
+# Docker Desktop on macOS manages its own proxy.)
+_configure_docker_proxy() {
+  has systemctl || return 0                       # only systemd-managed Docker
+  local dir="${TB_DOCKER_DROPIN_DIR:-/etc/systemd/system/docker.service.d}"
+  local conf="$dir/http-proxy.conf"
+  local marker="# Managed by tracebloc installer (#244)"
+
+  local proxy="" var
+  for var in HTTP_PROXY HTTPS_PROXY http_proxy https_proxy; do
+    [[ -n "${!var:-}" ]] && { proxy="${!var}"; break; }
+  done
+
+  # No host proxy → remove a drop-in WE wrote on a previous run (the proxy was
+  # removed since), so dockerd doesn't keep pulling through a proxy that no
+  # longer exists. Only touch our own file (identified by the marker); a
+  # user/IT-managed http-proxy.conf is left alone.
+  if [[ -z "$proxy" ]]; then
+    if [[ -f "$conf" ]] && sudo grep -qF "$marker" "$conf" 2>/dev/null; then
+      sudo rm -f "$conf"
+      sudo systemctl daemon-reload 2>/dev/null || true
+      if sudo systemctl is-active --quiet docker 2>/dev/null; then
+        spin_cmd "Removing stale Docker proxy settings…" sudo systemctl restart docker || true
+      fi
+      log "Removed stale tracebloc-managed Docker daemon proxy (no host proxy set)."
+    fi
+    return 0
+  fi
+
+  local https="${HTTPS_PROXY:-${https_proxy:-$proxy}}"
+  local noproxy
+  if declare -F _augment_no_proxy >/dev/null 2>&1; then
+    noproxy="$(_augment_no_proxy)"                 # host NO_PROXY ∪ cluster-internal ranges
+  else
+    noproxy="${NO_PROXY:-${no_proxy:-}}"
+  fi
+
+  local desired
+  printf -v desired '%s\n[Service]\nEnvironment="HTTP_PROXY=%s"\nEnvironment="HTTPS_PROXY=%s"\nEnvironment="NO_PROXY=%s"\n' \
+    "$marker" "$proxy" "$https" "$noproxy"
+
+  # Unchanged → leave dockerd alone (a restart would bounce a running cluster).
+  # Compare with cmp, not "$(cat)" == , so a trailing newline isn't stripped by
+  # command substitution (which would make the check always report "changed").
+  if [[ -f "$conf" ]] && printf '%s' "$desired" | sudo cmp -s - "$conf" 2>/dev/null; then
+    log "Docker daemon proxy already configured."
+    return 0
+  fi
+
+  sudo mkdir -p "$dir"
+  printf '%s' "$desired" | sudo tee "$conf" >/dev/null
+  sudo systemctl daemon-reload 2>/dev/null || true
+  # Restart only if the daemon is already up; on a fresh install the start in
+  # install_docker_engine brings it up with the drop-in already in place.
+  if sudo systemctl is-active --quiet docker 2>/dev/null; then
+    spin_cmd "Applying Docker proxy settings…" sudo systemctl restart docker || true
+  fi
+  log "Configured Docker daemon proxy for image pulls behind a corporate proxy (HTTP_PROXY=$proxy)."
+}
+
 # ── Docker Engine ────────────────────────────────────────────────────────────
 install_docker_engine() {
   # os-release path is overridable (TB_OS_RELEASE_FILE) so the distro detection
@@ -131,6 +202,10 @@ install_docker_engine() {
   # Load the kernel modules dockerd's bridge driver + k3s need BEFORE starting,
   # so minimal RHEL/AlmaLinux images don't fail with the "addrtype" iptables error.
   _ensure_kernel_modules
+
+  # Give the host Docker daemon the corporate proxy BEFORE it starts and before
+  # k3d uses it to pull rancher/k3s (#244) — dockerd doesn't read the shell env.
+  _configure_docker_proxy
 
   # Clear any failed/throttled state from a previous attempt first — a crashed
   # daemon leaves the unit in "Start request repeated too quickly", which makes
