@@ -55,11 +55,11 @@ jobs:
           # below for visibility but don't fail the gate.
           shellcheck --severity=error --shell=bash \
             scripts/install.sh scripts/install-k8s.sh scripts/lib/*.sh \
-            scripts/tests/distro-prereqs.sh scripts/tests/e2e-cluster.sh scripts/tests/e2e-proxy.sh scripts/tests/check-drift.sh
+            scripts/tests/distro-prereqs.sh scripts/tests/e2e-cluster.sh scripts/tests/e2e-proxy.sh scripts/tests/e2e-auto-upgrade.sh scripts/tests/check-drift.sh
           echo "── shellcheck warnings (advisory, non-blocking) ──"
           shellcheck --severity=warning --shell=bash \
             scripts/install.sh scripts/install-k8s.sh scripts/lib/*.sh \
-            scripts/tests/distro-prereqs.sh scripts/tests/e2e-cluster.sh scripts/tests/e2e-proxy.sh scripts/tests/check-drift.sh || true
+            scripts/tests/distro-prereqs.sh scripts/tests/e2e-cluster.sh scripts/tests/e2e-proxy.sh scripts/tests/e2e-auto-upgrade.sh scripts/tests/check-drift.sh || true
 
       - name: PSScriptAnalyzer (PowerShell installer)
         shell: pwsh
