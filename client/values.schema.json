@@ -266,6 +266,7 @@
       "description": "In-cluster squid egress gateway (SECURITY §8.2 / client-runtime#102). Forward proxy that permits HTTPS CONNECT only to the allowlist, so a locked-down training pod can reach the backend + App Insights and nothing else.",
       "properties": {
         "enabled": { "type": "boolean", "default": true },
+        "routeWorkloads": { "type": "boolean", "default": false, "description": "Route training-pod outbound HTTPS through the gateway (jobs-manager injects HTTPS_PROXY). Default false — enable per-fleet, verify a run, then drop the direct egress rule (networkPolicy.training.allowExternalHttps=false)." },
         "port": { "type": "integer", "minimum": 1, "maximum": 65535, "default": 3128 },
         "runAsUser": { "type": "integer", "minimum": 1 },
         "image": {

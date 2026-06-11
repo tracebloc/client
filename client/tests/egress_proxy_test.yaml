@@ -10,6 +10,8 @@ templates:
   - templates/egress-proxy-deployment.yaml
   - templates/egress-proxy-service.yaml
   - templates/egress-proxy-configmap.yaml
+  - templates/jobs-manager-deployment.yaml
+  - templates/network-policy-training.yaml
 set:
   clientId: "test-id"
   clientPassword: "test"
@@ -147,3 +149,48 @@ tests:
       - matchRegex:
           path: data["squid.conf"]
           pattern: "never_direct allow all"
+
+  # --- Step 1: routing training pods through the gateway ---
+
+  - it: jobs-manager gets EGRESS_PROXY_URL only when routeWorkloads is enabled
+    template: templates/jobs-manager-deployment.yaml
+    documentIndex: 0
+    set:
+      egressProxy:
+        routeWorkloads: true
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: EGRESS_PROXY_URL
+            value: "http://egress-proxy-service:3128"
+
+  - it: jobs-manager does NOT get EGRESS_PROXY_URL by default (routeWorkloads false)
+    template: templates/jobs-manager-deployment.yaml
+    documentIndex: 0
+    asserts:
+      - notContains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: EGRESS_PROXY_URL
+            value: "http://egress-proxy-service:3128"
+
+  - it: training netpol permits egress to the gateway and keeps a stable training podSelector
+    template: templates/network-policy-training.yaml
+    asserts:
+      # auto-upgrade safety: the lockdown netpol must select ONLY training pods,
+      # never the auto-upgrade / image-refresh cronjobs.
+      - equal:
+          path: spec.podSelector.matchLabels
+          value:
+            tracebloc.io/workload: training
+      - contains:
+          path: spec.egress
+          content:
+            to:
+              - podSelector:
+                  matchLabels:
+                    app: egress-proxy
+            ports:
+              - port: 3128
+                protocol: TCP

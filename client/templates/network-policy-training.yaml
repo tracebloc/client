@@ -100,4 +100,17 @@ spec:
       ports:
         - port: 8888
           protocol: TCP
+    {{- if (default dict .Values.egressProxy).enabled }}
+    # 5. egress gateway — training pods reach the in-cluster squid egress gateway
+    #    (egress-proxy-service) for allowlisted external HTTPS, used once the external
+    #    0.0.0.0/0:443 rule (rule 2) is dropped. Re-permitted explicitly like MySQL /
+    #    requests-proxy above (rule 2's `except` blocks ClusterIP egress).
+    - to:
+        - podSelector:
+            matchLabels:
+              app: egress-proxy
+      ports:
+        - port: {{ (default dict .Values.egressProxy).port | default 3128 }}
+          protocol: TCP
+    {{- end }}
 {{- end }}

@@ -198,6 +198,10 @@ networkPolicy:
 # so the training NetworkPolicy never selects it (it keeps its own egress).
 egressProxy:
   enabled: true
+  # Route training-pod outbound HTTPS through the gateway (Step 1 of #102). Default
+  # FALSE so the gateway ships inert; flip per-fleet to true, verify a real training
+  # run, THEN set networkPolicy.training.allowExternalHttps=false to drop direct egress.
+  routeWorkloads: false
   # squid image, pinned by multi-arch (amd64+arm64) index digest — tracebloc pins
   # all images by digest. `tag` stays for readability; the digest is authoritative.
   # ubuntu/squid:6.6-24.04_beta (Ubuntu 24.04 LTS base), resolved 2026-06-10.
