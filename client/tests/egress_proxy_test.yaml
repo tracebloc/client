@@ -194,3 +194,53 @@ tests:
             ports:
               - port: 3128
                 protocol: TCP
+
+  # --- Step 3: the lockdown — drop the external 0.0.0.0/0:443 rule ---
+
+  - it: keeps the external 443 egress rule by default (allowExternalHttps true)
+    template: templates/network-policy-training.yaml
+    asserts:
+      - contains:
+          path: spec.egress
+          content:
+            to:
+              - ipBlock:
+                  cidr: 0.0.0.0/0
+                  except:
+                    - 10.0.0.0/8
+                    - 172.16.0.0/12
+                    - 192.168.0.0/16
+            ports:
+              - port: 443
+                protocol: TCP
+
+  - it: drops the external 443 rule but keeps the gateway path when allowExternalHttps is false
+    template: templates/network-policy-training.yaml
+    set:
+      networkPolicy:
+        training:
+          allowExternalHttps: false
+    asserts:
+      - notContains:
+          path: spec.egress
+          content:
+            to:
+              - ipBlock:
+                  cidr: 0.0.0.0/0
+                  except:
+                    - 10.0.0.0/8
+                    - 172.16.0.0/12
+                    - 192.168.0.0/16
+            ports:
+              - port: 443
+                protocol: TCP
+      - contains:
+          path: spec.egress
+          content:
+            to:
+              - podSelector:
+                  matchLabels:
+                    app: egress-proxy
+            ports:
+              - port: 3128
+                protocol: TCP

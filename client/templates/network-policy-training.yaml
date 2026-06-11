@@ -61,10 +61,16 @@ spec:
           protocol: UDP
         - port: 53
           protocol: TCP
+    {{- /* Rule 2 (external HTTPS) is the egress hole SECURITY §8.2 closes. Gated on
+           networkPolicy.training.allowExternalHttps via `dig` with a default of TRUE:
+           an absent key (helm upgrade --reuse-values from a release predating it)
+           keeps the rule — old behaviour — so only an explicit `false` drops it, once
+           an operator has verified the egress gateway on that cluster (#102). */}}
+    {{- if dig "allowExternalHttps" true .Values.networkPolicy.training }}
     # 2. External HTTPS — everything NOT in the cluster's pod/service CIDRs.
-    #    Training pods call backend, Azure Service Bus, App Insights, etc.
-    #    This blocks pod-to-pod, ClusterIPs, jobs-manager, K8s API. MySQL is
-    #    explicitly re-permitted by the next rule.
+    #    Training pods reach the backend / Azure Service Bus / App Insights directly.
+    #    This blocks pod-to-pod, ClusterIPs, jobs-manager, K8s API. MySQL and the
+    #    in-cluster proxies are explicitly re-permitted by the rules below.
     - to:
         - ipBlock:
             cidr: 0.0.0.0/0
@@ -75,6 +81,7 @@ spec:
       ports:
         - port: 443
           protocol: TCP
+    {{- end }}
     # 3. MySQL — training pods read the training dataset from the
     #    in-namespace mysql-client pod. podSelector with no namespaceSelector
     #    matches pods in the same namespace as this NetworkPolicy.
@@ -102,8 +109,8 @@ spec:
           protocol: TCP
     {{- if (default dict .Values.egressProxy).enabled }}
     # 5. egress gateway — training pods reach the in-cluster squid egress gateway
-    #    (egress-proxy-service) for allowlisted external HTTPS, used once the external
-    #    0.0.0.0/0:443 rule (rule 2) is dropped. Re-permitted explicitly like MySQL /
+    #    (egress-proxy-service) for allowlisted external HTTPS, used once the
+    #    external-HTTPS rule (rule 2) is dropped. Re-permitted explicitly like MySQL /
     #    requests-proxy above (rule 2's `except` blocks ClusterIP egress).
     - to:
         - podSelector:
