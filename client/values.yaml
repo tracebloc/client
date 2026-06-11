@@ -168,6 +168,14 @@ namespace:
 networkPolicy:
   training:
     enabled: true
+    # Egress lockdown (SECURITY §8.2 / client-runtime#102). When false, the
+    # training NetworkPolicy DROPS the 0.0.0.0/0:443 rule, so training pods can
+    # reach only DNS, in-cluster MySQL, the requests-proxy, and the egress
+    # gateway. Default true keeps the fleet unchanged; flip OFF per-fleet AFTER
+    # verifying the egress gateway works on that cluster (G2). The template
+    # nil-guards this key, so a `helm upgrade --reuse-values` from a release
+    # predating it keeps the old behaviour (rule present).
+    allowExternalHttps: true
     dnsNamespace: kube-system
     # CoreDNS pod selector — varies per platform. Override in ci/<platform>-values.yaml.
     # When empty, the template falls back to {k8s-app: kube-dns}, which works
@@ -183,6 +191,40 @@ networkPolicy:
       - "10.0.0.0/8"
       - "172.16.0.0/12"
       - "192.168.0.0/16"
+
+# -- Egress gateway (squid) — SECURITY §8.2 / client-runtime#102.
+# In-cluster forward proxy that lets a locked-down training pod reach an FQDN
+# allowlist (backend + App Insights) and nothing else. Labelled app=egress-proxy
+# so the training NetworkPolicy never selects it (it keeps its own egress).
+egressProxy:
+  enabled: true
+  # squid image, pinned by multi-arch (amd64+arm64) index digest — tracebloc pins
+  # all images by digest. `tag` stays for readability; the digest is authoritative.
+  # ubuntu/squid:6.6-24.04_beta (Ubuntu 24.04 LTS base), resolved 2026-06-10.
+  image:
+    registry: docker.io
+    repository: ubuntu/squid
+    tag: "6.6-24.04_beta"
+    digest: "sha256:6a097f68bae708cedbabd6188d68c7e2e7a38cedd05a176e1cc0ba29e3bbe029"
+  # squid's non-root uid (Ubuntu `proxy`). Image-specific — verify if you swap image.
+  runAsUser: 13
+  port: 3128
+  # FQDNs the gateway permits HTTPS CONNECT to. squid dstdomain syntax: a leading
+  # dot matches subdomains; a bare host is exact. Fails CLOSED when empty.
+  allowlist:
+    - dev-api.tracebloc.io
+    - stg-api.tracebloc.io
+    - api.tracebloc.io
+    - xray-backend.azurewebsites.net
+    - .in.applicationinsights.azure.com
+    - dc.services.visualstudio.com
+  resources:
+    requests:
+      cpu: "50m"
+      memory: "64Mi"
+    limits:
+      cpu: "500m"
+      memory: "256Mi"
 
 # -- Container image pinning.
 # For each image, set `digest` to a sha256 (e.g. "sha256:abc123...") to pin

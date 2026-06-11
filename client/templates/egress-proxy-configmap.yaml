@@ -1,0 +1,52 @@
+{{- if (default dict .Values.egressProxy).enabled }}
+{{- /*
+  Egress gateway (squid) config — SECURITY §8.2 / client-runtime#102.
+  A forward proxy that ONLY permits HTTPS CONNECT to an FQDN allowlist, so that
+  once the training NetworkPolicy drops the 0.0.0.0/0:443 rule, a locked-down
+  training pod can still reach the tracebloc backend + App Insights through this
+  gateway — and nothing else. Service Bus is NOT here; it stays on the
+  requests-proxy:8888 path. The allowlist falls CLOSED: an empty list renders no
+  allow rule, so everything is denied.
+*/ -}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ .Release.Name }}-egress-proxy
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "tracebloc.labels" . | nindent 4 }}
+data:
+  squid.conf: |
+    visible_hostname tracebloc-egress-proxy
+    http_port {{ .Values.egressProxy.port | default 3128 }}
+
+    # Tunnel-only: no caching, no pid file, logs to the container's std streams —
+    # squid needs no writable paths, so the root filesystem stays read-only.
+    cache deny all
+    cache_store_log none
+    pid_filename none
+    access_log stdio:/dev/stdout
+    cache_log stdio:/dev/stderr
+    # No peers/cache → the ICMP pinger (needs CAP_NET_RAW, which the pod drops) is
+    # just noise/errors. Disable it.
+    pinger_enable off
+
+    acl SSL_ports port 443
+    acl CONNECT method CONNECT
+    {{- with .Values.egressProxy.allowlist }}
+    # dstdomain: a leading dot matches subdomains (e.g. .in.applicationinsights.azure.com),
+    # a bare host is an exact match (e.g. api.tracebloc.io).
+    acl allowed_fqdns dstdomain {{ join " " . }}
+    http_access deny CONNECT !SSL_ports
+    http_access allow CONNECT allowed_fqdns
+    {{- end }}
+    # Fail closed — anything not explicitly allowed above is denied.
+    http_access deny all
+    {{- if .Values.env.HTTP_PROXY_HOST }}
+
+    # Corporate-proxy chaining: when the cluster sits behind a corporate proxy,
+    # forward upstream through it instead of going direct (mirrors tracebloc.proxyEnv).
+    cache_peer {{ .Values.env.HTTP_PROXY_HOST }} parent {{ .Values.env.HTTP_PROXY_PORT | default 8080 }} 0 no-query default{{ if .Values.env.HTTP_PROXY_USERNAME }} login={{ .Values.env.HTTP_PROXY_USERNAME }}:{{ .Values.env.HTTP_PROXY_PASSWORD }}{{ end }}
+    never_direct allow all
+    {{- end }}
+{{- end }}

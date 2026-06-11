@@ -1,0 +1,149 @@
+suite: Egress gateway (squid)
+# SECURITY §8.2 / client-runtime#102. The egress gateway lets a locked-down
+# training pod reach an FQDN allowlist (backend + App Insights) and nothing
+# else. These guards pin: the on/off flag, the fail-closed allowlist, the
+# PSA-restricted security context, the nil-guards against `helm upgrade
+# --reuse-values` from a release predating egressProxy, and — critically — that
+# the gateway is NOT labelled as a training workload (so the lockdown netpol
+# never selects it and it keeps its own egress).
+templates:
+  - templates/egress-proxy-deployment.yaml
+  - templates/egress-proxy-service.yaml
+  - templates/egress-proxy-configmap.yaml
+set:
+  clientId: "test-id"
+  clientPassword: "test"
+tests:
+  - it: renders the Deployment, Service and ConfigMap when enabled (default)
+    asserts:
+      - hasDocuments:
+          count: 1
+        template: templates/egress-proxy-deployment.yaml
+      - hasDocuments:
+          count: 1
+        template: templates/egress-proxy-service.yaml
+      - hasDocuments:
+          count: 1
+        template: templates/egress-proxy-configmap.yaml
+
+  - it: renders nothing when disabled
+    set:
+      egressProxy:
+        enabled: false
+    asserts:
+      - hasDocuments:
+          count: 0
+        template: templates/egress-proxy-deployment.yaml
+      - hasDocuments:
+          count: 0
+        template: templates/egress-proxy-service.yaml
+
+  - it: renders nothing when egressProxy is absent (helm upgrade --reuse-values replay)
+    # A pre-#102 stored values set has no egressProxy key; the nil parent must
+    # render no gateway rather than crash with "nil pointer evaluating interface".
+    set:
+      egressProxy: null
+    asserts:
+      - hasDocuments:
+          count: 0
+        template: templates/egress-proxy-deployment.yaml
+
+  - it: is a ClusterIP service on the proxy port
+    template: templates/egress-proxy-service.yaml
+    asserts:
+      - equal:
+          path: metadata.name
+          value: egress-proxy-service
+      - equal:
+          path: spec.type
+          value: ClusterIP
+      - equal:
+          path: spec.ports[0].port
+          value: 3128
+
+  - it: is NOT labelled as a training workload (must stay outside the lockdown netpol)
+    template: templates/egress-proxy-deployment.yaml
+    asserts:
+      - equal:
+          path: spec.template.metadata.labels.app
+          value: egress-proxy
+      - notExists:
+          path: spec.template.metadata.labels["tracebloc.io/workload"]
+
+  - it: enforces a PSA-restricted security context
+    template: templates/egress-proxy-deployment.yaml
+    asserts:
+      - equal:
+          path: spec.template.spec.securityContext.runAsNonRoot
+          value: true
+      - equal:
+          path: spec.template.spec.securityContext.seccompProfile.type
+          value: RuntimeDefault
+      - equal:
+          path: spec.template.spec.containers[0].securityContext.allowPrivilegeEscalation
+          value: false
+      - equal:
+          path: spec.template.spec.containers[0].securityContext.readOnlyRootFilesystem
+          value: true
+      - contains:
+          path: spec.template.spec.containers[0].securityContext.capabilities.drop
+          content: "ALL"
+      - equal:
+          path: spec.template.spec.automountServiceAccountToken
+          value: false
+
+  - it: does not automount the service account token
+    template: templates/egress-proxy-deployment.yaml
+    asserts:
+      - equal:
+          path: spec.template.spec.automountServiceAccountToken
+          value: false
+
+  - it: renders default resources and honors an override through the nil-guard
+    template: templates/egress-proxy-deployment.yaml
+    set:
+      egressProxy:
+        resources:
+          limits:
+            memory: 1Gi
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].resources.requests.cpu
+          value: 50m
+      - equal:
+          path: spec.template.spec.containers[0].resources.limits.memory
+          value: 1Gi
+
+  - it: allowlists the backend + App Insights and fails closed
+    template: templates/egress-proxy-configmap.yaml
+    asserts:
+      - matchRegex:
+          path: data["squid.conf"]
+          pattern: "acl allowed_fqdns dstdomain .*api\\.tracebloc\\.io"
+      - matchRegex:
+          path: data["squid.conf"]
+          pattern: "\\.in\\.applicationinsights\\.azure\\.com"
+      - matchRegex:
+          path: data["squid.conf"]
+          pattern: "http_access deny all"
+
+  - it: does not chain to a corporate proxy unless one is configured
+    template: templates/egress-proxy-configmap.yaml
+    asserts:
+      - notMatchRegex:
+          path: data["squid.conf"]
+          pattern: "cache_peer"
+
+  - it: chains to the corporate proxy when env.HTTP_PROXY_HOST is set
+    template: templates/egress-proxy-configmap.yaml
+    set:
+      env:
+        HTTP_PROXY_HOST: corp-proxy.internal
+        HTTP_PROXY_PORT: "8080"
+    asserts:
+      - matchRegex:
+          path: data["squid.conf"]
+          pattern: "cache_peer corp-proxy\\.internal parent 8080"
+      - matchRegex:
+          path: data["squid.conf"]
+          pattern: "never_direct allow all"
