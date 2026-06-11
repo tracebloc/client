@@ -147,9 +147,10 @@ spec:
 **What this still allows:**
 
 - DNS lookups (needed to resolve backend + Azure endpoints)
-- Outbound HTTPS/443 to the public internet (needed today for the training container to reach the tracebloc backend and Azure Service Bus; see §8.2)
+- In-cluster egress to MySQL (3306), the requests-proxy (8888), and the egress gateway (3128)
+- Outbound HTTPS/443 to the public internet — **only while `networkPolicy.training.allowExternalHttps: true` (the current default).** Set it to `false` and this rule is dropped, so training pods reach external services only through the in-cluster egress gateway (see §8.2).
 
-**Configuration:** `networkPolicy.training.enabled: true` (the default).
+**Configuration:** `networkPolicy.training.enabled: true` (the default). Egress lockdown: `networkPolicy.training.allowExternalHttps` + `egressProxy.*` (see §8.2).
 
 ### 4.3 Kubernetes API access (G3)
 
@@ -408,13 +409,20 @@ Known gaps between the current state and a fully-hardened setup, with the owner 
 
 **Mitigation plan:** backend endpoint that mints short-TTL, entity-scoped, send-only SAS tokens per experiment. Backend team owns the design and implementation.
 
-**Interim mitigation:** the `NetworkPolicy` in §4.2 still allows outbound HTTPS, so a training pod can reach Azure Service Bus directly. The only way to hard-block forgery before backend support lands is to deny external egress entirely — not currently possible because training pods legitimately call the backend + App Insights + Service Bus. See §8.2.
+**Interim mitigation:** with the §8.2 egress lockdown enabled (`networkPolicy.training.allowExternalHttps: false`), a training pod can no longer reach Azure Service Bus directly — SB traffic goes through the in-cluster requests-proxy (which holds the connection strings), and the conn-strings are no longer injected into the pod. Until a fleet enables the lockdown the NetworkPolicy still allows direct outbound HTTPS. The scoped/short-TTL SAS-token plan above remains the durable fix. See §8.2.
 
-### 8.2 Training pods still have outbound HTTPS (G2) — **platform team**
+### 8.2 Training-pod outbound HTTPS (G2) — **mechanism shipped (1.7.0), gated rollout**
 
-The NetworkPolicy blocks in-cluster traffic and non-443 egress but must allow outbound HTTPS to let training pods function (backend API, Azure Service Bus, App Insights). A malicious pod can still `requests.post()` to an arbitrary endpoint.
+By default the NetworkPolicy still allows outbound HTTPS/443 so training pods can reach the backend, Azure Service Bus, and App Insights — so a malicious pod can still `requests.post()` to an arbitrary endpoint until the lockdown is enabled.
 
-**Final fix:** route all training-pod ↔ tracebloc communication through the jobs-manager sidecar, so training pods egress only to a cluster-internal IP and hold no external-facing credentials. Medium-size architectural change; not scheduled for this quarter.
+**Mechanism (chart 1.7.0, client-runtime#102):** an in-cluster **egress gateway** (`egressProxy` — a squid forward proxy) permits HTTPS CONNECT only to an FQDN allowlist (backend + App Insights) and chains to a corporate proxy via `cache_peer`. With routing on, jobs-manager injects `HTTPS_PROXY=egress-proxy-service:3128` into each training pod (and drops the raw `HTTP_PROXY_HOST`), so backend + App-Insights traffic flows through the gateway; Service Bus already goes via the requests-proxy. The pod then needs no direct internet, and the external-443 rule can be dropped.
+
+**Rollout (per fleet, progressive — each step reversible):**
+1. Upgrade to ≥ 1.7.0 — the gateway deploys, inert (`egressProxy.routeWorkloads: false`).
+2. Set `egressProxy.routeWorkloads: true`; verify a training run completes via the gateway.
+3. Set `networkPolicy.training.allowExternalHttps: false` to drop the external-443 rule, and verify **G2** (a training pod cannot reach an arbitrary external host). Requires a NetworkPolicy-enforcing CNI (§4.2).
+
+**Residual:** the pod still holds `BACKEND_TOKEN` (it authenticates to the backend through the gateway). Scoping / short-TTL of that token is tracked under §8.1.
 
 ### 8.3 Backend tokens never expire — **backend team**
 
