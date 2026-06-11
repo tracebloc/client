@@ -1,0 +1,23 @@
+{{- if (default dict .Values.egressProxy).enabled }}
+{{- /*
+  ClusterIP for the egress gateway. Training pods reach it as
+  egress-proxy-service:<port> via their HTTPS_PROXY env (wired in Step 1).
+*/ -}}
+apiVersion: v1
+kind: Service
+metadata:
+  name: egress-proxy-service
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "tracebloc.labels" . | nindent 4 }}
+    app: egress-proxy
+spec:
+  selector:
+    app: egress-proxy
+  ports:
+    - name: http-proxy
+      port: {{ .Values.egressProxy.port | default 3128 }}
+      targetPort: {{ .Values.egressProxy.port | default 3128 }}
+      protocol: TCP
+  type: ClusterIP
+{{- end }}

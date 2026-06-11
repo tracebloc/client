@@ -6,12 +6,14 @@ on:
     paths:
       - 'client/**'
       - 'ingestor/**'
+      - 'scripts/tests/e2e-auto-upgrade.sh'
       - '.github/workflows/helm-ci.yaml'
   pull_request:
     branches: [main, develop, openshift]
     paths:
       - 'client/**'
       - 'ingestor/**'
+      - 'scripts/tests/e2e-auto-upgrade.sh'
       - '.github/workflows/helm-ci.yaml'
 
 jobs:
@@ -160,6 +162,23 @@ jobs:
           else
             echo "images.ingestor.digest empty (default) — spawning by floating tag; no pinned digest to check."
           fi
+
+  upgrade-e2e:
+    # Fleet auto-upgrade non-regression gate (client-runtime#102 / #245-class
+    # regressions): installs the LAST PUBLISHED chart from gh-pages on a real
+    # k3d cluster, then upgrades to THIS working tree via both
+    # `--reuse-values` (manual-operator habit; nil-guards must hold, lockdown
+    # must not engage) and `--reset-then-reuse-values` (the auto-upgrade
+    # cronjob's path; new defaults must flow in inert), then flips the #102
+    # egress-lockdown flags and proves the next auto-upgrade preserves them.
+    # Pods are never waited on — published images need real credentials; the
+    # regression class this guards lives in Helm templating/values semantics.
+    name: Fleet auto-upgrade E2E (k3d)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Upgrade from last published release through both flag paths
+        run: bash scripts/tests/e2e-auto-upgrade.sh
 
   # Installer script tests (bats + Pester) + the cross-distro prerequisite matrix
   # live in their own workflow: .github/workflows/installer-tests.yaml

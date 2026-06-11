@@ -1,0 +1,88 @@
+{{- if (default dict .Values.egressProxy).enabled }}
+{{- /*
+  Egress gateway (squid) — SECURITY §8.2 / client-runtime#102.
+  Carries label app=egress-proxy, NOT tracebloc.io/workload=training, so it is
+  deliberately OUTSIDE the training NetworkPolicy and can egress to the
+  allowlisted FQDNs on the locked-down training pod's behalf.
+  Nil-guards: a `helm upgrade --reuse-values` from a release predating
+  egressProxy leaves .Values.egressProxy nil → the outer `if` renders nothing
+  (no gateway, no behaviour change). image/resources use default-through-dict so
+  a partial --set can't nil-pointer.
+*/ -}}
+{{- $ep := default dict .Values.egressProxy }}
+{{- $img := default dict $ep.image }}
+{{- $epRes := default dict $ep.resources }}
+{{- $epReq := default dict $epRes.requests }}
+{{- $epLim := default dict $epRes.limits }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}-egress-proxy
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "tracebloc.labels" . | nindent 4 }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: egress-proxy
+  template:
+    metadata:
+      labels:
+        app: egress-proxy
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/egress-proxy-configmap.yaml") . | sha256sum }}
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        # squid's non-root user (Ubuntu `proxy` uid). Configurable because it is
+        # image-specific — VERIFY against the chosen egressProxy.image.
+        runAsUser: {{ $ep.runAsUser | default 13 }}
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: squid
+          image: {{ include "tracebloc.image" (dict "repository" ($img.repository | default "ubuntu/squid") "tag" ($img.tag | default "6.6-24.04_beta") "digest" ($img.digest | default "") "registry" ($img.registry | default "docker.io")) | quote }}
+          imagePullPolicy: IfNotPresent
+          command: ["squid"]
+          # -N: no daemon (run in foreground). Logs go to the std streams via
+          # squid.conf (access_log/cache_log = stdio); omit -d to avoid duplicate lines.
+          args: ["-N", "-f", "/etc/squid/squid.conf"]
+          ports:
+            - containerPort: {{ $ep.port | default 3128 }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+            readOnlyRootFilesystem: true
+          resources:
+            requests:
+              cpu: {{ $epReq.cpu | default "50m" | quote }}
+              memory: {{ $epReq.memory | default "64Mi" | quote }}
+            limits:
+              cpu: {{ $epLim.cpu | default "500m" | quote }}
+              memory: {{ $epLim.memory | default "256Mi" | quote }}
+          volumeMounts:
+            - name: squid-config
+              mountPath: /etc/squid/squid.conf
+              subPath: squid.conf
+              readOnly: true
+            - name: tmp
+              mountPath: /tmp
+            - name: var-run
+              mountPath: /var/run
+      volumes:
+        - name: squid-config
+          configMap:
+            name: {{ .Release.Name }}-egress-proxy
+        - name: tmp
+          emptyDir: {}
+        - name: var-run
+          emptyDir: {}
+      {{- if include "tracebloc.useImagePullSecrets" . }}
+      imagePullSecrets:
+        - name: {{ include "tracebloc.registrySecretName" . }}
+      {{- end }}
+      restartPolicy: Always
+{{- end }}
