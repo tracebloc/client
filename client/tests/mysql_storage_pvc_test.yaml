@@ -1,0 +1,177 @@
+suite: MySQL Storage PVC
+# Covers templates/mysql-storage-pvc.yaml — the PersistentVolumeClaim (and,
+# on hostPath/bare-metal, the paired PersistentVolume) backing the per-cluster
+# MySQL state store. Previously untested. Locks down:
+#   - the dynamic-PVC-only path (hostPath.enabled=false, the managed default)
+#   - the hostPath PV+PVC pair (bare-metal) and its claimRef binding
+#   - the "helm.sh/resource-policy: keep" annotation that protects the state
+#     store from accidental deletion on helm uninstall/upgrade
+#   - access-mode defaulting and pvc size / storageClass wiring
+templates:
+  - templates/mysql-storage-pvc.yaml
+release:
+  name: stg
+  namespace: tracebloc
+set:
+  clientId: "test-id"
+  clientPassword: "test"
+tests:
+  # --- dynamic PVC only (managed clusters, the default) ---
+  - it: renders only the PVC when hostPath.enabled is false (default)
+    set:
+      hostPath:
+        enabled: false
+    asserts:
+      - hasDocuments:
+          count: 1
+      - isKind:
+          of: PersistentVolumeClaim
+
+  - it: PVC has the expected name and namespace
+    set:
+      hostPath:
+        enabled: false
+    asserts:
+      - equal:
+          path: metadata.name
+          value: mysql-pvc
+      - equal:
+          path: metadata.namespace
+          value: tracebloc
+
+  - it: PVC defaults to ReadWriteMany access mode
+    set:
+      hostPath:
+        enabled: false
+    asserts:
+      - equal:
+          path: spec.accessModes[0]
+          value: ReadWriteMany
+
+  - it: PVC requests the default 2Gi of storage
+    set:
+      hostPath:
+        enabled: false
+    asserts:
+      - equal:
+          path: spec.resources.requests.storage
+          value: 2Gi
+
+  - it: PVC carries the resource-policy keep annotation so the state store survives uninstall
+    set:
+      hostPath:
+        enabled: false
+    asserts:
+      - equal:
+          path: metadata.annotations["helm.sh/resource-policy"]
+          value: keep
+
+  - it: PVC uses the release-scoped StorageClass when storageClass.create is true (default)
+    set:
+      hostPath:
+        enabled: false
+      storageClass:
+        create: true
+    asserts:
+      - equal:
+          path: spec.storageClassName
+          value: stg-storage-class
+
+  - it: PVC uses the provided StorageClass name when storageClass.create is false
+    set:
+      hostPath:
+        enabled: false
+      storageClass:
+        create: false
+        name: existing-sc
+    asserts:
+      - equal:
+          path: spec.storageClassName
+          value: existing-sc
+
+  - it: PVC honours an explicit pvcAccessMode override
+    set:
+      hostPath:
+        enabled: false
+      pvcAccessMode: ReadWriteOnce
+    asserts:
+      - equal:
+          path: spec.accessModes[0]
+          value: ReadWriteOnce
+
+  - it: PVC honours a custom mysql storage size
+    set:
+      hostPath:
+        enabled: false
+      pvc:
+        mysql: 5Gi
+    asserts:
+      - equal:
+          path: spec.resources.requests.storage
+          value: 5Gi
+
+  # --- hostPath PV + PVC pair (bare-metal) ---
+  - it: renders PV + PVC when hostPath.enabled is true
+    set:
+      hostPath:
+        enabled: true
+    asserts:
+      - hasDocuments:
+          count: 2
+      - isKind:
+          of: PersistentVolume
+        documentIndex: 0
+      - isKind:
+          of: PersistentVolumeClaim
+        documentIndex: 1
+
+  - it: PV has the release-scoped name
+    set:
+      hostPath:
+        enabled: true
+    documentIndex: 0
+    asserts:
+      - equal:
+          path: metadata.name
+          value: stg-mysql-pv
+
+  - it: PV is backed by the fixed release-scoped hostPath with DirectoryOrCreate
+    set:
+      hostPath:
+        enabled: true
+    documentIndex: 0
+    asserts:
+      - equal:
+          path: spec.hostPath.path
+          value: /tracebloc/stg/mysql
+      - equal:
+          path: spec.hostPath.type
+          value: DirectoryOrCreate
+
+  - it: PV is hard-bound to the PVC via claimRef
+    set:
+      hostPath:
+        enabled: true
+    documentIndex: 0
+    asserts:
+      - equal:
+          path: spec.claimRef.name
+          value: mysql-pvc
+      - equal:
+          path: spec.claimRef.namespace
+          value: tracebloc
+
+  - it: PV uses ReadWriteOnce and advertises the configured capacity
+    set:
+      hostPath:
+        enabled: true
+      pvc:
+        mysql: 8Gi
+    documentIndex: 0
+    asserts:
+      - equal:
+          path: spec.accessModes[0]
+          value: ReadWriteOnce
+      - equal:
+          path: spec.capacity.storage
+          value: 8Gi
