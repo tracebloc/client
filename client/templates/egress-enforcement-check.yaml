@@ -4,9 +4,11 @@
   Renders ONLY when the lockdown is enabled (allowExternalHttps=false) and a probe
   host is set. This is a `helm test` hook — run `helm test <release>` after flipping
   the lockdown to verify it. A `tracebloc.io/workload: training`-labelled pod (so the
-  training-egress NetworkPolicy governs it) curls a canary external host DIRECTLY:
-  blocked => the CNI enforces egress (test PASSES); reachable => NOT enforced => the
-  lockdown is a silent no-op (test FAILS, exit 1). Because it's a test hook it never
+  training-egress NetworkPolicy governs it) opens a DIRECT TCP connection to a canary
+  host's :443 (the TLS/HTTP outcome is ignored — we only test reachability): connection
+  blocked => the CNI enforces egress (test PASSES); connection established => NOT
+  enforced => the lockdown is a silent no-op (test FAILS, exit 1). Because it's a test
+  hook it never
   runs during install/upgrade, so it can NEVER block them or the hourly auto-upgrade.
   The probe-host default is 1.1.1.1; set enforcementProbeHost="" to disable (e.g.
   air-gapped clusters with no external host to test against).
@@ -54,23 +56,29 @@ spec:
             - -c
             - |
               HOST={{ $host | quote }}
-              echo "[egress-enforcement-check] probing direct egress to https://$HOST (must be BLOCKED when the lockdown is enforced)..."
-              code=$(curl --noproxy '*' -s -m 5 -o /dev/null -w '%{http_code}' "https://$HOST" 2>/dev/null || true)
-              if [ -n "$code" ] && [ "$code" != "000" ]; then
-                echo "WARNING ================================================================"
-                echo "WARNING  EGRESS LOCKDOWN NOT ENFORCED on this cluster."
-                echo "WARNING  A tracebloc.io/workload=training pod reached https://$HOST"
-                echo "WARNING  directly (HTTP $code). networkPolicy.training.allowExternalHttps"
-                echo "WARNING  is false, but the CNI is NOT enforcing egress NetworkPolicy, so"
-                echo "WARNING  the SECURITY §8.2 lockdown is INACTIVE and training pods can"
-                echo "WARNING  still reach the open internet."
-                echo "WARNING  Fix: enable egress NetworkPolicy on the CNI (Calico/Cilium, or"
-                echo "WARNING  EKS VPC-CNI enableNetworkPolicy=true), then re-run 'helm test'."
-                echo "WARNING ================================================================"
-                exit 1
+              echo "[egress-enforcement-check] probing direct TCP egress to ${HOST}:443 (must be BLOCKED when the lockdown is enforced)..."
+              # We only care whether a TCP connection to :443 can be ESTABLISHED — the
+              # TLS/HTTP outcome is irrelevant. -k disables cert verification so probing an
+              # IP (or any host whose cert doesn't match) is NOT misread as a block, and the
+              # verdict is keyed on curl's EXIT CODE, not the HTTP status: a blocked egress
+              # yields a timeout (28) or connect failure (7), whereas any TLS-/HTTP-layer
+              # outcome (incl. a cert error) means the TCP connect already succeeded.
+              curl --noproxy '*' -k -sS -m 5 -o /dev/null "https://$HOST"; rc=$?
+              if [ "$rc" = "28" ] || [ "$rc" = "7" ]; then
+                echo "OK  egress lockdown verified: TCP to ${HOST}:443 could not be established (curl exit $rc) — egress is blocked."
+                exit 0
               fi
-              echo "OK  egress lockdown verified: direct external egress is blocked (curl -> ${code:-blocked})."
-              exit 0
+              echo "WARNING ================================================================"
+              echo "WARNING  EGRESS LOCKDOWN NOT ENFORCED on this cluster."
+              echo "WARNING  A tracebloc.io/workload=training pod reached ${HOST}:443 directly"
+              echo "WARNING  (curl exit $rc; the TCP connect succeeded). networkPolicy.training."
+              echo "WARNING  allowExternalHttps is false, but the CNI is NOT enforcing egress"
+              echo "WARNING  NetworkPolicy, so the SECURITY §8.2 lockdown is INACTIVE and"
+              echo "WARNING  training pods can still reach the open internet."
+              echo "WARNING  Fix: enable egress NetworkPolicy on the CNI (Calico/Cilium, or"
+              echo "WARNING  EKS VPC-CNI enableNetworkPolicy=true), then re-run 'helm test'."
+              echo "WARNING ================================================================"
+              exit 1
           resources:
             requests:
               cpu: "10m"
