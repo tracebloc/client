@@ -176,10 +176,11 @@ networkPolicy:
     # nil-guards this key, so a `helm upgrade --reuse-values` from a release
     # predating it keeps the old behaviour (rule present).
     allowExternalHttps: true
-    # client-runtime#104: deploy-time enforcement pre-flight. When the lockdown is
-    # enabled (allowExternalHttps=false), a post-upgrade hook curls this host directly
-    # from a training-labelled pod; if it's reachable the CNI isn't enforcing egress
-    # and the hook logs a loud, non-blocking warning. Set "" to disable (air-gapped).
+    # client-runtime#104: enforcement check, run via `helm test <release>` after
+    # flipping the lockdown (allowExternalHttps=false). The test curls this host
+    # directly from a training-labelled pod; reachable => the CNI isn't enforcing
+    # egress => the test FAILS (a test hook never affects install/upgrade). Set ""
+    # to disable (e.g. air-gapped clusters with no external host to test against).
     enforcementProbeHost: "1.1.1.1"
     dnsNamespace: kube-system
     # CoreDNS pod selector — varies per platform. Override in ci/<platform>-values.yaml.

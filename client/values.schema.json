@@ -228,7 +228,7 @@
             },
             "enforcementProbeHost": {
               "type": "string",
-              "description": "Host the enforcement pre-flight hook curls directly (when allowExternalHttps=false) to verify the CNI actually blocks egress; non-enforcement logs a non-blocking warning (client-runtime#104). Empty string disables the check (e.g. air-gapped clusters)."
+              "description": "Host the `helm test` enforcement check curls directly (when allowExternalHttps=false) to verify the CNI blocks egress; non-enforcement fails the test (a test hook never affects install/upgrade) — client-runtime#104. Empty string disables it (e.g. air-gapped clusters)."
             },
             "dnsNamespace": {
               "type": "string",

@@ -34,7 +34,7 @@ tests:
       - hasDocuments:
           count: 0
 
-  - it: renders as a post-install/post-upgrade hook Job when the lockdown is enabled
+  - it: renders as a helm test hook Job when the lockdown is enabled
     set:
       networkPolicy:
         training:
@@ -46,7 +46,7 @@ tests:
           of: Job
       - equal:
           path: metadata.annotations["helm.sh/hook"]
-          value: post-install,post-upgrade
+          value: test
       - equal:
           path: metadata.annotations["helm.sh/hook-delete-policy"]
           value: before-hook-creation,hook-succeeded
@@ -76,7 +76,7 @@ tests:
           path: spec.template.spec.automountServiceAccountToken
           value: false
 
-  - it: probes the configured host directly (no proxy) and is non-blocking
+  - it: probes the configured host directly (no proxy) and fails the test on non-enforcement
     set:
       networkPolicy:
         training:
@@ -91,7 +91,7 @@ tests:
           pattern: "curl --noproxy '\\*'"
       - matchRegex:
           path: spec.template.spec.containers[0].command[2]
-          pattern: "exit 0"
+          pattern: "exit 1"
 
   - it: pins the curl probe image by digest
     set:

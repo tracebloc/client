@@ -1,14 +1,15 @@
-{{- if and (default dict .Values.networkPolicy.training).enabled (not (dig "allowExternalHttps" true .Values.networkPolicy.training)) (dig "enforcementProbeHost" "" .Values.networkPolicy.training) }}
+{{- if and (default dict .Values.networkPolicy.training).enabled (not (dig "allowExternalHttps" true .Values.networkPolicy.training)) (dig "enforcementProbeHost" "1.1.1.1" .Values.networkPolicy.training) }}
 {{- /*
-  Egress-lockdown enforcement pre-flight (SECURITY §8.2 / client-runtime#104).
+  Egress-lockdown enforcement check (SECURITY §8.2 / client-runtime#104).
   Renders ONLY when the lockdown is enabled (allowExternalHttps=false) and a probe
-  host is set. A post-install/post-upgrade hook runs a `tracebloc.io/workload:
-  training`-labelled pod (so the training-egress NetworkPolicy governs it) that
-  curls a canary external host DIRECTLY: blocked => the CNI enforces egress (good);
-  reachable => NOT enforced => the lockdown is a silent no-op. NON-BLOCKING: the
-  probe always exits 0 and just logs a loud warning, so it never fails an
-  install/upgrade (including the hourly auto-upgrade). Set enforcementProbeHost=""
-  to disable (e.g. air-gapped clusters with no external host to test against).
+  host is set. This is a `helm test` hook — run `helm test <release>` after flipping
+  the lockdown to verify it. A `tracebloc.io/workload: training`-labelled pod (so the
+  training-egress NetworkPolicy governs it) curls a canary external host DIRECTLY:
+  blocked => the CNI enforces egress (test PASSES); reachable => NOT enforced => the
+  lockdown is a silent no-op (test FAILS, exit 1). Because it's a test hook it never
+  runs during install/upgrade, so it can NEVER block them or the hourly auto-upgrade.
+  The probe-host default is 1.1.1.1; set enforcementProbeHost="" to disable (e.g.
+  air-gapped clusters with no external host to test against).
 */ -}}
 {{- $host := dig "enforcementProbeHost" "1.1.1.1" .Values.networkPolicy.training }}
 apiVersion: batch/v1
@@ -19,8 +20,7 @@ metadata:
   labels:
     {{- include "tracebloc.labels" . | nindent 4 }}
   annotations:
-    "helm.sh/hook": post-install,post-upgrade
-    "helm.sh/hook-weight": "5"
+    "helm.sh/hook": test
     "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
 spec:
   backoffLimit: 0
@@ -65,11 +65,11 @@ spec:
                 echo "WARNING  the SECURITY §8.2 lockdown is INACTIVE and training pods can"
                 echo "WARNING  still reach the open internet."
                 echo "WARNING  Fix: enable egress NetworkPolicy on the CNI (Calico/Cilium, or"
-                echo "WARNING  EKS VPC-CNI enableNetworkPolicy=true), then re-run the upgrade."
+                echo "WARNING  EKS VPC-CNI enableNetworkPolicy=true), then re-run 'helm test'."
                 echo "WARNING ================================================================"
-              else
-                echo "OK  egress lockdown verified: direct external egress is blocked (curl -> ${code:-blocked})."
+                exit 1
               fi
+              echo "OK  egress lockdown verified: direct external egress is blocked (curl -> ${code:-blocked})."
               exit 0
           resources:
             requests:
