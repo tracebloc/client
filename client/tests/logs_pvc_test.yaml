@@ -1,0 +1,197 @@
+suite: Client Logs PVC
+templates:
+  - templates/logs-pvc.yaml
+set:
+  clientId: "test-id"
+  clientPassword: "test"
+  dockerRegistry:
+    server: https://index.docker.io/v1/
+    username: test
+    password: test
+    email: test@test.com
+tests:
+  # --- default (dynamic provisioning, no hostPath) ---
+  - it: should render only the PVC when hostPath is disabled
+    set:
+      hostPath:
+        enabled: false
+    asserts:
+      - hasDocuments:
+          count: 1
+      - isKind:
+          of: PersistentVolumeClaim
+
+  - it: should name the PVC client-logs-pvc
+    set:
+      hostPath:
+        enabled: false
+    asserts:
+      - equal:
+          path: metadata.name
+          value: client-logs-pvc
+
+  - it: should carry the keep resource-policy annotation on the PVC
+    set:
+      hostPath:
+        enabled: false
+    asserts:
+      - equal:
+          path: metadata.annotations["helm.sh/resource-policy"]
+          value: keep
+
+  - it: should default the PVC access mode to ReadWriteMany
+    set:
+      hostPath:
+        enabled: false
+    asserts:
+      - equal:
+          path: spec.accessModes[0]
+          value: ReadWriteMany
+
+  - it: should honour pvcAccessMode override on the PVC
+    set:
+      hostPath:
+        enabled: false
+      pvcAccessMode: ReadWriteOnce
+    asserts:
+      - equal:
+          path: spec.accessModes[0]
+          value: ReadWriteOnce
+
+  - it: should request the default 10Gi of storage on the PVC
+    set:
+      hostPath:
+        enabled: false
+    asserts:
+      - equal:
+          path: spec.resources.requests.storage
+          value: 10Gi
+
+  - it: should honour pvc.logs storage override on the PVC
+    set:
+      hostPath:
+        enabled: false
+      pvc:
+        logs: 25Gi
+    asserts:
+      - equal:
+          path: spec.resources.requests.storage
+          value: 25Gi
+
+  - it: should use the release-unique storage class when storageClass.create is true
+    set:
+      hostPath:
+        enabled: false
+      storageClass:
+        create: true
+    release:
+      name: my-release
+    asserts:
+      - equal:
+          path: spec.storageClassName
+          value: my-release-storage-class
+
+  - it: should use the provided storage class name when storageClass.create is false
+    set:
+      hostPath:
+        enabled: false
+      storageClass:
+        create: false
+        name: existing-sc
+    asserts:
+      - equal:
+          path: spec.storageClassName
+          value: existing-sc
+
+  # --- hostPath enabled (bare-metal: PV + PVC) ---
+  - it: should render both PV and PVC when hostPath is enabled
+    set:
+      hostPath:
+        enabled: true
+    asserts:
+      - hasDocuments:
+          count: 2
+      - isKind:
+          of: PersistentVolume
+        documentIndex: 0
+      - isKind:
+          of: PersistentVolumeClaim
+        documentIndex: 1
+
+  - it: should name the PV <release>-logs-pv
+    set:
+      hostPath:
+        enabled: true
+    release:
+      name: my-release
+    asserts:
+      - equal:
+          path: metadata.name
+          value: my-release-logs-pv
+        documentIndex: 0
+
+  - it: should bind the PV to the logs PVC via claimRef
+    set:
+      hostPath:
+        enabled: true
+    release:
+      name: my-release
+      namespace: tracebloc
+    asserts:
+      - equal:
+          path: spec.claimRef.name
+          value: client-logs-pvc
+        documentIndex: 0
+      - equal:
+          path: spec.claimRef.namespace
+          value: tracebloc
+        documentIndex: 0
+
+  - it: should set the PV hostPath to a release-scoped logs directory created on demand
+    set:
+      hostPath:
+        enabled: true
+    release:
+      name: my-release
+    asserts:
+      - equal:
+          path: spec.hostPath.path
+          value: /tracebloc/my-release/logs
+        documentIndex: 0
+      - equal:
+          path: spec.hostPath.type
+          value: DirectoryOrCreate
+        documentIndex: 0
+
+  - it: should expose the PV as ReadWriteOnce with matching capacity
+    set:
+      hostPath:
+        enabled: true
+      pvc:
+        logs: 15Gi
+    asserts:
+      - equal:
+          path: spec.accessModes[0]
+          value: ReadWriteOnce
+        documentIndex: 0
+      - equal:
+          path: spec.capacity.storage
+          value: 15Gi
+        documentIndex: 0
+
+  - it: should share the storage class between the PV and PVC
+    set:
+      hostPath:
+        enabled: true
+      storageClass:
+        create: false
+        name: existing-sc
+    asserts:
+      - equal:
+          path: spec.storageClassName
+          value: existing-sc
+        documentIndex: 0
+      - equal:
+          path: spec.storageClassName
+          value: existing-sc
+        documentIndex: 1
