@@ -4,8 +4,35 @@ entries:
   - annotations:
       category: Machine Learning
     apiVersion: v2
+    appVersion: 1.7.1
+    created: "2026-06-15T09:40:34.899610569Z"
+    description: A unified Helm chart for tracebloc on AKS, EKS, bare-metal, and OpenShift
+    digest: 018eaddb819d7fcc1f4203b728393f62d74a3794817c60825ae8f7fb8b673d49
+    home: https://github.com/tracebloc/client
+    keywords:
+    - tracebloc
+    - kubernetes
+    - machine-learning
+    - aks
+    - eks
+    - openshift
+    - bare-metal
+    kubeVersion: '>=1.24.0-0'
+    maintainers:
+    - name: Tracebloc Team
+      url: https://tracebloc.com
+    name: client
+    sources:
+    - https://github.com/tracebloc/client
+    type: application
+    urls:
+    - https://tracebloc.github.io/client/client-1.7.1.tgz
+    version: 1.7.1
+  - annotations:
+      category: Machine Learning
+    apiVersion: v2
     appVersion: 1.7.0
-    created: "2026-06-12T11:36:19.61486271Z"
+    created: "2026-06-15T09:40:34.897010667Z"
     description: A unified Helm chart for tracebloc on AKS, EKS, bare-metal, and OpenShift
     digest: 756da1dc2b247a9f3b0876074cb36de894519e0cc2e4a0219fa8dd2987516fdb
     home: https://github.com/tracebloc/client
@@ -32,7 +59,7 @@ entries:
       category: Machine Learning
     apiVersion: v2
     appVersion: 1.6.1
-    created: "2026-06-12T11:36:19.612570972Z"
+    created: "2026-06-15T09:40:34.894562889Z"
     description: A unified Helm chart for tracebloc on AKS, EKS, bare-metal, and OpenShift
     digest: 360e7c6f041b2af834feacec48628db6914039da716cf2ee9ee08aa28efd5b75
     home: https://github.com/tracebloc/client
@@ -59,7 +86,7 @@ entries:
       category: Machine Learning
     apiVersion: v2
     appVersion: 1.5.1
-    created: "2026-06-12T11:36:19.610448904Z"
+    created: "2026-06-15T09:40:34.891600417Z"
     description: A unified Helm chart for tracebloc on AKS, EKS, bare-metal, and OpenShift
     digest: 7bfbeaa413e62baae4360e4d35b2a793e85bff9e16585e546b6361617ce350e4
     home: https://github.com/tracebloc/client
@@ -86,7 +113,7 @@ entries:
       category: Machine Learning
     apiVersion: v2
     appVersion: 1.5.1
-    created: "2026-06-12T11:36:19.60754808Z"
+    created: "2026-06-15T09:40:34.889386621Z"
     description: A unified Helm chart for tracebloc on AKS, EKS, bare-metal, and OpenShift
     digest: efc1bd0981901f70272f40af1768f051f3b245711bf976969c9b0e2fcfe5db02
     home: https://github.com/tracebloc/client
@@ -113,7 +140,7 @@ entries:
       category: Machine Learning
     apiVersion: v2
     appVersion: 1.5.0
-    created: "2026-06-12T11:36:19.605398303Z"
+    created: "2026-06-15T09:40:34.887093432Z"
     description: A unified Helm chart for tracebloc on AKS, EKS, bare-metal, and OpenShift
     digest: 8f83b3323d40c1c3ca5c7fefaeeaf25884d096ff3fbec697b268c7ef7c16482d
     home: https://github.com/tracebloc/client
@@ -140,7 +167,7 @@ entries:
       category: Machine Learning
     apiVersion: v2
     appVersion: 1.4.5
-    created: "2026-06-12T11:36:19.60328536Z"
+    created: "2026-06-15T09:40:34.884272633Z"
     description: A unified Helm chart for tracebloc on AKS, EKS, bare-metal, and OpenShift
     digest: 8cd8e2b0b4967a6525e2f3c492df86006c55b31cefd6d73e57179fee534694e7
     home: https://github.com/tracebloc/client
@@ -167,7 +194,7 @@ entries:
       category: Machine Learning
     apiVersion: v2
     appVersion: 1.4.4
-    created: "2026-06-12T11:36:19.600426407Z"
+    created: "2026-06-15T09:40:34.882052146Z"
     description: A unified Helm chart for tracebloc on AKS, EKS, bare-metal, and OpenShift
     digest: bedcbdca466ffea0e2ded38abc29daddfae84df78fe4175807fa7a7c03dc28ad
     home: https://github.com/tracebloc/client
@@ -194,7 +221,7 @@ entries:
       category: Machine Learning
     apiVersion: v2
     appVersion: 1.4.3
-    created: "2026-06-12T11:36:19.598431021Z"
+    created: "2026-06-15T09:40:34.879954188Z"
     description: A unified Helm chart for tracebloc on AKS, EKS, bare-metal, and OpenShift
     digest: fa36a0913e9ffe89c37c8b230753e44ceab6c56c625b6892a7c25d010b516e72
     home: https://github.com/tracebloc/client
@@ -221,7 +248,7 @@ entries:
       category: Machine Learning
     apiVersion: v2
     appVersion: 1.4.2
-    created: "2026-06-12T11:36:19.596446845Z"
+    created: "2026-06-15T09:40:34.877850872Z"
     description: A unified Helm chart for tracebloc on AKS, EKS, bare-metal, and OpenShift
     digest: a9b7bff57d1b3bcfe1975b9cd08c86a06d375327d86aead65abc85a6aab05db5
     home: https://github.com/tracebloc/client
@@ -248,7 +275,7 @@ entries:
       category: Machine Learning
     apiVersion: v2
     appVersion: 1.4.1
-    created: "2026-06-12T11:36:19.594377399Z"
+    created: "2026-06-15T09:40:34.87515414Z"
     description: A unified Helm chart for tracebloc on AKS, EKS, bare-metal, and OpenShift
     digest: ef088b5a2412f653f27c37705539fc4753378a5ad8baa0bd610b750e3f971cb2
     home: https://github.com/tracebloc/client
@@ -275,7 +302,7 @@ entries:
       category: Machine Learning
     apiVersion: v2
     appVersion: 1.4.0
-    created: "2026-06-12T11:36:19.591494257Z"
+    created: "2026-06-15T09:40:34.873039727Z"
     description: A unified Helm chart for tracebloc on AKS, EKS, bare-metal, and OpenShift
     digest: b2debba6b7d363b2f168d053386e3ff94c8c8030fa9c928ef5e2ad175e5b0ca5
     home: https://github.com/tracebloc/client
@@ -302,7 +329,7 @@ entries:
       category: Machine Learning
     apiVersion: v2
     appVersion: 1.3.5
-    created: "2026-06-12T11:36:19.589687855Z"
+    created: "2026-06-15T09:40:34.871039871Z"
     description: A unified Helm chart for tracebloc on AKS, EKS, bare-metal, and OpenShift
     digest: 2a7ab1ff834b4ab710854c057b7710542676322eba9a00e774a7af53bc345f50
     home: https://github.com/tracebloc/client
@@ -329,7 +356,7 @@ entries:
       category: Machine Learning
     apiVersion: v2
     appVersion: 1.3.2
-    created: "2026-06-12T11:36:19.588149164Z"
+    created: "2026-06-15T09:40:34.869393219Z"
     description: A unified Helm chart for tracebloc on AKS, EKS, bare-metal, and OpenShift
     digest: 799d837853314433c881923f65691fe815c5579ed34e8db4f9d35cf5a70e1386
     home: https://github.com/tracebloc/client
@@ -356,7 +383,7 @@ entries:
       category: Machine Learning
     apiVersion: v2
     appVersion: 1.3.1
-    created: "2026-06-12T11:36:19.586757542Z"
+    created: "2026-06-15T09:40:34.867318543Z"
     description: A unified Helm chart for tracebloc on AKS, EKS, bare-metal, and OpenShift
     digest: 322ab1d646ed48731e7b9300c8c5be4f2127c77c3714ff22a61484f15e11e961
     home: https://github.com/tracebloc/client
@@ -383,7 +410,7 @@ entries:
       category: Machine Learning
     apiVersion: v2
     appVersion: 1.3.0
-    created: "2026-06-12T11:36:19.584637998Z"
+    created: "2026-06-15T09:40:34.865833661Z"
     description: A unified Helm chart for tracebloc on AKS, EKS, bare-metal, and OpenShift
     digest: 9e4ea0d147e0920fdca822be6489241af9b157dbb64800bd799bb11054aedc3a
     home: https://github.com/tracebloc/client
@@ -410,7 +437,7 @@ entries:
       category: Machine Learning
     apiVersion: v2
     appVersion: 1.2.3
-    created: "2026-06-12T11:36:19.583249652Z"
+    created: "2026-06-15T09:40:34.864368861Z"
     description: A unified Helm chart for tracebloc on AKS, EKS, bare-metal, and OpenShift
     digest: 973adbc9210d2d368440b045218c0e2b5d8b7d7bd770f660de9c174eae3f8fcd
     home: https://github.com/tracebloc/client
@@ -437,7 +464,7 @@ entries:
       category: Machine Learning
     apiVersion: v2
     appVersion: 1.1.0
-    created: "2026-06-12T11:36:19.582025746Z"
+    created: "2026-06-15T09:40:34.863082936Z"
     description: A unified Helm chart for tracebloc on AKS, EKS, bare-metal, and OpenShift
     digest: ba203702fbaff75dd8a2986daac8f78d5a3ca0b14c571ff021aed5f9bdbfb32f
     home: https://github.com/tracebloc/client
@@ -464,7 +491,7 @@ entries:
       category: Machine Learning
     apiVersion: v2
     appVersion: 1.0.8
-    created: "2026-06-12T11:36:19.580747895Z"
+    created: "2026-06-15T09:40:34.861847019Z"
     description: A unified Helm chart for tracebloc on AKS, EKS, bare-metal, and OpenShift
     digest: 4dc04113aa9720815397f68d108da23e069a82356d942551a5684f5f851f747e
     home: https://github.com/tracebloc/client
@@ -491,7 +518,7 @@ entries:
       category: Machine Learning
     apiVersion: v2
     appVersion: 1.0.3
-    created: "2026-06-12T11:36:19.579745729Z"
+    created: "2026-06-15T09:40:34.860572426Z"
     description: A unified Helm chart for tracebloc on AKS, EKS, bare-metal, and OpenShift
     digest: 0ec0756ace478c1f7278e56822f229a1c98ded570cd9e6f057ec73f798bd63d8
     home: https://github.com/tracebloc/client
@@ -518,7 +545,7 @@ entries:
       category: Machine Learning
     apiVersion: v2
     appVersion: 1.0.2
-    created: "2026-06-12T11:36:19.579147575Z"
+    created: "2026-06-15T09:40:34.859459258Z"
     description: A unified Helm chart for tracebloc on AKS, EKS, bare-metal, and OpenShift
     digest: 92ed4da54dc68346bab34b926bf15e8644478d2e7e1d055a498dde7aad02ca22
     home: https://github.com/tracebloc/client
@@ -545,7 +572,7 @@ entries:
       category: Machine Learning
     apiVersion: v2
     appVersion: 1.0.1
-    created: "2026-06-12T11:36:19.578465293Z"
+    created: "2026-06-15T09:40:34.858834785Z"
     description: A unified Helm chart for tracebloc on AKS, EKS, bare-metal, and OpenShift
     digest: 06bdb0224762700c9fecf4e8c48037b2438a512697091b9d16735a751b993e45
     home: https://github.com/tracebloc/client
@@ -572,7 +599,7 @@ entries:
       category: Machine Learning
     apiVersion: v2
     appVersion: 1.0.0
-    created: "2026-06-12T11:36:19.577212067Z"
+    created: "2026-06-15T09:40:34.858158851Z"
     description: A unified Helm chart for tracebloc on AKS, EKS, bare-metal, and OpenShift
     digest: 965a9a75a1f0a2c1a953f2c37226b41cc5fbd18301bd49f93aeda937ea9650af
     home: https://github.com/tracebloc/client
@@ -598,13 +625,13 @@ entries:
   ingestor:
   - apiVersion: v2
     appVersion: 0.3.0
-    created: "2026-06-12T11:36:19.615332638Z"
+    created: "2026-06-15T09:40:34.900109469Z"
     description: 'Helm chart for submitting a tracebloc data-ingestion run. Renders
       a customer''s ingest.yaml into a ConfigMap and runs a post-install hook that
       POSTs it to jobs-manager''s /internal/submit-ingestion-run. jobs-manager validates
       the YAML, mints a backend token, and creates the ingestor Job directly — this
       chart owns the config + hook artifacts, not the resulting Job or its data. '
-    digest: 5089c894d6833a690b8cf72d780edcd517d5066cf97358f4f7ff3fb1661aa248
+    digest: 86d8baa089eae7af91980cf1ce7565b1cfb40bbed922a375b3dd7b54892884ce
     home: https://github.com/tracebloc/client/tree/develop/ingestor
     keywords:
     - tracebloc
@@ -622,4 +649,4 @@ entries:
     urls:
     - https://tracebloc.github.io/client/ingestor-0.2.0.tgz
     version: 0.2.0
-generated: "2026-06-12T11:36:19.576051874Z"
+generated: "2026-06-15T09:40:34.857371556Z"
