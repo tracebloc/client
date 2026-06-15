@@ -94,6 +94,10 @@ tests:
       - matchRegex:
           path: spec.template.spec.containers[0].command[2]
           pattern: "rc=\\$\\?"
+      # a DNS failure (curl exit 6) is reported as inconclusive, not as "TCP connect succeeded"
+      - matchRegex:
+          path: spec.template.spec.containers[0].command[2]
+          pattern: "could not resolve host"
       # ...NOT the HTTP status — the old logic that conflated a TLS failure (code 000) with a block
       - notMatchRegex:
           path: spec.template.spec.containers[0].command[2]
