@@ -76,7 +76,7 @@ tests:
           path: spec.template.spec.automountServiceAccountToken
           value: false
 
-  - it: probes the configured host directly (no proxy) and fails the test on non-enforcement
+  - it: keys the verdict off TCP reachability (curl exit code), not the TLS/HTTP outcome, and fails on non-enforcement
     set:
       networkPolicy:
         training:
@@ -86,9 +86,21 @@ tests:
       - matchRegex:
           path: spec.template.spec.containers[0].command[2]
           pattern: "HOST=.?canary\\.example\\.net"
+      # -k: a cert mismatch (e.g. probing an IP) must NOT be misread as a block
       - matchRegex:
           path: spec.template.spec.containers[0].command[2]
-          pattern: "curl --noproxy '\\*'"
+          pattern: "curl --noproxy '\\*' -k"
+      # verdict comes from curl's exit code (TCP reachability)...
+      - matchRegex:
+          path: spec.template.spec.containers[0].command[2]
+          pattern: "rc=\\$\\?"
+      # ...NOT the HTTP status — the old logic that conflated a TLS failure (code 000) with a block
+      - notMatchRegex:
+          path: spec.template.spec.containers[0].command[2]
+          pattern: "http_code"
+      - notMatchRegex:
+          path: spec.template.spec.containers[0].command[2]
+          pattern: '"000"'
       - matchRegex:
           path: spec.template.spec.containers[0].command[2]
           pattern: "exit 1"
