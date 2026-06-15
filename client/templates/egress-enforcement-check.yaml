@@ -61,13 +61,26 @@ spec:
               # TLS/HTTP outcome is irrelevant. -k disables cert verification so probing an
               # IP (or any host whose cert doesn't match) is NOT misread as a block, and the
               # verdict is keyed on curl's EXIT CODE, not the HTTP status: a blocked egress
-              # yields a timeout (28) or connect failure (7), whereas any TLS-/HTTP-layer
-              # outcome (incl. a cert error) means the TCP connect already succeeded.
+              # yields a timeout (28) or connect failure (7); a DNS failure (6) is inconclusive;
+              # any other outcome (incl. a TLS/cert error) means the TCP connect already succeeded.
               curl --noproxy '*' -k -sS -m 5 -o /dev/null "https://$HOST"; rc=$?
-              if [ "$rc" = "28" ] || [ "$rc" = "7" ]; then
-                echo "OK  egress lockdown verified: TCP to ${HOST}:443 could not be established (curl exit $rc) — egress is blocked."
-                exit 0
-              fi
+              case "$rc" in
+                7|28)
+                  # connect refused (7) / timed out (28): the TCP handshake never completed => egress blocked.
+                  echo "OK  egress lockdown verified: TCP to ${HOST}:443 could not be established (curl exit $rc) — egress is blocked."
+                  exit 0
+                  ;;
+                6)
+                  # DNS resolution failed: no TCP connection was attempted, so enforcement can't be judged.
+                  echo "WARNING  egress enforcement INCONCLUSIVE: could not resolve host '${HOST}' (curl exit 6)."
+                  echo "WARNING  No TCP connection was attempted, so the lockdown was NOT verified. Point"
+                  echo "WARNING  networkPolicy.training.enforcementProbeHost at an external IP (e.g. 1.1.1.1)"
+                  echo "WARNING  or fix in-cluster DNS, then re-run 'helm test'."
+                  exit 1
+                  ;;
+              esac
+              # Any other outcome (0 success, or a TLS-/HTTP-layer error such as 35/52/56/60 — all of
+              # which require the TCP connect to have already succeeded) => the host was reached.
               echo "WARNING ================================================================"
               echo "WARNING  EGRESS LOCKDOWN NOT ENFORCED on this cluster."
               echo "WARNING  A tracebloc.io/workload=training pod reached ${HOST}:443 directly"
