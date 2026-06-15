@@ -226,6 +226,10 @@
               "default": true,
               "description": "When false, drop the 0.0.0.0/0:443 egress rule so training pods reach only DNS, MySQL, requests-proxy and the egress gateway (SECURITY §8.2 / client-runtime#102). Default true keeps existing behaviour; flip per-fleet after verifying the egress gateway works (G2)."
             },
+            "enforcementProbeHost": {
+              "type": "string",
+              "description": "Host the `helm test` enforcement check curls directly (when allowExternalHttps=false) to verify the CNI blocks egress; non-enforcement fails the test (a test hook never affects install/upgrade) — client-runtime#104. Empty string disables it (e.g. air-gapped clusters)."
+            },
             "dnsNamespace": {
               "type": "string",
               "default": "kube-system",

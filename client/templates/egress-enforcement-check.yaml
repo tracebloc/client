@@ -1,0 +1,106 @@
+{{- if and (default dict .Values.networkPolicy.training).enabled (not (dig "allowExternalHttps" true .Values.networkPolicy.training)) (dig "enforcementProbeHost" "1.1.1.1" .Values.networkPolicy.training) }}
+{{- /*
+  Egress-lockdown enforcement check (SECURITY §8.2 / client-runtime#104).
+  Renders ONLY when the lockdown is enabled (allowExternalHttps=false) and a probe
+  host is set. This is a `helm test` hook — run `helm test <release>` after flipping
+  the lockdown to verify it. A `tracebloc.io/workload: training`-labelled pod (so the
+  training-egress NetworkPolicy governs it) opens a DIRECT TCP connection to a canary
+  host's :443 (the TLS/HTTP outcome is ignored — we only test reachability): connection
+  blocked => the CNI enforces egress (test PASSES); connection established => NOT
+  enforced => the lockdown is a silent no-op (test FAILS, exit 1). Because it's a test
+  hook it never
+  runs during install/upgrade, so it can NEVER block them or the hourly auto-upgrade.
+  The probe-host default is 1.1.1.1; set enforcementProbeHost="" to disable (e.g.
+  air-gapped clusters with no external host to test against).
+*/ -}}
+{{- $host := dig "enforcementProbeHost" "1.1.1.1" .Values.networkPolicy.training }}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ .Release.Name }}-egress-enforcement-check
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "tracebloc.labels" . | nindent 4 }}
+  annotations:
+    "helm.sh/hook": test
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: 0
+  ttlSecondsAfterFinished: 120
+  template:
+    metadata:
+      labels:
+        {{- include "tracebloc.selectorLabels" . | nindent 8 }}
+        tracebloc.io/workload: training
+    spec:
+      restartPolicy: Never
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        # curlimages/curl's default user is non-numeric (curl_user); runAsNonRoot
+        # can't verify that, so pin the image's uid explicitly.
+        runAsUser: 100
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: probe
+          image: {{ include "tracebloc.image" (dict "repository" "curlimages/curl" "tag" "8.20.0" "digest" "sha256:b3f1fb2a51d923260350d21b8654bbc607164a987e2f7c84a0ac199a67df812a" "registry" "docker.io") | quote }}
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+            readOnlyRootFilesystem: true
+          command:
+            - sh
+            - -c
+            - |
+              HOST={{ $host | quote }}
+              echo "[egress-enforcement-check] probing direct TCP egress to ${HOST}:443 (must be BLOCKED when the lockdown is enforced)..."
+              # We only care whether a TCP connection to :443 can be ESTABLISHED — the
+              # TLS/HTTP outcome is irrelevant. -k disables cert verification so probing an
+              # IP (or any host whose cert doesn't match) is NOT misread as a block, and the
+              # verdict is keyed on curl's EXIT CODE, not the HTTP status: a blocked egress
+              # yields a timeout (28) or connect failure (7); a DNS failure (6) is inconclusive;
+              # any other outcome (incl. a TLS/cert error) means the TCP connect already succeeded.
+              curl --noproxy '*' -k -sS -m 5 -o /dev/null "https://$HOST"; rc=$?
+              case "$rc" in
+                7|28)
+                  # connect refused (7) / timed out (28): the TCP handshake never completed => egress blocked.
+                  echo "OK  egress lockdown verified: TCP to ${HOST}:443 could not be established (curl exit $rc) — egress is blocked."
+                  exit 0
+                  ;;
+                6)
+                  # DNS resolution failed: no TCP connection was attempted, so enforcement can't be judged.
+                  echo "WARNING  egress enforcement INCONCLUSIVE: could not resolve host '${HOST}' (curl exit 6)."
+                  echo "WARNING  No TCP connection was attempted, so the lockdown was NOT verified. Point"
+                  echo "WARNING  networkPolicy.training.enforcementProbeHost at an external IP (e.g. 1.1.1.1)"
+                  echo "WARNING  or fix in-cluster DNS, then re-run 'helm test'."
+                  exit 1
+                  ;;
+              esac
+              # Any other outcome (0 success, or a TLS-/HTTP-layer error such as 35/52/56/60 — all of
+              # which require the TCP connect to have already succeeded) => the host was reached.
+              echo "WARNING ================================================================"
+              echo "WARNING  EGRESS LOCKDOWN NOT ENFORCED on this cluster."
+              echo "WARNING  A tracebloc.io/workload=training pod reached ${HOST}:443 directly"
+              echo "WARNING  (curl exit $rc; the TCP connect succeeded). networkPolicy.training."
+              echo "WARNING  allowExternalHttps is false, but the CNI is NOT enforcing egress"
+              echo "WARNING  NetworkPolicy, so the SECURITY §8.2 lockdown is INACTIVE and"
+              echo "WARNING  training pods can still reach the open internet."
+              echo "WARNING  Fix: enable egress NetworkPolicy on the CNI (Calico/Cilium, or"
+              echo "WARNING  EKS VPC-CNI enableNetworkPolicy=true), then re-run 'helm test'."
+              echo "WARNING ================================================================"
+              exit 1
+          resources:
+            requests:
+              cpu: "10m"
+              memory: "32Mi"
+            limits:
+              cpu: "100m"
+              memory: "64Mi"
+      {{- if include "tracebloc.useImagePullSecrets" . }}
+      imagePullSecrets:
+        - name: {{ include "tracebloc.registrySecretName" . }}
+      {{- end }}
+{{- end }}

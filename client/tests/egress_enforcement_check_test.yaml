@@ -1,0 +1,120 @@
+suite: Egress-lockdown enforcement pre-flight hook
+# SECURITY §8.2 / client-runtime#104. A post-install/post-upgrade hook that, when
+# the lockdown is enabled (allowExternalHttps=false), runs a training-labelled probe
+# to verify the CNI actually blocks egress — and warns (non-blocking) if it doesn't.
+# Guards: renders ONLY when the lockdown is on + a probe host is set; never otherwise.
+templates:
+  - templates/egress-enforcement-check.yaml
+set:
+  clientId: "test-id"
+  clientPassword: "test"
+tests:
+  - it: does NOT render by default (lockdown off — allowExternalHttps defaults true)
+    asserts:
+      - hasDocuments:
+          count: 0
+
+  - it: does NOT render when training NetworkPolicy is disabled
+    set:
+      networkPolicy:
+        training:
+          enabled: false
+          allowExternalHttps: false
+    asserts:
+      - hasDocuments:
+          count: 0
+
+  - it: does NOT render when the probe host is empty (disabled, e.g. air-gapped)
+    set:
+      networkPolicy:
+        training:
+          allowExternalHttps: false
+          enforcementProbeHost: ""
+    asserts:
+      - hasDocuments:
+          count: 0
+
+  - it: renders as a helm test hook Job when the lockdown is enabled
+    set:
+      networkPolicy:
+        training:
+          allowExternalHttps: false
+    asserts:
+      - hasDocuments:
+          count: 1
+      - isKind:
+          of: Job
+      - equal:
+          path: metadata.annotations["helm.sh/hook"]
+          value: test
+      - equal:
+          path: metadata.annotations["helm.sh/hook-delete-policy"]
+          value: before-hook-creation,hook-succeeded
+
+  - it: probe pod is training-labelled (so the lockdown netpol governs it) and PSA-restricted
+    set:
+      networkPolicy:
+        training:
+          allowExternalHttps: false
+    asserts:
+      - equal:
+          path: spec.template.metadata.labels["tracebloc.io/workload"]
+          value: training
+      - equal:
+          path: spec.template.spec.securityContext.runAsNonRoot
+          value: true
+      - equal:
+          path: spec.template.spec.securityContext.runAsUser
+          value: 100
+      - equal:
+          path: spec.template.spec.containers[0].securityContext.readOnlyRootFilesystem
+          value: true
+      - contains:
+          path: spec.template.spec.containers[0].securityContext.capabilities.drop
+          content: "ALL"
+      - equal:
+          path: spec.template.spec.automountServiceAccountToken
+          value: false
+
+  - it: keys the verdict off TCP reachability (curl exit code), not the TLS/HTTP outcome, and fails on non-enforcement
+    set:
+      networkPolicy:
+        training:
+          allowExternalHttps: false
+          enforcementProbeHost: "canary.example.net"
+    asserts:
+      - matchRegex:
+          path: spec.template.spec.containers[0].command[2]
+          pattern: "HOST=.?canary\\.example\\.net"
+      # -k: a cert mismatch (e.g. probing an IP) must NOT be misread as a block
+      - matchRegex:
+          path: spec.template.spec.containers[0].command[2]
+          pattern: "curl --noproxy '\\*' -k"
+      # verdict comes from curl's exit code (TCP reachability)...
+      - matchRegex:
+          path: spec.template.spec.containers[0].command[2]
+          pattern: "rc=\\$\\?"
+      # a DNS failure (curl exit 6) is reported as inconclusive, not as "TCP connect succeeded"
+      - matchRegex:
+          path: spec.template.spec.containers[0].command[2]
+          pattern: "could not resolve host"
+      # ...NOT the HTTP status — the old logic that conflated a TLS failure (code 000) with a block
+      - notMatchRegex:
+          path: spec.template.spec.containers[0].command[2]
+          pattern: "http_code"
+      - notMatchRegex:
+          path: spec.template.spec.containers[0].command[2]
+          pattern: '"000"'
+      - matchRegex:
+          path: spec.template.spec.containers[0].command[2]
+          pattern: "exit 1"
+
+  - it: pins the curl probe image by digest
+    set:
+      networkPolicy:
+        training:
+          allowExternalHttps: false
+    asserts:
+      - matchRegex:
+          path: spec.template.spec.containers[0].image
+          pattern: "^docker\\.io/curlimages/curl@sha256:[a-f0-9]{64}$"
