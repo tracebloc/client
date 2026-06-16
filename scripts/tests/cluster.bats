@@ -124,6 +124,40 @@ setup() {
   [[ "$output" != *"--config"* ]]
 }
 
+# ── HOST_DATASET_DIR: second bind-mount + dataset dir split (backend#743) ────
+@test "_create_new_cluster: HOST_DATASET_DIR unset -> single /tracebloc mount" {
+  run _create_new_cluster
+  [ "$status" -eq 0 ]
+  run mock_calls
+  [[ "$output" == *"${HOST_DATA_DIR}:/tracebloc@all"* ]]
+  [[ "$output" != *"/tracebloc-data@all"* ]]
+}
+
+@test "_create_new_cluster: HOST_DATASET_DIR set -> adds a distinct /tracebloc-data mount" {
+  HOST_DATASET_DIR="$BATS_TEST_TMPDIR/ds"; mkdir -p "$HOST_DATASET_DIR"
+  run _create_new_cluster
+  [ "$status" -eq 0 ]
+  run mock_calls
+  [[ "$output" == *"${HOST_DATA_DIR}:/tracebloc@all"* ]]                 # mysql/logs stay local
+  [[ "$output" == *"${HOST_DATASET_DIR}:/tracebloc-data@all"* ]]         # datasets on the mount
+}
+
+@test "_ensure_release_dirs: HOST_DATASET_DIR set -> data on dataset dir, mysql+logs local" {
+  HOST_DATASET_DIR="$BATS_TEST_TMPDIR/ds"; mkdir -p "$HOST_DATASET_DIR"
+  _ensure_release_dirs tracebloc
+  [ -d "$HOST_DATASET_DIR/tracebloc/data" ]    # dataset on the (network) mount
+  [ -d "$HOST_DATA_DIR/tracebloc/logs" ]       # logs stay local
+  [ -d "$HOST_DATA_DIR/tracebloc/mysql" ]      # mysql stays local
+  [ ! -d "$HOST_DATA_DIR/tracebloc/data" ]     # data NOT created on the local tree
+}
+
+@test "_ensure_release_dirs: HOST_DATASET_DIR unset -> data stays local (unchanged)" {
+  _ensure_release_dirs tracebloc
+  [ -d "$HOST_DATA_DIR/tracebloc/data" ]
+  [ -d "$HOST_DATA_DIR/tracebloc/logs" ]
+  [ -d "$HOST_DATA_DIR/tracebloc/mysql" ]
+}
+
 # ── _check_existing_cluster_bind (Gap C) ────────────────────────────────────
 @test "_check_existing_cluster_bind: 0.0.0.0 bind -> warns (created outside installer)" {
   docker() { echo "0.0.0.0 0.0.0.0 "; }

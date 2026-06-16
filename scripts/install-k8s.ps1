@@ -130,6 +130,12 @@ $SERVERS       = if ($env:SERVERS)       { $env:SERVERS }       else { "1" }
 $AGENTS        = if ($env:AGENTS)        { $env:AGENTS }        else { "1" }
 $K8S_VERSION   = if ($env:K8S_VERSION)   { $env:K8S_VERSION }   else { "v1.29.4-k3s1" }
 $HOST_DATA_DIR = if ($env:HOST_DATA_DIR) { $env:HOST_DATA_DIR } else { "$env:USERPROFILE\.tracebloc" }
+# backend#743: optional separate dir for the big dataset volume. Empty (default)
+# keeps datasets under HOST_DATA_DIR. When set, it is bind-mounted at
+# /tracebloc-data and the chart's dataset PV points there (mysql + logs stay
+# local). The host-uid ingestion mechanism for root_squash NFS is Linux-only; on
+# Windows k3d runs in a Linux VM where Docker Desktop handles mount ownership.
+$HOST_DATASET_DIR = if ($env:HOST_DATASET_DIR) { $env:HOST_DATASET_DIR } else { "" }
 $CLIENT_ENV    = $env:CLIENT_ENV
 
 $GPU_VENDOR       = "none"
@@ -193,6 +199,29 @@ function Confirm-Config {
     }
   }
   $script:HOST_DATA_DIR = $dataDir
+
+  # backend#743: optional dataset dir. Unlike HOST_DATA_DIR it MAY live outside
+  # USERPROFILE (a separate / network drive). It must already EXIST and be
+  # writable; we never create a network-share root. System paths stay barred.
+  if ($HOST_DATASET_DIR) {
+    $dsDir = [System.IO.Path]::GetFullPath($HOST_DATASET_DIR)
+    if (-not (Test-Path $dsDir -PathType Container)) {
+      Err ("HOST_DATASET_DIR does not exist: " + $HOST_DATASET_DIR + " (mount the dataset volume before installing)")
+    }
+    try {
+      $probe = Join-Path $dsDir (".tb-write-" + [guid]::NewGuid().ToString("N"))
+      New-Item -ItemType File -Path $probe -ErrorAction Stop | Out-Null
+      Remove-Item $probe -Force -ErrorAction SilentlyContinue
+    } catch {
+      Err ("HOST_DATASET_DIR is not writable: " + $HOST_DATASET_DIR)
+    }
+    foreach ($f in $forbidden) {
+      if ($f -and $dsDir.StartsWith([System.IO.Path]::GetFullPath($f), [StringComparison]::OrdinalIgnoreCase)) {
+        Err ("HOST_DATASET_DIR cannot be a system path: " + $HOST_DATASET_DIR)
+      }
+    }
+    $script:HOST_DATASET_DIR = $dsDir
+  }
 }
 
 # =============================================================================
@@ -823,6 +852,11 @@ function New-K3dCluster {
       "--wait"
     )
 
+    # backend#743: bind-mount the customer dataset volume at a distinct cluster
+    # path so the chart's dataset PV points there while mysql + logs stay on the
+    # local /tracebloc tree. No-op when unset.
+    if ($HOST_DATASET_DIR) { $k3dArgs += @("-v", "${HOST_DATASET_DIR}:/tracebloc-data@all") }
+
     if ($K8S_VERSION -ne "" -and $K8S_VERSION -ne "latest") { $k3dArgs += @("--image", "rancher/k3s:$K8S_VERSION") }
     if ($K3D_GPU_FLAG -ne "") {
       $k3dArgs += $K3D_GPU_FLAG
@@ -1161,6 +1195,8 @@ function Install-ClientHelm {
   if ($CLIENT_ENV) {
     $envBlock += "  CLIENT_ENV: $CLIENT_ENV`n"
   }
+  # backend#743: relocate the dataset PV onto the network mount when HOST_DATASET_DIR is set.
+  $datasetPathLine = if ($HOST_DATASET_DIR) { "`n  datasetPath: /tracebloc-data" } else { "" }
   $envBlock += @"
   RESOURCE_LIMITS: "cpu=2,memory=8Gi"
   RESOURCE_REQUESTS: "cpu=2,memory=8Gi"
@@ -1176,7 +1212,7 @@ storageClass:
   parameters: {}
 
 hostPath:
-  enabled: true
+  enabled: true$datasetPathLine
 
 pvc:
   mysql: 2Gi

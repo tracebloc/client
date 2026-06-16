@@ -27,8 +27,13 @@ _cluster_exists() {
 # Ensure host dirs exist so /tracebloc/data, /tracebloc/logs, /tracebloc/mysql exist inside nodes (HOST_DATA_DIR is mounted as /tracebloc).
 # Only chmod the container data subdirs; do not make HOST_DATA_DIR or files like values.yaml world-readable.
 _ensure_tracebloc_dirs() {
-  mkdir -p "$HOST_DATA_DIR" "$HOST_DATA_DIR/data" "$HOST_DATA_DIR/logs" "$HOST_DATA_DIR/mysql"
-  chmod -R 777 "$HOST_DATA_DIR/data" "$HOST_DATA_DIR/logs" "$HOST_DATA_DIR/mysql" 2>/dev/null || true
+  mkdir -p "$HOST_DATA_DIR" "$HOST_DATA_DIR/logs" "$HOST_DATA_DIR/mysql"
+  chmod -R 777 "$HOST_DATA_DIR/logs" "$HOST_DATA_DIR/mysql" 2>/dev/null || true
+  # backend#743: the dataset dir goes under HOST_DATASET_DIR (a network mount,
+  # bind-mounted at /tracebloc-data) when set, else stays local under HOST_DATA_DIR.
+  local data_base="${HOST_DATASET_DIR:-$HOST_DATA_DIR}"
+  mkdir -p "$data_base/data"
+  chmod -R 777 "$data_base/data" 2>/dev/null || true
 }
 
 # Pre-create the per-release host dirs the chart's hostPath PVs bind to.
@@ -41,8 +46,14 @@ _ensure_release_dirs() {
   local release="$1"
   [[ -z "$release" ]] && return 0
   local base="$HOST_DATA_DIR/$release"
-  mkdir -p "$base/data" "$base/logs" "$base/mysql"
-  chmod -R 777 "$base/data" "$base/logs" "$base/mysql" 2>/dev/null || true
+  mkdir -p "$base/logs" "$base/mysql"
+  chmod -R 777 "$base/logs" "$base/mysql" 2>/dev/null || true
+  # backend#743: dataset dir goes under HOST_DATASET_DIR (network mount) when set,
+  # else stays local. mysql + logs always stay on the local HOST_DATA_DIR.
+  local data_base="${HOST_DATASET_DIR:+$HOST_DATASET_DIR/$release}"
+  data_base="${data_base:-$base}"
+  mkdir -p "$data_base/data"
+  chmod -R 777 "$data_base/data" 2>/dev/null || true
 }
 
 # --- Corporate-proxy support (authenticated proxies + NO_PROXY hardening) ----
@@ -267,6 +278,11 @@ _create_new_cluster() {
     --k3s-arg "--disable=local-storage@server:*"
     --wait
   )
+
+  # backend#743: bind-mount the customer's dataset volume (which may be a network
+  # mount) at a DISTINCT cluster path so the chart's dataset PV can point there
+  # while mysql + logs stay on the local /tracebloc tree. No-op when unset.
+  [[ -n "${HOST_DATASET_DIR:-}" ]] && K3D_ARGS+=(-v "${HOST_DATASET_DIR}:/tracebloc-data@all")
 
   [[ -n "$K8S_VERSION" && "$K8S_VERSION" != "latest" ]] && K3D_ARGS+=(--image "rancher/k3s:${K8S_VERSION}")
 
