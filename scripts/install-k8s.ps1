@@ -18,7 +18,7 @@
 #    $env:SERVERS       = "1"              default: 1  (control-plane nodes)
 #    $env:AGENTS        = "1"              default: 1  (worker nodes)
 #    $env:K8S_VERSION   = "v1.29.4-k3s1"  default: latest
-#    $env:HOST_DATA_DIR = "C:\data"        default: $env:USERPROFILE\.tracebloc
+#    $env:HOST_DATA_DIR = "C:\data"        default: $env:USERPROFILE\.tracebloc (LOCAL disk; no NFS/UNC)
 #    $env:CLIENT_ENV    = "dev"            optional; if not set, CLIENT_ENV is not added to env in values
 # =============================================================================
 
@@ -1409,6 +1409,21 @@ function Get-PfFreeGb {
   } catch { return $null }
 }
 
+# "network" if $HOST_DATA_DIR is on a UNC path or a mapped network drive
+# (Win32_LogicalDisk DriveType 4); "local" otherwise; $null if undeterminable
+# (e.g. non-Windows under Pester - tests mock this). Mirrors preflight.sh
+# _pf_storage_type: MySQL/InnoDB corrupts or crash-loops on network storage.
+function Get-PfFsType {
+  try {
+    if ($HOST_DATA_DIR -like '\\*') { return "network" }   # UNC path (\\server\share)
+    $qualifier = (Split-Path -Qualifier $HOST_DATA_DIR -ErrorAction SilentlyContinue)
+    if (-not $qualifier) { return "local" }                # no drive letter, not UNC
+    $d = Get-CimInstance Win32_LogicalDisk -Filter "DeviceID='$qualifier'" -ErrorAction Stop
+    if ($d.DriveType -eq 4) { return "network" }           # DriveType 4 = network drive
+    return "local"
+  } catch { return $null }
+}
+
 # Memory/CPU as the container runtime sees it (the Docker Desktop / WSL2 VM budget,
 # which is what the pods actually get — smaller than the host). $null if the daemon
 # is down or the value is junk, so callers fall back to the host (CIM) reader.
@@ -1487,6 +1502,22 @@ function Test-Preflight {
   elseif  ($disk -lt $minDiskGb)   { Write-PfFail "Disk: only $disk GB free - need >= $minDiskGb GB."; $hardFail++; Hint "Free up space or attach a larger disk, then re-run." }
   elseif  ($disk -lt $warnDiskGb)  { Warn "Disk: $disk GB free - recommended >= $warnDiskGb GB; images + data may fill it." }
   else                             { Ok "Disk: $disk GB free" }
+
+  # Network-FS guard: MySQL/InnoDB corrupts or crash-loops on NFS/CIFS/SMB. Fail
+  # fast instead of a cryptic CrashLoopBackOff ~20 min in. (Mirrors preflight.sh.)
+  $fs = Get-PfFsType
+  if     ($null -eq $fs)      { Info "Storage: filesystem type undetermined; assuming local." }
+  elseif ($fs -eq "network") {
+    if ($env:TRACEBLOC_ALLOW_NETWORK_FS) {
+      Warn "Storage: $HOST_DATA_DIR is on a network filesystem - proceeding (TRACEBLOC_ALLOW_NETWORK_FS set); the client database may corrupt or crash-loop."
+    } else {
+      Write-PfFail "Storage: $HOST_DATA_DIR is on a network filesystem - the tracebloc client database (MySQL/InnoDB) corrupts or crash-loops on network storage."
+      $hardFail++
+      Hint "Fix: point HOST_DATA_DIR at a LOCAL disk (the default $env:USERPROFILE\.tracebloc is local)."
+      Hint "  (or set `$env:TRACEBLOC_ALLOW_NETWORK_FS=1 to proceed anyway - not recommended for the database.)"
+    }
+  }
+  else                       { Ok "Storage: $HOST_DATA_DIR local disk" }
 
   Info "Checking outbound connectivity to required services..."
   $backendHost = (Get-BackendUrl) -replace '^https?://','' -replace '/$',''
