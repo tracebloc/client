@@ -183,3 +183,56 @@ tests:
             value: "false"
           count: 1
 
+  # tracebloc/backend#745: the per-spawned-training-job resource request/limit
+  # the jobs-manager hands to each Job it creates. The chart is the single
+  # effective source of truth — it ALWAYS injects RESOURCE_REQUESTS /
+  # RESOURCE_LIMITS, so client-runtime's jobs_manager.py only falls back to its
+  # own default when they are absent. Pin the rendered value here so the two
+  # cannot silently diverge again, on BOTH containers that receive it
+  # (api + pods-monitor).
+  - it: defaults spawned-job RESOURCE_REQUESTS/LIMITS to cpu=2,memory=8Gi (req==limit => Guaranteed QoS)
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: RESOURCE_REQUESTS
+            value: "cpu=2,memory=8Gi"
+          count: 1
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: RESOURCE_LIMITS
+            value: "cpu=2,memory=8Gi"
+          count: 1
+      - contains:
+          path: spec.template.spec.containers[1].env
+          content:
+            name: RESOURCE_REQUESTS
+            value: "cpu=2,memory=8Gi"
+          count: 1
+      - contains:
+          path: spec.template.spec.containers[1].env
+          content:
+            name: RESOURCE_LIMITS
+            value: "cpu=2,memory=8Gi"
+          count: 1
+
+  - it: lets operators override spawned-job resources via env.RESOURCE_REQUESTS/LIMITS
+    set:
+      env:
+        RESOURCE_REQUESTS: "cpu=4,memory=16Gi"
+        RESOURCE_LIMITS: "cpu=4,memory=16Gi"
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: RESOURCE_REQUESTS
+            value: "cpu=4,memory=16Gi"
+          count: 1
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: RESOURCE_LIMITS
+            value: "cpu=4,memory=16Gi"
+          count: 1
+
