@@ -200,6 +200,7 @@ _handle_existing_cluster() {
 
   _check_existing_cluster_proxy
   _check_existing_cluster_bind
+  _check_existing_cluster_dataset_mount
 }
 
 # k3d bakes proxy env into containers at create time; it cannot be added to a
@@ -252,6 +253,32 @@ _check_existing_cluster_bind() {
     hint "Your kubeconfig is normalized to 127.0.0.1 so reuse works. If kubectl is still intercepted, rebuild it:"
     hint "  k3d cluster delete $CLUSTER_NAME  &&  re-run this installer."
     echo ""
+  fi
+}
+
+# backend#743: the dataset bind mount (HOST_DATASET_DIR -> /tracebloc-data) is
+# baked into the k3d nodes at create time (_create_new_cluster). k3d cannot add
+# a bind mount to a RUNNING cluster, so re-using an existing cluster that lacks
+# it would point the chart's `datasetPath: /tracebloc-data` PV at ephemeral
+# in-node storage — datasets would silently land on disposable storage instead
+# of the network export and vanish on a restart. Fail fast with the recreate
+# remedy rather than installing a quietly-misrouted dataset volume. No-op when
+# HOST_DATASET_DIR is unset or the node can't be inspected.
+_check_existing_cluster_dataset_mount() {
+  [[ -z "${HOST_DATASET_DIR:-}" ]] && return 0
+  local mounts
+  mounts=$(docker inspect "k3d-${CLUSTER_NAME}-server-0" \
+    --format '{{range .Mounts}}{{println .Destination}}{{end}}' 2>/dev/null) || return 0
+  [[ -z "$mounts" ]] && return 0
+  if ! grep -qx '/tracebloc-data' <<<"$mounts"; then
+    echo ""
+    warn "HOST_DATASET_DIR is set, but the existing '$CLUSTER_NAME' cluster has no /tracebloc-data bind mount."
+    hint "k3d bakes bind mounts in at create time — they can't be added to a running cluster. Re-using this"
+    hint "cluster would put datasets on ephemeral in-node storage (lost on a restart), not your network export."
+    hint "Recreate the cluster so the dataset volume is bound (data under HOST_DATASET_DIR is untouched):"
+    hint "  k3d cluster delete $CLUSTER_NAME   &&   re-run this installer."
+    echo ""
+    error "Existing cluster is missing the dataset bind mount — refusing to install datasets onto ephemeral storage."
   fi
 }
 

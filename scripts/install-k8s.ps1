@@ -831,6 +831,24 @@ function New-K3dCluster {
         Hint "  k3d cluster delete $CLUSTER_NAME  (then re-run this installer)."
       }
     } catch {}
+
+    # backend#743: the dataset bind mount (HOST_DATASET_DIR -> /tracebloc-data)
+    # is baked into the k3d nodes at create time; k3d can't add it to a running
+    # cluster. Re-using an existing cluster without it would point the chart's
+    # datasetPath PV at ephemeral in-node storage (datasets lost on a restart)
+    # instead of the network export. Fail fast with the recreate remedy.
+    if ($HOST_DATASET_DIR) {
+      $dsMounts = ""
+      try { $dsMounts = (docker inspect "k3d-$CLUSTER_NAME-server-0" --format '{{range .Mounts}}{{println .Destination}}{{end}}' 2>$null | Out-String) } catch {}
+      if ($dsMounts -and ($dsMounts -notmatch '(?m)^/tracebloc-data\s*$')) {
+        Warn "HOST_DATASET_DIR is set, but the existing '$CLUSTER_NAME' cluster has no /tracebloc-data bind mount."
+        Hint "k3d bakes bind mounts in at create time - they can't be added to a running cluster. Re-using this"
+        Hint "cluster would put datasets on ephemeral in-node storage (lost on a restart), not your network export."
+        Hint "Recreate the cluster so the dataset volume is bound (data under HOST_DATASET_DIR is untouched):"
+        Hint "  k3d cluster delete $CLUSTER_NAME   (then re-run this installer)."
+        Err "Existing cluster is missing the dataset bind mount - refusing to install datasets onto ephemeral storage."
+      }
+    }
   } else {
     if (-not (Test-Path $HOST_DATA_DIR)) {
       New-Item -ItemType Directory -Path $HOST_DATA_DIR -Force | Out-Null
