@@ -310,6 +310,12 @@ _pf_storage_type() {
       success "Storage: ${target} (${fstype})"
       ;;
   esac
+  # backend#743: datasets MAY live on a network mount (HOST_DATASET_DIR) — only
+  # the database dir (HOST_DATA_DIR, checked above) must be local. Note it, never fail.
+  if [[ -n "${HOST_DATASET_DIR:-}" ]]; then
+    local dfstype; dfstype="$(_pf_fstype "$HOST_DATASET_DIR")"
+    info "Dataset dir: ${HOST_DATASET_DIR}${dfstype:+ (${dfstype})} — network mounts are supported here (the database stays on local disk)."
+  fi
   return 0
 }
 

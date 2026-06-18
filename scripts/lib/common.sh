@@ -248,6 +248,12 @@ AGENTS="${AGENTS:-1}"
 # Pinned default; set K8S_VERSION="" to use latest (may break on new k3s releases)
 K8S_VERSION="${K8S_VERSION:-v1.29.4-k3s1}"
 HOST_DATA_DIR="${HOST_DATA_DIR:-$HOME/.tracebloc}"
+# Optional separate host dir for the big DATASET volume (backend#743). Empty
+# (default) keeps datasets under HOST_DATA_DIR. When set — e.g. a network/NFS
+# mount like /data01/tracebloc — the installer bind-mounts it into the cluster
+# at /tracebloc-data and the chart's dataset PV points there, while mysql + logs
+# stay on the local HOST_DATA_DIR (InnoDB over NFS is unsafe).
+HOST_DATASET_DIR="${HOST_DATASET_DIR:-}"
 
 # ── Input validation ────────────────────────────────────────────────────────
 validate_config() {
@@ -278,6 +284,24 @@ validate_config() {
   [[ "$dir" != "$HOME" && "${dir#$HOME/}" == "$dir" ]] && \
     error "HOST_DATA_DIR must be under \$HOME (got: $HOST_DATA_DIR)"
   HOST_DATA_DIR="$dir"
+
+  # Optional dataset dir (backend#743): unlike HOST_DATA_DIR it MAY live outside
+  # $HOME (a mounted network volume like /data01). It must already EXIST and be
+  # WRITABLE as the host user — we never mkdir a network-share root — and is
+  # barred from system paths. The HOST_DATA_DIR rules above are unchanged.
+  if [[ -n "${HOST_DATASET_DIR:-}" ]]; then
+    local ddir="$HOST_DATASET_DIR" rddir
+    [[ "$ddir" == /* ]] || error "HOST_DATASET_DIR must be an absolute path (got '$HOST_DATASET_DIR')"
+    [[ -d "$ddir" ]]    || error "HOST_DATASET_DIR does not exist: $ddir (mount the dataset volume before installing)"
+    [[ -w "$ddir" ]]    || error "HOST_DATASET_DIR is not writable by $(id -un) (uid $(id -u)): $ddir"
+    rddir="$(cd -P "$ddir" 2>/dev/null && pwd)" || error "HOST_DATASET_DIR could not be resolved: $ddir"
+    case "$rddir" in
+      /) error "HOST_DATASET_DIR cannot be root (/)" ;;
+      /etc|/etc/*|/usr|/usr/*|/var|/var/*|/bin|/sbin|/lib|/lib64)
+        error "HOST_DATASET_DIR cannot be a system path: $rddir" ;;
+    esac
+    HOST_DATASET_DIR="$rddir"
+  fi
 }
 
 # ── Runtime globals ──────────────────────────────────────────────────────────

@@ -67,6 +67,20 @@ client-pvc
 {{ .Values.pvc.data | default "50Gi" }}
 {{- end }}
 
+{{/*
+  hostPath base for the DATASET (shared-images) PV ONLY. Defaults to the
+  historical local path /tracebloc so installs without a network dataset mount
+  render byte-identically. When the installer bind-mounts a customer network
+  (NFS) dir at /tracebloc-data (HOST_DATASET_DIR set), it passes
+  hostPath.datasetPath=/tracebloc-data to relocate datasets onto that mount,
+  while mysql + logs ALWAYS stay on the local /tracebloc tree (InnoDB over NFS
+  is unsafe — backend#743). The /<release>/data suffix is appended here.
+  Nil-guarded (default dict) for `--reuse-values` upgrades predating this key.
+*/}}
+{{- define "tracebloc.clientDataHostPath" -}}
+{{ printf "%s/%s/data" ((default dict .Values.hostPath).datasetPath | default "/tracebloc") .Release.Name }}
+{{- end -}}
+
 {{- define "tracebloc.clientLogsPvc" -}}
 client-logs-pvc
 {{- end }}

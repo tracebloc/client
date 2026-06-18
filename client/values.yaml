@@ -60,6 +60,13 @@ storageClass:
 hostPath:
   enabled: false
   # PV paths are fixed: /tracebloc/data, /tracebloc/logs, /tracebloc/mysql (→ ~/.tracebloc/{data,logs,mysql} when HOST_DATA_DIR is mounted at /tracebloc). Directories are created automatically via hostPath type: DirectoryOrCreate.
+  # Base host path for the DATASET PV ONLY (shared training data). Default
+  # /tracebloc keeps datasets on the local mount alongside mysql/logs. The
+  # installer sets this to /tracebloc-data when a customer network (NFS) dataset
+  # mount is provided via HOST_DATASET_DIR (backend#743) — mysql + logs ALWAYS
+  # stay on the local /tracebloc tree (InnoDB over NFS is unsafe). The chart
+  # appends /<release>/data. mysql/logs PV paths are not affected by this key.
+  datasetPath: /tracebloc
 
 # -- PVC storage sizes (override per-environment if needed)
 pvc:
