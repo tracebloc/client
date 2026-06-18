@@ -124,7 +124,10 @@ kubectl get pods -o wide
 # ── 3. prove the node's image pull actually traversed the AUTHED proxy ───────
 echo "── squid access log: the node's authenticated image-pull traffic ──"
 plog="$(docker exec "$SQUID_NAME" cat /var/log/squid/access.log 2>/dev/null || true)"
-echo "$plog" | grep -E 'CONNECT' | grep "$PROXY_USER" | grep -E 'docker' | tail -8 | sed 's/^/    /'
+# Diagnostic preview only. `|| true` is load-bearing: with no matching lines the
+# first grep exits 1 and, under `set -euo pipefail`, would kill the script HERE —
+# before the real assertion just below could report the actual reason.
+echo "$plog" | grep -E 'CONNECT' | grep "$PROXY_USER" | grep -E 'docker' | tail -8 | sed 's/^/    /' || true
 # auth.docker.io is fetched only by a real image pull (the node getting a pull
 # token) — never by the readiness probe to /v2/, which stops at the 401. So an
 # authenticated CONNECT to it proves the NODE pulled through the proxy (not just
@@ -151,10 +154,26 @@ fi
 #     ingestion Job);
 #   * with that env unset the same call bypasses the squid / dials direct (the
 #     pre-fix Job — in a real proxy-only network like Charité that direct dial is
-#     refused with [Errno 111]; here the node has direct egress, so we assert the
-#     *absence* of a proxied CONNECT).
+#     refused with [Errno 111]; here the env-unset call simply reaches the backend
+#     stand-in directly, and we assert the *absence* of a proxied CONNECT).
+#
+# HERMETIC (no external network I/O): the "backend" both calls target is a
+# reserved-TLD stand-in host — backend.tracebloc-e2e.test (RFC 6761 .test, which
+# is guaranteed never to resolve on the public internet). We alias it, via
+# /etc/hosts on BOTH the squid pod and the app pod, to the cluster's OWN
+# kube-apiserver ClusterIP — a guaranteed, always-up in-cluster HTTPS:443 listener.
+# So the squid's CONNECT tunnel terminates against a real in-cluster TLS endpoint
+# and the test never dials the production backend. The previous revision curled the
+# real https://api.tracebloc.io/ through the in-cluster squid, whose egress to that
+# host depends on the CI runner's internet at test time — the intermittent flake
+# that randomly red-X'd this required check on develop (e.g. run 27765964135).
+echo "── reading the in-cluster kube-apiserver ClusterIP (the backend stand-in) ──"
+APISERVER_IP="$(kubectl get svc kubernetes -n default -o jsonpath='{.spec.clusterIP}' 2>/dev/null || true)"
+[[ -n "$APISERVER_IP" ]] || error "Could not read the kube-apiserver ClusterIP for the in-cluster backend stand-in."
+BACKEND_HOST="backend.tracebloc-e2e.test"
+
 echo "── deploying an in-cluster squid the test pods can reach by Service DNS ──"
-kubectl apply -f - <<'YAML'
+kubectl apply -f - <<YAML
 apiVersion: v1
 kind: ConfigMap
 metadata: { name: tb-egress-squid }
@@ -175,6 +194,11 @@ spec:
   template:
     metadata: { labels: { app: tb-egress-squid } }
     spec:
+      # Resolve the stand-in backend host to the in-cluster kube-apiserver so the
+      # CONNECT tunnel terminates locally (squid honours /etc/hosts by default).
+      hostAliases:
+        - ip: "${APISERVER_IP}"
+          hostnames: ["${BACKEND_HOST}"]
       containers:
         - name: squid
           image: ubuntu/squid:latest
@@ -200,6 +224,8 @@ YAML
 kubectl rollout status deploy/tb-egress-squid --timeout=180s
 
 # Mirrors _EGRESS_NO_PROXY / the chart's cluster-safe NO_PROXY: in-cluster direct.
+# The stand-in backend host is deliberately OUTSIDE this list (not a .svc / RFC1918
+# entry), so WITH the env set curl routes it through the proxy.
 APP_PROXY_URL="http://tb-egress-squid.default.svc.cluster.local:3128"
 APP_NO_PROXY="localhost,127.0.0.1,mysql-client,requests-proxy-service,.svc,.svc.cluster.local,.cluster.local,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16"
 
@@ -209,17 +235,39 @@ APP_NO_PROXY="localhost,127.0.0.1,mysql-client,requests-proxy-service,.svc,.svc.
 # calls to the SAME backend: (A) with the proxy env it must traverse the squid via
 # a CONNECT tunnel; (B) with the proxy env unset it must dial direct. A single pod
 # keeps this deterministic — no multi-pod scheduling / log-flush race to flake on.
+# The same stand-in→apiserver /etc/hosts alias lets the (B) direct call reach a
+# real in-cluster TLS endpoint instead of failing DNS. `-k`: the apiserver presents
+# the cluster-CA cert (untrusted here) — we assert proxy ROUTING, not TLS trust, so
+# verification is skipped and both calls complete to a real 401.
 echo "── one app pod: WITH the ingestion proxy env it must tunnel via the squid; with it unset it must dial direct ──"
-kubectl run egress-app --image=curlimages/curl:latest --restart=Never \
-  --env="HTTP_PROXY=${APP_PROXY_URL}"  --env="HTTPS_PROXY=${APP_PROXY_URL}" \
-  --env="http_proxy=${APP_PROXY_URL}"  --env="https_proxy=${APP_PROXY_URL}" \
-  --env="NO_PROXY=${APP_NO_PROXY}"     --env="no_proxy=${APP_NO_PROXY}" \
-  --command -- sh -c '
-    echo ">>>>> SECTION_A_WITH_PROXY_ENV";
-    curl -v -sS -m 20 -o /dev/null https://api.tracebloc.io/ 2>&1;
-    echo ">>>>> SECTION_B_PROXY_ENV_UNSET";
-    env -u HTTP_PROXY -u HTTPS_PROXY -u http_proxy -u https_proxy -u NO_PROXY -u no_proxy curl -v -sS -m 20 -o /dev/null https://api.tracebloc.io/ 2>&1;
-    echo ">>>>> SECTION_END"'
+kubectl apply -f - <<YAML
+apiVersion: v1
+kind: Pod
+metadata: { name: egress-app }
+spec:
+  restartPolicy: Never
+  hostAliases:
+    - ip: "${APISERVER_IP}"
+      hostnames: ["${BACKEND_HOST}"]
+  containers:
+    - name: app
+      image: curlimages/curl:latest
+      env:
+        - { name: HTTP_PROXY,  value: "${APP_PROXY_URL}" }
+        - { name: HTTPS_PROXY, value: "${APP_PROXY_URL}" }
+        - { name: http_proxy,  value: "${APP_PROXY_URL}" }
+        - { name: https_proxy, value: "${APP_PROXY_URL}" }
+        - { name: NO_PROXY,    value: "${APP_NO_PROXY}" }
+        - { name: no_proxy,    value: "${APP_NO_PROXY}" }
+      command: ["sh", "-c"]
+      args:
+        - |
+          echo ">>>>> SECTION_A_WITH_PROXY_ENV"
+          curl -k -v -sS -m 20 -o /dev/null https://${BACKEND_HOST}/ 2>&1
+          echo ">>>>> SECTION_B_PROXY_ENV_UNSET"
+          env -u HTTP_PROXY -u HTTPS_PROXY -u http_proxy -u https_proxy -u NO_PROXY -u no_proxy curl -k -v -sS -m 20 -o /dev/null https://${BACKEND_HOST}/ 2>&1
+          echo ">>>>> SECTION_END"
+YAML
 
 # Wait for the pod to finish, then read its single log once.
 for _ in $(seq 1 90); do
@@ -232,11 +280,16 @@ a_section="$(printf '%s\n' "$applog" | awk '/SECTION_A_WITH_PROXY_ENV/{f=1;next}
 b_section="$(printf '%s\n' "$applog" | awk '/SECTION_B_PROXY_ENV_UNSET/{f=1;next} /SECTION_END/{f=0} f')"
 
 # Proof is CLIENT-side from `curl -v` — deterministic, unlike squid's access log
-# which the log daemon buffers and may not have flushed when we read it.
-printf '%s\n' "$a_section" | grep -iE 'Establish HTTP proxy tunnel|CONNECT tunnel established|< HTTP/1.1 200' | sed 's/^/    A WITH proxy env:  /'
-printf '%s\n' "$b_section" | grep -iE 'Trying|Connected to|< HTTP/1.1 200'                                   | sed 's/^/    B env unset:       /'
+# which the log daemon buffers and may not have flushed when we read it. These two
+# lines are DIAGNOSTIC ONLY; the trailing `|| true` is load-bearing: when a section
+# is empty (the failure case) `grep` exits 1 and, under `set -euo pipefail`, the
+# pipeline would kill the whole script HERE — before the real assertions below can
+# print WHY (the CI log then shows only "exit code 1" with no reason). `|| true`
+# keeps the diagnostics non-fatal so the assertions get to run and report.
+printf '%s\n' "$a_section" | grep -iE 'Establish HTTP proxy tunnel|CONNECT tunnel established|< HTTP/' | sed 's/^/    A WITH proxy env:  /' || true
+printf '%s\n' "$b_section" | grep -iE 'Trying|Connected to|< HTTP/|Could not resolve'                 | sed 's/^/    B env unset:       /' || true
 # (A) WITH the ingestion proxy env, the backend call MUST traverse the squid.
-if ! printf '%s' "$a_section" | grep -qiE 'Establish HTTP proxy tunnel to api\.tracebloc\.io|CONNECT tunnel established'; then
+if ! printf '%s' "$a_section" | grep -qiE 'Establish HTTP proxy tunnel to backend\.tracebloc-e2e\.test|CONNECT tunnel established'; then
   error "App pod WITH the ingestion proxy env did NOT tunnel through the squid — ingestion-style backend egress is not proxied (the #119 bug)."
 fi
 # (B) With the env unset, the SAME call MUST NOT use a proxy (it dials direct).
@@ -246,4 +299,4 @@ fi
 success "App-pod egress verified: WITH the ingestion proxy env the backend call tunnelled through the in-cluster squid; with it unset the same call dialled direct."
 
 echo ""
-echo "E2E PASS: cluster came up via an AUTHENTICATED proxy, pulled a workload through it, and an ingestion-style app pod egressed to the backend through a proxy (a no-proxy pod bypassed it)."
+echo "E2E PASS: cluster came up via an AUTHENTICATED proxy, pulled a workload through it, and an ingestion-style app pod tunnelled to an in-cluster backend stand-in through a proxy (with the proxy env unset the same call dialled direct)."
