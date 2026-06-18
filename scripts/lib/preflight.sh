@@ -10,6 +10,7 @@
 #  Escape hatches:
 #    TRACEBLOC_SKIP_PREFLIGHT=1   skip all checks
 #    TRACEBLOC_ALLOW_ARM64=1      proceed on arm64 despite amd64-only images
+#    TRACEBLOC_ALLOW_NETWORK_FS=1 proceed when HOST_DATA_DIR is on NFS/CIFS/SMB (DB may corrupt)
 #    PF_MIN_MEM_GB / PF_MIN_CPU / PF_MIN_DISK_GB   lower the hard floors (CI / odd sites)
 #
 #  This file is side-effect-safe to source (defaults + function defs only).
@@ -57,6 +58,32 @@ _pf_probe_url() {
 
 # Free space in KB on the filesystem holding $1.
 _pf_free_kb() { df -Pk "$1" 2>/dev/null | awk 'NR==2 {print $4}'; }
+
+# Filesystem type holding $1, lower-cased (e.g. ext4, xfs, apfs, overlay, nfs,
+# nfs4, cifs, smbfs), or empty if undeterminable. $1 may not exist yet at
+# preflight, so walk up to the nearest existing parent. Tries findmnt (util-linux,
+# bind-mount aware), then GNU `stat -f` (Linux only — BSD/macOS `stat -f` means
+# "format string", not filesystem), then df+mount (portable, incl. macOS).
+_pf_fstype() {
+  local p="$1" parent t="" mp
+  while [[ -n "$p" && ! -e "$p" ]]; do
+    parent="$(dirname "$p")"
+    [[ "$parent" == "$p" ]] && break
+    p="$parent"
+  done
+  [[ -z "$p" || ! -e "$p" ]] && return 0
+  if has findmnt; then
+    t="$(findmnt -nro FSTYPE --target "$p" 2>/dev/null | head -1)"
+  fi
+  if [[ -z "$t" && "$OS" != "Darwin" ]]; then
+    t="$(stat -f -c '%T' "$p" 2>/dev/null)"
+  fi
+  if [[ -z "$t" ]] && has df; then
+    mp="$(df "$p" 2>/dev/null | awk 'NR>1 && $NF ~ /^\// {print $NF}' | tail -1)"
+    [[ -n "$mp" ]] && t="$(mount 2>/dev/null | awk -v m="$mp" 'index($0," on "m" (")>0 {sub(/.* \(/,""); sub(/[,)].*/,""); print; exit}')"
+  fi
+  printf '%s' "$t" | tr '[:upper:]' '[:lower:]'
+}
 
 # Memory/CPU as the CONTAINER RUNTIME sees it (the budget the pods actually get).
 # On Docker Desktop / Colima / WSL2 this is the VM's allocation — smaller than the
@@ -255,6 +282,37 @@ _pf_disk() {
   return 0
 }
 
+# Network-filesystem guard for HOST_DATA_DIR. MySQL/InnoDB corrupts or crash-loops
+# on NFS/CIFS/SMB (broken POSIX locking + unsafe O_DIRECT/fsync), and the chart's
+# root chown init-container is blocked by NFS root_squash — so a network data dir
+# fails ~20 min in with a cryptic CrashLoopBackOff. Catch it in seconds here.
+_pf_storage_type() {
+  local target fstype
+  target="${HOST_DATA_DIR:-$HOME/.tracebloc}"
+  fstype="$(_pf_fstype "$target")"
+  if [[ -z "$fstype" ]]; then
+    info "Storage: ${target} — filesystem type undetermined; assuming local."
+    return 0
+  fi
+  case "$fstype" in
+    nfs|nfs3|nfs4|nfsd|cifs|smb|smbfs|smb2|smb3|afpfs|9p|ncpfs|gfs|gfs2|ocfs2|lustre|glusterfs|fuse.glusterfs|ceph|fuse.ceph|beegfs|fuse.sshfs|fuse.s3fs|davfs|fuse.davfs|webdav|fuse.rclone)
+      if [[ -n "${TRACEBLOC_ALLOW_NETWORK_FS:-}" ]]; then
+        warn "Storage: ${target} is on a network filesystem (${fstype}) — proceeding (TRACEBLOC_ALLOW_NETWORK_FS set); the client database may corrupt or crash-loop on network storage."
+        return 0
+      fi
+      _pf_fail_line "Storage: ${target} is on a network filesystem (${fstype}) — the tracebloc client database (MySQL/InnoDB) corrupts or crash-loops on network storage, and NFS root_squash blocks data-dir setup."
+      PF_HARD_FAIL=$(( ${PF_HARD_FAIL:-0} + 1 ))
+      hint "Fix: point HOST_DATA_DIR at a LOCAL disk — the default ~/.tracebloc is local:"
+      hint "  HOST_DATA_DIR=\"\$HOME/.tracebloc\" ./install-k8s.sh"
+      hint "  (or set TRACEBLOC_ALLOW_NETWORK_FS=1 to proceed anyway — not recommended for the database.)"
+      ;;
+    *)
+      success "Storage: ${target} (${fstype})"
+      ;;
+  esac
+  return 0
+}
+
 _pf_connectivity() {
   info "Checking outbound connectivity to required services..."
   # Can't probe without curl — and on the direct ./install-k8s.sh path the
@@ -330,6 +388,7 @@ run_preflight() {
   _pf_cpu          || true
   _pf_memory       || true
   _pf_disk         || true
+  _pf_storage_type || true
   _pf_connectivity || true
 
   if [[ "$PF_HARD_FAIL" -gt 0 ]]; then

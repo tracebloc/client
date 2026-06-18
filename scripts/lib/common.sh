@@ -376,6 +376,8 @@ Advanced configuration (environment variables):
   AGENTS         Worker nodes                    (default: 1)
   K8S_VERSION    k3s image tag                   (default: v1.29.4-k3s1)
   HOST_DATA_DIR  Persistent data directory       (default: ~/.tracebloc)
+                 Must be on a LOCAL disk — NFS/CIFS/SMB is rejected (the database
+                 corrupts on network storage). TRACEBLOC_ALLOW_NETWORK_FS=1 overrides.
 
 Windows:
   irm https://raw.githubusercontent.com/tracebloc/client/main/scripts/install.ps1 | iex
