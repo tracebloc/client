@@ -173,6 +173,38 @@ setup() {
   ! grep -q 'HOST_UID:' "$HOST_DATA_DIR/values.yaml"
 }
 
+@test "install_client_helm: TRACEBLOC_CLIENT_* env -> non-interactive (no prompt), writes values.yaml + helm" {
+  HOST_DATA_DIR="$BATS_TEST_TMPDIR/data"; mkdir -p "$HOST_DATA_DIR"
+  _ensure_tracebloc_dirs() { :; }
+  _ensure_release_dirs() { :; }
+  _ensure_helm_runnable() { :; }
+  helm() { record "helm $*"; return 0; }
+  verify_credentials() { printf valid; }
+  export TRACEBLOC_CLIENT_ID=envid TRACEBLOC_CLIENT_PASSWORD=envpw
+  run install_client_helm </dev/null    # no stdin: must not prompt
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Credentials verified"* ]]
+  [[ "$output" != *"Client ID:"* ]]
+  grep -q 'clientId: "envid"' "$HOST_DATA_DIR/values.yaml"
+  grep -q "clientPassword: 'envpw'" "$HOST_DATA_DIR/values.yaml"
+  mock_calls | grep -q "helm upgrade --install tracebloc"
+}
+
+@test "install_client_helm: TRACEBLOC_CLIENT_* with rejected creds -> errors, no helm" {
+  HOST_DATA_DIR="$BATS_TEST_TMPDIR/data"; mkdir -p "$HOST_DATA_DIR"
+  _ensure_tracebloc_dirs() { :; }
+  _ensure_release_dirs() { :; }
+  _ensure_helm_runnable() { :; }
+  helm() { record "helm $*"; return 0; }
+  verify_credentials() { printf invalid; }
+  export TRACEBLOC_CLIENT_ID=envid TRACEBLOC_CLIENT_PASSWORD=envpw
+  run install_client_helm </dev/null
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"rejected"* ]]
+  run mock_calls
+  [[ "$output" != *"helm upgrade"* ]]
+}
+
 @test "install_client_helm: points kubeconfig at the client namespace (so the CLI needs no -n)" {
   HOST_DATA_DIR="$BATS_TEST_TMPDIR/data"; mkdir -p "$HOST_DATA_DIR"
   _ensure_tracebloc_dirs() { :; }

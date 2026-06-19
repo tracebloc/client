@@ -216,7 +216,15 @@ install_client_helm() {
   local default_client_id=""
   local default_client_password=""
 
-  if [[ -f "$values_file" ]]; then
+  # Non-interactive credentials (RFC-0001 Phase 0): set TRACEBLOC_CLIENT_ID +
+  # TRACEBLOC_CLIENT_PASSWORD to provision without typing the secret inline
+  # (CI / automation / golden images). Verified the same way as the prompt.
+  local _noninteractive_creds=0
+  if [[ -n "${TRACEBLOC_CLIENT_ID:-}" && -n "${TRACEBLOC_CLIENT_PASSWORD:-}" ]]; then
+    _noninteractive_creds=1
+  fi
+
+  if [[ "$_noninteractive_creds" == 0 && -f "$values_file" ]]; then
     hint "Previous configuration found."
     while true; do
       read -r -p "  Use previous settings as defaults? [Y/n]: " use_existing
@@ -242,11 +250,28 @@ install_client_helm() {
   # ── Step 4/4: Connect to tracebloc network ──────────────────────────────
   step 4 5 "Connect to tracebloc network"
 
-  prompt_header "To connect this machine, you need a tracebloc client."
+  if [[ "$_noninteractive_creds" == 1 ]]; then
+    # Credentials supplied via env — verify once, no prompt, no re-prompt.
+    TB_CLIENT_ID=$(_sanitize_credential "$TRACEBLOC_CLIENT_ID")
+    TB_CLIENT_PASSWORD=$(_sanitize_credential "$TRACEBLOC_CLIENT_PASSWORD")
+    [[ -n "$TB_CLIENT_ID" && -n "$TB_CLIENT_PASSWORD" ]] || \
+      error "TRACEBLOC_CLIENT_ID / TRACEBLOC_CLIENT_PASSWORD must be non-empty."
+    info "Verifying credentials with tracebloc…"
+    case "$(verify_credentials "$TB_CLIENT_ID" "$TB_CLIENT_PASSWORD")" in
+      valid)      success "Credentials verified." ;;
+      invalid)    error "TRACEBLOC_CLIENT_ID / TRACEBLOC_CLIENT_PASSWORD was rejected by tracebloc — check it at https://ai.tracebloc.io/clients and re-run." ;;
+      inactive)   error "This tracebloc account is not active yet. Check your email for the activation link, then re-run." ;;
+      unverified) warn "Couldn't reach tracebloc to verify credentials right now — continuing (the client will stay offline if they are wrong)." ;;
+    esac
+  else
+
+  prompt_header "Connect this machine to a tracebloc client."
   hint "A client links your secure environment to the tracebloc"
   hint "platform so vendors can submit models for evaluation."
   echo ""
-  hint "Create one here (free):"
+  hint "Already have one? Enter its credentials below — or set"
+  hint "TRACEBLOC_CLIENT_ID / TRACEBLOC_CLIENT_PASSWORD to skip this prompt."
+  hint "Need one? Create it (free) at:"
   echo -e "    ${BOLD}${WHITE}https://ai.tracebloc.io/clients${RESET}"
   echo ""
 
@@ -300,6 +325,7 @@ install_client_helm() {
     # Force an active re-entry on retry (don't silently reuse a rejected default).
     default_client_id=""; default_client_password=""
   done
+  fi
 
   # ── One-client-per-machine guard ─────────────────────────────────────────
   # A machine runs exactly one tracebloc client: it shares this cluster and the
