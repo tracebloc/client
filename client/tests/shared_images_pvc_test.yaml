@@ -1,0 +1,105 @@
+suite: Client Data (shared-images) PVC
+# Covers templates/shared-images-pvc.yaml — the dataset (shared training data)
+# PV/PVC. backend#743 parameterized the dataset PV's hostPath base
+# (hostPath.datasetPath) so datasets can live on a separate network mount while
+# mysql + logs stay on the local /tracebloc tree. Locks down:
+#   - the dynamic-PVC-only path (managed default) is unaffected
+#   - the default hostPath is byte-identical to before (/tracebloc/<release>/data)
+#   - hostPath.datasetPath relocates ONLY this (dataset) PV
+#   - the helper nil-guards a --reuse-values upgrade predating datasetPath
+templates:
+  - templates/shared-images-pvc.yaml
+release:
+  name: stg
+  namespace: tracebloc
+set:
+  clientId: "test-id"
+  clientPassword: "test"
+tests:
+  # --- dynamic PVC only (managed clusters, the default) ---
+  - it: renders only the PVC when hostPath.enabled is false (default)
+    set:
+      hostPath:
+        enabled: false
+    asserts:
+      - hasDocuments:
+          count: 1
+      - isKind:
+          of: PersistentVolumeClaim
+      - equal:
+          path: metadata.name
+          value: client-pvc
+
+  # --- hostPath PV + PVC pair (bare-metal) ---
+  - it: renders PV + PVC when hostPath.enabled is true
+    set:
+      hostPath:
+        enabled: true
+    asserts:
+      - hasDocuments:
+          count: 2
+      - isKind:
+          of: PersistentVolume
+        documentIndex: 0
+      - isKind:
+          of: PersistentVolumeClaim
+        documentIndex: 1
+
+  # --- backend#743: dataset PV hostPath parameterization ---
+  - it: dataset PV defaults to the local /tracebloc path (backward compat)
+    set:
+      hostPath:
+        enabled: true
+    documentIndex: 0
+    asserts:
+      - equal:
+          path: spec.hostPath.path
+          value: /tracebloc/stg/data
+      - equal:
+          path: spec.hostPath.type
+          value: DirectoryOrCreate
+
+  - it: hostPath.datasetPath relocates the dataset PV onto the network mount
+    set:
+      hostPath:
+        enabled: true
+        datasetPath: /tracebloc-data
+    documentIndex: 0
+    asserts:
+      - equal:
+          path: spec.hostPath.path
+          value: /tracebloc-data/stg/data
+
+  - it: PV is hard-bound to the client-pvc via claimRef
+    set:
+      hostPath:
+        enabled: true
+    documentIndex: 0
+    asserts:
+      - equal:
+          path: spec.claimRef.name
+          value: client-pvc
+      - equal:
+          path: spec.claimRef.namespace
+          value: tracebloc
+
+  - it: dataset PV advertises the configured data capacity
+    set:
+      hostPath:
+        enabled: true
+      pvc:
+        data: 100Gi
+    documentIndex: 0
+    asserts:
+      - equal:
+          path: spec.capacity.storage
+          value: 100Gi
+
+  - it: PVC carries the resource-policy keep annotation so datasets survive uninstall
+    set:
+      hostPath:
+        enabled: false
+    asserts:
+      - equal:
+          path: metadata.annotations["helm.sh/resource-policy"]
+          value: keep

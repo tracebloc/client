@@ -406,7 +406,7 @@ $([ -n "${CLIENT_ENV:-}" ] && printf '  CLIENT_ENV: "%s"\n' "$CLIENT_ENV")${prox
   # a Pending GPU pod is downgraded to CPU rather than waiting for a GPU node
   # that will never arrive.
   SINGLE_NODE: "true"
-
+$([ -n "${HOST_DATASET_DIR:-}" ] && printf '  HOST_UID: "%s"\n  HOST_GID: "%s"\n' "$(id -u)" "$(id -g)")
 storageClass:
   create: true
   name: client-storage-class
@@ -416,7 +416,7 @@ storageClass:
 
 hostPath:
   enabled: true
-
+$([ -n "${HOST_DATASET_DIR:-}" ] && printf '  datasetPath: /tracebloc-data\n')
 pvc:
   mysql: 2Gi
   logs: 10Gi

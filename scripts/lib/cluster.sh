@@ -27,8 +27,13 @@ _cluster_exists() {
 # Ensure host dirs exist so /tracebloc/data, /tracebloc/logs, /tracebloc/mysql exist inside nodes (HOST_DATA_DIR is mounted as /tracebloc).
 # Only chmod the container data subdirs; do not make HOST_DATA_DIR or files like values.yaml world-readable.
 _ensure_tracebloc_dirs() {
-  mkdir -p "$HOST_DATA_DIR" "$HOST_DATA_DIR/data" "$HOST_DATA_DIR/logs" "$HOST_DATA_DIR/mysql"
-  chmod -R 777 "$HOST_DATA_DIR/data" "$HOST_DATA_DIR/logs" "$HOST_DATA_DIR/mysql" 2>/dev/null || true
+  mkdir -p "$HOST_DATA_DIR" "$HOST_DATA_DIR/logs" "$HOST_DATA_DIR/mysql"
+  chmod -R 777 "$HOST_DATA_DIR/logs" "$HOST_DATA_DIR/mysql" 2>/dev/null || true
+  # backend#743: the dataset dir goes under HOST_DATASET_DIR (a network mount,
+  # bind-mounted at /tracebloc-data) when set, else stays local under HOST_DATA_DIR.
+  local data_base="${HOST_DATASET_DIR:-$HOST_DATA_DIR}"
+  mkdir -p "$data_base/data"
+  chmod -R 777 "$data_base/data" 2>/dev/null || true
 }
 
 # Pre-create the per-release host dirs the chart's hostPath PVs bind to.
@@ -41,8 +46,14 @@ _ensure_release_dirs() {
   local release="$1"
   [[ -z "$release" ]] && return 0
   local base="$HOST_DATA_DIR/$release"
-  mkdir -p "$base/data" "$base/logs" "$base/mysql"
-  chmod -R 777 "$base/data" "$base/logs" "$base/mysql" 2>/dev/null || true
+  mkdir -p "$base/logs" "$base/mysql"
+  chmod -R 777 "$base/logs" "$base/mysql" 2>/dev/null || true
+  # backend#743: dataset dir goes under HOST_DATASET_DIR (network mount) when set,
+  # else stays local. mysql + logs always stay on the local HOST_DATA_DIR.
+  local data_base="${HOST_DATASET_DIR:+$HOST_DATASET_DIR/$release}"
+  data_base="${data_base:-$base}"
+  mkdir -p "$data_base/data"
+  chmod -R 777 "$data_base/data" 2>/dev/null || true
 }
 
 # --- Corporate-proxy support (authenticated proxies + NO_PROXY hardening) ----
@@ -189,6 +200,7 @@ _handle_existing_cluster() {
 
   _check_existing_cluster_proxy
   _check_existing_cluster_bind
+  _check_existing_cluster_dataset_mount
 }
 
 # k3d bakes proxy env into containers at create time; it cannot be added to a
@@ -244,6 +256,32 @@ _check_existing_cluster_bind() {
   fi
 }
 
+# backend#743: the dataset bind mount (HOST_DATASET_DIR -> /tracebloc-data) is
+# baked into the k3d nodes at create time (_create_new_cluster). k3d cannot add
+# a bind mount to a RUNNING cluster, so re-using an existing cluster that lacks
+# it would point the chart's `datasetPath: /tracebloc-data` PV at ephemeral
+# in-node storage — datasets would silently land on disposable storage instead
+# of the network export and vanish on a restart. Fail fast with the recreate
+# remedy rather than installing a quietly-misrouted dataset volume. No-op when
+# HOST_DATASET_DIR is unset or the node can't be inspected.
+_check_existing_cluster_dataset_mount() {
+  [[ -z "${HOST_DATASET_DIR:-}" ]] && return 0
+  local mounts
+  mounts=$(docker inspect "k3d-${CLUSTER_NAME}-server-0" \
+    --format '{{range .Mounts}}{{println .Destination}}{{end}}' 2>/dev/null) || return 0
+  [[ -z "$mounts" ]] && return 0
+  if ! grep -qx '/tracebloc-data' <<<"$mounts"; then
+    echo ""
+    warn "HOST_DATASET_DIR is set, but the existing '$CLUSTER_NAME' cluster has no /tracebloc-data bind mount."
+    hint "k3d bakes bind mounts in at create time — they can't be added to a running cluster. Re-using this"
+    hint "cluster would put datasets on ephemeral in-node storage (lost on a restart), not your network export."
+    hint "Recreate the cluster so the dataset volume is bound (data under HOST_DATASET_DIR is untouched):"
+    hint "  k3d cluster delete $CLUSTER_NAME   &&   re-run this installer."
+    echo ""
+    error "Existing cluster is missing the dataset bind mount — refusing to install datasets onto ephemeral storage."
+  fi
+}
+
 _create_new_cluster() {
   # The tracebloc client is outbound-only: jobs-manager + pods-monitor dial out
   # to the platform, and the only in-cluster Service (mysql-client) is ClusterIP.
@@ -267,6 +305,11 @@ _create_new_cluster() {
     --k3s-arg "--disable=local-storage@server:*"
     --wait
   )
+
+  # backend#743: bind-mount the customer's dataset volume (which may be a network
+  # mount) at a DISTINCT cluster path so the chart's dataset PV can point there
+  # while mysql + logs stay on the local /tracebloc tree. No-op when unset.
+  [[ -n "${HOST_DATASET_DIR:-}" ]] && K3D_ARGS+=(-v "${HOST_DATASET_DIR}:/tracebloc-data@all")
 
   [[ -n "$K8S_VERSION" && "$K8S_VERSION" != "latest" ]] && K3D_ARGS+=(--image "rancher/k3s:${K8S_VERSION}")
 

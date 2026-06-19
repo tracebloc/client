@@ -267,6 +267,8 @@ The chart does **not** set `runAsUser` on training pods. Training images declare
 
 When `hostPath.enabled: true`, the PVCs backing `/data/shared`, `/data/logs`, and MySQL data are rooted at `/tracebloc/<release>/*` on the node filesystem. Training pods still mount those volumes through the PVC abstraction — the read-only enforcement applies. Operators should be aware that compromising the node directly (outside of tracebloc's threat model) gives filesystem-level access to the same data.
 
+**Network-mounted datasets (backend#743).** MySQL/InnoDB must stay on a local disk — file-locking and `O_DIRECT` over NFS are unsafe — so the installer preflight fails fast when `HOST_DATA_DIR` is on a network filesystem (override: `TRACEBLOC_ALLOW_NETWORK_FS=1`). Large datasets may instead live on a customer network (NFS) mount via `HOST_DATASET_DIR`: only the dataset PV base path (`hostPath.datasetPath`, mounted at `/data/shared`) is relocated there, while mysql + logs stay on the local `/tracebloc` tree. Under NFS `root_squash` a non-admin researcher has access only as their own uid and cannot grant the fixed uid `999` access, so the installer passes the host user's uid/gid to jobs-manager, which runs spawned **ingestion** pods as that uid — dataset writes then land as the user who owns the export, with no chown and no root mapping. Training pods still mount `/data/shared` read-only and keep their arbitrary-UID posture (§5.3); only the ingestion writer is pinned to the host uid.
+
 ---
 
 ## 6. What operators must do themselves
