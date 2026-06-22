@@ -205,6 +205,18 @@ networkPolicy:
       - "172.16.0.0/12"
       - "192.168.0.0/16"
 
+# -- In-cluster backend-reachability check (client-runtime#116 WS3 / cli#90).
+# A `helm test` Job that verifies a normal (non-training) pod in this namespace
+# can reach the tracebloc backend API — the egress dependency that gates
+# everything (the cluster authenticates to the backend to obtain its Service Bus
+# credentials, so no backend egress => experiments sit in Pending). It is the
+# required-egress complement to networkPolicy.training.enforcementProbeHost
+# (which verifies the opposite: that training pods are locked out). As a test
+# hook it never runs during install/upgrade. Set enabled=false on a truly
+# air-gapped cluster with no route to the backend.
+egressReachabilityCheck:
+  enabled: true
+
 # -- Egress gateway (squid) — SECURITY §8.2 / client-runtime#102.
 # In-cluster forward proxy that lets a locked-down training pod reach an FQDN
 # allowlist (backend + App Insights) and nothing else. Labelled app=egress-proxy
