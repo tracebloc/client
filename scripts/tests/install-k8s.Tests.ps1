@@ -462,8 +462,9 @@ Describe "Test-Preflight" {
     Mock Err { throw "preflight-failed" }      # Err exits; make it throwable to assert
     Mock Get-PfCpu { 4 }; Mock Get-PfMemGb { 8 }; Mock Get-PfFreeGb { 50 }
     Mock Get-WindowsArch { "amd64" }
+    Mock Get-PfFsType { "local" }
   }
-  AfterEach { $env:TRACEBLOC_SKIP_PREFLIGHT = $null; $env:TRACEBLOC_ALLOW_ARM64 = $null }
+  AfterEach { $env:TRACEBLOC_SKIP_PREFLIGHT = $null; $env:TRACEBLOC_ALLOW_ARM64 = $null; $env:TRACEBLOC_ALLOW_NETWORK_FS = $null }
 
   It "healthy environment -> does not throw" {
     Mock Test-PfUrl { "ok" }
@@ -492,6 +493,36 @@ Describe "Test-Preflight" {
     Mock Test-PfUrl { "ok" }; Mock Get-PfMemGb { 3 }; $env:PF_MIN_MEM_GB = "2"
     { Test-Preflight } | Should -Not -Throw
     $env:PF_MIN_MEM_GB = $null
+  }
+  It "network filesystem (HOST_DATA_DIR on NFS/UNC) -> fails (Err throws)" {
+    Mock Test-PfUrl { "ok" }; Mock Get-PfFsType { "network" }
+    { Test-Preflight } | Should -Throw
+  }
+  It "network filesystem + TRACEBLOC_ALLOW_NETWORK_FS -> does not throw" {
+    Mock Test-PfUrl { "ok" }; Mock Get-PfFsType { "network" }
+    $env:TRACEBLOC_ALLOW_NETWORK_FS = "1"
+    { Test-Preflight } | Should -Not -Throw
+  }
+  It "undetermined filesystem type -> does not throw (assume local)" {
+    Mock Test-PfUrl { "ok" }; Mock Get-PfFsType { $null }
+    { Test-Preflight } | Should -Not -Throw
+  }
+}
+
+Describe "Get-PfFsType" -Skip:(-not $IsWindows) {
+  It "UNC path -> network" {
+    $HOST_DATA_DIR = "\\nas\share\tracebloc"
+    Get-PfFsType | Should -Be "network"
+  }
+  It "mapped network drive (DriveType 4) -> network" {
+    $HOST_DATA_DIR = "Z:\tracebloc"
+    Mock Get-CimInstance { [pscustomobject]@{ DriveType = 4 } }
+    Get-PfFsType | Should -Be "network"
+  }
+  It "local fixed disk (DriveType 3) -> local" {
+    $HOST_DATA_DIR = "C:\tracebloc"
+    Mock Get-CimInstance { [pscustomobject]@{ DriveType = 3 } }
+    Get-PfFsType | Should -Be "local"
   }
 }
 

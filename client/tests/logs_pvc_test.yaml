@@ -195,3 +195,18 @@ tests:
           path: spec.storageClassName
           value: existing-sc
         documentIndex: 1
+
+  # backend#743: the dataset storage split (hostPath.datasetPath) must NOT move
+  # the logs PV — logs stay on the local /tracebloc tree.
+  - it: hostPath.datasetPath leaves the logs PV on the local path
+    set:
+      hostPath:
+        enabled: true
+        datasetPath: /tracebloc-data
+    release:
+      name: my-release
+    asserts:
+      - equal:
+          path: spec.hostPath.path
+          value: /tracebloc/my-release/logs
+        documentIndex: 0

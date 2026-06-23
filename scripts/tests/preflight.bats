@@ -12,6 +12,7 @@ setup() {
   # Default-safe stubs (a healthy amd64 box); individual tests override.
   _pf_probe_url() { echo ok; }
   _pf_free_kb() { echo $((50 * 1024 * 1024)); }       # 50 GB
+  _pf_fstype() { echo ext4; }                          # local disk (storage check passes)
   _pf_total_mem_kb() { echo $((8 * 1024 * 1024)); }   # 8 GB
   _pf_ncpu() { echo 4; }
   _pf_runtime_mem_kb() { echo ""; }   # daemon "down" in tests → selectors/src use host
@@ -281,4 +282,70 @@ setup() {
   run _pf_connectivity
   [[ "$output" == *"Skipping connectivity"* ]]
   PF_HARD_FAIL=0; _pf_connectivity >/dev/null 2>&1; [ "$PF_HARD_FAIL" -eq 0 ]
+}
+
+# ── _pf_storage_type (network-FS guard for HOST_DATA_DIR) ────────────────────
+# _pf_fstype is stubbed per-test; the storage check must reject network FSes but
+# pass anything local — including overlay/tmpfs, which is what CI runners use.
+@test "_pf_storage_type: local ext4 -> success, no hard fail" {
+  _pf_fstype() { echo ext4; }
+  run _pf_storage_type; [[ "$output" == *"ext4"* ]]
+  PF_HARD_FAIL=0; _pf_storage_type >/dev/null; [ "$PF_HARD_FAIL" -eq 0 ]
+}
+
+@test "_pf_storage_type: overlay (CI/containers) -> success, never blocked" {
+  _pf_fstype() { echo overlay; }
+  PF_HARD_FAIL=0; _pf_storage_type >/dev/null; [ "$PF_HARD_FAIL" -eq 0 ]
+}
+
+@test "_pf_storage_type: NFS -> hard fail naming the cause + local-path hint" {
+  _pf_fstype() { echo nfs; }
+  run _pf_storage_type
+  [[ "$output" == *"network filesystem (nfs)"* ]]
+  [[ "$output" == *"HOST_DATA_DIR"* ]]
+  PF_HARD_FAIL=0; _pf_storage_type >/dev/null 2>&1; [ "$PF_HARD_FAIL" -eq 1 ]
+}
+
+@test "_pf_storage_type: NFS4 -> hard fail" {
+  _pf_fstype() { echo nfs4; }
+  PF_HARD_FAIL=0; _pf_storage_type >/dev/null 2>&1; [ "$PF_HARD_FAIL" -eq 1 ]
+}
+
+@test "_pf_storage_type: CIFS -> hard fail" {
+  _pf_fstype() { echo cifs; }
+  PF_HARD_FAIL=0; _pf_storage_type >/dev/null 2>&1; [ "$PF_HARD_FAIL" -eq 1 ]
+}
+
+@test "_pf_storage_type: fuse.sshfs -> hard fail (covers fuse.* network mounts)" {
+  _pf_fstype() { echo fuse.sshfs; }
+  PF_HARD_FAIL=0; _pf_storage_type >/dev/null 2>&1; [ "$PF_HARD_FAIL" -eq 1 ]
+}
+
+@test "_pf_storage_type: NFS + TRACEBLOC_ALLOW_NETWORK_FS -> warn, no hard fail" {
+  _pf_fstype() { echo nfs; }; export TRACEBLOC_ALLOW_NETWORK_FS=1
+  run _pf_storage_type; [[ "$output" == *"proceeding"* ]]
+  PF_HARD_FAIL=0; _pf_storage_type >/dev/null; [ "$PF_HARD_FAIL" -eq 0 ]
+  unset TRACEBLOC_ALLOW_NETWORK_FS
+}
+
+@test "_pf_storage_type: undetermined fstype -> no hard fail (assume local)" {
+  _pf_fstype() { echo ""; }
+  PF_HARD_FAIL=0; _pf_storage_type >/dev/null; [ "$PF_HARD_FAIL" -eq 0 ]
+}
+
+# ── _pf_fstype reader (re-source for the real function) ──────────────────────
+@test "_pf_fstype: lower-cases output and walks to the nearest existing parent" {
+  source "${BATS_TEST_DIRNAME}/../lib/preflight.sh"
+  has() { [[ "$1" == "findmnt" ]]; }   # only findmnt 'present'
+  findmnt() { echo NFS4; }             # upper-case, ignores args
+  run _pf_fstype "${BATS_TEST_TMPDIR}/does/not/exist/yet"
+  [ "$output" = "nfs4" ]
+}
+
+@test "_pf_fstype: real reader on this host -> a token or empty, never crashes" {
+  source "${BATS_TEST_DIRNAME}/../lib/preflight.sh"
+  OS="$(uname -s)"
+  run _pf_fstype /
+  [ "$status" -eq 0 ]
+  [[ -z "$output" || "$output" =~ ^[a-z0-9._/]+$ ]]
 }

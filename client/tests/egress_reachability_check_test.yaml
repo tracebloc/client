@@ -1,0 +1,64 @@
+suite: In-cluster backend-reachability check
+# client-runtime#116 WS3 / cli#90. A `helm test` Job that verifies a normal
+# (non-training) pod can reach the tracebloc backend — the egress dependency
+# that gates everything. These guards pin: the on/off flag, the test-hook
+# annotation (so it never runs during install/upgrade), that the probe is NOT
+# labelled as a training workload (so the lockdown netpol never selects it and
+# it keeps the jobs-manager/requests-proxy egress class), and that the probed
+# backend tracks CLIENT_ENV.
+templates:
+  - templates/egress-reachability-check.yaml
+set:
+  clientId: "test-id"
+  clientPassword: "test"
+tests:
+  - it: renders a single helm-test Job by default
+    asserts:
+      - hasDocuments:
+          count: 1
+      - isKind:
+          of: Job
+      - equal:
+          path: metadata.annotations["helm.sh/hook"]
+          value: test
+
+  - it: does not render when disabled
+    set:
+      egressReachabilityCheck.enabled: false
+    asserts:
+      - hasDocuments:
+          count: 0
+
+  - it: is NOT labelled as a training workload (keeps its own egress)
+    asserts:
+      - notExists:
+          path: spec.template.metadata.labels["tracebloc.io/workload"]
+
+  - it: defaults the probe to the prod backend
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: CLIENT_ENV
+            value: prod
+
+  - it: targets the dev backend when CLIENT_ENV=dev
+    set:
+      env.CLIENT_ENV: dev
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: CLIENT_ENV
+            value: dev
+
+  - it: inherits the corporate proxy env so it tests the real egress path
+    set:
+      env.HTTP_PROXY_HOST: proxy.corp
+      env.HTTP_PROXY_PORT: "3128"
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: HTTPS_PROXY
+            value: http://proxy.corp:3128

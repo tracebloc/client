@@ -175,3 +175,16 @@ tests:
       - equal:
           path: spec.capacity.storage
           value: 8Gi
+
+  # backend#743: the dataset storage split (hostPath.datasetPath) must NOT move
+  # the mysql PV — InnoDB stays on the local /tracebloc tree.
+  - it: hostPath.datasetPath leaves the mysql PV on the local path
+    set:
+      hostPath:
+        enabled: true
+        datasetPath: /tracebloc-data
+    documentIndex: 0
+    asserts:
+      - equal:
+          path: spec.hostPath.path
+          value: /tracebloc/stg/mysql

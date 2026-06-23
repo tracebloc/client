@@ -257,6 +257,7 @@ helm install my-tracebloc tracebloc/client -n tracebloc -f my-values.yaml
 - [ ] Platform-specific options set (e.g. `storageClass`, `hostPath` for bare-metal, OpenShift `openshift.scc`).
 - [ ] Namespace created or `--create-namespace` used.
 - [ ] Resource requests/limits and storage sizes reviewed in `values.yaml` (e.g. `pvc.mysql`, `pvc.logs`, `pvc.data`).
+- [ ] **MySQL storage is on a LOCAL disk.** The k3d installer's `HOST_DATA_DIR` (and the chart's mysql/logs hostPath) must be local — MySQL/InnoDB corrupts on NFS/CIFS, and the installer preflight fails fast if it is on a network filesystem. To keep large datasets on a network mount, point the installer's `HOST_DATASET_DIR` at that mount: only the dataset volume moves there; MySQL + logs stay local (backend#743).
 - [ ] Lint and template checked: `helm lint ./client -f my-values.yaml` and `helm template my-tracebloc ./client -f my-values.yaml`.
 
 ---

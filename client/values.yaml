@@ -60,6 +60,13 @@ storageClass:
 hostPath:
   enabled: false
   # PV paths are fixed: /tracebloc/data, /tracebloc/logs, /tracebloc/mysql (→ ~/.tracebloc/{data,logs,mysql} when HOST_DATA_DIR is mounted at /tracebloc). Directories are created automatically via hostPath type: DirectoryOrCreate.
+  # Base host path for the DATASET PV ONLY (shared training data). Default
+  # /tracebloc keeps datasets on the local mount alongside mysql/logs. The
+  # installer sets this to /tracebloc-data when a customer network (NFS) dataset
+  # mount is provided via HOST_DATASET_DIR (backend#743) — mysql + logs ALWAYS
+  # stay on the local /tracebloc tree (InnoDB over NFS is unsafe). The chart
+  # appends /<release>/data. mysql/logs PV paths are not affected by this key.
+  datasetPath: /tracebloc
 
 # -- PVC storage sizes (override per-environment if needed)
 pvc:
@@ -197,6 +204,18 @@ networkPolicy:
       - "10.0.0.0/8"
       - "172.16.0.0/12"
       - "192.168.0.0/16"
+
+# -- In-cluster backend-reachability check (client-runtime#116 WS3 / cli#90).
+# A `helm test` Job that verifies a normal (non-training) pod in this namespace
+# can reach the tracebloc backend API — the egress dependency that gates
+# everything (the cluster authenticates to the backend to obtain its Service Bus
+# credentials, so no backend egress => experiments sit in Pending). It is the
+# required-egress complement to networkPolicy.training.enforcementProbeHost
+# (which verifies the opposite: that training pods are locked out). As a test
+# hook it never runs during install/upgrade. Set enabled=false on a truly
+# air-gapped cluster with no route to the backend.
+egressReachabilityCheck:
+  enabled: true
 
 # -- Egress gateway (squid) — SECURITY §8.2 / client-runtime#102.
 # In-cluster forward proxy that lets a locked-down training pod reach an FQDN

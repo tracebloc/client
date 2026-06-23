@@ -93,6 +93,11 @@
         "enabled": {
           "type": "boolean",
           "description": "Enable hostPath PVs (bare-metal only). PV paths are fixed: /tracebloc/data, /tracebloc/logs, /tracebloc/mysql. Directories are created via hostPath type: DirectoryOrCreate."
+        },
+        "datasetPath": {
+          "type": "string",
+          "default": "/tracebloc",
+          "description": "Base host path for the DATASET (shared-images) PV ONLY. Default /tracebloc keeps datasets local alongside mysql/logs; the installer sets /tracebloc-data when a customer network (NFS) dataset mount is provided via HOST_DATASET_DIR (backend#743). mysql + logs PV paths always stay on /tracebloc. The chart appends /<release>/data."
         }
       }
     },

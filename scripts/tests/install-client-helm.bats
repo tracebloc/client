@@ -141,6 +141,70 @@ setup() {
   mock_calls | grep -q "helm upgrade --install tracebloc"
 }
 
+# backend#743: when a dataset mount is provided, the generated values must point
+# the dataset PV at /tracebloc-data and pass the host uid/gid so jobs-manager
+# runs spawned ingestion pods as the owning user (NFS writes).
+@test "install_client_helm: HOST_DATASET_DIR set -> values carry datasetPath + host uid/gid" {
+  HOST_DATA_DIR="$BATS_TEST_TMPDIR/data"; mkdir -p "$HOST_DATA_DIR"
+  HOST_DATASET_DIR="$BATS_TEST_TMPDIR/ds"; mkdir -p "$HOST_DATASET_DIR"
+  _ensure_tracebloc_dirs() { :; }
+  _ensure_release_dirs() { :; }
+  _ensure_helm_runnable() { :; }
+  helm() { record "helm $*"; return 0; }
+  verify_credentials() { printf valid; }
+  run install_client_helm <<< $'myid\nmypw'
+  [ "$status" -eq 0 ]
+  grep -q 'datasetPath: /tracebloc-data' "$HOST_DATA_DIR/values.yaml"
+  grep -qE 'HOST_UID: "[0-9]+"' "$HOST_DATA_DIR/values.yaml"
+  grep -qE 'HOST_GID: "[0-9]+"' "$HOST_DATA_DIR/values.yaml"
+}
+
+@test "install_client_helm: HOST_DATASET_DIR unset -> no datasetPath / host uid (unchanged)" {
+  unset HOST_DATASET_DIR
+  HOST_DATA_DIR="$BATS_TEST_TMPDIR/data"; mkdir -p "$HOST_DATA_DIR"
+  _ensure_tracebloc_dirs() { :; }
+  _ensure_release_dirs() { :; }
+  _ensure_helm_runnable() { :; }
+  helm() { record "helm $*"; return 0; }
+  verify_credentials() { printf valid; }
+  run install_client_helm <<< $'myid\nmypw'
+  [ "$status" -eq 0 ]
+  ! grep -q 'datasetPath:' "$HOST_DATA_DIR/values.yaml"
+  ! grep -q 'HOST_UID:' "$HOST_DATA_DIR/values.yaml"
+}
+
+@test "install_client_helm: TRACEBLOC_CLIENT_* env -> non-interactive (no prompt), writes values.yaml + helm" {
+  HOST_DATA_DIR="$BATS_TEST_TMPDIR/data"; mkdir -p "$HOST_DATA_DIR"
+  _ensure_tracebloc_dirs() { :; }
+  _ensure_release_dirs() { :; }
+  _ensure_helm_runnable() { :; }
+  helm() { record "helm $*"; return 0; }
+  verify_credentials() { printf valid; }
+  export TRACEBLOC_CLIENT_ID=envid TRACEBLOC_CLIENT_PASSWORD=envpw
+  run install_client_helm </dev/null    # no stdin: must not prompt
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Credentials verified"* ]]
+  [[ "$output" != *"Client ID:"* ]]
+  grep -q 'clientId: "envid"' "$HOST_DATA_DIR/values.yaml"
+  grep -q "clientPassword: 'envpw'" "$HOST_DATA_DIR/values.yaml"
+  mock_calls | grep -q "helm upgrade --install tracebloc"
+}
+
+@test "install_client_helm: TRACEBLOC_CLIENT_* with rejected creds -> errors, no helm" {
+  HOST_DATA_DIR="$BATS_TEST_TMPDIR/data"; mkdir -p "$HOST_DATA_DIR"
+  _ensure_tracebloc_dirs() { :; }
+  _ensure_release_dirs() { :; }
+  _ensure_helm_runnable() { :; }
+  helm() { record "helm $*"; return 0; }
+  verify_credentials() { printf invalid; }
+  export TRACEBLOC_CLIENT_ID=envid TRACEBLOC_CLIENT_PASSWORD=envpw
+  run install_client_helm </dev/null
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"rejected"* ]]
+  run mock_calls
+  [[ "$output" != *"helm upgrade"* ]]
+}
+
 @test "install_client_helm: points kubeconfig at the client namespace (so the CLI needs no -n)" {
   HOST_DATA_DIR="$BATS_TEST_TMPDIR/data"; mkdir -p "$HOST_DATA_DIR"
   _ensure_tracebloc_dirs() { :; }

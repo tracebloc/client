@@ -40,6 +40,47 @@ setup() {
   [[ "$output" == *"HOST_DATA_DIR"* ]]
 }
 
+# ── validate_config: HOST_DATASET_DIR (backend#743) ──────────────────────────
+# Resolve HOME to its physical path so the HOST_DATA_DIR under-$HOME check (which
+# uses cd -P) is not tripped by macOS's /var -> /private/var symlink (Linux/CI
+# has none). The dataset dir itself MAY live outside $HOME — that's the point.
+@test "validate_config: HOST_DATASET_DIR outside HOME but existing+writable -> passes" {
+  HOME="$(cd -P "$BATS_TEST_TMPDIR" && pwd)"; USER=tester
+  CLUSTER_NAME=ok; SERVERS=1; AGENTS=1; HOST_DATA_DIR="$HOME/.tracebloc"
+  HOST_DATASET_DIR="$HOME/dataset-mount"; mkdir -p "$HOST_DATASET_DIR"
+  run validate_config
+  [ "$status" -eq 0 ]
+}
+
+@test "validate_config: HOST_DATASET_DIR does not exist -> error (never mkdir a share root)" {
+  HOME="$(cd -P "$BATS_TEST_TMPDIR" && pwd)"; USER=tester
+  CLUSTER_NAME=ok; SERVERS=1; AGENTS=1; HOST_DATA_DIR="$HOME/.tracebloc"
+  HOST_DATASET_DIR="$HOME/nope-$$"
+  run validate_config
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"does not exist"* ]]
+}
+
+@test "validate_config: HOST_DATASET_DIR not writable -> error" {
+  [[ "$(id -u)" -eq 0 ]] && skip "root bypasses filesystem permission bits"
+  HOME="$(cd -P "$BATS_TEST_TMPDIR" && pwd)"; USER=tester
+  CLUSTER_NAME=ok; SERVERS=1; AGENTS=1; HOST_DATA_DIR="$HOME/.tracebloc"
+  HOST_DATASET_DIR="$HOME/ro-mount"; mkdir -p "$HOST_DATASET_DIR"; chmod 555 "$HOST_DATASET_DIR"
+  run validate_config
+  chmod 755 "$HOST_DATASET_DIR"   # restore so bats can clean up the tmpdir
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"not writable"* ]]
+}
+
+@test "validate_config: HOST_DATA_DIR still rejected outside HOME when dataset dir is set" {
+  HOME="$(cd -P "$BATS_TEST_TMPDIR" && pwd)"; USER=tester
+  CLUSTER_NAME=ok; SERVERS=1; AGENTS=1; HOST_DATA_DIR="/tmp/not-under-home-$$"
+  HOST_DATASET_DIR="$HOME/dataset-mount"; mkdir -p "$HOST_DATASET_DIR"
+  run validate_config
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"HOST_DATA_DIR"* ]]
+}
+
 # ── install_cleanup: the CLIENT_STATE guard (#716) ─────────────────────────
 @test "install_cleanup: exit 0 -> silent" {
   out="$( ( exit 0 ); install_cleanup 2>&1 )"

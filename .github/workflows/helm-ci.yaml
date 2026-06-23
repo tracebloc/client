@@ -16,8 +16,16 @@ on:
       - 'scripts/tests/e2e-auto-upgrade.sh'
       - '.github/workflows/helm-ci.yaml'
 
+concurrency:
+  # Cancel superseded runs on PRs — this is the repo's heaviest workflow
+  # (a real k3d cluster in upgrade-e2e plus two 4-platform matrices). Never
+  # cancel push/schedule runs.
+  group: helm-ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   lint:
+    timeout-minutes: 10
     name: Lint
     runs-on: ubuntu-latest
     steps:
@@ -47,6 +55,7 @@ jobs:
         run: helm lint --strict ./ingestor
 
   template:
+    timeout-minutes: 10
     name: Template render
     runs-on: ubuntu-latest
     strategy:
@@ -81,6 +90,7 @@ jobs:
             /tmp/rendered-${{ matrix.platform }}.yaml
 
   unittest:
+    timeout-minutes: 10
     name: Unit tests
     runs-on: ubuntu-latest
     steps:
@@ -98,6 +108,7 @@ jobs:
         run: helm unittest ./client
 
   schema:
+    timeout-minutes: 10
     name: Schema validation
     runs-on: ubuntu-latest
     strategy:
@@ -119,6 +130,7 @@ jobs:
           echo "Schema validation passed for ${{ matrix.platform }}"
 
   ingestor-multiarch:
+    timeout-minutes: 10
     # Guard: the ingestor image the cluster spawns must be a multi-arch index
     # (linux/amd64 + linux/arm64), or arm64 hosts (Apple Silicon, Graviton)
     # fail data ingestion with "no match for platform" / ImagePullBackOff.
@@ -164,6 +176,7 @@ jobs:
           fi
 
   upgrade-e2e:
+    timeout-minutes: 30
     # Fleet auto-upgrade non-regression gate (client-runtime#102 / #245-class
     # regressions): installs the LAST PUBLISHED chart from gh-pages on a real
     # k3d cluster, then upgrades to THIS working tree via both

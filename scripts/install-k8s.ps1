@@ -18,7 +18,7 @@
 #    $env:SERVERS       = "1"              default: 1  (control-plane nodes)
 #    $env:AGENTS        = "1"              default: 1  (worker nodes)
 #    $env:K8S_VERSION   = "v1.29.4-k3s1"  default: latest
-#    $env:HOST_DATA_DIR = "C:\data"        default: $env:USERPROFILE\.tracebloc
+#    $env:HOST_DATA_DIR = "C:\data"        default: $env:USERPROFILE\.tracebloc (LOCAL disk; no NFS/UNC)
 #    $env:CLIENT_ENV    = "dev"            optional; if not set, CLIENT_ENV is not added to env in values
 # =============================================================================
 
@@ -130,6 +130,12 @@ $SERVERS       = if ($env:SERVERS)       { $env:SERVERS }       else { "1" }
 $AGENTS        = if ($env:AGENTS)        { $env:AGENTS }        else { "1" }
 $K8S_VERSION   = if ($env:K8S_VERSION)   { $env:K8S_VERSION }   else { "v1.29.4-k3s1" }
 $HOST_DATA_DIR = if ($env:HOST_DATA_DIR) { $env:HOST_DATA_DIR } else { "$env:USERPROFILE\.tracebloc" }
+# backend#743: optional separate dir for the big dataset volume. Empty (default)
+# keeps datasets under HOST_DATA_DIR. When set, it is bind-mounted at
+# /tracebloc-data and the chart's dataset PV points there (mysql + logs stay
+# local). The host-uid ingestion mechanism for root_squash NFS is Linux-only; on
+# Windows k3d runs in a Linux VM where Docker Desktop handles mount ownership.
+$HOST_DATASET_DIR = if ($env:HOST_DATASET_DIR) { $env:HOST_DATASET_DIR } else { "" }
 $CLIENT_ENV    = $env:CLIENT_ENV
 
 $GPU_VENDOR       = "none"
@@ -193,6 +199,29 @@ function Confirm-Config {
     }
   }
   $script:HOST_DATA_DIR = $dataDir
+
+  # backend#743: optional dataset dir. Unlike HOST_DATA_DIR it MAY live outside
+  # USERPROFILE (a separate / network drive). It must already EXIST and be
+  # writable; we never create a network-share root. System paths stay barred.
+  if ($HOST_DATASET_DIR) {
+    $dsDir = [System.IO.Path]::GetFullPath($HOST_DATASET_DIR)
+    if (-not (Test-Path $dsDir -PathType Container)) {
+      Err ("HOST_DATASET_DIR does not exist: " + $HOST_DATASET_DIR + " (mount the dataset volume before installing)")
+    }
+    try {
+      $probe = Join-Path $dsDir (".tb-write-" + [guid]::NewGuid().ToString("N"))
+      New-Item -ItemType File -Path $probe -ErrorAction Stop | Out-Null
+      Remove-Item $probe -Force -ErrorAction SilentlyContinue
+    } catch {
+      Err ("HOST_DATASET_DIR is not writable: " + $HOST_DATASET_DIR)
+    }
+    foreach ($f in $forbidden) {
+      if ($f -and $dsDir.StartsWith([System.IO.Path]::GetFullPath($f), [StringComparison]::OrdinalIgnoreCase)) {
+        Err ("HOST_DATASET_DIR cannot be a system path: " + $HOST_DATASET_DIR)
+      }
+    }
+    $script:HOST_DATASET_DIR = $dsDir
+  }
 }
 
 # =============================================================================
@@ -802,6 +831,24 @@ function New-K3dCluster {
         Hint "  k3d cluster delete $CLUSTER_NAME  (then re-run this installer)."
       }
     } catch {}
+
+    # backend#743: the dataset bind mount (HOST_DATASET_DIR -> /tracebloc-data)
+    # is baked into the k3d nodes at create time; k3d can't add it to a running
+    # cluster. Re-using an existing cluster without it would point the chart's
+    # datasetPath PV at ephemeral in-node storage (datasets lost on a restart)
+    # instead of the network export. Fail fast with the recreate remedy.
+    if ($HOST_DATASET_DIR) {
+      $dsMounts = ""
+      try { $dsMounts = (docker inspect "k3d-$CLUSTER_NAME-server-0" --format '{{range .Mounts}}{{println .Destination}}{{end}}' 2>$null | Out-String) } catch {}
+      if ($dsMounts -and ($dsMounts -notmatch '(?m)^/tracebloc-data\s*$')) {
+        Warn "HOST_DATASET_DIR is set, but the existing '$CLUSTER_NAME' cluster has no /tracebloc-data bind mount."
+        Hint "k3d bakes bind mounts in at create time - they can't be added to a running cluster. Re-using this"
+        Hint "cluster would put datasets on ephemeral in-node storage (lost on a restart), not your network export."
+        Hint "Recreate the cluster so the dataset volume is bound (data under HOST_DATASET_DIR is untouched):"
+        Hint "  k3d cluster delete $CLUSTER_NAME   (then re-run this installer)."
+        Err "Existing cluster is missing the dataset bind mount - refusing to install datasets onto ephemeral storage."
+      }
+    }
   } else {
     if (-not (Test-Path $HOST_DATA_DIR)) {
       New-Item -ItemType Directory -Path $HOST_DATA_DIR -Force | Out-Null
@@ -822,6 +869,11 @@ function New-K3dCluster {
       "--k3s-arg", "--disable=local-storage@server:*",
       "--wait"
     )
+
+    # backend#743: bind-mount the customer dataset volume at a distinct cluster
+    # path so the chart's dataset PV points there while mysql + logs stay on the
+    # local /tracebloc tree. No-op when unset.
+    if ($HOST_DATASET_DIR) { $k3dArgs += @("-v", "${HOST_DATASET_DIR}:/tracebloc-data@all") }
 
     if ($K8S_VERSION -ne "" -and $K8S_VERSION -ne "latest") { $k3dArgs += @("--image", "rancher/k3s:$K8S_VERSION") }
     if ($K3D_GPU_FLAG -ne "") {
@@ -1161,6 +1213,8 @@ function Install-ClientHelm {
   if ($CLIENT_ENV) {
     $envBlock += "  CLIENT_ENV: $CLIENT_ENV`n"
   }
+  # backend#743: relocate the dataset PV onto the network mount when HOST_DATASET_DIR is set.
+  $datasetPathLine = if ($HOST_DATASET_DIR) { "`n  datasetPath: /tracebloc-data" } else { "" }
   $envBlock += @"
   RESOURCE_LIMITS: "cpu=2,memory=8Gi"
   RESOURCE_REQUESTS: "cpu=2,memory=8Gi"
@@ -1176,7 +1230,7 @@ storageClass:
   parameters: {}
 
 hostPath:
-  enabled: true
+  enabled: true$datasetPathLine
 
 pvc:
   mysql: 2Gi
@@ -1409,6 +1463,21 @@ function Get-PfFreeGb {
   } catch { return $null }
 }
 
+# "network" if $HOST_DATA_DIR is on a UNC path or a mapped network drive
+# (Win32_LogicalDisk DriveType 4); "local" otherwise; $null if undeterminable
+# (e.g. non-Windows under Pester - tests mock this). Mirrors preflight.sh
+# _pf_storage_type: MySQL/InnoDB corrupts or crash-loops on network storage.
+function Get-PfFsType {
+  try {
+    if ($HOST_DATA_DIR -like '\\*') { return "network" }   # UNC path (\\server\share)
+    $qualifier = (Split-Path -Qualifier $HOST_DATA_DIR -ErrorAction SilentlyContinue)
+    if (-not $qualifier) { return "local" }                # no drive letter, not UNC
+    $d = Get-CimInstance Win32_LogicalDisk -Filter "DeviceID='$qualifier'" -ErrorAction Stop
+    if ($d.DriveType -eq 4) { return "network" }           # DriveType 4 = network drive
+    return "local"
+  } catch { return $null }
+}
+
 # Memory/CPU as the container runtime sees it (the Docker Desktop / WSL2 VM budget,
 # which is what the pods actually get — smaller than the host). $null if the daemon
 # is down or the value is junk, so callers fall back to the host (CIM) reader.
@@ -1487,6 +1556,22 @@ function Test-Preflight {
   elseif  ($disk -lt $minDiskGb)   { Write-PfFail "Disk: only $disk GB free - need >= $minDiskGb GB."; $hardFail++; Hint "Free up space or attach a larger disk, then re-run." }
   elseif  ($disk -lt $warnDiskGb)  { Warn "Disk: $disk GB free - recommended >= $warnDiskGb GB; images + data may fill it." }
   else                             { Ok "Disk: $disk GB free" }
+
+  # Network-FS guard: MySQL/InnoDB corrupts or crash-loops on NFS/CIFS/SMB. Fail
+  # fast instead of a cryptic CrashLoopBackOff ~20 min in. (Mirrors preflight.sh.)
+  $fs = Get-PfFsType
+  if     ($null -eq $fs)      { Info "Storage: filesystem type undetermined; assuming local." }
+  elseif ($fs -eq "network") {
+    if ($env:TRACEBLOC_ALLOW_NETWORK_FS) {
+      Warn "Storage: $HOST_DATA_DIR is on a network filesystem - proceeding (TRACEBLOC_ALLOW_NETWORK_FS set); the client database may corrupt or crash-loop."
+    } else {
+      Write-PfFail "Storage: $HOST_DATA_DIR is on a network filesystem - the tracebloc client database (MySQL/InnoDB) corrupts or crash-loops on network storage."
+      $hardFail++
+      Hint "Fix: point HOST_DATA_DIR at a LOCAL disk (the default $env:USERPROFILE\.tracebloc is local)."
+      Hint "  (or set `$env:TRACEBLOC_ALLOW_NETWORK_FS=1 to proceed anyway - not recommended for the database.)"
+    }
+  }
+  else                       { Ok "Storage: $HOST_DATA_DIR local disk" }
 
   Info "Checking outbound connectivity to required services..."
   $backendHost = (Get-BackendUrl) -replace '^https?://','' -replace '/$',''

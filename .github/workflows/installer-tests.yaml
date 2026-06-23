@@ -28,8 +28,16 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  # Cancel superseded PR runs — this suite is expensive (9-distro
+  # docker-in-docker matrix + real k3d e2e + Windows Pester). Never cancel
+  # push/schedule runs.
+  group: installer-tests-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   static:
+    timeout-minutes: 10
     name: Static analysis
     runs-on: ubuntu-latest
     steps:
@@ -73,6 +81,7 @@ jobs:
           Write-Host "no PSScriptAnalyzer errors"
 
   unit-bash:
+    timeout-minutes: 10
     name: bats (bash unit, mocked)
     runs-on: ubuntu-latest
     steps:
@@ -83,6 +92,7 @@ jobs:
         run: bats scripts/tests/*.bats
 
   unit-pester:
+    timeout-minutes: 20
     # Pester on Linux pwsh (fast) AND real Windows — the .ps1 installer's actual
     # target. fail-fast:false so a Windows-only surprise doesn't mask Linux signal.
     name: Pester (${{ matrix.os }})
@@ -108,6 +118,7 @@ jobs:
           Invoke-Pester -Configuration $cfg
 
   distro-prereqs:
+    timeout-minutes: 20
     # Runs the installer's REAL Linux prerequisite path in a fresh container for
     # each distro family. Proves the package-manager / Docker / conntrack / helm
     # branches all resolve and install — the layer where every installer bug we
@@ -142,6 +153,7 @@ jobs:
             bash scripts/tests/distro-prereqs.sh
 
   e2e-cluster:
+    timeout-minutes: 30
     # Highest-fidelity check CI can run: brings up an ACTUAL k3d cluster via the
     # installer's own create_cluster() on a real kernel (Docker is preinstalled
     # on the runner), proves it can schedule + run a public workload, then tears
@@ -160,6 +172,7 @@ jobs:
         run: bash scripts/tests/e2e-cluster.sh
 
   e2e-proxy:
+    timeout-minutes: 30
     # Authenticated corporate-proxy E2E (the Charité/hospital archetype): stands
     # up a squid that REQUIRES basic auth, brings the cluster up with the
     # installer's proxy config pointed at it as user:pass@host, and proves the

@@ -1,0 +1,106 @@
+{{- if dig "enabled" true (default dict .Values.egressReachabilityCheck) }}
+{{- /*
+  In-cluster backend-reachability check (client-runtime#116 WS3 / cli#90).
+  A `helm test` hook: run `helm test <release>` to verify a normal (non-training)
+  pod in this namespace can reach the tracebloc backend API. This is the egress
+  dependency that gates EVERYTHING — the cluster authenticates to the backend to
+  obtain its Service Bus credentials, so if the backend is unreachable from inside
+  the cluster, experiments never start (they sit in Pending). It is the required-
+  egress complement to egress-enforcement-check, which verifies the opposite:
+  that *training* pods are locked OUT.
+
+  Service Bus itself is intentionally NOT probed here: its host is fetched
+  post-auth from the backend (static nowhere in the chart) and its egress is
+  brokered by the requests-proxy, whose readiness `tracebloc cluster doctor`
+  already checks. Reaching the backend is the prerequisite for both.
+
+  The probe pod is deliberately NOT labelled `tracebloc.io/workload: training`, so
+  the training-egress lockdown never selects it — it shares the egress class of
+  the jobs-manager / requests-proxy (the pods that actually reach the backend),
+  and honours the corporate proxy via tracebloc.proxyEnv, so it tests the real
+  path. As a test hook it never runs during install/upgrade, so it can never
+  block them or the hourly auto-upgrade. Set egressReachabilityCheck.enabled=false
+  to disable (e.g. a truly air-gapped cluster with no route to the backend).
+*/ -}}
+{{- $env := .Values.env.CLIENT_ENV | default "prod" -}}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ .Release.Name }}-egress-reachability-check
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "tracebloc.labels" . | nindent 4 }}
+  annotations:
+    "helm.sh/hook": test
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: 0
+  ttlSecondsAfterFinished: 120
+  template:
+    metadata:
+      labels:
+        {{- include "tracebloc.selectorLabels" . | nindent 8 }}
+    spec:
+      restartPolicy: Never
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        # curlimages/curl's default user is non-numeric (curl_user); runAsNonRoot
+        # can't verify that, so pin the image's uid explicitly.
+        runAsUser: 100
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: probe
+          image: {{ include "tracebloc.image" (dict "repository" "curlimages/curl" "tag" "8.20.0" "digest" "sha256:b3f1fb2a51d923260350d21b8654bbc607164a987e2f7c84a0ac199a67df812a" "registry" "docker.io") | quote }}
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+            readOnlyRootFilesystem: true
+          env:
+            {{- include "tracebloc.proxyEnv" . | nindent 12 }}
+            - name: CLIENT_ENV
+              value: {{ $env | quote }}
+          command:
+            - sh
+            - -c
+            - |
+              case "$CLIENT_ENV" in
+                dev) HOST="dev-api.tracebloc.io" ;;
+                stg) HOST="stg-api.tracebloc.io" ;;
+                *)   HOST="api.tracebloc.io" ;;
+              esac
+              echo "[egress-reachability-check] CLIENT_ENV=$CLIENT_ENV -> probing backend reachability to https://${HOST}/ (through the proxy if one is configured)..."
+              # Key the verdict on curl's EXIT CODE, not the HTTP status. With no
+              # --fail, curl exits 0 for ANY HTTP response (200/401/404/5xx), so a
+              # 0 exit is the only outcome that proves a full TCP+TLS+HTTP round
+              # trip — the backend is genuinely reachable AND usable. Every
+              # non-zero code is a transport/TLS failure, so we fail closed on it:
+              # connect-refused (7) / timeout (28) = egress blocked; DNS/proxy
+              # resolve (6/5) = host can't be found; a TLS handshake/cert error
+              # (35/51/60/…) = reached the host but TLS is broken (commonly a proxy
+              # intercepting TLS with an untrusted CA), so the API is unusable.
+              curl -sS -m 10 -o /dev/null "https://${HOST}/"; rc=$?
+              case "$rc" in
+                0)  echo "OK  backend reachable: completed an HTTPS request to ${HOST}:443 (curl exit 0) — the cluster can reach the tracebloc backend."; exit 0 ;;
+                5)  echo "FAIL  could not resolve the configured proxy (curl exit 5) — check HTTP_PROXY settings."; exit 1 ;;
+                6)  echo "FAIL  could not resolve ${HOST} (curl exit 6) — in-cluster DNS or egress is broken."; exit 1 ;;
+                7)  echo "FAIL  connection to ${HOST}:443 refused (curl exit 7) — no egress route to the tracebloc backend."; exit 1 ;;
+                28) echo "FAIL  connection to ${HOST}:443 timed out (curl exit 28) — egress blocked by a firewall/proxy/NetworkPolicy. Experiments can't start without backend egress."; exit 1 ;;
+                35|51|53|58|59|60|66|77|83|91) echo "FAIL  reached ${HOST}:443 but the TLS handshake/certificate check failed (curl exit $rc) — commonly a corporate proxy intercepting TLS with a CA the cluster doesn't trust. The backend API is unusable until that CA is trusted; experiments can't authenticate."; exit 1 ;;
+                *)  echo "FAIL  could not complete an HTTPS request to ${HOST}:443 (curl exit $rc) — backend egress is not working."; exit 1 ;;
+              esac
+          resources:
+            requests:
+              cpu: "10m"
+              memory: "32Mi"
+            limits:
+              cpu: "100m"
+              memory: "64Mi"
+      {{- if include "tracebloc.useImagePullSecrets" . }}
+      imagePullSecrets:
+        - name: {{ include "tracebloc.registrySecretName" . }}
+      {{- end }}
+{{- end }}
