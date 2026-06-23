@@ -73,21 +73,25 @@ spec:
                 *)   HOST="api.tracebloc.io" ;;
               esac
               echo "[egress-reachability-check] CLIENT_ENV=$CLIENT_ENV -> probing backend reachability to https://${HOST}/ (through the proxy if one is configured)..."
-              # Key the verdict on curl's EXIT CODE, not the HTTP status: we only
-              # care whether the TCP+TLS connection to the backend can be made.
-              # No-egress yields connect-refused (7) or timeout (28); a DNS/proxy
-              # resolution failure (6/5) means the host can't be found. Any other
-              # outcome (0, or a TLS/HTTP-layer code) means the connection already
-              # succeeded => the backend is reachable.
+              # Key the verdict on curl's EXIT CODE, not the HTTP status. With no
+              # --fail, curl exits 0 for ANY HTTP response (200/401/404/5xx), so a
+              # 0 exit is the only outcome that proves a full TCP+TLS+HTTP round
+              # trip — the backend is genuinely reachable AND usable. Every
+              # non-zero code is a transport/TLS failure, so we fail closed on it:
+              # connect-refused (7) / timeout (28) = egress blocked; DNS/proxy
+              # resolve (6/5) = host can't be found; a TLS handshake/cert error
+              # (35/51/60/…) = reached the host but TLS is broken (commonly a proxy
+              # intercepting TLS with an untrusted CA), so the API is unusable.
               curl -sS -m 10 -o /dev/null "https://${HOST}/"; rc=$?
               case "$rc" in
+                0)  echo "OK  backend reachable: completed an HTTPS request to ${HOST}:443 (curl exit 0) — the cluster can reach the tracebloc backend."; exit 0 ;;
                 5)  echo "FAIL  could not resolve the configured proxy (curl exit 5) — check HTTP_PROXY settings."; exit 1 ;;
                 6)  echo "FAIL  could not resolve ${HOST} (curl exit 6) — in-cluster DNS or egress is broken."; exit 1 ;;
                 7)  echo "FAIL  connection to ${HOST}:443 refused (curl exit 7) — no egress route to the tracebloc backend."; exit 1 ;;
                 28) echo "FAIL  connection to ${HOST}:443 timed out (curl exit 28) — egress blocked by a firewall/proxy/NetworkPolicy. Experiments can't start without backend egress."; exit 1 ;;
+                35|51|53|58|59|60|66|77|83|91) echo "FAIL  reached ${HOST}:443 but the TLS handshake/certificate check failed (curl exit $rc) — commonly a corporate proxy intercepting TLS with a CA the cluster doesn't trust. The backend API is unusable until that CA is trusted; experiments can't authenticate."; exit 1 ;;
+                *)  echo "FAIL  could not complete an HTTPS request to ${HOST}:443 (curl exit $rc) — backend egress is not working."; exit 1 ;;
               esac
-              echo "OK  backend reachable: connected to ${HOST}:443 (curl exit $rc) — the cluster can reach the tracebloc backend."
-              exit 0
           resources:
             requests:
               cpu: "10m"
