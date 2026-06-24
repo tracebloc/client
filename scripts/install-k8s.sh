@@ -69,6 +69,11 @@ source "${LIB_DIR}/summary.sh"
 source "${LIB_DIR}/diagnose.sh"
 
 trap install_cleanup EXIT
+# Route SIGINT/SIGTERM through a normal exit so the EXIT trap (install_cleanup)
+# always runs — it shreds the transient machine credential (#838). Without these,
+# a Ctrl-C in the brief mint→source window could leave the 0600 secret on disk.
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 # ── Main ─────────────────────────────────────────────────────────────────────
 main() {
@@ -83,7 +88,7 @@ main() {
   print_banner
   print_roadmap
 
-  # ── Step 1/4: Check system requirements ──────────────────────────────────
+  # ── Step 1/5: Check system requirements ──────────────────────────────────
   step 1 5 "Checking system requirements"
   run_preflight
   detect_gpu
@@ -97,7 +102,7 @@ main() {
     *)        error "Unsupported OS: $OS" ;;
   esac
 
-  # ── Step 2/4: Set up secure compute environment ──────────────────────────
+  # ── Step 2/5: Set up secure compute environment ──────────────────────────
   step 2 5 "Setting up secure compute environment"
   create_cluster
   deploy_gpu_device_plugin

@@ -56,12 +56,20 @@ provision_client() {
   # between mint and the explicit removal below — the secret must never linger.
   _PROVISION_CRED_FILE="$cred_file"
   rm -f "$cred_file"
-  if ! tracebloc client create --yes --credential-file "$cred_file" >>"${LOG_FILE:-/dev/null}" 2>&1; then
+  # umask 077 so the credential file lands 0600 even if a future CLI build
+  # regresses on its explicit chmod — defense in depth (cli#104 already sets 0600).
+  if ! ( umask 077; tracebloc client create --yes --credential-file "$cred_file" ) >>"${LOG_FILE:-/dev/null}" 2>&1; then
     rm -f "$cred_file"   # remove any partial the failed create may have written
     error "Provisioning the client failed — see ${LOG_FILE:-the install log}. Re-run to retry."
   fi
   [[ -f "$cred_file" ]] || error "client create did not write the credential file ($cred_file)."
 
+  # The credential file is the sole source of truth for what was provisioned.
+  # Clear any pre-existing values from the environment first: the mint case does
+  # NOT write TRACEBLOC_CLIENT_ADOPTED, so a stale ADOPTED=1 left in the env would
+  # otherwise misroute a fresh mint into the adopt branch and drop the just-minted
+  # credential. Same reasoning for id/password/namespace — only the file wins.
+  unset TRACEBLOC_CLIENT_ID TRACEBLOC_CLIENT_PASSWORD TB_NAMESPACE TRACEBLOC_CLIENT_ADOPTED
   # shellcheck disable=SC1090
   source "$cred_file"
   rm -f "$cred_file"

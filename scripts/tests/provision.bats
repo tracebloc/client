@@ -66,6 +66,16 @@ _stub_tracebloc() {
   [ ! -f "${HOST_DATA_DIR}/client-credential.env" ]
 }
 
+@test "provision_client: a stale TRACEBLOC_CLIENT_ADOPTED in the env does not misroute a mint" {
+  export TRACEBLOC_CLIENT_ADOPTED=1      # leftover in the environment, NOT from the mint file
+  _stub_tracebloc 'TRACEBLOC_CLIENT_ID=7\nTRACEBLOC_CLIENT_PASSWORD=pw\nTB_NAMESPACE=mns\n'  # mint: no ADOPTED line
+  provision_client
+  # mint path must win: the credential is handed to Helm, not dropped as if adopted
+  [ "$TRACEBLOC_CLIENT_ID" = "7" ]
+  [ "$TRACEBLOC_CLIENT_PASSWORD" = "pw" ]
+  [ "$TB_NAMESPACE" = "mns" ]
+}
+
 @test "provision_client: adopt hands only the namespace (no password)" {
   _stub_tracebloc 'TRACEBLOC_CLIENT_ID=8\nTB_NAMESPACE=ex-ns\nTRACEBLOC_CLIENT_ADOPTED=1\n'
   provision_client
