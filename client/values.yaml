@@ -167,7 +167,10 @@ namespace:
 # egress to DNS + external HTTPS only (blocks pod-to-pod, MySQL, K8s API).
 # Requires a CNI that enforces NetworkPolicy:
 #   AKS:   needs "Azure NPM" (--network-policy azure) or Calico at cluster create
-#   EKS:   needs Calico or Cilium add-on (AWS VPC CNI alone does NOT enforce)
+#   EKS:   AWS VPC CNI with enableNetworkPolicy=true (the network-policy agent), or
+#          a Calico / Cilium add-on. Plain AWS VPC CNI without the agent does NOT
+#          enforce. In "standard" mode enforcement applies after a brief per-pod
+#          reconcile (see enforcementProbeTimeoutSeconds).
 #   bm:    needs Calico / Cilium / kube-router (Flannel alone does NOT enforce)
 #   OC:    OVN-Kubernetes enforces by default
 # Leave `enabled: false` on clusters without an enforcing CNI — silently
@@ -184,11 +187,18 @@ networkPolicy:
     # predating it keeps the old behaviour (rule present).
     allowExternalHttps: true
     # client-runtime#104: enforcement check, run via `helm test <release>` after
-    # flipping the lockdown (allowExternalHttps=false). The test opens a direct TCP
-    # connection to this host's :443 from a training-labelled pod; if it connects =>
-    # the CNI isn't enforcing egress => the test FAILS (a test hook never affects
-    # install/upgrade). Set "" to disable (e.g. air-gapped clusters).
+    # flipping the lockdown (allowExternalHttps=false). A training-labelled pod opens a
+    # direct TCP connection to this host's :443 and RETRIES until it is blocked (PASS) or
+    # enforcementProbeTimeoutSeconds elapses while still reachable (FAIL — the CNI isn't
+    # enforcing egress). The retry tolerates standard-mode CNIs that enforce only after a
+    # brief per-pod reconcile. A test hook never affects install/upgrade. Set "" to
+    # disable (e.g. air-gapped clusters).
     enforcementProbeHost: "1.1.1.1"
+    # Max seconds the enforcement check waits for egress to become blocked before it
+    # gives up and FAILS. Covers the standard-mode CNI reconciliation window (AWS VPC CNI
+    # NETWORK_POLICY_ENFORCING_MODE=standard allows a new pod all traffic until its policy
+    # is programmed). 60s suits AWS VPC CNI / Calico / Cilium; raise it on slow nodes.
+    enforcementProbeTimeoutSeconds: 60
     dnsNamespace: kube-system
     # CoreDNS pod selector — varies per platform. Override in ci/<platform>-values.yaml.
     # When empty, the template falls back to {k8s-app: kube-dns}, which works
