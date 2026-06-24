@@ -25,6 +25,17 @@ _provisioning_preset() {
   return 1
 }
 
+# _cli_supports_provisioning: does the installed CLI ship the browser-auth mint
+# commands (`tracebloc login` + `tracebloc client create`)? install_tracebloc_cli
+# pulls the latest RELEASE, which can lag this installer until the cli#104 release
+# ships — so probe before committing to the path. `--help` is side-effect-free and
+# cobra exits non-zero on an unknown command, so this cleanly tells old from new.
+_cli_supports_provisioning() {
+  tracebloc login --help >/dev/null 2>&1 || return 1
+  tracebloc client create --help >/dev/null 2>&1 || return 1
+  return 0
+}
+
 provision_client() {
   step 3 5 "Sign in and provision this client"
 
@@ -42,6 +53,20 @@ provision_client() {
   # process's PATH); make it resolvable so the login/create calls below work.
   export PATH="${HOME}/.local/bin:${PATH}"
   has tracebloc || error "The tracebloc CLI is required to provision this client but isn't available after install. Install it (curl -fsSL ${TRACEBLOC_CLI_INSTALL_URL} | sh), open a new shell, and re-run."
+
+  # The browser-auth mint path needs a CLI new enough to ship `login` + `client
+  # create` (cli#104). The installed CLI comes from the latest RELEASE, which may
+  # predate this installer — so if it's too old, fall back to the proven manual-
+  # credential path (install_client_helm prompts for an existing client's
+  # credentials, exactly as before #838) instead of hard-failing on an unknown
+  # `tracebloc login`. Once the CLI release lands, the probe passes and the
+  # one-step browser flow takes over automatically.
+  if ! _cli_supports_provisioning; then
+    warn "This tracebloc CLI is too old to provision a client from the installer — falling back to manual sign-in."
+    hint "Connect an existing client below, or upgrade the CLI later for one-step browser sign-in:"
+    hint "  curl -fsSL ${TRACEBLOC_CLI_INSTALL_URL} | sh"
+    return 0
+  fi
 
   # Sign in (device flow — approve in a browser). Unattended installs use the
   # dual-mode credential path above.

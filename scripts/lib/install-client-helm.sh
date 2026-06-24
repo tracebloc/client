@@ -368,6 +368,19 @@ install_client_helm() {
     error "Refusing to replace the existing client. See the options above."
   fi
 
+  # Same client, but already installed under a DIFFERENT namespace — e.g. a release
+  # from an older installer that used the fixed `tracebloc` namespace, before #838
+  # began deriving the namespace from the minted client slug. Upgrade THAT release
+  # in place rather than installing a second one under the new namespace: the
+  # platform counts each release as separate capacity, so a fork would silently
+  # double-book this host (and orphan the original). Reuse the existing namespace;
+  # an intentional namespace move is a delete-then-reinstall, not a silent fork.
+  if [[ -n "$existing_id" && "$existing_id" == "$TB_CLIENT_ID" && -n "$existing_ns" && "$existing_ns" != "$TB_NAMESPACE" ]]; then
+    log "Client '${existing_id}' already installed in namespace '${existing_ns}'; upgrading it in place instead of creating '${TB_NAMESPACE}'."
+    info "Updating the existing client (namespace '${existing_ns}')."
+    TB_NAMESPACE="$existing_ns"
+  fi
+
   TB_CLIENT_PASSWORD_ESCAPED="${TB_CLIENT_PASSWORD//\'/\'\'}"
 
   # ── GPU limits ──────────────────────────────────────────────────────────

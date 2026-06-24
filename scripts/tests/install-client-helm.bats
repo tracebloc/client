@@ -344,6 +344,28 @@ setup() {
   [[ "$output" == *"helm upgrade --install tracebloc"* ]]
 }
 
+@test "install_client_helm: same client in a different namespace -> upgrades in place, no duplicate" {
+  HOST_DATA_DIR="$BATS_TEST_TMPDIR/data"; mkdir -p "$HOST_DATA_DIR"
+  _ensure_tracebloc_dirs() { :; }
+  _ensure_release_dirs() { :; }
+  _ensure_helm_runnable() { :; }
+  # The minted/adopted namespace (client slug) differs from where this same client
+  # is already installed (the old fixed `tracebloc` namespace). Must upgrade the
+  # existing release in place, NOT fork a second one under 'acme-corp'.
+  export TB_NAMESPACE=acme-corp
+  helm() {
+    if [ "$1" = list ]; then echo '[{"name":"tracebloc","namespace":"tracebloc","chart":"client-1.4.3"}]'; return 0; fi
+    if [ "$1" = get ] && [ "$2" = values ]; then echo 'clientId: "sameid"'; return 0; fi
+    record "helm $*"; return 0
+  }
+  verify_credentials() { printf valid; }
+  run install_client_helm <<< $'sameid\nmypw'
+  [ "$status" -eq 0 ]
+  run mock_calls
+  [[ "$output" == *"helm upgrade --install tracebloc"* ]]   # reused existing namespace
+  [[ "$output" != *"acme-corp"* ]]                          # no second release forked
+}
+
 # ── _chart_proxy_env_yaml (#242: host proxy -> split chart keys) ─────────────
 @test "_chart_proxy_env_yaml: no proxy on host -> empty" {
   run _chart_proxy_env_yaml

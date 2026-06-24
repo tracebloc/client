@@ -56,6 +56,17 @@ _stub_tracebloc() {
   [[ "$output" == *"skipping browser sign-in"* ]]
 }
 
+@test "provision_client: a CLI too old to provision falls back to manual sign-in (not fatal)" {
+  # Old CLI: `login` / `client create` are unknown commands, so the --help probe
+  # exits non-zero. provision_client must fall back (return 0) and let
+  # install_client_helm collect credentials, NOT hard-fail on `tracebloc login`.
+  tracebloc() { case "$1" in login|client) return 1 ;; *) return 0 ;; esac; }
+  run provision_client
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"falling back to manual sign-in"* ]]
+  [[ "$output" != *"approve this machine in your browser"* ]]   # never entered the login flow
+}
+
 @test "provision_client: mint hands id+password+namespace to Helm" {
   _stub_tracebloc 'TRACEBLOC_CLIENT_ID=5\nTRACEBLOC_CLIENT_PASSWORD=pw9\nTB_NAMESPACE=my-ns\n'
   provision_client                       # called directly so exports persist
@@ -93,7 +104,9 @@ _stub_tracebloc() {
 }
 
 @test "provision_client: failed sign-in is fatal" {
-  tracebloc() { [ "$1" = "login" ] && return 1; return 0; }
+  # Provisioning-capable CLI (the --help capability probe passes), but the actual
+  # sign-in fails — that must still be fatal, not a silent fall-through.
+  tracebloc() { [[ "$*" == *--help ]] && return 0; [ "$1" = "login" ] && return 1; return 0; }
   run provision_client
   [ "$status" -ne 0 ]
   [[ "$output" == *"Sign-in didn't complete"* ]]
@@ -108,6 +121,7 @@ _stub_tracebloc() {
 
 @test "provision_client: a failed client create leaves no credential file behind" {
   tracebloc() {
+    [[ "$*" == *--help ]] && return 0      # capability probe: CLI supports provisioning
     [ "$1" = "login" ] && return 0
     # create writes a PARTIAL (secret-bearing) file, then fails — must be cleaned up.
     local f="" prev=""
