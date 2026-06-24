@@ -118,3 +118,33 @@ tests:
       - matchRegex:
           path: spec.template.spec.containers[0].image
           pattern: "^docker\\.io/curlimages/curl@sha256:[a-f0-9]{64}$"
+
+  - it: retries until egress is blocked, tolerating the standard-mode CNI reconciliation window
+    set:
+      networkPolicy:
+        training:
+          allowExternalHttps: false
+          enforcementProbeTimeoutSeconds: 45
+    asserts:
+      # probes in a loop until blocked or the deadline, rather than a single immediate shot
+      - matchRegex:
+          path: spec.template.spec.containers[0].command[2]
+          pattern: "while :; do"
+      # honours the configurable timeout...
+      - matchRegex:
+          path: spec.template.spec.containers[0].command[2]
+          pattern: "TIMEOUT=45"
+      # ...via a wall-clock deadline
+      - matchRegex:
+          path: spec.template.spec.containers[0].command[2]
+          pattern: 'date \+%s'
+
+  - it: defaults the enforcement-probe timeout to 60s
+    set:
+      networkPolicy:
+        training:
+          allowExternalHttps: false
+    asserts:
+      - matchRegex:
+          path: spec.template.spec.containers[0].command[2]
+          pattern: "TIMEOUT=60"

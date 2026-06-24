@@ -56,40 +56,58 @@ spec:
             - -c
             - |
               HOST={{ $host | quote }}
-              echo "[egress-enforcement-check] probing direct TCP egress to ${HOST}:443 (must be BLOCKED when the lockdown is enforced)..."
+              TIMEOUT={{ dig "enforcementProbeTimeoutSeconds" 60 .Values.networkPolicy.training }}
+              echo "[egress-enforcement-check] probing direct TCP egress to ${HOST}:443; it must be BLOCKED once the CNI reconciles the training-egress NetworkPolicy (retrying up to ${TIMEOUT}s)..."
               # We only care whether a TCP connection to :443 can be ESTABLISHED — the
               # TLS/HTTP outcome is irrelevant. -k disables cert verification so probing an
               # IP (or any host whose cert doesn't match) is NOT misread as a block, and the
               # verdict is keyed on curl's EXIT CODE, not the HTTP status: a blocked egress
               # yields a timeout (28) or connect failure (7); a DNS failure (6) is inconclusive;
               # any other outcome (incl. a TLS/cert error) means the TCP connect already succeeded.
-              curl --noproxy '*' -k -sS -m 5 -o /dev/null "https://$HOST"; rc=$?
-              case "$rc" in
-                7|28)
-                  # connect refused (7) / timed out (28): the TCP handshake never completed => egress blocked.
-                  echo "OK  egress lockdown verified: TCP to ${HOST}:443 could not be established (curl exit $rc) — egress is blocked."
+              #
+              # Why retry: standard-mode CNIs — notably AWS VPC CNI with
+              # NETWORK_POLICY_ENFORCING_MODE=standard — allow a brand-new pod ALL traffic
+              # until its per-pod policy is reconciled (a few-second startup window). A single
+              # immediate probe races that window and can see a false connect, reporting "not
+              # enforced" on a cluster that DOES enforce. Real training pods start far slower
+              # than this window (image pull, dataset load, framework init) so user code never
+              # runs un-policed; this loop measures that steady state, not the startup race.
+              # PASS as soon as egress is blocked; FAIL only if it stays reachable for TIMEOUT.
+              deadline=$(( $(date +%s) + $TIMEOUT ))
+              rc=0
+              attempt=0
+              while :; do
+                attempt=$(( attempt + 1 ))
+                curl --noproxy '*' -k -sS -m 5 -o /dev/null "https://$HOST"; rc=$?
+                if [ "$rc" = 7 ] || [ "$rc" = 28 ]; then
+                  # connect refused (7) / timed out (28): the TCP handshake never completed => blocked.
+                  echo "OK  egress lockdown verified after ${attempt} attempt(s): TCP to ${HOST}:443 could not be established (curl exit ${rc}) — egress is blocked."
                   exit 0
-                  ;;
-                6)
-                  # DNS resolution failed: no TCP connection was attempted, so enforcement can't be judged.
-                  echo "WARNING  egress enforcement INCONCLUSIVE: could not resolve host '${HOST}' (curl exit 6)."
-                  echo "WARNING  No TCP connection was attempted, so the lockdown was NOT verified. Point"
-                  echo "WARNING  networkPolicy.training.enforcementProbeHost at an external IP (e.g. 1.1.1.1)"
-                  echo "WARNING  or fix in-cluster DNS, then re-run 'helm test'."
-                  exit 1
-                  ;;
-              esac
-              # Any other outcome (0 success, or a TLS-/HTTP-layer error such as 35/52/56/60 — all of
-              # which require the TCP connect to have already succeeded) => the host was reached.
+                fi
+                [ "$(date +%s)" -ge "$deadline" ] && break
+                echo "...  attempt ${attempt}: ${HOST}:443 still reachable (curl exit ${rc}); egress not yet enforced — retrying in 3s."
+                sleep 3
+              done
+              if [ "$rc" = 6 ]; then
+                # DNS resolution kept failing: no TCP connection was attempted, so enforcement can't be judged.
+                echo "WARNING  egress enforcement INCONCLUSIVE: could not resolve host '${HOST}' (curl exit 6) within ${TIMEOUT}s."
+                echo "WARNING  No TCP connection was attempted, so the lockdown was NOT verified. Point"
+                echo "WARNING  networkPolicy.training.enforcementProbeHost at an external IP (e.g. 1.1.1.1)"
+                echo "WARNING  or fix in-cluster DNS, then re-run 'helm test'."
+                exit 1
+              fi
+              # Stayed reachable for the whole TIMEOUT (rc=0, or a TLS-/HTTP-layer error such as
+              # 35/52/56/60 — all of which require the TCP connect to have already succeeded).
               echo "WARNING ================================================================"
               echo "WARNING  EGRESS LOCKDOWN NOT ENFORCED on this cluster."
-              echo "WARNING  A tracebloc.io/workload=training pod reached ${HOST}:443 directly"
-              echo "WARNING  (curl exit $rc; the TCP connect succeeded). networkPolicy.training."
+              echo "WARNING  A tracebloc.io/workload=training pod kept reaching ${HOST}:443 directly"
+              echo "WARNING  for ${TIMEOUT}s (curl exit ${rc}; the TCP connect succeeded). networkPolicy.training."
               echo "WARNING  allowExternalHttps is false, but the CNI is NOT enforcing egress"
               echo "WARNING  NetworkPolicy, so the SECURITY §8.2 lockdown is INACTIVE and"
               echo "WARNING  training pods can still reach the open internet."
-              echo "WARNING  Fix: enable egress NetworkPolicy on the CNI (Calico/Cilium, or"
-              echo "WARNING  EKS VPC-CNI enableNetworkPolicy=true), then re-run 'helm test'."
+              echo "WARNING  Fix: ensure the CNI enforces egress NetworkPolicy — Calico/Cilium, or"
+              echo "WARNING  AWS VPC CNI with enableNetworkPolicy=true (enforced after a brief reconcile"
+              echo "WARNING  in 'standard' mode). Then re-run 'helm test'."
               echo "WARNING ================================================================"
               exit 1
           resources:
