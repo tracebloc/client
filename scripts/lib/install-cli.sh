@@ -119,8 +119,9 @@ _verify_tracebloc_cli() {
 }
 
 install_tracebloc_cli() {
-  step 5 5 "Install the tracebloc CLI"
-
+  # No step framing here: this is called from provision_client (Step 3) on the
+  # browser-auth path and, non-fatally, on the dual-mode path — the caller owns
+  # the step heading. (#838 reorder: the CLI installs BEFORE Helm now.)
   if has tracebloc; then
     # Version is cosmetic — never let a failing `tracebloc version` (or SIGPIPE
     # from `head` closing the pipe, under `set -o pipefail`) abort this step.

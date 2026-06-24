@@ -194,8 +194,9 @@ _chart_proxy_env_yaml() {
 }
 
 install_client_helm() {
-  # ── Step 3/4: Install tracebloc client ───────────────────────────────────
-  step 3 5 "Installing tracebloc client"
+  # ── Step 4/5: Install tracebloc client (credential + namespace provisioned
+  #    in Step 3 by provision_client, or supplied via dual-mode) ─────────────
+  step 4 5 "Installing tracebloc client"
 
   _ensure_tracebloc_dirs
   local values_file="${HOST_DATA_DIR}/values.yaml"
@@ -247,8 +248,8 @@ install_client_helm() {
   # Advanced / GitOps setups can override with TB_NAMESPACE=<name>.
   TB_NAMESPACE=$(_sanitize_workspace_name "${TB_NAMESPACE:-tracebloc}")
 
-  # ── Step 4/4: Connect to tracebloc network ──────────────────────────────
-  step 4 5 "Connect to tracebloc network"
+  # ── Step 5/5: Connect to tracebloc network ──────────────────────────────
+  step 5 5 "Connect to tracebloc network"
 
   if [[ "$_noninteractive_creds" == 1 ]]; then
     # Credentials supplied via env — verify once, no prompt, no re-prompt.

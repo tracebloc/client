@@ -1,0 +1,111 @@
+#!/usr/bin/env bats
+# Tests for provision.sh (RFC-0001 #838): sign in + `client create` BEFORE Helm,
+# handing the minted credential + namespace to install_client_helm via env.
+#
+# The load-bearing properties: dual-mode (pre-supplied creds/values) skips
+# sign-in; the browser-auth path is FATAL on a missing CLI / failed login /
+# missing credential file; a mint hands all three env vars to Helm; an adopt
+# hands only the namespace (no password) and lets Helm reconcile.
+
+load test_helper
+
+setup() {
+  load_lib install-cli.sh             # common.sh + install-cli.sh (URL, the real fn)
+  # shellcheck source=/dev/null
+  source "${LIB_DIR}/provision.sh"
+  step() { :; }
+  info() { echo "INFO: $*"; }
+  warn() { echo "WARN: $*"; }
+  hint() { echo "HINT: $*"; }
+  # error() is the real common.sh one (prints + exit 1) — fatal tests assert status.
+  has() { return 0; }                 # default: CLI present after install
+  install_tracebloc_cli() { :; }      # stubbed — covered by install-cli.bats
+  LOG_FILE="$(mktemp)"
+  HOST_DATA_DIR="$(mktemp -d)"
+  unset TRACEBLOC_VALUES_FILE TRACEBLOC_CLIENT_ID TRACEBLOC_CLIENT_PASSWORD \
+        TB_NAMESPACE TRACEBLOC_CLIENT_ADOPTED
+}
+
+# A `tracebloc` stub: `login` succeeds; `client create` writes the given
+# --credential-file with the env lines in $CRED_LINES.
+_stub_tracebloc() {
+  CRED_LINES="$1"
+  tracebloc() {
+    [ "$1" = "login" ] && return 0
+    local f="" prev=""
+    for a in "$@"; do [ "$prev" = "--credential-file" ] && f="$a"; prev="$a"; done
+    [ -n "$f" ] && printf '%b' "$CRED_LINES" > "$f"
+    return 0
+  }
+}
+
+@test "provision_client: dual-mode (credentials) skips browser sign-in" {
+  export TRACEBLOC_CLIENT_ID=abc TRACEBLOC_CLIENT_PASSWORD=xyz
+  tracebloc() { echo "TRACEBLOC $*"; }   # must NOT be called for login/create
+  run provision_client
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"skipping browser sign-in"* ]]
+  [[ "$output" != *"TRACEBLOC login"* ]]
+}
+
+@test "provision_client: dual-mode (values file) skips browser sign-in" {
+  export TRACEBLOC_VALUES_FILE=/tmp/values.yaml
+  tracebloc() { echo "TRACEBLOC $*"; }
+  run provision_client
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"skipping browser sign-in"* ]]
+}
+
+@test "provision_client: mint hands id+password+namespace to Helm" {
+  _stub_tracebloc 'TRACEBLOC_CLIENT_ID=5\nTRACEBLOC_CLIENT_PASSWORD=pw9\nTB_NAMESPACE=my-ns\n'
+  provision_client                       # called directly so exports persist
+  [ "$TRACEBLOC_CLIENT_ID" = "5" ]
+  [ "$TRACEBLOC_CLIENT_PASSWORD" = "pw9" ]
+  [ "$TB_NAMESPACE" = "my-ns" ]
+  # the credential file is transient — removed after sourcing
+  [ ! -f "${HOST_DATA_DIR}/client-credential.env" ]
+}
+
+@test "provision_client: adopt hands only the namespace (no password)" {
+  _stub_tracebloc 'TRACEBLOC_CLIENT_ID=8\nTB_NAMESPACE=ex-ns\nTRACEBLOC_CLIENT_ADOPTED=1\n'
+  provision_client
+  [ "$TB_NAMESPACE" = "ex-ns" ]
+  [ -z "${TRACEBLOC_CLIENT_PASSWORD:-}" ]   # no fresh credential on adopt
+  [ -z "${TRACEBLOC_CLIENT_ID:-}" ]         # partial creds cleared → Helm uses values.yaml
+}
+
+@test "provision_client: missing CLI after install is fatal" {
+  has() { return 1; }                    # CLI not resolvable after install
+  tracebloc() { return 0; }
+  run provision_client
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"tracebloc CLI is required"* ]]
+}
+
+@test "provision_client: failed sign-in is fatal" {
+  tracebloc() { [ "$1" = "login" ] && return 1; return 0; }
+  run provision_client
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"Sign-in didn't complete"* ]]
+}
+
+@test "provision_client: client create writing no credential file is fatal" {
+  tracebloc() { return 0; }              # login OK, create "succeeds" but writes nothing
+  run provision_client
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"did not write the credential file"* ]]
+}
+
+@test "provision_client: a failed client create leaves no credential file behind" {
+  tracebloc() {
+    [ "$1" = "login" ] && return 0
+    # create writes a PARTIAL (secret-bearing) file, then fails — must be cleaned up.
+    local f="" prev=""
+    for a in "$@"; do [ "$prev" = "--credential-file" ] && f="$a"; prev="$a"; done
+    [ -n "$f" ] && printf 'TRACEBLOC_CLIENT_ID=5\nTRACEBLOC_CLIENT_PASSWORD=leak\n' >"$f"
+    return 1
+  }
+  run provision_client
+  [ "$status" -ne 0 ]
+  [ ! -f "${HOST_DATA_DIR}/client-credential.env" ]
+}
