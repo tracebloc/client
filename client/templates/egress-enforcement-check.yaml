@@ -76,6 +76,7 @@ spec:
               deadline=$(( $(date +%s) + $TIMEOUT ))
               rc=0
               attempt=0
+              reached=0
               while :; do
                 attempt=$(( attempt + 1 ))
                 curl --noproxy '*' -k -sS -m 5 -o /dev/null "https://$HOST"; rc=$?
@@ -84,24 +85,31 @@ spec:
                   echo "OK  egress lockdown verified after ${attempt} attempt(s): TCP to ${HOST}:443 could not be established (curl exit ${rc}) — egress is blocked."
                   exit 0
                 fi
+                # Not blocked. Anything other than a DNS failure (6) means the TCP connect
+                # succeeded => egress was observed REACHABLE. Latch it so a later DNS blip can't
+                # downgrade a definitive "reachable" verdict to "inconclusive" after the loop.
+                [ "$rc" != 6 ] && reached=1
                 [ "$(date +%s)" -ge "$deadline" ] && break
-                echo "...  attempt ${attempt}: ${HOST}:443 still reachable (curl exit ${rc}); egress not yet enforced — retrying in 3s."
+                echo "...  attempt ${attempt}: ${HOST}:443 not yet blocked (curl exit ${rc}); egress not yet enforced — retrying in 3s."
                 sleep 3
               done
-              if [ "$rc" = 6 ]; then
-                # DNS resolution kept failing: no TCP connection was attempted, so enforcement can't be judged.
+              if [ "$reached" != 1 ]; then
+                # Never established a TCP connection — every attempt failed DNS (curl exit 6),
+                # so egress enforcement could not be judged either way.
                 echo "WARNING  egress enforcement INCONCLUSIVE: could not resolve host '${HOST}' (curl exit 6) within ${TIMEOUT}s."
-                echo "WARNING  No TCP connection was attempted, so the lockdown was NOT verified. Point"
+                echo "WARNING  No TCP connection ever succeeded, so the lockdown was NOT verified. Point"
                 echo "WARNING  networkPolicy.training.enforcementProbeHost at an external IP (e.g. 1.1.1.1)"
                 echo "WARNING  or fix in-cluster DNS, then re-run 'helm test'."
                 exit 1
               fi
-              # Stayed reachable for the whole TIMEOUT (rc=0, or a TLS-/HTTP-layer error such as
-              # 35/52/56/60 — all of which require the TCP connect to have already succeeded).
+              # Egress was observed REACHABLE on at least one attempt (TCP connect succeeded;
+              # rc=0 or a TLS-/HTTP-layer error such as 35/52/56/60) and never became blocked
+              # within TIMEOUT — regardless of the final attempt's code, so a late DNS blip
+              # cannot mask a connect we already saw.
               echo "WARNING ================================================================"
               echo "WARNING  EGRESS LOCKDOWN NOT ENFORCED on this cluster."
-              echo "WARNING  A tracebloc.io/workload=training pod kept reaching ${HOST}:443 directly"
-              echo "WARNING  for ${TIMEOUT}s (curl exit ${rc}; the TCP connect succeeded). networkPolicy.training."
+              echo "WARNING  A tracebloc.io/workload=training pod established a direct TCP connection"
+              echo "WARNING  to ${HOST}:443 within ${TIMEOUT}s and egress never became blocked. networkPolicy.training."
               echo "WARNING  allowExternalHttps is false, but the CNI is NOT enforcing egress"
               echo "WARNING  NetworkPolicy, so the SECURITY §8.2 lockdown is INACTIVE and"
               echo "WARNING  training pods can still reach the open internet."

@@ -138,6 +138,11 @@ tests:
       - matchRegex:
           path: spec.template.spec.containers[0].command[2]
           pattern: 'date \+%s'
+      # a TCP connect seen on ANY attempt latches a definitive "reachable" verdict, so a
+      # later DNS failure cannot downgrade it to "inconclusive" (bugbot, PR #276)
+      - matchRegex:
+          path: spec.template.spec.containers[0].command[2]
+          pattern: "reached=1"
 
   - it: defaults the enforcement-probe timeout to 60s
     set:
