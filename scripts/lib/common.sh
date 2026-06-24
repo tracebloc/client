@@ -323,6 +323,10 @@ PM_UPDATE=""
 install_cleanup() {
   local exit_code=$?
   [[ -n "${SUDO_KEEPALIVE_PID:-}" ]] && kill "$SUDO_KEEPALIVE_PID" 2>/dev/null || true
+  # Never leave the transient machine credential on disk (#838): provision.sh sets
+  # _PROVISION_CRED_FILE before minting and removes it after sourcing — this is the
+  # backstop for an error/signal between mint and that cleanup.
+  [[ -n "${_PROVISION_CRED_FILE:-}" ]] && rm -f "$_PROVISION_CRED_FILE" 2>/dev/null || true
   if [[ $exit_code -eq 2 ]]; then
     echo ""
     if [[ -n "${TRACEBLOC_DOCKER_FIRST_RUN_EXIT:-}" ]]; then
@@ -369,9 +373,9 @@ print_roadmap() {
   echo -e "  ${DIM}─────${RESET}"
   echo -e "  ${DIM}1. Check system requirements${RESET}"
   echo -e "  ${DIM}2. Set up secure compute environment${RESET}"
-  echo -e "  ${DIM}3. Install tracebloc client${RESET}"
-  echo -e "  ${DIM}4. Connect to tracebloc network${RESET}"
-  echo -e "  ${DIM}5. Install the tracebloc CLI${RESET}"
+  echo -e "  ${DIM}3. Sign in and provision this client${RESET}"
+  echo -e "  ${DIM}4. Install tracebloc client${RESET}"
+  echo -e "  ${DIM}5. Connect to tracebloc network${RESET}"
   echo ""
 }
 

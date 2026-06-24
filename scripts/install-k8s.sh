@@ -59,10 +59,21 @@ source "${LIB_DIR}/install-client-helm.sh"
 if [[ -f "${LIB_DIR}/install-cli.sh" ]]; then
   source "${LIB_DIR}/install-cli.sh"
 fi
+# provision.sh (the #838 sign-in + client-create-before-Helm step) likewise may be
+# absent under a stale bootstrap — guard so the installer degrades to the dual-mode
+# credential path rather than aborting under `set -e`.
+if [[ -f "${LIB_DIR}/provision.sh" ]]; then
+  source "${LIB_DIR}/provision.sh"
+fi
 source "${LIB_DIR}/summary.sh"
 source "${LIB_DIR}/diagnose.sh"
 
 trap install_cleanup EXIT
+# Route SIGINT/SIGTERM through a normal exit so the EXIT trap (install_cleanup)
+# always runs — it shreds the transient machine credential (#838). Without these,
+# a Ctrl-C in the brief mint→source window could leave the 0600 secret on disk.
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 # ── Main ─────────────────────────────────────────────────────────────────────
 main() {
@@ -77,7 +88,7 @@ main() {
   print_banner
   print_roadmap
 
-  # ── Step 1/4: Check system requirements ──────────────────────────────────
+  # ── Step 1/5: Check system requirements ──────────────────────────────────
   step 1 5 "Checking system requirements"
   run_preflight
   detect_gpu
@@ -91,24 +102,27 @@ main() {
     *)        error "Unsupported OS: $OS" ;;
   esac
 
-  # ── Step 2/4: Set up secure compute environment ──────────────────────────
+  # ── Step 2/5: Set up secure compute environment ──────────────────────────
   step 2 5 "Setting up secure compute environment"
   create_cluster
   deploy_gpu_device_plugin
   verify_gpu
 
-  # ── Step 3/5 + 4/5 are handled inside install_client_helm ────────────────
+  # ── Step 3/5: sign in + provision the client (install CLI, login, client
+  #    create) BEFORE Helm, so the minted credential + derived namespace feed the
+  #    chart (#838). On the dual-mode path (TRACEBLOC_VALUES_FILE / pre-supplied
+  #    credentials) this skips sign-in. Guarded so a stale bootstrap that didn't
+  #    fetch provision.sh degrades to the dual-mode credential path rather than
+  #    aborting; in that case the operator must supply credentials/values. ──────
+  if declare -F provision_client >/dev/null 2>&1; then
+    provision_client
+  fi
+
+  # ── Step 4/5 + 5/5 are handled inside install_client_helm ────────────────
   install_client_helm
 
   # ── Verify the client actually came up before reporting anything ─────────
   wait_for_client_ready
-
-  # ── Step 5/5: install the tracebloc CLI. Non-fatal — the client is already
-  #    connected, so a CLI hiccup warns but never fails the run. Guarded on the
-  #    function being defined, in case a stale bootstrap didn't fetch the lib. ─
-  if declare -F install_tracebloc_cli >/dev/null 2>&1; then
-    install_tracebloc_cli
-  fi
 
   print_summary
 
