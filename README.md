@@ -68,7 +68,7 @@ bash <(curl -fsSL https://tracebloc.io/i.sh)
 irm https://tracebloc.io/i.ps1 | iex
 ```
 
-The installer pulls helper scripts from this repo at runtime — see [`scripts/install-k8s.sh`](scripts/install-k8s.sh) and [`scripts/install-k8s.ps1`](scripts/install-k8s.ps1).
+The installer pulls helper scripts from this repo at runtime — see [`scripts/install-k8s.sh`](scripts/install-k8s.sh) and [`scripts/install-k8s.ps1`](scripts/install-k8s.ps1). Those scripts are pinned to an **immutable release tag** and each is **verified against a cosign-signed manifest** before it runs; the install **fails closed** if verification can't complete (it never silently runs unverified code). See [docs/SUPPLY_CHAIN.md](docs/SUPPLY_CHAIN.md) for the integrity model and how to verify a release by hand.
 
 ### Helm install
 
