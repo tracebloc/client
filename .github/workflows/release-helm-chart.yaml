@@ -203,16 +203,46 @@ jobs:
         # run un-stamped (fail-closed). The published artifact is pinned to THIS
         # tag so `curl | bash` of the release asset transitively pins every
         # sub-script. We stamp a copy, never the committed file.
+        #
+        # SECURITY: the tag is passed via env (NOT interpolated into the run:
+        # script). Interpolating `${{ github.event.release.tag_name }}` straight
+        # into a shell assignment lets a tag containing a single quote break out
+        # and inject shell into THIS job — which holds id-token:write +
+        # contents:write, the trust-establishing privileges. As an env var it is
+        # plain data; the shell never re-parses it (RFC-0001 R8, backend#889).
+        env:
+          TAG: ${{ github.event.release.tag_name }}
         run: |
-          TAG='${{ github.event.release.tag_name }}'
           install -m 0755 scripts/install.sh scripts/install.stamped.sh
           # Replace only the placeholder token; fail loudly if it's absent so a
           # refactor that drops it can't silently publish an un-pinned installer.
           grep -q '__TRACEBLOC_RELEASE_REF__' scripts/install.stamped.sh \
             || { echo "::error::DEFAULT_REF placeholder not found in install.sh"; exit 1; }
-          sed -i "s|__TRACEBLOC_RELEASE_REF__|${TAG}|g" scripts/install.stamped.sh
-          mv scripts/install.stamped.sh scripts/install.sh
+          # Robust substitution: do a literal find/replace with awk instead of
+          # `sed s|...|...|`, so a tag containing sed-special bytes ('/' as the
+          # delimiter, '&' as match-text, '\' as an escape) can't corrupt the
+          # stamp or inject regex metacharacters. The index()/substr() loop treats
+          # BOTH the placeholder and the replacement (read from ENVIRON, never the
+          # command line) as plain strings — no regex, no backreference, no
+          # delimiter — so every byte of the tag lands verbatim.
+          TAG="$TAG" awk '
+            BEGIN { ph = "__TRACEBLOC_RELEASE_REF__"; rep = ENVIRON["TAG"] }
+            {
+              out = ""; line = $0
+              while ((p = index(line, ph)) > 0) {
+                out = out substr(line, 1, p - 1) rep
+                line = substr(line, p + length(ph))
+              }
+              print out line
+            }
+          ' scripts/install.stamped.sh > scripts/install.stamped.sh.new
+          mv scripts/install.stamped.sh.new scripts/install.sh
+          rm -f scripts/install.stamped.sh
+          # Confirm the stamp landed exactly and the placeholder is fully gone.
           grep -n 'DEFAULT_REF=' scripts/install.sh
+          if grep -q '__TRACEBLOC_RELEASE_REF__' scripts/install.sh; then
+            echo "::error::placeholder still present after stamping"; exit 1
+          fi
 
       - name: Self-test the stamped installer parses and refuses bad refs
         run: |

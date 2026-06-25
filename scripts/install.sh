@@ -92,7 +92,12 @@ fi
 
 # A ref that isn't a vX.Y.Z tag is a mutable branch — the exact thing R8 closes.
 # Allow it only under the explicit unverified opt-in, and say so loudly.
-if [[ "${USING_BRANCH:-0}" == "1" || ! "$REF" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([.-].+)?$ ]]; then
+# The version-suffix class is restricted to [A-Za-z0-9.] (e.g. -rc1, .4): a looser
+# trailer like ([.-].+)? admits '/' and '..', so a ref such as
+# 'v1.2.3-../../heads/main' would pass this gate and then curl would collapse the
+# '..' to fetch sub-scripts off the MUTABLE 'main' branch — the immutable-tag
+# guarantee bypassed with no opt-in (RFC-0001 R8, backend#889).
+if [[ "${USING_BRANCH:-0}" == "1" || ! "$REF" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([.-][A-Za-z0-9.]+)?$ ]]; then
   if [[ "$ALLOW_UNVERIFIED" == "1" ]]; then
     echo "============================================================================" >&2
     echo "[WARN]  UNVERIFIED INSTALL: fetching from mutable ref '$REF', signature checks" >&2
@@ -107,6 +112,18 @@ if [[ "${USING_BRANCH:-0}" == "1" || ! "$REF" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([.-].+
     exit 1
   fi
 fi
+
+# Belt-and-suspenders: even after the shape checks above, refuse a ref carrying a
+# path separator or a parent-dir token before it is interpolated into a URL. A
+# '/' or '..' here is a path-traversal lever (curl collapses '..', so the fetch
+# could escape the pinned tag onto a mutable branch) — independent of which
+# branch above let the ref through (RFC-0001 R8, backend#889).
+case "$REF" in
+  */*|*..*)
+    echo "[ERROR] Ref '$REF' contains a path separator or '..' — refusing to build a" >&2
+    echo "        fetch URL from it (path-traversal guard, RFC-0001 R8)." >&2
+    exit 1 ;;
+esac
 
 REPO_RAW="https://raw.githubusercontent.com/tracebloc/client/${REF}"
 # The signed manifest + its cosign sig/cert are published as RELEASE ASSETS

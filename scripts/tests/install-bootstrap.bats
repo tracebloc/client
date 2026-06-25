@@ -122,6 +122,29 @@ run_boot_no_cosign() {
   [ ! -f "$SBX/k8s-ran" ]            # never reached the privileged step
 }
 
+@test "path-traversal ref disguised as a tag fails closed without the opt-in" {
+  # 'v1.2.3-../../heads/main' once passed the tag gate (trailer was ([.-].+)?),
+  # so curl collapsed the '..' and fetched sub-scripts off the MUTABLE 'main'
+  # branch — the immutable-tag pin bypassed with no opt-in (RFC-0001 R8). It must
+  # now be REJECTED: exit non-zero, never fetch, never reach the privileged step.
+  REF="v1.2.3-../../heads/main" COSIGN_RESULT=0 run_boot
+  [ "$status" -ne 0 ]
+  # Either the tag-shape gate or the path-separator belt rejects it; both name R8.
+  [[ "$output" == *"not an immutable release tag"* \
+     || "$output" == *"path separator or '..'"* ]]
+  [ ! -f "$SBX/k8s-ran" ]            # privileged step never reached
+}
+
+@test "tag with a bare path separator fails closed without the opt-in" {
+  # A '/' in the ref (e.g. a heads/ ref dressed as a tag) is a traversal lever
+  # into a mutable location; reject it like the '..' case above.
+  REF="v1.2.3/heads/main" COSIGN_RESULT=0 run_boot
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"not an immutable release tag"* \
+     || "$output" == *"path separator or '..'"* ]]
+  [ ! -f "$SBX/k8s-ran" ]
+}
+
 @test "un-stamped DEFAULT_REF fails closed (placeholder still present)" {
   # The committed install.sh ships the __TRACEBLOC_RELEASE_REF__ placeholder;
   # running it directly (no REF/BRANCH) must refuse rather than guess.
