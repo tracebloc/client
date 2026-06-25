@@ -51,6 +51,14 @@ The following parts of the system are treated as trusted and are **not** in scop
 - Tracebloc engineers publishing the training base images (`tracebloc/*-cpu`, `tracebloc/*-gpu`) and the chart artifact.
 - The Helm chart itself and the values the customer provides at install time.
 
+> **Delivery integrity is verified, not assumed.** Trusting "the chart artifact"
+> and "the installer scripts" means trusting the bytes that actually reach the
+> box — so the `curl | bash` bootstrap pins to an immutable release tag and
+> verifies every sub-script against a cosign-signed manifest before running the
+> privileged steps (credential mint/write, Helm). See [§4.8](#48-installer-supply-chain-integrity-g8)
+> and [docs/SUPPLY_CHAIN.md](SUPPLY_CHAIN.md). This addresses RFC-0001 R8 (the
+> dominant supply-chain gap for a regulated buyer), tracked as backend#889.
+
 ### 1.3 Untrusted components
 
 - **The Python file, weight file, and training plan submitted by an external data scientist.**
@@ -224,6 +232,37 @@ pod-security.kubernetes.io/audit: restricted
 `warn` surfaces violations in `kubectl` output; `audit` writes them to the cluster audit log. These are **visibility**, not enforcement — a tripwire against accidental regressions in pod specs.
 
 `enforce: restricted` is on by default on CSI-backed deployments (EKS/AKS/OC); bare-metal overrides it off via `ci/bm-values.yaml`. See §6.6 and §8.5.
+
+### 4.8 Installer supply-chain integrity (G8)
+
+**Threat.** The `curl | bash` bootstrap (`scripts/install.sh`) is the most
+privileged code in the product: the sub-scripts it fetches mint the machine
+credential, write it to disk, and run Helm as a cluster admin. If the bytes that
+reach the box can be altered — by moving a mutable branch ref or by an on-path
+attacker — none of the in-cluster defenses above matter, because the attacker
+runs first, as root.
+
+**Mechanism (RFC-0001 R8, backend#889):**
+
+- **Immutable ref.** The bootstrap fetches every sub-script from a pinned release
+  **tag** (content-addressable), never a mutable branch. A branch / non-`vX.Y.Z`
+  ref is refused unless an operator sets `TRACEBLOC_ALLOW_UNVERIFIED=1` (a loud,
+  developer-only escape hatch).
+- **Signed manifest.** Each sub-script's sha256 is checked against a
+  `manifest.sha256` published on the release. A tampered sub-script, or one
+  missing from the manifest, **aborts the install before any privileged step**.
+- **Authenticated + fail-closed.** The manifest is verified with a **cosign
+  keyless signature** (same Sigstore chain as the CLI binary). If cosign is
+  absent the bootstrap bootstraps a pinned, checksum-verified cosign; if it can
+  neither find nor bootstrap cosign it **fails closed** rather than degrading to
+  a same-channel checksum.
+
+**Where implemented:** `scripts/install.sh` (verification), `scripts/gen-manifest.sh`
+(manifest generation), `.github/workflows/release-helm-chart.yaml`
+(`sign-installer-manifest` job: generate + sign + stamp + attach), and the CLI's
+own installer for the leaf binary (`tracebloc/cli` `scripts/install.sh`, made
+mandatory under the same ticket). Full model + release-pipeline + key-management
+follow-ups: [docs/SUPPLY_CHAIN.md](SUPPLY_CHAIN.md).
 
 ---
 
@@ -456,6 +495,19 @@ If the customer enables the policy on a CNI that doesn't enforce (default EKS, F
 ### 8.8 DoS via resource exhaustion — **out of scope**
 
 A malicious model can allocate memory / consume CPU up to the pod's resource limits. `resources.limits` are applied (defaults `cpu=2,memory=8Gi`). A pod running at 100% of its limits is expected behavior for training; OOMKill or eviction is the Kubernetes-native response. The chart does not attempt to detect or prevent resource-intensive pathological inputs.
+
+### 8.9 Cosign-bootstrap trust root on boxes without cosign — **security / operator**
+
+When cosign is not already installed, the bootstrap (§4.8) downloads a pinned
+cosign from the sigstore GitHub release and verifies it against
+`cosign_checksums.txt` fetched over the **same TLS channel**. This is a pragmatic
+trust root — strictly better than the previous "no verification at all" — but it
+is not signature-rooted (you can't verify cosign's signature without cosign). A
+sufficiently capable on-path attacker who can also forge a TLS chain to GitHub
+could substitute both. **Mitigation for regulated buyers:** pre-install cosign
+from the OS package manager (or an internal mirror) before running the
+installer, so the bootstrap uses a cosign you already trust. Documented in
+[docs/SUPPLY_CHAIN.md §6](SUPPLY_CHAIN.md#6-operator-guidance--verifying-a-release-by-hand).
 
 ---
 

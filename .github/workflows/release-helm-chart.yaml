@@ -139,3 +139,128 @@ jobs:
           generate_release_notes: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # ───────────────────────────────────────────────────────────────────────────
+  #  Supply-chain hardening (RFC-0001 R8, backend#889)
+  #
+  #  The curl|bash bootstrap (scripts/install.sh) refuses to run its sub-scripts
+  #  unless it can verify them against a cosign-signed manifest published on THIS
+  #  release. This job produces that manifest, signs it keyless (same Sigstore
+  #  machinery the CLI binary uses), stamps the published installer with this
+  #  immutable tag, and attaches the four assets the bootstrap fetches:
+  #     install.sh            (DEFAULT_REF stamped to this tag)
+  #     manifest.sha256       (sha256 of every sub-script at this tag)
+  #     manifest.sha256.sig   (cosign keyless signature over the manifest)
+  #     manifest.sha256.cert  (the signing certificate to verify .sig against)
+  #
+  #  Verified end-to-end by scripts/tests/install-bootstrap.bats; the release-
+  #  notes verification recipe is in docs/SUPPLY_CHAIN.md.
+  # ───────────────────────────────────────────────────────────────────────────
+  sign-installer-manifest:
+    name: Sign installer manifest (R8)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write   # attach assets to the release
+      id-token: write   # cosign keyless OIDC
+    steps:
+      - name: Checkout the released tag
+        # Same actions/runner#2788 guard as above — pin to the release tag so the
+        # manifest covers exactly the bytes published at this immutable ref.
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.release.tag_name }}
+          fetch-depth: 0
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v3
+        with:
+          cosign-release: 'v2.4.1'   # keep in lockstep with scripts/install.sh COSIGN_VERSION
+
+      - name: Generate the sub-script manifest
+        # gen-manifest.sh recomputes the manifest from the exact FILES the
+        # bootstrap fetches and cross-checks the two lists are in sync (it
+        # exits non-zero on drift), so a sub-script can never ship unlisted.
+        run: |
+          chmod +x scripts/gen-manifest.sh
+          scripts/gen-manifest.sh
+          echo "── manifest.sha256 ──"
+          cat scripts/manifest.sha256
+
+      - name: Sign the manifest (cosign keyless)
+        env:
+          COSIGN_YES: 'true'
+        run: |
+          cd scripts
+          cosign sign-blob \
+            --output-certificate manifest.sha256.cert \
+            --output-signature   manifest.sha256.sig \
+            manifest.sha256
+          echo "Signed manifest.sha256"
+          ls -l manifest.sha256*
+
+      - name: Stamp the published installer with this immutable tag
+        # The in-repo install.sh carries a placeholder DEFAULT_REF and refuses to
+        # run un-stamped (fail-closed). The published artifact is pinned to THIS
+        # tag so `curl | bash` of the release asset transitively pins every
+        # sub-script. We stamp a copy, never the committed file.
+        #
+        # SECURITY: the tag is passed via env (NOT interpolated into the run:
+        # script). Interpolating `${{ github.event.release.tag_name }}` straight
+        # into a shell assignment lets a tag containing a single quote break out
+        # and inject shell into THIS job — which holds id-token:write +
+        # contents:write, the trust-establishing privileges. As an env var it is
+        # plain data; the shell never re-parses it (RFC-0001 R8, backend#889).
+        env:
+          TAG: ${{ github.event.release.tag_name }}
+        run: |
+          install -m 0755 scripts/install.sh scripts/install.stamped.sh
+          # Replace only the placeholder token; fail loudly if it's absent so a
+          # refactor that drops it can't silently publish an un-pinned installer.
+          grep -q '__TRACEBLOC_RELEASE_REF__' scripts/install.stamped.sh \
+            || { echo "::error::DEFAULT_REF placeholder not found in install.sh"; exit 1; }
+          # Robust substitution: do a literal find/replace with awk instead of
+          # `sed s|...|...|`, so a tag containing sed-special bytes ('/' as the
+          # delimiter, '&' as match-text, '\' as an escape) can't corrupt the
+          # stamp or inject regex metacharacters. The index()/substr() loop treats
+          # BOTH the placeholder and the replacement (read from ENVIRON, never the
+          # command line) as plain strings — no regex, no backreference, no
+          # delimiter — so every byte of the tag lands verbatim.
+          TAG="$TAG" awk '
+            BEGIN { ph = "__TRACEBLOC_RELEASE_REF__"; rep = ENVIRON["TAG"] }
+            {
+              out = ""; line = $0
+              while ((p = index(line, ph)) > 0) {
+                out = out substr(line, 1, p - 1) rep
+                line = substr(line, p + length(ph))
+              }
+              print out line
+            }
+          ' scripts/install.stamped.sh > scripts/install.stamped.sh.new
+          mv scripts/install.stamped.sh.new scripts/install.sh
+          rm -f scripts/install.stamped.sh
+          # Confirm the stamp landed exactly and the placeholder is fully gone.
+          grep -n 'DEFAULT_REF=' scripts/install.sh
+          if grep -q '__TRACEBLOC_RELEASE_REF__' scripts/install.sh; then
+            echo "::error::placeholder still present after stamping"; exit 1
+          fi
+
+      - name: Self-test the stamped installer parses and refuses bad refs
+        run: |
+          bash -n scripts/install.sh
+          # Un-pinned dev ref without the opt-in must fail closed (exit non-zero).
+          if BRANCH=some-branch bash scripts/install.sh </dev/null >/dev/null 2>&1; then
+            echo "::error::stamped installer did not fail closed on a mutable BRANCH"; exit 1
+          fi
+          echo "stamped installer fails closed on a mutable ref (expected)"
+
+      - name: Attach installer + signed manifest to the release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event.release.tag_name }}
+          files: |
+            scripts/install.sh
+            scripts/manifest.sha256
+            scripts/manifest.sha256.sig
+            scripts/manifest.sha256.cert
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
