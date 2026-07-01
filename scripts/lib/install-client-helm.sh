@@ -336,21 +336,21 @@ install_client_helm() {
   # decide. The same clientId is a normal re-run/upgrade and passes through.
   # Check ANY namespace: a fresh install lands in `tracebloc`, but an install
   # from an older installer version may be in a different namespace. Enumerate
-  # client-chart releases and read each clientId. jq is already used elsewhere
-  # in the installer; if it's somehow absent, fall back to the `tracebloc` ns.
+  # client-chart releases WITHOUT jq — jq is not a guaranteed prerequisite here,
+  # and a jq-only enumeration whose fallback checked a single namespace would miss
+  # an older release under the fixed `tracebloc` namespace once the minted slug
+  # differs, forking a second release. helm's NAME/NAMESPACE are the first two
+  # columns and never contain whitespace, and the CHART column matches
+  # `client-<ver>` — the same jq-free parse _chart_version uses.
   local existing_id="" existing_ns="" _gvf _rel _ns _id
   _gvf="$(mktemp)"
-  if has jq; then
-    while IFS=$'\t' read -r _rel _ns; do
-      [[ -z "$_rel" ]] && continue
-      if helm get values "$_rel" -n "$_ns" > "$_gvf" 2>/dev/null; then
-        _id="$(_extract_yaml_value "$_gvf" clientId)"
-        [[ -n "$_id" ]] && { existing_id="$_id"; existing_ns="$_ns"; break; }
-      fi
-    done < <(helm list -A -o json 2>/dev/null | jq -r '.[] | select((.chart // "") | startswith("client-")) | "\(.name)\t\(.namespace)"')
-  elif helm get values "$TB_NAMESPACE" -n "$TB_NAMESPACE" > "$_gvf" 2>/dev/null; then
-    existing_id="$(_extract_yaml_value "$_gvf" clientId)"; existing_ns="$TB_NAMESPACE"
-  fi
+  while read -r _rel _ns; do
+    [[ -z "$_rel" ]] && continue
+    if helm get values "$_rel" -n "$_ns" > "$_gvf" 2>/dev/null; then
+      _id="$(_extract_yaml_value "$_gvf" clientId)"
+      [[ -n "$_id" ]] && { existing_id="$_id"; existing_ns="$_ns"; break; }
+    fi
+  done < <(helm list -A 2>/dev/null | awk '/[[:space:]]client-[0-9]/ { print $1, $2 }')
   rm -f "$_gvf"
   if [[ -n "$existing_id" && "$existing_id" != "$TB_CLIENT_ID" ]]; then
     echo ""
