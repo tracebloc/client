@@ -257,13 +257,23 @@ install_client_helm() {
     TB_CLIENT_PASSWORD=$(_sanitize_credential "$TRACEBLOC_CLIENT_PASSWORD")
     [[ -n "$TB_CLIENT_ID" && -n "$TB_CLIENT_PASSWORD" ]] || \
       error "TRACEBLOC_CLIENT_ID / TRACEBLOC_CLIENT_PASSWORD must be non-empty."
-    info "Verifying credentials with tracebloc…"
-    case "$(verify_credentials "$TB_CLIENT_ID" "$TB_CLIENT_PASSWORD")" in
-      valid)      success "Credentials verified." ;;
-      invalid)    error "TRACEBLOC_CLIENT_ID / TRACEBLOC_CLIENT_PASSWORD was rejected by tracebloc — check it at https://ai.tracebloc.io/clients and re-run." ;;
-      inactive)   error "This tracebloc account is not active yet. Check your email for the activation link, then re-run." ;;
-      unverified) warn "Couldn't reach tracebloc to verify credentials right now — continuing (the client will stay offline if they are wrong)." ;;
-    esac
+    if [[ "${TRACEBLOC_CLIENT_MINTED:-}" == 1 ]]; then
+      # Freshly minted by `tracebloc client create` in Step 3 (RFC-0001 provision):
+      # the credential is valid by construction, and the new client is "set to
+      # enroll" — it goes active only once the client pod we just deployed connects,
+      # which is async and usually outlasts this install. verify_credentials
+      # (api-token-auth) returns 400 for the not-yet-enrolled client, so pre-verifying
+      # here would hard-fail a perfectly good install. Trust the mint; the pod enrolls.
+      success "Provisioned client ${TB_CLIENT_ID} — it will connect and appear at https://ai.tracebloc.io/clients shortly."
+    else
+      info "Verifying credentials with tracebloc…"
+      case "$(verify_credentials "$TB_CLIENT_ID" "$TB_CLIENT_PASSWORD")" in
+        valid)      success "Credentials verified." ;;
+        invalid)    error "TRACEBLOC_CLIENT_ID / TRACEBLOC_CLIENT_PASSWORD was rejected by tracebloc — check it at https://ai.tracebloc.io/clients and re-run." ;;
+        inactive)   error "This tracebloc account is not active yet. Check your email for the activation link, then re-run." ;;
+        unverified) warn "Couldn't reach tracebloc to verify credentials right now — continuing (the client will stay offline if they are wrong)." ;;
+      esac
+    fi
   else
 
   prompt_header "Connect this machine to a tracebloc client."

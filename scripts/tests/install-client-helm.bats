@@ -190,6 +190,26 @@ setup() {
   mock_calls | grep -q "helm upgrade --install tracebloc"
 }
 
+@test "install_client_helm: minted credential (TRACEBLOC_CLIENT_MINTED=1) skips verify — trusts the mint" {
+  HOST_DATA_DIR="$BATS_TEST_TMPDIR/data"; mkdir -p "$HOST_DATA_DIR"
+  _ensure_tracebloc_dirs() { :; }
+  _ensure_release_dirs() { :; }
+  _ensure_helm_runnable() { :; }
+  helm() { record "helm $*"; return 0; }
+  # A freshly minted client is "set to enroll" — verify_credentials would 400 and
+  # hard-fail a good install. Make the stub shout + return invalid so this test
+  # fails loudly if the minted-skip ever regresses to calling verify.
+  verify_credentials() { echo "VERIFY_CALLED"; printf invalid; }
+  export TRACEBLOC_CLIENT_ID=1052 TRACEBLOC_CLIENT_PASSWORD=mintpw TRACEBLOC_CLIENT_MINTED=1
+  run install_client_helm </dev/null
+  [ "$status" -eq 0 ]                             # not hard-failed on "invalid"
+  [[ "$output" == *"Provisioned client 1052"* ]]  # minted, connecting message
+  [[ "$output" != *"VERIFY_CALLED"* ]]            # verify_credentials was NOT called
+  [[ "$output" != *"was rejected"* ]]             # no rejection error
+  grep -q 'clientId: "1052"' "$HOST_DATA_DIR/values.yaml"
+  mock_calls | grep -q "helm upgrade --install tracebloc"
+}
+
 @test "install_client_helm: TRACEBLOC_CLIENT_* with rejected creds -> errors, no helm" {
   HOST_DATA_DIR="$BATS_TEST_TMPDIR/data"; mkdir -p "$HOST_DATA_DIR"
   _ensure_tracebloc_dirs() { :; }

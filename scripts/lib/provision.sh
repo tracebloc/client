@@ -45,6 +45,11 @@ _prompt_tty() { [[ -r /dev/tty && -w /dev/tty ]]; }
 provision_client() {
   step 3 5 "Sign in and provision this client"
 
+  # "Minted this run" marker for install_client_helm's Step 5 — cleared up front so
+  # a stale value inherited from the environment can't make Step 5 skip credential
+  # verification. Only the mint path below sets it.
+  unset TRACEBLOC_CLIENT_MINTED
+
   if _provisioning_preset; then
     info "Using the credentials you supplied — skipping browser sign-in."
     # Still install the CLI (non-fatal) so the operator has it for `data ingest`.
@@ -144,6 +149,11 @@ provision_client() {
   # Mint: hand the credential + the provisioned namespace to the Helm step. The
   # namespace MUST be the created client's slug (Q2: it equals the heartbeat-
   # reported namespace), so the minted value wins over any TB_NAMESPACE default.
+  # MINTED=1 tells install_client_helm's Step 5 this credential was just created by
+  # `client create` (valid by construction) and the client is "set to enroll" — so
+  # Step 5 trusts the mint and skips the pre-verify that would otherwise 400 on the
+  # not-yet-enrolled client. Adopt/dual-mode paths don't set it and still verify.
   export TRACEBLOC_CLIENT_ID TRACEBLOC_CLIENT_PASSWORD TB_NAMESPACE
+  export TRACEBLOC_CLIENT_MINTED=1
   info "Provisioned — credential handed to the install (not shown)."
 }
