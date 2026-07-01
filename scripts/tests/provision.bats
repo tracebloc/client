@@ -23,7 +23,7 @@ setup() {
   LOG_FILE="$(mktemp)"
   HOST_DATA_DIR="$(mktemp -d)"
   unset TRACEBLOC_VALUES_FILE TRACEBLOC_CLIENT_ID TRACEBLOC_CLIENT_PASSWORD \
-        TB_NAMESPACE TRACEBLOC_CLIENT_ADOPTED TRACEBLOC_CLIENT_LOCATION TRACEBLOC_CLIENT_MINTED
+        TB_NAMESPACE TRACEBLOC_CLIENT_ADOPTED TRACEBLOC_CLIENT_LOCATION
   # Tests are non-interactive — never touch a real /dev/tty — and carry a machine
   # name so the mint tests clear provision.sh's required-name gate (the no-name
   # test unsets it). CREATE_ARGS_FILE captures the `client create` argv to assert on.
@@ -82,7 +82,6 @@ _stub_tracebloc() {
   [ "$TRACEBLOC_CLIENT_ID" = "5" ]
   [ "$TRACEBLOC_CLIENT_PASSWORD" = "pw9" ]
   [ "$TB_NAMESPACE" = "my-ns" ]
-  [ "$TRACEBLOC_CLIENT_MINTED" = "1" ]   # marks the mint so Step 5 skips the pre-verify
   # the credential file is transient — removed after sourcing
   [ ! -f "${HOST_DATA_DIR}/client-credential.env" ]
 }
@@ -103,7 +102,6 @@ _stub_tracebloc() {
   [ "$TB_NAMESPACE" = "ex-ns" ]
   [ -z "${TRACEBLOC_CLIENT_PASSWORD:-}" ]   # no fresh credential on adopt
   [ -z "${TRACEBLOC_CLIENT_ID:-}" ]         # partial creds cleared → Helm uses values.yaml
-  [ -z "${TRACEBLOC_CLIENT_MINTED:-}" ]     # not a mint → Step 5 still verifies
 }
 
 @test "provision_client: missing CLI after install is fatal" {
