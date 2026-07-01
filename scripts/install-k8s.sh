@@ -116,6 +116,12 @@ main() {
   #    aborting; in that case the operator must supply credentials/values. ──────
   if declare -F provision_client >/dev/null 2>&1; then
     provision_client
+  elif declare -F install_tracebloc_cli >/dev/null 2>&1; then
+    # Stale bootstrap: provision.sh wasn't fetched, but install-cli.sh was. Keep
+    # the old post-Helm Step 5 behavior so the CLI still gets installed (non-fatal,
+    # for `tracebloc data ingest`); provisioning then falls through to the dual-mode
+    # credential path inside install_client_helm.
+    install_tracebloc_cli
   fi
 
   # ── Step 4/5 + 5/5 are handled inside install_client_helm ────────────────
