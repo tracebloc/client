@@ -36,6 +36,12 @@ _cli_supports_provisioning() {
   return 0
 }
 
+# _prompt_tty: true when we can interactively prompt on the controlling terminal.
+# `client create`'s own prompt can't fire (we redirect its output to the log), and
+# under `curl | bash` stdin isn't the terminal — so read /dev/tty directly. Split
+# out as a function so tests can force the non-interactive path deterministically.
+_prompt_tty() { [[ -r /dev/tty && -w /dev/tty ]]; }
+
 provision_client() {
   step 3 5 "Sign in and provision this client"
 
@@ -81,9 +87,32 @@ provision_client() {
   # between mint and the explicit removal below — the secret must never linger.
   _PROVISION_CRED_FILE="$cred_file"
   rm -f "$cred_file"
+  # Name + location for this machine (RFC-0001 §6.4: "name this machine + confirm
+  # its location"). `client create` would prompt for these, but we redirect its
+  # output to the log below (the credential must never reach the terminal), so it
+  # can't — and it hard-requires --name when it can't prompt. Collect them here and
+  # pass explicitly. Precedence: env override (unattended) > interactive prompt on
+  # /dev/tty (works under `curl | bash`, whose stdin isn't the terminal) > fail closed.
+  local client_name="${TRACEBLOC_CLIENT_NAME:-}" client_location="${TRACEBLOC_CLIENT_LOCATION:-}"
+  if [[ -z "$client_name" ]] && _prompt_tty; then
+    printf '\n  Name this machine (shown on your tracebloc dashboard): ' >/dev/tty
+    IFS= read -r client_name </dev/tty || true
+    if [[ -z "$client_location" ]]; then
+      printf '  Location zone for carbon reporting [e.g. DE, optional]: ' >/dev/tty
+      IFS= read -r client_location </dev/tty || true
+    fi
+  fi
+  # Trim surrounding whitespace from the (possibly typed) values.
+  client_name="${client_name#"${client_name%%[![:space:]]*}"}"; client_name="${client_name%"${client_name##*[![:space:]]}"}"
+  client_location="${client_location#"${client_location%%[![:space:]]*}"}"; client_location="${client_location%"${client_location##*[![:space:]]}"}"
+  [[ -n "$client_name" ]] || error "A name for this machine is required to provision it. Re-run in a terminal to be prompted, or set TRACEBLOC_CLIENT_NAME (and optionally TRACEBLOC_CLIENT_LOCATION) for an unattended install."
+  # --name is required; pass --location only when we have one (the CLI defaults it
+  # otherwise). Build as an array so values with spaces survive intact.
+  local -a _create_args=(client create --yes --name "$client_name" --credential-file "$cred_file")
+  [[ -n "$client_location" ]] && _create_args+=(--location "$client_location")
   # umask 077 so the credential file lands 0600 even if a future CLI build
   # regresses on its explicit chmod — defense in depth (cli#104 already sets 0600).
-  if ! ( umask 077; tracebloc client create --yes --credential-file "$cred_file" ) >>"${LOG_FILE:-/dev/null}" 2>&1; then
+  if ! ( umask 077; tracebloc "${_create_args[@]}" ) >>"${LOG_FILE:-/dev/null}" 2>&1; then
     rm -f "$cred_file"   # remove any partial the failed create may have written
     error "Provisioning the client failed — see ${LOG_FILE:-the install log}. Re-run to retry."
   fi
