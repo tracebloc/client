@@ -225,29 +225,57 @@ jobs:
           # BOTH the placeholder and the replacement (read from ENVIRON, never the
           # command line) as plain strings — no regex, no backreference, no
           # delimiter — so every byte of the tag lands verbatim.
+          #
+          # Stamp ONLY the `DEFAULT_REF=` assignment line. install.sh's fail-closed
+          # guard checks the SAME placeholder token to detect an un-stamped build;
+          # a global replace rewrote that guard to the tag too, so it fired on every
+          # correctly stamped install — "wasn't stamped" for everyone (the v1.8.1
+          # regression, backend#830). Anchoring to the assignment keeps the guard's
+          # sentinel intact.
           TAG="$TAG" awk '
             BEGIN { ph = "__TRACEBLOC_RELEASE_REF__"; rep = ENVIRON["TAG"] }
-            {
+            /^DEFAULT_REF=/ {
               out = ""; line = $0
               while ((p = index(line, ph)) > 0) {
                 out = out substr(line, 1, p - 1) rep
                 line = substr(line, p + length(ph))
               }
-              print out line
+              print out line; next
             }
+            { print }
           ' scripts/install.stamped.sh > scripts/install.stamped.sh.new
           mv scripts/install.stamped.sh.new scripts/install.sh
           rm -f scripts/install.stamped.sh
-          # Confirm the stamp landed exactly and the placeholder is fully gone.
+          # Confirm the stamp landed on DEFAULT_REF (published installer pinned to
+          # this tag)...
           grep -n 'DEFAULT_REF=' scripts/install.sh
-          if grep -q '__TRACEBLOC_RELEASE_REF__' scripts/install.sh; then
-            echo "::error::placeholder still present after stamping"; exit 1
-          fi
+          grep -qF "DEFAULT_REF=\"${TAG}\"" scripts/install.sh \
+            || { echo "::error::DEFAULT_REF was not stamped to ${TAG}"; exit 1; }
+          # ...and that the surgical stamp left the fail-closed guard's sentinel
+          # untouched — a global replace would rewrite it to the tag and fire on
+          # every correct install (regression guard for the v1.8.1 clobber).
+          grep -qF '"$REF" == "__TRACEBLOC_RELEASE_REF__"' scripts/install.sh \
+            || { echo "::error::unstamped-guard sentinel was clobbered by stamping"; exit 1; }
 
-      - name: Self-test the stamped installer parses and refuses bad refs
+      - name: Self-test the stamped installer parses, accepts its tag, and refuses bad refs
+        env:
+          TAG: ${{ github.event.release.tag_name }}
         run: |
           bash -n scripts/install.sh
-          # Un-pinned dev ref without the opt-in must fail closed (exit non-zero).
+          # POSITIVE PATH — the v1.8.1 regression. With no BRANCH/REF override the
+          # installer resolves to its stamped DEFAULT_REF (this tag) and MUST clear
+          # the fail-closed guard, i.e. NEVER print "wasn't stamped". It still exits
+          # non-zero further on (the signed manifest assets aren't attached to the
+          # release until the next step), so we assert only that it got past the
+          # guard. `timeout` bounds the network fetch so this can't hang the job.
+          out="$(timeout 120 bash scripts/install.sh </dev/null 2>&1 || true)"
+          if printf '%s\n' "$out" | grep -q "wasn't stamped"; then
+            echo "::error::stamped installer rejected its own pinned tag '${TAG}' — the unstamped-guard was clobbered"
+            printf '%s\n' "$out" | head -25
+            exit 1
+          fi
+          echo "stamped installer accepts its pinned tag '${TAG}' (cleared the guard)"
+          # NEGATIVE PATH — an un-pinned dev ref without the opt-in must fail closed.
           if BRANCH=some-branch bash scripts/install.sh </dev/null >/dev/null 2>&1; then
             echo "::error::stamped installer did not fail closed on a mutable BRANCH"; exit 1
           fi
