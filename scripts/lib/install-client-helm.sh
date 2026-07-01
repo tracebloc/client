@@ -194,8 +194,9 @@ _chart_proxy_env_yaml() {
 }
 
 install_client_helm() {
-  # ── Step 3/4: Install tracebloc client ───────────────────────────────────
-  step 3 5 "Installing tracebloc client"
+  # ── Step 4/5: Install tracebloc client (credential + namespace provisioned
+  #    in Step 3 by provision_client, or supplied via dual-mode) ─────────────
+  step 4 5 "Installing tracebloc client"
 
   _ensure_tracebloc_dirs
   local values_file="${HOST_DATA_DIR}/values.yaml"
@@ -247,8 +248,8 @@ install_client_helm() {
   # Advanced / GitOps setups can override with TB_NAMESPACE=<name>.
   TB_NAMESPACE=$(_sanitize_workspace_name "${TB_NAMESPACE:-tracebloc}")
 
-  # ── Step 4/4: Connect to tracebloc network ──────────────────────────────
-  step 4 5 "Connect to tracebloc network"
+  # ── Step 5/5: Connect to tracebloc network ──────────────────────────────
+  step 5 5 "Connect to tracebloc network"
 
   if [[ "$_noninteractive_creds" == 1 ]]; then
     # Credentials supplied via env — verify once, no prompt, no re-prompt.
@@ -335,21 +336,21 @@ install_client_helm() {
   # decide. The same clientId is a normal re-run/upgrade and passes through.
   # Check ANY namespace: a fresh install lands in `tracebloc`, but an install
   # from an older installer version may be in a different namespace. Enumerate
-  # client-chart releases and read each clientId. jq is already used elsewhere
-  # in the installer; if it's somehow absent, fall back to the `tracebloc` ns.
+  # client-chart releases WITHOUT jq — jq is not a guaranteed prerequisite here,
+  # and a jq-only enumeration whose fallback checked a single namespace would miss
+  # an older release under the fixed `tracebloc` namespace once the minted slug
+  # differs, forking a second release. helm's NAME/NAMESPACE are the first two
+  # columns and never contain whitespace, and the CHART column matches
+  # `client-<ver>` — the same jq-free parse _chart_version uses.
   local existing_id="" existing_ns="" _gvf _rel _ns _id
   _gvf="$(mktemp)"
-  if has jq; then
-    while IFS=$'\t' read -r _rel _ns; do
-      [[ -z "$_rel" ]] && continue
-      if helm get values "$_rel" -n "$_ns" > "$_gvf" 2>/dev/null; then
-        _id="$(_extract_yaml_value "$_gvf" clientId)"
-        [[ -n "$_id" ]] && { existing_id="$_id"; existing_ns="$_ns"; break; }
-      fi
-    done < <(helm list -A -o json 2>/dev/null | jq -r '.[] | select((.chart // "") | startswith("client-")) | "\(.name)\t\(.namespace)"')
-  elif helm get values "$TB_NAMESPACE" -n "$TB_NAMESPACE" > "$_gvf" 2>/dev/null; then
-    existing_id="$(_extract_yaml_value "$_gvf" clientId)"; existing_ns="$TB_NAMESPACE"
-  fi
+  while read -r _rel _ns; do
+    [[ -z "$_rel" ]] && continue
+    if helm get values "$_rel" -n "$_ns" > "$_gvf" 2>/dev/null; then
+      _id="$(_extract_yaml_value "$_gvf" clientId)"
+      [[ -n "$_id" ]] && { existing_id="$_id"; existing_ns="$_ns"; break; }
+    fi
+  done < <(helm list -A 2>/dev/null | awk '/[[:space:]]client-[0-9]/ { print $1, $2 }')
   rm -f "$_gvf"
   if [[ -n "$existing_id" && "$existing_id" != "$TB_CLIENT_ID" ]]; then
     echo ""
@@ -365,6 +366,19 @@ install_client_helm() {
     hint "  • Run both clients                   →  install on a separate machine"
     echo ""
     error "Refusing to replace the existing client. See the options above."
+  fi
+
+  # Same client, but already installed under a DIFFERENT namespace — e.g. a release
+  # from an older installer that used the fixed `tracebloc` namespace, before #838
+  # began deriving the namespace from the minted client slug. Upgrade THAT release
+  # in place rather than installing a second one under the new namespace: the
+  # platform counts each release as separate capacity, so a fork would silently
+  # double-book this host (and orphan the original). Reuse the existing namespace;
+  # an intentional namespace move is a delete-then-reinstall, not a silent fork.
+  if [[ -n "$existing_id" && "$existing_id" == "$TB_CLIENT_ID" && -n "$existing_ns" && "$existing_ns" != "$TB_NAMESPACE" ]]; then
+    log "Client '${existing_id}' already installed in namespace '${existing_ns}'; upgrading it in place instead of creating '${TB_NAMESPACE}'."
+    info "Updating the existing client (namespace '${existing_ns}')."
+    TB_NAMESPACE="$existing_ns"
   fi
 
   TB_CLIENT_PASSWORD_ESCAPED="${TB_CLIENT_PASSWORD//\'/\'\'}"

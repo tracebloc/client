@@ -62,12 +62,22 @@ jobs:
           # common.sh and consumed in other sourced files. Warnings are printed
           # below for visibility but don't fail the gate.
           shellcheck --severity=error --shell=bash \
-            scripts/install.sh scripts/install-k8s.sh scripts/lib/*.sh \
+            scripts/install.sh scripts/install-k8s.sh scripts/gen-manifest.sh scripts/lib/*.sh \
             scripts/tests/distro-prereqs.sh scripts/tests/e2e-cluster.sh scripts/tests/e2e-proxy.sh scripts/tests/e2e-auto-upgrade.sh scripts/tests/check-drift.sh
           echo "── shellcheck warnings (advisory, non-blocking) ──"
           shellcheck --severity=warning --shell=bash \
-            scripts/install.sh scripts/install-k8s.sh scripts/lib/*.sh \
+            scripts/install.sh scripts/install-k8s.sh scripts/gen-manifest.sh scripts/lib/*.sh \
             scripts/tests/distro-prereqs.sh scripts/tests/e2e-cluster.sh scripts/tests/e2e-proxy.sh scripts/tests/e2e-auto-upgrade.sh scripts/tests/check-drift.sh || true
+
+      - name: Installer manifest is current (supply-chain, R8)
+        # The bootstrap verifies each sub-script against scripts/manifest.sha256
+        # before running the privileged steps. If a sub-script changed but the
+        # manifest didn't, the release would publish a manifest that rejects the
+        # very scripts it ships — so fail the PR until the manifest is regenerated.
+        # Also cross-checks the bootstrap's FILES list against gen-manifest.sh.
+        run: |
+          chmod +x scripts/gen-manifest.sh
+          scripts/gen-manifest.sh --check
 
       - name: PSScriptAnalyzer (PowerShell installer)
         shell: pwsh
