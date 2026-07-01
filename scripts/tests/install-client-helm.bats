@@ -314,7 +314,11 @@ setup() {
   _ensure_helm_runnable() { :; }
   # an existing release reports a different clientId -> must block before upgrade
   helm() {
-    if [ "$1" = list ]; then echo '[{"name":"oldrel","namespace":"default","chart":"client-1.4.3"}]'; return 0; fi
+    if [ "$1" = list ]; then
+      printf '%s\n' 'NAME NAMESPACE REVISION UPDATED STATUS CHART APP VERSION' \
+                    'oldrel default 1 2026-01-01 deployed client-1.4.3 1.4.3'
+      return 0
+    fi
     if [ "$1" = get ] && [ "$2" = values ]; then echo 'clientId: "otherclient"'; return 0; fi
     record "helm $*"; return 0
   }
@@ -333,7 +337,11 @@ setup() {
   _ensure_release_dirs() { :; }
   _ensure_helm_runnable() { :; }
   helm() {
-    if [ "$1" = list ]; then echo '[{"name":"tracebloc","namespace":"tracebloc","chart":"client-1.4.3"}]'; return 0; fi
+    if [ "$1" = list ]; then
+      printf '%s\n' 'NAME NAMESPACE REVISION UPDATED STATUS CHART APP VERSION' \
+                    'tracebloc tracebloc 1 2026-01-01 deployed client-1.4.3 1.4.3'
+      return 0
+    fi
     if [ "$1" = get ] && [ "$2" = values ]; then echo 'clientId: "sameid"'; return 0; fi
     record "helm $*"; return 0
   }
@@ -354,7 +362,40 @@ setup() {
   # existing release in place, NOT fork a second one under 'acme-corp'.
   export TB_NAMESPACE=acme-corp
   helm() {
-    if [ "$1" = list ]; then echo '[{"name":"tracebloc","namespace":"tracebloc","chart":"client-1.4.3"}]'; return 0; fi
+    if [ "$1" = list ]; then
+      printf '%s\n' 'NAME NAMESPACE REVISION UPDATED STATUS CHART APP VERSION' \
+                    'tracebloc tracebloc 1 2026-01-01 deployed client-1.4.3 1.4.3'
+      return 0
+    fi
+    if [ "$1" = get ] && [ "$2" = values ]; then echo 'clientId: "sameid"'; return 0; fi
+    record "helm $*"; return 0
+  }
+  verify_credentials() { printf valid; }
+  run install_client_helm <<< $'sameid\nmypw'
+  [ "$status" -eq 0 ]
+  run mock_calls
+  [[ "$output" == *"helm upgrade --install tracebloc"* ]]   # reused existing namespace
+  [[ "$output" != *"acme-corp"* ]]                          # no second release forked
+}
+
+@test "install_client_helm: different-namespace reconcile works WITHOUT jq (Bugbot #284)" {
+  HOST_DATA_DIR="$BATS_TEST_TMPDIR/data"; mkdir -p "$HOST_DATA_DIR"
+  _ensure_tracebloc_dirs() { :; }
+  _ensure_release_dirs() { :; }
+  _ensure_helm_runnable() { :; }
+  # Regression for the 2nd Bugbot finding on #284: the guard must enumerate ALL
+  # namespaces without jq. On a jq-less host the old fallback only checked the
+  # minted slug namespace, missed the existing `tracebloc` release, and forked a
+  # second release under the slug. Report jq absent + feed only tabular `helm
+  # list` output — the guard must still find `tracebloc` and upgrade it in place.
+  has() { [ "$1" = jq ] && return 1; command -v "$1" >/dev/null 2>&1; }
+  export TB_NAMESPACE=acme-corp
+  helm() {
+    if [ "$1" = list ]; then
+      printf '%s\n' 'NAME NAMESPACE REVISION UPDATED STATUS CHART APP VERSION' \
+                    'tracebloc tracebloc 1 2026-01-01 deployed client-1.4.3 1.4.3'
+      return 0
+    fi
     if [ "$1" = get ] && [ "$2" = values ]; then echo 'clientId: "sameid"'; return 0; fi
     record "helm $*"; return 0
   }
