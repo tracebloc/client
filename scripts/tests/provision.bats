@@ -23,7 +23,13 @@ setup() {
   LOG_FILE="$(mktemp)"
   HOST_DATA_DIR="$(mktemp -d)"
   unset TRACEBLOC_VALUES_FILE TRACEBLOC_CLIENT_ID TRACEBLOC_CLIENT_PASSWORD \
-        TB_NAMESPACE TRACEBLOC_CLIENT_ADOPTED
+        TB_NAMESPACE TRACEBLOC_CLIENT_ADOPTED TRACEBLOC_CLIENT_LOCATION
+  # Tests are non-interactive — never touch a real /dev/tty — and carry a machine
+  # name so the mint tests clear provision.sh's required-name gate (the no-name
+  # test unsets it). CREATE_ARGS_FILE captures the `client create` argv to assert on.
+  _prompt_tty() { return 1; }
+  export TRACEBLOC_CLIENT_NAME="ci-machine"
+  CREATE_ARGS_FILE="$(mktemp)"
 }
 
 # A `tracebloc` stub: `login` succeeds; `client create` writes the given
@@ -34,6 +40,9 @@ _stub_tracebloc() {
     [ "$1" = "login" ] && return 0
     local f="" prev=""
     for a in "$@"; do [ "$prev" = "--credential-file" ] && f="$a"; prev="$a"; done
+    # Record the real mint argv (the call that writes the credential file) so tests
+    # can assert --name / --location are passed through.
+    [ -n "$f" ] && printf '%s\n' "$*" >>"${CREATE_ARGS_FILE:-/dev/null}"
     [ -n "$f" ] && printf '%b' "$CRED_LINES" > "$f"
     return 0
   }
@@ -132,4 +141,27 @@ _stub_tracebloc() {
   run provision_client
   [ "$status" -ne 0 ]
   [ ! -f "${HOST_DATA_DIR}/client-credential.env" ]
+}
+
+@test "provision_client: mint passes --name (+ --location) through to client create" {
+  # `client create`'s output is redirected to the log, so it can't prompt and
+  # hard-requires --name; provision.sh must pass it. Multi-word name checks the
+  # array-based invocation keeps values with spaces intact.
+  export TRACEBLOC_CLIENT_NAME="lab box 3" TRACEBLOC_CLIENT_LOCATION="DE"
+  _stub_tracebloc 'TRACEBLOC_CLIENT_ID=1\nTRACEBLOC_CLIENT_PASSWORD=p\nTB_NAMESPACE=ns\n'
+  provision_client
+  run cat "$CREATE_ARGS_FILE"
+  [[ "$output" == *"--name lab box 3"* ]]
+  [[ "$output" == *"--location DE"* ]]
+}
+
+@test "provision_client: no name and no TTY to prompt is fatal (can't provision blind)" {
+  unset TRACEBLOC_CLIENT_NAME
+  _prompt_tty() { return 1; }   # non-interactive: no terminal to prompt on
+  _stub_tracebloc 'TRACEBLOC_CLIENT_ID=1\nTRACEBLOC_CLIENT_PASSWORD=p\nTB_NAMESPACE=ns\n'
+  run provision_client
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"name for this machine is required"* ]]
+  # and it must not have called client create (no argv recorded)
+  [ ! -s "$CREATE_ARGS_FILE" ]
 }
