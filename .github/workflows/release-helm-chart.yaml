@@ -281,12 +281,82 @@ jobs:
           fi
           echo "stamped installer fails closed on a mutable ref (expected)"
 
+      - name: Stamp the published PowerShell installer with this immutable tag
+        # Windows peer of the install.sh stamp above. install.ps1 carries the same
+        # placeholder $DefaultRef and refuses to run un-stamped; the published asset
+        # is pinned to THIS tag so `irm .../releases/latest/download/install.ps1 | iex`
+        # transitively pins install-k8s.ps1. Same discipline: the tag is passed via
+        # env (plain data), and a literal awk find/replace anchored to the
+        # `$DefaultRef =` assignment leaves the identical placeholder in the
+        # fail-closed guard untouched (a global replace would make every stamped
+        # install report "wasn't stamped" — the install.sh v1.8.1 regression).
+        env:
+          TAG: ${{ github.event.release.tag_name }}
+        run: |
+          install -m 0644 scripts/install.ps1 scripts/install.stamped.ps1
+          grep -q '__TRACEBLOC_RELEASE_REF__' scripts/install.stamped.ps1 \
+            || { echo "::error::DefaultRef placeholder not found in install.ps1"; exit 1; }
+          TAG="$TAG" awk '
+            BEGIN { ph = "__TRACEBLOC_RELEASE_REF__"; rep = ENVIRON["TAG"] }
+            /^\$DefaultRef = / {
+              out = ""; line = $0
+              while ((p = index(line, ph)) > 0) {
+                out = out substr(line, 1, p - 1) rep
+                line = substr(line, p + length(ph))
+              }
+              print out line; next
+            }
+            { print }
+          ' scripts/install.stamped.ps1 > scripts/install.stamped.ps1.new
+          mv scripts/install.stamped.ps1.new scripts/install.ps1
+          rm -f scripts/install.stamped.ps1
+          # Confirm the stamp landed on $DefaultRef...
+          grep -n 'DefaultRef' scripts/install.ps1 | head -3
+          grep -qF "\$DefaultRef = \"${TAG}\"" scripts/install.ps1 \
+            || { echo "::error::\$DefaultRef was not stamped to ${TAG}"; exit 1; }
+          # ...and that the fail-closed guard's sentinel survived (regression guard).
+          grep -qF '$ref -eq "__TRACEBLOC_RELEASE_REF__"' scripts/install.ps1 \
+            || { echo "::error::unstamped-guard sentinel was clobbered by stamping"; exit 1; }
+
+      - name: Self-test the stamped PowerShell installer parses + enforces R8 ref rules
+        # Windows peer of the install.sh self-test. Runs on the ubuntu runner via
+        # pwsh: TB_PESTER=1 loads the functions past the platform gate (which would
+        # otherwise exit off-Windows) so we can assert the SAME positive/negative
+        # paths — the stamped tag is accepted, a mutable branch fails closed. The
+        # full fetch/verify flow is exercised behaviorally by the Windows Pester job.
+        shell: pwsh
+        env:
+          TAG: ${{ github.event.release.tag_name }}
+          TB_PESTER: "1"
+        run: |
+          $errs = $null
+          [System.Management.Automation.Language.Parser]::ParseFile("scripts/install.ps1", [ref]$null, [ref]$errs) | Out-Null
+          if ($errs) { $errs | ForEach-Object { Write-Host $_ }; Write-Host "::error::install.ps1 has syntax errors after stamping"; exit 1 }
+          . ./scripts/install.ps1
+          # POSITIVE — no override resolves to the stamped $DefaultRef (this tag) and
+          # must be accepted (never throw "wasn't stamped").
+          try {
+            $ref = Resolve-InstallRef -DefaultRef $DefaultRef -AllowUnverified:$false
+          } catch {
+            Write-Host "::error::stamped installer rejected its own pinned tag '$($env:TAG)': $_"; exit 1
+          }
+          if ($ref -ne $env:TAG) { Write-Host "::error::stamped installer resolved '$ref', expected pinned tag '$($env:TAG)'"; exit 1 }
+          Write-Host "stamped PowerShell installer accepts its pinned tag '$($env:TAG)'"
+          # NEGATIVE — a mutable BRANCH without the opt-in must fail closed (throw).
+          try {
+            Resolve-InstallRef -DefaultRef $DefaultRef -BranchEnv 'some-branch' -AllowUnverified:$false | Out-Null
+            Write-Host "::error::stamped installer did not fail closed on a mutable BRANCH"; exit 1
+          } catch {
+            Write-Host "stamped PowerShell installer fails closed on a mutable ref (expected)"
+          }
+
       - name: Attach installer + signed manifest to the release
         uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
           tag_name: ${{ github.event.release.tag_name }}
           files: |
             scripts/install.sh
+            scripts/install.ps1
             scripts/manifest.sha256
             scripts/manifest.sha256.sig
             scripts/manifest.sha256.cert
