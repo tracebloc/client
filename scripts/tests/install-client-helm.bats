@@ -190,7 +190,7 @@ setup() {
   mock_calls | grep -q "helm upgrade --install tracebloc"
 }
 
-@test "install_client_helm: adopted client (TRACEBLOC_CLIENT_ADOPTED=1, no TRACEBLOC_CLIENT_ID) reconciles the live release in place — no prompt, no verify" {
+@test "install_client_helm: adopted client with the UUID heals clientId + reconciles in place — no prompt, no verify" {
   HOST_DATA_DIR="$BATS_TEST_TMPDIR/data"; mkdir -p "$HOST_DATA_DIR"
   _ensure_tracebloc_dirs() { :; }
   _ensure_release_dirs() { :; }
@@ -205,22 +205,49 @@ setup() {
   }
   # verify_credentials must NOT be called on adopt (the existing credential stands).
   verify_credentials() { echo "VERIFY_CALLED"; printf invalid; }
-  # Real adopt: provision_client cleared TRACEBLOC_CLIENT_ID and left only the marker
-  # (+ TB_NAMESPACE). Reconcile must work off the LIVE release, not the (absent) id.
-  export TRACEBLOC_CLIENT_ADOPTED=1
+  # Real CLI adopt: provision_client keeps the adopted client id (UUID) so Step 5 can
+  # heal a cli#125-era numeric clientId on the existing release.
+  export TRACEBLOC_CLIENT_ADOPTED=1 TRACEBLOC_CLIENT_ID=0e9db54e-c9c0-4bf3-9ff2-1646da307019
   run install_client_helm </dev/null              # no stdin: must not prompt
   [ "$status" -eq 0 ]
   [[ "$output" != *"Client ID:"* ]]                # no credential prompt
   [[ "$output" != *"VERIFY_CALLED"* ]]             # no verify
   [[ "$output" == *"reconciling"* ]]
   [[ "$output" == *"Connected to tracebloc"* ]]
-  # Reconciled the LIVE release in place (name 'munich'), reusing its stored values
-  # (--reset-then-reuse-values) — NOT a fresh --install, no duplicate, no --set clientId.
+  # Reconciled the LIVE release in place (name 'munich') AND healed clientId to the
+  # adopted UUID, reusing the stored password — NOT a fresh --install, no duplicate.
+  mock_calls | grep -q "helm upgrade munich"
+  mock_calls | grep -q -- "--reset-then-reuse-values"
+  mock_calls | grep -q -- "--set clientId=0e9db54e-c9c0-4bf3-9ff2-1646da307019"
+  run mock_calls
+  [[ "$output" != *"helm upgrade --install"* ]]
+}
+
+@test "install_client_helm: adopt with NO client id (rebuilt host / R7) reconciles WITHOUT a heal — no prompt, no bail" {
+  HOST_DATA_DIR="$BATS_TEST_TMPDIR/data"; mkdir -p "$HOST_DATA_DIR"
+  _ensure_tracebloc_dirs() { :; }
+  _ensure_release_dirs() { :; }
+  _ensure_helm_runnable() { :; }
+  kubectl() { record "kubectl $*"; return 0; }
+  helm() {
+    if [[ "$1" == list ]]; then echo "munich munich 1 now deployed client-1.8.2 1.8.2"; return 0; fi
+    if [[ "$1 $2" == "upgrade --help" ]]; then echo "  --reset-then-reuse-values"; return 0; fi
+    record "helm $*"; return 0
+  }
+  verify_credentials() { echo "VERIFY_CALLED"; printf invalid; }
+  # Edge case: the marker is set but no adopted id was handed over (rebuilt host /
+  # R7 orphan). Reconcile the LIVE release WITHOUT a heal — must not bail to a prompt.
+  export TRACEBLOC_CLIENT_ADOPTED=1
+  run install_client_helm </dev/null
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"Client ID:"* ]]                # no prompt (no bail)
+  [[ "$output" != *"VERIFY_CALLED"* ]]             # no verify
+  [[ "$output" == *"Connected to tracebloc"* ]]
   mock_calls | grep -q "helm upgrade munich"
   mock_calls | grep -q -- "--reset-then-reuse-values"
   run mock_calls
   [[ "$output" != *"helm upgrade --install"* ]]
-  [[ "$output" != *"--set clientId"* ]]
+  [[ "$output" != *"--set clientId"* ]]            # nothing to heal with → no --set
 }
 
 @test "install_client_helm: adopt on older Helm (no --reset-then-reuse-values) falls back to --reuse-values" {

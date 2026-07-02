@@ -224,11 +224,10 @@ _resolve_chart_ref() {
 # authenticate. Returns 0 on a successful reconcile; non-zero (caller falls back to
 # the normal connect flow) when no live tracebloc release is found to reconcile.
 _reconcile_adopted_client() {
-  # provision_client (Step 3) cleared TRACEBLOC_CLIENT_ID on adopt (no fresh
-  # credential is issued — the existing one stands, write-only on the backend), so
-  # the live release's STORED values are the source of truth. Find it and reconcile
-  # in place, reusing them. Enumerate the client release the same jq-free way the
-  # one-per-machine guard does. One client per machine, so take the first.
+  # provision_client (Step 3) hands over the adopted client id (UUID) + the marker on
+  # adopt (no password — the existing credential stands). Find the live client release
+  # and reconcile it in place. Enumerate it the same jq-free way the one-per-machine
+  # guard does. One client per machine, so take the first.
   local _rel="" _ns="" _r _n
   while read -r _r _n; do
     [[ -n "$_r" ]] && { _rel="$_r"; _ns="$_n"; break; }
@@ -239,26 +238,33 @@ _reconcile_adopted_client() {
   fi
 
   TB_NAMESPACE="$_ns"
-  info "This machine already runs a tracebloc client — reconciling '${_rel}' (namespace '${_ns}') in place, reusing its stored credential."
+  info "This machine already runs a tracebloc client — reconciling '${_rel}' (namespace '${_ns}') in place."
 
   _ensure_helm_runnable
   local chart_ref=""
   _resolve_chart_ref
 
-  # Reconcile in place, reusing the release's stored values (clientId/clientPassword
-  # + install-time config) — adopt issues no fresh credential, so the existing one
-  # stands. Prefer --reset-then-reuse-values (Helm >= 3.14: reset to chart defaults,
-  # then re-apply the stored user values, picking up new chart defaults); fall back
-  # to --reuse-values on older Helm.
+  # Reconcile in place, reusing the release's stored values (clientPassword +
+  # install-time config). Prefer --reset-then-reuse-values (Helm >= 3.14: reset to
+  # chart defaults, then re-apply the stored user values, picking up new chart
+  # defaults); fall back to --reuse-values on older Helm.
   local _reuse="--reuse-values"
   helm upgrade --help 2>/dev/null | grep -q -- '--reset-then-reuse-values' && _reuse="--reset-then-reuse-values"
+
+  # Heal the stored clientId to the adopted UUID when provision_client handed one
+  # over (export TRACEBLOC_CLIENT_ID on the adopt path): a cli#125-era install stored
+  # the numeric dashboard id, which can't authenticate, and --reuse-values alone
+  # would preserve it (the reused password is still correct). With no id (rebuilt
+  # host / R7 orphan) reconcile WITHOUT a heal rather than bail — the existing
+  # credential stands. Built as an array so the optional --set is bash-3.2 safe.
+  local _args=(upgrade "$_rel" "$chart_ref" --namespace "$_ns" "$_reuse")
+  local _uuid; _uuid="$(_sanitize_credential "${TRACEBLOC_CLIENT_ID:-}")"
+  [[ -n "$_uuid" ]] && _args+=(--set "clientId=$_uuid")
 
   _ensure_release_dirs "$_ns"
 
   local _hl; _hl="$(mktemp)"
-  if ! helm upgrade "$_rel" "$chart_ref" \
-      --namespace "$_ns" \
-      "$_reuse" > "$_hl" 2>&1; then
+  if ! helm "${_args[@]}" > "$_hl" 2>&1; then
     cat "$_hl" >> "${LOG_FILE:-/dev/null}" 2>/dev/null
     cat "$_hl" >&2
     rm -f "$_hl"
