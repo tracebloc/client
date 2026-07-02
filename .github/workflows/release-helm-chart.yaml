@@ -27,7 +27,7 @@ jobs:
         # runs (actions/runner#2788, still open). An empty default would cause
         # checkout to fall back to the repo default branch and package the
         # chart from the wrong commit.
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           ref: ${{ github.event.release.tag_name }}
           fetch-depth: 0
@@ -130,7 +130,7 @@ jobs:
         # release-triggered runs (actions/runner#2788, still open).
         # Attach BOTH chart tgzs so downloaders pinning a specific release
         # tag can pull either chart's exact bytes from this release page.
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
           tag_name: ${{ github.event.release.tag_name }}
           files: |
@@ -166,13 +166,13 @@ jobs:
       - name: Checkout the released tag
         # Same actions/runner#2788 guard as above — pin to the release tag so the
         # manifest covers exactly the bytes published at this immutable ref.
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           ref: ${{ github.event.release.tag_name }}
           fetch-depth: 0
 
       - name: Install cosign
-        uses: sigstore/cosign-installer@v3
+        uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac # v3
         with:
           cosign-release: 'v2.4.1'   # keep in lockstep with scripts/install.sh COSIGN_VERSION
 
@@ -282,7 +282,7 @@ jobs:
           echo "stamped installer fails closed on a mutable ref (expected)"
 
       - name: Attach installer + signed manifest to the release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
           tag_name: ${{ github.event.release.tag_name }}
           files: |
