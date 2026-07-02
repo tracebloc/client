@@ -190,6 +190,75 @@ setup() {
   mock_calls | grep -q "helm upgrade --install tracebloc"
 }
 
+@test "install_client_helm: adopted client (TRACEBLOC_CLIENT_ADOPTED=1) reconciles the live release in place — no prompt, no verify, heals clientId to the UUID" {
+  HOST_DATA_DIR="$BATS_TEST_TMPDIR/data"; mkdir -p "$HOST_DATA_DIR"
+  _ensure_tracebloc_dirs() { :; }
+  _ensure_release_dirs() { :; }
+  _ensure_helm_runnable() { :; }
+  kubectl() { record "kubectl $*"; return 0; }
+  # A live client release already occupies namespace 'munich'; helm advertises the
+  # modern reuse flag.
+  helm() {
+    if [[ "$1" == list ]]; then echo "munich munich 1 now deployed client-1.8.2 1.8.2"; return 0; fi
+    if [[ "$1 $2" == "upgrade --help" ]]; then echo "  --reset-then-reuse-values"; return 0; fi
+    record "helm $*"; return 0
+  }
+  # verify_credentials must NOT be called on adopt (the existing credential stands).
+  verify_credentials() { echo "VERIFY_CALLED"; printf invalid; }
+  export TRACEBLOC_CLIENT_ADOPTED=1 TRACEBLOC_CLIENT_ID=0e9db54e-c9c0-4bf3-9ff2-1646da307019
+  run install_client_helm </dev/null              # no stdin: must not prompt
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"Client ID:"* ]]                # no credential prompt
+  [[ "$output" != *"VERIFY_CALLED"* ]]             # no verify
+  [[ "$output" == *"reconciling"* ]]
+  [[ "$output" == *"Connected to tracebloc"* ]]
+  # Reconciled the LIVE release in place (name 'munich'), reusing its stored values
+  # and healing clientId to the adopted UUID — NOT a fresh --install, no duplicate.
+  mock_calls | grep -q "helm upgrade munich"
+  mock_calls | grep -q -- "--reset-then-reuse-values"
+  mock_calls | grep -q -- "--set clientId=0e9db54e-c9c0-4bf3-9ff2-1646da307019"
+  run mock_calls
+  [[ "$output" != *"helm upgrade --install"* ]]
+}
+
+@test "install_client_helm: adopt on older Helm (no --reset-then-reuse-values) falls back to --reuse-values" {
+  HOST_DATA_DIR="$BATS_TEST_TMPDIR/data"; mkdir -p "$HOST_DATA_DIR"
+  _ensure_tracebloc_dirs() { :; }
+  _ensure_release_dirs() { :; }
+  _ensure_helm_runnable() { :; }
+  kubectl() { record "kubectl $*"; return 0; }
+  helm() {
+    if [[ "$1" == list ]]; then echo "munich munich 1 now deployed client-1.8.2 1.8.2"; return 0; fi
+    if [[ "$1 $2" == "upgrade --help" ]]; then echo "--install --values --set --reuse-values"; return 0; fi
+    record "helm $*"; return 0
+  }
+  verify_credentials() { echo "VERIFY_CALLED"; printf invalid; }
+  export TRACEBLOC_CLIENT_ADOPTED=1 TRACEBLOC_CLIENT_ID=uuid-abc
+  run install_client_helm </dev/null
+  [ "$status" -eq 0 ]
+  mock_calls | grep -q -- "--reuse-values"
+  run mock_calls
+  [[ "$output" != *"--reset-then-reuse-values"* ]]
+}
+
+@test "install_client_helm: adopted but no live release -> falls back to the normal connect (fresh install)" {
+  HOST_DATA_DIR="$BATS_TEST_TMPDIR/data"; mkdir -p "$HOST_DATA_DIR"
+  _ensure_tracebloc_dirs() { :; }
+  _ensure_release_dirs() { :; }
+  _ensure_helm_runnable() { :; }
+  kubectl() { record "kubectl $*"; return 0; }
+  helm() {
+    if [[ "$1" == list ]]; then return 0; fi      # no releases on the cluster
+    record "helm $*"; return 0
+  }
+  verify_credentials() { printf valid; }
+  export TRACEBLOC_CLIENT_ADOPTED=1 TRACEBLOC_CLIENT_ID=uuid-abc
+  run install_client_helm <<< $'typed-id\ntyped-pw'   # must fall through to the prompt
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"no live tracebloc release"* ]]     # explained the fallback
+  mock_calls | grep -q "helm upgrade --install tracebloc"
+}
+
 @test "install_client_helm: TRACEBLOC_CLIENT_* with rejected creds -> errors, no helm" {
   HOST_DATA_DIR="$BATS_TEST_TMPDIR/data"; mkdir -p "$HOST_DATA_DIR"
   _ensure_tracebloc_dirs() { :; }

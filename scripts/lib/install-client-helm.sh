@@ -193,6 +193,84 @@ _chart_proxy_env_yaml() {
   return 0
 }
 
+# _resolve_chart_ref — resolve the chart reference (local dev path or remote repo)
+# and set `chart_ref` in the caller's scope (bash dynamic scope). Extracted so a
+# fresh install and an adopt reconcile resolve it identically. Logging is a side
+# effect only — never command-substitute this (that would capture the log lines).
+_resolve_chart_ref() {
+  if [[ -n "${TRACEBLOC_CHART_PATH:-}" ]]; then
+    [[ -d "$TRACEBLOC_CHART_PATH" ]] || error "TRACEBLOC_CHART_PATH not found: $TRACEBLOC_CHART_PATH"
+    chart_ref="$TRACEBLOC_CHART_PATH"
+    info "Dev mode: using local chart at $chart_ref"
+    log "Using local chart: $chart_ref"
+  else
+    if ! helm repo list 2>/dev/null | grep -q "^${TRACEBLOC_HELM_REPO_NAME}[[:space:]]"; then
+      log "Adding Helm repo: $TRACEBLOC_HELM_REPO_URL"
+      helm repo add "$TRACEBLOC_HELM_REPO_NAME" "$TRACEBLOC_HELM_REPO_URL" >> "${LOG_FILE:-/dev/null}" 2>&1
+    fi
+    log "Updating Helm repos..."
+    helm repo update >> "${LOG_FILE:-/dev/null}" 2>&1
+    chart_ref="$TRACEBLOC_HELM_REPO_NAME/$TRACEBLOC_CHART_NAME"
+  fi
+}
+
+# _reconcile_adopted_client — RFC-0001 §7.2 adopt path. provision_client (Step 3)
+# sets TRACEBLOC_CLIENT_ADOPTED=1 when `tracebloc client create` matched this cluster
+# to an EXISTING client on the account (get-or-create keyed on the cluster). Adopt
+# issues no new password — the existing one stands (write-only on the backend) — so
+# there is nothing to prompt for or verify. Reconcile the live release in place,
+# reusing its stored credential, and heal the stored clientId to the adopted UUID:
+# installs from the cli#125 window stored the numeric dashboard id, which can't
+# authenticate. Returns 0 on a successful reconcile; non-zero (caller falls back to
+# the normal connect flow) when no live tracebloc release is found to reconcile.
+_reconcile_adopted_client() {
+  local _uuid; _uuid="$(_sanitize_credential "${TRACEBLOC_CLIENT_ID:-}")"
+  [[ -n "$_uuid" ]] || { warn "Adopted client id is empty — continuing with a normal connect."; return 1; }
+
+  # Find the live client release (name + namespace) the same jq-free way the
+  # one-per-machine guard enumerates it. One client per machine, so take the first.
+  local _rel="" _ns="" _r _n
+  while read -r _r _n; do
+    [[ -n "$_r" ]] && { _rel="$_r"; _ns="$_n"; break; }
+  done < <(helm list -A 2>/dev/null | awk '/[[:space:]]client-[0-9]/ { print $1, $2 }')
+  if [[ -z "$_rel" ]]; then
+    warn "This client is already registered, but no live tracebloc release was found here to reconcile — continuing with a normal connect."
+    return 1
+  fi
+
+  TB_NAMESPACE="$_ns"
+  info "This machine already runs a tracebloc client — reconciling '${_rel}' (namespace '${_ns}') in place; keeping its existing credential."
+
+  _ensure_helm_runnable
+  local chart_ref=""
+  _resolve_chart_ref
+
+  # Prefer --reset-then-reuse-values (Helm >= 3.14): reset to chart defaults, re-apply
+  # the release's stored user values (clientPassword + install-time config), then heal
+  # clientId via --set. Fall back to --reuse-values on older Helm. Either way the stored
+  # password is preserved (never re-typed) and clientId becomes the real auth username.
+  local _reuse="--reuse-values"
+  helm upgrade --help 2>/dev/null | grep -q -- '--reset-then-reuse-values' && _reuse="--reset-then-reuse-values"
+
+  _ensure_release_dirs "$_ns"
+
+  local _hl; _hl="$(mktemp)"
+  if ! helm upgrade "$_rel" "$chart_ref" \
+      --namespace "$_ns" \
+      "$_reuse" \
+      --set clientId="$_uuid" > "$_hl" 2>&1; then
+    cat "$_hl" >> "${LOG_FILE:-/dev/null}" 2>/dev/null
+    cat "$_hl" >&2
+    rm -f "$_hl"
+    error "Reconcile of the existing client failed. Check the log for details: ${LOG_FILE:-}"
+  fi
+  cat "$_hl" >> "${LOG_FILE:-/dev/null}" 2>/dev/null
+  rm -f "$_hl"
+
+  kubectl config set-context --current --namespace "$_ns" >/dev/null 2>&1 || true
+  return 0
+}
+
 install_client_helm() {
   # ── Step 4/5: Install tracebloc client (credential + namespace provisioned
   #    in Step 3 by provision_client, or supplied via dual-mode) ─────────────
@@ -225,7 +303,7 @@ install_client_helm() {
     _noninteractive_creds=1
   fi
 
-  if [[ "$_noninteractive_creds" == 0 && -f "$values_file" ]]; then
+  if [[ "$_noninteractive_creds" == 0 && -f "$values_file" && "${TRACEBLOC_CLIENT_ADOPTED:-}" != 1 ]]; then
     hint "Previous configuration found."
     while true; do
       read -r -p "  Use previous settings as defaults? [Y/n]: " use_existing
@@ -250,6 +328,17 @@ install_client_helm() {
 
   # ── Step 5/5: Connect to tracebloc network ──────────────────────────────
   step 5 5 "Connect to tracebloc network"
+
+  # RFC-0001 §7.2 — a re-run on an already-connected client must reconcile in place,
+  # not re-provision. Step 3 marks that case with TRACEBLOC_CLIENT_ADOPTED=1 (+ the
+  # UUID, no password). Honor it: reconcile the live release silently — no credential
+  # prompt, no verify, no duplicate. Only if there's no live release to reconcile do
+  # we fall through to the normal connect flow below.
+  if [[ "${TRACEBLOC_CLIENT_ADOPTED:-}" == 1 ]] && _reconcile_adopted_client; then
+    success "Connected to tracebloc"
+    log "Reconciled adopted client in namespace '$TB_NAMESPACE'"
+    return 0
+  fi
 
   if [[ "$_noninteractive_creds" == 1 ]]; then
     # Credentials supplied via env — verify once, no prompt, no re-prompt.
@@ -452,21 +541,8 @@ EOF
   _ensure_helm_runnable
 
   # ── Resolve chart reference: local path (dev) or remote repo (default) ──
-  local chart_ref
-  if [[ -n "${TRACEBLOC_CHART_PATH:-}" ]]; then
-    [[ -d "$TRACEBLOC_CHART_PATH" ]] || error "TRACEBLOC_CHART_PATH not found: $TRACEBLOC_CHART_PATH"
-    chart_ref="$TRACEBLOC_CHART_PATH"
-    info "Dev mode: using local chart at $chart_ref"
-    log "Using local chart: $chart_ref"
-  else
-    if ! helm repo list 2>/dev/null | grep -q "^${TRACEBLOC_HELM_REPO_NAME}[[:space:]]"; then
-      log "Adding Helm repo: $TRACEBLOC_HELM_REPO_URL"
-      helm repo add "$TRACEBLOC_HELM_REPO_NAME" "$TRACEBLOC_HELM_REPO_URL" >> "${LOG_FILE:-/dev/null}" 2>&1
-    fi
-    log "Updating Helm repos..."
-    helm repo update >> "${LOG_FILE:-/dev/null}" 2>&1
-    chart_ref="$TRACEBLOC_HELM_REPO_NAME/$TRACEBLOC_CHART_NAME"
-  fi
+  local chart_ref=""
+  _resolve_chart_ref
 
   echo ""
   log "Installing $TB_NAMESPACE from $chart_ref in namespace '$TB_NAMESPACE'..."
