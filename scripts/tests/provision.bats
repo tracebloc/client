@@ -101,7 +101,8 @@ _stub_tracebloc() {
   provision_client
   [ "$TB_NAMESPACE" = "ex-ns" ]
   [ -z "${TRACEBLOC_CLIENT_PASSWORD:-}" ]   # no fresh credential on adopt
-  [ -z "${TRACEBLOC_CLIENT_ID:-}" ]         # partial creds cleared → Helm uses values.yaml
+  [ "$TRACEBLOC_CLIENT_ID" = "8" ]          # adopted id kept → Step 5 heals the release's clientId to it
+  [ "$TRACEBLOC_CLIENT_ADOPTED" = "1" ]     # marker kept → Step 5 takes the reconcile branch
 }
 
 @test "provision_client: missing CLI after install is fatal" {

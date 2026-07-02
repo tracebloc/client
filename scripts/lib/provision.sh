@@ -131,13 +131,16 @@ provision_client() {
 
   if [[ "${TRACEBLOC_CLIENT_ADOPTED:-}" == "1" ]]; then
     # Re-run on an already-registered cluster: no fresh credential was minted (the
-    # existing one stands, write-only on the backend). Drop the partial creds and
-    # let install_client_helm reconcile the existing release from the local
-    # values.yaml (helm upgrade). A rebuilt host with no local values falls through
-    # to its existing credential prompt/error — the R7 orphan-resume is a follow-up.
+    # existing one stands, write-only on the backend). Hand the adopted client id
+    # (its UUID username) + namespace + the ADOPTED marker to install_client_helm,
+    # which reconciles the existing release in place and heals a stale clientId to
+    # this UUID — cli#125-era installs stored the numeric dashboard id, which can't
+    # authenticate. Drop only the (absent) password: with no password, the partial
+    # creds never reach the non-interactive install path, so the ADOPTED branch owns
+    # this case. A rebuilt host with no local release still reconciles by discovery.
     info "This cluster is already registered (client ${TRACEBLOC_CLIENT_ID:-?}) — reconciling the existing install."
-    unset TRACEBLOC_CLIENT_ID TRACEBLOC_CLIENT_PASSWORD
-    export TB_NAMESPACE
+    unset TRACEBLOC_CLIENT_PASSWORD
+    export TRACEBLOC_CLIENT_ID TB_NAMESPACE TRACEBLOC_CLIENT_ADOPTED
     return 0
   fi
 
