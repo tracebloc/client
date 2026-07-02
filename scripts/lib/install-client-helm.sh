@@ -224,11 +224,11 @@ _resolve_chart_ref() {
 # authenticate. Returns 0 on a successful reconcile; non-zero (caller falls back to
 # the normal connect flow) when no live tracebloc release is found to reconcile.
 _reconcile_adopted_client() {
-  local _uuid; _uuid="$(_sanitize_credential "${TRACEBLOC_CLIENT_ID:-}")"
-  [[ -n "$_uuid" ]] || { warn "Adopted client id is empty — continuing with a normal connect."; return 1; }
-
-  # Find the live client release (name + namespace) the same jq-free way the
-  # one-per-machine guard enumerates it. One client per machine, so take the first.
+  # provision_client (Step 3) cleared TRACEBLOC_CLIENT_ID on adopt (no fresh
+  # credential is issued — the existing one stands, write-only on the backend), so
+  # the live release's STORED values are the source of truth. Find it and reconcile
+  # in place, reusing them. Enumerate the client release the same jq-free way the
+  # one-per-machine guard does. One client per machine, so take the first.
   local _rel="" _ns="" _r _n
   while read -r _r _n; do
     [[ -n "$_r" ]] && { _rel="$_r"; _ns="$_n"; break; }
@@ -239,16 +239,17 @@ _reconcile_adopted_client() {
   fi
 
   TB_NAMESPACE="$_ns"
-  info "This machine already runs a tracebloc client — reconciling '${_rel}' (namespace '${_ns}') in place; keeping its existing credential."
+  info "This machine already runs a tracebloc client — reconciling '${_rel}' (namespace '${_ns}') in place, reusing its stored credential."
 
   _ensure_helm_runnable
   local chart_ref=""
   _resolve_chart_ref
 
-  # Prefer --reset-then-reuse-values (Helm >= 3.14): reset to chart defaults, re-apply
-  # the release's stored user values (clientPassword + install-time config), then heal
-  # clientId via --set. Fall back to --reuse-values on older Helm. Either way the stored
-  # password is preserved (never re-typed) and clientId becomes the real auth username.
+  # Reconcile in place, reusing the release's stored values (clientId/clientPassword
+  # + install-time config) — adopt issues no fresh credential, so the existing one
+  # stands. Prefer --reset-then-reuse-values (Helm >= 3.14: reset to chart defaults,
+  # then re-apply the stored user values, picking up new chart defaults); fall back
+  # to --reuse-values on older Helm.
   local _reuse="--reuse-values"
   helm upgrade --help 2>/dev/null | grep -q -- '--reset-then-reuse-values' && _reuse="--reset-then-reuse-values"
 
@@ -257,8 +258,7 @@ _reconcile_adopted_client() {
   local _hl; _hl="$(mktemp)"
   if ! helm upgrade "$_rel" "$chart_ref" \
       --namespace "$_ns" \
-      "$_reuse" \
-      --set clientId="$_uuid" > "$_hl" 2>&1; then
+      "$_reuse" > "$_hl" 2>&1; then
     cat "$_hl" >> "${LOG_FILE:-/dev/null}" 2>/dev/null
     cat "$_hl" >&2
     rm -f "$_hl"

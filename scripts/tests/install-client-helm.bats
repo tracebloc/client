@@ -190,7 +190,7 @@ setup() {
   mock_calls | grep -q "helm upgrade --install tracebloc"
 }
 
-@test "install_client_helm: adopted client (TRACEBLOC_CLIENT_ADOPTED=1) reconciles the live release in place — no prompt, no verify, heals clientId to the UUID" {
+@test "install_client_helm: adopted client (TRACEBLOC_CLIENT_ADOPTED=1, no TRACEBLOC_CLIENT_ID) reconciles the live release in place — no prompt, no verify" {
   HOST_DATA_DIR="$BATS_TEST_TMPDIR/data"; mkdir -p "$HOST_DATA_DIR"
   _ensure_tracebloc_dirs() { :; }
   _ensure_release_dirs() { :; }
@@ -205,7 +205,9 @@ setup() {
   }
   # verify_credentials must NOT be called on adopt (the existing credential stands).
   verify_credentials() { echo "VERIFY_CALLED"; printf invalid; }
-  export TRACEBLOC_CLIENT_ADOPTED=1 TRACEBLOC_CLIENT_ID=0e9db54e-c9c0-4bf3-9ff2-1646da307019
+  # Real adopt: provision_client cleared TRACEBLOC_CLIENT_ID and left only the marker
+  # (+ TB_NAMESPACE). Reconcile must work off the LIVE release, not the (absent) id.
+  export TRACEBLOC_CLIENT_ADOPTED=1
   run install_client_helm </dev/null              # no stdin: must not prompt
   [ "$status" -eq 0 ]
   [[ "$output" != *"Client ID:"* ]]                # no credential prompt
@@ -213,12 +215,12 @@ setup() {
   [[ "$output" == *"reconciling"* ]]
   [[ "$output" == *"Connected to tracebloc"* ]]
   # Reconciled the LIVE release in place (name 'munich'), reusing its stored values
-  # and healing clientId to the adopted UUID — NOT a fresh --install, no duplicate.
+  # (--reset-then-reuse-values) — NOT a fresh --install, no duplicate, no --set clientId.
   mock_calls | grep -q "helm upgrade munich"
   mock_calls | grep -q -- "--reset-then-reuse-values"
-  mock_calls | grep -q -- "--set clientId=0e9db54e-c9c0-4bf3-9ff2-1646da307019"
   run mock_calls
   [[ "$output" != *"helm upgrade --install"* ]]
+  [[ "$output" != *"--set clientId"* ]]
 }
 
 @test "install_client_helm: adopt on older Helm (no --reset-then-reuse-values) falls back to --reuse-values" {
@@ -233,7 +235,7 @@ setup() {
     record "helm $*"; return 0
   }
   verify_credentials() { echo "VERIFY_CALLED"; printf invalid; }
-  export TRACEBLOC_CLIENT_ADOPTED=1 TRACEBLOC_CLIENT_ID=uuid-abc
+  export TRACEBLOC_CLIENT_ADOPTED=1
   run install_client_helm </dev/null
   [ "$status" -eq 0 ]
   mock_calls | grep -q -- "--reuse-values"
@@ -252,7 +254,7 @@ setup() {
     record "helm $*"; return 0
   }
   verify_credentials() { printf valid; }
-  export TRACEBLOC_CLIENT_ADOPTED=1 TRACEBLOC_CLIENT_ID=uuid-abc
+  export TRACEBLOC_CLIENT_ADOPTED=1
   run install_client_helm <<< $'typed-id\ntyped-pw'   # must fall through to the prompt
   [ "$status" -eq 0 ]
   [[ "$output" == *"no live tracebloc release"* ]]     # explained the fallback
