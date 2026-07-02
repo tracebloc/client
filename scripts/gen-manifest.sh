@@ -44,6 +44,20 @@ FILES=(
   "scripts/lib/diagnose.sh"
 )
 
+# The Windows bootstrap (scripts/install.ps1) is a separate entrypoint with its
+# own integrity surface: a single self-contained sub-script. It verifies against
+# the SAME signed manifest, so its file(s) must be hashed here too. Kept in
+# lockstep with the $Files array in scripts/install.ps1 (checked below).
+WINDOWS_FILES=(
+  "scripts/install-k8s.ps1"
+)
+
+# The full set the manifest covers = both bootstraps' surfaces. install.sh only
+# looks up its own bash entries and install.ps1 only its .ps1 entry, so the extra
+# cross-platform lines are harmless to each; a single manifest lets one cosign
+# signature anchor both entrypoints.
+ALL_FILES=("${FILES[@]}" "${WINDOWS_FILES[@]}")
+
 MANIFEST="scripts/manifest.sha256"
 
 _sha256_of() {
@@ -73,10 +87,27 @@ _check_bootstrap_in_sync() {
   fi
 }
 
+# Same cross-check for the Windows bootstrap: scripts/install.ps1's $Files array
+# must match WINDOWS_FILES exactly, or the manifest would miss a digest for a
+# script install.ps1 runs as Administrator (or carry a stale one). Extract the
+# array (lines between `$Files = @(` and `)`) and diff.
+_check_windows_bootstrap_in_sync() {
+  local boot
+  boot="$(awk '/^\$Files = @\($/{f=1;next} /^\)$/{f=0} f' scripts/install.ps1 \
+            | sed -nE 's/^[[:space:]]*"([^"]+)".*/\1/p')"
+  local here
+  here="$(printf '%s\n' "${WINDOWS_FILES[@]}")"
+  if [[ "$boot" != "$here" ]]; then
+    echo "[ERROR] scripts/install.ps1 \$Files array and gen-manifest.sh WINDOWS_FILES differ:" >&2
+    diff <(printf '%s\n' "$here") <(printf '%s\n' "$boot") >&2 || true
+    exit 1
+  fi
+}
+
 generate() {
   local f
   {
-    for f in "${FILES[@]}"; do
+    for f in "${ALL_FILES[@]}"; do
       [[ -f "$f" ]] || { echo "[ERROR] missing file: $f" >&2; exit 1; }
       printf '%s  %s\n' "$(_sha256_of "$f")" "$f"
     done
@@ -85,11 +116,12 @@ generate() {
 }
 
 _check_bootstrap_in_sync
+_check_windows_bootstrap_in_sync
 
 if [[ "${1:-}" == "--check" ]]; then
   generate_to="$(mktemp)"
   trap 'rm -f "$generate_to"' EXIT
-  for f in "${FILES[@]}"; do
+  for f in "${ALL_FILES[@]}"; do
     [[ -f "$f" ]] || { echo "[ERROR] missing file: $f" >&2; exit 1; }
     printf '%s  %s\n' "$(_sha256_of "$f")" "$f"
   done > "$generate_to"

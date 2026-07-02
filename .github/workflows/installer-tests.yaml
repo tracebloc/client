@@ -84,7 +84,12 @@ jobs:
         run: |
           Set-PSRepository PSGallery -InstallationPolicy Trusted
           Install-Module PSScriptAnalyzer -Force -SkipPublisherCheck -Scope CurrentUser
-          $issues = Invoke-ScriptAnalyzer -Path scripts/install-k8s.ps1 -Severity Error,Warning
+          # Both PowerShell entrypoints: the bootstrap (install.ps1, R8 trust root)
+          # and the main installer (install-k8s.ps1).
+          $issues = @()
+          foreach ($p in 'scripts/install.ps1', 'scripts/install-k8s.ps1') {
+            $issues += Invoke-ScriptAnalyzer -Path $p -Severity Error,Warning
+          }
           if ($issues) { $issues | Format-Table -AutoSize }
           $errs = @($issues | Where-Object { $_.Severity -eq 'Error' })
           if ($errs.Count -gt 0) { Write-Error "PSScriptAnalyzer: $($errs.Count) error(s)"; exit 1 }
@@ -122,7 +127,9 @@ jobs:
           Install-Module Pester -MinimumVersion 5.5.0 -Force -SkipPublisherCheck -Scope CurrentUser
           Import-Module Pester -MinimumVersion 5.5.0 -Force
           $cfg = New-PesterConfiguration
-          $cfg.Run.Path = "scripts/tests/install-k8s.Tests.ps1"
+          # The whole tests dir — picks up install-k8s.Tests.ps1 AND install.Tests.ps1
+          # (the R8 bootstrap) without needing a per-file edit as suites are added.
+          $cfg.Run.Path = "scripts/tests"
           $cfg.Run.Exit = $true
           $cfg.Output.Verbosity = "Detailed"
           Invoke-Pester -Configuration $cfg

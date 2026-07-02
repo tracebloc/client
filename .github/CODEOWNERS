@@ -6,14 +6,17 @@
 /client/values.yaml                                     @saadqbal
 /docs/SECURITY.md                                       @saadqbal
 
-# ── R8 signed-installer trust root (RFC-0001 / tracebloc/backend#889, client#282) ──
-# tracebloc.io/i.sh runs the latest signed release's install.sh, which cosign-verifies
-# every sub-script against a signed manifest. The keyless signer identity IS the release
-# workflow — so a change to the workflow, the installer, its sub-scripts, or the manifest
-# generator changes *what gets trusted*, and must be code-owner reviewed.
+# ── R8 signed-installer trust root (RFC-0001 / tracebloc/backend#889, client#282/#283) ──
+# The signed-install bootstraps — install.sh (curl|bash) and install.ps1 (irm|iex) —
+# run the latest signed release's sub-scripts only after cosign-verifying them against
+# a signed manifest. The keyless signer identity IS the release workflow — so a change
+# to the workflow, either installer, their sub-scripts, or the manifest generator
+# changes *what gets trusted*, and must be code-owner reviewed.
 /.github/workflows/release-helm-chart.yaml              @saadqbal
 /scripts/install.sh                                     @saadqbal
+/scripts/install.ps1                                    @saadqbal
 /scripts/install-k8s.sh                                 @saadqbal
+/scripts/install-k8s.ps1                                @saadqbal
 /scripts/gen-manifest.sh                                @saadqbal
 /scripts/manifest.sha256                                @saadqbal
 /scripts/lib/                                           @saadqbal
