@@ -238,10 +238,15 @@ jobs:
           # shipped in v0.3.1+).
           TRACEBLOC_CLI_REF: ${{ vars.TRACEBLOC_CLI_REF }}
         run: |
+          # Minimal base images (Alpine) ship only busybox `sh` — no bash — so we
+          # can't exec the bash script directly as the entrypoint (the container
+          # dies at init before line 1). Bootstrap bash via a POSIX `sh -c` wrapper:
+          # `command -v bash` short-circuits on every glibc distro (they already
+          # have it), and the apk branch only fires on Alpine. Then exec the script.
           docker run --rm \
             -e TRACEBLOC_CLI_REF \
             -v "$PWD:/src:ro" -w /src "$DISTRO" \
-            bash scripts/tests/path-persist.sh
+            sh -c 'command -v bash >/dev/null 2>&1 || apk add --no-cache bash >/dev/null 2>&1; exec bash scripts/tests/path-persist.sh'
 
   e2e-journey:
     # Leg 2 — the full last-mile journey on a real cluster: create_cluster() →
