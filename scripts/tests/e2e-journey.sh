@@ -132,10 +132,10 @@ echo "── Step 2: install the tracebloc CLI via cli/install.sh ────�
 # that matters on the journey, so a CLI that installs but isn't reachable from a
 # new terminal fails the END-TO-END path too — not just the cheap matrix.
 if [[ -z "$CLI_REF" ]]; then
-  # Default to the same branch installer path-persist.sh uses while cli#61 is
-  # unreleased. TODO(cli#61): switch to releases/latest/download/install.sh once
-  # the PATH-persist fix ships in a public release.
-  CLI_REF="https://raw.githubusercontent.com/tracebloc/cli/fix/install-path-persist/scripts/install.sh"
+  # Default to the public release installer, same as path-persist.sh. cli#61's
+  # PATH-persist fix shipped in cli v0.3.1 and is in every release since, so
+  # `releases/latest` exercises the fixed installer on the real journey.
+  CLI_REF="https://github.com/tracebloc/cli/releases/latest/download/install.sh"
 fi
 echo "  cli ref: ${CLI_REF}"
 

@@ -53,15 +53,14 @@ source "$LIB/common.sh"   # colours, has(), info/success/warn/error helpers
 umask 022
 
 # ── Where to get cli/install.sh ──────────────────────────────────────────────
-# TODO(cli#61): switch the default to the public release installer once the
-# PATH-persist fix has actually SHIPPED in a release:
-#     https://github.com/tracebloc/cli/releases/latest/download/install.sh
-# Until then the fix lives only on the cli `fix/install-path-persist` branch, so
-# we default to that branch's raw install.sh — otherwise this guard would test
-# the OLD (pre-fix) installer from the latest release and report a false RED for
-# a bug that's already fixed on the branch. The cli-side caller overrides this
-# with a local path to the PR's own install.sh (see cli install-path-persist.yml).
-DEFAULT_CLI_REF="https://raw.githubusercontent.com/tracebloc/cli/fix/install-path-persist/scripts/install.sh"
+# Default to the public release installer. cli#61's PATH-persist fix shipped in
+# cli v0.3.1 and is in every release since (verified: the served install.sh
+# persists PREFIX to ~/.bashrc / ~/.zshrc / fish config), so `releases/latest`
+# now exercises the FIXED installer — this guard stays green on a good release
+# and would go red if a future release regressed the PATH class. A cli-side
+# caller overrides TRACEBLOC_CLI_REF with a local path to a PR's own install.sh
+# for pre-merge cross-repo coverage (see cli install-path-persist.yml).
+DEFAULT_CLI_REF="https://github.com/tracebloc/cli/releases/latest/download/install.sh"
 CLI_REF="${TRACEBLOC_CLI_REF:-$DEFAULT_CLI_REF}"
 CLI_VERSION="${TRACEBLOC_CLI_VERSION:-}"
 

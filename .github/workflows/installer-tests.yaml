@@ -234,7 +234,8 @@ jobs:
           DISTRO: ${{ matrix.distro }}
           # Override TRACEBLOC_CLI_REF here to point at a specific cli install.sh
           # (URL or, for the cross-repo cli-side caller, a local path). Default
-          # lives in the script while cli#61's PATH fix is unreleased.
+          # in the script is the public release installer (cli#61's PATH fix
+          # shipped in v0.3.1+).
           TRACEBLOC_CLI_REF: ${{ vars.TRACEBLOC_CLI_REF }}
         run: |
           docker run --rm \
