@@ -20,6 +20,10 @@ setup() {
   # error() is the real common.sh one (prints + exit 1) — fatal tests assert status.
   has() { return 0; }                 # default: CLI present after install
   install_tracebloc_cli() { :; }      # stubbed — covered by install-cli.bats
+  # The #303 pre-flight probes local Helm via detect_installed_client (defined in
+  # install-client-helm.sh, which this suite doesn't source). Default it to
+  # "nothing installed here" so the pre-flight is skipped; the #303 tests override.
+  detect_installed_client() { INSTALLED_CLIENT_ID=""; INSTALLED_CLIENT_NS=""; }
   LOG_FILE="$(mktemp)"
   HOST_DATA_DIR="$(mktemp -d)"
   unset TRACEBLOC_VALUES_FILE TRACEBLOC_CLIENT_ID TRACEBLOC_CLIENT_PASSWORD \
@@ -154,6 +158,65 @@ _stub_tracebloc() {
   run cat "$CREATE_ARGS_FILE"
   [[ "$output" == *"--name lab box 3"* ]]
   [[ "$output" == *"--location DE"* ]]
+}
+
+@test "provision_client: refuses BEFORE minting when a foreign client already runs here (#303)" {
+  # A client is installed locally under a namespace the signed-in account does NOT
+  # own — the orphan scenario. provision_client must refuse before `client create`.
+  detect_installed_client() { INSTALLED_CLIENT_ID="uuid-x"; INSTALLED_CLIENT_NS="tracebloc-amazon"; }
+  tracebloc() {
+    [[ "$*" == *--help ]] && return 0                    # capability probe
+    [ "$1" = "login" ] && return 0
+    if [ "$1" = "client" ] && [ "$2" = "list" ]; then
+      echo "box   state=online   namespace=some-other-ns   location=DE"   # NOT tracebloc-amazon
+      return 0
+    fi
+    # any `client create` records its argv so we can assert it never ran
+    local f="" prev=""; for a in "$@"; do [ "$prev" = "--credential-file" ] && f="$a"; prev="$a"; done
+    [ -n "$f" ] && printf '%s\n' "$*" >>"${CREATE_ARGS_FILE}"
+    return 0
+  }
+  run provision_client
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"isn't in the account you just signed in as"* ]]
+  [[ "$output" == *"Refusing to provision a second client"* ]]
+  [ ! -s "$CREATE_ARGS_FILE" ]          # create was never called — no orphan minted
+}
+
+@test "provision_client: same-account re-run with a local client still provisions (adopt path intact) (#303)" {
+  # The account owns the local client's namespace → create proceeds and adopts.
+  detect_installed_client() { INSTALLED_CLIENT_ID="uuid-x"; INSTALLED_CLIENT_NS="my-ns"; }
+  tracebloc() {
+    [[ "$*" == *--help ]] && return 0
+    [ "$1" = "login" ] && return 0
+    if [ "$1" = "client" ] && [ "$2" = "list" ]; then
+      echo "box   state=online   namespace=my-ns   location=DE"      # owned
+      return 0
+    fi
+    local f="" prev=""; for a in "$@"; do [ "$prev" = "--credential-file" ] && f="$a"; prev="$a"; done
+    [ -n "$f" ] && printf '%b' 'TRACEBLOC_CLIENT_ID=8\nTB_NAMESPACE=my-ns\nTRACEBLOC_CLIENT_ADOPTED=1\n' > "$f"
+    return 0
+  }
+  provision_client
+  [ "$TB_NAMESPACE" = "my-ns" ]
+  [ "$TRACEBLOC_CLIENT_ADOPTED" = "1" ]     # adopt path reached, not refused
+}
+
+@test "provision_client: an unreadable client list falls through to create, not a refusal (#303)" {
+  # Ownership inconclusive (list read fails) must NOT block — degrade to create's
+  # own idempotent adopt/conflict handling, no worse than before the pre-flight.
+  detect_installed_client() { INSTALLED_CLIENT_ID="uuid-x"; INSTALLED_CLIENT_NS="tracebloc-amazon"; }
+  tracebloc() {
+    [[ "$*" == *--help ]] && return 0
+    [ "$1" = "login" ] && return 0
+    if [ "$1" = "client" ] && [ "$2" = "list" ]; then return 5; fi     # list read fails
+    local f="" prev=""; for a in "$@"; do [ "$prev" = "--credential-file" ] && f="$a"; prev="$a"; done
+    [ -n "$f" ] && printf '%b' 'TRACEBLOC_CLIENT_ID=9\nTRACEBLOC_CLIENT_PASSWORD=pw\nTB_NAMESPACE=fresh-ns\n' > "$f"
+    return 0
+  }
+  provision_client
+  [ "$TRACEBLOC_CLIENT_ID" = "9" ]          # create ran despite the inconclusive list
+  [ "$TB_NAMESPACE" = "fresh-ns" ]
 }
 
 @test "provision_client: no name and no TTY to prompt is fatal (can't provision blind)" {

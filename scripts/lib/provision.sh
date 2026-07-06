@@ -42,6 +42,21 @@ _cli_supports_provisioning() {
 # out as a function so tests can force the non-interactive path deterministically.
 _prompt_tty() { [[ -r /dev/tty && -w /dev/tty ]]; }
 
+# _account_owns_namespace NS — does the signed-in account's client list include a
+# client whose namespace is NS? `client list` prints "…namespace=<ns>   location=…";
+# match that field exactly. Namespace is the only stable join key between a local
+# Helm release (which stores the UUID clientId + namespace) and the list (which
+# shows the numeric dashboard id + namespace) — the two don't share an id.
+# Returns: 0 = owned, 1 = list read OK but NS absent, 2 = couldn't read the list.
+# Split out so the pre-flight can distinguish "not yours" (refuse) from
+# "couldn't tell" (fall through to `client create`'s own idempotent logic).
+_account_owns_namespace() {
+  local ns="$1" out
+  [[ -n "$ns" ]] || return 1
+  out="$(tracebloc client list --plain 2>/dev/null)" || return 2
+  grep -Eq "namespace=${ns}([[:space:]]|$)" <<<"$out"
+}
+
 provision_client() {
   step 3 5 "Sign in and provision this client"
 
@@ -78,6 +93,41 @@ provision_client() {
   # dual-mode credential path above.
   info "Sign in to tracebloc — approve this machine in your browser when prompted…"
   tracebloc login || error "Sign-in didn't complete — re-run the installer to try again."
+
+  # ── One-client-per-machine pre-flight (#303) ─────────────────────────────
+  # `client create` below mints a fresh client whenever the backend can't match
+  # THIS cluster to a client in the signed-in account — e.g. a pre-anchor client
+  # whose cluster_id is still null, or one owned by a DIFFERENT account. If a
+  # client is already installed here and the signed-in account doesn't own it,
+  # that mint registers a brand-new client that never installs (the Helm-step
+  # guard then refuses) — an orphan left on the dashboard. Catch it BEFORE minting.
+  #
+  # Only fires when a local release exists AND we can positively confirm the
+  # account does NOT own it. A fresh machine (no release), an account that DOES
+  # own the local client (create cleanly adopts), or an inconclusive list read all
+  # fall through to `client create`'s own idempotent adopt/conflict handling — so
+  # this never regresses the same-account re-run/upgrade path. Guarded on the
+  # shared probe being present (a stale bootstrap may not have sourced it).
+  if declare -F detect_installed_client >/dev/null 2>&1; then
+    detect_installed_client
+    if [[ -n "$INSTALLED_CLIENT_NS" ]]; then
+      local _own_rc=0
+      _account_owns_namespace "$INSTALLED_CLIENT_NS" || _own_rc=$?
+      if [[ "$_own_rc" -eq 1 ]]; then
+        echo ""
+        warn "This machine already runs a tracebloc client (namespace '${INSTALLED_CLIENT_NS}') that isn't in the account you just signed in as."
+        hint "tracebloc runs one client per machine. Provisioning now would register a"
+        hint "second client and strand it (it could never install here). Pick one:"
+        hint "  • Repair / update it     →  sign in as the account that owns it, or re-run with that client's credentials"
+        hint "  • Switch to this account →  remove the current client first:"
+        hint "        k3d cluster delete ${CLUSTER_NAME:-tracebloc}   (wipes this client + its local data)"
+        hint "      then re-run this installer"
+        hint "  • Run both               →  install on a separate machine"
+        echo ""
+        error "Refusing to provision a second client on this machine. See the options above."
+      fi
+    fi
+  fi
 
   # Mint the client + derive the namespace. --credential-file writes the secret to
   # a 0600 file (never printed); we source it, hand it to Helm, then delete it (the
