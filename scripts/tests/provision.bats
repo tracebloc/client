@@ -219,6 +219,27 @@ _stub_tracebloc() {
   [ "$TB_NAMESPACE" = "fresh-ns" ]
 }
 
+@test "provision_client: legacy 'tracebloc' namespace absent from the account is NOT refused — defers to create + guard (#306 Bugbot)" {
+  # A same-account client installed under the legacy fixed `tracebloc` namespace is
+  # listed on the dashboard by its minted slug, so `client list` won't show
+  # `tracebloc`. The old namespace-only check wrongly refused this (blocking a valid
+  # re-run install_client_helm reconciles by clientId). Must defer to create, not refuse.
+  detect_installed_client() { INSTALLED_CLIENT_ID="uuid-x"; INSTALLED_CLIENT_NS="tracebloc"; }
+  tracebloc() {
+    [[ "$*" == *--help ]] && return 0
+    [ "$1" = "login" ] && return 0
+    if [ "$1" = "client" ] && [ "$2" = "list" ]; then
+      echo "box   state=online   namespace=slug-ns   location=DE"   # listed by slug, not 'tracebloc'
+      return 0
+    fi
+    local f="" prev=""; for a in "$@"; do [ "$prev" = "--credential-file" ] && f="$a"; prev="$a"; done
+    [ -n "$f" ] && printf '%b' 'TRACEBLOC_CLIENT_ID=9\nTRACEBLOC_CLIENT_PASSWORD=pw\nTB_NAMESPACE=slug-ns\n' > "$f"
+    return 0
+  }
+  provision_client                          # must NOT refuse (a direct call fails the test if error exits)
+  [ "$TRACEBLOC_CLIENT_ID" = "9" ]           # deferred to create, which ran
+}
+
 @test "provision_client: no name and no TTY to prompt is fatal (can't provision blind)" {
   unset TRACEBLOC_CLIENT_NAME
   _prompt_tty() { return 1; }   # non-interactive: no terminal to prompt on

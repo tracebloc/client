@@ -113,7 +113,16 @@ provision_client() {
     if [[ -n "$INSTALLED_CLIENT_NS" ]]; then
       local _own_rc=0
       _account_owns_namespace "$INSTALLED_CLIENT_NS" || _own_rc=$?
-      if [[ "$_own_rc" -eq 1 ]]; then
+      # rc 1 = list read OK but the installed client's namespace is absent from the
+      # account. That's only proof of a FOREIGN client for a slug namespace. A
+      # client installed under the legacy fixed `tracebloc` namespace is listed on
+      # the dashboard under its minted slug (§838), so `client list` won't show
+      # `tracebloc` even for the account's OWN older client — a skew
+      # install_client_helm reconciles by clientId, the reliable key `client list`
+      # doesn't expose here. So refuse only for a non-legacy namespace; for
+      # `tracebloc`, defer to `client create` (adopts if it's yours, 409s if truly
+      # cross-account) and the Helm-step one-client guard, which key on clientId.
+      if [[ "$_own_rc" -eq 1 && "$INSTALLED_CLIENT_NS" != "tracebloc" ]]; then
         echo ""
         warn "This machine already runs a tracebloc client (namespace '${INSTALLED_CLIENT_NS}') that isn't in the account you just signed in as."
         hint "tracebloc runs one client per machine. Provisioning now would register a"
@@ -125,6 +134,8 @@ provision_client() {
         hint "  • Run both               →  install on a separate machine"
         echo ""
         error "Refusing to provision a second client on this machine. See the options above."
+      elif [[ "$_own_rc" -eq 1 ]]; then
+        log "installed client is in the legacy 'tracebloc' namespace (not listed by its slug); deferring ownership to client create + the Helm one-client guard, which key on clientId"
       fi
     fi
   fi
