@@ -250,9 +250,6 @@ function Print-Banner {
   Write-Host "  " -NoNewline; Write-Host "tracebloc" -ForegroundColor Cyan -NoNewline; Write-Host " -- client setup"
   Write-Host "  " -NoNewline; Write-Host ([string]([char]0x2500) * 40) -ForegroundColor DarkGray
   Write-Host ""
-  Write-Host "  Test AI models from external vendors on your"
-  Write-Host "  infrastructure -- without exposing your data."
-  Write-Host ""
   Hint "This installer sets up a secure compute environment"
   Hint "on your machine and connects it to the tracebloc network."
   Write-Host ""
@@ -1107,7 +1104,7 @@ function Install-ClientHelm {
 
   PromptHeader "To connect this machine, you need a tracebloc client."
   Hint "A client links your secure environment to the tracebloc"
-  Hint "platform so vendors can submit models for evaluation."
+  Hint "platform so other collaborators can submit models for evaluation."
   Write-Host ""
   Hint "Create one here (free):"
   Write-Host "    " -NoNewline; Write-Host "https://ai.tracebloc.io/clients" -ForegroundColor White
@@ -1367,14 +1364,14 @@ function Print-Summary {
       Write-Host "  Your client is live. Confirm it shows as Online:"
       Write-Host "    https://ai.tracebloc.io/clients" -ForegroundColor Cyan
       Write-Host ""
-      Hint "Models that vendors submit train on this machine -- your data never leaves it."
+      Hint "Models other collaborators submit train on this machine -- your data never leaves it."
       Write-Host ""
       Hint "After a reboot, start Docker Desktop to bring your client back (enable 'Start Docker Desktop when you sign in' in Settings -> General to automate)."
       Write-Host ""
       Write-Host "  What to do next" -ForegroundColor White
       Write-Host "  1. Ingest your training and test data with the tracebloc CLI:"
       Write-Host "       tracebloc data ingest ./data" -ForegroundColor Cyan
-      Write-Host "  2. Define your first AI use case and invite vendors"
+      Write-Host "  2. Create your use case and invite other collaborators: https://ai.tracebloc.io/my-use-cases"
       Write-Host ""
       Hint "Dashboard: https://ai.tracebloc.io   Logs: ~\.tracebloc\   Data: /tracebloc/$ns"
       Write-Host ""

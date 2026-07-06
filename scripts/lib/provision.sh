@@ -78,8 +78,8 @@ _report_create_failure() {
   echo ""
   if grep -qiE 'location.*not a valid choice' "$out" 2>/dev/null; then
     warn "\"${loc:-that location}\" isn't a recognized carbon zone — the client wasn't created."
-    hint "Re-run and press Enter to accept the detected zone, leave it blank to skip, or"
-    hint "use a zone code like DE, FR, US, GB (all codes: https://api.electricitymap.org/v3/zones)."
+    hint "Re-run and press Enter to accept the detected zone, or use a zone code"
+    hint "like DE, FR, US, GB (all codes: https://api.electricitymap.org/v3/zones)."
     return 0
   fi
   errline="$(grep -aE 'Error:|HTTP [0-9][0-9][0-9]|refused|timed? ?out|unauthorized|forbidden|denied' "$out" 2>/dev/null | head -4)"
@@ -205,30 +205,45 @@ provision_client() {
   # /dev/tty (works under `curl | bash`, whose stdin isn't the terminal) > fail closed.
   local client_name="${TRACEBLOC_CLIENT_NAME:-}" client_location="${TRACEBLOC_CLIENT_LOCATION:-}"
   if [[ -z "$client_name" ]] && _prompt_tty; then
-    printf '\n  Name this machine (shown on your tracebloc dashboard): ' >/dev/tty
+    printf '\n  Name this client (shown on your tracebloc dashboard): ' >/dev/tty
     IFS= read -r client_name </dev/tty || true
     if [[ -z "$client_location" ]]; then
-      local _loc_detect _loc_zone _loc_tz
+      local _loc_detect _loc_zone _loc_tz _loc_try
       _loc_detect="$(_detect_location_zone)"
       _loc_zone="${_loc_detect%% *}"; _loc_tz="${_loc_detect#* }"
       if [[ -n "$_loc_zone" ]]; then
         printf '  Location for carbon reporting — detected %s (from your timezone %s).\n' "$_loc_zone" "$_loc_tz" >/dev/tty
-        printf '    Press Enter to use it, type another zone code, or type "skip": ' >/dev/tty
+        printf '    Press Enter to use it, or type another zone code: ' >/dev/tty
         IFS= read -r client_location </dev/tty || true
-        case "$client_location" in
-          "")                              client_location="$_loc_zone" ;;  # Enter accepts the detected zone
-          skip|Skip|SKIP|none|None|NONE|-) client_location="" ;;            # explicit skip → left unset (it's optional)
-        esac
+        [[ -n "$client_location" ]] || client_location="$_loc_zone"
       else
-        printf '  Location for carbon reporting [zone code, e.g. DE — or Enter to skip]: ' >/dev/tty
-        IFS= read -r client_location </dev/tty || true
+        # No detection on this machine. The released CLI still REQUIRES a zone
+        # (client create fails without --location when it can't prompt), so a
+        # blank answer here would doom the create — ask until non-empty.
+        # Optional-location ships with the next CLI release; then this prompt
+        # goes away entirely (spec: silent, no location).
+        for _loc_try in 1 2 3; do
+          printf '  Location zone for carbon reporting (e.g. DE): ' >/dev/tty
+          IFS= read -r client_location </dev/tty || true
+          [[ -n "$client_location" ]] && break
+        done
+        [[ -n "$client_location" ]] || error "A location zone is required to provision this client. Re-run and enter a zone code (e.g. DE), or set TRACEBLOC_CLIENT_LOCATION for unattended installs."
       fi
     fi
   fi
+  # No location yet (unattended env-name path, or a TTY-less run): fall back to
+  # the timezone-detected zone silently — the released CLI requires a zone, and
+  # this matches the target spec (silent auto-derive, never prompt). If detection
+  # also comes up empty, the create's own error is surfaced by
+  # _report_create_failure below rather than failing blind here.
+  if [[ -z "$client_location" ]]; then
+    client_location="$(_detect_location_zone)"; client_location="${client_location%% *}"
+  fi
+
   # Trim surrounding whitespace from the (possibly typed) values.
   client_name="${client_name#"${client_name%%[![:space:]]*}"}"; client_name="${client_name%"${client_name##*[![:space:]]}"}"
   client_location="${client_location#"${client_location%%[![:space:]]*}"}"; client_location="${client_location%"${client_location##*[![:space:]]}"}"
-  [[ -n "$client_name" ]] || error "A name for this machine is required to provision it. Re-run in a terminal to be prompted, or set TRACEBLOC_CLIENT_NAME (and optionally TRACEBLOC_CLIENT_LOCATION) for an unattended install."
+  [[ -n "$client_name" ]] || error "A name for this client is required to provision it. Re-run in a terminal to be prompted, or set TRACEBLOC_CLIENT_NAME (and optionally TRACEBLOC_CLIENT_LOCATION) for an unattended install."
   # --name is required; pass --location only when we have one (the CLI defaults it
   # otherwise). Build as an array so values with spaces survive intact.
   local -a _create_args=(client create --yes --name "$client_name" --credential-file "$cred_file")
