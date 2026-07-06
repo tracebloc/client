@@ -107,7 +107,7 @@ if [[ "${USING_BRANCH:-0}" == "1" || ! "$REF" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([.-][A
   else
     echo "[ERROR] '$REF' is not an immutable release tag (expected vX.Y.Z)." >&2
     echo "        The bootstrap only trusts content-addressable release tags so a moved" >&2
-    echo "        branch ref can't change what runs as root on your box (RFC-0001 R8)." >&2
+    echo "        branch ref can't change what runs as root on your box." >&2
     echo "        Use a release tag, or for local dev set TRACEBLOC_ALLOW_UNVERIFIED=1." >&2
     exit 1
   fi
@@ -121,7 +121,7 @@ fi
 case "$REF" in
   */*|*..*)
     echo "[ERROR] Ref '$REF' contains a path separator or '..' — refusing to build a" >&2
-    echo "        fetch URL from it (path-traversal guard, RFC-0001 R8)." >&2
+    echo "        fetch URL from it (path-traversal guard)." >&2
     exit 1 ;;
 esac
 
@@ -135,7 +135,7 @@ REPO_REL="https://github.com/tracebloc/client/releases/download/${REF}"
 TMPDIR="$(mktemp -d)"
 trap 'rm -rf "$TMPDIR"' EXIT
 
-echo "Downloading Tracebloc client installer (ref: $REF)..."
+echo "tracebloc client installer · $REF"
 
 mkdir -p "$TMPDIR/lib"
 
@@ -203,6 +203,9 @@ _sha256_of() {
 verify_against_manifest() {
   local manifest="$TMPDIR/manifest.sha256"
 
+  echo ""
+  echo "Verifying the installer is authentic before anything runs…"
+
   if ! _sha256_of "$TMPDIR/install-k8s.sh" >/dev/null 2>&1; then
     echo "[ERROR] No sha256 tool (sha256sum / shasum) on PATH — can't verify the" >&2
     echo "        installer's integrity. Install coreutils (Linux) or ensure" >&2
@@ -216,7 +219,7 @@ verify_against_manifest() {
       return 0
     fi
     echo "[ERROR] Couldn't fetch manifest.sha256 for ref '$REF' — refusing to run" >&2
-    echo "        unverified installer scripts (RFC-0001 R8). If this ref pre-dates" >&2
+    echo "        unverified installer scripts. If this ref pre-dates" >&2
     echo "        signed manifests, pin a newer release tag." >&2
     exit 1
   fi
@@ -232,7 +235,7 @@ verify_against_manifest() {
     # many spaces the sha tool emits); take its first field as the digest.
     expected="$(awk -v p="$rel" '$NF == p {print $1; exit}' "$manifest")"
     if [[ -z "$expected" ]]; then
-      echo "[ERROR] $rel has no entry in manifest.sha256 — refusing to run it (RFC-0001 R8)." >&2
+      echo "[ERROR] $rel has no entry in manifest.sha256 — refusing to run it." >&2
       exit 1
     fi
     actual="$(_sha256_of "$TMPDIR/${f#scripts/}")"
@@ -241,11 +244,11 @@ verify_against_manifest() {
       echo "          expected: $expected" >&2
       echo "          actual:   $actual" >&2
       echo "        Someone may have tampered with the installer. Aborting before any" >&2
-      echo "        privileged step runs (RFC-0001 R8)." >&2
+      echo "        privileged step runs." >&2
       exit 1
     fi
   done
-  echo "  ✓ all installer scripts verified against the signed manifest"
+  echo "  ✔ All ${#FILES[@]} installer files verified — none were altered"
 }
 
 download_manifest() {
@@ -281,7 +284,7 @@ verify_manifest_signature() {
     fi
     echo "[ERROR] cosign is required to verify the installer's signed manifest and" >&2
     echo "        couldn't be found or bootstrapped. Refusing to fall back to an" >&2
-    echo "        unauthenticated, same-channel checksum (RFC-0001 R8)." >&2
+    echo "        unauthenticated, same-channel checksum." >&2
     echo "        Fix: install cosign (https://docs.sigstore.dev/cosign/installation/)" >&2
     echo "        and re-run, or for local development only set TRACEBLOC_ALLOW_UNVERIFIED=1." >&2
     exit 1
@@ -294,7 +297,7 @@ verify_manifest_signature() {
       return 0
     fi
     echo "[ERROR] manifest.sha256.sig / .cert not published for release '$REF' — can't" >&2
-    echo "        authenticate the manifest. Pin a release tag that ships them (RFC-0001 R8)." >&2
+    echo "        authenticate the manifest. Pin a release tag that ships them." >&2
     exit 1
   fi
 
@@ -305,10 +308,10 @@ verify_manifest_signature() {
         --certificate "$cert" \
         --signature "$sig" \
         "$manifest" >/dev/null 2>&1; then
-    echo "  ✓ manifest signature verified (cosign keyless)"
+    echo "  ✔ Signature verified — published by tracebloc (Sigstore keyless)"
   else
     echo "[ERROR] cosign signature verification FAILED for manifest.sha256 — refusing" >&2
-    echo "        to install (RFC-0001 R8)." >&2
+    echo "        to install." >&2
     exit 1
   fi
 }
@@ -342,7 +345,7 @@ ensure_cosign() {
   local bin="$TMPDIR/cosign"
   local sums="$TMPDIR/cosign_checksums.txt"
 
-  echo "  cosign not found — bootstrapping pinned ${COSIGN_VERSION} to verify the manifest…"
+  echo "  · Fetching the signature-verification tool (cosign)…"
   curl -fsSL --tlsv1.2 "$base/$asset"               -o "$bin"  2>/dev/null || return 1
   curl -fsSL --tlsv1.2 "$base/cosign_checksums.txt" -o "$sums" 2>/dev/null || return 1
 
@@ -363,5 +366,4 @@ verify_against_manifest
 
 chmod +x "$TMPDIR/install-k8s.sh"
 
-echo "Running Tracebloc environment setup..."
 bash "$TMPDIR/install-k8s.sh" "$@"

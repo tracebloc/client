@@ -1373,7 +1373,7 @@ function Print-Summary {
       Write-Host ""
       Write-Host "  What to do next" -ForegroundColor White
       Write-Host "  1. Ingest your training and test data with the tracebloc CLI:"
-      Write-Host "       tracebloc dataset push ./data" -ForegroundColor Cyan
+      Write-Host "       tracebloc data ingest ./data" -ForegroundColor Cyan
       Write-Host "  2. Define your first AI use case and invite vendors"
       Write-Host ""
       Hint "Dashboard: https://ai.tracebloc.io   Logs: ~\.tracebloc\   Data: /tracebloc/$ns"
@@ -1710,7 +1710,7 @@ function Invoke-DiagnoseBundle {
 # Installs the `tracebloc` CLI via its own released installer (tracebloc/cli),
 # which downloads the right build for this OS/arch and verifies it (SHA256 +
 # cosign signature). Lets the user push datasets to the client they just set
-# up:  tracebloc dataset push ./data
+# up:  tracebloc data ingest ./data
 #
 # NON-FATAL: runs after the client is connected, so a CLI-install hiccup warns
 # and moves on. The CLI's own installer sets $ErrorActionPreference='Stop' and
@@ -1742,7 +1742,7 @@ function Test-TraceblocCli {
 
   if (Has "tracebloc") {
     # `tracebloc version` is the real proof; cosmetic, never fatal. The canonical
-    # "tracebloc dataset push ./data" next step lives in Print-Summary's "What to
+    # "tracebloc data ingest ./data" next step lives in Print-Summary's "What to
     # do next" — don't duplicate it; just confirm the verdict.
     $ver = ""
     try { $ver = (& tracebloc version 2>$null | Select-Object -First 1) } catch { $ver = "" }
@@ -1756,7 +1756,7 @@ function Test-TraceblocCli {
   # it is and how to use it now (so the summary's command works from a new window).
   Ok "tracebloc CLI installed -- open a new PowerShell window to use it."
   Hint "  Installed to: $TRACEBLOC_CLI_INSTALL_DIR"
-  Hint "  Or use it now via:  & `"$TRACEBLOC_CLI_INSTALL_DIR\tracebloc.exe`" dataset push .\data"
+  Hint "  Or use it now via:  & `"$TRACEBLOC_CLI_INSTALL_DIR\tracebloc.exe`" data ingest .\data"
 }
 
 function Install-TraceblocCli {
@@ -1765,7 +1765,7 @@ function Install-TraceblocCli {
   if (Has "tracebloc") {
     Info "tracebloc CLI already present -- re-running its installer to pick up the latest."
   }
-  Info "Installing the tracebloc CLI (dataset push / cluster info / dataset rm)..."
+  Info "Installing the tracebloc CLI (data ingest / cluster info / data delete)..."
 
   # [System.IO.Path]::GetTempPath() is cross-platform (%TEMP% on Windows, /tmp
   # on Linux); $env:TEMP is null under Linux pwsh, which the ubuntu Pester run

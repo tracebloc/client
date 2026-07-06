@@ -42,6 +42,55 @@ _cli_supports_provisioning() {
 # out as a function so tests can force the non-interactive path deterministically.
 _prompt_tty() { [[ -r /dev/tty && -w /dev/tty ]]; }
 
+# _detect_location_zone: best-effort ISO country code for where this machine
+# physically runs, derived from the system timezone via the OS's OWN zone.tab —
+# no network call (privacy-preserving for on-prem installs) and no embedded zone
+# list to drift out of sync with the backend. For single-region countries the
+# carbon zone IS the ISO code (DE, FR, US, GB…); the backend validates the final
+# value and a miss surfaces via _report_create_failure. Prints "<CODE> <TZ>"
+# (e.g. "DE Europe/Berlin") on success, nothing otherwise.
+_detect_location_zone() {
+  local tz="" zt code
+  if [[ -n "${TZ:-}" ]]; then
+    tz="$TZ"
+  elif [[ -L /etc/localtime ]]; then
+    tz="$(readlink /etc/localtime 2>/dev/null)"; tz="${tz#*/zoneinfo/}"
+  elif [[ -r /etc/timezone ]]; then
+    IFS= read -r tz </etc/timezone 2>/dev/null || tz=""
+  fi
+  # A real IANA zone looks like "Area/City"; ignore anything else (e.g. "UTC").
+  [[ "$tz" == */* ]] || return 0
+  for zt in /usr/share/zoneinfo/zone.tab /usr/share/zoneinfo/zone1970.tab; do
+    [[ -r "$zt" ]] || continue
+    code="$(awk -v tz="$tz" '$1 !~ /^#/ && $3 == tz {split($1,a,","); print a[1]; exit}' "$zt" 2>/dev/null)"
+    if [[ -n "$code" ]]; then printf '%s %s\n' "$code" "$tz"; return 0; fi
+  done
+  return 0
+}
+
+# _report_create_failure LOGFILE LOCATION — surface the REAL reason `client create`
+# failed on the terminal instead of a generic "see the log". Nothing sensitive is
+# exposed: a failed create minted no credential, so its captured output holds only
+# the error. Special-cases the commonest tripwire — an unrecognized carbon zone
+# (e.g. a city like "berlin" typed instead of a zone code).
+_report_create_failure() {
+  local out="$1" loc="$2" errline l
+  echo ""
+  if grep -qiE 'location.*not a valid choice' "$out" 2>/dev/null; then
+    warn "\"${loc:-that location}\" isn't a recognized carbon zone — the client wasn't created."
+    hint "Re-run and press Enter to accept the detected zone, leave it blank to skip, or"
+    hint "use a zone code like DE, FR, US, GB (all codes: https://api.electricitymap.org/v3/zones)."
+    return 0
+  fi
+  errline="$(grep -aE 'Error:|HTTP [0-9][0-9][0-9]|refused|timed? ?out|unauthorized|forbidden|denied' "$out" 2>/dev/null | head -4)"
+  if [[ -n "$errline" ]]; then
+    warn "The client couldn't be provisioned:"
+    while IFS= read -r l; do [[ -n "$l" ]] && hint "$l"; done <<<"$errline"
+  else
+    warn "The client couldn't be provisioned."
+  fi
+}
+
 # _account_owns_namespace NS — does the signed-in account's client list include a
 # client whose namespace is NS? `client list` prints "…namespace=<ns>   location=…";
 # match that field exactly. Namespace is the only stable join key between a local
@@ -159,8 +208,21 @@ provision_client() {
     printf '\n  Name this machine (shown on your tracebloc dashboard): ' >/dev/tty
     IFS= read -r client_name </dev/tty || true
     if [[ -z "$client_location" ]]; then
-      printf '  Location zone for carbon reporting [e.g. DE, optional]: ' >/dev/tty
-      IFS= read -r client_location </dev/tty || true
+      local _loc_detect _loc_zone _loc_tz
+      _loc_detect="$(_detect_location_zone)"
+      _loc_zone="${_loc_detect%% *}"; _loc_tz="${_loc_detect#* }"
+      if [[ -n "$_loc_zone" ]]; then
+        printf '  Location for carbon reporting — detected %s (from your timezone %s).\n' "$_loc_zone" "$_loc_tz" >/dev/tty
+        printf '    Press Enter to use it, type another zone code, or type "skip": ' >/dev/tty
+        IFS= read -r client_location </dev/tty || true
+        case "$client_location" in
+          "")                              client_location="$_loc_zone" ;;  # Enter accepts the detected zone
+          skip|Skip|SKIP|none|None|NONE|-) client_location="" ;;            # explicit skip → left unset (it's optional)
+        esac
+      else
+        printf '  Location for carbon reporting [zone code, e.g. DE — or Enter to skip]: ' >/dev/tty
+        IFS= read -r client_location </dev/tty || true
+      fi
     fi
   fi
   # Trim surrounding whitespace from the (possibly typed) values.
@@ -173,10 +235,20 @@ provision_client() {
   [[ -n "$client_location" ]] && _create_args+=(--location "$client_location")
   # umask 077 so the credential file lands 0600 even if a future CLI build
   # regresses on its explicit chmod — defense in depth (cli#104 already sets 0600).
-  if ! ( umask 077; tracebloc "${_create_args[@]}" ) >>"${LOG_FILE:-/dev/null}" 2>&1; then
+  # Capture the create's output so we can surface the ACTUAL failure reason on the
+  # terminal (not just "see the log"). On success it's appended to the log and the
+  # credential stays in its 0600 file, never on stdout; on failure nothing was
+  # minted, so the captured text is safe to show.
+  local _create_out; _create_out="$(mktemp 2>/dev/null || printf '%s' "${TMPDIR:-/tmp}/tb-create.$$")"
+  if ! ( umask 077; tracebloc "${_create_args[@]}" ) >"$_create_out" 2>&1; then
+    cat "$_create_out" >>"${LOG_FILE:-/dev/null}" 2>/dev/null || true
     rm -f "$cred_file"   # remove any partial the failed create may have written
-    error "Provisioning the client failed — see ${LOG_FILE:-the install log}. Re-run to retry."
+    _report_create_failure "$_create_out" "$client_location"
+    rm -f "$_create_out"
+    error "Couldn't provision the client. Re-run to retry — full log: ${LOG_FILE:-the install log}."
   fi
+  cat "$_create_out" >>"${LOG_FILE:-/dev/null}" 2>/dev/null || true
+  rm -f "$_create_out"
   [[ -f "$cred_file" ]] || error "client create did not write the credential file ($cred_file)."
 
   # The credential file is the sole source of truth for what was provisioned.

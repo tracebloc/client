@@ -140,7 +140,7 @@ preflight_sudo() {
     return 0
   fi
   echo ""
-  prompt_header "Tracebloc needs administrator permissions to install"
+  prompt_header "tracebloc needs administrator access to install"
   hint "Docker and system dependencies."
   echo ""
   hint "You may be asked for your password once."
@@ -358,10 +358,7 @@ print_banner() {
   echo ""
   echo -e "  ${DIM}This installer sets up a secure compute environment${RESET}"
   echo -e "  ${DIM}on your machine and connects it to the tracebloc network.${RESET}"
-  echo ""
-  echo -e "  ${DIM}Nothing will be modified outside:${RESET}"
-  echo -e "  ${DIM}  ~/.tracebloc/    (data and config)${RESET}"
-  echo -e "  ${DIM}  Docker           (container runtime)${RESET}"
+  echo -e "  ${DIM}All data and config stay in ~/.tracebloc/.${RESET}"
   echo ""
   log "OS=$OS  Arch=$ARCH  Cluster='$CLUSTER_NAME'  Servers=$SERVERS  Agents=$AGENTS"
   log "Host data dir: $HOST_DATA_DIR → /tracebloc (inside k3s nodes)"

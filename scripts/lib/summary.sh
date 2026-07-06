@@ -113,7 +113,7 @@ print_summary() {
       echo ""
       echo -e "  ${BOLD}What to do next${RESET}"
       echo -e "  ${WHITE}1.${RESET} Ingest your training and test data with the tracebloc CLI:"
-      echo -e "       ${CYAN}tracebloc dataset push ./data${RESET}"
+      echo -e "       ${CYAN}tracebloc data ingest ./data${RESET}"
       echo -e "  ${WHITE}2.${RESET} Define your first AI use case and invite vendors"
       echo ""
       echo -e "  ${DIM}Dashboard:${RESET} ${CYAN}https://ai.tracebloc.io${RESET}   ${DIM}Logs:${RESET} ${DIM}~/.tracebloc/${RESET}   ${DIM}Data:${RESET} ${DIM}/tracebloc/${ns}${RESET}"
