@@ -588,3 +588,31 @@ setup() {
   [ "$status" -eq 0 ]
   ! grep -q 'HTTP_PROXY_HOST' "$HOST_DATA_DIR/values.yaml"
 }
+
+@test "install_client_helm: TRACEBLOC_TRAINING_RESOURCES overrides the training size in generated values" {
+  HOST_DATA_DIR="$BATS_TEST_TMPDIR/data"; mkdir -p "$HOST_DATA_DIR"
+  _ensure_tracebloc_dirs() { :; }
+  _ensure_release_dirs() { :; }
+  _ensure_helm_runnable() { :; }
+  helm() { record "helm $*"; return 0; }
+  verify_credentials() { printf valid; }
+  export TRACEBLOC_TRAINING_RESOURCES="cpu=4,memory=16Gi"
+  run install_client_helm <<< $'myid\nmypw'
+  [ "$status" -eq 0 ]
+  grep -q 'RESOURCE_LIMITS: "cpu=4,memory=16Gi"' "$HOST_DATA_DIR/values.yaml"
+  grep -q 'RESOURCE_REQUESTS: "cpu=4,memory=16Gi"' "$HOST_DATA_DIR/values.yaml"
+}
+
+@test "install_client_helm: default training size stays cpu=2,memory=8Gi" {
+  HOST_DATA_DIR="$BATS_TEST_TMPDIR/data"; mkdir -p "$HOST_DATA_DIR"
+  _ensure_tracebloc_dirs() { :; }
+  _ensure_release_dirs() { :; }
+  _ensure_helm_runnable() { :; }
+  helm() { record "helm $*"; return 0; }
+  verify_credentials() { printf valid; }
+  unset TRACEBLOC_TRAINING_RESOURCES
+  run install_client_helm <<< $'myid\nmypw'
+  [ "$status" -eq 0 ]
+  grep -q 'RESOURCE_LIMITS: "cpu=2,memory=8Gi"' "$HOST_DATA_DIR/values.yaml"
+  grep -q 'RESOURCE_REQUESTS: "cpu=2,memory=8Gi"' "$HOST_DATA_DIR/values.yaml"
+}
