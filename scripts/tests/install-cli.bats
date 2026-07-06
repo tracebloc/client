@@ -56,10 +56,11 @@ setup() {
 # shell-correct PATH fix instead of a generic "open a new terminal". Always
 # non-fatal (return 0) — the client is already connected by Step 5.
 
-@test "install_tracebloc_cli: fresh-shell success reports a VERIFIED verdict (not 'open a new terminal')" {
+@test "install_tracebloc_cli: fresh-shell AND current-shell success reports a VERIFIED verdict" {
   curl()             { : > "${@: -1}"; return 0; }
   sh()               { return 0; }
   _cli_on_fresh_path() { return 0; }     # a brand-new terminal resolves tracebloc
+  has()              { return 0; }       # …and so does THIS shell (binary already on PATH)
   tracebloc()        { echo "tracebloc 0.2.0"; }
   run install_tracebloc_cli
   [ "$status" -eq 0 ]
@@ -67,8 +68,27 @@ setup() {
   [[ "$output" == *"0.2.0"* ]]                          # real proof via `tracebloc version`
   [[ "$output" != *"open a new terminal"* ]]            # the old, useless message is gone
   # The canonical dataset-push next step lives in summary.sh — don't duplicate it
-  # here on the verified path (#738: "don't duplicate; keep consistent").
+  # here on the fully-verified path (#738: "don't duplicate; keep consistent").
   [[ "$output" != *"tracebloc dataset push"* ]]
+}
+
+@test "install_tracebloc_cli: fresh shell finds it but the CURRENT shell can't → 'new terminals' verdict + load-it-now hint (#304)" {
+  # The bug: binary lands in ~/.local/bin, a fresh shell sources the rc and finds
+  # it, but the caller's live shell predates that PATH edit. Old code printed
+  # "verified on your PATH" here — a lie for the shell the user is typing in.
+  curl()             { : > "${@: -1}"; return 0; }
+  sh()               { return 0; }
+  _cli_on_fresh_path() { return 0; }     # a NEW terminal resolves tracebloc (rc edit persisted)…
+  has()              { return 1; }       # …but THIS shell does not yet
+  SHELL="/bin/zsh"; OS="Linux"          # zsh → ~/.zshrc
+  tracebloc()        { echo "tracebloc 0.2.0"; }
+  run install_tracebloc_cli
+  [ "$status" -eq 0 ]                                   # still non-fatal
+  [[ "$output" == *"verified for new terminals"* ]]     # honest: persisted, but not here
+  [[ "$output" == *"source $HOME/.zshrc"* ]]            # how to use it in THIS shell now
+  [[ "$output" != *"verified on your PATH"* ]]          # never over-claim for the current shell
+  # It's already in the rc (fresh shell found it) — don't tell the user to re-append.
+  [[ "$output" != *"echo '"* ]]
 }
 
 @test "install_tracebloc_cli: CLI-missing-from-fresh-shell prints an actionable, shell-correct PATH hint" {

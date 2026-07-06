@@ -84,13 +84,36 @@ _cli_on_fresh_path() {
 # verification hiccup must never abort an otherwise-successful install.
 _verify_tracebloc_cli() {
   if _cli_on_fresh_path; then
-    # Usable from a new terminal. `tracebloc version` is the real proof; keep it
-    # cosmetic (never let a failing version call or a SIGPIPE flip the outcome).
-    # The canonical "tracebloc dataset push ./data" next step lives in the
-    # summary's "What to do next" — don't duplicate it here; just confirm the
-    # verdict so the summary's command is known-good.
+    # A brand-new terminal resolves tracebloc — the rc PATH edit persisted. But
+    # `_cli_on_fresh_path` spawns FRESH shells; the caller's CURRENT shell may
+    # predate that edit. When the binary lands in ~/.local/bin, the shell that
+    # launched this installer fixed its PATH at login (before the dir existed)
+    # and won't see it until it re-reads its rc — so the very next `tracebloc …`
+    # the user types HERE fails with command-not-found even though a new terminal
+    # works (#304). Only claim "verified on your PATH" when THIS shell resolves it
+    # too; otherwise be honest and say how to use it now.
+    # `tracebloc version` is the real proof; keep it cosmetic (never let a failing
+    # version call or a SIGPIPE flip the outcome). The canonical "tracebloc
+    # dataset push ./data" next step lives in the summary's "What to do next".
     local ver; ver="$(tracebloc version 2>/dev/null | head -1 || true)"
-    success "tracebloc CLI installed${ver:+ ($ver)} — verified on your PATH."
+    if has tracebloc; then
+      # Usable right now AND in new terminals — the fully-clean verdict.
+      success "tracebloc CLI installed${ver:+ ($ver)} — verified on your PATH."
+      return 0
+    fi
+    # Persisted for new terminals, but not yet on THIS shell's PATH. The rc
+    # already carries the PATH line (that's why a fresh shell finds it), so the
+    # user just needs a new terminal — or to load the rc into this one. Don't
+    # re-append it; don't over-claim "verified on your PATH" for a shell it isn't.
+    local sh_name; sh_name="$(basename "${SHELL:-/bin/sh}")"
+    success "tracebloc CLI installed${ver:+ ($ver)} — verified for new terminals."
+    if [[ "$sh_name" == "fish" ]]; then
+      hint "This shell won't see it yet — open a new terminal to use it."
+    else
+      local rc; rc="$(_cli_rc_for_shell || true)"
+      hint "This shell won't see it yet — open a new terminal, or load it now:  source ${rc}"
+    fi
+    info "Then the 'tracebloc dataset push ./data' step below will work."
     return 0
   fi
 
