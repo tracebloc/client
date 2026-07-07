@@ -62,7 +62,13 @@ _extract_yaml_value() {
 detect_installed_client() {
   INSTALLED_CLIENT_ID=""; INSTALLED_CLIENT_NS=""
   local _gvf _rel _ns _id
-  _gvf="$(mktemp)" || return 0
+  # A mktemp failure is an environment error, NOT proof of "no client here" —
+  # treating it as such would silently skip the one-client / #303 ownership
+  # guards. Fall back to a path in a dir we own (same reasoning as the create
+  # step: never a predictable world-writable /tmp path under sudo). Only give up
+  # (empty result) when there is genuinely nowhere to write.
+  _gvf="$(mktemp 2>/dev/null)" || _gvf="${HOST_DATA_DIR:+${HOST_DATA_DIR}/.tb-detect-values.$$}"
+  [[ -n "$_gvf" ]] || return 0
   while read -r _rel _ns; do
     [[ -z "$_rel" ]] && continue
     if helm get values "$_rel" -n "$_ns" > "$_gvf" 2>/dev/null; then

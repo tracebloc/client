@@ -215,6 +215,9 @@ provision_client() {
         printf '  Location for carbon reporting — detected %s (from your timezone %s).\n' "$_loc_zone" "$_loc_tz" >/dev/tty
         printf '    Press Enter to use it, or type another zone code: ' >/dev/tty
         IFS= read -r client_location </dev/tty || true
+        # Trim BEFORE the non-empty check so a whitespace-only answer counts as
+        # "just pressed Enter" and falls back to the detected zone.
+        client_location="${client_location#"${client_location%%[![:space:]]*}"}"; client_location="${client_location%"${client_location##*[![:space:]]}"}"
         [[ -n "$client_location" ]] || client_location="$_loc_zone"
       else
         # No detection on this machine. The released CLI still REQUIRES a zone
@@ -225,6 +228,9 @@ provision_client() {
         for _loc_try in 1 2 3; do
           printf '  Location zone for carbon reporting (e.g. DE): ' >/dev/tty
           IFS= read -r client_location </dev/tty || true
+          # Trim BEFORE the non-empty check: a whitespace-only answer must NOT
+          # satisfy it, break the loop, and skip the "required" error below.
+          client_location="${client_location#"${client_location%%[![:space:]]*}"}"; client_location="${client_location%"${client_location##*[![:space:]]}"}"
           [[ -n "$client_location" ]] && break
         done
         [[ -n "$client_location" ]] || error "A location zone is required to provision this client. Re-run and enter a zone code (e.g. DE), or set TRACEBLOC_CLIENT_LOCATION for unattended installs."
