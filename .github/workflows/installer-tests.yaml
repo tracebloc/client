@@ -17,6 +17,10 @@ on:
       - 'scripts/**'
       - '.github/workflows/installer-tests.yaml'
   pull_request:
+    # `labeled` is required so adding the `e2e` label to an open PR starts the
+    # e2e-journey job immediately — with the default types it would only fire on
+    # the next push, making the label gate feel broken.
+    types: [opened, synchronize, reopened, labeled]
     branches: [main, develop, openshift]
     paths:
       - 'scripts/**'
@@ -204,6 +208,7 @@ jobs:
         run: bash scripts/tests/e2e-proxy.sh
 
   path-persist:
+    timeout-minutes: 20
     # Fresh-shell PATH-persistence guard for the tracebloc CLI — the cheap, wide
     # leg. Installs cli/install.sh in a plain container per distro, then opens a
     # BRAND-NEW login AND non-login shell for each of bash/zsh/fish and asserts
@@ -249,6 +254,7 @@ jobs:
             sh -c 'command -v bash >/dev/null 2>&1 || apk add --no-cache bash >/dev/null 2>&1; exec bash scripts/tests/path-persist.sh'
 
   e2e-journey:
+    timeout-minutes: 30
     # Leg 2 — the full last-mile journey on a real cluster: create_cluster() →
     # install the CLI via cli/install.sh → apply a CREDENTIAL-FREE stub the CLI
     # discovers (a *-jobs-manager Deployment with the chart's labels + an

@@ -83,18 +83,32 @@ guard() { # guard <seconds> <label> -- <command...>
   local secs="$1" label="$2"; shift 2
   [[ "${1:-}" == "--" ]] && shift
   if has timeout; then
-    if ! timeout --kill-after=15s "$secs" "$@"; then
-      local rc=$?
-      if [[ $rc -eq 124 ]]; then
-        error "step '${label}' exceeded ${secs}s — treating the hang as a failure."
-      fi
-      return $rc
+    # Capture the real exit status. `if ! timeout ...; then rc=$?` would read the
+    # NEGATED status ($? is always 0 inside that branch), so a failed or hung step
+    # returned 0 and the whole journey passed vacuously — see the negative-control
+    # self-test below. Run the command, stash its status via `|| rc=$?`, act on it.
+    local rc=0
+    timeout --kill-after=15s "$secs" "$@" || rc=$?
+    if [[ $rc -eq 124 ]]; then
+      error "step '${label}' exceeded ${secs}s — treating the hang as a failure."
     fi
+    return $rc
   else
     warn "'timeout' not found — running '${label}' without a watchdog."
     "$@"
   fi
 }
+
+# ── Negative control: prove the watchdog can actually fail ───────────────────
+# This whole harness once shipped with a guard() that returned 0 for a failed or
+# hung step, so `E2E JOURNEY PASS` was printed vacuously. Before we run any real
+# assertion, confirm guard() propagates a non-zero exit — otherwise a green run
+# means nothing. Run in a subshell so this script's `set -e` doesn't abort on the
+# intentional failure.
+if ( guard 5 "watchdog self-test" -- sh -c 'exit 7' ) >/dev/null 2>&1; then
+  error "watchdog self-test FAILED: guard() returned 0 for a command that exited non-zero — every assertion below would pass vacuously. Refusing to run."
+fi
+success "watchdog self-test: guard() propagates failures (a red step stays red)."
 
 echo "═══════════════════════════════════════════════════════════════════════"
 echo "  E2E last-mile journey   arch: $(uname -m)   kernel: $(uname -r)"
