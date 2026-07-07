@@ -91,6 +91,14 @@ spec:
                 secretKeyRef:
                   name: {{ include "tracebloc.secretName" . }}
                   key: CLIENT_PASSWORD
+            {{- /* Corporate egress proxy (client-runtime#154): resource-monitor
+                 was the only backend-calling workload without proxyEnv, so its
+                 auth/heartbeat POSTs dialed direct and failed behind a proxy.
+                 Renders nothing when HTTP_PROXY_HOST is unset. requests honours
+                 the URL-form vars ambiently (trust_env); NO_PROXY carries the
+                 cluster-internal ranges, and the k8s python client ignores
+                 ambient proxy env, so in-cluster calls are unaffected. */ -}}
+            {{- include "tracebloc.proxyEnv" . | nindent 12 }}
           resources:
             requests:
               cpu: 50m
