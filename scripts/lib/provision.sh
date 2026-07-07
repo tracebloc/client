@@ -231,18 +231,22 @@ provision_client() {
       fi
     fi
   fi
-  # No location yet (unattended env-name path, or a TTY-less run): fall back to
-  # the timezone-detected zone silently — the released CLI requires a zone, and
-  # this matches the target spec (silent auto-derive, never prompt). If detection
-  # also comes up empty, the create's own error is surfaced by
-  # _report_create_failure below rather than failing blind here.
+  # Trim surrounding whitespace from the (possibly typed) values FIRST, so a
+  # whitespace-only answer (spaces then Enter) counts as "unset" for the silent
+  # fallback below instead of slipping through as a non-empty, doomed location.
+  client_name="${client_name#"${client_name%%[![:space:]]*}"}"; client_name="${client_name%"${client_name##*[![:space:]]}"}"
+  client_location="${client_location#"${client_location%%[![:space:]]*}"}"; client_location="${client_location%"${client_location##*[![:space:]]}"}"
+
+  # No location yet (unattended env-name path, a TTY-less run, or a whitespace-only
+  # answer): fall back to the timezone-detected zone silently — the released CLI
+  # requires a zone, and this matches the target spec (silent auto-derive, never
+  # prompt). The detected code is already whitespace-free. If detection also comes
+  # up empty, the create's own error is surfaced by _report_create_failure below
+  # rather than failing blind here.
   if [[ -z "$client_location" ]]; then
     client_location="$(_detect_location_zone)"; client_location="${client_location%% *}"
   fi
 
-  # Trim surrounding whitespace from the (possibly typed) values.
-  client_name="${client_name#"${client_name%%[![:space:]]*}"}"; client_name="${client_name%"${client_name##*[![:space:]]}"}"
-  client_location="${client_location#"${client_location%%[![:space:]]*}"}"; client_location="${client_location%"${client_location##*[![:space:]]}"}"
   [[ -n "$client_name" ]] || error "A name for this client is required to provision it. Re-run in a terminal to be prompted, or set TRACEBLOC_CLIENT_NAME (and optionally TRACEBLOC_CLIENT_LOCATION) for an unattended install."
   # --name is required; pass --location only when we have one (the CLI defaults it
   # otherwise). Build as an array so values with spaces survive intact.
@@ -254,7 +258,10 @@ provision_client() {
   # terminal (not just "see the log"). On success it's appended to the log and the
   # credential stays in its 0600 file, never on stdout; on failure nothing was
   # minted, so the captured text is safe to show.
-  local _create_out; _create_out="$(mktemp 2>/dev/null || printf '%s' "${TMPDIR:-/tmp}/tb-create.$$")"
+  # Prefer mktemp; if it's unavailable, fall back INSIDE the install dir (which we
+  # own and just wrote the 0600 credential into) rather than a predictable
+  # world-writable /tmp path — that path is a symlink-clobber target under sudo.
+  local _create_out; _create_out="$(mktemp 2>/dev/null)" || _create_out="${HOST_DATA_DIR}/.client-create.$$.out"
   if ! ( umask 077; tracebloc "${_create_args[@]}" ) >"$_create_out" 2>&1; then
     cat "$_create_out" >>"${LOG_FILE:-/dev/null}" 2>/dev/null || true
     rm -f "$cred_file"   # remove any partial the failed create may have written
