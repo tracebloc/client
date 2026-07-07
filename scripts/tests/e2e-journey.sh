@@ -124,7 +124,17 @@ install_helm
 
 echo ""
 echo "── Step 1: create_cluster() — the installer's real cluster-bring-up ─────"
-guard 600 "create_cluster" -- create_cluster
+# `timeout` (inside guard) execs an external command in a fresh process, so it
+# cannot see create_cluster — a shell function sourced from cluster.sh (guarding
+# it directly fails with "timeout: failed to run command 'create_cluster': No
+# such file or directory", exit 127). Run it inside a real `bash` (which timeout
+# CAN exec) that re-sources the libs. The exported CLUSTER_NAME /
+# TRACEBLOC_NO_AUTOSTART / USER carry through the env, and the CLI binaries the
+# install_* steps dropped into /usr/local/bin are on the inherited PATH.
+guard 600 "create_cluster" -- bash -c '
+  set -euo pipefail
+  source "$1/common.sh"; source "$1/setup-linux.sh"; source "$1/cluster.sh"
+  create_cluster' _ "$LIB"
 
 echo "── assert: all nodes reach Ready ──"
 guard 200 "wait nodes Ready" -- kubectl wait --for=condition=Ready nodes --all --timeout=180s
