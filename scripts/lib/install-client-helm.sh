@@ -387,7 +387,7 @@ install_client_helm() {
 
   prompt_header "Connect this machine to a tracebloc client."
   hint "A client links your secure environment to the tracebloc"
-  hint "platform so vendors can submit models for evaluation."
+  hint "platform so other collaborators can submit models for evaluation."
   echo ""
   hint "Already have one? Enter its credentials below — or set"
   hint "TRACEBLOC_CLIENT_ID / TRACEBLOC_CLIENT_PASSWORD to skip this prompt."

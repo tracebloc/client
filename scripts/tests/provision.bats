@@ -246,7 +246,7 @@ _stub_tracebloc() {
   _stub_tracebloc 'TRACEBLOC_CLIENT_ID=1\nTRACEBLOC_CLIENT_PASSWORD=p\nTB_NAMESPACE=ns\n'
   run provision_client
   [ "$status" -ne 0 ]
-  [[ "$output" == *"name for this machine is required"* ]]
+  [[ "$output" == *"name for this client is required"* ]]
   # and it must not have called client create (no argv recorded)
   [ ! -s "$CREATE_ARGS_FILE" ]
 }
