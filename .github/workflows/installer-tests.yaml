@@ -210,15 +210,17 @@ jobs:
   path-persist:
     timeout-minutes: 20
     # Fresh-shell PATH-persistence guard for the tracebloc CLI — the cheap, wide
-    # leg. Installs cli/install.sh in a plain container per distro, then opens a
-    # BRAND-NEW login AND non-login shell for each of bash/zsh/fish and asserts
-    # `tracebloc` resolves + `tracebloc version` runs. This is the cell that goes
-    # RED on the pre-fix installer and GREEN on the fixed one (a fresh non-login
-    # bash reads ~/.bashrc, not ~/.profile) — the regression guard for the whole
-    # PATH class that distro-prereqs / e2e-cluster can't see (they assert in the
-    # same shell that ran the installer). No cluster, no Docker-in-Docker, no
-    # creds. The script iterates shell × mode INSIDE the container; distro is the
-    # matrix axis (it installs zsh/fish in-container where a package exists).
+    # leg. Installs cli/install.sh into an OFF-PATH prefix (~/.local/bin) in a
+    # plain container per distro, once per shell (SHELL=bash/zsh/fish so the
+    # installer persists to that shell's rc), then opens a BRAND-NEW INTERACTIVE
+    # shell of that kind and asserts `tracebloc` resolves + `tracebloc version`
+    # runs. Forcing an off-PATH prefix is what gives the test a real signal: it
+    # goes RED on an installer that doesn't persist PATH to the rc and GREEN on
+    # the fixed one — the regression guard for the whole PATH class that
+    # distro-prereqs / e2e-cluster can't see (they assert in the same shell that
+    # ran the installer). No cluster, no Docker-in-Docker, no creds. The script
+    # iterates shells INSIDE the container; distro is the matrix axis (it installs
+    # zsh/fish in-container where a package exists). See client#310.
     name: PATH persist — ${{ matrix.distro }}
     runs-on: ubuntu-latest
     strategy:
