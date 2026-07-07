@@ -122,7 +122,7 @@ spec:
         - name: INGESTOR_IMAGE_REPOSITORY
           value: {{ (default dict .Values.images.ingestor).repository | default "ghcr.io/tracebloc/ingestor" | quote }}
         - name: INGESTOR_IMAGE_TAG
-          value: {{ (default dict .Values.images.ingestor).tag | default "0.3" | quote }}
+          value: {{ (default dict .Values.images.ingestor).tag | default "0.5" | quote }}
         - name: INGESTOR_IMAGE_DIGEST
           value: {{ (default dict .Values.images.ingestor).digest | default "" | quote }}
         - name: REQUESTS_PROXY_URL
