@@ -15,8 +15,9 @@
 #       context's namespace at it, and assert `tracebloc cluster info`:
 #         (a) succeeds (exit 0), AND
 #         (b) succeeds from a FRESH shell (the cli#61 PATH class, on the journey)
-#    4. `tracebloc dataset push --dry-run` smoke on a tiny sample CSV
-#       (offline-validatable; no creds, no real ingestion)
+#    4. `tracebloc data validate` smoke on a committed ingest spec — offline
+#       schema validation (no creds, no cluster), asserted both ways: a valid
+#       spec passes and an invalid one is rejected
 #    5. teardown (EXIT trap, same as e2e-cluster.sh)
 #
 #  What it deliberately does NOT do: the private-image tracebloc helm install +
@@ -274,28 +275,55 @@ guard 120 "cluster info (fresh shell)" -- bash -lc 'tracebloc cluster info'
 guard 120 "cluster info (fresh non-login shell)" -- bash -c 'tracebloc cluster info'
 success "cluster info works in the current shell AND a fresh login + non-login shell."
 
-# ── Step 4: dataset push --dry-run smoke ─────────────────────────────────────
-# A tiny CSV validated entirely offline: --dry-run stops before any stage Pod /
-# tar stream / network, so it needs no credentials and no reachable platform. We
-# assert exit 0 (a clean validation), which is what a customer sees as the first
-# half of `dataset push` before the real upload.
+# ── Step 4: offline spec validation smoke (`tracebloc data validate`) ─────────
+# The credential-free, no-cluster half of the ingest journey. `dataset push
+# --dry-run` is NOT offline any more — the current CLI runs cluster discovery AND
+# a Bound-PVC check before its dry-run stop, which this harness's stub (no PVC)
+# can't satisfy. `data validate <spec>` is the CLI's purpose-built offline check:
+# it schema-validates a spec against the embedded ingest.v1.json and never touches
+# the cluster — exactly the "offline-validatable, no creds, no reachable platform"
+# smoke this step was always meant to be. We assert BOTH directions so a green run
+# means something: a valid spec passes (exit 0) AND an invalid one is rejected
+# (non-zero) — the same "prove the check can fail" discipline as the guard()
+# self-test above. The spec shape mirrors the CLI's own known-good smoke fixture
+# (testdata/smoke/valid-image-classification.yaml); the /data/shared paths are
+# schema-only (validate never reads them).
 echo ""
-echo "── Step 4: dataset push --dry-run smoke ────────────────────────────────"
+echo "── Step 4: offline spec validation (tracebloc data validate) ────────────"
 SAMPLE_DIR="$WORKDIR/sample-dataset"
 mkdir -p "$SAMPLE_DIR"
-cat > "$SAMPLE_DIR/data.csv" <<'CSV'
-id,feature_a,feature_b,label
-1,0.10,0.20,0
-2,0.30,0.40,1
-3,0.50,0.60,0
-CSV
+cat > "$SAMPLE_DIR/ingest.yaml" <<'YAML'
+apiVersion: tracebloc.io/v1
+kind: IngestConfig
+category: image_classification
+table: e2e_smoke
+intent: train
+csv: /data/shared/e2e_smoke/labels.csv
+images: /data/shared/e2e_smoke/images/
+label: label
+YAML
 
-# `dataset push <dir> --dry-run` is the documented offline-validatable form. Pin
-# the namespace explicitly so the smoke is independent of context state.
-echo "── assert: dataset push --dry-run exits 0 ──"
-guard 120 "dataset push --dry-run" -- \
-  tracebloc dataset push "$SAMPLE_DIR" --dry-run --namespace "$TB_NAMESPACE"
-success "dataset push --dry-run validated the sample dataset (exit 0)."
+echo "── assert (a): data validate accepts a valid spec (exit 0) ──"
+guard 120 "data validate (valid)" -- tracebloc data validate "$SAMPLE_DIR/ingest.yaml"
+
+# Negative control: drop the required `intent` field and confirm validate rejects
+# it. Without this, a validate that silently exits 0 on everything would pass the
+# positive assertion vacuously.
+cat > "$SAMPLE_DIR/ingest-invalid.yaml" <<'YAML'
+apiVersion: tracebloc.io/v1
+kind: IngestConfig
+category: image_classification
+table: e2e_smoke
+csv: /data/shared/e2e_smoke/labels.csv
+images: /data/shared/e2e_smoke/images/
+label: label
+YAML
+
+echo "── assert (b): data validate rejects an invalid spec (non-zero) ──"
+if guard 120 "data validate (invalid)" -- tracebloc data validate "$SAMPLE_DIR/ingest-invalid.yaml"; then
+  error "data validate accepted a spec missing the required 'intent' field — the positive assertion above would pass vacuously."
+fi
+success "data validate accepts a valid spec and rejects an invalid one (offline)."
 
 # ── Pending sub-assertion: context-on-default auto-discover (cli, not merged) ─
 # Reproduces incident #2's harder half: context left on `default`, CLI expected
