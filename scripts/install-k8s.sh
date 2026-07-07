@@ -23,6 +23,8 @@
 #    HOST_DATA_DIR=~/.tracebloc  default: ~/.tracebloc
 #    CLIENT_ENV=dev              optional; if not set, CLIENT_ENV is not added to env in values
 #    TRACEBLOC_SKIP_REBOOT_PROMPT=1 (Linux) skip "Reboot now?" after NVIDIA driver install
+#    TRACEBLOC_TRAINING_RESOURCES="cpu=4,memory=16Gi"  CPU/RAM each training run
+#                                may use (default cpu=2,memory=8Gi; sets requests==limits)
 # =============================================================================
 
 set -euo pipefail

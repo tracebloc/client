@@ -50,6 +50,36 @@ _extract_yaml_value() {
   _strip_paste_garbage "$line"
 }
 
+# detect_installed_client — report the tracebloc client already installed on this
+# cluster, if any, via the globals INSTALLED_CLIENT_ID / INSTALLED_CLIENT_NS
+# (both empty when none is found). Enumerate client-chart releases across ALL
+# namespaces WITHOUT jq (not a guaranteed prerequisite): helm's NAME/NAMESPACE are
+# the first two whitespace-free columns and the CHART column matches
+# `client-<ver>`, the same jq-free parse _chart_version uses. Shared by the
+# pre-provision ownership pre-flight (#303) and the Helm-step one-client guard so
+# the two can never disagree on "what already runs here". Always returns 0 — a
+# missing helm / unreadable values just yields the empty (no-client) result.
+detect_installed_client() {
+  INSTALLED_CLIENT_ID=""; INSTALLED_CLIENT_NS=""
+  local _gvf _rel _ns _id
+  # A mktemp failure is an environment error, NOT proof of "no client here" —
+  # treating it as such would silently skip the one-client / #303 ownership
+  # guards. Fall back to a path in a dir we own (same reasoning as the create
+  # step: never a predictable world-writable /tmp path under sudo). Only give up
+  # (empty result) when there is genuinely nowhere to write.
+  _gvf="$(mktemp 2>/dev/null)" || _gvf="${HOST_DATA_DIR:+${HOST_DATA_DIR}/.tb-detect-values.$$}"
+  [[ -n "$_gvf" ]] || return 0
+  while read -r _rel _ns; do
+    [[ -z "$_rel" ]] && continue
+    if helm get values "$_rel" -n "$_ns" > "$_gvf" 2>/dev/null; then
+      _id="$(_extract_yaml_value "$_gvf" clientId)"
+      [[ -n "$_id" ]] && { INSTALLED_CLIENT_ID="$_id"; INSTALLED_CLIENT_NS="$_ns"; break; }
+    fi
+  done < <(helm list -A 2>/dev/null | awk '/[[:space:]]client-[0-9]/ { print $1, $2 }')
+  rm -f "$_gvf"
+  return 0
+}
+
 # Strip ANSI escape sequences and C0 control characters from a value.
 # `read -r -s` captures whatever the terminal sends — this can include:
 #   • bracketed-paste wrappers:  ESC[200~ ... ESC[201~
@@ -363,7 +393,7 @@ install_client_helm() {
 
   prompt_header "Connect this machine to a tracebloc client."
   hint "A client links your secure environment to the tracebloc"
-  hint "platform so vendors can submit models for evaluation."
+  hint "platform so other collaborators can submit models for evaluation."
   echo ""
   hint "Already have one? Enter its credentials below — or set"
   hint "TRACEBLOC_CLIENT_ID / TRACEBLOC_CLIENT_PASSWORD to skip this prompt."
@@ -430,23 +460,12 @@ install_client_helm() {
   # would silently re-point the machine — so we stop and let the operator
   # decide. The same clientId is a normal re-run/upgrade and passes through.
   # Check ANY namespace: a fresh install lands in `tracebloc`, but an install
-  # from an older installer version may be in a different namespace. Enumerate
-  # client-chart releases WITHOUT jq — jq is not a guaranteed prerequisite here,
-  # and a jq-only enumeration whose fallback checked a single namespace would miss
-  # an older release under the fixed `tracebloc` namespace once the minted slug
-  # differs, forking a second release. helm's NAME/NAMESPACE are the first two
-  # columns and never contain whitespace, and the CHART column matches
-  # `client-<ver>` — the same jq-free parse _chart_version uses.
-  local existing_id="" existing_ns="" _gvf _rel _ns _id
-  _gvf="$(mktemp)"
-  while read -r _rel _ns; do
-    [[ -z "$_rel" ]] && continue
-    if helm get values "$_rel" -n "$_ns" > "$_gvf" 2>/dev/null; then
-      _id="$(_extract_yaml_value "$_gvf" clientId)"
-      [[ -n "$_id" ]] && { existing_id="$_id"; existing_ns="$_ns"; break; }
-    fi
-  done < <(helm list -A 2>/dev/null | awk '/[[:space:]]client-[0-9]/ { print $1, $2 }')
-  rm -f "$_gvf"
+  # from an older installer version may be in a different namespace. The jq-free
+  # enumeration lives in detect_installed_client (shared with the #303 pre-provision
+  # pre-flight so the two can't disagree on what's installed here).
+  local existing_id="" existing_ns=""
+  detect_installed_client
+  existing_id="$INSTALLED_CLIENT_ID"; existing_ns="$INSTALLED_CLIENT_NS"
   if [[ -n "$existing_id" && "$existing_id" != "$TB_CLIENT_ID" ]]; then
     echo ""
     warn "This machine already runs the tracebloc client '${existing_id}' (namespace '${existing_ns}')."
@@ -505,8 +524,11 @@ install_client_helm() {
 
 env:
 $([ -n "${CLIENT_ENV:-}" ] && printf '  CLIENT_ENV: "%s"\n' "$CLIENT_ENV")${proxy_env_yaml}
-  RESOURCE_LIMITS: "cpu=2,memory=8Gi"
-  RESOURCE_REQUESTS: "cpu=2,memory=8Gi"
+  # Training size: how much CPU/RAM each training run gets. One knob sets
+  # requests == limits (Guaranteed QoS; client-runtime keeps them in lockstep).
+  # Set at install time with TRACEBLOC_TRAINING_RESOURCES="cpu=4,memory=16Gi".
+  RESOURCE_LIMITS: "${TRACEBLOC_TRAINING_RESOURCES:-cpu=2,memory=8Gi}"
+  RESOURCE_REQUESTS: "${TRACEBLOC_TRAINING_RESOURCES:-cpu=2,memory=8Gi}"
   GPU_LIMITS: "$gpu_val"
   GPU_REQUESTS: "$gpu_val"
   RUNTIME_CLASS_NAME: ""

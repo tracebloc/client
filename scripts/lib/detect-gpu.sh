@@ -9,17 +9,10 @@ detect_gpu() {
   if [[ "$OS" == "Darwin" ]]; then
     if [[ "$ARCH" == "arm64" ]]; then
       GPU_VENDOR="apple_silicon"
-      echo ""
-      warn "Apple Silicon detected."
-      info "GPU acceleration is not yet available on macOS."
-      info "Your environment will run in CPU mode."
-      echo ""
-      hint "For GPU-accelerated model training,"
-      hint "deploy tracebloc on a Linux machine with NVIDIA GPUs."
-    else
-      warn "Intel Mac detected."
-      info "Your environment will run in CPU mode."
     fi
+    echo ""
+    warn "GPU training isn't supported on macOS yet — this machine will run in CPU mode."
+    hint "For GPU-accelerated training, deploy on a Linux machine with NVIDIA GPUs."
     return
   fi
 
