@@ -5,7 +5,7 @@
 #  Installs the `tracebloc` command-line tool so the user can push datasets to
 #  the client they just set up:
 #
-#      tracebloc dataset push ./data
+#      tracebloc data ingest ./data
 #
 #  It does NOT reimplement any install logic — it runs the CLI's own released
 #  installer (github.com/tracebloc/cli), which downloads the right build for
@@ -94,7 +94,7 @@ _verify_tracebloc_cli() {
     # too; otherwise be honest and say how to use it now.
     # `tracebloc version` is the real proof; keep it cosmetic (never let a failing
     # version call or a SIGPIPE flip the outcome). The canonical "tracebloc
-    # dataset push ./data" next step lives in the summary's "What to do next".
+    # data ingest ./data" next step lives in the summary's "What to do next".
     local ver; ver="$(tracebloc version 2>/dev/null | head -1 || true)"
     if has tracebloc; then
       # Usable right now AND in new terminals — the fully-clean verdict.
@@ -113,7 +113,7 @@ _verify_tracebloc_cli() {
       local rc; rc="$(_cli_rc_for_shell || true)"
       hint "This shell won't see it yet — open a new terminal, or load it now:  source ${rc}"
     fi
-    info "Then the 'tracebloc dataset push ./data' step below will work."
+    info "Then the 'tracebloc data ingest ./data' step below will work."
     return 0
   fi
 
@@ -137,7 +137,7 @@ _verify_tracebloc_cli() {
     hint "  echo '${export_line}' >> ${rc}"
     hint "  source ${rc}"
   fi
-  info "Then the 'tracebloc dataset push ./data' step below will work."
+  info "Then the 'tracebloc data ingest ./data' step below will work."
   return 0
 }
 
@@ -153,7 +153,7 @@ install_tracebloc_cli() {
     info "tracebloc CLI already present${ver:+ ($ver)} — re-running its installer to pick up the latest."
   fi
 
-  info "Installing the tracebloc CLI (dataset push / cluster info / dataset rm)…"
+  info "Installing the tracebloc CLI (data ingest / cluster info / data delete)…"
 
   local installer
   installer="$(mktemp)" || { warn "Couldn't install the tracebloc CLI (no temp dir) — your client is set up fine."; return 0; }
