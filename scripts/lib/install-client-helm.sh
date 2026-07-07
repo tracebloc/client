@@ -518,8 +518,11 @@ install_client_helm() {
 
 env:
 $([ -n "${CLIENT_ENV:-}" ] && printf '  CLIENT_ENV: "%s"\n' "$CLIENT_ENV")${proxy_env_yaml}
-  RESOURCE_LIMITS: "cpu=2,memory=8Gi"
-  RESOURCE_REQUESTS: "cpu=2,memory=8Gi"
+  # Training size: how much CPU/RAM each training run gets. One knob sets
+  # requests == limits (Guaranteed QoS; client-runtime keeps them in lockstep).
+  # Set at install time with TRACEBLOC_TRAINING_RESOURCES="cpu=4,memory=16Gi".
+  RESOURCE_LIMITS: "${TRACEBLOC_TRAINING_RESOURCES:-cpu=2,memory=8Gi}"
+  RESOURCE_REQUESTS: "${TRACEBLOC_TRAINING_RESOURCES:-cpu=2,memory=8Gi}"
   GPU_LIMITS: "$gpu_val"
   GPU_REQUESTS: "$gpu_val"
   RUNTIME_CLASS_NAME: ""
