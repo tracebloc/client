@@ -323,14 +323,16 @@ images:
     # until this is moved to `0.6` (or set to `0` for minor auto-track too).
     # `latest` is rejected by the schema.
     #
-    # Pinned to the 0.5 line so the spawned ingestor supports the full task
-    # catalogue jobs-manager now validates at submit time — sentence_pair_
-    # classification and embeddings first ship in v0.5.6. The 0.3 line only
-    # supported 11 categories; leaving this at 0.3 while client-runtime's
-    # ingest schema tracks the newer categories re-opens the submit-vs-run
-    # drift bug (categories accepted at submit that the spawned image can't
-    # process). See client-runtime#162 discussion.
-    tag: "0.5"
+    # Pinned to the 0.6 line so the spawned ingestor carries the current
+    # ingestion correctness fixes — case/whitespace label-column resolution
+    # (data-ingestors#340) and UTF-8 BOM header handling (#338) — and still
+    # supports the full task catalogue jobs-manager validates at submit time
+    # (sentence_pair_classification and embeddings shipped in v0.5.6). Keep
+    # this tracking the current line: leaving it on an older line while
+    # client-runtime's ingest schema tracks newer categories re-opens the
+    # submit-vs-run drift bug (categories accepted at submit that the spawned
+    # image can't process). See client-runtime#162 discussion.
+    tag: "0.6"
     # Opt-in pin. Empty (default) = spawn by the floating `tag` above. Set to
     # a canonical multi-arch digest to lock all ingestion Jobs to one exact
     # image (see the comment block above). Last known-good baseline, for easy
