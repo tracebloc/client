@@ -157,9 +157,17 @@ _backend_url() {
 verify_credentials() {
   local client_id="$1" client_password="$2" backend code
   backend="$(_backend_url)"
-  code=$(curl -sS -m 60 -o /dev/null -w '%{http_code}' \
+  # SECURITY: never put the password on curl's argv — it would be world-readable
+  # via `ps` / /proc/<pid>/cmdline for the request's lifetime, and tracebloc runs
+  # on shared institutional/on-prem compute where a co-tenant could scrape it
+  # (CWE-214). Feed it through stdin instead: `--data-urlencode password@-` reads
+  # the value from stdin and URL-encodes it, so the secret never appears in the
+  # process table. `printf '%s'` is a bash builtin (no fork, no argv exposure) and
+  # emits no trailing newline (a here-string `<<<` would append one and corrupt
+  # the password). The username (client_id, a UUID) isn't secret, so it stays inline.
+  code=$(printf '%s' "$client_password" | curl -sS -m 60 -o /dev/null -w '%{http_code}' \
     --data-urlencode "username=${client_id}" \
-    --data-urlencode "password=${client_password}" \
+    --data-urlencode "password@-" \
     "${backend}api-token-auth/" 2>/dev/null) || code="000"
   case "$code" in
     200) printf 'valid' ;;
