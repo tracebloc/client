@@ -315,6 +315,19 @@ _reconcile_adopted_client() {
   return 0
 }
 
+# TB_TTY is where interactive credential prompts READ from. Under `curl … | bash`
+# stdin is the piped script, not the terminal, so an unredirected `read` hits EOF
+# and (under set -e) aborts the installer with an opaque failure — read the
+# controlling terminal directly instead. Overridable so tests can feed canned
+# input on stdin (TB_TTY=/dev/stdin).
+: "${TB_TTY:=/dev/tty}"
+
+# _tty_available: true when there's a terminal we can prompt on (TB_TTY readable).
+# Mirrors provision.sh's _prompt_tty; defined locally because provision.sh is
+# sourced conditionally and AFTER this file, so its helper may not exist when
+# install_client_helm runs.
+_tty_available() { [[ -r "$TB_TTY" ]]; }
+
 install_client_helm() {
   # ── Step 4/5: Install tracebloc client (credential + namespace provisioned
   #    in Step 3 by provision_client, or supplied via dual-mode) ─────────────
@@ -347,10 +360,10 @@ install_client_helm() {
     _noninteractive_creds=1
   fi
 
-  if [[ "$_noninteractive_creds" == 0 && -f "$values_file" && "${TRACEBLOC_CLIENT_ADOPTED:-}" != 1 ]]; then
+  if [[ "$_noninteractive_creds" == 0 && -f "$values_file" && "${TRACEBLOC_CLIENT_ADOPTED:-}" != 1 ]] && _tty_available; then
     hint "Previous configuration found."
     while true; do
-      read -r -p "  Use previous settings as defaults? [Y/n]: " use_existing
+      read -r -p "  Use previous settings as defaults? [Y/n]: " use_existing <"$TB_TTY"
       use_existing="$(echo "${use_existing}" | tr '[:upper:]' '[:lower:]')"
       [[ "$use_existing" == "y" || "$use_existing" == "yes" || "$use_existing" == "n" || "$use_existing" == "no" || -z "$use_existing" ]] && break
       warn "Please enter y or n."
@@ -399,6 +412,17 @@ install_client_helm() {
     esac
   else
 
+  # We must prompt for credentials, but there's no terminal to prompt on
+  # (typically `curl … | bash`, where stdin is the piped script). Without a tty
+  # the reads below would hit EOF and abort under set -e with an opaque error —
+  # so fail here with an actionable one instead.
+  if ! _tty_available; then
+    error "No credentials supplied and no terminal to prompt on.
+  Set TRACEBLOC_CLIENT_ID and TRACEBLOC_CLIENT_PASSWORD (find them at
+  https://ai.tracebloc.io/clients), then re-run — under \`curl … | bash\` the
+  prompt cannot read your input."
+  fi
+
   prompt_header "Connect this machine to a tracebloc client."
   hint "A client links your secure environment to the tracebloc"
   hint "platform so other collaborators can submit models for evaluation."
@@ -416,20 +440,20 @@ install_client_helm() {
   local _cred_attempt=0 _cred_max=5 _cred_status
   while true; do
     if [[ -n "$default_client_id" ]]; then
-      read -r -p "  Client ID [${default_client_id}]: " TB_CLIENT_ID_INPUT
+      read -r -p "  Client ID [${default_client_id}]: " TB_CLIENT_ID_INPUT <"$TB_TTY"
       TB_CLIENT_ID="${TB_CLIENT_ID_INPUT:-$default_client_id}"
     else
-      read -r -p "  Client ID: " TB_CLIENT_ID
+      read -r -p "  Client ID: " TB_CLIENT_ID <"$TB_TTY"
     fi
     TB_CLIENT_ID=$(_sanitize_credential "$TB_CLIENT_ID")
     if [[ -z "$TB_CLIENT_ID" ]]; then warn "Client ID cannot be empty."; continue; fi
 
     if [[ -n "$default_client_password" ]]; then
-      read -r -s -p "  Client password [press Enter to keep existing]: " TB_CLIENT_PASSWORD_INPUT
+      read -r -s -p "  Client password [press Enter to keep existing]: " TB_CLIENT_PASSWORD_INPUT <"$TB_TTY"
       echo ""
       TB_CLIENT_PASSWORD="${TB_CLIENT_PASSWORD_INPUT:-$default_client_password}"
     else
-      read -r -s -p "  Client password: " TB_CLIENT_PASSWORD
+      read -r -s -p "  Client password: " TB_CLIENT_PASSWORD <"$TB_TTY"
       echo ""
     fi
     TB_CLIENT_PASSWORD=$(_sanitize_credential "$TB_CLIENT_PASSWORD")
