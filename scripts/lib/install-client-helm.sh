@@ -157,9 +157,17 @@ _backend_url() {
 verify_credentials() {
   local client_id="$1" client_password="$2" backend code
   backend="$(_backend_url)"
-  code=$(curl -sS -m 60 -o /dev/null -w '%{http_code}' \
+  # SECURITY: never put the password on curl's argv — it would be world-readable
+  # via `ps` / /proc/<pid>/cmdline for the request's lifetime, and tracebloc runs
+  # on shared institutional/on-prem compute where a co-tenant could scrape it
+  # (CWE-214). Feed it through stdin instead: `--data-urlencode password@-` reads
+  # the value from stdin and URL-encodes it, so the secret never appears in the
+  # process table. `printf '%s'` is a bash builtin (no fork, no argv exposure) and
+  # emits no trailing newline (a here-string `<<<` would append one and corrupt
+  # the password). The username (client_id, a UUID) isn't secret, so it stays inline.
+  code=$(printf '%s' "$client_password" | curl -sS -m 60 -o /dev/null -w '%{http_code}' \
     --data-urlencode "username=${client_id}" \
-    --data-urlencode "password=${client_password}" \
+    --data-urlencode "password@-" \
     "${backend}api-token-auth/" 2>/dev/null) || code="000"
   case "$code" in
     200) printf 'valid' ;;
@@ -307,6 +315,33 @@ _reconcile_adopted_client() {
   return 0
 }
 
+# TB_TTY is where interactive credential prompts READ from. Under `curl … | bash`
+# stdin is the piped script, not the terminal, so an unredirected `read` hits EOF
+# and (under set -e) aborts the installer with an opaque failure — read the
+# controlling terminal directly instead. Overridable so tests can feed canned
+# input on stdin (TB_TTY=/dev/stdin).
+: "${TB_TTY:=/dev/tty}"
+
+# _tty_available: true when there's a terminal we can prompt on (TB_TTY readable).
+# Mirrors provision.sh's _prompt_tty; defined locally because provision.sh is
+# sourced conditionally and AFTER this file, so its helper may not exist when
+# install_client_helm runs.
+_tty_available() { [[ -r "$TB_TTY" ]]; }
+
+# _no_interactive_creds_die: abort with actionable env-var guidance when we can't
+# collect credentials interactively. Covers BOTH no-terminal-at-all AND a
+# readable-but-dead-input tty (non-PTY ssh, an IDE terminal, a drained/queued
+# tty): _tty_available only checks `-r`, so a `read <"$TB_TTY"` can still hit EOF
+# and would otherwise abort opaquely under set -e (Bugbot / #326 review) — the
+# same failure class the TB_TTY change set out to remove. Mirrors provision.sh,
+# whose name read breaks on rc!=0 and falls through to the same guidance.
+_no_interactive_creds_die() {
+  error "No credentials supplied and no terminal to prompt on.
+  Set TRACEBLOC_CLIENT_ID and TRACEBLOC_CLIENT_PASSWORD (find them at
+  https://ai.tracebloc.io/clients), then re-run — under \`curl … | bash\` the
+  prompt cannot read your input."
+}
+
 install_client_helm() {
   # ── Step 4/5: Install tracebloc client (credential + namespace provisioned
   #    in Step 3 by provision_client, or supplied via dual-mode) ─────────────
@@ -339,10 +374,10 @@ install_client_helm() {
     _noninteractive_creds=1
   fi
 
-  if [[ "$_noninteractive_creds" == 0 && -f "$values_file" && "${TRACEBLOC_CLIENT_ADOPTED:-}" != 1 ]]; then
+  if [[ "$_noninteractive_creds" == 0 && -f "$values_file" && "${TRACEBLOC_CLIENT_ADOPTED:-}" != 1 ]] && _tty_available; then
     hint "Previous configuration found."
     while true; do
-      read -r -p "  Use previous settings as defaults? [Y/n]: " use_existing
+      read -r -p "  Use previous settings as defaults? [Y/n]: " use_existing <"$TB_TTY" || _no_interactive_creds_die
       use_existing="$(echo "${use_existing}" | tr '[:upper:]' '[:lower:]')"
       [[ "$use_existing" == "y" || "$use_existing" == "yes" || "$use_existing" == "n" || "$use_existing" == "no" || -z "$use_existing" ]] && break
       warn "Please enter y or n."
@@ -391,6 +426,15 @@ install_client_helm() {
     esac
   else
 
+  # We must prompt for credentials, but there may be no terminal to prompt on
+  # (typically `curl … | bash`, where stdin is the piped script). Fail here with
+  # an actionable message rather than aborting opaquely under set -e. The
+  # per-read `|| _no_interactive_creds_die` guards below catch the harder case
+  # this cheap check can't: a tty that is readable (`-r`) but yields no input.
+  if ! _tty_available; then
+    _no_interactive_creds_die
+  fi
+
   prompt_header "Connect this machine to a tracebloc client."
   hint "A client links your secure environment to the tracebloc"
   hint "platform so other collaborators can submit models for evaluation."
@@ -408,20 +452,20 @@ install_client_helm() {
   local _cred_attempt=0 _cred_max=5 _cred_status
   while true; do
     if [[ -n "$default_client_id" ]]; then
-      read -r -p "  Client ID [${default_client_id}]: " TB_CLIENT_ID_INPUT
+      read -r -p "  Client ID [${default_client_id}]: " TB_CLIENT_ID_INPUT <"$TB_TTY" || _no_interactive_creds_die
       TB_CLIENT_ID="${TB_CLIENT_ID_INPUT:-$default_client_id}"
     else
-      read -r -p "  Client ID: " TB_CLIENT_ID
+      read -r -p "  Client ID: " TB_CLIENT_ID <"$TB_TTY" || _no_interactive_creds_die
     fi
     TB_CLIENT_ID=$(_sanitize_credential "$TB_CLIENT_ID")
     if [[ -z "$TB_CLIENT_ID" ]]; then warn "Client ID cannot be empty."; continue; fi
 
     if [[ -n "$default_client_password" ]]; then
-      read -r -s -p "  Client password [press Enter to keep existing]: " TB_CLIENT_PASSWORD_INPUT
+      read -r -s -p "  Client password [press Enter to keep existing]: " TB_CLIENT_PASSWORD_INPUT <"$TB_TTY" || _no_interactive_creds_die
       echo ""
       TB_CLIENT_PASSWORD="${TB_CLIENT_PASSWORD_INPUT:-$default_client_password}"
     else
-      read -r -s -p "  Client password: " TB_CLIENT_PASSWORD
+      read -r -s -p "  Client password: " TB_CLIENT_PASSWORD <"$TB_TTY" || _no_interactive_creds_die
       echo ""
     fi
     TB_CLIENT_PASSWORD=$(_sanitize_credential "$TB_CLIENT_PASSWORD")

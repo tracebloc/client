@@ -42,6 +42,11 @@ _cli_supports_provisioning() {
 # out as a function so tests can force the non-interactive path deterministically.
 _prompt_tty() { [[ -r /dev/tty && -w /dev/tty ]]; }
 
+# TB_TTY: where interactive prompts READ from. Under `curl | bash` stdin is the
+# piped installer, not the keyboard, so reads must come from the controlling
+# terminal. Overridable so tests can feed canned input on stdin (TB_TTY=/dev/stdin).
+: "${TB_TTY:=/dev/tty}"
+
 # _detect_location_zone: best-effort ISO country code for where this machine
 # physically runs, derived from the system timezone via the OS's OWN zone.tab —
 # no network call (privacy-preserving for on-prem installs) and no embedded zone
@@ -205,16 +210,30 @@ provision_client() {
   # /dev/tty (works under `curl | bash`, whose stdin isn't the terminal) > fail closed.
   local client_name="${TRACEBLOC_CLIENT_NAME:-}" client_location="${TRACEBLOC_CLIENT_LOCATION:-}"
   if [[ -z "$client_name" ]] && _prompt_tty; then
-    printf '\n  Name this client (shown on your tracebloc dashboard): ' >/dev/tty
-    IFS= read -r client_name </dev/tty || true
+    # Read the name from the terminal, RETRYING on an empty line instead of
+    # accepting it. A stray newline queued in the tty during the ~minute
+    # browser-approval wait above (type-ahead) would otherwise be read as an
+    # empty name and abort the install at the "name is required" error below
+    # (customer-reported 2026-07-09). A FAILED read (rc!=0 = EOF / no live input,
+    # e.g. a non-PTY ssh or IDE terminal) can't be fixed by re-prompting, so stop
+    # and let that actionable error fire. The prompt WRITE is guarded (|| true) so
+    # a test without a real /dev/tty doesn't abort; reads use TB_TTY.
+    local _name_try _name_read_ok
+    for _name_try in 1 2 3; do
+      printf '\n  Name this client (shown on your tracebloc dashboard): ' >/dev/tty 2>/dev/null || true
+      _name_read_ok=1; IFS= read -r client_name <"$TB_TTY" || _name_read_ok=0
+      client_name="${client_name#"${client_name%%[![:space:]]*}"}"; client_name="${client_name%"${client_name##*[![:space:]]}"}"
+      [[ -n "$client_name" ]] && break       # captured a name (incl. a no-newline partial)
+      [[ "$_name_read_ok" == 0 ]] && break    # EOF / no interactive input — retrying won't help
+    done
     if [[ -z "$client_location" ]]; then
       local _loc_detect _loc_zone _loc_tz _loc_try
       _loc_detect="$(_detect_location_zone)"
       _loc_zone="${_loc_detect%% *}"; _loc_tz="${_loc_detect#* }"
       if [[ -n "$_loc_zone" ]]; then
-        printf '  Location for carbon reporting — detected %s (from your timezone %s).\n' "$_loc_zone" "$_loc_tz" >/dev/tty
-        printf '    Press Enter to use it, or type another zone code: ' >/dev/tty
-        IFS= read -r client_location </dev/tty || true
+        printf '  Location for carbon reporting — detected %s (from your timezone %s).\n' "$_loc_zone" "$_loc_tz" >/dev/tty 2>/dev/null || true
+        printf '    Press Enter to use it, or type another zone code: ' >/dev/tty 2>/dev/null || true
+        IFS= read -r client_location <"$TB_TTY" || true
         # Trim BEFORE the non-empty check so a whitespace-only answer counts as
         # "just pressed Enter" and falls back to the detected zone.
         client_location="${client_location#"${client_location%%[![:space:]]*}"}"; client_location="${client_location%"${client_location##*[![:space:]]}"}"
@@ -226,8 +245,8 @@ provision_client() {
         # Optional-location ships with the next CLI release; then this prompt
         # goes away entirely (spec: silent, no location).
         for _loc_try in 1 2 3; do
-          printf '  Location zone for carbon reporting (e.g. DE): ' >/dev/tty
-          IFS= read -r client_location </dev/tty || true
+          printf '  Location zone for carbon reporting (e.g. DE): ' >/dev/tty 2>/dev/null || true
+          IFS= read -r client_location <"$TB_TTY" || true
           # Trim BEFORE the non-empty check: a whitespace-only answer must NOT
           # satisfy it, break the loop, and skip the "required" error below.
           client_location="${client_location#"${client_location%%[![:space:]]*}"}"; client_location="${client_location%"${client_location##*[![:space:]]}"}"
