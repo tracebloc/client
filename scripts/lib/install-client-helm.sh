@@ -301,15 +301,10 @@ _reconcile_adopted_client() {
 
   _ensure_release_dirs "$_ns"
 
-  local _hl; _hl="$(mktemp)"
-  if ! helm "${_args[@]}" > "$_hl" 2>&1; then
-    cat "$_hl" >> "${LOG_FILE:-/dev/null}" 2>/dev/null
-    cat "$_hl" >&2
-    rm -f "$_hl"
+  # Reconcile blocks too — same spinner treatment (RFC-0002 §2).
+  if ! spin_cmd "Reconciling the existing client…" helm "${_args[@]}"; then
     error "Reconcile of the existing client failed. Check the log for details: ${LOG_FILE:-}"
   fi
-  cat "$_hl" >> "${LOG_FILE:-/dev/null}" 2>/dev/null
-  rm -f "$_hl"
 
   kubectl config set-context --current --namespace "$_ns" >/dev/null 2>&1 || true
   return 0
@@ -623,20 +618,17 @@ EOF
   # root:root from kubelet's DirectoryOrCreate. See _ensure_release_dirs.
   _ensure_release_dirs "$TB_NAMESPACE"
 
-  local helm_log
-  helm_log="$(mktemp)"
-  if ! helm upgrade --install "$TB_NAMESPACE" "$chart_ref" \
+  # The chart install blocks ~10-15s (render + apply + image pull), so run it
+  # behind a spinner instead of a frozen terminal — spin_cmd streams helm output
+  # to $LOG_FILE and, on failure, tails the log to stderr. Honours RFC-0002 §2
+  # "progress on every wait".
+  if ! spin_cmd "Installing the tracebloc client…" \
+    helm upgrade --install "$TB_NAMESPACE" "$chart_ref" \
     --namespace "$TB_NAMESPACE" \
     --create-namespace \
-    --values "$values_file" > "$helm_log" 2>&1; then
-    log "Helm install failed — output:"
-    cat "$helm_log" >> "${LOG_FILE:-/dev/null}" 2>/dev/null
-    cat "$helm_log" >&2
-    rm -f "$helm_log"
+    --values "$values_file"; then
     error "Client installation failed. Check the log for details: ${LOG_FILE:-}"
   fi
-  cat "$helm_log" >> "${LOG_FILE:-/dev/null}" 2>/dev/null
-  rm -f "$helm_log"
 
   # Point the kubeconfig's current context at the client namespace, so kubectl and
   # the tracebloc CLI default to it with no -n / --namespace flag. Best-effort:
