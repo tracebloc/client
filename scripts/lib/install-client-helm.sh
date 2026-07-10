@@ -328,6 +328,20 @@ _reconcile_adopted_client() {
 # install_client_helm runs.
 _tty_available() { [[ -r "$TB_TTY" ]]; }
 
+# _no_interactive_creds_die: abort with actionable env-var guidance when we can't
+# collect credentials interactively. Covers BOTH no-terminal-at-all AND a
+# readable-but-dead-input tty (non-PTY ssh, an IDE terminal, a drained/queued
+# tty): _tty_available only checks `-r`, so a `read <"$TB_TTY"` can still hit EOF
+# and would otherwise abort opaquely under set -e (Bugbot / #326 review) — the
+# same failure class the TB_TTY change set out to remove. Mirrors provision.sh,
+# whose name read breaks on rc!=0 and falls through to the same guidance.
+_no_interactive_creds_die() {
+  error "No credentials supplied and no terminal to prompt on.
+  Set TRACEBLOC_CLIENT_ID and TRACEBLOC_CLIENT_PASSWORD (find them at
+  https://ai.tracebloc.io/clients), then re-run — under \`curl … | bash\` the
+  prompt cannot read your input."
+}
+
 install_client_helm() {
   # ── Step 4/5: Install tracebloc client (credential + namespace provisioned
   #    in Step 3 by provision_client, or supplied via dual-mode) ─────────────
@@ -363,7 +377,7 @@ install_client_helm() {
   if [[ "$_noninteractive_creds" == 0 && -f "$values_file" && "${TRACEBLOC_CLIENT_ADOPTED:-}" != 1 ]] && _tty_available; then
     hint "Previous configuration found."
     while true; do
-      read -r -p "  Use previous settings as defaults? [Y/n]: " use_existing <"$TB_TTY"
+      read -r -p "  Use previous settings as defaults? [Y/n]: " use_existing <"$TB_TTY" || _no_interactive_creds_die
       use_existing="$(echo "${use_existing}" | tr '[:upper:]' '[:lower:]')"
       [[ "$use_existing" == "y" || "$use_existing" == "yes" || "$use_existing" == "n" || "$use_existing" == "no" || -z "$use_existing" ]] && break
       warn "Please enter y or n."
@@ -412,15 +426,13 @@ install_client_helm() {
     esac
   else
 
-  # We must prompt for credentials, but there's no terminal to prompt on
-  # (typically `curl … | bash`, where stdin is the piped script). Without a tty
-  # the reads below would hit EOF and abort under set -e with an opaque error —
-  # so fail here with an actionable one instead.
+  # We must prompt for credentials, but there may be no terminal to prompt on
+  # (typically `curl … | bash`, where stdin is the piped script). Fail here with
+  # an actionable message rather than aborting opaquely under set -e. The
+  # per-read `|| _no_interactive_creds_die` guards below catch the harder case
+  # this cheap check can't: a tty that is readable (`-r`) but yields no input.
   if ! _tty_available; then
-    error "No credentials supplied and no terminal to prompt on.
-  Set TRACEBLOC_CLIENT_ID and TRACEBLOC_CLIENT_PASSWORD (find them at
-  https://ai.tracebloc.io/clients), then re-run — under \`curl … | bash\` the
-  prompt cannot read your input."
+    _no_interactive_creds_die
   fi
 
   prompt_header "Connect this machine to a tracebloc client."
@@ -440,20 +452,20 @@ install_client_helm() {
   local _cred_attempt=0 _cred_max=5 _cred_status
   while true; do
     if [[ -n "$default_client_id" ]]; then
-      read -r -p "  Client ID [${default_client_id}]: " TB_CLIENT_ID_INPUT <"$TB_TTY"
+      read -r -p "  Client ID [${default_client_id}]: " TB_CLIENT_ID_INPUT <"$TB_TTY" || _no_interactive_creds_die
       TB_CLIENT_ID="${TB_CLIENT_ID_INPUT:-$default_client_id}"
     else
-      read -r -p "  Client ID: " TB_CLIENT_ID <"$TB_TTY"
+      read -r -p "  Client ID: " TB_CLIENT_ID <"$TB_TTY" || _no_interactive_creds_die
     fi
     TB_CLIENT_ID=$(_sanitize_credential "$TB_CLIENT_ID")
     if [[ -z "$TB_CLIENT_ID" ]]; then warn "Client ID cannot be empty."; continue; fi
 
     if [[ -n "$default_client_password" ]]; then
-      read -r -s -p "  Client password [press Enter to keep existing]: " TB_CLIENT_PASSWORD_INPUT <"$TB_TTY"
+      read -r -s -p "  Client password [press Enter to keep existing]: " TB_CLIENT_PASSWORD_INPUT <"$TB_TTY" || _no_interactive_creds_die
       echo ""
       TB_CLIENT_PASSWORD="${TB_CLIENT_PASSWORD_INPUT:-$default_client_password}"
     else
-      read -r -s -p "  Client password: " TB_CLIENT_PASSWORD <"$TB_TTY"
+      read -r -s -p "  Client password: " TB_CLIENT_PASSWORD <"$TB_TTY" || _no_interactive_creds_die
       echo ""
     fi
     TB_CLIENT_PASSWORD=$(_sanitize_credential "$TB_CLIENT_PASSWORD")

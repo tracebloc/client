@@ -326,6 +326,27 @@ setup() {
   [[ "$output" != *"helm upgrade"* ]]
 }
 
+@test "install_client_helm: readable-but-dead-input tty (EOF) fails fast, doesn't abort mid-read (#326 review)" {
+  # _tty_available passes ([[ -r "$TB_TTY" ]] is true for /dev/stdin backed by
+  # /dev/null), but the first credential read hits EOF — the non-PTY-ssh / IDE /
+  # drained-tty class. The per-read `|| _no_interactive_creds_die` guard must
+  # surface the actionable env-var error instead of a bare `read` aborting the
+  # installer opaquely under set -e (Bugbot + Asad on #326).
+  HOST_DATA_DIR="$BATS_TEST_TMPDIR/data"; mkdir -p "$HOST_DATA_DIR"
+  _ensure_tracebloc_dirs() { :; }
+  _ensure_release_dirs() { :; }
+  _ensure_helm_runnable() { :; }
+  helm() { record "helm $*"; return 0; }
+  verify_credentials() { printf valid; }
+  unset TRACEBLOC_CLIENT_ID TRACEBLOC_CLIENT_PASSWORD
+  TB_TTY=/dev/stdin
+  run install_client_helm </dev/null   # tty is readable, but yields EOF immediately
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"TRACEBLOC_CLIENT_ID"* ]]
+  run mock_calls
+  [[ "$output" != *"helm upgrade"* ]]
+}
+
 @test "install_client_helm: points kubeconfig at the client namespace (so the CLI needs no -n)" {
   HOST_DATA_DIR="$BATS_TEST_TMPDIR/data"; mkdir -p "$HOST_DATA_DIR"
   _ensure_tracebloc_dirs() { :; }
