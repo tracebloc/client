@@ -318,21 +318,22 @@ images:
     repository: "ghcr.io/tracebloc/ingestor"
     # Floating tag spawned by default (imagePullPolicy=Always). The team's
     # ghcr.io publishing convention uses semver-style float tags — `0` tracks
-    # the latest 0.x, `0.5` tracks the latest 0.5.x patch. `0.5` (patch-only
-    # auto-track) is the default: a future 0.6 release will NOT be picked up
-    # until this is moved to `0.6` (or set to `0` for minor auto-track too).
+    # the latest 0.x, `0.7` tracks the latest 0.7.x patch. `0.7` (patch-only
+    # auto-track) is the default: a future 0.8 release will NOT be picked up
+    # until this is moved to `0.8` (or set to `0` for minor auto-track too).
     # `latest` is rejected by the schema.
     #
-    # Pinned to the 0.6 line so the spawned ingestor carries the current
-    # ingestion correctness fixes — case/whitespace label-column resolution
-    # (data-ingestors#340) and UTF-8 BOM header handling (#338) — and still
-    # supports the full task catalogue jobs-manager validates at submit time
-    # (sentence_pair_classification and embeddings shipped in v0.5.6). Keep
-    # this tracking the current line: leaving it on an older line while
-    # client-runtime's ingest schema tracks newer categories re-opens the
-    # submit-vs-run drift bug (categories accepted at submit that the spawned
-    # image can't process). See client-runtime#162 discussion.
-    tag: "0.6"
+    # Pinned to the 0.7 line so the spawned ingestor carries the current
+    # ingestion correctness fixes and task catalogue — case/whitespace
+    # label-column resolution (data-ingestors#340) and UTF-8 BOM header
+    # handling (#338) from the 0.6 line, plus 0.7's tabular schema-inference
+    # rules (#349), the semantic-segmentation mask_id contract (#358), and the
+    # minimum-image-size floor (#348). Keep this tracking the current line:
+    # leaving it on an older line while client-runtime's ingest schema tracks
+    # newer categories re-opens the submit-vs-run drift bug (categories
+    # accepted at submit that the spawned image can't process). See
+    # client-runtime#162 discussion.
+    tag: "0.7"
     # Opt-in pin. Empty (default) = spawn by the floating `tag` above. Set to
     # a canonical multi-arch digest to lock all ingestion Jobs to one exact
     # image (see the comment block above). Last known-good baseline, for easy

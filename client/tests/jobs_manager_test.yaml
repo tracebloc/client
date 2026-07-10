@@ -107,7 +107,7 @@ tests:
           path: spec.template.spec.containers[0].env
           content:
             name: INGESTOR_IMAGE_TAG
-            value: "0.6"
+            value: "0.7"
       - contains:
           path: spec.template.spec.containers[0].env
           content:
