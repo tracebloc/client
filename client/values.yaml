@@ -336,8 +336,16 @@ images:
     tag: "0.7"
     # Opt-in pin. Empty (default) = spawn by the floating `tag` above. Set to
     # a canonical multi-arch digest to lock all ingestion Jobs to one exact
-    # image (see the comment block above). Last known-good baseline, for easy
-    # pinning: v0.3.6 (cumulative NULL / empty-value ingestion fixes —
+    # image (see the comment block above).
+    #
+    # PROD REPRODUCIBILITY (backend#1028): the digest is pinned PROD-ONLY via
+    # the `client/values-prod.yaml` overlay, layered on top of this file at
+    # prod-release time. Leave it EMPTY here so dev/staging (which do NOT layer
+    # the overlay) keep floating on `tag` and are never frozen on a stale build.
+    # Regenerate the prod pin with `scripts/resolve-ingestor-digest.sh`.
+    #
+    # Last known-good baseline, for easy manual pinning: v0.3.6 (cumulative
+    # NULL / empty-value ingestion fixes —
     # data-ingestors#150/#167/#168/#170/#172/#176/#179):
     #   sha256:dfdaa7e633a8df0f46b403e9422eba5c16bdb7d9c39047e6d3738f9e38fbdba8
     digest: ""

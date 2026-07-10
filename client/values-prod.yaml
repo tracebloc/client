@@ -1,0 +1,46 @@
+# ============================================================
+# Production overlay — reproducible prod installs (backend#1028)
+# ============================================================
+#
+# Layer this AFTER the base values.yaml, PROD ONLY:
+#
+#   helm upgrade --install <release> ./client \
+#     -f client/values.yaml \
+#     -f client/values-prod.yaml
+#
+# (or `-f values-prod.yaml` alongside the installer-generated values file).
+#
+# WHAT THIS DOES
+#   Pins the spawned ingestion image to an exact multi-arch digest so a prod
+#   cluster runs a known, certified ingestor build — reproducible regardless
+#   of what the floating `images.ingestor.tag` (0.7) later resolves to. With
+#   the digest set, jobs-manager spawns every ingestion Job by `repo@digest`
+#   and drops imagePullPolicy to IfNotPresent (see jobs-manager-deployment.yaml
+#   and client-runtime submit_ingestion_run._build_image_reference).
+#
+# WHY PROD ONLY
+#   Dev and staging install WITHOUT this overlay and keep the base default
+#   (`images.ingestor.digest: ""`) — floating `0.7`, imagePullPolicy=Always —
+#   so they always pick up the latest published 0.7.x patch at ingestion
+#   submit time and are never frozen on a stale build. Only prod trades that
+#   auto-tracking for a reproducible, audited pin.
+#
+#
+# RELEASE CONVENTION — re-verify the digest every time the prod ingestor
+# line is cut. The digest below MUST equal the current published
+# `images.ingestor.tag` multi-arch index. Resolve it with the helper:
+#
+#   scripts/resolve-ingestor-digest.sh 0.7            # print the index digest
+#   scripts/resolve-ingestor-digest.sh 0.7 --write    # patch this file in place
+#
+# then commit the change. NOTE: CI's `ingestor-multiarch` guard
+# (helm-ci.yaml) inspects the base `client/values.yaml` digest only — it does
+# NOT read this overlay — so it does not validate the digest below. The helper
+# above performs the multi-arch check at resolve time; re-verify by hand at
+# each prod cut (the `# VERIFIED …` note on the digest is the audit trail).
+images:
+  ingestor:
+    # ghcr.io/tracebloc/ingestor multi-arch index for the 0.7 line.
+    # v0.7.0 (== tag `0.7` / `0.7.0`) — VERIFIED against ghcr.io 2026-07-10
+    # (linux/amd64 + linux/arm64 OCI image index). Re-verify at each prod cut.
+    digest: "sha256:78f21a08d1fb186b9764ad96090dcaf9c381c6407c7778f2085a56dea2d8f117"
