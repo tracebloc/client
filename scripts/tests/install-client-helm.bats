@@ -8,6 +8,10 @@ setup() {
   MOCK_CALLS="$(mktemp)"
   GPU_VENDOR=none
   CLIENT_ENV=""
+  # Interactive credential reads come from TB_TTY (the controlling terminal in
+  # production, so prompts survive `curl … | bash`). Point it at stdin so the
+  # tests below can feed canned input via a heredoc.
+  export TB_TTY=/dev/stdin
   # A proxy inherited from the CI runner would otherwise leak proxy keys into
   # the generated values.yaml and make the proxy assertions non-deterministic.
   unset HTTP_PROXY HTTPS_PROXY NO_PROXY http_proxy https_proxy no_proxy
@@ -299,6 +303,46 @@ setup() {
   run install_client_helm </dev/null
   [ "$status" -ne 0 ]
   [[ "$output" == *"rejected"* ]]
+  run mock_calls
+  [[ "$output" != *"helm upgrade"* ]]
+}
+
+@test "install_client_helm: no credentials + no terminal -> actionable error, no helm (curl|bash)" {
+  # Reproduces `curl … | bash` with no env creds: TB_TTY points at a path that
+  # can't be read, so we must fail with a clear "set TRACEBLOC_CLIENT_*" message
+  # instead of aborting on an EOF read under set -e.
+  HOST_DATA_DIR="$BATS_TEST_TMPDIR/data"; mkdir -p "$HOST_DATA_DIR"
+  _ensure_tracebloc_dirs() { :; }
+  _ensure_release_dirs() { :; }
+  _ensure_helm_runnable() { :; }
+  helm() { record "helm $*"; return 0; }
+  verify_credentials() { printf valid; }
+  unset TRACEBLOC_CLIENT_ID TRACEBLOC_CLIENT_PASSWORD
+  export TB_TTY="$BATS_TEST_TMPDIR/no-such-tty"
+  run install_client_helm </dev/null
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"TRACEBLOC_CLIENT_ID"* ]]
+  run mock_calls
+  [[ "$output" != *"helm upgrade"* ]]
+}
+
+@test "install_client_helm: readable-but-dead-input tty (EOF) fails fast, doesn't abort mid-read (#326 review)" {
+  # _tty_available passes ([[ -r "$TB_TTY" ]] is true for /dev/stdin backed by
+  # /dev/null), but the first credential read hits EOF — the non-PTY-ssh / IDE /
+  # drained-tty class. The per-read `|| _no_interactive_creds_die` guard must
+  # surface the actionable env-var error instead of a bare `read` aborting the
+  # installer opaquely under set -e (Bugbot + Asad on #326).
+  HOST_DATA_DIR="$BATS_TEST_TMPDIR/data"; mkdir -p "$HOST_DATA_DIR"
+  _ensure_tracebloc_dirs() { :; }
+  _ensure_release_dirs() { :; }
+  _ensure_helm_runnable() { :; }
+  helm() { record "helm $*"; return 0; }
+  verify_credentials() { printf valid; }
+  unset TRACEBLOC_CLIENT_ID TRACEBLOC_CLIENT_PASSWORD
+  TB_TTY=/dev/stdin
+  run install_client_helm </dev/null   # tty is readable, but yields EOF immediately
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"TRACEBLOC_CLIENT_ID"* ]]
   run mock_calls
   [[ "$output" != *"helm upgrade"* ]]
 }

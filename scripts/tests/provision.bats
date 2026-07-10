@@ -250,3 +250,34 @@ _stub_tracebloc() {
   # and it must not have called client create (no argv recorded)
   [ ! -s "$CREATE_ARGS_FILE" ]
 }
+
+@test "provision_client: type-ahead blank lines are re-prompted, not accepted as the name (2026-07-09)" {
+  # Regression: a stray newline queued in the tty during the browser-approval
+  # wait was read as an empty name and aborted the install. The name read must
+  # RETRY past empty lines and still capture the real name. TB_TTY=/dev/stdin
+  # lets us feed the queued blanks + the name on stdin.
+  unset TRACEBLOC_CLIENT_NAME
+  export TRACEBLOC_CLIENT_LOCATION="DE"   # skip the location sub-prompt; isolate the name read
+  _prompt_tty() { return 0; }             # a terminal IS available
+  TB_TTY=/dev/stdin
+  _stub_tracebloc 'TRACEBLOC_CLIENT_ID=1\nTRACEBLOC_CLIENT_PASSWORD=p\nTB_NAMESPACE=ns\n'
+  run provision_client <<< $'\n\nMyBox\n'  # two type-ahead blanks, then the real name
+  [ "$status" -eq 0 ]
+  run cat "$CREATE_ARGS_FILE"
+  [[ "$output" == *"--name MyBox"* ]]      # the real name survived the stray blanks
+}
+
+@test "provision_client: a dead input tty (EOF, no keystrokes) fails fast with the actionable error" {
+  # _prompt_tty passes (a controlling terminal exists) but the read side yields
+  # no interactive input (EOF) — e.g. a non-PTY ssh / IDE terminal. Must NOT loop
+  # or hang, and must surface the set-TRACEBLOC_CLIENT_NAME guidance.
+  unset TRACEBLOC_CLIENT_NAME
+  export TRACEBLOC_CLIENT_LOCATION="DE"
+  _prompt_tty() { return 0; }
+  TB_TTY=/dev/stdin
+  _stub_tracebloc 'TRACEBLOC_CLIENT_ID=1\nTRACEBLOC_CLIENT_PASSWORD=p\nTB_NAMESPACE=ns\n'
+  run provision_client </dev/null          # read returns EOF immediately
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"name for this client is required"* ]]
+  [ ! -s "$CREATE_ARGS_FILE" ]
+}

@@ -267,7 +267,13 @@ install_system_deps() {
   has openssl   || MISSING_PKGS+=(openssl)
   has tar       || MISSING_PKGS+=(tar)
   if [[ ${#MISSING_PKGS[@]} -gt 0 ]]; then
-    spin_cmd "Updating package index…" $PM_UPDATE
+    # Guard the index refresh: under set -e an unguarded failure here aborts the
+    # whole install, yet the per-package installs below are already guarded
+    # (|| log) — so a flaky mirror refresh was MORE fatal than a failed install,
+    # which is backwards. A stale index usually still installs from cache; if a
+    # package genuinely can't be found, the guarded install below surfaces it.
+    spin_cmd "Updating package index…" $PM_UPDATE || \
+      warn "Package index refresh failed — continuing; installs will use the cached index."
     for pkg in "${MISSING_PKGS[@]}"; do
       spin_cmd "Installing $pkg…" $PM_INSTALL "$pkg" || \
         log "Could not install $pkg — may already be satisfied by an alternative package."
