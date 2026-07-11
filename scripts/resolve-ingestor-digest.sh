@@ -3,8 +3,9 @@
 # spawned ingestor image and (optionally) write it into the prod overlay.
 #
 # backend#1028: prod installs pin `images.ingestor.digest` for reproducibility
-# (see client/values-prod.yaml). The floating tag (default `0.7`) moves as new
-# patches ship, so the pinned digest must be re-resolved every time the prod
+# (see client/values-prod.yaml). The floating tag (read from the chart's
+# images.ingestor.tag) moves as new patches ship, so the pinned digest must
+# be re-resolved every time the prod
 # ingestor line is cut. This helper does that resolution against the live
 # registry so the pin is never hand-typed.
 #
@@ -12,7 +13,9 @@
 #   scripts/resolve-ingestor-digest.sh [TAG]           # print repo@digest
 #   scripts/resolve-ingestor-digest.sh [TAG] --write   # patch values-prod.yaml
 #
-# TAG defaults to `images.ingestor.tag` from client/values.yaml.
+# TAG defaults to `images.ingestor.tag` read from client/values.yaml (via yq
+# if present, else a portable yq-free parse). If it cannot be determined, the
+# script fails loudly — it never falls back to a hardcoded tag.
 # REPO override: INGESTOR_REPO=ghcr.io/tracebloc/ingestor (default).
 set -euo pipefail
 
@@ -26,11 +29,61 @@ write=0
 [[ "${1:-}" == "--write" ]] && { tag=""; write=1; }
 [[ "${2:-}" == "--write" ]] && write=1
 
+# Portable, yq-free reader for images.ingestor.tag from a values.yaml.
+# Scoped to the images: -> ingestor: block so a sibling image's `tag:`
+# (jobsManager / podsMonitor / requestsProxy / ... each carry their own)
+# can never be picked up by mistake. bash-3.2 / macOS-safe (pure awk).
+read_ingestor_tag() {
+  local file="$1"
+  [[ -f "$file" ]] || return 1
+  awk '
+    # Enter the top-level images: block.
+    /^images:[[:space:]]*$/ { in_images = 1; next }
+    # Any other top-level key (col 0, not a comment) closes it.
+    /^[^[:space:]#]/        { in_images = 0; in_ingestor = 0 }
+    in_images {
+      # A 2-space sibling key under images: — arm the ingestor scope only
+      # while we are inside ingestor:, disarm on the next sibling.
+      if ($0 ~ /^  [A-Za-z_][A-Za-z0-9_]*:[[:space:]]*$/) {
+        in_ingestor = ($0 ~ /^  ingestor:[[:space:]]*$/) ? 1 : 0
+        next
+      }
+      # The 4-space tag: leaf inside ingestor:.
+      if (in_ingestor && $0 ~ /^    tag:[[:space:]]/) {
+        v = $0
+        sub(/^    tag:[[:space:]]*/, "", v)          # drop the key
+        sub(/[[:space:]]+#.*$/, "", v)               # drop a trailing comment
+        gsub(/^[[:space:]]+|[[:space:]]+$/, "", v)   # trim
+        gsub(/^"|"$/, "", v)                         # unwrap double quotes
+        gsub(/^'\''|'\''$/, "", v)                   # unwrap single quotes
+        print v
+        exit
+      }
+    }
+  ' "$file"
+}
+
 if [[ -z "$tag" ]]; then
+  # No explicit TAG arg → default to the chart's images.ingestor.tag so this
+  # helper always resolves the SAME line the chart ships. NEVER hardcode a
+  # tag here: a stale constant would silently pin the WRONG (older) digest
+  # after the chart tag moves (e.g. 0.7 -> 0.8) while appearing to follow the
+  # chart. Prefer yq; fall back to the portable yq-free parse above; if
+  # neither can determine it, fail loudly rather than guess.
   if command -v yq >/dev/null 2>&1 && [[ -f "$chart_values" ]]; then
     tag="$(yq -r '.images.ingestor.tag' "$chart_values")"
+    [[ "$tag" == "null" ]] && tag=""   # yq prints literal "null" for a missing key
+  else
+    tag="$(read_ingestor_tag "$chart_values" || true)"
   fi
-  tag="${tag:-0.7}"
+  if [[ -z "$tag" ]]; then
+    echo "ERROR: could not determine the default ingestor tag from ${chart_values#$here/../}." >&2
+    echo "       (images.ingestor.tag was unreadable: file missing, key absent, or yq not" >&2
+    echo "        installed and the yq-free parse found nothing.)" >&2
+    echo "       Fix: pass TAG explicitly — scripts/resolve-ingestor-digest.sh <TAG> [--write] —" >&2
+    echo "       or install yq. Refusing to fall back to a hardcoded tag." >&2
+    exit 1
+  fi
 fi
 
 ref="${repo}:${tag}"
