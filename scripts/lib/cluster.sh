@@ -66,7 +66,7 @@ _ensure_release_dirs() {
 # a *proxied* private-IP destination can narrow this; tracebloc itself only
 # pulls from public registries + dials public api.tracebloc.io, so the broad
 # bypass is safe for the isolated VM the client runs on.)
-TB_NO_PROXY_DEFAULTS="localhost,127.0.0.1,0.0.0.0,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,.svc,.svc.cluster.local,.cluster.local,host.k3d.internal"
+TB_NO_PROXY_DEFAULTS="localhost,127.0.0.1,0.0.0.0,169.254.169.254,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,.svc,.svc.cluster.local,.cluster.local,host.k3d.internal"
 
 # Echo an effective NO_PROXY = host NO_PROXY/no_proxy ∪ TB_NO_PROXY_DEFAULTS,
 # de-duplicated with first-seen order preserved (host entries first).
