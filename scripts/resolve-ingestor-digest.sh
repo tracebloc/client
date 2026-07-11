@@ -110,8 +110,13 @@ fi
 # `ingestor-multiarch` guard, and inspect the RESOLVED index (repo@digest) —
 # i.e. the exact thing we would pin — not the floating repo:tag.
 resolved="${repo}@${digest}"
+# `|| true`: under `set -o pipefail`, an inspect failure or a `grep -v` that
+# filters every line exits non-zero and would abort the whole script — even
+# though the digest is already resolved. Tolerate it: an empty `platforms`
+# then trips multiarch=0 below, so the guard still fires (ERROR under --write,
+# WARNING otherwise) instead of the run dying silently with no digest line.
 platforms="$(docker buildx imagetools inspect "$resolved" 2>/dev/null \
-  | awk '/Platform:/ {print $2}' | grep -v '^unknown' | sort -u | tr '\n' ' ')"
+  | awk '/Platform:/ {print $2}' | grep -v '^unknown' | sort -u | tr '\n' ' ')" || true
 multiarch=1
 grep -q 'linux/amd64' <<<"$platforms" || multiarch=0
 grep -q 'linux/arm64' <<<"$platforms" || multiarch=0
