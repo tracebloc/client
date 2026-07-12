@@ -664,3 +664,27 @@ setup() {
   grep -q 'RESOURCE_LIMITS: "cpu=2,memory=8Gi"' "$HOST_DATA_DIR/values.yaml"
   grep -q 'RESOURCE_REQUESTS: "cpu=2,memory=8Gi"' "$HOST_DATA_DIR/values.yaml"
 }
+
+# ── _download_services_progress (step-e count bar; must never hang/fail) ─────
+@test "_download_services_progress: TB_NO_SERVICE_PROGRESS set -> immediate no-op" {
+  export TB_NO_SERVICE_PROGRESS=1
+  run _download_services_progress tracebloc
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+}
+
+@test "_download_services_progress: kubectl absent -> silent skip (never fatal)" {
+  unset TB_NO_SERVICE_PROGRESS
+  has() { return 1; }                 # kubectl not present
+  run _download_services_progress tracebloc
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+}
+
+@test "_download_services_progress: empty namespace -> no-op" {
+  unset TB_NO_SERVICE_PROGRESS
+  has() { return 0; }
+  run _download_services_progress ""
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+}

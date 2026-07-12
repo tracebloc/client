@@ -132,3 +132,70 @@ setup() {
   run check_docker_arch_mac
   [ "$status" -eq 0 ]
 }
+
+# ── count_bar (first-run: honest N-of-M for multi-image pulls) ───────────────
+@test "count_bar: renders 'N of M <noun>'" {
+  run count_bar 3 6 services
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"3 of 6 services"* ]]
+}
+
+@test "count_bar: clamps current above total (never over-reports)" {
+  run count_bar 9 6 services
+  [[ "$output" == *"6 of 6 services"* ]]
+  [[ "$output" != *"9 of 6"* ]]
+}
+
+@test "count_bar: non-numeric current -> 0 (no crash)" {
+  run count_bar nope 6 services
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"0 of 6 services"* ]]
+}
+
+@test "count_bar: total<1 floored to 1 (no divide-by-zero)" {
+  run count_bar 0 0 services
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"0 of 1 services"* ]]
+}
+
+# ── step_header (first-run: bold a–f running headers) ────────────────────────
+@test "step_header: renders '<letter>) <Title>'" {
+  run step_header a "Checking your machine"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"a) Checking your machine"* ]]
+}
+
+# ── print_roadmap (the '2. Installing' a–f plan) ─────────────────────────────
+@test "print_roadmap: lists the a–f plan under '2. Installing'" {
+  run print_roadmap
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"2. Installing"* ]]
+  [[ "$output" == *"a) Check your machine"* ]]
+  [[ "$output" == *"b) Install what tracebloc needs"* ]]
+  [[ "$output" == *"c) Create your secure environment"* ]]
+  [[ "$output" == *"d) Register this machine"* ]]
+  [[ "$output" == *"e) Install tracebloc"* ]]
+  [[ "$output" == *"f) Connect to the tracebloc network"* ]]
+}
+
+# ── print_banner (title + version; suppressed after the bootstrap drew it) ───
+@test "print_banner: title + version when TB_VERSION is set" {
+  unset TRACEBLOC_BANNER_SHOWN
+  TB_VERSION="v1.9.3"; OS=Darwin; ARCH=arm64
+  CLUSTER_NAME=tracebloc; SERVERS=1; AGENTS=1; HOST_DATA_DIR="$BATS_TEST_TMPDIR/.tracebloc"
+  run print_banner
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Setting up"* ]]
+  [[ "$output" == *"tracebloc"* ]]
+  [[ "$output" == *"v1.9.3"* ]]
+}
+
+@test "print_banner: suppressed when the bootstrap already drew it (TRACEBLOC_BANNER_SHOWN)" {
+  export TRACEBLOC_BANNER_SHOWN=1
+  OS=Darwin; ARCH=arm64; CLUSTER_NAME=tracebloc; SERVERS=1; AGENTS=1
+  HOST_DATA_DIR="$BATS_TEST_TMPDIR/.tracebloc"
+  run print_banner
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"Setting up"* ]]
+  unset TRACEBLOC_BANNER_SHOWN
+}

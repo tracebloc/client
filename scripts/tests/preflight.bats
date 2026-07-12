@@ -349,3 +349,44 @@ setup() {
   [ "$status" -eq 0 ]
   [[ -z "$output" || "$output" =~ ^[a-z0-9._/]+$ ]]
 }
+
+# ── first-run step a: collapsed hardware summary + connectivity combined line ─
+@test "_pf_hw_summary_line: one line 'arch · N CPU cores · N GB memory · N GB free disk'" {
+  ARCH=arm64; OS=Darwin
+  _pf_ncpu() { echo 6; }
+  _pf_total_mem_kb() { echo $((11 * 1024 * 1024)); }
+  _pf_free_kb() { echo $((419 * 1024 * 1024)); }
+  run _pf_hw_summary_line
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"arm64"* ]]
+  [[ "$output" == *"6 CPU cores"* ]]
+  [[ "$output" == *"11 GB memory"* ]]
+  [[ "$output" == *"419 GB free disk"* ]]
+}
+
+@test "_pf_connectivity: all reachable -> single combined 'Connected:' line" {
+  _pf_probe_url() { echo ok; }
+  run _pf_connectivity
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Connected: tracebloc.io"* ]]
+  [[ "$output" == *"Docker Hub (registry-1.docker.io)"* ]]
+  [[ "$output" == *"GitHub (ghcr.io)"* ]]
+}
+
+@test "run_preflight: healthy -> collapsed step-a view, per-check ✔ lines folded away" {
+  ARCH=arm64; OS=Darwin
+  _pf_ncpu() { echo 6; }
+  _pf_total_mem_kb() { echo $((11 * 1024 * 1024)); }
+  _pf_free_kb() { echo $((419 * 1024 * 1024)); }
+  _pf_fstype() { echo apfs; }
+  _pf_probe_url() { echo ok; }
+  HOST_DATA_DIR="$HOME/.tracebloc"
+  run run_preflight
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"6 CPU cores"* ]]        # collapsed hardware line
+  [[ "$output" == *"Connected:"* ]]         # connectivity combined line
+  [[ "$output" == *"Local storage"* ]]      # storage line
+  # the individual arch/memory ✔ lines are suppressed inside run_preflight
+  [[ "$output" != *"Architecture:"* ]]
+  [[ "$output" != *"Memory:"* ]]
+}
