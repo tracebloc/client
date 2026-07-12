@@ -289,7 +289,9 @@ setup() {
 # pass anything local — including overlay/tmpfs, which is what CI runners use.
 @test "_pf_storage_type: local ext4 -> success, no hard fail" {
   _pf_fstype() { echo ext4; }
-  run _pf_storage_type; [[ "$output" == *"ext4"* ]]
+  # First-run copy: the visible line is the clean "Local storage (…)"; the fstype
+  # detail (ext4) moved to the log, so assert the user-facing line, not the fstype.
+  run _pf_storage_type; [[ "$output" == *"Local storage"* ]]
   PF_HARD_FAIL=0; _pf_storage_type >/dev/null; [ "$PF_HARD_FAIL" -eq 0 ]
 }
 

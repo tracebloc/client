@@ -157,7 +157,7 @@ run_boot_no_cosign() {
 @test "happy path: immutable tag + valid manifest + good signature runs install-k8s.sh" {
   REF="v9.9.9" COSIGN_RESULT=0 run_boot
   [ "$status" -eq 0 ]
-  [[ "$output" == *"installer files verified"* ]]
+  [[ "$output" == *"files intact"* ]]   # first-run copy: "All N files intact — nothing was altered"
   [ -f "$SBX/k8s-ran" ]              # privileged step reached only after verify
 }
 
