@@ -97,8 +97,11 @@ _verify_tracebloc_cli() {
     # data ingest ./data" next step lives in the summary's "What to do next".
     local ver; ver="$(tracebloc version 2>/dev/null | head -1 || true)"
     if has tracebloc; then
-      # Usable right now AND in new terminals — the fully-clean verdict.
-      success "tracebloc CLI installed${ver:+ ($ver)} — verified on your PATH."
+      # Usable right now AND in new terminals — the fully-clean verdict. "ready"
+      # matches the run-through's step-b pattern (Docker ready / System tools
+      # ready / tracebloc CLI ready); the edge-case lines below stay "installed"
+      # because there it is installed but not yet usable in this/every shell.
+      success "tracebloc CLI ready${ver:+ ($ver)} — verified on your PATH."
       return 0
     fi
     # Persisted for new terminals, but not yet on THIS shell's PATH. The rc
