@@ -383,13 +383,16 @@ tracebloc — client setup
 
 Usage:
   curl -fsSL https://raw.githubusercontent.com/tracebloc/client/main/scripts/install.sh | bash
-  ./install-k8s.sh [--help] [--diagnose]
+  ./install-k8s.sh [--help] [--diagnose] [--force]
 
 Commands:
   --diagnose     Collect a redacted support bundle (logs + cluster/host status)
                  into ~/.tracebloc/tracebloc-diagnose-<timestamp>.tgz and exit.
                  Run this if something went wrong, then send the file to support
                  (passwords and proxy credentials are removed before it is written).
+  --force        Skip the "already set up" check and re-run every step. Use this
+  --reinstall    to force a full reinstall on a machine that is already set up.
+                 (Same effect as TRACEBLOC_FORCE_REINSTALL=1 for curl | bash.)
 
 Advanced configuration (environment variables):
   CLUSTER_NAME   Cluster name                   (default: tracebloc)

@@ -31,7 +31,7 @@ setup() {
              lib/common.sh lib/preflight.sh lib/detect-gpu.sh lib/gpu-nvidia.sh \
              lib/gpu-amd.sh lib/setup-macos.sh lib/setup-linux.sh lib/cluster.sh \
              lib/gpu-plugins.sh lib/install-client-helm.sh lib/install-cli.sh \
-             lib/provision.sh lib/summary.sh lib/diagnose.sh; do
+             lib/provision.sh lib/assess.sh lib/summary.sh lib/diagnose.sh; do
     printf '#!/usr/bin/env bash\n# stub %s\n' "$rel" > "$SERVE/scripts/$rel"
   done
   cat > "$SERVE/scripts/install-k8s.sh" <<EOF
@@ -45,8 +45,8 @@ EOF
       scripts/lib/detect-gpu.sh scripts/lib/gpu-nvidia.sh scripts/lib/gpu-amd.sh \
       scripts/lib/setup-macos.sh scripts/lib/setup-linux.sh scripts/lib/cluster.sh \
       scripts/lib/gpu-plugins.sh scripts/lib/install-client-helm.sh \
-      scripts/lib/install-cli.sh scripts/lib/provision.sh scripts/lib/summary.sh \
-      scripts/lib/diagnose.sh; do
+      scripts/lib/install-cli.sh scripts/lib/provision.sh scripts/lib/assess.sh \
+      scripts/lib/summary.sh scripts/lib/diagnose.sh; do
         printf '%s  %s\n' "$(_real_sha "$SERVE/$f")" "$f"
       done ) > "$SERVE_REL/manifest.sha256"
   printf 'FAKE-SIG\n'  > "$SERVE_REL/manifest.sha256.sig"
