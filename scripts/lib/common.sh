@@ -32,6 +32,13 @@ log()            { [[ -n "${LOG_FILE:-}" ]] && echo "[$(date +%H:%M:%S)] $*" >> 
 prompt_header()  { echo -e "\n  ${BOLD}${WHITE}$*${RESET}"; }
 hint()           { echo -e "  ${DIM}$*${RESET}"; }
 
+# step_header LETTER TITLE — bold running header for one of the six install steps
+# (a–f) in the first-run run-through, e.g. `step_header a "Checking your machine"`
+# → "  a) Checking your machine". Prints the header + a single trailing blank; the
+# blank-line gap BETWEEN steps comes from each step body ending with a blank line
+# (main() adds it), matching the run-through's spacing.
+step_header()    { echo -e "  ${BOLD}$1) $2${RESET}"; echo ""; }
+
 # ── Utility ──────────────────────────────────────────────────────────────────
 has() { command -v "$1" &>/dev/null; }
 
@@ -139,11 +146,10 @@ preflight_sudo() {
   if sudo -n true 2>/dev/null; then
     return 0
   fi
-  echo ""
-  prompt_header "tracebloc needs administrator access to install"
-  hint "Docker and system dependencies."
-  echo ""
-  hint "You may be asked for your password once."
+  # Step b intro copy (first-run run-through): one line, then the system's own
+  # "Password:" prompt from `sudo -v`. Kept generic so it reads correctly on both
+  # macOS (Docker Desktop) and Linux (Docker Engine + system packages).
+  hint "tracebloc needs your password once to install Docker and a few tools."
   echo ""
   sudo -v || error "Could not obtain administrator privileges. Re-run with a user that has sudo access."
   ( while sudo -n true 2>/dev/null; do sleep 50; done ) &
@@ -213,6 +219,27 @@ download_with_progress() {
   printf "\r\033[K"
   tput cnorm 2>/dev/null || true
   return $rc
+}
+
+# ── Count bar — honest N-of-M progress for things pulled in discrete units ────
+#  Usage:  count_bar <current> <total> [noun]      (renders ONE frame)
+#  Draws a bar plus an "N of M <noun>" counter and NO newline, so a caller loop
+#  can overwrite it in place (with \r) and clear it at the end via printf "\r\033[K".
+#  Use this — never a fabricated aggregate percentage — for multi-image pulls
+#  (e.g. the client's container images), where the only honest signal is how many
+#  of a known count have completed. The %-by-bytes bar (download_with_progress) is
+#  reserved for a single-file curl download, where a true byte percentage exists.
+count_bar() {
+  local cur="$1" total="$2" noun="${3:-items}" w=24 filled j bar=""
+  [[ "$cur"   =~ ^[0-9]+$ ]] || cur=0
+  [[ "$total" =~ ^[0-9]+$ ]] || total=1
+  (( total < 1 ))     && total=1
+  (( cur > total ))   && cur=$total
+  (( cur < 0 ))       && cur=0
+  filled=$(( cur * w / total ))
+  for (( j=0; j<filled; j++ )); do bar+="█"; done
+  for (( j=filled; j<w;   j++ )); do bar+="░"; done
+  printf "\r  ${CYAN}%s${RESET}  %d of %d %s" "$bar" "$cur" "$total" "$noun"
 }
 
 # ── Retry wrapper for flaky network calls ────────────────────────────────────
@@ -347,29 +374,51 @@ install_cleanup() {
   fi
 }
 
+# Installer version shown in the banner's title (" · <version>"). The curl|bash
+# bootstrap (install.sh) exports TRACEBLOC_INSTALL_REF — the immutable release tag
+# it pinned to, e.g. v1.9.3 — so the title states exactly what is being installed.
+# On the direct ./install-k8s.sh path it's unset and the title drops the suffix.
+TB_VERSION="${TB_VERSION:-${TRACEBLOC_INSTALL_REF:-}}"
+
 # ── Banner ───────────────────────────────────────────────────────────────────
+#  The first-run title: "Setting up tracebloc on your machine · <version>".
+#  In the curl|bash path the bootstrap (install.sh) already drew this above its
+#  "1. Downloading" section and exported TRACEBLOC_BANNER_SHOWN, so we don't draw
+#  a second one; on the direct ./install-k8s.sh path we draw it here.
 print_banner() {
+  if [[ -n "${TRACEBLOC_BANNER_SHOWN:-}" ]]; then
+    log "Banner already shown by the bootstrap — not redrawing."
+    log "OS=$OS  Arch=$ARCH  Cluster='$CLUSTER_NAME'  Servers=$SERVERS  Agents=$AGENTS"
+    return 0
+  fi
   echo ""
-  echo -e "  ${BOLD}${CYAN}tracebloc${RESET} — client setup"
+  echo ""
+  if [[ -n "${TB_VERSION:-}" ]]; then
+    echo -e "  Setting up ${BOLD}${CYAN}tracebloc${RESET} on your machine${DIM} · ${TB_VERSION}${RESET}"
+  else
+    echo -e "  Setting up ${BOLD}${CYAN}tracebloc${RESET} on your machine"
+  fi
+  echo ""
   echo -e "  ${DIM}────────────────────────────────────────${RESET}"
-  echo ""
-  echo -e "  ${DIM}This installer sets up a secure compute environment${RESET}"
-  echo -e "  ${DIM}on your machine and connects it to the tracebloc network.${RESET}"
-  echo -e "  ${DIM}All data and config stay in ~/.tracebloc/.${RESET}"
   echo ""
   log "OS=$OS  Arch=$ARCH  Cluster='$CLUSTER_NAME'  Servers=$SERVERS  Agents=$AGENTS"
   log "Host data dir: $HOST_DATA_DIR → /tracebloc (inside k3s nodes)"
 }
 
-# ── Step roadmap — printed once before install begins ─────────────────────────
+# ── Step roadmap — the "2. Installing" plan, printed once before install begins ─
+#  Section 1 ("1. Downloading") is the bootstrap's download+verify; this is the
+#  a–f plan for everything install-k8s.sh does. The running steps use the gerund
+#  form ("Checking your machine", …) via step_header.
 print_roadmap() {
-  echo -e "  ${BOLD}Steps${RESET}"
-  echo -e "  ${DIM}─────${RESET}"
-  echo -e "  ${DIM}1. Check system requirements${RESET}"
-  echo -e "  ${DIM}2. Set up secure compute environment${RESET}"
-  echo -e "  ${DIM}3. Sign in and provision this client${RESET}"
-  echo -e "  ${DIM}4. Install tracebloc client${RESET}"
-  echo -e "  ${DIM}5. Connect to tracebloc network${RESET}"
+  echo -e "  ${BOLD}2. Installing${RESET}"
+  echo ""
+  echo -e "  ${DIM}a) Check your machine${RESET}"
+  echo -e "  ${DIM}b) Install what tracebloc needs${RESET}"
+  echo -e "  ${DIM}c) Create your secure environment${RESET}"
+  echo -e "  ${DIM}d) Register this machine${RESET}"
+  echo -e "  ${DIM}e) Install tracebloc${RESET}"
+  echo -e "  ${DIM}f) Connect to the tracebloc network${RESET}"
+  echo ""
   echo ""
 }
 
