@@ -36,6 +36,16 @@
 # =============================================================================
 set -euo pipefail
 
+# ── Minimal colours for THIS script's own output ─────────────────────────────
+# common.sh (which owns the shared colour palette + helpers) is one of the files
+# this bootstrap is about to fetch and verify, so it isn't sourced yet. Define a
+# small local palette, disabled when stdout isn't a terminal or NO_COLOR is set.
+if [[ -t 1 && -z "${NO_COLOR:-}" ]]; then
+  _B=$'\033[1m'; _C=$'\033[0;36m'; _D=$'\033[2m'; _G=$'\033[0;32m'; _R=$'\033[0m'
+else
+  _B=""; _C=""; _D=""; _G=""; _R=""
+fi
+
 # ── Platform gate ────────────────────────────────────────────────────────────
 case "$(uname -s)" in
   MINGW*|MSYS*|CYGWIN*)
@@ -43,6 +53,61 @@ case "$(uname -s)" in
     echo "  irm https://raw.githubusercontent.com/tracebloc/client/main/scripts/install.ps1 | iex"
     exit 1 ;;
 esac
+
+# ── Early bailout: already set up and healthy → skip the whole download ──────
+# Before fetching ANYTHING, if the tracebloc CLI is already present AND reports a
+# healthy setup, there is nothing to download or install — hand straight to the
+# home screen. `tracebloc doctor` is the health probe; it is BOUNDED (stock macOS
+# has no coreutils `timeout`, so we background + poll + kill on overrun) and its
+# EXIT CODE is the gate: an old CLI that doesn't know `doctor` returns non-zero, so
+# we simply fall through to a normal install. Skipped on a forced reinstall
+# (--force/--reinstall or TRACEBLOC_FORCE_REINSTALL=1), on the dev/unverified path,
+# and whenever the operator explicitly pinned a REF/BRANCH (an explicit version
+# request must always (re)install, never bail).
+_tb_bail_ok=1
+[[ "${TRACEBLOC_FORCE_REINSTALL:-0}" == "1" ]] && _tb_bail_ok=0
+[[ "${TRACEBLOC_ALLOW_UNVERIFIED:-0}" == "1" ]] && _tb_bail_ok=0
+[[ -n "${REF:-}" || -n "${BRANCH:-}" ]] && _tb_bail_ok=0
+for _a in "$@"; do
+  case "$_a" in --force|--reinstall) _tb_bail_ok=0 ;; esac
+done
+
+_tb_check_healthy() {
+  # Run `tracebloc doctor` behind a small inline spinner, bounded so a wedged CLI
+  # can't hang the bootstrap. Returns doctor's exit code (0 = healthy), or 124 on
+  # timeout. 0.2s ticks; TRACEBLOC_DOCTOR_TIMEOUT (default 20s) bounds it.
+  local timeout="${TRACEBLOC_DOCTOR_TIMEOUT:-20}" maxticks tick=0 rc
+  local frames='⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏' i=0 f
+  maxticks=$(( timeout * 5 ))
+  tracebloc doctor >/dev/null 2>&1 &
+  local pid=$!
+  tput civis 2>/dev/null || true
+  while kill -0 "$pid" 2>/dev/null; do
+    f="${frames:i:1}"; i=$(( (i + 1) % ${#frames} ))
+    printf '\r  %s%s%s Checking your tracebloc setup…' "$_C" "$f" "$_R"
+    if [[ "$tick" -ge "$maxticks" ]]; then
+      kill "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true
+      printf '\r\033[K'; tput cnorm 2>/dev/null || true
+      return 124
+    fi
+    sleep 0.2; tick=$(( tick + 1 ))
+  done
+  wait "$pid"; rc=$?
+  printf '\r\033[K'; tput cnorm 2>/dev/null || true
+  return "$rc"
+}
+
+if [[ "$_tb_bail_ok" == "1" ]] && command -v tracebloc >/dev/null 2>&1; then
+  printf '\n'
+  if _tb_check_healthy; then
+    printf '  %s✓%s %sAlready set up and healthy — nothing to download or install.%s\n' "$_G" "$_R" "$_B" "$_R"
+    printf "    %sRun%s  %stracebloc%s%s  to use it. Here's your environment:%s\n" "$_D" "$_R" "$_C" "$_R" "$_D" "$_R"
+    # Hand off to the home screen (exec replaces this process); if that somehow
+    # fails, we've already told the user it's healthy, so exit 0.
+    exec tracebloc || true
+    exit 0
+  fi
+fi
 
 # ── Pinned, immutable release ref ──────────────────────────────────────────
 # DEFAULT_REF is the immutable git tag this bootstrap fetches from. The release
@@ -135,7 +200,24 @@ REPO_REL="https://github.com/tracebloc/client/releases/download/${REF}"
 TMPDIR="$(mktemp -d)"
 trap 'rm -rf "$TMPDIR"' EXIT
 
-echo "tracebloc client installer · $REF"
+# ── Banner ───────────────────────────────────────────────────────────────────
+# Draw the first-run title here (mirrors common.sh::print_banner) so the
+# curl|bash path shows it above "1. Downloading". Export TRACEBLOC_BANNER_SHOWN
+# so the install-k8s.sh we're about to fetch doesn't draw a SECOND banner, and
+# TRACEBLOC_INSTALL_REF so its title can state the version on the direct path.
+export TRACEBLOC_BANNER_SHOWN=1
+export TRACEBLOC_INSTALL_REF="$REF"
+_tb_ver_suffix=""
+case "$REF" in
+  v[0-9]*) _tb_ver_suffix="${_D} · ${REF}${_R}" ;;   # only a real vX.Y.Z tag is a "version"
+esac
+printf '\n\n'
+printf '  Setting up %s%stracebloc%s on your machine%s\n' "$_B" "$_C" "$_R" "$_tb_ver_suffix"
+printf '\n'
+printf '  %s────────────────────────────────────────%s\n' "$_D" "$_R"
+printf '\n'
+printf '  %s1. Downloading%s\n' "$_B" "$_R"
+printf '\n'
 
 mkdir -p "$TMPDIR/lib"
 
@@ -178,10 +260,16 @@ download_with_retry() {
 }
 
 # ── Fetch the sub-scripts ─────────────────────────────────────────────────
+# One transient status frame while the (quiet on success) fetch loop runs; a
+# retry/failure inside download_with_retry prints its own [WARN]/[ERROR] and, on
+# hard failure, exits — so we only reach the success line when every file landed.
+printf '  %s⠋%s Fetching the installer…' "$_C" "$_R"
 for f in "${FILES[@]}"; do
   dest="$TMPDIR/${f#scripts/}"
   download_with_retry "$REPO_RAW/$f" "$dest"
 done
+printf '\r\033[K'
+printf '  %s✔%s Installer downloaded — %s files\n' "$_G" "$_R" "${#FILES[@]}"
 
 # ── Pick a sha256 tool (coreutils on Linux, shasum on macOS) ───────────────
 _sha256_of() {
@@ -203,8 +291,7 @@ _sha256_of() {
 verify_against_manifest() {
   local manifest="$TMPDIR/manifest.sha256"
 
-  echo ""
-  echo "Verifying the installer is authentic before anything runs…"
+  printf "  %sVerifying it's authentic (cosign)…%s\n" "$_D" "$_R"
 
   if ! _sha256_of "$TMPDIR/install-k8s.sh" >/dev/null 2>&1; then
     echo "[ERROR] No sha256 tool (sha256sum / shasum) on PATH — can't verify the" >&2
@@ -248,7 +335,7 @@ verify_against_manifest() {
       exit 1
     fi
   done
-  echo "  ✔ All ${#FILES[@]} installer files verified — none were altered"
+  printf '  %s✔%s All %s files intact — nothing was altered\n' "$_G" "$_R" "${#FILES[@]}"
 }
 
 download_manifest() {
@@ -308,7 +395,7 @@ verify_manifest_signature() {
         --certificate "$cert" \
         --signature "$sig" \
         "$manifest" >/dev/null 2>&1; then
-    echo "  ✔ Signature verified — published by tracebloc (Sigstore keyless)"
+    printf '  %s✔%s Signature verified — published by tracebloc (Sigstore keyless)\n' "$_G" "$_R"
   else
     echo "[ERROR] cosign signature verification FAILED for manifest.sha256 — refusing" >&2
     echo "        to install." >&2
@@ -363,6 +450,10 @@ ensure_cosign() {
 }
 
 verify_against_manifest
+
+# Spacing before install-k8s.sh renders "2. Installing" (its banner is suppressed
+# by TRACEBLOC_BANNER_SHOWN, so it goes straight to the roadmap).
+printf '\n\n'
 
 chmod +x "$TMPDIR/install-k8s.sh"
 
