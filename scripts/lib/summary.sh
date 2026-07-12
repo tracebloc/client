@@ -31,7 +31,7 @@ wait_for_client_ready() {
   local all_ready=true d remaining
 
   echo ""
-  info "Waiting for the client to start — first run downloads images, this can take a few minutes…"
+  info "Connecting to the tracebloc network — waiting for your services to come online…"
   for d in "${deploys[@]}"; do
     remaining=$(( deadline - $(date +%s) )); (( remaining < 10 )) && remaining=10
     if kubectl rollout status "deployment/${d}" -n "$ns" --timeout="${remaining}s" \
@@ -76,11 +76,13 @@ _diagnose_not_ready() {
 # One-line note in the success summary so the user knows the client survives a
 # reboot — automatic on Linux; needs Docker Desktop start-on-login on macOS/Win.
 _reboot_note() {
+  # Single dim footer line — the LAST line of the summary. OS-specific so Linux is
+  # NOT regressed: on Linux the cluster + Docker come back on boot automatically;
+  # on macOS/Windows Docker Desktop must be launched (the run-through's macOS copy).
   if [[ "$OS" == "Linux" ]]; then
-    echo -e "  ${GREEN}✔${RESET} ${DIM}Survives reboot — Docker and your client restart automatically.${RESET}"
+    echo -e "  ${DIM}After a reboot, tracebloc restarts automatically.${RESET}"
   else
-    echo -e "  ${DIM}After a reboot, start Docker Desktop to bring your client back —${RESET}"
-    echo -e "  ${DIM}enable Settings → General → \"Start Docker Desktop when you sign in\" to automate.${RESET}"
+    echo -e "  ${DIM}After a reboot, open Docker Desktop to bring tracebloc back.${RESET}"
   fi
 }
 
@@ -90,45 +92,33 @@ print_summary() {
   [[ "$GPU_VENDOR" == "amd" ]] && mode="AMD GPU"
   local ns="${TB_NAMESPACE:-default}"
   local cver; cver="$(_chart_version "$ns")"
-  local line="━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+  # Footer log path: HOST_DATA_DIR with $HOME collapsed to ~ (e.g. ~/.tracebloc).
+  local logdisp="${HOST_DATA_DIR:-$HOME/.tracebloc}"
+  if [[ -n "${HOME:-}" && "$logdisp" == "$HOME"* ]]; then logdisp="~${logdisp#"$HOME"}"; fi
 
   echo ""
   case "$CLIENT_STATE" in
     connected)
-      echo -e "  ${GREEN}${line}${RESET}"
+      echo -e "  ${BOLD}${GREEN}✔${RESET} ${BOLD}Connected to tracebloc${RESET}"
       echo ""
-      echo -e "  ${BOLD}${GREEN}✔ Connected to tracebloc${RESET}"
+      echo -e "  ${DIM}Environment${RESET} : ${ns}"
+      echo -e "  ${DIM}Version${RESET}     : ${cver:-unknown}"
+      echo -e "  ${DIM}Mode${RESET}        : ${mode}"
       echo ""
-      echo -e "  ${BOLD}Workspace${RESET} : ${CYAN}${ns}${RESET}"
-      echo -e "  ${BOLD}Version${RESET}   : ${CYAN}${cver:-unknown}${RESET}"
-      echo -e "  ${BOLD}Mode${RESET}      : ${CYAN}${mode}${RESET}"
+      echo -e "  Your secure environment is live 🟢"
+      echo -e "    See it on your dashboard:  ${CYAN}https://ai.tracebloc.io/clients${RESET}"
       echo ""
-      echo -e "  Your client is live. Confirm it shows as ${BOLD}🟢 Online${RESET}:"
-      echo -e "    ${CYAN}https://ai.tracebloc.io/clients${RESET}"
+      # "What's next" is deliberately NOT dim — it's the primary call to action.
+      echo -e "  ${BOLD}What's next${RESET}"
+      echo -e "    1. Ingest your data       ${CYAN}tb data ingest${RESET}"
+      echo -e "    2. Create a use case      ${CYAN}https://ai.tracebloc.io/my-use-cases${RESET}"
+      echo -e "    3. Invite collaborators — they train on your data; it never leaves this machine"
       echo ""
-      echo -e "  ${DIM}Models other collaborators submit train on this machine —${RESET}"
-      echo -e "  ${DIM}your data never leaves it.${RESET}"
+      echo -e "  ${BOLD}Run  ${CYAN}tracebloc${RESET}${BOLD}  to get started.${RESET}"
       echo ""
+      echo -e "  ${DIM}────────────────────────────────────────${RESET}"
+      echo -e "  ${DIM}Logs ${logdisp}  ·  Data /tracebloc/${ns}${RESET}"
       _reboot_note
-      echo ""
-      echo -e "  ${BOLD}What's next — your first use case${RESET}"
-      echo -e "  A use case starts with data. Ingest a dataset into this client —"
-      echo -e "  it stays on this machine; models come here to train on it, once"
-      echo -e "  you approve them:"
-      echo ""
-      echo -e "       ${CYAN}tracebloc data ingest ./data${RESET}"
-      echo ""
-      echo -e "  With the data in place, create your use case and invite other"
-      echo -e "  collaborators:"
-      echo ""
-      echo -e "       ${CYAN}https://ai.tracebloc.io/my-use-cases${RESET}"
-      echo ""
-      echo -e "  ${DIM}· this client on your dashboard:${RESET}  ${CYAN}https://ai.tracebloc.io/clients${RESET}"
-      echo -e "  ${DIM}· everything else the CLI does:${RESET}   ${DIM}tracebloc --help${RESET}"
-      echo ""
-      echo -e "  ${DIM}Logs:${RESET} ${DIM}~/.tracebloc/${RESET}   ${DIM}Data:${RESET} ${DIM}/tracebloc/${ns}${RESET}"
-      echo ""
-      echo -e "  ${GREEN}${line}${RESET}"
       ;;
     starting)
       echo -e "  ${YELLOW}⚠  Almost there — tracebloc is installed but still starting.${RESET}"
