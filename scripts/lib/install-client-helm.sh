@@ -342,11 +342,62 @@ _no_interactive_creds_die() {
   prompt cannot read your input."
 }
 
-install_client_helm() {
-  # ── Step 4/5: Install tracebloc client (credential + namespace provisioned
-  #    in Step 3 by provision_client, or supplied via dual-mode) ─────────────
-  step 4 5 "Installing tracebloc client"
+# _download_services_progress NS — render an honest N-of-M count bar as the
+# client's container images pull onto the node (the "services download" in step
+# e). The only TRUTHFUL per-unit signal is how many containers report a populated
+# imageID (image present) out of the total the pods declare — never a fabricated
+# aggregate percentage. Best-effort, BOUNDED, and NON-FATAL: it must never block
+# or fail the install — the authoritative readiness gate is wait_for_client_ready
+# (step f). Skipped entirely when TB_NO_SERVICE_PROGRESS is set (the bats suite,
+# where kubectl is mocked and a poll loop would hang) or kubectl is unavailable.
+_download_services_progress() {
+  local ns="$1"
+  if [[ -n "${TB_NO_SERVICE_PROGRESS:-}" ]]; then return 0; fi
+  has kubectl || return 0
+  [[ -n "$ns" ]] || return 0
 
+  # Establish the total container count once the pods are scheduled (bounded).
+  local total=0 tries=0
+  while (( tries < 15 )); do
+    total="$(kubectl get pods -n "$ns" \
+      -o jsonpath='{range .items[*].spec.containers[*]}{"x"}{end}' 2>/dev/null \
+      | tr -cd 'x' | wc -c | tr -d ' ')" || total=0
+    [[ "$total" =~ ^[0-9]+$ ]] || total=0
+    if (( total > 0 )); then break; fi
+    tries=$(( tries + 1 )); sleep 2
+  done
+  if (( total < 1 )); then return 0; fi   # never saw pods — skip the bar silently
+
+  local deadline pulled=0
+  deadline=$(( $(date +%s) + ${TB_PULL_TIMEOUT:-300} ))
+  tput civis 2>/dev/null || true
+  while :; do
+    pulled="$(kubectl get pods -n "$ns" \
+      -o jsonpath='{range .items[*].status.containerStatuses[*]}{.imageID}{"\n"}{end}' 2>/dev/null \
+      | grep -c '.')" || pulled=0
+    [[ "$pulled" =~ ^[0-9]+$ ]] || pulled=0
+    if (( pulled > total )); then pulled=$total; fi
+    count_bar "$pulled" "$total" "services"
+    if (( pulled >= total )); then break; fi
+    if (( $(date +%s) >= deadline )); then break; fi
+    sleep 2
+  done
+  printf "\r\033[K"
+  tput cnorm 2>/dev/null || true
+  if (( pulled >= total )); then
+    success "Downloaded — ${total} services"
+  else
+    info "Services are still downloading — they'll finish starting in the background."
+  fi
+  return 0
+}
+
+install_client_helm() {
+  # Step e (Install tracebloc) — main() prints the "e) Installing tracebloc"
+  # header. The credential + namespace were provisioned in step d
+  # (provision_client) or supplied via dual-mode (TRACEBLOC_CLIENT_ID/PASSWORD or
+  # TRACEBLOC_VALUES_FILE). This step renders the values, runs Helm, and shows the
+  # services download; the final connect + summary is step f.
   _ensure_tracebloc_dirs
   local values_file="${HOST_DATA_DIR}/values.yaml"
 
@@ -397,16 +448,13 @@ install_client_helm() {
   # Advanced / GitOps setups can override with TB_NAMESPACE=<name>.
   TB_NAMESPACE=$(_sanitize_workspace_name "${TB_NAMESPACE:-tracebloc}")
 
-  # ── Step 5/5: Connect to tracebloc network ──────────────────────────────
-  step 5 5 "Connect to tracebloc network"
-
   # RFC-0001 §7.2 — a re-run on an already-connected client must reconcile in place,
   # not re-provision. Step 3 marks that case with TRACEBLOC_CLIENT_ADOPTED=1 (+ the
   # UUID, no password). Honor it: reconcile the live release silently — no credential
   # prompt, no verify, no duplicate. Only if there's no live release to reconcile do
   # we fall through to the normal connect flow below.
   if [[ "${TRACEBLOC_CLIENT_ADOPTED:-}" == 1 ]] && _reconcile_adopted_client; then
-    success "Connected to tracebloc"
+    success "tracebloc installed"
     log "Reconciled adopted client in namespace '$TB_NAMESPACE'"
     return 0
   fi
@@ -619,6 +667,12 @@ EOF
   echo ""
   log "Installing $TB_NAMESPACE from $chart_ref in namespace '$TB_NAMESPACE'..."
 
+  # What the user is about to see download (the "e) Installing tracebloc" body).
+  echo -e "  ${DIM}Downloading the tracebloc services — a training runner that runs models${RESET}"
+  echo -e "  ${DIM}on your data, a data manager, a live monitor, and a local database. They${RESET}"
+  echo -e "  ${DIM}run entirely on your machine; your data never leaves it.${RESET}"
+  echo ""
+
   # Pre-create per-release hostPath dirs so they're owned by the host user, not
   # root:root from kubelet's DirectoryOrCreate. See _ensure_release_dirs.
   _ensure_release_dirs "$TB_NAMESPACE"
@@ -643,6 +697,10 @@ EOF
   # a failure here must not abort an otherwise-successful install.
   kubectl config set-context --current --namespace "$TB_NAMESPACE" >/dev/null 2>&1 || true
 
-  success "Connected to tracebloc"
+  # Honest N-of-M count bar as the service images pull onto the node. Best-effort +
+  # bounded + non-fatal — the real readiness gate is step f (wait_for_client_ready).
+  _download_services_progress "$TB_NAMESPACE"
+
+  success "tracebloc installed"
   log "Values file: $values_file"
 }
