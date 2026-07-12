@@ -465,11 +465,14 @@ By default the NetworkPolicy still allows outbound HTTPS/443 so training pods ca
 
 **Residual:** the pod still holds `BACKEND_TOKEN` (it authenticates to the backend through the gateway). Scoping / short-TTL of that token is tracked under §8.1.
 
-### 8.3 Backend tokens never expire — **backend team**
+### 8.3 Backend token lifetime — **mitigated for web sessions; edge tokens long-lived by design**
 
-The tracebloc backend uses Django REST Framework's `authtoken` with no TTL. A leaked token is valid forever until manually deleted from the DB.
+Historically every backend token was a Django REST Framework `authtoken` with no TTL — a leaked token stayed valid until manually deleted from the DB. That finding is now split by credential type (tracebloc/backend#590):
 
-**Mitigation plan:** backend adds a revocation endpoint + evaluates switching to `djangorestframework-simplejwt` for TTL-bound tokens. Backend team owns.
+- **Data-scientist web sessions — mitigated.** Interactive logins receive a bounded, revocable 30-day `ClientAccessToken` (Bearer). Revocation paths: `/auth/revoke`, `/logout/`, password change, and a Django-admin bulk-revoke action. There is deliberately no refresh token — an expired session re-authenticates and mints a fresh one. (Backend: tracebloc/backend#933; frontend 401 handling: tracebloc/frontend-app#575.)
+- **Edge devices and bots — long-lived by design.** Non-interactive service credentials — including the token this chart's jobs-manager obtains via `/api-token-auth/` — keep the legacy non-expiring DRF `Token`: an edge has no interactive re-login path, so an expiring token would take it offline. This is intentional, not an oversight. A leaked edge token still requires manual revocation (§9 step 3); removing long-lived credentials from *training pods* is tracked under §8.1 / §8.2.
+
+**Residual:** the web token is stored in JS-readable browser storage (localStorage + a non-httpOnly cookie), so an XSS on the web console could still steal a live token. Tracked backend-side as the SEC-06 residual follow-up to tracebloc/backend#590.
 
 ### 8.4 Legacy training image architecture (G4 partial) — **legacy-migration team**
 
@@ -524,7 +527,7 @@ If a specific training run is suspected of malicious behavior:
    kubectl -n <ns> logs --previous <pod-name> > suspect-pod.log
    ```
 3. **Rotate `clientId` / `clientPassword`** if you have any reason to believe the pod exfiltrated them:
-   - Change the password on the tracebloc console (backend team can invalidate the old token)
+   - Change the password on the tracebloc console and have the tracebloc team revoke the old edge token — it never expires on its own (§8.3)
    - Update the Kubernetes Secret per §6.1
 4. **Check the audit log** for PSA violations or anomalous K8s API calls (though training pods have no token, so this should be a no-op):
    ```bash
@@ -555,6 +558,7 @@ Cross-reference for reviewers and contributors.
 ## 11. Document history
 
 - **2026-04** — Initial version. Documents the training-pod sandbox as shipped in client chart ≥ 1.0.4 and client-runtime images built from `develop` at that date. Reflects the narrow threat model (trusted platform, untrusted external data scientist submissions).
+- **2026-07** — §8.3 updated: data-scientist web tokens are now bounded (30-day TTL) + revocable (tracebloc/backend#933); edge/bot tokens remain long-lived by design; the JS-readable-storage residual is tracked backend-side.
 
 ---
 
