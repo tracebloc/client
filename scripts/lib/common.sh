@@ -44,6 +44,17 @@ _chart_version() {
   helm list -n "$ns" 2>/dev/null | grep -oE 'client-[0-9][^[:space:]]*' | head -1 | sed 's/^client-//'
 }
 
+# The client's core workload Deployments in namespace $1 — the set whose
+# readiness DEFINES "the client is up". SINGLE SOURCE OF TRUTH: both
+# wait_for_client_ready (summary.sh, the post-install readiness gate) and the
+# installer's stop-and-check gate (assess.sh) consume this, so the two can never
+# drift on what "ready" / "healthy" means. Echoes one Deployment name per line;
+# `mysql-client` is fixed, the other two are release-namespace-prefixed.
+_client_workload_deployments() {
+  local ns="${1:-${TB_NAMESPACE:-default}}"
+  printf '%s\n' "mysql-client" "${ns}-jobs-manager" "${ns}-requests-proxy"
+}
+
 # ── macOS: Docker Desktop architecture vs machine (for wrong-arch UX) ────────
 #  Call early on macOS to fail fast with clear instructions if Docker.app
 #  is for the wrong architecture (e.g. Intel Docker on Apple Silicon).

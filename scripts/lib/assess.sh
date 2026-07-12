@@ -48,27 +48,40 @@ _assess_cluster_servers_running() {
       | jq -r --arg n "$CLUSTER_NAME" '.[] | select(.name == $n) | .serversRunning // 0' 2>/dev/null)" \
       || running="0"
   else
-    line="$(k3d cluster list --no-headers 2>/dev/null | awk -v n="$CLUSTER_NAME" '$1 == n { print $2; exit }')"
+    # `|| line=""` mirrors the jq branch's guard: awk's `exit` closes the pipe, so
+    # under `set -o pipefail` a SIGPIPE from k3d (141) — or any k3d failure —
+    # would otherwise propagate non-zero out of the assignment and abort the
+    # installer under `set -e`.
+    line="$(k3d cluster list --no-headers 2>/dev/null | awk -v n="$CLUSTER_NAME" '$1 == n { print $2; exit }')" \
+      || line=""
     [[ -n "$line" ]] && running="${line%%/*}"
   fi
   [[ "$running" =~ ^[0-9]+$ ]] || running="0"
   printf '%s' "$running"
 }
 
-# _assess_jobs_manager_ready NS — is the core workload (jobs-manager) Ready in
-# namespace NS? Read-only + bounded via kubectl --request-timeout, so a stopped
-# or unreachable API returns quickly instead of hanging. Ready == the Deployment
-# reports >=1 readyReplicas. Any error / missing / zero => not ready (return 1),
-# which degrades toward the normal flow. The Deployment name matches summary.sh's
-# readiness gate ("${ns}-jobs-manager").
-_assess_jobs_manager_ready() {
-  local ns="$1" ready
+# _assess_workload_ready NS — are ALL the client's core workloads Ready in
+# namespace NS? "Ready" MUST match the installer's OWN definition, so this
+# iterates the SAME deployment set as wait_for_client_ready (summary.sh) via the
+# shared _client_workload_deployments — mysql-client + jobs-manager +
+# requests-proxy. A machine with jobs-manager up but requests-proxy (training
+# egress) or mysql-client down is NOT healthy, and must reconcile rather than be
+# told "already set up". Read-only + bounded via kubectl --request-timeout, so a
+# stopped/unreachable API returns quickly instead of hanging. A Deployment is
+# Ready when it reports >=1 readyReplicas; ANY one missing / erroring / zero =>
+# not ready (return 1), which degrades toward the normal flow.
+_assess_workload_ready() {
+  local ns="$1" d ready
   [[ -n "$ns" ]] || return 1
   has kubectl || return 1
-  ready="$(kubectl get deployment "${ns}-jobs-manager" -n "$ns" \
-             --request-timeout="$TB_ASSESS_KUBECTL_TIMEOUT" \
-             -o jsonpath='{.status.readyReplicas}' 2>/dev/null)" || return 1
-  [[ "$ready" =~ ^[0-9]+$ ]] && [[ "$ready" -ge 1 ]]
+  while IFS= read -r d; do
+    [[ -n "$d" ]] || continue
+    ready="$(kubectl get deployment "$d" -n "$ns" \
+               --request-timeout="$TB_ASSESS_KUBECTL_TIMEOUT" \
+               -o jsonpath='{.status.readyReplicas}' 2>/dev/null)" || return 1
+    [[ "$ready" =~ ^[0-9]+$ ]] && [[ "$ready" -ge 1 ]] || return 1
+  done < <(_client_workload_deployments "$ns")
+  return 0
 }
 
 # _assess_cli_present — is the tracebloc CLI available? Counts a binary in
@@ -117,8 +130,8 @@ _assess_classify() {
   fi
 
   # Cluster is running, so the readiness probe talks to a live API (and is
-  # bounded regardless). A not-Ready workload => degraded.
-  if ! _assess_jobs_manager_ready "$ns"; then
+  # bounded regardless). ANY of the client's core workloads not Ready => degraded.
+  if ! _assess_workload_ready "$ns"; then
     INSTALL_STATE="degraded"; INSTALL_STATE_REASON="workload-not-ready"
     return 0
   fi

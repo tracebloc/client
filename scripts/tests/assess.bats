@@ -46,6 +46,16 @@ refute_has() {   # needle haystack
   return 0
 }
 
+# _depname — echo the Deployment name from a `kubectl get deployment <name> …`
+# argv, so a kubectl mock can answer per-workload (flip one deployment down).
+_depname() {
+  local a prev=""
+  for a in "$@"; do
+    [ "$prev" = deployment ] && { printf '%s' "$a"; return 0; }
+    prev="$a"
+  done
+}
+
 # ── _assess_cluster_servers_running (read-only serversRunning, jq + awk) ─────
 # The k3d mock answers BOTH the jq path (`-o json`) and the awk path
 # (`--no-headers`) so the result is identical whether or not the runner has jq.
@@ -80,46 +90,68 @@ refute_has() {   # needle haystack
   [ "$output" = "0" ]
 }
 
-# ── _assess_jobs_manager_ready (bounded, read-only) ─────────────────────────
-@test "_assess_jobs_manager_ready: readyReplicas>=1 -> ready (0)" {
+# ── _assess_workload_ready (ALL shared workloads; bounded, read-only) ───────
+# "Ready" must match the installer's OWN definition — the same deployment set
+# wait_for_client_ready uses (mysql-client + ${ns}-jobs-manager +
+# ${ns}-requests-proxy). These tests are mutation-real against the old
+# jobs-manager-only probe: "mysql-client down" / "requests-proxy down" both
+# return ready under the old code (it never looked at them), so they'd fail it.
+@test "_assess_workload_ready: all three Ready -> ready (0)" {
   has() { [ "$1" = kubectl ]; }
-  kubectl() { echo 2; }
-  run _assess_jobs_manager_ready tracebloc
+  kubectl() { echo 1; }                          # every workload reports 1 ready
+  run _assess_workload_ready tracebloc
   [ "$status" -eq 0 ]
 }
 
-@test "_assess_jobs_manager_ready: empty readyReplicas -> not ready (1)" {
+@test "_assess_workload_ready: mysql-client down -> not ready (1)" {
   has() { [ "$1" = kubectl ]; }
-  kubectl() { echo ""; }
-  run _assess_jobs_manager_ready tracebloc
+  kubectl() { case "$(_depname "$@")" in mysql-client) echo "";; *) echo 1;; esac; }
+  run _assess_workload_ready tracebloc
   [ "$status" -ne 0 ]
 }
 
-@test "_assess_jobs_manager_ready: kubectl error -> not ready (1)" {
+@test "_assess_workload_ready: jobs-manager has 0 ready -> not ready (1)" {
   has() { [ "$1" = kubectl ]; }
-  kubectl() { return 1; }
-  run _assess_jobs_manager_ready tracebloc
+  kubectl() { case "$(_depname "$@")" in *-jobs-manager) echo 0;; *) echo 1;; esac; }
+  run _assess_workload_ready tracebloc
   [ "$status" -ne 0 ]
 }
 
-@test "_assess_jobs_manager_ready: kubectl absent -> not ready (1)" {
+@test "_assess_workload_ready: requests-proxy down (training egress) -> not ready (1)" {
+  has() { [ "$1" = kubectl ]; }
+  kubectl() { case "$(_depname "$@")" in *-requests-proxy) echo "";; *) echo 1;; esac; }
+  run _assess_workload_ready tracebloc
+  [ "$status" -ne 0 ]
+}
+
+@test "_assess_workload_ready: a deployment absent (kubectl errors) -> not ready (1)" {
+  has() { [ "$1" = kubectl ]; }
+  kubectl() { case "$(_depname "$@")" in *-requests-proxy) return 1;; *) echo 1;; esac; }
+  run _assess_workload_ready tracebloc
+  [ "$status" -ne 0 ]
+}
+
+@test "_assess_workload_ready: kubectl absent -> not ready (1)" {
   has() { return 1; }
-  run _assess_jobs_manager_ready tracebloc
+  run _assess_workload_ready tracebloc
   [ "$status" -ne 0 ]
 }
 
-@test "_assess_jobs_manager_ready: empty namespace -> not ready (1)" {
+@test "_assess_workload_ready: empty namespace -> not ready (1)" {
   has() { return 0; }
-  run _assess_jobs_manager_ready ""
+  run _assess_workload_ready ""
   [ "$status" -ne 0 ]
 }
 
-@test "_assess_jobs_manager_ready: passes a bounded --request-timeout (can't hang)" {
+@test "_assess_workload_ready: probes ALL three, each with a bounded --request-timeout" {
   has() { [ "$1" = kubectl ]; }
-  kubectl() { printf '%s\n' "$*" >>"$MOCK_CALLS"; echo 1; }
-  run _assess_jobs_manager_ready tracebloc
+  kubectl() { printf '%s | %s\n' "$(_depname "$@")" "$*" >>"$MOCK_CALLS"; echo 1; }
+  run _assess_workload_ready tracebloc
   [ "$status" -eq 0 ]
   run mock_calls
+  assert_has "mysql-client" "$output"
+  assert_has "tracebloc-jobs-manager" "$output"
+  assert_has "tracebloc-requests-proxy" "$output"
   assert_has "--request-timeout=" "$output"
 }
 
@@ -173,36 +205,38 @@ refute_has() {   # needle haystack
   [ "$INSTALL_STATE_REASON" = cluster-stopped ]
 }
 
-@test "_assess_classify: running but workload not Ready -> degraded (workload-not-ready)" {
-  has() { return 0; }
+# healthy requires ALL three workloads: with the REAL _assess_workload_ready
+# driven per-deployment, one workload down at the classify level -> degraded.
+@test "_assess_classify: one workload down (requests-proxy) -> degraded (workload-not-ready)" {
+  has() { return 0; }                            # k3d, kubectl, tracebloc present
   _cluster_exists() { return 0; }
   detect_installed_client() { INSTALLED_CLIENT_ID=uuid; INSTALLED_CLIENT_NS=tracebloc; }
   _assess_cluster_servers_running() { echo 1; }
-  _assess_jobs_manager_ready() { return 1; }
+  _assess_cli_present() { return 0; }
+  kubectl() { case "$(_depname "$@")" in *-requests-proxy) echo "";; *) echo 1;; esac; }
   _assess_classify
   [ "$INSTALL_STATE" = degraded ]
   [ "$INSTALL_STATE_REASON" = workload-not-ready ]
 }
 
-@test "_assess_classify: up + Ready but CLI missing -> degraded (cli-missing)" {
-  has() { return 0; }
+@test "_assess_classify: up + all workloads Ready but CLI missing -> degraded (cli-missing)" {
+  has() { case "$1" in tracebloc) return 1;; *) return 0;; esac; }   # k3d+kubectl present, CLI absent
   _cluster_exists() { return 0; }
   detect_installed_client() { INSTALLED_CLIENT_ID=uuid; INSTALLED_CLIENT_NS=tracebloc; }
   _assess_cluster_servers_running() { echo 1; }
-  _assess_jobs_manager_ready() { return 0; }
-  _assess_cli_present() { return 1; }
+  kubectl() { echo 1; }                          # all workloads Ready
+  HOME="$BATS_TEST_TMPDIR/nocli"; mkdir -p "$HOME"   # and no ~/.local/bin/tracebloc
   _assess_classify
   [ "$INSTALL_STATE" = degraded ]
   [ "$INSTALL_STATE_REASON" = cli-missing ]
 }
 
-@test "_assess_classify: all four signals true -> healthy" {
-  has() { return 0; }
+@test "_assess_classify: all signals true (all three workloads Ready + CLI) -> healthy" {
+  has() { return 0; }                            # k3d, kubectl, tracebloc all present
   _cluster_exists() { return 0; }
   detect_installed_client() { INSTALLED_CLIENT_ID=uuid; INSTALLED_CLIENT_NS=munich; }
   _assess_cluster_servers_running() { echo 1; }
-  _assess_jobs_manager_ready() { return 0; }
-  _assess_cli_present() { return 0; }
+  kubectl() { echo 1; }                          # every workload Ready
   _assess_classify
   [ "$INSTALL_STATE" = healthy ]
   assert_has "munich" "$INSTALL_STATE_REASON"
