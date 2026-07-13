@@ -111,12 +111,13 @@ if [[ "$_tb_bail_ok" == "1" ]] && command -v tracebloc >/dev/null 2>&1; then
     printf '  %s✓%s %sAlready set up and healthy — nothing to download or install.%s\n' "$_G" "$_R" "$_B" "$_R"
     printf "    %sRun%s  %stracebloc%s%s  to use it. Here's your environment:%s\n" "$_D" "$_R" "$_C" "$_R" "$_D" "$_R"
     # Hand off to the interactive home screen (exec replaces this process).
-    # </dev/tty: under `curl … | bash` stdin is the install pipe, so read the
-    # user's real terminal instead — otherwise the home screen would consume/
-    # block on the script bytes rather than the keyboard. exec only returns if
-    # it FAILED to replace the process (bad binary, or no controlling terminal
-    # to open /dev/tty) — surface that instead of a silent exit 0.
-    exec tracebloc </dev/tty
+    # Under `curl … | bash` stdin is the install pipe, so give the home screen
+    # the user's real terminal instead — but only when /dev/tty is actually
+    # OPENABLE (a readable device node with no controlling terminal — e.g. under
+    # CI / a detached session — still fails to open, which would abort the exec);
+    # otherwise /dev/null, never the pipe. exec only returns if it FAILED to
+    # replace the process — surface that instead of a silent exit 0.
+    if { : </dev/tty; } 2>/dev/null; then exec tracebloc </dev/tty; else exec tracebloc </dev/null; fi
     printf '  %sCould not launch tracebloc automatically — run %stracebloc%s%s to use it.%s\n' "$_B" "$_C" "$_R" "$_B" "$_R" >&2
     exit 1
   fi
