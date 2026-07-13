@@ -210,4 +210,7 @@ irm https://github.com/tracebloc/client/releases/latest/download/install.ps1 | i
 ```
 
 The raw-`main` copy of `install.ps1` is un-stamped and fails closed by design;
-customers must use the release asset (or a pinned `<TAG>` raw URL).
+customers must use the release asset. (A raw `<TAG>` URL serves the same
+un-stamped tree — the committed tag tree keeps the `__TRACEBLOC_RELEASE_REF__`
+placeholder; only the release *asset* is stamped — so it too refuses to run
+unless you also set `$env:REF = '<TAG>'` to pin the ref yourself.)
