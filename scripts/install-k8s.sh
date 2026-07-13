@@ -22,6 +22,8 @@
 #    K8S_VERSION=v1.29.4-k3s1   default: latest stable k3s
 #    HOST_DATA_DIR=~/.tracebloc  default: ~/.tracebloc
 #    CLIENT_ENV=dev              optional; if not set, CLIENT_ENV is not added to env in values
+#    TRACEBLOC_FORCE_REINSTALL=1  skip the "already set up" stop-and-check gate
+#                                and re-run every step (same as --force/--reinstall)
 #    TRACEBLOC_SKIP_REBOOT_PROMPT=1 (Linux) skip "Reboot now?" after NVIDIA driver install
 #    TRACEBLOC_TRAINING_RESOURCES="cpu=4,memory=16Gi"  CPU/RAM each training run
 #                                may use (default cpu=2,memory=8Gi; sets requests==limits)
@@ -67,6 +69,13 @@ fi
 if [[ -f "${LIB_DIR}/provision.sh" ]]; then
   source "${LIB_DIR}/provision.sh"
 fi
+# assess.sh (the stop-and-check gate) may likewise be absent under a stale
+# bootstrap that didn't fetch it — guard the source so the installer simply runs
+# the full flow (no gate) instead of aborting under `set -e`. An `if` block, not
+# `[[ -f … ]] && source`, so a false test doesn't trip `set -e`.
+if [[ -f "${LIB_DIR}/assess.sh" ]]; then
+  source "${LIB_DIR}/assess.sh"
+fi
 source "${LIB_DIR}/summary.sh"
 source "${LIB_DIR}/diagnose.sh"
 
@@ -89,21 +98,29 @@ main() {
   # the post-install cleanup message doesn't fire after a diagnose run.
   [[ "${1:-}" == "--diagnose" ]] && { trap - EXIT; run_diagnose; exit $?; }
 
+  # Run-modifying flags (unlike --help/--diagnose, which are terminal). --force /
+  # --reinstall skips the stop-and-check gate below and re-runs every step. Also
+  # honored via TRACEBLOC_FORCE_REINSTALL=1 for the curl|bash path (assess.sh
+  # seeds that default; here we let the flag override it).
+  local _arg
+  for _arg in "$@"; do
+    case "$_arg" in
+      --force|--reinstall) TB_FORCE_REINSTALL=1 ;;
+    esac
+  done
+
   validate_config
   setup_log_file
   print_banner
 
-  # ── Stop-and-check gate — SLOT for client#339 (do NOT implement here) ─────
-  # After the banner, before the roadmap: client#339 adds a READ-ONLY assessment
-  # (assess.sh::assess_existing_install) that short-circuits an already-healthy
-  # machine straight to the `tracebloc` home screen and exits 0, so a plain re-run
-  # doesn't repeat every step. The gate LOGIC lives in that branch's assess.sh
-  # (plus its --force/--reinstall / TRACEBLOC_FORCE_REINSTALL bypass) — this is
-  # only the call site, left here so the two changes reconcile cleanly. The call
-  # is a guarded NO-OP until assess.sh ships (declare -F is false), so nothing
-  # changes on this branch. NOTE: the bootstrap (install.sh) already performs the
-  # pre-download `tracebloc doctor` bailout; this is the deeper post-download check.
-  if declare -F assess_existing_install >/dev/null 2>&1; then
+  # ── Stop-and-check gate ──────────────────────────────────────────────────
+  # A re-run on an already-set-up machine must not re-run full provisioning.
+  # assess_existing_install inspects the machine READ-ONLY: a verifiably healthy
+  # box is handed straight to the `tracebloc` home screen and exits 0; a fresh or
+  # half-set-up box falls through to the normal flow below. Guarded so a stale
+  # bootstrap that didn't fetch assess.sh — or --force/--reinstall — simply runs
+  # the full flow.
+  if [[ "${TB_FORCE_REINSTALL:-0}" != 1 ]] && declare -F assess_existing_install >/dev/null 2>&1; then
     assess_existing_install
   fi
 

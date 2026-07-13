@@ -281,3 +281,69 @@ _stub_tracebloc() {
   [[ "$output" == *"name for this client is required"* ]]
   [ ! -s "$CREATE_ARGS_FILE" ]
 }
+
+# ── cli#141: the #303 pre-flight's grep contract with `tracebloc client list` ──
+# _account_owns_namespace shells out to `tracebloc client list --plain` and greps
+# the output for `namespace=<ns>([[:space:]]|$)` to decide ownership. `client list`
+# is a HIDDEN cobra command in the cli repo (RFC-0001 §7.10), kept callable purely
+# for this pre-flight. The PRODUCER half of the contract — that the hidden command
+# still runs and still prints that exact `namespace=<ns>` field under --plain — is
+# pinned in the cli repo (internal/cli/client_list_contract_test.go, cli#141). The
+# tests below pin the CONSUMER half here: that the grep classifies the CLI's EXACT
+# --plain line format correctly (owned / absent / unreadable / prefix-boundary) and
+# that the pre-flight really passes --plain. The fixture mirrors, field-for-field,
+# what cli's runClientList prints (cli internal/cli/client.go):
+#     "<name>   state=<state>   namespace=<ns>   location=<loc>"
+# If that format ever changes, the cli-side guard fails first; keep this fixture +
+# provision.sh's grep in lockstep with it.
+
+# _stub_client_list_plain LINES — stub `tracebloc` so `client list` prints $LINES
+# (one client per line, in the CLI's real --plain value format; \n-separated) and
+# records its argv to $LIST_ARGV_FILE so a test can assert --plain was passed.
+_stub_client_list_plain() {
+  CLIENT_LIST_OUTPUT="$1"
+  tracebloc() {
+    if [ "$1" = "client" ] && [ "$2" = "list" ]; then
+      printf '%s\n' "$*" >>"${LIST_ARGV_FILE:-/dev/null}"
+      printf '%b' "$CLIENT_LIST_OUTPUT"
+      return 0
+    fi
+    return 0
+  }
+}
+
+@test "cli#141: _account_owns_namespace matches the CLI's exact --plain namespace= line (owned / absent / prefix-boundary) + passes --plain" {
+  LIST_ARGV_FILE="$(mktemp)"
+  # Two clients in the account, printed exactly as `client list --plain` renders
+  # them; the second's namespace has the first's as a strict prefix on purpose.
+  _stub_client_list_plain 'acme-box   state=online   namespace=acme-prod-01   location=DE\nother-box   state=offline   namespace=acme-prod-01-staging   location=US\n'
+
+  # Owned → 0 (provision proceeds to create, which adopts).
+  run _account_owns_namespace "acme-prod-01"
+  [ "$status" -eq 0 ]
+
+  # List read OK but the namespace is absent → 1 (the FOREIGN-client refuse signal).
+  run _account_owns_namespace "acme-prod-99"
+  [ "$status" -eq 1 ]
+
+  # Strict prefix must NOT match: after "acme-prod-0" comes "1", not whitespace/EOL,
+  # so the account does not "own" acme-prod-0 just because it owns acme-prod-01.
+  # This pins the ([[:space:]]|$) anchor the installer's grep depends on — without
+  # it a prefix collision would silently mis-classify ownership.
+  run _account_owns_namespace "acme-prod-0"
+  [ "$status" -eq 1 ]
+
+  # The pre-flight MUST invoke the hidden list with --plain (the #141 output
+  # contract). grep gives a real exit code, so this holds on bash 3.2 too.
+  run grep -qF -- '--plain' "$LIST_ARGV_FILE"
+  [ "$status" -eq 0 ]
+}
+
+@test "cli#141: _account_owns_namespace reports 'couldn't read the list' as rc 2, distinct from 'absent' rc 1" {
+  # A failed list read must be rc 2 (not 1) so provision_client falls through to
+  # create's own idempotent adopt/conflict handling instead of REFUSING on a
+  # transient blip — the distinction the #303 pre-flight branches on.
+  tracebloc() { if [ "$1" = "client" ] && [ "$2" = "list" ]; then return 7; fi; return 0; }
+  run _account_owns_namespace "any-ns"
+  [ "$status" -eq 2 ]
+}

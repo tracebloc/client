@@ -26,7 +26,11 @@ READY_TIMEOUT="${READY_TIMEOUT:-300}"
 
 wait_for_client_ready() {
   local ns="${TB_NAMESPACE:-default}"
-  local deploys=("mysql-client" "${ns}-jobs-manager" "${ns}-requests-proxy")
+  # The workloads that must be Ready are shared with the installer's stop-and-check
+  # gate (assess.sh) via _client_workload_deployments — single source of truth, so
+  # the readiness gate and the gate's "healthy" test can't drift.
+  local deploys=() _d
+  while IFS= read -r _d; do [[ -n "$_d" ]] && deploys+=("$_d"); done < <(_client_workload_deployments "$ns")
   local deadline=$(( $(date +%s) + READY_TIMEOUT ))
   local all_ready=true d remaining
 

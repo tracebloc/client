@@ -36,6 +36,7 @@ setup() {
   run _augment_no_proxy
   [ "$status" -eq 0 ]
   [[ "$output" == *"localhost"* ]]
+  [[ "$output" == *"169.254.169.254"* ]]
   [[ "$output" == *"127.0.0.1"* ]]
   [[ "$output" == *"10.0.0.0/8"* ]]
   [[ "$output" == *".svc"* ]]

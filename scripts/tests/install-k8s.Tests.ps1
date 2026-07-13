@@ -314,6 +314,11 @@ Describe "Install-ClientHelm" {
     Install-ClientHelm
     (Get-Content "$HOST_DATA_DIR/values.yaml" -Raw) | Should -Match 'clientId: "previd"'
   }
+  # One-client guard mocks mirror real helm (#200): `helm get values` re-serializes
+  # the stored values, so its YAML view typically emits clientId UNQUOTED — only
+  # the `-o json` view is quoting-proof, and that is what the guard must read.
+  # Each mock serves JSON when asked for it and the YAML view otherwise, so a
+  # regression back to YAML-regex-scraping fails these tests.
   It "blocks a DIFFERENT client already installed" {
     $HOST_DATA_DIR = "$TestDrive/d5"
     Mock Err { throw "err" }
@@ -325,11 +330,77 @@ Describe "Install-ClientHelm" {
     Mock Test-Credentials { "valid" }
     Mock helm {
       if ($args -contains "list") { '[{"name":"oldrel","namespace":"default","chart":"client-1.4.3"}]'; $global:LASTEXITCODE = 0; return }
-      if ($args -contains "get") { 'clientId: "otherclient"'; $global:LASTEXITCODE = 0; return }
+      if ($args -contains "get") {
+        if ($args -contains "json") { '{"clientId":"otherclient"}' } else { 'clientId: otherclient' }
+        $global:LASTEXITCODE = 0; return
+      }
       $global:LASTEXITCODE = 0
     }
     { Install-ClientHelm } | Should -Throw
     Should -Not -Invoke helm -ParameterFilter { $args -contains "upgrade" }
+  }
+  It "blocks a DIFFERENT client whose YAML view is <style> (#200)" -TestCases @(
+    @{ style = 'unquoted';      yaml = 'clientId: otherclient' }
+    @{ style = 'single-quoted'; yaml = "clientId: 'otherclient'" }
+    @{ style = 'double-quoted'; yaml = 'clientId: "otherclient"' }
+  ) {
+    param($style, $yaml)
+    $HOST_DATA_DIR = "$TestDrive/d5-$style"
+    $script:yamlView = $yaml
+    Mock Err { throw "err" }
+    Mock Read-Host {
+      param([string]$Prompt, [switch]$AsSecureString)
+      if ($Prompt -match 'password') { return (ConvertTo-SecureString "pw" -AsPlainText -Force) }
+      return "newclient"
+    }
+    Mock Test-Credentials { "valid" }
+    Mock helm {
+      if ($args -contains "list") { '[{"name":"oldrel","namespace":"default","chart":"client-1.4.3"}]'; $global:LASTEXITCODE = 0; return }
+      if ($args -contains "get") {
+        if ($args -contains "json") { '{"clientId":"otherclient"}' } else { $script:yamlView }
+        $global:LASTEXITCODE = 0; return
+      }
+      $global:LASTEXITCODE = 0
+    }
+    { Install-ClientHelm } | Should -Throw
+    Should -Not -Invoke helm -ParameterFilter { $args -contains "upgrade" }
+  }
+  It "scans past a release with no user values and still finds the client" {
+    $HOST_DATA_DIR = "$TestDrive/d5-null"
+    Mock Err { throw "err" }
+    Mock Read-Host {
+      param([string]$Prompt, [switch]$AsSecureString)
+      if ($Prompt -match 'password') { return (ConvertTo-SecureString "pw" -AsPlainText -Force) }
+      return "newclient"
+    }
+    Mock Test-Credentials { "valid" }
+    Mock helm {
+      if ($args -contains "list") { '[{"name":"bare","namespace":"ns1","chart":"client-1.4.2"},{"name":"oldrel","namespace":"ns2","chart":"client-1.4.3"}]'; $global:LASTEXITCODE = 0; return }
+      if ($args -contains "get") {
+        # `helm get values -o json` prints literal null when nothing was set.
+        if ($args -contains "bare") { 'null' } else { '{"clientId":"otherclient"}' }
+        $global:LASTEXITCODE = 0; return
+      }
+      $global:LASTEXITCODE = 0
+    }
+    { Install-ClientHelm } | Should -Throw
+    Should -Not -Invoke helm -ParameterFilter { $args -contains "upgrade" }
+  }
+  It "values without a clientId key do not trip the guard" {
+    $HOST_DATA_DIR = "$TestDrive/d5-nokey"
+    Mock Read-Host {
+      param([string]$Prompt, [switch]$AsSecureString)
+      if ($Prompt -match 'password') { return (ConvertTo-SecureString "pw" -AsPlainText -Force) }
+      return "newclient"
+    }
+    Mock Test-Credentials { "valid" }
+    Mock helm {
+      if ($args -contains "list") { '[{"name":"oldrel","namespace":"default","chart":"client-1.4.3"}]'; $global:LASTEXITCODE = 0; return }
+      if ($args -contains "get") { '{"env":{"CLIENT_ENV":"dev"}}'; $global:LASTEXITCODE = 0; return }
+      $global:LASTEXITCODE = 0
+    }
+    Install-ClientHelm
+    Should -Invoke helm -ParameterFilter { $args -contains "upgrade" }
   }
   It "same client re-run is allowed (upgrade in place)" {
     $HOST_DATA_DIR = "$TestDrive/d6"
@@ -341,7 +412,10 @@ Describe "Install-ClientHelm" {
     Mock Test-Credentials { "valid" }
     Mock helm {
       if ($args -contains "list") { '[{"name":"tracebloc","namespace":"tracebloc","chart":"client-1.4.3"}]'; $global:LASTEXITCODE = 0; return }
-      if ($args -contains "get") { 'clientId: "sameid"'; $global:LASTEXITCODE = 0; return }
+      if ($args -contains "get") {
+        if ($args -contains "json") { '{"clientId":"sameid"}' } else { 'clientId: sameid' }
+        $global:LASTEXITCODE = 0; return
+      }
       $global:LASTEXITCODE = 0
     }
     Install-ClientHelm
@@ -363,6 +437,7 @@ Describe "Get-EffectiveNoProxy" {
   It "empty host NO_PROXY -> cluster-internal defaults" {
     $env:NO_PROXY = $null; $env:no_proxy = $null
     $r = Get-EffectiveNoProxy
+    $r | Should -Match '169\.254\.169\.254'
     $r | Should -Match '127\.0\.0\.1'
     $r | Should -Match '10\.0\.0\.0/8'
     $r | Should -Match '\.svc'
