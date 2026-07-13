@@ -87,6 +87,10 @@ trap 'exit 130' INT
 trap 'exit 143' TERM
 
 # ── Main ─────────────────────────────────────────────────────────────────────
+#  Structured as the six-step first-run run-through (a–f). Each step prints a
+#  gerund header via step_header and a trailing blank-line pair (the run-through's
+#  spacing); print_roadmap lists the plan up front. Step b owns the prerequisites
+#  AND the tracebloc CLI (moved out of provisioning — step d needs it to sign in).
 main() {
   [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]] && print_help
   # Support bundle: collect redacted diagnostics and exit, before any install
@@ -122,11 +126,19 @@ main() {
 
   print_roadmap
 
-  # ── Step 1/5: Check system requirements ──────────────────────────────────
-  step 1 5 "Checking system requirements"
+  # ── a) Check your machine ────────────────────────────────────────────────
+  step_header a "Checking your machine"
   run_preflight
   detect_gpu
+  echo ""; echo ""
 
+  # ── b) Install what tracebloc needs ──────────────────────────────────────
+  #     Prerequisites (Docker + system tools) AND the tracebloc CLI. The CLI moved
+  #     here from provisioning: step d (provision_client) needs it to sign in and
+  #     mint the credential, so it must exist before then. install_tracebloc_cli is
+  #     non-fatal on its own; step d's `has tracebloc` guard makes a genuinely
+  #     missing CLI fatal at the point it's actually required.
+  step_header b "Installing what tracebloc needs"
   case "$OS" in
     Darwin)   install_macos ;;
     Linux)    install_linux ;;
@@ -135,35 +147,41 @@ main() {
   irm https://raw.githubusercontent.com/tracebloc/client/main/scripts/install.ps1 | iex" ;;
     *)        error "Unsupported OS: $OS" ;;
   esac
+  # Guarded: a stale bootstrap may not have fetched install-cli.sh — then step d's
+  # guard (or install_client_helm's dual-mode path) surfaces it.
+  if declare -F install_tracebloc_cli >/dev/null 2>&1; then
+    install_tracebloc_cli
+  fi
+  echo ""; echo ""
 
-  # ── Step 2/5: Set up secure compute environment ──────────────────────────
-  step 2 5 "Setting up secure compute environment"
+  # ── c) Create your secure environment ────────────────────────────────────
+  step_header c "Creating your secure environment"
   create_cluster
   deploy_gpu_device_plugin
   verify_gpu
+  echo ""; echo ""
 
-  # ── Step 3/5: sign in + provision the client (install CLI, login, client
-  #    create) BEFORE Helm, so the minted credential + derived namespace feed the
-  #    chart (#838). On the dual-mode path (TRACEBLOC_VALUES_FILE / pre-supplied
-  #    credentials) this skips sign-in. Guarded so a stale bootstrap that didn't
-  #    fetch provision.sh degrades to the dual-mode credential path rather than
-  #    aborting; in that case the operator must supply credentials/values. ──────
+  # ── d) Register this machine ─────────────────────────────────────────────
+  #     Sign in + `client create` BEFORE Helm, so the minted credential + derived
+  #     namespace feed the chart (#838). Dual-mode (TRACEBLOC_VALUES_FILE / pre-
+  #     supplied credentials) skips sign-in. Guarded so a stale bootstrap that
+  #     didn't fetch provision.sh degrades to the dual-mode credential path inside
+  #     install_client_helm rather than aborting.
+  step_header d "Registering this machine"
   if declare -F provision_client >/dev/null 2>&1; then
     provision_client
-  elif declare -F install_tracebloc_cli >/dev/null 2>&1; then
-    # Stale bootstrap: provision.sh wasn't fetched, but install-cli.sh was. Keep
-    # the old post-Helm Step 5 behavior so the CLI still gets installed (non-fatal,
-    # for `tracebloc data ingest`); provisioning then falls through to the dual-mode
-    # credential path inside install_client_helm.
-    install_tracebloc_cli
   fi
+  echo ""; echo ""
 
-  # ── Step 4/5 + 5/5 are handled inside install_client_helm ────────────────
+  # ── e) Install tracebloc ─────────────────────────────────────────────────
+  step_header e "Installing tracebloc"
   install_client_helm
+  echo ""; echo ""
 
-  # ── Verify the client actually came up before reporting anything ─────────
+  # ── f) Connect to the tracebloc network ──────────────────────────────────
+  #     Wait for the client's workloads to actually come up, then the rich summary.
+  step_header f "Connecting to the tracebloc network"
   wait_for_client_ready
-
   print_summary
 
   # Exit code reflects reality: connected/starting are OK; failures are non-zero

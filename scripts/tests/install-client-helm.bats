@@ -15,6 +15,10 @@ setup() {
   # A proxy inherited from the CI runner would otherwise leak proxy keys into
   # the generated values.yaml and make the proxy assertions non-deterministic.
   unset HTTP_PROXY HTTPS_PROXY NO_PROXY http_proxy https_proxy no_proxy
+  # Skip the live image-pull count bar: kubectl is mocked here and its poll loop
+  # would otherwise spin against fake output. The bar is cosmetic + covered by
+  # its own reasoning; the readiness gate (summary.bats) is the real contract.
+  export TB_NO_SERVICE_PROGRESS=1
 }
 
 # ── _backend_url ───────────────────────────────────────────────────────────
@@ -136,7 +140,7 @@ setup() {
   run install_client_helm <<< $'myid\nmypw'
   [ "$status" -eq 0 ]
   [[ "$output" == *"Credentials verified"* ]]
-  [[ "$output" == *"Connected to tracebloc"* ]]
+  [[ "$output" == *"tracebloc installed"* ]]
   grep -q 'clientId: "myid"' "$HOST_DATA_DIR/values.yaml"
   grep -q "clientPassword: 'mypw'" "$HOST_DATA_DIR/values.yaml"
   # client-runtime#92: installer-provisioned k3d is a fixed single-host cluster,
@@ -217,7 +221,7 @@ setup() {
   [[ "$output" != *"Client ID:"* ]]                # no credential prompt
   [[ "$output" != *"VERIFY_CALLED"* ]]             # no verify
   [[ "$output" == *"reconciling"* ]]
-  [[ "$output" == *"Connected to tracebloc"* ]]
+  [[ "$output" == *"tracebloc installed"* ]]
   # Reconciled the LIVE release in place (name 'munich') AND healed clientId to the
   # adopted UUID, reusing the stored password — NOT a fresh --install, no duplicate.
   mock_calls | grep -q "helm upgrade munich"
@@ -246,7 +250,7 @@ setup() {
   [ "$status" -eq 0 ]
   [[ "$output" != *"Client ID:"* ]]                # no prompt (no bail)
   [[ "$output" != *"VERIFY_CALLED"* ]]             # no verify
-  [[ "$output" == *"Connected to tracebloc"* ]]
+  [[ "$output" == *"tracebloc installed"* ]]
   mock_calls | grep -q "helm upgrade munich"
   mock_calls | grep -q -- "--reset-then-reuse-values"
   run mock_calls
@@ -659,4 +663,28 @@ setup() {
   [ "$status" -eq 0 ]
   grep -q 'RESOURCE_LIMITS: "cpu=2,memory=8Gi"' "$HOST_DATA_DIR/values.yaml"
   grep -q 'RESOURCE_REQUESTS: "cpu=2,memory=8Gi"' "$HOST_DATA_DIR/values.yaml"
+}
+
+# ── _download_services_progress (step-e count bar; must never hang/fail) ─────
+@test "_download_services_progress: TB_NO_SERVICE_PROGRESS set -> immediate no-op" {
+  export TB_NO_SERVICE_PROGRESS=1
+  run _download_services_progress tracebloc
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+}
+
+@test "_download_services_progress: kubectl absent -> silent skip (never fatal)" {
+  unset TB_NO_SERVICE_PROGRESS
+  has() { return 1; }                 # kubectl not present
+  run _download_services_progress tracebloc
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+}
+
+@test "_download_services_progress: empty namespace -> no-op" {
+  unset TB_NO_SERVICE_PROGRESS
+  has() { return 0; }
+  run _download_services_progress ""
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
 }

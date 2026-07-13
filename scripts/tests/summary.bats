@@ -57,11 +57,19 @@ setup() {
 }
 
 # ── print_summary: the trust claim must appear ONLY when connected ─────────
-@test "print_summary connected: Connected + trust claim" {
+@test "print_summary connected: Connected + trust claim + rich summary blocks" {
   CLIENT_STATE=connected
   run print_summary
   [[ "$output" == *"Connected to tracebloc"* ]]
-  [[ "$output" == *"data never leaves"* ]]
+  [[ "$output" == *"never leaves this machine"* ]]   # trust claim (was "data never leaves")
+  # rich summary from the run-through
+  [[ "$output" == *"Environment"* ]]
+  [[ "$output" == *"Mode"* ]]
+  [[ "$output" == *"live 🟢"* ]]
+  [[ "$output" == *"What's next"* ]]
+  [[ "$output" == *"tracebloc data ingest"* ]]
+  [[ "$output" == *"my-use-cases"* ]]
+  [[ "$output" == *"Run"* && "$output" == *"to get started"* ]]
 }
 
 @test "print_summary connected: shows the client version" {
@@ -76,35 +84,35 @@ setup() {
   CLIENT_STATE=starting
   run print_summary
   [[ "$output" == *"still starting"* ]]
-  [[ "$output" != *"data never leaves"* ]]
+  [[ "$output" != *"never leaves this machine"* ]]
 }
 
 @test "print_summary bad_creds: 'rejected', no trust claim" {
   CLIENT_STATE=bad_creds
   run print_summary
   [[ "$output" == *"rejected"* ]]
-  [[ "$output" != *"data never leaves"* ]]
+  [[ "$output" != *"never leaves this machine"* ]]
 }
 
 @test "print_summary image_pull: image message, no trust claim" {
   CLIENT_STATE=image_pull
   run print_summary
   [[ "$output" == *"image couldn't be pulled"* ]]
-  [[ "$output" != *"data never leaves"* ]]
+  [[ "$output" != *"never leaves this machine"* ]]
 }
 
 @test "print_summary crash: crash-loop message" {
   CLIENT_STATE=crash
   run print_summary
   [[ "$output" == *"crash loop"* ]]
-  [[ "$output" != *"data never leaves"* ]]
+  [[ "$output" != *"never leaves this machine"* ]]
 }
 
 # ── _reboot_note (reboot persistence) ───────────────────────────────────────
 @test "_reboot_note: Linux -> survives-reboot line" {
   OS=Linux
   run _reboot_note
-  [[ "$output" == *"Survives reboot"* ]]
+  [[ "$output" == *"restarts automatically"* ]]
   [[ "$output" != *"Docker Desktop"* ]]
 }
 
@@ -112,11 +120,11 @@ setup() {
   OS=Darwin
   run _reboot_note
   [[ "$output" == *"Docker Desktop"* ]]
-  [[ "$output" == *"sign in"* ]]
+  [[ "$output" == *"open Docker Desktop"* ]]
 }
 
 @test "print_summary connected: includes the reboot note" {
   CLIENT_STATE=connected; OS=Linux
   run print_summary
-  [[ "$output" == *"Survives reboot"* ]]
+  [[ "$output" == *"restarts automatically"* ]]
 }

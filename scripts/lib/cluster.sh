@@ -191,11 +191,11 @@ _handle_existing_cluster() {
   CLUSTER_STATUS="${CLUSTER_STATUS:-0}"
 
   if [[ "$CLUSTER_STATUS" -gt "0" ]]; then
-    success "Compute environment already running."
+    success "Secure environment already running."
   else
     log "Cluster '$CLUSTER_NAME' exists but is stopped — starting it..."
     k3d cluster start "$CLUSTER_NAME"
-    success "Compute environment started."
+    success "Secure environment started."
   fi
 
   _check_existing_cluster_proxy
@@ -320,7 +320,9 @@ _create_new_cluster() {
   else
     log "Creating cluster with $SERVERS server(s) + $AGENTS agent(s) (CPU-only)..."
   fi
-  hint "First run may take 1-2 minutes to download components."
+  echo -e "  ${DIM}Downloading the runtime that hosts your environment — a lightweight,${RESET}"
+  echo -e "  ${DIM}self-contained Kubernetes that runs entirely on your machine.${RESET}"
+  echo ""
 
   # Propagate corporate proxy env so k3s/containerd can reach external registries
   # behind an HTTP/HTTPS proxy (hospital/banking/government tenants). Passed via a
@@ -339,10 +341,15 @@ _create_new_cluster() {
 
   local create_out create_rc
   create_out="$(mktemp)"
-  # Capture the exit code WITHOUT tripping `set -e`: a bare failing command here
-  # would abort the script immediately, skipping the 'already exists' reuse path,
-  # the error dump, and the temp-dir cleanup below.
-  k3d "${K3D_ARGS[@]}" >"$create_out" 2>&1 && create_rc=0 || create_rc=$?
+  # Wrap the create in a spinner. k3d pulls the runtime image + boots the node
+  # (1-2 min on first run) while printing nothing, which reads as a frozen
+  # installer — the real fix here. Run it backgrounded and animate; spin() waits
+  # for the PID, so create_rc is k3d's real exit code (captured WITHOUT tripping
+  # `set -e`, so the 'already exists' reuse path, error dump, and temp-dir cleanup
+  # below still run) and the proxy-config cleanup can't race the finished create.
+  ( k3d "${K3D_ARGS[@]}" >"$create_out" 2>&1 ) &
+  create_rc=0
+  spin "$!" "Creating your secure environment…" || create_rc=$?
   [[ -n "$proxy_cfg" ]] && rm -rf "${proxy_cfg%/*}"
   if [[ $create_rc -ne 0 ]]; then
     if grep -qi "already exists\|a cluster with that name already exists" "$create_out" 2>/dev/null; then
@@ -358,7 +365,9 @@ _create_new_cluster() {
   fi
   cat "$create_out" >> "${LOG_FILE:-/dev/null}" 2>/dev/null
   rm -f "$create_out"
-  success "Compute environment ready."
+  # No success line here — _wait_for_api prints the single "Secure environment
+  # ready" once the API server actually answers (the true ready signal).
+  log "k3d cluster '$CLUSTER_NAME' created."
 }
 
 _merge_kubeconfig() {
@@ -402,10 +411,10 @@ _wait_for_api() {
     if kubectl cluster-info &>/dev/null 2>&1; then
       printf "\r\033[K"
       tput cnorm 2>/dev/null || true
-      success "Compute environment online."
+      success "Secure environment ready"
       return
     fi
-    printf "\r  ${CYAN}%s${RESET} Starting compute environment..." "${frames[f]}"
+    printf "\r  ${CYAN}%s${RESET} Starting your secure environment…" "${frames[f]}"
     f=$(( (f + 1) % ${#frames[@]} ))
     sleep 2
   done

@@ -157,7 +157,7 @@ run_boot_no_cosign() {
 @test "happy path: immutable tag + valid manifest + good signature runs install-k8s.sh" {
   REF="v9.9.9" COSIGN_RESULT=0 run_boot
   [ "$status" -eq 0 ]
-  [[ "$output" == *"installer files verified"* ]]
+  [[ "$output" == *"files intact"* ]]   # first-run copy: "All N files intact — nothing was altered"
   [ -f "$SBX/k8s-ran" ]              # privileged step reached only after verify
 }
 
@@ -202,4 +202,50 @@ run_boot_no_cosign() {
   [ "$status" -eq 0 ]
   [[ "$output" == *"manifest signature NOT verified"* ]]
   [ -f "$SBX/k8s-ran" ]             # checksum integrity still enforced; runs
+}
+
+# ── Early bailout: already-healthy machine skips the whole download ──────────
+# The bootstrap runs `tracebloc doctor` (bounded, exit-code gated) BEFORE any
+# fetch. Healthy → print the healthy line + exec the home screen; unhealthy or
+# --force → fall through to the normal (download + verify) flow. The bailout is
+# skipped whenever REF/BRANCH is pinned, which is why every OTHER test here (they
+# all set REF) is unaffected by it.
+
+@test "early bailout: healthy tracebloc doctor -> execs home screen, no download" {
+  # A tracebloc CLI that reports healthy; when exec'd with no args (home screen)
+  # it drops a sentinel so we can prove the hand-off happened.
+  cat > "$BIN/tracebloc" <<EOF
+#!/usr/bin/env bash
+[ "\$1" = "doctor" ] && exit 0
+: > "$SBX/home-ran"
+EOF
+  chmod +x "$BIN/tracebloc"
+  run_boot                                   # NO REF -> bailout is eligible
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Already set up and healthy"* ]]
+  [ -f "$SBX/home-ran" ]                      # handed off to the home screen
+  [ ! -f "$SBX/k8s-ran" ]                     # never downloaded / ran install-k8s.sh
+}
+
+@test "early bailout: unhealthy tracebloc doctor -> does NOT bail" {
+  cat > "$BIN/tracebloc" <<'EOF'
+#!/usr/bin/env bash
+[ "$1" = "doctor" ] && exit 3    # unhealthy
+EOF
+  chmod +x "$BIN/tracebloc"
+  run_boot                                   # NO REF: proceeds past bailout, then
+                                             # hits the un-stamped-ref refusal
+  [[ "$output" != *"Already set up and healthy"* ]]
+  [ ! -f "$SBX/home-ran" ]                    # no hand-off
+}
+
+@test "early bailout: --force skips the bailout even when healthy" {
+  cat > "$BIN/tracebloc" <<'EOF'
+#!/usr/bin/env bash
+[ "$1" = "doctor" ] && exit 0    # healthy, but --force must ignore it
+EOF
+  chmod +x "$BIN/tracebloc"
+  run_boot --force
+  [[ "$output" != *"Already set up and healthy"* ]]
+  [ ! -f "$SBX/home-ran" ]
 }
