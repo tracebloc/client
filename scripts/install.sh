@@ -97,15 +97,23 @@ _tb_check_healthy() {
   return "$rc"
 }
 
+# The CLI installer drops the binary in ~/.local/bin when /usr/local/bin isn't
+# writable, and a fresh curl|bash shell doesn't have that on PATH — so mirror
+# provision_client's prepend before probing, or a healthy ~/.local/bin install
+# is missed and forces a needless full re-download.
+export PATH="${HOME}/.local/bin:${PATH}"
+
 if [[ "$_tb_bail_ok" == "1" ]] && command -v tracebloc >/dev/null 2>&1; then
   printf '\n'
   if _tb_check_healthy; then
     printf '  %s✓%s %sAlready set up and healthy — nothing to download or install.%s\n' "$_G" "$_R" "$_B" "$_R"
     printf "    %sRun%s  %stracebloc%s%s  to use it. Here's your environment:%s\n" "$_D" "$_R" "$_C" "$_R" "$_D" "$_R"
-    # Hand off to the home screen (exec replaces this process); if that somehow
-    # fails, we've already told the user it's healthy, so exit 0.
-    exec tracebloc || true
-    exit 0
+    # Hand off to the home screen (exec replaces this process). exec only
+    # returns if it FAILED to replace the process — surface that instead of a
+    # silent exit 0, since the machine is healthy but we couldn't launch it.
+    exec tracebloc
+    printf '  %sCould not launch tracebloc automatically — run %stracebloc%s%s to use it.%s\n' "$_B" "$_C" "$_R" "$_B" "$_R" >&2
+    exit 1
   fi
 fi
 

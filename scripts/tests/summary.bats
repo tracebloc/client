@@ -67,7 +67,7 @@ setup() {
   [[ "$output" == *"Mode"* ]]
   [[ "$output" == *"live 🟢"* ]]
   [[ "$output" == *"What's next"* ]]
-  [[ "$output" == *"tb data ingest"* ]]
+  [[ "$output" == *"tracebloc data ingest"* ]]
   [[ "$output" == *"my-use-cases"* ]]
   [[ "$output" == *"Run"* && "$output" == *"to get started"* ]]
 }

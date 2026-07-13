@@ -110,7 +110,7 @@ print_summary() {
       echo ""
       # "What's next" is deliberately NOT dim — it's the primary call to action.
       echo -e "  ${BOLD}What's next${RESET}"
-      echo -e "    1. Ingest your data       ${CYAN}tb data ingest${RESET}"
+      echo -e "    1. Ingest your data       ${CYAN}tracebloc data ingest${RESET}"
       echo -e "    2. Create a use case      ${CYAN}https://ai.tracebloc.io/my-use-cases${RESET}"
       echo -e "    3. Invite collaborators — they train on your data; it never leaves this machine"
       echo ""
