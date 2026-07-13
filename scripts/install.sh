@@ -79,7 +79,9 @@ _tb_check_healthy() {
   local timeout="${TRACEBLOC_DOCTOR_TIMEOUT:-20}" maxticks tick=0 rc
   local frames='⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏' i=0 f
   maxticks=$(( timeout * 5 ))
-  tracebloc doctor >/dev/null 2>&1 &
+  # </dev/null: under `curl … | bash` stdin is the install pipe, so a
+  # diagnostic that reads stdin would consume/block on the script bytes.
+  tracebloc doctor </dev/null >/dev/null 2>&1 &
   local pid=$!
   tput civis 2>/dev/null || true
   while kill -0 "$pid" 2>/dev/null; do
@@ -108,10 +110,13 @@ if [[ "$_tb_bail_ok" == "1" ]] && command -v tracebloc >/dev/null 2>&1; then
   if _tb_check_healthy; then
     printf '  %s✓%s %sAlready set up and healthy — nothing to download or install.%s\n' "$_G" "$_R" "$_B" "$_R"
     printf "    %sRun%s  %stracebloc%s%s  to use it. Here's your environment:%s\n" "$_D" "$_R" "$_C" "$_R" "$_D" "$_R"
-    # Hand off to the home screen (exec replaces this process). exec only
-    # returns if it FAILED to replace the process — surface that instead of a
-    # silent exit 0, since the machine is healthy but we couldn't launch it.
-    exec tracebloc
+    # Hand off to the interactive home screen (exec replaces this process).
+    # </dev/tty: under `curl … | bash` stdin is the install pipe, so read the
+    # user's real terminal instead — otherwise the home screen would consume/
+    # block on the script bytes rather than the keyboard. exec only returns if
+    # it FAILED to replace the process (bad binary, or no controlling terminal
+    # to open /dev/tty) — surface that instead of a silent exit 0.
+    exec tracebloc </dev/tty
     printf '  %sCould not launch tracebloc automatically — run %stracebloc%s%s to use it.%s\n' "$_B" "$_C" "$_R" "$_B" "$_R" >&2
     exit 1
   fi
