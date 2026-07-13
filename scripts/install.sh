@@ -156,6 +156,7 @@ FILES=(
   "scripts/lib/install-client-helm.sh"
   "scripts/lib/install-cli.sh"
   "scripts/lib/provision.sh"
+  "scripts/lib/assess.sh"
   "scripts/lib/summary.sh"
   "scripts/lib/diagnose.sh"
 )

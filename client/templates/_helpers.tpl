@@ -236,7 +236,7 @@ Usage inside a container's env: list:
 {{- $cred := "" -}}
 {{- if $user }}{{- $cred = printf "%s:%s@" $user $pass -}}{{- end -}}
 {{- $url := printf "http://%s%s" $cred $hostport -}}
-{{- $noProxy := "localhost,127.0.0.1,0.0.0.0,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,.svc,.svc.cluster.local,.cluster.local,host.k3d.internal" -}}
+{{- $noProxy := "localhost,127.0.0.1,0.0.0.0,169.254.169.254,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,.svc,.svc.cluster.local,.cluster.local,host.k3d.internal" -}}
 {{- with .Values.env.NO_PROXY }}{{- $noProxy = printf "%s,%s" . $noProxy -}}{{- end }}
 - name: HTTP_PROXY
   value: {{ $url | quote }}
