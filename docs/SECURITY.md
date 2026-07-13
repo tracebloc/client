@@ -465,11 +465,15 @@ By default the NetworkPolicy still allows outbound HTTPS/443 so training pods ca
 
 **Residual:** the pod still holds `BACKEND_TOKEN` (it authenticates to the backend through the gateway). Scoping / short-TTL of that token is tracked under §8.1.
 
-### 8.3 Backend tokens never expire — **backend team**
+### 8.3 Backend token lifetime (SEC-06) — **mitigated for web sessions; residual tracked (backend team)**
 
-The tracebloc backend uses Django REST Framework's `authtoken` with no TTL. A leaked token is valid forever until manually deleted from the DB.
+Previously the tracebloc backend issued Django REST Framework `authtoken` credentials with no TTL, so a leaked token was valid forever until manually deleted from the DB.
 
-**Mitigation plan:** backend adds a revocation endpoint + evaluates switching to `djangorestframework-simplejwt` for TTL-bound tokens. Backend team owns.
+**Mitigated for interactive web sessions (backend#933 + frontend-app#575, shipped via backend#590).** Data-scientist web logins now receive a bounded, revocable **30-day `ClientAccessToken`** (Bearer). It can be revoked via `/auth/revoke`, `/logout/`, a password change, or a Django-admin action; there is no refresh token by design, so re-login simply mints a fresh token. The frontend sends a scheme-aware `Authorization: <token_scheme> <token>` header and centrally handles `401 → re-login`.
+
+**Intentionally unchanged — edge devices and bots.** Non-interactive service credentials (edge devices, bots) deliberately keep the legacy long-lived DRF `Token`: these are machine identities with no interactive re-login path, so a bounded web-session token doesn't apply. This is by design, not an oversight.
+
+**Residual risk (open — backend team).** The web-session token is still stored in JS-readable storage (localStorage + a non-`httpOnly` cookie), so it remains exfiltratable via XSS. Moving it out of script-reachable storage is tracked as the **SEC-06 residual follow-up** in tracebloc/backend (successor to backend#590).
 
 ### 8.4 Legacy training image architecture (G4 partial) — **legacy-migration team**
 
