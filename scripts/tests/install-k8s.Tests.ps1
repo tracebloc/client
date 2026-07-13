@@ -363,6 +363,7 @@ Describe "Get-EffectiveNoProxy" {
   It "empty host NO_PROXY -> cluster-internal defaults" {
     $env:NO_PROXY = $null; $env:no_proxy = $null
     $r = Get-EffectiveNoProxy
+    $r | Should -Match '169\.254\.169\.254'
     $r | Should -Match '127\.0\.0\.1'
     $r | Should -Match '10\.0\.0\.0/8'
     $r | Should -Match '\.svc'

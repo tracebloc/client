@@ -56,7 +56,7 @@ tests:
           content: {name: HTTP_PROXY, value: "http://proxy.example.com:8080"}
       - contains:
           path: spec.template.spec.containers[0].env
-          content: {name: NO_PROXY, value: "localhost,127.0.0.1,0.0.0.0,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,.svc,.svc.cluster.local,.cluster.local,host.k3d.internal"}
+          content: {name: NO_PROXY, value: "localhost,127.0.0.1,0.0.0.0,169.254.169.254,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,.svc,.svc.cluster.local,.cluster.local,host.k3d.internal"}
   - it: jobs-manager pods-monitor gets HTTP_PROXY when a proxy is set
     template: templates/jobs-manager-deployment.yaml
     set: {env.HTTP_PROXY_HOST: proxy.example.com, env.HTTP_PROXY_PORT: "8080"}
@@ -108,14 +108,14 @@ tests:
       # api container: only the merged value (custom + cluster-internal) is present
       - contains:
           path: spec.template.spec.containers[0].env
-          content: {name: NO_PROXY, value: "myinternal.example,localhost,127.0.0.1,0.0.0.0,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,.svc,.svc.cluster.local,.cluster.local,host.k3d.internal"}
+          content: {name: NO_PROXY, value: "myinternal.example,localhost,127.0.0.1,0.0.0.0,169.254.169.254,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,.svc,.svc.cluster.local,.cluster.local,host.k3d.internal"}
       - notContains:
           path: spec.template.spec.containers[0].env
           content: {name: NO_PROXY, value: "myinternal.example"}
       # pods-monitor container: same guarantee
       - contains:
           path: spec.template.spec.containers[1].env
-          content: {name: NO_PROXY, value: "myinternal.example,localhost,127.0.0.1,0.0.0.0,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,.svc,.svc.cluster.local,.cluster.local,host.k3d.internal"}
+          content: {name: NO_PROXY, value: "myinternal.example,localhost,127.0.0.1,0.0.0.0,169.254.169.254,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,.svc,.svc.cluster.local,.cluster.local,host.k3d.internal"}
       - notContains:
           path: spec.template.spec.containers[1].env
           content: {name: NO_PROXY, value: "myinternal.example"}

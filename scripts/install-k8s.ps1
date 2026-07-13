@@ -726,7 +726,7 @@ function Install-K3dAndHelm {
 # in-cluster DNS suffixes. Echoes host NO_PROXY/no_proxy unioned with these
 # defaults, de-duplicated with host entries first.
 function Get-EffectiveNoProxy {
-  $defaults = @('localhost','127.0.0.1','0.0.0.0','10.0.0.0/8','172.16.0.0/12','192.168.0.0/16','.svc','.svc.cluster.local','.cluster.local','host.k3d.internal')
+  $defaults = @('localhost','127.0.0.1','0.0.0.0','169.254.169.254','10.0.0.0/8','172.16.0.0/12','192.168.0.0/16','.svc','.svc.cluster.local','.cluster.local','host.k3d.internal')
   $existing = if ($env:NO_PROXY) { $env:NO_PROXY } elseif ($env:no_proxy) { $env:no_proxy } else { '' }
   $seen = @{}
   $out  = New-Object System.Collections.Generic.List[string]
