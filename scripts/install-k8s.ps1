@@ -1167,14 +1167,24 @@ function Install-ClientHelm {
   # Check ANY namespace: a fresh install lands in 'tracebloc', but an install
   # from an older installer version may be in a different namespace. Enumerate
   # client-chart releases and read each clientId (ConvertFrom-Json -- no jq).
+  # Values are read with `-o json`, not as YAML: helm re-serializes values on
+  # `get`, so the YAML view quotes clientId inconsistently (typically not at
+  # all) and a quote-expecting regex silently bypassed this guard (#200).
   $existingId = ""; $existingNs = ""
   $listJson = (helm list -A -o json 2>$null) | Out-String
   if ($LASTEXITCODE -eq 0 -and $listJson.Trim()) {
     try {
       foreach ($rel in ($listJson | ConvertFrom-Json)) {
         if ($rel.chart -and $rel.chart.StartsWith("client-")) {
-          $vals = (helm get values $rel.name -n $rel.namespace 2>$null) | Out-String
-          if ($vals -match 'clientId:\s*"([^"]+)"') { $existingId = $Matches[1].Trim(); $existingNs = $rel.namespace; break }
+          $valsJson = (helm get values $rel.name -n $rel.namespace -o json 2>$null) | Out-String
+          if ($LASTEXITCODE -ne 0 -or -not $valsJson.Trim()) { continue }
+          # No user values serializes as literal `null` (-> $vals = $null); an
+          # unparsable release must not abort the scan of the remaining ones.
+          $vals = $null
+          try { $vals = $valsJson | ConvertFrom-Json } catch { continue }
+          if ($null -eq $vals -or $null -eq $vals.clientId) { continue }
+          $id = "$($vals.clientId)".Trim()
+          if ($id) { $existingId = $id; $existingNs = $rel.namespace; break }
         }
       }
     } catch { }
