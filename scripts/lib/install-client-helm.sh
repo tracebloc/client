@@ -351,10 +351,16 @@ _download_services_progress() {
   has kubectl || return 0
   [[ -n "$ns" ]] || return 0
 
+  # Every kubectl call is bounded with --request-timeout so a wedged/unreachable
+  # API can never make the poll BLOCK — the between-iteration deadline check below
+  # only fires if kubectl actually returns, so an unbounded call would hang step e
+  # forever despite TB_PULL_TIMEOUT. Overridable; mirrors assess.sh's bounded probe.
+  local kube_timeout="${TB_PROGRESS_KUBECTL_TIMEOUT:-5s}"
+
   # Establish the total container count once the pods are scheduled (bounded).
   local total=0 tries=0
   while (( tries < 15 )); do
-    total="$(kubectl get pods -n "$ns" \
+    total="$(kubectl get pods -n "$ns" --request-timeout="$kube_timeout" \
       -o jsonpath='{range .items[*].spec.containers[*]}{"x"}{end}' 2>/dev/null \
       | tr -cd 'x' | wc -c | tr -d ' ')" || total=0
     [[ "$total" =~ ^[0-9]+$ ]] || total=0
@@ -367,7 +373,7 @@ _download_services_progress() {
   deadline=$(( $(date +%s) + ${TB_PULL_TIMEOUT:-300} ))
   tput civis 2>/dev/null || true
   while :; do
-    pulled="$(kubectl get pods -n "$ns" \
+    pulled="$(kubectl get pods -n "$ns" --request-timeout="$kube_timeout" \
       -o jsonpath='{range .items[*].status.containerStatuses[*]}{.imageID}{"\n"}{end}' 2>/dev/null \
       | grep -c '.')" || pulled=0
     [[ "$pulled" =~ ^[0-9]+$ ]] || pulled=0
