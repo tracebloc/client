@@ -178,6 +178,21 @@ provision_client() {
   # shared probe being present (a stale bootstrap may not have sourced it).
   if declare -F detect_installed_client >/dev/null 2>&1; then
     detect_installed_client
+    # Fail CLOSED when we couldn't enumerate what's here (helm/API failure): the
+    # NS check below can't distinguish "no client" from "couldn't tell", so minting
+    # now could strand a SECOND client (the exact orphan this pre-flight prevents).
+    # Same signal the Helm-step one-client guard keys on.
+    if [[ "${INSTALLED_CLIENT_UNKNOWN:-0}" == 1 ]]; then
+      echo ""
+      warn "Couldn't determine whether a tracebloc client is already installed here."
+      hint "tracebloc runs one client per machine. Registering a new client now could strand"
+      hint "a second one if an existing client just couldn't be seen — usually the cluster API"
+      hint "is briefly unreachable. Check it and re-run:"
+      hint "  kubectl cluster-info"
+      hint "  helm list -A"
+      echo ""
+      error "Refusing to provision without verifying what's already on this machine."
+    fi
     if [[ -n "$INSTALLED_CLIENT_NS" ]]; then
       local _own_rc=0
       _account_owns_namespace "$INSTALLED_CLIENT_NS" || _own_rc=$?
