@@ -72,6 +72,16 @@ for _a in "$@"; do
   case "$_a" in --force|--reinstall) _tb_bail_ok=0 ;; esac
 done
 
+# A skipped bailout means an explicit (re)install was requested (force, dev/
+# unverified path, or a pinned REF/BRANCH). install-k8s.sh runs its OWN read-only
+# stop-and-check gate (assess_existing_install) that short-circuits a healthy
+# machine to the home screen and exits 0 — so without propagating our intent, a
+# pinned-ref re-run would download the new installer and then do nothing. Export
+# TB_FORCE_REINSTALL so the downstream gate is skipped and the full (idempotent)
+# flow runs. (--force/--reinstall pass through via "$@" too, but env is the only
+# channel for the REF/BRANCH/unverified reasons.)
+[[ "$_tb_bail_ok" == "0" ]] && export TB_FORCE_REINSTALL=1
+
 _tb_check_healthy() {
   # Run `tracebloc doctor` behind a small inline spinner, bounded so a wedged CLI
   # can't hang the bootstrap. Returns doctor's exit code (0 = healthy), or 124 on
