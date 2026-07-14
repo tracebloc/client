@@ -51,9 +51,14 @@ run_diagnose() {
 
   # Namespace discovery — TB_NAMESPACE isn't set on a standalone diagnose run,
   # so find the namespace of the jobs-manager pod (falls back to "default").
+  # Every kubectl call below carries --request-timeout: run_diagnose runs `set +e`
+  # so a non-zero exit is harmless, but that does NOT bound an indefinite BLOCK —
+  # and --diagnose is exactly the "API may be wedged" path, where an unbounded
+  # call would freeze the bundle this function exists to produce.
+  local kt="--request-timeout=5s"
   ns="${TB_NAMESPACE:-}"
   if [[ -z "$ns" ]] && has kubectl; then
-    ns="$(kubectl get pods -A 2>/dev/null | awk '/-jobs-manager/{print $1; exit}')"
+    ns="$(kubectl get pods -A $kt 2>/dev/null | awk '/-jobs-manager/{print $1; exit}')"
   fi
   [[ -z "$ns" ]] && ns="default"
 
@@ -106,28 +111,31 @@ run_diagnose() {
   # ── kubectl overview + per-pod detail ──
   if has kubectl; then
     {
-      echo "## nodes";        kubectl get nodes -o wide 2>&1
-      echo; echo "## pods (all namespaces)"; kubectl get pods -A -o wide 2>&1
-      echo; echo "## workloads"; kubectl get deploy,ds,sts -A 2>&1
-      echo; echo "## recent events"; kubectl get events -A --sort-by=.lastTimestamp 2>&1 | tail -120
+      echo "## nodes";        kubectl get nodes -o wide $kt 2>&1
+      echo; echo "## pods (all namespaces)"; kubectl get pods -A -o wide $kt 2>&1
+      echo; echo "## workloads"; kubectl get deploy,ds,sts -A $kt 2>&1
+      echo; echo "## recent events"; kubectl get events -A --sort-by=.lastTimestamp $kt 2>&1 | tail -120
     } > "$d/02-kubectl.txt" 2>&1
     {
       echo "## describe of non-Running pods in namespace '$ns'"
-      for p in $(kubectl get pods -n "$ns" --no-headers 2>/dev/null | awk '$3!="Running" && $3!="Completed"{print $1}'); do
-        echo; echo "### $p"; kubectl describe pod -n "$ns" "$p" 2>&1
+      for p in $(kubectl get pods -n "$ns" --no-headers $kt 2>/dev/null | awk '$3!="Running" && $3!="Completed"{print $1}'); do
+        echo; echo "### $p"; kubectl describe pod -n "$ns" "$p" $kt 2>&1
       done
     } > "$d/03-describe.txt" 2>&1
     # workload logs (current + previous)
     local w
     for w in mysql-client "${ns}-jobs-manager" "${ns}-requests-proxy"; do
-      kubectl logs -n "$ns" "deploy/$w" --all-containers --tail=500           > "$d/logs/${w}.log" 2>&1
-      kubectl logs -n "$ns" "deploy/$w" --all-containers --previous --tail=500 > "$d/logs/${w}.previous.log" 2>&1
+      kubectl logs -n "$ns" "deploy/$w" --all-containers --tail=500 $kt           > "$d/logs/${w}.log" 2>&1
+      kubectl logs -n "$ns" "deploy/$w" --all-containers --previous --tail=500 $kt > "$d/logs/${w}.previous.log" 2>&1
     done
-    kubectl logs -n "$ns" "daemonset/tracebloc-resource-monitor" --tail=300   > "$d/logs/resource-monitor.log" 2>&1
+    kubectl logs -n "$ns" "daemonset/tracebloc-resource-monitor" --tail=300 $kt   > "$d/logs/resource-monitor.log" 2>&1
   fi
 
   # ── helm (redacted afterwards) ──
-  if has helm; then
+  # helm has no --request-timeout; it talks to the same API. Only run it when a
+  # BOUNDED probe confirms the API is reachable, so a wedged API can't hang the
+  # bundle here (the kubectl output above already captured the degraded state).
+  if has helm && { ! has kubectl || kubectl cluster-info --request-timeout=5s >/dev/null 2>&1; }; then
     # NOTE: deliberately NOT collecting `helm get manifest` — it renders the
     # Secret objects with base64-encoded credentials (CLIENT_PASSWORD,
     # .dockerconfigjson), which the text redaction can't see. `helm get values`
@@ -136,6 +144,8 @@ run_diagnose() {
       echo "## helm list -A";          helm list -A 2>&1
       echo; echo "## helm get values $ns"; helm get values "$ns" -n "$ns" 2>&1
     } > "$d/04-helm.txt" 2>&1
+  elif has helm; then
+    echo "## helm skipped — API unreachable (bounded cluster-info probe failed)" > "$d/04-helm.txt" 2>&1
   fi
 
   # ── install artifacts (copied, redacted afterwards) ──

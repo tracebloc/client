@@ -477,6 +477,26 @@ setup() {
   [[ "$output" != *"helm upgrade"* ]]
 }
 
+@test "install_client_helm: helm list failure -> fails CLOSED (refuses, no upgrade)" {
+  HOST_DATA_DIR="$BATS_TEST_TMPDIR/data"; mkdir -p "$HOST_DATA_DIR"
+  _ensure_tracebloc_dirs() { :; }
+  _ensure_release_dirs() { :; }
+  _ensure_helm_runnable() { :; }
+  # `helm list` errors (wedged/unreachable API): detect_installed_client can't
+  # enumerate, so the guard must REFUSE rather than read empty as "no client here"
+  # and silently overwrite whatever is installed.
+  helm() {
+    if [ "$1" = list ]; then return 1; fi          # enumeration fails
+    record "helm $*"; return 0
+  }
+  verify_credentials() { printf valid; }
+  run install_client_helm <<< $'newclient\nmypw'
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"Couldn't determine which tracebloc client"* ]]
+  run mock_calls
+  [[ "$output" != *"helm upgrade"* ]]
+}
+
 @test "install_client_helm: same client re-run is allowed (upgrade in place)" {
   HOST_DATA_DIR="$BATS_TEST_TMPDIR/data"; mkdir -p "$HOST_DATA_DIR"
   _ensure_tracebloc_dirs() { :; }

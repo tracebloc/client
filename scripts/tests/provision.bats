@@ -183,6 +183,24 @@ _stub_tracebloc() {
   [ ! -s "$CREATE_ARGS_FILE" ]          # create was never called — no orphan minted
 }
 
+@test "provision_client: unknown helm state (list failed) refuses BEFORE minting — no orphan (#303)" {
+  # detect_installed_client couldn't enumerate (helm/API failure): both globals
+  # empty but INSTALLED_CLIENT_UNKNOWN=1. Minting now could strand a second client,
+  # so provision_client must refuse before `client create` ever runs.
+  detect_installed_client() { INSTALLED_CLIENT_ID=""; INSTALLED_CLIENT_NS=""; INSTALLED_CLIENT_UNKNOWN=1; }
+  tracebloc() {
+    [[ "$*" == *--help ]] && return 0
+    [ "$1" = "login" ] && return 0
+    local f="" prev=""; for a in "$@"; do [ "$prev" = "--credential-file" ] && f="$a"; prev="$a"; done
+    [ -n "$f" ] && printf '%s\n' "$*" >>"${CREATE_ARGS_FILE}"
+    return 0
+  }
+  run provision_client
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"Couldn't determine whether a tracebloc client is already installed"* ]]
+  [ ! -s "$CREATE_ARGS_FILE" ]          # create never ran — no orphan minted
+}
+
 @test "provision_client: same-account re-run with a local client still provisions (adopt path intact) (#303)" {
   # The account owns the local client's namespace → create proceeds and adopts.
   detect_installed_client() { INSTALLED_CLIENT_ID="uuid-x"; INSTALLED_CLIENT_NS="my-ns"; }

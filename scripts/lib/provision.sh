@@ -149,7 +149,18 @@ provision_client() {
   echo -e "  Sign in to approve this machine — open the link in your browser"
   echo -e "  (on this or any device) and enter the code:"
   echo ""
-  tracebloc login || error "Sign-in didn't complete — re-run the installer to try again."
+  # Give the interactive device-flow sign-in the user's REAL terminal. This runs
+  # after setup_log_file (`exec > >(tee …) 2>&1`), so the shell's stdout/stderr are
+  # a pipe and — under `curl … | bash` — stdin is the install pipe; a bare
+  # `tracebloc login` would then have no tty on any stream and can misrender or
+  # fail (same class assess.sh's hand-off handles). Redirect all three to /dev/tty
+  # when openable, else </dev/null (unattended reaches the dual-mode credential
+  # path above, not here).
+  if { : </dev/tty; } 2>/dev/null; then
+    tracebloc login </dev/tty >/dev/tty 2>/dev/tty || error "Sign-in didn't complete — re-run the installer to try again."
+  else
+    tracebloc login </dev/null || error "Sign-in didn't complete — re-run the installer to try again."
+  fi
 
   # ── One-client-per-machine pre-flight (#303) ─────────────────────────────
   # `client create` below mints a fresh client whenever the backend can't match
@@ -167,6 +178,21 @@ provision_client() {
   # shared probe being present (a stale bootstrap may not have sourced it).
   if declare -F detect_installed_client >/dev/null 2>&1; then
     detect_installed_client
+    # Fail CLOSED when we couldn't enumerate what's here (helm/API failure): the
+    # NS check below can't distinguish "no client" from "couldn't tell", so minting
+    # now could strand a SECOND client (the exact orphan this pre-flight prevents).
+    # Same signal the Helm-step one-client guard keys on.
+    if [[ "${INSTALLED_CLIENT_UNKNOWN:-0}" == 1 ]]; then
+      echo ""
+      warn "Couldn't determine whether a tracebloc client is already installed here."
+      hint "tracebloc runs one client per machine. Registering a new client now could strand"
+      hint "a second one if an existing client just couldn't be seen — usually the cluster API"
+      hint "is briefly unreachable. Check it and re-run:"
+      hint "  kubectl cluster-info"
+      hint "  helm list -A"
+      echo ""
+      error "Refusing to provision without verifying what's already on this machine."
+    fi
     if [[ -n "$INSTALLED_CLIENT_NS" ]]; then
       local _own_rc=0
       _account_owns_namespace "$INSTALLED_CLIENT_NS" || _own_rc=$?

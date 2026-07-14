@@ -277,8 +277,10 @@ download_with_retry() {
   for attempt in 1 2 3; do
     # --tlsv1.2 floor; honor any proxy / custom-CA env the corporate-proxy
     # segment relies on (#172/#722) — curl picks up HTTPS_PROXY/NO_PROXY/
-    # CURL_CA_BUNDLE from the environment automatically.
-    if curl -fsSL --tlsv1.2 "$url" -o "$dest"; then return 0; fi
+    # CURL_CA_BUNDLE from the environment automatically. --connect-timeout/--max-time
+    # (added to every fetch in this file) turn a stalled endpoint into a retriable
+    # failure instead of hanging the "1. Downloading" phase forever.
+    if curl -fsSL --tlsv1.2 --connect-timeout 30 --max-time 300 "$url" -o "$dest"; then return 0; fi
     if [[ $attempt -ge $max_attempts ]]; then
       echo "[ERROR] Failed to download $url after $max_attempts attempts."
       exit 1
@@ -372,11 +374,11 @@ download_manifest() {
   # Authoritative source: the signed release asset. Fall back to the in-repo
   # copy in the tag tree only under the unverified dev opt-in (a branch checkout
   # has no release assets).
-  if curl -fsSL --tlsv1.2 "$REPO_REL/manifest.sha256" -o "$dest" 2>/dev/null; then
+  if curl -fsSL --tlsv1.2 --connect-timeout 30 --max-time 300 "$REPO_REL/manifest.sha256" -o "$dest" 2>/dev/null; then
     return 0
   fi
   if [[ "$ALLOW_UNVERIFIED" == "1" ]]; then
-    curl -fsSL --tlsv1.2 "$REPO_RAW/scripts/manifest.sha256" -o "$dest" 2>/dev/null
+    curl -fsSL --tlsv1.2 --connect-timeout 30 --max-time 300 "$REPO_RAW/scripts/manifest.sha256" -o "$dest" 2>/dev/null
     return $?
   fi
   return 1
@@ -406,8 +408,8 @@ verify_manifest_signature() {
     exit 1
   fi
 
-  if ! curl -fsSL --tlsv1.2 "$REPO_REL/manifest.sha256.sig"  -o "$sig"  2>/dev/null \
-     || ! curl -fsSL --tlsv1.2 "$REPO_REL/manifest.sha256.cert" -o "$cert" 2>/dev/null; then
+  if ! curl -fsSL --tlsv1.2 --connect-timeout 30 --max-time 300 "$REPO_REL/manifest.sha256.sig"  -o "$sig"  2>/dev/null \
+     || ! curl -fsSL --tlsv1.2 --connect-timeout 30 --max-time 300 "$REPO_REL/manifest.sha256.cert" -o "$cert" 2>/dev/null; then
     if [[ "$ALLOW_UNVERIFIED" == "1" ]]; then
       echo "[WARN]  manifest signature/cert not published for ref '$REF' — not verified (TRACEBLOC_ALLOW_UNVERIFIED=1)." >&2
       return 0
@@ -462,8 +464,8 @@ ensure_cosign() {
   local sums="$TMPDIR/cosign_checksums.txt"
 
   echo "  · Fetching the signature-verification tool (cosign)…"
-  curl -fsSL --tlsv1.2 "$base/$asset"               -o "$bin"  2>/dev/null || return 1
-  curl -fsSL --tlsv1.2 "$base/cosign_checksums.txt" -o "$sums" 2>/dev/null || return 1
+  curl -fsSL --tlsv1.2 --connect-timeout 30 --max-time 300 "$base/$asset"               -o "$bin"  2>/dev/null || return 1
+  curl -fsSL --tlsv1.2 --connect-timeout 30 --max-time 300 "$base/cosign_checksums.txt" -o "$sums" 2>/dev/null || return 1
 
   local want got
   want="$(grep " ${asset}\$" "$sums" | awk '{print $1}' | head -1)"

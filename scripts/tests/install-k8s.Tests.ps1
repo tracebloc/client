@@ -423,6 +423,39 @@ Describe "Install-ClientHelm" {
     { Install-ClientHelm } | Should -Throw
     Should -Not -Invoke helm -ParameterFilter { $args -contains "upgrade" }
   }
+  It "fails CLOSED when 'helm list' itself errors (can't enumerate -> no silent overwrite)" {
+    # A failed enumeration must not read as "no client here" — that fails OPEN.
+    $HOST_DATA_DIR = "$TestDrive/d5-listfail"
+    Mock Err { throw "err" }
+    Mock Read-Host {
+      param([string]$Prompt, [switch]$AsSecureString)
+      if ($Prompt -match 'password') { return (ConvertTo-SecureString "pw" -AsPlainText -Force) }
+      return "newclient"
+    }
+    Mock Test-Credentials { "valid" }
+    Mock helm {
+      if ($args -contains "list") { $global:LASTEXITCODE = 1; return }   # helm list failed
+      $global:LASTEXITCODE = 0
+    }
+    { Install-ClientHelm } | Should -Throw
+    Should -Not -Invoke helm -ParameterFilter { $args -contains "upgrade" }
+  }
+  It "fails CLOSED when 'helm list' returns non-JSON garbage" {
+    $HOST_DATA_DIR = "$TestDrive/d5-listgarbage"
+    Mock Err { throw "err" }
+    Mock Read-Host {
+      param([string]$Prompt, [switch]$AsSecureString)
+      if ($Prompt -match 'password') { return (ConvertTo-SecureString "pw" -AsPlainText -Force) }
+      return "newclient"
+    }
+    Mock Test-Credentials { "valid" }
+    Mock helm {
+      if ($args -contains "list") { 'this is not json'; $global:LASTEXITCODE = 0; return }  # rc 0 but garbage
+      $global:LASTEXITCODE = 0
+    }
+    { Install-ClientHelm } | Should -Throw
+    Should -Not -Invoke helm -ParameterFilter { $args -contains "upgrade" }
+  }
   It "values without a clientId key do not trip the guard" {
     $HOST_DATA_DIR = "$TestDrive/d5-nokey"
     Mock Read-Host {

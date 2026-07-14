@@ -57,25 +57,36 @@ _extract_yaml_value() {
 # the first two whitespace-free columns and the CHART column matches
 # `client-<ver>`, the same jq-free parse _chart_version uses. Shared by the
 # pre-provision ownership pre-flight (#303) and the Helm-step one-client guard so
-# the two can never disagree on "what already runs here". Always returns 0 — a
-# missing helm / unreadable values just yields the empty (no-client) result.
+# the two can never disagree on "what already runs here". Always returns 0. A
+# missing helm just yields the empty (no-client) result — but a helm/API FAILURE
+# is reported as INSTALLED_CLIENT_UNKNOWN=1 (not "no client"), so guards can fail
+# CLOSED instead of silently overwriting a client they couldn't see.
 detect_installed_client() {
-  INSTALLED_CLIENT_ID=""; INSTALLED_CLIENT_NS=""
-  local _gvf _rel _ns _id
-  # A mktemp failure is an environment error, NOT proof of "no client here" —
-  # treating it as such would silently skip the one-client / #303 ownership
-  # guards. Fall back to a path in a dir we own (same reasoning as the create
-  # step: never a predictable world-writable /tmp path under sudo). Only give up
-  # (empty result) when there is genuinely nowhere to write.
+  INSTALLED_CLIENT_ID=""; INSTALLED_CLIENT_NS=""; INSTALLED_CLIENT_UNKNOWN=0
+  # No helm => nothing helm-installed here; a genuine (documented) "no client".
+  has helm || return 0
+  local _gvf _rel _ns _id _list
+  # A mktemp failure is an environment error, NOT proof of "no client here" — flag
+  # UNKNOWN so the guards fail closed rather than skip. Fall back to a path in a
+  # dir we own (never a predictable world-writable /tmp path under sudo) before
+  # giving up.
   _gvf="$(mktemp 2>/dev/null)" || _gvf="${HOST_DATA_DIR:+${HOST_DATA_DIR}/.tb-detect-values.$$}"
-  [[ -n "$_gvf" ]] || return 0
+  [[ -n "$_gvf" ]] || { INSTALLED_CLIENT_UNKNOWN=1; return 0; }
+  # Capture `helm list`'s exit code: a FAILED enumeration (wedged/unreachable API,
+  # kubeconfig glitch) must NOT read as "no client here" — that fails OPEN and lets
+  # a re-install silently overwrite an existing client. `helm list` returns 0 with
+  # empty output when there are genuinely no releases, so only a non-zero exit is
+  # "unknown".
+  if ! _list="$(helm list -A 2>/dev/null)"; then
+    INSTALLED_CLIENT_UNKNOWN=1; rm -f "$_gvf"; return 0
+  fi
   while read -r _rel _ns; do
     [[ -z "$_rel" ]] && continue
     if helm get values "$_rel" -n "$_ns" > "$_gvf" 2>/dev/null; then
       _id="$(_extract_yaml_value "$_gvf" clientId)"
       [[ -n "$_id" ]] && { INSTALLED_CLIENT_ID="$_id"; INSTALLED_CLIENT_NS="$_ns"; break; }
     fi
-  done < <(helm list -A 2>/dev/null | awk '/[[:space:]]client-[0-9]/ { print $1, $2 }')
+  done < <(printf '%s\n' "$_list" | awk '/[[:space:]]client-[0-9]/ { print $1, $2 }')
   rm -f "$_gvf"
   return 0
 }
@@ -559,6 +570,19 @@ install_client_helm() {
   local existing_id="" existing_ns=""
   detect_installed_client
   existing_id="$INSTALLED_CLIENT_ID"; existing_ns="$INSTALLED_CLIENT_NS"
+  # Fail CLOSED when we couldn't enumerate what's here (API/helm failure): refuse
+  # rather than risk overwriting a client the guard simply couldn't see.
+  if [[ "${INSTALLED_CLIENT_UNKNOWN:-0}" == 1 ]]; then
+    echo ""
+    warn "Couldn't determine which tracebloc client (if any) is already installed here."
+    hint "tracebloc runs one client per machine, so the installer won't risk overwriting"
+    hint "an existing client it can't see — usually the cluster API is briefly unreachable."
+    hint "Check it and re-run:"
+    hint "  kubectl cluster-info"
+    hint "  helm list -A"
+    echo ""
+    error "Refusing to install without verifying what's already on this machine."
+  fi
   if [[ -n "$existing_id" && "$existing_id" != "$TB_CLIENT_ID" ]]; then
     echo ""
     warn "This machine already runs the tracebloc client '${existing_id}' (namespace '${existing_ns}')."

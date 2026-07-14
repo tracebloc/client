@@ -48,7 +48,11 @@ has() { command -v "$1" &>/dev/null; }
 _chart_version() {
   local ns="${1:-${TB_NAMESPACE:-tracebloc}}"
   has helm || return 0
-  helm list -n "$ns" 2>/dev/null | grep -oE 'client-[0-9][^[:space:]]*' | head -1 | sed 's/^client-//'
+  # Trailing `|| true`: when no client-* release exists, `grep` exits 1 and, under
+  # `set -o pipefail`, the pipeline (this function's last command) returns 1 —
+  # which would abort callers that assign it under `set -e` (e.g. diagnose.sh).
+  # The version (or empty) has already been emitted to stdout regardless.
+  helm list -n "$ns" 2>/dev/null | grep -oE 'client-[0-9][^[:space:]]*' | head -1 | sed 's/^client-//' || true
 }
 
 # The client's core workload Deployments in namespace $1 — the set whose
@@ -176,7 +180,9 @@ download_with_progress() {
   local url="$1" dest="$2" label="$3"
 
   local total_bytes
-  total_bytes=$(curl -fsSLI "$url" 2>/dev/null \
+  # -m bounds the HEAD probe so a stalled server can't hang it (it's not
+  # retry-wrapped and its failure just means "no total" -> indeterminate bar).
+  total_bytes=$(curl -fsSLI -m 15 "$url" 2>/dev/null \
     | awk 'tolower($0) ~ /content-length/ {gsub(/[^0-9]/,"",$2); print $2}' \
     | tail -1)
 
@@ -192,7 +198,13 @@ download_with_progress() {
   local logfile="${LOG_FILE:-/tmp/tracebloc-spin.log}"
   rm -f "$dest"
 
-  curl -fSL -o "$dest" "$url" >> "$logfile" 2>&1 &
+  # --connect-timeout bounds the dial; --speed-limit/--speed-time abort a STALLED
+  # transfer (<1 KB/s for 60s) without capping a legitimately slow-but-progressing
+  # large download. Without these the backgrounded curl is monitored only by
+  # `kill -0` (no deadline, no kill), so a slow-loris / mid-stream stall would
+  # hang the progress loop forever.
+  curl -fSL --connect-timeout 30 --speed-limit 1024 --speed-time 60 \
+    -o "$dest" "$url" >> "$logfile" 2>&1 &
   local curl_pid=$!
 
   local bar_width=30

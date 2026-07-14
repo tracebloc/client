@@ -6,9 +6,11 @@
 # Cluster status dump (debug log only).
 _log_cluster_status() {
   log "--- Cluster Status ---"
-  kubectl cluster-info >> "${LOG_FILE:-/dev/null}" 2>&1 || true
-  kubectl get nodes -o wide >> "${LOG_FILE:-/dev/null}" 2>&1 || true
-  kubectl get pods -n "${TB_NAMESPACE:-default}" -o wide >> "${LOG_FILE:-/dev/null}" 2>&1 || true
+  # --request-timeout so a wedged API can't hang the final summary/diagnostics
+  # (|| true only swallows the exit code, not an indefinite block).
+  kubectl cluster-info --request-timeout=5s >> "${LOG_FILE:-/dev/null}" 2>&1 || true
+  kubectl get nodes -o wide --request-timeout=5s >> "${LOG_FILE:-/dev/null}" 2>&1 || true
+  kubectl get pods -n "${TB_NAMESPACE:-default}" -o wide --request-timeout=5s >> "${LOG_FILE:-/dev/null}" 2>&1 || true
   log "--- End Cluster Status ---"
 }
 
@@ -60,11 +62,11 @@ _diagnose_not_ready() {
   local ns="$1" pods jm_logs
   # Wrong credentials: jobs-manager authenticates to the backend on startup and
   # crash-loops when rejected — surfaced as an auth error in its logs.
-  jm_logs="$(kubectl logs -n "$ns" "deployment/${ns}-jobs-manager" --all-containers --tail=50 2>/dev/null || true)"
+  jm_logs="$(kubectl logs -n "$ns" "deployment/${ns}-jobs-manager" --all-containers --tail=50 --request-timeout=5s 2>/dev/null || true)"
   if printf '%s' "$jm_logs" | grep -qiE 'authentication failed|unable to log in'; then
     printf 'bad_creds'; return
   fi
-  pods="$(kubectl get pods -n "$ns" 2>/dev/null || true)"
+  pods="$(kubectl get pods -n "$ns" --request-timeout=5s 2>/dev/null || true)"
   if printf '%s' "$pods" | grep -qiE 'ImagePullBackOff|ErrImagePull|InvalidImageName'; then
     printf 'image_pull'; return
   fi

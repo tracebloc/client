@@ -54,7 +54,13 @@ install_nvidia_drivers() {
     log "TRACEBLOC_SKIP_REBOOT_PROMPT set — skipping reboot prompt."
     exit 2
   fi
-  read -r -p "  Reboot now? [y/N]: " _choice
+  # Read the terminal directly: the main install path is `curl … | bash`, where
+  # this shell's stdin is the (EOF) install pipe — a bare `read` there returns
+  # non-zero and, with `set -e` active in this code path, would ABORT the whole
+  # installer right after a successful driver install. No tty (unattended) => treat
+  # as "no reboot" (same as TRACEBLOC_SKIP_REBOOT_PROMPT).
+  local _choice=""
+  if [[ -r /dev/tty ]]; then read -r -p "  Reboot now? [y/N]: " _choice </dev/tty || _choice=""; fi
   [[ "$_choice" =~ ^[Yy]$ ]] && sudo reboot
   warn "Skipping reboot. GPU may not be available until you restart."
 }
