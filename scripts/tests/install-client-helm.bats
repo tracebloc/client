@@ -497,6 +497,31 @@ setup() {
   [[ "$output" != *"helm upgrade"* ]]
 }
 
+@test "install_client_helm: unreadable client values -> fails CLOSED (refuses, no upgrade)" {
+  HOST_DATA_DIR="$BATS_TEST_TMPDIR/data"; mkdir -p "$HOST_DATA_DIR"
+  _ensure_tracebloc_dirs() { :; }
+  _ensure_release_dirs() { :; }
+  _ensure_helm_runnable() { :; }
+  # A client-* release is present, but `helm get values` for it fails — we can't
+  # read its clientId, so it's an unidentifiable client. The guard must refuse
+  # rather than read it as "no client here" and overwrite it.
+  helm() {
+    if [ "$1" = list ]; then
+      printf '%s\n' 'NAME NAMESPACE REVISION UPDATED STATUS CHART APP VERSION' \
+                    'oldrel default 1 2026-01-01 deployed client-1.4.3 1.4.3'
+      return 0
+    fi
+    if [ "$1" = get ] && [ "$2" = values ]; then return 1; fi     # values unreadable
+    record "helm $*"; return 0
+  }
+  verify_credentials() { printf valid; }
+  run install_client_helm <<< $'newclient\nmypw'
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"Couldn't determine which tracebloc client"* ]]
+  run mock_calls
+  [[ "$output" != *"helm upgrade"* ]]
+}
+
 @test "install_client_helm: same client re-run is allowed (upgrade in place)" {
   HOST_DATA_DIR="$BATS_TEST_TMPDIR/data"; mkdir -p "$HOST_DATA_DIR"
   _ensure_tracebloc_dirs() { :; }
