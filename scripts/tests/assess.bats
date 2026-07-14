@@ -231,21 +231,39 @@ _depname() {
 }
 
 # ── _assess_handoff (hand-off + exit 0, no exec) ────────────────────────────
-@test "_assess_handoff: resolvable CLI -> prints the line, runs tracebloc, exit 0" {
+# main() has already run setup_log_file (`exec > >(tee …) 2>&1`), so the hand-off
+# must give the interactive home screen a REAL terminal on ALL THREE streams, not
+# just stdin (Bugbot: "Handoff loses terminal stdout"). TB_TTY points at a temp
+# file here so we can prove tracebloc's stdout is redirected to the terminal —
+# it lands in the file, NOT the (teed) script stdout.
+@test "_assess_handoff: openable tty -> routes the home screen to the terminal, exit 0" {
   has() { [ "$1" = tracebloc ]; }
-  tracebloc() { echo "HOME_SCREEN"; }
+  tracebloc() { echo "HOME_SCREEN"; }        # writes to whatever stdout it's given
+  TB_TTY="$BATS_TEST_TMPDIR/tty"; : > "$TB_TTY"
   run _assess_handoff
   [ "$status" -eq 0 ]
-  assert_has "Already set up on this machine" "$output"
-  assert_has "HOME_SCREEN" "$output"
+  assert_has "Already set up on this machine" "$output"   # the success line: script stdout
+  assert_has "HOME_SCREEN" "$(cat "$TB_TTY")"             # home screen: the terminal, not the pipe
+  refute_has "HOME_SCREEN" "$output"                      # proves stdout was redirected off the pipe
 }
 
 @test "_assess_handoff: hands off with NO args (bare = the home screen)" {
   has() { [ "$1" = tracebloc ]; }
   tracebloc() { echo "ARGS=[$*]"; }
+  TB_TTY="$BATS_TEST_TMPDIR/tty"; : > "$TB_TTY"
   run _assess_handoff
   [ "$status" -eq 0 ]
-  assert_has "ARGS=[]" "$output"               # invoked bare, not a subcommand
+  assert_has "ARGS=[]" "$(cat "$TB_TTY")"      # invoked bare, not a subcommand
+}
+
+@test "_assess_handoff: unopenable tty -> falls back to </dev/null, still exit 0" {
+  has() { [ "$1" = tracebloc ]; }
+  tracebloc() { echo "HOME_SCREEN"; }
+  TB_TTY="$BATS_TEST_TMPDIR/nope/tty"          # parent dir absent -> not openable
+  run _assess_handoff
+  [ "$status" -eq 0 ]
+  assert_has "Already set up on this machine" "$output"
+  assert_has "HOME_SCREEN" "$output"           # fallback leaves stdout on the (captured) pipe
 }
 
 @test "_assess_handoff: unresolvable CLI -> honest fallback, still exit 0" {
@@ -262,10 +280,11 @@ _depname() {
   _assess_classify() { INSTALL_STATE=healthy; INSTALL_STATE_REASON="ns:munich"; }
   has() { [ "$1" = tracebloc ]; }
   tracebloc() { echo "HOME_SCREEN"; }
+  TB_TTY="$BATS_TEST_TMPDIR/tty"; : > "$TB_TTY"
   run assess_existing_install
   [ "$status" -eq 0 ]
   assert_has "Already set up on this machine" "$output"
-  assert_has "HOME_SCREEN" "$output"
+  assert_has "HOME_SCREEN" "$(cat "$TB_TTY")"
 }
 
 # Mutation guard for the short-circuit: if the healthy branch stops handing off
@@ -274,6 +293,7 @@ _depname() {
   _assess_classify() { INSTALL_STATE=healthy; INSTALL_STATE_REASON="ns:x"; }
   has() { [ "$1" = tracebloc ]; }
   tracebloc() { echo "HANDED_OFF"; }
+  TB_TTY="$BATS_TEST_TMPDIR/nope/tty"          # unopenable -> fallback keeps stdout captured
   run assess_existing_install
   [ "$status" -eq 0 ]
   assert_has "HANDED_OFF" "$output"

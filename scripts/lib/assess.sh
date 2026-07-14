@@ -35,6 +35,11 @@
 # can never make the gate hang. Overridable for tests.
 : "${TB_ASSESS_KUBECTL_TIMEOUT:=5s}"
 
+# Where the healthy-machine hand-off points the interactive home screen (see
+# _assess_handoff). Mirrors provision.sh's TB_TTY so tests can redirect it to a
+# real file instead of the controlling terminal.
+: "${TB_TTY:=/dev/tty}"
+
 # _assess_cluster_servers_running — echo the number of running servers for
 # CLUSTER_NAME. This mirrors ONLY the read half of cluster.sh's
 # _handle_existing_cluster; that function is off-limits here because it MUTATES
@@ -154,13 +159,22 @@ _assess_handoff() {
   if has tracebloc; then
     echo ""
     # Bare invocation -> the home screen; the user lands on their status. Give it
-    # the user's REAL terminal: under `curl … | bash` this shell's stdin is the
-    # install pipe, so a bare `tracebloc` would consume/block on the script bytes
-    # (same class as #341). Redirect </dev/tty when it's openable, else </dev/null
-    # — never the pipe (mirrors install.sh's bootstrap hand-off). Deliberately NO
-    # `exec` (see above) so the EXIT trap still runs. Never let a non-zero render
-    # flip our exit code — a healthy machine exits 0.
-    if { : </dev/tty; } 2>/dev/null; then tracebloc </dev/tty || true; else tracebloc </dev/null || true; fi
+    # the user's REAL terminal on ALL THREE streams. Unlike install.sh's bootstrap
+    # hand-off (which runs BEFORE any redirect), main() has already called
+    # setup_log_file — `exec > >(tee …) 2>&1` — so this shell's stdout/stderr are a
+    # pipe to `tee`, and its stdin is the install pipe under `curl … | bash`. An
+    # interactive TUI needs a tty on stdout/stderr too, not just stdin: point all
+    # three at the terminal ($TB_TTY, /dev/tty) when it's openable (bypassing tee
+    # for the interactive screen, exactly as the bootstrap does), else fall back to
+    # </dev/null and leave stdout/stderr on the tee pipe (non-interactive / CI —
+    # never the input pipe). Deliberately NO `exec` (see above) so the EXIT trap
+    # still runs. `|| true` keeps a non-zero render from flipping our exit code — a
+    # healthy machine exits 0.
+    if { : <"$TB_TTY"; } 2>/dev/null; then
+      tracebloc <"$TB_TTY" >"$TB_TTY" 2>"$TB_TTY" || true
+    else
+      tracebloc </dev/null || true
+    fi
     exit 0
   fi
   info "Open the tracebloc home screen any time with:  tracebloc"
