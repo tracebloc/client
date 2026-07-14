@@ -87,7 +87,11 @@ _tb_check_healthy() {
   # can't hang the bootstrap. Returns doctor's exit code (0 = healthy), or 124 on
   # timeout. 0.2s ticks; TRACEBLOC_DOCTOR_TIMEOUT (default 20s) bounds it.
   local timeout="${TRACEBLOC_DOCTOR_TIMEOUT:-20}" maxticks tick=0 rc
-  local frames='⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏' i=0 f
+  # ARRAY of glyphs, not a single string: the braille frames are 3-byte UTF-8, and
+  # macOS's system bash 3.2 slices `${str:i:1}` and counts `${#str}` by BYTES, so a
+  # string form renders mid-glyph garbage. An array indexes whole elements on 3.2
+  # (matches spin() in lib/common.sh).
+  local frames=('⠋' '⠙' '⠹' '⠸' '⠼' '⠴' '⠦' '⠧' '⠇' '⠏') i=0 f
   maxticks=$(( timeout * 5 ))
   # </dev/null: under `curl … | bash` stdin is the install pipe, so a
   # diagnostic that reads stdin would consume/block on the script bytes.
@@ -95,7 +99,7 @@ _tb_check_healthy() {
   local pid=$!
   tput civis 2>/dev/null || true
   while kill -0 "$pid" 2>/dev/null; do
-    f="${frames:i:1}"; i=$(( (i + 1) % ${#frames} ))
+    f="${frames[i]}"; i=$(( (i + 1) % ${#frames[@]} ))
     printf '\r  %s%s%s Checking your tracebloc setup…' "$_C" "$f" "$_R"
     if [[ "$tick" -ge "$maxticks" ]]; then
       kill "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true
