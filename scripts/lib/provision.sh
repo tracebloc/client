@@ -149,7 +149,18 @@ provision_client() {
   echo -e "  Sign in to approve this machine — open the link in your browser"
   echo -e "  (on this or any device) and enter the code:"
   echo ""
-  tracebloc login || error "Sign-in didn't complete — re-run the installer to try again."
+  # Give the interactive device-flow sign-in the user's REAL terminal. This runs
+  # after setup_log_file (`exec > >(tee …) 2>&1`), so the shell's stdout/stderr are
+  # a pipe and — under `curl … | bash` — stdin is the install pipe; a bare
+  # `tracebloc login` would then have no tty on any stream and can misrender or
+  # fail (same class assess.sh's hand-off handles). Redirect all three to /dev/tty
+  # when openable, else </dev/null (unattended reaches the dual-mode credential
+  # path above, not here).
+  if { : </dev/tty; } 2>/dev/null; then
+    tracebloc login </dev/tty >/dev/tty 2>/dev/tty || error "Sign-in didn't complete — re-run the installer to try again."
+  else
+    tracebloc login </dev/null || error "Sign-in didn't complete — re-run the installer to try again."
+  fi
 
   # ── One-client-per-machine pre-flight (#303) ─────────────────────────────
   # `client create` below mints a fresh client whenever the backend can't match

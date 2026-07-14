@@ -163,7 +163,10 @@ install_tracebloc_cli() {
 
   # 1) Download the released installer. A failure here is a download problem,
   #    distinct from an install problem below.
-  if ! curl -fsSL "$CURL_SECURE" "$TRACEBLOC_CLI_INSTALL_URL" -o "$installer" 2>>"${LOG_FILE:-/dev/null}"; then
+  # --connect-timeout/--max-time so a stalled CDN turns into a clean "install later"
+  # failure below instead of hanging the CLI-install step (this call isn't retry-
+  # wrapped, and a hang is not a failure the graceful fallback would otherwise catch).
+  if ! curl -fsSL "$CURL_SECURE" --connect-timeout 30 --max-time 120 "$TRACEBLOC_CLI_INSTALL_URL" -o "$installer" 2>>"${LOG_FILE:-/dev/null}"; then
     warn "Couldn't download the tracebloc CLI installer — your client is set up fine."
     hint "Install it later:  curl -fsSL ${TRACEBLOC_CLI_INSTALL_URL} | sh"
     rm -f "$installer"

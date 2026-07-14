@@ -408,7 +408,11 @@ _wait_for_api() {
   local frames=('⠋' '⠙' '⠹' '⠸' '⠼' '⠴' '⠦' '⠧' '⠇' '⠏')
   local f=0
   for attempt in $(seq 1 $max); do
-    if kubectl cluster-info &>/dev/null 2>&1; then
+    # --request-timeout bounds the call itself: the 60s cap here is only re-checked
+    # BETWEEN iterations, so an unbounded cluster-info against an API that accepts
+    # the TCP connection but never responds (corporate-proxy intercept of
+    # localhost, half-booted apiserver) would hang this gate forever.
+    if kubectl cluster-info --request-timeout=5s &>/dev/null 2>&1; then
       printf "\r\033[K"
       tput cnorm 2>/dev/null || true
       success "Secure environment ready"

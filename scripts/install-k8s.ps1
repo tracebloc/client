@@ -563,7 +563,18 @@ echo "NCT installed successfully."
 
   $scriptPath = [System.IO.Path]::Combine($env:TEMP, "install-nct-$(Get-Random -Maximum 999999).sh")
   [System.IO.File]::WriteAllText($scriptPath, $nctScript.Replace("`r`n", "`n"))
-  $wslPath = "/mnt/" + ($scriptPath -replace '\\','/' -replace '^([A-Za-z]):/', { $_.Groups[1].Value.ToLower() + '/' })
+  # Build the WSL path WITHOUT a scriptblock -replace: scriptblock substitution in
+  # the -replace operator is PowerShell 6.1+, but the bootstrap (install.ps1) runs
+  # this via powershell.exe (Windows PowerShell 5.1, per #Requires -Version 5.1),
+  # where the scriptblock is coerced to its literal text and the drive letter is
+  # NOT lowercased -> a malformed $wslPath and a 180s NCT-install timeout. -match
+  # / $Matches is 5.1-safe.
+  $fwd = $scriptPath -replace '\\','/'
+  if ($fwd -match '^([A-Za-z]):/(.*)$') {
+    $wslPath = "/mnt/" + $Matches[1].ToLower() + '/' + $Matches[2]
+  } else {
+    $wslPath = "/mnt/" + $fwd
+  }
 
   $nctInstallJob = Start-Job -ScriptBlock {
     param($d, $p)
@@ -1176,8 +1187,16 @@ function Install-ClientHelm {
   # fails OPEN and lets a re-install silently overwrite an existing client we
   # simply couldn't identify. Record it and fail CLOSED below (#200 follow-up).
   $unreadableNs = ""
+  # $listUnknown: `helm list` itself failed or returned non-JSON, so we couldn't
+  # even ENUMERATE releases. Same fail-open risk one level up from $unreadableNs —
+  # skipping the guard here would let a re-install overwrite a different client.
+  $listUnknown = $false
   $listJson = (helm list -A -o json 2>$null) | Out-String
-  if ($LASTEXITCODE -eq 0 -and $listJson.Trim()) {
+  if ($LASTEXITCODE -ne 0) {
+    # helm list failed (wedged/unreachable API, kubeconfig glitch) -> unknown.
+    # (helm returns 0 with an empty `[]` when there are genuinely no releases.)
+    $listUnknown = $true
+  } elseif ($listJson.Trim()) {
     try {
       foreach ($rel in ($listJson | ConvertFrom-Json)) {
         if ($rel.chart -and $rel.chart.StartsWith("client-")) {
@@ -1202,17 +1221,25 @@ function Install-ClientHelm {
           if ($id) { $existingId = $id; $existingNs = $rel.namespace; break }
         }
       }
-    } catch { }
+    } catch {
+      # helm list returned non-JSON/garbage -> can't trust the enumeration.
+      $listUnknown = $true
+    }
   }
-  # Fail closed: a client release exists here but we couldn't read its clientId,
-  # and no OTHER release gave us a definitive id. Refuse rather than overwrite an
+  # Fail closed when we couldn't identify a client we can see ($unreadableNs) OR
+  # couldn't enumerate at all ($listUnknown). Refuse rather than overwrite an
   # unknown client -- the operator must resolve it explicitly.
-  if (-not $existingId -and $unreadableNs) {
+  if (-not $existingId -and ($unreadableNs -or $listUnknown)) {
     Write-Host ""
-    Warn "A tracebloc client release is installed here (namespace '$unreadableNs') but its configuration could not be read."
+    if ($listUnknown) {
+      Warn "Couldn't determine which tracebloc client (if any) is already installed here -- helm could not enumerate releases."
+    } else {
+      Warn "A tracebloc client release is installed here (namespace '$unreadableNs') but its configuration could not be read."
+    }
     Hint "tracebloc runs one client per machine, so the installer will not overwrite"
-    Hint "a client it cannot identify. Inspect or remove it, then re-run:"
-    Hint "  helm get values -A            (see what is installed)"
+    Hint "a client it cannot see (usually the cluster API is briefly unreachable). Check and re-run:"
+    Hint "  kubectl cluster-info         (is the API reachable?)"
+    Hint "  helm get values -A           (see what is installed)"
     Hint "  k3d cluster delete $CLUSTER_NAME   (wipes this client + its local data)"
     Write-Host ""
     Err "Refusing to replace an unidentifiable existing client."

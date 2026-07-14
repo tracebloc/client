@@ -133,8 +133,12 @@ install_docker_desktop() {
       echo ""
 
       if [[ "${TRACEBLOC_DOCKER_ARCH_PROMPT:-0}" == "1" ]]; then
-        local reply
-        read -r -p "  Replace wrong-architecture Docker with native version? [Y/n] " reply || true
+        # Read the terminal, not the (EOF) `curl … | bash` install pipe — otherwise
+        # `reply` is always empty and the confirmation below is meaningless (the
+        # replacement proceeds without a real answer). No tty => empty => proceed,
+        # preserving the opt-in prompt's prior non-interactive behavior.
+        local reply=""
+        if [[ -r /dev/tty ]]; then read -r -p "  Replace wrong-architecture Docker with native version? [Y/n] " reply </dev/tty || reply=""; fi
         if [[ -n "$reply" && "$reply" != "y" && "$reply" != "Y" ]]; then
           echo ""
           echo -e "  ${BOLD}Skipped.${RESET} To fix later, re-run this installer."
