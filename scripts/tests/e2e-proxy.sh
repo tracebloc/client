@@ -263,14 +263,20 @@ spec:
       args:
         - |
           echo ">>>>> SECTION_A_WITH_PROXY_ENV"
-          # --retry-connrefused survives the window where the squid Deployment is
-          # rolled out (readinessProbe green) but its Service endpoints aren't yet
-          # programmed in kube-proxy, so a brand-new pod's first CONNECT to the
-          # Service ClusterIP is refused. Without it, that transient refusal made
-          # curl give up before attempting the tunnel — no "Establish HTTP proxy
-          # tunnel" line — and §4 flaked red (e.g. run 29255451968). A genuine
-          # #119 regression still fails all retries, so the guard keeps its teeth.
-          curl -k -v -sS -m 30 --retry 5 --retry-connrefused --retry-delay 2 -o /dev/null https://${BACKEND_HOST}/ 2>&1
+          # Retries ride out the startup window where the squid Deployment is
+          # rolled out (readinessProbe green) but the cluster hasn't finished
+          # wiring it up for a brand-new pod:
+          #   • --retry-connrefused: Service endpoints not yet programmed in
+          #     kube-proxy, so the first CONNECT to the ClusterIP is refused
+          #     (curl exit 7) — run 29255451968.
+          #   • --retry-all-errors: the proxy Service name isn't yet in the pod's
+          #     resolver, so curl fails with "Could not resolve proxy" (exit 5) —
+          #     a DNS error curl does NOT retry on its own (PR #349 run
+          #     29345383969). --retry-connrefused alone doesn't cover it, so §4
+          #     still flaked red until curl saw the tunnel.
+          # A genuine #119 regression (proxy env ignored / squid down) still fails
+          # ALL retries, so the guard keeps its teeth.
+          curl -k -v -sS -m 30 --retry 8 --retry-connrefused --retry-all-errors --retry-delay 2 -o /dev/null https://${BACKEND_HOST}/ 2>&1
           echo ">>>>> SECTION_B_PROXY_ENV_UNSET"
           env -u HTTP_PROXY -u HTTPS_PROXY -u http_proxy -u https_proxy -u NO_PROXY -u no_proxy curl -k -v -sS -m 20 -o /dev/null https://${BACKEND_HOST}/ 2>&1
           echo ">>>>> SECTION_END"

@@ -106,10 +106,24 @@ _assess_classify() {
     return 0
   fi
 
-  # A cluster exists. Is a tracebloc release installed on it? Reuse the shared
-  # jq-free probe (sets INSTALLED_CLIENT_NS) so this can never disagree with the
-  # Helm-step / #303 ownership guards on "what runs here". A cluster with no
-  # release is still a first-time client setup.
+  # A cluster exists — but is it RUNNING? Check this via the cheap read-only k3d
+  # probe BEFORE any Helm call. detect_installed_client below runs `helm list -A`
+  # / `helm get values`, which are UNBOUNDED and talk to the k8s API — on a
+  # stopped cluster (after a reboot or a manual stop) that API is down, so Helm
+  # would hang for a long time (breaking the gate's "bounded, never-hang"
+  # contract) and, when it finally failed, mislabel the machine as
+  # `fresh`/`cluster-no-release`. Probing servers first keeps Helm off a dead API
+  # and makes `cluster-stopped` actually reachable on real re-runs.
+  local servers; servers="$(_assess_cluster_servers_running)"
+  if [[ "$servers" -lt 1 ]]; then
+    INSTALL_STATE="degraded"; INSTALL_STATE_REASON="cluster-stopped"
+    return 0
+  fi
+
+  # Cluster is running (live API). Is a tracebloc release installed on it? Reuse
+  # the shared jq-free probe (sets INSTALLED_CLIENT_NS) so this can never disagree
+  # with the Helm-step / #303 ownership guards on "what runs here". A running
+  # cluster with no release is still a first-time client setup.
   local ns=""
   if declare -F detect_installed_client >/dev/null 2>&1; then
     detect_installed_client
@@ -120,17 +134,11 @@ _assess_classify() {
     return 0
   fi
 
-  # Cluster + release both present -> healthy or degraded. Require CERTAINTY on
-  # every signal for "healthy"; anything less degrades to the normal flow, which
-  # reconciles the specific layer that is off.
-  local servers; servers="$(_assess_cluster_servers_running)"
-  if [[ "$servers" -lt 1 ]]; then
-    INSTALL_STATE="degraded"; INSTALL_STATE_REASON="cluster-stopped"
-    return 0
-  fi
-
-  # Cluster is running, so the readiness probe talks to a live API (and is
-  # bounded regardless). ANY of the client's core workloads not Ready => degraded.
+  # Cluster running + release present -> healthy or degraded. Require CERTAINTY on
+  # every remaining signal for "healthy"; anything less degrades to the normal
+  # flow, which reconciles the specific layer that is off. The readiness probe
+  # talks to a live API (and is bounded regardless). ANY of the client's core
+  # workloads not Ready => degraded.
   if ! _assess_workload_ready "$ns"; then
     INSTALL_STATE="degraded"; INSTALL_STATE_REASON="workload-not-ready"
     return 0
