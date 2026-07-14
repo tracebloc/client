@@ -249,3 +249,36 @@ EOF
   [[ "$output" != *"Already set up and healthy"* ]]
   [ ! -f "$SBX/home-ran" ]
 }
+
+# ── Reinstall intent reaches install-k8s.sh's stop-and-check gate ────────────
+# Skipping the bootstrap bailout is not enough: install-k8s.sh runs its OWN
+# read-only assess gate that short-circuits a healthy machine and exits 0. So an
+# explicit (re)install request must EXPORT TB_FORCE_REINSTALL, or a pinned-ref
+# re-run downloads the new installer and then does nothing. The stub install-k8s.sh
+# records the value it inherits so we can assert the propagation.
+_capture_k8s_force() {
+  cat > "$SERVE/scripts/install-k8s.sh" <<EOF
+#!/usr/bin/env bash
+echo "TB_FORCE_REINSTALL=\${TB_FORCE_REINSTALL:-unset}" > "$SBX/k8s-ran"
+EOF
+  # Rebuild the manifest digest for the rewritten sub-script (verify runs first).
+  local newsha; newsha="$(_real_sha "$SERVE/scripts/install-k8s.sh")"
+  awk -v s="$newsha" '$2 == "scripts/install-k8s.sh" { $1 = s } { print }' \
+    "$SERVE_REL/manifest.sha256" > "$SERVE_REL/m.tmp"
+  mv "$SERVE_REL/m.tmp" "$SERVE_REL/manifest.sha256"
+}
+
+@test "pinned REF exports TB_FORCE_REINSTALL so the assess gate can't short-circuit" {
+  _capture_k8s_force
+  REF="v9.9.9" COSIGN_RESULT=0 run_boot
+  [ "$status" -eq 0 ]
+  [ -f "$SBX/k8s-ran" ]
+  [[ "$(cat "$SBX/k8s-ran")" == "TB_FORCE_REINSTALL=1" ]]
+}
+
+@test "--force also exports TB_FORCE_REINSTALL to install-k8s.sh" {
+  _capture_k8s_force
+  REF="v9.9.9" COSIGN_RESULT=0 run_boot --force
+  [ "$status" -eq 0 ]
+  [[ "$(cat "$SBX/k8s-ran")" == "TB_FORCE_REINSTALL=1" ]]
+}

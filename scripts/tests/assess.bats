@@ -56,30 +56,18 @@ _depname() {
   done
 }
 
-# ── _assess_cluster_servers_running (read-only serversRunning, jq + awk) ─────
-# The k3d mock answers BOTH the jq path (`-o json`) and the awk path
-# (`--no-headers`) so the result is identical whether or not the runner has jq.
-@test "_assess_cluster_servers_running: running cluster -> >=1 (jq and awk paths agree)" {
-  k3d() {
-    case "$*" in
-      *"-o json"*)      printf '[{"name":"tracebloc","serversRunning":1}]\n' ;;
-      *"--no-headers"*) printf 'tracebloc 1/1 0/0\n' ;;
-      *)                printf 'tracebloc 1/1 0/0\n' ;;
-    esac
-  }
+# ── _assess_cluster_servers_running (read-only serversRunning, jq-free) ──────
+# Single jq-free path (jq is not a guaranteed installer prerequisite, Bugbot
+# #284): the k3d table's SERVERS column ("running/total"), read with awk.
+@test "_assess_cluster_servers_running: running cluster -> >=1" {
+  k3d() { printf 'tracebloc 1/1 0/0\n'; }
   run _assess_cluster_servers_running
   [ "$status" -eq 0 ]
   [ "$output" = "1" ]
 }
 
 @test "_assess_cluster_servers_running: stopped cluster -> 0" {
-  k3d() {
-    case "$*" in
-      *"-o json"*)      printf '[{"name":"tracebloc","serversRunning":0}]\n' ;;
-      *"--no-headers"*) printf 'tracebloc 0/1 0/0\n' ;;
-      *)                printf 'tracebloc 0/1 0/0\n' ;;
-    esac
-  }
+  k3d() { printf 'tracebloc 0/1 0/0\n'; }
   run _assess_cluster_servers_running
   [ "$output" = "0" ]
 }
