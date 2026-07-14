@@ -133,8 +133,12 @@ install_docker_desktop() {
       echo ""
 
       if [[ "${TRACEBLOC_DOCKER_ARCH_PROMPT:-0}" == "1" ]]; then
-        local reply
-        read -r -p "  Replace wrong-architecture Docker with native version? [Y/n] " reply || true
+        # Read the terminal, not the (EOF) `curl … | bash` install pipe — otherwise
+        # `reply` is always empty and the confirmation below is meaningless (the
+        # replacement proceeds without a real answer). No tty => empty => proceed,
+        # preserving the opt-in prompt's prior non-interactive behavior.
+        local reply=""
+        if [[ -r /dev/tty ]]; then read -r -p "  Replace wrong-architecture Docker with native version? [Y/n] " reply </dev/tty || reply=""; fi
         if [[ -n "$reply" && "$reply" != "y" && "$reply" != "Y" ]]; then
           echo ""
           echo -e "  ${BOLD}Skipped.${RESET} To fix later, re-run this installer."
@@ -165,8 +169,11 @@ install_docker_desktop() {
     local dmg_url="https://desktop.docker.com/mac/main/${real_arch}/Docker.dmg"
     local dmg_path="/tmp/Docker.dmg"
 
+    log "Downloading Docker Desktop DMG for $real_arch"
+    # Real %-by-bytes bar: this is a single-file curl of the .dmg, so the byte
+    # percentage is genuine (download_with_progress) — not a fabricated aggregate.
     retry 3 5 download_with_progress "$dmg_url" "$dmg_path" \
-      "Downloading Docker Desktop ($real_arch)"
+      "Downloading Docker Desktop — large, a few minutes on a fresh Mac"
 
     local checksum_url="${dmg_url}.sha256sum"
     local expected_hash
@@ -242,7 +249,7 @@ install_docker_desktop() {
     error "Docker Desktop did not start in time. Re-run this script once Docker is ready."
   fi
 
-  success "Docker"
+  success "Docker ready"
 }
 
 install_macos_cli_tools() {
@@ -261,7 +268,7 @@ install_macos_cli_tools() {
   fi
   log "helm: $(helm version --short 2>/dev/null || echo installed)"
 
-  success "System tools"
+  success "System tools ready (k3d, helm, kubectl)"
 }
 
 install_macos() {

@@ -36,6 +36,16 @@
 # =============================================================================
 set -euo pipefail
 
+# ── Minimal colours for THIS script's own output ─────────────────────────────
+# common.sh (which owns the shared colour palette + helpers) is one of the files
+# this bootstrap is about to fetch and verify, so it isn't sourced yet. Define a
+# small local palette, disabled when stdout isn't a terminal or NO_COLOR is set.
+if [[ -t 1 && -z "${NO_COLOR:-}" ]]; then
+  _B=$'\033[1m'; _C=$'\033[0;36m'; _D=$'\033[2m'; _G=$'\033[0;32m'; _R=$'\033[0m'
+else
+  _B=""; _C=""; _D=""; _G=""; _R=""
+fi
+
 # ── Platform gate ────────────────────────────────────────────────────────────
 case "$(uname -s)" in
   MINGW*|MSYS*|CYGWIN*)
@@ -43,6 +53,89 @@ case "$(uname -s)" in
     echo "  irm https://raw.githubusercontent.com/tracebloc/client/main/scripts/install.ps1 | iex"
     exit 1 ;;
 esac
+
+# ── Early bailout: already set up and healthy → skip the whole download ──────
+# Before fetching ANYTHING, if the tracebloc CLI is already present AND reports a
+# healthy setup, there is nothing to download or install — hand straight to the
+# home screen. `tracebloc doctor` is the health probe; it is BOUNDED (stock macOS
+# has no coreutils `timeout`, so we background + poll + kill on overrun) and its
+# EXIT CODE is the gate: an old CLI that doesn't know `doctor` returns non-zero, so
+# we simply fall through to a normal install. Skipped on a forced reinstall
+# (--force/--reinstall or TRACEBLOC_FORCE_REINSTALL=1), on the dev/unverified path,
+# and whenever the operator explicitly pinned a REF/BRANCH (an explicit version
+# request must always (re)install, never bail).
+_tb_bail_ok=1
+[[ "${TRACEBLOC_FORCE_REINSTALL:-0}" == "1" ]] && _tb_bail_ok=0
+[[ "${TRACEBLOC_ALLOW_UNVERIFIED:-0}" == "1" ]] && _tb_bail_ok=0
+[[ -n "${REF:-}" || -n "${BRANCH:-}" ]] && _tb_bail_ok=0
+for _a in "$@"; do
+  case "$_a" in --force|--reinstall) _tb_bail_ok=0 ;; esac
+done
+
+# A skipped bailout means an explicit (re)install was requested (force, dev/
+# unverified path, or a pinned REF/BRANCH). install-k8s.sh runs its OWN read-only
+# stop-and-check gate (assess_existing_install) that short-circuits a healthy
+# machine to the home screen and exits 0 — so without propagating our intent, a
+# pinned-ref re-run would download the new installer and then do nothing. Export
+# TB_FORCE_REINSTALL so the downstream gate is skipped and the full (idempotent)
+# flow runs. (--force/--reinstall pass through via "$@" too, but env is the only
+# channel for the REF/BRANCH/unverified reasons.)
+[[ "$_tb_bail_ok" == "0" ]] && export TB_FORCE_REINSTALL=1
+
+_tb_check_healthy() {
+  # Run `tracebloc doctor` behind a small inline spinner, bounded so a wedged CLI
+  # can't hang the bootstrap. Returns doctor's exit code (0 = healthy), or 124 on
+  # timeout. 0.2s ticks; TRACEBLOC_DOCTOR_TIMEOUT (default 20s) bounds it.
+  local timeout="${TRACEBLOC_DOCTOR_TIMEOUT:-20}" maxticks tick=0 rc
+  # ARRAY of glyphs, not a single string: the braille frames are 3-byte UTF-8, and
+  # macOS's system bash 3.2 slices `${str:i:1}` and counts `${#str}` by BYTES, so a
+  # string form renders mid-glyph garbage. An array indexes whole elements on 3.2
+  # (matches spin() in lib/common.sh).
+  local frames=('⠋' '⠙' '⠹' '⠸' '⠼' '⠴' '⠦' '⠧' '⠇' '⠏') i=0 f
+  maxticks=$(( timeout * 5 ))
+  # </dev/null: under `curl … | bash` stdin is the install pipe, so a
+  # diagnostic that reads stdin would consume/block on the script bytes.
+  tracebloc doctor </dev/null >/dev/null 2>&1 &
+  local pid=$!
+  tput civis 2>/dev/null || true
+  while kill -0 "$pid" 2>/dev/null; do
+    f="${frames[i]}"; i=$(( (i + 1) % ${#frames[@]} ))
+    printf '\r  %s%s%s Checking your tracebloc setup…' "$_C" "$f" "$_R"
+    if [[ "$tick" -ge "$maxticks" ]]; then
+      kill "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true
+      printf '\r\033[K'; tput cnorm 2>/dev/null || true
+      return 124
+    fi
+    sleep 0.2; tick=$(( tick + 1 ))
+  done
+  wait "$pid"; rc=$?
+  printf '\r\033[K'; tput cnorm 2>/dev/null || true
+  return "$rc"
+}
+
+# The CLI installer drops the binary in ~/.local/bin when /usr/local/bin isn't
+# writable, and a fresh curl|bash shell doesn't have that on PATH — so mirror
+# provision_client's prepend before probing, or a healthy ~/.local/bin install
+# is missed and forces a needless full re-download.
+export PATH="${HOME}/.local/bin:${PATH}"
+
+if [[ "$_tb_bail_ok" == "1" ]] && command -v tracebloc >/dev/null 2>&1; then
+  printf '\n'
+  if _tb_check_healthy; then
+    printf '  %s✓%s %sAlready set up and healthy — nothing to download or install.%s\n' "$_G" "$_R" "$_B" "$_R"
+    printf "    %sRun%s  %stracebloc%s%s  to use it. Here's your environment:%s\n" "$_D" "$_R" "$_C" "$_R" "$_D" "$_R"
+    # Hand off to the interactive home screen (exec replaces this process).
+    # Under `curl … | bash` stdin is the install pipe, so give the home screen
+    # the user's real terminal instead — but only when /dev/tty is actually
+    # OPENABLE (a readable device node with no controlling terminal — e.g. under
+    # CI / a detached session — still fails to open, which would abort the exec);
+    # otherwise /dev/null, never the pipe. exec only returns if it FAILED to
+    # replace the process — surface that instead of a silent exit 0.
+    if { : </dev/tty; } 2>/dev/null; then exec tracebloc </dev/tty; else exec tracebloc </dev/null; fi
+    printf '  %sCould not launch tracebloc automatically — run %stracebloc%s%s to use it.%s\n' "$_B" "$_C" "$_R" "$_B" "$_R" >&2
+    exit 1
+  fi
+fi
 
 # ── Pinned, immutable release ref ──────────────────────────────────────────
 # DEFAULT_REF is the immutable git tag this bootstrap fetches from. The release
@@ -135,7 +228,24 @@ REPO_REL="https://github.com/tracebloc/client/releases/download/${REF}"
 TMPDIR="$(mktemp -d)"
 trap 'rm -rf "$TMPDIR"' EXIT
 
-echo "tracebloc client installer · $REF"
+# ── Banner ───────────────────────────────────────────────────────────────────
+# Draw the first-run title here (mirrors common.sh::print_banner) so the
+# curl|bash path shows it above "1. Downloading". Export TRACEBLOC_BANNER_SHOWN
+# so the install-k8s.sh we're about to fetch doesn't draw a SECOND banner, and
+# TRACEBLOC_INSTALL_REF so its title can state the version on the direct path.
+export TRACEBLOC_BANNER_SHOWN=1
+export TRACEBLOC_INSTALL_REF="$REF"
+_tb_ver_suffix=""
+case "$REF" in
+  v[0-9]*) _tb_ver_suffix="${_D} · ${REF}${_R}" ;;   # only a real vX.Y.Z tag is a "version"
+esac
+printf '\n\n'
+printf '  Setting up %s%stracebloc%s on your machine%s\n' "$_B" "$_C" "$_R" "$_tb_ver_suffix"
+printf '\n'
+printf '  %s────────────────────────────────────────%s\n' "$_D" "$_R"
+printf '\n'
+printf '  %s1. Downloading%s\n' "$_B" "$_R"
+printf '\n'
 
 mkdir -p "$TMPDIR/lib"
 
@@ -156,6 +266,7 @@ FILES=(
   "scripts/lib/install-client-helm.sh"
   "scripts/lib/install-cli.sh"
   "scripts/lib/provision.sh"
+  "scripts/lib/assess.sh"
   "scripts/lib/summary.sh"
   "scripts/lib/diagnose.sh"
 )
@@ -166,8 +277,10 @@ download_with_retry() {
   for attempt in 1 2 3; do
     # --tlsv1.2 floor; honor any proxy / custom-CA env the corporate-proxy
     # segment relies on (#172/#722) — curl picks up HTTPS_PROXY/NO_PROXY/
-    # CURL_CA_BUNDLE from the environment automatically.
-    if curl -fsSL --tlsv1.2 "$url" -o "$dest"; then return 0; fi
+    # CURL_CA_BUNDLE from the environment automatically. --connect-timeout/--max-time
+    # (added to every fetch in this file) turn a stalled endpoint into a retriable
+    # failure instead of hanging the "1. Downloading" phase forever.
+    if curl -fsSL --tlsv1.2 --connect-timeout 30 --max-time 300 "$url" -o "$dest"; then return 0; fi
     if [[ $attempt -ge $max_attempts ]]; then
       echo "[ERROR] Failed to download $url after $max_attempts attempts."
       exit 1
@@ -178,10 +291,16 @@ download_with_retry() {
 }
 
 # ── Fetch the sub-scripts ─────────────────────────────────────────────────
+# One transient status frame while the (quiet on success) fetch loop runs; a
+# retry/failure inside download_with_retry prints its own [WARN]/[ERROR] and, on
+# hard failure, exits — so we only reach the success line when every file landed.
+printf '  %s⠋%s Fetching the installer…' "$_C" "$_R"
 for f in "${FILES[@]}"; do
   dest="$TMPDIR/${f#scripts/}"
   download_with_retry "$REPO_RAW/$f" "$dest"
 done
+printf '\r\033[K'
+printf '  %s✔%s Installer downloaded — %s files\n' "$_G" "$_R" "${#FILES[@]}"
 
 # ── Pick a sha256 tool (coreutils on Linux, shasum on macOS) ───────────────
 _sha256_of() {
@@ -203,8 +322,7 @@ _sha256_of() {
 verify_against_manifest() {
   local manifest="$TMPDIR/manifest.sha256"
 
-  echo ""
-  echo "Verifying the installer is authentic before anything runs…"
+  printf "  %sVerifying it's authentic (cosign)…%s\n" "$_D" "$_R"
 
   if ! _sha256_of "$TMPDIR/install-k8s.sh" >/dev/null 2>&1; then
     echo "[ERROR] No sha256 tool (sha256sum / shasum) on PATH — can't verify the" >&2
@@ -248,7 +366,7 @@ verify_against_manifest() {
       exit 1
     fi
   done
-  echo "  ✔ All ${#FILES[@]} installer files verified — none were altered"
+  printf '  %s✔%s All %s files intact — nothing was altered\n' "$_G" "$_R" "${#FILES[@]}"
 }
 
 download_manifest() {
@@ -256,11 +374,11 @@ download_manifest() {
   # Authoritative source: the signed release asset. Fall back to the in-repo
   # copy in the tag tree only under the unverified dev opt-in (a branch checkout
   # has no release assets).
-  if curl -fsSL --tlsv1.2 "$REPO_REL/manifest.sha256" -o "$dest" 2>/dev/null; then
+  if curl -fsSL --tlsv1.2 --connect-timeout 30 --max-time 300 "$REPO_REL/manifest.sha256" -o "$dest" 2>/dev/null; then
     return 0
   fi
   if [[ "$ALLOW_UNVERIFIED" == "1" ]]; then
-    curl -fsSL --tlsv1.2 "$REPO_RAW/scripts/manifest.sha256" -o "$dest" 2>/dev/null
+    curl -fsSL --tlsv1.2 --connect-timeout 30 --max-time 300 "$REPO_RAW/scripts/manifest.sha256" -o "$dest" 2>/dev/null
     return $?
   fi
   return 1
@@ -290,8 +408,8 @@ verify_manifest_signature() {
     exit 1
   fi
 
-  if ! curl -fsSL --tlsv1.2 "$REPO_REL/manifest.sha256.sig"  -o "$sig"  2>/dev/null \
-     || ! curl -fsSL --tlsv1.2 "$REPO_REL/manifest.sha256.cert" -o "$cert" 2>/dev/null; then
+  if ! curl -fsSL --tlsv1.2 --connect-timeout 30 --max-time 300 "$REPO_REL/manifest.sha256.sig"  -o "$sig"  2>/dev/null \
+     || ! curl -fsSL --tlsv1.2 --connect-timeout 30 --max-time 300 "$REPO_REL/manifest.sha256.cert" -o "$cert" 2>/dev/null; then
     if [[ "$ALLOW_UNVERIFIED" == "1" ]]; then
       echo "[WARN]  manifest signature/cert not published for ref '$REF' — not verified (TRACEBLOC_ALLOW_UNVERIFIED=1)." >&2
       return 0
@@ -308,7 +426,7 @@ verify_manifest_signature() {
         --certificate "$cert" \
         --signature "$sig" \
         "$manifest" >/dev/null 2>&1; then
-    echo "  ✔ Signature verified — published by tracebloc (Sigstore keyless)"
+    printf '  %s✔%s Signature verified — published by tracebloc (Sigstore keyless)\n' "$_G" "$_R"
   else
     echo "[ERROR] cosign signature verification FAILED for manifest.sha256 — refusing" >&2
     echo "        to install." >&2
@@ -346,8 +464,8 @@ ensure_cosign() {
   local sums="$TMPDIR/cosign_checksums.txt"
 
   echo "  · Fetching the signature-verification tool (cosign)…"
-  curl -fsSL --tlsv1.2 "$base/$asset"               -o "$bin"  2>/dev/null || return 1
-  curl -fsSL --tlsv1.2 "$base/cosign_checksums.txt" -o "$sums" 2>/dev/null || return 1
+  curl -fsSL --tlsv1.2 --connect-timeout 30 --max-time 300 "$base/$asset"               -o "$bin"  2>/dev/null || return 1
+  curl -fsSL --tlsv1.2 --connect-timeout 30 --max-time 300 "$base/cosign_checksums.txt" -o "$sums" 2>/dev/null || return 1
 
   local want got
   want="$(grep " ${asset}\$" "$sums" | awk '{print $1}' | head -1)"
@@ -363,6 +481,10 @@ ensure_cosign() {
 }
 
 verify_against_manifest
+
+# Spacing before install-k8s.sh renders "2. Installing" (its banner is suppressed
+# by TRACEBLOC_BANNER_SHOWN, so it goes straight to the roadmap).
+printf '\n\n'
 
 chmod +x "$TMPDIR/install-k8s.sh"
 

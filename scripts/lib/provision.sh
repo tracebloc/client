@@ -112,22 +112,20 @@ _account_owns_namespace() {
 }
 
 provision_client() {
-  step 3 5 "Sign in and provision this client"
+  # No step header here — main() prints "d) Registering this machine". The
+  # tracebloc CLI was installed in step b (Install what tracebloc needs); this
+  # step signs in and mints the machine credential using it.
 
   if _provisioning_preset; then
     info "Using the credentials you supplied — skipping browser sign-in."
-    # Still install the CLI (non-fatal) so the operator has it for `data ingest`.
-    install_tracebloc_cli
     return 0
   fi
 
-  # Browser-auth path. The CLI is REQUIRED here (it mints the credential), so the
-  # install is effectively FATAL — unlike the old post-Helm, non-fatal Step 5.
-  install_tracebloc_cli
-  # The CLI installer may drop the binary in ~/.local/bin (not yet on this
-  # process's PATH); make it resolvable so the login/create calls below work.
+  # Browser-auth path. The CLI (installed in step b) is REQUIRED here — it mints
+  # the credential — so a missing CLI is FATAL. It may live in ~/.local/bin (not
+  # yet on this process's PATH); make it resolvable before the login/create calls.
   export PATH="${HOME}/.local/bin:${PATH}"
-  has tracebloc || error "The tracebloc CLI is required to provision this client but isn't available after install. Install it (curl -fsSL ${TRACEBLOC_CLI_INSTALL_URL} | sh), open a new shell, and re-run."
+  has tracebloc || error "The tracebloc CLI is required to provision this machine but isn't available. Install it (curl -fsSL ${TRACEBLOC_CLI_INSTALL_URL} | sh), open a new shell, and re-run."
 
   # The browser-auth mint path needs a CLI new enough to ship `login` + `client
   # create` (cli#104). The installed CLI comes from the latest RELEASE, which may
@@ -143,10 +141,26 @@ provision_client() {
     return 0
   fi
 
-  # Sign in (device flow — approve in a browser). Unattended installs use the
-  # dual-mode credential path above.
-  info "Sign in to tracebloc — approve this machine in your browser when prompted…"
-  tracebloc login || error "Sign-in didn't complete — re-run the installer to try again."
+  # Sign in (device flow). `tracebloc login` PRINTS a URL + one-time code and
+  # waits for approval — it does NOT auto-open a browser, so the copy says "open
+  # the link" (print-only). The Open/Enter/code lines + the wait are the CLI's own
+  # output; unattended installs use the dual-mode credential path above.
+  echo ""
+  echo -e "  Sign in to approve this machine — open the link in your browser"
+  echo -e "  (on this or any device) and enter the code:"
+  echo ""
+  # Give the interactive device-flow sign-in the user's REAL terminal. This runs
+  # after setup_log_file (`exec > >(tee …) 2>&1`), so the shell's stdout/stderr are
+  # a pipe and — under `curl … | bash` — stdin is the install pipe; a bare
+  # `tracebloc login` would then have no tty on any stream and can misrender or
+  # fail (same class assess.sh's hand-off handles). Redirect all three to /dev/tty
+  # when openable, else </dev/null (unattended reaches the dual-mode credential
+  # path above, not here).
+  if { : </dev/tty; } 2>/dev/null; then
+    tracebloc login </dev/tty >/dev/tty 2>/dev/tty || error "Sign-in didn't complete — re-run the installer to try again."
+  else
+    tracebloc login </dev/null || error "Sign-in didn't complete — re-run the installer to try again."
+  fi
 
   # ── One-client-per-machine pre-flight (#303) ─────────────────────────────
   # `client create` below mints a fresh client whenever the backend can't match
@@ -164,6 +178,21 @@ provision_client() {
   # shared probe being present (a stale bootstrap may not have sourced it).
   if declare -F detect_installed_client >/dev/null 2>&1; then
     detect_installed_client
+    # Fail CLOSED when we couldn't enumerate what's here (helm/API failure): the
+    # NS check below can't distinguish "no client" from "couldn't tell", so minting
+    # now could strand a SECOND client (the exact orphan this pre-flight prevents).
+    # Same signal the Helm-step one-client guard keys on.
+    if [[ "${INSTALLED_CLIENT_UNKNOWN:-0}" == 1 ]]; then
+      echo ""
+      warn "Couldn't determine whether a tracebloc client is already installed here."
+      hint "tracebloc runs one client per machine. Registering a new client now could strand"
+      hint "a second one if an existing client just couldn't be seen — usually the cluster API"
+      hint "is briefly unreachable. Check it and re-run:"
+      hint "  kubectl cluster-info"
+      hint "  helm list -A"
+      echo ""
+      error "Refusing to provision without verifying what's already on this machine."
+    fi
     if [[ -n "$INSTALLED_CLIENT_NS" ]]; then
       local _own_rc=0
       _account_owns_namespace "$INSTALLED_CLIENT_NS" || _own_rc=$?
@@ -208,6 +237,12 @@ provision_client() {
   # can't — and it hard-requires --name when it can't prompt. Collect them here and
   # pass explicitly. Precedence: env override (unattended) > interactive prompt on
   # /dev/tty (works under `curl | bash`, whose stdin isn't the terminal) > fail closed.
+  #
+  # INTERIM — KEEP THIS PROMPT. The locked run-through drops the name/location
+  # question (machine auto-named <firstname>-NN, location auto-derived), but the
+  # DEPLOYED CLI still hard-requires --name without a TTY (backend#992), so
+  # dropping it now would break `curl | bash`. Slated for removal when cli#137
+  # ships the auto-name + optional-location `client create`; until then it stays.
   local client_name="${TRACEBLOC_CLIENT_NAME:-}" client_location="${TRACEBLOC_CLIENT_LOCATION:-}"
   if [[ -z "$client_name" ]] && _prompt_tty; then
     # Read the name from the terminal, RETRYING on an empty line instead of
@@ -328,5 +363,8 @@ provision_client() {
   # namespace MUST be the created client's slug (Q2: it equals the heartbeat-
   # reported namespace), so the minted value wins over any TB_NAMESPACE default.
   export TRACEBLOC_CLIENT_ID TRACEBLOC_CLIENT_PASSWORD TB_NAMESPACE
-  info "Provisioned — credential handed to the install (not shown)."
+  # The registered identity is the minted slug (= TB_NAMESPACE = the dashboard
+  # name), e.g. "lukas-01" — not the raw typed name (which may be de-duplicated).
+  success "Registered as \"${TB_NAMESPACE}\""
+  log "Provisioned — credential handed to the install (not shown)."
 }

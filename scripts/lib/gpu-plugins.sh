@@ -67,7 +67,9 @@ verify_gpu() {
   log "Verifying GPU on node..."
 
   for i in {1..18}; do
-    RAW=$(kubectl get nodes -o json 2>/dev/null \
+    # --request-timeout bounds the call: the 18×5s cap is only re-checked between
+    # iterations, so an unbounded get-nodes against a wedged API would hang here.
+    RAW=$(kubectl get nodes -o json --request-timeout=5s 2>/dev/null \
       | grep -o '"[^"]*gpu[^"]*"\s*:\s*"[^"]*"' \
       | sed 's/"//g; s/\s*:\s*/=/g' | head -5 \
       2>/dev/null || echo "")

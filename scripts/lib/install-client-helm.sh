@@ -57,25 +57,47 @@ _extract_yaml_value() {
 # the first two whitespace-free columns and the CHART column matches
 # `client-<ver>`, the same jq-free parse _chart_version uses. Shared by the
 # pre-provision ownership pre-flight (#303) and the Helm-step one-client guard so
-# the two can never disagree on "what already runs here". Always returns 0 — a
-# missing helm / unreadable values just yields the empty (no-client) result.
+# the two can never disagree on "what already runs here". Always returns 0. A
+# missing helm just yields the empty (no-client) result — but a helm/API FAILURE
+# is reported as INSTALLED_CLIENT_UNKNOWN=1 (not "no client"), so guards can fail
+# CLOSED instead of silently overwriting a client they couldn't see.
 detect_installed_client() {
-  INSTALLED_CLIENT_ID=""; INSTALLED_CLIENT_NS=""
-  local _gvf _rel _ns _id
-  # A mktemp failure is an environment error, NOT proof of "no client here" —
-  # treating it as such would silently skip the one-client / #303 ownership
-  # guards. Fall back to a path in a dir we own (same reasoning as the create
-  # step: never a predictable world-writable /tmp path under sudo). Only give up
-  # (empty result) when there is genuinely nowhere to write.
+  INSTALLED_CLIENT_ID=""; INSTALLED_CLIENT_NS=""; INSTALLED_CLIENT_UNKNOWN=0
+  # No helm => nothing helm-installed here; a genuine (documented) "no client".
+  has helm || return 0
+  local _gvf _rel _ns _id _list _unreadable=0
+  # A mktemp failure is an environment error, NOT proof of "no client here" — flag
+  # UNKNOWN so the guards fail closed rather than skip. Fall back to a path in a
+  # dir we own (never a predictable world-writable /tmp path under sudo) before
+  # giving up.
   _gvf="$(mktemp 2>/dev/null)" || _gvf="${HOST_DATA_DIR:+${HOST_DATA_DIR}/.tb-detect-values.$$}"
-  [[ -n "$_gvf" ]] || return 0
+  [[ -n "$_gvf" ]] || { INSTALLED_CLIENT_UNKNOWN=1; return 0; }
+  # Capture `helm list`'s exit code: a FAILED enumeration (wedged/unreachable API,
+  # kubeconfig glitch) must NOT read as "no client here" — that fails OPEN and lets
+  # a re-install silently overwrite an existing client. `helm list` returns 0 with
+  # empty output when there are genuinely no releases, so only a non-zero exit is
+  # "unknown".
+  if ! _list="$(helm list -A 2>/dev/null)"; then
+    INSTALLED_CLIENT_UNKNOWN=1; rm -f "$_gvf"; return 0
+  fi
   while read -r _rel _ns; do
     [[ -z "$_rel" ]] && continue
     if helm get values "$_rel" -n "$_ns" > "$_gvf" 2>/dev/null; then
       _id="$(_extract_yaml_value "$_gvf" clientId)"
       [[ -n "$_id" ]] && { INSTALLED_CLIENT_ID="$_id"; INSTALLED_CLIENT_NS="$_ns"; break; }
+      # Values readable but no clientId -> parsed fine, just not a match; keep
+      # scanning (mirrors the PowerShell peer's null-clientId `continue`).
+    else
+      # Couldn't read THIS client release's values -> an UNIDENTIFIABLE client.
+      # Record it and keep scanning (a later release may give a definitive id);
+      # if none does, fail closed below rather than read it as "no client here".
+      _unreadable=1
     fi
-  done < <(helm list -A 2>/dev/null | awk '/[[:space:]]client-[0-9]/ { print $1, $2 }')
+  done < <(printf '%s\n' "$_list" | awk '/[[:space:]]client-[0-9]/ { print $1, $2 }')
+  # A client release existed but we couldn't read its clientId, and no OTHER
+  # release gave a definitive id -> unknown (parity with the PowerShell guard's
+  # $unreadableNs fail-closed path).
+  [[ -z "$INSTALLED_CLIENT_ID" && "$_unreadable" == 1 ]] && INSTALLED_CLIENT_UNKNOWN=1
   rm -f "$_gvf"
   return 0
 }
@@ -301,15 +323,10 @@ _reconcile_adopted_client() {
 
   _ensure_release_dirs "$_ns"
 
-  local _hl; _hl="$(mktemp)"
-  if ! helm "${_args[@]}" > "$_hl" 2>&1; then
-    cat "$_hl" >> "${LOG_FILE:-/dev/null}" 2>/dev/null
-    cat "$_hl" >&2
-    rm -f "$_hl"
+  # Reconcile blocks too — same spinner treatment (RFC-0002 §2).
+  if ! spin_cmd "Reconciling the existing client…" helm "${_args[@]}"; then
     error "Reconcile of the existing client failed. Check the log for details: ${LOG_FILE:-}"
   fi
-  cat "$_hl" >> "${LOG_FILE:-/dev/null}" 2>/dev/null
-  rm -f "$_hl"
 
   kubectl config set-context --current --namespace "$_ns" >/dev/null 2>&1 || true
   return 0
@@ -342,11 +359,68 @@ _no_interactive_creds_die() {
   prompt cannot read your input."
 }
 
-install_client_helm() {
-  # ── Step 4/5: Install tracebloc client (credential + namespace provisioned
-  #    in Step 3 by provision_client, or supplied via dual-mode) ─────────────
-  step 4 5 "Installing tracebloc client"
+# _download_services_progress NS — render an honest N-of-M count bar as the
+# client's container images pull onto the node (the "services download" in step
+# e). The only TRUTHFUL per-unit signal is how many containers report a populated
+# imageID (image present) out of the total the pods declare — never a fabricated
+# aggregate percentage. Best-effort, BOUNDED, and NON-FATAL: it must never block
+# or fail the install — the authoritative readiness gate is wait_for_client_ready
+# (step f). Skipped entirely when TB_NO_SERVICE_PROGRESS is set (the bats suite,
+# where kubectl is mocked and a poll loop would hang) or kubectl is unavailable.
+_download_services_progress() {
+  local ns="$1"
+  if [[ -n "${TB_NO_SERVICE_PROGRESS:-}" ]]; then return 0; fi
+  has kubectl || return 0
+  [[ -n "$ns" ]] || return 0
 
+  # Every kubectl call is bounded with --request-timeout so a wedged/unreachable
+  # API can never make the poll BLOCK — the between-iteration deadline check below
+  # only fires if kubectl actually returns, so an unbounded call would hang step e
+  # forever despite TB_PULL_TIMEOUT. Overridable; mirrors assess.sh's bounded probe.
+  local kube_timeout="${TB_PROGRESS_KUBECTL_TIMEOUT:-5s}"
+
+  # Establish the total container count once the pods are scheduled (bounded).
+  local total=0 tries=0
+  while (( tries < 15 )); do
+    total="$(kubectl get pods -n "$ns" --request-timeout="$kube_timeout" \
+      -o jsonpath='{range .items[*].spec.containers[*]}{"x"}{end}' 2>/dev/null \
+      | tr -cd 'x' | wc -c | tr -d ' ')" || total=0
+    [[ "$total" =~ ^[0-9]+$ ]] || total=0
+    if (( total > 0 )); then break; fi
+    tries=$(( tries + 1 )); sleep 2
+  done
+  if (( total < 1 )); then return 0; fi   # never saw pods — skip the bar silently
+
+  local deadline pulled=0
+  deadline=$(( $(date +%s) + ${TB_PULL_TIMEOUT:-300} ))
+  tput civis 2>/dev/null || true
+  while :; do
+    pulled="$(kubectl get pods -n "$ns" --request-timeout="$kube_timeout" \
+      -o jsonpath='{range .items[*].status.containerStatuses[*]}{.imageID}{"\n"}{end}' 2>/dev/null \
+      | grep -c '.')" || pulled=0
+    [[ "$pulled" =~ ^[0-9]+$ ]] || pulled=0
+    if (( pulled > total )); then pulled=$total; fi
+    count_bar "$pulled" "$total" "services"
+    if (( pulled >= total )); then break; fi
+    if (( $(date +%s) >= deadline )); then break; fi
+    sleep 2
+  done
+  printf "\r\033[K"
+  tput cnorm 2>/dev/null || true
+  if (( pulled >= total )); then
+    success "Downloaded — ${total} services"
+  else
+    info "Services are still downloading — they'll finish starting in the background."
+  fi
+  return 0
+}
+
+install_client_helm() {
+  # Step e (Install tracebloc) — main() prints the "e) Installing tracebloc"
+  # header. The credential + namespace were provisioned in step d
+  # (provision_client) or supplied via dual-mode (TRACEBLOC_CLIENT_ID/PASSWORD or
+  # TRACEBLOC_VALUES_FILE). This step renders the values, runs Helm, and shows the
+  # services download; the final connect + summary is step f.
   _ensure_tracebloc_dirs
   local values_file="${HOST_DATA_DIR}/values.yaml"
 
@@ -397,16 +471,13 @@ install_client_helm() {
   # Advanced / GitOps setups can override with TB_NAMESPACE=<name>.
   TB_NAMESPACE=$(_sanitize_workspace_name "${TB_NAMESPACE:-tracebloc}")
 
-  # ── Step 5/5: Connect to tracebloc network ──────────────────────────────
-  step 5 5 "Connect to tracebloc network"
-
   # RFC-0001 §7.2 — a re-run on an already-connected client must reconcile in place,
   # not re-provision. Step 3 marks that case with TRACEBLOC_CLIENT_ADOPTED=1 (+ the
   # UUID, no password). Honor it: reconcile the live release silently — no credential
   # prompt, no verify, no duplicate. Only if there's no live release to reconcile do
   # we fall through to the normal connect flow below.
   if [[ "${TRACEBLOC_CLIENT_ADOPTED:-}" == 1 ]] && _reconcile_adopted_client; then
-    success "Connected to tracebloc"
+    success "tracebloc installed"
     log "Reconciled adopted client in namespace '$TB_NAMESPACE'"
     return 0
   fi
@@ -510,6 +581,19 @@ install_client_helm() {
   local existing_id="" existing_ns=""
   detect_installed_client
   existing_id="$INSTALLED_CLIENT_ID"; existing_ns="$INSTALLED_CLIENT_NS"
+  # Fail CLOSED when we couldn't enumerate what's here (API/helm failure): refuse
+  # rather than risk overwriting a client the guard simply couldn't see.
+  if [[ "${INSTALLED_CLIENT_UNKNOWN:-0}" == 1 ]]; then
+    echo ""
+    warn "Couldn't determine which tracebloc client (if any) is already installed here."
+    hint "tracebloc runs one client per machine, so the installer won't risk overwriting"
+    hint "an existing client it can't see — usually the cluster API is briefly unreachable."
+    hint "Check it and re-run:"
+    hint "  kubectl cluster-info"
+    hint "  helm list -A"
+    echo ""
+    error "Refusing to install without verifying what's already on this machine."
+  fi
   if [[ -n "$existing_id" && "$existing_id" != "$TB_CLIENT_ID" ]]; then
     echo ""
     warn "This machine already runs the tracebloc client '${existing_id}' (namespace '${existing_ns}')."
@@ -619,30 +703,37 @@ EOF
   echo ""
   log "Installing $TB_NAMESPACE from $chart_ref in namespace '$TB_NAMESPACE'..."
 
+  # What the user is about to see download (the "e) Installing tracebloc" body).
+  echo -e "  ${DIM}Downloading the tracebloc services — a training runner that runs models${RESET}"
+  echo -e "  ${DIM}on your data, a data manager, a live monitor, and a local database. They${RESET}"
+  echo -e "  ${DIM}run entirely on your machine; your data never leaves it.${RESET}"
+  echo ""
+
   # Pre-create per-release hostPath dirs so they're owned by the host user, not
   # root:root from kubelet's DirectoryOrCreate. See _ensure_release_dirs.
   _ensure_release_dirs "$TB_NAMESPACE"
 
-  local helm_log
-  helm_log="$(mktemp)"
-  if ! helm upgrade --install "$TB_NAMESPACE" "$chart_ref" \
+  # The chart install blocks ~10-15s (render + apply + image pull), so run it
+  # behind a spinner instead of a frozen terminal — spin_cmd streams helm output
+  # to $LOG_FILE and, on failure, tails the log to stderr. Honours RFC-0002 §2
+  # "progress on every wait".
+  if ! spin_cmd "Installing the tracebloc client…" \
+    helm upgrade --install "$TB_NAMESPACE" "$chart_ref" \
     --namespace "$TB_NAMESPACE" \
     --create-namespace \
-    --values "$values_file" > "$helm_log" 2>&1; then
-    log "Helm install failed — output:"
-    cat "$helm_log" >> "${LOG_FILE:-/dev/null}" 2>/dev/null
-    cat "$helm_log" >&2
-    rm -f "$helm_log"
+    --values "$values_file"; then
     error "Client installation failed. Check the log for details: ${LOG_FILE:-}"
   fi
-  cat "$helm_log" >> "${LOG_FILE:-/dev/null}" 2>/dev/null
-  rm -f "$helm_log"
 
   # Point the kubeconfig's current context at the client namespace, so kubectl and
   # the tracebloc CLI default to it with no -n / --namespace flag. Best-effort:
   # a failure here must not abort an otherwise-successful install.
   kubectl config set-context --current --namespace "$TB_NAMESPACE" >/dev/null 2>&1 || true
 
-  success "Connected to tracebloc"
+  # Honest N-of-M count bar as the service images pull onto the node. Best-effort +
+  # bounded + non-fatal — the real readiness gate is step f (wait_for_client_ready).
+  _download_services_progress "$TB_NAMESPACE"
+
+  success "tracebloc installed"
   log "Values file: $values_file"
 }

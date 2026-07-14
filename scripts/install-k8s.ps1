@@ -563,7 +563,18 @@ echo "NCT installed successfully."
 
   $scriptPath = [System.IO.Path]::Combine($env:TEMP, "install-nct-$(Get-Random -Maximum 999999).sh")
   [System.IO.File]::WriteAllText($scriptPath, $nctScript.Replace("`r`n", "`n"))
-  $wslPath = "/mnt/" + ($scriptPath -replace '\\','/' -replace '^([A-Za-z]):/', { $_.Groups[1].Value.ToLower() + '/' })
+  # Build the WSL path WITHOUT a scriptblock -replace: scriptblock substitution in
+  # the -replace operator is PowerShell 6.1+, but the bootstrap (install.ps1) runs
+  # this via powershell.exe (Windows PowerShell 5.1, per #Requires -Version 5.1),
+  # where the scriptblock is coerced to its literal text and the drive letter is
+  # NOT lowercased -> a malformed $wslPath and a 180s NCT-install timeout. -match
+  # / $Matches is 5.1-safe.
+  $fwd = $scriptPath -replace '\\','/'
+  if ($fwd -match '^([A-Za-z]):/(.*)$') {
+    $wslPath = "/mnt/" + $Matches[1].ToLower() + '/' + $Matches[2]
+  } else {
+    $wslPath = "/mnt/" + $fwd
+  }
 
   $nctInstallJob = Start-Job -ScriptBlock {
     param($d, $p)
@@ -726,7 +737,7 @@ function Install-K3dAndHelm {
 # in-cluster DNS suffixes. Echoes host NO_PROXY/no_proxy unioned with these
 # defaults, de-duplicated with host entries first.
 function Get-EffectiveNoProxy {
-  $defaults = @('localhost','127.0.0.1','0.0.0.0','10.0.0.0/8','172.16.0.0/12','192.168.0.0/16','.svc','.svc.cluster.local','.cluster.local','host.k3d.internal')
+  $defaults = @('localhost','127.0.0.1','0.0.0.0','169.254.169.254','10.0.0.0/8','172.16.0.0/12','192.168.0.0/16','.svc','.svc.cluster.local','.cluster.local','host.k3d.internal')
   $existing = if ($env:NO_PROXY) { $env:NO_PROXY } elseif ($env:no_proxy) { $env:no_proxy } else { '' }
   $seen = @{}
   $out  = New-Object System.Collections.Generic.List[string]
@@ -1167,17 +1178,71 @@ function Install-ClientHelm {
   # Check ANY namespace: a fresh install lands in 'tracebloc', but an install
   # from an older installer version may be in a different namespace. Enumerate
   # client-chart releases and read each clientId (ConvertFrom-Json -- no jq).
+  # Values are read with `-o json`, not as YAML: helm re-serializes values on
+  # `get`, so the YAML view quotes clientId inconsistently (typically not at
+  # all) and a quote-expecting regex silently bypassed this guard (#200).
   $existingId = ""; $existingNs = ""
+  # A client-chart release whose clientId we could NOT read (values fetch failed,
+  # or unparsable JSON). We must NOT treat that as "no client here" -- doing so
+  # fails OPEN and lets a re-install silently overwrite an existing client we
+  # simply couldn't identify. Record it and fail CLOSED below (#200 follow-up).
+  $unreadableNs = ""
+  # $listUnknown: `helm list` itself failed or returned non-JSON, so we couldn't
+  # even ENUMERATE releases. Same fail-open risk one level up from $unreadableNs —
+  # skipping the guard here would let a re-install overwrite a different client.
+  $listUnknown = $false
   $listJson = (helm list -A -o json 2>$null) | Out-String
-  if ($LASTEXITCODE -eq 0 -and $listJson.Trim()) {
+  if ($LASTEXITCODE -ne 0) {
+    # helm list failed (wedged/unreachable API, kubeconfig glitch) -> unknown.
+    # (helm returns 0 with an empty `[]` when there are genuinely no releases.)
+    $listUnknown = $true
+  } elseif ($listJson.Trim()) {
     try {
       foreach ($rel in ($listJson | ConvertFrom-Json)) {
         if ($rel.chart -and $rel.chart.StartsWith("client-")) {
-          $vals = (helm get values $rel.name -n $rel.namespace 2>$null) | Out-String
-          if ($vals -match 'clientId:\s*"([^"]+)"') { $existingId = $Matches[1].Trim(); $existingNs = $rel.namespace; break }
+          $valsJson = (helm get values $rel.name -n $rel.namespace -o json 2>$null) | Out-String
+          # Values unavailable for THIS client release -> unidentifiable client.
+          if ($LASTEXITCODE -ne 0 -or -not $valsJson.Trim()) {
+            if (-not $unreadableNs) { $unreadableNs = $rel.namespace }
+            continue
+          }
+          # No user values serializes as literal `null` (-> $vals = $null, a
+          # parsed release with no clientId, NOT an error). An unparsable release
+          # must not abort the scan of the remaining ones, but it IS an
+          # unidentifiable client -> record it and keep scanning.
+          $vals = $null; $parsed = $true
+          try { $vals = $valsJson | ConvertFrom-Json } catch { $parsed = $false }
+          if (-not $parsed) {
+            if (-not $unreadableNs) { $unreadableNs = $rel.namespace }
+            continue
+          }
+          if ($null -eq $vals -or $null -eq $vals.clientId) { continue }
+          $id = "$($vals.clientId)".Trim()
+          if ($id) { $existingId = $id; $existingNs = $rel.namespace; break }
         }
       }
-    } catch { }
+    } catch {
+      # helm list returned non-JSON/garbage -> can't trust the enumeration.
+      $listUnknown = $true
+    }
+  }
+  # Fail closed when we couldn't identify a client we can see ($unreadableNs) OR
+  # couldn't enumerate at all ($listUnknown). Refuse rather than overwrite an
+  # unknown client -- the operator must resolve it explicitly.
+  if (-not $existingId -and ($unreadableNs -or $listUnknown)) {
+    Write-Host ""
+    if ($listUnknown) {
+      Warn "Couldn't determine which tracebloc client (if any) is already installed here -- helm could not enumerate releases."
+    } else {
+      Warn "A tracebloc client release is installed here (namespace '$unreadableNs') but its configuration could not be read."
+    }
+    Hint "tracebloc runs one client per machine, so the installer will not overwrite"
+    Hint "a client it cannot see (usually the cluster API is briefly unreachable). Check and re-run:"
+    Hint "  kubectl cluster-info         (is the API reachable?)"
+    Hint "  helm get values -A           (see what is installed)"
+    Hint "  k3d cluster delete $CLUSTER_NAME   (wipes this client + its local data)"
+    Write-Host ""
+    Err "Refusing to replace an unidentifiable existing client."
   }
   if ($existingId -and $existingId -ne $TB_CLIENT_ID) {
     Write-Host ""

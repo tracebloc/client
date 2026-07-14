@@ -263,7 +263,20 @@ spec:
       args:
         - |
           echo ">>>>> SECTION_A_WITH_PROXY_ENV"
-          curl -k -v -sS -m 20 -o /dev/null https://${BACKEND_HOST}/ 2>&1
+          # Retries ride out the startup window where the squid Deployment is
+          # rolled out (readinessProbe green) but the cluster hasn't finished
+          # wiring it up for a brand-new pod:
+          #   • --retry-connrefused: Service endpoints not yet programmed in
+          #     kube-proxy, so the first CONNECT to the ClusterIP is refused
+          #     (curl exit 7) — run 29255451968.
+          #   • --retry-all-errors: the proxy Service name isn't yet in the pod's
+          #     resolver, so curl fails with "Could not resolve proxy" (exit 5) —
+          #     a DNS error curl does NOT retry on its own (PR #349 run
+          #     29345383969). --retry-connrefused alone doesn't cover it, so §4
+          #     still flaked red until curl saw the tunnel.
+          # A genuine #119 regression (proxy env ignored / squid down) still fails
+          # ALL retries, so the guard keeps its teeth.
+          curl -k -v -sS -m 30 --retry 8 --retry-connrefused --retry-all-errors --retry-delay 2 -o /dev/null https://${BACKEND_HOST}/ 2>&1
           echo ">>>>> SECTION_B_PROXY_ENV_UNSET"
           env -u HTTP_PROXY -u HTTPS_PROXY -u http_proxy -u https_proxy -u NO_PROXY -u no_proxy curl -k -v -sS -m 20 -o /dev/null https://${BACKEND_HOST}/ 2>&1
           echo ">>>>> SECTION_END"
@@ -290,6 +303,14 @@ printf '%s\n' "$a_section" | grep -iE 'Establish HTTP proxy tunnel|CONNECT tunne
 printf '%s\n' "$b_section" | grep -iE 'Trying|Connected to|< HTTP/|Could not resolve'                 | sed 's/^/    B env unset:       /' || true
 # (A) WITH the ingestion proxy env, the backend call MUST traverse the squid.
 if ! printf '%s' "$a_section" | grep -qiE 'Establish HTTP proxy tunnel to backend\.tracebloc-e2e\.test|CONNECT tunnel established'; then
+  # The filtered diagnostics above matched nothing on a novel failure (run
+  # 29255451968 showed only the B line). Dump the RAW pod log + squid/endpoint
+  # state so the cause is visible next time instead of a bare "did NOT tunnel."
+  echo "── DIAGNOSTIC: raw egress-app log (section A showed no proxy tunnel) ──"
+  printf '%s\n' "$applog" | sed 's/^/    app| /'
+  echo "── DIAGNOSTIC: squid pod + service endpoints ──"
+  kubectl get pod -l app=tb-egress-squid -o wide 2>&1 | sed 's/^/    /' || true
+  kubectl get endpoints tb-egress-squid 2>&1 | sed 's/^/    /' || true
   error "App pod WITH the ingestion proxy env did NOT tunnel through the squid — ingestion-style backend egress is not proxied (the #119 bug)."
 fi
 # (B) With the env unset, the SAME call MUST NOT use a proxy (it dials direct).

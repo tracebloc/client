@@ -35,6 +35,17 @@ PF_REC_CPU="${PF_REC_CPU:-4}"              # recommended (warn) below this
 # that follow — only the final aggregated error() writes to stderr.
 _pf_fail_line() { echo -e "  ${RED}✖${RESET} $*"; }
 
+# Quiet-success helpers (first-run run-through). run_preflight sets
+# PF_QUIET_SUCCESS while the arch/CPU/RAM/disk checks run, so their individual
+# ✔ lines are SUPPRESSED and collapsed into one summary line
+# ("arch · N CPU cores · N GB memory · N GB free disk"); warnings and hard-fails
+# still print. When called directly (the bats suite, or the direct-invocation
+# path) the flag is unset and the per-check ✔/info lines print as before, so the
+# unit tests that assert on them keep passing. Connectivity + storage print their
+# own always-on summary line and so do NOT route through these.
+_pf_ok()   { [[ -n "${PF_QUIET_SUCCESS:-}" ]] || success "$*"; }
+_pf_note() { [[ -n "${PF_QUIET_SUCCESS:-}" ]] || info "$*"; }
+
 # ── Injectable readers (overridden in bats so checks run without net/df) ─────
 
 # Probe a URL for reachability. Echoes one of: ok|dns|refused|timeout|tls|blocked|nocurl
@@ -158,7 +169,7 @@ _pf_amd64_emulation_available() { [[ -e /proc/sys/fs/binfmt_misc/qemu-x86_64 ]];
 
 _pf_arch() {
   case "$ARCH" in
-    x86_64|amd64) success "Architecture: ${ARCH} (amd64)"; return 0 ;;
+    x86_64|amd64) _pf_ok "Architecture: ${ARCH} (amd64)"; return 0 ;;
   esac
   # Non-amd64 (arm64/aarch64): the tracebloc client images (e.g. mysql-client)
   # are amd64-only, so they need emulation to run.
@@ -167,11 +178,11 @@ _pf_arch() {
     return 0
   fi
   if [[ "$OS" != "Linux" ]]; then
-    info "Architecture: ${ARCH} — Docker Desktop runs the amd64 client images under emulation (slower, but works)."
+    _pf_note "Architecture: ${ARCH} — Docker Desktop runs the amd64 client images under emulation (slower, but works)."
     return 0
   fi
   if _pf_amd64_emulation_available; then
-    info "Architecture: ${ARCH} — amd64 emulation (QEMU binfmt) available; client images run emulated (slower)."
+    _pf_note "Architecture: ${ARCH} — amd64 emulation (QEMU binfmt) available; client images run emulated (slower)."
     return 0
   fi
   _pf_fail_line "Architecture: ${ARCH} — the tracebloc client images (e.g. mysql-client) are amd64-only and can't run here."
@@ -192,7 +203,7 @@ _pf_cpu() {
   elif [[ "$n" -lt "$PF_REC_CPU" ]]; then
     warn "CPU: ${n} cores — fine to run; ${PF_REC_CPU}+ recommended to train locally."
   else
-    success "CPU: ${n} cores"
+    _pf_ok "CPU: ${n} cores"
   fi
   return 0
 }
@@ -224,7 +235,7 @@ _pf_memory() {
     warn "Memory: ${gb} GB (${src}) — enough to run, but training (≈8 GB/job) may OOM; ${PF_REC_MEM_GB} GB recommended to train locally."
     [[ "$OS" != "Linux" ]] && hint "Docker Desktop → Settings → Resources → Memory ≥ ${PF_REC_MEM_GB} GB to train."
   else
-    success "Memory: ${gb} GB (${src})"
+    _pf_ok "Memory: ${gb} GB (${src})"
   fi
 
   # Linux: even when total is fine, a busy shared VM may have little free RAM now.
@@ -267,7 +278,7 @@ _pf_disk() {
   if [[ -z "$free_kb" ]]; then warn "Disk: couldn't determine free space on ${target} (skipping)."; return 0; fi
   free_gb=$(( free_kb / 1024 / 1024 ))
   if [[ "$OS" != "Linux" ]]; then
-    info "Disk: ${free_gb} GB free on ${target} (host) — also ensure Docker Desktop's disk image has ≥ ${PF_WARN_DISK_GB} GB."
+    _pf_note "Disk: ${free_gb} GB free on ${target} (host) — also ensure Docker Desktop's disk image has ≥ ${PF_WARN_DISK_GB} GB."
     return 0
   fi
   if [[ "$free_gb" -lt "$PF_MIN_DISK_GB" ]]; then
@@ -277,7 +288,7 @@ _pf_disk() {
   elif [[ "$free_gb" -lt "$PF_WARN_DISK_GB" ]]; then
     warn "Disk: ${free_gb} GB free on ${target} — recommended ≥ ${PF_WARN_DISK_GB} GB; images + data may fill it."
   else
-    success "Disk: ${free_gb} GB free on ${target}"
+    _pf_ok "Disk: ${free_gb} GB free on ${target}"
   fi
   return 0
 }
@@ -287,11 +298,14 @@ _pf_disk() {
 # root chown init-container is blocked by NFS root_squash — so a network data dir
 # fails ~20 min in with a cryptic CrashLoopBackOff. Catch it in seconds here.
 _pf_storage_type() {
-  local target fstype
+  local target fstype disp
   target="${HOST_DATA_DIR:-$HOME/.tracebloc}"
+  disp="$target"
+  if [[ -n "${HOME:-}" && "$disp" == "$HOME"* ]]; then disp="~${disp#"$HOME"}"; fi
   fstype="$(_pf_fstype "$target")"
   if [[ -z "$fstype" ]]; then
-    info "Storage: ${target} — filesystem type undetermined; assuming local."
+    log "Storage: ${target} — filesystem type undetermined; assuming local."
+    success "Local storage (${disp})"
     return 0
   fi
   case "$fstype" in
@@ -307,7 +321,8 @@ _pf_storage_type() {
       hint "  (or set TRACEBLOC_ALLOW_NETWORK_FS=1 to proceed anyway — not recommended for the database.)"
       ;;
     *)
-      success "Storage: ${target} (${fstype})"
+      log "Storage: ${target} (${fstype})"
+      success "Local storage (${disp})"
       ;;
   esac
   # backend#743: datasets MAY live on a network mount (HOST_DATASET_DIR) — only
@@ -320,7 +335,6 @@ _pf_storage_type() {
 }
 
 _pf_connectivity() {
-  info "Checking outbound connectivity to required services..."
   # Can't probe without curl — and on the direct ./install-k8s.sh path the
   # installer hasn't installed it yet. Skip with a warning rather than hard-fail
   # with a misleading "egress blocked" (curl is installed downstream).
@@ -338,19 +352,40 @@ _pf_connectivity() {
     "tracebloc API (${backend_host})|https://${backend_host}/"
     "tracebloc Helm charts (tracebloc.github.io)|https://tracebloc.github.io/"
   )
+  # Probe each critical host in the FOREGROUND (so PF_HARD_FAIL updates in THIS
+  # shell — a backgrounded spinner subshell couldn't propagate it), advancing a
+  # spinner frame before each blocking probe. No sleep: the network probe itself
+  # is the delay in production; under test the stubbed probe is instant, so this
+  # can never hang. Failures are collected and printed after the line is cleared.
+  local frames=('⠋' '⠙' '⠹' '⠸' '⠼' '⠴' '⠦' '⠧' '⠇' '⠏') fi=0
+  local -a fails=()
+  tput civis 2>/dev/null || true
   for c in "${criticals[@]}"; do
     label="${c%%|*}"; url="${c#*|}"
+    printf "\r  ${CYAN}%s${RESET} Checking outbound connectivity…" "${frames[fi]}"
+    fi=$(( (fi + 1) % ${#frames[@]} ))
     status="$(_pf_probe_url "$url")"
     if [[ "$status" != "ok" ]]; then status="$(_pf_probe_url "$url")"; fi   # one retry (transient blips)
-    if [[ "$status" == "ok" ]]; then
-      success "${label} reachable"
-    else
-      _pf_fail_line "${label} unreachable (${status})"
-      PF_HARD_FAIL=$(( ${PF_HARD_FAIL:-0} + 1 ))
-      cfail=$(( cfail + 1 ))
+    if [[ "$status" != "ok" ]]; then
+      fails+=("${label}|${status}")
       if [[ "$status" == "tls" ]]; then tls_seen=1; fi
     fi
   done
+  printf "\r\033[K"
+  tput cnorm 2>/dev/null || true
+
+  if [[ ${#fails[@]} -eq 0 ]]; then
+    # Collapsed happy-path line (always shown — this IS the connectivity result,
+    # not one of the arch/CPU/RAM/disk lines the summary folds together).
+    success "Connected: tracebloc.io, Docker Hub (registry-1.docker.io), GitHub (ghcr.io)"
+  else
+    local ff
+    for ff in "${fails[@]}"; do
+      _pf_fail_line "${ff%%|*} unreachable (${ff#*|})"
+      PF_HARD_FAIL=$(( ${PF_HARD_FAIL:-0} + 1 ))
+      cfail=$(( cfail + 1 ))
+    done
+  fi
 
   # Tool-download hosts: only relevant on Linux when the tool isn't present. Warn-only.
   if [[ "$OS" == "Linux" ]]; then
@@ -365,7 +400,7 @@ _pf_connectivity() {
       label="${c%%|*}"; url="${c#*|}"
       status="$(_pf_probe_url "$url")"
       if [[ "$status" == "ok" ]]; then
-        success "${label} reachable"
+        _pf_ok "${label} reachable"
       else
         warn "${label} unreachable (${status}) — needed only to install that tool."
       fi
@@ -381,6 +416,29 @@ _pf_connectivity() {
   return 0
 }
 
+# One-line hardware summary for the collapsed step-a view:
+#   "arch · N CPU cores · N GB memory · N GB free disk"
+# Computed from the same readers the individual checks use, so it can never
+# disagree with them. Fields that can't be read are simply omitted (arch always
+# leads). Printed by run_preflight only when nothing hard-failed — a ✔ summary
+# above a ✖ would contradict itself.
+_pf_hw_summary_line() {
+  local cpu mem_kb mem_gb disk_target disk_kb disk_gb
+  local -a parts=("$ARCH")
+  cpu="$(_pf_ncpu)"
+  if [[ -n "$cpu" ]]; then parts+=("${cpu} CPU cores"); fi
+  mem_kb="$(_pf_total_mem_kb)"
+  if [[ -n "$mem_kb" ]]; then mem_gb=$(( mem_kb / 1024 / 1024 )); parts+=("${mem_gb} GB memory"); fi
+  disk_target="$(_pf_docker_root)"
+  if [[ ! -d "$disk_target" ]]; then disk_target="/"; fi
+  if [[ "$OS" != "Linux" ]]; then disk_target="$HOME"; fi   # Desktop VM disk is opaque; report host
+  disk_kb="$(_pf_free_kb "$disk_target")"
+  if [[ -n "$disk_kb" ]]; then disk_gb=$(( disk_kb / 1024 / 1024 )); parts+=("${disk_gb} GB free disk"); fi
+  local joined="" p
+  for p in "${parts[@]}"; do joined="${joined:+$joined · }$p"; done
+  success "$joined"
+}
+
 # ── Orchestrator ─────────────────────────────────────────────────────────────
 run_preflight() {
   if [[ -n "${TRACEBLOC_SKIP_PREFLIGHT:-}" ]]; then
@@ -388,14 +446,22 @@ run_preflight() {
     return 0
   fi
   PF_HARD_FAIL=0
-  # '|| true' so a single check returning non-zero can't trip the caller's set -e
-  # before the others run — the aggregated counter below is the source of truth.
+  # Run the arch/CPU/RAM/disk checks in quiet-success mode: on the happy path they
+  # print nothing and we collapse them into ONE summary line below; a warning or
+  # hard-fail still prints its specific ⚠/✖. '|| true' so a single check returning
+  # non-zero can't trip set -e before the others run — PF_HARD_FAIL is the truth.
+  PF_QUIET_SUCCESS=1
   _pf_arch         || true
   _pf_cpu          || true
   _pf_memory       || true
   _pf_disk         || true
-  _pf_storage_type || true
+  # The combined hardware line — only when nothing hard-failed so far.
+  if [[ "$PF_HARD_FAIL" -eq 0 ]]; then _pf_hw_summary_line; fi
+  # Connectivity (own spinner + combined "Connected:" line) and storage
+  # ("Local storage (…)") each print their own always-on summary line.
   _pf_connectivity || true
+  _pf_storage_type || true
+  unset PF_QUIET_SUCCESS
 
   if [[ "$PF_HARD_FAIL" -gt 0 ]]; then
     echo ""

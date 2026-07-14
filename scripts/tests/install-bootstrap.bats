@@ -31,7 +31,7 @@ setup() {
              lib/common.sh lib/preflight.sh lib/detect-gpu.sh lib/gpu-nvidia.sh \
              lib/gpu-amd.sh lib/setup-macos.sh lib/setup-linux.sh lib/cluster.sh \
              lib/gpu-plugins.sh lib/install-client-helm.sh lib/install-cli.sh \
-             lib/provision.sh lib/summary.sh lib/diagnose.sh; do
+             lib/provision.sh lib/assess.sh lib/summary.sh lib/diagnose.sh; do
     printf '#!/usr/bin/env bash\n# stub %s\n' "$rel" > "$SERVE/scripts/$rel"
   done
   cat > "$SERVE/scripts/install-k8s.sh" <<EOF
@@ -45,8 +45,8 @@ EOF
       scripts/lib/detect-gpu.sh scripts/lib/gpu-nvidia.sh scripts/lib/gpu-amd.sh \
       scripts/lib/setup-macos.sh scripts/lib/setup-linux.sh scripts/lib/cluster.sh \
       scripts/lib/gpu-plugins.sh scripts/lib/install-client-helm.sh \
-      scripts/lib/install-cli.sh scripts/lib/provision.sh scripts/lib/summary.sh \
-      scripts/lib/diagnose.sh; do
+      scripts/lib/install-cli.sh scripts/lib/provision.sh scripts/lib/assess.sh \
+      scripts/lib/summary.sh scripts/lib/diagnose.sh; do
         printf '%s  %s\n' "$(_real_sha "$SERVE/$f")" "$f"
       done ) > "$SERVE_REL/manifest.sha256"
   printf 'FAKE-SIG\n'  > "$SERVE_REL/manifest.sha256.sig"
@@ -157,7 +157,7 @@ run_boot_no_cosign() {
 @test "happy path: immutable tag + valid manifest + good signature runs install-k8s.sh" {
   REF="v9.9.9" COSIGN_RESULT=0 run_boot
   [ "$status" -eq 0 ]
-  [[ "$output" == *"installer files verified"* ]]
+  [[ "$output" == *"files intact"* ]]   # first-run copy: "All N files intact — nothing was altered"
   [ -f "$SBX/k8s-ran" ]              # privileged step reached only after verify
 }
 
@@ -202,4 +202,83 @@ run_boot_no_cosign() {
   [ "$status" -eq 0 ]
   [[ "$output" == *"manifest signature NOT verified"* ]]
   [ -f "$SBX/k8s-ran" ]             # checksum integrity still enforced; runs
+}
+
+# ── Early bailout: already-healthy machine skips the whole download ──────────
+# The bootstrap runs `tracebloc doctor` (bounded, exit-code gated) BEFORE any
+# fetch. Healthy → print the healthy line + exec the home screen; unhealthy or
+# --force → fall through to the normal (download + verify) flow. The bailout is
+# skipped whenever REF/BRANCH is pinned, which is why every OTHER test here (they
+# all set REF) is unaffected by it.
+
+@test "early bailout: healthy tracebloc doctor -> execs home screen, no download" {
+  # A tracebloc CLI that reports healthy; when exec'd with no args (home screen)
+  # it drops a sentinel so we can prove the hand-off happened.
+  cat > "$BIN/tracebloc" <<EOF
+#!/usr/bin/env bash
+[ "\$1" = "doctor" ] && exit 0
+: > "$SBX/home-ran"
+EOF
+  chmod +x "$BIN/tracebloc"
+  run_boot                                   # NO REF -> bailout is eligible
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Already set up and healthy"* ]]
+  [ -f "$SBX/home-ran" ]                      # handed off to the home screen
+  [ ! -f "$SBX/k8s-ran" ]                     # never downloaded / ran install-k8s.sh
+}
+
+@test "early bailout: unhealthy tracebloc doctor -> does NOT bail" {
+  cat > "$BIN/tracebloc" <<'EOF'
+#!/usr/bin/env bash
+[ "$1" = "doctor" ] && exit 3    # unhealthy
+EOF
+  chmod +x "$BIN/tracebloc"
+  run_boot                                   # NO REF: proceeds past bailout, then
+                                             # hits the un-stamped-ref refusal
+  [[ "$output" != *"Already set up and healthy"* ]]
+  [ ! -f "$SBX/home-ran" ]                    # no hand-off
+}
+
+@test "early bailout: --force skips the bailout even when healthy" {
+  cat > "$BIN/tracebloc" <<'EOF'
+#!/usr/bin/env bash
+[ "$1" = "doctor" ] && exit 0    # healthy, but --force must ignore it
+EOF
+  chmod +x "$BIN/tracebloc"
+  run_boot --force
+  [[ "$output" != *"Already set up and healthy"* ]]
+  [ ! -f "$SBX/home-ran" ]
+}
+
+# ── Reinstall intent reaches install-k8s.sh's stop-and-check gate ────────────
+# Skipping the bootstrap bailout is not enough: install-k8s.sh runs its OWN
+# read-only assess gate that short-circuits a healthy machine and exits 0. So an
+# explicit (re)install request must EXPORT TB_FORCE_REINSTALL, or a pinned-ref
+# re-run downloads the new installer and then does nothing. The stub install-k8s.sh
+# records the value it inherits so we can assert the propagation.
+_capture_k8s_force() {
+  cat > "$SERVE/scripts/install-k8s.sh" <<EOF
+#!/usr/bin/env bash
+echo "TB_FORCE_REINSTALL=\${TB_FORCE_REINSTALL:-unset}" > "$SBX/k8s-ran"
+EOF
+  # Rebuild the manifest digest for the rewritten sub-script (verify runs first).
+  local newsha; newsha="$(_real_sha "$SERVE/scripts/install-k8s.sh")"
+  awk -v s="$newsha" '$2 == "scripts/install-k8s.sh" { $1 = s } { print }' \
+    "$SERVE_REL/manifest.sha256" > "$SERVE_REL/m.tmp"
+  mv "$SERVE_REL/m.tmp" "$SERVE_REL/manifest.sha256"
+}
+
+@test "pinned REF exports TB_FORCE_REINSTALL so the assess gate can't short-circuit" {
+  _capture_k8s_force
+  REF="v9.9.9" COSIGN_RESULT=0 run_boot
+  [ "$status" -eq 0 ]
+  [ -f "$SBX/k8s-ran" ]
+  [[ "$(cat "$SBX/k8s-ran")" == "TB_FORCE_REINSTALL=1" ]]
+}
+
+@test "--force also exports TB_FORCE_REINSTALL to install-k8s.sh" {
+  _capture_k8s_force
+  REF="v9.9.9" COSIGN_RESULT=0 run_boot --force
+  [ "$status" -eq 0 ]
+  [[ "$(cat "$SBX/k8s-ran")" == "TB_FORCE_REINSTALL=1" ]]
 }

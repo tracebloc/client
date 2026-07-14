@@ -97,8 +97,11 @@ _verify_tracebloc_cli() {
     # data ingest ./data" next step lives in the summary's "What to do next".
     local ver; ver="$(tracebloc version 2>/dev/null | head -1 || true)"
     if has tracebloc; then
-      # Usable right now AND in new terminals — the fully-clean verdict.
-      success "tracebloc CLI installed${ver:+ ($ver)} — verified on your PATH."
+      # Usable right now AND in new terminals — the fully-clean verdict. "ready"
+      # matches the run-through's step-b pattern (Docker ready / System tools
+      # ready / tracebloc CLI ready); the edge-case lines below stay "installed"
+      # because there it is installed but not yet usable in this/every shell.
+      success "tracebloc CLI ready${ver:+ ($ver)} — verified on your PATH."
       return 0
     fi
     # Persisted for new terminals, but not yet on THIS shell's PATH. The rc
@@ -160,7 +163,10 @@ install_tracebloc_cli() {
 
   # 1) Download the released installer. A failure here is a download problem,
   #    distinct from an install problem below.
-  if ! curl -fsSL "$CURL_SECURE" "$TRACEBLOC_CLI_INSTALL_URL" -o "$installer" 2>>"${LOG_FILE:-/dev/null}"; then
+  # --connect-timeout/--max-time so a stalled CDN turns into a clean "install later"
+  # failure below instead of hanging the CLI-install step (this call isn't retry-
+  # wrapped, and a hang is not a failure the graceful fallback would otherwise catch).
+  if ! curl -fsSL "$CURL_SECURE" --connect-timeout 30 --max-time 120 "$TRACEBLOC_CLI_INSTALL_URL" -o "$installer" 2>>"${LOG_FILE:-/dev/null}"; then
     warn "Couldn't download the tracebloc CLI installer — your client is set up fine."
     hint "Install it later:  curl -fsSL ${TRACEBLOC_CLI_INSTALL_URL} | sh"
     rm -f "$installer"

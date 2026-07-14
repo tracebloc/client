@@ -47,7 +47,7 @@ setup() {
   tracebloc()        { echo "tracebloc 0.2.0"; }
   run install_tracebloc_cli
   [ "$status" -eq 0 ]
-  [[ "$output" == *"SUCCESS: tracebloc CLI installed"* ]]
+  [[ "$output" == *"SUCCESS: tracebloc CLI ready"* ]]
 }
 
 # ── Self-verification (#738) ────────────────────────────────────────────────

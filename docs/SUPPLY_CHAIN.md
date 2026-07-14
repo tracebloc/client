@@ -1,9 +1,10 @@
 # Installer supply-chain integrity (RFC-0001 R8)
 
 **Audience:** release engineers and security reviewers.
-**Scope:** how the `curl | bash` bootstrap (`scripts/install.sh`) verifies the
-sub-scripts it runs, and exactly what the release pipeline + key management must
-provide for that verification to be real.
+**Scope:** how the two bootstraps — `curl | bash` (`scripts/install.sh`) and the
+Windows `irm | iex` peer (`scripts/install.ps1`, §7) — verify the sub-scripts
+they run, and exactly what the release pipeline + key management must provide
+for that verification to be real.
 
 Tracking issue: **backend#889** (private security ticket). RFC: §9, §14 R8, §13.
 
@@ -48,13 +49,14 @@ binary covered only the *leaf*; everything upstream of it was unverified.
    the same channel an attacker controls. The only way past is the explicit
    `TRACEBLOC_ALLOW_UNVERIFIED=1` opt-in.
 
-The four assets the bootstrap consumes are published as **GitHub Release
-assets** on the pinned tag:
+The assets the bootstraps consume are published as **GitHub Release assets** on
+the pinned tag:
 
 | Asset | Produced by | Verifies |
 |---|---|---|
 | `install.sh` | release job, `DEFAULT_REF` stamped to the tag | the entrypoint itself (pin) |
-| `manifest.sha256` | `scripts/gen-manifest.sh` | every sub-script's bytes |
+| `install.ps1` | release job, `$DefaultRef` stamped to the tag | the Windows entrypoint (pin, §7) |
+| `manifest.sha256` | `scripts/gen-manifest.sh` | every sub-script's bytes (both platforms) |
 | `manifest.sha256.sig` | `cosign sign-blob` (keyless) | authenticity of the manifest |
 | `manifest.sha256.cert` | `cosign sign-blob` (keyless) | the cert the sig verifies against |
 
@@ -168,6 +170,47 @@ curl -fsSL "https://raw.githubusercontent.com/tracebloc/client/$TAG/scripts/lib/
   | sha256sum  # compare to the provision.sh line in manifest.sha256
 ```
 
+On Windows the same `cosign verify-blob` invocation works verbatim (cosign ships
+a Windows binary); compare a sub-script's digest with
+`Get-FileHash -Algorithm SHA256 install-k8s.ps1` against its line in
+`manifest.sha256`.
+
 **Hardened / air-gapped sites:** install cosign from your OS package manager (or
 an internal mirror) *before* running the installer, so the bootstrap uses a
 cosign you already trust rather than downloading one.
+
+## 7. The Windows bootstrap (`scripts/install.ps1`)
+
+Everything above applies to Windows as well — `scripts/install.ps1` is the
+PowerShell peer of `install.sh` and implements the same guarantee (added with
+the R8 Windows leg, PR #299):
+
+1. **Immutable ref.** The release pipeline stamps `$DefaultRef` to the release
+   tag in the same "Stamp the published installer" job that stamps `install.sh`
+   (`release-helm-chart.yaml`), and self-tests the stamp before attaching the
+   asset. An un-stamped copy (placeholder ref) **refuses to run**. `$env:REF`
+   pins a different release tag; the legacy `$env:BRANCH` escape and any
+   non-`vX.Y.Z` ref require `$env:TRACEBLOC_ALLOW_UNVERIFIED = '1'` and warn
+   loudly.
+2. **Signed manifest.** Its integrity surface (`$Files`, currently
+   `scripts/install-k8s.ps1`) is hashed into the **same** `manifest.sha256`:
+   the `WINDOWS_FILES` array in `gen-manifest.sh` mirrors `$Files`, and the CI
+   `--check` gate fails any PR where the two drift — exactly like the bash
+   `FILES` list. One manifest, one cosign signature, both entrypoints.
+3. **Fail-closed cosign.** The manifest signature is required on the default
+   path. If cosign is absent, the bootstrap fetches the pinned `$CosignVersion`
+   release binary and verifies it against cosign's published checksums; if it
+   can be neither found nor bootstrapped, the install **fails closed** — the
+   only way past is the explicit `TRACEBLOC_ALLOW_UNVERIFIED` opt-in.
+
+Canonical Windows entrypoint (PowerShell as Administrator):
+
+```powershell
+irm https://github.com/tracebloc/client/releases/latest/download/install.ps1 | iex
+```
+
+The raw-`main` copy of `install.ps1` is un-stamped and fails closed by design;
+customers must use the release asset. (A raw `<TAG>` URL serves the same
+un-stamped tree — the committed tag tree keeps the `__TRACEBLOC_RELEASE_REF__`
+placeholder; only the release *asset* is stamped — so it too refuses to run
+unless you also set `$env:REF = '<TAG>'` to pin the ref yourself.)
