@@ -65,7 +65,7 @@ detect_installed_client() {
   INSTALLED_CLIENT_ID=""; INSTALLED_CLIENT_NS=""; INSTALLED_CLIENT_UNKNOWN=0
   # No helm => nothing helm-installed here; a genuine (documented) "no client".
   has helm || return 0
-  local _gvf _rel _ns _id _list
+  local _gvf _rel _ns _id _list _unreadable=0
   # A mktemp failure is an environment error, NOT proof of "no client here" — flag
   # UNKNOWN so the guards fail closed rather than skip. Fall back to a path in a
   # dir we own (never a predictable world-writable /tmp path under sudo) before
@@ -85,8 +85,19 @@ detect_installed_client() {
     if helm get values "$_rel" -n "$_ns" > "$_gvf" 2>/dev/null; then
       _id="$(_extract_yaml_value "$_gvf" clientId)"
       [[ -n "$_id" ]] && { INSTALLED_CLIENT_ID="$_id"; INSTALLED_CLIENT_NS="$_ns"; break; }
+      # Values readable but no clientId -> parsed fine, just not a match; keep
+      # scanning (mirrors the PowerShell peer's null-clientId `continue`).
+    else
+      # Couldn't read THIS client release's values -> an UNIDENTIFIABLE client.
+      # Record it and keep scanning (a later release may give a definitive id);
+      # if none does, fail closed below rather than read it as "no client here".
+      _unreadable=1
     fi
   done < <(printf '%s\n' "$_list" | awk '/[[:space:]]client-[0-9]/ { print $1, $2 }')
+  # A client release existed but we couldn't read its clientId, and no OTHER
+  # release gave a definitive id -> unknown (parity with the PowerShell guard's
+  # $unreadableNs fail-closed path).
+  [[ -z "$INSTALLED_CLIENT_ID" && "$_unreadable" == 1 ]] && INSTALLED_CLIENT_UNKNOWN=1
   rm -f "$_gvf"
   return 0
 }
