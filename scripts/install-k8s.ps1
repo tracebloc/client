@@ -1171,23 +1171,51 @@ function Install-ClientHelm {
   # `get`, so the YAML view quotes clientId inconsistently (typically not at
   # all) and a quote-expecting regex silently bypassed this guard (#200).
   $existingId = ""; $existingNs = ""
+  # A client-chart release whose clientId we could NOT read (values fetch failed,
+  # or unparsable JSON). We must NOT treat that as "no client here" -- doing so
+  # fails OPEN and lets a re-install silently overwrite an existing client we
+  # simply couldn't identify. Record it and fail CLOSED below (#200 follow-up).
+  $unreadableNs = ""
   $listJson = (helm list -A -o json 2>$null) | Out-String
   if ($LASTEXITCODE -eq 0 -and $listJson.Trim()) {
     try {
       foreach ($rel in ($listJson | ConvertFrom-Json)) {
         if ($rel.chart -and $rel.chart.StartsWith("client-")) {
           $valsJson = (helm get values $rel.name -n $rel.namespace -o json 2>$null) | Out-String
-          if ($LASTEXITCODE -ne 0 -or -not $valsJson.Trim()) { continue }
-          # No user values serializes as literal `null` (-> $vals = $null); an
-          # unparsable release must not abort the scan of the remaining ones.
-          $vals = $null
-          try { $vals = $valsJson | ConvertFrom-Json } catch { continue }
+          # Values unavailable for THIS client release -> unidentifiable client.
+          if ($LASTEXITCODE -ne 0 -or -not $valsJson.Trim()) {
+            if (-not $unreadableNs) { $unreadableNs = $rel.namespace }
+            continue
+          }
+          # No user values serializes as literal `null` (-> $vals = $null, a
+          # parsed release with no clientId, NOT an error). An unparsable release
+          # must not abort the scan of the remaining ones, but it IS an
+          # unidentifiable client -> record it and keep scanning.
+          $vals = $null; $parsed = $true
+          try { $vals = $valsJson | ConvertFrom-Json } catch { $parsed = $false }
+          if (-not $parsed) {
+            if (-not $unreadableNs) { $unreadableNs = $rel.namespace }
+            continue
+          }
           if ($null -eq $vals -or $null -eq $vals.clientId) { continue }
           $id = "$($vals.clientId)".Trim()
           if ($id) { $existingId = $id; $existingNs = $rel.namespace; break }
         }
       }
     } catch { }
+  }
+  # Fail closed: a client release exists here but we couldn't read its clientId,
+  # and no OTHER release gave us a definitive id. Refuse rather than overwrite an
+  # unknown client -- the operator must resolve it explicitly.
+  if (-not $existingId -and $unreadableNs) {
+    Write-Host ""
+    Warn "A tracebloc client release is installed here (namespace '$unreadableNs') but its configuration could not be read."
+    Hint "tracebloc runs one client per machine, so the installer will not overwrite"
+    Hint "a client it cannot identify. Inspect or remove it, then re-run:"
+    Hint "  helm get values -A            (see what is installed)"
+    Hint "  k3d cluster delete $CLUSTER_NAME   (wipes this client + its local data)"
+    Write-Host ""
+    Err "Refusing to replace an unidentifiable existing client."
   }
   if ($existingId -and $existingId -ne $TB_CLIENT_ID) {
     Write-Host ""

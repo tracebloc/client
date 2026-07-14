@@ -386,6 +386,43 @@ Describe "Install-ClientHelm" {
     { Install-ClientHelm } | Should -Throw
     Should -Not -Invoke helm -ParameterFilter { $args -contains "upgrade" }
   }
+  It "fails CLOSED when the only client release has unparsable values (no silent overwrite)" {
+    # An unparsable `helm get values -o json` for the sole client release must NOT
+    # be treated as "no client here" — that fails OPEN and overwrites an existing
+    # client we simply couldn't identify. The guard must block instead.
+    $HOST_DATA_DIR = "$TestDrive/d5-badjson"
+    Mock Err { throw "err" }
+    Mock Read-Host {
+      param([string]$Prompt, [switch]$AsSecureString)
+      if ($Prompt -match 'password') { return (ConvertTo-SecureString "pw" -AsPlainText -Force) }
+      return "newclient"
+    }
+    Mock Test-Credentials { "valid" }
+    Mock helm {
+      if ($args -contains "list") { '[{"name":"oldrel","namespace":"default","chart":"client-1.4.3"}]'; $global:LASTEXITCODE = 0; return }
+      if ($args -contains "get") { '{ this is : not json'; $global:LASTEXITCODE = 0; return }  # fetch OK, unparsable
+      $global:LASTEXITCODE = 0
+    }
+    { Install-ClientHelm } | Should -Throw
+    Should -Not -Invoke helm -ParameterFilter { $args -contains "upgrade" }
+  }
+  It "fails CLOSED when the only client release's values cannot be fetched" {
+    $HOST_DATA_DIR = "$TestDrive/d5-fetchfail"
+    Mock Err { throw "err" }
+    Mock Read-Host {
+      param([string]$Prompt, [switch]$AsSecureString)
+      if ($Prompt -match 'password') { return (ConvertTo-SecureString "pw" -AsPlainText -Force) }
+      return "newclient"
+    }
+    Mock Test-Credentials { "valid" }
+    Mock helm {
+      if ($args -contains "list") { '[{"name":"oldrel","namespace":"default","chart":"client-1.4.3"}]'; $global:LASTEXITCODE = 0; return }
+      if ($args -contains "get") { $global:LASTEXITCODE = 1; return }   # `helm get values` failed
+      $global:LASTEXITCODE = 0
+    }
+    { Install-ClientHelm } | Should -Throw
+    Should -Not -Invoke helm -ParameterFilter { $args -contains "upgrade" }
+  }
   It "values without a clientId key do not trip the guard" {
     $HOST_DATA_DIR = "$TestDrive/d5-nokey"
     Mock Read-Host {
