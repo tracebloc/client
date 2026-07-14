@@ -174,9 +174,10 @@ _depname() {
   [ "$INSTALL_STATE_REASON" = no-cluster ]
 }
 
-@test "_assess_classify: cluster but no tracebloc release -> fresh (cluster-no-release)" {
+@test "_assess_classify: running cluster but no tracebloc release -> fresh (cluster-no-release)" {
   has() { return 0; }
   _cluster_exists() { return 0; }
+  _assess_cluster_servers_running() { echo 1; }  # running: reached only after the servers check
   detect_installed_client() { INSTALLED_CLIENT_ID=""; INSTALLED_CLIENT_NS=""; }
   _assess_classify
   [ "$INSTALL_STATE" = fresh ]
@@ -191,6 +192,19 @@ _depname() {
   _assess_classify
   [ "$INSTALL_STATE" = degraded ]
   [ "$INSTALL_STATE_REASON" = cluster-stopped ]
+}
+
+# Ordering guard (Bugbot: "Assess probes Helm before cluster runs"): a stopped
+# cluster must be classified cluster-stopped WITHOUT ever invoking the unbounded
+# Helm probe — otherwise Helm hangs on a dead API and the box is mislabeled fresh.
+@test "_assess_classify: stopped cluster short-circuits BEFORE the Helm probe" {
+  has() { return 0; }
+  _cluster_exists() { return 0; }
+  _assess_cluster_servers_running() { echo 0; }               # stopped
+  detect_installed_client() { touch "$BATS_TEST_TMPDIR/helm-probed"; }  # must NOT run
+  _assess_classify
+  [ "$INSTALL_STATE_REASON" = cluster-stopped ]
+  [ ! -f "$BATS_TEST_TMPDIR/helm-probed" ]                    # Helm was never touched
 }
 
 # healthy requires ALL three workloads: with the REAL _assess_workload_ready
