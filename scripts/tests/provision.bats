@@ -401,3 +401,34 @@ _stub_client_list_plain() {
   run _account_owns_namespace "any-ns"
   [ "$status" -eq 2 ]
 }
+
+# ── _report_create_failure: rejected-zone hint names the real source (Bugbot #356) ──
+# The invalid-location branch must attribute the rejected zone to where it actually
+# came from. Blaming the timezone auto-derivation when the operator pinned
+# TRACEBLOC_CLIENT_LOCATION reads as "the env override was ignored".
+
+@test "bugbot#356: rejected zone from TRACEBLOC_CLIENT_LOCATION points at the env var, not the timezone" {
+  local out; out="$(mktemp)"
+  printf '%s\n' "Error: location: 'ZZ' is not a valid choice." > "$out"
+  run _report_create_failure "$out" "ZZ" "env"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"came from TRACEBLOC_CLIENT_LOCATION"* ]]
+  [[ "$output" != *"auto-derived from this machine's timezone"* ]]
+}
+
+@test "bugbot#356: rejected auto-derived zone still blames the timezone and offers the override" {
+  local out; out="$(mktemp)"
+  printf '%s\n' "Error: location: 'XX' is not a valid choice." > "$out"
+  run _report_create_failure "$out" "XX" "auto"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"auto-derived from this machine's timezone"* ]]
+  [[ "$output" == *"TRACEBLOC_CLIENT_LOCATION"* ]]
+}
+
+@test "bugbot#356: source defaults to auto when the caller omits it" {
+  local out; out="$(mktemp)"
+  printf '%s\n' "Error: location: 'XX' is not a valid choice." > "$out"
+  run _report_create_failure "$out" "XX"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"auto-derived from this machine's timezone"* ]]
+}
