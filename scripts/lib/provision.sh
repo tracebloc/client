@@ -79,13 +79,23 @@ _detect_location_zone() {
 # the error. Special-cases the commonest tripwire — an unrecognized carbon zone
 # (e.g. a city like "berlin" typed instead of a zone code).
 _report_create_failure() {
-  local out="$1" loc="$2" errline l
+  local out="$1" loc="$2" src="${3:-auto}" errline l
   echo ""
   if grep -qiE 'location.*not a valid choice' "$out" 2>/dev/null; then
     warn "\"${loc:-that location}\" isn't a recognized carbon zone — the client wasn't created."
-    hint "The zone is auto-derived from this machine's timezone; to pin one, set"
-    hint "TRACEBLOC_CLIENT_LOCATION=<code> (e.g. DE, FR, US, GB — all codes:"
-    hint "https://api.electricitymap.org/v3/zones) and re-run."
+    # The rejected value came either from TRACEBLOC_CLIENT_LOCATION (an explicit
+    # override the operator set) or from the silent timezone auto-derivation.
+    # Blaming the timezone when the operator pinned the value reads as "the env
+    # override was ignored", so word the fix hint to the actual source.
+    if [[ "$src" == env ]]; then
+      hint "That value came from TRACEBLOC_CLIENT_LOCATION; set it to a valid code"
+      hint "(e.g. DE, FR, US, GB — all codes: https://api.electricitymap.org/v3/zones)"
+      hint "and re-run."
+    else
+      hint "The zone is auto-derived from this machine's timezone; to pin one, set"
+      hint "TRACEBLOC_CLIENT_LOCATION=<code> (e.g. DE, FR, US, GB — all codes:"
+      hint "https://api.electricitymap.org/v3/zones) and re-run."
+    fi
     return 0
   fi
   errline="$(grep -aE 'Error:|HTTP [0-9][0-9][0-9]|refused|timed? ?out|unauthorized|forbidden|denied' "$out" 2>/dev/null | head -4)"
@@ -244,6 +254,9 @@ provision_client() {
   # yields nothing, provision with NO location rather than asking. A pinned
   # TRACEBLOC_CLIENT_LOCATION still overrides for unattended installs.
   local client_name="${TRACEBLOC_CLIENT_NAME:-}" client_location="${TRACEBLOC_CLIENT_LOCATION:-}"
+  # Track where the location came from so a rejected-zone hint can name the real
+  # source ("env" = pinned via TRACEBLOC_CLIENT_LOCATION, "auto" = timezone-derived).
+  local client_location_source="auto"
   if [[ -z "$client_name" ]] && _prompt_tty; then
     # Read the name from the terminal, RETRYING on an empty line instead of
     # accepting it. A stray newline queued in the tty during the ~minute
@@ -267,6 +280,9 @@ provision_client() {
   # fallback below instead of slipping through as a non-empty, doomed location.
   client_name="${client_name#"${client_name%%[![:space:]]*}"}"; client_name="${client_name%"${client_name##*[![:space:]]}"}"
   client_location="${client_location#"${client_location%%[![:space:]]*}"}"; client_location="${client_location%"${client_location##*[![:space:]]}"}"
+  # A value surviving the trim came from TRACEBLOC_CLIENT_LOCATION (the only source
+  # read so far); anything set below is timezone-derived, so the default stands.
+  [[ -n "$client_location" ]] && client_location_source="env"
 
   # No location from TRACEBLOC_CLIENT_LOCATION: derive the carbon zone from the
   # system timezone silently — never prompted, matching the target spec. The
@@ -296,7 +312,7 @@ provision_client() {
   if ! ( umask 077; tracebloc "${_create_args[@]}" ) >"$_create_out" 2>&1; then
     cat "$_create_out" >>"${LOG_FILE:-/dev/null}" 2>/dev/null || true
     rm -f "$cred_file"   # remove any partial the failed create may have written
-    _report_create_failure "$_create_out" "$client_location"
+    _report_create_failure "$_create_out" "$client_location" "$client_location_source"
     rm -f "$_create_out"
     error "Couldn't provision the client. Re-run to retry — full log: ${LOG_FILE:-the install log}."
   fi
