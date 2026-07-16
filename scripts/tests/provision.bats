@@ -275,7 +275,7 @@ _stub_tracebloc() {
   # RETRY past empty lines and still capture the real name. TB_TTY=/dev/stdin
   # lets us feed the queued blanks + the name on stdin.
   unset TRACEBLOC_CLIENT_NAME
-  export TRACEBLOC_CLIENT_LOCATION="DE"   # skip the location sub-prompt; isolate the name read
+  export TRACEBLOC_CLIENT_LOCATION="DE"   # pin the zone (skip the timezone auto-derive); isolate the name read
   _prompt_tty() { return 0; }             # a terminal IS available
   TB_TTY=/dev/stdin
   _stub_tracebloc 'TRACEBLOC_CLIENT_ID=1\nTRACEBLOC_CLIENT_PASSWORD=p\nTB_NAMESPACE=ns\n'
@@ -290,7 +290,7 @@ _stub_tracebloc() {
   # no interactive input (EOF) — e.g. a non-PTY ssh / IDE terminal. Must NOT loop
   # or hang, and must surface the set-TRACEBLOC_CLIENT_NAME guidance.
   unset TRACEBLOC_CLIENT_NAME
-  export TRACEBLOC_CLIENT_LOCATION="DE"
+  export TRACEBLOC_CLIENT_LOCATION="DE"    # pin the zone; the read under test is the name
   _prompt_tty() { return 0; }
   TB_TTY=/dev/stdin
   _stub_tracebloc 'TRACEBLOC_CLIENT_ID=1\nTRACEBLOC_CLIENT_PASSWORD=p\nTB_NAMESPACE=ns\n'
@@ -298,6 +298,42 @@ _stub_tracebloc() {
   [ "$status" -ne 0 ]
   [[ "$output" == *"name for this client is required"* ]]
   [ ! -s "$CREATE_ARGS_FILE" ]
+}
+
+@test "provision_client: interactive install auto-derives location from the timezone — never prompts (#354)" {
+  # Only the name is prompted. With no TRACEBLOC_CLIENT_LOCATION the zone is derived
+  # silently from the system timezone and passed as --location; the user is never
+  # asked. Feed ONLY a name on stdin — a lingering location prompt would block on the
+  # absent second line and the test would hang/fail.
+  unset TRACEBLOC_CLIENT_NAME TRACEBLOC_CLIENT_LOCATION
+  _prompt_tty() { return 0; }
+  TB_TTY=/dev/stdin
+  _detect_location_zone() { printf 'FR Europe/Paris\n'; }   # detection succeeds
+  _stub_tracebloc 'TRACEBLOC_CLIENT_ID=1\nTRACEBLOC_CLIENT_PASSWORD=p\nTB_NAMESPACE=ns\n'
+  run provision_client <<< $'MyBox\n'
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"carbon reporting"* ]]   # the location prompt is gone
+  run cat "$CREATE_ARGS_FILE"
+  [[ "$output" == *"--name MyBox"* ]]
+  [[ "$output" == *"--location FR"* ]]       # zone came from the timezone, silently
+}
+
+@test "provision_client: interactive install with no detectable zone provisions with NO location — never prompts (#354)" {
+  # Timezone detection yields nothing. The installer must NOT ask for a zone (the old
+  # required-entry loop is gone) — it provisions with no --location, which the CLI
+  # now accepts (cli#137), and the backend records the client with no location.
+  unset TRACEBLOC_CLIENT_NAME TRACEBLOC_CLIENT_LOCATION
+  _prompt_tty() { return 0; }
+  TB_TTY=/dev/stdin
+  _detect_location_zone() { return 0; }      # nothing detected
+  _stub_tracebloc 'TRACEBLOC_CLIENT_ID=1\nTRACEBLOC_CLIENT_PASSWORD=p\nTB_NAMESPACE=ns\n'
+  run provision_client <<< $'MyBox\n'
+  [ "$status" -eq 0 ]                        # no location is not fatal anymore
+  [[ "$output" != *"carbon reporting"* ]]    # never prompted
+  [[ "$output" != *"location zone is required"* ]]
+  run cat "$CREATE_ARGS_FILE"
+  [[ "$output" == *"--name MyBox"* ]]
+  [[ "$output" != *"--location"* ]]          # provisioned with no location
 }
 
 # ── cli#141: the #303 pre-flight's grep contract with `tracebloc client list` ──
@@ -364,4 +400,35 @@ _stub_client_list_plain() {
   tracebloc() { if [ "$1" = "client" ] && [ "$2" = "list" ]; then return 7; fi; return 0; }
   run _account_owns_namespace "any-ns"
   [ "$status" -eq 2 ]
+}
+
+# ── _report_create_failure: rejected-zone hint names the real source (Bugbot #356) ──
+# The invalid-location branch must attribute the rejected zone to where it actually
+# came from. Blaming the timezone auto-derivation when the operator pinned
+# TRACEBLOC_CLIENT_LOCATION reads as "the env override was ignored".
+
+@test "bugbot#356: rejected zone from TRACEBLOC_CLIENT_LOCATION points at the env var, not the timezone" {
+  local out; out="$(mktemp)"
+  printf '%s\n' "Error: location: 'ZZ' is not a valid choice." > "$out"
+  run _report_create_failure "$out" "ZZ" "env"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"came from TRACEBLOC_CLIENT_LOCATION"* ]]
+  [[ "$output" != *"auto-derived from this machine's timezone"* ]]
+}
+
+@test "bugbot#356: rejected auto-derived zone still blames the timezone and offers the override" {
+  local out; out="$(mktemp)"
+  printf '%s\n' "Error: location: 'XX' is not a valid choice." > "$out"
+  run _report_create_failure "$out" "XX" "auto"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"auto-derived from this machine's timezone"* ]]
+  [[ "$output" == *"TRACEBLOC_CLIENT_LOCATION"* ]]
+}
+
+@test "bugbot#356: source defaults to auto when the caller omits it" {
+  local out; out="$(mktemp)"
+  printf '%s\n' "Error: location: 'XX' is not a valid choice." > "$out"
+  run _report_create_failure "$out" "XX"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"auto-derived from this machine's timezone"* ]]
 }

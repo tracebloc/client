@@ -79,12 +79,23 @@ _detect_location_zone() {
 # the error. Special-cases the commonest tripwire — an unrecognized carbon zone
 # (e.g. a city like "berlin" typed instead of a zone code).
 _report_create_failure() {
-  local out="$1" loc="$2" errline l
+  local out="$1" loc="$2" src="${3:-auto}" errline l
   echo ""
   if grep -qiE 'location.*not a valid choice' "$out" 2>/dev/null; then
     warn "\"${loc:-that location}\" isn't a recognized carbon zone — the client wasn't created."
-    hint "Re-run and press Enter to accept the detected zone, or use a zone code"
-    hint "like DE, FR, US, GB (all codes: https://api.electricitymap.org/v3/zones)."
+    # The rejected value came either from TRACEBLOC_CLIENT_LOCATION (an explicit
+    # override the operator set) or from the silent timezone auto-derivation.
+    # Blaming the timezone when the operator pinned the value reads as "the env
+    # override was ignored", so word the fix hint to the actual source.
+    if [[ "$src" == env ]]; then
+      hint "That value came from TRACEBLOC_CLIENT_LOCATION; set it to a valid code"
+      hint "(e.g. DE, FR, US, GB — all codes: https://api.electricitymap.org/v3/zones)"
+      hint "and re-run."
+    else
+      hint "The zone is auto-derived from this machine's timezone; to pin one, set"
+      hint "TRACEBLOC_CLIENT_LOCATION=<code> (e.g. DE, FR, US, GB — all codes:"
+      hint "https://api.electricitymap.org/v3/zones) and re-run."
+    fi
     return 0
   fi
   errline="$(grep -aE 'Error:|HTTP [0-9][0-9][0-9]|refused|timed? ?out|unauthorized|forbidden|denied' "$out" 2>/dev/null | head -4)"
@@ -231,19 +242,21 @@ provision_client() {
   # between mint and the explicit removal below — the secret must never linger.
   _PROVISION_CRED_FILE="$cred_file"
   rm -f "$cred_file"
-  # Name + location for this machine (RFC-0001 §6.4: "name this machine + confirm
-  # its location"). `client create` would prompt for these, but we redirect its
-  # output to the log below (the credential must never reach the terminal), so it
-  # can't — and it hard-requires --name when it can't prompt. Collect them here and
-  # pass explicitly. Precedence: env override (unattended) > interactive prompt on
-  # /dev/tty (works under `curl | bash`, whose stdin isn't the terminal) > fail closed.
+  # Name this machine, then provision. `client create` would prompt for the name
+  # itself, but we redirect its output to the log below (the credential must never
+  # reach the terminal), so it can't — collect the name here and pass it explicitly.
+  # Precedence: TRACEBLOC_CLIENT_NAME (unattended) > interactive prompt on /dev/tty
+  # (works under `curl | bash`, whose stdin isn't the terminal) > fail closed.
   #
-  # INTERIM — KEEP THIS PROMPT. The locked run-through drops the name/location
-  # question (machine auto-named <firstname>-NN, location auto-derived), but the
-  # DEPLOYED CLI still hard-requires --name without a TTY (backend#992), so
-  # dropping it now would break `curl | bash`. Slated for removal when cli#137
-  # ships the auto-name + optional-location `client create`; until then it stays.
+  # Location is NEVER prompted (RFC-0001 §6.4 target spec; cli#137). The CLI's
+  # `client create` now treats --location as optional, so we auto-derive the carbon
+  # zone from the system timezone below (silent, no network) and, when detection
+  # yields nothing, provision with NO location rather than asking. A pinned
+  # TRACEBLOC_CLIENT_LOCATION still overrides for unattended installs.
   local client_name="${TRACEBLOC_CLIENT_NAME:-}" client_location="${TRACEBLOC_CLIENT_LOCATION:-}"
+  # Track where the location came from so a rejected-zone hint can name the real
+  # source ("env" = pinned via TRACEBLOC_CLIENT_LOCATION, "auto" = timezone-derived).
+  local client_location_source="auto"
   if [[ -z "$client_name" ]] && _prompt_tty; then
     # Read the name from the terminal, RETRYING on an empty line instead of
     # accepting it. A stray newline queued in the tty during the ~minute
@@ -261,47 +274,21 @@ provision_client() {
       [[ -n "$client_name" ]] && break       # captured a name (incl. a no-newline partial)
       [[ "$_name_read_ok" == 0 ]] && break    # EOF / no interactive input — retrying won't help
     done
-    if [[ -z "$client_location" ]]; then
-      local _loc_detect _loc_zone _loc_tz _loc_try
-      _loc_detect="$(_detect_location_zone)"
-      _loc_zone="${_loc_detect%% *}"; _loc_tz="${_loc_detect#* }"
-      if [[ -n "$_loc_zone" ]]; then
-        printf '  Location for carbon reporting — detected %s (from your timezone %s).\n' "$_loc_zone" "$_loc_tz" >/dev/tty 2>/dev/null || true
-        printf '    Press Enter to use it, or type another zone code: ' >/dev/tty 2>/dev/null || true
-        IFS= read -r client_location <"$TB_TTY" || true
-        # Trim BEFORE the non-empty check so a whitespace-only answer counts as
-        # "just pressed Enter" and falls back to the detected zone.
-        client_location="${client_location#"${client_location%%[![:space:]]*}"}"; client_location="${client_location%"${client_location##*[![:space:]]}"}"
-        [[ -n "$client_location" ]] || client_location="$_loc_zone"
-      else
-        # No detection on this machine. The released CLI still REQUIRES a zone
-        # (client create fails without --location when it can't prompt), so a
-        # blank answer here would doom the create — ask until non-empty.
-        # Optional-location ships with the next CLI release; then this prompt
-        # goes away entirely (spec: silent, no location).
-        for _loc_try in 1 2 3; do
-          printf '  Location zone for carbon reporting (e.g. DE): ' >/dev/tty 2>/dev/null || true
-          IFS= read -r client_location <"$TB_TTY" || true
-          # Trim BEFORE the non-empty check: a whitespace-only answer must NOT
-          # satisfy it, break the loop, and skip the "required" error below.
-          client_location="${client_location#"${client_location%%[![:space:]]*}"}"; client_location="${client_location%"${client_location##*[![:space:]]}"}"
-          [[ -n "$client_location" ]] && break
-        done
-        [[ -n "$client_location" ]] || error "A location zone is required to provision this client. Re-run and enter a zone code (e.g. DE), or set TRACEBLOC_CLIENT_LOCATION for unattended installs."
-      fi
-    fi
   fi
   # Trim surrounding whitespace from the (possibly typed) values FIRST, so a
   # whitespace-only answer (spaces then Enter) counts as "unset" for the silent
   # fallback below instead of slipping through as a non-empty, doomed location.
   client_name="${client_name#"${client_name%%[![:space:]]*}"}"; client_name="${client_name%"${client_name##*[![:space:]]}"}"
   client_location="${client_location#"${client_location%%[![:space:]]*}"}"; client_location="${client_location%"${client_location##*[![:space:]]}"}"
+  # A value surviving the trim came from TRACEBLOC_CLIENT_LOCATION (the only source
+  # read so far); anything set below is timezone-derived, so the default stands.
+  [[ -n "$client_location" ]] && client_location_source="env"
 
-  # No location yet (unattended env-name path, a TTY-less run, or a whitespace-only
-  # answer): fall back to the timezone-detected zone silently — the released CLI
-  # requires a zone, and this matches the target spec (silent auto-derive, never
-  # prompt). The detected code is already whitespace-free. If detection also comes
-  # up empty, the create's own error is surfaced by _report_create_failure below
+  # No location from TRACEBLOC_CLIENT_LOCATION: derive the carbon zone from the
+  # system timezone silently — never prompted, matching the target spec. The
+  # detected code is already whitespace-free. If detection also comes up empty we
+  # leave client_location unset and provision with NO --location (cli#137 makes it
+  # optional); a rejected zone still surfaces via _report_create_failure below
   # rather than failing blind here.
   if [[ -z "$client_location" ]]; then
     client_location="$(_detect_location_zone)"; client_location="${client_location%% *}"
@@ -325,7 +312,7 @@ provision_client() {
   if ! ( umask 077; tracebloc "${_create_args[@]}" ) >"$_create_out" 2>&1; then
     cat "$_create_out" >>"${LOG_FILE:-/dev/null}" 2>/dev/null || true
     rm -f "$cred_file"   # remove any partial the failed create may have written
-    _report_create_failure "$_create_out" "$client_location"
+    _report_create_failure "$_create_out" "$client_location" "$client_location_source"
     rm -f "$_create_out"
     error "Couldn't provision the client. Re-run to retry — full log: ${LOG_FILE:-the install log}."
   fi
