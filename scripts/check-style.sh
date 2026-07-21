@@ -34,8 +34,10 @@ hits=''
 scan() {
   local re="$1" flags="${2:-}" out rc
   # shellcheck disable=SC2086
+  # No 2>/dev/null: let a real grep error surface on stderr — rc>=2 below turns
+  # it into a fail-closed exit, so the error is visible AND fatal, never a silent pass.
   out="$(grep -rnE $flags --include='*.sh' --include='*.ps1' --exclude='check-style.sh' \
-    --exclude-dir='tests' "$re" scripts/ 2>/dev/null)"
+    --exclude-dir='tests' "$re" scripts/)"
   rc=$?
   if [[ "$rc" -ge 2 ]]; then
     echo "check-style: grep errored (rc=$rc) on /$re/ — failing closed" >&2
