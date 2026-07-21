@@ -66,11 +66,11 @@ jobs:
           # common.sh and consumed in other sourced files. Warnings are printed
           # below for visibility but don't fail the gate.
           shellcheck --severity=error --shell=bash \
-            scripts/install.sh scripts/install-k8s.sh scripts/gen-manifest.sh scripts/lib/*.sh \
+            scripts/install.sh scripts/install-k8s.sh scripts/gen-manifest.sh scripts/check-style.sh scripts/lib/*.sh \
             scripts/tests/check-drift.sh scripts/tests/distro-prereqs.sh scripts/tests/e2e-auto-upgrade.sh scripts/tests/e2e-cluster.sh scripts/tests/e2e-journey.sh scripts/tests/e2e-proxy.sh scripts/tests/path-persist.sh
           echo "── shellcheck warnings (advisory, non-blocking) ──"
           shellcheck --severity=warning --shell=bash \
-            scripts/install.sh scripts/install-k8s.sh scripts/gen-manifest.sh scripts/lib/*.sh \
+            scripts/install.sh scripts/install-k8s.sh scripts/gen-manifest.sh scripts/check-style.sh scripts/lib/*.sh \
             scripts/tests/check-drift.sh scripts/tests/distro-prereqs.sh scripts/tests/e2e-auto-upgrade.sh scripts/tests/e2e-cluster.sh scripts/tests/e2e-journey.sh scripts/tests/e2e-proxy.sh scripts/tests/path-persist.sh || true
 
       - name: Installer manifest is current (supply-chain, R8)
@@ -82,6 +82,13 @@ jobs:
         run: |
           chmod +x scripts/gen-manifest.sh
           scripts/gen-manifest.sh --check
+
+      - name: Style + terminology guard
+        # Enforces the terminal style system (STYLE.md): no hardcoded brand colour
+        # outside the tone engine (common.sh), no status/traffic-light emoji, and
+        # "secure environment" not "workspace" in user-facing text. Mechanical
+        # checks only — role/wording judgement stays with CODEOWNERS review.
+        run: bash scripts/check-style.sh
 
       - name: PSScriptAnalyzer (PowerShell installer)
         shell: pwsh

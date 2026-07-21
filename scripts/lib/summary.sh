@@ -105,50 +105,50 @@ print_summary() {
   echo ""
   case "$CLIENT_STATE" in
     connected)
-      echo -e "  ${BOLD}${GREEN}✔${RESET} ${BOLD}Connected to tracebloc${RESET}"
+      echo -e "  ${TB_GO}✔${RESET} ${BOLD}Connected to tracebloc${RESET}"
       echo ""
-      echo -e "  ${DIM}Environment${RESET} : ${ns}"
-      echo -e "  ${DIM}Version${RESET}     : ${cver:-unknown}"
-      echo -e "  ${DIM}Mode${RESET}        : ${mode}"
+      echo -e "  ${TB_LABEL}Environment${RESET} : ${ns}"
+      echo -e "  ${TB_LABEL}Version${RESET}     : ${cver:-unknown}"
+      echo -e "  ${TB_LABEL}Mode${RESET}        : ${mode}"
       echo ""
-      echo -e "  Your secure environment is live 🟢"
-      echo -e "    See it on your dashboard:  ${CYAN}https://ai.tracebloc.io/clients${RESET}"
+      echo -e "  ${TB_HEADING}Your secure environment is live${RESET}  ${TB_GO}●${RESET}"
+      echo -e "    See it on your dashboard:  ${TB_LINK}https://ai.tracebloc.io/clients${RESET}"
       echo ""
-      # "What's next" is deliberately NOT dim — it's the primary call to action.
-      echo -e "  ${BOLD}What's next${RESET}"
-      echo -e "    1. Ingest your data       ${CYAN}tracebloc data ingest${RESET}"
-      echo -e "    2. Create a use case      ${CYAN}https://ai.tracebloc.io/my-use-cases${RESET}"
-      echo -e "    3. Invite collaborators — they train on your data; it never leaves this machine"
+      # "What's next" is a heading (cyan) — the primary call to action, not dim.
+      echo -e "  ${TB_HEADING}What's next${RESET}"
+      echo -e "    1. Ingest your data       ${TB_CMD}tracebloc data ingest${RESET}"
+      echo -e "    2. Create a use case      ${TB_LINK}https://ai.tracebloc.io/my-use-cases${RESET}"
+      echo -e "    3. Invite collaborators — ${TB_DESC}they train on your data; it never leaves this machine${RESET}"
       echo ""
-      echo -e "  ${BOLD}Run  ${CYAN}tracebloc${RESET}${BOLD}  to get started.${RESET}"
+      echo -e "  ${BOLD}Run  ${TB_CMD}tracebloc${RESET}${BOLD}  to get started.${RESET}"
       echo ""
       echo -e "  ${DIM}────────────────────────────────────────${RESET}"
       echo -e "  ${DIM}Logs ${logdisp}  ·  Data /tracebloc/${ns}${RESET}"
       _reboot_note
       ;;
     starting)
-      echo -e "  ${YELLOW}⚠  Almost there — tracebloc is installed but still starting.${RESET}"
+      echo -e "  ${TB_WARN}⚠${RESET}  Almost there — tracebloc is installed but still starting."
       echo ""
       echo -e "  Components are still downloading/starting (first run can take a few minutes)."
-      echo -e "  Check progress:   ${CYAN}kubectl get pods -n ${ns}${RESET}"
+      echo -e "  Check progress:   ${TB_CMD}kubectl get pods -n ${ns}${RESET}"
       echo ""
-      echo -e "  Your client will show as ${BOLD}🟢 Online${RESET} at ${CYAN}https://ai.tracebloc.io/clients${RESET}"
+      echo -e "  Your client will show as ${TB_GO}● Online${RESET} at ${TB_LINK}https://ai.tracebloc.io/clients${RESET}"
       echo -e "  once it finishes. ${DIM}Re-running this installer is safe.${RESET}"
       ;;
     bad_creds)
-      echo -e "  ${RED}${BOLD}✖ Couldn't connect — your Client ID or password was rejected.${RESET}" >&2
+      echo -e "  ${TB_ERR}✖ Couldn't connect — your Client ID or password was rejected.${RESET}" >&2
       echo ""
       echo -e "  The environment installed, but tracebloc refused those credentials."
-      echo -e "    1. Re-check them at ${CYAN}https://ai.tracebloc.io/clients${RESET}"
+      echo -e "    1. Re-check them at ${TB_LINK}https://ai.tracebloc.io/clients${RESET}"
       echo -e "    2. Re-run this installer ${DIM}(safe to re-run)${RESET}"
       ;;
     image_pull|crash)
       local reason="a component didn't start"
       [[ "$CLIENT_STATE" == "image_pull" ]] && reason="an image couldn't be pulled"
       [[ "$CLIENT_STATE" == "crash" ]] && reason="a container is restarting (crash loop)"
-      echo -e "  ${RED}${BOLD}✖ Setup didn't finish — ${reason}.${RESET}" >&2
+      echo -e "  ${TB_ERR}✖ Setup didn't finish — ${reason}.${RESET}" >&2
       echo ""
-      echo -e "  Inspect:  ${CYAN}kubectl get pods -n ${ns}${RESET}"
+      echo -e "  Inspect:  ${TB_CMD}kubectl get pods -n ${ns}${RESET}"
       echo -e "  Logs:     ${DIM}~/.tracebloc/install-*.log${RESET}"
       echo -e "  ${DIM}Re-running this installer is safe.${RESET}"
       ;;

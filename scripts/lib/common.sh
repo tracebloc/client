@@ -10,9 +10,66 @@ umask 077
 readonly CURL_SECURE="--tlsv1.2"
 
 # ── Colours ──────────────────────────────────────────────────────────────────
-RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'
-CYAN='\033[0;36m'; BOLD='\033[1m'; DIM='\033[2m'
-WHITE='\033[1;37m'; RESET='\033[0m'
+# One brand-grounded palette (design-system tokens): cyan #01a5cc = structure,
+# lime #91e947 = action — mirrors the Go CLI's internal/ui engine. Each tone
+# renders as exact 24-bit hex on a truecolor terminal, the nearest ANSI-16
+# elsewhere, its deep shade on a light background, and nothing at all when colour
+# is off (NO_COLOR / not a TTY / TERM=dumb / TB_PLAIN=1). Meaning never rests on
+# hue alone — headings/commands also carry bold and alerts a distinct glyph.
+#
+# Decided ONCE here, at source time: common.sh is sourced before setup_log_file
+# redirects stdout through `tee`, so the `-t 1` test sees the real terminal.
+if [[ -n "${NO_COLOR:-}" || "${TB_PLAIN:-}" == "1" || "${TERM:-}" == "dumb" || ! -t 1 ]]; then
+  _tb_mode=none
+elif [[ "${COLORTERM:-}" == "truecolor" || "${COLORTERM:-}" == "24bit" ]]; then
+  _tb_mode=true
+else
+  _tb_mode=16
+fi
+_tb_bg=dark
+if [[ -n "${COLORFGBG:-}" ]]; then
+  _tb_last="${COLORFGBG##*;}"           # "fg;bg" → a trailing 7/15 is a light bg
+  [[ "$_tb_last" == "7" || "$_tb_last" == "15" ]] && _tb_bg=light
+fi
+
+# _sgr DARK_RGB LIGHT_RGB ANSI16 BOLD UNDERLINE → the opening escape for a tone
+# (empty when colour is off). RGB args are "R;G;B"; emits the literal \033[…m form
+# so both `echo -e` and printf format strings interpret it, matching legacy usage.
+_sgr() {
+  [[ "$_tb_mode" == "none" ]] && return 0
+  local codes
+  if [[ "$_tb_mode" == "true" ]]; then
+    if [[ "$_tb_bg" == "light" ]]; then codes="38;2;$2"; else codes="38;2;$1"; fi
+  else
+    codes="$3"
+  fi
+  [[ "$4" == "1" ]] && codes="${codes};1"
+  [[ "$5" == "1" ]] && codes="${codes};4"
+  printf '\\033[%sm' "$codes"
+}
+
+# Semantic tones (the same table as internal/ui/ui.go).
+TB_HEADING="$(_sgr '1;165;204'  '1;99;122'   36 1 0)"  # cyan bold — structure/headings
+TB_CMD="$(_sgr     '145;233;71' '87;140;43'  32 1 0)"  # lime bold — the thing to run
+TB_DESC="$(_sgr    '167;237;108' '87;140;43' 32 0 0)"  # soft lime — supporting text
+TB_LINK="$(_sgr    '1;165;204'  '1;99;122'   36 0 1)"  # cyan underline — destinations
+TB_ACCENT="$(_sgr  '1;165;204'  '1;99;122'   36 0 0)"  # cyan — prompt guidance
+TB_GO="$(_sgr      '145;233;71' '87;140;43'  32 0 0)"  # lime — ✔ / ● (good/go)
+TB_WARN="$(_sgr    '255;198;43' '138;106;0'  33 0 0)"  # amber — ⚠
+TB_ERR="$(_sgr     '246;76;76'  '192;39;31'  31 1 0)"  # red bold — ✖
+TB_ERRSOFT="$(_sgr '246;76;76'  '192;39;31'  31 0 0)"  # red — ✗ offline
+TB_LABEL="$(_sgr   '142;142;142' '107;107;107' 2 0 0)" # dim neutral — labels
+
+# Structural (weight only) + reset — also honour the off switch.
+if [[ "$_tb_mode" == "none" ]]; then
+  BOLD=''; DIM=''; WHITE=''; RESET=''
+else
+  BOLD='\033[1m'; DIM='\033[2m'; WHITE='\033[1;37m'; RESET='\033[0m'
+fi
+
+# Legacy names, kept so untouched call sites still render on-brand AND honour the
+# off switch: CYAN → cyan accent, GREEN → go/lime, YELLOW → warn, RED → error.
+CYAN="$TB_ACCENT"; GREEN="$TB_GO"; YELLOW="$TB_WARN"; RED="$TB_ERRSOFT"
 
 # ── Logging ──────────────────────────────────────────────────────────────────
 #  info()          — supplementary detail shown to user (dim bullet)
@@ -24,10 +81,10 @@ WHITE='\033[1;37m'; RESET='\033[0m'
 #  prompt_header() — bold label before user input prompts
 #  hint()          — dim contextual help text
 info()           { echo -e "  ${DIM}·${RESET} $*"; }
-success()        { echo -e "  ${GREEN}✔${RESET} $*"; }
-warn()           { echo -e "  ${YELLOW}⚠${RESET}  $*"; }
-error()          { echo -e "  ${RED}${BOLD}✖ $*${RESET}" >&2; exit 1; }
-step()           { echo -e "\n${BOLD}${CYAN}Step $1/$2${RESET}  ${BOLD}$3${RESET}"; }
+success()        { echo -e "  ${TB_GO}✔${RESET} $*"; }
+warn()           { echo -e "  ${TB_WARN}⚠${RESET}  $*"; }
+error()          { echo -e "  ${TB_ERR}✖ $*${RESET}" >&2; exit 1; }
+step()           { echo -e "\n${TB_HEADING}Step $1/$2${RESET}  ${BOLD}$3${RESET}"; }
 log()            { [[ -n "${LOG_FILE:-}" ]] && echo "[$(date +%H:%M:%S)] $*" >> "$LOG_FILE" 2>/dev/null; return 0; }
 prompt_header()  { echo -e "\n  ${BOLD}${WHITE}$*${RESET}"; }
 hint()           { echo -e "  ${DIM}$*${RESET}"; }
@@ -37,10 +94,39 @@ hint()           { echo -e "  ${DIM}$*${RESET}"; }
 # → "  a) Checking your machine". Prints the header + a single trailing blank; the
 # blank-line gap BETWEEN steps comes from each step body ending with a blank line
 # (main() adds it), matching the run-through's spacing.
-step_header()    { echo -e "  ${BOLD}$1) $2${RESET}"; echo ""; }
+step_header()    { echo -e "  ${TB_HEADING}$1) $2${RESET}"; echo ""; }
 
 # ── Utility ──────────────────────────────────────────────────────────────────
 has() { command -v "$1" &>/dev/null; }
+
+# Strip ANSI escape sequences and C0 control characters from a value. A raw
+# `read` captures whatever the terminal sends — this can include:
+#   • bracketed-paste wrappers:  ESC[200~ ... ESC[201~
+#   • arrow keys / cursor moves: ESC[A/B/C/D, ESC[1;5C, ESC[3~ (Delete), …
+#   • function keys, modifier combos, mode-switch sequences
+# All follow the ANSI CSI shape:  ESC '[' <params> <final-byte>
+# where params ∈ [0-9;] and final ∈ [A-Za-z~]. Strip them iteratively to
+# handle consecutive sequences (e.g. paste-wrappers).
+#
+# Also handles the post-corruption case where ESC was stripped by an earlier
+# (buggy) sanitizer but the literal `[200~`/`[201~` markers survived. Only
+# self-heals the two well-defined bracketed-paste markers — generic `[X]`
+# shapes could plausibly be real password content.
+#
+# UTF-8 bytes (0x80+) preserved so international characters survive. Lives here
+# (shared) so BOTH the credential path (install-client-helm.sh) and the client-
+# name prompt (provision.sh) sanitize identically (customer-reported 2026-07-20).
+_strip_paste_garbage() {
+  local s="$1"
+  local esc=$'\e'
+  local csi_pattern="${esc}\\[[0-9;]*[A-Za-z~]"
+  while [[ "$s" =~ $csi_pattern ]]; do
+    s="${s/${BASH_REMATCH[0]}/}"
+  done
+  s="${s//\[200\~/}"
+  s="${s//\[201\~/}"
+  printf '%s' "$s" | tr -d '\000-\037\177'
+}
 
 # Best-effort chart version of the installed client release in namespace $1
 # (e.g. "1.4.4"); empty if not found / cluster unreachable. Greps helm's CHART
@@ -164,7 +250,7 @@ preflight_sudo() {
   # Step b intro copy (first-run run-through): one line, then the system's own
   # "Password:" prompt from `sudo -v`. Kept generic so it reads correctly on both
   # macOS (Docker Desktop) and Linux (Docker Engine + system packages).
-  hint "tracebloc needs your password once to install Docker and a few tools."
+  hint "tracebloc needs your password once to set up Docker and a few tools."
   echo ""
   sudo -v || error "Could not obtain administrator privileges. Re-run with a user that has sudo access."
   ( while sudo -n true 2>/dev/null; do sleep 50; done ) &
@@ -468,7 +554,7 @@ Commands:
 
 Advanced configuration (environment variables):
   CLUSTER_NAME   Cluster name                   (default: tracebloc)
-  TB_NAMESPACE   Namespace / workspace label    (default: tracebloc)
+  TB_NAMESPACE   Secure-environment name        (default: tracebloc)
   SERVERS        Control-plane nodes             (default: 1)
   AGENTS         Worker nodes                    (default: 1)
   K8S_VERSION    k3s image tag                   (default: v1.29.4-k3s1)

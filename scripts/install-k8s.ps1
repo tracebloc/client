@@ -1421,10 +1421,10 @@ function Print-Summary {
       Write-Host ""
       Write-Host "  " -NoNewline; Write-Host "$([char]0x2714) Connected to tracebloc" -ForegroundColor Green
       Write-Host ""
-      Write-Host "  Workspace : " -NoNewline; Write-Host $ns -ForegroundColor Cyan
+      Write-Host "  Environment : " -ForegroundColor DarkGray -NoNewline; Write-Host $ns
       $cver = Get-ChartVersion -Namespace $ns; if (-not $cver) { $cver = "unknown" }
-      Write-Host "  Version   : " -NoNewline; Write-Host $cver -ForegroundColor Cyan
-      Write-Host "  Mode      : " -NoNewline; Write-Host $mode -ForegroundColor Cyan
+      Write-Host "  Version     : " -ForegroundColor DarkGray -NoNewline; Write-Host $cver
+      Write-Host "  Mode        : " -ForegroundColor DarkGray -NoNewline; Write-Host $mode
       Write-Host ""
       Write-Host "  Your client is live. Confirm it shows as Online:"
       Write-Host "    https://ai.tracebloc.io/clients" -ForegroundColor Cyan
@@ -1433,9 +1433,9 @@ function Print-Summary {
       Write-Host ""
       Hint "After a reboot, start Docker Desktop to bring your client back (enable 'Start Docker Desktop when you sign in' in Settings -> General to automate)."
       Write-Host ""
-      Write-Host "  What to do next" -ForegroundColor White
+      Write-Host "  What to do next" -ForegroundColor Cyan
       Write-Host "  1. Ingest your training and test data with the tracebloc CLI:"
-      Write-Host "       tracebloc data ingest ./data" -ForegroundColor Cyan
+      Write-Host "       tracebloc data ingest ./data" -ForegroundColor Green
       Write-Host "  2. Create your use case and invite other collaborators: https://ai.tracebloc.io/my-use-cases"
       Write-Host ""
       Hint "Dashboard: https://ai.tracebloc.io   Logs: ~\.tracebloc\   Data: /tracebloc/$ns"
@@ -1446,7 +1446,7 @@ function Print-Summary {
       Write-Host "  " -NoNewline; Write-Host "$([char]0x26A0)  Almost there - tracebloc is installed but still starting." -ForegroundColor Yellow
       Write-Host ""
       Write-Host "  Components are still downloading/starting (first run can take a few minutes)."
-      Write-Host "  Check progress:   kubectl get pods -n $ns" -ForegroundColor Cyan
+      Write-Host "  Check progress:   " -NoNewline; Write-Host "kubectl get pods -n $ns" -ForegroundColor Green
       Write-Host ""
       Write-Host "  Your client will show as Online at https://ai.tracebloc.io/clients once it finishes."
       Hint "Re-running this installer is safe."
@@ -1464,7 +1464,7 @@ function Print-Summary {
       if ($script:ClientState -eq "crash")      { $reason = "a container is restarting (crash loop)" }
       Write-Host "  " -NoNewline; Write-Host "$([char]0x2716) Setup didn't finish - $reason." -ForegroundColor Red
       Write-Host ""
-      Write-Host "  Inspect:  kubectl get pods -n $ns" -ForegroundColor Cyan
+      Write-Host "  Inspect:  " -NoNewline; Write-Host "kubectl get pods -n $ns" -ForegroundColor Green
       Write-Host "  Logs:     ~\.tracebloc\install-*.log"
       Hint "Re-running this installer is safe."
     }
@@ -1808,8 +1808,12 @@ function Test-TraceblocCli {
     # do next" — don't duplicate it; just confirm the verdict.
     $ver = ""
     try { $ver = (& tracebloc version 2>$null | Select-Object -First 1) } catch { $ver = "" }
-    if ($ver) { Ok "tracebloc CLI installed ($ver) -- verified on your PATH." }
-    else      { Ok "tracebloc CLI installed -- verified on your PATH." }
+    $short = if ($ver -match '\s(\S+)') { "v" + $Matches[1] } else { "" }
+    # Prefer the short 'tb' alias; fall back to 'tracebloc' if it isn't on PATH
+    # (the alias wasn't created), so the copy never names a missing command (Bugbot).
+    $cli = if (Has "tb") { "tb" } else { "tracebloc" }
+    if ($short) { Ok "tracebloc CLI ready ($short) -- run '$cli' to use it." }
+    else        { Ok "tracebloc CLI ready -- run '$cli' to use it." }
     return
   }
 
@@ -1824,10 +1828,7 @@ function Test-TraceblocCli {
 function Install-TraceblocCli {
   Step 5 5 "Install the tracebloc CLI"
 
-  if (Has "tracebloc") {
-    Info "tracebloc CLI already present -- re-running its installer to pick up the latest."
-  }
-  Info "Installing the tracebloc CLI (data ingest / cluster info / data delete)..."
+  Info "Installing the tracebloc CLI..."
 
   # [System.IO.Path]::GetTempPath() is cross-platform (%TEMP% on Windows, /tmp
   # on Linux); $env:TEMP is null under Linux pwsh, which the ubuntu Pester run

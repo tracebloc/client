@@ -82,6 +82,13 @@ _cli_on_fresh_path() {
 # NOT find it, the EXACT shell-correct PATH fix instead of a vague "open a new
 # terminal". ALWAYS returns 0: the client is connected by Step 5, so a CLI
 # verification hiccup must never abort an otherwise-successful install.
+# _cli_version_short prints the bare semver from `tracebloc version`
+# ("tracebloc 0.9.3 (…)" → "0.9.3"). Cosmetic only — empty if the CLI isn't
+# runnable or the format changes, so callers guard with ${ver:+…}.
+_cli_version_short() {
+  tracebloc version 2>/dev/null | head -1 | awk '{print $2}' || true
+}
+
 _verify_tracebloc_cli() {
   if _cli_on_fresh_path; then
     # A brand-new terminal resolves tracebloc — the rc PATH edit persisted. But
@@ -95,13 +102,29 @@ _verify_tracebloc_cli() {
     # `tracebloc version` is the real proof; keep it cosmetic (never let a failing
     # version call or a SIGPIPE flip the outcome). The canonical "tracebloc
     # data ingest ./data" next step lives in the summary's "What to do next".
-    local ver; ver="$(tracebloc version 2>/dev/null | head -1 || true)"
+    local ver; ver="$(_cli_version_short)"
+    # Prefer the short `tb` alias (the CLI installer symlinks it next to
+    # `tracebloc`); fall back to `tracebloc` when that alias wasn't created — its
+    # name was already taken, so the CLI's install.sh skipped it — so the copy
+    # never points the user at a command that isn't there (Bugbot).
+    local cli_cmd="tracebloc"; has tb && cli_cmd="tb"
     if has tracebloc; then
-      # Usable right now AND in new terminals — the fully-clean verdict. "ready"
-      # matches the run-through's step-b pattern (Docker ready / System tools
-      # ready / tracebloc CLI ready); the edge-case lines below stay "installed"
-      # because there it is installed but not yet usable in this/every shell.
-      success "tracebloc CLI ready${ver:+ ($ver)} — verified on your PATH."
+      # Usable right now AND in new terminals — the fully-clean verdict, collapsed
+      # to ONE line (old→new when this was an update), so the step shows a single
+      # ✔ instead of an already-present / re-running / installing / ready pileup.
+      # The edge-case lines below stay "installed" (it's installed but not yet
+      # usable in this/every shell).
+      if [[ -n "${TB_CLI_OLD_VER:-}" && -n "$ver" && "${TB_CLI_OLD_VER}" != "$ver" ]]; then
+        # Only claim an upgrade when we CONFIRMED a new version. If the post-install
+        # `tracebloc version` probe came back empty ($ver=""), we can't tell whether
+        # anything changed — fall through to the neutral "up to date" rather than a
+        # bare "updated" with no version to back it up (Bugbot: false updated verdict).
+        success "tracebloc CLI updated${ver:+ (v${TB_CLI_OLD_VER} → v${ver})} — run \`${cli_cmd}\` to use it"
+      elif [[ -n "${TB_CLI_OLD_VER:-}" ]]; then
+        success "tracebloc CLI up to date${ver:+ (v${ver})} — run \`${cli_cmd}\` to use it"
+      else
+        success "tracebloc CLI ready${ver:+ (v${ver})} — run \`${cli_cmd}\` to use it"
+      fi
       return 0
     fi
     # Persisted for new terminals, but not yet on THIS shell's PATH. The rc
@@ -109,7 +132,7 @@ _verify_tracebloc_cli() {
     # user just needs a new terminal — or to load the rc into this one. Don't
     # re-append it; don't over-claim "verified on your PATH" for a shell it isn't.
     local sh_name; sh_name="$(basename "${SHELL:-/bin/sh}")"
-    success "tracebloc CLI installed${ver:+ ($ver)} — verified for new terminals."
+    success "tracebloc CLI installed${ver:+ (v$ver)} — open a new terminal to use \`${cli_cmd}\`."
     if [[ "$sh_name" == "fish" ]]; then
       hint "This shell won't see it yet — open a new terminal to use it."
     else
@@ -148,15 +171,13 @@ install_tracebloc_cli() {
   # No step framing here: this is called from provision_client (Step 3) on the
   # browser-auth path and, non-fatally, on the dual-mode path — the caller owns
   # the step heading. (#838 reorder: the CLI installs BEFORE Helm now.)
+  # Remember the version already installed (if any) so the final ✔ can show a
+  # clean "vX → vY" update instead of an already-present / re-running / installing
+  # pileup. Cosmetic — a failing `tracebloc version` just yields "" (guarded).
+  TB_CLI_OLD_VER=""
   if has tracebloc; then
-    # Version is cosmetic — never let a failing `tracebloc version` (or SIGPIPE
-    # from `head` closing the pipe, under `set -o pipefail`) abort this step.
-    # `local` masks the status and `|| true` keeps any captured value.
-    local ver="$(tracebloc version 2>/dev/null | head -1 || true)"
-    info "tracebloc CLI already present${ver:+ ($ver)} — re-running its installer to pick up the latest."
+    TB_CLI_OLD_VER="$(_cli_version_short)"
   fi
-
-  info "Installing the tracebloc CLI (data ingest / cluster info / data delete)…"
 
   local installer
   installer="$(mktemp)" || { warn "Couldn't install the tracebloc CLI (no temp dir) — your client is set up fine."; return 0; }
@@ -173,12 +194,18 @@ install_tracebloc_cli() {
     return 0
   fi
 
-  # 2) Run it. Output → install log to keep this screen clean. The CLI installer
+  # 2) Run it behind a transient spinner (output → install log to keep the screen
+  #    clean). Drive `spin` DIRECTLY rather than `spin_cmd`: this step is NON-FATAL
+  #    (the client is already connected), but spin_cmd prints a hard red "✖ …" plus
+  #    a 10-line log dump on failure — which would make a recoverable CLI hiccup
+  #    look like a hard failure and reintroduce exactly the noisy output this step
+  #    avoids. We surface the failure softly below instead. The CLI installer
   #    verifies SHA256 + cosign and falls back to ~/.local/bin (printing PATH
   #    guidance) when /usr/local/bin isn't writable.
-  if sh "$installer" >> "${LOG_FILE:-/dev/null}" 2>&1; then
-    # Self-verify usability from a FRESH terminal and print a verified next
-    # command (or a shell-correct PATH fix). Non-fatal — always returns 0.
+  sh "$installer" >> "${LOG_FILE:-/dev/null}" 2>&1 &
+  if spin "$!" "Installing the tracebloc CLI…"; then
+    # Self-verify usability from a FRESH terminal and print the single ✔ line
+    # (or a shell-correct PATH fix). Non-fatal — always returns 0.
     _verify_tracebloc_cli
   else
     warn "Couldn't install the tracebloc CLI automatically — your client is set up fine."

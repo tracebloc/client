@@ -147,7 +147,7 @@ Describe "Install-TraceblocCli" {
       $o
     }
     $out = Install-TraceblocCli 6>&1 | Out-String
-    $out | Should -Match "tracebloc CLI installed"
+    $out | Should -Match "tracebloc CLI (ready|installed)"   # happy verdict is "ready", edge is "installed"
   }
   It "warns on a failed re-install even when a CLI is already on PATH" {
     Mock Start-Process {
@@ -172,7 +172,7 @@ Describe "Test-TraceblocCli" {
     Mock Has { $true }                       # a fresh shell resolves tracebloc
     Mock tracebloc { "tracebloc 0.2.0" }
     $out = Test-TraceblocCli 6>&1 | Out-String
-    $out | Should -Match "verified on your PATH"
+    $out | Should -Match "run 'tb'"          # usable-now verdict (was "verified on your PATH")
     $out | Should -Match "0.2.0"             # real proof via `tracebloc version`
     $out | Should -Not -Match "open a new terminal so"   # the old, useless line is gone
   }
