@@ -29,8 +29,9 @@ Don't hardcode colour. Use the helper / tone for the role:
 | Error ✖ | `error`, `TB_ERR` | red `#f64c4c` | bold glyph |
 | Label : value | `TB_LABEL` | dim neutral | — |
 
-**No emoji.** The lime `●` is the online indicator (not 🟢); status uses the
-glyphs above.
+**Emoji are welcome** — used with intent, for warmth (👋 greeting, 💚 sign-off,
+🚀 sent) and for status (🟢 online, 🟡 starting, 🔴 offline, ⚠ caution). They're a
+brand touch, not policed by the guard — just don't overuse them.
 
 The colour **engine** lives in one place per surface — extend it there, never
 inline a raw escape or hex elsewhere:
@@ -63,8 +64,8 @@ identifiers — the guard only flags `workspace` in user-facing text.
 ## What's enforced vs reviewed
 
 `scripts/check-style.sh` (CI, blocking) catches the **mechanical** violations:
-hardcoded brand colour outside `common.sh`, status emoji, and `workspace` in
-user-facing text. Run it locally with `bash scripts/check-style.sh`.
+hardcoded brand colour outside `common.sh` and `workspace` in user-facing text.
+Run it locally with `bash scripts/check-style.sh`.
 
 It can't police **judgement** — using the right *role* for a token (a command in
 the command tone, not the heading tone), or the softer terminology calls. Those

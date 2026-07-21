@@ -111,7 +111,7 @@ print_summary() {
       echo -e "  ${TB_LABEL}Version${RESET}     : ${cver:-unknown}"
       echo -e "  ${TB_LABEL}Mode${RESET}        : ${mode}"
       echo ""
-      echo -e "  ${TB_HEADING}Your secure environment is live${RESET}  ${TB_GO}●${RESET}"
+      echo -e "  ${TB_HEADING}Your secure environment is live${RESET} 🟢"
       echo -e "    See it on your dashboard:  ${TB_LINK}https://ai.tracebloc.io/clients${RESET}"
       echo ""
       # "What's next" is a heading (cyan) — the primary call to action, not dim.
@@ -132,7 +132,7 @@ print_summary() {
       echo -e "  Components are still downloading/starting (first run can take a few minutes)."
       echo -e "  Check progress:   ${TB_CMD}kubectl get pods -n ${ns}${RESET}"
       echo ""
-      echo -e "  Your client will show as ${TB_GO}● Online${RESET} at ${TB_LINK}https://ai.tracebloc.io/clients${RESET}"
+      echo -e "  Your client will show as ${BOLD}🟢 Online${RESET} at ${TB_LINK}https://ai.tracebloc.io/clients${RESET}"
       echo -e "  once it finishes. ${DIM}Re-running this installer is safe.${RESET}"
       ;;
     bad_creds)
