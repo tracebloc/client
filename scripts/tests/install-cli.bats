@@ -37,6 +37,11 @@ setup() {
   run install_tracebloc_cli
   [ "$status" -eq 0 ]
   [[ "$output" == *"WARN: Couldn't install"* ]]
+  # This step is by-design non-fatal, so a failure must NOT show spin_cmd's hard
+  # red "✖ …" + log dump (which would look like a hard failure). We drive `spin`
+  # directly to keep the failure path soft (Bugbot: fatal-looking CLI install UX).
+  [[ "$output" != *"Last 10 lines"* ]]
+  [[ "$output" != *"✖ Installing the tracebloc CLI"* ]]
 }
 
 @test "install_tracebloc_cli: success path reports installed" {

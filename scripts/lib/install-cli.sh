@@ -195,10 +195,15 @@ install_tracebloc_cli() {
   fi
 
   # 2) Run it behind a transient spinner (output → install log to keep the screen
-  #    clean; spin_cmd already redirects to LOG_FILE). The CLI installer verifies
-  #    SHA256 + cosign and falls back to ~/.local/bin (printing PATH guidance)
-  #    when /usr/local/bin isn't writable.
-  if spin_cmd "Installing the tracebloc CLI…" sh "$installer"; then
+  #    clean). Drive `spin` DIRECTLY rather than `spin_cmd`: this step is NON-FATAL
+  #    (the client is already connected), but spin_cmd prints a hard red "✖ …" plus
+  #    a 10-line log dump on failure — which would make a recoverable CLI hiccup
+  #    look like a hard failure and reintroduce exactly the noisy output this step
+  #    avoids. We surface the failure softly below instead. The CLI installer
+  #    verifies SHA256 + cosign and falls back to ~/.local/bin (printing PATH
+  #    guidance) when /usr/local/bin isn't writable.
+  sh "$installer" >> "${LOG_FILE:-/dev/null}" 2>&1 &
+  if spin "$!" "Installing the tracebloc CLI…"; then
     # Self-verify usability from a FRESH terminal and print the single ✔ line
     # (or a shell-correct PATH fix). Non-fatal — always returns 0.
     _verify_tracebloc_cli
