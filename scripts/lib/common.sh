@@ -42,6 +42,35 @@ step_header()    { echo -e "  ${BOLD}$1) $2${RESET}"; echo ""; }
 # ── Utility ──────────────────────────────────────────────────────────────────
 has() { command -v "$1" &>/dev/null; }
 
+# Strip ANSI escape sequences and C0 control characters from a value. A raw
+# `read` captures whatever the terminal sends — this can include:
+#   • bracketed-paste wrappers:  ESC[200~ ... ESC[201~
+#   • arrow keys / cursor moves: ESC[A/B/C/D, ESC[1;5C, ESC[3~ (Delete), …
+#   • function keys, modifier combos, mode-switch sequences
+# All follow the ANSI CSI shape:  ESC '[' <params> <final-byte>
+# where params ∈ [0-9;] and final ∈ [A-Za-z~]. Strip them iteratively to
+# handle consecutive sequences (e.g. paste-wrappers).
+#
+# Also handles the post-corruption case where ESC was stripped by an earlier
+# (buggy) sanitizer but the literal `[200~`/`[201~` markers survived. Only
+# self-heals the two well-defined bracketed-paste markers — generic `[X]`
+# shapes could plausibly be real password content.
+#
+# UTF-8 bytes (0x80+) preserved so international characters survive. Lives here
+# (shared) so BOTH the credential path (install-client-helm.sh) and the client-
+# name prompt (provision.sh) sanitize identically (customer-reported 2026-07-20).
+_strip_paste_garbage() {
+  local s="$1"
+  local esc=$'\e'
+  local csi_pattern="${esc}\\[[0-9;]*[A-Za-z~]"
+  while [[ "$s" =~ $csi_pattern ]]; do
+    s="${s/${BASH_REMATCH[0]}/}"
+  done
+  s="${s//\[200\~/}"
+  s="${s//\[201\~/}"
+  printf '%s' "$s" | tr -d '\000-\037\177'
+}
+
 # Best-effort chart version of the installed client release in namespace $1
 # (e.g. "1.4.4"); empty if not found / cluster unreachable. Greps helm's CHART
 # column ("client-<ver>"), so it needs no jq.
@@ -164,7 +193,7 @@ preflight_sudo() {
   # Step b intro copy (first-run run-through): one line, then the system's own
   # "Password:" prompt from `sudo -v`. Kept generic so it reads correctly on both
   # macOS (Docker Desktop) and Linux (Docker Engine + system packages).
-  hint "tracebloc needs your password once to install Docker and a few tools."
+  hint "tracebloc needs your password once to set up Docker and a few tools."
   echo ""
   sudo -v || error "Could not obtain administrator privileges. Re-run with a user that has sudo access."
   ( while sudo -n true 2>/dev/null; do sleep 50; done ) &
