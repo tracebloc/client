@@ -67,11 +67,27 @@ setup() {
   run install_tracebloc_cli
   [ "$status" -eq 0 ]
   [[ "$output" == *"to use it"* ]]                      # usable-now verdict ("… — run tb to use it")
+  [[ "$output" == *'`tb`'* ]]                           # prefers the short alias when it's present
   [[ "$output" == *"0.2.0"* ]]                          # real proof via `tracebloc version`
   [[ "$output" != *"open a new terminal"* ]]            # not the new-terminal (edge) message
   # The canonical dataset-push next step lives in summary.sh — don't duplicate it
   # here on the fully-verified path (#738: "don't duplicate; keep consistent").
   [[ "$output" != *"tracebloc dataset push"* ]]
+}
+
+@test "install_tracebloc_cli: names 'tracebloc' when the 'tb' alias wasn't created" {
+  # The CLI installer skips the `tb` symlink when that name is already taken, so
+  # the success copy must fall back to `tracebloc` rather than point the user at a
+  # command that isn't there (Bugbot: wrong CLI command in success copy).
+  curl()             { : > "${@: -1}"; return 0; }
+  sh()               { return 0; }
+  _cli_on_fresh_path() { return 0; }
+  has()              { [[ "$1" == "tracebloc" ]]; }     # tracebloc present, tb absent
+  tracebloc()        { echo "tracebloc 0.2.0"; }
+  run install_tracebloc_cli
+  [ "$status" -eq 0 ]
+  [[ "$output" == *'run `tracebloc` to use it'* ]]      # named the real binary
+  [[ "$output" != *'`tb`'* ]]                           # never a bare `tb` when it doesn't resolve
 }
 
 @test "install_tracebloc_cli: fresh shell finds it but the CURRENT shell can't → 'new terminals' verdict + load-it-now hint (#304)" {

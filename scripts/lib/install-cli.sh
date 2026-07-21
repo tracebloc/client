@@ -103,6 +103,11 @@ _verify_tracebloc_cli() {
     # version call or a SIGPIPE flip the outcome). The canonical "tracebloc
     # data ingest ./data" next step lives in the summary's "What to do next".
     local ver; ver="$(_cli_version_short)"
+    # Prefer the short `tb` alias (the CLI installer symlinks it next to
+    # `tracebloc`); fall back to `tracebloc` when that alias wasn't created — its
+    # name was already taken, so the CLI's install.sh skipped it — so the copy
+    # never points the user at a command that isn't there (Bugbot).
+    local cli_cmd="tracebloc"; has tb && cli_cmd="tb"
     if has tracebloc; then
       # Usable right now AND in new terminals — the fully-clean verdict, collapsed
       # to ONE line (old→new when this was an update), so the step shows a single
@@ -114,11 +119,11 @@ _verify_tracebloc_cli() {
         # `tracebloc version` probe came back empty ($ver=""), we can't tell whether
         # anything changed — fall through to the neutral "up to date" rather than a
         # bare "updated" with no version to back it up (Bugbot: false updated verdict).
-        success "tracebloc CLI updated${ver:+ (v${TB_CLI_OLD_VER} → v${ver})} — run \`tb\` to use it"
+        success "tracebloc CLI updated${ver:+ (v${TB_CLI_OLD_VER} → v${ver})} — run \`${cli_cmd}\` to use it"
       elif [[ -n "${TB_CLI_OLD_VER:-}" ]]; then
-        success "tracebloc CLI up to date${ver:+ (v${ver})} — run \`tb\` to use it"
+        success "tracebloc CLI up to date${ver:+ (v${ver})} — run \`${cli_cmd}\` to use it"
       else
-        success "tracebloc CLI ready${ver:+ (v${ver})} — run \`tb\` to use it"
+        success "tracebloc CLI ready${ver:+ (v${ver})} — run \`${cli_cmd}\` to use it"
       fi
       return 0
     fi
@@ -127,7 +132,7 @@ _verify_tracebloc_cli() {
     # user just needs a new terminal — or to load the rc into this one. Don't
     # re-append it; don't over-claim "verified on your PATH" for a shell it isn't.
     local sh_name; sh_name="$(basename "${SHELL:-/bin/sh}")"
-    success "tracebloc CLI installed${ver:+ (v$ver)} — open a new terminal to use \`tb\`."
+    success "tracebloc CLI installed${ver:+ (v$ver)} — open a new terminal to use \`${cli_cmd}\`."
     if [[ "$sh_name" == "fish" ]]; then
       hint "This shell won't see it yet — open a new terminal to use it."
     else

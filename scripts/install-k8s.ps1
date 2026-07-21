@@ -1809,8 +1809,11 @@ function Test-TraceblocCli {
     $ver = ""
     try { $ver = (& tracebloc version 2>$null | Select-Object -First 1) } catch { $ver = "" }
     $short = if ($ver -match '\s(\S+)') { "v" + $Matches[1] } else { "" }
-    if ($short) { Ok "tracebloc CLI ready ($short) -- run 'tb' to use it." }
-    else        { Ok "tracebloc CLI ready -- run 'tb' to use it." }
+    # Prefer the short 'tb' alias; fall back to 'tracebloc' if it isn't on PATH
+    # (the alias wasn't created), so the copy never names a missing command (Bugbot).
+    $cli = if (Has "tb") { "tb" } else { "tracebloc" }
+    if ($short) { Ok "tracebloc CLI ready ($short) -- run '$cli' to use it." }
+    else        { Ok "tracebloc CLI ready -- run '$cli' to use it." }
     return
   }
 
