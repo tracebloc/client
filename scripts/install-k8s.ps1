@@ -1808,8 +1808,9 @@ function Test-TraceblocCli {
     # do next" — don't duplicate it; just confirm the verdict.
     $ver = ""
     try { $ver = (& tracebloc version 2>$null | Select-Object -First 1) } catch { $ver = "" }
-    if ($ver) { Ok "tracebloc CLI installed ($ver) -- verified on your PATH." }
-    else      { Ok "tracebloc CLI installed -- verified on your PATH." }
+    $short = if ($ver -match '\s(\S+)') { "v" + $Matches[1] } else { "" }
+    if ($short) { Ok "tracebloc CLI ready ($short) -- run 'tb' to use it." }
+    else        { Ok "tracebloc CLI ready -- run 'tb' to use it." }
     return
   }
 
@@ -1824,10 +1825,7 @@ function Test-TraceblocCli {
 function Install-TraceblocCli {
   Step 5 5 "Install the tracebloc CLI"
 
-  if (Has "tracebloc") {
-    Info "tracebloc CLI already present -- re-running its installer to pick up the latest."
-  }
-  Info "Installing the tracebloc CLI (data ingest / cluster info / data delete)..."
+  Info "Installing the tracebloc CLI..."
 
   # [System.IO.Path]::GetTempPath() is cross-platform (%TEMP% on Windows, /tmp
   # on Linux); $env:TEMP is null under Linux pwsh, which the ubuntu Pester run

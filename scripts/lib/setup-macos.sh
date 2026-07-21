@@ -17,9 +17,9 @@ install_homebrew() {
       grep -q 'homebrew' "$HOME/.zprofile" 2>/dev/null || \
         echo 'eval "$(/opt/homebrew/bin/brew shellenv)"' >> "$HOME/.zprofile"
     fi
-    success "Homebrew installed."
+    log "Homebrew installed."
   else
-    success "Homebrew"
+    log "Homebrew already present."
   fi
 }
 
@@ -268,7 +268,7 @@ install_macos_cli_tools() {
   fi
   log "helm: $(helm version --short 2>/dev/null || echo installed)"
 
-  success "System tools ready (k3d, helm, kubectl)"
+  success "System tools ready"
 }
 
 install_macos() {

@@ -47,7 +47,9 @@ setup() {
   tracebloc()        { echo "tracebloc 0.2.0"; }
   run install_tracebloc_cli
   [ "$status" -eq 0 ]
-  [[ "$output" == *"SUCCESS: tracebloc CLI ready"* ]]
+  # tracebloc was already present at the same version → "up to date" (a re-run
+  # that bumped the version would say "updated (vOLD → vNEW)").
+  [[ "$output" == *"SUCCESS: tracebloc CLI up to date"* ]]
 }
 
 # ── Self-verification (#738) ────────────────────────────────────────────────
@@ -64,9 +66,9 @@ setup() {
   tracebloc()        { echo "tracebloc 0.2.0"; }
   run install_tracebloc_cli
   [ "$status" -eq 0 ]
-  [[ "$output" == *"verified on your PATH"* ]]          # explicit proof, not hope
+  [[ "$output" == *"to use it"* ]]                      # usable-now verdict ("… — run tb to use it")
   [[ "$output" == *"0.2.0"* ]]                          # real proof via `tracebloc version`
-  [[ "$output" != *"open a new terminal"* ]]            # the old, useless message is gone
+  [[ "$output" != *"open a new terminal"* ]]            # not the new-terminal (edge) message
   # The canonical dataset-push next step lives in summary.sh — don't duplicate it
   # here on the fully-verified path (#738: "don't duplicate; keep consistent").
   [[ "$output" != *"tracebloc dataset push"* ]]
@@ -84,9 +86,9 @@ setup() {
   tracebloc()        { echo "tracebloc 0.2.0"; }
   run install_tracebloc_cli
   [ "$status" -eq 0 ]                                   # still non-fatal
-  [[ "$output" == *"verified for new terminals"* ]]     # honest: persisted, but not here
+  [[ "$output" == *"open a new terminal"* ]]            # honest: persisted, but not usable in THIS shell
   [[ "$output" == *"source $HOME/.zshrc"* ]]            # how to use it in THIS shell now
-  [[ "$output" != *"verified on your PATH"* ]]          # never over-claim for the current shell
+  [[ "$output" != *"to use it"* ]]                      # never claim the usable-now verdict for this shell
   # It's already in the rc (fresh shell found it) — don't tell the user to re-append.
   [[ "$output" != *"echo '"* ]]
 }

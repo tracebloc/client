@@ -268,8 +268,14 @@ provision_client() {
     # a test without a real /dev/tty doesn't abort; reads use TB_TTY.
     local _name_try _name_read_ok
     for _name_try in 1 2 3; do
-      printf '\n  Name this client (shown on your tracebloc dashboard): ' >/dev/tty 2>/dev/null || true
-      _name_read_ok=1; IFS= read -r client_name <"$TB_TTY" || _name_read_ok=0
+      printf '\n  Name your secure environment (shown on your tracebloc dashboard): ' >/dev/tty 2>/dev/null || true
+      _name_read_ok=1; IFS= read -e -r client_name <"$TB_TTY" || _name_read_ok=0
+      # `read -e` gives readline line-editing so arrow keys move the cursor
+      # instead of injecting ESC[D/ESC[A bytes; belt-and-suspenders, strip any
+      # escape / paste-mode sequences that still slip in (same helper the
+      # credential path uses) — otherwise they slug-ify into a garbage name like
+      # "d-d-d-a-a-a" when passed to `client create` (customer-reported 2026-07-20).
+      client_name="$(_strip_paste_garbage "$client_name")"
       client_name="${client_name#"${client_name%%[![:space:]]*}"}"; client_name="${client_name%"${client_name##*[![:space:]]}"}"
       [[ -n "$client_name" ]] && break       # captured a name (incl. a no-newline partial)
       [[ "$_name_read_ok" == 0 ]] && break    # EOF / no interactive input — retrying won't help
