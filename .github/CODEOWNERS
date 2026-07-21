@@ -20,3 +20,9 @@
 /scripts/gen-manifest.sh                                @saadqbal
 /scripts/manifest.sha256                                @saadqbal
 /scripts/lib/                                           @saadqbal
+
+# ── Style-system enforcement (STYLE.md) ──
+# The guard + the style definition decide what output regressions CI blocks; a
+# change here changes the rules themselves, so it must be code-owner reviewed.
+/scripts/check-style.sh                                 @saadqbal
+/STYLE.md                                               @saadqbal

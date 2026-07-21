@@ -26,3 +26,4 @@
 - [ ] Docs updated if behavior or config changed
 - [ ] No secrets / credentials in the diff
 - [ ] For security-sensitive paths: appropriate reviewer requested
+- [ ] Terminal output follows [STYLE.md](../STYLE.md) — tone helpers (no hardcoded colour/emoji), "secure environment" not "workspace"; `bash scripts/check-style.sh` passes

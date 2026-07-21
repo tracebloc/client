@@ -1421,10 +1421,10 @@ function Print-Summary {
       Write-Host ""
       Write-Host "  " -NoNewline; Write-Host "$([char]0x2714) Connected to tracebloc" -ForegroundColor Green
       Write-Host ""
-      Write-Host "  Workspace : " -ForegroundColor DarkGray -NoNewline; Write-Host $ns
+      Write-Host "  Environment : " -ForegroundColor DarkGray -NoNewline; Write-Host $ns
       $cver = Get-ChartVersion -Namespace $ns; if (-not $cver) { $cver = "unknown" }
-      Write-Host "  Version   : " -ForegroundColor DarkGray -NoNewline; Write-Host $cver
-      Write-Host "  Mode      : " -ForegroundColor DarkGray -NoNewline; Write-Host $mode
+      Write-Host "  Version     : " -ForegroundColor DarkGray -NoNewline; Write-Host $cver
+      Write-Host "  Mode        : " -ForegroundColor DarkGray -NoNewline; Write-Host $mode
       Write-Host ""
       Write-Host "  Your client is live. Confirm it shows as Online:"
       Write-Host "    https://ai.tracebloc.io/clients" -ForegroundColor Cyan
