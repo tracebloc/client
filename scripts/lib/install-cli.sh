@@ -109,7 +109,11 @@ _verify_tracebloc_cli() {
       # ✔ instead of an already-present / re-running / installing / ready pileup.
       # The edge-case lines below stay "installed" (it's installed but not yet
       # usable in this/every shell).
-      if [[ -n "${TB_CLI_OLD_VER:-}" && "${TB_CLI_OLD_VER}" != "$ver" ]]; then
+      if [[ -n "${TB_CLI_OLD_VER:-}" && -n "$ver" && "${TB_CLI_OLD_VER}" != "$ver" ]]; then
+        # Only claim an upgrade when we CONFIRMED a new version. If the post-install
+        # `tracebloc version` probe came back empty ($ver=""), we can't tell whether
+        # anything changed — fall through to the neutral "up to date" rather than a
+        # bare "updated" with no version to back it up (Bugbot: false updated verdict).
         success "tracebloc CLI updated${ver:+ (v${TB_CLI_OLD_VER} → v${ver})} — run \`tb\` to use it"
       elif [[ -n "${TB_CLI_OLD_VER:-}" ]]; then
         success "tracebloc CLI up to date${ver:+ (v${ver})} — run \`tb\` to use it"
