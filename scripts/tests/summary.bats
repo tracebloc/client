@@ -65,7 +65,7 @@ setup() {
   # rich summary from the run-through
   [[ "$output" == *"Environment"* ]]
   [[ "$output" == *"Mode"* ]]
-  [[ "$output" == *"live 🟢"* ]]
+  [[ "$output" == *"Your secure environment is live"* ]]   # live-status heading (lime ● replaced the 🟢 emoji)
   [[ "$output" == *"What's next"* ]]
   [[ "$output" == *"tracebloc data ingest"* ]]
   [[ "$output" == *"my-use-cases"* ]]
