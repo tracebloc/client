@@ -66,11 +66,11 @@ jobs:
           # common.sh and consumed in other sourced files. Warnings are printed
           # below for visibility but don't fail the gate.
           shellcheck --severity=error --shell=bash \
-            scripts/install.sh scripts/install-k8s.sh scripts/gen-manifest.sh scripts/lib/*.sh \
+            scripts/install.sh scripts/install-k8s.sh scripts/gen-manifest.sh scripts/check-style.sh scripts/lib/*.sh \
             scripts/tests/check-drift.sh scripts/tests/distro-prereqs.sh scripts/tests/e2e-auto-upgrade.sh scripts/tests/e2e-cluster.sh scripts/tests/e2e-journey.sh scripts/tests/e2e-proxy.sh scripts/tests/path-persist.sh
           echo "── shellcheck warnings (advisory, non-blocking) ──"
           shellcheck --severity=warning --shell=bash \
-            scripts/install.sh scripts/install-k8s.sh scripts/gen-manifest.sh scripts/lib/*.sh \
+            scripts/install.sh scripts/install-k8s.sh scripts/gen-manifest.sh scripts/check-style.sh scripts/lib/*.sh \
             scripts/tests/check-drift.sh scripts/tests/distro-prereqs.sh scripts/tests/e2e-auto-upgrade.sh scripts/tests/e2e-cluster.sh scripts/tests/e2e-journey.sh scripts/tests/e2e-proxy.sh scripts/tests/path-persist.sh || true
 
       - name: Installer manifest is current (supply-chain, R8)
