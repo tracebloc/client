@@ -554,7 +554,7 @@ Commands:
 
 Advanced configuration (environment variables):
   CLUSTER_NAME   Cluster name                   (default: tracebloc)
-  TB_NAMESPACE   Namespace / workspace label    (default: tracebloc)
+  TB_NAMESPACE   Secure-environment name        (default: tracebloc)
   SERVERS        Control-plane nodes             (default: 1)
   AGENTS         Worker nodes                    (default: 1)
   K8S_VERSION    k3s image tag                   (default: v1.29.4-k3s1)
