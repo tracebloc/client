@@ -381,6 +381,21 @@ setup_log_file() {
 CLUSTER_NAME="${CLUSTER_NAME:-tracebloc}"
 SERVERS="${SERVERS:-1}"
 AGENTS="${AGENTS:-1}"
+# RFC-0003 (client#367) — local dataset storage model. PROTOTYPE, default off.
+#   hostpath   (default) : today's model — datasets live in ~/.tracebloc on the
+#                          host, bind-mounted into the cluster; survive cluster
+#                          delete; world-writable dirs.
+#   node-local (Option C): datasets live on k3s local-path INSIDE the k3d node —
+#                          they die with `cluster delete`, are not a browsable
+#                          host folder, and need no chmod 777. This is the
+#                          RFC-0003 goal for the local install.
+# C1: local-path is RWO + WaitForFirstConsumer and provisions on a single node,
+# but the shared data PVC is mounted by jobs-manager-spawned Jobs that could
+# schedule on a second node with no volume. So node-local forces single-node.
+TB_STORAGE_MODE="${TB_STORAGE_MODE:-hostpath}"
+if [[ "$TB_STORAGE_MODE" == "node-local" && "$AGENTS" != "0" ]]; then
+  AGENTS=0
+fi
 # Pinned default; set K8S_VERSION="" to use latest (may break on new k3s releases)
 K8S_VERSION="${K8S_VERSION:-v1.29.4-k3s1}"
 HOST_DATA_DIR="${HOST_DATA_DIR:-$HOME/.tracebloc}"
@@ -401,6 +416,8 @@ validate_config() {
 
   [[ "$SERVERS" =~ ^[1-9][0-9]*$ ]] || error "SERVERS must be a positive integer >= 1 (got '$SERVERS')"
   [[ "$AGENTS"  =~ ^[0-9]+$ ]]     || error "AGENTS must be a non-negative integer (got '$AGENTS')"
+  [[ "$TB_STORAGE_MODE" == "hostpath" || "$TB_STORAGE_MODE" == "node-local" ]] \
+    || error "TB_STORAGE_MODE must be 'hostpath' or 'node-local' (got '$TB_STORAGE_MODE')"
 
   # HOST_DATA_DIR must be under $HOME and must not be a system path (security)
   local dir="$HOST_DATA_DIR"

@@ -143,6 +143,25 @@ setup() {
   [[ "$output" == *"${HOST_DATASET_DIR}:/tracebloc-data@all"* ]]         # datasets on the mount
 }
 
+# ── RFC-0003 Option C: node-local storage (client#367) ──────────────────────
+@test "_create_new_cluster: node-local -> no host bind-mount, keeps k3s local-storage" {
+  TB_STORAGE_MODE="node-local"
+  run _create_new_cluster
+  [ "$status" -eq 0 ]
+  run mock_calls
+  [[ "$output" == *"k3d cluster create"* ]]
+  [[ "$output" != *"/tracebloc@all"* ]]                 # no ~/.tracebloc bind-mount
+  [[ "$output" != *"--disable=local-storage"* ]]        # keep local-path provisioner
+}
+
+@test "_create_new_cluster: hostpath (default) -> bind-mount + disables local-storage" {
+  run _create_new_cluster
+  [ "$status" -eq 0 ]
+  run mock_calls
+  [[ "$output" == *"${HOST_DATA_DIR}:/tracebloc@all"* ]]
+  [[ "$output" == *"--disable=local-storage"* ]]
+}
+
 @test "_ensure_release_dirs: HOST_DATASET_DIR set -> data on dataset dir, mysql+logs local" {
   HOST_DATASET_DIR="$BATS_TEST_TMPDIR/ds"; mkdir -p "$HOST_DATASET_DIR"
   _ensure_release_dirs tracebloc

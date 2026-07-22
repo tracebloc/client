@@ -128,7 +128,14 @@ _export_host_no_proxy() {
 create_cluster() {
   log "Creating k3d cluster: '$CLUSTER_NAME'"
 
-  _ensure_tracebloc_dirs
+  # node-local (RFC-0003 Option C): no host data dirs, no bind-mount, no chmod —
+  # data lives on k3s local-path inside the node. Only the hostpath model needs
+  # the pre-created world-writable ~/.tracebloc dirs.
+  if [[ "${TB_STORAGE_MODE:-hostpath}" == "node-local" ]]; then
+    log "Storage mode: node-local — datasets live inside the cluster node (k3s local-path), not ~/.tracebloc; they are wiped on 'cluster delete'."
+  else
+    _ensure_tracebloc_dirs
+  fi
 
   # Docker is up now (unlike at preflight time), so re-check the runtime's real
   # memory budget — a too-small Docker VM (Mac/Win) surfaces before we build out.
@@ -299,12 +306,26 @@ _create_new_cluster() {
     --servers "$SERVERS"
     --agents  "$AGENTS"
     --api-port 127.0.0.1:6550
-    -v "${HOST_DATA_DIR}:/tracebloc@all"
-    --k3s-arg "--disable=traefik@server:*"
-    --k3s-arg "--disable=servicelb@server:*"
-    --k3s-arg "--disable=local-storage@server:*"
-    --wait
   )
+  # hostpath model: bind-mount ~/.tracebloc into every node and disable k3s
+  # local-storage (the chart ships its own `manual` StorageClass for the
+  # hostPath PVs). node-local model (RFC-0003 Option C): no host bind-mount, and
+  # KEEP k3s local-storage so its `local-path` StorageClass provisions the
+  # dataset volumes inside the node — data then dies with the cluster.
+  if [[ "${TB_STORAGE_MODE:-hostpath}" == "node-local" ]]; then
+    K3D_ARGS+=(
+      --k3s-arg "--disable=traefik@server:*"
+      --k3s-arg "--disable=servicelb@server:*"
+    )
+  else
+    K3D_ARGS+=(
+      -v "${HOST_DATA_DIR}:/tracebloc@all"
+      --k3s-arg "--disable=traefik@server:*"
+      --k3s-arg "--disable=servicelb@server:*"
+      --k3s-arg "--disable=local-storage@server:*"
+    )
+  fi
+  K3D_ARGS+=(--wait)
 
   # backend#743: bind-mount the customer's dataset volume (which may be a network
   # mount) at a DISTINCT cluster path so the chart's dataset PV can point there

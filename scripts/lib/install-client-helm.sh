@@ -298,7 +298,8 @@ _reconcile_adopted_client() {
   local _uuid; _uuid="$(_sanitize_credential "${TRACEBLOC_CLIENT_ID:-}")"
   [[ -n "$_uuid" ]] && _args+=(--set "clientId=$_uuid")
 
-  _ensure_release_dirs "$_ns"
+  # node-local (RFC-0003 Option C) has no hostPath dirs to pre-create.
+  [[ "${TB_STORAGE_MODE:-hostpath}" != "node-local" ]] && _ensure_release_dirs "$_ns"
 
   # Reconcile blocks too — same spinner treatment (RFC-0002 §2).
   if ! spin_cmd "Reconciling the existing client…" helm "${_args[@]}"; then
@@ -643,6 +644,20 @@ $([ -n "${CLIENT_ENV:-}" ] && printf '  CLIENT_ENV: "%s"\n' "$CLIENT_ENV")${prox
   # that will never arrive.
   SINGLE_NODE: "true"
 $([ -n "${HOST_DATASET_DIR:-}" ] && printf '  HOST_UID: "%s"\n  HOST_GID: "%s"\n' "$(id -u)" "$(id -g)")
+$(if [[ "${TB_STORAGE_MODE:-hostpath}" == "node-local" ]]; then
+cat <<'STORAGE'
+# RFC-0003 Option C — node-local: use k3s's built-in local-path StorageClass.
+# No hostPath PVs, so dataset volumes are provisioned inside the k3d node and
+# are destroyed by `cluster delete` rather than left as host files.
+storageClass:
+  create: false
+  name: local-path
+
+hostPath:
+  enabled: false
+STORAGE
+else
+cat <<'STORAGE'
 storageClass:
   create: true
   name: client-storage-class
@@ -652,7 +667,9 @@ storageClass:
 
 hostPath:
   enabled: true
-$([ -n "${HOST_DATASET_DIR:-}" ] && printf '  datasetPath: /tracebloc-data\n')
+STORAGE
+[ -n "${HOST_DATASET_DIR:-}" ] && printf '  datasetPath: /tracebloc-data\n'
+fi)
 pvc:
   mysql: 2Gi
   logs: 10Gi
@@ -688,7 +705,8 @@ EOF
 
   # Pre-create per-release hostPath dirs so they're owned by the host user, not
   # root:root from kubelet's DirectoryOrCreate. See _ensure_release_dirs.
-  _ensure_release_dirs "$TB_NAMESPACE"
+  # node-local (RFC-0003 Option C) has no hostPath dirs to pre-create.
+  [[ "${TB_STORAGE_MODE:-hostpath}" != "node-local" ]] && _ensure_release_dirs "$TB_NAMESPACE"
 
   # The chart install blocks ~10-15s (render + apply + image pull), so run it
   # behind a spinner instead of a frozen terminal — spin_cmd streams helm output
