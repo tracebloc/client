@@ -383,6 +383,8 @@ Node-level agents (`tracebloc-resource-monitor` DaemonSet) run in a separate nam
 
 After a fresh install, the following `kubectl` checks confirm each defense layer is in place.
 
+The chart also ships an in-cluster conformance suite — the **seal check** — that automates the enforcement-level verifications as `helm test` hook Jobs (egress-enforcement probe, backend-reachability check, storage assertions), each labelled `tracebloc.io/seal-check` for tooling to enumerate. Run it with `helm test <release> --logs`; a guarantee that cannot be verified fails loudly (unsealed), never silently passes. See [SEAL-CHECK.md](SEAL-CHECK.md) for the contract, coverage, and runbooks (RFC-0003 §8.2–8.4 / backend#1184).
+
 ### 7.1 Training pod has the workload label
 
 ```bash

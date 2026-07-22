@@ -1,0 +1,351 @@
+{{- $cfg := default dict (default dict .Values.sealCheck).storageAssertions }}
+{{- if dig "enabled" true $cfg }}
+{{- /*
+  In-cluster storage assertions (seal check — RFC-0003 §8.2 / backend#1184).
+  A `helm test` hook Job that asserts, from inside the cluster, that the
+  release's storage is what the declared storage model says it is:
+
+    pvc-bound         every release PVC (data / logs / mysql) exists and is
+                      Bound — waits up to timeoutSeconds first, because
+                      WaitForFirstConsumer classes stay Pending until the
+                      consuming pod is scheduled and fresh installs may still
+                      be pulling images.
+    pvc-storageclass  every release PVC is on the release's expected
+                      StorageClass (tracebloc.storageClassName) — a claim
+                      silently satisfied by some other class is storage the
+                      chart does not manage.
+    pv-hostpath       DYNAMIC-PVC MODE ONLY (hostPath.enabled=false): no
+                      release PVC is backed by a hostPath PersistentVolume on
+                      an unmanaged host tree. This catches the RFC-0003 D3/D4
+                      stranding scenario — a leftover chart hostPath PV from an
+                      older bare-metal install still carries a claimRef for our
+                      PVC names and captures the claim even in dynamic mode.
+                      Dynamically provisioned NODE-LOCAL hostPath PVs (the k3s
+                      local-path pattern under /var/lib/rancher/…) are
+                      tolerated and reported: those live inside the cluster
+                      node's filesystem and die with the cluster (RFC-0003
+                      Option C); whether that path is additionally host-visible
+                      is a cluster-creation fact (a bind mount) that cannot be
+                      seen from in-cluster and is verified at install level.
+                      In hostPath mode the sub-check reports SKIP — hostPath
+                      PVs are the declared storage model there, and the model
+                      itself is chosen in values, visible to review.
+
+  Verdict philosophy (RFC-0003 §8.2): a guarantee that cannot be verified is
+  reported UNSEALED (the Job fails loudly) — it is never silently claimed
+  sealed. The one deliberate softening: with clusterScope=false the chart
+  cannot grant PV read (cluster-scoped RBAC), so pv-hostpath degrades to the
+  claimRef/name check plus an explicit WARNING naming exactly what was NOT
+  verified. That degradation is declared in values (clusterScope), not
+  discovered at runtime — same reasoning as enforcementProbeHost="" disabling
+  the egress probe. See docs/SEAL-CHECK.md.
+
+  Unlike the curl-based checks this pod must talk to the Kubernetes API, so it
+  mounts a token for a dedicated least-privilege ServiceAccount (get/list on
+  PVCs in this namespace; get/list on PVs cluster-wide only when clusterScope
+  allows a ClusterRole). The SA/RBAC are test hooks at negative hook-weight:
+  created before the Job on each `helm test`, deleted with it on success,
+  left behind for debugging on failure. As test hooks, none of this ever runs
+  at install/upgrade time, so it can never block them or the auto-upgrade.
+  Set sealCheck.storageAssertions.enabled=false to disable.
+*/ -}}
+{{- $name := printf "%s-storage-assertions-check" .Release.Name }}
+{{- $timeout := dig "timeoutSeconds" 120 $cfg }}
+{{- $img := default dict $cfg.image }}
+{{- $pvScan := ne .Values.clusterScope false }}
+{{- $hostPathMode := (default dict .Values.hostPath).enabled }}
+{{- $nodeLocalPrefixes := dig "nodeLocalPathPrefixes" (list "/var/lib/rancher/" "/opt/local-path-provisioner") $cfg }}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ $name }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "tracebloc.labels" . | nindent 4 }}
+    {{- /* seal-check enumeration contract (RFC-0003 §8.2) — see _helpers.tpl */}}
+    {{- include "tracebloc.sealCheckLabels" (dict "name" "storage-assertions") | nindent 4 }}
+  annotations:
+    "helm.sh/hook": test
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: 0
+  ttlSecondsAfterFinished: 120
+  # The script bounds itself (timeoutSeconds for the Bound-wait, and every
+  # kubectl call carries --request-timeout); this is the backstop so a wedged
+  # API can never hang `helm test` past its own timeout budget.
+  activeDeadlineSeconds: {{ add $timeout 180 }}
+  template:
+    metadata:
+      labels:
+        {{- include "tracebloc.selectorLabels" . | nindent 8 }}
+        {{- include "tracebloc.sealCheckLabels" (dict "name" "storage-assertions") | nindent 8 }}
+        {{- /* Deliberately NOT tracebloc.io/workload: training — this pod
+               needs the Kubernetes API, which the training lockdown denies. */}}
+    spec:
+      restartPolicy: Never
+      serviceAccountName: {{ $name }}
+      # Deviates from the curl-based checks (which set false): storage
+      # introspection IS a Kubernetes API workload. The token belongs to the
+      # dedicated least-privilege SA below, not the jobs-manager SA.
+      automountServiceAccountToken: true
+      securityContext:
+        runAsNonRoot: true
+        # alpine/k8s has no non-root user baked in; pin an arbitrary uid, same
+        # as the image-refresh CronJob that uses this image.
+        runAsUser: 1000
+        runAsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: assert
+          # Same kubectl-capable image the image-refresh CronJob uses; the tag
+          # pins kubectl so behaviour cannot drift if upstream re-tags.
+          image: "{{ $img.repository | default "alpine/k8s" }}:{{ $img.tag | default "1.30.5" }}"
+          imagePullPolicy: {{ $img.pullPolicy | default "IfNotPresent" }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+            readOnlyRootFilesystem: true
+          env:
+            # alpine/k8s's kubectl writes a discovery cache under $HOME/.kube.
+            # The pod runs uid 1000 with readOnlyRootFilesystem, so point HOME
+            # at the writable emptyDir mounted at /home/kubectl.
+            - name: HOME
+              value: "/home/kubectl"
+            - name: NAMESPACE
+              value: {{ .Release.Namespace | quote }}
+            - name: RELEASE
+              value: {{ .Release.Name | quote }}
+            - name: EXPECTED_STORAGE_CLASS
+              value: {{ include "tracebloc.storageClassName" . | quote }}
+            - name: EXPECTED_PVCS
+              value: "{{ include "tracebloc.clientDataPvc" . }} {{ include "tracebloc.clientLogsPvc" . }} {{ include "tracebloc.mysqlPvc" . }}"
+            # The chart's own (legacy bare-metal) hostPath PV names — in
+            # dynamic mode, a claim bound to one of these is a leftover-PV
+            # capture, detectable by name alone (no PV read RBAC needed).
+            - name: CHART_HOSTPATH_PVS
+              value: "{{ include "tracebloc.clientDataPvName" . }} {{ include "tracebloc.clientLogsPvName" . }} {{ include "tracebloc.mysqlPvName" . }}"
+            - name: HOSTPATH_MODE
+              value: {{ ternary "true" "false" (not (empty $hostPathMode)) | quote }}
+            - name: PV_SCAN
+              value: {{ ternary "true" "false" $pvScan | quote }}
+            - name: TIMEOUT_SECONDS
+              value: {{ $timeout | quote }}
+            - name: NODE_LOCAL_PREFIXES
+              value: {{ join " " $nodeLocalPrefixes | quote }}
+          command:
+            - sh
+            - -c
+            - |
+              set -u
+              KC="kubectl --request-timeout=10s -n ${NAMESPACE}"
+              fail=0
+              echo "[storage-assertions] release=${RELEASE} ns=${NAMESPACE} expected-class=${EXPECTED_STORAGE_CLASS} hostPath-mode=${HOSTPATH_MODE} pv-scan=${PV_SCAN}"
+
+              # ── pvc-bound: every release PVC exists and is Bound ──────────
+              # Wait first (bounded): WaitForFirstConsumer classes bind only
+              # when the consuming pod schedules, and a fresh install may still
+              # be pulling images. FAIL only if still unbound at the deadline.
+              deadline=$(( $(date +%s) + TIMEOUT_SECONDS ))
+              pending=""
+              while :; do
+                pending=""
+                for pvc in $EXPECTED_PVCS; do
+                  phase=$($KC get pvc "$pvc" -o jsonpath='{.status.phase}' 2>/dev/null) || phase=""
+                  [ -n "$phase" ] || phase="MISSING"
+                  [ "$phase" = "Bound" ] || pending="$pending $pvc=$phase"
+                done
+                [ -z "$pending" ] && break
+                [ "$(date +%s)" -ge "$deadline" ] && break
+                echo "...  pvc-bound: waiting for:$pending ($(( deadline - $(date +%s) ))s left)"
+                sleep 5
+              done
+              if [ -z "$pending" ]; then
+                echo "OK  pvc-bound: all release PVCs are Bound ($EXPECTED_PVCS)"
+              else
+                echo "FAIL  pvc-bound: not all release PVCs reached Bound within ${TIMEOUT_SECONDS}s:$pending"
+                fail=1
+              fi
+
+              # ── pvc-storageclass: every release PVC is on the expected class ──
+              for pvc in $EXPECTED_PVCS; do
+                sc=$($KC get pvc "$pvc" -o jsonpath='{.spec.storageClassName}' 2>/dev/null) || sc=""
+                if [ "$sc" = "$EXPECTED_STORAGE_CLASS" ]; then
+                  echo "OK  pvc-storageclass: $pvc is on '$sc'"
+                else
+                  echo "FAIL  pvc-storageclass: $pvc is on '${sc:-<none>}', expected '$EXPECTED_STORAGE_CLASS'"
+                  fail=1
+                fi
+              done
+
+              # ── pv-hostpath: no unmanaged hostPath backing in dynamic mode ──
+              if [ "$HOSTPATH_MODE" = "true" ]; then
+                echo "SKIP  pv-hostpath: hostPath.enabled=true — hostPath PVs are this install's declared storage model; nothing to assert."
+              else
+                for pvc in $EXPECTED_PVCS; do
+                  vol=$($KC get pvc "$pvc" -o jsonpath='{.spec.volumeName}' 2>/dev/null) || vol=""
+                  if [ -z "$vol" ]; then
+                    echo "FAIL  pv-hostpath: PVC $pvc has no bound PersistentVolume to inspect"
+                    fail=1
+                    continue
+                  fi
+                  # Leftover chart hostPath PVs carry a claimRef for our PVC
+                  # names and capture the claim even in dynamic mode (RFC-0003
+                  # D3/D4). Detectable by name with no PV read RBAC.
+                  for legacy in $CHART_HOSTPATH_PVS; do
+                    if [ "$vol" = "$legacy" ]; then
+                      echo "FAIL  pv-hostpath: PVC $pvc is bound to the chart's legacy hostPath PV '$vol' while hostPath.enabled=false — a leftover PV from a previous hostPath install captured this claim."
+                      fail=1
+                    fi
+                  done
+                  if [ "$PV_SCAN" = "true" ]; then
+                    if ! hp=$(kubectl --request-timeout=10s get pv "$vol" -o jsonpath='{.spec.hostPath.path}' 2>/dev/null); then
+                      echo "FAIL  pv-hostpath: could not read PV '$vol' (RBAC or API error) — its backing is UNVERIFIED, and unverified is reported unsealed, never sealed."
+                      fail=1
+                      continue
+                    fi
+                    if [ -z "$hp" ]; then
+                      echo "OK  pv-hostpath: $pvc -> PV $vol has no hostPath backing"
+                    else
+                      allowed=""
+                      for prefix in $NODE_LOCAL_PREFIXES; do
+                        case "$hp" in "$prefix"*) allowed=1 ;; esac
+                      done
+                      if [ -n "$allowed" ]; then
+                        echo "OK  pv-hostpath: $pvc -> PV $vol is provisioner-managed node-local storage at '$hp' (k3s local-path pattern; lives inside the cluster node, dies with the cluster). Host visibility of that path is a cluster-creation fact verified at install level, not from in-cluster."
+                      else
+                        echo "FAIL  pv-hostpath: $pvc -> PV $vol uses hostPath '$hp' while hostPath.enabled=false — dynamic-PVC mode must not place data on an unmanaged host tree."
+                        fail=1
+                      fi
+                    fi
+                  else
+                    echo "WARNING  pv-hostpath: PARTIAL verification for $pvc (clusterScope=false grants no PV read). Verified only that the claim is not bound to a chart legacy hostPath PV by name; the PV spec itself was NOT inspected. Set clusterScope=true for full verification."
+                  fi
+                done
+              fi
+
+              if [ "$fail" != 0 ]; then
+                echo "SEAL-CHECK RESULT: storage-assertions FAILED — treat this environment as UNSEALED for the storage guarantee (a failed or unverifiable check is never claimed sealed)."
+                exit 1
+              fi
+              echo "SEAL-CHECK RESULT: storage-assertions passed."
+          resources:
+            requests:
+              cpu: "20m"
+              memory: "64Mi"
+            limits:
+              cpu: "200m"
+              memory: "256Mi"
+          volumeMounts:
+            - name: home
+              mountPath: /home/kubectl
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: home
+          emptyDir: {}
+        - name: tmp
+          emptyDir: {}
+      {{- if include "tracebloc.useImagePullSecrets" . }}
+      imagePullSecrets:
+        - name: {{ include "tracebloc.registrySecretName" . }}
+      {{- end }}
+---
+# Least-privilege identity for the assertion pod. Test hooks at negative
+# weight: applied before the Job on every `helm test`, removed with it on
+# success (before-hook-creation re-creates cleanly after a failure). The
+# seal-check labels are deliberately NOT applied here — only runnable checks
+# (Jobs) are enumerable under the contract.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ $name }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "tracebloc.labels" . | nindent 4 }}
+  annotations:
+    "helm.sh/hook": test
+    "helm.sh/hook-weight": "-6"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ $name }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "tracebloc.labels" . | nindent 4 }}
+  annotations:
+    "helm.sh/hook": test
+    "helm.sh/hook-weight": "-6"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+rules:
+  - apiGroups: [""]
+    resources: ["persistentvolumeclaims"]
+    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ $name }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "tracebloc.labels" . | nindent 4 }}
+  annotations:
+    "helm.sh/hook": test
+    "helm.sh/hook-weight": "-5"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+subjects:
+  - kind: ServiceAccount
+    name: {{ $name }}
+    namespace: {{ .Release.Namespace }}
+roleRef:
+  kind: Role
+  name: {{ $name }}
+  apiGroup: rbac.authorization.k8s.io
+{{- if $pvScan }}
+---
+# PersistentVolumes are cluster-scoped, so PV introspection needs a
+# ClusterRole — grantable only when the operator allows cluster scope (same
+# condition as the chart's main RBAC in rbac.yaml). With clusterScope=false
+# the pv-hostpath sub-check degrades to the name/claimRef check and says so.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "tracebloc.labels" . | nindent 4 }}
+  annotations:
+    "helm.sh/hook": test
+    "helm.sh/hook-weight": "-6"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+    meta.helm.sh/release-name: {{ .Release.Name }}
+    meta.helm.sh/release-namespace: {{ .Release.Namespace }}
+rules:
+  - apiGroups: [""]
+    resources: ["persistentvolumes"]
+    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "tracebloc.labels" . | nindent 4 }}
+  annotations:
+    "helm.sh/hook": test
+    "helm.sh/hook-weight": "-5"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+    meta.helm.sh/release-name: {{ .Release.Name }}
+    meta.helm.sh/release-namespace: {{ .Release.Namespace }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ $name }}
+    namespace: {{ .Release.Namespace }}
+roleRef:
+  kind: ClusterRole
+  name: {{ $name }}
+  apiGroup: rbac.authorization.k8s.io
+{{- end }}
+{{- end }}
