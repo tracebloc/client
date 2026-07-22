@@ -399,7 +399,14 @@ install_client_helm() {
   # (provision_client) or supplied via dual-mode (TRACEBLOC_CLIENT_ID/PASSWORD or
   # TRACEBLOC_VALUES_FILE). This step renders the values, runs Helm, and shows the
   # services download; the final connect + summary is step f.
-  _ensure_tracebloc_dirs
+  # node-local (RFC-0003 Option C): data lives inside the node, so skip the
+  # world-writable ~/.tracebloc/{data,logs,mysql} dirs; just ensure the base dir
+  # exists for values.yaml + the install log.
+  if [[ "${TB_STORAGE_MODE:-hostpath}" == "node-local" ]]; then
+    mkdir -p "$HOST_DATA_DIR"
+  else
+    _ensure_tracebloc_dirs
+  fi
   local values_file="${HOST_DATA_DIR}/values.yaml"
 
   # ── Dev-mode override: caller-supplied values file ───────────────────────
