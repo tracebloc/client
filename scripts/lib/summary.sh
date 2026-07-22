@@ -92,6 +92,16 @@ _reboot_note() {
   fi
 }
 
+# Is `tracebloc` runnable in the CURRENT shell right now? install-cli.sh records
+# this in TB_CLI_USABLE_NOW (authoritative — it just installed it and probed this
+# shell); fall back to a live PATH check when that wasn't set (e.g. a stale
+# bootstrap skipped the CLI step). Keeps the final CTA from telling the user to
+# run a command this shell can't resolve yet — the ~/.local/bin case (B2).
+_cli_runnable_now() {
+  [[ "${TB_CLI_USABLE_NOW:-}" == "1" ]] && return 0
+  has tracebloc
+}
+
 print_summary() {
   local mode="CPU"
   [[ "$GPU_VENDOR" == "nvidia" ]] && mode="NVIDIA GPU"
@@ -120,7 +130,14 @@ print_summary() {
       echo -e "    2. Create a use case      ${TB_LINK}https://ai.tracebloc.io/my-use-cases${RESET}"
       echo -e "    3. Invite collaborators — ${TB_DESC}they train on your data; it never leaves this machine${RESET}"
       echo ""
-      echo -e "  ${BOLD}Run  ${TB_CMD}tracebloc${RESET}${BOLD}  to get started.${RESET}"
+      if _cli_runnable_now; then
+        echo -e "  ${BOLD}Run  ${TB_CMD}tracebloc${RESET}${BOLD}  to get started.${RESET}"
+      else
+        # Installed, but this shell's PATH predates it (it landed in ~/.local/bin).
+        # install-cli.sh already printed the exact one-liner to load it now; here we
+        # just keep the CTA honest rather than pointing at a command it can't find.
+        echo -e "  ${BOLD}Open a new terminal, then run  ${TB_CMD}tracebloc${RESET}${BOLD}  to get started.${RESET}"
+      fi
       echo ""
       echo -e "  ${DIM}────────────────────────────────────────${RESET}"
       echo -e "  ${DIM}Logs ${logdisp}  ·  Data /tracebloc/${ns}${RESET}"

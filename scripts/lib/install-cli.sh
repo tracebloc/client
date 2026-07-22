@@ -109,6 +109,9 @@ _verify_tracebloc_cli() {
     # never points the user at a command that isn't there (Bugbot).
     local cli_cmd="tracebloc"; has tb && cli_cmd="tb"
     if has tracebloc; then
+      # Resolvable in THIS shell AND in fresh terminals — the summary's CTA can
+      # safely say "Run tracebloc" (B2).
+      TB_CLI_USABLE_NOW=1
       # Usable right now AND in new terminals — the fully-clean verdict, collapsed
       # to ONE line (old→new when this was an update), so the step shows a single
       # ✔ instead of an already-present / re-running / installing / ready pileup.
@@ -178,6 +181,13 @@ install_tracebloc_cli() {
   if has tracebloc; then
     TB_CLI_OLD_VER="$(_cli_version_short)"
   fi
+  # Whether the CLI ends up runnable in THIS shell (not just a fresh terminal).
+  # summary.sh reads it to keep its final CTA honest — "Run tracebloc" vs "Open a
+  # new terminal, then run tracebloc" (B2). Default 0; _verify_tracebloc_cli flips
+  # it to 1 only in the fully-usable branch. Left 0 on any download/install/verify
+  # miss, so the summary never tells the user to run a command this shell can't find.
+  # shellcheck disable=SC2034  # consumed cross-file by summary.sh (_cli_runnable_now)
+  TB_CLI_USABLE_NOW=0
 
   local installer
   installer="$(mktemp)" || { warn "Couldn't install the tracebloc CLI (no temp dir) — your client is set up fine."; return 0; }

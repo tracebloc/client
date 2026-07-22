@@ -128,3 +128,22 @@ setup() {
   run print_summary
   [[ "$output" == *"restarts automatically"* ]]
 }
+
+# ── B2: PATH-aware CTA (grep-based so a false check fails loudly on bash 3.2) ──
+@test "print_summary connected: CTA says 'Run' when the CLI is usable now (B2)" {
+  CLIENT_STATE=connected; OS=Linux
+  helm() { echo "tracebloc tracebloc 1 now deployed client-1.4.4 1.4.4"; }
+  TB_CLI_USABLE_NOW=1
+  run print_summary
+  printf '%s\n' "$output" | grep -qF "to get started"
+  ! printf '%s\n' "$output" | grep -qF "Open a new terminal"
+}
+
+@test "print_summary connected: CTA says 'open a new terminal' when not on PATH yet (B2)" {
+  CLIENT_STATE=connected; OS=Linux
+  helm() { echo "tracebloc tracebloc 1 now deployed client-1.4.4 1.4.4"; }
+  TB_CLI_USABLE_NOW=0
+  has() { [ "$1" = tracebloc ] && return 1; command -v "$1" >/dev/null 2>&1; }
+  run print_summary
+  printf '%s\n' "$output" | grep -qF "Open a new terminal"
+}
