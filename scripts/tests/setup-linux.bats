@@ -333,3 +333,53 @@ setup() {
   [ "$status" -ne 0 ]           # forced to Tier 2 + no_sudo => fail-fast
   printf '%s\n' "$output" | grep -qF "administrator rights"
 }
+
+# ── install_linux tier branching (RFC 0001 #1175) ────────────────────────────
+# Stub every step so the branch is observable without a real install.
+_stub_install_steps() {
+  preflight_sudo()       { record "preflight_sudo"; }
+  setup_pm()             { record "setup_pm"; }
+  apt_wait_for_lock()    { record "apt_wait_for_lock"; }
+  install_docker_engine(){ record "install_docker_engine"; }
+  install_system_deps()  { record "install_system_deps"; }
+  dispatch_gpu_setup()   { record "dispatch_gpu_setup"; }
+  install_kubectl()      { record "install_kubectl"; }
+  install_k3d()          { record "install_k3d"; }
+  install_helm()         { record "install_helm"; }
+}
+
+@test "install_linux: Tier 0 skips every privileged step, installs only user-space tools" {
+  MOCK_CALLS="$(mktemp)"
+  INSTALL_TIER=0
+  _stub_install_steps
+  run install_linux
+  [ "$status" -eq 0 ]
+  mock_calls | grep -q install_kubectl
+  mock_calls | grep -q install_k3d
+  mock_calls | grep -q install_helm
+  ! mock_calls | grep -q preflight_sudo
+  ! mock_calls | grep -q install_docker_engine
+  ! mock_calls | grep -q install_system_deps
+  ! mock_calls | grep -q dispatch_gpu_setup
+}
+
+@test "install_linux: Tier 1 runs the full privileged flow" {
+  MOCK_CALLS="$(mktemp)"
+  INSTALL_TIER=1; PROBE_PRIVILEGE=sudo_nopw
+  _stub_install_steps
+  run install_linux
+  [ "$status" -eq 0 ]
+  mock_calls | grep -q preflight_sudo
+  mock_calls | grep -q install_docker_engine
+  mock_calls | grep -q install_kubectl
+  mock_calls | grep -q dispatch_gpu_setup
+}
+
+@test "install_linux: unset tier (stale bootstrap) runs the full flow" {
+  MOCK_CALLS="$(mktemp)"
+  unset INSTALL_TIER PROBE_PRIVILEGE
+  _stub_install_steps
+  run install_linux
+  [ "$status" -eq 0 ]
+  mock_calls | grep -q install_docker_engine
+}

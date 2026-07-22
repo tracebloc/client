@@ -400,20 +400,11 @@ _route_install_tier() {
   return 0
 }
 
-install_linux() {
-  export DEBIAN_FRONTEND=noninteractive
-  export NEEDRESTART_MODE=a
-  export NEEDRESTART_SUSPEND=1
-
-  _route_install_tier        # RFC 0001: honour the tier + honest fail-fast
-  preflight_sudo
-  setup_pm
-  apt_wait_for_lock          # don't fight apt-daily/unattended-upgrades for the lock
-  install_docker_engine
-  install_system_deps
-
-  # umask 077 (set in common.sh) would make binaries in /usr/local/bin/
-  # executable only by root — relax to 022 for system tool installs
+# _install_userspace_tools — download kubectl / k3d / helm into the user's bin
+# (no root: install-cli-style ~/.local/bin fallback). Shared by the Tier-0 fast
+# path and the full flow so they can't drift. umask 077 (common.sh) would make
+# the binaries executable only by their owner — relax to 022 for the installs.
+_install_userspace_tools() {
   local _saved_umask
   _saved_umask=$(umask)
   umask 022
@@ -421,6 +412,35 @@ install_linux() {
   install_k3d
   install_helm
   umask "$_saved_umask"
+}
 
+install_linux() {
+  export DEBIAN_FRONTEND=noninteractive
+  export NEEDRESTART_MODE=a
+  export NEEDRESTART_SUSPEND=1
+
+  _route_install_tier        # RFC 0001: honour the tier + honest fail-fast
+
+  # ── Tier 0 — a usable container runtime already exists → ZERO privileged
+  # steps (RFC 0001 #1175). Skip sudo priming, the Docker engine install, the
+  # system-package + kernel-module setup, and the privileged GPU-driver install
+  # entirely; just drop the user-space tools in and let create_cluster reuse the
+  # runtime. The biggest unlock for shared/managed hosts (a researcher in the
+  # `docker` group installs with no admin at all). GPU device-plugin deployment
+  # still happens later in create_cluster; only the privileged *driver* install
+  # is skipped (a Tier-0 host with a GPU already has its drivers).
+  if [ "${INSTALL_TIER:-}" = "0" ]; then
+    info "Using the container runtime already on this machine — no administrator rights needed."
+    _install_userspace_tools
+    return 0
+  fi
+
+  # ── Tier 1/2 (or unknown / stale bootstrap) — the full privileged flow.
+  preflight_sudo
+  setup_pm
+  apt_wait_for_lock          # don't fight apt-daily/unattended-upgrades for the lock
+  install_docker_engine
+  install_system_deps
+  _install_userspace_tools
   dispatch_gpu_setup
 }
