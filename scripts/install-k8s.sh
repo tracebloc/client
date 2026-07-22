@@ -136,6 +136,13 @@ main() {
   step_header a "Checking your machine"
   run_preflight
   detect_gpu
+  # RFC 0001 host audit: capability/privilege probe + the chosen install tier.
+  # Sets INSTALL_TIER, which install_linux's _route_install_tier honours. Guarded
+  # so a stale bootstrap without probe.sh simply skips it (routing then proceeds
+  # exactly as before).
+  if declare -F host_audit >/dev/null 2>&1; then
+    host_audit
+  fi
   echo ""; echo ""
 
   # ── b) Install what tracebloc needs ──────────────────────────────────────
