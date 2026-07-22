@@ -76,6 +76,12 @@ fi
 if [[ -f "${LIB_DIR}/assess.sh" ]]; then
   source "${LIB_DIR}/assess.sh"
 fi
+# probe.sh (RFC 0001 host capability/privilege audit) may likewise be absent
+# under a stale bootstrap that didn't fetch it — guard the source so `--diagnose`
+# simply omits the install-tier section instead of aborting under `set -e`.
+if [[ -f "${LIB_DIR}/probe.sh" ]]; then
+  source "${LIB_DIR}/probe.sh"
+fi
 source "${LIB_DIR}/summary.sh"
 source "${LIB_DIR}/diagnose.sh"
 
