@@ -383,3 +383,20 @@ _stub_install_steps() {
   [ "$status" -eq 0 ]
   mock_calls | grep -q install_docker_engine
 }
+
+# ── _set_tools_target: Tier 0 tools must NOT sudo (Bugbot #1175) ─────────────
+@test "_set_tools_target: Tier 0 => ~/.local/bin, no sudo, on PATH" {
+  INSTALL_TIER=0; HOME="$BATS_TEST_TMPDIR"
+  _set_tools_target
+  [ "$TB_TOOLS_DIR" = "$HOME/.local/bin" ]
+  [ -z "$TB_TOOLS_SUDO" ]           # zero-root: no sudo for the tools
+  [ -d "$TB_TOOLS_DIR" ]            # created
+  case ":$PATH:" in *":$TB_TOOLS_DIR:"*) : ;; *) return 1 ;; esac   # on PATH now
+}
+
+@test "_set_tools_target: full flow => /usr/local/bin with sudo" {
+  INSTALL_TIER=1
+  _set_tools_target
+  [ "$TB_TOOLS_DIR" = "/usr/local/bin" ]
+  [ "$TB_TOOLS_SUDO" = "sudo" ]
+}

@@ -284,6 +284,25 @@ install_system_deps() {
 }
 
 # ── kubectl ──────────────────────────────────────────────────────────────────
+# _set_tools_target — decide WHERE kubectl/k3d/helm install and whether that
+# needs sudo, based on the tier (RFC 0001 #1175). On Tier 0 (a usable runtime
+# already exists, no admin) the tools MUST NOT sudo — a docker-group researcher
+# without root would otherwise fail (or hit a hidden password prompt under
+# spin_cmd) at the "zero privileged steps" step. Install them into ~/.local/bin
+# (user-owned) and put it on this process's PATH so create_cluster finds them.
+# Otherwise the system location, with sudo. Sets TB_TOOLS_DIR + TB_TOOLS_SUDO.
+_set_tools_target() {
+  if [ "${INSTALL_TIER:-}" = "0" ]; then
+    TB_TOOLS_DIR="${HOME}/.local/bin"
+    TB_TOOLS_SUDO=""
+    mkdir -p "$TB_TOOLS_DIR"
+    case ":$PATH:" in *":$TB_TOOLS_DIR:"*) ;; *) export PATH="$TB_TOOLS_DIR:$PATH" ;; esac
+  else
+    TB_TOOLS_DIR="/usr/local/bin"
+    TB_TOOLS_SUDO="sudo"
+  fi
+}
+
 _fetch_kubectl() {
   local ver="$1" arch="$2"
   local tmpdir
@@ -295,7 +314,12 @@ _fetch_kubectl() {
   echo "$(cat "${tmpdir}/kubectl.sha256")  ${tmpdir}/kubectl" | sha256sum --check --quiet \
     || { rm -rf "$tmpdir"; error "System tool checksum verification failed"; }
   chmod +x "${tmpdir}/kubectl"
-  sudo mv "${tmpdir}/kubectl" /usr/local/bin/kubectl
+  # Tier 0 → no sudo (TB_TOOLS_SUDO empty, TB_TOOLS_DIR under $HOME).
+  if [ -n "$TB_TOOLS_SUDO" ]; then
+    sudo mv "${tmpdir}/kubectl" "$TB_TOOLS_DIR/kubectl"
+  else
+    mv "${tmpdir}/kubectl" "$TB_TOOLS_DIR/kubectl"
+  fi
   rm -rf "$tmpdir"
 }
 
@@ -322,11 +346,19 @@ install_k3d() {
     https://raw.githubusercontent.com/k3d-io/k3d/main/install.sh -o "$k3d_script"
   chmod +x "$k3d_script"
 
-  # Preserve PATH through sudo: the k3d install script verifies itself with
-  # `command -v k3d` after copying the binary into /usr/local/bin. On RHEL-family
-  # distros sudo's secure_path excludes /usr/local/bin, so that check fails and
-  # the script aborts with "k3d not found". `sudo env PATH=$PATH` keeps it visible.
-  if ! spin_cmd "Installing system tools…" sudo env "PATH=$PATH" bash "$k3d_script"; then
+  # Tier 0 (no admin): install user-space via k3d's own knobs (USE_SUDO=false +
+  # K3D_INSTALL_DIR=~/.local/bin) — no sudo, no password prompt (RFC 0001 #1175).
+  # Otherwise the system dir: preserve PATH through sudo because the k3d script
+  # verifies itself with `command -v k3d` after copying into /usr/local/bin, and
+  # on RHEL-family distros sudo's secure_path excludes it.
+  local _k3d_ok=1
+  if [ -z "$TB_TOOLS_SUDO" ]; then
+    spin_cmd "Installing system tools…" \
+      env "USE_SUDO=false" "K3D_INSTALL_DIR=$TB_TOOLS_DIR" "PATH=$PATH" bash "$k3d_script" || _k3d_ok=0
+  else
+    spin_cmd "Installing system tools…" sudo env "PATH=$PATH" bash "$k3d_script" || _k3d_ok=0
+  fi
+  if [ "$_k3d_ok" -ne 1 ]; then
     rm -f "$k3d_script"
     error "System tool installation failed. See the install log for details."
   fi
@@ -356,7 +388,15 @@ install_helm() {
     retry 3 5 curl -fsSL $CURL_SECURE \
       https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 -o "$helm_script"
     chmod +x "$helm_script"
-    spin_cmd "Installing system tools…" bash "$helm_script"
+    # Tier 0 (no admin): get-helm-3 honours USE_SUDO + HELM_INSTALL_DIR — install
+    # user-space, no sudo (RFC 0001 #1175). Otherwise the script's default
+    # (USE_SUDO=true → /usr/local/bin).
+    if [ -z "$TB_TOOLS_SUDO" ]; then
+      spin_cmd "Installing system tools…" \
+        env "USE_SUDO=false" "HELM_INSTALL_DIR=$TB_TOOLS_DIR" "PATH=$PATH" bash "$helm_script"
+    else
+      spin_cmd "Installing system tools…" bash "$helm_script"
+    fi
     rm -f "$helm_script"
     _ensure_helm_executable
   else
@@ -405,6 +445,7 @@ _route_install_tier() {
 # path and the full flow so they can't drift. umask 077 (common.sh) would make
 # the binaries executable only by their owner — relax to 022 for the installs.
 _install_userspace_tools() {
+  _set_tools_target          # RFC 0001 #1175: Tier 0 → ~/.local/bin, no sudo
   local _saved_umask
   _saved_umask=$(umask)
   umask 022
