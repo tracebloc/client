@@ -459,6 +459,41 @@ _route_install_tier() {
   return 0
 }
 
+# _tools_rc_for_shell — which rc file a *fresh* interactive shell of the user's
+# $SHELL reads, so a PATH line we append is actually sourced. Mirrors
+# install-cli.sh::_cli_rc_for_shell, kept local so this module stays testable on
+# its own: zsh → ~/.zshrc; bash+macOS → ~/.bash_profile; bash+Linux → ~/.bashrc
+# (a fresh non-login bash reads ~/.bashrc, NOT ~/.profile — the failure mode);
+# anything else → POSIX ~/.profile.
+_tools_rc_for_shell() {
+  case "$(basename "${SHELL:-sh}")" in
+    zsh)  echo "${HOME}/.zshrc" ;;
+    bash) if [ "${OS:-}" = "Darwin" ]; then echo "${HOME}/.bash_profile"; else echo "${HOME}/.bashrc"; fi ;;
+    *)    echo "${HOME}/.profile" ;;
+  esac
+}
+
+# _persist_tools_on_path — when Tier 0 dropped kubectl/k3d/helm into the user's
+# ~/.local/bin, that dir usually isn't on a fresh shell's PATH, so the summary's
+# suggested `kubectl …` commands fail in a NEW terminal — and because the CLI can
+# live in /usr/local/bin (already on PATH), nothing else triggers a PATH fix
+# either (Bugbot #375). Persist the dir to the shell rc so future terminals
+# resolve the tools. Idempotent (skips if the rc already references ~/.local/bin)
+# and best-effort — a PATH-persist hiccup must never fail an otherwise-good
+# install. No-op unless we actually used the user-local dir (i.e. Tier 0).
+_persist_tools_on_path() {
+  [ "${TB_TOOLS_DIR:-}" = "${HOME}/.local/bin" ] || return 0
+  local rc; rc="$(_tools_rc_for_shell)"
+  # Already referenced (a prior run, or the user's/distro's own line) → leave it:
+  # a fresh shell already finds the tools, and we must not double-append.
+  if [ -f "$rc" ] && grep -qF '.local/bin' "$rc" 2>/dev/null; then return 0; fi
+  {
+    printf '\n# Added by tracebloc installer (RFC 0001 #1175): user-local tools\n'
+    printf 'export PATH="%s/.local/bin:$PATH"\n' "$HOME"
+  } >> "$rc" 2>/dev/null || return 0
+  hint "Added ${HOME}/.local/bin to your PATH in ${rc} — open a new terminal (or run 'source ${rc}') so kubectl/k3d/helm resolve."
+}
+
 # _install_userspace_tools — download kubectl / k3d / helm into the user's bin
 # (no root: install-cli-style ~/.local/bin fallback). Shared by the Tier-0 fast
 # path and the full flow so they can't drift. umask 077 (common.sh) would make
@@ -472,6 +507,7 @@ _install_userspace_tools() {
   install_k3d
   install_helm
   umask "$_saved_umask"
+  _persist_tools_on_path     # RFC 0001 #1175: keep ~/.local/bin on PATH for new shells (Bugbot #375)
 }
 
 # _tier0_gpu_flags — on Tier 0 we skip the privileged GPU driver/toolkit install,

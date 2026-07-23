@@ -401,6 +401,42 @@ _stub_install_steps() {
   [ "$TB_TOOLS_SUDO" = "sudo" ]
 }
 
+# ── _tools_rc_for_shell + _persist_tools_on_path: keep Tier-0 tools on PATH (#375) ─
+@test "_tools_rc_for_shell: zsh/bash-linux/bash-mac/other" {
+  HOME=/h
+  SHELL=/bin/zsh;  [ "$(_tools_rc_for_shell)" = "/h/.zshrc" ]
+  SHELL=/bin/bash; OS=Linux;  [ "$(_tools_rc_for_shell)" = "/h/.bashrc" ]
+  SHELL=/bin/bash; OS=Darwin; [ "$(_tools_rc_for_shell)" = "/h/.bash_profile" ]
+  SHELL=/bin/dash; OS=Linux;  [ "$(_tools_rc_for_shell)" = "/h/.profile" ]
+}
+
+@test "_persist_tools_on_path: Tier 0 appends ~/.local/bin to the shell rc (#375)" {
+  HOME="$BATS_TEST_TMPDIR"; SHELL=/bin/bash; OS=Linux
+  TB_TOOLS_DIR="$HOME/.local/bin"
+  hint() { :; }
+  _persist_tools_on_path
+  grep -qF "$HOME/.local/bin" "$HOME/.bashrc"
+}
+
+@test "_persist_tools_on_path: idempotent — no double append (#375)" {
+  HOME="$BATS_TEST_TMPDIR"; SHELL=/bin/bash; OS=Linux
+  TB_TOOLS_DIR="$HOME/.local/bin"
+  hint() { :; }
+  _persist_tools_on_path
+  _persist_tools_on_path
+  [ "$(grep -cF '.local/bin' "$HOME/.bashrc")" -eq 1 ]
+}
+
+@test "_persist_tools_on_path: no-op for the full flow (/usr/local/bin) (#375)" {
+  HOME="$BATS_TEST_TMPDIR"; SHELL=/bin/bash; OS=Linux
+  TB_TOOLS_DIR="/usr/local/bin"
+  hint() { echo "must-not-run"; }
+  run _persist_tools_on_path
+  [ "$status" -eq 0 ]
+  [ ! -f "$HOME/.bashrc" ]                 # nothing written
+  [[ "$output" != *"must-not-run"* ]]      # no PATH hint emitted
+}
+
 # ── _tier0_gpu_flags: NVIDIA k3d flag reused only when the runtime exists (#375) ─
 @test "_tier0_gpu_flags: nvidia + configured runtime => --gpus=all" {
   GPU_VENDOR=nvidia; K3D_GPU_FLAGS=()
