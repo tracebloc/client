@@ -68,6 +68,7 @@ setup() {
   sh()               { return 0; }
   _cli_on_fresh_path() { return 0; }     # a brand-new terminal resolves tracebloc
   has()              { return 0; }       # …and so does THIS shell (binary already on PATH)
+  _cli_at_system_dir() { return 0; }     # installed to a system dir → usable in THIS shell too
   tracebloc()        { echo "tracebloc 0.2.0"; }
   run install_tracebloc_cli
   [ "$status" -eq 0 ]
@@ -88,11 +89,31 @@ setup() {
   sh()               { return 0; }
   _cli_on_fresh_path() { return 0; }
   has()              { [[ "$1" == "tracebloc" ]]; }     # tracebloc present, tb absent
+  _cli_at_system_dir() { return 0; }                    # system dir → usable-now verdict path
   tracebloc()        { echo "tracebloc 0.2.0"; }
   run install_tracebloc_cli
   [ "$status" -eq 0 ]
   [[ "$output" == *'run `tracebloc` to use it'* ]]      # named the real binary
   [[ "$output" != *'`tb`'* ]]                           # never a bare `tb` when it doesn't resolve
+}
+
+@test "install_tracebloc_cli: on PATH via ~/.local/bin (not a system dir) → new-terminal verdict, never 'run it now' (#371)" {
+  # The contradictory-verdict bug: has tracebloc is TRUE (install.sh prepends
+  # ~/.local/bin to THIS process) and a fresh shell resolves it, but the binary is
+  # NOT in a system dir, so the user's returning login shell won't see it yet. The
+  # step must NOT print the usable-now verdict (the summary CTA correctly says
+  # "open a new terminal"); the two must agree.
+  curl()             { : > "${@: -1}"; return 0; }
+  sh()               { return 0; }
+  _cli_on_fresh_path() { return 0; }             # a new terminal resolves it
+  has()              { return 0; }               # THIS process resolves it too (PATH prepend)
+  _cli_at_system_dir() { return 1; }             # …but it's in ~/.local/bin, not a system dir
+  SHELL="/bin/zsh"; OS="Linux"
+  tracebloc()        { echo "tracebloc 0.2.0"; }
+  run install_tracebloc_cli
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"open a new terminal"* ]]     # matches the summary CTA
+  [[ "$output" != *"to use it"* ]]               # NEVER the usable-now verdict on this path
 }
 
 @test "install_tracebloc_cli: fresh shell finds it but the CURRENT shell can't → 'new terminals' verdict + load-it-now hint (#304)" {

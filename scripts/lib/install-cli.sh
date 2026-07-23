@@ -120,22 +120,16 @@ _verify_tracebloc_cli() {
     # name was already taken, so the CLI's install.sh skipped it — so the copy
     # never points the user at a command that isn't there (Bugbot).
     local cli_cmd="tracebloc"; has tb && cli_cmd="tb"
-    if has tracebloc; then
-      # Whether the summary's CTA may say "Run tracebloc" NOW vs "open a new
-      # terminal" — gate on WHERE the CLI landed, not `has tracebloc` here (this
-      # process's PATH was mutated with ~/.local/bin by install.sh, so it resolves
-      # the CLI even when the user's returning shell won't). Only a system dir is
-      # unconditionally on that shell's PATH (Bugbot #371).
-      if _cli_at_system_dir "$(command -v tracebloc 2>/dev/null)"; then
-        TB_CLI_USABLE_NOW=1
-      else
-        TB_CLI_USABLE_NOW=0
-      fi
+    # Whether the summary's CTA + this step may say "run it NOW" vs "open a new
+    # terminal" — gate on WHERE the CLI landed, not `has tracebloc` (this process's
+    # PATH was mutated with ~/.local/bin by install.sh, so it resolves the CLI even
+    # when the user's returning shell won't). Only a system dir is unconditionally
+    # on that shell's PATH (Bugbot #371).
+    if has tracebloc && _cli_at_system_dir "$(command -v tracebloc 2>/dev/null)"; then
+      TB_CLI_USABLE_NOW=1
       # Usable right now AND in new terminals — the fully-clean verdict, collapsed
       # to ONE line (old→new when this was an update), so the step shows a single
       # ✔ instead of an already-present / re-running / installing / ready pileup.
-      # The edge-case lines below stay "installed" (it's installed but not yet
-      # usable in this/every shell).
       if [[ -n "${TB_CLI_OLD_VER:-}" && -n "$ver" && "${TB_CLI_OLD_VER}" != "$ver" ]]; then
         # Only claim an upgrade when we CONFIRMED a new version. If the post-install
         # `tracebloc version` probe came back empty ($ver=""), we can't tell whether
@@ -149,10 +143,15 @@ _verify_tracebloc_cli() {
       fi
       return 0
     fi
-    # Persisted for new terminals, but not yet on THIS shell's PATH. The rc
-    # already carries the PATH line (that's why a fresh shell finds it), so the
-    # user just needs a new terminal — or to load the rc into this one. Don't
-    # re-append it; don't over-claim "verified on your PATH" for a shell it isn't.
+    # Installed and persisted for NEW terminals (a fresh shell resolves it — that's
+    # why we're on this branch), but NOT usable in the user's returning shell yet:
+    # either it landed in ~/.local/bin (the login shell fixed its PATH before that
+    # dir existed, #304) or it's otherwise off this shell's PATH. Say "open a new
+    # terminal" — matching the summary CTA — instead of "run it now", which would
+    # fail command-not-found. The earlier code printed the usable-now verdict here
+    # unconditionally, contradicting the summary (Bugbot #371). Keep
+    # TB_CLI_USABLE_NOW=0 so _cli_runnable_now (summary.sh) agrees.
+    TB_CLI_USABLE_NOW=0
     local sh_name; sh_name="$(basename "${SHELL:-/bin/sh}")"
     success "tracebloc CLI installed${ver:+ (v$ver)} — open a new terminal to use \`${cli_cmd}\`."
     if [[ "$sh_name" == "fish" ]]; then
