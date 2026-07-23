@@ -95,7 +95,11 @@ spec:
               set -u
               TIMEOUT={{ $mb.backfillTimeoutSeconds | default 180 }}
               echo "[metadata-backfill] running (timeout ${TIMEOUT}s)"
-              if timeout "${TIMEOUT}" tracebloc-backfill; then
+              # -k 30: if the backfill ignores the SIGTERM at TIMEOUT (or is
+              # wedged), escalate to SIGKILL 30s later so `timeout` can't wait
+              # forever and hang the hook past Helm's --timeout. Worst-case
+              # wrapper runtime is TIMEOUT+30s, still well under the 5m default. (bugbot)
+              if timeout -k 30 "${TIMEOUT}" tracebloc-backfill; then
                 echo "[metadata-backfill] completed"
               else
                 echo "[metadata-backfill] did not finish (exit $?); remaining tables resume on the next upgrade (non-fatal)"

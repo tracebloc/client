@@ -52,7 +52,7 @@ tests:
           value: 0
       - matchRegex:
           path: spec.template.spec.containers[0].args[0]
-          pattern: 'timeout "\$\{TIMEOUT\}" tracebloc-backfill'
+          pattern: 'timeout -k 30 "\$\{TIMEOUT\}" tracebloc-backfill'
       - matchRegex:
           path: spec.template.spec.containers[0].args[0]
           pattern: exit 0
