@@ -351,6 +351,11 @@ _stub_install_steps() {
 @test "install_linux: Tier 0 skips every privileged step, installs only user-space tools" {
   MOCK_CALLS="$(mktemp)"
   INSTALL_TIER=0
+  # Sandbox HOME: the Tier-0 branch runs the REAL _install_userspace_tools, whose
+  # _set_tools_target mkdir's ~/.local/bin and _persist_tools_on_path appends a
+  # PATH line to the shell rc — both would hit the developer's real home without
+  # this (Bugbot #375). Matches the dedicated _set_tools_target/_persist tests.
+  HOME="$BATS_TEST_TMPDIR"
   _stub_install_steps
   run install_linux
   [ "$status" -eq 0 ]
