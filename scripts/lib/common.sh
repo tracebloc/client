@@ -239,21 +239,76 @@ spin_cmd() {
   fi
 }
 
+# ── Root-aware privileged execution (RFC 0001 A2) ────────────────────────────
+#  The installer's privileged steps are written as `sudo <cmd>`. Two gaps that
+#  needlessly excluded real users — a shared-cluster researcher, a root
+#  container/VM:
+#    (a) when we are ALREADY root, sudo is unnecessary — and often ABSENT on
+#        minimal images — so `sudo <cmd>` died with "sudo: command not found"
+#        even though <cmd> would have run fine directly; and
+#    (b) "sudo isn't installed" was reported as "no sudo access", a different and
+#        misleading fix.
+#  We shadow `sudo` with a function so every existing `sudo <cmd>` call site is
+#  fixed with NO edit: as root, run <cmd> directly (no sudo binary needed);
+#  otherwise defer to the real sudo; and when neither is possible, fail the way
+#  the real sudo would (non-zero) so best-effort `sudo … || fallback` sites still
+#  take their fallback. Only `sudo <command>` forms route through here — the sole
+#  option-only uses (`sudo -v` / `sudo -n`) live in preflight_sudo and go through
+#  _real_sudo. Detection + the real binary are wrapped in tiny helpers so the
+#  bats suite can exercise every branch without a real sudo.
+_have_sudo_bin() { type -P sudo >/dev/null 2>&1; }   # real binary, ignoring this fn; no $(...) so a failing probe can't trip set -e on bash <4.4 (Bugbot #372)
+_real_sudo()     { command sudo "$@"; }           # the real sudo, bypassing the shadow
+
+sudo() {
+  if [ "$(id -u)" -eq 0 ]; then
+    "$@"
+  elif _have_sudo_bin; then
+    _real_sudo "$@"
+  else
+    # Not root and no sudo binary. Mimic sudo's own not-found failure (non-zero)
+    # rather than exit, so best-effort call sites keep working; preflight_sudo
+    # aborts up front with an accurate message on the REQUIRED path.
+    echo "sudo: not found (you are not root and sudo is not installed)" >&2
+    return 127
+  fi
+}
+
+# Export the shadow (+ its helpers) so `sudo <cmd>` inside `bash -c '…'` subshells
+# also routes through it — e.g. the apt-lock wait and the RHEL-rebuild (Alma/Rocky/
+# OL) Docker install in setup-linux.sh both run `bash -c '… sudo … …'`. Without
+# export, those child shells resolve the REAL sudo binary, so a root box without
+# sudo installed would still hit "sudo: command not found" there — the exact case
+# A2 fixes everywhere else (review #372). Harmless to non-bash children, which
+# ignore the BASH_FUNC_* environment entries.
+export -f sudo _real_sudo _have_sudo_bin
+
 # ── Sudo preflight — warm the credential cache before spinners hide prompts ──
-#  Call once at the start of install_macos / install_linux.  sudo -v caches
-#  credentials for the default timeout (usually 5–15 min), so subsequent sudo
-#  calls inside spin_cmd won't prompt interactively.
+#  Call once at the start of install_macos / install_linux. Establishes that the
+#  privileged steps below can run, and (when a password is needed) primes the
+#  sudo credential once so later steps behind spinners don't re-prompt.
 preflight_sudo() {
-  if sudo -n true 2>/dev/null; then
+  # Already root — nothing to prime; the sudo() shadow runs privileged steps
+  # directly and needs no sudo binary. Fixes root containers/VMs and minimal
+  # images without sudo (A2).
+  if [ "$(id -u)" -eq 0 ]; then
     return 0
   fi
-  # Step b intro copy (first-run run-through): one line, then the system's own
-  # "Password:" prompt from `sudo -v`. Kept generic so it reads correctly on both
-  # macOS (Docker Desktop) and Linux (Docker Engine + system packages).
+  # Not root AND no sudo binary — the honest, actionable failure (previously
+  # conflated with "no sudo access").
+  if ! _have_sudo_bin; then
+    error "This machine needs administrator rights to install Docker and system tools, but you are not root and sudo isn't installed. Re-run as root, or install sudo (e.g. apt-get install sudo) and try again."
+  fi
+  # Sudo present and already usable without a password (cached / NOPASSWD).
+  if _real_sudo -n true 2>/dev/null; then
+    return 0
+  fi
+  # Prompt once, then keep the credential warm. One line, then the system's own
+  # "Password:" prompt. Kept generic so it reads correctly on macOS (Docker
+  # Desktop) and Linux (Docker Engine + system packages).
   hint "tracebloc needs your password once to set up Docker and a few tools."
   echo ""
-  sudo -v || error "Could not obtain administrator privileges. Re-run with a user that has sudo access."
-  ( while sudo -n true 2>/dev/null; do sleep 50; done ) &
+  _real_sudo -v || error "Could not obtain administrator privileges (sudo authentication failed). Re-run as a user allowed to sudo, or as root."
+  ( while _real_sudo -n true 2>/dev/null; do sleep 50; done ) &
   SUDO_KEEPALIVE_PID=$!
 }
 

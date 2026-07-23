@@ -199,3 +199,80 @@ setup() {
   [[ "$output" != *"Setting up"* ]]
   unset TRACEBLOC_BANNER_SHOWN
 }
+
+# ── Root-aware sudo + preflight (RFC 0001 A2) ────────────────────────────────
+# _have_sudo_bin / _real_sudo are stubbed so every branch runs without a real
+# sudo; the payload command is a recordable mock so the root path never shells
+# out to a real binary.
+@test "sudo(): as root, runs the command directly — no real sudo" {
+  MOCK_CALLS="$(mktemp)"
+  id() { echo 0; }
+  modprobe() { record "modprobe $*"; }
+  _real_sudo() { record "real_sudo $*"; }
+  run sudo modprobe overlay
+  [ "$status" -eq 0 ]
+  mock_calls | grep -q "modprobe overlay"
+  ! mock_calls | grep -q "real_sudo"
+}
+
+@test "sudo(): non-root with sudo present defers to the real sudo" {
+  MOCK_CALLS="$(mktemp)"
+  id() { echo 1000; }
+  _have_sudo_bin() { return 0; }
+  _real_sudo() { record "real_sudo $*"; }
+  run sudo modprobe overlay
+  [ "$status" -eq 0 ]
+  mock_calls | grep -q "real_sudo modprobe overlay"
+}
+
+@test "sudo(): non-root without sudo returns 127 (best-effort friendly), never exits" {
+  id() { echo 1000; }
+  _have_sudo_bin() { return 1; }
+  run sudo modprobe overlay
+  [ "$status" -eq 127 ]
+}
+
+@test "preflight_sudo: root returns 0 with no sudo binary needed" {
+  id() { echo 0; }
+  _have_sudo_bin() { return 1; }   # even with NO sudo, root is fine
+  _real_sudo() { echo "must-not-run"; return 1; }
+  run preflight_sudo
+  [ "$status" -eq 0 ]
+}
+
+@test "preflight_sudo: non-root + no sudo => accurate error, not 'no sudo access'" {
+  id() { echo 1000; }
+  _have_sudo_bin() { return 1; }
+  run preflight_sudo
+  [ "$status" -ne 0 ]
+  printf '%s\n' "$output" | grep -qF "isn't installed"
+}
+
+@test "preflight_sudo: non-root + passwordless sudo returns 0 (no prompt)" {
+  id() { echo 1000; }
+  _have_sudo_bin() { return 0; }
+  _real_sudo() { case "$*" in "-n true") return 0 ;; *) return 1 ;; esac; }
+  run preflight_sudo
+  [ "$status" -eq 0 ]
+}
+
+@test "sudo(): exported so a bash -c subshell inherits the shadow (#372)" {
+  # The nested `sudo <cmd>` in setup-linux.sh's bash -c blocks (apt-lock wait,
+  # RHEL-rebuild Docker install) must route through OUR shadow, not the real sudo.
+  # A child bash sees the function only if it was exported (export -f in common.sh).
+  run bash -c 'declare -F sudo >/dev/null && declare -f sudo | grep -q _real_sudo && echo INHERITED'
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"INHERITED"* ]]
+}
+
+@test "_have_sudo_bin: set -e safe when sudo is absent (no command substitution, #372)" {
+  # The pre-fix body wrapped `type -P sudo` in `[ -n "$(...)" ]`. On bash <4.4
+  # (Amazon Linux 2's 4.2, and this dev host's 3.2) a failing command
+  # substitution trips `set -e` EVEN inside an `if` condition, so the non-root/
+  # no-sudo path aborted before preflight_sudo could print its clear message.
+  # The whole-body `type -P` form has no substitution and must survive.
+  run bash -c "set -e; PATH=/nonexistent; $(declare -f _have_sudo_bin); if _have_sudo_bin; then echo yes; else echo no; fi; echo survived"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"no"* ]]
+  [[ "$output" == *"survived"* ]]
+}
