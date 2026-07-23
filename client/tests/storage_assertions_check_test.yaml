@@ -211,7 +211,48 @@ tests:
           path: spec.template.spec.containers[0].env
           content:
             name: NODE_LOCAL_PREFIXES
-            value: "/var/lib/rancher/ /opt/local-path-provisioner"
+            value: "/var/lib/rancher/ /opt/local-path-provisioner/"
+        documentIndex: 0
+
+  - it: matches node-local prefixes on whole path segments only — a sibling like /opt/local-path-provisioner-evil must FAIL (bugbot, PR #378)
+    asserts:
+      # entries are normalized first (trailing slash stripped)...
+      - matchRegex:
+          path: spec.template.spec.containers[0].command[2]
+          pattern: 'p=\$\{prefix%/\}'
+        documentIndex: 0
+      # ...then a prefix admits exactly itself or paths UNDER it (segment
+      # boundary), so a sibling path can never ride the allowlist
+      - matchRegex:
+          path: spec.template.spec.containers[0].command[2]
+          pattern: 'case "\$hp" in "\$p"\|"\$p"/\*\)'
+        documentIndex: 0
+      # the old bare-prefix glob (admitted /opt/local-path-provisioner-evil)
+      # must not come back
+      - notMatchRegex:
+          path: spec.template.spec.containers[0].command[2]
+          pattern: 'in "\$prefix"\*'
+        documentIndex: 0
+
+  - it: suppresses the partial-verification WARNING for a claim that already FAILED the legacy-name check (bugbot, PR #378)
+    set:
+      clusterScope: false
+    asserts:
+      # a legacy-name FAIL is latched per claim...
+      - matchRegex:
+          path: spec.template.spec.containers[0].command[2]
+          pattern: legacy_hit=1
+        documentIndex: 0
+      # ...and the clusterScope=false WARNING ("verified NOT bound to a
+      # legacy PV") only prints when that name check actually passed —
+      # never contradicting a FAIL printed just above
+      - matchRegex:
+          path: spec.template.spec.containers[0].command[2]
+          pattern: 'elif \[ -z "\$legacy_hit" \]'
+        documentIndex: 0
+      - matchRegex:
+          path: spec.template.spec.containers[0].command[2]
+          pattern: "PARTIAL verification"
         documentIndex: 0
 
   - it: runs restricted-PSA clean (non-root, no caps, read-only root, seccomp)

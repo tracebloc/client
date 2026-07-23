@@ -117,7 +117,9 @@ Two deliberate nuances, both grounded in RFC-0003:
   but live inside the cluster node's filesystem and die with the cluster —
   exactly the RFC-0003 **Option C** ("node-local") model. Paths under
   `sealCheck.storageAssertions.nodeLocalPathPrefixes` (default:
-  `/var/lib/rancher/`, `/opt/local-path-provisioner`) therefore pass, with
+  `/var/lib/rancher/`, `/opt/local-path-provisioner/`; entries match whole
+  path segments — a prefix admits itself and paths under it, never sibling
+  paths) therefore pass, with
   an `OK` line stating the caveat: whether such a path is *additionally*
   host-visible is a cluster-creation fact (a bind mount) that cannot be
   observed from inside the cluster — it is verified at install level, not

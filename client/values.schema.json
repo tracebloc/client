@@ -292,7 +292,7 @@
             "nodeLocalPathPrefixes": {
               "type": "array",
               "items": { "type": "string" },
-              "description": "hostPath prefixes accepted as provisioner-managed node-local storage in dynamic mode (k3s local-path: /var/lib/rancher/…; upstream local-path-provisioner: /opt/local-path-provisioner). Any other hostPath backing fails the check."
+              "description": "hostPath prefixes accepted as provisioner-managed node-local storage in dynamic mode (k3s local-path: /var/lib/rancher/…; upstream local-path-provisioner: /opt/local-path-provisioner/). Entries match whole path segments (trailing slash optional) — a prefix admits itself and paths under it, never sibling paths. Any other hostPath backing fails the check."
             },
             "image": {
               "type": "object",

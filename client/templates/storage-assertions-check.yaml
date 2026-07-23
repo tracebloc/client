@@ -54,7 +54,7 @@
 {{- $img := default dict $cfg.image }}
 {{- $pvScan := ne .Values.clusterScope false }}
 {{- $hostPathMode := (default dict .Values.hostPath).enabled }}
-{{- $nodeLocalPrefixes := dig "nodeLocalPathPrefixes" (list "/var/lib/rancher/" "/opt/local-path-provisioner") $cfg }}
+{{- $nodeLocalPrefixes := dig "nodeLocalPathPrefixes" (list "/var/lib/rancher/" "/opt/local-path-provisioner/") $cfg }}
 apiVersion: batch/v1
 kind: Job
 metadata:
@@ -193,10 +193,12 @@ spec:
                   # Leftover chart hostPath PVs carry a claimRef for our PVC
                   # names and capture the claim even in dynamic mode (RFC-0003
                   # D3/D4). Detectable by name with no PV read RBAC.
+                  legacy_hit=""
                   for legacy in $CHART_HOSTPATH_PVS; do
                     if [ "$vol" = "$legacy" ]; then
                       echo "FAIL  pv-hostpath: PVC $pvc is bound to the chart's legacy hostPath PV '$vol' while hostPath.enabled=false — a leftover PV from a previous hostPath install captured this claim."
                       fail=1
+                      legacy_hit=1
                     fi
                   done
                   if [ "$PV_SCAN" = "true" ]; then
@@ -209,8 +211,14 @@ spec:
                       echo "OK  pv-hostpath: $pvc -> PV $vol has no hostPath backing"
                     else
                       allowed=""
+                      # Whole-path-segment match: a prefix admits itself and
+                      # paths under it, never siblings — /opt/local-path-provisioner
+                      # must not admit /opt/local-path-provisioner-evil. Trailing
+                      # slashes on entries are normalized away, so both entry
+                      # styles behave identically. (bugbot, PR #378)
                       for prefix in $NODE_LOCAL_PREFIXES; do
-                        case "$hp" in "$prefix"*) allowed=1 ;; esac
+                        p=${prefix%/}
+                        case "$hp" in "$p"|"$p"/*) allowed=1 ;; esac
                       done
                       if [ -n "$allowed" ]; then
                         echo "OK  pv-hostpath: $pvc -> PV $vol is provisioner-managed node-local storage at '$hp' (k3s local-path pattern; lives inside the cluster node, dies with the cluster). Host visibility of that path is a cluster-creation fact verified at install level, not from in-cluster."
@@ -219,7 +227,11 @@ spec:
                         fail=1
                       fi
                     fi
-                  else
+                  elif [ -z "$legacy_hit" ]; then
+                    # Only when the legacy-name check passed: after a FAIL just
+                    # above, "verified not bound to a legacy PV" would be a
+                    # claim the check did not make — the FAIL alone is the
+                    # honest verdict for that claim. (bugbot, PR #378)
                     echo "WARNING  pv-hostpath: PARTIAL verification for $pvc (clusterScope=false grants no PV read). Verified only that the claim is not bound to a chart legacy hostPath PV by name; the PV spec itself was NOT inspected. Set clusterScope=true for full verification."
                   fi
                 done

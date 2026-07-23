@@ -262,12 +262,14 @@ sealCheck:
     # hostPath prefixes accepted as provisioner-managed NODE-LOCAL storage in
     # dynamic mode: the k3s bundled local-path provisioner
     # (/var/lib/rancher/…) and upstream local-path-provisioner's default
-    # (/opt/local-path-provisioner). Any other hostPath backing in dynamic
+    # (/opt/local-path-provisioner/). Any other hostPath backing in dynamic
     # mode fails the check. Extend only for a provisioner you trust to keep
-    # data inside the cluster node.
+    # data inside the cluster node. Entries match whole path segments (a
+    # trailing slash is optional): a prefix admits itself and paths under
+    # it, never sibling paths like /opt/local-path-provisioner-evil.
     nodeLocalPathPrefixes:
       - /var/lib/rancher/
-      - /opt/local-path-provisioner
+      - /opt/local-path-provisioner/
     # kubectl-capable image for the assertion pod — same image the
     # image-refresh CronJob uses; the tag pins kubectl so behaviour cannot
     # drift if upstream re-tags.
