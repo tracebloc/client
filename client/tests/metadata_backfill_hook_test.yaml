@@ -43,12 +43,11 @@ tests:
 
   - it: is best-effort — self-bounded by timeout, always exits 0, deadline backstops a stuck pull
     asserts:
-      # Job-level backstop bounds an ImagePullBackOff/Pending pod below Helm's
-      # timeout (backfillTimeoutSeconds 120 + 120 = 240); the in-container timeout
-      # exits a healthy run well before it.
+      # Job-level backstop bounds an ImagePullBackOff/Pending pod (backfillTimeout
+      # 120 + 30 grace + 120 pull = 270), sized to exceed a healthy cold-pull run.
       - equal:
           path: spec.activeDeadlineSeconds
-          value: 240
+          value: 270
       - equal:
           path: spec.backoffLimit
           value: 0

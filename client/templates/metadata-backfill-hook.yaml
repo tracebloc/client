@@ -54,16 +54,22 @@ metadata:
 spec:
   # activeDeadlineSeconds is a Job-level BACKSTOP for a pod that never runs its
   # container — chiefly ImagePullBackOff, which sits Pending forever (backoffLimit
-  # can't catch it, since Pending isn't a failed attempt). Without it, such a pod
-  # would hang the hook until Helm's own --timeout before failing. Set it well
-  # under Helm's 5m default (backfillTimeoutSeconds + 120s = 240s at the default:
-  # +30s kill grace, +90s pull/scheduling), so a stuck pull fails FAST and the
-  # hourly auto-upgrade retries. It does NOT gate a healthy run: the in-container
-  # `timeout` (see args) exits ~150s in, well before this deadline, so a running
-  # sweep is never killed by it. A genuinely un-pullable image still fails the
-  # upgrade — irreducible for a synchronous hook running the ingestor image — but
-  # now quickly and self-healing once the registry recovers. (bugbot)
-  activeDeadlineSeconds: {{ add (int ($mb.backfillTimeoutSeconds | default 120)) 120 }}
+  # can't catch it, since Pending isn't a failed attempt). Without it such a pod
+  # hangs the hook until Helm's own --timeout before failing.
+  #
+  # It is Job wall-clock and INCLUDES the image pull, so it must exceed
+  # (cold pull + full in-container run) or it would kill a HEALTHY sweep. Budget:
+  #   backfillTimeoutSeconds (in-container sweep) + 30s kill grace + 120s cold
+  #   pull/scheduling = 270s at the default.
+  # A healthy run therefore fits (warm pull ≈ instant; a cold pull up to ~120s
+  # plus the ≤150s container still lands on the deadline), while a Pending/stuck
+  # pod is bounded at 270s. That is well under the auto-upgrade CronJob's 10m
+  # --timeout (the path this feature targets); on a MANUAL `helm install/upgrade`
+  # use `--timeout 10m` on a cold cluster, since the 5m default leaves little room
+  # once resource rollout + a first-ever pull are counted. A pull slower than the
+  # budget hits the deadline and fails that upgrade, then self-heals on the next
+  # one (the image is cached by then). (bugbot)
+  activeDeadlineSeconds: {{ add (int ($mb.backfillTimeoutSeconds | default 120)) 150 }}
   # backoffLimit 0: never retry a failed pod (a retry loop would only burn more
   # of Helm's wait). The deadline above is the real bound.
   backoffLimit: 0

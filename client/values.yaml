@@ -563,13 +563,14 @@ metadataBackfill:
   # fails. Remaining tables resume on the next upgrade (the sweep is idempotent
   # and skips already-backfilled datasets).
   #
-  # MUST stay comfortably under Helm's --timeout with headroom for image pull +
-  # pod scheduling (which Helm counts against its hook wait, but the in-container
-  # `timeout` does not). The binding case is a MANUAL `helm install/upgrade`,
-  # whose default --timeout is 5m — not the auto-upgrade CronJob's 10m. Budget:
-  # worst-case in-container = this + the 30s SIGKILL grace, so 120 -> 150s, which
-  # leaves ~150s of the 5m default for a cold ghcr.io pull + scheduling (and
-  # ~450s under the auto-upgrade's 10m). (bugbot)
+  # In-container sweep budget. Worst-case container runtime is this + the 30s
+  # SIGKILL grace (150s at the default). The Job's activeDeadlineSeconds is
+  # derived as this + 30s grace + 120s cold-pull/scheduling allowance (270s at
+  # the default) and is what bounds a stuck/Pending pod — see the hook template.
+  # Keep this small enough that (this + 30 + 120) stays under your Helm --timeout:
+  # comfortable under the auto-upgrade's 10m (the target path); on a MANUAL
+  # `helm install/upgrade` on a cold cluster pass `--timeout 10m` rather than
+  # relying on the 5m default. (bugbot)
   backfillTimeoutSeconds: 120
   # Small: the sweep is I/O-bound on MySQL aggregates + backend calls.
   resources:
