@@ -244,6 +244,17 @@ setup() {
   [[ "$output" == *"sudo systemctl enable docker"* ]]
 }
 
+@test "ensure_cluster_autostart: Tier 0 sets restart policy but does NOT sudo-enable docker.service (#375)" {
+  OS=Linux; INSTALL_TIER=0
+  docker() { if [[ "$1 $2" == "ps -a" ]]; then echo "k3d-tracebloc-server-0"; else record "docker $*"; fi; }
+  sudo()   { record "sudo $*"; }
+  has()    { return 0; }
+  ensure_cluster_autostart
+  run mock_calls
+  [[ "$output" == *"docker update --restart unless-stopped"* ]]   # reboot policy still set (no privilege)
+  [[ "$output" != *"systemctl enable docker"* ]]                  # but no sudo autostart on the zero-root path
+}
+
 @test "ensure_cluster_autostart: macOS does not enable docker.service" {
   OS=Darwin
   docker() { if [[ "$1 $2" == "ps -a" ]]; then echo "k3d-tracebloc-server-0"; else record "docker $*"; fi; }

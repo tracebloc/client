@@ -4,6 +4,16 @@
 #                   system deps, kubectl, k3d, helm, GPU dispatch
 # =============================================================================
 
+# ── Tool-install target defaults ─────────────────────────────────────────────
+# WHERE kubectl/k3d/helm install, and whether that needs sudo. Default to the
+# system location; _set_tools_target() overrides at runtime (Tier 0 flips these
+# to a no-sudo ~/.local/bin). Defaulted here so any caller that reaches the
+# install_* functions WITHOUT going through _set_tools_target — the bats suite,
+# e2e harnesses — still gets the system behaviour, not an empty TB_TOOLS_DIR
+# (kubectl → "/kubectl") or a spurious no-sudo branch (Bugbot #1175 r2).
+: "${TB_TOOLS_DIR:=/usr/local/bin}"
+: "${TB_TOOLS_SUDO:=sudo}"
+
 # ── Package manager detection ────────────────────────────────────────────────
 setup_pm() {
   # apt note: Ubuntu 22.04+ ships needrestart, which hooks `apt-get install` and
