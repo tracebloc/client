@@ -459,12 +459,14 @@ _route_install_tier() {
   return 0
 }
 
-# _tools_rc_for_shell — which rc file a *fresh* interactive shell of the user's
-# $SHELL reads, so a PATH line we append is actually sourced. Mirrors
+# _tools_rc_for_shell — which POSIX rc file a *fresh* interactive shell of the
+# user's $SHELL reads, so a PATH line we append is actually sourced. Mirrors
 # install-cli.sh::_cli_rc_for_shell, kept local so this module stays testable on
 # its own: zsh → ~/.zshrc; bash+macOS → ~/.bash_profile; bash+Linux → ~/.bashrc
 # (a fresh non-login bash reads ~/.bashrc, NOT ~/.profile — the failure mode);
-# anything else → POSIX ~/.profile.
+# anything else → POSIX ~/.profile. fish is NOT a POSIX shell (no `export`, reads
+# ~/.config/fish, not these files) and is handled separately in
+# _persist_tools_on_path — never routed here.
 _tools_rc_for_shell() {
   case "$(basename "${SHELL:-sh}")" in
     zsh)  echo "${HOME}/.zshrc" ;;
@@ -483,6 +485,14 @@ _tools_rc_for_shell() {
 # install. No-op unless we actually used the user-local dir (i.e. Tier 0).
 _persist_tools_on_path() {
   [ "${TB_TOOLS_DIR:-}" = "${HOME}/.local/bin" ] || return 0
+  # fish reads ~/.config/fish, not the POSIX rc files, and uses `set`/fish_add_path
+  # rather than `export PATH=`. Appending a bash `export` line to ~/.profile would
+  # be dead (fish never loads it), so hint the fish-correct command instead — it
+  # persists (a universal var) AND applies to the current shell (Bugbot #375).
+  if [ "$(basename "${SHELL:-sh}")" = "fish" ]; then
+    hint "Add ${HOME}/.local/bin to your PATH so kubectl/k3d/helm resolve:  fish_add_path \"${HOME}/.local/bin\""
+    return 0
+  fi
   local rc; rc="$(_tools_rc_for_shell)"
   # Already referenced (a prior run, or the user's/distro's own line) → leave it:
   # a fresh shell already finds the tools, and we must not double-append.
@@ -525,7 +535,7 @@ _tier0_gpu_flags() {
     success "Reusing the NVIDIA container runtime already configured — your environment will have GPU access."
   else
     warn "NVIDIA GPU detected, but Docker's NVIDIA runtime isn't configured (installing the toolkit needs admin) — your environment will be CPU-only."
-    hint "To enable GPU, have an admin install nvidia-container-toolkit (or run: curl -fsSL https://tracebloc.io/i.sh | bash -s -- prepare-host), then re-run."
+    hint "To enable GPU, have an admin install and configure nvidia-container-toolkit on this host, then re-run."
   fi
 }
 

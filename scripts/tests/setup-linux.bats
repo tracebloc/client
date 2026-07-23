@@ -437,6 +437,16 @@ _stub_install_steps() {
   [[ "$output" != *"must-not-run"* ]]      # no PATH hint emitted
 }
 
+@test "_persist_tools_on_path: fish gets fish_add_path, no dead export in ~/.profile (#375)" {
+  HOME="$BATS_TEST_TMPDIR"; SHELL=/usr/bin/fish; OS=Linux
+  TB_TOOLS_DIR="$HOME/.local/bin"
+  hint() { echo "$*"; }
+  run _persist_tools_on_path
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"fish_add_path"* ]]     # fish-correct guidance
+  [ ! -f "$HOME/.profile" ]                # did NOT write a bash export fish can't read
+}
+
 # ── _tier0_gpu_flags: NVIDIA k3d flag reused only when the runtime exists (#375) ─
 @test "_tier0_gpu_flags: nvidia + configured runtime => --gpus=all" {
   GPU_VENDOR=nvidia; K3D_GPU_FLAGS=()
