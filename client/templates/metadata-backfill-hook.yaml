@@ -1,4 +1,12 @@
-{{- if .Values.metadataBackfill.enabled }}
+{{- /* Nil-guard the whole block: an `--reuse-values` upgrade from a release
+       that predates the `metadataBackfill` key stores no such value, so
+       `.Values.metadataBackfill` is nil and a bare `.enabled` access would fail
+       template rendering (same hazard the images.ingestor keys guard against).
+       Absent key => feature off on that path; the production auto-upgrade uses
+       `--reset-then-reuse-values`, which layers in the new default (enabled:
+       true), so the backfill still runs on the real upgrade path. */ -}}
+{{- $mb := default (dict) .Values.metadataBackfill -}}
+{{- if $mb.enabled }}
 {{- $ing := default dict .Values.images.ingestor -}}
 {{- $repo := $ing.repository | default "ghcr.io/tracebloc/ingestor" -}}
 {{- $digest := $ing.digest | default "" -}}
@@ -42,7 +50,7 @@ spec:
   # Best-effort: the container always exits 0 (see args), so backoff/deadline
   # only bound a genuinely stuck pod rather than gating correctness.
   backoffLimit: 1
-  activeDeadlineSeconds: {{ .Values.metadataBackfill.deadlineSeconds | default 1800 }}
+  activeDeadlineSeconds: {{ $mb.deadlineSeconds | default 1800 }}
   ttlSecondsAfterFinished: 86400
   template:
     metadata:
@@ -115,7 +123,7 @@ spec:
             capabilities:
               drop: ["ALL"]
           resources:
-            {{- toYaml .Values.metadataBackfill.resources | nindent 12 }}
+            {{- toYaml ($mb.resources | default dict) | nindent 12 }}
           volumeMounts:
             - name: tmp
               mountPath: /tmp
