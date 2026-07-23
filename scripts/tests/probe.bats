@@ -68,11 +68,18 @@ setup() {
   [ "$INSTALL_TIER_REASON" = no-cgroup2 ]
 }
 
-@test "classify: non-Linux, no runtime => Tier 2 (needs-docker-desktop)" {
+@test "classify: macOS, no runtime => Tier 2 (needs-docker-desktop)" {
   OS=Darwin; PROBE_RUNTIME_USABLE=0
   _classify_from_probes
   [ "$INSTALL_TIER" = 2 ]
   [ "$INSTALL_TIER_REASON" = needs-docker-desktop ]
+}
+
+@test "classify: other non-Linux (Git Bash/MINGW) => Tier 2 (unsupported-os), not Docker Desktop (#370)" {
+  OS="MINGW64_NT-10.0"; PROBE_RUNTIME_USABLE=0
+  _classify_from_probes
+  [ "$INSTALL_TIER" = 2 ]
+  [ "$INSTALL_TIER_REASON" = unsupported-os ]
 }
 
 # ── _probe_privilege: the four postures ──────────────────────────────────────
@@ -128,6 +135,16 @@ setup() {
   TB_PROBE_VERIFY=1
   _probe_verify_runtime
   assert_has "docker run" "$(mock_calls)"
+}
+
+@test "run_host_probes: --verify demotes a daemon that answers docker info but can't run a container (#370)" {
+  OS=Linux; TB_PROBE_VERIFY=1
+  docker() { case "$1" in info) return 0 ;; run) return 1 ;; version) echo "27.0" ;; *) return 0 ;; esac; }
+  id() { echo 1000; }
+  has() { case "$1" in docker) return 0 ;; sudo) return 1 ;; *) command -v "$1" >/dev/null 2>&1 ;; esac; }
+  run_host_probes
+  [ "$PROBE_RUNTIME_USABLE" = 0 ]   # docker info OK but `docker run` failed => not usable
+  [ "$INSTALL_TIER" != 0 ]          # so NOT Tier 0
 }
 
 # ── render_host_audit: the panel ──────────────────────────────────────────────

@@ -110,11 +110,16 @@ _classify_from_probes() {
     return 0
   fi
 
-  # No usable runtime. On non-Linux (macOS) the runtime is Docker Desktop, whose
-  # install/start is a privileged, GUI step — treat as Tier 2 with an OS-specific
-  # reason so the audit can give the right remedy.
-  if [[ "${OS:-}" != "Linux" ]]; then
+  # No usable runtime. On macOS the runtime is Docker Desktop (a privileged GUI
+  # install) → Tier 2 with a Docker-Desktop remedy. Any OTHER non-Linux (e.g. Git
+  # Bash / MINGW on Windows) isn't served by this bash installer at all — say so
+  # rather than misdirect to Docker Desktop (Bugbot #370).
+  if [[ "${OS:-}" == "Darwin" ]]; then
     INSTALL_TIER=2; INSTALL_TIER_REASON="needs-docker-desktop"
+    return 0
+  fi
+  if [[ "${OS:-}" != "Linux" ]]; then
+    INSTALL_TIER=2; INSTALL_TIER_REASON="unsupported-os"
     return 0
   fi
 
@@ -136,7 +141,16 @@ _classify_from_probes() {
 # assignments (not `probe && VAR=1`) so a failing probe can't trip `set -e`.
 run_host_probes() {
   PROBE_RUNTIME_USABLE=0
-  if _probe_runtime_usable; then PROBE_RUNTIME_USABLE=1; fi
+  if _probe_runtime_usable; then
+    PROBE_RUNTIME_USABLE=1
+    # --verify (opt-in, TB_PROBE_VERIFY=1): confirm end-to-end by actually running
+    # a throwaway container. A daemon that answers `docker info` but can't run a
+    # container (broken storage driver, etc.) is then correctly NOT usable. Off by
+    # default — this is the ONLY probe that pulls an image.
+    if [[ "${TB_PROBE_VERIFY:-0}" == "1" ]] && ! _probe_verify_runtime; then
+      PROBE_RUNTIME_USABLE=0
+    fi
+  fi
 
   PROBE_PRIVILEGE="$(_probe_privilege)"
 
@@ -204,6 +218,7 @@ render_host_audit() {
     2)
       case "${INSTALL_TIER_REASON:-}" in
         needs-docker-desktop) echo -e "  ${TB_HEADING}→ Install tier${RESET}  Tier 2 — Docker isn't running; start/install Docker Desktop (needs admin once)." ;;
+        unsupported-os)       echo -e "  ${TB_HEADING}→ Install tier${RESET}  Tier 2 — this OS isn't supported by this installer; on Windows use the PowerShell installer (install.ps1)." ;;
         no-cgroup2)           echo -e "  ${TB_HEADING}→ Install tier${RESET}  Tier 2 — this kernel isn't on cgroup v2; a one-time admin step is needed." ;;
         no-userns)            echo -e "  ${TB_HEADING}→ Install tier${RESET}  Tier 2 — unprivileged user namespaces are disabled; a one-time admin step is needed." ;;
         *)                    echo -e "  ${TB_HEADING}→ Install tier${RESET}  Tier 2 — a one-time admin step is needed to prepare this host." ;;
