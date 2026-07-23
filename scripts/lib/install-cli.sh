@@ -114,6 +114,11 @@ _verify_tracebloc_cli() {
     # `tracebloc version` is the real proof; keep it cosmetic (never let a failing
     # version call or a SIGPIPE flip the outcome). The canonical "tracebloc
     # data ingest ./data" next step lives in the summary's "What to do next".
+    # A fresh terminal WILL resolve tracebloc (that's this whole branch). The
+    # summary CTA uses this to pick "open a new terminal" (case A) over the
+    # PATH-fix guidance it must give when even a new shell can't find it (case B,
+    # the outer fall-through below) — Bugbot #371.
+    TB_CLI_ON_FRESH_PATH=1
     local ver; ver="$(_cli_version_short)"
     # Prefer the short `tb` alias (the CLI installer symlinks it next to
     # `tracebloc`); fall back to `tracebloc` when that alias wasn't created — its
@@ -167,6 +172,10 @@ _verify_tracebloc_cli() {
   # Installed, but a fresh terminal won't find it (e.g. it landed in
   # ~/.local/bin, which isn't on PATH). Tell the user precisely how to fix it
   # for THEIR shell — not a generic "open a new terminal" that won't help.
+  # Not usable now AND a new shell won't resolve it either (case B): the summary
+  # CTA must point at the PATH fix below, NOT "open a new terminal" (Bugbot #371).
+  TB_CLI_USABLE_NOW=0
+  TB_CLI_ON_FRESH_PATH=0
   # `|| true` so a hiccup in rc-resolution can't trip the orchestrator's set -e.
   local rc; rc="$(_cli_rc_for_shell || true)"
   local export_line; export_line="$(_cli_path_export_line || true)"

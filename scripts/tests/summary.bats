@@ -140,11 +140,21 @@ setup() {
   ! printf '%s\n' "$output" | grep -qF "Open a new terminal"
 }
 
-@test "print_summary connected: CTA says 'open a new terminal' when not on PATH yet (B2)" {
+@test "print_summary connected: CTA says 'open a new terminal' when persisted but this shell can't see it yet (case A, B2)" {
   CLIENT_STATE=connected; OS=Linux
   helm() { echo "tracebloc tracebloc 1 now deployed client-1.4.4 1.4.4"; }
-  TB_CLI_USABLE_NOW=0
+  TB_CLI_USABLE_NOW=0; TB_CLI_ON_FRESH_PATH=1   # a NEW terminal resolves it, this one doesn't
   has() { [ "$1" = tracebloc ] && return 1; command -v "$1" >/dev/null 2>&1; }
   run print_summary
   printf '%s\n' "$output" | grep -qF "Open a new terminal"
+}
+
+@test "print_summary connected: CTA points at the PATH fix (NOT 'open a new terminal') when a fresh shell won't find it either (case B, #371)" {
+  CLIENT_STATE=connected; OS=Linux
+  helm() { echo "tracebloc tracebloc 1 now deployed client-1.4.4 1.4.4"; }
+  TB_CLI_USABLE_NOW=0; TB_CLI_ON_FRESH_PATH=0   # not on PATH anywhere yet
+  has() { [ "$1" = tracebloc ] && return 1; command -v "$1" >/dev/null 2>&1; }
+  run print_summary
+  printf '%s\n' "$output" | grep -qF "Add tracebloc to your PATH"   # matches install-cli.sh's PATH-fix step
+  ! printf '%s\n' "$output" | grep -qF "Open a new terminal"        # never the useless new-terminal advice
 }

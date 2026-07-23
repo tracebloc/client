@@ -134,11 +134,17 @@ print_summary() {
       echo ""
       if _cli_runnable_now; then
         echo -e "  ${BOLD}Run  ${TB_CMD}tracebloc${RESET}${BOLD}  to get started.${RESET}"
-      else
-        # Installed, but this shell's PATH predates it (it landed in ~/.local/bin).
-        # install-cli.sh already printed the exact one-liner to load it now; here we
-        # just keep the CTA honest rather than pointing at a command it can't find.
+      elif [[ "${TB_CLI_ON_FRESH_PATH:-0}" == "1" ]]; then
+        # Case A: installed to ~/.local/bin and persisted — a NEW terminal resolves
+        # it, only this shell (PATH fixed at login before the dir existed) doesn't.
+        # install-cli.sh already printed the load-it-now one-liner; keep the CTA
+        # honest rather than pointing at a command this shell can't find.
         echo -e "  ${BOLD}Open a new terminal, then run  ${TB_CMD}tracebloc${RESET}${BOLD}  to get started.${RESET}"
+      else
+        # Case B: not on PATH anywhere yet — a new terminal won't help either.
+        # install-cli.sh printed the EXACT PATH fix above; don't contradict it with
+        # a useless "open a new terminal" (Bugbot #371).
+        echo -e "  ${BOLD}Add tracebloc to your PATH (see above), then run  ${TB_CMD}tracebloc${RESET}${BOLD}  to get started.${RESET}"
       fi
       echo ""
       echo -e "  ${DIM}────────────────────────────────────────${RESET}"
