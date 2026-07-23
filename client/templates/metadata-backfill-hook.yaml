@@ -10,7 +10,12 @@
 {{- $ing := default dict .Values.images.ingestor -}}
 {{- $repo := $ing.repository | default "ghcr.io/tracebloc/ingestor" -}}
 {{- $digest := $ing.digest | default "" -}}
-{{- $tag := $ing.tag | default "0.5" -}}
+{{- /* Fallback tag matches values.yaml images.ingestor.tag and jobs-manager's
+       INGESTOR_IMAGE_TAG default — an older tag here would pull an ingestor that
+       predates the `tracebloc-backfill` entrypoint and the sweep would no-op.
+       (bugbot) The default only applies on a --reuse-values upgrade whose stored
+       values predate the images.ingestor key; keep it in lockstep with those. */ -}}
+{{- $tag := $ing.tag | default "0.7" -}}
 # One-time pre-cutover metadata backfill (data-ingestors #393, backend
 # #1166/#1198). Runs the ingestor image's `tracebloc-backfill` entrypoint, which
 # sweeps THIS client's already-registered datasets: GET each from the backend,
@@ -47,10 +52,13 @@ metadata:
     helm.sh/hook-weight: "5"
     helm.sh/hook-delete-policy: before-hook-creation
 spec:
-  # Best-effort: the container always exits 0 (see args), so backoff/deadline
-  # only bound a genuinely stuck pod rather than gating correctness.
-  backoffLimit: 1
-  activeDeadlineSeconds: {{ $mb.deadlineSeconds | default 1800 }}
+  # No activeDeadlineSeconds: a deadline kill marks the Job FAILED, which fails
+  # the `helm upgrade` (and thus the auto-upgrade). Instead the container bounds
+  # its OWN runtime with `timeout` and always exits 0 (see args), so the pod
+  # completes successfully well within Helm's --timeout regardless of how the
+  # sweep goes. backoffLimit 0 so a genuine infra failure (image pull / OOM)
+  # fails fast rather than retry-looping toward Helm's timeout. (bugbot)
+  backoffLimit: 0
   ttlSecondsAfterFinished: 86400
   template:
     metadata:
@@ -75,23 +83,23 @@ spec:
         - name: metadata-backfill
           image: {{ if $digest }}{{ printf "%s@%s" $repo $digest | quote }}{{ else }}{{ printf "%s:%s" $repo $tag | quote }}{{ end }}
           imagePullPolicy: {{ if $digest }}IfNotPresent{{ else }}Always{{ end }}
-          # Run the backfill runner, but never fail the release on its exit code:
-          # a few in-pod retries cover a transient MySQL/network blip, then we
-          # exit 0 regardless so a backfill problem can't block the auto-upgrade.
+          # Bound the sweep with `timeout` and ALWAYS exit 0, so neither a slow
+          # run nor a backfill error can fail the hook (and thus the upgrade).
+          # backfillTimeoutSeconds must stay under autoUpgrade.timeout (10m) so
+          # the pod finishes before Helm's --timeout; a run that hits the bound
+          # is killed cleanly and resumes on the next upgrade (the sweep is
+          # idempotent and skips datasets already backfilled). (bugbot)
           command: ["/bin/sh", "-c"]
           args:
             - |
               set -u
-              for attempt in 1 2 3; do
-                echo "[metadata-backfill] attempt $attempt"
-                if tracebloc-backfill; then
-                  echo "[metadata-backfill] completed"
-                  exit 0
-                fi
-                echo "[metadata-backfill] attempt $attempt failed; retrying in 15s"
-                sleep 15
-              done
-              echo "[metadata-backfill] still failing after retries — leaving pre-cutover metadata for the next upgrade (non-fatal)"
+              TIMEOUT={{ $mb.backfillTimeoutSeconds | default 300 }}
+              echo "[metadata-backfill] running (timeout ${TIMEOUT}s)"
+              if timeout "${TIMEOUT}" tracebloc-backfill; then
+                echo "[metadata-backfill] completed"
+              else
+                echo "[metadata-backfill] did not finish (exit $?); remaining tables resume on the next upgrade (non-fatal)"
+              fi
               exit 0
           env:
             {{- include "tracebloc.proxyEnv" . | nindent 12 }}

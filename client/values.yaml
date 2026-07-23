@@ -558,9 +558,12 @@ autoUpgrade:
 # `enabled: false` to opt a cluster out (e.g. one with no pre-cutover data).
 metadataBackfill:
   enabled: true
-  # Upper bound on a single run before the pod is killed (best-effort — a
-  # timeout does NOT fail the upgrade; it just leaves the backlog for next time).
-  deadlineSeconds: 1800
+  # Wall-clock bound the sweep gives ITSELF (`timeout` in the hook), after which
+  # it stops and exits 0 cleanly — the pod never fails, so the upgrade never
+  # fails. Remaining tables resume on the next upgrade (the sweep is idempotent
+  # and skips already-backfilled datasets). MUST stay under `autoUpgrade.timeout`
+  # (10m) so the pod finishes before Helm's --timeout gives up on the hook.
+  backfillTimeoutSeconds: 300
   # Small: the sweep is I/O-bound on MySQL aggregates + backend calls.
   resources:
     requests:

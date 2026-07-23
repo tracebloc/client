@@ -41,6 +41,22 @@ tests:
           path: spec.template.spec.containers[0].args[0]
           pattern: tracebloc-backfill
 
+  - it: is best-effort — self-bounded by timeout, always exits 0, no Job deadline
+    asserts:
+      # No activeDeadlineSeconds: a deadline kill would FAIL the Job and thus the
+      # upgrade; the container bounds itself and exits 0 instead.
+      - notExists:
+          path: spec.activeDeadlineSeconds
+      - equal:
+          path: spec.backoffLimit
+          value: 0
+      - matchRegex:
+          path: spec.template.spec.containers[0].args[0]
+          pattern: 'timeout "\$\{TIMEOUT\}" tracebloc-backfill'
+      - matchRegex:
+          path: spec.template.spec.containers[0].args[0]
+          pattern: exit 0
+
   - it: pins the ingestor image by digest when one is set
     set:
       images.ingestor.digest: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
