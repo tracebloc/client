@@ -93,7 +93,7 @@ spec:
           args:
             - |
               set -u
-              TIMEOUT={{ $mb.backfillTimeoutSeconds | default 300 }}
+              TIMEOUT={{ $mb.backfillTimeoutSeconds | default 180 }}
               echo "[metadata-backfill] running (timeout ${TIMEOUT}s)"
               if timeout "${TIMEOUT}" tracebloc-backfill; then
                 echo "[metadata-backfill] completed"
