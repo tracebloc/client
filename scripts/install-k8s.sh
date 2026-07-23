@@ -104,6 +104,25 @@ main() {
   # the post-install cleanup message doesn't fire after a diagnose run.
   [[ "${1:-}" == "--diagnose" ]] && { trap - EXIT; run_diagnose; exit $?; }
 
+  # prepare-host: the standalone, admin-run Tier-2 step (RFC 0001 #1178) —
+  # installs the privileged prerequisites so a researcher can then install
+  # unprivileged at Tier 0, and grants them docker-group access. Terminal like
+  # --diagnose (never provisions as the admin); clear the EXIT trap so no
+  # post-install cleanup message fires. Accept both the bootstrap positional
+  # (`… | bash -s -- prepare-host`) and the direct flag.
+  [[ "${1:-}" == "prepare-host" || "${1:-}" == "--prepare-host" ]] && {
+    # Replace the full install_cleanup (its credential-shred + "did not complete"
+    # messaging don't apply to a host-prep run) with a lightweight reaper that
+    # still tears down the sudo keepalive preflight_sudo starts — otherwise it
+    # orphans a background loop polling `sudo` every 50s (Bugbot #377).
+    trap 'if [ -n "${SUDO_KEEPALIVE_PID:-}" ]; then kill "$SUDO_KEEPALIVE_PID" 2>/dev/null || true; fi' EXIT
+    setup_log_file
+    if declare -F run_prepare_host >/dev/null 2>&1; then
+      run_prepare_host; exit $?
+    fi
+    error "This installer build doesn't include prepare-host (stale bootstrap). Re-run: curl -fsSL https://tracebloc.io/i.sh | bash -s -- prepare-host"
+  }
+
   # Run-modifying flags (unlike --help/--diagnose, which are terminal). --force /
   # --reinstall skips the stop-and-check gate below and re-runs every step. Also
   # honored via TRACEBLOC_FORCE_REINSTALL=1 for the curl|bash path (assess.sh

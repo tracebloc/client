@@ -474,3 +474,82 @@ _stub_install_steps() {
   _tier0_gpu_flags
   [ "${#K3D_GPU_FLAGS[@]}" -eq 0 ]
 }
+
+# ── run_prepare_host (RFC 0001 #1178) ────────────────────────────────────────
+@test "run_prepare_host: installs runtime prereqs + adds researcher to docker group, no cluster/CLI" {
+  MOCK_CALLS="$(mktemp)"
+  OS=Linux; TB_PREPARE_USER=researcher
+  host_audit()          { :; }
+  preflight_sudo()      { record preflight_sudo; }
+  setup_pm()            { :; }
+  apt_wait_for_lock()   { :; }
+  install_docker_engine(){ record install_docker_engine; }
+  install_system_deps() { record install_system_deps; }
+  sudo()                { record "sudo $*"; return 0; }
+  run run_prepare_host
+  [ "$status" -eq 0 ]
+  mock_calls | grep -q install_docker_engine
+  mock_calls | grep -q "sudo usermod -aG docker researcher"
+  ! mock_calls | grep -qi "create_cluster"
+  ! mock_calls | grep -qi "install_tracebloc_cli"
+  # Grant succeeded => the no-admin promise is honest and shown (#377).
+  printf '%s\n' "$output" | grep -qi "no administrator rights"
+}
+
+@test "run_prepare_host: no target user => best-effort, still prepares the host" {
+  MOCK_CALLS="$(mktemp)"
+  OS=Linux; unset TB_PREPARE_USER SUDO_USER
+  host_audit()          { :; }
+  preflight_sudo()      { :; }
+  setup_pm()            { :; }
+  apt_wait_for_lock()   { :; }
+  install_docker_engine(){ record install_docker_engine; }
+  install_system_deps() { :; }
+  sudo()                { record "sudo $*"; return 0; }
+  run run_prepare_host
+  [ "$status" -eq 0 ]
+  mock_calls | grep -q install_docker_engine
+  ! mock_calls | grep -q "usermod"      # nobody to add
+  # No grant happened => must NOT falsely promise a no-admin install (#377).
+  ! printf '%s\n' "$output" | grep -qi "can now install tracebloc with no administrator rights"
+}
+
+@test "run_prepare_host: usermod fails => no false no-admin promise, still exits 0 (#377)" {
+  MOCK_CALLS="$(mktemp)"
+  OS=Linux; TB_PREPARE_USER=researcher
+  host_audit()          { :; }
+  preflight_sudo()      { :; }
+  setup_pm()            { :; }
+  apt_wait_for_lock()   { :; }
+  install_docker_engine(){ record install_docker_engine; }
+  install_system_deps() { :; }
+  # sudo succeeds for everything EXCEPT the usermod grant.
+  sudo()                { case "$*" in usermod*) return 1 ;; *) return 0 ;; esac; }
+  run run_prepare_host
+  [ "$status" -eq 0 ]                                 # best-effort: prep still succeeds
+  printf '%s\n' "$output" | grep -qi "Couldn't add"   # honest warning
+  ! printf '%s\n' "$output" | grep -qi "can now install tracebloc with no administrator rights"
+}
+
+@test "run_prepare_host: does NOT grant docker-group to SUDO_USER (the admin), only TB_PREPARE_USER (#377)" {
+  MOCK_CALLS="$(mktemp)"
+  OS=Linux; unset TB_PREPARE_USER; SUDO_USER=admin
+  host_audit()          { :; }
+  preflight_sudo()      { :; }
+  setup_pm()            { :; }
+  apt_wait_for_lock()   { :; }
+  install_docker_engine(){ record install_docker_engine; }
+  install_system_deps() { :; }
+  sudo()                { record "sudo $*"; return 0; }
+  run run_prepare_host
+  [ "$status" -eq 0 ]
+  mock_calls | grep -q install_docker_engine   # host still prepared
+  ! mock_calls | grep -q "usermod"             # the ADMIN (SUDO_USER) is NOT added
+}
+
+@test "run_prepare_host: non-Linux errors with a Docker Desktop / WSL2 pointer" {
+  OS=Darwin
+  run run_prepare_host
+  [ "$status" -ne 0 ]
+  printf '%s\n' "$output" | grep -qiE "Docker Desktop|WSL2"
+}
