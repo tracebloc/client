@@ -544,6 +544,32 @@ autoUpgrade:
       cpu: "500m"
       memory: "256Mi"
 
+# -- One-time pre-cutover metadata backfill (data-ingestors #393, backend
+# #1166/#1198). A post-upgrade/post-install Helm hook Job that runs the ingestor
+# image's `tracebloc-backfill` entrypoint once per chart upgrade. It sweeps this
+# client's already-registered datasets and brings their global-metadata up to
+# the federated-alignment shape (enriched schema + feature_stats), recomputed
+# from the persisted MySQL rows — so old competitions/experiments that predate
+# the cutover keep working under the new backend alignment code.
+#
+# Safe to leave enabled: the sweep skips datasets already carrying new-shape
+# metadata and the backend upsert is idempotent, so after the fleet has
+# backfilled once it is a cheap no-op on every subsequent upgrade. Set
+# `enabled: false` to opt a cluster out (e.g. one with no pre-cutover data).
+metadataBackfill:
+  enabled: true
+  # Upper bound on a single run before the pod is killed (best-effort — a
+  # timeout does NOT fail the upgrade; it just leaves the backlog for next time).
+  deadlineSeconds: 1800
+  # Small: the sweep is I/O-bound on MySQL aggregates + backend calls.
+  resources:
+    requests:
+      cpu: "250m"
+      memory: "512Mi"
+    limits:
+      cpu: "1"
+      memory: "2Gi"
+
 # -- Image-refresh CronJob (closes tracebloc/client#154).
 # Auto-restarts the jobs-manager Deployment when a new image digest is
 # published to Docker Hub under the floating CLIENT_ENV tag. Without

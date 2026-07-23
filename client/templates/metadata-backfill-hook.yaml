@@ -1,0 +1,125 @@
+{{- if .Values.metadataBackfill.enabled }}
+{{- $ing := default dict .Values.images.ingestor -}}
+{{- $repo := $ing.repository | default "ghcr.io/tracebloc/ingestor" -}}
+{{- $digest := $ing.digest | default "" -}}
+{{- $tag := $ing.tag | default "0.5" -}}
+# One-time pre-cutover metadata backfill (data-ingestors #393, backend
+# #1166/#1198). Runs the ingestor image's `tracebloc-backfill` entrypoint, which
+# sweeps THIS client's already-registered datasets: GET each from the backend,
+# recompute the enriched {schema, meta_data} from the persisted MySQL rows, and
+# POST it back (which also re-folds any competition built from them). Datasets
+# ingested before the federated-alignment cutover otherwise carry no enriched
+# schema / feature_stats, so the backend's combine-time alignment checks and the
+# edge metadata API can't reconcile them — old competitions/experiments that
+# rely on that metadata would degrade under the new code.
+#
+# Trigger: a Helm post-upgrade/post-install hook. The auto-upgrade CronJob runs
+# `helm upgrade` when a new chart is published, which fires this hook — so a
+# client that auto-updates to this release runs the backfill once, automatically,
+# with no operator step.
+#
+# One-time / idempotent: `before-hook-creation` replaces the prior hook Job on
+# each upgrade; the sweep skips datasets already carrying new-shape metadata and
+# the backend upsert is a safe overwrite, so re-runs are cheap no-ops. It is
+# deliberately BEST-EFFORT — the entrypoint's exit code is swallowed so a
+# backfill hiccup can never fail the `helm upgrade` (which would strand the
+# cluster on the old chart). Operators read the outcome via `kubectl logs`.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ .Release.Name }}-metadata-backfill
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "tracebloc.labels" . | nindent 4 }}
+    app.kubernetes.io/component: metadata-backfill
+  annotations:
+    helm.sh/hook: post-upgrade,post-install
+    # Run late, after the release's core resources (MySQL, jobs-manager) are in
+    # place — the sweep talks to in-cluster MySQL and the backend API.
+    helm.sh/hook-weight: "5"
+    helm.sh/hook-delete-policy: before-hook-creation
+spec:
+  # Best-effort: the container always exits 0 (see args), so backoff/deadline
+  # only bound a genuinely stuck pod rather than gating correctness.
+  backoffLimit: 1
+  activeDeadlineSeconds: {{ .Values.metadataBackfill.deadlineSeconds | default 1800 }}
+  ttlSecondsAfterFinished: 86400
+  template:
+    metadata:
+      labels:
+        {{- include "tracebloc.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: metadata-backfill
+    spec:
+      restartPolicy: Never
+      # The sweep never calls the Kubernetes API — it only reaches MySQL and the
+      # backend — so no ServiceAccount token is mounted.
+      automountServiceAccountToken: false
+      {{- if include "tracebloc.useImagePullSecrets" . }}
+      imagePullSecrets:
+        - name: {{ include "tracebloc.registrySecretName" . }}
+      {{- end }}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: metadata-backfill
+          image: {{ if $digest }}{{ printf "%s@%s" $repo $digest | quote }}{{ else }}{{ printf "%s:%s" $repo $tag | quote }}{{ end }}
+          imagePullPolicy: {{ if $digest }}IfNotPresent{{ else }}Always{{ end }}
+          # Run the backfill runner, but never fail the release on its exit code:
+          # a few in-pod retries cover a transient MySQL/network blip, then we
+          # exit 0 regardless so a backfill problem can't block the auto-upgrade.
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              set -u
+              for attempt in 1 2 3; do
+                echo "[metadata-backfill] attempt $attempt"
+                if tracebloc-backfill; then
+                  echo "[metadata-backfill] completed"
+                  exit 0
+                fi
+                echo "[metadata-backfill] attempt $attempt failed; retrying in 15s"
+                sleep 15
+              done
+              echo "[metadata-backfill] still failing after retries — leaving pre-cutover metadata for the next upgrade (non-fatal)"
+              exit 0
+          env:
+            {{- include "tracebloc.proxyEnv" . | nindent 12 }}
+            # Backend auth: the ingestor's APIClient mints a token from these
+            # (same credentials Secret jobs-manager uses). BACKEND_TOKEN would be
+            # preferred, but the chart holds no static backend token — jobs-manager
+            # mints its own at runtime — so the backfill uses the client creds.
+            - name: CLIENT_ID
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "tracebloc.secretName" . }}
+                  key: CLIENT_ID
+            - name: CLIENT_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "tracebloc.secretName" . }}
+                  key: CLIENT_PASSWORD
+            # In-cluster MySQL + backend endpoint, mirroring the jobs-manager /
+            # ingestion-Job env so the ingestor's Config resolves the same store.
+            - name: MYSQL_HOST
+              value: "mysql-client"
+            - name: CLIENT_ENV
+              value: {{ .Values.env.CLIENT_ENV | default "prod" | quote }}
+            - name: HOME
+              value: "/tmp"
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            {{- toYaml .Values.metadataBackfill.resources | nindent 12 }}
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir: {}
+{{- end }}
