@@ -544,6 +544,43 @@ autoUpgrade:
       cpu: "500m"
       memory: "256Mi"
 
+# -- One-time pre-cutover metadata backfill (data-ingestors #393, backend
+# #1166/#1198). A post-upgrade/post-install Helm hook Job that runs the ingestor
+# image's `tracebloc-backfill` entrypoint once per chart upgrade. It sweeps this
+# client's already-registered datasets and brings their global-metadata up to
+# the federated-alignment shape (enriched schema + feature_stats), recomputed
+# from the persisted MySQL rows — so old competitions/experiments that predate
+# the cutover keep working under the new backend alignment code.
+#
+# Safe to leave enabled: the sweep skips datasets already carrying new-shape
+# metadata and the backend upsert is idempotent, so after the fleet has
+# backfilled once it is a cheap no-op on every subsequent upgrade. Set
+# `enabled: false` to opt a cluster out (e.g. one with no pre-cutover data).
+metadataBackfill:
+  enabled: true
+  # Wall-clock bound the sweep gives ITSELF (`timeout` in the hook), after which
+  # it stops and exits 0 cleanly — the pod never fails, so the upgrade never
+  # fails. Remaining tables resume on the next upgrade (the sweep is idempotent
+  # and skips already-backfilled datasets).
+  #
+  # In-container sweep budget. Worst-case container runtime is this + the 30s
+  # SIGKILL grace (150s at the default). The Job's activeDeadlineSeconds is
+  # derived as this + 30s grace + 120s cold-pull/scheduling allowance (270s at
+  # the default) and is what bounds a stuck/Pending pod — see the hook template.
+  # Keep this small enough that (this + 30 + 120) stays under your Helm --timeout:
+  # comfortable under the auto-upgrade's 10m (the target path); on a MANUAL
+  # `helm install/upgrade` on a cold cluster pass `--timeout 10m` rather than
+  # relying on the 5m default. (bugbot)
+  backfillTimeoutSeconds: 120
+  # Small: the sweep is I/O-bound on MySQL aggregates + backend calls.
+  resources:
+    requests:
+      cpu: "250m"
+      memory: "512Mi"
+    limits:
+      cpu: "1"
+      memory: "2Gi"
+
 # -- Image-refresh CronJob (closes tracebloc/client#154).
 # Auto-restarts the jobs-manager Deployment when a new image digest is
 # published to Docker Hub under the floating CLIENT_ENV tag. Without

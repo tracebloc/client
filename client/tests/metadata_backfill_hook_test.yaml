@@ -1,0 +1,108 @@
+suite: metadata-backfill post-upgrade hook Job
+templates:
+  - templates/metadata-backfill-hook.yaml
+release:
+  name: stg
+  namespace: tracebloc
+set:
+  clientId: "test-id"
+  clientPassword: "test"
+tests:
+  - it: renders a hook Job by default
+    asserts:
+      - hasDocuments:
+          count: 1
+      - isKind:
+          of: Job
+      - equal:
+          path: metadata.name
+          value: stg-metadata-backfill
+
+  - it: is a post-upgrade (only) hook that replaces its prior run
+    asserts:
+      - equal:
+          path: metadata.annotations["helm.sh/hook"]
+          value: post-upgrade
+      - equal:
+          path: metadata.annotations["helm.sh/hook-delete-policy"]
+          value: before-hook-creation
+
+  - it: runs the backfill entrypoint on the ingestor image, best-effort (exit 0)
+    set:
+      images.ingestor.tag: "0.9"
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].image
+          value: ghcr.io/tracebloc/ingestor:0.9
+      - equal:
+          path: spec.template.spec.containers[0].imagePullPolicy
+          value: Always
+      - matchRegex:
+          path: spec.template.spec.containers[0].args[0]
+          pattern: tracebloc-backfill
+
+  - it: is best-effort — self-bounded by timeout, always exits 0, deadline backstops a stuck pull
+    asserts:
+      # Job-level backstop bounds an ImagePullBackOff/Pending pod (backfillTimeout
+      # 120 + 30 grace + 120 pull = 270), sized to exceed a healthy cold-pull run.
+      - equal:
+          path: spec.activeDeadlineSeconds
+          value: 270
+      - equal:
+          path: spec.backoffLimit
+          value: 0
+      - matchRegex:
+          path: spec.template.spec.containers[0].args[0]
+          pattern: 'timeout -k 30 "\$\{TIMEOUT\}" tracebloc-backfill'
+      - matchRegex:
+          path: spec.template.spec.containers[0].args[0]
+          pattern: exit 0
+
+  - it: pins the ingestor image by digest when one is set
+    set:
+      images.ingestor.digest: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].image
+          value: ghcr.io/tracebloc/ingestor@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+      - equal:
+          path: spec.template.spec.containers[0].imagePullPolicy
+          value: IfNotPresent
+
+  - it: sources backend creds from the release Secret and points at in-cluster MySQL
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: CLIENT_ID
+            valueFrom:
+              secretKeyRef:
+                name: stg-secrets
+                key: CLIENT_ID
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: MYSQL_HOST
+            value: "mysql-client"
+
+  - it: hardened pod — non-root, no SA token, read-only rootfs, caps dropped
+    asserts:
+      - equal:
+          path: spec.template.spec.securityContext.runAsNonRoot
+          value: true
+      - equal:
+          path: spec.template.spec.automountServiceAccountToken
+          value: false
+      - equal:
+          path: spec.template.spec.containers[0].securityContext.readOnlyRootFilesystem
+          value: true
+      - equal:
+          path: spec.template.spec.containers[0].securityContext.allowPrivilegeEscalation
+          value: false
+
+  - it: renders nothing when metadataBackfill.enabled=false
+    set:
+      metadataBackfill.enabled: false
+    asserts:
+      - hasDocuments:
+          count: 0
