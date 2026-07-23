@@ -158,3 +158,16 @@ setup() {
   printf '%s\n' "$output" | grep -qF "Add tracebloc to your PATH"   # matches install-cli.sh's PATH-fix step
   ! printf '%s\n' "$output" | grep -qF "Open a new terminal"        # never the useless new-terminal advice
 }
+
+@test "print_summary connected: UNSET fresh-path flag falls back to 'open a new terminal', not the 'see above' PATH fix (#371)" {
+  # CLI step skipped/failed → TB_CLI_ON_FRESH_PATH never set, and NO PATH-fix was
+  # printed. "Add tracebloc to your PATH (see above)" would point at nothing; the
+  # safe default is "open a new terminal".
+  CLIENT_STATE=connected; OS=Linux
+  helm() { echo "tracebloc tracebloc 1 now deployed client-1.4.4 1.4.4"; }
+  unset TB_CLI_USABLE_NOW TB_CLI_ON_FRESH_PATH
+  has() { [ "$1" = tracebloc ] && return 1; command -v "$1" >/dev/null 2>&1; }
+  run print_summary
+  printf '%s\n' "$output" | grep -qF "Open a new terminal"
+  ! printf '%s\n' "$output" | grep -qF "Add tracebloc to your PATH"
+}

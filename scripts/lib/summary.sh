@@ -134,17 +134,19 @@ print_summary() {
       echo ""
       if _cli_runnable_now; then
         echo -e "  ${BOLD}Run  ${TB_CMD}tracebloc${RESET}${BOLD}  to get started.${RESET}"
-      elif [[ "${TB_CLI_ON_FRESH_PATH:-0}" == "1" ]]; then
-        # Case A: installed to ~/.local/bin and persisted — a NEW terminal resolves
-        # it, only this shell (PATH fixed at login before the dir existed) doesn't.
-        # install-cli.sh already printed the load-it-now one-liner; keep the CTA
-        # honest rather than pointing at a command this shell can't find.
-        echo -e "  ${BOLD}Open a new terminal, then run  ${TB_CMD}tracebloc${RESET}${BOLD}  to get started.${RESET}"
-      else
-        # Case B: not on PATH anywhere yet — a new terminal won't help either.
-        # install-cli.sh printed the EXACT PATH fix above; don't contradict it with
-        # a useless "open a new terminal" (Bugbot #371).
+      elif [[ "${TB_CLI_ON_FRESH_PATH:-}" == "0" ]]; then
+        # Case B: install-cli.sh RAN and set the flag to 0 — it printed the EXACT
+        # PATH fix above and a new terminal won't help. Point at that fix, not a
+        # useless "open a new terminal" (Bugbot #371). The explicit "0" test matters:
+        # an UNSET flag (CLI step skipped/failed → nothing printed above) must NOT
+        # land here, or "see above" points at nothing.
         echo -e "  ${BOLD}Add tracebloc to your PATH (see above), then run  ${TB_CMD}tracebloc${RESET}${BOLD}  to get started.${RESET}"
+      else
+        # Case A (flag=1: installed to ~/.local/bin, persisted — a new terminal
+        # resolves it, only this shell doesn't) OR the flag is UNSET (the CLI step
+        # was skipped/failed, so no PATH-fix guidance exists): the safe, honest
+        # default is "open a new terminal" (Bugbot #371).
+        echo -e "  ${BOLD}Open a new terminal, then run  ${TB_CMD}tracebloc${RESET}${BOLD}  to get started.${RESET}"
       fi
       echo ""
       echo -e "  ${DIM}────────────────────────────────────────${RESET}"
