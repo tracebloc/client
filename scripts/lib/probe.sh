@@ -90,8 +90,14 @@ _probe_userns() {
 # `id -u`, `command -v sudo`, and `sudo -n true` are all side-effect-free.
 _probe_privilege() {
   if [[ "$(id -u 2>/dev/null)" == "0" ]]; then echo "root"; return 0; fi
-  if ! has sudo; then echo "no_sudo"; return 0; fi
-  if sudo -n true 2>/dev/null; then echo "sudo_nopw"; return 0; fi
+  # Detect the real sudo *binary*, never a `sudo` shell function common.sh
+  # installs (the A2 shadow). `has sudo` / a bare `sudo -n true` both resolve
+  # to that function, so a host with no sudo at all would look like sudo is
+  # present and we'd misreport the posture as sudo_pw instead of no_sudo
+  # (Bugbot #372). Reuse the same primitives preflight_sudo uses: _have_sudo_bin
+  # (type -P, ignores functions) and _real_sudo (command sudo, bypasses it).
+  if ! _have_sudo_bin; then echo "no_sudo"; return 0; fi
+  if _real_sudo -n true 2>/dev/null; then echo "sudo_nopw"; return 0; fi
   echo "sudo_pw"
 }
 

@@ -92,23 +92,24 @@ setup() {
 
 @test "privilege: not root, sudo absent => no_sudo" {
   id() { echo 1000; }
-  has() { [ "$1" = sudo ] && return 1; command -v "$1" >/dev/null 2>&1; }
+  # No real sudo binary — even if the A2 sudo() shadow is defined (Bugbot #372).
+  _have_sudo_bin() { return 1; }
   run _probe_privilege
   [ "$output" = no_sudo ]
 }
 
 @test "privilege: not root, passwordless sudo => sudo_nopw" {
   id() { echo 1000; }
-  has() { return 0; }
-  sudo() { return 0; }
+  _have_sudo_bin() { return 0; }
+  _real_sudo() { return 0; }
   run _probe_privilege
   [ "$output" = sudo_nopw ]
 }
 
 @test "privilege: not root, sudo needs a password => sudo_pw" {
   id() { echo 1000; }
-  has() { return 0; }
-  sudo() { return 1; }
+  _have_sudo_bin() { return 0; }
+  _real_sudo() { return 1; }
   run _probe_privilege
   [ "$output" = sudo_pw ]
 }
