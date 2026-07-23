@@ -273,6 +273,15 @@ sudo() {
   fi
 }
 
+# Export the shadow (+ its helpers) so `sudo <cmd>` inside `bash -c '…'` subshells
+# also routes through it — e.g. the apt-lock wait and the RHEL-rebuild (Alma/Rocky/
+# OL) Docker install in setup-linux.sh both run `bash -c '… sudo … …'`. Without
+# export, those child shells resolve the REAL sudo binary, so a root box without
+# sudo installed would still hit "sudo: command not found" there — the exact case
+# A2 fixes everywhere else (review #372). Harmless to non-bash children, which
+# ignore the BASH_FUNC_* environment entries.
+export -f sudo _real_sudo _have_sudo_bin
+
 # ── Sudo preflight — warm the credential cache before spinners hide prompts ──
 #  Call once at the start of install_macos / install_linux. Establishes that the
 #  privileged steps below can run, and (when a password is needed) primes the

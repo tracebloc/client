@@ -255,3 +255,12 @@ setup() {
   run preflight_sudo
   [ "$status" -eq 0 ]
 }
+
+@test "sudo(): exported so a bash -c subshell inherits the shadow (#372)" {
+  # The nested `sudo <cmd>` in setup-linux.sh's bash -c blocks (apt-lock wait,
+  # RHEL-rebuild Docker install) must route through OUR shadow, not the real sudo.
+  # A child bash sees the function only if it was exported (export -f in common.sh).
+  run bash -c 'declare -F sudo >/dev/null && declare -f sudo | grep -q _real_sudo && echo INHERITED'
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"INHERITED"* ]]
+}
