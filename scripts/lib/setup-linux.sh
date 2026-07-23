@@ -474,6 +474,25 @@ _install_userspace_tools() {
   umask "$_saved_umask"
 }
 
+# _tier0_gpu_flags — on Tier 0 we skip the privileged GPU driver/toolkit install,
+# but create_cluster still needs K3D_GPU_FLAGS to expose an NVIDIA GPU to the k3d
+# cluster (--gpus=all). Without it a GPU host gets a CPU-only cluster even when the
+# toolkit is already installed (Bugbot #375). Reuse the flag ONLY when Docker's
+# NVIDIA runtime is already configured — expected on a GPU host with a usable
+# Docker; we can't (and won't) install/configure it here without admin. Otherwise
+# stay CPU-only and tell the user how to enable it. (AMD uses the device plugin
+# only — no k3d flag — so it needs nothing here.)
+_tier0_gpu_flags() {
+  [ "${GPU_VENDOR:-none}" = "nvidia" ] || return 0
+  if docker info --format '{{json .Runtimes}}' 2>/dev/null | grep -q '"nvidia"'; then
+    K3D_GPU_FLAGS=("--gpus=all")
+    success "Reusing the NVIDIA container runtime already configured — your environment will have GPU access."
+  else
+    warn "NVIDIA GPU detected, but Docker's NVIDIA runtime isn't configured (installing the toolkit needs admin) — your environment will be CPU-only."
+    hint "To enable GPU, have an admin install nvidia-container-toolkit (or run: curl -fsSL https://tracebloc.io/i.sh | bash -s -- prepare-host), then re-run."
+  fi
+}
+
 install_linux() {
   export DEBIAN_FRONTEND=noninteractive
   export NEEDRESTART_MODE=a
@@ -486,12 +505,14 @@ install_linux() {
   # system-package + kernel-module setup, and the privileged GPU-driver install
   # entirely; just drop the user-space tools in and let create_cluster reuse the
   # runtime. The biggest unlock for shared/managed hosts (a researcher in the
-  # `docker` group installs with no admin at all). GPU device-plugin deployment
-  # still happens later in create_cluster; only the privileged *driver* install
-  # is skipped (a Tier-0 host with a GPU already has its drivers).
+  # `docker` group installs with no admin at all). We still set the k3d GPU flag
+  # from the ALREADY-configured runtime (_tier0_gpu_flags) so a GPU host isn't
+  # silently downgraded to a CPU-only cluster; only the privileged driver/toolkit
+  # INSTALL is skipped.
   if [ "${INSTALL_TIER:-}" = "0" ]; then
     info "Using the container runtime already on this machine — no administrator rights needed."
     _install_userspace_tools
+    _tier0_gpu_flags
     return 0
   fi
 

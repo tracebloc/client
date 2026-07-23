@@ -400,3 +400,26 @@ _stub_install_steps() {
   [ "$TB_TOOLS_DIR" = "/usr/local/bin" ]
   [ "$TB_TOOLS_SUDO" = "sudo" ]
 }
+
+# ── _tier0_gpu_flags: NVIDIA k3d flag reused only when the runtime exists (#375) ─
+@test "_tier0_gpu_flags: nvidia + configured runtime => --gpus=all" {
+  GPU_VENDOR=nvidia; K3D_GPU_FLAGS=()
+  success() { :; }
+  docker() { case "$*" in *Runtimes*) echo '{"nvidia":{"path":"nvidia-container-runtime"},"runc":{}}' ;; *) return 0 ;; esac; }
+  _tier0_gpu_flags
+  [ "${K3D_GPU_FLAGS[*]}" = "--gpus=all" ]
+}
+
+@test "_tier0_gpu_flags: nvidia + NO configured runtime => stays CPU-only (empty flags)" {
+  GPU_VENDOR=nvidia; K3D_GPU_FLAGS=()
+  warn() { :; }; hint() { :; }
+  docker() { case "$*" in *Runtimes*) echo '{"runc":{}}' ;; *) return 0 ;; esac; }
+  _tier0_gpu_flags
+  [ "${#K3D_GPU_FLAGS[@]}" -eq 0 ]   # no --gpus flag → CPU-only cluster (safe, not a broken create)
+}
+
+@test "_tier0_gpu_flags: non-nvidia GPU => no-op" {
+  GPU_VENDOR=none; K3D_GPU_FLAGS=()
+  _tier0_gpu_flags
+  [ "${#K3D_GPU_FLAGS[@]}" -eq 0 ]
+}
