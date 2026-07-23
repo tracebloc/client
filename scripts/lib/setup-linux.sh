@@ -387,7 +387,16 @@ _ensure_helm_executable() {
   helm_bin="$(command -v helm 2>/dev/null)" || true
   if [[ -n "$helm_bin" && -f "$helm_bin" && ! -x "$helm_bin" ]]; then
     log "Making Helm executable (fixing permissions)..."
-    sudo chmod 755 "$helm_bin" 2>/dev/null || true
+    # Tier 0 (no admin): helm is in the user's ~/.local/bin — a plain owner chmod
+    # works and MUST NOT sudo (would prompt on the tty after the zero-privilege
+    # promise, like the systemctl guard). Full flow: /usr/local/bin needs sudo.
+    # TB_TOOLS_SUDO is set by _set_tools_target (empty on Tier 0), defaulted to
+    # "sudo" at module scope for direct callers (Bugbot #1175 r3).
+    if [[ -n "${TB_TOOLS_SUDO:-}" ]]; then
+      sudo chmod 755 "$helm_bin" 2>/dev/null || true
+    else
+      chmod 755 "$helm_bin" 2>/dev/null || true
+    fi
   fi
 }
 
