@@ -52,12 +52,20 @@ metadata:
     helm.sh/hook-weight: "5"
     helm.sh/hook-delete-policy: before-hook-creation
 spec:
-  # No activeDeadlineSeconds: a deadline kill marks the Job FAILED, which fails
-  # the `helm upgrade` (and thus the auto-upgrade). Instead the container bounds
-  # its OWN runtime with `timeout` and always exits 0 (see args), so the pod
-  # completes successfully well within Helm's --timeout regardless of how the
-  # sweep goes. backoffLimit 0 so a genuine infra failure (image pull / OOM)
-  # fails fast rather than retry-looping toward Helm's timeout. (bugbot)
+  # activeDeadlineSeconds is a Job-level BACKSTOP for a pod that never runs its
+  # container — chiefly ImagePullBackOff, which sits Pending forever (backoffLimit
+  # can't catch it, since Pending isn't a failed attempt). Without it, such a pod
+  # would hang the hook until Helm's own --timeout before failing. Set it well
+  # under Helm's 5m default (backfillTimeoutSeconds + 120s = 240s at the default:
+  # +30s kill grace, +90s pull/scheduling), so a stuck pull fails FAST and the
+  # hourly auto-upgrade retries. It does NOT gate a healthy run: the in-container
+  # `timeout` (see args) exits ~150s in, well before this deadline, so a running
+  # sweep is never killed by it. A genuinely un-pullable image still fails the
+  # upgrade — irreducible for a synchronous hook running the ingestor image — but
+  # now quickly and self-healing once the registry recovers. (bugbot)
+  activeDeadlineSeconds: {{ add (int ($mb.backfillTimeoutSeconds | default 120)) 120 }}
+  # backoffLimit 0: never retry a failed pod (a retry loop would only burn more
+  # of Helm's wait). The deadline above is the real bound.
   backoffLimit: 0
   ttlSecondsAfterFinished: 86400
   template:
