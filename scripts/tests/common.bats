@@ -264,3 +264,15 @@ setup() {
   [ "$status" -eq 0 ]
   [[ "$output" == *"INHERITED"* ]]
 }
+
+@test "_have_sudo_bin: set -e safe when sudo is absent (no command substitution, #372)" {
+  # The pre-fix body wrapped `type -P sudo` in `[ -n "$(...)" ]`. On bash <4.4
+  # (Amazon Linux 2's 4.2, and this dev host's 3.2) a failing command
+  # substitution trips `set -e` EVEN inside an `if` condition, so the non-root/
+  # no-sudo path aborted before preflight_sudo could print its clear message.
+  # The whole-body `type -P` form has no substitution and must survive.
+  run bash -c "set -e; PATH=/nonexistent; $(declare -f _have_sudo_bin); if _have_sudo_bin; then echo yes; else echo no; fi; echo survived"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"no"* ]]
+  [[ "$output" == *"survived"* ]]
+}

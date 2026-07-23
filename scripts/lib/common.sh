@@ -256,7 +256,7 @@ spin_cmd() {
 #  option-only uses (`sudo -v` / `sudo -n`) live in preflight_sudo and go through
 #  _real_sudo. Detection + the real binary are wrapped in tiny helpers so the
 #  bats suite can exercise every branch without a real sudo.
-_have_sudo_bin() { [ -n "$(type -P sudo 2>/dev/null)" ]; }   # real binary, ignoring this fn (silence "type: not found" — Bugbot #372)
+_have_sudo_bin() { type -P sudo >/dev/null 2>&1; }   # real binary, ignoring this fn; no $(...) so a failing probe can't trip set -e on bash <4.4 (Bugbot #372)
 _real_sudo()     { command sudo "$@"; }           # the real sudo, bypassing the shadow
 
 sudo() {
