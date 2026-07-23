@@ -166,3 +166,13 @@ setup() {
   set +e
   [ "$rc" -eq 0 ]
 }
+
+# ── _cli_at_system_dir: the summary-CTA usable-now gate (Bugbot #371) ─────────
+@test "_cli_at_system_dir: system dir usable-now, \$HOME bin conservative (#371)" {
+  HOME=/home/tester
+  _cli_at_system_dir /usr/local/bin/tracebloc                 # system → usable now
+  _cli_at_system_dir /usr/bin/tracebloc
+  ! _cli_at_system_dir /home/tester/.local/bin/tracebloc      # $HOME → conservative
+  ! _cli_at_system_dir /home/tester/bin/tracebloc
+  ! _cli_at_system_dir ""                                     # unresolved → conservative
+}

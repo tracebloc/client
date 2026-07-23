@@ -26,6 +26,18 @@ TRACEBLOC_CLI_INSTALL_URL="https://github.com/tracebloc/cli/releases/latest/down
 # writable (see cli's install.sh) — the dir we tell the user to put on PATH.
 TRACEBLOC_CLI_FALLBACK_BIN="${HOME}/.local/bin"
 
+# _cli_at_system_dir PATH → true if the CLI lives in a SYSTEM location that's
+# unconditionally on the user's shell PATH (so the summary CTA may say "run it
+# now"); false for a $HOME bin (~/.local/bin, ~/bin) or an empty path — those may
+# be on THIS installer's PATH only via the ~/.local/bin prepend or a just-edited
+# rc, which the shell the user returns to hasn't read (Bugbot #371).
+_cli_at_system_dir() {
+  case "${1:-}" in
+    "" | "${HOME%/}"/*) return 1 ;;
+    *) return 0 ;;
+  esac
+}
+
 # Which rc file a *fresh* interactive shell of the user's $SHELL actually reads,
 # so the PATH fix we print sources the right file. Mirrors how the cli's
 # install.sh routes guidance, but resolved per-shell here:
@@ -109,9 +121,16 @@ _verify_tracebloc_cli() {
     # never points the user at a command that isn't there (Bugbot).
     local cli_cmd="tracebloc"; has tb && cli_cmd="tb"
     if has tracebloc; then
-      # Resolvable in THIS shell AND in fresh terminals — the summary's CTA can
-      # safely say "Run tracebloc" (B2).
-      TB_CLI_USABLE_NOW=1
+      # Whether the summary's CTA may say "Run tracebloc" NOW vs "open a new
+      # terminal" — gate on WHERE the CLI landed, not `has tracebloc` here (this
+      # process's PATH was mutated with ~/.local/bin by install.sh, so it resolves
+      # the CLI even when the user's returning shell won't). Only a system dir is
+      # unconditionally on that shell's PATH (Bugbot #371).
+      if _cli_at_system_dir "$(command -v tracebloc 2>/dev/null)"; then
+        TB_CLI_USABLE_NOW=1
+      else
+        TB_CLI_USABLE_NOW=0
+      fi
       # Usable right now AND in new terminals — the fully-clean verdict, collapsed
       # to ONE line (old→new when this was an update), so the step shows a single
       # ✔ instead of an already-present / re-running / installing / ready pileup.
