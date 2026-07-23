@@ -92,14 +92,16 @@ _reboot_note() {
   fi
 }
 
-# Is `tracebloc` runnable in the CURRENT shell right now? install-cli.sh records
-# this in TB_CLI_USABLE_NOW (authoritative — it just installed it and probed this
-# shell); fall back to a live PATH check when that wasn't set (e.g. a stale
-# bootstrap skipped the CLI step). Keeps the final CTA from telling the user to
-# run a command this shell can't resolve yet — the ~/.local/bin case (B2).
+# Will `tracebloc` resolve in the user's shell? Rely SOLELY on TB_CLI_USABLE_NOW,
+# which install-cli.sh sets from a FRESH-shell probe (_cli_on_fresh_path). A
+# `has tracebloc` fallback would be WRONG here: install.sh and provision.sh both
+# prepend ~/.local/bin to THIS process's PATH, so the installer can resolve
+# tracebloc even when the user's launching shell cannot — exactly the
+# "command not found in a new terminal" case B2 exists to catch (Bugbot #371).
+# Unset (a stale bootstrap that skipped the CLI step) → treat as not-usable and
+# tell the user to open a new terminal: the safe, honest default.
 _cli_runnable_now() {
-  [[ "${TB_CLI_USABLE_NOW:-}" == "1" ]] && return 0
-  has tracebloc
+  [[ "${TB_CLI_USABLE_NOW:-0}" == "1" ]]
 }
 
 print_summary() {

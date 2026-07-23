@@ -59,6 +59,7 @@ setup() {
 # ── print_summary: the trust claim must appear ONLY when connected ─────────
 @test "print_summary connected: Connected + trust claim + rich summary blocks" {
   CLIENT_STATE=connected
+  TB_CLI_USABLE_NOW=1   # pin CLI-usable so the CTA is the deterministic "Run …" variant (B2)
   run print_summary
   [[ "$output" == *"Connected to tracebloc"* ]]
   [[ "$output" == *"never leaves this machine"* ]]   # trust claim (was "data never leaves")
@@ -135,7 +136,7 @@ setup() {
   helm() { echo "tracebloc tracebloc 1 now deployed client-1.4.4 1.4.4"; }
   TB_CLI_USABLE_NOW=1
   run print_summary
-  printf '%s\n' "$output" | grep -qF "to get started"
+  printf '%s\n' "$output" | grep -qE "Run[[:space:]]+tracebloc"   # the "Run …" branch specifically
   ! printf '%s\n' "$output" | grep -qF "Open a new terminal"
 }
 
