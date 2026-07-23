@@ -26,10 +26,10 @@
 # edge metadata API can't reconcile them — old competitions/experiments that
 # rely on that metadata would degrade under the new code.
 #
-# Trigger: a Helm post-upgrade/post-install hook. The auto-upgrade CronJob runs
-# `helm upgrade` when a new chart is published, which fires this hook — so a
-# client that auto-updates to this release runs the backfill once, automatically,
-# with no operator step.
+# Trigger: a Helm post-upgrade hook. The auto-upgrade CronJob runs `helm upgrade`
+# when a new chart is published, which fires this hook — so a client that
+# auto-updates to this release runs the backfill once, automatically, with no
+# operator step. (Not post-install: a fresh install has nothing to backfill.)
 #
 # One-time / idempotent: `before-hook-creation` replaces the prior hook Job on
 # each upgrade; the sweep skips datasets already carrying new-shape metadata and
@@ -46,7 +46,12 @@ metadata:
     {{- include "tracebloc.labels" . | nindent 4 }}
     app.kubernetes.io/component: metadata-backfill
   annotations:
-    helm.sh/hook: post-upgrade,post-install
+    # post-upgrade ONLY — deliberately NOT post-install. A fresh install has no
+    # pre-cutover datasets to backfill, so running there is pure risk (Helm waits
+    # on hooks even without --wait, so a cold ingestor-image pull / ImagePullBackOff
+    # could fail the client install for no benefit). A cluster that does carry old
+    # data reaches this on its FIRST auto-upgrade. (bugbot)
+    helm.sh/hook: post-upgrade
     # Run late, after the release's core resources (MySQL, jobs-manager) are in
     # place — the sweep talks to in-cluster MySQL and the backend API.
     helm.sh/hook-weight: "5"

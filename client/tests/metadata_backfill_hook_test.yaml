@@ -18,11 +18,11 @@ tests:
           path: metadata.name
           value: stg-metadata-backfill
 
-  - it: is a post-upgrade/post-install hook that replaces its prior run
+  - it: is a post-upgrade (only) hook that replaces its prior run
     asserts:
       - equal:
           path: metadata.annotations["helm.sh/hook"]
-          value: post-upgrade,post-install
+          value: post-upgrade
       - equal:
           path: metadata.annotations["helm.sh/hook-delete-policy"]
           value: before-hook-creation
