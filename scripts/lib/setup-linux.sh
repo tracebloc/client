@@ -571,3 +571,66 @@ install_linux() {
   _install_userspace_tools
   dispatch_gpu_setup
 }
+
+# run_prepare_host — the standalone, admin-run Tier-2 step (RFC 0001 #1178). An
+# administrator runs this ONCE (`curl … | bash -s -- prepare-host`, or
+# `tracebloc prepare-host`) on a host a researcher can't install on unprivileged
+# — no usable runtime — after which the researcher installs at Tier 0 with NO
+# admin. It does ONLY the privileged prerequisites, reusing the exact functions
+# the full install uses (install the container runtime + system deps + kernel
+# modules) and then grants the researcher docker-group access. It never mints a
+# credential, creates a cluster, or installs the CLI — so an admin can safely run
+# it on a shared host without provisioning anything as themselves.
+run_prepare_host() {
+  if [[ "$OS" != "Linux" ]]; then
+    error "prepare-host is for Linux hosts. On macOS/Windows, install Docker Desktop (or enable WSL2) as an administrator, then run the installer normally."
+  fi
+  export DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a NEEDRESTART_SUSPEND=1
+
+  step_header a "Preparing this host for tracebloc (one-time administrator step)"
+  if declare -F host_audit >/dev/null 2>&1; then host_audit; fi
+  echo ""
+
+  preflight_sudo
+  setup_pm
+  apt_wait_for_lock
+  install_docker_engine
+  install_system_deps
+
+  # Grant the researcher docker-group access so THEIR later install is Tier 0
+  # (zero root). The researcher must be named EXPLICITLY via TB_PREPARE_USER — we
+  # must NOT fall back to $SUDO_USER, which is the ADMIN who ran prepare-host, not
+  # the researcher (adding the admin would report success while the researcher
+  # still can't install; Bugbot #377). Best-effort: never fail the prep over it.
+  local target="${TB_PREPARE_USER:-}"
+  local granted=0
+  if [[ -n "$target" && "$target" != "root" ]]; then
+    if sudo usermod -aG docker "$target" 2>/dev/null; then
+      success "Added ${target} to the docker group — they can now install with no admin."
+      granted=1
+    else
+      warn "Couldn't add ${target} to the docker group; add it manually:  sudo usermod -aG docker ${target}"
+    fi
+  else
+    hint "To let a non-admin user install at Tier 0, grant them docker-group access:"
+    hint "  set TB_PREPARE_USER=<their-username> when running prepare-host, or run:  sudo usermod -aG docker <their-username>"
+  fi
+
+  echo ""
+  success "Host prepared."
+  # Only promise a no-admin install when a researcher actually got docker-group
+  # access. Without a successful grant (no TB_PREPARE_USER, or usermod failed)
+  # the user still can't reach the socket, so claiming "no administrator rights"
+  # would be a lie that sends them into an install that then demands sudo
+  # (Bugbot #377).
+  if [[ "$granted" == 1 ]]; then
+    info "The researcher can now install tracebloc with no administrator rights:"
+    echo "    curl -fsSL https://tracebloc.io/i.sh | bash"
+    info "(A fresh login may be needed for docker-group membership to take effect.)"
+  else
+    info "The container runtime and prerequisites are installed. Once a researcher"
+    info "has docker-group access (see above), they can install with no admin rights:"
+    echo "    curl -fsSL https://tracebloc.io/i.sh | bash"
+  fi
+  return 0
+}
