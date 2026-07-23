@@ -376,11 +376,36 @@ dispatch_gpu_setup() {
 }
 
 # ── Main Linux installer ────────────────────────────────────────────────────
+# _route_install_tier — honor the detected install tier (set by run_host_probes
+# in main's step a, RFC 0001) and fail fast when the host genuinely cannot run
+# containers without administrator rights AND there is no way to get them.
+# Extracted so the bats suite can exercise the decision without running the whole
+# install. TB_FORCE_TIER overrides the detected tier (QA / support).
+#
+# This is the routing SKELETON (#1172): it adds tier detection + the honest
+# fail-fast to the flow. Per-tier optimisation of the body — Tier 0 skipping the
+# privileged steps (#1175), Tier 1 setting up rootless Docker (#1177) — lands on
+# top; until then every proceeding tier runs the existing full flow below.
+_route_install_tier() {
+  [ -n "${TB_FORCE_TIER:-}" ] && INSTALL_TIER="$TB_FORCE_TIER"
+  # Tier 2 = the kernel can't run an unprivileged container (no cgroup v2 /
+  # unprivileged userns). If we also can't become root, no amount of retrying
+  # helps — fail with the actionable remedy instead of a cryptic mid-install
+  # crash minutes later. Tier 0 (runtime usable) and Tier 1 (rootless-capable)
+  # proceed. When probe.sh wasn't loaded (stale bootstrap) INSTALL_TIER is unset
+  # and we proceed exactly as before.
+  if [ "${INSTALL_TIER:-}" = "2" ] && [ "${PROBE_PRIVILEGE:-}" = "no_sudo" ]; then
+    error "This machine can't run containers without administrator rights — its kernel lacks cgroup v2 / unprivileged user namespaces, and you are neither root nor able to sudo. Ask an administrator to prepare this host once (install a container runtime + enable the kernel prerequisites), then re-run this installer as yourself. Details: docs/rfcs/0001-least-privilege-install.md"
+  fi
+  return 0
+}
+
 install_linux() {
   export DEBIAN_FRONTEND=noninteractive
   export NEEDRESTART_MODE=a
   export NEEDRESTART_SUSPEND=1
 
+  _route_install_tier        # RFC 0001: honour the tier + honest fail-fast
   preflight_sudo
   setup_pm
   apt_wait_for_lock          # don't fight apt-daily/unattended-upgrades for the lock

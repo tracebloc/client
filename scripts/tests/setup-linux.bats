@@ -299,3 +299,37 @@ setup() {
   [ -f "$TB_DOCKER_DROPIN_DIR/http-proxy.conf" ]   # NOT ours -> left alone
   grep -q 'it-managed' "$TB_DOCKER_DROPIN_DIR/http-proxy.conf"
 }
+
+# ── _route_install_tier (RFC 0001 #1172) ─────────────────────────────────────
+@test "_route_install_tier: Tier 2 + no sudo => actionable fail-fast" {
+  INSTALL_TIER=2; PROBE_PRIVILEGE=no_sudo
+  run _route_install_tier
+  [ "$status" -ne 0 ]
+  printf '%s\n' "$output" | grep -qF "administrator rights"
+  printf '%s\n' "$output" | grep -qF "prepare this host"
+}
+
+@test "_route_install_tier: Tier 2 + root => proceeds (root can install a runtime)" {
+  INSTALL_TIER=2; PROBE_PRIVILEGE=root
+  run _route_install_tier
+  [ "$status" -eq 0 ]
+}
+
+@test "_route_install_tier: Tier 0 + no sudo => proceeds (runtime already usable)" {
+  INSTALL_TIER=0; PROBE_PRIVILEGE=no_sudo
+  run _route_install_tier
+  [ "$status" -eq 0 ]
+}
+
+@test "_route_install_tier: unset tier (stale bootstrap) => proceeds as before" {
+  unset INSTALL_TIER PROBE_PRIVILEGE
+  run _route_install_tier
+  [ "$status" -eq 0 ]
+}
+
+@test "_route_install_tier: TB_FORCE_TIER overrides the detected tier" {
+  INSTALL_TIER=0; PROBE_PRIVILEGE=no_sudo; TB_FORCE_TIER=2
+  run _route_install_tier
+  [ "$status" -ne 0 ]           # forced to Tier 2 + no_sudo => fail-fast
+  printf '%s\n' "$output" | grep -qF "administrator rights"
+}
