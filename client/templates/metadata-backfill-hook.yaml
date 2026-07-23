@@ -93,7 +93,7 @@ spec:
           args:
             - |
               set -u
-              TIMEOUT={{ $mb.backfillTimeoutSeconds | default 180 }}
+              TIMEOUT={{ $mb.backfillTimeoutSeconds | default 120 }}
               echo "[metadata-backfill] running (timeout ${TIMEOUT}s)"
               # -k 30: if the backfill ignores the SIGTERM at TIMEOUT (or is
               # wedged), escalate to SIGKILL 30s later so `timeout` can't wait
