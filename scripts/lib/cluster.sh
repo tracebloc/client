@@ -395,6 +395,17 @@ ensure_cluster_autostart() {
   # enables docker.service when Docker was absent; this also covers the
   # installed-but-disabled re-run case. Idempotent.
   if [[ "$OS" == "Linux" ]] && has systemctl; then
+    # Seed the reboot promise from the CURRENT on-boot state, not just from
+    # whether *this* run flipped it: a normal Docker package install already
+    # enables docker.service, so on the Tier 0 path (which deliberately never
+    # runs `systemctl enable`) the cluster still returns on its own after a
+    # reboot. `is-enabled` is an unprivileged read, so no sudo/password prompt.
+    # Only the persistent "enabled" state survives a reboot — "enabled-runtime"
+    # is transient and must NOT set the flag.
+    if [[ "$(systemctl is-enabled docker 2>/dev/null)" == "enabled" ]]; then
+      TB_DOCKER_AUTOSTART=1
+    fi
+
     if [[ "${INSTALL_TIER:-}" == "0" ]]; then
       # Tier 0 (a usable runtime already exists, no admin): do NOT sudo to enable
       # docker.service — we promised zero privileged steps, and a docker-group
@@ -404,6 +415,9 @@ ensure_cluster_autostart() {
       # case; enabling docker.service on boot is the user's call.
       log "Tier 0: leaving Docker autostart to the user (no privileged step)."
     elif sudo systemctl enable docker >/dev/null 2>&1; then
+      # docker.service will start on boot → the summary's reboot note can honestly
+      # promise the cluster returns on its own (read in summary.sh::_reboot_note).
+      TB_DOCKER_AUTOSTART=1
       log "Ensured docker.service is enabled on boot."
     fi
   fi

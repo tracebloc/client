@@ -667,7 +667,7 @@
     },
     "metadataBackfill": {
       "type": "object",
-      "description": "One-time pre-cutover metadata backfill (data-ingestors #393, backend #1166/#1198). A post-upgrade/post-install hook Job runs the ingestor image's `tracebloc-backfill` entrypoint to bring already-registered datasets up to the federated-alignment metadata shape. Idempotent (skips already-backfilled datasets) and best-effort (never fails the upgrade). Disable to opt a cluster out.",
+      "description": "One-time pre-cutover metadata backfill (data-ingestors #393, backend #1166/#1198). A post-upgrade (NOT post-install) hook Job runs the ingestor image's `tracebloc-backfill` entrypoint to bring already-registered datasets up to the federated-alignment metadata shape; a fresh install has no pre-cutover data to backfill. Idempotent (skips already-backfilled datasets) and best-effort (never fails the upgrade). Disable to opt a cluster out.",
       "properties": {
         "enabled": {
           "type": "boolean",

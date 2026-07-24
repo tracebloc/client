@@ -110,11 +110,20 @@ setup() {
 }
 
 # ── _reboot_note (reboot persistence) ───────────────────────────────────────
-@test "_reboot_note: Linux -> survives-reboot line" {
-  OS=Linux
+@test "_reboot_note: Linux with docker autostart -> survives-reboot line" {
+  OS=Linux; TB_DOCKER_AUTOSTART=1
   run _reboot_note
   [[ "$output" == *"restarts automatically"* ]]
   [[ "$output" != *"Docker Desktop"* ]]
+}
+
+@test "_reboot_note: Linux without docker autostart -> honest 'start Docker' line" {
+  # Tier 0 (zero-privilege) never enables docker.service, so the note must NOT
+  # promise an automatic restart (Bugbot r3645585369).
+  OS=Linux; TB_DOCKER_AUTOSTART=0
+  run _reboot_note
+  [[ "$output" == *"start Docker"* ]]
+  [[ "$output" != *"restarts automatically"* ]]
 }
 
 @test "_reboot_note: macOS -> Docker Desktop start-on-login instruction" {
@@ -125,9 +134,24 @@ setup() {
 }
 
 @test "print_summary connected: includes the reboot note" {
-  CLIENT_STATE=connected; OS=Linux
+  CLIENT_STATE=connected; OS=Linux; TB_DOCKER_AUTOSTART=1
   run print_summary
   [[ "$output" == *"restarts automatically"* ]]
+}
+
+@test "print_summary connected: node-local storage -> in-node data path, no host /tracebloc" {
+  # Under TB_STORAGE_MODE=node-local there is no host /tracebloc bind-mount
+  # (RFC-0003 Option C) — the summary must not point at one (Bugbot r3645585376).
+  CLIENT_STATE=connected; OS=Linux; TB_DOCKER_AUTOSTART=1; TB_STORAGE_MODE=node-local
+  run print_summary
+  [[ "$output" == *"in-node (k3s local-path)"* ]]
+  [[ "$output" != *"Data /tracebloc/"* ]]
+}
+
+@test "print_summary connected: hostpath storage -> host /tracebloc data path" {
+  CLIENT_STATE=connected; OS=Linux; TB_DOCKER_AUTOSTART=1; TB_STORAGE_MODE=hostpath
+  run print_summary
+  [[ "$output" == *"Data /tracebloc/testns"* ]]
 }
 
 # ── B2: PATH-aware CTA (grep-based so a false check fails loudly on bash 3.2) ──
