@@ -452,16 +452,33 @@ _ensure_unpack_tools() {
     # sudo prompt), with the honest reason, before the spin_cmd installs below.
     info "Your machine is missing ${missing[*]} (needed once, to unpack Helm) — administrator password required to install ${missing[*]}."
     _real_sudo -v || error "Couldn't get administrator rights to install ${missing[*]}. Ask an administrator to install ${missing[*]}, then re-run this installer."
+    # Tier 0 skips preflight_sudo, so keep the just-primed ticket warm ourselves:
+    # the dpkg-lock wait below can outlast sudo's timestamp, and an expired
+    # ticket re-prompts invisibly behind the spinner (Bugbot r2). Same pattern
+    # as preflight_sudo; install_cleanup kills the pid on ANY exit, and we kill
+    # it right after the installs — the zero-privilege tier shouldn't hold a
+    # warm admin ticket a second longer than needed.
+    ( while _real_sudo -n true 2>/dev/null; do sleep 50; done ) &
+    SUDO_KEEPALIVE_PID=$!
   fi
+  # Tier 0 also skips the full flow's apt_wait_for_lock — on a freshly-booted
+  # Debian/Ubuntu host apt-daily can hold the dpkg lock for minutes, and apt
+  # would sit on it invisibly behind the spinner (Bugbot r2). Bounded + visible;
+  # no-op off apt distros. Runs after the priming above so its own sudo calls
+  # never prompt mid-spinner.
+  apt_wait_for_lock
   # Mirror install_system_deps: refresh the index best-effort (a brand-new
   # minimal image has no package lists at all), gate on the install itself.
   spin_cmd "Updating package index…" $PM_UPDATE || \
     warn "Package index refresh failed — continuing; installs will use the cached index."
-  local pkg
-  for pkg in "${missing[@]}"; do
-    spin_cmd "Installing $pkg…" $PM_INSTALL "$pkg" || \
-      error "Couldn't install $pkg (needed to unpack Helm). Install it with your package manager, then re-run this installer."
-  done
+  # ONE combined install (not per-package): a single sudo consumer right after
+  # the priming, minimizing the window in which the ticket could lapse.
+  spin_cmd "Installing ${missing[*]}…" $PM_INSTALL "${missing[@]}" || \
+    error "Couldn't install ${missing[*]} (needed to unpack Helm). Install with your package manager, then re-run this installer."
+  if [ -n "${SUDO_KEEPALIVE_PID:-}" ]; then
+    kill "$SUDO_KEEPALIVE_PID" 2>/dev/null || true
+    SUDO_KEEPALIVE_PID=""
+  fi
   log "Dependencies installed: ${missing[*]}"
 }
 

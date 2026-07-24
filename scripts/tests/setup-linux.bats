@@ -376,7 +376,7 @@ _helm_dl_setup() {
   run mock_calls
   [ -z "$output" ]
 }
-@test "_ensure_unpack_tools: missing + passwordless sudo -> installs via the package manager (#395)" {
+@test "_ensure_unpack_tools: missing + passwordless sudo -> ONE combined install via the package manager (#395)" {
   PRESENT_CMDS="curl apt-get"           # tar + gzip absent
   # Option-led probes go through _real_sudo (the A2 shadow mangles them as
   # root) — stub the primitive, not the shadow (Bugbot #372 pattern).
@@ -385,9 +385,23 @@ _helm_dl_setup() {
   run _ensure_unpack_tools
   [ "$status" -eq 0 ]
   run mock_calls
-  [[ "$output" == *"apt-get install"* ]]
-  [[ "$output" == *"Installing tar"* ]]
-  [[ "$output" == *"Installing gzip"* ]]
+  # One combined install call — a single sudo consumer (Bugbot r2), both pkgs on it.
+  [[ "$output" == *"Installing tar gzip"* ]]
+  [[ "$output" == *"apt-get install"*"tar gzip"* ]]
+}
+@test "_ensure_unpack_tools: password path primes sudo, waits out the dpkg lock, then installs (Bugbot r2)" {
+  PRESENT_CMDS="curl apt-get fuser"     # tar + gzip absent; fuser present → lock wait live
+  _have_sudo_bin() { return 0; }
+  # -n fails (no cached ticket) → prompt path; -v succeeds; the keepalive loop's
+  # own -n probes also fail, so it exits immediately (no stray child in bats).
+  _real_sudo() { record "_real_sudo $*"; case "$1" in -v) return 0 ;; *) return 1 ;; esac; }
+  apt_wait_for_lock() { record "apt_wait_for_lock"; }
+  run _ensure_unpack_tools
+  [ "$status" -eq 0 ]
+  run mock_calls
+  [[ "$output" == *"_real_sudo -v"* ]]              # primed before any spinner
+  [[ "$output" == *"apt_wait_for_lock"* ]]          # lock wait not skipped on Tier 0
+  [[ "$output" == *"Installing tar gzip"* ]]
 }
 @test "_ensure_unpack_tools: no sudo rights -> honest error, names the packages" {
   PRESENT_CMDS="curl apt-get"           # tar + gzip absent
