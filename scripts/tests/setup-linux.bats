@@ -378,7 +378,10 @@ _helm_dl_setup() {
 }
 @test "_ensure_unpack_tools: missing + passwordless sudo -> installs via the package manager (#395)" {
   PRESENT_CMDS="curl apt-get"           # tar + gzip absent
-  sudo() { record "sudo $*"; return 0; }   # sudo -n true succeeds → quiet path
+  # Option-led probes go through _real_sudo (the A2 shadow mangles them as
+  # root) — stub the primitive, not the shadow (Bugbot #372 pattern).
+  _have_sudo_bin() { return 0; }
+  _real_sudo() { record "_real_sudo $*"; return 0; }   # -n probe succeeds → quiet path
   run _ensure_unpack_tools
   [ "$status" -eq 0 ]
   run mock_calls
@@ -388,15 +391,26 @@ _helm_dl_setup() {
 }
 @test "_ensure_unpack_tools: no sudo rights -> honest error, names the packages" {
   PRESENT_CMDS="curl apt-get"           # tar + gzip absent
-  sudo() { record "sudo $*"; return 1; }   # -n probe AND -v both fail
+  _have_sudo_bin() { return 0; }
+  _real_sudo() { record "_real_sudo $*"; return 1; }   # -n probe AND -v both fail
   run _ensure_unpack_tools
   [ "$status" -ne 0 ]
   [[ "$output" == *"administrator"* ]]
   [[ "$output" == *"tar"* ]]
 }
+@test "_ensure_unpack_tools: not root and no sudo binary -> honest error before any prompt" {
+  PRESENT_CMDS="curl apt-get"           # tar + gzip absent
+  _have_sudo_bin() { return 1; }                        # no sudo on the machine at all
+  _real_sudo() { record "_real_sudo $*"; return 127; }
+  run _ensure_unpack_tools
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"no sudo"* ]]
+  [[ "$output" == *"tar"* ]]
+}
 @test "_ensure_unpack_tools: package install fails -> fatal (helm can't unpack without it)" {
   PRESENT_CMDS="curl apt-get gzip"      # only tar absent
-  sudo() { record "sudo $*"; return 0; }
+  _have_sudo_bin() { return 0; }
+  _real_sudo() { record "_real_sudo $*"; return 0; }
   spin_cmd() { record "$*"; case "$*" in *"apt-get install"*) return 1 ;; *) return 0 ;; esac; }
   run _ensure_unpack_tools
   [ "$status" -ne 0 ]

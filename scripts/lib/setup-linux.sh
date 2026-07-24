@@ -441,24 +441,25 @@ _ensure_unpack_tools() {
   has gzip || missing+=(gzip)
   [ ${#missing[@]} -eq 0 ] && return 0
   setup_pm    # variable setup only (PM_UPDATE/PM_INSTALL); errors on unknown PM
-  # PM_INSTALL is written with a leading `sudo`; as real root without the sudo
-  # binary (containers, cloud-init) strip it rather than fail on a missing tool.
-  local pm_update="$PM_UPDATE" pm_install="$PM_INSTALL"
-  if [ "${EUID:-1000}" -eq 0 ] && ! has sudo; then
-    pm_update="${PM_UPDATE#sudo }"; pm_install="${PM_INSTALL#sudo }"
-  elif [ "${EUID:-1000}" -ne 0 ] && ! sudo -n true 2>/dev/null; then
+  # PM_INSTALL leads with `sudo` — that's the common.sh shadow (A2): as root it
+  # runs the command directly (fine with no sudo binary at all), so nothing to
+  # strip here. The OPTION-led probes below must BYPASS the shadow via
+  # _have_sudo_bin/_real_sudo — as root the shadow would execute "-n true" as a
+  # command — mirroring preflight_sudo/_probe_privilege (Bugbot #372).
+  if [ "${EUID:-1000}" -ne 0 ] && ! _real_sudo -n true 2>/dev/null; then
+    _have_sudo_bin || error "Couldn't install ${missing[*]} (needed to unpack Helm): you aren't root and this machine has no sudo. Ask an administrator to install ${missing[*]}, then re-run this installer."
     # A password IS needed — prompt on a plain line (a spinner would garble the
     # sudo prompt), with the honest reason, before the spin_cmd installs below.
     info "Your machine is missing ${missing[*]} (needed once, to unpack Helm) — administrator password required to install ${missing[*]}."
-    sudo -v || error "Couldn't get administrator rights to install ${missing[*]}. Ask an administrator to install ${missing[*]}, then re-run this installer."
+    _real_sudo -v || error "Couldn't get administrator rights to install ${missing[*]}. Ask an administrator to install ${missing[*]}, then re-run this installer."
   fi
   # Mirror install_system_deps: refresh the index best-effort (a brand-new
   # minimal image has no package lists at all), gate on the install itself.
-  spin_cmd "Updating package index…" $pm_update || \
+  spin_cmd "Updating package index…" $PM_UPDATE || \
     warn "Package index refresh failed — continuing; installs will use the cached index."
   local pkg
   for pkg in "${missing[@]}"; do
-    spin_cmd "Installing $pkg…" $pm_install "$pkg" || \
+    spin_cmd "Installing $pkg…" $PM_INSTALL "$pkg" || \
       error "Couldn't install $pkg (needed to unpack Helm). Install it with your package manager, then re-run this installer."
   done
   log "Dependencies installed: ${missing[*]}"
