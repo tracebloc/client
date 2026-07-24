@@ -421,6 +421,56 @@ _helm_dl_setup() {
   [[ "$output" == *"no sudo"* ]]
   [[ "$output" == *"tar"* ]]
 }
+@test "_ensure_unpack_tools: never kills a preflight keepalive (Bugbot r3)" {
+  PRESENT_CMDS="curl apt-get"           # tar + gzip absent (Tier 1/2 recovery case)
+  SUDO_KEEPALIVE_PID=99999              # preflight_sudo's keepalive owns the global
+  _have_sudo_bin() { return 0; }
+  _real_sudo() { record "_real_sudo $*"; return 0; }   # ticket cached → quiet path
+  kill() { record "kill $*"; }
+  run _ensure_unpack_tools
+  [ "$status" -eq 0 ]
+  run mock_calls
+  [[ "$output" != *"kill 99999"* ]]     # preflight's warm ticket left alone
+}
+@test "install_helm: HELM_VERSION=latest survives retry notices on stdout (Bugbot r3)" {
+  _helm_dl_setup
+  HELM_VERSION=latest
+  # First helm-latest-version fetch fails -> the REAL retry warns on stdout
+  # inside the command substitution; the resolver must still isolate the body.
+  _lv_attempts="$BATS_TEST_TMPDIR/lv-attempts"
+  curl() {
+    record "curl $*"
+    local prev="" a out="" url=""
+    for a in "$@"; do
+      [ "$prev" = "-o" ] && out="$a"
+      case "$a" in http*) url="$a" ;; esac
+      prev="$a"
+    done
+    case "$url" in
+      *helm-latest-version)
+        local n; n="$(cat "$_lv_attempts" 2>/dev/null || echo 0)"; n=$((n+1)); echo "$n" >"$_lv_attempts"
+        if [ "$n" -lt 2 ]; then return 22; fi
+        printf 'v9.9.9' ;;
+      *.tar.gz.sha256sum)   [ -n "$out" ] && printf '%s  %s\n' "cafe01" "$(basename "${url%.sha256sum}")" >"$out" ;;
+      *.tar.gz)             [ -n "$out" ] && printf 'helm-tarball-bytes' >"$out" ;;
+    esac
+    return 0
+  }
+  retry() { local m="$1" d="$2"; shift 2
+    local i=1
+    while true; do
+      if "$@"; then return 0; fi
+      [ "$i" -ge "$m" ] && { warn "Command failed after $m attempts: $*"; return 1; }
+      warn "Attempt $i/$m failed. Retrying in ${d}s..."   # STDOUT, like common.sh
+      i=$((i+1))
+    done
+  }
+  run install_helm
+  [ "$status" -eq 0 ]
+  run mock_calls
+  [[ "$output" == *"get.helm.sh/helm-v9.9.9-linux-amd64.tar.gz"* ]]   # clean tag despite the notice
+}
+
 @test "_ensure_unpack_tools: package install fails -> fatal (helm can't unpack without it)" {
   PRESENT_CMDS="curl apt-get gzip"      # only tar absent
   _have_sudo_bin() { return 0; }

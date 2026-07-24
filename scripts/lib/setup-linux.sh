@@ -436,7 +436,7 @@ install_k3d() {
 # installs quietly; otherwise we say exactly why we're asking for a password
 # this once (and only error as a last resort, when we truly can't get rights).
 _ensure_unpack_tools() {
-  local missing=()
+  local missing=() _unpack_keepalive=""
   has tar  || missing+=(tar)
   has gzip || missing+=(gzip)
   [ ${#missing[@]} -eq 0 ] && return 0
@@ -459,7 +459,14 @@ _ensure_unpack_tools() {
     # it right after the installs — the zero-privilege tier shouldn't hold a
     # warm admin ticket a second longer than needed.
     ( while _real_sudo -n true 2>/dev/null; do sleep 50; done ) &
-    SUDO_KEEPALIVE_PID=$!
+    _unpack_keepalive=$!
+    # Register OUR pid for install_cleanup only when no preflight keepalive
+    # owns the global — on the Tier 1/2 recovery path SUDO_KEEPALIVE_PID is
+    # preflight_sudo's, and clobbering (or later killing) it would let the
+    # remaining privileged steps re-prompt behind a spinner (Bugbot r3).
+    if [ -z "${SUDO_KEEPALIVE_PID:-}" ]; then
+      SUDO_KEEPALIVE_PID=$_unpack_keepalive
+    fi
   fi
   # Tier 0 also skips the full flow's apt_wait_for_lock — on a freshly-booted
   # Debian/Ubuntu host apt-daily can hold the dpkg lock for minutes, and apt
@@ -475,9 +482,13 @@ _ensure_unpack_tools() {
   # the priming, minimizing the window in which the ticket could lapse.
   spin_cmd "Installing ${missing[*]}…" $PM_INSTALL "${missing[@]}" || \
     error "Couldn't install ${missing[*]} (needed to unpack Helm). Install with your package manager, then re-run this installer."
-  if [ -n "${SUDO_KEEPALIVE_PID:-}" ]; then
-    kill "$SUDO_KEEPALIVE_PID" 2>/dev/null || true
-    SUDO_KEEPALIVE_PID=""
+  # Kill only the keepalive WE started — never a preflight_sudo one that the
+  # rest of the full flow still relies on (Bugbot r3).
+  if [ -n "$_unpack_keepalive" ]; then
+    kill "$_unpack_keepalive" 2>/dev/null || true
+    if [ "${SUDO_KEEPALIVE_PID:-}" = "$_unpack_keepalive" ]; then
+      SUDO_KEEPALIVE_PID=""
+    fi
   fi
   log "Dependencies installed: ${missing[*]}"
 }
@@ -555,8 +566,12 @@ install_helm() {
     _ensure_unpack_tools
 
     if [ -z "$_helm_tag" ]; then
+      # tail -1: retry's attempt notices go to STDOUT and would concatenate into
+      # the capture on a failed-then-successful fetch; the endpoint's body is
+      # the last line either way (Bugbot r3). On total failure the last line is
+      # retry's notice, which the tag regex below rejects → the honest error.
       _helm_tag="$(retry 3 5 curl -fsSL $CURL_SECURE --connect-timeout 15 --max-time 30 \
-        "https://get.helm.sh/helm-latest-version" 2>/dev/null | tr -d '[:space:]')" || _helm_tag=""
+        "https://get.helm.sh/helm-latest-version" 2>/dev/null | tail -1 | tr -d '[:space:]')" || _helm_tag=""
       [[ "$_helm_tag" =~ ^v[0-9][A-Za-z0-9._-]*$ ]] \
         || error "Couldn't resolve the latest Helm release tag — set HELM_VERSION to a release tag (e.g. v4.2.3) and re-run."
     fi
