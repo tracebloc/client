@@ -16,8 +16,16 @@ helm test <release> -n <namespace> --logs
 `helm test` exits non-zero if any check fails — that exit status is the
 aggregated verdict today. Per-check detail is in each Job's log
 (`OK` / `FAIL` / `SKIP` / `WARNING` lines, ending in a
-`SEAL-CHECK RESULT:` line). Run a single check with
-`--filter name=<release>-<check>-check`.
+`SEAL-CHECK RESULT:` line). Run a single check by its **literal Job name**
+(⚠️ not derivable from the check name — backend-reachability's Job is named
+`egress-reachability`, and `helm test --filter` matching zero hooks runs
+nothing and exits 0, a silent pass):
+
+| Check | `--filter` value |
+|---|---|
+| egress-enforcement | `name=<release>-egress-enforcement-check` |
+| backend-reachability | `name=<release>-egress-reachability-check` |
+| storage-assertions | `name=<release>-storage-assertions-check` |
 
 Because every check is a `helm.sh/hook: test` hook, **nothing here ever runs
 during install or upgrade** — the suite can never block them or the hourly
