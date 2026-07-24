@@ -203,6 +203,17 @@ setup() {
   [[ "$output" == *"TAG= "* ]]                        # empty TAG = upstream resolves
   [[ "$output" != *"TAG=v"* ]]
 }
+@test "install_k3d: malformed K3D_VERSION fails closed before any fetch (Bugbot r1)" {
+  PRESENT_CMDS="curl"
+  K3D_VERSION="../../evil/repo/main"    # would traverse out of k3d-io/k3d in the URL
+  has() { case " $PRESENT_CMDS " in *" $1 "*) return 0 ;; *) return 1 ;; esac; }
+  spin_cmd() { record "$*"; return 0; }
+  run install_k3d
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"K3D_VERSION must be a k3d release tag"* ]]
+  run mock_calls
+  [ -z "$output" ]                      # no curl, no spin_cmd — nothing ran
+}
 
 @test "install_k3d: already present -> skip" {
   has() { [ "$1" = k3d ]; }

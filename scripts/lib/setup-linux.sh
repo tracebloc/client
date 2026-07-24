@@ -356,10 +356,16 @@ install_k3d() {
   # GitHub rate limiting on shared egress IPs (CI runners, corporate NAT) and
   # took down 2/9 distro CI jobs on 2026-07-21 with a bare "curl: 404". The
   # script still verifies the binary against the release's checksums.txt.
-  # K3D_VERSION="" or "latest" restores resolve-at-install-time (TAG unset +
-  # script from main).
+  # K3D_VERSION=latest restores resolve-at-install-time (TAG unset + script
+  # from main; an empty value means the common.sh default pin, Bugbot r1).
+  # The value lands in a raw.githubusercontent URL path, so anything that
+  # isn't a plain release tag fails closed — a value carrying "/" could
+  # otherwise traverse to a script outside k3d-io/k3d and run it privileged
+  # (Bugbot r1).
   local _k3d_tag="${K3D_VERSION:-}"
   [[ "$_k3d_tag" == "latest" ]] && _k3d_tag=""
+  [[ -z "$_k3d_tag" || "$_k3d_tag" =~ ^v[0-9][A-Za-z0-9._-]*$ ]] \
+    || error "K3D_VERSION must be a k3d release tag like v5.9.0, or 'latest' (got '${K3D_VERSION:-}')"
 
   local k3d_script
   k3d_script="$(mktemp)"
