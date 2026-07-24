@@ -157,12 +157,30 @@ _leftover_data_dirs() {
   local d
   for d in "${candidates[@]}"; do
     [[ -d "$d" ]] || continue
-    # Non-empty test that is portable across GNU + BSD/macOS find (no -quit):
-    # head -1 closes the pipe after the first hit, so it never walks a huge tree.
-    if find "$d" -type f 2>/dev/null | head -1 | grep -q .; then
+    # Non-empty test that is pipefail-safe AND portable (GNU + BSD/macOS: no
+    # -quit). A `find | head -1 | grep -q` pipeline SIGPIPEs find once its output
+    # exceeds the pipe buffer (a real multi-table MySQL dir), and under the
+    # installer's `set -o pipefail` that non-zero status wrongly reads as "empty"
+    # — skipping exactly the leftovers this guard must catch. Reading the first
+    # path from a process substitution keeps find's status out of the check and
+    # still short-circuits (read stops after one line).
+    if read -r _ < <(find "$d" -type f 2>/dev/null); then
       echo "$d"
     fi
   done
+}
+
+# Read one line from $TB_TTY into the named variable, stripping bracketed-paste
+# / CSI escape garbage (arrow keys, pastes survive `read -r`) and trimming
+# surrounding whitespace — so a paste or a spaces-then-Enter can't smuggle
+# control bytes into HOST_DATA_DIR or slip past a non-empty check. Mirrors the
+# provision.sh client-name handling (_strip_paste_garbage + trim).
+_read_sanitized() {
+  local __prompt="$1" __var="$2" __in=""
+  read -r -p "$__prompt" __in <"$TB_TTY" || __in=""
+  __in="$(_strip_paste_garbage "$__in")"
+  __in="${__in#"${__in%%[![:space:]]*}"}"; __in="${__in%"${__in##*[![:space:]]}"}"
+  printf -v "$__var" '%s' "$__in"
 }
 
 # Delete the detected leftover data dirs. Only ever removes paths UNDER the
@@ -212,7 +230,7 @@ guard_leftover_data() {
       hint "  [n] new   — install into a different directory"
       hint "  [a] abort — stop and sort it out myself (default)"
       local reply=""
-      read -r -p "  Choice [r/w/n/a]: " reply <"$TB_TTY" || reply=""
+      _read_sanitized "  Choice [r/w/n/a]: " reply
       case "$reply" in
         r|R|reuse) action=reuse ;;
         w|W|wipe)  action=wipe ;;
@@ -242,7 +260,7 @@ guard_leftover_data() {
       ;;
     newdir)
       local newdir=""
-      [[ -r "$TB_TTY" ]] && { read -r -p "  New data directory (absolute or under \$HOME): " newdir <"$TB_TTY" || newdir=""; }
+      [[ -r "$TB_TTY" ]] && _read_sanitized "  New data directory (absolute or under \$HOME): " newdir
       [[ -n "$newdir" ]] || error "No new directory given — aborting."
       HOST_DATA_DIR="$newdir"
       # Re-resolve + re-validate the new path, then re-check it for leftovers too.

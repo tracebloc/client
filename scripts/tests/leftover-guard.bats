@@ -49,6 +49,19 @@ seed_release_data() { mkdir -p "$HOST_DATA_DIR/tracebloc/data/ds1"; : >"$HOST_DA
   [[ "$output" == *"$HOST_DATA_DIR/tracebloc/data"* ]]
 }
 
+@test "_leftover_data_dirs: large multi-file MySQL dir detected under pipefail (#384 bugbot)" {
+  # A real MySQL data dir has many files; once find's output exceeds the pipe
+  # buffer a find|head|grep pipeline SIGPIPEs find, and under `set -o pipefail`
+  # (which the installer sets) that wrongly reads as "empty" -> silent adopt.
+  mkdir -p "$HOST_DATA_DIR/mysql"
+  for i in $(seq 1 3000); do : >"$HOST_DATA_DIR/mysql/table_with_a_reasonably_long_name_$i.ibd"; done
+  set -o pipefail
+  run _leftover_data_dirs
+  set +o pipefail
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"$HOST_DATA_DIR/mysql"* ]]
+}
+
 # ── guard_leftover_data (decision) ───────────────────────────────────────────
 @test "guard: clean slate -> proceeds silently" {
   run guard_leftover_data
@@ -113,4 +126,27 @@ seed_release_data() { mkdir -p "$HOST_DATA_DIR/tracebloc/data/ds1"; : >"$HOST_DA
   TB_TTY=/dev/stdin run guard_leftover_data <<< ""
   [ "$status" -eq 1 ]
   [ -e "$HOST_DATA_DIR/mysql/ibdata1" ]
+}
+
+# ── input sanitizing (#384 bugbot: paste garbage + whitespace) ───────────────
+@test "_read_sanitized: strips CSI/paste garbage and trims whitespace" {
+  TB_TTY=/dev/stdin
+  local got="unset"
+  _read_sanitized "" got <<< "$(printf ' \033[Dhello world ')"
+  [ "$got" = "hello world" ]
+}
+
+@test "_read_sanitized: whitespace-only input -> empty" {
+  TB_TTY=/dev/stdin
+  local got="unset"
+  _read_sanitized "" got <<< "   "
+  [ -z "$got" ]
+}
+
+@test "guard: new-dir choice with whitespace-only path aborts (#384 bugbot)" {
+  seed_flat_mysql
+  TB_LEFTOVER_ACTION=newdir TB_TTY=/dev/stdin run guard_leftover_data <<< "   "
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"No new directory given"* ]]
+  [ -e "$HOST_DATA_DIR/mysql/ibdata1" ]   # untouched
 }
