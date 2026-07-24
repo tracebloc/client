@@ -306,6 +306,15 @@ function Confirm-NvidiaDriver {
     if ($majorVer -ge 460) {
       $script:NVIDIA_DRIVER_OK = $true
       Ok "NVIDIA GPU ready (driver $driverVer)"
+      # Expectation-setting only, never a gate (#387): entry-level cards pass
+      # every check but are too small for real training (field: a 2 GB GT 710
+      # installed fine and could never fit a model).
+      try {
+        $vramMiB = [int]((& $nvSmi --query-gpu=memory.total --format=csv,noheader,nounits 2>&1 | Select-Object -First 1).Trim())
+        if ($vramMiB -gt 0 -and $vramMiB -lt 8192) {
+          Hint "This GPU has $([math]::Round($vramMiB / 1024, 1)) GB VRAM - fine for setup; real training typically needs 8 GB+."
+        }
+      } catch {}
     } else {
       Warn "NVIDIA driver $driverVer is too old (need 460+)."
       Hint "Download latest: https://www.nvidia.com/Download/index.aspx"
@@ -498,7 +507,8 @@ function Install-DockerDesktop {
       Write-Host ""
       Hint "1. Look for the Docker whale icon in your system tray"
       Hint "2. If Docker is open, wait until it says 'Docker Desktop is running'"
-      Hint "3. Re-run this script once it's ready"
+      Hint "3. If Docker shows an error window instead (e.g. 'Virtualization support not detected' or a WSL update prompt), fix that first - it may need a reboot"
+      Hint "4. Re-run this script once it's ready"
       Write-Host ""
       Hint "Nothing is broken -- Docker just needs a moment."
       Write-Host ""
@@ -1668,6 +1678,21 @@ function Get-PfCpu {
   catch { if ($env:NUMBER_OF_PROCESSORS) { return [int]$env:NUMBER_OF_PROCESSORS } else { return $null } }
 }
 
+# $true when this machine can host Docker's VM: a hypervisor is already running
+# (check FIRST — when Hyper-V owns VT-x, VirtualizationFirmwareEnabled reads
+# $false on a perfectly healthy machine), or virtualization is enabled in
+# firmware. $false = disabled in BIOS/UEFI. $null if undeterminable (non-Windows
+# under Pester — tests mock this). #387
+function Get-PfVirtualization {
+  try {
+    $cs = Get-CimInstance Win32_ComputerSystem -ErrorAction Stop
+    if ($cs.HypervisorPresent) { return $true }
+    $cpu = Get-CimInstance Win32_Processor -ErrorAction Stop | Select-Object -First 1
+    if ($null -ne $cpu.VirtualizationFirmwareEnabled) { return [bool]$cpu.VirtualizationFirmwareEnabled }
+    return $null
+  } catch { return $null }
+}
+
 function Test-Preflight {
   if ($env:TRACEBLOC_SKIP_PREFLIGHT) { Info "Preflight checks skipped (TRACEBLOC_SKIP_PREFLIGHT set)."; return }
 
@@ -1690,6 +1715,23 @@ function Test-Preflight {
     Info "Architecture: $arch - Docker Desktop runs the amd64 client images under emulation (slower, but works)."
   }
 
+  # Hardware virtualization -- without it Docker Desktop's VM cannot start, and
+  # its own failure ("Virtualization support not detected") only appears AFTER
+  # this installer has installed and launched it, with no guidance (#387).
+  # Fail fast here instead, with the firmware fix.
+  $virt = Get-PfVirtualization
+  if ($null -eq $virt) {
+    Info "Virtualization: couldn't determine (skipping)."
+  } elseif ($virt) {
+    Ok "Virtualization enabled"
+  } else {
+    Write-PfFail "Virtualization is disabled in firmware - Docker Desktop cannot run."
+    $hardFail++
+    Hint "Enable Intel VT-x / AMD SVM in your BIOS/UEFI setup (usually under Advanced -> CPU), then re-run."
+    Hint "Confirm afterwards in Task Manager -> Performance -> CPU: 'Virtualization: Enabled'."
+    Hint "On a company device this setting may be locked by IT policy."
+  }
+
   $cpu = Get-PfCpu
   if      ($null -eq $cpu)   { Warn "CPU: couldn't determine core count (skipping)." }
   elseif  ($cpu -lt $minCpu) { Warn "CPU: $cpu core(s) - below the $minCpu-core minimum; mysql may hit lock-wait timeouts. $recCpu+ recommended to train." }
@@ -1702,11 +1744,13 @@ function Test-Preflight {
   if      ($null -eq $mem)      { Warn "Memory: couldn't determine total RAM (skipping)." }
   elseif  ($mem -lt $minMemGb)  {
     Warn "Memory: $mem GB - below the $minMemGb GB the client needs; it will OOM."
-    Hint "Docker Desktop -> Settings -> Resources -> Memory: raise to >= $warnMemGb GB ($recMemGb GB to train), then re-run."
+    Hint "Give Docker more memory (>= $warnMemGb GB; $recMemGb GB to train), then re-run:"
+    Hint "  WSL2 backend (the default): set [wsl2] memory=${warnMemGb}GB in %UserProfile%\.wslconfig, run 'wsl --shutdown', restart Docker Desktop."
+    Hint "  Hyper-V backend: Docker Desktop -> Settings -> Resources -> Advanced."
   }
   elseif  ($mem -lt $warnMemGb) {
     Warn "Memory: $mem GB - enough to run, but training (~8 GB/job) may OOM; $recMemGb GB recommended to train locally."
-    Hint "Docker Desktop -> Settings -> Resources -> Memory >= $recMemGb GB to train."
+    Hint "To train locally give Docker >= $recMemGb GB: WSL2 backend - [wsl2] memory=${recMemGb}GB in %UserProfile%\.wslconfig + 'wsl --shutdown'; Hyper-V backend - Docker Desktop -> Settings -> Resources -> Advanced."
   }
   else                          { Ok "Memory: $mem GB" }
 
@@ -1775,7 +1819,7 @@ function Test-PreflightRuntimeMem {
   $recMemGb  = if ($env:PF_REC_MEM_GB)  { [int]$env:PF_REC_MEM_GB }  else { 16 }
   if ($mem -lt $warnMemGb) {
     Warn "Docker is running with $mem GB - recommended >= $warnMemGb GB ($recMemGb GB to train); the client may OOM under load."
-    Hint "Docker Desktop -> Settings -> Resources -> Memory >= $warnMemGb GB, then re-install."
+    Hint "Give Docker >= $warnMemGb GB, then re-install: WSL2 backend - [wsl2] memory=${warnMemGb}GB in %UserProfile%\.wslconfig + 'wsl --shutdown'; Hyper-V backend - Docker Desktop -> Settings -> Resources -> Advanced."
   }
 }
 

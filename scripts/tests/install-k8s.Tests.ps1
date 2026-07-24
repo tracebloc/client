@@ -708,6 +708,15 @@ Describe "Get-Pf* resource readers" -Skip:(-not $IsWindows) {
     Mock Get-CimInstance { [pscustomobject]@{ FreeSpace = 50GB } }
     Get-PfFreeGb | Should -Be 50
   }
+  It "Get-PfVirtualization: running hypervisor -> true, firmware not consulted (#387)" {
+    Mock Get-CimInstance { [pscustomobject]@{ HypervisorPresent = $true } } -ParameterFilter { $ClassName -eq 'Win32_ComputerSystem' }
+    Get-PfVirtualization | Should -Be $true
+  }
+  It "Get-PfVirtualization: no hypervisor + firmware disabled -> false (#387)" {
+    Mock Get-CimInstance { [pscustomobject]@{ HypervisorPresent = $false } } -ParameterFilter { $ClassName -eq 'Win32_ComputerSystem' }
+    Mock Get-CimInstance { [pscustomobject]@{ VirtualizationFirmwareEnabled = $false } } -ParameterFilter { $ClassName -eq 'Win32_Processor' }
+    Get-PfVirtualization | Should -Be $false
+  }
 }
 
 Describe "Test-Preflight" {
@@ -716,6 +725,7 @@ Describe "Test-Preflight" {
     Mock Get-PfCpu { 4 }; Mock Get-PfMemGb { 8 }; Mock Get-PfFreeGb { 50 }
     Mock Get-WindowsArch { "amd64" }
     Mock Get-PfFsType { "local" }
+    Mock Get-PfVirtualization { $true }
   }
   AfterEach { $env:TRACEBLOC_SKIP_PREFLIGHT = $null; $env:TRACEBLOC_ALLOW_ARM64 = $null; $env:TRACEBLOC_ALLOW_NETWORK_FS = $null }
 
@@ -736,6 +746,19 @@ Describe "Test-Preflight" {
   It "arm64 -> info, not a hard fail (Docker Desktop emulates)" {
     Mock Get-WindowsArch { "arm64" }
     Mock Test-PfUrl { "ok" }
+    { Test-Preflight } | Should -Not -Throw
+  }
+  # #387: Docker Desktop's own "Virtualization support not detected" only
+  # appears AFTER we've installed and launched it — preflight must fail fast
+  # with the firmware fix instead.
+  It "virtualization disabled in firmware -> fails (Err throws) (#387)" {
+    Mock Test-PfUrl { "ok" }
+    Mock Get-PfVirtualization { $false }
+    { Test-Preflight } | Should -Throw
+  }
+  It "virtualization undeterminable -> skipped, not a fail (#387)" {
+    Mock Test-PfUrl { "ok" }
+    Mock Get-PfVirtualization { $null }
     { Test-Preflight } | Should -Not -Throw
   }
   It "memory below floor -> warn-only on Windows (does not throw)" {
