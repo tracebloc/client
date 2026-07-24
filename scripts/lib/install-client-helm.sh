@@ -69,6 +69,11 @@ _mem_to_bytes() {
 _existing_training_resources() {
   local ns="${TB_NAMESPACE:-}" out
   [[ -n "$ns" ]] || return 0
+  # helm get has no request timeout, so gate it behind a BOUNDED probe: a
+  # wedged API degrades to machine sizing / the static default instead of
+  # hanging values generation (Bugbot). A missing namespace also means there
+  # is no release to carry — skip the helm call entirely.
+  kubectl get namespace "$ns" --request-timeout=5s >/dev/null 2>&1 || return 0
   out="$(helm get values "$ns" -n "$ns" 2>/dev/null)" || return 0
   printf '%s\n' "$out" | awk '
     /^[[:space:]]*RESOURCE_LIMITS:/ {

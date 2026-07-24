@@ -544,6 +544,7 @@ Describe "Get-TrainingResources" {
     Get-TrainingResources | Should -Be "cpu=4,memory=16Gi"
   }
   It "existing release choice carried (resources set survives re-install)" {
+    Mock kubectl { $global:LASTEXITCODE = 0; "" }   # bounded namespace probe passes
     Mock helm { $global:LASTEXITCODE = 0; '{"env":{"RESOURCE_LIMITS":"cpu=4,memory=12Gi"}}' }
     Get-TrainingResources | Should -Be "cpu=4,memory=12Gi"
   }

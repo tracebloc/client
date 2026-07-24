@@ -1034,10 +1034,16 @@ $TRACEBLOC_CHART_NAME = "client"
 function Get-TrainingResources {
   if ($env:TRACEBLOC_TRAINING_RESOURCES) { return $env:TRACEBLOC_TRAINING_RESOURCES }
   try {
-    $valsJson = (helm get values $TB_NAMESPACE -n $TB_NAMESPACE -o json 2>$null) | Out-String
-    if ($LASTEXITCODE -eq 0 -and $valsJson.Trim()) {
-      $prev = ($valsJson | ConvertFrom-Json).env.RESOURCE_LIMITS
-      if ($prev) { return $prev }
+    # helm get has no request timeout — gate it behind a bounded probe so a
+    # wedged API degrades instead of hanging values generation (Bugbot). A
+    # missing namespace also means there is no release to carry.
+    $null = (kubectl get namespace $TB_NAMESPACE --request-timeout=5s 2>$null) | Out-String
+    if ($LASTEXITCODE -eq 0) {
+      $valsJson = (helm get values $TB_NAMESPACE -n $TB_NAMESPACE -o json 2>$null) | Out-String
+      if ($LASTEXITCODE -eq 0 -and $valsJson.Trim()) {
+        $prev = ($valsJson | ConvertFrom-Json).env.RESOURCE_LIMITS
+        if ($prev) { return $prev }
+      }
     }
   } catch {}
   try {

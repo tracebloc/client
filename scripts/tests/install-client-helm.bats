@@ -726,13 +726,17 @@ setup() {
 @test "training size: existing release choice carried — resources set survives re-install" {
   TB_NAMESPACE=tracebloc
   unset TRACEBLOC_TRAINING_RESOURCES
-  # helm re-serializes stored values UNQUOTED (the #200 lesson).
+  # helm re-serializes stored values UNQUOTED (the #200 lesson). The kubectl
+  # stub only answers the BOUNDED namespace probe that gates the helm call.
   helm() { printf 'env:\n  RESOURCE_LIMITS: cpu=4,memory=12Gi\n'; }
-  kubectl() { record "kubectl $*"; return 0; }
+  kubectl() {
+    record "kubectl $*"
+    case "$*" in *"get namespace"*--request-timeout=*) return 0 ;; *) return 1 ;; esac
+  }
   run _training_resources
   [ "$output" = "cpu=4,memory=12Gi" ]
   run mock_calls
-  [ -z "$output" ]   # machine sizing never consulted
+  [[ "$output" != *"get nodes"* ]]   # machine sizing never consulted
   # and the QUOTED form (our own values file style) parses identically
   helm() { printf 'env:\n  RESOURCE_LIMITS: "cpu=4,memory=12Gi"\n'; }
   run _training_resources
@@ -745,10 +749,14 @@ setup() {
   helm() { return 1; }
   has() { return 0; }
   # two k3d nodes = the same physical machine; must NOT be summed (cli#399).
-  # The stub only answers a BOUNDED call — a wedged API must never hang
+  # The stub only answers BOUNDED calls — a wedged API must never hang
   # values generation, so dropping --request-timeout fails this test.
   kubectl() {
-    case "$*" in *--request-timeout=*) printf '12 6924Mi\n12 6924Mi\n' ;; *) return 1 ;; esac
+    case "$*" in
+      *"get namespace"*--request-timeout=*) return 0 ;;
+      *"get nodes"*--request-timeout=*) printf '12 6924Mi\n12 6924Mi\n' ;;
+      *) return 1 ;;
+    esac
   }
   run _training_resources
   [ "$output" = "cpu=11,memory=3Gi" ]   # 12−1 CPU; 6.76−3 GiB floored
@@ -768,6 +776,7 @@ setup() {
   TB_NAMESPACE=tracebloc
   unset TRACEBLOC_TRAINING_RESOURCES
   helm() { return 1; }
+  kubectl() { return 1; }   # the probe also fails -> carry skipped hermetically
   has() { case "$1" in kubectl) return 1 ;; *) return 0 ;; esac; }
   run _training_resources
   [ "$output" = "cpu=2,memory=8Gi" ]
