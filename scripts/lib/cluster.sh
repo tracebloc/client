@@ -125,8 +125,226 @@ _export_host_no_proxy() {
   done
 }
 
+# ── Leftover-data guard (RFC-0003 §4 / D3, #376) ─────────────────────────────
+# The installer used to `mkdir -p` its data dirs and silently adopt whatever was
+# already there — data left by an earlier install (different layout, older
+# version, custom dir) got picked up by the next install, so a "fresh" install
+# was not guaranteed fresh. This guard detects real leftover data at install
+# time and forces a choice instead of adopting it. It doubles as the migration
+# prompt for the node-local transition (#367): existing ~/.tracebloc data is
+# never silently stranded.
+#
+# Where prompts READ from (mirrors provision.sh/install-client-helm.sh so the
+# curl|bash path can still prompt on the controlling terminal; overridable so
+# tests can feed canned input via TB_TTY=/dev/stdin).
+: "${TB_TTY:=/dev/tty}"
+
+# True only when $TB_TTY can actually be OPENED for reading. A plain `-r` test is
+# not enough: /dev/tty is world-readable even with no controlling terminal (CI,
+# `curl|bash`), so `-r` would route those runs into the interactive branch where
+# the `read` then fails immediately and the guard aborts with the generic abort
+# text instead of the non-interactive guidance that lists --reuse-data/--wipe-data
+# (Bugbot #384). Mirrors the openability probe assess.sh already uses.
+_tty_usable() { { : <"$TB_TTY"; } 2>/dev/null; }
+
+# Echo each dir under HOST_DATA_DIR that holds real client data — a MySQL data
+# dir or a dataset dir with at least one file — across BOTH on-disk layouts:
+# flat ($HOST_DATA_DIR/{mysql,data}) and per-release ($HOST_DATA_DIR/<rel>/…).
+# Deliberately scoped to HOST_DATA_DIR only: HOST_DATASET_DIR may be a shared
+# network mount other tools use, so the guard never scans or touches it. Empty
+# dirs, values.yaml and install-*.log are not data and are ignored.
+_leftover_data_dirs() {
+  local base="${HOST_DATA_DIR:-}"
+  [[ -n "$base" && -d "$base" ]] || return 0
+  local -a candidates=("$base/mysql" "$base/data")
+  local sub
+  for sub in "$base"/*/; do
+    # Skip symlinked per-release dirs: base is physically resolved (validate_config
+    # uses `cd -P`), so a real subdir can't escape it — but a symlink could point
+    # anywhere, and $base/<link>/mysql would let the wipe's rm -rf follow it
+    # outside HOST_DATA_DIR (Bugbot #384). Not walking symlinks keeps scope honest.
+    [[ -d "$sub" && ! -L "${sub%/}" ]] || continue
+    # Skip the flat-layout data dirs themselves — they are already candidates
+    # above. Descending into them would mislabel a real MySQL datadir's nested
+    # `mysql` system schema ($base/mysql/mysql) as a second leftover root, which
+    # confuses the prompt and doubles up wipe targets (Bugbot #384).
+    case "${sub%/}" in "$base/mysql"|"$base/data") continue ;; esac
+    candidates+=("${sub%/}/mysql" "${sub%/}/data")
+  done
+  local d
+  for d in "${candidates[@]}"; do
+    # ! -L: never treat a symlink as a data dir — it would let the wipe traverse
+    # outside HOST_DATA_DIR (Bugbot #384). A symlinked data path is out of scope.
+    [[ -d "$d" && ! -L "$d" ]] || continue
+
+    # Fail closed on an unlistable dir: a root/container-owned mysql/data dir the
+    # host user can't read/enter can't be proven empty, so treat it as a leftover
+    # rather than mistake it for a clean slate and adopt it (Bugbot #384; same
+    # ownership case the wipe path treats as fatal). This is the common shape —
+    # the whole data dir is owned by the container uid. No temp file, so it can't
+    # itself fail open (an earlier mktemp-based version could when mktemp failed).
+    if [[ ! -r "$d" || ! -x "$d" ]]; then
+      echo "$d"; continue
+    fi
+
+    # Readable dir → non-empty test. pipefail-safe AND portable (GNU + BSD/macOS:
+    # no -quit): a `find | head -1 | grep` pipeline SIGPIPEs find once output
+    # exceeds the pipe buffer (a real multi-table MySQL dir), and under the
+    # installer's `set -o pipefail` that reads as "empty" — the exact leftover
+    # this guard must catch. `read < <(find …)` keeps find's status out of the
+    # check and short-circuits after one line. The `||` fallback (only reached
+    # when no top-level file was read) captures find's stderr WITHOUT a temp file
+    # — so an unreadable *sub*dir (Permission denied) is also caught, not skipped.
+    if read -r _ < <(find "$d" -type f 2>/dev/null) \
+       || [[ -n "$(find "$d" -type f 2>&1 >/dev/null)" ]]; then
+      echo "$d"
+    fi
+  done
+}
+
+# Read one line from $TB_TTY into the named variable, stripping bracketed-paste
+# / CSI escape garbage (arrow keys, pastes survive `read -r`) and trimming
+# surrounding whitespace — so a paste or a spaces-then-Enter can't smuggle
+# control bytes into HOST_DATA_DIR or slip past a non-empty check. Mirrors the
+# provision.sh client-name handling (_strip_paste_garbage + trim).
+_read_sanitized() {
+  local __prompt="$1" __var="$2" __in=""
+  read -r -p "$__prompt" __in <"$TB_TTY" || __in=""
+  __in="$(_strip_paste_garbage "$__in")"
+  __in="${__in#"${__in%%[![:space:]]*}"}"; __in="${__in%"${__in##*[![:space:]]}"}"
+  printf -v "$__var" '%s' "$__in"
+}
+
+# Delete the detected leftover data dirs. Only ever removes paths UNDER the
+# already-validated HOST_DATA_DIR (validate_config guarantees it is under $HOME
+# and not a system path) — never HOST_DATASET_DIR, never a system path. Returns
+# non-zero if anything survived the wipe (e.g. root/container-owned MySQL files
+# the host user can't remove) so the caller can fail closed instead of letting
+# create_cluster adopt the survivors — a warn-and-proceed would silently break
+# the "wipe means gone" guarantee.
+_wipe_leftover_data() {
+  # Belt-and-suspenders (Lukas review, #384): never wipe unless HOST_DATA_DIR is
+  # a non-empty path strictly under $HOME — exactly what validate_config enforces.
+  # This guards the rm below even if a future refactor ever calls the guard before
+  # validate_config: an empty HOST_DATA_DIR would collapse the "$HOST_DATA_DIR"/*
+  # case pattern to /* and defeat the scope check. Placed in the destructive
+  # function itself so it holds for every caller, not just the current one.
+  [[ -n "${HOST_DATA_DIR:-}" && "$HOST_DATA_DIR" == "$HOME"/* ]] \
+    || error "Refusing to wipe: HOST_DATA_DIR is unset or not under \$HOME (got '${HOST_DATA_DIR:-}')."
+  local d rc=0
+  for d in "$@"; do
+    case "$d" in
+      "$HOST_DATA_DIR"/*)
+        # Backstop for the symlink case (detection already skips symlinks): never
+        # rm -rf a symlink — it would delete the target OUTSIDE HOST_DATA_DIR.
+        if [[ -L "$d" ]]; then
+          warn "Refusing to wipe symlink ${d} — it could point outside ${HOST_DATA_DIR}; remove it by hand."
+          rc=1; continue
+        fi
+        log "Wiping leftover data: ${d}"
+        rm -rf "$d" 2>/dev/null || true
+        # Verify — do not trust rm's exit code alone.
+        if [[ -e "$d" ]]; then
+          warn "Could not remove ${d} — files may be owned by another user (root/container)."
+          rc=1
+        fi
+        ;;
+      *)
+        warn "Refusing to wipe ${d} — outside ${HOST_DATA_DIR}."
+        rc=1
+        ;;
+    esac
+  done
+  return "$rc"
+}
+
+# Guard entry point. Called from create_cluster ONLY when creating a NEW cluster
+# (an existing cluster is an in-place reuse/upgrade whose data stays by design,
+# §3.3). Resolves an action from TB_LEFTOVER_ACTION (set by --reuse-data /
+# --wipe-data, or directly) or, failing that, an interactive prompt. When there
+# is no terminal and no explicit action, it fails safe: abort, never adopt.
+guard_leftover_data() {
+  [[ -n "${TRACEBLOC_SKIP_LEFTOVER_GUARD:-}" ]] && return 0
+
+  local -a found=()
+  local d
+  while IFS= read -r d; do [[ -n "$d" ]] && found+=("$d"); done < <(_leftover_data_dirs)
+  [[ ${#found[@]} -eq 0 ]] && return 0   # clean slate — nothing to guard
+
+  warn "Existing tracebloc data found under ${HOST_DATA_DIR}:"
+  for d in "${found[@]}"; do hint "  • ${d}"; done
+  hint "A fresh install would silently adopt it, so it would not really be fresh."
+  if [[ "${TB_STORAGE_MODE:-hostpath}" == "node-local" ]]; then
+    hint "node-local storage keeps data inside the cluster node — this ~/.tracebloc data would be stranded, not used."
+  fi
+
+  local action="${TB_LEFTOVER_ACTION:-}"
+  if [[ -z "$action" ]]; then
+    if _tty_usable; then
+      prompt_header "How should the installer handle it?"
+      hint "  [r] reuse — keep and adopt the existing data"
+      hint "  [w] wipe  — delete it and start fresh"
+      hint "  [n] new   — install into a different directory"
+      hint "  [a] abort — stop and sort it out myself (default)"
+      local reply=""
+      _read_sanitized "  Choice [r/w/n/a]: " reply
+      case "$reply" in
+        r|R|reuse) action=reuse ;;
+        w|W|wipe)  action=wipe ;;
+        n|N|new)   action=newdir ;;
+        *)         action=abort ;;
+      esac
+    else
+      # Non-interactive with no explicit choice → fail safe.
+      error "Existing data found under ${HOST_DATA_DIR} and no choice was given (no terminal). Re-run with one of:
+  --reuse-data                    adopt the existing data
+  --wipe-data                     delete it and start fresh
+  HOST_DATA_DIR=<new-path> ...    install into a different directory
+  (or TRACEBLOC_SKIP_LEFTOVER_GUARD=1 to bypass this guard entirely)"
+    fi
+  fi
+
+  case "$action" in
+    reuse)
+      log "Reusing existing data under ${HOST_DATA_DIR} (user choice)."
+      ;;
+    wipe)
+      # Fail closed: if any data survived the wipe, abort rather than fall
+      # through to create_cluster, which would adopt the survivors and silently
+      # break the "wipe means gone" guarantee.
+      if ! _wipe_leftover_data "${found[@]}"; then
+        error "Could not fully wipe existing data under ${HOST_DATA_DIR} — some files could not be removed (often root/container-owned MySQL files). Remove them manually (e.g. 'sudo rm -rf ${HOST_DATA_DIR}') and re-run, or choose a different directory. Refusing to proceed and adopt the leftovers."
+      fi
+      if [[ -n "${HOST_DATASET_DIR:-}" ]]; then
+        hint "Left HOST_DATASET_DIR (${HOST_DATASET_DIR}) untouched — it is a shared mount, not wiped."
+      fi
+      log "Wiped leftover data under ${HOST_DATA_DIR} (user choice)."
+      ;;
+    newdir)
+      local newdir=""
+      _tty_usable && _read_sanitized "  New data directory (absolute or under \$HOME): " newdir
+      [[ -n "$newdir" ]] || error "No new directory given — aborting."
+      HOST_DATA_DIR="$newdir"
+      # Re-resolve + re-validate the new path, then re-check it for leftovers too.
+      if declare -F validate_config >/dev/null 2>&1; then validate_config; fi
+      log "Switched HOST_DATA_DIR to ${HOST_DATA_DIR}; re-checking it for leftover data."
+      guard_leftover_data
+      ;;
+    abort|*)
+      error "Aborted — existing data under ${HOST_DATA_DIR} left untouched. Choose reuse / wipe / a new directory and re-run."
+      ;;
+  esac
+}
+
 create_cluster() {
   log "Creating k3d cluster: '$CLUSTER_NAME'"
+
+  # Leftover-data guard (RFC-0003 D3, #376): a NEW cluster must not silently
+  # adopt data from an earlier install. Skipped when the cluster already exists
+  # — that path is an in-place reuse/upgrade and keeps its data by design (§3.3).
+  if ! _cluster_exists; then
+    guard_leftover_data
+  fi
 
   # node-local (RFC-0003 Option C): no host data dirs, no bind-mount, no chmod —
   # data lives on k3s local-path inside the node. Only the hostpath model needs
