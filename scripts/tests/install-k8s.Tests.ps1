@@ -533,6 +533,56 @@ Describe "Install-ClientHelm" {
   }
 }
 
+Describe "Get-TrainingResources" {
+  # backend#1236 (option A): machine-sized training default, mirroring the bash
+  # twin's _training_resources. Precedence: env override > installed release's
+  # choice > largest-node sizing > static fallback.
+  BeforeEach { $script:TB_NAMESPACE = "tracebloc"; $env:TRACEBLOC_TRAINING_RESOURCES = $null }
+  AfterEach  { $env:TRACEBLOC_TRAINING_RESOURCES = $null }
+  It "explicit override wins" {
+    $env:TRACEBLOC_TRAINING_RESOURCES = "cpu=4,memory=16Gi"
+    Get-TrainingResources | Should -Be "cpu=4,memory=16Gi"
+  }
+  It "existing release choice carried (resources set survives re-install)" {
+    Mock kubectl { $global:LASTEXITCODE = 0; "" }   # bounded namespace probe passes
+    Mock helm { $global:LASTEXITCODE = 0; '{"env":{"RESOURCE_LIMITS":"cpu=4,memory=12Gi"}}' }
+    Get-TrainingResources | Should -Be "cpu=4,memory=12Gi"
+  }
+  It "the historic static default is NOT carried — re-install gets sized (Bugbot)" {
+    Mock helm { $global:LASTEXITCODE = 0; '{"env":{"RESOURCE_LIMITS":"cpu=2,memory=8Gi"}}' }
+    Mock kubectl {
+      if ($args -contains "--request-timeout=10s") {
+        $global:LASTEXITCODE = 0
+        @("12 6924Mi")
+      } else { $global:LASTEXITCODE = 0; "" }   # namespace probe passes
+    }
+    Get-TrainingResources | Should -Be "cpu=11,memory=3Gi"
+  }
+  It "fresh install sized to the largest node minus overhead (k3d nodes not summed)" {
+    Mock helm { $global:LASTEXITCODE = 1; "" }
+    # The mock only answers a BOUNDED call — dropping --request-timeout fails
+    # this test (a wedged API must never hang values generation). Output is the
+    # jsonpath "cpu memory" line contract (one line per node).
+    Mock kubectl {
+      if ($args -contains "--request-timeout=10s") {
+        $global:LASTEXITCODE = 0
+        @("12 6924Mi", "12 6924Mi")
+      } else { $global:LASTEXITCODE = 1; "" }
+    }
+    Get-TrainingResources | Should -Be "cpu=11,memory=3Gi"
+  }
+  It "below-floor machine falls back to the static default" {
+    Mock helm { $global:LASTEXITCODE = 1; "" }
+    Mock kubectl { $global:LASTEXITCODE = 0; @("2 4Gi") }
+    Get-TrainingResources | Should -Be "cpu=2,memory=8Gi"
+  }
+  It "unreadable cluster falls back to the static default" {
+    Mock helm { $global:LASTEXITCODE = 1; "" }
+    Mock kubectl { $global:LASTEXITCODE = 1; "" }
+    Get-TrainingResources | Should -Be "cpu=2,memory=8Gi"
+  }
+}
+
 Describe "Confirm-Cluster" {
   It "dumps cluster status without error" {
     $script:TB_NAMESPACE = "ns"; $script:LOG_FILE = "$TestDrive/log.txt"
