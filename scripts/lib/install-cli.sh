@@ -26,6 +26,18 @@ TRACEBLOC_CLI_INSTALL_URL="https://github.com/tracebloc/cli/releases/latest/down
 # writable (see cli's install.sh) — the dir we tell the user to put on PATH.
 TRACEBLOC_CLI_FALLBACK_BIN="${HOME}/.local/bin"
 
+# _cli_at_system_dir PATH → true if the CLI lives in a SYSTEM location that's
+# unconditionally on the user's shell PATH (so the summary CTA may say "run it
+# now"); false for a $HOME bin (~/.local/bin, ~/bin) or an empty path — those may
+# be on THIS installer's PATH only via the ~/.local/bin prepend or a just-edited
+# rc, which the shell the user returns to hasn't read (Bugbot #371).
+_cli_at_system_dir() {
+  case "${1:-}" in
+    "" | "${HOME%/}"/*) return 1 ;;
+    *) return 0 ;;
+  esac
+}
+
 # Which rc file a *fresh* interactive shell of the user's $SHELL actually reads,
 # so the PATH fix we print sources the right file. Mirrors how the cli's
 # install.sh routes guidance, but resolved per-shell here:
@@ -102,18 +114,27 @@ _verify_tracebloc_cli() {
     # `tracebloc version` is the real proof; keep it cosmetic (never let a failing
     # version call or a SIGPIPE flip the outcome). The canonical "tracebloc
     # data ingest ./data" next step lives in the summary's "What to do next".
+    # A fresh terminal WILL resolve tracebloc (that's this whole branch). The
+    # summary CTA uses this to pick "open a new terminal" (case A) over the
+    # PATH-fix guidance it must give when even a new shell can't find it (case B,
+    # the outer fall-through below) — Bugbot #371.
+    TB_CLI_ON_FRESH_PATH=1
     local ver; ver="$(_cli_version_short)"
     # Prefer the short `tb` alias (the CLI installer symlinks it next to
     # `tracebloc`); fall back to `tracebloc` when that alias wasn't created — its
     # name was already taken, so the CLI's install.sh skipped it — so the copy
     # never points the user at a command that isn't there (Bugbot).
     local cli_cmd="tracebloc"; has tb && cli_cmd="tb"
-    if has tracebloc; then
+    # Whether the summary's CTA + this step may say "run it NOW" vs "open a new
+    # terminal" — gate on WHERE the CLI landed, not `has tracebloc` (this process's
+    # PATH was mutated with ~/.local/bin by install.sh, so it resolves the CLI even
+    # when the user's returning shell won't). Only a system dir is unconditionally
+    # on that shell's PATH (Bugbot #371).
+    if has tracebloc && _cli_at_system_dir "$(command -v tracebloc 2>/dev/null)"; then
+      TB_CLI_USABLE_NOW=1
       # Usable right now AND in new terminals — the fully-clean verdict, collapsed
       # to ONE line (old→new when this was an update), so the step shows a single
       # ✔ instead of an already-present / re-running / installing / ready pileup.
-      # The edge-case lines below stay "installed" (it's installed but not yet
-      # usable in this/every shell).
       if [[ -n "${TB_CLI_OLD_VER:-}" && -n "$ver" && "${TB_CLI_OLD_VER}" != "$ver" ]]; then
         # Only claim an upgrade when we CONFIRMED a new version. If the post-install
         # `tracebloc version` probe came back empty ($ver=""), we can't tell whether
@@ -127,10 +148,15 @@ _verify_tracebloc_cli() {
       fi
       return 0
     fi
-    # Persisted for new terminals, but not yet on THIS shell's PATH. The rc
-    # already carries the PATH line (that's why a fresh shell finds it), so the
-    # user just needs a new terminal — or to load the rc into this one. Don't
-    # re-append it; don't over-claim "verified on your PATH" for a shell it isn't.
+    # Installed and persisted for NEW terminals (a fresh shell resolves it — that's
+    # why we're on this branch), but NOT usable in the user's returning shell yet:
+    # either it landed in ~/.local/bin (the login shell fixed its PATH before that
+    # dir existed, #304) or it's otherwise off this shell's PATH. Say "open a new
+    # terminal" — matching the summary CTA — instead of "run it now", which would
+    # fail command-not-found. The earlier code printed the usable-now verdict here
+    # unconditionally, contradicting the summary (Bugbot #371). Keep
+    # TB_CLI_USABLE_NOW=0 so _cli_runnable_now (summary.sh) agrees.
+    TB_CLI_USABLE_NOW=0
     local sh_name; sh_name="$(basename "${SHELL:-/bin/sh}")"
     success "tracebloc CLI installed${ver:+ (v$ver)} — open a new terminal to use \`${cli_cmd}\`."
     if [[ "$sh_name" == "fish" ]]; then
@@ -146,6 +172,10 @@ _verify_tracebloc_cli() {
   # Installed, but a fresh terminal won't find it (e.g. it landed in
   # ~/.local/bin, which isn't on PATH). Tell the user precisely how to fix it
   # for THEIR shell — not a generic "open a new terminal" that won't help.
+  # Not usable now AND a new shell won't resolve it either (case B): the summary
+  # CTA must point at the PATH fix below, NOT "open a new terminal" (Bugbot #371).
+  TB_CLI_USABLE_NOW=0
+  TB_CLI_ON_FRESH_PATH=0
   # `|| true` so a hiccup in rc-resolution can't trip the orchestrator's set -e.
   local rc; rc="$(_cli_rc_for_shell || true)"
   local export_line; export_line="$(_cli_path_export_line || true)"
@@ -177,6 +207,23 @@ install_tracebloc_cli() {
   TB_CLI_OLD_VER=""
   if has tracebloc; then
     TB_CLI_OLD_VER="$(_cli_version_short)"
+  fi
+  # Whether the CLI ends up runnable in THIS shell (not just a fresh terminal).
+  # summary.sh reads it to keep its final CTA honest — "Run tracebloc" vs "Open a
+  # new terminal, then run tracebloc" (B2). _verify_tracebloc_cli overrides this
+  # per THIS run's outcome. The DEFAULT is seeded from the PRE-install state: a
+  # tracebloc ALREADY on a SYSTEM PATH dir (a prior install) is resolvable in the
+  # user's shell unconditionally, so if the CLI step is later skipped or fails
+  # (download/installer/temp-dir miss → early return, _verify never runs), the
+  # summary must still say "Run" — not send a user with a working system tracebloc
+  # to a new terminal (Bugbot #371). Gate on _cli_at_system_dir, NOT bare `has`:
+  # install.sh prepends ~/.local/bin to THIS process, which would false-positive a
+  # ~/.local/bin install the returning shell can't yet see.
+  # shellcheck disable=SC2034  # consumed cross-file by summary.sh (_cli_runnable_now)
+  if has tracebloc && _cli_at_system_dir "$(command -v tracebloc 2>/dev/null)"; then
+    TB_CLI_USABLE_NOW=1
+  else
+    TB_CLI_USABLE_NOW=0
   fi
 
   local installer

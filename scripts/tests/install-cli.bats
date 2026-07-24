@@ -68,6 +68,7 @@ setup() {
   sh()               { return 0; }
   _cli_on_fresh_path() { return 0; }     # a brand-new terminal resolves tracebloc
   has()              { return 0; }       # …and so does THIS shell (binary already on PATH)
+  _cli_at_system_dir() { return 0; }     # installed to a system dir → usable in THIS shell too
   tracebloc()        { echo "tracebloc 0.2.0"; }
   run install_tracebloc_cli
   [ "$status" -eq 0 ]
@@ -88,11 +89,31 @@ setup() {
   sh()               { return 0; }
   _cli_on_fresh_path() { return 0; }
   has()              { [[ "$1" == "tracebloc" ]]; }     # tracebloc present, tb absent
+  _cli_at_system_dir() { return 0; }                    # system dir → usable-now verdict path
   tracebloc()        { echo "tracebloc 0.2.0"; }
   run install_tracebloc_cli
   [ "$status" -eq 0 ]
   [[ "$output" == *'run `tracebloc` to use it'* ]]      # named the real binary
   [[ "$output" != *'`tb`'* ]]                           # never a bare `tb` when it doesn't resolve
+}
+
+@test "install_tracebloc_cli: on PATH via ~/.local/bin (not a system dir) → new-terminal verdict, never 'run it now' (#371)" {
+  # The contradictory-verdict bug: has tracebloc is TRUE (install.sh prepends
+  # ~/.local/bin to THIS process) and a fresh shell resolves it, but the binary is
+  # NOT in a system dir, so the user's returning login shell won't see it yet. The
+  # step must NOT print the usable-now verdict (the summary CTA correctly says
+  # "open a new terminal"); the two must agree.
+  curl()             { : > "${@: -1}"; return 0; }
+  sh()               { return 0; }
+  _cli_on_fresh_path() { return 0; }             # a new terminal resolves it
+  has()              { return 0; }               # THIS process resolves it too (PATH prepend)
+  _cli_at_system_dir() { return 1; }             # …but it's in ~/.local/bin, not a system dir
+  SHELL="/bin/zsh"; OS="Linux"
+  tracebloc()        { echo "tracebloc 0.2.0"; }
+  run install_tracebloc_cli
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"open a new terminal"* ]]     # matches the summary CTA
+  [[ "$output" != *"to use it"* ]]               # NEVER the usable-now verdict on this path
 }
 
 @test "install_tracebloc_cli: fresh shell finds it but the CURRENT shell can't → 'new terminals' verdict + load-it-now hint (#304)" {
@@ -165,4 +186,41 @@ setup() {
   local rc=$?
   set +e
   [ "$rc" -eq 0 ]
+}
+
+# ── _cli_at_system_dir: the summary-CTA usable-now gate (Bugbot #371) ─────────
+@test "_cli_at_system_dir: system dir usable-now, \$HOME bin conservative (#371)" {
+  HOME=/home/tester
+  _cli_at_system_dir /usr/local/bin/tracebloc                 # system → usable now
+  _cli_at_system_dir /usr/bin/tracebloc
+  ! _cli_at_system_dir /home/tester/.local/bin/tracebloc      # $HOME → conservative
+  ! _cli_at_system_dir /home/tester/bin/tracebloc
+  ! _cli_at_system_dir ""                                     # unresolved → conservative
+}
+
+# ── TB_CLI_USABLE_NOW default seeded from pre-install state (Bugbot #371) ─────
+@test "install_tracebloc_cli: pre-existing SYSTEM tracebloc + install step fails → TB_CLI_USABLE_NOW stays 1 (#371)" {
+  # A prior install left tracebloc on a system PATH dir (resolvable in the user's
+  # shell). This run can't even start (no temp dir) → early return, _verify never
+  # runs — the summary must still say "Run", not "open a new terminal".
+  has() { return 0; }                    # tracebloc resolvable
+  _cli_at_system_dir() { return 0; }     # …at a system dir
+  _cli_version_short() { echo "0.2.0"; }
+  mktemp() { return 1; }                 # force the early "(no temp dir)" return
+  TB_CLI_USABLE_NOW=
+  install_tracebloc_cli >/dev/null 2>&1 || true
+  [ "$TB_CLI_USABLE_NOW" = "1" ]
+}
+
+@test "install_tracebloc_cli: pre-existing ~/.local/bin tracebloc + install step fails → TB_CLI_USABLE_NOW=0 (#371)" {
+  # Prior install is in ~/.local/bin (this process resolves it via install.sh's
+  # PATH prepend, the returning shell may not) → NOT usable-now; the summary must
+  # not over-claim "Run".
+  has() { return 0; }
+  _cli_at_system_dir() { return 1; }     # ~/.local/bin, not a system dir
+  _cli_version_short() { echo "0.2.0"; }
+  mktemp() { return 1; }
+  TB_CLI_USABLE_NOW=
+  install_tracebloc_cli >/dev/null 2>&1 || true
+  [ "$TB_CLI_USABLE_NOW" = "0" ]
 }
