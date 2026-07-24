@@ -270,12 +270,13 @@ install_system_deps() {
   MISSING_PKGS=()
   has curl      || MISSING_PKGS+=(curl)
   has conntrack || MISSING_PKGS+=("$conntrack_pkg")
-  # helm's get-helm-3 verifies its download checksum with openssl and unpacks a
-  # tarball with tar; minimal cloud images (Amazon Linux 2023, minimal RHEL) ship
-  # neither, so the Helm install fails. Ensure both (package names are uniform
-  # across apt/dnf/yum/zypper/pacman, unlike conntrack).
-  has openssl   || MISSING_PKGS+=(openssl)
+  # Helm's release tarball is unpacked with tar + gzip; minimal cloud images
+  # (Amazon Linux 2023, minimal RHEL) ship neither. openssl is NOT needed any
+  # more — the Helm download is verified with sha256sum since get-helm-3 was
+  # replaced by a direct fetch (#395; see _fetch_helm_release). Package names
+  # are uniform across apt/dnf/yum/zypper/pacman, unlike conntrack.
   has tar       || MISSING_PKGS+=(tar)
+  has gzip      || MISSING_PKGS+=(gzip)
   if [[ ${#MISSING_PKGS[@]} -gt 0 ]]; then
     # Guard the index refresh: under set -e an unguarded failure here aborts the
     # whole install, yet the per-package installs below are already guarded
@@ -425,6 +426,80 @@ install_k3d() {
 }
 
 # ── Helm ─────────────────────────────────────────────────────────────────────
+# _ensure_unpack_tools — Helm's release ships as a .tar.gz, so unpacking needs
+# tar + gzip. The full flow guarantees them via install_system_deps, but the
+# Tier 0 fast path skips that step — and minimal cloud images (Amazon Linux
+# 2023, minimal RHEL) genuinely ship without them, so the Helm install would
+# die mid-flight (Bugbot #383). Product call (#395): the installer takes care
+# of its own requirements — install what's missing via the package manager
+# instead of telling the user to go install tools. Root / passwordless sudo
+# installs quietly; otherwise we say exactly why we're asking for a password
+# this once (and only error as a last resort, when we truly can't get rights).
+_ensure_unpack_tools() {
+  local missing=()
+  has tar  || missing+=(tar)
+  has gzip || missing+=(gzip)
+  [ ${#missing[@]} -eq 0 ] && return 0
+  setup_pm    # variable setup only (PM_UPDATE/PM_INSTALL); errors on unknown PM
+  # PM_INSTALL is written with a leading `sudo`; as real root without the sudo
+  # binary (containers, cloud-init) strip it rather than fail on a missing tool.
+  local pm_update="$PM_UPDATE" pm_install="$PM_INSTALL"
+  if [ "${EUID:-1000}" -eq 0 ] && ! has sudo; then
+    pm_update="${PM_UPDATE#sudo }"; pm_install="${PM_INSTALL#sudo }"
+  elif [ "${EUID:-1000}" -ne 0 ] && ! sudo -n true 2>/dev/null; then
+    # A password IS needed — prompt on a plain line (a spinner would garble the
+    # sudo prompt), with the honest reason, before the spin_cmd installs below.
+    info "Your machine is missing ${missing[*]} (needed once, to unpack Helm) — administrator password required to install ${missing[*]}."
+    sudo -v || error "Couldn't get administrator rights to install ${missing[*]}. Ask an administrator to install ${missing[*]}, then re-run this installer."
+  fi
+  # Mirror install_system_deps: refresh the index best-effort (a brand-new
+  # minimal image has no package lists at all), gate on the install itself.
+  spin_cmd "Updating package index…" $pm_update || \
+    warn "Package index refresh failed — continuing; installs will use the cached index."
+  local pkg
+  for pkg in "${missing[@]}"; do
+    spin_cmd "Installing $pkg…" $pm_install "$pkg" || \
+      error "Couldn't install $pkg (needed to unpack Helm). Install it with your package manager, then re-run this installer."
+  done
+  log "Dependencies installed: ${missing[*]}"
+}
+
+# _fetch_helm_release <tag> <arch> — download the Helm tarball for <tag> plus
+# its published .sha256sum from get.helm.sh, verify (FAIL-CLOSED), unpack, and
+# move the binary into TB_TOOLS_DIR. Runs under spin_cmd — no output of its own.
+# Direct download replaces helm's get-helm-3: that script floats on the MUTABLE
+# helm/helm@main (unpinned code executed on the host), needs openssl for its
+# checksum step (absent on minimal images — Bugbot #383), and its own fetches
+# are unbounded. sha256sum (coreutils) is present everywhere we run, get.helm.sh
+# is Helm's official release CDN, and the pin keeps installs deterministic
+# (mirrors _fetch_k3d_release / #382).
+_fetch_helm_release() {
+  local tag="$1" arch="$2" tarball tmpdir
+  tarball="helm-${tag}-linux-${arch}.tar.gz"
+  tmpdir="$(mktemp -d)"
+  # --connect-timeout + a stall floor (not --max-time: the tarball is ~17 MB and
+  # a hard cap would break slow-but-healthy links) — a hung transfer under
+  # spin_cmd would otherwise spin forever.
+  retry 3 5 curl -fsSL $CURL_SECURE --connect-timeout 15 --speed-limit 1024 --speed-time 60 \
+    "https://get.helm.sh/${tarball}" -o "${tmpdir}/${tarball}"
+  retry 3 5 curl -fsSL $CURL_SECURE --connect-timeout 15 --speed-limit 1024 --speed-time 60 \
+    "https://get.helm.sh/${tarball}.sha256sum" -o "${tmpdir}/${tarball}.sha256sum"
+  # The published file is "<sha256>  <tarball-name>" — verify in place.
+  if ! (cd "$tmpdir" && sha256sum --check --quiet "${tarball}.sha256sum"); then
+    rm -rf "$tmpdir"
+    error "System tool checksum verification failed"
+  fi
+  tar -xzf "${tmpdir}/${tarball}" -C "$tmpdir" "linux-${arch}/helm"
+  chmod +x "${tmpdir}/linux-${arch}/helm"
+  # Tier 0 → no sudo (TB_TOOLS_SUDO empty, TB_TOOLS_DIR under $HOME).
+  if [ -n "$TB_TOOLS_SUDO" ]; then
+    sudo mv "${tmpdir}/linux-${arch}/helm" "$TB_TOOLS_DIR/helm"
+  else
+    mv "${tmpdir}/linux-${arch}/helm" "$TB_TOOLS_DIR/helm"
+  fi
+  rm -rf "$tmpdir"
+}
+
 _ensure_helm_executable() {
   local helm_bin
   helm_bin="$(command -v helm 2>/dev/null)" || true
@@ -445,25 +520,37 @@ _ensure_helm_executable() {
 
 install_helm() {
   if ! has helm; then
-    local helm_script
-    helm_script="$(mktemp)"
-    retry 3 5 curl -fsSL $CURL_SECURE \
-      https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 -o "$helm_script"
-    chmod +x "$helm_script"
-    # Tier 0 (no admin): get-helm-3 honours USE_SUDO + HELM_INSTALL_DIR — install
-    # user-space, no sudo (RFC 0001 #1175). Otherwise the script's default
-    # (USE_SUDO=true → /usr/local/bin).
-    if [ -z "$TB_TOOLS_SUDO" ]; then
-      spin_cmd "Installing system tools…" \
-        env "USE_SUDO=false" "HELM_INSTALL_DIR=$TB_TOOLS_DIR" "PATH=$PATH" bash "$helm_script"
-    else
-      spin_cmd "Installing system tools…" bash "$helm_script"
+    # Pin the Helm release (HELM_VERSION, common.sh) and fetch the tarball
+    # DIRECTLY from get.helm.sh, verified against its published .sha256sum —
+    # get-helm-3 is gone (see _fetch_helm_release). HELM_VERSION=latest resolves
+    # the newest release at install time via get.helm.sh/helm-latest-version and
+    # takes the same verified path; an empty value means the common.sh pin. The
+    # tag lands in a URL path, so anything that isn't a plain release tag fails
+    # closed (mirrors install_k3d).
+    local _helm_tag="${HELM_VERSION:-}"
+    [[ "$_helm_tag" == "latest" ]] && _helm_tag=""
+    [[ -z "$_helm_tag" || "$_helm_tag" =~ ^v[0-9][A-Za-z0-9._-]*$ ]] \
+      || error "HELM_VERSION must be a Helm release tag like v4.2.3, or 'latest' (got '${HELM_VERSION:-}')"
+
+    # Unpack needs tar + gzip — make sure of them BEFORE spending the download,
+    # installing them ourselves when missing (#395; Tier 0 skips system deps).
+    _ensure_unpack_tools
+
+    if [ -z "$_helm_tag" ]; then
+      _helm_tag="$(retry 3 5 curl -fsSL $CURL_SECURE --connect-timeout 15 --max-time 30 \
+        "https://get.helm.sh/helm-latest-version" 2>/dev/null | tr -d '[:space:]')" || _helm_tag=""
+      [[ "$_helm_tag" =~ ^v[0-9][A-Za-z0-9._-]*$ ]] \
+        || error "Couldn't resolve the latest Helm release tag — set HELM_VERSION to a release tag (e.g. v4.2.3) and re-run."
     fi
-    rm -f "$helm_script"
-    _ensure_helm_executable
-  else
-    _ensure_helm_executable
+
+    spin_cmd "Installing system tools…" _fetch_helm_release "$_helm_tag" "$ARCH_DL" \
+      || error "System tool installation failed. See the install log for details."
+
+    if ! has helm; then
+      error "System tool installation completed but not found on PATH."
+    fi
   fi
+  _ensure_helm_executable
   log "helm: $(helm version --short 2>/dev/null || echo installed)"
   success "System tools"
 }
