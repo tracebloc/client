@@ -61,7 +61,7 @@ tracebloc — client setup
 
 Usage:
   curl -fsSL https://raw.githubusercontent.com/tracebloc/client/main/scripts/install.sh | bash
-  ./install-k8s.sh [--help] [--diagnose] [--force]
+  ./install-k8s.sh [--help] [--diagnose] [--force] [--reuse-data|--wipe-data|--data-dir=PATH]
 
 Commands:
   --diagnose     Collect a redacted support bundle (logs + cluster/host status)
@@ -72,12 +72,20 @@ Commands:
   --reinstall    to force a full reinstall on a machine that is already set up.
                  (Same effect as TRACEBLOC_FORCE_REINSTALL=1 for curl | bash.)
 
+Leftover data (a new install onto a machine that still holds old data):
+  By default the installer STOPS and asks rather than silently adopting it.
+  --reuse-data   Keep and adopt the existing data (non-interactive).
+  --wipe-data    Delete the existing data and start fresh (non-interactive).
+  --data-dir=P   Install into directory P instead (leaves old data untouched).
+                 (Bypass the guard entirely with TRACEBLOC_SKIP_LEFTOVER_GUARD=1.)
+
 Advanced configuration (environment variables):
   CLUSTER_NAME   Cluster name                   (default: tracebloc)
   TB_NAMESPACE   Secure-environment name        (default: tracebloc)
   SERVERS        Control-plane nodes             (default: 1)
   AGENTS         Worker nodes                    (default: 1)
   K8S_VERSION    k3s image tag                   (default: v1.29.4-k3s1)
+  K3D_VERSION    k3d release tag                 (default: v5.9.0; "latest" resolves at install time)
   HOST_DATA_DIR  Persistent data directory       (default: ~/.tracebloc)
                  Must be on a LOCAL disk — NFS/CIFS/SMB is rejected (the database
                  corrupts on network storage). TRACEBLOC_ALLOW_NETWORK_FS=1 overrides.

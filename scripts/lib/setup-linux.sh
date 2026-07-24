@@ -344,35 +344,78 @@ install_kubectl() {
 }
 
 # ── k3d ──────────────────────────────────────────────────────────────────────
+# Download the k3d release binary + checksums.txt at the given tag, verify, and
+# install into TB_TOOLS_DIR (mirrors _fetch_kubectl; fail-closed). We install
+# the binary OURSELVES because upstream's install.sh performs NO checksum
+# verification — its downloadFile fetches the bare binary and installFile just
+# chmod+cp's it (review of the pinned v5.9.0 script, PR #382) — so piping it
+# through sudo would install unverified bytes on a privileged path.
+# checksums.txt lines read "<sha256>  _dist/k3d-linux-amd64": match on the
+# asset basename.
+_fetch_k3d_release() {
+  local tag="$1" arch="$2"
+  local base="https://github.com/k3d-io/k3d/releases/download/${tag}"
+  local tmpdir
+  tmpdir="$(mktemp -d)"
+  # --connect-timeout + a stall floor (not --max-time: the binary is ~50 MB and
+  # a hard cap would break slow-but-healthy links): a hung transfer under
+  # spin_cmd would otherwise spin forever (Bugbot r2).
+  retry 3 5 curl -fsSL $CURL_SECURE --connect-timeout 15 --speed-limit 1024 --speed-time 60 \
+    "${base}/k3d-linux-${arch}" -o "${tmpdir}/k3d"
+  retry 3 5 curl -fsSL $CURL_SECURE --connect-timeout 15 --speed-limit 1024 --speed-time 60 \
+    "${base}/checksums.txt" -o "${tmpdir}/checksums.txt"
+  local want
+  want="$(awk -v asset="k3d-linux-${arch}" \
+    '{ n = split($2, p, "/"); if (p[n] == asset) { print $1; exit } }' \
+    "${tmpdir}/checksums.txt" 2>/dev/null)"
+  if [ -z "$want" ] || ! echo "${want}  ${tmpdir}/k3d" | sha256sum --check --quiet; then
+    rm -rf "$tmpdir"
+    error "System tool checksum verification failed"
+  fi
+  chmod +x "${tmpdir}/k3d"
+  # Tier 0 → no sudo (TB_TOOLS_SUDO empty, TB_TOOLS_DIR under $HOME).
+  if [ -n "$TB_TOOLS_SUDO" ]; then
+    sudo mv "${tmpdir}/k3d" "$TB_TOOLS_DIR/k3d"
+  else
+    mv "${tmpdir}/k3d" "$TB_TOOLS_DIR/k3d"
+  fi
+  rm -rf "$tmpdir"
+}
+
 install_k3d() {
   if has k3d; then
     log "k3d: $(k3d version | head -1)"
     return 0
   fi
 
-  local k3d_script
-  k3d_script="$(mktemp)"
-  retry 3 5 curl -fsSL $CURL_SECURE \
-    https://raw.githubusercontent.com/k3d-io/k3d/main/install.sh -o "$k3d_script"
-  chmod +x "$k3d_script"
+  # Pin the k3d release (K3D_VERSION, common.sh) and fetch the binary DIRECTLY
+  # from the pinned release, verified against the release's checksums.txt
+  # (upstream's install.sh verifies nothing — see _fetch_k3d_release). The
+  # direct download also never touches the releases/latest redirect, whose
+  # GitHub rate limiting on shared egress IPs (CI runners, corporate NAT) took
+  # down 2/9 distro CI jobs on 2026-07-21 with a bare "curl: 404" — so the
+  # failure mode can't occur on the pinned (default) path at all.
+  # K3D_VERSION=latest resolves the newest tag at install time via the plain
+  # /releases/latest redirect (no API) and then takes the same verified path;
+  # an empty value means the common.sh default pin (Bugbot r1). The tag lands
+  # in a URL path, so anything that isn't a plain release tag fails closed —
+  # a value carrying "/" could otherwise traverse outside k3d-io/k3d
+  # (Bugbot r1).
+  local _k3d_tag="${K3D_VERSION:-}"
+  [[ "$_k3d_tag" == "latest" ]] && _k3d_tag=""
+  [[ -z "$_k3d_tag" || "$_k3d_tag" =~ ^v[0-9][A-Za-z0-9._-]*$ ]] \
+    || error "K3D_VERSION must be a k3d release tag like v5.9.0, or 'latest' (got '${K3D_VERSION:-}')"
+  if [ -z "$_k3d_tag" ]; then
+    _k3d_tag="$(retry 3 5 curl -fsSLI $CURL_SECURE --connect-timeout 15 --max-time 30 \
+      -o /dev/null -w '%{url_effective}' \
+      "https://github.com/k3d-io/k3d/releases/latest" 2>/dev/null)" || _k3d_tag=""
+    _k3d_tag="${_k3d_tag##*/}"
+    [[ "$_k3d_tag" =~ ^v[0-9][A-Za-z0-9._-]*$ ]] \
+      || error "Couldn't resolve the latest k3d release tag — set K3D_VERSION to a release tag (e.g. v5.9.0) and re-run."
+  fi
 
-  # Tier 0 (no admin): install user-space via k3d's own knobs (USE_SUDO=false +
-  # K3D_INSTALL_DIR=~/.local/bin) — no sudo, no password prompt (RFC 0001 #1175).
-  # Otherwise the system dir: preserve PATH through sudo because the k3d script
-  # verifies itself with `command -v k3d` after copying into /usr/local/bin, and
-  # on RHEL-family distros sudo's secure_path excludes it.
-  local _k3d_ok=1
-  if [ -z "$TB_TOOLS_SUDO" ]; then
-    spin_cmd "Installing system tools…" \
-      env "USE_SUDO=false" "K3D_INSTALL_DIR=$TB_TOOLS_DIR" "PATH=$PATH" bash "$k3d_script" || _k3d_ok=0
-  else
-    spin_cmd "Installing system tools…" sudo env "PATH=$PATH" bash "$k3d_script" || _k3d_ok=0
-  fi
-  if [ "$_k3d_ok" -ne 1 ]; then
-    rm -f "$k3d_script"
-    error "System tool installation failed. See the install log for details."
-  fi
-  rm -f "$k3d_script"
+  spin_cmd "Installing system tools…" _fetch_k3d_release "$_k3d_tag" "$ARCH_DL" \
+    || error "System tool installation failed. See the install log for details."
 
   if ! has k3d; then
     error "System tool installation completed but not found on PATH."
