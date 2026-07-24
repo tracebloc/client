@@ -36,6 +36,11 @@ setup() {
   # references never trip).
   OS=Linux; ARCH=amd64; CLUSTER_NAME=tracebloc; SERVERS=1; AGENTS=1
   GPU_VENDOR=none; TB_NAMESPACE=tracebloc; HOST_DATA_DIR="$HOME/.tracebloc"
+  # The connected-state CTA is now PATH-aware (#371): pin the CLI as usable-now
+  # so the catalog deterministically renders the happy-path "Run tracebloc to get
+  # started." line, instead of drifting to "Open a new terminal" on an unset (or
+  # inherited) flag.
+  TB_CLI_USABLE_NOW=1
   # Stub the one live read the summary makes, so it's deterministic.
   _chart_version() { echo "1.9.5"; }
 }
