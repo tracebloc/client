@@ -134,6 +134,25 @@ seed_release_data() { mkdir -p "$HOST_DATA_DIR/tracebloc/data/ds1"; : >"$HOST_DA
   [ -e "$HOST_DATA_DIR/mysql/ibdata1" ]        # survivor NOT silently adopted
 }
 
+@test "_leftover_data_dirs: symlinked subdir is not a wipeable candidate (#384 bugbot)" {
+  mkdir -p "$HOST_DATA_DIR"
+  local target="$BATS_TEST_TMPDIR/outside"; mkdir -p "$target/mysql"; : >"$target/mysql/ibdata1"
+  ln -s "$target" "$HOST_DATA_DIR/evil"       # $HOST_DATA_DIR/evil -> outside the data dir
+  run _leftover_data_dirs
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"/evil/"* ]]               # symlink not walked into a candidate
+}
+
+@test "_wipe_leftover_data: refuses to delete a symlink, target preserved (#384 bugbot)" {
+  mkdir -p "$HOST_DATA_DIR"
+  local target="$BATS_TEST_TMPDIR/outside"; mkdir -p "$target"; : >"$target/keep"
+  ln -s "$target" "$HOST_DATA_DIR/link"
+  run _wipe_leftover_data "$HOST_DATA_DIR/link"
+  [ "$status" -ne 0 ]
+  [ -e "$target/keep" ]                        # target outside HOST_DATA_DIR untouched
+  [ -L "$HOST_DATA_DIR/link" ]                  # symlink itself left for the user
+}
+
 @test "guard: wipe never touches HOST_DATASET_DIR (shared mount)" {
   seed_flat_mysql
   HOST_DATASET_DIR="$BATS_TEST_TMPDIR/netmount"

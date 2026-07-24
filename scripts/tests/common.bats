@@ -16,6 +16,27 @@ setup() {
   [ "$status" -eq 0 ]
 }
 
+@test "validate_config: empty HOST_DATA_DIR fails closed (#384 bugbot)" {
+  HOME="$BATS_TEST_TMPDIR"; USER=tester
+  CLUSTER_NAME=tracebloc; SERVERS=1; AGENTS=1; HOST_DATA_DIR=""
+  run validate_config
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"must not be empty"* ]]
+}
+
+@test "validate_config: leading tilde in HOST_DATA_DIR expands to \$HOME (#384 bugbot)" {
+  # Resolve symlinks in HOME so macOS's /var->/private/var (via validate_config's
+  # `cd -P`) doesn't skew the under-$HOME check — this keeps the test about tilde
+  # expansion, not the tmpdir's symlink shape.
+  HOME="$(cd -P "$BATS_TEST_TMPDIR" && pwd)"; USER=tester
+  CLUSTER_NAME=tracebloc; SERVERS=1; AGENTS=1; HOST_DATA_DIR="~/tracebloc-new"
+  run validate_config
+  # Pre-fix, `~/x` became the literal "$HOME/~/x" and failed parent resolution;
+  # now it resolves to $HOME/tracebloc-new and validates. No `~` may survive.
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"~"* ]]
+}
+
 @test "validate_config: invalid CLUSTER_NAME -> error" {
   HOME="$BATS_TEST_TMPDIR"; USER=tester
   CLUSTER_NAME="1nope"; SERVERS=1; AGENTS=1; HOST_DATA_DIR="$HOME/x"

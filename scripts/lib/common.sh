@@ -487,6 +487,16 @@ validate_config() {
 
   # HOST_DATA_DIR must be under $HOME and must not be a system path (security)
   local dir="$HOST_DATA_DIR"
+  # Fail closed on an empty value (e.g. --data-dir= with no path) — otherwise the
+  # $HOME-relative rewrite below resolves "" to a surprise dir like $HOME/$USER.
+  [[ -n "$dir" ]] || error "HOST_DATA_DIR must not be empty (got '')."
+  # Expand a leading ~ / ~/ : users type --data-dir=~/foo and the shell does not
+  # expand ~ inside a quoted value, so it would otherwise be read as the literal
+  # "$HOME/~/foo" and fail parent resolution. Only the leading ~ is expanded.
+  case "$dir" in
+    "~")   dir="$HOME" ;;
+    "~/"*) dir="$HOME/${dir#\~/}" ;;
+  esac
   [[ "$dir" != /* ]] && dir="$HOME/$dir"
   # Resolve via parent directory — the target itself may not exist yet on first run
   local parent

@@ -151,12 +151,18 @@ _leftover_data_dirs() {
   local -a candidates=("$base/mysql" "$base/data")
   local sub
   for sub in "$base"/*/; do
-    [[ -d "$sub" ]] || continue
+    # Skip symlinked per-release dirs: base is physically resolved (validate_config
+    # uses `cd -P`), so a real subdir can't escape it — but a symlink could point
+    # anywhere, and $base/<link>/mysql would let the wipe's rm -rf follow it
+    # outside HOST_DATA_DIR (Bugbot #384). Not walking symlinks keeps scope honest.
+    [[ -d "$sub" && ! -L "${sub%/}" ]] || continue
     candidates+=("${sub%/}/mysql" "${sub%/}/data")
   done
   local d
   for d in "${candidates[@]}"; do
-    [[ -d "$d" ]] || continue
+    # ! -L: never treat a symlink as a data dir — it would let the wipe traverse
+    # outside HOST_DATA_DIR (Bugbot #384). A symlinked data path is out of scope.
+    [[ -d "$d" && ! -L "$d" ]] || continue
 
     # Fail closed on an unlistable dir: a root/container-owned mysql/data dir the
     # host user can't read/enter can't be proven empty, so treat it as a leftover
@@ -216,6 +222,12 @@ _wipe_leftover_data() {
   for d in "$@"; do
     case "$d" in
       "$HOST_DATA_DIR"/*)
+        # Backstop for the symlink case (detection already skips symlinks): never
+        # rm -rf a symlink — it would delete the target OUTSIDE HOST_DATA_DIR.
+        if [[ -L "$d" ]]; then
+          warn "Refusing to wipe symlink ${d} — it could point outside ${HOST_DATA_DIR}; remove it by hand."
+          rc=1; continue
+        fi
         log "Wiping leftover data: ${d}"
         rm -rf "$d" 2>/dev/null || true
         # Verify — do not trust rm's exit code alone.
