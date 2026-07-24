@@ -171,6 +171,7 @@ setup() {
   [ "$status" -eq 0 ]
   run mock_calls
   [[ "$output" == *"sudo docker info"* ]]
+  [[ "$output" == *"systemctl enable docker"* ]]  # boot-enable survives a reboot (r5)
   [[ "$output" != *"sg "* ]]                      # …no re-exec ever fires
   TB_PREPARE_HOST_MODE=""
 }

@@ -234,6 +234,11 @@ install_docker_engine() {
   # abort before the TB_PREPARE_USER grant runs (Bugbot on #381).
   if [[ -n "${TB_PREPARE_HOST_MODE:-}" ]]; then
     if sudo docker info &>/dev/null; then
+      # Running NOW isn't enough for host-prep: after a reboot the Tier-0
+      # researcher can't start the daemon themselves, so make sure it's also
+      # enabled on boot (best-effort — non-systemd hosts manage this their own
+      # way, and the daemon is verifiably up either way) (Bugbot r5).
+      sudo systemctl enable docker 2>/dev/null || true
       log "Docker daemon running (verified via sudo — prepare-host mode)."
       return 0
     fi
