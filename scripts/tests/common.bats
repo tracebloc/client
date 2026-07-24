@@ -81,6 +81,34 @@ setup() {
   [[ "$output" == *"HOST_DATA_DIR"* ]]
 }
 
+@test "validate_config: node-local + HOST_DATASET_DIR -> error (unsupported combo)" {
+  HOME="$(cd -P "$BATS_TEST_TMPDIR" && pwd)"; USER=tester
+  CLUSTER_NAME=ok; SERVERS=1; AGENTS=1; HOST_DATA_DIR="$HOME/.tracebloc"
+  TB_STORAGE_MODE=node-local
+  HOST_DATASET_DIR="$HOME/dataset-mount"; mkdir -p "$HOST_DATASET_DIR"
+  run validate_config
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"HOST_DATASET_DIR is not supported with TB_STORAGE_MODE=node-local"* ]]
+}
+
+# ── C1 single-node guarantee (RFC-0003 Option C, load-time) ─────────────────
+# The C1 clamp runs when common.sh is sourced, reading AGENTS/SERVERS from env.
+# Source in a fresh shell (not the test's, which already has common.sh's readonly
+# vars) with the env applied, then print the clamped values.
+@test "C1: node-local forces single-node — AGENTS=0 AND SERVERS=1" {
+  run env TB_STORAGE_MODE=node-local AGENTS=4 SERVERS=3 \
+    bash -c "source '${LIB_DIR}/common.sh' >/dev/null 2>&1; echo \"\$AGENTS \$SERVERS\""
+  [ "$status" -eq 0 ]
+  [ "$output" = "0 1" ]
+}
+
+@test "C1: hostpath (default) leaves AGENTS/SERVERS untouched" {
+  run env TB_STORAGE_MODE=hostpath AGENTS=4 SERVERS=3 \
+    bash -c "source '${LIB_DIR}/common.sh' >/dev/null 2>&1; echo \"\$AGENTS \$SERVERS\""
+  [ "$status" -eq 0 ]
+  [ "$output" = "4 3" ]
+}
+
 # ── install_cleanup: the CLIENT_STATE guard (#716) ─────────────────────────
 @test "install_cleanup: exit 0 -> silent" {
   out="$( ( exit 0 ); install_cleanup 2>&1 )"
