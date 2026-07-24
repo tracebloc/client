@@ -25,6 +25,11 @@ load test_helper
 
 setup() {
   export NO_COLOR=1          # empty every tone → byte-exact plain copy
+  # print_banner no-ops when TRACEBLOC_BANNER_SHOWN is set (the curl|bash
+  # bootstrap exports it after drawing the banner). An inherited value would
+  # blank both banner samples in emit_install and drift the golden — clear it
+  # so the catalog always renders them (mirrors common.bats).
+  unset TRACEBLOC_BANNER_SHOWN
   load_lib summary.sh        # common.sh (banner/roadmap/help/step_header) + summary.sh
   # Deterministic env for the copy-emitting functions (values a user never sees
   # under NO_COLOR affect only the silent log(), but set them so `set -u`-style
