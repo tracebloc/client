@@ -154,30 +154,32 @@ _leftover_data_dirs() {
     [[ -d "$sub" ]] || continue
     candidates+=("${sub%/}/mysql" "${sub%/}/data")
   done
-  local d errfile got
+  local d
   for d in "${candidates[@]}"; do
     [[ -d "$d" ]] || continue
-    # Non-empty test that is pipefail-safe AND portable (GNU + BSD/macOS: no
-    # -quit). A `find | head -1 | grep -q` pipeline SIGPIPEs find once its output
+
+    # Fail closed on an unlistable dir: a root/container-owned mysql/data dir the
+    # host user can't read/enter can't be proven empty, so treat it as a leftover
+    # rather than mistake it for a clean slate and adopt it (Bugbot #384; same
+    # ownership case the wipe path treats as fatal). This is the common shape —
+    # the whole data dir is owned by the container uid. No temp file, so it can't
+    # itself fail open (an earlier mktemp-based version could when mktemp failed).
+    if [[ ! -r "$d" || ! -x "$d" ]]; then
+      echo "$d"; continue
+    fi
+
+    # Readable dir → non-empty test. pipefail-safe AND portable (GNU + BSD/macOS:
+    # no -quit): a `find | head -1 | grep` pipeline SIGPIPEs find once output
     # exceeds the pipe buffer (a real multi-table MySQL dir), and under the
-    # installer's `set -o pipefail` that non-zero status wrongly reads as "empty"
-    # — skipping exactly the leftovers this guard must catch. Reading the first
-    # path from a process substitution keeps find's status out of the check and
-    # still short-circuits (read stops after one line).
-    #
-    # Fail closed on unreadable dirs too: a root/container-owned mysql/data dir
-    # the host user can't list makes `find` emit "Permission denied" and no
-    # paths — which would otherwise look like a clean slate and get adopted
-    # (Bugbot #384). Capture find's stderr; ANY error means we can't prove the
-    # dir empty, so treat it as leftover (same ownership case the wipe treats as
-    # fatal). `2>/dev/null` would silently swallow exactly this signal.
-    errfile="$(mktemp "${TMPDIR:-/tmp}/tb-leftover-XXXXXX" 2>/dev/null)" || errfile=""
-    got=1
-    read -r _ < <(find "$d" -type f 2>"${errfile:-/dev/null}") || got=0
-    if [[ "$got" -eq 1 ]] || [[ -n "$errfile" && -s "$errfile" ]]; then
+    # installer's `set -o pipefail` that reads as "empty" — the exact leftover
+    # this guard must catch. `read < <(find …)` keeps find's status out of the
+    # check and short-circuits after one line. The `||` fallback (only reached
+    # when no top-level file was read) captures find's stderr WITHOUT a temp file
+    # — so an unreadable *sub*dir (Permission denied) is also caught, not skipped.
+    if read -r _ < <(find "$d" -type f 2>/dev/null) \
+       || [[ -n "$(find "$d" -type f 2>&1 >/dev/null)" ]]; then
       echo "$d"
     fi
-    [[ -n "$errfile" ]] && rm -f "$errfile"
   done
 }
 
