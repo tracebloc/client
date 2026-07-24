@@ -61,7 +61,7 @@ tracebloc — client setup
 
 Usage:
   curl -fsSL https://raw.githubusercontent.com/tracebloc/client/main/scripts/install.sh | bash
-  ./install-k8s.sh [--help] [--diagnose] [--force]
+  ./install-k8s.sh [--help] [--diagnose] [--force] [--reuse-data|--wipe-data|--data-dir=PATH]
 
 Commands:
   --diagnose     Collect a redacted support bundle (logs + cluster/host status)
@@ -71,6 +71,13 @@ Commands:
   --force        Skip the "already set up" check and re-run every step. Use this
   --reinstall    to force a full reinstall on a machine that is already set up.
                  (Same effect as TRACEBLOC_FORCE_REINSTALL=1 for curl | bash.)
+
+Leftover data (a new install onto a machine that still holds old data):
+  By default the installer STOPS and asks rather than silently adopting it.
+  --reuse-data   Keep and adopt the existing data (non-interactive).
+  --wipe-data    Delete the existing data and start fresh (non-interactive).
+  --data-dir=P   Install into directory P instead (leaves old data untouched).
+                 (Bypass the guard entirely with TRACEBLOC_SKIP_LEFTOVER_GUARD=1.)
 
 Advanced configuration (environment variables):
   CLUSTER_NAME   Cluster name                   (default: tracebloc)
