@@ -143,6 +143,25 @@ setup() {
   [[ "$output" == *"${HOST_DATASET_DIR}:/tracebloc-data@all"* ]]         # datasets on the mount
 }
 
+# ── RFC-0003 Option C: node-local storage (client#367) ──────────────────────
+@test "_create_new_cluster: node-local -> no host bind-mount, keeps k3s local-storage" {
+  TB_STORAGE_MODE="node-local"
+  run _create_new_cluster
+  [ "$status" -eq 0 ]
+  run mock_calls
+  [[ "$output" == *"k3d cluster create"* ]]
+  [[ "$output" != *"/tracebloc@all"* ]]                 # no ~/.tracebloc bind-mount
+  [[ "$output" != *"--disable=local-storage"* ]]        # keep local-path provisioner
+}
+
+@test "_create_new_cluster: hostpath (default) -> bind-mount + disables local-storage" {
+  run _create_new_cluster
+  [ "$status" -eq 0 ]
+  run mock_calls
+  [[ "$output" == *"${HOST_DATA_DIR}:/tracebloc@all"* ]]
+  [[ "$output" == *"--disable=local-storage"* ]]
+}
+
 @test "_ensure_release_dirs: HOST_DATASET_DIR set -> data on dataset dir, mysql+logs local" {
   HOST_DATASET_DIR="$BATS_TEST_TMPDIR/ds"; mkdir -p "$HOST_DATASET_DIR"
   _ensure_release_dirs tracebloc
@@ -231,6 +250,51 @@ setup() {
   [ -z "$output" ]
 }
 
+# ── _check_existing_cluster_storage_mode (RFC-0003 Option C) ────────────────
+@test "_check_existing_cluster_storage_mode: node-local matches node-local cluster -> silent pass" {
+  TB_STORAGE_MODE=node-local
+  docker() { printf '%s\n' /var/lib/rancher; }              # no /tracebloc mount
+  run _check_existing_cluster_storage_mode
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+}
+
+@test "_check_existing_cluster_storage_mode: hostpath matches hostpath cluster -> silent pass" {
+  TB_STORAGE_MODE=hostpath
+  docker() { printf '%s\n' /tracebloc; }
+  run _check_existing_cluster_storage_mode
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+}
+
+@test "_check_existing_cluster_storage_mode: node-local onto hostpath cluster -> fail fast (no local-path SC)" {
+  TB_STORAGE_MODE=node-local
+  docker() { printf '%s\n' /tracebloc; }                    # hostpath cluster
+  run _check_existing_cluster_storage_mode
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"built for hostpath storage"* ]]
+  [[ "$output" == *"Pending"* ]]
+  [[ "$output" == *"k3d cluster delete"* ]]
+}
+
+@test "_check_existing_cluster_storage_mode: hostpath onto node-local cluster -> fail fast (ephemeral)" {
+  TB_STORAGE_MODE=hostpath
+  docker() { printf '%s\n' /var/lib/rancher; }              # node-local cluster, no /tracebloc
+  run _check_existing_cluster_storage_mode
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"built for node-local storage"* ]]
+  [[ "$output" == *"ephemeral"* ]]
+  [[ "$output" == *"k3d cluster delete"* ]]
+}
+
+@test "_check_existing_cluster_storage_mode: inspect fails -> silent no-op" {
+  TB_STORAGE_MODE=node-local
+  docker() { return 1; }
+  run _check_existing_cluster_storage_mode
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+}
+
 # ── ensure_cluster_autostart (reboot persistence) ───────────────────────────
 @test "ensure_cluster_autostart: unless-stopped per node + enables docker (Linux)" {
   OS=Linux
@@ -242,6 +306,17 @@ setup() {
   [[ "$output" == *"docker update --restart unless-stopped k3d-tracebloc-server-0"* ]]
   [[ "$output" == *"docker update --restart unless-stopped k3d-tracebloc-serverlb"* ]]
   [[ "$output" == *"sudo systemctl enable docker"* ]]
+}
+
+@test "ensure_cluster_autostart: Tier 0 sets restart policy but does NOT sudo-enable docker.service (#375)" {
+  OS=Linux; INSTALL_TIER=0
+  docker() { if [[ "$1 $2" == "ps -a" ]]; then echo "k3d-tracebloc-server-0"; else record "docker $*"; fi; }
+  sudo()   { record "sudo $*"; }
+  has()    { return 0; }
+  ensure_cluster_autostart
+  run mock_calls
+  [[ "$output" == *"docker update --restart unless-stopped"* ]]   # reboot policy still set (no privilege)
+  [[ "$output" != *"systemctl enable docker"* ]]                  # but no sudo autostart on the zero-root path
 }
 
 @test "ensure_cluster_autostart: macOS does not enable docker.service" {

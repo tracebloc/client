@@ -1,0 +1,95 @@
+tracebloc installer — what you see while installing
+===================================================
+What scrolls past when you run the installer (curl | bash, or ./install-k8s.sh
+directly). Shown byte-exact, colour off. The banner and the "2. Installing"
+roadmap print once up front; then each step prints its running header. The
+titles below are read live from install-k8s.sh, so they can't drift from what
+the installer actually prints. Interactive prompts and per-component progress
+stream during the run and aren't pinned here.
+
+$ ./install-k8s.sh   # banner (curl|bash pins a version; direct run omits it)
+
+
+  Setting up tracebloc on your machine · v1.9.5
+
+  ────────────────────────────────────────
+
+
+$ ./install-k8s.sh   # banner, direct run (no version suffix)
+
+
+  Setting up tracebloc on your machine
+
+  ────────────────────────────────────────
+
+
+$ ./install-k8s.sh   # the plan, printed once before install begins
+  2. Installing
+
+  a) Check your machine
+  b) Install what tracebloc needs
+  c) Create your secure environment
+  d) Register this machine
+  e) Install tracebloc
+  f) Connect to the tracebloc network
+
+
+
+$ ./install-k8s.sh   # the running step headers, titles from install-k8s.sh
+  a) Checking your machine
+
+  b) Installing what tracebloc needs
+
+  c) Creating your secure environment
+
+  d) Registering this machine
+
+  e) Installing tracebloc
+
+  f) Connecting to the tracebloc network
+
+
+
+------------------------------------------------------------
+--help
+------------------------------------------------------------
+$ ./install-k8s.sh --help
+tracebloc — client setup
+
+  Set up a secure compute environment on your machine
+  and connect it to the tracebloc network.
+
+Usage:
+  curl -fsSL https://raw.githubusercontent.com/tracebloc/client/main/scripts/install.sh | bash
+  ./install-k8s.sh [--help] [--diagnose] [--force] [--reuse-data|--wipe-data|--data-dir=PATH]
+
+Commands:
+  --diagnose     Collect a redacted support bundle (logs + cluster/host status)
+                 into ~/.tracebloc/tracebloc-diagnose-<timestamp>.tgz and exit.
+                 Run this if something went wrong, then send the file to support
+                 (passwords and proxy credentials are removed before it is written).
+  --force        Skip the "already set up" check and re-run every step. Use this
+  --reinstall    to force a full reinstall on a machine that is already set up.
+                 (Same effect as TRACEBLOC_FORCE_REINSTALL=1 for curl | bash.)
+
+Leftover data (a new install onto a machine that still holds old data):
+  By default the installer STOPS and asks rather than silently adopting it.
+  --reuse-data   Keep and adopt the existing data (non-interactive).
+  --wipe-data    Delete the existing data and start fresh (non-interactive).
+  --data-dir=P   Install into directory P instead (leaves old data untouched).
+                 (Bypass the guard entirely with TRACEBLOC_SKIP_LEFTOVER_GUARD=1.)
+
+Advanced configuration (environment variables):
+  CLUSTER_NAME   Cluster name                   (default: tracebloc)
+  TB_NAMESPACE   Secure-environment name        (default: tracebloc)
+  SERVERS        Control-plane nodes             (default: 1)
+  AGENTS         Worker nodes                    (default: 1)
+  K8S_VERSION    k3s image tag                   (default: v1.29.4-k3s1)
+  HOST_DATA_DIR  Persistent data directory       (default: ~/.tracebloc)
+                 Must be on a LOCAL disk — NFS/CIFS/SMB is rejected (the database
+                 corrupts on network storage). TRACEBLOC_ALLOW_NETWORK_FS=1 overrides.
+
+Windows:
+  irm https://raw.githubusercontent.com/tracebloc/client/main/scripts/install.ps1 | iex
+
+Learn more: https://docs.tracebloc.io

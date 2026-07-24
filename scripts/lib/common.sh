@@ -239,21 +239,76 @@ spin_cmd() {
   fi
 }
 
+# ── Root-aware privileged execution (RFC 0001 A2) ────────────────────────────
+#  The installer's privileged steps are written as `sudo <cmd>`. Two gaps that
+#  needlessly excluded real users — a shared-cluster researcher, a root
+#  container/VM:
+#    (a) when we are ALREADY root, sudo is unnecessary — and often ABSENT on
+#        minimal images — so `sudo <cmd>` died with "sudo: command not found"
+#        even though <cmd> would have run fine directly; and
+#    (b) "sudo isn't installed" was reported as "no sudo access", a different and
+#        misleading fix.
+#  We shadow `sudo` with a function so every existing `sudo <cmd>` call site is
+#  fixed with NO edit: as root, run <cmd> directly (no sudo binary needed);
+#  otherwise defer to the real sudo; and when neither is possible, fail the way
+#  the real sudo would (non-zero) so best-effort `sudo … || fallback` sites still
+#  take their fallback. Only `sudo <command>` forms route through here — the sole
+#  option-only uses (`sudo -v` / `sudo -n`) live in preflight_sudo and go through
+#  _real_sudo. Detection + the real binary are wrapped in tiny helpers so the
+#  bats suite can exercise every branch without a real sudo.
+_have_sudo_bin() { type -P sudo >/dev/null 2>&1; }   # real binary, ignoring this fn; no $(...) so a failing probe can't trip set -e on bash <4.4 (Bugbot #372)
+_real_sudo()     { command sudo "$@"; }           # the real sudo, bypassing the shadow
+
+sudo() {
+  if [ "$(id -u)" -eq 0 ]; then
+    "$@"
+  elif _have_sudo_bin; then
+    _real_sudo "$@"
+  else
+    # Not root and no sudo binary. Mimic sudo's own not-found failure (non-zero)
+    # rather than exit, so best-effort call sites keep working; preflight_sudo
+    # aborts up front with an accurate message on the REQUIRED path.
+    echo "sudo: not found (you are not root and sudo is not installed)" >&2
+    return 127
+  fi
+}
+
+# Export the shadow (+ its helpers) so `sudo <cmd>` inside `bash -c '…'` subshells
+# also routes through it — e.g. the apt-lock wait and the RHEL-rebuild (Alma/Rocky/
+# OL) Docker install in setup-linux.sh both run `bash -c '… sudo … …'`. Without
+# export, those child shells resolve the REAL sudo binary, so a root box without
+# sudo installed would still hit "sudo: command not found" there — the exact case
+# A2 fixes everywhere else (review #372). Harmless to non-bash children, which
+# ignore the BASH_FUNC_* environment entries.
+export -f sudo _real_sudo _have_sudo_bin
+
 # ── Sudo preflight — warm the credential cache before spinners hide prompts ──
-#  Call once at the start of install_macos / install_linux.  sudo -v caches
-#  credentials for the default timeout (usually 5–15 min), so subsequent sudo
-#  calls inside spin_cmd won't prompt interactively.
+#  Call once at the start of install_macos / install_linux. Establishes that the
+#  privileged steps below can run, and (when a password is needed) primes the
+#  sudo credential once so later steps behind spinners don't re-prompt.
 preflight_sudo() {
-  if sudo -n true 2>/dev/null; then
+  # Already root — nothing to prime; the sudo() shadow runs privileged steps
+  # directly and needs no sudo binary. Fixes root containers/VMs and minimal
+  # images without sudo (A2).
+  if [ "$(id -u)" -eq 0 ]; then
     return 0
   fi
-  # Step b intro copy (first-run run-through): one line, then the system's own
-  # "Password:" prompt from `sudo -v`. Kept generic so it reads correctly on both
-  # macOS (Docker Desktop) and Linux (Docker Engine + system packages).
+  # Not root AND no sudo binary — the honest, actionable failure (previously
+  # conflated with "no sudo access").
+  if ! _have_sudo_bin; then
+    error "This machine needs administrator rights to install Docker and system tools, but you are not root and sudo isn't installed. Re-run as root, or install sudo (e.g. apt-get install sudo) and try again."
+  fi
+  # Sudo present and already usable without a password (cached / NOPASSWD).
+  if _real_sudo -n true 2>/dev/null; then
+    return 0
+  fi
+  # Prompt once, then keep the credential warm. One line, then the system's own
+  # "Password:" prompt. Kept generic so it reads correctly on macOS (Docker
+  # Desktop) and Linux (Docker Engine + system packages).
   hint "tracebloc needs your password once to set up Docker and a few tools."
   echo ""
-  sudo -v || error "Could not obtain administrator privileges. Re-run with a user that has sudo access."
-  ( while sudo -n true 2>/dev/null; do sleep 50; done ) &
+  _real_sudo -v || error "Could not obtain administrator privileges (sudo authentication failed). Re-run as a user allowed to sudo, or as root."
+  ( while _real_sudo -n true 2>/dev/null; do sleep 50; done ) &
   SUDO_KEEPALIVE_PID=$!
 }
 
@@ -381,6 +436,25 @@ setup_log_file() {
 CLUSTER_NAME="${CLUSTER_NAME:-tracebloc}"
 SERVERS="${SERVERS:-1}"
 AGENTS="${AGENTS:-1}"
+# RFC-0003 (client#367) — local dataset storage model. PROTOTYPE, default off.
+#   hostpath   (default) : today's model — datasets live in ~/.tracebloc on the
+#                          host, bind-mounted into the cluster; survive cluster
+#                          delete; world-writable dirs.
+#   node-local (Option C): datasets live on k3s local-path INSIDE the k3d node —
+#                          they die with `cluster delete`, are not a browsable
+#                          host folder, and need no chmod 777. This is the
+#                          RFC-0003 goal for the local install.
+# C1: local-path is RWO + WaitForFirstConsumer and provisions on a single node,
+# but the shared data PVC is mounted by jobs-manager-spawned Jobs that could
+# schedule on another node with no volume. So node-local forces single-node —
+# and that means BOTH agents=0 AND servers=1: unlike a full k8s control plane,
+# k3s server nodes are schedulable, so SERVERS>1 still yields multiple nodes the
+# data PVC can't follow. Forcing agents=0 alone would leave that hole open.
+TB_STORAGE_MODE="${TB_STORAGE_MODE:-hostpath}"
+if [[ "$TB_STORAGE_MODE" == "node-local" ]]; then
+  AGENTS=0
+  SERVERS=1
+fi
 # Pinned default; set K8S_VERSION="" to use latest (may break on new k3s releases)
 K8S_VERSION="${K8S_VERSION:-v1.29.4-k3s1}"
 HOST_DATA_DIR="${HOST_DATA_DIR:-$HOME/.tracebloc}"
@@ -401,9 +475,28 @@ validate_config() {
 
   [[ "$SERVERS" =~ ^[1-9][0-9]*$ ]] || error "SERVERS must be a positive integer >= 1 (got '$SERVERS')"
   [[ "$AGENTS"  =~ ^[0-9]+$ ]]     || error "AGENTS must be a non-negative integer (got '$AGENTS')"
+  [[ "$TB_STORAGE_MODE" == "hostpath" || "$TB_STORAGE_MODE" == "node-local" ]] \
+    || error "TB_STORAGE_MODE must be 'hostpath' or 'node-local' (got '$TB_STORAGE_MODE')"
+
+  # node-local forces hostPath.enabled=false, so a HOST_DATASET_DIR network export
+  # would be ignored and datasets would silently land on ephemeral local-path
+  # storage (gone on 'cluster delete'). Combining the two is a documented follow-up
+  # (backend#743 + RFC-0003); until then, refuse it rather than misroute datasets.
+  [[ "$TB_STORAGE_MODE" == "node-local" && -n "${HOST_DATASET_DIR:-}" ]] \
+    && error "HOST_DATASET_DIR is not supported with TB_STORAGE_MODE=node-local (datasets would land on ephemeral in-node storage, not the export). Use the default hostpath mode for network-mount datasets."
 
   # HOST_DATA_DIR must be under $HOME and must not be a system path (security)
   local dir="$HOST_DATA_DIR"
+  # Fail closed on an empty value (e.g. --data-dir= with no path) — otherwise the
+  # $HOME-relative rewrite below resolves "" to a surprise dir like $HOME/$USER.
+  [[ -n "$dir" ]] || error "HOST_DATA_DIR must not be empty (got '')."
+  # Expand a leading ~ / ~/ : users type --data-dir=~/foo and the shell does not
+  # expand ~ inside a quoted value, so it would otherwise be read as the literal
+  # "$HOME/~/foo" and fail parent resolution. Only the leading ~ is expanded.
+  case "$dir" in
+    "~")   dir="$HOME" ;;
+    "~/"*) dir="$HOME/${dir#\~/}" ;;
+  esac
   [[ "$dir" != /* ]] && dir="$HOME/$dir"
   # Resolve via parent directory — the target itself may not exist yet on first run
   local parent
@@ -417,7 +510,14 @@ validate_config() {
       error "HOST_DATA_DIR cannot be a system path: $dir"
       ;;
   esac
-  [[ "$dir" != "$HOME" && "${dir#$HOME/}" == "$dir" ]] && \
+  # Must be strictly UNDER $HOME — never $HOME itself. $HOME is reachable via a
+  # bare '~', HOST_DATA_DIR=$HOME, or --data-dir=$HOME; adopting it would make the
+  # installer chmod 777 home-level logs/mysql dirs, bind-mount all of $HOME into
+  # the cluster, and treat any existing ~/data or ~/mysql as install data
+  # (Bugbot #384).
+  [[ "$dir" == "$HOME" ]] && \
+    error "HOST_DATA_DIR must be a subdirectory of \$HOME, not \$HOME itself (got: $HOST_DATA_DIR)."
+  [[ "${dir#$HOME/}" == "$dir" ]] && \
     error "HOST_DATA_DIR must be under \$HOME (got: $HOST_DATA_DIR)"
   HOST_DATA_DIR="$dir"
 
@@ -541,7 +641,7 @@ tracebloc — client setup
 
 Usage:
   curl -fsSL https://raw.githubusercontent.com/tracebloc/client/main/scripts/install.sh | bash
-  ./install-k8s.sh [--help] [--diagnose] [--force]
+  ./install-k8s.sh [--help] [--diagnose] [--force] [--reuse-data|--wipe-data|--data-dir=PATH]
 
 Commands:
   --diagnose     Collect a redacted support bundle (logs + cluster/host status)
@@ -551,6 +651,13 @@ Commands:
   --force        Skip the "already set up" check and re-run every step. Use this
   --reinstall    to force a full reinstall on a machine that is already set up.
                  (Same effect as TRACEBLOC_FORCE_REINSTALL=1 for curl | bash.)
+
+Leftover data (a new install onto a machine that still holds old data):
+  By default the installer STOPS and asks rather than silently adopting it.
+  --reuse-data   Keep and adopt the existing data (non-interactive).
+  --wipe-data    Delete the existing data and start fresh (non-interactive).
+  --data-dir=P   Install into directory P instead (leaves old data untouched).
+                 (Bypass the guard entirely with TRACEBLOC_SKIP_LEFTOVER_GUARD=1.)
 
 Advanced configuration (environment variables):
   CLUSTER_NAME   Cluster name                   (default: tracebloc)

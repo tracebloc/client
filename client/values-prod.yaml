@@ -41,6 +41,6 @@
 images:
   ingestor:
     # ghcr.io/tracebloc/ingestor multi-arch index for the 0.7 line.
-    # v0.7.0 (== tag `0.7` / `0.7.0`) — VERIFIED against ghcr.io 2026-07-10
+    # v0.7.5 (== tag `0.7` / `0.7.5`) — VERIFIED against ghcr.io 2026-07-23
     # (linux/amd64 + linux/arm64 OCI image index). Re-verify at each prod cut.
-    digest: "sha256:78f21a08d1fb186b9764ad96090dcaf9c381c6407c7778f2085a56dea2d8f117"
+    digest: "sha256:a5f2650b2ffbe027cbf4401b8778c4376e383d56d673df297babe150ecf49414"

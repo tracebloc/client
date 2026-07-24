@@ -16,6 +16,45 @@ setup() {
   [ "$status" -eq 0 ]
 }
 
+@test "validate_config: empty HOST_DATA_DIR fails closed (#384 bugbot)" {
+  HOME="$BATS_TEST_TMPDIR"; USER=tester
+  CLUSTER_NAME=tracebloc; SERVERS=1; AGENTS=1; HOST_DATA_DIR=""
+  run validate_config
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"must not be empty"* ]]
+}
+
+@test "validate_config: leading tilde in HOST_DATA_DIR expands to \$HOME (#384 bugbot)" {
+  # Resolve symlinks in HOME so macOS's /var->/private/var (via validate_config's
+  # `cd -P`) doesn't skew the under-$HOME check — this keeps the test about tilde
+  # expansion, not the tmpdir's symlink shape.
+  HOME="$(cd -P "$BATS_TEST_TMPDIR" && pwd)"; USER=tester
+  CLUSTER_NAME=tracebloc; SERVERS=1; AGENTS=1; HOST_DATA_DIR="~/tracebloc-new"
+  run validate_config
+  # Pre-fix, `~/x` became the literal "$HOME/~/x" and failed parent resolution;
+  # now it resolves to $HOME/tracebloc-new and validates. No `~` may survive.
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"~"* ]]
+}
+
+@test "validate_config: HOST_DATA_DIR == \$HOME is rejected, not adopted (#384 bugbot)" {
+  # $HOME itself must never be the data dir: the installer would chmod 777
+  # home-level dirs, bind-mount all of $HOME, and treat ~/data|~/mysql as data.
+  HOME="$(cd -P "$BATS_TEST_TMPDIR" && pwd)"; USER=tester
+  CLUSTER_NAME=tracebloc; SERVERS=1; AGENTS=1; HOST_DATA_DIR="$HOME"
+  run validate_config
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"not \$HOME itself"* ]]
+}
+
+@test "validate_config: bare ~ is rejected (resolves to \$HOME) (#384 bugbot)" {
+  HOME="$(cd -P "$BATS_TEST_TMPDIR" && pwd)"; USER=tester
+  CLUSTER_NAME=tracebloc; SERVERS=1; AGENTS=1; HOST_DATA_DIR="~"
+  run validate_config
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"not \$HOME itself"* ]]
+}
+
 @test "validate_config: invalid CLUSTER_NAME -> error" {
   HOME="$BATS_TEST_TMPDIR"; USER=tester
   CLUSTER_NAME="1nope"; SERVERS=1; AGENTS=1; HOST_DATA_DIR="$HOME/x"
@@ -79,6 +118,34 @@ setup() {
   run validate_config
   [ "$status" -ne 0 ]
   [[ "$output" == *"HOST_DATA_DIR"* ]]
+}
+
+@test "validate_config: node-local + HOST_DATASET_DIR -> error (unsupported combo)" {
+  HOME="$(cd -P "$BATS_TEST_TMPDIR" && pwd)"; USER=tester
+  CLUSTER_NAME=ok; SERVERS=1; AGENTS=1; HOST_DATA_DIR="$HOME/.tracebloc"
+  TB_STORAGE_MODE=node-local
+  HOST_DATASET_DIR="$HOME/dataset-mount"; mkdir -p "$HOST_DATASET_DIR"
+  run validate_config
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"HOST_DATASET_DIR is not supported with TB_STORAGE_MODE=node-local"* ]]
+}
+
+# ── C1 single-node guarantee (RFC-0003 Option C, load-time) ─────────────────
+# The C1 clamp runs when common.sh is sourced, reading AGENTS/SERVERS from env.
+# Source in a fresh shell (not the test's, which already has common.sh's readonly
+# vars) with the env applied, then print the clamped values.
+@test "C1: node-local forces single-node — AGENTS=0 AND SERVERS=1" {
+  run env TB_STORAGE_MODE=node-local AGENTS=4 SERVERS=3 \
+    bash -c "source '${LIB_DIR}/common.sh' >/dev/null 2>&1; echo \"\$AGENTS \$SERVERS\""
+  [ "$status" -eq 0 ]
+  [ "$output" = "0 1" ]
+}
+
+@test "C1: hostpath (default) leaves AGENTS/SERVERS untouched" {
+  run env TB_STORAGE_MODE=hostpath AGENTS=4 SERVERS=3 \
+    bash -c "source '${LIB_DIR}/common.sh' >/dev/null 2>&1; echo \"\$AGENTS \$SERVERS\""
+  [ "$status" -eq 0 ]
+  [ "$output" = "4 3" ]
 }
 
 # ── install_cleanup: the CLIENT_STATE guard (#716) ─────────────────────────
@@ -198,4 +265,81 @@ setup() {
   [ "$status" -eq 0 ]
   [[ "$output" != *"Setting up"* ]]
   unset TRACEBLOC_BANNER_SHOWN
+}
+
+# ── Root-aware sudo + preflight (RFC 0001 A2) ────────────────────────────────
+# _have_sudo_bin / _real_sudo are stubbed so every branch runs without a real
+# sudo; the payload command is a recordable mock so the root path never shells
+# out to a real binary.
+@test "sudo(): as root, runs the command directly — no real sudo" {
+  MOCK_CALLS="$(mktemp)"
+  id() { echo 0; }
+  modprobe() { record "modprobe $*"; }
+  _real_sudo() { record "real_sudo $*"; }
+  run sudo modprobe overlay
+  [ "$status" -eq 0 ]
+  mock_calls | grep -q "modprobe overlay"
+  ! mock_calls | grep -q "real_sudo"
+}
+
+@test "sudo(): non-root with sudo present defers to the real sudo" {
+  MOCK_CALLS="$(mktemp)"
+  id() { echo 1000; }
+  _have_sudo_bin() { return 0; }
+  _real_sudo() { record "real_sudo $*"; }
+  run sudo modprobe overlay
+  [ "$status" -eq 0 ]
+  mock_calls | grep -q "real_sudo modprobe overlay"
+}
+
+@test "sudo(): non-root without sudo returns 127 (best-effort friendly), never exits" {
+  id() { echo 1000; }
+  _have_sudo_bin() { return 1; }
+  run sudo modprobe overlay
+  [ "$status" -eq 127 ]
+}
+
+@test "preflight_sudo: root returns 0 with no sudo binary needed" {
+  id() { echo 0; }
+  _have_sudo_bin() { return 1; }   # even with NO sudo, root is fine
+  _real_sudo() { echo "must-not-run"; return 1; }
+  run preflight_sudo
+  [ "$status" -eq 0 ]
+}
+
+@test "preflight_sudo: non-root + no sudo => accurate error, not 'no sudo access'" {
+  id() { echo 1000; }
+  _have_sudo_bin() { return 1; }
+  run preflight_sudo
+  [ "$status" -ne 0 ]
+  printf '%s\n' "$output" | grep -qF "isn't installed"
+}
+
+@test "preflight_sudo: non-root + passwordless sudo returns 0 (no prompt)" {
+  id() { echo 1000; }
+  _have_sudo_bin() { return 0; }
+  _real_sudo() { case "$*" in "-n true") return 0 ;; *) return 1 ;; esac; }
+  run preflight_sudo
+  [ "$status" -eq 0 ]
+}
+
+@test "sudo(): exported so a bash -c subshell inherits the shadow (#372)" {
+  # The nested `sudo <cmd>` in setup-linux.sh's bash -c blocks (apt-lock wait,
+  # RHEL-rebuild Docker install) must route through OUR shadow, not the real sudo.
+  # A child bash sees the function only if it was exported (export -f in common.sh).
+  run bash -c 'declare -F sudo >/dev/null && declare -f sudo | grep -q _real_sudo && echo INHERITED'
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"INHERITED"* ]]
+}
+
+@test "_have_sudo_bin: set -e safe when sudo is absent (no command substitution, #372)" {
+  # The pre-fix body wrapped `type -P sudo` in `[ -n "$(...)" ]`. On bash <4.4
+  # (Amazon Linux 2's 4.2, and this dev host's 3.2) a failing command
+  # substitution trips `set -e` EVEN inside an `if` condition, so the non-root/
+  # no-sudo path aborted before preflight_sudo could print its clear message.
+  # The whole-body `type -P` form has no substitution and must survive.
+  run bash -c "set -e; PATH=/nonexistent; $(declare -f _have_sudo_bin); if _have_sudo_bin; then echo yes; else echo no; fi; echo survived"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"no"* ]]
+  [[ "$output" == *"survived"* ]]
 }
