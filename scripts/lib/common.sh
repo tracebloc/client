@@ -436,6 +436,25 @@ setup_log_file() {
 CLUSTER_NAME="${CLUSTER_NAME:-tracebloc}"
 SERVERS="${SERVERS:-1}"
 AGENTS="${AGENTS:-1}"
+# RFC-0003 (client#367) — local dataset storage model. PROTOTYPE, default off.
+#   hostpath   (default) : today's model — datasets live in ~/.tracebloc on the
+#                          host, bind-mounted into the cluster; survive cluster
+#                          delete; world-writable dirs.
+#   node-local (Option C): datasets live on k3s local-path INSIDE the k3d node —
+#                          they die with `cluster delete`, are not a browsable
+#                          host folder, and need no chmod 777. This is the
+#                          RFC-0003 goal for the local install.
+# C1: local-path is RWO + WaitForFirstConsumer and provisions on a single node,
+# but the shared data PVC is mounted by jobs-manager-spawned Jobs that could
+# schedule on another node with no volume. So node-local forces single-node —
+# and that means BOTH agents=0 AND servers=1: unlike a full k8s control plane,
+# k3s server nodes are schedulable, so SERVERS>1 still yields multiple nodes the
+# data PVC can't follow. Forcing agents=0 alone would leave that hole open.
+TB_STORAGE_MODE="${TB_STORAGE_MODE:-hostpath}"
+if [[ "$TB_STORAGE_MODE" == "node-local" ]]; then
+  AGENTS=0
+  SERVERS=1
+fi
 # Pinned default; set K8S_VERSION="" to use latest (may break on new k3s releases)
 K8S_VERSION="${K8S_VERSION:-v1.29.4-k3s1}"
 HOST_DATA_DIR="${HOST_DATA_DIR:-$HOME/.tracebloc}"
@@ -456,6 +475,15 @@ validate_config() {
 
   [[ "$SERVERS" =~ ^[1-9][0-9]*$ ]] || error "SERVERS must be a positive integer >= 1 (got '$SERVERS')"
   [[ "$AGENTS"  =~ ^[0-9]+$ ]]     || error "AGENTS must be a non-negative integer (got '$AGENTS')"
+  [[ "$TB_STORAGE_MODE" == "hostpath" || "$TB_STORAGE_MODE" == "node-local" ]] \
+    || error "TB_STORAGE_MODE must be 'hostpath' or 'node-local' (got '$TB_STORAGE_MODE')"
+
+  # node-local forces hostPath.enabled=false, so a HOST_DATASET_DIR network export
+  # would be ignored and datasets would silently land on ephemeral local-path
+  # storage (gone on 'cluster delete'). Combining the two is a documented follow-up
+  # (backend#743 + RFC-0003); until then, refuse it rather than misroute datasets.
+  [[ "$TB_STORAGE_MODE" == "node-local" && -n "${HOST_DATASET_DIR:-}" ]] \
+    && error "HOST_DATASET_DIR is not supported with TB_STORAGE_MODE=node-local (datasets would land on ephemeral in-node storage, not the export). Use the default hostpath mode for network-mount datasets."
 
   # HOST_DATA_DIR must be under $HOME and must not be a system path (security)
   local dir="$HOST_DATA_DIR"

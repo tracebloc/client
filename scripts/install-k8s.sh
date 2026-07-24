@@ -21,6 +21,10 @@
 #    AGENTS=1                    default: 1  (worker nodes)
 #    K8S_VERSION=v1.29.4-k3s1   default: latest stable k3s
 #    HOST_DATA_DIR=~/.tracebloc  default: ~/.tracebloc
+#    TB_STORAGE_MODE=node-local  default: hostpath  (RFC-0003 Option C, flag-gated)
+#                                node-local stores datasets on k3s local-path INSIDE
+#                                the node — no ~/.tracebloc host dirs, wiped on cluster
+#                                delete; forces AGENTS=0 (single-node)
 #    CLIENT_ENV=dev              optional; if not set, CLIENT_ENV is not added to env in values
 #    TRACEBLOC_FORCE_REINSTALL=1  skip the "already set up" stop-and-check gate
 #                                and re-run every step (same as --force/--reinstall)
