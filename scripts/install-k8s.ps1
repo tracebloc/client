@@ -39,7 +39,7 @@ if (-not $env:TB_PESTER) {
     Write-Host "  Open an elevated PowerShell: press Win+X and choose 'Terminal (Admin)'" -ForegroundColor DarkGray
     Write-Host "  (or search 'PowerShell' in Start and press Ctrl+Shift+Enter)," -ForegroundColor DarkGray
     Write-Host "  accept the User Account Control prompt, then re-run:" -ForegroundColor DarkGray
-    Write-Host "    irm tracebloc.io/i.ps1 | iex" -ForegroundColor Cyan
+    Write-Host "    irm https://tracebloc.io/i.ps1 | iex" -ForegroundColor Cyan
     exit 1
   }
 
