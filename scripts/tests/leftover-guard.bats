@@ -89,6 +89,20 @@ seed_release_data() { mkdir -p "$HOST_DATA_DIR/tracebloc/data/ds1"; : >"$HOST_DA
   [ ! -e "$HOST_DATA_DIR/tracebloc/data/ds1/rows.csv" ]
 }
 
+@test "_wipe_leftover_data: refuses when HOST_DATA_DIR is empty (#384 wipe-safety)" {
+  HOST_DATA_DIR=""
+  run _wipe_leftover_data "/some/path/mysql"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"Refusing to wipe"* ]]
+}
+
+@test "_wipe_leftover_data: refuses when HOST_DATA_DIR is outside \$HOME (#384 wipe-safety)" {
+  HOST_DATA_DIR="/var/tmp/evil"
+  run _wipe_leftover_data "/var/tmp/evil/mysql"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"Refusing to wipe"* ]]
+}
+
 @test "guard: wipe that cannot remove data fails closed, does not adopt (#384 bugbot)" {
   [ "$(id -u)" -eq 0 ] && skip "rm cannot be blocked as root"
   seed_flat_mysql

@@ -191,6 +191,14 @@ _read_sanitized() {
 # create_cluster adopt the survivors — a warn-and-proceed would silently break
 # the "wipe means gone" guarantee.
 _wipe_leftover_data() {
+  # Belt-and-suspenders (Lukas review, #384): never wipe unless HOST_DATA_DIR is
+  # a non-empty path strictly under $HOME — exactly what validate_config enforces.
+  # This guards the rm below even if a future refactor ever calls the guard before
+  # validate_config: an empty HOST_DATA_DIR would collapse the "$HOST_DATA_DIR"/*
+  # case pattern to /* and defeat the scope check. Placed in the destructive
+  # function itself so it holds for every caller, not just the current one.
+  [[ -n "${HOST_DATA_DIR:-}" && "$HOST_DATA_DIR" == "$HOME"/* ]] \
+    || error "Refusing to wipe: HOST_DATA_DIR is unset or not under \$HOME (got '${HOST_DATA_DIR:-}')."
   local d rc=0
   for d in "$@"; do
     case "$d" in
