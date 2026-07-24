@@ -49,14 +49,20 @@ _pf_note() { [[ -n "${PF_QUIET_SUCCESS:-}" ]] || info "$*"; }
 # ── Injectable readers (overridden in bats so checks run without net/df) ─────
 
 # Probe a URL for reachability. Echoes one of: ok|dns|refused|timeout|tls|blocked|nocurl
-# "Reachable" = any HTTP response (200/401/403 all count — TLS + HTTP completed).
+# (or "http <code>" in strict mode). "Reachable" = any HTTP response (200/401/403 all
+# count — TLS + HTTP completed). Pass "strict" as $2 for targets whose CONTENT must
+# exist (2xx/3xx only — e.g. the Helm repo index.yaml, where the site root 404s by
+# design and plain reachability proves nothing, #385).
 # Respects the caller's HTTP(S)_PROXY env (curl picks it up), so a TLS-inspecting
 # proxy without its CA surfaces here as 'tls'.
 _pf_probe_url() {
-  local url="$1" code ec
+  local url="$1" mode="${2:-}" code ec
   has curl || { echo "nocurl"; return 0; }
   code=$(curl -sS $CURL_SECURE -o /dev/null --max-time 8 -w '%{http_code}' "$url" 2>/dev/null) && ec=0 || ec=$?
-  if [[ -n "$code" && "$code" != "000" ]]; then echo "ok"; return 0; fi
+  if [[ -n "$code" && "$code" != "000" ]]; then
+    if [[ "$mode" == "strict" && ! "$code" =~ ^[23] ]]; then echo "http $code"; return 0; fi
+    echo "ok"; return 0
+  fi
   case "${ec:-1}" in
     6)     echo "dns" ;;
     7)     echo "refused" ;;
@@ -342,15 +348,18 @@ _pf_connectivity() {
     warn "Skipping connectivity check — curl isn't available yet (the installer will add it)."
     return 0
   fi
-  local backend_host cfail=0 tls_seen=0 c label url status
+  local backend_host cfail=0 tls_seen=0 c label rest url mode status
   backend_host="$(_pf_backend_host)"
 
   # Critical: the install cannot succeed without these (image pulls, creds, chart).
+  # Entries are "label|url" with an optional third "|strict" field.
   local criticals=(
     "Docker Hub (registry-1.docker.io)|https://registry-1.docker.io/v2/"
     "GitHub Container Registry (ghcr.io)|https://ghcr.io/"
     "tracebloc API (${backend_host})|https://${backend_host}/"
-    "tracebloc Helm charts (tracebloc.github.io)|https://tracebloc.github.io/"
+    # The chart repo is probed at its index.yaml, strictly (third field): the site
+    # ROOT 404s by design, while the index must exist for `helm repo add` (#385).
+    "tracebloc Helm charts (tracebloc.github.io)|https://tracebloc.github.io/client/index.yaml|strict"
   )
   # Probe each critical host in the FOREGROUND (so PF_HARD_FAIL updates in THIS
   # shell — a backgrounded spinner subshell couldn't propagate it), advancing a
@@ -361,11 +370,12 @@ _pf_connectivity() {
   local -a fails=()
   tput civis 2>/dev/null || true
   for c in "${criticals[@]}"; do
-    label="${c%%|*}"; url="${c#*|}"
+    label="${c%%|*}"; rest="${c#*|}"; url="${rest%%|*}"
+    mode=""; [[ "$rest" == *"|"* ]] && mode="${rest##*|}"
     printf "\r  ${CYAN}%s${RESET} Checking outbound connectivity…" "${frames[fi]}"
     fi=$(( (fi + 1) % ${#frames[@]} ))
-    status="$(_pf_probe_url "$url")"
-    if [[ "$status" != "ok" ]]; then status="$(_pf_probe_url "$url")"; fi   # one retry (transient blips)
+    status="$(_pf_probe_url "$url" "$mode")"
+    if [[ "$status" != "ok" ]]; then status="$(_pf_probe_url "$url" "$mode")"; fi   # one retry (transient blips)
     if [[ "$status" != "ok" ]]; then
       fails+=("${label}|${status}")
       if [[ "$status" == "tls" ]]; then tls_seen=1; fi

@@ -1317,14 +1317,18 @@ $envBlock
   Set-Content -Path $valuesFile -Value $valuesContent -Encoding UTF8
   Log "Values file written to $valuesFile"
 
-  $repoList = (helm repo list 2>&1) | Out-String
-  if ($repoList -notmatch [regex]::Escape($TRACEBLOC_HELM_REPO_NAME)) {
-    Log "Adding Helm repo: $TRACEBLOC_HELM_REPO_URL"
-    $null = (helm repo add $TRACEBLOC_HELM_REPO_NAME $TRACEBLOC_HELM_REPO_URL 2>&1)
-    if ($LASTEXITCODE -ne 0) { Err "Failed to connect to tracebloc." }
-  }
-  Log "Updating Helm repos..."
-  $null = (helm repo update 2>&1)
+  # Register the chart repo unconditionally. `--force-update` is idempotent, heals
+  # a stale/wrong URL from an earlier attempt, and re-fetches the repo index, so no
+  # separate `helm repo update` pass is needed. (The old presence guard string-
+  # matched `(helm repo list 2>&1)`: on a fresh machine helm reports "no
+  # repositories" on stderr, and Windows PowerShell 5.1 renders that ErrorRecord
+  # with this script's own ...\tracebloc-installer-<n>\install-k8s.ps1 temp path --
+  # which contains "tracebloc" -- so the guard skipped the add on every fresh
+  # install and Step 4 died later with "Error: repo tracebloc not found". #385)
+  Log "Adding Helm repo: $TRACEBLOC_HELM_REPO_URL"
+  $addOutput = (helm repo add $TRACEBLOC_HELM_REPO_NAME $TRACEBLOC_HELM_REPO_URL --force-update 2>&1) | Out-String
+  Log "helm repo add: $addOutput"
+  if ($LASTEXITCODE -ne 0) { Err "Couldn't add the tracebloc chart repo ($TRACEBLOC_HELM_REPO_URL). Helm output:`n$addOutput`nCheck the log for details: $LOG_FILE" }
 
   Write-Host ""
   Log "Installing $TB_NAMESPACE from $TRACEBLOC_HELM_REPO_NAME/$TRACEBLOC_CHART_NAME in namespace '$TB_NAMESPACE'..."
@@ -1497,15 +1501,21 @@ function Print-Summary {
 # Non-exiting failure line (Err exits; preflight must finish all checks first).
 function Write-PfFail($m) { Write-Host "  " -NoNewline; Write-Host ([char]0x2716) -ForegroundColor Red -NoNewline; Write-Host " $m" -ForegroundColor Red }
 
-# Probe a URL for reachability. Returns: ok|tls|dns|timeout|blocked. Any HTTP
-# response (incl. 401/403/404) = reachable (TLS + HTTP completed). Honors the
-# system / HTTP_PROXY proxy automatically.
-function Test-PfUrl([string]$Url) {
+# Probe a URL for reachability. Returns: ok|tls|dns|timeout|blocked (or "http <code>"
+# under -RequireSuccess). By default any HTTP response (incl. 401/403/404) counts as
+# reachable (TLS + HTTP completed) -- registry endpoints answer 401 by design. Pass
+# -RequireSuccess for targets whose CONTENT must exist (e.g. the Helm repo index.yaml:
+# the site root 404s by design, so plain reachability proves nothing there, #385).
+# Honors the system / HTTP_PROXY proxy automatically.
+function Test-PfUrl([string]$Url, [switch]$RequireSuccess) {
   try {
     Invoke-WebRequest -Uri $Url -Method Head -TimeoutSec 8 -UseBasicParsing -ErrorAction Stop | Out-Null
     return "ok"
   } catch {
-    if ($null -ne $_.Exception.Response) { return "ok" }   # reached the server, got an HTTP error
+    if ($null -ne $_.Exception.Response) {                 # reached the server, got an HTTP error
+      if ($RequireSuccess) { return "http $([int]$_.Exception.Response.StatusCode)" }
+      return "ok"
+    }
     $m = "$($_.Exception.Message)"
     if ($m -match 'trust|SSL|certificate|TLS|secure channel') { return "tls" }
     if ($m -match 'resolve|name or service|known')            { return "dns" }
@@ -1641,12 +1651,15 @@ function Test-Preflight {
     @{ label = "Docker Hub (registry-1.docker.io)";           url = "https://registry-1.docker.io/v2/" },
     @{ label = "GitHub Container Registry (ghcr.io)";         url = "https://ghcr.io/" },
     @{ label = "tracebloc API ($backendHost)";                url = "https://$backendHost/" },
-    @{ label = "tracebloc Helm charts (tracebloc.github.io)"; url = "https://tracebloc.github.io/" }
+    # The chart repo is probed at its index.yaml, strictly: the site ROOT 404s by
+    # design (so "any response = reachable" proves nothing), while the index must
+    # actually exist for `helm repo add` to succeed (#385).
+    @{ label = "tracebloc Helm charts (tracebloc.github.io)"; url = "$TRACEBLOC_HELM_REPO_URL/index.yaml"; strict = $true }
   )
   $tlsSeen = $false; $cfail = 0
   foreach ($c in $criticals) {
-    $status = Test-PfUrl $c.url
-    if ($status -ne "ok") { $status = Test-PfUrl $c.url }   # one retry for transient blips
+    $status = Test-PfUrl $c.url -RequireSuccess:([bool]$c.strict)
+    if ($status -ne "ok") { $status = Test-PfUrl $c.url -RequireSuccess:([bool]$c.strict) }   # one retry for transient blips
     if ($status -eq "ok") { Ok "$($c.label) reachable" }
     else {
       Write-PfFail "$($c.label) unreachable ($status)"
