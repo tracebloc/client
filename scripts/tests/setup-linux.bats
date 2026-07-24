@@ -169,6 +169,41 @@ setup() {
   [[ "$output" == *"PATH="* ]]
   [[ "$output" == *"bash"* ]]
 }
+
+# ── install_k3d: pinned release (K3D_VERSION) ───────────────────────────────
+# The upstream installer's releases/latest lookup 404s under GitHub rate
+# limiting on shared egress IPs (2/9 distro CI jobs, 2026-07-21). The pin must
+# reach BOTH sides: the install script is fetched at the tag (immutable bytes),
+# and TAG=<pin> makes the script skip the lookup.
+@test "install_k3d: default pins TAG and fetches the tagged install script" {
+  PRESENT_CMDS="curl"
+  has() {
+    if [ "$1" = k3d ]; then [ -f "$BATS_TEST_TMPDIR/k3di" ]
+    else case " $PRESENT_CMDS " in *" $1 "*) return 0 ;; *) return 1 ;; esac; fi
+  }
+  spin_cmd() { record "$*"; touch "$BATS_TEST_TMPDIR/k3di"; return 0; }
+  run install_k3d
+  [ "$status" -eq 0 ]
+  run mock_calls
+  [[ "$output" == *"k3d-io/k3d/${K3D_VERSION}/install.sh"* ]]   # tagged script, not main
+  [[ "$output" == *"TAG=${K3D_VERSION}"* ]]                     # lookup skipped
+}
+@test "install_k3d: K3D_VERSION=latest restores resolve-at-install-time" {
+  PRESENT_CMDS="curl"
+  K3D_VERSION=latest
+  has() {
+    if [ "$1" = k3d ]; then [ -f "$BATS_TEST_TMPDIR/k3di" ]
+    else case " $PRESENT_CMDS " in *" $1 "*) return 0 ;; *) return 1 ;; esac; fi
+  }
+  spin_cmd() { record "$*"; touch "$BATS_TEST_TMPDIR/k3di"; return 0; }
+  run install_k3d
+  [ "$status" -eq 0 ]
+  run mock_calls
+  [[ "$output" == *"k3d-io/k3d/main/install.sh"* ]]   # script from main again
+  [[ "$output" == *"TAG= "* ]]                        # empty TAG = upstream resolves
+  [[ "$output" != *"TAG=v"* ]]
+}
+
 @test "install_k3d: already present -> skip" {
   has() { [ "$1" = k3d ]; }
   spin_cmd() { record "$*"; return 0; }

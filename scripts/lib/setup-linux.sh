@@ -350,23 +350,36 @@ install_k3d() {
     return 0
   fi
 
+  # Pin the k3d release (K3D_VERSION, common.sh): fetch the install script AT
+  # the pinned tag (immutable bytes, not k3d's mutable main) and pass TAG so the
+  # script skips its releases/latest redirect lookup — that lookup breaks under
+  # GitHub rate limiting on shared egress IPs (CI runners, corporate NAT) and
+  # took down 2/9 distro CI jobs on 2026-07-21 with a bare "curl: 404". The
+  # script still verifies the binary against the release's checksums.txt.
+  # K3D_VERSION="" or "latest" restores resolve-at-install-time (TAG unset +
+  # script from main).
+  local _k3d_tag="${K3D_VERSION:-}"
+  [[ "$_k3d_tag" == "latest" ]] && _k3d_tag=""
+
   local k3d_script
   k3d_script="$(mktemp)"
   retry 3 5 curl -fsSL $CURL_SECURE \
-    https://raw.githubusercontent.com/k3d-io/k3d/main/install.sh -o "$k3d_script"
+    "https://raw.githubusercontent.com/k3d-io/k3d/${_k3d_tag:-main}/install.sh" -o "$k3d_script"
   chmod +x "$k3d_script"
 
   # Tier 0 (no admin): install user-space via k3d's own knobs (USE_SUDO=false +
   # K3D_INSTALL_DIR=~/.local/bin) — no sudo, no password prompt (RFC 0001 #1175).
   # Otherwise the system dir: preserve PATH through sudo because the k3d script
   # verifies itself with `command -v k3d` after copying into /usr/local/bin, and
-  # on RHEL-family distros sudo's secure_path excludes it.
+  # on RHEL-family distros sudo's secure_path excludes it. (An empty TAG= is
+  # how the upstream script spells "resolve latest" — its checkTagProvided
+  # treats empty and unset the same.)
   local _k3d_ok=1
   if [ -z "$TB_TOOLS_SUDO" ]; then
     spin_cmd "Installing system tools…" \
-      env "USE_SUDO=false" "K3D_INSTALL_DIR=$TB_TOOLS_DIR" "PATH=$PATH" bash "$k3d_script" || _k3d_ok=0
+      env "TAG=$_k3d_tag" "USE_SUDO=false" "K3D_INSTALL_DIR=$TB_TOOLS_DIR" "PATH=$PATH" bash "$k3d_script" || _k3d_ok=0
   else
-    spin_cmd "Installing system tools…" sudo env "PATH=$PATH" bash "$k3d_script" || _k3d_ok=0
+    spin_cmd "Installing system tools…" sudo env "TAG=$_k3d_tag" "PATH=$PATH" bash "$k3d_script" || _k3d_ok=0
   fi
   if [ "$_k3d_ok" -ne 1 ]; then
     rm -f "$k3d_script"
