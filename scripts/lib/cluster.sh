@@ -125,8 +125,146 @@ _export_host_no_proxy() {
   done
 }
 
+# ── Leftover-data guard (RFC-0003 §4 / D3, #376) ─────────────────────────────
+# The installer used to `mkdir -p` its data dirs and silently adopt whatever was
+# already there — data left by an earlier install (different layout, older
+# version, custom dir) got picked up by the next install, so a "fresh" install
+# was not guaranteed fresh. This guard detects real leftover data at install
+# time and forces a choice instead of adopting it. It doubles as the migration
+# prompt for the node-local transition (#367): existing ~/.tracebloc data is
+# never silently stranded.
+#
+# Where prompts READ from (mirrors provision.sh/install-client-helm.sh so the
+# curl|bash path can still prompt on the controlling terminal; overridable so
+# tests can feed canned input via TB_TTY=/dev/stdin).
+: "${TB_TTY:=/dev/tty}"
+
+# Echo each dir under HOST_DATA_DIR that holds real client data — a MySQL data
+# dir or a dataset dir with at least one file — across BOTH on-disk layouts:
+# flat ($HOST_DATA_DIR/{mysql,data}) and per-release ($HOST_DATA_DIR/<rel>/…).
+# Deliberately scoped to HOST_DATA_DIR only: HOST_DATASET_DIR may be a shared
+# network mount other tools use, so the guard never scans or touches it. Empty
+# dirs, values.yaml and install-*.log are not data and are ignored.
+_leftover_data_dirs() {
+  local base="${HOST_DATA_DIR:-}"
+  [[ -n "$base" && -d "$base" ]] || return 0
+  local -a candidates=("$base/mysql" "$base/data")
+  local sub
+  for sub in "$base"/*/; do
+    [[ -d "$sub" ]] || continue
+    candidates+=("${sub%/}/mysql" "${sub%/}/data")
+  done
+  local d
+  for d in "${candidates[@]}"; do
+    [[ -d "$d" ]] || continue
+    # Non-empty test that is portable across GNU + BSD/macOS find (no -quit):
+    # head -1 closes the pipe after the first hit, so it never walks a huge tree.
+    if find "$d" -type f 2>/dev/null | head -1 | grep -q .; then
+      echo "$d"
+    fi
+  done
+}
+
+# Delete the detected leftover data dirs. Only ever removes paths UNDER the
+# already-validated HOST_DATA_DIR (validate_config guarantees it is under $HOME
+# and not a system path) — never HOST_DATASET_DIR, never a system path.
+_wipe_leftover_data() {
+  local d
+  for d in "$@"; do
+    case "$d" in
+      "$HOST_DATA_DIR"/*)
+        log "Wiping leftover data: ${d}"
+        rm -rf "$d" 2>/dev/null || warn "Could not fully remove ${d} — check permissions."
+        ;;
+      *)
+        warn "Refusing to wipe ${d} — outside ${HOST_DATA_DIR}."
+        ;;
+    esac
+  done
+}
+
+# Guard entry point. Called from create_cluster ONLY when creating a NEW cluster
+# (an existing cluster is an in-place reuse/upgrade whose data stays by design,
+# §3.3). Resolves an action from TB_LEFTOVER_ACTION (set by --reuse-data /
+# --wipe-data, or directly) or, failing that, an interactive prompt. When there
+# is no terminal and no explicit action, it fails safe: abort, never adopt.
+guard_leftover_data() {
+  [[ -n "${TRACEBLOC_SKIP_LEFTOVER_GUARD:-}" ]] && return 0
+
+  local -a found=()
+  local d
+  while IFS= read -r d; do [[ -n "$d" ]] && found+=("$d"); done < <(_leftover_data_dirs)
+  [[ ${#found[@]} -eq 0 ]] && return 0   # clean slate — nothing to guard
+
+  warn "Existing tracebloc data found under ${HOST_DATA_DIR}:"
+  for d in "${found[@]}"; do hint "  • ${d}"; done
+  hint "A fresh install would silently adopt it, so it would not really be fresh."
+  if [[ "${TB_STORAGE_MODE:-hostpath}" == "node-local" ]]; then
+    hint "node-local storage keeps data inside the cluster node — this ~/.tracebloc data would be stranded, not used."
+  fi
+
+  local action="${TB_LEFTOVER_ACTION:-}"
+  if [[ -z "$action" ]]; then
+    if [[ -r "$TB_TTY" ]]; then
+      prompt_header "How should the installer handle it?"
+      hint "  [r] reuse — keep and adopt the existing data"
+      hint "  [w] wipe  — delete it and start fresh"
+      hint "  [n] new   — install into a different directory"
+      hint "  [a] abort — stop and sort it out myself (default)"
+      local reply=""
+      read -r -p "  Choice [r/w/n/a]: " reply <"$TB_TTY" || reply=""
+      case "$reply" in
+        r|R|reuse) action=reuse ;;
+        w|W|wipe)  action=wipe ;;
+        n|N|new)   action=newdir ;;
+        *)         action=abort ;;
+      esac
+    else
+      # Non-interactive with no explicit choice → fail safe.
+      error "Existing data found under ${HOST_DATA_DIR} and no choice was given (no terminal). Re-run with one of:
+  --reuse-data                    adopt the existing data
+  --wipe-data                     delete it and start fresh
+  HOST_DATA_DIR=<new-path> ...    install into a different directory
+  (or TRACEBLOC_SKIP_LEFTOVER_GUARD=1 to bypass this guard entirely)"
+    fi
+  fi
+
+  case "$action" in
+    reuse)
+      log "Reusing existing data under ${HOST_DATA_DIR} (user choice)."
+      ;;
+    wipe)
+      _wipe_leftover_data "${found[@]}"
+      if [[ -n "${HOST_DATASET_DIR:-}" ]]; then
+        hint "Left HOST_DATASET_DIR (${HOST_DATASET_DIR}) untouched — it is a shared mount, not wiped."
+      fi
+      log "Wiped leftover data under ${HOST_DATA_DIR} (user choice)."
+      ;;
+    newdir)
+      local newdir=""
+      [[ -r "$TB_TTY" ]] && { read -r -p "  New data directory (absolute or under \$HOME): " newdir <"$TB_TTY" || newdir=""; }
+      [[ -n "$newdir" ]] || error "No new directory given — aborting."
+      HOST_DATA_DIR="$newdir"
+      # Re-resolve + re-validate the new path, then re-check it for leftovers too.
+      if declare -F validate_config >/dev/null 2>&1; then validate_config; fi
+      log "Switched HOST_DATA_DIR to ${HOST_DATA_DIR}; re-checking it for leftover data."
+      guard_leftover_data
+      ;;
+    abort|*)
+      error "Aborted — existing data under ${HOST_DATA_DIR} left untouched. Choose reuse / wipe / a new directory and re-run."
+      ;;
+  esac
+}
+
 create_cluster() {
   log "Creating k3d cluster: '$CLUSTER_NAME'"
+
+  # Leftover-data guard (RFC-0003 D3, #376): a NEW cluster must not silently
+  # adopt data from an earlier install. Skipped when the cluster already exists
+  # — that path is an in-place reuse/upgrade and keeps its data by design (§3.3).
+  if ! _cluster_exists; then
+    guard_leftover_data
+  fi
 
   # node-local (RFC-0003 Option C): no host data dirs, no bind-mount, no chmod —
   # data lives on k3s local-path inside the node. Only the hostpath model needs
