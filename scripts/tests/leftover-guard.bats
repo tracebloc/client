@@ -170,6 +170,21 @@ seed_release_data() { mkdir -p "$HOST_DATA_DIR/tracebloc/data/ds1"; : >"$HOST_DA
   [ -e "$HOST_DATA_DIR/mysql/ibdata1" ]   # abort leaves data as-is
 }
 
+@test "guard: readable-but-unopenable TB_TTY -> non-interactive guidance, not generic abort (#384 bugbot)" {
+  # /dev/tty is world-readable (-r true) yet cannot be OPENED without a
+  # controlling terminal — the CI / curl|bash case. A plain `-r` check would take
+  # the interactive branch, `read` would fail, and the guard would abort with the
+  # generic text instead of the actionable --reuse-data/--wipe-data guidance.
+  # Only meaningful where /dev/tty is unopenable; skip in an interactive shell.
+  [[ -r /dev/tty ]] || skip "/dev/tty not readable in this environment"
+  { : </dev/tty; } 2>/dev/null && skip "/dev/tty is openable here (interactive shell)"
+  seed_flat_mysql
+  TB_TTY=/dev/tty run guard_leftover_data
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"no choice was given"* ]]   # non-interactive guidance, not generic abort
+  [ -e "$HOST_DATA_DIR/mysql/ibdata1" ]          # fail-safe: data untouched
+}
+
 # ── interactive prompt (input fed via TB_TTY=/dev/stdin) ─────────────────────
 @test "guard: interactive 'w' wipes" {
   seed_flat_mysql

@@ -139,6 +139,14 @@ _export_host_no_proxy() {
 # tests can feed canned input via TB_TTY=/dev/stdin).
 : "${TB_TTY:=/dev/tty}"
 
+# True only when $TB_TTY can actually be OPENED for reading. A plain `-r` test is
+# not enough: /dev/tty is world-readable even with no controlling terminal (CI,
+# `curl|bash`), so `-r` would route those runs into the interactive branch where
+# the `read` then fails immediately and the guard aborts with the generic abort
+# text instead of the non-interactive guidance that lists --reuse-data/--wipe-data
+# (Bugbot #384). Mirrors the openability probe assess.sh already uses.
+_tty_usable() { { : <"$TB_TTY"; } 2>/dev/null; }
+
 # Echo each dir under HOST_DATA_DIR that holds real client data — a MySQL data
 # dir or a dataset dir with at least one file — across BOTH on-disk layouts:
 # flat ($HOST_DATA_DIR/{mysql,data}) and per-release ($HOST_DATA_DIR/<rel>/…).
@@ -267,7 +275,7 @@ guard_leftover_data() {
 
   local action="${TB_LEFTOVER_ACTION:-}"
   if [[ -z "$action" ]]; then
-    if [[ -r "$TB_TTY" ]]; then
+    if _tty_usable; then
       prompt_header "How should the installer handle it?"
       hint "  [r] reuse — keep and adopt the existing data"
       hint "  [w] wipe  — delete it and start fresh"
@@ -309,7 +317,7 @@ guard_leftover_data() {
       ;;
     newdir)
       local newdir=""
-      [[ -r "$TB_TTY" ]] && _read_sanitized "  New data directory (absolute or under \$HOME): " newdir
+      _tty_usable && _read_sanitized "  New data directory (absolute or under \$HOME): " newdir
       [[ -n "$newdir" ]] || error "No new directory given — aborting."
       HOST_DATA_DIR="$newdir"
       # Re-resolve + re-validate the new path, then re-check it for leftovers too.
