@@ -20,6 +20,7 @@
 #    $env:K8S_VERSION   = "v1.29.4-k3s1"  default: latest
 #    $env:HOST_DATA_DIR = "C:\data"        default: $env:USERPROFILE\.tracebloc (LOCAL disk; no NFS/UNC)
 #    $env:CLIENT_ENV    = "dev"            optional; if not set, CLIENT_ENV is not added to env in values
+#    $env:TRACEBLOC_TRAINING_RESOURCES = "cpu=4,memory=16Gi"   optional; overrides the machine-sized training default
 # =============================================================================
 
 #Requires -Version 5.1
@@ -1019,6 +1020,55 @@ $TRACEBLOC_HELM_REPO_URL = "https://tracebloc.github.io/client"
 $TRACEBLOC_HELM_REPO_NAME = "tracebloc"
 $TRACEBLOC_CHART_NAME = "client"
 
+# ── Training-size default (backend#1236, option A; mirrors install-client-helm.sh) ──
+# One knob, requests == limits (Guaranteed QoS). The old static "cpu=2,memory=8Gi"
+# was wrong at both ends: dead on arrival on nodes under 8 GiB (the WSL2 field
+# case — nothing could ever schedule) and ~12% of a 64 GiB box. Precedence:
+#   1. TRACEBLOC_TRAINING_RESOURCES (explicit install-time override)
+#   2. the installed release's current value (a `tracebloc resources set` choice
+#      must survive re-install, never be clobbered back to a default)
+#   3. sized to this machine: LARGEST node allocatable - ~1 CPU / 3 GiB platform
+#      overhead (a pod schedules onto ONE node; k3d's server+agent are the same
+#      machine, so summing would double-count)
+#   4. the historic static default (tiny or undeterminable machines)
+function Get-TrainingResources {
+  if ($env:TRACEBLOC_TRAINING_RESOURCES) { return $env:TRACEBLOC_TRAINING_RESOURCES }
+  try {
+    $valsJson = (helm get values $TB_NAMESPACE -n $TB_NAMESPACE -o json 2>$null) | Out-String
+    if ($LASTEXITCODE -eq 0 -and $valsJson.Trim()) {
+      $prev = ($valsJson | ConvertFrom-Json).env.RESOURCE_LIMITS
+      if ($prev) { return $prev }
+    }
+  } catch {}
+  try {
+    $nodesJson = (kubectl get nodes -o json 2>$null) | Out-String
+    if ($LASTEXITCODE -eq 0 -and $nodesJson.Trim()) {
+      $bestMemB = [long]0; $bestCpuM = [long]0
+      foreach ($n in ($nodesJson | ConvertFrom-Json).items) {
+        $cpuRaw = "$($n.status.allocatable.cpu)"
+        $memRaw = "$($n.status.allocatable.memory)"
+        $cpuM = if ($cpuRaw -match '^(\d+)m$') { [long]$Matches[1] }
+                elseif ($cpuRaw -match '^\d+$') { [long]$cpuRaw * 1000 }
+                else { [long]0 }
+        $memB = if ($memRaw -match '^(\d+)Ki$') { [long]$Matches[1] * 1KB }
+                elseif ($memRaw -match '^(\d+)Mi$') { [long]$Matches[1] * 1MB }
+                elseif ($memRaw -match '^(\d+)Gi$') { [long]$Matches[1] * 1GB }
+                elseif ($memRaw -match '^\d+$') { [long]$memRaw }
+                else { [long]0 }
+        if ($memB -gt $bestMemB -or ($memB -eq $bestMemB -and $cpuM -gt $bestCpuM)) {
+          $bestMemB = $memB; $bestCpuM = $cpuM
+        }
+      }
+      $runCpuM = $bestCpuM - 1000
+      $runMemB = $bestMemB - 3GB
+      if ($runCpuM -ge 1000 -and $runMemB -ge 2GB) {
+        return "cpu=$([math]::Floor($runCpuM / 1000)),memory=$([math]::Floor($runMemB / 1GB))Gi"
+      }
+    }
+  } catch {}
+  return "cpu=2,memory=8Gi"
+}
+
 function Get-TraceblocYamlValue {
   param([string]$Path, [string]$Key)
   if (-not (Test-Path $Path)) { return "" }
@@ -1277,9 +1327,12 @@ function Install-ClientHelm {
   }
   # backend#743: relocate the dataset PV onto the network mount when HOST_DATASET_DIR is set.
   $datasetPathLine = if ($HOST_DATASET_DIR) { "`n  datasetPath: /tracebloc-data" } else { "" }
+  # backend#1236 (option A): size the default training budget to this machine.
+  $trainingSize = Get-TrainingResources
+  Log "Training size: $trainingSize"
   $envBlock += @"
-  RESOURCE_LIMITS: "cpu=2,memory=8Gi"
-  RESOURCE_REQUESTS: "cpu=2,memory=8Gi"
+  RESOURCE_LIMITS: "$trainingSize"
+  RESOURCE_REQUESTS: "$trainingSize"
   GPU_LIMITS: "$gpuVal"
   GPU_REQUESTS: "$gpuVal"
   RUNTIME_CLASS_NAME: ""
