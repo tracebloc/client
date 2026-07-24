@@ -32,7 +32,14 @@ if (-not $env:TB_PESTER) {
   $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()
              ).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
   if (-not $isAdmin) {
-    Write-Host "  " -NoNewline; Write-Host ([char]0x2716) -ForegroundColor Red -NoNewline; Write-Host " Run this script as Administrator (right-click > Run as Administrator)." -ForegroundColor Red
+    # In the documented flow (`irm tracebloc.io/i.ps1 | iex`) there is no script
+    # file to right-click, so the old "right-click > Run as Administrator" advice
+    # was impossible to follow (#386). Give the actual steps.
+    Write-Host "  " -NoNewline; Write-Host ([char]0x2716) -ForegroundColor Red -NoNewline; Write-Host " Administrator rights required." -ForegroundColor Red
+    Write-Host "  Open an elevated PowerShell: press Win+X and choose 'Terminal (Admin)'" -ForegroundColor DarkGray
+    Write-Host "  (or search 'PowerShell' in Start and press Ctrl+Shift+Enter)," -ForegroundColor DarkGray
+    Write-Host "  accept the User Account Control prompt, then re-run:" -ForegroundColor DarkGray
+    Write-Host "    irm tracebloc.io/i.ps1 | iex" -ForegroundColor Cyan
     exit 1
   }
 
