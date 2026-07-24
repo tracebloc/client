@@ -154,7 +154,7 @@ _leftover_data_dirs() {
     [[ -d "$sub" ]] || continue
     candidates+=("${sub%/}/mysql" "${sub%/}/data")
   done
-  local d
+  local d errfile got
   for d in "${candidates[@]}"; do
     [[ -d "$d" ]] || continue
     # Non-empty test that is pipefail-safe AND portable (GNU + BSD/macOS: no
@@ -164,9 +164,20 @@ _leftover_data_dirs() {
     # — skipping exactly the leftovers this guard must catch. Reading the first
     # path from a process substitution keeps find's status out of the check and
     # still short-circuits (read stops after one line).
-    if read -r _ < <(find "$d" -type f 2>/dev/null); then
+    #
+    # Fail closed on unreadable dirs too: a root/container-owned mysql/data dir
+    # the host user can't list makes `find` emit "Permission denied" and no
+    # paths — which would otherwise look like a clean slate and get adopted
+    # (Bugbot #384). Capture find's stderr; ANY error means we can't prove the
+    # dir empty, so treat it as leftover (same ownership case the wipe treats as
+    # fatal). `2>/dev/null` would silently swallow exactly this signal.
+    errfile="$(mktemp "${TMPDIR:-/tmp}/tb-leftover-XXXXXX" 2>/dev/null)" || errfile=""
+    got=1
+    read -r _ < <(find "$d" -type f 2>"${errfile:-/dev/null}") || got=0
+    if [[ "$got" -eq 1 ]] || [[ -n "$errfile" && -s "$errfile" ]]; then
       echo "$d"
     fi
+    [[ -n "$errfile" ]] && rm -f "$errfile"
   done
 }
 

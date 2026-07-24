@@ -49,6 +49,16 @@ seed_release_data() { mkdir -p "$HOST_DATA_DIR/tracebloc/data/ds1"; : >"$HOST_DA
   [[ "$output" == *"$HOST_DATA_DIR/tracebloc/data"* ]]
 }
 
+@test "_leftover_data_dirs: unreadable (root/container-owned) dir is detected, not skipped (#384 bugbot)" {
+  [ "$(id -u)" -eq 0 ] && skip "cannot make a dir unreadable as root"
+  mkdir -p "$HOST_DATA_DIR/mysql"; : >"$HOST_DATA_DIR/mysql/ibdata1"
+  chmod 000 "$HOST_DATA_DIR/mysql"            # host user can't list it (find errors)
+  run _leftover_data_dirs
+  chmod 755 "$HOST_DATA_DIR/mysql"            # restore for teardown
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"$HOST_DATA_DIR/mysql"* ]] # detected via find's error, not skipped
+}
+
 @test "_leftover_data_dirs: large multi-file MySQL dir detected under pipefail (#384 bugbot)" {
   # A real MySQL data dir has many files; once find's output exceeds the pipe
   # buffer a find|head|grep pipeline SIGPIPEs find, and under `set -o pipefail`
