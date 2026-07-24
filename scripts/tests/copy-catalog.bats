@@ -41,6 +41,16 @@ setup() {
   # started." line, instead of drifting to "Open a new terminal" on an unset (or
   # inherited) flag.
   TB_CLI_USABLE_NOW=1
+  # The reboot note is now conditional on docker.service autostart — the
+  # zero-privilege Tier 0 path deliberately does NOT enable it, so a Linux install
+  # only auto-restarts when it was enabled. Pin it on so the catalog
+  # deterministically renders the canonical full-install line ("…restarts
+  # automatically.") rather than the honest "start Docker" fallback (mirrors the
+  # TB_CLI_USABLE_NOW pin above).
+  TB_DOCKER_AUTOSTART=1
+  # Storage mode defaults to hostpath (the GA path) → the connected summary shows
+  # "Data /tracebloc/<ns>"; node-local (RFC-0003 Option C) is a flag-gated
+  # prototype and is exercised by summary.bats, not pinned into the catalog.
   # Stub the one live read the summary makes, so it's deterministic.
   _chart_version() { echo "1.9.5"; }
 }

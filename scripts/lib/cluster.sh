@@ -186,6 +186,9 @@ ensure_cluster_autostart() {
       # case; enabling docker.service on boot is the user's call.
       log "Tier 0: leaving Docker autostart to the user (no privileged step)."
     elif sudo systemctl enable docker >/dev/null 2>&1; then
+      # docker.service will start on boot → the summary's reboot note can honestly
+      # promise the cluster returns on its own (read in summary.sh::_reboot_note).
+      TB_DOCKER_AUTOSTART=1
       log "Ensured docker.service is enabled on boot."
     fi
   fi

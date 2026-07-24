@@ -79,16 +79,24 @@ _diagnose_not_ready() {
 # Reports the outcome based on CLIENT_STATE (set by wait_for_client_ready).
 # The "secure compute environment / your data never leaves" claim is printed
 # ONLY when the client is verifiably connected — never on a partial/failed run.
-# One-line note in the success summary so the user knows the client survives a
-# reboot — automatic on Linux; needs Docker Desktop start-on-login on macOS/Win.
+# One-line note in the success summary so the user knows how the client comes
+# back after a reboot. Linux with docker.service enabled on boot → automatic;
+# Linux without it (Tier 0's zero-privilege path, or opted out) → the user has to
+# start Docker first; macOS/Windows → Docker Desktop must be launched.
 _reboot_note() {
-  # Single dim footer line — the LAST line of the summary. OS-specific so Linux is
-  # NOT regressed: on Linux the cluster + Docker come back on boot automatically;
-  # on macOS/Windows Docker Desktop must be launched (the run-through's macOS copy).
-  if [[ "$OS" == "Linux" ]]; then
+  # Single dim footer line — the LAST line of the summary.
+  if [[ "$OS" != "Linux" ]]; then
+    # macOS/Windows: Docker Desktop owns boot autostart and must be launched.
+    echo -e "  ${DIM}After a reboot, open Docker Desktop to bring tracebloc back.${RESET}"
+  elif [[ "${TB_DOCKER_AUTOSTART:-0}" == "1" ]]; then
+    # docker.service is enabled on boot (ensure_cluster_autostart) and the k3d
+    # nodes carry --restart unless-stopped → the cluster returns on its own.
     echo -e "  ${DIM}After a reboot, tracebloc restarts automatically.${RESET}"
   else
-    echo -e "  ${DIM}After a reboot, open Docker Desktop to bring tracebloc back.${RESET}"
+    # We did NOT enable docker.service (Tier 0, or the user opted out): the k3d
+    # restart policy still brings the cluster back, but only once Docker itself is
+    # running — so be honest and don't promise it happens automatically.
+    echo -e "  ${DIM}After a reboot, start Docker to bring tracebloc back.${RESET}"
   fi
 }
 
@@ -150,7 +158,14 @@ print_summary() {
       fi
       echo ""
       echo -e "  ${DIM}────────────────────────────────────────${RESET}"
-      echo -e "  ${DIM}Logs ${logdisp}  ·  Data /tracebloc/${ns}${RESET}"
+      # Data location depends on the storage model: hostpath binds /tracebloc on
+      # the host; node-local (RFC-0003 Option C) keeps datasets inside the node on
+      # k3s local-path, so there is no host /tracebloc to point the user at.
+      if [[ "${TB_STORAGE_MODE:-hostpath}" == "node-local" ]]; then
+        echo -e "  ${DIM}Logs ${logdisp}  ·  Data in-node (k3s local-path)${RESET}"
+      else
+        echo -e "  ${DIM}Logs ${logdisp}  ·  Data /tracebloc/${ns}${RESET}"
+      fi
       _reboot_note
       ;;
     starting)
