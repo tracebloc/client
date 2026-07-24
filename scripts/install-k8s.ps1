@@ -1677,11 +1677,11 @@ function Test-Preflight {
     Warn "Memory: $mem GB - below the $minMemGb GB the client needs; it will OOM."
     Hint "Give Docker more memory (>= $warnMemGb GB; $recMemGb GB to train), then re-run:"
     Hint "  WSL2 backend (the default): set [wsl2] memory=${warnMemGb}GB in %UserProfile%\.wslconfig, run 'wsl --shutdown', restart Docker Desktop."
-    Hint "  Hyper-V backend: Docker Desktop -> Settings -> Resources -> Memory."
+    Hint "  Hyper-V backend: Docker Desktop -> Settings -> Resources -> Advanced."
   }
   elseif  ($mem -lt $warnMemGb) {
     Warn "Memory: $mem GB - enough to run, but training (~8 GB/job) may OOM; $recMemGb GB recommended to train locally."
-    Hint "To train locally give Docker >= $recMemGb GB: WSL2 backend - [wsl2] memory=${recMemGb}GB in %UserProfile%\.wslconfig + 'wsl --shutdown'; Hyper-V backend - Docker Desktop -> Settings -> Resources."
+    Hint "To train locally give Docker >= $recMemGb GB: WSL2 backend - [wsl2] memory=${recMemGb}GB in %UserProfile%\.wslconfig + 'wsl --shutdown'; Hyper-V backend - Docker Desktop -> Settings -> Resources -> Advanced."
   }
   else                          { Ok "Memory: $mem GB" }
 
@@ -1750,7 +1750,7 @@ function Test-PreflightRuntimeMem {
   $recMemGb  = if ($env:PF_REC_MEM_GB)  { [int]$env:PF_REC_MEM_GB }  else { 16 }
   if ($mem -lt $warnMemGb) {
     Warn "Docker is running with $mem GB - recommended >= $warnMemGb GB ($recMemGb GB to train); the client may OOM under load."
-    Hint "Give Docker >= $warnMemGb GB, then re-install: WSL2 backend - [wsl2] memory=${warnMemGb}GB in %UserProfile%\.wslconfig + 'wsl --shutdown'; Hyper-V backend - Docker Desktop -> Settings -> Resources."
+    Hint "Give Docker >= $warnMemGb GB, then re-install: WSL2 backend - [wsl2] memory=${warnMemGb}GB in %UserProfile%\.wslconfig + 'wsl --shutdown'; Hyper-V backend - Docker Desktop -> Settings -> Resources -> Advanced."
   }
 }
 
