@@ -8,7 +8,7 @@
 #  golden catalog (cli repo, internal/cli/testdata/golden/).
 #
 #  Two files, ordered like the run:
-#    00-install.golden  — banner, the "2. Installing" roadmap, the six running
+#    00-install.golden  — banner, the "2. Installing" roadmap, the running
 #                         step headers (titles read live from install-k8s.sh),
 #                         and --help.
 #    01-outcomes.golden — the state-branched final summary (connected / starting
@@ -58,6 +58,13 @@ check_golden() {
     cp "$actual" "$golden"
     return 0
   fi
+  # No golden yet → a bare `diff` just errors with "No such file"; point the
+  # reader at the regenerate command instead (a missing golden isn't drift).
+  if [ ! -f "$golden" ]; then
+    printf 'golden missing: %s\n' "$golden" >&2
+    printf 'regenerate with: TB_UPDATE_GOLDEN=1 bats scripts/tests/copy-catalog.bats\n' >&2
+    return 1
+  fi
   diff -u "$golden" "$actual"
 }
 
@@ -82,8 +89,8 @@ PROSE
   printf '\n$ ./install-k8s.sh   # the plan, printed once before install begins\n'
   print_roadmap
 
-  printf '\n$ ./install-k8s.sh   # the six running step headers (a-f), titles from install-k8s.sh\n'
-  sed -nE 's/.*step_header ([a-f]) "([^"]*)".*/\1 \2/p' "${SCRIPTS_DIR}/install-k8s.sh" \
+  printf '\n$ ./install-k8s.sh   # the running step headers, titles from install-k8s.sh\n'
+  sed -nE 's/.*step_header ([a-z]) "([^"]*)".*/\1 \2/p' "${SCRIPTS_DIR}/install-k8s.sh" \
     | while read -r letter title; do step_header "$letter" "$title"; done
 
   printf '\n\n------------------------------------------------------------\n--help\n------------------------------------------------------------\n'
@@ -109,7 +116,14 @@ PROSE
   local state
   for state in connected starting bad_creds image_pull crash; do
     printf '\n$ (install finished — %s)\n' "$state"
-    CLIENT_STATE="$state" print_summary 2>&1
+    # print_summary splits across stdout (the body) and stderr (the ✖ lead line
+    # on error states). Merge them through a single file — both fds share one
+    # file offset, so the bytes land in write order — rather than `2>&1` down a
+    # pipe, where the two streams can interleave differently across machines and
+    # flake the byte-exact diff.
+    local summary="${BATS_TEST_TMPDIR}/summary.${state}"
+    CLIENT_STATE="$state" print_summary >"$summary" 2>&1
+    cat "$summary"
   done
 
   printf '\n$ (connected, on macOS/Windows — the reboot footer differs)\n'
