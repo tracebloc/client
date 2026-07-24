@@ -666,27 +666,35 @@ function Install-K3dAndHelm {
         Invoke-WebRequest "https://github.com/k3d-io/k3d/releases/download/$k3dVer/k3d-windows-$arch.exe" `
           -OutFile $k3dDest -UseBasicParsing
       }
+      # Fail-closed verification, matching the Linux path and the kubectl
+      # precedent: an unfetchable checksums.txt, a missing asset line, or a
+      # mismatch all abort and remove the download — never install unverified
+      # bytes on a privileged path (Bugbot r3). The release's checksum asset is
+      # named checksums.txt ("<sha256>  _dist/<asset>" lines); the previous
+      # sha256sum.txt URL never existed, so the old fail-open verification
+      # silently never ran (#382).
       try {
-        # The release's checksum asset is named checksums.txt ("<sha256>  _dist/<asset>"
-        # lines). The old sha256sum.txt URL never existed — it 404'd into the catch
-        # below on every install, so this verification silently never ran (#382).
         $checksums = Invoke-WithRetry -Label "k3d checksums" -ScriptBlock {
           (Invoke-WebRequest "https://github.com/k3d-io/k3d/releases/download/$k3dVer/checksums.txt" `
             -UseBasicParsing).Content
         }
-        $expectedHash = ($checksums -split "`n" |
-          Where-Object { $_ -match "k3d-windows-$arch\.exe" }) -replace '\s+.*',''
-        if ($expectedHash) {
-          $actualHash = (Get-FileHash $k3dDest -Algorithm SHA256).Hash.ToLower()
-          if ($actualHash -ne $expectedHash.Trim().ToLower()) {
-            Remove-Item $k3dDest -Force
-            Err "System tool checksum verification failed."
-          }
-          Log "k3d checksum verified."
-        }
       } catch {
-        Log "Could not verify k3d checksum: $_"
+        Remove-Item $k3dDest -Force -ErrorAction SilentlyContinue
+        Err "Couldn't fetch the k3d checksums ($_). Check egress to github.com and re-run."
       }
+      $expectedHash = (($checksums -split "`n" |
+        Where-Object { $_ -match "k3d-windows-$arch\.exe" }) -replace '\s+.*','' |
+        Select-Object -First 1)
+      if (-not $expectedHash) {
+        Remove-Item $k3dDest -Force -ErrorAction SilentlyContinue
+        Err "System tool checksum verification failed."
+      }
+      $actualHash = (Get-FileHash $k3dDest -Algorithm SHA256).Hash.ToLower()
+      if ($actualHash -ne $expectedHash.Trim().ToLower()) {
+        Remove-Item $k3dDest -Force
+        Err "System tool checksum verification failed."
+      }
+      Log "k3d checksum verified."
       RefreshPath
     }
   }
