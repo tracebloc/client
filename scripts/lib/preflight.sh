@@ -401,7 +401,7 @@ _pf_connectivity() {
   if [[ "$OS" == "Linux" ]]; then
     local conds=()
     if ! has docker;  then conds+=("Docker install (get.docker.com)|https://get.docker.com/"); fi
-    if ! has k3d;     then conds+=("k3d install (raw.githubusercontent.com)|https://raw.githubusercontent.com/"); fi
+    if ! has k3d;     then conds+=("k3d download (github.com)|https://github.com/"); fi
     if ! has kubectl; then conds+=("kubectl (dl.k8s.io)|https://dl.k8s.io/"); fi
     if ! has helm;    then conds+=("Helm (get.helm.sh)|https://get.helm.sh/"); fi
     # ${conds[@]+...} guard: expanding an empty array under `set -u` errors on

@@ -455,8 +455,16 @@ if [[ "$TB_STORAGE_MODE" == "node-local" ]]; then
   AGENTS=0
   SERVERS=1
 fi
-# Pinned default; set K8S_VERSION="" to use latest (may break on new k3s releases)
+# Pinned default; an empty value falls back to this pin (`:-` treats empty and
+# unset the same — there is no opt-out to "latest" for k3s).
 K8S_VERSION="${K8S_VERSION:-v1.29.4-k3s1}"
+# Pinned default; ONLY the literal K3D_VERSION=latest resolves the newest k3d
+# release at install time instead (an empty value falls back to this pin, like
+# K8S_VERSION above). The binary is fetched directly from the release and
+# verified against its checksums.txt either way (setup-linux.sh). The pin makes
+# installs deterministic and immune to the releases/latest lookup, which breaks
+# under GitHub rate limiting on shared egress IPs (CI runners, corporate NAT).
+K3D_VERSION="${K3D_VERSION:-v5.9.0}"
 HOST_DATA_DIR="${HOST_DATA_DIR:-$HOME/.tracebloc}"
 # Optional separate host dir for the big DATASET volume (backend#743). Empty
 # (default) keeps datasets under HOST_DATA_DIR. When set — e.g. a network/NFS
@@ -665,6 +673,7 @@ Advanced configuration (environment variables):
   SERVERS        Control-plane nodes             (default: 1)
   AGENTS         Worker nodes                    (default: 1)
   K8S_VERSION    k3s image tag                   (default: v1.29.4-k3s1)
+  K3D_VERSION    k3d release tag                 (default: v5.9.0; "latest" resolves at install time)
   HOST_DATA_DIR  Persistent data directory       (default: ~/.tracebloc)
                  Must be on a LOCAL disk — NFS/CIFS/SMB is rejected (the database
                  corrupts on network storage). TRACEBLOC_ALLOW_NETWORK_FS=1 overrides.
