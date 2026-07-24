@@ -487,6 +487,16 @@ validate_config() {
 
   # HOST_DATA_DIR must be under $HOME and must not be a system path (security)
   local dir="$HOST_DATA_DIR"
+  # Fail closed on an empty value (e.g. --data-dir= with no path) — otherwise the
+  # $HOME-relative rewrite below resolves "" to a surprise dir like $HOME/$USER.
+  [[ -n "$dir" ]] || error "HOST_DATA_DIR must not be empty (got '')."
+  # Expand a leading ~ / ~/ : users type --data-dir=~/foo and the shell does not
+  # expand ~ inside a quoted value, so it would otherwise be read as the literal
+  # "$HOME/~/foo" and fail parent resolution. Only the leading ~ is expanded.
+  case "$dir" in
+    "~")   dir="$HOME" ;;
+    "~/"*) dir="$HOME/${dir#\~/}" ;;
+  esac
   [[ "$dir" != /* ]] && dir="$HOME/$dir"
   # Resolve via parent directory — the target itself may not exist yet on first run
   local parent
@@ -500,7 +510,14 @@ validate_config() {
       error "HOST_DATA_DIR cannot be a system path: $dir"
       ;;
   esac
-  [[ "$dir" != "$HOME" && "${dir#$HOME/}" == "$dir" ]] && \
+  # Must be strictly UNDER $HOME — never $HOME itself. $HOME is reachable via a
+  # bare '~', HOST_DATA_DIR=$HOME, or --data-dir=$HOME; adopting it would make the
+  # installer chmod 777 home-level logs/mysql dirs, bind-mount all of $HOME into
+  # the cluster, and treat any existing ~/data or ~/mysql as install data
+  # (Bugbot #384).
+  [[ "$dir" == "$HOME" ]] && \
+    error "HOST_DATA_DIR must be a subdirectory of \$HOME, not \$HOME itself (got: $HOST_DATA_DIR)."
+  [[ "${dir#$HOME/}" == "$dir" ]] && \
     error "HOST_DATA_DIR must be under \$HOME (got: $HOST_DATA_DIR)"
   HOST_DATA_DIR="$dir"
 
@@ -624,7 +641,7 @@ tracebloc — client setup
 
 Usage:
   curl -fsSL https://raw.githubusercontent.com/tracebloc/client/main/scripts/install.sh | bash
-  ./install-k8s.sh [--help] [--diagnose] [--force]
+  ./install-k8s.sh [--help] [--diagnose] [--force] [--reuse-data|--wipe-data|--data-dir=PATH]
 
 Commands:
   --diagnose     Collect a redacted support bundle (logs + cluster/host status)
@@ -634,6 +651,13 @@ Commands:
   --force        Skip the "already set up" check and re-run every step. Use this
   --reinstall    to force a full reinstall on a machine that is already set up.
                  (Same effect as TRACEBLOC_FORCE_REINSTALL=1 for curl | bash.)
+
+Leftover data (a new install onto a machine that still holds old data):
+  By default the installer STOPS and asks rather than silently adopting it.
+  --reuse-data   Keep and adopt the existing data (non-interactive).
+  --wipe-data    Delete the existing data and start fresh (non-interactive).
+  --data-dir=P   Install into directory P instead (leaves old data untouched).
+                 (Bypass the guard entirely with TRACEBLOC_SKIP_LEFTOVER_GUARD=1.)
 
 Advanced configuration (environment variables):
   CLUSTER_NAME   Cluster name                   (default: tracebloc)
