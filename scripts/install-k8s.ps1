@@ -667,8 +667,11 @@ function Install-K3dAndHelm {
           -OutFile $k3dDest -UseBasicParsing
       }
       try {
+        # The release's checksum asset is named checksums.txt ("<sha256>  _dist/<asset>"
+        # lines). The old sha256sum.txt URL never existed — it 404'd into the catch
+        # below on every install, so this verification silently never ran (#382).
         $checksums = Invoke-WithRetry -Label "k3d checksums" -ScriptBlock {
-          (Invoke-WebRequest "https://github.com/k3d-io/k3d/releases/download/$k3dVer/sha256sum.txt" `
+          (Invoke-WebRequest "https://github.com/k3d-io/k3d/releases/download/$k3dVer/checksums.txt" `
             -UseBasicParsing).Content
         }
         $expectedHash = ($checksums -split "`n" |

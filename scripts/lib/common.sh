@@ -459,9 +459,10 @@ fi
 K8S_VERSION="${K8S_VERSION:-v1.29.4-k3s1}"
 # Pinned default; set K3D_VERSION=latest to resolve the newest k3d release at
 # install time instead (an empty value falls back to this pin, same as
-# K8S_VERSION above). The pin makes installs deterministic and immune to the
-# upstream installer's releases/latest lookup, which breaks under GitHub rate
-# limiting on shared egress IPs (CI runners, corporate NAT).
+# K8S_VERSION above). The binary is fetched directly from the release and
+# verified against its checksums.txt either way (setup-linux.sh). The pin makes
+# installs deterministic and immune to the releases/latest lookup, which breaks
+# under GitHub rate limiting on shared egress IPs (CI runners, corporate NAT).
 K3D_VERSION="${K3D_VERSION:-v5.9.0}"
 HOST_DATA_DIR="${HOST_DATA_DIR:-$HOME/.tracebloc}"
 # Optional separate host dir for the big DATASET volume (backend#743). Empty
