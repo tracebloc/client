@@ -121,8 +121,13 @@ main() {
   # unprivileged at Tier 0, and grants them docker-group access. Terminal like
   # --diagnose (never provisions as the admin); clear the EXIT trap so no
   # post-install cleanup message fires. Accept both the bootstrap positional
-  # (`… | bash -s -- prepare-host`) and the direct flag.
-  [[ "${1:-}" == "prepare-host" || "${1:-}" == "--prepare-host" ]] && {
+  # (`… | bash -s -- prepare-host`) and the direct flag, AT ANY POSITION —
+  # install.sh's bailout exemption scans all args, so a run like
+  # `--force prepare-host` must dispatch here too, never fall through into a
+  # (forced) full provision as the admin (Bugbot r4).
+  local _a_ph
+  for _a_ph in "$@"; do
+    [[ "$_a_ph" == "prepare-host" || "$_a_ph" == "--prepare-host" ]] || continue
     # Replace the full install_cleanup (its credential-shred + "did not complete"
     # messaging don't apply to a host-prep run) with a lightweight reaper that
     # still tears down the sudo keepalive preflight_sudo starts — otherwise it
@@ -133,7 +138,7 @@ main() {
       run_prepare_host; exit $?
     fi
     error "This installer build doesn't include prepare-host (stale bootstrap). Re-run: curl -fsSL https://tracebloc.io/i.sh | bash -s -- prepare-host"
-  }
+  done
 
   # Run-modifying flags (unlike --help/--diagnose, which are terminal). --force /
   # --reinstall skips the stop-and-check gate below and re-runs every step. Also

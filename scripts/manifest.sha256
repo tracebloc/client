@@ -1,4 +1,4 @@
-14783506edaaaecad015b0d6dc983d1124c319a17dd2a298e46ef7303a3166ce  scripts/install-k8s.sh
+31485e986fee4a30ebe69c1cadb943d079d935b276564beea7ca7b2908d36e51  scripts/install-k8s.sh
 bfafa76b1ab6424fd59d2c2551e6f874026996ef54aa2efb37d6b96bb2539510  scripts/lib/common.sh
 6eaa3039105f7fbb2f4255a6629889affd718c2a0392377816965828802a47cd  scripts/lib/preflight.sh
 19be2771df0e1a41b4fa9678e1cf6a77492304f66f73cf705a2ae42b1dac2ba3  scripts/lib/detect-gpu.sh
