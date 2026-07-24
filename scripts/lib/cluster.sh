@@ -164,6 +164,11 @@ _leftover_data_dirs() {
     # anywhere, and $base/<link>/mysql would let the wipe's rm -rf follow it
     # outside HOST_DATA_DIR (Bugbot #384). Not walking symlinks keeps scope honest.
     [[ -d "$sub" && ! -L "${sub%/}" ]] || continue
+    # Skip the flat-layout data dirs themselves — they are already candidates
+    # above. Descending into them would mislabel a real MySQL datadir's nested
+    # `mysql` system schema ($base/mysql/mysql) as a second leftover root, which
+    # confuses the prompt and doubles up wipe targets (Bugbot #384).
+    case "${sub%/}" in "$base/mysql"|"$base/data") continue ;; esac
     candidates+=("${sub%/}/mysql" "${sub%/}/data")
   done
   local d

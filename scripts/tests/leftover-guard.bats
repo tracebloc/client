@@ -49,6 +49,18 @@ seed_release_data() { mkdir -p "$HOST_DATA_DIR/tracebloc/data/ds1"; : >"$HOST_DA
   [[ "$output" == *"$HOST_DATA_DIR/tracebloc/data"* ]]
 }
 
+@test "_leftover_data_dirs: flat MySQL datadir's nested 'mysql' schema is not a second root (#384 bugbot)" {
+  # A real MySQL datadir always holds a nested 'mysql' system schema. The
+  # per-release scan must not descend into the flat-layout dirs and report
+  # $HOST_DATA_DIR/mysql/mysql as a separate leftover root.
+  mkdir -p "$HOST_DATA_DIR/mysql/mysql"
+  : >"$HOST_DATA_DIR/mysql/ibdata1"
+  : >"$HOST_DATA_DIR/mysql/mysql/user.frm"
+  run _leftover_data_dirs
+  [ "$status" -eq 0 ]
+  [ "$output" = "$HOST_DATA_DIR/mysql" ]   # exactly one root; nested schema not double-reported
+}
+
 @test "_leftover_data_dirs: unreadable (root/container-owned) dir is detected, not skipped (#384 bugbot)" {
   [ "$(id -u)" -eq 0 ] && skip "cannot make a dir unreadable as root"
   mkdir -p "$HOST_DATA_DIR/mysql"; : >"$HOST_DATA_DIR/mysql/ibdata1"
