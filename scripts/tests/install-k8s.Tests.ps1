@@ -553,7 +553,7 @@ Describe "Get-TrainingResources" {
     Mock kubectl {
       if ($args -contains "--request-timeout=10s") {
         $global:LASTEXITCODE = 0
-        '{"items":[{"status":{"allocatable":{"cpu":"12","memory":"6924Mi"}}}]}'
+        @("12 6924Mi")
       } else { $global:LASTEXITCODE = 0; "" }   # namespace probe passes
     }
     Get-TrainingResources | Should -Be "cpu=11,memory=3Gi"
@@ -561,18 +561,19 @@ Describe "Get-TrainingResources" {
   It "fresh install sized to the largest node minus overhead (k3d nodes not summed)" {
     Mock helm { $global:LASTEXITCODE = 1; "" }
     # The mock only answers a BOUNDED call — dropping --request-timeout fails
-    # this test (a wedged API must never hang values generation).
+    # this test (a wedged API must never hang values generation). Output is the
+    # jsonpath "cpu memory" line contract (one line per node).
     Mock kubectl {
       if ($args -contains "--request-timeout=10s") {
         $global:LASTEXITCODE = 0
-        '{"items":[{"status":{"allocatable":{"cpu":"12","memory":"6924Mi"}}},{"status":{"allocatable":{"cpu":"12","memory":"6924Mi"}}}]}'
+        @("12 6924Mi", "12 6924Mi")
       } else { $global:LASTEXITCODE = 1; "" }
     }
     Get-TrainingResources | Should -Be "cpu=11,memory=3Gi"
   }
   It "below-floor machine falls back to the static default" {
     Mock helm { $global:LASTEXITCODE = 1; "" }
-    Mock kubectl { $global:LASTEXITCODE = 0; '{"items":[{"status":{"allocatable":{"cpu":"2","memory":"4Gi"}}}]}' }
+    Mock kubectl { $global:LASTEXITCODE = 0; @("2 4Gi") }
     Get-TrainingResources | Should -Be "cpu=2,memory=8Gi"
   }
   It "unreadable cluster falls back to the static default" {

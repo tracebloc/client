@@ -1069,13 +1069,18 @@ function Get-TrainingResources {
   } catch {}
   try {
     # Bounded: a wedged API server must degrade to the static default, never
-    # hang values generation (Bugbot).
-    $nodesJson = (kubectl get nodes --request-timeout=10s -o json 2>$null) | Out-String
-    if ($LASTEXITCODE -eq 0 -and $nodesJson.Trim()) {
+    # hang values generation (Bugbot). jsonpath extracts ONLY cpu/memory — no
+    # full-JSON ConvertFrom-Json, mirroring the bash twin, so a parse hiccup on
+    # unrelated node fields can never silently reinstate the static default
+    # (Bugbot r5).
+    $lines = kubectl get nodes --request-timeout=10s -o jsonpath='{range .items[*]}{.status.allocatable.cpu}{" "}{.status.allocatable.memory}{"\n"}{end}' 2>$null
+    if ($LASTEXITCODE -eq 0 -and $lines) {
       $bestMemB = [long]0; $bestCpuM = [long]0
-      foreach ($n in ($nodesJson | ConvertFrom-Json).items) {
-        $cpuRaw = "$($n.status.allocatable.cpu)"
-        $memRaw = "$($n.status.allocatable.memory)"
+      foreach ($ln in @($lines)) {
+        $parts = "$ln".Trim() -split '\s+'
+        if ($parts.Count -lt 2) { continue }
+        $cpuRaw = $parts[0]
+        $memRaw = $parts[1]
         $cpuM = if ($cpuRaw -match '^(\d+)m$') { [long]$Matches[1] }
                 elseif ($cpuRaw -match '^\d+$') { [long]$cpuRaw * 1000 }
                 else { [long]0 }
