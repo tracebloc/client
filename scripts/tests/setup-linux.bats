@@ -299,3 +299,178 @@ setup() {
   [ -f "$TB_DOCKER_DROPIN_DIR/http-proxy.conf" ]   # NOT ours -> left alone
   grep -q 'it-managed' "$TB_DOCKER_DROPIN_DIR/http-proxy.conf"
 }
+
+# ── _route_install_tier (RFC 0001 #1172) ─────────────────────────────────────
+@test "_route_install_tier: Tier 2 + no sudo => actionable fail-fast" {
+  INSTALL_TIER=2; PROBE_PRIVILEGE=no_sudo
+  run _route_install_tier
+  [ "$status" -ne 0 ]
+  printf '%s\n' "$output" | grep -qF "administrator rights"
+  printf '%s\n' "$output" | grep -qF "prepare this host"
+}
+
+@test "_route_install_tier: Tier 2 + root => proceeds (root can install a runtime)" {
+  INSTALL_TIER=2; PROBE_PRIVILEGE=root
+  run _route_install_tier
+  [ "$status" -eq 0 ]
+}
+
+@test "_route_install_tier: Tier 0 + no sudo => proceeds (runtime already usable)" {
+  INSTALL_TIER=0; PROBE_PRIVILEGE=no_sudo
+  run _route_install_tier
+  [ "$status" -eq 0 ]
+}
+
+@test "_route_install_tier: unset tier (stale bootstrap) => proceeds as before" {
+  unset INSTALL_TIER PROBE_PRIVILEGE
+  run _route_install_tier
+  [ "$status" -eq 0 ]
+}
+
+@test "_route_install_tier: TB_FORCE_TIER overrides the detected tier" {
+  INSTALL_TIER=0; PROBE_PRIVILEGE=no_sudo; TB_FORCE_TIER=2
+  run _route_install_tier
+  [ "$status" -ne 0 ]           # forced to Tier 2 + no_sudo => fail-fast
+  printf '%s\n' "$output" | grep -qF "administrator rights"
+}
+
+# ── install_linux tier branching (RFC 0001 #1175) ────────────────────────────
+# Stub every step so the branch is observable without a real install.
+_stub_install_steps() {
+  preflight_sudo()       { record "preflight_sudo"; }
+  setup_pm()             { record "setup_pm"; }
+  apt_wait_for_lock()    { record "apt_wait_for_lock"; }
+  install_docker_engine(){ record "install_docker_engine"; }
+  install_system_deps()  { record "install_system_deps"; }
+  dispatch_gpu_setup()   { record "dispatch_gpu_setup"; }
+  install_kubectl()      { record "install_kubectl"; }
+  install_k3d()          { record "install_k3d"; }
+  install_helm()         { record "install_helm"; }
+}
+
+@test "install_linux: Tier 0 skips every privileged step, installs only user-space tools" {
+  MOCK_CALLS="$(mktemp)"
+  INSTALL_TIER=0
+  # Sandbox HOME: the Tier-0 branch runs the REAL _install_userspace_tools, whose
+  # _set_tools_target mkdir's ~/.local/bin and _persist_tools_on_path appends a
+  # PATH line to the shell rc — both would hit the developer's real home without
+  # this (Bugbot #375). Matches the dedicated _set_tools_target/_persist tests.
+  HOME="$BATS_TEST_TMPDIR"
+  _stub_install_steps
+  run install_linux
+  [ "$status" -eq 0 ]
+  mock_calls | grep -q install_kubectl
+  mock_calls | grep -q install_k3d
+  mock_calls | grep -q install_helm
+  ! mock_calls | grep -q preflight_sudo
+  ! mock_calls | grep -q install_docker_engine
+  ! mock_calls | grep -q install_system_deps
+  ! mock_calls | grep -q dispatch_gpu_setup
+}
+
+@test "install_linux: Tier 1 runs the full privileged flow" {
+  MOCK_CALLS="$(mktemp)"
+  INSTALL_TIER=1; PROBE_PRIVILEGE=sudo_nopw
+  _stub_install_steps
+  run install_linux
+  [ "$status" -eq 0 ]
+  mock_calls | grep -q preflight_sudo
+  mock_calls | grep -q install_docker_engine
+  mock_calls | grep -q install_kubectl
+  mock_calls | grep -q dispatch_gpu_setup
+}
+
+@test "install_linux: unset tier (stale bootstrap) runs the full flow" {
+  MOCK_CALLS="$(mktemp)"
+  unset INSTALL_TIER PROBE_PRIVILEGE
+  _stub_install_steps
+  run install_linux
+  [ "$status" -eq 0 ]
+  mock_calls | grep -q install_docker_engine
+}
+
+# ── _set_tools_target: Tier 0 tools must NOT sudo (Bugbot #1175) ─────────────
+@test "_set_tools_target: Tier 0 => ~/.local/bin, no sudo, on PATH" {
+  INSTALL_TIER=0; HOME="$BATS_TEST_TMPDIR"
+  _set_tools_target
+  [ "$TB_TOOLS_DIR" = "$HOME/.local/bin" ]
+  [ -z "$TB_TOOLS_SUDO" ]           # zero-root: no sudo for the tools
+  [ -d "$TB_TOOLS_DIR" ]            # created
+  case ":$PATH:" in *":$TB_TOOLS_DIR:"*) : ;; *) return 1 ;; esac   # on PATH now
+}
+
+@test "_set_tools_target: full flow => /usr/local/bin with sudo" {
+  INSTALL_TIER=1
+  _set_tools_target
+  [ "$TB_TOOLS_DIR" = "/usr/local/bin" ]
+  [ "$TB_TOOLS_SUDO" = "sudo" ]
+}
+
+# ── _tools_rc_for_shell + _persist_tools_on_path: keep Tier-0 tools on PATH (#375) ─
+@test "_tools_rc_for_shell: zsh/bash-linux/bash-mac/other" {
+  HOME=/h
+  SHELL=/bin/zsh;  [ "$(_tools_rc_for_shell)" = "/h/.zshrc" ]
+  SHELL=/bin/bash; OS=Linux;  [ "$(_tools_rc_for_shell)" = "/h/.bashrc" ]
+  SHELL=/bin/bash; OS=Darwin; [ "$(_tools_rc_for_shell)" = "/h/.bash_profile" ]
+  SHELL=/bin/dash; OS=Linux;  [ "$(_tools_rc_for_shell)" = "/h/.profile" ]
+}
+
+@test "_persist_tools_on_path: Tier 0 appends ~/.local/bin to the shell rc (#375)" {
+  HOME="$BATS_TEST_TMPDIR"; SHELL=/bin/bash; OS=Linux
+  TB_TOOLS_DIR="$HOME/.local/bin"
+  hint() { :; }
+  _persist_tools_on_path
+  grep -qF "$HOME/.local/bin" "$HOME/.bashrc"
+}
+
+@test "_persist_tools_on_path: idempotent — no double append (#375)" {
+  HOME="$BATS_TEST_TMPDIR"; SHELL=/bin/bash; OS=Linux
+  TB_TOOLS_DIR="$HOME/.local/bin"
+  hint() { :; }
+  _persist_tools_on_path
+  _persist_tools_on_path
+  [ "$(grep -cF '.local/bin' "$HOME/.bashrc")" -eq 1 ]
+}
+
+@test "_persist_tools_on_path: no-op for the full flow (/usr/local/bin) (#375)" {
+  HOME="$BATS_TEST_TMPDIR"; SHELL=/bin/bash; OS=Linux
+  TB_TOOLS_DIR="/usr/local/bin"
+  hint() { echo "must-not-run"; }
+  run _persist_tools_on_path
+  [ "$status" -eq 0 ]
+  [ ! -f "$HOME/.bashrc" ]                 # nothing written
+  [[ "$output" != *"must-not-run"* ]]      # no PATH hint emitted
+}
+
+@test "_persist_tools_on_path: fish gets fish_add_path, no dead export in ~/.profile (#375)" {
+  HOME="$BATS_TEST_TMPDIR"; SHELL=/usr/bin/fish; OS=Linux
+  TB_TOOLS_DIR="$HOME/.local/bin"
+  hint() { echo "$*"; }
+  run _persist_tools_on_path
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"fish_add_path"* ]]     # fish-correct guidance
+  [ ! -f "$HOME/.profile" ]                # did NOT write a bash export fish can't read
+}
+
+# ── _tier0_gpu_flags: NVIDIA k3d flag reused only when the runtime exists (#375) ─
+@test "_tier0_gpu_flags: nvidia + configured runtime => --gpus=all" {
+  GPU_VENDOR=nvidia; K3D_GPU_FLAGS=()
+  success() { :; }
+  docker() { case "$*" in *Runtimes*) echo '{"nvidia":{"path":"nvidia-container-runtime"},"runc":{}}' ;; *) return 0 ;; esac; }
+  _tier0_gpu_flags
+  [ "${K3D_GPU_FLAGS[*]}" = "--gpus=all" ]
+}
+
+@test "_tier0_gpu_flags: nvidia + NO configured runtime => stays CPU-only (empty flags)" {
+  GPU_VENDOR=nvidia; K3D_GPU_FLAGS=()
+  warn() { :; }; hint() { :; }
+  docker() { case "$*" in *Runtimes*) echo '{"runc":{}}' ;; *) return 0 ;; esac; }
+  _tier0_gpu_flags
+  [ "${#K3D_GPU_FLAGS[@]}" -eq 0 ]   # no --gpus flag → CPU-only cluster (safe, not a broken create)
+}
+
+@test "_tier0_gpu_flags: non-nvidia GPU => no-op" {
+  GPU_VENDOR=none; K3D_GPU_FLAGS=()
+  _tier0_gpu_flags
+  [ "${#K3D_GPU_FLAGS[@]}" -eq 0 ]
+}

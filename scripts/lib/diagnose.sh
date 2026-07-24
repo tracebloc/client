@@ -67,6 +67,14 @@ run_diagnose() {
   info "tracebloc client version: ${cver:-unknown}   (namespace: $ns)"
   info "Collecting diagnostics — this is safe; credentials are redacted before the file is written."
 
+  # RFC 0001 host audit — read-only capability/privilege probe + install tier.
+  # --diagnose installs nothing, so showing the detected tier here is honest and
+  # useful for support. Guarded: a stale bootstrap may not have fetched probe.sh.
+  # Sets PROBE_*/INSTALL_TIER, which the 00-host.txt section below records.
+  if declare -F host_audit >/dev/null 2>&1; then
+    host_audit
+  fi
+
   # ── host / versions ──
   {
     echo "# tracebloc diagnose ($ts)"
@@ -89,6 +97,12 @@ run_diagnose() {
     if has docker; then
       echo; echo "## docker info"
       docker info 2>/dev/null | grep -iE 'Server Version|Storage Driver|Docker Root|Operating System|Total Memory|CPUs|Cgroup'
+    fi
+    # RFC 0001 install-tier readout (set by host_audit above; plain for the bundle).
+    if declare -F run_host_probes >/dev/null 2>&1; then
+      echo; echo "## install tier (RFC 0001)"
+      echo "INSTALL_TIER=${INSTALL_TIER:-?}  reason=${INSTALL_TIER_REASON:-?}"
+      echo "runtime_usable=${PROBE_RUNTIME_USABLE:-?}  privilege=${PROBE_PRIVILEGE:-?}  cgroup2=${PROBE_CGROUP2:-?}  userns=${PROBE_USERNS:-?}"
     fi
   } > "$d/00-host.txt" 2>&1
 

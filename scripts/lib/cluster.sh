@@ -177,7 +177,15 @@ ensure_cluster_autostart() {
   # enables docker.service when Docker was absent; this also covers the
   # installed-but-disabled re-run case. Idempotent.
   if [[ "$OS" == "Linux" ]] && has systemctl; then
-    if sudo systemctl enable docker >/dev/null 2>&1; then
+    if [[ "${INSTALL_TIER:-}" == "0" ]]; then
+      # Tier 0 (a usable runtime already exists, no admin): do NOT sudo to enable
+      # docker.service — we promised zero privileged steps, and a docker-group
+      # user may have no sudo, so this would prompt for a password on /dev/tty
+      # even behind the spinner (Bugbot #375). The k3d `--restart unless-stopped`
+      # policy set above already returns the cluster after a reboot for the common
+      # case; enabling docker.service on boot is the user's call.
+      log "Tier 0: leaving Docker autostart to the user (no privileged step)."
+    elif sudo systemctl enable docker >/dev/null 2>&1; then
       log "Ensured docker.service is enabled on boot."
     fi
   fi
