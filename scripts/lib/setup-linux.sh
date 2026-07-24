@@ -357,8 +357,13 @@ _fetch_k3d_release() {
   local base="https://github.com/k3d-io/k3d/releases/download/${tag}"
   local tmpdir
   tmpdir="$(mktemp -d)"
-  retry 3 5 curl -fsSL $CURL_SECURE "${base}/k3d-linux-${arch}" -o "${tmpdir}/k3d"
-  retry 3 5 curl -fsSL $CURL_SECURE "${base}/checksums.txt" -o "${tmpdir}/checksums.txt"
+  # --connect-timeout + a stall floor (not --max-time: the binary is ~50 MB and
+  # a hard cap would break slow-but-healthy links): a hung transfer under
+  # spin_cmd would otherwise spin forever (Bugbot r2).
+  retry 3 5 curl -fsSL $CURL_SECURE --connect-timeout 15 --speed-limit 1024 --speed-time 60 \
+    "${base}/k3d-linux-${arch}" -o "${tmpdir}/k3d"
+  retry 3 5 curl -fsSL $CURL_SECURE --connect-timeout 15 --speed-limit 1024 --speed-time 60 \
+    "${base}/checksums.txt" -o "${tmpdir}/checksums.txt"
   local want
   want="$(awk -v asset="k3d-linux-${arch}" \
     '{ n = split($2, p, "/"); if (p[n] == asset) { print $1; exit } }' \
@@ -401,7 +406,8 @@ install_k3d() {
   [[ -z "$_k3d_tag" || "$_k3d_tag" =~ ^v[0-9][A-Za-z0-9._-]*$ ]] \
     || error "K3D_VERSION must be a k3d release tag like v5.9.0, or 'latest' (got '${K3D_VERSION:-}')"
   if [ -z "$_k3d_tag" ]; then
-    _k3d_tag="$(retry 3 5 curl -fsSLI $CURL_SECURE -o /dev/null -w '%{url_effective}' \
+    _k3d_tag="$(retry 3 5 curl -fsSLI $CURL_SECURE --connect-timeout 15 --max-time 30 \
+      -o /dev/null -w '%{url_effective}' \
       "https://github.com/k3d-io/k3d/releases/latest" 2>/dev/null)" || _k3d_tag=""
     _k3d_tag="${_k3d_tag##*/}"
     [[ "$_k3d_tag" =~ ^v[0-9][A-Za-z0-9._-]*$ ]] \

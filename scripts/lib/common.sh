@@ -455,10 +455,11 @@ if [[ "$TB_STORAGE_MODE" == "node-local" ]]; then
   AGENTS=0
   SERVERS=1
 fi
-# Pinned default; set K8S_VERSION="" to use latest (may break on new k3s releases)
+# Pinned default; an empty value falls back to this pin (`:-` treats empty and
+# unset the same — there is no opt-out to "latest" for k3s).
 K8S_VERSION="${K8S_VERSION:-v1.29.4-k3s1}"
-# Pinned default; set K3D_VERSION=latest to resolve the newest k3d release at
-# install time instead (an empty value falls back to this pin, same as
+# Pinned default; ONLY the literal K3D_VERSION=latest resolves the newest k3d
+# release at install time instead (an empty value falls back to this pin, like
 # K8S_VERSION above). The binary is fetched directly from the release and
 # verified against its checksums.txt either way (setup-linux.sh). The pin makes
 # installs deterministic and immune to the releases/latest lookup, which breaks
