@@ -1060,7 +1060,10 @@ function Get-TrainingResources {
       $valsJson = (helm get values $TB_NAMESPACE -n $TB_NAMESPACE -o json 2>$null) | Out-String
       if ($LASTEXITCODE -eq 0 -and $valsJson.Trim()) {
         $prev = ($valsJson | ConvertFrom-Json).env.RESOURCE_LIMITS
-        if ($prev) { return $prev }
+        # The historic static default was the ABSENCE of a choice — carrying it
+        # would keep the unschedulable 8Gi on exactly the machines this sizing
+        # exists to fix (Bugbot). Only a differing value survives re-install.
+        if ($prev -and $prev -ne "cpu=2,memory=8Gi") { return $prev }
       }
     }
   } catch {}

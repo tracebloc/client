@@ -115,7 +115,10 @@ _training_resources() {
   fi
   local prev
   prev="$(_existing_training_resources)"
-  if [[ -n "$prev" ]]; then
+  # The historic static default was the ABSENCE of a choice, not a choice —
+  # carrying it would keep the unschedulable 8Gi on exactly the machines this
+  # sizing exists to fix (Bugbot). Only a value that differs from it survives.
+  if [[ -n "$prev" && "$prev" != "$_TRAINING_DEFAULT" ]]; then
     printf '%s' "$prev"
     return 0
   fi

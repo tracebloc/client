@@ -743,6 +743,24 @@ setup() {
   [ "$output" = "cpu=4,memory=12Gi" ]
 }
 
+@test "training size: the historic static default is NOT carried — re-install gets sized" {
+  TB_NAMESPACE=tracebloc
+  unset TRACEBLOC_TRAINING_RESOURCES
+  # An older install stored the chart default; that was the absence of a
+  # choice, so machine sizing must run (Bugbot on tracebloc/client#393).
+  helm() { printf 'env:\n  RESOURCE_LIMITS: cpu=2,memory=8Gi\n'; }
+  has() { return 0; }
+  kubectl() {
+    case "$*" in
+      *"get namespace"*--request-timeout=*) return 0 ;;
+      *"get nodes"*--request-timeout=*) printf '12 6924Mi\n' ;;
+      *) return 1 ;;
+    esac
+  }
+  run _training_resources
+  [ "$output" = "cpu=11,memory=3Gi" ]
+}
+
 @test "training size: fresh install sized to the largest node minus overhead" {
   TB_NAMESPACE=tracebloc
   unset TRACEBLOC_TRAINING_RESOURCES

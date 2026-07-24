@@ -548,6 +548,16 @@ Describe "Get-TrainingResources" {
     Mock helm { $global:LASTEXITCODE = 0; '{"env":{"RESOURCE_LIMITS":"cpu=4,memory=12Gi"}}' }
     Get-TrainingResources | Should -Be "cpu=4,memory=12Gi"
   }
+  It "the historic static default is NOT carried — re-install gets sized (Bugbot)" {
+    Mock helm { $global:LASTEXITCODE = 0; '{"env":{"RESOURCE_LIMITS":"cpu=2,memory=8Gi"}}' }
+    Mock kubectl {
+      if ($args -contains "--request-timeout=10s") {
+        $global:LASTEXITCODE = 0
+        '{"items":[{"status":{"allocatable":{"cpu":"12","memory":"6924Mi"}}}]}'
+      } else { $global:LASTEXITCODE = 0; "" }   # namespace probe passes
+    }
+    Get-TrainingResources | Should -Be "cpu=11,memory=3Gi"
+  }
   It "fresh install sized to the largest node minus overhead (k3d nodes not summed)" {
     Mock helm { $global:LASTEXITCODE = 1; "" }
     # The mock only answers a BOUNDED call — dropping --request-timeout fails
