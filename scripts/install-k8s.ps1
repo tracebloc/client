@@ -20,6 +20,7 @@
 #    $env:K8S_VERSION   = "v1.29.4-k3s1"  default: latest
 #    $env:HOST_DATA_DIR = "C:\data"        default: $env:USERPROFILE\.tracebloc (LOCAL disk; no NFS/UNC)
 #    $env:CLIENT_ENV    = "dev"            optional; if not set, CLIENT_ENV is not added to env in values
+#    $env:TRACEBLOC_TRAINING_RESOURCES = "cpu=4,memory=16Gi"   optional; overrides the machine-sized training default
 # =============================================================================
 
 #Requires -Version 5.1
@@ -32,7 +33,14 @@ if (-not $env:TB_PESTER) {
   $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()
              ).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
   if (-not $isAdmin) {
-    Write-Host "  " -NoNewline; Write-Host ([char]0x2716) -ForegroundColor Red -NoNewline; Write-Host " Run this script as Administrator (right-click > Run as Administrator)." -ForegroundColor Red
+    # In the documented flow (`irm tracebloc.io/i.ps1 | iex`) there is no script
+    # file to right-click, so the old "right-click > Run as Administrator" advice
+    # was impossible to follow (#386). Give the actual steps.
+    Write-Host "  " -NoNewline; Write-Host ([char]0x2716) -ForegroundColor Red -NoNewline; Write-Host " Administrator rights required." -ForegroundColor Red
+    Write-Host "  Open an elevated PowerShell: press Win+X and choose 'Terminal (Admin)'" -ForegroundColor DarkGray
+    Write-Host "  (or search 'PowerShell' in Start and press Ctrl+Shift+Enter)," -ForegroundColor DarkGray
+    Write-Host "  accept the User Account Control prompt, then re-run:" -ForegroundColor DarkGray
+    Write-Host "    irm https://tracebloc.io/i.ps1 | iex" -ForegroundColor Cyan
     exit 1
   }
 
@@ -298,6 +306,15 @@ function Confirm-NvidiaDriver {
     if ($majorVer -ge 460) {
       $script:NVIDIA_DRIVER_OK = $true
       Ok "NVIDIA GPU ready (driver $driverVer)"
+      # Expectation-setting only, never a gate (#387): entry-level cards pass
+      # every check but are too small for real training (field: a 2 GB GT 710
+      # installed fine and could never fit a model).
+      try {
+        $vramMiB = [int]((& $nvSmi --query-gpu=memory.total --format=csv,noheader,nounits 2>&1 | Select-Object -First 1).Trim())
+        if ($vramMiB -gt 0 -and $vramMiB -lt 8192) {
+          Hint "This GPU has $([math]::Round($vramMiB / 1024, 1)) GB VRAM - fine for setup; real training typically needs 8 GB+."
+        }
+      } catch {}
     } else {
       Warn "NVIDIA driver $driverVer is too old (need 460+)."
       Hint "Download latest: https://www.nvidia.com/Download/index.aspx"
@@ -490,7 +507,8 @@ function Install-DockerDesktop {
       Write-Host ""
       Hint "1. Look for the Docker whale icon in your system tray"
       Hint "2. If Docker is open, wait until it says 'Docker Desktop is running'"
-      Hint "3. Re-run this script once it's ready"
+      Hint "3. If Docker shows an error window instead (e.g. 'Virtualization support not detected' or a WSL update prompt), fix that first - it may need a reboot"
+      Hint "4. Re-run this script once it's ready"
       Write-Host ""
       Hint "Nothing is broken -- Docker just needs a moment."
       Write-Host ""
@@ -666,24 +684,35 @@ function Install-K3dAndHelm {
         Invoke-WebRequest "https://github.com/k3d-io/k3d/releases/download/$k3dVer/k3d-windows-$arch.exe" `
           -OutFile $k3dDest -UseBasicParsing
       }
+      # Fail-closed verification, matching the Linux path and the kubectl
+      # precedent: an unfetchable checksums.txt, a missing asset line, or a
+      # mismatch all abort and remove the download — never install unverified
+      # bytes on a privileged path (Bugbot r3). The release's checksum asset is
+      # named checksums.txt ("<sha256>  _dist/<asset>" lines); the previous
+      # sha256sum.txt URL never existed, so the old fail-open verification
+      # silently never ran (#382).
       try {
         $checksums = Invoke-WithRetry -Label "k3d checksums" -ScriptBlock {
-          (Invoke-WebRequest "https://github.com/k3d-io/k3d/releases/download/$k3dVer/sha256sum.txt" `
+          (Invoke-WebRequest "https://github.com/k3d-io/k3d/releases/download/$k3dVer/checksums.txt" `
             -UseBasicParsing).Content
         }
-        $expectedHash = ($checksums -split "`n" |
-          Where-Object { $_ -match "k3d-windows-$arch\.exe" }) -replace '\s+.*',''
-        if ($expectedHash) {
-          $actualHash = (Get-FileHash $k3dDest -Algorithm SHA256).Hash.ToLower()
-          if ($actualHash -ne $expectedHash.Trim().ToLower()) {
-            Remove-Item $k3dDest -Force
-            Err "System tool checksum verification failed."
-          }
-          Log "k3d checksum verified."
-        }
       } catch {
-        Log "Could not verify k3d checksum: $_"
+        Remove-Item $k3dDest -Force -ErrorAction SilentlyContinue
+        Err "Couldn't fetch the k3d checksums ($_). Check egress to github.com and re-run."
       }
+      $expectedHash = (($checksums -split "`n" |
+        Where-Object { $_ -match "k3d-windows-$arch\.exe" }) -replace '\s+.*','' |
+        Select-Object -First 1)
+      if (-not $expectedHash) {
+        Remove-Item $k3dDest -Force -ErrorAction SilentlyContinue
+        Err "System tool checksum verification failed."
+      }
+      $actualHash = (Get-FileHash $k3dDest -Algorithm SHA256).Hash.ToLower()
+      if ($actualHash -ne $expectedHash.Trim().ToLower()) {
+        Remove-Item $k3dDest -Force
+        Err "System tool checksum verification failed."
+      }
+      Log "k3d checksum verified."
       RefreshPath
     }
   }
@@ -1019,6 +1048,71 @@ $TRACEBLOC_HELM_REPO_URL = "https://tracebloc.github.io/client"
 $TRACEBLOC_HELM_REPO_NAME = "tracebloc"
 $TRACEBLOC_CHART_NAME = "client"
 
+# ── Training-size default (backend#1236, option A; mirrors install-client-helm.sh) ──
+# One knob, requests == limits (Guaranteed QoS). The old static "cpu=2,memory=8Gi"
+# was wrong at both ends: dead on arrival on nodes under 8 GiB (the WSL2 field
+# case — nothing could ever schedule) and ~12% of a 64 GiB box. Precedence:
+#   1. TRACEBLOC_TRAINING_RESOURCES (explicit install-time override)
+#   2. the installed release's current value (a `tracebloc resources set` choice
+#      must survive re-install, never be clobbered back to a default)
+#   3. sized to this machine: LARGEST node allocatable - ~1 CPU / 3 GiB platform
+#      overhead (a pod schedules onto ONE node; k3d's server+agent are the same
+#      machine, so summing would double-count)
+#   4. the historic static default (tiny or undeterminable machines)
+function Get-TrainingResources {
+  if ($env:TRACEBLOC_TRAINING_RESOURCES) { return $env:TRACEBLOC_TRAINING_RESOURCES }
+  try {
+    # helm get has no request timeout — gate it behind a bounded probe so a
+    # wedged API degrades instead of hanging values generation (Bugbot). A
+    # missing namespace also means there is no release to carry.
+    $null = (kubectl get namespace $TB_NAMESPACE --request-timeout=5s 2>$null) | Out-String
+    if ($LASTEXITCODE -eq 0) {
+      $valsJson = (helm get values $TB_NAMESPACE -n $TB_NAMESPACE -o json 2>$null) | Out-String
+      if ($LASTEXITCODE -eq 0 -and $valsJson.Trim()) {
+        $prev = ($valsJson | ConvertFrom-Json).env.RESOURCE_LIMITS
+        # The historic static default was the ABSENCE of a choice — carrying it
+        # would keep the unschedulable 8Gi on exactly the machines this sizing
+        # exists to fix (Bugbot). Only a differing value survives re-install.
+        if ($prev -and $prev -ne "cpu=2,memory=8Gi") { return $prev }
+      }
+    }
+  } catch {}
+  try {
+    # Bounded: a wedged API server must degrade to the static default, never
+    # hang values generation (Bugbot). jsonpath extracts ONLY cpu/memory — no
+    # full-JSON ConvertFrom-Json, mirroring the bash twin, so a parse hiccup on
+    # unrelated node fields can never silently reinstate the static default
+    # (Bugbot r5).
+    $lines = kubectl get nodes --request-timeout=10s -o jsonpath='{range .items[*]}{.status.allocatable.cpu}{" "}{.status.allocatable.memory}{"\n"}{end}' 2>$null
+    if ($LASTEXITCODE -eq 0 -and $lines) {
+      $bestMemB = [long]0; $bestCpuM = [long]0
+      foreach ($ln in @($lines)) {
+        $parts = "$ln".Trim() -split '\s+'
+        if ($parts.Count -lt 2) { continue }
+        $cpuRaw = $parts[0]
+        $memRaw = $parts[1]
+        $cpuM = if ($cpuRaw -match '^(\d+)m$') { [long]$Matches[1] }
+                elseif ($cpuRaw -match '^\d+$') { [long]$cpuRaw * 1000 }
+                else { [long]0 }
+        $memB = if ($memRaw -match '^(\d+)Ki$') { [long]$Matches[1] * 1KB }
+                elseif ($memRaw -match '^(\d+)Mi$') { [long]$Matches[1] * 1MB }
+                elseif ($memRaw -match '^(\d+)Gi$') { [long]$Matches[1] * 1GB }
+                elseif ($memRaw -match '^\d+$') { [long]$memRaw }
+                else { [long]0 }
+        if ($memB -gt $bestMemB -or ($memB -eq $bestMemB -and $cpuM -gt $bestCpuM)) {
+          $bestMemB = $memB; $bestCpuM = $cpuM
+        }
+      }
+      $runCpuM = $bestCpuM - 1000
+      $runMemB = $bestMemB - 3GB
+      if ($runCpuM -ge 1000 -and $runMemB -ge 2GB) {
+        return "cpu=$([math]::Floor($runCpuM / 1000)),memory=$([math]::Floor($runMemB / 1GB))Gi"
+      }
+    }
+  } catch {}
+  return "cpu=2,memory=8Gi"
+}
+
 function Get-TraceblocYamlValue {
   param([string]$Path, [string]$Key)
   if (-not (Test-Path $Path)) { return "" }
@@ -1277,9 +1371,12 @@ function Install-ClientHelm {
   }
   # backend#743: relocate the dataset PV onto the network mount when HOST_DATASET_DIR is set.
   $datasetPathLine = if ($HOST_DATASET_DIR) { "`n  datasetPath: /tracebloc-data" } else { "" }
+  # backend#1236 (option A): size the default training budget to this machine.
+  $trainingSize = Get-TrainingResources
+  Log "Training size: $trainingSize"
   $envBlock += @"
-  RESOURCE_LIMITS: "cpu=2,memory=8Gi"
-  RESOURCE_REQUESTS: "cpu=2,memory=8Gi"
+  RESOURCE_LIMITS: "$trainingSize"
+  RESOURCE_REQUESTS: "$trainingSize"
   GPU_LIMITS: "$gpuVal"
   GPU_REQUESTS: "$gpuVal"
   RUNTIME_CLASS_NAME: ""
@@ -1317,14 +1414,18 @@ $envBlock
   Set-Content -Path $valuesFile -Value $valuesContent -Encoding UTF8
   Log "Values file written to $valuesFile"
 
-  $repoList = (helm repo list 2>&1) | Out-String
-  if ($repoList -notmatch [regex]::Escape($TRACEBLOC_HELM_REPO_NAME)) {
-    Log "Adding Helm repo: $TRACEBLOC_HELM_REPO_URL"
-    $null = (helm repo add $TRACEBLOC_HELM_REPO_NAME $TRACEBLOC_HELM_REPO_URL 2>&1)
-    if ($LASTEXITCODE -ne 0) { Err "Failed to connect to tracebloc." }
-  }
-  Log "Updating Helm repos..."
-  $null = (helm repo update 2>&1)
+  # Register the chart repo unconditionally. `--force-update` is idempotent, heals
+  # a stale/wrong URL from an earlier attempt, and re-fetches the repo index, so no
+  # separate `helm repo update` pass is needed. (The old presence guard string-
+  # matched `(helm repo list 2>&1)`: on a fresh machine helm reports "no
+  # repositories" on stderr, and Windows PowerShell 5.1 renders that ErrorRecord
+  # with this script's own ...\tracebloc-installer-<n>\install-k8s.ps1 temp path --
+  # which contains "tracebloc" -- so the guard skipped the add on every fresh
+  # install and Step 4 died later with "Error: repo tracebloc not found". #385)
+  Log "Adding Helm repo: $TRACEBLOC_HELM_REPO_URL"
+  $addOutput = (helm repo add $TRACEBLOC_HELM_REPO_NAME $TRACEBLOC_HELM_REPO_URL --force-update 2>&1) | Out-String
+  Log "helm repo add: $addOutput"
+  if ($LASTEXITCODE -ne 0) { Err "Couldn't add the tracebloc chart repo ($TRACEBLOC_HELM_REPO_URL). Helm output:`n$addOutput`nCheck the log for details: $LOG_FILE" }
 
   Write-Host ""
   Log "Installing $TB_NAMESPACE from $TRACEBLOC_HELM_REPO_NAME/$TRACEBLOC_CHART_NAME in namespace '$TB_NAMESPACE'..."
@@ -1497,15 +1598,21 @@ function Print-Summary {
 # Non-exiting failure line (Err exits; preflight must finish all checks first).
 function Write-PfFail($m) { Write-Host "  " -NoNewline; Write-Host ([char]0x2716) -ForegroundColor Red -NoNewline; Write-Host " $m" -ForegroundColor Red }
 
-# Probe a URL for reachability. Returns: ok|tls|dns|timeout|blocked. Any HTTP
-# response (incl. 401/403/404) = reachable (TLS + HTTP completed). Honors the
-# system / HTTP_PROXY proxy automatically.
-function Test-PfUrl([string]$Url) {
+# Probe a URL for reachability. Returns: ok|tls|dns|timeout|blocked (or "http <code>"
+# under -RequireSuccess). By default any HTTP response (incl. 401/403/404) counts as
+# reachable (TLS + HTTP completed) -- registry endpoints answer 401 by design. Pass
+# -RequireSuccess for targets whose CONTENT must exist (e.g. the Helm repo index.yaml:
+# the site root 404s by design, so plain reachability proves nothing there, #385).
+# Honors the system / HTTP_PROXY proxy automatically.
+function Test-PfUrl([string]$Url, [switch]$RequireSuccess) {
   try {
     Invoke-WebRequest -Uri $Url -Method Head -TimeoutSec 8 -UseBasicParsing -ErrorAction Stop | Out-Null
     return "ok"
   } catch {
-    if ($null -ne $_.Exception.Response) { return "ok" }   # reached the server, got an HTTP error
+    if ($null -ne $_.Exception.Response) {                 # reached the server, got an HTTP error
+      if ($RequireSuccess) { return "http $([int]$_.Exception.Response.StatusCode)" }
+      return "ok"
+    }
     $m = "$($_.Exception.Message)"
     if ($m -match 'trust|SSL|certificate|TLS|secure channel') { return "tls" }
     if ($m -match 'resolve|name or service|known')            { return "dns" }
@@ -1571,6 +1678,21 @@ function Get-PfCpu {
   catch { if ($env:NUMBER_OF_PROCESSORS) { return [int]$env:NUMBER_OF_PROCESSORS } else { return $null } }
 }
 
+# $true when this machine can host Docker's VM: a hypervisor is already running
+# (check FIRST — when Hyper-V owns VT-x, VirtualizationFirmwareEnabled reads
+# $false on a perfectly healthy machine), or virtualization is enabled in
+# firmware. $false = disabled in BIOS/UEFI. $null if undeterminable (non-Windows
+# under Pester — tests mock this). #387
+function Get-PfVirtualization {
+  try {
+    $cs = Get-CimInstance Win32_ComputerSystem -ErrorAction Stop
+    if ($cs.HypervisorPresent) { return $true }
+    $cpu = Get-CimInstance Win32_Processor -ErrorAction Stop | Select-Object -First 1
+    if ($null -ne $cpu.VirtualizationFirmwareEnabled) { return [bool]$cpu.VirtualizationFirmwareEnabled }
+    return $null
+  } catch { return $null }
+}
+
 function Test-Preflight {
   if ($env:TRACEBLOC_SKIP_PREFLIGHT) { Info "Preflight checks skipped (TRACEBLOC_SKIP_PREFLIGHT set)."; return }
 
@@ -1593,6 +1715,23 @@ function Test-Preflight {
     Info "Architecture: $arch - Docker Desktop runs the amd64 client images under emulation (slower, but works)."
   }
 
+  # Hardware virtualization -- without it Docker Desktop's VM cannot start, and
+  # its own failure ("Virtualization support not detected") only appears AFTER
+  # this installer has installed and launched it, with no guidance (#387).
+  # Fail fast here instead, with the firmware fix.
+  $virt = Get-PfVirtualization
+  if ($null -eq $virt) {
+    Info "Virtualization: couldn't determine (skipping)."
+  } elseif ($virt) {
+    Ok "Virtualization enabled"
+  } else {
+    Write-PfFail "Virtualization is disabled in firmware - Docker Desktop cannot run."
+    $hardFail++
+    Hint "Enable Intel VT-x / AMD SVM in your BIOS/UEFI setup (usually under Advanced -> CPU), then re-run."
+    Hint "Confirm afterwards in Task Manager -> Performance -> CPU: 'Virtualization: Enabled'."
+    Hint "On a company device this setting may be locked by IT policy."
+  }
+
   $cpu = Get-PfCpu
   if      ($null -eq $cpu)   { Warn "CPU: couldn't determine core count (skipping)." }
   elseif  ($cpu -lt $minCpu) { Warn "CPU: $cpu core(s) - below the $minCpu-core minimum; mysql may hit lock-wait timeouts. $recCpu+ recommended to train." }
@@ -1605,11 +1744,13 @@ function Test-Preflight {
   if      ($null -eq $mem)      { Warn "Memory: couldn't determine total RAM (skipping)." }
   elseif  ($mem -lt $minMemGb)  {
     Warn "Memory: $mem GB - below the $minMemGb GB the client needs; it will OOM."
-    Hint "Docker Desktop -> Settings -> Resources -> Memory: raise to >= $warnMemGb GB ($recMemGb GB to train), then re-run."
+    Hint "Give Docker more memory (>= $warnMemGb GB; $recMemGb GB to train), then re-run:"
+    Hint "  WSL2 backend (the default): set [wsl2] memory=${warnMemGb}GB in %UserProfile%\.wslconfig, run 'wsl --shutdown', restart Docker Desktop."
+    Hint "  Hyper-V backend: Docker Desktop -> Settings -> Resources -> Advanced."
   }
   elseif  ($mem -lt $warnMemGb) {
     Warn "Memory: $mem GB - enough to run, but training (~8 GB/job) may OOM; $recMemGb GB recommended to train locally."
-    Hint "Docker Desktop -> Settings -> Resources -> Memory >= $recMemGb GB to train."
+    Hint "To train locally give Docker >= $recMemGb GB: WSL2 backend - [wsl2] memory=${recMemGb}GB in %UserProfile%\.wslconfig + 'wsl --shutdown'; Hyper-V backend - Docker Desktop -> Settings -> Resources -> Advanced."
   }
   else                          { Ok "Memory: $mem GB" }
 
@@ -1641,12 +1782,15 @@ function Test-Preflight {
     @{ label = "Docker Hub (registry-1.docker.io)";           url = "https://registry-1.docker.io/v2/" },
     @{ label = "GitHub Container Registry (ghcr.io)";         url = "https://ghcr.io/" },
     @{ label = "tracebloc API ($backendHost)";                url = "https://$backendHost/" },
-    @{ label = "tracebloc Helm charts (tracebloc.github.io)"; url = "https://tracebloc.github.io/" }
+    # The chart repo is probed at its index.yaml, strictly: the site ROOT 404s by
+    # design (so "any response = reachable" proves nothing), while the index must
+    # actually exist for `helm repo add` to succeed (#385).
+    @{ label = "tracebloc Helm charts (tracebloc.github.io)"; url = "$TRACEBLOC_HELM_REPO_URL/index.yaml"; strict = $true }
   )
   $tlsSeen = $false; $cfail = 0
   foreach ($c in $criticals) {
-    $status = Test-PfUrl $c.url
-    if ($status -ne "ok") { $status = Test-PfUrl $c.url }   # one retry for transient blips
+    $status = Test-PfUrl $c.url -RequireSuccess:([bool]$c.strict)
+    if ($status -ne "ok") { $status = Test-PfUrl $c.url -RequireSuccess:([bool]$c.strict) }   # one retry for transient blips
     if ($status -eq "ok") { Ok "$($c.label) reachable" }
     else {
       Write-PfFail "$($c.label) unreachable ($status)"
@@ -1675,7 +1819,7 @@ function Test-PreflightRuntimeMem {
   $recMemGb  = if ($env:PF_REC_MEM_GB)  { [int]$env:PF_REC_MEM_GB }  else { 16 }
   if ($mem -lt $warnMemGb) {
     Warn "Docker is running with $mem GB - recommended >= $warnMemGb GB ($recMemGb GB to train); the client may OOM under load."
-    Hint "Docker Desktop -> Settings -> Resources -> Memory >= $warnMemGb GB, then re-install."
+    Hint "Give Docker >= $warnMemGb GB, then re-install: WSL2 backend - [wsl2] memory=${warnMemGb}GB in %UserProfile%\.wslconfig + 'wsl --shutdown'; Hyper-V backend - Docker Desktop -> Settings -> Resources -> Advanced."
   }
 }
 

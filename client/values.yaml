@@ -227,6 +227,57 @@ networkPolicy:
 egressReachabilityCheck:
   enabled: true
 
+# -- Seal check (RFC-0003 §8.2 / backend#1184) — the chart's conformance suite.
+# Every runnable check is a `helm test` hook Job carrying the enumeration
+# labels (the contract tooling consumes — tracebloc CLI, cli#393):
+#   tracebloc.io/seal-check: "true"
+#   tracebloc.io/seal-check-name: <check>
+# Checks today: egress-enforcement (config under networkPolicy.training),
+# backend-reachability (config under egressReachabilityCheck), and
+# storage-assertions (config below). Run with `helm test <release> --logs`.
+# Philosophy: a guarantee that cannot be verified is reported UNSEALED — a
+# check fails loudly rather than silently claiming sealed. Disabling a check
+# is an explicit, values-visible declaration, never a runtime fallback.
+# See docs/SEAL-CHECK.md for the contract, coverage, and runbooks.
+sealCheck:
+  # In-cluster storage assertions: all release PVCs (data / logs / mysql) are
+  # Bound on the release's expected StorageClass, and — in dynamic-PVC mode
+  # (hostPath.enabled=false) — no release PVC is backed by a hostPath
+  # PersistentVolume on an unmanaged host tree. Leftover chart hostPath PVs
+  # from an older bare-metal install carry a claimRef for our PVC names and
+  # would capture the claims even in dynamic mode (the RFC-0003 D3/D4
+  # stranding scenario); this check catches that. Dynamically provisioned
+  # node-local hostPath PVs (k3s local-path pattern) are tolerated and
+  # reported — see nodeLocalPathPrefixes. In hostPath mode the PV sub-check
+  # reports SKIP (hostPath is the declared storage model there).
+  # PV introspection needs cluster-scoped read RBAC: with clusterScope=false
+  # the sub-check degrades to a PV-name check and prints an explicit WARNING
+  # naming what was not verified.
+  storageAssertions:
+    enabled: true
+    # Max seconds to wait for all release PVCs to reach Bound before failing.
+    # Covers WaitForFirstConsumer classes (bind only when the consuming pod
+    # schedules) and first-install image pulls.
+    timeoutSeconds: 120
+    # hostPath prefixes accepted as provisioner-managed NODE-LOCAL storage in
+    # dynamic mode: the k3s bundled local-path provisioner
+    # (/var/lib/rancher/…) and upstream local-path-provisioner's default
+    # (/opt/local-path-provisioner/). Any other hostPath backing in dynamic
+    # mode fails the check. Extend only for a provisioner you trust to keep
+    # data inside the cluster node. Entries match whole path segments (a
+    # trailing slash is optional): a prefix admits itself and paths under
+    # it, never sibling paths like /opt/local-path-provisioner-evil.
+    nodeLocalPathPrefixes:
+      - /var/lib/rancher/
+      - /opt/local-path-provisioner/
+    # kubectl-capable image for the assertion pod — same image the
+    # image-refresh CronJob uses; the tag pins kubectl so behaviour cannot
+    # drift if upstream re-tags.
+    image:
+      repository: alpine/k8s
+      tag: "1.30.5"
+      pullPolicy: IfNotPresent
+
 # -- Egress gateway (squid) — SECURITY §8.2 / client-runtime#102.
 # In-cluster forward proxy that lets a locked-down training pod reach an FQDN
 # allowlist (backend + App Insights) and nothing else. Labelled app=egress-proxy
@@ -543,6 +594,44 @@ autoUpgrade:
     limits:
       cpu: "500m"
       memory: "256Mi"
+
+# -- One-time pre-cutover metadata backfill (data-ingestors #393, backend
+# #1166/#1198). A post-upgrade (NOT post-install) Helm hook Job that runs the
+# ingestor image's `tracebloc-backfill` entrypoint once per chart upgrade — a
+# fresh install has no pre-cutover data to backfill. It sweeps this
+# client's already-registered datasets and brings their global-metadata up to
+# the federated-alignment shape (enriched schema + feature_stats), recomputed
+# from the persisted MySQL rows — so old competitions/experiments that predate
+# the cutover keep working under the new backend alignment code.
+#
+# Safe to leave enabled: the sweep skips datasets already carrying new-shape
+# metadata and the backend upsert is idempotent, so after the fleet has
+# backfilled once it is a cheap no-op on every subsequent upgrade. Set
+# `enabled: false` to opt a cluster out (e.g. one with no pre-cutover data).
+metadataBackfill:
+  enabled: true
+  # Wall-clock bound the sweep gives ITSELF (`timeout` in the hook), after which
+  # it stops and exits 0 cleanly — the pod never fails, so the upgrade never
+  # fails. Remaining tables resume on the next upgrade (the sweep is idempotent
+  # and skips already-backfilled datasets).
+  #
+  # In-container sweep budget. Worst-case container runtime is this + the 30s
+  # SIGKILL grace (150s at the default). The Job's activeDeadlineSeconds is
+  # derived as this + 30s grace + 120s cold-pull/scheduling allowance (270s at
+  # the default) and is what bounds a stuck/Pending pod — see the hook template.
+  # Keep this small enough that (this + 30 + 120) stays under your Helm --timeout:
+  # comfortable under the auto-upgrade's 10m (the target path); on a MANUAL
+  # `helm install/upgrade` on a cold cluster pass `--timeout 10m` rather than
+  # relying on the 5m default. (bugbot)
+  backfillTimeoutSeconds: 120
+  # Small: the sweep is I/O-bound on MySQL aggregates + backend calls.
+  resources:
+    requests:
+      cpu: "250m"
+      memory: "512Mi"
+    limits:
+      cpu: "1"
+      memory: "2Gi"
 
 # -- Image-refresh CronJob (closes tracebloc/client#154).
 # Auto-restarts the jobs-manager Deployment when a new image digest is

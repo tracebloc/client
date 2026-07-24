@@ -4,6 +4,16 @@
 #                   system deps, kubectl, k3d, helm, GPU dispatch
 # =============================================================================
 
+# ── Tool-install target defaults ─────────────────────────────────────────────
+# WHERE kubectl/k3d/helm install, and whether that needs sudo. Default to the
+# system location; _set_tools_target() overrides at runtime (Tier 0 flips these
+# to a no-sudo ~/.local/bin). Defaulted here so any caller that reaches the
+# install_* functions WITHOUT going through _set_tools_target — the bats suite,
+# e2e harnesses — still gets the system behaviour, not an empty TB_TOOLS_DIR
+# (kubectl → "/kubectl") or a spurious no-sudo branch (Bugbot #1175 r2).
+: "${TB_TOOLS_DIR:=/usr/local/bin}"
+: "${TB_TOOLS_SUDO:=sudo}"
+
 # ── Package manager detection ────────────────────────────────────────────────
 setup_pm() {
   # apt note: Ubuntu 22.04+ ships needrestart, which hooks `apt-get install` and
@@ -284,6 +294,25 @@ install_system_deps() {
 }
 
 # ── kubectl ──────────────────────────────────────────────────────────────────
+# _set_tools_target — decide WHERE kubectl/k3d/helm install and whether that
+# needs sudo, based on the tier (RFC 0001 #1175). On Tier 0 (a usable runtime
+# already exists, no admin) the tools MUST NOT sudo — a docker-group researcher
+# without root would otherwise fail (or hit a hidden password prompt under
+# spin_cmd) at the "zero privileged steps" step. Install them into ~/.local/bin
+# (user-owned) and put it on this process's PATH so create_cluster finds them.
+# Otherwise the system location, with sudo. Sets TB_TOOLS_DIR + TB_TOOLS_SUDO.
+_set_tools_target() {
+  if [ "${INSTALL_TIER:-}" = "0" ]; then
+    TB_TOOLS_DIR="${HOME}/.local/bin"
+    TB_TOOLS_SUDO=""
+    mkdir -p "$TB_TOOLS_DIR"
+    case ":$PATH:" in *":$TB_TOOLS_DIR:"*) ;; *) export PATH="$TB_TOOLS_DIR:$PATH" ;; esac
+  else
+    TB_TOOLS_DIR="/usr/local/bin"
+    TB_TOOLS_SUDO="sudo"
+  fi
+}
+
 _fetch_kubectl() {
   local ver="$1" arch="$2"
   local tmpdir
@@ -295,7 +324,12 @@ _fetch_kubectl() {
   echo "$(cat "${tmpdir}/kubectl.sha256")  ${tmpdir}/kubectl" | sha256sum --check --quiet \
     || { rm -rf "$tmpdir"; error "System tool checksum verification failed"; }
   chmod +x "${tmpdir}/kubectl"
-  sudo mv "${tmpdir}/kubectl" /usr/local/bin/kubectl
+  # Tier 0 → no sudo (TB_TOOLS_SUDO empty, TB_TOOLS_DIR under $HOME).
+  if [ -n "$TB_TOOLS_SUDO" ]; then
+    sudo mv "${tmpdir}/kubectl" "$TB_TOOLS_DIR/kubectl"
+  else
+    mv "${tmpdir}/kubectl" "$TB_TOOLS_DIR/kubectl"
+  fi
   rm -rf "$tmpdir"
 }
 
@@ -310,27 +344,78 @@ install_kubectl() {
 }
 
 # ── k3d ──────────────────────────────────────────────────────────────────────
+# Download the k3d release binary + checksums.txt at the given tag, verify, and
+# install into TB_TOOLS_DIR (mirrors _fetch_kubectl; fail-closed). We install
+# the binary OURSELVES because upstream's install.sh performs NO checksum
+# verification — its downloadFile fetches the bare binary and installFile just
+# chmod+cp's it (review of the pinned v5.9.0 script, PR #382) — so piping it
+# through sudo would install unverified bytes on a privileged path.
+# checksums.txt lines read "<sha256>  _dist/k3d-linux-amd64": match on the
+# asset basename.
+_fetch_k3d_release() {
+  local tag="$1" arch="$2"
+  local base="https://github.com/k3d-io/k3d/releases/download/${tag}"
+  local tmpdir
+  tmpdir="$(mktemp -d)"
+  # --connect-timeout + a stall floor (not --max-time: the binary is ~50 MB and
+  # a hard cap would break slow-but-healthy links): a hung transfer under
+  # spin_cmd would otherwise spin forever (Bugbot r2).
+  retry 3 5 curl -fsSL $CURL_SECURE --connect-timeout 15 --speed-limit 1024 --speed-time 60 \
+    "${base}/k3d-linux-${arch}" -o "${tmpdir}/k3d"
+  retry 3 5 curl -fsSL $CURL_SECURE --connect-timeout 15 --speed-limit 1024 --speed-time 60 \
+    "${base}/checksums.txt" -o "${tmpdir}/checksums.txt"
+  local want
+  want="$(awk -v asset="k3d-linux-${arch}" \
+    '{ n = split($2, p, "/"); if (p[n] == asset) { print $1; exit } }' \
+    "${tmpdir}/checksums.txt" 2>/dev/null)"
+  if [ -z "$want" ] || ! echo "${want}  ${tmpdir}/k3d" | sha256sum --check --quiet; then
+    rm -rf "$tmpdir"
+    error "System tool checksum verification failed"
+  fi
+  chmod +x "${tmpdir}/k3d"
+  # Tier 0 → no sudo (TB_TOOLS_SUDO empty, TB_TOOLS_DIR under $HOME).
+  if [ -n "$TB_TOOLS_SUDO" ]; then
+    sudo mv "${tmpdir}/k3d" "$TB_TOOLS_DIR/k3d"
+  else
+    mv "${tmpdir}/k3d" "$TB_TOOLS_DIR/k3d"
+  fi
+  rm -rf "$tmpdir"
+}
+
 install_k3d() {
   if has k3d; then
     log "k3d: $(k3d version | head -1)"
     return 0
   fi
 
-  local k3d_script
-  k3d_script="$(mktemp)"
-  retry 3 5 curl -fsSL $CURL_SECURE \
-    https://raw.githubusercontent.com/k3d-io/k3d/main/install.sh -o "$k3d_script"
-  chmod +x "$k3d_script"
-
-  # Preserve PATH through sudo: the k3d install script verifies itself with
-  # `command -v k3d` after copying the binary into /usr/local/bin. On RHEL-family
-  # distros sudo's secure_path excludes /usr/local/bin, so that check fails and
-  # the script aborts with "k3d not found". `sudo env PATH=$PATH` keeps it visible.
-  if ! spin_cmd "Installing system tools…" sudo env "PATH=$PATH" bash "$k3d_script"; then
-    rm -f "$k3d_script"
-    error "System tool installation failed. See the install log for details."
+  # Pin the k3d release (K3D_VERSION, common.sh) and fetch the binary DIRECTLY
+  # from the pinned release, verified against the release's checksums.txt
+  # (upstream's install.sh verifies nothing — see _fetch_k3d_release). The
+  # direct download also never touches the releases/latest redirect, whose
+  # GitHub rate limiting on shared egress IPs (CI runners, corporate NAT) took
+  # down 2/9 distro CI jobs on 2026-07-21 with a bare "curl: 404" — so the
+  # failure mode can't occur on the pinned (default) path at all.
+  # K3D_VERSION=latest resolves the newest tag at install time via the plain
+  # /releases/latest redirect (no API) and then takes the same verified path;
+  # an empty value means the common.sh default pin (Bugbot r1). The tag lands
+  # in a URL path, so anything that isn't a plain release tag fails closed —
+  # a value carrying "/" could otherwise traverse outside k3d-io/k3d
+  # (Bugbot r1).
+  local _k3d_tag="${K3D_VERSION:-}"
+  [[ "$_k3d_tag" == "latest" ]] && _k3d_tag=""
+  [[ -z "$_k3d_tag" || "$_k3d_tag" =~ ^v[0-9][A-Za-z0-9._-]*$ ]] \
+    || error "K3D_VERSION must be a k3d release tag like v5.9.0, or 'latest' (got '${K3D_VERSION:-}')"
+  if [ -z "$_k3d_tag" ]; then
+    _k3d_tag="$(retry 3 5 curl -fsSLI $CURL_SECURE --connect-timeout 15 --max-time 30 \
+      -o /dev/null -w '%{url_effective}' \
+      "https://github.com/k3d-io/k3d/releases/latest" 2>/dev/null)" || _k3d_tag=""
+    _k3d_tag="${_k3d_tag##*/}"
+    [[ "$_k3d_tag" =~ ^v[0-9][A-Za-z0-9._-]*$ ]] \
+      || error "Couldn't resolve the latest k3d release tag — set K3D_VERSION to a release tag (e.g. v5.9.0) and re-run."
   fi
-  rm -f "$k3d_script"
+
+  spin_cmd "Installing system tools…" _fetch_k3d_release "$_k3d_tag" "$ARCH_DL" \
+    || error "System tool installation failed. See the install log for details."
 
   if ! has k3d; then
     error "System tool installation completed but not found on PATH."
@@ -345,7 +430,16 @@ _ensure_helm_executable() {
   helm_bin="$(command -v helm 2>/dev/null)" || true
   if [[ -n "$helm_bin" && -f "$helm_bin" && ! -x "$helm_bin" ]]; then
     log "Making Helm executable (fixing permissions)..."
-    sudo chmod 755 "$helm_bin" 2>/dev/null || true
+    # Tier 0 (no admin): helm is in the user's ~/.local/bin — a plain owner chmod
+    # works and MUST NOT sudo (would prompt on the tty after the zero-privilege
+    # promise, like the systemctl guard). Full flow: /usr/local/bin needs sudo.
+    # TB_TOOLS_SUDO is set by _set_tools_target (empty on Tier 0), defaulted to
+    # "sudo" at module scope for direct callers (Bugbot #1175 r3).
+    if [[ -n "${TB_TOOLS_SUDO:-}" ]]; then
+      sudo chmod 755 "$helm_bin" 2>/dev/null || true
+    else
+      chmod 755 "$helm_bin" 2>/dev/null || true
+    fi
   fi
 }
 
@@ -356,7 +450,15 @@ install_helm() {
     retry 3 5 curl -fsSL $CURL_SECURE \
       https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 -o "$helm_script"
     chmod +x "$helm_script"
-    spin_cmd "Installing system tools…" bash "$helm_script"
+    # Tier 0 (no admin): get-helm-3 honours USE_SUDO + HELM_INSTALL_DIR — install
+    # user-space, no sudo (RFC 0001 #1175). Otherwise the script's default
+    # (USE_SUDO=true → /usr/local/bin).
+    if [ -z "$TB_TOOLS_SUDO" ]; then
+      spin_cmd "Installing system tools…" \
+        env "USE_SUDO=false" "HELM_INSTALL_DIR=$TB_TOOLS_DIR" "PATH=$PATH" bash "$helm_script"
+    else
+      spin_cmd "Installing system tools…" bash "$helm_script"
+    fi
     rm -f "$helm_script"
     _ensure_helm_executable
   else
@@ -376,19 +478,81 @@ dispatch_gpu_setup() {
 }
 
 # ── Main Linux installer ────────────────────────────────────────────────────
-install_linux() {
-  export DEBIAN_FRONTEND=noninteractive
-  export NEEDRESTART_MODE=a
-  export NEEDRESTART_SUSPEND=1
+# _route_install_tier — honor the detected install tier (set by run_host_probes
+# in main's step a, RFC 0001) and fail fast when the host genuinely cannot run
+# containers without administrator rights AND there is no way to get them.
+# Extracted so the bats suite can exercise the decision without running the whole
+# install. TB_FORCE_TIER overrides the detected tier (QA / support).
+#
+# This is the routing SKELETON (#1172): it adds tier detection + the honest
+# fail-fast to the flow. Per-tier optimisation of the body — Tier 0 skipping the
+# privileged steps (#1175), Tier 1 setting up rootless Docker (#1177) — lands on
+# top; until then every proceeding tier runs the existing full flow below.
+_route_install_tier() {
+  [ -n "${TB_FORCE_TIER:-}" ] && INSTALL_TIER="$TB_FORCE_TIER"
+  # Tier 2 = the kernel can't run an unprivileged container (no cgroup v2 /
+  # unprivileged userns). If we also can't become root, no amount of retrying
+  # helps — fail with the actionable remedy instead of a cryptic mid-install
+  # crash minutes later. Tier 0 (runtime usable) and Tier 1 (rootless-capable)
+  # proceed. When probe.sh wasn't loaded (stale bootstrap) INSTALL_TIER is unset
+  # and we proceed exactly as before.
+  if [ "${INSTALL_TIER:-}" = "2" ] && [ "${PROBE_PRIVILEGE:-}" = "no_sudo" ]; then
+    error "This machine can't run containers without administrator rights — its kernel lacks cgroup v2 / unprivileged user namespaces, and you are neither root nor able to sudo. Ask an administrator to prepare this host once (install a container runtime + enable the kernel prerequisites), then re-run this installer as yourself. Details: docs/rfcs/0001-least-privilege-install.md"
+  fi
+  return 0
+}
 
-  preflight_sudo
-  setup_pm
-  apt_wait_for_lock          # don't fight apt-daily/unattended-upgrades for the lock
-  install_docker_engine
-  install_system_deps
+# _tools_rc_for_shell — which POSIX rc file a *fresh* interactive shell of the
+# user's $SHELL reads, so a PATH line we append is actually sourced. Mirrors
+# install-cli.sh::_cli_rc_for_shell, kept local so this module stays testable on
+# its own: zsh → ~/.zshrc; bash+macOS → ~/.bash_profile; bash+Linux → ~/.bashrc
+# (a fresh non-login bash reads ~/.bashrc, NOT ~/.profile — the failure mode);
+# anything else → POSIX ~/.profile. fish is NOT a POSIX shell (no `export`, reads
+# ~/.config/fish, not these files) and is handled separately in
+# _persist_tools_on_path — never routed here.
+_tools_rc_for_shell() {
+  case "$(basename "${SHELL:-sh}")" in
+    zsh)  echo "${HOME}/.zshrc" ;;
+    bash) if [ "${OS:-}" = "Darwin" ]; then echo "${HOME}/.bash_profile"; else echo "${HOME}/.bashrc"; fi ;;
+    *)    echo "${HOME}/.profile" ;;
+  esac
+}
 
-  # umask 077 (set in common.sh) would make binaries in /usr/local/bin/
-  # executable only by root — relax to 022 for system tool installs
+# _persist_tools_on_path — when Tier 0 dropped kubectl/k3d/helm into the user's
+# ~/.local/bin, that dir usually isn't on a fresh shell's PATH, so the summary's
+# suggested `kubectl …` commands fail in a NEW terminal — and because the CLI can
+# live in /usr/local/bin (already on PATH), nothing else triggers a PATH fix
+# either (Bugbot #375). Persist the dir to the shell rc so future terminals
+# resolve the tools. Idempotent (skips if the rc already references ~/.local/bin)
+# and best-effort — a PATH-persist hiccup must never fail an otherwise-good
+# install. No-op unless we actually used the user-local dir (i.e. Tier 0).
+_persist_tools_on_path() {
+  [ "${TB_TOOLS_DIR:-}" = "${HOME}/.local/bin" ] || return 0
+  # fish reads ~/.config/fish, not the POSIX rc files, and uses `set`/fish_add_path
+  # rather than `export PATH=`. Appending a bash `export` line to ~/.profile would
+  # be dead (fish never loads it), so hint the fish-correct command instead — it
+  # persists (a universal var) AND applies to the current shell (Bugbot #375).
+  if [ "$(basename "${SHELL:-sh}")" = "fish" ]; then
+    hint "Add ${HOME}/.local/bin to your PATH so kubectl/k3d/helm resolve:  fish_add_path \"${HOME}/.local/bin\""
+    return 0
+  fi
+  local rc; rc="$(_tools_rc_for_shell)"
+  # Already referenced (a prior run, or the user's/distro's own line) → leave it:
+  # a fresh shell already finds the tools, and we must not double-append.
+  if [ -f "$rc" ] && grep -qF '.local/bin' "$rc" 2>/dev/null; then return 0; fi
+  {
+    printf '\n# Added by tracebloc installer (RFC 0001 #1175): user-local tools\n'
+    printf 'export PATH="%s/.local/bin:$PATH"\n' "$HOME"
+  } >> "$rc" 2>/dev/null || return 0
+  hint "Added ${HOME}/.local/bin to your PATH in ${rc} — open a new terminal (or run 'source ${rc}') so kubectl/k3d/helm resolve."
+}
+
+# _install_userspace_tools — download kubectl / k3d / helm into the user's bin
+# (no root: install-cli-style ~/.local/bin fallback). Shared by the Tier-0 fast
+# path and the full flow so they can't drift. umask 077 (common.sh) would make
+# the binaries executable only by their owner — relax to 022 for the installs.
+_install_userspace_tools() {
+  _set_tools_target          # RFC 0001 #1175: Tier 0 → ~/.local/bin, no sudo
   local _saved_umask
   _saved_umask=$(umask)
   umask 022
@@ -396,6 +560,57 @@ install_linux() {
   install_k3d
   install_helm
   umask "$_saved_umask"
+  _persist_tools_on_path     # RFC 0001 #1175: keep ~/.local/bin on PATH for new shells (Bugbot #375)
+}
 
+# _tier0_gpu_flags — on Tier 0 we skip the privileged GPU driver/toolkit install,
+# but create_cluster still needs K3D_GPU_FLAGS to expose an NVIDIA GPU to the k3d
+# cluster (--gpus=all). Without it a GPU host gets a CPU-only cluster even when the
+# toolkit is already installed (Bugbot #375). Reuse the flag ONLY when Docker's
+# NVIDIA runtime is already configured — expected on a GPU host with a usable
+# Docker; we can't (and won't) install/configure it here without admin. Otherwise
+# stay CPU-only and tell the user how to enable it. (AMD uses the device plugin
+# only — no k3d flag — so it needs nothing here.)
+_tier0_gpu_flags() {
+  [ "${GPU_VENDOR:-none}" = "nvidia" ] || return 0
+  if docker info --format '{{json .Runtimes}}' 2>/dev/null | grep -q '"nvidia"'; then
+    K3D_GPU_FLAGS=("--gpus=all")
+    success "Reusing the NVIDIA container runtime already configured — your environment will have GPU access."
+  else
+    warn "NVIDIA GPU detected, but Docker's NVIDIA runtime isn't configured (installing the toolkit needs admin) — your environment will be CPU-only."
+    hint "To enable GPU, have an admin install and configure nvidia-container-toolkit on this host, then re-run."
+  fi
+}
+
+install_linux() {
+  export DEBIAN_FRONTEND=noninteractive
+  export NEEDRESTART_MODE=a
+  export NEEDRESTART_SUSPEND=1
+
+  _route_install_tier        # RFC 0001: honour the tier + honest fail-fast
+
+  # ── Tier 0 — a usable container runtime already exists → ZERO privileged
+  # steps (RFC 0001 #1175). Skip sudo priming, the Docker engine install, the
+  # system-package + kernel-module setup, and the privileged GPU-driver install
+  # entirely; just drop the user-space tools in and let create_cluster reuse the
+  # runtime. The biggest unlock for shared/managed hosts (a researcher in the
+  # `docker` group installs with no admin at all). We still set the k3d GPU flag
+  # from the ALREADY-configured runtime (_tier0_gpu_flags) so a GPU host isn't
+  # silently downgraded to a CPU-only cluster; only the privileged driver/toolkit
+  # INSTALL is skipped.
+  if [ "${INSTALL_TIER:-}" = "0" ]; then
+    info "Using the container runtime already on this machine — no administrator rights needed."
+    _install_userspace_tools
+    _tier0_gpu_flags
+    return 0
+  fi
+
+  # ── Tier 1/2 (or unknown / stale bootstrap) — the full privileged flow.
+  preflight_sudo
+  setup_pm
+  apt_wait_for_lock          # don't fight apt-daily/unattended-upgrades for the lock
+  install_docker_engine
+  install_system_deps
+  _install_userspace_tools
   dispatch_gpu_setup
 }

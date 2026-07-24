@@ -21,6 +21,38 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{ .Release.Name }}-secrets
 {{- end }}
 
+{{/*
+  tracebloc.sealCheckLabels — the seal-check enumeration contract
+  (RFC-0003 §8.2 / backend#1184; consumed by the tracebloc CLI, cli#393).
+
+  Every runnable conformance check in this chart is a `helm.sh/hook: test` Job
+  carrying these two labels, so tooling can enumerate the suite without
+  hardcoding job names:
+
+    tracebloc.io/seal-check: "true"        — membership marker
+    tracebloc.io/seal-check-name: <check>  — stable per-check identifier
+
+  Current check names: egress-enforcement, backend-reachability,
+  storage-assertions.
+
+  Enumerate without running anything:   helm get hooks <release>
+  While a `helm test` run is live:      kubectl get jobs,pods -n <ns> \
+                                          -l tracebloc.io/seal-check=true
+
+  CONTRACT RULES — the label keys and existing check names are public API:
+  never rename them; add new checks under new names. Apply this helper to the
+  hook Job metadata AND its pod template (pod-level lets the CLI stream logs by
+  label). Do NOT apply it to auxiliary hook resources (ServiceAccounts, RBAC) —
+  only runnable checks are enumerable. See docs/SEAL-CHECK.md.
+
+  Usage:
+    {{- include "tracebloc.sealCheckLabels" (dict "name" "storage-assertions") | nindent 4 }}
+*/}}
+{{- define "tracebloc.sealCheckLabels" -}}
+tracebloc.io/seal-check: "true"
+tracebloc.io/seal-check-name: {{ .name | quote }}
+{{- end }}
+
 {{- define "tracebloc.serviceAccountName" -}}
 {{ .Release.Name }}-jobs-manager
 {{- end }}

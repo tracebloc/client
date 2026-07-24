@@ -1,0 +1,293 @@
+suite: Storage-assertions seal check
+# RFC-0003 §8.2 / backend#1184. A `helm test` hook Job that asserts release
+# PVCs are Bound on the expected StorageClass and — in dynamic-PVC mode — not
+# backed by unmanaged hostPath PVs. These guards pin: the on/off flag, the
+# test-hook annotation (never runs during install/upgrade), the seal-check
+# enumeration labels (the contract the tracebloc CLI consumes — cli#393), the
+# least-privilege RBAC split (PV read only with clusterScope), the mode
+# switches baked into the pod env, and that the pod is NOT a training
+# workload (it needs the Kubernetes API, which the lockdown denies).
+templates:
+  - templates/storage-assertions-check.yaml
+set:
+  clientId: "test-id"
+  clientPassword: "test"
+tests:
+  - it: renders by default — Job + SA + Role + RoleBinding + ClusterRole + CRB
+    asserts:
+      - hasDocuments:
+          count: 6
+      - isKind:
+          of: Job
+        documentIndex: 0
+      - isKind:
+          of: ServiceAccount
+        documentIndex: 1
+      - isKind:
+          of: Role
+        documentIndex: 2
+      - isKind:
+          of: RoleBinding
+        documentIndex: 3
+      - isKind:
+          of: ClusterRole
+        documentIndex: 4
+      - isKind:
+          of: ClusterRoleBinding
+        documentIndex: 5
+
+  - it: does not render when disabled
+    set:
+      sealCheck.storageAssertions.enabled: false
+    asserts:
+      - hasDocuments:
+          count: 0
+
+  - it: every resource is a test hook, so install/upgrade are never blocked
+    asserts:
+      - equal:
+          path: metadata.annotations["helm.sh/hook"]
+          value: test
+        documentIndex: 0
+      - equal:
+          path: metadata.annotations["helm.sh/hook"]
+          value: test
+        documentIndex: 1
+      - equal:
+          path: metadata.annotations["helm.sh/hook"]
+          value: test
+        documentIndex: 4
+      # RBAC must exist before the Job runs: negative hook-weight on the SA.
+      - equal:
+          path: metadata.annotations["helm.sh/hook-weight"]
+          value: "-6"
+        documentIndex: 1
+
+  - it: carries the seal-check enumeration labels on the Job AND its pod (contract for cli#393)
+    asserts:
+      - equal:
+          path: metadata.labels["tracebloc.io/seal-check"]
+          value: "true"
+        documentIndex: 0
+      - equal:
+          path: metadata.labels["tracebloc.io/seal-check-name"]
+          value: storage-assertions
+        documentIndex: 0
+      - equal:
+          path: spec.template.metadata.labels["tracebloc.io/seal-check"]
+          value: "true"
+        documentIndex: 0
+      - equal:
+          path: spec.template.metadata.labels["tracebloc.io/seal-check-name"]
+          value: storage-assertions
+        documentIndex: 0
+
+  - it: does NOT put the enumeration labels on auxiliary RBAC (only runnable checks are enumerable)
+    asserts:
+      - notExists:
+          path: metadata.labels["tracebloc.io/seal-check"]
+        documentIndex: 1
+      - notExists:
+          path: metadata.labels["tracebloc.io/seal-check"]
+        documentIndex: 4
+
+  - it: is NOT labelled as a training workload (it needs the Kubernetes API)
+    asserts:
+      - notExists:
+          path: spec.template.metadata.labels["tracebloc.io/workload"]
+        documentIndex: 0
+
+  - it: mounts a token for its own least-privilege ServiceAccount
+    asserts:
+      - equal:
+          path: spec.template.spec.automountServiceAccountToken
+          value: true
+        documentIndex: 0
+      - equal:
+          path: spec.template.spec.serviceAccountName
+          value: RELEASE-NAME-storage-assertions-check
+        documentIndex: 0
+      # Namespaced Role: PVC read only.
+      - equal:
+          path: rules[0].resources
+          value: ["persistentvolumeclaims"]
+        documentIndex: 2
+      - equal:
+          path: rules[0].verbs
+          value: ["get", "list"]
+        documentIndex: 2
+      # ClusterRole: PV read only.
+      - equal:
+          path: rules[0].resources
+          value: ["persistentvolumes"]
+        documentIndex: 4
+      - equal:
+          path: rules[0].verbs
+          value: ["get", "list"]
+        documentIndex: 4
+
+  - it: drops the ClusterRole/CRB and disables the PV scan with clusterScope=false
+    set:
+      clusterScope: false
+    asserts:
+      - hasDocuments:
+          count: 4
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: PV_SCAN
+            value: "false"
+        documentIndex: 0
+
+  - it: enables the PV scan by default (clusterScope defaults true)
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: PV_SCAN
+            value: "true"
+        documentIndex: 0
+
+  - it: bakes dynamic-PVC mode into the pod env by default (hostPath disabled)
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: HOSTPATH_MODE
+            value: "false"
+        documentIndex: 0
+
+  - it: bakes hostPath mode into the pod env on bare-metal (PV sub-check self-SKIPs)
+    set:
+      hostPath.enabled: true
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: HOSTPATH_MODE
+            value: "true"
+        documentIndex: 0
+
+  - it: expects the release-unique StorageClass when the chart creates one
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: EXPECTED_STORAGE_CLASS
+            value: RELEASE-NAME-storage-class
+        documentIndex: 0
+
+  - it: expects the operator-provided StorageClass when create=false
+    set:
+      storageClass:
+        create: false
+        name: ocs-storagecluster-cephfs
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: EXPECTED_STORAGE_CLASS
+            value: ocs-storagecluster-cephfs
+        documentIndex: 0
+
+  - it: knows the chart's fixed PVC names and legacy hostPath PV names
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: EXPECTED_PVCS
+            value: "client-pvc client-logs-pvc mysql-pvc"
+        documentIndex: 0
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: CHART_HOSTPATH_PVS
+            value: "RELEASE-NAME-data-pv RELEASE-NAME-logs-pv RELEASE-NAME-mysql-pv"
+        documentIndex: 0
+
+  - it: tolerates the k3s local-path provisioner prefixes by default (node-local, RFC-0003 Option C)
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: NODE_LOCAL_PREFIXES
+            value: "/var/lib/rancher/ /opt/local-path-provisioner/"
+        documentIndex: 0
+
+  - it: matches node-local prefixes on whole path segments only — a sibling like /opt/local-path-provisioner-evil must FAIL (bugbot, PR #378)
+    asserts:
+      # entries are normalized first (trailing slash stripped)...
+      - matchRegex:
+          path: spec.template.spec.containers[0].command[2]
+          pattern: 'p=\$\{prefix%/\}'
+        documentIndex: 0
+      # ...then a prefix admits exactly itself or paths UNDER it (segment
+      # boundary), so a sibling path can never ride the allowlist
+      - matchRegex:
+          path: spec.template.spec.containers[0].command[2]
+          pattern: 'case "\$hp" in "\$p"\|"\$p"/\*\)'
+        documentIndex: 0
+      # the old bare-prefix glob (admitted /opt/local-path-provisioner-evil)
+      # must not come back
+      - notMatchRegex:
+          path: spec.template.spec.containers[0].command[2]
+          pattern: 'in "\$prefix"\*'
+        documentIndex: 0
+
+  - it: suppresses the partial-verification WARNING for a claim that already FAILED the legacy-name check (bugbot, PR #378)
+    set:
+      clusterScope: false
+    asserts:
+      # a legacy-name FAIL is latched per claim...
+      - matchRegex:
+          path: spec.template.spec.containers[0].command[2]
+          pattern: legacy_hit=1
+        documentIndex: 0
+      # ...and the clusterScope=false WARNING ("verified NOT bound to a
+      # legacy PV") only prints when that name check actually passed —
+      # never contradicting a FAIL printed just above
+      - matchRegex:
+          path: spec.template.spec.containers[0].command[2]
+          pattern: 'elif \[ -z "\$legacy_hit" \]'
+        documentIndex: 0
+      - matchRegex:
+          path: spec.template.spec.containers[0].command[2]
+          pattern: "PARTIAL verification"
+        documentIndex: 0
+
+  - it: runs restricted-PSA clean (non-root, no caps, read-only root, seccomp)
+    asserts:
+      - equal:
+          path: spec.template.spec.securityContext.runAsNonRoot
+          value: true
+        documentIndex: 0
+      - equal:
+          path: spec.template.spec.securityContext.seccompProfile.type
+          value: RuntimeDefault
+        documentIndex: 0
+      - equal:
+          path: spec.template.spec.containers[0].securityContext.readOnlyRootFilesystem
+          value: true
+        documentIndex: 0
+      - equal:
+          path: spec.template.spec.containers[0].securityContext.capabilities.drop
+          value: ["ALL"]
+        documentIndex: 0
+
+  - it: pins the kubectl image by tag and stays overridable
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].image
+          value: "alpine/k8s:1.30.5"
+        documentIndex: 0
+
+  - it: survives a --reuse-values upgrade from a release predating sealCheck (nil block)
+    set:
+      sealCheck: null
+    asserts:
+      - hasDocuments:
+          count: 6
+      - equal:
+          path: spec.template.spec.containers[0].image
+          value: "alpine/k8s:1.30.5"
+        documentIndex: 0

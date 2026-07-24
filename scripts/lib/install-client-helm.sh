@@ -29,6 +29,108 @@ _ensure_helm_runnable() {
   error "Installation tools could not be run. Try: sudo chmod 755 $helm_bin then re-run this script."
 }
 
+# ── Training-size default (backend#1236, option A) ──────────────────────────
+# One knob, requests == limits (Guaranteed QoS). The old static default
+# ("cpu=2,memory=8Gi") was wrong at both ends: dead on arrival on nodes under
+# 8 GiB (the WSL2 field case — nothing could ever schedule) and ~12% of a
+# 64 GiB box. Precedence:
+#   1. TRACEBLOC_TRAINING_RESOURCES  (explicit install-time override, client#308)
+#   2. the installed release's current value — a `tracebloc resources set`
+#      choice must survive re-install, never be clobbered back to a default
+#   3. sized to this machine: LARGEST node allocatable − platform overhead
+#      (~1 CPU / 3 GiB, the cli's constants; a pod schedules onto ONE node, and
+#      k3d's server+agent are the same machine — summing would double-count)
+#   4. the historic static default (tiny or undeterminable machines)
+_TRAINING_DEFAULT="cpu=2,memory=8Gi"
+
+# k8s cpu quantity -> millicores ("12" -> 12000, "11500m" -> 11500); empty on junk.
+_cpu_to_milli() {
+  case "$1" in
+    *m) printf '%s' "${1%m}" ;;
+    ''|*[!0-9]*) : ;;
+    *) printf '%s' "$(( $1 * 1000 ))" ;;
+  esac
+}
+# k8s memory quantity -> bytes (Ki/Mi/Gi or plain bytes); empty on junk.
+_mem_to_bytes() {
+  local v="$1"
+  case "$v" in
+    *Ki) printf '%s' "$(( ${v%Ki} * 1024 ))" ;;
+    *Mi) printf '%s' "$(( ${v%Mi} * 1024 * 1024 ))" ;;
+    *Gi) printf '%s' "$(( ${v%Gi} * 1024 * 1024 * 1024 ))" ;;
+    ''|*[!0-9]*) : ;;
+    *) printf '%s' "$v" ;;
+  esac
+}
+
+# The installed release's RESOURCE_LIMITS (nested under env:), or nothing.
+# Handles both the quoted form our values file writes and the unquoted form
+# helm re-serializes (`helm get values` strips quotes — the #200 lesson).
+_existing_training_resources() {
+  local ns="${TB_NAMESPACE:-}" out
+  [[ -n "$ns" ]] || return 0
+  # helm get has no request timeout, so gate it behind a BOUNDED probe: a
+  # wedged API degrades to machine sizing / the static default instead of
+  # hanging values generation (Bugbot). A missing namespace also means there
+  # is no release to carry — skip the helm call entirely.
+  kubectl get namespace "$ns" --request-timeout=5s >/dev/null 2>&1 || return 0
+  out="$(helm get values "$ns" -n "$ns" 2>/dev/null)" || return 0
+  printf '%s\n' "$out" | awk '
+    /^[[:space:]]*RESOURCE_LIMITS:/ {
+      sub(/^[^:]*:[[:space:]]*/, ""); gsub(/"/, ""); print; exit
+    }'
+}
+
+# Echo "cpu=N,memory=MGi" sized to the largest node, or nothing when the
+# cluster is unreadable / the machine cannot give a run the 1-CPU/2-GiB floor.
+_machine_training_resources() {
+  has kubectl || return 0
+  local lines cpu mem cpu_m mem_b best_cpu=0 best_mem=0
+  # Bounded: a wedged API server must degrade to the static default, never
+  # hang values generation (Bugbot).
+  lines="$(kubectl get nodes --request-timeout=10s -o jsonpath='{range .items[*]}{.status.allocatable.cpu}{" "}{.status.allocatable.memory}{"\n"}{end}' 2>/dev/null)" || return 0
+  [[ -n "$lines" ]] || return 0
+  while read -r cpu mem; do
+    [[ -n "$cpu" && -n "$mem" ]] || continue
+    cpu_m="$(_cpu_to_milli "$cpu")"
+    mem_b="$(_mem_to_bytes "$mem")"
+    [[ -n "$cpu_m" && -n "$mem_b" ]] || continue
+    if (( mem_b > best_mem )) || { (( mem_b == best_mem )) && (( cpu_m > best_cpu )); }; then
+      best_mem=$mem_b
+      best_cpu=$cpu_m
+    fi
+  done <<< "$lines"
+  (( best_mem > 0 )) || return 0
+  local run_cpu_m=$(( best_cpu - 1000 ))            # − ~1 CPU platform overhead
+  local run_mem_b=$(( best_mem - 3 * 1024 * 1024 * 1024 ))  # − ~3 GiB overhead
+  { (( run_cpu_m >= 1000 )) && (( run_mem_b >= 2 * 1024 * 1024 * 1024 )); } || return 0
+  printf 'cpu=%d,memory=%dGi' "$(( run_cpu_m / 1000 ))" "$(( run_mem_b / 1024 / 1024 / 1024 ))"
+}
+
+# The per-run training size for the generated values ("cpu=N,memory=MGi").
+_training_resources() {
+  if [[ -n "${TRACEBLOC_TRAINING_RESOURCES:-}" ]]; then
+    printf '%s' "$TRACEBLOC_TRAINING_RESOURCES"
+    return 0
+  fi
+  local prev
+  prev="$(_existing_training_resources)"
+  # The historic static default was the ABSENCE of a choice, not a choice —
+  # carrying it would keep the unschedulable 8Gi on exactly the machines this
+  # sizing exists to fix (Bugbot). Only a value that differs from it survives.
+  if [[ -n "$prev" && "$prev" != "$_TRAINING_DEFAULT" ]]; then
+    printf '%s' "$prev"
+    return 0
+  fi
+  local sized
+  sized="$(_machine_training_resources)"
+  if [[ -n "$sized" ]]; then
+    printf '%s' "$sized"
+    return 0
+  fi
+  printf '%s' "$_TRAINING_DEFAULT"
+}
+
 _extract_yaml_value() {
   local file="$1" key="$2"
   local line
@@ -298,7 +400,8 @@ _reconcile_adopted_client() {
   local _uuid; _uuid="$(_sanitize_credential "${TRACEBLOC_CLIENT_ID:-}")"
   [[ -n "$_uuid" ]] && _args+=(--set "clientId=$_uuid")
 
-  _ensure_release_dirs "$_ns"
+  # node-local (RFC-0003 Option C) has no hostPath dirs to pre-create.
+  [[ "${TB_STORAGE_MODE:-hostpath}" != "node-local" ]] && _ensure_release_dirs "$_ns"
 
   # Reconcile blocks too — same spinner treatment (RFC-0002 §2).
   if ! spin_cmd "Reconciling the existing client…" helm "${_args[@]}"; then
@@ -398,7 +501,14 @@ install_client_helm() {
   # (provision_client) or supplied via dual-mode (TRACEBLOC_CLIENT_ID/PASSWORD or
   # TRACEBLOC_VALUES_FILE). This step renders the values, runs Helm, and shows the
   # services download; the final connect + summary is step f.
-  _ensure_tracebloc_dirs
+  # node-local (RFC-0003 Option C): data lives inside the node, so skip the
+  # world-writable ~/.tracebloc/{data,logs,mysql} dirs; just ensure the base dir
+  # exists for values.yaml + the install log.
+  if [[ "${TB_STORAGE_MODE:-hostpath}" == "node-local" ]]; then
+    mkdir -p "$HOST_DATA_DIR"
+  else
+    _ensure_tracebloc_dirs
+  fi
   local values_file="${HOST_DATA_DIR}/values.yaml"
 
   # ── Dev-mode override: caller-supplied values file ───────────────────────
@@ -622,6 +732,11 @@ install_client_helm() {
   proxy_env_yaml="$(_chart_proxy_env_yaml)"
   [[ -n "$proxy_env_yaml" ]] && log "Corporate proxy detected on host — propagating to client workloads via chart values."
 
+  # backend#1236 (option A): size the default training budget to this machine.
+  local training_size
+  training_size="$(_training_resources)"
+  log "Training size: ${training_size} (adjust any time with 'tracebloc resources set')"
+
   cat <<EOF > "$values_file"
 # ============================================================
 # Generated by tracebloc installer — client configuration
@@ -631,9 +746,11 @@ env:
 $([ -n "${CLIENT_ENV:-}" ] && printf '  CLIENT_ENV: "%s"\n' "$CLIENT_ENV")${proxy_env_yaml}
   # Training size: how much CPU/RAM each training run gets. One knob sets
   # requests == limits (Guaranteed QoS; client-runtime keeps them in lockstep).
-  # Set at install time with TRACEBLOC_TRAINING_RESOURCES="cpu=4,memory=16Gi".
-  RESOURCE_LIMITS: "${TRACEBLOC_TRAINING_RESOURCES:-cpu=2,memory=8Gi}"
-  RESOURCE_REQUESTS: "${TRACEBLOC_TRAINING_RESOURCES:-cpu=2,memory=8Gi}"
+  # Sized to this machine at install — largest node minus ~1 CPU / 3 GiB
+  # platform overhead — unless TRACEBLOC_TRAINING_RESOURCES is set or the
+  # installed release already carries a choice (backend#1236, option A).
+  RESOURCE_LIMITS: "${training_size}"
+  RESOURCE_REQUESTS: "${training_size}"
   GPU_LIMITS: "$gpu_val"
   GPU_REQUESTS: "$gpu_val"
   RUNTIME_CLASS_NAME: ""
@@ -643,6 +760,20 @@ $([ -n "${CLIENT_ENV:-}" ] && printf '  CLIENT_ENV: "%s"\n' "$CLIENT_ENV")${prox
   # that will never arrive.
   SINGLE_NODE: "true"
 $([ -n "${HOST_DATASET_DIR:-}" ] && printf '  HOST_UID: "%s"\n  HOST_GID: "%s"\n' "$(id -u)" "$(id -g)")
+$(if [[ "${TB_STORAGE_MODE:-hostpath}" == "node-local" ]]; then
+cat <<'STORAGE'
+# RFC-0003 Option C — node-local: use k3s's built-in local-path StorageClass.
+# No hostPath PVs, so dataset volumes are provisioned inside the k3d node and
+# are destroyed by `cluster delete` rather than left as host files.
+storageClass:
+  create: false
+  name: local-path
+
+hostPath:
+  enabled: false
+STORAGE
+else
+cat <<'STORAGE'
 storageClass:
   create: true
   name: client-storage-class
@@ -652,7 +783,9 @@ storageClass:
 
 hostPath:
   enabled: true
-$([ -n "${HOST_DATASET_DIR:-}" ] && printf '  datasetPath: /tracebloc-data\n')
+STORAGE
+[ -n "${HOST_DATASET_DIR:-}" ] && printf '  datasetPath: /tracebloc-data\n'
+fi)
 pvc:
   mysql: 2Gi
   logs: 10Gi
@@ -688,7 +821,8 @@ EOF
 
   # Pre-create per-release hostPath dirs so they're owned by the host user, not
   # root:root from kubelet's DirectoryOrCreate. See _ensure_release_dirs.
-  _ensure_release_dirs "$TB_NAMESPACE"
+  # node-local (RFC-0003 Option C) has no hostPath dirs to pre-create.
+  [[ "${TB_STORAGE_MODE:-hostpath}" != "node-local" ]] && _ensure_release_dirs "$TB_NAMESPACE"
 
   # The chart install blocks ~10-15s (render + apply + image pull), so run it
   # behind a spinner instead of a frozen terminal — spin_cmd streams helm output

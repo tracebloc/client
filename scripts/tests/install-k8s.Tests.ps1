@@ -491,6 +491,96 @@ Describe "Install-ClientHelm" {
     Install-ClientHelm
     Should -Invoke helm -ParameterFilter { $args -contains "upgrade" }
   }
+  # #385: the repo must be (re-)registered on EVERY run. The old presence guard
+  # string-matched (helm repo list 2>&1), which Windows PowerShell 5.1 renders
+  # with this script's own ...\tracebloc-installer-<n>\... temp path -- containing
+  # "tracebloc" -- so the add was skipped on every fresh machine and the upgrade
+  # died with "Error: repo tracebloc not found".
+  It "registers the chart repo with --force-update before upgrading (#385)" {
+    $HOST_DATA_DIR = "$TestDrive/d385a"
+    Mock Read-Host {
+      param([string]$Prompt, [switch]$AsSecureString)
+      if ($Prompt -match 'password') { return (ConvertTo-SecureString "pw" -AsPlainText -Force) }
+      return "id385"
+    }
+    Mock Test-Credentials { "valid" }
+    Install-ClientHelm
+    Should -Invoke helm -ParameterFilter {
+      ($args -contains "repo") -and ($args -contains "add") -and
+      ($args -contains "--force-update") -and ($args -contains "https://tracebloc.github.io/client")
+    }
+    Should -Invoke helm -ParameterFilter { $args -contains "upgrade" }
+  }
+  It "aborts with helm's own output when the repo add fails (#385)" {
+    $HOST_DATA_DIR = "$TestDrive/d385b"
+    Mock Read-Host {
+      param([string]$Prompt, [switch]$AsSecureString)
+      if ($Prompt -match 'password') { return (ConvertTo-SecureString "pw" -AsPlainText -Force) }
+      return "id385b"
+    }
+    Mock Test-Credentials { "valid" }
+    Mock Err { param($m) $script:lastErr = $m; throw "err" }
+    Mock helm {
+      if (($args -contains "repo") -and ($args -contains "add")) {
+        $global:LASTEXITCODE = 1
+        return "Error: looks like this is not a valid chart repository"
+      }
+      $global:LASTEXITCODE = 0
+    }
+    { Install-ClientHelm } | Should -Throw
+    $script:lastErr | Should -Match 'not a valid chart repository'
+    Should -Not -Invoke helm -ParameterFilter { $args -contains "upgrade" }
+  }
+}
+
+Describe "Get-TrainingResources" {
+  # backend#1236 (option A): machine-sized training default, mirroring the bash
+  # twin's _training_resources. Precedence: env override > installed release's
+  # choice > largest-node sizing > static fallback.
+  BeforeEach { $script:TB_NAMESPACE = "tracebloc"; $env:TRACEBLOC_TRAINING_RESOURCES = $null }
+  AfterEach  { $env:TRACEBLOC_TRAINING_RESOURCES = $null }
+  It "explicit override wins" {
+    $env:TRACEBLOC_TRAINING_RESOURCES = "cpu=4,memory=16Gi"
+    Get-TrainingResources | Should -Be "cpu=4,memory=16Gi"
+  }
+  It "existing release choice carried (resources set survives re-install)" {
+    Mock kubectl { $global:LASTEXITCODE = 0; "" }   # bounded namespace probe passes
+    Mock helm { $global:LASTEXITCODE = 0; '{"env":{"RESOURCE_LIMITS":"cpu=4,memory=12Gi"}}' }
+    Get-TrainingResources | Should -Be "cpu=4,memory=12Gi"
+  }
+  It "the historic static default is NOT carried — re-install gets sized (Bugbot)" {
+    Mock helm { $global:LASTEXITCODE = 0; '{"env":{"RESOURCE_LIMITS":"cpu=2,memory=8Gi"}}' }
+    Mock kubectl {
+      if ($args -contains "--request-timeout=10s") {
+        $global:LASTEXITCODE = 0
+        @("12 6924Mi")
+      } else { $global:LASTEXITCODE = 0; "" }   # namespace probe passes
+    }
+    Get-TrainingResources | Should -Be "cpu=11,memory=3Gi"
+  }
+  It "fresh install sized to the largest node minus overhead (k3d nodes not summed)" {
+    Mock helm { $global:LASTEXITCODE = 1; "" }
+    # The mock only answers a BOUNDED call — dropping --request-timeout fails
+    # this test (a wedged API must never hang values generation). Output is the
+    # jsonpath "cpu memory" line contract (one line per node).
+    Mock kubectl {
+      if ($args -contains "--request-timeout=10s") {
+        $global:LASTEXITCODE = 0
+        @("12 6924Mi", "12 6924Mi")
+      } else { $global:LASTEXITCODE = 1; "" }
+    }
+    Get-TrainingResources | Should -Be "cpu=11,memory=3Gi"
+  }
+  It "below-floor machine falls back to the static default" {
+    Mock helm { $global:LASTEXITCODE = 1; "" }
+    Mock kubectl { $global:LASTEXITCODE = 0; @("2 4Gi") }
+    Get-TrainingResources | Should -Be "cpu=2,memory=8Gi"
+  }
+  It "unreadable cluster falls back to the static default" {
+    Mock helm { $global:LASTEXITCODE = 1; "" }
+    Mock kubectl { $global:LASTEXITCODE = 1; "" }
+    Get-TrainingResources | Should -Be "cpu=2,memory=8Gi"
+  }
 }
 
 Describe "Confirm-Cluster" {
@@ -581,6 +671,24 @@ Describe "Test-PfUrl" {
     Mock Invoke-WebRequest { throw [System.Exception]::new("Unable to connect to the remote server") }
     Test-PfUrl "https://x" | Should -Be "blocked"
   }
+  # -RequireSuccess: for targets whose CONTENT must exist (the Helm repo
+  # index.yaml, #385) an HTTP error is a failure, not "reachable".
+  It "-RequireSuccess: HTTP 404 -> 'http 404' (#385)" {
+    Mock Invoke-WebRequest {
+      $ex = [System.Exception]::new("HTTP 404")
+      Add-Member -InputObject $ex -NotePropertyName Response -NotePropertyValue ([pscustomobject]@{ StatusCode = 404 }) -Force
+      throw $ex
+    }
+    Test-PfUrl "https://x" -RequireSuccess | Should -Be "http 404"
+  }
+  It "-RequireSuccess: HTTP 200 -> ok" {
+    Mock Invoke-WebRequest { [pscustomobject]@{ StatusCode = 200 } }
+    Test-PfUrl "https://x" -RequireSuccess | Should -Be "ok"
+  }
+  It "-RequireSuccess: connection failure still classified (blocked)" {
+    Mock Invoke-WebRequest { throw [System.Exception]::new("Unable to connect to the remote server") }
+    Test-PfUrl "https://x" -RequireSuccess | Should -Be "blocked"
+  }
 }
 
 # Get-CimInstance is a Windows-only cmdlet (CimCmdlets module) — it can't be
@@ -600,6 +708,15 @@ Describe "Get-Pf* resource readers" -Skip:(-not $IsWindows) {
     Mock Get-CimInstance { [pscustomobject]@{ FreeSpace = 50GB } }
     Get-PfFreeGb | Should -Be 50
   }
+  It "Get-PfVirtualization: running hypervisor -> true, firmware not consulted (#387)" {
+    Mock Get-CimInstance { [pscustomobject]@{ HypervisorPresent = $true } } -ParameterFilter { $ClassName -eq 'Win32_ComputerSystem' }
+    Get-PfVirtualization | Should -Be $true
+  }
+  It "Get-PfVirtualization: no hypervisor + firmware disabled -> false (#387)" {
+    Mock Get-CimInstance { [pscustomobject]@{ HypervisorPresent = $false } } -ParameterFilter { $ClassName -eq 'Win32_ComputerSystem' }
+    Mock Get-CimInstance { [pscustomobject]@{ VirtualizationFirmwareEnabled = $false } } -ParameterFilter { $ClassName -eq 'Win32_Processor' }
+    Get-PfVirtualization | Should -Be $false
+  }
 }
 
 Describe "Test-Preflight" {
@@ -608,6 +725,7 @@ Describe "Test-Preflight" {
     Mock Get-PfCpu { 4 }; Mock Get-PfMemGb { 8 }; Mock Get-PfFreeGb { 50 }
     Mock Get-WindowsArch { "amd64" }
     Mock Get-PfFsType { "local" }
+    Mock Get-PfVirtualization { $true }
   }
   AfterEach { $env:TRACEBLOC_SKIP_PREFLIGHT = $null; $env:TRACEBLOC_ALLOW_ARM64 = $null; $env:TRACEBLOC_ALLOW_NETWORK_FS = $null }
 
@@ -628,6 +746,19 @@ Describe "Test-Preflight" {
   It "arm64 -> info, not a hard fail (Docker Desktop emulates)" {
     Mock Get-WindowsArch { "arm64" }
     Mock Test-PfUrl { "ok" }
+    { Test-Preflight } | Should -Not -Throw
+  }
+  # #387: Docker Desktop's own "Virtualization support not detected" only
+  # appears AFTER we've installed and launched it — preflight must fail fast
+  # with the firmware fix instead.
+  It "virtualization disabled in firmware -> fails (Err throws) (#387)" {
+    Mock Test-PfUrl { "ok" }
+    Mock Get-PfVirtualization { $false }
+    { Test-Preflight } | Should -Throw
+  }
+  It "virtualization undeterminable -> skipped, not a fail (#387)" {
+    Mock Test-PfUrl { "ok" }
+    Mock Get-PfVirtualization { $null }
     { Test-Preflight } | Should -Not -Throw
   }
   It "memory below floor -> warn-only on Windows (does not throw)" {
