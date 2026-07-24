@@ -258,21 +258,25 @@ Describe "Install-ClientHelm" {
     $script:TB_PROV_MODE = "minted"; $script:TB_PROV_ID = "uuid-11"
     $script:TB_PROV_PASSWORD = "mintedpw"; $script:TB_PROV_NS = "lukas-01"
     Mock Read-Host { throw "the minted path must never prompt" }
+    Mock Test-Credentials { "valid" }   # even a fresh mint verifies (#397 r2)
     Install-ClientHelm
+    Should -Invoke Test-Credentials -Times 1
     (Get-Content "$HOST_DATA_DIR/values.yaml" -Raw) | Should -Match 'clientId: "uuid-11"'
     (Get-Content "$HOST_DATA_DIR/values.yaml" -Raw) | Should -Match "clientPassword: 'mintedpw'"
     Should -Invoke helm -ParameterFilter { ($args -contains "upgrade") -and ($args -contains "lukas-01") }
   }
-  It "adopted mode (#388): heals a STALE (cli#125 numeric) clientId past the one-client guard" {
+  It "adopted mode (#388): surgical --reuse-values reconcile heals a STALE (cli#125 numeric) clientId" {
     # The realistic heal: helm still reports the legacy numeric dashboard id
-    # while Step 4 adopted the UUID. The guard must let adopted mode through —
-    # this is the one sanctioned id mismatch (Bugbot #397 r1, High).
+    # while Step 4 adopted the UUID. The guard must let adopted mode through
+    # (the one sanctioned id mismatch, r1 High), and the upgrade must be
+    # SURGICAL — --reuse-values on the LIVE release in ITS namespace, healing
+    # only clientId, never regenerating values (#397 r2).
     $HOST_DATA_DIR = "$TestDrive/d-adopt"; New-Item -ItemType Directory -Path $HOST_DATA_DIR -Force | Out-Null
     Set-Content "$HOST_DATA_DIR/values.yaml" "clientId: `"123`"`nclientPassword: 'prevpw'"
     $script:TB_PROV_MODE = "adopted"; $script:TB_PROV_ID = "uuid-9"; $script:TB_PROV_NS = "lukas-01"
     Mock Read-Host { throw "the adopted path must never prompt" }
     Mock helm {
-      if ($args -contains "list") { '[{"name":"oldrel","namespace":"lukas-01","chart":"client-1.4.3"}]'; $global:LASTEXITCODE = 0; return }
+      if ($args -contains "list") { '[{"name":"oldrel","namespace":"legacy-ns","chart":"client-1.4.3"}]'; $global:LASTEXITCODE = 0; return }
       if ($args -contains "get") {
         if ($args -contains "json") { '{"clientId":"123"}' } else { 'clientId: 123' }   # STALE id
         $global:LASTEXITCODE = 0; return
@@ -280,9 +284,27 @@ Describe "Install-ClientHelm" {
       $global:LASTEXITCODE = 0
     }
     Install-ClientHelm
-    (Get-Content "$HOST_DATA_DIR/values.yaml" -Raw) | Should -Match 'clientId: "uuid-9"'    # healed
+    Should -Invoke helm -ParameterFilter { ($args -contains "upgrade") -and ($args -contains "--reuse-values") -and ($args -contains "clientId=uuid-9") -and ($args -contains "oldrel") -and ($args -contains "legacy-ns") }
+    Should -Not -Invoke helm -ParameterFilter { ($args -contains "upgrade") -and ($args -contains "--values") }
+    # The local record is healed surgically — clientId only, password untouched.
+    (Get-Content "$HOST_DATA_DIR/values.yaml" -Raw) | Should -Match 'clientId: "uuid-9"'
     (Get-Content "$HOST_DATA_DIR/values.yaml" -Raw) | Should -Match "clientPassword: 'prevpw'"
-    Should -Invoke helm -ParameterFilter { $args -contains "upgrade" }
+    # Wait-ForClientReady must watch the LIVE release's namespace.
+    $script:TB_NAMESPACE | Should -Be "legacy-ns"
+  }
+  It "adopted mode with a live release needs NO password at all (#397 r2)" {
+    $HOST_DATA_DIR = "$TestDrive/d-adopt-nopw"   # no values.yaml anywhere
+    $script:TB_PROV_MODE = "adopted"; $script:TB_PROV_ID = "uuid-9"; $script:TB_PROV_NS = "lukas-01"
+    Mock helm {
+      if ($args -contains "list") { '[{"name":"oldrel","namespace":"lukas-01","chart":"client-1.4.3"}]'; $global:LASTEXITCODE = 0; return }
+      if ($args -contains "get") {
+        if ($args -contains "json") { '{"clientId":"uuid-9"}' } else { 'clientId: uuid-9' }
+        $global:LASTEXITCODE = 0; return
+      }
+      $global:LASTEXITCODE = 0
+    }
+    Install-ClientHelm
+    Should -Invoke helm -ParameterFilter { ($args -contains "upgrade") -and ($args -contains "--reuse-values") }
   }
   It "a DIFFERENT existing client still refuses outside adopted mode (guard intact)" {
     $HOST_DATA_DIR = "$TestDrive/d-guard-minted"
@@ -300,7 +322,7 @@ Describe "Install-ClientHelm" {
     { Install-ClientHelm } | Should -Throw
     Should -Not -Invoke helm -ParameterFilter { $args -contains "upgrade" }
   }
-  It "adopted mode without a local values file -> honest terminal error (#388)" {
+  It "adopted mode on a REBUILT cluster (no release, no values file) -> honest terminal error (#388)" {
     $HOST_DATA_DIR = "$TestDrive/d-adopt-bare"
     $script:TB_PROV_MODE = "adopted"; $script:TB_PROV_ID = "uuid-9"; $script:TB_PROV_NS = "lukas-01"
     Mock Err { throw "err: $args" }

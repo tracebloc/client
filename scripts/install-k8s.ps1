@@ -1289,7 +1289,7 @@ function Read-TraceblocCredentialFile {
 # client release whose values couldn't be read — fail CLOSED, never treat as
 # "no client here"), ListUnknown (couldn't even enumerate releases).
 function Get-InstalledClientInfo {
-  $existingId = ""; $existingNs = ""; $unreadableNs = ""; $listUnknown = $false
+  $existingId = ""; $existingNs = ""; $existingName = ""; $unreadableNs = ""; $listUnknown = $false
   $listJson = (helm list -A -o json 2>$null) | Out-String
   if ($LASTEXITCODE -ne 0) {
     # helm list failed (wedged/unreachable API, kubeconfig glitch) -> unknown.
@@ -1317,7 +1317,7 @@ function Get-InstalledClientInfo {
           }
           if ($null -eq $vals -or $null -eq $vals.clientId) { continue }
           $id = "$($vals.clientId)".Trim()
-          if ($id) { $existingId = $id; $existingNs = $rel.namespace; break }
+          if ($id) { $existingId = $id; $existingNs = $rel.namespace; $existingName = $rel.name; break }
         }
       }
     } catch {
@@ -1325,7 +1325,7 @@ function Get-InstalledClientInfo {
       $listUnknown = $true
     }
   }
-  return [pscustomobject]@{ Id = $existingId; Ns = $existingNs; UnreadableNs = $unreadableNs; ListUnknown = $listUnknown }
+  return [pscustomobject]@{ Id = $existingId; Ns = $existingNs; Name = $existingName; UnreadableNs = $unreadableNs; ListUnknown = $listUnknown }
 }
 
 # -- Step 4/5: Register this machine (browser sign-in; mirrors provision_client)
@@ -1441,20 +1441,25 @@ function Invoke-ProvisionClient {
   $createOut = Join-Path ([System.IO.Path]::GetTempPath()) "tb-client-create-$(Get-Random).log"
   $createArgs = @("client", "create", "--yes", "--name", $clientName, "--credential-file", $credFile)
   if ($clientLocation) { $createArgs += @("--location", $clientLocation) }
-  & tracebloc @createArgs *> $createOut
-  $createRc = $LASTEXITCODE
-  if (Test-Path $createOut) { Get-Content $createOut -ErrorAction SilentlyContinue | ForEach-Object { Log $_ } }
-  if ($createRc -ne 0) {
-    Remove-Item $credFile -Force -ErrorAction SilentlyContinue   # any partial the failed create wrote
-    Print-CreateFailure -OutFile $createOut -Location $clientLocation
+  # try/finally: PowerShell runs `finally` on Ctrl-C, terminating errors, AND
+  # `exit` (Err), so the secret can never linger in the window between mint and
+  # parse — the ps1 analogue of bash's _PROVISION_CRED_FILE + install_cleanup
+  # (Bugbot #397 r2).
+  $cred = $null
+  try {
+    & tracebloc @createArgs *> $createOut
+    $createRc = $LASTEXITCODE
+    if (Test-Path $createOut) { Get-Content $createOut -ErrorAction SilentlyContinue | ForEach-Object { Log $_ } }
+    if ($createRc -ne 0) {
+      Print-CreateFailure -OutFile $createOut -Location $clientLocation
+      Err "Couldn't provision the client. Re-run to retry - full log: $LOG_FILE"
+    }
+    if (-not (Test-Path $credFile)) { Err "client create did not write the credential file ($credFile)." }
+    $cred = Read-TraceblocCredentialFile -Path $credFile
+  } finally {
+    Remove-Item $credFile -Force -ErrorAction SilentlyContinue
     Remove-Item $createOut -Force -ErrorAction SilentlyContinue
-    Err "Couldn't provision the client. Re-run to retry - full log: $LOG_FILE"
   }
-  Remove-Item $createOut -Force -ErrorAction SilentlyContinue
-  if (-not (Test-Path $credFile)) { Err "client create did not write the credential file ($credFile)." }
-
-  $cred = Read-TraceblocCredentialFile -Path $credFile
-  Remove-Item $credFile -Force -ErrorAction SilentlyContinue
 
   $script:TB_PROV_ID = "$($cred['TRACEBLOC_CLIENT_ID'])".Trim()
   $script:TB_PROV_NS = "$($cred['TB_NAMESPACE'])".Trim()
@@ -1491,32 +1496,34 @@ function Install-ClientHelm {
 
   switch ($provMode) {
     "minted" {
-      # Freshly minted by `tracebloc client create` — valid by construction, no
-      # re-verify. The namespace MUST be the minted slug (it equals the
-      # heartbeat-reported namespace).
+      # Freshly minted by `tracebloc client create`. The namespace MUST be the
+      # minted slug (it equals the heartbeat-reported namespace). Verify even a
+      # fresh mint (never skip verification by provisioning method — Bugbot
+      # #397 r2): a mint that can't authenticate — backend skew, an account
+      # deactivated mid-flow — fails HERE, not as a crash-looping pod later.
       $TB_CLIENT_ID = $script:TB_PROV_ID
       $TB_CLIENT_PASSWORD = $script:TB_PROV_PASSWORD
       $rawNs = $script:TB_PROV_NS
+      Info "Verifying the new credential with tracebloc..."
+      $credStatus = Test-Credentials -ClientId $TB_CLIENT_ID -ClientPassword $TB_CLIENT_PASSWORD
+      if ($credStatus -eq "valid") { Ok "Credentials verified." }
+      elseif ($credStatus -eq "inactive") { Err "This tracebloc account is not active yet. Check your email for the activation link, then re-run." }
+      elseif ($credStatus -eq "invalid") { Err "The freshly minted credential was rejected by tracebloc - this shouldn't happen. Re-run the installer; if it persists, contact tracebloc support." }
+      else {
+        Warn "Couldn't reach tracebloc to verify the new credential right now - continuing."
+      }
     }
     "adopted" {
       # Re-run on a registered cluster: no new credential was minted (the
-      # existing one stands, write-only on the backend). Reuse the password
-      # already deployed in the previous values file; the values write below
-      # heals a stale clientId to the adopted UUID (cli#125-era installs
-      # stored the numeric dashboard id, which can't authenticate).
+      # existing one stands, write-only on the backend). With a LIVE release
+      # the upgrade below is surgical (--reuse-values, heals only clientId —
+      # Bugbot #397 r2) and needs no password at all; the previous values-file
+      # password matters only on a rebuilt cluster with no release, decided
+      # after the guard where the release enumeration is known.
       $TB_CLIENT_ID = $script:TB_PROV_ID
       $rawNs = $script:TB_PROV_NS
       if (Test-Path $valuesFile) {
         $TB_CLIENT_PASSWORD = Get-TraceblocYamlValue -Path $valuesFile -Key "clientPassword"
-      }
-      if (-not $TB_CLIENT_PASSWORD) {
-        Write-Host ""
-        Warn "This cluster is registered as client '$TB_CLIENT_ID', but its local configuration (with the client password) is gone."
-        Hint "Pick one:"
-        Hint "  - Re-run with the client's credentials:  set TRACEBLOC_CLIENT_ID + TRACEBLOC_CLIENT_PASSWORD, then re-run"
-        Hint "  - Start fresh:  k3d cluster delete $CLUSTER_NAME   (wipes this client + its local data), then re-run"
-        Write-Host ""
-        Err "Can't reconcile the existing client without its password."
       }
     }
     "preset" {
@@ -1683,6 +1690,30 @@ function Install-ClientHelm {
     Err "Refusing to replace the existing client. See the options above."
   }
 
+  # -- Adopted reconcile routing (#397 r2) --
+  # With a LIVE release, reconcile surgically: upgrade THAT release, in ITS
+  # namespace, with --reuse-values — preserving the deployed configuration and
+  # secret, healing only clientId (bash parity: the reuse-values reconcile).
+  # Regenerating values.yaml would clobber live config with fresh defaults.
+  # Only a rebuilt cluster (adopted anchor on the backend, no local release)
+  # needs the full values write — and that path needs the previous password.
+  $adoptedReuse = $false
+  $existingName = $inst.Name
+  if ($provMode -eq "adopted" -and $existingId) {
+    $adoptedReuse = $true
+    $TB_NAMESPACE = $existingNs
+    $script:TB_NAMESPACE = $TB_NAMESPACE   # Wait-ForClientReady watches the LIVE release's namespace
+  } elseif ($provMode -eq "adopted" -and -not $TB_CLIENT_PASSWORD) {
+    Write-Host ""
+    Warn "This cluster is registered as client '$TB_CLIENT_ID', but no release survives locally and the previous configuration (with the client password) is gone."
+    Hint "Pick one:"
+    Hint "  - Re-run with the client's credentials:  set TRACEBLOC_CLIENT_ID + TRACEBLOC_CLIENT_PASSWORD, then re-run"
+    Hint "  - Start fresh:  k3d cluster delete $CLUSTER_NAME   (wipes this client + its local data), then re-run"
+    Write-Host ""
+    Err "Can't reconcile the existing client without its password."
+  }
+
+  if (-not $adoptedReuse) {
   $passwordEscaped = $TB_CLIENT_PASSWORD -replace "'", "''"
 
   $gpuVal = ""
@@ -1742,6 +1773,7 @@ $envBlock
 "@
   Set-Content -Path $valuesFile -Value $valuesContent -Encoding UTF8
   Log "Values file written to $valuesFile"
+  }   # end -not $adoptedReuse (values regeneration)
 
   # Register the chart repo unconditionally. `--force-update` is idempotent, heals
   # a stale/wrong URL from an earlier attempt, and re-fetches the repo index, so no
@@ -1757,13 +1789,32 @@ $envBlock
   if ($LASTEXITCODE -ne 0) { Err "Couldn't add the tracebloc chart repo ($TRACEBLOC_HELM_REPO_URL). Helm output:`n$addOutput`nCheck the log for details: $LOG_FILE" }
 
   Write-Host ""
-  Log "Installing $TB_NAMESPACE from $TRACEBLOC_HELM_REPO_NAME/$TRACEBLOC_CHART_NAME in namespace '$TB_NAMESPACE'..."
-  $helmOutput = (helm upgrade --install $TB_NAMESPACE "$TRACEBLOC_HELM_REPO_NAME/$TRACEBLOC_CHART_NAME" `
-    --namespace $TB_NAMESPACE `
-    --create-namespace `
-    --values $valuesFile 2>&1) | Out-String
-  Log "Helm Output: $helmOutput"
-  if ($LASTEXITCODE -ne 0) { Err "Client installation failed. Helm output:`n$helmOutput`nCheck the log for details: $LOG_FILE" }
+  if ($adoptedReuse) {
+    # Surgical reconcile of the LIVE release: --reuse-values preserves the
+    # deployed configuration + secret; only clientId is healed (#397 r2).
+    Log "Reconciling release '$existingName' in namespace '$existingNs' (adopted; --reuse-values; healing clientId)..."
+    $helmOutput = (helm upgrade $existingName "$TRACEBLOC_HELM_REPO_NAME/$TRACEBLOC_CHART_NAME" `
+      --namespace $existingNs `
+      --reuse-values `
+      --set-string "clientId=$TB_CLIENT_ID" 2>&1) | Out-String
+    Log "Helm Output: $helmOutput"
+    if ($LASTEXITCODE -ne 0) { Err "Client reconcile failed. Helm output:`n$helmOutput`nCheck the log for details: $LOG_FILE" }
+    # Keep the LOCAL record in step for future default-reuse prompts: heal only
+    # the clientId line, never regenerate — the live release is the truth.
+    if (Test-Path $valuesFile) {
+      $vals = Get-Content $valuesFile -Raw
+      $vals = $vals -replace '(?m)^clientId:\s*.*$', "clientId: `"$TB_CLIENT_ID`""
+      Set-Content -Path $valuesFile -Value $vals -Encoding UTF8
+    }
+  } else {
+    Log "Installing $TB_NAMESPACE from $TRACEBLOC_HELM_REPO_NAME/$TRACEBLOC_CHART_NAME in namespace '$TB_NAMESPACE'..."
+    $helmOutput = (helm upgrade --install $TB_NAMESPACE "$TRACEBLOC_HELM_REPO_NAME/$TRACEBLOC_CHART_NAME" `
+      --namespace $TB_NAMESPACE `
+      --create-namespace `
+      --values $valuesFile 2>&1) | Out-String
+    Log "Helm Output: $helmOutput"
+    if ($LASTEXITCODE -ne 0) { Err "Client installation failed. Helm output:`n$helmOutput`nCheck the log for details: $LOG_FILE" }
+  }
 
   # Point kubeconfig's current context at the client namespace so kubectl + the
   # tracebloc CLI default to it (no -n / --namespace needed). Best-effort.
