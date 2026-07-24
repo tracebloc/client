@@ -79,17 +79,37 @@ _diagnose_not_ready() {
 # Reports the outcome based on CLIENT_STATE (set by wait_for_client_ready).
 # The "secure compute environment / your data never leaves" claim is printed
 # ONLY when the client is verifiably connected — never on a partial/failed run.
-# One-line note in the success summary so the user knows the client survives a
-# reboot — automatic on Linux; needs Docker Desktop start-on-login on macOS/Win.
+# One-line note in the success summary so the user knows how the client comes
+# back after a reboot. Linux with docker.service enabled on boot → automatic;
+# Linux without it (Tier 0's zero-privilege path, or opted out) → the user has to
+# start Docker first; macOS/Windows → Docker Desktop must be launched.
 _reboot_note() {
-  # Single dim footer line — the LAST line of the summary. OS-specific so Linux is
-  # NOT regressed: on Linux the cluster + Docker come back on boot automatically;
-  # on macOS/Windows Docker Desktop must be launched (the run-through's macOS copy).
-  if [[ "$OS" == "Linux" ]]; then
+  # Single dim footer line — the LAST line of the summary.
+  if [[ "$OS" != "Linux" ]]; then
+    # macOS/Windows: Docker Desktop owns boot autostart and must be launched.
+    echo -e "  ${DIM}After a reboot, open Docker Desktop to bring tracebloc back.${RESET}"
+  elif [[ "${TB_DOCKER_AUTOSTART:-0}" == "1" ]]; then
+    # docker.service is enabled on boot (ensure_cluster_autostart) and the k3d
+    # nodes carry --restart unless-stopped → the cluster returns on its own.
     echo -e "  ${DIM}After a reboot, tracebloc restarts automatically.${RESET}"
   else
-    echo -e "  ${DIM}After a reboot, open Docker Desktop to bring tracebloc back.${RESET}"
+    # We did NOT enable docker.service (Tier 0, or the user opted out): the k3d
+    # restart policy still brings the cluster back, but only once Docker itself is
+    # running — so be honest and don't promise it happens automatically.
+    echo -e "  ${DIM}After a reboot, start Docker to bring tracebloc back.${RESET}"
   fi
+}
+
+# Will `tracebloc` resolve in the user's shell? Rely SOLELY on TB_CLI_USABLE_NOW,
+# which install-cli.sh sets from a FRESH-shell probe (_cli_on_fresh_path). A
+# `has tracebloc` fallback would be WRONG here: install.sh and provision.sh both
+# prepend ~/.local/bin to THIS process's PATH, so the installer can resolve
+# tracebloc even when the user's launching shell cannot — exactly the
+# "command not found in a new terminal" case B2 exists to catch (Bugbot #371).
+# Unset (a stale bootstrap that skipped the CLI step) → treat as not-usable and
+# tell the user to open a new terminal: the safe, honest default.
+_cli_runnable_now() {
+  [[ "${TB_CLI_USABLE_NOW:-0}" == "1" ]]
 }
 
 print_summary() {
@@ -120,10 +140,32 @@ print_summary() {
       echo -e "    2. Create a use case      ${TB_LINK}https://ai.tracebloc.io/my-use-cases${RESET}"
       echo -e "    3. Invite collaborators — ${TB_DESC}they train on your data; it never leaves this machine${RESET}"
       echo ""
-      echo -e "  ${BOLD}Run  ${TB_CMD}tracebloc${RESET}${BOLD}  to get started.${RESET}"
+      if _cli_runnable_now; then
+        echo -e "  ${BOLD}Run  ${TB_CMD}tracebloc${RESET}${BOLD}  to get started.${RESET}"
+      elif [[ "${TB_CLI_ON_FRESH_PATH:-}" == "0" ]]; then
+        # Case B: install-cli.sh RAN and set the flag to 0 — it printed the EXACT
+        # PATH fix above and a new terminal won't help. Point at that fix, not a
+        # useless "open a new terminal" (Bugbot #371). The explicit "0" test matters:
+        # an UNSET flag (CLI step skipped/failed → nothing printed above) must NOT
+        # land here, or "see above" points at nothing.
+        echo -e "  ${BOLD}Add tracebloc to your PATH (see above), then run  ${TB_CMD}tracebloc${RESET}${BOLD}  to get started.${RESET}"
+      else
+        # Case A (flag=1: installed to ~/.local/bin, persisted — a new terminal
+        # resolves it, only this shell doesn't) OR the flag is UNSET (the CLI step
+        # was skipped/failed, so no PATH-fix guidance exists): the safe, honest
+        # default is "open a new terminal" (Bugbot #371).
+        echo -e "  ${BOLD}Open a new terminal, then run  ${TB_CMD}tracebloc${RESET}${BOLD}  to get started.${RESET}"
+      fi
       echo ""
       echo -e "  ${DIM}────────────────────────────────────────${RESET}"
-      echo -e "  ${DIM}Logs ${logdisp}  ·  Data /tracebloc/${ns}${RESET}"
+      # Data location depends on the storage model: hostpath binds /tracebloc on
+      # the host; node-local (RFC-0003 Option C) keeps datasets inside the node on
+      # k3s local-path, so there is no host /tracebloc to point the user at.
+      if [[ "${TB_STORAGE_MODE:-hostpath}" == "node-local" ]]; then
+        echo -e "  ${DIM}Logs ${logdisp}  ·  Data in-node (k3s local-path)${RESET}"
+      else
+        echo -e "  ${DIM}Logs ${logdisp}  ·  Data /tracebloc/${ns}${RESET}"
+      fi
       _reboot_note
       ;;
     starting)

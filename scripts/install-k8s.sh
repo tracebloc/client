@@ -20,10 +20,22 @@
 #    SERVERS=1                   default: 1  (control-plane nodes)
 #    AGENTS=1                    default: 1  (worker nodes)
 #    K8S_VERSION=v1.29.4-k3s1   default: latest stable k3s
+#    K3D_VERSION=v5.9.0          default: v5.9.0  (k3d release tag; "latest" resolves at install time)
 #    HOST_DATA_DIR=~/.tracebloc  default: ~/.tracebloc
+#    TB_STORAGE_MODE=node-local  default: hostpath  (RFC-0003 Option C, flag-gated)
+#                                node-local stores datasets on k3s local-path INSIDE
+#                                the node — no ~/.tracebloc host dirs, wiped on cluster
+#                                delete; forces AGENTS=0 (single-node)
 #    CLIENT_ENV=dev              optional; if not set, CLIENT_ENV is not added to env in values
 #    TRACEBLOC_FORCE_REINSTALL=1  skip the "already set up" stop-and-check gate
 #                                and re-run every step (same as --force/--reinstall)
+#    TB_LEFTOVER_ACTION=reuse|wipe  non-interactive answer to the leftover-data
+#                                guard (#376) — same as --reuse-data / --wipe-data.
+#                                A new install onto a machine that still holds old
+#                                data STOPS and asks by default rather than
+#                                silently adopting it; a fresh HOST_DATA_DIR (or
+#                                --data-dir=PATH) sidesteps the prompt.
+#    TRACEBLOC_SKIP_LEFTOVER_GUARD=1  bypass the leftover-data guard entirely
 #    TRACEBLOC_SKIP_REBOOT_PROMPT=1 (Linux) skip "Reboot now?" after NVIDIA driver install
 #    TRACEBLOC_TRAINING_RESOURCES="cpu=4,memory=16Gi"  CPU/RAM each training run
 #                                may use (default cpu=2,memory=8Gi; sets requests==limits)
@@ -131,6 +143,12 @@ main() {
   for _arg in "$@"; do
     case "$_arg" in
       --force|--reinstall) TB_FORCE_REINSTALL=1 ;;
+      # Leftover-data guard (#376): non-interactive answers to the reuse/wipe/
+      # new-dir prompt. --data-dir=PATH just points HOST_DATA_DIR elsewhere
+      # (validate_config resolves it below), so a fresh dir sidesteps the prompt.
+      --reuse-data) TB_LEFTOVER_ACTION=reuse ;;
+      --wipe-data)  TB_LEFTOVER_ACTION=wipe ;;
+      --data-dir=*) HOST_DATA_DIR="${_arg#*=}" ;;
     esac
   done
 

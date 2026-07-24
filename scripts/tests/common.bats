@@ -16,6 +16,45 @@ setup() {
   [ "$status" -eq 0 ]
 }
 
+@test "validate_config: empty HOST_DATA_DIR fails closed (#384 bugbot)" {
+  HOME="$BATS_TEST_TMPDIR"; USER=tester
+  CLUSTER_NAME=tracebloc; SERVERS=1; AGENTS=1; HOST_DATA_DIR=""
+  run validate_config
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"must not be empty"* ]]
+}
+
+@test "validate_config: leading tilde in HOST_DATA_DIR expands to \$HOME (#384 bugbot)" {
+  # Resolve symlinks in HOME so macOS's /var->/private/var (via validate_config's
+  # `cd -P`) doesn't skew the under-$HOME check — this keeps the test about tilde
+  # expansion, not the tmpdir's symlink shape.
+  HOME="$(cd -P "$BATS_TEST_TMPDIR" && pwd)"; USER=tester
+  CLUSTER_NAME=tracebloc; SERVERS=1; AGENTS=1; HOST_DATA_DIR="~/tracebloc-new"
+  run validate_config
+  # Pre-fix, `~/x` became the literal "$HOME/~/x" and failed parent resolution;
+  # now it resolves to $HOME/tracebloc-new and validates. No `~` may survive.
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"~"* ]]
+}
+
+@test "validate_config: HOST_DATA_DIR == \$HOME is rejected, not adopted (#384 bugbot)" {
+  # $HOME itself must never be the data dir: the installer would chmod 777
+  # home-level dirs, bind-mount all of $HOME, and treat ~/data|~/mysql as data.
+  HOME="$(cd -P "$BATS_TEST_TMPDIR" && pwd)"; USER=tester
+  CLUSTER_NAME=tracebloc; SERVERS=1; AGENTS=1; HOST_DATA_DIR="$HOME"
+  run validate_config
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"not \$HOME itself"* ]]
+}
+
+@test "validate_config: bare ~ is rejected (resolves to \$HOME) (#384 bugbot)" {
+  HOME="$(cd -P "$BATS_TEST_TMPDIR" && pwd)"; USER=tester
+  CLUSTER_NAME=tracebloc; SERVERS=1; AGENTS=1; HOST_DATA_DIR="~"
+  run validate_config
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"not \$HOME itself"* ]]
+}
+
 @test "validate_config: invalid CLUSTER_NAME -> error" {
   HOME="$BATS_TEST_TMPDIR"; USER=tester
   CLUSTER_NAME="1nope"; SERVERS=1; AGENTS=1; HOST_DATA_DIR="$HOME/x"
@@ -79,6 +118,34 @@ setup() {
   run validate_config
   [ "$status" -ne 0 ]
   [[ "$output" == *"HOST_DATA_DIR"* ]]
+}
+
+@test "validate_config: node-local + HOST_DATASET_DIR -> error (unsupported combo)" {
+  HOME="$(cd -P "$BATS_TEST_TMPDIR" && pwd)"; USER=tester
+  CLUSTER_NAME=ok; SERVERS=1; AGENTS=1; HOST_DATA_DIR="$HOME/.tracebloc"
+  TB_STORAGE_MODE=node-local
+  HOST_DATASET_DIR="$HOME/dataset-mount"; mkdir -p "$HOST_DATASET_DIR"
+  run validate_config
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"HOST_DATASET_DIR is not supported with TB_STORAGE_MODE=node-local"* ]]
+}
+
+# ── C1 single-node guarantee (RFC-0003 Option C, load-time) ─────────────────
+# The C1 clamp runs when common.sh is sourced, reading AGENTS/SERVERS from env.
+# Source in a fresh shell (not the test's, which already has common.sh's readonly
+# vars) with the env applied, then print the clamped values.
+@test "C1: node-local forces single-node — AGENTS=0 AND SERVERS=1" {
+  run env TB_STORAGE_MODE=node-local AGENTS=4 SERVERS=3 \
+    bash -c "source '${LIB_DIR}/common.sh' >/dev/null 2>&1; echo \"\$AGENTS \$SERVERS\""
+  [ "$status" -eq 0 ]
+  [ "$output" = "0 1" ]
+}
+
+@test "C1: hostpath (default) leaves AGENTS/SERVERS untouched" {
+  run env TB_STORAGE_MODE=hostpath AGENTS=4 SERVERS=3 \
+    bash -c "source '${LIB_DIR}/common.sh' >/dev/null 2>&1; echo \"\$AGENTS \$SERVERS\""
+  [ "$status" -eq 0 ]
+  [ "$output" = "4 3" ]
 }
 
 # ── install_cleanup: the CLIENT_STATE guard (#716) ─────────────────────────

@@ -154,21 +154,103 @@ setup() {
   [[ "$output" != *"docker-ce.repo"* ]]
 }
 
-# ── install_k3d: PATH preserved through sudo (#718) ────────────────────────
-@test "install_k3d: installs via 'sudo env PATH=' (#718)" {
+# ── install_k3d: pinned release, verified direct download (#382) ────────────
+# The binary is fetched straight from the pinned release and verified against
+# the release's checksums.txt — upstream's install.sh is NOT used (it performs
+# no checksum verification, and its releases/latest lookup 404s under GitHub
+# rate limiting on shared egress IPs; 2/9 distro CI jobs, 2026-07-21).
+#
+# Shared scaffolding: spin_cmd executes its command (so _fetch_k3d_release
+# really runs); curl honors "-o <dest>" and writes fixtures; sha256sum is
+# stubbed (SHA_RC) so no real hashing is needed.
+_k3d_dl_setup() {
   PRESENT_CMDS="curl"
+  ARCH_DL="amd64"
+  TB_TOOLS_DIR="$BATS_TEST_TMPDIR/bin"; TB_TOOLS_SUDO=""
+  mkdir -p "$TB_TOOLS_DIR"
   has() {
-    if [ "$1" = k3d ]; then [ -f "$BATS_TEST_TMPDIR/k3di" ]
+    if [ "$1" = k3d ]; then [ -f "$TB_TOOLS_DIR/k3d" ]
     else case " $PRESENT_CMDS " in *" $1 "*) return 0 ;; *) return 1 ;; esac; fi
   }
-  spin_cmd() { record "$*"; touch "$BATS_TEST_TMPDIR/k3di"; return 0; }
+  spin_cmd() { record "spin_cmd $*"; local _m="$1"; shift; "$@"; }
+  sha256sum() { record "sha256sum $*"; cat >/dev/null; return "${SHA_RC:-0}"; }
+  curl() {
+    record "curl $*"
+    local prev="" a out="" url=""
+    for a in "$@"; do
+      [ "$prev" = "-o" ] && out="$a"
+      case "$a" in http*) url="$a" ;; esac
+      prev="$a"
+    done
+    case "$url" in
+      */checksums.txt)  [ -n "$out" ] && printf '%s  _dist/k3d-linux-amd64\n' "${CHECKSUM_LINE_SHA:-cafe01}" >"$out" ;;
+      */k3d-linux-*)    [ -n "$out" ] && printf 'k3d-binary-bytes' >"$out" ;;
+      */releases/latest) printf 'https://github.com/k3d-io/k3d/releases/tag/v9.9.9' ;;
+    esac
+    return 0
+  }
+}
+@test "install_k3d: default pin -> verified direct download, no upstream script" {
+  _k3d_dl_setup
+  run install_k3d
+  [ "$status" -eq 0 ]
+  [ -f "$TB_TOOLS_DIR/k3d" ]                                   # installed where we said
+  run mock_calls
+  [[ "$output" == *"releases/download/${K3D_VERSION}/k3d-linux-amd64"* ]]
+  [[ "$output" == *"releases/download/${K3D_VERSION}/checksums.txt"* ]]
+  [[ "$output" == *"sha256sum --check"* ]]                     # verification ran
+  [[ "$output" != *"install.sh"* ]]                            # upstream script gone
+  [[ "$output" != *"releases/latest"* ]]                       # pinned path never resolves
+}
+@test "install_k3d: checksum mismatch fails closed, nothing installed (#382)" {
+  _k3d_dl_setup
+  SHA_RC=1
+  run install_k3d
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"checksum verification failed"* ]]
+  [ ! -f "$TB_TOOLS_DIR/k3d" ]
+}
+@test "install_k3d: asset missing from checksums.txt fails closed (#382)" {
+  _k3d_dl_setup
+  ARCH_DL="arm64"    # fixture checksums.txt only lists amd64 -> no matching line
+  run install_k3d
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"checksum verification failed"* ]]
+  [ ! -f "$TB_TOOLS_DIR/k3d" ]
+}
+@test "install_k3d: system path installs via sudo mv" {
+  _k3d_dl_setup
+  TB_TOOLS_SUDO="sudo"
+  sudo() { record "sudo $*"; "$@"; }
   run install_k3d
   [ "$status" -eq 0 ]
   run mock_calls
-  [[ "$output" == *"sudo env"* ]]
-  [[ "$output" == *"PATH="* ]]
-  [[ "$output" == *"bash"* ]]
+  [[ "$output" == *"sudo mv"* ]]
+  [[ "$output" == *"$TB_TOOLS_DIR/k3d"* ]]
 }
+@test "install_k3d: K3D_VERSION=latest resolves the tag, then the same verified path" {
+  _k3d_dl_setup
+  K3D_VERSION=latest
+  run install_k3d
+  [ "$status" -eq 0 ]
+  run mock_calls
+  [[ "$output" == *"releases/latest"* ]]                            # resolve-at-install-time
+  [[ "$output" == *"releases/download/v9.9.9/k3d-linux-amd64"* ]]   # resolved tag used
+  [[ "$output" == *"releases/download/v9.9.9/checksums.txt"* ]]     # still verified
+  [[ "$output" != *"install.sh"* ]]
+}
+@test "install_k3d: malformed K3D_VERSION fails closed before any fetch (Bugbot r1)" {
+  PRESENT_CMDS="curl"
+  K3D_VERSION="../../evil/repo/main"    # would traverse out of k3d-io/k3d in the URL
+  has() { case " $PRESENT_CMDS " in *" $1 "*) return 0 ;; *) return 1 ;; esac; }
+  spin_cmd() { record "$*"; return 0; }
+  run install_k3d
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"K3D_VERSION must be a k3d release tag"* ]]
+  run mock_calls
+  [ -z "$output" ]                      # no curl, no spin_cmd — nothing ran
+}
+
 @test "install_k3d: already present -> skip" {
   has() { [ "$1" = k3d ]; }
   spin_cmd() { record "$*"; return 0; }

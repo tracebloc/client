@@ -436,8 +436,35 @@ setup_log_file() {
 CLUSTER_NAME="${CLUSTER_NAME:-tracebloc}"
 SERVERS="${SERVERS:-1}"
 AGENTS="${AGENTS:-1}"
-# Pinned default; set K8S_VERSION="" to use latest (may break on new k3s releases)
+# RFC-0003 (client#367) — local dataset storage model. PROTOTYPE, default off.
+#   hostpath   (default) : today's model — datasets live in ~/.tracebloc on the
+#                          host, bind-mounted into the cluster; survive cluster
+#                          delete; world-writable dirs.
+#   node-local (Option C): datasets live on k3s local-path INSIDE the k3d node —
+#                          they die with `cluster delete`, are not a browsable
+#                          host folder, and need no chmod 777. This is the
+#                          RFC-0003 goal for the local install.
+# C1: local-path is RWO + WaitForFirstConsumer and provisions on a single node,
+# but the shared data PVC is mounted by jobs-manager-spawned Jobs that could
+# schedule on another node with no volume. So node-local forces single-node —
+# and that means BOTH agents=0 AND servers=1: unlike a full k8s control plane,
+# k3s server nodes are schedulable, so SERVERS>1 still yields multiple nodes the
+# data PVC can't follow. Forcing agents=0 alone would leave that hole open.
+TB_STORAGE_MODE="${TB_STORAGE_MODE:-hostpath}"
+if [[ "$TB_STORAGE_MODE" == "node-local" ]]; then
+  AGENTS=0
+  SERVERS=1
+fi
+# Pinned default; an empty value falls back to this pin (`:-` treats empty and
+# unset the same — there is no opt-out to "latest" for k3s).
 K8S_VERSION="${K8S_VERSION:-v1.29.4-k3s1}"
+# Pinned default; ONLY the literal K3D_VERSION=latest resolves the newest k3d
+# release at install time instead (an empty value falls back to this pin, like
+# K8S_VERSION above). The binary is fetched directly from the release and
+# verified against its checksums.txt either way (setup-linux.sh). The pin makes
+# installs deterministic and immune to the releases/latest lookup, which breaks
+# under GitHub rate limiting on shared egress IPs (CI runners, corporate NAT).
+K3D_VERSION="${K3D_VERSION:-v5.9.0}"
 HOST_DATA_DIR="${HOST_DATA_DIR:-$HOME/.tracebloc}"
 # Optional separate host dir for the big DATASET volume (backend#743). Empty
 # (default) keeps datasets under HOST_DATA_DIR. When set — e.g. a network/NFS
@@ -456,9 +483,28 @@ validate_config() {
 
   [[ "$SERVERS" =~ ^[1-9][0-9]*$ ]] || error "SERVERS must be a positive integer >= 1 (got '$SERVERS')"
   [[ "$AGENTS"  =~ ^[0-9]+$ ]]     || error "AGENTS must be a non-negative integer (got '$AGENTS')"
+  [[ "$TB_STORAGE_MODE" == "hostpath" || "$TB_STORAGE_MODE" == "node-local" ]] \
+    || error "TB_STORAGE_MODE must be 'hostpath' or 'node-local' (got '$TB_STORAGE_MODE')"
+
+  # node-local forces hostPath.enabled=false, so a HOST_DATASET_DIR network export
+  # would be ignored and datasets would silently land on ephemeral local-path
+  # storage (gone on 'cluster delete'). Combining the two is a documented follow-up
+  # (backend#743 + RFC-0003); until then, refuse it rather than misroute datasets.
+  [[ "$TB_STORAGE_MODE" == "node-local" && -n "${HOST_DATASET_DIR:-}" ]] \
+    && error "HOST_DATASET_DIR is not supported with TB_STORAGE_MODE=node-local (datasets would land on ephemeral in-node storage, not the export). Use the default hostpath mode for network-mount datasets."
 
   # HOST_DATA_DIR must be under $HOME and must not be a system path (security)
   local dir="$HOST_DATA_DIR"
+  # Fail closed on an empty value (e.g. --data-dir= with no path) — otherwise the
+  # $HOME-relative rewrite below resolves "" to a surprise dir like $HOME/$USER.
+  [[ -n "$dir" ]] || error "HOST_DATA_DIR must not be empty (got '')."
+  # Expand a leading ~ / ~/ : users type --data-dir=~/foo and the shell does not
+  # expand ~ inside a quoted value, so it would otherwise be read as the literal
+  # "$HOME/~/foo" and fail parent resolution. Only the leading ~ is expanded.
+  case "$dir" in
+    "~")   dir="$HOME" ;;
+    "~/"*) dir="$HOME/${dir#\~/}" ;;
+  esac
   [[ "$dir" != /* ]] && dir="$HOME/$dir"
   # Resolve via parent directory — the target itself may not exist yet on first run
   local parent
@@ -472,7 +518,14 @@ validate_config() {
       error "HOST_DATA_DIR cannot be a system path: $dir"
       ;;
   esac
-  [[ "$dir" != "$HOME" && "${dir#$HOME/}" == "$dir" ]] && \
+  # Must be strictly UNDER $HOME — never $HOME itself. $HOME is reachable via a
+  # bare '~', HOST_DATA_DIR=$HOME, or --data-dir=$HOME; adopting it would make the
+  # installer chmod 777 home-level logs/mysql dirs, bind-mount all of $HOME into
+  # the cluster, and treat any existing ~/data or ~/mysql as install data
+  # (Bugbot #384).
+  [[ "$dir" == "$HOME" ]] && \
+    error "HOST_DATA_DIR must be a subdirectory of \$HOME, not \$HOME itself (got: $HOST_DATA_DIR)."
+  [[ "${dir#$HOME/}" == "$dir" ]] && \
     error "HOST_DATA_DIR must be under \$HOME (got: $HOST_DATA_DIR)"
   HOST_DATA_DIR="$dir"
 
@@ -596,7 +649,7 @@ tracebloc — client setup
 
 Usage:
   curl -fsSL https://raw.githubusercontent.com/tracebloc/client/main/scripts/install.sh | bash
-  ./install-k8s.sh [--help] [--diagnose] [--force]
+  ./install-k8s.sh [--help] [--diagnose] [--force] [--reuse-data|--wipe-data|--data-dir=PATH]
 
 Commands:
   --diagnose     Collect a redacted support bundle (logs + cluster/host status)
@@ -607,12 +660,20 @@ Commands:
   --reinstall    to force a full reinstall on a machine that is already set up.
                  (Same effect as TRACEBLOC_FORCE_REINSTALL=1 for curl | bash.)
 
+Leftover data (a new install onto a machine that still holds old data):
+  By default the installer STOPS and asks rather than silently adopting it.
+  --reuse-data   Keep and adopt the existing data (non-interactive).
+  --wipe-data    Delete the existing data and start fresh (non-interactive).
+  --data-dir=P   Install into directory P instead (leaves old data untouched).
+                 (Bypass the guard entirely with TRACEBLOC_SKIP_LEFTOVER_GUARD=1.)
+
 Advanced configuration (environment variables):
   CLUSTER_NAME   Cluster name                   (default: tracebloc)
   TB_NAMESPACE   Secure-environment name        (default: tracebloc)
   SERVERS        Control-plane nodes             (default: 1)
   AGENTS         Worker nodes                    (default: 1)
   K8S_VERSION    k3s image tag                   (default: v1.29.4-k3s1)
+  K3D_VERSION    k3d release tag                 (default: v5.9.0; "latest" resolves at install time)
   HOST_DATA_DIR  Persistent data directory       (default: ~/.tracebloc)
                  Must be on a LOCAL disk — NFS/CIFS/SMB is rejected (the database
                  corrupts on network storage). TRACEBLOC_ALLOW_NETWORK_FS=1 overrides.
