@@ -491,6 +491,46 @@ Describe "Install-ClientHelm" {
     Install-ClientHelm
     Should -Invoke helm -ParameterFilter { $args -contains "upgrade" }
   }
+  # #385: the repo must be (re-)registered on EVERY run. The old presence guard
+  # string-matched (helm repo list 2>&1), which Windows PowerShell 5.1 renders
+  # with this script's own ...\tracebloc-installer-<n>\... temp path -- containing
+  # "tracebloc" -- so the add was skipped on every fresh machine and the upgrade
+  # died with "Error: repo tracebloc not found".
+  It "registers the chart repo with --force-update before upgrading (#385)" {
+    $HOST_DATA_DIR = "$TestDrive/d385a"
+    Mock Read-Host {
+      param([string]$Prompt, [switch]$AsSecureString)
+      if ($Prompt -match 'password') { return (ConvertTo-SecureString "pw" -AsPlainText -Force) }
+      return "id385"
+    }
+    Mock Test-Credentials { "valid" }
+    Install-ClientHelm
+    Should -Invoke helm -ParameterFilter {
+      ($args -contains "repo") -and ($args -contains "add") -and
+      ($args -contains "--force-update") -and ($args -contains "https://tracebloc.github.io/client")
+    }
+    Should -Invoke helm -ParameterFilter { $args -contains "upgrade" }
+  }
+  It "aborts with helm's own output when the repo add fails (#385)" {
+    $HOST_DATA_DIR = "$TestDrive/d385b"
+    Mock Read-Host {
+      param([string]$Prompt, [switch]$AsSecureString)
+      if ($Prompt -match 'password') { return (ConvertTo-SecureString "pw" -AsPlainText -Force) }
+      return "id385b"
+    }
+    Mock Test-Credentials { "valid" }
+    Mock Err { param($m) $script:lastErr = $m; throw "err" }
+    Mock helm {
+      if (($args -contains "repo") -and ($args -contains "add")) {
+        $global:LASTEXITCODE = 1
+        return "Error: looks like this is not a valid chart repository"
+      }
+      $global:LASTEXITCODE = 0
+    }
+    { Install-ClientHelm } | Should -Throw
+    $script:lastErr | Should -Match 'not a valid chart repository'
+    Should -Not -Invoke helm -ParameterFilter { $args -contains "upgrade" }
+  }
 }
 
 Describe "Confirm-Cluster" {
@@ -580,6 +620,24 @@ Describe "Test-PfUrl" {
   It "connection failure -> blocked" {
     Mock Invoke-WebRequest { throw [System.Exception]::new("Unable to connect to the remote server") }
     Test-PfUrl "https://x" | Should -Be "blocked"
+  }
+  # -RequireSuccess: for targets whose CONTENT must exist (the Helm repo
+  # index.yaml, #385) an HTTP error is a failure, not "reachable".
+  It "-RequireSuccess: HTTP 404 -> 'http 404' (#385)" {
+    Mock Invoke-WebRequest {
+      $ex = [System.Exception]::new("HTTP 404")
+      Add-Member -InputObject $ex -NotePropertyName Response -NotePropertyValue ([pscustomobject]@{ StatusCode = 404 }) -Force
+      throw $ex
+    }
+    Test-PfUrl "https://x" -RequireSuccess | Should -Be "http 404"
+  }
+  It "-RequireSuccess: HTTP 200 -> ok" {
+    Mock Invoke-WebRequest { [pscustomobject]@{ StatusCode = 200 } }
+    Test-PfUrl "https://x" -RequireSuccess | Should -Be "ok"
+  }
+  It "-RequireSuccess: connection failure still classified (blocked)" {
+    Mock Invoke-WebRequest { throw [System.Exception]::new("Unable to connect to the remote server") }
+    Test-PfUrl "https://x" -RequireSuccess | Should -Be "blocked"
   }
 }
 
