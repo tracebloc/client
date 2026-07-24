@@ -744,8 +744,12 @@ setup() {
   unset TRACEBLOC_TRAINING_RESOURCES
   helm() { return 1; }
   has() { return 0; }
-  # two k3d nodes = the same physical machine; must NOT be summed (cli#399)
-  kubectl() { printf '12 6924Mi\n12 6924Mi\n'; }
+  # two k3d nodes = the same physical machine; must NOT be summed (cli#399).
+  # The stub only answers a BOUNDED call — a wedged API must never hang
+  # values generation, so dropping --request-timeout fails this test.
+  kubectl() {
+    case "$*" in *--request-timeout=*) printf '12 6924Mi\n12 6924Mi\n' ;; *) return 1 ;; esac
+  }
   run _training_resources
   [ "$output" = "cpu=11,memory=3Gi" ]   # 12−1 CPU; 6.76−3 GiB floored
 }

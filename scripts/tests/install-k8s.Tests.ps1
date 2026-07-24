@@ -549,7 +549,14 @@ Describe "Get-TrainingResources" {
   }
   It "fresh install sized to the largest node minus overhead (k3d nodes not summed)" {
     Mock helm { $global:LASTEXITCODE = 1; "" }
-    Mock kubectl { $global:LASTEXITCODE = 0; '{"items":[{"status":{"allocatable":{"cpu":"12","memory":"6924Mi"}}},{"status":{"allocatable":{"cpu":"12","memory":"6924Mi"}}}]}' }
+    # The mock only answers a BOUNDED call — dropping --request-timeout fails
+    # this test (a wedged API must never hang values generation).
+    Mock kubectl {
+      if ($args -contains "--request-timeout=10s") {
+        $global:LASTEXITCODE = 0
+        '{"items":[{"status":{"allocatable":{"cpu":"12","memory":"6924Mi"}}},{"status":{"allocatable":{"cpu":"12","memory":"6924Mi"}}}]}'
+      } else { $global:LASTEXITCODE = 1; "" }
+    }
     Get-TrainingResources | Should -Be "cpu=11,memory=3Gi"
   }
   It "below-floor machine falls back to the static default" {

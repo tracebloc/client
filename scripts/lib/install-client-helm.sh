@@ -81,7 +81,9 @@ _existing_training_resources() {
 _machine_training_resources() {
   has kubectl || return 0
   local lines cpu mem cpu_m mem_b best_cpu=0 best_mem=0
-  lines="$(kubectl get nodes -o jsonpath='{range .items[*]}{.status.allocatable.cpu}{" "}{.status.allocatable.memory}{"\n"}{end}' 2>/dev/null)" || return 0
+  # Bounded: a wedged API server must degrade to the static default, never
+  # hang values generation (Bugbot).
+  lines="$(kubectl get nodes --request-timeout=10s -o jsonpath='{range .items[*]}{.status.allocatable.cpu}{" "}{.status.allocatable.memory}{"\n"}{end}' 2>/dev/null)" || return 0
   [[ -n "$lines" ]] || return 0
   while read -r cpu mem; do
     [[ -n "$cpu" && -n "$mem" ]] || continue

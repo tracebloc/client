@@ -1041,7 +1041,9 @@ function Get-TrainingResources {
     }
   } catch {}
   try {
-    $nodesJson = (kubectl get nodes -o json 2>$null) | Out-String
+    # Bounded: a wedged API server must degrade to the static default, never
+    # hang values generation (Bugbot).
+    $nodesJson = (kubectl get nodes --request-timeout=10s -o json 2>$null) | Out-String
     if ($LASTEXITCODE -eq 0 -and $nodesJson.Trim()) {
       $bestMemB = [long]0; $bestCpuM = [long]0
       foreach ($n in ($nodesJson | ConvertFrom-Json).items) {
