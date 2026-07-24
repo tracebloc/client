@@ -232,9 +232,18 @@ install_docker_engine() {
   # WITHOUT its arguments, which would silently turn a host-prep into a FULL
   # provision as the admin; and a non-root admin without socket access must not
   # abort before the TB_PREPARE_USER grant runs (Bugbot on #381).
-  if [[ -n "${TB_PREPARE_HOST_MODE:-}" ]] && sudo docker info &>/dev/null; then
-    log "Docker daemon running (verified via sudo — prepare-host mode)."
-    return 0
+  if [[ -n "${TB_PREPARE_HOST_MODE:-}" ]]; then
+    if sudo docker info &>/dev/null; then
+      log "Docker daemon running (verified via sudo — prepare-host mode)."
+      return 0
+    fi
+    # Daemon ACTIVE but not answering even via sudo: terminal HERE — the
+    # shared tail's "log out and back in" advice is docker-group advice, wrong
+    # for an admin who never joins the group (Bugbot). A daemon that is DOWN
+    # falls through to the shared diagnostics below instead.
+    if sudo systemctl is-active --quiet docker 2>/dev/null; then
+      error "Docker's daemon is active but not answering (even via sudo). Check 'sudo docker info', then re-run prepare-host."
+    fi
   fi
   if ! docker info &>/dev/null 2>&1; then
     # (a) Group not active in THIS shell yet → re-exec under the docker group.

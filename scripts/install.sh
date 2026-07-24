@@ -65,14 +65,24 @@ esac
 # and whenever the operator explicitly pinned a REF/BRANCH (an explicit version
 # request must always (re)install, never bail).
 _tb_bail_ok=1
-[[ "${TRACEBLOC_FORCE_REINSTALL:-0}" == "1" ]] && _tb_bail_ok=0
-[[ "${TRACEBLOC_ALLOW_UNVERIFIED:-0}" == "1" ]] && _tb_bail_ok=0
-[[ -n "${REF:-}" || -n "${BRANCH:-}" ]] && _tb_bail_ok=0
+_tb_force=0
+[[ "${TRACEBLOC_FORCE_REINSTALL:-0}" == "1" ]] && { _tb_bail_ok=0; _tb_force=1; }
+[[ "${TRACEBLOC_ALLOW_UNVERIFIED:-0}" == "1" ]] && { _tb_bail_ok=0; _tb_force=1; }
+[[ -n "${REF:-}" || -n "${BRANCH:-}" ]] && { _tb_bail_ok=0; _tb_force=1; }
 for _a in "$@"; do
-  case "$_a" in --force|--reinstall) _tb_bail_ok=0 ;; esac
+  case "$_a" in
+    --force|--reinstall) _tb_bail_ok=0; _tb_force=1 ;;
+    # prepare-host must reach the sub-script even on a healthy machine — it's
+    # useful there (grant ANOTHER researcher docker-group access), and the
+    # healthy-bailout would otherwise open the home screen and silently skip the
+    # TB_PREPARE_USER grant (Bugbot on #381). It skips ONLY the bailout — no
+    # _tb_force — so host-prep is never mislabeled as a forced reinstall (the
+    # sub-script dispatches prepare-host before its assess gate anyway).
+    prepare-host|--prepare-host) _tb_bail_ok=0 ;;
+  esac
 done
 
-# A skipped bailout means an explicit (re)install was requested (force, dev/
+# A force flag means an explicit (re)install was requested (force, dev/
 # unverified path, or a pinned REF/BRANCH). install-k8s.sh runs its OWN read-only
 # stop-and-check gate (assess_existing_install) that short-circuits a healthy
 # machine to the home screen and exits 0 — so without propagating our intent, a
@@ -80,7 +90,7 @@ done
 # TB_FORCE_REINSTALL so the downstream gate is skipped and the full (idempotent)
 # flow runs. (--force/--reinstall pass through via "$@" too, but env is the only
 # channel for the REF/BRANCH/unverified reasons.)
-[[ "$_tb_bail_ok" == "0" ]] && export TB_FORCE_REINSTALL=1
+[[ "$_tb_force" == "1" ]] && export TB_FORCE_REINSTALL=1
 
 _tb_check_healthy() {
   # Run `tracebloc doctor` behind a small inline spinner, bounded so a wedged CLI

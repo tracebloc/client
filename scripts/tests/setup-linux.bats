@@ -175,6 +175,25 @@ setup() {
   TB_PREPARE_HOST_MODE=""
 }
 
+@test "install_docker_engine: prepare-host + active daemon that won't answer -> terminal error, no logout advice (#381)" {
+  PRESENT_CMDS="curl docker"; TEST_DISTRO=ubuntu
+  TB_PREPARE_HOST_MODE=1
+  docker() { return 1; }
+  sudo()   { record "sudo $*"
+    case "$*" in
+      "docker info") return 1 ;;          # even sudo can't reach it
+      *is-active*)   return 0 ;;          # …but the daemon claims active
+      *) return 0 ;;
+    esac
+  }
+  sg() { record "sg $*"; exit 97; }
+  run install_docker_engine
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"re-run prepare-host"* ]]
+  [[ "$output" != *"logging out and back in"* ]]
+  TB_PREPARE_HOST_MODE=""
+}
+
 @test "install_docker_engine: prepare-host mode skips the admin group-add on fresh install (#381)" {
   PRESENT_CMDS="curl"; TEST_DISTRO=ubuntu         # docker absent -> install branch
   TB_PREPARE_HOST_MODE=1
