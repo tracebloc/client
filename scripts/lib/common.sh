@@ -465,6 +465,13 @@ K8S_VERSION="${K8S_VERSION:-v1.29.4-k3s1}"
 # installs deterministic and immune to the releases/latest lookup, which breaks
 # under GitHub rate limiting on shared egress IPs (CI runners, corporate NAT).
 K3D_VERSION="${K3D_VERSION:-v5.9.0}"
+# Pinned default; ONLY the literal HELM_VERSION=latest resolves the newest Helm
+# release at install time (an empty value falls back to this pin, like the two
+# above). The tarball is fetched directly from get.helm.sh and verified against
+# its published .sha256sum either way (setup-linux.sh) — helm's get-helm-3
+# script is NOT used: it floats on the mutable helm/helm@main and needs
+# openssl, which minimal cloud images don't ship (#395).
+HELM_VERSION="${HELM_VERSION:-v4.2.3}"
 HOST_DATA_DIR="${HOST_DATA_DIR:-$HOME/.tracebloc}"
 # Optional separate host dir for the big DATASET volume (backend#743). Empty
 # (default) keeps datasets under HOST_DATA_DIR. When set — e.g. a network/NFS
@@ -674,6 +681,7 @@ Advanced configuration (environment variables):
   AGENTS         Worker nodes                    (default: 1)
   K8S_VERSION    k3s image tag                   (default: v1.29.4-k3s1)
   K3D_VERSION    k3d release tag                 (default: v5.9.0; "latest" resolves at install time)
+  HELM_VERSION   Helm release tag                (default: v4.2.3; "latest" resolves at install time)
   HOST_DATA_DIR  Persistent data directory       (default: ~/.tracebloc)
                  Must be on a LOCAL disk — NFS/CIFS/SMB is rejected (the database
                  corrupts on network storage). TRACEBLOC_ALLOW_NETWORK_FS=1 overrides.

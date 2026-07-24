@@ -94,21 +94,24 @@ setup() {
   run mock_calls
   [[ "$output" != *"Installing conntrack"* ]]
 }
-# Caught by the cross-distro CI matrix on Amazon Linux 2023: helm's get-helm-3
-# needs openssl (checksum) + tar (unpack), absent on minimal cloud images.
-@test "install_system_deps: ensures openssl + tar (helm needs them on minimal images)" {
-  PRESENT_CMDS="dnf curl conntrack"   # openssl + tar absent
+# Caught by the cross-distro CI matrix on Amazon Linux 2023: the Helm tarball
+# needs tar + gzip to unpack, absent on minimal cloud images. openssl is no
+# longer a dependency — the Helm download verifies with sha256sum since
+# get-helm-3 was replaced by a direct fetch (#395).
+@test "install_system_deps: ensures tar + gzip (helm unpack on minimal images), NOT openssl (#395)" {
+  PRESENT_CMDS="dnf curl conntrack"   # tar + gzip absent
   run install_system_deps
   run mock_calls
-  [[ "$output" == *"Installing openssl"* ]]
   [[ "$output" == *"Installing tar"* ]]
+  [[ "$output" == *"Installing gzip"* ]]
+  [[ "$output" != *"Installing openssl"* ]]
 }
-@test "install_system_deps: openssl + tar already present -> not reinstalled" {
-  PRESENT_CMDS="apt-get curl conntrack openssl tar"
+@test "install_system_deps: tar + gzip already present -> not reinstalled" {
+  PRESENT_CMDS="apt-get curl conntrack tar gzip"
   run install_system_deps
   run mock_calls
-  [[ "$output" != *"Installing openssl"* ]]
   [[ "$output" != *"Installing tar"* ]]
+  [[ "$output" != *"Installing gzip"* ]]
 }
 
 # ── install_docker_engine: branch selection ────────────────────────────────
@@ -258,6 +261,174 @@ _k3d_dl_setup() {
   [ "$status" -eq 0 ]
   run mock_calls
   [ -z "$output" ]
+}
+
+# ── install_helm: pinned release, verified direct download (#395) ────────────
+# The tarball is fetched straight from get.helm.sh and verified against its
+# published .sha256sum — helm's get-helm-3 is NOT used (it floats on the
+# mutable helm/helm@main, performs its checksum step with openssl, and minimal
+# cloud images ship no openssl — Bugbot #383). Mirrors the install_k3d suite.
+_helm_dl_setup() {
+  PRESENT_CMDS="curl tar gzip"
+  ARCH_DL="amd64"
+  TB_TOOLS_DIR="$BATS_TEST_TMPDIR/bin"; TB_TOOLS_SUDO=""
+  mkdir -p "$TB_TOOLS_DIR"
+  has() {
+    if [ "$1" = helm ]; then [ -f "$TB_TOOLS_DIR/helm" ]
+    else case " $PRESENT_CMDS " in *" $1 "*) return 0 ;; *) return 1 ;; esac; fi
+  }
+  spin_cmd() { record "spin_cmd $*"; local _m="$1"; shift; "$@"; }
+  sha256sum() { record "sha256sum $*"; return "${SHA_RC:-0}"; }
+  # The real code runs `tar -xzf <tarball> -C <dir> linux-amd64/helm`; the stub
+  # materialises exactly that extraction result.
+  tar() {
+    record "tar $*"
+    local prev="" a dest=""
+    for a in "$@"; do [ "$prev" = "-C" ] && dest="$a"; prev="$a"; done
+    mkdir -p "$dest/linux-${ARCH_DL}" && printf 'helm-binary' > "$dest/linux-${ARCH_DL}/helm"
+  }
+  curl() {
+    record "curl $*"
+    local prev="" a out="" url=""
+    for a in "$@"; do
+      [ "$prev" = "-o" ] && out="$a"
+      case "$a" in http*) url="$a" ;; esac
+      prev="$a"
+    done
+    case "$url" in
+      *.tar.gz.sha256sum)     [ -n "$out" ] && printf '%s  %s\n' "${CHECKSUM_LINE_SHA:-cafe01}" "$(basename "${url%.sha256sum}")" >"$out" ;;
+      *.tar.gz)               [ -n "$out" ] && printf 'helm-tarball-bytes' >"$out" ;;
+      *helm-latest-version)   printf 'v9.9.9' ;;
+    esac
+    return 0
+  }
+}
+@test "install_helm: default pin -> verified direct download, no get-helm-3 (#395)" {
+  _helm_dl_setup
+  run install_helm
+  [ "$status" -eq 0 ]
+  [ -f "$TB_TOOLS_DIR/helm" ]                                     # installed where we said
+  run mock_calls
+  [[ "$output" == *"get.helm.sh/helm-${HELM_VERSION}-linux-amd64.tar.gz"* ]]
+  [[ "$output" == *"get.helm.sh/helm-${HELM_VERSION}-linux-amd64.tar.gz.sha256sum"* ]]
+  [[ "$output" == *"sha256sum --check"* ]]                        # verification ran
+  [[ "$output" != *"get-helm-3"* ]]                               # upstream script gone
+  [[ "$output" != *"raw.githubusercontent.com"* ]]
+  [[ "$output" != *"helm-latest-version"* ]]                      # pinned path never resolves
+}
+@test "install_helm: checksum mismatch fails closed, nothing installed (#395)" {
+  _helm_dl_setup
+  SHA_RC=1
+  run install_helm
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"checksum verification failed"* ]]
+  [ ! -f "$TB_TOOLS_DIR/helm" ]
+}
+@test "install_helm: system path installs via sudo mv" {
+  _helm_dl_setup
+  TB_TOOLS_SUDO="sudo"
+  sudo() { record "sudo $*"; "$@"; }
+  run install_helm
+  [ "$status" -eq 0 ]
+  run mock_calls
+  [[ "$output" == *"sudo mv"* ]]
+  [[ "$output" == *"$TB_TOOLS_DIR/helm"* ]]
+}
+@test "install_helm: HELM_VERSION=latest resolves the tag, then the same verified path" {
+  _helm_dl_setup
+  HELM_VERSION=latest
+  run install_helm
+  [ "$status" -eq 0 ]
+  run mock_calls
+  [[ "$output" == *"helm-latest-version"* ]]                          # resolve-at-install-time
+  [[ "$output" == *"get.helm.sh/helm-v9.9.9-linux-amd64.tar.gz"* ]]   # resolved tag used
+  [[ "$output" == *"helm-v9.9.9-linux-amd64.tar.gz.sha256sum"* ]]     # still verified
+}
+@test "install_helm: malformed HELM_VERSION fails closed before any fetch (#395)" {
+  PRESENT_CMDS="curl tar gzip"
+  HELM_VERSION="../../evil/path"        # would traverse out of get.helm.sh's release namespace
+  has() { case " $PRESENT_CMDS " in *" $1 "*) return 0 ;; *) return 1 ;; esac; }
+  spin_cmd() { record "$*"; return 0; }
+  run install_helm
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"HELM_VERSION must be a Helm release tag"* ]]
+  run mock_calls
+  [ -z "$output" ]                      # no curl, no spin_cmd — nothing ran
+}
+@test "install_helm: already present -> skip" {
+  has() { [ "$1" = helm ]; }
+  spin_cmd() { record "$*"; return 0; }
+  run install_helm
+  [ "$status" -eq 0 ]
+  run mock_calls
+  [ -z "$output" ]
+}
+
+# ── _ensure_unpack_tools: the installer installs tar/gzip itself (#395) ──────
+# Tier 0 skips install_system_deps, so when the Helm unpack tools are missing
+# we install them via the package manager rather than telling the user to —
+# quietly with root/passwordless sudo, with an honest one-line reason when a
+# password is needed, and an error ONLY when we truly can't get rights.
+@test "_ensure_unpack_tools: tar + gzip present -> silent no-op" {
+  PRESENT_CMDS="curl apt-get tar gzip"
+  run _ensure_unpack_tools
+  [ "$status" -eq 0 ]
+  run mock_calls
+  [ -z "$output" ]
+}
+@test "_ensure_unpack_tools: missing + passwordless sudo -> ONE combined install via the package manager (#395)" {
+  PRESENT_CMDS="curl apt-get"           # tar + gzip absent
+  # Option-led probes go through _real_sudo (the A2 shadow mangles them as
+  # root) — stub the primitive, not the shadow (Bugbot #372 pattern).
+  _have_sudo_bin() { return 0; }
+  _real_sudo() { record "_real_sudo $*"; return 0; }   # -n probe succeeds → quiet path
+  run _ensure_unpack_tools
+  [ "$status" -eq 0 ]
+  run mock_calls
+  # One combined install call — a single sudo consumer (Bugbot r2), both pkgs on it.
+  [[ "$output" == *"Installing tar gzip"* ]]
+  [[ "$output" == *"apt-get install"*"tar gzip"* ]]
+}
+@test "_ensure_unpack_tools: password path primes sudo, waits out the dpkg lock, then installs (Bugbot r2)" {
+  PRESENT_CMDS="curl apt-get fuser"     # tar + gzip absent; fuser present → lock wait live
+  _have_sudo_bin() { return 0; }
+  # -n fails (no cached ticket) → prompt path; -v succeeds; the keepalive loop's
+  # own -n probes also fail, so it exits immediately (no stray child in bats).
+  _real_sudo() { record "_real_sudo $*"; case "$1" in -v) return 0 ;; *) return 1 ;; esac; }
+  apt_wait_for_lock() { record "apt_wait_for_lock"; }
+  run _ensure_unpack_tools
+  [ "$status" -eq 0 ]
+  run mock_calls
+  [[ "$output" == *"_real_sudo -v"* ]]              # primed before any spinner
+  [[ "$output" == *"apt_wait_for_lock"* ]]          # lock wait not skipped on Tier 0
+  [[ "$output" == *"Installing tar gzip"* ]]
+}
+@test "_ensure_unpack_tools: no sudo rights -> honest error, names the packages" {
+  PRESENT_CMDS="curl apt-get"           # tar + gzip absent
+  _have_sudo_bin() { return 0; }
+  _real_sudo() { record "_real_sudo $*"; return 1; }   # -n probe AND -v both fail
+  run _ensure_unpack_tools
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"administrator"* ]]
+  [[ "$output" == *"tar"* ]]
+}
+@test "_ensure_unpack_tools: not root and no sudo binary -> honest error before any prompt" {
+  PRESENT_CMDS="curl apt-get"           # tar + gzip absent
+  _have_sudo_bin() { return 1; }                        # no sudo on the machine at all
+  _real_sudo() { record "_real_sudo $*"; return 127; }
+  run _ensure_unpack_tools
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"no sudo"* ]]
+  [[ "$output" == *"tar"* ]]
+}
+@test "_ensure_unpack_tools: package install fails -> fatal (helm can't unpack without it)" {
+  PRESENT_CMDS="curl apt-get gzip"      # only tar absent
+  _have_sudo_bin() { return 0; }
+  _real_sudo() { record "_real_sudo $*"; return 0; }
+  spin_cmd() { record "$*"; case "$*" in *"apt-get install"*) return 1 ;; *) return 0 ;; esac; }
+  run _ensure_unpack_tools
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"Couldn't install tar"* ]]
 }
 
 # ── install_docker_engine: dead daemon vs group-not-active (Asad's Alma9 case) ──
