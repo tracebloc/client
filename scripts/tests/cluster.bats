@@ -250,6 +250,51 @@ setup() {
   [ -z "$output" ]
 }
 
+# ── _check_existing_cluster_storage_mode (RFC-0003 Option C) ────────────────
+@test "_check_existing_cluster_storage_mode: node-local matches node-local cluster -> silent pass" {
+  TB_STORAGE_MODE=node-local
+  docker() { printf '%s\n' /var/lib/rancher; }              # no /tracebloc mount
+  run _check_existing_cluster_storage_mode
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+}
+
+@test "_check_existing_cluster_storage_mode: hostpath matches hostpath cluster -> silent pass" {
+  TB_STORAGE_MODE=hostpath
+  docker() { printf '%s\n' /tracebloc; }
+  run _check_existing_cluster_storage_mode
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+}
+
+@test "_check_existing_cluster_storage_mode: node-local onto hostpath cluster -> fail fast (no local-path SC)" {
+  TB_STORAGE_MODE=node-local
+  docker() { printf '%s\n' /tracebloc; }                    # hostpath cluster
+  run _check_existing_cluster_storage_mode
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"built for hostpath storage"* ]]
+  [[ "$output" == *"Pending"* ]]
+  [[ "$output" == *"k3d cluster delete"* ]]
+}
+
+@test "_check_existing_cluster_storage_mode: hostpath onto node-local cluster -> fail fast (ephemeral)" {
+  TB_STORAGE_MODE=hostpath
+  docker() { printf '%s\n' /var/lib/rancher; }              # node-local cluster, no /tracebloc
+  run _check_existing_cluster_storage_mode
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"built for node-local storage"* ]]
+  [[ "$output" == *"ephemeral"* ]]
+  [[ "$output" == *"k3d cluster delete"* ]]
+}
+
+@test "_check_existing_cluster_storage_mode: inspect fails -> silent no-op" {
+  TB_STORAGE_MODE=node-local
+  docker() { return 1; }
+  run _check_existing_cluster_storage_mode
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+}
+
 # ── ensure_cluster_autostart (reboot persistence) ───────────────────────────
 @test "ensure_cluster_autostart: unless-stopped per node + enables docker (Linux)" {
   OS=Linux

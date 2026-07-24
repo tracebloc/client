@@ -216,6 +216,7 @@ _handle_existing_cluster() {
   _check_existing_cluster_proxy
   _check_existing_cluster_bind
   _check_existing_cluster_dataset_mount
+  _check_existing_cluster_storage_mode
 }
 
 # k3d bakes proxy env into containers at create time; it cannot be added to a
@@ -294,6 +295,46 @@ _check_existing_cluster_dataset_mount() {
     hint "  k3d cluster delete $CLUSTER_NAME   &&   re-run this installer."
     echo ""
     error "Existing cluster is missing the dataset bind mount — refusing to install datasets onto ephemeral storage."
+  fi
+}
+
+# The storage topology is baked into the cluster at create time and cannot be
+# changed on a running cluster: hostpath mode bind-mounts HOST_DATA_DIR at
+# /tracebloc and disables k3s local-storage; node-local mode does neither (it
+# keeps local-storage so the `local-path` StorageClass provisions in-node). The
+# generated chart values must match — reusing a cluster built for the OTHER mode
+# silently breaks storage: a node-local install onto a hostpath cluster asks for
+# a `local-path` StorageClass that was disabled (PVCs stay Pending), and a
+# hostpath install onto a node-local cluster points hostPath PVs at an unmounted
+# /tracebloc (datasets on ephemeral in-node storage). The /tracebloc bind mount
+# is the discriminator: present ⟺ hostpath cluster. Fail fast with the recreate
+# remedy. No-op when the node can't be inspected.
+_check_existing_cluster_storage_mode() {
+  local mounts
+  mounts=$(docker inspect "k3d-${CLUSTER_NAME}-server-0" \
+    --format '{{range .Mounts}}{{println .Destination}}{{end}}' 2>/dev/null) || return 0
+  [[ -z "$mounts" ]] && return 0
+
+  local cluster_is_hostpath=false
+  grep -qx '/tracebloc' <<<"$mounts" && cluster_is_hostpath=true
+  local want="${TB_STORAGE_MODE:-hostpath}"
+
+  if [[ "$want" == "node-local" && "$cluster_is_hostpath" == true ]]; then
+    echo ""
+    warn "TB_STORAGE_MODE=node-local, but the existing '$CLUSTER_NAME' cluster was built for hostpath storage."
+    hint "That cluster disabled k3s local-storage, so the requested 'local-path' StorageClass does not exist —"
+    hint "PVCs would stay Pending. Storage topology is fixed at create time; recreate the cluster for node-local:"
+    hint "  k3d cluster delete $CLUSTER_NAME   &&   TB_STORAGE_MODE=node-local  re-run this installer."
+    echo ""
+    error "Existing cluster's storage topology (hostpath) does not match TB_STORAGE_MODE=node-local — refusing to install onto a cluster with no matching StorageClass."
+  elif [[ "$want" == "hostpath" && "$cluster_is_hostpath" == false ]]; then
+    echo ""
+    warn "TB_STORAGE_MODE=hostpath (default), but the existing '$CLUSTER_NAME' cluster was built for node-local storage."
+    hint "That cluster has no /tracebloc bind mount, so hostPath volumes would land on ephemeral in-node storage"
+    hint "(lost on 'cluster delete'), not ~/.tracebloc. Storage topology is fixed at create time; recreate to switch:"
+    hint "  k3d cluster delete $CLUSTER_NAME   &&   re-run this installer."
+    echo ""
+    error "Existing cluster's storage topology (node-local) does not match TB_STORAGE_MODE=hostpath — refusing to install datasets onto ephemeral storage."
   fi
 }
 

@@ -474,6 +474,13 @@ validate_config() {
   [[ "$TB_STORAGE_MODE" == "hostpath" || "$TB_STORAGE_MODE" == "node-local" ]] \
     || error "TB_STORAGE_MODE must be 'hostpath' or 'node-local' (got '$TB_STORAGE_MODE')"
 
+  # node-local forces hostPath.enabled=false, so a HOST_DATASET_DIR network export
+  # would be ignored and datasets would silently land on ephemeral local-path
+  # storage (gone on 'cluster delete'). Combining the two is a documented follow-up
+  # (backend#743 + RFC-0003); until then, refuse it rather than misroute datasets.
+  [[ "$TB_STORAGE_MODE" == "node-local" && -n "${HOST_DATASET_DIR:-}" ]] \
+    && error "HOST_DATASET_DIR is not supported with TB_STORAGE_MODE=node-local (datasets would land on ephemeral in-node storage, not the export). Use the default hostpath mode for network-mount datasets."
+
   # HOST_DATA_DIR must be under $HOME and must not be a system path (security)
   local dir="$HOST_DATA_DIR"
   [[ "$dir" != /* ]] && dir="$HOME/$dir"

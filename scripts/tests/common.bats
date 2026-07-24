@@ -81,6 +81,16 @@ setup() {
   [[ "$output" == *"HOST_DATA_DIR"* ]]
 }
 
+@test "validate_config: node-local + HOST_DATASET_DIR -> error (unsupported combo)" {
+  HOME="$(cd -P "$BATS_TEST_TMPDIR" && pwd)"; USER=tester
+  CLUSTER_NAME=ok; SERVERS=1; AGENTS=1; HOST_DATA_DIR="$HOME/.tracebloc"
+  TB_STORAGE_MODE=node-local
+  HOST_DATASET_DIR="$HOME/dataset-mount"; mkdir -p "$HOST_DATASET_DIR"
+  run validate_config
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"HOST_DATASET_DIR is not supported with TB_STORAGE_MODE=node-local"* ]]
+}
+
 # ── install_cleanup: the CLIENT_STATE guard (#716) ─────────────────────────
 @test "install_cleanup: exit 0 -> silent" {
   out="$( ( exit 0 ); install_cleanup 2>&1 )"
