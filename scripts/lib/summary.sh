@@ -92,6 +92,18 @@ _reboot_note() {
   fi
 }
 
+# Will `tracebloc` resolve in the user's shell? Rely SOLELY on TB_CLI_USABLE_NOW,
+# which install-cli.sh sets from a FRESH-shell probe (_cli_on_fresh_path). A
+# `has tracebloc` fallback would be WRONG here: install.sh and provision.sh both
+# prepend ~/.local/bin to THIS process's PATH, so the installer can resolve
+# tracebloc even when the user's launching shell cannot — exactly the
+# "command not found in a new terminal" case B2 exists to catch (Bugbot #371).
+# Unset (a stale bootstrap that skipped the CLI step) → treat as not-usable and
+# tell the user to open a new terminal: the safe, honest default.
+_cli_runnable_now() {
+  [[ "${TB_CLI_USABLE_NOW:-0}" == "1" ]]
+}
+
 print_summary() {
   local mode="CPU"
   [[ "$GPU_VENDOR" == "nvidia" ]] && mode="NVIDIA GPU"
@@ -120,7 +132,22 @@ print_summary() {
       echo -e "    2. Create a use case      ${TB_LINK}https://ai.tracebloc.io/my-use-cases${RESET}"
       echo -e "    3. Invite collaborators — ${TB_DESC}they train on your data; it never leaves this machine${RESET}"
       echo ""
-      echo -e "  ${BOLD}Run  ${TB_CMD}tracebloc${RESET}${BOLD}  to get started.${RESET}"
+      if _cli_runnable_now; then
+        echo -e "  ${BOLD}Run  ${TB_CMD}tracebloc${RESET}${BOLD}  to get started.${RESET}"
+      elif [[ "${TB_CLI_ON_FRESH_PATH:-}" == "0" ]]; then
+        # Case B: install-cli.sh RAN and set the flag to 0 — it printed the EXACT
+        # PATH fix above and a new terminal won't help. Point at that fix, not a
+        # useless "open a new terminal" (Bugbot #371). The explicit "0" test matters:
+        # an UNSET flag (CLI step skipped/failed → nothing printed above) must NOT
+        # land here, or "see above" points at nothing.
+        echo -e "  ${BOLD}Add tracebloc to your PATH (see above), then run  ${TB_CMD}tracebloc${RESET}${BOLD}  to get started.${RESET}"
+      else
+        # Case A (flag=1: installed to ~/.local/bin, persisted — a new terminal
+        # resolves it, only this shell doesn't) OR the flag is UNSET (the CLI step
+        # was skipped/failed, so no PATH-fix guidance exists): the safe, honest
+        # default is "open a new terminal" (Bugbot #371).
+        echo -e "  ${BOLD}Open a new terminal, then run  ${TB_CMD}tracebloc${RESET}${BOLD}  to get started.${RESET}"
+      fi
       echo ""
       echo -e "  ${DIM}────────────────────────────────────────${RESET}"
       echo -e "  ${DIM}Logs ${logdisp}  ·  Data /tracebloc/${ns}${RESET}"
