@@ -220,7 +220,7 @@ render_host_audit() {
 
   case "${INSTALL_TIER:-2}" in
     0) echo -e "  ${TB_HEADING}→ Install tier${RESET}  Tier 0 (zero root) — a container is already runnable; no privileged steps." ;;
-    1) echo -e "  ${TB_HEADING}→ Install tier${RESET}  Tier 1 — set up rootless Docker in your account (no admin needed)." ;;
+    1) echo -e "  ${TB_HEADING}→ Install tier${RESET}  Tier 1 — set up Docker for your account; a one-time admin step is still needed for now." ;;
     2)
       case "${INSTALL_TIER_REASON:-}" in
         needs-docker-desktop) echo -e "  ${TB_HEADING}→ Install tier${RESET}  Tier 2 — Docker isn't running; start/install Docker Desktop (needs admin once)." ;;

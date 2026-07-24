@@ -35,7 +35,7 @@ $ ./install-k8s.sh   # the plan, printed once before install begins
 
 
 
-$ ./install-k8s.sh   # the six running step headers (a-f), titles from install-k8s.sh
+$ ./install-k8s.sh   # the running step headers, titles from install-k8s.sh
   a) Checking your machine
 
   b) Installing what tracebloc needs

@@ -159,13 +159,15 @@ setup() {
   assert_has "Tier 0" "$output"
 }
 
-@test "audit: Tier 1 panel shows the kernel row + rootless" {
+@test "audit: Tier 1 panel shows the kernel row + the one-time admin note" {
   OS=Linux; PROBE_RUNTIME_USABLE=0; PROBE_CGROUP2=1; PROBE_USERNS=1
   PROBE_PRIVILEGE=no_sudo; INSTALL_TIER=1; INSTALL_TIER_REASON=rootless-capable
   run render_host_audit
   assert_has "cgroup v2" "$output"
   assert_has "Tier 1" "$output"
-  assert_has "rootless" "$output"
+  # Tier 1 still runs the privileged install path (install_linux) until rootless
+  # Docker lands (#1177), so the audit must be honest about the one-time admin step.
+  assert_has "one-time admin" "$output"
 }
 
 @test "audit: Tier 2 no-userns names the disabled namespaces" {
