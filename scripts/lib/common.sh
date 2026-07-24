@@ -510,7 +510,14 @@ validate_config() {
       error "HOST_DATA_DIR cannot be a system path: $dir"
       ;;
   esac
-  [[ "$dir" != "$HOME" && "${dir#$HOME/}" == "$dir" ]] && \
+  # Must be strictly UNDER $HOME — never $HOME itself. $HOME is reachable via a
+  # bare '~', HOST_DATA_DIR=$HOME, or --data-dir=$HOME; adopting it would make the
+  # installer chmod 777 home-level logs/mysql dirs, bind-mount all of $HOME into
+  # the cluster, and treat any existing ~/data or ~/mysql as install data
+  # (Bugbot #384).
+  [[ "$dir" == "$HOME" ]] && \
+    error "HOST_DATA_DIR must be a subdirectory of \$HOME, not \$HOME itself (got: $HOST_DATA_DIR)."
+  [[ "${dir#$HOME/}" == "$dir" ]] && \
     error "HOST_DATA_DIR must be under \$HOME (got: $HOST_DATA_DIR)"
   HOST_DATA_DIR="$dir"
 

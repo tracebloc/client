@@ -37,6 +37,24 @@ setup() {
   [[ "$output" != *"~"* ]]
 }
 
+@test "validate_config: HOST_DATA_DIR == \$HOME is rejected, not adopted (#384 bugbot)" {
+  # $HOME itself must never be the data dir: the installer would chmod 777
+  # home-level dirs, bind-mount all of $HOME, and treat ~/data|~/mysql as data.
+  HOME="$(cd -P "$BATS_TEST_TMPDIR" && pwd)"; USER=tester
+  CLUSTER_NAME=tracebloc; SERVERS=1; AGENTS=1; HOST_DATA_DIR="$HOME"
+  run validate_config
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"not \$HOME itself"* ]]
+}
+
+@test "validate_config: bare ~ is rejected (resolves to \$HOME) (#384 bugbot)" {
+  HOME="$(cd -P "$BATS_TEST_TMPDIR" && pwd)"; USER=tester
+  CLUSTER_NAME=tracebloc; SERVERS=1; AGENTS=1; HOST_DATA_DIR="~"
+  run validate_config
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"not \$HOME itself"* ]]
+}
+
 @test "validate_config: invalid CLUSTER_NAME -> error" {
   HOME="$BATS_TEST_TMPDIR"; USER=tester
   CLUSTER_NAME="1nope"; SERVERS=1; AGENTS=1; HOST_DATA_DIR="$HOME/x"
