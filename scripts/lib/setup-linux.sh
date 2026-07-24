@@ -203,7 +203,10 @@ install_docker_engine() {
     # Enable for boot only (no --now): starting is handled below, where a start
     # failure is diagnosed instead of aborting the whole script under `set -e`.
     sudo systemctl enable docker >/dev/null 2>&1 || true
-    sudo usermod -aG docker "$USER"
+    # prepare-host mode: the invoking ADMIN must not be granted the socket —
+    # only the researcher named by TB_PREPARE_USER gets it, later (Bugbot on
+    # #381; same least-privilege rule as the #377 SUDO_USER fix).
+    [[ -n "${TB_PREPARE_HOST_MODE:-}" ]] || sudo usermod -aG docker "$USER"
     success "Docker"
   else
     success "Docker"
@@ -224,9 +227,43 @@ install_docker_engine() {
   sudo systemctl reset-failed docker 2>/dev/null || true
   sudo systemctl start docker 2>/dev/null || true
 
+  # prepare-host mode: the admin verifies the DAEMON via sudo and never joins
+  # or re-execs into the docker group — the sg re-exec below re-runs the script
+  # WITHOUT its arguments, which would silently turn a host-prep into a FULL
+  # provision as the admin; and a non-root admin without socket access must not
+  # abort before the TB_PREPARE_USER grant runs (Bugbot on #381).
+  if [[ -n "${TB_PREPARE_HOST_MODE:-}" ]]; then
+    if sudo docker info &>/dev/null; then
+      log "Docker daemon running (verified via sudo — prepare-host mode)."
+      return 0
+    fi
+    # Daemon ACTIVE but not answering even via sudo: terminal HERE — the
+    # shared tail's "log out and back in" advice is docker-group advice, wrong
+    # for an admin who never joins the group (Bugbot).
+    if sudo systemctl is-active --quiet docker 2>/dev/null; then
+      error "Docker's daemon is active but not answering (even via sudo). Check 'sudo docker info', then re-run prepare-host."
+    fi
+    # Daemon DOWN: starting it IS host preparation — try, then re-verify. Every
+    # outcome stays terminal in prepare-host wording: the shared diagnostics
+    # below end with "re-run this installer", which for the ADMIN means a full
+    # provision as themselves — the exact outcome prepare-host exists to
+    # prevent (Bugbot r3).
+    log "Docker daemon not active (prepare-host) — starting it."
+    sudo systemctl enable --now docker 2>/dev/null || true
+    if sudo docker info &>/dev/null; then
+      log "Docker daemon started (prepare-host mode)."
+      return 0
+    fi
+    if [[ -n "${KMODS_REBOOT_REQUIRED:-}" ]]; then
+      error "Reboot required to finish Docker setup: its kernel modules were installed for a newer kernel that isn't running yet. Reboot, then re-run prepare-host."
+    fi
+    warn "Docker is installed, but its daemon won't start — this is a Docker/host issue, not tracebloc. Docker's error:"
+    { sudo systemctl status docker.service --no-pager -l 2>&1 | tail -6; } | sed 's/^/    /'
+    error "Fix the Docker error above, then re-run prepare-host."
+  fi
   if ! docker info &>/dev/null 2>&1; then
     # (a) Group not active in THIS shell yet → re-exec under the docker group.
-    if [[ -z "${_K3S_INSTALL_REEXEC:-}" ]] && id -nG "$USER" 2>/dev/null | grep -qw docker; then
+    if [[ -z "${TB_PREPARE_HOST_MODE:-}" && -z "${_K3S_INSTALL_REEXEC:-}" ]] && id -nG "$USER" 2>/dev/null | grep -qw docker; then
       SELF="$(readlink -f "$0" 2>/dev/null || echo "$0")"
       log "Docker group not yet active in this session — re-executing script..."
       exec sg docker -c "_K3S_INSTALL_REEXEC=1 bash '$SELF'"
@@ -613,4 +650,77 @@ install_linux() {
   install_system_deps
   _install_userspace_tools
   dispatch_gpu_setup
+}
+
+# run_prepare_host — the standalone, admin-run Tier-2 step (RFC 0001 #1178). An
+# administrator runs this ONCE (`curl … | bash -s -- prepare-host`, or
+# `tracebloc prepare-host`) on a host a researcher can't install on unprivileged
+# — no usable runtime — after which the researcher installs at Tier 0 with NO
+# admin. It does ONLY the privileged prerequisites, reusing the exact functions
+# the full install uses (install the container runtime + system deps + kernel
+# modules) and then grants the researcher docker-group access. It never mints a
+# credential, creates a cluster, or installs the CLI — so an admin can safely run
+# it on a shared host without provisioning anything as themselves.
+run_prepare_host() {
+  if [[ "$OS" != "Linux" ]]; then
+    error "prepare-host is for Linux hosts. On macOS/Windows, install Docker Desktop (or enable WSL2) as an administrator, then run the installer normally."
+  fi
+  export DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a NEEDRESTART_SUSPEND=1
+
+  step_header a "Preparing this host for tracebloc (one-time administrator step)"
+  if declare -F host_audit >/dev/null 2>&1; then host_audit; fi
+  echo ""
+
+  preflight_sudo
+  setup_pm
+  apt_wait_for_lock
+  # Prepare-host reuses the full install's engine setup, but the ADMIN must
+  # never be granted the socket or sg-re-exec'd into the script (which drops
+  # the prepare-host argument and runs a FULL provision) — the daemon check
+  # runs via sudo instead (Bugbot on #381).
+  TB_PREPARE_HOST_MODE=1
+  install_docker_engine
+  TB_PREPARE_HOST_MODE=""
+  install_system_deps
+
+  # Grant the researcher docker-group access so THEIR later install is Tier 0
+  # (zero root). The researcher must be named EXPLICITLY via TB_PREPARE_USER — we
+  # must NOT fall back to $SUDO_USER, which is the ADMIN who ran prepare-host, not
+  # the researcher (adding the admin would report success while the researcher
+  # still can't install; Bugbot #377). Best-effort: never fail the prep over it.
+  local target="${TB_PREPARE_USER:-}"
+  # Trim surrounding whitespace BEFORE the non-empty gate: a pasted value with
+  # stray spaces passes [[ -n ]], fails usermod, and skips the honest no-grant
+  # messaging even though a real username was intended (Bugbot r3).
+  target="${target#"${target%%[![:space:]]*}"}"; target="${target%"${target##*[![:space:]]}"}"
+  local granted=0
+  if [[ -n "$target" && "$target" != "root" ]]; then
+    if sudo usermod -aG docker "$target" 2>/dev/null; then
+      success "Added ${target} to the docker group — they can now install with no admin."
+      granted=1
+    else
+      warn "Couldn't add ${target} to the docker group; add it manually:  sudo usermod -aG docker ${target}"
+    fi
+  else
+    hint "To let a non-admin user install at Tier 0, grant them docker-group access:"
+    hint "  set TB_PREPARE_USER=<their-username> when running prepare-host, or run:  sudo usermod -aG docker <their-username>"
+  fi
+
+  echo ""
+  success "Host prepared."
+  # Only promise a no-admin install when a researcher actually got docker-group
+  # access. Without a successful grant (no TB_PREPARE_USER, or usermod failed)
+  # the user still can't reach the socket, so claiming "no administrator rights"
+  # would be a lie that sends them into an install that then demands sudo
+  # (Bugbot #377).
+  if [[ "$granted" == 1 ]]; then
+    info "The researcher can now install tracebloc with no administrator rights:"
+    echo "    curl -fsSL https://tracebloc.io/i.sh | bash"
+    info "(A fresh login may be needed for docker-group membership to take effect.)"
+  else
+    info "The container runtime and prerequisites are installed. Once a researcher"
+    info "has docker-group access (see above), they can install with no admin rights:"
+    echo "    curl -fsSL https://tracebloc.io/i.sh | bash"
+  fi
+  return 0
 }

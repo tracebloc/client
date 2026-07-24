@@ -154,6 +154,104 @@ setup() {
   [[ "$output" != *"docker-ce.repo"* ]]
 }
 
+# ── install_docker_engine under prepare-host (#381 Bugbot) ───────────────────
+# The admin runs prepare-host with sudo but no docker-group membership. The
+# engine gate must verify the DAEMON via sudo and never (a) sg-re-exec — that
+# re-runs the script WITHOUT the prepare-host argument, i.e. a silent FULL
+# provision — nor (b) abort on the admin's unreachable non-root socket, nor
+# (c) grant the ADMIN the socket (only TB_PREPARE_USER gets it, later).
+@test "install_docker_engine: prepare-host mode verifies via sudo, no sg re-exec, exits 0 (#381)" {
+  PRESENT_CMDS="curl docker"; TEST_DISTRO=ubuntu
+  TB_PREPARE_HOST_MODE=1
+  docker() { return 1; }                          # admin's non-root socket: unreachable
+  sudo()   { record "sudo $*"; return 0; }        # sudo docker info succeeds
+  sg()     { record "sg $*"; exit 97; }           # the escape this test forbids
+  id()     { echo "admin docker"; }               # even WITH membership visible…
+  run install_docker_engine
+  [ "$status" -eq 0 ]
+  run mock_calls
+  [[ "$output" == *"sudo docker info"* ]]
+  [[ "$output" != *"sg "* ]]                      # …no re-exec ever fires
+  TB_PREPARE_HOST_MODE=""
+}
+
+@test "install_docker_engine: prepare-host + active daemon that won't answer -> terminal error, no logout advice (#381)" {
+  PRESENT_CMDS="curl docker"; TEST_DISTRO=ubuntu
+  TB_PREPARE_HOST_MODE=1
+  docker() { return 1; }
+  sudo()   { record "sudo $*"
+    case "$*" in
+      "docker info") return 1 ;;          # even sudo can't reach it
+      *is-active*)   return 0 ;;          # …but the daemon claims active
+      *) return 0 ;;
+    esac
+  }
+  sg() { record "sg $*"; exit 97; }
+  run install_docker_engine
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"re-run prepare-host"* ]]
+  [[ "$output" != *"logging out and back in"* ]]
+  TB_PREPARE_HOST_MODE=""
+}
+
+@test "install_docker_engine: prepare-host + daemon down -> starts it via sudo, exits 0 (#381 r3)" {
+  PRESENT_CMDS="curl docker"; TEST_DISTRO=ubuntu
+  TB_PREPARE_HOST_MODE=1
+  docker() { return 1; }
+  STARTED_FLAG="$BATS_TEST_TMPDIR/docker-started"
+  sudo() { record "sudo $*"
+    case "$*" in
+      "docker info")           if [ -f "$STARTED_FLAG" ]; then return 0; else return 1; fi ;;
+      *"enable --now docker"*) touch "$STARTED_FLAG"; return 0 ;;
+      *is-active*)             return 1 ;;
+      *) return 0 ;;
+    esac
+  }
+  sg() { record "sg $*"; exit 97; }
+  run install_docker_engine
+  [ "$status" -eq 0 ]
+  run mock_calls
+  [[ "$output" == *"enable --now docker"* ]]
+  TB_PREPARE_HOST_MODE=""
+}
+
+# A daemon that won't start must stay terminal in PREPARE-HOST wording: the
+# shared diagnostics end with "re-run this installer", which for the admin
+# means a full provision as themselves — the outcome prepare-host exists to
+# prevent (Bugbot r3).
+@test "install_docker_engine: prepare-host + daemon won't start -> terminal, says re-run prepare-host (#381 r3)" {
+  PRESENT_CMDS="curl docker"; TEST_DISTRO=ubuntu
+  TB_PREPARE_HOST_MODE=1
+  docker() { return 1; }
+  sudo() { record "sudo $*"
+    case "$*" in
+      "docker info") return 1 ;;
+      *is-active*)   return 1 ;;
+      *) return 0 ;;
+    esac
+  }
+  sg() { record "sg $*"; exit 97; }
+  run install_docker_engine
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"re-run prepare-host"* ]]
+  [[ "$output" != *"re-run this installer"* ]]
+  [[ "$output" != *"logging out and back in"* ]]
+  TB_PREPARE_HOST_MODE=""
+}
+
+@test "install_docker_engine: prepare-host mode skips the admin group-add on fresh install (#381)" {
+  PRESENT_CMDS="curl"; TEST_DISTRO=ubuntu         # docker absent -> install branch
+  TB_PREPARE_HOST_MODE=1
+  docker() { return 1; }
+  sudo()   { record "sudo $*"; return 0; }
+  sg()     { record "sg $*"; exit 97; }
+  run install_docker_engine
+  [ "$status" -eq 0 ]
+  run mock_calls
+  [[ "$output" != *"usermod -aG docker"* ]]       # the ADMIN is never granted the socket
+  TB_PREPARE_HOST_MODE=""
+}
+
 # ── install_k3d: pinned release, verified direct download (#382) ────────────
 # The binary is fetched straight from the pinned release and verified against
 # the release's checksums.txt — upstream's install.sh is NOT used (it performs
@@ -555,4 +653,101 @@ _stub_install_steps() {
   GPU_VENDOR=none; K3D_GPU_FLAGS=()
   _tier0_gpu_flags
   [ "${#K3D_GPU_FLAGS[@]}" -eq 0 ]
+}
+
+# ── run_prepare_host (RFC 0001 #1178) ────────────────────────────────────────
+@test "run_prepare_host: installs runtime prereqs + adds researcher to docker group, no cluster/CLI" {
+  MOCK_CALLS="$(mktemp)"
+  OS=Linux; TB_PREPARE_USER=researcher
+  host_audit()          { :; }
+  preflight_sudo()      { record preflight_sudo; }
+  setup_pm()            { :; }
+  apt_wait_for_lock()   { :; }
+  install_docker_engine(){ record install_docker_engine; }
+  install_system_deps() { record install_system_deps; }
+  sudo()                { record "sudo $*"; return 0; }
+  run run_prepare_host
+  [ "$status" -eq 0 ]
+  mock_calls | grep -q install_docker_engine
+  mock_calls | grep -q "sudo usermod -aG docker researcher"
+  ! mock_calls | grep -qi "create_cluster"
+  ! mock_calls | grep -qi "install_tracebloc_cli"
+  # Grant succeeded => the no-admin promise is honest and shown (#377).
+  printf '%s\n' "$output" | grep -qi "no administrator rights"
+}
+
+@test "run_prepare_host: TB_PREPARE_USER with stray whitespace is trimmed before the grant (#381 r3)" {
+  MOCK_CALLS="$(mktemp)"
+  OS=Linux; TB_PREPARE_USER="  researcher  "
+  host_audit()          { :; }
+  preflight_sudo()      { :; }
+  setup_pm()            { :; }
+  apt_wait_for_lock()   { :; }
+  install_docker_engine(){ :; }
+  install_system_deps() { :; }
+  sudo()                { record "sudo $*"; return 0; }
+  run run_prepare_host
+  [ "$status" -eq 0 ]
+  # Untrimmed, the record would be "docker   researcher  " — single-space match
+  # proves the value was trimmed before the gate and the grant.
+  mock_calls | grep -q "sudo usermod -aG docker researcher"
+  [[ "$output" == *"Added researcher to the docker group"* ]]
+}
+
+@test "run_prepare_host: no target user => best-effort, still prepares the host" {
+  MOCK_CALLS="$(mktemp)"
+  OS=Linux; unset TB_PREPARE_USER SUDO_USER
+  host_audit()          { :; }
+  preflight_sudo()      { :; }
+  setup_pm()            { :; }
+  apt_wait_for_lock()   { :; }
+  install_docker_engine(){ record install_docker_engine; }
+  install_system_deps() { :; }
+  sudo()                { record "sudo $*"; return 0; }
+  run run_prepare_host
+  [ "$status" -eq 0 ]
+  mock_calls | grep -q install_docker_engine
+  ! mock_calls | grep -q "usermod"      # nobody to add
+  # No grant happened => must NOT falsely promise a no-admin install (#377).
+  ! printf '%s\n' "$output" | grep -qi "can now install tracebloc with no administrator rights"
+}
+
+@test "run_prepare_host: usermod fails => no false no-admin promise, still exits 0 (#377)" {
+  MOCK_CALLS="$(mktemp)"
+  OS=Linux; TB_PREPARE_USER=researcher
+  host_audit()          { :; }
+  preflight_sudo()      { :; }
+  setup_pm()            { :; }
+  apt_wait_for_lock()   { :; }
+  install_docker_engine(){ record install_docker_engine; }
+  install_system_deps() { :; }
+  # sudo succeeds for everything EXCEPT the usermod grant.
+  sudo()                { case "$*" in usermod*) return 1 ;; *) return 0 ;; esac; }
+  run run_prepare_host
+  [ "$status" -eq 0 ]                                 # best-effort: prep still succeeds
+  printf '%s\n' "$output" | grep -qi "Couldn't add"   # honest warning
+  ! printf '%s\n' "$output" | grep -qi "can now install tracebloc with no administrator rights"
+}
+
+@test "run_prepare_host: does NOT grant docker-group to SUDO_USER (the admin), only TB_PREPARE_USER (#377)" {
+  MOCK_CALLS="$(mktemp)"
+  OS=Linux; unset TB_PREPARE_USER; SUDO_USER=admin
+  host_audit()          { :; }
+  preflight_sudo()      { :; }
+  setup_pm()            { :; }
+  apt_wait_for_lock()   { :; }
+  install_docker_engine(){ record install_docker_engine; }
+  install_system_deps() { :; }
+  sudo()                { record "sudo $*"; return 0; }
+  run run_prepare_host
+  [ "$status" -eq 0 ]
+  mock_calls | grep -q install_docker_engine   # host still prepared
+  ! mock_calls | grep -q "usermod"             # the ADMIN (SUDO_USER) is NOT added
+}
+
+@test "run_prepare_host: non-Linux errors with a Docker Desktop / WSL2 pointer" {
+  OS=Darwin
+  run run_prepare_host
+  [ "$status" -ne 0 ]
+  printf '%s\n' "$output" | grep -qiE "Docker Desktop|WSL2"
 }
