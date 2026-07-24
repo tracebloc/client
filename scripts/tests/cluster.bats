@@ -300,6 +300,7 @@ setup() {
   OS=Linux
   docker() { if [[ "$1 $2" == "ps -a" ]]; then printf '%s\n' "k3d-tracebloc-server-0" "k3d-tracebloc-serverlb"; else record "docker $*"; fi; }
   sudo()   { record "sudo $*"; }
+  systemctl() { record "systemctl $*"; return 1; }   # not already enabled on boot
   has()    { return 0; }
   ensure_cluster_autostart
   run mock_calls
@@ -312,11 +313,50 @@ setup() {
   OS=Linux; INSTALL_TIER=0
   docker() { if [[ "$1 $2" == "ps -a" ]]; then echo "k3d-tracebloc-server-0"; else record "docker $*"; fi; }
   sudo()   { record "sudo $*"; }
+  systemctl() { record "systemctl $*"; return 1; }   # docker.service not enabled on boot
   has()    { return 0; }
   ensure_cluster_autostart
   run mock_calls
   [[ "$output" == *"docker update --restart unless-stopped"* ]]   # reboot policy still set (no privilege)
   [[ "$output" != *"systemctl enable docker"* ]]                  # but no sudo autostart on the zero-root path
+}
+
+# Tier 0 never runs `systemctl enable`, but a normal Docker package install
+# already enables docker.service — so the reboot promise must be seeded from that
+# pre-install state, not left at 0 just because THIS run didn't flip it (Bugbot:
+# cross-step state flags must seed from pre-install state, not hard defaults).
+@test "ensure_cluster_autostart: Tier 0 with docker.service already enabled -> honest auto-restart promise" {
+  OS=Linux; INSTALL_TIER=0
+  docker() { if [[ "$1 $2" == "ps -a" ]]; then echo "k3d-tracebloc-server-0"; else record "docker $*"; fi; }
+  sudo()   { record "sudo $*"; }
+  systemctl() { [[ "$1 $2" == "is-enabled docker" ]] && { echo "enabled"; return 0; }; record "systemctl $*"; }
+  has()    { return 0; }
+  ensure_cluster_autostart
+  [ "${TB_DOCKER_AUTOSTART:-0}" = "1" ]                           # summary can honestly promise auto-restart
+  run mock_calls
+  [[ "$output" != *"systemctl enable docker"* ]]                  # still no privileged enable on the zero-root path
+}
+
+@test "ensure_cluster_autostart: Tier 0 with docker.service disabled -> no false auto-restart promise" {
+  OS=Linux; INSTALL_TIER=0
+  docker() { if [[ "$1 $2" == "ps -a" ]]; then echo "k3d-tracebloc-server-0"; else record "docker $*"; fi; }
+  sudo()   { record "sudo $*"; }
+  systemctl() { [[ "$1 $2" == "is-enabled docker" ]] && { echo "disabled"; return 1; }; record "systemctl $*"; }
+  has()    { return 0; }
+  ensure_cluster_autostart
+  [ "${TB_DOCKER_AUTOSTART:-0}" != "1" ]                          # summary tells the user to start Docker
+}
+
+# `enabled-runtime` is a transient enable that does NOT survive a reboot, so it
+# must not set the auto-restart flag.
+@test "ensure_cluster_autostart: docker.service 'enabled-runtime' (transient) does NOT promise auto-restart" {
+  OS=Linux; INSTALL_TIER=0
+  docker() { if [[ "$1 $2" == "ps -a" ]]; then echo "k3d-tracebloc-server-0"; else record "docker $*"; fi; }
+  sudo()   { record "sudo $*"; }
+  systemctl() { [[ "$1 $2" == "is-enabled docker" ]] && { echo "enabled-runtime"; return 0; }; record "systemctl $*"; }
+  has()    { return 0; }
+  ensure_cluster_autostart
+  [ "${TB_DOCKER_AUTOSTART:-0}" != "1" ]
 }
 
 @test "ensure_cluster_autostart: macOS does not enable docker.service" {
