@@ -210,11 +210,21 @@ install_tracebloc_cli() {
   fi
   # Whether the CLI ends up runnable in THIS shell (not just a fresh terminal).
   # summary.sh reads it to keep its final CTA honest — "Run tracebloc" vs "Open a
-  # new terminal, then run tracebloc" (B2). Default 0; _verify_tracebloc_cli flips
-  # it to 1 only in the fully-usable branch. Left 0 on any download/install/verify
-  # miss, so the summary never tells the user to run a command this shell can't find.
+  # new terminal, then run tracebloc" (B2). _verify_tracebloc_cli overrides this
+  # per THIS run's outcome. The DEFAULT is seeded from the PRE-install state: a
+  # tracebloc ALREADY on a SYSTEM PATH dir (a prior install) is resolvable in the
+  # user's shell unconditionally, so if the CLI step is later skipped or fails
+  # (download/installer/temp-dir miss → early return, _verify never runs), the
+  # summary must still say "Run" — not send a user with a working system tracebloc
+  # to a new terminal (Bugbot #371). Gate on _cli_at_system_dir, NOT bare `has`:
+  # install.sh prepends ~/.local/bin to THIS process, which would false-positive a
+  # ~/.local/bin install the returning shell can't yet see.
   # shellcheck disable=SC2034  # consumed cross-file by summary.sh (_cli_runnable_now)
-  TB_CLI_USABLE_NOW=0
+  if has tracebloc && _cli_at_system_dir "$(command -v tracebloc 2>/dev/null)"; then
+    TB_CLI_USABLE_NOW=1
+  else
+    TB_CLI_USABLE_NOW=0
+  fi
 
   local installer
   installer="$(mktemp)" || { warn "Couldn't install the tracebloc CLI (no temp dir) — your client is set up fine."; return 0; }

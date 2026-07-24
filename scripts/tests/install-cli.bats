@@ -197,3 +197,30 @@ setup() {
   ! _cli_at_system_dir /home/tester/bin/tracebloc
   ! _cli_at_system_dir ""                                     # unresolved → conservative
 }
+
+# ── TB_CLI_USABLE_NOW default seeded from pre-install state (Bugbot #371) ─────
+@test "install_tracebloc_cli: pre-existing SYSTEM tracebloc + install step fails → TB_CLI_USABLE_NOW stays 1 (#371)" {
+  # A prior install left tracebloc on a system PATH dir (resolvable in the user's
+  # shell). This run can't even start (no temp dir) → early return, _verify never
+  # runs — the summary must still say "Run", not "open a new terminal".
+  has() { return 0; }                    # tracebloc resolvable
+  _cli_at_system_dir() { return 0; }     # …at a system dir
+  _cli_version_short() { echo "0.2.0"; }
+  mktemp() { return 1; }                 # force the early "(no temp dir)" return
+  TB_CLI_USABLE_NOW=
+  install_tracebloc_cli >/dev/null 2>&1 || true
+  [ "$TB_CLI_USABLE_NOW" = "1" ]
+}
+
+@test "install_tracebloc_cli: pre-existing ~/.local/bin tracebloc + install step fails → TB_CLI_USABLE_NOW=0 (#371)" {
+  # Prior install is in ~/.local/bin (this process resolves it via install.sh's
+  # PATH prepend, the returning shell may not) → NOT usable-now; the summary must
+  # not over-claim "Run".
+  has() { return 0; }
+  _cli_at_system_dir() { return 1; }     # ~/.local/bin, not a system dir
+  _cli_version_short() { echo "0.2.0"; }
+  mktemp() { return 1; }
+  TB_CLI_USABLE_NOW=
+  install_tracebloc_cli >/dev/null 2>&1 || true
+  [ "$TB_CLI_USABLE_NOW" = "0" ]
+}
