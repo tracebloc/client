@@ -228,6 +228,10 @@ setup() {
     case "$*" in
       "docker info") return 1 ;;
       *is-active*)   return 1 ;;
+      # Real `systemctl status` exits 3 for an inactive unit — the diagnostics
+      # pipeline must swallow that (|| true) or set -e kills the script before
+      # the re-run guidance ever prints (Bugbot r6).
+      *"systemctl status"*) echo "docker.service: inactive (dead)"; return 3 ;;
       *) return 0 ;;
     esac
   }

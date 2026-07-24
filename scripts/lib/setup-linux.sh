@@ -263,7 +263,10 @@ install_docker_engine() {
       error "Reboot required to finish Docker setup: its kernel modules were installed for a newer kernel that isn't running yet. Reboot, then re-run prepare-host."
     fi
     warn "Docker is installed, but its daemon won't start — this is a Docker/host issue, not tracebloc. Docker's error:"
-    { sudo systemctl status docker.service --no-pager -l 2>&1 | tail -6; } | sed 's/^/    /'
+    # || true: `systemctl status` exits 3 for an inactive unit, and under
+    # set -e -o pipefail the failing pipeline would abort BEFORE the error
+    # below — a silent death with no re-run guidance (Bugbot r6).
+    { sudo systemctl status docker.service --no-pager -l 2>&1 | tail -6; } | sed 's/^/    /' || true
     error "Fix the Docker error above, then re-run prepare-host."
   fi
   if ! docker info &>/dev/null 2>&1; then
@@ -292,9 +295,13 @@ install_docker_engine() {
       hint "If the error below mentions 'addrtype' / 'missing kernel module', the host lacks the"
       hint "netfilter modules Docker needs — try:  sudo dnf install -y kernel-modules-extra && sudo reboot"
       hint "Other causes: SELinux, an overlay storage-driver issue, or low /var/lib/docker disk. Docker's error:"
+      # || true: same silent-death hazard as the prepare-host block above —
+      # `systemctl status` exits 3 on an inactive unit and a no-match `grep`
+      # exits 1, so under set -e -o pipefail this diagnostics pipeline would
+      # abort before the error message below ever printed (Bugbot r6).
       { sudo systemctl status docker.service --no-pager -l 2>&1 | tail -6
         sudo journalctl -u docker.service --no-pager 2>/dev/null \
-          | grep -iE 'level=(error|fatal)|failed to|cannot |unable |no such' | tail -12; } | sed 's/^/    /'
+          | grep -iE 'level=(error|fatal)|failed to|cannot |unable |no such' | tail -12; } | sed 's/^/    /' || true
       echo ""
       error "Start Docker manually (fix the error above), then re-run this installer."
     fi
