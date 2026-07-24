@@ -111,6 +111,29 @@ setup() {
   [[ "$output" != *"Installing tar"* ]]
 }
 
+# ── _ensure_helm_prereqs: Tier 0 skips install_system_deps, so guard helm's
+# openssl+tar deps up front instead of letting get-helm-3 die mid-install after
+# promising a zero-privilege path (Bugbot #383). We can't sudo them in on Tier 0.
+@test "_ensure_helm_prereqs: openssl + tar present -> silent no-op (exit 0)" {
+  PRESENT_CMDS="docker openssl tar"
+  run _ensure_helm_prereqs
+  [ "$status" -eq 0 ]
+}
+@test "_ensure_helm_prereqs: both missing -> fatal, names openssl+tar and the zero-privilege constraint" {
+  PRESENT_CMDS="docker"            # neither openssl nor tar
+  run _ensure_helm_prereqs
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"openssl"* ]]
+  [[ "$output" == *"tar"* ]]
+  [[ "$output" == *"Tier 0"* ]]     # honest about why we won't install them
+}
+@test "_ensure_helm_prereqs: only tar missing -> fatal, names tar (not openssl)" {
+  PRESENT_CMDS="docker openssl"    # openssl present, tar absent
+  run _ensure_helm_prereqs
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"tar"* ]]
+}
+
 # ── install_docker_engine: branch selection ────────────────────────────────
 @test "install_docker_engine: Amazon Linux -> dnf docker" {
   PRESENT_CMDS="dnf"; TEST_DISTRO=amzn; write_os_release
@@ -428,6 +451,7 @@ _stub_install_steps() {
   install_kubectl()      { record "install_kubectl"; }
   install_k3d()          { record "install_k3d"; }
   install_helm()         { record "install_helm"; }
+  _ensure_helm_prereqs() { record "_ensure_helm_prereqs"; }
 }
 
 @test "install_linux: Tier 0 skips every privileged step, installs only user-space tools" {
@@ -444,6 +468,7 @@ _stub_install_steps() {
   mock_calls | grep -q install_kubectl
   mock_calls | grep -q install_k3d
   mock_calls | grep -q install_helm
+  mock_calls | grep -q _ensure_helm_prereqs   # openssl+tar checked before helm (Bugbot #383)
   ! mock_calls | grep -q preflight_sudo
   ! mock_calls | grep -q install_docker_engine
   ! mock_calls | grep -q install_system_deps

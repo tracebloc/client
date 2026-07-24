@@ -468,6 +468,28 @@ install_helm() {
   success "System tools"
 }
 
+# _ensure_helm_prereqs — install_helm shells to get-helm-3, which verifies its
+# download checksum with `openssl` and unpacks a tarball with `tar`. The full
+# flow guarantees both via install_system_deps (see the matching note there), but
+# the Tier 0 fast path skips install_system_deps entirely — so on a minimal host
+# that lacks them (Amazon Linux 2023, minimal RHEL) the Helm install would die
+# cryptically AFTER we promised a zero-privilege install (Bugbot #383).
+#
+# We MUST NOT install them here: on Tier 0 every package install needs sudo
+# ($PM_INSTALL is sudo-prefixed and setup_pm isn't even run on this path), and a
+# docker-group user without root would hit a password prompt / failure on the
+# "no administrator rights needed" path. Hosts that already have a usable Docker
+# almost always have openssl+tar, so the common case is a silent no-op; when they
+# are genuinely absent, surface the real constraint up front instead of silently
+# sudo-ing or failing mid-install.
+_ensure_helm_prereqs() {
+  local missing=()
+  has openssl || missing+=(openssl)
+  has tar     || missing+=(tar)
+  [ ${#missing[@]} -eq 0 ] && return 0
+  error "Helm's installer needs these packages, which aren't installed: ${missing[*]}. This zero-privilege (Tier 0) path won't install system packages for you — install ${missing[*]} once (your package manager, or ask an administrator), then re-run this installer. Details: docs/rfcs/0001-least-privilege-install.md"
+}
+
 # ── GPU setup dispatch ───────────────────────────────────────────────────────
 dispatch_gpu_setup() {
   case "$GPU_VENDOR" in
@@ -600,6 +622,10 @@ install_linux() {
   # INSTALL is skipped.
   if [ "${INSTALL_TIER:-}" = "0" ]; then
     info "Using the container runtime already on this machine — no administrator rights needed."
+    # get-helm-3 (run by install_helm) needs openssl+tar; the full flow installs
+    # them in install_system_deps, which this path skips — verify they're present
+    # up front rather than sudo them in on the zero-privilege path (Bugbot #383).
+    _ensure_helm_prereqs
     _install_userspace_tools
     _tier0_gpu_flags
     return 0
