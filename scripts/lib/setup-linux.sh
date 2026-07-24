@@ -239,11 +239,27 @@ install_docker_engine() {
     fi
     # Daemon ACTIVE but not answering even via sudo: terminal HERE — the
     # shared tail's "log out and back in" advice is docker-group advice, wrong
-    # for an admin who never joins the group (Bugbot). A daemon that is DOWN
-    # falls through to the shared diagnostics below instead.
+    # for an admin who never joins the group (Bugbot).
     if sudo systemctl is-active --quiet docker 2>/dev/null; then
       error "Docker's daemon is active but not answering (even via sudo). Check 'sudo docker info', then re-run prepare-host."
     fi
+    # Daemon DOWN: starting it IS host preparation — try, then re-verify. Every
+    # outcome stays terminal in prepare-host wording: the shared diagnostics
+    # below end with "re-run this installer", which for the ADMIN means a full
+    # provision as themselves — the exact outcome prepare-host exists to
+    # prevent (Bugbot r3).
+    log "Docker daemon not active (prepare-host) — starting it."
+    sudo systemctl enable --now docker 2>/dev/null || true
+    if sudo docker info &>/dev/null; then
+      log "Docker daemon started (prepare-host mode)."
+      return 0
+    fi
+    if [[ -n "${KMODS_REBOOT_REQUIRED:-}" ]]; then
+      error "Reboot required to finish Docker setup: its kernel modules were installed for a newer kernel that isn't running yet. Reboot, then re-run prepare-host."
+    fi
+    warn "Docker is installed, but its daemon won't start — this is a Docker/host issue, not tracebloc. Docker's error:"
+    { sudo systemctl status docker.service --no-pager -l 2>&1 | tail -6; } | sed 's/^/    /'
+    error "Fix the Docker error above, then re-run prepare-host."
   fi
   if ! docker info &>/dev/null 2>&1; then
     # (a) Group not active in THIS shell yet → re-exec under the docker group.
@@ -673,6 +689,10 @@ run_prepare_host() {
   # the researcher (adding the admin would report success while the researcher
   # still can't install; Bugbot #377). Best-effort: never fail the prep over it.
   local target="${TB_PREPARE_USER:-}"
+  # Trim surrounding whitespace BEFORE the non-empty gate: a pasted value with
+  # stray spaces passes [[ -n ]], fails usermod, and skips the honest no-grant
+  # messaging even though a real username was intended (Bugbot r3).
+  target="${target#"${target%%[![:space:]]*}"}"; target="${target%"${target##*[![:space:]]}"}"
   local granted=0
   if [[ -n "$target" && "$target" != "root" ]]; then
     if sudo usermod -aG docker "$target" 2>/dev/null; then

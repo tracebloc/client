@@ -194,6 +194,51 @@ setup() {
   TB_PREPARE_HOST_MODE=""
 }
 
+@test "install_docker_engine: prepare-host + daemon down -> starts it via sudo, exits 0 (#381 r3)" {
+  PRESENT_CMDS="curl docker"; TEST_DISTRO=ubuntu
+  TB_PREPARE_HOST_MODE=1
+  docker() { return 1; }
+  STARTED_FLAG="$BATS_TEST_TMPDIR/docker-started"
+  sudo() { record "sudo $*"
+    case "$*" in
+      "docker info")           if [ -f "$STARTED_FLAG" ]; then return 0; else return 1; fi ;;
+      *"enable --now docker"*) touch "$STARTED_FLAG"; return 0 ;;
+      *is-active*)             return 1 ;;
+      *) return 0 ;;
+    esac
+  }
+  sg() { record "sg $*"; exit 97; }
+  run install_docker_engine
+  [ "$status" -eq 0 ]
+  run mock_calls
+  [[ "$output" == *"enable --now docker"* ]]
+  TB_PREPARE_HOST_MODE=""
+}
+
+# A daemon that won't start must stay terminal in PREPARE-HOST wording: the
+# shared diagnostics end with "re-run this installer", which for the admin
+# means a full provision as themselves — the outcome prepare-host exists to
+# prevent (Bugbot r3).
+@test "install_docker_engine: prepare-host + daemon won't start -> terminal, says re-run prepare-host (#381 r3)" {
+  PRESENT_CMDS="curl docker"; TEST_DISTRO=ubuntu
+  TB_PREPARE_HOST_MODE=1
+  docker() { return 1; }
+  sudo() { record "sudo $*"
+    case "$*" in
+      "docker info") return 1 ;;
+      *is-active*)   return 1 ;;
+      *) return 0 ;;
+    esac
+  }
+  sg() { record "sg $*"; exit 97; }
+  run install_docker_engine
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"re-run prepare-host"* ]]
+  [[ "$output" != *"re-run this installer"* ]]
+  [[ "$output" != *"logging out and back in"* ]]
+  TB_PREPARE_HOST_MODE=""
+}
+
 @test "install_docker_engine: prepare-host mode skips the admin group-add on fresh install (#381)" {
   PRESENT_CMDS="curl"; TEST_DISTRO=ubuntu         # docker absent -> install branch
   TB_PREPARE_HOST_MODE=1
@@ -629,6 +674,24 @@ _stub_install_steps() {
   ! mock_calls | grep -qi "install_tracebloc_cli"
   # Grant succeeded => the no-admin promise is honest and shown (#377).
   printf '%s\n' "$output" | grep -qi "no administrator rights"
+}
+
+@test "run_prepare_host: TB_PREPARE_USER with stray whitespace is trimmed before the grant (#381 r3)" {
+  MOCK_CALLS="$(mktemp)"
+  OS=Linux; TB_PREPARE_USER="  researcher  "
+  host_audit()          { :; }
+  preflight_sudo()      { :; }
+  setup_pm()            { :; }
+  apt_wait_for_lock()   { :; }
+  install_docker_engine(){ :; }
+  install_system_deps() { :; }
+  sudo()                { record "sudo $*"; return 0; }
+  run run_prepare_host
+  [ "$status" -eq 0 ]
+  # Untrimmed, the record would be "docker   researcher  " — single-space match
+  # proves the value was trimmed before the gate and the grant.
+  mock_calls | grep -q "sudo usermod -aG docker researcher"
+  [[ "$output" == *"Added researcher to the docker group"* ]]
 }
 
 @test "run_prepare_host: no target user => best-effort, still prepares the host" {
