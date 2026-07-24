@@ -29,6 +29,21 @@ tests:
       - hasDocuments:
           count: 0
 
+  - it: carries the seal-check enumeration labels on the Job AND its pod (contract for cli#393)
+    asserts:
+      - equal:
+          path: metadata.labels["tracebloc.io/seal-check"]
+          value: "true"
+      - equal:
+          path: metadata.labels["tracebloc.io/seal-check-name"]
+          value: backend-reachability
+      - equal:
+          path: spec.template.metadata.labels["tracebloc.io/seal-check"]
+          value: "true"
+      - equal:
+          path: spec.template.metadata.labels["tracebloc.io/seal-check-name"]
+          value: backend-reachability
+
   - it: is NOT labelled as a training workload (keeps its own egress)
     asserts:
       - notExists:

@@ -227,6 +227,57 @@ networkPolicy:
 egressReachabilityCheck:
   enabled: true
 
+# -- Seal check (RFC-0003 §8.2 / backend#1184) — the chart's conformance suite.
+# Every runnable check is a `helm test` hook Job carrying the enumeration
+# labels (the contract tooling consumes — tracebloc CLI, cli#393):
+#   tracebloc.io/seal-check: "true"
+#   tracebloc.io/seal-check-name: <check>
+# Checks today: egress-enforcement (config under networkPolicy.training),
+# backend-reachability (config under egressReachabilityCheck), and
+# storage-assertions (config below). Run with `helm test <release> --logs`.
+# Philosophy: a guarantee that cannot be verified is reported UNSEALED — a
+# check fails loudly rather than silently claiming sealed. Disabling a check
+# is an explicit, values-visible declaration, never a runtime fallback.
+# See docs/SEAL-CHECK.md for the contract, coverage, and runbooks.
+sealCheck:
+  # In-cluster storage assertions: all release PVCs (data / logs / mysql) are
+  # Bound on the release's expected StorageClass, and — in dynamic-PVC mode
+  # (hostPath.enabled=false) — no release PVC is backed by a hostPath
+  # PersistentVolume on an unmanaged host tree. Leftover chart hostPath PVs
+  # from an older bare-metal install carry a claimRef for our PVC names and
+  # would capture the claims even in dynamic mode (the RFC-0003 D3/D4
+  # stranding scenario); this check catches that. Dynamically provisioned
+  # node-local hostPath PVs (k3s local-path pattern) are tolerated and
+  # reported — see nodeLocalPathPrefixes. In hostPath mode the PV sub-check
+  # reports SKIP (hostPath is the declared storage model there).
+  # PV introspection needs cluster-scoped read RBAC: with clusterScope=false
+  # the sub-check degrades to a PV-name check and prints an explicit WARNING
+  # naming what was not verified.
+  storageAssertions:
+    enabled: true
+    # Max seconds to wait for all release PVCs to reach Bound before failing.
+    # Covers WaitForFirstConsumer classes (bind only when the consuming pod
+    # schedules) and first-install image pulls.
+    timeoutSeconds: 120
+    # hostPath prefixes accepted as provisioner-managed NODE-LOCAL storage in
+    # dynamic mode: the k3s bundled local-path provisioner
+    # (/var/lib/rancher/…) and upstream local-path-provisioner's default
+    # (/opt/local-path-provisioner/). Any other hostPath backing in dynamic
+    # mode fails the check. Extend only for a provisioner you trust to keep
+    # data inside the cluster node. Entries match whole path segments (a
+    # trailing slash is optional): a prefix admits itself and paths under
+    # it, never sibling paths like /opt/local-path-provisioner-evil.
+    nodeLocalPathPrefixes:
+      - /var/lib/rancher/
+      - /opt/local-path-provisioner/
+    # kubectl-capable image for the assertion pod — same image the
+    # image-refresh CronJob uses; the tag pins kubectl so behaviour cannot
+    # drift if upstream re-tags.
+    image:
+      repository: alpine/k8s
+      tag: "1.30.5"
+      pullPolicy: IfNotPresent
+
 # -- Egress gateway (squid) — SECURITY §8.2 / client-runtime#102.
 # In-cluster forward proxy that lets a locked-down training pod reach an FQDN
 # allowlist (backend + App Insights) and nothing else. Labelled app=egress-proxy

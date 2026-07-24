@@ -270,6 +270,43 @@
         }
       }
     },
+    "sealCheck": {
+      "type": "object",
+      "description": "Seal check — the chart's conformance suite (RFC-0003 §8.2 / backend#1184). Every check is a `helm test` hook Job labelled tracebloc.io/seal-check=true + tracebloc.io/seal-check-name=<check> (the enumeration contract the tracebloc CLI consumes, cli#393). See docs/SEAL-CHECK.md.",
+      "properties": {
+        "storageAssertions": {
+          "type": "object",
+          "description": "In-cluster storage assertions: release PVCs Bound on the expected StorageClass; in dynamic-PVC mode (hostPath.enabled=false) no release PVC backed by a hostPath PV on an unmanaged host tree (leftover chart hostPath PVs capture claims via claimRef — RFC-0003 D3/D4).",
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "default": true,
+              "description": "Render the storage-assertions `helm test` hook Job (plus its least-privilege SA/RBAC test hooks)."
+            },
+            "timeoutSeconds": {
+              "type": "integer",
+              "minimum": 1,
+              "default": 120,
+              "description": "Max seconds to wait for all release PVCs to reach Bound before failing (covers WaitForFirstConsumer classes and first-install image pulls)."
+            },
+            "nodeLocalPathPrefixes": {
+              "type": "array",
+              "items": { "type": "string" },
+              "description": "hostPath prefixes accepted as provisioner-managed node-local storage in dynamic mode (k3s local-path: /var/lib/rancher/…; upstream local-path-provisioner: /opt/local-path-provisioner/). Entries match whole path segments (trailing slash optional) — a prefix admits itself and paths under it, never sibling paths. Any other hostPath backing fails the check."
+            },
+            "image": {
+              "type": "object",
+              "description": "kubectl-capable image for the assertion pod (same image the image-refresh CronJob uses).",
+              "properties": {
+                "repository": { "type": "string", "default": "alpine/k8s" },
+                "tag": { "type": "string", "not": { "const": "latest" }, "default": "1.30.5" },
+                "pullPolicy": { "type": "string", "enum": ["Always", "IfNotPresent", "Never"], "default": "IfNotPresent" }
+              }
+            }
+          }
+        }
+      }
+    },
     "egressProxy": {
       "type": "object",
       "description": "In-cluster squid egress gateway (SECURITY §8.2 / client-runtime#102). Forward proxy that permits HTTPS CONNECT only to the allowlist, so a locked-down training pod can reach the backend + App Insights and nothing else.",
