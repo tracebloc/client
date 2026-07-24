@@ -89,6 +89,17 @@ seed_release_data() { mkdir -p "$HOST_DATA_DIR/tracebloc/data/ds1"; : >"$HOST_DA
   [ ! -e "$HOST_DATA_DIR/tracebloc/data/ds1/rows.csv" ]
 }
 
+@test "guard: wipe that cannot remove data fails closed, does not adopt (#384 bugbot)" {
+  [ "$(id -u)" -eq 0 ] && skip "rm cannot be blocked as root"
+  seed_flat_mysql
+  chmod a-w "$HOST_DATA_DIR/mysql"            # make ibdata1 unremovable
+  TB_LEFTOVER_ACTION=wipe TB_TTY=/dev/null run guard_leftover_data
+  chmod u+w "$HOST_DATA_DIR/mysql"            # restore so teardown can clean up
+  [ "$status" -eq 1 ]                          # aborted, did not proceed
+  [[ "$output" == *"Could not fully wipe"* ]]
+  [ -e "$HOST_DATA_DIR/mysql/ibdata1" ]        # survivor NOT silently adopted
+}
+
 @test "guard: wipe never touches HOST_DATASET_DIR (shared mount)" {
   seed_flat_mysql
   HOST_DATASET_DIR="$BATS_TEST_TMPDIR/netmount"

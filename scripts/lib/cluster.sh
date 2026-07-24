@@ -185,20 +185,31 @@ _read_sanitized() {
 
 # Delete the detected leftover data dirs. Only ever removes paths UNDER the
 # already-validated HOST_DATA_DIR (validate_config guarantees it is under $HOME
-# and not a system path) — never HOST_DATASET_DIR, never a system path.
+# and not a system path) — never HOST_DATASET_DIR, never a system path. Returns
+# non-zero if anything survived the wipe (e.g. root/container-owned MySQL files
+# the host user can't remove) so the caller can fail closed instead of letting
+# create_cluster adopt the survivors — a warn-and-proceed would silently break
+# the "wipe means gone" guarantee.
 _wipe_leftover_data() {
-  local d
+  local d rc=0
   for d in "$@"; do
     case "$d" in
       "$HOST_DATA_DIR"/*)
         log "Wiping leftover data: ${d}"
-        rm -rf "$d" 2>/dev/null || warn "Could not fully remove ${d} — check permissions."
+        rm -rf "$d" 2>/dev/null || true
+        # Verify — do not trust rm's exit code alone.
+        if [[ -e "$d" ]]; then
+          warn "Could not remove ${d} — files may be owned by another user (root/container)."
+          rc=1
+        fi
         ;;
       *)
         warn "Refusing to wipe ${d} — outside ${HOST_DATA_DIR}."
+        rc=1
         ;;
     esac
   done
+  return "$rc"
 }
 
 # Guard entry point. Called from create_cluster ONLY when creating a NEW cluster
@@ -252,7 +263,12 @@ guard_leftover_data() {
       log "Reusing existing data under ${HOST_DATA_DIR} (user choice)."
       ;;
     wipe)
-      _wipe_leftover_data "${found[@]}"
+      # Fail closed: if any data survived the wipe, abort rather than fall
+      # through to create_cluster, which would adopt the survivors and silently
+      # break the "wipe means gone" guarantee.
+      if ! _wipe_leftover_data "${found[@]}"; then
+        error "Could not fully wipe existing data under ${HOST_DATA_DIR} — some files could not be removed (often root/container-owned MySQL files). Remove them manually (e.g. 'sudo rm -rf ${HOST_DATA_DIR}') and re-run, or choose a different directory. Refusing to proceed and adopt the leftovers."
+      fi
       if [[ -n "${HOST_DATASET_DIR:-}" ]]; then
         hint "Left HOST_DATASET_DIR (${HOST_DATASET_DIR}) untouched — it is a shared mount, not wiped."
       fi
