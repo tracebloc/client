@@ -274,9 +274,9 @@ function Print-Roadmap {
   Hint ([string]([char]0x2500) * 5)
   Hint "1. Check system requirements"
   Hint "2. Set up secure compute environment"
-  Hint "3. Install tracebloc client"
-  Hint "4. Connect to tracebloc network"
-  Hint "5. Install the tracebloc CLI"
+  Hint "3. Install the tracebloc CLI"
+  Hint "4. Register this machine"
+  Hint "5. Install tracebloc client"
   Write-Host ""
 }
 
@@ -1166,125 +1166,117 @@ function Test-Credentials {
   }
 }
 
-function Install-ClientHelm {
-  # -- Step 3/4: Install tracebloc client --
-  Step 3 5 "Installing tracebloc client"
+# =============================================================================
+#  PROVISIONING (#388 — parity with scripts/lib/provision.sh)
+# =============================================================================
+# The bash installer registers the machine via the CLI: browser sign-in
+# (`tracebloc login`, device flow) + `tracebloc client create` mints the
+# machine credential, derives the namespace, and writes the CLI's
+# active-client pointer — no secrets pass through the user's hands. These
+# functions port that sequence; the legacy hand-copied Client-ID/password
+# prompts survive only as the fallback for a too-old/missing CLI, and the
+# TRACEBLOC_CLIENT_ID/TRACEBLOC_CLIENT_PASSWORD env pair stays as the
+# unattended/automation path.
 
-  if (-not (Test-Path $HOST_DATA_DIR)) {
-    New-Item -ItemType Directory -Path $HOST_DATA_DIR -Force | Out-Null
-  }
-  $valuesFile = Join-Path $HOST_DATA_DIR "values.yaml"
+# True when the operator pre-supplied credentials -> browser sign-in is skipped
+# and the Helm step consumes the env pair directly (mirrors _provisioning_preset).
+function Get-ProvisioningPreset {
+  return [bool]($env:TRACEBLOC_CLIENT_ID -and $env:TRACEBLOC_CLIENT_PASSWORD)
+}
 
-  $defaultClientId = ""
-  $defaultClientPassword = ""
+# Native-probe wrapper so Pester can mock per-invocation (a mocked FUNCTION
+# doesn't set $LASTEXITCODE, so the callers below never shell out directly).
+function Invoke-TraceblocProbe {
+  param([string[]]$Args_)
+  try { & tracebloc @Args_ *> $null } catch { return $false }
+  return ($LASTEXITCODE -eq 0)
+}
 
-  if (Test-Path $valuesFile) {
-    Hint "Previous configuration found."
-    do {
-      $useExisting = Read-Host "  Use previous settings as defaults? [Y/n]"
-      $useExisting = if ($useExisting) { $useExisting.Trim().ToLowerInvariant() } else { "y" }
-      if ($useExisting -eq "y" -or $useExisting -eq "yes" -or $useExisting -eq "n" -or $useExisting -eq "no" -or $useExisting -eq "") { break }
-      Warn "Please enter y or n."
-    } while ($true)
+# Does the installed CLI ship the browser-auth mint commands? The CLI comes
+# from the latest release, which can lag this installer — probe before
+# committing (mirrors _cli_supports_provisioning; --help is side-effect-free
+# and cobra exits non-zero on an unknown command).
+function Test-CliProvisioningSupport {
+  if (-not (Invoke-TraceblocProbe @("login", "--help"))) { return $false }
+  if (-not (Invoke-TraceblocProbe @("client", "create", "--help"))) { return $false }
+  return $true
+}
 
-    if ($useExisting -eq "y" -or $useExisting -eq "yes" -or $useExisting -eq "") {
-      $defaultClientId = Get-TraceblocYamlValue -Path $valuesFile -Key "clientId"
-      $defaultClientPassword = Get-TraceblocYamlValue -Path $valuesFile -Key "clientPassword"
-      if ($defaultClientId) { Log "Using existing clientId as default." }
-      if ($defaultClientPassword) { Log "Using existing clientPassword as default." }
-    }
-  }
+# Fetch wrapper for `tracebloc client list --plain` (mockable, like the probe).
+function Get-TraceblocClientList {
+  $text = ""
+  try { $text = (& tracebloc client list --plain 2>$null) | Out-String } catch { return [pscustomobject]@{ Ok = $false; Text = "" } }
+  if ($LASTEXITCODE -ne 0) { return [pscustomobject]@{ Ok = $false; Text = "" } }
+  return [pscustomobject]@{ Ok = $true; Text = $text }
+}
 
-  # -- Namespace (fixed; not prompted) --
-  # The on-prem client is one-per-machine and is identified to the backend by
-  # its credentials (clientId), not by this name -- so we don't ask the user to
-  # invent one. It's just the local k8s namespace / Helm release name.
-  # Advanced / GitOps setups can override with TB_NAMESPACE=<name>.
-  $rawNs = if ($env:TB_NAMESPACE) { $env:TB_NAMESPACE } else { "tracebloc" }
-  $TB_NAMESPACE = ConvertTo-WorkspaceName -Input_ $rawNs
-  $script:TB_NAMESPACE = $TB_NAMESPACE   # share with Wait-ForClientReady / Print-Summary
+# Does the signed-in account's client list include namespace $Ns? Namespace is
+# the only stable join key between a local Helm release and the list (they
+# don't share an id) — mirrors _account_owns_namespace. Returns
+# "owned" | "absent" | "unknown" (couldn't read the list).
+function Test-AccountOwnsNamespace {
+  param([string]$Ns)
+  if (-not $Ns) { return "absent" }
+  $list = Get-TraceblocClientList
+  if (-not $list.Ok) { return "unknown" }
+  if ($list.Text -match "namespace=$([regex]::Escape($Ns))(\s|$)") { return "owned" }
+  return "absent"
+}
 
-  # -- Step 4/4: Connect to tracebloc network --
-  Step 4 5 "Connect to tracebloc network"
-
-  PromptHeader "To connect this machine, you need a tracebloc client."
-  Hint "A client links your secure environment to the tracebloc"
-  Hint "platform so other collaborators can submit models for evaluation."
+# Surface the REAL reason `client create` failed instead of "see the log".
+# Nothing sensitive: a failed create minted no credential. Special-cases the
+# commonest tripwire — an unrecognized carbon zone (mirrors _report_create_failure).
+function Print-CreateFailure {
+  param([string]$OutFile, [string]$Location, [string]$Source = "env")
   Write-Host ""
-  Hint "Create one here (free):"
-  Write-Host "    " -NoNewline; Write-Host "https://ai.tracebloc.io/clients" -ForegroundColor White
-  Write-Host ""
-
-  # Collect + verify credentials. The entered Client ID / password are checked
-  # against the backend (the same api-token-auth/ call jobs-manager makes)
-  # before we deploy, so a wrong credential is caught here -- with a re-prompt --
-  # instead of surfacing later as a silently crash-looping pod.
-  $credAttempt = 0; $credMax = 5
-  while ($true) {
-    if ($defaultClientId) {
-      $idInput = Read-Host "  Client ID [$defaultClientId]"
-      $TB_CLIENT_ID = if ($idInput) { $idInput } else { $defaultClientId }
-    } else {
-      $TB_CLIENT_ID = Read-Host "  Client ID"
-    }
-    if (-not $TB_CLIENT_ID) { Warn "Client ID cannot be empty."; continue }
-
-    if ($defaultClientPassword) {
-      $pwInput = Read-Host "  Client password [press Enter to keep existing]" -AsSecureString
-      if ($pwInput -and $pwInput.Length -gt 0) {
-        $BSTR = [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($pwInput)
-        try { $TB_CLIENT_PASSWORD = [System.Runtime.InteropServices.Marshal]::PtrToStringAuto($BSTR) } finally { [System.Runtime.InteropServices.Marshal]::ZeroFreeBSTR($BSTR) }
-      } else {
-        $TB_CLIENT_PASSWORD = $defaultClientPassword
-      }
-    } else {
-      $pwInput = Read-Host "  Client password" -AsSecureString
-      $BSTR = [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($pwInput)
-      try { $TB_CLIENT_PASSWORD = [System.Runtime.InteropServices.Marshal]::PtrToStringAuto($BSTR) } finally { [System.Runtime.InteropServices.Marshal]::ZeroFreeBSTR($BSTR) }
-    }
-    if (-not $TB_CLIENT_PASSWORD) { Warn "Client password cannot be empty."; continue }
-
-    Info "Verifying credentials with tracebloc..."
-    $credStatus = Test-Credentials -ClientId $TB_CLIENT_ID -ClientPassword $TB_CLIENT_PASSWORD
-    if ($credStatus -eq "valid") { Ok "Credentials verified."; break }
-    elseif ($credStatus -eq "inactive") { Err "This tracebloc account is not active yet. Check your email for the activation link, then re-run." }
-    elseif ($credStatus -eq "unverified") {
-      Warn "Couldn't reach tracebloc to verify your credentials right now - continuing."
-      Hint "If they are wrong, your client will stay offline at https://ai.tracebloc.io/clients after install."
-      break
-    } else {
-      Warn "That Client ID / password was rejected by tracebloc - please re-enter."
-      Hint "Find your credentials at https://ai.tracebloc.io/clients"
-    }
-
-    $credAttempt++
-    if ($credAttempt -ge $credMax) { Err "Too many failed attempts. Double-check your credentials at https://ai.tracebloc.io/clients and re-run." }
-    # Force active re-entry on retry (don't silently reuse a rejected default).
-    $defaultClientId = ""; $defaultClientPassword = ""
+  $text = ""
+  if (Test-Path $OutFile) { $text = (Get-Content $OutFile -Raw -ErrorAction SilentlyContinue) }
+  if ($text -match '(?i)location.*not a valid choice') {
+    $locLabel = if ($Location) { "`"$Location`"" } else { "that location" }
+    Warn "$locLabel isn't a recognized carbon zone - the client wasn't created."
+    Hint "That value came from TRACEBLOC_CLIENT_LOCATION; set it to a valid code"
+    Hint "(e.g. DE, FR, US, GB - all codes: https://api.electricitymap.org/v3/zones)"
+    Hint "and re-run."
+    return
   }
+  $errLines = @()
+  foreach ($l in ($text -split "`r?`n")) {
+    if ($l -match 'Error:|HTTP [0-9][0-9][0-9]|refused|timed? ?out|unauthorized|forbidden|denied') { $errLines += $l }
+    if ($errLines.Count -ge 4) { break }
+  }
+  if ($errLines.Count -gt 0) {
+    Warn "The client couldn't be provisioned:"
+    foreach ($l in $errLines) { if ($l.Trim()) { Hint $l.Trim() } }
+  } else {
+    Warn "The client couldn't be provisioned."
+  }
+}
 
-  # -- One-client-per-machine guard --
-  # A machine runs exactly one tracebloc client: it shares this cluster and the
-  # host's CPU/RAM/GPU, and the platform counts each client as separate
-  # capacity. If a DIFFERENT client is already installed here, a re-install
-  # would silently re-point the machine -- so we stop and let the operator
-  # decide. The same clientId is a normal re-run/upgrade and passes through.
-  # Check ANY namespace: a fresh install lands in 'tracebloc', but an install
-  # from an older installer version may be in a different namespace. Enumerate
-  # client-chart releases and read each clientId (ConvertFrom-Json -- no jq).
-  # Values are read with `-o json`, not as YAML: helm re-serializes values on
-  # `get`, so the YAML view quotes clientId inconsistently (typically not at
-  # all) and a quote-expecting regex silently bypassed this guard (#200).
-  $existingId = ""; $existingNs = ""
-  # A client-chart release whose clientId we could NOT read (values fetch failed,
-  # or unparsable JSON). We must NOT treat that as "no client here" -- doing so
-  # fails OPEN and lets a re-install silently overwrite an existing client we
-  # simply couldn't identify. Record it and fail CLOSED below (#200 follow-up).
-  $unreadableNs = ""
-  # $listUnknown: `helm list` itself failed or returned non-JSON, so we couldn't
-  # even ENUMERATE releases. Same fail-open risk one level up from $unreadableNs —
-  # skipping the guard here would let a re-install overwrite a different client.
-  $listUnknown = $false
+# Parse the credential file `tracebloc client create --credential-file` writes:
+# plain KEY=value lines (split on the FIRST '=' — a password may contain '=').
+# Mint writes TRACEBLOC_CLIENT_ID + TRACEBLOC_CLIENT_PASSWORD + TB_NAMESPACE;
+# a re-run on an already-registered cluster writes TRACEBLOC_CLIENT_ID +
+# TB_NAMESPACE + TRACEBLOC_CLIENT_ADOPTED=1 (no new credential is minted).
+function Read-TraceblocCredentialFile {
+  param([string]$Path)
+  $cred = @{}
+  foreach ($line in (Get-Content $Path -ErrorAction Stop)) {
+    $idx = $line.IndexOf('=')
+    if ($idx -gt 0) { $cred[$line.Substring(0, $idx).Trim()] = $line.Substring($idx + 1) }
+  }
+  return $cred
+}
+
+# Enumerate what client (if any) is already installed on this cluster — the
+# shared source for the provisioning pre-flight AND the Helm-step guard, so the
+# two can never drift. Values are read with `-o json`, not YAML: helm
+# re-serializes values on `get`, so the YAML view quotes clientId
+# inconsistently and a quote-expecting regex silently bypassed the guard (#200).
+# Returns Id/Ns (first identifiable client-chart release), UnreadableNs (a
+# client release whose values couldn't be read — fail CLOSED, never treat as
+# "no client here"), ListUnknown (couldn't even enumerate releases).
+function Get-InstalledClientInfo {
+  $existingId = ""; $existingNs = ""; $unreadableNs = ""; $listUnknown = $false
   $listJson = (helm list -A -o json 2>$null) | Out-String
   if ($LASTEXITCODE -ne 0) {
     # helm list failed (wedged/unreachable API, kubeconfig glitch) -> unknown.
@@ -1301,9 +1293,9 @@ function Install-ClientHelm {
             continue
           }
           # No user values serializes as literal `null` (-> $vals = $null, a
-          # parsed release with no clientId, NOT an error). An unparsable release
-          # must not abort the scan of the remaining ones, but it IS an
-          # unidentifiable client -> record it and keep scanning.
+          # parsed release with no clientId, NOT an error). An unparsable
+          # release must not abort the scan, but it IS an unidentifiable
+          # client -> record it and keep scanning.
           $vals = $null; $parsed = $true
           try { $vals = $valsJson | ConvertFrom-Json } catch { $parsed = $false }
           if (-not $parsed) {
@@ -1320,6 +1312,320 @@ function Install-ClientHelm {
       $listUnknown = $true
     }
   }
+  return [pscustomobject]@{ Id = $existingId; Ns = $existingNs; UnreadableNs = $unreadableNs; ListUnknown = $listUnknown }
+}
+
+# -- Step 4/5: Register this machine (browser sign-in; mirrors provision_client)
+# Sets $script:TB_PROV_MODE to route the Helm step:
+#   preset   - operator supplied TRACEBLOC_CLIENT_ID/PASSWORD (env automation)
+#   minted   - fresh credential in TB_PROV_ID/TB_PROV_PASSWORD/TB_PROV_NS
+#   adopted  - cluster already registered: TB_PROV_ID/TB_PROV_NS, no password
+#   fallback - CLI missing/too old -> the legacy manual prompts in the Helm step
+function Invoke-ProvisionClient {
+  Step 4 5 "Registering this machine"
+  $script:TB_PROV_MODE = "fallback"
+
+  if (Get-ProvisioningPreset) {
+    Info "Using the credentials you supplied - skipping browser sign-in."
+    $script:TB_PROV_MODE = "preset"
+    return
+  }
+
+  # The CLI was installed in Step 3; it may have landed on the *registry* PATH
+  # only — re-read it so `tracebloc` resolves in THIS process.
+  try { RefreshPath } catch { Log "RefreshPath failed before provisioning: $_" }
+  if (-not (Has "tracebloc")) {
+    Warn "The tracebloc CLI isn't available, so this machine can't be registered automatically - falling back to manual sign-in."
+    Hint "Connect an existing client below, or install the CLI later for one-step browser sign-in:"
+    Hint "  irm $TRACEBLOC_CLI_INSTALL_URL | iex"
+    return
+  }
+  if (-not (Test-CliProvisioningSupport)) {
+    Warn "This tracebloc CLI is too old to provision a client from the installer - falling back to manual sign-in."
+    Hint "Connect an existing client below, or upgrade the CLI later for one-step browser sign-in:"
+    Hint "  irm $TRACEBLOC_CLI_INSTALL_URL | iex"
+    return
+  }
+
+  # Sign in (device flow). `tracebloc login` prints a URL + one-time code and
+  # waits for approval — run it ATTACHED to the console (never captured), so
+  # the user sees the link/code and the CLI can render its wait.
+  Write-Host ""
+  Write-Host "  Sign in to approve this machine - open the link in your browser"
+  Write-Host "  (on this or any device) and enter the code:"
+  Write-Host ""
+  & tracebloc login
+  if ($LASTEXITCODE -ne 0) { Err "Sign-in didn't complete - re-run the installer to try again." }
+
+  # One-client-per-machine pre-flight (mirrors provision.sh #303): if a client
+  # is already installed here and the signed-in account can't be shown to own
+  # it, minting now would register a brand-new client that never installs (the
+  # Helm-step guard refuses) — an orphan on the dashboard. Catch it BEFORE
+  # minting. Inconclusive reads fail CLOSED; a client under the legacy fixed
+  # 'tracebloc' namespace defers to `client create` + the Helm guard (they key
+  # on clientId, which `client list` doesn't expose here).
+  $inst = Get-InstalledClientInfo
+  if ($inst.ListUnknown -or ($inst.UnreadableNs -and -not $inst.Id)) {
+    Write-Host ""
+    Warn "Couldn't determine whether a tracebloc client is already installed here."
+    Hint "tracebloc runs one client per machine. Registering a new client now could strand"
+    Hint "a second one if an existing client just couldn't be seen - usually the cluster API"
+    Hint "is briefly unreachable. Check it and re-run:"
+    Hint "  kubectl cluster-info"
+    Hint "  helm list -A"
+    Write-Host ""
+    Err "Refusing to provision without verifying what's already on this machine."
+  }
+  if ($inst.Ns) {
+    $own = Test-AccountOwnsNamespace -Ns $inst.Ns
+    if ($own -eq "absent" -and $inst.Ns -ne "tracebloc") {
+      Write-Host ""
+      Warn "This machine already runs a tracebloc client (namespace '$($inst.Ns)') that isn't in the account you just signed in as."
+      Hint "tracebloc runs one client per machine. Provisioning now would register a"
+      Hint "second client and strand it (it could never install here). Pick one:"
+      Hint "  - Repair / update it     -> sign in as the account that owns it, or re-run with that client's credentials"
+      Hint "  - Switch to this account -> remove the current client first:"
+      Hint "        k3d cluster delete $CLUSTER_NAME   (wipes this client + its local data)"
+      Hint "      then re-run this installer"
+      Hint "  - Run both               -> install on a separate machine"
+      Write-Host ""
+      Err "Refusing to provision a second client on this machine. See the options above."
+    } elseif ($own -eq "absent") {
+      Log "installed client is in the legacy 'tracebloc' namespace (not listed by its slug); deferring ownership to client create + the Helm one-client guard"
+    }
+  }
+
+  # Name this machine. `client create` would prompt itself, but its output is
+  # captured to the log below (the credential must never reach the terminal) —
+  # so collect the name here. Precedence: TRACEBLOC_CLIENT_NAME (unattended) >
+  # interactive prompt (3 tries on empty Enter) > fail closed.
+  $clientName = ""
+  if ($env:TRACEBLOC_CLIENT_NAME) { $clientName = $env:TRACEBLOC_CLIENT_NAME.Trim() }
+  if (-not $clientName) {
+    foreach ($try in 1..3) {
+      $clientName = (Read-Host "  Name your secure environment (shown on your tracebloc dashboard)")
+      if ($clientName) { $clientName = $clientName.Trim() }
+      if ($clientName) { break }
+    }
+  }
+  if (-not $clientName) { Err "A name for this client is required to provision it. Re-run in a terminal to be prompted, or set TRACEBLOC_CLIENT_NAME for an unattended install." }
+
+  # Location is NEVER prompted (RFC-0001 §6.4). Windows has no zone.tab to
+  # derive a carbon zone from without an embedded Windows-timezone map that
+  # would drift — so pass --location only when TRACEBLOC_CLIENT_LOCATION pins
+  # one; the CLI treats it as optional and the backend defaults it.
+  $clientLocation = ""
+  if ($env:TRACEBLOC_CLIENT_LOCATION) { $clientLocation = $env:TRACEBLOC_CLIENT_LOCATION.Trim() }
+
+  # Mint. --credential-file keeps the secret off the terminal; the file lives
+  # in the user-profile data dir and is deleted right after parsing (its
+  # durable home is the Helm/cluster secret — RFC §7.9).
+  if (-not (Test-Path $HOST_DATA_DIR)) { New-Item -ItemType Directory -Path $HOST_DATA_DIR -Force | Out-Null }
+  $credFile = Join-Path $HOST_DATA_DIR "client-credential.env"
+  Remove-Item $credFile -Force -ErrorAction SilentlyContinue
+  $createOut = Join-Path ([System.IO.Path]::GetTempPath()) "tb-client-create-$(Get-Random).log"
+  $createArgs = @("client", "create", "--yes", "--name", $clientName, "--credential-file", $credFile)
+  if ($clientLocation) { $createArgs += @("--location", $clientLocation) }
+  & tracebloc @createArgs *> $createOut
+  $createRc = $LASTEXITCODE
+  if (Test-Path $createOut) { Get-Content $createOut -ErrorAction SilentlyContinue | ForEach-Object { Log $_ } }
+  if ($createRc -ne 0) {
+    Remove-Item $credFile -Force -ErrorAction SilentlyContinue   # any partial the failed create wrote
+    Print-CreateFailure -OutFile $createOut -Location $clientLocation
+    Remove-Item $createOut -Force -ErrorAction SilentlyContinue
+    Err "Couldn't provision the client. Re-run to retry - full log: $LOG_FILE"
+  }
+  Remove-Item $createOut -Force -ErrorAction SilentlyContinue
+  if (-not (Test-Path $credFile)) { Err "client create did not write the credential file ($credFile)." }
+
+  $cred = Read-TraceblocCredentialFile -Path $credFile
+  Remove-Item $credFile -Force -ErrorAction SilentlyContinue
+
+  $script:TB_PROV_ID = "$($cred['TRACEBLOC_CLIENT_ID'])".Trim()
+  $script:TB_PROV_NS = "$($cred['TB_NAMESPACE'])".Trim()
+  if ("$($cred['TRACEBLOC_CLIENT_ADOPTED'])".Trim() -eq "1") {
+    # Re-run on an already-registered cluster: no fresh credential was minted
+    # (the existing one stands, write-only on the backend). The Helm step
+    # reconciles the existing release and heals a stale clientId to this UUID.
+    Info "This cluster is already registered (client $($script:TB_PROV_ID)) - reconciling the existing install."
+    $script:TB_PROV_PASSWORD = ""
+    $script:TB_PROV_MODE = "adopted"
+    return
+  }
+  $script:TB_PROV_PASSWORD = "$($cred['TRACEBLOC_CLIENT_PASSWORD'])"
+  if (-not $script:TB_PROV_ID -or -not $script:TB_PROV_PASSWORD) { Err "The credential file was incomplete - re-run the installer to retry." }
+  $script:TB_PROV_MODE = "minted"
+  # The registered identity is the minted slug (= the dashboard name), which
+  # may be de-duplicated from the raw typed name.
+  Ok "Registered as `"$($script:TB_PROV_NS)`""
+  Log "Provisioned - credential handed to the install (not shown)."
+}
+
+function Install-ClientHelm {
+  # -- Step 5/5: Install tracebloc client --
+  Step 5 5 "Installing tracebloc client"
+
+  if (-not (Test-Path $HOST_DATA_DIR)) {
+    New-Item -ItemType Directory -Path $HOST_DATA_DIR -Force | Out-Null
+  }
+  $valuesFile = Join-Path $HOST_DATA_DIR "values.yaml"
+
+  # -- Credentials + namespace, routed by the Step-4 provisioning mode (#388) --
+  $provMode = if ($script:TB_PROV_MODE) { $script:TB_PROV_MODE } else { "fallback" }
+  $TB_CLIENT_ID = ""; $TB_CLIENT_PASSWORD = ""; $rawNs = ""
+
+  switch ($provMode) {
+    "minted" {
+      # Freshly minted by `tracebloc client create` — valid by construction, no
+      # re-verify. The namespace MUST be the minted slug (it equals the
+      # heartbeat-reported namespace).
+      $TB_CLIENT_ID = $script:TB_PROV_ID
+      $TB_CLIENT_PASSWORD = $script:TB_PROV_PASSWORD
+      $rawNs = $script:TB_PROV_NS
+    }
+    "adopted" {
+      # Re-run on a registered cluster: no new credential was minted (the
+      # existing one stands, write-only on the backend). Reuse the password
+      # already deployed in the previous values file; the values write below
+      # heals a stale clientId to the adopted UUID (cli#125-era installs
+      # stored the numeric dashboard id, which can't authenticate).
+      $TB_CLIENT_ID = $script:TB_PROV_ID
+      $rawNs = $script:TB_PROV_NS
+      if (Test-Path $valuesFile) {
+        $TB_CLIENT_PASSWORD = Get-TraceblocYamlValue -Path $valuesFile -Key "clientPassword"
+      }
+      if (-not $TB_CLIENT_PASSWORD) {
+        Write-Host ""
+        Warn "This cluster is registered as client '$TB_CLIENT_ID', but its local configuration (with the client password) is gone."
+        Hint "Pick one:"
+        Hint "  - Re-run with the client's credentials:  set TRACEBLOC_CLIENT_ID + TRACEBLOC_CLIENT_PASSWORD, then re-run"
+        Hint "  - Start fresh:  k3d cluster delete $CLUSTER_NAME   (wipes this client + its local data), then re-run"
+        Write-Host ""
+        Err "Can't reconcile the existing client without its password."
+      }
+    }
+    "preset" {
+      # Unattended/automation path: the operator-supplied env pair. Verify once,
+      # non-interactively (the same api-token-auth call jobs-manager makes) —
+      # a wrong credential fails here, not as a crash-looping pod later.
+      $TB_CLIENT_ID = $env:TRACEBLOC_CLIENT_ID
+      $TB_CLIENT_PASSWORD = $env:TRACEBLOC_CLIENT_PASSWORD
+      Info "Verifying the supplied credentials with tracebloc..."
+      $credStatus = Test-Credentials -ClientId $TB_CLIENT_ID -ClientPassword $TB_CLIENT_PASSWORD
+      if ($credStatus -eq "valid") { Ok "Credentials verified." }
+      elseif ($credStatus -eq "inactive") { Err "This tracebloc account is not active yet. Check your email for the activation link, then re-run." }
+      elseif ($credStatus -eq "invalid") { Err "The supplied TRACEBLOC_CLIENT_ID / TRACEBLOC_CLIENT_PASSWORD was rejected by tracebloc. Check them at https://ai.tracebloc.io/clients and re-run." }
+      else {
+        Warn "Couldn't reach tracebloc to verify the supplied credentials right now - continuing."
+        Hint "If they are wrong, your client will stay offline at https://ai.tracebloc.io/clients after install."
+      }
+    }
+    default {
+      # -- Legacy manual connect (fallback ONLY: the CLI was missing or too old
+      # for browser provisioning in Step 4). Hand-copied credentials from the
+      # web app — dropped from the primary path by #388.
+      $defaultClientId = ""
+      $defaultClientPassword = ""
+
+      if (Test-Path $valuesFile) {
+        Hint "Previous configuration found."
+        do {
+          $useExisting = Read-Host "  Use previous settings as defaults? [Y/n]"
+          $useExisting = if ($useExisting) { $useExisting.Trim().ToLowerInvariant() } else { "y" }
+          if ($useExisting -eq "y" -or $useExisting -eq "yes" -or $useExisting -eq "n" -or $useExisting -eq "no" -or $useExisting -eq "") { break }
+          Warn "Please enter y or n."
+        } while ($true)
+
+        if ($useExisting -eq "y" -or $useExisting -eq "yes" -or $useExisting -eq "") {
+          $defaultClientId = Get-TraceblocYamlValue -Path $valuesFile -Key "clientId"
+          $defaultClientPassword = Get-TraceblocYamlValue -Path $valuesFile -Key "clientPassword"
+          if ($defaultClientId) { Log "Using existing clientId as default." }
+          if ($defaultClientPassword) { Log "Using existing clientPassword as default." }
+        }
+      }
+
+      PromptHeader "To connect this machine, you need a tracebloc client."
+      Hint "A client links your secure environment to the tracebloc"
+      Hint "platform so other collaborators can submit models for evaluation."
+      Write-Host ""
+      Hint "Create one here (free):"
+      Write-Host "    " -NoNewline; Write-Host "https://ai.tracebloc.io/clients" -ForegroundColor White
+      Write-Host ""
+
+      # Collect + verify credentials. The entered Client ID / password are checked
+      # against the backend (the same api-token-auth/ call jobs-manager makes)
+      # before we deploy, so a wrong credential is caught here -- with a re-prompt --
+      # instead of surfacing later as a silently crash-looping pod.
+      $credAttempt = 0; $credMax = 5
+      while ($true) {
+        if ($defaultClientId) {
+          $idInput = Read-Host "  Client ID [$defaultClientId]"
+          $TB_CLIENT_ID = if ($idInput) { $idInput } else { $defaultClientId }
+        } else {
+          $TB_CLIENT_ID = Read-Host "  Client ID"
+        }
+        if (-not $TB_CLIENT_ID) { Warn "Client ID cannot be empty."; continue }
+
+        if ($defaultClientPassword) {
+          $pwInput = Read-Host "  Client password [press Enter to keep existing]" -AsSecureString
+          if ($pwInput -and $pwInput.Length -gt 0) {
+            $BSTR = [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($pwInput)
+            try { $TB_CLIENT_PASSWORD = [System.Runtime.InteropServices.Marshal]::PtrToStringAuto($BSTR) } finally { [System.Runtime.InteropServices.Marshal]::ZeroFreeBSTR($BSTR) }
+          } else {
+            $TB_CLIENT_PASSWORD = $defaultClientPassword
+          }
+        } else {
+          $pwInput = Read-Host "  Client password" -AsSecureString
+          $BSTR = [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($pwInput)
+          try { $TB_CLIENT_PASSWORD = [System.Runtime.InteropServices.Marshal]::PtrToStringAuto($BSTR) } finally { [System.Runtime.InteropServices.Marshal]::ZeroFreeBSTR($BSTR) }
+        }
+        if (-not $TB_CLIENT_PASSWORD) { Warn "Client password cannot be empty."; continue }
+
+        Info "Verifying credentials with tracebloc..."
+        $credStatus = Test-Credentials -ClientId $TB_CLIENT_ID -ClientPassword $TB_CLIENT_PASSWORD
+        if ($credStatus -eq "valid") { Ok "Credentials verified."; break }
+        elseif ($credStatus -eq "inactive") { Err "This tracebloc account is not active yet. Check your email for the activation link, then re-run." }
+        elseif ($credStatus -eq "unverified") {
+          Warn "Couldn't reach tracebloc to verify your credentials right now - continuing."
+          Hint "If they are wrong, your client will stay offline at https://ai.tracebloc.io/clients after install."
+          break
+        } else {
+          Warn "That Client ID / password was rejected by tracebloc - please re-enter."
+          Hint "Find your credentials at https://ai.tracebloc.io/clients"
+        }
+
+        $credAttempt++
+        if ($credAttempt -ge $credMax) { Err "Too many failed attempts. Double-check your credentials at https://ai.tracebloc.io/clients and re-run." }
+        # Force active re-entry on retry (don't silently reuse a rejected default).
+        $defaultClientId = ""; $defaultClientPassword = ""
+      }
+    }
+  }
+
+  # -- Namespace --
+  # Minted/adopted installs land in the client's SLUG namespace (bash parity —
+  # it equals the heartbeat-reported namespace). Preset/fallback keep the fixed
+  # default ('tracebloc'); advanced/GitOps setups can override with
+  # TB_NAMESPACE=<name>. Never prompted — the client is identified to the
+  # backend by clientId, not this name.
+  if (-not $rawNs) { $rawNs = if ($env:TB_NAMESPACE) { $env:TB_NAMESPACE } else { "tracebloc" } }
+  $TB_NAMESPACE = ConvertTo-WorkspaceName -Input_ $rawNs
+  $script:TB_NAMESPACE = $TB_NAMESPACE   # share with Wait-ForClientReady / Print-Summary
+
+  # -- One-client-per-machine guard --
+  # A machine runs exactly one tracebloc client: it shares this cluster and the
+  # host's CPU/RAM/GPU, and the platform counts each client as separate
+  # capacity. If a DIFFERENT client is already installed here, a re-install
+  # would silently re-point the machine -- so we stop and let the operator
+  # decide. The same clientId is a normal re-run/upgrade and passes through.
+  # Check ANY namespace: a fresh install lands in 'tracebloc', but an install
+  # from an older installer version may be in a different namespace. The
+  # enumeration lives in Get-InstalledClientInfo (#388 — shared with the
+  # Step-4 provisioning pre-flight so the two can never drift; #200 fail-closed
+  # semantics preserved there).
+  $inst = Get-InstalledClientInfo
+  $existingId = $inst.Id; $existingNs = $inst.Ns
+  $unreadableNs = $inst.UnreadableNs; $listUnknown = $inst.ListUnknown
   # Fail closed when we couldn't identify a client we can see ($unreadableNs) OR
   # couldn't enumerate at all ($listUnknown). Refuse rather than overwrite an
   # unknown client -- the operator must resolve it explicitly.
@@ -1940,7 +2246,8 @@ $TRACEBLOC_CLI_INSTALL_DIR = if ($env:LOCALAPPDATA) {
 # window) rather than a vague "open a new terminal". The CLI installer edits the
 # user-scope PATH in the registry, so RefreshPath (re-reading Machine+User PATH)
 # is the faithful "fresh terminal" probe here — there is no `source ~/.rc`
-# analogue on Windows. ALWAYS non-fatal: the client is connected by Step 5.
+# analogue on Windows. ALWAYS non-fatal: a missing CLI degrades Step 4 to the
+# legacy manual-credential fallback (#388).
 function Test-TraceblocCli {
   # Pull the persisted (registry) PATH into THIS process — same env a brand-new
   # PowerShell window would start with.
@@ -1970,7 +2277,11 @@ function Test-TraceblocCli {
 }
 
 function Install-TraceblocCli {
-  Step 5 5 "Install the tracebloc CLI"
+  # -- Step 3/5 (#388): BEFORE connect, as bash does — the CLI mints the machine
+  # credential in Step 4 (browser sign-in + `client create`). A failed CLI
+  # install is still non-fatal: Step 4 falls back to the legacy manual-
+  # credential flow, so the machine can always be connected.
+  Step 3 5 "Install the tracebloc CLI"
 
   Info "Installing the tracebloc CLI..."
 
@@ -2001,11 +2312,11 @@ function Install-TraceblocCli {
       # command (or the Windows-correct fix). Non-fatal.
       Test-TraceblocCli
     } else {
-      Warn "Couldn't install the tracebloc CLI automatically -- your client is set up fine."
+      Warn "Couldn't install the tracebloc CLI automatically -- you can still connect with existing client credentials."
       Hint "Install it later:  irm $TRACEBLOC_CLI_INSTALL_URL | iex"
     }
   } catch {
-    Warn "Couldn't install the tracebloc CLI automatically -- your client is set up fine."
+    Warn "Couldn't install the tracebloc CLI automatically -- you can still connect with existing client credentials."
     Hint "Install it later:  irm $TRACEBLOC_CLI_INSTALL_URL | iex"
     Log "CLI install failed: $_"
   } finally {
@@ -2045,14 +2356,20 @@ New-K3dCluster
 Install-GpuDevicePlugin
 Confirm-GpuNode
 
-# -- Steps 3/5 + 4/5 handled inside Install-ClientHelm --
+# -- Step 3/5: install the tracebloc CLI FIRST (#388) — it mints the machine
+# credential in Step 4; a CLI-install hiccup degrades Step 4 to the legacy
+# manual-credential fallback instead of aborting.
+Install-TraceblocCli
+
+# -- Step 4/5: register this machine (browser sign-in + `client create`;
+# env-var credentials skip it; missing/old CLI falls back to manual prompts) --
+Invoke-ProvisionClient
+
+# -- Step 5/5 handled inside Install-ClientHelm --
 Install-ClientHelm
 
 # Verify the client actually came up before reporting anything
 Wait-ForClientReady
-
-# -- Step 5/5: install the tracebloc CLI (non-fatal; client is already up) --
-Install-TraceblocCli
 
 Print-Summary
 

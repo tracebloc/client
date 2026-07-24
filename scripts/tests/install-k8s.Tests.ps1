@@ -246,6 +246,68 @@ Describe "Install-ClientHelm" {
     $GPU_VENDOR = "none"; $NVIDIA_DRIVER_OK = $false; $env:CLIENT_ENV = $null
     Mock helm { $global:LASTEXITCODE = 0 }
   }
+  # Step-4 provisioning state must never leak between tests (#388): unset means
+  # the legacy fallback path, which is what the pre-#388 tests below drive.
+  AfterEach {
+    $script:TB_PROV_MODE = $null; $script:TB_PROV_ID = $null
+    $script:TB_PROV_NS = $null; $script:TB_PROV_PASSWORD = $null
+    $env:TRACEBLOC_CLIENT_ID = $null; $env:TRACEBLOC_CLIENT_PASSWORD = $null
+  }
+  It "minted mode (#388): no prompts; values carry the minted credential; slug namespace used" {
+    $HOST_DATA_DIR = "$TestDrive/d-mint"
+    $script:TB_PROV_MODE = "minted"; $script:TB_PROV_ID = "uuid-11"
+    $script:TB_PROV_PASSWORD = "mintedpw"; $script:TB_PROV_NS = "lukas-01"
+    Mock Read-Host { throw "the minted path must never prompt" }
+    Install-ClientHelm
+    (Get-Content "$HOST_DATA_DIR/values.yaml" -Raw) | Should -Match 'clientId: "uuid-11"'
+    (Get-Content "$HOST_DATA_DIR/values.yaml" -Raw) | Should -Match "clientPassword: 'mintedpw'"
+    Should -Invoke helm -ParameterFilter { ($args -contains "upgrade") -and ($args -contains "lukas-01") }
+  }
+  It "adopted mode (#388): reuses the previous values password + heals clientId to the UUID" {
+    $HOST_DATA_DIR = "$TestDrive/d-adopt"; New-Item -ItemType Directory -Path $HOST_DATA_DIR -Force | Out-Null
+    Set-Content "$HOST_DATA_DIR/values.yaml" "clientId: `"123`"`nclientPassword: 'prevpw'"
+    $script:TB_PROV_MODE = "adopted"; $script:TB_PROV_ID = "uuid-9"; $script:TB_PROV_NS = "lukas-01"
+    Mock Read-Host { throw "the adopted path must never prompt" }
+    Mock helm {
+      if ($args -contains "list") { '[{"name":"oldrel","namespace":"lukas-01","chart":"client-1.4.3"}]'; $global:LASTEXITCODE = 0; return }
+      if ($args -contains "get") {
+        if ($args -contains "json") { '{"clientId":"uuid-9"}' } else { 'clientId: uuid-9' }
+        $global:LASTEXITCODE = 0; return
+      }
+      $global:LASTEXITCODE = 0
+    }
+    Install-ClientHelm
+    (Get-Content "$HOST_DATA_DIR/values.yaml" -Raw) | Should -Match 'clientId: "uuid-9"'    # healed
+    (Get-Content "$HOST_DATA_DIR/values.yaml" -Raw) | Should -Match "clientPassword: 'prevpw'"
+    Should -Invoke helm -ParameterFilter { $args -contains "upgrade" }
+  }
+  It "adopted mode without a local values file -> honest terminal error (#388)" {
+    $HOST_DATA_DIR = "$TestDrive/d-adopt-bare"
+    $script:TB_PROV_MODE = "adopted"; $script:TB_PROV_ID = "uuid-9"; $script:TB_PROV_NS = "lukas-01"
+    Mock Err { throw "err: $args" }
+    { Install-ClientHelm } | Should -Throw
+    Should -Not -Invoke helm -ParameterFilter { $args -contains "upgrade" }
+  }
+  It "preset mode (#388): env credentials verify once, no prompts" {
+    $HOST_DATA_DIR = "$TestDrive/d-preset"
+    $script:TB_PROV_MODE = "preset"
+    $env:TRACEBLOC_CLIENT_ID = "envid"; $env:TRACEBLOC_CLIENT_PASSWORD = "envpw"
+    Mock Read-Host { throw "the preset path must never prompt" }
+    Mock Test-Credentials { "valid" }
+    Install-ClientHelm
+    (Get-Content "$HOST_DATA_DIR/values.yaml" -Raw) | Should -Match 'clientId: "envid"'
+    Should -Invoke Test-Credentials -Times 1
+    Should -Invoke helm -ParameterFilter { $args -contains "upgrade" }
+  }
+  It "preset mode: rejected env credentials fail closed (#388)" {
+    $HOST_DATA_DIR = "$TestDrive/d-preset-bad"
+    $script:TB_PROV_MODE = "preset"
+    $env:TRACEBLOC_CLIENT_ID = "envid"; $env:TRACEBLOC_CLIENT_PASSWORD = "wrong"
+    Mock Test-Credentials { "invalid" }
+    Mock Err { throw "err: $args" }
+    { Install-ClientHelm } | Should -Throw
+    Should -Not -Invoke helm -ParameterFilter { $args -contains "upgrade" }
+  }
   It "valid creds: writes values.yaml + runs helm" {
     $HOST_DATA_DIR = "$TestDrive/d1"
     Mock Read-Host {
@@ -900,5 +962,109 @@ Describe "Invoke-DiagnoseBundle" {
     Expand-Archive -Path $zip.FullName -DestinationPath $ex -Force
     $all = (Get-ChildItem $ex -Recurse -File | ForEach-Object { Get-Content $_.FullName -Raw }) -join "`n"
     $all | Should -Not -Match 'LEAKME123'
+  }
+}
+
+# ── Provisioning (#388 — parity with scripts/lib/provision.sh) ───────────────
+
+Describe "Read-TraceblocCredentialFile" {
+  It "parses the mint keys, splitting on the FIRST '=' (a password may contain '=')" {
+    $f = "$TestDrive/cred.env"
+    Set-Content $f "TRACEBLOC_CLIENT_ID=uuid-1`nTRACEBLOC_CLIENT_PASSWORD=p=w=x`nTB_NAMESPACE=lukas-01"
+    $c = Read-TraceblocCredentialFile -Path $f
+    $c['TRACEBLOC_CLIENT_ID'] | Should -Be "uuid-1"
+    $c['TRACEBLOC_CLIENT_PASSWORD'] | Should -Be "p=w=x"
+    $c['TB_NAMESPACE'] | Should -Be "lukas-01"
+  }
+  It "parses the adopt variant (no password, ADOPTED=1)" {
+    $f = "$TestDrive/cred2.env"
+    Set-Content $f "TRACEBLOC_CLIENT_ID=uuid-2`nTB_NAMESPACE=ws-7`nTRACEBLOC_CLIENT_ADOPTED=1"
+    $c = Read-TraceblocCredentialFile -Path $f
+    $c['TRACEBLOC_CLIENT_ADOPTED'] | Should -Be "1"
+    $c.ContainsKey('TRACEBLOC_CLIENT_PASSWORD') | Should -BeFalse
+  }
+}
+
+Describe "Get-ProvisioningPreset" {
+  AfterEach { $env:TRACEBLOC_CLIENT_ID = $null; $env:TRACEBLOC_CLIENT_PASSWORD = $null }
+  It "true only when BOTH env credentials are set" {
+    $env:TRACEBLOC_CLIENT_ID = "x"
+    Get-ProvisioningPreset | Should -BeFalse
+    $env:TRACEBLOC_CLIENT_PASSWORD = "y"
+    Get-ProvisioningPreset | Should -BeTrue
+  }
+}
+
+Describe "Test-CliProvisioningSupport" {
+  It "true when both --help probes pass" {
+    Mock Invoke-TraceblocProbe { $true }
+    Test-CliProvisioningSupport | Should -BeTrue
+  }
+  It "false when `client create` is unknown (old CLI)" {
+    Mock Invoke-TraceblocProbe { param([string[]]$Args_) -not ($Args_ -contains "create") }
+    Test-CliProvisioningSupport | Should -BeFalse
+  }
+}
+
+Describe "Test-AccountOwnsNamespace" {
+  It "owned when the list shows namespace=<ns>" {
+    Mock Get-TraceblocClientList { [pscustomobject]@{ Ok = $true; Text = "id=7  name=x  namespace=lukas-01   location=DE" } }
+    Test-AccountOwnsNamespace -Ns "lukas-01" | Should -Be "owned"
+  }
+  It "absent on a prefix (lukas-0 must not match lukas-01)" {
+    Mock Get-TraceblocClientList { [pscustomobject]@{ Ok = $true; Text = "namespace=lukas-01 " } }
+    Test-AccountOwnsNamespace -Ns "lukas-0" | Should -Be "absent"
+  }
+  It "unknown when the list can't be read" {
+    Mock Get-TraceblocClientList { [pscustomobject]@{ Ok = $false; Text = "" } }
+    Test-AccountOwnsNamespace -Ns "x" | Should -Be "unknown"
+  }
+}
+
+Describe "Print-CreateFailure" {
+  It "surfaces the unrecognized-carbon-zone hint with the rejected value" {
+    $f = "$TestDrive/create-out.log"
+    Set-Content $f 'Error: location: "berlin" is not a valid choice.'
+    Mock Warn {}
+    Mock Hint {}
+    Print-CreateFailure -OutFile $f -Location "berlin"
+    Should -Invoke Warn -ParameterFilter { $m -match "carbon zone" }
+    Should -Invoke Hint -ParameterFilter { $m -match "TRACEBLOC_CLIENT_LOCATION" }
+  }
+  It "surfaces backend error lines instead of a generic message" {
+    $f = "$TestDrive/create-out2.log"
+    Set-Content $f "booting`nError: HTTP 503 from api.tracebloc.io`nmore noise"
+    Mock Warn {}
+    Mock Hint {}
+    Print-CreateFailure -OutFile $f -Location ""
+    Should -Invoke Hint -ParameterFilter { $m -match "HTTP 503" }
+  }
+}
+
+Describe "Invoke-ProvisionClient" {
+  # Only the ROUTING is unit-tested here (which TB_PROV_MODE each entry state
+  # lands in); the mint/adopt handoff is covered via Install-ClientHelm's
+  # minted/adopted-mode tests above.
+  BeforeEach { Mock RefreshPath {} }
+  AfterEach {
+    $script:TB_PROV_MODE = $null; $script:TB_PROV_ID = $null
+    $script:TB_PROV_NS = $null; $script:TB_PROV_PASSWORD = $null
+    $env:TRACEBLOC_CLIENT_ID = $null; $env:TRACEBLOC_CLIENT_PASSWORD = $null
+  }
+  It "env preset skips browser sign-in entirely -> mode=preset" {
+    $env:TRACEBLOC_CLIENT_ID = "x"; $env:TRACEBLOC_CLIENT_PASSWORD = "y"
+    Invoke-ProvisionClient
+    $script:TB_PROV_MODE | Should -Be "preset"
+  }
+  It "missing CLI -> mode=fallback (legacy manual prompts take over)" {
+    Mock Has { $false }
+    Invoke-ProvisionClient
+    $script:TB_PROV_MODE | Should -Be "fallback"
+  }
+  It "too-old CLI (no login/client create) -> mode=fallback" {
+    Mock Has { $true }
+    Mock Test-CliProvisioningSupport { $false }
+    Invoke-ProvisionClient
+    $script:TB_PROV_MODE | Should -Be "fallback"
   }
 }
