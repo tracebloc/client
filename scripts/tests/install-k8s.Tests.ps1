@@ -263,7 +263,10 @@ Describe "Install-ClientHelm" {
     (Get-Content "$HOST_DATA_DIR/values.yaml" -Raw) | Should -Match "clientPassword: 'mintedpw'"
     Should -Invoke helm -ParameterFilter { ($args -contains "upgrade") -and ($args -contains "lukas-01") }
   }
-  It "adopted mode (#388): reuses the previous values password + heals clientId to the UUID" {
+  It "adopted mode (#388): heals a STALE (cli#125 numeric) clientId past the one-client guard" {
+    # The realistic heal: helm still reports the legacy numeric dashboard id
+    # while Step 4 adopted the UUID. The guard must let adopted mode through —
+    # this is the one sanctioned id mismatch (Bugbot #397 r1, High).
     $HOST_DATA_DIR = "$TestDrive/d-adopt"; New-Item -ItemType Directory -Path $HOST_DATA_DIR -Force | Out-Null
     Set-Content "$HOST_DATA_DIR/values.yaml" "clientId: `"123`"`nclientPassword: 'prevpw'"
     $script:TB_PROV_MODE = "adopted"; $script:TB_PROV_ID = "uuid-9"; $script:TB_PROV_NS = "lukas-01"
@@ -271,7 +274,7 @@ Describe "Install-ClientHelm" {
     Mock helm {
       if ($args -contains "list") { '[{"name":"oldrel","namespace":"lukas-01","chart":"client-1.4.3"}]'; $global:LASTEXITCODE = 0; return }
       if ($args -contains "get") {
-        if ($args -contains "json") { '{"clientId":"uuid-9"}' } else { 'clientId: uuid-9' }
+        if ($args -contains "json") { '{"clientId":"123"}' } else { 'clientId: 123' }   # STALE id
         $global:LASTEXITCODE = 0; return
       }
       $global:LASTEXITCODE = 0
@@ -280,6 +283,22 @@ Describe "Install-ClientHelm" {
     (Get-Content "$HOST_DATA_DIR/values.yaml" -Raw) | Should -Match 'clientId: "uuid-9"'    # healed
     (Get-Content "$HOST_DATA_DIR/values.yaml" -Raw) | Should -Match "clientPassword: 'prevpw'"
     Should -Invoke helm -ParameterFilter { $args -contains "upgrade" }
+  }
+  It "a DIFFERENT existing client still refuses outside adopted mode (guard intact)" {
+    $HOST_DATA_DIR = "$TestDrive/d-guard-minted"
+    $script:TB_PROV_MODE = "minted"; $script:TB_PROV_ID = "uuid-new"
+    $script:TB_PROV_PASSWORD = "pw"; $script:TB_PROV_NS = "ws-new"
+    Mock Err { throw "err: $args" }
+    Mock helm {
+      if ($args -contains "list") { '[{"name":"oldrel","namespace":"other","chart":"client-1.4.3"}]'; $global:LASTEXITCODE = 0; return }
+      if ($args -contains "get") {
+        if ($args -contains "json") { '{"clientId":"someone-else"}' } else { 'clientId: someone-else' }
+        $global:LASTEXITCODE = 0; return
+      }
+      $global:LASTEXITCODE = 0
+    }
+    { Install-ClientHelm } | Should -Throw
+    Should -Not -Invoke helm -ParameterFilter { $args -contains "upgrade" }
   }
   It "adopted mode without a local values file -> honest terminal error (#388)" {
     $HOST_DATA_DIR = "$TestDrive/d-adopt-bare"
@@ -982,6 +1001,23 @@ Describe "Read-TraceblocCredentialFile" {
     $c = Read-TraceblocCredentialFile -Path $f
     $c['TRACEBLOC_CLIENT_ADOPTED'] | Should -Be "1"
     $c.ContainsKey('TRACEBLOC_CLIENT_PASSWORD') | Should -BeFalse
+  }
+}
+
+Describe "ConvertTo-SanitizedInput" {
+  It "strips CSI sequences (arrow keys) and bracketed-paste markers" {
+    $esc = [char]27
+    ConvertTo-SanitizedInput -Value "$esc[200~my machine$esc[201~" | Should -Be "my machine"
+    ConvertTo-SanitizedInput -Value "na$esc[Dme$esc[1;5C" | Should -Be "name"
+  }
+  It "self-heals literal paste markers left by an earlier stripper" {
+    ConvertTo-SanitizedInput -Value "[200~box[201~" | Should -Be "box"
+  }
+  It "drops control characters but keeps international letters" {
+    ConvertTo-SanitizedInput -Value "b`tox-müller" | Should -Be "box-müller"
+  }
+  It "empty in, empty out" {
+    ConvertTo-SanitizedInput -Value "" | Should -Be ""
   }
 }
 

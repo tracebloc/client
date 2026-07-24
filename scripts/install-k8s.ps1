@@ -1252,6 +1252,19 @@ function Print-CreateFailure {
   }
 }
 
+# Strip ANSI CSI sequences (arrow keys, cursor moves), bracketed-paste markers,
+# and C0 control characters from interactive input — they otherwise corrupt the
+# name passed to `client create` into a garbage slug (mirrors common.sh's
+# _strip_paste_garbage; customer-reported 2026-07-20 on the bash flow). UTF-8
+# letters survive (only < 0x20 and DEL are dropped).
+function ConvertTo-SanitizedInput {
+  param([string]$Value)
+  if (-not $Value) { return "" }
+  $s = $Value -replace "$([char]27)\[[0-9;]*[A-Za-z~]", ""
+  $s = $s.Replace("[200~", "").Replace("[201~", "")
+  return (($s.ToCharArray() | Where-Object { [int]$_ -ge 32 -and [int]$_ -ne 127 }) -join "")
+}
+
 # Parse the credential file `tracebloc client create --credential-file` writes:
 # plain KEY=value lines (split on the FIRST '=' — a password may contain '=').
 # Mint writes TRACEBLOC_CLIENT_ID + TRACEBLOC_CLIENT_PASSWORD + TB_NAMESPACE;
@@ -1404,7 +1417,9 @@ function Invoke-ProvisionClient {
   if (-not $clientName) {
     foreach ($try in 1..3) {
       $clientName = (Read-Host "  Name your secure environment (shown on your tracebloc dashboard)")
-      if ($clientName) { $clientName = $clientName.Trim() }
+      # Strip paste/arrow-key escape garbage BEFORE the trim — it would slug-ify
+      # into a garbage name like "d-d-d-a-a-a" (bash flow, 2026-07-20).
+      $clientName = (ConvertTo-SanitizedInput -Value $clientName).Trim()
       if ($clientName) { break }
     }
   }
@@ -1644,7 +1659,15 @@ function Install-ClientHelm {
     Write-Host ""
     Err "Refusing to replace an unidentifiable existing client."
   }
-  if ($existingId -and $existingId -ne $TB_CLIENT_ID) {
+  # Adopted mode is the ONE sanctioned id mismatch: the backend just anchored
+  # THIS cluster to the adopted UUID (`client create`), while the local release
+  # still stores a stale id (cli#125-era installs kept the numeric dashboard
+  # id, which can't authenticate). That's not a different client — it's exactly
+  # the skew the values write below heals; refusing here would make every
+  # legacy-id re-run abort (Bugbot #397 r1, High).
+  if ($existingId -and $existingId -ne $TB_CLIENT_ID -and $provMode -eq "adopted") {
+    Log "one-client guard: healing stale clientId '$existingId' -> adopted '$TB_CLIENT_ID' (namespace '$existingNs')"
+  } elseif ($existingId -and $existingId -ne $TB_CLIENT_ID) {
     Write-Host ""
     Warn "This machine already runs the tracebloc client '$existingId' (namespace '$existingNs')."
     Hint "tracebloc runs one client per machine -- it shares this cluster and host"
