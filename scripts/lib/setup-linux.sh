@@ -203,7 +203,10 @@ install_docker_engine() {
     # Enable for boot only (no --now): starting is handled below, where a start
     # failure is diagnosed instead of aborting the whole script under `set -e`.
     sudo systemctl enable docker >/dev/null 2>&1 || true
-    sudo usermod -aG docker "$USER"
+    # prepare-host mode: the invoking ADMIN must not be granted the socket —
+    # only the researcher named by TB_PREPARE_USER gets it, later (Bugbot on
+    # #381; same least-privilege rule as the #377 SUDO_USER fix).
+    [[ -n "${TB_PREPARE_HOST_MODE:-}" ]] || sudo usermod -aG docker "$USER"
     success "Docker"
   else
     success "Docker"
@@ -224,9 +227,18 @@ install_docker_engine() {
   sudo systemctl reset-failed docker 2>/dev/null || true
   sudo systemctl start docker 2>/dev/null || true
 
+  # prepare-host mode: the admin verifies the DAEMON via sudo and never joins
+  # or re-execs into the docker group — the sg re-exec below re-runs the script
+  # WITHOUT its arguments, which would silently turn a host-prep into a FULL
+  # provision as the admin; and a non-root admin without socket access must not
+  # abort before the TB_PREPARE_USER grant runs (Bugbot on #381).
+  if [[ -n "${TB_PREPARE_HOST_MODE:-}" ]] && sudo docker info &>/dev/null; then
+    log "Docker daemon running (verified via sudo — prepare-host mode)."
+    return 0
+  fi
   if ! docker info &>/dev/null 2>&1; then
     # (a) Group not active in THIS shell yet → re-exec under the docker group.
-    if [[ -z "${_K3S_INSTALL_REEXEC:-}" ]] && id -nG "$USER" 2>/dev/null | grep -qw docker; then
+    if [[ -z "${TB_PREPARE_HOST_MODE:-}" && -z "${_K3S_INSTALL_REEXEC:-}" ]] && id -nG "$USER" 2>/dev/null | grep -qw docker; then
       SELF="$(readlink -f "$0" 2>/dev/null || echo "$0")"
       log "Docker group not yet active in this session — re-executing script..."
       exec sg docker -c "_K3S_INSTALL_REEXEC=1 bash '$SELF'"
@@ -637,7 +649,13 @@ run_prepare_host() {
   preflight_sudo
   setup_pm
   apt_wait_for_lock
+  # Prepare-host reuses the full install's engine setup, but the ADMIN must
+  # never be granted the socket or sg-re-exec'd into the script (which drops
+  # the prepare-host argument and runs a FULL provision) — the daemon check
+  # runs via sudo instead (Bugbot on #381).
+  TB_PREPARE_HOST_MODE=1
   install_docker_engine
+  TB_PREPARE_HOST_MODE=""
   install_system_deps
 
   # Grant the researcher docker-group access so THEIR later install is Tier 0

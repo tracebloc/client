@@ -154,6 +154,40 @@ setup() {
   [[ "$output" != *"docker-ce.repo"* ]]
 }
 
+# ── install_docker_engine under prepare-host (#381 Bugbot) ───────────────────
+# The admin runs prepare-host with sudo but no docker-group membership. The
+# engine gate must verify the DAEMON via sudo and never (a) sg-re-exec — that
+# re-runs the script WITHOUT the prepare-host argument, i.e. a silent FULL
+# provision — nor (b) abort on the admin's unreachable non-root socket, nor
+# (c) grant the ADMIN the socket (only TB_PREPARE_USER gets it, later).
+@test "install_docker_engine: prepare-host mode verifies via sudo, no sg re-exec, exits 0 (#381)" {
+  PRESENT_CMDS="curl docker"; TEST_DISTRO=ubuntu
+  TB_PREPARE_HOST_MODE=1
+  docker() { return 1; }                          # admin's non-root socket: unreachable
+  sudo()   { record "sudo $*"; return 0; }        # sudo docker info succeeds
+  sg()     { record "sg $*"; exit 97; }           # the escape this test forbids
+  id()     { echo "admin docker"; }               # even WITH membership visible…
+  run install_docker_engine
+  [ "$status" -eq 0 ]
+  run mock_calls
+  [[ "$output" == *"sudo docker info"* ]]
+  [[ "$output" != *"sg "* ]]                      # …no re-exec ever fires
+  TB_PREPARE_HOST_MODE=""
+}
+
+@test "install_docker_engine: prepare-host mode skips the admin group-add on fresh install (#381)" {
+  PRESENT_CMDS="curl"; TEST_DISTRO=ubuntu         # docker absent -> install branch
+  TB_PREPARE_HOST_MODE=1
+  docker() { return 1; }
+  sudo()   { record "sudo $*"; return 0; }
+  sg()     { record "sg $*"; exit 97; }
+  run install_docker_engine
+  [ "$status" -eq 0 ]
+  run mock_calls
+  [[ "$output" != *"usermod -aG docker"* ]]       # the ADMIN is never granted the socket
+  TB_PREPARE_HOST_MODE=""
+}
+
 # ── install_k3d: pinned release, verified direct download (#382) ────────────
 # The binary is fetched straight from the pinned release and verified against
 # the release's checksums.txt — upstream's install.sh is NOT used (it performs
