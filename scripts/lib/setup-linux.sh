@@ -317,9 +317,14 @@ _fetch_kubectl() {
   local ver="$1" arch="$2"
   local tmpdir
   tmpdir="$(mktemp -d)"
-  retry 3 5 curl_secure -fsSL \
+  # Same bounds as _fetch_k3d_release below, and for the same reason: kubectl is a
+  # ~50 MB binary, so a stall floor is the right bound and a hard --max-time is not
+  # (it would fail a slow-but-healthy link). These flags are also how curl_secure
+  # knows not to add its default deadline here (Bugbot, backend#1252). Before this
+  # the fetch had no bound at all — a mid-stream stall hung the step indefinitely.
+  retry 3 5 curl_secure -fsSL --connect-timeout 15 --speed-limit 1024 --speed-time 60 \
     "https://dl.k8s.io/release/${ver}/bin/linux/${arch}/kubectl" -o "${tmpdir}/kubectl"
-  retry 3 5 curl_secure -fsSL \
+  retry 3 5 curl_secure -fsSL --connect-timeout 15 --speed-limit 1024 --speed-time 60 \
     "https://dl.k8s.io/release/${ver}/bin/linux/${arch}/kubectl.sha256" -o "${tmpdir}/kubectl.sha256"
   echo "$(cat "${tmpdir}/kubectl.sha256")  ${tmpdir}/kubectl" | sha256sum --check --quiet \
     || { rm -rf "$tmpdir"; error "System tool checksum verification failed"; }
