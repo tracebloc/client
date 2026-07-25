@@ -1,10 +1,11 @@
-# RFC 0001 — Least-privilege install
+# RFC 0002 — Least-privilege install
 
-**Status:** Decisions recorded 2026-07-22, revised after @saadqbal review (rootless Docker primary) — one validation spike open
+**Qualified ID:** `RFC-CLIENT-0002` — renumbered from 0001 on 2026-07-25 because `client` already had a 0001 (the rootless spike). Cite by qualified ID, never as a bare "RFC 0002". Org-wide index: `docs/rfcs/README.md` in `tracebloc/backend` (private).
+**Status:** **Accepted** — 2026-07-25. Decisions were recorded 2026-07-22 and revised after @saadqbal's review (rootless Docker as the primary target); one validation spike remains open. Implementation is tracked in the epic **tracebloc/backend#1168**, which was 6-of-9 children merged when this was accepted.
 **Author:** Lukas (drafted with Claude)
 **Reviewers:** @saadqbal
 **Repos affected:** `client` (installer), `cli` (CLI install + PATH)
-**Related:** backlog A2 (sudo/root handling), A3 (rootless), B2 (post-install PATH)
+**Related:** [`RFC-CLIENT-0001` — spike: rootless Docker as the k3d backend](./0001-rootless-spike.md) · backlog A2 (sudo/root handling), A3 (rootless), B2 (post-install PATH)
 
 ## Summary
 
