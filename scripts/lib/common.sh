@@ -7,7 +7,48 @@
 # ── Security hardening ───────────────────────────────────────────────────────
 export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:${PATH}"
 umask 077
+
+# Minimum TLS version, as a bare flag. Retained for backward compatibility only
+# (an out-of-tree caller may still splice it in by hand); everything in this repo
+# goes through curl_secure() below, which names the flag itself rather than
+# reading this — so growing this constant can never silently reshape every fetch
+# in the installer. It must stay a SINGLE flag regardless: two call sites
+# historically quoted it ("$CURL_SECURE"), and a space-separated value collapses
+# into one argv element that curl rejects.
 readonly CURL_SECURE="--tlsv1.2"
+
+# curl_secure — the one way this installer fetches anything.
+#
+# The TLS floor used to be opt-in: every call site had to remember to splice
+# $CURL_SECURE in, and seven of them had silently lost it — including the POST
+# that carries the client's password (backend#1252). A wrapper makes the floor
+# structural instead of remembered: a new call site gets it whether or not its
+# author knew it existed.
+#
+# It is not redundant with modern curl defaults. These installs run on
+# customer-managed hosts, older distros, and behind TLS-inspecting corporate
+# proxies, which negotiate down to whatever the client will accept — which is
+# exactly why this repo adopted an explicit floor instead of trusting defaults.
+#
+# It also supplies default time bounds so an unbounded fetch cannot hang the
+# install. Both defaults are injected BEFORE "$@", so a call site that passes its
+# own --connect-timeout/--max-time still wins (curl honours the LAST occurrence).
+# The one thing the wrapper must not do is impose a deadline where a call site
+# deliberately has none: a large binary download bounds itself with stall
+# detection (--speed-limit/--speed-time) because a hard --max-time would kill a
+# slow-but-healthy link, so those calls keep exactly the behaviour they had.
+#
+# Plain `curl`, not `command curl`: the bats suite mocks transfers by defining a
+# curl shell function, and `command` would bypass the mock and dial the network.
+curl_secure() {
+  local _arg _stall_bounded=0
+  for _arg in "$@"; do
+    case "$_arg" in --speed-limit|--speed-time) _stall_bounded=1; break ;; esac
+  done
+  local -a _bounds=(--connect-timeout "${TB_CURL_CONNECT_TIMEOUT:-30}")
+  (( _stall_bounded )) || _bounds+=(--max-time "${TB_CURL_MAX_TIME:-300}")
+  curl --tlsv1.2 "${_bounds[@]}" "$@"
+}
 
 # ── Colours ──────────────────────────────────────────────────────────────────
 # One brand-grounded palette (design-system tokens): cyan #01a5cc = structure,
@@ -321,9 +362,10 @@ download_with_progress() {
   local url="$1" dest="$2" label="$3"
 
   local total_bytes
-  # -m bounds the HEAD probe so a stalled server can't hang it (it's not
-  # retry-wrapped and its failure just means "no total" -> indeterminate bar).
-  total_bytes=$(curl -fsSLI -m 15 "$url" 2>/dev/null \
+  # -m 15 tightens curl_secure's default deadline for the HEAD probe so a stalled
+  # server can't hang it (it's not retry-wrapped and its failure just means
+  # "no total" -> indeterminate bar).
+  total_bytes=$(curl_secure -fsSLI -m 15 "$url" 2>/dev/null \
     | awk 'tolower($0) ~ /content-length/ {gsub(/[^0-9]/,"",$2); print $2}' \
     | tail -1)
 
@@ -343,8 +385,11 @@ download_with_progress() {
   # transfer (<1 KB/s for 60s) without capping a legitimately slow-but-progressing
   # large download. Without these the backgrounded curl is monitored only by
   # `kill -0` (no deadline, no kill), so a slow-loris / mid-stream stall would
-  # hang the progress loop forever.
-  curl -fSL --connect-timeout 30 --speed-limit 1024 --speed-time 60 \
+  # hang the progress loop forever. The stall flags are also how curl_secure knows
+  # NOT to add its default --max-time here: this path carries the large (hundreds
+  # of MB) Docker Desktop DMG, where a fixed deadline would fail a slow-but-healthy
+  # link.
+  curl_secure -fSL --connect-timeout 30 --speed-limit 1024 --speed-time 60 \
     -o "$dest" "$url" >> "$logfile" 2>&1 &
   local curl_pid=$!
 

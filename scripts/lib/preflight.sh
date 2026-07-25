@@ -58,7 +58,7 @@ _pf_note() { [[ -n "${PF_QUIET_SUCCESS:-}" ]] || info "$*"; }
 _pf_probe_url() {
   local url="$1" mode="${2:-}" code ec
   has curl || { echo "nocurl"; return 0; }
-  code=$(curl -sS $CURL_SECURE -o /dev/null --max-time 8 -w '%{http_code}' "$url" 2>/dev/null) && ec=0 || ec=$?
+  code=$(curl_secure -sS -o /dev/null --max-time 8 -w '%{http_code}' "$url" 2>/dev/null) && ec=0 || ec=$?
   if [[ -n "$code" && "$code" != "000" ]]; then
     if [[ "$mode" == "strict" && ! "$code" =~ ^[23] ]]; then echo "http $code"; return 0; fi
     echo "ok"; return 0
@@ -345,7 +345,7 @@ _pf_connectivity() {
   # installer hasn't installed it yet. Skip with a warning rather than hard-fail
   # with a misleading "egress blocked" (curl is installed downstream).
   if ! has curl; then
-    warn "Skipping connectivity check — curl isn't available yet (the installer will add it)."
+    warn "Skipping connectivity check — curl isn't available yet (the installer will add it)."  # style-guard: allow (copy, not a call)
     return 0
   fi
   local backend_host cfail=0 tls_seen=0 c label rest url mode status

@@ -565,9 +565,12 @@ function Install-NvidiaContainerToolkit {
 #!/bin/bash
 set -e
 if command -v nvidia-ctk &>/dev/null; then echo "NCT already installed."; exit 0; fi
-curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey \
+# --tlsv1.2 --connect-timeout/--max-time inline: this runs inside WSL2, where
+# common.sh's curl_secure() isn't available, so the floor and the bounds are spelled
+# out the same way the bootstrap (install.sh) spells them out (backend#1252).
+curl -fsSL --tlsv1.2 --connect-timeout 30 --max-time 30 https://nvidia.github.io/libnvidia-container/gpgkey \
   | sudo gpg --dearmor -o /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg 2>/dev/null
-curl -fsSL https://nvidia.github.io/libnvidia-container/stable/deb/nvidia-container-toolkit.list \
+curl -fsSL --tlsv1.2 --connect-timeout 30 --max-time 30 https://nvidia.github.io/libnvidia-container/stable/deb/nvidia-container-toolkit.list \
   | sed 's#deb https://#deb [signed-by=/usr/share/keyrings/nvidia-container-toolkit-keyring.gpg] https://#g' \
   | sudo tee /etc/apt/sources.list.d/nvidia-container-toolkit.list >/dev/null
 sudo apt-get update -qq
