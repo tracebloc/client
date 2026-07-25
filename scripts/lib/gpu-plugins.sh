@@ -23,7 +23,7 @@ _apply_remote_manifest() {
   local tmp_yml
   tmp_yml="$(mktemp)"
   trap "rm -f '$tmp_yml'" RETURN
-  retry 3 5 curl -fsSL "$CURL_SECURE" "$url" -o "$tmp_yml" || { rm -f "$tmp_yml"; return 1; }
+  retry 3 5 curl_secure -fsSL "$url" -o "$tmp_yml" || { rm -f "$tmp_yml"; return 1; }
   [[ -s "$tmp_yml" ]] || { warn "Downloaded $label manifest is empty"; rm -f "$tmp_yml"; return 1; }
   kubectl apply -f "$tmp_yml"
 }
