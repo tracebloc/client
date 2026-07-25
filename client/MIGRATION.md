@@ -2,6 +2,65 @@
 
 This guide explains how to migrate from the legacy per-platform charts (`aks/`, `bm/`, `eks/`, `oc/`) to the unified `client/` chart.
 
+## Upgrading to 1.9.6 — the prod ingestor pin moved into chart defaults; `values-prod.yaml` removed
+
+The digest that pins the spawned ingestion image on prod now lives in the
+chart's **default** `client/values.yaml` as `images.ingestor.prodDigest`, gated
+to prod. The `client/values-prod.yaml` install-time overlay has been **deleted**.
+
+**Why:** an install-time `-f` overlay could never deliver the pin.
+
+- The installer only ever passes its own generated values file, so a standard
+  prod install never applied the overlay at all — prod floated on the tag
+  exactly like dev and staging.
+- Even where an operator layered it by hand, it could never be *updated*. The
+  fleet auto-upgrade CronJob runs `helm upgrade --reset-then-reuse-values` with
+  no `-f` and no `--set`: that resets to the **new chart's `values.yaml`
+  defaults**, then re-applies the release's stored **user-supplied** values. An
+  overlay value is user-supplied, so it was replayed verbatim forever — and
+  because Helm only auto-reads `values.yaml` from a chart, the overlay shipped
+  inside the new chart archive was never read. The edge stayed frozen on its
+  install-day digest while the chart version advanced.
+
+Chart **defaults** propagate through that upgrade; user-supplied values freeze.
+So the pin has to be a default, which is how the egress-proxy squid image has
+always been pinned. Removing the overlay rather than keeping it as a shim is
+deliberate: passing `-f values-prod.yaml` would re-create the frozen-value bug.
+
+**What you need to do: nothing for most clusters.**
+
+| Edge | `env.CLIENT_ENV` | Ingestor image |
+|---|---|---|
+| Prod (installer writes no `CLIENT_ENV`) | unset → resolves `prod` | Pinned to `images.ingestor.prodDigest`, `imagePullPolicy: IfNotPresent` |
+| Dev / staging | `dev` / `stg` | Floating `images.ingestor.tag`, `imagePullPolicy: Always` (unchanged) |
+
+The pin arrives on the next hands-off auto-upgrade, and each subsequent
+republished pin follows the same way.
+
+**If you hand-layered the old overlay, clear the stored value.** A manually
+applied `-f client/values-prod.yaml` stored `images.ingestor.digest` as a
+user-supplied value, and that key still takes precedence over `prodDigest` — so
+such an edge would stay frozen on its install-day digest. Clear it once:
+
+```bash
+helm upgrade <release> tracebloc/client -n <namespace> \
+  --reset-then-reuse-values --set images.ingestor.digest=""
+```
+
+Confirm the edge now tracks the chart pin:
+
+```bash
+kubectl get deploy -n <namespace> -l app.kubernetes.io/component=jobs-manager \
+  -o jsonpath='{.items[0].spec.template.spec.containers[0].env[?(@.name=="INGESTOR_IMAGE_DIGEST")].value}{"\n"}'
+```
+
+**Canary edges.** To float one prod edge on the tag while the rest of the fleet
+stays pinned — e.g. to validate a new ingestor release in place — set
+`images.ingestor.prodPin=false` on that edge. It is user-supplied, so the
+opt-out persists across auto-upgrades until you change it back. To pin an edge
+to a *specific* different digest instead, set `images.ingestor.digest`; that
+wins in any environment.
+
 ## Upgrading to 1.5.1 — single-node gating of the GPU→CPU pending fallback
 
 [client-runtime#92](https://github.com/tracebloc/client-runtime/issues/92) /

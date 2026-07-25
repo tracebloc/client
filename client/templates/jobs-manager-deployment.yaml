@@ -101,22 +101,26 @@ spec:
           value: "mysql-client"
         # Ingestor image wiring for the POST /internal/submit-ingestion-run
         # endpoint. jobs-manager spawns each ingestion Job from these values
-        # (see client-runtime submit_ingestion_run._build_image_reference).
+        # (see client-runtime submit_ingestion_run._build_image_reference):
+        # DIGEST set -> repo@digest + imagePullPolicy=IfNotPresent;
+        # DIGEST empty -> repo:tag + imagePullPolicy=Always.
         #
-        # Default (digest empty): spawn by the floating tag with
-        # imagePullPolicy=Always, so every ingestion Job resolves the current
-        # published ingestor digest at spawn time — exactly how training pods
-        # are spawned. There is no chart-pinned digest to keep current, so a
-        # `helm upgrade` that resets values can no longer revert the ingestor
-        # image (the regression behind the customer "non-numeric" report). The
-        # image-refresh CronJob no longer touches the ingestor — its class-2
-        # pass was retired in favour of this.
+        # Non-prod (dev / staging): DIGEST renders empty, so every ingestion Job
+        # resolves the current published ingestor digest at spawn time — exactly
+        # how training pods are spawned, and immune to a `helm upgrade` that
+        # resets values reverting the image (the regression behind the customer
+        # "non-numeric" report). The image-refresh CronJob no longer touches the
+        # ingestor — its class-2 pass was retired in favour of this.
         #
-        # Pinning is opt-in: set `images.ingestor.digest` to a canonical
-        # multi-arch digest to lock every ingestion Job to that exact image
-        # (imagePullPolicy then drops to IfNotPresent for reproducibility —
-        # debugging a release before rollout, certification, air-gapped repro).
-        # Repository + tag are overridable for private mirrors. All three are
+        # Prod: DIGEST renders `images.ingestor.prodDigest`, a CHART DEFAULT, so
+        # prod is reproducible with no per-edge action and a republished pin
+        # reaches installed edges via the auto-upgrade's
+        # `--reset-then-reuse-values` (backend#1245). `prodPin: false` opts a
+        # canary edge back onto the floating tag; `images.ingestor.digest` pins
+        # explicitly in any environment. All of that resolves in one place —
+        # the `tracebloc.ingestorDigest` helper.
+        #
+        # Repository + tag are overridable for private mirrors. Every read is
         # nil-guarded so `--reuse-values` from a release that predates the
         # `images.ingestor` key still renders.
         - name: INGESTOR_IMAGE_REPOSITORY
@@ -124,7 +128,7 @@ spec:
         - name: INGESTOR_IMAGE_TAG
           value: {{ (default dict .Values.images.ingestor).tag | default "0.7" | quote }}
         - name: INGESTOR_IMAGE_DIGEST
-          value: {{ (default dict .Values.images.ingestor).digest | default "" | quote }}
+          value: {{ include "tracebloc.ingestorDigest" . | quote }}
         - name: REQUESTS_PROXY_URL
           value: "http://requests-proxy-service:8888"
         {{- if and (default dict .Values.egressProxy).enabled (default dict .Values.egressProxy).routeWorkloads }}
