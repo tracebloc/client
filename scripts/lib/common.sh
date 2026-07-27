@@ -140,6 +140,16 @@ step_header()    { echo -e "  ${TB_HEADING}$1) $2${RESET}"; echo ""; }
 # ── Utility ──────────────────────────────────────────────────────────────────
 has() { command -v "$1" &>/dev/null; }
 
+# Sanitize a minutes-valued env override to a base-10 integer, else <default>.
+# The 10# base prefix matters: bash arithmetic reads a leading zero as octal,
+# so 08/09 would ABORT $(( … )) under set -e (mid-create, leaving a partial
+# cluster) and 010 would silently become 8 (Bugbot #442).
+tb_minutes_or() {
+  local v="$1" def="$2"
+  case "$v" in ''|*[!0-9]*) echo "$def"; return 0 ;; esac
+  echo $((10#$v))
+}
+
 # Strip ANSI escape sequences and C0 control characters from a value. A raw
 # `read` captures whatever the terminal sends — this can include:
 #   • bracketed-paste wrappers:  ESC[200~ ... ESC[201~

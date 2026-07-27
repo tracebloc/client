@@ -636,8 +636,8 @@ _create_new_cluster() {
   # pull (rate-limited registry, TLS-intercepting proxy) hangs the create
   # forever. k3d's own --timeout aborts it with a real error instead; the env
   # knob matches the Windows installer's TB_CREATE_TIMEOUT_MIN.
-  local _create_timeout_min="${TB_CREATE_TIMEOUT_MIN:-15}"
-  case "$_create_timeout_min" in ''|*[!0-9]*) _create_timeout_min=15 ;; esac
+  local _create_timeout_min
+  _create_timeout_min="$(tb_minutes_or "${TB_CREATE_TIMEOUT_MIN:-}" 15)"
   K3D_ARGS+=(--wait --timeout "${_create_timeout_min}m")
 
   # backend#743: bind-mount the customer's dataset volume (which may be a network

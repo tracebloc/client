@@ -409,8 +409,8 @@ _reconcile_adopted_client() {
 
   # Reconcile blocks too — same spinner treatment (RFC-0002 §2), bounded so a
   # wedged kube-apiserver can't hang it forever (#426).
-  local _helm_timeout_min="${TB_HELM_TIMEOUT_MIN:-10}"
-  case "$_helm_timeout_min" in ''|*[!0-9]*) _helm_timeout_min=10 ;; esac
+  local _helm_timeout_min
+  _helm_timeout_min="$(tb_minutes_or "${TB_HELM_TIMEOUT_MIN:-}" 10)"
   local _helm_rc=0
   spin_cmd_bounded "$(( _helm_timeout_min * 60 ))" "Reconciling the existing client…" helm "${_args[@]}" || _helm_rc=$?
   if [[ "$_helm_rc" -ne 0 ]]; then
@@ -845,8 +845,8 @@ EOF
   # helm output to $LOG_FILE and, on failure, tails the log to stderr. Honours
   # RFC-0002 §2 "progress on every wait"; the deadline stops a wedged
   # kube-apiserver from hanging the install forever (#426).
-  local _helm_timeout_min="${TB_HELM_TIMEOUT_MIN:-10}"
-  case "$_helm_timeout_min" in ''|*[!0-9]*) _helm_timeout_min=10 ;; esac
+  local _helm_timeout_min
+  _helm_timeout_min="$(tb_minutes_or "${TB_HELM_TIMEOUT_MIN:-}" 10)"
   local _helm_rc=0
   spin_cmd_bounded "$(( _helm_timeout_min * 60 ))" "Installing the tracebloc client…" \
     helm upgrade --install "$TB_NAMESPACE" "$chart_ref" \

@@ -442,6 +442,14 @@ setup() {
   ! kill -0 "$child" 2>/dev/null
 }
 
+@test "tb_minutes_or: base-10 normalization defuses the octal trap (Bugbot #442 r6)" {
+  [ "$(tb_minutes_or 08 15)" = "8" ]      # would abort $(( )) as invalid octal
+  [ "$(tb_minutes_or 010 15)" = "10" ]    # would silently read as 8
+  [ "$(tb_minutes_or 25 15)" = "25" ]
+  [ "$(tb_minutes_or '' 15)" = "15" ]
+  [ "$(tb_minutes_or 20m 15)" = "15" ]
+}
+
 @test "spin: deadline path survives set -e end-to-end (Bugbot #442 r3)" {
   # A childless stuck pid (pkill -P finds nothing -> returns 1) plus wait
   # after a kill: under `set -e` any bare failure aborts the deadline path
