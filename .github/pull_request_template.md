@@ -2,7 +2,7 @@
 <!-- 1–3 sentences. What does this PR do and why? -->
 
 ## Related
-<!-- Closes #123 / Ref tracebloc/other-repo#456 -->
+<!-- Same repo: Closes #123 · Cross-repo: Fixes tracebloc/backend#456 (owner-qualified — a bare backend#456 closes nothing). PRs land on develop, not the default branch, so confirm the issue actually closed. -->
 
 ## Type of change
 - [ ] Feature
@@ -27,3 +27,4 @@
 - [ ] No secrets / credentials in the diff
 - [ ] For security-sensitive paths: appropriate reviewer requested
 - [ ] Terminal output follows [STYLE.md](../STYLE.md) — tone helpers (no hardcoded colour/emoji), "secure environment" not "workspace"; `bash scripts/check-style.sh` passes
+- [ ] Cross-repo issues use `Fixes tracebloc/<repo>#N` — a bare `repo#N` closes nothing
