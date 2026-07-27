@@ -27,8 +27,13 @@ tests:
           path: metadata.annotations["helm.sh/hook-delete-policy"]
           value: before-hook-creation
 
-  - it: runs the backfill entrypoint on the ingestor image, best-effort (exit 0)
+  - it: runs the backfill entrypoint on the floating ingestor tag off-prod
+    # Non-prod (env.CLIENT_ENV=dev|stg): no digest applies, so the hook runs the
+    # floating tag with imagePullPolicy=Always — same image the edge's ingestion
+    # Jobs are spawned from (tracebloc.ingestorDigest is shared by both).
     set:
+      env:
+        CLIENT_ENV: dev
       images.ingestor.tag: "0.9"
     asserts:
       - equal:
@@ -37,6 +42,23 @@ tests:
       - equal:
           path: spec.template.spec.containers[0].imagePullPolicy
           value: Always
+      - matchRegex:
+          path: spec.template.spec.containers[0].args[0]
+          pattern: tracebloc-backfill
+
+  - it: runs the prod-pinned ingestor image on prod (chart default, backend#1245)
+    # Prod resolves the chart-default prod pin, so the backfill reconciles
+    # metadata with the exact same certified build prod ingestions run — and,
+    # being a chart default, it tracks the fleet pin across auto-upgrades.
+    set:
+      images.ingestor.prodDigest: "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].image
+          value: ghcr.io/tracebloc/ingestor@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+      - equal:
+          path: spec.template.spec.containers[0].imagePullPolicy
+          value: IfNotPresent
       - matchRegex:
           path: spec.template.spec.containers[0].args[0]
           pattern: tracebloc-backfill

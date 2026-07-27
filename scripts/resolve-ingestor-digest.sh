@@ -1,17 +1,27 @@
 #!/usr/bin/env bash
 # resolve-ingestor-digest.sh — resolve the multi-arch index digest for the
-# spawned ingestor image and (optionally) write it into the prod overlay.
+# spawned ingestor image and (optionally) write it into the chart's prod pin.
 #
-# backend#1028: prod installs pin `images.ingestor.digest` for reproducibility
-# (see client/values-prod.yaml). The floating tag (read from the chart's
-# images.ingestor.tag) moves as new patches ship, so the pinned digest must
-# be re-resolved every time the prod
-# ingestor line is cut. This helper does that resolution against the live
-# registry so the pin is never hand-typed.
+# backend#1028: prod installs pin the ingestor image for reproducibility. The
+# floating tag (read from the chart's images.ingestor.tag) moves as new patches
+# ship, so the pinned digest must be re-resolved every time the prod ingestor
+# line is cut. This helper does that resolution against the live registry so
+# the pin is never hand-typed.
+#
+# backend#1245: the pin lives in `images.ingestor.prodDigest` in the chart's
+# DEFAULT client/values.yaml — not in an install-time `-f` overlay. Only a chart
+# default survives the fleet's `helm upgrade --reset-then-reuse-values`, which
+# adopts new chart defaults but re-applies stored user-supplied values; the old
+# client/values-prod.yaml overlay could never reach an installed edge and has
+# been removed. --write therefore patches values.yaml.
 #
 # Usage:
 #   scripts/resolve-ingestor-digest.sh [TAG]           # print repo@digest
-#   scripts/resolve-ingestor-digest.sh [TAG] --write   # patch values-prod.yaml
+#   scripts/resolve-ingestor-digest.sh [TAG] --write   # patch prodDigest in
+#                                                      #   client/values.yaml
+#
+# After --write, BUMP client/Chart.yaml (version + appVersion): the chart only
+# publishes on a version change, so an unbumped refresh reaches no edge.
 #
 # TAG defaults to `images.ingestor.tag` read from client/values.yaml (via yq
 # if present, else a portable yq-free parse). If it cannot be determined, the
@@ -21,7 +31,6 @@ set -euo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 chart_values="$here/../client/values.yaml"
-prod_overlay="$here/../client/values-prod.yaml"
 
 repo="${INGESTOR_REPO:-ghcr.io/tracebloc/ingestor}"
 tag="${1:-}"
@@ -125,7 +134,7 @@ if [[ "$multiarch" -eq 0 ]]; then
     # A prod pin MUST be multi-arch: helm-ci hard-fails a single-arch digest,
     # and a committed arch-specific pin breaks ingestion on the other arch.
     echo "ERROR: $resolved is not a linux/amd64 + linux/arm64 multi-arch index (saw: ${platforms:-none})." >&2
-    echo "       Refusing to pin a single-arch digest into the prod overlay (client#186 / #160)." >&2
+    echo "       Refusing to pin a single-arch digest as the chart's prod pin (client#186 / #160)." >&2
     echo "       helm-ci's ingestor-multiarch guard would reject this pin at CI time." >&2
     exit 1
   fi
@@ -136,20 +145,36 @@ fi
 echo "${repo}@${digest}  (tag ${tag}; platforms: ${platforms:-unknown})"
 
 if [[ "$write" == 1 ]]; then
-  [[ -f "$prod_overlay" ]] || { echo "ERROR: $prod_overlay not found." >&2; exit 1; }
-  # Replace the digest value on the `digest:` line under images.ingestor.
-  tmp="$(mktemp)"
-  sed -E "s|(^[[:space:]]*digest:[[:space:]]*\").*(\")|\1${digest}\2|" "$prod_overlay" >"$tmp"
-  mv "$tmp" "$prod_overlay"
-  # Verify the sed actually landed: if the overlay's digest line has drifted
-  # from the expected `digest: "…"` format, sed matches nothing and silently
-  # leaves the file unchanged. Confirm the intended digest is now present
-  # before reporting success.
-  if ! grep -q "digest:[[:space:]]*\"${digest}\"" "$prod_overlay"; then
-    echo "ERROR: ${prod_overlay#$here/../} was not patched — no matching digest line found." >&2
-    echo "       Expected a line of the form:  digest: \"${digest}\"" >&2
-    echo "       Fix the overlay's digest line to that format and re-run." >&2
+  [[ -f "$chart_values" ]] || { echo "ERROR: $chart_values not found." >&2; exit 1; }
+  # Patch `images.ingestor.prodDigest` in the chart's DEFAULT values.yaml.
+  #
+  # Keyed on the distinct `prodDigest:` name rather than a bare `digest:`:
+  # values.yaml carries a `digest:` leaf for EVERY image (jobsManager,
+  # podsMonitor, egressProxy, busybox, …), so a `digest:`-anchored sed would
+  # rewrite the wrong image — or all of them. Assert the key occurs exactly once
+  # before touching the file, so a future rename/duplication fails loudly here
+  # instead of silently patching a sibling.
+  matches="$(grep -c -E '^[[:space:]]*prodDigest:[[:space:]]*"' "$chart_values" || true)"
+  if [[ "$matches" != "1" ]]; then
+    echo "ERROR: expected exactly one 'prodDigest: \"…\"' line in ${chart_values#$here/../}, found ${matches}." >&2
+    echo "       Refusing to patch: the prod pin's location is ambiguous." >&2
+    echo "       Fix images.ingestor.prodDigest to a single quoted line and re-run." >&2
     exit 1
   fi
-  echo "Wrote ${digest} to ${prod_overlay#$here/../}" >&2
+  tmp="$(mktemp)"
+  sed -E "s|(^[[:space:]]*prodDigest:[[:space:]]*\").*(\")|\1${digest}\2|" "$chart_values" >"$tmp"
+  mv "$tmp" "$chart_values"
+  # Verify the sed actually landed: if the line has drifted from the expected
+  # `prodDigest: "…"` format, sed matches nothing and silently leaves the file
+  # unchanged. Confirm the intended digest is now present before reporting
+  # success.
+  if ! grep -q -E "^[[:space:]]*prodDigest:[[:space:]]*\"${digest}\"" "$chart_values"; then
+    echo "ERROR: ${chart_values#$here/../} was not patched — no matching prodDigest line found." >&2
+    echo "       Expected a line of the form:  prodDigest: \"${digest}\"" >&2
+    echo "       Fix images.ingestor.prodDigest to that format and re-run." >&2
+    exit 1
+  fi
+  echo "Wrote ${digest} to ${chart_values#$here/../} (images.ingestor.prodDigest)" >&2
+  echo "NEXT: bump client/Chart.yaml (version + appVersion) — the chart only" >&2
+  echo "      publishes on a version change, so an unbumped pin reaches no edge." >&2
 fi
