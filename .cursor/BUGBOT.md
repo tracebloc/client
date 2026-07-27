@@ -19,12 +19,15 @@ for *what the operator sees and can act on*, not code elegance.
   `[[ -f x ]] && source x` **trips `set -e`** when the test is false — require an `if`
   block instead (`scripts/install-k8s.sh:70-80`).
 
-- **A `curl` call without the TLS floor.** `CURL_SECURE="--tlsv1.2"`
-  (`scripts/lib/common.sh:10`) is a *constant, not a wrapper* — every call site splices
-  it manually, so a new call silently loses it, and a TLS-inspecting proxy will happily
-  negotiate down. Already missing at `common.sh:326,347`, `gpu-amd.sh:29,52`,
-  `gpu-nvidia.sh:92,99`, `install-client-helm.sh:269`. (`scripts/install.sh` hardcodes
-  the literal because it cannot source `common.sh` — it is the file fetching it. Correct.)
+- **A bare `curl` that bypasses `curl_secure()`.** Every fetch goes through the
+  `curl_secure()` wrapper (`scripts/lib/common.sh`), which bakes in the TLS floor
+  (`--tlsv1.2`) and the connect/stall timeouts so a call site can't silently drop them
+  and a TLS-inspecting proxy can't negotiate down. `check-style.sh` (rule 3, "no bare
+  `curl`") enforces this in CI, so flag any new bare `curl` that isn't `curl_secure`.
+  Legitimately exempt (the style rule already allows these): `scripts/install.sh` and the
+  WSL here-string in `install-k8s.ps1` name `--tlsv1.2` directly because they can't source
+  `common.sh`; comments; `has curl` / `command -v curl` presence tests; and the
+  `curl … | sh` one-liner printed for the user to copy.
 
 - **An unbounded external call.** `kubectl` takes `--request-timeout=5s`. `helm` has no
   `--request-timeout`, so the convention is to gate a helm call behind a bounded
@@ -70,11 +73,16 @@ for *what the operator sees and can act on*, not code elegance.
   `node-agents-namespace.yaml`, `priority-class.yaml`.
 
 - **Image pinning drift.** Images are pinned by digest with the tag kept for readability
-  only — the digest is authoritative (`client/values.yaml:291-298`). Digests must be
-  multi-arch *index* digests; `scripts/resolve-ingestor-digest.sh` refuses a single-arch
-  one. CI's `ingestor-multiarch` guard reads `client/values.yaml` **only** and does not
-  validate `client/values-prod.yaml` (stated at `values-prod.yaml:36-40`) — flag a
-  prod-overlay digest change with no `# VERIFIED` audit note.
+  only — the digest is authoritative (`client/values.yaml`, `images.ingestor`). Pinned
+  digests must be multi-arch *index* digests; `scripts/resolve-ingestor-digest.sh` refuses
+  a single-arch one. The fleet-wide prod pin is the chart default
+  `images.ingestor.prodDigest` (in `client/values.yaml`), **not** an install-time overlay —
+  the old `client/values-prod.yaml` was deleted and the pin moved into chart defaults
+  (backend#1245). CI's `ingestor-multiarch` guard (`.github/workflows/helm-ci.yaml`) reads
+  `client/values.yaml` and hard-fails if `prodDigest` is empty (that silently un-pins prod)
+  or not multi-arch; it also checks the floating `images.ingestor.tag` and the per-edge
+  `images.ingestor.digest` when set. Flag a `prodDigest`/`digest` change that isn't a
+  verified multi-arch index digest (resolve with `scripts/resolve-ingestor-digest.sh`).
 
 - **Credentials in `values*.yaml`, logs, argv, or a `--diagnose` bundle**; secret/values
   files should be mode 0600.
