@@ -176,6 +176,13 @@ Advanced configuration (environment variables):
   -NoReboot      Skip reboot prompt after enabling Windows features
   HOST_DATA_DIR  Persistent data directory       (default: ~\.tracebloc)
 
+Reinstalling on a machine that still holds data:
+  A new install won't silently adopt data left under HOST_DATA_DIR (both the
+  flat and per-release layouts) — it stops and asks reuse / wipe / different dir.
+  Non-interactive: TB_LEFTOVER_ACTION=reuse|wipe, or HOST_DATA_DIR=<new-path>
+  (with no choice and no terminal the install aborts). Bypass entirely with
+  TRACEBLOC_SKIP_LEFTOVER_GUARD=1.
+
 macOS / Linux:
   curl -fsSL https://raw.githubusercontent.com/tracebloc/client/main/scripts/install.sh | bash
 
@@ -189,12 +196,11 @@ Learn more: https://docs.tracebloc.io
 #  INPUT VALIDATION
 # =============================================================================
 
-function Confirm-Config {
-  if ($CLUSTER_NAME -notmatch '^[a-zA-Z][a-zA-Z0-9._-]{0,62}$') {
-    Err ("CLUSTER_NAME must start with a letter, contain only [a-zA-Z0-9._-], max 63 chars (got '" + $CLUSTER_NAME + "')")
-  }
-  if ($SERVERS -notmatch '^[1-9]\d*$') { Err ("SERVERS must be a positive integer >= 1 (got '" + $SERVERS + "')") }
-  if ($AGENTS  -notmatch '^\d+$') { Err ("AGENTS must be a non-negative integer (got '" + $AGENTS + "')") }
+# Resolve + validate HOST_DATA_DIR: it must be under USERPROFILE and never a
+# system path. Sets $script:HOST_DATA_DIR to the resolved absolute path. Shared
+# by Confirm-Config and the leftover-data guard's "install into a different
+# directory" path so the two can't drift.
+function Confirm-DataDir {
   $dataDir = [System.IO.Path]::GetFullPath($HOST_DATA_DIR)
   $userProfile = [System.IO.Path]::GetFullPath($env:USERPROFILE)
   if (-not $dataDir.StartsWith($userProfile, [StringComparison]::OrdinalIgnoreCase)) {
@@ -207,6 +213,15 @@ function Confirm-Config {
     }
   }
   $script:HOST_DATA_DIR = $dataDir
+}
+
+function Confirm-Config {
+  if ($CLUSTER_NAME -notmatch '^[a-zA-Z][a-zA-Z0-9._-]{0,62}$') {
+    Err ("CLUSTER_NAME must start with a letter, contain only [a-zA-Z0-9._-], max 63 chars (got '" + $CLUSTER_NAME + "')")
+  }
+  if ($SERVERS -notmatch '^[1-9]\d*$') { Err ("SERVERS must be a positive integer >= 1 (got '" + $SERVERS + "')") }
+  if ($AGENTS  -notmatch '^\d+$') { Err ("AGENTS must be a non-negative integer (got '" + $AGENTS + "')") }
+  Confirm-DataDir   # resolve + validate HOST_DATA_DIR (shared with the leftover-data guard's new-dir path)
 
   # backend#743: optional dataset dir. Unlike HOST_DATA_DIR it MAY live outside
   # USERPROFILE (a separate / network drive). It must already EXIST and be
@@ -835,6 +850,151 @@ function Set-ClusterAutostart {
   } catch {}
 }
 
+# =============================================================================
+#  LEFTOVER-DATA GUARD (RFC-0003 §4 / #376) — Windows parity with the bash
+#  guard_leftover_data (scripts/lib/cluster.sh). A NEW install must never
+#  silently adopt data an earlier install left under HOST_DATA_DIR. Windows is
+#  hostpath-only (New-K3dCluster always bind-mounts HOST_DATA_DIR -> /tracebloc);
+#  node-local (RFC-0003 Option C) is a Linux/k3s prototype with no Windows path,
+#  so this is intentionally scoped to hostpath. Non-interactive knobs mirror the
+#  bash env contract: $env:TB_LEFTOVER_ACTION (reuse|wipe), $env:HOST_DATA_DIR
+#  (a different dir), $env:TRACEBLOC_SKIP_LEFTOVER_GUARD (bypass).
+# =============================================================================
+
+# Can we prompt? False under CI / piped / redirected stdin — where the guard must
+# fail safe (abort) rather than hang or silently adopt.
+function Test-CanPrompt {
+  try { return ([Environment]::UserInteractive -and -not [Console]::IsInputRedirected) }
+  catch { return $false }
+}
+
+# Directories under HOST_DATA_DIR that hold real client data — a MySQL data dir
+# or a dataset dir with at least one file — across BOTH on-disk layouts: flat
+# (HOST_DATA_DIR\{mysql,data}) and per-release (HOST_DATA_DIR\<rel>\{mysql,data}).
+# Empty dirs, values.yaml and install-*.log are not data. Reparse points
+# (symlinks/junctions) are skipped so a later wipe can't traverse outside
+# HOST_DATA_DIR. An unreadable dir can't be proven empty, so it is treated as a
+# leftover (fail closed). Mirrors bash _leftover_data_dirs.
+function Get-LeftoverDataDirs {
+  param([string]$Base = $HOST_DATA_DIR)
+  $out = @()
+  if (-not $Base -or -not (Test-Path -LiteralPath $Base -PathType Container)) { return $out }
+  $candidates = New-Object System.Collections.Generic.List[string]
+  $candidates.Add((Join-Path $Base "mysql")); $candidates.Add((Join-Path $Base "data"))
+  Get-ChildItem -LiteralPath $Base -Directory -Force -ErrorAction SilentlyContinue | ForEach-Object {
+    if ($_.Attributes -band [IO.FileAttributes]::ReparsePoint) { return }   # skip symlink/junction
+    if ($_.Name -eq "mysql" -or $_.Name -eq "data") { return }             # flat dirs already candidates
+    $candidates.Add((Join-Path $_.FullName "mysql")); $candidates.Add((Join-Path $_.FullName "data"))
+  }
+  foreach ($d in $candidates) {
+    if (-not (Test-Path -LiteralPath $d -PathType Container)) { continue }
+    $item = Get-Item -LiteralPath $d -Force -ErrorAction SilentlyContinue
+    if ($item -and ($item.Attributes -band [IO.FileAttributes]::ReparsePoint)) { continue }  # never a data dir
+    $hasFile = $false
+    try {
+      $f = Get-ChildItem -LiteralPath $d -Recurse -File -Force -ErrorAction Stop | Select-Object -First 1
+      $hasFile = [bool]$f
+    } catch { $hasFile = $true }   # unlistable/unreadable -> can't prove empty -> leftover
+    if ($hasFile) { $out += $d }
+  }
+  return $out
+}
+
+# Delete the detected leftover dirs. Only ever removes paths UNDER the validated
+# HOST_DATA_DIR (Confirm-DataDir guarantees it is under USERPROFILE). Returns
+# $true only if everything was removed, so the caller can fail closed on survivors
+# (e.g. locked files) instead of adopting them. Mirrors bash _wipe_leftover_data.
+function Remove-LeftoverData {
+  param([string[]]$Dirs)
+  $base = [System.IO.Path]::GetFullPath($HOST_DATA_DIR)
+  $userProfile = [System.IO.Path]::GetFullPath($env:USERPROFILE)
+  if (-not $HOST_DATA_DIR -or -not $base.StartsWith($userProfile, [StringComparison]::OrdinalIgnoreCase)) {
+    Err ("Refusing to wipe: HOST_DATA_DIR is unset or not under USERPROFILE (got: " + $HOST_DATA_DIR + ")")
+  }
+  $prefix = $base.TrimEnd([IO.Path]::DirectorySeparatorChar) + [IO.Path]::DirectorySeparatorChar
+  $ok = $true
+  foreach ($d in $Dirs) {
+    $full = [System.IO.Path]::GetFullPath($d)
+    if (-not $full.StartsWith($prefix, [StringComparison]::OrdinalIgnoreCase)) {
+      Warn "Refusing to wipe $d - outside $HOST_DATA_DIR."; $ok = $false; continue
+    }
+    $item = Get-Item -LiteralPath $d -Force -ErrorAction SilentlyContinue
+    if ($item -and ($item.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+      Warn "Refusing to wipe reparse point $d - it could point outside $HOST_DATA_DIR; remove it by hand."; $ok = $false; continue
+    }
+    Log "Wiping leftover data: $d"
+    Remove-Item -LiteralPath $d -Recurse -Force -ErrorAction SilentlyContinue
+    if (Test-Path -LiteralPath $d) {
+      Warn "Could not remove $d - files may be locked or owned by another user."; $ok = $false
+    }
+  }
+  return $ok
+}
+
+# Guard entry point — called from New-K3dCluster ONLY when creating a NEW cluster
+# (an existing cluster is an in-place reuse/upgrade whose data stays by design).
+# Resolves an action from $env:TB_LEFTOVER_ACTION, else an interactive prompt;
+# with no terminal and no explicit action it fails safe (abort, never adopt).
+function Invoke-LeftoverDataGuard {
+  if ($env:TRACEBLOC_SKIP_LEFTOVER_GUARD) { return }
+  $found = @(Get-LeftoverDataDirs)
+  if ($found.Count -eq 0) { return }   # clean slate — nothing to guard
+
+  Warn "Existing tracebloc data found under ${HOST_DATA_DIR}:"
+  foreach ($d in $found) { Hint "  * $d" }
+  Hint "A fresh install would silently adopt it, so it would not really be fresh."
+
+  $action = ""
+  switch ("$($env:TB_LEFTOVER_ACTION)".Trim().ToLower()) {
+    "reuse" { $action = "reuse" }
+    "wipe"  { $action = "wipe" }
+  }
+  if (-not $action) {
+    if (Test-CanPrompt) {
+      Write-Host ""
+      Hint "How should the installer handle it?"
+      Hint "  [r] reuse - keep and adopt the existing data"
+      Hint "  [w] wipe  - delete it and start fresh"
+      Hint "  [n] new   - install into a different directory"
+      Hint "  [a] abort - stop and sort it out myself (default)"
+      $reply = ""
+      try { $reply = (Read-Host "  Choice [r/w/n/a]") } catch { $reply = "" }
+      switch ("$reply".Trim().ToLower()) {
+        { $_ -in @("r","reuse") } { $action = "reuse" }
+        { $_ -in @("w","wipe") }  { $action = "wipe" }
+        { $_ -in @("n","new") }   { $action = "newdir" }
+        default                   { $action = "abort" }
+      }
+    } else {
+      Err ("Existing data found under $HOST_DATA_DIR and no choice was given (no terminal). Re-run with one of:`n" +
+           "  `$env:TB_LEFTOVER_ACTION='reuse'   adopt the existing data`n" +
+           "  `$env:TB_LEFTOVER_ACTION='wipe'    delete it and start fresh`n" +
+           "  `$env:HOST_DATA_DIR='<new-path>'   install into a different directory`n" +
+           "  (or `$env:TRACEBLOC_SKIP_LEFTOVER_GUARD='1' to bypass this guard entirely)")
+    }
+  }
+
+  switch ($action) {
+    "reuse" { Log "Reusing existing data under $HOST_DATA_DIR (user choice)." }
+    "wipe"  {
+      if (-not (Remove-LeftoverData -Dirs $found)) {
+        Err "Could not fully wipe existing data under $HOST_DATA_DIR - some files could not be removed (locked, or owned by another user). Remove them manually and re-run, or choose a different directory. Refusing to proceed and adopt the leftovers."
+      }
+      Log "Wiped leftover data under $HOST_DATA_DIR (user choice)."
+    }
+    "newdir" {
+      $newdir = ""
+      if (Test-CanPrompt) { try { $newdir = (Read-Host "  New data directory (under $env:USERPROFILE)") } catch { $newdir = "" } }
+      if (-not "$newdir".Trim()) { Err "No new directory given - aborting." }
+      $script:HOST_DATA_DIR = "$newdir".Trim()
+      Confirm-DataDir   # re-resolve + re-validate the new path
+      Log "Switched HOST_DATA_DIR to $HOST_DATA_DIR; re-checking it for leftover data."
+      Invoke-LeftoverDataGuard
+    }
+    default { Err "Aborted - existing data under $HOST_DATA_DIR left untouched. Choose reuse / wipe / a different directory and re-run." }
+  }
+}
+
 function New-K3dCluster {
   Log "Creating k3d cluster: '$CLUSTER_NAME'"
 
@@ -890,6 +1050,12 @@ function New-K3dCluster {
       }
     }
   } else {
+    # Creating a FRESH cluster — never silently adopt data an earlier install
+    # left under HOST_DATA_DIR (RFC-0003 §4 / #376; parity with the bash guard).
+    # May prompt and/or update $script:HOST_DATA_DIR (new-dir choice) before we
+    # bind-mount it below, or abort on wipe-failed / no-choice-no-terminal.
+    Invoke-LeftoverDataGuard
+
     if (-not (Test-Path $HOST_DATA_DIR)) {
       New-Item -ItemType Directory -Path $HOST_DATA_DIR -Force | Out-Null
     }

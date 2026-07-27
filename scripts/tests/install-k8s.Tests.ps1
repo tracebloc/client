@@ -1126,3 +1126,87 @@ Describe "Invoke-ProvisionClient" {
     $script:TB_PROV_MODE | Should -Be "fallback"
   }
 }
+
+Describe "Get-LeftoverDataDirs (Windows leftover-data detection; Bugbot r3655218480)" {
+  It "nonexistent HOST_DATA_DIR -> nothing" {
+    @(Get-LeftoverDataDirs -Base "$TestDrive\nope").Count | Should -Be 0
+  }
+  It "empty dirs / values.yaml are not data" {
+    $b = "$TestDrive\clean"
+    New-Item -ItemType Directory -Path "$b\mysql" -Force | Out-Null   # empty
+    New-Item -ItemType Directory -Path "$b\logs"  -Force | Out-Null
+    Set-Content "$b\values.yaml" "x"
+    @(Get-LeftoverDataDirs -Base $b).Count | Should -Be 0
+  }
+  It "flat mysql data detected" {
+    $b = "$TestDrive\flat"
+    New-Item -ItemType Directory -Path "$b\mysql" -Force | Out-Null
+    Set-Content "$b\mysql\ibdata1" "x"
+    @(Get-LeftoverDataDirs -Base $b) | Should -Contain "$b\mysql"
+  }
+  It "per-release layout detected" {
+    $b = "$TestDrive\rel"
+    New-Item -ItemType Directory -Path "$b\tracebloc\data\ds1" -Force | Out-Null
+    Set-Content "$b\tracebloc\data\ds1\rows.csv" "x"
+    @(Get-LeftoverDataDirs -Base $b) | Should -Contain "$b\tracebloc\data"
+  }
+}
+
+Describe "Invoke-LeftoverDataGuard (Windows leftover-data guard; Bugbot r3655218480)" {
+  BeforeEach {
+    $script:__up = $env:USERPROFILE
+    $env:USERPROFILE = "$TestDrive"                 # so HOST_DATA_DIR under TestDrive passes the wipe path guard
+    $env:TB_LEFTOVER_ACTION = $null
+    $env:TRACEBLOC_SKIP_LEFTOVER_GUARD = $null
+    Mock Warn {}; Mock Hint {}; Mock Log {}; Mock Info {}; Mock Write-Host {}
+  }
+  AfterEach { $env:USERPROFILE = $script:__up; $env:TB_LEFTOVER_ACTION = $null; $env:TRACEBLOC_SKIP_LEFTOVER_GUARD = $null }
+
+  It "clean slate -> no prompt, returns" {
+    $HOST_DATA_DIR = "$TestDrive\g-clean"; New-Item -ItemType Directory -Path $HOST_DATA_DIR -Force | Out-Null
+    Mock Read-Host { throw "should not prompt" }
+    { Invoke-LeftoverDataGuard } | Should -Not -Throw
+  }
+  It "TRACEBLOC_SKIP_LEFTOVER_GUARD bypasses even with data present" {
+    $HOST_DATA_DIR = "$TestDrive\g-skip"; New-Item -ItemType Directory -Path "$HOST_DATA_DIR\mysql" -Force | Out-Null; Set-Content "$HOST_DATA_DIR\mysql\ibdata1" "x"
+    $env:TRACEBLOC_SKIP_LEFTOVER_GUARD = "1"
+    Mock Read-Host { throw "should not prompt" }
+    { Invoke-LeftoverDataGuard } | Should -Not -Throw
+    "$HOST_DATA_DIR\mysql\ibdata1" | Should -Exist
+  }
+  It "TB_LEFTOVER_ACTION=reuse keeps data and does not prompt" {
+    $HOST_DATA_DIR = "$TestDrive\g-reuse"; New-Item -ItemType Directory -Path "$HOST_DATA_DIR\mysql" -Force | Out-Null; Set-Content "$HOST_DATA_DIR\mysql\ibdata1" "x"
+    $env:TB_LEFTOVER_ACTION = "reuse"
+    Mock Read-Host { throw "should not prompt" }
+    { Invoke-LeftoverDataGuard } | Should -Not -Throw
+    "$HOST_DATA_DIR\mysql\ibdata1" | Should -Exist
+  }
+  It "TB_LEFTOVER_ACTION=wipe removes the leftover data" {
+    $HOST_DATA_DIR = "$TestDrive\g-wipe"; New-Item -ItemType Directory -Path "$HOST_DATA_DIR\mysql" -Force | Out-Null; Set-Content "$HOST_DATA_DIR\mysql\ibdata1" "x"
+    $env:TB_LEFTOVER_ACTION = "wipe"
+    Invoke-LeftoverDataGuard
+    "$HOST_DATA_DIR\mysql" | Should -Not -Exist
+  }
+  It "non-interactive with no action -> aborts (Err), data untouched" {
+    $HOST_DATA_DIR = "$TestDrive\g-abort"; New-Item -ItemType Directory -Path "$HOST_DATA_DIR\mysql" -Force | Out-Null; Set-Content "$HOST_DATA_DIR\mysql\ibdata1" "x"
+    Mock Test-CanPrompt { $false }
+    Mock Err { throw "abort" }
+    { Invoke-LeftoverDataGuard } | Should -Throw
+    "$HOST_DATA_DIR\mysql\ibdata1" | Should -Exist
+  }
+  It "interactive 'w' wipes" {
+    $HOST_DATA_DIR = "$TestDrive\g-iw"; New-Item -ItemType Directory -Path "$HOST_DATA_DIR\mysql" -Force | Out-Null; Set-Content "$HOST_DATA_DIR\mysql\ibdata1" "x"
+    Mock Test-CanPrompt { $true }
+    Mock Read-Host { "w" }
+    Invoke-LeftoverDataGuard
+    "$HOST_DATA_DIR\mysql" | Should -Not -Exist
+  }
+  It "interactive default (empty) aborts, data untouched" {
+    $HOST_DATA_DIR = "$TestDrive\g-ia"; New-Item -ItemType Directory -Path "$HOST_DATA_DIR\mysql" -Force | Out-Null; Set-Content "$HOST_DATA_DIR\mysql\ibdata1" "x"
+    Mock Test-CanPrompt { $true }
+    Mock Read-Host { "" }
+    Mock Err { throw "abort" }
+    { Invoke-LeftoverDataGuard } | Should -Throw
+    "$HOST_DATA_DIR\mysql\ibdata1" | Should -Exist
+  }
+}
