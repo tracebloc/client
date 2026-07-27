@@ -59,6 +59,7 @@ setup() {
 # ── print_summary: the trust claim must appear ONLY when connected ─────────
 @test "print_summary connected: Connected + trust claim + rich summary blocks" {
   CLIENT_STATE=connected
+  TB_CLI_USABLE_NOW=1   # pin CLI-usable so the CTA is the deterministic "Run …" variant (B2)
   run print_summary
   [[ "$output" == *"Connected to tracebloc"* ]]
   [[ "$output" == *"never leaves this machine"* ]]   # trust claim (was "data never leaves")
@@ -109,11 +110,20 @@ setup() {
 }
 
 # ── _reboot_note (reboot persistence) ───────────────────────────────────────
-@test "_reboot_note: Linux -> survives-reboot line" {
-  OS=Linux
+@test "_reboot_note: Linux with docker autostart -> survives-reboot line" {
+  OS=Linux; TB_DOCKER_AUTOSTART=1
   run _reboot_note
   [[ "$output" == *"restarts automatically"* ]]
   [[ "$output" != *"Docker Desktop"* ]]
+}
+
+@test "_reboot_note: Linux without docker autostart -> honest 'start Docker' line" {
+  # Tier 0 (zero-privilege) never enables docker.service, so the note must NOT
+  # promise an automatic restart (Bugbot r3645585369).
+  OS=Linux; TB_DOCKER_AUTOSTART=0
+  run _reboot_note
+  [[ "$output" == *"start Docker"* ]]
+  [[ "$output" != *"restarts automatically"* ]]
 }
 
 @test "_reboot_note: macOS -> Docker Desktop start-on-login instruction" {
@@ -124,7 +134,64 @@ setup() {
 }
 
 @test "print_summary connected: includes the reboot note" {
-  CLIENT_STATE=connected; OS=Linux
+  CLIENT_STATE=connected; OS=Linux; TB_DOCKER_AUTOSTART=1
   run print_summary
   [[ "$output" == *"restarts automatically"* ]]
+}
+
+@test "print_summary connected: node-local storage -> in-node data path, no host /tracebloc" {
+  # Under TB_STORAGE_MODE=node-local there is no host /tracebloc bind-mount
+  # (RFC-0003 Option C) — the summary must not point at one (Bugbot r3645585376).
+  CLIENT_STATE=connected; OS=Linux; TB_DOCKER_AUTOSTART=1; TB_STORAGE_MODE=node-local
+  run print_summary
+  [[ "$output" == *"in-node (k3s local-path)"* ]]
+  [[ "$output" != *"Data /tracebloc/"* ]]
+}
+
+@test "print_summary connected: hostpath storage -> host /tracebloc data path" {
+  CLIENT_STATE=connected; OS=Linux; TB_DOCKER_AUTOSTART=1; TB_STORAGE_MODE=hostpath
+  run print_summary
+  [[ "$output" == *"Data /tracebloc/testns"* ]]
+}
+
+# ── B2: PATH-aware CTA (grep-based so a false check fails loudly on bash 3.2) ──
+@test "print_summary connected: CTA says 'Run' when the CLI is usable now (B2)" {
+  CLIENT_STATE=connected; OS=Linux
+  helm() { echo "tracebloc tracebloc 1 now deployed client-1.4.4 1.4.4"; }
+  TB_CLI_USABLE_NOW=1
+  run print_summary
+  printf '%s\n' "$output" | grep -qE "Run[[:space:]]+tracebloc"   # the "Run …" branch specifically
+  ! printf '%s\n' "$output" | grep -qF "Open a new terminal"
+}
+
+@test "print_summary connected: CTA says 'open a new terminal' when persisted but this shell can't see it yet (case A, B2)" {
+  CLIENT_STATE=connected; OS=Linux
+  helm() { echo "tracebloc tracebloc 1 now deployed client-1.4.4 1.4.4"; }
+  TB_CLI_USABLE_NOW=0; TB_CLI_ON_FRESH_PATH=1   # a NEW terminal resolves it, this one doesn't
+  has() { [ "$1" = tracebloc ] && return 1; command -v "$1" >/dev/null 2>&1; }
+  run print_summary
+  printf '%s\n' "$output" | grep -qF "Open a new terminal"
+}
+
+@test "print_summary connected: CTA points at the PATH fix (NOT 'open a new terminal') when a fresh shell won't find it either (case B, #371)" {
+  CLIENT_STATE=connected; OS=Linux
+  helm() { echo "tracebloc tracebloc 1 now deployed client-1.4.4 1.4.4"; }
+  TB_CLI_USABLE_NOW=0; TB_CLI_ON_FRESH_PATH=0   # not on PATH anywhere yet
+  has() { [ "$1" = tracebloc ] && return 1; command -v "$1" >/dev/null 2>&1; }
+  run print_summary
+  printf '%s\n' "$output" | grep -qF "Add tracebloc to your PATH"   # matches install-cli.sh's PATH-fix step
+  ! printf '%s\n' "$output" | grep -qF "Open a new terminal"        # never the useless new-terminal advice
+}
+
+@test "print_summary connected: UNSET fresh-path flag falls back to 'open a new terminal', not the 'see above' PATH fix (#371)" {
+  # CLI step skipped/failed → TB_CLI_ON_FRESH_PATH never set, and NO PATH-fix was
+  # printed. "Add tracebloc to your PATH (see above)" would point at nothing; the
+  # safe default is "open a new terminal".
+  CLIENT_STATE=connected; OS=Linux
+  helm() { echo "tracebloc tracebloc 1 now deployed client-1.4.4 1.4.4"; }
+  unset TB_CLI_USABLE_NOW TB_CLI_ON_FRESH_PATH
+  has() { [ "$1" = tracebloc ] && return 1; command -v "$1" >/dev/null 2>&1; }
+  run print_summary
+  printf '%s\n' "$output" | grep -qF "Open a new terminal"
+  ! printf '%s\n' "$output" | grep -qF "Add tracebloc to your PATH"
 }

@@ -260,6 +260,27 @@ setup() {
   curl() { printf '200'; return 0;};run _pf_probe_url https://x; [ "$output" = "ok" ]
 }
 
+# strict mode (#385): content must exist — an HTTP error is a failure, not
+# "reachable". Default mode is unchanged (404 still counts as reachable, e.g.
+# registry endpoints that answer 401 by design).
+@test "_pf_probe_url: strict maps HTTP errors to 'http <code>', 2xx to ok (#385)" {
+  source "${BATS_TEST_DIRNAME}/../lib/preflight.sh"
+  has() { return 0; }
+  curl() { printf '404'; return 0; }; run _pf_probe_url https://x strict; [ "$output" = "http 404" ]
+  curl() { printf '200'; return 0; }; run _pf_probe_url https://x strict; [ "$output" = "ok" ]
+  curl() { printf '301'; return 0; }; run _pf_probe_url https://x strict; [ "$output" = "ok" ]
+  curl() { printf '404'; return 0; }; run _pf_probe_url https://x;        [ "$output" = "ok" ]
+  curl() { return 6;    };            run _pf_probe_url https://x strict; [ "$output" = "dns" ]
+}
+
+@test "_pf_connectivity: chart-repo index probed strictly — 404 hard-fails preflight (#385)" {
+  _pf_probe_url() { case "${1}|${2:-}" in *index.yaml*\|strict) echo "http 404" ;; *) echo ok ;; esac; }
+  run _pf_connectivity
+  [[ "$output" == *"tracebloc Helm charts"* ]]
+  [[ "$output" == *"http 404"* ]]
+  PF_HARD_FAIL=0; _pf_connectivity >/dev/null 2>&1; [ "$PF_HARD_FAIL" -eq 1 ]
+}
+
 @test "_pf_probe_url: missing curl -> nocurl" {
   source "${BATS_TEST_DIRNAME}/../lib/preflight.sh"
   has() { return 1; }

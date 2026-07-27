@@ -21,6 +21,38 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{ .Release.Name }}-secrets
 {{- end }}
 
+{{/*
+  tracebloc.sealCheckLabels — the seal-check enumeration contract
+  (RFC-0003 §8.2 / backend#1184; consumed by the tracebloc CLI, cli#393).
+
+  Every runnable conformance check in this chart is a `helm.sh/hook: test` Job
+  carrying these two labels, so tooling can enumerate the suite without
+  hardcoding job names:
+
+    tracebloc.io/seal-check: "true"        — membership marker
+    tracebloc.io/seal-check-name: <check>  — stable per-check identifier
+
+  Current check names: egress-enforcement, backend-reachability,
+  storage-assertions.
+
+  Enumerate without running anything:   helm get hooks <release>
+  While a `helm test` run is live:      kubectl get jobs,pods -n <ns> \
+                                          -l tracebloc.io/seal-check=true
+
+  CONTRACT RULES — the label keys and existing check names are public API:
+  never rename them; add new checks under new names. Apply this helper to the
+  hook Job metadata AND its pod template (pod-level lets the CLI stream logs by
+  label). Do NOT apply it to auxiliary hook resources (ServiceAccounts, RBAC) —
+  only runnable checks are enumerable. See docs/SEAL-CHECK.md.
+
+  Usage:
+    {{- include "tracebloc.sealCheckLabels" (dict "name" "storage-assertions") | nindent 4 }}
+*/}}
+{{- define "tracebloc.sealCheckLabels" -}}
+tracebloc.io/seal-check: "true"
+tracebloc.io/seal-check-name: {{ .name | quote }}
+{{- end }}
+
 {{- define "tracebloc.serviceAccountName" -}}
 {{ .Release.Name }}-jobs-manager
 {{- end }}
@@ -212,6 +244,50 @@ Usage: {{ include "tracebloc.image" (dict "repository" "tracebloc/jobs-manager" 
 {{ $registry }}/{{ .repository }}@{{ $digest }}
 {{- else -}}
 {{ $registry }}/{{ .repository }}:{{ .tag | default "prod" }}
+{{- end -}}
+{{- end }}
+
+{{/*
+tracebloc.ingestorDigest — the ONE effective digest for the spawned ingestor
+image. Renders the digest to pin to, or nothing at all to float on
+`images.ingestor.tag`. Every consumer of the ingestor image must go through
+this helper so every consumer of the ingestor image (jobs-manager's spawned
+ingestion Jobs, any manual backfill Job) agrees on which image is authoritative.
+
+Precedence (most specific first):
+  1. `images.ingestor.digest` non-empty  -> that digest, in ANY environment.
+     The long-standing per-edge opt-in pin; unchanged semantics.
+  2. otherwise the prod gate: `images.ingestor.prodPin` (default TRUE when the
+     key is absent) AND the resolved CLIENT_ENV == "prod"  -> `prodDigest`.
+  3. otherwise empty -> float on `tag` with imagePullPolicy=Always.
+
+Why the gate is on CLIENT_ENV (backend#1245): dev and staging installs carry
+`env.CLIENT_ENV: dev|stg` in their user-supplied values while the chart defaults
+CLIENT_ENV to "prod", so this pins prod and floats non-prod with zero per-edge
+action — and because `prodDigest` is a chart DEFAULT, a republished pin reaches
+installed edges through `helm upgrade --reset-then-reuse-values` (the fleet
+auto-upgrade path), which an install-time `-f` overlay never could.
+
+`prodPin` defaults to TRUE when the key is absent so a `--reuse-values` upgrade
+from a release predating the key still pins prod, rather than silently
+defeating the pin. Every read is nil-guarded for the same reason.
+
+Usage: {{ include "tracebloc.ingestorDigest" . }}
+*/}}
+{{- define "tracebloc.ingestorDigest" -}}
+{{- $ing := default dict .Values.images.ingestor -}}
+{{- $explicit := $ing.digest | default "" -}}
+{{- if $explicit -}}
+{{- $explicit -}}
+{{- else -}}
+{{- $prodPin := true -}}
+{{- if hasKey $ing "prodPin" -}}
+{{- $prodPin = $ing.prodPin -}}
+{{- end -}}
+{{- $clientEnv := (default dict .Values.env).CLIENT_ENV | default "prod" -}}
+{{- if and $prodPin (eq $clientEnv "prod") -}}
+{{- $ing.prodDigest | default "" -}}
+{{- end -}}
 {{- end -}}
 {{- end }}
 

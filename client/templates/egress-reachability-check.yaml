@@ -30,6 +30,8 @@ metadata:
   namespace: {{ .Release.Namespace }}
   labels:
     {{- include "tracebloc.labels" . | nindent 4 }}
+    {{- /* seal-check enumeration contract (RFC-0003 §8.2) — see _helpers.tpl */}}
+    {{- include "tracebloc.sealCheckLabels" (dict "name" "backend-reachability") | nindent 4 }}
   annotations:
     "helm.sh/hook": test
     "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
@@ -40,6 +42,7 @@ spec:
     metadata:
       labels:
         {{- include "tracebloc.selectorLabels" . | nindent 8 }}
+        {{- include "tracebloc.sealCheckLabels" (dict "name" "backend-reachability") | nindent 8 }}
     spec:
       restartPolicy: Never
       automountServiceAccountToken: false

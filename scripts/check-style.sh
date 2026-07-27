@@ -7,11 +7,13 @@
 #  Exit 0 = clean, 1 = violations found, 2 = the guard itself errored (fail-closed).
 #
 #  Three mechanical checks (semantic calls — role misuse, judgement-y wording —
-#  stay with CODEOWNERS review + STYLE.md; a grep can't police those):
+#  stay with CODEOWNERS review + STYLE.md; a grep can't police those). Emoji are
+#  intentionally NOT policed — they're welcome (see STYLE.md):
 #    1. No hardcoded brand colour outside the colour engine (scripts/lib/common.sh).
-#    2. No status / traffic-light emoji — the lime dot is the online indicator.
-#    3. No 'workspace' in user-facing text — the term is "secure environment".
+#    2. No 'workspace' in user-facing text — the term is "secure environment".
 #       Internal identifiers (the DNS-1123 sanitisers) and comments are exempt.
+#    3. No bare 'curl' — every fetch carries the minimum TLS version. INTERIM,
+#       see the note on the check itself.
 #
 #  A line may opt out of ANY check with a trailing  # style-guard: allow  marker.
 # =============================================================================
@@ -33,9 +35,9 @@ hits=''
 # guard + opt-out lines removed). grep exit 2+ (bad regex/flags/tree) → fail closed.
 scan() {
   local re="$1" flags="${2:-}" out rc
-  # shellcheck disable=SC2086
   # No 2>/dev/null: let a real grep error surface on stderr — rc>=2 below turns
   # it into a fail-closed exit, so the error is visible AND fatal, never a silent pass.
+  # shellcheck disable=SC2086
   out="$(grep -rnE $flags --include='*.sh' --include='*.ps1' --exclude='check-style.sh' \
     --exclude-dir='tests' "$re" scripts/)"
   rc=$?
@@ -61,13 +63,7 @@ scan "$brand" '-i'
 report "hardcoded brand colour — use the TB_* tones from ${ENGINE}, don't re-hardcode hex/RGB" \
   "$(printf '%s' "$hits" | grep -vE "^${ENGINE}:" || true)"
 
-# 2) Status / traffic-light emoji. Pattern built from bytes so the guard's own
-#    source stays emoji-free (green/red/yellow/orange circles).
-emoji="$(printf '\360\237\237\242|\360\237\224\264|\360\237\237\241|\360\237\237\240')"
-scan "$emoji"
-report "status emoji — use the lime online dot (see STYLE.md), not traffic-light emoji" "$hits"
-
-# 3) Banned terminology in user-facing text: 'workspace' -> 'secure environment'.
+# 2) Banned terminology in user-facing text: 'workspace' -> 'secure environment'.
 #    Exempt: comments (content starts with #, anchored to the file:line: prefix)
 #    and the internal DNS-1123 sanitiser identifiers.
 scan 'workspace' '-i'
@@ -75,6 +71,35 @@ report "banned term 'workspace' in user-facing text — use 'secure environment'
   "$(printf '%s' "$hits" \
       | grep -vE '(_sanitize_workspace_name|ConvertTo-WorkspaceName|[Ww]orkspace[_-]?[Nn]ame)' \
       | grep -vE '^[^:]+:[0-9]+:[[:space:]]*#' || true)"
+
+# 3) Bare `curl` — the TLS floor must not be losable.
+#
+#    INTERIM CHECK. tracebloc/.github's shared code-quality workflow already
+#    implements this properly (its `house-rules` job has quote-aware, heredoc-aware
+#    `curl-tls` and `curl-timeout` rules — a lexer, not a grep). Retire this block
+#    the moment this repo adds that caller; it exists only because that workflow
+#    is not yet on `main` and cannot be referenced from here until it is.
+#
+#    Why it's worth an interim grep: the floor used to be a bare constant every
+#    call site had to splice in by hand, and seven had silently lost it — one of
+#    them the POST that carries the client's password (backend#1252). Calls now go
+#    through curl_secure() in common.sh, which cannot be spliced in wrongly.
+#
+#    Mechanics: \bcurl\b matches the bare command word and NOT curl_secure /
+#    curl_pid / nocurl. Exempt are (a) any line naming --tlsv1.2 itself — the
+#    bootstrap scripts/install.sh is the trust root that FETCHES common.sh, so it
+#    cannot source curl_secure and hardcodes the flags instead, as does the WSL
+#    here-string in install-k8s.ps1; (b) comments; (c) `has curl` / `command -v
+#    curl` presence tests; (d) the `curl … | sh` install one-liner we print for the
+#    user to copy. The timeout half of the rule needs no grep: curl_secure supplies
+#    default bounds to everything that can source it.
+scan '\bcurl\b'
+report "bare 'curl' — call curl_secure() from ${ENGINE} so the TLS floor and timeouts can't be lost (backend#1252)" \
+  "$(printf '%s' "$hits" \
+      | grep -vE -e '--tlsv1\.2' \
+      | grep -vE '^[^:]+:[0-9]+:[[:space:]]*#' \
+      | grep -vE '(has curl|command -v curl)' \
+      | grep -vE 'curl[^|]*\|[[:space:]]*(sh|bash)' || true)"
 
 if [[ "$guard_error" -ne 0 ]]; then
   echo "  [!] the guard hit an internal error — failing closed (exit 2)" >&2

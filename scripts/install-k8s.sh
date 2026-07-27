@@ -20,10 +20,22 @@
 #    SERVERS=1                   default: 1  (control-plane nodes)
 #    AGENTS=1                    default: 1  (worker nodes)
 #    K8S_VERSION=v1.29.4-k3s1   default: latest stable k3s
+#    K3D_VERSION=v5.9.0          default: v5.9.0  (k3d release tag; "latest" resolves at install time)
 #    HOST_DATA_DIR=~/.tracebloc  default: ~/.tracebloc
+#    TB_STORAGE_MODE=node-local  default: hostpath  (RFC-0003 Option C, flag-gated)
+#                                node-local stores datasets on k3s local-path INSIDE
+#                                the node — no ~/.tracebloc host dirs, wiped on cluster
+#                                delete; forces AGENTS=0 (single-node)
 #    CLIENT_ENV=dev              optional; if not set, CLIENT_ENV is not added to env in values
 #    TRACEBLOC_FORCE_REINSTALL=1  skip the "already set up" stop-and-check gate
 #                                and re-run every step (same as --force/--reinstall)
+#    TB_LEFTOVER_ACTION=reuse|wipe  non-interactive answer to the leftover-data
+#                                guard (#376) — same as --reuse-data / --wipe-data.
+#                                A new install onto a machine that still holds old
+#                                data STOPS and asks by default rather than
+#                                silently adopting it; a fresh HOST_DATA_DIR (or
+#                                --data-dir=PATH) sidesteps the prompt.
+#    TRACEBLOC_SKIP_LEFTOVER_GUARD=1  bypass the leftover-data guard entirely
 #    TRACEBLOC_SKIP_REBOOT_PROMPT=1 (Linux) skip "Reboot now?" after NVIDIA driver install
 #    TRACEBLOC_TRAINING_RESOURCES="cpu=4,memory=16Gi"  CPU/RAM each training run
 #                                may use (default cpu=2,memory=8Gi; sets requests==limits)
@@ -76,6 +88,12 @@ fi
 if [[ -f "${LIB_DIR}/assess.sh" ]]; then
   source "${LIB_DIR}/assess.sh"
 fi
+# probe.sh (RFC 0001 host capability/privilege audit) may likewise be absent
+# under a stale bootstrap that didn't fetch it — guard the source so `--diagnose`
+# simply omits the install-tier section instead of aborting under `set -e`.
+if [[ -f "${LIB_DIR}/probe.sh" ]]; then
+  source "${LIB_DIR}/probe.sh"
+fi
 source "${LIB_DIR}/summary.sh"
 source "${LIB_DIR}/diagnose.sh"
 
@@ -98,6 +116,30 @@ main() {
   # the post-install cleanup message doesn't fire after a diagnose run.
   [[ "${1:-}" == "--diagnose" ]] && { trap - EXIT; run_diagnose; exit $?; }
 
+  # prepare-host: the standalone, admin-run Tier-2 step (RFC 0001 #1178) —
+  # installs the privileged prerequisites so a researcher can then install
+  # unprivileged at Tier 0, and grants them docker-group access. Terminal like
+  # --diagnose (never provisions as the admin); clear the EXIT trap so no
+  # post-install cleanup message fires. Accept both the bootstrap positional
+  # (`… | bash -s -- prepare-host`) and the direct flag, AT ANY POSITION —
+  # install.sh's bailout exemption scans all args, so a run like
+  # `--force prepare-host` must dispatch here too, never fall through into a
+  # (forced) full provision as the admin (Bugbot r4).
+  local _a_ph
+  for _a_ph in "$@"; do
+    [[ "$_a_ph" == "prepare-host" || "$_a_ph" == "--prepare-host" ]] || continue
+    # Replace the full install_cleanup (its credential-shred + "did not complete"
+    # messaging don't apply to a host-prep run) with a lightweight reaper that
+    # still tears down the sudo keepalive preflight_sudo starts — otherwise it
+    # orphans a background loop polling `sudo` every 50s (Bugbot #377).
+    trap 'if [ -n "${SUDO_KEEPALIVE_PID:-}" ]; then kill "$SUDO_KEEPALIVE_PID" 2>/dev/null || true; fi' EXIT
+    setup_log_file
+    if declare -F run_prepare_host >/dev/null 2>&1; then
+      run_prepare_host; exit $?
+    fi
+    error "This installer build doesn't include prepare-host (stale bootstrap). Re-run: curl -fsSL https://tracebloc.io/i.sh | bash -s -- prepare-host"
+  done
+
   # Run-modifying flags (unlike --help/--diagnose, which are terminal). --force /
   # --reinstall skips the stop-and-check gate below and re-runs every step. Also
   # honored via TRACEBLOC_FORCE_REINSTALL=1 for the curl|bash path (assess.sh
@@ -106,6 +148,12 @@ main() {
   for _arg in "$@"; do
     case "$_arg" in
       --force|--reinstall) TB_FORCE_REINSTALL=1 ;;
+      # Leftover-data guard (#376): non-interactive answers to the reuse/wipe/
+      # new-dir prompt. --data-dir=PATH just points HOST_DATA_DIR elsewhere
+      # (validate_config resolves it below), so a fresh dir sidesteps the prompt.
+      --reuse-data) TB_LEFTOVER_ACTION=reuse ;;
+      --wipe-data)  TB_LEFTOVER_ACTION=wipe ;;
+      --data-dir=*) HOST_DATA_DIR="${_arg#*=}" ;;
     esac
   done
 
@@ -130,6 +178,13 @@ main() {
   step_header a "Checking your machine"
   run_preflight
   detect_gpu
+  # RFC 0001 host audit: capability/privilege probe + the chosen install tier.
+  # Sets INSTALL_TIER, which install_linux's _route_install_tier honours. Guarded
+  # so a stale bootstrap without probe.sh simply skips it (routing then proceeds
+  # exactly as before).
+  if declare -F host_audit >/dev/null 2>&1; then
+    host_audit
+  fi
   echo ""; echo ""
 
   # ── b) Install what tracebloc needs ──────────────────────────────────────

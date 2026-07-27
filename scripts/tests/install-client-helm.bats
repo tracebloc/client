@@ -696,18 +696,108 @@ setup() {
   grep -q 'RESOURCE_REQUESTS: "cpu=4,memory=16Gi"' "$HOST_DATA_DIR/values.yaml"
 }
 
-@test "install_client_helm: default training size stays cpu=2,memory=8Gi" {
+@test "install_client_helm: undeterminable machine falls back to cpu=2,memory=8Gi" {
   HOST_DATA_DIR="$BATS_TEST_TMPDIR/data"; mkdir -p "$HOST_DATA_DIR"
   _ensure_tracebloc_dirs() { :; }
   _ensure_release_dirs() { :; }
   _ensure_helm_runnable() { :; }
   helm() { record "helm $*"; return 0; }
+  kubectl() { return 1; }   # cluster unreadable -> machine sizing unavailable
   verify_credentials() { printf valid; }
   unset TRACEBLOC_TRAINING_RESOURCES
   run install_client_helm <<< $'myid\nmypw'
   [ "$status" -eq 0 ]
   grep -q 'RESOURCE_LIMITS: "cpu=2,memory=8Gi"' "$HOST_DATA_DIR/values.yaml"
   grep -q 'RESOURCE_REQUESTS: "cpu=2,memory=8Gi"' "$HOST_DATA_DIR/values.yaml"
+}
+
+# ── _training_resources (backend#1236, option A) ─────────────────────────────
+@test "training size: TRACEBLOC_TRAINING_RESOURCES override wins, no probing" {
+  TRACEBLOC_TRAINING_RESOURCES="cpu=4,memory=16Gi"
+  helm() { record "helm $*"; return 1; }
+  kubectl() { record "kubectl $*"; return 1; }
+  run _training_resources
+  [ "$output" = "cpu=4,memory=16Gi" ]
+  run mock_calls
+  [ -z "$output" ]
+  unset TRACEBLOC_TRAINING_RESOURCES
+}
+
+@test "training size: existing release choice carried — resources set survives re-install" {
+  TB_NAMESPACE=tracebloc
+  unset TRACEBLOC_TRAINING_RESOURCES
+  # helm re-serializes stored values UNQUOTED (the #200 lesson). The kubectl
+  # stub only answers the BOUNDED namespace probe that gates the helm call.
+  helm() { printf 'env:\n  RESOURCE_LIMITS: cpu=4,memory=12Gi\n'; }
+  kubectl() {
+    record "kubectl $*"
+    case "$*" in *"get namespace"*--request-timeout=*) return 0 ;; *) return 1 ;; esac
+  }
+  run _training_resources
+  [ "$output" = "cpu=4,memory=12Gi" ]
+  run mock_calls
+  [[ "$output" != *"get nodes"* ]]   # machine sizing never consulted
+  # and the QUOTED form (our own values file style) parses identically
+  helm() { printf 'env:\n  RESOURCE_LIMITS: "cpu=4,memory=12Gi"\n'; }
+  run _training_resources
+  [ "$output" = "cpu=4,memory=12Gi" ]
+}
+
+@test "training size: the historic static default is NOT carried — re-install gets sized" {
+  TB_NAMESPACE=tracebloc
+  unset TRACEBLOC_TRAINING_RESOURCES
+  # An older install stored the chart default; that was the absence of a
+  # choice, so machine sizing must run (Bugbot on tracebloc/client#393).
+  helm() { printf 'env:\n  RESOURCE_LIMITS: cpu=2,memory=8Gi\n'; }
+  has() { return 0; }
+  kubectl() {
+    case "$*" in
+      *"get namespace"*--request-timeout=*) return 0 ;;
+      *"get nodes"*--request-timeout=*) printf '12 6924Mi\n' ;;
+      *) return 1 ;;
+    esac
+  }
+  run _training_resources
+  [ "$output" = "cpu=11,memory=3Gi" ]
+}
+
+@test "training size: fresh install sized to the largest node minus overhead" {
+  TB_NAMESPACE=tracebloc
+  unset TRACEBLOC_TRAINING_RESOURCES
+  helm() { return 1; }
+  has() { return 0; }
+  # two k3d nodes = the same physical machine; must NOT be summed (cli#399).
+  # The stub only answers BOUNDED calls — a wedged API must never hang
+  # values generation, so dropping --request-timeout fails this test.
+  kubectl() {
+    case "$*" in
+      *"get namespace"*--request-timeout=*) return 0 ;;
+      *"get nodes"*--request-timeout=*) printf '12 6924Mi\n12 6924Mi\n' ;;
+      *) return 1 ;;
+    esac
+  }
+  run _training_resources
+  [ "$output" = "cpu=11,memory=3Gi" ]   # 12−1 CPU; 6.76−3 GiB floored
+}
+
+@test "training size: below-floor machine falls back to the static default" {
+  TB_NAMESPACE=tracebloc
+  unset TRACEBLOC_TRAINING_RESOURCES
+  helm() { return 1; }
+  has() { return 0; }
+  kubectl() { printf '2 4Gi\n'; }        # 4−3 GiB = 1 GiB < the 2 GiB floor
+  run _training_resources
+  [ "$output" = "cpu=2,memory=8Gi" ]
+}
+
+@test "training size: kubectl absent falls back to the static default" {
+  TB_NAMESPACE=tracebloc
+  unset TRACEBLOC_TRAINING_RESOURCES
+  helm() { return 1; }
+  kubectl() { return 1; }   # the probe also fails -> carry skipped hermetically
+  has() { case "$1" in kubectl) return 1 ;; *) return 0 ;; esac; }
+  run _training_resources
+  [ "$output" = "cpu=2,memory=8Gi" ]
 }
 
 # ── _download_services_progress (step-e count bar; must never hang/fail) ─────

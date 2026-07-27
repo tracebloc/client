@@ -31,7 +31,7 @@ setup() {
              lib/common.sh lib/preflight.sh lib/detect-gpu.sh lib/gpu-nvidia.sh \
              lib/gpu-amd.sh lib/setup-macos.sh lib/setup-linux.sh lib/cluster.sh \
              lib/gpu-plugins.sh lib/install-client-helm.sh lib/install-cli.sh \
-             lib/provision.sh lib/assess.sh lib/summary.sh lib/diagnose.sh; do
+             lib/provision.sh lib/assess.sh lib/probe.sh lib/summary.sh lib/diagnose.sh; do
     printf '#!/usr/bin/env bash\n# stub %s\n' "$rel" > "$SERVE/scripts/$rel"
   done
   cat > "$SERVE/scripts/install-k8s.sh" <<EOF
@@ -46,7 +46,7 @@ EOF
       scripts/lib/setup-macos.sh scripts/lib/setup-linux.sh scripts/lib/cluster.sh \
       scripts/lib/gpu-plugins.sh scripts/lib/install-client-helm.sh \
       scripts/lib/install-cli.sh scripts/lib/provision.sh scripts/lib/assess.sh \
-      scripts/lib/summary.sh scripts/lib/diagnose.sh; do
+      scripts/lib/probe.sh scripts/lib/summary.sh scripts/lib/diagnose.sh; do
         printf '%s  %s\n' "$(_real_sha "$SERVE/$f")" "$f"
       done ) > "$SERVE_REL/manifest.sha256"
   printf 'FAKE-SIG\n'  > "$SERVE_REL/manifest.sha256.sig"
@@ -281,4 +281,28 @@ EOF
   REF="v9.9.9" COSIGN_RESULT=0 run_boot --force
   [ "$status" -eq 0 ]
   [[ "$(cat "$SBX/k8s-ran")" == "TB_FORCE_REINSTALL=1" ]]
+}
+
+# prepare-host is useful precisely on a machine that is already set up (grant
+# ANOTHER researcher docker-group access), so the healthy bailout must not eat
+# it — but it is NOT a reinstall, so TB_FORCE_REINSTALL must stay unset or a
+# stale sub-script without the prepare-host dispatch would treat the run as a
+# forced full provision (Bugbot on #381). Can't pass REF here (env REF itself
+# forces), so stamp DEFAULT_REF the way a release build does.
+@test "prepare-host skips the healthy bailout but does NOT export TB_FORCE_REINSTALL (#381)" {
+  _capture_k8s_force
+  cat > "$BIN/tracebloc" <<'EOF'
+#!/usr/bin/env bash
+[ "$1" = "doctor" ] && exit 0    # healthy — prepare-host must still proceed
+EOF
+  chmod +x "$BIN/tracebloc"
+  # Rewrite only the ASSIGNMENT line (like the release pipeline) — a global
+  # replace would also rewrite the placeholder-detection comparison and the
+  # bootstrap would still see itself as unstamped.
+  sed 's/^DEFAULT_REF=.*/DEFAULT_REF="v9.9.9"/' "$BOOT" > "$SBX/boot.stamped"
+  PATH="$BIN:$PATH" run bash "$SBX/boot.stamped" prepare-host
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"Already set up and healthy"* ]]
+  [ -f "$SBX/k8s-ran" ]
+  [[ "$(cat "$SBX/k8s-ran")" == "TB_FORCE_REINSTALL=unset" ]]
 }

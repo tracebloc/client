@@ -51,6 +51,25 @@ tests:
           path: metadata.annotations["helm.sh/hook-delete-policy"]
           value: before-hook-creation,hook-succeeded
 
+  - it: carries the seal-check enumeration labels on the Job AND its pod (contract for cli#393)
+    set:
+      networkPolicy:
+        training:
+          allowExternalHttps: false
+    asserts:
+      - equal:
+          path: metadata.labels["tracebloc.io/seal-check"]
+          value: "true"
+      - equal:
+          path: metadata.labels["tracebloc.io/seal-check-name"]
+          value: egress-enforcement
+      - equal:
+          path: spec.template.metadata.labels["tracebloc.io/seal-check"]
+          value: "true"
+      - equal:
+          path: spec.template.metadata.labels["tracebloc.io/seal-check-name"]
+          value: egress-enforcement
+
   - it: probe pod is training-labelled (so the lockdown netpol governs it) and PSA-restricted
     set:
       networkPolicy:

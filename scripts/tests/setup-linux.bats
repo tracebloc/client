@@ -94,22 +94,29 @@ setup() {
   run mock_calls
   [[ "$output" != *"Installing conntrack"* ]]
 }
-# Caught by the cross-distro CI matrix on Amazon Linux 2023: helm's get-helm-3
-# needs openssl (checksum) + tar (unpack), absent on minimal cloud images.
-@test "install_system_deps: ensures openssl + tar (helm needs them on minimal images)" {
-  PRESENT_CMDS="dnf curl conntrack"   # openssl + tar absent
+# Caught by the cross-distro CI matrix on Amazon Linux 2023: the Helm tarball
+# needs tar + gzip to unpack, absent on minimal cloud images. openssl is no
+# longer a dependency — the Helm download verifies with sha256sum since
+# get-helm-3 was replaced by a direct fetch (#395).
+@test "install_system_deps: ensures tar + gzip (helm unpack on minimal images), NOT openssl (#395)" {
+  PRESENT_CMDS="dnf curl conntrack"   # tar + gzip absent
   run install_system_deps
   run mock_calls
-  [[ "$output" == *"Installing openssl"* ]]
   [[ "$output" == *"Installing tar"* ]]
+  [[ "$output" == *"Installing gzip"* ]]
+  [[ "$output" != *"Installing openssl"* ]]
 }
-@test "install_system_deps: openssl + tar already present -> not reinstalled" {
-  PRESENT_CMDS="apt-get curl conntrack openssl tar"
+@test "install_system_deps: tar + gzip already present -> not reinstalled" {
+  PRESENT_CMDS="apt-get curl conntrack tar gzip"
   run install_system_deps
   run mock_calls
-  [[ "$output" != *"Installing openssl"* ]]
   [[ "$output" != *"Installing tar"* ]]
+  [[ "$output" != *"Installing gzip"* ]]
 }
+
+# _ensure_helm_prereqs was removed with get-helm-3 (Bugbot #396): Helm no longer
+# needs openssl, and tar/gzip are installed Tier-0-aware by _ensure_unpack_tools
+# (covered by its own tests above), so the old fail-fast preflight is gone.
 
 # ── install_docker_engine: branch selection ────────────────────────────────
 @test "install_docker_engine: Amazon Linux -> dnf docker" {
@@ -154,21 +161,256 @@ setup() {
   [[ "$output" != *"docker-ce.repo"* ]]
 }
 
-# ── install_k3d: PATH preserved through sudo (#718) ────────────────────────
-@test "install_k3d: installs via 'sudo env PATH=' (#718)" {
+# ── install_docker_engine under prepare-host (#381 Bugbot) ───────────────────
+# The admin runs prepare-host with sudo but no docker-group membership. The
+# engine gate must verify the DAEMON via sudo and never (a) sg-re-exec — that
+# re-runs the script WITHOUT the prepare-host argument, i.e. a silent FULL
+# provision — nor (b) abort on the admin's unreachable non-root socket, nor
+# (c) grant the ADMIN the socket (only TB_PREPARE_USER gets it, later).
+@test "install_docker_engine: prepare-host mode verifies via sudo, no sg re-exec, exits 0 (#381)" {
+  PRESENT_CMDS="curl docker"; TEST_DISTRO=ubuntu
+  TB_PREPARE_HOST_MODE=1
+  docker() { return 1; }                          # admin's non-root socket: unreachable
+  sudo()   { record "sudo $*"; return 0; }        # sudo docker info succeeds
+  sg()     { record "sg $*"; exit 97; }           # the escape this test forbids
+  id()     { echo "admin docker"; }               # even WITH membership visible…
+  run install_docker_engine
+  [ "$status" -eq 0 ]
+  run mock_calls
+  [[ "$output" == *"sudo docker info"* ]]
+  [[ "$output" == *"systemctl enable docker"* ]]  # boot-enable survives a reboot (r5)
+  [[ "$output" != *"sg "* ]]                      # …no re-exec ever fires
+  TB_PREPARE_HOST_MODE=""
+}
+
+@test "install_docker_engine: prepare-host + active daemon that won't answer -> terminal error, no logout advice (#381)" {
+  PRESENT_CMDS="curl docker"; TEST_DISTRO=ubuntu
+  TB_PREPARE_HOST_MODE=1
+  docker() { return 1; }
+  sudo()   { record "sudo $*"
+    case "$*" in
+      "docker info") return 1 ;;          # even sudo can't reach it
+      *is-active*)   return 0 ;;          # …but the daemon claims active
+      *) return 0 ;;
+    esac
+  }
+  sg() { record "sg $*"; exit 97; }
+  run install_docker_engine
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"re-run prepare-host"* ]]
+  [[ "$output" != *"logging out and back in"* ]]
+  TB_PREPARE_HOST_MODE=""
+}
+
+@test "install_docker_engine: prepare-host + daemon down -> starts it via sudo, exits 0 (#381 r3)" {
+  PRESENT_CMDS="curl docker"; TEST_DISTRO=ubuntu
+  TB_PREPARE_HOST_MODE=1
+  docker() { return 1; }
+  STARTED_FLAG="$BATS_TEST_TMPDIR/docker-started"
+  sudo() { record "sudo $*"
+    case "$*" in
+      "docker info")           if [ -f "$STARTED_FLAG" ]; then return 0; else return 1; fi ;;
+      *"enable --now docker"*) touch "$STARTED_FLAG"; return 0 ;;
+      *is-active*)             return 1 ;;
+      *) return 0 ;;
+    esac
+  }
+  sg() { record "sg $*"; exit 97; }
+  run install_docker_engine
+  [ "$status" -eq 0 ]
+  run mock_calls
+  [[ "$output" == *"enable --now docker"* ]]
+  TB_PREPARE_HOST_MODE=""
+}
+
+# A daemon that won't start must stay terminal in PREPARE-HOST wording: the
+# shared diagnostics end with "re-run this installer", which for the admin
+# means a full provision as themselves — the outcome prepare-host exists to
+# prevent (Bugbot r3).
+@test "install_docker_engine: prepare-host + daemon won't start -> terminal, says re-run prepare-host (#381 r3)" {
+  PRESENT_CMDS="curl docker"; TEST_DISTRO=ubuntu
+  TB_PREPARE_HOST_MODE=1
+  docker() { return 1; }
+  sudo() { record "sudo $*"
+    case "$*" in
+      "docker info") return 1 ;;
+      *is-active*)   return 1 ;;
+      # Real `systemctl status` exits 3 for an inactive unit — the diagnostics
+      # pipeline must swallow that (|| true) or set -e kills the script before
+      # the re-run guidance ever prints (Bugbot r6).
+      *"systemctl status"*) echo "docker.service: inactive (dead)"; return 3 ;;
+      *) return 0 ;;
+    esac
+  }
+  sg() { record "sg $*"; exit 97; }
+  run install_docker_engine
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"re-run prepare-host"* ]]
+  [[ "$output" != *"re-run this installer"* ]]
+  [[ "$output" != *"logging out and back in"* ]]
+  TB_PREPARE_HOST_MODE=""
+}
+
+@test "install_docker_engine: prepare-host mode skips the admin group-add on fresh install (#381)" {
+  PRESENT_CMDS="curl"; TEST_DISTRO=ubuntu         # docker absent -> install branch
+  TB_PREPARE_HOST_MODE=1
+  docker() { return 1; }
+  sudo()   { record "sudo $*"; return 0; }
+  sg()     { record "sg $*"; exit 97; }
+  run install_docker_engine
+  [ "$status" -eq 0 ]
+  run mock_calls
+  [[ "$output" != *"usermod -aG docker"* ]]       # the ADMIN is never granted the socket
+  TB_PREPARE_HOST_MODE=""
+}
+
+# ── _fetch_kubectl: the ~50 MB binary must be stall-bounded ────────────────
+# curl_secure supplies a default --max-time, and only steps aside when it SEES
+# --speed-limit/--speed-time — so a large-binary fetch has to carry those flags at
+# the call site or it inherits a hard deadline that fails a slow-but-healthy link
+# (Bugbot on backend#1252; same reasoning as _fetch_k3d_release below).
+@test "_fetch_kubectl: stall-bounded with no hard deadline (large binary)" {
+  TB_TOOLS_DIR="$BATS_TEST_TMPDIR/bin"; TB_TOOLS_SUDO=""
+  mkdir -p "$TB_TOOLS_DIR"
+  curl() {                      # honour "-o <dest>" so the real chmod/mv succeed
+    record "curl $*"
+    local prev="" a
+    for a in "$@"; do [ "$prev" = "-o" ] && printf 'x' >"$a"; prev="$a"; done
+    return 0
+  }
+  sha256sum() { cat >/dev/null; return 0; }
+  run _fetch_kubectl v1.29.4 amd64
+  [ "$status" -eq 0 ]
+  run mock_calls
+  [[ "$output" == *"--speed-limit 1024 --speed-time 60"* ]]
+  [[ "$output" != *"--max-time"* ]]
+  [[ "$output" == *"--tlsv1.2"* ]]
+}
+
+# retry emits its attempt notices on STDOUT, so a failed-then-successful
+# stable.txt fetch used to concatenate the notice into KUBE_VER, corrupting the
+# download URL. install_kubectl must isolate the clean version (Bugbot r3655543170).
+@test "install_kubectl: retry notices on stdout do not pollute the captured version" {
+  PRESENT_CMDS="curl"            # kubectl absent -> install path runs
+  ARCH_DL=amd64
+  retry()       { shift 2; "$@"; }   # passthrough: drop max_attempts + delay
+  curl_secure() { printf '%s\n' "Attempt 1/3 failed. Retrying in 5s..." "v1.29.4"; }
+  install_kubectl
+  # spin_cmd (default mock) records "_fetch_kubectl <ver> <arch>" — the version
+  # must be the clean token, not the retry notice.
+  run mock_calls
+  [[ "$output" == *"_fetch_kubectl v1.29.4 amd64"* ]]
+  [[ "$output" != *"Retrying"* ]]
+}
+
+@test "install_kubectl: unresolvable version (only a retry notice) fails closed, no bad fetch" {
   PRESENT_CMDS="curl"
+  ARCH_DL=amd64
+  retry()       { shift 2; "$@"; }
+  curl_secure() { printf '%s\n' "Command failed after 3 attempts: curl_secure"; }  # no version line
+  run install_kubectl
+  [ "$status" -ne 0 ]                       # regex rejects the notice -> error, not a broken URL
+  run mock_calls
+  [[ "$output" != *"_fetch_kubectl"* ]]
+}
+
+# ── install_k3d: pinned release, verified direct download (#382) ────────────
+# The binary is fetched straight from the pinned release and verified against
+# the release's checksums.txt — upstream's install.sh is NOT used (it performs
+# no checksum verification, and its releases/latest lookup 404s under GitHub
+# rate limiting on shared egress IPs; 2/9 distro CI jobs, 2026-07-21).
+#
+# Shared scaffolding: spin_cmd executes its command (so _fetch_k3d_release
+# really runs); curl honors "-o <dest>" and writes fixtures; sha256sum is
+# stubbed (SHA_RC) so no real hashing is needed.
+_k3d_dl_setup() {
+  PRESENT_CMDS="curl"
+  ARCH_DL="amd64"
+  TB_TOOLS_DIR="$BATS_TEST_TMPDIR/bin"; TB_TOOLS_SUDO=""
+  mkdir -p "$TB_TOOLS_DIR"
   has() {
-    if [ "$1" = k3d ]; then [ -f "$BATS_TEST_TMPDIR/k3di" ]
+    if [ "$1" = k3d ]; then [ -f "$TB_TOOLS_DIR/k3d" ]
     else case " $PRESENT_CMDS " in *" $1 "*) return 0 ;; *) return 1 ;; esac; fi
   }
-  spin_cmd() { record "$*"; touch "$BATS_TEST_TMPDIR/k3di"; return 0; }
+  spin_cmd() { record "spin_cmd $*"; local _m="$1"; shift; "$@"; }
+  sha256sum() { record "sha256sum $*"; cat >/dev/null; return "${SHA_RC:-0}"; }
+  curl() {
+    record "curl $*"
+    local prev="" a out="" url=""
+    for a in "$@"; do
+      [ "$prev" = "-o" ] && out="$a"
+      case "$a" in http*) url="$a" ;; esac
+      prev="$a"
+    done
+    case "$url" in
+      */checksums.txt)  [ -n "$out" ] && printf '%s  _dist/k3d-linux-amd64\n' "${CHECKSUM_LINE_SHA:-cafe01}" >"$out" ;;
+      */k3d-linux-*)    [ -n "$out" ] && printf 'k3d-binary-bytes' >"$out" ;;
+      */releases/latest) printf 'https://github.com/k3d-io/k3d/releases/tag/v9.9.9' ;;
+    esac
+    return 0
+  }
+}
+@test "install_k3d: default pin -> verified direct download, no upstream script" {
+  _k3d_dl_setup
+  run install_k3d
+  [ "$status" -eq 0 ]
+  [ -f "$TB_TOOLS_DIR/k3d" ]                                   # installed where we said
+  run mock_calls
+  [[ "$output" == *"releases/download/${K3D_VERSION}/k3d-linux-amd64"* ]]
+  [[ "$output" == *"releases/download/${K3D_VERSION}/checksums.txt"* ]]
+  [[ "$output" == *"sha256sum --check"* ]]                     # verification ran
+  [[ "$output" != *"install.sh"* ]]                            # upstream script gone
+  [[ "$output" != *"releases/latest"* ]]                       # pinned path never resolves
+}
+@test "install_k3d: checksum mismatch fails closed, nothing installed (#382)" {
+  _k3d_dl_setup
+  SHA_RC=1
+  run install_k3d
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"checksum verification failed"* ]]
+  [ ! -f "$TB_TOOLS_DIR/k3d" ]
+}
+@test "install_k3d: asset missing from checksums.txt fails closed (#382)" {
+  _k3d_dl_setup
+  ARCH_DL="arm64"    # fixture checksums.txt only lists amd64 -> no matching line
+  run install_k3d
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"checksum verification failed"* ]]
+  [ ! -f "$TB_TOOLS_DIR/k3d" ]
+}
+@test "install_k3d: system path installs via sudo mv" {
+  _k3d_dl_setup
+  TB_TOOLS_SUDO="sudo"
+  sudo() { record "sudo $*"; "$@"; }
   run install_k3d
   [ "$status" -eq 0 ]
   run mock_calls
-  [[ "$output" == *"sudo env"* ]]
-  [[ "$output" == *"PATH="* ]]
-  [[ "$output" == *"bash"* ]]
+  [[ "$output" == *"sudo mv"* ]]
+  [[ "$output" == *"$TB_TOOLS_DIR/k3d"* ]]
 }
+@test "install_k3d: K3D_VERSION=latest resolves the tag, then the same verified path" {
+  _k3d_dl_setup
+  K3D_VERSION=latest
+  run install_k3d
+  [ "$status" -eq 0 ]
+  run mock_calls
+  [[ "$output" == *"releases/latest"* ]]                            # resolve-at-install-time
+  [[ "$output" == *"releases/download/v9.9.9/k3d-linux-amd64"* ]]   # resolved tag used
+  [[ "$output" == *"releases/download/v9.9.9/checksums.txt"* ]]     # still verified
+  [[ "$output" != *"install.sh"* ]]
+}
+@test "install_k3d: malformed K3D_VERSION fails closed before any fetch (Bugbot r1)" {
+  PRESENT_CMDS="curl"
+  K3D_VERSION="../../evil/repo/main"    # would traverse out of k3d-io/k3d in the URL
+  has() { case " $PRESENT_CMDS " in *" $1 "*) return 0 ;; *) return 1 ;; esac; }
+  spin_cmd() { record "$*"; return 0; }
+  run install_k3d
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"K3D_VERSION must be a k3d release tag"* ]]
+  run mock_calls
+  [ -z "$output" ]                      # no curl, no spin_cmd — nothing ran
+}
+
 @test "install_k3d: already present -> skip" {
   has() { [ "$1" = k3d ]; }
   spin_cmd() { record "$*"; return 0; }
@@ -176,6 +418,224 @@ setup() {
   [ "$status" -eq 0 ]
   run mock_calls
   [ -z "$output" ]
+}
+
+# ── install_helm: pinned release, verified direct download (#395) ────────────
+# The tarball is fetched straight from get.helm.sh and verified against its
+# published .sha256sum — helm's get-helm-3 is NOT used (it floats on the
+# mutable helm/helm@main, performs its checksum step with openssl, and minimal
+# cloud images ship no openssl — Bugbot #383). Mirrors the install_k3d suite.
+_helm_dl_setup() {
+  PRESENT_CMDS="curl tar gzip"
+  ARCH_DL="amd64"
+  TB_TOOLS_DIR="$BATS_TEST_TMPDIR/bin"; TB_TOOLS_SUDO=""
+  mkdir -p "$TB_TOOLS_DIR"
+  has() {
+    if [ "$1" = helm ]; then [ -f "$TB_TOOLS_DIR/helm" ]
+    else case " $PRESENT_CMDS " in *" $1 "*) return 0 ;; *) return 1 ;; esac; fi
+  }
+  spin_cmd() { record "spin_cmd $*"; local _m="$1"; shift; "$@"; }
+  sha256sum() { record "sha256sum $*"; return "${SHA_RC:-0}"; }
+  # The real code runs `tar -xzf <tarball> -C <dir> linux-amd64/helm`; the stub
+  # materialises exactly that extraction result.
+  tar() {
+    record "tar $*"
+    local prev="" a dest=""
+    for a in "$@"; do [ "$prev" = "-C" ] && dest="$a"; prev="$a"; done
+    mkdir -p "$dest/linux-${ARCH_DL}" && printf 'helm-binary' > "$dest/linux-${ARCH_DL}/helm"
+  }
+  curl() {
+    record "curl $*"
+    local prev="" a out="" url=""
+    for a in "$@"; do
+      [ "$prev" = "-o" ] && out="$a"
+      case "$a" in http*) url="$a" ;; esac
+      prev="$a"
+    done
+    case "$url" in
+      *.tar.gz.sha256sum)     [ -n "$out" ] && printf '%s  %s\n' "${CHECKSUM_LINE_SHA:-cafe01}" "$(basename "${url%.sha256sum}")" >"$out" ;;
+      *.tar.gz)               [ -n "$out" ] && printf 'helm-tarball-bytes' >"$out" ;;
+      *helm-latest-version)   printf 'v9.9.9' ;;
+    esac
+    return 0
+  }
+}
+@test "install_helm: default pin -> verified direct download, no get-helm-3 (#395)" {
+  _helm_dl_setup
+  run install_helm
+  [ "$status" -eq 0 ]
+  [ -f "$TB_TOOLS_DIR/helm" ]                                     # installed where we said
+  run mock_calls
+  [[ "$output" == *"get.helm.sh/helm-${HELM_VERSION}-linux-amd64.tar.gz"* ]]
+  [[ "$output" == *"get.helm.sh/helm-${HELM_VERSION}-linux-amd64.tar.gz.sha256sum"* ]]
+  [[ "$output" == *"sha256sum --check"* ]]                        # verification ran
+  [[ "$output" != *"get-helm-3"* ]]                               # upstream script gone
+  [[ "$output" != *"raw.githubusercontent.com"* ]]
+  [[ "$output" != *"helm-latest-version"* ]]                      # pinned path never resolves
+}
+@test "install_helm: checksum mismatch fails closed, nothing installed (#395)" {
+  _helm_dl_setup
+  SHA_RC=1
+  run install_helm
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"checksum verification failed"* ]]
+  [ ! -f "$TB_TOOLS_DIR/helm" ]
+}
+@test "install_helm: system path installs via sudo mv" {
+  _helm_dl_setup
+  TB_TOOLS_SUDO="sudo"
+  sudo() { record "sudo $*"; "$@"; }
+  run install_helm
+  [ "$status" -eq 0 ]
+  run mock_calls
+  [[ "$output" == *"sudo mv"* ]]
+  [[ "$output" == *"$TB_TOOLS_DIR/helm"* ]]
+}
+@test "install_helm: HELM_VERSION=latest resolves the tag, then the same verified path" {
+  _helm_dl_setup
+  HELM_VERSION=latest
+  run install_helm
+  [ "$status" -eq 0 ]
+  run mock_calls
+  [[ "$output" == *"helm-latest-version"* ]]                          # resolve-at-install-time
+  [[ "$output" == *"get.helm.sh/helm-v9.9.9-linux-amd64.tar.gz"* ]]   # resolved tag used
+  [[ "$output" == *"helm-v9.9.9-linux-amd64.tar.gz.sha256sum"* ]]     # still verified
+}
+@test "install_helm: malformed HELM_VERSION fails closed before any fetch (#395)" {
+  PRESENT_CMDS="curl tar gzip"
+  HELM_VERSION="../../evil/path"        # would traverse out of get.helm.sh's release namespace
+  has() { case " $PRESENT_CMDS " in *" $1 "*) return 0 ;; *) return 1 ;; esac; }
+  spin_cmd() { record "$*"; return 0; }
+  run install_helm
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"HELM_VERSION must be a Helm release tag"* ]]
+  run mock_calls
+  [ -z "$output" ]                      # no curl, no spin_cmd — nothing ran
+}
+@test "install_helm: already present -> skip" {
+  has() { [ "$1" = helm ]; }
+  spin_cmd() { record "$*"; return 0; }
+  run install_helm
+  [ "$status" -eq 0 ]
+  run mock_calls
+  [ -z "$output" ]
+}
+
+# ── _ensure_unpack_tools: the installer installs tar/gzip itself (#395) ──────
+# Tier 0 skips install_system_deps, so when the Helm unpack tools are missing
+# we install them via the package manager rather than telling the user to —
+# quietly with root/passwordless sudo, with an honest one-line reason when a
+# password is needed, and an error ONLY when we truly can't get rights.
+@test "_ensure_unpack_tools: tar + gzip present -> silent no-op" {
+  PRESENT_CMDS="curl apt-get tar gzip"
+  run _ensure_unpack_tools
+  [ "$status" -eq 0 ]
+  run mock_calls
+  [ -z "$output" ]
+}
+@test "_ensure_unpack_tools: missing + passwordless sudo -> ONE combined install via the package manager (#395)" {
+  PRESENT_CMDS="curl apt-get"           # tar + gzip absent
+  # Option-led probes go through _real_sudo (the A2 shadow mangles them as
+  # root) — stub the primitive, not the shadow (Bugbot #372 pattern).
+  _have_sudo_bin() { return 0; }
+  _real_sudo() { record "_real_sudo $*"; return 0; }   # -n probe succeeds → quiet path
+  run _ensure_unpack_tools
+  [ "$status" -eq 0 ]
+  run mock_calls
+  # One combined install call — a single sudo consumer (Bugbot r2), both pkgs on it.
+  [[ "$output" == *"Installing tar gzip"* ]]
+  [[ "$output" == *"apt-get install"*"tar gzip"* ]]
+}
+@test "_ensure_unpack_tools: password path primes sudo, waits out the dpkg lock, then installs (Bugbot r2)" {
+  PRESENT_CMDS="curl apt-get fuser"     # tar + gzip absent; fuser present → lock wait live
+  _have_sudo_bin() { return 0; }
+  # -n fails (no cached ticket) → prompt path; -v succeeds; the keepalive loop's
+  # own -n probes also fail, so it exits immediately (no stray child in bats).
+  _real_sudo() { record "_real_sudo $*"; case "$1" in -v) return 0 ;; *) return 1 ;; esac; }
+  apt_wait_for_lock() { record "apt_wait_for_lock"; }
+  run _ensure_unpack_tools
+  [ "$status" -eq 0 ]
+  run mock_calls
+  [[ "$output" == *"_real_sudo -v"* ]]              # primed before any spinner
+  [[ "$output" == *"apt_wait_for_lock"* ]]          # lock wait not skipped on Tier 0
+  [[ "$output" == *"Installing tar gzip"* ]]
+}
+@test "_ensure_unpack_tools: no sudo rights -> honest error, names the packages" {
+  PRESENT_CMDS="curl apt-get"           # tar + gzip absent
+  _have_sudo_bin() { return 0; }
+  _real_sudo() { record "_real_sudo $*"; return 1; }   # -n probe AND -v both fail
+  run _ensure_unpack_tools
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"administrator"* ]]
+  [[ "$output" == *"tar"* ]]
+}
+@test "_ensure_unpack_tools: not root and no sudo binary -> honest error before any prompt" {
+  PRESENT_CMDS="curl apt-get"           # tar + gzip absent
+  _have_sudo_bin() { return 1; }                        # no sudo on the machine at all
+  _real_sudo() { record "_real_sudo $*"; return 127; }
+  run _ensure_unpack_tools
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"no sudo"* ]]
+  [[ "$output" == *"tar"* ]]
+}
+@test "_ensure_unpack_tools: never kills a preflight keepalive (Bugbot r3)" {
+  PRESENT_CMDS="curl apt-get"           # tar + gzip absent (Tier 1/2 recovery case)
+  SUDO_KEEPALIVE_PID=99999              # preflight_sudo's keepalive owns the global
+  _have_sudo_bin() { return 0; }
+  _real_sudo() { record "_real_sudo $*"; return 0; }   # ticket cached → quiet path
+  kill() { record "kill $*"; }
+  run _ensure_unpack_tools
+  [ "$status" -eq 0 ]
+  run mock_calls
+  [[ "$output" != *"kill 99999"* ]]     # preflight's warm ticket left alone
+}
+@test "install_helm: HELM_VERSION=latest survives retry notices on stdout (Bugbot r3)" {
+  _helm_dl_setup
+  HELM_VERSION=latest
+  # First helm-latest-version fetch fails -> the REAL retry warns on stdout
+  # inside the command substitution; the resolver must still isolate the body.
+  _lv_attempts="$BATS_TEST_TMPDIR/lv-attempts"
+  curl() {
+    record "curl $*"
+    local prev="" a out="" url=""
+    for a in "$@"; do
+      [ "$prev" = "-o" ] && out="$a"
+      case "$a" in http*) url="$a" ;; esac
+      prev="$a"
+    done
+    case "$url" in
+      *helm-latest-version)
+        local n; n="$(cat "$_lv_attempts" 2>/dev/null || echo 0)"; n=$((n+1)); echo "$n" >"$_lv_attempts"
+        if [ "$n" -lt 2 ]; then return 22; fi
+        printf 'v9.9.9' ;;
+      *.tar.gz.sha256sum)   [ -n "$out" ] && printf '%s  %s\n' "cafe01" "$(basename "${url%.sha256sum}")" >"$out" ;;
+      *.tar.gz)             [ -n "$out" ] && printf 'helm-tarball-bytes' >"$out" ;;
+    esac
+    return 0
+  }
+  retry() { local m="$1" d="$2"; shift 2
+    local i=1
+    while true; do
+      if "$@"; then return 0; fi
+      [ "$i" -ge "$m" ] && { warn "Command failed after $m attempts: $*"; return 1; }
+      warn "Attempt $i/$m failed. Retrying in ${d}s..."   # STDOUT, like common.sh
+      i=$((i+1))
+    done
+  }
+  run install_helm
+  [ "$status" -eq 0 ]
+  run mock_calls
+  [[ "$output" == *"get.helm.sh/helm-v9.9.9-linux-amd64.tar.gz"* ]]   # clean tag despite the notice
+}
+
+@test "_ensure_unpack_tools: package install fails -> fatal (helm can't unpack without it)" {
+  PRESENT_CMDS="curl apt-get gzip"      # only tar absent
+  _have_sudo_bin() { return 0; }
+  _real_sudo() { record "_real_sudo $*"; return 0; }
+  spin_cmd() { record "$*"; case "$*" in *"apt-get install"*) return 1 ;; *) return 0 ;; esac; }
+  run _ensure_unpack_tools
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"Couldn't install tar"* ]]
 }
 
 # ── install_docker_engine: dead daemon vs group-not-active (Asad's Alma9 case) ──
@@ -298,4 +758,276 @@ setup() {
   [ "$status" -eq 0 ]
   [ -f "$TB_DOCKER_DROPIN_DIR/http-proxy.conf" ]   # NOT ours -> left alone
   grep -q 'it-managed' "$TB_DOCKER_DROPIN_DIR/http-proxy.conf"
+}
+
+# ── _route_install_tier (RFC 0001 #1172) ─────────────────────────────────────
+@test "_route_install_tier: Tier 2 + no sudo => actionable fail-fast" {
+  INSTALL_TIER=2; PROBE_PRIVILEGE=no_sudo
+  run _route_install_tier
+  [ "$status" -ne 0 ]
+  printf '%s\n' "$output" | grep -qF "administrator rights"
+  printf '%s\n' "$output" | grep -qF "prepare this host"
+}
+
+@test "_route_install_tier: Tier 2 + root => proceeds (root can install a runtime)" {
+  INSTALL_TIER=2; PROBE_PRIVILEGE=root
+  run _route_install_tier
+  [ "$status" -eq 0 ]
+}
+
+@test "_route_install_tier: Tier 0 + no sudo => proceeds (runtime already usable)" {
+  INSTALL_TIER=0; PROBE_PRIVILEGE=no_sudo
+  run _route_install_tier
+  [ "$status" -eq 0 ]
+}
+
+@test "_route_install_tier: unset tier (stale bootstrap) => proceeds as before" {
+  unset INSTALL_TIER PROBE_PRIVILEGE
+  run _route_install_tier
+  [ "$status" -eq 0 ]
+}
+
+@test "_route_install_tier: TB_FORCE_TIER overrides the detected tier" {
+  INSTALL_TIER=0; PROBE_PRIVILEGE=no_sudo; TB_FORCE_TIER=2
+  run _route_install_tier
+  [ "$status" -ne 0 ]           # forced to Tier 2 + no_sudo => fail-fast
+  printf '%s\n' "$output" | grep -qF "administrator rights"
+}
+
+# ── install_linux tier branching (RFC 0001 #1175) ────────────────────────────
+# Stub every step so the branch is observable without a real install.
+_stub_install_steps() {
+  preflight_sudo()       { record "preflight_sudo"; }
+  setup_pm()             { record "setup_pm"; }
+  apt_wait_for_lock()    { record "apt_wait_for_lock"; }
+  install_docker_engine(){ record "install_docker_engine"; }
+  install_system_deps()  { record "install_system_deps"; }
+  dispatch_gpu_setup()   { record "dispatch_gpu_setup"; }
+  install_kubectl()      { record "install_kubectl"; }
+  install_k3d()          { record "install_k3d"; }
+  install_helm()         { record "install_helm"; }
+}
+
+@test "install_linux: Tier 0 skips every privileged step, installs only user-space tools" {
+  MOCK_CALLS="$(mktemp)"
+  INSTALL_TIER=0
+  # Sandbox HOME: the Tier-0 branch runs the REAL _install_userspace_tools, whose
+  # _set_tools_target mkdir's ~/.local/bin and _persist_tools_on_path appends a
+  # PATH line to the shell rc — both would hit the developer's real home without
+  # this (Bugbot #375). Matches the dedicated _set_tools_target/_persist tests.
+  HOME="$BATS_TEST_TMPDIR"
+  _stub_install_steps
+  run install_linux
+  [ "$status" -eq 0 ]
+  mock_calls | grep -q install_kubectl
+  mock_calls | grep -q install_k3d
+  mock_calls | grep -q install_helm
+  ! mock_calls | grep -q preflight_sudo
+  ! mock_calls | grep -q install_docker_engine
+  ! mock_calls | grep -q install_system_deps
+  ! mock_calls | grep -q dispatch_gpu_setup
+}
+
+@test "install_linux: Tier 1 runs the full privileged flow" {
+  MOCK_CALLS="$(mktemp)"
+  INSTALL_TIER=1; PROBE_PRIVILEGE=sudo_nopw
+  _stub_install_steps
+  run install_linux
+  [ "$status" -eq 0 ]
+  mock_calls | grep -q preflight_sudo
+  mock_calls | grep -q install_docker_engine
+  mock_calls | grep -q install_kubectl
+  mock_calls | grep -q dispatch_gpu_setup
+}
+
+@test "install_linux: unset tier (stale bootstrap) runs the full flow" {
+  MOCK_CALLS="$(mktemp)"
+  unset INSTALL_TIER PROBE_PRIVILEGE
+  _stub_install_steps
+  run install_linux
+  [ "$status" -eq 0 ]
+  mock_calls | grep -q install_docker_engine
+}
+
+# ── _set_tools_target: Tier 0 tools must NOT sudo (Bugbot #1175) ─────────────
+@test "_set_tools_target: Tier 0 => ~/.local/bin, no sudo, on PATH" {
+  INSTALL_TIER=0; HOME="$BATS_TEST_TMPDIR"
+  _set_tools_target
+  [ "$TB_TOOLS_DIR" = "$HOME/.local/bin" ]
+  [ -z "$TB_TOOLS_SUDO" ]           # zero-root: no sudo for the tools
+  [ -d "$TB_TOOLS_DIR" ]            # created
+  case ":$PATH:" in *":$TB_TOOLS_DIR:"*) : ;; *) return 1 ;; esac   # on PATH now
+}
+
+@test "_set_tools_target: full flow => /usr/local/bin with sudo" {
+  INSTALL_TIER=1
+  _set_tools_target
+  [ "$TB_TOOLS_DIR" = "/usr/local/bin" ]
+  [ "$TB_TOOLS_SUDO" = "sudo" ]
+}
+
+# ── _tools_rc_for_shell + _persist_tools_on_path: keep Tier-0 tools on PATH (#375) ─
+@test "_tools_rc_for_shell: zsh/bash-linux/bash-mac/other" {
+  HOME=/h
+  SHELL=/bin/zsh;  [ "$(_tools_rc_for_shell)" = "/h/.zshrc" ]
+  SHELL=/bin/bash; OS=Linux;  [ "$(_tools_rc_for_shell)" = "/h/.bashrc" ]
+  SHELL=/bin/bash; OS=Darwin; [ "$(_tools_rc_for_shell)" = "/h/.bash_profile" ]
+  SHELL=/bin/dash; OS=Linux;  [ "$(_tools_rc_for_shell)" = "/h/.profile" ]
+}
+
+@test "_persist_tools_on_path: Tier 0 appends ~/.local/bin to the shell rc (#375)" {
+  HOME="$BATS_TEST_TMPDIR"; SHELL=/bin/bash; OS=Linux
+  TB_TOOLS_DIR="$HOME/.local/bin"
+  hint() { :; }
+  _persist_tools_on_path
+  grep -qF "$HOME/.local/bin" "$HOME/.bashrc"
+}
+
+@test "_persist_tools_on_path: idempotent — no double append (#375)" {
+  HOME="$BATS_TEST_TMPDIR"; SHELL=/bin/bash; OS=Linux
+  TB_TOOLS_DIR="$HOME/.local/bin"
+  hint() { :; }
+  _persist_tools_on_path
+  _persist_tools_on_path
+  [ "$(grep -cF '.local/bin' "$HOME/.bashrc")" -eq 1 ]
+}
+
+@test "_persist_tools_on_path: no-op for the full flow (/usr/local/bin) (#375)" {
+  HOME="$BATS_TEST_TMPDIR"; SHELL=/bin/bash; OS=Linux
+  TB_TOOLS_DIR="/usr/local/bin"
+  hint() { echo "must-not-run"; }
+  run _persist_tools_on_path
+  [ "$status" -eq 0 ]
+  [ ! -f "$HOME/.bashrc" ]                 # nothing written
+  [[ "$output" != *"must-not-run"* ]]      # no PATH hint emitted
+}
+
+@test "_persist_tools_on_path: fish gets fish_add_path, no dead export in ~/.profile (#375)" {
+  HOME="$BATS_TEST_TMPDIR"; SHELL=/usr/bin/fish; OS=Linux
+  TB_TOOLS_DIR="$HOME/.local/bin"
+  hint() { echo "$*"; }
+  run _persist_tools_on_path
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"fish_add_path"* ]]     # fish-correct guidance
+  [ ! -f "$HOME/.profile" ]                # did NOT write a bash export fish can't read
+}
+
+# ── _tier0_gpu_flags: NVIDIA k3d flag reused only when the runtime exists (#375) ─
+@test "_tier0_gpu_flags: nvidia + configured runtime => --gpus=all" {
+  GPU_VENDOR=nvidia; K3D_GPU_FLAGS=()
+  success() { :; }
+  docker() { case "$*" in *Runtimes*) echo '{"nvidia":{"path":"nvidia-container-runtime"},"runc":{}}' ;; *) return 0 ;; esac; }
+  _tier0_gpu_flags
+  [ "${K3D_GPU_FLAGS[*]}" = "--gpus=all" ]
+}
+
+@test "_tier0_gpu_flags: nvidia + NO configured runtime => stays CPU-only (empty flags)" {
+  GPU_VENDOR=nvidia; K3D_GPU_FLAGS=()
+  warn() { :; }; hint() { :; }
+  docker() { case "$*" in *Runtimes*) echo '{"runc":{}}' ;; *) return 0 ;; esac; }
+  _tier0_gpu_flags
+  [ "${#K3D_GPU_FLAGS[@]}" -eq 0 ]   # no --gpus flag → CPU-only cluster (safe, not a broken create)
+}
+
+@test "_tier0_gpu_flags: non-nvidia GPU => no-op" {
+  GPU_VENDOR=none; K3D_GPU_FLAGS=()
+  _tier0_gpu_flags
+  [ "${#K3D_GPU_FLAGS[@]}" -eq 0 ]
+}
+
+# ── run_prepare_host (RFC 0001 #1178) ────────────────────────────────────────
+@test "run_prepare_host: installs runtime prereqs + adds researcher to docker group, no cluster/CLI" {
+  MOCK_CALLS="$(mktemp)"
+  OS=Linux; TB_PREPARE_USER=researcher
+  host_audit()          { :; }
+  preflight_sudo()      { record preflight_sudo; }
+  setup_pm()            { :; }
+  apt_wait_for_lock()   { :; }
+  install_docker_engine(){ record install_docker_engine; }
+  install_system_deps() { record install_system_deps; }
+  sudo()                { record "sudo $*"; return 0; }
+  run run_prepare_host
+  [ "$status" -eq 0 ]
+  mock_calls | grep -q install_docker_engine
+  mock_calls | grep -q "sudo usermod -aG docker researcher"
+  ! mock_calls | grep -qi "create_cluster"
+  ! mock_calls | grep -qi "install_tracebloc_cli"
+  # Grant succeeded => the no-admin promise is honest and shown (#377).
+  printf '%s\n' "$output" | grep -qi "no administrator rights"
+}
+
+@test "run_prepare_host: TB_PREPARE_USER with stray whitespace is trimmed before the grant (#381 r3)" {
+  MOCK_CALLS="$(mktemp)"
+  OS=Linux; TB_PREPARE_USER="  researcher  "
+  host_audit()          { :; }
+  preflight_sudo()      { :; }
+  setup_pm()            { :; }
+  apt_wait_for_lock()   { :; }
+  install_docker_engine(){ :; }
+  install_system_deps() { :; }
+  sudo()                { record "sudo $*"; return 0; }
+  run run_prepare_host
+  [ "$status" -eq 0 ]
+  # Untrimmed, the record would be "docker   researcher  " — single-space match
+  # proves the value was trimmed before the gate and the grant.
+  mock_calls | grep -q "sudo usermod -aG docker researcher"
+  [[ "$output" == *"Added researcher to the docker group"* ]]
+}
+
+@test "run_prepare_host: no target user => best-effort, still prepares the host" {
+  MOCK_CALLS="$(mktemp)"
+  OS=Linux; unset TB_PREPARE_USER SUDO_USER
+  host_audit()          { :; }
+  preflight_sudo()      { :; }
+  setup_pm()            { :; }
+  apt_wait_for_lock()   { :; }
+  install_docker_engine(){ record install_docker_engine; }
+  install_system_deps() { :; }
+  sudo()                { record "sudo $*"; return 0; }
+  run run_prepare_host
+  [ "$status" -eq 0 ]
+  mock_calls | grep -q install_docker_engine
+  ! mock_calls | grep -q "usermod"      # nobody to add
+  # No grant happened => must NOT falsely promise a no-admin install (#377).
+  ! printf '%s\n' "$output" | grep -qi "can now install tracebloc with no administrator rights"
+}
+
+@test "run_prepare_host: usermod fails => no false no-admin promise, still exits 0 (#377)" {
+  MOCK_CALLS="$(mktemp)"
+  OS=Linux; TB_PREPARE_USER=researcher
+  host_audit()          { :; }
+  preflight_sudo()      { :; }
+  setup_pm()            { :; }
+  apt_wait_for_lock()   { :; }
+  install_docker_engine(){ record install_docker_engine; }
+  install_system_deps() { :; }
+  # sudo succeeds for everything EXCEPT the usermod grant.
+  sudo()                { case "$*" in usermod*) return 1 ;; *) return 0 ;; esac; }
+  run run_prepare_host
+  [ "$status" -eq 0 ]                                 # best-effort: prep still succeeds
+  printf '%s\n' "$output" | grep -qi "Couldn't add"   # honest warning
+  ! printf '%s\n' "$output" | grep -qi "can now install tracebloc with no administrator rights"
+}
+
+@test "run_prepare_host: does NOT grant docker-group to SUDO_USER (the admin), only TB_PREPARE_USER (#377)" {
+  MOCK_CALLS="$(mktemp)"
+  OS=Linux; unset TB_PREPARE_USER; SUDO_USER=admin
+  host_audit()          { :; }
+  preflight_sudo()      { :; }
+  setup_pm()            { :; }
+  apt_wait_for_lock()   { :; }
+  install_docker_engine(){ record install_docker_engine; }
+  install_system_deps() { :; }
+  sudo()                { record "sudo $*"; return 0; }
+  run run_prepare_host
+  [ "$status" -eq 0 ]
+  mock_calls | grep -q install_docker_engine   # host still prepared
+  ! mock_calls | grep -q "usermod"             # the ADMIN (SUDO_USER) is NOT added
+}
+
+@test "run_prepare_host: non-Linux errors with a Docker Desktop / WSL2 pointer" {
+  OS=Darwin
+  run run_prepare_host
+  [ "$status" -ne 0 ]
+  printf '%s\n' "$output" | grep -qiE "Docker Desktop|WSL2"
 }

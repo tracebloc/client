@@ -41,6 +41,7 @@ FILES=(
   "scripts/lib/install-cli.sh"
   "scripts/lib/provision.sh"
   "scripts/lib/assess.sh"
+  "scripts/lib/probe.sh"
   "scripts/lib/summary.sh"
   "scripts/lib/diagnose.sh"
 )

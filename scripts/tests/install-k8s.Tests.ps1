@@ -6,7 +6,10 @@ BeforeAll {
   $env:TB_PESTER = "1"
   . "$PSScriptRoot/../install-k8s.ps1"
   # Stubs so Pester can mock external commands that the functions invoke.
-  function kubectl { }
+  # kubectl defaults to a successful exit so the bounded API-reachability probe
+  # (Test-ApiReachable) passes in tests that don't explicitly mock it; tests that
+  # care about an unreachable API Mock kubectl to set a non-zero exit.
+  function kubectl { $global:LASTEXITCODE = 0 }
   function docker { }
   function helm { }
   function k3d { }
@@ -245,6 +248,109 @@ Describe "Install-ClientHelm" {
   BeforeEach {
     $GPU_VENDOR = "none"; $NVIDIA_DRIVER_OK = $false; $env:CLIENT_ENV = $null
     Mock helm { $global:LASTEXITCODE = 0 }
+  }
+  # Step-4 provisioning state must never leak between tests (#388): unset means
+  # the legacy fallback path, which is what the pre-#388 tests below drive.
+  AfterEach {
+    $script:TB_PROV_MODE = $null; $script:TB_PROV_ID = $null
+    $script:TB_PROV_NS = $null; $script:TB_PROV_PASSWORD = $null
+    $env:TRACEBLOC_CLIENT_ID = $null; $env:TRACEBLOC_CLIENT_PASSWORD = $null
+  }
+  It "minted mode (#388): no prompts; values carry the minted credential; slug namespace used" {
+    $HOST_DATA_DIR = "$TestDrive/d-mint"
+    $script:TB_PROV_MODE = "minted"; $script:TB_PROV_ID = "uuid-11"
+    $script:TB_PROV_PASSWORD = "mintedpw"; $script:TB_PROV_NS = "lukas-01"
+    Mock Read-Host { throw "the minted path must never prompt" }
+    Mock Test-Credentials { "valid" }   # even a fresh mint verifies (#397 r2)
+    Install-ClientHelm
+    Should -Invoke Test-Credentials -Times 1
+    (Get-Content "$HOST_DATA_DIR/values.yaml" -Raw) | Should -Match 'clientId: "uuid-11"'
+    (Get-Content "$HOST_DATA_DIR/values.yaml" -Raw) | Should -Match "clientPassword: 'mintedpw'"
+    Should -Invoke helm -ParameterFilter { ($args -contains "upgrade") -and ($args -contains "lukas-01") }
+  }
+  It "adopted mode (#388): surgical --reuse-values reconcile heals a STALE (cli#125 numeric) clientId" {
+    # The realistic heal: helm still reports the legacy numeric dashboard id
+    # while Step 4 adopted the UUID. The guard must let adopted mode through
+    # (the one sanctioned id mismatch, r1 High), and the upgrade must be
+    # SURGICAL — --reuse-values on the LIVE release in ITS namespace, healing
+    # only clientId, never regenerating values (#397 r2).
+    $HOST_DATA_DIR = "$TestDrive/d-adopt"; New-Item -ItemType Directory -Path $HOST_DATA_DIR -Force | Out-Null
+    Set-Content "$HOST_DATA_DIR/values.yaml" "clientId: `"123`"`nclientPassword: 'prevpw'"
+    $script:TB_PROV_MODE = "adopted"; $script:TB_PROV_ID = "uuid-9"; $script:TB_PROV_NS = "lukas-01"
+    Mock Read-Host { throw "the adopted path must never prompt" }
+    Mock helm {
+      if ($args -contains "list") { '[{"name":"oldrel","namespace":"legacy-ns","chart":"client-1.4.3"}]'; $global:LASTEXITCODE = 0; return }
+      if ($args -contains "get") {
+        if ($args -contains "json") { '{"clientId":"123"}' } else { 'clientId: 123' }   # STALE id
+        $global:LASTEXITCODE = 0; return
+      }
+      $global:LASTEXITCODE = 0
+    }
+    Install-ClientHelm
+    Should -Invoke helm -ParameterFilter { ($args -contains "upgrade") -and ($args -contains "--reuse-values") -and ($args -contains "clientId=uuid-9") -and ($args -contains "oldrel") -and ($args -contains "legacy-ns") }
+    Should -Not -Invoke helm -ParameterFilter { ($args -contains "upgrade") -and ($args -contains "--values") }
+    # The local record is healed surgically — clientId only, password untouched.
+    (Get-Content "$HOST_DATA_DIR/values.yaml" -Raw) | Should -Match 'clientId: "uuid-9"'
+    (Get-Content "$HOST_DATA_DIR/values.yaml" -Raw) | Should -Match "clientPassword: 'prevpw'"
+    # Wait-ForClientReady must watch the LIVE release's namespace.
+    $script:TB_NAMESPACE | Should -Be "legacy-ns"
+  }
+  It "adopted mode with a live release needs NO password at all (#397 r2)" {
+    $HOST_DATA_DIR = "$TestDrive/d-adopt-nopw"   # no values.yaml anywhere
+    $script:TB_PROV_MODE = "adopted"; $script:TB_PROV_ID = "uuid-9"; $script:TB_PROV_NS = "lukas-01"
+    Mock helm {
+      if ($args -contains "list") { '[{"name":"oldrel","namespace":"lukas-01","chart":"client-1.4.3"}]'; $global:LASTEXITCODE = 0; return }
+      if ($args -contains "get") {
+        if ($args -contains "json") { '{"clientId":"uuid-9"}' } else { 'clientId: uuid-9' }
+        $global:LASTEXITCODE = 0; return
+      }
+      $global:LASTEXITCODE = 0
+    }
+    Install-ClientHelm
+    Should -Invoke helm -ParameterFilter { ($args -contains "upgrade") -and ($args -contains "--reuse-values") }
+  }
+  It "a DIFFERENT existing client still refuses outside adopted mode (guard intact)" {
+    $HOST_DATA_DIR = "$TestDrive/d-guard-minted"
+    $script:TB_PROV_MODE = "minted"; $script:TB_PROV_ID = "uuid-new"
+    $script:TB_PROV_PASSWORD = "pw"; $script:TB_PROV_NS = "ws-new"
+    Mock Err { throw "err: $args" }
+    Mock helm {
+      if ($args -contains "list") { '[{"name":"oldrel","namespace":"other","chart":"client-1.4.3"}]'; $global:LASTEXITCODE = 0; return }
+      if ($args -contains "get") {
+        if ($args -contains "json") { '{"clientId":"someone-else"}' } else { 'clientId: someone-else' }
+        $global:LASTEXITCODE = 0; return
+      }
+      $global:LASTEXITCODE = 0
+    }
+    { Install-ClientHelm } | Should -Throw
+    Should -Not -Invoke helm -ParameterFilter { $args -contains "upgrade" }
+  }
+  It "adopted mode on a REBUILT cluster (no release, no values file) -> honest terminal error (#388)" {
+    $HOST_DATA_DIR = "$TestDrive/d-adopt-bare"
+    $script:TB_PROV_MODE = "adopted"; $script:TB_PROV_ID = "uuid-9"; $script:TB_PROV_NS = "lukas-01"
+    Mock Err { throw "err: $args" }
+    { Install-ClientHelm } | Should -Throw
+    Should -Not -Invoke helm -ParameterFilter { $args -contains "upgrade" }
+  }
+  It "preset mode (#388): env credentials verify once, no prompts" {
+    $HOST_DATA_DIR = "$TestDrive/d-preset"
+    $script:TB_PROV_MODE = "preset"
+    $env:TRACEBLOC_CLIENT_ID = "envid"; $env:TRACEBLOC_CLIENT_PASSWORD = "envpw"
+    Mock Read-Host { throw "the preset path must never prompt" }
+    Mock Test-Credentials { "valid" }
+    Install-ClientHelm
+    (Get-Content "$HOST_DATA_DIR/values.yaml" -Raw) | Should -Match 'clientId: "envid"'
+    Should -Invoke Test-Credentials -Times 1
+    Should -Invoke helm -ParameterFilter { $args -contains "upgrade" }
+  }
+  It "preset mode: rejected env credentials fail closed (#388)" {
+    $HOST_DATA_DIR = "$TestDrive/d-preset-bad"
+    $script:TB_PROV_MODE = "preset"
+    $env:TRACEBLOC_CLIENT_ID = "envid"; $env:TRACEBLOC_CLIENT_PASSWORD = "wrong"
+    Mock Test-Credentials { "invalid" }
+    Mock Err { throw "err: $args" }
+    { Install-ClientHelm } | Should -Throw
+    Should -Not -Invoke helm -ParameterFilter { $args -contains "upgrade" }
   }
   It "valid creds: writes values.yaml + runs helm" {
     $HOST_DATA_DIR = "$TestDrive/d1"
@@ -491,6 +597,96 @@ Describe "Install-ClientHelm" {
     Install-ClientHelm
     Should -Invoke helm -ParameterFilter { $args -contains "upgrade" }
   }
+  # #385: the repo must be (re-)registered on EVERY run. The old presence guard
+  # string-matched (helm repo list 2>&1), which Windows PowerShell 5.1 renders
+  # with this script's own ...\tracebloc-installer-<n>\... temp path -- containing
+  # "tracebloc" -- so the add was skipped on every fresh machine and the upgrade
+  # died with "Error: repo tracebloc not found".
+  It "registers the chart repo with --force-update before upgrading (#385)" {
+    $HOST_DATA_DIR = "$TestDrive/d385a"
+    Mock Read-Host {
+      param([string]$Prompt, [switch]$AsSecureString)
+      if ($Prompt -match 'password') { return (ConvertTo-SecureString "pw" -AsPlainText -Force) }
+      return "id385"
+    }
+    Mock Test-Credentials { "valid" }
+    Install-ClientHelm
+    Should -Invoke helm -ParameterFilter {
+      ($args -contains "repo") -and ($args -contains "add") -and
+      ($args -contains "--force-update") -and ($args -contains "https://tracebloc.github.io/client")
+    }
+    Should -Invoke helm -ParameterFilter { $args -contains "upgrade" }
+  }
+  It "aborts with helm's own output when the repo add fails (#385)" {
+    $HOST_DATA_DIR = "$TestDrive/d385b"
+    Mock Read-Host {
+      param([string]$Prompt, [switch]$AsSecureString)
+      if ($Prompt -match 'password') { return (ConvertTo-SecureString "pw" -AsPlainText -Force) }
+      return "id385b"
+    }
+    Mock Test-Credentials { "valid" }
+    Mock Err { param($m) $script:lastErr = $m; throw "err" }
+    Mock helm {
+      if (($args -contains "repo") -and ($args -contains "add")) {
+        $global:LASTEXITCODE = 1
+        return "Error: looks like this is not a valid chart repository"
+      }
+      $global:LASTEXITCODE = 0
+    }
+    { Install-ClientHelm } | Should -Throw
+    $script:lastErr | Should -Match 'not a valid chart repository'
+    Should -Not -Invoke helm -ParameterFilter { $args -contains "upgrade" }
+  }
+}
+
+Describe "Get-TrainingResources" {
+  # backend#1236 (option A): machine-sized training default, mirroring the bash
+  # twin's _training_resources. Precedence: env override > installed release's
+  # choice > largest-node sizing > static fallback.
+  BeforeEach { $script:TB_NAMESPACE = "tracebloc"; $env:TRACEBLOC_TRAINING_RESOURCES = $null }
+  AfterEach  { $env:TRACEBLOC_TRAINING_RESOURCES = $null }
+  It "explicit override wins" {
+    $env:TRACEBLOC_TRAINING_RESOURCES = "cpu=4,memory=16Gi"
+    Get-TrainingResources | Should -Be "cpu=4,memory=16Gi"
+  }
+  It "existing release choice carried (resources set survives re-install)" {
+    Mock kubectl { $global:LASTEXITCODE = 0; "" }   # bounded namespace probe passes
+    Mock helm { $global:LASTEXITCODE = 0; '{"env":{"RESOURCE_LIMITS":"cpu=4,memory=12Gi"}}' }
+    Get-TrainingResources | Should -Be "cpu=4,memory=12Gi"
+  }
+  It "the historic static default is NOT carried — re-install gets sized (Bugbot)" {
+    Mock helm { $global:LASTEXITCODE = 0; '{"env":{"RESOURCE_LIMITS":"cpu=2,memory=8Gi"}}' }
+    Mock kubectl {
+      if ($args -contains "--request-timeout=10s") {
+        $global:LASTEXITCODE = 0
+        @("12 6924Mi")
+      } else { $global:LASTEXITCODE = 0; "" }   # namespace probe passes
+    }
+    Get-TrainingResources | Should -Be "cpu=11,memory=3Gi"
+  }
+  It "fresh install sized to the largest node minus overhead (k3d nodes not summed)" {
+    Mock helm { $global:LASTEXITCODE = 1; "" }
+    # The mock only answers a BOUNDED call — dropping --request-timeout fails
+    # this test (a wedged API must never hang values generation). Output is the
+    # jsonpath "cpu memory" line contract (one line per node).
+    Mock kubectl {
+      if ($args -contains "--request-timeout=10s") {
+        $global:LASTEXITCODE = 0
+        @("12 6924Mi", "12 6924Mi")
+      } else { $global:LASTEXITCODE = 1; "" }
+    }
+    Get-TrainingResources | Should -Be "cpu=11,memory=3Gi"
+  }
+  It "below-floor machine falls back to the static default" {
+    Mock helm { $global:LASTEXITCODE = 1; "" }
+    Mock kubectl { $global:LASTEXITCODE = 0; @("2 4Gi") }
+    Get-TrainingResources | Should -Be "cpu=2,memory=8Gi"
+  }
+  It "unreadable cluster falls back to the static default" {
+    Mock helm { $global:LASTEXITCODE = 1; "" }
+    Mock kubectl { $global:LASTEXITCODE = 1; "" }
+    Get-TrainingResources | Should -Be "cpu=2,memory=8Gi"
+  }
 }
 
 Describe "Confirm-Cluster" {
@@ -581,6 +777,24 @@ Describe "Test-PfUrl" {
     Mock Invoke-WebRequest { throw [System.Exception]::new("Unable to connect to the remote server") }
     Test-PfUrl "https://x" | Should -Be "blocked"
   }
+  # -RequireSuccess: for targets whose CONTENT must exist (the Helm repo
+  # index.yaml, #385) an HTTP error is a failure, not "reachable".
+  It "-RequireSuccess: HTTP 404 -> 'http 404' (#385)" {
+    Mock Invoke-WebRequest {
+      $ex = [System.Exception]::new("HTTP 404")
+      Add-Member -InputObject $ex -NotePropertyName Response -NotePropertyValue ([pscustomobject]@{ StatusCode = 404 }) -Force
+      throw $ex
+    }
+    Test-PfUrl "https://x" -RequireSuccess | Should -Be "http 404"
+  }
+  It "-RequireSuccess: HTTP 200 -> ok" {
+    Mock Invoke-WebRequest { [pscustomobject]@{ StatusCode = 200 } }
+    Test-PfUrl "https://x" -RequireSuccess | Should -Be "ok"
+  }
+  It "-RequireSuccess: connection failure still classified (blocked)" {
+    Mock Invoke-WebRequest { throw [System.Exception]::new("Unable to connect to the remote server") }
+    Test-PfUrl "https://x" -RequireSuccess | Should -Be "blocked"
+  }
 }
 
 # Get-CimInstance is a Windows-only cmdlet (CimCmdlets module) — it can't be
@@ -600,6 +814,15 @@ Describe "Get-Pf* resource readers" -Skip:(-not $IsWindows) {
     Mock Get-CimInstance { [pscustomobject]@{ FreeSpace = 50GB } }
     Get-PfFreeGb | Should -Be 50
   }
+  It "Get-PfVirtualization: running hypervisor -> true, firmware not consulted (#387)" {
+    Mock Get-CimInstance { [pscustomobject]@{ HypervisorPresent = $true } } -ParameterFilter { $ClassName -eq 'Win32_ComputerSystem' }
+    Get-PfVirtualization | Should -Be $true
+  }
+  It "Get-PfVirtualization: no hypervisor + firmware disabled -> false (#387)" {
+    Mock Get-CimInstance { [pscustomobject]@{ HypervisorPresent = $false } } -ParameterFilter { $ClassName -eq 'Win32_ComputerSystem' }
+    Mock Get-CimInstance { [pscustomobject]@{ VirtualizationFirmwareEnabled = $false } } -ParameterFilter { $ClassName -eq 'Win32_Processor' }
+    Get-PfVirtualization | Should -Be $false
+  }
 }
 
 Describe "Test-Preflight" {
@@ -608,6 +831,7 @@ Describe "Test-Preflight" {
     Mock Get-PfCpu { 4 }; Mock Get-PfMemGb { 8 }; Mock Get-PfFreeGb { 50 }
     Mock Get-WindowsArch { "amd64" }
     Mock Get-PfFsType { "local" }
+    Mock Get-PfVirtualization { $true }
   }
   AfterEach { $env:TRACEBLOC_SKIP_PREFLIGHT = $null; $env:TRACEBLOC_ALLOW_ARM64 = $null; $env:TRACEBLOC_ALLOW_NETWORK_FS = $null }
 
@@ -628,6 +852,19 @@ Describe "Test-Preflight" {
   It "arm64 -> info, not a hard fail (Docker Desktop emulates)" {
     Mock Get-WindowsArch { "arm64" }
     Mock Test-PfUrl { "ok" }
+    { Test-Preflight } | Should -Not -Throw
+  }
+  # #387: Docker Desktop's own "Virtualization support not detected" only
+  # appears AFTER we've installed and launched it — preflight must fail fast
+  # with the firmware fix instead.
+  It "virtualization disabled in firmware -> fails (Err throws) (#387)" {
+    Mock Test-PfUrl { "ok" }
+    Mock Get-PfVirtualization { $false }
+    { Test-Preflight } | Should -Throw
+  }
+  It "virtualization undeterminable -> skipped, not a fail (#387)" {
+    Mock Test-PfUrl { "ok" }
+    Mock Get-PfVirtualization { $null }
     { Test-Preflight } | Should -Not -Throw
   }
   It "memory below floor -> warn-only on Windows (does not throw)" {
@@ -769,5 +1006,270 @@ Describe "Invoke-DiagnoseBundle" {
     Expand-Archive -Path $zip.FullName -DestinationPath $ex -Force
     $all = (Get-ChildItem $ex -Recurse -File | ForEach-Object { Get-Content $_.FullName -Raw }) -join "`n"
     $all | Should -Not -Match 'LEAKME123'
+  }
+}
+
+# ── Provisioning (#388 — parity with scripts/lib/provision.sh) ───────────────
+
+Describe "Read-TraceblocCredentialFile" {
+  It "parses the mint keys, splitting on the FIRST '=' (a password may contain '=')" {
+    $f = "$TestDrive/cred.env"
+    Set-Content $f "TRACEBLOC_CLIENT_ID=uuid-1`nTRACEBLOC_CLIENT_PASSWORD=p=w=x`nTB_NAMESPACE=lukas-01"
+    $c = Read-TraceblocCredentialFile -Path $f
+    $c['TRACEBLOC_CLIENT_ID'] | Should -Be "uuid-1"
+    $c['TRACEBLOC_CLIENT_PASSWORD'] | Should -Be "p=w=x"
+    $c['TB_NAMESPACE'] | Should -Be "lukas-01"
+  }
+  It "parses the adopt variant (no password, ADOPTED=1)" {
+    $f = "$TestDrive/cred2.env"
+    Set-Content $f "TRACEBLOC_CLIENT_ID=uuid-2`nTB_NAMESPACE=ws-7`nTRACEBLOC_CLIENT_ADOPTED=1"
+    $c = Read-TraceblocCredentialFile -Path $f
+    $c['TRACEBLOC_CLIENT_ADOPTED'] | Should -Be "1"
+    $c.ContainsKey('TRACEBLOC_CLIENT_PASSWORD') | Should -BeFalse
+  }
+}
+
+Describe "ConvertTo-SanitizedInput" {
+  It "strips CSI sequences (arrow keys) and bracketed-paste markers" {
+    $esc = [char]27
+    ConvertTo-SanitizedInput -Value "$esc[200~my machine$esc[201~" | Should -Be "my machine"
+    ConvertTo-SanitizedInput -Value "na$esc[Dme$esc[1;5C" | Should -Be "name"
+  }
+  It "self-heals literal paste markers left by an earlier stripper" {
+    ConvertTo-SanitizedInput -Value "[200~box[201~" | Should -Be "box"
+  }
+  It "drops control characters but keeps international letters" {
+    ConvertTo-SanitizedInput -Value "b`tox-müller" | Should -Be "box-müller"
+  }
+  It "empty in, empty out" {
+    ConvertTo-SanitizedInput -Value "" | Should -Be ""
+  }
+}
+
+Describe "Get-ProvisioningPreset" {
+  AfterEach { $env:TRACEBLOC_CLIENT_ID = $null; $env:TRACEBLOC_CLIENT_PASSWORD = $null }
+  It "true only when BOTH env credentials are set" {
+    $env:TRACEBLOC_CLIENT_ID = "x"
+    Get-ProvisioningPreset | Should -BeFalse
+    $env:TRACEBLOC_CLIENT_PASSWORD = "y"
+    Get-ProvisioningPreset | Should -BeTrue
+  }
+}
+
+Describe "Test-CliProvisioningSupport" {
+  It "true when both --help probes pass" {
+    Mock Invoke-TraceblocProbe { $true }
+    Test-CliProvisioningSupport | Should -BeTrue
+  }
+  It "false when `client create` is unknown (old CLI)" {
+    Mock Invoke-TraceblocProbe { param([string[]]$Args_) -not ($Args_ -contains "create") }
+    Test-CliProvisioningSupport | Should -BeFalse
+  }
+}
+
+Describe "Test-AccountOwnsNamespace" {
+  It "owned when the list shows namespace=<ns>" {
+    Mock Get-TraceblocClientList { [pscustomobject]@{ Ok = $true; Text = "id=7  name=x  namespace=lukas-01   location=DE" } }
+    Test-AccountOwnsNamespace -Ns "lukas-01" | Should -Be "owned"
+  }
+  It "absent on a prefix (lukas-0 must not match lukas-01)" {
+    Mock Get-TraceblocClientList { [pscustomobject]@{ Ok = $true; Text = "namespace=lukas-01 " } }
+    Test-AccountOwnsNamespace -Ns "lukas-0" | Should -Be "absent"
+  }
+  It "unknown when the list can't be read" {
+    Mock Get-TraceblocClientList { [pscustomobject]@{ Ok = $false; Text = "" } }
+    Test-AccountOwnsNamespace -Ns "x" | Should -Be "unknown"
+  }
+}
+
+Describe "Print-CreateFailure" {
+  It "surfaces the unrecognized-carbon-zone hint with the rejected value" {
+    $f = "$TestDrive/create-out.log"
+    Set-Content $f 'Error: location: "berlin" is not a valid choice.'
+    Mock Warn {}
+    Mock Hint {}
+    Print-CreateFailure -OutFile $f -Location "berlin"
+    Should -Invoke Warn -ParameterFilter { $m -match "carbon zone" }
+    Should -Invoke Hint -ParameterFilter { $m -match "TRACEBLOC_CLIENT_LOCATION" }
+  }
+  It "surfaces backend error lines instead of a generic message" {
+    $f = "$TestDrive/create-out2.log"
+    Set-Content $f "booting`nError: HTTP 503 from api.tracebloc.io`nmore noise"
+    Mock Warn {}
+    Mock Hint {}
+    Print-CreateFailure -OutFile $f -Location ""
+    Should -Invoke Hint -ParameterFilter { $m -match "HTTP 503" }
+  }
+}
+
+Describe "Invoke-ProvisionClient" {
+  # Only the ROUTING is unit-tested here (which TB_PROV_MODE each entry state
+  # lands in); the mint/adopt handoff is covered via Install-ClientHelm's
+  # minted/adopted-mode tests above.
+  BeforeEach { Mock RefreshPath {} }
+  AfterEach {
+    $script:TB_PROV_MODE = $null; $script:TB_PROV_ID = $null
+    $script:TB_PROV_NS = $null; $script:TB_PROV_PASSWORD = $null
+    $env:TRACEBLOC_CLIENT_ID = $null; $env:TRACEBLOC_CLIENT_PASSWORD = $null
+  }
+  It "env preset skips browser sign-in entirely -> mode=preset" {
+    $env:TRACEBLOC_CLIENT_ID = "x"; $env:TRACEBLOC_CLIENT_PASSWORD = "y"
+    Invoke-ProvisionClient
+    $script:TB_PROV_MODE | Should -Be "preset"
+  }
+  It "missing CLI -> mode=fallback (legacy manual prompts take over)" {
+    Mock Has { $false }
+    Invoke-ProvisionClient
+    $script:TB_PROV_MODE | Should -Be "fallback"
+  }
+  It "too-old CLI (no login/client create) -> mode=fallback" {
+    Mock Has { $true }
+    Mock Test-CliProvisioningSupport { $false }
+    Invoke-ProvisionClient
+    $script:TB_PROV_MODE | Should -Be "fallback"
+  }
+}
+
+Describe "Get-LeftoverDataDirs (Windows leftover-data detection; Bugbot r3655218480)" {
+  # Paths are built with Join-Path / [IO.Path]::Combine so the tests pass under
+  # BOTH Windows and Linux pwsh (CI runs Pester on ubuntu too — a hardcoded '\'
+  # is a literal char, not a separator, on Linux).
+  It "nonexistent HOST_DATA_DIR -> nothing" {
+    @(Get-LeftoverDataDirs -Base (Join-Path $TestDrive 'nope')).Count | Should -Be 0
+  }
+  It "empty dirs / values.yaml are not data" {
+    $b = Join-Path $TestDrive 'clean'
+    New-Item -ItemType Directory -Path (Join-Path $b 'mysql') -Force | Out-Null   # empty
+    New-Item -ItemType Directory -Path (Join-Path $b 'logs')  -Force | Out-Null
+    Set-Content (Join-Path $b 'values.yaml') 'x'
+    @(Get-LeftoverDataDirs -Base $b).Count | Should -Be 0
+  }
+  It "flat mysql data detected" {
+    $b = Join-Path $TestDrive 'flat'
+    New-Item -ItemType Directory -Path (Join-Path $b 'mysql') -Force | Out-Null
+    Set-Content ([IO.Path]::Combine($b,'mysql','ibdata1')) 'x'
+    @(Get-LeftoverDataDirs -Base $b) | Should -Contain (Join-Path $b 'mysql')
+  }
+  It "per-release layout detected" {
+    $b = Join-Path $TestDrive 'rel'
+    New-Item -ItemType Directory -Path ([IO.Path]::Combine($b,'tracebloc','data','ds1')) -Force | Out-Null
+    Set-Content ([IO.Path]::Combine($b,'tracebloc','data','ds1','rows.csv')) 'x'
+    @(Get-LeftoverDataDirs -Base $b) | Should -Contain ([IO.Path]::Combine($b,'tracebloc','data'))
+  }
+}
+
+Describe "Invoke-LeftoverDataGuard (Windows leftover-data guard; Bugbot r3655218480)" {
+  BeforeEach {
+    $script:__up = $env:USERPROFILE
+    $env:USERPROFILE = "$TestDrive"                 # so HOST_DATA_DIR under TestDrive passes the wipe path guard
+    $env:TB_LEFTOVER_ACTION = $null
+    $env:TRACEBLOC_SKIP_LEFTOVER_GUARD = $null
+    Mock Warn {}; Mock Hint {}; Mock Log {}; Mock Info {}; Mock Write-Host {}
+  }
+  AfterEach { $env:USERPROFILE = $script:__up; $env:TB_LEFTOVER_ACTION = $null; $env:TRACEBLOC_SKIP_LEFTOVER_GUARD = $null }
+
+  It "clean slate -> no prompt, returns" {
+    $HOST_DATA_DIR = Join-Path $TestDrive 'g-clean'; New-Item -ItemType Directory -Path $HOST_DATA_DIR -Force | Out-Null
+    Mock Read-Host { throw "should not prompt" }
+    { Invoke-LeftoverDataGuard } | Should -Not -Throw
+  }
+  It "TRACEBLOC_SKIP_LEFTOVER_GUARD bypasses even with data present" {
+    $HOST_DATA_DIR = Join-Path $TestDrive 'g-skip'; $ib = [IO.Path]::Combine($HOST_DATA_DIR,'mysql','ibdata1')
+    New-Item -ItemType Directory -Path (Join-Path $HOST_DATA_DIR 'mysql') -Force | Out-Null; Set-Content $ib 'x'
+    $env:TRACEBLOC_SKIP_LEFTOVER_GUARD = "1"
+    Mock Read-Host { throw "should not prompt" }
+    { Invoke-LeftoverDataGuard } | Should -Not -Throw
+    $ib | Should -Exist
+  }
+  It "TB_LEFTOVER_ACTION=reuse keeps data and does not prompt" {
+    $HOST_DATA_DIR = Join-Path $TestDrive 'g-reuse'; $ib = [IO.Path]::Combine($HOST_DATA_DIR,'mysql','ibdata1')
+    New-Item -ItemType Directory -Path (Join-Path $HOST_DATA_DIR 'mysql') -Force | Out-Null; Set-Content $ib 'x'
+    $env:TB_LEFTOVER_ACTION = "reuse"
+    Mock Read-Host { throw "should not prompt" }
+    { Invoke-LeftoverDataGuard } | Should -Not -Throw
+    $ib | Should -Exist
+  }
+  It "TB_LEFTOVER_ACTION=wipe removes the leftover data" {
+    $HOST_DATA_DIR = Join-Path $TestDrive 'g-wipe'; $mysql = Join-Path $HOST_DATA_DIR 'mysql'
+    New-Item -ItemType Directory -Path $mysql -Force | Out-Null; Set-Content (Join-Path $mysql 'ibdata1') 'x'
+    $env:TB_LEFTOVER_ACTION = "wipe"
+    Invoke-LeftoverDataGuard
+    $mysql | Should -Not -Exist
+  }
+  It "non-interactive with no action -> aborts (Err), data untouched" {
+    $HOST_DATA_DIR = Join-Path $TestDrive 'g-abort'; $ib = [IO.Path]::Combine($HOST_DATA_DIR,'mysql','ibdata1')
+    New-Item -ItemType Directory -Path (Join-Path $HOST_DATA_DIR 'mysql') -Force | Out-Null; Set-Content $ib 'x'
+    Mock Test-CanPrompt { $false }
+    Mock Err { throw "abort" }
+    { Invoke-LeftoverDataGuard } | Should -Throw
+    $ib | Should -Exist
+  }
+  It "interactive 'w' wipes" {
+    $HOST_DATA_DIR = Join-Path $TestDrive 'g-iw'; $mysql = Join-Path $HOST_DATA_DIR 'mysql'
+    New-Item -ItemType Directory -Path $mysql -Force | Out-Null; Set-Content (Join-Path $mysql 'ibdata1') 'x'
+    Mock Test-CanPrompt { $true }
+    Mock Read-Host { "w" }
+    Invoke-LeftoverDataGuard
+    $mysql | Should -Not -Exist
+  }
+  It "interactive default (empty) aborts, data untouched" {
+    $HOST_DATA_DIR = Join-Path $TestDrive 'g-ia'; $ib = [IO.Path]::Combine($HOST_DATA_DIR,'mysql','ibdata1')
+    New-Item -ItemType Directory -Path (Join-Path $HOST_DATA_DIR 'mysql') -Force | Out-Null; Set-Content $ib 'x'
+    Mock Test-CanPrompt { $true }
+    Mock Read-Host { "" }
+    Mock Err { throw "abort" }
+    { Invoke-LeftoverDataGuard } | Should -Throw
+    $ib | Should -Exist
+  }
+  It "wipe unlinks a NESTED reparse point without deleting its target outside HOST_DATA_DIR (Bugbot r3655703571)" {
+    $HOST_DATA_DIR = Join-Path $TestDrive 'g-nested'; $mysql = Join-Path $HOST_DATA_DIR 'mysql'
+    New-Item -ItemType Directory -Path $mysql -Force | Out-Null; Set-Content (Join-Path $mysql 'ibdata1') 'x'
+    # A target OUTSIDE HOST_DATA_DIR whose contents must survive the wipe.
+    $outside = Join-Path $TestDrive 'outside-precious'
+    New-Item -ItemType Directory -Path $outside -Force | Out-Null
+    Set-Content (Join-Path $outside 'precious.dat') 'keep'
+    # Plant a nested reparse point inside the leftover mysql dir -> outside.
+    $link = Join-Path $mysql 'link'
+    try {
+      if ($IsWindows) { New-Item -ItemType Junction -Path $link -Target $outside -ErrorAction Stop | Out-Null }
+      else            { New-Item -ItemType SymbolicLink -Path $link -Target $outside -ErrorAction Stop | Out-Null }
+    } catch { Set-ItResult -Skipped -Because "cannot create a reparse point here: $_"; return }
+    $env:TB_LEFTOVER_ACTION = "wipe"
+    Invoke-LeftoverDataGuard
+    $mysql | Should -Not -Exist                                # leftover dir (+ the link entry) gone
+    (Join-Path $outside 'precious.dat') | Should -Exist        # target OUTSIDE never followed/deleted
+  }
+}
+
+Describe "Test-ApiReachable (bounded probe gates helm; Bugbot)" {
+  It "API answers within the timeout -> reachable" {
+    Mock kubectl { $global:LASTEXITCODE = 0 }
+    Test-ApiReachable | Should -BeTrue
+  }
+  It "API wedged/unreachable (non-zero exit) -> not reachable" {
+    Mock kubectl { $global:LASTEXITCODE = 1 }
+    Test-ApiReachable | Should -BeFalse
+  }
+}
+
+Describe "Get-InstalledClientInfo API gating (Bugbot)" {
+  It "unreachable API -> degrades to ListUnknown WITHOUT calling helm (no hang)" {
+    Mock kubectl { $global:LASTEXITCODE = 1 }     # bounded probe fails
+    Mock helm    { $global:LASTEXITCODE = 0 }
+    $info = Get-InstalledClientInfo
+    $info.ListUnknown | Should -BeTrue
+    Should -Not -Invoke helm
+  }
+  It "reachable API -> enumerates via helm and finds the client" {
+    Mock kubectl { $global:LASTEXITCODE = 0 }
+    Mock helm {
+      if ($args -contains "list") { '[{"name":"rel","namespace":"tracebloc","chart":"client-1.4.4"}]'; $global:LASTEXITCODE = 0; return }
+      if ($args -contains "get")  { '{"clientId":"acme"}'; $global:LASTEXITCODE = 0; return }
+      $global:LASTEXITCODE = 0
+    }
+    $info = Get-InstalledClientInfo
+    $info.Id | Should -Be "acme"
+    $info.ListUnknown | Should -BeFalse
+    Should -Invoke helm -ParameterFilter { $args -contains "list" }
   }
 }

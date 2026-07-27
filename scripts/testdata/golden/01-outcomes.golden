@@ -1,0 +1,70 @@
+tracebloc installer — the final summary
+=======================================
+The last thing you see. After applying the chart the installer waits for your
+services and reports one of these end states (summary.sh, print_summary). Shown
+byte-exact, colour off. The "your data never leaves this machine" trust claim
+appears ONLY on a verified connection.
+
+$ (install finished — connected)
+
+  ✔ Connected to tracebloc
+
+  Environment : tracebloc
+  Version     : 1.9.5
+  Mode        : CPU
+
+  Your secure environment is live 🟢
+    See it on your dashboard:  https://ai.tracebloc.io/clients
+
+  What's next
+    1. Ingest your data       tracebloc data ingest
+    2. Create a use case      https://ai.tracebloc.io/my-use-cases
+    3. Invite collaborators — they train on your data; it never leaves this machine
+
+  Run  tracebloc  to get started.
+
+  ────────────────────────────────────────
+  Logs ~/.tracebloc  ·  Data /tracebloc/tracebloc
+  After a reboot, tracebloc restarts automatically.
+
+
+$ (install finished — starting)
+
+  ⚠  Almost there — tracebloc is installed but still starting.
+
+  Components are still downloading/starting (first run can take a few minutes).
+  Check progress:   kubectl get pods -n tracebloc
+
+  Your client will show as 🟢 Online at https://ai.tracebloc.io/clients
+  once it finishes. Re-running this installer is safe.
+
+
+$ (install finished — bad_creds)
+
+  ✖ Couldn't connect — your Client ID or password was rejected.
+
+  The environment installed, but tracebloc refused those credentials.
+    1. Re-check them at https://ai.tracebloc.io/clients
+    2. Re-run this installer (safe to re-run)
+
+
+$ (install finished — image_pull)
+
+  ✖ Setup didn't finish — an image couldn't be pulled.
+
+  Inspect:  kubectl get pods -n tracebloc
+  Logs:     ~/.tracebloc/install-*.log
+  Re-running this installer is safe.
+
+
+$ (install finished — crash)
+
+  ✖ Setup didn't finish — a container is restarting (crash loop).
+
+  Inspect:  kubectl get pods -n tracebloc
+  Logs:     ~/.tracebloc/install-*.log
+  Re-running this installer is safe.
+
+
+$ (connected, on macOS/Windows — the reboot footer differs)
+  After a reboot, open Docker Desktop to bring tracebloc back.
