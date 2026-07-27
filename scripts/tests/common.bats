@@ -413,6 +413,21 @@ setup() {
   ! kill -0 "$stuck_pid" 2>/dev/null
 }
 
+@test "spin: deadline kills the wrapper's CHILDREN too, not just the subshell (Bugbot #442)" {
+  # `; true` stops bash exec-optimizing the subshell away, forcing the real
+  # wrapper+child shape cluster.sh's `( k3d … ) &` can produce.
+  ( sleep 30; true ) &
+  local wrapper=$!
+  sleep 0.3                                  # let the subshell fork its child
+  local child
+  child="$(pgrep -P "$wrapper" | head -1)"
+  [ -n "$child" ]
+  run spin "$wrapper" "waiting…" 1
+  [ "$status" -eq 124 ]
+  ! kill -0 "$wrapper" 2>/dev/null
+  ! kill -0 "$child" 2>/dev/null
+}
+
 @test "spin: without a deadline behaviour is unchanged (returns the pid's rc)" {
   # Called directly (not via `run`): spin must `wait` the pid, and a `run`
   # subshell can't wait a process it didn't spawn.

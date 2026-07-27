@@ -257,8 +257,17 @@ spin() {
   tput civis 2>/dev/null || true          # hide cursor
   while kill -0 "$pid" 2>/dev/null; do
     if [[ -n "$deadline_s" ]] && (( ticks * 12 >= deadline_s * 100 )); then
+      # Children FIRST: the pid is often a wrapper subshell (cluster.sh's
+      # `( k3d … ) &`) — signalling only the wrapper orphans the real worker,
+      # which keeps running (k3d keeps creating the cluster) after the install
+      # has already failed, racing any retry (Bugbot #442). Children must be
+      # signalled while the parent is alive (once it dies they reparent to
+      # init and pkill -P can't see them). Harmless when bash exec-optimized
+      # the wrapper away — then $pid IS the worker and pkill finds no children.
+      pkill -TERM -P "$pid" 2>/dev/null
       kill "$pid" 2>/dev/null
       sleep 0.5
+      pkill -KILL -P "$pid" 2>/dev/null
       kill -0 "$pid" 2>/dev/null && kill -9 "$pid" 2>/dev/null
       wait "$pid" 2>/dev/null
       printf "\r\033[K"
