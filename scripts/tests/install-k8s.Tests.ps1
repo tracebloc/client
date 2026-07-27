@@ -1455,3 +1455,16 @@ Describe "Bounded cluster-create wait (#412 / #426)" {
     $raw | Should -Match '(?s)Wait-ProcessWithDeadline -Process \$k3dProc.*?cluster delete \$CLUSTER_NAME.*?timed out after'
   }
 }
+
+Describe "Docker engine wait calibration (#413)" {
+  BeforeAll { $script:raw = Get-Content "$PSScriptRoot/../install-k8s.ps1" -Raw }
+  It "waits 10 minutes by default, overridable via TB_DOCKER_WAIT_MIN" {
+    $raw | Should -Match '\$waitMin = 10'
+    $raw | Should -Match 'TB_DOCKER_WAIT_MIN'
+    $raw | Should -Not -Match '\$maxWait = 60\b'
+  }
+  It "shows elapsed progress during the wait and names the observed state on expiry" {
+    $raw | Should -Match 'min elapsed; a first start can take up to'
+    $raw | Should -Match 'Get-Process "Docker Desktop"'
+  }
+}

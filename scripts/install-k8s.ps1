@@ -534,7 +534,13 @@ function Install-DockerDesktop {
   if (-not $dockerRunning) {
     Start-Process $dockerExe -ErrorAction SilentlyContinue
 
-    $maxWait = 60
+    # A first-ever Docker Desktop start on AV-heavy corporate machines
+    # routinely needs 5-10 minutes (WSL bootstrap, image unpack). The old
+    # 3-minute cap turned a normal cold start into a failed install plus a
+    # manual re-run (#413). Default 10 minutes; TB_DOCKER_WAIT_MIN overrides.
+    $waitMin = 10
+    if ("$env:TB_DOCKER_WAIT_MIN" -match '^\d+$') { $waitMin = [int]$env:TB_DOCKER_WAIT_MIN }
+    $maxWait = $waitMin * 20                     # 3s per iteration
     Write-Host -NoNewline "  "
     $frames = @([char]0x2807, [char]0x2819, [char]0x2839, [char]0x2838, [char]0x283C, [char]0x2834, [char]0x2826, [char]0x2827, [char]0x2847, [char]0x280F)
     $f = 0
@@ -544,26 +550,41 @@ function Install-DockerDesktop {
         $dkOut = (docker info --format '{{.ID}}' 2>$null) | Out-String
         if (-not [string]::IsNullOrWhiteSpace($dkOut)) { $dockerRunning = $true; break }
       } catch {}
+      # Honest elapsed status after the first minute — silent dead air on a
+      # slow first start reads as a hang.
+      $label = " Waiting for Docker..."
+      if ($i -ge 20) { $label = " Waiting for Docker... ($([math]::Floor($i / 20)) min elapsed; a first start can take up to $waitMin)" }
       Write-Host "`r  " -NoNewline
       Write-Host $frames[$f] -ForegroundColor Cyan -NoNewline
-      Write-Host " Waiting for Docker..." -NoNewline
+      Write-Host $label -NoNewline
       $f = ($f + 1) % $frames.Count
     }
-    Write-Host "`r                                    `r" -NoNewline
+    Write-Host ("`r" + (" " * 78) + "`r") -NoNewline
 
     if (-not $dockerRunning) {
       Write-Host ""
-      Warn "Docker is not responding yet."
-      Hint "This usually means it's still starting up."
-      Write-Host ""
-      Hint "1. Look for the Docker whale icon in your system tray"
-      Hint "2. If Docker is open, wait until it says 'Docker Desktop is running'"
-      Hint "3. If Docker shows an error window instead (e.g. 'Virtualization support not detected' or a WSL update prompt), fix that first - it may need a reboot"
-      Hint "4. Re-run this script once it's ready"
-      Write-Host ""
-      Hint "Nothing is broken -- Docker just needs a moment."
-      Write-Host ""
-      Err "Docker did not start in time. Re-run this script once Docker is ready."
+      # Name the observed state instead of a generic retry request (#413).
+      $ddProc = Get-Process "Docker Desktop" -ErrorAction SilentlyContinue
+      if (-not $ddProc) {
+        # Exited = crashed/blocked, not slow — the slow-start reassurance and
+        # the wait-override hint would point operators at the wrong fix
+        # (Bugbot #440): raising the wait can't help a dead process.
+        Warn "Docker Desktop is not running (its process exited)."
+        Hint "Start Docker Desktop from the Start menu. If it shows an error window"
+        Hint "(virtualization support, a WSL update prompt), fix that first - it may need a reboot."
+        Write-Host ""
+        Err "Docker Desktop exited before its engine came up. Start it, fix anything it reports, then re-run this script."
+      } else {
+        Warn "Docker Desktop is running, but its engine didn't come up within $waitMin minutes."
+        Hint "1. Look for the Docker whale icon in your system tray"
+        Hint "2. If Docker is open, wait until it says 'Docker Desktop is running'"
+        Hint "3. If Docker shows an error window instead (e.g. 'Virtualization support not detected' or a WSL update prompt), fix that first - it may need a reboot"
+        Write-Host ""
+        Hint "Nothing is broken -- a first start can be slow. Re-run this script once Docker is ready."
+        Hint "(TB_DOCKER_WAIT_MIN overrides the wait, e.g. `$env:TB_DOCKER_WAIT_MIN = '20'.)"
+        Write-Host ""
+        Err "Docker did not start within $waitMin minutes. Re-run this script once Docker is ready."
+      }
     }
   }
 
