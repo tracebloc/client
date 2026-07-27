@@ -113,6 +113,37 @@ seed_release_data() { mkdir -p "$HOST_DATA_DIR/tracebloc/data/ds1"; : >"$HOST_DA
   [ -e "$HOST_DATA_DIR/mysql/ibdata1" ]   # kept
 }
 
+# node-local has no /tracebloc host bind-mount, so "reuse" cannot adopt the host
+# data — the cluster starts empty in-node. reuse must stay honest, not claim
+# adoption (Bugbot r3655015727 / RFC-0003 §4 / #367).
+@test "guard: node-local reuse keeps data on disk but says it is NOT adopted" {
+  seed_flat_mysql
+  TB_STORAGE_MODE=node-local TB_LEFTOVER_ACTION=reuse run guard_leftover_data
+  [ "$status" -eq 0 ]
+  [ -e "$HOST_DATA_DIR/mysql/ibdata1" ]              # left on disk (not wiped)
+  [[ "$output" == *"can't adopt"* ]]                # honest: not adopted
+  [[ "$output" == *"starts empty"* ]]
+  [[ "$output" != *"keep and adopt the existing data"* ]]
+}
+
+@test "guard: node-local interactive reuse ('r') -> honest label, no false adopt claim" {
+  seed_flat_mysql
+  TB_STORAGE_MODE=node-local TB_TTY=/dev/stdin run guard_leftover_data <<< "r"
+  [ "$status" -eq 0 ]
+  [ -e "$HOST_DATA_DIR/mysql/ibdata1" ]              # kept, not wiped
+  [[ "$output" == *"NOT adopted"* ]]                # honest option label
+  [[ "$output" != *"reuse — keep and adopt the existing data"* ]]
+}
+
+# hostpath reuse is unchanged: it still adopts, no node-local warning.
+@test "guard: hostpath reuse still adopts (no node-local 'can't adopt' warning)" {
+  seed_flat_mysql
+  TB_STORAGE_MODE=hostpath TB_LEFTOVER_ACTION=reuse run guard_leftover_data
+  [ "$status" -eq 0 ]
+  [ -e "$HOST_DATA_DIR/mysql/ibdata1" ]
+  [[ "$output" != *"can't adopt"* ]]
+}
+
 @test "guard: --wipe-data (TB_LEFTOVER_ACTION=wipe) removes the detected data dirs" {
   seed_flat_mysql
   seed_release_data

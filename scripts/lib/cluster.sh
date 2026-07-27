@@ -282,7 +282,13 @@ guard_leftover_data() {
   if [[ -z "$action" ]]; then
     if _tty_usable; then
       prompt_header "How should the installer handle it?"
-      hint "  [r] reuse — keep and adopt the existing data"
+      if [[ "${TB_STORAGE_MODE:-hostpath}" == "node-local" ]]; then
+        # node-local can't adopt the host data (no /tracebloc bind-mount) — the
+        # cluster starts empty in-node — so don't offer "reuse = adopt" here (#367).
+        hint "  [r] keep  — leave the existing data on disk, unused (node-local starts empty; it is NOT adopted)"
+      else
+        hint "  [r] reuse — keep and adopt the existing data"
+      fi
       hint "  [w] wipe  — delete it and start fresh"
       hint "  [n] new   — install into a different directory"
       hint "  [a] abort — stop and sort it out myself (default)"
@@ -306,7 +312,16 @@ guard_leftover_data() {
 
   case "$action" in
     reuse)
-      log "Reusing existing data under ${HOST_DATA_DIR} (user choice)."
+      if [[ "${TB_STORAGE_MODE:-hostpath}" == "node-local" ]]; then
+        # node-local starts empty in-node — the host data is NOT adopted (RFC-0003
+        # §4 / #367). Keep the files on disk but say so plainly, so "reuse" never
+        # silently claims an adoption that node-local can't actually do.
+        warn "node-local storage can't adopt ${HOST_DATA_DIR} — the new cluster starts empty inside the node."
+        hint "Your existing data is left on disk, untouched but unused. Re-ingest it after setup ('tracebloc data ingest'), or use hostpath storage (TB_STORAGE_MODE=hostpath) to keep using it in place."
+        log "node-local: left ${HOST_DATA_DIR} on disk (NOT adopted — no host bind-mount)."
+      else
+        log "Reusing existing data under ${HOST_DATA_DIR} (user choice)."
+      fi
       ;;
     wipe)
       # Fail closed: if any data survived the wipe, abort rather than fall
