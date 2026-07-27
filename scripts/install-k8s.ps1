@@ -66,6 +66,32 @@ function RefreshPath {
               [System.Environment]::GetEnvironmentVariable("PATH","User")
 }
 
+# Spin a braille spinner while a process runs, bounded by a deadline (#426):
+# `k3d cluster create --wait` has no timeout of its own, so a stalled image
+# pull would otherwise spin forever. Returns $true when the process exited on
+# its own, $false on deadline expiry (the process is killed best-effort).
+# Extracted as a function so the deadline/kill path is unit-testable (#412).
+function Wait-ProcessWithDeadline {
+  param([object]$Process, [datetime]$Deadline, [string]$Message)
+  $frames = @([char]0x2807, [char]0x2819, [char]0x2839, [char]0x2838, [char]0x283C, [char]0x2834, [char]0x2826, [char]0x2827, [char]0x2847, [char]0x280F)
+  $f = 0
+  Write-Host -NoNewline "  "
+  while (-not $Process.HasExited) {
+    if ((Get-Date) -gt $Deadline) {
+      try { $Process.Kill() } catch {}
+      Write-Host "`r                                                   `r" -NoNewline
+      return $false
+    }
+    Write-Host "`r  " -NoNewline
+    Write-Host $frames[$f] -ForegroundColor Cyan -NoNewline
+    Write-Host " $Message" -NoNewline
+    $f = ($f + 1) % $frames.Count
+    Start-Sleep -Seconds 2
+  }
+  Write-Host "`r                                                   `r" -NoNewline
+  return $true
+}
+
 # Background jobs spawn their runspace in the user's HOME directory. On managed
 # machines (roaming profiles) HOME is often a UNC share (\\fileserver\home\user);
 # every cmd.exe a job starts there prints "CMD.EXE was started with the above
@@ -1209,22 +1235,34 @@ function New-K3dCluster {
     $k3dOutLog = Join-Path $env:TEMP "k3d-create-$(Get-Random).log"
     $k3dErrLog = Join-Path $env:TEMP "k3d-create-err-$(Get-Random).log"
 
-    $k3dProc = Start-Process -FilePath $k3dExe -ArgumentList $k3dArgString `
-      -NoNewWindow -PassThru `
-      -RedirectStandardOutput $k3dOutLog `
-      -RedirectStandardError $k3dErrLog
-
-    $frames = @([char]0x2807, [char]0x2819, [char]0x2839, [char]0x2838, [char]0x283C, [char]0x2834, [char]0x2826, [char]0x2827, [char]0x2847, [char]0x280F)
-    $f = 0
-    Write-Host -NoNewline "  "
-    while (-not $k3dProc.HasExited) {
-      Write-Host "`r  " -NoNewline
-      Write-Host $frames[$f] -ForegroundColor Cyan -NoNewline
-      Write-Host " Creating compute environment..." -NoNewline
-      $f = ($f + 1) % $frames.Count
-      Start-Sleep -Seconds 2
+    # -ErrorAction Stop + catch: a failed spawn (broken/invalid k3d.exe) used
+    # to leave $k3dProc null, and `while (-not $null.HasExited)` spun the
+    # spinner forever over a dead install (#412). Fail fast instead.
+    $k3dProc = $null
+    try {
+      $k3dProc = Start-Process -FilePath $k3dExe -ArgumentList $k3dArgString `
+        -NoNewWindow -PassThru -ErrorAction Stop `
+        -RedirectStandardOutput $k3dOutLog `
+        -RedirectStandardError $k3dErrLog
+    } catch {
+      Remove-Item $k3dOutLog, $k3dErrLog -Force -ErrorAction SilentlyContinue
+      if ($proxyCfg) { Remove-Item (Split-Path $proxyCfg -Parent) -Recurse -Force -ErrorAction SilentlyContinue }
+      if ($script:LOG_FILE) { Hint "Full log: $LOG_FILE" }
+      Err "Couldn't start k3d ($k3dExe): $($_.Exception.Message). Reinstall it (re-run this script) or check that the binary runs: k3d version"
     }
-    Write-Host "`r                                                   `r" -NoNewline
+
+    $timeoutMin = 15
+    if ("$env:TB_CREATE_TIMEOUT_MIN" -match '^\d+$') { $timeoutMin = [int]$env:TB_CREATE_TIMEOUT_MIN }
+    if (-not (Wait-ProcessWithDeadline -Process $k3dProc -Deadline (Get-Date).AddMinutes($timeoutMin) -Message "Creating compute environment...")) {
+      $tail = @()
+      if (Test-Path $k3dErrLog) { $tail = @(Get-Content $k3dErrLog -ErrorAction SilentlyContinue | Select-Object -Last 5) }
+      if (-not $tail -and (Test-Path $k3dOutLog)) { $tail = @(Get-Content $k3dOutLog -ErrorAction SilentlyContinue | Select-Object -Last 5) }
+      foreach ($line in $tail) { Warn "k3d: $line" }
+      if ($script:LOG_FILE) { Hint "Full log: $LOG_FILE" }
+      Remove-Item $k3dOutLog, $k3dErrLog -Force -ErrorAction SilentlyContinue
+      if ($proxyCfg) { Remove-Item (Split-Path $proxyCfg -Parent) -Recurse -Force -ErrorAction SilentlyContinue }
+      Err "Compute environment creation timed out after $timeoutMin minutes. Check that Docker is healthy and this network can pull images, then re-run. (TB_CREATE_TIMEOUT_MIN overrides the bound.)"
+    }
 
     $k3dExitCode = $k3dProc.ExitCode
     $k3dStdout = if (Test-Path $k3dOutLog) { Get-Content $k3dOutLog -Raw -ErrorAction SilentlyContinue } else { "" }

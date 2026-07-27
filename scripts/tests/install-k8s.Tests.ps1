@@ -1372,3 +1372,34 @@ Describe "Pinned tool versions - no api.github.com (#382 / #410)" {
     }
   }
 }
+
+Describe "Bounded cluster-create wait (#412 / #426)" {
+  Context "Wait-ProcessWithDeadline" {
+    It "returns true when the process exits on its own" {
+      $proc = [pscustomobject]@{ HasExited = $true }
+      Wait-ProcessWithDeadline -Process $proc -Deadline (Get-Date).AddMinutes(1) -Message "x" | Should -BeTrue
+    }
+    It "kills the process and returns false once the deadline passes" {
+      $global:TbTestKilled = $false
+      $proc = [pscustomobject]@{ HasExited = $false }
+      $proc | Add-Member -MemberType ScriptMethod -Name Kill -Value { $global:TbTestKilled = $true }
+      try {
+        Wait-ProcessWithDeadline -Process $proc -Deadline (Get-Date).AddMinutes(-1) -Message "x" | Should -BeFalse
+        $global:TbTestKilled | Should -BeTrue
+      } finally {
+        Remove-Variable -Name TbTestKilled -Scope Global -ErrorAction SilentlyContinue
+      }
+    }
+  }
+
+  It "the k3d create spawn fails fast instead of leaving a null process (#412)" {
+    $raw = Get-Content "$PSScriptRoot/../install-k8s.ps1" -Raw
+    $raw | Should -Match '(?s)try \{\s*\$k3dProc = Start-Process.*?-ErrorAction Stop'
+  }
+
+  It "the create wait is deadline-bounded — the unbounded HasExited loop is gone" {
+    $raw = Get-Content "$PSScriptRoot/../install-k8s.ps1" -Raw
+    $raw | Should -Match 'Wait-ProcessWithDeadline -Process \$k3dProc'
+    $raw | Should -Not -Match 'while \(-not \$k3dProc\.HasExited\)'
+  }
+}
