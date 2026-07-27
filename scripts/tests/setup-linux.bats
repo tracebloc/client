@@ -154,6 +154,29 @@ setup() {
   [[ "$output" != *"docker-ce.repo"* ]]
 }
 
+# ── _fetch_kubectl: the ~50 MB binary must be stall-bounded ────────────────
+# curl_secure supplies a default --max-time, and only steps aside when it SEES
+# --speed-limit/--speed-time — so a large-binary fetch has to carry those flags at
+# the call site or it inherits a hard deadline that fails a slow-but-healthy link
+# (Bugbot on backend#1252; same reasoning as _fetch_k3d_release below).
+@test "_fetch_kubectl: stall-bounded with no hard deadline (large binary)" {
+  TB_TOOLS_DIR="$BATS_TEST_TMPDIR/bin"; TB_TOOLS_SUDO=""
+  mkdir -p "$TB_TOOLS_DIR"
+  curl() {                      # honour "-o <dest>" so the real chmod/mv succeed
+    record "curl $*"
+    local prev="" a
+    for a in "$@"; do [ "$prev" = "-o" ] && printf 'x' >"$a"; prev="$a"; done
+    return 0
+  }
+  sha256sum() { cat >/dev/null; return 0; }
+  run _fetch_kubectl v1.29.4 amd64
+  [ "$status" -eq 0 ]
+  run mock_calls
+  [[ "$output" == *"--speed-limit 1024 --speed-time 60"* ]]
+  [[ "$output" != *"--max-time"* ]]
+  [[ "$output" == *"--tlsv1.2"* ]]
+}
+
 # ── install_k3d: pinned release, verified direct download (#382) ────────────
 # The binary is fetched straight from the pinned release and verified against
 # the release's checksums.txt — upstream's install.sh is NOT used (it performs
