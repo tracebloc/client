@@ -1417,3 +1417,54 @@ Describe "Pinned tool versions - no api.github.com (#382 / #410)" {
     }
   }
 }
+
+Describe "Bounded cluster-create wait (#412 / #426)" {
+  Context "Wait-ProcessWithDeadline" {
+    It "returns true when the process exits on its own" {
+      $proc = [pscustomobject]@{ HasExited = $true }
+      Wait-ProcessWithDeadline -Process $proc -Deadline (Get-Date).AddMinutes(1) -Message "x" | Should -BeTrue
+    }
+    It "kills the process and returns false once the deadline passes" {
+      $global:TbTestKilled = $false
+      $proc = [pscustomobject]@{ HasExited = $false }
+      $proc | Add-Member -MemberType ScriptMethod -Name Kill -Value { $global:TbTestKilled = $true }
+      try {
+        Wait-ProcessWithDeadline -Process $proc -Deadline (Get-Date).AddMinutes(-1) -Message "x" | Should -BeFalse
+        $global:TbTestKilled | Should -BeTrue
+      } finally {
+        Remove-Variable -Name TbTestKilled -Scope Global -ErrorAction SilentlyContinue
+      }
+    }
+  }
+
+  It "the k3d create spawn fails fast instead of leaving a null process (#412)" {
+    $raw = Get-Content "$PSScriptRoot/../install-k8s.ps1" -Raw
+    $raw | Should -Match '(?s)try \{\s*\$k3dProc = Start-Process.*?-ErrorAction Stop'
+  }
+
+  It "the create wait is deadline-bounded — the unbounded HasExited loop is gone" {
+    $raw = Get-Content "$PSScriptRoot/../install-k8s.ps1" -Raw
+    $raw | Should -Match 'Wait-ProcessWithDeadline -Process \$k3dProc'
+    $raw | Should -Not -Match 'while \(-not \$k3dProc\.HasExited\)'
+  }
+
+  It "the timeout path removes the partial cluster before failing (Bugbot #439)" {
+    # Killing k3d mid --wait skips its rollback; without the delete, a re-run
+    # adopts the half-created cluster as "already running".
+    $raw = Get-Content "$PSScriptRoot/../install-k8s.ps1" -Raw
+    $raw | Should -Match '(?s)Wait-ProcessWithDeadline -Process \$k3dProc.*?cluster delete \$CLUSTER_NAME.*?timed out after'
+  }
+}
+
+Describe "Docker engine wait calibration (#413)" {
+  BeforeAll { $script:raw = Get-Content "$PSScriptRoot/../install-k8s.ps1" -Raw }
+  It "waits 10 minutes by default, overridable via TB_DOCKER_WAIT_MIN" {
+    $raw | Should -Match '\$waitMin = 10'
+    $raw | Should -Match 'TB_DOCKER_WAIT_MIN'
+    $raw | Should -Not -Match '\$maxWait = 60\b'
+  }
+  It "shows elapsed progress during the wait and names the observed state on expiry" {
+    $raw | Should -Match 'min elapsed; a first start can take up to'
+    $raw | Should -Match 'Get-Process "Docker Desktop"'
+  }
+}
