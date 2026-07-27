@@ -695,6 +695,20 @@ _create_new_cluster() {
       _handle_existing_cluster
       return 0
     fi
+    if [[ "$create_rc" -eq 124 ]]; then
+      # spin's backstop fired: k3d wedged past its own --timeout (typically a
+      # hung Docker daemon) and was killed. Say so explicitly — the create log
+      # is often EMPTY here, so without this the operator gets a bare failure
+      # with no timeout hint (Bugbot #442). And killing k3d mid-create skips
+      # its rollback: delete the partial cluster so a re-run doesn't adopt a
+      # half-created environment via the "already exists" branch above
+      # (parity with the Windows fix on #439).
+      warn "Creating the environment timed out after $(( _create_timeout_min + 5 )) minutes."
+      hint "Check that Docker is healthy and this machine can pull images, then re-run. (TB_CREATE_TIMEOUT_MIN raises the k3d bound.)"
+      ( k3d cluster delete "$CLUSTER_NAME" >>"${LOG_FILE:-/dev/null}" 2>&1 ) &
+      spin "$!" "Removing the partially created environment…" 120 \
+        || warn "Couldn't remove the partial cluster - run 'k3d cluster delete $CLUSTER_NAME' before re-running."
+    fi
     cat "$create_out" >> "${LOG_FILE:-/dev/null}" 2>/dev/null
     cat "$create_out" >&2
     rm -f "$create_out"

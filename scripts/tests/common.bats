@@ -428,6 +428,20 @@ setup() {
   ! kill -0 "$child" 2>/dev/null
 }
 
+@test "spin: deadline KILLs a TERM-immune child even after the wrapper died (Bugbot #442 r2)" {
+  # The child ignores TERM; the wrapper dies at TERM, reparenting the child to
+  # init — only a KILL by captured PID can still reach it.
+  ( bash -c 'trap "" TERM; sleep 30'; true ) &
+  local wrapper=$!
+  sleep 0.4
+  local child
+  child="$(pgrep -P "$wrapper" | head -1)"
+  [ -n "$child" ]
+  run spin "$wrapper" "waiting…" 1
+  [ "$status" -eq 124 ]
+  ! kill -0 "$child" 2>/dev/null
+}
+
 @test "spin: without a deadline behaviour is unchanged (returns the pid's rc)" {
   # Called directly (not via `run`): spin must `wait` the pid, and a `run`
   # subshell can't wait a process it didn't spawn.

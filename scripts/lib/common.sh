@@ -253,6 +253,7 @@ spin() {
   local frames=('⠋' '⠙' '⠹' '⠸' '⠼' '⠴' '⠦' '⠧' '⠇' '⠏')
   local i=0
   local ticks=0                           # one tick ≈ 0.12s
+  local _spin_kids="" _spin_k=""          # deadline path: captured child PIDs
 
   tput civis 2>/dev/null || true          # hide cursor
   while kill -0 "$pid" 2>/dev/null; do
@@ -260,14 +261,18 @@ spin() {
       # Children FIRST: the pid is often a wrapper subshell (cluster.sh's
       # `( k3d … ) &`) — signalling only the wrapper orphans the real worker,
       # which keeps running (k3d keeps creating the cluster) after the install
-      # has already failed, racing any retry (Bugbot #442). Children must be
-      # signalled while the parent is alive (once it dies they reparent to
-      # init and pkill -P can't see them). Harmless when bash exec-optimized
-      # the wrapper away — then $pid IS the worker and pkill finds no children.
+      # has already failed, racing any retry (Bugbot #442). Capture the child
+      # PIDs BEFORE any signal: once the wrapper dies they reparent to init
+      # and pkill -P can't see them (Bugbot #442 r2), so the KILL sweep must
+      # address them by captured PID. Harmless when bash exec-optimized the
+      # wrapper away — then $pid IS the worker and there are no children.
+      _spin_kids="$(pgrep -P "$pid" 2>/dev/null || true)"
       pkill -TERM -P "$pid" 2>/dev/null
       kill "$pid" 2>/dev/null
       sleep 0.5
-      pkill -KILL -P "$pid" 2>/dev/null
+      for _spin_k in $_spin_kids; do
+        kill -0 "$_spin_k" 2>/dev/null && kill -9 "$_spin_k" 2>/dev/null
+      done
       kill -0 "$pid" 2>/dev/null && kill -9 "$pid" 2>/dev/null
       wait "$pid" 2>/dev/null
       printf "\r\033[K"

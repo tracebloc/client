@@ -396,3 +396,15 @@ setup() {
   grep -q 'spin "\$!" "Creating your secure environment…" "\$(( (_create_timeout_min + 5) \* 60 ))"' \
     "$BATS_TEST_DIRNAME/../lib/cluster.sh"
 }
+
+@test "create backstop names the timeout and removes the partial cluster (Bugbot #442)" {
+  # rc 124 must produce an explicit timed-out message (the create log is often
+  # empty on a hung daemon) and must not leave the half-created cluster for a
+  # re-run to adopt via the "already exists" branch.
+  grep -q 'timed out after \$(( _create_timeout_min + 5 )) minutes' \
+    "$BATS_TEST_DIRNAME/../lib/cluster.sh"
+  grep -q 'TB_CREATE_TIMEOUT_MIN raises the k3d bound' \
+    "$BATS_TEST_DIRNAME/../lib/cluster.sh"
+  grep -q 'k3d cluster delete "\$CLUSTER_NAME"' \
+    "$BATS_TEST_DIRNAME/../lib/cluster.sh"
+}
