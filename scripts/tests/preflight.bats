@@ -437,9 +437,17 @@ setup() {
   [ "$status" -eq 0 ]
 }
 
+@test "early_data_dir_guard: NFS + existing data dir -> silent pass (healthy re-run reaches assess; Bugbot #441)" {
+  _pf_fstype() { echo nfs4; }
+  mkdir -p "$BATS_TEST_TMPDIR/existing/.tracebloc"
+  HOST_DATA_DIR="$BATS_TEST_TMPDIR/existing/.tracebloc" run early_data_dir_guard
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+}
+
 @test "early_data_dir_guard: NFS -> refuses before any mkdir, names the fix" {
   _pf_fstype() { echo nfs4; }
-  run early_data_dir_guard
+  HOST_DATA_DIR="$BATS_TEST_TMPDIR/fresh/.tracebloc" run early_data_dir_guard
   [ "$status" -eq 1 ]
   [[ "$output" == *"network filesystem (nfs4)"* ]]
   [[ "$output" == *"HOST_DATA_DIR"* ]]

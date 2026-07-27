@@ -319,6 +319,11 @@ early_data_dir_guard() {
   local target fstype
   target="${HOST_DATA_DIR:-${HOME:-}/.tracebloc}"
   [[ -n "${TRACEBLOC_ALLOW_NETWORK_FS:-}" ]] && return 0
+  # An EXISTING data dir has no at-risk mkdir here, and a healthy machine's
+  # re-run must keep reaching the assess hand-off exactly as it did when this
+  # check lived only in run_preflight (Bugbot #441). The full preflight guard
+  # below still classifies network storage for actual (re)installs.
+  [[ -d "$target" ]] && return 0
   fstype="$(_pf_fstype "$target")"
   [[ -z "$fstype" ]] && return 0                 # undetermined — assume local
   _pf_is_network_fstype "$fstype" || return 0
