@@ -411,7 +411,16 @@ _reconcile_adopted_client() {
   # wedged kube-apiserver can't hang it forever (#426).
   local _helm_timeout_min="${TB_HELM_TIMEOUT_MIN:-10}"
   case "$_helm_timeout_min" in ''|*[!0-9]*) _helm_timeout_min=10 ;; esac
-  if ! spin_cmd_bounded "$(( _helm_timeout_min * 60 ))" "Reconciling the existing client…" helm "${_args[@]}"; then
+  local _helm_rc=0
+  spin_cmd_bounded "$(( _helm_timeout_min * 60 ))" "Reconciling the existing client…" helm "${_args[@]}" || _helm_rc=$?
+  if [[ "$_helm_rc" -ne 0 ]]; then
+    if [[ "$_helm_rc" -eq 124 ]]; then
+      # A SIGKILLed helm can leave the release wedged as pending-upgrade; the
+      # NEXT run then fails with "another operation is in progress" and no
+      # clue (Bugbot #442). Name the unwedge command now.
+      hint "If the next run reports 'another operation is in progress', unwedge the release first:"
+      hint "  helm -n $_ns rollback $_ns    (returns to the previous, working release)"
+    fi
     error "Reconcile of the existing client failed. Check the log for details: ${LOG_FILE:-}"
   fi
 
@@ -838,11 +847,21 @@ EOF
   # kube-apiserver from hanging the install forever (#426).
   local _helm_timeout_min="${TB_HELM_TIMEOUT_MIN:-10}"
   case "$_helm_timeout_min" in ''|*[!0-9]*) _helm_timeout_min=10 ;; esac
-  if ! spin_cmd_bounded "$(( _helm_timeout_min * 60 ))" "Installing the tracebloc client…" \
+  local _helm_rc=0
+  spin_cmd_bounded "$(( _helm_timeout_min * 60 ))" "Installing the tracebloc client…" \
     helm upgrade --install "$TB_NAMESPACE" "$chart_ref" \
     --namespace "$TB_NAMESPACE" \
     --create-namespace \
-    --values "$values_file"; then
+    --values "$values_file" || _helm_rc=$?
+  if [[ "$_helm_rc" -ne 0 ]]; then
+    if [[ "$_helm_rc" -eq 124 ]]; then
+      # A SIGKILLed helm can leave the release wedged as pending-install /
+      # pending-upgrade; the NEXT run then fails with "another operation is
+      # in progress" and no clue (Bugbot #442). Name the unwedge command now.
+      hint "If the next run reports 'another operation is in progress', unwedge the release first:"
+      hint "  first install:  helm -n $TB_NAMESPACE uninstall $TB_NAMESPACE    (removes only the half-installed release)"
+      hint "  upgrade:        helm -n $TB_NAMESPACE rollback $TB_NAMESPACE     (returns to the previous release)"
+    fi
     error "Client installation failed. Check the log for details: ${LOG_FILE:-}"
   fi
 
