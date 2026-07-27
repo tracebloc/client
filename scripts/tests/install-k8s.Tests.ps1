@@ -1386,6 +1386,26 @@ Describe "Pinned tool versions - no api.github.com (#382 / #410)" {
     }
   }
 
+  It "latest lookups carry a request timeout (Bugbot: no-response hosts must not hang)" {
+    $ast = [System.Management.Automation.Language.Parser]::ParseFile(
+      "$PSScriptRoot/../install-k8s.ps1", [ref]$null, [ref]$null)
+    $fn = $ast.FindAll({ param($n)
+      $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'Get-LatestGitHubTag'
+    }, $true) | Select-Object -First 1
+    $iwr = $fn.FindAll({ param($n)
+      $n -is [System.Management.Automation.Language.CommandAst] -and $n.GetCommandName() -eq 'Invoke-WebRequest'
+    }, $true)
+    $iwr.Count | Should -BeGreaterThan 0
+    foreach ($call in $iwr) {
+      $call.CommandElements.Where({
+        $_ -is [System.Management.Automation.Language.CommandParameterAst] -and $_.ParameterName -eq 'TimeoutSec'
+      }).Count | Should -Be 1
+    }
+    # The inline helm resolver too.
+    (Get-Content "$PSScriptRoot/../install-k8s.ps1" -Raw) |
+      Should -Match 'helm-latest-version" -UseBasicParsing -TimeoutSec 30'
+  }
+
   Context "Get-LatestGitHubTag" {
     It "reads the tag from the /releases/latest redirect Location header" {
       Mock Invoke-WebRequest { [pscustomobject]@{ Headers = @{ Location = "https://github.com/k3d-io/k3d/releases/tag/v5.9.1" } } }

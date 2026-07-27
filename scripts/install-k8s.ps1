@@ -742,8 +742,10 @@ function Get-LatestGitHubTag {
   param([string]$Repo)
   $loc = $null
   try {
+    # -TimeoutSec: a host that accepts the connect but never answers must not
+    # hang the install (parity with the bash lookups' --max-time 30).
     $resp = Invoke-WebRequest -Uri "https://github.com/$Repo/releases/latest" `
-      -Method Head -MaximumRedirection 0 -UseBasicParsing -ErrorAction Stop
+      -Method Head -MaximumRedirection 0 -UseBasicParsing -TimeoutSec 30 -ErrorAction Stop
     $loc = $resp.Headers['Location']
   } catch {
     # Windows PowerShell 5.1 throws on a 3xx when redirects are disabled; the
@@ -855,7 +857,7 @@ function Install-K3dAndHelm {
       # Pinned by default (#410); "latest" resolves via get.helm.sh (no API),
       # mirroring lib/setup-linux.sh.
       $helmVer = Resolve-ToolVersion -Name "helm" -Value $HelmVersion -LatestResolver {
-        $c = (Invoke-WebRequest "https://get.helm.sh/helm-latest-version" -UseBasicParsing).Content.Trim()
+        $c = (Invoke-WebRequest "https://get.helm.sh/helm-latest-version" -UseBasicParsing -TimeoutSec 30).Content.Trim()
         if (-not $c) { throw "empty helm-latest-version response" }
         $c
       }
