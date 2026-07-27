@@ -1356,6 +1356,31 @@ Describe "Pinned tool versions - no api.github.com (#382 / #410)" {
     It "fails closed when 'latest' cannot be resolved" {
       { Resolve-ToolVersion -Name "helm" -Value "latest" -LatestResolver { $null } } | Should -Throw "*ERR:*"
     }
+    It "retries transient lookup failures before giving up (retry 3 5 parity; Bugbot)" {
+      Mock Start-Sleep {}
+      Mock Warn {}
+      $global:TbTestAttempts = 0
+      try {
+        $resolver = { $global:TbTestAttempts++; if ($global:TbTestAttempts -lt 3) { throw "blip" }; "v7.7.7" }
+        Resolve-ToolVersion -Name "k3d" -Value "latest" -LatestResolver $resolver | Should -Be "v7.7.7"
+        $global:TbTestAttempts | Should -Be 3
+      } finally {
+        Remove-Variable -Name TbTestAttempts -Scope Global -ErrorAction SilentlyContinue
+      }
+    }
+    It "fails closed after exhausting retries on a persistently failing lookup" {
+      Mock Start-Sleep {}
+      Mock Warn {}
+      Mock Err { throw "ERR: $($args -join ' ')" }
+      $global:TbTestAttempts = 0
+      try {
+        $resolver = { $global:TbTestAttempts++; throw "down" }
+        { Resolve-ToolVersion -Name "helm" -Value "latest" -LatestResolver $resolver } | Should -Throw "*ERR:*"
+        $global:TbTestAttempts | Should -Be 3
+      } finally {
+        Remove-Variable -Name TbTestAttempts -Scope Global -ErrorAction SilentlyContinue
+      }
+    }
     It "fails closed on a non-release-shaped value" {
       { Resolve-ToolVersion -Name "k3d" -Value "v1.2.3-../../heads/main" -LatestResolver { $null } } | Should -Throw "*ERR:*"
     }
@@ -1401,6 +1426,13 @@ Describe "Bounded cluster-create wait (#412 / #426)" {
     $raw = Get-Content "$PSScriptRoot/../install-k8s.ps1" -Raw
     $raw | Should -Match 'Wait-ProcessWithDeadline -Process \$k3dProc'
     $raw | Should -Not -Match 'while \(-not \$k3dProc\.HasExited\)'
+  }
+
+  It "the timeout path removes the partial cluster before failing (Bugbot #439)" {
+    # Killing k3d mid --wait skips its rollback; without the delete, a re-run
+    # adopts the half-created cluster as "already running".
+    $raw = Get-Content "$PSScriptRoot/../install-k8s.ps1" -Raw
+    $raw | Should -Match '(?s)Wait-ProcessWithDeadline -Process \$k3dProc.*?cluster delete \$CLUSTER_NAME.*?timed out after'
   }
 }
 

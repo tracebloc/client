@@ -781,7 +781,14 @@ function Resolve-ToolVersion {
   param([string]$Name, [string]$Value, [scriptblock]$LatestResolver)
   $v = $Value
   if ($v -eq "latest") {
-    $v = & $LatestResolver
+    # Retry parity with the old lookups and lib/setup-linux.sh (`retry 3 5`):
+    # a single network blip must not abort the install (Bugbot #438). The
+    # resolver THROWS on failure so Invoke-WithRetry can drive the attempts.
+    try {
+      $v = Invoke-WithRetry -Label "$Name version lookup" -ScriptBlock $LatestResolver
+    } catch {
+      $v = $null
+    }
     if (-not $v) { Err "Couldn't resolve the latest $Name release. Set $($Name.ToUpper())_VERSION to a release tag and re-run." }
   }
   if (-not (Test-ReleaseTagShape $v)) {
@@ -805,7 +812,11 @@ function Install-K3dAndHelm {
       Log "Downloading k3d binary directly ($arch)..."
       # Pinned by default (#382 / #410) — no api.github.com on the default path.
       $k3dVer = Resolve-ToolVersion -Name "k3d" -Value $K3dVersion `
-        -LatestResolver { Get-LatestGitHubTag -Repo "k3d-io/k3d" }
+        -LatestResolver {
+          $tag = Get-LatestGitHubTag -Repo "k3d-io/k3d"
+          if (-not $tag) { throw "no Location header on the /releases/latest redirect" }
+          $tag
+        }
       $k3dDest = "$TOOL_DIR\k3d.exe"
       Invoke-WithRetry -Label "k3d download" -ScriptBlock {
         Invoke-WebRequest "https://github.com/k3d-io/k3d/releases/download/$k3dVer/k3d-windows-$arch.exe" `
@@ -860,7 +871,9 @@ function Install-K3dAndHelm {
       # Pinned by default (#410); "latest" resolves via get.helm.sh (no API),
       # mirroring lib/setup-linux.sh.
       $helmVer = Resolve-ToolVersion -Name "helm" -Value $HelmVersion -LatestResolver {
-        try { (Invoke-WebRequest "https://get.helm.sh/helm-latest-version" -UseBasicParsing).Content.Trim() } catch { $null }
+        $c = (Invoke-WebRequest "https://get.helm.sh/helm-latest-version" -UseBasicParsing).Content.Trim()
+        if (-not $c) { throw "empty helm-latest-version response" }
+        $c
       }
       $helmZip = "$env:TEMP\helm-$helmVer-windows-$arch.zip"
       Invoke-WithRetry -Label "helm download" -ScriptBlock {
@@ -1277,6 +1290,21 @@ function New-K3dCluster {
       if ($script:LOG_FILE) { Hint "Full log: $LOG_FILE" }
       Remove-Item $k3dOutLog, $k3dErrLog -Force -ErrorAction SilentlyContinue
       if ($proxyCfg) { Remove-Item (Split-Path $proxyCfg -Parent) -Recurse -Force -ErrorAction SilentlyContinue }
+      # Killing k3d mid --wait skips its own rollback; a leftover partial
+      # cluster would be adopted as "already running" by the next run's
+      # reuse path (Bugbot #439). Remove it — bounded — before failing.
+      Info "Removing the partially created environment..."
+      $partialDeleted = $false
+      try {
+        $delProc = Start-Process -FilePath $k3dExe -ArgumentList "cluster delete $CLUSTER_NAME" `
+          -NoNewWindow -PassThru -ErrorAction Stop
+        if (Wait-ProcessWithDeadline -Process $delProc -Deadline (Get-Date).AddMinutes(2) -Message "Removing partial environment...") {
+          $partialDeleted = ($delProc.ExitCode -eq 0)
+        }
+      } catch {}
+      if (-not $partialDeleted) {
+        Warn "Couldn't remove the partial cluster automatically - run 'k3d cluster delete $CLUSTER_NAME' before re-running."
+      }
       Err "Compute environment creation timed out after $timeoutMin minutes. Check that Docker is healthy and this network can pull images, then re-run. (TB_CREATE_TIMEOUT_MIN overrides the bound.)"
     }
 
