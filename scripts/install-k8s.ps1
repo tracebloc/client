@@ -904,6 +904,40 @@ function Get-LeftoverDataDirs {
 # HOST_DATA_DIR (Confirm-DataDir guarantees it is under USERPROFILE). Returns
 # $true only if everything was removed, so the caller can fail closed on survivors
 # (e.g. locked files) instead of adopting them. Mirrors bash _wipe_leftover_data.
+# Recursively delete $Path the way bash `rm -rf` does — WITHOUT ever following a
+# reparse point (junction/symlink) nested anywhere in the tree. Windows
+# PowerShell 5.1's `Remove-Item -Recurse` descends INTO nested junctions and can
+# delete their targets OUTSIDE the validated tree (Bugbot r3655703571); bash
+# unlinks them instead. We walk depth-first: a reparse-point entry is unlinked
+# (Directory.Delete(path,$false) for a dir link, File.Delete for a file link) and
+# never descended; a real directory has its children removed first, then itself;
+# plain files are deleted. Returns $true only when $Path is fully gone. Behaves
+# identically on PS 5.1 and 7+ (no reliance on -Recurse's version-specific quirk).
+function Remove-TreeNoFollow {
+  param([string]$Path)
+  $item = Get-Item -LiteralPath $Path -Force -ErrorAction SilentlyContinue
+  if (-not $item) { return (-not (Test-Path -LiteralPath $Path)) }
+  $isReparse = [bool]($item.Attributes -band [IO.FileAttributes]::ReparsePoint)
+  if ($item.PSIsContainer -and -not $isReparse) {
+    $ok = $true
+    foreach ($child in @(Get-ChildItem -LiteralPath $Path -Force -ErrorAction SilentlyContinue)) {
+      if (-not (Remove-TreeNoFollow -Path $child.FullName)) { $ok = $false }
+    }
+    try { [System.IO.Directory]::Delete($Path, $false) } catch { $ok = $false }
+    return ($ok -and -not (Test-Path -LiteralPath $Path))
+  }
+  # Reparse point (dir junction / file symlink) or a plain file: unlink the entry
+  # itself — for a directory reparse point Directory.Delete(...,$false) removes the
+  # link without touching the target.
+  try {
+    if ($item.PSIsContainer) { [System.IO.Directory]::Delete($Path, $false) }
+    else { [System.IO.File]::Delete($Path) }
+  } catch {
+    try { Remove-Item -LiteralPath $Path -Force -ErrorAction Stop } catch {}
+  }
+  return (-not (Test-Path -LiteralPath $Path))
+}
+
 function Remove-LeftoverData {
   param([string[]]$Dirs)
   $base = [System.IO.Path]::GetFullPath($HOST_DATA_DIR)
@@ -923,9 +957,8 @@ function Remove-LeftoverData {
       Warn "Refusing to wipe reparse point $d - it could point outside $HOST_DATA_DIR; remove it by hand."; $ok = $false; continue
     }
     Log "Wiping leftover data: $d"
-    Remove-Item -LiteralPath $d -Recurse -Force -ErrorAction SilentlyContinue
-    if (Test-Path -LiteralPath $d) {
-      Warn "Could not remove $d - files may be locked or owned by another user."; $ok = $false
+    if (-not (Remove-TreeNoFollow -Path $d)) {
+      Warn "Could not fully remove $d - files may be locked, owned by another user, or a nested reparse point was refused."; $ok = $false
     }
   }
   return $ok
