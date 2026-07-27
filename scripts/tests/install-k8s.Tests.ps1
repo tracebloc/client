@@ -1130,6 +1130,117 @@ Describe "Invoke-ProvisionClient" {
   }
 }
 
+Describe "Get-LeftoverDataDirs (Windows leftover-data detection; Bugbot r3655218480)" {
+  # Paths are built with Join-Path / [IO.Path]::Combine so the tests pass under
+  # BOTH Windows and Linux pwsh (CI runs Pester on ubuntu too — a hardcoded '\'
+  # is a literal char, not a separator, on Linux).
+  It "nonexistent HOST_DATA_DIR -> nothing" {
+    @(Get-LeftoverDataDirs -Base (Join-Path $TestDrive 'nope')).Count | Should -Be 0
+  }
+  It "empty dirs / values.yaml are not data" {
+    $b = Join-Path $TestDrive 'clean'
+    New-Item -ItemType Directory -Path (Join-Path $b 'mysql') -Force | Out-Null   # empty
+    New-Item -ItemType Directory -Path (Join-Path $b 'logs')  -Force | Out-Null
+    Set-Content (Join-Path $b 'values.yaml') 'x'
+    @(Get-LeftoverDataDirs -Base $b).Count | Should -Be 0
+  }
+  It "flat mysql data detected" {
+    $b = Join-Path $TestDrive 'flat'
+    New-Item -ItemType Directory -Path (Join-Path $b 'mysql') -Force | Out-Null
+    Set-Content ([IO.Path]::Combine($b,'mysql','ibdata1')) 'x'
+    @(Get-LeftoverDataDirs -Base $b) | Should -Contain (Join-Path $b 'mysql')
+  }
+  It "per-release layout detected" {
+    $b = Join-Path $TestDrive 'rel'
+    New-Item -ItemType Directory -Path ([IO.Path]::Combine($b,'tracebloc','data','ds1')) -Force | Out-Null
+    Set-Content ([IO.Path]::Combine($b,'tracebloc','data','ds1','rows.csv')) 'x'
+    @(Get-LeftoverDataDirs -Base $b) | Should -Contain ([IO.Path]::Combine($b,'tracebloc','data'))
+  }
+}
+
+Describe "Invoke-LeftoverDataGuard (Windows leftover-data guard; Bugbot r3655218480)" {
+  BeforeEach {
+    $script:__up = $env:USERPROFILE
+    $env:USERPROFILE = "$TestDrive"                 # so HOST_DATA_DIR under TestDrive passes the wipe path guard
+    $env:TB_LEFTOVER_ACTION = $null
+    $env:TRACEBLOC_SKIP_LEFTOVER_GUARD = $null
+    Mock Warn {}; Mock Hint {}; Mock Log {}; Mock Info {}; Mock Write-Host {}
+  }
+  AfterEach { $env:USERPROFILE = $script:__up; $env:TB_LEFTOVER_ACTION = $null; $env:TRACEBLOC_SKIP_LEFTOVER_GUARD = $null }
+
+  It "clean slate -> no prompt, returns" {
+    $HOST_DATA_DIR = Join-Path $TestDrive 'g-clean'; New-Item -ItemType Directory -Path $HOST_DATA_DIR -Force | Out-Null
+    Mock Read-Host { throw "should not prompt" }
+    { Invoke-LeftoverDataGuard } | Should -Not -Throw
+  }
+  It "TRACEBLOC_SKIP_LEFTOVER_GUARD bypasses even with data present" {
+    $HOST_DATA_DIR = Join-Path $TestDrive 'g-skip'; $ib = [IO.Path]::Combine($HOST_DATA_DIR,'mysql','ibdata1')
+    New-Item -ItemType Directory -Path (Join-Path $HOST_DATA_DIR 'mysql') -Force | Out-Null; Set-Content $ib 'x'
+    $env:TRACEBLOC_SKIP_LEFTOVER_GUARD = "1"
+    Mock Read-Host { throw "should not prompt" }
+    { Invoke-LeftoverDataGuard } | Should -Not -Throw
+    $ib | Should -Exist
+  }
+  It "TB_LEFTOVER_ACTION=reuse keeps data and does not prompt" {
+    $HOST_DATA_DIR = Join-Path $TestDrive 'g-reuse'; $ib = [IO.Path]::Combine($HOST_DATA_DIR,'mysql','ibdata1')
+    New-Item -ItemType Directory -Path (Join-Path $HOST_DATA_DIR 'mysql') -Force | Out-Null; Set-Content $ib 'x'
+    $env:TB_LEFTOVER_ACTION = "reuse"
+    Mock Read-Host { throw "should not prompt" }
+    { Invoke-LeftoverDataGuard } | Should -Not -Throw
+    $ib | Should -Exist
+  }
+  It "TB_LEFTOVER_ACTION=wipe removes the leftover data" {
+    $HOST_DATA_DIR = Join-Path $TestDrive 'g-wipe'; $mysql = Join-Path $HOST_DATA_DIR 'mysql'
+    New-Item -ItemType Directory -Path $mysql -Force | Out-Null; Set-Content (Join-Path $mysql 'ibdata1') 'x'
+    $env:TB_LEFTOVER_ACTION = "wipe"
+    Invoke-LeftoverDataGuard
+    $mysql | Should -Not -Exist
+  }
+  It "non-interactive with no action -> aborts (Err), data untouched" {
+    $HOST_DATA_DIR = Join-Path $TestDrive 'g-abort'; $ib = [IO.Path]::Combine($HOST_DATA_DIR,'mysql','ibdata1')
+    New-Item -ItemType Directory -Path (Join-Path $HOST_DATA_DIR 'mysql') -Force | Out-Null; Set-Content $ib 'x'
+    Mock Test-CanPrompt { $false }
+    Mock Err { throw "abort" }
+    { Invoke-LeftoverDataGuard } | Should -Throw
+    $ib | Should -Exist
+  }
+  It "interactive 'w' wipes" {
+    $HOST_DATA_DIR = Join-Path $TestDrive 'g-iw'; $mysql = Join-Path $HOST_DATA_DIR 'mysql'
+    New-Item -ItemType Directory -Path $mysql -Force | Out-Null; Set-Content (Join-Path $mysql 'ibdata1') 'x'
+    Mock Test-CanPrompt { $true }
+    Mock Read-Host { "w" }
+    Invoke-LeftoverDataGuard
+    $mysql | Should -Not -Exist
+  }
+  It "interactive default (empty) aborts, data untouched" {
+    $HOST_DATA_DIR = Join-Path $TestDrive 'g-ia'; $ib = [IO.Path]::Combine($HOST_DATA_DIR,'mysql','ibdata1')
+    New-Item -ItemType Directory -Path (Join-Path $HOST_DATA_DIR 'mysql') -Force | Out-Null; Set-Content $ib 'x'
+    Mock Test-CanPrompt { $true }
+    Mock Read-Host { "" }
+    Mock Err { throw "abort" }
+    { Invoke-LeftoverDataGuard } | Should -Throw
+    $ib | Should -Exist
+  }
+  It "wipe unlinks a NESTED reparse point without deleting its target outside HOST_DATA_DIR (Bugbot r3655703571)" {
+    $HOST_DATA_DIR = Join-Path $TestDrive 'g-nested'; $mysql = Join-Path $HOST_DATA_DIR 'mysql'
+    New-Item -ItemType Directory -Path $mysql -Force | Out-Null; Set-Content (Join-Path $mysql 'ibdata1') 'x'
+    # A target OUTSIDE HOST_DATA_DIR whose contents must survive the wipe.
+    $outside = Join-Path $TestDrive 'outside-precious'
+    New-Item -ItemType Directory -Path $outside -Force | Out-Null
+    Set-Content (Join-Path $outside 'precious.dat') 'keep'
+    # Plant a nested reparse point inside the leftover mysql dir -> outside.
+    $link = Join-Path $mysql 'link'
+    try {
+      if ($IsWindows) { New-Item -ItemType Junction -Path $link -Target $outside -ErrorAction Stop | Out-Null }
+      else            { New-Item -ItemType SymbolicLink -Path $link -Target $outside -ErrorAction Stop | Out-Null }
+    } catch { Set-ItResult -Skipped -Because "cannot create a reparse point here: $_"; return }
+    $env:TB_LEFTOVER_ACTION = "wipe"
+    Invoke-LeftoverDataGuard
+    $mysql | Should -Not -Exist                                # leftover dir (+ the link entry) gone
+    (Join-Path $outside 'precious.dat') | Should -Exist        # target OUTSIDE never followed/deleted
+  }
+}
+
 Describe "Test-ApiReachable (bounded probe gates helm; Bugbot)" {
   It "API answers within the timeout -> reachable" {
     Mock kubectl { $global:LASTEXITCODE = 0 }

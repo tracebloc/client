@@ -390,7 +390,15 @@ _fetch_kubectl() {
 
 install_kubectl() {
   if ! has kubectl; then
-    KUBE_VER=$(retry 3 5 curl_secure -fsSL https://dl.k8s.io/release/stable.txt)
+    # tail -1 + tr: retry's attempt notices go to STDOUT and, on a failed-then-
+    # successful fetch, concatenate into the capture — polluting the version and
+    # breaking the download URL. The endpoint body (the version) is the last line
+    # either way; on total failure the last line is retry's notice, which the tag
+    # regex below rejects → the honest error. Mirrors the Helm resolver in
+    # install_helm (Bugbot r3655543170).
+    KUBE_VER="$(retry 3 5 curl_secure -fsSL https://dl.k8s.io/release/stable.txt 2>/dev/null | tail -1 | tr -d '[:space:]')"
+    [[ "$KUBE_VER" =~ ^v[0-9][A-Za-z0-9._-]*$ ]] \
+      || error "Couldn't resolve the kubectl version from dl.k8s.io/release/stable.txt — check network connectivity to dl.k8s.io and re-run."
     spin_cmd "Installing system tools…" _fetch_kubectl "$KUBE_VER" "$ARCH_DL"
     log "kubectl $KUBE_VER installed."
   else

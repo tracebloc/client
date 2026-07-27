@@ -46,7 +46,21 @@
 # running rootless daemon). That is exactly the Tier-0 condition. No image pull.
 _probe_runtime_usable() {
   has docker || return 1
-  docker info >/dev/null 2>&1
+  # Bound the daemon call: `docker info` against a WEDGED daemon hangs forever,
+  # and run_host_probes runs this on EVERY install — so a headless SSH install
+  # would hang indefinitely (unbounded-external-call). Cap it with timeout(1) /
+  # gtimeout(1) when either is present; fall back to the bare call only when
+  # neither is (rare on the Linux hosts this targets). Read-only and never fatal:
+  # a timeout (exit 124) or any failure just reads as "not usable" (non-zero), it
+  # never errors the probe (Bugbot).
+  local _t="${TB_PROBE_TIMEOUT:-5}"
+  if has timeout; then
+    timeout "$_t" docker info >/dev/null 2>&1
+  elif has gtimeout; then
+    gtimeout "$_t" docker info >/dev/null 2>&1
+  else
+    docker info >/dev/null 2>&1
+  fi
 }
 
 # _probe_verify_runtime — opt-in (--verify / TB_PROBE_VERIFY=1): actually run a

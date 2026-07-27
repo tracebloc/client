@@ -30,6 +30,13 @@ setup() {
   unset INSTALL_TIER INSTALL_TIER_REASON \
         PROBE_RUNTIME_USABLE PROBE_PRIVILEGE PROBE_CGROUP2 PROBE_USERNS
   TB_PROBE_VERIFY=0
+  # _probe_runtime_usable now bounds `docker info` with timeout/gtimeout, but in
+  # tests `docker` is a shell-function mock that the EXTERNAL timeout can't see.
+  # Shadow timeout/gtimeout with a passthrough that drops the duration and runs
+  # the rest (so the mocked docker is still invoked). Individual tests that assert
+  # on the bound override these.
+  timeout()  { shift; "$@"; }
+  gtimeout() { shift; "$@"; }
 }
 
 # ── _classify_from_probes: the tier truth table (pure) ───────────────────────
@@ -125,6 +132,31 @@ setup() {
   refute_has "docker run"  "$(mock_calls)"
   refute_has "docker pull" "$(mock_calls)"
   [ "$INSTALL_TIER" = 0 ]          # docker info OK => Tier 0
+}
+
+# The default-path daemon check must be bounded so a wedged Docker can't hang a
+# headless install (Bugbot r3655543152).
+@test "_probe_runtime_usable: bounds 'docker info' with a timeout cap" {
+  has() { case "$1" in docker|timeout) return 0 ;; *) return 1 ;; esac; }
+  timeout() { record "timeout $*"; shift; "$@"; }
+  docker()  { record "docker $*"; case "$1" in info) return 0 ;; *) return 0 ;; esac; }
+  _probe_runtime_usable
+  assert_has "timeout 5 docker info" "$(mock_calls)"   # 5s-bounded, not a bare call
+}
+
+@test "_probe_runtime_usable: no timeout/gtimeout binary -> falls back to bare docker info" {
+  has() { case "$1" in docker) return 0 ;; timeout|gtimeout) return 1 ;; *) return 1 ;; esac; }
+  docker() { record "docker $*"; return 0; }
+  _probe_runtime_usable
+  assert_has "docker info" "$(mock_calls)"
+  refute_has "timeout" "$(mock_calls)"
+}
+
+@test "_probe_runtime_usable: docker info non-zero (wedged/timed out) -> not usable, never fatal" {
+  has() { case "$1" in docker) return 0 ;; timeout|gtimeout) return 1 ;; *) return 1 ;; esac; }
+  docker() { return 1; }              # daemon unreachable, or timeout killed it (124)
+  run _probe_runtime_usable
+  [ "$status" -ne 0 ]                 # "not usable" — no error thrown
 }
 
 @test "verify probe pulls only when --verify is set" {

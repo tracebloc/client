@@ -287,6 +287,33 @@ setup() {
   [[ "$output" == *"--tlsv1.2"* ]]
 }
 
+# retry emits its attempt notices on STDOUT, so a failed-then-successful
+# stable.txt fetch used to concatenate the notice into KUBE_VER, corrupting the
+# download URL. install_kubectl must isolate the clean version (Bugbot r3655543170).
+@test "install_kubectl: retry notices on stdout do not pollute the captured version" {
+  PRESENT_CMDS="curl"            # kubectl absent -> install path runs
+  ARCH_DL=amd64
+  retry()       { shift 2; "$@"; }   # passthrough: drop max_attempts + delay
+  curl_secure() { printf '%s\n' "Attempt 1/3 failed. Retrying in 5s..." "v1.29.4"; }
+  install_kubectl
+  # spin_cmd (default mock) records "_fetch_kubectl <ver> <arch>" — the version
+  # must be the clean token, not the retry notice.
+  run mock_calls
+  [[ "$output" == *"_fetch_kubectl v1.29.4 amd64"* ]]
+  [[ "$output" != *"Retrying"* ]]
+}
+
+@test "install_kubectl: unresolvable version (only a retry notice) fails closed, no bad fetch" {
+  PRESENT_CMDS="curl"
+  ARCH_DL=amd64
+  retry()       { shift 2; "$@"; }
+  curl_secure() { printf '%s\n' "Command failed after 3 attempts: curl_secure"; }  # no version line
+  run install_kubectl
+  [ "$status" -ne 0 ]                       # regex rejects the notice -> error, not a broken URL
+  run mock_calls
+  [[ "$output" != *"_fetch_kubectl"* ]]
+}
+
 # ── install_k3d: pinned release, verified direct download (#382) ────────────
 # The binary is fetched straight from the pinned release and verified against
 # the release's checksums.txt — upstream's install.sh is NOT used (it performs
