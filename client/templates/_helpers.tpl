@@ -251,8 +251,8 @@ Usage: {{ include "tracebloc.image" (dict "repository" "tracebloc/jobs-manager" 
 tracebloc.ingestorDigest — the ONE effective digest for the spawned ingestor
 image. Renders the digest to pin to, or nothing at all to float on
 `images.ingestor.tag`. Every consumer of the ingestor image must go through
-this helper so jobs-manager's spawned ingestion Jobs and the metadata-backfill
-hook can never disagree about which image is authoritative.
+this helper so every consumer of the ingestor image (jobs-manager's spawned
+ingestion Jobs, any manual backfill Job) agrees on which image is authoritative.
 
 Precedence (most specific first):
   1. `images.ingestor.digest` non-empty  -> that digest, in ANY environment.
