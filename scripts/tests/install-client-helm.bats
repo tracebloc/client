@@ -823,3 +823,10 @@ setup() {
   [ "$status" -eq 0 ]
   [ -z "$output" ]
 }
+
+# ── bounded helm calls (#426) ────────────────────────────────────────────────
+@test "both helm invocations run under a deadline, none unbounded (#426)" {
+  local f="$BATS_TEST_DIRNAME/../lib/install-client-helm.sh"
+  ! grep -qE 'spin_cmd "(Reconciling the existing client|Installing the tracebloc client)' "$f"
+  [ "$(grep -c 'if ! spin_cmd_bounded ' "$f")" -eq 2 ]
+}

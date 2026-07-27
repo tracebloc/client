@@ -402,3 +402,41 @@ setup() {
   [[ "$output" == *"no"* ]]
   [[ "$output" == *"survived"* ]]
 }
+
+# ── spin deadline + spin_cmd_bounded (#426) ──────────────────────────────────
+@test "spin: optional deadline kills a stuck pid and returns 124 (#426)" {
+  sleep 30 &
+  local stuck_pid=$!
+  run spin "$stuck_pid" "waiting…" 1
+  [ "$status" -eq 124 ]
+  # the stuck process is gone (kill -0 fails)
+  ! kill -0 "$stuck_pid" 2>/dev/null
+}
+
+@test "spin: without a deadline behaviour is unchanged (returns the pid's rc)" {
+  # Called directly (not via `run`): spin must `wait` the pid, and a `run`
+  # subshell can't wait a process it didn't spawn.
+  bash -c 'exit 7' &
+  local rc=0
+  spin "$!" "quick…" >/dev/null || rc=$?
+  [ "$rc" -eq 7 ]
+}
+
+@test "spin_cmd_bounded: fast success passes through rc 0, no output" {
+  run spin_cmd_bounded 5 "quick…" true
+  [ "$status" -eq 0 ]
+}
+
+@test "spin_cmd_bounded: failure preserves the command's exit code + tails the log" {
+  LOG_FILE="$BATS_TEST_TMPDIR/spin.log"   # load_lib pins LOG_FILE=/dev/null; tail needs a real file
+  run spin_cmd_bounded 5 "failing…" bash -c 'echo boom; exit 3'
+  [ "$status" -eq 3 ]
+  [[ "$output" == *"Last 10 lines of log:"* ]]
+  [[ "$output" == *"boom"* ]]
+}
+
+@test "spin_cmd_bounded: deadline -> 124 with an explicit timeout note" {
+  run spin_cmd_bounded 1 "stuck…" sleep 30
+  [ "$status" -eq 124 ]
+  [[ "$output" == *"timed out after 1s"* ]]
+}

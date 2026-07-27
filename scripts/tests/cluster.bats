@@ -386,3 +386,13 @@ setup() {
   run mock_calls
   [[ "$output" != *"docker update"* ]]
 }
+
+# ── bounded create (#426) ────────────────────────────────────────────────────
+@test "k3d create is bounded: --wait always pairs with --timeout (#426)" {
+  grep -q -- '--wait --timeout' "$BATS_TEST_DIRNAME/../lib/cluster.sh"
+}
+
+@test "create spin carries the backstop deadline (#426)" {
+  grep -q 'spin "\$!" "Creating your secure environment…" "\$(( (_create_timeout_min + 5) \* 60 ))"' \
+    "$BATS_TEST_DIRNAME/../lib/cluster.sh"
+}

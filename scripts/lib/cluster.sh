@@ -632,7 +632,13 @@ _create_new_cluster() {
       --k3s-arg "--disable=local-storage@server:*"
     )
   fi
-  K3D_ARGS+=(--wait)
+  # Bounded create (#426): --wait alone has no deadline, so a stalled image
+  # pull (rate-limited registry, TLS-intercepting proxy) hangs the create
+  # forever. k3d's own --timeout aborts it with a real error instead; the env
+  # knob matches the Windows installer's TB_CREATE_TIMEOUT_MIN.
+  local _create_timeout_min="${TB_CREATE_TIMEOUT_MIN:-15}"
+  case "$_create_timeout_min" in ''|*[!0-9]*) _create_timeout_min=15 ;; esac
+  K3D_ARGS+=(--wait --timeout "${_create_timeout_min}m")
 
   # backend#743: bind-mount the customer's dataset volume (which may be a network
   # mount) at a DISTINCT cluster path so the chart's dataset PV can point there
@@ -677,7 +683,10 @@ _create_new_cluster() {
   # below still run) and the proxy-config cleanup can't race the finished create.
   ( k3d "${K3D_ARGS[@]}" >"$create_out" 2>&1 ) &
   create_rc=0
-  spin "$!" "Creating your secure environment…" || create_rc=$?
+  # Backstop deadline (#426): k3d's --timeout above should end a stuck create
+  # itself; if k3d wedges past it (hung docker daemon), spin's deadline kills
+  # it 5 minutes later and the error path below dumps the output.
+  spin "$!" "Creating your secure environment…" "$(( (_create_timeout_min + 5) * 60 ))" || create_rc=$?
   [[ -n "$proxy_cfg" ]] && rm -rf "${proxy_cfg%/*}"
   if [[ $create_rc -ne 0 ]]; then
     if grep -qi "already exists\|a cluster with that name already exists" "$create_out" 2>/dev/null; then

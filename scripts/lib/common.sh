@@ -242,18 +242,32 @@ check_docker_arch_mac() {
 }
 
 # ── Spinner — hides noisy command output behind an animated status line ──────
-#  Usage:  spin <pid> "Installing foo…"
+#  Usage:  spin <pid> "Installing foo…" [deadline_seconds]
 #  The background process's stdout/stderr should already be redirected to a file
 #  before calling spin. spin waits for the PID to exit and returns its exit code.
+#  With the optional third argument, a still-running PID is killed once the
+#  deadline passes and spin returns 124 (GNU timeout's convention) — the
+#  backstop for commands that can wedge indefinitely (#426).
 spin() {
-  local pid="$1" msg="$2"
+  local pid="$1" msg="$2" deadline_s="${3:-}"
   local frames=('⠋' '⠙' '⠹' '⠸' '⠼' '⠴' '⠦' '⠧' '⠇' '⠏')
   local i=0
+  local ticks=0                           # one tick ≈ 0.12s
 
   tput civis 2>/dev/null || true          # hide cursor
   while kill -0 "$pid" 2>/dev/null; do
+    if [[ -n "$deadline_s" ]] && (( ticks * 12 >= deadline_s * 100 )); then
+      kill "$pid" 2>/dev/null
+      sleep 0.5
+      kill -0 "$pid" 2>/dev/null && kill -9 "$pid" 2>/dev/null
+      wait "$pid" 2>/dev/null
+      printf "\r\033[K"
+      tput cnorm 2>/dev/null || true
+      return 124
+    fi
     printf "\r  ${CYAN}%s${RESET} %s" "${frames[i]}" "$msg"
     i=$(( (i + 1) % ${#frames[@]} ))
+    ticks=$(( ticks + 1 ))
     sleep 0.12
   done
 
@@ -277,6 +291,32 @@ spin_cmd() {
     echo -e "  ${DIM}Last 10 lines of log:${RESET}" >&2
     tail -10 "$logfile" >&2
     return 1
+  fi
+}
+
+# ── spin_cmd with a hard deadline (#426) ─────────────────────────────────────
+#  Usage:  spin_cmd_bounded <seconds> "Doing the thing…" cmd args…
+#  For commands that can wedge indefinitely against a stuck endpoint (helm
+#  talking to a wedged kube-apiserver). Same quiet-log capture + failure tail
+#  as spin_cmd; returns the command's real exit code, or 124 when the deadline
+#  killed it (with a timeout note so the user knows it was us, not the tool).
+spin_cmd_bounded() {
+  local secs="$1" msg="$2"; shift 2
+  local logfile="${LOG_FILE:-/tmp/tracebloc-spin.log}"
+  "$@" >> "$logfile" 2>&1 &
+  local pid=$!
+  local rc=0
+  spin "$pid" "$msg" "$secs" || rc=$?
+  if (( rc == 124 )); then
+    echo -e "  ${RED}${BOLD}✖ ${msg} — timed out after ${secs}s${RESET}" >&2
+    echo -e "  ${DIM}Last 10 lines of log:${RESET}" >&2
+    tail -10 "$logfile" >&2
+    return 124
+  elif (( rc != 0 )); then
+    echo -e "  ${RED}${BOLD}✖ ${msg}${RESET}" >&2
+    echo -e "  ${DIM}Last 10 lines of log:${RESET}" >&2
+    tail -10 "$logfile" >&2
+    return $rc
   fi
 }
 
