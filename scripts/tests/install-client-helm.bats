@@ -830,16 +830,17 @@ setup() {
   ! grep -qE 'spin_cmd "(Reconciling the existing client|Installing the tracebloc client)' "$f"
   # rc is captured (|| _helm_rc=$?) rather than tested via `if !` so the 124
   # timeout case can print its unwedge guidance before error (Bugbot #442).
-  [ "$(grep -c 'spin_cmd_bounded ' "$f")" -eq 2 ]
+  # Match the invocation lines only (comments also mention the helper).
+  [ "$(grep -c 'spin_cmd_bounded "\$(( _helm_timeout_min \* 60 ))"' "$f")" -eq 2 ]
   [ "$(grep -c '|| _helm_rc=\$?' "$f")" -eq 2 ]
 }
 
 @test "helm timeout (124) names the pending-release unwedge commands (Bugbot #442)" {
   # SIGKILLed helm can leave pending-install/pending-upgrade; the next run
   # fails with "another operation is in progress" — both call sites must
-  # point at the unwedge command.
+  # point at the unwedge command. Match the hint lines, not the comments.
   local f="$BATS_TEST_DIRNAME/../lib/install-client-helm.sh"
-  [ "$(grep -c "another operation is in progress" "$f")" -eq 2 ]
+  [ "$(grep -c "reports 'another operation is in progress'" "$f")" -eq 2 ]
   grep -q 'helm -n \$TB_NAMESPACE uninstall \$TB_NAMESPACE' "$f"
   grep -q 'helm -n \$_ns rollback \$_ns' "$f"
 }
