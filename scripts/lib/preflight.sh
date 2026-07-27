@@ -299,6 +299,36 @@ _pf_disk() {
   return 0
 }
 
+# The network-filesystem classification shared by the full storage check and
+# the pre-log early_data_dir_guard (#432). Everything listed corrupts or
+# crash-loops MySQL/InnoDB (broken POSIX locking, unsafe O_DIRECT/fsync).
+_pf_is_network_fstype() {
+  case "$1" in
+    nfs|nfs3|nfs4|nfsd|cifs|smb|smbfs|smb2|smb3|afpfs|9p|ncpfs|gfs|gfs2|ocfs2|lustre|glusterfs|fuse.glusterfs|ceph|fuse.ceph|beegfs|fuse.sshfs|fuse.s3fs|davfs|fuse.davfs|webdav|fuse.rclone) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# Pre-log guard (#432): main() creates HOST_DATA_DIR and tees the session log
+# onto it (setup_log_file) BEFORE run_preflight fires — on an NFS home under
+# sudo + root_squash that unguarded mkdir fails with a bare error (or the log
+# dir lands squashed/nobody-owned) before _pf_storage_type below can print its
+# friendly, named failure. Same classification, run first, output only on
+# failure. TRACEBLOC_ALLOW_NETWORK_FS defers to the full check's warning.
+early_data_dir_guard() {
+  local target fstype
+  target="${HOST_DATA_DIR:-${HOME:-}/.tracebloc}"
+  [[ -n "${TRACEBLOC_ALLOW_NETWORK_FS:-}" ]] && return 0
+  fstype="$(_pf_fstype "$target")"
+  [[ -z "$fstype" ]] && return 0                 # undetermined — assume local
+  _pf_is_network_fstype "$fstype" || return 0
+  warn "Storage: ${target} is on a network filesystem (${fstype})."
+  hint "The client database (MySQL/InnoDB) corrupts or crash-loops on network storage, and NFS root_squash blocks data-dir setup."
+  hint "Fix: point HOST_DATA_DIR at a LOCAL disk:  HOST_DATA_DIR=/local/path ./install-k8s.sh"
+  hint "(or set TRACEBLOC_ALLOW_NETWORK_FS=1 to proceed anyway — not recommended for the database.)"
+  error "Refusing to create the data directory on ${fstype} before logging starts."
+}
+
 # Network-filesystem guard for HOST_DATA_DIR. MySQL/InnoDB corrupts or crash-loops
 # on NFS/CIFS/SMB (broken POSIX locking + unsafe O_DIRECT/fsync), and the chart's
 # root chown init-container is blocked by NFS root_squash — so a network data dir
@@ -314,8 +344,7 @@ _pf_storage_type() {
     success "Local storage (${disp})"
     return 0
   fi
-  case "$fstype" in
-    nfs|nfs3|nfs4|nfsd|cifs|smb|smbfs|smb2|smb3|afpfs|9p|ncpfs|gfs|gfs2|ocfs2|lustre|glusterfs|fuse.glusterfs|ceph|fuse.ceph|beegfs|fuse.sshfs|fuse.s3fs|davfs|fuse.davfs|webdav|fuse.rclone)
+  if _pf_is_network_fstype "$fstype"; then
       if [[ -n "${TRACEBLOC_ALLOW_NETWORK_FS:-}" ]]; then
         warn "Storage: ${target} is on a network filesystem (${fstype}) — proceeding (TRACEBLOC_ALLOW_NETWORK_FS set); the client database may corrupt or crash-loop on network storage."
         return 0
@@ -325,12 +354,10 @@ _pf_storage_type() {
       hint "Fix: point HOST_DATA_DIR at a LOCAL disk — the default ~/.tracebloc is local:"
       hint "  HOST_DATA_DIR=\"\$HOME/.tracebloc\" ./install-k8s.sh"
       hint "  (or set TRACEBLOC_ALLOW_NETWORK_FS=1 to proceed anyway — not recommended for the database.)"
-      ;;
-    *)
+  else
       log "Storage: ${target} (${fstype})"
       success "Local storage (${disp})"
-      ;;
-  esac
+  fi
   # backend#743: datasets MAY live on a network mount (HOST_DATASET_DIR) — only
   # the database dir (HOST_DATA_DIR, checked above) must be local. Note it, never fail.
   if [[ -n "${HOST_DATASET_DIR:-}" ]]; then
