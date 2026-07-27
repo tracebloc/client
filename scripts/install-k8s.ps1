@@ -66,6 +66,16 @@ function RefreshPath {
               [System.Environment]::GetEnvironmentVariable("PATH","User")
 }
 
+# Background jobs spawn their runspace in the user's HOME directory. On managed
+# machines (roaming profiles) HOME is often a UNC share (\\fileserver\home\user);
+# every cmd.exe a job starts there prints "CMD.EXE was started with the above
+# path as the current directory. UNC paths are not supported." and its stderr
+# surfaces as a red RemoteException error record — alarming noise on a healthy
+# install (#409). Every Start-Job below passes this as -InitializationScript to
+# pin the job to a local working directory before it runs anything. (SystemRoot
+# is always local; the guard makes it a no-op on non-Windows Pester runs.)
+$script:JobInit = { if ($env:SystemRoot) { Set-Location $env:SystemRoot } }
+
 function Get-WindowsArch {
   switch ($env:PROCESSOR_ARCHITECTURE) {
     "AMD64"  { return "amd64" }
@@ -411,7 +421,7 @@ function Enable-VirtualisationFeatures {
   Ok "System features"
 
   Log "Updating WSL..."
-  $wslJob = Start-Job -ScriptBlock { cmd /c "wsl --update 2>&1" }
+  $wslJob = Start-Job -InitializationScript $JobInit -ScriptBlock { cmd /c "wsl --update 2>&1" }
   Write-Host -NoNewline "  "
   $wslTimeoutSec = 90
   $wslElapsed = 0
@@ -433,7 +443,7 @@ function Enable-VirtualisationFeatures {
   }
   Remove-Job -Job $wslJob -Force
 
-  $wslSetJob = Start-Job -ScriptBlock { cmd /c "wsl --set-default-version 2 2>&1" }
+  $wslSetJob = Start-Job -InitializationScript $JobInit -ScriptBlock { cmd /c "wsl --set-default-version 2 2>&1" }
   $wslSetDone = $wslSetJob | Wait-Job -Timeout 20
   if ($wslSetDone) {
     Receive-Job $wslSetJob | Out-Null
@@ -543,7 +553,7 @@ function Install-NvidiaContainerToolkit {
 
   Log "Setting up NVIDIA container toolkit in WSL2"
 
-  $wslListJob = Start-Job -ScriptBlock {
+  $wslListJob = Start-Job -InitializationScript $JobInit -ScriptBlock {
     $prevEncoding = [Console]::OutputEncoding
     [Console]::OutputEncoding = [System.Text.Encoding]::Unicode
     $raw = wsl --list --quiet 2>$null
@@ -612,7 +622,7 @@ echo "NCT installed successfully."
     $wslPath = "/mnt/" + $fwd
   }
 
-  $nctInstallJob = Start-Job -ScriptBlock {
+  $nctInstallJob = Start-Job -InitializationScript $JobInit -ScriptBlock {
     param($d, $p)
     cmd /c "wsl -d $d -- /bin/bash `"$p`" 2>&1"
   } -ArgumentList $wslDistro, $wslPath
@@ -629,7 +639,7 @@ echo "NCT installed successfully."
   Remove-Job $nctInstallJob -Force
   Remove-Item $scriptPath -Force -ErrorAction SilentlyContinue
 
-  $verJob = Start-Job -ScriptBlock {
+  $verJob = Start-Job -InitializationScript $JobInit -ScriptBlock {
     param($d)
     cmd /c "wsl -d $d -- nvidia-ctk --version 2>&1"
   } -ArgumentList $wslDistro

@@ -1273,3 +1273,49 @@ Describe "Get-InstalledClientInfo API gating (Bugbot)" {
     Should -Invoke helm -ParameterFilter { $args -contains "list" }
   }
 }
+
+Describe "UNC-safe background jobs (#409)" {
+  # Jobs spawn their runspace in $HOME; on roaming-profile machines that is a
+  # UNC share and every cmd.exe child prints "UNC paths are not supported" +
+  # a RemoteException record. $JobInit pins jobs to a local cwd first.
+  It "defines the JobInit initialization scriptblock" {
+    $JobInit | Should -Not -BeNullOrEmpty
+    $JobInit | Should -BeOfType [scriptblock]
+  }
+
+  It "every Start-Job call site passes -InitializationScript (AST gate)" {
+    $ast = [System.Management.Automation.Language.Parser]::ParseFile(
+      "$PSScriptRoot/../install-k8s.ps1", [ref]$null, [ref]$null)
+    $jobCalls = $ast.FindAll({
+      param($node)
+      $node -is [System.Management.Automation.Language.CommandAst] -and
+      $node.GetCommandName() -eq 'Start-Job'
+    }, $true)
+    $jobCalls.Count | Should -BeGreaterThan 0
+    foreach ($call in $jobCalls) {
+      $call.CommandElements.Where({
+        $_ -is [System.Management.Automation.Language.CommandParameterAst] -and
+        $_.ParameterName -eq 'InitializationScript'
+      }).Count | Should -Be 1 -Because "Start-Job at line $($call.Extent.StartLineNumber) must pin a local cwd (#409)"
+    }
+  }
+
+  It "JobInit moves the job to SystemRoot when set, and is a no-op when unset" {
+    $prev = $env:SystemRoot
+    try {
+      $env:SystemRoot = (New-Item -ItemType Directory -Path (Join-Path $TestDrive 'sysroot')).FullName
+      $job = Start-Job -InitializationScript $JobInit -ScriptBlock {
+        (Get-Location).Path -eq (Resolve-Path $env:SystemRoot).Path
+      }
+      Receive-Job -Job ($job | Wait-Job) | Should -BeTrue
+      Remove-Job $job -Force
+
+      $env:SystemRoot = $null
+      $job2 = Start-Job -InitializationScript $JobInit -ScriptBlock { "ran" }
+      Receive-Job -Job ($job2 | Wait-Job) | Should -Be "ran"
+      Remove-Job $job2 -Force
+    } finally {
+      $env:SystemRoot = $prev
+    }
+  }
+}
