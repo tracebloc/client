@@ -294,16 +294,27 @@ guard_leftover_data() {
       hint "  [a] abort — stop and sort it out myself (default)"
       local reply=""
       _read_sanitized "  Choice [r/w/n/a]: " reply
-      case "$reply" in
-        r|R|reuse) action=reuse ;;
-        w|W|wipe)  action=wipe ;;
-        n|N|new)   action=newdir ;;
-        *)         action=abort ;;
+      # Accept the word we SHOW: node-local relabels [r] to "keep", so r/reuse AND
+      # k/keep must both map to the reuse action or a user typing the shown "keep"
+      # would fall through to abort (Bugbot). Lowercase via tr (bash 3.2-safe — no
+      # ${x,,}) so any casing works.
+      local choice; choice=$(printf '%s' "$reply" | tr '[:upper:]' '[:lower:]')
+      case "$choice" in
+        r|reuse|k|keep) action=reuse ;;
+        w|wipe)         action=wipe ;;
+        n|new)          action=newdir ;;
+        *)              action=abort ;;
       esac
     else
-      # Non-interactive with no explicit choice → fail safe.
+      # Non-interactive with no explicit choice → fail safe. Describe --reuse-data
+      # honestly per storage mode: under node-local it keeps the data on disk but
+      # does NOT adopt it (the cluster starts empty in-node), matching the
+      # interactive reuse branch below (Bugbot).
+      local reuse_desc="adopt the existing data"
+      [[ "${TB_STORAGE_MODE:-hostpath}" == "node-local" ]] && \
+        reuse_desc="keep the data on disk, NOT adopted (node-local starts empty in-node)"
       error "Existing data found under ${HOST_DATA_DIR} and no choice was given (no terminal). Re-run with one of:
-  --reuse-data                    adopt the existing data
+  --reuse-data                    ${reuse_desc}
   --wipe-data                     delete it and start fresh
   HOST_DATA_DIR=<new-path> ...    install into a different directory
   (or TRACEBLOC_SKIP_LEFTOVER_GUARD=1 to bypass this guard entirely)"
