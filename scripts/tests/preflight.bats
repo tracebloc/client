@@ -413,3 +413,65 @@ setup() {
   [[ "$output" != *"Architecture:"* ]]
   [[ "$output" != *"Memory:"* ]]
 }
+
+# ── early_data_dir_guard — pre-log network-FS refusal (#432) ─────────────────
+@test "_pf_is_network_fstype: classifies network vs local" {
+  _pf_is_network_fstype nfs4
+  _pf_is_network_fstype cifs
+  _pf_is_network_fstype fuse.sshfs
+  ! _pf_is_network_fstype ext4
+  ! _pf_is_network_fstype apfs
+  ! _pf_is_network_fstype ""
+}
+
+@test "early_data_dir_guard: local filesystem -> silent pass" {
+  _pf_fstype() { echo ext4; }
+  run early_data_dir_guard
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+}
+
+@test "early_data_dir_guard: undetermined filesystem -> pass (assume local)" {
+  _pf_fstype() { echo ""; }
+  run early_data_dir_guard
+  [ "$status" -eq 0 ]
+}
+
+@test "early_data_dir_guard: NFS + existing data dir -> silent pass (healthy re-run reaches assess; Bugbot #441)" {
+  _pf_fstype() { echo nfs4; }
+  mkdir -p "$BATS_TEST_TMPDIR/existing/.tracebloc"
+  HOST_DATA_DIR="$BATS_TEST_TMPDIR/existing/.tracebloc" run early_data_dir_guard
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+}
+
+@test "early_data_dir_guard: NFS -> refuses before any mkdir, names the fix" {
+  _pf_fstype() { echo nfs4; }
+  HOST_DATA_DIR="$BATS_TEST_TMPDIR/fresh/.tracebloc" run early_data_dir_guard
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"network filesystem (nfs4)"* ]]
+  [[ "$output" == *"HOST_DATA_DIR"* ]]
+  [[ "$output" == *"Refusing to create the data directory"* ]]
+  # The remediation must be followable (Bugbot #441): validate_config rejects
+  # paths outside $HOME, so the guard must not advise HOST_DATA_DIR=/local/path.
+  [[ "$output" != *"/local/path"* ]]
+  [[ "$output" == *"TRACEBLOC_ALLOW_NETWORK_FS=1"* ]]
+  [[ "$output" == *"local disk"* ]]
+}
+
+@test "early_data_dir_guard: TRACEBLOC_ALLOW_NETWORK_FS defers to the full check" {
+  _pf_fstype() { echo nfs4; }
+  TRACEBLOC_ALLOW_NETWORK_FS=1 run early_data_dir_guard
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+}
+
+@test "install-k8s.sh runs the early guard before setup_log_file (#432 ordering)" {
+  local main_sh="$BATS_TEST_DIRNAME/../install-k8s.sh"
+  local guard_line setup_line
+  guard_line=$(grep -n 'early_data_dir_guard' "$main_sh" | head -1 | cut -d: -f1)
+  setup_line=$(grep -n '^  setup_log_file' "$main_sh" | head -1 | cut -d: -f1)
+  [ -n "$guard_line" ]
+  [ -n "$setup_line" ]
+  [ "$guard_line" -lt "$setup_line" ]
+}
