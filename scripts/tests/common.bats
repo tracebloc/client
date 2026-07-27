@@ -442,6 +442,15 @@ setup() {
   ! kill -0 "$child" 2>/dev/null
 }
 
+@test "spin: deadline path survives set -e end-to-end (Bugbot #442 r3)" {
+  # A childless stuck pid (pkill -P finds nothing -> returns 1) plus wait
+  # after a kill: under `set -e` any bare failure aborts the deadline path
+  # before `return 124` and the caller sees 143/1 — no timeout copy, no
+  # partial-cluster cleanup. The whole path must still deliver 124.
+  run bash -c "set -euo pipefail; source '${BATS_TEST_DIRNAME}/../lib/common.sh'; LOG_FILE=/dev/null; sleep 30 & spin \$! 'waiting…' 1"
+  [ "$status" -eq 124 ]
+}
+
 @test "spin: without a deadline behaviour is unchanged (returns the pid's rc)" {
   # Called directly (not via `run`): spin must `wait` the pid, and a `run`
   # subshell can't wait a process it didn't spawn.

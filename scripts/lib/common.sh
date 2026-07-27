@@ -266,15 +266,20 @@ spin() {
       # and pkill -P can't see them (Bugbot #442 r2), so the KILL sweep must
       # address them by captured PID. Harmless when bash exec-optimized the
       # wrapper away — then $pid IS the worker and there are no children.
+      # Every line below is failure-proofed (`|| true`): pkill returns 1 when
+      # there are no children, kill/wait fail on already-reaped PIDs, and wait
+      # reports the kill signal — under `set -e` any of those would abort the
+      # deadline path before `return 124`, so the caller would never see the
+      # timeout (no warn/hint, no partial-cluster cleanup) (Bugbot #442 r3).
       _spin_kids="$(pgrep -P "$pid" 2>/dev/null || true)"
-      pkill -TERM -P "$pid" 2>/dev/null
-      kill "$pid" 2>/dev/null
+      pkill -TERM -P "$pid" 2>/dev/null || true
+      kill "$pid" 2>/dev/null || true
       sleep 0.5
       for _spin_k in $_spin_kids; do
-        kill -0 "$_spin_k" 2>/dev/null && kill -9 "$_spin_k" 2>/dev/null
+        kill -9 "$_spin_k" 2>/dev/null || true
       done
-      kill -0 "$pid" 2>/dev/null && kill -9 "$pid" 2>/dev/null
-      wait "$pid" 2>/dev/null
+      kill -9 "$pid" 2>/dev/null || true
+      wait "$pid" 2>/dev/null || true
       printf "\r\033[K"
       tput cnorm 2>/dev/null || true
       return 124
