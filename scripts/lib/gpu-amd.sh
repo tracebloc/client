@@ -24,9 +24,13 @@ _detect_rhel_version() {
 }
 
 # Scrape the directory listing to find the .deb or .rpm filename (portable: -oE not -oP)
+# --max-time 30 tightens curl_secure's default deadline: this fetch is a small HTML
+# index, so a longer wait only ever means a hung mirror — and this call sits in the
+# GPU step with no spinner deadline of its own. Deliberately NOT retry-wrapped:
+# retry() reports its attempts on stdout, which here IS this function's return value.
 _find_package_name() {
   local dir_url="$1" ext="$2"
-  curl -fsSL "$dir_url" | grep -oE "amdgpu-install[^\"<>]*\\.${ext}" | head -1
+  curl_secure -fsSL --max-time 30 "$dir_url" | grep -oE "amdgpu-install[^\"<>]*\\.${ext}" | head -1
 }
 
 install_rocm() {
@@ -49,7 +53,7 @@ install_rocm() {
     [[ -z "$deb_name" ]] && error "No amdgpu-install .deb found at ${deb_dir}"
 
     log "Downloading ${deb_name} ..."
-    curl -fsSL "${deb_dir}${deb_name}" -o /tmp/amdgpu-install.deb
+    retry 3 5 curl_secure -fsSL "${deb_dir}${deb_name}" -o /tmp/amdgpu-install.deb
     sudo apt-get install -y /tmp/amdgpu-install.deb
     sudo amdgpu-install -y --usecase=rocm
     rm -f /tmp/amdgpu-install.deb

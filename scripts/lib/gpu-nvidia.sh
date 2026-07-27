@@ -77,7 +77,7 @@ install_nvidia_container_toolkit() {
     if has apt-get; then
       local nvidia_gpg_tmp
       nvidia_gpg_tmp="$(mktemp)"
-      curl -fsSL $CURL_SECURE https://nvidia.github.io/libnvidia-container/gpgkey \
+      curl_secure -fsSL --max-time 30 https://nvidia.github.io/libnvidia-container/gpgkey \
         -o "$nvidia_gpg_tmp"
       local nvidia_fp
       nvidia_fp=$(gpg --with-colons --import-options show-only --import "$nvidia_gpg_tmp" 2>/dev/null \
@@ -89,14 +89,18 @@ install_nvidia_container_toolkit() {
       fi
       sudo gpg --dearmor -o /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg "$nvidia_gpg_tmp"
       rm -f "$nvidia_gpg_tmp"
-      curl -fsSL https://nvidia.github.io/libnvidia-container/stable/deb/nvidia-container-toolkit.list \
+      # --max-time 30 on all three fetches above/below: each is a few KB of key or
+      # repo metadata, so a longer wait only means a hung mirror. They pipe into
+      # sed/tee, so they can't be retry-wrapped — retry() reports attempts on
+      # stdout, which here IS the file content being written.
+      curl_secure -fsSL --max-time 30 https://nvidia.github.io/libnvidia-container/stable/deb/nvidia-container-toolkit.list \
         | sed 's#deb https://#deb [signed-by=/usr/share/keyrings/nvidia-container-toolkit-keyring.gpg] https://#g' \
         | sudo tee /etc/apt/sources.list.d/nvidia-container-toolkit.list >/dev/null
       sudo apt-get update -qq
       $PM_INSTALL nvidia-container-toolkit
 
     elif has dnf || has yum; then
-      curl -fsSL https://nvidia.github.io/libnvidia-container/stable/rpm/nvidia-container-toolkit.repo \
+      curl_secure -fsSL --max-time 30 https://nvidia.github.io/libnvidia-container/stable/rpm/nvidia-container-toolkit.repo \
         | sudo tee /etc/yum.repos.d/nvidia-container-toolkit.repo >/dev/null
       has dnf && sudo dnf install -y nvidia-container-toolkit || sudo yum install -y nvidia-container-toolkit
 
