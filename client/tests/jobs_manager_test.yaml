@@ -91,12 +91,21 @@ tests:
             name: JOB_IMAGE_HOST
             value: "docker.io/"
 
-  - it: spawns the ingestor by floating tag by default (revert-proof across helm upgrade)
-    # Default (no pinned digest): jobs-manager spawns each ingestion Job by
-    # the floating tag with imagePullPolicy=Always, so the cluster always
-    # runs the current published ingestor and a `helm upgrade` that resets
-    # values cannot revert it. Wires REPOSITORY + TAG + an empty DIGEST into
-    # client-runtime submit_ingestion_run._build_image_reference.
+  # ---------------------------------------------------------------------------
+  # Ingestor image distribution (backend#1028 pin, backend#1245 distribution).
+  #
+  # The prod pin `images.ingestor.prodDigest` is a CHART DEFAULT, gated to prod
+  # by the resolved CLIENT_ENV, so a standard prod install is reproducible and a
+  # republished pin propagates through `helm upgrade --reset-then-reuse-values`
+  # (the fleet auto-upgrade) — which an install-time `-f` overlay never could.
+  # These cases lock in both halves of the gate: prod pinned, non-prod floating.
+  # ---------------------------------------------------------------------------
+  - it: pins the ingestor digest on prod by chart default (CLIENT_ENV unset => prod)
+    # Chart defaults only: no env.CLIENT_ENV, which the template resolves to
+    # "prod" — exactly what the standard prod installer produces (it writes
+    # CLIENT_ENV into the generated values ONLY for dev/stg). Asserting the
+    # chart-default digest here is the regression guard for #1245: the pin must
+    # be reachable with no `-f` overlay and no `--set`.
     asserts:
       - contains:
           path: spec.template.spec.containers[0].env
@@ -112,9 +121,90 @@ tests:
           path: spec.template.spec.containers[0].env
           content:
             name: INGESTOR_IMAGE_DIGEST
+            value: "sha256:9098b3c9b83951f825e262d6ff1e9c47c46c5b5cafbfc8fef1ed82ccbadebb24"
+
+  - it: keeps the ingestor floating on dev (CLIENT_ENV=dev => no digest)
+    # dev/staging carry env.CLIENT_ENV in their user-supplied values, so the prod
+    # pin does not apply: DIGEST empty => client-runtime spawns repo:tag with
+    # imagePullPolicy=Always and the edge is never frozen on a stale build.
+    set:
+      env:
+        CLIENT_ENV: dev
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: INGESTOR_IMAGE_DIGEST
+            value: ""
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: INGESTOR_IMAGE_TAG
+            value: "0.7"
+
+  - it: keeps the ingestor floating on staging (CLIENT_ENV=stg => no digest)
+    set:
+      env:
+        CLIENT_ENV: stg
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: INGESTOR_IMAGE_DIGEST
+            value: ""
+
+  - it: renders the prod pin when CLIENT_ENV is set explicitly to prod
+    set:
+      env:
+        CLIENT_ENV: prod
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: INGESTOR_IMAGE_DIGEST
+            value: "sha256:9098b3c9b83951f825e262d6ff1e9c47c46c5b5cafbfc8fef1ed82ccbadebb24"
+
+  - it: prodPin=false floats a canary prod edge while the fleet stays pinned
+    set:
+      images:
+        ingestor:
+          prodPin: false
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: INGESTOR_IMAGE_DIGEST
+            value: ""
+
+  - it: an empty prodDigest falls back to the floating tag (never renders a bare @)
+    set:
+      images:
+        ingestor:
+          prodDigest: ""
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: INGESTOR_IMAGE_DIGEST
             value: ""
 
   - it: pins the ingestor digest when images.ingestor.digest is set (opt-in reproducibility)
+    # The per-edge explicit pin wins over the prod default, in any environment —
+    # here on a dev edge, which the CLIENT_ENV gate would otherwise float.
+    set:
+      env:
+        CLIENT_ENV: dev
+      images:
+        ingestor:
+          digest: "sha256:dfdaa7e633a8df0f46b403e9422eba5c16bdb7d9c39047e6d3738f9e38fbdba8"
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: INGESTOR_IMAGE_DIGEST
+            value: "sha256:dfdaa7e633a8df0f46b403e9422eba5c16bdb7d9c39047e6d3738f9e38fbdba8"
+
+  - it: an explicit images.ingestor.digest overrides the prod pin on prod too
     set:
       images:
         ingestor:

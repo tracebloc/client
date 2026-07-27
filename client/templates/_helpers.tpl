@@ -248,6 +248,50 @@ Usage: {{ include "tracebloc.image" (dict "repository" "tracebloc/jobs-manager" 
 {{- end }}
 
 {{/*
+tracebloc.ingestorDigest — the ONE effective digest for the spawned ingestor
+image. Renders the digest to pin to, or nothing at all to float on
+`images.ingestor.tag`. Every consumer of the ingestor image must go through
+this helper so jobs-manager's spawned ingestion Jobs and the metadata-backfill
+hook can never disagree about which image is authoritative.
+
+Precedence (most specific first):
+  1. `images.ingestor.digest` non-empty  -> that digest, in ANY environment.
+     The long-standing per-edge opt-in pin; unchanged semantics.
+  2. otherwise the prod gate: `images.ingestor.prodPin` (default TRUE when the
+     key is absent) AND the resolved CLIENT_ENV == "prod"  -> `prodDigest`.
+  3. otherwise empty -> float on `tag` with imagePullPolicy=Always.
+
+Why the gate is on CLIENT_ENV (backend#1245): dev and staging installs carry
+`env.CLIENT_ENV: dev|stg` in their user-supplied values while the chart defaults
+CLIENT_ENV to "prod", so this pins prod and floats non-prod with zero per-edge
+action — and because `prodDigest` is a chart DEFAULT, a republished pin reaches
+installed edges through `helm upgrade --reset-then-reuse-values` (the fleet
+auto-upgrade path), which an install-time `-f` overlay never could.
+
+`prodPin` defaults to TRUE when the key is absent so a `--reuse-values` upgrade
+from a release predating the key still pins prod, rather than silently
+defeating the pin. Every read is nil-guarded for the same reason.
+
+Usage: {{ include "tracebloc.ingestorDigest" . }}
+*/}}
+{{- define "tracebloc.ingestorDigest" -}}
+{{- $ing := default dict .Values.images.ingestor -}}
+{{- $explicit := $ing.digest | default "" -}}
+{{- if $explicit -}}
+{{- $explicit -}}
+{{- else -}}
+{{- $prodPin := true -}}
+{{- if hasKey $ing "prodPin" -}}
+{{- $prodPin = $ing.prodPin -}}
+{{- end -}}
+{{- $clientEnv := (default dict .Values.env).CLIENT_ENV | default "prod" -}}
+{{- if and $prodPin (eq $clientEnv "prod") -}}
+{{- $ing.prodDigest | default "" -}}
+{{- end -}}
+{{- end -}}
+{{- end }}
+
+{{/*
 tracebloc.proxyEnv — corporate-proxy env for egress-needing workloads.
 Derives HTTP(S)_PROXY + an auto-augmented NO_PROXY from .Values.env.HTTP_PROXY_*
 so workload pods can reach the backend / registries through a corporate proxy.
