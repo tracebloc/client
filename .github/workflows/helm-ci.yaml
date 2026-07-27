@@ -112,22 +112,25 @@ jobs:
     # Guard: the ingestor image the cluster spawns must be a multi-arch index
     # (linux/amd64 + linux/arm64), or arm64 hosts (Apple Silicon, Graviton)
     # fail data ingestion with "no match for platform" / ImagePullBackOff.
-    # jobs-manager spawns ingestion Jobs by the floating tag
-    # `images.ingestor.tag` (imagePullPolicy=Always) by DEFAULT, so that tag
-    # must be multi-arch. If an operator opts into pinning via
-    # `images.ingestor.digest` (empty by default), the pinned digest must be
-    # multi-arch too. This would have caught #160 (the amd64-only v0.3.1 pin).
-    # See client#186.
+    # dev/staging edges spawn ingestion Jobs by the floating tag
+    # `images.ingestor.tag` (imagePullPolicy=Always), so that tag must be
+    # multi-arch. Prod edges spawn `images.ingestor.prodDigest` — a chart default
+    # that ships to the whole fleet (backend#1245) — so that MUST be checked too;
+    # the pin previously lived in an install-time overlay this job never read.
+    # `images.ingestor.digest` (empty by default) is the per-edge opt-in pin and
+    # is checked when set. This would have caught #160 (the amd64-only v0.3.1
+    # pin). See client#186.
     name: Spawned ingestor image is multi-arch
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Assert the ingestor tag (and pinned digest, if any) is multi-arch
+      - name: Assert the ingestor tag and pinned digests are multi-arch
         run: |
           repo=$(yq '.images.ingestor.repository' client/values.yaml)
           if [ -z "$repo" ] || [ "$repo" = "null" ]; then repo="ghcr.io/tracebloc/ingestor"; fi
           tag=$(yq '.images.ingestor.tag' client/values.yaml)
           digest=$(yq '.images.ingestor.digest' client/values.yaml)
+          prod_digest=$(yq '.images.ingestor.prodDigest' client/values.yaml)
 
           assert_multiarch() {
             ref="$1"; label="$2"
@@ -146,11 +149,21 @@ jobs:
           fi
           assert_multiarch "${repo}:${tag}" "floating tag"
 
-          # A pinned digest is opt-in (empty by default). When set, it must be multi-arch too.
+          # The prod pin is a chart DEFAULT that reaches every prod edge through
+          # the fleet auto-upgrade, so a single-arch value here would break
+          # ingestion fleet-wide on arm64. Hard-fail when it is missing: an empty
+          # prodDigest silently un-pins prod (backend#1028 reproducibility) and
+          # is never intentional.
+          if [ -z "$prod_digest" ] || [ "$prod_digest" = "null" ]; then
+            echo "::error::images.ingestor.prodDigest is empty — prod edges would silently fall back to the floating tag, losing the reproducibility pin (backend#1028/#1245). Resolve it with scripts/resolve-ingestor-digest.sh --write."; exit 1
+          fi
+          assert_multiarch "${repo}@${prod_digest}" "prod pin (images.ingestor.prodDigest)"
+
+          # The per-edge pin is opt-in (empty by default). When set, it must be multi-arch too.
           if [ -n "$digest" ] && [ "$digest" != "null" ]; then
-            assert_multiarch "${repo}@${digest}" "pinned digest"
+            assert_multiarch "${repo}@${digest}" "per-edge pinned digest"
           else
-            echo "images.ingestor.digest empty (default) — spawning by floating tag; no pinned digest to check."
+            echo "images.ingestor.digest empty (default) — no per-edge pin to check."
           fi
 
   upgrade-e2e:
