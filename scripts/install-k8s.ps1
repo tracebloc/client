@@ -690,6 +690,64 @@ function Install-Kubectl {
   Log "kubectl $kVer installed."
 }
 
+# ── Pinned tool versions (#382 / #410) ──────────────────────────────────────
+# Defaults MUST stay in lockstep with scripts/lib/common.sh (K3D_VERSION /
+# HELM_VERSION) until the shared facts spec (#435) single-sources them. Pinned
+# defaults keep installs deterministic and immune to GitHub's unauthenticated
+# releases/latest API, whose 60 req/hour/IP limit a single shared corporate NAT
+# exhausts. Only the literal value "latest" resolves at install time — via the
+# plain /releases/latest redirect or get.helm.sh, never api.github.com.
+$script:K3dVersion  = if ($env:K3D_VERSION)  { $env:K3D_VERSION }  else { "v5.9.0" }
+$script:HelmVersion = if ($env:HELM_VERSION) { $env:HELM_VERSION } else { "v4.2.3" }
+
+# A tag is interpolated into a download URL — refuse separators and parent-dir
+# tokens (path-traversal lever) and require a release shape. Mirrors the
+# bootstrap's ref gate and cli install.sh's validate_version_tag.
+function Test-ReleaseTagShape {
+  param([string]$Tag)
+  if (-not $Tag -or $Tag -match '/' -or $Tag -match '\.\.') { return $false }
+  return [bool]($Tag -match '^v[0-9]+\.[0-9]+\.[0-9]+([.-][A-Za-z0-9.]+)?$')
+}
+
+# Resolve "latest" for a GitHub project WITHOUT the rate-limited API: read the
+# tag from the /releases/latest redirect's Location header (same trick as
+# cli/scripts/install.ps1 and lib/setup-linux.sh).
+function Get-LatestGitHubTag {
+  param([string]$Repo)
+  $loc = $null
+  try {
+    $resp = Invoke-WebRequest -Uri "https://github.com/$Repo/releases/latest" `
+      -Method Head -MaximumRedirection 0 -UseBasicParsing -ErrorAction Stop
+    $loc = $resp.Headers['Location']
+  } catch {
+    # Windows PowerShell 5.1 throws on a 3xx when redirects are disabled; the
+    # response object still carries the Location header we want.
+    $resp = $_.Exception.Response
+    if ($resp) {
+      try { $loc = $resp.Headers['Location'] } catch {}
+      if (-not $loc) { try { $loc = $resp.Headers.Location } catch {} }
+    }
+  }
+  if (-not $loc) { return $null }
+  return ("$loc" -split '/')[-1]
+}
+
+# The version a tool install uses: the pinned default (or the operator's env
+# override) validated for release shape; the literal "latest" resolves via the
+# API-free path above. Aborts rather than building a URL from a bad value.
+function Resolve-ToolVersion {
+  param([string]$Name, [string]$Value, [scriptblock]$LatestResolver)
+  $v = $Value
+  if ($v -eq "latest") {
+    $v = & $LatestResolver
+    if (-not $v) { Err "Couldn't resolve the latest $Name release. Set $($Name.ToUpper())_VERSION to a release tag and re-run." }
+  }
+  if (-not (Test-ReleaseTagShape $v)) {
+    Err "$($Name.ToUpper())_VERSION '$v' is not a release tag (expected vX.Y.Z) - refusing to build a download URL from it."
+  }
+  return $v
+}
+
 function Install-K3dAndHelm {
   # -- k3d --
   if (-not (Has "k3d")) {
@@ -703,10 +761,9 @@ function Install-K3dAndHelm {
     if (-not (Has "k3d")) {
       $arch = Get-WindowsArch
       Log "Downloading k3d binary directly ($arch)..."
-      $k3dVer = Invoke-WithRetry -Label "k3d version lookup" -ScriptBlock {
-        (Invoke-WebRequest "https://api.github.com/repos/k3d-io/k3d/releases/latest" `
-          -UseBasicParsing | ConvertFrom-Json).tag_name
-      }
+      # Pinned by default (#382 / #410) — no api.github.com on the default path.
+      $k3dVer = Resolve-ToolVersion -Name "k3d" -Value $K3dVersion `
+        -LatestResolver { Get-LatestGitHubTag -Repo "k3d-io/k3d" }
       $k3dDest = "$TOOL_DIR\k3d.exe"
       Invoke-WithRetry -Label "k3d download" -ScriptBlock {
         Invoke-WebRequest "https://github.com/k3d-io/k3d/releases/download/$k3dVer/k3d-windows-$arch.exe" `
@@ -758,9 +815,10 @@ function Install-K3dAndHelm {
     if (-not (Has "helm")) {
       $arch = Get-WindowsArch
       Log "Downloading Helm binary directly ($arch)..."
-      $helmVer = Invoke-WithRetry -Label "helm version lookup" -ScriptBlock {
-        (Invoke-WebRequest "https://api.github.com/repos/helm/helm/releases/latest" `
-          -UseBasicParsing | ConvertFrom-Json).tag_name
+      # Pinned by default (#410); "latest" resolves via get.helm.sh (no API),
+      # mirroring lib/setup-linux.sh.
+      $helmVer = Resolve-ToolVersion -Name "helm" -Value $HelmVersion -LatestResolver {
+        try { (Invoke-WebRequest "https://get.helm.sh/helm-latest-version" -UseBasicParsing).Content.Trim() } catch { $null }
       }
       $helmZip = "$env:TEMP\helm-$helmVer-windows-$arch.zip"
       Invoke-WithRetry -Label "helm download" -ScriptBlock {

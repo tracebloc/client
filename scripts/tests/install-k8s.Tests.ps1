@@ -1319,3 +1319,56 @@ Describe "UNC-safe background jobs (#409)" {
     }
   }
 }
+
+Describe "Pinned tool versions - no api.github.com (#382 / #410)" {
+  It "pins k3d and helm by default (lockstep with scripts/lib/common.sh)" {
+    $K3dVersion  | Should -Be "v5.9.0"
+    $HelmVersion | Should -Be "v4.2.3"
+  }
+
+  It "the installer never fetches from the rate-limited GitHub API" {
+    # Comments may *mention* the API (to say why we avoid it); a URL means a fetch.
+    (Get-Content "$PSScriptRoot/../install-k8s.ps1" -Raw) | Should -Not -Match 'https://api\.github\.com'
+  }
+
+  Context "Test-ReleaseTagShape" {
+    It "accepts release tags" {
+      Test-ReleaseTagShape "v5.9.0"     | Should -BeTrue
+      Test-ReleaseTagShape "v1.2.3-rc1" | Should -BeTrue
+    }
+    It "rejects traversal, branches, and empties" {
+      Test-ReleaseTagShape "v1.2.3-../../heads/main" | Should -BeFalse
+      Test-ReleaseTagShape "develop"                 | Should -BeFalse
+      Test-ReleaseTagShape "latest"                  | Should -BeFalse
+      Test-ReleaseTagShape ""                        | Should -BeFalse
+    }
+  }
+
+  Context "Resolve-ToolVersion" {
+    BeforeEach { Mock Err { throw "ERR: $($args -join ' ')" } }
+    It "returns a pinned value without touching the network" {
+      Resolve-ToolVersion -Name "k3d" -Value "v5.9.0" -LatestResolver { throw "resolver must not run for a pinned value" } |
+        Should -Be "v5.9.0"
+    }
+    It "resolves the literal 'latest' via the provided API-free resolver" {
+      Resolve-ToolVersion -Name "k3d" -Value "latest" -LatestResolver { "v9.9.9" } | Should -Be "v9.9.9"
+    }
+    It "fails closed when 'latest' cannot be resolved" {
+      { Resolve-ToolVersion -Name "helm" -Value "latest" -LatestResolver { $null } } | Should -Throw "*ERR:*"
+    }
+    It "fails closed on a non-release-shaped value" {
+      { Resolve-ToolVersion -Name "k3d" -Value "v1.2.3-../../heads/main" -LatestResolver { $null } } | Should -Throw "*ERR:*"
+    }
+  }
+
+  Context "Get-LatestGitHubTag" {
+    It "reads the tag from the /releases/latest redirect Location header" {
+      Mock Invoke-WebRequest { [pscustomobject]@{ Headers = @{ Location = "https://github.com/k3d-io/k3d/releases/tag/v5.9.1" } } }
+      Get-LatestGitHubTag -Repo "k3d-io/k3d" | Should -Be "v5.9.1"
+    }
+    It "returns null when no Location is available" {
+      Mock Invoke-WebRequest { [pscustomobject]@{ Headers = @{} } }
+      Get-LatestGitHubTag -Repo "k3d-io/k3d" | Should -BeNullOrEmpty
+    }
+  }
+}
