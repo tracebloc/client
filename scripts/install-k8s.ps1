@@ -1274,6 +1274,21 @@ function New-K3dCluster {
       if ($script:LOG_FILE) { Hint "Full log: $LOG_FILE" }
       Remove-Item $k3dOutLog, $k3dErrLog -Force -ErrorAction SilentlyContinue
       if ($proxyCfg) { Remove-Item (Split-Path $proxyCfg -Parent) -Recurse -Force -ErrorAction SilentlyContinue }
+      # Killing k3d mid --wait skips its own rollback; a leftover partial
+      # cluster would be adopted as "already running" by the next run's
+      # reuse path (Bugbot #439). Remove it — bounded — before failing.
+      Info "Removing the partially created environment..."
+      $partialDeleted = $false
+      try {
+        $delProc = Start-Process -FilePath $k3dExe -ArgumentList "cluster delete $CLUSTER_NAME" `
+          -NoNewWindow -PassThru -ErrorAction Stop
+        if (Wait-ProcessWithDeadline -Process $delProc -Deadline (Get-Date).AddMinutes(2) -Message "Removing partial environment...") {
+          $partialDeleted = ($delProc.ExitCode -eq 0)
+        }
+      } catch {}
+      if (-not $partialDeleted) {
+        Warn "Couldn't remove the partial cluster automatically - run 'k3d cluster delete $CLUSTER_NAME' before re-running."
+      }
       Err "Compute environment creation timed out after $timeoutMin minutes. Check that Docker is healthy and this network can pull images, then re-run. (TB_CREATE_TIMEOUT_MIN overrides the bound.)"
     }
 

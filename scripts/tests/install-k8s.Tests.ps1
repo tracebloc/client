@@ -1427,4 +1427,11 @@ Describe "Bounded cluster-create wait (#412 / #426)" {
     $raw | Should -Match 'Wait-ProcessWithDeadline -Process \$k3dProc'
     $raw | Should -Not -Match 'while \(-not \$k3dProc\.HasExited\)'
   }
+
+  It "the timeout path removes the partial cluster before failing (Bugbot #439)" {
+    # Killing k3d mid --wait skips its rollback; without the delete, a re-run
+    # adopts the half-created cluster as "already running".
+    $raw = Get-Content "$PSScriptRoot/../install-k8s.ps1" -Raw
+    $raw | Should -Match '(?s)Wait-ProcessWithDeadline -Process \$k3dProc.*?cluster delete \$CLUSTER_NAME.*?timed out after'
+  }
 }
