@@ -6,7 +6,10 @@ BeforeAll {
   $env:TB_PESTER = "1"
   . "$PSScriptRoot/../install-k8s.ps1"
   # Stubs so Pester can mock external commands that the functions invoke.
-  function kubectl { }
+  # kubectl defaults to a successful exit so the bounded API-reachability probe
+  # (Test-ApiReachable) passes in tests that don't explicitly mock it; tests that
+  # care about an unreachable API Mock kubectl to set a non-zero exit.
+  function kubectl { $global:LASTEXITCODE = 0 }
   function docker { }
   function helm { }
   function k3d { }
@@ -1208,5 +1211,38 @@ Describe "Invoke-LeftoverDataGuard (Windows leftover-data guard; Bugbot r3655218
     Mock Err { throw "abort" }
     { Invoke-LeftoverDataGuard } | Should -Throw
     "$HOST_DATA_DIR\mysql\ibdata1" | Should -Exist
+  }
+}
+
+Describe "Test-ApiReachable (bounded probe gates helm; Bugbot)" {
+  It "API answers within the timeout -> reachable" {
+    Mock kubectl { $global:LASTEXITCODE = 0 }
+    Test-ApiReachable | Should -BeTrue
+  }
+  It "API wedged/unreachable (non-zero exit) -> not reachable" {
+    Mock kubectl { $global:LASTEXITCODE = 1 }
+    Test-ApiReachable | Should -BeFalse
+  }
+}
+
+Describe "Get-InstalledClientInfo API gating (Bugbot)" {
+  It "unreachable API -> degrades to ListUnknown WITHOUT calling helm (no hang)" {
+    Mock kubectl { $global:LASTEXITCODE = 1 }     # bounded probe fails
+    Mock helm    { $global:LASTEXITCODE = 0 }
+    $info = Get-InstalledClientInfo
+    $info.ListUnknown | Should -BeTrue
+    Should -Not -Invoke helm
+  }
+  It "reachable API -> enumerates via helm and finds the client" {
+    Mock kubectl { $global:LASTEXITCODE = 0 }
+    Mock helm {
+      if ($args -contains "list") { '[{"name":"rel","namespace":"tracebloc","chart":"client-1.4.4"}]'; $global:LASTEXITCODE = 0; return }
+      if ($args -contains "get")  { '{"clientId":"acme"}'; $global:LASTEXITCODE = 0; return }
+      $global:LASTEXITCODE = 0
+    }
+    $info = Get-InstalledClientInfo
+    $info.Id | Should -Be "acme"
+    $info.ListUnknown | Should -BeFalse
+    Should -Invoke helm -ParameterFilter { $args -contains "list" }
   }
 }
