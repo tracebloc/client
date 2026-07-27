@@ -566,20 +566,25 @@ function Install-DockerDesktop {
       # Name the observed state instead of a generic retry request (#413).
       $ddProc = Get-Process "Docker Desktop" -ErrorAction SilentlyContinue
       if (-not $ddProc) {
+        # Exited = crashed/blocked, not slow — the slow-start reassurance and
+        # the wait-override hint would point operators at the wrong fix
+        # (Bugbot #440): raising the wait can't help a dead process.
         Warn "Docker Desktop is not running (its process exited)."
         Hint "Start Docker Desktop from the Start menu. If it shows an error window"
         Hint "(virtualization support, a WSL update prompt), fix that first - it may need a reboot."
+        Write-Host ""
+        Err "Docker Desktop exited before its engine came up. Start it, fix anything it reports, then re-run this script."
       } else {
         Warn "Docker Desktop is running, but its engine didn't come up within $waitMin minutes."
         Hint "1. Look for the Docker whale icon in your system tray"
         Hint "2. If Docker is open, wait until it says 'Docker Desktop is running'"
         Hint "3. If Docker shows an error window instead (e.g. 'Virtualization support not detected' or a WSL update prompt), fix that first - it may need a reboot"
+        Write-Host ""
+        Hint "Nothing is broken -- a first start can be slow. Re-run this script once Docker is ready."
+        Hint "(TB_DOCKER_WAIT_MIN overrides the wait, e.g. `$env:TB_DOCKER_WAIT_MIN = '20'.)"
+        Write-Host ""
+        Err "Docker did not start within $waitMin minutes. Re-run this script once Docker is ready."
       }
-      Write-Host ""
-      Hint "Nothing is broken -- a first start can be slow. Re-run this script once Docker is ready."
-      Hint "(TB_DOCKER_WAIT_MIN overrides the wait, e.g. `$env:TB_DOCKER_WAIT_MIN = '20'.)"
-      Write-Host ""
-      Err "Docker did not start within $waitMin minutes. Re-run this script once Docker is ready."
     }
   }
 
