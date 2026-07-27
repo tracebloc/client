@@ -9,7 +9,12 @@
 {{- if $mb.enabled }}
 {{- $ing := default dict .Values.images.ingestor -}}
 {{- $repo := $ing.repository | default "ghcr.io/tracebloc/ingestor" -}}
-{{- $digest := $ing.digest | default "" -}}
+{{- /* One effective digest for the ingestor image, shared with the ingestion
+       Jobs jobs-manager spawns (INGESTOR_IMAGE_DIGEST) so the backfill can never
+       run a different build than the ingestions it is reconciling: explicit
+       `images.ingestor.digest` wins, else the prod pin `prodDigest` when the
+       prod gate is on, else float on `tag`. See the helper (backend#1245). */ -}}
+{{- $digest := include "tracebloc.ingestorDigest" . -}}
 {{- /* Fallback tag matches values.yaml images.ingestor.tag and jobs-manager's
        INGESTOR_IMAGE_TAG default — an older tag here would pull an ingestor that
        predates the `tracebloc-backfill` entrypoint and the sweep would no-op.

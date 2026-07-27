@@ -8,7 +8,7 @@ install_homebrew() {
   if ! has brew; then
     local brew_script
     brew_script="$(mktemp)"
-    curl -fsSL $CURL_SECURE https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh \
+    curl_secure -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh \
       -o "$brew_script"
     spin_cmd "Installing Homebrew…" env NONINTERACTIVE=1 /bin/bash "$brew_script"
     rm -f "$brew_script"
@@ -177,7 +177,7 @@ install_docker_desktop() {
 
     local checksum_url="${dmg_url}.sha256sum"
     local expected_hash
-    expected_hash=$(curl -fsSL $CURL_SECURE "$checksum_url" 2>/dev/null | awk '{print $1}' || true)
+    expected_hash=$(curl_secure -fsSL "$checksum_url" 2>/dev/null | awk '{print $1}' || true)
     if [[ -n "$expected_hash" ]]; then
       local actual_hash
       actual_hash=$(shasum -a 256 "$dmg_path" | awk '{print $1}')

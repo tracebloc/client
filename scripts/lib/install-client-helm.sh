@@ -266,7 +266,11 @@ verify_credentials() {
   # process table. `printf '%s'` is a bash builtin (no fork, no argv exposure) and
   # emits no trailing newline (a here-string `<<<` would append one and corrupt
   # the password). The username (client_id, a UUID) isn't secret, so it stays inline.
-  code=$(printf '%s' "$client_password" | curl -sS -m 60 -o /dev/null -w '%{http_code}' \
+  # curl_secure (not bare curl) pins the minimum TLS version: this request carries
+  # the client's password, and a TLS-inspecting proxy in front of it would happily
+  # negotiate whatever the client accepts (backend#1252). -m 60 keeps the tighter
+  # deadline this call already had.
+  code=$(printf '%s' "$client_password" | curl_secure -sS -m 60 -o /dev/null -w '%{http_code}' \
     --data-urlencode "username=${client_id}" \
     --data-urlencode "password@-" \
     "${backend}api-token-auth/" 2>/dev/null) || code="000"
