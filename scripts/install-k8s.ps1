@@ -1283,6 +1283,18 @@ function Read-TraceblocCredentialFile {
   return $cred
 }
 
+# Test-ApiReachable — a bounded liveness probe for the cluster API. helm has no
+# request timeout, so any helm call against a wedged/unreachable API would hang
+# indefinitely; callers gate helm behind this so they degrade gracefully instead
+# of freezing the install. Returns $true only when kubectl reached the API within
+# the timeout. Mirrors the bounded probe Get-TrainingResources runs before `helm
+# get values` (Bugbot).
+function Test-ApiReachable {
+  param([int]$TimeoutSeconds = 5)
+  $null = (kubectl get --raw='/readyz' --request-timeout="${TimeoutSeconds}s" 2>$null) | Out-String
+  return ($LASTEXITCODE -eq 0)
+}
+
 # Enumerate what client (if any) is already installed on this cluster — the
 # shared source for the provisioning pre-flight AND the Helm-step guard, so the
 # two can never drift. Values are read with `-o json`, not YAML: helm
@@ -1293,6 +1305,15 @@ function Read-TraceblocCredentialFile {
 # "no client here"), ListUnknown (couldn't even enumerate releases).
 function Get-InstalledClientInfo {
   $existingId = ""; $existingNs = ""; $existingName = ""; $unreadableNs = ""; $listUnknown = $false
+  # helm has no request timeout, so a wedged/unreachable API server would hang
+  # `helm list`/`helm get values` indefinitely — freezing Step 4 (after browser
+  # sign-in) and Step 5's one-client guard. Gate the enumeration behind a bounded
+  # kubectl probe (mirrors Get-TrainingResources). If the API isn't reachable
+  # within the timeout, degrade to the same "couldn't enumerate" (ListUnknown)
+  # shape a helm failure produces, so callers fail closed instead of hanging (Bugbot).
+  if (-not (Test-ApiReachable)) {
+    return [pscustomobject]@{ Id = ""; Ns = ""; Name = ""; UnreadableNs = ""; ListUnknown = $true }
+  }
   $listJson = (helm list -A -o json 2>$null) | Out-String
   if ($LASTEXITCODE -ne 0) {
     # helm list failed (wedged/unreachable API, kubeconfig glitch) -> unknown.
