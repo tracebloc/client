@@ -842,5 +842,7 @@ setup() {
   local f="$BATS_TEST_DIRNAME/../lib/install-client-helm.sh"
   [ "$(grep -c "reports 'another operation is in progress'" "$f")" -eq 2 ]
   grep -q 'helm -n \$TB_NAMESPACE uninstall \$TB_NAMESPACE' "$f"
-  grep -q 'helm -n \$_ns rollback \$_ns' "$f"
+  # The adopt path tracks release and namespace separately — the rollback hint
+  # must name the RELEASE (\$_rel), not the namespace (Bugbot #442 r5).
+  grep -q 'helm -n \$_ns rollback \$_rel' "$f"
 }

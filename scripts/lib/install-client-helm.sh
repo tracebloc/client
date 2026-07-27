@@ -419,7 +419,7 @@ _reconcile_adopted_client() {
       # NEXT run then fails with "another operation is in progress" and no
       # clue (Bugbot #442). Name the unwedge command now.
       hint "If the next run reports 'another operation is in progress', unwedge the release first:"
-      hint "  helm -n $_ns rollback $_ns    (returns to the previous, working release)"
+      hint "  helm -n $_ns rollback $_rel    (returns to the previous, working release)"
     fi
     error "Reconcile of the existing client failed. Check the log for details: ${LOG_FILE:-}"
   fi
