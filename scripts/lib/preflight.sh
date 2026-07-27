@@ -324,8 +324,13 @@ early_data_dir_guard() {
   _pf_is_network_fstype "$fstype" || return 0
   warn "Storage: ${target} is on a network filesystem (${fstype})."
   hint "The client database (MySQL/InnoDB) corrupts or crash-loops on network storage, and NFS root_squash blocks data-dir setup."
-  hint "Fix: point HOST_DATA_DIR at a LOCAL disk:  HOST_DATA_DIR=/local/path ./install-k8s.sh"
-  hint "(or set TRACEBLOC_ALLOW_NETWORK_FS=1 to proceed anyway — not recommended for the database.)"
+  # No "HOST_DATA_DIR=/local/path" advice here: validate_config requires the
+  # data dir UNDER \$HOME (security, Bugbot #384), so on a network home that
+  # advice is un-followable (Bugbot #441). Name the two paths that work today.
+  hint "HOST_DATA_DIR must be a LOCAL disk under your \$HOME (paths outside \$HOME are rejected), so on a network home either:"
+  hint "  1. install as a user whose home is on a local disk (ask your admin), or"
+  hint "  2. set TRACEBLOC_ALLOW_NETWORK_FS=1 to proceed anyway - NOT recommended: the database can corrupt."
+  hint "(Datasets may stay on network storage via HOST_DATASET_DIR - only the data dir must be local.)"
   error "Refusing to create the data directory on ${fstype} before logging starts."
 }
 

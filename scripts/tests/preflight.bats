@@ -444,6 +444,11 @@ setup() {
   [[ "$output" == *"network filesystem (nfs4)"* ]]
   [[ "$output" == *"HOST_DATA_DIR"* ]]
   [[ "$output" == *"Refusing to create the data directory"* ]]
+  # The remediation must be followable (Bugbot #441): validate_config rejects
+  # paths outside $HOME, so the guard must not advise HOST_DATA_DIR=/local/path.
+  [[ "$output" != *"/local/path"* ]]
+  [[ "$output" == *"TRACEBLOC_ALLOW_NETWORK_FS=1"* ]]
+  [[ "$output" == *"local disk"* ]]
 }
 
 @test "early_data_dir_guard: TRACEBLOC_ALLOW_NETWORK_FS defers to the full check" {
