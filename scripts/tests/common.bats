@@ -190,6 +190,65 @@ setup() {
   [ "$status" -eq 0 ]
 }
 
+# ── curl_secure (backend#1252) ─────────────────────────────────────────────
+# The TLS floor used to be a bare constant every call site had to splice in by
+# hand, and seven had silently lost it — one of them the POST that carries the
+# client's password. These pin the wrapper's contract so it can't drift back:
+# the floor is always present, a caller can still TIGHTEN a bound, and a
+# stall-bounded transfer keeps having no overall deadline.
+@test "curl_secure: always passes the minimum TLS version, caller args intact" {
+  curl() { printf '%s' "$*"; }
+  run curl_secure -fsSL https://example.com
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"--tlsv1.2"* ]]
+  [[ "$output" == *"-fsSL https://example.com"* ]]
+}
+
+@test "curl_secure: supplies default time bounds when the caller sets none" {
+  curl() { printf '%s' "$*"; }
+  run curl_secure -fsSL https://example.com
+  [[ "$output" == *"--connect-timeout 30"* ]]
+  [[ "$output" == *"--max-time 300"* ]]
+}
+
+@test "curl_secure: a caller's own deadline wins (lands after the default)" {
+  curl() { printf '%s' "$*"; }
+  run curl_secure -sS -m 60 https://example.com
+  # curl honours the LAST occurrence, so -m 60 must come after --max-time 300.
+  [[ "$output" == *"--max-time 300"*"-m 60"* ]]
+}
+
+@test "curl_secure: a stall-bounded transfer gets NO overall deadline" {
+  # download_with_progress / the k3d + kubectl binaries bound themselves with
+  # --speed-limit/--speed-time on purpose: a hard --max-time would fail a
+  # slow-but-healthy link on a big download. The wrapper must not add one.
+  curl() { printf '%s' "$*"; }
+  run curl_secure -fSL --speed-limit 1024 --speed-time 60 -o /tmp/x https://example.com
+  [[ "$output" == *"--tlsv1.2"* ]]
+  [[ "$output" != *"--max-time"* ]]
+}
+
+@test "curl_secure: default bounds are overridable by env" {
+  curl() { printf '%s' "$*"; }
+  TB_CURL_CONNECT_TIMEOUT=5
+  TB_CURL_MAX_TIME=7
+  run curl_secure https://example.com
+  [[ "$output" == *"--connect-timeout 5"* ]]
+  [[ "$output" == *"--max-time 7"* ]]
+}
+
+@test "curl_secure: dispatches through curl, so the suite can still mock it" {
+  # Deliberately NOT `command curl` — every mocked-transfer test in this suite
+  # substitutes a curl shell function, which `command` would bypass.
+  curl() { return 42; }
+  run curl_secure https://example.com
+  [ "$status" -eq 42 ]
+}
+
+@test "curl_secure: CURL_SECURE stays defined for out-of-tree callers" {
+  [ "$CURL_SECURE" = "--tlsv1.2" ]
+}
+
 # ── has ────────────────────────────────────────────────────────────────────
 @test "has: present command" { run has bash; [ "$status" -eq 0 ]; }
 @test "has: absent command" { run has nope-not-a-real-cmd-xyz; [ "$status" -ne 0 ]; }

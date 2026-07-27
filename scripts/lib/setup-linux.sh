@@ -193,7 +193,7 @@ install_docker_engine() {
     else
       local docker_script
       docker_script="$(mktemp)"
-      retry 3 5 curl -fsSL $CURL_SECURE https://get.docker.com -o "$docker_script"
+      retry 3 5 curl_secure -fsSL https://get.docker.com -o "$docker_script"
       chmod +x "$docker_script"
       # Same needrestart guard as setup_pm: get.docker.com runs `apt-get install`
       # internally, so under spin_cmd it can hit the same hidden prompt and hang.
@@ -318,9 +318,14 @@ _fetch_kubectl() {
   local ver="$1" arch="$2"
   local tmpdir
   tmpdir="$(mktemp -d)"
-  retry 3 5 curl -fsSL $CURL_SECURE \
+  # Same bounds as _fetch_k3d_release below, and for the same reason: kubectl is a
+  # ~50 MB binary, so a stall floor is the right bound and a hard --max-time is not
+  # (it would fail a slow-but-healthy link). These flags are also how curl_secure
+  # knows not to add its default deadline here (Bugbot, backend#1252). Before this
+  # the fetch had no bound at all — a mid-stream stall hung the step indefinitely.
+  retry 3 5 curl_secure -fsSL --connect-timeout 15 --speed-limit 1024 --speed-time 60 \
     "https://dl.k8s.io/release/${ver}/bin/linux/${arch}/kubectl" -o "${tmpdir}/kubectl"
-  retry 3 5 curl -fsSL $CURL_SECURE \
+  retry 3 5 curl_secure -fsSL --connect-timeout 15 --speed-limit 1024 --speed-time 60 \
     "https://dl.k8s.io/release/${ver}/bin/linux/${arch}/kubectl.sha256" -o "${tmpdir}/kubectl.sha256"
   echo "$(cat "${tmpdir}/kubectl.sha256")  ${tmpdir}/kubectl" | sha256sum --check --quiet \
     || { rm -rf "$tmpdir"; error "System tool checksum verification failed"; }
@@ -336,7 +341,7 @@ _fetch_kubectl() {
 
 install_kubectl() {
   if ! has kubectl; then
-    KUBE_VER=$(retry 3 5 curl -fsSL $CURL_SECURE https://dl.k8s.io/release/stable.txt)
+    KUBE_VER=$(retry 3 5 curl_secure -fsSL https://dl.k8s.io/release/stable.txt)
     spin_cmd "Installing system tools…" _fetch_kubectl "$KUBE_VER" "$ARCH_DL"
     log "kubectl $KUBE_VER installed."
   else
@@ -361,9 +366,9 @@ _fetch_k3d_release() {
   # --connect-timeout + a stall floor (not --max-time: the binary is ~50 MB and
   # a hard cap would break slow-but-healthy links): a hung transfer under
   # spin_cmd would otherwise spin forever (Bugbot r2).
-  retry 3 5 curl -fsSL $CURL_SECURE --connect-timeout 15 --speed-limit 1024 --speed-time 60 \
+  retry 3 5 curl_secure -fsSL --connect-timeout 15 --speed-limit 1024 --speed-time 60 \
     "${base}/k3d-linux-${arch}" -o "${tmpdir}/k3d"
-  retry 3 5 curl -fsSL $CURL_SECURE --connect-timeout 15 --speed-limit 1024 --speed-time 60 \
+  retry 3 5 curl_secure -fsSL --connect-timeout 15 --speed-limit 1024 --speed-time 60 \
     "${base}/checksums.txt" -o "${tmpdir}/checksums.txt"
   local want
   want="$(awk -v asset="k3d-linux-${arch}" \
@@ -407,7 +412,7 @@ install_k3d() {
   [[ -z "$_k3d_tag" || "$_k3d_tag" =~ ^v[0-9][A-Za-z0-9._-]*$ ]] \
     || error "K3D_VERSION must be a k3d release tag like v5.9.0, or 'latest' (got '${K3D_VERSION:-}')"
   if [ -z "$_k3d_tag" ]; then
-    _k3d_tag="$(retry 3 5 curl -fsSLI $CURL_SECURE --connect-timeout 15 --max-time 30 \
+    _k3d_tag="$(retry 3 5 curl_secure -fsSLI --connect-timeout 15 --max-time 30 \
       -o /dev/null -w '%{url_effective}' \
       "https://github.com/k3d-io/k3d/releases/latest" 2>/dev/null)" || _k3d_tag=""
     _k3d_tag="${_k3d_tag##*/}"
@@ -509,9 +514,9 @@ _fetch_helm_release() {
   # --connect-timeout + a stall floor (not --max-time: the tarball is ~17 MB and
   # a hard cap would break slow-but-healthy links) — a hung transfer under
   # spin_cmd would otherwise spin forever.
-  retry 3 5 curl -fsSL $CURL_SECURE --connect-timeout 15 --speed-limit 1024 --speed-time 60 \
+  retry 3 5 curl_secure -fsSL --connect-timeout 15 --speed-limit 1024 --speed-time 60 \
     "https://get.helm.sh/${tarball}" -o "${tmpdir}/${tarball}"
-  retry 3 5 curl -fsSL $CURL_SECURE --connect-timeout 15 --speed-limit 1024 --speed-time 60 \
+  retry 3 5 curl_secure -fsSL --connect-timeout 15 --speed-limit 1024 --speed-time 60 \
     "https://get.helm.sh/${tarball}.sha256sum" -o "${tmpdir}/${tarball}.sha256sum"
   # The published file is "<sha256>  <tarball-name>" — verify in place.
   if ! (cd "$tmpdir" && sha256sum --check --quiet "${tarball}.sha256sum"); then
@@ -570,7 +575,7 @@ install_helm() {
       # the capture on a failed-then-successful fetch; the endpoint's body is
       # the last line either way (Bugbot r3). On total failure the last line is
       # retry's notice, which the tag regex below rejects → the honest error.
-      _helm_tag="$(retry 3 5 curl -fsSL $CURL_SECURE --connect-timeout 15 --max-time 30 \
+      _helm_tag="$(retry 3 5 curl_secure -fsSL --connect-timeout 15 --max-time 30 \
         "https://get.helm.sh/helm-latest-version" 2>/dev/null | tail -1 | tr -d '[:space:]')" || _helm_tag=""
       [[ "$_helm_tag" =~ ^v[0-9][A-Za-z0-9._-]*$ ]] \
         || error "Couldn't resolve the latest Helm release tag — set HELM_VERSION to a release tag (e.g. v4.2.3) and re-run."
