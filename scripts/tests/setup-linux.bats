@@ -20,6 +20,14 @@ setup() {
   id()        { echo "testuser docker"; }
   curl()      { record "curl $*"; return 0; }
 
+  # The execute-gate (#411) runs `<tool> version` after install, so the tool mocks
+  # must be RUNNABLE, not merely "present" via has(). Silent (no record) so the
+  # mock_calls assertions stay about the install/fetch, not the gate's probe — and
+  # so these shadow any real tool on the dev host (the toolless CI runner has none).
+  k3d()       { echo "k3d version v5.9.0"; }
+  kubectl()   { echo "Client Version: v1.29.4"; }
+  helm()      { echo "v4.2.3"; }
+
   # macOS has no /etc/os-release, and a bash `[[ -f ]]` file-test can't be mocked
   # the way `grep` can — so install_docker_engine's amzn/RHEL-clone branches
   # short-circuited off-Linux and fell through to get.docker.com. Write a real
