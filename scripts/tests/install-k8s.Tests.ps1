@@ -1468,3 +1468,154 @@ Describe "Docker engine wait calibration (#413)" {
     $raw | Should -Match 'Get-Process "Docker Desktop"'
   }
 }
+
+Describe "Preflight download-host probing (#416)" {
+  # Isolate the connectivity section: everything else reports healthy so only the
+  # host probes decide the outcome. Err throws so a hard fail is observable.
+  BeforeEach {
+    $env:TRACEBLOC_SKIP_PREFLIGHT   = $null
+    $env:TRACEBLOC_ALLOW_NETWORK_FS = $null
+    Mock Get-WindowsArch      { "amd64" }
+    Mock Get-PfVirtualization { $true }
+    Mock Get-PfCpu            { 8 }
+    Mock Get-PfMemGb          { 16 }
+    Mock Get-PfFreeGb         { 100 }
+    Mock Get-PfFsType         { "local" }
+    Mock Get-BackendUrl       { "https://api.tracebloc.io" }
+    Mock Err                  { throw "ERR: $args" }
+    Mock Test-Path            { $false }   # Docker Desktop absent -> desktop.docker.com probed
+  }
+
+  It "auth.docker.io (Docker Hub token host) blocked -> hard fail" {
+    Mock Has        { $true }              # all tools present -> only always-critical hosts probed
+    Mock Test-PfUrl { param($Url) if ($Url -match 'auth\.docker\.io') { "blocked" } else { "ok" } }
+    { Test-Preflight } | Should -Throw "*ERR:*"
+  }
+
+  It "kubectl host (dl.k8s.io) blocked -> hard fail when kubectl is absent" {
+    Mock Has        { param($cmd) $cmd -ne "kubectl" }
+    Mock Test-PfUrl { param($Url) if ($Url -match 'dl\.k8s\.io') { "blocked" } else { "ok" } }
+    { Test-Preflight } | Should -Throw "*ERR:*"
+  }
+
+  It "k3d asset host (objects.githubusercontent.com) blocked -> hard fail when k3d absent" {
+    Mock Has        { param($cmd) $cmd -ne "k3d" }
+    Mock Test-PfUrl { param($Url) if ($Url -match 'objects\.githubusercontent\.com') { "blocked" } else { "ok" } }
+    { Test-Preflight } | Should -Throw "*ERR:*"
+  }
+
+  It "a present tool's host is not probed (no false hard-fail)" {
+    Mock Has        { $true }              # kubectl present -> dl.k8s.io never probed
+    Mock Test-Path  { $true }              # Docker Desktop present -> desktop.docker.com not probed
+    Mock Test-PfUrl { param($Url) if ($Url -match 'dl\.k8s\.io') { "blocked" } else { "ok" } }
+    { Test-Preflight } | Should -Not -Throw
+  }
+
+  It "all hosts reachable -> preflight passes" {
+    Mock Has        { $true }
+    Mock Test-PfUrl { "ok" }
+    { Test-Preflight } | Should -Not -Throw
+  }
+}
+
+Describe "Preflight host list — required download hosts present (#416)" {
+  BeforeAll { $script:raw = Get-Content "$PSScriptRoot/../install-k8s.ps1" -Raw }
+  It "probes every download host the installer fetches from" {
+    foreach ($h in 'auth.docker.io','desktop.docker.com','dl.k8s.io','get.helm.sh','github.com','objects.githubusercontent.com') {
+      $script:raw | Should -Match ([regex]::Escape($h))
+    }
+  }
+  It "gates tool-download hosts on tool absence (a present tool is not re-probed)" {
+    $script:raw | Should -Match 'if \(-not \(Has "kubectl"\)\)'
+    $script:raw | Should -Match 'if \(-not \(Has "k3d"\)\)'
+  }
+}
+
+Describe "GPU container toolkit — progress + honest remedies (#415)" {
+  BeforeAll {
+    $ast = [System.Management.Automation.Language.Parser]::ParseFile(
+      "$PSScriptRoot/../install-k8s.ps1", [ref]$null, [ref]$null)
+    $script:gpuFn = $ast.FindAll({ param($n)
+      $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+      $n.Name -eq 'Install-NvidiaContainerToolkit'
+    }, $true) | Select-Object -First 1
+  }
+
+  Context "Wait-JobWithProgress" {
+    It "returns true when the job has already completed" {
+      $job = [pscustomobject]@{ State = "Completed" }
+      Wait-JobWithProgress -Job $job -TimeoutSec 4 -PollSeconds 2 | Should -BeTrue
+    }
+    It "stops the job and returns false once the timeout elapses" {
+      # A real job (Start-Sleep in its own runspace, unaffected by the mock below)
+      # so the production Stop-Job path binds and runs for real.
+      Mock Start-Sleep {}
+      $job = Start-Job -InitializationScript $JobInit -ScriptBlock { Start-Sleep -Seconds 120 }
+      try {
+        Wait-JobWithProgress -Job $job -TimeoutSec 6 -PollSeconds 2 -Message "x" | Should -BeFalse
+        $job.State | Should -BeIn @("Stopped", "Stopping", "Failed")
+      } finally {
+        Remove-Job $job -Force -ErrorAction SilentlyContinue
+      }
+    }
+    It "polls at most TimeoutSec/PollSeconds times (bounded, never unbounded)" {
+      $global:TbSleeps = 0
+      Mock Start-Sleep { $global:TbSleeps++ }
+      $job = Start-Job -InitializationScript $JobInit -ScriptBlock { Start-Sleep -Seconds 120 }
+      try {
+        Wait-JobWithProgress -Job $job -TimeoutSec 10 -PollSeconds 2 -Message "x" | Out-Null
+        $global:TbSleeps | Should -Be 5
+      } finally {
+        Remove-Job $job -Force -ErrorAction SilentlyContinue
+        Remove-Variable -Name TbSleeps -Scope Global -ErrorAction SilentlyContinue
+      }
+    }
+  }
+
+  Context "Show-GpuManualRemedy" {
+    It "prints copy-pastable remedy commands and a tracebloc doctor follow-up" {
+      $out = Show-GpuManualRemedy -Distro "Ubuntu-22.04" 6>&1 | Out-String
+      $out | Should -Match 'apt-get install -y nvidia-container-toolkit'
+      $out | Should -Match 'nvidia-ctk runtime configure'
+      $out | Should -Match 'tracebloc doctor'
+      $out | Should -Match 'Ubuntu-22\.04'
+    }
+    It "is honest that the environment falls back to CPU mode" {
+      $out = Show-GpuManualRemedy 6>&1 | Out-String
+      $out | Should -Match 'CPU mode'
+    }
+  }
+
+  Context "Install-NvidiaContainerToolkit" {
+    It "no-ops without an NVIDIA GPU (never starts a background job)" {
+      $GPU_VENDOR = "none"; $NVIDIA_DRIVER_OK = $false
+      Mock Start-Job { throw "must not start a job in CPU mode" }
+      { Install-NvidiaContainerToolkit } | Should -Not -Throw
+    }
+    It "announces GPU setup on screen, not only in the log file" {
+      # The old flow used Log (file-only) -> a blank console for minutes (#415).
+      $script:gpuFn.Extent.Text | Should -Match 'Info "Setting up GPU acceleration'
+    }
+    It "every long job wait shows a heartbeat — no bare Wait-Job in the GPU flow" {
+      ($script:gpuFn.FindAll({ param($n)
+        $n -is [System.Management.Automation.Language.CommandAst] -and $n.GetCommandName() -eq 'Wait-Job'
+      }, $true)).Count | Should -Be 0
+      ($script:gpuFn.FindAll({ param($n)
+        $n -is [System.Management.Automation.Language.CommandAst] -and $n.GetCommandName() -eq 'Wait-JobWithProgress'
+      }, $true)).Count | Should -BeGreaterOrEqual 3
+    }
+    It "the Ubuntu install runs as a progress-tracked job, not a silent cmd /c" {
+      $script:gpuFn.Extent.Text | Should -Not -Match 'cmd /c "wsl --install -d Ubuntu --no-launch 2>&1" \| Out-Null'
+      $script:gpuFn.Extent.Text | Should -Match 'Downloading and installing Ubuntu'
+    }
+    It "every timeout/failure branch hands the user a runnable remedy" {
+      ($script:gpuFn.FindAll({ param($n)
+        $n -is [System.Management.Automation.Language.CommandAst] -and $n.GetCommandName() -eq 'Show-GpuManualRemedy'
+      }, $true)).Count | Should -BeGreaterOrEqual 3
+    }
+    It "drops the vague dead-end copy the ticket flagged" {
+      $script:gpuFn.Extent.Text | Should -Not -Match 'set it up manually inside WSL later'
+      $script:gpuFn.Extent.Text | Should -Not -Match 'GPU setup may need manual attention'
+    }
+  }
+}

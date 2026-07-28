@@ -66,6 +66,9 @@ function RefreshPath {
               [System.Environment]::GetEnvironmentVariable("PATH","User")
 }
 
+# Shared braille spinner frames for the progress helpers below.
+$script:SpinnerFrames = @([char]0x2807, [char]0x2819, [char]0x2839, [char]0x2838, [char]0x283C, [char]0x2834, [char]0x2826, [char]0x2827, [char]0x2847, [char]0x280F)
+
 # Spin a braille spinner while a process runs, bounded by a deadline (#426):
 # `k3d cluster create --wait` has no timeout of its own, so a stalled image
 # pull would otherwise spin forever. Returns $true when the process exited on
@@ -73,7 +76,7 @@ function RefreshPath {
 # Extracted as a function so the deadline/kill path is unit-testable (#412).
 function Wait-ProcessWithDeadline {
   param([object]$Process, [datetime]$Deadline, [string]$Message)
-  $frames = @([char]0x2807, [char]0x2819, [char]0x2839, [char]0x2838, [char]0x283C, [char]0x2834, [char]0x2826, [char]0x2827, [char]0x2847, [char]0x280F)
+  $frames = $script:SpinnerFrames
   $f = 0
   Write-Host -NoNewline "  "
   while (-not $Process.HasExited) {
@@ -89,6 +92,37 @@ function Wait-ProcessWithDeadline {
     Start-Sleep -Seconds 2
   }
   Write-Host "`r                                                   `r" -NoNewline
+  return $true
+}
+
+# Wait on a background job with a visible heartbeat so a long step never leaves
+# the console silent for more than a couple of seconds (#415). Prints a spinner +
+# elapsed/timeout line while the job runs; returns $true if the job finished
+# before the deadline, $false on timeout (the job is stopped best-effort; the
+# caller still owns Remove-Job). Extracted so the progress/timeout contract is
+# unit-testable without a real slow job.
+function Wait-JobWithProgress {
+  param(
+    [Parameter(Mandatory)] $Job,
+    [int]$TimeoutSec = 180,
+    [string]$Message = "Working",
+    [int]$PollSeconds = 2
+  )
+  $frames = $script:SpinnerFrames
+  $f = 0; $elapsed = 0
+  while ($Job.State -eq "Running" -and $elapsed -lt $TimeoutSec) {
+    Write-Host "`r  " -NoNewline
+    Write-Host $frames[$f] -ForegroundColor Cyan -NoNewline
+    Write-Host " $Message ... ${elapsed}s / ${TimeoutSec}s" -NoNewline
+    $f = ($f + 1) % $frames.Count
+    Start-Sleep -Seconds $PollSeconds
+    $elapsed += $PollSeconds
+  }
+  Write-Host "`r                                                                      `r" -NoNewline
+  if ($Job.State -eq "Running") {
+    Stop-Job $Job -ErrorAction SilentlyContinue
+    return $false
+  }
   return $true
 }
 
@@ -595,9 +629,31 @@ function Install-DockerDesktop {
 #  NVIDIA CONTAINER TOOLKIT (inside WSL2)
 # =============================================================================
 
+# Copy-pastable manual remedy printed whenever GPU setup can't finish on its own
+# (#415). Mirrors the steps in the $nctScript heredoc below so a user can run them
+# by hand inside WSL; ends with the `tracebloc doctor` follow-up so "later" is an
+# actual next action rather than a vague pointer.
+function Show-GpuManualRemedy {
+  param([string]$Distro = "Ubuntu")
+  Warn "GPU acceleration isn't set up -- your environment will run in CPU mode."
+  Hint "To enable it later, open '$Distro' from the Start Menu and run:"
+  Hint "    curl -fsSL --tlsv1.2 --connect-timeout 30 --max-time 30 https://nvidia.github.io/libnvidia-container/gpgkey | sudo gpg --dearmor -o /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg"
+  Hint "    curl -fsSL --tlsv1.2 --connect-timeout 30 --max-time 30 https://nvidia.github.io/libnvidia-container/stable/deb/nvidia-container-toolkit.list | sed 's#deb https://#deb [signed-by=/usr/share/keyrings/nvidia-container-toolkit-keyring.gpg] https://#g' | sudo tee /etc/apt/sources.list.d/nvidia-container-toolkit.list"
+  Hint "    sudo apt-get update && sudo apt-get install -y nvidia-container-toolkit"
+  Hint "    sudo nvidia-ctk runtime configure --runtime=docker --set-as-default"
+  Hint "Then check status and re-run tracebloc:  tracebloc doctor"
+}
+
+# GPU setup is best-effort and never fatal: on any failure it prints a runnable
+# manual remedy (#415) and returns, leaving K3D_GPU_FLAG empty so the cluster is
+# created in CPU mode. It runs in Step 1 (before New-K3dCluster) because the
+# --gpus flag is decided here; moving it to a post-install step would mean
+# recreating the cluster to add the flag -- the exact churn #431 warns against --
+# so instead every long sub-step below shows a heartbeat and CPU mode always wins.
 function Install-NvidiaContainerToolkit {
   if ($GPU_VENDOR -ne "nvidia" -or -not $NVIDIA_DRIVER_OK) { return }
 
+  Info "Setting up GPU acceleration (NVIDIA container toolkit) in WSL2 -- optional; CPU mode works either way."
   Log "Setting up NVIDIA container toolkit in WSL2"
 
   $wslListJob = Start-Job -InitializationScript $JobInit -ScriptBlock {
@@ -607,11 +663,11 @@ function Install-NvidiaContainerToolkit {
     [Console]::OutputEncoding = $prevEncoding
     return $raw
   }
-  $wslListDone = $wslListJob | Wait-Job -Timeout 30
-  if (-not $wslListDone) {
-    Stop-Job $wslListJob; Remove-Job $wslListJob -Force
+  if (-not (Wait-JobWithProgress -Job $wslListJob -TimeoutSec 30 -Message "Checking for a WSL2 distro")) {
+    Remove-Job $wslListJob -Force
     Warn "WSL did not respond in time. Skipping GPU container toolkit."
     Hint "Run 'wsl --update' manually, then re-run this script for GPU support."
+    Show-GpuManualRemedy
     return
   }
   $distroRaw = Receive-Job $wslListJob
@@ -622,15 +678,29 @@ function Install-NvidiaContainerToolkit {
   if (-not $wslDistro -and $distros.Count -gt 0) { $wslDistro = $distros[0] }
 
   if (-not $wslDistro) {
+    Info "No WSL2 distro found -- installing Ubuntu (a few hundred MB; this can take several minutes)..."
     Log "No WSL2 distro found -- installing Ubuntu..."
-    cmd /c "wsl --install -d Ubuntu --no-launch 2>&1" | Out-Null
-    cmd /c "wsl --setdefault Ubuntu 2>&1" | Out-Null
+    $ubuntuJob = Start-Job -InitializationScript $JobInit -ScriptBlock {
+      cmd /c "wsl --install -d Ubuntu --no-launch 2>&1"
+      cmd /c "wsl --setdefault Ubuntu 2>&1"
+    }
+    if (-not (Wait-JobWithProgress -Job $ubuntuJob -TimeoutSec 600 -Message "Downloading and installing Ubuntu")) {
+      Remove-Job $ubuntuJob -Force
+      Warn "Ubuntu WSL2 install timed out."
+      Hint "Install it manually, then re-run this script for GPU support:"
+      Hint "    wsl --install -d Ubuntu"
+      Hint "Then check status and re-run tracebloc:  tracebloc doctor"
+      return
+    }
+    Receive-Job $ubuntuJob | Out-Null
+    Remove-Job $ubuntuJob -Force
     Warn "Ubuntu WSL2 installed but needs first-run setup."
     Hint "Open Ubuntu from the Start Menu and set a username/password."
     Hint "Then re-run this script for GPU support."
     return
   }
 
+  Info "Using WSL2 distro: $wslDistro"
   Log "Using WSL2 distro: $wslDistro"
 
   $nctScript = @'
@@ -674,12 +744,11 @@ echo "NCT installed successfully."
     cmd /c "wsl -d $d -- /bin/bash `"$p`" 2>&1"
   } -ArgumentList $wslDistro, $wslPath
 
-  $nctDone = $nctInstallJob | Wait-Job -Timeout 180
-  if (-not $nctDone) {
-    Stop-Job $nctInstallJob; Remove-Job $nctInstallJob -Force
+  if (-not (Wait-JobWithProgress -Job $nctInstallJob -TimeoutSec 180 -Message "Installing NVIDIA container toolkit in $wslDistro")) {
+    Remove-Job $nctInstallJob -Force
     Remove-Item $scriptPath -Force -ErrorAction SilentlyContinue
     Warn "GPU container toolkit installation timed out."
-    Hint "You can set it up manually inside WSL later."
+    Show-GpuManualRemedy -Distro $wslDistro
     return
   }
   Receive-Job $nctInstallJob | Out-Null
@@ -691,19 +760,21 @@ echo "NCT installed successfully."
     cmd /c "wsl -d $d -- nvidia-ctk --version 2>&1"
   } -ArgumentList $wslDistro
 
-  $verDone = $verJob | Wait-Job -Timeout 15
-  if ($verDone) {
+  if (Wait-JobWithProgress -Job $verJob -TimeoutSec 15 -Message "Verifying GPU toolkit") {
     $nctVer = (Receive-Job $verJob | Out-String).Trim()
     Remove-Job $verJob -Force
     if ($nctVer -and $nctVer -notmatch 'error|not found') {
+      Ok "GPU acceleration ready -- NVIDIA Container Toolkit in ${wslDistro}: $nctVer"
       Log "NVIDIA Container Toolkit in WSL2: $nctVer"
       $script:K3D_GPU_FLAG = "--gpus=all"
     } else {
-      Warn "GPU setup may need manual attention."
+      Warn "GPU toolkit installed but could not be verified."
+      Show-GpuManualRemedy -Distro $wslDistro
     }
   } else {
-    Stop-Job $verJob; Remove-Job $verJob -Force
-    Warn "GPU setup may need manual attention."
+    Remove-Job $verJob -Force
+    Warn "GPU toolkit verification timed out."
+    Show-GpuManualRemedy -Distro $wslDistro
   }
 }
 
@@ -2540,6 +2611,9 @@ function Test-Preflight {
   $backendHost = (Get-BackendUrl) -replace '^https?://','' -replace '/$',''
   $criticals = @(
     @{ label = "Docker Hub (registry-1.docker.io)";           url = "https://registry-1.docker.io/v2/" },
+    # auth.docker.io is Docker Hub's token endpoint: a network that allows
+    # registry-1 but blocks the token host fails only at in-cluster pull time (#416).
+    @{ label = "Docker Hub auth (auth.docker.io)";            url = "https://auth.docker.io/token" },
     @{ label = "GitHub Container Registry (ghcr.io)";         url = "https://ghcr.io/" },
     @{ label = "tracebloc API ($backendHost)";                url = "https://$backendHost/" },
     # The chart repo is probed at its index.yaml, strictly: the site ROOT 404s by
@@ -2547,6 +2621,20 @@ function Test-Preflight {
     # actually exist for `helm repo add` to succeed (#385).
     @{ label = "tracebloc Helm charts (tracebloc.github.io)"; url = "$TRACEBLOC_HELM_REPO_URL/index.yaml"; strict = $true }
   )
+  # Download hosts Step 1 fetches from — promoted to HARD (#416): a blocked one
+  # used to pass preflight then fail the install ~30s later. Added only when the
+  # fetch will actually happen (tool/app absent; a present tool is never
+  # re-downloaded). k3d release assets 302 to objects.githubusercontent.com, so it
+  # is probed explicitly. Kept in lockstep with preflight.sh (drift: check-drift.sh).
+  if (-not (Test-Path "$env:ProgramFiles\Docker\Docker\Docker Desktop.exe")) {
+    $criticals += @{ label = "Docker Desktop (desktop.docker.com)"; url = "https://desktop.docker.com/" }
+  }
+  if (-not (Has "kubectl")) { $criticals += @{ label = "kubectl (dl.k8s.io)"; url = "https://dl.k8s.io/" } }
+  if (-not (Has "helm"))    { $criticals += @{ label = "Helm (get.helm.sh)";  url = "https://get.helm.sh/" } }
+  if (-not (Has "k3d")) {
+    $criticals += @{ label = "k3d download (github.com)";                  url = "https://github.com/" }
+    $criticals += @{ label = "k3d assets (objects.githubusercontent.com)"; url = "https://objects.githubusercontent.com/" }
+  }
   $tlsSeen = $false; $cfail = 0
   foreach ($c in $criticals) {
     $status = Test-PfUrl $c.url -RequireSuccess:([bool]$c.strict)
@@ -2559,7 +2647,7 @@ function Test-Preflight {
     }
   }
   if ($tlsSeen)    { Hint "A TLS/certificate error usually means a break-and-inspect (TLS-inspecting) proxy whose corporate CA isn't trusted here - see the proxy notes." }
-  if ($cfail -gt 0){ Hint "Allow HTTPS (443) egress to: registry-1.docker.io, ghcr.io, $backendHost, tracebloc.github.io - or configure your corporate proxy." }
+  if ($cfail -gt 0){ Hint "Allow HTTPS (443) egress to the host(s) named above - the always-needed set is registry-1.docker.io, auth.docker.io, ghcr.io, $backendHost, tracebloc.github.io, plus any tool-download host listed (desktop.docker.com / dl.k8s.io / get.helm.sh / github.com / objects.githubusercontent.com) - or configure your corporate proxy." }
 
   if ($hardFail -gt 0) {
     Write-Host ""
