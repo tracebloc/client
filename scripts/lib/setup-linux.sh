@@ -782,14 +782,18 @@ install_rootless_docker() {
   # Precondition (minimal this slice): the setuid newuidmap/newgidmap helpers from
   # the `uidmap` package must already be present. We deliberately do NOT
   # blanket-`sudo apt-get install uidmap` — that would reintroduce the very
-  # privilege escalation Tier 1 exists to remove. When they're missing, defer to
-  # the admin-run prepare-host step (#1178), which installs the prerequisites once;
-  # full /etc/subuid + /etc/subgid range handling is slice 2 (#1220).
+  # privilege escalation Tier 1 exists to remove. When they're missing there are two
+  # honest admin remedies: install the `uidmap` package (rootless then works), or
+  # run prepare-host to set up Docker so the researcher installs at Tier 0 instead —
+  # no rootless needed. prepare-host on its own does NOT install uidmap; #1220 folds
+  # this into the shared subuid/subgid gate and teaches prepare-host to install it.
   if ! has newuidmap || ! has newgidmap; then
     warn "Rootless Docker needs the 'uidmap' helpers (newuidmap/newgidmap), which aren't installed here."
-    hint "An administrator can provide them once with the prepare-host step, then you install with no admin:"
+    hint "Ask an administrator to install the package once (a single named step, not blanket sudo):"
+    hint "  sudo apt-get install -y uidmap        # Debian/Ubuntu   (RHEL family: sudo dnf install -y shadow-utils)"
+    hint "…or run prepare-host to set up Docker for you, then install at Tier 0 (no rootless needed):"
     hint "  curl -fsSL https://tracebloc.io/i.sh | bash -s -- prepare-host   (or: tracebloc prepare-host <your-username>)"
-    error "Missing uidmap helpers — can't set up rootless Docker without an administrator on this host."
+    error "Missing uidmap helpers — an administrator must install the 'uidmap' package (or run prepare-host), then re-run."
   fi
 
   # Install the rootless daemon as THIS user, no sudo. Prefer the setuptool shipped
