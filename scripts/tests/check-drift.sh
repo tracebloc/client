@@ -213,6 +213,48 @@ _drift_execute_gates() {
   return 0
 }
 
+# ── Check 5: preflight probes the same download hosts on both installers ─────
+# preflight.sh (Linux/macOS) and install-k8s.ps1 (Windows) each probe the hosts
+# the install fetches from (#416). A host added to one installer but not the other
+# silently reopens the "green preflight, blocked download 30s later" gap on
+# whichever OS was missed.
+#
+# We extract only hosts that appear in an actual PROBE URL — preflight.sh entries
+# are "label|https://host/…", install-k8s.ps1 entries are url = "https://host/…" —
+# NOT a whole-file grep. A whole-file grep also matches the same hosts inside
+# comments and the egress-hint strings, so it would pass even if a real probe line
+# were deleted (reviewer: it couldn't detect the drift it exists to catch).
+#
+# The shared-core set is every host BOTH probe as a URL literal on the default
+# path. OS-specific hosts (get.docker.com / download.docker.com on Linux,
+# raw.githubusercontent.com / formulae.brew.sh on macOS) are excluded, as is
+# tracebloc.github.io (install-k8s.ps1 probes it via the $TRACEBLOC_HELM_REPO_URL
+# variable, not a literal — Check 1 already pins the backend/chart host map).
+# Extract ONLY the hosts in a preflight probe entry, not any URL in the file:
+#  - preflight.sh entries are "label|https://host/…" (the pipe is unique to them)
+#  - install-k8s.ps1 entries are @{ label = "…"; url = "https://host/…" } — REQUIRE
+#    the `label =` on the same line so unrelated `$url = "https://…"` assignments
+#    (e.g. the winget download) don't count and mask a deleted probe (Bugbot).
+_drift_probed_hosts_sh()  { grep -oE '\|https://[a-zA-Z0-9.-]+' "$1" 2>/dev/null | sed 's#.*//##' | sort -u; }
+_drift_probed_hosts_ps1() { grep -oE 'label *=.*url *= *"https://[a-zA-Z0-9.-]+' "$1" 2>/dev/null | sed 's#.*https://##' | sort -u; }
+_drift_preflight_hosts() {
+  echo "▸ Preflight download-host parity (probed URLs in preflight.sh · install-k8s.ps1)"
+  local shared=(
+    registry-1.docker.io auth.docker.io ghcr.io
+    dl.k8s.io get.helm.sh github.com objects.githubusercontent.com
+    desktop.docker.com
+  )
+  local before=$_drift h sh_hosts ps_hosts
+  sh_hosts="$(_drift_probed_hosts_sh  "$DRIFT_ROOT/scripts/lib/preflight.sh")"
+  ps_hosts="$(_drift_probed_hosts_ps1 "$DRIFT_ROOT/scripts/install-k8s.ps1")"
+  for h in "${shared[@]}"; do
+    grep -qxF -- "$h" <<<"$sh_hosts" || _note "preflight.sh: '$h' is not in any probe URL — both installers must probe it (#416)"
+    grep -qxF -- "$h" <<<"$ps_hosts" || _note "install-k8s.ps1: '$h' is not in any probe URL — both installers must probe it (#416)"
+  done
+  if [[ "$_drift" -eq "$before" ]]; then _ok "both installers probe the shared download-host set (extracted from probe URLs)"; fi
+  return 0
+}
+
 main() {
   set -uo pipefail
   echo "── source-of-truth drift checks ─────────────────────────────"
@@ -220,6 +262,7 @@ main() {
   _drift_workload_names
   _drift_cli_contract
   _drift_execute_gates
+  _drift_preflight_hosts
   echo "─────────────────────────────────────────────────────────────"
   if [[ "$_drift" -gt 0 ]]; then
     echo "DRIFT: $_drift divergence(s) above. Update both sides (or the contract in check-drift.sh) and re-run." >&2
