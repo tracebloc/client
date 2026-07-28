@@ -173,15 +173,28 @@ setup() {
   PF_HARD_FAIL=0; _pf_connectivity >/dev/null 2>&1; [ "$PF_HARD_FAIL" -ge 1 ]
 }
 
-@test "_pf_connectivity: macOS Docker Desktop host is WARN not hard — Colima path (Bugbot #416)" {
-  # Headless Macs use Colima via brew (ghcr.io), not desktop.docker.com — so a
-  # blocked Desktop CDN must not abort that supported path.
+@test "_pf_connectivity: GUI Mac, docker missing -> desktop.docker.com HARD (Bugbot #416)" {
+  # Docker Desktop is the actual GUI-Mac Docker path, so a blocked CDN must fail
+  # preflight, not the mid-download step.
   _pf_probe_url() { case "$1" in *desktop.docker.com*) echo blocked ;; *) echo ok ;; esac; }
-  has() { [[ "$1" == "curl" ]]; }   # docker + brew missing on this mac
+  has() { case "$1" in curl|brew|kubectl|k3d|helm) return 0 ;; *) return 1 ;; esac; }  # only docker missing
+  _pf_has_gui_session() { return 0; }   # GUI -> Docker Desktop
   OS=Darwin
   run _pf_connectivity
-  [[ "$output" == *"desktop.docker.com) unreachable"* ]]                        # surfaced as a warning…
-  PF_HARD_FAIL=0; _pf_connectivity >/dev/null 2>&1; [ "$PF_HARD_FAIL" -eq 0 ]   # …not a hard fail
+  [[ "$output" == *"desktop.docker.com) unreachable"* ]]
+  PF_HARD_FAIL=0; _pf_connectivity >/dev/null 2>&1; [ "$PF_HARD_FAIL" -ge 1 ]
+}
+
+@test "_pf_connectivity: headless Mac, docker missing -> desktop.docker.com NOT probed (Colima path; Bugbot #416)" {
+  # Headless installs use colima/docker via brew, never desktop.docker.com — so a
+  # blocked CDN must not abort that path (formulae.brew.sh covers the brew route).
+  _pf_probe_url() { case "$1" in *desktop.docker.com*) echo blocked ;; *) echo ok ;; esac; }
+  has() { case "$1" in curl|brew|kubectl|k3d|helm) return 0 ;; *) return 1 ;; esac; }  # only docker missing
+  _pf_has_gui_session() { return 1; }   # headless -> colima via brew
+  OS=Darwin
+  run _pf_connectivity
+  [[ "$output" != *"desktop.docker.com"* ]]
+  PF_HARD_FAIL=0; _pf_connectivity >/dev/null 2>&1; [ "$PF_HARD_FAIL" -eq 0 ]
 }
 
 @test "_pf_connectivity: a download host is NOT probed when its tool is present (#416)" {

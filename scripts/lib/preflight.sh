@@ -435,22 +435,29 @@ _pf_connectivity() {
     if ! has docker;  then soft+=("Docker install (get.docker.com)|https://get.docker.com/" \
                                   "Docker packages (download.docker.com)|https://download.docker.com/"); fi
   elif [[ "$OS" == "Darwin" ]]; then
-    # Homebrew install fetches the script from raw.githubusercontent.com AND then
-    # git-clones Homebrew/brew + core from github.com — probe both (Bugbot #416).
+    # macOS install paths, all keyed on what will actually be fetched (#416):
+    #  - Homebrew install (when brew absent): the script from raw.githubusercontent.com,
+    #    then a git-clone of Homebrew/brew + core from github.com — both hard.
+    #  - kubectl/k3d/helm ALWAYS install via `brew install` -> formula metadata from
+    #    formulae.brew.sh (bottles are ghcr.io, probed above; metadata host is separate
+    #    and is hit even when brew is already present) -> hard.
+    #  - docker is path-dependent: a GUI Mac installs Docker Desktop from
+    #    desktop.docker.com (hard — the actual path); a HEADLESS Mac installs
+    #    colima/docker via brew, which needs formulae.brew.sh instead. _pf_has_gui_session
+    #    (mirrors setup-macos.sh) picks the branch, so each host is probed only on the
+    #    path that fetches it — no false-fail on the path that doesn't (Bugbot r3/r4/r5).
     if ! has brew; then criticals+=("Homebrew install (raw.githubusercontent.com)|https://raw.githubusercontent.com/" \
                                     "Homebrew clone (github.com)|https://github.com/"); fi
-    # `brew install` pulls formula METADATA from formulae.brew.sh — bottles come
-    # from ghcr.io (probed above), but the metadata host is separate and is hit even
-    # when brew is already installed. A blocked formulae.brew.sh = green preflight
-    # then a failed `brew install` (reviewer, #416). kubectl/k3d/helm ALWAYS install
-    # via brew. docker is path-dependent: a GUI Mac installs Docker Desktop from
-    # desktop.docker.com (no brew — probing formulae would false-fail, Bugbot r3),
-    # but a HEADLESS Mac installs colima/docker via brew (formulae IS needed,
-    # Bugbot r4). So add docker to the trigger only when there's no GUI session.
-    if ! has kubectl || ! has k3d || ! has helm || { ! has docker && ! _pf_has_gui_session; }; then
-      criticals+=("Homebrew formulae (formulae.brew.sh)|https://formulae.brew.sh/")
+    local _brew_will_run=""
+    if ! has kubectl || ! has k3d || ! has helm; then _brew_will_run=1; fi
+    if ! has docker; then
+      if _pf_has_gui_session; then
+        criticals+=("Docker Desktop (desktop.docker.com)|https://desktop.docker.com/")   # GUI: the actual Docker path
+      else
+        _brew_will_run=1                                                                  # headless: colima/docker via brew
+      fi
     fi
-    if ! has docker; then soft+=("Docker Desktop (desktop.docker.com)|https://desktop.docker.com/"); fi
+    [[ -n "$_brew_will_run" ]] && criticals+=("Homebrew formulae (formulae.brew.sh)|https://formulae.brew.sh/")
   fi
   # Probe each critical host in the FOREGROUND (so PF_HARD_FAIL updates in THIS
   # shell — a backgrounded spinner subshell couldn't propagate it), advancing a
