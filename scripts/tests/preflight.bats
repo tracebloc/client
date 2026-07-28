@@ -127,6 +127,17 @@ setup() {
   [[ "$output" == *"auth.docker.io) unreachable"* ]]
 }
 
+@test "_pf_connectivity: macOS hard-probes github.com for the Homebrew clone when brew absent (Bugbot #416)" {
+  # install_homebrew git-clones Homebrew/brew from github.com after fetching the
+  # script from raw.githubusercontent.com — both must be reachable.
+  _pf_probe_url() { case "$1" in *//github.com/*) echo blocked ;; *) echo ok ;; esac; }
+  has() { [[ "$1" == "curl" ]]; }   # brew missing -> clone host probed
+  OS=Darwin
+  run _pf_connectivity
+  [[ "$output" == *"github.com) unreachable"* ]]
+  PF_HARD_FAIL=0; _pf_connectivity >/dev/null 2>&1; [ "$PF_HARD_FAIL" -ge 1 ]
+}
+
 @test "_pf_connectivity: macOS Docker Desktop host is WARN not hard — Colima path (Bugbot #416)" {
   # Headless Macs use Colima via brew (ghcr.io), not desktop.docker.com — so a
   # blocked Desktop CDN must not abort that supported path.

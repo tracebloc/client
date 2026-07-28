@@ -425,7 +425,10 @@ _pf_connectivity() {
     if ! has docker;  then soft+=("Docker install (get.docker.com)|https://get.docker.com/" \
                                   "Docker packages (download.docker.com)|https://download.docker.com/"); fi
   elif [[ "$OS" == "Darwin" ]]; then
-    if ! has brew;    then criticals+=("Homebrew install (raw.githubusercontent.com)|https://raw.githubusercontent.com/"); fi
+    # Homebrew install fetches the script from raw.githubusercontent.com AND then
+    # git-clones Homebrew/brew + core from github.com — probe both (Bugbot #416).
+    if ! has brew;    then criticals+=("Homebrew install (raw.githubusercontent.com)|https://raw.githubusercontent.com/" \
+                                       "Homebrew clone (github.com)|https://github.com/"); fi
     if ! has docker;  then soft+=("Docker Desktop (desktop.docker.com)|https://desktop.docker.com/"); fi
     # k3d / kubectl / helm install via Homebrew bottles on ghcr.io (probed above).
   fi
