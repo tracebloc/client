@@ -1468,3 +1468,65 @@ Describe "Docker engine wait calibration (#413)" {
     $raw | Should -Match 'Get-Process "Docker Desktop"'
   }
 }
+
+Describe "Preflight download-host probing (#416)" {
+  # Isolate the connectivity section: everything else reports healthy so only the
+  # host probes decide the outcome. Err throws so a hard fail is observable.
+  BeforeEach {
+    $env:TRACEBLOC_SKIP_PREFLIGHT   = $null
+    $env:TRACEBLOC_ALLOW_NETWORK_FS = $null
+    Mock Get-WindowsArch      { "amd64" }
+    Mock Get-PfVirtualization { $true }
+    Mock Get-PfCpu            { 8 }
+    Mock Get-PfMemGb          { 16 }
+    Mock Get-PfFreeGb         { 100 }
+    Mock Get-PfFsType         { "local" }
+    Mock Get-BackendUrl       { "https://api.tracebloc.io" }
+    Mock Err                  { throw "ERR: $args" }
+    Mock Test-Path            { $false }   # Docker Desktop absent -> desktop.docker.com probed
+  }
+
+  It "auth.docker.io (Docker Hub token host) blocked -> hard fail" {
+    Mock Has        { $true }              # all tools present -> only always-critical hosts probed
+    Mock Test-PfUrl { param($Url) if ($Url -match 'auth\.docker\.io') { "blocked" } else { "ok" } }
+    { Test-Preflight } | Should -Throw "*ERR:*"
+  }
+
+  It "kubectl host (dl.k8s.io) blocked -> hard fail when kubectl is absent" {
+    Mock Has        { param($cmd) $cmd -ne "kubectl" }
+    Mock Test-PfUrl { param($Url) if ($Url -match 'dl\.k8s\.io') { "blocked" } else { "ok" } }
+    { Test-Preflight } | Should -Throw "*ERR:*"
+  }
+
+  It "k3d asset host (objects.githubusercontent.com) blocked -> hard fail when k3d absent" {
+    Mock Has        { param($cmd) $cmd -ne "k3d" }
+    Mock Test-PfUrl { param($Url) if ($Url -match 'objects\.githubusercontent\.com') { "blocked" } else { "ok" } }
+    { Test-Preflight } | Should -Throw "*ERR:*"
+  }
+
+  It "a present tool's host is not probed (no false hard-fail)" {
+    Mock Has        { $true }              # kubectl present -> dl.k8s.io never probed
+    Mock Test-Path  { $true }              # Docker Desktop present -> desktop.docker.com not probed
+    Mock Test-PfUrl { param($Url) if ($Url -match 'dl\.k8s\.io') { "blocked" } else { "ok" } }
+    { Test-Preflight } | Should -Not -Throw
+  }
+
+  It "all hosts reachable -> preflight passes" {
+    Mock Has        { $true }
+    Mock Test-PfUrl { "ok" }
+    { Test-Preflight } | Should -Not -Throw
+  }
+}
+
+Describe "Preflight host list — required download hosts present (#416)" {
+  BeforeAll { $script:raw = Get-Content "$PSScriptRoot/../install-k8s.ps1" -Raw }
+  It "probes every download host the installer fetches from" {
+    foreach ($h in 'auth.docker.io','desktop.docker.com','dl.k8s.io','get.helm.sh','github.com','objects.githubusercontent.com') {
+      $script:raw | Should -Match ([regex]::Escape($h))
+    }
+  }
+  It "gates tool-download hosts on tool absence (a present tool is not re-probed)" {
+    $script:raw | Should -Match 'if \(-not \(Has "kubectl"\)\)'
+    $script:raw | Should -Match 'if \(-not \(Has "k3d"\)\)'
+  }
+}

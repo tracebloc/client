@@ -88,3 +88,20 @@ YAML
   command() { if [[ "${2:-}" == helm ]]; then return 1; fi; builtin command "$@"; }
   _drift=0; _drift_workload_names >/dev/null 2>&1; [ "$_drift" -eq 0 ]
 }
+
+# ── Check 4: preflight download-host parity (#416) ───────────────────────────
+# hosts are newline-delimited via $'...' (not space-split) so the fixture writes
+# one host per line regardless of the test runner's IFS.
+@test "preflight hosts: both installers list the shared set -> no drift (#416)" {
+  local hosts=$'registry-1.docker.io\nauth.docker.io\nghcr.io\ndl.k8s.io\nget.helm.sh\ngithub.com\nobjects.githubusercontent.com\ndesktop.docker.com\ntracebloc.github.io'
+  printf '%s\n' "$hosts" >> "$ROOT/scripts/lib/preflight.sh"
+  printf '%s\n' "$hosts" >> "$ROOT/scripts/install-k8s.ps1"
+  _drift=0; _drift_preflight_hosts >/dev/null; [ "$_drift" -eq 0 ]
+}
+
+@test "preflight hosts: a host in bash but missing from ps1 -> drift (#416)" {
+  local hosts=$'registry-1.docker.io\nauth.docker.io\nghcr.io\ndl.k8s.io\nget.helm.sh\ngithub.com\nobjects.githubusercontent.com\ndesktop.docker.com\ntracebloc.github.io'
+  printf '%s\n' "$hosts" >> "$ROOT/scripts/lib/preflight.sh"
+  printf '%s\n' "$hosts" | grep -v '^dl\.k8s\.io$' >> "$ROOT/scripts/install-k8s.ps1"
+  _drift=0; _drift_preflight_hosts >/dev/null 2>&1; [ "$_drift" -ge 1 ]
+}

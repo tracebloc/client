@@ -392,12 +392,34 @@ _pf_connectivity() {
   # Entries are "label|url" with an optional third "|strict" field.
   local criticals=(
     "Docker Hub (registry-1.docker.io)|https://registry-1.docker.io/v2/"
+    # auth.docker.io is Docker Hub's token endpoint: a network that allows
+    # registry-1 but blocks the token host fails only at in-cluster pull time (#416).
+    "Docker Hub auth (auth.docker.io)|https://auth.docker.io/token"
     "GitHub Container Registry (ghcr.io)|https://ghcr.io/"
     "tracebloc API (${backend_host})|https://${backend_host}/"
     # The chart repo is probed at its index.yaml, strictly (third field): the site
     # ROOT 404s by design, while the index must exist for `helm repo add` (#385).
     "tracebloc Helm charts (tracebloc.github.io)|https://tracebloc.github.io/client/index.yaml|strict"
   )
+  # Download hosts the default install path fetches from on THIS OS — promoted to
+  # HARD (#416): a blocked one used to pass preflight then fail the install ~30s
+  # later. Only added when the fetch will actually happen (tool/app absent; a
+  # present tool is never re-downloaded, so its host is not probed). Release assets
+  # 302 to objects.githubusercontent.com and _pf_probe_url does not follow
+  # redirects, so github.com passing proves nothing about the asset host — probe it
+  # explicitly. Kept in lockstep with install-k8s.ps1 (drift check: check-drift.sh).
+  if [[ "$OS" == "Linux" ]]; then
+    if ! has docker;  then criticals+=("Docker install (get.docker.com)|https://get.docker.com/" \
+                                       "Docker packages (download.docker.com)|https://download.docker.com/"); fi
+    if ! has k3d;     then criticals+=("k3d download (github.com)|https://github.com/" \
+                                       "k3d assets (objects.githubusercontent.com)|https://objects.githubusercontent.com/"); fi
+    if ! has kubectl; then criticals+=("kubectl (dl.k8s.io)|https://dl.k8s.io/"); fi
+    if ! has helm;    then criticals+=("Helm (get.helm.sh)|https://get.helm.sh/"); fi
+  elif [[ "$OS" == "Darwin" ]]; then
+    if ! has brew;    then criticals+=("Homebrew install (raw.githubusercontent.com)|https://raw.githubusercontent.com/"); fi
+    if ! has docker;  then criticals+=("Docker Desktop (desktop.docker.com)|https://desktop.docker.com/"); fi
+    # k3d / kubectl / helm install via Homebrew bottles on ghcr.io (probed above).
+  fi
   # Probe each critical host in the FOREGROUND (so PF_HARD_FAIL updates in THIS
   # shell — a backgrounded spinner subshell couldn't propagate it), advancing a
   # spinner frame before each blocking probe. No sleep: the network probe itself
@@ -431,26 +453,6 @@ _pf_connectivity() {
       _pf_fail_line "${ff%%|*} unreachable (${ff#*|})"
       PF_HARD_FAIL=$(( ${PF_HARD_FAIL:-0} + 1 ))
       cfail=$(( cfail + 1 ))
-    done
-  fi
-
-  # Tool-download hosts: only relevant on Linux when the tool isn't present. Warn-only.
-  if [[ "$OS" == "Linux" ]]; then
-    local conds=()
-    if ! has docker;  then conds+=("Docker install (get.docker.com)|https://get.docker.com/"); fi
-    if ! has k3d;     then conds+=("k3d download (github.com)|https://github.com/"); fi
-    if ! has kubectl; then conds+=("kubectl (dl.k8s.io)|https://dl.k8s.io/"); fi
-    if ! has helm;    then conds+=("Helm (get.helm.sh)|https://get.helm.sh/"); fi
-    # ${conds[@]+...} guard: expanding an empty array under `set -u` errors on
-    # bash 3.2 (macOS). This expands to nothing when no tools are missing.
-    for c in ${conds[@]+"${conds[@]}"}; do
-      label="${c%%|*}"; url="${c#*|}"
-      status="$(_pf_probe_url "$url")"
-      if [[ "$status" == "ok" ]]; then
-        _pf_ok "${label} reachable"
-      else
-        warn "${label} unreachable (${status}) — needed only to install that tool."
-      fi
     done
   fi
 

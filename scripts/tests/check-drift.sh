@@ -186,12 +186,40 @@ _drift_cli_contract() {
   fi
 }
 
+# ── Check 4: preflight probes the same download hosts on both installers ─────
+# preflight.sh (Linux/macOS) and install-k8s.ps1 (Windows) each hard-probe the
+# hosts the install fetches from (#416). A host added to one installer but not the
+# other silently reopens the "green preflight, blocked download 30s later" gap on
+# whichever OS was missed. The shared-core set below is every host BOTH installers
+# can touch on the default path; the OS-specific ones (get.docker.com / download.
+# docker.com on Linux, raw.githubusercontent.com on macOS) are excluded on purpose.
+_drift_preflight_hosts() {
+  echo "▸ Preflight download-host parity (preflight.sh · install-k8s.ps1)"
+  local files=( scripts/lib/preflight.sh scripts/install-k8s.ps1 )
+  local shared=(
+    registry-1.docker.io auth.docker.io ghcr.io
+    dl.k8s.io get.helm.sh github.com objects.githubusercontent.com
+    desktop.docker.com tracebloc.github.io
+  )
+  local before=$_drift f h
+  for f in "${files[@]}"; do
+    if [[ ! -f "$DRIFT_ROOT/$f" ]]; then _note "$f is missing"; continue; fi
+    for h in "${shared[@]}"; do
+      grep -qF -- "$h" "$DRIFT_ROOT/$f" || \
+        _note "$f: preflight host '$h' not probed — both installers must probe it (#416)"
+    done
+  done
+  if [[ "$_drift" -eq "$before" ]]; then _ok "both installers probe the shared download-host set"; fi
+  return 0
+}
+
 main() {
   set -uo pipefail
   echo "── source-of-truth drift checks ─────────────────────────────"
   _drift_backend_hosts
   _drift_workload_names
   _drift_cli_contract
+  _drift_preflight_hosts
   echo "─────────────────────────────────────────────────────────────"
   if [[ "$_drift" -gt 0 ]]; then
     echo "DRIFT: $_drift divergence(s) above. Update both sides (or the contract in check-drift.sh) and re-run." >&2

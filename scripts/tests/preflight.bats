@@ -88,13 +88,59 @@ setup() {
   [[ "$output" != *"get.docker.com"* ]]
 }
 
-@test "_pf_connectivity: tool host probed (warn-only) when the tool is missing" {
+@test "_pf_connectivity: missing-tool download host is a HARD fail (#416)" {
+  # Behaviour change (#416): a blocked download host used to be warn-only and
+  # passed preflight, then failed the install ~30s later. It is now a red line.
   _pf_probe_url() { case "$1" in *get.docker.com*) echo blocked ;; *) echo ok ;; esac; }
   has() { [[ "$1" == "curl" ]]; }   # curl present (probing possible), other tools missing
   OS=Linux
   run _pf_connectivity
-  [[ "$output" == *"get.docker.com"* ]]
-  # a missing tool host is warn-only, never a hard fail
+  [[ "$output" == *"get.docker.com) unreachable"* ]]
+  PF_HARD_FAIL=0; _pf_connectivity >/dev/null 2>&1; [ "$PF_HARD_FAIL" -ge 1 ]
+}
+
+@test "_pf_connectivity: kubectl host (dl.k8s.io) blocked -> HARD fail (#416)" {
+  _pf_probe_url() { case "$1" in *dl.k8s.io*) echo blocked ;; *) echo ok ;; esac; }
+  has() { [[ "$1" == "curl" ]]; }   # tools missing -> their download hosts probed
+  OS=Linux
+  run _pf_connectivity
+  [[ "$output" == *"dl.k8s.io) unreachable"* ]]
+  PF_HARD_FAIL=0; _pf_connectivity >/dev/null 2>&1; [ "$PF_HARD_FAIL" -ge 1 ]
+}
+
+@test "_pf_connectivity: k3d asset host objects.githubusercontent.com is probed (#416)" {
+  # Release assets 302 to objects.githubusercontent.com; _pf_probe_url can't
+  # follow redirects, so it must be listed (and probed) explicitly.
+  _pf_probe_url() { case "$1" in *objects.githubusercontent.com*) echo blocked ;; *) echo ok ;; esac; }
+  has() { [[ "$1" == "curl" ]]; }
+  OS=Linux
+  run _pf_connectivity
+  [[ "$output" == *"objects.githubusercontent.com) unreachable"* ]]
+}
+
+@test "_pf_connectivity: auth.docker.io (Docker Hub token host) is probed hard (#416)" {
+  _pf_probe_url() { case "$1" in *auth.docker.io*) echo blocked ;; *) echo ok ;; esac; }
+  has() { return 0; }               # all tools present -> only always-critical hosts probed
+  OS=Linux
+  run _pf_connectivity
+  [[ "$output" == *"auth.docker.io) unreachable"* ]]
+}
+
+@test "_pf_connectivity: macOS probes desktop.docker.com when docker is missing (#416)" {
+  _pf_probe_url() { case "$1" in *desktop.docker.com*) echo blocked ;; *) echo ok ;; esac; }
+  has() { [[ "$1" == "curl" ]]; }   # docker + brew missing on this mac
+  OS=Darwin
+  run _pf_connectivity
+  [[ "$output" == *"desktop.docker.com) unreachable"* ]]
+  PF_HARD_FAIL=0; _pf_connectivity >/dev/null 2>&1; [ "$PF_HARD_FAIL" -ge 1 ]
+}
+
+@test "_pf_connectivity: a download host is NOT probed when its tool is present (#416)" {
+  _pf_probe_url() { case "$1" in *dl.k8s.io*) echo blocked ;; *) echo ok ;; esac; }
+  has() { case "$1" in curl|kubectl) return 0 ;; *) return 1 ;; esac; }   # kubectl present
+  OS=Linux
+  run _pf_connectivity
+  [[ "$output" != *"dl.k8s.io"* ]]  # present tool is never re-downloaded -> host not probed
   PF_HARD_FAIL=0; _pf_connectivity >/dev/null 2>&1; [ "$PF_HARD_FAIL" -eq 0 ]
 }
 
