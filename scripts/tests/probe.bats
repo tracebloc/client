@@ -121,6 +121,91 @@ setup() {
   [ "$output" = sudo_pw ]
 }
 
+# ── _probe_subid_ranges / _probe_uidmap_helpers (rootless prereqs, #1220) ─────
+
+@test "subid: range present in BOTH files (by name) => present" {
+  USER=testuser; id() { echo 1000; }
+  TB_SUBUID_FILE="$(mktemp)"; TB_SUBGID_FILE="$(mktemp)"
+  printf 'testuser:100000:65536\n' >"$TB_SUBUID_FILE"
+  printf 'testuser:100000:65536\n' >"$TB_SUBGID_FILE"
+  _probe_subid_ranges
+}
+
+@test "subid: range keyed by numeric uid => present" {
+  USER=testuser; id() { echo 1000; }
+  TB_SUBUID_FILE="$(mktemp)"; TB_SUBGID_FILE="$(mktemp)"
+  printf '1000:100000:65536\n' >"$TB_SUBUID_FILE"
+  printf '1000:100000:65536\n' >"$TB_SUBGID_FILE"
+  _probe_subid_ranges
+}
+
+@test "subid: present in subuid but MISSING from subgid => not present (both required)" {
+  USER=testuser; id() { echo 1000; }
+  TB_SUBUID_FILE="$(mktemp)"; TB_SUBGID_FILE="$(mktemp)"
+  printf 'testuser:100000:65536\n' >"$TB_SUBUID_FILE"
+  : >"$TB_SUBGID_FILE"
+  run _probe_subid_ranges
+  [ "$status" -ne 0 ]
+}
+
+@test "subid: both files empty => not present" {
+  USER=testuser; id() { echo 1000; }
+  TB_SUBUID_FILE="$(mktemp)"; TB_SUBGID_FILE="$(mktemp)"
+  run _probe_subid_ranges
+  [ "$status" -ne 0 ]
+}
+
+@test "subid: a name that is a substring of another entry does NOT false-positive" {
+  USER=test; id() { echo 4242; }        # entries below are 'testuser', not 'test'
+  TB_SUBUID_FILE="$(mktemp)"; TB_SUBGID_FILE="$(mktemp)"
+  printf 'testuser:100000:65536\n' >"$TB_SUBUID_FILE"
+  printf 'testuser:100000:65536\n' >"$TB_SUBGID_FILE"
+  run _probe_subid_ranges
+  [ "$status" -ne 0 ]
+}
+
+@test "uidmap: both helpers present AND setuid => satisfied" {
+  bin="$(mktemp -d)"
+  : >"$bin/newuidmap"; : >"$bin/newgidmap"
+  chmod u+s "$bin/newuidmap" "$bin/newgidmap"
+  PATH="$bin"                            # hermetic: hide any system copy
+  _probe_uidmap_helpers
+}
+
+@test "uidmap: present but NOT setuid => not satisfied" {
+  bin="$(mktemp -d)"
+  : >"$bin/newuidmap"; : >"$bin/newgidmap"
+  chmod +x "$bin/newuidmap" "$bin/newgidmap"
+  PATH="$bin"
+  run _probe_uidmap_helpers
+  [ "$status" -ne 0 ]
+}
+
+@test "uidmap: one helper missing => not satisfied" {
+  bin="$(mktemp -d)"
+  : >"$bin/newuidmap"; chmod u+s "$bin/newuidmap"   # newgidmap absent
+  PATH="$bin"
+  run _probe_uidmap_helpers
+  [ "$status" -ne 0 ]
+}
+
+@test "subid probes: side-effect-free — fixtures unchanged after run_host_probes" {
+  OS=Linux; USER=testuser; id() { echo 1000; }
+  TB_SUBUID_FILE="$(mktemp)"; TB_SUBGID_FILE="$(mktemp)"
+  printf 'testuser:100000:65536\n' >"$TB_SUBUID_FILE"
+  printf 'testuser:100000:65536\n' >"$TB_SUBGID_FILE"
+  before_u="$(cat "$TB_SUBUID_FILE")"; before_g="$(cat "$TB_SUBGID_FILE")"
+  _probe_runtime_usable() { return 1; }
+  _probe_cgroup_v2()      { return 0; }
+  _probe_userns()         { return 0; }
+  _probe_privilege()      { echo no_sudo; }
+  _probe_uidmap_helpers() { return 0; }
+  run_host_probes
+  [ "$PROBE_SUBID" = 1 ]
+  [ "$(cat "$TB_SUBUID_FILE")" = "$before_u" ]
+  [ "$(cat "$TB_SUBGID_FILE")" = "$before_g" ]
+}
+
 # ── read-only guarantee ───────────────────────────────────────────────────────
 
 @test "run_host_probes: read-only — no image pull on the default path" {
@@ -200,6 +285,16 @@ setup() {
   # Tier 1 still runs the privileged install path (install_linux) until rootless
   # Docker lands (#1177), so the audit must be honest about the one-time admin step.
   assert_has "one-time admin" "$output"
+}
+
+@test "audit: Tier 1 shows the rootless prerequisite rows (subid + uidmap)" {
+  OS=Linux; PROBE_RUNTIME_USABLE=0; PROBE_CGROUP2=1; PROBE_USERNS=1
+  PROBE_SUBID=0; PROBE_UIDMAP=1
+  PROBE_PRIVILEGE=no_sudo; INSTALL_TIER=1; INSTALL_TIER_REASON=rootless-capable
+  run render_host_audit
+  assert_has "Subordinate IDs" "$output"
+  assert_has "no range for this user" "$output"          # PROBE_SUBID=0
+  assert_has "newuidmap + newgidmap present" "$output"    # PROBE_UIDMAP=1
 }
 
 @test "audit: Tier 2 no-userns names the disabled namespaces" {

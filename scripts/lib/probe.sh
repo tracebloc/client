@@ -26,6 +26,8 @@
 #    PROBE_PRIVILEGE       root | sudo_nopw | sudo_pw | no_sudo
 #    PROBE_CGROUP2         0|1  (Linux only; 0 elsewhere)
 #    PROBE_USERNS          0|1  (Linux only; 0 elsewhere)
+#    PROBE_SUBID           0|1  (Linux only; subuid+subgid range for this user)
+#    PROBE_UIDMAP          0|1  (Linux only; newuidmap+newgidmap present & setuid)
 #    INSTALL_TIER          0|1|2
 #    INSTALL_TIER_REASON   short machine-readable tag
 #
@@ -115,6 +117,32 @@ _probe_privilege() {
   echo "sudo_pw"
 }
 
+# _probe_subid_ranges — does THIS user own a subordinate UID/GID range in BOTH
+# /etc/subuid and /etc/subgid? Rootless Docker maps container UIDs into this range
+# and needs BOTH files — a range in only one is unusable → not present. Entries may
+# be keyed by name OR numeric uid, so check both. The files are world-readable; the
+# read is side-effect-free. Paths overridable (TB_SUBUID_FILE/TB_SUBGID_FILE) so the
+# probe is testable against fixtures. _subid_has_entry lives in common.sh (shared
+# with setup-linux.sh's remediation).
+_probe_subid_ranges() {
+  local uid; uid="$(id -u 2>/dev/null)"
+  _subid_has_entry "${TB_SUBUID_FILE:-/etc/subuid}" "${USER:-}" "$uid" \
+    && _subid_has_entry "${TB_SUBGID_FILE:-/etc/subgid}" "${USER:-}" "$uid"
+}
+
+# _probe_uidmap_helpers — are BOTH newuidmap and newgidmap present AND setuid-root?
+# Rootless uses them to write the ID mapping; a non-setuid helper is as useless as a
+# missing one, so a plain `has` is not enough. `command -v` + a setuid (`-u`) test on
+# the resolved path, both side-effect-free.
+_probe_uidmap_helpers() {
+  local h path
+  for h in newuidmap newgidmap; do
+    path="$(command -v "$h" 2>/dev/null)" || return 1
+    [[ -n "$path" && -u "$path" ]] || return 1
+  done
+  return 0
+}
+
 # ── Classification ────────────────────────────────────────────────────────────
 
 # _classify_from_probes — set INSTALL_TIER (+ reason) from the cached PROBE_*
@@ -176,9 +204,13 @@ run_host_probes() {
 
   PROBE_CGROUP2=0
   PROBE_USERNS=0
+  PROBE_SUBID=0
+  PROBE_UIDMAP=0
   if [[ "${OS:-}" == "Linux" ]]; then
-    if _probe_cgroup_v2; then PROBE_CGROUP2=1; fi
-    if _probe_userns;   then PROBE_USERNS=1; fi
+    if _probe_cgroup_v2;      then PROBE_CGROUP2=1; fi
+    if _probe_userns;         then PROBE_USERNS=1; fi
+    if _probe_subid_ranges;   then PROBE_SUBID=1; fi
+    if _probe_uidmap_helpers; then PROBE_UIDMAP=1; fi
   fi
 
   _classify_from_probes
@@ -218,6 +250,19 @@ render_host_audit() {
   if [[ "${OS:-}" == "Linux" && "${PROBE_RUNTIME_USABLE:-0}" != "1" ]]; then
     if [[ "${PROBE_CGROUP2:-0}" == "1" && "${PROBE_USERNS:-0}" == "1" ]]; then
       _audit_row "Kernel" "cgroup v2 + unprivileged userns present" ok
+      # Rootless prerequisites (Tier 1): a subuid/subgid range + the setuid uidmap
+      # helpers. A missing one is the single narrow admin touch prepare-host
+      # remediates (RFC 0001 §2.1) — surface it honestly rather than crash later.
+      if [[ "${PROBE_SUBID:-0}" == "1" ]]; then
+        _audit_row "Subordinate IDs" "/etc/subuid + /etc/subgid range present" ok
+      else
+        _audit_row "Subordinate IDs" "no range for this user — one-time admin step" bad
+      fi
+      if [[ "${PROBE_UIDMAP:-0}" == "1" ]]; then
+        _audit_row "uidmap helpers" "newuidmap + newgidmap present (setuid)" ok
+      else
+        _audit_row "uidmap helpers" "missing or not setuid — one-time admin step" bad
+      fi
     elif [[ "${PROBE_CGROUP2:-0}" != "1" ]]; then
       _audit_row "Kernel" "cgroup v2 not enabled" bad
     else

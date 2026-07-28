@@ -189,6 +189,41 @@ _bounded() {
   else "$@"; fi
 }
 
+# ── Subordinate ID helpers (rootless Docker, RFC 0001 #1220) ──────────────────
+# Pure parsers shared by probe.sh (detection) and setup-linux.sh (remediation), so
+# both read /etc/subuid + /etc/subgid the same way. Lines are `key:start:count`,
+# key = user name OR numeric uid.
+
+# _subid_has_entry FILE NAME UID — true if FILE has a range keyed by NAME or UID.
+# First-field (anchored) match, so a name that is a substring of another user's
+# entry can't false-positive. FILE is world-readable; the read is side-effect-free.
+_subid_has_entry() {
+  local file="$1" name="$2" uid="$3" key
+  [[ -r "$file" ]] || return 1
+  while IFS=: read -r key _ _; do
+    [[ -n "$key" ]] || continue
+    [[ "$key" == "$name" ]] && return 0
+    [[ -n "$uid" && "$key" == "$uid" ]] && return 0
+  done < "$file"
+  return 1
+}
+
+# _next_subid_start FILE... — the next free start offset for a fresh 65536-wide
+# block: max(start+count) across the given files, or 100000 (Docker's default base)
+# when none carry a valid range. Guarantees the new block can't overlap an existing
+# allocation, so remediation is safe to run on a host that already has some ranges.
+_next_subid_start() {
+  local f start count max=100000
+  for f in "$@"; do
+    [[ -r "$f" ]] || continue
+    while IFS=: read -r _ start count; do
+      [[ "$start" =~ ^[0-9]+$ && "$count" =~ ^[0-9]+$ ]] || continue
+      if (( start + count > max )); then max=$(( start + count )); fi
+    done < "$f"
+  done
+  echo "$max"
+}
+
 # Sanitize a minutes-valued env override to a base-10 integer, else <default>.
 # The 10# base prefix matters: bash arithmetic reads a leading zero as octal,
 # so 08/09 would ABORT $(( … )) under set -e (mid-create, leaving a partial

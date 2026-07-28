@@ -902,15 +902,6 @@ _stub_install_steps() {
   ! mock_calls | grep -q sudo                          # no blanket sudo anywhere on the rootless path
 }
 
-@test "install_rootless_docker: missing uidmap helpers defer to prepare-host and never self-sudo" {
-  MOCK_CALLS="$(mktemp)"
-  PRESENT_CMDS="curl docker"                           # no newuidmap / newgidmap
-  run install_rootless_docker
-  [ "$status" -ne 0 ]
-  [[ "$output" == *prepare-host* ]]                    # actionable admin remedy, not an opaque failure
-  ! mock_calls | grep -q sudo                          # must NOT sudo apt-get install uidmap
-}
-
 @test "install_rootless_docker: XDG_RUNTIME_DIR unset falls back to /run/user/<uid>" {
   MOCK_CALLS="$(mktemp)"
   PRESENT_CMDS="curl newuidmap newgidmap dockerd-rootless-setuptool.sh docker"
@@ -944,6 +935,105 @@ _stub_install_steps() {
   docker()    { return 0; }                            # ...but the daemon is actually up
   install_rootless_docker                              # must reach the export + verify, not set -e abort
   [ "$DOCKER_HOST" = "unix:///run/user/1000/docker.sock" ]
+}
+
+# ── _ensure_subid_ranges: the Tier-1 subuid/subgid gate (RFC 0001 #1220) ─────
+@test "_ensure_subid_ranges: present => proceeds with zero privileged calls" {
+  MOCK_CALLS="$(mktemp)"
+  PROBE_SUBID=1; PROBE_UIDMAP=1
+  _provision_subid_ranges() { record "_provision_subid_ranges $*"; }
+  run _ensure_subid_ranges
+  [ "$status" -eq 0 ]
+  ! mock_calls | grep -q _provision_subid_ranges
+  ! mock_calls | grep -q sudo
+}
+
+@test "_ensure_subid_ranges: missing + unprivileged => hand off to prepare-host, fail-fast, no sudo" {
+  MOCK_CALLS="$(mktemp)"
+  PROBE_SUBID=0; PROBE_UIDMAP=1; PROBE_PRIVILEGE=no_sudo
+  _provision_subid_ranges() { record "_provision_subid_ranges $*"; }
+  run _ensure_subid_ranges
+  [ "$status" -ne 0 ]                                  # honest fail-fast
+  [[ "$output" == *prepare-host* ]]
+  [[ "$output" == *"/etc/subuid"* ]]                   # the two literal remedy lines
+  [[ "$output" == *"/etc/subgid"* ]]
+  ! mock_calls | grep -q _provision_subid_ranges       # never self-provisions unprivileged
+  ! mock_calls | grep -q sudo
+}
+
+@test "_ensure_subid_ranges: missing + sudo available => exactly one announced provision" {
+  MOCK_CALLS="$(mktemp)"
+  PROBE_SUBID=0; PROBE_UIDMAP=1; PROBE_PRIVILEGE=sudo_nopw
+  _provision_subid_ranges() { record "_provision_subid_ranges $*"; }
+  run _ensure_subid_ranges
+  [ "$status" -eq 0 ]
+  [ "$(mock_calls | grep -c _provision_subid_ranges)" -eq 1 ]
+  [[ "$output" == *one-time* ]]                         # announced (A2 honest messaging)
+}
+
+@test "_ensure_subid_ranges: uidmap helpers absent => message includes the package-install hint" {
+  MOCK_CALLS="$(mktemp)"
+  PROBE_SUBID=1; PROBE_UIDMAP=0; PROBE_PRIVILEGE=no_sudo
+  run _ensure_subid_ranges
+  [ "$status" -ne 0 ]
+  [[ "$output" == *uidmap* ]]
+}
+
+# ── _provision_subid_ranges: shared remediation body ─────────────────────────
+@test "_provision_subid_ranges: allocates a range and appends it (file-append path)" {
+  MOCK_CALLS="$(mktemp)"
+  PRESENT_CMDS="newuidmap newgidmap"                   # helpers present -> no pkg install
+  sudo()    { "$@"; }                                  # pass-through so tee writes the fixture
+  usermod() { return 0; }                              # `usermod --help` has no --add-subuids -> append path
+  id()      { echo 1000; }
+  TB_SUBUID_FILE="$(mktemp)"; TB_SUBGID_FILE="$(mktemp)"
+  _provision_subid_ranges testuser
+  grep -q '^testuser:100000:65536$' "$TB_SUBUID_FILE"
+  grep -q '^testuser:100000:65536$' "$TB_SUBGID_FILE"
+}
+
+@test "_provision_subid_ranges: idempotent — an existing range is left untouched" {
+  MOCK_CALLS="$(mktemp)"
+  PRESENT_CMDS="newuidmap newgidmap"
+  sudo()    { "$@"; }
+  usermod() { return 0; }
+  id()      { echo 1000; }
+  TB_SUBUID_FILE="$(mktemp)"; TB_SUBGID_FILE="$(mktemp)"
+  printf 'testuser:100000:65536\n' >"$TB_SUBUID_FILE"
+  printf 'testuser:100000:65536\n' >"$TB_SUBGID_FILE"
+  _provision_subid_ranges testuser
+  [ "$(grep -c '^testuser:' "$TB_SUBUID_FILE")" -eq 1 ]   # not appended again
+  [ "$(grep -c '^testuser:' "$TB_SUBGID_FILE")" -eq 1 ]
+}
+
+@test "_provision_subid_ranges: allocates a NON-overlapping block past an existing range" {
+  MOCK_CALLS="$(mktemp)"
+  PRESENT_CMDS="newuidmap newgidmap"
+  sudo()    { "$@"; }
+  usermod() { return 0; }
+  id()      { echo 1000; }
+  TB_SUBUID_FILE="$(mktemp)"; TB_SUBGID_FILE="$(mktemp)"
+  printf 'someoneelse:100000:65536\n' >"$TB_SUBUID_FILE"   # 100000..165535 taken
+  printf 'someoneelse:100000:65536\n' >"$TB_SUBGID_FILE"
+  _provision_subid_ranges testuser
+  grep -q '^testuser:165536:65536$' "$TB_SUBUID_FILE"       # next free start, no overlap
+}
+
+@test "_provision_subid_ranges: installs the uidmap helpers when absent" {
+  MOCK_CALLS="$(mktemp)"
+  PRESENT_CMDS="apt-get"                               # newuidmap/newgidmap absent
+  usermod() { return 0; }
+  id()      { echo 1000; }
+  TB_SUBUID_FILE="$(mktemp)"; TB_SUBGID_FILE="$(mktemp)"
+  _provision_subid_ranges testuser
+  mock_calls | grep -q "apt-get install -y uidmap"
+}
+
+@test "_install_uidmap_pkg: apt-get distro installs the 'uidmap' package" {
+  MOCK_CALLS="$(mktemp)"
+  PRESENT_CMDS="apt-get"
+  _install_uidmap_pkg
+  mock_calls | grep -q "apt-get install -y uidmap"
 }
 
 # ── _set_tools_target: Tier 0 tools must NOT sudo (Bugbot #1175) ─────────────
