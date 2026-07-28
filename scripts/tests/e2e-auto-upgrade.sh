@@ -104,6 +104,10 @@ echo "  E2E auto-upgrade gate   arch: $(uname -m)   kernel: $(uname -r)"
 echo "═══════════════════════════════════════════════════════════════════════"
 
 has docker || error "Docker is not available on this host."
+# jq reads the baseline release's computed values (BASELINE_PROD_DIGEST).
+# Preinstalled on GitHub-hosted runners; local runs must bring their own —
+# fail fast here instead of a mid-run pipeline abort.
+has jq || error "jq is required (it reads the baseline release's computed values)."
 umask 022
 install_kubectl
 install_k3d
