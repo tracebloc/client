@@ -37,6 +37,29 @@ jobs:
         with:
           version: v3.15.4
 
+      - name: Verify tag matches chart version + stability rule
+        # Release-train guard (backend#1301): the tag's base X.Y.Z must equal
+        # client/Chart.yaml's version -- train-cut or manual -- so the chart
+        # version can never go silently stale after an out-of-train release.
+        # STRICT stability: only a plain vX.Y.Z release may be stable; an
+        # rc-ish tag left unmarked would become 'latest' (what the installer
+        # bootstrap resolves) and enter the helm index as stable. Tag passed
+        # via env, never interpolated into the script (R8, backend#889).
+        env:
+          TAG: ${{ github.event.release.tag_name }}
+          IS_PRERELEASE: ${{ github.event.release.prerelease }}
+        run: |
+          BASE=$(printf '%s' "${TAG#v}" | grep -oE '^[0-9]+\.[0-9]+\.[0-9]+' || true)
+          CHART=$(grep -E '^version:' client/Chart.yaml | head -1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+')
+          if [ -z "$BASE" ] || [ "$BASE" != "$CHART" ]; then
+            echo "::error::release tag '$TAG' (base '${BASE:-none}') does not match client/Chart.yaml version ($CHART) - bump the chart version on develop first."
+            exit 1
+          fi
+          if ! printf '%s' "$TAG" | grep -qE '^v[0-9]+\.[0-9]+\.[0-9]+$' && [ "$IS_PRERELEASE" != "true" ]; then
+            echo "::error::non-final tag '$TAG' must be marked PRE-release - it would otherwise become 'latest' and enter the helm index as stable."
+            exit 1
+          fi
+
       - name: Lint charts
         # The parent `client` chart needs a CI values file so `--strict` sees
         # non-empty clientId / clientPassword (the defaults in values.yaml are
