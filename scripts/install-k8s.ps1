@@ -2611,6 +2611,9 @@ function Test-Preflight {
   $backendHost = (Get-BackendUrl) -replace '^https?://','' -replace '/$',''
   $criticals = @(
     @{ label = "Docker Hub (registry-1.docker.io)";           url = "https://registry-1.docker.io/v2/" },
+    # auth.docker.io is Docker Hub's token endpoint: a network that allows
+    # registry-1 but blocks the token host fails only at in-cluster pull time (#416).
+    @{ label = "Docker Hub auth (auth.docker.io)";            url = "https://auth.docker.io/token" },
     @{ label = "GitHub Container Registry (ghcr.io)";         url = "https://ghcr.io/" },
     @{ label = "tracebloc API ($backendHost)";                url = "https://$backendHost/" },
     # The chart repo is probed at its index.yaml, strictly: the site ROOT 404s by
@@ -2618,6 +2621,20 @@ function Test-Preflight {
     # actually exist for `helm repo add` to succeed (#385).
     @{ label = "tracebloc Helm charts (tracebloc.github.io)"; url = "$TRACEBLOC_HELM_REPO_URL/index.yaml"; strict = $true }
   )
+  # Download hosts Step 1 fetches from — promoted to HARD (#416): a blocked one
+  # used to pass preflight then fail the install ~30s later. Added only when the
+  # fetch will actually happen (tool/app absent; a present tool is never
+  # re-downloaded). k3d release assets 302 to objects.githubusercontent.com, so it
+  # is probed explicitly. Kept in lockstep with preflight.sh (drift: check-drift.sh).
+  if (-not (Test-Path "$env:ProgramFiles\Docker\Docker\Docker Desktop.exe")) {
+    $criticals += @{ label = "Docker Desktop (desktop.docker.com)"; url = "https://desktop.docker.com/" }
+  }
+  if (-not (Has "kubectl")) { $criticals += @{ label = "kubectl (dl.k8s.io)"; url = "https://dl.k8s.io/" } }
+  if (-not (Has "helm"))    { $criticals += @{ label = "Helm (get.helm.sh)";  url = "https://get.helm.sh/" } }
+  if (-not (Has "k3d")) {
+    $criticals += @{ label = "k3d download (github.com)";                  url = "https://github.com/" }
+    $criticals += @{ label = "k3d assets (objects.githubusercontent.com)"; url = "https://objects.githubusercontent.com/" }
+  }
   $tlsSeen = $false; $cfail = 0
   foreach ($c in $criticals) {
     $status = Test-PfUrl $c.url -RequireSuccess:([bool]$c.strict)
@@ -2630,7 +2647,7 @@ function Test-Preflight {
     }
   }
   if ($tlsSeen)    { Hint "A TLS/certificate error usually means a break-and-inspect (TLS-inspecting) proxy whose corporate CA isn't trusted here - see the proxy notes." }
-  if ($cfail -gt 0){ Hint "Allow HTTPS (443) egress to: registry-1.docker.io, ghcr.io, $backendHost, tracebloc.github.io - or configure your corporate proxy." }
+  if ($cfail -gt 0){ Hint "Allow HTTPS (443) egress to the host(s) named above - the always-needed set is registry-1.docker.io, auth.docker.io, ghcr.io, $backendHost, tracebloc.github.io, plus any tool-download host listed (desktop.docker.com / dl.k8s.io / get.helm.sh / github.com / objects.githubusercontent.com) - or configure your corporate proxy." }
 
   if ($hardFail -gt 0) {
     Write-Host ""
