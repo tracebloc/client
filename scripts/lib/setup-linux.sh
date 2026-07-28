@@ -819,6 +819,14 @@ install_rootless_docker() {
   # Idempotent, and a no-op on the setuptool path where docker is already on PATH.
   case ":$PATH:" in *":$HOME/bin:"*) ;; *) export PATH="$HOME/bin:$PATH" ;; esac
 
+  # TODO(#1221): configure a corporate-proxy drop-in for the ROOTLESS daemon before
+  # starting it — user-scoped ~/.config/systemd/user/docker.service.d/http-proxy.conf
+  # + `systemctl --user daemon-reload/restart`, NO sudo. The system path's
+  # _configure_docker_proxy (#244) is sudo/system-scoped and never runs on the
+  # Tier-1 early-return, so on a proxy-only host k3d pulls of rancher/k3s time out
+  # even though the daemon verified. Deferred to the k3d-on-rootless slice (#1221),
+  # which owns the pulls this enables and can test them together (Bugbot on #452).
+
   # Start the user daemon and make it survive logout / return after reboot without
   # an active login session — both user-scoped, no root. Neither is fatal: the
   # bounded `docker info` verify below is the real gate, so a systemctl hiccup
