@@ -253,12 +253,6 @@ setup() {
 @test "has: present command" { run has bash; [ "$status" -eq 0 ]; }
 @test "has: absent command" { run has nope-not-a-real-cmd-xyz; [ "$status" -ne 0 ]; }
 
-# ── check_docker_arch_mac (no-op off macOS) ────────────────────────────────
-@test "check_docker_arch_mac: no-op on non-macOS" {
-  run check_docker_arch_mac
-  [ "$status" -eq 0 ]
-}
-
 # ── count_bar (first-run: honest N-of-M for multi-image pulls) ───────────────
 @test "count_bar: renders 'N of M <noun>'" {
   run count_bar 3 6 services

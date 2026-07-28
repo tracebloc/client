@@ -50,7 +50,7 @@ For the threat model, defense layers, per-platform caveats, operator responsibil
 
 ## Deploy
 
-This repo ships the **tracebloc** unified Helm chart (currently `v1.3.5`) — one chart for AKS, EKS, bare-metal, and OpenShift.
+This repo ships the **tracebloc** unified Helm chart — one chart for AKS, EKS, bare-metal, and OpenShift. See [`client/Chart.yaml`](client/Chart.yaml) or the [releases page](https://github.com/tracebloc/client/releases) for the current chart version.
 
 ### Quick install
 
