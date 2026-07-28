@@ -13,8 +13,50 @@ env:
   HELM_EXPERIMENTAL_OCI: 0
 
 jobs:
+  # Gate for BOTH jobs below (Bugbot on #460: a guard living only inside
+  # `release` left sign-installer-manifest stamping and attaching installers
+  # for a bad release anyway).
+  verify:
+    name: Verify tag / chart version / stability
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write   # demote a mis-marked release to prerelease
+    steps:
+      - name: Checkout the released tag
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          ref: ${{ github.event.release.tag_name }}
+
+      - name: Verify tag matches chart version + stability rule
+        # Release-train guard (backend#1301): the tag's base X.Y.Z must equal
+        # client/Chart.yaml's version -- train-cut or manual -- so the chart
+        # version can never go silently stale after an out-of-train release
+        # (hard fail: that needs a chart bump, nothing to auto-fix). A
+        # non-final tag left marked stable would sit as GitHub 'latest' --
+        # exactly what the installer bootstrap resolves -- so it is DEMOTED
+        # to prerelease here (self-healing: 'latest' snaps back to the
+        # previous stable), then publishing continues as a proper
+        # pre-release. Tag passed via env, never interpolated into the
+        # script (R8, backend#889).
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.event.release.tag_name }}
+          IS_PRERELEASE: ${{ github.event.release.prerelease }}
+        run: |
+          BASE=$(printf '%s' "${TAG#v}" | grep -oE '^[0-9]+\.[0-9]+\.[0-9]+' || true)
+          CHART=$(grep -E '^version:' client/Chart.yaml | head -1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+')
+          if [ -z "$BASE" ] || [ "$BASE" != "$CHART" ]; then
+            echo "::error::release tag '$TAG' (base '${BASE:-none}') does not match client/Chart.yaml version ($CHART) - bump the chart version on develop first."
+            exit 1
+          fi
+          if ! printf '%s' "$TAG" | grep -qE '^v[0-9]+\.[0-9]+\.[0-9]+$' && [ "$IS_PRERELEASE" != "true" ]; then
+            echo "::warning::non-final tag '$TAG' was published as a STABLE release - demoting to prerelease so 'latest' (the installer bootstrap) snaps back to the previous stable."
+            gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --prerelease
+          fi
+
   release:
     name: Package and publish tracebloc chart
+    needs: verify
     runs-on: ubuntu-latest
     permissions:
       contents: write   # push to gh-pages, create release and upload assets on tag
@@ -36,29 +78,6 @@ jobs:
         uses: azure/setup-helm@v4
         with:
           version: v3.15.4
-
-      - name: Verify tag matches chart version + stability rule
-        # Release-train guard (backend#1301): the tag's base X.Y.Z must equal
-        # client/Chart.yaml's version -- train-cut or manual -- so the chart
-        # version can never go silently stale after an out-of-train release.
-        # STRICT stability: only a plain vX.Y.Z release may be stable; an
-        # rc-ish tag left unmarked would become 'latest' (what the installer
-        # bootstrap resolves) and enter the helm index as stable. Tag passed
-        # via env, never interpolated into the script (R8, backend#889).
-        env:
-          TAG: ${{ github.event.release.tag_name }}
-          IS_PRERELEASE: ${{ github.event.release.prerelease }}
-        run: |
-          BASE=$(printf '%s' "${TAG#v}" | grep -oE '^[0-9]+\.[0-9]+\.[0-9]+' || true)
-          CHART=$(grep -E '^version:' client/Chart.yaml | head -1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+')
-          if [ -z "$BASE" ] || [ "$BASE" != "$CHART" ]; then
-            echo "::error::release tag '$TAG' (base '${BASE:-none}') does not match client/Chart.yaml version ($CHART) - bump the chart version on develop first."
-            exit 1
-          fi
-          if ! printf '%s' "$TAG" | grep -qE '^v[0-9]+\.[0-9]+\.[0-9]+$' && [ "$IS_PRERELEASE" != "true" ]; then
-            echo "::error::non-final tag '$TAG' must be marked PRE-release - it would otherwise become 'latest' and enter the helm index as stable."
-            exit 1
-          fi
 
       - name: Lint charts
         # The parent `client` chart needs a CI values file so `--strict` sees
@@ -181,6 +200,7 @@ jobs:
   # ───────────────────────────────────────────────────────────────────────────
   sign-installer-manifest:
     name: Sign installer manifest (R8)
+    needs: verify
     runs-on: ubuntu-latest
     permissions:
       contents: write   # attach assets to the release
