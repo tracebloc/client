@@ -1468,3 +1468,71 @@ Describe "Docker engine wait calibration (#413)" {
     $raw | Should -Match 'Get-Process "Docker Desktop"'
   }
 }
+
+Describe "In-node CA trust for TLS-inspecting networks (#424)" {
+  Context "Resolve-CaBundle" {
+    BeforeEach {
+      $env:TRACEBLOC_CA_BUNDLE = $null; $env:CURL_CA_BUNDLE = $null
+      Mock Err { throw "ERR: $args" }
+    }
+    It "returns null when no CA var is set" {
+      Resolve-CaBundle | Should -BeNullOrEmpty
+    }
+    It "returns the path when TRACEBLOC_CA_BUNDLE is set and readable" {
+      $ca = Join-Path $TestDrive "ca.pem"; "x" | Set-Content $ca
+      $env:TRACEBLOC_CA_BUNDLE = $ca
+      Resolve-CaBundle | Should -Be (Resolve-Path $ca).Path
+    }
+    It "falls back to CURL_CA_BUNDLE" {
+      $ca = Join-Path $TestDrive "curlca.pem"; "x" | Set-Content $ca
+      $env:CURL_CA_BUNDLE = $ca
+      Resolve-CaBundle | Should -Be (Resolve-Path $ca).Path
+    }
+    It "hard-errors when the CA var is set but the file is missing" {
+      $env:TRACEBLOC_CA_BUNDLE = (Join-Path $TestDrive "missing.pem")
+      { Resolve-CaBundle } | Should -Throw "*ERR:*"
+    }
+  }
+
+  Context "Write-K3dRegistriesConfig" {
+    It "writes ca_file for every registry" {
+      $p = Write-K3dRegistriesConfig -NodeCa "/etc/ssl/certs/tracebloc-mitm-ca.crt"
+      try {
+        $raw = Get-Content $p -Raw
+        $raw | Should -Match 'registry-1\.docker\.io'
+        $raw | Should -Match 'ghcr\.io'
+        ([regex]::Matches($raw, [regex]::Escape('ca_file: "/etc/ssl/certs/tracebloc-mitm-ca.crt"'))).Count | Should -Be 3
+      } finally { Remove-Item (Split-Path $p -Parent) -Recurse -Force -ErrorAction SilentlyContinue }
+    }
+  }
+
+  Context "Get-NotReadyState (CA classification)" {
+    It "an x509 pull event -> image_pull_ca" {
+      Mock kubectl {
+        if ($args -match 'logs')   { return "booting" }
+        if ($args -match 'events') { return "Failed to pull image: x509: certificate signed by unknown authority" }
+        return "x 0/1 ImagePullBackOff"
+      }
+      Get-NotReadyState -Namespace "ns" | Should -Be "image_pull_ca"
+    }
+    It "ImagePullBackOff without x509 stays image_pull" {
+      Mock kubectl {
+        if ($args -match 'logs')   { return "booting" }
+        if ($args -match 'events') { return "Back-off pulling image (rate limited)" }
+        return "x 0/1 ImagePullBackOff"
+      }
+      Get-NotReadyState -Namespace "ns" | Should -Be "image_pull"
+    }
+  }
+
+  Context "Print-Summary CA message" {
+    It "names the CA problem + env var, not a generic pull error" {
+      $script:ClientState = "image_pull_ca"
+      $script:TB_NAMESPACE = "ns"
+      $out = Print-Summary 6>&1 | Out-String
+      $out | Should -Match 'TLS-inspection CA'
+      $out | Should -Match 'TRACEBLOC_CA_BUNDLE'
+      $out | Should -Not -Match "an image couldn't be pulled"
+    }
+  }
+}

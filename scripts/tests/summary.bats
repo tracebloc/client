@@ -195,3 +195,38 @@ setup() {
   printf '%s\n' "$output" | grep -qF "Open a new terminal"
   ! printf '%s\n' "$output" | grep -qF "Add tracebloc to your PATH"
 }
+
+# ── CA-trust diagnosis (#424) ────────────────────────────────────────────────
+@test "_diagnose_not_ready: ImagePullBackOff + x509 event -> image_pull_ca (#424)" {
+  kubectl() {
+    case "$*" in
+      *logs*)   echo "booting" ;;
+      *events*) echo "Failed to pull image \"ghcr.io/x\": x509: certificate signed by unknown authority" ;;
+      *)        echo "x 0/1 ImagePullBackOff" ;;
+    esac
+  }
+  run _diagnose_not_ready testns
+  [ "$output" = "image_pull_ca" ]
+}
+
+@test "_diagnose_not_ready: ImagePullBackOff without x509 stays image_pull (#424)" {
+  kubectl() {
+    case "$*" in
+      *logs*)   echo "booting" ;;
+      *events*) echo "Back-off pulling image (rate limited)" ;;
+      *)        echo "x 0/1 ImagePullBackOff" ;;
+    esac
+  }
+  run _diagnose_not_ready testns
+  [ "$output" = "image_pull" ]
+}
+
+@test "print_summary image_pull_ca: names the CA problem + env var, not a generic pull error (#424)" {
+  CLIENT_STATE=image_pull_ca
+  TB_NAMESPACE=testns
+  run print_summary
+  [[ "$output" == *"TLS-inspection CA"* ]]
+  [[ "$output" == *"TRACEBLOC_CA_BUNDLE"* ]]
+  [[ "$output" == *"x509"* ]]
+  [[ "$output" != *"an image couldn't be pulled"* ]]   # not the generic message
+}

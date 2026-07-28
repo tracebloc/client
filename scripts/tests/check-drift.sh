@@ -186,12 +186,32 @@ _drift_cli_contract() {
   fi
 }
 
+# ── Check 4: both installers wire in-node CA trust (#424) ────────────────────
+# cluster.sh (Linux/macOS) and install-k8s.ps1 (Windows) must each resolve the
+# operator's CA bundle, mount it into the nodes, and point containerd at it via
+# --registry-config. If one installer drops any piece, the break-and-inspect x509
+# pull failure reopens on that OS — catch it here, not in a hospital's network.
+_drift_ca_trust() {
+  echo "▸ In-node CA trust wiring (cluster.sh · install-k8s.ps1)"
+  local before=$_drift pat
+  local sh="scripts/lib/cluster.sh" ps1="scripts/install-k8s.ps1"
+  for pat in TRACEBLOC_CA_BUNDLE CURL_CA_BUNDLE _resolve_ca_bundle registry-config tracebloc-mitm-ca.crt; do
+    grep -qF -- "$pat" "$DRIFT_ROOT/$sh" || _note "$sh: CA wiring missing '$pat' (#424)"
+  done
+  for pat in TRACEBLOC_CA_BUNDLE CURL_CA_BUNDLE Resolve-CaBundle registry-config tracebloc-mitm-ca.crt; do
+    grep -qF -- "$pat" "$DRIFT_ROOT/$ps1" || _note "$ps1: CA wiring missing '$pat' (#424)"
+  done
+  if [[ "$_drift" -eq "$before" ]]; then _ok "both installers resolve, mount, and register the corporate CA"; fi
+  return 0
+}
+
 main() {
   set -uo pipefail
   echo "── source-of-truth drift checks ─────────────────────────────"
   _drift_backend_hosts
   _drift_workload_names
   _drift_cli_contract
+  _drift_ca_trust
   echo "─────────────────────────────────────────────────────────────"
   if [[ "$_drift" -gt 0 ]]; then
     echo "DRIFT: $_drift divergence(s) above. Update both sides (or the contract in check-drift.sh) and re-run." >&2

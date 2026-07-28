@@ -408,3 +408,69 @@ setup() {
   grep -q 'k3d cluster delete "\$CLUSTER_NAME"' \
     "$BATS_TEST_DIRNAME/../lib/cluster.sh"
 }
+
+# ── In-node CA trust for TLS-inspecting networks (#424) ──────────────────────
+@test "_resolve_ca_bundle: no CA var set -> empty, rc 0" {
+  unset TRACEBLOC_CA_BUNDLE CURL_CA_BUNDLE
+  run _resolve_ca_bundle
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+}
+
+@test "_resolve_ca_bundle: TRACEBLOC_CA_BUNDLE readable -> absolute path (#424)" {
+  export TRACEBLOC_CA_BUNDLE="$BATS_TEST_TMPDIR/ca.pem"; : > "$TRACEBLOC_CA_BUNDLE"
+  run _resolve_ca_bundle
+  [ "$status" -eq 0 ]
+  [[ "$output" == /*ca.pem ]]
+}
+
+@test "_resolve_ca_bundle: CURL_CA_BUNDLE is the fallback (#424)" {
+  unset TRACEBLOC_CA_BUNDLE
+  export CURL_CA_BUNDLE="$BATS_TEST_TMPDIR/curlca.pem"; : > "$CURL_CA_BUNDLE"
+  run _resolve_ca_bundle
+  [ "$status" -eq 0 ]
+  [[ "$output" == *curlca.pem ]]
+}
+
+@test "_resolve_ca_bundle: set but unreadable -> var name + rc 2 (#424)" {
+  export TRACEBLOC_CA_BUNDLE="/no/such/ca.pem"
+  run _resolve_ca_bundle
+  [ "$status" -eq 2 ]
+  [ "$output" = "TRACEBLOC_CA_BUNDLE" ]
+}
+
+@test "_write_k3d_registries_config: ca_file for every registry (#424)" {
+  run _write_k3d_registries_config /etc/ssl/certs/tracebloc-mitm-ca.crt
+  [ "$status" -eq 0 ]
+  local cfg="$output"
+  grep -q 'registry-1.docker.io' "$cfg"
+  grep -q 'ghcr.io' "$cfg"
+  [ "$(grep -c 'ca_file: "/etc/ssl/certs/tracebloc-mitm-ca.crt"' "$cfg")" -eq 3 ]
+  rm -rf "${cfg%/*}"
+}
+
+@test "_create_new_cluster: CA supplied -> mounts CA + --registry-config (#424)" {
+  export TRACEBLOC_CA_BUNDLE="$BATS_TEST_TMPDIR/ca.pem"; : > "$TRACEBLOC_CA_BUNDLE"
+  run _create_new_cluster
+  [ "$status" -eq 0 ]
+  run mock_calls
+  [[ "$output" == *"k3d cluster create"* ]]
+  [[ "$output" == *":/etc/ssl/certs/tracebloc-mitm-ca.crt@all"* ]]   # CA mounted into nodes
+  [[ "$output" == *"--registry-config"* ]]                           # containerd pointed at it
+}
+
+@test "_create_new_cluster: no CA var -> no registry-config, no mitm mount (#424)" {
+  unset TRACEBLOC_CA_BUNDLE CURL_CA_BUNDLE
+  run _create_new_cluster
+  [ "$status" -eq 0 ]
+  run mock_calls
+  [[ "$output" != *"tracebloc-mitm-ca.crt"* ]]
+  [[ "$output" != *"--registry-config"* ]]
+}
+
+@test "_create_new_cluster: CA var set but file missing -> hard error (#424)" {
+  export TRACEBLOC_CA_BUNDLE="/no/such/ca.pem"
+  run _create_new_cluster
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"can't be read"* ]]
+}

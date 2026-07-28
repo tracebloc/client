@@ -88,3 +88,17 @@ YAML
   command() { if [[ "${2:-}" == helm ]]; then return 1; fi; builtin command "$@"; }
   _drift=0; _drift_workload_names >/dev/null 2>&1; [ "$_drift" -eq 0 ]
 }
+
+# ── Check 4: in-node CA trust parity (#424) ──────────────────────────────────
+@test "ca trust: both installers wire the CA -> no drift (#424)" {
+  printf 'TRACEBLOC_CA_BUNDLE CURL_CA_BUNDLE _resolve_ca_bundle --registry-config tracebloc-mitm-ca.crt\n' > "$ROOT/scripts/lib/cluster.sh"
+  printf 'TRACEBLOC_CA_BUNDLE CURL_CA_BUNDLE Resolve-CaBundle --registry-config tracebloc-mitm-ca.crt\n' > "$ROOT/scripts/install-k8s.ps1"
+  _drift=0; _drift_ca_trust >/dev/null; [ "$_drift" -eq 0 ]
+}
+
+@test "ca trust: an installer missing the registry-config -> drift (#424)" {
+  printf 'TRACEBLOC_CA_BUNDLE CURL_CA_BUNDLE _resolve_ca_bundle --registry-config tracebloc-mitm-ca.crt\n' > "$ROOT/scripts/lib/cluster.sh"
+  # ps1 missing --registry-config
+  printf 'TRACEBLOC_CA_BUNDLE CURL_CA_BUNDLE Resolve-CaBundle tracebloc-mitm-ca.crt\n' > "$ROOT/scripts/install-k8s.ps1"
+  _drift=0; _drift_ca_trust >/dev/null 2>&1; [ "$_drift" -ge 1 ]
+}
