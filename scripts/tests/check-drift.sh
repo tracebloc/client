@@ -186,12 +186,40 @@ _drift_cli_contract() {
   fi
 }
 
+# ── Check 4: every installer execute-gates every tool (#411) ─────────────────
+# The post-install "check" used to be a log-only interpolation that masked a
+# corrupt/wrong-arch binary until cluster-create. All installers now RUN each tool
+# (assert_tool_runs on bash, Assert-ToolRuns on PowerShell). If an installer drops
+# the gate for a tool, the "green System tools then dies in Step 2" bug reopens on
+# that OS — catch it here rather than in the field.
+_drift_execute_gates() {
+  echo "▸ Tool execute-gate parity (setup-linux.sh · setup-macos.sh · install-k8s.ps1)"
+  local before=$_drift f t
+  local bash_files=( scripts/lib/setup-linux.sh scripts/lib/setup-macos.sh )
+  for f in "${bash_files[@]}"; do
+    if [[ ! -f "$DRIFT_ROOT/$f" ]]; then _note "$f is missing"; continue; fi
+    for t in kubectl k3d helm; do
+      grep -qE "assert_tool_runs $t\b" "$DRIFT_ROOT/$f" || \
+        _note "$f: no execute-gate for '$t' (assert_tool_runs $t ...) — #411"
+    done
+  done
+  local ps1="scripts/install-k8s.ps1"
+  if [[ ! -f "$DRIFT_ROOT/$ps1" ]]; then _note "$ps1 is missing"; fi
+  for t in kubectl k3d helm; do
+    grep -qE "Assert-ToolRuns -Name \"$t\"" "$DRIFT_ROOT/$ps1" || \
+      _note "$ps1: no execute-gate for '$t' (Assert-ToolRuns -Name \"$t\") — #411"
+  done
+  if [[ "$_drift" -eq "$before" ]]; then _ok "all installers execute-gate kubectl / k3d / helm"; fi
+  return 0
+}
+
 main() {
   set -uo pipefail
   echo "── source-of-truth drift checks ─────────────────────────────"
   _drift_backend_hosts
   _drift_workload_names
   _drift_cli_contract
+  _drift_execute_gates
   echo "─────────────────────────────────────────────────────────────"
   if [[ "$_drift" -gt 0 ]]; then
     echo "DRIFT: $_drift divergence(s) above. Update both sides (or the contract in check-drift.sh) and re-run." >&2

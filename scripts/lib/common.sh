@@ -140,6 +140,27 @@ step_header()    { echo -e "  ${TB_HEADING}$1) $2${RESET}"; echo ""; }
 # ── Utility ──────────────────────────────────────────────────────────────────
 has() { command -v "$1" &>/dev/null; }
 
+# Execute-gate a freshly-installed tool (#411). The old post-install "check" was a
+# log-only interpolation (`... 2>/dev/null || echo present`) that masked failure,
+# so a corrupt or wrong-architecture binary — a partial pkg/brew install, or a
+# download no checksum path guarded — sat on PATH and failed only later, at
+# cluster-create, after a green "System tools". Actually RUN the tool's cheapest
+# self-check; on failure remove the binary we can locate and error() with an
+# arch-aware remedy so the tool step fails loudly instead. NOTE: kubectl is gated
+# with `version --client` (NOT --short, which was removed in kubectl 1.28+ and
+# would false-fail the gate). Usage: assert_tool_runs <name> <version-arg>...
+assert_tool_runs() {
+  local name="$1"; shift
+  local out
+  if out="$("$name" "$@" 2>&1)"; then
+    log "$name OK: $(printf '%s\n' "$out" | head -1)"
+    return 0
+  fi
+  local path; path="$(command -v "$name" 2>/dev/null || true)"
+  [[ -n "$path" && -w "$path" ]] && rm -f "$path" 2>/dev/null || true
+  error "$name was installed but won't run — a corrupt or wrong-architecture binary (this machine is ${ARCH:-$(uname -m)}). Re-run the installer to re-download it; if it recurs, remove ${path:-the $name on your PATH} (and any package-manager copy) first."
+}
+
 # Sanitize a minutes-valued env override to a base-10 integer, else <default>.
 # The 10# base prefix matters: bash arithmetic reads a leading zero as octal,
 # so 08/09 would ABORT $(( … )) under set -e (mid-create, leaving a partial

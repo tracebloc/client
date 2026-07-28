@@ -142,6 +142,33 @@ function Invoke-WithRetry {
   }
 }
 
+# Execute-gate a freshly-installed tool (#411). The old post-install "check" was a
+# Log interpolation whose failure is non-terminating, so a corrupt or wrong-arch
+# binary (winget shims / partial installs skip the direct path's checksum verify)
+# still reached "System tools" and only died at cluster-create. Actually RUN the
+# tool's self-check; on a non-zero exit or an exception, remove the binary we
+# dropped and Err with an arch-aware remedy so Step 1 fails loudly. NOTE: kubectl
+# uses `version --client` (NOT --short — removed in kubectl 1.28+, would
+# false-fail the gate).
+function Assert-ToolRuns {
+  param(
+    [Parameter(Mandatory)][string]$Name,
+    [Parameter(Mandatory)][string[]]$VersionArgs,
+    [string]$BinPath
+  )
+  $ok = $false; $out = $null
+  try {
+    $out = (& $Name @VersionArgs 2>&1)
+    $ok  = ($LASTEXITCODE -eq 0)
+  } catch { $ok = $false }
+  if (-not $ok) {
+    if ($BinPath -and (Test-Path $BinPath)) { Remove-Item $BinPath -Force -ErrorAction SilentlyContinue }
+    $arch = Get-WindowsArch
+    Err "$Name was installed but won't run -- a corrupt or wrong-architecture binary (this machine is $arch). Re-run this script to re-download it; if it recurs, remove any $Name installed via a package manager (winget/choco) first, then re-run."
+  }
+  Log "$Name OK: $(($out | Select-Object -First 1))"
+}
+
 # Sanitize workspace name to comply with DNS-1123
 function ConvertTo-WorkspaceName {
   param([string]$Input_)
@@ -712,7 +739,9 @@ echo "NCT installed successfully."
 # =============================================================================
 
 function Install-Kubectl {
-  if (Has "kubectl") { Log "kubectl: $(cmd /c 'kubectl version --client 2>&1' | Select-Object -First 1)"; return }
+  # Execute-gate on both paths (#411): a present-but-broken kubectl is as fatal as
+  # a bad fresh install, and this runs in Step 1, before the cluster step.
+  if (Has "kubectl") { Assert-ToolRuns -Name "kubectl" -VersionArgs @("version","--client"); return }
 
   $arch = Get-WindowsArch
   $kVer = Invoke-WithRetry -Label "version check" -ScriptBlock {
@@ -735,6 +764,7 @@ function Install-Kubectl {
   }
   RefreshPath
   Log "kubectl $kVer installed."
+  Assert-ToolRuns -Name "kubectl" -VersionArgs @("version","--client") -BinPath $kubectlDest
 }
 
 # ── Pinned tool versions (#382 / #410) ──────────────────────────────────────
@@ -861,7 +891,7 @@ function Install-K3dAndHelm {
       RefreshPath
     }
   }
-  Log "k3d: $(k3d version | Select-Object -First 1)"
+  Assert-ToolRuns -Name "k3d" -VersionArgs @("version") -BinPath "$TOOL_DIR\k3d.exe"
 
   # -- Helm --
   if (-not (Has "helm")) {
@@ -898,7 +928,7 @@ function Install-K3dAndHelm {
 
     if (-not (Has "helm")) { Err "Helm could not be installed. Install manually from https://helm.sh/docs/intro/install/ and re-run." }
   }
-  Log "helm: $(cmd /c 'helm version --short 2>&1')"
+  Assert-ToolRuns -Name "helm" -VersionArgs @("version","--short") -BinPath "$TOOL_DIR\helm.exe"
 
   Ok "System tools"
 }

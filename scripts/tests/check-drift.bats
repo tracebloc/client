@@ -88,3 +88,18 @@ YAML
   command() { if [[ "${2:-}" == helm ]]; then return 1; fi; builtin command "$@"; }
   _drift=0; _drift_workload_names >/dev/null 2>&1; [ "$_drift" -eq 0 ]
 }
+
+# ── Check 4: tool execute-gate parity (#411) ─────────────────────────────────
+@test "execute-gates: all installers gate all tools -> no drift (#411)" {
+  printf 'assert_tool_runs kubectl version --client\nassert_tool_runs k3d version\nassert_tool_runs helm version --short\n' > "$ROOT/scripts/lib/setup-linux.sh"
+  printf 'assert_tool_runs kubectl version --client\nassert_tool_runs k3d version\nassert_tool_runs helm version --short\n' > "$ROOT/scripts/lib/setup-macos.sh"
+  printf 'Assert-ToolRuns -Name "kubectl" -VersionArgs @("version","--client")\nAssert-ToolRuns -Name "k3d" -VersionArgs @("version")\nAssert-ToolRuns -Name "helm" -VersionArgs @("version","--short")\n' >> "$ROOT/scripts/install-k8s.ps1"
+  _drift=0; _drift_execute_gates >/dev/null; [ "$_drift" -eq 0 ]
+}
+
+@test "execute-gates: an installer missing a tool gate -> drift (#411)" {
+  printf 'assert_tool_runs kubectl version --client\nassert_tool_runs k3d version\nassert_tool_runs helm version --short\n' > "$ROOT/scripts/lib/setup-linux.sh"
+  printf 'assert_tool_runs kubectl version --client\nassert_tool_runs k3d version\n' > "$ROOT/scripts/lib/setup-macos.sh"   # no helm gate
+  printf 'Assert-ToolRuns -Name "kubectl" -VersionArgs @("version","--client")\nAssert-ToolRuns -Name "k3d" -VersionArgs @("version")\nAssert-ToolRuns -Name "helm" -VersionArgs @("version","--short")\n' >> "$ROOT/scripts/install-k8s.ps1"
+  _drift=0; _drift_execute_gates >/dev/null 2>&1; [ "$_drift" -ge 1 ]
+}

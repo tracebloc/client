@@ -486,3 +486,25 @@ setup() {
   [ "$status" -eq 124 ]
   [[ "$output" == *"timed out after 1s"* ]]
 }
+
+# ── assert_tool_runs (execute-gate, #411) ────────────────────────────────────
+@test "assert_tool_runs: a working tool passes, binary untouched (#411)" {
+  mkdir -p "$BATS_TEST_TMPDIR/bin"
+  printf '#!/usr/bin/env bash\necho "k3d version v5.9.0"\n' > "$BATS_TEST_TMPDIR/bin/k3d"
+  chmod +x "$BATS_TEST_TMPDIR/bin/k3d"
+  PATH="$BATS_TEST_TMPDIR/bin:$PATH"
+  run assert_tool_runs k3d version
+  [ "$status" -eq 0 ]
+  [ -f "$BATS_TEST_TMPDIR/bin/k3d" ]
+}
+
+@test "assert_tool_runs: a broken tool errors and removes the binary (#411)" {
+  mkdir -p "$BATS_TEST_TMPDIR/bin"
+  printf '#!/usr/bin/env bash\nexit 1\n' > "$BATS_TEST_TMPDIR/bin/k3d"
+  chmod +x "$BATS_TEST_TMPDIR/bin/k3d"
+  PATH="$BATS_TEST_TMPDIR/bin:$PATH"
+  run assert_tool_runs k3d version
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"won't run"* ]]
+  [ ! -f "$BATS_TEST_TMPDIR/bin/k3d" ]
+}

@@ -401,9 +401,10 @@ install_kubectl() {
       || error "Couldn't resolve the kubectl version from dl.k8s.io/release/stable.txt — check network connectivity to dl.k8s.io and re-run."
     spin_cmd "Installing system tools…" _fetch_kubectl "$KUBE_VER" "$ARCH_DL"
     log "kubectl $KUBE_VER installed."
-  else
-    log "kubectl: $(kubectl version --client --short 2>/dev/null || echo present)"
   fi
+  # Execute-gate on both paths (#411): a present-but-broken kubectl is as fatal
+  # as a bad fresh install, and this runs before the cluster step either way.
+  assert_tool_runs kubectl version --client
 }
 
 # ── k3d ──────────────────────────────────────────────────────────────────────
@@ -447,7 +448,7 @@ _fetch_k3d_release() {
 
 install_k3d() {
   if has k3d; then
-    log "k3d: $(k3d version | head -1)"
+    assert_tool_runs k3d version
     return 0
   fi
 
@@ -484,7 +485,7 @@ install_k3d() {
     error "System tool installation completed but not found on PATH."
   fi
 
-  log "k3d: $(k3d version | head -1)"
+  assert_tool_runs k3d version
 }
 
 # ── Helm ─────────────────────────────────────────────────────────────────────
@@ -646,7 +647,7 @@ install_helm() {
     fi
   fi
   _ensure_helm_executable
-  log "helm: $(helm version --short 2>/dev/null || echo installed)"
+  assert_tool_runs helm version --short
   success "System tools"
 }
 
