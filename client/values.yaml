@@ -459,7 +459,14 @@ images:
     # if you are publishing your own fork with a different tag. Never use
     # "latest"; pin via digest instead.
     tag: ""
-    digest: ""
+    # Pinned (2026-07-28) to the current MySQL 5.7-lineage :prod image
+    # (pushed 2026-04-24). Workspace datadirs are 5.7-format and MySQL
+    # supports only staged upgrades (5.7 -> 8.0 -> 8.4), while this repo's
+    # Dockerfile.mysql_client already builds 8.4 (backend#723) — so a
+    # re-published :prod tag must never reach fleets implicitly. Remove or
+    # replace this pin only as an explicit step of the staged migration
+    # plan in backend#723.
+    digest: "sha256:f546e47fb339e0982c902cef063b081ccf2cbbaf35b475287d583b9bf3163354"
   busybox:
     tag: "1.35"
     digest: ""
