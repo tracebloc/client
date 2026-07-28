@@ -1515,3 +1515,92 @@ Describe "System-tool installs are execute-gated (#411)" {
     $script:raw | Should -Not -Match 'Log "helm: \$\('
   }
 }
+
+Describe "GPU container toolkit — progress + honest remedies (#415)" {
+  BeforeAll {
+    $ast = [System.Management.Automation.Language.Parser]::ParseFile(
+      "$PSScriptRoot/../install-k8s.ps1", [ref]$null, [ref]$null)
+    $script:gpuFn = $ast.FindAll({ param($n)
+      $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+      $n.Name -eq 'Install-NvidiaContainerToolkit'
+    }, $true) | Select-Object -First 1
+  }
+
+  Context "Wait-JobWithProgress" {
+    It "returns true when the job has already completed" {
+      $job = [pscustomobject]@{ State = "Completed" }
+      Wait-JobWithProgress -Job $job -TimeoutSec 4 -PollSeconds 2 | Should -BeTrue
+    }
+    It "stops the job and returns false once the timeout elapses" {
+      # A real job (Start-Sleep in its own runspace, unaffected by the mock below)
+      # so the production Stop-Job path binds and runs for real.
+      Mock Start-Sleep {}
+      $job = Start-Job -InitializationScript $JobInit -ScriptBlock { Start-Sleep -Seconds 120 }
+      try {
+        Wait-JobWithProgress -Job $job -TimeoutSec 6 -PollSeconds 2 -Message "x" | Should -BeFalse
+        $job.State | Should -BeIn @("Stopped", "Stopping", "Failed")
+      } finally {
+        Remove-Job $job -Force -ErrorAction SilentlyContinue
+      }
+    }
+    It "polls at most TimeoutSec/PollSeconds times (bounded, never unbounded)" {
+      $global:TbSleeps = 0
+      Mock Start-Sleep { $global:TbSleeps++ }
+      $job = Start-Job -InitializationScript $JobInit -ScriptBlock { Start-Sleep -Seconds 120 }
+      try {
+        Wait-JobWithProgress -Job $job -TimeoutSec 10 -PollSeconds 2 -Message "x" | Out-Null
+        $global:TbSleeps | Should -Be 5
+      } finally {
+        Remove-Job $job -Force -ErrorAction SilentlyContinue
+        Remove-Variable -Name TbSleeps -Scope Global -ErrorAction SilentlyContinue
+      }
+    }
+  }
+
+  Context "Show-GpuManualRemedy" {
+    It "prints copy-pastable remedy commands and a tracebloc doctor follow-up" {
+      $out = Show-GpuManualRemedy -Distro "Ubuntu-22.04" 6>&1 | Out-String
+      $out | Should -Match 'apt-get install -y nvidia-container-toolkit'
+      $out | Should -Match 'nvidia-ctk runtime configure'
+      $out | Should -Match 'tracebloc doctor'
+      $out | Should -Match 'Ubuntu-22\.04'
+    }
+    It "is honest that the environment falls back to CPU mode" {
+      $out = Show-GpuManualRemedy 6>&1 | Out-String
+      $out | Should -Match 'CPU mode'
+    }
+  }
+
+  Context "Install-NvidiaContainerToolkit" {
+    It "no-ops without an NVIDIA GPU (never starts a background job)" {
+      $GPU_VENDOR = "none"; $NVIDIA_DRIVER_OK = $false
+      Mock Start-Job { throw "must not start a job in CPU mode" }
+      { Install-NvidiaContainerToolkit } | Should -Not -Throw
+    }
+    It "announces GPU setup on screen, not only in the log file" {
+      # The old flow used Log (file-only) -> a blank console for minutes (#415).
+      $script:gpuFn.Extent.Text | Should -Match 'Info "Setting up GPU acceleration'
+    }
+    It "every long job wait shows a heartbeat — no bare Wait-Job in the GPU flow" {
+      ($script:gpuFn.FindAll({ param($n)
+        $n -is [System.Management.Automation.Language.CommandAst] -and $n.GetCommandName() -eq 'Wait-Job'
+      }, $true)).Count | Should -Be 0
+      ($script:gpuFn.FindAll({ param($n)
+        $n -is [System.Management.Automation.Language.CommandAst] -and $n.GetCommandName() -eq 'Wait-JobWithProgress'
+      }, $true)).Count | Should -BeGreaterOrEqual 3
+    }
+    It "the Ubuntu install runs as a progress-tracked job, not a silent cmd /c" {
+      $script:gpuFn.Extent.Text | Should -Not -Match 'cmd /c "wsl --install -d Ubuntu --no-launch 2>&1" \| Out-Null'
+      $script:gpuFn.Extent.Text | Should -Match 'Downloading and installing Ubuntu'
+    }
+    It "every timeout/failure branch hands the user a runnable remedy" {
+      ($script:gpuFn.FindAll({ param($n)
+        $n -is [System.Management.Automation.Language.CommandAst] -and $n.GetCommandName() -eq 'Show-GpuManualRemedy'
+      }, $true)).Count | Should -BeGreaterOrEqual 3
+    }
+    It "drops the vague dead-end copy the ticket flagged" {
+      $script:gpuFn.Extent.Text | Should -Not -Match 'set it up manually inside WSL later'
+      $script:gpuFn.Extent.Text | Should -Not -Match 'GPU setup may need manual attention'
+    }
+  }
+}
