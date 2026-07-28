@@ -14,9 +14,12 @@
 #  paths and asserts the contract that keeps the fleet safe:
 #    1. `--reuse-values`            -> upgrade succeeds (nil-guards hold), the
 #                                      egress lockdown does NOT engage by
-#                                      accident, and the prod ingestor pin does
-#                                      NOT arrive (stored computed values
-#                                      predate the key — documented limitation).
+#                                      accident, and the prod ingestor pin
+#                                      matches the BASELINE release: absent when
+#                                      the published chart predates the pin key,
+#                                      replayed VERBATIM when it carries one —
+#                                      never injected from the new chart's
+#                                      defaults (documented limitation).
 #    2. `--reset-then-reuse-values` -> upgrade succeeds, new defaults flow in
 #                                      (egress gateway deploys, inert),
 #                                      out-of-band image-refresh annotations
@@ -126,6 +129,17 @@ helm install "$NS" "${REPO_NAME}/client" --version "$PREV" \
   --set clientPassword=ci-e2e-upgrade \
   --set storageClass.provisioner=rancher.io/local-path
 
+# The baseline (published) release's computed prod-ingestor pin, if any. This
+# decides which era path 1 asserts: releases published before client#398 have
+# no images.ingestor.prodDigest to replay (the pin must NOT arrive via
+# --reuse-values), while releases since client#383 carry it in their computed
+# values (the SAME pin must be replayed verbatim). Read it from the release,
+# not from a date or version compare, so the test is correct in both eras.
+# jq is preinstalled on the stock runners.
+BASELINE_PROD_DIGEST="$(helm get values "$NS" -n "$NS" --all -o json \
+  | jq -r '.images.ingestor.prodDigest // ""')"
+echo "   baseline prod ingestor pin: ${BASELINE_PROD_DIGEST:-<none — pre-pin era>}"
+
 echo "── simulate an image-refresh-managed annotation (must survive upgrades) ──"
 kubectl annotate -n "$NS" "$(jm_deploy)" \
   "tracebloc.io/last-refreshed-jobs-manager-digest=sha256:e2e-sentinel" --overwrite
@@ -137,13 +151,22 @@ helm upgrade "$NS" "$CHART_DIR" --namespace "$NS" --reuse-values
 netpol_has_external_443 || fail "--reuse-values upgrade dropped the external 443 rule (lockdown engaged by accident)"
 [ -z "$(jm_egress_proxy_url)" ] || fail "--reuse-values upgrade injected EGRESS_PROXY_URL (routing engaged by accident)"
 # Documented limitation, asserted so it stays a known quantity: plain
-# --reuse-values replays the old release's COMPUTED values, which predate
-# images.ingestor.prodDigest, so the prod pin does NOT arrive on this path. The
-# fleet does not use it (path 2 does) — but an operator upgrading by hand with
-# this flag stays on the floating tag.
-[ -z "$(jm_ingestor_digest)" ] \
-  || fail "--reuse-values unexpectedly applied a prod ingestor pin; this path replays stored computed values and should still float"
-echo "   OK: upgrade succeeded, lockdown stayed off, ingestor still floating"
+# --reuse-values replays the old release's COMPUTED values and ignores the new
+# chart's defaults. What that means for the prod ingestor pin depends on the
+# baseline era: a published release that predates images.ingestor.prodDigest
+# has no key to replay, so the pin must NOT arrive; a release that already
+# carries the pin must have it replayed VERBATIM — the baseline's digest, not
+# the working tree's. Either way nothing may be injected from the new chart's
+# defaults on this path. The fleet does not use this flag (path 2 does) — an
+# operator upgrading by hand with it keeps exactly the values the edge had.
+if [ -z "$BASELINE_PROD_DIGEST" ]; then
+  [ -z "$(jm_ingestor_digest)" ] \
+    || fail "--reuse-values unexpectedly applied a prod ingestor pin; the baseline release predates the key, so replayed computed values cannot contain it"
+else
+  [ "$(jm_ingestor_digest)" = "$BASELINE_PROD_DIGEST" ] \
+    || fail "--reuse-values did not replay the baseline prod pin verbatim: got '$(jm_ingestor_digest)', want '$BASELINE_PROD_DIGEST' (stored computed values must win over new chart defaults on this path)"
+fi
+echo "   OK: upgrade succeeded, lockdown stayed off, ingestor pin matches the baseline era (${BASELINE_PROD_DIGEST:-floating})"
 
 echo "── path 2: the fleet auto-upgrade — helm upgrade --reset-then-reuse-values ──"
 helm upgrade "$NS" "$CHART_DIR" --namespace "$NS" --reset-then-reuse-values
@@ -158,12 +181,18 @@ DEPLOYED="$(helm list -n "$NS" --filter "^${NS}\$" -o yaml \
   | awk '/^[[:space:]]*chart:/ {print $2; exit}')"
 [ "$DEPLOYED" = "client-${LOCAL_VERSION}" ] || fail "deployed chart is $DEPLOYED, expected client-${LOCAL_VERSION}"
 # backend#1245 acceptance criterion: publishing a chart with an updated prod pin
-# must change the digest on an ALREADY-INSTALLED edge. The release was installed
-# from the published chart (no prodDigest key at all, floating on the tag); this
-# upgrade is the exact command the fleet auto-upgrade CronJob runs, with no `-f`
-# and no `--set`. The pin arriving here is what the old `-f values-prod.yaml`
-# overlay could never do — an overlay value is user-supplied, so it would be
-# replayed verbatim forever while the chart's copy was ignored.
+# must change the digest on an ALREADY-INSTALLED edge. This upgrade is the exact
+# command the fleet auto-upgrade CronJob runs, with no `-f` and no `--set`. The
+# pin arriving here is what the old `-f values-prod.yaml` overlay could never
+# do — an overlay value is user-supplied, so it would be replayed verbatim
+# forever while the chart's copy was ignored.
+# ERA NOTE: path 1's --reuse-values rewrote this release's recorded values to
+# the baseline's full computed set, so against a post-pin baseline the replayed
+# pin and the local chart default coincide only while nobody has bumped the
+# pin. If a pin bump makes them differ, the assertion below fails — and that
+# failure is a real signal, not test noise: an edge that was ever hand-upgraded
+# with --reuse-values stops receiving chart pin updates the same way. Decide
+# then whether to isolate path 2 from path 1 or fix the replay contamination.
 WANT_DIGEST="$(local_prod_digest)"
 [ -n "$WANT_DIGEST" ] \
   || fail "images.ingestor.prodDigest is empty in the working-tree chart — prod would silently lose its reproducibility pin"
