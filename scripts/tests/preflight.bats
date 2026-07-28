@@ -88,15 +88,16 @@ setup() {
   [[ "$output" != *"get.docker.com"* ]]
 }
 
-@test "_pf_connectivity: missing-tool download host is a HARD fail (#416)" {
-  # Behaviour change (#416): a blocked download host used to be warn-only and
-  # passed preflight, then failed the install ~30s later. It is now a red line.
+@test "_pf_connectivity: Docker-engine host is WARN not hard — path-dependent (Bugbot #416)" {
+  # The Docker install host varies by distro/path (Debian get.docker.com, RHEL
+  # clones download.docker.com, Amazon/Arch/SUSE distro repos), so a blocked one
+  # must NOT abort a supported install that never touches it — warn only.
   _pf_probe_url() { case "$1" in *get.docker.com*) echo blocked ;; *) echo ok ;; esac; }
-  has() { [[ "$1" == "curl" ]]; }   # curl present (probing possible), other tools missing
+  has() { [[ "$1" == "curl" ]]; }   # docker + all tools missing
   OS=Linux
   run _pf_connectivity
-  [[ "$output" == *"get.docker.com) unreachable"* ]]
-  PF_HARD_FAIL=0; _pf_connectivity >/dev/null 2>&1; [ "$PF_HARD_FAIL" -ge 1 ]
+  [[ "$output" == *"get.docker.com) unreachable"* ]]                            # still surfaced…
+  PF_HARD_FAIL=0; _pf_connectivity >/dev/null 2>&1; [ "$PF_HARD_FAIL" -eq 0 ]   # …but NOT a hard fail
 }
 
 @test "_pf_connectivity: kubectl host (dl.k8s.io) blocked -> HARD fail (#416)" {
@@ -126,13 +127,15 @@ setup() {
   [[ "$output" == *"auth.docker.io) unreachable"* ]]
 }
 
-@test "_pf_connectivity: macOS probes desktop.docker.com when docker is missing (#416)" {
+@test "_pf_connectivity: macOS Docker Desktop host is WARN not hard — Colima path (Bugbot #416)" {
+  # Headless Macs use Colima via brew (ghcr.io), not desktop.docker.com — so a
+  # blocked Desktop CDN must not abort that supported path.
   _pf_probe_url() { case "$1" in *desktop.docker.com*) echo blocked ;; *) echo ok ;; esac; }
   has() { [[ "$1" == "curl" ]]; }   # docker + brew missing on this mac
   OS=Darwin
   run _pf_connectivity
-  [[ "$output" == *"desktop.docker.com) unreachable"* ]]
-  PF_HARD_FAIL=0; _pf_connectivity >/dev/null 2>&1; [ "$PF_HARD_FAIL" -ge 1 ]
+  [[ "$output" == *"desktop.docker.com) unreachable"* ]]                        # surfaced as a warning…
+  PF_HARD_FAIL=0; _pf_connectivity >/dev/null 2>&1; [ "$PF_HARD_FAIL" -eq 0 ]   # …not a hard fail
 }
 
 @test "_pf_connectivity: a download host is NOT probed when its tool is present (#416)" {

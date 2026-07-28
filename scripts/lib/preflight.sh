@@ -401,23 +401,32 @@ _pf_connectivity() {
     # ROOT 404s by design, while the index must exist for `helm repo add` (#385).
     "tracebloc Helm charts (tracebloc.github.io)|https://tracebloc.github.io/client/index.yaml|strict"
   )
-  # Download hosts the default install path fetches from on THIS OS — promoted to
-  # HARD (#416): a blocked one used to pass preflight then fail the install ~30s
-  # later. Only added when the fetch will actually happen (tool/app absent; a
-  # present tool is never re-downloaded, so its host is not probed). Release assets
-  # 302 to objects.githubusercontent.com and _pf_probe_url does not follow
-  # redirects, so github.com passing proves nothing about the asset host — probe it
-  # explicitly. Kept in lockstep with install-k8s.ps1 (drift check: check-drift.sh).
+  # Tool-binary download hosts — promoted to HARD (#416): a blocked one used to
+  # pass preflight then fail the install ~30s later. Only added when the fetch will
+  # actually happen (tool absent; a present tool is never re-downloaded). These are
+  # UNAMBIGUOUS: the installer always fetches kubectl/k3d/helm from exactly these
+  # hosts. Release assets 302 to objects.githubusercontent.com and _pf_probe_url
+  # does not follow redirects, so github.com passing proves nothing about the asset
+  # host — probe it explicitly. Lockstep with install-k8s.ps1 (drift: check-drift.sh).
+  #
+  # The Docker-ENGINE install host is deliberately NOT hard: it's path/distro/
+  # environment-dependent (Debian→get.docker.com, RHEL clones→download.docker.com,
+  # Amazon/Arch/SUSE→distro repos, macOS GUI→desktop.docker.com, headless→Colima via
+  # brew/ghcr.io). preflight can't cheaply know which, so hard-probing a fixed host
+  # would abort supported paths that never touch it (Bugbot). It goes in `soft`
+  # (warn-only) below. On Windows Docker Desktop is the sole path, so install-k8s.ps1
+  # keeps desktop.docker.com hard there.
+  local soft=()
   if [[ "$OS" == "Linux" ]]; then
-    if ! has docker;  then criticals+=("Docker install (get.docker.com)|https://get.docker.com/" \
-                                       "Docker packages (download.docker.com)|https://download.docker.com/"); fi
     if ! has k3d;     then criticals+=("k3d download (github.com)|https://github.com/" \
                                        "k3d assets (objects.githubusercontent.com)|https://objects.githubusercontent.com/"); fi
     if ! has kubectl; then criticals+=("kubectl (dl.k8s.io)|https://dl.k8s.io/"); fi
     if ! has helm;    then criticals+=("Helm (get.helm.sh)|https://get.helm.sh/"); fi
+    if ! has docker;  then soft+=("Docker install (get.docker.com)|https://get.docker.com/" \
+                                  "Docker packages (download.docker.com)|https://download.docker.com/"); fi
   elif [[ "$OS" == "Darwin" ]]; then
     if ! has brew;    then criticals+=("Homebrew install (raw.githubusercontent.com)|https://raw.githubusercontent.com/"); fi
-    if ! has docker;  then criticals+=("Docker Desktop (desktop.docker.com)|https://desktop.docker.com/"); fi
+    if ! has docker;  then soft+=("Docker Desktop (desktop.docker.com)|https://desktop.docker.com/"); fi
     # k3d / kubectl / helm install via Homebrew bottles on ghcr.io (probed above).
   fi
   # Probe each critical host in the FOREGROUND (so PF_HARD_FAIL updates in THIS
@@ -456,11 +465,20 @@ _pf_connectivity() {
     done
   fi
 
+  # Path-dependent Docker-engine hosts: WARN only (never hard) so a blocked host on
+  # a path that won't use it doesn't abort a supported install (Bugbot). The
+  # ${soft[@]+…} guard keeps `set -u` happy with an empty array on bash 3.2 (macOS).
+  for c in ${soft[@]+"${soft[@]}"}; do
+    label="${c%%|*}"; url="${c#*|}"
+    status="$(_pf_probe_url "$url")"
+    [[ "$status" == "ok" ]] || warn "${label} unreachable (${status}) — only needed if the installer fetches Docker from that host; other install paths don't."
+  done
+
   if [[ "$tls_seen" -eq 1 ]]; then
     hint "A TLS/certificate error usually means a break-and-inspect (TLS-inspecting) proxy whose corporate CA isn't trusted here — see the proxy notes."
   fi
   if [[ "$cfail" -gt 0 ]]; then
-    hint "Allow HTTPS (443) egress to: registry-1.docker.io, ghcr.io, ${backend_host}, tracebloc.github.io — or set HTTP_PROXY if you use a corporate proxy."
+    hint "Allow HTTPS (443) egress to the host(s) named above — the always-needed set is registry-1.docker.io, auth.docker.io, ghcr.io, ${backend_host}, tracebloc.github.io, plus any tool-download host listed (dl.k8s.io / get.helm.sh / github.com / objects.githubusercontent.com) — or set HTTP_PROXY if you use a corporate proxy."
   fi
   return 0
 }
