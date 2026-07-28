@@ -203,8 +203,13 @@ _drift_cli_contract() {
 # raw.githubusercontent.com / formulae.brew.sh on macOS) are excluded, as is
 # tracebloc.github.io (install-k8s.ps1 probes it via the $TRACEBLOC_HELM_REPO_URL
 # variable, not a literal — Check 1 already pins the backend/chart host map).
+# Extract ONLY the hosts in a preflight probe entry, not any URL in the file:
+#  - preflight.sh entries are "label|https://host/…" (the pipe is unique to them)
+#  - install-k8s.ps1 entries are @{ label = "…"; url = "https://host/…" } — REQUIRE
+#    the `label =` on the same line so unrelated `$url = "https://…"` assignments
+#    (e.g. the winget download) don't count and mask a deleted probe (Bugbot).
 _drift_probed_hosts_sh()  { grep -oE '\|https://[a-zA-Z0-9.-]+' "$1" 2>/dev/null | sed 's#.*//##' | sort -u; }
-_drift_probed_hosts_ps1() { grep -oE 'url *= *"https://[a-zA-Z0-9.-]+' "$1" 2>/dev/null | sed 's#.*//##' | sort -u; }
+_drift_probed_hosts_ps1() { grep -oE 'label *=.*url *= *"https://[a-zA-Z0-9.-]+' "$1" 2>/dev/null | sed 's#.*https://##' | sort -u; }
 _drift_preflight_hosts() {
   echo "▸ Preflight download-host parity (probed URLs in preflight.sh · install-k8s.ps1)"
   local shared=(

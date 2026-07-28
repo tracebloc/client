@@ -429,12 +429,14 @@ _pf_connectivity() {
     # git-clones Homebrew/brew + core from github.com — probe both (Bugbot #416).
     if ! has brew; then criticals+=("Homebrew install (raw.githubusercontent.com)|https://raw.githubusercontent.com/" \
                                     "Homebrew clone (github.com)|https://github.com/"); fi
-    # `brew install` (kubectl/k3d/helm, and colima/docker) pulls formula METADATA
-    # from formulae.brew.sh — bottles come from ghcr.io (probed above), but the
-    # metadata host is separate and is hit even when brew is already installed. A
-    # blocked formulae.brew.sh = green preflight then a failed `brew install`
-    # (reviewer, #416). Probe it whenever a brew-installed tool is missing.
-    if ! has kubectl || ! has k3d || ! has helm || ! has docker; then
+    # `brew install kubectl/k3d/helm` pulls formula METADATA from formulae.brew.sh
+    # — bottles come from ghcr.io (probed above), but the metadata host is separate
+    # and is hit even when brew is already installed. A blocked formulae.brew.sh =
+    # green preflight then a failed `brew install` (reviewer, #416). Trigger only on
+    # the tools that ALWAYS install via brew — NOT docker: on a GUI Mac docker comes
+    # from Docker Desktop (desktop.docker.com), so `! has docker` alone would
+    # hard-fail formulae.brew.sh on an install that never runs brew (Bugbot).
+    if ! has kubectl || ! has k3d || ! has helm; then
       criticals+=("Homebrew formulae (formulae.brew.sh)|https://formulae.brew.sh/")
     fi
     if ! has docker; then soft+=("Docker Desktop (desktop.docker.com)|https://desktop.docker.com/"); fi

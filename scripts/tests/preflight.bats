@@ -138,6 +138,17 @@ setup() {
   PF_HARD_FAIL=0; _pf_connectivity >/dev/null 2>&1; [ "$PF_HARD_FAIL" -ge 1 ]
 }
 
+@test "_pf_connectivity: macOS does NOT probe formulae.brew.sh when only docker is missing (Bugbot #416)" {
+  # GUI Macs install Docker Desktop from desktop.docker.com, not brew — so docker
+  # absence alone must not hard-fail the brew metadata host when the tools are present.
+  _pf_probe_url() { case "$1" in *formulae.brew.sh*) echo blocked ;; *) echo ok ;; esac; }
+  has() { case "$1" in curl|brew|kubectl|k3d|helm) return 0 ;; *) return 1 ;; esac; }  # only docker missing
+  OS=Darwin
+  run _pf_connectivity
+  [[ "$output" != *"formulae.brew.sh"* ]]              # not probed at all
+  PF_HARD_FAIL=0; _pf_connectivity >/dev/null 2>&1; [ "$PF_HARD_FAIL" -eq 0 ]
+}
+
 @test "_pf_connectivity: macOS hard-probes github.com for the Homebrew clone when brew absent (Bugbot #416)" {
   # install_homebrew git-clones Homebrew/brew from github.com after fetching the
   # script from raw.githubusercontent.com — both must be reachable.
