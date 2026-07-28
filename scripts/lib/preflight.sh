@@ -142,6 +142,16 @@ _pf_host_ncpu() {
 # Available (free) RAM right now, KB — Linux only (for the busy-shared-VM warn).
 _pf_avail_mem_kb() { awk '/^MemAvailable:/ {print $2}' /proc/meminfo 2>/dev/null; }
 
+# True on a macOS box with a real GUI login session — mirrors setup-macos.sh's
+# _has_gui_session (the branch that installs Docker Desktop from desktop.docker.com
+# vs. the headless branch that installs colima/docker via brew). /dev/console is
+# owned by the GUI user; on headless Macs (EC2/CI) it's "root" or empty. Used to
+# decide whether a missing docker means a brew install (→ formulae.brew.sh needed).
+_pf_has_gui_session() {
+  local u; u="$(stat -f '%Su' /dev/console 2>/dev/null || echo '')"
+  [[ -n "$u" && "$u" != "root" ]]
+}
+
 # Selectors: prefer the runtime view, fall back to the host. The checks (and the
 # bats numeric test) call these names; they always emit exactly one integer.
 _pf_total_mem_kb() { local v; v="$(_pf_runtime_mem_kb)"; [[ -n "$v" ]] && { echo "$v"; return 0; }; _pf_host_mem_kb; }
@@ -392,12 +402,63 @@ _pf_connectivity() {
   # Entries are "label|url" with an optional third "|strict" field.
   local criticals=(
     "Docker Hub (registry-1.docker.io)|https://registry-1.docker.io/v2/"
+    # auth.docker.io is Docker Hub's token endpoint: a network that allows
+    # registry-1 but blocks the token host fails only at in-cluster pull time (#416).
+    "Docker Hub auth (auth.docker.io)|https://auth.docker.io/token"
     "GitHub Container Registry (ghcr.io)|https://ghcr.io/"
     "tracebloc API (${backend_host})|https://${backend_host}/"
     # The chart repo is probed at its index.yaml, strictly (third field): the site
     # ROOT 404s by design, while the index must exist for `helm repo add` (#385).
     "tracebloc Helm charts (tracebloc.github.io)|https://tracebloc.github.io/client/index.yaml|strict"
   )
+  # Tool-binary download hosts — promoted to HARD (#416): a blocked one used to
+  # pass preflight then fail the install ~30s later. Only added when the fetch will
+  # actually happen (tool absent; a present tool is never re-downloaded). These are
+  # UNAMBIGUOUS: the installer always fetches kubectl/k3d/helm from exactly these
+  # hosts. Release assets 302 to objects.githubusercontent.com and _pf_probe_url
+  # does not follow redirects, so github.com passing proves nothing about the asset
+  # host — probe it explicitly. Lockstep with install-k8s.ps1 (drift: check-drift.sh).
+  #
+  # The Docker-ENGINE install host is deliberately NOT hard: it's path/distro/
+  # environment-dependent (Debian→get.docker.com, RHEL clones→download.docker.com,
+  # Amazon/Arch/SUSE→distro repos, macOS GUI→desktop.docker.com, headless→Colima via
+  # brew/ghcr.io). preflight can't cheaply know which, so hard-probing a fixed host
+  # would abort supported paths that never touch it (Bugbot). It goes in `soft`
+  # (warn-only) below. On Windows Docker Desktop is the sole path, so install-k8s.ps1
+  # keeps desktop.docker.com hard there.
+  local soft=()
+  if [[ "$OS" == "Linux" ]]; then
+    if ! has k3d;     then criticals+=("k3d download (github.com)|https://github.com/" \
+                                       "k3d assets (objects.githubusercontent.com)|https://objects.githubusercontent.com/"); fi
+    if ! has kubectl; then criticals+=("kubectl (dl.k8s.io)|https://dl.k8s.io/"); fi
+    if ! has helm;    then criticals+=("Helm (get.helm.sh)|https://get.helm.sh/"); fi
+    if ! has docker;  then soft+=("Docker install (get.docker.com)|https://get.docker.com/" \
+                                  "Docker packages (download.docker.com)|https://download.docker.com/"); fi
+  elif [[ "$OS" == "Darwin" ]]; then
+    # macOS install paths, all keyed on what will actually be fetched (#416):
+    #  - Homebrew install (when brew absent): the script from raw.githubusercontent.com,
+    #    then a git-clone of Homebrew/brew + core from github.com — both hard.
+    #  - kubectl/k3d/helm ALWAYS install via `brew install` -> formula metadata from
+    #    formulae.brew.sh (bottles are ghcr.io, probed above; metadata host is separate
+    #    and is hit even when brew is already present) -> hard.
+    #  - docker is path-dependent: a GUI Mac installs Docker Desktop from
+    #    desktop.docker.com (hard — the actual path); a HEADLESS Mac installs
+    #    colima/docker via brew, which needs formulae.brew.sh instead. _pf_has_gui_session
+    #    (mirrors setup-macos.sh) picks the branch, so each host is probed only on the
+    #    path that fetches it — no false-fail on the path that doesn't (Bugbot r3/r4/r5).
+    if ! has brew; then criticals+=("Homebrew install (raw.githubusercontent.com)|https://raw.githubusercontent.com/" \
+                                    "Homebrew clone (github.com)|https://github.com/"); fi
+    local _brew_will_run=""
+    if ! has kubectl || ! has k3d || ! has helm; then _brew_will_run=1; fi
+    if ! has docker; then
+      if _pf_has_gui_session; then
+        criticals+=("Docker Desktop (desktop.docker.com)|https://desktop.docker.com/")   # GUI: the actual Docker path
+      else
+        _brew_will_run=1                                                                  # headless: colima/docker via brew
+      fi
+    fi
+    [[ -n "$_brew_will_run" ]] && criticals+=("Homebrew formulae (formulae.brew.sh)|https://formulae.brew.sh/")
+  fi
   # Probe each critical host in the FOREGROUND (so PF_HARD_FAIL updates in THIS
   # shell — a backgrounded spinner subshell couldn't propagate it), advancing a
   # spinner frame before each blocking probe. No sleep: the network probe itself
@@ -434,32 +495,21 @@ _pf_connectivity() {
     done
   fi
 
-  # Tool-download hosts: only relevant on Linux when the tool isn't present. Warn-only.
-  if [[ "$OS" == "Linux" ]]; then
-    local conds=()
-    if ! has docker;  then conds+=("Docker install (get.docker.com)|https://get.docker.com/"); fi
-    if ! has k3d;     then conds+=("k3d download (github.com)|https://github.com/"); fi
-    if ! has kubectl; then conds+=("kubectl (dl.k8s.io)|https://dl.k8s.io/"); fi
-    if ! has helm;    then conds+=("Helm (get.helm.sh)|https://get.helm.sh/"); fi
-    # ${conds[@]+...} guard: expanding an empty array under `set -u` errors on
-    # bash 3.2 (macOS). This expands to nothing when no tools are missing.
-    for c in ${conds[@]+"${conds[@]}"}; do
-      label="${c%%|*}"; url="${c#*|}"
-      status="$(_pf_probe_url "$url")"
-      if [[ "$status" == "ok" ]]; then
-        _pf_ok "${label} reachable"
-      else
-        warn "${label} unreachable (${status}) — needed only to install that tool."
-      fi
-    done
-  fi
+  # Path-dependent Docker-engine hosts: WARN only (never hard) so a blocked host on
+  # a path that won't use it doesn't abort a supported install (Bugbot). The
+  # ${soft[@]+…} guard keeps `set -u` happy with an empty array on bash 3.2 (macOS).
+  for c in ${soft[@]+"${soft[@]}"}; do
+    label="${c%%|*}"; url="${c#*|}"
+    status="$(_pf_probe_url "$url")"
+    [[ "$status" == "ok" ]] || warn "${label} unreachable (${status}) — only needed if the installer fetches Docker from that host; other install paths don't."
+  done
 
   if [[ "$tls_seen" -eq 1 ]]; then
     hint "A TLS/certificate error usually means a break-and-inspect (TLS-inspecting) proxy whose corporate CA isn't trusted here."
     hint "Point the installer at your corporate CA bundle so the host AND the k3d nodes trust it: TRACEBLOC_CA_BUNDLE=/path/to/corporate-ca.pem (CURL_CA_BUNDLE is also honored). Ask IT for the bundle if unsure."
   fi
   if [[ "$cfail" -gt 0 ]]; then
-    hint "Allow HTTPS (443) egress to: registry-1.docker.io, ghcr.io, ${backend_host}, tracebloc.github.io — or set HTTP_PROXY if you use a corporate proxy."
+    hint "Allow HTTPS (443) egress to the host(s) named above — the always-needed set is registry-1.docker.io, auth.docker.io, ghcr.io, ${backend_host}, tracebloc.github.io, plus any tool-download host listed (dl.k8s.io / get.helm.sh / github.com / objects.githubusercontent.com) — or set HTTP_PROXY if you use a corporate proxy."
   fi
   return 0
 }
