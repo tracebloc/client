@@ -187,29 +187,39 @@ _drift_cli_contract() {
 }
 
 # ── Check 4: preflight probes the same download hosts on both installers ─────
-# preflight.sh (Linux/macOS) and install-k8s.ps1 (Windows) each hard-probe the
-# hosts the install fetches from (#416). A host added to one installer but not the
-# other silently reopens the "green preflight, blocked download 30s later" gap on
-# whichever OS was missed. The shared-core set below is every host BOTH installers
-# can touch on the default path; the OS-specific ones (get.docker.com / download.
-# docker.com on Linux, raw.githubusercontent.com on macOS) are excluded on purpose.
+# preflight.sh (Linux/macOS) and install-k8s.ps1 (Windows) each probe the hosts
+# the install fetches from (#416). A host added to one installer but not the other
+# silently reopens the "green preflight, blocked download 30s later" gap on
+# whichever OS was missed.
+#
+# We extract only hosts that appear in an actual PROBE URL — preflight.sh entries
+# are "label|https://host/…", install-k8s.ps1 entries are url = "https://host/…" —
+# NOT a whole-file grep. A whole-file grep also matches the same hosts inside
+# comments and the egress-hint strings, so it would pass even if a real probe line
+# were deleted (reviewer: it couldn't detect the drift it exists to catch).
+#
+# The shared-core set is every host BOTH probe as a URL literal on the default
+# path. OS-specific hosts (get.docker.com / download.docker.com on Linux,
+# raw.githubusercontent.com / formulae.brew.sh on macOS) are excluded, as is
+# tracebloc.github.io (install-k8s.ps1 probes it via the $TRACEBLOC_HELM_REPO_URL
+# variable, not a literal — Check 1 already pins the backend/chart host map).
+_drift_probed_hosts_sh()  { grep -oE '\|https://[a-zA-Z0-9.-]+' "$1" 2>/dev/null | sed 's#.*//##' | sort -u; }
+_drift_probed_hosts_ps1() { grep -oE 'url *= *"https://[a-zA-Z0-9.-]+' "$1" 2>/dev/null | sed 's#.*//##' | sort -u; }
 _drift_preflight_hosts() {
-  echo "▸ Preflight download-host parity (preflight.sh · install-k8s.ps1)"
-  local files=( scripts/lib/preflight.sh scripts/install-k8s.ps1 )
+  echo "▸ Preflight download-host parity (probed URLs in preflight.sh · install-k8s.ps1)"
   local shared=(
     registry-1.docker.io auth.docker.io ghcr.io
     dl.k8s.io get.helm.sh github.com objects.githubusercontent.com
-    desktop.docker.com tracebloc.github.io
+    desktop.docker.com
   )
-  local before=$_drift f h
-  for f in "${files[@]}"; do
-    if [[ ! -f "$DRIFT_ROOT/$f" ]]; then _note "$f is missing"; continue; fi
-    for h in "${shared[@]}"; do
-      grep -qF -- "$h" "$DRIFT_ROOT/$f" || \
-        _note "$f: preflight host '$h' not probed — both installers must probe it (#416)"
-    done
+  local before=$_drift h sh_hosts ps_hosts
+  sh_hosts="$(_drift_probed_hosts_sh  "$DRIFT_ROOT/scripts/lib/preflight.sh")"
+  ps_hosts="$(_drift_probed_hosts_ps1 "$DRIFT_ROOT/scripts/install-k8s.ps1")"
+  for h in "${shared[@]}"; do
+    grep -qxF -- "$h" <<<"$sh_hosts" || _note "preflight.sh: '$h' is not in any probe URL — both installers must probe it (#416)"
+    grep -qxF -- "$h" <<<"$ps_hosts" || _note "install-k8s.ps1: '$h' is not in any probe URL — both installers must probe it (#416)"
   done
-  if [[ "$_drift" -eq "$before" ]]; then _ok "both installers probe the shared download-host set"; fi
+  if [[ "$_drift" -eq "$before" ]]; then _ok "both installers probe the shared download-host set (extracted from probe URLs)"; fi
   return 0
 }
 

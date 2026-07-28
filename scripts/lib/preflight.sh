@@ -427,10 +427,17 @@ _pf_connectivity() {
   elif [[ "$OS" == "Darwin" ]]; then
     # Homebrew install fetches the script from raw.githubusercontent.com AND then
     # git-clones Homebrew/brew + core from github.com — probe both (Bugbot #416).
-    if ! has brew;    then criticals+=("Homebrew install (raw.githubusercontent.com)|https://raw.githubusercontent.com/" \
-                                       "Homebrew clone (github.com)|https://github.com/"); fi
-    if ! has docker;  then soft+=("Docker Desktop (desktop.docker.com)|https://desktop.docker.com/"); fi
-    # k3d / kubectl / helm install via Homebrew bottles on ghcr.io (probed above).
+    if ! has brew; then criticals+=("Homebrew install (raw.githubusercontent.com)|https://raw.githubusercontent.com/" \
+                                    "Homebrew clone (github.com)|https://github.com/"); fi
+    # `brew install` (kubectl/k3d/helm, and colima/docker) pulls formula METADATA
+    # from formulae.brew.sh — bottles come from ghcr.io (probed above), but the
+    # metadata host is separate and is hit even when brew is already installed. A
+    # blocked formulae.brew.sh = green preflight then a failed `brew install`
+    # (reviewer, #416). Probe it whenever a brew-installed tool is missing.
+    if ! has kubectl || ! has k3d || ! has helm || ! has docker; then
+      criticals+=("Homebrew formulae (formulae.brew.sh)|https://formulae.brew.sh/")
+    fi
+    if ! has docker; then soft+=("Docker Desktop (desktop.docker.com)|https://desktop.docker.com/"); fi
   fi
   # Probe each critical host in the FOREGROUND (so PF_HARD_FAIL updates in THIS
   # shell — a backgrounded spinner subshell couldn't propagate it), advancing a

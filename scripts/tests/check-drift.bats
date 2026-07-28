@@ -90,18 +90,38 @@ YAML
 }
 
 # ── Check 4: preflight download-host parity (#416) ───────────────────────────
-# hosts are newline-delimited via $'...' (not space-split) so the fixture writes
-# one host per line regardless of the test runner's IFS.
-@test "preflight hosts: both installers list the shared set -> no drift (#416)" {
-  local hosts=$'registry-1.docker.io\nauth.docker.io\nghcr.io\ndl.k8s.io\nget.helm.sh\ngithub.com\nobjects.githubusercontent.com\ndesktop.docker.com\ntracebloc.github.io'
-  printf '%s\n' "$hosts" >> "$ROOT/scripts/lib/preflight.sh"
-  printf '%s\n' "$hosts" >> "$ROOT/scripts/install-k8s.ps1"
+# The check extracts hosts from PROBE URLs only — bash "label|https://host/…" and
+# ps1 url = "https://host/…" — so the fixtures must write real probe entries (an
+# explicit array iterates regardless of the runner's IFS).
+@test "preflight hosts: both installers probe the shared set as URLs -> no drift (#416)" {
+  local shared=(registry-1.docker.io auth.docker.io ghcr.io dl.k8s.io get.helm.sh github.com objects.githubusercontent.com desktop.docker.com) h
+  for h in "${shared[@]}"; do
+    printf '  "L (%s)|https://%s/"\n'  "$h" "$h" >> "$ROOT/scripts/lib/preflight.sh"
+    printf '    url = "https://%s/"\n' "$h"      >> "$ROOT/scripts/install-k8s.ps1"
+  done
   _drift=0; _drift_preflight_hosts >/dev/null; [ "$_drift" -eq 0 ]
 }
 
-@test "preflight hosts: a host in bash but missing from ps1 -> drift (#416)" {
-  local hosts=$'registry-1.docker.io\nauth.docker.io\nghcr.io\ndl.k8s.io\nget.helm.sh\ngithub.com\nobjects.githubusercontent.com\ndesktop.docker.com\ntracebloc.github.io'
-  printf '%s\n' "$hosts" >> "$ROOT/scripts/lib/preflight.sh"
-  printf '%s\n' "$hosts" | grep -v '^dl\.k8s\.io$' >> "$ROOT/scripts/install-k8s.ps1"
+@test "preflight hosts: a probe URL missing from ps1 -> drift (#416)" {
+  local shared=(registry-1.docker.io auth.docker.io ghcr.io dl.k8s.io get.helm.sh github.com objects.githubusercontent.com desktop.docker.com) h
+  for h in "${shared[@]}"; do
+    printf '  "L (%s)|https://%s/"\n' "$h" "$h" >> "$ROOT/scripts/lib/preflight.sh"
+    [[ "$h" == "dl.k8s.io" ]] || printf '    url = "https://%s/"\n' "$h" >> "$ROOT/scripts/install-k8s.ps1"
+  done
+  _drift=0; _drift_preflight_hosts >/dev/null 2>&1; [ "$_drift" -ge 1 ]
+}
+
+@test "preflight hosts: a host present only in a COMMENT/hint is NOT counted -> drift (reviewer #416)" {
+  # The whole-file grep this replaced would pass here; the URL-extracting check
+  # must still flag dl.k8s.io because it's no longer in a probe URL on the ps1 side.
+  local shared=(registry-1.docker.io auth.docker.io ghcr.io dl.k8s.io get.helm.sh github.com objects.githubusercontent.com desktop.docker.com) h
+  for h in "${shared[@]}"; do
+    printf '  "L (%s)|https://%s/"\n' "$h" "$h" >> "$ROOT/scripts/lib/preflight.sh"
+    if [[ "$h" == "dl.k8s.io" ]]; then
+      printf '  # kubectl comes from dl.k8s.io\n  Hint "allow HTTPS egress to dl.k8s.io"\n' >> "$ROOT/scripts/install-k8s.ps1"
+    else
+      printf '    url = "https://%s/"\n' "$h" >> "$ROOT/scripts/install-k8s.ps1"
+    fi
+  done
   _drift=0; _drift_preflight_hosts >/dev/null 2>&1; [ "$_drift" -ge 1 ]
 }

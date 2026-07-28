@@ -127,6 +127,17 @@ setup() {
   [[ "$output" == *"auth.docker.io) unreachable"* ]]
 }
 
+@test "_pf_connectivity: macOS hard-probes formulae.brew.sh when a brew tool is absent (reviewer #416)" {
+  # brew install pulls formula metadata from formulae.brew.sh even when brew is
+  # already present — so a blocked metadata host must fail preflight, not the install.
+  _pf_probe_url() { case "$1" in *formulae.brew.sh*) echo blocked ;; *) echo ok ;; esac; }
+  has() { case "$1" in curl|brew|docker) return 0 ;; *) return 1 ;; esac; }  # brew+docker present, kubectl/k3d/helm absent
+  OS=Darwin
+  run _pf_connectivity
+  [[ "$output" == *"formulae.brew.sh) unreachable"* ]]
+  PF_HARD_FAIL=0; _pf_connectivity >/dev/null 2>&1; [ "$PF_HARD_FAIL" -ge 1 ]
+}
+
 @test "_pf_connectivity: macOS hard-probes github.com for the Homebrew clone when brew absent (Bugbot #416)" {
   # install_homebrew git-clones Homebrew/brew from github.com after fetching the
   # script from raw.githubusercontent.com — both must be reachable.
