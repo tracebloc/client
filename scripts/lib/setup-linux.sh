@@ -807,10 +807,23 @@ install_rootless_docker() {
     rm -f "$rootless_script"
   fi
 
+  # The rootless installer drops the Docker CLI + daemon binaries in ~/bin (its
+  # default target); prepend it so THIS run's `docker info` verify and later k3d /
+  # docker calls resolve them. Without it the get.docker.com/rootless fallback
+  # (taken exactly when dockerd-rootless-setuptool.sh is absent) installs docker
+  # off-PATH and every later call fails as if the daemon never came up (Bugbot).
+  # Idempotent, and a no-op on the setuptool path where docker is already on PATH.
+  case ":$PATH:" in *":$HOME/bin:"*) ;; *) export PATH="$HOME/bin:$PATH" ;; esac
+
   # Start the user daemon and make it survive logout / return after reboot without
-  # an active login session — both user-scoped, no root.
-  systemctl --user enable --now docker
-  loginctl enable-linger "$USER"
+  # an active login session — both user-scoped, no root. Neither is fatal: the
+  # bounded `docker info` verify below is the real gate, so a systemctl hiccup
+  # falls through to actionable guidance instead of a bare set -e abort (mirrors
+  # install_docker_engine's start-then-verify). Linger is optional and can fail on
+  # polkit-locked hosts even when the daemon is up, so it only warns (Bugbot).
+  systemctl --user enable --now docker || true
+  loginctl enable-linger "$USER" \
+    || warn "Couldn't enable linger (optional) — the rootless daemon may not survive logout. Enable it later with:  loginctl enable-linger ${USER}"
 
   # Point every later docker/k3d call in this run at the rootless socket. docker and
   # k3d both read DOCKER_HOST from the environment, so exporting it is sufficient
@@ -820,10 +833,12 @@ install_rootless_docker() {
   export DOCKER_HOST="unix://${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/docker.sock"
 
   # Confirm the rootless daemon actually answers on that socket before handing off
-  # to the tools / cluster. On failure, surface the daemon's own error and stop —
-  # no retry loop (a rootless bring-up failure is a prerequisite problem, not a race).
-  if ! docker info >/dev/null 2>&1; then
-    docker info || true
+  # to the tools / cluster. Bound it (installer rule) so a wedged user daemon can't
+  # hang a headless install; on failure surface the daemon's own (bounded) error and
+  # stop — no retry loop (a rootless bring-up failure is a prerequisite problem, not
+  # a race).
+  if ! _bounded 15 docker info >/dev/null 2>&1; then
+    _bounded 15 docker info || true
     error "Rootless Docker didn't come up on ${DOCKER_HOST} (daemon output above). See https://docs.docker.com/engine/security/rootless/ for kernel/uidmap prerequisites."
   fi
   success "Rootless Docker is running as ${USER} — no administrator rights were used."

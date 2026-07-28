@@ -921,6 +921,30 @@ _stub_install_steps() {
   [ "$DOCKER_HOST" = "unix:///run/user/1000/docker.sock" ]
 }
 
+@test "install_rootless_docker: prepends ~/bin so the rootless CLI resolves (get.docker.com fallback) (Bugbot)" {
+  MOCK_CALLS="$(mktemp)"
+  PRESENT_CMDS="curl newuidmap newgidmap docker"       # no setuptool -> get.docker.com/rootless installs to ~/bin
+  XDG_RUNTIME_DIR=/run/user/1000
+  HOME="$BATS_TEST_TMPDIR"
+  curl_secure() { record "curl_secure $*"; return 0; } # no network
+  systemctl()   { :; }
+  loginctl()    { :; }
+  install_rootless_docker
+  case ":$PATH:" in *":$HOME/bin:"*) : ;; *) return 1 ;; esac   # ~/bin now on PATH for the run
+}
+
+@test "install_rootless_docker: systemd/linger failure falls through to the verify, not a bare abort (Bugbot)" {
+  MOCK_CALLS="$(mktemp)"
+  PRESENT_CMDS="newuidmap newgidmap dockerd-rootless-setuptool.sh docker"
+  XDG_RUNTIME_DIR=/run/user/1000
+  HOME="$BATS_TEST_TMPDIR"
+  systemctl() { return 1; }                            # user-systemd refuses
+  loginctl()  { return 1; }                            # linger blocked (polkit-locked)
+  docker()    { return 0; }                            # ...but the daemon is actually up
+  install_rootless_docker                              # must reach the export + verify, not set -e abort
+  [ "$DOCKER_HOST" = "unix:///run/user/1000/docker.sock" ]
+}
+
 # ── _set_tools_target: Tier 0 tools must NOT sudo (Bugbot #1175) ─────────────
 @test "_set_tools_target: Tier 0 => ~/.local/bin, no sudo, on PATH" {
   INSTALL_TIER=0; HOME="$BATS_TEST_TMPDIR"

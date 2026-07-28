@@ -175,6 +175,17 @@ assert_tool_runs() {
   error "$name was installed but won't run — a corrupt or wrong-architecture binary (this machine is ${ARCH:-$(uname -m)}). Re-run the installer to re-download it; if it recurs, remove ${rm_path:-the $name on your PATH} (and any package-manager copy) first."
 }
 
+# _bounded SECONDS CMD… — run CMD under timeout(1)/gtimeout(1) when either is
+# present, else bare, so a wedged external call can't hang a headless install
+# (installer rule: every docker/kubectl/helm probe must be bounded). Returns CMD's
+# exit status (124 on timeout). Output is NOT redirected — the caller decides.
+_bounded() {
+  local t="$1"; shift
+  if   has timeout;  then timeout  "$t" "$@"
+  elif has gtimeout; then gtimeout "$t" "$@"
+  else "$@"; fi
+}
+
 # Sanitize a minutes-valued env override to a base-10 integer, else <default>.
 # The 10# base prefix matters: bash arithmetic reads a leading zero as octal,
 # so 08/09 would ABORT $(( … )) under set -e (mid-create, leaving a partial
