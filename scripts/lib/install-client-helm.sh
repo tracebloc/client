@@ -407,8 +407,20 @@ _reconcile_adopted_client() {
   # node-local (RFC-0003 Option C) has no hostPath dirs to pre-create.
   [[ "${TB_STORAGE_MODE:-hostpath}" != "node-local" ]] && _ensure_release_dirs "$_ns"
 
-  # Reconcile blocks too — same spinner treatment (RFC-0002 §2).
-  if ! spin_cmd "Reconciling the existing client…" helm "${_args[@]}"; then
+  # Reconcile blocks too — same spinner treatment (RFC-0002 §2), bounded so a
+  # wedged kube-apiserver can't hang it forever (#426).
+  local _helm_timeout_min
+  _helm_timeout_min="$(tb_minutes_or "${TB_HELM_TIMEOUT_MIN:-}" 10)"
+  local _helm_rc=0
+  spin_cmd_bounded "$(( _helm_timeout_min * 60 ))" "Reconciling the existing client…" helm "${_args[@]}" || _helm_rc=$?
+  if [[ "$_helm_rc" -ne 0 ]]; then
+    if [[ "$_helm_rc" -eq 124 ]]; then
+      # A SIGKILLed helm can leave the release wedged as pending-upgrade; the
+      # NEXT run then fails with "another operation is in progress" and no
+      # clue (Bugbot #442). Name the unwedge command now.
+      hint "If the next run reports 'another operation is in progress', unwedge the release first:"
+      hint "  helm -n $_ns rollback $_rel    (returns to the previous, working release)"
+    fi
     error "Reconcile of the existing client failed. Check the log for details: ${LOG_FILE:-}"
   fi
 
@@ -829,14 +841,27 @@ EOF
   [[ "${TB_STORAGE_MODE:-hostpath}" != "node-local" ]] && _ensure_release_dirs "$TB_NAMESPACE"
 
   # The chart install blocks ~10-15s (render + apply + image pull), so run it
-  # behind a spinner instead of a frozen terminal — spin_cmd streams helm output
-  # to $LOG_FILE and, on failure, tails the log to stderr. Honours RFC-0002 §2
-  # "progress on every wait".
-  if ! spin_cmd "Installing the tracebloc client…" \
+  # behind a spinner instead of a frozen terminal — spin_cmd_bounded streams
+  # helm output to $LOG_FILE and, on failure, tails the log to stderr. Honours
+  # RFC-0002 §2 "progress on every wait"; the deadline stops a wedged
+  # kube-apiserver from hanging the install forever (#426).
+  local _helm_timeout_min
+  _helm_timeout_min="$(tb_minutes_or "${TB_HELM_TIMEOUT_MIN:-}" 10)"
+  local _helm_rc=0
+  spin_cmd_bounded "$(( _helm_timeout_min * 60 ))" "Installing the tracebloc client…" \
     helm upgrade --install "$TB_NAMESPACE" "$chart_ref" \
     --namespace "$TB_NAMESPACE" \
     --create-namespace \
-    --values "$values_file"; then
+    --values "$values_file" || _helm_rc=$?
+  if [[ "$_helm_rc" -ne 0 ]]; then
+    if [[ "$_helm_rc" -eq 124 ]]; then
+      # A SIGKILLed helm can leave the release wedged as pending-install /
+      # pending-upgrade; the NEXT run then fails with "another operation is
+      # in progress" and no clue (Bugbot #442). Name the unwedge command now.
+      hint "If the next run reports 'another operation is in progress', unwedge the release first:"
+      hint "  first install:  helm -n $TB_NAMESPACE uninstall $TB_NAMESPACE    (removes only the half-installed release)"
+      hint "  upgrade:        helm -n $TB_NAMESPACE rollback $TB_NAMESPACE     (returns to the previous release)"
+    fi
     error "Client installation failed. Check the log for details: ${LOG_FILE:-}"
   fi
 
