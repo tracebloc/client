@@ -142,6 +142,16 @@ _pf_host_ncpu() {
 # Available (free) RAM right now, KB — Linux only (for the busy-shared-VM warn).
 _pf_avail_mem_kb() { awk '/^MemAvailable:/ {print $2}' /proc/meminfo 2>/dev/null; }
 
+# True on a macOS box with a real GUI login session — mirrors setup-macos.sh's
+# _has_gui_session (the branch that installs Docker Desktop from desktop.docker.com
+# vs. the headless branch that installs colima/docker via brew). /dev/console is
+# owned by the GUI user; on headless Macs (EC2/CI) it's "root" or empty. Used to
+# decide whether a missing docker means a brew install (→ formulae.brew.sh needed).
+_pf_has_gui_session() {
+  local u; u="$(stat -f '%Su' /dev/console 2>/dev/null || echo '')"
+  [[ -n "$u" && "$u" != "root" ]]
+}
+
 # Selectors: prefer the runtime view, fall back to the host. The checks (and the
 # bats numeric test) call these names; they always emit exactly one integer.
 _pf_total_mem_kb() { local v; v="$(_pf_runtime_mem_kb)"; [[ -n "$v" ]] && { echo "$v"; return 0; }; _pf_host_mem_kb; }
@@ -429,14 +439,15 @@ _pf_connectivity() {
     # git-clones Homebrew/brew + core from github.com — probe both (Bugbot #416).
     if ! has brew; then criticals+=("Homebrew install (raw.githubusercontent.com)|https://raw.githubusercontent.com/" \
                                     "Homebrew clone (github.com)|https://github.com/"); fi
-    # `brew install kubectl/k3d/helm` pulls formula METADATA from formulae.brew.sh
-    # — bottles come from ghcr.io (probed above), but the metadata host is separate
-    # and is hit even when brew is already installed. A blocked formulae.brew.sh =
-    # green preflight then a failed `brew install` (reviewer, #416). Trigger only on
-    # the tools that ALWAYS install via brew — NOT docker: on a GUI Mac docker comes
-    # from Docker Desktop (desktop.docker.com), so `! has docker` alone would
-    # hard-fail formulae.brew.sh on an install that never runs brew (Bugbot).
-    if ! has kubectl || ! has k3d || ! has helm; then
+    # `brew install` pulls formula METADATA from formulae.brew.sh — bottles come
+    # from ghcr.io (probed above), but the metadata host is separate and is hit even
+    # when brew is already installed. A blocked formulae.brew.sh = green preflight
+    # then a failed `brew install` (reviewer, #416). kubectl/k3d/helm ALWAYS install
+    # via brew. docker is path-dependent: a GUI Mac installs Docker Desktop from
+    # desktop.docker.com (no brew — probing formulae would false-fail, Bugbot r3),
+    # but a HEADLESS Mac installs colima/docker via brew (formulae IS needed,
+    # Bugbot r4). So add docker to the trigger only when there's no GUI session.
+    if ! has kubectl || ! has k3d || ! has helm || { ! has docker && ! _pf_has_gui_session; }; then
       criticals+=("Homebrew formulae (formulae.brew.sh)|https://formulae.brew.sh/")
     fi
     if ! has docker; then soft+=("Docker Desktop (desktop.docker.com)|https://desktop.docker.com/"); fi
