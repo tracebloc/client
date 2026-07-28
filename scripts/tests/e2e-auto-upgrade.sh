@@ -134,12 +134,14 @@ helm install "$NS" "${REPO_NAME}/client" --version "$PREV" \
   --set storageClass.provisioner=rancher.io/local-path
 
 # The baseline (published) release's computed prod-ingestor pin, if any. This
-# decides which era path 1 asserts: releases published before client#398 have
-# no images.ingestor.prodDigest to replay (the pin must NOT arrive via
-# --reuse-values), while releases since client#383 carry it in their computed
+# decides which era path 1 asserts. The boundary is the #383 promotion
+# (2026-07-27) — the first PUBLISHED chart release to carry the
+# images.ingestor.prodDigest default that #398 added to the chart source.
+# Baselines published before it have no pin to replay (the pin must NOT
+# arrive via --reuse-values); baselines since carry it in their computed
 # values (the SAME pin must be replayed verbatim). Read it from the release,
 # not from a date or version compare, so the test is correct in both eras.
-# jq is preinstalled on the stock runners.
+# jq is guarded in the preflight above.
 BASELINE_PROD_DIGEST="$(helm get values "$NS" -n "$NS" --all -o json \
   | jq -r '.images.ingestor.prodDigest // ""')"
 echo "   baseline prod ingestor pin: ${BASELINE_PROD_DIGEST:-<none — pre-pin era>}"
@@ -195,8 +197,9 @@ DEPLOYED="$(helm list -n "$NS" --filter "^${NS}\$" -o yaml \
 # pin and the local chart default coincide only while nobody has bumped the
 # pin. If a pin bump makes them differ, the assertion below fails — and that
 # failure is a real signal, not test noise: an edge that was ever hand-upgraded
-# with --reuse-values stops receiving chart pin updates the same way. Decide
-# then whether to isolate path 2 from path 1 or fix the replay contamination.
+# with --reuse-values stops receiving chart pin updates the same way. Tracked
+# in client#459 — the first prodDigest bump trips this deliberately; decide
+# there whether to isolate path 2 from path 1 or fix the replay contamination.
 WANT_DIGEST="$(local_prod_digest)"
 [ -n "$WANT_DIGEST" ] \
   || fail "images.ingestor.prodDigest is empty in the working-tree chart — prod would silently lose its reproducibility pin"
