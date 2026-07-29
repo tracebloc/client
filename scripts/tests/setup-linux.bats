@@ -942,6 +942,21 @@ _stub_install_steps() {
   [ "$DOCKER_HOST" = "unix:///run/user/1000/docker.sock" ]
 }
 
+@test "install_rootless_docker: success line is honest about the admin touch (#458)" {
+  PRESENT_CMDS="newuidmap newgidmap dockerd-rootless-setuptool.sh docker"
+  XDG_RUNTIME_DIR=/run/user/1000; HOME="$BATS_TEST_TMPDIR"
+  systemctl() { :; }; loginctl() { :; }
+  # Zero-root path (gate didn't touch sudo): claims no admin rights.
+  MOCK_CALLS="$(mktemp)"; unset TB_ROOTLESS_ADMIN_TOUCH
+  run install_rootless_docker
+  [[ "$output" == *"no administrator rights were used"* ]]
+  # Sudo-touch path (gate provisioned the range with sudo): must NOT claim zero-root.
+  MOCK_CALLS="$(mktemp)"; TB_ROOTLESS_ADMIN_TOUCH=1
+  run install_rootless_docker
+  [[ "$output" != *"no administrator rights were used"* ]]
+  [[ "$output" == *"one-time admin step"* ]]
+}
+
 # ── _ensure_subid_ranges: the Tier-1 subuid/subgid gate (RFC 0001 #1220) ─────
 @test "_ensure_subid_ranges: present => proceeds with zero privileged calls" {
   MOCK_CALLS="$(mktemp)"
@@ -1086,11 +1101,16 @@ _stub_install_steps() {
   ! mock_calls | grep -q "tee -a"
 }
 
-@test "_install_uidmap_pkg: apt-get distro installs the 'uidmap' package" {
+@test "_install_uidmap_pkg: apt-get distro installs 'uidmap' via the hardened PM_INSTALL (no bare apt hang, #458)" {
   MOCK_CALLS="$(mktemp)"
   PRESENT_CMDS="apt-get"
+  unset PM_INSTALL PM_UPDATE            # Tier-1 skips setup_pm; force the real populate-then-install path
   _install_uidmap_pkg
-  mock_calls | grep -q "apt-get install -y uidmap"
+  run mock_calls
+  [[ "$output" == *"apt-get install"* ]]
+  [[ "$output" == *"uidmap"* ]]
+  [[ "$output" == *"NEEDRESTART_MODE=a"* ]]            # needrestart guard (no spinner hang)
+  [[ "$output" == *"DPkg::Lock::Timeout="* ]]          # bounded dpkg-lock wait (#210)
 }
 
 # ── _set_tools_target: Tier 0 tools must NOT sudo (Bugbot #1175) ─────────────

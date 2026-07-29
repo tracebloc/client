@@ -846,7 +846,14 @@ install_rootless_docker() {
     _bounded 15 docker info || true
     error "Rootless Docker didn't come up on ${DOCKER_HOST} (daemon output above). See https://docs.docker.com/engine/security/rootless/ for kernel/uidmap prerequisites."
   fi
-  success "Rootless Docker is running as ${_user} — no administrator rights were used."
+  # Be honest about privilege: _ensure_subid_ranges may have used one announced sudo
+  # touch (subuid range / uidmap install) on the root/sudo_nopw path. Only claim
+  # "no administrator rights" on the true zero-root path (Bugbot #458).
+  if [ "${TB_ROOTLESS_ADMIN_TOUCH:-0}" = "1" ]; then
+    success "Rootless Docker is running as ${_user} — one one-time admin step set up the subuid/subgid range; the daemon itself runs rootless."
+  else
+    success "Rootless Docker is running as ${_user} — no administrator rights were used."
+  fi
 }
 
 # _ensure_subid_ranges — RFC 0001 #1220 (Tier 1). The ONE spot a modern rootless
@@ -881,6 +888,9 @@ _ensure_subid_ranges() {
       # each caller decides — self-review, client#458.)
       _provision_subid_ranges "$_user" \
         || error "Couldn't set up the subuid/subgid prerequisites for '${_user}' (see the warning above) — an administrator must prepare this host, then re-run."
+      # Record that this path used one privileged (sudo) touch, so the final summary
+      # doesn't falsely claim "no administrator rights were used" (Bugbot #458).
+      TB_ROOTLESS_ADMIN_TOUCH=1
       ;;
     *)
       # Unprivileged (no_sudo, or sudo_pw we choose not to prompt) → HAND OFF, never
@@ -975,13 +985,22 @@ _provision_subid_ranges() {
 # package on Debian/Ubuntu, `shadow-utils` on the RHEL family, `shadow` elsewhere.
 # One announced privileged step.
 _install_uidmap_pkg() {
-  if   has apt-get; then spin_cmd "Installing uidmap helpers…" sudo apt-get install -y uidmap
-  elif has dnf;     then spin_cmd "Installing uidmap helpers…" sudo dnf install -y shadow-utils
-  elif has yum;     then spin_cmd "Installing uidmap helpers…" sudo yum install -y shadow-utils
-  elif has zypper;  then spin_cmd "Installing uidmap helpers…" sudo zypper install -y shadow
-  elif has pacman;  then spin_cmd "Installing uidmap helpers…" sudo pacman -S --noconfirm shadow
-  else warn "Couldn't determine how to install the uidmap helpers on this distro — install newuidmap/newgidmap manually."
+  local pkg
+  if   has apt-get;              then pkg=uidmap
+  elif has dnf || has yum;       then pkg=shadow-utils
+  elif has zypper || has pacman; then pkg=shadow
+  else
+    warn "Couldn't determine how to install the uidmap helpers on this distro — install newuidmap/newgidmap manually."
+    return 0
   fi
+  # Use the repo's hardened install command (PM_INSTALL: needrestart/DEBIAN_FRONTEND
+  # env + DPkg::Lock::Timeout), not a bare `apt-get` — under the spinner on Ubuntu a
+  # bare install hangs on a needrestart prompt or an apt-daily lock (Bugbot #458, same
+  # class as #210). The Tier-1 path skips setup_pm, so populate PM_INSTALL here.
+  [ -n "${PM_INSTALL:-}" ] || setup_pm
+  apt_wait_for_lock
+  # shellcheck disable=SC2086  # PM_INSTALL is a command line that must word-split
+  spin_cmd "Installing uidmap helpers…" $PM_INSTALL "$pkg"
 }
 
 install_linux() {
