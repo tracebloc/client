@@ -186,7 +186,44 @@ _drift_cli_contract() {
   fi
 }
 
-# ── Check 4: preflight probes the same download hosts on both installers ─────
+# ── Check 4: every installer execute-gates every tool (#411) ─────────────────
+# The post-install "check" used to be a log-only interpolation that masked a
+# corrupt/wrong-arch binary until cluster-create. All installers now RUN each tool
+# (assert_tool_runs on bash, Assert-ToolRuns on PowerShell). If an installer drops
+# the gate for a tool, the "green System tools then dies in Step 2" bug reopens on
+# that OS — catch it here rather than in the field.
+# Match the actual gate CALL, never a whole-file grep: strip comment lines first,
+# then require the tool's own version-check invocation — `assert_tool_runs … <t>
+# version` (the optional `--rm <path>` sits between and is ignored) on bash,
+# `Assert-ToolRuns -Name "<t>"` on ps1. A commented-out or merely-mentioned gate no
+# longer satisfies the check (reviewer: parity checks must extract structured calls).
+# NOTE: no `grep -q` — under main()'s `set -o pipefail` a -q that closes the pipe
+# early makes the upstream grep exit on SIGPIPE (141), failing the pipeline even on
+# a match. Read to EOF and redirect instead.
+_drift_gate_bash() { grep -vE '^[[:space:]]*#' "$1" 2>/dev/null | grep -F assert_tool_runs | grep -E "(^| )$2 version" >/dev/null 2>&1; }
+_drift_gate_ps1()  { grep -vE '^[[:space:]]*#' "$1" 2>/dev/null | grep -E "Assert-ToolRuns -Name \"$2\"" >/dev/null 2>&1; }
+_drift_execute_gates() {
+  echo "▸ Tool execute-gate parity (setup-linux.sh · setup-macos.sh · install-k8s.ps1)"
+  local before=$_drift f t
+  local bash_files=( scripts/lib/setup-linux.sh scripts/lib/setup-macos.sh )
+  for f in "${bash_files[@]}"; do
+    if [[ ! -f "$DRIFT_ROOT/$f" ]]; then _note "$f is missing"; continue; fi
+    for t in kubectl k3d helm; do
+      _drift_gate_bash "$DRIFT_ROOT/$f" "$t" || \
+        _note "$f: no execute-gate call for '$t' (assert_tool_runs … $t version) — #411"
+    done
+  done
+  local ps1="scripts/install-k8s.ps1"
+  if [[ ! -f "$DRIFT_ROOT/$ps1" ]]; then _note "$ps1 is missing"; fi
+  for t in kubectl k3d helm; do
+    _drift_gate_ps1 "$DRIFT_ROOT/$ps1" "$t" || \
+      _note "$ps1: no execute-gate call for '$t' (Assert-ToolRuns -Name \"$t\") — #411"
+  done
+  if [[ "$_drift" -eq "$before" ]]; then _ok "all installers execute-gate kubectl / k3d / helm"; fi
+  return 0
+}
+
+# ── Check 5: preflight probes the same download hosts on both installers ─────
 # preflight.sh (Linux/macOS) and install-k8s.ps1 (Windows) each probe the hosts
 # the install fetches from (#416). A host added to one installer but not the other
 # silently reopens the "green preflight, blocked download 30s later" gap on
@@ -234,6 +271,7 @@ main() {
   _drift_backend_hosts
   _drift_workload_names
   _drift_cli_contract
+  _drift_execute_gates
   _drift_preflight_hosts
   echo "─────────────────────────────────────────────────────────────"
   if [[ "$_drift" -gt 0 ]]; then

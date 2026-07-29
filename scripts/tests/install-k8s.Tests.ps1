@@ -1469,6 +1469,62 @@ Describe "Docker engine wait calibration (#413)" {
   }
 }
 
+Describe "Assert-ToolRuns execute-gate (#411)" {
+  BeforeEach {
+    Mock Err             { throw "ERR: $args" }
+    Mock Get-WindowsArch { "amd64" }
+  }
+
+  It "passes when the tool runs (exit 0), no throw" {
+    Mock k3d { $global:LASTEXITCODE = 0; "k3d version v5.9.0" }
+    { Assert-ToolRuns -Name "k3d" -VersionArgs @("version") } | Should -Not -Throw
+  }
+
+  It "a non-zero exit -> hard fail (Err)" {
+    Mock k3d { $global:LASTEXITCODE = 1; "boom" }
+    { Assert-ToolRuns -Name "k3d" -VersionArgs @("version") } | Should -Throw "*ERR:*"
+  }
+
+  It "an unrunnable binary (exception) -> hard fail (Err)" {
+    Mock k3d { throw "is not a valid application for this OS platform" }
+    { Assert-ToolRuns -Name "k3d" -VersionArgs @("version") } | Should -Throw "*ERR:*"
+  }
+
+  It "removes the dropped binary on failure when it's the one that ran" {
+    Mock k3d { $global:LASTEXITCODE = 1 }
+    $bin = Join-Path $TestDrive "k3d.exe"; "x" | Set-Content $bin
+    Mock Get-Command { [pscustomobject]@{ Source = $bin } } -ParameterFilter { $Name -eq 'k3d' }
+    { Assert-ToolRuns -Name "k3d" -VersionArgs @("version") -BinPath $bin } | Should -Throw
+    Test-Path $bin | Should -BeFalse
+  }
+
+  It "does NOT remove BinPath when the failing binary resolved elsewhere (winget/present)" {
+    Mock k3d { $global:LASTEXITCODE = 1 }
+    $bin = Join-Path $TestDrive "k3d.exe"; "x" | Set-Content $bin
+    Mock Get-Command { [pscustomobject]@{ Source = "C:\winget\k3d.exe" } } -ParameterFilter { $Name -eq 'k3d' }
+    { Assert-ToolRuns -Name "k3d" -VersionArgs @("version") -BinPath $bin } | Should -Throw
+    Test-Path $bin | Should -BeTrue      # left alone — it isn't the binary that ran
+  }
+
+  It "the arch-aware remedy names the machine architecture" {
+    Mock k3d { $global:LASTEXITCODE = 1 }
+    { Assert-ToolRuns -Name "k3d" -VersionArgs @("version") } | Should -Throw "*amd64*"
+  }
+}
+
+Describe "System-tool installs are execute-gated (#411)" {
+  BeforeAll { $script:raw = Get-Content "$PSScriptRoot/../install-k8s.ps1" -Raw }
+  It "gates kubectl, k3d, and helm" {
+    $script:raw | Should -Match 'Assert-ToolRuns -Name "kubectl"'
+    $script:raw | Should -Match 'Assert-ToolRuns -Name "k3d"'
+    $script:raw | Should -Match 'Assert-ToolRuns -Name "helm"'
+  }
+  It "no longer masks a broken tool with a non-terminating version Log interpolation" {
+    $script:raw | Should -Not -Match 'Log "k3d: \$\('
+    $script:raw | Should -Not -Match 'Log "helm: \$\('
+  }
+}
+
 Describe "Preflight download-host probing (#416)" {
   # Isolate the connectivity section: everything else reports healthy so only the
   # host probes decide the outcome. Err throws so a hard fail is observable.
