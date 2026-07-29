@@ -1754,3 +1754,45 @@ Describe "GPU container toolkit — progress + honest remedies (#415)" {
     }
   }
 }
+
+Describe "Enable-OneVirtFeature -- translated DISM failures, honest reboot flag (#468)" {
+  BeforeAll {
+    # DISM cmdlets don't exist off-Windows; Pester can only Mock an existing
+    # command, so define an advanced-function stub (it must accept -ErrorAction).
+    function Enable-WindowsOptionalFeature {
+      [CmdletBinding()]
+      param([switch]$Online, [string]$FeatureName, [switch]$NoRestart)
+    }
+  }
+  BeforeEach {
+    Mock Log  {}
+    Mock Warn {}
+    Mock Hint {}
+  }
+  It "already-enabled feature: no DISM call, no reboot demanded" {
+    Mock Enable-WindowsOptionalFeature {}
+    Enable-OneVirtFeature -Key 'VirtualMachinePlatform' -Label 'VMP' -CurrentState 'Enabled' -Edition 'Pro' |
+      Should -BeFalse
+    Should -Invoke Enable-WindowsOptionalFeature -Times 0
+  }
+  It "newly enabled feature: reports reboot-pending" {
+    Mock Enable-WindowsOptionalFeature {}
+    Enable-OneVirtFeature -Key 'VirtualMachinePlatform' -Label 'VMP' -CurrentState 'Disabled' -Edition 'Pro' |
+      Should -BeTrue
+  }
+  It "feature package ABSENT on this edition (Server SKU): translated skip, no raw COMException, no reboot" {
+    Mock Enable-WindowsOptionalFeature { throw [System.Runtime.InteropServices.COMException]::new("0x800f080c") }
+    { Enable-OneVirtFeature -Key 'Microsoft-Hyper-V-All' -Label 'Hyper-V' -CurrentState $null -Edition 'Server 2022' } |
+      Should -Not -Throw
+    Enable-OneVirtFeature -Key 'Microsoft-Hyper-V-All' -Label 'Hyper-V' -CurrentState $null -Edition 'Server 2022' |
+      Should -BeFalse
+    Should -Invoke Warn -ParameterFilter { $m -like '*not available on this Windows edition*' }
+  }
+  It "feature present but enable FAILS: translated warning + manual hint, no reboot loop" {
+    Mock Enable-WindowsOptionalFeature { throw [System.Runtime.InteropServices.COMException]::new("0x80070005") }
+    Enable-OneVirtFeature -Key 'Microsoft-Hyper-V-All' -Label 'Hyper-V' -CurrentState 'Disabled' -Edition 'Pro' |
+      Should -BeFalse
+    Should -Invoke Warn -ParameterFilter { $m -like 'Could not enable*' }
+    Should -Invoke Hint -ParameterFilter { $m -like "*Enable 'Microsoft-Hyper-V-All' manually*" }
+  }
+}

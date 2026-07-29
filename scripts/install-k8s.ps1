@@ -286,7 +286,7 @@ Advanced configuration (environment variables):
 
 Reinstalling on a machine that still holds data:
   A new install won't silently adopt data left under HOST_DATA_DIR (both the
-  flat and per-release layouts) — it stops and asks reuse / wipe / different dir.
+  flat and per-release layouts) -- it stops and asks reuse / wipe / different dir.
   Non-interactive: TB_LEFTOVER_ACTION=reuse|wipe, or HOST_DATA_DIR=<new-path>
   (with no choice and no terminal the install aborts). Bypass entirely with
   TRACEBLOC_SKIP_LEFTOVER_GUARD=1.
@@ -481,6 +481,40 @@ function Find-Gpu {
 #  WINDOWS VIRTUALISATION FEATURES
 # =============================================================================
 
+# Enable ONE Windows optional feature; returns $true only when the feature was
+# newly enabled (i.e. a reboot is now pending for it). DISM splashes a raw
+# COMException when a feature package simply doesn't exist on the running
+# edition (Server SKUs have no Microsoft-Hyper-V-All package) -- alarming red
+# noise on an otherwise honest flow, and the old code ALSO demanded a reboot
+# for a feature that never got enabled, sending those users into a reboot ->
+# re-run -> same-error loop (#468). Translate instead: name the real situation,
+# and only report reboot-pending on an actual state change.
+function Enable-OneVirtFeature {
+  param(
+    [string]$Key,           # DISM feature name, e.g. Microsoft-Hyper-V-All
+    [string]$Label,          # human name for messages, e.g. Hyper-V
+    $CurrentState,           # .State from Get-WindowsOptionalFeature ($null = package absent)
+    [string]$Edition         # OS caption, for the not-available message
+  )
+  if ($CurrentState -eq "Enabled") {
+    Log "$Label already enabled."
+    return $false
+  }
+  Log "Enabling $Label..."
+  try {
+    Enable-WindowsOptionalFeature -Online -FeatureName $Key -NoRestart -ErrorAction Stop | Out-Null
+    return $true
+  } catch {
+    if ($null -eq $CurrentState) {
+      Warn "$Label is not available on this Windows edition ($Edition) -- skipping."
+    } else {
+      Warn "Could not enable ${Label}: $($_.Exception.Message)"
+      Hint "Enable '$Key' manually (Windows Features / optionalfeatures.exe), then re-run this script."
+    }
+    return $false
+  }
+}
+
 function Enable-VirtualisationFeatures {
   $rebootNeeded = $false
   $features = @{
@@ -496,12 +530,8 @@ function Enable-VirtualisationFeatures {
 
   $features.GetEnumerator() | ForEach-Object {
     $state = (Get-WindowsOptionalFeature -Online -FeatureName $_.Key -ErrorAction SilentlyContinue).State
-    if ($state -ne "Enabled") {
-      Log "Enabling $($_.Value)..."
-      Enable-WindowsOptionalFeature -Online -FeatureName $_.Key -NoRestart | Out-Null
+    if (Enable-OneVirtFeature -Key $_.Key -Label $_.Value -CurrentState $state -Edition $edition) {
       $rebootNeeded = $true
-    } else {
-      Log "$($_.Value) already enabled."
     }
   }
 
