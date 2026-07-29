@@ -1318,6 +1318,22 @@ function New-K3dCluster {
       }
     } catch {}
 
+    # CA trust (like proxy / the dataset mount) is baked into the nodes at create
+    # time (mount + --registry-config). If a CA bundle is set but the existing
+    # cluster was created without it, reuse leaves in-node pulls failing x509 — so
+    # the "set the CA and re-run" remedy does nothing. Warn + point at recreate
+    # (Bugbot #424). Path mirrors New-K3dCluster's mount destination.
+    if ($env:TRACEBLOC_CA_BUNDLE -or $env:CURL_CA_BUNDLE) {
+      $caMounts = ""
+      try { $caMounts = (docker inspect "k3d-$CLUSTER_NAME-server-0" --format '{{range .Mounts}}{{println .Destination}}{{end}}' 2>$null | Out-String) } catch {}
+      if ($caMounts -and ($caMounts -notmatch '(?m)^/etc/ssl/certs/tracebloc-mitm-ca\.crt\s*$')) {
+        Warn "A CA bundle is set, but the existing '$CLUSTER_NAME' cluster was created without it."
+        Hint "k3d bakes CA trust into the nodes at create time -- it can't be added to a running cluster."
+        Hint "If in-cluster image pulls fail x509, recreate the cluster so the CA is applied:"
+        Hint "  k3d cluster delete $CLUSTER_NAME  (then re-run this installer)."
+      }
+    }
+
     # backend#743: the dataset bind mount (HOST_DATASET_DIR -> /tracebloc-data)
     # is baked into the k3d nodes at create time; k3d can't add it to a running
     # cluster. Re-using an existing cluster without it would point the chart's
@@ -2469,8 +2485,9 @@ function Print-Summary {
       Write-Host "  " -NoNewline; Write-Host "$([char]0x2716) Setup didn't finish - the cluster does not trust your network's TLS-inspection CA." -ForegroundColor Red
       Write-Host ""
       Write-Host "  Your network intercepts HTTPS (break-and-inspect), so the in-cluster image"
-      Write-Host "  pulls fail certificate validation (x509). Point the installer at your"
-      Write-Host "  corporate CA bundle so the nodes trust it, then re-run:"
+      Write-Host "  pulls fail certificate validation (x509). CA trust is baked in at"
+      Write-Host "  cluster-create, so delete the existing cluster first, then re-run with the CA:"
+      Write-Host "    k3d cluster delete $CLUSTER_NAME" -ForegroundColor Green
       Write-Host "    `$env:TRACEBLOC_CA_BUNDLE = 'C:\path\to\corporate-ca.pem'; irm https://tracebloc.io/i.ps1 | iex" -ForegroundColor Green
       Hint "(CURL_CA_BUNDLE is also honored.) Ask your IT team for the bundle if unsure."
       Write-Host "  Inspect:  " -NoNewline; Write-Host "kubectl get events -n $ns | Select-String x509" -ForegroundColor Green

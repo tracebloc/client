@@ -515,6 +515,7 @@ _handle_existing_cluster() {
   fi
 
   _check_existing_cluster_proxy
+  _check_existing_cluster_ca
   _check_existing_cluster_bind
   _check_existing_cluster_dataset_mount
   _check_existing_cluster_storage_mode
@@ -548,6 +549,27 @@ _check_existing_cluster_proxy() {
     warn "Host has proxy env set, but the existing '$CLUSTER_NAME' cluster is missing: ${missing[*]}."
     hint "k3d bakes proxy settings into containers at create time — they can't be added to a running cluster."
     hint "If image pulls fail or in-cluster traffic misroutes, recreate the cluster:"
+    hint "  k3d cluster delete $CLUSTER_NAME  &&  re-run this installer."
+    echo ""
+  fi
+}
+
+# CA trust, like proxy, is baked into the nodes at create time (the -v mount +
+# --registry-config). If the operator sets a CA bundle but the cluster already
+# exists WITHOUT it, a re-run reuses the cluster and the x509 pulls persist — so
+# the "set the CA and re-run" remedy silently does nothing. Warn and point at
+# recreate (Bugbot #424). The path mirrors _create_new_cluster's mount destination.
+_check_existing_cluster_ca() {
+  [[ -n "${TRACEBLOC_CA_BUNDLE:-}" || -n "${CURL_CA_BUNDLE:-}" ]] || return 0
+  local server_container="k3d-${CLUSTER_NAME}-server-0"
+  local mounts
+  mounts=$(docker inspect "$server_container" --format '{{range .Mounts}}{{println .Destination}}{{end}}' 2>/dev/null) || return 0
+  [[ -z "$mounts" ]] && return 0
+  if [[ "$mounts" != *"/etc/ssl/certs/tracebloc-mitm-ca.crt"* ]]; then
+    echo ""
+    warn "A CA bundle is set (TRACEBLOC_CA_BUNDLE/CURL_CA_BUNDLE), but the existing '$CLUSTER_NAME' cluster was created without it."
+    hint "k3d bakes CA trust into the nodes at create time — it can't be added to a running cluster."
+    hint "If in-cluster image pulls fail x509, recreate the cluster so the CA is applied:"
     hint "  k3d cluster delete $CLUSTER_NAME  &&  re-run this installer."
     echo ""
   fi

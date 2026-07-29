@@ -215,6 +215,30 @@ setup() {
   [[ "$output" == *"missing: HTTP_PROXY"* ]]
 }
 
+# ── _check_existing_cluster_ca (Bugbot #424 r4) ─────────────────────────────
+@test "_check_existing_cluster_ca: no CA var set -> no-op" {
+  unset TRACEBLOC_CA_BUNDLE CURL_CA_BUNDLE
+  docker() { echo "/should-not-be-read"; }
+  run _check_existing_cluster_ca
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+}
+
+@test "_check_existing_cluster_ca: CA set but existing cluster lacks the mount -> recreate warning" {
+  export TRACEBLOC_CA_BUNDLE="/some/ca.pem"
+  docker() { printf '/tracebloc\n/etc/ssl/certs/ca-certificates.crt\n'; }   # no mitm-ca mount
+  run _check_existing_cluster_ca
+  [[ "$output" == *"created without it"* ]]
+  [[ "$output" == *"k3d cluster delete"* ]]
+}
+
+@test "_check_existing_cluster_ca: CA set and mount present -> no warning" {
+  export TRACEBLOC_CA_BUNDLE="/some/ca.pem"
+  docker() { printf '/tracebloc\n/etc/ssl/certs/tracebloc-mitm-ca.crt\n'; }
+  run _check_existing_cluster_ca
+  [ -z "$output" ]
+}
+
 # ── _check_existing_cluster_dataset_mount (backend#743) ─────────────────────
 @test "_check_existing_cluster_dataset_mount: HOST_DATASET_DIR unset -> no-op" {
   unset HOST_DATASET_DIR
