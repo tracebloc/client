@@ -109,9 +109,27 @@ _ensure_kernel_modules() {
 # we wrote (tagged with a marker) so dockerd stops routing pulls through a dead
 # proxy, while a foreign http-proxy.conf is left untouched. (Linux/systemd only;
 # Docker Desktop on macOS manages its own proxy.)
+# SCOPE (RFC 0001 #1221): "system" (default) manages the host daemon's drop-in
+# under /etc/systemd/system with sudo — the original #244 behaviour, unchanged.
+# "user" manages the ROOTLESS daemon's drop-in under ~/.config/systemd/user with
+# NO sudo and `systemctl --user`. Slice 1's Tier-1 early-return never reaches the
+# system path, so on a proxy-only host the rootless daemon would pull rancher/k3s
+# with no proxy and time out; install_rootless_docker calls this with "user" to
+# fix that. One implementation, two scopes — no duplicated proxy logic.
 _configure_docker_proxy() {
   has systemctl || return 0                       # only systemd-managed Docker
-  local dir="${TB_DOCKER_DROPIN_DIR:-/etc/systemd/system/docker.service.d}"
+  local scope="${1:-system}"
+  local dir _sudo
+  local -a _sc                                    # systemctl invocation (never empty)
+  if [[ "$scope" == "user" ]]; then
+    dir="${TB_DOCKER_USER_DROPIN_DIR:-$HOME/.config/systemd/user/docker.service.d}"
+    _sudo=""                                       # user-scoped: no root
+    _sc=(systemctl --user)
+  else
+    dir="${TB_DOCKER_DROPIN_DIR:-/etc/systemd/system/docker.service.d}"
+    _sudo="sudo"
+    _sc=(sudo systemctl)
+  fi
   local conf="$dir/http-proxy.conf"
   local marker="# Managed by tracebloc installer (#244)"
 
@@ -125,11 +143,13 @@ _configure_docker_proxy() {
   # longer exists. Only touch our own file (identified by the marker); a
   # user/IT-managed http-proxy.conf is left alone.
   if [[ -z "$proxy" ]]; then
-    if [[ -f "$conf" ]] && sudo grep -qF "$marker" "$conf" 2>/dev/null; then
-      sudo rm -f "$conf"
-      sudo systemctl daemon-reload 2>/dev/null || true
-      if sudo systemctl is-active --quiet docker 2>/dev/null; then
-        spin_cmd "Removing stale Docker proxy settings…" sudo systemctl restart docker || true
+    # shellcheck disable=SC2086  # $_sudo is a deliberate optional prefix (empty in user scope)
+    if [[ -f "$conf" ]] && $_sudo grep -qF "$marker" "$conf" 2>/dev/null; then
+      # shellcheck disable=SC2086
+      $_sudo rm -f "$conf"
+      "${_sc[@]}" daemon-reload 2>/dev/null || true
+      if "${_sc[@]}" is-active --quiet docker 2>/dev/null; then
+        spin_cmd "Removing stale Docker proxy settings…" "${_sc[@]}" restart docker || true
       fi
       log "Removed stale tracebloc-managed Docker daemon proxy (no host proxy set)."
     fi
@@ -151,20 +171,24 @@ _configure_docker_proxy() {
   # Unchanged → leave dockerd alone (a restart would bounce a running cluster).
   # Compare with cmp, not "$(cat)" == , so a trailing newline isn't stripped by
   # command substitution (which would make the check always report "changed").
-  if [[ -f "$conf" ]] && printf '%s' "$desired" | sudo cmp -s - "$conf" 2>/dev/null; then
+  # shellcheck disable=SC2086
+  if [[ -f "$conf" ]] && printf '%s' "$desired" | $_sudo cmp -s - "$conf" 2>/dev/null; then
     log "Docker daemon proxy already configured."
     return 0
   fi
 
-  sudo mkdir -p "$dir"
-  printf '%s' "$desired" | sudo tee "$conf" >/dev/null
-  sudo systemctl daemon-reload 2>/dev/null || true
+  # shellcheck disable=SC2086
+  $_sudo mkdir -p "$dir"
+  # shellcheck disable=SC2086
+  printf '%s' "$desired" | $_sudo tee "$conf" >/dev/null
+  "${_sc[@]}" daemon-reload 2>/dev/null || true
   # Restart only if the daemon is already up; on a fresh install the start in
-  # install_docker_engine brings it up with the drop-in already in place.
-  if sudo systemctl is-active --quiet docker 2>/dev/null; then
-    spin_cmd "Applying Docker proxy settings…" sudo systemctl restart docker || true
+  # install_docker_engine (system) / install_rootless_docker (user) brings it up
+  # with the drop-in already in place.
+  if "${_sc[@]}" is-active --quiet docker 2>/dev/null; then
+    spin_cmd "Applying Docker proxy settings…" "${_sc[@]}" restart docker || true
   fi
-  log "Configured Docker daemon proxy for image pulls behind a corporate proxy (HTTP_PROXY=$proxy)."
+  log "Configured Docker daemon proxy (${scope} scope) for image pulls behind a corporate proxy (HTTP_PROXY=$proxy)."
 }
 
 # ── Docker Engine ────────────────────────────────────────────────────────────
@@ -352,7 +376,11 @@ install_system_deps() {
 # (user-owned) and put it on this process's PATH so create_cluster finds them.
 # Otherwise the system location, with sudo. Sets TB_TOOLS_DIR + TB_TOOLS_SUDO.
 _set_tools_target() {
-  if [ "${INSTALL_TIER:-}" = "0" ]; then
+  # Tier 0 (a usable runtime, no admin) AND rootless Tier 1 (#1221, possibly no root
+  # at all) both install user-space with NO sudo: a `sudo mv → /usr/local/bin` here
+  # would abort the rootless install under `set -e` AFTER the daemon is already up,
+  # leaving a half-install on a true no-sudo host (Asad review, #452).
+  if [ "${INSTALL_TIER:-}" = "0" ] || _rootless_active; then
     TB_TOOLS_DIR="${HOME}/.local/bin"
     TB_TOOLS_SUDO=""
     mkdir -p "$TB_TOOLS_DIR"
@@ -734,6 +762,39 @@ _persist_tools_on_path() {
   hint "Added ${HOME}/.local/bin to your PATH in ${rc} — open a new terminal (or run 'source ${rc}') so kubectl/k3d/helm resolve."
 }
 
+# _persist_docker_host — RFC 0001 #1221 (Tier 1). install_rootless_docker exports
+# DOCKER_HOST for THIS process only, and _persist_tools_on_path puts ~/.local/bin on
+# future shells' PATH — but without DOCKER_HOST persisted too, a new terminal (and
+# the tracebloc CLI it launches) can't reach the rootless socket (Asad review, #452).
+# Persist it to the same shell rc, idempotently. Best-effort; no-op off the rootless
+# path. The rc line keeps the ${XDG_RUNTIME_DIR:-…} expansion UNquoted-at-write so it
+# resolves per-session in the user's shell, not to this install's runtime dir.
+_persist_docker_host() {
+  _rootless_active || return 0
+  if [ "$(basename "${SHELL:-sh}")" = "fish" ]; then
+    hint "Point new shells at the rootless Docker socket:  set -Ux DOCKER_HOST \"unix://\$XDG_RUNTIME_DIR/docker.sock\""
+    return 0
+  fi
+  local rc; rc="$(_tools_rc_for_shell)"
+  local marker='# Added by tracebloc installer (RFC 0001 #1221): rootless Docker socket'
+  # Our own prior line → idempotent, nothing to do. Key this off OUR marker, not a
+  # bare 'DOCKER_HOST=' probe: that also matched a user's own DOCKER_HOST (e.g. a
+  # remote/TCP daemon) and made us silently skip — leaving new shells pointed at the
+  # wrong daemon while the install assumes rootless (Asad + Bugbot on #478).
+  if [ -f "$rc" ] && grep -qF "$marker" "$rc" 2>/dev/null; then return 0; fi
+  # A DOCKER_HOST the user set themselves → don't clobber it, but don't silently
+  # pretend we persisted the rootless socket either: warn so they know to repoint it.
+  if [ -f "$rc" ] && grep -qE '^[[:space:]]*(export[[:space:]]+)?DOCKER_HOST=' "$rc" 2>/dev/null; then
+    warn "Your ${rc} already sets DOCKER_HOST — left it untouched. If it isn't the rootless socket, new terminals and the tracebloc CLI won't reach the rootless daemon; point it at:  export DOCKER_HOST=\"unix://\$XDG_RUNTIME_DIR/docker.sock\""
+    return 0
+  fi
+  {
+    printf '\n%s\n' "$marker"
+    printf '%s\n' 'export DOCKER_HOST="unix://${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/docker.sock"'
+  } >> "$rc" 2>/dev/null || return 0
+  hint "Added DOCKER_HOST to ${rc} so new terminals reach the rootless Docker daemon."
+}
+
 # _install_userspace_tools — download kubectl / k3d / helm into the user's bin
 # (no root: install-cli-style ~/.local/bin fallback). Shared by the Tier-0 fast
 # path and the full flow so they can't drift. umask 077 (common.sh) would make
@@ -748,6 +809,7 @@ _install_userspace_tools() {
   install_helm
   umask "$_saved_umask"
   _persist_tools_on_path     # RFC 0001 #1175: keep ~/.local/bin on PATH for new shells (Bugbot #375)
+  _persist_docker_host       # RFC 0001 #1221: keep DOCKER_HOST resolving on rootless Tier 1 (self-gates; no-op otherwise)
 }
 
 # _tier0_gpu_flags — on Tier 0 we skip the privileged GPU driver/toolkit install,
@@ -812,13 +874,13 @@ install_rootless_docker() {
   # Idempotent, and a no-op on the setuptool path where docker is already on PATH.
   case ":$PATH:" in *":$HOME/bin:"*) ;; *) export PATH="$HOME/bin:$PATH" ;; esac
 
-  # TODO(#1221): configure a corporate-proxy drop-in for the ROOTLESS daemon before
-  # starting it — user-scoped ~/.config/systemd/user/docker.service.d/http-proxy.conf
-  # + `systemctl --user daemon-reload/restart`, NO sudo. The system path's
-  # _configure_docker_proxy (#244) is sudo/system-scoped and never runs on the
-  # Tier-1 early-return, so on a proxy-only host k3d pulls of rancher/k3s time out
-  # even though the daemon verified. Deferred to the k3d-on-rootless slice (#1221),
-  # which owns the pulls this enables and can test them together (Bugbot on #452).
+  # Give the ROOTLESS daemon the corporate proxy BEFORE it starts, user-scoped and
+  # with NO sudo (RFC 0001 #1221). The system path's _configure_docker_proxy (#244)
+  # is sudo/system-scoped and never runs on this Tier-1 early-return, so without it
+  # k3d pulls of rancher/k3s time out on a proxy-only host even though the daemon
+  # verified (Bugbot on #452). The drop-in must exist before the
+  # `systemctl --user enable --now docker` below picks it up.
+  _configure_docker_proxy user
 
   # Start the user daemon and make it survive logout / return after reboot without
   # an active login session — both user-scoped, no root. Neither is fatal: the
@@ -832,7 +894,8 @@ install_rootless_docker() {
 
   # Point every later docker/k3d call in this run at the rootless socket. docker and
   # k3d both read DOCKER_HOST from the environment, so exporting it is sufficient
-  # here; explicit create_cluster wiring is slice 3 (#1221). Guard XDG_RUNTIME_DIR,
+  # here; create_cluster re-asserts this same export (#1221) so a re-run that lost
+  # it still targets the socket. Guard XDG_RUNTIME_DIR,
   # which is unset on some non-login / systemd-less sessions → fall back to the
   # canonical /run/user/<uid> path rather than emitting a bare unix://docker.sock.
   export DOCKER_HOST="unix://${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/docker.sock"
@@ -850,7 +913,7 @@ install_rootless_docker() {
   # touch (subuid range / uidmap install) on the root/sudo_nopw path. Only claim
   # "no administrator rights" on the true zero-root path (Bugbot #458).
   if [ "${TB_ROOTLESS_ADMIN_TOUCH:-0}" = "1" ]; then
-    success "Rootless Docker is running as ${_user} — one one-time admin step set up the subuid/subgid range; the daemon itself runs rootless."
+    success "Rootless Docker is running as ${_user} — one or more one-time admin steps set up the host prerequisites (subuid/subgid range and/or cgroup delegation); the daemon itself runs rootless."
   else
     success "Rootless Docker is running as ${_user} — no administrator rights were used."
   fi
@@ -1042,14 +1105,17 @@ install_linux() {
   # install entirely in user space, mirroring the Tier-0 early-return above. Gated
   # behind the opt-in TB_TIER1_ROOTLESS until the spike's §5 host validation runs
   # (#1176) — with the flag unset, a Tier-1 host falls straight through to the
-  # legacy privileged flow below, which stays the validated default. NOTE: tools
-  # still install via sudo here — _install_userspace_tools keys its no-sudo path off
-  # Tier 0 only; tightening _set_tools_target for rootless Tier 1 is slice 3 (#1221).
-  if [ "${INSTALL_TIER:-}" = "1" ] && [ "${TB_TIER1_ROOTLESS:-0}" = "1" ]; then
+  # legacy privileged flow below, which stays the validated default. Tools install
+  # entirely user-space here (_set_tools_target routes rootless Tier 1 to
+  # ~/.local/bin, no sudo — #1221), so this branch stays root-free apart from the
+  # two announced prerequisite touches (_ensure_subid_ranges + _ensure_cgroup_
+  # delegation), each of which routes to prepare-host when unprivileged.
+  if _rootless_active; then
     info "Setting up a rootless container runtime — no administrator rights needed."
     _ensure_subid_ranges         # RFC 0001 #1220: the one narrow privileged residue — gated + announced, or handed off
+    _ensure_cgroup_delegation || true  # RFC 0001 #1221: delegate cpu/cpuset/io so pod CPU/mem limits enforce (best-effort; routes to prepare-host if unprivileged)
     install_rootless_docker
-    _install_userspace_tools     # tools still sudo-install on Tier 1 (see NOTE above; #1221 tightens); DOCKER_HOST exported for this run
+    _install_userspace_tools     # user-space, no sudo (_set_tools_target, #1221); also persists DOCKER_HOST for new shells
     _tier0_gpu_flags             # reuse an already-configured runtime only; no privileged driver install
     return 0
   fi
@@ -1062,6 +1128,86 @@ install_linux() {
   install_system_deps
   _install_userspace_tools
   dispatch_gpu_setup
+}
+
+# _write_cgroup_delegation — the shared, idempotent WRITE of the cgroup v2 controller
+# delegation drop-in, used by BOTH the sudo-available installer path
+# (_ensure_cgroup_delegation) and admin-run prepare-host (run_prepare_host). Always
+# writes with sudo; returns non-zero on failure so each caller decides how fatal it
+# is — mirroring _provision_subid_ranges. Path overridable (TB_USER_UNIT_DROPIN_DIR)
+# for tests.
+_write_cgroup_delegation() {
+  local dir="${TB_USER_UNIT_DROPIN_DIR:-/etc/systemd/system/user@.service.d}"
+  local conf="$dir/delegate.conf"
+  local marker="# Managed by tracebloc installer (RFC 0001 #1221)"
+  local desired
+  printf -v desired '%s\n[Service]\nDelegate=cpu cpuset io memory pids\n' "$marker"
+
+  # Unchanged → don't rewrite / daemon-reload (avoids churning the user manager).
+  if [[ -f "$conf" ]] && printf '%s' "$desired" | sudo cmp -s - "$conf" 2>/dev/null; then
+    log "cgroup delegation drop-in already present."
+    return 0
+  fi
+  # Guard the writes: callers run this with `set -e` relaxed (`|| true`, `if !`), so
+  # an unguarded failure would fall through to success and let the install proceed
+  # with pods that can't be given limits (the exact silent breakage this slice
+  # exists to prevent).
+  sudo mkdir -p "$dir" \
+    || { warn "Couldn't create ${dir} for the cgroup delegation drop-in."; return 1; }
+  printf '%s' "$desired" | sudo tee "$conf" >/dev/null \
+    || { warn "Couldn't write the cgroup delegation drop-in at ${conf}."; return 1; }
+  sudo systemctl daemon-reload 2>/dev/null || true
+  success "Delegated cpu/cpuset/io cgroup controllers (${conf}). A re-login may be needed for it to take effect."
+}
+
+# _ensure_cgroup_delegation — RFC 0001 #1221 (Tier 1). k3s inside the k3d node needs
+# the cpu/cpuset/io cgroup v2 controllers delegated to the user session to enforce
+# the pod CPU/memory limits our Helm chart sets. On cgroup v2 systemd delegates
+# memory+pids to user sessions by default but NOT cpu/cpuset/io; enabling those needs
+# a SYSTEM-level drop-in at /etc/systemd/system/user@.service.d/delegate.conf +
+# `daemon-reload` (systemd ≥ 244). That file is root-owned, so this is a SECOND named
+# privileged touch alongside slice 2's subuid/subgid line — routed by privilege
+# exactly as _ensure_subid_ranges routes that one; never blanket sudo, never opaque:
+#   • root/sudo_nopw → write it + daemon-reload (one announced touch, logged).
+#   • unprivileged   → hand off to prepare-host (#1178) with the exact path + content.
+# Non-fatal to the caller: unlike the subuid range (without which the daemon can't
+# start at all), a missing delegation still lets the cluster CREATE — it only breaks
+# once limit-bearing workloads schedule — so the Tier-1 branch calls this best-effort
+# and a no-sudo host gets a (degraded, clearly-warned) cluster rather than an abort.
+_ensure_cgroup_delegation() {
+  local dir="${TB_USER_UNIT_DROPIN_DIR:-/etc/systemd/system/user@.service.d}"
+  local conf="$dir/delegate.conf"
+  # Fast path: already delegated → no privileged call at all (an unprivileged read;
+  # the drop-in is world-readable under /etc).
+  if [[ -f "$conf" ]] && grep -qF 'Delegate=cpu cpuset io memory pids' "$conf" 2>/dev/null; then
+    log "cgroup delegation drop-in already present."
+    return 0
+  fi
+  case "${PROBE_PRIVILEGE:-no_sudo}" in
+    root | sudo_nopw)
+      info "Delegating cpu/cpuset/io cgroup controllers to your user session (one-time, needs admin)…"
+      if _write_cgroup_delegation; then
+        # Record the one privileged touch so the final summary doesn't falsely claim
+        # "no administrator rights were used" (Bugbot #458, same rule as subuid).
+        TB_ROOTLESS_ADMIN_TOUCH=1
+        return 0
+      fi
+      return 1
+      ;;
+    *)
+      # Unprivileged → HAND OFF, never silent-sudo, never opaque. Name what's missing
+      # and print the exact lines an admin can paste (mirrors _ensure_subid_ranges).
+      warn "Rootless pod CPU/memory limits need cgroup controller delegation that isn't set up on this host yet."
+      hint "Have an administrator prepare this host once (or run prepare-host), then re-run — or add it directly:"
+      hint "  sudo mkdir -p ${dir}"
+      hint "  sudo tee ${conf} <<'EOF'"
+      hint "  [Service]"
+      hint "  Delegate=cpu cpuset io memory pids"
+      hint "  EOF"
+      hint "  sudo systemctl daemon-reload"
+      return 1
+      ;;
+  esac
 }
 
 # run_prepare_host — the standalone, admin-run Tier-2 step (RFC 0001 #1178). An
@@ -1127,6 +1273,15 @@ run_prepare_host() {
   else
     hint "To let a non-admin user install at Tier 0, grant them docker-group access:"
     hint "  set TB_PREPARE_USER=<their-username> when running prepare-host, or run:  sudo usermod -aG docker <their-username>"
+  fi
+
+  # Write the cgroup controller delegation drop-in a rootless k3s cluster needs to
+  # enforce pod CPU/memory limits (RFC 0001 #1221). It's system-wide (user@.service),
+  # so writing it once here covers the researcher named above — this is the second
+  # half of the prepare-host contract alongside the subuid/subgid range. Best-effort:
+  # never fail the whole prep over it.
+  if ! _write_cgroup_delegation; then
+    warn "Couldn't write the cgroup delegation drop-in; a rootless install won't enforce pod limits until it's added (see above)."
   fi
 
   echo ""
