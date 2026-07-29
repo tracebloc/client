@@ -140,6 +140,41 @@ step_header()    { echo -e "  ${TB_HEADING}$1) $2${RESET}"; echo ""; }
 # ── Utility ──────────────────────────────────────────────────────────────────
 has() { command -v "$1" &>/dev/null; }
 
+# Execute-gate a freshly-installed tool (#411). The old post-install "check" was a
+# log-only interpolation (`... 2>/dev/null || echo present`) that masked failure,
+# so a corrupt or wrong-architecture binary — a partial pkg/brew install, or a
+# download no checksum path guarded — sat on PATH and failed only later, at
+# cluster-create, after a green "System tools". Actually RUN the tool's cheapest
+# self-check; on failure error() with an arch-aware remedy so the tool step fails
+# loudly instead. NOTE: kubectl is gated with `version --client` (NOT --short,
+# removed in kubectl 1.28+); helm with bare `version` (—short may go the same way).
+#
+# Removal is OPT-IN via a leading `--rm <path>`: pass it with the path where the
+# installer PLACES the binary (TB_TOOLS_DIR/<tool>). On failure we remove that path
+# ONLY when the binary that actually ran is that exact file (same inode, `-ef`).
+# So: a broken binary WE installed there (fresh OR left by a prior run) is cleared,
+# letting a re-run self-heal (Bugbot: otherwise `has` stays true → stuck loop);
+# but a brew/pkg-manager copy that lives elsewhere on PATH is never deleted — the
+# resolved binary won't match our path (reviewer). Callers may pass --rm on every
+# path; the `-ef` guard sorts out ownership. macOS/brew callers pass no --rm.
+# Usage: assert_tool_runs [--rm <placed-path>] <name> <version-arg>...
+assert_tool_runs() {
+  local rm_path=""
+  if [[ "${1:-}" == "--rm" ]]; then rm_path="$2"; shift 2; fi
+  local name="$1"; shift
+  local out
+  if out="$("$name" "$@" 2>&1)"; then
+    log "$name OK: $(printf '%s\n' "$out" | head -1)"
+    return 0
+  fi
+  # Remove only the file we placed AND only if it's the binary that just failed.
+  if [[ -n "$rm_path" && -f "$rm_path" ]]; then
+    local resolved; resolved="$(command -v "$name" 2>/dev/null || true)"
+    [[ -n "$resolved" && "$resolved" -ef "$rm_path" ]] && rm -f "$rm_path" 2>/dev/null || true
+  fi
+  error "$name was installed but won't run — a corrupt or wrong-architecture binary (this machine is ${ARCH:-$(uname -m)}). Re-run the installer to re-download it; if it recurs, remove ${rm_path:-the $name on your PATH} (and any package-manager copy) first."
+}
+
 # Sanitize a minutes-valued env override to a base-10 integer, else <default>.
 # The 10# base prefix matters: bash arithmetic reads a leading zero as octal,
 # so 08/09 would ABORT $(( … )) under set -e (mid-create, leaving a partial
