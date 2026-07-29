@@ -107,8 +107,15 @@ jobs:
         # to live alongside each other in gh-pages and be referenced in a
         # single shared index.yaml. Earlier versions packaged only `./client`
         # and the second install path failed with "chart not found" — see #135.
+        env:
+          TAG: ${{ github.event.release.tag_name }}
         run: |
-          helm package ./client
+          # Package the client chart AS the release tag's version (rc suffix
+          # included). The chart version is what helm's pre-release rules key
+          # on: packaging an rc from Chart.yaml's plain X.Y.Z published a
+          # staging build as stable 1.9.7 (the 2026-07-29 index leak). The
+          # verify job already enforces base-version equality with Chart.yaml.
+          helm package ./client --version "${TAG#v}" --app-version "${TAG#v}"
           helm package ./ingestor
           echo "Packaged:"
           ls -la *.tgz
@@ -123,11 +130,17 @@ jobs:
             ingestor-*.tgz
 
       - name: Configure Git
+        # Pre-releases are FR artifacts: they ship as release assets only and
+        # must never enter the public helm index (customer surface).
+        if: ${{ !github.event.release.prerelease }}
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
       - name: Fetch existing index (gh-pages)
+        # Pre-releases are FR artifacts: they ship as release assets only and
+        # must never enter the public helm index (customer surface).
+        if: ${{ !github.event.release.prerelease }}
         id: fetch
         run: |
           # Remove any local chart packages before switching branches to avoid
@@ -149,6 +162,9 @@ jobs:
           name: helm-charts
 
       - name: Update index and push to gh-pages
+        # Pre-releases are FR artifacts: they ship as release assets only and
+        # must never enter the public helm index (customer surface).
+        if: ${{ !github.event.release.prerelease }}
         env:
           REPO_URL: https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}
         run: |
