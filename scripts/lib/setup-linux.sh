@@ -999,6 +999,13 @@ _install_uidmap_pkg() {
   # class as #210). The Tier-1 path skips setup_pm, so populate PM_INSTALL here.
   [ -n "${PM_INSTALL:-}" ] || setup_pm
   apt_wait_for_lock
+  # Refresh the package index first: on the Tier-1 path this is the first package
+  # operation, so an empty/stale apt/dnf/pacman list can't locate uidmap/shadow and
+  # the install hard-stops (Bugbot #458). Best-effort — matches the repo pattern; a
+  # genuine not-found still surfaces on the guarded install below.
+  # shellcheck disable=SC2086  # PM_UPDATE is a command line that must word-split
+  spin_cmd "Updating package index…" $PM_UPDATE \
+    || warn "Package index refresh failed — continuing; the install will use the cached index."
   # shellcheck disable=SC2086  # PM_INSTALL is a command line that must word-split
   spin_cmd "Installing uidmap helpers…" $PM_INSTALL "$pkg"
 }

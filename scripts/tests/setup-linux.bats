@@ -1107,6 +1107,7 @@ _stub_install_steps() {
   unset PM_INSTALL PM_UPDATE            # Tier-1 skips setup_pm; force the real populate-then-install path
   _install_uidmap_pkg
   run mock_calls
+  [[ "$output" == *"apt-get update"* ]]                # refreshes the index first (#458)
   [[ "$output" == *"apt-get install"* ]]
   [[ "$output" == *"uidmap"* ]]
   [[ "$output" == *"NEEDRESTART_MODE=a"* ]]            # needrestart guard (no spinner hang)
