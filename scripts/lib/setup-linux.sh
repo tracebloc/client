@@ -776,13 +776,20 @@ _persist_docker_host() {
     return 0
   fi
   local rc; rc="$(_tools_rc_for_shell)"
-  # Already referenced (a prior run, or the user's own line) → leave it. Match
-  # 'DOCKER_HOST=' (not '…=unix://'): the line we write quotes the value
-  # (DOCKER_HOST="unix://…), so a '…=unix://' probe would miss our own prior line
-  # and double-append on a re-run.
-  if [ -f "$rc" ] && grep -qF 'DOCKER_HOST=' "$rc" 2>/dev/null; then return 0; fi
+  local marker='# Added by tracebloc installer (RFC 0001 #1221): rootless Docker socket'
+  # Our own prior line → idempotent, nothing to do. Key this off OUR marker, not a
+  # bare 'DOCKER_HOST=' probe: that also matched a user's own DOCKER_HOST (e.g. a
+  # remote/TCP daemon) and made us silently skip — leaving new shells pointed at the
+  # wrong daemon while the install assumes rootless (Asad + Bugbot on #478).
+  if [ -f "$rc" ] && grep -qF "$marker" "$rc" 2>/dev/null; then return 0; fi
+  # A DOCKER_HOST the user set themselves → don't clobber it, but don't silently
+  # pretend we persisted the rootless socket either: warn so they know to repoint it.
+  if [ -f "$rc" ] && grep -qE '^[[:space:]]*(export[[:space:]]+)?DOCKER_HOST=' "$rc" 2>/dev/null; then
+    warn "Your ${rc} already sets DOCKER_HOST — left it untouched. If it isn't the rootless socket, new terminals and the tracebloc CLI won't reach the rootless daemon; point it at:  export DOCKER_HOST=\"unix://\$XDG_RUNTIME_DIR/docker.sock\""
+    return 0
+  fi
   {
-    printf '\n# Added by tracebloc installer (RFC 0001 #1221): rootless Docker socket\n'
+    printf '\n%s\n' "$marker"
     printf '%s\n' 'export DOCKER_HOST="unix://${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/docker.sock"'
   } >> "$rc" 2>/dev/null || return 0
   hint "Added DOCKER_HOST to ${rc} so new terminals reach the rootless Docker daemon."
@@ -906,7 +913,7 @@ install_rootless_docker() {
   # touch (subuid range / uidmap install) on the root/sudo_nopw path. Only claim
   # "no administrator rights" on the true zero-root path (Bugbot #458).
   if [ "${TB_ROOTLESS_ADMIN_TOUCH:-0}" = "1" ]; then
-    success "Rootless Docker is running as ${_user} — a one-time admin step set up the host prerequisites (subuid/subgid range and/or cgroup delegation); the daemon itself runs rootless."
+    success "Rootless Docker is running as ${_user} — one or more one-time admin steps set up the host prerequisites (subuid/subgid range and/or cgroup delegation); the daemon itself runs rootless."
   else
     success "Rootless Docker is running as ${_user} — no administrator rights were used."
   fi

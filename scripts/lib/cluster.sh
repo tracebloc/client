@@ -531,6 +531,11 @@ ensure_cluster_autostart() {
         TB_DOCKER_AUTOSTART=1
         log "Tier 1 rootless: enabled the user Docker daemon on boot (systemctl --user enable + linger)."
       else
+        # Defensive (Asad review): make the honesty guarantee local to this branch —
+        # ensure no earlier state leaves a reboot-survival promise the rootless daemon
+        # can't keep. The is-enabled seed above is already guarded off the rootless
+        # path, so this is belt-and-suspenders, not the sole fix.
+        TB_DOCKER_AUTOSTART=0
         log "Tier 1 rootless: boot autostart not fully enabled (user-service enable or linger unavailable); the --restart policy still applies while your user session is active."
       fi
     elif sudo systemctl enable docker >/dev/null 2>&1; then

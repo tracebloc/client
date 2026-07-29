@@ -1418,3 +1418,14 @@ _stub_install_steps() {
   _persist_docker_host
   [ ! -e "$HOME/.bashrc" ]
 }
+
+@test "_persist_docker_host: foreign DOCKER_HOST present -> warns, does NOT clobber or double-write (Asad/Bugbot #478)" {
+  INSTALL_TIER=1; TB_TIER1_ROOTLESS=1
+  HOME="$(mktemp -d)"; SHELL=/bin/bash; OS=Linux
+  printf 'export DOCKER_HOST="tcp://10.0.0.5:2375"\n' > "$HOME/.bashrc"   # user's own remote daemon
+  run _persist_docker_host
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"already sets DOCKER_HOST"* ]]                 # warned, not silent
+  grep -q 'tcp://10.0.0.5:2375' "$HOME/.bashrc"                   # their line left untouched
+  [ "$(grep -c 'DOCKER_HOST=' "$HOME/.bashrc")" -eq 1 ]           # we did NOT append the rootless line
+}
