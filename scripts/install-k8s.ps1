@@ -1536,6 +1536,12 @@ function New-K3dCluster {
     $timeoutMin = 15
     if ("$env:TB_CREATE_TIMEOUT_MIN" -match '^\d+$') { $timeoutMin = [int]$env:TB_CREATE_TIMEOUT_MIN }
     if (-not (Wait-ProcessWithDeadline -Process $k3dProc -Deadline (Get-Date).AddMinutes($timeoutMin) -Message "Creating compute environment...")) {
+      # Capture the FULL create output before the logs are deleted, so the
+      # host-CA x509 check below can see an x509 that scrolled past the last 5
+      # lines (a hung TLS-inspected pull logs x509 then wedges until the deadline).
+      $timeoutOut = ""
+      if (Test-Path $k3dErrLog) { $timeoutOut += ([string](Get-Content $k3dErrLog -Raw -ErrorAction SilentlyContinue)) }
+      if (Test-Path $k3dOutLog) { $timeoutOut += "`n" + ([string](Get-Content $k3dOutLog -Raw -ErrorAction SilentlyContinue)) }
       $tail = @()
       if (Test-Path $k3dErrLog) { $tail = @(Get-Content $k3dErrLog -ErrorAction SilentlyContinue | Select-Object -Last 5) }
       if (-not $tail -and (Test-Path $k3dOutLog)) { $tail = @(Get-Content $k3dOutLog -ErrorAction SilentlyContinue | Select-Object -Last 5) }
@@ -1559,6 +1565,9 @@ function New-K3dCluster {
       if (-not $partialDeleted) {
         Warn "Couldn't remove the partial cluster automatically - run 'k3d cluster delete $CLUSTER_NAME' before re-running."
       }
+      # A TLS-inspected host pull can log x509 and then hang until the deadline —
+      # surface the CA remedy here too, matching bash's timeout fall-through (#474).
+      Write-HostCaCreateHint -Output $timeoutOut
       Err "Compute environment creation timed out after $timeoutMin minutes. Check that Docker is healthy and this network can pull images, then re-run. (TB_CREATE_TIMEOUT_MIN overrides the bound.)"
     }
 
