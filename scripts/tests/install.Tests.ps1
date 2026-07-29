@@ -68,6 +68,62 @@ Describe "Find-ManifestDigest — manifest lookup (matches on the last field)" {
   }
 }
 
+Describe "Wait-JobWithTicks — liveness heartbeat for background fetches (#468)" {
+  It "returns true when the job finishes before the timeout" {
+    $j = Start-Job { Start-Sleep -Milliseconds 200 }
+    try {
+      Wait-JobWithTicks -Job $j -TimeoutSeconds 30 -TickSeconds 1 | Should -BeTrue
+    } finally { Remove-Job $j -Force -ErrorAction SilentlyContinue }
+  }
+  It "returns false and stops a job that outlives the timeout" {
+    $j = Start-Job { Start-Sleep -Seconds 120 }
+    try {
+      Wait-JobWithTicks -Job $j -TimeoutSeconds 2 -TickSeconds 1 | Should -BeFalse
+      $j.State | Should -Not -Be 'Running'
+    } finally { Remove-Job $j -Force -ErrorAction SilentlyContinue }
+  }
+}
+
+Describe "Download UX — PS 5.1 progress throttle + fresh-process hardening (#468)" {
+  # PS 5.1's progress overlay throttles Invoke-WebRequest massively and reads
+  # like a hang; these invariants keep the silencing (and the background job's
+  # re-hardening) from being quietly dropped in a refactor.
+  It "Get-WithRetry silences the progress overlay for the duration of the call" {
+    (Get-Command Get-WithRetry).Definition | Should -Match "ProgressPreference\s*=\s*'SilentlyContinue'"
+  }
+  It "Get-Optional silences the progress overlay for the duration of the call" {
+    (Get-Command Get-Optional).Definition | Should -Match "ProgressPreference\s*=\s*'SilentlyContinue'"
+  }
+  It "the large-fetch job silences progress, re-applies the TLS 1.2 floor, and pins a local cwd (#409)" {
+    $def = (Get-Command Get-OptionalWithTicks).Definition
+    $def | Should -Match "ProgressPreference\s*=\s*'SilentlyContinue'"
+    $def | Should -Match 'SecurityProtocolType\]::Tls12'
+    $def | Should -Match 'Set-Location \$env:SystemRoot'
+  }
+}
+
+Describe "Source hygiene — string literals must survive a Latin-1 mis-decode (#468)" {
+  # PS 5.1 decodes the release-asset bootstrap (served without a charset header)
+  # as Latin-1 before iex, and reads BOM-less .ps1 files given to -File as ANSI:
+  # any non-ASCII character inside a STRING literal reaches the customer as
+  # mojibake ("â€¦"). Comments are exempt (never rendered); glyphs belong in
+  # [char]0xNNNN form (which is pure-ASCII source), like the logging helpers.
+  It "<name> has no non-ASCII characters in any string literal" -TestCases @(
+    @{ name = 'install.ps1';     file = 'install.ps1' }
+    @{ name = 'install-k8s.ps1'; file = 'install-k8s.ps1' }
+  ) {
+    param($name, $file)
+    $path = (Resolve-Path "$PSScriptRoot/../$file").Path
+    $tokens = $null; $errors = $null
+    [System.Management.Automation.Language.Parser]::ParseFile($path, [ref]$tokens, [ref]$errors) | Out-Null
+    $stringKinds = 'StringLiteral', 'StringExpandable', 'HereStringLiteral', 'HereStringExpandable'
+    $bad = @($tokens | Where-Object {
+      "$($_.Kind)" -in $stringKinds -and $_.Text -match '[^\x00-\x7F]'
+    } | ForEach-Object { "line $($_.Extent.StartLineNumber): $($_.Text)" })
+    $bad -join "; " | Should -BeNullOrEmpty
+  }
+}
+
 Describe "Confirm-ScriptIntegrity — integrity gate before any privileged step" {
   BeforeAll {
     $script:tmp = Join-Path $TestDrive 'dl'
