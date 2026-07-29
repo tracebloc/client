@@ -171,7 +171,18 @@ function Wait-JobWithProgress {
 # install (#409). Every Start-Job below passes this as -InitializationScript to
 # pin the job to a local working directory before it runs anything. (SystemRoot
 # is always local; the guard makes it a no-op on non-Windows Pester runs.)
-$script:JobInit = { if ($env:SystemRoot) { Set-Location $env:SystemRoot } }
+$script:JobInit = {
+  if ($env:SystemRoot) { Set-Location $env:SystemRoot }
+  # Job runspaces don't inherit the parent's TLS floor (set once at script top).
+  # Windows PowerShell 5.1 still defaults to TLS 1.0/1.1, which many corporate
+  # proxies and CDNs reject — so in-job HTTPS downloads (kubectl/k3d/helm/winget/
+  # Docker Desktop via Invoke-WithHeartbeat) would fail SSL/TLS without this
+  # (#422 Bugbot). Re-apply TLS 1.2 (OR-in, don't clobber a higher floor).
+  try {
+    [Net.ServicePointManager]::SecurityProtocol =
+      [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
+  } catch {}
+}
 
 # One honest line per system tool once it's ready (#422): name, version, and
 # whatever of {size, elapsed} is known — so "Installing system tools" shows
@@ -1538,7 +1549,15 @@ function New-K3dCluster {
       # heartbeat and capture the output to the log instead of streaming raw lines.
       try {
         $startOut = Invoke-WithHeartbeat -Message "Starting your secure environment" -TimeoutSec 300 `
-          -ArgumentList @($CLUSTER_NAME) -Script { param($n) k3d cluster start $n 2>&1 }
+          -ArgumentList @($CLUSTER_NAME) -Script {
+            param($n)
+            $o = k3d cluster start $n 2>&1
+            # A native non-zero exit leaves the job state 'Completed', so it must
+            # throw to surface as a failure (else the installer reports "started"
+            # on a stopped cluster, #422 Bugbot). Throw carries the output.
+            if ($LASTEXITCODE -ne 0) { throw ($o | Out-String) }
+            $o
+          }
         if ($startOut) { Log "k3d cluster start: $($startOut -join "`n")" }
       } catch {
         Log "k3d cluster start failed: $_"

@@ -58,6 +58,12 @@ Describe "Invoke-WithHeartbeat (#422 no silent window)" {
     (Invoke-WithHeartbeat -Message "args" -PollSeconds 1 -ArgumentList @("a","b") -Script { param($x,$y) "$x$y" }) |
       Should -Be "ab"
   }
+  It "job runspaces get the TLS 1.2 floor (Bugbot #422)" {
+    # Jobs don't inherit the parent's SecurityProtocol; JobInit must re-apply it,
+    # else in-job HTTPS downloads fail on TLS-1.2-only hosts.
+    (Invoke-WithHeartbeat -Message "tls" -PollSeconds 1 -Script { [Net.ServicePointManager]::SecurityProtocol.ToString() }) |
+      Should -Match 'Tls12'
+  }
 }
 
 Describe "Step honesty (#422 split check vs install)" {
@@ -74,6 +80,13 @@ Describe "Step honesty (#422 split check vs install)" {
     # replaced by the captured job form (k3d cluster start `$n) inside the heartbeat.
     $script:SRC | Should -Not -Match '(?m)^\s*k3d cluster start \$CLUSTER_NAME\s*$'
     $script:SRC | Should -Match 'k3d cluster start \$n'
+  }
+  It "k3d start throws on a non-zero exit so a stopped cluster isn't reported started (Bugbot #422)" {
+    # Invoke-WithHeartbeat only throws on job Failed/timeout; a native non-zero
+    # exit leaves the job Completed, so the start scriptblock must check
+    # $LASTEXITCODE and throw its captured output ($o) itself.
+    $script:SRC | Should -Match 'k3d cluster start \$n'
+    $script:SRC | Should -Match 'if \(\$LASTEXITCODE -ne 0\) \{ throw \(\$o'
   }
 }
 
