@@ -607,8 +607,11 @@ _host_ca_create_hint() {
     hint "    store as above, then restart Docker Desktop (it re-reads the host trust store on start)."
   else
     hint "  Docker Desktop (macOS): the daemon runs in a VM the installer can't reach. Add the CA"
-    hint "  to the macOS keychain and set it to 'Always Trust', then restart Docker Desktop —"
-    hint "  it reads the host keychain on start."
+    hint "    to the macOS keychain and set it to 'Always Trust', then restart Docker Desktop —"
+    hint "    it reads the host keychain on start."
+    hint "  Colima (headless macOS): the daemon runs in a Lima VM that does NOT read the keychain —"
+    hint "    add the CA inside the VM ('colima ssh', copy the PEM into the VM's trust store and"
+    hint "    refresh it), then 'colima restart'."
   fi
   hint "  Details: docs/INSTALL.md (\"TLS-inspecting network\") and https://docs.docker.com/."
   echo ""

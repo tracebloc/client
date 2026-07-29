@@ -43,6 +43,7 @@ On **Linux**, the installer also fetches tooling from `get.docker.com`, `raw.git
 >   - Debian/Ubuntu: `sudo cp <corporate-ca>.pem /usr/local/share/ca-certificates/tracebloc-corp-ca.crt && sudo update-ca-certificates`
 >   - RHEL/Fedora: `sudo cp <corporate-ca>.pem /etc/pki/ca-trust/source/anchors/tracebloc-corp-ca.crt && sudo update-ca-trust`
 > - **Docker Desktop (macOS / Windows / Linux):** the daemon runs in a VM the installer can't reach. Trust the CA in the host OS store — the **macOS keychain** (set "Always Trust"), the **Windows Trusted Root** store (`certlm.msc`), or the **Linux system trust store** (the native-Docker commands above) — then restart Docker Desktop, which re-reads the host store on start. See [docs.docker.com](https://docs.docker.com/).
+> - **Colima (headless macOS):** the daemon runs in a Lima VM that does **not** read the macOS keychain. Add the CA *inside* the VM — `colima ssh`, copy the PEM into the VM's system trust store and refresh it — then `colima restart`.
 
 ---
 

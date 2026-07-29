@@ -264,11 +264,12 @@ setup() {
   [[ "$output" != *"macOS keychain"* ]]
 }
 
-@test "_host_ca_create_hint: x509 on macOS -> names Docker Desktop VM + keychain (#474)" {
+@test "_host_ca_create_hint: x509 on macOS -> Docker Desktop keychain AND Colima VM (#474 Bugbot)" {
   OS=Darwin
   run _host_ca_create_hint 'Error response from daemon: tls: failed to verify certificate'
   [[ "$output" == *"Docker Desktop"* ]]
   [[ "$output" == *"macOS keychain"* ]]
+  [[ "$output" == *"Colima"* ]]            # headless macOS uses Colima, which ignores the keychain
   [[ "$output" != *"update-ca-certificates"* ]]
 }
 
