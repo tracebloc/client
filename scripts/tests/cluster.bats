@@ -248,6 +248,28 @@ setup() {
   [[ "$output" == *"k3d cluster delete"* ]]
 }
 
+# ── _host_ca_create_hint (host Docker daemon x509 at create, #474) ───────────
+@test "_host_ca_create_hint: no x509 in output -> silent" {
+  run _host_ca_create_hint "FATA[0000] Failed to create cluster: docker daemon not running"
+  [ -z "$output" ]
+}
+
+@test "_host_ca_create_hint: x509 on Linux -> names host daemon + system trust store (#474)" {
+  OS=Linux
+  run _host_ca_create_hint 'FATA Failed to pull image "rancher/k3s": x509: certificate signed by unknown authority'
+  [[ "$output" == *"HOST Docker daemon"* ]]
+  [[ "$output" == *"update-ca-certificates"* ]]
+  [[ "$output" != *"macOS keychain"* ]]
+}
+
+@test "_host_ca_create_hint: x509 on macOS -> names Docker Desktop VM + keychain (#474)" {
+  OS=Darwin
+  run _host_ca_create_hint 'Error response from daemon: tls: failed to verify certificate'
+  [[ "$output" == *"Docker Desktop"* ]]
+  [[ "$output" == *"macOS keychain"* ]]
+  [[ "$output" != *"update-ca-certificates"* ]]
+}
+
 # ── _check_existing_cluster_dataset_mount (backend#743) ─────────────────────
 @test "_check_existing_cluster_dataset_mount: HOST_DATASET_DIR unset -> no-op" {
   unset HOST_DATASET_DIR

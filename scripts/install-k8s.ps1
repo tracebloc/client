@@ -1349,6 +1349,31 @@ function Invoke-LeftoverDataGuard {
   }
 }
 
+# When 'k3d cluster create' fails, one cause on a TLS-inspecting network is the
+# HOST Docker daemon hitting x509 while pulling k3d's OWN runtime images
+# (rancher/k3s, k3d-tools, k3d-proxy) -- a different surface than the in-node CA
+# trust (#424), which only covers containerd inside the nodes. Docker Desktop runs
+# the daemon in a VM the installer can't reach, so the node CA mount can't fix it,
+# and this fails before any node boots so Get-NotReadyState never sees it. Detect
+# x509 in the create output and name it with a Windows-specific remedy (#474).
+# No-op unless the output shows a TLS-verification failure. Mirrors the bash
+# _host_ca_create_hint.
+function Write-HostCaCreateHint {
+  param([string]$Output)
+  if ($Output -notmatch '(?i)x509|certificate signed by unknown authority|tls: failed to verify') { return }
+  Write-Host ""
+  Warn "The Docker daemon couldn't pull k3d's runtime images -- TLS verification failed (x509)."
+  Hint "k3d pulls rancher/k3s, k3d-tools and k3d-proxy with the HOST Docker daemon, which does"
+  Hint "not use the in-node CA trust (TRACEBLOC_CA_BUNDLE) this installer configures. Docker"
+  Hint "Desktop runs the daemon in a VM the installer can't reach, so the CA must be trusted by"
+  Hint "the host:"
+  Hint "  Import your corporate CA into the Windows certificate store (Trusted Root Certification"
+  Hint "  Authorities -- 'certlm.msc' for the machine store), then restart Docker Desktop; it reads"
+  Hint "  the Windows trust store on start."
+  Hint "  Details: docs/INSTALL.md (`"TLS-inspecting network`") and https://docs.docker.com/."
+  Write-Host ""
+}
+
 function New-K3dCluster {
   Log "Creating k3d cluster: '$CLUSTER_NAME'"
 
@@ -1546,7 +1571,12 @@ function New-K3dCluster {
     if ($k3dStdout) { Log "k3d stdout: $k3dStdout" }
     if ($k3dStderr) { Log "k3d stderr: $k3dStderr" }
 
-    if ($k3dExitCode -ne 0) { Err "Failed to create compute environment." }
+    if ($k3dExitCode -ne 0) {
+      # Host-daemon x509 (k3d runtime image pull on a TLS-inspecting network,
+      # #474) -- name it before the generic failure.
+      Write-HostCaCreateHint -Output ("$k3dStdout`n$k3dStderr")
+      Err "Failed to create compute environment."
+    }
     Ok "Compute environment ready."
   }
 

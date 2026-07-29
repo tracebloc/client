@@ -1549,6 +1549,18 @@ Describe "In-node CA trust for TLS-inspecting networks (#424)" {
     }
   }
 
+  Context "Write-HostCaCreateHint (host daemon x509 at create, #474)" {
+    It "no x509 in output -> silent" {
+      $out = Write-HostCaCreateHint -Output "FATA Failed to create cluster: docker not running" 6>&1 | Out-String
+      $out.Trim() | Should -BeNullOrEmpty
+    }
+    It "x509 in output -> names the host daemon + Windows trust store" {
+      $out = Write-HostCaCreateHint -Output 'Failed to pull image "rancher/k3s": x509: certificate signed by unknown authority' 6>&1 | Out-String
+      $out | Should -Match 'HOST Docker daemon'
+      $out | Should -Match 'Trusted Root'
+    }
+  }
+
   Context "Print-Summary CA message" {
     It "names the CA problem + env var, not a generic pull error" {
       $script:ClientState = "image_pull_ca"
