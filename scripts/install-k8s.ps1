@@ -1642,8 +1642,11 @@ function New-K3dCluster {
       # #474) -- name the CA remedy before the generic failure.
       Write-HostCaCreateHint -Output ("$k3dStdout`n$k3dStderr")
       # Surface k3d's real reason (image pull / proxy / port / WSL) on screen via
-      # Err's detail excerpt, not only in the log (#423).
-      Err "Failed to create compute environment." "$k3dStderr`n$k3dStdout"
+      # Err's detail excerpt, not only in the log (#423). stderr LAST so its tail
+      # (the FATA/x509/port reason) survives Get-ErrDetailLines' last-5-line window
+      # even if k3d wrote to stdout; matches the Write-HostCaCreateHint order above
+      # (reviewer).
+      Err "Failed to create compute environment." "$k3dStdout`n$k3dStderr"
     }
     Ok "Compute environment ready."
   }
