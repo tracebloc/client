@@ -88,7 +88,7 @@ for _ in $(seq 1 30); do
   # No -f: the registry answers 401 (needs a token) even on a healthy tunnel; we
   # only care that the proxy TUNNELED the request (curl exit 0) vs refused with
   # 407 (curl non-zero). -o /dev/null discards the body.
-  if curl -sS -m 8 -x "http://${PROXY_USER}:${PROXY_PASS}@127.0.0.1:${PROXY_PORT}" \
+  if curl -sS --tlsv1.2 -m 8 -x "http://${PROXY_USER}:${PROXY_PASS}@127.0.0.1:${PROXY_PORT}" \
         https://registry-1.docker.io/v2/ -o /dev/null 2>/dev/null; then
     ready=1; break
   fi
@@ -96,7 +96,7 @@ for _ in $(seq 1 30); do
 done
 [[ -n "$ready" ]] || error "squid did not become ready / auth check failed."
 # Prove auth is actually ENFORCED: a request with NO credentials must be refused.
-if curl -sS -m 8 -x "http://127.0.0.1:${PROXY_PORT}" https://registry-1.docker.io/v2/ -o /dev/null 2>/dev/null; then
+if curl -sS --tlsv1.2 -m 8 -x "http://127.0.0.1:${PROXY_PORT}" https://registry-1.docker.io/v2/ -o /dev/null 2>/dev/null; then
   error "Proxy allowed an unauthenticated request — auth not enforced; test is invalid."
 fi
 success "Authenticated squid proxy up (anonymous requests refused)."

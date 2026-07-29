@@ -89,7 +89,39 @@ YAML
   _drift=0; _drift_workload_names >/dev/null 2>&1; [ "$_drift" -eq 0 ]
 }
 
-# ── Check 4: tool execute-gate parity (#411) ─────────────────────────────────
+# ── Check 4: in-node CA trust parity (#424) ──────────────────────────────────
+@test "ca trust: both installers wire the CA -> no drift (#424)" {
+  printf 'TRACEBLOC_CA_BUNDLE CURL_CA_BUNDLE _resolve_ca_bundle --registry-config tracebloc-mitm-ca.crt _host_ca_create_hint\n' > "$ROOT/scripts/lib/cluster.sh"
+  printf 'TRACEBLOC_CA_BUNDLE CURL_CA_BUNDLE Resolve-CaBundle --registry-config tracebloc-mitm-ca.crt Write-HostCaCreateHint\n' > "$ROOT/scripts/install-k8s.ps1"
+  _drift=0; _drift_ca_trust >/dev/null; [ "$_drift" -eq 0 ]
+}
+
+@test "ca trust: an installer missing the host-daemon CA hint -> drift (#474)" {
+  printf 'TRACEBLOC_CA_BUNDLE CURL_CA_BUNDLE _resolve_ca_bundle --registry-config tracebloc-mitm-ca.crt _host_ca_create_hint\n' > "$ROOT/scripts/lib/cluster.sh"
+  # ps1 wires the in-node CA but drops the host-daemon create hint (Write-HostCaCreateHint)
+  printf 'TRACEBLOC_CA_BUNDLE CURL_CA_BUNDLE Resolve-CaBundle --registry-config tracebloc-mitm-ca.crt\n' > "$ROOT/scripts/install-k8s.ps1"
+  _drift=0; _drift_ca_trust >/dev/null 2>&1; [ "$_drift" -ge 1 ]
+}
+
+@test "ca trust: an installer missing the registry-config -> drift (#424)" {
+  # Both fully wired EXCEPT ps1's --registry-config — so drift can only come from
+  # that single omission (all other required tokens, incl the host-CA hints, present).
+  printf 'TRACEBLOC_CA_BUNDLE CURL_CA_BUNDLE _resolve_ca_bundle --registry-config tracebloc-mitm-ca.crt _host_ca_create_hint\n' > "$ROOT/scripts/lib/cluster.sh"
+  printf 'TRACEBLOC_CA_BUNDLE CURL_CA_BUNDLE Resolve-CaBundle tracebloc-mitm-ca.crt Write-HostCaCreateHint\n' > "$ROOT/scripts/install-k8s.ps1"
+  _drift=0; _drift_ca_trust >/dev/null 2>&1; [ "$_drift" -ge 1 ]
+}
+
+@test "ca trust: --registry-config only in a COMMENT does NOT count -> drift (Bugbot #424)" {
+  # ALL other required tokens are present as real (non-comment) wiring — including
+  # the host-CA hints — so the ONLY thing that can trip drift is --registry-config
+  # surviving solely inside a comment. This isolates the comment-stripping behavior;
+  # a whole-file grep would pass. (Bugbot: don't let a missing new token mask it.)
+  printf '# uses --registry-config to point containerd at the CA\nTRACEBLOC_CA_BUNDLE CURL_CA_BUNDLE _resolve_ca_bundle tracebloc-mitm-ca.crt _host_ca_create_hint\n' > "$ROOT/scripts/lib/cluster.sh"
+  printf 'TRACEBLOC_CA_BUNDLE CURL_CA_BUNDLE Resolve-CaBundle --registry-config tracebloc-mitm-ca.crt Write-HostCaCreateHint\n' > "$ROOT/scripts/install-k8s.ps1"
+  _drift=0; _drift_ca_trust >/dev/null 2>&1; [ "$_drift" -ge 1 ]
+}
+
+# ── Check 4b: tool execute-gate parity (#411) ────────────────────────────────
 @test "execute-gates: all installers gate all tools -> no drift (#411)" {
   printf 'assert_tool_runs kubectl version --client\nassert_tool_runs k3d version\nassert_tool_runs helm version --short\n' > "$ROOT/scripts/lib/setup-linux.sh"
   printf 'assert_tool_runs kubectl version --client\nassert_tool_runs k3d version\nassert_tool_runs helm version --short\n' > "$ROOT/scripts/lib/setup-macos.sh"

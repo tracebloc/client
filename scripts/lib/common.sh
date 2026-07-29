@@ -47,6 +47,9 @@ curl_secure() {
   done
   local -a _bounds=(--connect-timeout "${TB_CURL_CONNECT_TIMEOUT:-30}")
   (( _stall_bounded )) || _bounds+=(--max-time "${TB_CURL_MAX_TIME:-300}")
+  # checker false positive: _bounds ALWAYS carries --connect-timeout (plus
+  # --max-time unless the call stall-bounds itself) — flags inside a bash
+  # array expansion are invisible to the grep. house-rules: ignore=curl-timeout
   curl --tlsv1.2 "${_bounds[@]}" "$@"
 }
 
@@ -140,6 +143,16 @@ step_header()    { echo -e "  ${TB_HEADING}$1) $2${RESET}"; echo ""; }
 # ── Utility ──────────────────────────────────────────────────────────────────
 has() { command -v "$1" &>/dev/null; }
 
+# _rootless_active — the single source of truth for "this run is a rootless Tier-1
+# install" (RFC 0001 #1177). Slice 1 (#1219) established the condition as
+# INSTALL_TIER==1 AND the opt-in TB_TIER1_ROOTLESS flag; every later slice calls
+# THIS predicate instead of re-testing the pair, so the two markers can never drift
+# (#1221). Lives in common.sh because both setup-linux.sh (the install path) and
+# cluster.sh (the cluster path, sourced standalone by the e2e harness) depend on it.
+_rootless_active() {
+  [ "${INSTALL_TIER:-}" = "1" ] && [ "${TB_TIER1_ROOTLESS:-0}" = "1" ]
+}
+
 # Execute-gate a freshly-installed tool (#411). The old post-install "check" was a
 # log-only interpolation (`... 2>/dev/null || echo present`) that masked failure,
 # so a corrupt or wrong-architecture binary — a partial pkg/brew install, or a
@@ -173,6 +186,77 @@ assert_tool_runs() {
     [[ -n "$resolved" && "$resolved" -ef "$rm_path" ]] && rm -f "$rm_path" 2>/dev/null || true
   fi
   error "$name was installed but won't run — a corrupt or wrong-architecture binary (this machine is ${ARCH:-$(uname -m)}). Re-run the installer to re-download it; if it recurs, remove ${rm_path:-the $name on your PATH} (and any package-manager copy) first."
+}
+
+# _bounded SECONDS CMD… — run CMD under timeout(1)/gtimeout(1) when either is
+# present, else bare, so a wedged external call can't hang a headless install
+# (installer rule: every docker/kubectl/helm probe must be bounded). Returns CMD's
+# exit status (124 on timeout). Output is NOT redirected — the caller decides.
+_bounded() {
+  local t="$1"; shift
+  if   has timeout;  then timeout  "$t" "$@"
+  elif has gtimeout; then gtimeout "$t" "$@"
+  else "$@"; fi
+}
+
+# ── Subordinate ID helpers (rootless Docker, RFC 0001 #1220) ──────────────────
+# Pure parsers shared by probe.sh (detection) and setup-linux.sh (remediation), so
+# both read /etc/subuid + /etc/subgid the same way. Lines are `key:start:count`,
+# key = user name OR numeric uid.
+
+# _subid_has_entry FILE NAME UID — true if FILE has a range keyed by NAME or UID.
+# First-field (anchored) match, so a name that is a substring of another user's
+# entry can't false-positive. FILE is world-readable; the read is side-effect-free.
+_subid_has_entry() {
+  local file="$1" name="$2" uid="$3" key
+  [[ -r "$file" ]] || return 1
+  while IFS=: read -r key _ _; do
+    [[ -n "$key" ]] || continue
+    [[ "$key" == "$name" ]] && return 0
+    [[ -n "$uid" && "$key" == "$uid" ]] && return 0
+  done < "$file"
+  return 1
+}
+
+# _next_subid_start FILE... — the next free start offset for a fresh 65536-wide
+# block: max(start+count) across the given files, or 100000 (Docker's default base)
+# when none carry a valid range. Guarantees the new block can't overlap an existing
+# allocation, so remediation is safe to run on a host that already has some ranges.
+_next_subid_start() {
+  local f start count max=100000
+  for f in "$@"; do
+    [[ -r "$f" ]] || continue
+    while IFS=: read -r _ start count; do
+      [[ "$start" =~ ^[0-9]+$ && "$count" =~ ^[0-9]+$ ]] || continue
+      if (( start + count > max )); then max=$(( start + count )); fi
+    done < "$f"
+  done
+  echo "$max"
+}
+
+# _idmap_helper_ok NAME — is a subid-mapping helper (newuidmap/newgidmap) both
+# present AND privileged enough to write ID maps: the setuid bit, OR a cap_setuid
+# file capability. Arch's `shadow` ships these with filecaps rather than setuid
+# (Bugbot, client#458), so a setuid-only test wrongly rejects a working helper and
+# false-hands-off. When getcap is unavailable we can't inspect caps, so fall back to
+# the setuid check alone. Shared by probe.sh (detection) and setup-linux.sh (the
+# post-install re-verify).
+_idmap_helper_ok() {
+  local name="$1" p cap
+  p="$(command -v "$name" 2>/dev/null)" || return 1
+  [[ -n "$p" ]] || return 1
+  [[ -u "$p" ]] && return 0                     # setuid-root covers both helpers
+  # Filecaps path (Arch etc.): newuidmap needs cap_setuid, newgidmap needs
+  # cap_setgid — checking cap_setuid for both wrongly rejects newgidmap (Bugbot #458).
+  case "$name" in
+    newgidmap) cap=cap_setgid ;;
+    *)         cap=cap_setuid ;;
+  esac
+  if has getcap; then
+    local caps; caps="$(getcap "$p" 2>/dev/null)"
+    [[ "$caps" == *"$cap"* ]] && return 0
+  fi
+  return 1
 }
 
 # Sanitize a minutes-valued env override to a base-10 integer, else <default>.
@@ -236,54 +320,6 @@ _chart_version() {
 _client_workload_deployments() {
   local ns="${1:-${TB_NAMESPACE:-default}}"
   printf '%s\n' "mysql-client" "${ns}-jobs-manager" "${ns}-requests-proxy"
-}
-
-# ── macOS: Docker Desktop architecture vs machine (for wrong-arch UX) ────────
-#  Call early on macOS to fail fast with clear instructions if Docker.app
-#  is for the wrong architecture (e.g. Intel Docker on Apple Silicon).
-#  Returns 0 if OK or not applicable; returns 1 and prints message if mismatch.
-check_docker_arch_mac() {
-  [[ "$(uname -s)" != "Darwin" ]] && return 0
-  [[ ! -d "/Applications/Docker.app" ]] && return 0
-
-  local real_arch
-  if sysctl -n hw.optional.arm64 2>/dev/null | grep -q '1'; then
-    real_arch="arm64"
-  else
-    real_arch="amd64"
-  fi
-
-  # Main executable is com.docker.backend (CFBundleExecutable), not "Docker"
-  local docker_bin_path="/Applications/Docker.app/Contents/MacOS/com.docker.backend"
-  [[ ! -x "$docker_bin_path" ]] && docker_bin_path="/Applications/Docker.app/Contents/MacOS/Docker"
-  local docker_bin_arch
-  docker_bin_arch="$(file "$docker_bin_path" 2>/dev/null || true)"
-  local docker_is_arm=false
-  local docker_is_intel=false
-  echo "$docker_bin_arch" | grep -q 'arm64' && docker_is_arm=true
-  echo "$docker_bin_arch" | grep -q 'x86_64' && docker_is_intel=true
-
-  if [[ "$real_arch" == "arm64" ]] && [[ "$docker_is_intel" == true ]] && [[ "$docker_is_arm" != true ]]; then
-    echo ""
-    warn "Docker is installed for the wrong chip (Intel instead of Apple Silicon)."
-    hint "This can cause slow performance or prevent Docker from starting."
-    echo ""
-    echo -e "  ${BOLD}Fix:${RESET} Re-run the installer — it will replace Docker with the correct version."
-    echo ""
-    return 1
-  fi
-
-  if [[ "$real_arch" == "amd64" ]] && [[ "$docker_is_arm" == true ]]; then
-    echo ""
-    warn "Docker is installed for the wrong chip (Apple Silicon instead of Intel)."
-    hint "Docker may not work correctly."
-    echo ""
-    echo -e "  ${BOLD}Fix:${RESET} Re-run the installer — it will replace Docker with the correct version."
-    echo ""
-    return 1
-  fi
-
-  return 0
 }
 
 # ── Spinner — hides noisy command output behind an animated status line ──────

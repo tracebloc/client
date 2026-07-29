@@ -111,6 +111,53 @@ _write_k3d_proxy_config() {
   echo "$cfg"
 }
 
+# --- Corporate MITM CA trust for in-node containerd pulls (#424) --------------
+# Proxy REACHABILITY reaches the nodes (above), but on a TLS-inspecting network
+# the nodes still don't TRUST the corporate CA, so every in-node containerd pull
+# (rancher/k3s, ghcr.io/k3d-io, tracebloc images) fails x509 — then masked into a
+# root-cause-free "an image couldn't be pulled". When the operator supplies the
+# CA bundle we mount it into every node and point containerd at it per-registry.
+
+# The registries the cluster pulls from; behind a break-and-inspect proxy each
+# needs the corporate CA to validate the intercepted cert.
+TB_CA_REGISTRIES=(docker.io registry-1.docker.io auth.docker.io ghcr.io)
+
+# Echo the operator's CA bundle path (absolute) when TRACEBLOC_CA_BUNDLE or
+# CURL_CA_BUNDLE is set and readable. If a var is set but the file is unreadable,
+# echo the offending var NAME and return 2 — the caller turns that into a hard
+# error (a silent skip would drop them straight back into the x509 failure they
+# set the var to fix). Empty stdout + return 0 when no CA var is set.
+_resolve_ca_bundle() {
+  local var val
+  for var in TRACEBLOC_CA_BUNDLE CURL_CA_BUNDLE; do
+    val="${!var:-}"; [[ -z "$val" ]] && continue
+    # Require a readable regular FILE, not just -r: a directory of PEMs is readable
+    # but would bind-mount over the single-file node path and containerd can't read
+    # it as a ca_file — the silent "looks applied but still x509" case. Mirrors the
+    # PS Resolve-CaBundle -PathType Leaf check (reviewer).
+    if [[ ! -r "$val" || ! -f "$val" ]]; then echo "$var"; return 2; fi
+    case "$val" in /*) : ;; *) val="$(cd "$(dirname "$val")" 2>/dev/null && pwd)/$(basename "$val")" ;; esac
+    echo "$val"; return 0
+  done
+  return 0
+}
+
+# Write a k3d registries.yaml pointing containerd at the mounted CA for every
+# registry in TB_CA_REGISTRIES, and echo its path. $1 = the CA path INSIDE the
+# node (where the -v mount lands). Caller removes the temp dir.
+_write_k3d_registries_config() {
+  local node_ca="$1" host td cfg
+  td="$(mktemp -d "${TMPDIR:-/tmp}/tracebloc-k3d-reg-XXXXXX")" || return 1
+  cfg="$td/registries.yaml"
+  {
+    echo "configs:"
+    for host in "${TB_CA_REGISTRIES[@]}"; do
+      printf '  "%s":\n    tls:\n      ca_file: "%s"\n' "$host" "$node_ca"
+    done
+  } > "$cfg"
+  echo "$cfg"
+}
+
 # When a proxy is configured, ensure THIS installer's own kubectl/helm/curl
 # bypass it for the cluster API (127.0.0.1) and the in-cluster ranges. Go
 # already auto-bypasses loopback, but exporting NO_PROXY also covers helm/curl.
@@ -365,6 +412,18 @@ guard_leftover_data() {
 create_cluster() {
   log "Creating k3d cluster: '$CLUSTER_NAME'"
 
+  # RFC 0001 #1221 (Tier 1): target the per-user ROOTLESS daemon, not a (missing)
+  # system daemon. Slice 1 exports DOCKER_HOST during install, but create_cluster
+  # can be re-entered by a caller that lost that export (the e2e harness, a bare
+  # re-run), so re-assert it here whenever rootless is active. k3d and docker read
+  # DOCKER_HOST from the environment and the `( k3d … ) &` subshell in
+  # _create_new_cluster inherits it, so one export covers every call in this flow.
+  # Guard XDG_RUNTIME_DIR (unset on some non-login sessions). No-op with the flag
+  # off — the legacy host-daemon path is byte-for-byte unchanged.
+  if _rootless_active; then
+    export DOCKER_HOST="unix://${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/docker.sock"
+  fi
+
   # Leftover-data guard (RFC-0003 D3, #376): a NEW cluster must not silently
   # adopt data from an earlier install. Skipped when the cluster already exists
   # — that path is an in-place reuse/upgrade and keeps its data by design (§3.3).
@@ -428,7 +487,14 @@ ensure_cluster_autostart() {
     # reboot. `is-enabled` is an unprivileged read, so no sudo/password prompt.
     # Only the persistent "enabled" state survives a reboot — "enabled-runtime"
     # is transient and must NOT set the flag.
-    if [[ "$(systemctl is-enabled docker 2>/dev/null)" == "enabled" ]]; then
+    # NOT on the rootless path (#478 / Bugbot): there the cluster runs on the
+    # per-user rootless socket, so the SYSTEM docker.service's on-boot state says
+    # nothing about whether the cluster returns — a system unit that happens to be
+    # enabled (docker installed system-wide, user not in the group → they chose
+    # rootless) would seed a false promise the rootless branch below then can't
+    # honestly retract. On rootless, the user-scope enable+linger below are the
+    # SOLE authority for the flag.
+    if ! _rootless_active && [[ "$(systemctl is-enabled docker 2>/dev/null)" == "enabled" ]]; then
       TB_DOCKER_AUTOSTART=1
     fi
 
@@ -440,6 +506,38 @@ ensure_cluster_autostart() {
       # policy set above already returns the cluster after a reboot for the common
       # case; enabling docker.service on boot is the user's call.
       log "Tier 0: leaving Docker autostart to the user (no privileged step)."
+    elif _rootless_active; then
+      # Tier 1 rootless (RFC 0001 #1221): the daemon is a per-user systemd unit,
+      # NOT the system docker.service — `sudo systemctl enable docker` would target
+      # a unit that doesn't exist on this path (and demand a password we promised
+      # not to need). Enable it in user scope, and enable linger so the user manager
+      # (and thus the rootless daemon + cluster) starts at boot on a headless
+      # training host with no active login session. Both best-effort: enabling
+      # linger for one's own user generally needs no root, and the `--restart
+      # unless-stopped` policy set above is what actually returns the cluster after
+      # a reboot. The node loop above already ran against this same rootless daemon
+      # (via DOCKER_HOST), so the reboot promise holds.
+      # Attempt BOTH unconditionally (if-form, so a failure never trips set -e),
+      # then only promise reboot-survival when BOTH succeed: on a headless host the
+      # cluster returns on its own only if the user manager runs with no login
+      # session (linger) AND its docker unit is enabled. Setting the flag
+      # regardless would let summary.sh::_reboot_note promise a survival the host
+      # can't deliver — the honesty rule the legacy `elif sudo … enable` path
+      # already follows (only flags on success). #375/#458.
+      local _user_enabled=0 _linger_ok=0
+      if systemctl --user enable docker >/dev/null 2>&1; then _user_enabled=1; fi
+      if loginctl enable-linger "$(id -un 2>/dev/null || printf '%s' "${USER:-}")" >/dev/null 2>&1; then _linger_ok=1; fi
+      if [[ "$_user_enabled" == 1 && "$_linger_ok" == 1 ]]; then
+        TB_DOCKER_AUTOSTART=1
+        log "Tier 1 rootless: enabled the user Docker daemon on boot (systemctl --user enable + linger)."
+      else
+        # Defensive (Asad review): make the honesty guarantee local to this branch —
+        # ensure no earlier state leaves a reboot-survival promise the rootless daemon
+        # can't keep. The is-enabled seed above is already guarded off the rootless
+        # path, so this is belt-and-suspenders, not the sole fix.
+        TB_DOCKER_AUTOSTART=0
+        log "Tier 1 rootless: boot autostart not fully enabled (user-service enable or linger unavailable); the --restart policy still applies while your user session is active."
+      fi
     elif sudo systemctl enable docker >/dev/null 2>&1; then
       # docker.service will start on boot → the summary's reboot note can honestly
       # promise the cluster returns on its own (read in summary.sh::_reboot_note).
@@ -472,6 +570,7 @@ _handle_existing_cluster() {
   fi
 
   _check_existing_cluster_proxy
+  _check_existing_cluster_ca
   _check_existing_cluster_bind
   _check_existing_cluster_dataset_mount
   _check_existing_cluster_storage_mode
@@ -508,6 +607,69 @@ _check_existing_cluster_proxy() {
     hint "  k3d cluster delete $CLUSTER_NAME  &&  re-run this installer."
     echo ""
   fi
+}
+
+# CA trust, like proxy, is baked into the nodes at create time (the -v mount +
+# --registry-config). If the operator sets a CA bundle but the cluster already
+# exists WITHOUT it, a re-run reuses the cluster and the x509 pulls persist — so
+# the "set the CA and re-run" remedy silently does nothing. Warn and point at
+# recreate (Bugbot #424). The path mirrors _create_new_cluster's mount destination.
+_check_existing_cluster_ca() {
+  [[ -n "${TRACEBLOC_CA_BUNDLE:-}" || -n "${CURL_CA_BUNDLE:-}" ]] || return 0
+  local server_container="k3d-${CLUSTER_NAME}-server-0"
+  local mounts
+  mounts=$(docker inspect "$server_container" --format '{{range .Mounts}}{{println .Destination}}{{end}}' 2>/dev/null) || return 0
+  [[ -z "$mounts" ]] && return 0
+  # Exact whole-line match (mounts is newline-separated destinations): a longer
+  # path that merely embeds the CA path as a substring is NOT our mount. Mirrors
+  # the PS anchored `(?m)^…\s*$` check (Bugbot #424).
+  if ! grep -qxF '/etc/ssl/certs/tracebloc-mitm-ca.crt' <<<"$mounts"; then
+    echo ""
+    warn "A CA bundle is set (TRACEBLOC_CA_BUNDLE/CURL_CA_BUNDLE), but the existing '$CLUSTER_NAME' cluster was created without it."
+    hint "k3d bakes CA trust into the nodes at create time — it can't be added to a running cluster."
+    hint "If in-cluster image pulls fail x509, recreate the cluster so the CA is applied:"
+    hint "  k3d cluster delete $CLUSTER_NAME  &&  re-run this installer."
+    echo ""
+  fi
+}
+
+# When `k3d cluster create` fails, one cause on a TLS-inspecting network is the
+# HOST Docker daemon hitting x509 while pulling k3d's OWN runtime images
+# (rancher/k3s, k3d-tools, k3d-proxy) — a different surface than the in-node CA
+# trust (#424), which only covers containerd INSIDE the nodes. The node CA mount
+# can't fix the host daemon, and this failure happens before any node boots, so
+# the post-create _diagnose_not_ready never sees it. Detect x509 in the create
+# output and name it with a platform-specific remedy (#474). No-op unless the
+# output actually shows a TLS-verification failure.
+_host_ca_create_hint() {
+  local out="$1"
+  # Herestring, not a pipe: under `set -o pipefail`, `grep -q` closes the pipe on
+  # first match, and for output past the ~64KB pipe buffer (reachable on the
+  # timeout path, which passes the full logs) printf takes SIGPIPE → the pipeline
+  # exits non-zero → `|| return 0` would bail even though x509 matched (reviewer).
+  grep -qiE 'x509|certificate signed by unknown authority|tls: failed to verify' <<<"$out" || return 0
+  echo ""
+  warn "The Docker daemon couldn't pull k3d's runtime images — TLS verification failed (x509)."
+  hint "k3d pulls rancher/k3s, k3d-tools and k3d-proxy with the HOST Docker daemon, which does"
+  hint "not use the in-node CA trust (TRACEBLOC_CA_BUNDLE) this installer configures — the daemon"
+  hint "itself has to trust your corporate CA:"
+  if [[ "${OS:-}" == "Linux" ]]; then
+    hint "  Native Docker — add the CA to the system trust store (use your distro's path):"
+    hint "    Debian/Ubuntu: sudo cp <corporate-ca>.pem /usr/local/share/ca-certificates/tracebloc-corp-ca.crt && sudo update-ca-certificates"
+    hint "    RHEL/Fedora:   sudo cp <corporate-ca>.pem /etc/pki/ca-trust/source/anchors/tracebloc-corp-ca.crt && sudo update-ca-trust"
+    hint "    then restart Docker: sudo systemctl restart docker"
+    hint "  Docker Desktop for Linux — the daemon runs in a VM: add the CA to the system trust"
+    hint "    store as above, then restart Docker Desktop (it re-reads the host trust store on start)."
+  else
+    hint "  Docker Desktop (macOS): the daemon runs in a VM the installer can't reach. Add the CA"
+    hint "    to the macOS keychain and set it to 'Always Trust', then restart Docker Desktop —"
+    hint "    it reads the host keychain on start."
+    hint "  Colima (headless macOS): the daemon runs in a Lima VM that does NOT read the keychain —"
+    hint "    add the CA inside the VM ('colima ssh', copy the PEM into the VM's trust store and"
+    hint "    refresh it), then 'colima restart'."
+  fi
+  hint "  Details: docs/INSTALL.md (\"TLS-inspecting network\") and https://docs.docker.com/."
+  echo ""
 }
 
 # An externally-created cluster may bind its API to 0.0.0.0 rather than the
@@ -673,6 +835,29 @@ _create_new_cluster() {
     log "Propagating proxy settings to k3d nodes (authenticated proxies supported; NO_PROXY auto-augmented)."
   fi
 
+  # In-node CA trust for TLS-inspecting networks (#424): mount the operator's CA
+  # bundle into every node and point containerd at it per-registry, so in-node
+  # image pulls validate the intercepted certs instead of failing x509.
+  local ca_bundle reg_cfg="" ca_rc=0
+  local node_ca="/etc/ssl/certs/tracebloc-mitm-ca.crt"
+  # `|| ca_rc=$?` (not a bare `;`): under `set -euo pipefail` a rc-2 from the
+  # command substitution would trip errexit and exit before ca_rc/error below,
+  # giving a bare exit instead of the "can't be read" guidance (Bugbot).
+  ca_bundle="$(_resolve_ca_bundle)" || ca_rc=$?
+  if [[ $ca_rc -eq 2 ]]; then
+    error "$ca_bundle is set but its file can't be read — point it at your corporate CA bundle (PEM) and re-run."
+  fi
+  if [[ -n "$ca_bundle" ]]; then
+    K3D_ARGS+=(-v "${ca_bundle}:${node_ca}@all")
+    # Hard-fail if we can't write the registries.yaml: mounting the CA without the
+    # --registry-config would leave containerd untrusting while we log success —
+    # the operator would think the fix applied and still hit x509 (Bugbot).
+    reg_cfg="$(_write_k3d_registries_config "$node_ca")" \
+      || error "Couldn't write the k3d CA-trust registries config (temp dir/disk?). Re-run; the CA bundle was supplied so we won't proceed without wiring it in."
+    K3D_ARGS+=(--registry-config "$reg_cfg")
+    log "Trusting your network's TLS-inspection CA in the k3d nodes (from ${ca_bundle})."
+  fi
+
   local create_out create_rc
   create_out="$(mktemp)"
   # Wrap the create in a spinner. k3d pulls the runtime image + boots the node
@@ -688,6 +873,7 @@ _create_new_cluster() {
   # it 5 minutes later and the error path below dumps the output.
   spin "$!" "Creating your secure environment…" "$(( (_create_timeout_min + 5) * 60 ))" || create_rc=$?
   [[ -n "$proxy_cfg" ]] && rm -rf "${proxy_cfg%/*}"
+  [[ -n "$reg_cfg" ]] && rm -rf "${reg_cfg%/*}"
   if [[ $create_rc -ne 0 ]]; then
     if grep -qi "already exists\|a cluster with that name already exists" "$create_out" 2>/dev/null; then
       log "Cluster '$CLUSTER_NAME' already exists (detected from k3d message). Using existing cluster."
@@ -709,6 +895,10 @@ _create_new_cluster() {
       spin "$!" "Removing the partially created environment…" 120 \
         || warn "Couldn't remove the partial cluster - run 'k3d cluster delete $CLUSTER_NAME' before re-running."
     fi
+    # Host-daemon x509 (k3d runtime image pull on a TLS-inspecting network, #474)
+    # — name it before dumping the raw k3d error. Empty output (e.g. the timeout
+    # kill above) simply produces no hint.
+    _host_ca_create_hint "$(cat "$create_out" 2>/dev/null)"
     cat "$create_out" >> "${LOG_FILE:-/dev/null}" 2>/dev/null
     cat "$create_out" >&2
     rm -f "$create_out"

@@ -31,10 +31,12 @@ ingestConfig: ""
 # rollout. jobs-manager then runs that exact digest (IfNotPresent). Must
 # be the full canonical sha256 digest; tags are rejected.
 image:
-  # Repository defaults to the GHCR-published image. Customers running an
-  # air-gapped mirror override this (and the parent client chart's
-  # images.ingestor.repository — that is what jobs-manager spawns from).
-  repository: ghcr.io/tracebloc/ingestor
+  # Air-gapped mirror override lives in the PARENT client chart's
+  # images.ingestor.repository — that is what jobs-manager actually spawns
+  # from. This subchart previously carried its own `repository` key, but no
+  # template ever rendered it; it was removed (tracebloc/backend#963) so it
+  # can't be mistaken for a second, non-authoritative override.
+  #
   # Optional per-request pin. Empty (default) = jobs-manager spawns the
   # current published image by floating tag. When set must be
   # sha256:<64 lowercase hex>.
