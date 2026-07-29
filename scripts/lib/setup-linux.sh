@@ -906,7 +906,7 @@ install_rootless_docker() {
   # touch (subuid range / uidmap install) on the root/sudo_nopw path. Only claim
   # "no administrator rights" on the true zero-root path (Bugbot #458).
   if [ "${TB_ROOTLESS_ADMIN_TOUCH:-0}" = "1" ]; then
-    success "Rootless Docker is running as ${_user} — one one-time admin step set up the subuid/subgid range; the daemon itself runs rootless."
+    success "Rootless Docker is running as ${_user} — a one-time admin step set up the host prerequisites (subuid/subgid range and/or cgroup delegation); the daemon itself runs rootless."
   else
     success "Rootless Docker is running as ${_user} — no administrator rights were used."
   fi

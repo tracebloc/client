@@ -487,7 +487,14 @@ ensure_cluster_autostart() {
     # reboot. `is-enabled` is an unprivileged read, so no sudo/password prompt.
     # Only the persistent "enabled" state survives a reboot — "enabled-runtime"
     # is transient and must NOT set the flag.
-    if [[ "$(systemctl is-enabled docker 2>/dev/null)" == "enabled" ]]; then
+    # NOT on the rootless path (#478 / Bugbot): there the cluster runs on the
+    # per-user rootless socket, so the SYSTEM docker.service's on-boot state says
+    # nothing about whether the cluster returns — a system unit that happens to be
+    # enabled (docker installed system-wide, user not in the group → they chose
+    # rootless) would seed a false promise the rootless branch below then can't
+    # honestly retract. On rootless, the user-scope enable+linger below are the
+    # SOLE authority for the flag.
+    if ! _rootless_active && [[ "$(systemctl is-enabled docker 2>/dev/null)" == "enabled" ]]; then
       TB_DOCKER_AUTOSTART=1
     fi
 

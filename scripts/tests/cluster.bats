@@ -650,6 +650,19 @@ _stub_create_cluster_deps() {
   [[ "$output" != *"sudo systemctl enable docker"* ]]
 }
 
+@test "ensure_cluster_autostart: Tier 1 rootless -> system docker.service enabled does NOT seed a false promise when user-enable fails (Bugbot #478)" {
+  OS=Linux; INSTALL_TIER=1; TB_TIER1_ROOTLESS=1; TB_DOCKER_AUTOSTART=0
+  docker()    { if [[ "$1 $2" == "ps -a" ]]; then echo "k3d-tracebloc-server-0"; else record "docker $*"; fi; }
+  sudo()      { record "sudo $*"; }
+  # System docker.service IS enabled (the seed source), but the rootless user-scope
+  # enable FAILS: the rootless path must ignore the system-unit seed, so no promise.
+  systemctl() { record "systemctl $*"; case "$*" in "is-enabled docker") echo enabled; return 0 ;; *) return 1 ;; esac; }
+  loginctl()  { record "loginctl $*"; return 0; }
+  has()       { return 0; }
+  ensure_cluster_autostart
+  [ "${TB_DOCKER_AUTOSTART:-0}" != "1" ]      # system-unit seed ignored on the rootless socket path
+}
+
 @test "ensure_cluster_autostart: Tier 1 flag OFF -> legacy sudo systemctl enable docker (unchanged)" {
   OS=Linux; INSTALL_TIER=1
   unset TB_TIER1_ROOTLESS
