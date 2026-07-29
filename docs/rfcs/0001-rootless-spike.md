@@ -1,7 +1,8 @@
 # RFC 0001 — Spike: rootless Docker as the k3d backend
 
-**Ticket:** tracebloc/backend#1176 · **Epic:** tracebloc/backend#1168 · **RFC:** [0001-least-privilege-install.md](./0001-least-privilege-install.md)
-**Status:** analysis + validation plan (preliminary go/no-go). The experiments in §5 need real target hosts before Tier 1 (#1177) ships.
+**Qualified ID:** `RFC-CLIENT-0001` — cite this document by its qualified ID, never as a bare "RFC 0001"; `backend` and `cli` each have their own 0001. Org-wide index: `docs/rfcs/README.md` in `tracebloc/backend` (private).
+**Ticket:** tracebloc/backend#1176 · **Epic:** tracebloc/backend#1168 · **RFC:** [`RFC-CLIENT-0002` — 0002-least-privilege-install.md](./0002-least-privilege-install.md)
+**Status:** Draft — analysis + validation plan (preliminary go/no-go). The experiments in §5 need real target hosts before Tier 1 (#1177) ships.
 
 ## 0. Why this spike gates Tier 1
 

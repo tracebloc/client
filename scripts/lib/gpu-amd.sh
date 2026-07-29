@@ -24,9 +24,28 @@ _detect_rhel_version() {
 }
 
 # Scrape the directory listing to find the .deb or .rpm filename (portable: -oE not -oP)
+# --max-time 30 tightens curl_secure's default deadline: this fetch is a small HTML
+# index, so a longer wait only ever means a hung mirror — and this call sits in the
+# GPU step with no spinner deadline of its own. Deliberately NOT retry-wrapped:
+# retry() reports its attempts on stdout, which here IS this function's return value.
+# The fetch and the match are captured separately, and neither is allowed to fail
+# this function, because install-k8s.sh sources this file under `set -euo pipefail`:
+#   * a failed fetch (404, timeout, proxy block) would otherwise abort the installer
+#     at the caller's assignment, BEFORE its `[[ -z ... ]] && error ...` could report
+#     it -- a silent abort mid-GPU-step instead of an actionable message. It also
+#     made the RHEL major-version fallback below unreachable.
+#   * `head -1` closing the pipe early can SIGPIPE grep (141), which `pipefail`
+#     propagates as a pipeline failure even when a filename WAS found. That depends
+#     on the index exceeding the pipe buffer, so it fails only on big mirrors --
+#     the worst kind of bug to leave in an installer. Taking the first line with
+#     `${var%%...}` keeps `head` out of a pipeline entirely.
+# The contract is unchanged: the filename on stdout, nothing at all when not found,
+# so emptiness stays the single signal every caller already tests for.
 _find_package_name() {
-  local dir_url="$1" ext="$2"
-  curl -fsSL "$dir_url" | grep -oE "amdgpu-install[^\"<>]*\\.${ext}" | head -1
+  local dir_url="$1" ext="$2" index="" matches=""
+  index="$(curl_secure -fsSL --max-time 30 "$dir_url")" || return 0
+  matches="$(printf '%s\n' "$index" | grep -oE "amdgpu-install[^\"<>]*\\.${ext}")" || return 0
+  printf '%s\n' "${matches%%$'\n'*}"
 }
 
 install_rocm() {
@@ -49,7 +68,7 @@ install_rocm() {
     [[ -z "$deb_name" ]] && error "No amdgpu-install .deb found at ${deb_dir}"
 
     log "Downloading ${deb_name} ..."
-    curl -fsSL "${deb_dir}${deb_name}" -o /tmp/amdgpu-install.deb
+    retry 3 5 curl_secure -fsSL "${deb_dir}${deb_name}" -o /tmp/amdgpu-install.deb
     sudo apt-get install -y /tmp/amdgpu-install.deb
     sudo amdgpu-install -y --usecase=rocm
     rm -f /tmp/amdgpu-install.deb

@@ -282,3 +282,27 @@ EOF
   [ "$status" -eq 0 ]
   [[ "$(cat "$SBX/k8s-ran")" == "TB_FORCE_REINSTALL=1" ]]
 }
+
+# prepare-host is useful precisely on a machine that is already set up (grant
+# ANOTHER researcher docker-group access), so the healthy bailout must not eat
+# it — but it is NOT a reinstall, so TB_FORCE_REINSTALL must stay unset or a
+# stale sub-script without the prepare-host dispatch would treat the run as a
+# forced full provision (Bugbot on #381). Can't pass REF here (env REF itself
+# forces), so stamp DEFAULT_REF the way a release build does.
+@test "prepare-host skips the healthy bailout but does NOT export TB_FORCE_REINSTALL (#381)" {
+  _capture_k8s_force
+  cat > "$BIN/tracebloc" <<'EOF'
+#!/usr/bin/env bash
+[ "$1" = "doctor" ] && exit 0    # healthy — prepare-host must still proceed
+EOF
+  chmod +x "$BIN/tracebloc"
+  # Rewrite only the ASSIGNMENT line (like the release pipeline) — a global
+  # replace would also rewrite the placeholder-detection comparison and the
+  # bootstrap would still see itself as unstamped.
+  sed 's/^DEFAULT_REF=.*/DEFAULT_REF="v9.9.9"/' "$BOOT" > "$SBX/boot.stamped"
+  PATH="$BIN:$PATH" run bash "$SBX/boot.stamped" prepare-host
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"Already set up and healthy"* ]]
+  [ -f "$SBX/k8s-ran" ]
+  [[ "$(cat "$SBX/k8s-ran")" == "TB_FORCE_REINSTALL=unset" ]]
+}

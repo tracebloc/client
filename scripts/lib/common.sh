@@ -7,7 +7,48 @@
 # ── Security hardening ───────────────────────────────────────────────────────
 export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:${PATH}"
 umask 077
+
+# Minimum TLS version, as a bare flag. Retained for backward compatibility only
+# (an out-of-tree caller may still splice it in by hand); everything in this repo
+# goes through curl_secure() below, which names the flag itself rather than
+# reading this — so growing this constant can never silently reshape every fetch
+# in the installer. It must stay a SINGLE flag regardless: two call sites
+# historically quoted it ("$CURL_SECURE"), and a space-separated value collapses
+# into one argv element that curl rejects.
 readonly CURL_SECURE="--tlsv1.2"
+
+# curl_secure — the one way this installer fetches anything.
+#
+# The TLS floor used to be opt-in: every call site had to remember to splice
+# $CURL_SECURE in, and seven of them had silently lost it — including the POST
+# that carries the client's password (backend#1252). A wrapper makes the floor
+# structural instead of remembered: a new call site gets it whether or not its
+# author knew it existed.
+#
+# It is not redundant with modern curl defaults. These installs run on
+# customer-managed hosts, older distros, and behind TLS-inspecting corporate
+# proxies, which negotiate down to whatever the client will accept — which is
+# exactly why this repo adopted an explicit floor instead of trusting defaults.
+#
+# It also supplies default time bounds so an unbounded fetch cannot hang the
+# install. Both defaults are injected BEFORE "$@", so a call site that passes its
+# own --connect-timeout/--max-time still wins (curl honours the LAST occurrence).
+# The one thing the wrapper must not do is impose a deadline where a call site
+# deliberately has none: a large binary download bounds itself with stall
+# detection (--speed-limit/--speed-time) because a hard --max-time would kill a
+# slow-but-healthy link, so those calls keep exactly the behaviour they had.
+#
+# Plain `curl`, not `command curl`: the bats suite mocks transfers by defining a
+# curl shell function, and `command` would bypass the mock and dial the network.
+curl_secure() {
+  local _arg _stall_bounded=0
+  for _arg in "$@"; do
+    case "$_arg" in --speed-limit|--speed-time) _stall_bounded=1; break ;; esac
+  done
+  local -a _bounds=(--connect-timeout "${TB_CURL_CONNECT_TIMEOUT:-30}")
+  (( _stall_bounded )) || _bounds+=(--max-time "${TB_CURL_MAX_TIME:-300}")
+  curl --tlsv1.2 "${_bounds[@]}" "$@"
+}
 
 # ── Colours ──────────────────────────────────────────────────────────────────
 # One brand-grounded palette (design-system tokens): cyan #01a5cc = structure,
@@ -98,6 +139,51 @@ step_header()    { echo -e "  ${TB_HEADING}$1) $2${RESET}"; echo ""; }
 
 # ── Utility ──────────────────────────────────────────────────────────────────
 has() { command -v "$1" &>/dev/null; }
+
+# Execute-gate a freshly-installed tool (#411). The old post-install "check" was a
+# log-only interpolation (`... 2>/dev/null || echo present`) that masked failure,
+# so a corrupt or wrong-architecture binary — a partial pkg/brew install, or a
+# download no checksum path guarded — sat on PATH and failed only later, at
+# cluster-create, after a green "System tools". Actually RUN the tool's cheapest
+# self-check; on failure error() with an arch-aware remedy so the tool step fails
+# loudly instead. NOTE: kubectl is gated with `version --client` (NOT --short,
+# removed in kubectl 1.28+); helm with bare `version` (—short may go the same way).
+#
+# Removal is OPT-IN via a leading `--rm <path>`: pass it with the path where the
+# installer PLACES the binary (TB_TOOLS_DIR/<tool>). On failure we remove that path
+# ONLY when the binary that actually ran is that exact file (same inode, `-ef`).
+# So: a broken binary WE installed there (fresh OR left by a prior run) is cleared,
+# letting a re-run self-heal (Bugbot: otherwise `has` stays true → stuck loop);
+# but a brew/pkg-manager copy that lives elsewhere on PATH is never deleted — the
+# resolved binary won't match our path (reviewer). Callers may pass --rm on every
+# path; the `-ef` guard sorts out ownership. macOS/brew callers pass no --rm.
+# Usage: assert_tool_runs [--rm <placed-path>] <name> <version-arg>...
+assert_tool_runs() {
+  local rm_path=""
+  if [[ "${1:-}" == "--rm" ]]; then rm_path="$2"; shift 2; fi
+  local name="$1"; shift
+  local out
+  if out="$("$name" "$@" 2>&1)"; then
+    log "$name OK: $(printf '%s\n' "$out" | head -1)"
+    return 0
+  fi
+  # Remove only the file we placed AND only if it's the binary that just failed.
+  if [[ -n "$rm_path" && -f "$rm_path" ]]; then
+    local resolved; resolved="$(command -v "$name" 2>/dev/null || true)"
+    [[ -n "$resolved" && "$resolved" -ef "$rm_path" ]] && rm -f "$rm_path" 2>/dev/null || true
+  fi
+  error "$name was installed but won't run — a corrupt or wrong-architecture binary (this machine is ${ARCH:-$(uname -m)}). Re-run the installer to re-download it; if it recurs, remove ${rm_path:-the $name on your PATH} (and any package-manager copy) first."
+}
+
+# Sanitize a minutes-valued env override to a base-10 integer, else <default>.
+# The 10# base prefix matters: bash arithmetic reads a leading zero as octal,
+# so 08/09 would ABORT $(( … )) under set -e (mid-create, leaving a partial
+# cluster) and 010 would silently become 8 (Bugbot #442).
+tb_minutes_or() {
+  local v="$1" def="$2"
+  case "$v" in ''|*[!0-9]*) echo "$def"; return 0 ;; esac
+  echo $((10#$v))
+}
 
 # Strip ANSI escape sequences and C0 control characters from a value. A raw
 # `read` captures whatever the terminal sends — this can include:
@@ -201,18 +287,51 @@ check_docker_arch_mac() {
 }
 
 # ── Spinner — hides noisy command output behind an animated status line ──────
-#  Usage:  spin <pid> "Installing foo…"
+#  Usage:  spin <pid> "Installing foo…" [deadline_seconds]
 #  The background process's stdout/stderr should already be redirected to a file
 #  before calling spin. spin waits for the PID to exit and returns its exit code.
+#  With the optional third argument, a still-running PID is killed once the
+#  deadline passes and spin returns 124 (GNU timeout's convention) — the
+#  backstop for commands that can wedge indefinitely (#426).
 spin() {
-  local pid="$1" msg="$2"
+  local pid="$1" msg="$2" deadline_s="${3:-}"
   local frames=('⠋' '⠙' '⠹' '⠸' '⠼' '⠴' '⠦' '⠧' '⠇' '⠏')
   local i=0
+  local ticks=0                           # one tick ≈ 0.12s
+  local _spin_kids="" _spin_k=""          # deadline path: captured child PIDs
 
   tput civis 2>/dev/null || true          # hide cursor
   while kill -0 "$pid" 2>/dev/null; do
+    if [[ -n "$deadline_s" ]] && (( ticks * 12 >= deadline_s * 100 )); then
+      # Children FIRST: the pid is often a wrapper subshell (cluster.sh's
+      # `( k3d … ) &`) — signalling only the wrapper orphans the real worker,
+      # which keeps running (k3d keeps creating the cluster) after the install
+      # has already failed, racing any retry (Bugbot #442). Capture the child
+      # PIDs BEFORE any signal: once the wrapper dies they reparent to init
+      # and pkill -P can't see them (Bugbot #442 r2), so the KILL sweep must
+      # address them by captured PID. Harmless when bash exec-optimized the
+      # wrapper away — then $pid IS the worker and there are no children.
+      # Every line below is failure-proofed (`|| true`): pkill returns 1 when
+      # there are no children, kill/wait fail on already-reaped PIDs, and wait
+      # reports the kill signal — under `set -e` any of those would abort the
+      # deadline path before `return 124`, so the caller would never see the
+      # timeout (no warn/hint, no partial-cluster cleanup) (Bugbot #442 r3).
+      _spin_kids="$(pgrep -P "$pid" 2>/dev/null || true)"
+      pkill -TERM -P "$pid" 2>/dev/null || true
+      kill "$pid" 2>/dev/null || true
+      sleep 0.5
+      for _spin_k in $_spin_kids; do
+        kill -9 "$_spin_k" 2>/dev/null || true
+      done
+      kill -9 "$pid" 2>/dev/null || true
+      wait "$pid" 2>/dev/null || true
+      printf "\r\033[K"
+      tput cnorm 2>/dev/null || true
+      return 124
+    fi
     printf "\r  ${CYAN}%s${RESET} %s" "${frames[i]}" "$msg"
     i=$(( (i + 1) % ${#frames[@]} ))
+    ticks=$(( ticks + 1 ))
     sleep 0.12
   done
 
@@ -236,6 +355,32 @@ spin_cmd() {
     echo -e "  ${DIM}Last 10 lines of log:${RESET}" >&2
     tail -10 "$logfile" >&2
     return 1
+  fi
+}
+
+# ── spin_cmd with a hard deadline (#426) ─────────────────────────────────────
+#  Usage:  spin_cmd_bounded <seconds> "Doing the thing…" cmd args…
+#  For commands that can wedge indefinitely against a stuck endpoint (helm
+#  talking to a wedged kube-apiserver). Same quiet-log capture + failure tail
+#  as spin_cmd; returns the command's real exit code, or 124 when the deadline
+#  killed it (with a timeout note so the user knows it was us, not the tool).
+spin_cmd_bounded() {
+  local secs="$1" msg="$2"; shift 2
+  local logfile="${LOG_FILE:-/tmp/tracebloc-spin.log}"
+  "$@" >> "$logfile" 2>&1 &
+  local pid=$!
+  local rc=0
+  spin "$pid" "$msg" "$secs" || rc=$?
+  if (( rc == 124 )); then
+    echo -e "  ${RED}${BOLD}✖ ${msg} — timed out after ${secs}s${RESET}" >&2
+    echo -e "  ${DIM}Last 10 lines of log:${RESET}" >&2
+    tail -10 "$logfile" >&2
+    return 124
+  elif (( rc != 0 )); then
+    echo -e "  ${RED}${BOLD}✖ ${msg}${RESET}" >&2
+    echo -e "  ${DIM}Last 10 lines of log:${RESET}" >&2
+    tail -10 "$logfile" >&2
+    return $rc
   fi
 }
 
@@ -321,9 +466,10 @@ download_with_progress() {
   local url="$1" dest="$2" label="$3"
 
   local total_bytes
-  # -m bounds the HEAD probe so a stalled server can't hang it (it's not
-  # retry-wrapped and its failure just means "no total" -> indeterminate bar).
-  total_bytes=$(curl -fsSLI -m 15 "$url" 2>/dev/null \
+  # -m 15 tightens curl_secure's default deadline for the HEAD probe so a stalled
+  # server can't hang it (it's not retry-wrapped and its failure just means
+  # "no total" -> indeterminate bar).
+  total_bytes=$(curl_secure -fsSLI -m 15 "$url" 2>/dev/null \
     | awk 'tolower($0) ~ /content-length/ {gsub(/[^0-9]/,"",$2); print $2}' \
     | tail -1)
 
@@ -343,8 +489,11 @@ download_with_progress() {
   # transfer (<1 KB/s for 60s) without capping a legitimately slow-but-progressing
   # large download. Without these the backgrounded curl is monitored only by
   # `kill -0` (no deadline, no kill), so a slow-loris / mid-stream stall would
-  # hang the progress loop forever.
-  curl -fSL --connect-timeout 30 --speed-limit 1024 --speed-time 60 \
+  # hang the progress loop forever. The stall flags are also how curl_secure knows
+  # NOT to add its default --max-time here: this path carries the large (hundreds
+  # of MB) Docker Desktop DMG, where a fixed deadline would fail a slow-but-healthy
+  # link.
+  curl_secure -fSL --connect-timeout 30 --speed-limit 1024 --speed-time 60 \
     -o "$dest" "$url" >> "$logfile" 2>&1 &
   local curl_pid=$!
 
@@ -465,6 +614,13 @@ K8S_VERSION="${K8S_VERSION:-v1.29.4-k3s1}"
 # installs deterministic and immune to the releases/latest lookup, which breaks
 # under GitHub rate limiting on shared egress IPs (CI runners, corporate NAT).
 K3D_VERSION="${K3D_VERSION:-v5.9.0}"
+# Pinned default; ONLY the literal HELM_VERSION=latest resolves the newest Helm
+# release at install time (an empty value falls back to this pin, like the two
+# above). The tarball is fetched directly from get.helm.sh and verified against
+# its published .sha256sum either way (setup-linux.sh) — helm's get-helm-3
+# script is NOT used: it floats on the mutable helm/helm@main and needs
+# openssl, which minimal cloud images don't ship (#395).
+HELM_VERSION="${HELM_VERSION:-v4.2.3}"
 HOST_DATA_DIR="${HOST_DATA_DIR:-$HOME/.tracebloc}"
 # Optional separate host dir for the big DATASET volume (backend#743). Empty
 # (default) keeps datasets under HOST_DATA_DIR. When set — e.g. a network/NFS
@@ -674,6 +830,7 @@ Advanced configuration (environment variables):
   AGENTS         Worker nodes                    (default: 1)
   K8S_VERSION    k3s image tag                   (default: v1.29.4-k3s1)
   K3D_VERSION    k3d release tag                 (default: v5.9.0; "latest" resolves at install time)
+  HELM_VERSION   Helm release tag                (default: v4.2.3; "latest" resolves at install time)
   HOST_DATA_DIR  Persistent data directory       (default: ~/.tracebloc)
                  Must be on a LOCAL disk — NFS/CIFS/SMB is rejected (the database
                  corrupts on network storage). TRACEBLOC_ALLOW_NETWORK_FS=1 overrides.

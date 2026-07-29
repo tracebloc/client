@@ -113,6 +113,69 @@ seed_release_data() { mkdir -p "$HOST_DATA_DIR/tracebloc/data/ds1"; : >"$HOST_DA
   [ -e "$HOST_DATA_DIR/mysql/ibdata1" ]   # kept
 }
 
+# node-local has no /tracebloc host bind-mount, so "reuse" cannot adopt the host
+# data — the cluster starts empty in-node. reuse must stay honest, not claim
+# adoption (Bugbot r3655015727 / RFC-0003 §4 / #367).
+@test "guard: node-local reuse keeps data on disk but says it is NOT adopted" {
+  seed_flat_mysql
+  TB_STORAGE_MODE=node-local TB_LEFTOVER_ACTION=reuse run guard_leftover_data
+  [ "$status" -eq 0 ]
+  [ -e "$HOST_DATA_DIR/mysql/ibdata1" ]              # left on disk (not wiped)
+  [[ "$output" == *"can't adopt"* ]]                # honest: not adopted
+  [[ "$output" == *"starts empty"* ]]
+  [[ "$output" != *"keep and adopt the existing data"* ]]
+}
+
+@test "guard: node-local interactive reuse ('r') -> honest label, no false adopt claim" {
+  seed_flat_mysql
+  TB_STORAGE_MODE=node-local TB_TTY=/dev/stdin run guard_leftover_data <<< "r"
+  [ "$status" -eq 0 ]
+  [ -e "$HOST_DATA_DIR/mysql/ibdata1" ]              # kept, not wiped
+  [[ "$output" == *"NOT adopted"* ]]                # honest option label
+  [[ "$output" != *"reuse — keep and adopt the existing data"* ]]
+}
+
+# hostpath reuse is unchanged: it still adopts, no node-local warning.
+@test "guard: hostpath reuse still adopts (no node-local 'can't adopt' warning)" {
+  seed_flat_mysql
+  TB_STORAGE_MODE=hostpath TB_LEFTOVER_ACTION=reuse run guard_leftover_data
+  [ "$status" -eq 0 ]
+  [ -e "$HOST_DATA_DIR/mysql/ibdata1" ]
+  [[ "$output" != *"can't adopt"* ]]
+}
+
+# The node-local prompt shows "[r] keep …" — the parser must accept the shown
+# word (keep/k) as well as r/reuse (any case), or the user aborts unexpectedly
+# instead of keeping-and-continuing (Bugbot r3655253296).
+@test "guard: node-local interactive keep/k/reuse/r (any case) all keep-and-continue, never abort" {
+  for word in keep k reuse r KEEP Keep K R Reuse; do
+    seed_flat_mysql
+    TB_STORAGE_MODE=node-local TB_TTY=/dev/stdin run guard_leftover_data <<< "$word"
+    [ "$status" -eq 0 ]                          # continues (reuse action), not abort
+    [ -e "$HOST_DATA_DIR/mysql/ibdata1" ]         # data kept
+    [[ "$output" == *"starts empty"* ]]           # took the honest node-local reuse branch
+  done
+}
+
+# The non-interactive (no-TTY) recovery guidance must describe --reuse-data
+# honestly per storage mode (Bugbot r3655253306).
+@test "guard: non-interactive node-local --reuse-data guidance is honest (NOT adopted)" {
+  seed_flat_mysql
+  TB_STORAGE_MODE=node-local TB_TTY=/no/such/tty run guard_leftover_data
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"no choice was given"* ]]
+  [[ "$output" == *"NOT adopted"* ]]              # honest --reuse-data description
+  [[ "$output" != *"--reuse-data                    adopt the existing data"* ]]
+  [ -e "$HOST_DATA_DIR/mysql/ibdata1" ]           # fail-safe: data untouched
+}
+
+@test "guard: non-interactive hostpath --reuse-data still says 'adopt' (unchanged)" {
+  seed_flat_mysql
+  TB_STORAGE_MODE=hostpath TB_TTY=/no/such/tty run guard_leftover_data
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"adopt the existing data"* ]]
+}
+
 @test "guard: --wipe-data (TB_LEFTOVER_ACTION=wipe) removes the detected data dirs" {
   seed_flat_mysql
   seed_release_data

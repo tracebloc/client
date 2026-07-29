@@ -8,7 +8,7 @@ install_homebrew() {
   if ! has brew; then
     local brew_script
     brew_script="$(mktemp)"
-    curl -fsSL $CURL_SECURE https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh \
+    curl_secure -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh \
       -o "$brew_script"
     spin_cmd "Installing Homebrew…" env NONINTERACTIVE=1 /bin/bash "$brew_script"
     rm -f "$brew_script"
@@ -177,7 +177,7 @@ install_docker_desktop() {
 
     local checksum_url="${dmg_url}.sha256sum"
     local expected_hash
-    expected_hash=$(curl -fsSL $CURL_SECURE "$checksum_url" 2>/dev/null | awk '{print $1}' || true)
+    expected_hash=$(curl_secure -fsSL "$checksum_url" 2>/dev/null | awk '{print $1}' || true)
     if [[ -n "$expected_hash" ]]; then
       local actual_hash
       actual_hash=$(shasum -a 256 "$dmg_path" | awk '{print $1}')
@@ -253,20 +253,25 @@ install_docker_desktop() {
 }
 
 install_macos_cli_tools() {
+  # brew delivers these binaries with no checksum of our own (#429), so the
+  # execute-gate (#411) is the only thing standing between a partial/wrong-arch
+  # install and a green "System tools" that dies at cluster-create.
   if ! has kubectl; then
     spin_cmd "Installing system tools…" brew install kubectl
   fi
-  log "kubectl: $(kubectl version --client --short 2>/dev/null || echo installed)"
+  assert_tool_runs kubectl version --client
 
   if ! has k3d; then
     spin_cmd "Installing system tools…" brew install k3d
   fi
-  log "k3d: $(k3d version | head -1 2>/dev/null || echo installed)"
+  assert_tool_runs k3d version
 
   if ! has helm; then
     spin_cmd "Installing system tools…" brew install helm
   fi
-  log "helm: $(helm version --short 2>/dev/null || echo installed)"
+  # bare `helm version` (not --short: may be dropped like kubectl's). No --rm:
+  # brew owns these binaries; deleting a formula's symlink just wedges the re-run.
+  assert_tool_runs helm version
 
   success "System tools ready"
 }

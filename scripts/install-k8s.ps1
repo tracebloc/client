@@ -66,6 +66,76 @@ function RefreshPath {
               [System.Environment]::GetEnvironmentVariable("PATH","User")
 }
 
+# Shared braille spinner frames for the progress helpers below.
+$script:SpinnerFrames = @([char]0x2807, [char]0x2819, [char]0x2839, [char]0x2838, [char]0x283C, [char]0x2834, [char]0x2826, [char]0x2827, [char]0x2847, [char]0x280F)
+
+# Spin a braille spinner while a process runs, bounded by a deadline (#426):
+# `k3d cluster create --wait` has no timeout of its own, so a stalled image
+# pull would otherwise spin forever. Returns $true when the process exited on
+# its own, $false on deadline expiry (the process is killed best-effort).
+# Extracted as a function so the deadline/kill path is unit-testable (#412).
+function Wait-ProcessWithDeadline {
+  param([object]$Process, [datetime]$Deadline, [string]$Message)
+  $frames = $script:SpinnerFrames
+  $f = 0
+  Write-Host -NoNewline "  "
+  while (-not $Process.HasExited) {
+    if ((Get-Date) -gt $Deadline) {
+      try { $Process.Kill() } catch {}
+      Write-Host "`r                                                   `r" -NoNewline
+      return $false
+    }
+    Write-Host "`r  " -NoNewline
+    Write-Host $frames[$f] -ForegroundColor Cyan -NoNewline
+    Write-Host " $Message" -NoNewline
+    $f = ($f + 1) % $frames.Count
+    Start-Sleep -Seconds 2
+  }
+  Write-Host "`r                                                   `r" -NoNewline
+  return $true
+}
+
+# Wait on a background job with a visible heartbeat so a long step never leaves
+# the console silent for more than a couple of seconds (#415). Prints a spinner +
+# elapsed/timeout line while the job runs; returns $true if the job finished
+# before the deadline, $false on timeout (the job is stopped best-effort; the
+# caller still owns Remove-Job). Extracted so the progress/timeout contract is
+# unit-testable without a real slow job.
+function Wait-JobWithProgress {
+  param(
+    [Parameter(Mandatory)] $Job,
+    [int]$TimeoutSec = 180,
+    [string]$Message = "Working",
+    [int]$PollSeconds = 2
+  )
+  $frames = $script:SpinnerFrames
+  $f = 0; $elapsed = 0
+  while ($Job.State -eq "Running" -and $elapsed -lt $TimeoutSec) {
+    Write-Host "`r  " -NoNewline
+    Write-Host $frames[$f] -ForegroundColor Cyan -NoNewline
+    Write-Host " $Message ... ${elapsed}s / ${TimeoutSec}s" -NoNewline
+    $f = ($f + 1) % $frames.Count
+    Start-Sleep -Seconds $PollSeconds
+    $elapsed += $PollSeconds
+  }
+  Write-Host "`r                                                                      `r" -NoNewline
+  if ($Job.State -eq "Running") {
+    Stop-Job $Job -ErrorAction SilentlyContinue
+    return $false
+  }
+  return $true
+}
+
+# Background jobs spawn their runspace in the user's HOME directory. On managed
+# machines (roaming profiles) HOME is often a UNC share (\\fileserver\home\user);
+# every cmd.exe a job starts there prints "CMD.EXE was started with the above
+# path as the current directory. UNC paths are not supported." and its stderr
+# surfaces as a red RemoteException error record — alarming noise on a healthy
+# install (#409). Every Start-Job below passes this as -InitializationScript to
+# pin the job to a local working directory before it runs anything. (SystemRoot
+# is always local; the guard makes it a no-op on non-Windows Pester runs.)
+$script:JobInit = { if ($env:SystemRoot) { Set-Location $env:SystemRoot } }
+
 function Get-WindowsArch {
   switch ($env:PROCESSOR_ARCHITECTURE) {
     "AMD64"  { return "amd64" }
@@ -104,6 +174,41 @@ function Invoke-WithRetry {
       Start-Sleep -Seconds $DelaySeconds
     }
   }
+}
+
+# Execute-gate a freshly-installed tool (#411). The old post-install "check" was a
+# Log interpolation whose failure is non-terminating, so a corrupt or wrong-arch
+# binary (winget shims / partial installs skip the direct path's checksum verify)
+# still reached "System tools" and only died at cluster-create. Actually RUN the
+# tool's self-check; on failure Err with an arch-aware remedy so Step 1 fails
+# loudly. NOTE: kubectl uses `version --client` (NOT --short — removed in 1.28+);
+# helm uses bare `version` (--short may go the same way).
+#
+# -BinPath is our own install location. On failure we remove it ONLY when the
+# binary that actually ran resolves to it — so a broken copy WE placed (fresh or
+# left by a prior run) self-heals on re-run, while a winget/choco/pre-existing copy
+# elsewhere on PATH is never deleted (reviewer + Bugbot). Callers may pass -BinPath
+# on every path; the resolved-source guard sorts out ownership.
+function Assert-ToolRuns {
+  param(
+    [Parameter(Mandatory)][string]$Name,
+    [Parameter(Mandatory)][string[]]$VersionArgs,
+    [string]$BinPath
+  )
+  $ok = $false; $out = $null
+  try {
+    $out = (& $Name @VersionArgs 2>&1)
+    $ok  = ($LASTEXITCODE -eq 0)
+  } catch { $ok = $false }
+  if (-not $ok) {
+    if ($BinPath -and (Test-Path $BinPath)) {
+      $resolved = (Get-Command $Name -ErrorAction SilentlyContinue).Source
+      if ($resolved -and ($resolved -eq $BinPath)) { Remove-Item $BinPath -Force -ErrorAction SilentlyContinue }
+    }
+    $arch = Get-WindowsArch
+    Err "$Name was installed but won't run -- a corrupt or wrong-architecture binary (this machine is $arch). Re-run this script to re-download it; if it recurs, remove any $Name installed via a package manager (winget/choco) first, then re-run."
+  }
+  Log "$Name OK: $(($out | Select-Object -First 1))"
 }
 
 # Sanitize workspace name to comply with DNS-1123
@@ -176,6 +281,13 @@ Advanced configuration (environment variables):
   -NoReboot      Skip reboot prompt after enabling Windows features
   HOST_DATA_DIR  Persistent data directory       (default: ~\.tracebloc)
 
+Reinstalling on a machine that still holds data:
+  A new install won't silently adopt data left under HOST_DATA_DIR (both the
+  flat and per-release layouts) — it stops and asks reuse / wipe / different dir.
+  Non-interactive: TB_LEFTOVER_ACTION=reuse|wipe, or HOST_DATA_DIR=<new-path>
+  (with no choice and no terminal the install aborts). Bypass entirely with
+  TRACEBLOC_SKIP_LEFTOVER_GUARD=1.
+
 macOS / Linux:
   curl -fsSL https://raw.githubusercontent.com/tracebloc/client/main/scripts/install.sh | bash
 
@@ -189,12 +301,11 @@ Learn more: https://docs.tracebloc.io
 #  INPUT VALIDATION
 # =============================================================================
 
-function Confirm-Config {
-  if ($CLUSTER_NAME -notmatch '^[a-zA-Z][a-zA-Z0-9._-]{0,62}$') {
-    Err ("CLUSTER_NAME must start with a letter, contain only [a-zA-Z0-9._-], max 63 chars (got '" + $CLUSTER_NAME + "')")
-  }
-  if ($SERVERS -notmatch '^[1-9]\d*$') { Err ("SERVERS must be a positive integer >= 1 (got '" + $SERVERS + "')") }
-  if ($AGENTS  -notmatch '^\d+$') { Err ("AGENTS must be a non-negative integer (got '" + $AGENTS + "')") }
+# Resolve + validate HOST_DATA_DIR: it must be under USERPROFILE and never a
+# system path. Sets $script:HOST_DATA_DIR to the resolved absolute path. Shared
+# by Confirm-Config and the leftover-data guard's "install into a different
+# directory" path so the two can't drift.
+function Confirm-DataDir {
   $dataDir = [System.IO.Path]::GetFullPath($HOST_DATA_DIR)
   $userProfile = [System.IO.Path]::GetFullPath($env:USERPROFILE)
   if (-not $dataDir.StartsWith($userProfile, [StringComparison]::OrdinalIgnoreCase)) {
@@ -207,6 +318,15 @@ function Confirm-Config {
     }
   }
   $script:HOST_DATA_DIR = $dataDir
+}
+
+function Confirm-Config {
+  if ($CLUSTER_NAME -notmatch '^[a-zA-Z][a-zA-Z0-9._-]{0,62}$') {
+    Err ("CLUSTER_NAME must start with a letter, contain only [a-zA-Z0-9._-], max 63 chars (got '" + $CLUSTER_NAME + "')")
+  }
+  if ($SERVERS -notmatch '^[1-9]\d*$') { Err ("SERVERS must be a positive integer >= 1 (got '" + $SERVERS + "')") }
+  if ($AGENTS  -notmatch '^\d+$') { Err ("AGENTS must be a non-negative integer (got '" + $AGENTS + "')") }
+  Confirm-DataDir   # resolve + validate HOST_DATA_DIR (shared with the leftover-data guard's new-dir path)
 
   # backend#743: optional dataset dir. Unlike HOST_DATA_DIR it MAY live outside
   # USERPROFILE (a separate / network drive). It must already EXIST and be
@@ -274,9 +394,9 @@ function Print-Roadmap {
   Hint ([string]([char]0x2500) * 5)
   Hint "1. Check system requirements"
   Hint "2. Set up secure compute environment"
-  Hint "3. Install tracebloc client"
-  Hint "4. Connect to tracebloc network"
-  Hint "5. Install the tracebloc CLI"
+  Hint "3. Install the tracebloc CLI"
+  Hint "4. Register this machine"
+  Hint "5. Install tracebloc client"
   Write-Host ""
 }
 
@@ -396,7 +516,7 @@ function Enable-VirtualisationFeatures {
   Ok "System features"
 
   Log "Updating WSL..."
-  $wslJob = Start-Job -ScriptBlock { cmd /c "wsl --update 2>&1" }
+  $wslJob = Start-Job -InitializationScript $JobInit -ScriptBlock { cmd /c "wsl --update 2>&1" }
   Write-Host -NoNewline "  "
   $wslTimeoutSec = 90
   $wslElapsed = 0
@@ -418,7 +538,7 @@ function Enable-VirtualisationFeatures {
   }
   Remove-Job -Job $wslJob -Force
 
-  $wslSetJob = Start-Job -ScriptBlock { cmd /c "wsl --set-default-version 2 2>&1" }
+  $wslSetJob = Start-Job -InitializationScript $JobInit -ScriptBlock { cmd /c "wsl --set-default-version 2 2>&1" }
   $wslSetDone = $wslSetJob | Wait-Job -Timeout 20
   if ($wslSetDone) {
     Receive-Job $wslSetJob | Out-Null
@@ -483,7 +603,13 @@ function Install-DockerDesktop {
   if (-not $dockerRunning) {
     Start-Process $dockerExe -ErrorAction SilentlyContinue
 
-    $maxWait = 60
+    # A first-ever Docker Desktop start on AV-heavy corporate machines
+    # routinely needs 5-10 minutes (WSL bootstrap, image unpack). The old
+    # 3-minute cap turned a normal cold start into a failed install plus a
+    # manual re-run (#413). Default 10 minutes; TB_DOCKER_WAIT_MIN overrides.
+    $waitMin = 10
+    if ("$env:TB_DOCKER_WAIT_MIN" -match '^\d+$') { $waitMin = [int]$env:TB_DOCKER_WAIT_MIN }
+    $maxWait = $waitMin * 20                     # 3s per iteration
     Write-Host -NoNewline "  "
     $frames = @([char]0x2807, [char]0x2819, [char]0x2839, [char]0x2838, [char]0x283C, [char]0x2834, [char]0x2826, [char]0x2827, [char]0x2847, [char]0x280F)
     $f = 0
@@ -493,26 +619,41 @@ function Install-DockerDesktop {
         $dkOut = (docker info --format '{{.ID}}' 2>$null) | Out-String
         if (-not [string]::IsNullOrWhiteSpace($dkOut)) { $dockerRunning = $true; break }
       } catch {}
+      # Honest elapsed status after the first minute — silent dead air on a
+      # slow first start reads as a hang.
+      $label = " Waiting for Docker..."
+      if ($i -ge 20) { $label = " Waiting for Docker... ($([math]::Floor($i / 20)) min elapsed; a first start can take up to $waitMin)" }
       Write-Host "`r  " -NoNewline
       Write-Host $frames[$f] -ForegroundColor Cyan -NoNewline
-      Write-Host " Waiting for Docker..." -NoNewline
+      Write-Host $label -NoNewline
       $f = ($f + 1) % $frames.Count
     }
-    Write-Host "`r                                    `r" -NoNewline
+    Write-Host ("`r" + (" " * 78) + "`r") -NoNewline
 
     if (-not $dockerRunning) {
       Write-Host ""
-      Warn "Docker is not responding yet."
-      Hint "This usually means it's still starting up."
-      Write-Host ""
-      Hint "1. Look for the Docker whale icon in your system tray"
-      Hint "2. If Docker is open, wait until it says 'Docker Desktop is running'"
-      Hint "3. If Docker shows an error window instead (e.g. 'Virtualization support not detected' or a WSL update prompt), fix that first - it may need a reboot"
-      Hint "4. Re-run this script once it's ready"
-      Write-Host ""
-      Hint "Nothing is broken -- Docker just needs a moment."
-      Write-Host ""
-      Err "Docker did not start in time. Re-run this script once Docker is ready."
+      # Name the observed state instead of a generic retry request (#413).
+      $ddProc = Get-Process "Docker Desktop" -ErrorAction SilentlyContinue
+      if (-not $ddProc) {
+        # Exited = crashed/blocked, not slow — the slow-start reassurance and
+        # the wait-override hint would point operators at the wrong fix
+        # (Bugbot #440): raising the wait can't help a dead process.
+        Warn "Docker Desktop is not running (its process exited)."
+        Hint "Start Docker Desktop from the Start menu. If it shows an error window"
+        Hint "(virtualization support, a WSL update prompt), fix that first - it may need a reboot."
+        Write-Host ""
+        Err "Docker Desktop exited before its engine came up. Start it, fix anything it reports, then re-run this script."
+      } else {
+        Warn "Docker Desktop is running, but its engine didn't come up within $waitMin minutes."
+        Hint "1. Look for the Docker whale icon in your system tray"
+        Hint "2. If Docker is open, wait until it says 'Docker Desktop is running'"
+        Hint "3. If Docker shows an error window instead (e.g. 'Virtualization support not detected' or a WSL update prompt), fix that first - it may need a reboot"
+        Write-Host ""
+        Hint "Nothing is broken -- a first start can be slow. Re-run this script once Docker is ready."
+        Hint "(TB_DOCKER_WAIT_MIN overrides the wait, e.g. `$env:TB_DOCKER_WAIT_MIN = '20'.)"
+        Write-Host ""
+        Err "Docker did not start within $waitMin minutes. Re-run this script once Docker is ready."
+      }
     }
   }
 
@@ -523,23 +664,45 @@ function Install-DockerDesktop {
 #  NVIDIA CONTAINER TOOLKIT (inside WSL2)
 # =============================================================================
 
+# Copy-pastable manual remedy printed whenever GPU setup can't finish on its own
+# (#415). Mirrors the steps in the $nctScript heredoc below so a user can run them
+# by hand inside WSL; ends with the `tracebloc doctor` follow-up so "later" is an
+# actual next action rather than a vague pointer.
+function Show-GpuManualRemedy {
+  param([string]$Distro = "Ubuntu")
+  Warn "GPU acceleration isn't set up -- your environment will run in CPU mode."
+  Hint "To enable it later, open '$Distro' from the Start Menu and run:"
+  Hint "    curl -fsSL --tlsv1.2 --connect-timeout 30 --max-time 30 https://nvidia.github.io/libnvidia-container/gpgkey | sudo gpg --dearmor -o /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg"
+  Hint "    curl -fsSL --tlsv1.2 --connect-timeout 30 --max-time 30 https://nvidia.github.io/libnvidia-container/stable/deb/nvidia-container-toolkit.list | sed 's#deb https://#deb [signed-by=/usr/share/keyrings/nvidia-container-toolkit-keyring.gpg] https://#g' | sudo tee /etc/apt/sources.list.d/nvidia-container-toolkit.list"
+  Hint "    sudo apt-get update && sudo apt-get install -y nvidia-container-toolkit"
+  Hint "    sudo nvidia-ctk runtime configure --runtime=docker --set-as-default"
+  Hint "Then check status and re-run tracebloc:  tracebloc doctor"
+}
+
+# GPU setup is best-effort and never fatal: on any failure it prints a runnable
+# manual remedy (#415) and returns, leaving K3D_GPU_FLAG empty so the cluster is
+# created in CPU mode. It runs in Step 1 (before New-K3dCluster) because the
+# --gpus flag is decided here; moving it to a post-install step would mean
+# recreating the cluster to add the flag -- the exact churn #431 warns against --
+# so instead every long sub-step below shows a heartbeat and CPU mode always wins.
 function Install-NvidiaContainerToolkit {
   if ($GPU_VENDOR -ne "nvidia" -or -not $NVIDIA_DRIVER_OK) { return }
 
+  Info "Setting up GPU acceleration (NVIDIA container toolkit) in WSL2 -- optional; CPU mode works either way."
   Log "Setting up NVIDIA container toolkit in WSL2"
 
-  $wslListJob = Start-Job -ScriptBlock {
+  $wslListJob = Start-Job -InitializationScript $JobInit -ScriptBlock {
     $prevEncoding = [Console]::OutputEncoding
     [Console]::OutputEncoding = [System.Text.Encoding]::Unicode
     $raw = wsl --list --quiet 2>$null
     [Console]::OutputEncoding = $prevEncoding
     return $raw
   }
-  $wslListDone = $wslListJob | Wait-Job -Timeout 30
-  if (-not $wslListDone) {
-    Stop-Job $wslListJob; Remove-Job $wslListJob -Force
+  if (-not (Wait-JobWithProgress -Job $wslListJob -TimeoutSec 30 -Message "Checking for a WSL2 distro")) {
+    Remove-Job $wslListJob -Force
     Warn "WSL did not respond in time. Skipping GPU container toolkit."
     Hint "Run 'wsl --update' manually, then re-run this script for GPU support."
+    Show-GpuManualRemedy
     return
   }
   $distroRaw = Receive-Job $wslListJob
@@ -550,24 +713,41 @@ function Install-NvidiaContainerToolkit {
   if (-not $wslDistro -and $distros.Count -gt 0) { $wslDistro = $distros[0] }
 
   if (-not $wslDistro) {
+    Info "No WSL2 distro found -- installing Ubuntu (a few hundred MB; this can take several minutes)..."
     Log "No WSL2 distro found -- installing Ubuntu..."
-    cmd /c "wsl --install -d Ubuntu --no-launch 2>&1" | Out-Null
-    cmd /c "wsl --setdefault Ubuntu 2>&1" | Out-Null
+    $ubuntuJob = Start-Job -InitializationScript $JobInit -ScriptBlock {
+      cmd /c "wsl --install -d Ubuntu --no-launch 2>&1"
+      cmd /c "wsl --setdefault Ubuntu 2>&1"
+    }
+    if (-not (Wait-JobWithProgress -Job $ubuntuJob -TimeoutSec 600 -Message "Downloading and installing Ubuntu")) {
+      Remove-Job $ubuntuJob -Force
+      Warn "Ubuntu WSL2 install timed out."
+      Hint "Install it manually, then re-run this script for GPU support:"
+      Hint "    wsl --install -d Ubuntu"
+      Hint "Then check status and re-run tracebloc:  tracebloc doctor"
+      return
+    }
+    Receive-Job $ubuntuJob | Out-Null
+    Remove-Job $ubuntuJob -Force
     Warn "Ubuntu WSL2 installed but needs first-run setup."
     Hint "Open Ubuntu from the Start Menu and set a username/password."
     Hint "Then re-run this script for GPU support."
     return
   }
 
+  Info "Using WSL2 distro: $wslDistro"
   Log "Using WSL2 distro: $wslDistro"
 
   $nctScript = @'
 #!/bin/bash
 set -e
 if command -v nvidia-ctk &>/dev/null; then echo "NCT already installed."; exit 0; fi
-curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey \
+# --tlsv1.2 --connect-timeout/--max-time inline: this runs inside WSL2, where
+# common.sh's curl_secure() isn't available, so the floor and the bounds are spelled
+# out the same way the bootstrap (install.sh) spells them out (backend#1252).
+curl -fsSL --tlsv1.2 --connect-timeout 30 --max-time 30 https://nvidia.github.io/libnvidia-container/gpgkey \
   | sudo gpg --dearmor -o /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg 2>/dev/null
-curl -fsSL https://nvidia.github.io/libnvidia-container/stable/deb/nvidia-container-toolkit.list \
+curl -fsSL --tlsv1.2 --connect-timeout 30 --max-time 30 https://nvidia.github.io/libnvidia-container/stable/deb/nvidia-container-toolkit.list \
   | sed 's#deb https://#deb [signed-by=/usr/share/keyrings/nvidia-container-toolkit-keyring.gpg] https://#g' \
   | sudo tee /etc/apt/sources.list.d/nvidia-container-toolkit.list >/dev/null
 sudo apt-get update -qq
@@ -594,41 +774,42 @@ echo "NCT installed successfully."
     $wslPath = "/mnt/" + $fwd
   }
 
-  $nctInstallJob = Start-Job -ScriptBlock {
+  $nctInstallJob = Start-Job -InitializationScript $JobInit -ScriptBlock {
     param($d, $p)
     cmd /c "wsl -d $d -- /bin/bash `"$p`" 2>&1"
   } -ArgumentList $wslDistro, $wslPath
 
-  $nctDone = $nctInstallJob | Wait-Job -Timeout 180
-  if (-not $nctDone) {
-    Stop-Job $nctInstallJob; Remove-Job $nctInstallJob -Force
+  if (-not (Wait-JobWithProgress -Job $nctInstallJob -TimeoutSec 180 -Message "Installing NVIDIA container toolkit in $wslDistro")) {
+    Remove-Job $nctInstallJob -Force
     Remove-Item $scriptPath -Force -ErrorAction SilentlyContinue
     Warn "GPU container toolkit installation timed out."
-    Hint "You can set it up manually inside WSL later."
+    Show-GpuManualRemedy -Distro $wslDistro
     return
   }
   Receive-Job $nctInstallJob | Out-Null
   Remove-Job $nctInstallJob -Force
   Remove-Item $scriptPath -Force -ErrorAction SilentlyContinue
 
-  $verJob = Start-Job -ScriptBlock {
+  $verJob = Start-Job -InitializationScript $JobInit -ScriptBlock {
     param($d)
     cmd /c "wsl -d $d -- nvidia-ctk --version 2>&1"
   } -ArgumentList $wslDistro
 
-  $verDone = $verJob | Wait-Job -Timeout 15
-  if ($verDone) {
+  if (Wait-JobWithProgress -Job $verJob -TimeoutSec 15 -Message "Verifying GPU toolkit") {
     $nctVer = (Receive-Job $verJob | Out-String).Trim()
     Remove-Job $verJob -Force
     if ($nctVer -and $nctVer -notmatch 'error|not found') {
+      Ok "GPU acceleration ready -- NVIDIA Container Toolkit in ${wslDistro}: $nctVer"
       Log "NVIDIA Container Toolkit in WSL2: $nctVer"
       $script:K3D_GPU_FLAG = "--gpus=all"
     } else {
-      Warn "GPU setup may need manual attention."
+      Warn "GPU toolkit installed but could not be verified."
+      Show-GpuManualRemedy -Distro $wslDistro
     }
   } else {
-    Stop-Job $verJob; Remove-Job $verJob -Force
-    Warn "GPU setup may need manual attention."
+    Remove-Job $verJob -Force
+    Warn "GPU toolkit verification timed out."
+    Show-GpuManualRemedy -Distro $wslDistro
   }
 }
 
@@ -637,7 +818,9 @@ echo "NCT installed successfully."
 # =============================================================================
 
 function Install-Kubectl {
-  if (Has "kubectl") { Log "kubectl: $(cmd /c 'kubectl version --client 2>&1' | Select-Object -First 1)"; return }
+  # Execute-gate on both paths (#411): a present-but-broken kubectl is as fatal as
+  # a bad fresh install, and this runs in Step 1, before the cluster step.
+  if (Has "kubectl") { Assert-ToolRuns -Name "kubectl" -VersionArgs @("version","--client") -BinPath "$TOOL_DIR\kubectl.exe"; return }
 
   $arch = Get-WindowsArch
   $kVer = Invoke-WithRetry -Label "version check" -ScriptBlock {
@@ -660,6 +843,74 @@ function Install-Kubectl {
   }
   RefreshPath
   Log "kubectl $kVer installed."
+  Assert-ToolRuns -Name "kubectl" -VersionArgs @("version","--client") -BinPath $kubectlDest
+}
+
+# ── Pinned tool versions (#382 / #410) ──────────────────────────────────────
+# Defaults MUST stay in lockstep with scripts/lib/common.sh (K3D_VERSION /
+# HELM_VERSION) until the shared facts spec (#435) single-sources them. Pinned
+# defaults keep installs deterministic and immune to GitHub's unauthenticated
+# releases/latest API, whose 60 req/hour/IP limit a single shared corporate NAT
+# exhausts. Only the literal value "latest" resolves at install time — via the
+# plain /releases/latest redirect or get.helm.sh, never api.github.com.
+$script:K3dVersion  = if ($env:K3D_VERSION)  { $env:K3D_VERSION }  else { "v5.9.0" }
+$script:HelmVersion = if ($env:HELM_VERSION) { $env:HELM_VERSION } else { "v4.2.3" }
+
+# A tag is interpolated into a download URL — refuse separators and parent-dir
+# tokens (path-traversal lever) and require a release shape. Mirrors the
+# bootstrap's ref gate and cli install.sh's validate_version_tag.
+function Test-ReleaseTagShape {
+  param([string]$Tag)
+  if (-not $Tag -or $Tag -match '/' -or $Tag -match '\.\.') { return $false }
+  return [bool]($Tag -match '^v[0-9]+\.[0-9]+\.[0-9]+([.-][A-Za-z0-9.]+)?$')
+}
+
+# Resolve "latest" for a GitHub project WITHOUT the rate-limited API: read the
+# tag from the /releases/latest redirect's Location header (same trick as
+# cli/scripts/install.ps1 and lib/setup-linux.sh).
+function Get-LatestGitHubTag {
+  param([string]$Repo)
+  $loc = $null
+  try {
+    # -TimeoutSec: a host that accepts the connect but never answers must not
+    # hang the install (parity with the bash lookups' --max-time 30).
+    $resp = Invoke-WebRequest -Uri "https://github.com/$Repo/releases/latest" `
+      -Method Head -MaximumRedirection 0 -UseBasicParsing -TimeoutSec 30 -ErrorAction Stop
+    $loc = $resp.Headers['Location']
+  } catch {
+    # Windows PowerShell 5.1 throws on a 3xx when redirects are disabled; the
+    # response object still carries the Location header we want.
+    $resp = $_.Exception.Response
+    if ($resp) {
+      try { $loc = $resp.Headers['Location'] } catch {}
+      if (-not $loc) { try { $loc = $resp.Headers.Location } catch {} }
+    }
+  }
+  if (-not $loc) { return $null }
+  return ("$loc" -split '/')[-1]
+}
+
+# The version a tool install uses: the pinned default (or the operator's env
+# override) validated for release shape; the literal "latest" resolves via the
+# API-free path above. Aborts rather than building a URL from a bad value.
+function Resolve-ToolVersion {
+  param([string]$Name, [string]$Value, [scriptblock]$LatestResolver)
+  $v = $Value
+  if ($v -eq "latest") {
+    # Retry parity with the old lookups and lib/setup-linux.sh (`retry 3 5`):
+    # a single network blip must not abort the install (Bugbot #438). The
+    # resolver THROWS on failure so Invoke-WithRetry can drive the attempts.
+    try {
+      $v = Invoke-WithRetry -Label "$Name version lookup" -ScriptBlock $LatestResolver
+    } catch {
+      $v = $null
+    }
+    if (-not $v) { Err "Couldn't resolve the latest $Name release. Set $($Name.ToUpper())_VERSION to a release tag and re-run." }
+  }
+  if (-not (Test-ReleaseTagShape $v)) {
+    Err "$($Name.ToUpper())_VERSION '$v' is not a release tag (expected vX.Y.Z) - refusing to build a download URL from it."
+  }
+  return $v
 }
 
 function Install-K3dAndHelm {
@@ -675,10 +926,13 @@ function Install-K3dAndHelm {
     if (-not (Has "k3d")) {
       $arch = Get-WindowsArch
       Log "Downloading k3d binary directly ($arch)..."
-      $k3dVer = Invoke-WithRetry -Label "k3d version lookup" -ScriptBlock {
-        (Invoke-WebRequest "https://api.github.com/repos/k3d-io/k3d/releases/latest" `
-          -UseBasicParsing | ConvertFrom-Json).tag_name
-      }
+      # Pinned by default (#382 / #410) — no api.github.com on the default path.
+      $k3dVer = Resolve-ToolVersion -Name "k3d" -Value $K3dVersion `
+        -LatestResolver {
+          $tag = Get-LatestGitHubTag -Repo "k3d-io/k3d"
+          if (-not $tag) { throw "no Location header on the /releases/latest redirect" }
+          $tag
+        }
       $k3dDest = "$TOOL_DIR\k3d.exe"
       Invoke-WithRetry -Label "k3d download" -ScriptBlock {
         Invoke-WebRequest "https://github.com/k3d-io/k3d/releases/download/$k3dVer/k3d-windows-$arch.exe" `
@@ -716,7 +970,7 @@ function Install-K3dAndHelm {
       RefreshPath
     }
   }
-  Log "k3d: $(k3d version | Select-Object -First 1)"
+  Assert-ToolRuns -Name "k3d" -VersionArgs @("version") -BinPath "$TOOL_DIR\k3d.exe"
 
   # -- Helm --
   if (-not (Has "helm")) {
@@ -730,9 +984,12 @@ function Install-K3dAndHelm {
     if (-not (Has "helm")) {
       $arch = Get-WindowsArch
       Log "Downloading Helm binary directly ($arch)..."
-      $helmVer = Invoke-WithRetry -Label "helm version lookup" -ScriptBlock {
-        (Invoke-WebRequest "https://api.github.com/repos/helm/helm/releases/latest" `
-          -UseBasicParsing | ConvertFrom-Json).tag_name
+      # Pinned by default (#410); "latest" resolves via get.helm.sh (no API),
+      # mirroring lib/setup-linux.sh.
+      $helmVer = Resolve-ToolVersion -Name "helm" -Value $HelmVersion -LatestResolver {
+        $c = (Invoke-WebRequest "https://get.helm.sh/helm-latest-version" -UseBasicParsing -TimeoutSec 30).Content.Trim()
+        if (-not $c) { throw "empty helm-latest-version response" }
+        $c
       }
       $helmZip = "$env:TEMP\helm-$helmVer-windows-$arch.zip"
       Invoke-WithRetry -Label "helm download" -ScriptBlock {
@@ -750,7 +1007,7 @@ function Install-K3dAndHelm {
 
     if (-not (Has "helm")) { Err "Helm could not be installed. Install manually from https://helm.sh/docs/intro/install/ and re-run." }
   }
-  Log "helm: $(cmd /c 'helm version --short 2>&1')"
+  Assert-ToolRuns -Name "helm" -VersionArgs @("version") -BinPath "$TOOL_DIR\helm.exe"
 
   Ok "System tools"
 }
@@ -832,6 +1089,184 @@ function Set-ClusterAutostart {
   } catch {}
 }
 
+# =============================================================================
+#  LEFTOVER-DATA GUARD (RFC-0003 §4 / #376) — Windows parity with the bash
+#  guard_leftover_data (scripts/lib/cluster.sh). A NEW install must never
+#  silently adopt data an earlier install left under HOST_DATA_DIR. Windows is
+#  hostpath-only (New-K3dCluster always bind-mounts HOST_DATA_DIR -> /tracebloc);
+#  node-local (RFC-0003 Option C) is a Linux/k3s prototype with no Windows path,
+#  so this is intentionally scoped to hostpath. Non-interactive knobs mirror the
+#  bash env contract: $env:TB_LEFTOVER_ACTION (reuse|wipe), $env:HOST_DATA_DIR
+#  (a different dir), $env:TRACEBLOC_SKIP_LEFTOVER_GUARD (bypass).
+# =============================================================================
+
+# Can we prompt? False under CI / piped / redirected stdin — where the guard must
+# fail safe (abort) rather than hang or silently adopt.
+function Test-CanPrompt {
+  try { return ([Environment]::UserInteractive -and -not [Console]::IsInputRedirected) }
+  catch { return $false }
+}
+
+# Directories under HOST_DATA_DIR that hold real client data — a MySQL data dir
+# or a dataset dir with at least one file — across BOTH on-disk layouts: flat
+# (HOST_DATA_DIR\{mysql,data}) and per-release (HOST_DATA_DIR\<rel>\{mysql,data}).
+# Empty dirs, values.yaml and install-*.log are not data. Reparse points
+# (symlinks/junctions) are skipped so a later wipe can't traverse outside
+# HOST_DATA_DIR. An unreadable dir can't be proven empty, so it is treated as a
+# leftover (fail closed). Mirrors bash _leftover_data_dirs.
+function Get-LeftoverDataDirs {
+  param([string]$Base = $HOST_DATA_DIR)
+  $out = @()
+  if (-not $Base -or -not (Test-Path -LiteralPath $Base -PathType Container)) { return $out }
+  $candidates = New-Object System.Collections.Generic.List[string]
+  $candidates.Add((Join-Path $Base "mysql")); $candidates.Add((Join-Path $Base "data"))
+  Get-ChildItem -LiteralPath $Base -Directory -Force -ErrorAction SilentlyContinue | ForEach-Object {
+    if ($_.Attributes -band [IO.FileAttributes]::ReparsePoint) { return }   # skip symlink/junction
+    if ($_.Name -eq "mysql" -or $_.Name -eq "data") { return }             # flat dirs already candidates
+    $candidates.Add((Join-Path $_.FullName "mysql")); $candidates.Add((Join-Path $_.FullName "data"))
+  }
+  foreach ($d in $candidates) {
+    if (-not (Test-Path -LiteralPath $d -PathType Container)) { continue }
+    $item = Get-Item -LiteralPath $d -Force -ErrorAction SilentlyContinue
+    if ($item -and ($item.Attributes -band [IO.FileAttributes]::ReparsePoint)) { continue }  # never a data dir
+    $hasFile = $false
+    try {
+      $f = Get-ChildItem -LiteralPath $d -Recurse -File -Force -ErrorAction Stop | Select-Object -First 1
+      $hasFile = [bool]$f
+    } catch { $hasFile = $true }   # unlistable/unreadable -> can't prove empty -> leftover
+    if ($hasFile) { $out += $d }
+  }
+  return $out
+}
+
+# Delete the detected leftover dirs. Only ever removes paths UNDER the validated
+# HOST_DATA_DIR (Confirm-DataDir guarantees it is under USERPROFILE). Returns
+# $true only if everything was removed, so the caller can fail closed on survivors
+# (e.g. locked files) instead of adopting them. Mirrors bash _wipe_leftover_data.
+# Recursively delete $Path the way bash `rm -rf` does — WITHOUT ever following a
+# reparse point (junction/symlink) nested anywhere in the tree. Windows
+# PowerShell 5.1's `Remove-Item -Recurse` descends INTO nested junctions and can
+# delete their targets OUTSIDE the validated tree (Bugbot r3655703571); bash
+# unlinks them instead. We walk depth-first: a reparse-point entry is unlinked
+# (Directory.Delete(path,$false) for a dir link, File.Delete for a file link) and
+# never descended; a real directory has its children removed first, then itself;
+# plain files are deleted. Returns $true only when $Path is fully gone. Behaves
+# identically on PS 5.1 and 7+ (no reliance on -Recurse's version-specific quirk).
+function Remove-TreeNoFollow {
+  param([string]$Path)
+  $item = Get-Item -LiteralPath $Path -Force -ErrorAction SilentlyContinue
+  if (-not $item) { return (-not (Test-Path -LiteralPath $Path)) }
+  $isReparse = [bool]($item.Attributes -band [IO.FileAttributes]::ReparsePoint)
+  if ($item.PSIsContainer -and -not $isReparse) {
+    $ok = $true
+    foreach ($child in @(Get-ChildItem -LiteralPath $Path -Force -ErrorAction SilentlyContinue)) {
+      if (-not (Remove-TreeNoFollow -Path $child.FullName)) { $ok = $false }
+    }
+    try { [System.IO.Directory]::Delete($Path, $false) } catch { $ok = $false }
+    return ($ok -and -not (Test-Path -LiteralPath $Path))
+  }
+  # Reparse point (dir junction / file symlink) or a plain file: unlink the entry
+  # itself — for a directory reparse point Directory.Delete(...,$false) removes the
+  # link without touching the target.
+  try {
+    if ($item.PSIsContainer) { [System.IO.Directory]::Delete($Path, $false) }
+    else { [System.IO.File]::Delete($Path) }
+  } catch {
+    try { Remove-Item -LiteralPath $Path -Force -ErrorAction Stop } catch {}
+  }
+  return (-not (Test-Path -LiteralPath $Path))
+}
+
+function Remove-LeftoverData {
+  param([string[]]$Dirs)
+  $base = [System.IO.Path]::GetFullPath($HOST_DATA_DIR)
+  $userProfile = [System.IO.Path]::GetFullPath($env:USERPROFILE)
+  if (-not $HOST_DATA_DIR -or -not $base.StartsWith($userProfile, [StringComparison]::OrdinalIgnoreCase)) {
+    Err ("Refusing to wipe: HOST_DATA_DIR is unset or not under USERPROFILE (got: " + $HOST_DATA_DIR + ")")
+  }
+  $prefix = $base.TrimEnd([IO.Path]::DirectorySeparatorChar) + [IO.Path]::DirectorySeparatorChar
+  $ok = $true
+  foreach ($d in $Dirs) {
+    $full = [System.IO.Path]::GetFullPath($d)
+    if (-not $full.StartsWith($prefix, [StringComparison]::OrdinalIgnoreCase)) {
+      Warn "Refusing to wipe $d - outside $HOST_DATA_DIR."; $ok = $false; continue
+    }
+    $item = Get-Item -LiteralPath $d -Force -ErrorAction SilentlyContinue
+    if ($item -and ($item.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+      Warn "Refusing to wipe reparse point $d - it could point outside $HOST_DATA_DIR; remove it by hand."; $ok = $false; continue
+    }
+    Log "Wiping leftover data: $d"
+    if (-not (Remove-TreeNoFollow -Path $d)) {
+      Warn "Could not fully remove $d - files may be locked, owned by another user, or a nested reparse point was refused."; $ok = $false
+    }
+  }
+  return $ok
+}
+
+# Guard entry point — called from New-K3dCluster ONLY when creating a NEW cluster
+# (an existing cluster is an in-place reuse/upgrade whose data stays by design).
+# Resolves an action from $env:TB_LEFTOVER_ACTION, else an interactive prompt;
+# with no terminal and no explicit action it fails safe (abort, never adopt).
+function Invoke-LeftoverDataGuard {
+  if ($env:TRACEBLOC_SKIP_LEFTOVER_GUARD) { return }
+  $found = @(Get-LeftoverDataDirs)
+  if ($found.Count -eq 0) { return }   # clean slate — nothing to guard
+
+  Warn "Existing tracebloc data found under ${HOST_DATA_DIR}:"
+  foreach ($d in $found) { Hint "  * $d" }
+  Hint "A fresh install would silently adopt it, so it would not really be fresh."
+
+  $action = ""
+  switch ("$($env:TB_LEFTOVER_ACTION)".Trim().ToLower()) {
+    "reuse" { $action = "reuse" }
+    "wipe"  { $action = "wipe" }
+  }
+  if (-not $action) {
+    if (Test-CanPrompt) {
+      Write-Host ""
+      Hint "How should the installer handle it?"
+      Hint "  [r] reuse - keep and adopt the existing data"
+      Hint "  [w] wipe  - delete it and start fresh"
+      Hint "  [n] new   - install into a different directory"
+      Hint "  [a] abort - stop and sort it out myself (default)"
+      $reply = ""
+      try { $reply = (Read-Host "  Choice [r/w/n/a]") } catch { $reply = "" }
+      switch ("$reply".Trim().ToLower()) {
+        { $_ -in @("r","reuse") } { $action = "reuse" }
+        { $_ -in @("w","wipe") }  { $action = "wipe" }
+        { $_ -in @("n","new") }   { $action = "newdir" }
+        default                   { $action = "abort" }
+      }
+    } else {
+      Err ("Existing data found under $HOST_DATA_DIR and no choice was given (no terminal). Re-run with one of:`n" +
+           "  `$env:TB_LEFTOVER_ACTION='reuse'   adopt the existing data`n" +
+           "  `$env:TB_LEFTOVER_ACTION='wipe'    delete it and start fresh`n" +
+           "  `$env:HOST_DATA_DIR='<new-path>'   install into a different directory`n" +
+           "  (or `$env:TRACEBLOC_SKIP_LEFTOVER_GUARD='1' to bypass this guard entirely)")
+    }
+  }
+
+  switch ($action) {
+    "reuse" { Log "Reusing existing data under $HOST_DATA_DIR (user choice)." }
+    "wipe"  {
+      if (-not (Remove-LeftoverData -Dirs $found)) {
+        Err "Could not fully wipe existing data under $HOST_DATA_DIR - some files could not be removed (locked, or owned by another user). Remove them manually and re-run, or choose a different directory. Refusing to proceed and adopt the leftovers."
+      }
+      Log "Wiped leftover data under $HOST_DATA_DIR (user choice)."
+    }
+    "newdir" {
+      $newdir = ""
+      if (Test-CanPrompt) { try { $newdir = (Read-Host "  New data directory (under $env:USERPROFILE)") } catch { $newdir = "" } }
+      if (-not "$newdir".Trim()) { Err "No new directory given - aborting." }
+      $script:HOST_DATA_DIR = "$newdir".Trim()
+      Confirm-DataDir   # re-resolve + re-validate the new path
+      Log "Switched HOST_DATA_DIR to $HOST_DATA_DIR; re-checking it for leftover data."
+      Invoke-LeftoverDataGuard
+    }
+    default { Err "Aborted - existing data under $HOST_DATA_DIR left untouched. Choose reuse / wipe / a different directory and re-run." }
+  }
+}
+
 function New-K3dCluster {
   Log "Creating k3d cluster: '$CLUSTER_NAME'"
 
@@ -887,6 +1322,12 @@ function New-K3dCluster {
       }
     }
   } else {
+    # Creating a FRESH cluster — never silently adopt data an earlier install
+    # left under HOST_DATA_DIR (RFC-0003 §4 / #376; parity with the bash guard).
+    # May prompt and/or update $script:HOST_DATA_DIR (new-dir choice) before we
+    # bind-mount it below, or abort on wipe-failed / no-choice-no-terminal.
+    Invoke-LeftoverDataGuard
+
     if (-not (Test-Path $HOST_DATA_DIR)) {
       New-Item -ItemType Directory -Path $HOST_DATA_DIR -Force | Out-Null
     }
@@ -939,22 +1380,49 @@ function New-K3dCluster {
     $k3dOutLog = Join-Path $env:TEMP "k3d-create-$(Get-Random).log"
     $k3dErrLog = Join-Path $env:TEMP "k3d-create-err-$(Get-Random).log"
 
-    $k3dProc = Start-Process -FilePath $k3dExe -ArgumentList $k3dArgString `
-      -NoNewWindow -PassThru `
-      -RedirectStandardOutput $k3dOutLog `
-      -RedirectStandardError $k3dErrLog
-
-    $frames = @([char]0x2807, [char]0x2819, [char]0x2839, [char]0x2838, [char]0x283C, [char]0x2834, [char]0x2826, [char]0x2827, [char]0x2847, [char]0x280F)
-    $f = 0
-    Write-Host -NoNewline "  "
-    while (-not $k3dProc.HasExited) {
-      Write-Host "`r  " -NoNewline
-      Write-Host $frames[$f] -ForegroundColor Cyan -NoNewline
-      Write-Host " Creating compute environment..." -NoNewline
-      $f = ($f + 1) % $frames.Count
-      Start-Sleep -Seconds 2
+    # -ErrorAction Stop + catch: a failed spawn (broken/invalid k3d.exe) used
+    # to leave $k3dProc null, and `while (-not $null.HasExited)` spun the
+    # spinner forever over a dead install (#412). Fail fast instead.
+    $k3dProc = $null
+    try {
+      $k3dProc = Start-Process -FilePath $k3dExe -ArgumentList $k3dArgString `
+        -NoNewWindow -PassThru -ErrorAction Stop `
+        -RedirectStandardOutput $k3dOutLog `
+        -RedirectStandardError $k3dErrLog
+    } catch {
+      Remove-Item $k3dOutLog, $k3dErrLog -Force -ErrorAction SilentlyContinue
+      if ($proxyCfg) { Remove-Item (Split-Path $proxyCfg -Parent) -Recurse -Force -ErrorAction SilentlyContinue }
+      if ($script:LOG_FILE) { Hint "Full log: $LOG_FILE" }
+      Err "Couldn't start k3d ($k3dExe): $($_.Exception.Message). Reinstall it (re-run this script) or check that the binary runs: k3d version"
     }
-    Write-Host "`r                                                   `r" -NoNewline
+
+    $timeoutMin = 15
+    if ("$env:TB_CREATE_TIMEOUT_MIN" -match '^\d+$') { $timeoutMin = [int]$env:TB_CREATE_TIMEOUT_MIN }
+    if (-not (Wait-ProcessWithDeadline -Process $k3dProc -Deadline (Get-Date).AddMinutes($timeoutMin) -Message "Creating compute environment...")) {
+      $tail = @()
+      if (Test-Path $k3dErrLog) { $tail = @(Get-Content $k3dErrLog -ErrorAction SilentlyContinue | Select-Object -Last 5) }
+      if (-not $tail -and (Test-Path $k3dOutLog)) { $tail = @(Get-Content $k3dOutLog -ErrorAction SilentlyContinue | Select-Object -Last 5) }
+      foreach ($line in $tail) { Warn "k3d: $line" }
+      if ($script:LOG_FILE) { Hint "Full log: $LOG_FILE" }
+      Remove-Item $k3dOutLog, $k3dErrLog -Force -ErrorAction SilentlyContinue
+      if ($proxyCfg) { Remove-Item (Split-Path $proxyCfg -Parent) -Recurse -Force -ErrorAction SilentlyContinue }
+      # Killing k3d mid --wait skips its own rollback; a leftover partial
+      # cluster would be adopted as "already running" by the next run's
+      # reuse path (Bugbot #439). Remove it — bounded — before failing.
+      Info "Removing the partially created environment..."
+      $partialDeleted = $false
+      try {
+        $delProc = Start-Process -FilePath $k3dExe -ArgumentList "cluster delete $CLUSTER_NAME" `
+          -NoNewWindow -PassThru -ErrorAction Stop
+        if (Wait-ProcessWithDeadline -Process $delProc -Deadline (Get-Date).AddMinutes(2) -Message "Removing partial environment...") {
+          $partialDeleted = ($delProc.ExitCode -eq 0)
+        }
+      } catch {}
+      if (-not $partialDeleted) {
+        Warn "Couldn't remove the partial cluster automatically - run 'k3d cluster delete $CLUSTER_NAME' before re-running."
+      }
+      Err "Compute environment creation timed out after $timeoutMin minutes. Check that Docker is healthy and this network can pull images, then re-run. (TB_CREATE_TIMEOUT_MIN overrides the bound.)"
+    }
 
     $k3dExitCode = $k3dProc.ExitCode
     $k3dStdout = if (Test-Path $k3dOutLog) { Get-Content $k3dOutLog -Raw -ErrorAction SilentlyContinue } else { "" }
@@ -1166,125 +1634,151 @@ function Test-Credentials {
   }
 }
 
-function Install-ClientHelm {
-  # -- Step 3/4: Install tracebloc client --
-  Step 3 5 "Installing tracebloc client"
+# =============================================================================
+#  PROVISIONING (#388 — parity with scripts/lib/provision.sh)
+# =============================================================================
+# The bash installer registers the machine via the CLI: browser sign-in
+# (`tracebloc login`, device flow) + `tracebloc client create` mints the
+# machine credential, derives the namespace, and writes the CLI's
+# active-client pointer — no secrets pass through the user's hands. These
+# functions port that sequence; the legacy hand-copied Client-ID/password
+# prompts survive only as the fallback for a too-old/missing CLI, and the
+# TRACEBLOC_CLIENT_ID/TRACEBLOC_CLIENT_PASSWORD env pair stays as the
+# unattended/automation path.
 
-  if (-not (Test-Path $HOST_DATA_DIR)) {
-    New-Item -ItemType Directory -Path $HOST_DATA_DIR -Force | Out-Null
-  }
-  $valuesFile = Join-Path $HOST_DATA_DIR "values.yaml"
+# True when the operator pre-supplied credentials -> browser sign-in is skipped
+# and the Helm step consumes the env pair directly (mirrors _provisioning_preset).
+function Get-ProvisioningPreset {
+  return [bool]($env:TRACEBLOC_CLIENT_ID -and $env:TRACEBLOC_CLIENT_PASSWORD)
+}
 
-  $defaultClientId = ""
-  $defaultClientPassword = ""
+# Native-probe wrapper so Pester can mock per-invocation (a mocked FUNCTION
+# doesn't set $LASTEXITCODE, so the callers below never shell out directly).
+function Invoke-TraceblocProbe {
+  param([string[]]$Args_)
+  try { & tracebloc @Args_ *> $null } catch { return $false }
+  return ($LASTEXITCODE -eq 0)
+}
 
-  if (Test-Path $valuesFile) {
-    Hint "Previous configuration found."
-    do {
-      $useExisting = Read-Host "  Use previous settings as defaults? [Y/n]"
-      $useExisting = if ($useExisting) { $useExisting.Trim().ToLowerInvariant() } else { "y" }
-      if ($useExisting -eq "y" -or $useExisting -eq "yes" -or $useExisting -eq "n" -or $useExisting -eq "no" -or $useExisting -eq "") { break }
-      Warn "Please enter y or n."
-    } while ($true)
+# Does the installed CLI ship the browser-auth mint commands? The CLI comes
+# from the latest release, which can lag this installer — probe before
+# committing (mirrors _cli_supports_provisioning; --help is side-effect-free
+# and cobra exits non-zero on an unknown command).
+function Test-CliProvisioningSupport {
+  if (-not (Invoke-TraceblocProbe @("login", "--help"))) { return $false }
+  if (-not (Invoke-TraceblocProbe @("client", "create", "--help"))) { return $false }
+  return $true
+}
 
-    if ($useExisting -eq "y" -or $useExisting -eq "yes" -or $useExisting -eq "") {
-      $defaultClientId = Get-TraceblocYamlValue -Path $valuesFile -Key "clientId"
-      $defaultClientPassword = Get-TraceblocYamlValue -Path $valuesFile -Key "clientPassword"
-      if ($defaultClientId) { Log "Using existing clientId as default." }
-      if ($defaultClientPassword) { Log "Using existing clientPassword as default." }
-    }
-  }
+# Fetch wrapper for `tracebloc client list --plain` (mockable, like the probe).
+function Get-TraceblocClientList {
+  $text = ""
+  try { $text = (& tracebloc client list --plain 2>$null) | Out-String } catch { return [pscustomobject]@{ Ok = $false; Text = "" } }
+  if ($LASTEXITCODE -ne 0) { return [pscustomobject]@{ Ok = $false; Text = "" } }
+  return [pscustomobject]@{ Ok = $true; Text = $text }
+}
 
-  # -- Namespace (fixed; not prompted) --
-  # The on-prem client is one-per-machine and is identified to the backend by
-  # its credentials (clientId), not by this name -- so we don't ask the user to
-  # invent one. It's just the local k8s namespace / Helm release name.
-  # Advanced / GitOps setups can override with TB_NAMESPACE=<name>.
-  $rawNs = if ($env:TB_NAMESPACE) { $env:TB_NAMESPACE } else { "tracebloc" }
-  $TB_NAMESPACE = ConvertTo-WorkspaceName -Input_ $rawNs
-  $script:TB_NAMESPACE = $TB_NAMESPACE   # share with Wait-ForClientReady / Print-Summary
+# Does the signed-in account's client list include namespace $Ns? Namespace is
+# the only stable join key between a local Helm release and the list (they
+# don't share an id) — mirrors _account_owns_namespace. Returns
+# "owned" | "absent" | "unknown" (couldn't read the list).
+function Test-AccountOwnsNamespace {
+  param([string]$Ns)
+  if (-not $Ns) { return "absent" }
+  $list = Get-TraceblocClientList
+  if (-not $list.Ok) { return "unknown" }
+  if ($list.Text -match "namespace=$([regex]::Escape($Ns))(\s|$)") { return "owned" }
+  return "absent"
+}
 
-  # -- Step 4/4: Connect to tracebloc network --
-  Step 4 5 "Connect to tracebloc network"
-
-  PromptHeader "To connect this machine, you need a tracebloc client."
-  Hint "A client links your secure environment to the tracebloc"
-  Hint "platform so other collaborators can submit models for evaluation."
+# Surface the REAL reason `client create` failed instead of "see the log".
+# Nothing sensitive: a failed create minted no credential. Special-cases the
+# commonest tripwire — an unrecognized carbon zone (mirrors _report_create_failure).
+function Print-CreateFailure {
+  param([string]$OutFile, [string]$Location, [string]$Source = "env")
   Write-Host ""
-  Hint "Create one here (free):"
-  Write-Host "    " -NoNewline; Write-Host "https://ai.tracebloc.io/clients" -ForegroundColor White
-  Write-Host ""
-
-  # Collect + verify credentials. The entered Client ID / password are checked
-  # against the backend (the same api-token-auth/ call jobs-manager makes)
-  # before we deploy, so a wrong credential is caught here -- with a re-prompt --
-  # instead of surfacing later as a silently crash-looping pod.
-  $credAttempt = 0; $credMax = 5
-  while ($true) {
-    if ($defaultClientId) {
-      $idInput = Read-Host "  Client ID [$defaultClientId]"
-      $TB_CLIENT_ID = if ($idInput) { $idInput } else { $defaultClientId }
-    } else {
-      $TB_CLIENT_ID = Read-Host "  Client ID"
-    }
-    if (-not $TB_CLIENT_ID) { Warn "Client ID cannot be empty."; continue }
-
-    if ($defaultClientPassword) {
-      $pwInput = Read-Host "  Client password [press Enter to keep existing]" -AsSecureString
-      if ($pwInput -and $pwInput.Length -gt 0) {
-        $BSTR = [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($pwInput)
-        try { $TB_CLIENT_PASSWORD = [System.Runtime.InteropServices.Marshal]::PtrToStringAuto($BSTR) } finally { [System.Runtime.InteropServices.Marshal]::ZeroFreeBSTR($BSTR) }
-      } else {
-        $TB_CLIENT_PASSWORD = $defaultClientPassword
-      }
-    } else {
-      $pwInput = Read-Host "  Client password" -AsSecureString
-      $BSTR = [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($pwInput)
-      try { $TB_CLIENT_PASSWORD = [System.Runtime.InteropServices.Marshal]::PtrToStringAuto($BSTR) } finally { [System.Runtime.InteropServices.Marshal]::ZeroFreeBSTR($BSTR) }
-    }
-    if (-not $TB_CLIENT_PASSWORD) { Warn "Client password cannot be empty."; continue }
-
-    Info "Verifying credentials with tracebloc..."
-    $credStatus = Test-Credentials -ClientId $TB_CLIENT_ID -ClientPassword $TB_CLIENT_PASSWORD
-    if ($credStatus -eq "valid") { Ok "Credentials verified."; break }
-    elseif ($credStatus -eq "inactive") { Err "This tracebloc account is not active yet. Check your email for the activation link, then re-run." }
-    elseif ($credStatus -eq "unverified") {
-      Warn "Couldn't reach tracebloc to verify your credentials right now - continuing."
-      Hint "If they are wrong, your client will stay offline at https://ai.tracebloc.io/clients after install."
-      break
-    } else {
-      Warn "That Client ID / password was rejected by tracebloc - please re-enter."
-      Hint "Find your credentials at https://ai.tracebloc.io/clients"
-    }
-
-    $credAttempt++
-    if ($credAttempt -ge $credMax) { Err "Too many failed attempts. Double-check your credentials at https://ai.tracebloc.io/clients and re-run." }
-    # Force active re-entry on retry (don't silently reuse a rejected default).
-    $defaultClientId = ""; $defaultClientPassword = ""
+  $text = ""
+  if (Test-Path $OutFile) { $text = (Get-Content $OutFile -Raw -ErrorAction SilentlyContinue) }
+  if ($text -match '(?i)location.*not a valid choice') {
+    $locLabel = if ($Location) { "`"$Location`"" } else { "that location" }
+    Warn "$locLabel isn't a recognized carbon zone - the client wasn't created."
+    Hint "That value came from TRACEBLOC_CLIENT_LOCATION; set it to a valid code"
+    Hint "(e.g. DE, FR, US, GB - all codes: https://api.electricitymap.org/v3/zones)"
+    Hint "and re-run."
+    return
   }
+  $errLines = @()
+  foreach ($l in ($text -split "`r?`n")) {
+    if ($l -match 'Error:|HTTP [0-9][0-9][0-9]|refused|timed? ?out|unauthorized|forbidden|denied') { $errLines += $l }
+    if ($errLines.Count -ge 4) { break }
+  }
+  if ($errLines.Count -gt 0) {
+    Warn "The client couldn't be provisioned:"
+    foreach ($l in $errLines) { if ($l.Trim()) { Hint $l.Trim() } }
+  } else {
+    Warn "The client couldn't be provisioned."
+  }
+}
 
-  # -- One-client-per-machine guard --
-  # A machine runs exactly one tracebloc client: it shares this cluster and the
-  # host's CPU/RAM/GPU, and the platform counts each client as separate
-  # capacity. If a DIFFERENT client is already installed here, a re-install
-  # would silently re-point the machine -- so we stop and let the operator
-  # decide. The same clientId is a normal re-run/upgrade and passes through.
-  # Check ANY namespace: a fresh install lands in 'tracebloc', but an install
-  # from an older installer version may be in a different namespace. Enumerate
-  # client-chart releases and read each clientId (ConvertFrom-Json -- no jq).
-  # Values are read with `-o json`, not as YAML: helm re-serializes values on
-  # `get`, so the YAML view quotes clientId inconsistently (typically not at
-  # all) and a quote-expecting regex silently bypassed this guard (#200).
-  $existingId = ""; $existingNs = ""
-  # A client-chart release whose clientId we could NOT read (values fetch failed,
-  # or unparsable JSON). We must NOT treat that as "no client here" -- doing so
-  # fails OPEN and lets a re-install silently overwrite an existing client we
-  # simply couldn't identify. Record it and fail CLOSED below (#200 follow-up).
-  $unreadableNs = ""
-  # $listUnknown: `helm list` itself failed or returned non-JSON, so we couldn't
-  # even ENUMERATE releases. Same fail-open risk one level up from $unreadableNs —
-  # skipping the guard here would let a re-install overwrite a different client.
-  $listUnknown = $false
+# Strip ANSI CSI sequences (arrow keys, cursor moves), bracketed-paste markers,
+# and C0 control characters from interactive input — they otherwise corrupt the
+# name passed to `client create` into a garbage slug (mirrors common.sh's
+# _strip_paste_garbage; customer-reported 2026-07-20 on the bash flow). UTF-8
+# letters survive (only < 0x20 and DEL are dropped).
+function ConvertTo-SanitizedInput {
+  param([string]$Value)
+  if (-not $Value) { return "" }
+  $s = $Value -replace "$([char]27)\[[0-9;]*[A-Za-z~]", ""
+  $s = $s.Replace("[200~", "").Replace("[201~", "")
+  return (($s.ToCharArray() | Where-Object { [int]$_ -ge 32 -and [int]$_ -ne 127 }) -join "")
+}
+
+# Parse the credential file `tracebloc client create --credential-file` writes:
+# plain KEY=value lines (split on the FIRST '=' — a password may contain '=').
+# Mint writes TRACEBLOC_CLIENT_ID + TRACEBLOC_CLIENT_PASSWORD + TB_NAMESPACE;
+# a re-run on an already-registered cluster writes TRACEBLOC_CLIENT_ID +
+# TB_NAMESPACE + TRACEBLOC_CLIENT_ADOPTED=1 (no new credential is minted).
+function Read-TraceblocCredentialFile {
+  param([string]$Path)
+  $cred = @{}
+  foreach ($line in (Get-Content $Path -ErrorAction Stop)) {
+    $idx = $line.IndexOf('=')
+    if ($idx -gt 0) { $cred[$line.Substring(0, $idx).Trim()] = $line.Substring($idx + 1) }
+  }
+  return $cred
+}
+
+# Test-ApiReachable — a bounded liveness probe for the cluster API. helm has no
+# request timeout, so any helm call against a wedged/unreachable API would hang
+# indefinitely; callers gate helm behind this so they degrade gracefully instead
+# of freezing the install. Returns $true only when kubectl reached the API within
+# the timeout. Mirrors the bounded probe Get-TrainingResources runs before `helm
+# get values` (Bugbot).
+function Test-ApiReachable {
+  param([int]$TimeoutSeconds = 5)
+  $null = (kubectl get --raw='/readyz' --request-timeout="${TimeoutSeconds}s" 2>$null) | Out-String
+  return ($LASTEXITCODE -eq 0)
+}
+
+# Enumerate what client (if any) is already installed on this cluster — the
+# shared source for the provisioning pre-flight AND the Helm-step guard, so the
+# two can never drift. Values are read with `-o json`, not YAML: helm
+# re-serializes values on `get`, so the YAML view quotes clientId
+# inconsistently and a quote-expecting regex silently bypassed the guard (#200).
+# Returns Id/Ns (first identifiable client-chart release), UnreadableNs (a
+# client release whose values couldn't be read — fail CLOSED, never treat as
+# "no client here"), ListUnknown (couldn't even enumerate releases).
+function Get-InstalledClientInfo {
+  $existingId = ""; $existingNs = ""; $existingName = ""; $unreadableNs = ""; $listUnknown = $false
+  # helm has no request timeout, so a wedged/unreachable API server would hang
+  # `helm list`/`helm get values` indefinitely — freezing Step 4 (after browser
+  # sign-in) and Step 5's one-client guard. Gate the enumeration behind a bounded
+  # kubectl probe (mirrors Get-TrainingResources). If the API isn't reachable
+  # within the timeout, degrade to the same "couldn't enumerate" (ListUnknown)
+  # shape a helm failure produces, so callers fail closed instead of hanging (Bugbot).
+  if (-not (Test-ApiReachable)) {
+    return [pscustomobject]@{ Id = ""; Ns = ""; Name = ""; UnreadableNs = ""; ListUnknown = $true }
+  }
   $listJson = (helm list -A -o json 2>$null) | Out-String
   if ($LASTEXITCODE -ne 0) {
     # helm list failed (wedged/unreachable API, kubeconfig glitch) -> unknown.
@@ -1301,9 +1795,9 @@ function Install-ClientHelm {
             continue
           }
           # No user values serializes as literal `null` (-> $vals = $null, a
-          # parsed release with no clientId, NOT an error). An unparsable release
-          # must not abort the scan of the remaining ones, but it IS an
-          # unidentifiable client -> record it and keep scanning.
+          # parsed release with no clientId, NOT an error). An unparsable
+          # release must not abort the scan, but it IS an unidentifiable
+          # client -> record it and keep scanning.
           $vals = $null; $parsed = $true
           try { $vals = $valsJson | ConvertFrom-Json } catch { $parsed = $false }
           if (-not $parsed) {
@@ -1312,7 +1806,7 @@ function Install-ClientHelm {
           }
           if ($null -eq $vals -or $null -eq $vals.clientId) { continue }
           $id = "$($vals.clientId)".Trim()
-          if ($id) { $existingId = $id; $existingNs = $rel.namespace; break }
+          if ($id) { $existingId = $id; $existingNs = $rel.namespace; $existingName = $rel.name; break }
         }
       }
     } catch {
@@ -1320,6 +1814,329 @@ function Install-ClientHelm {
       $listUnknown = $true
     }
   }
+  return [pscustomobject]@{ Id = $existingId; Ns = $existingNs; Name = $existingName; UnreadableNs = $unreadableNs; ListUnknown = $listUnknown }
+}
+
+# -- Step 4/5: Register this machine (browser sign-in; mirrors provision_client)
+# Sets $script:TB_PROV_MODE to route the Helm step:
+#   preset   - operator supplied TRACEBLOC_CLIENT_ID/PASSWORD (env automation)
+#   minted   - fresh credential in TB_PROV_ID/TB_PROV_PASSWORD/TB_PROV_NS
+#   adopted  - cluster already registered: TB_PROV_ID/TB_PROV_NS, no password
+#   fallback - CLI missing/too old -> the legacy manual prompts in the Helm step
+function Invoke-ProvisionClient {
+  Step 4 5 "Registering this machine"
+  $script:TB_PROV_MODE = "fallback"
+
+  if (Get-ProvisioningPreset) {
+    Info "Using the credentials you supplied - skipping browser sign-in."
+    $script:TB_PROV_MODE = "preset"
+    return
+  }
+
+  # The CLI was installed in Step 3; it may have landed on the *registry* PATH
+  # only — re-read it so `tracebloc` resolves in THIS process.
+  try { RefreshPath } catch { Log "RefreshPath failed before provisioning: $_" }
+  if (-not (Has "tracebloc")) {
+    Warn "The tracebloc CLI isn't available, so this machine can't be registered automatically - falling back to manual sign-in."
+    Hint "Connect an existing client below, or install the CLI later for one-step browser sign-in:"
+    Hint "  irm $TRACEBLOC_CLI_INSTALL_URL | iex"
+    return
+  }
+  if (-not (Test-CliProvisioningSupport)) {
+    Warn "This tracebloc CLI is too old to provision a client from the installer - falling back to manual sign-in."
+    Hint "Connect an existing client below, or upgrade the CLI later for one-step browser sign-in:"
+    Hint "  irm $TRACEBLOC_CLI_INSTALL_URL | iex"
+    return
+  }
+
+  # Sign in (device flow). `tracebloc login` prints a URL + one-time code and
+  # waits for approval — run it ATTACHED to the console (never captured), so
+  # the user sees the link/code and the CLI can render its wait.
+  Write-Host ""
+  Write-Host "  Sign in to approve this machine - open the link in your browser"
+  Write-Host "  (on this or any device) and enter the code:"
+  Write-Host ""
+  & tracebloc login
+  if ($LASTEXITCODE -ne 0) { Err "Sign-in didn't complete - re-run the installer to try again." }
+
+  # One-client-per-machine pre-flight (mirrors provision.sh #303): if a client
+  # is already installed here and the signed-in account can't be shown to own
+  # it, minting now would register a brand-new client that never installs (the
+  # Helm-step guard refuses) — an orphan on the dashboard. Catch it BEFORE
+  # minting. Inconclusive reads fail CLOSED; a client under the legacy fixed
+  # 'tracebloc' namespace defers to `client create` + the Helm guard (they key
+  # on clientId, which `client list` doesn't expose here).
+  $inst = Get-InstalledClientInfo
+  if ($inst.ListUnknown -or ($inst.UnreadableNs -and -not $inst.Id)) {
+    Write-Host ""
+    Warn "Couldn't determine whether a tracebloc client is already installed here."
+    Hint "tracebloc runs one client per machine. Registering a new client now could strand"
+    Hint "a second one if an existing client just couldn't be seen - usually the cluster API"
+    Hint "is briefly unreachable. Check it and re-run:"
+    Hint "  kubectl cluster-info"
+    Hint "  helm list -A"
+    Write-Host ""
+    Err "Refusing to provision without verifying what's already on this machine."
+  }
+  if ($inst.Ns) {
+    $own = Test-AccountOwnsNamespace -Ns $inst.Ns
+    if ($own -eq "absent" -and $inst.Ns -ne "tracebloc") {
+      Write-Host ""
+      Warn "This machine already runs a tracebloc client (namespace '$($inst.Ns)') that isn't in the account you just signed in as."
+      Hint "tracebloc runs one client per machine. Provisioning now would register a"
+      Hint "second client and strand it (it could never install here). Pick one:"
+      Hint "  - Repair / update it     -> sign in as the account that owns it, or re-run with that client's credentials"
+      Hint "  - Switch to this account -> remove the current client first:"
+      Hint "        k3d cluster delete $CLUSTER_NAME   (wipes this client + its local data)"
+      Hint "      then re-run this installer"
+      Hint "  - Run both               -> install on a separate machine"
+      Write-Host ""
+      Err "Refusing to provision a second client on this machine. See the options above."
+    } elseif ($own -eq "absent") {
+      Log "installed client is in the legacy 'tracebloc' namespace (not listed by its slug); deferring ownership to client create + the Helm one-client guard"
+    }
+  }
+
+  # Name this machine. `client create` would prompt itself, but its output is
+  # captured to the log below (the credential must never reach the terminal) —
+  # so collect the name here. Precedence: TRACEBLOC_CLIENT_NAME (unattended) >
+  # interactive prompt (3 tries on empty Enter) > fail closed.
+  $clientName = ""
+  if ($env:TRACEBLOC_CLIENT_NAME) { $clientName = $env:TRACEBLOC_CLIENT_NAME.Trim() }
+  if (-not $clientName) {
+    foreach ($try in 1..3) {
+      $clientName = (Read-Host "  Name your secure environment (shown on your tracebloc dashboard)")
+      # Strip paste/arrow-key escape garbage BEFORE the trim — it would slug-ify
+      # into a garbage name like "d-d-d-a-a-a" (bash flow, 2026-07-20).
+      $clientName = (ConvertTo-SanitizedInput -Value $clientName).Trim()
+      if ($clientName) { break }
+    }
+  }
+  if (-not $clientName) { Err "A name for this client is required to provision it. Re-run in a terminal to be prompted, or set TRACEBLOC_CLIENT_NAME for an unattended install." }
+
+  # Location is NEVER prompted (RFC-0001 §6.4). Windows has no zone.tab to
+  # derive a carbon zone from without an embedded Windows-timezone map that
+  # would drift — so pass --location only when TRACEBLOC_CLIENT_LOCATION pins
+  # one; the CLI treats it as optional and the backend defaults it.
+  $clientLocation = ""
+  if ($env:TRACEBLOC_CLIENT_LOCATION) { $clientLocation = $env:TRACEBLOC_CLIENT_LOCATION.Trim() }
+
+  # Mint. --credential-file keeps the secret off the terminal; the file lives
+  # in the user-profile data dir and is deleted right after parsing (its
+  # durable home is the Helm/cluster secret — RFC §7.9).
+  if (-not (Test-Path $HOST_DATA_DIR)) { New-Item -ItemType Directory -Path $HOST_DATA_DIR -Force | Out-Null }
+  $credFile = Join-Path $HOST_DATA_DIR "client-credential.env"
+  Remove-Item $credFile -Force -ErrorAction SilentlyContinue
+  $createOut = Join-Path ([System.IO.Path]::GetTempPath()) "tb-client-create-$(Get-Random).log"
+  $createArgs = @("client", "create", "--yes", "--name", $clientName, "--credential-file", $credFile)
+  if ($clientLocation) { $createArgs += @("--location", $clientLocation) }
+  # try/finally: PowerShell runs `finally` on Ctrl-C, terminating errors, AND
+  # `exit` (Err), so the secret can never linger in the window between mint and
+  # parse — the ps1 analogue of bash's _PROVISION_CRED_FILE + install_cleanup
+  # (Bugbot #397 r2).
+  $cred = $null
+  try {
+    & tracebloc @createArgs *> $createOut
+    $createRc = $LASTEXITCODE
+    if (Test-Path $createOut) { Get-Content $createOut -ErrorAction SilentlyContinue | ForEach-Object { Log $_ } }
+    if ($createRc -ne 0) {
+      Print-CreateFailure -OutFile $createOut -Location $clientLocation
+      Err "Couldn't provision the client. Re-run to retry - full log: $LOG_FILE"
+    }
+    if (-not (Test-Path $credFile)) { Err "client create did not write the credential file ($credFile)." }
+    $cred = Read-TraceblocCredentialFile -Path $credFile
+  } finally {
+    Remove-Item $credFile -Force -ErrorAction SilentlyContinue
+    Remove-Item $createOut -Force -ErrorAction SilentlyContinue
+  }
+
+  $script:TB_PROV_ID = "$($cred['TRACEBLOC_CLIENT_ID'])".Trim()
+  $script:TB_PROV_NS = "$($cred['TB_NAMESPACE'])".Trim()
+  if ("$($cred['TRACEBLOC_CLIENT_ADOPTED'])".Trim() -eq "1") {
+    # Re-run on an already-registered cluster: no fresh credential was minted
+    # (the existing one stands, write-only on the backend). The Helm step
+    # reconciles the existing release and heals a stale clientId to this UUID.
+    Info "This cluster is already registered (client $($script:TB_PROV_ID)) - reconciling the existing install."
+    $script:TB_PROV_PASSWORD = ""
+    $script:TB_PROV_MODE = "adopted"
+    return
+  }
+  $script:TB_PROV_PASSWORD = "$($cred['TRACEBLOC_CLIENT_PASSWORD'])"
+  if (-not $script:TB_PROV_ID -or -not $script:TB_PROV_PASSWORD) { Err "The credential file was incomplete - re-run the installer to retry." }
+  $script:TB_PROV_MODE = "minted"
+  # The registered identity is the minted slug (= the dashboard name), which
+  # may be de-duplicated from the raw typed name.
+  Ok "Registered as `"$($script:TB_PROV_NS)`""
+  Log "Provisioned - credential handed to the install (not shown)."
+}
+
+function Install-ClientHelm {
+  # -- Step 5/5: Install tracebloc client --
+  Step 5 5 "Installing tracebloc client"
+
+  if (-not (Test-Path $HOST_DATA_DIR)) {
+    New-Item -ItemType Directory -Path $HOST_DATA_DIR -Force | Out-Null
+  }
+  $valuesFile = Join-Path $HOST_DATA_DIR "values.yaml"
+
+  # -- Credentials + namespace, routed by the Step-4 provisioning mode (#388) --
+  $provMode = if ($script:TB_PROV_MODE) { $script:TB_PROV_MODE } else { "fallback" }
+  $TB_CLIENT_ID = ""; $TB_CLIENT_PASSWORD = ""; $rawNs = ""
+
+  switch ($provMode) {
+    "minted" {
+      # Freshly minted by `tracebloc client create`. The namespace MUST be the
+      # minted slug (it equals the heartbeat-reported namespace). Verify even a
+      # fresh mint (never skip verification by provisioning method — Bugbot
+      # #397 r2): a mint that can't authenticate — backend skew, an account
+      # deactivated mid-flow — fails HERE, not as a crash-looping pod later.
+      $TB_CLIENT_ID = $script:TB_PROV_ID
+      $TB_CLIENT_PASSWORD = $script:TB_PROV_PASSWORD
+      $rawNs = $script:TB_PROV_NS
+      Info "Verifying the new credential with tracebloc..."
+      $credStatus = Test-Credentials -ClientId $TB_CLIENT_ID -ClientPassword $TB_CLIENT_PASSWORD
+      if ($credStatus -eq "valid") { Ok "Credentials verified." }
+      elseif ($credStatus -eq "inactive") { Err "This tracebloc account is not active yet. Check your email for the activation link, then re-run." }
+      elseif ($credStatus -eq "invalid") { Err "The freshly minted credential was rejected by tracebloc - this shouldn't happen. Re-run the installer; if it persists, contact tracebloc support." }
+      else {
+        Warn "Couldn't reach tracebloc to verify the new credential right now - continuing."
+      }
+    }
+    "adopted" {
+      # Re-run on a registered cluster: no new credential was minted (the
+      # existing one stands, write-only on the backend). With a LIVE release
+      # the upgrade below is surgical (--reuse-values, heals only clientId —
+      # Bugbot #397 r2) and needs no password at all; the previous values-file
+      # password matters only on a rebuilt cluster with no release, decided
+      # after the guard where the release enumeration is known.
+      $TB_CLIENT_ID = $script:TB_PROV_ID
+      $rawNs = $script:TB_PROV_NS
+      if (Test-Path $valuesFile) {
+        $TB_CLIENT_PASSWORD = Get-TraceblocYamlValue -Path $valuesFile -Key "clientPassword"
+      }
+    }
+    "preset" {
+      # Unattended/automation path: the operator-supplied env pair. Verify once,
+      # non-interactively (the same api-token-auth call jobs-manager makes) —
+      # a wrong credential fails here, not as a crash-looping pod later.
+      $TB_CLIENT_ID = $env:TRACEBLOC_CLIENT_ID
+      $TB_CLIENT_PASSWORD = $env:TRACEBLOC_CLIENT_PASSWORD
+      Info "Verifying the supplied credentials with tracebloc..."
+      $credStatus = Test-Credentials -ClientId $TB_CLIENT_ID -ClientPassword $TB_CLIENT_PASSWORD
+      if ($credStatus -eq "valid") { Ok "Credentials verified." }
+      elseif ($credStatus -eq "inactive") { Err "This tracebloc account is not active yet. Check your email for the activation link, then re-run." }
+      elseif ($credStatus -eq "invalid") { Err "The supplied TRACEBLOC_CLIENT_ID / TRACEBLOC_CLIENT_PASSWORD was rejected by tracebloc. Check them at https://ai.tracebloc.io/clients and re-run." }
+      else {
+        Warn "Couldn't reach tracebloc to verify the supplied credentials right now - continuing."
+        Hint "If they are wrong, your client will stay offline at https://ai.tracebloc.io/clients after install."
+      }
+    }
+    default {
+      # -- Legacy manual connect (fallback ONLY: the CLI was missing or too old
+      # for browser provisioning in Step 4). Hand-copied credentials from the
+      # web app — dropped from the primary path by #388.
+      $defaultClientId = ""
+      $defaultClientPassword = ""
+
+      if (Test-Path $valuesFile) {
+        Hint "Previous configuration found."
+        do {
+          $useExisting = Read-Host "  Use previous settings as defaults? [Y/n]"
+          $useExisting = if ($useExisting) { $useExisting.Trim().ToLowerInvariant() } else { "y" }
+          if ($useExisting -eq "y" -or $useExisting -eq "yes" -or $useExisting -eq "n" -or $useExisting -eq "no" -or $useExisting -eq "") { break }
+          Warn "Please enter y or n."
+        } while ($true)
+
+        if ($useExisting -eq "y" -or $useExisting -eq "yes" -or $useExisting -eq "") {
+          $defaultClientId = Get-TraceblocYamlValue -Path $valuesFile -Key "clientId"
+          $defaultClientPassword = Get-TraceblocYamlValue -Path $valuesFile -Key "clientPassword"
+          if ($defaultClientId) { Log "Using existing clientId as default." }
+          if ($defaultClientPassword) { Log "Using existing clientPassword as default." }
+        }
+      }
+
+      PromptHeader "To connect this machine, you need a tracebloc client."
+      Hint "A client links your secure environment to the tracebloc"
+      Hint "platform so other collaborators can submit models for evaluation."
+      Write-Host ""
+      Hint "Create one here (free):"
+      Write-Host "    " -NoNewline; Write-Host "https://ai.tracebloc.io/clients" -ForegroundColor White
+      Write-Host ""
+
+      # Collect + verify credentials. The entered Client ID / password are checked
+      # against the backend (the same api-token-auth/ call jobs-manager makes)
+      # before we deploy, so a wrong credential is caught here -- with a re-prompt --
+      # instead of surfacing later as a silently crash-looping pod.
+      $credAttempt = 0; $credMax = 5
+      while ($true) {
+        if ($defaultClientId) {
+          $idInput = Read-Host "  Client ID [$defaultClientId]"
+          $TB_CLIENT_ID = if ($idInput) { $idInput } else { $defaultClientId }
+        } else {
+          $TB_CLIENT_ID = Read-Host "  Client ID"
+        }
+        if (-not $TB_CLIENT_ID) { Warn "Client ID cannot be empty."; continue }
+
+        if ($defaultClientPassword) {
+          $pwInput = Read-Host "  Client password [press Enter to keep existing]" -AsSecureString
+          if ($pwInput -and $pwInput.Length -gt 0) {
+            $BSTR = [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($pwInput)
+            try { $TB_CLIENT_PASSWORD = [System.Runtime.InteropServices.Marshal]::PtrToStringAuto($BSTR) } finally { [System.Runtime.InteropServices.Marshal]::ZeroFreeBSTR($BSTR) }
+          } else {
+            $TB_CLIENT_PASSWORD = $defaultClientPassword
+          }
+        } else {
+          $pwInput = Read-Host "  Client password" -AsSecureString
+          $BSTR = [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($pwInput)
+          try { $TB_CLIENT_PASSWORD = [System.Runtime.InteropServices.Marshal]::PtrToStringAuto($BSTR) } finally { [System.Runtime.InteropServices.Marshal]::ZeroFreeBSTR($BSTR) }
+        }
+        if (-not $TB_CLIENT_PASSWORD) { Warn "Client password cannot be empty."; continue }
+
+        Info "Verifying credentials with tracebloc..."
+        $credStatus = Test-Credentials -ClientId $TB_CLIENT_ID -ClientPassword $TB_CLIENT_PASSWORD
+        if ($credStatus -eq "valid") { Ok "Credentials verified."; break }
+        elseif ($credStatus -eq "inactive") { Err "This tracebloc account is not active yet. Check your email for the activation link, then re-run." }
+        elseif ($credStatus -eq "unverified") {
+          Warn "Couldn't reach tracebloc to verify your credentials right now - continuing."
+          Hint "If they are wrong, your client will stay offline at https://ai.tracebloc.io/clients after install."
+          break
+        } else {
+          Warn "That Client ID / password was rejected by tracebloc - please re-enter."
+          Hint "Find your credentials at https://ai.tracebloc.io/clients"
+        }
+
+        $credAttempt++
+        if ($credAttempt -ge $credMax) { Err "Too many failed attempts. Double-check your credentials at https://ai.tracebloc.io/clients and re-run." }
+        # Force active re-entry on retry (don't silently reuse a rejected default).
+        $defaultClientId = ""; $defaultClientPassword = ""
+      }
+    }
+  }
+
+  # -- Namespace --
+  # Minted/adopted installs land in the client's SLUG namespace (bash parity —
+  # it equals the heartbeat-reported namespace). Preset/fallback keep the fixed
+  # default ('tracebloc'); advanced/GitOps setups can override with
+  # TB_NAMESPACE=<name>. Never prompted — the client is identified to the
+  # backend by clientId, not this name.
+  if (-not $rawNs) { $rawNs = if ($env:TB_NAMESPACE) { $env:TB_NAMESPACE } else { "tracebloc" } }
+  $TB_NAMESPACE = ConvertTo-WorkspaceName -Input_ $rawNs
+  $script:TB_NAMESPACE = $TB_NAMESPACE   # share with Wait-ForClientReady / Print-Summary
+
+  # -- One-client-per-machine guard --
+  # A machine runs exactly one tracebloc client: it shares this cluster and the
+  # host's CPU/RAM/GPU, and the platform counts each client as separate
+  # capacity. If a DIFFERENT client is already installed here, a re-install
+  # would silently re-point the machine -- so we stop and let the operator
+  # decide. The same clientId is a normal re-run/upgrade and passes through.
+  # Check ANY namespace: a fresh install lands in 'tracebloc', but an install
+  # from an older installer version may be in a different namespace. The
+  # enumeration lives in Get-InstalledClientInfo (#388 — shared with the
+  # Step-4 provisioning pre-flight so the two can never drift; #200 fail-closed
+  # semantics preserved there).
+  $inst = Get-InstalledClientInfo
+  $existingId = $inst.Id; $existingNs = $inst.Ns
+  $unreadableNs = $inst.UnreadableNs; $listUnknown = $inst.ListUnknown
   # Fail closed when we couldn't identify a client we can see ($unreadableNs) OR
   # couldn't enumerate at all ($listUnknown). Refuse rather than overwrite an
   # unknown client -- the operator must resolve it explicitly.
@@ -1338,7 +2155,15 @@ function Install-ClientHelm {
     Write-Host ""
     Err "Refusing to replace an unidentifiable existing client."
   }
-  if ($existingId -and $existingId -ne $TB_CLIENT_ID) {
+  # Adopted mode is the ONE sanctioned id mismatch: the backend just anchored
+  # THIS cluster to the adopted UUID (`client create`), while the local release
+  # still stores a stale id (cli#125-era installs kept the numeric dashboard
+  # id, which can't authenticate). That's not a different client — it's exactly
+  # the skew the values write below heals; refusing here would make every
+  # legacy-id re-run abort (Bugbot #397 r1, High).
+  if ($existingId -and $existingId -ne $TB_CLIENT_ID -and $provMode -eq "adopted") {
+    Log "one-client guard: healing stale clientId '$existingId' -> adopted '$TB_CLIENT_ID' (namespace '$existingNs')"
+  } elseif ($existingId -and $existingId -ne $TB_CLIENT_ID) {
     Write-Host ""
     Warn "This machine already runs the tracebloc client '$existingId' (namespace '$existingNs')."
     Hint "tracebloc runs one client per machine -- it shares this cluster and host"
@@ -1354,6 +2179,30 @@ function Install-ClientHelm {
     Err "Refusing to replace the existing client. See the options above."
   }
 
+  # -- Adopted reconcile routing (#397 r2) --
+  # With a LIVE release, reconcile surgically: upgrade THAT release, in ITS
+  # namespace, with --reuse-values — preserving the deployed configuration and
+  # secret, healing only clientId (bash parity: the reuse-values reconcile).
+  # Regenerating values.yaml would clobber live config with fresh defaults.
+  # Only a rebuilt cluster (adopted anchor on the backend, no local release)
+  # needs the full values write — and that path needs the previous password.
+  $adoptedReuse = $false
+  $existingName = $inst.Name
+  if ($provMode -eq "adopted" -and $existingId) {
+    $adoptedReuse = $true
+    $TB_NAMESPACE = $existingNs
+    $script:TB_NAMESPACE = $TB_NAMESPACE   # Wait-ForClientReady watches the LIVE release's namespace
+  } elseif ($provMode -eq "adopted" -and -not $TB_CLIENT_PASSWORD) {
+    Write-Host ""
+    Warn "This cluster is registered as client '$TB_CLIENT_ID', but no release survives locally and the previous configuration (with the client password) is gone."
+    Hint "Pick one:"
+    Hint "  - Re-run with the client's credentials:  set TRACEBLOC_CLIENT_ID + TRACEBLOC_CLIENT_PASSWORD, then re-run"
+    Hint "  - Start fresh:  k3d cluster delete $CLUSTER_NAME   (wipes this client + its local data), then re-run"
+    Write-Host ""
+    Err "Can't reconcile the existing client without its password."
+  }
+
+  if (-not $adoptedReuse) {
   $passwordEscaped = $TB_CLIENT_PASSWORD -replace "'", "''"
 
   $gpuVal = ""
@@ -1413,6 +2262,7 @@ $envBlock
 "@
   Set-Content -Path $valuesFile -Value $valuesContent -Encoding UTF8
   Log "Values file written to $valuesFile"
+  }   # end -not $adoptedReuse (values regeneration)
 
   # Register the chart repo unconditionally. `--force-update` is idempotent, heals
   # a stale/wrong URL from an earlier attempt, and re-fetches the repo index, so no
@@ -1428,13 +2278,32 @@ $envBlock
   if ($LASTEXITCODE -ne 0) { Err "Couldn't add the tracebloc chart repo ($TRACEBLOC_HELM_REPO_URL). Helm output:`n$addOutput`nCheck the log for details: $LOG_FILE" }
 
   Write-Host ""
-  Log "Installing $TB_NAMESPACE from $TRACEBLOC_HELM_REPO_NAME/$TRACEBLOC_CHART_NAME in namespace '$TB_NAMESPACE'..."
-  $helmOutput = (helm upgrade --install $TB_NAMESPACE "$TRACEBLOC_HELM_REPO_NAME/$TRACEBLOC_CHART_NAME" `
-    --namespace $TB_NAMESPACE `
-    --create-namespace `
-    --values $valuesFile 2>&1) | Out-String
-  Log "Helm Output: $helmOutput"
-  if ($LASTEXITCODE -ne 0) { Err "Client installation failed. Helm output:`n$helmOutput`nCheck the log for details: $LOG_FILE" }
+  if ($adoptedReuse) {
+    # Surgical reconcile of the LIVE release: --reuse-values preserves the
+    # deployed configuration + secret; only clientId is healed (#397 r2).
+    Log "Reconciling release '$existingName' in namespace '$existingNs' (adopted; --reuse-values; healing clientId)..."
+    $helmOutput = (helm upgrade $existingName "$TRACEBLOC_HELM_REPO_NAME/$TRACEBLOC_CHART_NAME" `
+      --namespace $existingNs `
+      --reuse-values `
+      --set-string "clientId=$TB_CLIENT_ID" 2>&1) | Out-String
+    Log "Helm Output: $helmOutput"
+    if ($LASTEXITCODE -ne 0) { Err "Client reconcile failed. Helm output:`n$helmOutput`nCheck the log for details: $LOG_FILE" }
+    # Keep the LOCAL record in step for future default-reuse prompts: heal only
+    # the clientId line, never regenerate — the live release is the truth.
+    if (Test-Path $valuesFile) {
+      $vals = Get-Content $valuesFile -Raw
+      $vals = $vals -replace '(?m)^clientId:\s*.*$', "clientId: `"$TB_CLIENT_ID`""
+      Set-Content -Path $valuesFile -Value $vals -Encoding UTF8
+    }
+  } else {
+    Log "Installing $TB_NAMESPACE from $TRACEBLOC_HELM_REPO_NAME/$TRACEBLOC_CHART_NAME in namespace '$TB_NAMESPACE'..."
+    $helmOutput = (helm upgrade --install $TB_NAMESPACE "$TRACEBLOC_HELM_REPO_NAME/$TRACEBLOC_CHART_NAME" `
+      --namespace $TB_NAMESPACE `
+      --create-namespace `
+      --values $valuesFile 2>&1) | Out-String
+    Log "Helm Output: $helmOutput"
+    if ($LASTEXITCODE -ne 0) { Err "Client installation failed. Helm output:`n$helmOutput`nCheck the log for details: $LOG_FILE" }
+  }
 
   # Point kubeconfig's current context at the client namespace so kubectl + the
   # tracebloc CLI default to it (no -n / --namespace needed). Best-effort.
@@ -1780,6 +2649,9 @@ function Test-Preflight {
   $backendHost = (Get-BackendUrl) -replace '^https?://','' -replace '/$',''
   $criticals = @(
     @{ label = "Docker Hub (registry-1.docker.io)";           url = "https://registry-1.docker.io/v2/" },
+    # auth.docker.io is Docker Hub's token endpoint: a network that allows
+    # registry-1 but blocks the token host fails only at in-cluster pull time (#416).
+    @{ label = "Docker Hub auth (auth.docker.io)";            url = "https://auth.docker.io/token" },
     @{ label = "GitHub Container Registry (ghcr.io)";         url = "https://ghcr.io/" },
     @{ label = "tracebloc API ($backendHost)";                url = "https://$backendHost/" },
     # The chart repo is probed at its index.yaml, strictly: the site ROOT 404s by
@@ -1787,6 +2659,20 @@ function Test-Preflight {
     # actually exist for `helm repo add` to succeed (#385).
     @{ label = "tracebloc Helm charts (tracebloc.github.io)"; url = "$TRACEBLOC_HELM_REPO_URL/index.yaml"; strict = $true }
   )
+  # Download hosts Step 1 fetches from — promoted to HARD (#416): a blocked one
+  # used to pass preflight then fail the install ~30s later. Added only when the
+  # fetch will actually happen (tool/app absent; a present tool is never
+  # re-downloaded). k3d release assets 302 to objects.githubusercontent.com, so it
+  # is probed explicitly. Kept in lockstep with preflight.sh (drift: check-drift.sh).
+  if (-not (Test-Path "$env:ProgramFiles\Docker\Docker\Docker Desktop.exe")) {
+    $criticals += @{ label = "Docker Desktop (desktop.docker.com)"; url = "https://desktop.docker.com/" }
+  }
+  if (-not (Has "kubectl")) { $criticals += @{ label = "kubectl (dl.k8s.io)"; url = "https://dl.k8s.io/" } }
+  if (-not (Has "helm"))    { $criticals += @{ label = "Helm (get.helm.sh)";  url = "https://get.helm.sh/" } }
+  if (-not (Has "k3d")) {
+    $criticals += @{ label = "k3d download (github.com)";                  url = "https://github.com/" }
+    $criticals += @{ label = "k3d assets (objects.githubusercontent.com)"; url = "https://objects.githubusercontent.com/" }
+  }
   $tlsSeen = $false; $cfail = 0
   foreach ($c in $criticals) {
     $status = Test-PfUrl $c.url -RequireSuccess:([bool]$c.strict)
@@ -1799,7 +2685,7 @@ function Test-Preflight {
     }
   }
   if ($tlsSeen)    { Hint "A TLS/certificate error usually means a break-and-inspect (TLS-inspecting) proxy whose corporate CA isn't trusted here - see the proxy notes." }
-  if ($cfail -gt 0){ Hint "Allow HTTPS (443) egress to: registry-1.docker.io, ghcr.io, $backendHost, tracebloc.github.io - or configure your corporate proxy." }
+  if ($cfail -gt 0){ Hint "Allow HTTPS (443) egress to the host(s) named above - the always-needed set is registry-1.docker.io, auth.docker.io, ghcr.io, $backendHost, tracebloc.github.io, plus any tool-download host listed (desktop.docker.com / dl.k8s.io / get.helm.sh / github.com / objects.githubusercontent.com) - or configure your corporate proxy." }
 
   if ($hardFail -gt 0) {
     Write-Host ""
@@ -1940,7 +2826,8 @@ $TRACEBLOC_CLI_INSTALL_DIR = if ($env:LOCALAPPDATA) {
 # window) rather than a vague "open a new terminal". The CLI installer edits the
 # user-scope PATH in the registry, so RefreshPath (re-reading Machine+User PATH)
 # is the faithful "fresh terminal" probe here — there is no `source ~/.rc`
-# analogue on Windows. ALWAYS non-fatal: the client is connected by Step 5.
+# analogue on Windows. ALWAYS non-fatal: a missing CLI degrades Step 4 to the
+# legacy manual-credential fallback (#388).
 function Test-TraceblocCli {
   # Pull the persisted (registry) PATH into THIS process — same env a brand-new
   # PowerShell window would start with.
@@ -1970,7 +2857,11 @@ function Test-TraceblocCli {
 }
 
 function Install-TraceblocCli {
-  Step 5 5 "Install the tracebloc CLI"
+  # -- Step 3/5 (#388): BEFORE connect, as bash does — the CLI mints the machine
+  # credential in Step 4 (browser sign-in + `client create`). A failed CLI
+  # install is still non-fatal: Step 4 falls back to the legacy manual-
+  # credential flow, so the machine can always be connected.
+  Step 3 5 "Install the tracebloc CLI"
 
   Info "Installing the tracebloc CLI..."
 
@@ -2001,11 +2892,11 @@ function Install-TraceblocCli {
       # command (or the Windows-correct fix). Non-fatal.
       Test-TraceblocCli
     } else {
-      Warn "Couldn't install the tracebloc CLI automatically -- your client is set up fine."
+      Warn "Couldn't install the tracebloc CLI automatically -- you can still connect with existing client credentials."
       Hint "Install it later:  irm $TRACEBLOC_CLI_INSTALL_URL | iex"
     }
   } catch {
-    Warn "Couldn't install the tracebloc CLI automatically -- your client is set up fine."
+    Warn "Couldn't install the tracebloc CLI automatically -- you can still connect with existing client credentials."
     Hint "Install it later:  irm $TRACEBLOC_CLI_INSTALL_URL | iex"
     Log "CLI install failed: $_"
   } finally {
@@ -2045,14 +2936,20 @@ New-K3dCluster
 Install-GpuDevicePlugin
 Confirm-GpuNode
 
-# -- Steps 3/5 + 4/5 handled inside Install-ClientHelm --
+# -- Step 3/5: install the tracebloc CLI FIRST (#388) — it mints the machine
+# credential in Step 4; a CLI-install hiccup degrades Step 4 to the legacy
+# manual-credential fallback instead of aborting.
+Install-TraceblocCli
+
+# -- Step 4/5: register this machine (browser sign-in + `client create`;
+# env-var credentials skip it; missing/old CLI falls back to manual prompts) --
+Invoke-ProvisionClient
+
+# -- Step 5/5 handled inside Install-ClientHelm --
 Install-ClientHelm
 
 # Verify the client actually came up before reporting anything
 Wait-ForClientReady
-
-# -- Step 5/5: install the tracebloc CLI (non-fatal; client is already up) --
-Install-TraceblocCli
 
 Print-Summary
 
