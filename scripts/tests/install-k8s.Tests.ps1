@@ -1625,6 +1625,26 @@ Describe "In-node CA trust for TLS-inspecting networks (#424)" {
     }
   }
 
+  Context "Write-HostCaCreateHint (host daemon x509 at create, #474)" {
+    It "no x509 in output -> silent" {
+      $out = Write-HostCaCreateHint -Output "FATA Failed to create cluster: docker not running" 6>&1 | Out-String
+      $out.Trim() | Should -BeNullOrEmpty
+    }
+    It "x509 in output -> names the host daemon + Windows trust store" {
+      $out = Write-HostCaCreateHint -Output 'Failed to pull image "rancher/k3s": x509: certificate signed by unknown authority' 6>&1 | Out-String
+      $out | Should -Match 'HOST Docker daemon'
+      $out | Should -Match 'Trusted Root'
+    }
+    It "the create-timeout path captures full output and surfaces the hint (Bugbot #474 parity)" {
+      # The timeout branch can't be exercised end-to-end here, so assert the wiring:
+      # it captures the full logs before deleting them and calls the hint before Err
+      # (bash runs _host_ca_create_hint on its timeout fall-through too).
+      $src = Get-Content "$PSScriptRoot/../install-k8s.ps1" -Raw
+      $src | Should -Match '\$timeoutOut\s*\+='                       # full output captured
+      $src | Should -Match 'Write-HostCaCreateHint -Output \$timeoutOut'  # hint called on timeout
+    }
+  }
+
   Context "Print-Summary CA message" {
     It "names the CA problem + env var, not a generic pull error" {
       $script:ClientState = "image_pull_ca"
@@ -1841,6 +1861,23 @@ Describe "GPU container toolkit — progress + honest remedies (#415)" {
       $script:gpuFn.Extent.Text | Should -Not -Match 'set it up manually inside WSL later'
       $script:gpuFn.Extent.Text | Should -Not -Match 'GPU setup may need manual attention'
     }
+  }
+}
+
+Describe "Download UX -- PS 5.1 progress throttle silenced, honest expectation lines (#468)" {
+  It "Invoke-WithRetry silences the progress overlay for every fetch scriptblock it drives" {
+    (Get-Command Invoke-WithRetry).Definition | Should -Match "ProgressPreference\s*=\s*'SilentlyContinue'"
+  }
+  It "the Docker Desktop fallback names its ~600 MB wait before the silent fetch" {
+    (Get-Command Install-DockerDesktop).Definition | Should -Match 'Downloading Docker Desktop \(~600 MB\)'
+  }
+  It "the winget bootstrap names its ~200 MB wait" {
+    (Get-Command Install-Winget).Definition | Should -Match 'Downloading winget \(~200 MB\)'
+  }
+  It "kubectl / k3d / helm downloads announce size before going quiet" {
+    (Get-Command Install-Kubectl).Definition    | Should -Match 'Downloading kubectl \$kVer \(~60 MB\)'
+    (Get-Command Install-K3dAndHelm).Definition | Should -Match 'Downloading k3d \$k3dVer \(~25 MB\)'
+    (Get-Command Install-K3dAndHelm).Definition | Should -Match 'Downloading Helm \$helmVer \(~20 MB\)'
   }
 }
 

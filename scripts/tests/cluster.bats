@@ -248,6 +248,44 @@ setup() {
   [[ "$output" == *"k3d cluster delete"* ]]
 }
 
+# ── _host_ca_create_hint (host Docker daemon x509 at create, #474) ───────────
+@test "_host_ca_create_hint: no x509 in output -> silent" {
+  run _host_ca_create_hint "FATA[0000] Failed to create cluster: docker daemon not running"
+  [ -z "$output" ]
+}
+
+@test "_host_ca_create_hint: x509 on Linux -> host daemon + Debian AND RHEL paths + DD-for-Linux (#474)" {
+  OS=Linux
+  run _host_ca_create_hint 'FATA Failed to pull image "rancher/k3s": x509: certificate signed by unknown authority'
+  [[ "$output" == *"HOST Docker daemon"* ]]
+  [[ "$output" == *"update-ca-certificates"* ]]              # Debian/Ubuntu
+  [[ "$output" == *"update-ca-trust"* ]]                     # RHEL/Fedora (Bugbot: not Debian-only)
+  [[ "$output" == *"Docker Desktop for Linux"* ]]            # Bugbot: no dangling "Docker Desktop step"
+  [[ "$output" != *"macOS keychain"* ]]
+}
+
+@test "_host_ca_create_hint: x509 on macOS -> Docker Desktop keychain AND Colima VM (#474 Bugbot)" {
+  OS=Darwin
+  run _host_ca_create_hint 'Error response from daemon: tls: failed to verify certificate'
+  [[ "$output" == *"Docker Desktop"* ]]
+  [[ "$output" == *"macOS keychain"* ]]
+  [[ "$output" == *"Colima"* ]]            # headless macOS uses Colima, which ignores the keychain
+  [[ "$output" != *"update-ca-certificates"* ]]
+}
+
+@test "_host_ca_create_hint: large (>64KB) x509 output under pipefail still fires (reviewer #474)" {
+  # The timeout path passes the FULL create logs; with a pipe + grep -q under
+  # set -o pipefail, printf would take SIGPIPE past the ~64KB buffer and the hint
+  # would be silently swallowed even though x509 matched. Guard against that.
+  set -o pipefail
+  OS=Linux
+  local big; big="$(printf 'noise line %s\n' $(seq 1 8000))"   # well over 64KB
+  big+=$'\nFATA Failed to pull image "rancher/k3s": x509: certificate signed by unknown authority'
+  run _host_ca_create_hint "$big"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"HOST Docker daemon"* ]]
+}
+
 # ── _check_existing_cluster_dataset_mount (backend#743) ─────────────────────
 @test "_check_existing_cluster_dataset_mount: HOST_DATASET_DIR unset -> no-op" {
   unset HOST_DATASET_DIR

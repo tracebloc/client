@@ -200,6 +200,12 @@ function Invoke-WithRetry {
     [int]$DelaySeconds = 5,
     [string]$Label = "Operation"
   )
+  # PS 5.1's progress overlay throttles Invoke-WebRequest massively (its render
+  # loop dominates the transfer) and its "Writing request stream" banner reads
+  # like a hang (#468; same fix as the bootstrap's fetch helpers). Function-local
+  # assignment -- PowerShell's dynamic scoping makes every fetch $ScriptBlock
+  # invoked below see it, and the preference reverts when this function returns.
+  $ProgressPreference = 'SilentlyContinue'
   for ($i = 1; $i -le $MaxAttempts; $i++) {
     try {
       $result = & $ScriptBlock
@@ -634,6 +640,9 @@ function Install-Winget {
   if (Has "winget") { Log "winget: $(winget --version)"; return }
 
   Log "Installing winget..."
+  # Honest progress (#468): with the overlay silenced this fetch is quiet, so
+  # name the wait before it starts. Size measured 2026-07-29 (207 MB).
+  Info "Downloading winget (~200 MB) -- one-time; a few minutes on a slow network is normal."
   $url  = "https://github.com/microsoft/winget-cli/releases/latest/download/Microsoft.DesktopAppInstaller_8wekyb3d8bbwe.msixbundle"
   $dest = "$env:TEMP\winget-installer.msixbundle"
   Invoke-WithRetry -Label "winget download" -ScriptBlock {
@@ -658,6 +667,9 @@ function Install-DockerDesktop {
         --accept-package-agreements --accept-source-agreements --silent
     } else {
       $ddArch = Get-WindowsArch
+      # Honest progress (#468): the single biggest download of the install.
+      # Size measured 2026-07-29 (613 MB).
+      Info "Downloading Docker Desktop (~600 MB) -- the biggest download of this install; several minutes is normal."
       $installer = "$env:TEMP\DockerDesktopInstaller.exe"
       Invoke-WithRetry -Label "Docker download" -ScriptBlock {
         Invoke-WebRequest -Uri "https://desktop.docker.com/win/main/$ddArch/Docker%20Desktop%20Installer.exe" `
@@ -902,6 +914,7 @@ function Install-Kubectl {
     (Invoke-WebRequest "https://dl.k8s.io/release/stable.txt" -UseBasicParsing).Content.Trim()
   }
   Log "Downloading kubectl $kVer ($arch)..."
+  Info "Downloading kubectl $kVer (~60 MB)..."
   $kubectlDest = "$TOOL_DIR\kubectl.exe"
   Invoke-WithRetry -Label "download" -ScriptBlock {
     Invoke-WebRequest "https://dl.k8s.io/release/$kVer/bin/windows/$arch/kubectl.exe" `
@@ -1008,6 +1021,7 @@ function Install-K3dAndHelm {
           if (-not $tag) { throw "no Location header on the /releases/latest redirect" }
           $tag
         }
+      Info "Downloading k3d $k3dVer (~25 MB)..."
       $k3dDest = "$TOOL_DIR\k3d.exe"
       Invoke-WithRetry -Label "k3d download" -ScriptBlock {
         Invoke-WebRequest "https://github.com/k3d-io/k3d/releases/download/$k3dVer/k3d-windows-$arch.exe" `
@@ -1066,6 +1080,7 @@ function Install-K3dAndHelm {
         if (-not $c) { throw "empty helm-latest-version response" }
         $c
       }
+      Info "Downloading Helm $helmVer (~20 MB)..."
       $helmZip = "$env:TEMP\helm-$helmVer-windows-$arch.zip"
       Invoke-WithRetry -Label "helm download" -ScriptBlock {
         Invoke-WebRequest "https://get.helm.sh/helm-$helmVer-windows-$arch.zip" `
@@ -1391,6 +1406,31 @@ function Invoke-LeftoverDataGuard {
   }
 }
 
+# When 'k3d cluster create' fails, one cause on a TLS-inspecting network is the
+# HOST Docker daemon hitting x509 while pulling k3d's OWN runtime images
+# (rancher/k3s, k3d-tools, k3d-proxy) -- a different surface than the in-node CA
+# trust (#424), which only covers containerd inside the nodes. Docker Desktop runs
+# the daemon in a VM the installer can't reach, so the node CA mount can't fix it,
+# and this fails before any node boots so Get-NotReadyState never sees it. Detect
+# x509 in the create output and name it with a Windows-specific remedy (#474).
+# No-op unless the output shows a TLS-verification failure. Mirrors the bash
+# _host_ca_create_hint.
+function Write-HostCaCreateHint {
+  param([string]$Output)
+  if ($Output -notmatch '(?i)x509|certificate signed by unknown authority|tls: failed to verify') { return }
+  Write-Host ""
+  Warn "The Docker daemon couldn't pull k3d's runtime images -- TLS verification failed (x509)."
+  Hint "k3d pulls rancher/k3s, k3d-tools and k3d-proxy with the HOST Docker daemon, which does"
+  Hint "not use the in-node CA trust (TRACEBLOC_CA_BUNDLE) this installer configures. Docker"
+  Hint "Desktop runs the daemon in a VM the installer can't reach, so the CA must be trusted by"
+  Hint "the host:"
+  Hint "  Import your corporate CA into the Windows certificate store (Trusted Root Certification"
+  Hint "  Authorities -- 'certlm.msc' for the machine store), then restart Docker Desktop; it reads"
+  Hint "  the Windows trust store on start."
+  Hint "  Details: docs/INSTALL.md (`"TLS-inspecting network`") and https://docs.docker.com/."
+  Write-Host ""
+}
+
 function New-K3dCluster {
   Log "Creating k3d cluster: '$CLUSTER_NAME'"
 
@@ -1553,6 +1593,12 @@ function New-K3dCluster {
     $timeoutMin = 15
     if ("$env:TB_CREATE_TIMEOUT_MIN" -match '^\d+$') { $timeoutMin = [int]$env:TB_CREATE_TIMEOUT_MIN }
     if (-not (Wait-ProcessWithDeadline -Process $k3dProc -Deadline (Get-Date).AddMinutes($timeoutMin) -Message "Creating compute environment...")) {
+      # Capture the FULL create output before the logs are deleted, so the
+      # host-CA x509 check below can see an x509 that scrolled past the last 5
+      # lines (a hung TLS-inspected pull logs x509 then wedges until the deadline).
+      $timeoutOut = ""
+      if (Test-Path $k3dErrLog) { $timeoutOut += ([string](Get-Content $k3dErrLog -Raw -ErrorAction SilentlyContinue)) }
+      if (Test-Path $k3dOutLog) { $timeoutOut += "`n" + ([string](Get-Content $k3dOutLog -Raw -ErrorAction SilentlyContinue)) }
       $tail = @()
       if (Test-Path $k3dErrLog) { $tail = @(Get-Content $k3dErrLog -ErrorAction SilentlyContinue | Select-Object -Last 5) }
       if (-not $tail -and (Test-Path $k3dOutLog)) { $tail = @(Get-Content $k3dOutLog -ErrorAction SilentlyContinue | Select-Object -Last 5) }
@@ -1576,6 +1622,9 @@ function New-K3dCluster {
       if (-not $partialDeleted) {
         Warn "Couldn't remove the partial cluster automatically - run 'k3d cluster delete $CLUSTER_NAME' before re-running."
       }
+      # A TLS-inspected host pull can log x509 and then hang until the deadline —
+      # surface the CA remedy here too, matching bash's timeout fall-through (#474).
+      Write-HostCaCreateHint -Output $timeoutOut
       Err "Compute environment creation timed out after $timeoutMin minutes. Check that Docker is healthy and this network can pull images, then re-run. (TB_CREATE_TIMEOUT_MIN overrides the bound.)"
     }
 
@@ -1588,9 +1637,14 @@ function New-K3dCluster {
     if ($k3dStdout) { Log "k3d stdout: $k3dStdout" }
     if ($k3dStderr) { Log "k3d stderr: $k3dStderr" }
 
-    # Surface k3d's real reason (image pull / proxy / port / WSL) on screen, not
-    # only in the log (#423).
-    if ($k3dExitCode -ne 0) { Err "Failed to create compute environment." "$k3dStderr`n$k3dStdout" }
+    if ($k3dExitCode -ne 0) {
+      # Host-daemon x509 (k3d runtime image pull on a TLS-inspecting network,
+      # #474) -- name the CA remedy before the generic failure.
+      Write-HostCaCreateHint -Output ("$k3dStdout`n$k3dStderr")
+      # Surface k3d's real reason (image pull / proxy / port / WSL) on screen via
+      # Err's detail excerpt, not only in the log (#423).
+      Err "Failed to create compute environment." "$k3dStderr`n$k3dStdout"
+    }
     Ok "Compute environment ready."
   }
 

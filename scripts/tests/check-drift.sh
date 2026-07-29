@@ -200,11 +200,11 @@ _drift_ca_trust() {
   echo "▸ In-node CA trust wiring (cluster.sh · install-k8s.ps1)"
   local before=$_drift pat
   local sh="scripts/lib/cluster.sh" ps1="scripts/install-k8s.ps1"
-  for pat in TRACEBLOC_CA_BUNDLE CURL_CA_BUNDLE _resolve_ca_bundle registry-config tracebloc-mitm-ca.crt; do
-    _drift_ca_token "$DRIFT_ROOT/$sh" "$pat" || _note "$sh: CA wiring missing '$pat' (#424)"
+  for pat in TRACEBLOC_CA_BUNDLE CURL_CA_BUNDLE _resolve_ca_bundle registry-config tracebloc-mitm-ca.crt _host_ca_create_hint; do
+    _drift_ca_token "$DRIFT_ROOT/$sh" "$pat" || _note "$sh: CA wiring missing '$pat' (#424/#474)"
   done
-  for pat in TRACEBLOC_CA_BUNDLE CURL_CA_BUNDLE Resolve-CaBundle registry-config tracebloc-mitm-ca.crt; do
-    _drift_ca_token "$DRIFT_ROOT/$ps1" "$pat" || _note "$ps1: CA wiring missing '$pat' (#424)"
+  for pat in TRACEBLOC_CA_BUNDLE CURL_CA_BUNDLE Resolve-CaBundle registry-config tracebloc-mitm-ca.crt Write-HostCaCreateHint; do
+    _drift_ca_token "$DRIFT_ROOT/$ps1" "$pat" || _note "$ps1: CA wiring missing '$pat' (#424/#474)"
   done
   if [[ "$_drift" -eq "$before" ]]; then _ok "both installers resolve, mount, and register the corporate CA"; fi
   return 0
