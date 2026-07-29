@@ -2734,7 +2734,7 @@ function Test-Preflight {
   }
   if ($tlsSeen)    {
     Hint "A TLS/certificate error usually means a break-and-inspect (TLS-inspecting) proxy whose corporate CA isn't trusted here."
-    Hint "Point the installer at your corporate CA bundle so the host AND the k3d nodes trust it: `$env:TRACEBLOC_CA_BUNDLE='C:\path\to\corporate-ca.pem' (CURL_CA_BUNDLE also honored). Ask IT for the bundle if unsure."
+    Hint "Fix THESE host checks by importing the CA into the Windows certificate store (Cert:\LocalMachine\Root) - Invoke-WebRequest uses the system store, not an env var. The k3d nodes are trusted separately via `$env:TRACEBLOC_CA_BUNDLE='C:\path\to\corporate-ca.pem' (CURL_CA_BUNDLE also honored) at cluster-create. Ask IT for the bundle if unsure."
   }
   if ($cfail -gt 0){ Hint "Allow HTTPS (443) egress to the host(s) named above - the always-needed set is registry-1.docker.io, auth.docker.io, ghcr.io, $backendHost, tracebloc.github.io, plus any tool-download host listed (desktop.docker.com / dl.k8s.io / get.helm.sh / github.com / objects.githubusercontent.com) - or configure your corporate proxy." }
 
