@@ -47,6 +47,9 @@ curl_secure() {
   done
   local -a _bounds=(--connect-timeout "${TB_CURL_CONNECT_TIMEOUT:-30}")
   (( _stall_bounded )) || _bounds+=(--max-time "${TB_CURL_MAX_TIME:-300}")
+  # checker false positive: _bounds ALWAYS carries --connect-timeout (plus
+  # --max-time unless the call stall-bounds itself) — flags inside a bash
+  # array expansion are invisible to the grep. house-rules: ignore=curl-timeout
   curl --tlsv1.2 "${_bounds[@]}" "$@"
 }
 
