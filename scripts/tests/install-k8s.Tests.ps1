@@ -93,11 +93,12 @@ Describe "Step honesty (#422 split check vs install)" {
     $script:SRC | Should -Match 'k3d cluster start \$n'
     $script:SRC | Should -Match 'if \(\$LASTEXITCODE -ne 0\) \{ throw \(\$o'
   }
-  It "the Docker Desktop installer fails loudly, not silently (Bugbot #422)" {
-    # -ErrorAction Stop on the spawn + a non-zero exit-code throw, so a failed
-    # install doesn't complete the job as success and let Step 2 continue.
-    $script:SRC | Should -Match 'install --quiet --accept-license[\s\S]{0,120}-ErrorAction Stop'
-    $script:SRC | Should -Match '\$p\.ExitCode -ne 0[\s\S]{0,40}throw'
+  It "the Docker installer runs as a killable process, not an orphan-prone job (Bugbot #422)" {
+    # Start-Process -PassThru + Wait-ProcessWithDeadline (kills on timeout) + an
+    # exit-code check — a background job would orphan the installer on timeout.
+    $script:SRC | Should -Match 'Start-Process -FilePath \$installer[\s\S]{0,80}-PassThru -ErrorAction Stop'
+    $script:SRC | Should -Match 'Wait-ProcessWithDeadline -Process \$ip'
+    $script:SRC | Should -Match '\$ip\.ExitCode -ne 0'
   }
   It "k3d/helm print their green summary only after the execute-gate (Bugbot #422)" {
     # A corrupt/wrong-arch binary must fail Assert-ToolRuns before any green Ok;
@@ -105,11 +106,12 @@ Describe "Step honesty (#422 split check vs install)" {
     $script:SRC | Should -Match 'Assert-ToolRuns -Name "k3d"[\s\S]{0,80}if \(\$k3dSummary\) \{ Ok'
     $script:SRC | Should -Match 'Assert-ToolRuns -Name "helm"[\s\S]{0,80}if \(\$helmSummary\) \{ Ok'
   }
-  It "the winget Docker path checks exit, falls back, and fails loudly (Bugbot #422)" {
-    # winget Docker install must check $LASTEXITCODE (throw -> fallback), then a
-    # final Test-Path guard Errs if neither winget nor the direct install landed.
-    $script:SRC | Should -Match 'Docker\.DockerDesktop'
-    $script:SRC | Should -Match 'if \(\$LASTEXITCODE -ne 0\) \{ throw "winget exited'
+  It "the winget Docker path is killable, checks exit, falls back, and fails loudly (Bugbot #422)" {
+    # winget runs as a tracked process (killable on timeout), its exit is checked
+    # (throw -> fallback), and a final Test-Path guard Errs if nothing landed.
+    $script:SRC | Should -Match 'Start-Process -FilePath "winget"[\s\S]{0,240}Docker\.DockerDesktop'
+    $script:SRC | Should -Match 'Wait-ProcessWithDeadline -Process \$wp'
+    $script:SRC | Should -Match '\$wp\.ExitCode -ne 0'
     $script:SRC | Should -Match "Docker Desktop installation didn't complete"
   }
 }

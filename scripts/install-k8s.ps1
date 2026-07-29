@@ -734,14 +734,19 @@ function Install-DockerDesktop {
     # Docker-wait later (#422 Bugbot).
     if (Has "winget") {
       # winget install is console-silent for minutes on a 600 MB package (#422).
+      # Run it as a tracked PROCESS (not a background job): Wait-ProcessWithDeadline
+      # shows a spinner AND kills the process on timeout, so a stuck install can't
+      # orphan past the step and fall through to a second concurrent install —
+      # Stop-Job would leave the job's child process running (#422 Bugbot).
       Info "Installing Docker Desktop (~600 MB via winget) -- several minutes is normal."
       try {
-        Invoke-WithHeartbeat -Message "Installing Docker Desktop" -TimeoutSec 2400 -Script {
-          winget install -e --id Docker.DockerDesktop --accept-package-agreements --accept-source-agreements --silent
-          # winget is native: a non-zero exit leaves the job Completed, so throw
-          # to mark it failed and trigger the direct-download fallback below.
-          if ($LASTEXITCODE -ne 0) { throw "winget exited $LASTEXITCODE" }
-        } | Out-Null
+        $wp = Start-Process -FilePath "winget" -PassThru -ErrorAction Stop -ArgumentList @(
+          "install","-e","--id","Docker.DockerDesktop",
+          "--accept-package-agreements","--accept-source-agreements","--silent")
+        if (-not (Wait-ProcessWithDeadline -Process $wp -Deadline (Get-Date).AddMinutes(40) -Message "Installing Docker Desktop (winget)")) {
+          throw "winget Docker install timed out (process killed)"
+        }
+        if ($wp.ExitCode -ne 0) { throw "winget exited $($wp.ExitCode)" }
       } catch { Log "Docker Desktop winget install failed (will try direct download): $_" }
       RefreshPath
     }
@@ -760,19 +765,24 @@ function Install-DockerDesktop {
             Invoke-WebRequest -Uri $u -OutFile $d -UseBasicParsing
           }
       }
-      # The installer itself runs silent with --quiet; heartbeat it too (#422).
-      # -ErrorAction Stop + a non-zero exit-code check so a spawn failure or a
-      # failed install throws (job -> Failed) instead of completing as success (#422 Bugbot).
+      # Run the installer as a tracked PROCESS with a deadline that KILLS it on
+      # timeout (a background job would orphan the installer, #422 Bugbot).
+      # -ErrorAction Stop catches a spawn failure; the exit code catches a failed
+      # install — either way fail loudly, never continue as if Docker installed.
       try {
-        Invoke-WithHeartbeat -Message "Installing Docker Desktop" -TimeoutSec 2400 `
-          -ArgumentList @($installer) -Script {
-            param($d)
-            $p = Start-Process -FilePath $d -ArgumentList "install --quiet --accept-license" `
-              -Wait -PassThru -ErrorAction Stop
-            if ($p.ExitCode -ne 0) { throw "Docker Desktop installer exited $($p.ExitCode)" }
-          } | Out-Null
+        $ip = Start-Process -FilePath $installer -ArgumentList "install --quiet --accept-license" `
+          -PassThru -ErrorAction Stop
       } catch {
-        Err "Docker Desktop installation failed. Install it manually from https://www.docker.com/products/docker-desktop/ and re-run." "$_"
+        Remove-Item $installer -Force -ErrorAction SilentlyContinue
+        Err "Docker Desktop installer wouldn't start. Install it manually from https://www.docker.com/products/docker-desktop/ and re-run." "$_"
+      }
+      if (-not (Wait-ProcessWithDeadline -Process $ip -Deadline (Get-Date).AddMinutes(40) -Message "Installing Docker Desktop")) {
+        Remove-Item $installer -Force -ErrorAction SilentlyContinue
+        Err "Docker Desktop installation timed out (installer stopped). Install it manually from https://www.docker.com/products/docker-desktop/ and re-run."
+      }
+      if ($ip.ExitCode -ne 0) {
+        Remove-Item $installer -Force -ErrorAction SilentlyContinue
+        Err "Docker Desktop installation failed (installer exited $($ip.ExitCode)). Install it manually from https://www.docker.com/products/docker-desktop/ and re-run."
       }
       Remove-Item $installer -Force -ErrorAction SilentlyContinue
       RefreshPath
@@ -1116,10 +1126,14 @@ function Install-K3dAndHelm {
   if (-not (Has "k3d")) {
     if (Has "winget") {
       Log "Installing k3d via winget..."
-      # winget install is console-silent; heartbeat so it doesn't read as a hang (#422).
+      # winget install is console-silent; run it as a killable tracked process
+      # (not a job — Stop-Job would orphan the child on timeout) with a spinner +
+      # deadline. Best-effort: on failure the direct download below takes over (#422).
       try {
-        $null = Invoke-WithHeartbeat -Message "Installing k3d via winget" -TimeoutSec 600 -Script {
-          winget install -e --id Rancher.k3d --accept-package-agreements --accept-source-agreements --silent 2>&1
+        $kp = Start-Process -FilePath "winget" -PassThru -ErrorAction Stop -ArgumentList @(
+          "install","-e","--id","Rancher.k3d","--accept-package-agreements","--accept-source-agreements","--silent")
+        if (-not (Wait-ProcessWithDeadline -Process $kp -Deadline (Get-Date).AddMinutes(10) -Message "Installing k3d (winget)")) {
+          throw "k3d winget install timed out (process killed)"
         }
       } catch { Log "k3d winget install: $_" }
     }
@@ -1188,10 +1202,14 @@ function Install-K3dAndHelm {
   if (-not (Has "helm")) {
     if (Has "winget") {
       Log "Installing Helm via winget..."
-      # winget install is console-silent; heartbeat so it doesn't read as a hang (#422).
+      # winget install is console-silent; killable tracked process + spinner/deadline
+      # (a job would orphan the child on timeout). Best-effort: the direct download
+      # below takes over on failure (#422).
       try {
-        $null = Invoke-WithHeartbeat -Message "Installing Helm via winget" -TimeoutSec 600 -Script {
-          winget install -e --id Helm.Helm --accept-package-agreements --accept-source-agreements --silent 2>&1
+        $hp = Start-Process -FilePath "winget" -PassThru -ErrorAction Stop -ArgumentList @(
+          "install","-e","--id","Helm.Helm","--accept-package-agreements","--accept-source-agreements","--silent")
+        if (-not (Wait-ProcessWithDeadline -Process $hp -Deadline (Get-Date).AddMinutes(10) -Message "Installing Helm (winget)")) {
+          throw "helm winget install timed out (process killed)"
         }
       } catch { Log "helm winget install: $_" }
       RefreshPath
