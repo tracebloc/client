@@ -104,17 +104,20 @@ YAML
 }
 
 @test "ca trust: an installer missing the registry-config -> drift (#424)" {
-  printf 'TRACEBLOC_CA_BUNDLE CURL_CA_BUNDLE _resolve_ca_bundle --registry-config tracebloc-mitm-ca.crt\n' > "$ROOT/scripts/lib/cluster.sh"
-  # ps1 missing --registry-config
-  printf 'TRACEBLOC_CA_BUNDLE CURL_CA_BUNDLE Resolve-CaBundle tracebloc-mitm-ca.crt\n' > "$ROOT/scripts/install-k8s.ps1"
+  # Both fully wired EXCEPT ps1's --registry-config — so drift can only come from
+  # that single omission (all other required tokens, incl the host-CA hints, present).
+  printf 'TRACEBLOC_CA_BUNDLE CURL_CA_BUNDLE _resolve_ca_bundle --registry-config tracebloc-mitm-ca.crt _host_ca_create_hint\n' > "$ROOT/scripts/lib/cluster.sh"
+  printf 'TRACEBLOC_CA_BUNDLE CURL_CA_BUNDLE Resolve-CaBundle tracebloc-mitm-ca.crt Write-HostCaCreateHint\n' > "$ROOT/scripts/install-k8s.ps1"
   _drift=0; _drift_ca_trust >/dev/null 2>&1; [ "$_drift" -ge 1 ]
 }
 
 @test "ca trust: --registry-config only in a COMMENT does NOT count -> drift (Bugbot #424)" {
-  # The functional wiring is gone; the token lingers only in a comment. A whole-file
-  # grep would pass — the comment-stripping check must still flag it.
-  printf '# uses --registry-config to point containerd at the CA\nTRACEBLOC_CA_BUNDLE CURL_CA_BUNDLE _resolve_ca_bundle tracebloc-mitm-ca.crt\n' > "$ROOT/scripts/lib/cluster.sh"
-  printf 'TRACEBLOC_CA_BUNDLE CURL_CA_BUNDLE Resolve-CaBundle --registry-config tracebloc-mitm-ca.crt\n' > "$ROOT/scripts/install-k8s.ps1"
+  # ALL other required tokens are present as real (non-comment) wiring — including
+  # the host-CA hints — so the ONLY thing that can trip drift is --registry-config
+  # surviving solely inside a comment. This isolates the comment-stripping behavior;
+  # a whole-file grep would pass. (Bugbot: don't let a missing new token mask it.)
+  printf '# uses --registry-config to point containerd at the CA\nTRACEBLOC_CA_BUNDLE CURL_CA_BUNDLE _resolve_ca_bundle tracebloc-mitm-ca.crt _host_ca_create_hint\n' > "$ROOT/scripts/lib/cluster.sh"
+  printf 'TRACEBLOC_CA_BUNDLE CURL_CA_BUNDLE Resolve-CaBundle --registry-config tracebloc-mitm-ca.crt Write-HostCaCreateHint\n' > "$ROOT/scripts/install-k8s.ps1"
   _drift=0; _drift_ca_trust >/dev/null 2>&1; [ "$_drift" -ge 1 ]
 }
 
