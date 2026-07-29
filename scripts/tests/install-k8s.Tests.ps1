@@ -99,6 +99,12 @@ Describe "Step honesty (#422 split check vs install)" {
     $script:SRC | Should -Match 'install --quiet --accept-license[\s\S]{0,120}-ErrorAction Stop'
     $script:SRC | Should -Match '\$p\.ExitCode -ne 0[\s\S]{0,40}throw'
   }
+  It "k3d/helm print their green summary only after the execute-gate (Bugbot #422)" {
+    # A corrupt/wrong-arch binary must fail Assert-ToolRuns before any green Ok;
+    # the summary is deferred to after the gate (kubectl already does this).
+    $script:SRC | Should -Match 'Assert-ToolRuns -Name "k3d"[\s\S]{0,80}if \(\$k3dSummary\) \{ Ok'
+    $script:SRC | Should -Match 'Assert-ToolRuns -Name "helm"[\s\S]{0,80}if \(\$helmSummary\) \{ Ok'
+  }
 }
 
 Describe "Get-ErrDetailLines (#423 honest failure output)" {

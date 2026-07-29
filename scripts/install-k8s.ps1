@@ -1160,10 +1160,14 @@ function Install-K3dAndHelm {
       }
       Log "k3d checksum verified."
       RefreshPath
-      Ok (Get-ToolSummaryLine -Name "k3d" -Version $k3dVer -Size "~25 MB" -ElapsedSec ([int]((Get-Date) - $t0k3d).TotalSeconds))
+      # Compute the summary now (correct elapsed) but print it only AFTER the
+      # execute-gate passes — a corrupt/wrong-arch binary must not show a green
+      # "ready" line before Assert-ToolRuns (#422 Bugbot; kubectl gates first too).
+      $k3dSummary = Get-ToolSummaryLine -Name "k3d" -Version $k3dVer -Size "~25 MB" -ElapsedSec ([int]((Get-Date) - $t0k3d).TotalSeconds)
     }
   }
   Assert-ToolRuns -Name "k3d" -VersionArgs @("version") -BinPath "$TOOL_DIR\k3d.exe"
+  if ($k3dSummary) { Ok $k3dSummary }
 
   # -- Helm --
   if (-not (Has "helm")) {
@@ -1205,12 +1209,14 @@ function Install-K3dAndHelm {
       Remove-Item $helmZip -Force -ErrorAction SilentlyContinue
       Remove-Item $helmExtract -Recurse -Force -ErrorAction SilentlyContinue
       RefreshPath
-      Ok (Get-ToolSummaryLine -Name "helm" -Version $helmVer -Size "~20 MB" -ElapsedSec ([int]((Get-Date) - $t0helm).TotalSeconds))
+      # Summary printed only after the execute-gate below (#422 Bugbot).
+      $helmSummary = Get-ToolSummaryLine -Name "helm" -Version $helmVer -Size "~20 MB" -ElapsedSec ([int]((Get-Date) - $t0helm).TotalSeconds)
     }
 
     if (-not (Has "helm")) { Err "Helm could not be installed. Install manually from https://helm.sh/docs/intro/install/ and re-run." }
   }
   Assert-ToolRuns -Name "helm" -VersionArgs @("version") -BinPath "$TOOL_DIR\helm.exe"
+  if ($helmSummary) { Ok $helmSummary }
 
   Ok "System tools"
 }
