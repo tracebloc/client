@@ -131,7 +131,11 @@ _resolve_ca_bundle() {
   local var val
   for var in TRACEBLOC_CA_BUNDLE CURL_CA_BUNDLE; do
     val="${!var:-}"; [[ -z "$val" ]] && continue
-    if [[ ! -r "$val" ]]; then echo "$var"; return 2; fi
+    # Require a readable regular FILE, not just -r: a directory of PEMs is readable
+    # but would bind-mount over the single-file node path and containerd can't read
+    # it as a ca_file — the silent "looks applied but still x509" case. Mirrors the
+    # PS Resolve-CaBundle -PathType Leaf check (reviewer).
+    if [[ ! -r "$val" || ! -f "$val" ]]; then echo "$var"; return 2; fi
     case "$val" in /*) : ;; *) val="$(cd "$(dirname "$val")" 2>/dev/null && pwd)/$(basename "$val")" ;; esac
     echo "$val"; return 0
   done

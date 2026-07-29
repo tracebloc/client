@@ -463,6 +463,13 @@ setup() {
   [ "$output" = "TRACEBLOC_CA_BUNDLE" ]
 }
 
+@test "_resolve_ca_bundle: a directory (readable but not a file) -> var name + rc 2 (#424 review)" {
+  export TRACEBLOC_CA_BUNDLE="$BATS_TEST_TMPDIR/ca-dir"; mkdir -p "$TRACEBLOC_CA_BUNDLE"
+  run _resolve_ca_bundle
+  [ "$status" -eq 2 ]
+  [ "$output" = "TRACEBLOC_CA_BUNDLE" ]
+}
+
 @test "_write_k3d_registries_config: ca_file for every registry (#424)" {
   run _write_k3d_registries_config /etc/ssl/certs/tracebloc-mitm-ca.crt
   [ "$status" -eq 0 ]
