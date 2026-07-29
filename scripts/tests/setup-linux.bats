@@ -862,10 +862,15 @@ _stub_install_steps() {
   MOCK_CALLS="$(mktemp)"
   INSTALL_TIER=1; TB_TIER1_ROOTLESS=1
   HOME="$BATS_TEST_TMPDIR"                 # _install_userspace_tools runs for real
+  # Stub the subid gate and daemon setup — this test asserts install_linux ROUTES to
+  # the rootless path; the gate's own behavior is covered by the _ensure_subid_ranges
+  # tests below.
+  _ensure_subid_ranges()    { record "_ensure_subid_ranges"; }
   install_rootless_docker() { record "install_rootless_docker"; }
   _stub_install_steps
   run install_linux
   [ "$status" -eq 0 ]
+  mock_calls | grep -q _ensure_subid_ranges            # gate runs before daemon setup
   mock_calls | grep -q install_rootless_docker
   mock_calls | grep -q install_kubectl                 # _install_userspace_tools ran
   ! mock_calls | grep -q preflight_sudo
@@ -902,15 +907,6 @@ _stub_install_steps() {
   ! mock_calls | grep -q sudo                          # no blanket sudo anywhere on the rootless path
 }
 
-@test "install_rootless_docker: missing uidmap helpers defer to prepare-host and never self-sudo" {
-  MOCK_CALLS="$(mktemp)"
-  PRESENT_CMDS="curl docker"                           # no newuidmap / newgidmap
-  run install_rootless_docker
-  [ "$status" -ne 0 ]
-  [[ "$output" == *prepare-host* ]]                    # actionable admin remedy, not an opaque failure
-  ! mock_calls | grep -q sudo                          # must NOT sudo apt-get install uidmap
-}
-
 @test "install_rootless_docker: XDG_RUNTIME_DIR unset falls back to /run/user/<uid>" {
   MOCK_CALLS="$(mktemp)"
   PRESENT_CMDS="curl newuidmap newgidmap dockerd-rootless-setuptool.sh docker"
@@ -944,6 +940,178 @@ _stub_install_steps() {
   docker()    { return 0; }                            # ...but the daemon is actually up
   install_rootless_docker                              # must reach the export + verify, not set -e abort
   [ "$DOCKER_HOST" = "unix:///run/user/1000/docker.sock" ]
+}
+
+@test "install_rootless_docker: success line is honest about the admin touch (#458)" {
+  PRESENT_CMDS="newuidmap newgidmap dockerd-rootless-setuptool.sh docker"
+  XDG_RUNTIME_DIR=/run/user/1000; HOME="$BATS_TEST_TMPDIR"
+  systemctl() { :; }; loginctl() { :; }
+  # Zero-root path (gate didn't touch sudo): claims no admin rights.
+  MOCK_CALLS="$(mktemp)"; unset TB_ROOTLESS_ADMIN_TOUCH
+  run install_rootless_docker
+  [[ "$output" == *"no administrator rights were used"* ]]
+  # Sudo-touch path (gate provisioned the range with sudo): must NOT claim zero-root.
+  MOCK_CALLS="$(mktemp)"; TB_ROOTLESS_ADMIN_TOUCH=1
+  run install_rootless_docker
+  [[ "$output" != *"no administrator rights were used"* ]]
+  [[ "$output" == *"one-time admin step"* ]]
+}
+
+# ── _ensure_subid_ranges: the Tier-1 subuid/subgid gate (RFC 0001 #1220) ─────
+@test "_ensure_subid_ranges: present => proceeds with zero privileged calls" {
+  MOCK_CALLS="$(mktemp)"
+  PROBE_SUBID=1; PROBE_UIDMAP=1
+  _provision_subid_ranges() { record "_provision_subid_ranges $*"; }
+  run _ensure_subid_ranges
+  [ "$status" -eq 0 ]
+  ! mock_calls | grep -q _provision_subid_ranges
+  ! mock_calls | grep -q sudo
+}
+
+@test "_ensure_subid_ranges: missing + unprivileged => hand off to prepare-host (naming the user), fail-fast, no sudo" {
+  MOCK_CALLS="$(mktemp)"
+  PROBE_SUBID=0; PROBE_UIDMAP=1; PROBE_PRIVILEGE=no_sudo
+  id() { [ "$1" = "-un" ] && echo researcher || echo 1000; }
+  TB_SUBUID_FILE="$(mktemp)"; TB_SUBGID_FILE="$(mktemp)"   # empty -> next start 100000
+  _provision_subid_ranges() { record "_provision_subid_ranges $*"; }
+  run _ensure_subid_ranges
+  [ "$status" -ne 0 ]                                  # honest fail-fast
+  [[ "$output" == *prepare-host* ]]
+  [[ "$output" == *"TB_PREPARE_USER=researcher"* ]]    # command names the researcher (#458)
+  [[ "$output" == *"/etc/subuid"* ]]                   # the two literal remedy lines
+  [[ "$output" == *"/etc/subgid"* ]]
+  [[ "$output" == *"researcher:100000:65536"* ]]       # computed (non-hardcoded) start for this host
+  ! mock_calls | grep -q _provision_subid_ranges       # never self-provisions unprivileged
+  ! mock_calls | grep -q sudo
+}
+
+@test "_ensure_subid_ranges: missing + sudo available => exactly one announced provision (for id -un)" {
+  MOCK_CALLS="$(mktemp)"
+  PROBE_SUBID=0; PROBE_UIDMAP=1; PROBE_PRIVILEGE=sudo_nopw
+  id() { [ "$1" = "-un" ] && echo researcher || echo 1000; }
+  _provision_subid_ranges() { record "_provision_subid_ranges $*"; }
+  run _ensure_subid_ranges
+  [ "$status" -eq 0 ]
+  [ "$(mock_calls | grep -c _provision_subid_ranges)" -eq 1 ]
+  mock_calls | grep -q "_provision_subid_ranges researcher"   # id -un, not $USER
+  [[ "$output" == *one-time* ]]                         # announced (A2 honest messaging)
+}
+
+@test "_ensure_subid_ranges: uidmap helpers absent => message includes the package-install hint" {
+  MOCK_CALLS="$(mktemp)"
+  PROBE_SUBID=1; PROBE_UIDMAP=0; PROBE_PRIVILEGE=no_sudo
+  run _ensure_subid_ranges
+  [ "$status" -ne 0 ]
+  [[ "$output" == *uidmap* ]]
+}
+
+# ── _provision_subid_ranges: shared remediation body ─────────────────────────
+# _idmap_helper_ok (real, via command -v) is stubbed here to control the usable /
+# not-usable state; its own setuid/filecaps logic is unit-tested in probe.bats.
+@test "_provision_subid_ranges: allocates a range and appends it (file-append path)" {
+  MOCK_CALLS="$(mktemp)"
+  _idmap_helper_ok() { return 0; }                     # helpers usable -> no install
+  sudo()    { "$@"; }                                  # pass-through so tee writes the fixture
+  usermod() { return 0; }                              # `usermod --help` has no --add-subuids -> append path
+  id()      { echo 1000; }
+  TB_SUBUID_FILE="$(mktemp)"; TB_SUBGID_FILE="$(mktemp)"
+  _provision_subid_ranges testuser
+  grep -q '^testuser:100000:65536$' "$TB_SUBUID_FILE"
+  grep -q '^testuser:100000:65536$' "$TB_SUBGID_FILE"
+}
+
+@test "_provision_subid_ranges: idempotent — an existing range is left untouched" {
+  MOCK_CALLS="$(mktemp)"
+  _idmap_helper_ok() { return 0; }
+  sudo()    { "$@"; }
+  usermod() { return 0; }
+  id()      { echo 1000; }
+  TB_SUBUID_FILE="$(mktemp)"; TB_SUBGID_FILE="$(mktemp)"
+  printf 'testuser:100000:65536\n' >"$TB_SUBUID_FILE"
+  printf 'testuser:100000:65536\n' >"$TB_SUBGID_FILE"
+  _provision_subid_ranges testuser
+  [ "$(grep -c '^testuser:' "$TB_SUBUID_FILE")" -eq 1 ]   # not appended again
+  [ "$(grep -c '^testuser:' "$TB_SUBGID_FILE")" -eq 1 ]
+}
+
+@test "_provision_subid_ranges: allocates a NON-overlapping block past an existing range" {
+  MOCK_CALLS="$(mktemp)"
+  _idmap_helper_ok() { return 0; }
+  sudo()    { "$@"; }
+  usermod() { return 0; }
+  id()      { echo 1000; }
+  TB_SUBUID_FILE="$(mktemp)"; TB_SUBGID_FILE="$(mktemp)"
+  printf 'someoneelse:100000:65536\n' >"$TB_SUBUID_FILE"   # 100000..165535 taken
+  printf 'someoneelse:100000:65536\n' >"$TB_SUBGID_FILE"
+  _provision_subid_ranges testuser
+  grep -q '^testuser:165536:65536$' "$TB_SUBUID_FILE"       # next free start, no overlap
+}
+
+@test "_provision_subid_ranges: installs uidmap helpers when not usable, then proceeds" {
+  MOCK_CALLS="$(mktemp)"
+  ok="$BATS_TEST_TMPDIR/uidmap_ok"
+  _idmap_helper_ok()    { [ -e "$ok" ]; }              # not usable until installed
+  _install_uidmap_pkg() { record "install_uidmap"; : >"$ok"; }
+  sudo()    { "$@"; }
+  usermod() { return 0; }
+  id()      { echo 1000; }
+  TB_SUBUID_FILE="$(mktemp)"; TB_SUBGID_FILE="$(mktemp)"
+  _provision_subid_ranges testuser
+  mock_calls | grep -q install_uidmap
+  grep -q '^testuser:100000:65536$' "$TB_SUBUID_FILE"  # proceeded after a successful install
+}
+
+@test "_provision_subid_ranges: helpers still not usable after install => returns non-zero (best-effort), no half-provision (#458)" {
+  MOCK_CALLS="$(mktemp)"
+  _idmap_helper_ok()    { return 1; }                  # never usable (unknown distro / not setuid+no caps)
+  _install_uidmap_pkg() { record "install_uidmap"; }
+  sudo()    { record "sudo $*"; return 0; }
+  id()      { echo 1000; }
+  TB_SUBUID_FILE="$(mktemp)"; TB_SUBGID_FILE="$(mktemp)"
+  run _provision_subid_ranges testuser
+  [ "$status" -ne 0 ]                                  # returns non-zero (NOT exit) so callers decide
+  [[ "$output" == *uidmap* ]]
+  ! mock_calls | grep -q "tee -a"                      # never wrote a range on a broken host
+}
+
+@test "_provision_subid_ranges: a failed range write returns non-zero, not false success (#458)" {
+  MOCK_CALLS="$(mktemp)"
+  _idmap_helper_ok() { return 0; }                     # helpers fine
+  usermod() { return 0; }                              # no --add-subuids -> append path
+  sudo() { case "$*" in tee*) return 1 ;; *) return 0 ;; esac; }  # the tee write FAILS
+  id() { echo 1000; }
+  TB_SUBUID_FILE="$(mktemp)"; TB_SUBGID_FILE="$(mktemp)"
+  run _provision_subid_ranges testuser
+  [ "$status" -ne 0 ]                                  # must surface the write failure, not print success
+}
+
+@test "_provision_subid_ranges: usermod --help nonzero exit still takes the usermod path (pipefail-safe, #458)" {
+  MOCK_CALLS="$(mktemp)"
+  _idmap_helper_ok() { return 0; }
+  sudo() { record "sudo $*"; return 0; }
+  # --help prints the flag but EXITS NON-ZERO (some shadow-utils builds do); the fix
+  # captures output before grepping, so --add-subuids is still detected under pipefail.
+  usermod() { if [ "$1" = "--help" ]; then printf -- '  --add-subuids\n'; return 2; fi; return 0; }
+  id() { echo 1000; }
+  TB_SUBUID_FILE="$(mktemp)"; TB_SUBGID_FILE="$(mktemp)"
+  # Scope pipefail to a subshell — setting it in the @test body can leak into bats'
+  # own harness pipelines and fail the run even when every test passes (bats footgun).
+  ( set -o pipefail; _provision_subid_ranges testuser )
+  mock_calls | grep -q "usermod --add-subuids"         # usermod path, not the append fallback
+  ! mock_calls | grep -q "tee -a"
+}
+
+@test "_install_uidmap_pkg: apt-get distro installs 'uidmap' via the hardened PM_INSTALL (no bare apt hang, #458)" {
+  MOCK_CALLS="$(mktemp)"
+  PRESENT_CMDS="apt-get"
+  unset PM_INSTALL PM_UPDATE            # Tier-1 skips setup_pm; force the real populate-then-install path
+  _install_uidmap_pkg
+  run mock_calls
+  [[ "$output" == *"apt-get update"* ]]                # refreshes the index first (#458)
+  [[ "$output" == *"apt-get install"* ]]
+  [[ "$output" == *"uidmap"* ]]
+  [[ "$output" == *"NEEDRESTART_MODE=a"* ]]            # needrestart guard (no spinner hang)
+  [[ "$output" == *"DPkg::Lock::Timeout="* ]]          # bounded dpkg-lock wait (#210)
 }
 
 # ── _set_tools_target: Tier 0 tools must NOT sudo (Bugbot #1175) ─────────────
@@ -1087,6 +1255,23 @@ _stub_install_steps() {
   ! mock_calls | grep -q "usermod"      # nobody to add
   # No grant happened => must NOT falsely promise a no-admin install (#377).
   ! printf '%s\n' "$output" | grep -qi "can now install tracebloc with no administrator rights"
+}
+
+@test "run_prepare_host: subid provisioning failure is best-effort — warns, still prepares the host (#458)" {
+  MOCK_CALLS="$(mktemp)"
+  OS=Linux; TB_PREPARE_USER=researcher
+  host_audit()          { :; }
+  preflight_sudo()      { :; }
+  setup_pm()            { :; }
+  apt_wait_for_lock()   { :; }
+  install_docker_engine(){ record install_docker_engine; }
+  install_system_deps() { :; }
+  sudo()                { record "sudo $*"; return 0; }
+  _provision_subid_ranges() { return 1; }              # can't provision (e.g. unknown distro / helpers unfixable)
+  run run_prepare_host
+  [ "$status" -eq 0 ]                                  # best-effort: the whole prep must NOT abort (#458)
+  [[ "$output" == *"Couldn't provision subuid/subgid"* ]]   # honest warning, not a hard exit
+  mock_calls | grep -q install_docker_engine           # host still prepared
 }
 
 @test "run_prepare_host: usermod fails => no false no-admin promise, still exits 0 (#377)" {
