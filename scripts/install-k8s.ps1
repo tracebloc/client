@@ -728,15 +728,25 @@ function Install-DockerDesktop {
   $dockerExe = "$env:ProgramFiles\Docker\Docker\Docker Desktop.exe"
 
   if (-not (Test-Path $dockerExe)) {
+    # Try winget first (if present), then fall back to the direct download when
+    # winget is absent OR its install didn't land the exe — parity with k3d/helm,
+    # so a swallowed winget failure doesn't leave Step 2 to die in the long
+    # Docker-wait later (#422 Bugbot).
     if (Has "winget") {
       # winget install is console-silent for minutes on a 600 MB package (#422).
       Info "Installing Docker Desktop (~600 MB via winget) -- several minutes is normal."
       try {
         Invoke-WithHeartbeat -Message "Installing Docker Desktop" -TimeoutSec 2400 -Script {
           winget install -e --id Docker.DockerDesktop --accept-package-agreements --accept-source-agreements --silent
+          # winget is native: a non-zero exit leaves the job Completed, so throw
+          # to mark it failed and trigger the direct-download fallback below.
+          if ($LASTEXITCODE -ne 0) { throw "winget exited $LASTEXITCODE" }
         } | Out-Null
-      } catch { Log "Docker Desktop winget install: $_" }
-    } else {
+      } catch { Log "Docker Desktop winget install failed (will try direct download): $_" }
+      RefreshPath
+    }
+
+    if (-not (Test-Path $dockerExe)) {
       $ddArch = Get-WindowsArch
       # Honest progress (#468): the single biggest download of the install.
       # Size measured 2026-07-29 (613 MB).
@@ -752,8 +762,7 @@ function Install-DockerDesktop {
       }
       # The installer itself runs silent with --quiet; heartbeat it too (#422).
       # -ErrorAction Stop + a non-zero exit-code check so a spawn failure or a
-      # failed install throws (job -> Failed) instead of completing as success and
-      # letting Step 2 continue as if Docker was installed (#422 Bugbot).
+      # failed install throws (job -> Failed) instead of completing as success (#422 Bugbot).
       try {
         Invoke-WithHeartbeat -Message "Installing Docker Desktop" -TimeoutSec 2400 `
           -ArgumentList @($installer) -Script {
@@ -766,8 +775,14 @@ function Install-DockerDesktop {
         Err "Docker Desktop installation failed. Install it manually from https://www.docker.com/products/docker-desktop/ and re-run." "$_"
       }
       Remove-Item $installer -Force -ErrorAction SilentlyContinue
+      RefreshPath
     }
-    RefreshPath
+
+    # Neither winget nor the direct installer produced the exe — fail loudly now
+    # rather than in the 10-minute Docker-wait below (#422 Bugbot).
+    if (-not (Test-Path $dockerExe)) {
+      Err "Docker Desktop installation didn't complete. Install it manually from https://www.docker.com/products/docker-desktop/ and re-run."
+    }
   }
 
   $dockerRunning = $false

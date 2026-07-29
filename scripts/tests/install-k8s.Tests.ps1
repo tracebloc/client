@@ -105,6 +105,13 @@ Describe "Step honesty (#422 split check vs install)" {
     $script:SRC | Should -Match 'Assert-ToolRuns -Name "k3d"[\s\S]{0,80}if \(\$k3dSummary\) \{ Ok'
     $script:SRC | Should -Match 'Assert-ToolRuns -Name "helm"[\s\S]{0,80}if \(\$helmSummary\) \{ Ok'
   }
+  It "the winget Docker path checks exit, falls back, and fails loudly (Bugbot #422)" {
+    # winget Docker install must check $LASTEXITCODE (throw -> fallback), then a
+    # final Test-Path guard Errs if neither winget nor the direct install landed.
+    $script:SRC | Should -Match 'Docker\.DockerDesktop'
+    $script:SRC | Should -Match 'if \(\$LASTEXITCODE -ne 0\) \{ throw "winget exited'
+    $script:SRC | Should -Match "Docker Desktop installation didn't complete"
+  }
 }
 
 Describe "Get-ErrDetailLines (#423 honest failure output)" {
