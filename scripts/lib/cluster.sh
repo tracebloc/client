@@ -599,10 +599,12 @@ _host_ca_create_hint() {
   hint "not use the in-node CA trust (TRACEBLOC_CA_BUNDLE) this installer configures — the daemon"
   hint "itself has to trust your corporate CA:"
   if [[ "${OS:-}" == "Linux" ]]; then
-    hint "  Linux (native Docker): add the CA to the system trust store, then restart Docker —"
-    hint "    sudo cp <corporate-ca>.pem /usr/local/share/ca-certificates/tracebloc-corp-ca.crt"
-    hint "    sudo update-ca-certificates && sudo systemctl restart docker"
-    hint "  (Docker Desktop for Linux runs the daemon in a VM — use the Docker Desktop step instead.)"
+    hint "  Native Docker — add the CA to the system trust store (use your distro's path):"
+    hint "    Debian/Ubuntu: sudo cp <corporate-ca>.pem /usr/local/share/ca-certificates/tracebloc-corp-ca.crt && sudo update-ca-certificates"
+    hint "    RHEL/Fedora:   sudo cp <corporate-ca>.pem /etc/pki/ca-trust/source/anchors/tracebloc-corp-ca.crt && sudo update-ca-trust"
+    hint "    then restart Docker: sudo systemctl restart docker"
+    hint "  Docker Desktop for Linux — the daemon runs in a VM: add the CA to the system trust"
+    hint "    store as above, then restart Docker Desktop (it re-reads the host trust store on start)."
   else
     hint "  Docker Desktop (macOS): the daemon runs in a VM the installer can't reach. Add the CA"
     hint "  to the macOS keychain and set it to 'Always Trust', then restart Docker Desktop —"

@@ -254,11 +254,13 @@ setup() {
   [ -z "$output" ]
 }
 
-@test "_host_ca_create_hint: x509 on Linux -> names host daemon + system trust store (#474)" {
+@test "_host_ca_create_hint: x509 on Linux -> host daemon + Debian AND RHEL paths + DD-for-Linux (#474)" {
   OS=Linux
   run _host_ca_create_hint 'FATA Failed to pull image "rancher/k3s": x509: certificate signed by unknown authority'
   [[ "$output" == *"HOST Docker daemon"* ]]
-  [[ "$output" == *"update-ca-certificates"* ]]
+  [[ "$output" == *"update-ca-certificates"* ]]              # Debian/Ubuntu
+  [[ "$output" == *"update-ca-trust"* ]]                     # RHEL/Fedora (Bugbot: not Debian-only)
+  [[ "$output" == *"Docker Desktop for Linux"* ]]            # Bugbot: no dangling "Docker Desktop step"
   [[ "$output" != *"macOS keychain"* ]]
 }
 
