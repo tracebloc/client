@@ -61,7 +61,19 @@ function Warn($m)          { Write-Host "  " -NoNewline; Write-Host ([char]0x26A
 function Get-ErrDetailLines([string]$Detail) {
   $out = @()
   if ($Detail) {
-    $lines = @($Detail -split "`r?`n" | ForEach-Object { $_.TrimEnd() } | Where-Object { $_ -ne "" } | Select-Object -Last 5)
+    # Drop PowerShell 5.1 ErrorRecord "chrome" that `native 2>&1 | Out-String`
+    # wraps around stderr (the `At <file>:<n> char:<n>` position line and the
+    # `+ ...` / `+ CategoryInfo` / `+ FullyQualifiedErrorId` block). Otherwise a
+    # helm failure's last 5 lines are all chrome and the real `Error:` line is
+    # crowded out of the excerpt (#423 Bugbot).
+    $lines = @($Detail -split "`r?`n" |
+      ForEach-Object { $_.TrimEnd() } |
+      Where-Object {
+        $_ -ne "" -and
+        $_ -notmatch '^\s*At [^ ]+:\d+ char:\d+' -and
+        $_ -notmatch '^\s*\+ '
+      } |
+      Select-Object -Last 5)
     if ($lines.Count) { $out += "--- details ---"; $out += $lines }
   }
   if ($script:LOG_FILE) { $out += "Full log: $script:LOG_FILE" }

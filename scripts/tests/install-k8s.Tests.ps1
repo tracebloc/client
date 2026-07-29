@@ -66,6 +66,24 @@ Describe "Get-ErrDetailLines (#423 honest failure output)" {
     $out | Should -Not -Match 'Full log:'
     $out | Should -Match '-Diagnose'   # next-step hint still present
   }
+  It "keeps the real Error: line and strips PS 5.1 ErrorRecord chrome (Bugbot #423)" {
+    # helm failures arrive as `native 2>&1 | Out-String`; on PS 5.1 that decorates
+    # stderr with position/CategoryInfo/FullyQualifiedErrorId lines. The excerpt
+    # must surface the actual Error, not the formatter noise.
+    $detail = @"
+helm : Error: looks like "https://bad" is not a valid chart repository or cannot be reached
+At line:1 char:14
++ `$addOutput = (helm repo add tracebloc https://bad --force-update 2>&1 ...
++              ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (Error:...:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+"@
+    $out = (Get-ErrDetailLines $detail) -join "`n"
+    $out | Should -Match 'Error: looks like'
+    $out | Should -Not -Match 'FullyQualifiedErrorId'
+    $out | Should -Not -Match 'CategoryInfo'
+    $out | Should -Not -Match 'At line:1 char:14'
+  }
   It "single-line result enumerates as one intact line, never per-character (Bugbot #423)" {
     # The bare-Err path (no detail, no LOG_FILE — e.g. a Confirm-Config failure
     # before Start-InstallLog) returns just the support-bundle line. Enumerating it
