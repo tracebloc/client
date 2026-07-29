@@ -163,6 +163,12 @@ function Invoke-WithRetry {
     [int]$DelaySeconds = 5,
     [string]$Label = "Operation"
   )
+  # PS 5.1's progress overlay throttles Invoke-WebRequest massively (its render
+  # loop dominates the transfer) and its "Writing request stream" banner reads
+  # like a hang (#468; same fix as the bootstrap's fetch helpers). Function-local
+  # assignment -- PowerShell's dynamic scoping makes every fetch $ScriptBlock
+  # invoked below see it, and the preference reverts when this function returns.
+  $ProgressPreference = 'SilentlyContinue'
   for ($i = 1; $i -le $MaxAttempts; $i++) {
     try {
       $result = & $ScriptBlock
@@ -592,6 +598,9 @@ function Install-Winget {
   if (Has "winget") { Log "winget: $(winget --version)"; return }
 
   Log "Installing winget..."
+  # Honest progress (#468): with the overlay silenced this fetch is quiet, so
+  # name the wait before it starts. Size measured 2026-07-29 (207 MB).
+  Info "Downloading winget (~200 MB) -- one-time; a few minutes on a slow network is normal."
   $url  = "https://github.com/microsoft/winget-cli/releases/latest/download/Microsoft.DesktopAppInstaller_8wekyb3d8bbwe.msixbundle"
   $dest = "$env:TEMP\winget-installer.msixbundle"
   Invoke-WithRetry -Label "winget download" -ScriptBlock {
@@ -616,6 +625,9 @@ function Install-DockerDesktop {
         --accept-package-agreements --accept-source-agreements --silent
     } else {
       $ddArch = Get-WindowsArch
+      # Honest progress (#468): the single biggest download of the install.
+      # Size measured 2026-07-29 (613 MB).
+      Info "Downloading Docker Desktop (~600 MB) -- the biggest download of this install; several minutes is normal."
       $installer = "$env:TEMP\DockerDesktopInstaller.exe"
       Invoke-WithRetry -Label "Docker download" -ScriptBlock {
         Invoke-WebRequest -Uri "https://desktop.docker.com/win/main/$ddArch/Docker%20Desktop%20Installer.exe" `
@@ -860,6 +872,7 @@ function Install-Kubectl {
     (Invoke-WebRequest "https://dl.k8s.io/release/stable.txt" -UseBasicParsing).Content.Trim()
   }
   Log "Downloading kubectl $kVer ($arch)..."
+  Info "Downloading kubectl $kVer (~60 MB)..."
   $kubectlDest = "$TOOL_DIR\kubectl.exe"
   Invoke-WithRetry -Label "download" -ScriptBlock {
     Invoke-WebRequest "https://dl.k8s.io/release/$kVer/bin/windows/$arch/kubectl.exe" `
@@ -966,6 +979,7 @@ function Install-K3dAndHelm {
           if (-not $tag) { throw "no Location header on the /releases/latest redirect" }
           $tag
         }
+      Info "Downloading k3d $k3dVer (~25 MB)..."
       $k3dDest = "$TOOL_DIR\k3d.exe"
       Invoke-WithRetry -Label "k3d download" -ScriptBlock {
         Invoke-WebRequest "https://github.com/k3d-io/k3d/releases/download/$k3dVer/k3d-windows-$arch.exe" `
@@ -1024,6 +1038,7 @@ function Install-K3dAndHelm {
         if (-not $c) { throw "empty helm-latest-version response" }
         $c
       }
+      Info "Downloading Helm $helmVer (~20 MB)..."
       $helmZip = "$env:TEMP\helm-$helmVer-windows-$arch.zip"
       Invoke-WithRetry -Label "helm download" -ScriptBlock {
         Invoke-WebRequest "https://get.helm.sh/helm-$helmVer-windows-$arch.zip" `
