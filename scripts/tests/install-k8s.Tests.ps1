@@ -28,6 +28,55 @@ Describe "Get-BackendUrl" {
   It "unknown -> prod" { $env:CLIENT_ENV = "whatever"; Get-BackendUrl | Should -Be "https://api.tracebloc.io/" }
 }
 
+Describe "Get-ToolSummaryLine (#422 honest per-tool progress)" {
+  It "name + version + size + elapsed" {
+    Get-ToolSummaryLine -Name "kubectl" -Version "v1.31.0" -Size "~60 MB" -ElapsedSec 12 |
+      Should -Be "kubectl v1.31.0 (~60 MB, 12s)"
+  }
+  It "name + version only (no meta parens)" {
+    Get-ToolSummaryLine -Name "helm" -Version "v4.2.3" | Should -Be "helm v4.2.3"
+  }
+  It "name only" { Get-ToolSummaryLine -Name "k3d" | Should -Be "k3d" }
+  It "size without elapsed" {
+    Get-ToolSummaryLine -Name "k3d" -Version "v5.9.0" -Size "~25 MB" |
+      Should -Be "k3d v5.9.0 (~25 MB)"
+  }
+  It "elapsed 0 is shown (not treated as absent)" {
+    Get-ToolSummaryLine -Name "helm" -Version "v4.2.3" -ElapsedSec 0 |
+      Should -Be "helm v4.2.3 (0s)"
+  }
+}
+
+Describe "Invoke-WithHeartbeat (#422 no silent window)" {
+  It "returns the operation output" {
+    (Invoke-WithHeartbeat -Message "adding" -PollSeconds 1 -Script { 40 + 2 }) | Should -Be 42
+  }
+  It "throws when the operation fails (so callers keep retry/abort flow)" {
+    { Invoke-WithHeartbeat -Message "boom" -PollSeconds 1 -Script { throw "kaboom" } } | Should -Throw
+  }
+  It "passes ArgumentList into the job scriptblock" {
+    (Invoke-WithHeartbeat -Message "args" -PollSeconds 1 -ArgumentList @("a","b") -Script { param($x,$y) "$x$y" }) |
+      Should -Be "ab"
+  }
+}
+
+Describe "Step honesty (#422 split check vs install)" {
+  BeforeAll { $script:SRC = Get-Content "$PSScriptRoot/../install-k8s.ps1" -Raw }
+  It "runs six steps, not five" {
+    $script:SRC | Should -Match 'Step 6 6 "'
+    $script:SRC | Should -Not -Match 'Step [0-9] 5 "'
+  }
+  It "has a dedicated 'Installing system tools' step" {
+    $script:SRC | Should -Match 'Step 2 6 "Installing system tools"'
+  }
+  It "the k3d start path does not stream raw output (routed via heartbeat)" {
+    # The old bare form streamed k3d's INFO[...] to the console; it must be gone,
+    # replaced by the captured job form (k3d cluster start `$n) inside the heartbeat.
+    $script:SRC | Should -Not -Match '(?m)^\s*k3d cluster start \$CLUSTER_NAME\s*$'
+    $script:SRC | Should -Match 'k3d cluster start \$n'
+  }
+}
+
 Describe "Test-Credentials" {
   It "HTTP 200 -> valid" {
     Mock Invoke-WebRequest { [pscustomobject]@{ StatusCode = 200 } }
