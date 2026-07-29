@@ -180,10 +180,15 @@ function Invoke-WithRetry {
 # Log interpolation whose failure is non-terminating, so a corrupt or wrong-arch
 # binary (winget shims / partial installs skip the direct path's checksum verify)
 # still reached "System tools" and only died at cluster-create. Actually RUN the
-# tool's self-check; on a non-zero exit or an exception, remove the binary we
-# dropped and Err with an arch-aware remedy so Step 1 fails loudly. NOTE: kubectl
-# uses `version --client` (NOT --short — removed in kubectl 1.28+, would
-# false-fail the gate).
+# tool's self-check; on failure Err with an arch-aware remedy so Step 1 fails
+# loudly. NOTE: kubectl uses `version --client` (NOT --short — removed in 1.28+);
+# helm uses bare `version` (--short may go the same way).
+#
+# -BinPath is our own install location. On failure we remove it ONLY when the
+# binary that actually ran resolves to it — so a broken copy WE placed (fresh or
+# left by a prior run) self-heals on re-run, while a winget/choco/pre-existing copy
+# elsewhere on PATH is never deleted (reviewer + Bugbot). Callers may pass -BinPath
+# on every path; the resolved-source guard sorts out ownership.
 function Assert-ToolRuns {
   param(
     [Parameter(Mandatory)][string]$Name,
@@ -196,7 +201,10 @@ function Assert-ToolRuns {
     $ok  = ($LASTEXITCODE -eq 0)
   } catch { $ok = $false }
   if (-not $ok) {
-    if ($BinPath -and (Test-Path $BinPath)) { Remove-Item $BinPath -Force -ErrorAction SilentlyContinue }
+    if ($BinPath -and (Test-Path $BinPath)) {
+      $resolved = (Get-Command $Name -ErrorAction SilentlyContinue).Source
+      if ($resolved -and ($resolved -eq $BinPath)) { Remove-Item $BinPath -Force -ErrorAction SilentlyContinue }
+    }
     $arch = Get-WindowsArch
     Err "$Name was installed but won't run -- a corrupt or wrong-architecture binary (this machine is $arch). Re-run this script to re-download it; if it recurs, remove any $Name installed via a package manager (winget/choco) first, then re-run."
   }
@@ -812,7 +820,7 @@ echo "NCT installed successfully."
 function Install-Kubectl {
   # Execute-gate on both paths (#411): a present-but-broken kubectl is as fatal as
   # a bad fresh install, and this runs in Step 1, before the cluster step.
-  if (Has "kubectl") { Assert-ToolRuns -Name "kubectl" -VersionArgs @("version","--client"); return }
+  if (Has "kubectl") { Assert-ToolRuns -Name "kubectl" -VersionArgs @("version","--client") -BinPath "$TOOL_DIR\kubectl.exe"; return }
 
   $arch = Get-WindowsArch
   $kVer = Invoke-WithRetry -Label "version check" -ScriptBlock {
@@ -907,10 +915,6 @@ function Resolve-ToolVersion {
 
 function Install-K3dAndHelm {
   # -- k3d --
-  # $k3dDest is set ONLY on the direct-download path below; it stays $null when k3d
-  # came from winget or was already present, so the gate's -BinPath removes only a
-  # binary WE placed — never a winget/pre-existing copy elsewhere on PATH (#411 review).
-  $k3dDest = $null
   if (-not (Has "k3d")) {
     if (Has "winget") {
       Log "Installing k3d via winget..."
@@ -966,11 +970,9 @@ function Install-K3dAndHelm {
       RefreshPath
     }
   }
-  Assert-ToolRuns -Name "k3d" -VersionArgs @("version") -BinPath $k3dDest
+  Assert-ToolRuns -Name "k3d" -VersionArgs @("version") -BinPath "$TOOL_DIR\k3d.exe"
 
   # -- Helm --
-  # $helmDest set only on the direct-download path; gate removes only what we placed.
-  $helmDest = $null
   if (-not (Has "helm")) {
     if (Has "winget") {
       Log "Installing Helm via winget..."
@@ -998,7 +1000,6 @@ function Install-K3dAndHelm {
       if (Test-Path $helmExtract) { Remove-Item $helmExtract -Recurse -Force }
       Expand-Archive -Path $helmZip -DestinationPath $helmExtract -Force
       Copy-Item "$helmExtract\windows-$arch\helm.exe" "$TOOL_DIR\helm.exe" -Force
-      $helmDest = "$TOOL_DIR\helm.exe"
       Remove-Item $helmZip -Force -ErrorAction SilentlyContinue
       Remove-Item $helmExtract -Recurse -Force -ErrorAction SilentlyContinue
       RefreshPath
@@ -1006,7 +1007,7 @@ function Install-K3dAndHelm {
 
     if (-not (Has "helm")) { Err "Helm could not be installed. Install manually from https://helm.sh/docs/intro/install/ and re-run." }
   }
-  Assert-ToolRuns -Name "helm" -VersionArgs @("version") -BinPath $helmDest
+  Assert-ToolRuns -Name "helm" -VersionArgs @("version") -BinPath "$TOOL_DIR\helm.exe"
 
   Ok "System tools"
 }

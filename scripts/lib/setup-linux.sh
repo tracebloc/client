@@ -401,12 +401,11 @@ install_kubectl() {
       || error "Couldn't resolve the kubectl version from dl.k8s.io/release/stable.txt — check network connectivity to dl.k8s.io and re-run."
     spin_cmd "Installing system tools…" _fetch_kubectl "$KUBE_VER" "$ARCH_DL"
     log "kubectl $KUBE_VER installed."
-    # Fresh install: we placed it, so --rm lets a corrupt/wrong-arch download be
-    # cleared. Present path (else): don't remove a binary we didn't install (#411 review).
-    assert_tool_runs --rm "$TB_TOOLS_DIR/kubectl" kubectl version --client
-  else
-    assert_tool_runs kubectl version --client
   fi
+  # Gate on both paths (fresh + already-present). --rm removes our TB_TOOLS_DIR copy
+  # only if IT is the binary that failed (assert_tool_runs' -ef guard), so a broken
+  # installer-placed kubectl self-heals on re-run while a pkg copy elsewhere is safe.
+  assert_tool_runs --rm "$TB_TOOLS_DIR/kubectl" kubectl version --client
 }
 
 # ── k3d ──────────────────────────────────────────────────────────────────────
@@ -450,7 +449,7 @@ _fetch_k3d_release() {
 
 install_k3d() {
   if has k3d; then
-    assert_tool_runs k3d version
+    assert_tool_runs --rm "$TB_TOOLS_DIR/k3d" k3d version
     return 0
   fi
 
@@ -649,14 +648,10 @@ install_helm() {
     fi
   fi
   _ensure_helm_executable
-  # bare `helm version` (not --short: it may be dropped like kubectl's was, which
-  # would false-fail the gate). --rm only when helm sits in OUR tools dir; a
-  # pre-existing / pkg-managed helm elsewhere on PATH is not ours to delete (#411 review).
-  if [[ -f "$TB_TOOLS_DIR/helm" ]]; then
-    assert_tool_runs --rm "$TB_TOOLS_DIR/helm" helm version
-  else
-    assert_tool_runs helm version
-  fi
+  # bare `helm version` (not --short: it may be dropped like kubectl's was). --rm
+  # removes our TB_TOOLS_DIR copy only if IT is the binary that failed (-ef guard),
+  # never a pre-existing / pkg-managed helm elsewhere on PATH (#411 review).
+  assert_tool_runs --rm "$TB_TOOLS_DIR/helm" helm version
   success "System tools"
 }
 

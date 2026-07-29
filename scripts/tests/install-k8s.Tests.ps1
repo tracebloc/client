@@ -1490,11 +1490,20 @@ Describe "Assert-ToolRuns execute-gate (#411)" {
     { Assert-ToolRuns -Name "k3d" -VersionArgs @("version") } | Should -Throw "*ERR:*"
   }
 
-  It "removes the dropped binary on failure" {
+  It "removes the dropped binary on failure when it's the one that ran" {
     Mock k3d { $global:LASTEXITCODE = 1 }
     $bin = Join-Path $TestDrive "k3d.exe"; "x" | Set-Content $bin
+    Mock Get-Command { [pscustomobject]@{ Source = $bin } } -ParameterFilter { $Name -eq 'k3d' }
     { Assert-ToolRuns -Name "k3d" -VersionArgs @("version") -BinPath $bin } | Should -Throw
     Test-Path $bin | Should -BeFalse
+  }
+
+  It "does NOT remove BinPath when the failing binary resolved elsewhere (winget/present)" {
+    Mock k3d { $global:LASTEXITCODE = 1 }
+    $bin = Join-Path $TestDrive "k3d.exe"; "x" | Set-Content $bin
+    Mock Get-Command { [pscustomobject]@{ Source = "C:\winget\k3d.exe" } } -ParameterFilter { $Name -eq 'k3d' }
+    { Assert-ToolRuns -Name "k3d" -VersionArgs @("version") -BinPath $bin } | Should -Throw
+    Test-Path $bin | Should -BeTrue      # left alone — it isn't the binary that ran
   }
 
   It "the arch-aware remedy names the machine architecture" {

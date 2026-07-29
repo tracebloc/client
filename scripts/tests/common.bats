@@ -521,3 +521,15 @@ setup() {
   [[ "$output" == *"won't run"* ]]
   [ -f "$BATS_TEST_TMPDIR/bin/k3d" ]          # NOT removed — we didn't place it
 }
+
+@test "assert_tool_runs: --rm removes ONLY the binary that actually ran, not a decoy copy (#411 Bugbot)" {
+  # The failing k3d resolves to bin/; --rm points at a different (installer-dir)
+  # copy that did NOT run. The -ef guard must leave that copy alone.
+  mkdir -p "$BATS_TEST_TMPDIR/bin" "$BATS_TEST_TMPDIR/tools"
+  printf '#!/usr/bin/env bash\nexit 1\n' > "$BATS_TEST_TMPDIR/bin/k3d"; chmod +x "$BATS_TEST_TMPDIR/bin/k3d"
+  : > "$BATS_TEST_TMPDIR/tools/k3d"
+  PATH="$BATS_TEST_TMPDIR/bin:$PATH"
+  run assert_tool_runs --rm "$BATS_TEST_TMPDIR/tools/k3d" k3d version
+  [ "$status" -ne 0 ]
+  [ -f "$BATS_TEST_TMPDIR/tools/k3d" ]         # NOT removed — it isn't the binary that ran
+}
