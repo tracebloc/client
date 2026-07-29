@@ -54,7 +54,44 @@ if (-not $env:TB_PESTER) {
 function Info($m)          { Write-Host "  " -NoNewline; Write-Host ([char]0x00B7) -ForegroundColor DarkGray -NoNewline; Write-Host " $m" -ForegroundColor DarkGray }
 function Ok($m)            { Write-Host "  " -NoNewline; Write-Host ([char]0x2714) -ForegroundColor Green -NoNewline; Write-Host " $m" }
 function Warn($m)          { Write-Host "  " -NoNewline; Write-Host ([char]0x26A0) -ForegroundColor Yellow -NoNewline; Write-Host "  $m" -ForegroundColor Yellow }
-function Err($m)           { Write-Host "  " -NoNewline; Write-Host ([char]0x2716) -ForegroundColor Red -NoNewline; Write-Host " $m" -ForegroundColor Red; exit 1 }
+# Build the trailing lines every fatal error shows (#423): a short excerpt of the
+# real tool output (last few non-empty lines — the actual reason, not a generic
+# line), then the log path and the -Diagnose support-bundle hint as first-class
+# next steps. Pure (no host writes / no exit) so it is unit-testable.
+function Get-ErrDetailLines([string]$Detail) {
+  $out = @()
+  if ($Detail) {
+    # Drop PowerShell 5.1 ErrorRecord "chrome" that `native 2>&1 | Out-String`
+    # wraps around stderr (the `At <file>:<n> char:<n>` position line and the
+    # `+ ...` / `+ CategoryInfo` / `+ FullyQualifiedErrorId` block). Otherwise a
+    # helm failure's last 5 lines are all chrome and the real `Error:` line is
+    # crowded out of the excerpt (#423 Bugbot).
+    $lines = @($Detail -split "`r?`n" |
+      ForEach-Object { $_.TrimEnd() } |
+      Where-Object {
+        $_ -ne "" -and
+        $_ -notmatch '^\s*At [^ ]+:\d+ char:\d+' -and
+        $_ -notmatch '^\s*\+ '
+      } |
+      Select-Object -Last 5)
+    if ($lines.Count) { $out += "--- details ---"; $out += $lines }
+  }
+  if ($script:LOG_FILE) { $out += "Full log: $script:LOG_FILE" }
+  $out += "Support bundle: re-run with -Diagnose"
+  return $out
+}
+
+# $Detail (optional) is captured tool output (e.g. k3d/helm stderr); its last few
+# non-empty lines are surfaced on screen so the real reason isn't buried in the
+# log (#423). Every failure names the log path + -Diagnose regardless.
+function Err($m, $Detail)  {
+  Write-Host "  " -NoNewline; Write-Host ([char]0x2716) -ForegroundColor Red -NoNewline; Write-Host " $m" -ForegroundColor Red
+  # @(...) forces array enumeration: a single-line result unwraps to a scalar
+  # string, and enumerating that explicitly keeps each line intact (defensive —
+  # the `foreach` statement already iterates a scalar once, not per-char).
+  foreach ($l in @(Get-ErrDetailLines $Detail)) { Write-Host "  $l" -ForegroundColor DarkGray }
+  exit 1
+}
 function Step($n, $t, $l)  { Write-Host ""; Write-Host "Step $n/$t" -ForegroundColor Cyan -NoNewline; Write-Host "  $l" -ForegroundColor White }
 function Log($m)           { if ($script:LOG_FILE) { Add-Content -Path $script:LOG_FILE -Value "[$(Get-Date -Format 'HH:mm:ss')] $m" -ErrorAction SilentlyContinue } }
 function PromptHeader($m)  { Write-Host ""; Write-Host "  $m" -ForegroundColor White }
@@ -393,6 +430,11 @@ function Print-Banner {
   Hint "Nothing will be modified outside:"
   Hint "  ~\.tracebloc\    (data and config)"
   Hint "  Docker           (container runtime)"
+  Write-Host ""
+  # Announce the log path up front (#423) — if anything fails, the user already
+  # knows where the full transcript is instead of hunting for a file support can't
+  # name. Was previously written only inside the log itself.
+  if ($script:LOG_FILE) { Hint "Install log: $script:LOG_FILE" }
   Write-Host ""
   Log "Cluster='$CLUSTER_NAME'  Servers=$SERVERS  Agents=$AGENTS"
   Log "Host data dir: $HOST_DATA_DIR"
@@ -1544,7 +1586,7 @@ function New-K3dCluster {
       Remove-Item $k3dOutLog, $k3dErrLog -Force -ErrorAction SilentlyContinue
       if ($proxyCfg) { Remove-Item (Split-Path $proxyCfg -Parent) -Recurse -Force -ErrorAction SilentlyContinue }
       if ($registriesCfg) { Remove-Item (Split-Path $registriesCfg -Parent) -Recurse -Force -ErrorAction SilentlyContinue }
-      if ($script:LOG_FILE) { Hint "Full log: $LOG_FILE" }
+      # Err prints the log path + -Diagnose itself now (#423); no inline Hint here.
       Err "Couldn't start k3d ($k3dExe): $($_.Exception.Message). Reinstall it (re-run this script) or check that the binary runs: k3d version"
     }
 
@@ -1561,7 +1603,7 @@ function New-K3dCluster {
       if (Test-Path $k3dErrLog) { $tail = @(Get-Content $k3dErrLog -ErrorAction SilentlyContinue | Select-Object -Last 5) }
       if (-not $tail -and (Test-Path $k3dOutLog)) { $tail = @(Get-Content $k3dOutLog -ErrorAction SilentlyContinue | Select-Object -Last 5) }
       foreach ($line in $tail) { Warn "k3d: $line" }
-      if ($script:LOG_FILE) { Hint "Full log: $LOG_FILE" }
+      # Err prints the log path + -Diagnose itself now (#423); no inline Hint here.
       Remove-Item $k3dOutLog, $k3dErrLog -Force -ErrorAction SilentlyContinue
       if ($proxyCfg) { Remove-Item (Split-Path $proxyCfg -Parent) -Recurse -Force -ErrorAction SilentlyContinue }
       if ($registriesCfg) { Remove-Item (Split-Path $registriesCfg -Parent) -Recurse -Force -ErrorAction SilentlyContinue }
@@ -1597,9 +1639,14 @@ function New-K3dCluster {
 
     if ($k3dExitCode -ne 0) {
       # Host-daemon x509 (k3d runtime image pull on a TLS-inspecting network,
-      # #474) -- name it before the generic failure.
+      # #474) -- name the CA remedy before the generic failure.
       Write-HostCaCreateHint -Output ("$k3dStdout`n$k3dStderr")
-      Err "Failed to create compute environment."
+      # Surface k3d's real reason (image pull / proxy / port / WSL) on screen via
+      # Err's detail excerpt, not only in the log (#423). stderr LAST so its tail
+      # (the FATA/x509/port reason) survives Get-ErrDetailLines' last-5-line window
+      # even if k3d wrote to stdout; matches the Write-HostCaCreateHint order above
+      # (reviewer).
+      Err "Failed to create compute environment." "$k3dStdout`n$k3dStderr"
     }
     Ok "Compute environment ready."
   }
@@ -2109,7 +2156,7 @@ function Invoke-ProvisionClient {
     if (Test-Path $createOut) { Get-Content $createOut -ErrorAction SilentlyContinue | ForEach-Object { Log $_ } }
     if ($createRc -ne 0) {
       Print-CreateFailure -OutFile $createOut -Location $clientLocation
-      Err "Couldn't provision the client. Re-run to retry - full log: $LOG_FILE"
+      Err "Couldn't provision the client. Re-run to retry."
     }
     if (-not (Test-Path $credFile)) { Err "client create did not write the credential file ($credFile)." }
     $cred = Read-TraceblocCredentialFile -Path $credFile
@@ -2443,7 +2490,7 @@ $envBlock
   Log "Adding Helm repo: $TRACEBLOC_HELM_REPO_URL"
   $addOutput = (helm repo add $TRACEBLOC_HELM_REPO_NAME $TRACEBLOC_HELM_REPO_URL --force-update 2>&1) | Out-String
   Log "helm repo add: $addOutput"
-  if ($LASTEXITCODE -ne 0) { Err "Couldn't add the tracebloc chart repo ($TRACEBLOC_HELM_REPO_URL). Helm output:`n$addOutput`nCheck the log for details: $LOG_FILE" }
+  if ($LASTEXITCODE -ne 0) { Err "Couldn't add the tracebloc chart repo ($TRACEBLOC_HELM_REPO_URL)." $addOutput }
 
   Write-Host ""
   if ($adoptedReuse) {
@@ -2455,7 +2502,7 @@ $envBlock
       --reuse-values `
       --set-string "clientId=$TB_CLIENT_ID" 2>&1) | Out-String
     Log "Helm Output: $helmOutput"
-    if ($LASTEXITCODE -ne 0) { Err "Client reconcile failed. Helm output:`n$helmOutput`nCheck the log for details: $LOG_FILE" }
+    if ($LASTEXITCODE -ne 0) { Err "Client reconcile failed." $helmOutput }
     # Keep the LOCAL record in step for future default-reuse prompts: heal only
     # the clientId line, never regenerate — the live release is the truth.
     if (Test-Path $valuesFile) {
@@ -2470,7 +2517,7 @@ $envBlock
       --create-namespace `
       --values $valuesFile 2>&1) | Out-String
     Log "Helm Output: $helmOutput"
-    if ($LASTEXITCODE -ne 0) { Err "Client installation failed. Helm output:`n$helmOutput`nCheck the log for details: $LOG_FILE" }
+    if ($LASTEXITCODE -ne 0) { Err "Client installation failed." $helmOutput }
   }
 
   # Point kubeconfig's current context at the client namespace so kubectl + the

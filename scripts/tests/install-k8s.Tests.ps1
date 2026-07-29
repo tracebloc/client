@@ -28,6 +28,80 @@ Describe "Get-BackendUrl" {
   It "unknown -> prod" { $env:CLIENT_ENV = "whatever"; Get-BackendUrl | Should -Be "https://api.tracebloc.io/" }
 }
 
+Describe "Get-ErrDetailLines (#423 honest failure output)" {
+  BeforeEach { $script:LOG_FILE = "C:\Users\x\.tracebloc\install-20260729-000000.log" }
+  AfterEach  { $script:LOG_FILE = $null }
+
+  It "always names the log path and the -Diagnose support bundle" {
+    $out = (Get-ErrDetailLines $null) -join "`n"
+    $out | Should -Match ([regex]::Escape($script:LOG_FILE))
+    $out | Should -Match '-Diagnose'
+  }
+  It "no detail -> no '--- details ---' section" {
+    (Get-ErrDetailLines $null) | Should -Not -Contain "--- details ---"
+  }
+  It "surfaces the real error excerpt when detail is supplied" {
+    $detail = "pulling image`nrpc error`nx509: certificate signed by unknown authority"
+    $out = (Get-ErrDetailLines $detail)
+    $out | Should -Contain "--- details ---"
+    ($out -join "`n") | Should -Match 'x509: certificate signed by unknown authority'
+  }
+  It "caps the excerpt at the last 5 non-empty lines" {
+    $detail = (1..9 | ForEach-Object { "line$_" }) -join "`n"
+    $out = (Get-ErrDetailLines $detail)
+    ($out -join "`n") | Should -Match 'line9'
+    ($out -join "`n") | Should -Match 'line5'
+    ($out -join "`n") | Should -Not -Match 'line4\b'   # only last 5 (line5..line9)
+  }
+  It "drops blank lines from the excerpt" {
+    $detail = "real reason`n`n`n   `n"
+    $out = (Get-ErrDetailLines $detail)
+    ($out -join "`n") | Should -Match 'real reason'
+    # trailing blank lines must not become excerpt entries
+    ($out | Where-Object { $_ -eq "" }).Count | Should -Be 0
+  }
+  It "omits the log line when no log file is set yet" {
+    $script:LOG_FILE = $null
+    $out = (Get-ErrDetailLines "boom") -join "`n"
+    $out | Should -Not -Match 'Full log:'
+    $out | Should -Match '-Diagnose'   # next-step hint still present
+  }
+  It "keeps the real Error: line and strips PS 5.1 ErrorRecord chrome (Bugbot #423)" {
+    # helm failures arrive as `native 2>&1 | Out-String`; on PS 5.1 that decorates
+    # stderr with position/CategoryInfo/FullyQualifiedErrorId lines. The excerpt
+    # must surface the actual Error, not the formatter noise.
+    $detail = @"
+helm : Error: looks like "https://bad" is not a valid chart repository or cannot be reached
+At line:1 char:14
++ `$addOutput = (helm repo add tracebloc https://bad --force-update 2>&1 ...
++              ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (Error:...:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+"@
+    $out = (Get-ErrDetailLines $detail) -join "`n"
+    $out | Should -Match 'Error: looks like'
+    $out | Should -Not -Match 'FullyQualifiedErrorId'
+    $out | Should -Not -Match 'CategoryInfo'
+    $out | Should -Not -Match 'At line:1 char:14'
+  }
+  It "Err is the single source of the log path — no inline 'Full log:' hints (Bugbot #423)" {
+    # Err now always prints the log path via Get-ErrDetailLines; an inline
+    # `Hint "Full log:"` right before an Err would print it twice.
+    $src = Get-Content "$PSScriptRoot/../install-k8s.ps1" -Raw
+    $src | Should -Not -Match 'Hint "Full log:'
+  }
+  It "single-line result enumerates as one intact line, never per-character (Bugbot #423)" {
+    # The bare-Err path (no detail, no LOG_FILE — e.g. a Confirm-Config failure
+    # before Start-InstallLog) returns just the support-bundle line. Enumerating it
+    # must yield that whole line, not a stream of single characters.
+    $script:LOG_FILE = $null
+    $lines = @(Get-ErrDetailLines $null)
+    $lines.Count | Should -Be 1
+    $lines[0]    | Should -Be "Support bundle: re-run with -Diagnose"
+    foreach ($l in @(Get-ErrDetailLines $null)) { $l.Length | Should -BeGreaterThan 1 }
+  }
+}
+
 Describe "Test-Credentials" {
   It "HTTP 200 -> valid" {
     Mock Invoke-WebRequest { [pscustomobject]@{ StatusCode = 200 } }
@@ -625,7 +699,9 @@ Describe "Install-ClientHelm" {
       return "id385b"
     }
     Mock Test-Credentials { "valid" }
-    Mock Err { param($m) $script:lastErr = $m; throw "err" }
+    # #423: helm's real output now flows through Err's $Detail param (surfaced on
+    # screen via Get-ErrDetailLines), not embedded in the message — capture both.
+    Mock Err { param($m, $Detail) $script:lastErr = "$m`n$Detail"; throw "err" }
     Mock helm {
       if (($args -contains "repo") -and ($args -contains "add")) {
         $global:LASTEXITCODE = 1
