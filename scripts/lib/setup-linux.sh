@@ -806,7 +806,7 @@ install_rootless_docker() {
     local rootless_script
     rootless_script="$(mktemp)"
     retry 3 5 curl_secure -fsSL https://get.docker.com/rootless -o "$rootless_script"
-    chmod +x "$rootless_script"
+    # No chmod +x — we run it via `sh "$rootless_script"`, which ignores the exec bit (Asad review, #452).
     spin_cmd "Installing rootless Docker…" sh "$rootless_script"
     rm -f "$rootless_script"
   fi
@@ -894,7 +894,7 @@ install_linux() {
   if [ "${INSTALL_TIER:-}" = "1" ] && [ "${TB_TIER1_ROOTLESS:-0}" = "1" ]; then
     info "Setting up a rootless container runtime — no administrator rights needed."
     install_rootless_docker
-    _install_userspace_tools     # already no-sudo for its own PATH persistence; DOCKER_HOST is exported
+    _install_userspace_tools     # tools still sudo-install on Tier 1 (see NOTE above; #1221 tightens); DOCKER_HOST exported for this run
     _tier0_gpu_flags             # reuse an already-configured runtime only; no privileged driver install
     return 0
   fi
