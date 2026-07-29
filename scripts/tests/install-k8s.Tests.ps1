@@ -1788,6 +1788,23 @@ Describe "GPU container toolkit — progress + honest remedies (#415)" {
   }
 }
 
+Describe "Download UX -- PS 5.1 progress throttle silenced, honest expectation lines (#468)" {
+  It "Invoke-WithRetry silences the progress overlay for every fetch scriptblock it drives" {
+    (Get-Command Invoke-WithRetry).Definition | Should -Match "ProgressPreference\s*=\s*'SilentlyContinue'"
+  }
+  It "the Docker Desktop fallback names its ~600 MB wait before the silent fetch" {
+    (Get-Command Install-DockerDesktop).Definition | Should -Match 'Downloading Docker Desktop \(~600 MB\)'
+  }
+  It "the winget bootstrap names its ~200 MB wait" {
+    (Get-Command Install-Winget).Definition | Should -Match 'Downloading winget \(~200 MB\)'
+  }
+  It "kubectl / k3d / helm downloads announce size before going quiet" {
+    (Get-Command Install-Kubectl).Definition    | Should -Match 'Downloading kubectl \$kVer \(~60 MB\)'
+    (Get-Command Install-K3dAndHelm).Definition | Should -Match 'Downloading k3d \$k3dVer \(~25 MB\)'
+    (Get-Command Install-K3dAndHelm).Definition | Should -Match 'Downloading Helm \$helmVer \(~20 MB\)'
+  }
+}
+
 Describe "Enable-OneVirtFeature -- translated DISM failures, honest reboot flag (#468)" {
   BeforeAll {
     # DISM cmdlets don't exist off-Windows; Pester can only Mock an existing
