@@ -1546,7 +1546,7 @@ function New-K3dCluster {
       Remove-Item $k3dOutLog, $k3dErrLog -Force -ErrorAction SilentlyContinue
       if ($proxyCfg) { Remove-Item (Split-Path $proxyCfg -Parent) -Recurse -Force -ErrorAction SilentlyContinue }
       if ($registriesCfg) { Remove-Item (Split-Path $registriesCfg -Parent) -Recurse -Force -ErrorAction SilentlyContinue }
-      if ($script:LOG_FILE) { Hint "Full log: $LOG_FILE" }
+      # Err prints the log path + -Diagnose itself now (#423); no inline Hint here.
       Err "Couldn't start k3d ($k3dExe): $($_.Exception.Message). Reinstall it (re-run this script) or check that the binary runs: k3d version"
     }
 
@@ -1557,7 +1557,7 @@ function New-K3dCluster {
       if (Test-Path $k3dErrLog) { $tail = @(Get-Content $k3dErrLog -ErrorAction SilentlyContinue | Select-Object -Last 5) }
       if (-not $tail -and (Test-Path $k3dOutLog)) { $tail = @(Get-Content $k3dOutLog -ErrorAction SilentlyContinue | Select-Object -Last 5) }
       foreach ($line in $tail) { Warn "k3d: $line" }
-      if ($script:LOG_FILE) { Hint "Full log: $LOG_FILE" }
+      # Err prints the log path + -Diagnose itself now (#423); no inline Hint here.
       Remove-Item $k3dOutLog, $k3dErrLog -Force -ErrorAction SilentlyContinue
       if ($proxyCfg) { Remove-Item (Split-Path $proxyCfg -Parent) -Recurse -Force -ErrorAction SilentlyContinue }
       if ($registriesCfg) { Remove-Item (Split-Path $registriesCfg -Parent) -Recurse -Force -ErrorAction SilentlyContinue }

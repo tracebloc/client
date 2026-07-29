@@ -84,6 +84,12 @@ At line:1 char:14
     $out | Should -Not -Match 'CategoryInfo'
     $out | Should -Not -Match 'At line:1 char:14'
   }
+  It "Err is the single source of the log path — no inline 'Full log:' hints (Bugbot #423)" {
+    # Err now always prints the log path via Get-ErrDetailLines; an inline
+    # `Hint "Full log:"` right before an Err would print it twice.
+    $src = Get-Content "$PSScriptRoot/../install-k8s.ps1" -Raw
+    $src | Should -Not -Match 'Hint "Full log:'
+  }
   It "single-line result enumerates as one intact line, never per-character (Bugbot #423)" {
     # The bare-Err path (no detail, no LOG_FILE — e.g. a Confirm-Config failure
     # before Start-InstallLog) returns just the support-bundle line. Enumerating it
