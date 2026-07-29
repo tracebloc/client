@@ -1061,7 +1061,6 @@ _stub_install_steps() {
 
 @test "_provision_subid_ranges: usermod --help nonzero exit still takes the usermod path (pipefail-safe, #458)" {
   MOCK_CALLS="$(mktemp)"
-  set -o pipefail
   _idmap_helper_ok() { return 0; }
   sudo() { record "sudo $*"; return 0; }
   # --help prints the flag but EXITS NON-ZERO (some shadow-utils builds do); the fix
@@ -1069,7 +1068,9 @@ _stub_install_steps() {
   usermod() { if [ "$1" = "--help" ]; then printf -- '  --add-subuids\n'; return 2; fi; return 0; }
   id() { echo 1000; }
   TB_SUBUID_FILE="$(mktemp)"; TB_SUBGID_FILE="$(mktemp)"
-  _provision_subid_ranges testuser
+  # Scope pipefail to a subshell — setting it in the @test body can leak into bats'
+  # own harness pipelines and fail the run even when every test passes (bats footgun).
+  ( set -o pipefail; _provision_subid_ranges testuser )
   mock_calls | grep -q "usermod --add-subuids"         # usermod path, not the append fallback
   ! mock_calls | grep -q "tee -a"
 }
