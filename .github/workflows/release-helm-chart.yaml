@@ -438,3 +438,30 @@ jobs:
             scripts/manifest.sha256.cert
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+  # Post-publish invariant check: turns the 2026-07-29 manual leak catch into
+  # CI. Runs after EVERY release run (stable or pre) and fails loudly if the
+  # public helm index -- the customer surface -- ever holds a pre-release.
+  verify-index:
+    name: Index invariants (post-publish)
+    needs: [verify, release]
+    if: ${{ always() && needs.verify.result == 'success' && needs.release.result == 'success' }}
+    runs-on: ubuntu-latest
+    env:
+      TAG: ${{ github.event.release.tag_name }}
+      PRERELEASE: ${{ needs.verify.outputs.prerelease }}
+    steps:
+      - name: Assert the public index holds only stable versions
+        run: |
+          set -euo pipefail
+          idx=$(curl -fsSL --retry 3 "https://raw.githubusercontent.com/$GITHUB_REPOSITORY/gh-pages/index.yaml?nocache=$GITHUB_RUN_ID")
+          # No prerelease-shaped chart version may ever be indexed.
+          if printf '%s\n' "$idx" | grep -E '^[[:space:]]+version:' | grep -- '-'; then
+            echo "::error::public helm index contains prerelease-shaped versions (above) - customer surface polluted."
+            exit 1
+          fi
+          # A prerelease run must not have indexed its own version.
+          if [ "$PRERELEASE" = "true" ] && printf '%s\n' "$idx" | grep -qF "${TAG#v}"; then
+            echo "::error::prerelease $TAG leaked into the public index."
+            exit 1
+          fi
+          echo "Index invariants hold: stable-only, $TAG handled correctly."
