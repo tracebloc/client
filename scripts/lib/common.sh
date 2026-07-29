@@ -143,6 +143,16 @@ step_header()    { echo -e "  ${TB_HEADING}$1) $2${RESET}"; echo ""; }
 # ── Utility ──────────────────────────────────────────────────────────────────
 has() { command -v "$1" &>/dev/null; }
 
+# _rootless_active — the single source of truth for "this run is a rootless Tier-1
+# install" (RFC 0001 #1177). Slice 1 (#1219) established the condition as
+# INSTALL_TIER==1 AND the opt-in TB_TIER1_ROOTLESS flag; every later slice calls
+# THIS predicate instead of re-testing the pair, so the two markers can never drift
+# (#1221). Lives in common.sh because both setup-linux.sh (the install path) and
+# cluster.sh (the cluster path, sourced standalone by the e2e harness) depend on it.
+_rootless_active() {
+  [ "${INSTALL_TIER:-}" = "1" ] && [ "${TB_TIER1_ROOTLESS:-0}" = "1" ]
+}
+
 # Execute-gate a freshly-installed tool (#411). The old post-install "check" was a
 # log-only interpolation (`... 2>/dev/null || echo present`) that masked failure,
 # so a corrupt or wrong-architecture binary — a partial pkg/brew install, or a

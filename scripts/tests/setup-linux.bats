@@ -1313,3 +1313,108 @@ _stub_install_steps() {
   [ "$status" -ne 0 ]
   printf '%s\n' "$output" | grep -qiE "Docker Desktop|WSL2"
 }
+
+# ── cgroup delegation drop-in (RFC 0001 #1221) ────────────────────────────────
+
+@test "_write_cgroup_delegation: writes the exact [Service] Delegate drop-in + daemon-reload" {
+  TB_USER_UNIT_DROPIN_DIR="$(mktemp -d)/user@.service.d"
+  sudo()      { "$@"; }                              # passthrough: really mkdir/tee/cmp
+  systemctl() { record "systemctl $*"; }
+  _write_cgroup_delegation
+  run cat "$TB_USER_UNIT_DROPIN_DIR/delegate.conf"
+  [[ "$output" == *"[Service]"* ]]
+  [[ "$output" == *"Delegate=cpu cpuset io memory pids"* ]]
+  run mock_calls
+  [[ "$output" == *"systemctl daemon-reload"* ]]
+}
+
+@test "_write_cgroup_delegation: idempotent when content already matches (no daemon-reload)" {
+  TB_USER_UNIT_DROPIN_DIR="$(mktemp -d)/user@.service.d"; mkdir -p "$TB_USER_UNIT_DROPIN_DIR"
+  printf '%s\n[Service]\nDelegate=cpu cpuset io memory pids\n' \
+    '# Managed by tracebloc installer (RFC 0001 #1221)' > "$TB_USER_UNIT_DROPIN_DIR/delegate.conf"
+  sudo()      { "$@"; }
+  systemctl() { record "systemctl $*"; }
+  _write_cgroup_delegation
+  run mock_calls
+  [[ "$output" != *"daemon-reload"* ]]              # unchanged -> no user-manager churn
+}
+
+@test "_ensure_cgroup_delegation: no_sudo -> hands off with the exact path + content, writes nothing" {
+  local d; d="$(mktemp -d)/user@.service.d"
+  TB_USER_UNIT_DROPIN_DIR="$d"; PROBE_PRIVILEGE=no_sudo
+  sudo() { record "sudo $*"; }                       # must NOT be used to write
+  run _ensure_cgroup_delegation
+  [ "$status" -ne 0 ]                                # non-fatal signal to the caller
+  [[ "$output" == *"Delegate=cpu cpuset io memory pids"* ]]
+  [[ "$output" == *"$d/delegate.conf"* ]]
+  [ ! -e "$d/delegate.conf" ]
+}
+
+@test "_ensure_cgroup_delegation: root -> writes the drop-in + records the one admin touch" {
+  TB_USER_UNIT_DROPIN_DIR="$(mktemp -d)/user@.service.d"; PROBE_PRIVILEGE=root
+  sudo()      { "$@"; }
+  systemctl() { record "systemctl $*"; }
+  TB_ROOTLESS_ADMIN_TOUCH=0
+  _ensure_cgroup_delegation
+  grep -qF 'Delegate=cpu cpuset io memory pids' "$TB_USER_UNIT_DROPIN_DIR/delegate.conf"
+  [ "$TB_ROOTLESS_ADMIN_TOUCH" = "1" ]
+}
+
+@test "_ensure_cgroup_delegation: already delegated -> no privileged call (fast path)" {
+  TB_USER_UNIT_DROPIN_DIR="$(mktemp -d)/user@.service.d"; mkdir -p "$TB_USER_UNIT_DROPIN_DIR"
+  printf '[Service]\nDelegate=cpu cpuset io memory pids\n' > "$TB_USER_UNIT_DROPIN_DIR/delegate.conf"
+  PROBE_PRIVILEGE=no_sudo
+  sudo() { record "sudo $*"; }
+  _ensure_cgroup_delegation
+  run mock_calls
+  [ -z "$output" ]                                   # nothing invoked at all
+}
+
+# ── rootless-daemon corporate proxy: user-scoped, no sudo (carry-in, #452) ────
+
+@test "_configure_docker_proxy user: writes user-scoped drop-in via systemctl --user, no sudo" {
+  local d; d="$(mktemp -d)/docker.service.d"
+  TB_DOCKER_USER_DROPIN_DIR="$d"
+  unset HTTPS_PROXY NO_PROXY http_proxy https_proxy no_proxy
+  HTTP_PROXY="http://proxy.example:3128"
+  has()       { return 0; }                          # systemd present
+  sudo()      { record "sudo $*"; }                  # must NOT be called in user scope
+  systemctl() { record "systemctl $*"; return 1; }   # is-active: fresh daemon, not up
+  _configure_docker_proxy user
+  run cat "$d/http-proxy.conf"
+  [[ "$output" == *'HTTP_PROXY=http://proxy.example:3128'* ]]
+  run mock_calls
+  [[ "$output" == *"systemctl --user daemon-reload"* ]]
+  [[ "$output" != *"sudo "* ]]                       # user scope never elevates
+}
+
+# ── carry-in: tools install user-space on rootless Tier 1 (no sudo mv crash) ──
+
+@test "_set_tools_target: rootless Tier 1 -> ~/.local/bin, no sudo (carry-in #452)" {
+  INSTALL_TIER=1; TB_TIER1_ROOTLESS=1
+  HOME="$(mktemp -d)"
+  _set_tools_target
+  [ "$TB_TOOLS_DIR" = "$HOME/.local/bin" ]
+  [ -z "$TB_TOOLS_SUDO" ]
+  case ":$PATH:" in *":$HOME/.local/bin:"*) : ;; *) return 1 ;; esac
+}
+
+# ── carry-in: persist DOCKER_HOST for the user's shell (#452) ──────────────────
+
+@test "_persist_docker_host: rootless -> persists DOCKER_HOST to the shell rc, idempotently" {
+  INSTALL_TIER=1; TB_TIER1_ROOTLESS=1
+  HOME="$(mktemp -d)"; SHELL=/bin/bash; OS=Linux     # _tools_rc_for_shell -> ~/.bashrc
+  _persist_docker_host
+  run cat "$HOME/.bashrc"
+  [[ "$output" == *'export DOCKER_HOST="unix://${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/docker.sock"'* ]]
+  _persist_docker_host                               # second run must not double-append
+  run bash -c "grep -c 'DOCKER_HOST=' '$HOME/.bashrc'"
+  [ "$output" = "1" ]
+}
+
+@test "_persist_docker_host: flag OFF -> no-op (no rc write)" {
+  INSTALL_TIER=1; unset TB_TIER1_ROOTLESS
+  HOME="$(mktemp -d)"; SHELL=/bin/bash; OS=Linux
+  _persist_docker_host
+  [ ! -e "$HOME/.bashrc" ]
+}

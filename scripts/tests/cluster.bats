@@ -586,3 +586,80 @@ setup() {
   [[ "$output" == *"bundle=TRACEBLOC_CA_BUNDLE"* ]]
   grep -qE 'ca_bundle="\$\(_resolve_ca_bundle\)" \|\| ca_rc=' "$BATS_TEST_DIRNAME/../lib/cluster.sh"
 }
+
+# ── Tier 1 rootless: k3d on the rootless socket + autostart (RFC 0001 #1221) ──
+# Shared stubs for the create_cluster wiring tests: neutralise everything
+# create_cluster calls EXCEPT the DOCKER_HOST export under test.
+_stub_create_cluster_deps() {
+  TB_STORAGE_MODE=node-local            # skip _ensure_tracebloc_dirs (host dirs)
+  _cluster_exists()          { return 1; }   # NEW-cluster path
+  guard_leftover_data()      { :; }
+  ensure_cluster_autostart() { :; }
+  _merge_kubeconfig()        { :; }
+  _export_host_no_proxy()    { :; }
+  _wait_for_api()            { :; }
+}
+
+@test "create_cluster: rootless active -> DOCKER_HOST targets the rootless socket before k3d runs" {
+  INSTALL_TIER=1; TB_TIER1_ROOTLESS=1; XDG_RUNTIME_DIR=/run/user/12345
+  _stub_create_cluster_deps
+  _create_new_cluster() { record "create_saw DOCKER_HOST=$DOCKER_HOST"; }   # what k3d/docker would see
+  create_cluster
+  [ "$DOCKER_HOST" = "unix:///run/user/12345/docker.sock" ]
+  run mock_calls
+  [[ "$output" == *"create_saw DOCKER_HOST=unix:///run/user/12345/docker.sock"* ]]
+}
+
+@test "create_cluster: rootless flag OFF -> DOCKER_HOST left untouched (legacy host daemon)" {
+  INSTALL_TIER=1                        # Tier 1 host, but the opt-in flag is unset
+  unset TB_TIER1_ROOTLESS DOCKER_HOST
+  _stub_create_cluster_deps
+  _create_new_cluster() { :; }
+  create_cluster
+  [ -z "${DOCKER_HOST:-}" ]
+}
+
+@test "ensure_cluster_autostart: Tier 1 rootless -> systemctl --user + linger (both OK) => honest autostart promise, NOT sudo enable" {
+  OS=Linux; INSTALL_TIER=1; TB_TIER1_ROOTLESS=1
+  docker()    { if [[ "$1 $2" == "ps -a" ]]; then echo "k3d-tracebloc-server-0"; else record "docker $*"; fi; }
+  sudo()      { record "sudo $*"; }
+  systemctl() { record "systemctl $*"; case "$*" in *"--user enable"*) return 0 ;; *) return 1 ;; esac; }  # enable OK; is-enabled not
+  loginctl()  { record "loginctl $*"; return 0; }        # linger OK
+  has()       { return 0; }
+  ensure_cluster_autostart
+  [ "${TB_DOCKER_AUTOSTART:-0}" = "1" ]                                                  # both succeeded -> honest promise
+  run mock_calls
+  [[ "$output" == *"docker update --restart unless-stopped k3d-tracebloc-server-0"* ]]  # node loop still runs
+  [[ "$output" == *"systemctl --user enable docker"* ]]
+  [[ "$output" == *"loginctl enable-linger"* ]]
+  [[ "$output" != *"sudo systemctl enable docker"* ]]                                    # never the system unit
+}
+
+@test "ensure_cluster_autostart: Tier 1 rootless -> user-enable fails => NO false reboot promise, both still attempted (#375)" {
+  OS=Linux; INSTALL_TIER=1; TB_TIER1_ROOTLESS=1; TB_DOCKER_AUTOSTART=0
+  docker()    { if [[ "$1 $2" == "ps -a" ]]; then echo "k3d-tracebloc-server-0"; else record "docker $*"; fi; }
+  sudo()      { record "sudo $*"; }
+  systemctl() { record "systemctl $*"; return 1; }       # --user enable FAILS
+  loginctl()  { record "loginctl $*"; return 0; }
+  has()       { return 0; }
+  ensure_cluster_autostart
+  [ "${TB_DOCKER_AUTOSTART:-0}" != "1" ]                                                 # honest: can't promise reboot-survival
+  run mock_calls
+  [[ "$output" == *"systemctl --user enable docker"* ]]                                  # attempted (best-effort)
+  [[ "$output" == *"loginctl enable-linger"* ]]                                          # linger still attempted (not short-circuited)
+  [[ "$output" != *"sudo systemctl enable docker"* ]]
+}
+
+@test "ensure_cluster_autostart: Tier 1 flag OFF -> legacy sudo systemctl enable docker (unchanged)" {
+  OS=Linux; INSTALL_TIER=1
+  unset TB_TIER1_ROOTLESS
+  docker()    { if [[ "$1 $2" == "ps -a" ]]; then echo "k3d-tracebloc-server-0"; else record "docker $*"; fi; }
+  sudo()      { record "sudo $*"; return 0; }
+  systemctl() { record "systemctl $*"; return 1; }
+  loginctl()  { record "loginctl $*"; }
+  has()       { return 0; }
+  ensure_cluster_autostart
+  run mock_calls
+  [[ "$output" == *"sudo systemctl enable docker"* ]]
+  [[ "$output" != *"systemctl --user enable docker"* ]]
+}

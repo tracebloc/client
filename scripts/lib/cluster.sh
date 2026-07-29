@@ -412,6 +412,18 @@ guard_leftover_data() {
 create_cluster() {
   log "Creating k3d cluster: '$CLUSTER_NAME'"
 
+  # RFC 0001 #1221 (Tier 1): target the per-user ROOTLESS daemon, not a (missing)
+  # system daemon. Slice 1 exports DOCKER_HOST during install, but create_cluster
+  # can be re-entered by a caller that lost that export (the e2e harness, a bare
+  # re-run), so re-assert it here whenever rootless is active. k3d and docker read
+  # DOCKER_HOST from the environment and the `( k3d … ) &` subshell in
+  # _create_new_cluster inherits it, so one export covers every call in this flow.
+  # Guard XDG_RUNTIME_DIR (unset on some non-login sessions). No-op with the flag
+  # off — the legacy host-daemon path is byte-for-byte unchanged.
+  if _rootless_active; then
+    export DOCKER_HOST="unix://${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/docker.sock"
+  fi
+
   # Leftover-data guard (RFC-0003 D3, #376): a NEW cluster must not silently
   # adopt data from an earlier install. Skipped when the cluster already exists
   # — that path is an in-place reuse/upgrade and keeps its data by design (§3.3).
@@ -487,6 +499,33 @@ ensure_cluster_autostart() {
       # policy set above already returns the cluster after a reboot for the common
       # case; enabling docker.service on boot is the user's call.
       log "Tier 0: leaving Docker autostart to the user (no privileged step)."
+    elif _rootless_active; then
+      # Tier 1 rootless (RFC 0001 #1221): the daemon is a per-user systemd unit,
+      # NOT the system docker.service — `sudo systemctl enable docker` would target
+      # a unit that doesn't exist on this path (and demand a password we promised
+      # not to need). Enable it in user scope, and enable linger so the user manager
+      # (and thus the rootless daemon + cluster) starts at boot on a headless
+      # training host with no active login session. Both best-effort: enabling
+      # linger for one's own user generally needs no root, and the `--restart
+      # unless-stopped` policy set above is what actually returns the cluster after
+      # a reboot. The node loop above already ran against this same rootless daemon
+      # (via DOCKER_HOST), so the reboot promise holds.
+      # Attempt BOTH unconditionally (if-form, so a failure never trips set -e),
+      # then only promise reboot-survival when BOTH succeed: on a headless host the
+      # cluster returns on its own only if the user manager runs with no login
+      # session (linger) AND its docker unit is enabled. Setting the flag
+      # regardless would let summary.sh::_reboot_note promise a survival the host
+      # can't deliver — the honesty rule the legacy `elif sudo … enable` path
+      # already follows (only flags on success). #375/#458.
+      local _user_enabled=0 _linger_ok=0
+      if systemctl --user enable docker >/dev/null 2>&1; then _user_enabled=1; fi
+      if loginctl enable-linger "$(id -un 2>/dev/null || printf '%s' "${USER:-}")" >/dev/null 2>&1; then _linger_ok=1; fi
+      if [[ "$_user_enabled" == 1 && "$_linger_ok" == 1 ]]; then
+        TB_DOCKER_AUTOSTART=1
+        log "Tier 1 rootless: enabled the user Docker daemon on boot (systemctl --user enable + linger)."
+      else
+        log "Tier 1 rootless: boot autostart not fully enabled (user-service enable or linger unavailable); the --restart policy still applies while your user session is active."
+      fi
     elif sudo systemctl enable docker >/dev/null 2>&1; then
       # docker.service will start on boot → the summary's reboot note can honestly
       # promise the cluster returns on its own (read in summary.sh::_reboot_note).
