@@ -505,7 +505,8 @@ _pf_connectivity() {
   done
 
   if [[ "$tls_seen" -eq 1 ]]; then
-    hint "A TLS/certificate error usually means a break-and-inspect (TLS-inspecting) proxy whose corporate CA isn't trusted here — see the proxy notes."
+    hint "A TLS/certificate error usually means a break-and-inspect (TLS-inspecting) proxy whose corporate CA isn't trusted here."
+    hint "Fix THESE host checks with CURL_CA_BUNDLE=/path/to/corporate-ca.pem (the installer's HTTPS downloads honor it) or by adding the CA to the system trust store. The k3d nodes are trusted separately via TRACEBLOC_CA_BUNDLE (or CURL_CA_BUNDLE) at cluster-create — so CURL_CA_BUNDLE covers both, TRACEBLOC_CA_BUNDLE only the nodes. Ask IT for the bundle if unsure."
   fi
   if [[ "$cfail" -gt 0 ]]; then
     hint "Allow HTTPS (443) egress to the host(s) named above — the always-needed set is registry-1.docker.io, auth.docker.io, ghcr.io, ${backend_host}, tracebloc.github.io, plus any tool-download host listed (dl.k8s.io / get.helm.sh / github.com / objects.githubusercontent.com) — or set HTTP_PROXY if you use a corporate proxy."

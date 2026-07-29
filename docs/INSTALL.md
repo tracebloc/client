@@ -36,7 +36,7 @@ The standalone installer runs a **preflight** check that verifies this connectiv
 
 On **Linux**, the installer also fetches tooling from `get.docker.com`, `raw.githubusercontent.com`, `dl.k8s.io`, and `get.helm.sh` — but only when Docker / k3d / kubectl / Helm aren't already installed.
 
-**Behind a corporate proxy?** Set `HTTP_PROXY` / `HTTPS_PROXY` before running (the installer auto-augments `NO_PROXY` with the cluster-internal ranges). A **TLS-inspecting** proxy additionally needs its corporate CA trusted on the VM, or HTTPS to the hosts above will fail certificate validation.
+**Behind a corporate proxy?** Set `HTTP_PROXY` / `HTTPS_PROXY` before running (the installer auto-augments `NO_PROXY` with the cluster-internal ranges). On a **TLS-inspecting** (break-and-inspect) network, also point the installer at your corporate CA bundle with **`TRACEBLOC_CA_BUNDLE=/path/to/corporate-ca.pem`** (a PEM file; `CURL_CA_BUNDLE` is also honored). The installer mounts it into the k3d nodes and configures containerd to trust it, so in-cluster image pulls don't fail `x509: certificate signed by unknown authority`. Without it, the install stops with a message naming the CA and the env var — never a generic "image couldn't be pulled." Ask your IT team for the bundle if unsure.
 
 ---
 

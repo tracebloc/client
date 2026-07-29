@@ -170,7 +170,9 @@ cli_install_args=()
 case "$CLI_REF" in
   http://*|https://*)
     installer="$WORKDIR/install.sh"
-    guard 120 "download install.sh" -- curl -fsSL "$CLI_REF" -o "$installer"
+    # --tlsv1.2 floor + own time bounds (house rules) — guard's 120s watchdog
+    # still backstops the whole step.
+    guard 120 "download install.sh" -- curl -fsSL --tlsv1.2 --connect-timeout 30 --max-time 60 "$CLI_REF" -o "$installer"
     guard 300 "run install.sh" -- sh "$installer" "${cli_install_args[@]}"
     ;;
   *)

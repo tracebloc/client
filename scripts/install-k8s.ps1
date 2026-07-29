@@ -286,6 +286,9 @@ Advanced configuration (environment variables):
   K8S_VERSION    k3s image tag                   (default: v1.29.4-k3s1)
   -NoReboot      Skip reboot prompt after enabling Windows features
   HOST_DATA_DIR  Persistent data directory       (default: ~\.tracebloc)
+  TRACEBLOC_CA_BUNDLE  Corporate CA bundle (PEM) to trust on a TLS-inspecting
+                 network, so in-cluster image pulls don't fail x509 (#424).
+                 CURL_CA_BUNDLE is also honored.
 
 Reinstalling on a machine that still holds data:
   A new install won't silently adopt data left under HOST_DATA_DIR (both the
@@ -1118,6 +1121,55 @@ function Write-K3dProxyConfig {
   return $cfg
 }
 
+# --- Corporate MITM CA trust for in-node containerd pulls (#424) --------------
+# Proxy reachability reaches the nodes (above), but on a TLS-inspecting network
+# the nodes still don't TRUST the corporate CA, so in-node image pulls fail x509
+# and get masked into a generic "an image couldn't be pulled". When the operator
+# supplies the CA bundle we mount it into every node and point containerd at it
+# per-registry. Mirrors scripts/lib/cluster.sh (drift check: check-drift.sh).
+$script:TbCaRegistries = @('docker.io','registry-1.docker.io','auth.docker.io','ghcr.io')
+
+# Return the operator's CA bundle path (absolute) when TRACEBLOC_CA_BUNDLE or
+# CURL_CA_BUNDLE is set and readable; $null when neither is set. Err (hard) when a
+# var is set but its file is missing — a silent skip would drop the user straight
+# back into the x509 failure they set the var to fix.
+function Resolve-CaBundle {
+  foreach ($name in @('TRACEBLOC_CA_BUNDLE','CURL_CA_BUNDLE')) {
+    $val = [Environment]::GetEnvironmentVariable($name)
+    if (-not $val) { continue }
+    if (-not (Test-Path -LiteralPath $val -PathType Leaf)) {
+      Err "$name is set to '$val' but no such file exists - point it at your corporate CA bundle (PEM) and re-run."
+    }
+    # Verify it's actually READABLE, not just present (matches bash's `-r`): a file
+    # that exists but can't be opened must hard-fail here, not at k3d mount/pull time.
+    try { [System.IO.File]::OpenRead($val).Dispose() }
+    catch { Err "$name is set to '$val' but that file can't be read ($($_.Exception.Message)) - fix its permissions or point it at a readable CA bundle (PEM), then re-run." }
+    return (Resolve-Path -LiteralPath $val).Path
+  }
+  return $null
+}
+
+# Build a k3d registries.yaml pointing containerd at the mounted CA for every
+# registry in $TbCaRegistries, and return its path. $NodeCa = the CA path INSIDE
+# the node (where the -v mount lands). Written UTF-8 without BOM. Caller removes
+# the parent temp dir.
+function Write-K3dRegistriesConfig {
+  param([Parameter(Mandatory)][string]$NodeCa)
+  $tmpDir = Join-Path ([System.IO.Path]::GetTempPath()) ("tracebloc-k3d-reg-" + [System.IO.Path]::GetRandomFileName())
+  New-Item -ItemType Directory -Path $tmpDir -Force | Out-Null
+  $cfg = Join-Path $tmpDir "registries.yaml"
+  $lines = New-Object System.Collections.Generic.List[string]
+  $lines.Add('configs:')
+  foreach ($reg in $script:TbCaRegistries) {
+    $lines.Add('  "' + $reg + '":')
+    $lines.Add('    tls:')
+    $lines.Add('      ca_file: "' + $NodeCa + '"')
+  }
+  $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+  [System.IO.File]::WriteAllLines($cfg, $lines, $utf8NoBom)
+  return $cfg
+}
+
 # Guarantee the cluster returns after a reboot: ensure the k3d node containers
 # restart when Docker starts. k3d already sets unless-stopped; this is defensive
 # and also covers externally-created clusters. On Windows the remaining piece is
@@ -1349,6 +1401,22 @@ function New-K3dCluster {
       }
     } catch {}
 
+    # CA trust (like proxy / the dataset mount) is baked into the nodes at create
+    # time (mount + --registry-config). If a CA bundle is set but the existing
+    # cluster was created without it, reuse leaves in-node pulls failing x509 — so
+    # the "set the CA and re-run" remedy does nothing. Warn + point at recreate
+    # (Bugbot #424). Path mirrors New-K3dCluster's mount destination.
+    if ($env:TRACEBLOC_CA_BUNDLE -or $env:CURL_CA_BUNDLE) {
+      $caMounts = ""
+      try { $caMounts = (docker inspect "k3d-$CLUSTER_NAME-server-0" --format '{{range .Mounts}}{{println .Destination}}{{end}}' 2>$null | Out-String) } catch {}
+      if ($caMounts -and ($caMounts -notmatch '(?m)^/etc/ssl/certs/tracebloc-mitm-ca\.crt\s*$')) {
+        Warn "A CA bundle is set, but the existing '$CLUSTER_NAME' cluster was created without it."
+        Hint "k3d bakes CA trust into the nodes at create time -- it can't be added to a running cluster."
+        Hint "If in-cluster image pulls fail x509, recreate the cluster so the CA is applied:"
+        Hint "  k3d cluster delete $CLUSTER_NAME  (then re-run this installer)."
+      }
+    }
+
     # backend#743: the dataset bind mount (HOST_DATASET_DIR -> /tracebloc-data)
     # is baked into the k3d nodes at create time; k3d can't add it to a running
     # cluster. Re-using an existing cluster without it would point the chart's
@@ -1414,6 +1482,19 @@ function New-K3dCluster {
       Log "Propagating proxy settings to k3d nodes (authenticated proxies supported; NO_PROXY auto-augmented)."
     }
 
+    # In-node CA trust for TLS-inspecting networks (#424): mount the operator's CA
+    # bundle into every node and point containerd at it per-registry, so in-node
+    # image pulls validate the intercepted certs instead of failing x509.
+    $caBundle = Resolve-CaBundle
+    $registriesCfg = $null
+    if ($caBundle) {
+      $nodeCa = "/etc/ssl/certs/tracebloc-mitm-ca.crt"
+      $k3dArgs += @("-v", "${caBundle}:${nodeCa}@all")
+      $registriesCfg = Write-K3dRegistriesConfig -NodeCa $nodeCa
+      $k3dArgs += @("--registry-config", $registriesCfg)
+      Log "Trusting your network's TLS-inspection CA in the k3d nodes (from $caBundle)."
+    }
+
     Log "Creating cluster: $SERVERS server(s) + $AGENTS agent(s)..."
     Hint "First run may take a few minutes to download components."
 
@@ -1437,6 +1518,7 @@ function New-K3dCluster {
     } catch {
       Remove-Item $k3dOutLog, $k3dErrLog -Force -ErrorAction SilentlyContinue
       if ($proxyCfg) { Remove-Item (Split-Path $proxyCfg -Parent) -Recurse -Force -ErrorAction SilentlyContinue }
+      if ($registriesCfg) { Remove-Item (Split-Path $registriesCfg -Parent) -Recurse -Force -ErrorAction SilentlyContinue }
       if ($script:LOG_FILE) { Hint "Full log: $LOG_FILE" }
       Err "Couldn't start k3d ($k3dExe): $($_.Exception.Message). Reinstall it (re-run this script) or check that the binary runs: k3d version"
     }
@@ -1451,6 +1533,7 @@ function New-K3dCluster {
       if ($script:LOG_FILE) { Hint "Full log: $LOG_FILE" }
       Remove-Item $k3dOutLog, $k3dErrLog -Force -ErrorAction SilentlyContinue
       if ($proxyCfg) { Remove-Item (Split-Path $proxyCfg -Parent) -Recurse -Force -ErrorAction SilentlyContinue }
+      if ($registriesCfg) { Remove-Item (Split-Path $registriesCfg -Parent) -Recurse -Force -ErrorAction SilentlyContinue }
       # Killing k3d mid --wait skips its own rollback; a leftover partial
       # cluster would be adopted as "already running" by the next run's
       # reuse path (Bugbot #439). Remove it — bounded — before failing.
@@ -1474,6 +1557,7 @@ function New-K3dCluster {
     $k3dStderr = if (Test-Path $k3dErrLog) { Get-Content $k3dErrLog -Raw -ErrorAction SilentlyContinue } else { "" }
     Remove-Item $k3dOutLog, $k3dErrLog -Force -ErrorAction SilentlyContinue
     if ($proxyCfg) { Remove-Item (Split-Path $proxyCfg -Parent) -Recurse -Force -ErrorAction SilentlyContinue }
+    if ($registriesCfg) { Remove-Item (Split-Path $registriesCfg -Parent) -Recurse -Force -ErrorAction SilentlyContinue }
     if ($k3dStdout) { Log "k3d stdout: $k3dStdout" }
     if ($k3dStderr) { Log "k3d stderr: $k3dStderr" }
 
@@ -2410,7 +2494,19 @@ function Get-NotReadyState {
   $jmLogs = (& kubectl logs -n $Namespace "deployment/$Namespace-jobs-manager" --all-containers --tail=50 2>$null | Out-String)
   if ($jmLogs -match '(?i)authentication failed|unable to log in') { return "bad_creds" }
   $pods = (& kubectl get pods -n $Namespace 2>$null | Out-String)
-  if ($pods -match '(?i)ImagePullBackOff|ErrImagePull|InvalidImageName') { return "image_pull" }
+  if ($pods -match '(?i)ImagePullBackOff|ErrImagePull|InvalidImageName') {
+    # On a TLS-inspecting network the pull fails x509 because the nodes don't trust
+    # the corporate CA (#424). Distinguish it so the remedy can name the CA + env
+    # var, not a vague retry. Mirrors scripts/lib/summary.sh::_diagnose_not_ready.
+    # Scope the x509 test to the image-pull failure event itself, not any stray
+    # x509 event elsewhere in the ns -- a stale/unrelated x509 event must not steer
+    # the user into a delete+recreate for the wrong reason (reviewer). Mirrors the
+    # bash _diagnose_not_ready pull_fail filter.
+    $events = (& kubectl get events -n $Namespace --request-timeout=5s 2>$null | Out-String)
+    $pullFail = (($events -split "`n") | Where-Object { $_ -match '(?i)failed to pull|ErrImagePull' }) -join "`n"
+    if ($pullFail -match '(?i)x509|certificate signed by unknown authority|tls: failed to verify') { return "image_pull_ca" }
+    return "image_pull"
+  }
   if ($pods -match '(?i)CrashLoopBackOff') { return "crash" }
   return "starting"
 }
@@ -2472,6 +2568,18 @@ function Print-Summary {
       Write-Host "  The environment installed, but tracebloc refused those credentials."
       Write-Host "    1. Re-check them at https://ai.tracebloc.io/clients" -ForegroundColor Cyan
       Write-Host "    2. Re-run this installer (safe to re-run)"
+    }
+    "image_pull_ca" {
+      Write-Host "  " -NoNewline; Write-Host "$([char]0x2716) Setup didn't finish - the cluster does not trust your network's TLS-inspection CA." -ForegroundColor Red
+      Write-Host ""
+      Write-Host "  Your network intercepts HTTPS (break-and-inspect), so the in-cluster image"
+      Write-Host "  pulls fail certificate validation (x509). CA trust is baked in at"
+      Write-Host "  cluster-create, so delete the existing cluster first, then re-run with the CA:"
+      Write-Host "    k3d cluster delete $CLUSTER_NAME" -ForegroundColor Green
+      Write-Host "    `$env:TRACEBLOC_CA_BUNDLE = 'C:\path\to\corporate-ca.pem'; irm https://tracebloc.io/i.ps1 | iex" -ForegroundColor Green
+      Hint "(CURL_CA_BUNDLE is also honored.) Ask your IT team for the bundle if unsure."
+      Write-Host "  Inspect:  " -NoNewline; Write-Host "kubectl get events -n $ns | Select-String x509" -ForegroundColor Green
+      Hint "Re-running this installer is safe."
     }
     default {
       $reason = "a component didn't start"
@@ -2729,7 +2837,10 @@ function Test-Preflight {
       if ($status -eq "tls") { $tlsSeen = $true }
     }
   }
-  if ($tlsSeen)    { Hint "A TLS/certificate error usually means a break-and-inspect (TLS-inspecting) proxy whose corporate CA isn't trusted here - see the proxy notes." }
+  if ($tlsSeen)    {
+    Hint "A TLS/certificate error usually means a break-and-inspect (TLS-inspecting) proxy whose corporate CA isn't trusted here."
+    Hint "Fix THESE host checks by importing the CA into the Windows certificate store (Cert:\LocalMachine\Root) - Invoke-WebRequest uses the system store, not an env var. The k3d nodes are trusted separately via `$env:TRACEBLOC_CA_BUNDLE='C:\path\to\corporate-ca.pem' (CURL_CA_BUNDLE also honored) at cluster-create. Ask IT for the bundle if unsure."
+  }
   if ($cfail -gt 0){ Hint "Allow HTTPS (443) egress to the host(s) named above - the always-needed set is registry-1.docker.io, auth.docker.io, ghcr.io, $backendHost, tracebloc.github.io, plus any tool-download host listed (desktop.docker.com / dl.k8s.io / get.helm.sh / github.com / objects.githubusercontent.com) - or configure your corporate proxy." }
 
   if ($hardFail -gt 0) {

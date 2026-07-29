@@ -215,6 +215,39 @@ setup() {
   [[ "$output" == *"missing: HTTP_PROXY"* ]]
 }
 
+# ── _check_existing_cluster_ca (Bugbot #424 r4) ─────────────────────────────
+@test "_check_existing_cluster_ca: no CA var set -> no-op" {
+  unset TRACEBLOC_CA_BUNDLE CURL_CA_BUNDLE
+  docker() { echo "/should-not-be-read"; }
+  run _check_existing_cluster_ca
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+}
+
+@test "_check_existing_cluster_ca: CA set but existing cluster lacks the mount -> recreate warning" {
+  export TRACEBLOC_CA_BUNDLE="/some/ca.pem"
+  docker() { printf '/tracebloc\n/etc/ssl/certs/ca-certificates.crt\n'; }   # no mitm-ca mount
+  run _check_existing_cluster_ca
+  [[ "$output" == *"created without it"* ]]
+  [[ "$output" == *"k3d cluster delete"* ]]
+}
+
+@test "_check_existing_cluster_ca: CA set and mount present -> no warning" {
+  export TRACEBLOC_CA_BUNDLE="/some/ca.pem"
+  docker() { printf '/tracebloc\n/etc/ssl/certs/tracebloc-mitm-ca.crt\n'; }
+  run _check_existing_cluster_ca
+  [ -z "$output" ]
+}
+
+@test "_check_existing_cluster_ca: a mount that only embeds the CA path -> still warns (Bugbot #424)" {
+  export TRACEBLOC_CA_BUNDLE="/some/ca.pem"
+  # substring but NOT the exact mount destination — must not be treated as our CA mount
+  docker() { printf '/tracebloc\n/etc/ssl/certs/tracebloc-mitm-ca.crt.bak\n'; }
+  run _check_existing_cluster_ca
+  [[ "$output" == *"created without it"* ]]
+  [[ "$output" == *"k3d cluster delete"* ]]
+}
+
 # ── _check_existing_cluster_dataset_mount (backend#743) ─────────────────────
 @test "_check_existing_cluster_dataset_mount: HOST_DATASET_DIR unset -> no-op" {
   unset HOST_DATASET_DIR
@@ -407,4 +440,111 @@ setup() {
     "$BATS_TEST_DIRNAME/../lib/cluster.sh"
   grep -q 'k3d cluster delete "\$CLUSTER_NAME"' \
     "$BATS_TEST_DIRNAME/../lib/cluster.sh"
+}
+
+# ── In-node CA trust for TLS-inspecting networks (#424) ──────────────────────
+@test "_resolve_ca_bundle: no CA var set -> empty, rc 0" {
+  unset TRACEBLOC_CA_BUNDLE CURL_CA_BUNDLE
+  run _resolve_ca_bundle
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+}
+
+@test "_resolve_ca_bundle: TRACEBLOC_CA_BUNDLE readable -> absolute path (#424)" {
+  export TRACEBLOC_CA_BUNDLE="$BATS_TEST_TMPDIR/ca.pem"; : > "$TRACEBLOC_CA_BUNDLE"
+  run _resolve_ca_bundle
+  [ "$status" -eq 0 ]
+  [[ "$output" == /*ca.pem ]]
+}
+
+@test "_resolve_ca_bundle: CURL_CA_BUNDLE is the fallback (#424)" {
+  unset TRACEBLOC_CA_BUNDLE
+  export CURL_CA_BUNDLE="$BATS_TEST_TMPDIR/curlca.pem"; : > "$CURL_CA_BUNDLE"
+  run _resolve_ca_bundle
+  [ "$status" -eq 0 ]
+  [[ "$output" == *curlca.pem ]]
+}
+
+@test "_resolve_ca_bundle: set but unreadable -> var name + rc 2 (#424)" {
+  export TRACEBLOC_CA_BUNDLE="/no/such/ca.pem"
+  run _resolve_ca_bundle
+  [ "$status" -eq 2 ]
+  [ "$output" = "TRACEBLOC_CA_BUNDLE" ]
+}
+
+@test "_resolve_ca_bundle: a directory (readable but not a file) -> var name + rc 2 (#424 review)" {
+  export TRACEBLOC_CA_BUNDLE="$BATS_TEST_TMPDIR/ca-dir"; mkdir -p "$TRACEBLOC_CA_BUNDLE"
+  run _resolve_ca_bundle
+  [ "$status" -eq 2 ]
+  [ "$output" = "TRACEBLOC_CA_BUNDLE" ]
+}
+
+@test "_write_k3d_registries_config: ca_file for every registry (#424)" {
+  run _write_k3d_registries_config /etc/ssl/certs/tracebloc-mitm-ca.crt
+  [ "$status" -eq 0 ]
+  local cfg="$output"
+  grep -q 'registry-1.docker.io' "$cfg"
+  grep -q 'auth.docker.io' "$cfg"      # Docker Hub token host — also TLS-handshakes (Bugbot #424)
+  grep -q 'ghcr.io' "$cfg"
+  [ "$(grep -c 'ca_file: "/etc/ssl/certs/tracebloc-mitm-ca.crt"' "$cfg")" -eq 4 ]
+  rm -rf "${cfg%/*}"
+}
+
+@test "_write_k3d_registries_config: mktemp failure -> non-zero, no path (no fail-open; #424 Bugbot)" {
+  mktemp() { return 1; }
+  run _write_k3d_registries_config /etc/ssl/certs/tracebloc-mitm-ca.crt
+  [ "$status" -ne 0 ]
+  [ -z "$output" ]
+}
+
+@test "_create_new_cluster: CA supplied -> mounts CA + --registry-config (#424)" {
+  export TRACEBLOC_CA_BUNDLE="$BATS_TEST_TMPDIR/ca.pem"; : > "$TRACEBLOC_CA_BUNDLE"
+  run _create_new_cluster
+  [ "$status" -eq 0 ]
+  run mock_calls
+  [[ "$output" == *"k3d cluster create"* ]]
+  [[ "$output" == *":/etc/ssl/certs/tracebloc-mitm-ca.crt@all"* ]]   # CA mounted into nodes
+  [[ "$output" == *"--registry-config"* ]]                           # containerd pointed at it
+}
+
+@test "_create_new_cluster: CA supplied but registries config unwritable -> hard error, never fail-open (#424 Bugbot)" {
+  export TRACEBLOC_CA_BUNDLE="$BATS_TEST_TMPDIR/ca.pem"; : > "$TRACEBLOC_CA_BUNDLE"
+  # only the registries temp dir fails; other mktemp uses delegate to the real one
+  mktemp() { case "$*" in *tracebloc-k3d-reg*) return 1 ;; *) command mktemp "$@" ;; esac; }
+  run _create_new_cluster
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"registries config"* ]]
+  run mock_calls
+  [[ "$output" != *"k3d cluster create"* ]]   # aborted before create — never claims success
+}
+
+@test "_create_new_cluster: no CA var -> no registry-config, no mitm mount (#424)" {
+  unset TRACEBLOC_CA_BUNDLE CURL_CA_BUNDLE
+  run _create_new_cluster
+  [ "$status" -eq 0 ]
+  run mock_calls
+  [[ "$output" != *"tracebloc-mitm-ca.crt"* ]]
+  [[ "$output" != *"--registry-config"* ]]
+}
+
+@test "_create_new_cluster: CA var set but file missing -> hard error (#424)" {
+  export TRACEBLOC_CA_BUNDLE="/no/such/ca.pem"
+  run _create_new_cluster
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"can't be read"* ]]
+}
+
+@test "CA resolve capture is errexit-safe under set -euo pipefail — reaches the guidance, not a bare exit (#424 Bugbot)" {
+  # The real install runs under `set -euo pipefail`. With a bare `; ca_rc=$?` the
+  # rc-2 from the command substitution would exit before the error(); `|| ca_rc=$?`
+  # keeps errexit from firing so ca_rc is captured. Assert the idiom + that
+  # cluster.sh actually uses it.
+  run bash -euo pipefail -c '
+    _resolve_ca_bundle() { echo TRACEBLOC_CA_BUNDLE; return 2; }
+    ca_rc=0; ca_bundle="$(_resolve_ca_bundle)" || ca_rc=$?
+    printf "rc=%s bundle=%s\n" "$ca_rc" "$ca_bundle"'
+  [ "$status" -eq 0 ]                                  # no bare errexit exit
+  [[ "$output" == *"rc=2"* ]]
+  [[ "$output" == *"bundle=TRACEBLOC_CA_BUNDLE"* ]]
+  grep -qE 'ca_bundle="\$\(_resolve_ca_bundle\)" \|\| ca_rc=' "$BATS_TEST_DIRNAME/../lib/cluster.sh"
 }
