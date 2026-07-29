@@ -112,7 +112,7 @@ function Resolve-InstallRef {
     if ($AllowUnverified) {
       Warn "============================================================================"
       Warn "UNVERIFIED INSTALL: fetching from mutable ref '$ref', signature checks"
-      Warn "relaxed. This is for tracebloc development only — never for a customer or"
+      Warn "relaxed. This is for tracebloc development only -- never for a customer or"
       Warn "production box. A moved ref here can run arbitrary privileged code."
       Warn "============================================================================"
     } else {
@@ -125,7 +125,7 @@ function Resolve-InstallRef {
   # A '/' or '..' here is a path-traversal lever (it could escape the pinned tag
   # onto a mutable branch) — independent of which branch above let it through.
   if ($ref -match '/' -or $ref -match '\.\.') {
-    throw "Ref '$ref' contains a path separator or '..' — refusing to build a fetch URL from it (path-traversal guard, RFC-0001 R8)."
+    throw "Ref '$ref' contains a path separator or '..' -- refusing to build a fetch URL from it (path-traversal guard, RFC-0001 R8)."
   }
 
   return $ref
@@ -145,6 +145,11 @@ function Get-WithRetry {
     [int]$MaxAttempts = 3,
     [int]$DelaySeconds = 5
   )
+  # PS 5.1's progress overlay throttles Invoke-WebRequest massively (its render
+  # loop dominates the transfer) and its "Writing request stream" banner reads
+  # like a hang (#468). Function-local assignment — the preference reverts
+  # automatically when this function returns.
+  $ProgressPreference = 'SilentlyContinue'
   $proxyArgs = @{}
   if ($env:HTTPS_PROXY) { $proxyArgs['Proxy'] = $env:HTTPS_PROXY }
   for ($attempt = 1; $attempt -le $MaxAttempts; $attempt++) {
@@ -165,6 +170,8 @@ function Get-WithRetry {
 # fall-through, sig/cert) where the caller decides fail-closed vs. opt-out.
 function Get-Optional {
   param([string]$Url, [string]$Dest)
+  # Same PS 5.1 progress-throttle fix as Get-WithRetry (#468); local scope only.
+  $ProgressPreference = 'SilentlyContinue'
   $proxyArgs = @{}
   if ($env:HTTPS_PROXY) { $proxyArgs['Proxy'] = $env:HTTPS_PROXY }
   try {
@@ -173,6 +180,68 @@ function Get-Optional {
   } catch {
     return $false
   }
+}
+
+# Print a dim heartbeat dot every $TickSeconds while $Job runs — a quiet window
+# on a multi-minute step reads as a hang and gets killed (#468; same honest-
+# progress philosophy as the Docker wait in install-k8s.ps1, #449). Returns
+# $true once the job has left the Running state on its own; $false if it is
+# still running after $TimeoutSeconds (the job is stopped, caller owns Remove-Job).
+function Wait-JobWithTicks {
+  param(
+    [object]$Job,
+    [int]$TimeoutSeconds,
+    [int]$TickSeconds = 3
+  )
+  $elapsed = 0
+  $ticked = $false
+  while (($Job.State -eq 'Running' -or $Job.State -eq 'NotStarted') -and $elapsed -lt $TimeoutSeconds) {
+    Start-Sleep -Seconds $TickSeconds
+    $elapsed += $TickSeconds
+    if ($Job.State -ne 'Running' -and $Job.State -ne 'NotStarted') { break }
+    if (-not $ticked) { Write-Host -NoNewline "  " }
+    Write-Host -NoNewline "." -ForegroundColor DarkGray
+    $ticked = $true
+  }
+  if ($ticked) { Write-Host "" }
+  if ($Job.State -eq 'Running' -or $Job.State -eq 'NotStarted') {
+    Stop-Job $Job -ErrorAction SilentlyContinue
+    return $false
+  }
+  return $true
+}
+
+# Get-Optional for a LARGE asset: same contract ($true/$false, no retry/throw),
+# but the fetch runs in a background job so the parent can tick a liveness dot.
+# The job re-applies the TLS 1.2 floor (fresh powershell.exe — PS 5.1 defaults
+# to TLS 1.0), silences the progress overlay (#468), and pins its cwd to a local
+# directory so UNC-homed roaming profiles don't splash red noise (#409). The
+# timeout only bounds a wedged transfer; a slow-but-moving download must never
+# be killed — that is the exact failure mode this function exists to prevent.
+function Get-OptionalWithTicks {
+  param(
+    [string]$Url,
+    [string]$Dest,
+    [int]$TimeoutMinutes = 30
+  )
+  $job = Start-Job -InitializationScript { if ($env:SystemRoot) { Set-Location $env:SystemRoot } } -ScriptBlock {
+    param($u, $d, $proxy)
+    $ProgressPreference = 'SilentlyContinue'
+    [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+    $proxyArgs = @{}
+    if ($proxy) { $proxyArgs['Proxy'] = $proxy }
+    Invoke-WebRequest -Uri $u -OutFile $d -UseBasicParsing -ErrorAction Stop @proxyArgs
+  } -ArgumentList $Url, $Dest, $env:HTTPS_PROXY
+
+  if (-not (Wait-JobWithTicks -Job $job -TimeoutSeconds ($TimeoutMinutes * 60))) {
+    Remove-Job $job -Force -ErrorAction SilentlyContinue
+    Err "Download still running after $TimeoutMinutes minutes -- giving up: $Url"
+    return $false
+  }
+  $ok = ($job.State -eq 'Completed')
+  try { Receive-Job $job -ErrorAction Stop | Out-Null } catch { $ok = $false }
+  Remove-Job $job -Force -ErrorAction SilentlyContinue
+  return ($ok -and (Test-Path -LiteralPath $Dest))
 }
 
 function Get-Sha256 {
@@ -214,8 +283,14 @@ function Resolve-Cosign {
   $bin   = Join-Path $TmpDir "cosign.exe"
   $sums  = Join-Path $TmpDir "cosign_checksums.txt"
 
-  Info "cosign not found — bootstrapping pinned $CosignVersion to verify the manifest…"
-  if (-not (Get-Optional "$base/$asset" $bin))               { return $null }
+  # Set expectations BEFORE the big fetch: this is the bootstrap's one large
+  # download, and during v1.9.7-rc.1 FR a healthy install got killed as
+  # "frozen" in exactly this window (#468).
+  Info "cosign not found -- downloading pinned cosign $CosignVersion (~17 MB) to verify the manifest."
+  Info "This is the bootstrap's one big download; a few minutes on a slow network is normal."
+  Info "Tip: 'winget install sigstore.cosign' makes re-runs skip this download."
+  $sw = [System.Diagnostics.Stopwatch]::StartNew()
+  if (-not (Get-OptionalWithTicks "$base/$asset" $bin))       { return $null }
   if (-not (Get-Optional "$base/cosign_checksums.txt" $sums)) { return $null }
 
   # cosign_checksums.txt lines: "<sha256>␠␠<asset>". Take the one for our asset.
@@ -226,9 +301,10 @@ function Resolve-Cosign {
   }
   if (-not $want) { return $null }
   if ((Get-Sha256 $bin) -ne $want) {
-    Err "Bootstrapped cosign failed its own checksum — not using it."
+    Err "Bootstrapped cosign failed its own checksum -- not using it."
     return $null
   }
+  Ok "cosign $CosignVersion downloaded and checksum-verified ($([math]::Round($sw.Elapsed.TotalSeconds))s)"
   return $bin
 }
 
@@ -246,7 +322,7 @@ function Confirm-ManifestSignature {
   $cosign = Resolve-Cosign -TmpDir $TmpDir
   if (-not $cosign) {
     if ($AllowUnverified) {
-      Warn "cosign unavailable — manifest signature NOT verified (TRACEBLOC_ALLOW_UNVERIFIED=1)."
+      Warn "cosign unavailable -- manifest signature NOT verified (TRACEBLOC_ALLOW_UNVERIFIED=1)."
       Warn "Proceeding on checksum-only integrity. Not for production."
       return
     }
@@ -258,10 +334,10 @@ function Confirm-ManifestSignature {
   if (-not (Get-Optional "$RepoRel/manifest.sha256.sig"  $sig) -or
       -not (Get-Optional "$RepoRel/manifest.sha256.cert" $cert)) {
     if ($AllowUnverified) {
-      Warn "manifest signature/cert not published for this ref — not verified (TRACEBLOC_ALLOW_UNVERIFIED=1)."
+      Warn "manifest signature/cert not published for this ref -- not verified (TRACEBLOC_ALLOW_UNVERIFIED=1)."
       return
     }
-    throw "manifest.sha256.sig / .cert not published for this release — can't authenticate the manifest. Pin a release tag that ships them (RFC-0001 R8)."
+    throw "manifest.sha256.sig / .cert not published for this release -- can't authenticate the manifest. Pin a release tag that ships them (RFC-0001 R8)."
   }
 
   # The identity is the client release workflow (release-helm-chart.yaml) — the
@@ -283,10 +359,10 @@ function Confirm-ManifestSignature {
   try {
     & $cosign @cosignArgs 2>$null 1>$null
   } catch {
-    throw "cosign could not be executed to verify manifest.sha256 — refusing to install (RFC-0001 R8): $_"
+    throw "cosign could not be executed to verify manifest.sha256 -- refusing to install (RFC-0001 R8): $_"
   }
   if ($LASTEXITCODE -ne 0) {
-    throw "cosign signature verification FAILED for manifest.sha256 — refusing to install (RFC-0001 R8)."
+    throw "cosign signature verification FAILED for manifest.sha256 -- refusing to install (RFC-0001 R8)."
   }
   Ok "manifest signature verified (cosign keyless)"
 }
@@ -304,7 +380,7 @@ function Confirm-ScriptIntegrity {
     $local    = Join-Path $TmpDir ($f -replace '^scripts/', '')
     $expected = Find-ManifestDigest -ManifestPath $Manifest -Key $rel
     if (-not $expected) {
-      throw "$rel has no entry in manifest.sha256 — refusing to run it (RFC-0001 R8)."
+      throw "$rel has no entry in manifest.sha256 -- refusing to run it (RFC-0001 R8)."
     }
     $actual = Get-Sha256 -Path $local
     if ($actual -ne $expected) {
@@ -335,7 +411,7 @@ function Invoke-Bootstrap {
   # before the integrity check (parity with install.sh's `mktemp -d`, 0700).
   $tmpDir = Join-Path $env:TEMP ("tracebloc-installer-" + [guid]::NewGuid().ToString('N'))
   if (Test-Path -LiteralPath $tmpDir) {
-    throw "temp dir $tmpDir already exists — refusing to reuse it (RFC-0001 R8)."
+    throw "temp dir $tmpDir already exists -- refusing to reuse it (RFC-0001 R8)."
   }
   New-Item -ItemType Directory -Path $tmpDir | Out-Null
   try {
@@ -353,10 +429,10 @@ function Invoke-Bootstrap {
       if ($allowUnverified -and (Get-Optional "$repoRaw/scripts/manifest.sha256" $manifest)) {
         Warn "Using in-repo manifest.sha256 from ref '$ref' (TRACEBLOC_ALLOW_UNVERIFIED=1)."
       } elseif ($allowUnverified) {
-        Warn "No manifest.sha256 for ref '$ref' — skipping integrity check (TRACEBLOC_ALLOW_UNVERIFIED=1)."
+        Warn "No manifest.sha256 for ref '$ref' -- skipping integrity check (TRACEBLOC_ALLOW_UNVERIFIED=1)."
         $manifest = $null
       } else {
-        throw "Couldn't fetch manifest.sha256 for ref '$ref' — refusing to run unverified installer scripts (RFC-0001 R8). If this ref pre-dates signed manifests, pin a newer release tag."
+        throw "Couldn't fetch manifest.sha256 for ref '$ref' -- refusing to run unverified installer scripts (RFC-0001 R8). If this ref pre-dates signed manifests, pin a newer release tag."
       }
     }
 
