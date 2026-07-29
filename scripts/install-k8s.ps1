@@ -907,6 +907,10 @@ function Resolve-ToolVersion {
 
 function Install-K3dAndHelm {
   # -- k3d --
+  # $k3dDest is set ONLY on the direct-download path below; it stays $null when k3d
+  # came from winget or was already present, so the gate's -BinPath removes only a
+  # binary WE placed — never a winget/pre-existing copy elsewhere on PATH (#411 review).
+  $k3dDest = $null
   if (-not (Has "k3d")) {
     if (Has "winget") {
       Log "Installing k3d via winget..."
@@ -962,9 +966,11 @@ function Install-K3dAndHelm {
       RefreshPath
     }
   }
-  Assert-ToolRuns -Name "k3d" -VersionArgs @("version") -BinPath "$TOOL_DIR\k3d.exe"
+  Assert-ToolRuns -Name "k3d" -VersionArgs @("version") -BinPath $k3dDest
 
   # -- Helm --
+  # $helmDest set only on the direct-download path; gate removes only what we placed.
+  $helmDest = $null
   if (-not (Has "helm")) {
     if (Has "winget") {
       Log "Installing Helm via winget..."
@@ -992,6 +998,7 @@ function Install-K3dAndHelm {
       if (Test-Path $helmExtract) { Remove-Item $helmExtract -Recurse -Force }
       Expand-Archive -Path $helmZip -DestinationPath $helmExtract -Force
       Copy-Item "$helmExtract\windows-$arch\helm.exe" "$TOOL_DIR\helm.exe" -Force
+      $helmDest = "$TOOL_DIR\helm.exe"
       Remove-Item $helmZip -Force -ErrorAction SilentlyContinue
       Remove-Item $helmExtract -Recurse -Force -ErrorAction SilentlyContinue
       RefreshPath
@@ -999,7 +1006,7 @@ function Install-K3dAndHelm {
 
     if (-not (Has "helm")) { Err "Helm could not be installed. Install manually from https://helm.sh/docs/intro/install/ and re-run." }
   }
-  Assert-ToolRuns -Name "helm" -VersionArgs @("version","--short") -BinPath "$TOOL_DIR\helm.exe"
+  Assert-ToolRuns -Name "helm" -VersionArgs @("version") -BinPath $helmDest
 
   Ok "System tools"
 }

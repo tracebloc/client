@@ -269,7 +269,9 @@ install_macos_cli_tools() {
   if ! has helm; then
     spin_cmd "Installing system tools…" brew install helm
   fi
-  assert_tool_runs helm version --short
+  # bare `helm version` (not --short: may be dropped like kubectl's). No --rm:
+  # brew owns these binaries; deleting a formula's symlink just wedges the re-run.
+  assert_tool_runs helm version
 
   success "System tools ready"
 }

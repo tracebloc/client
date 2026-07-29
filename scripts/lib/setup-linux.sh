@@ -401,10 +401,12 @@ install_kubectl() {
       || error "Couldn't resolve the kubectl version from dl.k8s.io/release/stable.txt — check network connectivity to dl.k8s.io and re-run."
     spin_cmd "Installing system tools…" _fetch_kubectl "$KUBE_VER" "$ARCH_DL"
     log "kubectl $KUBE_VER installed."
+    # Fresh install: we placed it, so --rm lets a corrupt/wrong-arch download be
+    # cleared. Present path (else): don't remove a binary we didn't install (#411 review).
+    assert_tool_runs --rm "$TB_TOOLS_DIR/kubectl" kubectl version --client
+  else
+    assert_tool_runs kubectl version --client
   fi
-  # Execute-gate on both paths (#411): a present-but-broken kubectl is as fatal
-  # as a bad fresh install, and this runs before the cluster step either way.
-  assert_tool_runs kubectl version --client
 }
 
 # ── k3d ──────────────────────────────────────────────────────────────────────
@@ -485,7 +487,7 @@ install_k3d() {
     error "System tool installation completed but not found on PATH."
   fi
 
-  assert_tool_runs k3d version
+  assert_tool_runs --rm "$TB_TOOLS_DIR/k3d" k3d version
 }
 
 # ── Helm ─────────────────────────────────────────────────────────────────────
@@ -647,7 +649,14 @@ install_helm() {
     fi
   fi
   _ensure_helm_executable
-  assert_tool_runs helm version --short
+  # bare `helm version` (not --short: it may be dropped like kubectl's was, which
+  # would false-fail the gate). --rm only when helm sits in OUR tools dir; a
+  # pre-existing / pkg-managed helm elsewhere on PATH is not ours to delete (#411 review).
+  if [[ -f "$TB_TOOLS_DIR/helm" ]]; then
+    assert_tool_runs --rm "$TB_TOOLS_DIR/helm" helm version
+  else
+    assert_tool_runs helm version
+  fi
   success "System tools"
 }
 

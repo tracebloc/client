@@ -498,7 +498,20 @@ setup() {
   [ -f "$BATS_TEST_TMPDIR/bin/k3d" ]
 }
 
-@test "assert_tool_runs: a broken tool errors and removes the binary (#411)" {
+@test "assert_tool_runs: a broken tool with --rm errors and removes the binary WE placed (#411)" {
+  mkdir -p "$BATS_TEST_TMPDIR/bin"
+  printf '#!/usr/bin/env bash\nexit 1\n' > "$BATS_TEST_TMPDIR/bin/k3d"
+  chmod +x "$BATS_TEST_TMPDIR/bin/k3d"
+  PATH="$BATS_TEST_TMPDIR/bin:$PATH"
+  run assert_tool_runs --rm "$BATS_TEST_TMPDIR/bin/k3d" k3d version
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"won't run"* ]]
+  [ ! -f "$BATS_TEST_TMPDIR/bin/k3d" ]        # the binary we placed was removed
+}
+
+@test "assert_tool_runs: a broken tool WITHOUT --rm errors but leaves the binary (#411 review)" {
+  # Already-present / pkg-managed path: we didn't place it, so we must not delete it
+  # (deleting a brew symlink just wedges the re-run — reviewer).
   mkdir -p "$BATS_TEST_TMPDIR/bin"
   printf '#!/usr/bin/env bash\nexit 1\n' > "$BATS_TEST_TMPDIR/bin/k3d"
   chmod +x "$BATS_TEST_TMPDIR/bin/k3d"
@@ -506,5 +519,5 @@ setup() {
   run assert_tool_runs k3d version
   [ "$status" -ne 0 ]
   [[ "$output" == *"won't run"* ]]
-  [ ! -f "$BATS_TEST_TMPDIR/bin/k3d" ]
+  [ -f "$BATS_TEST_TMPDIR/bin/k3d" ]          # NOT removed — we didn't place it
 }
