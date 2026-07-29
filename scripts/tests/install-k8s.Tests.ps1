@@ -1273,3 +1273,405 @@ Describe "Get-InstalledClientInfo API gating (Bugbot)" {
     Should -Invoke helm -ParameterFilter { $args -contains "list" }
   }
 }
+
+Describe "UNC-safe background jobs (#409)" {
+  # Jobs spawn their runspace in $HOME; on roaming-profile machines that is a
+  # UNC share and every cmd.exe child prints "UNC paths are not supported" +
+  # a RemoteException record. $JobInit pins jobs to a local cwd first.
+  It "defines the JobInit initialization scriptblock" {
+    $JobInit | Should -Not -BeNullOrEmpty
+    $JobInit | Should -BeOfType [scriptblock]
+  }
+
+  It "every Start-Job call site passes -InitializationScript (AST gate)" {
+    $ast = [System.Management.Automation.Language.Parser]::ParseFile(
+      "$PSScriptRoot/../install-k8s.ps1", [ref]$null, [ref]$null)
+    $jobCalls = $ast.FindAll({
+      param($node)
+      $node -is [System.Management.Automation.Language.CommandAst] -and
+      $node.GetCommandName() -eq 'Start-Job'
+    }, $true)
+    $jobCalls.Count | Should -BeGreaterThan 0
+    foreach ($call in $jobCalls) {
+      $call.CommandElements.Where({
+        $_ -is [System.Management.Automation.Language.CommandParameterAst] -and
+        $_.ParameterName -eq 'InitializationScript'
+      }).Count | Should -Be 1 -Because "Start-Job at line $($call.Extent.StartLineNumber) must pin a local cwd (#409)"
+    }
+  }
+
+  It "JobInit moves the job to SystemRoot when set, and is a no-op when unset" {
+    $prev = $env:SystemRoot
+    try {
+      $env:SystemRoot = (New-Item -ItemType Directory -Path (Join-Path $TestDrive 'sysroot')).FullName
+      $job = Start-Job -InitializationScript $JobInit -ScriptBlock {
+        (Get-Location).Path -eq (Resolve-Path $env:SystemRoot).Path
+      }
+      Receive-Job -Job ($job | Wait-Job) | Should -BeTrue
+      Remove-Job $job -Force
+
+      $env:SystemRoot = $null
+      $job2 = Start-Job -InitializationScript $JobInit -ScriptBlock { "ran" }
+      Receive-Job -Job ($job2 | Wait-Job) | Should -Be "ran"
+      Remove-Job $job2 -Force
+    } finally {
+      $env:SystemRoot = $prev
+    }
+  }
+}
+
+Describe "Pinned tool versions - no api.github.com (#382 / #410)" {
+  It "pins k3d and helm by default (lockstep with scripts/lib/common.sh)" {
+    $K3dVersion  | Should -Be "v5.9.0"
+    $HelmVersion | Should -Be "v4.2.3"
+  }
+
+  It "the installer never fetches from the rate-limited GitHub API" {
+    # Comments may *mention* the API (to say why we avoid it); a URL means a fetch.
+    (Get-Content "$PSScriptRoot/../install-k8s.ps1" -Raw) | Should -Not -Match 'https://api\.github\.com'
+  }
+
+  Context "Test-ReleaseTagShape" {
+    It "accepts release tags" {
+      Test-ReleaseTagShape "v5.9.0"     | Should -BeTrue
+      Test-ReleaseTagShape "v1.2.3-rc1" | Should -BeTrue
+    }
+    It "rejects traversal, branches, and empties" {
+      Test-ReleaseTagShape "v1.2.3-../../heads/main" | Should -BeFalse
+      Test-ReleaseTagShape "develop"                 | Should -BeFalse
+      Test-ReleaseTagShape "latest"                  | Should -BeFalse
+      Test-ReleaseTagShape ""                        | Should -BeFalse
+    }
+  }
+
+  Context "Resolve-ToolVersion" {
+    BeforeEach { Mock Err { throw "ERR: $($args -join ' ')" } }
+    It "returns a pinned value without touching the network" {
+      Resolve-ToolVersion -Name "k3d" -Value "v5.9.0" -LatestResolver { throw "resolver must not run for a pinned value" } |
+        Should -Be "v5.9.0"
+    }
+    It "resolves the literal 'latest' via the provided API-free resolver" {
+      Resolve-ToolVersion -Name "k3d" -Value "latest" -LatestResolver { "v9.9.9" } | Should -Be "v9.9.9"
+    }
+    It "fails closed when 'latest' cannot be resolved" {
+      { Resolve-ToolVersion -Name "helm" -Value "latest" -LatestResolver { $null } } | Should -Throw "*ERR:*"
+    }
+    It "retries transient lookup failures before giving up (retry 3 5 parity; Bugbot)" {
+      Mock Start-Sleep {}
+      Mock Warn {}
+      $global:TbTestAttempts = 0
+      try {
+        $resolver = { $global:TbTestAttempts++; if ($global:TbTestAttempts -lt 3) { throw "blip" }; "v7.7.7" }
+        Resolve-ToolVersion -Name "k3d" -Value "latest" -LatestResolver $resolver | Should -Be "v7.7.7"
+        $global:TbTestAttempts | Should -Be 3
+      } finally {
+        Remove-Variable -Name TbTestAttempts -Scope Global -ErrorAction SilentlyContinue
+      }
+    }
+    It "fails closed after exhausting retries on a persistently failing lookup" {
+      Mock Start-Sleep {}
+      Mock Warn {}
+      Mock Err { throw "ERR: $($args -join ' ')" }
+      $global:TbTestAttempts = 0
+      try {
+        $resolver = { $global:TbTestAttempts++; throw "down" }
+        { Resolve-ToolVersion -Name "helm" -Value "latest" -LatestResolver $resolver } | Should -Throw "*ERR:*"
+        $global:TbTestAttempts | Should -Be 3
+      } finally {
+        Remove-Variable -Name TbTestAttempts -Scope Global -ErrorAction SilentlyContinue
+      }
+    }
+    It "fails closed on a non-release-shaped value" {
+      { Resolve-ToolVersion -Name "k3d" -Value "v1.2.3-../../heads/main" -LatestResolver { $null } } | Should -Throw "*ERR:*"
+    }
+  }
+
+  It "latest lookups carry a request timeout (Bugbot: no-response hosts must not hang)" {
+    $ast = [System.Management.Automation.Language.Parser]::ParseFile(
+      "$PSScriptRoot/../install-k8s.ps1", [ref]$null, [ref]$null)
+    $fn = $ast.FindAll({ param($n)
+      $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'Get-LatestGitHubTag'
+    }, $true) | Select-Object -First 1
+    $iwr = $fn.FindAll({ param($n)
+      $n -is [System.Management.Automation.Language.CommandAst] -and $n.GetCommandName() -eq 'Invoke-WebRequest'
+    }, $true)
+    $iwr.Count | Should -BeGreaterThan 0
+    foreach ($call in $iwr) {
+      $call.CommandElements.Where({
+        $_ -is [System.Management.Automation.Language.CommandParameterAst] -and $_.ParameterName -eq 'TimeoutSec'
+      }).Count | Should -Be 1
+    }
+    # The inline helm resolver too.
+    (Get-Content "$PSScriptRoot/../install-k8s.ps1" -Raw) |
+      Should -Match 'helm-latest-version" -UseBasicParsing -TimeoutSec 30'
+  }
+
+  Context "Get-LatestGitHubTag" {
+    It "reads the tag from the /releases/latest redirect Location header" {
+      Mock Invoke-WebRequest { [pscustomobject]@{ Headers = @{ Location = "https://github.com/k3d-io/k3d/releases/tag/v5.9.1" } } }
+      Get-LatestGitHubTag -Repo "k3d-io/k3d" | Should -Be "v5.9.1"
+    }
+    It "returns null when no Location is available" {
+      Mock Invoke-WebRequest { [pscustomobject]@{ Headers = @{} } }
+      Get-LatestGitHubTag -Repo "k3d-io/k3d" | Should -BeNullOrEmpty
+    }
+  }
+}
+
+Describe "Bounded cluster-create wait (#412 / #426)" {
+  Context "Wait-ProcessWithDeadline" {
+    It "returns true when the process exits on its own" {
+      $proc = [pscustomobject]@{ HasExited = $true }
+      Wait-ProcessWithDeadline -Process $proc -Deadline (Get-Date).AddMinutes(1) -Message "x" | Should -BeTrue
+    }
+    It "kills the process and returns false once the deadline passes" {
+      $global:TbTestKilled = $false
+      $proc = [pscustomobject]@{ HasExited = $false }
+      $proc | Add-Member -MemberType ScriptMethod -Name Kill -Value { $global:TbTestKilled = $true }
+      try {
+        Wait-ProcessWithDeadline -Process $proc -Deadline (Get-Date).AddMinutes(-1) -Message "x" | Should -BeFalse
+        $global:TbTestKilled | Should -BeTrue
+      } finally {
+        Remove-Variable -Name TbTestKilled -Scope Global -ErrorAction SilentlyContinue
+      }
+    }
+  }
+
+  It "the k3d create spawn fails fast instead of leaving a null process (#412)" {
+    $raw = Get-Content "$PSScriptRoot/../install-k8s.ps1" -Raw
+    $raw | Should -Match '(?s)try \{\s*\$k3dProc = Start-Process.*?-ErrorAction Stop'
+  }
+
+  It "the create wait is deadline-bounded — the unbounded HasExited loop is gone" {
+    $raw = Get-Content "$PSScriptRoot/../install-k8s.ps1" -Raw
+    $raw | Should -Match 'Wait-ProcessWithDeadline -Process \$k3dProc'
+    $raw | Should -Not -Match 'while \(-not \$k3dProc\.HasExited\)'
+  }
+
+  It "the timeout path removes the partial cluster before failing (Bugbot #439)" {
+    # Killing k3d mid --wait skips its rollback; without the delete, a re-run
+    # adopts the half-created cluster as "already running".
+    $raw = Get-Content "$PSScriptRoot/../install-k8s.ps1" -Raw
+    $raw | Should -Match '(?s)Wait-ProcessWithDeadline -Process \$k3dProc.*?cluster delete \$CLUSTER_NAME.*?timed out after'
+  }
+}
+
+Describe "Docker engine wait calibration (#413)" {
+  BeforeAll { $script:raw = Get-Content "$PSScriptRoot/../install-k8s.ps1" -Raw }
+  It "waits 10 minutes by default, overridable via TB_DOCKER_WAIT_MIN" {
+    $raw | Should -Match '\$waitMin = 10'
+    $raw | Should -Match 'TB_DOCKER_WAIT_MIN'
+    $raw | Should -Not -Match '\$maxWait = 60\b'
+  }
+  It "shows elapsed progress during the wait and names the observed state on expiry" {
+    $raw | Should -Match 'min elapsed; a first start can take up to'
+    $raw | Should -Match 'Get-Process "Docker Desktop"'
+  }
+}
+
+Describe "Assert-ToolRuns execute-gate (#411)" {
+  BeforeEach {
+    Mock Err             { throw "ERR: $args" }
+    Mock Get-WindowsArch { "amd64" }
+  }
+
+  It "passes when the tool runs (exit 0), no throw" {
+    Mock k3d { $global:LASTEXITCODE = 0; "k3d version v5.9.0" }
+    { Assert-ToolRuns -Name "k3d" -VersionArgs @("version") } | Should -Not -Throw
+  }
+
+  It "a non-zero exit -> hard fail (Err)" {
+    Mock k3d { $global:LASTEXITCODE = 1; "boom" }
+    { Assert-ToolRuns -Name "k3d" -VersionArgs @("version") } | Should -Throw "*ERR:*"
+  }
+
+  It "an unrunnable binary (exception) -> hard fail (Err)" {
+    Mock k3d { throw "is not a valid application for this OS platform" }
+    { Assert-ToolRuns -Name "k3d" -VersionArgs @("version") } | Should -Throw "*ERR:*"
+  }
+
+  It "removes the dropped binary on failure when it's the one that ran" {
+    Mock k3d { $global:LASTEXITCODE = 1 }
+    $bin = Join-Path $TestDrive "k3d.exe"; "x" | Set-Content $bin
+    Mock Get-Command { [pscustomobject]@{ Source = $bin } } -ParameterFilter { $Name -eq 'k3d' }
+    { Assert-ToolRuns -Name "k3d" -VersionArgs @("version") -BinPath $bin } | Should -Throw
+    Test-Path $bin | Should -BeFalse
+  }
+
+  It "does NOT remove BinPath when the failing binary resolved elsewhere (winget/present)" {
+    Mock k3d { $global:LASTEXITCODE = 1 }
+    $bin = Join-Path $TestDrive "k3d.exe"; "x" | Set-Content $bin
+    Mock Get-Command { [pscustomobject]@{ Source = "C:\winget\k3d.exe" } } -ParameterFilter { $Name -eq 'k3d' }
+    { Assert-ToolRuns -Name "k3d" -VersionArgs @("version") -BinPath $bin } | Should -Throw
+    Test-Path $bin | Should -BeTrue      # left alone — it isn't the binary that ran
+  }
+
+  It "the arch-aware remedy names the machine architecture" {
+    Mock k3d { $global:LASTEXITCODE = 1 }
+    { Assert-ToolRuns -Name "k3d" -VersionArgs @("version") } | Should -Throw "*amd64*"
+  }
+}
+
+Describe "System-tool installs are execute-gated (#411)" {
+  BeforeAll { $script:raw = Get-Content "$PSScriptRoot/../install-k8s.ps1" -Raw }
+  It "gates kubectl, k3d, and helm" {
+    $script:raw | Should -Match 'Assert-ToolRuns -Name "kubectl"'
+    $script:raw | Should -Match 'Assert-ToolRuns -Name "k3d"'
+    $script:raw | Should -Match 'Assert-ToolRuns -Name "helm"'
+  }
+  It "no longer masks a broken tool with a non-terminating version Log interpolation" {
+    $script:raw | Should -Not -Match 'Log "k3d: \$\('
+    $script:raw | Should -Not -Match 'Log "helm: \$\('
+  }
+}
+
+Describe "Preflight download-host probing (#416)" {
+  # Isolate the connectivity section: everything else reports healthy so only the
+  # host probes decide the outcome. Err throws so a hard fail is observable.
+  BeforeEach {
+    $env:TRACEBLOC_SKIP_PREFLIGHT   = $null
+    $env:TRACEBLOC_ALLOW_NETWORK_FS = $null
+    Mock Get-WindowsArch      { "amd64" }
+    Mock Get-PfVirtualization { $true }
+    Mock Get-PfCpu            { 8 }
+    Mock Get-PfMemGb          { 16 }
+    Mock Get-PfFreeGb         { 100 }
+    Mock Get-PfFsType         { "local" }
+    Mock Get-BackendUrl       { "https://api.tracebloc.io" }
+    Mock Err                  { throw "ERR: $args" }
+    Mock Test-Path            { $false }   # Docker Desktop absent -> desktop.docker.com probed
+  }
+
+  It "auth.docker.io (Docker Hub token host) blocked -> hard fail" {
+    Mock Has        { $true }              # all tools present -> only always-critical hosts probed
+    Mock Test-PfUrl { param($Url) if ($Url -match 'auth\.docker\.io') { "blocked" } else { "ok" } }
+    { Test-Preflight } | Should -Throw "*ERR:*"
+  }
+
+  It "kubectl host (dl.k8s.io) blocked -> hard fail when kubectl is absent" {
+    Mock Has        { param($cmd) $cmd -ne "kubectl" }
+    Mock Test-PfUrl { param($Url) if ($Url -match 'dl\.k8s\.io') { "blocked" } else { "ok" } }
+    { Test-Preflight } | Should -Throw "*ERR:*"
+  }
+
+  It "k3d asset host (objects.githubusercontent.com) blocked -> hard fail when k3d absent" {
+    Mock Has        { param($cmd) $cmd -ne "k3d" }
+    Mock Test-PfUrl { param($Url) if ($Url -match 'objects\.githubusercontent\.com') { "blocked" } else { "ok" } }
+    { Test-Preflight } | Should -Throw "*ERR:*"
+  }
+
+  It "a present tool's host is not probed (no false hard-fail)" {
+    Mock Has        { $true }              # kubectl present -> dl.k8s.io never probed
+    Mock Test-Path  { $true }              # Docker Desktop present -> desktop.docker.com not probed
+    Mock Test-PfUrl { param($Url) if ($Url -match 'dl\.k8s\.io') { "blocked" } else { "ok" } }
+    { Test-Preflight } | Should -Not -Throw
+  }
+
+  It "all hosts reachable -> preflight passes" {
+    Mock Has        { $true }
+    Mock Test-PfUrl { "ok" }
+    { Test-Preflight } | Should -Not -Throw
+  }
+}
+
+Describe "Preflight host list — required download hosts present (#416)" {
+  BeforeAll { $script:raw = Get-Content "$PSScriptRoot/../install-k8s.ps1" -Raw }
+  It "probes every download host the installer fetches from" {
+    foreach ($h in 'auth.docker.io','desktop.docker.com','dl.k8s.io','get.helm.sh','github.com','objects.githubusercontent.com') {
+      $script:raw | Should -Match ([regex]::Escape($h))
+    }
+  }
+  It "gates tool-download hosts on tool absence (a present tool is not re-probed)" {
+    $script:raw | Should -Match 'if \(-not \(Has "kubectl"\)\)'
+    $script:raw | Should -Match 'if \(-not \(Has "k3d"\)\)'
+  }
+}
+
+Describe "GPU container toolkit — progress + honest remedies (#415)" {
+  BeforeAll {
+    $ast = [System.Management.Automation.Language.Parser]::ParseFile(
+      "$PSScriptRoot/../install-k8s.ps1", [ref]$null, [ref]$null)
+    $script:gpuFn = $ast.FindAll({ param($n)
+      $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+      $n.Name -eq 'Install-NvidiaContainerToolkit'
+    }, $true) | Select-Object -First 1
+  }
+
+  Context "Wait-JobWithProgress" {
+    It "returns true when the job has already completed" {
+      $job = [pscustomobject]@{ State = "Completed" }
+      Wait-JobWithProgress -Job $job -TimeoutSec 4 -PollSeconds 2 | Should -BeTrue
+    }
+    It "stops the job and returns false once the timeout elapses" {
+      # A real job (Start-Sleep in its own runspace, unaffected by the mock below)
+      # so the production Stop-Job path binds and runs for real.
+      Mock Start-Sleep {}
+      $job = Start-Job -InitializationScript $JobInit -ScriptBlock { Start-Sleep -Seconds 120 }
+      try {
+        Wait-JobWithProgress -Job $job -TimeoutSec 6 -PollSeconds 2 -Message "x" | Should -BeFalse
+        $job.State | Should -BeIn @("Stopped", "Stopping", "Failed")
+      } finally {
+        Remove-Job $job -Force -ErrorAction SilentlyContinue
+      }
+    }
+    It "polls at most TimeoutSec/PollSeconds times (bounded, never unbounded)" {
+      $global:TbSleeps = 0
+      Mock Start-Sleep { $global:TbSleeps++ }
+      $job = Start-Job -InitializationScript $JobInit -ScriptBlock { Start-Sleep -Seconds 120 }
+      try {
+        Wait-JobWithProgress -Job $job -TimeoutSec 10 -PollSeconds 2 -Message "x" | Out-Null
+        $global:TbSleeps | Should -Be 5
+      } finally {
+        Remove-Job $job -Force -ErrorAction SilentlyContinue
+        Remove-Variable -Name TbSleeps -Scope Global -ErrorAction SilentlyContinue
+      }
+    }
+  }
+
+  Context "Show-GpuManualRemedy" {
+    It "prints copy-pastable remedy commands and a tracebloc doctor follow-up" {
+      $out = Show-GpuManualRemedy -Distro "Ubuntu-22.04" 6>&1 | Out-String
+      $out | Should -Match 'apt-get install -y nvidia-container-toolkit'
+      $out | Should -Match 'nvidia-ctk runtime configure'
+      $out | Should -Match 'tracebloc doctor'
+      $out | Should -Match 'Ubuntu-22\.04'
+    }
+    It "is honest that the environment falls back to CPU mode" {
+      $out = Show-GpuManualRemedy 6>&1 | Out-String
+      $out | Should -Match 'CPU mode'
+    }
+  }
+
+  Context "Install-NvidiaContainerToolkit" {
+    It "no-ops without an NVIDIA GPU (never starts a background job)" {
+      $GPU_VENDOR = "none"; $NVIDIA_DRIVER_OK = $false
+      Mock Start-Job { throw "must not start a job in CPU mode" }
+      { Install-NvidiaContainerToolkit } | Should -Not -Throw
+    }
+    It "announces GPU setup on screen, not only in the log file" {
+      # The old flow used Log (file-only) -> a blank console for minutes (#415).
+      $script:gpuFn.Extent.Text | Should -Match 'Info "Setting up GPU acceleration'
+    }
+    It "every long job wait shows a heartbeat — no bare Wait-Job in the GPU flow" {
+      ($script:gpuFn.FindAll({ param($n)
+        $n -is [System.Management.Automation.Language.CommandAst] -and $n.GetCommandName() -eq 'Wait-Job'
+      }, $true)).Count | Should -Be 0
+      ($script:gpuFn.FindAll({ param($n)
+        $n -is [System.Management.Automation.Language.CommandAst] -and $n.GetCommandName() -eq 'Wait-JobWithProgress'
+      }, $true)).Count | Should -BeGreaterOrEqual 3
+    }
+    It "the Ubuntu install runs as a progress-tracked job, not a silent cmd /c" {
+      $script:gpuFn.Extent.Text | Should -Not -Match 'cmd /c "wsl --install -d Ubuntu --no-launch 2>&1" \| Out-Null'
+      $script:gpuFn.Extent.Text | Should -Match 'Downloading and installing Ubuntu'
+    }
+    It "every timeout/failure branch hands the user a runnable remedy" {
+      ($script:gpuFn.FindAll({ param($n)
+        $n -is [System.Management.Automation.Language.CommandAst] -and $n.GetCommandName() -eq 'Show-GpuManualRemedy'
+      }, $true)).Count | Should -BeGreaterOrEqual 3
+    }
+    It "drops the vague dead-end copy the ticket flagged" {
+      $script:gpuFn.Extent.Text | Should -Not -Match 'set it up manually inside WSL later'
+      $script:gpuFn.Extent.Text | Should -Not -Match 'GPU setup may need manual attention'
+    }
+  }
+}

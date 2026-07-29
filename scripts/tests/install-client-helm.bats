@@ -823,3 +823,26 @@ setup() {
   [ "$status" -eq 0 ]
   [ -z "$output" ]
 }
+
+# ── bounded helm calls (#426) ────────────────────────────────────────────────
+@test "both helm invocations run under a deadline, none unbounded (#426)" {
+  local f="$BATS_TEST_DIRNAME/../lib/install-client-helm.sh"
+  ! grep -qE 'spin_cmd "(Reconciling the existing client|Installing the tracebloc client)' "$f"
+  # rc is captured (|| _helm_rc=$?) rather than tested via `if !` so the 124
+  # timeout case can print its unwedge guidance before error (Bugbot #442).
+  # Match the invocation lines only (comments also mention the helper).
+  [ "$(grep -c 'spin_cmd_bounded "\$(( _helm_timeout_min \* 60 ))"' "$f")" -eq 2 ]
+  [ "$(grep -c '|| _helm_rc=\$?' "$f")" -eq 2 ]
+}
+
+@test "helm timeout (124) names the pending-release unwedge commands (Bugbot #442)" {
+  # SIGKILLed helm can leave pending-install/pending-upgrade; the next run
+  # fails with "another operation is in progress" — both call sites must
+  # point at the unwedge command. Match the hint lines, not the comments.
+  local f="$BATS_TEST_DIRNAME/../lib/install-client-helm.sh"
+  [ "$(grep -c "reports 'another operation is in progress'" "$f")" -eq 2 ]
+  grep -q 'helm -n \$TB_NAMESPACE uninstall \$TB_NAMESPACE' "$f"
+  # The adopt path tracks release and namespace separately — the rollback hint
+  # must name the RELEASE (\$_rel), not the namespace (Bugbot #442 r5).
+  grep -q 'helm -n \$_ns rollback \$_rel' "$f"
+}

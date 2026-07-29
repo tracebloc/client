@@ -253,20 +253,25 @@ install_docker_desktop() {
 }
 
 install_macos_cli_tools() {
+  # brew delivers these binaries with no checksum of our own (#429), so the
+  # execute-gate (#411) is the only thing standing between a partial/wrong-arch
+  # install and a green "System tools" that dies at cluster-create.
   if ! has kubectl; then
     spin_cmd "Installing system tools…" brew install kubectl
   fi
-  log "kubectl: $(kubectl version --client --short 2>/dev/null || echo installed)"
+  assert_tool_runs kubectl version --client
 
   if ! has k3d; then
     spin_cmd "Installing system tools…" brew install k3d
   fi
-  log "k3d: $(k3d version | head -1 2>/dev/null || echo installed)"
+  assert_tool_runs k3d version
 
   if ! has helm; then
     spin_cmd "Installing system tools…" brew install helm
   fi
-  log "helm: $(helm version --short 2>/dev/null || echo installed)"
+  # bare `helm version` (not --short: may be dropped like kubectl's). No --rm:
+  # brew owns these binaries; deleting a formula's symlink just wedges the re-run.
+  assert_tool_runs helm version
 
   success "System tools ready"
 }

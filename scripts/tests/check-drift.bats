@@ -88,3 +88,87 @@ YAML
   command() { if [[ "${2:-}" == helm ]]; then return 1; fi; builtin command "$@"; }
   _drift=0; _drift_workload_names >/dev/null 2>&1; [ "$_drift" -eq 0 ]
 }
+
+# ── Check 4: tool execute-gate parity (#411) ─────────────────────────────────
+@test "execute-gates: all installers gate all tools -> no drift (#411)" {
+  printf 'assert_tool_runs kubectl version --client\nassert_tool_runs k3d version\nassert_tool_runs helm version --short\n' > "$ROOT/scripts/lib/setup-linux.sh"
+  printf 'assert_tool_runs kubectl version --client\nassert_tool_runs k3d version\nassert_tool_runs helm version --short\n' > "$ROOT/scripts/lib/setup-macos.sh"
+  printf 'Assert-ToolRuns -Name "kubectl" -VersionArgs @("version","--client")\nAssert-ToolRuns -Name "k3d" -VersionArgs @("version")\nAssert-ToolRuns -Name "helm" -VersionArgs @("version","--short")\n' >> "$ROOT/scripts/install-k8s.ps1"
+  _drift=0; _drift_execute_gates >/dev/null; [ "$_drift" -eq 0 ]
+}
+
+@test "execute-gates: an installer missing a tool gate -> drift (#411)" {
+  printf 'assert_tool_runs kubectl version --client\nassert_tool_runs k3d version\nassert_tool_runs helm version\n' > "$ROOT/scripts/lib/setup-linux.sh"
+  printf 'assert_tool_runs kubectl version --client\nassert_tool_runs k3d version\n' > "$ROOT/scripts/lib/setup-macos.sh"   # no helm gate
+  printf 'Assert-ToolRuns -Name "kubectl" -VersionArgs @("version","--client")\nAssert-ToolRuns -Name "k3d" -VersionArgs @("version")\nAssert-ToolRuns -Name "helm" -VersionArgs @("version")\n' >> "$ROOT/scripts/install-k8s.ps1"
+  _drift=0; _drift_execute_gates >/dev/null 2>&1; [ "$_drift" -ge 1 ]
+}
+
+@test "execute-gates: the --rm <path> form is recognized as a gate (#411 review)" {
+  printf 'assert_tool_runs --rm "$TB_TOOLS_DIR/kubectl" kubectl version --client\nassert_tool_runs --rm "$TB_TOOLS_DIR/k3d" k3d version\nassert_tool_runs helm version\n' > "$ROOT/scripts/lib/setup-linux.sh"
+  printf 'assert_tool_runs kubectl version --client\nassert_tool_runs k3d version\nassert_tool_runs helm version\n' > "$ROOT/scripts/lib/setup-macos.sh"
+  printf 'Assert-ToolRuns -Name "kubectl" -VersionArgs @("version","--client")\nAssert-ToolRuns -Name "k3d" -VersionArgs @("version")\nAssert-ToolRuns -Name "helm" -VersionArgs @("version")\n' >> "$ROOT/scripts/install-k8s.ps1"
+  _drift=0; _drift_execute_gates >/dev/null; [ "$_drift" -eq 0 ]
+}
+
+@test "execute-gates: a COMMENTED-OUT gate does NOT count -> drift (Bugbot #411)" {
+  # A gate that lingers only in a comment must not satisfy the check (structured
+  # call extraction, not whole-file grep).
+  printf 'assert_tool_runs kubectl version --client\nassert_tool_runs k3d version\n# assert_tool_runs helm version\n' > "$ROOT/scripts/lib/setup-linux.sh"
+  printf 'assert_tool_runs kubectl version --client\nassert_tool_runs k3d version\nassert_tool_runs helm version\n' > "$ROOT/scripts/lib/setup-macos.sh"
+  printf 'Assert-ToolRuns -Name "kubectl" -VersionArgs @("version","--client")\nAssert-ToolRuns -Name "k3d" -VersionArgs @("version")\n# Assert-ToolRuns -Name "helm" -VersionArgs @("version")\n' >> "$ROOT/scripts/install-k8s.ps1"
+  _drift=0; _drift_execute_gates >/dev/null 2>&1; [ "$_drift" -ge 1 ]
+}
+
+# ── Check 5: preflight download-host parity (#416) ───────────────────────────
+# The check extracts hosts from PROBE ENTRIES only — bash "label|https://host/…"
+# and ps1 @{ label = "…"; url = "https://host/…" } (label REQUIRED on the ps1 line,
+# so an unrelated $url = "https://…" download line can't count). Fixtures write
+# real probe entries; an explicit array iterates regardless of the runner's IFS.
+@test "preflight hosts: both installers probe the shared set as URLs -> no drift (#416)" {
+  local shared=(registry-1.docker.io auth.docker.io ghcr.io dl.k8s.io get.helm.sh github.com objects.githubusercontent.com desktop.docker.com) h
+  for h in "${shared[@]}"; do
+    printf '  "L (%s)|https://%s/"\n'                 "$h" "$h" >> "$ROOT/scripts/lib/preflight.sh"
+    printf '    @{ label = "L (%s)"; url = "https://%s/" }\n' "$h" "$h" >> "$ROOT/scripts/install-k8s.ps1"
+  done
+  _drift=0; _drift_preflight_hosts >/dev/null; [ "$_drift" -eq 0 ]
+}
+
+@test "preflight hosts: a probe entry missing from ps1 -> drift (#416)" {
+  local shared=(registry-1.docker.io auth.docker.io ghcr.io dl.k8s.io get.helm.sh github.com objects.githubusercontent.com desktop.docker.com) h
+  for h in "${shared[@]}"; do
+    printf '  "L (%s)|https://%s/"\n' "$h" "$h" >> "$ROOT/scripts/lib/preflight.sh"
+    [[ "$h" == "dl.k8s.io" ]] || printf '    @{ label = "L (%s)"; url = "https://%s/" }\n' "$h" "$h" >> "$ROOT/scripts/install-k8s.ps1"
+  done
+  _drift=0; _drift_preflight_hosts >/dev/null 2>&1; [ "$_drift" -ge 1 ]
+}
+
+@test "preflight hosts: a host present only in a COMMENT/hint is NOT counted -> drift (reviewer #416)" {
+  # The whole-file grep this replaced would pass here; the URL-extracting check
+  # must still flag dl.k8s.io because it's no longer in a probe entry on the ps1 side.
+  local shared=(registry-1.docker.io auth.docker.io ghcr.io dl.k8s.io get.helm.sh github.com objects.githubusercontent.com desktop.docker.com) h
+  for h in "${shared[@]}"; do
+    printf '  "L (%s)|https://%s/"\n' "$h" "$h" >> "$ROOT/scripts/lib/preflight.sh"
+    if [[ "$h" == "dl.k8s.io" ]]; then
+      printf '  # kubectl comes from dl.k8s.io\n  Hint "allow HTTPS egress to dl.k8s.io"\n' >> "$ROOT/scripts/install-k8s.ps1"
+    else
+      printf '    @{ label = "L (%s)"; url = "https://%s/" }\n' "$h" "$h" >> "$ROOT/scripts/install-k8s.ps1"
+    fi
+  done
+  _drift=0; _drift_preflight_hosts >/dev/null 2>&1; [ "$_drift" -ge 1 ]
+}
+
+@test "preflight hosts: an unrelated \$url= download line does NOT mask a deleted probe -> drift (Bugbot #416)" {
+  # github.com's PROBE entry is removed, but a winget-style \$url = "https://github.com/…"
+  # download line remains — the label-scoped extractor must NOT count it as a probe.
+  local shared=(registry-1.docker.io auth.docker.io ghcr.io dl.k8s.io get.helm.sh github.com objects.githubusercontent.com desktop.docker.com) h
+  for h in "${shared[@]}"; do
+    printf '  "L (%s)|https://%s/"\n' "$h" "$h" >> "$ROOT/scripts/lib/preflight.sh"
+    if [[ "$h" == "github.com" ]]; then
+      printf '  $url = "https://github.com/microsoft/winget-cli/releases/latest/download/x.msixbundle"\n' >> "$ROOT/scripts/install-k8s.ps1"
+    else
+      printf '    @{ label = "L (%s)"; url = "https://%s/" }\n' "$h" "$h" >> "$ROOT/scripts/install-k8s.ps1"
+    fi
+  done
+  _drift=0; _drift_preflight_hosts >/dev/null 2>&1; [ "$_drift" -ge 1 ]
+}

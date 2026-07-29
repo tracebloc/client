@@ -140,6 +140,51 @@ step_header()    { echo -e "  ${TB_HEADING}$1) $2${RESET}"; echo ""; }
 # ── Utility ──────────────────────────────────────────────────────────────────
 has() { command -v "$1" &>/dev/null; }
 
+# Execute-gate a freshly-installed tool (#411). The old post-install "check" was a
+# log-only interpolation (`... 2>/dev/null || echo present`) that masked failure,
+# so a corrupt or wrong-architecture binary — a partial pkg/brew install, or a
+# download no checksum path guarded — sat on PATH and failed only later, at
+# cluster-create, after a green "System tools". Actually RUN the tool's cheapest
+# self-check; on failure error() with an arch-aware remedy so the tool step fails
+# loudly instead. NOTE: kubectl is gated with `version --client` (NOT --short,
+# removed in kubectl 1.28+); helm with bare `version` (—short may go the same way).
+#
+# Removal is OPT-IN via a leading `--rm <path>`: pass it with the path where the
+# installer PLACES the binary (TB_TOOLS_DIR/<tool>). On failure we remove that path
+# ONLY when the binary that actually ran is that exact file (same inode, `-ef`).
+# So: a broken binary WE installed there (fresh OR left by a prior run) is cleared,
+# letting a re-run self-heal (Bugbot: otherwise `has` stays true → stuck loop);
+# but a brew/pkg-manager copy that lives elsewhere on PATH is never deleted — the
+# resolved binary won't match our path (reviewer). Callers may pass --rm on every
+# path; the `-ef` guard sorts out ownership. macOS/brew callers pass no --rm.
+# Usage: assert_tool_runs [--rm <placed-path>] <name> <version-arg>...
+assert_tool_runs() {
+  local rm_path=""
+  if [[ "${1:-}" == "--rm" ]]; then rm_path="$2"; shift 2; fi
+  local name="$1"; shift
+  local out
+  if out="$("$name" "$@" 2>&1)"; then
+    log "$name OK: $(printf '%s\n' "$out" | head -1)"
+    return 0
+  fi
+  # Remove only the file we placed AND only if it's the binary that just failed.
+  if [[ -n "$rm_path" && -f "$rm_path" ]]; then
+    local resolved; resolved="$(command -v "$name" 2>/dev/null || true)"
+    [[ -n "$resolved" && "$resolved" -ef "$rm_path" ]] && rm -f "$rm_path" 2>/dev/null || true
+  fi
+  error "$name was installed but won't run — a corrupt or wrong-architecture binary (this machine is ${ARCH:-$(uname -m)}). Re-run the installer to re-download it; if it recurs, remove ${rm_path:-the $name on your PATH} (and any package-manager copy) first."
+}
+
+# Sanitize a minutes-valued env override to a base-10 integer, else <default>.
+# The 10# base prefix matters: bash arithmetic reads a leading zero as octal,
+# so 08/09 would ABORT $(( … )) under set -e (mid-create, leaving a partial
+# cluster) and 010 would silently become 8 (Bugbot #442).
+tb_minutes_or() {
+  local v="$1" def="$2"
+  case "$v" in ''|*[!0-9]*) echo "$def"; return 0 ;; esac
+  echo $((10#$v))
+}
+
 # Strip ANSI escape sequences and C0 control characters from a value. A raw
 # `read` captures whatever the terminal sends — this can include:
 #   • bracketed-paste wrappers:  ESC[200~ ... ESC[201~
@@ -242,18 +287,51 @@ check_docker_arch_mac() {
 }
 
 # ── Spinner — hides noisy command output behind an animated status line ──────
-#  Usage:  spin <pid> "Installing foo…"
+#  Usage:  spin <pid> "Installing foo…" [deadline_seconds]
 #  The background process's stdout/stderr should already be redirected to a file
 #  before calling spin. spin waits for the PID to exit and returns its exit code.
+#  With the optional third argument, a still-running PID is killed once the
+#  deadline passes and spin returns 124 (GNU timeout's convention) — the
+#  backstop for commands that can wedge indefinitely (#426).
 spin() {
-  local pid="$1" msg="$2"
+  local pid="$1" msg="$2" deadline_s="${3:-}"
   local frames=('⠋' '⠙' '⠹' '⠸' '⠼' '⠴' '⠦' '⠧' '⠇' '⠏')
   local i=0
+  local ticks=0                           # one tick ≈ 0.12s
+  local _spin_kids="" _spin_k=""          # deadline path: captured child PIDs
 
   tput civis 2>/dev/null || true          # hide cursor
   while kill -0 "$pid" 2>/dev/null; do
+    if [[ -n "$deadline_s" ]] && (( ticks * 12 >= deadline_s * 100 )); then
+      # Children FIRST: the pid is often a wrapper subshell (cluster.sh's
+      # `( k3d … ) &`) — signalling only the wrapper orphans the real worker,
+      # which keeps running (k3d keeps creating the cluster) after the install
+      # has already failed, racing any retry (Bugbot #442). Capture the child
+      # PIDs BEFORE any signal: once the wrapper dies they reparent to init
+      # and pkill -P can't see them (Bugbot #442 r2), so the KILL sweep must
+      # address them by captured PID. Harmless when bash exec-optimized the
+      # wrapper away — then $pid IS the worker and there are no children.
+      # Every line below is failure-proofed (`|| true`): pkill returns 1 when
+      # there are no children, kill/wait fail on already-reaped PIDs, and wait
+      # reports the kill signal — under `set -e` any of those would abort the
+      # deadline path before `return 124`, so the caller would never see the
+      # timeout (no warn/hint, no partial-cluster cleanup) (Bugbot #442 r3).
+      _spin_kids="$(pgrep -P "$pid" 2>/dev/null || true)"
+      pkill -TERM -P "$pid" 2>/dev/null || true
+      kill "$pid" 2>/dev/null || true
+      sleep 0.5
+      for _spin_k in $_spin_kids; do
+        kill -9 "$_spin_k" 2>/dev/null || true
+      done
+      kill -9 "$pid" 2>/dev/null || true
+      wait "$pid" 2>/dev/null || true
+      printf "\r\033[K"
+      tput cnorm 2>/dev/null || true
+      return 124
+    fi
     printf "\r  ${CYAN}%s${RESET} %s" "${frames[i]}" "$msg"
     i=$(( (i + 1) % ${#frames[@]} ))
+    ticks=$(( ticks + 1 ))
     sleep 0.12
   done
 
@@ -277,6 +355,32 @@ spin_cmd() {
     echo -e "  ${DIM}Last 10 lines of log:${RESET}" >&2
     tail -10 "$logfile" >&2
     return 1
+  fi
+}
+
+# ── spin_cmd with a hard deadline (#426) ─────────────────────────────────────
+#  Usage:  spin_cmd_bounded <seconds> "Doing the thing…" cmd args…
+#  For commands that can wedge indefinitely against a stuck endpoint (helm
+#  talking to a wedged kube-apiserver). Same quiet-log capture + failure tail
+#  as spin_cmd; returns the command's real exit code, or 124 when the deadline
+#  killed it (with a timeout note so the user knows it was us, not the tool).
+spin_cmd_bounded() {
+  local secs="$1" msg="$2"; shift 2
+  local logfile="${LOG_FILE:-/tmp/tracebloc-spin.log}"
+  "$@" >> "$logfile" 2>&1 &
+  local pid=$!
+  local rc=0
+  spin "$pid" "$msg" "$secs" || rc=$?
+  if (( rc == 124 )); then
+    echo -e "  ${RED}${BOLD}✖ ${msg} — timed out after ${secs}s${RESET}" >&2
+    echo -e "  ${DIM}Last 10 lines of log:${RESET}" >&2
+    tail -10 "$logfile" >&2
+    return 124
+  elif (( rc != 0 )); then
+    echo -e "  ${RED}${BOLD}✖ ${msg}${RESET}" >&2
+    echo -e "  ${DIM}Last 10 lines of log:${RESET}" >&2
+    tail -10 "$logfile" >&2
+    return $rc
   fi
 }
 

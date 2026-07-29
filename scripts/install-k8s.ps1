@@ -66,6 +66,76 @@ function RefreshPath {
               [System.Environment]::GetEnvironmentVariable("PATH","User")
 }
 
+# Shared braille spinner frames for the progress helpers below.
+$script:SpinnerFrames = @([char]0x2807, [char]0x2819, [char]0x2839, [char]0x2838, [char]0x283C, [char]0x2834, [char]0x2826, [char]0x2827, [char]0x2847, [char]0x280F)
+
+# Spin a braille spinner while a process runs, bounded by a deadline (#426):
+# `k3d cluster create --wait` has no timeout of its own, so a stalled image
+# pull would otherwise spin forever. Returns $true when the process exited on
+# its own, $false on deadline expiry (the process is killed best-effort).
+# Extracted as a function so the deadline/kill path is unit-testable (#412).
+function Wait-ProcessWithDeadline {
+  param([object]$Process, [datetime]$Deadline, [string]$Message)
+  $frames = $script:SpinnerFrames
+  $f = 0
+  Write-Host -NoNewline "  "
+  while (-not $Process.HasExited) {
+    if ((Get-Date) -gt $Deadline) {
+      try { $Process.Kill() } catch {}
+      Write-Host "`r                                                   `r" -NoNewline
+      return $false
+    }
+    Write-Host "`r  " -NoNewline
+    Write-Host $frames[$f] -ForegroundColor Cyan -NoNewline
+    Write-Host " $Message" -NoNewline
+    $f = ($f + 1) % $frames.Count
+    Start-Sleep -Seconds 2
+  }
+  Write-Host "`r                                                   `r" -NoNewline
+  return $true
+}
+
+# Wait on a background job with a visible heartbeat so a long step never leaves
+# the console silent for more than a couple of seconds (#415). Prints a spinner +
+# elapsed/timeout line while the job runs; returns $true if the job finished
+# before the deadline, $false on timeout (the job is stopped best-effort; the
+# caller still owns Remove-Job). Extracted so the progress/timeout contract is
+# unit-testable without a real slow job.
+function Wait-JobWithProgress {
+  param(
+    [Parameter(Mandatory)] $Job,
+    [int]$TimeoutSec = 180,
+    [string]$Message = "Working",
+    [int]$PollSeconds = 2
+  )
+  $frames = $script:SpinnerFrames
+  $f = 0; $elapsed = 0
+  while ($Job.State -eq "Running" -and $elapsed -lt $TimeoutSec) {
+    Write-Host "`r  " -NoNewline
+    Write-Host $frames[$f] -ForegroundColor Cyan -NoNewline
+    Write-Host " $Message ... ${elapsed}s / ${TimeoutSec}s" -NoNewline
+    $f = ($f + 1) % $frames.Count
+    Start-Sleep -Seconds $PollSeconds
+    $elapsed += $PollSeconds
+  }
+  Write-Host "`r                                                                      `r" -NoNewline
+  if ($Job.State -eq "Running") {
+    Stop-Job $Job -ErrorAction SilentlyContinue
+    return $false
+  }
+  return $true
+}
+
+# Background jobs spawn their runspace in the user's HOME directory. On managed
+# machines (roaming profiles) HOME is often a UNC share (\\fileserver\home\user);
+# every cmd.exe a job starts there prints "CMD.EXE was started with the above
+# path as the current directory. UNC paths are not supported." and its stderr
+# surfaces as a red RemoteException error record — alarming noise on a healthy
+# install (#409). Every Start-Job below passes this as -InitializationScript to
+# pin the job to a local working directory before it runs anything. (SystemRoot
+# is always local; the guard makes it a no-op on non-Windows Pester runs.)
+$script:JobInit = { if ($env:SystemRoot) { Set-Location $env:SystemRoot } }
+
 function Get-WindowsArch {
   switch ($env:PROCESSOR_ARCHITECTURE) {
     "AMD64"  { return "amd64" }
@@ -104,6 +174,41 @@ function Invoke-WithRetry {
       Start-Sleep -Seconds $DelaySeconds
     }
   }
+}
+
+# Execute-gate a freshly-installed tool (#411). The old post-install "check" was a
+# Log interpolation whose failure is non-terminating, so a corrupt or wrong-arch
+# binary (winget shims / partial installs skip the direct path's checksum verify)
+# still reached "System tools" and only died at cluster-create. Actually RUN the
+# tool's self-check; on failure Err with an arch-aware remedy so Step 1 fails
+# loudly. NOTE: kubectl uses `version --client` (NOT --short — removed in 1.28+);
+# helm uses bare `version` (--short may go the same way).
+#
+# -BinPath is our own install location. On failure we remove it ONLY when the
+# binary that actually ran resolves to it — so a broken copy WE placed (fresh or
+# left by a prior run) self-heals on re-run, while a winget/choco/pre-existing copy
+# elsewhere on PATH is never deleted (reviewer + Bugbot). Callers may pass -BinPath
+# on every path; the resolved-source guard sorts out ownership.
+function Assert-ToolRuns {
+  param(
+    [Parameter(Mandatory)][string]$Name,
+    [Parameter(Mandatory)][string[]]$VersionArgs,
+    [string]$BinPath
+  )
+  $ok = $false; $out = $null
+  try {
+    $out = (& $Name @VersionArgs 2>&1)
+    $ok  = ($LASTEXITCODE -eq 0)
+  } catch { $ok = $false }
+  if (-not $ok) {
+    if ($BinPath -and (Test-Path $BinPath)) {
+      $resolved = (Get-Command $Name -ErrorAction SilentlyContinue).Source
+      if ($resolved -and ($resolved -eq $BinPath)) { Remove-Item $BinPath -Force -ErrorAction SilentlyContinue }
+    }
+    $arch = Get-WindowsArch
+    Err "$Name was installed but won't run -- a corrupt or wrong-architecture binary (this machine is $arch). Re-run this script to re-download it; if it recurs, remove any $Name installed via a package manager (winget/choco) first, then re-run."
+  }
+  Log "$Name OK: $(($out | Select-Object -First 1))"
 }
 
 # Sanitize workspace name to comply with DNS-1123
@@ -411,7 +516,7 @@ function Enable-VirtualisationFeatures {
   Ok "System features"
 
   Log "Updating WSL..."
-  $wslJob = Start-Job -ScriptBlock { cmd /c "wsl --update 2>&1" }
+  $wslJob = Start-Job -InitializationScript $JobInit -ScriptBlock { cmd /c "wsl --update 2>&1" }
   Write-Host -NoNewline "  "
   $wslTimeoutSec = 90
   $wslElapsed = 0
@@ -433,7 +538,7 @@ function Enable-VirtualisationFeatures {
   }
   Remove-Job -Job $wslJob -Force
 
-  $wslSetJob = Start-Job -ScriptBlock { cmd /c "wsl --set-default-version 2 2>&1" }
+  $wslSetJob = Start-Job -InitializationScript $JobInit -ScriptBlock { cmd /c "wsl --set-default-version 2 2>&1" }
   $wslSetDone = $wslSetJob | Wait-Job -Timeout 20
   if ($wslSetDone) {
     Receive-Job $wslSetJob | Out-Null
@@ -498,7 +603,13 @@ function Install-DockerDesktop {
   if (-not $dockerRunning) {
     Start-Process $dockerExe -ErrorAction SilentlyContinue
 
-    $maxWait = 60
+    # A first-ever Docker Desktop start on AV-heavy corporate machines
+    # routinely needs 5-10 minutes (WSL bootstrap, image unpack). The old
+    # 3-minute cap turned a normal cold start into a failed install plus a
+    # manual re-run (#413). Default 10 minutes; TB_DOCKER_WAIT_MIN overrides.
+    $waitMin = 10
+    if ("$env:TB_DOCKER_WAIT_MIN" -match '^\d+$') { $waitMin = [int]$env:TB_DOCKER_WAIT_MIN }
+    $maxWait = $waitMin * 20                     # 3s per iteration
     Write-Host -NoNewline "  "
     $frames = @([char]0x2807, [char]0x2819, [char]0x2839, [char]0x2838, [char]0x283C, [char]0x2834, [char]0x2826, [char]0x2827, [char]0x2847, [char]0x280F)
     $f = 0
@@ -508,26 +619,41 @@ function Install-DockerDesktop {
         $dkOut = (docker info --format '{{.ID}}' 2>$null) | Out-String
         if (-not [string]::IsNullOrWhiteSpace($dkOut)) { $dockerRunning = $true; break }
       } catch {}
+      # Honest elapsed status after the first minute — silent dead air on a
+      # slow first start reads as a hang.
+      $label = " Waiting for Docker..."
+      if ($i -ge 20) { $label = " Waiting for Docker... ($([math]::Floor($i / 20)) min elapsed; a first start can take up to $waitMin)" }
       Write-Host "`r  " -NoNewline
       Write-Host $frames[$f] -ForegroundColor Cyan -NoNewline
-      Write-Host " Waiting for Docker..." -NoNewline
+      Write-Host $label -NoNewline
       $f = ($f + 1) % $frames.Count
     }
-    Write-Host "`r                                    `r" -NoNewline
+    Write-Host ("`r" + (" " * 78) + "`r") -NoNewline
 
     if (-not $dockerRunning) {
       Write-Host ""
-      Warn "Docker is not responding yet."
-      Hint "This usually means it's still starting up."
-      Write-Host ""
-      Hint "1. Look for the Docker whale icon in your system tray"
-      Hint "2. If Docker is open, wait until it says 'Docker Desktop is running'"
-      Hint "3. If Docker shows an error window instead (e.g. 'Virtualization support not detected' or a WSL update prompt), fix that first - it may need a reboot"
-      Hint "4. Re-run this script once it's ready"
-      Write-Host ""
-      Hint "Nothing is broken -- Docker just needs a moment."
-      Write-Host ""
-      Err "Docker did not start in time. Re-run this script once Docker is ready."
+      # Name the observed state instead of a generic retry request (#413).
+      $ddProc = Get-Process "Docker Desktop" -ErrorAction SilentlyContinue
+      if (-not $ddProc) {
+        # Exited = crashed/blocked, not slow — the slow-start reassurance and
+        # the wait-override hint would point operators at the wrong fix
+        # (Bugbot #440): raising the wait can't help a dead process.
+        Warn "Docker Desktop is not running (its process exited)."
+        Hint "Start Docker Desktop from the Start menu. If it shows an error window"
+        Hint "(virtualization support, a WSL update prompt), fix that first - it may need a reboot."
+        Write-Host ""
+        Err "Docker Desktop exited before its engine came up. Start it, fix anything it reports, then re-run this script."
+      } else {
+        Warn "Docker Desktop is running, but its engine didn't come up within $waitMin minutes."
+        Hint "1. Look for the Docker whale icon in your system tray"
+        Hint "2. If Docker is open, wait until it says 'Docker Desktop is running'"
+        Hint "3. If Docker shows an error window instead (e.g. 'Virtualization support not detected' or a WSL update prompt), fix that first - it may need a reboot"
+        Write-Host ""
+        Hint "Nothing is broken -- a first start can be slow. Re-run this script once Docker is ready."
+        Hint "(TB_DOCKER_WAIT_MIN overrides the wait, e.g. `$env:TB_DOCKER_WAIT_MIN = '20'.)"
+        Write-Host ""
+        Err "Docker did not start within $waitMin minutes. Re-run this script once Docker is ready."
+      }
     }
   }
 
@@ -538,23 +664,45 @@ function Install-DockerDesktop {
 #  NVIDIA CONTAINER TOOLKIT (inside WSL2)
 # =============================================================================
 
+# Copy-pastable manual remedy printed whenever GPU setup can't finish on its own
+# (#415). Mirrors the steps in the $nctScript heredoc below so a user can run them
+# by hand inside WSL; ends with the `tracebloc doctor` follow-up so "later" is an
+# actual next action rather than a vague pointer.
+function Show-GpuManualRemedy {
+  param([string]$Distro = "Ubuntu")
+  Warn "GPU acceleration isn't set up -- your environment will run in CPU mode."
+  Hint "To enable it later, open '$Distro' from the Start Menu and run:"
+  Hint "    curl -fsSL --tlsv1.2 --connect-timeout 30 --max-time 30 https://nvidia.github.io/libnvidia-container/gpgkey | sudo gpg --dearmor -o /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg"
+  Hint "    curl -fsSL --tlsv1.2 --connect-timeout 30 --max-time 30 https://nvidia.github.io/libnvidia-container/stable/deb/nvidia-container-toolkit.list | sed 's#deb https://#deb [signed-by=/usr/share/keyrings/nvidia-container-toolkit-keyring.gpg] https://#g' | sudo tee /etc/apt/sources.list.d/nvidia-container-toolkit.list"
+  Hint "    sudo apt-get update && sudo apt-get install -y nvidia-container-toolkit"
+  Hint "    sudo nvidia-ctk runtime configure --runtime=docker --set-as-default"
+  Hint "Then check status and re-run tracebloc:  tracebloc doctor"
+}
+
+# GPU setup is best-effort and never fatal: on any failure it prints a runnable
+# manual remedy (#415) and returns, leaving K3D_GPU_FLAG empty so the cluster is
+# created in CPU mode. It runs in Step 1 (before New-K3dCluster) because the
+# --gpus flag is decided here; moving it to a post-install step would mean
+# recreating the cluster to add the flag -- the exact churn #431 warns against --
+# so instead every long sub-step below shows a heartbeat and CPU mode always wins.
 function Install-NvidiaContainerToolkit {
   if ($GPU_VENDOR -ne "nvidia" -or -not $NVIDIA_DRIVER_OK) { return }
 
+  Info "Setting up GPU acceleration (NVIDIA container toolkit) in WSL2 -- optional; CPU mode works either way."
   Log "Setting up NVIDIA container toolkit in WSL2"
 
-  $wslListJob = Start-Job -ScriptBlock {
+  $wslListJob = Start-Job -InitializationScript $JobInit -ScriptBlock {
     $prevEncoding = [Console]::OutputEncoding
     [Console]::OutputEncoding = [System.Text.Encoding]::Unicode
     $raw = wsl --list --quiet 2>$null
     [Console]::OutputEncoding = $prevEncoding
     return $raw
   }
-  $wslListDone = $wslListJob | Wait-Job -Timeout 30
-  if (-not $wslListDone) {
-    Stop-Job $wslListJob; Remove-Job $wslListJob -Force
+  if (-not (Wait-JobWithProgress -Job $wslListJob -TimeoutSec 30 -Message "Checking for a WSL2 distro")) {
+    Remove-Job $wslListJob -Force
     Warn "WSL did not respond in time. Skipping GPU container toolkit."
     Hint "Run 'wsl --update' manually, then re-run this script for GPU support."
+    Show-GpuManualRemedy
     return
   }
   $distroRaw = Receive-Job $wslListJob
@@ -565,15 +713,29 @@ function Install-NvidiaContainerToolkit {
   if (-not $wslDistro -and $distros.Count -gt 0) { $wslDistro = $distros[0] }
 
   if (-not $wslDistro) {
+    Info "No WSL2 distro found -- installing Ubuntu (a few hundred MB; this can take several minutes)..."
     Log "No WSL2 distro found -- installing Ubuntu..."
-    cmd /c "wsl --install -d Ubuntu --no-launch 2>&1" | Out-Null
-    cmd /c "wsl --setdefault Ubuntu 2>&1" | Out-Null
+    $ubuntuJob = Start-Job -InitializationScript $JobInit -ScriptBlock {
+      cmd /c "wsl --install -d Ubuntu --no-launch 2>&1"
+      cmd /c "wsl --setdefault Ubuntu 2>&1"
+    }
+    if (-not (Wait-JobWithProgress -Job $ubuntuJob -TimeoutSec 600 -Message "Downloading and installing Ubuntu")) {
+      Remove-Job $ubuntuJob -Force
+      Warn "Ubuntu WSL2 install timed out."
+      Hint "Install it manually, then re-run this script for GPU support:"
+      Hint "    wsl --install -d Ubuntu"
+      Hint "Then check status and re-run tracebloc:  tracebloc doctor"
+      return
+    }
+    Receive-Job $ubuntuJob | Out-Null
+    Remove-Job $ubuntuJob -Force
     Warn "Ubuntu WSL2 installed but needs first-run setup."
     Hint "Open Ubuntu from the Start Menu and set a username/password."
     Hint "Then re-run this script for GPU support."
     return
   }
 
+  Info "Using WSL2 distro: $wslDistro"
   Log "Using WSL2 distro: $wslDistro"
 
   $nctScript = @'
@@ -612,41 +774,42 @@ echo "NCT installed successfully."
     $wslPath = "/mnt/" + $fwd
   }
 
-  $nctInstallJob = Start-Job -ScriptBlock {
+  $nctInstallJob = Start-Job -InitializationScript $JobInit -ScriptBlock {
     param($d, $p)
     cmd /c "wsl -d $d -- /bin/bash `"$p`" 2>&1"
   } -ArgumentList $wslDistro, $wslPath
 
-  $nctDone = $nctInstallJob | Wait-Job -Timeout 180
-  if (-not $nctDone) {
-    Stop-Job $nctInstallJob; Remove-Job $nctInstallJob -Force
+  if (-not (Wait-JobWithProgress -Job $nctInstallJob -TimeoutSec 180 -Message "Installing NVIDIA container toolkit in $wslDistro")) {
+    Remove-Job $nctInstallJob -Force
     Remove-Item $scriptPath -Force -ErrorAction SilentlyContinue
     Warn "GPU container toolkit installation timed out."
-    Hint "You can set it up manually inside WSL later."
+    Show-GpuManualRemedy -Distro $wslDistro
     return
   }
   Receive-Job $nctInstallJob | Out-Null
   Remove-Job $nctInstallJob -Force
   Remove-Item $scriptPath -Force -ErrorAction SilentlyContinue
 
-  $verJob = Start-Job -ScriptBlock {
+  $verJob = Start-Job -InitializationScript $JobInit -ScriptBlock {
     param($d)
     cmd /c "wsl -d $d -- nvidia-ctk --version 2>&1"
   } -ArgumentList $wslDistro
 
-  $verDone = $verJob | Wait-Job -Timeout 15
-  if ($verDone) {
+  if (Wait-JobWithProgress -Job $verJob -TimeoutSec 15 -Message "Verifying GPU toolkit") {
     $nctVer = (Receive-Job $verJob | Out-String).Trim()
     Remove-Job $verJob -Force
     if ($nctVer -and $nctVer -notmatch 'error|not found') {
+      Ok "GPU acceleration ready -- NVIDIA Container Toolkit in ${wslDistro}: $nctVer"
       Log "NVIDIA Container Toolkit in WSL2: $nctVer"
       $script:K3D_GPU_FLAG = "--gpus=all"
     } else {
-      Warn "GPU setup may need manual attention."
+      Warn "GPU toolkit installed but could not be verified."
+      Show-GpuManualRemedy -Distro $wslDistro
     }
   } else {
-    Stop-Job $verJob; Remove-Job $verJob -Force
-    Warn "GPU setup may need manual attention."
+    Remove-Job $verJob -Force
+    Warn "GPU toolkit verification timed out."
+    Show-GpuManualRemedy -Distro $wslDistro
   }
 }
 
@@ -655,7 +818,9 @@ echo "NCT installed successfully."
 # =============================================================================
 
 function Install-Kubectl {
-  if (Has "kubectl") { Log "kubectl: $(cmd /c 'kubectl version --client 2>&1' | Select-Object -First 1)"; return }
+  # Execute-gate on both paths (#411): a present-but-broken kubectl is as fatal as
+  # a bad fresh install, and this runs in Step 1, before the cluster step.
+  if (Has "kubectl") { Assert-ToolRuns -Name "kubectl" -VersionArgs @("version","--client") -BinPath "$TOOL_DIR\kubectl.exe"; return }
 
   $arch = Get-WindowsArch
   $kVer = Invoke-WithRetry -Label "version check" -ScriptBlock {
@@ -678,6 +843,74 @@ function Install-Kubectl {
   }
   RefreshPath
   Log "kubectl $kVer installed."
+  Assert-ToolRuns -Name "kubectl" -VersionArgs @("version","--client") -BinPath $kubectlDest
+}
+
+# ── Pinned tool versions (#382 / #410) ──────────────────────────────────────
+# Defaults MUST stay in lockstep with scripts/lib/common.sh (K3D_VERSION /
+# HELM_VERSION) until the shared facts spec (#435) single-sources them. Pinned
+# defaults keep installs deterministic and immune to GitHub's unauthenticated
+# releases/latest API, whose 60 req/hour/IP limit a single shared corporate NAT
+# exhausts. Only the literal value "latest" resolves at install time — via the
+# plain /releases/latest redirect or get.helm.sh, never api.github.com.
+$script:K3dVersion  = if ($env:K3D_VERSION)  { $env:K3D_VERSION }  else { "v5.9.0" }
+$script:HelmVersion = if ($env:HELM_VERSION) { $env:HELM_VERSION } else { "v4.2.3" }
+
+# A tag is interpolated into a download URL — refuse separators and parent-dir
+# tokens (path-traversal lever) and require a release shape. Mirrors the
+# bootstrap's ref gate and cli install.sh's validate_version_tag.
+function Test-ReleaseTagShape {
+  param([string]$Tag)
+  if (-not $Tag -or $Tag -match '/' -or $Tag -match '\.\.') { return $false }
+  return [bool]($Tag -match '^v[0-9]+\.[0-9]+\.[0-9]+([.-][A-Za-z0-9.]+)?$')
+}
+
+# Resolve "latest" for a GitHub project WITHOUT the rate-limited API: read the
+# tag from the /releases/latest redirect's Location header (same trick as
+# cli/scripts/install.ps1 and lib/setup-linux.sh).
+function Get-LatestGitHubTag {
+  param([string]$Repo)
+  $loc = $null
+  try {
+    # -TimeoutSec: a host that accepts the connect but never answers must not
+    # hang the install (parity with the bash lookups' --max-time 30).
+    $resp = Invoke-WebRequest -Uri "https://github.com/$Repo/releases/latest" `
+      -Method Head -MaximumRedirection 0 -UseBasicParsing -TimeoutSec 30 -ErrorAction Stop
+    $loc = $resp.Headers['Location']
+  } catch {
+    # Windows PowerShell 5.1 throws on a 3xx when redirects are disabled; the
+    # response object still carries the Location header we want.
+    $resp = $_.Exception.Response
+    if ($resp) {
+      try { $loc = $resp.Headers['Location'] } catch {}
+      if (-not $loc) { try { $loc = $resp.Headers.Location } catch {} }
+    }
+  }
+  if (-not $loc) { return $null }
+  return ("$loc" -split '/')[-1]
+}
+
+# The version a tool install uses: the pinned default (or the operator's env
+# override) validated for release shape; the literal "latest" resolves via the
+# API-free path above. Aborts rather than building a URL from a bad value.
+function Resolve-ToolVersion {
+  param([string]$Name, [string]$Value, [scriptblock]$LatestResolver)
+  $v = $Value
+  if ($v -eq "latest") {
+    # Retry parity with the old lookups and lib/setup-linux.sh (`retry 3 5`):
+    # a single network blip must not abort the install (Bugbot #438). The
+    # resolver THROWS on failure so Invoke-WithRetry can drive the attempts.
+    try {
+      $v = Invoke-WithRetry -Label "$Name version lookup" -ScriptBlock $LatestResolver
+    } catch {
+      $v = $null
+    }
+    if (-not $v) { Err "Couldn't resolve the latest $Name release. Set $($Name.ToUpper())_VERSION to a release tag and re-run." }
+  }
+  if (-not (Test-ReleaseTagShape $v)) {
+    Err "$($Name.ToUpper())_VERSION '$v' is not a release tag (expected vX.Y.Z) - refusing to build a download URL from it."
+  }
+  return $v
 }
 
 function Install-K3dAndHelm {
@@ -693,10 +926,13 @@ function Install-K3dAndHelm {
     if (-not (Has "k3d")) {
       $arch = Get-WindowsArch
       Log "Downloading k3d binary directly ($arch)..."
-      $k3dVer = Invoke-WithRetry -Label "k3d version lookup" -ScriptBlock {
-        (Invoke-WebRequest "https://api.github.com/repos/k3d-io/k3d/releases/latest" `
-          -UseBasicParsing | ConvertFrom-Json).tag_name
-      }
+      # Pinned by default (#382 / #410) — no api.github.com on the default path.
+      $k3dVer = Resolve-ToolVersion -Name "k3d" -Value $K3dVersion `
+        -LatestResolver {
+          $tag = Get-LatestGitHubTag -Repo "k3d-io/k3d"
+          if (-not $tag) { throw "no Location header on the /releases/latest redirect" }
+          $tag
+        }
       $k3dDest = "$TOOL_DIR\k3d.exe"
       Invoke-WithRetry -Label "k3d download" -ScriptBlock {
         Invoke-WebRequest "https://github.com/k3d-io/k3d/releases/download/$k3dVer/k3d-windows-$arch.exe" `
@@ -734,7 +970,7 @@ function Install-K3dAndHelm {
       RefreshPath
     }
   }
-  Log "k3d: $(k3d version | Select-Object -First 1)"
+  Assert-ToolRuns -Name "k3d" -VersionArgs @("version") -BinPath "$TOOL_DIR\k3d.exe"
 
   # -- Helm --
   if (-not (Has "helm")) {
@@ -748,9 +984,12 @@ function Install-K3dAndHelm {
     if (-not (Has "helm")) {
       $arch = Get-WindowsArch
       Log "Downloading Helm binary directly ($arch)..."
-      $helmVer = Invoke-WithRetry -Label "helm version lookup" -ScriptBlock {
-        (Invoke-WebRequest "https://api.github.com/repos/helm/helm/releases/latest" `
-          -UseBasicParsing | ConvertFrom-Json).tag_name
+      # Pinned by default (#410); "latest" resolves via get.helm.sh (no API),
+      # mirroring lib/setup-linux.sh.
+      $helmVer = Resolve-ToolVersion -Name "helm" -Value $HelmVersion -LatestResolver {
+        $c = (Invoke-WebRequest "https://get.helm.sh/helm-latest-version" -UseBasicParsing -TimeoutSec 30).Content.Trim()
+        if (-not $c) { throw "empty helm-latest-version response" }
+        $c
       }
       $helmZip = "$env:TEMP\helm-$helmVer-windows-$arch.zip"
       Invoke-WithRetry -Label "helm download" -ScriptBlock {
@@ -768,7 +1007,7 @@ function Install-K3dAndHelm {
 
     if (-not (Has "helm")) { Err "Helm could not be installed. Install manually from https://helm.sh/docs/intro/install/ and re-run." }
   }
-  Log "helm: $(cmd /c 'helm version --short 2>&1')"
+  Assert-ToolRuns -Name "helm" -VersionArgs @("version") -BinPath "$TOOL_DIR\helm.exe"
 
   Ok "System tools"
 }
@@ -1141,22 +1380,49 @@ function New-K3dCluster {
     $k3dOutLog = Join-Path $env:TEMP "k3d-create-$(Get-Random).log"
     $k3dErrLog = Join-Path $env:TEMP "k3d-create-err-$(Get-Random).log"
 
-    $k3dProc = Start-Process -FilePath $k3dExe -ArgumentList $k3dArgString `
-      -NoNewWindow -PassThru `
-      -RedirectStandardOutput $k3dOutLog `
-      -RedirectStandardError $k3dErrLog
-
-    $frames = @([char]0x2807, [char]0x2819, [char]0x2839, [char]0x2838, [char]0x283C, [char]0x2834, [char]0x2826, [char]0x2827, [char]0x2847, [char]0x280F)
-    $f = 0
-    Write-Host -NoNewline "  "
-    while (-not $k3dProc.HasExited) {
-      Write-Host "`r  " -NoNewline
-      Write-Host $frames[$f] -ForegroundColor Cyan -NoNewline
-      Write-Host " Creating compute environment..." -NoNewline
-      $f = ($f + 1) % $frames.Count
-      Start-Sleep -Seconds 2
+    # -ErrorAction Stop + catch: a failed spawn (broken/invalid k3d.exe) used
+    # to leave $k3dProc null, and `while (-not $null.HasExited)` spun the
+    # spinner forever over a dead install (#412). Fail fast instead.
+    $k3dProc = $null
+    try {
+      $k3dProc = Start-Process -FilePath $k3dExe -ArgumentList $k3dArgString `
+        -NoNewWindow -PassThru -ErrorAction Stop `
+        -RedirectStandardOutput $k3dOutLog `
+        -RedirectStandardError $k3dErrLog
+    } catch {
+      Remove-Item $k3dOutLog, $k3dErrLog -Force -ErrorAction SilentlyContinue
+      if ($proxyCfg) { Remove-Item (Split-Path $proxyCfg -Parent) -Recurse -Force -ErrorAction SilentlyContinue }
+      if ($script:LOG_FILE) { Hint "Full log: $LOG_FILE" }
+      Err "Couldn't start k3d ($k3dExe): $($_.Exception.Message). Reinstall it (re-run this script) or check that the binary runs: k3d version"
     }
-    Write-Host "`r                                                   `r" -NoNewline
+
+    $timeoutMin = 15
+    if ("$env:TB_CREATE_TIMEOUT_MIN" -match '^\d+$') { $timeoutMin = [int]$env:TB_CREATE_TIMEOUT_MIN }
+    if (-not (Wait-ProcessWithDeadline -Process $k3dProc -Deadline (Get-Date).AddMinutes($timeoutMin) -Message "Creating compute environment...")) {
+      $tail = @()
+      if (Test-Path $k3dErrLog) { $tail = @(Get-Content $k3dErrLog -ErrorAction SilentlyContinue | Select-Object -Last 5) }
+      if (-not $tail -and (Test-Path $k3dOutLog)) { $tail = @(Get-Content $k3dOutLog -ErrorAction SilentlyContinue | Select-Object -Last 5) }
+      foreach ($line in $tail) { Warn "k3d: $line" }
+      if ($script:LOG_FILE) { Hint "Full log: $LOG_FILE" }
+      Remove-Item $k3dOutLog, $k3dErrLog -Force -ErrorAction SilentlyContinue
+      if ($proxyCfg) { Remove-Item (Split-Path $proxyCfg -Parent) -Recurse -Force -ErrorAction SilentlyContinue }
+      # Killing k3d mid --wait skips its own rollback; a leftover partial
+      # cluster would be adopted as "already running" by the next run's
+      # reuse path (Bugbot #439). Remove it — bounded — before failing.
+      Info "Removing the partially created environment..."
+      $partialDeleted = $false
+      try {
+        $delProc = Start-Process -FilePath $k3dExe -ArgumentList "cluster delete $CLUSTER_NAME" `
+          -NoNewWindow -PassThru -ErrorAction Stop
+        if (Wait-ProcessWithDeadline -Process $delProc -Deadline (Get-Date).AddMinutes(2) -Message "Removing partial environment...") {
+          $partialDeleted = ($delProc.ExitCode -eq 0)
+        }
+      } catch {}
+      if (-not $partialDeleted) {
+        Warn "Couldn't remove the partial cluster automatically - run 'k3d cluster delete $CLUSTER_NAME' before re-running."
+      }
+      Err "Compute environment creation timed out after $timeoutMin minutes. Check that Docker is healthy and this network can pull images, then re-run. (TB_CREATE_TIMEOUT_MIN overrides the bound.)"
+    }
 
     $k3dExitCode = $k3dProc.ExitCode
     $k3dStdout = if (Test-Path $k3dOutLog) { Get-Content $k3dOutLog -Raw -ErrorAction SilentlyContinue } else { "" }
@@ -2383,6 +2649,9 @@ function Test-Preflight {
   $backendHost = (Get-BackendUrl) -replace '^https?://','' -replace '/$',''
   $criticals = @(
     @{ label = "Docker Hub (registry-1.docker.io)";           url = "https://registry-1.docker.io/v2/" },
+    # auth.docker.io is Docker Hub's token endpoint: a network that allows
+    # registry-1 but blocks the token host fails only at in-cluster pull time (#416).
+    @{ label = "Docker Hub auth (auth.docker.io)";            url = "https://auth.docker.io/token" },
     @{ label = "GitHub Container Registry (ghcr.io)";         url = "https://ghcr.io/" },
     @{ label = "tracebloc API ($backendHost)";                url = "https://$backendHost/" },
     # The chart repo is probed at its index.yaml, strictly: the site ROOT 404s by
@@ -2390,6 +2659,20 @@ function Test-Preflight {
     # actually exist for `helm repo add` to succeed (#385).
     @{ label = "tracebloc Helm charts (tracebloc.github.io)"; url = "$TRACEBLOC_HELM_REPO_URL/index.yaml"; strict = $true }
   )
+  # Download hosts Step 1 fetches from — promoted to HARD (#416): a blocked one
+  # used to pass preflight then fail the install ~30s later. Added only when the
+  # fetch will actually happen (tool/app absent; a present tool is never
+  # re-downloaded). k3d release assets 302 to objects.githubusercontent.com, so it
+  # is probed explicitly. Kept in lockstep with preflight.sh (drift: check-drift.sh).
+  if (-not (Test-Path "$env:ProgramFiles\Docker\Docker\Docker Desktop.exe")) {
+    $criticals += @{ label = "Docker Desktop (desktop.docker.com)"; url = "https://desktop.docker.com/" }
+  }
+  if (-not (Has "kubectl")) { $criticals += @{ label = "kubectl (dl.k8s.io)"; url = "https://dl.k8s.io/" } }
+  if (-not (Has "helm"))    { $criticals += @{ label = "Helm (get.helm.sh)";  url = "https://get.helm.sh/" } }
+  if (-not (Has "k3d")) {
+    $criticals += @{ label = "k3d download (github.com)";                  url = "https://github.com/" }
+    $criticals += @{ label = "k3d assets (objects.githubusercontent.com)"; url = "https://objects.githubusercontent.com/" }
+  }
   $tlsSeen = $false; $cfail = 0
   foreach ($c in $criticals) {
     $status = Test-PfUrl $c.url -RequireSuccess:([bool]$c.strict)
@@ -2402,7 +2685,7 @@ function Test-Preflight {
     }
   }
   if ($tlsSeen)    { Hint "A TLS/certificate error usually means a break-and-inspect (TLS-inspecting) proxy whose corporate CA isn't trusted here - see the proxy notes." }
-  if ($cfail -gt 0){ Hint "Allow HTTPS (443) egress to: registry-1.docker.io, ghcr.io, $backendHost, tracebloc.github.io - or configure your corporate proxy." }
+  if ($cfail -gt 0){ Hint "Allow HTTPS (443) egress to the host(s) named above - the always-needed set is registry-1.docker.io, auth.docker.io, ghcr.io, $backendHost, tracebloc.github.io, plus any tool-download host listed (desktop.docker.com / dl.k8s.io / get.helm.sh / github.com / objects.githubusercontent.com) - or configure your corporate proxy." }
 
   if ($hardFail -gt 0) {
     Write-Host ""

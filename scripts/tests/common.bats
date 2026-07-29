@@ -402,3 +402,134 @@ setup() {
   [[ "$output" == *"no"* ]]
   [[ "$output" == *"survived"* ]]
 }
+
+# ── spin deadline + spin_cmd_bounded (#426) ──────────────────────────────────
+@test "spin: optional deadline kills a stuck pid and returns 124 (#426)" {
+  sleep 30 &
+  local stuck_pid=$!
+  run spin "$stuck_pid" "waiting…" 1
+  [ "$status" -eq 124 ]
+  # the stuck process is gone (kill -0 fails)
+  ! kill -0 "$stuck_pid" 2>/dev/null
+}
+
+@test "spin: deadline kills the wrapper's CHILDREN too, not just the subshell (Bugbot #442)" {
+  # `; true` stops bash exec-optimizing the subshell away, forcing the real
+  # wrapper+child shape cluster.sh's `( k3d … ) &` can produce.
+  ( sleep 30; true ) &
+  local wrapper=$!
+  sleep 0.3                                  # let the subshell fork its child
+  local child
+  child="$(pgrep -P "$wrapper" | head -1)"
+  [ -n "$child" ]
+  run spin "$wrapper" "waiting…" 1
+  [ "$status" -eq 124 ]
+  ! kill -0 "$wrapper" 2>/dev/null
+  ! kill -0 "$child" 2>/dev/null
+}
+
+@test "spin: deadline KILLs a TERM-immune child even after the wrapper died (Bugbot #442 r2)" {
+  # The child ignores TERM; the wrapper dies at TERM, reparenting the child to
+  # init — only a KILL by captured PID can still reach it.
+  ( bash -c 'trap "" TERM; sleep 30'; true ) &
+  local wrapper=$!
+  sleep 0.4
+  local child
+  child="$(pgrep -P "$wrapper" | head -1)"
+  [ -n "$child" ]
+  run spin "$wrapper" "waiting…" 1
+  [ "$status" -eq 124 ]
+  ! kill -0 "$child" 2>/dev/null
+}
+
+@test "tb_minutes_or: base-10 normalization defuses the octal trap (Bugbot #442 r6)" {
+  [ "$(tb_minutes_or 08 15)" = "8" ]      # would abort $(( )) as invalid octal
+  [ "$(tb_minutes_or 010 15)" = "10" ]    # would silently read as 8
+  [ "$(tb_minutes_or 25 15)" = "25" ]
+  [ "$(tb_minutes_or '' 15)" = "15" ]
+  [ "$(tb_minutes_or 20m 15)" = "15" ]
+}
+
+@test "spin: deadline path survives set -e end-to-end (Bugbot #442 r3)" {
+  # A childless stuck pid (pkill -P finds nothing -> returns 1) plus wait
+  # after a kill: under `set -e` any bare failure aborts the deadline path
+  # before `return 124` and the caller sees 143/1 — no timeout copy, no
+  # partial-cluster cleanup. The whole path must still deliver 124.
+  run bash -c "set -euo pipefail; source '${BATS_TEST_DIRNAME}/../lib/common.sh'; LOG_FILE=/dev/null; sleep 30 & spin \$! 'waiting…' 1"
+  [ "$status" -eq 124 ]
+}
+
+@test "spin: without a deadline behaviour is unchanged (returns the pid's rc)" {
+  # Called directly (not via `run`): spin must `wait` the pid, and a `run`
+  # subshell can't wait a process it didn't spawn.
+  bash -c 'exit 7' &
+  local rc=0
+  spin "$!" "quick…" >/dev/null || rc=$?
+  [ "$rc" -eq 7 ]
+}
+
+@test "spin_cmd_bounded: fast success passes through rc 0, no output" {
+  run spin_cmd_bounded 5 "quick…" true
+  [ "$status" -eq 0 ]
+}
+
+@test "spin_cmd_bounded: failure preserves the command's exit code + tails the log" {
+  LOG_FILE="$BATS_TEST_TMPDIR/spin.log"   # load_lib pins LOG_FILE=/dev/null; tail needs a real file
+  run spin_cmd_bounded 5 "failing…" bash -c 'echo boom; exit 3'
+  [ "$status" -eq 3 ]
+  [[ "$output" == *"Last 10 lines of log:"* ]]
+  [[ "$output" == *"boom"* ]]
+}
+
+@test "spin_cmd_bounded: deadline -> 124 with an explicit timeout note" {
+  run spin_cmd_bounded 1 "stuck…" sleep 30
+  [ "$status" -eq 124 ]
+  [[ "$output" == *"timed out after 1s"* ]]
+}
+
+# ── assert_tool_runs (execute-gate, #411) ────────────────────────────────────
+@test "assert_tool_runs: a working tool passes, binary untouched (#411)" {
+  mkdir -p "$BATS_TEST_TMPDIR/bin"
+  printf '#!/usr/bin/env bash\necho "k3d version v5.9.0"\n' > "$BATS_TEST_TMPDIR/bin/k3d"
+  chmod +x "$BATS_TEST_TMPDIR/bin/k3d"
+  PATH="$BATS_TEST_TMPDIR/bin:$PATH"
+  run assert_tool_runs k3d version
+  [ "$status" -eq 0 ]
+  [ -f "$BATS_TEST_TMPDIR/bin/k3d" ]
+}
+
+@test "assert_tool_runs: a broken tool with --rm errors and removes the binary WE placed (#411)" {
+  mkdir -p "$BATS_TEST_TMPDIR/bin"
+  printf '#!/usr/bin/env bash\nexit 1\n' > "$BATS_TEST_TMPDIR/bin/k3d"
+  chmod +x "$BATS_TEST_TMPDIR/bin/k3d"
+  PATH="$BATS_TEST_TMPDIR/bin:$PATH"
+  run assert_tool_runs --rm "$BATS_TEST_TMPDIR/bin/k3d" k3d version
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"won't run"* ]]
+  [ ! -f "$BATS_TEST_TMPDIR/bin/k3d" ]        # the binary we placed was removed
+}
+
+@test "assert_tool_runs: a broken tool WITHOUT --rm errors but leaves the binary (#411 review)" {
+  # Already-present / pkg-managed path: we didn't place it, so we must not delete it
+  # (deleting a brew symlink just wedges the re-run — reviewer).
+  mkdir -p "$BATS_TEST_TMPDIR/bin"
+  printf '#!/usr/bin/env bash\nexit 1\n' > "$BATS_TEST_TMPDIR/bin/k3d"
+  chmod +x "$BATS_TEST_TMPDIR/bin/k3d"
+  PATH="$BATS_TEST_TMPDIR/bin:$PATH"
+  run assert_tool_runs k3d version
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"won't run"* ]]
+  [ -f "$BATS_TEST_TMPDIR/bin/k3d" ]          # NOT removed — we didn't place it
+}
+
+@test "assert_tool_runs: --rm removes ONLY the binary that actually ran, not a decoy copy (#411 Bugbot)" {
+  # The failing k3d resolves to bin/; --rm points at a different (installer-dir)
+  # copy that did NOT run. The -ef guard must leave that copy alone.
+  mkdir -p "$BATS_TEST_TMPDIR/bin" "$BATS_TEST_TMPDIR/tools"
+  printf '#!/usr/bin/env bash\nexit 1\n' > "$BATS_TEST_TMPDIR/bin/k3d"; chmod +x "$BATS_TEST_TMPDIR/bin/k3d"
+  : > "$BATS_TEST_TMPDIR/tools/k3d"
+  PATH="$BATS_TEST_TMPDIR/bin:$PATH"
+  run assert_tool_runs --rm "$BATS_TEST_TMPDIR/tools/k3d" k3d version
+  [ "$status" -ne 0 ]
+  [ -f "$BATS_TEST_TMPDIR/tools/k3d" ]         # NOT removed — it isn't the binary that ran
+}

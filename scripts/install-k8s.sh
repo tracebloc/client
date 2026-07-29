@@ -158,6 +158,14 @@ main() {
   done
 
   validate_config
+  # Pre-log network-FS guard (#432): setup_log_file mkdirs HOST_DATA_DIR and
+  # redirects the whole session's output onto it — refuse a network-FS target
+  # BEFORE that unguarded mkdir can fail (or land root-squashed) on an NFS
+  # home. Guarded so a stale bootstrap without the new helper proceeds as
+  # before (same pattern as the assess/host_audit gates below).
+  if declare -F early_data_dir_guard >/dev/null 2>&1; then
+    early_data_dir_guard
+  fi
   setup_log_file
   print_banner
 

@@ -401,9 +401,11 @@ install_kubectl() {
       || error "Couldn't resolve the kubectl version from dl.k8s.io/release/stable.txt — check network connectivity to dl.k8s.io and re-run."
     spin_cmd "Installing system tools…" _fetch_kubectl "$KUBE_VER" "$ARCH_DL"
     log "kubectl $KUBE_VER installed."
-  else
-    log "kubectl: $(kubectl version --client --short 2>/dev/null || echo present)"
   fi
+  # Gate on both paths (fresh + already-present). --rm removes our TB_TOOLS_DIR copy
+  # only if IT is the binary that failed (assert_tool_runs' -ef guard), so a broken
+  # installer-placed kubectl self-heals on re-run while a pkg copy elsewhere is safe.
+  assert_tool_runs --rm "$TB_TOOLS_DIR/kubectl" kubectl version --client
 }
 
 # ── k3d ──────────────────────────────────────────────────────────────────────
@@ -447,7 +449,7 @@ _fetch_k3d_release() {
 
 install_k3d() {
   if has k3d; then
-    log "k3d: $(k3d version | head -1)"
+    assert_tool_runs --rm "$TB_TOOLS_DIR/k3d" k3d version
     return 0
   fi
 
@@ -484,7 +486,7 @@ install_k3d() {
     error "System tool installation completed but not found on PATH."
   fi
 
-  log "k3d: $(k3d version | head -1)"
+  assert_tool_runs --rm "$TB_TOOLS_DIR/k3d" k3d version
 }
 
 # ── Helm ─────────────────────────────────────────────────────────────────────
@@ -646,7 +648,10 @@ install_helm() {
     fi
   fi
   _ensure_helm_executable
-  log "helm: $(helm version --short 2>/dev/null || echo installed)"
+  # bare `helm version` (not --short: it may be dropped like kubectl's was). --rm
+  # removes our TB_TOOLS_DIR copy only if IT is the binary that failed (-ef guard),
+  # never a pre-existing / pkg-managed helm elsewhere on PATH (#411 review).
+  assert_tool_runs --rm "$TB_TOOLS_DIR/helm" helm version
   success "System tools"
 }
 

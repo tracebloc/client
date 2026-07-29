@@ -88,13 +88,121 @@ setup() {
   [[ "$output" != *"get.docker.com"* ]]
 }
 
-@test "_pf_connectivity: tool host probed (warn-only) when the tool is missing" {
+@test "_pf_connectivity: Docker-engine host is WARN not hard — path-dependent (Bugbot #416)" {
+  # The Docker install host varies by distro/path (Debian get.docker.com, RHEL
+  # clones download.docker.com, Amazon/Arch/SUSE distro repos), so a blocked one
+  # must NOT abort a supported install that never touches it — warn only.
   _pf_probe_url() { case "$1" in *get.docker.com*) echo blocked ;; *) echo ok ;; esac; }
-  has() { [[ "$1" == "curl" ]]; }   # curl present (probing possible), other tools missing
+  has() { [[ "$1" == "curl" ]]; }   # docker + all tools missing
   OS=Linux
   run _pf_connectivity
-  [[ "$output" == *"get.docker.com"* ]]
-  # a missing tool host is warn-only, never a hard fail
+  [[ "$output" == *"get.docker.com) unreachable"* ]]                            # still surfaced…
+  PF_HARD_FAIL=0; _pf_connectivity >/dev/null 2>&1; [ "$PF_HARD_FAIL" -eq 0 ]   # …but NOT a hard fail
+}
+
+@test "_pf_connectivity: kubectl host (dl.k8s.io) blocked -> HARD fail (#416)" {
+  _pf_probe_url() { case "$1" in *dl.k8s.io*) echo blocked ;; *) echo ok ;; esac; }
+  has() { [[ "$1" == "curl" ]]; }   # tools missing -> their download hosts probed
+  OS=Linux
+  run _pf_connectivity
+  [[ "$output" == *"dl.k8s.io) unreachable"* ]]
+  PF_HARD_FAIL=0; _pf_connectivity >/dev/null 2>&1; [ "$PF_HARD_FAIL" -ge 1 ]
+}
+
+@test "_pf_connectivity: k3d asset host objects.githubusercontent.com is probed (#416)" {
+  # Release assets 302 to objects.githubusercontent.com; _pf_probe_url can't
+  # follow redirects, so it must be listed (and probed) explicitly.
+  _pf_probe_url() { case "$1" in *objects.githubusercontent.com*) echo blocked ;; *) echo ok ;; esac; }
+  has() { [[ "$1" == "curl" ]]; }
+  OS=Linux
+  run _pf_connectivity
+  [[ "$output" == *"objects.githubusercontent.com) unreachable"* ]]
+}
+
+@test "_pf_connectivity: auth.docker.io (Docker Hub token host) is probed hard (#416)" {
+  _pf_probe_url() { case "$1" in *auth.docker.io*) echo blocked ;; *) echo ok ;; esac; }
+  has() { return 0; }               # all tools present -> only always-critical hosts probed
+  OS=Linux
+  run _pf_connectivity
+  [[ "$output" == *"auth.docker.io) unreachable"* ]]
+}
+
+@test "_pf_connectivity: macOS hard-probes formulae.brew.sh when a brew tool is absent (reviewer #416)" {
+  # brew install pulls formula metadata from formulae.brew.sh even when brew is
+  # already present — so a blocked metadata host must fail preflight, not the install.
+  _pf_probe_url() { case "$1" in *formulae.brew.sh*) echo blocked ;; *) echo ok ;; esac; }
+  has() { case "$1" in curl|brew|docker) return 0 ;; *) return 1 ;; esac; }  # brew+docker present, kubectl/k3d/helm absent
+  OS=Darwin
+  run _pf_connectivity
+  [[ "$output" == *"formulae.brew.sh) unreachable"* ]]
+  PF_HARD_FAIL=0; _pf_connectivity >/dev/null 2>&1; [ "$PF_HARD_FAIL" -ge 1 ]
+}
+
+@test "_pf_connectivity: GUI Mac, only docker missing -> formulae.brew.sh NOT probed (Bugbot #416)" {
+  # GUI Macs install Docker Desktop from desktop.docker.com, not brew — so docker
+  # absence alone must not hard-fail the brew metadata host when the tools are present.
+  _pf_probe_url() { case "$1" in *formulae.brew.sh*) echo blocked ;; *) echo ok ;; esac; }
+  has() { case "$1" in curl|brew|kubectl|k3d|helm) return 0 ;; *) return 1 ;; esac; }  # only docker missing
+  _pf_has_gui_session() { return 0; }   # GUI session -> Docker Desktop path
+  OS=Darwin
+  run _pf_connectivity
+  [[ "$output" != *"formulae.brew.sh"* ]]              # not probed at all
+  PF_HARD_FAIL=0; _pf_connectivity >/dev/null 2>&1; [ "$PF_HARD_FAIL" -eq 0 ]
+}
+
+@test "_pf_connectivity: headless Mac, only docker missing -> formulae.brew.sh IS probed (Bugbot #416)" {
+  # Headless Macs install colima/docker via brew, which hits formulae.brew.sh — so
+  # a blocked metadata host must fail preflight on the Colima path.
+  _pf_probe_url() { case "$1" in *formulae.brew.sh*) echo blocked ;; *) echo ok ;; esac; }
+  has() { case "$1" in curl|brew|kubectl|k3d|helm) return 0 ;; *) return 1 ;; esac; }  # only docker missing
+  _pf_has_gui_session() { return 1; }   # headless -> colima via brew
+  OS=Darwin
+  run _pf_connectivity
+  [[ "$output" == *"formulae.brew.sh) unreachable"* ]]
+  PF_HARD_FAIL=0; _pf_connectivity >/dev/null 2>&1; [ "$PF_HARD_FAIL" -ge 1 ]
+}
+
+@test "_pf_connectivity: macOS hard-probes github.com for the Homebrew clone when brew absent (Bugbot #416)" {
+  # install_homebrew git-clones Homebrew/brew from github.com after fetching the
+  # script from raw.githubusercontent.com — both must be reachable.
+  _pf_probe_url() { case "$1" in *//github.com/*) echo blocked ;; *) echo ok ;; esac; }
+  has() { [[ "$1" == "curl" ]]; }   # brew missing -> clone host probed
+  OS=Darwin
+  run _pf_connectivity
+  [[ "$output" == *"github.com) unreachable"* ]]
+  PF_HARD_FAIL=0; _pf_connectivity >/dev/null 2>&1; [ "$PF_HARD_FAIL" -ge 1 ]
+}
+
+@test "_pf_connectivity: GUI Mac, docker missing -> desktop.docker.com HARD (Bugbot #416)" {
+  # Docker Desktop is the actual GUI-Mac Docker path, so a blocked CDN must fail
+  # preflight, not the mid-download step.
+  _pf_probe_url() { case "$1" in *desktop.docker.com*) echo blocked ;; *) echo ok ;; esac; }
+  has() { case "$1" in curl|brew|kubectl|k3d|helm) return 0 ;; *) return 1 ;; esac; }  # only docker missing
+  _pf_has_gui_session() { return 0; }   # GUI -> Docker Desktop
+  OS=Darwin
+  run _pf_connectivity
+  [[ "$output" == *"desktop.docker.com) unreachable"* ]]
+  PF_HARD_FAIL=0; _pf_connectivity >/dev/null 2>&1; [ "$PF_HARD_FAIL" -ge 1 ]
+}
+
+@test "_pf_connectivity: headless Mac, docker missing -> desktop.docker.com NOT probed (Colima path; Bugbot #416)" {
+  # Headless installs use colima/docker via brew, never desktop.docker.com — so a
+  # blocked CDN must not abort that path (formulae.brew.sh covers the brew route).
+  _pf_probe_url() { case "$1" in *desktop.docker.com*) echo blocked ;; *) echo ok ;; esac; }
+  has() { case "$1" in curl|brew|kubectl|k3d|helm) return 0 ;; *) return 1 ;; esac; }  # only docker missing
+  _pf_has_gui_session() { return 1; }   # headless -> colima via brew
+  OS=Darwin
+  run _pf_connectivity
+  [[ "$output" != *"desktop.docker.com"* ]]
+  PF_HARD_FAIL=0; _pf_connectivity >/dev/null 2>&1; [ "$PF_HARD_FAIL" -eq 0 ]
+}
+
+@test "_pf_connectivity: a download host is NOT probed when its tool is present (#416)" {
+  _pf_probe_url() { case "$1" in *dl.k8s.io*) echo blocked ;; *) echo ok ;; esac; }
+  has() { case "$1" in curl|kubectl) return 0 ;; *) return 1 ;; esac; }   # kubectl present
+  OS=Linux
+  run _pf_connectivity
+  [[ "$output" != *"dl.k8s.io"* ]]  # present tool is never re-downloaded -> host not probed
   PF_HARD_FAIL=0; _pf_connectivity >/dev/null 2>&1; [ "$PF_HARD_FAIL" -eq 0 ]
 }
 
@@ -412,4 +520,66 @@ setup() {
   # the individual arch/memory ✔ lines are suppressed inside run_preflight
   [[ "$output" != *"Architecture:"* ]]
   [[ "$output" != *"Memory:"* ]]
+}
+
+# ── early_data_dir_guard — pre-log network-FS refusal (#432) ─────────────────
+@test "_pf_is_network_fstype: classifies network vs local" {
+  _pf_is_network_fstype nfs4
+  _pf_is_network_fstype cifs
+  _pf_is_network_fstype fuse.sshfs
+  ! _pf_is_network_fstype ext4
+  ! _pf_is_network_fstype apfs
+  ! _pf_is_network_fstype ""
+}
+
+@test "early_data_dir_guard: local filesystem -> silent pass" {
+  _pf_fstype() { echo ext4; }
+  run early_data_dir_guard
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+}
+
+@test "early_data_dir_guard: undetermined filesystem -> pass (assume local)" {
+  _pf_fstype() { echo ""; }
+  run early_data_dir_guard
+  [ "$status" -eq 0 ]
+}
+
+@test "early_data_dir_guard: NFS + existing data dir -> silent pass (healthy re-run reaches assess; Bugbot #441)" {
+  _pf_fstype() { echo nfs4; }
+  mkdir -p "$BATS_TEST_TMPDIR/existing/.tracebloc"
+  HOST_DATA_DIR="$BATS_TEST_TMPDIR/existing/.tracebloc" run early_data_dir_guard
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+}
+
+@test "early_data_dir_guard: NFS -> refuses before any mkdir, names the fix" {
+  _pf_fstype() { echo nfs4; }
+  HOST_DATA_DIR="$BATS_TEST_TMPDIR/fresh/.tracebloc" run early_data_dir_guard
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"network filesystem (nfs4)"* ]]
+  [[ "$output" == *"HOST_DATA_DIR"* ]]
+  [[ "$output" == *"Refusing to create the data directory"* ]]
+  # The remediation must be followable (Bugbot #441): validate_config rejects
+  # paths outside $HOME, so the guard must not advise HOST_DATA_DIR=/local/path.
+  [[ "$output" != *"/local/path"* ]]
+  [[ "$output" == *"TRACEBLOC_ALLOW_NETWORK_FS=1"* ]]
+  [[ "$output" == *"local disk"* ]]
+}
+
+@test "early_data_dir_guard: TRACEBLOC_ALLOW_NETWORK_FS defers to the full check" {
+  _pf_fstype() { echo nfs4; }
+  TRACEBLOC_ALLOW_NETWORK_FS=1 run early_data_dir_guard
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+}
+
+@test "install-k8s.sh runs the early guard before setup_log_file (#432 ordering)" {
+  local main_sh="$BATS_TEST_DIRNAME/../install-k8s.sh"
+  local guard_line setup_line
+  guard_line=$(grep -n 'early_data_dir_guard' "$main_sh" | head -1 | cut -d: -f1)
+  setup_line=$(grep -n '^  setup_log_file' "$main_sh" | head -1 | cut -d: -f1)
+  [ -n "$guard_line" ]
+  [ -n "$setup_line" ]
+  [ "$guard_line" -lt "$setup_line" ]
 }
