@@ -863,30 +863,48 @@ _ensure_subid_ranges() {
     return 0
   fi
 
+  # Key everything off the user the rootless daemon will run as — `id -un`, not
+  # $USER (they diverge under su/cron), matching install_rootless_docker and the
+  # probe so detection + provisioning + the hand-off all name the same user
+  # (Asad/Bugbot, client#458).
+  local _user; _user="$(id -un 2>/dev/null || printf '%s' "${USER:-}")"
+
   case "${PROBE_PRIVILEGE:-no_sudo}" in
     root | sudo_nopw)
       # Sudo available → perform the touch as exactly ONE named, announced
       # privileged step (A2 honest-messaging), never blanket sudo. Delegate to the
       # shared remediation so installer + prepare-host use one implementation.
       info "Adding a subordinate UID/GID range for rootless containers (one-time, needs admin)…"
-      _provision_subid_ranges "$USER"
+      # Hard-fail the install if provisioning can't complete — the rootless daemon
+      # can't come up without it. (run_prepare_host, by contrast, calls this
+      # best-effort; _provision_subid_ranges returns non-zero rather than exiting so
+      # each caller decides — self-review, client#458.)
+      _provision_subid_ranges "$_user" \
+        || error "Couldn't set up the subuid/subgid prerequisites for '${_user}' (see the warning above) — an administrator must prepare this host, then re-run."
       ;;
     *)
       # Unprivileged (no_sudo, or sudo_pw we choose not to prompt) → HAND OFF, never
       # fail opaque: name exactly what's missing, print the prepare-host command AND
       # the literal lines an admin can paste, then stop with an actionable error.
-      warn "Rootless Docker needs host prerequisites for '${USER}' that aren't set up yet."
-      hint "Have an administrator prepare this host once, then re-run:"
-      hint "  curl -fsSL https://tracebloc.io/i.sh | bash -s -- prepare-host   (or: tracebloc prepare-host ${USER})"
+      # The prepare-host command MUST name the researcher — bare `prepare-host`
+      # provisions nothing (run_prepare_host keys off TB_PREPARE_USER), so following
+      # it would loop back to this same hand-off (Bugbot #458).
+      warn "Rootless Docker needs host prerequisites for '${_user}' that aren't set up yet."
+      hint "Have an administrator prepare this host once (naming you as the researcher), then re-run:"
+      hint "  curl -fsSL https://tracebloc.io/i.sh | TB_PREPARE_USER=${_user} bash -s -- prepare-host"
+      hint "  (or, with the CLI:  tracebloc prepare-host ${_user})"
       if [ "${PROBE_SUBID:-0}" != "1" ]; then
+        # Compute a non-overlapping start for THIS host so the paste-in remedy can't
+        # collide with an existing allocation (Bugbot #458).
+        local _start; _start="$(_next_subid_start "${TB_SUBUID_FILE:-/etc/subuid}" "${TB_SUBGID_FILE:-/etc/subgid}")"
         hint "Missing — a subordinate UID/GID range. An admin can add it directly:"
-        hint "  echo '${USER}:100000:65536' | sudo tee -a /etc/subuid"
-        hint "  echo '${USER}:100000:65536' | sudo tee -a /etc/subgid"
+        hint "  echo '${_user}:${_start}:65536' | sudo tee -a /etc/subuid"
+        hint "  echo '${_user}:${_start}:65536' | sudo tee -a /etc/subgid"
       fi
       if [ "${PROBE_UIDMAP:-0}" != "1" ]; then
         hint "Missing — the uidmap helpers:  sudo apt-get install -y uidmap   (RHEL family: sudo dnf install -y shadow-utils)"
       fi
-      error "Missing rootless prerequisites for '${USER}' — an administrator must prepare this host (see above), then re-run."
+      error "Missing rootless prerequisites for '${_user}' — an administrator must prepare this host (see above), then re-run."
       ;;
   esac
 }
@@ -899,13 +917,25 @@ _ensure_subid_ranges() {
 # direct file append on older shadow-utils. Idempotent: an existing range is left
 # untouched. Paths overridable (TB_SUBUID_FILE/TB_SUBGID_FILE) for tests.
 _provision_subid_ranges() {
-  local user="${1:-$USER}"
+  local user="${1:-$(id -un 2>/dev/null || printf '%s' "${USER:-}")}"
   local subuid="${TB_SUBUID_FILE:-/etc/subuid}"
   local subgid="${TB_SUBGID_FILE:-/etc/subgid}"
 
-  # The helpers are needed to USE the range; install them if missing (one touch).
-  if ! has newuidmap || ! has newgidmap; then
+  # The helpers must be present AND privileged (setuid bit OR cap_setuid) to write ID
+  # maps — present-but-unprivileged is as useless as missing. Install if not usable,
+  # then RE-VERIFY and fail HONESTLY rather than printing success and letting rootless
+  # die deep inside dockerd-rootless-setuptool.sh — this restores the guard the removed
+  # install_rootless_docker precondition gave (Bugbot/Asad, client#458).
+  if ! _idmap_helper_ok newuidmap || ! _idmap_helper_ok newgidmap; then
     _install_uidmap_pkg
+    if ! _idmap_helper_ok newuidmap || ! _idmap_helper_ok newgidmap; then
+      # Return non-zero (don't error/exit): the sudo-path caller turns this into a
+      # hard failure via `|| error`, but run_prepare_host wants it best-effort
+      # (`if ! _provision_subid_ranges`) so an unknown-distro uidmap gap warns and
+      # lets the rest of the host-prep finish (Bugbot/Asad + self-review, client#458).
+      warn "The uidmap helpers (newuidmap/newgidmap) are still missing or not privileged (no setuid bit / cap_setuid) after install — rootless Docker can't map IDs. Install the 'uidmap' package (Debian/Ubuntu) or 'shadow'/'shadow-utils' (setuid or filecaps) for this distro."
+      return 1
+    fi
   fi
 
   # Idempotent: a user that already owns a range in both files needs nothing.
@@ -920,8 +950,12 @@ _provision_subid_ranges() {
   end=$(( start + count - 1 ))
 
   # Prefer usermod (keeps both files consistent + validated); fall back to a direct
-  # append when this shadow-utils lacks --add-subuids.
-  if usermod --help 2>&1 | grep -q -- '--add-subuids'; then
+  # append when this shadow-utils lacks --add-subuids. Capture --help output FIRST
+  # (not `usermod --help | grep`): under `set -o pipefail` a non-zero `usermod --help`
+  # exit would falsely fail the match and silently downgrade a capable shadow-utils to
+  # the append path (Asad #458).
+  local _um_help; _um_help="$(usermod --help 2>&1 || true)"
+  if printf '%s' "$_um_help" | grep -q -- '--add-subuids'; then
     sudo usermod --add-subuids "${start}-${end}" --add-subgids "${start}-${end}" "$user"
   else
     printf '%s:%s:%s\n' "$user" "$start" "$count" | sudo tee -a "$subuid" >/dev/null
@@ -1050,8 +1084,13 @@ run_prepare_host() {
     # host where docker-group access isn't wanted still supports a fully rootless
     # install (RFC 0001 #1220). Idempotent + non-overlapping; best-effort — never
     # fail the whole prep over it.
-    _provision_subid_ranges "$target" \
-      || warn "Couldn't provision subuid/subgid ranges for ${target}; add later with:  sudo usermod --add-subuids 100000-165535 --add-subgids 100000-165535 ${target}"
+    if ! _provision_subid_ranges "$target"; then
+      # Non-overlapping start for the manual fallback too — don't hardcode 100000,
+      # which collides on a host that already allocated that block (Bugbot #458).
+      # Honor the TB_SUBUID_FILE/TB_SUBGID_FILE overrides like every other subid path.
+      local _s; _s="$(_next_subid_start "${TB_SUBUID_FILE:-/etc/subuid}" "${TB_SUBGID_FILE:-/etc/subgid}")"
+      warn "Couldn't provision subuid/subgid ranges for ${target}; add later with:  sudo usermod --add-subuids ${_s}-$(( _s + 65535 )) --add-subgids ${_s}-$(( _s + 65535 )) ${target}"
+    fi
   else
     hint "To let a non-admin user install at Tier 0, grant them docker-group access:"
     hint "  set TB_PREPARE_USER=<their-username> when running prepare-host, or run:  sudo usermod -aG docker <their-username>"

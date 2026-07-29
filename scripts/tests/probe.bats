@@ -122,9 +122,11 @@ setup() {
 }
 
 # ── _probe_subid_ranges / _probe_uidmap_helpers (rootless prereqs, #1220) ─────
+# _probe_subid_ranges keys off `id -un` (the user the rootless daemon runs as), so
+# the mocks distinguish `id -un` (name) from `id -u` (numeric uid) (#458).
 
 @test "subid: range present in BOTH files (by name) => present" {
-  USER=testuser; id() { echo 1000; }
+  USER=testuser; id() { [ "$1" = "-un" ] && echo testuser || echo 1000; }
   TB_SUBUID_FILE="$(mktemp)"; TB_SUBGID_FILE="$(mktemp)"
   printf 'testuser:100000:65536\n' >"$TB_SUBUID_FILE"
   printf 'testuser:100000:65536\n' >"$TB_SUBGID_FILE"
@@ -132,7 +134,7 @@ setup() {
 }
 
 @test "subid: range keyed by numeric uid => present" {
-  USER=testuser; id() { echo 1000; }
+  USER=testuser; id() { [ "$1" = "-un" ] && echo testuser || echo 1000; }
   TB_SUBUID_FILE="$(mktemp)"; TB_SUBGID_FILE="$(mktemp)"
   printf '1000:100000:65536\n' >"$TB_SUBUID_FILE"
   printf '1000:100000:65536\n' >"$TB_SUBGID_FILE"
@@ -140,7 +142,7 @@ setup() {
 }
 
 @test "subid: present in subuid but MISSING from subgid => not present (both required)" {
-  USER=testuser; id() { echo 1000; }
+  USER=testuser; id() { [ "$1" = "-un" ] && echo testuser || echo 1000; }
   TB_SUBUID_FILE="$(mktemp)"; TB_SUBGID_FILE="$(mktemp)"
   printf 'testuser:100000:65536\n' >"$TB_SUBUID_FILE"
   : >"$TB_SUBGID_FILE"
@@ -149,14 +151,25 @@ setup() {
 }
 
 @test "subid: both files empty => not present" {
-  USER=testuser; id() { echo 1000; }
+  USER=testuser; id() { [ "$1" = "-un" ] && echo testuser || echo 1000; }
   TB_SUBUID_FILE="$(mktemp)"; TB_SUBGID_FILE="$(mktemp)"
   run _probe_subid_ranges
   [ "$status" -ne 0 ]
 }
 
+@test "subid: keyed off id -un not \$USER — su/cron divergence can't false-positive (#458)" {
+  # daemon user (id -un) is 'bob'; login \$USER is 'alice'. A range for alice must
+  # NOT read as present for bob, or the gate would skip and rootless die deep.
+  USER=alice; id() { [ "$1" = "-un" ] && echo bob || echo 1000; }
+  TB_SUBUID_FILE="$(mktemp)"; TB_SUBGID_FILE="$(mktemp)"
+  printf 'alice:100000:65536\n' >"$TB_SUBUID_FILE"
+  printf 'alice:100000:65536\n' >"$TB_SUBGID_FILE"
+  run _probe_subid_ranges
+  [ "$status" -ne 0 ]
+}
+
 @test "subid: a name that is a substring of another entry does NOT false-positive" {
-  USER=test; id() { echo 4242; }        # entries below are 'testuser', not 'test'
+  USER=test; id() { [ "$1" = "-un" ] && echo test || echo 4242; }   # entries are 'testuser'
   TB_SUBUID_FILE="$(mktemp)"; TB_SUBGID_FILE="$(mktemp)"
   printf 'testuser:100000:65536\n' >"$TB_SUBUID_FILE"
   printf 'testuser:100000:65536\n' >"$TB_SUBGID_FILE"
@@ -172,10 +185,20 @@ setup() {
   _probe_uidmap_helpers
 }
 
-@test "uidmap: present but NOT setuid => not satisfied" {
+@test "uidmap: cap_setuid filecaps (no setuid bit) => satisfied (Arch shadow, #458)" {
+  bin="$(mktemp -d)"
+  : >"$bin/newuidmap"; : >"$bin/newgidmap"
+  chmod +x "$bin/newuidmap" "$bin/newgidmap"       # NO setuid bit
+  getcap() { printf '%s cap_setuid=ep\n' "$1"; }   # pretend file capabilities present
+  PATH="$bin"
+  _probe_uidmap_helpers
+}
+
+@test "uidmap: present with neither setuid bit nor cap_setuid => not satisfied" {
   bin="$(mktemp -d)"
   : >"$bin/newuidmap"; : >"$bin/newgidmap"
   chmod +x "$bin/newuidmap" "$bin/newgidmap"
+  getcap() { printf '%s =\n' "$1"; }               # getcap present, no caps
   PATH="$bin"
   run _probe_uidmap_helpers
   [ "$status" -ne 0 ]
@@ -190,7 +213,7 @@ setup() {
 }
 
 @test "subid probes: side-effect-free — fixtures unchanged after run_host_probes" {
-  OS=Linux; USER=testuser; id() { echo 1000; }
+  OS=Linux; USER=testuser; id() { [ "$1" = "-un" ] && echo testuser || echo 1000; }
   TB_SUBUID_FILE="$(mktemp)"; TB_SUBGID_FILE="$(mktemp)"
   printf 'testuser:100000:65536\n' >"$TB_SUBUID_FILE"
   printf 'testuser:100000:65536\n' >"$TB_SUBGID_FILE"

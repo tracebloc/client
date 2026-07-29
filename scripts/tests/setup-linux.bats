@@ -948,26 +948,32 @@ _stub_install_steps() {
   ! mock_calls | grep -q sudo
 }
 
-@test "_ensure_subid_ranges: missing + unprivileged => hand off to prepare-host, fail-fast, no sudo" {
+@test "_ensure_subid_ranges: missing + unprivileged => hand off to prepare-host (naming the user), fail-fast, no sudo" {
   MOCK_CALLS="$(mktemp)"
   PROBE_SUBID=0; PROBE_UIDMAP=1; PROBE_PRIVILEGE=no_sudo
+  id() { [ "$1" = "-un" ] && echo researcher || echo 1000; }
+  TB_SUBUID_FILE="$(mktemp)"; TB_SUBGID_FILE="$(mktemp)"   # empty -> next start 100000
   _provision_subid_ranges() { record "_provision_subid_ranges $*"; }
   run _ensure_subid_ranges
   [ "$status" -ne 0 ]                                  # honest fail-fast
   [[ "$output" == *prepare-host* ]]
+  [[ "$output" == *"TB_PREPARE_USER=researcher"* ]]    # command names the researcher (#458)
   [[ "$output" == *"/etc/subuid"* ]]                   # the two literal remedy lines
   [[ "$output" == *"/etc/subgid"* ]]
+  [[ "$output" == *"researcher:100000:65536"* ]]       # computed (non-hardcoded) start for this host
   ! mock_calls | grep -q _provision_subid_ranges       # never self-provisions unprivileged
   ! mock_calls | grep -q sudo
 }
 
-@test "_ensure_subid_ranges: missing + sudo available => exactly one announced provision" {
+@test "_ensure_subid_ranges: missing + sudo available => exactly one announced provision (for id -un)" {
   MOCK_CALLS="$(mktemp)"
   PROBE_SUBID=0; PROBE_UIDMAP=1; PROBE_PRIVILEGE=sudo_nopw
+  id() { [ "$1" = "-un" ] && echo researcher || echo 1000; }
   _provision_subid_ranges() { record "_provision_subid_ranges $*"; }
   run _ensure_subid_ranges
   [ "$status" -eq 0 ]
   [ "$(mock_calls | grep -c _provision_subid_ranges)" -eq 1 ]
+  mock_calls | grep -q "_provision_subid_ranges researcher"   # id -un, not $USER
   [[ "$output" == *one-time* ]]                         # announced (A2 honest messaging)
 }
 
@@ -980,9 +986,11 @@ _stub_install_steps() {
 }
 
 # ── _provision_subid_ranges: shared remediation body ─────────────────────────
+# _idmap_helper_ok (real, via command -v) is stubbed here to control the usable /
+# not-usable state; its own setuid/filecaps logic is unit-tested in probe.bats.
 @test "_provision_subid_ranges: allocates a range and appends it (file-append path)" {
   MOCK_CALLS="$(mktemp)"
-  PRESENT_CMDS="newuidmap newgidmap"                   # helpers present -> no pkg install
+  _idmap_helper_ok() { return 0; }                     # helpers usable -> no install
   sudo()    { "$@"; }                                  # pass-through so tee writes the fixture
   usermod() { return 0; }                              # `usermod --help` has no --add-subuids -> append path
   id()      { echo 1000; }
@@ -994,7 +1002,7 @@ _stub_install_steps() {
 
 @test "_provision_subid_ranges: idempotent — an existing range is left untouched" {
   MOCK_CALLS="$(mktemp)"
-  PRESENT_CMDS="newuidmap newgidmap"
+  _idmap_helper_ok() { return 0; }
   sudo()    { "$@"; }
   usermod() { return 0; }
   id()      { echo 1000; }
@@ -1008,7 +1016,7 @@ _stub_install_steps() {
 
 @test "_provision_subid_ranges: allocates a NON-overlapping block past an existing range" {
   MOCK_CALLS="$(mktemp)"
-  PRESENT_CMDS="newuidmap newgidmap"
+  _idmap_helper_ok() { return 0; }
   sudo()    { "$@"; }
   usermod() { return 0; }
   id()      { echo 1000; }
@@ -1019,14 +1027,46 @@ _stub_install_steps() {
   grep -q '^testuser:165536:65536$' "$TB_SUBUID_FILE"       # next free start, no overlap
 }
 
-@test "_provision_subid_ranges: installs the uidmap helpers when absent" {
+@test "_provision_subid_ranges: installs uidmap helpers when not usable, then proceeds" {
   MOCK_CALLS="$(mktemp)"
-  PRESENT_CMDS="apt-get"                               # newuidmap/newgidmap absent
+  ok="$BATS_TEST_TMPDIR/uidmap_ok"
+  _idmap_helper_ok()    { [ -e "$ok" ]; }              # not usable until installed
+  _install_uidmap_pkg() { record "install_uidmap"; : >"$ok"; }
+  sudo()    { "$@"; }
   usermod() { return 0; }
   id()      { echo 1000; }
   TB_SUBUID_FILE="$(mktemp)"; TB_SUBGID_FILE="$(mktemp)"
   _provision_subid_ranges testuser
-  mock_calls | grep -q "apt-get install -y uidmap"
+  mock_calls | grep -q install_uidmap
+  grep -q '^testuser:100000:65536$' "$TB_SUBUID_FILE"  # proceeded after a successful install
+}
+
+@test "_provision_subid_ranges: helpers still not usable after install => returns non-zero (best-effort), no half-provision (#458)" {
+  MOCK_CALLS="$(mktemp)"
+  _idmap_helper_ok()    { return 1; }                  # never usable (unknown distro / not setuid+no caps)
+  _install_uidmap_pkg() { record "install_uidmap"; }
+  sudo()    { record "sudo $*"; return 0; }
+  id()      { echo 1000; }
+  TB_SUBUID_FILE="$(mktemp)"; TB_SUBGID_FILE="$(mktemp)"
+  run _provision_subid_ranges testuser
+  [ "$status" -ne 0 ]                                  # returns non-zero (NOT exit) so callers decide
+  [[ "$output" == *uidmap* ]]
+  ! mock_calls | grep -q "tee -a"                      # never wrote a range on a broken host
+}
+
+@test "_provision_subid_ranges: usermod --help nonzero exit still takes the usermod path (pipefail-safe, #458)" {
+  MOCK_CALLS="$(mktemp)"
+  set -o pipefail
+  _idmap_helper_ok() { return 0; }
+  sudo() { record "sudo $*"; return 0; }
+  # --help prints the flag but EXITS NON-ZERO (some shadow-utils builds do); the fix
+  # captures output before grepping, so --add-subuids is still detected under pipefail.
+  usermod() { if [ "$1" = "--help" ]; then printf -- '  --add-subuids\n'; return 2; fi; return 0; }
+  id() { echo 1000; }
+  TB_SUBUID_FILE="$(mktemp)"; TB_SUBGID_FILE="$(mktemp)"
+  _provision_subid_ranges testuser
+  mock_calls | grep -q "usermod --add-subuids"         # usermod path, not the append fallback
+  ! mock_calls | grep -q "tee -a"
 }
 
 @test "_install_uidmap_pkg: apt-get distro installs the 'uidmap' package" {
@@ -1177,6 +1217,23 @@ _stub_install_steps() {
   ! mock_calls | grep -q "usermod"      # nobody to add
   # No grant happened => must NOT falsely promise a no-admin install (#377).
   ! printf '%s\n' "$output" | grep -qi "can now install tracebloc with no administrator rights"
+}
+
+@test "run_prepare_host: subid provisioning failure is best-effort — warns, still prepares the host (#458)" {
+  MOCK_CALLS="$(mktemp)"
+  OS=Linux; TB_PREPARE_USER=researcher
+  host_audit()          { :; }
+  preflight_sudo()      { :; }
+  setup_pm()            { :; }
+  apt_wait_for_lock()   { :; }
+  install_docker_engine(){ record install_docker_engine; }
+  install_system_deps() { :; }
+  sudo()                { record "sudo $*"; return 0; }
+  _provision_subid_ranges() { return 1; }              # can't provision (e.g. unknown distro / helpers unfixable)
+  run run_prepare_host
+  [ "$status" -eq 0 ]                                  # best-effort: the whole prep must NOT abort (#458)
+  [[ "$output" == *"Couldn't provision subuid/subgid"* ]]   # honest warning, not a hard exit
+  mock_calls | grep -q install_docker_engine           # host still prepared
 }
 
 @test "run_prepare_host: usermod fails => no false no-admin promise, still exits 0 (#377)" {

@@ -125,9 +125,15 @@ _probe_privilege() {
 # probe is testable against fixtures. _subid_has_entry lives in common.sh (shared
 # with setup-linux.sh's remediation).
 _probe_subid_ranges() {
-  local uid; uid="$(id -u 2>/dev/null)"
-  _subid_has_entry "${TB_SUBUID_FILE:-/etc/subuid}" "${USER:-}" "$uid" \
-    && _subid_has_entry "${TB_SUBGID_FILE:-/etc/subgid}" "${USER:-}" "$uid"
+  # Key off the user the rootless daemon will actually run as — `id -un`, NOT $USER,
+  # which diverges under su/cron. Matching install_rootless_docker / the gate keeps
+  # detection and provisioning on the same user, so a re-run can't mis-read a
+  # wrong-user entry as satisfied and skip the gate (Asad/Bugbot, client#458).
+  local name uid
+  name="$(id -un 2>/dev/null || printf '%s' "${USER:-}")"
+  uid="$(id -u 2>/dev/null)"
+  _subid_has_entry "${TB_SUBUID_FILE:-/etc/subuid}" "$name" "$uid" \
+    && _subid_has_entry "${TB_SUBGID_FILE:-/etc/subgid}" "$name" "$uid"
 }
 
 # _probe_uidmap_helpers — are BOTH newuidmap and newgidmap present AND setuid-root?
@@ -135,12 +141,10 @@ _probe_subid_ranges() {
 # missing one, so a plain `has` is not enough. `command -v` + a setuid (`-u`) test on
 # the resolved path, both side-effect-free.
 _probe_uidmap_helpers() {
-  local h path
-  for h in newuidmap newgidmap; do
-    path="$(command -v "$h" 2>/dev/null)" || return 1
-    [[ -n "$path" && -u "$path" ]] || return 1
-  done
-  return 0
+  # Present AND privileged (setuid bit OR cap_setuid filecaps — see _idmap_helper_ok
+  # in common.sh). A setuid-only test wrongly rejects Arch's filecaps `shadow`
+  # (Bugbot, client#458).
+  _idmap_helper_ok newuidmap && _idmap_helper_ok newgidmap
 }
 
 # ── Classification ────────────────────────────────────────────────────────────

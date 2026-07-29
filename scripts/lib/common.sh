@@ -224,6 +224,24 @@ _next_subid_start() {
   echo "$max"
 }
 
+# _idmap_helper_ok NAME — is a subid-mapping helper (newuidmap/newgidmap) both
+# present AND privileged enough to write ID maps: the setuid bit, OR a cap_setuid
+# file capability. Arch's `shadow` ships these with filecaps rather than setuid
+# (Bugbot, client#458), so a setuid-only test wrongly rejects a working helper and
+# false-hands-off. When getcap is unavailable we can't inspect caps, so fall back to
+# the setuid check alone. Shared by probe.sh (detection) and setup-linux.sh (the
+# post-install re-verify).
+_idmap_helper_ok() {
+  local p; p="$(command -v "$1" 2>/dev/null)" || return 1
+  [[ -n "$p" ]] || return 1
+  [[ -u "$p" ]] && return 0
+  if has getcap; then
+    local caps; caps="$(getcap "$p" 2>/dev/null)"
+    [[ "$caps" == *cap_setuid* ]] && return 0
+  fi
+  return 1
+}
+
 # Sanitize a minutes-valued env override to a base-10 integer, else <default>.
 # The 10# base prefix matters: bash arithmetic reads a leading zero as octal,
 # so 08/09 would ABORT $(( … )) under set -e (mid-create, leaving a partial
