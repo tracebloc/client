@@ -45,13 +45,17 @@ jobs:
         run: |
           BASE=$(printf '%s' "${TAG#v}" | grep -oE '^[0-9]+\.[0-9]+\.[0-9]+' || true)
           CHART=$(grep -E '^version:' client/Chart.yaml | head -1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+')
-          if [ -z "$BASE" ] || [ "$BASE" != "$CHART" ]; then
-            echo "::error::release tag '$TAG' (base '${BASE:-none}') does not match client/Chart.yaml version ($CHART) - bump the chart version on develop first."
-            exit 1
-          fi
+          # Demote FIRST, hard-fail second: a release that is BOTH mis-marked
+          # stable and version-mismatched must still lose 'latest' before the
+          # exit 1 below strands it (Bugbot: demotion-after-fail left a stable
+          # husk as 'latest' with a 404ing bootstrap behind it).
           if ! printf '%s' "$TAG" | grep -qE '^v[0-9]+\.[0-9]+\.[0-9]+$' && [ "$IS_PRERELEASE" != "true" ]; then
             echo "::warning::non-final tag '$TAG' was published as a STABLE release - demoting to prerelease so 'latest' (the installer bootstrap) snaps back to the previous stable."
             gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --prerelease
+          fi
+          if [ -z "$BASE" ] || [ "$BASE" != "$CHART" ]; then
+            echo "::error::release tag '$TAG' (base '${BASE:-none}') does not match client/Chart.yaml version ($CHART) - bump the chart version on develop first."
+            exit 1
           fi
 
   release:
