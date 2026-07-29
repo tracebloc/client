@@ -111,6 +111,53 @@ _write_k3d_proxy_config() {
   echo "$cfg"
 }
 
+# --- Corporate MITM CA trust for in-node containerd pulls (#424) --------------
+# Proxy REACHABILITY reaches the nodes (above), but on a TLS-inspecting network
+# the nodes still don't TRUST the corporate CA, so every in-node containerd pull
+# (rancher/k3s, ghcr.io/k3d-io, tracebloc images) fails x509 — then masked into a
+# root-cause-free "an image couldn't be pulled". When the operator supplies the
+# CA bundle we mount it into every node and point containerd at it per-registry.
+
+# The registries the cluster pulls from; behind a break-and-inspect proxy each
+# needs the corporate CA to validate the intercepted cert.
+TB_CA_REGISTRIES=(docker.io registry-1.docker.io auth.docker.io ghcr.io)
+
+# Echo the operator's CA bundle path (absolute) when TRACEBLOC_CA_BUNDLE or
+# CURL_CA_BUNDLE is set and readable. If a var is set but the file is unreadable,
+# echo the offending var NAME and return 2 — the caller turns that into a hard
+# error (a silent skip would drop them straight back into the x509 failure they
+# set the var to fix). Empty stdout + return 0 when no CA var is set.
+_resolve_ca_bundle() {
+  local var val
+  for var in TRACEBLOC_CA_BUNDLE CURL_CA_BUNDLE; do
+    val="${!var:-}"; [[ -z "$val" ]] && continue
+    # Require a readable regular FILE, not just -r: a directory of PEMs is readable
+    # but would bind-mount over the single-file node path and containerd can't read
+    # it as a ca_file — the silent "looks applied but still x509" case. Mirrors the
+    # PS Resolve-CaBundle -PathType Leaf check (reviewer).
+    if [[ ! -r "$val" || ! -f "$val" ]]; then echo "$var"; return 2; fi
+    case "$val" in /*) : ;; *) val="$(cd "$(dirname "$val")" 2>/dev/null && pwd)/$(basename "$val")" ;; esac
+    echo "$val"; return 0
+  done
+  return 0
+}
+
+# Write a k3d registries.yaml pointing containerd at the mounted CA for every
+# registry in TB_CA_REGISTRIES, and echo its path. $1 = the CA path INSIDE the
+# node (where the -v mount lands). Caller removes the temp dir.
+_write_k3d_registries_config() {
+  local node_ca="$1" host td cfg
+  td="$(mktemp -d "${TMPDIR:-/tmp}/tracebloc-k3d-reg-XXXXXX")" || return 1
+  cfg="$td/registries.yaml"
+  {
+    echo "configs:"
+    for host in "${TB_CA_REGISTRIES[@]}"; do
+      printf '  "%s":\n    tls:\n      ca_file: "%s"\n' "$host" "$node_ca"
+    done
+  } > "$cfg"
+  echo "$cfg"
+}
+
 # When a proxy is configured, ensure THIS installer's own kubectl/helm/curl
 # bypass it for the cluster API (127.0.0.1) and the in-cluster ranges. Go
 # already auto-bypasses loopback, but exporting NO_PROXY also covers helm/curl.
@@ -472,6 +519,7 @@ _handle_existing_cluster() {
   fi
 
   _check_existing_cluster_proxy
+  _check_existing_cluster_ca
   _check_existing_cluster_bind
   _check_existing_cluster_dataset_mount
   _check_existing_cluster_storage_mode
@@ -505,6 +553,30 @@ _check_existing_cluster_proxy() {
     warn "Host has proxy env set, but the existing '$CLUSTER_NAME' cluster is missing: ${missing[*]}."
     hint "k3d bakes proxy settings into containers at create time — they can't be added to a running cluster."
     hint "If image pulls fail or in-cluster traffic misroutes, recreate the cluster:"
+    hint "  k3d cluster delete $CLUSTER_NAME  &&  re-run this installer."
+    echo ""
+  fi
+}
+
+# CA trust, like proxy, is baked into the nodes at create time (the -v mount +
+# --registry-config). If the operator sets a CA bundle but the cluster already
+# exists WITHOUT it, a re-run reuses the cluster and the x509 pulls persist — so
+# the "set the CA and re-run" remedy silently does nothing. Warn and point at
+# recreate (Bugbot #424). The path mirrors _create_new_cluster's mount destination.
+_check_existing_cluster_ca() {
+  [[ -n "${TRACEBLOC_CA_BUNDLE:-}" || -n "${CURL_CA_BUNDLE:-}" ]] || return 0
+  local server_container="k3d-${CLUSTER_NAME}-server-0"
+  local mounts
+  mounts=$(docker inspect "$server_container" --format '{{range .Mounts}}{{println .Destination}}{{end}}' 2>/dev/null) || return 0
+  [[ -z "$mounts" ]] && return 0
+  # Exact whole-line match (mounts is newline-separated destinations): a longer
+  # path that merely embeds the CA path as a substring is NOT our mount. Mirrors
+  # the PS anchored `(?m)^…\s*$` check (Bugbot #424).
+  if ! grep -qxF '/etc/ssl/certs/tracebloc-mitm-ca.crt' <<<"$mounts"; then
+    echo ""
+    warn "A CA bundle is set (TRACEBLOC_CA_BUNDLE/CURL_CA_BUNDLE), but the existing '$CLUSTER_NAME' cluster was created without it."
+    hint "k3d bakes CA trust into the nodes at create time — it can't be added to a running cluster."
+    hint "If in-cluster image pulls fail x509, recreate the cluster so the CA is applied:"
     hint "  k3d cluster delete $CLUSTER_NAME  &&  re-run this installer."
     echo ""
   fi
@@ -673,6 +745,29 @@ _create_new_cluster() {
     log "Propagating proxy settings to k3d nodes (authenticated proxies supported; NO_PROXY auto-augmented)."
   fi
 
+  # In-node CA trust for TLS-inspecting networks (#424): mount the operator's CA
+  # bundle into every node and point containerd at it per-registry, so in-node
+  # image pulls validate the intercepted certs instead of failing x509.
+  local ca_bundle reg_cfg="" ca_rc=0
+  local node_ca="/etc/ssl/certs/tracebloc-mitm-ca.crt"
+  # `|| ca_rc=$?` (not a bare `;`): under `set -euo pipefail` a rc-2 from the
+  # command substitution would trip errexit and exit before ca_rc/error below,
+  # giving a bare exit instead of the "can't be read" guidance (Bugbot).
+  ca_bundle="$(_resolve_ca_bundle)" || ca_rc=$?
+  if [[ $ca_rc -eq 2 ]]; then
+    error "$ca_bundle is set but its file can't be read — point it at your corporate CA bundle (PEM) and re-run."
+  fi
+  if [[ -n "$ca_bundle" ]]; then
+    K3D_ARGS+=(-v "${ca_bundle}:${node_ca}@all")
+    # Hard-fail if we can't write the registries.yaml: mounting the CA without the
+    # --registry-config would leave containerd untrusting while we log success —
+    # the operator would think the fix applied and still hit x509 (Bugbot).
+    reg_cfg="$(_write_k3d_registries_config "$node_ca")" \
+      || error "Couldn't write the k3d CA-trust registries config (temp dir/disk?). Re-run; the CA bundle was supplied so we won't proceed without wiring it in."
+    K3D_ARGS+=(--registry-config "$reg_cfg")
+    log "Trusting your network's TLS-inspection CA in the k3d nodes (from ${ca_bundle})."
+  fi
+
   local create_out create_rc
   create_out="$(mktemp)"
   # Wrap the create in a spinner. k3d pulls the runtime image + boots the node
@@ -688,6 +783,7 @@ _create_new_cluster() {
   # it 5 minutes later and the error path below dumps the output.
   spin "$!" "Creating your secure environment…" "$(( (_create_timeout_min + 5) * 60 ))" || create_rc=$?
   [[ -n "$proxy_cfg" ]] && rm -rf "${proxy_cfg%/*}"
+  [[ -n "$reg_cfg" ]] && rm -rf "${reg_cfg%/*}"
   if [[ $create_rc -ne 0 ]]; then
     if grep -qi "already exists\|a cluster with that name already exists" "$create_out" 2>/dev/null; then
       log "Cluster '$CLUSTER_NAME' already exists (detected from k3d message). Using existing cluster."
