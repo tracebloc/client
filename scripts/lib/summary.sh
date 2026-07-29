@@ -71,9 +71,14 @@ _diagnose_not_ready() {
     # On a TLS-inspecting network the pull fails x509 because the nodes don't trust
     # the corporate CA (#424). Distinguish it from a generic pull error so the
     # remedy can name the CA + the env var, not a vague "retry".
-    local events
+    # Scope the x509 test to the image-pull failure event itself, not any stray
+    # x509 event elsewhere in the ns — a stale/unrelated x509 event must not steer
+    # the user into a delete+recreate for the wrong reason (reviewer). kubectl
+    # prints one event per line, so an x509 on a pull-failure line is that pull.
+    local events pull_fail
     events="$(kubectl get events -n "$ns" --request-timeout=5s 2>/dev/null || true)"
-    if printf '%s' "$events" | grep -qiE 'x509|certificate signed by unknown authority|tls: failed to verify'; then
+    pull_fail="$(printf '%s\n' "$events" | grep -iE 'failed to pull|ErrImagePull' || true)"
+    if printf '%s' "$pull_fail" | grep -qiE 'x509|certificate signed by unknown authority|tls: failed to verify'; then
       printf 'image_pull_ca'; return
     fi
     printf 'image_pull'; return

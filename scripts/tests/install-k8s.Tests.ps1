@@ -1530,6 +1530,19 @@ Describe "In-node CA trust for TLS-inspecting networks (#424)" {
       }
       Get-NotReadyState -Namespace "ns" | Should -Be "image_pull"
     }
+    It "x509 on an unrelated event (not the pull) stays image_pull (Bugbot #424)" {
+      Mock kubectl {
+        if ($args -match 'logs')   { return "booting" }
+        if ($args -match 'events') {
+          return @(
+            'Warning  Failed       pod/x   Back-off pulling image "ghcr.io/x"',
+            'Warning  FailedMount  pod/y   MountVolume failed: x509: certificate signed by unknown authority'
+          ) -join "`n"
+        }
+        return "x 0/1 ImagePullBackOff"
+      }
+      Get-NotReadyState -Namespace "ns" | Should -Be "image_pull"
+    }
     It "bounds the events lookup with --request-timeout (matches bash; Bugbot #424)" {
       (Get-Content "$PSScriptRoot/../install-k8s.ps1" -Raw) |
         Should -Match 'kubectl get events -n \$Namespace --request-timeout=5s'

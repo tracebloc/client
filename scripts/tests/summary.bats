@@ -221,6 +221,23 @@ setup() {
   [ "$output" = "image_pull" ]
 }
 
+@test "_diagnose_not_ready: x509 on an unrelated event (not the pull) stays image_pull (Bugbot #424)" {
+  # The pull failure has no x509; a separate, unrelated event carries x509.
+  # Must NOT be classified image_pull_ca — that would send the user into a
+  # needless delete+recreate for the wrong reason.
+  kubectl() {
+    case "$*" in
+      *logs*)   echo "booting" ;;
+      *events*) printf '%s\n' \
+                  'Warning  Failed       pod/x   Back-off pulling image "ghcr.io/x"' \
+                  'Warning  FailedMount  pod/y   MountVolume failed: x509: certificate signed by unknown authority' ;;
+      *)        echo "x 0/1 ImagePullBackOff" ;;
+    esac
+  }
+  run _diagnose_not_ready testns
+  [ "$output" = "image_pull" ]
+}
+
 @test "print_summary image_pull_ca: names the CA problem + env var, not a generic pull error (#424)" {
   CLIENT_STATE=image_pull_ca
   TB_NAMESPACE=testns

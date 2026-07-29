@@ -2483,8 +2483,13 @@ function Get-NotReadyState {
     # On a TLS-inspecting network the pull fails x509 because the nodes don't trust
     # the corporate CA (#424). Distinguish it so the remedy can name the CA + env
     # var, not a vague retry. Mirrors scripts/lib/summary.sh::_diagnose_not_ready.
+    # Scope the x509 test to the image-pull failure event itself, not any stray
+    # x509 event elsewhere in the ns -- a stale/unrelated x509 event must not steer
+    # the user into a delete+recreate for the wrong reason (reviewer). Mirrors the
+    # bash _diagnose_not_ready pull_fail filter.
     $events = (& kubectl get events -n $Namespace --request-timeout=5s 2>$null | Out-String)
-    if ($events -match '(?i)x509|certificate signed by unknown authority|tls: failed to verify') { return "image_pull_ca" }
+    $pullFail = (($events -split "`n") | Where-Object { $_ -match '(?i)failed to pull|ErrImagePull' }) -join "`n"
+    if ($pullFail -match '(?i)x509|certificate signed by unknown authority|tls: failed to verify') { return "image_pull_ca" }
     return "image_pull"
   }
   if ($pods -match '(?i)CrashLoopBackOff') { return "crash" }
