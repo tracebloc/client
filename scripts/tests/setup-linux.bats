@@ -862,10 +862,15 @@ _stub_install_steps() {
   MOCK_CALLS="$(mktemp)"
   INSTALL_TIER=1; TB_TIER1_ROOTLESS=1
   HOME="$BATS_TEST_TMPDIR"                 # _install_userspace_tools runs for real
+  # Stub the subid gate and daemon setup — this test asserts install_linux ROUTES to
+  # the rootless path; the gate's own behavior is covered by the _ensure_subid_ranges
+  # tests below.
+  _ensure_subid_ranges()    { record "_ensure_subid_ranges"; }
   install_rootless_docker() { record "install_rootless_docker"; }
   _stub_install_steps
   run install_linux
   [ "$status" -eq 0 ]
+  mock_calls | grep -q _ensure_subid_ranges            # gate runs before daemon setup
   mock_calls | grep -q install_rootless_docker
   mock_calls | grep -q install_kubectl                 # _install_userspace_tools ran
   ! mock_calls | grep -q preflight_sudo
