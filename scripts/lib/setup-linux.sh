@@ -769,6 +769,98 @@ _tier0_gpu_flags() {
   fi
 }
 
+# install_rootless_docker — RFC 0001 #1219 (Tier 1). Stand up a per-user, ROOTLESS
+# Docker daemon with NO blanket sudo, so a researcher on a modern kernel (cgroup v2
+# + unprivileged userns) with no runtime and no admin can still install tracebloc.
+# This slice covers the daemon core + pointing the run at the rootless socket.
+# Sibling slices build on it: subuid/subgid range creation → prepare-host (slice 2,
+# #1220), k3s cgroup delegation + explicit k3d-on-rootless wiring (slice 3, #1221),
+# and the no-systemd/HPC fallback + fuse-overlayfs perf (slice 4, #1222). The whole
+# path is gated behind TB_TIER1_ROOTLESS=1 at the call site until the spike's §5
+# host-validation matrix runs (#1176 / #1177).
+install_rootless_docker() {
+  # Resolve the current user robustly: $USER can be empty in headless / su / cron
+  # contexts (Saqlain review, #452), and the linger call + success line below need a
+  # real name. `id -un` is authoritative; fall back to $USER only if it somehow fails.
+  local _user; _user="$(id -un 2>/dev/null || printf '%s' "${USER:-}")"
+
+  # Precondition (minimal this slice): the setuid newuidmap/newgidmap helpers from
+  # the `uidmap` package must already be present. We deliberately do NOT
+  # blanket-`sudo apt-get install uidmap` — that would reintroduce the very
+  # privilege escalation Tier 1 exists to remove. When they're missing there are two
+  # honest admin remedies: install the `uidmap` package (rootless then works), or
+  # run prepare-host to set up Docker so the researcher installs at Tier 0 instead —
+  # no rootless needed. prepare-host on its own does NOT install uidmap; #1220 folds
+  # this into the shared subuid/subgid gate and teaches prepare-host to install it.
+  if ! has newuidmap || ! has newgidmap; then
+    warn "Rootless Docker needs the 'uidmap' helpers (newuidmap/newgidmap), which aren't installed here."
+    hint "Ask an administrator to install the package once (a single named step, not blanket sudo):"
+    hint "  sudo apt-get install -y uidmap        # Debian/Ubuntu   (RHEL family: sudo dnf install -y shadow-utils)"
+    hint "…or run prepare-host to set up Docker for you, then install at Tier 0 (no rootless needed):"
+    hint "  curl -fsSL https://tracebloc.io/i.sh | bash -s -- prepare-host   (or: tracebloc prepare-host <your-username>)"
+    error "Missing uidmap helpers — an administrator must install the 'uidmap' package (or run prepare-host), then re-run."
+  fi
+
+  # Install the rootless daemon as THIS user, no sudo. Prefer the setuptool shipped
+  # by docker-ce-rootless-extras when it's already present; otherwise fetch Docker's
+  # official rootless installer (same retry + mktemp pattern as install_docker_engine's
+  # get.docker.com path), run as the current user — never under sudo.
+  if has dockerd-rootless-setuptool.sh; then
+    spin_cmd "Installing rootless Docker…" dockerd-rootless-setuptool.sh install
+  else
+    local rootless_script
+    rootless_script="$(mktemp)"
+    retry 3 5 curl_secure -fsSL https://get.docker.com/rootless -o "$rootless_script"
+    # No chmod +x — we run it via `sh "$rootless_script"`, which ignores the exec bit (Asad review, #452).
+    spin_cmd "Installing rootless Docker…" sh "$rootless_script"
+    rm -f "$rootless_script"
+  fi
+
+  # The rootless installer drops the Docker CLI + daemon binaries in ~/bin (its
+  # default target); prepend it so THIS run's `docker info` verify and later k3d /
+  # docker calls resolve them. Without it the get.docker.com/rootless fallback
+  # (taken exactly when dockerd-rootless-setuptool.sh is absent) installs docker
+  # off-PATH and every later call fails as if the daemon never came up (Bugbot).
+  # Idempotent, and a no-op on the setuptool path where docker is already on PATH.
+  case ":$PATH:" in *":$HOME/bin:"*) ;; *) export PATH="$HOME/bin:$PATH" ;; esac
+
+  # TODO(#1221): configure a corporate-proxy drop-in for the ROOTLESS daemon before
+  # starting it — user-scoped ~/.config/systemd/user/docker.service.d/http-proxy.conf
+  # + `systemctl --user daemon-reload/restart`, NO sudo. The system path's
+  # _configure_docker_proxy (#244) is sudo/system-scoped and never runs on the
+  # Tier-1 early-return, so on a proxy-only host k3d pulls of rancher/k3s time out
+  # even though the daemon verified. Deferred to the k3d-on-rootless slice (#1221),
+  # which owns the pulls this enables and can test them together (Bugbot on #452).
+
+  # Start the user daemon and make it survive logout / return after reboot without
+  # an active login session — both user-scoped, no root. Neither is fatal: the
+  # bounded `docker info` verify below is the real gate, so a systemctl hiccup
+  # falls through to actionable guidance instead of a bare set -e abort (mirrors
+  # install_docker_engine's start-then-verify). Linger is optional and can fail on
+  # polkit-locked hosts even when the daemon is up, so it only warns (Bugbot).
+  systemctl --user enable --now docker || true
+  loginctl enable-linger "$_user" \
+    || warn "Couldn't enable linger (optional) — the rootless daemon may not survive logout. Enable it later with:  loginctl enable-linger ${_user}"
+
+  # Point every later docker/k3d call in this run at the rootless socket. docker and
+  # k3d both read DOCKER_HOST from the environment, so exporting it is sufficient
+  # here; explicit create_cluster wiring is slice 3 (#1221). Guard XDG_RUNTIME_DIR,
+  # which is unset on some non-login / systemd-less sessions → fall back to the
+  # canonical /run/user/<uid> path rather than emitting a bare unix://docker.sock.
+  export DOCKER_HOST="unix://${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/docker.sock"
+
+  # Confirm the rootless daemon actually answers on that socket before handing off
+  # to the tools / cluster. Bound it (installer rule) so a wedged user daemon can't
+  # hang a headless install; on failure surface the daemon's own (bounded) error and
+  # stop — no retry loop (a rootless bring-up failure is a prerequisite problem, not
+  # a race).
+  if ! _bounded 15 docker info >/dev/null 2>&1; then
+    _bounded 15 docker info || true
+    error "Rootless Docker didn't come up on ${DOCKER_HOST} (daemon output above). See https://docs.docker.com/engine/security/rootless/ for kernel/uidmap prerequisites."
+  fi
+  success "Rootless Docker is running as ${_user} — no administrator rights were used."
+}
+
 install_linux() {
   export DEBIAN_FRONTEND=noninteractive
   export NEEDRESTART_MODE=a
@@ -793,6 +885,22 @@ install_linux() {
     # so get-helm-3 and its openssl dependency are gone (Bugbot #383/#396).
     _install_userspace_tools
     _tier0_gpu_flags
+    return 0
+  fi
+
+  # ── Tier 1 — rootless (RFC 0001 #1177/#1219, the RFC's PRIMARY path). A modern
+  # kernel with no runtime and no root: set up a per-user rootless Docker daemon and
+  # install entirely in user space, mirroring the Tier-0 early-return above. Gated
+  # behind the opt-in TB_TIER1_ROOTLESS until the spike's §5 host validation runs
+  # (#1176) — with the flag unset, a Tier-1 host falls straight through to the
+  # legacy privileged flow below, which stays the validated default. NOTE: tools
+  # still install via sudo here — _install_userspace_tools keys its no-sudo path off
+  # Tier 0 only; tightening _set_tools_target for rootless Tier 1 is slice 3 (#1221).
+  if [ "${INSTALL_TIER:-}" = "1" ] && [ "${TB_TIER1_ROOTLESS:-0}" = "1" ]; then
+    info "Setting up a rootless container runtime — no administrator rights needed."
+    install_rootless_docker
+    _install_userspace_tools     # tools still sudo-install on Tier 1 (see NOTE above; #1221 tightens); DOCKER_HOST exported for this run
+    _tier0_gpu_flags             # reuse an already-configured runtime only; no privileged driver install
     return 0
   fi
 

@@ -857,6 +857,95 @@ _stub_install_steps() {
   mock_calls | grep -q install_docker_engine
 }
 
+# ── install_linux: Tier 1 rootless routing (RFC 0001 #1177/#1219) ────────────
+@test "install_linux: Tier 1 + TB_TIER1_ROOTLESS=1 routes to rootless, skips every privileged step" {
+  MOCK_CALLS="$(mktemp)"
+  INSTALL_TIER=1; TB_TIER1_ROOTLESS=1
+  HOME="$BATS_TEST_TMPDIR"                 # _install_userspace_tools runs for real
+  install_rootless_docker() { record "install_rootless_docker"; }
+  _stub_install_steps
+  run install_linux
+  [ "$status" -eq 0 ]
+  mock_calls | grep -q install_rootless_docker
+  mock_calls | grep -q install_kubectl                 # _install_userspace_tools ran
+  ! mock_calls | grep -q preflight_sudo
+  ! mock_calls | grep -q install_docker_engine
+  ! mock_calls | grep -q install_system_deps
+  ! mock_calls | grep -q dispatch_gpu_setup
+}
+
+@test "install_linux: Tier 1 WITHOUT the opt-in falls through to the legacy privileged flow (safe default)" {
+  MOCK_CALLS="$(mktemp)"
+  INSTALL_TIER=1; unset TB_TIER1_ROOTLESS; PROBE_PRIVILEGE=sudo_nopw
+  install_rootless_docker() { record "install_rootless_docker"; }
+  _stub_install_steps
+  run install_linux
+  [ "$status" -eq 0 ]
+  ! mock_calls | grep -q install_rootless_docker       # opt-in off → rootless never runs
+  mock_calls | grep -q preflight_sudo
+  mock_calls | grep -q install_docker_engine
+}
+
+# ── install_rootless_docker (RFC 0001 #1219) ─────────────────────────────────
+@test "install_rootless_docker: happy path installs no-sudo, starts the user daemon, exports DOCKER_HOST" {
+  MOCK_CALLS="$(mktemp)"
+  PRESENT_CMDS="curl newuidmap newgidmap dockerd-rootless-setuptool.sh docker"
+  XDG_RUNTIME_DIR=/run/user/1000
+  systemctl() { record "systemctl $*"; }
+  loginctl()  { record "loginctl $*"; }
+  id()        { [ "${1:-}" = "-un" ] && echo testuser || echo "testuser docker"; }  # id -un → clean username (#452)
+  install_rootless_docker                              # called directly to observe the exported DOCKER_HOST
+  mock_calls | grep -q "dockerd-rootless-setuptool.sh install"
+  mock_calls | grep -q "systemctl --user enable --now docker"
+  mock_calls | grep -q "loginctl enable-linger testuser"
+  [ "$DOCKER_HOST" = "unix://${XDG_RUNTIME_DIR}/docker.sock" ]
+  ! mock_calls | grep -q sudo                          # no blanket sudo anywhere on the rootless path
+}
+
+@test "install_rootless_docker: missing uidmap helpers defer to prepare-host and never self-sudo" {
+  MOCK_CALLS="$(mktemp)"
+  PRESENT_CMDS="curl docker"                           # no newuidmap / newgidmap
+  run install_rootless_docker
+  [ "$status" -ne 0 ]
+  [[ "$output" == *prepare-host* ]]                    # actionable admin remedy, not an opaque failure
+  ! mock_calls | grep -q sudo                          # must NOT sudo apt-get install uidmap
+}
+
+@test "install_rootless_docker: XDG_RUNTIME_DIR unset falls back to /run/user/<uid>" {
+  MOCK_CALLS="$(mktemp)"
+  PRESENT_CMDS="curl newuidmap newgidmap dockerd-rootless-setuptool.sh docker"
+  unset XDG_RUNTIME_DIR
+  id()        { [ "${1:-}" = "-u" ] && echo 1000 || echo "testuser docker"; }
+  systemctl() { :; }
+  loginctl()  { :; }
+  install_rootless_docker
+  [ "$DOCKER_HOST" = "unix:///run/user/1000/docker.sock" ]
+}
+
+@test "install_rootless_docker: prepends ~/bin so the rootless CLI resolves (get.docker.com fallback) (Bugbot)" {
+  MOCK_CALLS="$(mktemp)"
+  PRESENT_CMDS="curl newuidmap newgidmap docker"       # no setuptool -> get.docker.com/rootless installs to ~/bin
+  XDG_RUNTIME_DIR=/run/user/1000
+  HOME="$BATS_TEST_TMPDIR"
+  curl_secure() { record "curl_secure $*"; return 0; } # no network
+  systemctl()   { :; }
+  loginctl()    { :; }
+  install_rootless_docker
+  case ":$PATH:" in *":$HOME/bin:"*) : ;; *) return 1 ;; esac   # ~/bin now on PATH for the run
+}
+
+@test "install_rootless_docker: systemd/linger failure falls through to the verify, not a bare abort (Bugbot)" {
+  MOCK_CALLS="$(mktemp)"
+  PRESENT_CMDS="newuidmap newgidmap dockerd-rootless-setuptool.sh docker"
+  XDG_RUNTIME_DIR=/run/user/1000
+  HOME="$BATS_TEST_TMPDIR"
+  systemctl() { return 1; }                            # user-systemd refuses
+  loginctl()  { return 1; }                            # linger blocked (polkit-locked)
+  docker()    { return 0; }                            # ...but the daemon is actually up
+  install_rootless_docker                              # must reach the export + verify, not set -e abort
+  [ "$DOCKER_HOST" = "unix:///run/user/1000/docker.sock" ]
+}
+
 # ── _set_tools_target: Tier 0 tools must NOT sudo (Bugbot #1175) ─────────────
 @test "_set_tools_target: Tier 0 => ~/.local/bin, no sudo, on PATH" {
   INSTALL_TIER=0; HOME="$BATS_TEST_TMPDIR"

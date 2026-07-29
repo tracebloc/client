@@ -21,6 +21,12 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write   # demote a mis-marked release to prerelease
+    outputs:
+      # Effective prerelease-ness, derived from the TAG SHAPE -- not from
+      # github.event.release.prerelease, which is a frozen snapshot: after
+      # this job demotes a mis-marked release, the event still says false
+      # (Bugbot on #467). Downstream gh-pages gates key on THIS.
+      prerelease: ${{ steps.guard.outputs.prerelease }}
     steps:
       - name: Checkout the released tag
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
@@ -28,6 +34,7 @@ jobs:
           ref: ${{ github.event.release.tag_name }}
 
       - name: Verify tag matches chart version + stability rule
+        id: guard
         # Release-train guard (backend#1301): the tag's base X.Y.Z must equal
         # client/Chart.yaml's version -- train-cut or manual -- so the chart
         # version can never go silently stale after an out-of-train release
@@ -45,6 +52,12 @@ jobs:
         run: |
           BASE=$(printf '%s' "${TAG#v}" | grep -oE '^[0-9]+\.[0-9]+\.[0-9]+' || true)
           CHART=$(grep -E '^version:' client/Chart.yaml | head -1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+')
+          # Single source of truth for downstream jobs: plain vX.Y.Z = stable.
+          if printf '%s' "$TAG" | grep -qE '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "prerelease=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "prerelease=true" >> "$GITHUB_OUTPUT"
+          fi
           # Demote FIRST, hard-fail second: a release that is BOTH mis-marked
           # stable and version-mismatched must still lose 'latest' before the
           # exit 1 below strands it (Bugbot: demotion-after-fail left a stable
@@ -107,8 +120,15 @@ jobs:
         # to live alongside each other in gh-pages and be referenced in a
         # single shared index.yaml. Earlier versions packaged only `./client`
         # and the second install path failed with "chart not found" — see #135.
+        env:
+          TAG: ${{ github.event.release.tag_name }}
         run: |
-          helm package ./client
+          # Package the client chart AS the release tag's version (rc suffix
+          # included). The chart version is what helm's pre-release rules key
+          # on: packaging an rc from Chart.yaml's plain X.Y.Z published a
+          # staging build as stable 1.9.7 (the 2026-07-29 index leak). The
+          # verify job already enforces base-version equality with Chart.yaml.
+          helm package ./client --version "${TAG#v}" --app-version "${TAG#v}"
           helm package ./ingestor
           echo "Packaged:"
           ls -la *.tgz
@@ -123,11 +143,17 @@ jobs:
             ingestor-*.tgz
 
       - name: Configure Git
+        # Pre-releases are FR artifacts: they ship as release assets only and
+        # must never enter the public helm index (customer surface).
+        if: ${{ needs.verify.outputs.prerelease != 'true' }}
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
       - name: Fetch existing index (gh-pages)
+        # Pre-releases are FR artifacts: they ship as release assets only and
+        # must never enter the public helm index (customer surface).
+        if: ${{ needs.verify.outputs.prerelease != 'true' }}
         id: fetch
         run: |
           # Remove any local chart packages before switching branches to avoid
@@ -149,6 +175,9 @@ jobs:
           name: helm-charts
 
       - name: Update index and push to gh-pages
+        # Pre-releases are FR artifacts: they ship as release assets only and
+        # must never enter the public helm index (customer surface).
+        if: ${{ needs.verify.outputs.prerelease != 'true' }}
         env:
           REPO_URL: https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}
         run: |
@@ -409,3 +438,30 @@ jobs:
             scripts/manifest.sha256.cert
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+  # Post-publish invariant check: turns the 2026-07-29 manual leak catch into
+  # CI. Runs after EVERY release run (stable or pre) and fails loudly if the
+  # public helm index -- the customer surface -- ever holds a pre-release.
+  verify-index:
+    name: Index invariants (post-publish)
+    needs: [verify, release]
+    if: ${{ always() && needs.verify.result == 'success' && needs.release.result == 'success' }}
+    runs-on: ubuntu-latest
+    env:
+      TAG: ${{ github.event.release.tag_name }}
+      PRERELEASE: ${{ needs.verify.outputs.prerelease }}
+    steps:
+      - name: Assert the public index holds only stable versions
+        run: |
+          set -euo pipefail
+          idx=$(curl -fsSL --retry 3 "https://raw.githubusercontent.com/$GITHUB_REPOSITORY/gh-pages/index.yaml?nocache=$GITHUB_RUN_ID")
+          # No prerelease-shaped chart version may ever be indexed.
+          if printf '%s\n' "$idx" | grep -E '^[[:space:]]+version:' | grep -- '-'; then
+            echo "::error::public helm index contains prerelease-shaped versions (above) - customer surface polluted."
+            exit 1
+          fi
+          # A prerelease run must not have indexed its own version.
+          if [ "$PRERELEASE" = "true" ] && printf '%s\n' "$idx" | grep -qF "${TAG#v}"; then
+            echo "::error::prerelease $TAG leaked into the public index."
+            exit 1
+          fi
+          echo "Index invariants hold: stable-only, $TAG handled correctly."

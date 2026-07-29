@@ -175,6 +175,17 @@ assert_tool_runs() {
   error "$name was installed but won't run — a corrupt or wrong-architecture binary (this machine is ${ARCH:-$(uname -m)}). Re-run the installer to re-download it; if it recurs, remove ${rm_path:-the $name on your PATH} (and any package-manager copy) first."
 }
 
+# _bounded SECONDS CMD… — run CMD under timeout(1)/gtimeout(1) when either is
+# present, else bare, so a wedged external call can't hang a headless install
+# (installer rule: every docker/kubectl/helm probe must be bounded). Returns CMD's
+# exit status (124 on timeout). Output is NOT redirected — the caller decides.
+_bounded() {
+  local t="$1"; shift
+  if   has timeout;  then timeout  "$t" "$@"
+  elif has gtimeout; then gtimeout "$t" "$@"
+  else "$@"; fi
+}
+
 # Sanitize a minutes-valued env override to a base-10 integer, else <default>.
 # The 10# base prefix matters: bash arithmetic reads a leading zero as octal,
 # so 08/09 would ABORT $(( … )) under set -e (mid-create, leaving a partial
@@ -236,54 +247,6 @@ _chart_version() {
 _client_workload_deployments() {
   local ns="${1:-${TB_NAMESPACE:-default}}"
   printf '%s\n' "mysql-client" "${ns}-jobs-manager" "${ns}-requests-proxy"
-}
-
-# ── macOS: Docker Desktop architecture vs machine (for wrong-arch UX) ────────
-#  Call early on macOS to fail fast with clear instructions if Docker.app
-#  is for the wrong architecture (e.g. Intel Docker on Apple Silicon).
-#  Returns 0 if OK or not applicable; returns 1 and prints message if mismatch.
-check_docker_arch_mac() {
-  [[ "$(uname -s)" != "Darwin" ]] && return 0
-  [[ ! -d "/Applications/Docker.app" ]] && return 0
-
-  local real_arch
-  if sysctl -n hw.optional.arm64 2>/dev/null | grep -q '1'; then
-    real_arch="arm64"
-  else
-    real_arch="amd64"
-  fi
-
-  # Main executable is com.docker.backend (CFBundleExecutable), not "Docker"
-  local docker_bin_path="/Applications/Docker.app/Contents/MacOS/com.docker.backend"
-  [[ ! -x "$docker_bin_path" ]] && docker_bin_path="/Applications/Docker.app/Contents/MacOS/Docker"
-  local docker_bin_arch
-  docker_bin_arch="$(file "$docker_bin_path" 2>/dev/null || true)"
-  local docker_is_arm=false
-  local docker_is_intel=false
-  echo "$docker_bin_arch" | grep -q 'arm64' && docker_is_arm=true
-  echo "$docker_bin_arch" | grep -q 'x86_64' && docker_is_intel=true
-
-  if [[ "$real_arch" == "arm64" ]] && [[ "$docker_is_intel" == true ]] && [[ "$docker_is_arm" != true ]]; then
-    echo ""
-    warn "Docker is installed for the wrong chip (Intel instead of Apple Silicon)."
-    hint "This can cause slow performance or prevent Docker from starting."
-    echo ""
-    echo -e "  ${BOLD}Fix:${RESET} Re-run the installer — it will replace Docker with the correct version."
-    echo ""
-    return 1
-  fi
-
-  if [[ "$real_arch" == "amd64" ]] && [[ "$docker_is_arm" == true ]]; then
-    echo ""
-    warn "Docker is installed for the wrong chip (Apple Silicon instead of Intel)."
-    hint "Docker may not work correctly."
-    echo ""
-    echo -e "  ${BOLD}Fix:${RESET} Re-run the installer — it will replace Docker with the correct version."
-    echo ""
-    return 1
-  fi
-
-  return 0
 }
 
 # ── Spinner — hides noisy command output behind an animated status line ──────
