@@ -21,6 +21,12 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write   # demote a mis-marked release to prerelease
+    outputs:
+      # Effective prerelease-ness, derived from the TAG SHAPE -- not from
+      # github.event.release.prerelease, which is a frozen snapshot: after
+      # this job demotes a mis-marked release, the event still says false
+      # (Bugbot on #467). Downstream gh-pages gates key on THIS.
+      prerelease: ${{ steps.guard.outputs.prerelease }}
     steps:
       - name: Checkout the released tag
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
@@ -28,6 +34,7 @@ jobs:
           ref: ${{ github.event.release.tag_name }}
 
       - name: Verify tag matches chart version + stability rule
+        id: guard
         # Release-train guard (backend#1301): the tag's base X.Y.Z must equal
         # client/Chart.yaml's version -- train-cut or manual -- so the chart
         # version can never go silently stale after an out-of-train release
@@ -45,6 +52,12 @@ jobs:
         run: |
           BASE=$(printf '%s' "${TAG#v}" | grep -oE '^[0-9]+\.[0-9]+\.[0-9]+' || true)
           CHART=$(grep -E '^version:' client/Chart.yaml | head -1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+')
+          # Single source of truth for downstream jobs: plain vX.Y.Z = stable.
+          if printf '%s' "$TAG" | grep -qE '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "prerelease=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "prerelease=true" >> "$GITHUB_OUTPUT"
+          fi
           # Demote FIRST, hard-fail second: a release that is BOTH mis-marked
           # stable and version-mismatched must still lose 'latest' before the
           # exit 1 below strands it (Bugbot: demotion-after-fail left a stable
@@ -132,7 +145,7 @@ jobs:
       - name: Configure Git
         # Pre-releases are FR artifacts: they ship as release assets only and
         # must never enter the public helm index (customer surface).
-        if: ${{ !github.event.release.prerelease }}
+        if: ${{ needs.verify.outputs.prerelease != 'true' }}
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
@@ -140,7 +153,7 @@ jobs:
       - name: Fetch existing index (gh-pages)
         # Pre-releases are FR artifacts: they ship as release assets only and
         # must never enter the public helm index (customer surface).
-        if: ${{ !github.event.release.prerelease }}
+        if: ${{ needs.verify.outputs.prerelease != 'true' }}
         id: fetch
         run: |
           # Remove any local chart packages before switching branches to avoid
@@ -164,7 +177,7 @@ jobs:
       - name: Update index and push to gh-pages
         # Pre-releases are FR artifacts: they ship as release assets only and
         # must never enter the public helm index (customer surface).
-        if: ${{ !github.event.release.prerelease }}
+        if: ${{ needs.verify.outputs.prerelease != 'true' }}
         env:
           REPO_URL: https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}
         run: |
