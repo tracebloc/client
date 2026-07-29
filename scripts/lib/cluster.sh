@@ -569,7 +569,10 @@ _check_existing_cluster_ca() {
   local mounts
   mounts=$(docker inspect "$server_container" --format '{{range .Mounts}}{{println .Destination}}{{end}}' 2>/dev/null) || return 0
   [[ -z "$mounts" ]] && return 0
-  if [[ "$mounts" != *"/etc/ssl/certs/tracebloc-mitm-ca.crt"* ]]; then
+  # Exact whole-line match (mounts is newline-separated destinations): a longer
+  # path that merely embeds the CA path as a substring is NOT our mount. Mirrors
+  # the PS anchored `(?m)^…\s*$` check (Bugbot #424).
+  if ! grep -qxF '/etc/ssl/certs/tracebloc-mitm-ca.crt' <<<"$mounts"; then
     echo ""
     warn "A CA bundle is set (TRACEBLOC_CA_BUNDLE/CURL_CA_BUNDLE), but the existing '$CLUSTER_NAME' cluster was created without it."
     hint "k3d bakes CA trust into the nodes at create time — it can't be added to a running cluster."

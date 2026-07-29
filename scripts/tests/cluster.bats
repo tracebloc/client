@@ -239,6 +239,15 @@ setup() {
   [ -z "$output" ]
 }
 
+@test "_check_existing_cluster_ca: a mount that only embeds the CA path -> still warns (Bugbot #424)" {
+  export TRACEBLOC_CA_BUNDLE="/some/ca.pem"
+  # substring but NOT the exact mount destination — must not be treated as our CA mount
+  docker() { printf '/tracebloc\n/etc/ssl/certs/tracebloc-mitm-ca.crt.bak\n'; }
+  run _check_existing_cluster_ca
+  [[ "$output" == *"created without it"* ]]
+  [[ "$output" == *"k3d cluster delete"* ]]
+}
+
 # ── _check_existing_cluster_dataset_mount (backend#743) ─────────────────────
 @test "_check_existing_cluster_dataset_mount: HOST_DATASET_DIR unset -> no-op" {
   unset HOST_DATASET_DIR
