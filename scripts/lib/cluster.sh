@@ -592,7 +592,11 @@ _check_existing_cluster_ca() {
 # output actually shows a TLS-verification failure.
 _host_ca_create_hint() {
   local out="$1"
-  printf '%s' "$out" | grep -qiE 'x509|certificate signed by unknown authority|tls: failed to verify' || return 0
+  # Herestring, not a pipe: under `set -o pipefail`, `grep -q` closes the pipe on
+  # first match, and for output past the ~64KB pipe buffer (reachable on the
+  # timeout path, which passes the full logs) printf takes SIGPIPE → the pipeline
+  # exits non-zero → `|| return 0` would bail even though x509 matched (reviewer).
+  grep -qiE 'x509|certificate signed by unknown authority|tls: failed to verify' <<<"$out" || return 0
   echo ""
   warn "The Docker daemon couldn't pull k3d's runtime images — TLS verification failed (x509)."
   hint "k3d pulls rancher/k3s, k3d-tools and k3d-proxy with the HOST Docker daemon, which does"

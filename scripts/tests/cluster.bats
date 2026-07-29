@@ -273,6 +273,19 @@ setup() {
   [[ "$output" != *"update-ca-certificates"* ]]
 }
 
+@test "_host_ca_create_hint: large (>64KB) x509 output under pipefail still fires (reviewer #474)" {
+  # The timeout path passes the FULL create logs; with a pipe + grep -q under
+  # set -o pipefail, printf would take SIGPIPE past the ~64KB buffer and the hint
+  # would be silently swallowed even though x509 matched. Guard against that.
+  set -o pipefail
+  OS=Linux
+  local big; big="$(printf 'noise line %s\n' $(seq 1 8000))"   # well over 64KB
+  big+=$'\nFATA Failed to pull image "rancher/k3s": x509: certificate signed by unknown authority'
+  run _host_ca_create_hint "$big"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"HOST Docker daemon"* ]]
+}
+
 # ── _check_existing_cluster_dataset_mount (backend#743) ─────────────────────
 @test "_check_existing_cluster_dataset_mount: HOST_DATASET_DIR unset -> no-op" {
   unset HOST_DATASET_DIR
