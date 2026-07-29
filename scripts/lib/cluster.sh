@@ -143,7 +143,7 @@ _resolve_ca_bundle() {
 # node (where the -v mount lands). Caller removes the temp dir.
 _write_k3d_registries_config() {
   local node_ca="$1" host td cfg
-  td="$(mktemp -d "${TMPDIR:-/tmp}/tracebloc-k3d-reg-XXXXXX")" || return 0
+  td="$(mktemp -d "${TMPDIR:-/tmp}/tracebloc-k3d-reg-XXXXXX")" || return 1
   cfg="$td/registries.yaml"
   {
     echo "configs:"
@@ -727,8 +727,12 @@ _create_new_cluster() {
   fi
   if [[ -n "$ca_bundle" ]]; then
     K3D_ARGS+=(-v "${ca_bundle}:${node_ca}@all")
-    reg_cfg="$(_write_k3d_registries_config "$node_ca")"
-    [[ -n "$reg_cfg" ]] && K3D_ARGS+=(--registry-config "$reg_cfg")
+    # Hard-fail if we can't write the registries.yaml: mounting the CA without the
+    # --registry-config would leave containerd untrusting while we log success —
+    # the operator would think the fix applied and still hit x509 (Bugbot).
+    reg_cfg="$(_write_k3d_registries_config "$node_ca")" \
+      || error "Couldn't write the k3d CA-trust registries config (temp dir/disk?). Re-run; the CA bundle was supplied so we won't proceed without wiring it in."
+    K3D_ARGS+=(--registry-config "$reg_cfg")
     log "Trusting your network's TLS-inspection CA in the k3d nodes (from ${ca_bundle})."
   fi
 

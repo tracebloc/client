@@ -449,6 +449,13 @@ setup() {
   rm -rf "${cfg%/*}"
 }
 
+@test "_write_k3d_registries_config: mktemp failure -> non-zero, no path (no fail-open; #424 Bugbot)" {
+  mktemp() { return 1; }
+  run _write_k3d_registries_config /etc/ssl/certs/tracebloc-mitm-ca.crt
+  [ "$status" -ne 0 ]
+  [ -z "$output" ]
+}
+
 @test "_create_new_cluster: CA supplied -> mounts CA + --registry-config (#424)" {
   export TRACEBLOC_CA_BUNDLE="$BATS_TEST_TMPDIR/ca.pem"; : > "$TRACEBLOC_CA_BUNDLE"
   run _create_new_cluster
@@ -457,6 +464,17 @@ setup() {
   [[ "$output" == *"k3d cluster create"* ]]
   [[ "$output" == *":/etc/ssl/certs/tracebloc-mitm-ca.crt@all"* ]]   # CA mounted into nodes
   [[ "$output" == *"--registry-config"* ]]                           # containerd pointed at it
+}
+
+@test "_create_new_cluster: CA supplied but registries config unwritable -> hard error, never fail-open (#424 Bugbot)" {
+  export TRACEBLOC_CA_BUNDLE="$BATS_TEST_TMPDIR/ca.pem"; : > "$TRACEBLOC_CA_BUNDLE"
+  # only the registries temp dir fails; other mktemp uses delegate to the real one
+  mktemp() { case "$*" in *tracebloc-k3d-reg*) return 1 ;; *) command mktemp "$@" ;; esac; }
+  run _create_new_cluster
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"registries config"* ]]
+  run mock_calls
+  [[ "$output" != *"k3d cluster create"* ]]   # aborted before create — never claims success
 }
 
 @test "_create_new_cluster: no CA var -> no registry-config, no mitm mount (#424)" {

@@ -1492,6 +1492,12 @@ Describe "In-node CA trust for TLS-inspecting networks (#424)" {
       $env:TRACEBLOC_CA_BUNDLE = (Join-Path $TestDrive "missing.pem")
       { Resolve-CaBundle } | Should -Throw "*ERR:*"
     }
+    It "hard-errors when the CA file exists but is unreadable (matches bash -r; Bugbot #424)" -Skip:($IsWindows) {
+      $ca = Join-Path $TestDrive "unreadable.pem"; "x" | Set-Content $ca
+      chmod 000 $ca
+      $env:TRACEBLOC_CA_BUNDLE = $ca
+      try { { Resolve-CaBundle } | Should -Throw "*ERR:*" } finally { chmod 644 $ca }
+    }
   }
 
   Context "Write-K3dRegistriesConfig" {
@@ -1522,6 +1528,10 @@ Describe "In-node CA trust for TLS-inspecting networks (#424)" {
         return "x 0/1 ImagePullBackOff"
       }
       Get-NotReadyState -Namespace "ns" | Should -Be "image_pull"
+    }
+    It "bounds the events lookup with --request-timeout (matches bash; Bugbot #424)" {
+      (Get-Content "$PSScriptRoot/../install-k8s.ps1" -Raw) |
+        Should -Match 'kubectl get events -n \$Namespace --request-timeout=5s'
     }
   }
 

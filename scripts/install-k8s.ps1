@@ -1055,8 +1055,12 @@ function Resolve-CaBundle {
     $val = [Environment]::GetEnvironmentVariable($name)
     if (-not $val) { continue }
     if (-not (Test-Path -LiteralPath $val -PathType Leaf)) {
-      Err "$name is set to '$val' but that file can't be read - point it at your corporate CA bundle (PEM) and re-run."
+      Err "$name is set to '$val' but no such file exists - point it at your corporate CA bundle (PEM) and re-run."
     }
+    # Verify it's actually READABLE, not just present (matches bash's `-r`): a file
+    # that exists but can't be opened must hard-fail here, not at k3d mount/pull time.
+    try { [System.IO.File]::OpenRead($val).Dispose() }
+    catch { Err "$name is set to '$val' but that file can't be read ($($_.Exception.Message)) - fix its permissions or point it at a readable CA bundle (PEM), then re-run." }
     return (Resolve-Path -LiteralPath $val).Path
   }
   return $null
@@ -2395,7 +2399,7 @@ function Get-NotReadyState {
     # On a TLS-inspecting network the pull fails x509 because the nodes don't trust
     # the corporate CA (#424). Distinguish it so the remedy can name the CA + env
     # var, not a vague retry. Mirrors scripts/lib/summary.sh::_diagnose_not_ready.
-    $events = (& kubectl get events -n $Namespace 2>$null | Out-String)
+    $events = (& kubectl get events -n $Namespace --request-timeout=5s 2>$null | Out-String)
     if ($events -match '(?i)x509|certificate signed by unknown authority|tls: failed to verify') { return "image_pull_ca" }
     return "image_pull"
   }
