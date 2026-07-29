@@ -232,12 +232,19 @@ _next_subid_start() {
 # the setuid check alone. Shared by probe.sh (detection) and setup-linux.sh (the
 # post-install re-verify).
 _idmap_helper_ok() {
-  local p; p="$(command -v "$1" 2>/dev/null)" || return 1
+  local name="$1" p cap
+  p="$(command -v "$name" 2>/dev/null)" || return 1
   [[ -n "$p" ]] || return 1
-  [[ -u "$p" ]] && return 0
+  [[ -u "$p" ]] && return 0                     # setuid-root covers both helpers
+  # Filecaps path (Arch etc.): newuidmap needs cap_setuid, newgidmap needs
+  # cap_setgid — checking cap_setuid for both wrongly rejects newgidmap (Bugbot #458).
+  case "$name" in
+    newgidmap) cap=cap_setgid ;;
+    *)         cap=cap_setuid ;;
+  esac
   if has getcap; then
     local caps; caps="$(getcap "$p" 2>/dev/null)"
-    [[ "$caps" == *cap_setuid* ]] && return 0
+    [[ "$caps" == *"$cap"* ]] && return 0
   fi
   return 1
 }

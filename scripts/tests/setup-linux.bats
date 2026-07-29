@@ -1059,6 +1059,17 @@ _stub_install_steps() {
   ! mock_calls | grep -q "tee -a"                      # never wrote a range on a broken host
 }
 
+@test "_provision_subid_ranges: a failed range write returns non-zero, not false success (#458)" {
+  MOCK_CALLS="$(mktemp)"
+  _idmap_helper_ok() { return 0; }                     # helpers fine
+  usermod() { return 0; }                              # no --add-subuids -> append path
+  sudo() { case "$*" in tee*) return 1 ;; *) return 0 ;; esac; }  # the tee write FAILS
+  id() { echo 1000; }
+  TB_SUBUID_FILE="$(mktemp)"; TB_SUBGID_FILE="$(mktemp)"
+  run _provision_subid_ranges testuser
+  [ "$status" -ne 0 ]                                  # must surface the write failure, not print success
+}
+
 @test "_provision_subid_ranges: usermod --help nonzero exit still takes the usermod path (pipefail-safe, #458)" {
   MOCK_CALLS="$(mktemp)"
   _idmap_helper_ok() { return 0; }

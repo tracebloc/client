@@ -177,21 +177,34 @@ setup() {
   [ "$status" -ne 0 ]
 }
 
+# NOTE: these clobber PATH to $bin for a hermetic probe (hide any system newuidmap),
+# but ONLY inside a subshell — setting PATH="$bin" in the test body also hides `rm`,
+# which breaks bats-core's own per-test cleanup and fails the whole run even when
+# every test passes (bats 1.10+; root cause of the #458 red bats). Functions defined
+# in the body (getcap mock, has) are inherited by the subshell.
 @test "uidmap: both helpers present AND setuid => satisfied" {
   bin="$(mktemp -d)"
   : >"$bin/newuidmap"; : >"$bin/newgidmap"
   chmod u+s "$bin/newuidmap" "$bin/newgidmap"
-  PATH="$bin"                            # hermetic: hide any system copy
-  _probe_uidmap_helpers
+  ( PATH="$bin"; _probe_uidmap_helpers )
 }
 
-@test "uidmap: cap_setuid filecaps (no setuid bit) => satisfied (Arch shadow, #458)" {
+@test "uidmap: filecaps (no setuid bit) => satisfied — newuidmap:cap_setuid, newgidmap:cap_setgid (Arch shadow, #458)" {
   bin="$(mktemp -d)"
   : >"$bin/newuidmap"; : >"$bin/newgidmap"
   chmod +x "$bin/newuidmap" "$bin/newgidmap"       # NO setuid bit
-  getcap() { printf '%s cap_setuid=ep\n' "$1"; }   # pretend file capabilities present
-  PATH="$bin"
-  _probe_uidmap_helpers
+  # Each helper carries its OWN capability: newuidmap → cap_setuid, newgidmap → cap_setgid.
+  getcap() { case "$1" in *newgidmap) printf '%s cap_setgid=ep\n' "$1" ;; *) printf '%s cap_setuid=ep\n' "$1" ;; esac; }
+  ( PATH="$bin"; _probe_uidmap_helpers )
+}
+
+@test "uidmap: newgidmap with only cap_setuid (wrong cap) => NOT satisfied (#458)" {
+  bin="$(mktemp -d)"
+  : >"$bin/newuidmap"; : >"$bin/newgidmap"
+  chmod +x "$bin/newuidmap" "$bin/newgidmap"
+  # Both report cap_setuid; newgidmap actually needs cap_setgid, so it must be rejected.
+  getcap() { printf '%s cap_setuid=ep\n' "$1"; }
+  ! ( PATH="$bin"; _probe_uidmap_helpers )
 }
 
 @test "uidmap: present with neither setuid bit nor cap_setuid => not satisfied" {
@@ -199,17 +212,13 @@ setup() {
   : >"$bin/newuidmap"; : >"$bin/newgidmap"
   chmod +x "$bin/newuidmap" "$bin/newgidmap"
   getcap() { printf '%s =\n' "$1"; }               # getcap present, no caps
-  PATH="$bin"
-  run _probe_uidmap_helpers
-  [ "$status" -ne 0 ]
+  ! ( PATH="$bin"; _probe_uidmap_helpers )
 }
 
 @test "uidmap: one helper missing => not satisfied" {
   bin="$(mktemp -d)"
   : >"$bin/newuidmap"; chmod u+s "$bin/newuidmap"   # newgidmap absent
-  PATH="$bin"
-  run _probe_uidmap_helpers
-  [ "$status" -ne 0 ]
+  ! ( PATH="$bin"; _probe_uidmap_helpers )
 }
 
 @test "subid probes: side-effect-free — fixtures unchanged after run_host_probes" {

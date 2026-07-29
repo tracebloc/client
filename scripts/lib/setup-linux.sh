@@ -955,12 +955,18 @@ _provision_subid_ranges() {
   # (not `usermod --help | grep`): under `set -o pipefail` a non-zero `usermod --help`
   # exit would falsely fail the match and silently downgrade a capable shadow-utils to
   # the append path (Asad #458).
+  # Guard every write: both callers run this with `set -e` disabled (`|| error`,
+  # `if !`), so an unguarded failure would fall through to `success`/return 0 and let
+  # the installer proceed with no range — dying later in setuptool (Bugbot #458).
   local _um_help; _um_help="$(usermod --help 2>&1 || true)"
   if printf '%s' "$_um_help" | grep -q -- '--add-subuids'; then
-    sudo usermod --add-subuids "${start}-${end}" --add-subgids "${start}-${end}" "$user"
+    sudo usermod --add-subuids "${start}-${end}" --add-subgids "${start}-${end}" "$user" \
+      || { warn "Couldn't add the subuid/subgid range for ${user} via usermod."; return 1; }
   else
-    printf '%s:%s:%s\n' "$user" "$start" "$count" | sudo tee -a "$subuid" >/dev/null
-    printf '%s:%s:%s\n' "$user" "$start" "$count" | sudo tee -a "$subgid" >/dev/null
+    printf '%s:%s:%s\n' "$user" "$start" "$count" | sudo tee -a "$subuid" >/dev/null \
+      || { warn "Couldn't append the subuid range for ${user} to ${subuid}."; return 1; }
+    printf '%s:%s:%s\n' "$user" "$start" "$count" | sudo tee -a "$subgid" >/dev/null \
+      || { warn "Couldn't append the subgid range for ${user} to ${subgid}."; return 1; }
   fi
   success "Added subordinate UID/GID range ${start}-${end} for ${user}."
 }
