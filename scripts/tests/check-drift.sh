@@ -191,15 +191,20 @@ _drift_cli_contract() {
 # operator's CA bundle, mount it into the nodes, and point containerd at it via
 # --registry-config. If one installer drops any piece, the break-and-inspect x509
 # pull failure reopens on that OS — catch it here, not in a hospital's network.
+# Match tokens in real code only, not comments: strip comment lines first, so
+# deleting the functional `--registry-config` wiring can't be masked by the token
+# lingering in a comment above it (Bugbot: no whole-file grep). No `grep -q` under
+# main()'s pipefail — a SIGPIPE on the upstream grep would false-fail.
+_drift_ca_token() { grep -vE '^[[:space:]]*#' "$1" 2>/dev/null | grep -F -- "$2" >/dev/null 2>&1; }
 _drift_ca_trust() {
   echo "▸ In-node CA trust wiring (cluster.sh · install-k8s.ps1)"
   local before=$_drift pat
   local sh="scripts/lib/cluster.sh" ps1="scripts/install-k8s.ps1"
   for pat in TRACEBLOC_CA_BUNDLE CURL_CA_BUNDLE _resolve_ca_bundle registry-config tracebloc-mitm-ca.crt; do
-    grep -qF -- "$pat" "$DRIFT_ROOT/$sh" || _note "$sh: CA wiring missing '$pat' (#424)"
+    _drift_ca_token "$DRIFT_ROOT/$sh" "$pat" || _note "$sh: CA wiring missing '$pat' (#424)"
   done
   for pat in TRACEBLOC_CA_BUNDLE CURL_CA_BUNDLE Resolve-CaBundle registry-config tracebloc-mitm-ca.crt; do
-    grep -qF -- "$pat" "$DRIFT_ROOT/$ps1" || _note "$ps1: CA wiring missing '$pat' (#424)"
+    _drift_ca_token "$DRIFT_ROOT/$ps1" "$pat" || _note "$ps1: CA wiring missing '$pat' (#424)"
   done
   if [[ "$_drift" -eq "$before" ]]; then _ok "both installers resolve, mount, and register the corporate CA"; fi
   return 0

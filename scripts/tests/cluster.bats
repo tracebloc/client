@@ -492,3 +492,18 @@ setup() {
   [ "$status" -ne 0 ]
   [[ "$output" == *"can't be read"* ]]
 }
+
+@test "CA resolve capture is errexit-safe under set -euo pipefail — reaches the guidance, not a bare exit (#424 Bugbot)" {
+  # The real install runs under `set -euo pipefail`. With a bare `; ca_rc=$?` the
+  # rc-2 from the command substitution would exit before the error(); `|| ca_rc=$?`
+  # keeps errexit from firing so ca_rc is captured. Assert the idiom + that
+  # cluster.sh actually uses it.
+  run bash -euo pipefail -c '
+    _resolve_ca_bundle() { echo TRACEBLOC_CA_BUNDLE; return 2; }
+    ca_rc=0; ca_bundle="$(_resolve_ca_bundle)" || ca_rc=$?
+    printf "rc=%s bundle=%s\n" "$ca_rc" "$ca_bundle"'
+  [ "$status" -eq 0 ]                                  # no bare errexit exit
+  [[ "$output" == *"rc=2"* ]]
+  [[ "$output" == *"bundle=TRACEBLOC_CA_BUNDLE"* ]]
+  grep -qE 'ca_bundle="\$\(_resolve_ca_bundle\)" \|\| ca_rc=' "$BATS_TEST_DIRNAME/../lib/cluster.sh"
+}

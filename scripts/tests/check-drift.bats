@@ -103,6 +103,14 @@ YAML
   _drift=0; _drift_ca_trust >/dev/null 2>&1; [ "$_drift" -ge 1 ]
 }
 
+@test "ca trust: --registry-config only in a COMMENT does NOT count -> drift (Bugbot #424)" {
+  # The functional wiring is gone; the token lingers only in a comment. A whole-file
+  # grep would pass — the comment-stripping check must still flag it.
+  printf '# uses --registry-config to point containerd at the CA\nTRACEBLOC_CA_BUNDLE CURL_CA_BUNDLE _resolve_ca_bundle tracebloc-mitm-ca.crt\n' > "$ROOT/scripts/lib/cluster.sh"
+  printf 'TRACEBLOC_CA_BUNDLE CURL_CA_BUNDLE Resolve-CaBundle --registry-config tracebloc-mitm-ca.crt\n' > "$ROOT/scripts/install-k8s.ps1"
+  _drift=0; _drift_ca_trust >/dev/null 2>&1; [ "$_drift" -ge 1 ]
+}
+
 # ── Check 5: preflight download-host parity (#416) ───────────────────────────
 # The check extracts hosts from PROBE ENTRIES only — bash "label|https://host/…"
 # and ps1 @{ label = "…"; url = "https://host/…" } (label REQUIRED on the ps1 line,

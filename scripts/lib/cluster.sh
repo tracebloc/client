@@ -719,9 +719,12 @@ _create_new_cluster() {
   # In-node CA trust for TLS-inspecting networks (#424): mount the operator's CA
   # bundle into every node and point containerd at it per-registry, so in-node
   # image pulls validate the intercepted certs instead of failing x509.
-  local ca_bundle reg_cfg="" ca_rc
+  local ca_bundle reg_cfg="" ca_rc=0
   local node_ca="/etc/ssl/certs/tracebloc-mitm-ca.crt"
-  ca_bundle="$(_resolve_ca_bundle)"; ca_rc=$?
+  # `|| ca_rc=$?` (not a bare `;`): under `set -euo pipefail` a rc-2 from the
+  # command substitution would trip errexit and exit before ca_rc/error below,
+  # giving a bare exit instead of the "can't be read" guidance (Bugbot).
+  ca_bundle="$(_resolve_ca_bundle)" || ca_rc=$?
   if [[ $ca_rc -eq 2 ]]; then
     error "$ca_bundle is set but its file can't be read — point it at your corporate CA bundle (PEM) and re-run."
   fi
