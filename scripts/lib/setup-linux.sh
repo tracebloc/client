@@ -891,7 +891,8 @@ _ensure_subid_ranges() {
       # it would loop back to this same hand-off (Bugbot #458).
       warn "Rootless Docker needs host prerequisites for '${_user}' that aren't set up yet."
       hint "Have an administrator prepare this host once (naming you as the researcher), then re-run:"
-      hint "  curl -fsSL https://tracebloc.io/i.sh | TB_PREPARE_USER=${_user} bash -s -- prepare-host"
+      hint "  export TB_PREPARE_USER=${_user}"
+      hint "  curl -fsSL https://tracebloc.io/i.sh | bash -s -- prepare-host"
       hint "  (or, with the CLI:  tracebloc prepare-host ${_user})"
       if [ "${PROBE_SUBID:-0}" != "1" ]; then
         # Compute a non-overlapping start for THIS host so the paste-in remedy can't
