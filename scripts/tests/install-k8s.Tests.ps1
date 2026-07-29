@@ -66,6 +66,16 @@ Describe "Get-ErrDetailLines (#423 honest failure output)" {
     $out | Should -Not -Match 'Full log:'
     $out | Should -Match '-Diagnose'   # next-step hint still present
   }
+  It "single-line result enumerates as one intact line, never per-character (Bugbot #423)" {
+    # The bare-Err path (no detail, no LOG_FILE — e.g. a Confirm-Config failure
+    # before Start-InstallLog) returns just the support-bundle line. Enumerating it
+    # must yield that whole line, not a stream of single characters.
+    $script:LOG_FILE = $null
+    $lines = @(Get-ErrDetailLines $null)
+    $lines.Count | Should -Be 1
+    $lines[0]    | Should -Be "Support bundle: re-run with -Diagnose"
+    foreach ($l in @(Get-ErrDetailLines $null)) { $l.Length | Should -BeGreaterThan 1 }
+  }
 }
 
 Describe "Test-Credentials" {

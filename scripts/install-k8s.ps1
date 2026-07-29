@@ -74,7 +74,10 @@ function Get-ErrDetailLines([string]$Detail) {
 # log (#423). Every failure names the log path + -Diagnose regardless.
 function Err($m, $Detail)  {
   Write-Host "  " -NoNewline; Write-Host ([char]0x2716) -ForegroundColor Red -NoNewline; Write-Host " $m" -ForegroundColor Red
-  foreach ($l in (Get-ErrDetailLines $Detail)) { Write-Host "  $l" -ForegroundColor DarkGray }
+  # @(...) forces array enumeration: a single-line result unwraps to a scalar
+  # string, and enumerating that explicitly keeps each line intact (defensive —
+  # the `foreach` statement already iterates a scalar once, not per-char).
+  foreach ($l in @(Get-ErrDetailLines $Detail)) { Write-Host "  $l" -ForegroundColor DarkGray }
   exit 1
 }
 function Step($n, $t, $l)  { Write-Host ""; Write-Host "Step $n/$t" -ForegroundColor Cyan -NoNewline; Write-Host "  $l" -ForegroundColor White }
