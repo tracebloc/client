@@ -287,6 +287,10 @@
         }
       }
     },
+    "perIngestionTables": {
+      "type": "boolean",
+      "description": "RFC-0003 D16 (backend#1204/#1205): stamp PER_INGESTION_TABLES=1 into every ingestion Job. Flip per environment, dev first; file-bearing categories are refused under the flag until client-runtime#203 phase 2."
+    },
     "ingestionAuthz": {
       "type": "object",
       "description": "Authorization policy for POST /internal/submit-ingestion-run on jobs-manager (client-runtime#21). Rendered into the ingestion-authz ConfigMap.",

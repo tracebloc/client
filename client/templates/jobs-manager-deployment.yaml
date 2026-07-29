@@ -99,6 +99,14 @@ spec:
           value: {{ include "tracebloc.clientLogsPvc" . | quote }}
         - name: MYSQL_HOST
           value: "mysql-client"
+        {{- if .Values.perIngestionTables }}
+        # RFC-0003 D16 (backend#1204 / backend#1205): forwarded by
+        # jobs-manager into every ingestion Job it spawns — the ingestor
+        # then writes one immutable ds_<uuid4 hex> table per run. Rendered
+        # only when enabled so default installs stay byte-identical.
+        - name: PER_INGESTION_TABLES
+          value: "1"
+        {{- end }}
         # Ingestor image wiring for the POST /internal/submit-ingestion-run
         # endpoint. jobs-manager spawns each ingestion Job from these values
         # (see client-runtime submit_ingestion_run._build_image_reference):
