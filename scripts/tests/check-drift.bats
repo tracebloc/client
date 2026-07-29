@@ -111,6 +111,37 @@ YAML
   _drift=0; _drift_ca_trust >/dev/null 2>&1; [ "$_drift" -ge 1 ]
 }
 
+# ── Check 4b: tool execute-gate parity (#411) ────────────────────────────────
+@test "execute-gates: all installers gate all tools -> no drift (#411)" {
+  printf 'assert_tool_runs kubectl version --client\nassert_tool_runs k3d version\nassert_tool_runs helm version --short\n' > "$ROOT/scripts/lib/setup-linux.sh"
+  printf 'assert_tool_runs kubectl version --client\nassert_tool_runs k3d version\nassert_tool_runs helm version --short\n' > "$ROOT/scripts/lib/setup-macos.sh"
+  printf 'Assert-ToolRuns -Name "kubectl" -VersionArgs @("version","--client")\nAssert-ToolRuns -Name "k3d" -VersionArgs @("version")\nAssert-ToolRuns -Name "helm" -VersionArgs @("version","--short")\n' >> "$ROOT/scripts/install-k8s.ps1"
+  _drift=0; _drift_execute_gates >/dev/null; [ "$_drift" -eq 0 ]
+}
+
+@test "execute-gates: an installer missing a tool gate -> drift (#411)" {
+  printf 'assert_tool_runs kubectl version --client\nassert_tool_runs k3d version\nassert_tool_runs helm version\n' > "$ROOT/scripts/lib/setup-linux.sh"
+  printf 'assert_tool_runs kubectl version --client\nassert_tool_runs k3d version\n' > "$ROOT/scripts/lib/setup-macos.sh"   # no helm gate
+  printf 'Assert-ToolRuns -Name "kubectl" -VersionArgs @("version","--client")\nAssert-ToolRuns -Name "k3d" -VersionArgs @("version")\nAssert-ToolRuns -Name "helm" -VersionArgs @("version")\n' >> "$ROOT/scripts/install-k8s.ps1"
+  _drift=0; _drift_execute_gates >/dev/null 2>&1; [ "$_drift" -ge 1 ]
+}
+
+@test "execute-gates: the --rm <path> form is recognized as a gate (#411 review)" {
+  printf 'assert_tool_runs --rm "$TB_TOOLS_DIR/kubectl" kubectl version --client\nassert_tool_runs --rm "$TB_TOOLS_DIR/k3d" k3d version\nassert_tool_runs helm version\n' > "$ROOT/scripts/lib/setup-linux.sh"
+  printf 'assert_tool_runs kubectl version --client\nassert_tool_runs k3d version\nassert_tool_runs helm version\n' > "$ROOT/scripts/lib/setup-macos.sh"
+  printf 'Assert-ToolRuns -Name "kubectl" -VersionArgs @("version","--client")\nAssert-ToolRuns -Name "k3d" -VersionArgs @("version")\nAssert-ToolRuns -Name "helm" -VersionArgs @("version")\n' >> "$ROOT/scripts/install-k8s.ps1"
+  _drift=0; _drift_execute_gates >/dev/null; [ "$_drift" -eq 0 ]
+}
+
+@test "execute-gates: a COMMENTED-OUT gate does NOT count -> drift (Bugbot #411)" {
+  # A gate that lingers only in a comment must not satisfy the check (structured
+  # call extraction, not whole-file grep).
+  printf 'assert_tool_runs kubectl version --client\nassert_tool_runs k3d version\n# assert_tool_runs helm version\n' > "$ROOT/scripts/lib/setup-linux.sh"
+  printf 'assert_tool_runs kubectl version --client\nassert_tool_runs k3d version\nassert_tool_runs helm version\n' > "$ROOT/scripts/lib/setup-macos.sh"
+  printf 'Assert-ToolRuns -Name "kubectl" -VersionArgs @("version","--client")\nAssert-ToolRuns -Name "k3d" -VersionArgs @("version")\n# Assert-ToolRuns -Name "helm" -VersionArgs @("version")\n' >> "$ROOT/scripts/install-k8s.ps1"
+  _drift=0; _drift_execute_gates >/dev/null 2>&1; [ "$_drift" -ge 1 ]
+}
+
 # ── Check 5: preflight download-host parity (#416) ───────────────────────────
 # The check extracts hosts from PROBE ENTRIES only — bash "label|https://host/…"
 # and ps1 @{ label = "…"; url = "https://host/…" } (label REQUIRED on the ps1 line,

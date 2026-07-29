@@ -486,3 +486,50 @@ setup() {
   [ "$status" -eq 124 ]
   [[ "$output" == *"timed out after 1s"* ]]
 }
+
+# ── assert_tool_runs (execute-gate, #411) ────────────────────────────────────
+@test "assert_tool_runs: a working tool passes, binary untouched (#411)" {
+  mkdir -p "$BATS_TEST_TMPDIR/bin"
+  printf '#!/usr/bin/env bash\necho "k3d version v5.9.0"\n' > "$BATS_TEST_TMPDIR/bin/k3d"
+  chmod +x "$BATS_TEST_TMPDIR/bin/k3d"
+  PATH="$BATS_TEST_TMPDIR/bin:$PATH"
+  run assert_tool_runs k3d version
+  [ "$status" -eq 0 ]
+  [ -f "$BATS_TEST_TMPDIR/bin/k3d" ]
+}
+
+@test "assert_tool_runs: a broken tool with --rm errors and removes the binary WE placed (#411)" {
+  mkdir -p "$BATS_TEST_TMPDIR/bin"
+  printf '#!/usr/bin/env bash\nexit 1\n' > "$BATS_TEST_TMPDIR/bin/k3d"
+  chmod +x "$BATS_TEST_TMPDIR/bin/k3d"
+  PATH="$BATS_TEST_TMPDIR/bin:$PATH"
+  run assert_tool_runs --rm "$BATS_TEST_TMPDIR/bin/k3d" k3d version
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"won't run"* ]]
+  [ ! -f "$BATS_TEST_TMPDIR/bin/k3d" ]        # the binary we placed was removed
+}
+
+@test "assert_tool_runs: a broken tool WITHOUT --rm errors but leaves the binary (#411 review)" {
+  # Already-present / pkg-managed path: we didn't place it, so we must not delete it
+  # (deleting a brew symlink just wedges the re-run — reviewer).
+  mkdir -p "$BATS_TEST_TMPDIR/bin"
+  printf '#!/usr/bin/env bash\nexit 1\n' > "$BATS_TEST_TMPDIR/bin/k3d"
+  chmod +x "$BATS_TEST_TMPDIR/bin/k3d"
+  PATH="$BATS_TEST_TMPDIR/bin:$PATH"
+  run assert_tool_runs k3d version
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"won't run"* ]]
+  [ -f "$BATS_TEST_TMPDIR/bin/k3d" ]          # NOT removed — we didn't place it
+}
+
+@test "assert_tool_runs: --rm removes ONLY the binary that actually ran, not a decoy copy (#411 Bugbot)" {
+  # The failing k3d resolves to bin/; --rm points at a different (installer-dir)
+  # copy that did NOT run. The -ef guard must leave that copy alone.
+  mkdir -p "$BATS_TEST_TMPDIR/bin" "$BATS_TEST_TMPDIR/tools"
+  printf '#!/usr/bin/env bash\nexit 1\n' > "$BATS_TEST_TMPDIR/bin/k3d"; chmod +x "$BATS_TEST_TMPDIR/bin/k3d"
+  : > "$BATS_TEST_TMPDIR/tools/k3d"
+  PATH="$BATS_TEST_TMPDIR/bin:$PATH"
+  run assert_tool_runs --rm "$BATS_TEST_TMPDIR/tools/k3d" k3d version
+  [ "$status" -ne 0 ]
+  [ -f "$BATS_TEST_TMPDIR/tools/k3d" ]         # NOT removed — it isn't the binary that ran
+}
