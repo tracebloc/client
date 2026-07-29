@@ -326,3 +326,21 @@ tests:
             value: "cpu=4,memory=16Gi"
           count: 1
 
+
+  - it: does not render PER_INGESTION_TABLES by default (RFC-0003 D16 knob off)
+    asserts:
+      - notContains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: PER_INGESTION_TABLES
+            value: "1"
+
+  - it: renders PER_INGESTION_TABLES=1 when perIngestionTables is enabled
+    set:
+      perIngestionTables: true
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: PER_INGESTION_TABLES
+            value: "1"
