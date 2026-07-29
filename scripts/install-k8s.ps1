@@ -215,11 +215,20 @@ function Invoke-WithHeartbeat {
   )
   $job = Start-Job -ScriptBlock $Script -ArgumentList $ArgumentList -InitializationScript $script:JobInit
   $finished = Wait-JobWithProgress -Job $job -TimeoutSec $TimeoutSec -Message $Message -PollSeconds $PollSeconds
-  $out   = @(Receive-Job $job -ErrorAction SilentlyContinue)
-  $state = $job.State
+  # Capture BOTH output and error records (2>&1) so a failure's real detail
+  # (e.g. the k3d/installer error the scriptblock threw) can be surfaced, not
+  # swallowed (#422 Bugbot). The job's terminating exception is the most reliable
+  # source of the reason.
+  $out    = @(Receive-Job $job -ErrorAction SilentlyContinue 2>&1)
+  $state  = $job.State
+  $reason = $null
+  try { $reason = $job.ChildJobs[0].JobStateInfo.Reason.Message } catch {}
   Remove-Job $job -Force -ErrorAction SilentlyContinue
-  if (-not $finished) { throw "Timed out after ${TimeoutSec}s while: $Message" }
-  if ($state -eq 'Failed') { throw "Failed while: $Message" }
+  if (-not $finished) { throw "Timed out after ${TimeoutSec}s while: ${Message}" }
+  if ($state -eq 'Failed') {
+    $detail = if ($reason) { "$reason" } else { ("$($out -join "`n")").Trim() }
+    throw ("Failed while: ${Message}" + $(if ($detail) { " -- $detail" } else { "" }))
+  }
   return $out
 }
 
@@ -742,10 +751,20 @@ function Install-DockerDesktop {
           }
       }
       # The installer itself runs silent with --quiet; heartbeat it too (#422).
-      Invoke-WithHeartbeat -Message "Installing Docker Desktop" -TimeoutSec 2400 `
-        -ArgumentList @($installer) -Script {
-          param($d); Start-Process -FilePath $d -ArgumentList "install --quiet --accept-license" -Wait
-        } | Out-Null
+      # -ErrorAction Stop + a non-zero exit-code check so a spawn failure or a
+      # failed install throws (job -> Failed) instead of completing as success and
+      # letting Step 2 continue as if Docker was installed (#422 Bugbot).
+      try {
+        Invoke-WithHeartbeat -Message "Installing Docker Desktop" -TimeoutSec 2400 `
+          -ArgumentList @($installer) -Script {
+            param($d)
+            $p = Start-Process -FilePath $d -ArgumentList "install --quiet --accept-license" `
+              -Wait -PassThru -ErrorAction Stop
+            if ($p.ExitCode -ne 0) { throw "Docker Desktop installer exited $($p.ExitCode)" }
+          } | Out-Null
+      } catch {
+        Err "Docker Desktop installation failed. Install it manually from https://www.docker.com/products/docker-desktop/ and re-run." "$_"
+      }
       Remove-Item $installer -Force -ErrorAction SilentlyContinue
     }
     RefreshPath
@@ -1560,8 +1579,10 @@ function New-K3dCluster {
           }
         if ($startOut) { Log "k3d cluster start: $($startOut -join "`n")" }
       } catch {
+        # $_ now carries the real k3d output (Invoke-WithHeartbeat surfaces the
+        # job's failure reason), so pass it as Err detail, not just to the log (#422 Bugbot).
         Log "k3d cluster start failed: $_"
-        Err "Couldn't start the existing '$CLUSTER_NAME' environment. Check Docker is running, then re-run."
+        Err "Couldn't start the existing '$CLUSTER_NAME' environment. Check Docker is running, then re-run." "$_"
       }
       Ok "Compute environment started."
     }

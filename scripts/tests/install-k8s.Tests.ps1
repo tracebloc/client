@@ -64,6 +64,11 @@ Describe "Invoke-WithHeartbeat (#422 no silent window)" {
     (Invoke-WithHeartbeat -Message "tls" -PollSeconds 1 -Script { [Net.ServicePointManager]::SecurityProtocol.ToString() }) |
       Should -Match 'Tls12'
   }
+  It "surfaces the real failure detail, not just a generic message (Bugbot #422)" {
+    # A failed job's real error must reach the caller (log + Err), not be swallowed.
+    { Invoke-WithHeartbeat -Message "op" -PollSeconds 1 -Script { throw "REAL_REASON_XYZ" } } |
+      Should -Throw -ExpectedMessage "*REAL_REASON_XYZ*"
+  }
 }
 
 Describe "Step honesty (#422 split check vs install)" {
@@ -87,6 +92,12 @@ Describe "Step honesty (#422 split check vs install)" {
     # $LASTEXITCODE and throw its captured output ($o) itself.
     $script:SRC | Should -Match 'k3d cluster start \$n'
     $script:SRC | Should -Match 'if \(\$LASTEXITCODE -ne 0\) \{ throw \(\$o'
+  }
+  It "the Docker Desktop installer fails loudly, not silently (Bugbot #422)" {
+    # -ErrorAction Stop on the spawn + a non-zero exit-code throw, so a failed
+    # install doesn't complete the job as success and let Step 2 continue.
+    $script:SRC | Should -Match 'install --quiet --accept-license[\s\S]{0,120}-ErrorAction Stop'
+    $script:SRC | Should -Match '\$p\.ExitCode -ne 0[\s\S]{0,40}throw'
   }
 }
 
