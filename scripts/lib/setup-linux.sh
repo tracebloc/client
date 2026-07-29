@@ -779,6 +779,11 @@ _tier0_gpu_flags() {
 # path is gated behind TB_TIER1_ROOTLESS=1 at the call site until the spike's §5
 # host-validation matrix runs (#1176 / #1177).
 install_rootless_docker() {
+  # Resolve the current user robustly: $USER can be empty in headless / su / cron
+  # contexts (Saqlain review, #452), and the linger call + success line below need a
+  # real name. `id -un` is authoritative; fall back to $USER only if it somehow fails.
+  local _user; _user="$(id -un 2>/dev/null || printf '%s' "${USER:-}")"
+
   # Precondition (minimal this slice): the setuid newuidmap/newgidmap helpers from
   # the `uidmap` package must already be present. We deliberately do NOT
   # blanket-`sudo apt-get install uidmap` — that would reintroduce the very
@@ -834,8 +839,8 @@ install_rootless_docker() {
   # install_docker_engine's start-then-verify). Linger is optional and can fail on
   # polkit-locked hosts even when the daemon is up, so it only warns (Bugbot).
   systemctl --user enable --now docker || true
-  loginctl enable-linger "$USER" \
-    || warn "Couldn't enable linger (optional) — the rootless daemon may not survive logout. Enable it later with:  loginctl enable-linger ${USER}"
+  loginctl enable-linger "$_user" \
+    || warn "Couldn't enable linger (optional) — the rootless daemon may not survive logout. Enable it later with:  loginctl enable-linger ${_user}"
 
   # Point every later docker/k3d call in this run at the rootless socket. docker and
   # k3d both read DOCKER_HOST from the environment, so exporting it is sufficient
@@ -853,7 +858,7 @@ install_rootless_docker() {
     _bounded 15 docker info || true
     error "Rootless Docker didn't come up on ${DOCKER_HOST} (daemon output above). See https://docs.docker.com/engine/security/rootless/ for kernel/uidmap prerequisites."
   fi
-  success "Rootless Docker is running as ${USER} — no administrator rights were used."
+  success "Rootless Docker is running as ${_user} — no administrator rights were used."
 }
 
 install_linux() {

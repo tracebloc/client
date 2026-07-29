@@ -893,6 +893,7 @@ _stub_install_steps() {
   XDG_RUNTIME_DIR=/run/user/1000
   systemctl() { record "systemctl $*"; }
   loginctl()  { record "loginctl $*"; }
+  id()        { [ "${1:-}" = "-un" ] && echo testuser || echo "testuser docker"; }  # id -un → clean username (#452)
   install_rootless_docker                              # called directly to observe the exported DOCKER_HOST
   mock_calls | grep -q "dockerd-rootless-setuptool.sh install"
   mock_calls | grep -q "systemctl --user enable --now docker"
