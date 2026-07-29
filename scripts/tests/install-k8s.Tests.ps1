@@ -1506,8 +1506,9 @@ Describe "In-node CA trust for TLS-inspecting networks (#424)" {
       try {
         $raw = Get-Content $p -Raw
         $raw | Should -Match 'registry-1\.docker\.io'
+        $raw | Should -Match 'auth\.docker\.io'      # Docker Hub token host (Bugbot #424)
         $raw | Should -Match 'ghcr\.io'
-        ([regex]::Matches($raw, [regex]::Escape('ca_file: "/etc/ssl/certs/tracebloc-mitm-ca.crt"'))).Count | Should -Be 3
+        ([regex]::Matches($raw, [regex]::Escape('ca_file: "/etc/ssl/certs/tracebloc-mitm-ca.crt"'))).Count | Should -Be 4
       } finally { Remove-Item (Split-Path $p -Parent) -Recurse -Force -ErrorAction SilentlyContinue }
     }
   }

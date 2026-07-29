@@ -1082,7 +1082,7 @@ function Write-K3dProxyConfig {
 # and get masked into a generic "an image couldn't be pulled". When the operator
 # supplies the CA bundle we mount it into every node and point containerd at it
 # per-registry. Mirrors scripts/lib/cluster.sh (drift check: check-drift.sh).
-$script:TbCaRegistries = @('docker.io','registry-1.docker.io','ghcr.io')
+$script:TbCaRegistries = @('docker.io','registry-1.docker.io','auth.docker.io','ghcr.io')
 
 # Return the operator's CA bundle path (absolute) when TRACEBLOC_CA_BUNDLE or
 # CURL_CA_BUNDLE is set and readable; $null when neither is set. Err (hard) when a

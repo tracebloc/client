@@ -120,7 +120,7 @@ _write_k3d_proxy_config() {
 
 # The registries the cluster pulls from; behind a break-and-inspect proxy each
 # needs the corporate CA to validate the intercepted cert.
-TB_CA_REGISTRIES=(docker.io registry-1.docker.io ghcr.io)
+TB_CA_REGISTRIES=(docker.io registry-1.docker.io auth.docker.io ghcr.io)
 
 # Echo the operator's CA bundle path (absolute) when TRACEBLOC_CA_BUNDLE or
 # CURL_CA_BUNDLE is set and readable. If a var is set but the file is unreadable,

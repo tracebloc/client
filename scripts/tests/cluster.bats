@@ -468,8 +468,9 @@ setup() {
   [ "$status" -eq 0 ]
   local cfg="$output"
   grep -q 'registry-1.docker.io' "$cfg"
+  grep -q 'auth.docker.io' "$cfg"      # Docker Hub token host — also TLS-handshakes (Bugbot #424)
   grep -q 'ghcr.io' "$cfg"
-  [ "$(grep -c 'ca_file: "/etc/ssl/certs/tracebloc-mitm-ca.crt"' "$cfg")" -eq 3 ]
+  [ "$(grep -c 'ca_file: "/etc/ssl/certs/tracebloc-mitm-ca.crt"' "$cfg")" -eq 4 ]
   rm -rf "${cfg%/*}"
 }
 
