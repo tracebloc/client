@@ -89,7 +89,29 @@ YAML
   _drift=0; _drift_workload_names >/dev/null 2>&1; [ "$_drift" -eq 0 ]
 }
 
-# ── Check 4: tool execute-gate parity (#411) ─────────────────────────────────
+# ── Check 4: in-node CA trust parity (#424) ──────────────────────────────────
+@test "ca trust: both installers wire the CA -> no drift (#424)" {
+  printf 'TRACEBLOC_CA_BUNDLE CURL_CA_BUNDLE _resolve_ca_bundle --registry-config tracebloc-mitm-ca.crt\n' > "$ROOT/scripts/lib/cluster.sh"
+  printf 'TRACEBLOC_CA_BUNDLE CURL_CA_BUNDLE Resolve-CaBundle --registry-config tracebloc-mitm-ca.crt\n' > "$ROOT/scripts/install-k8s.ps1"
+  _drift=0; _drift_ca_trust >/dev/null; [ "$_drift" -eq 0 ]
+}
+
+@test "ca trust: an installer missing the registry-config -> drift (#424)" {
+  printf 'TRACEBLOC_CA_BUNDLE CURL_CA_BUNDLE _resolve_ca_bundle --registry-config tracebloc-mitm-ca.crt\n' > "$ROOT/scripts/lib/cluster.sh"
+  # ps1 missing --registry-config
+  printf 'TRACEBLOC_CA_BUNDLE CURL_CA_BUNDLE Resolve-CaBundle tracebloc-mitm-ca.crt\n' > "$ROOT/scripts/install-k8s.ps1"
+  _drift=0; _drift_ca_trust >/dev/null 2>&1; [ "$_drift" -ge 1 ]
+}
+
+@test "ca trust: --registry-config only in a COMMENT does NOT count -> drift (Bugbot #424)" {
+  # The functional wiring is gone; the token lingers only in a comment. A whole-file
+  # grep would pass — the comment-stripping check must still flag it.
+  printf '# uses --registry-config to point containerd at the CA\nTRACEBLOC_CA_BUNDLE CURL_CA_BUNDLE _resolve_ca_bundle tracebloc-mitm-ca.crt\n' > "$ROOT/scripts/lib/cluster.sh"
+  printf 'TRACEBLOC_CA_BUNDLE CURL_CA_BUNDLE Resolve-CaBundle --registry-config tracebloc-mitm-ca.crt\n' > "$ROOT/scripts/install-k8s.ps1"
+  _drift=0; _drift_ca_trust >/dev/null 2>&1; [ "$_drift" -ge 1 ]
+}
+
+# ── Check 4b: tool execute-gate parity (#411) ────────────────────────────────
 @test "execute-gates: all installers gate all tools -> no drift (#411)" {
   printf 'assert_tool_runs kubectl version --client\nassert_tool_runs k3d version\nassert_tool_runs helm version --short\n' > "$ROOT/scripts/lib/setup-linux.sh"
   printf 'assert_tool_runs kubectl version --client\nassert_tool_runs k3d version\nassert_tool_runs helm version --short\n' > "$ROOT/scripts/lib/setup-macos.sh"
