@@ -582,6 +582,45 @@ _check_existing_cluster_ca() {
   fi
 }
 
+# When `k3d cluster create` fails, one cause on a TLS-inspecting network is the
+# HOST Docker daemon hitting x509 while pulling k3d's OWN runtime images
+# (rancher/k3s, k3d-tools, k3d-proxy) — a different surface than the in-node CA
+# trust (#424), which only covers containerd INSIDE the nodes. The node CA mount
+# can't fix the host daemon, and this failure happens before any node boots, so
+# the post-create _diagnose_not_ready never sees it. Detect x509 in the create
+# output and name it with a platform-specific remedy (#474). No-op unless the
+# output actually shows a TLS-verification failure.
+_host_ca_create_hint() {
+  local out="$1"
+  # Herestring, not a pipe: under `set -o pipefail`, `grep -q` closes the pipe on
+  # first match, and for output past the ~64KB pipe buffer (reachable on the
+  # timeout path, which passes the full logs) printf takes SIGPIPE → the pipeline
+  # exits non-zero → `|| return 0` would bail even though x509 matched (reviewer).
+  grep -qiE 'x509|certificate signed by unknown authority|tls: failed to verify' <<<"$out" || return 0
+  echo ""
+  warn "The Docker daemon couldn't pull k3d's runtime images — TLS verification failed (x509)."
+  hint "k3d pulls rancher/k3s, k3d-tools and k3d-proxy with the HOST Docker daemon, which does"
+  hint "not use the in-node CA trust (TRACEBLOC_CA_BUNDLE) this installer configures — the daemon"
+  hint "itself has to trust your corporate CA:"
+  if [[ "${OS:-}" == "Linux" ]]; then
+    hint "  Native Docker — add the CA to the system trust store (use your distro's path):"
+    hint "    Debian/Ubuntu: sudo cp <corporate-ca>.pem /usr/local/share/ca-certificates/tracebloc-corp-ca.crt && sudo update-ca-certificates"
+    hint "    RHEL/Fedora:   sudo cp <corporate-ca>.pem /etc/pki/ca-trust/source/anchors/tracebloc-corp-ca.crt && sudo update-ca-trust"
+    hint "    then restart Docker: sudo systemctl restart docker"
+    hint "  Docker Desktop for Linux — the daemon runs in a VM: add the CA to the system trust"
+    hint "    store as above, then restart Docker Desktop (it re-reads the host trust store on start)."
+  else
+    hint "  Docker Desktop (macOS): the daemon runs in a VM the installer can't reach. Add the CA"
+    hint "    to the macOS keychain and set it to 'Always Trust', then restart Docker Desktop —"
+    hint "    it reads the host keychain on start."
+    hint "  Colima (headless macOS): the daemon runs in a Lima VM that does NOT read the keychain —"
+    hint "    add the CA inside the VM ('colima ssh', copy the PEM into the VM's trust store and"
+    hint "    refresh it), then 'colima restart'."
+  fi
+  hint "  Details: docs/INSTALL.md (\"TLS-inspecting network\") and https://docs.docker.com/."
+  echo ""
+}
+
 # An externally-created cluster may bind its API to 0.0.0.0 rather than the
 # 127.0.0.1 this installer uses. _merge_kubeconfig normalizes the kubeconfig
 # (→127.0.0.1) so reuse still works, but we warn so the user understands their
@@ -805,6 +844,10 @@ _create_new_cluster() {
       spin "$!" "Removing the partially created environment…" 120 \
         || warn "Couldn't remove the partial cluster - run 'k3d cluster delete $CLUSTER_NAME' before re-running."
     fi
+    # Host-daemon x509 (k3d runtime image pull on a TLS-inspecting network, #474)
+    # — name it before dumping the raw k3d error. Empty output (e.g. the timeout
+    # kill above) simply produces no hint.
+    _host_ca_create_hint "$(cat "$create_out" 2>/dev/null)"
     cat "$create_out" >> "${LOG_FILE:-/dev/null}" 2>/dev/null
     cat "$create_out" >&2
     rm -f "$create_out"

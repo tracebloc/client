@@ -38,6 +38,13 @@ On **Linux**, the installer also fetches tooling from `get.docker.com`, `raw.git
 
 **Behind a corporate proxy?** Set `HTTP_PROXY` / `HTTPS_PROXY` before running (the installer auto-augments `NO_PROXY` with the cluster-internal ranges). On a **TLS-inspecting** (break-and-inspect) network, also point the installer at your corporate CA bundle with **`TRACEBLOC_CA_BUNDLE=/path/to/corporate-ca.pem`** (a PEM file; `CURL_CA_BUNDLE` is also honored). The installer mounts it into the k3d nodes and configures containerd to trust it, so in-cluster image pulls don't fail `x509: certificate signed by unknown authority`. Without it, the install stops with a message naming the CA and the env var — never a generic "image couldn't be pulled." Ask your IT team for the bundle if unsure.
 
+> **Also trust the CA in the Docker daemon itself.** `TRACEBLOC_CA_BUNDLE` fixes pulls made *inside* the cluster, but k3d first pulls its **own** runtime images (`rancher/k3s`, `k3d-tools`, `k3d-proxy`) using the **host Docker daemon**, which doesn't read that variable. On a TLS-inspecting network that pull can fail `x509` during `k3d cluster create`, before any node boots — the installer detects this and points you here. Fix it once, at the daemon:
+> - **Linux (native Docker)** — add the CA to your distro's system trust store, then `sudo systemctl restart docker`:
+>   - Debian/Ubuntu: `sudo cp <corporate-ca>.pem /usr/local/share/ca-certificates/tracebloc-corp-ca.crt && sudo update-ca-certificates`
+>   - RHEL/Fedora: `sudo cp <corporate-ca>.pem /etc/pki/ca-trust/source/anchors/tracebloc-corp-ca.crt && sudo update-ca-trust`
+> - **Docker Desktop (macOS / Windows / Linux):** the daemon runs in a VM the installer can't reach. Trust the CA in the host OS store — the **macOS keychain** (set "Always Trust"), the **Windows Trusted Root** store (`certlm.msc`), or the **Linux system trust store** (the native-Docker commands above) — then restart Docker Desktop, which re-reads the host store on start. See [docs.docker.com](https://docs.docker.com/).
+> - **Colima (headless macOS):** the daemon runs in a Lima VM that does **not** read the macOS keychain. Add the CA *inside* the VM — `colima ssh`, copy the PEM into the VM's system trust store and refresh it — then `colima restart`.
+
 ---
 
 ## 1. Add the Helm repository (recommended for production)

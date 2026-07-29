@@ -1549,6 +1549,26 @@ Describe "In-node CA trust for TLS-inspecting networks (#424)" {
     }
   }
 
+  Context "Write-HostCaCreateHint (host daemon x509 at create, #474)" {
+    It "no x509 in output -> silent" {
+      $out = Write-HostCaCreateHint -Output "FATA Failed to create cluster: docker not running" 6>&1 | Out-String
+      $out.Trim() | Should -BeNullOrEmpty
+    }
+    It "x509 in output -> names the host daemon + Windows trust store" {
+      $out = Write-HostCaCreateHint -Output 'Failed to pull image "rancher/k3s": x509: certificate signed by unknown authority' 6>&1 | Out-String
+      $out | Should -Match 'HOST Docker daemon'
+      $out | Should -Match 'Trusted Root'
+    }
+    It "the create-timeout path captures full output and surfaces the hint (Bugbot #474 parity)" {
+      # The timeout branch can't be exercised end-to-end here, so assert the wiring:
+      # it captures the full logs before deleting them and calls the hint before Err
+      # (bash runs _host_ca_create_hint on its timeout fall-through too).
+      $src = Get-Content "$PSScriptRoot/../install-k8s.ps1" -Raw
+      $src | Should -Match '\$timeoutOut\s*\+='                       # full output captured
+      $src | Should -Match 'Write-HostCaCreateHint -Output \$timeoutOut'  # hint called on timeout
+    }
+  }
+
   Context "Print-Summary CA message" {
     It "names the CA problem + env var, not a generic pull error" {
       $script:ClientState = "image_pull_ca"
