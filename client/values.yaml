@@ -748,6 +748,24 @@ imageRefresh:
       memory: "128Mi"
 
 # ============================================================
+# Per-ingestion dataset tables (RFC-0003 D16 — backend#1204 / backend#1205)
+# ============================================================
+# When true, jobs-manager stamps PER_INGESTION_TABLES=1 into every ingestion
+# Job it spawns: each ingest run then writes its own IMMUTABLE physical table
+# ds_<uuid4 hex> (append disabled) and reports the handle to the backend,
+# which resolves it into the experiment payload (data_info.tables) for the
+# training read path and for per-experiment grant scoping.
+#
+# FLIP PER ENVIRONMENT, dev first — and only once that environment's
+# backend, engine images, and jobs-manager all carry the D-series (merged to
+# develop 2026-07-29). An edge flipped early ingests datasets its training
+# path cannot locate. File-bearing categories (images/text) are refused
+# under the flag until the per-dataset mount work (client-runtime#203
+# phase 2) — row-only categories (tabular / time-series) are the v1 target.
+# Default false: legacy shared label-named tables, byte-for-byte.
+perIngestionTables: false
+
+# ============================================================
 # Ingestion endpoint authorization (client-runtime#21)
 # ============================================================
 # jobs-manager's POST /internal/submit-ingestion-run authenticates callers
@@ -764,22 +782,6 @@ imageRefresh:
 #       - service_account: my-dataset-ingestor
 #         namespace: tracebloc
 #         table_prefixes: ["chest_xrays_", "tumors_"]
-# -- RFC-0003 D16: per-ingestion dataset tables (backend#1204 / backend#1205).
-# When true, jobs-manager stamps PER_INGESTION_TABLES=1 into every ingestion
-# Job it spawns: each ingest run then writes its own IMMUTABLE physical table
-# ds_<uuid4 hex> (append disabled) and reports the handle to the backend,
-# which resolves it into the experiment payload (data_info.tables) for the
-# training read path and for per-experiment grant scoping.
-#
-# FLIP PER ENVIRONMENT, dev first — and only once that environment's
-# backend, engine images, and jobs-manager all carry the D-series (merged to
-# develop 2026-07-29). An edge flipped early ingests datasets its training
-# path cannot locate. File-bearing categories (images/text) are refused
-# under the flag until the per-dataset mount work (client-runtime#203
-# phase 2) — row-only categories (tabular / time-series) are the v1 target.
-# Default false: legacy shared label-named tables, byte-for-byte.
-perIngestionTables: false
-
 ingestionAuthz:
   # -- Name of the shared ServiceAccount this chart creates for ingestor
   # subchart releases (client#129). Single source of truth: the SA

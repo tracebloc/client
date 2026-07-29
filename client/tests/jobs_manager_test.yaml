@@ -326,7 +326,6 @@ tests:
             value: "cpu=4,memory=16Gi"
           count: 1
 
-
   - it: does not render PER_INGESTION_TABLES by default (RFC-0003 D16 knob off)
     asserts:
       - notContains:
