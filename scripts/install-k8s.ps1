@@ -1603,25 +1603,31 @@ function New-K3dCluster {
       Ok "Compute environment already running."
     } else {
       Log "Cluster '$CLUSTER_NAME' exists but stopped -- starting..."
-      # Route k3d's raw INFO[...] through the style system (#422): run with a
-      # heartbeat and capture the output to the log instead of streaming raw lines.
+      # Run k3d start as a killable tracked PROCESS with a deadline (a background
+      # job would orphan the native k3d child on timeout, #422 Bugbot), capturing
+      # its raw INFO[...] to temp files so it goes to the log, not streamed to the
+      # console. Exit code + timeout are both checked so a failed start Errs with
+      # the real reason instead of falsely reporting "started".
+      $startOutFile = Join-Path $env:TEMP "k3d-start-$(Get-Random).log"
+      $startErrFile = Join-Path $env:TEMP "k3d-start-err-$(Get-Random).log"
+      $sp = $null
       try {
-        $startOut = Invoke-WithHeartbeat -Message "Starting your secure environment" -TimeoutSec 300 `
-          -ArgumentList @($CLUSTER_NAME) -Script {
-            param($n)
-            $o = k3d cluster start $n 2>&1
-            # A native non-zero exit leaves the job state 'Completed', so it must
-            # throw to surface as a failure (else the installer reports "started"
-            # on a stopped cluster, #422 Bugbot). Throw carries the output.
-            if ($LASTEXITCODE -ne 0) { throw ($o | Out-String) }
-            $o
-          }
-        if ($startOut) { Log "k3d cluster start: $($startOut -join "`n")" }
+        $sp = Start-Process -FilePath "k3d" -ArgumentList @("cluster","start",$CLUSTER_NAME) `
+          -NoNewWindow -PassThru -ErrorAction Stop `
+          -RedirectStandardOutput $startOutFile -RedirectStandardError $startErrFile
       } catch {
-        # $_ now carries the real k3d output (Invoke-WithHeartbeat surfaces the
-        # job's failure reason), so pass it as Err detail, not just to the log (#422 Bugbot).
-        Log "k3d cluster start failed: $_"
-        Err "Couldn't start the existing '$CLUSTER_NAME' environment. Check Docker is running, then re-run." "$_"
+        Remove-Item $startOutFile, $startErrFile -Force -ErrorAction SilentlyContinue
+        Err "Couldn't start the existing '$CLUSTER_NAME' environment (k3d wouldn't start). Check Docker is running, then re-run." "$_"
+      }
+      $startTimedOut = -not (Wait-ProcessWithDeadline -Process $sp -Deadline (Get-Date).AddMinutes(5) -Message "Starting your secure environment")
+      $startLog = (("$(Get-Content $startErrFile -Raw -ErrorAction SilentlyContinue)`n$(Get-Content $startOutFile -Raw -ErrorAction SilentlyContinue)")).Trim()
+      Remove-Item $startOutFile, $startErrFile -Force -ErrorAction SilentlyContinue
+      if ($startLog) { Log "k3d cluster start: $startLog" }
+      if ($startTimedOut) {
+        Err "Starting the existing '$CLUSTER_NAME' environment timed out (k3d stopped). Check Docker is running, then re-run." $startLog
+      }
+      if ($sp.ExitCode -ne 0) {
+        Err "Couldn't start the existing '$CLUSTER_NAME' environment. Check Docker is running, then re-run." $startLog
       }
       Ok "Compute environment started."
     }

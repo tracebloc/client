@@ -80,18 +80,18 @@ Describe "Step honesty (#422 split check vs install)" {
   It "has a dedicated 'Installing system tools' step" {
     $script:SRC | Should -Match 'Step 2 6 "Installing system tools"'
   }
-  It "the k3d start path does not stream raw output (routed via heartbeat)" {
-    # The old bare form streamed k3d's INFO[...] to the console; it must be gone,
-    # replaced by the captured job form (k3d cluster start `$n) inside the heartbeat.
+  It "the k3d start path runs as a killable process with output to the log, not streamed (Bugbot #422)" {
+    # No bare streaming form; k3d start is a tracked process with its raw INFO[...]
+    # redirected to temp files (logged), so nothing streams to the console.
     $script:SRC | Should -Not -Match '(?m)^\s*k3d cluster start \$CLUSTER_NAME\s*$'
-    $script:SRC | Should -Match 'k3d cluster start \$n'
+    $script:SRC | Should -Match 'Start-Process -FilePath "k3d" -ArgumentList @\("cluster","start"'
+    $script:SRC | Should -Match 'RedirectStandardError \$startErrFile'
   }
-  It "k3d start throws on a non-zero exit so a stopped cluster isn't reported started (Bugbot #422)" {
-    # Invoke-WithHeartbeat only throws on job Failed/timeout; a native non-zero
-    # exit leaves the job Completed, so the start scriptblock must check
-    # $LASTEXITCODE and throw its captured output ($o) itself.
-    $script:SRC | Should -Match 'k3d cluster start \$n'
-    $script:SRC | Should -Match 'if \(\$LASTEXITCODE -ne 0\) \{ throw \(\$o'
+  It "k3d start Errs on timeout or non-zero exit, never a false 'started' (Bugbot #422)" {
+    # A deadline that KILLS the process (no orphan) plus an exit-code check both
+    # gate the "started" line.
+    $script:SRC | Should -Match 'Wait-ProcessWithDeadline -Process \$sp'
+    $script:SRC | Should -Match '\$sp\.ExitCode -ne 0'
   }
   It "the Docker installer runs as a killable process, not an orphan-prone job (Bugbot #422)" {
     # Start-Process -PassThru + Wait-ProcessWithDeadline (kills on timeout) + an
