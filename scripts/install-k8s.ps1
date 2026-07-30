@@ -626,9 +626,15 @@ function Enable-OneVirtFeature {
 # legacy/absent WSL errors or prints nothing. Returns $true when WSL is already
 # installed and current enough that no update is needed (#414). Takes the command
 # output as a parameter so it's unit-testable without WSL present.
+#
+# Match the version NUMBER, not the English "WSL version:" label -- `wsl --version`
+# localizes its labels (e.g. Japanese "WSL バージョン:"), so label-matching would
+# fail skip-when-current on non-English Windows (#414 Bugbot). Modern WSL always
+# prints dotted version numbers (e.g. 2.3.26.0); legacy/absent WSL errors out with
+# none.
 function Test-WslCurrent {
   param([string]$VersionOutput)
-  return [bool]($VersionOutput -match '(?im)^\s*WSL version:\s*\d+\.\d+')
+  return [bool]($VersionOutput -match '\d+\.\d+\.\d+')
 }
 
 # Update WSL in a way that survives Store-blocked corporate networks (#414):

@@ -1112,6 +1112,10 @@ Describe "Test-WslCurrent (#414 skip-when-current)" {
   It "legacy error text (no version block) -> not current" {
     Test-WslCurrent -VersionOutput "Windows Subsystem for Linux has no installed distributions." | Should -BeFalse
   }
+  It "non-English (localized) label still detected via the version number (Bugbot #414)" {
+    # `wsl --version` localizes the label; match the dotted version, not "WSL version:".
+    Test-WslCurrent -VersionOutput "WSL バージョン: 2.3.26.0`nカーネル バージョン: 5.15.167.4-1" | Should -BeTrue
+  }
 }
 
 Describe "Update-Wsl / WSL install (#414 Store-blocked fallback)" {
