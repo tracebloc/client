@@ -101,11 +101,6 @@ _reboot_note() {
   if [[ "$OS" != "Linux" ]]; then
     # macOS/Windows: Docker Desktop owns boot autostart and must be launched.
     echo -e "  ${DIM}After a reboot, open Docker Desktop to bring tracebloc back.${RESET}"
-  elif [[ "${TB_ROOTLESS_NO_LINGER:-0}" == "1" ]]; then
-    # Rootless daemon started via nohup on a host with no per-user systemd (#1222):
-    # there's no linger to bring it back, so don't pretend autostart is set — be
-    # explicit it won't return on its own and how to restart it.
-    echo -e "  ${DIM}After a reboot, tracebloc will NOT restart automatically (no per-user systemd on this host); restart the rootless daemon with 'XDG_RUNTIME_DIR=${TB_ROOTLESS_RUNTIME_DIR:-\$XDG_RUNTIME_DIR} nohup dockerd-rootless.sh &', then re-run the installer.${RESET}"
   elif [[ "${TB_DOCKER_AUTOSTART:-0}" == "1" ]]; then
     # docker.service is enabled on boot (ensure_cluster_autostart) and the k3d
     # nodes carry --restart unless-stopped → the cluster returns on its own.

@@ -960,22 +960,17 @@ _stub_install_steps() {
 
 # ── no-systemd fallback + Tier-2 fall-through (RFC 0001 #1222) ────────────────
 
-@test "install_rootless_docker: no user-systemd -> nohup fallback, no systemctl enable, no linger promise (#1222)" {
+@test "install_rootless_docker: no user-systemd -> Tier-2 prepare-host fall-through (nohup fallback descoped, #1222)" {
   MOCK_CALLS="$(mktemp)"
-  PRESENT_CMDS="newuidmap newgidmap dockerd-rootless-setuptool.sh dockerd-rootless.sh docker"
-  XDG_RUNTIME_DIR="$BATS_TEST_TMPDIR/run"; mkdir -p "$XDG_RUNTIME_DIR"
-  HOME="$BATS_TEST_TMPDIR"
+  PRESENT_CMDS="newuidmap newgidmap dockerd-rootless-setuptool.sh docker"
+  XDG_RUNTIME_DIR=/run/user/1000; HOME="$BATS_TEST_TMPDIR"
   systemctl() { record "systemctl $*"; }                 # is-system-running → empty ⇒ no user manager
   loginctl()  { record "loginctl $*"; }
-  _launch_dockerd_rootless() { record "launch dockerd-rootless"; }   # stub the raw nohup start
-  docker()    { return 0; }                              # daemon answers immediately (poll breaks first try)
-  install_rootless_docker
-  mock_calls | grep -q "launch dockerd-rootless"                     # nohup launcher invoked
-  ! mock_calls | grep -q "systemctl --user enable"                   # systemd path NOT taken
-  ! mock_calls | grep -q "loginctl enable-linger"                    # no linger without user-systemd
-  [ "${TB_ROOTLESS_NO_LINGER:-0}" = "1" ]                            # honest: autostart not guaranteed
-  [ "$TB_ROOTLESS_RUNTIME_DIR" = "$XDG_RUNTIME_DIR" ]                # exact dir recorded for persist + restart (#485)
-  [ "$DOCKER_HOST" = "unix://${XDG_RUNTIME_DIR}/docker.sock" ]
+  run install_rootless_docker
+  [ "$status" -ne 0 ]                                    # routes to Tier-2 and exits (no blind nohup bring-up)
+  [[ "$output" == *"prepare-host"* ]]                    # the Tier-2 remedy
+  [[ "$output" == *"no per-user systemd"* ]]             # names the reason
+  ! mock_calls | grep -q "systemctl --user enable"       # never attempted the user-systemd bring-up
 }
 
 @test "install_rootless_docker: daemon never Ready -> Tier-2 prepare-host fall-through, not a silent proceed (#1222)" {
@@ -987,22 +982,6 @@ _stub_install_steps() {
   docker()    { return 1; }                              # daemon never answers on the socket
   run install_rootless_docker
   [ "$status" -ne 0 ]                                    # exits via fall-through, not onward
-  [[ "$output" == *"prepare-host"* ]]                    # routes to the Tier-2 remedy
-}
-
-@test "install_rootless_docker: no user-systemd + nohup daemon never answers -> no false 'Started' claim, honest Tier-2 (#485 r2)" {
-  MOCK_CALLS="$(mktemp)"
-  PRESENT_CMDS="newuidmap newgidmap dockerd-rootless-setuptool.sh dockerd-rootless.sh docker"
-  XDG_RUNTIME_DIR="$BATS_TEST_TMPDIR/run"; mkdir -p "$XDG_RUNTIME_DIR"
-  HOME="$BATS_TEST_TMPDIR"
-  systemctl() { :; }                                     # no user manager -> nohup path
-  loginctl()  { :; }
-  _launch_dockerd_rootless() { :; }                      # "launched" but the daemon never comes up
-  docker()    { return 1; }                              # every poll + the shared verify fail
-  sleep()     { :; }                                     # don't actually wait out the 30-try poll
-  run install_rootless_docker
-  [ "$status" -ne 0 ]                                    # honest fall-through, not a silent proceed
-  [[ "$output" != *"Started rootless Docker"* ]]         # NO "Started …" claim on a failed bring-up
   [[ "$output" == *"prepare-host"* ]]                    # routes to the Tier-2 remedy
 }
 
@@ -1474,21 +1453,6 @@ _stub_install_steps() {
   [ "$output" = "1" ]
 }
 
-@test "_persist_docker_host: no-systemd nohup path persists a GUARDED runtime dir — resolves our socket without clobbering a session XDG (#485)" {
-  INSTALL_TIER=1; TB_TIER1_ROOTLESS=1
-  HOME="$(mktemp -d)"; SHELL=/bin/bash; OS=Linux
-  TB_ROOTLESS_RUNTIME_DIR="$HOME/.tracebloc-rootless-run"   # the $HOME fallback dir the nohup path chose
-  _persist_docker_host
-  run cat "$HOME/.bashrc"
-  [[ "$output" == *"export XDG_RUNTIME_DIR=\"\${XDG_RUNTIME_DIR:-$HOME/.tracebloc-rootless-run}\""* ]]  # guarded, NOT a bare export (#485 r3)
-  # (a) no-systemd host (XDG unset): resolves DOCKER_HOST to the SAME socket the install used.
-  run bash -c "unset XDG_RUNTIME_DIR; . '$HOME/.bashrc'; printf '%s' \"\$DOCKER_HOST\""
-  [ "$output" = "unix://$HOME/.tracebloc-rootless-run/docker.sock" ]
-  # (b) systemd host sharing this home: a pre-set pam/systemd XDG is PRESERVED, not clobbered.
-  run bash -c "export XDG_RUNTIME_DIR=/run/user/1000; . '$HOME/.bashrc'; printf '%s' \"\$XDG_RUNTIME_DIR\""
-  [ "$output" = "/run/user/1000" ]
-}
-
 @test "_persist_docker_host: flag OFF -> no-op (no rc write)" {
   INSTALL_TIER=1; unset TB_TIER1_ROOTLESS
   HOME="$(mktemp -d)"; SHELL=/bin/bash; OS=Linux
@@ -1507,35 +1471,3 @@ _stub_install_steps() {
   [ "$(grep -c 'DOCKER_HOST=' "$HOME/.bashrc")" -eq 1 ]           # we did NOT append the rootless line
 }
 
-@test "_persist_docker_host: systemd→nohup re-run rewrites the block atomically — XDG added, DOCKER_HOST fallback fixed, no dupes (#485 r4)" {
-  INSTALL_TIER=1; TB_TIER1_ROOTLESS=1
-  HOME="$(mktemp -d)"; SHELL=/bin/bash; OS=Linux
-  # A PRIOR systemd-path persist: our block with the /run/user fallback and NO XDG line.
-  { printf '%s\n' '# >>> tracebloc rootless Docker socket (RFC 0001 #1221) >>>'
-    printf '%s\n' 'export DOCKER_HOST="unix://${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/docker.sock"'
-    printf '%s\n' '# <<< tracebloc rootless Docker socket (RFC 0001 #1221) <<<'; } > "$HOME/.bashrc"
-  TB_ROOTLESS_RUNTIME_DIR="$HOME/.tracebloc-rootless-run"   # re-run now takes the nohup path
-  _persist_docker_host
-  grep -qF 'export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-'"$HOME/.tracebloc-rootless-run"'}"' "$HOME/.bashrc"   # XDG line now added
-  grep -qF "unix://\${XDG_RUNTIME_DIR:-$HOME/.tracebloc-rootless-run}/docker.sock" "$HOME/.bashrc"           # DOCKER_HOST fallback repointed
-  [ "$(grep -c 'DOCKER_HOST=' "$HOME/.bashrc")" -eq 1 ]          # not duplicated
-  [ "$(grep -cF '>>> tracebloc' "$HOME/.bashrc")" -eq 1 ]        # single managed block, not stacked
-  run bash -c "unset XDG_RUNTIME_DIR; . '$HOME/.bashrc'; printf '%s' \"\$DOCKER_HOST\""
-  [ "$output" = "unix://$HOME/.tracebloc-rootless-run/docker.sock" ]   # fresh no-systemd shell reaches the $HOME socket
-}
-
-@test "_launch_dockerd_rootless: detaches stdin (</dev/null) so a curl|bash pipe isn't consumed (#485 r4)" {
-  grep -qF 'nohup dockerd-rootless.sh </dev/null' "$BATS_TEST_DIRNAME/../lib/setup-linux.sh"
-}
-
-@test "_persist_docker_host: preserves unrelated rc content and does NOT eat past a malformed (END-less) block (self-review)" {
-  INSTALL_TIER=1; TB_TIER1_ROOTLESS=1
-  HOME="$(mktemp -d)"; SHELL=/bin/bash; OS=Linux
-  { printf '%s\n' 'alias ll="ls -la"'                                            # user content BEFORE
-    printf '%s\n' '# >>> tracebloc rootless Docker socket (RFC 0001 #1221) >>>'   # malformed: BEGIN, no END
-    printf '%s\n' 'export MY_CUSTOM=1'; } > "$HOME/.bashrc"                       # content the strip must NOT eat
-  _persist_docker_host
-  grep -qF 'alias ll="ls -la"' "$HOME/.bashrc"     # pre-existing content preserved
-  grep -qF 'export MY_CUSTOM=1' "$HOME/.bashrc"    # content past the END-less marker NOT eaten
-  grep -qF 'DOCKER_HOST=' "$HOME/.bashrc"          # our line still appended
-}

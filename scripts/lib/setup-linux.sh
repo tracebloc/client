@@ -776,54 +776,26 @@ _persist_docker_host() {
     return 0
   fi
   local rc; rc="$(_tools_rc_for_shell)"
-  # A BEGIN/END-delimited block we own and rewrite atomically each run, so it stays
-  # correct across a systemd→nohup re-run on a shared home (Bugbot #485 r4) instead of
-  # appending stale lines in the wrong order.
-  local begin='# >>> tracebloc rootless Docker socket (RFC 0001 #1221) >>>'
-  local end='# <<< tracebloc rootless Docker socket (RFC 0001 #1221) <<<'
-
-  # A DOCKER_HOST the user set OUTSIDE our block → don't clobber; warn once so they know
-  # new shells won't reach the rootless daemon until they repoint it (Asad + Bugbot #478).
-  if [ -f "$rc" ] && ! grep -qF "$begin" "$rc" 2>/dev/null \
-     && grep -qE '^[[:space:]]*(export[[:space:]]+)?DOCKER_HOST=' "$rc" 2>/dev/null; then
+  local marker='# Added by tracebloc installer (RFC 0001 #1221): rootless Docker socket'
+  # Our own prior line → idempotent, nothing to do. Key off OUR marker, not a bare
+  # 'DOCKER_HOST=' probe (that also matched a user's own DOCKER_HOST and silently skipped
+  # — Asad + Bugbot #478).
+  if [ -f "$rc" ] && grep -qF "$marker" "$rc" 2>/dev/null; then return 0; fi
+  # A DOCKER_HOST the user set themselves → don't clobber it, but warn so they know to
+  # repoint it at the rootless socket.
+  if [ -f "$rc" ] && grep -qE '^[[:space:]]*(export[[:space:]]+)?DOCKER_HOST=' "$rc" 2>/dev/null; then
     warn "Your ${rc} already sets DOCKER_HOST — left it untouched. If it isn't the rootless socket, new terminals and the tracebloc CLI won't reach the rootless daemon; point it at:  export DOCKER_HOST=\"unix://\$XDG_RUNTIME_DIR/docker.sock\""
     return 0
   fi
-
-  # On the nohup path the socket may live under $HOME (not /run/user/<uid>); use that dir
-  # as the DOCKER_HOST fallback so a fresh no-systemd shell resolves the right socket even
-  # before the XDG line runs — ORDER-INDEPENDENT, which the previous per-line append got
-  # wrong on a re-run (Bugbot #485 r4). Off the nohup path, the standard /run/user/<uid>.
-  local fallback='/run/user/$(id -u)'
-  if [ -n "${TB_ROOTLESS_RUNTIME_DIR:-}" ]; then fallback="$TB_ROOTLESS_RUNTIME_DIR"; fi
-
-  # Rebuild the rc in a SIBLING temp (same dir → same filesystem), then copy it back with
-  # `cat` (follows a symlinked rc + preserves its perms, unlike `mv` which would break a
-  # stow/chezmoi-managed dotfile; and a same-fs temp means a full disk fails the temp
-  # write and bails BEFORE we touch the real rc). Idempotent AND transition-safe. The XDG
-  # line is GUARDED with ${XDG_RUNTIME_DIR:-…} so it never clobbers a systemd node's own
-  # /run/user/<uid> on a shared home (Bugbot #485 r3); it exists so the user can restart
-  # dockerd-rootless.sh. Strip only a WELL-FORMED prior block (BOTH markers) — a malformed
-  # rc is left as-is rather than risk eating content past a missing END marker.
-  local _new; _new="$(mktemp "$(dirname "$rc")/.tbrc.XXXXXX" 2>/dev/null)" || return 0
-  if [ -f "$rc" ]; then
-    if grep -qF "$begin" "$rc" 2>/dev/null && grep -qF "$end" "$rc" 2>/dev/null; then
-      awk -v b="$begin" -v e="$end" '$0==b{s=1;next} $0==e{s=0;next} !s{print}' "$rc" >"$_new" 2>/dev/null \
-        || { rm -f "$_new"; return 0; }
-    else
-      cat "$rc" >"$_new" 2>/dev/null || { rm -f "$_new"; return 0; }
-    fi
-  fi
+  # Rootless Tier 1 runs under user-systemd, so pam sets XDG_RUNTIME_DIR=/run/user/<uid>
+  # and the socket always lives there — persist the standard template. (The no-systemd
+  # nohup fallback, where the socket could live under $HOME, is descoped from this slice
+  # and deferred until it can be validated on a real HPC host — see the PR/issue.)
   {
-    printf '%s\n' "$begin"
-    if [ -n "${TB_ROOTLESS_RUNTIME_DIR:-}" ]; then
-      printf 'export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-%s}"\n' "$TB_ROOTLESS_RUNTIME_DIR"
-    fi
-    printf 'export DOCKER_HOST="unix://${XDG_RUNTIME_DIR:-%s}/docker.sock"\n' "$fallback"
-    printf '%s\n' "$end"
-  } >>"$_new" 2>/dev/null || { rm -f "$_new"; return 0; }
-  if cat "$_new" >"$rc" 2>/dev/null; then rm -f "$_new"; else rm -f "$_new"; return 0; fi
-  hint "Updated ${rc} so new terminals reach the rootless Docker daemon — open a new terminal or run 'source ${rc}'."
+    printf '\n%s\n' "$marker"
+    printf '%s\n' 'export DOCKER_HOST="unix://${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/docker.sock"'
+  } >> "$rc" 2>/dev/null || return 0
+  hint "Added DOCKER_HOST to ${rc} so new terminals reach the rootless Docker daemon."
 }
 
 # _install_userspace_tools — download kubectl / k3d / helm into the user's bin
@@ -895,55 +867,6 @@ _tier2_fallthrough() {
   error "This host couldn't complete a rootless install (${reason}); an administrator must prepare it (see above), then re-run. Details: docs/rfcs/0001-least-privilege-install.md"
 }
 
-# _launch_dockerd_rootless — the raw detached daemon start, isolated into its own
-# function so the bats suite can stub it (nohup can't run a shell-function mock).
-# `</dev/null` is load-bearing: under `curl … | bash` the installer's stdin is the
-# script PIPE, not a TTY, and nohup only auto-redirects stdin from /dev/null when it
-# IS a TTY — so without this the backgrounded daemon would inherit the pipe and eat
-# the rest of the installer script, corrupting/hanging the run (Bugbot #485 r4).
-_launch_dockerd_rootless() {
-  nohup dockerd-rootless.sh </dev/null >"${XDG_RUNTIME_DIR}/dockerd-rootless.log" 2>&1 &
-}
-
-# _start_rootless_nohup — start the rootless daemon WITHOUT user-systemd (RFC 0001
-# #1222): on hardened/HPC nodes `systemctl --user` has no manager to talk to. Ensure
-# an owned XDG_RUNTIME_DIR, launch `dockerd-rootless.sh` under nohup, and poll the
-# socket until Ready. Still user-space, no root, no systemctl. Persistence across
-# logout is NOT guaranteed here (no linger) — surfaced honestly to the user.
-_start_rootless_nohup() {
-  if [ -z "${XDG_RUNTIME_DIR:-}" ] || [ ! -d "${XDG_RUNTIME_DIR}" ]; then
-    local _uid; _uid="$(id -u)"
-    if mkdir -p "/run/user/${_uid}" 2>/dev/null && [ -w "/run/user/${_uid}" ]; then
-      export XDG_RUNTIME_DIR="/run/user/${_uid}"
-    else
-      export XDG_RUNTIME_DIR="${HOME}/.tracebloc-rootless-run"
-      mkdir -p "$XDG_RUNTIME_DIR" 2>/dev/null || true
-    fi
-    chmod 700 "$XDG_RUNTIME_DIR" 2>/dev/null || true
-  fi
-  has dockerd-rootless.sh \
-    || _tier2_fallthrough "no per-user systemd and 'dockerd-rootless.sh' (docker-ce-rootless-extras) isn't on PATH"
-  info "No per-user systemd on this host — starting rootless Docker directly (nohup)…"
-  _launch_dockerd_rootless
-  # nohup starts the daemon ASYNC (unlike systemd --now), so poll the socket until it
-  # answers or a bounded number of tries elapse — the shared verify below is the gate.
-  local _i _up=0
-  for _i in $(seq 1 30); do
-    if _bounded 5 docker -H "unix://${XDG_RUNTIME_DIR}/docker.sock" info >/dev/null 2>&1; then _up=1; break; fi
-    sleep 1
-  done
-  # Record the EXACT runtime dir so _persist_docker_host + the restart guidance target
-  # the SAME socket we used (esp. the $HOME fallback, not /run/user) — Bugbot #485.
-  TB_ROOTLESS_RUNTIME_DIR="$XDG_RUNTIME_DIR"
-  # Only claim "started" once the daemon actually ANSWERED (Bugbot #485 r2): a bare
-  # "Started…" before a failed poll contradicts the shared verify's "daemon never
-  # answered" fall-through moments later. If it didn't come up, stay silent and let
-  # that verify route to _tier2_fallthrough honestly.
-  if [ "$_up" = "1" ]; then
-    TB_ROOTLESS_NO_LINGER=1   # honest: no linger without user-systemd → no autostart
-    warn "Started rootless Docker without user-systemd — it will NOT auto-restart after logout or reboot (no linger). Restart it manually with:  XDG_RUNTIME_DIR=${XDG_RUNTIME_DIR} nohup dockerd-rootless.sh &"
-  fi
-}
 
 install_rootless_docker() {
   # Resolve the current user robustly: $USER can be empty in headless / su / cron
@@ -998,14 +921,17 @@ install_rootless_docker() {
   # falls through to actionable guidance instead of a bare set -e abort (mirrors
   # install_docker_engine's start-then-verify). Linger is optional and can fail on
   # polkit-locked hosts even when the daemon is up, so it only warns (Bugbot).
-  # Prefer per-user systemd (survives logout via linger); fall back to nohup on
-  # hardened/HPC nodes with no user systemd (RFC 0001 #1222). Both user-space, no root.
+  # Start the daemon under per-user systemd (survives logout via linger). On a host with
+  # NO user systemd (some hardened/HPC login nodes), a rootless daemon can't be brought up
+  # + kept alive reliably, and that path can't be validated without real HPC hardware — so
+  # route to the Tier-2 prepare-host remedy rather than a blind nohup bring-up. The nohup
+  # fallback is deferred to a host-available slice (RFC 0001 #1222; see the follow-up issue).
   if _user_systemd_available; then
     systemctl --user enable --now docker || true
     loginctl enable-linger "$_user" \
       || warn "Couldn't enable linger (optional) — the rootless daemon may not survive logout. Enable it later with:  loginctl enable-linger ${_user}"
   else
-    _start_rootless_nohup
+    _tier2_fallthrough "this host has no per-user systemd (systemctl --user has no manager); rootless without it needs a one-time admin step"
   fi
 
   # Point every later docker/k3d call in this run at the rootless socket. docker and
