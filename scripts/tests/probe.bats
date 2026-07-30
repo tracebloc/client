@@ -336,3 +336,68 @@ setup() {
   assert_has "Tier 2" "$output"
   assert_has "user namespaces" "$output"
 }
+
+# ── _probe_wsl: WSL2 detection (#1179) ────────────────────────────────────────
+
+@test "wsl: WSL_DISTRO_NAME set => detected" {
+  WSL_DISTRO_NAME=Ubuntu
+  _probe_wsl
+}
+
+@test "wsl: WSL_INTEROP set (no distro name) => detected" {
+  unset WSL_DISTRO_NAME; WSL_INTEROP=/run/WSL/8_interop
+  _probe_wsl
+}
+
+@test "wsl: 'microsoft' in the kernel osrelease => detected (no env markers)" {
+  unset WSL_DISTRO_NAME WSL_INTEROP
+  TB_OSRELEASE_FILE="$(mktemp)"; printf '5.15.167.4-microsoft-standard-WSL2\n' > "$TB_OSRELEASE_FILE"
+  TB_PROC_VERSION_FILE="$(mktemp)"; : > "$TB_PROC_VERSION_FILE"
+  _probe_wsl
+}
+
+@test "wsl: plain Linux (no WSL markers anywhere) => NOT detected" {
+  unset WSL_DISTRO_NAME WSL_INTEROP
+  TB_OSRELEASE_FILE="$(mktemp)"; printf '6.8.0-generic\n' > "$TB_OSRELEASE_FILE"
+  TB_PROC_VERSION_FILE="$(mktemp)"; printf 'Linux version 6.8.0-generic (gcc 13)\n' > "$TB_PROC_VERSION_FILE"
+  run _probe_wsl
+  [ "$status" -ne 0 ]
+}
+
+@test "run_host_probes: sets PROBE_WSL=1 inside WSL2 (Linux)" {
+  OS=Linux; WSL_DISTRO_NAME=Ubuntu
+  _probe_runtime_usable() { return 1; }
+  _probe_cgroup_v2()      { return 0; }
+  _probe_userns()         { return 0; }
+  _probe_subid_ranges()   { return 0; }
+  _probe_uidmap_helpers() { return 0; }
+  _probe_privilege()      { echo no_sudo; }
+  run_host_probes
+  [ "$PROBE_WSL" = "1" ]
+}
+
+# ── audit: WSL2-aware rows/messages (#1179) ───────────────────────────────────
+
+@test "audit: WSL2 environment row surfaces the rootless-preferred note" {
+  OS=Linux; PROBE_RUNTIME_USABLE=0; PROBE_CGROUP2=1; PROBE_USERNS=1; PROBE_WSL=1
+  PROBE_PRIVILEGE=no_sudo; INSTALL_TIER=1; INSTALL_TIER_REASON=rootless-capable
+  run render_host_audit
+  assert_has "Environment" "$output"
+  assert_has "WSL2" "$output"
+  assert_has "rootless preferred" "$output"
+}
+
+@test "audit: no WSL row when not in WSL (PROBE_WSL=0)" {
+  OS=Linux; PROBE_RUNTIME_USABLE=0; PROBE_CGROUP2=1; PROBE_USERNS=1; PROBE_WSL=0
+  PROBE_PRIVILEGE=no_sudo; INSTALL_TIER=1; INSTALL_TIER_REASON=rootless-capable
+  run render_host_audit
+  refute_has "WSL2" "$output"
+}
+
+@test "audit: Tier 2 unsupported-os points Windows users at WSL2 (rootless) + install.ps1" {
+  OS="MINGW64_NT-10.0"; PROBE_RUNTIME_USABLE=0
+  PROBE_PRIVILEGE=no_sudo; INSTALL_TIER=2; INSTALL_TIER_REASON=unsupported-os
+  run render_host_audit
+  assert_has "WSL2" "$output"
+  assert_has "install.ps1" "$output"
+}

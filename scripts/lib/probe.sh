@@ -97,6 +97,18 @@ _probe_userns() {
   return 0
 }
 
+# _probe_wsl — are we running inside a WSL2 distro (Linux inside Windows)? #1179.
+# WSL sets WSL_DISTRO_NAME / WSL_INTEROP in the environment and stamps "microsoft"/
+# "WSL" into the kernel release. Read-only. This is used ONLY for a WSL-aware audit
+# note — inside WSL2 the environment IS Linux, so the Linux tiers apply unchanged and
+# this never changes classification. Paths overridable (TB_OSRELEASE_FILE /
+# TB_PROC_VERSION_FILE) so it's testable off a real WSL host.
+_probe_wsl() {
+  [[ -n "${WSL_DISTRO_NAME:-}" || -n "${WSL_INTEROP:-}" ]] && return 0
+  grep -qiE 'microsoft|wsl' "${TB_OSRELEASE_FILE:-/proc/sys/kernel/osrelease}" 2>/dev/null && return 0
+  grep -qiE 'microsoft|wsl' "${TB_PROC_VERSION_FILE:-/proc/version}" 2>/dev/null
+}
+
 # _probe_privilege — echo this shell's privilege posture (for honest messaging,
 # backlog A2). Distinguishes the four cases the installer must treat differently:
 #   root       already uid 0 — no sudo needed at all
@@ -210,11 +222,13 @@ run_host_probes() {
   PROBE_USERNS=0
   PROBE_SUBID=0
   PROBE_UIDMAP=0
+  PROBE_WSL=0
   if [[ "${OS:-}" == "Linux" ]]; then
     if _probe_cgroup_v2;      then PROBE_CGROUP2=1; fi
     if _probe_userns;         then PROBE_USERNS=1; fi
     if _probe_subid_ranges;   then PROBE_SUBID=1; fi
     if _probe_uidmap_helpers; then PROBE_UIDMAP=1; fi
+    if _probe_wsl;            then PROBE_WSL=1; fi
   fi
 
   _classify_from_probes
@@ -247,6 +261,14 @@ render_host_audit() {
     _audit_row "Container runtime" "Docker ${ver:-(running)} — docker info OK" ok
   else
     _audit_row "Container runtime" "none usable as this user" note
+  fi
+
+  # WSL2 (#1179): inside WSL the environment IS Linux, so we install via the Linux
+  # tiers (no separate Windows path) — surface that + the rootless-over-Docker-Desktop
+  # preference. Tier classification is unchanged: a usable Docker (incl. Docker
+  # Desktop's WSL integration, if present) is Tier 0; otherwise Tier 1 rootless.
+  if [[ "${PROBE_WSL:-0}" == "1" ]]; then
+    _audit_row "Environment" "WSL2 (Linux-in-Windows) — rootless preferred" note
   fi
 
   # Kernel row is only meaningful on Linux when there is no usable runtime yet
@@ -287,7 +309,7 @@ render_host_audit() {
     2)
       case "${INSTALL_TIER_REASON:-}" in
         needs-docker-desktop) echo -e "  ${TB_HEADING}→ Install tier${RESET}  Tier 2 — Docker isn't running; start/install Docker Desktop (needs admin once)." ;;
-        unsupported-os)       echo -e "  ${TB_HEADING}→ Install tier${RESET}  Tier 2 — this OS isn't supported by this installer; on Windows use the PowerShell installer (install.ps1)." ;;
+        unsupported-os)       echo -e "  ${TB_HEADING}→ Install tier${RESET}  Tier 2 — this OS isn't supported by this installer directly. On Windows: run this installer inside a WSL2 Linux distro (rootless, no Docker Desktop licence — preferred), or install Docker Desktop via the PowerShell installer (install.ps1)." ;;
         no-cgroup2)           echo -e "  ${TB_HEADING}→ Install tier${RESET}  Tier 2 — this kernel isn't on cgroup v2; a one-time admin step is needed." ;;
         no-userns)            echo -e "  ${TB_HEADING}→ Install tier${RESET}  Tier 2 — unprivileged user namespaces are disabled; a one-time admin step is needed." ;;
         *)                    echo -e "  ${TB_HEADING}→ Install tier${RESET}  Tier 2 — a one-time admin step is needed to prepare this host." ;;
