@@ -776,34 +776,54 @@ _persist_docker_host() {
     return 0
   fi
   local rc; rc="$(_tools_rc_for_shell)"
-  local marker='# Added by tracebloc installer (RFC 0001 #1221): rootless Docker socket'
-  # Our own prior line → idempotent, nothing to do. Key this off OUR marker, not a
-  # bare 'DOCKER_HOST=' probe: that also matched a user's own DOCKER_HOST (e.g. a
-  # remote/TCP daemon) and made us silently skip — leaving new shells pointed at the
-  # wrong daemon while the install assumes rootless (Asad + Bugbot on #478).
-  if [ -f "$rc" ] && grep -qF "$marker" "$rc" 2>/dev/null; then return 0; fi
-  # A DOCKER_HOST the user set themselves → don't clobber it, but don't silently
-  # pretend we persisted the rootless socket either: warn so they know to repoint it.
-  if [ -f "$rc" ] && grep -qE '^[[:space:]]*(export[[:space:]]+)?DOCKER_HOST=' "$rc" 2>/dev/null; then
+  # A BEGIN/END-delimited block we own and rewrite atomically each run, so it stays
+  # correct across a systemd→nohup re-run on a shared home (Bugbot #485 r4) instead of
+  # appending stale lines in the wrong order.
+  local begin='# >>> tracebloc rootless Docker socket (RFC 0001 #1221) >>>'
+  local end='# <<< tracebloc rootless Docker socket (RFC 0001 #1221) <<<'
+
+  # A DOCKER_HOST the user set OUTSIDE our block → don't clobber; warn once so they know
+  # new shells won't reach the rootless daemon until they repoint it (Asad + Bugbot #478).
+  if [ -f "$rc" ] && ! grep -qF "$begin" "$rc" 2>/dev/null \
+     && grep -qE '^[[:space:]]*(export[[:space:]]+)?DOCKER_HOST=' "$rc" 2>/dev/null; then
     warn "Your ${rc} already sets DOCKER_HOST — left it untouched. If it isn't the rootless socket, new terminals and the tracebloc CLI won't reach the rootless daemon; point it at:  export DOCKER_HOST=\"unix://\$XDG_RUNTIME_DIR/docker.sock\""
     return 0
   fi
+
+  # On the nohup path the socket may live under $HOME (not /run/user/<uid>); use that dir
+  # as the DOCKER_HOST fallback so a fresh no-systemd shell resolves the right socket even
+  # before the XDG line runs — ORDER-INDEPENDENT, which the previous per-line append got
+  # wrong on a re-run (Bugbot #485 r4). Off the nohup path, the standard /run/user/<uid>.
+  local fallback='/run/user/$(id -u)'
+  if [ -n "${TB_ROOTLESS_RUNTIME_DIR:-}" ]; then fallback="$TB_ROOTLESS_RUNTIME_DIR"; fi
+
+  # Rebuild the rc in a SIBLING temp (same dir → same filesystem), then copy it back with
+  # `cat` (follows a symlinked rc + preserves its perms, unlike `mv` which would break a
+  # stow/chezmoi-managed dotfile; and a same-fs temp means a full disk fails the temp
+  # write and bails BEFORE we touch the real rc). Idempotent AND transition-safe. The XDG
+  # line is GUARDED with ${XDG_RUNTIME_DIR:-…} so it never clobbers a systemd node's own
+  # /run/user/<uid> on a shared home (Bugbot #485 r3); it exists so the user can restart
+  # dockerd-rootless.sh. Strip only a WELL-FORMED prior block (BOTH markers) — a malformed
+  # rc is left as-is rather than risk eating content past a missing END marker.
+  local _new; _new="$(mktemp "$(dirname "$rc")/.tbrc.XXXXXX" 2>/dev/null)" || return 0
+  if [ -f "$rc" ]; then
+    if grep -qF "$begin" "$rc" 2>/dev/null && grep -qF "$end" "$rc" 2>/dev/null; then
+      awk -v b="$begin" -v e="$end" '$0==b{s=1;next} $0==e{s=0;next} !s{print}' "$rc" >"$_new" 2>/dev/null \
+        || { rm -f "$_new"; return 0; }
+    else
+      cat "$rc" >"$_new" 2>/dev/null || { rm -f "$_new"; return 0; }
+    fi
+  fi
   {
-    printf '\n%s\n' "$marker"
-    # No-systemd nohup path (Bugbot #485): a fresh login shell won't have
-    # XDG_RUNTIME_DIR set, and the socket may live under $HOME rather than
-    # /run/user/<uid> — persist the dir first so the DOCKER_HOST line below resolves
-    # to the same socket the install used AND the daemon can be restarted.
-    # Guard with ${XDG_RUNTIME_DIR:-…}, NOT a bare export: ~/.bashrc is sourced on
-    # EVERY host that shares this home (HPC NFS), so an unconditional value would
-    # clobber a legitimate pam/systemd /run/user/<uid> on a systemd node and break
-    # user-systemd there. Supply our dir only when the session hasn't (Bugbot #485 r3).
+    printf '%s\n' "$begin"
     if [ -n "${TB_ROOTLESS_RUNTIME_DIR:-}" ]; then
       printf 'export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-%s}"\n' "$TB_ROOTLESS_RUNTIME_DIR"
     fi
-    printf '%s\n' 'export DOCKER_HOST="unix://${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/docker.sock"'
-  } >> "$rc" 2>/dev/null || return 0
-  hint "Added DOCKER_HOST to ${rc} so new terminals reach the rootless Docker daemon."
+    printf 'export DOCKER_HOST="unix://${XDG_RUNTIME_DIR:-%s}/docker.sock"\n' "$fallback"
+    printf '%s\n' "$end"
+  } >>"$_new" 2>/dev/null || { rm -f "$_new"; return 0; }
+  if cat "$_new" >"$rc" 2>/dev/null; then rm -f "$_new"; else rm -f "$_new"; return 0; fi
+  hint "Updated ${rc} so new terminals reach the rootless Docker daemon — open a new terminal or run 'source ${rc}'."
 }
 
 # _install_userspace_tools — download kubectl / k3d / helm into the user's bin
@@ -877,8 +897,12 @@ _tier2_fallthrough() {
 
 # _launch_dockerd_rootless — the raw detached daemon start, isolated into its own
 # function so the bats suite can stub it (nohup can't run a shell-function mock).
+# `</dev/null` is load-bearing: under `curl … | bash` the installer's stdin is the
+# script PIPE, not a TTY, and nohup only auto-redirects stdin from /dev/null when it
+# IS a TTY — so without this the backgrounded daemon would inherit the pipe and eat
+# the rest of the installer script, corrupting/hanging the run (Bugbot #485 r4).
 _launch_dockerd_rootless() {
-  nohup dockerd-rootless.sh >"${XDG_RUNTIME_DIR}/dockerd-rootless.log" 2>&1 &
+  nohup dockerd-rootless.sh </dev/null >"${XDG_RUNTIME_DIR}/dockerd-rootless.log" 2>&1 &
 }
 
 # _start_rootless_nohup — start the rootless daemon WITHOUT user-systemd (RFC 0001

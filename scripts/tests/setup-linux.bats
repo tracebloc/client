@@ -1506,3 +1506,36 @@ _stub_install_steps() {
   grep -q 'tcp://10.0.0.5:2375' "$HOME/.bashrc"                   # their line left untouched
   [ "$(grep -c 'DOCKER_HOST=' "$HOME/.bashrc")" -eq 1 ]           # we did NOT append the rootless line
 }
+
+@test "_persist_docker_host: systemd→nohup re-run rewrites the block atomically — XDG added, DOCKER_HOST fallback fixed, no dupes (#485 r4)" {
+  INSTALL_TIER=1; TB_TIER1_ROOTLESS=1
+  HOME="$(mktemp -d)"; SHELL=/bin/bash; OS=Linux
+  # A PRIOR systemd-path persist: our block with the /run/user fallback and NO XDG line.
+  { printf '%s\n' '# >>> tracebloc rootless Docker socket (RFC 0001 #1221) >>>'
+    printf '%s\n' 'export DOCKER_HOST="unix://${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/docker.sock"'
+    printf '%s\n' '# <<< tracebloc rootless Docker socket (RFC 0001 #1221) <<<'; } > "$HOME/.bashrc"
+  TB_ROOTLESS_RUNTIME_DIR="$HOME/.tracebloc-rootless-run"   # re-run now takes the nohup path
+  _persist_docker_host
+  grep -qF 'export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-'"$HOME/.tracebloc-rootless-run"'}"' "$HOME/.bashrc"   # XDG line now added
+  grep -qF "unix://\${XDG_RUNTIME_DIR:-$HOME/.tracebloc-rootless-run}/docker.sock" "$HOME/.bashrc"           # DOCKER_HOST fallback repointed
+  [ "$(grep -c 'DOCKER_HOST=' "$HOME/.bashrc")" -eq 1 ]          # not duplicated
+  [ "$(grep -cF '>>> tracebloc' "$HOME/.bashrc")" -eq 1 ]        # single managed block, not stacked
+  run bash -c "unset XDG_RUNTIME_DIR; . '$HOME/.bashrc'; printf '%s' \"\$DOCKER_HOST\""
+  [ "$output" = "unix://$HOME/.tracebloc-rootless-run/docker.sock" ]   # fresh no-systemd shell reaches the $HOME socket
+}
+
+@test "_launch_dockerd_rootless: detaches stdin (</dev/null) so a curl|bash pipe isn't consumed (#485 r4)" {
+  grep -qF 'nohup dockerd-rootless.sh </dev/null' "$BATS_TEST_DIRNAME/../lib/setup-linux.sh"
+}
+
+@test "_persist_docker_host: preserves unrelated rc content and does NOT eat past a malformed (END-less) block (self-review)" {
+  INSTALL_TIER=1; TB_TIER1_ROOTLESS=1
+  HOME="$(mktemp -d)"; SHELL=/bin/bash; OS=Linux
+  { printf '%s\n' 'alias ll="ls -la"'                                            # user content BEFORE
+    printf '%s\n' '# >>> tracebloc rootless Docker socket (RFC 0001 #1221) >>>'   # malformed: BEGIN, no END
+    printf '%s\n' 'export MY_CUSTOM=1'; } > "$HOME/.bashrc"                       # content the strip must NOT eat
+  _persist_docker_host
+  grep -qF 'alias ll="ls -la"' "$HOME/.bashrc"     # pre-existing content preserved
+  grep -qF 'export MY_CUSTOM=1' "$HOME/.bashrc"    # content past the END-less marker NOT eaten
+  grep -qF 'DOCKER_HOST=' "$HOME/.bashrc"          # our line still appended
+}
