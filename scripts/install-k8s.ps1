@@ -889,9 +889,17 @@ function Install-DockerDesktop {
       # Stop-Job would leave the job's child process running (#422 Bugbot).
       Info "Installing Docker Desktop (~600 MB via winget) -- several minutes is normal."
       try {
-        $wp = Start-Process -FilePath "winget" -PassThru -ErrorAction Stop -ArgumentList @(
-          "install","-e","--id","Docker.DockerDesktop",
-          "--accept-package-agreements","--accept-source-agreements","--silent")
+        # Pass Docker Desktop's OWN installer flags through winget (--override
+        # replaces winget's manifest defaults) so a fresh machine reaches a running
+        # WSL2 engine with no license/onboarding GUI prompt (#419). Use a single
+        # command-line STRING, not an array: PS 5.1's Start-Process joins array
+        # elements without quoting, which would split the --override value into
+        # stray tokens; a string is passed verbatim so the quoted value survives
+        # as one argument (#419 Bugbot).
+        $wingetArgs = 'install -e --id Docker.DockerDesktop ' +
+          '--accept-package-agreements --accept-source-agreements --silent ' +
+          '--override "install --quiet --accept-license --backend=wsl-2 --always-run-service"'
+        $wp = Start-Process -FilePath "winget" -PassThru -ErrorAction Stop -ArgumentList $wingetArgs
         if (-not (Wait-ProcessWithDeadline -Process $wp -Deadline (Get-Date).AddMinutes(40) -Message "Installing Docker Desktop (winget)")) {
           throw "winget Docker install timed out (process killed)"
         }
@@ -919,7 +927,10 @@ function Install-DockerDesktop {
       # -ErrorAction Stop catches a spawn failure; the exit code catches a failed
       # install — either way fail loudly, never continue as if Docker installed.
       try {
-        $ip = Start-Process -FilePath $installer -ArgumentList "install --quiet --accept-license" `
+        # Same flags as the winget --override path: WSL2 backend + no GUI/license
+        # prompt + the engine service running unattended, so a fresh machine reaches
+        # a running engine with zero Docker Desktop interaction (#419).
+        $ip = Start-Process -FilePath $installer -ArgumentList "install --quiet --accept-license --backend=wsl-2 --always-run-service" `
           -PassThru -ErrorAction Stop
       } catch {
         Remove-Item $installer -Force -ErrorAction SilentlyContinue
