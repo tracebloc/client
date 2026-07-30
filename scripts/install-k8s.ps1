@@ -54,7 +54,44 @@ if (-not $env:TB_PESTER) {
 function Info($m)          { Write-Host "  " -NoNewline; Write-Host ([char]0x00B7) -ForegroundColor DarkGray -NoNewline; Write-Host " $m" -ForegroundColor DarkGray }
 function Ok($m)            { Write-Host "  " -NoNewline; Write-Host ([char]0x2714) -ForegroundColor Green -NoNewline; Write-Host " $m" }
 function Warn($m)          { Write-Host "  " -NoNewline; Write-Host ([char]0x26A0) -ForegroundColor Yellow -NoNewline; Write-Host "  $m" -ForegroundColor Yellow }
-function Err($m)           { Write-Host "  " -NoNewline; Write-Host ([char]0x2716) -ForegroundColor Red -NoNewline; Write-Host " $m" -ForegroundColor Red; exit 1 }
+# Build the trailing lines every fatal error shows (#423): a short excerpt of the
+# real tool output (last few non-empty lines — the actual reason, not a generic
+# line), then the log path and the -Diagnose support-bundle hint as first-class
+# next steps. Pure (no host writes / no exit) so it is unit-testable.
+function Get-ErrDetailLines([string]$Detail) {
+  $out = @()
+  if ($Detail) {
+    # Drop PowerShell 5.1 ErrorRecord "chrome" that `native 2>&1 | Out-String`
+    # wraps around stderr (the `At <file>:<n> char:<n>` position line and the
+    # `+ ...` / `+ CategoryInfo` / `+ FullyQualifiedErrorId` block). Otherwise a
+    # helm failure's last 5 lines are all chrome and the real `Error:` line is
+    # crowded out of the excerpt (#423 Bugbot).
+    $lines = @($Detail -split "`r?`n" |
+      ForEach-Object { $_.TrimEnd() } |
+      Where-Object {
+        $_ -ne "" -and
+        $_ -notmatch '^\s*At [^ ]+:\d+ char:\d+' -and
+        $_ -notmatch '^\s*\+ '
+      } |
+      Select-Object -Last 5)
+    if ($lines.Count) { $out += "--- details ---"; $out += $lines }
+  }
+  if ($script:LOG_FILE) { $out += "Full log: $script:LOG_FILE" }
+  $out += "Support bundle: re-run with -Diagnose"
+  return $out
+}
+
+# $Detail (optional) is captured tool output (e.g. k3d/helm stderr); its last few
+# non-empty lines are surfaced on screen so the real reason isn't buried in the
+# log (#423). Every failure names the log path + -Diagnose regardless.
+function Err($m, $Detail)  {
+  Write-Host "  " -NoNewline; Write-Host ([char]0x2716) -ForegroundColor Red -NoNewline; Write-Host " $m" -ForegroundColor Red
+  # @(...) forces array enumeration: a single-line result unwraps to a scalar
+  # string, and enumerating that explicitly keeps each line intact (defensive —
+  # the `foreach` statement already iterates a scalar once, not per-char).
+  foreach ($l in @(Get-ErrDetailLines $Detail)) { Write-Host "  $l" -ForegroundColor DarkGray }
+  exit 1
+}
 function Step($n, $t, $l)  { Write-Host ""; Write-Host "Step $n/$t" -ForegroundColor Cyan -NoNewline; Write-Host "  $l" -ForegroundColor White }
 function Log($m)           { if ($script:LOG_FILE) { Add-Content -Path $script:LOG_FILE -Value "[$(Get-Date -Format 'HH:mm:ss')] $m" -ErrorAction SilentlyContinue } }
 function PromptHeader($m)  { Write-Host ""; Write-Host "  $m" -ForegroundColor White }
@@ -163,6 +200,12 @@ function Invoke-WithRetry {
     [int]$DelaySeconds = 5,
     [string]$Label = "Operation"
   )
+  # PS 5.1's progress overlay throttles Invoke-WebRequest massively (its render
+  # loop dominates the transfer) and its "Writing request stream" banner reads
+  # like a hang (#468; same fix as the bootstrap's fetch helpers). Function-local
+  # assignment -- PowerShell's dynamic scoping makes every fetch $ScriptBlock
+  # invoked below see it, and the preference reverts when this function returns.
+  $ProgressPreference = 'SilentlyContinue'
   for ($i = 1; $i -le $MaxAttempts; $i++) {
     try {
       $result = & $ScriptBlock
@@ -280,10 +323,13 @@ Advanced configuration (environment variables):
   K8S_VERSION    k3s image tag                   (default: v1.29.4-k3s1)
   -NoReboot      Skip reboot prompt after enabling Windows features
   HOST_DATA_DIR  Persistent data directory       (default: ~\.tracebloc)
+  TRACEBLOC_CA_BUNDLE  Corporate CA bundle (PEM) to trust on a TLS-inspecting
+                 network, so in-cluster image pulls don't fail x509 (#424).
+                 CURL_CA_BUNDLE is also honored.
 
 Reinstalling on a machine that still holds data:
   A new install won't silently adopt data left under HOST_DATA_DIR (both the
-  flat and per-release layouts) — it stops and asks reuse / wipe / different dir.
+  flat and per-release layouts) -- it stops and asks reuse / wipe / different dir.
   Non-interactive: TB_LEFTOVER_ACTION=reuse|wipe, or HOST_DATA_DIR=<new-path>
   (with no choice and no terminal the install aborts). Bypass entirely with
   TRACEBLOC_SKIP_LEFTOVER_GUARD=1.
@@ -385,6 +431,11 @@ function Print-Banner {
   Hint "  ~\.tracebloc\    (data and config)"
   Hint "  Docker           (container runtime)"
   Write-Host ""
+  # Announce the log path up front (#423) — if anything fails, the user already
+  # knows where the full transcript is instead of hunting for a file support can't
+  # name. Was previously written only inside the log itself.
+  if ($script:LOG_FILE) { Hint "Install log: $script:LOG_FILE" }
+  Write-Host ""
   Log "Cluster='$CLUSTER_NAME'  Servers=$SERVERS  Agents=$AGENTS"
   Log "Host data dir: $HOST_DATA_DIR"
 }
@@ -478,6 +529,40 @@ function Find-Gpu {
 #  WINDOWS VIRTUALISATION FEATURES
 # =============================================================================
 
+# Enable ONE Windows optional feature; returns $true only when the feature was
+# newly enabled (i.e. a reboot is now pending for it). DISM splashes a raw
+# COMException when a feature package simply doesn't exist on the running
+# edition (Server SKUs have no Microsoft-Hyper-V-All package) -- alarming red
+# noise on an otherwise honest flow, and the old code ALSO demanded a reboot
+# for a feature that never got enabled, sending those users into a reboot ->
+# re-run -> same-error loop (#468). Translate instead: name the real situation,
+# and only report reboot-pending on an actual state change.
+function Enable-OneVirtFeature {
+  param(
+    [string]$Key,           # DISM feature name, e.g. Microsoft-Hyper-V-All
+    [string]$Label,          # human name for messages, e.g. Hyper-V
+    $CurrentState,           # .State from Get-WindowsOptionalFeature ($null = package absent)
+    [string]$Edition         # OS caption, for the not-available message
+  )
+  if ($CurrentState -eq "Enabled") {
+    Log "$Label already enabled."
+    return $false
+  }
+  Log "Enabling $Label..."
+  try {
+    Enable-WindowsOptionalFeature -Online -FeatureName $Key -NoRestart -ErrorAction Stop | Out-Null
+    return $true
+  } catch {
+    if ($null -eq $CurrentState) {
+      Warn "$Label is not available on this Windows edition ($Edition) -- skipping."
+    } else {
+      Warn "Could not enable ${Label}: $($_.Exception.Message)"
+      Hint "Enable '$Key' manually (Windows Features / optionalfeatures.exe), then re-run this script."
+    }
+    return $false
+  }
+}
+
 function Enable-VirtualisationFeatures {
   $rebootNeeded = $false
   $features = @{
@@ -493,12 +578,8 @@ function Enable-VirtualisationFeatures {
 
   $features.GetEnumerator() | ForEach-Object {
     $state = (Get-WindowsOptionalFeature -Online -FeatureName $_.Key -ErrorAction SilentlyContinue).State
-    if ($state -ne "Enabled") {
-      Log "Enabling $($_.Value)..."
-      Enable-WindowsOptionalFeature -Online -FeatureName $_.Key -NoRestart | Out-Null
+    if (Enable-OneVirtFeature -Key $_.Key -Label $_.Value -CurrentState $state -Edition $edition) {
       $rebootNeeded = $true
-    } else {
-      Log "$($_.Value) already enabled."
     }
   }
 
@@ -559,6 +640,9 @@ function Install-Winget {
   if (Has "winget") { Log "winget: $(winget --version)"; return }
 
   Log "Installing winget..."
+  # Honest progress (#468): with the overlay silenced this fetch is quiet, so
+  # name the wait before it starts. Size measured 2026-07-29 (207 MB).
+  Info "Downloading winget (~200 MB) -- one-time; a few minutes on a slow network is normal."
   $url  = "https://github.com/microsoft/winget-cli/releases/latest/download/Microsoft.DesktopAppInstaller_8wekyb3d8bbwe.msixbundle"
   $dest = "$env:TEMP\winget-installer.msixbundle"
   Invoke-WithRetry -Label "winget download" -ScriptBlock {
@@ -583,6 +667,9 @@ function Install-DockerDesktop {
         --accept-package-agreements --accept-source-agreements --silent
     } else {
       $ddArch = Get-WindowsArch
+      # Honest progress (#468): the single biggest download of the install.
+      # Size measured 2026-07-29 (613 MB).
+      Info "Downloading Docker Desktop (~600 MB) -- the biggest download of this install; several minutes is normal."
       $installer = "$env:TEMP\DockerDesktopInstaller.exe"
       Invoke-WithRetry -Label "Docker download" -ScriptBlock {
         Invoke-WebRequest -Uri "https://desktop.docker.com/win/main/$ddArch/Docker%20Desktop%20Installer.exe" `
@@ -827,6 +914,7 @@ function Install-Kubectl {
     (Invoke-WebRequest "https://dl.k8s.io/release/stable.txt" -UseBasicParsing).Content.Trim()
   }
   Log "Downloading kubectl $kVer ($arch)..."
+  Info "Downloading kubectl $kVer (~60 MB)..."
   $kubectlDest = "$TOOL_DIR\kubectl.exe"
   Invoke-WithRetry -Label "download" -ScriptBlock {
     Invoke-WebRequest "https://dl.k8s.io/release/$kVer/bin/windows/$arch/kubectl.exe" `
@@ -933,6 +1021,7 @@ function Install-K3dAndHelm {
           if (-not $tag) { throw "no Location header on the /releases/latest redirect" }
           $tag
         }
+      Info "Downloading k3d $k3dVer (~25 MB)..."
       $k3dDest = "$TOOL_DIR\k3d.exe"
       Invoke-WithRetry -Label "k3d download" -ScriptBlock {
         Invoke-WebRequest "https://github.com/k3d-io/k3d/releases/download/$k3dVer/k3d-windows-$arch.exe" `
@@ -991,6 +1080,7 @@ function Install-K3dAndHelm {
         if (-not $c) { throw "empty helm-latest-version response" }
         $c
       }
+      Info "Downloading Helm $helmVer (~20 MB)..."
       $helmZip = "$env:TEMP\helm-$helmVer-windows-$arch.zip"
       Invoke-WithRetry -Label "helm download" -ScriptBlock {
         Invoke-WebRequest "https://get.helm.sh/helm-$helmVer-windows-$arch.zip" `
@@ -1067,6 +1157,55 @@ function Write-K3dProxyConfig {
     $lines.Add('  - envVar: "' + $name + '=' + $noProxy + '"')
     $lines.Add('    nodeFilters:')
     $lines.Add('      - all')
+  }
+  $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+  [System.IO.File]::WriteAllLines($cfg, $lines, $utf8NoBom)
+  return $cfg
+}
+
+# --- Corporate MITM CA trust for in-node containerd pulls (#424) --------------
+# Proxy reachability reaches the nodes (above), but on a TLS-inspecting network
+# the nodes still don't TRUST the corporate CA, so in-node image pulls fail x509
+# and get masked into a generic "an image couldn't be pulled". When the operator
+# supplies the CA bundle we mount it into every node and point containerd at it
+# per-registry. Mirrors scripts/lib/cluster.sh (drift check: check-drift.sh).
+$script:TbCaRegistries = @('docker.io','registry-1.docker.io','auth.docker.io','ghcr.io')
+
+# Return the operator's CA bundle path (absolute) when TRACEBLOC_CA_BUNDLE or
+# CURL_CA_BUNDLE is set and readable; $null when neither is set. Err (hard) when a
+# var is set but its file is missing — a silent skip would drop the user straight
+# back into the x509 failure they set the var to fix.
+function Resolve-CaBundle {
+  foreach ($name in @('TRACEBLOC_CA_BUNDLE','CURL_CA_BUNDLE')) {
+    $val = [Environment]::GetEnvironmentVariable($name)
+    if (-not $val) { continue }
+    if (-not (Test-Path -LiteralPath $val -PathType Leaf)) {
+      Err "$name is set to '$val' but no such file exists - point it at your corporate CA bundle (PEM) and re-run."
+    }
+    # Verify it's actually READABLE, not just present (matches bash's `-r`): a file
+    # that exists but can't be opened must hard-fail here, not at k3d mount/pull time.
+    try { [System.IO.File]::OpenRead($val).Dispose() }
+    catch { Err "$name is set to '$val' but that file can't be read ($($_.Exception.Message)) - fix its permissions or point it at a readable CA bundle (PEM), then re-run." }
+    return (Resolve-Path -LiteralPath $val).Path
+  }
+  return $null
+}
+
+# Build a k3d registries.yaml pointing containerd at the mounted CA for every
+# registry in $TbCaRegistries, and return its path. $NodeCa = the CA path INSIDE
+# the node (where the -v mount lands). Written UTF-8 without BOM. Caller removes
+# the parent temp dir.
+function Write-K3dRegistriesConfig {
+  param([Parameter(Mandatory)][string]$NodeCa)
+  $tmpDir = Join-Path ([System.IO.Path]::GetTempPath()) ("tracebloc-k3d-reg-" + [System.IO.Path]::GetRandomFileName())
+  New-Item -ItemType Directory -Path $tmpDir -Force | Out-Null
+  $cfg = Join-Path $tmpDir "registries.yaml"
+  $lines = New-Object System.Collections.Generic.List[string]
+  $lines.Add('configs:')
+  foreach ($reg in $script:TbCaRegistries) {
+    $lines.Add('  "' + $reg + '":')
+    $lines.Add('    tls:')
+    $lines.Add('      ca_file: "' + $NodeCa + '"')
   }
   $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
   [System.IO.File]::WriteAllLines($cfg, $lines, $utf8NoBom)
@@ -1267,6 +1406,31 @@ function Invoke-LeftoverDataGuard {
   }
 }
 
+# When 'k3d cluster create' fails, one cause on a TLS-inspecting network is the
+# HOST Docker daemon hitting x509 while pulling k3d's OWN runtime images
+# (rancher/k3s, k3d-tools, k3d-proxy) -- a different surface than the in-node CA
+# trust (#424), which only covers containerd inside the nodes. Docker Desktop runs
+# the daemon in a VM the installer can't reach, so the node CA mount can't fix it,
+# and this fails before any node boots so Get-NotReadyState never sees it. Detect
+# x509 in the create output and name it with a Windows-specific remedy (#474).
+# No-op unless the output shows a TLS-verification failure. Mirrors the bash
+# _host_ca_create_hint.
+function Write-HostCaCreateHint {
+  param([string]$Output)
+  if ($Output -notmatch '(?i)x509|certificate signed by unknown authority|tls: failed to verify') { return }
+  Write-Host ""
+  Warn "The Docker daemon couldn't pull k3d's runtime images -- TLS verification failed (x509)."
+  Hint "k3d pulls rancher/k3s, k3d-tools and k3d-proxy with the HOST Docker daemon, which does"
+  Hint "not use the in-node CA trust (TRACEBLOC_CA_BUNDLE) this installer configures. Docker"
+  Hint "Desktop runs the daemon in a VM the installer can't reach, so the CA must be trusted by"
+  Hint "the host:"
+  Hint "  Import your corporate CA into the Windows certificate store (Trusted Root Certification"
+  Hint "  Authorities -- 'certlm.msc' for the machine store), then restart Docker Desktop; it reads"
+  Hint "  the Windows trust store on start."
+  Hint "  Details: docs/INSTALL.md (`"TLS-inspecting network`") and https://docs.docker.com/."
+  Write-Host ""
+}
+
 function New-K3dCluster {
   Log "Creating k3d cluster: '$CLUSTER_NAME'"
 
@@ -1303,6 +1467,22 @@ function New-K3dCluster {
         Hint "  k3d cluster delete $CLUSTER_NAME  (then re-run this installer)."
       }
     } catch {}
+
+    # CA trust (like proxy / the dataset mount) is baked into the nodes at create
+    # time (mount + --registry-config). If a CA bundle is set but the existing
+    # cluster was created without it, reuse leaves in-node pulls failing x509 — so
+    # the "set the CA and re-run" remedy does nothing. Warn + point at recreate
+    # (Bugbot #424). Path mirrors New-K3dCluster's mount destination.
+    if ($env:TRACEBLOC_CA_BUNDLE -or $env:CURL_CA_BUNDLE) {
+      $caMounts = ""
+      try { $caMounts = (docker inspect "k3d-$CLUSTER_NAME-server-0" --format '{{range .Mounts}}{{println .Destination}}{{end}}' 2>$null | Out-String) } catch {}
+      if ($caMounts -and ($caMounts -notmatch '(?m)^/etc/ssl/certs/tracebloc-mitm-ca\.crt\s*$')) {
+        Warn "A CA bundle is set, but the existing '$CLUSTER_NAME' cluster was created without it."
+        Hint "k3d bakes CA trust into the nodes at create time -- it can't be added to a running cluster."
+        Hint "If in-cluster image pulls fail x509, recreate the cluster so the CA is applied:"
+        Hint "  k3d cluster delete $CLUSTER_NAME  (then re-run this installer)."
+      }
+    }
 
     # backend#743: the dataset bind mount (HOST_DATASET_DIR -> /tracebloc-data)
     # is baked into the k3d nodes at create time; k3d can't add it to a running
@@ -1369,6 +1549,19 @@ function New-K3dCluster {
       Log "Propagating proxy settings to k3d nodes (authenticated proxies supported; NO_PROXY auto-augmented)."
     }
 
+    # In-node CA trust for TLS-inspecting networks (#424): mount the operator's CA
+    # bundle into every node and point containerd at it per-registry, so in-node
+    # image pulls validate the intercepted certs instead of failing x509.
+    $caBundle = Resolve-CaBundle
+    $registriesCfg = $null
+    if ($caBundle) {
+      $nodeCa = "/etc/ssl/certs/tracebloc-mitm-ca.crt"
+      $k3dArgs += @("-v", "${caBundle}:${nodeCa}@all")
+      $registriesCfg = Write-K3dRegistriesConfig -NodeCa $nodeCa
+      $k3dArgs += @("--registry-config", $registriesCfg)
+      Log "Trusting your network's TLS-inspection CA in the k3d nodes (from $caBundle)."
+    }
+
     Log "Creating cluster: $SERVERS server(s) + $AGENTS agent(s)..."
     Hint "First run may take a few minutes to download components."
 
@@ -1392,20 +1585,28 @@ function New-K3dCluster {
     } catch {
       Remove-Item $k3dOutLog, $k3dErrLog -Force -ErrorAction SilentlyContinue
       if ($proxyCfg) { Remove-Item (Split-Path $proxyCfg -Parent) -Recurse -Force -ErrorAction SilentlyContinue }
-      if ($script:LOG_FILE) { Hint "Full log: $LOG_FILE" }
+      if ($registriesCfg) { Remove-Item (Split-Path $registriesCfg -Parent) -Recurse -Force -ErrorAction SilentlyContinue }
+      # Err prints the log path + -Diagnose itself now (#423); no inline Hint here.
       Err "Couldn't start k3d ($k3dExe): $($_.Exception.Message). Reinstall it (re-run this script) or check that the binary runs: k3d version"
     }
 
     $timeoutMin = 15
     if ("$env:TB_CREATE_TIMEOUT_MIN" -match '^\d+$') { $timeoutMin = [int]$env:TB_CREATE_TIMEOUT_MIN }
     if (-not (Wait-ProcessWithDeadline -Process $k3dProc -Deadline (Get-Date).AddMinutes($timeoutMin) -Message "Creating compute environment...")) {
+      # Capture the FULL create output before the logs are deleted, so the
+      # host-CA x509 check below can see an x509 that scrolled past the last 5
+      # lines (a hung TLS-inspected pull logs x509 then wedges until the deadline).
+      $timeoutOut = ""
+      if (Test-Path $k3dErrLog) { $timeoutOut += ([string](Get-Content $k3dErrLog -Raw -ErrorAction SilentlyContinue)) }
+      if (Test-Path $k3dOutLog) { $timeoutOut += "`n" + ([string](Get-Content $k3dOutLog -Raw -ErrorAction SilentlyContinue)) }
       $tail = @()
       if (Test-Path $k3dErrLog) { $tail = @(Get-Content $k3dErrLog -ErrorAction SilentlyContinue | Select-Object -Last 5) }
       if (-not $tail -and (Test-Path $k3dOutLog)) { $tail = @(Get-Content $k3dOutLog -ErrorAction SilentlyContinue | Select-Object -Last 5) }
       foreach ($line in $tail) { Warn "k3d: $line" }
-      if ($script:LOG_FILE) { Hint "Full log: $LOG_FILE" }
+      # Err prints the log path + -Diagnose itself now (#423); no inline Hint here.
       Remove-Item $k3dOutLog, $k3dErrLog -Force -ErrorAction SilentlyContinue
       if ($proxyCfg) { Remove-Item (Split-Path $proxyCfg -Parent) -Recurse -Force -ErrorAction SilentlyContinue }
+      if ($registriesCfg) { Remove-Item (Split-Path $registriesCfg -Parent) -Recurse -Force -ErrorAction SilentlyContinue }
       # Killing k3d mid --wait skips its own rollback; a leftover partial
       # cluster would be adopted as "already running" by the next run's
       # reuse path (Bugbot #439). Remove it — bounded — before failing.
@@ -1421,6 +1622,9 @@ function New-K3dCluster {
       if (-not $partialDeleted) {
         Warn "Couldn't remove the partial cluster automatically - run 'k3d cluster delete $CLUSTER_NAME' before re-running."
       }
+      # A TLS-inspected host pull can log x509 and then hang until the deadline —
+      # surface the CA remedy here too, matching bash's timeout fall-through (#474).
+      Write-HostCaCreateHint -Output $timeoutOut
       Err "Compute environment creation timed out after $timeoutMin minutes. Check that Docker is healthy and this network can pull images, then re-run. (TB_CREATE_TIMEOUT_MIN overrides the bound.)"
     }
 
@@ -1429,10 +1633,21 @@ function New-K3dCluster {
     $k3dStderr = if (Test-Path $k3dErrLog) { Get-Content $k3dErrLog -Raw -ErrorAction SilentlyContinue } else { "" }
     Remove-Item $k3dOutLog, $k3dErrLog -Force -ErrorAction SilentlyContinue
     if ($proxyCfg) { Remove-Item (Split-Path $proxyCfg -Parent) -Recurse -Force -ErrorAction SilentlyContinue }
+    if ($registriesCfg) { Remove-Item (Split-Path $registriesCfg -Parent) -Recurse -Force -ErrorAction SilentlyContinue }
     if ($k3dStdout) { Log "k3d stdout: $k3dStdout" }
     if ($k3dStderr) { Log "k3d stderr: $k3dStderr" }
 
-    if ($k3dExitCode -ne 0) { Err "Failed to create compute environment." }
+    if ($k3dExitCode -ne 0) {
+      # Host-daemon x509 (k3d runtime image pull on a TLS-inspecting network,
+      # #474) -- name the CA remedy before the generic failure.
+      Write-HostCaCreateHint -Output ("$k3dStdout`n$k3dStderr")
+      # Surface k3d's real reason (image pull / proxy / port / WSL) on screen via
+      # Err's detail excerpt, not only in the log (#423). stderr LAST so its tail
+      # (the FATA/x509/port reason) survives Get-ErrDetailLines' last-5-line window
+      # even if k3d wrote to stdout; matches the Write-HostCaCreateHint order above
+      # (reviewer).
+      Err "Failed to create compute environment." "$k3dStdout`n$k3dStderr"
+    }
     Ok "Compute environment ready."
   }
 
@@ -1941,7 +2156,7 @@ function Invoke-ProvisionClient {
     if (Test-Path $createOut) { Get-Content $createOut -ErrorAction SilentlyContinue | ForEach-Object { Log $_ } }
     if ($createRc -ne 0) {
       Print-CreateFailure -OutFile $createOut -Location $clientLocation
-      Err "Couldn't provision the client. Re-run to retry - full log: $LOG_FILE"
+      Err "Couldn't provision the client. Re-run to retry."
     }
     if (-not (Test-Path $credFile)) { Err "client create did not write the credential file ($credFile)." }
     $cred = Read-TraceblocCredentialFile -Path $credFile
@@ -2275,7 +2490,7 @@ $envBlock
   Log "Adding Helm repo: $TRACEBLOC_HELM_REPO_URL"
   $addOutput = (helm repo add $TRACEBLOC_HELM_REPO_NAME $TRACEBLOC_HELM_REPO_URL --force-update 2>&1) | Out-String
   Log "helm repo add: $addOutput"
-  if ($LASTEXITCODE -ne 0) { Err "Couldn't add the tracebloc chart repo ($TRACEBLOC_HELM_REPO_URL). Helm output:`n$addOutput`nCheck the log for details: $LOG_FILE" }
+  if ($LASTEXITCODE -ne 0) { Err "Couldn't add the tracebloc chart repo ($TRACEBLOC_HELM_REPO_URL)." $addOutput }
 
   Write-Host ""
   if ($adoptedReuse) {
@@ -2287,7 +2502,7 @@ $envBlock
       --reuse-values `
       --set-string "clientId=$TB_CLIENT_ID" 2>&1) | Out-String
     Log "Helm Output: $helmOutput"
-    if ($LASTEXITCODE -ne 0) { Err "Client reconcile failed. Helm output:`n$helmOutput`nCheck the log for details: $LOG_FILE" }
+    if ($LASTEXITCODE -ne 0) { Err "Client reconcile failed." $helmOutput }
     # Keep the LOCAL record in step for future default-reuse prompts: heal only
     # the clientId line, never regenerate — the live release is the truth.
     if (Test-Path $valuesFile) {
@@ -2302,7 +2517,7 @@ $envBlock
       --create-namespace `
       --values $valuesFile 2>&1) | Out-String
     Log "Helm Output: $helmOutput"
-    if ($LASTEXITCODE -ne 0) { Err "Client installation failed. Helm output:`n$helmOutput`nCheck the log for details: $LOG_FILE" }
+    if ($LASTEXITCODE -ne 0) { Err "Client installation failed." $helmOutput }
   }
 
   # Point kubeconfig's current context at the client namespace so kubectl + the
@@ -2365,7 +2580,19 @@ function Get-NotReadyState {
   $jmLogs = (& kubectl logs -n $Namespace "deployment/$Namespace-jobs-manager" --all-containers --tail=50 2>$null | Out-String)
   if ($jmLogs -match '(?i)authentication failed|unable to log in') { return "bad_creds" }
   $pods = (& kubectl get pods -n $Namespace 2>$null | Out-String)
-  if ($pods -match '(?i)ImagePullBackOff|ErrImagePull|InvalidImageName') { return "image_pull" }
+  if ($pods -match '(?i)ImagePullBackOff|ErrImagePull|InvalidImageName') {
+    # On a TLS-inspecting network the pull fails x509 because the nodes don't trust
+    # the corporate CA (#424). Distinguish it so the remedy can name the CA + env
+    # var, not a vague retry. Mirrors scripts/lib/summary.sh::_diagnose_not_ready.
+    # Scope the x509 test to the image-pull failure event itself, not any stray
+    # x509 event elsewhere in the ns -- a stale/unrelated x509 event must not steer
+    # the user into a delete+recreate for the wrong reason (reviewer). Mirrors the
+    # bash _diagnose_not_ready pull_fail filter.
+    $events = (& kubectl get events -n $Namespace --request-timeout=5s 2>$null | Out-String)
+    $pullFail = (($events -split "`n") | Where-Object { $_ -match '(?i)failed to pull|ErrImagePull' }) -join "`n"
+    if ($pullFail -match '(?i)x509|certificate signed by unknown authority|tls: failed to verify') { return "image_pull_ca" }
+    return "image_pull"
+  }
   if ($pods -match '(?i)CrashLoopBackOff') { return "crash" }
   return "starting"
 }
@@ -2427,6 +2654,18 @@ function Print-Summary {
       Write-Host "  The environment installed, but tracebloc refused those credentials."
       Write-Host "    1. Re-check them at https://ai.tracebloc.io/clients" -ForegroundColor Cyan
       Write-Host "    2. Re-run this installer (safe to re-run)"
+    }
+    "image_pull_ca" {
+      Write-Host "  " -NoNewline; Write-Host "$([char]0x2716) Setup didn't finish - the cluster does not trust your network's TLS-inspection CA." -ForegroundColor Red
+      Write-Host ""
+      Write-Host "  Your network intercepts HTTPS (break-and-inspect), so the in-cluster image"
+      Write-Host "  pulls fail certificate validation (x509). CA trust is baked in at"
+      Write-Host "  cluster-create, so delete the existing cluster first, then re-run with the CA:"
+      Write-Host "    k3d cluster delete $CLUSTER_NAME" -ForegroundColor Green
+      Write-Host "    `$env:TRACEBLOC_CA_BUNDLE = 'C:\path\to\corporate-ca.pem'; irm https://tracebloc.io/i.ps1 | iex" -ForegroundColor Green
+      Hint "(CURL_CA_BUNDLE is also honored.) Ask your IT team for the bundle if unsure."
+      Write-Host "  Inspect:  " -NoNewline; Write-Host "kubectl get events -n $ns | Select-String x509" -ForegroundColor Green
+      Hint "Re-running this installer is safe."
     }
     default {
       $reason = "a component didn't start"
@@ -2684,7 +2923,10 @@ function Test-Preflight {
       if ($status -eq "tls") { $tlsSeen = $true }
     }
   }
-  if ($tlsSeen)    { Hint "A TLS/certificate error usually means a break-and-inspect (TLS-inspecting) proxy whose corporate CA isn't trusted here - see the proxy notes." }
+  if ($tlsSeen)    {
+    Hint "A TLS/certificate error usually means a break-and-inspect (TLS-inspecting) proxy whose corporate CA isn't trusted here."
+    Hint "Fix THESE host checks by importing the CA into the Windows certificate store (Cert:\LocalMachine\Root) - Invoke-WebRequest uses the system store, not an env var. The k3d nodes are trusted separately via `$env:TRACEBLOC_CA_BUNDLE='C:\path\to\corporate-ca.pem' (CURL_CA_BUNDLE also honored) at cluster-create. Ask IT for the bundle if unsure."
+  }
   if ($cfail -gt 0){ Hint "Allow HTTPS (443) egress to the host(s) named above - the always-needed set is registry-1.docker.io, auth.docker.io, ghcr.io, $backendHost, tracebloc.github.io, plus any tool-download host listed (desktop.docker.com / dl.k8s.io / get.helm.sh / github.com / objects.githubusercontent.com) - or configure your corporate proxy." }
 
   if ($hardFail -gt 0) {

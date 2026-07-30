@@ -235,6 +235,12 @@
               "type": "string",
               "description": "Host the `helm test` enforcement check curls directly (when allowExternalHttps=false) to verify the CNI blocks egress; non-enforcement fails the test (a test hook never affects install/upgrade) — client-runtime#104. Empty string disables it (e.g. air-gapped clusters)."
             },
+            "enforcementProbeTimeoutSeconds": {
+              "type": "integer",
+              "minimum": 1,
+              "default": 60,
+              "description": "Max seconds the egress-enforcement `helm test` waits for egress to become blocked before failing. Covers standard-mode CNI reconciliation (e.g. AWS VPC CNI NETWORK_POLICY_ENFORCING_MODE=standard). 60s suits AWS VPC CNI / Calico / Cilium; raise on slow nodes."
+            },
             "dnsNamespace": {
               "type": "string",
               "default": "kube-system",
@@ -269,6 +275,66 @@
           }
         }
       }
+    },
+    "egressReachabilityCheck": {
+      "type": "object",
+      "description": "Backend-reachability seal check (helm test hook). Set enabled=false only on truly air-gapped clusters with no route to the backend.",
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Render the backend-reachability helm test hook Job. A test hook never affects install/upgrade."
+        }
+      }
+    },
+    "perIngestionTables": {
+      "type": "boolean",
+      "description": "RFC-0003 D16 (backend#1204/#1205): stamp PER_INGESTION_TABLES=1 into every ingestion Job. Flip per environment, dev first; file-bearing categories are refused under the flag until client-runtime#203 phase 2."
+    },
+    "ingestionAuthz": {
+      "type": "object",
+      "description": "Authorization policy for POST /internal/submit-ingestion-run on jobs-manager (client-runtime#21). Rendered into the ingestion-authz ConfigMap.",
+      "properties": {
+        "serviceAccountName": {
+          "type": "string",
+          "minLength": 1,
+          "default": "ingestor",
+          "description": "Name of the shared ServiceAccount this chart creates for ingestor subchart releases (client#129). Single source of truth for the SA template and the default `allowed` entry."
+        },
+        "allowed": {
+          "type": "array",
+          "description": "Maps (namespace, service_account) to permitted table-name prefixes. Empty renders `allowed: []` (deny-all, fail-safe).",
+          "items": {
+            "type": "object",
+            "properties": {
+              "service_account": {
+                "type": "string",
+                "description": "SA name. Omit to fall back to ingestionAuthz.serviceAccountName."
+              },
+              "namespace": {
+                "type": "string",
+                "description": "SA namespace. Omit to fall back to the release namespace."
+              },
+              "table_prefixes": {
+                "type": "array",
+                "items": { "type": "string" },
+                "description": "Table-name prefixes this SA may ingest into. [\"*\"] = any table."
+              }
+            }
+          }
+        }
+      }
+    },
+    "podTokenSigningSecret": {
+      "type": "string",
+      "default": "",
+      "description": "HMAC secret for signing pod-proxy tokens. Empty (default) auto-generates a stable secret on first install and reuses it via lookup on upgrade. Set explicitly only to pin or rotate (rotating invalidates all live tokens)."
+    },
+    "podTokenTtlSeconds": {
+      "type": "integer",
+      "minimum": 1,
+      "default": 604800,
+      "description": "Backstop lifetime (seconds) for a signed pod-proxy token. Set to comfortably exceed the longest expected training-job duration or long-running jobs 401 mid-run. Default 7 days."
     },
     "sealCheck": {
       "type": "object",

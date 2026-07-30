@@ -28,6 +28,80 @@ Describe "Get-BackendUrl" {
   It "unknown -> prod" { $env:CLIENT_ENV = "whatever"; Get-BackendUrl | Should -Be "https://api.tracebloc.io/" }
 }
 
+Describe "Get-ErrDetailLines (#423 honest failure output)" {
+  BeforeEach { $script:LOG_FILE = "C:\Users\x\.tracebloc\install-20260729-000000.log" }
+  AfterEach  { $script:LOG_FILE = $null }
+
+  It "always names the log path and the -Diagnose support bundle" {
+    $out = (Get-ErrDetailLines $null) -join "`n"
+    $out | Should -Match ([regex]::Escape($script:LOG_FILE))
+    $out | Should -Match '-Diagnose'
+  }
+  It "no detail -> no '--- details ---' section" {
+    (Get-ErrDetailLines $null) | Should -Not -Contain "--- details ---"
+  }
+  It "surfaces the real error excerpt when detail is supplied" {
+    $detail = "pulling image`nrpc error`nx509: certificate signed by unknown authority"
+    $out = (Get-ErrDetailLines $detail)
+    $out | Should -Contain "--- details ---"
+    ($out -join "`n") | Should -Match 'x509: certificate signed by unknown authority'
+  }
+  It "caps the excerpt at the last 5 non-empty lines" {
+    $detail = (1..9 | ForEach-Object { "line$_" }) -join "`n"
+    $out = (Get-ErrDetailLines $detail)
+    ($out -join "`n") | Should -Match 'line9'
+    ($out -join "`n") | Should -Match 'line5'
+    ($out -join "`n") | Should -Not -Match 'line4\b'   # only last 5 (line5..line9)
+  }
+  It "drops blank lines from the excerpt" {
+    $detail = "real reason`n`n`n   `n"
+    $out = (Get-ErrDetailLines $detail)
+    ($out -join "`n") | Should -Match 'real reason'
+    # trailing blank lines must not become excerpt entries
+    ($out | Where-Object { $_ -eq "" }).Count | Should -Be 0
+  }
+  It "omits the log line when no log file is set yet" {
+    $script:LOG_FILE = $null
+    $out = (Get-ErrDetailLines "boom") -join "`n"
+    $out | Should -Not -Match 'Full log:'
+    $out | Should -Match '-Diagnose'   # next-step hint still present
+  }
+  It "keeps the real Error: line and strips PS 5.1 ErrorRecord chrome (Bugbot #423)" {
+    # helm failures arrive as `native 2>&1 | Out-String`; on PS 5.1 that decorates
+    # stderr with position/CategoryInfo/FullyQualifiedErrorId lines. The excerpt
+    # must surface the actual Error, not the formatter noise.
+    $detail = @"
+helm : Error: looks like "https://bad" is not a valid chart repository or cannot be reached
+At line:1 char:14
++ `$addOutput = (helm repo add tracebloc https://bad --force-update 2>&1 ...
++              ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (Error:...:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+"@
+    $out = (Get-ErrDetailLines $detail) -join "`n"
+    $out | Should -Match 'Error: looks like'
+    $out | Should -Not -Match 'FullyQualifiedErrorId'
+    $out | Should -Not -Match 'CategoryInfo'
+    $out | Should -Not -Match 'At line:1 char:14'
+  }
+  It "Err is the single source of the log path — no inline 'Full log:' hints (Bugbot #423)" {
+    # Err now always prints the log path via Get-ErrDetailLines; an inline
+    # `Hint "Full log:"` right before an Err would print it twice.
+    $src = Get-Content "$PSScriptRoot/../install-k8s.ps1" -Raw
+    $src | Should -Not -Match 'Hint "Full log:'
+  }
+  It "single-line result enumerates as one intact line, never per-character (Bugbot #423)" {
+    # The bare-Err path (no detail, no LOG_FILE — e.g. a Confirm-Config failure
+    # before Start-InstallLog) returns just the support-bundle line. Enumerating it
+    # must yield that whole line, not a stream of single characters.
+    $script:LOG_FILE = $null
+    $lines = @(Get-ErrDetailLines $null)
+    $lines.Count | Should -Be 1
+    $lines[0]    | Should -Be "Support bundle: re-run with -Diagnose"
+    foreach ($l in @(Get-ErrDetailLines $null)) { $l.Length | Should -BeGreaterThan 1 }
+  }
+}
+
 Describe "Test-Credentials" {
   It "HTTP 200 -> valid" {
     Mock Invoke-WebRequest { [pscustomobject]@{ StatusCode = 200 } }
@@ -625,7 +699,9 @@ Describe "Install-ClientHelm" {
       return "id385b"
     }
     Mock Test-Credentials { "valid" }
-    Mock Err { param($m) $script:lastErr = $m; throw "err" }
+    # #423: helm's real output now flows through Err's $Detail param (surfaced on
+    # screen via Get-ErrDetailLines), not embedded in the message — capture both.
+    Mock Err { param($m, $Detail) $script:lastErr = "$m`n$Detail"; throw "err" }
     Mock helm {
       if (($args -contains "repo") -and ($args -contains "add")) {
         $global:LASTEXITCODE = 1
@@ -1469,6 +1545,118 @@ Describe "Docker engine wait calibration (#413)" {
   }
 }
 
+Describe "In-node CA trust for TLS-inspecting networks (#424)" {
+  Context "Resolve-CaBundle" {
+    BeforeEach {
+      $env:TRACEBLOC_CA_BUNDLE = $null; $env:CURL_CA_BUNDLE = $null
+      Mock Err { throw "ERR: $args" }
+    }
+    It "returns null when no CA var is set" {
+      Resolve-CaBundle | Should -BeNullOrEmpty
+    }
+    It "returns the path when TRACEBLOC_CA_BUNDLE is set and readable" {
+      $ca = Join-Path $TestDrive "ca.pem"; "x" | Set-Content $ca
+      $env:TRACEBLOC_CA_BUNDLE = $ca
+      Resolve-CaBundle | Should -Be (Resolve-Path $ca).Path
+    }
+    It "falls back to CURL_CA_BUNDLE" {
+      $ca = Join-Path $TestDrive "curlca.pem"; "x" | Set-Content $ca
+      $env:CURL_CA_BUNDLE = $ca
+      Resolve-CaBundle | Should -Be (Resolve-Path $ca).Path
+    }
+    It "hard-errors when the CA var is set but the file is missing" {
+      $env:TRACEBLOC_CA_BUNDLE = (Join-Path $TestDrive "missing.pem")
+      { Resolve-CaBundle } | Should -Throw "*ERR:*"
+    }
+    It "hard-errors when the CA file exists but is unreadable (matches bash -r; Bugbot #424)" -Skip:($IsWindows) {
+      $ca = Join-Path $TestDrive "unreadable.pem"; "x" | Set-Content $ca
+      chmod 000 $ca
+      $env:TRACEBLOC_CA_BUNDLE = $ca
+      try { { Resolve-CaBundle } | Should -Throw "*ERR:*" } finally { chmod 644 $ca }
+    }
+  }
+
+  Context "Write-K3dRegistriesConfig" {
+    It "writes ca_file for every registry" {
+      $p = Write-K3dRegistriesConfig -NodeCa "/etc/ssl/certs/tracebloc-mitm-ca.crt"
+      try {
+        $raw = Get-Content $p -Raw
+        $raw | Should -Match 'registry-1\.docker\.io'
+        $raw | Should -Match 'auth\.docker\.io'      # Docker Hub token host (Bugbot #424)
+        $raw | Should -Match 'ghcr\.io'
+        ([regex]::Matches($raw, [regex]::Escape('ca_file: "/etc/ssl/certs/tracebloc-mitm-ca.crt"'))).Count | Should -Be 4
+      } finally { Remove-Item (Split-Path $p -Parent) -Recurse -Force -ErrorAction SilentlyContinue }
+    }
+  }
+
+  Context "Get-NotReadyState (CA classification)" {
+    It "an x509 pull event -> image_pull_ca" {
+      Mock kubectl {
+        if ($args -match 'logs')   { return "booting" }
+        if ($args -match 'events') { return "Failed to pull image: x509: certificate signed by unknown authority" }
+        return "x 0/1 ImagePullBackOff"
+      }
+      Get-NotReadyState -Namespace "ns" | Should -Be "image_pull_ca"
+    }
+    It "ImagePullBackOff without x509 stays image_pull" {
+      Mock kubectl {
+        if ($args -match 'logs')   { return "booting" }
+        if ($args -match 'events') { return "Back-off pulling image (rate limited)" }
+        return "x 0/1 ImagePullBackOff"
+      }
+      Get-NotReadyState -Namespace "ns" | Should -Be "image_pull"
+    }
+    It "x509 on an unrelated event (not the pull) stays image_pull (Bugbot #424)" {
+      Mock kubectl {
+        if ($args -match 'logs')   { return "booting" }
+        if ($args -match 'events') {
+          return @(
+            'Warning  Failed       pod/x   Back-off pulling image "ghcr.io/x"',
+            'Warning  FailedMount  pod/y   MountVolume failed: x509: certificate signed by unknown authority'
+          ) -join "`n"
+        }
+        return "x 0/1 ImagePullBackOff"
+      }
+      Get-NotReadyState -Namespace "ns" | Should -Be "image_pull"
+    }
+    It "bounds the events lookup with --request-timeout (matches bash; Bugbot #424)" {
+      (Get-Content "$PSScriptRoot/../install-k8s.ps1" -Raw) |
+        Should -Match 'kubectl get events -n \$Namespace --request-timeout=5s'
+    }
+  }
+
+  Context "Write-HostCaCreateHint (host daemon x509 at create, #474)" {
+    It "no x509 in output -> silent" {
+      $out = Write-HostCaCreateHint -Output "FATA Failed to create cluster: docker not running" 6>&1 | Out-String
+      $out.Trim() | Should -BeNullOrEmpty
+    }
+    It "x509 in output -> names the host daemon + Windows trust store" {
+      $out = Write-HostCaCreateHint -Output 'Failed to pull image "rancher/k3s": x509: certificate signed by unknown authority' 6>&1 | Out-String
+      $out | Should -Match 'HOST Docker daemon'
+      $out | Should -Match 'Trusted Root'
+    }
+    It "the create-timeout path captures full output and surfaces the hint (Bugbot #474 parity)" {
+      # The timeout branch can't be exercised end-to-end here, so assert the wiring:
+      # it captures the full logs before deleting them and calls the hint before Err
+      # (bash runs _host_ca_create_hint on its timeout fall-through too).
+      $src = Get-Content "$PSScriptRoot/../install-k8s.ps1" -Raw
+      $src | Should -Match '\$timeoutOut\s*\+='                       # full output captured
+      $src | Should -Match 'Write-HostCaCreateHint -Output \$timeoutOut'  # hint called on timeout
+    }
+  }
+
+  Context "Print-Summary CA message" {
+    It "names the CA problem + env var, not a generic pull error" {
+      $script:ClientState = "image_pull_ca"
+      $script:TB_NAMESPACE = "ns"
+      $out = Print-Summary 6>&1 | Out-String
+      $out | Should -Match 'TLS-inspection CA'
+      $out | Should -Match 'TRACEBLOC_CA_BUNDLE'
+      $out | Should -Not -Match "an image couldn't be pulled"
+    }
+  }
+}
+
 Describe "Assert-ToolRuns execute-gate (#411)" {
   BeforeEach {
     Mock Err             { throw "ERR: $args" }
@@ -1673,5 +1861,64 @@ Describe "GPU container toolkit — progress + honest remedies (#415)" {
       $script:gpuFn.Extent.Text | Should -Not -Match 'set it up manually inside WSL later'
       $script:gpuFn.Extent.Text | Should -Not -Match 'GPU setup may need manual attention'
     }
+  }
+}
+
+Describe "Download UX -- PS 5.1 progress throttle silenced, honest expectation lines (#468)" {
+  It "Invoke-WithRetry silences the progress overlay for every fetch scriptblock it drives" {
+    (Get-Command Invoke-WithRetry).Definition | Should -Match "ProgressPreference\s*=\s*'SilentlyContinue'"
+  }
+  It "the Docker Desktop fallback names its ~600 MB wait before the silent fetch" {
+    (Get-Command Install-DockerDesktop).Definition | Should -Match 'Downloading Docker Desktop \(~600 MB\)'
+  }
+  It "the winget bootstrap names its ~200 MB wait" {
+    (Get-Command Install-Winget).Definition | Should -Match 'Downloading winget \(~200 MB\)'
+  }
+  It "kubectl / k3d / helm downloads announce size before going quiet" {
+    (Get-Command Install-Kubectl).Definition    | Should -Match 'Downloading kubectl \$kVer \(~60 MB\)'
+    (Get-Command Install-K3dAndHelm).Definition | Should -Match 'Downloading k3d \$k3dVer \(~25 MB\)'
+    (Get-Command Install-K3dAndHelm).Definition | Should -Match 'Downloading Helm \$helmVer \(~20 MB\)'
+  }
+}
+
+Describe "Enable-OneVirtFeature -- translated DISM failures, honest reboot flag (#468)" {
+  BeforeAll {
+    # DISM cmdlets don't exist off-Windows; Pester can only Mock an existing
+    # command, so define an advanced-function stub (it must accept -ErrorAction).
+    function Enable-WindowsOptionalFeature {
+      [CmdletBinding()]
+      param([switch]$Online, [string]$FeatureName, [switch]$NoRestart)
+    }
+  }
+  BeforeEach {
+    Mock Log  {}
+    Mock Warn {}
+    Mock Hint {}
+  }
+  It "already-enabled feature: no DISM call, no reboot demanded" {
+    Mock Enable-WindowsOptionalFeature {}
+    Enable-OneVirtFeature -Key 'VirtualMachinePlatform' -Label 'VMP' -CurrentState 'Enabled' -Edition 'Pro' |
+      Should -BeFalse
+    Should -Invoke Enable-WindowsOptionalFeature -Times 0
+  }
+  It "newly enabled feature: reports reboot-pending" {
+    Mock Enable-WindowsOptionalFeature {}
+    Enable-OneVirtFeature -Key 'VirtualMachinePlatform' -Label 'VMP' -CurrentState 'Disabled' -Edition 'Pro' |
+      Should -BeTrue
+  }
+  It "feature package ABSENT on this edition (Server SKU): translated skip, no raw COMException, no reboot" {
+    Mock Enable-WindowsOptionalFeature { throw [System.Runtime.InteropServices.COMException]::new("0x800f080c") }
+    { Enable-OneVirtFeature -Key 'Microsoft-Hyper-V-All' -Label 'Hyper-V' -CurrentState $null -Edition 'Server 2022' } |
+      Should -Not -Throw
+    Enable-OneVirtFeature -Key 'Microsoft-Hyper-V-All' -Label 'Hyper-V' -CurrentState $null -Edition 'Server 2022' |
+      Should -BeFalse
+    Should -Invoke Warn -ParameterFilter { $m -like '*not available on this Windows edition*' }
+  }
+  It "feature present but enable FAILS: translated warning + manual hint, no reboot loop" {
+    Mock Enable-WindowsOptionalFeature { throw [System.Runtime.InteropServices.COMException]::new("0x80070005") }
+    Enable-OneVirtFeature -Key 'Microsoft-Hyper-V-All' -Label 'Hyper-V' -CurrentState 'Disabled' -Edition 'Pro' |
+      Should -BeFalse
+    Should -Invoke Warn -ParameterFilter { $m -like 'Could not enable*' }
+    Should -Invoke Hint -ParameterFilter { $m -like "*Enable 'Microsoft-Hyper-V-All' manually*" }
   }
 }

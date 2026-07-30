@@ -50,7 +50,7 @@ For the threat model, defense layers, per-platform caveats, operator responsibil
 
 ## Deploy
 
-This repo ships the **tracebloc** unified Helm chart (currently `v1.3.5`) — one chart for AKS, EKS, bare-metal, and OpenShift.
+This repo ships the **tracebloc** unified Helm chart — one chart for AKS, EKS, bare-metal, and OpenShift. See [`client/Chart.yaml`](client/Chart.yaml) or the [releases page](https://github.com/tracebloc/client/releases) for the current chart version.
 
 ### Quick install
 
@@ -139,3 +139,9 @@ Platform-specific walkthroughs: [Linux](https://docs.tracebloc.io/environment-se
 Apache 2.0 — see [LICENSE](LICENSE).
 
 **Deployment help?** [support@tracebloc.io](mailto:support@tracebloc.io) or [open an issue](https://github.com/tracebloc/client/issues).
+
+## Pre-commit
+
+Optional but recommended: `pip install pre-commit && pre-commit install` sets up the git hooks from [`.pre-commit-config.yaml`](.pre-commit-config.yaml).
+The hooks run automatically on each commit and are lint-only (ShellCheck at the same error-severity gate as CI) — nothing rewrites files, so `scripts/manifest.sha256` always stays true to `scripts/`.
+They are a fast local guard — CI remains the guarantee.

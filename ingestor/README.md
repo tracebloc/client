@@ -147,7 +147,7 @@ The dominant install path leaves `image.digest` empty and lets jobs-manager spaw
 |---|---|
 | Reproducing an older ingestion run for audit / debugging | `--set image.digest=sha256:<old-digest>` |
 | Testing a new ingestor release before cluster-wide rollout | `--set image.digest=sha256:<new-digest>` |
-| Air-gapped mirror with frozen versions | Use both `--set image.repository=...` and `--set image.digest=sha256:...` |
+| Air-gapped mirror with frozen versions | Point the parent `tracebloc/client` chart's `images.ingestor.repository` at your mirror (that is what jobs-manager spawns from) and pin `--set image.digest=sha256:...` |
 
 When set, the digest must be the full canonical form (`sha256:` + 64 lowercase hex chars). Tags like `v0.3.0` are rejected by jobs-manager. See the [data-ingestors releases page](https://github.com/tracebloc/data-ingestors/releases) for current digests.
 
@@ -157,7 +157,6 @@ When set, the digest must be the full canonical form (`sha256:` + 64 lowercase h
 |---|---|---|
 | `jobsManager.endpoint` | `http://jobs-manager.<release-namespace>.svc.cluster.local:8080` (auto-resolved) | The ingestor release and the parent `tracebloc/client` release live in different namespaces, or you're testing against a port-forward. |
 | `serviceAccount.name` | `ingestor` | The cluster's `ingestionAuthz` policy expects a different SA name. (Default matches the parent chart's default.) |
-| `image.repository` | `ghcr.io/tracebloc/ingestor` | Air-gapped mirror. |
 | `idempotencyKey` | `<release>-<unix-epoch>` (regenerated every install) | You want strict at-most-once semantics across reinstalls of the same release name — pass a stable UUID so jobs-manager replays the original run instead of starting a new one. |
 | `hookTimeoutSeconds` | `30` | Slow networks or large schemas. |
 

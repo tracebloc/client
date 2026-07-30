@@ -186,7 +186,31 @@ _drift_cli_contract() {
   fi
 }
 
-# ── Check 4: every installer execute-gates every tool (#411) ─────────────────
+# ── Check 4: both installers wire in-node CA trust (#424) ────────────────────
+# cluster.sh (Linux/macOS) and install-k8s.ps1 (Windows) must each resolve the
+# operator's CA bundle, mount it into the nodes, and point containerd at it via
+# --registry-config. If one installer drops any piece, the break-and-inspect x509
+# pull failure reopens on that OS — catch it here, not in a hospital's network.
+# Match tokens in real code only, not comments: strip comment lines first, so
+# deleting the functional `--registry-config` wiring can't be masked by the token
+# lingering in a comment above it (Bugbot: no whole-file grep). No `grep -q` under
+# main()'s pipefail — a SIGPIPE on the upstream grep would false-fail.
+_drift_ca_token() { grep -vE '^[[:space:]]*#' "$1" 2>/dev/null | grep -F -- "$2" >/dev/null 2>&1; }
+_drift_ca_trust() {
+  echo "▸ In-node CA trust wiring (cluster.sh · install-k8s.ps1)"
+  local before=$_drift pat
+  local sh="scripts/lib/cluster.sh" ps1="scripts/install-k8s.ps1"
+  for pat in TRACEBLOC_CA_BUNDLE CURL_CA_BUNDLE _resolve_ca_bundle registry-config tracebloc-mitm-ca.crt _host_ca_create_hint; do
+    _drift_ca_token "$DRIFT_ROOT/$sh" "$pat" || _note "$sh: CA wiring missing '$pat' (#424/#474)"
+  done
+  for pat in TRACEBLOC_CA_BUNDLE CURL_CA_BUNDLE Resolve-CaBundle registry-config tracebloc-mitm-ca.crt Write-HostCaCreateHint; do
+    _drift_ca_token "$DRIFT_ROOT/$ps1" "$pat" || _note "$ps1: CA wiring missing '$pat' (#424/#474)"
+  done
+  if [[ "$_drift" -eq "$before" ]]; then _ok "both installers resolve, mount, and register the corporate CA"; fi
+  return 0
+}
+
+# ── Check 4b: every installer execute-gates every tool (#411) ────────────────
 # The post-install "check" used to be a log-only interpolation that masked a
 # corrupt/wrong-arch binary until cluster-create. All installers now RUN each tool
 # (assert_tool_runs on bash, Assert-ToolRuns on PowerShell). If an installer drops
@@ -271,6 +295,7 @@ main() {
   _drift_backend_hosts
   _drift_workload_names
   _drift_cli_contract
+  _drift_ca_trust
   _drift_execute_gates
   _drift_preflight_hosts
   echo "─────────────────────────────────────────────────────────────"
