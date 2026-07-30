@@ -24,7 +24,7 @@
 # =============================================================================
 
 #Requires -Version 5.1
-param([switch]$Help, [switch]$NoReboot, [switch]$Diagnose, [string]$DailyUser)
+param([switch]$Help, [switch]$NoReboot, [switch]$Diagnose, [string]$DailyUser, [switch]$Resume)
 
 # --- Self-elevation (#421) ---------------------------------------------------
 # Build the powershell.exe argument list to relaunch this installer ELEVATED.
@@ -35,11 +35,12 @@ param([switch]$Help, [switch]$NoReboot, [switch]$Diagnose, [string]$DailyUser)
 # ShellExecute/RunAs doesn't inherit the caller's process env, and putting secrets
 # on a command line is unsafe; an env-driven run should be launched elevated.
 function Get-ElevationCommand {
-  param([string]$ScriptPath, [switch]$NoReboot, [switch]$Diagnose, [string]$DailyUser)
+  param([string]$ScriptPath, [switch]$NoReboot, [switch]$Diagnose, [string]$DailyUser, [switch]$Resume)
   $switches = @()
   if ($NoReboot)  { $switches += '-NoReboot' }
   if ($Diagnose)  { $switches += '-Diagnose' }
   if ($DailyUser) { $switches += @('-DailyUser', "`"$DailyUser`"") }   # forward the daily user (#418 Bugbot)
+  if ($Resume)    { $switches += '-Resume' }                          # forward a resume so a re-elevation stays a continuation (#420)
   # Return a single command-line STRING, not an array: PS 5.1 Start-Process
   # -ArgumentList doesn't quote array elements, so a script path with spaces (or
   # the quoted -Command value) would be split (#421 Bugbot; same class as #419).
@@ -61,8 +62,8 @@ function Get-ElevationCommand {
 # elevated process was started (user accepted UAC), $false if they declined the
 # prompt or the launch failed (Start-Process -Verb RunAs throws on cancel).
 function Invoke-SelfElevate {
-  param([string]$ScriptPath, [switch]$NoReboot, [switch]$Diagnose, [string]$DailyUser)
-  $argList = Get-ElevationCommand -ScriptPath $ScriptPath -NoReboot:$NoReboot -Diagnose:$Diagnose -DailyUser $DailyUser
+  param([string]$ScriptPath, [switch]$NoReboot, [switch]$Diagnose, [string]$DailyUser, [switch]$Resume)
+  $argList = Get-ElevationCommand -ScriptPath $ScriptPath -NoReboot:$NoReboot -Diagnose:$Diagnose -DailyUser $DailyUser -Resume:$Resume
   try {
     Start-Process -FilePath 'powershell' -Verb RunAs -ArgumentList $argList -ErrorAction Stop | Out-Null
     return $true
@@ -85,7 +86,7 @@ if (-not $env:TB_PESTER) {
       Write-Host "  " -NoNewline; Write-Host ([char]0x26A0) -ForegroundColor Yellow -NoNewline; Write-Host "  Administrator rights are required to set up Docker + WSL." -ForegroundColor Yellow
       $ans = Read-Host "  Relaunch as Administrator now? A Windows UAC prompt will appear [Y/n]"
       if ($ans -notmatch '^\s*[Nn]') {
-        $elevated = Invoke-SelfElevate -ScriptPath $PSCommandPath -NoReboot:$NoReboot -Diagnose:$Diagnose -DailyUser $DailyUser
+        $elevated = Invoke-SelfElevate -ScriptPath $PSCommandPath -NoReboot:$NoReboot -Diagnose:$Diagnose -DailyUser $DailyUser -Resume:$Resume
         if ($elevated) { Write-Host "  Continuing in the new elevated window -- you can close this one." -ForegroundColor DarkGray }
         else           { Write-Host "  Elevation was cancelled." -ForegroundColor DarkGray }
       }
@@ -433,7 +434,7 @@ tracebloc -- client setup
 
 Usage:
   irm https://raw.githubusercontent.com/tracebloc/client/main/scripts/install.ps1 | iex
-  .\install-k8s.ps1 [-Help] [-NoReboot]
+  .\install-k8s.ps1 [-Help] [-NoReboot] [-Resume]
 
 Advanced configuration (environment variables):
   CLUSTER_NAME   Cluster name                   (default: tracebloc)
@@ -441,6 +442,8 @@ Advanced configuration (environment variables):
   AGENTS         Worker nodes                    (default: 1)
   K8S_VERSION    k3s image tag                   (default: v1.29.4-k3s1)
   -NoReboot      Skip reboot prompt after enabling Windows features
+  -Resume        Continue an install interrupted by a reboot (set automatically
+                 by the registered RunOnce continuation; rarely needed by hand)
   HOST_DATA_DIR  Persistent data directory       (default: ~\.tracebloc)
   TRACEBLOC_CA_BUNDLE  Corporate CA bundle (PEM) to trust on a TLS-inspecting
                  network, so in-cluster image pulls don't fail x509 (#424).
@@ -532,6 +535,165 @@ function Start-InstallLog {
   } catch {
     Log "Could not start transcript logging: $_"
   }
+}
+
+# =============================================================================
+#  INSTALL STATE + RESUME-AFTER-REBOOT (#420)
+#  Two legitimate reboots (Windows feature enablement; Docker/WSL first boot) can
+#  interrupt the install. Instead of "re-find and re-paste the one-liner", we:
+#   - checkpoint completed stages in a schema-versioned JSON state file under
+#     %USERPROFILE%\.tracebloc\, and
+#   - on a reboot, register a RunOnce continuation that resumes automatically at
+#     next sign-in (-Resume).
+#  The state file is ADVISORY: every stage still self-verifies (tools re-checked,
+#  cluster re-derived), so a stale/corrupt checkpoint can never skip real work.
+# =============================================================================
+
+$script:STATE_SCHEMA = 1
+$script:RESUME_ROOT   = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\RunOnce'
+$script:RESUME_NAME   = 'TraceblocInstallerResume'
+
+# --- Pure state helpers (no I/O; unit-testable) ------------------------------
+
+# A fresh, empty state at the current schema.
+function New-InstallState {
+  return [pscustomobject]@{ schema = $script:STATE_SCHEMA; stages = @(); completed = $false }
+}
+
+# Is a parsed state usable by THIS installer (schema matches)? A future/older or
+# malformed schema is treated as absent so we never act on an incompatible file.
+function Test-InstallStateCurrent {
+  param($State)
+  return ($null -ne $State -and
+          ($State.PSObject.Properties.Name -contains 'schema') -and
+          ([int]$State.schema -eq $script:STATE_SCHEMA))
+}
+
+# Parse a state JSON string -> normalised state object. Corrupt/incompatible/empty
+# -> a fresh empty state, NEVER a throw (a broken checkpoint must not break install).
+function ConvertTo-InstallState {
+  param([string]$Json)
+  if ([string]::IsNullOrWhiteSpace($Json)) { return (New-InstallState) }
+  try { $obj = $Json | ConvertFrom-Json -ErrorAction Stop } catch { return (New-InstallState) }
+  if (-not (Test-InstallStateCurrent -State $obj)) { return (New-InstallState) }
+  $stages = @()
+  if (($obj.PSObject.Properties.Name -contains 'stages') -and $obj.stages) { $stages = @($obj.stages) }
+  $completed = $false
+  if ($obj.PSObject.Properties.Name -contains 'completed') { $completed = [bool]$obj.completed }
+  return [pscustomobject]@{ schema = [int]$obj.schema; stages = $stages; completed = $completed }
+}
+
+# Record a stage complete (idempotent, order-preserving, deduped). Pure -> returns
+# a new state; callers persist it.
+function Add-CompletedStage {
+  param($State, [string]$Name)
+  if ($null -eq $State) { $State = New-InstallState }
+  $stages = @($State.stages)
+  if ($stages -notcontains $Name) { $stages += $Name }
+  return [pscustomobject]@{ schema = $State.schema; stages = $stages; completed = $State.completed }
+}
+
+# Is a stage recorded complete?
+function Test-StateHasStage {
+  param($State, [string]$Name)
+  return ($null -ne $State -and (@($State.stages) -contains $Name))
+}
+
+# --- State-file I/O (thin wrappers over the pure helpers) --------------------
+
+function Get-InstallStatePath { return (Join-Path $HOST_DATA_DIR 'install-state.json') }
+
+# Read + parse the on-disk state; missing/unreadable/corrupt -> fresh empty state.
+function Read-InstallState {
+  $path = Get-InstallStatePath
+  if (-not (Test-Path -LiteralPath $path)) { return (New-InstallState) }
+  try { return (ConvertTo-InstallState -Json (Get-Content -LiteralPath $path -Raw -ErrorAction Stop)) }
+  catch { return (New-InstallState) }
+}
+
+# Persist state. Warn-only: a failed checkpoint must never fail the install.
+function Save-InstallState {
+  param($State)
+  try {
+    if (-not (Test-Path $HOST_DATA_DIR)) { New-Item -ItemType Directory -Path $HOST_DATA_DIR -Force | Out-Null }
+    ($State | ConvertTo-Json -Compress) | Set-Content -Path (Get-InstallStatePath) -Encoding ASCII -ErrorAction Stop
+  } catch { Log "install-state write failed: $_" }
+}
+
+# Mark a stage complete in the live $script:InstallState and persist it.
+function Set-StageComplete {
+  param([string]$Name)
+  $script:InstallState = Add-CompletedStage -State $script:InstallState -Name $Name
+  Save-InstallState -State $script:InstallState
+}
+
+# Is a stage recorded complete in the live state?
+function Test-StageComplete {
+  param([string]$Name)
+  return (Test-StateHasStage -State $script:InstallState -Name $Name)
+}
+
+# Mark the whole install completed + persist (so a later re-run detects nothing-to-do).
+function Set-InstallComplete {
+  if ($null -eq $script:InstallState) { $script:InstallState = New-InstallState }
+  $script:InstallState = [pscustomobject]@{
+    schema = $script:InstallState.schema; stages = @($script:InstallState.stages); completed = $true
+  }
+  Save-InstallState -State $script:InstallState
+}
+
+# --- Fast-path health probes (honest "nothing to do", not just a checkpoint) --
+
+# Are all four client tools on PATH? Cheap; used to gate the nothing-to-do path.
+function Test-ToolsPresent {
+  foreach ($t in @('docker','kubectl','k3d','helm')) { if (-not (Has $t)) { return $false } }
+  return $true
+}
+
+# Does our k3d cluster already exist? Read-only, bounded, never-fatal.
+function Test-ClusterPresent {
+  try {
+    $out = (& k3d cluster list $CLUSTER_NAME 2>$null | Out-String)
+    return (($LASTEXITCODE -eq 0) -and ($out -match [regex]::Escape($CLUSTER_NAME)))
+  } catch { return $false }
+}
+
+# --- Resume-after-reboot (RunOnce) -------------------------------------------
+
+# Pure: the RunOnce command line that resumes the install after a reboot. Reuses
+# the elevation arg-builder (#421) and adds -Resume so the resumed run auto-continues
+# past the reboot prompt. Prefixed with the powershell.exe host that RunOnce needs.
+function Get-ResumeCommand {
+  param([string]$ScriptPath, [switch]$NoReboot, [switch]$Diagnose, [string]$DailyUser)
+  $inner = Get-ElevationCommand -ScriptPath $ScriptPath -NoReboot:$NoReboot -Diagnose:$Diagnose -DailyUser $DailyUser
+  # Only the durable -File form can carry -Resume; the irm|iex shim has no param
+  # block to bind it (#421), and appending it would sit past -Command's value. The
+  # state file (completed/stages) drives the resume for the one-liner path anyway (#420).
+  if ($inner -match '(^|\s)-File\s') { $inner = "$inner -Resume" }
+  return "powershell.exe $inner"
+}
+
+# Register the RunOnce continuation. Warn-only. Returns $true on success.
+function Register-ResumeAfterReboot {
+  param([string]$ScriptPath, [switch]$NoReboot, [switch]$Diagnose, [string]$DailyUser)
+  try {
+    if (-not (Test-Path $script:RESUME_ROOT)) { New-Item -Path $script:RESUME_ROOT -Force | Out-Null }
+    $cmd = Get-ResumeCommand -ScriptPath $ScriptPath -NoReboot:$NoReboot -Diagnose:$Diagnose -DailyUser $DailyUser
+    New-ItemProperty -Path $script:RESUME_ROOT -Name $script:RESUME_NAME -Value $cmd -PropertyType String -Force -ErrorAction Stop | Out-Null
+    Log "Registered resume-after-reboot: $cmd"
+    return $true
+  } catch { Log "resume registration failed: $_"; return $false }
+}
+
+# Remove the RunOnce continuation. RunOnce self-deletes once it fires, but clear it
+# explicitly on the success path (no reboot happened) and after a manual re-run so a
+# stale entry can never relaunch the installer unexpectedly.
+function Unregister-ResumeAfterReboot {
+  try {
+    if (Test-Path $script:RESUME_ROOT) {
+      Remove-ItemProperty -Path $script:RESUME_ROOT -Name $script:RESUME_NAME -ErrorAction SilentlyContinue
+    }
+  } catch { Log "resume unregister failed: $_" }
 }
 
 # =============================================================================
@@ -815,12 +977,19 @@ function Enable-VirtualisationFeatures {
 
   if ($rebootNeeded) {
     Warn "A reboot is required to finish enabling system features."
+    # Checkpoint + arm the RunOnce continuation so the install resumes at next
+    # sign-in with no re-pasting -- both for auto-reboot and manual -NoReboot (#420).
+    Set-StageComplete 'features-reboot-pending'
+    $resumeArmed = Register-ResumeAfterReboot -ScriptPath $PSCommandPath -NoReboot:$NoReboot -Diagnose:$Diagnose -DailyUser $DailyUser
+    if ($resumeArmed) { Ok "The install will resume automatically the next time you sign in." }
     if ($NoReboot) {
-      Hint "Reboot manually, then re-run this script."
+      if ($resumeArmed) { Hint "Reboot when ready; the install resumes at your next sign-in." }
+      else              { Hint "Reboot manually, then re-run this installer to continue." }
       exit 2
     }
     $choice = Read-Host "  Reboot now? [y/N]"
     if ($choice -match "^[Yy]$") { Restart-Computer -Force }
+    if (-not $resumeArmed) { Hint "After the reboot, re-run this installer to continue." }
     exit 2
   }
 
@@ -3737,14 +3906,30 @@ if ($Diagnose) { Invoke-DiagnoseBundle; exit 0 }
 Confirm-Config
 Initialize-ToolDir
 Start-InstallLog
+# Load the checkpoint state up front (#420): drives the resume banner + the fast
+# nothing-to-do path. Missing/corrupt -> a fresh empty state (never fatal).
+$script:InstallState = Read-InstallState
 Print-Banner
+if ($Resume) { Ok "Resuming the tracebloc install after a reboot..." }
 Print-Roadmap
+
+# Fast path (#420): a prior run completed AND the tools + cluster are still here
+# -> nothing to do. Honest: verifies real presence, not just the checkpoint. Skipped
+# on -Resume (a resume must finish the interrupted walk, not short-circuit it).
+if ((-not $Resume) -and $script:InstallState.completed -and (Test-ToolsPresent) -and (Test-ClusterPresent)) {
+  Ok "tracebloc is already installed on this machine -- nothing to do."
+  Hint "Delete ~\.tracebloc\install-state.json (or set a fresh HOST_DATA_DIR) to force a full reinstall."
+  Unregister-ResumeAfterReboot
+  try { Stop-Transcript | Out-Null } catch {}
+  exit 0
+}
 
 # -- Step 1/6: Check system requirements (honest split from tool install, #422) --
 Step 1 6 "Checking system requirements"
 Test-Preflight
 Find-Gpu
 Enable-VirtualisationFeatures
+Set-StageComplete 'step1-requirements'
 
 # -- Step 2/6: Install system tools (~700 MB — Docker Desktop, kubectl, k3d, helm;
 # each names its wait + shows a heartbeat + prints a summary line, #422) --
@@ -3754,24 +3939,29 @@ Install-DockerDesktop
 Install-NvidiaContainerToolkit
 Install-Kubectl
 Install-K3dAndHelm
+Set-StageComplete 'step2-tools'
 
 # -- Step 3/6: Set up secure compute environment --
 Step 3 6 "Setting up secure compute environment"
 New-K3dCluster
 Install-GpuDevicePlugin
 Confirm-GpuNode
+Set-StageComplete 'step3-cluster'
 
 # -- Step 4/6: install the tracebloc CLI FIRST (#388) — it mints the machine
 # credential in Step 5; a CLI-install hiccup degrades Step 5 to the legacy
 # manual-credential fallback instead of aborting.
 Install-TraceblocCli
+Set-StageComplete 'step4-cli'
 
 # -- Step 5/6: register this machine (browser sign-in + `client create`;
 # env-var credentials skip it; missing/old CLI falls back to manual prompts) --
 Invoke-ProvisionClient
+Set-StageComplete 'step5-register'
 
 # -- Step 6/6 handled inside Install-ClientHelm --
 Install-ClientHelm
+Set-StageComplete 'step6-client'
 
 # Verify the client actually came up before reporting anything
 Wait-ForClientReady
@@ -3779,6 +3969,11 @@ Wait-ForClientReady
 # Provision Docker for the day-to-day (standard) user during this elevated window
 # (#418) so they need zero admin actions later. Warn-only -- never fail the install.
 try { Set-DailyUserProvisioning } catch { Log "daily-user provisioning error: $_" }
+
+# The install reached the end: no reboot is pending, so clear any RunOnce
+# continuation and record completion for the next re-run's fast path (#420).
+Unregister-ResumeAfterReboot
+Set-InstallComplete
 
 Print-Summary
 

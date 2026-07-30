@@ -122,6 +122,120 @@ Describe "Daily-user provisioning wiring (#418 source guards)" {
   }
 }
 
+Describe "Install-state pure helpers (#420)" {
+  It "New-InstallState is empty at the current schema" {
+    $s = New-InstallState
+    $s.schema    | Should -Be 1
+    $s.completed | Should -BeFalse
+    @($s.stages).Count | Should -Be 0
+  }
+  It "Add-CompletedStage appends, dedups, and preserves order" {
+    $s = New-InstallState
+    $s = Add-CompletedStage -State $s -Name 'step1-requirements'
+    $s = Add-CompletedStage -State $s -Name 'step1-requirements'   # dedup
+    $s = Add-CompletedStage -State $s -Name 'step2-tools'
+    @($s.stages) | Should -Be @('step1-requirements','step2-tools')
+  }
+  It "Test-StateHasStage reports membership" {
+    $s = Add-CompletedStage -State (New-InstallState) -Name 'step3-cluster'
+    Test-StateHasStage -State $s -Name 'step3-cluster' | Should -BeTrue
+    Test-StateHasStage -State $s -Name 'step6-client'  | Should -BeFalse
+  }
+  It "Test-InstallStateCurrent is true only for a matching schema" {
+    Test-InstallStateCurrent -State (New-InstallState) | Should -BeTrue
+    Test-InstallStateCurrent -State $null              | Should -BeFalse
+    Test-InstallStateCurrent -State ([pscustomobject]@{ schema = 99 }) | Should -BeFalse
+  }
+  It "ConvertTo-InstallState round-trips a valid state" {
+    $s = Add-CompletedStage -State (New-InstallState) -Name 'step1-requirements'
+    $r = ConvertTo-InstallState -Json ($s | ConvertTo-Json -Compress)
+    @($r.stages) | Should -Be @('step1-requirements')
+    $r.schema | Should -Be 1
+  }
+  It "ConvertTo-InstallState returns a fresh state on corrupt / empty / wrong-schema JSON" {
+    (ConvertTo-InstallState -Json '{not json').stages.Count | Should -Be 0
+    (ConvertTo-InstallState -Json '').schema                | Should -Be 1
+    $wrong = @{ schema = 99; stages = @('x'); completed = $true } | ConvertTo-Json -Compress
+    $w = ConvertTo-InstallState -Json $wrong
+    @($w.stages).Count | Should -Be 0
+    $w.completed       | Should -BeFalse
+  }
+}
+
+Describe "Get-ResumeCommand (#420 resume-after-reboot)" {
+  It "carries -File, forwarded switches, and -Resume for a durable script path" {
+    $real = (Resolve-Path "$PSScriptRoot/../install-k8s.ps1").Path   # a real, non-temp file
+    $c = Get-ResumeCommand -ScriptPath $real -DailyUser 'jdoe'
+    $c | Should -Match '^powershell\.exe '
+    $c | Should -Match '-File "'
+    $c | Should -Match '-DailyUser "jdoe"'
+    $c | Should -Match '-Resume$'
+  }
+  It "does NOT append -Resume to the irm|iex one-liner (shim has no param block, #421)" {
+    $c = Get-ResumeCommand -ScriptPath 'C:\does\not\exist.ps1'   # forces the one-liner fallback
+    $c | Should -Match 'irm https://tracebloc.io/i.ps1 \| iex'
+    $c | Should -Not -Match '-Resume'
+  }
+}
+
+Describe "Install-state I/O round-trip (#420)" {
+  # Mock the path to TestDrive (Pester mocks reach dot-sourced callers regardless of
+  # scope) and no-op the profile-dir mkdir so nothing touches the real home dir.
+  BeforeAll {
+    Mock Get-InstallStatePath { Join-Path "$TestDrive" 'install-state.json' }
+    Mock New-Item { }
+  }
+  BeforeEach { Remove-Item (Join-Path "$TestDrive" 'install-state.json') -ErrorAction SilentlyContinue }
+
+  It "Read-InstallState returns a fresh state when no file exists" {
+    $r = Read-InstallState
+    $r.schema | Should -Be 1
+    @($r.stages).Count | Should -Be 0
+  }
+  It "Save-InstallState + Read-InstallState round-trip a full state" {
+    $s = Add-CompletedStage -State (New-InstallState) -Name 'step1-requirements'
+    $s = Add-CompletedStage -State $s -Name 'step2-tools'
+    $s = [pscustomobject]@{ schema = $s.schema; stages = @($s.stages); completed = $true }
+    Save-InstallState -State $s
+    $r = Read-InstallState
+    @($r.stages) | Should -Be @('step1-requirements','step2-tools')
+    $r.completed | Should -BeTrue
+  }
+  It "Set-StageComplete records a stage that Test-StageComplete then sees" {
+    # Both read the same function-scope $script:InstallState, so they stay consistent
+    # regardless of Pester's It-scope; a never-run stage stays unseen.
+    Set-StageComplete 'step4-cli'
+    Test-StageComplete 'step4-cli'  | Should -BeTrue
+    Test-StageComplete 'never-ran'  | Should -BeFalse
+  }
+  It "a corrupt state file degrades to a fresh state instead of throwing" {
+    Set-Content -Path (Get-InstallStatePath) -Value '{ broken' -Encoding ASCII
+    $r = Read-InstallState
+    $r.schema | Should -Be 1
+    @($r.stages).Count | Should -Be 0
+  }
+}
+
+Describe "Resume-after-reboot wiring (#420 source guards)" {
+  BeforeAll { $script:PSRC = Get-Content "$PSScriptRoot/../install-k8s.ps1" -Raw }
+  It "adds a -Resume switch to the param block and forwards it through elevation" {
+    $script:PSRC | Should -Match 'param\(\[switch\]\$Help.*\[switch\]\$Resume\)'
+    $script:PSRC | Should -Match "if \(\`$Resume\)\s+\{ \`$switches \+= '-Resume' \}"
+  }
+  It "registers a RunOnce continuation at the reboot exit and checkpoints it" {
+    $script:PSRC | Should -Match "Set-StageComplete 'features-reboot-pending'"
+    $script:PSRC | Should -Match 'Register-ResumeAfterReboot -ScriptPath \$PSCommandPath'
+  }
+  It "checkpoints every step and clears + completes on success" {
+    foreach ($n in 1..6) { $script:PSRC | Should -Match "Set-StageComplete 'step$n-" }
+    $script:PSRC | Should -Match 'Unregister-ResumeAfterReboot\s*\r?\nSet-InstallComplete'
+  }
+  It "gates the fast nothing-to-do path on real presence, not just the checkpoint" {
+    $script:PSRC | Should -Match '\$script:InstallState\.completed -and \(Test-ToolsPresent\) -and \(Test-ClusterPresent\)'
+    $script:PSRC | Should -Match 'already installed on this machine -- nothing to do'
+  }
+}
+
 Describe "Get-ElevationCommand (#421 self-elevate)" {
   It "returns a single command-line STRING (PS 5.1 quoting-safe, Bugbot #421)" {
     Get-ElevationCommand -ScriptPath "" | Should -BeOfType [string]
