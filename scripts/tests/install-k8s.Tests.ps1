@@ -162,6 +162,26 @@ Describe "Install-state pure helpers (#420)" {
   }
 }
 
+Describe "Test-ClusterRunningInList (#420 Bugbot: running, not just present)" {
+  It "is true only when the named cluster has >=1 server running" {
+    $up = '[{"name":"tracebloc","serversCount":1,"serversRunning":1}]'
+    Test-ClusterRunningInList -Json $up -Name 'tracebloc' | Should -BeTrue
+  }
+  It "is false for a present-but-stopped cluster (serversRunning=0)" {
+    $stopped = '[{"name":"tracebloc","serversCount":1,"serversRunning":0}]'
+    Test-ClusterRunningInList -Json $stopped -Name 'tracebloc' | Should -BeFalse
+  }
+  It "is false when the named cluster is absent" {
+    $other = '[{"name":"other","serversRunning":1}]'
+    Test-ClusterRunningInList -Json $other -Name 'tracebloc' | Should -BeFalse
+  }
+  It "is false for empty / corrupt / shape-without-running-count JSON" {
+    Test-ClusterRunningInList -Json ''            -Name 'tracebloc' | Should -BeFalse
+    Test-ClusterRunningInList -Json '{not json'   -Name 'tracebloc' | Should -BeFalse
+    Test-ClusterRunningInList -Json '[{"name":"tracebloc"}]' -Name 'tracebloc' | Should -BeFalse
+  }
+}
+
 Describe "Get-ResumeCommand (#420 resume-after-reboot)" {
   It "carries -File, forwarded switches, and -Resume for a durable script path" {
     $real = (Resolve-Path "$PSScriptRoot/../install-k8s.ps1").Path   # a real, non-temp file
@@ -244,9 +264,13 @@ Describe "Resume-after-reboot wiring (#420 source guards)" {
     # the exit code shares the same predicate so a failed run never arms the fast path
     $script:PSRC | Should -Match 'if \(-not \(Test-InstallSucceeded\)\) \{ exit 1 \}'
   }
-  It "gates the fast nothing-to-do path on real presence, not just the checkpoint" {
-    $script:PSRC | Should -Match '\$script:InstallState\.completed -and \(Test-ToolsPresent\) -and \(Test-ClusterPresent\)'
-    $script:PSRC | Should -Match 'already installed on this machine -- nothing to do'
+  It "gates the fast nothing-to-do path on a RUNNING cluster, not just the checkpoint" {
+    $script:PSRC | Should -Match '\$script:InstallState\.completed -and \(Test-ToolsPresent\) -and \(Test-ClusterRunning\)'
+    $script:PSRC | Should -Match 'already installed and the cluster is running -- nothing to do'
+  }
+  It "bounds the k3d fast-path probe with a job + deadline (no unbounded k3d call)" {
+    # Test-ClusterRunning must run k3d inside a timed job, never a bare foreground call.
+    $script:PSRC | Should -Match 'function Test-ClusterRunning[\s\S]*Start-Job[\s\S]*Wait-JobWithProgress[\s\S]*Remove-Job'
   }
 }
 

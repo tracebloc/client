@@ -658,12 +658,36 @@ function Test-ToolsPresent {
   return $true
 }
 
-# Does our k3d cluster already exist? Read-only, bounded, never-fatal.
-function Test-ClusterPresent {
-  try {
-    $out = (& k3d cluster list $CLUSTER_NAME 2>$null | Out-String)
-    return (($LASTEXITCODE -eq 0) -and ($out -match [regex]::Escape($CLUSTER_NAME)))
-  } catch { return $false }
+# Pure: from `k3d cluster list -o json` output, is <Name> present AND running (>=1
+# server node up)? A present-but-STOPPED cluster returns $false so the fast path
+# doesn't skip New-K3dCluster's start/repair. Unknown/corrupt shape -> false (#420 Bugbot).
+function Test-ClusterRunningInList {
+  param([string]$Json, [string]$Name)
+  if ([string]::IsNullOrWhiteSpace($Json)) { return $false }
+  try { $clusters = $Json | ConvertFrom-Json -ErrorAction Stop } catch { return $false }
+  foreach ($c in @($clusters)) {
+    if ($c.name -ne $Name) { continue }
+    if ($c.PSObject.Properties.Name -contains 'serversRunning') { return ([int]$c.serversRunning -ge 1) }
+    return $false   # shape without a running count can't prove the cluster is up
+  }
+  return $false
+}
+
+# Is our k3d cluster present AND running? STATE query, BOUNDED via a job+deadline so a
+# wedged Docker engine can't hang the fast path at the start of every re-run (#420
+# Bugbot). Never-fatal: a timeout / parse failure -> $false (fall through to the walk).
+function Test-ClusterRunning {
+  $job = Start-Job -InitializationScript $JobInit -ScriptBlock {
+    param($n) (k3d cluster list $n -o json 2>$null | Out-String)
+  } -ArgumentList $CLUSTER_NAME
+  $out = ""
+  if (Wait-JobWithProgress -Job $job -TimeoutSec 15 -Message "Checking cluster") {
+    $out = (Receive-Job $job -ErrorAction SilentlyContinue | Out-String)
+  } else {
+    Log "k3d cluster list timed out; treating cluster as not running."
+  }
+  Remove-Job $job -Force -ErrorAction SilentlyContinue
+  return (Test-ClusterRunningInList -Json $out -Name $CLUSTER_NAME)
 }
 
 # --- Resume-after-reboot (RunOnce) -------------------------------------------
@@ -3921,11 +3945,12 @@ Print-Banner
 if ($Resume) { Ok "Resuming the tracebloc install after a reboot..." }
 Print-Roadmap
 
-# Fast path (#420): a prior run completed AND the tools + cluster are still here
-# -> nothing to do. Honest: verifies real presence, not just the checkpoint. Skipped
-# on -Resume (a resume must finish the interrupted walk, not short-circuit it).
-if ((-not $Resume) -and $script:InstallState.completed -and (Test-ToolsPresent) -and (Test-ClusterPresent)) {
-  Ok "tracebloc is already installed on this machine -- nothing to do."
+# Fast path (#420): a prior run completed successfully AND the tools + a RUNNING
+# cluster are still here -> nothing to do. Honest: verifies real, running state (not
+# just the checkpoint), so a stopped cluster falls through to New-K3dCluster's
+# start/repair. Skipped on -Resume (a resume must finish the interrupted walk).
+if ((-not $Resume) -and $script:InstallState.completed -and (Test-ToolsPresent) -and (Test-ClusterRunning)) {
+  Ok "tracebloc is already installed and the cluster is running -- nothing to do."
   Hint "Delete ~\.tracebloc\install-state.json (or set a fresh HOST_DATA_DIR) to force a full reinstall."
   Unregister-ResumeAfterReboot
   try { Stop-Transcript | Out-Null } catch {}
