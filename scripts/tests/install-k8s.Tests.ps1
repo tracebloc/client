@@ -28,6 +28,42 @@ Describe "Get-BackendUrl" {
   It "unknown -> prod" { $env:CLIENT_ENV = "whatever"; Get-BackendUrl | Should -Be "https://api.tracebloc.io/" }
 }
 
+Describe "Daily-user provisioning (#418)" {
+  It "Get-WslConfigMemoryGb caps at physical - 4 GB" {
+    Get-WslConfigMemoryGb -HostGb 16 | Should -Be 12
+    Get-WslConfigMemoryGb -HostGb 32 | Should -Be 28
+  }
+  It "Get-WslConfigMemoryGb floors at 1 GB on a tiny host" {
+    Get-WslConfigMemoryGb -HostGb 4 | Should -Be 1
+  }
+  It "Get-WslConfigContent writes the [wsl2] memory stanza" {
+    $c = Get-WslConfigContent -MemoryGb 12
+    $c | Should -Match '(?m)^\[wsl2\]'
+    $c | Should -Match 'memory=12GB'
+  }
+  It "Resolve-DailyUser prefers the param and strips the domain" {
+    Resolve-DailyUser -Param 'CORP\jdoe' -CurrentUser 'admin' | Should -Be 'jdoe'
+  }
+  It "Resolve-DailyUser falls back to the current user" {
+    Resolve-DailyUser -Param '' -CurrentUser 'researcher' | Should -Be 'researcher'
+  }
+}
+
+Describe "Daily-user provisioning wiring (#418 source guards)" {
+  BeforeAll { $script:PSRC = Get-Content "$PSScriptRoot/../install-k8s.ps1" -Raw }
+  It "adds the daily user to docker-users" {
+    $script:PSRC | Should -Match 'net localgroup docker-users'
+  }
+  It "writes a sized .wslconfig without clobbering an existing tuned one" {
+    $script:PSRC | Should -Match 'Get-WslConfigContent -MemoryGb'
+    $script:PSRC | Should -Match '\(\?im\)\^\\s\*memory\\s\*='   # preserves an existing memory= line
+  }
+  It "is warn-only, opt-out-able, and wired into the elevated run" {
+    $script:PSRC | Should -Match 'Set-DailyUserProvisioning'
+    $script:PSRC | Should -Match 'TRACEBLOC_SKIP_DAILY_USER'
+  }
+}
+
 Describe "Get-ElevationCommand (#421 self-elevate)" {
   It "returns a single command-line STRING (PS 5.1 quoting-safe, Bugbot #421)" {
     Get-ElevationCommand -ScriptPath "" | Should -BeOfType [string]
