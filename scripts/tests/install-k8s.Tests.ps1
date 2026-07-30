@@ -109,7 +109,8 @@ Describe "Step honesty (#422 split check vs install)" {
   It "the winget Docker path is killable, checks exit, falls back, and fails loudly (Bugbot #422)" {
     # winget runs as a tracked process (killable on timeout), its exit is checked
     # (throw -> fallback), and a final Test-Path guard Errs if nothing landed.
-    $script:SRC | Should -Match 'Start-Process -FilePath "winget"[\s\S]{0,240}Docker\.DockerDesktop'
+    $script:SRC | Should -Match 'Docker\.DockerDesktop'
+    $script:SRC | Should -Match 'Start-Process -FilePath "winget"[\s\S]{0,120}-ArgumentList \$wingetArgs'
     $script:SRC | Should -Match 'Wait-ProcessWithDeadline -Process \$wp'
     $script:SRC | Should -Match '\$wp\.ExitCode -ne 0'
     $script:SRC | Should -Match "Docker Desktop installation didn't complete"
@@ -118,10 +119,12 @@ Describe "Step honesty (#422 split check vs install)" {
 
 Describe "Docker Desktop install flags (#419 zero GUI interaction)" {
   BeforeAll { $script:DSRC = Get-Content "$PSScriptRoot/../install-k8s.ps1" -Raw }
-  It "winget path passes Docker's installer flags via --override" {
+  It "winget path passes Docker's installer flags via a quoted --override (PS 5.1 safe)" {
     # winget's manifest defaults can't set the backend or accept the license; --override
-    # passes Docker Desktop's own installer args so first launch has no GUI prompt.
-    $script:DSRC | Should -Match '"--override","install --quiet --accept-license --backend=wsl-2'
+    # passes Docker Desktop's own installer args. The value must be a single quoted
+    # argument in a command-line STRING (array elements aren't quoted on PS 5.1).
+    $script:DSRC | Should -Match '--override "install --quiet --accept-license --backend=wsl-2 --always-run-service"'
+    $script:DSRC | Should -Match 'Start-Process -FilePath "winget"[\s\S]{0,120}-ArgumentList \$wingetArgs'
   }
   It "direct path installs unattended with the WSL2 backend" {
     $script:DSRC | Should -Match 'install --quiet --accept-license --backend=wsl-2 --always-run-service'
