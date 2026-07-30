@@ -2950,11 +2950,24 @@ function Get-PfRuntimeCpu {
   return $null
 }
 
-# Prefer the runtime view, fall back to the host (CIM).
+# Total physical HOST RAM in GB — the consistent memory figure we report, whether
+# or not Docker is up (#417). The container runtime's smaller VM budget is read
+# separately via Get-PfRuntimeMemGb and shown as its own labeled line, so the
+# reported host RAM never flip-flops across re-runs. $null if undeterminable.
 function Get-PfMemGb {
-  $r = Get-PfRuntimeMemGb; if ($null -ne $r) { return $r }
   try { return [math]::Floor((Get-CimInstance Win32_ComputerSystem -ErrorAction Stop).TotalPhysicalMemory / 1GB) }
   catch { return $null }
+}
+
+# Cap a desired Docker-memory recommendation at what the host can actually give
+# (physical RAM minus ~2 GB reserved for the OS), so we never advise more than the
+# machine physically has — e.g. "give Docker 16 GB" on a 15 GB laptop (#417).
+# Floors at 1 GB so a tiny host still yields a positive number.
+function Get-PfMemRecommendation([int]$DesiredGb, [int]$HostGb) {
+  $cap = $HostGb - 2
+  if ($cap -lt 1) { $cap = 1 }
+  if ($DesiredGb -lt $cap) { return $DesiredGb }
+  return $cap
 }
 
 function Get-PfCpu {
@@ -3023,21 +3036,31 @@ function Test-Preflight {
   elseif  ($cpu -lt $recCpu) { Warn "CPU: $cpu cores - fine to run; $recCpu+ recommended to train locally." }
   else                       { Ok "CPU: $cpu cores" }
 
-  # Memory is warn-only on Windows: at preflight the Docker Desktop / WSL2 daemon may
-  # be down (so this is host RAM); the post-Docker re-check sees the real VM budget.
-  $mem = Get-PfMemGb
-  if      ($null -eq $mem)      { Warn "Memory: couldn't determine total RAM (skipping)." }
-  elseif  ($mem -lt $minMemGb)  {
-    Warn "Memory: $mem GB - below the $minMemGb GB the client needs; it will OOM."
-    Hint "Give Docker more memory (>= $warnMemGb GB; $recMemGb GB to train), then re-run:"
-    Hint "  WSL2 backend (the default): set [wsl2] memory=${warnMemGb}GB in %UserProfile%\.wslconfig, run 'wsl --shutdown', restart Docker Desktop."
-    Hint "  Hyper-V backend: Docker Desktop -> Settings -> Resources -> Advanced."
+  # Memory is warn-only on Windows. Report HOST RAM — identical whether Docker is
+  # up or down (#417) — and, when a runtime is up, Docker's current VM budget as a
+  # separate labeled line (it's a smaller slice of the host). Recommendations are
+  # capped at (host - 2 GB) so we never advise more than the machine has. The
+  # post-Docker re-check (Test-PreflightRuntimeMem) warns on the VM budget once
+  # Docker is running, using the same wording.
+  $mem    = Get-PfMemGb            # host RAM (consistent)
+  $budget = Get-PfRuntimeMemGb     # Docker VM budget, or $null when the daemon is down
+  if ($null -eq $mem) {
+    Warn "Memory: couldn't determine total RAM (skipping)."
+  } else {
+    $budgetNote = if ($null -ne $budget) { " (Docker's current share: $budget GB)" } else { "" }
+    $recTrain   = Get-PfMemRecommendation -DesiredGb $recMemGb  -HostGb $mem
+    if ($mem -lt $minMemGb) {
+      Warn "Memory: $mem GB$budgetNote - below the $minMemGb GB the client needs; it will OOM."
+      Hint "This machine has $mem GB of RAM total; the client needs at least $minMemGb GB. Free up memory or use a larger machine."
+    }
+    elseif ($mem -lt $warnMemGb) {
+      Warn "Memory: $mem GB$budgetNote - enough to run, but training (~8 GB/job) may OOM; more RAM helps to train locally."
+      Hint "To train locally, give Docker up to $recTrain GB (the most this $mem GB host can spare): WSL2 backend - [wsl2] memory=${recTrain}GB in %UserProfile%\.wslconfig + 'wsl --shutdown'; Hyper-V - Docker Desktop -> Settings -> Resources -> Advanced."
+    }
+    else {
+      Ok "Memory: $mem GB$budgetNote"
+    }
   }
-  elseif  ($mem -lt $warnMemGb) {
-    Warn "Memory: $mem GB - enough to run, but training (~8 GB/job) may OOM; $recMemGb GB recommended to train locally."
-    Hint "To train locally give Docker >= $recMemGb GB: WSL2 backend - [wsl2] memory=${recMemGb}GB in %UserProfile%\.wslconfig + 'wsl --shutdown'; Hyper-V backend - Docker Desktop -> Settings -> Resources -> Advanced."
-  }
-  else                          { Ok "Memory: $mem GB" }
 
   $disk = Get-PfFreeGb
   if      ($null -eq $disk)        { Warn "Disk: couldn't determine free space (skipping)." }
@@ -3118,13 +3141,18 @@ function Test-Preflight {
 # Docker, so aborting here would be jarring.
 function Test-PreflightRuntimeMem {
   if ($env:TRACEBLOC_SKIP_PREFLIGHT) { return }
-  $mem = Get-PfRuntimeMemGb
-  if ($null -eq $mem) { return }
+  $budget = Get-PfRuntimeMemGb
+  if ($null -eq $budget) { return }
   $warnMemGb = if ($env:PF_WARN_MEM_GB) { [int]$env:PF_WARN_MEM_GB } else { 8 }
-  $recMemGb  = if ($env:PF_REC_MEM_GB)  { [int]$env:PF_REC_MEM_GB }  else { 16 }
-  if ($mem -lt $warnMemGb) {
-    Warn "Docker is running with $mem GB - recommended >= $warnMemGb GB ($recMemGb GB to train); the client may OOM under load."
-    Hint "Give Docker >= $warnMemGb GB, then re-install: WSL2 backend - [wsl2] memory=${warnMemGb}GB in %UserProfile%\.wslconfig + 'wsl --shutdown'; Hyper-V backend - Docker Desktop -> Settings -> Resources -> Advanced."
+  if ($budget -lt $warnMemGb) {
+    # Cap the recommendation at what the host can spare (host - 2 GB) so we never
+    # advise more than the machine physically has (#417). Falls back to the raw
+    # target if host RAM can't be read.
+    $host_ = Get-PfMemGb
+    $rec = if ($null -ne $host_) { Get-PfMemRecommendation -DesiredGb $warnMemGb -HostGb $host_ } else { $warnMemGb }
+    $hostNote = if ($null -ne $host_) { " of $host_ GB host RAM" } else { "" }
+    Warn "Docker's memory budget is $budget GB$hostNote - the client may OOM under load; $rec GB recommended."
+    Hint "Raise Docker's memory to $rec GB, then re-install: WSL2 backend - [wsl2] memory=${rec}GB in %UserProfile%\.wslconfig + 'wsl --shutdown'; Hyper-V - Docker Desktop -> Settings -> Resources -> Advanced."
   }
 }
 

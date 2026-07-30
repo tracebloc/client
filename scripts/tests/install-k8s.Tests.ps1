@@ -974,6 +974,13 @@ Describe "Get-Pf* resource readers" -Skip:(-not $IsWindows) {
     Mock Get-CimInstance { [pscustomobject]@{ TotalPhysicalMemory = 8GB } }
     Get-PfMemGb | Should -Be 8
   }
+  It "Get-PfMemGb reports host RAM even when Docker reports a smaller budget (#417)" {
+    # The flip-flop bug: same 16 GB host read as ~8 GB while Docker was up. Now the
+    # host figure wins regardless of the Docker VM budget.
+    Mock Get-CimInstance { [pscustomobject]@{ TotalPhysicalMemory = 16GB } }
+    Mock docker { '8589934592' }          # Docker would report 8 GiB; must be IGNORED
+    Get-PfMemGb | Should -Be 16
+  }
   It "Get-PfFreeGb reads free disk in GB" {
     Mock Get-CimInstance { [pscustomobject]@{ FreeSpace = 50GB } }
     Get-PfFreeGb | Should -Be 50
@@ -1073,9 +1080,13 @@ Describe "Get-PfFsType" -Skip:(-not $IsWindows) {
 }
 
 Describe "Get-Pf* runtime (Docker VM) view preference" {
-  It "Get-PfMemGb prefers docker MemTotal over the host" {
-    Mock docker { '8589934592' }          # 8 GiB, in bytes
-    Get-PfMemGb | Should -Be 8
+  It "Get-PfMemGb no longer follows the Docker VM budget (#417 no flip-flop)" {
+    # The docker reader still sees the VM budget, but the reported memory figure is
+    # host RAM (or $null off-Windows where CIM is unavailable) — never the smaller
+    # budget. Cross-platform: proves the two are decoupled without needing CIM.
+    Mock docker { '8589934592' }          # Docker reports 8 GiB
+    Get-PfRuntimeMemGb | Should -Be 8     # the runtime reader follows docker...
+    Get-PfMemGb        | Should -Not -Be 8 # ...but the reported memory does not
   }
   It "Get-PfCpu prefers docker NCPU over the host" {
     Mock docker { '2' }
@@ -1091,6 +1102,21 @@ Describe "Get-Pf* runtime (Docker VM) view preference" {
   }
 }
 
+Describe "Get-PfMemRecommendation (#417 achievable memory advice)" {
+  It "caps the recommendation at host RAM - 2 GB" {
+    Get-PfMemRecommendation -DesiredGb 16 -HostGb 15 | Should -Be 13
+  }
+  It "16 GB target on a 15 GB host -> 13, never the impossible 16 (the reported bug)" {
+    Get-PfMemRecommendation -DesiredGb 16 -HostGb 15 | Should -Not -Be 16
+  }
+  It "returns the desired value untouched when it fits" {
+    Get-PfMemRecommendation -DesiredGb 8 -HostGb 32 | Should -Be 8
+  }
+  It "floors at 1 GB on a tiny host (never zero/negative)" {
+    Get-PfMemRecommendation -DesiredGb 8 -HostGb 2 | Should -Be 1
+  }
+}
+
 Describe "Test-PreflightRuntimeMem (post-Docker, warn-only)" {
   It "small Docker VM -> warns, does not throw" {
     Mock Get-PfRuntimeMemGb { 4 }
@@ -1099,6 +1125,14 @@ Describe "Test-PreflightRuntimeMem (post-Docker, warn-only)" {
   It "daemon not reporting (null) -> no-op, does not throw" {
     Mock Get-PfRuntimeMemGb { $null }
     { Test-PreflightRuntimeMem } | Should -Not -Throw
+  }
+  It "caps its recommendation at host RAM - never advises more than the machine has (#417)" {
+    Mock Get-PfRuntimeMemGb { 4 }    # small Docker budget triggers the warn
+    Mock Get-PfMemGb { 6 }           # 6 GB host -> achievable cap is 4 GB
+    $out = (Test-PreflightRuntimeMem 6>&1 | Out-String)
+    $out | Should -Match '4 GB recommended'
+    $out | Should -Not -Match '8 GB recommended'   # never the impossible raw target
+    $out | Should -Match 'of 6 GB host RAM'
   }
 }
 
