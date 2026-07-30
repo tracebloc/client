@@ -167,6 +167,29 @@ Describe "Test-ClusterRunningInList (#420 Bugbot: running, not just present)" {
   }
 }
 
+Describe "Test-ClientHealthy (#420 Bugbot: verify workloads Ready, not just cluster)" {
+  It "Get-ClientDeploymentNames lists the three client workloads for a namespace" {
+    Get-ClientDeploymentNames -Namespace 'acme' |
+      Should -Be @('mysql-client','acme-jobs-manager','acme-requests-proxy')
+  }
+  It "is false when no client release can be found (unknown / no namespace)" {
+    Mock Get-InstalledClientInfo { [pscustomobject]@{ Id=''; Ns=''; Name=''; UnreadableNs=''; ListUnknown=$true } }
+    Test-ClientHealthy | Should -BeFalse
+    Mock Get-InstalledClientInfo { [pscustomobject]@{ Id=''; Ns=''; Name=''; UnreadableNs=''; ListUnknown=$false } }
+    Test-ClientHealthy | Should -BeFalse
+  }
+  It "is true only when every client deployment rolls out Ready" {
+    Mock Get-InstalledClientInfo { [pscustomobject]@{ Id='c1'; Ns='acme'; Name='acme'; UnreadableNs=''; ListUnknown=$false } }
+    Mock kubectl { $global:LASTEXITCODE = 0 }   # all rollouts Ready
+    Test-ClientHealthy | Should -BeTrue
+  }
+  It "is false when any client deployment is not Ready" {
+    Mock Get-InstalledClientInfo { [pscustomobject]@{ Id='c1'; Ns='acme'; Name='acme'; UnreadableNs=''; ListUnknown=$false } }
+    Mock kubectl { $global:LASTEXITCODE = 1 }   # rollout not Ready
+    Test-ClientHealthy | Should -BeFalse
+  }
+}
+
 Describe "Get-ResumeCommand (#420 resume-after-reboot)" {
   It "carries -File, forwarded switches, and -Resume for a durable script path" {
     $real = (Resolve-Path "$PSScriptRoot/../install-k8s.ps1").Path   # a real, non-temp file
@@ -202,6 +225,12 @@ Describe "Install-state I/O round-trip (#420)" {
     $r = Read-InstallState
     $r.completed | Should -BeTrue
     $r.schema    | Should -Be 1
+  }
+  It "Clear-InstallCompleted resets completed=false (disarms a stale fast path)" {
+    Set-InstallComplete
+    (Read-InstallState).completed | Should -BeTrue
+    Clear-InstallCompleted
+    (Read-InstallState).completed | Should -BeFalse
   }
   It "a corrupt state file degrades to a fresh state instead of throwing" {
     Set-Content -Path (Get-InstallStatePath) -Value '{ broken' -Encoding ASCII
@@ -243,8 +272,8 @@ Describe "Resume-after-reboot wiring (#420 source guards)" {
     $script:PSRC | Should -Match '\$DailyUser -and \(\$DailyUser -ne \$env:USERNAME\)'
     $script:PSRC | Should -Match 'Resume is registered for'
   }
-  It "clears the continuation, then completes ONLY when connected (not merely starting)" {
-    $script:PSRC | Should -Match 'Unregister-ResumeAfterReboot\s*\r?\nif \(Test-InstallConnected\) \{ Set-InstallComplete \}'
+  It "completes ONLY when connected, and CLEARS a stale completed on any other outcome" {
+    $script:PSRC | Should -Match 'if \(Test-InstallConnected\) \{ Set-InstallComplete \} else \{ Clear-InstallCompleted \}'
     # the exit code is deliberately more lenient (starting is OK) but a failure exits 1
     $script:PSRC | Should -Match 'if \(-not \(Test-InstallSucceeded\)\) \{ exit 1 \}'
   }
@@ -252,13 +281,21 @@ Describe "Resume-after-reboot wiring (#420 source guards)" {
     $script:PSRC | Should -Not -Match "Set-StageComplete"
     $script:PSRC | Should -Not -Match "function Add-CompletedStage"
   }
-  It "gates the fast nothing-to-do path on a RUNNING cluster, not just the checkpoint" {
-    $script:PSRC | Should -Match '\$script:InstallState\.completed -and \(Test-ToolsPresent\) -and \(Test-ClusterRunning\)'
-    $script:PSRC | Should -Match 'already installed and the cluster is running -- nothing to do'
+  It "gates the fast nothing-to-do path on tools + running cluster + HEALTHY client" {
+    $script:PSRC | Should -Match '\$script:InstallState\.completed -and \(Test-ToolsPresent\) -and \(Test-ClusterRunning\) -and \(Test-ClientHealthy\)'
+    $script:PSRC | Should -Match 'already installed and the client is healthy -- nothing to do'
+  }
+  It "names the ACTUAL state-file path in the force-reinstall hint (honours HOST_DATA_DIR)" {
+    # Must interpolate Get-InstallStatePath, not hard-code ~\.tracebloc\install-state.json.
+    $script:PSRC | Should -Match 'Delete \$\(Get-InstallStatePath\)'
+    $script:PSRC | Should -Not -Match 'Delete ~\\\.tracebloc\\install-state\.json'
   }
   It "bounds the k3d fast-path probe with a job + deadline (no unbounded k3d call)" {
     # Test-ClusterRunning must run k3d inside a timed job, never a bare foreground call.
     $script:PSRC | Should -Match 'function Test-ClusterRunning[\s\S]*Start-Job[\s\S]*Wait-JobWithProgress[\s\S]*Remove-Job'
+  }
+  It "bounds the fast-path client health check (short rollout deadline, not the full wait)" {
+    $script:PSRC | Should -Match 'function Test-ClientHealthy[\s\S]*rollout status[\s\S]*--timeout=5s'
   }
 }
 

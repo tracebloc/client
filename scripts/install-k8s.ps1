@@ -612,6 +612,13 @@ function Set-InstallComplete {
   Save-InstallState -State ([pscustomobject]@{ schema = $script:STATE_SCHEMA; completed = $true })
 }
 
+# Clear the completed flag (persist not-completed) -- called when a walk ends without
+# a connected client, so a stale `completed` from an earlier success can't keep the
+# fast path armed over a now-broken install (#420 reviewer).
+function Clear-InstallCompleted {
+  Save-InstallState -State (New-InstallState)
+}
+
 # Did the client actually come UP? Only `connected` (all workloads Ready) proves the
 # install is done. `starting` is Get-NotReadyState's catch-all for a client that
 # isn't Ready yet (Pending pods / a slow pull) -- treating it as done would arm the
@@ -667,6 +674,29 @@ function Test-ClusterRunning {
   }
   Remove-Job $job -Force -ErrorAction SilentlyContinue
   return (Test-ClusterRunningInList -Json $out -Name $CLUSTER_NAME)
+}
+
+# The client's three workload deployments in a namespace. Single source of truth for
+# both the readiness gate and the fast-path health check (#420).
+function Get-ClientDeploymentNames {
+  param([string]$Namespace)
+  return @("mysql-client", "$Namespace-jobs-manager", "$Namespace-requests-proxy")
+}
+
+# Is a previously-installed client actually HEALTHY right now? The fast path must not
+# claim "nothing to do" over a running cluster whose client workloads are down (the
+# bash assess path requires Ready workloads too). Finds the installed release's
+# namespace via Get-InstalledClientInfo (bounded), then checks each client deployment
+# with a SHORT rollout deadline -- if any isn't Ready (or the release can't be found),
+# return $false so the run falls through to the repairing walk (#420 Bugbot).
+function Test-ClientHealthy {
+  $info = Get-InstalledClientInfo
+  if ($info.ListUnknown -or -not $info.Ns) { return $false }
+  foreach ($d in (Get-ClientDeploymentNames -Namespace $info.Ns)) {
+    & kubectl rollout status "deployment/$d" -n $info.Ns --timeout=5s 2>&1 | Out-Null
+    if ($LASTEXITCODE -ne 0) { return $false }
+  }
+  return $true
 }
 
 # --- Resume-after-reboot (RunOnce) -------------------------------------------
@@ -3252,7 +3282,7 @@ function Confirm-Cluster {
 # summary reports the truth: connected | starting | bad_creds | image_pull | crash
 function Wait-ForClientReady {
   $ns = $script:TB_NAMESPACE
-  $deploys = @("mysql-client", "$ns-jobs-manager", "$ns-requests-proxy")
+  $deploys = Get-ClientDeploymentNames -Namespace $ns
   $deadline = (Get-Date).AddSeconds([int]$ReadyTimeout)
   $allReady = $true
 
@@ -3932,12 +3962,13 @@ if ($Resume) { Ok "Resuming the tracebloc install after a reboot..." }
 Print-Roadmap
 
 # Fast path (#420): a prior run completed successfully AND the tools + a RUNNING
-# cluster are still here -> nothing to do. Honest: verifies real, running state (not
-# just the checkpoint), so a stopped cluster falls through to New-K3dCluster's
-# start/repair. Skipped on -Resume (a resume must finish the interrupted walk).
-if ((-not $Resume) -and $script:InstallState.completed -and (Test-ToolsPresent) -and (Test-ClusterRunning)) {
-  Ok "tracebloc is already installed and the cluster is running -- nothing to do."
-  Hint "Delete ~\.tracebloc\install-state.json (or set a fresh HOST_DATA_DIR) to force a full reinstall."
+# cluster + Ready client workloads are all still here -> nothing to do. Honest: it
+# verifies live health (not just the checkpoint), so a stopped cluster or a down
+# client falls through to the repairing walk. Skipped on -Resume (a resume must
+# finish the interrupted walk).
+if ((-not $Resume) -and $script:InstallState.completed -and (Test-ToolsPresent) -and (Test-ClusterRunning) -and (Test-ClientHealthy)) {
+  Ok "tracebloc is already installed and the client is healthy -- nothing to do."
+  Hint "Delete $(Get-InstallStatePath) (or set a fresh HOST_DATA_DIR) to force a full reinstall."
   Unregister-ResumeAfterReboot
   try { Stop-Transcript | Out-Null } catch {}
   exit 0
@@ -3984,12 +4015,12 @@ Wait-ForClientReady
 try { Set-DailyUserProvisioning } catch { Log "daily-user provisioning error: $_" }
 
 # The install reached the end: no reboot is pending, so clear any RunOnce
-# continuation. Record completion ONLY when the client is actually CONNECTED -- a
-# still-starting or failed client must not arm the "nothing to do" fast path, or a
-# re-run (likely started because it never came up) would skip the documented
-# remediation the summary just printed (#420 reviewer).
+# continuation. Record completion ONLY when the client is actually CONNECTED; on any
+# other outcome CLEAR a stale completed flag from an earlier success, so a re-run
+# (likely started because the client is down) can't hit the fast path and skip the
+# documented remediation the summary just printed (#420 reviewer + Bugbot).
 Unregister-ResumeAfterReboot
-if (Test-InstallConnected) { Set-InstallComplete }
+if (Test-InstallConnected) { Set-InstallComplete } else { Clear-InstallCompleted }
 
 Print-Summary
 
