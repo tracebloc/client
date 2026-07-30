@@ -642,6 +642,14 @@ function Set-InstallComplete {
   Save-InstallState -State $script:InstallState
 }
 
+# Did the install actually succeed? The client is up (connected) or on its way
+# (starting); anything else (bad_creds/crash/image_pull/...) is a failure the operator
+# must re-run to fix. This is the SINGLE source of truth shared by the completion
+# checkpoint and the exit code so a failed run never arms the fast path (#420 Bugbot).
+function Test-InstallSucceeded {
+  return ($script:ClientState -eq "connected" -or $script:ClientState -eq "starting")
+}
+
 # --- Fast-path health probes (honest "nothing to do", not just a checkpoint) --
 
 # Are all four client tools on PATH? Cheap; used to gate the nothing-to-do path.
@@ -3971,15 +3979,17 @@ Wait-ForClientReady
 try { Set-DailyUserProvisioning } catch { Log "daily-user provisioning error: $_" }
 
 # The install reached the end: no reboot is pending, so clear any RunOnce
-# continuation and record completion for the next re-run's fast path (#420).
+# continuation. Record completion ONLY on success -- a failed client state must not
+# arm the "nothing to do" fast path, or a re-run would skip the documented
+# remediation the summary just printed (#420 Bugbot).
 Unregister-ResumeAfterReboot
-Set-InstallComplete
+if (Test-InstallSucceeded) { Set-InstallComplete }
 
 Print-Summary
 
 try { Stop-Transcript | Out-Null } catch {}
 
 # Exit code reflects reality: connected/starting are OK; failures are non-zero.
-if ($script:ClientState -ne "connected" -and $script:ClientState -ne "starting") { exit 1 }
+if (-not (Test-InstallSucceeded)) { exit 1 }
 
 }  # end TB_PESTER guard (skipped when the test suite dot-sources this file)

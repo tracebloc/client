@@ -216,6 +216,18 @@ Describe "Install-state I/O round-trip (#420)" {
   }
 }
 
+Describe "Test-InstallSucceeded (#420 Bugbot: don't mark a failed install complete)" {
+  AfterAll { $script:ClientState = 'starting' }   # restore the module default
+  It "is true only for connected/starting; failure states are false" {
+    $script:ClientState = 'connected'; Test-InstallSucceeded | Should -BeTrue
+    $script:ClientState = 'starting';  Test-InstallSucceeded | Should -BeTrue
+    foreach ($s in 'crash','bad_creds','image_pull','image_pull_ca','stopped') {
+      $script:ClientState = $s
+      Test-InstallSucceeded | Should -BeFalse -Because "'$s' is a failure that must be re-run, not marked complete"
+    }
+  }
+}
+
 Describe "Resume-after-reboot wiring (#420 source guards)" {
   BeforeAll { $script:PSRC = Get-Content "$PSScriptRoot/../install-k8s.ps1" -Raw }
   It "adds a -Resume switch to the param block and forwards it through elevation" {
@@ -226,9 +238,11 @@ Describe "Resume-after-reboot wiring (#420 source guards)" {
     $script:PSRC | Should -Match "Set-StageComplete 'features-reboot-pending'"
     $script:PSRC | Should -Match 'Register-ResumeAfterReboot -ScriptPath \$PSCommandPath'
   }
-  It "checkpoints every step and clears + completes on success" {
+  It "checkpoints every step and clears + completes ONLY on success" {
     foreach ($n in 1..6) { $script:PSRC | Should -Match "Set-StageComplete 'step$n-" }
-    $script:PSRC | Should -Match 'Unregister-ResumeAfterReboot\s*\r?\nSet-InstallComplete'
+    $script:PSRC | Should -Match 'Unregister-ResumeAfterReboot\s*\r?\nif \(Test-InstallSucceeded\) \{ Set-InstallComplete \}'
+    # the exit code shares the same predicate so a failed run never arms the fast path
+    $script:PSRC | Should -Match 'if \(-not \(Test-InstallSucceeded\)\) \{ exit 1 \}'
   }
   It "gates the fast nothing-to-do path on real presence, not just the checkpoint" {
     $script:PSRC | Should -Match '\$script:InstallState\.completed -and \(Test-ToolsPresent\) -and \(Test-ClusterPresent\)'
