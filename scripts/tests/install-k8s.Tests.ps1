@@ -28,6 +28,56 @@ Describe "Get-BackendUrl" {
   It "unknown -> prod" { $env:CLIENT_ENV = "whatever"; Get-BackendUrl | Should -Be "https://api.tracebloc.io/" }
 }
 
+Describe "Get-ElevationCommand (#421 self-elevate)" {
+  It "returns a single command-line STRING (PS 5.1 quoting-safe, Bugbot #421)" {
+    Get-ElevationCommand -ScriptPath "" | Should -BeOfType [string]
+  }
+  It "re-runs an on-disk script with a QUOTED -File path + forwards the switches" {
+    $c = Get-ElevationCommand -ScriptPath $PSCommandPath -NoReboot -Diagnose   # durable, non-temp
+    $c | Should -Match '-File "'          # path is quoted (survives spaces)
+    $c | Should -Match '-NoReboot'
+    $c | Should -Match '-Diagnose'
+  }
+  It "re-fetches the one-liner when there's no script on disk (irm|iex)" {
+    $c = Get-ElevationCommand -ScriptPath ""
+    $c | Should -Match 'irm https://tracebloc\.io/i\.ps1 \| iex'
+    $c | Should -Not -Match '-File'
+  }
+  It "a bootstrap TEMP-dir script -> re-fetches the one-liner, not -File (deleted-temp, Bugbot #421)" {
+    $tmp = Join-Path ([IO.Path]::GetTempPath()) "install-k8s.ps1"
+    Set-Content -Path $tmp -Value "x" -Force
+    try {
+      $c = Get-ElevationCommand -ScriptPath $tmp
+      $c | Should -Not -Match '-File'
+      $c | Should -Match 'irm https://tracebloc\.io/i\.ps1'
+    } finally { Remove-Item $tmp -Force -ErrorAction SilentlyContinue }
+  }
+  It "does NOT bind switches to the paramless shim on the one-liner path (Bugbot #421)" {
+    # & ([scriptblock]::Create((irm ...))) -Diagnose would fail (shim has no param
+    # block); an iex launch can't have set a switch anyway. Keep plain irm|iex.
+    $c = Get-ElevationCommand -ScriptPath "" -Diagnose
+    $c | Should -Match 'irm https://tracebloc\.io/i\.ps1 \| iex'
+    $c | Should -Not -Match 'scriptblock'
+  }
+  It "omits switches that weren't passed" {
+    $c = Get-ElevationCommand -ScriptPath ""
+    $c | Should -Not -Match '-NoReboot'
+    $c | Should -Not -Match '-Diagnose'
+  }
+}
+
+Describe "Self-elevation gate (#421 source guards)" {
+  BeforeAll { $script:ESRC = Get-Content "$PSScriptRoot/../install-k8s.ps1" -Raw }
+  It "offers to relaunch elevated (UAC) before falling back to instructions" {
+    $script:ESRC | Should -Match 'Invoke-SelfElevate -ScriptPath \$PSCommandPath'
+    $script:ESRC | Should -Match "Start-Process -FilePath 'powershell' -Verb RunAs"
+  }
+  It "only prompts when interactive, else prints the manual Terminal (Admin) steps" {
+    $script:ESRC | Should -Match 'UserInteractive -and -not \[Console\]::IsInputRedirected'
+    $script:ESRC | Should -Match 'Terminal \(Admin\)'
+  }
+}
+
 Describe "Get-ToolSummaryLine (#422 honest per-tool progress)" {
   It "name + version + size + elapsed" {
     Get-ToolSummaryLine -Name "kubectl" -Version "v1.31.0" -Size "~60 MB" -ElapsedSec 12 |

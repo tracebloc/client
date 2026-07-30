@@ -5,7 +5,10 @@ This guide covers installing the **tracebloc** unified Helm chart (AKS, EKS, bar
 > **Don't have a Kubernetes cluster yet?** The standalone installer provisions a cluster, installs GPU drivers, deploys a full tracebloc client, and installs the [tracebloc CLI](https://github.com/tracebloc/cli) — in a single command:
 >
 > - **macOS / Linux:** `bash <(curl -fsSL https://tracebloc.io/i.sh)`
-> - **Windows:** `irm https://tracebloc.io/i.ps1 | iex` *(PowerShell as Administrator)*
+> - **Windows (PowerShell):** `irm https://tracebloc.io/i.ps1 | iex`
+> - **Windows (Command Prompt):** `powershell -ExecutionPolicy Bypass -Command "irm https://tracebloc.io/i.ps1 | iex"`
+>
+> **On Windows the installer needs Administrator rights.** Open an elevated shell first — press **Win+X → Terminal (Admin)** (or search "PowerShell" in Start and press **Ctrl+Shift+Enter**), accept the User Account Control prompt, then paste the command. If you run it un-elevated, the installer now **offers to relaunch itself as Administrator** (one UAC prompt) rather than failing. The Command-Prompt form above also works from `cmd.exe`, so a paste into the wrong shell still runs instead of erroring.
 >
 > See the [README's Quick install section](../README.md#quick-install) for what it does. Continue here if you're deploying into an existing cluster.
 

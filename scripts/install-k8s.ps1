@@ -26,6 +26,48 @@
 #Requires -Version 5.1
 param([switch]$Help, [switch]$NoReboot, [switch]$Diagnose)
 
+# --- Self-elevation (#421) ---------------------------------------------------
+# Build the powershell.exe argument list to relaunch this installer ELEVATED.
+# Run from a .ps1 on disk -> re-run that file; run via the documented one-liner
+# (`irm ... | iex`, so there's no file on disk) -> re-fetch and re-run the
+# one-liner. Forwards the pass-through switches. Pure (no side effects) so it's
+# unit-testable. Env-var config (TRACEBLOC_*) is intentionally NOT forwarded --
+# ShellExecute/RunAs doesn't inherit the caller's process env, and putting secrets
+# on a command line is unsafe; an env-driven run should be launched elevated.
+function Get-ElevationCommand {
+  param([string]$ScriptPath, [switch]$NoReboot, [switch]$Diagnose)
+  $switches = @()
+  if ($NoReboot) { $switches += '-NoReboot' }
+  if ($Diagnose) { $switches += '-Diagnose' }
+  # Return a single command-line STRING, not an array: PS 5.1 Start-Process
+  # -ArgumentList doesn't quote array elements, so a script path with spaces (or
+  # the quoted -Command value) would be split (#421 Bugbot; same class as #419).
+  $temp = [System.IO.Path]::GetTempPath()
+  if ($ScriptPath -and (Test-Path $ScriptPath) -and ($ScriptPath -notlike "$temp*")) {
+    # Durable path: re-run the file (quoted for spaces), forwarding switches. The
+    # documented irm|iex flow runs from a bootstrap TEMP dir the un-elevated process
+    # deletes on exit, so -File is used ONLY for a non-temp path (#421 Bugbot).
+    return (@('-NoProfile','-ExecutionPolicy','Bypass','-File',"`"$ScriptPath`"") + $switches) -join ' '
+  }
+  # Re-fetch the one-liner. Switches are NOT forwarded here: the shim (i.ps1) has no
+  # param block to bind them (& ([scriptblock]) -Diagnose would fail on an unknown
+  # named parameter), and an `irm | iex` launch can't have set a switch anyway
+  # (#421 Bugbot). Keep the exact documented form.
+  return '-NoProfile -ExecutionPolicy Bypass -Command "irm https://tracebloc.io/i.ps1 | iex"'
+}
+
+# Relaunch elevated through UAC, forwarding the switches. Returns $true when the
+# elevated process was started (user accepted UAC), $false if they declined the
+# prompt or the launch failed (Start-Process -Verb RunAs throws on cancel).
+function Invoke-SelfElevate {
+  param([string]$ScriptPath, [switch]$NoReboot, [switch]$Diagnose)
+  $argList = Get-ElevationCommand -ScriptPath $ScriptPath -NoReboot:$NoReboot -Diagnose:$Diagnose
+  try {
+    Start-Process -FilePath 'powershell' -Verb RunAs -ArgumentList $argList -ErrorAction Stop | Out-Null
+    return $true
+  } catch { return $false }
+}
+
 # -- Admin check --------------------------------------------------------------
 # $env:TB_PESTER lets the test suite dot-source this file to load the functions
 # without triggering the admin gate (which throws off-Windows) or running main.
@@ -33,15 +75,32 @@ if (-not $env:TB_PESTER) {
   $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()
              ).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
   if (-not $isAdmin) {
-    # In the documented flow (`irm tracebloc.io/i.ps1 | iex`) there is no script
-    # file to right-click, so the old "right-click > Run as Administrator" advice
-    # was impossible to follow (#386). Give the actual steps.
-    Write-Host "  " -NoNewline; Write-Host ([char]0x2716) -ForegroundColor Red -NoNewline; Write-Host " Administrator rights required." -ForegroundColor Red
-    Write-Host "  Open an elevated PowerShell: press Win+X and choose 'Terminal (Admin)'" -ForegroundColor DarkGray
-    Write-Host "  (or search 'PowerShell' in Start and press Ctrl+Shift+Enter)," -ForegroundColor DarkGray
-    Write-Host "  accept the User Account Control prompt, then re-run:" -ForegroundColor DarkGray
-    Write-Host "    irm https://tracebloc.io/i.ps1 | iex" -ForegroundColor Cyan
-    exit 1
+    # Offer to self-elevate instead of only instructing (#421): a hospital user who
+    # pasted into a normal PowerShell shouldn't have to know that "Terminal (Admin)"
+    # is a separate thing to open. One consent -> one UAC prompt -> install proceeds.
+    $canPrompt = try { [Environment]::UserInteractive -and -not [Console]::IsInputRedirected } catch { $false }
+    $elevated  = $false
+    if ($canPrompt) {
+      Write-Host "  " -NoNewline; Write-Host ([char]0x26A0) -ForegroundColor Yellow -NoNewline; Write-Host "  Administrator rights are required to set up Docker + WSL." -ForegroundColor Yellow
+      $ans = Read-Host "  Relaunch as Administrator now? A Windows UAC prompt will appear [Y/n]"
+      if ($ans -notmatch '^\s*[Nn]') {
+        $elevated = Invoke-SelfElevate -ScriptPath $PSCommandPath -NoReboot:$NoReboot -Diagnose:$Diagnose
+        if ($elevated) { Write-Host "  Continuing in the new elevated window -- you can close this one." -ForegroundColor DarkGray }
+        else           { Write-Host "  Elevation was cancelled." -ForegroundColor DarkGray }
+      }
+    }
+    if (-not $elevated) {
+      # Non-interactive, declined, or the launch failed -> the followable steps (#386).
+      # In the documented `irm ... | iex` flow there is no script file to right-click,
+      # so "right-click > Run as Administrator" was impossible; give the actual steps.
+      Write-Host "  " -NoNewline; Write-Host ([char]0x2716) -ForegroundColor Red -NoNewline; Write-Host " Administrator rights required." -ForegroundColor Red
+      Write-Host "  Open an elevated PowerShell: press Win+X and choose 'Terminal (Admin)'" -ForegroundColor DarkGray
+      Write-Host "  (or search 'PowerShell' in Start and press Ctrl+Shift+Enter)," -ForegroundColor DarkGray
+      Write-Host "  accept the User Account Control prompt, then re-run:" -ForegroundColor DarkGray
+      Write-Host "    irm https://tracebloc.io/i.ps1 | iex" -ForegroundColor Cyan
+      exit 1
+    }
+    exit 0
   }
 
   [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
