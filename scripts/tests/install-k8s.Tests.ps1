@@ -122,6 +122,183 @@ Describe "Daily-user provisioning wiring (#418 source guards)" {
   }
 }
 
+Describe "Install-state pure helpers (#420)" {
+  It "New-InstallState is not-completed at the current schema" {
+    $s = New-InstallState
+    $s.schema    | Should -Be 1
+    $s.completed | Should -BeFalse
+  }
+  It "Test-InstallStateCurrent is true only for a matching schema" {
+    Test-InstallStateCurrent -State (New-InstallState) | Should -BeTrue
+    Test-InstallStateCurrent -State $null              | Should -BeFalse
+    Test-InstallStateCurrent -State ([pscustomobject]@{ schema = 99 }) | Should -BeFalse
+  }
+  It "ConvertTo-InstallState round-trips a completed state" {
+    $s = [pscustomobject]@{ schema = 1; completed = $true }
+    $r = ConvertTo-InstallState -Json ($s | ConvertTo-Json -Compress)
+    $r.schema    | Should -Be 1
+    $r.completed | Should -BeTrue
+  }
+  It "ConvertTo-InstallState returns a fresh (not-completed) state on corrupt / empty / wrong-schema JSON" {
+    (ConvertTo-InstallState -Json '{not json').completed | Should -BeFalse
+    (ConvertTo-InstallState -Json '').schema             | Should -Be 1
+    $wrong = @{ schema = 99; completed = $true } | ConvertTo-Json -Compress
+    (ConvertTo-InstallState -Json $wrong).completed | Should -BeFalse
+  }
+}
+
+Describe "Test-ClusterRunningInList (#420 Bugbot: running, not just present)" {
+  It "is true only when the named cluster has >=1 server running" {
+    $up = '[{"name":"tracebloc","serversCount":1,"serversRunning":1}]'
+    Test-ClusterRunningInList -Json $up -Name 'tracebloc' | Should -BeTrue
+  }
+  It "is false for a present-but-stopped cluster (serversRunning=0)" {
+    $stopped = '[{"name":"tracebloc","serversCount":1,"serversRunning":0}]'
+    Test-ClusterRunningInList -Json $stopped -Name 'tracebloc' | Should -BeFalse
+  }
+  It "is false when the named cluster is absent" {
+    $other = '[{"name":"other","serversRunning":1}]'
+    Test-ClusterRunningInList -Json $other -Name 'tracebloc' | Should -BeFalse
+  }
+  It "is false for empty / corrupt / shape-without-running-count JSON" {
+    Test-ClusterRunningInList -Json ''            -Name 'tracebloc' | Should -BeFalse
+    Test-ClusterRunningInList -Json '{not json'   -Name 'tracebloc' | Should -BeFalse
+    Test-ClusterRunningInList -Json '[{"name":"tracebloc"}]' -Name 'tracebloc' | Should -BeFalse
+  }
+}
+
+Describe "Test-ClientHealthy (#420 Bugbot: verify workloads Ready, not just cluster)" {
+  It "Get-ClientDeploymentNames lists the three client workloads for a namespace" {
+    Get-ClientDeploymentNames -Namespace 'acme' |
+      Should -Be @('mysql-client','acme-jobs-manager','acme-requests-proxy')
+  }
+  It "is false when no client release can be found (unknown / no namespace)" {
+    Mock Get-InstalledClientInfo { [pscustomobject]@{ Id=''; Ns=''; Name=''; UnreadableNs=''; ListUnknown=$true } }
+    Test-ClientHealthy | Should -BeFalse
+    Mock Get-InstalledClientInfo { [pscustomobject]@{ Id=''; Ns=''; Name=''; UnreadableNs=''; ListUnknown=$false } }
+    Test-ClientHealthy | Should -BeFalse
+  }
+  It "is true only when every client deployment rolls out Ready" {
+    Mock Get-InstalledClientInfo { [pscustomobject]@{ Id='c1'; Ns='acme'; Name='acme'; UnreadableNs=''; ListUnknown=$false } }
+    Mock kubectl { $global:LASTEXITCODE = 0 }   # all rollouts Ready
+    Test-ClientHealthy | Should -BeTrue
+  }
+  It "is false when any client deployment is not Ready" {
+    Mock Get-InstalledClientInfo { [pscustomobject]@{ Id='c1'; Ns='acme'; Name='acme'; UnreadableNs=''; ListUnknown=$false } }
+    Mock kubectl { $global:LASTEXITCODE = 1 }   # rollout not Ready
+    Test-ClientHealthy | Should -BeFalse
+  }
+}
+
+Describe "Get-ResumeCommand (#420 resume-after-reboot)" {
+  It "carries -File, forwarded switches, and -Resume for a durable script path" {
+    $real = (Resolve-Path "$PSScriptRoot/../install-k8s.ps1").Path   # a real, non-temp file
+    $c = Get-ResumeCommand -ScriptPath $real -DailyUser 'jdoe'
+    $c | Should -Match '^powershell\.exe '
+    $c | Should -Match '-File "'
+    $c | Should -Match '-DailyUser "jdoe"'
+    $c | Should -Match '-Resume$'
+  }
+  It "does NOT append -Resume to the irm|iex one-liner (shim has no param block, #421)" {
+    $c = Get-ResumeCommand -ScriptPath 'C:\does\not\exist.ps1'   # forces the one-liner fallback
+    $c | Should -Match 'irm https://tracebloc.io/i.ps1 \| iex'
+    $c | Should -Not -Match '-Resume'
+  }
+}
+
+Describe "Install-state I/O round-trip (#420)" {
+  # Mock the path to TestDrive (Pester mocks reach dot-sourced callers regardless of
+  # scope) and no-op the profile-dir mkdir so nothing touches the real home dir.
+  BeforeAll {
+    Mock Get-InstallStatePath { Join-Path "$TestDrive" 'install-state.json' }
+    Mock New-Item { }
+  }
+  BeforeEach { Remove-Item (Join-Path "$TestDrive" 'install-state.json') -ErrorAction SilentlyContinue }
+
+  It "Read-InstallState returns a fresh (not-completed) state when no file exists" {
+    $r = Read-InstallState
+    $r.schema    | Should -Be 1
+    $r.completed | Should -BeFalse
+  }
+  It "Set-InstallComplete persists completed=true, reloadable by Read-InstallState" {
+    Set-InstallComplete
+    $r = Read-InstallState
+    $r.completed | Should -BeTrue
+    $r.schema    | Should -Be 1
+  }
+  It "Clear-InstallCompleted resets completed=false (disarms a stale fast path)" {
+    Set-InstallComplete
+    (Read-InstallState).completed | Should -BeTrue
+    Clear-InstallCompleted
+    (Read-InstallState).completed | Should -BeFalse
+  }
+  It "a corrupt state file degrades to a fresh state instead of throwing" {
+    Set-Content -Path (Get-InstallStatePath) -Value '{ broken' -Encoding ASCII
+    $r = Read-InstallState
+    $r.schema    | Should -Be 1
+    $r.completed | Should -BeFalse
+  }
+}
+
+Describe "Completion vs exit predicates (#420 reviewer: 'starting' is not 'done')" {
+  AfterAll { $script:ClientState = 'starting' }   # restore the module default
+  It "Test-InstallConnected (arms the fast path) is true ONLY for connected" {
+    $script:ClientState = 'connected'; Test-InstallConnected | Should -BeTrue
+    foreach ($s in 'starting','crash','bad_creds','image_pull','image_pull_ca') {
+      $script:ClientState = $s
+      Test-InstallConnected | Should -BeFalse -Because "'$s' is not a fully-up client, so completion must not arm the fast path"
+    }
+  }
+  It "Test-InstallSucceeded (exit code) also allows starting, but never a failure state" {
+    $script:ClientState = 'connected'; Test-InstallSucceeded | Should -BeTrue
+    $script:ClientState = 'starting';  Test-InstallSucceeded | Should -BeTrue
+    foreach ($s in 'crash','bad_creds','image_pull','image_pull_ca','stopped') {
+      $script:ClientState = $s
+      Test-InstallSucceeded | Should -BeFalse -Because "'$s' is a failure that must exit non-zero"
+    }
+  }
+}
+
+Describe "Resume-after-reboot wiring (#420 source guards)" {
+  BeforeAll { $script:PSRC = Get-Content "$PSScriptRoot/../install-k8s.ps1" -Raw }
+  It "adds a -Resume switch to the param block and forwards it through elevation" {
+    $script:PSRC | Should -Match 'param\(\[switch\]\$Help.*\[switch\]\$Resume\)'
+    $script:PSRC | Should -Match "if \(\`$Resume\)\s+\{ \`$switches \+= '-Resume' \}"
+  }
+  It "registers a RunOnce continuation at the reboot exit" {
+    $script:PSRC | Should -Match 'Register-ResumeAfterReboot -ScriptPath \$PSCommandPath'
+  }
+  It "warns that resume is tied to the current account in the split -DailyUser case" {
+    $script:PSRC | Should -Match '\$DailyUser -and \(\$DailyUser -ne \$env:USERNAME\)'
+    $script:PSRC | Should -Match 'Resume is registered for'
+  }
+  It "completes ONLY when connected, and CLEARS a stale completed on any other outcome" {
+    $script:PSRC | Should -Match 'if \(Test-InstallConnected\) \{ Set-InstallComplete \} else \{ Clear-InstallCompleted \}'
+    # the exit code is deliberately more lenient (starting is OK) but a failure exits 1
+    $script:PSRC | Should -Match 'if \(-not \(Test-InstallSucceeded\)\) \{ exit 1 \}'
+  }
+  It "does not leave dead per-step stage checkpoints behind (reviewer: stages dropped)" {
+    $script:PSRC | Should -Not -Match "Set-StageComplete"
+    $script:PSRC | Should -Not -Match "function Add-CompletedStage"
+  }
+  It "gates the fast nothing-to-do path on tools + running cluster + HEALTHY client" {
+    $script:PSRC | Should -Match '\$script:InstallState\.completed -and \(Test-ToolsPresent\) -and \(Test-ClusterRunning\) -and \(Test-ClientHealthy\)'
+    $script:PSRC | Should -Match 'already installed and the client is healthy -- nothing to do'
+  }
+  It "names the ACTUAL state-file path in the force-reinstall hint (honours HOST_DATA_DIR)" {
+    # Must interpolate Get-InstallStatePath, not hard-code ~\.tracebloc\install-state.json.
+    $script:PSRC | Should -Match 'Delete \$\(Get-InstallStatePath\)'
+    $script:PSRC | Should -Not -Match 'Delete ~\\\.tracebloc\\install-state\.json'
+  }
+  It "bounds the k3d fast-path probe with a job + deadline (no unbounded k3d call)" {
+    # Test-ClusterRunning must run k3d inside a timed job, never a bare foreground call.
+    $script:PSRC | Should -Match 'function Test-ClusterRunning[\s\S]*Start-Job[\s\S]*Wait-JobWithProgress[\s\S]*Remove-Job'
+  }
+  It "bounds the fast-path client health check (short rollout deadline, not the full wait)" {
+    $script:PSRC | Should -Match 'function Test-ClientHealthy[\s\S]*rollout status[\s\S]*--timeout=5s'
+  }
+}
+
 Describe "Get-ElevationCommand (#421 self-elevate)" {
   It "returns a single command-line STRING (PS 5.1 quoting-safe, Bugbot #421)" {
     Get-ElevationCommand -ScriptPath "" | Should -BeOfType [string]

@@ -24,7 +24,7 @@
 # =============================================================================
 
 #Requires -Version 5.1
-param([switch]$Help, [switch]$NoReboot, [switch]$Diagnose, [string]$DailyUser)
+param([switch]$Help, [switch]$NoReboot, [switch]$Diagnose, [string]$DailyUser, [switch]$Resume)
 
 # --- Self-elevation (#421) ---------------------------------------------------
 # Build the powershell.exe argument list to relaunch this installer ELEVATED.
@@ -35,11 +35,12 @@ param([switch]$Help, [switch]$NoReboot, [switch]$Diagnose, [string]$DailyUser)
 # ShellExecute/RunAs doesn't inherit the caller's process env, and putting secrets
 # on a command line is unsafe; an env-driven run should be launched elevated.
 function Get-ElevationCommand {
-  param([string]$ScriptPath, [switch]$NoReboot, [switch]$Diagnose, [string]$DailyUser)
+  param([string]$ScriptPath, [switch]$NoReboot, [switch]$Diagnose, [string]$DailyUser, [switch]$Resume)
   $switches = @()
   if ($NoReboot)  { $switches += '-NoReboot' }
   if ($Diagnose)  { $switches += '-Diagnose' }
   if ($DailyUser) { $switches += @('-DailyUser', "`"$DailyUser`"") }   # forward the daily user (#418 Bugbot)
+  if ($Resume)    { $switches += '-Resume' }                          # forward a resume so a re-elevation stays a continuation (#420)
   # Return a single command-line STRING, not an array: PS 5.1 Start-Process
   # -ArgumentList doesn't quote array elements, so a script path with spaces (or
   # the quoted -Command value) would be split (#421 Bugbot; same class as #419).
@@ -61,8 +62,8 @@ function Get-ElevationCommand {
 # elevated process was started (user accepted UAC), $false if they declined the
 # prompt or the launch failed (Start-Process -Verb RunAs throws on cancel).
 function Invoke-SelfElevate {
-  param([string]$ScriptPath, [switch]$NoReboot, [switch]$Diagnose, [string]$DailyUser)
-  $argList = Get-ElevationCommand -ScriptPath $ScriptPath -NoReboot:$NoReboot -Diagnose:$Diagnose -DailyUser $DailyUser
+  param([string]$ScriptPath, [switch]$NoReboot, [switch]$Diagnose, [string]$DailyUser, [switch]$Resume)
+  $argList = Get-ElevationCommand -ScriptPath $ScriptPath -NoReboot:$NoReboot -Diagnose:$Diagnose -DailyUser $DailyUser -Resume:$Resume
   try {
     Start-Process -FilePath 'powershell' -Verb RunAs -ArgumentList $argList -ErrorAction Stop | Out-Null
     return $true
@@ -85,7 +86,7 @@ if (-not $env:TB_PESTER) {
       Write-Host "  " -NoNewline; Write-Host ([char]0x26A0) -ForegroundColor Yellow -NoNewline; Write-Host "  Administrator rights are required to set up Docker + WSL." -ForegroundColor Yellow
       $ans = Read-Host "  Relaunch as Administrator now? A Windows UAC prompt will appear [Y/n]"
       if ($ans -notmatch '^\s*[Nn]') {
-        $elevated = Invoke-SelfElevate -ScriptPath $PSCommandPath -NoReboot:$NoReboot -Diagnose:$Diagnose -DailyUser $DailyUser
+        $elevated = Invoke-SelfElevate -ScriptPath $PSCommandPath -NoReboot:$NoReboot -Diagnose:$Diagnose -DailyUser $DailyUser -Resume:$Resume
         if ($elevated) { Write-Host "  Continuing in the new elevated window -- you can close this one." -ForegroundColor DarkGray }
         else           { Write-Host "  Elevation was cancelled." -ForegroundColor DarkGray }
       }
@@ -433,7 +434,7 @@ tracebloc -- client setup
 
 Usage:
   irm https://raw.githubusercontent.com/tracebloc/client/main/scripts/install.ps1 | iex
-  .\install-k8s.ps1 [-Help] [-NoReboot]
+  .\install-k8s.ps1 [-Help] [-NoReboot] [-Resume]
 
 Advanced configuration (environment variables):
   CLUSTER_NAME   Cluster name                   (default: tracebloc)
@@ -441,6 +442,8 @@ Advanced configuration (environment variables):
   AGENTS         Worker nodes                    (default: 1)
   K8S_VERSION    k3s image tag                   (default: v1.29.4-k3s1)
   -NoReboot      Skip reboot prompt after enabling Windows features
+  -Resume        Continue an install interrupted by a reboot (set automatically
+                 by the registered RunOnce continuation; rarely needed by hand)
   HOST_DATA_DIR  Persistent data directory       (default: ~\.tracebloc)
   TRACEBLOC_CA_BUNDLE  Corporate CA bundle (PEM) to trust on a TLS-inspecting
                  network, so in-cluster image pulls don't fail x509 (#424).
@@ -532,6 +535,206 @@ function Start-InstallLog {
   } catch {
     Log "Could not start transcript logging: $_"
   }
+}
+
+# =============================================================================
+#  INSTALL STATE + RESUME-AFTER-REBOOT (#420)
+#  Two legitimate reboots (Windows feature enablement; Docker/WSL first boot) can
+#  interrupt the install. Instead of "re-find and re-paste the one-liner", we:
+#   - record a schema-versioned `completed` flag in a JSON state file under
+#     %USERPROFILE%\.tracebloc\ (set only when the client is actually connected), and
+#   - on a reboot, register a RunOnce continuation that resumes automatically at
+#     next sign-in (-Resume).
+#  The state is ADVISORY: the fast path still verifies the tools + a RUNNING cluster
+#  before it claims "nothing to do", so a stale flag can never skip real work.
+# =============================================================================
+
+$script:STATE_SCHEMA = 1
+$script:RESUME_ROOT   = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\RunOnce'
+$script:RESUME_NAME   = 'TraceblocInstallerResume'
+
+# --- Pure state helpers (no I/O; unit-testable) ------------------------------
+# The state records only `completed` -- what actually drives behavior. Per-stage
+# checkpoints were dropped (reviewer): the six steps set shared $script: state that
+# downstream steps need, so a resume must re-walk them; speed on re-run comes from
+# each step's own self-skip (tools present, WSL current, cluster running), not from
+# skipping the call. `completed` alone arms the nothing-to-do fast path.
+
+# A fresh state at the current schema.
+function New-InstallState {
+  return [pscustomobject]@{ schema = $script:STATE_SCHEMA; completed = $false }
+}
+
+# Is a parsed state usable by THIS installer (schema matches)? A future/older or
+# malformed schema is treated as absent so we never act on an incompatible file.
+function Test-InstallStateCurrent {
+  param($State)
+  return ($null -ne $State -and
+          ($State.PSObject.Properties.Name -contains 'schema') -and
+          ([int]$State.schema -eq $script:STATE_SCHEMA))
+}
+
+# Parse a state JSON string -> normalised state object. Corrupt/incompatible/empty
+# -> a fresh state, NEVER a throw (a broken checkpoint must not break the install).
+function ConvertTo-InstallState {
+  param([string]$Json)
+  if ([string]::IsNullOrWhiteSpace($Json)) { return (New-InstallState) }
+  try { $obj = $Json | ConvertFrom-Json -ErrorAction Stop } catch { return (New-InstallState) }
+  if (-not (Test-InstallStateCurrent -State $obj)) { return (New-InstallState) }
+  $completed = $false
+  if ($obj.PSObject.Properties.Name -contains 'completed') { $completed = [bool]$obj.completed }
+  return [pscustomobject]@{ schema = [int]$obj.schema; completed = $completed }
+}
+
+# --- State-file I/O (thin wrappers over the pure helpers) --------------------
+
+function Get-InstallStatePath { return (Join-Path $HOST_DATA_DIR 'install-state.json') }
+
+# Read + parse the on-disk state; missing/unreadable/corrupt -> fresh state.
+function Read-InstallState {
+  $path = Get-InstallStatePath
+  if (-not (Test-Path -LiteralPath $path)) { return (New-InstallState) }
+  try { return (ConvertTo-InstallState -Json (Get-Content -LiteralPath $path -Raw -ErrorAction Stop)) }
+  catch { return (New-InstallState) }
+}
+
+# Persist state. Warn-only: a failed write must never fail the install.
+function Save-InstallState {
+  param($State)
+  try {
+    if (-not (Test-Path $HOST_DATA_DIR)) { New-Item -ItemType Directory -Path $HOST_DATA_DIR -Force | Out-Null }
+    ($State | ConvertTo-Json -Compress) | Set-Content -Path (Get-InstallStatePath) -Encoding ASCII -ErrorAction Stop
+  } catch { Log "install-state write failed: $_" }
+}
+
+# Mark the whole install completed + persist (so a later re-run detects nothing-to-do).
+function Set-InstallComplete {
+  Save-InstallState -State ([pscustomobject]@{ schema = $script:STATE_SCHEMA; completed = $true })
+}
+
+# Clear the completed flag (persist not-completed) -- called when a walk ends without
+# a connected client, so a stale `completed` from an earlier success can't keep the
+# fast path armed over a now-broken install (#420 reviewer).
+function Clear-InstallCompleted {
+  Save-InstallState -State (New-InstallState)
+}
+
+# Did the client actually come UP? Only `connected` (all workloads Ready) proves the
+# install is done. `starting` is Get-NotReadyState's catch-all for a client that
+# isn't Ready yet (Pending pods / a slow pull) -- treating it as done would arm the
+# fast path for a client that never came up, skipping the remediation (reviewer).
+# This gates the completion checkpoint; the exit code is deliberately more lenient.
+function Test-InstallConnected {
+  return ($script:ClientState -eq "connected")
+}
+
+# Is the exit code a success? connected (up) or starting (on its way) both avoid a
+# hard error exit; anything else (bad_creds/crash/image_pull/...) is a non-zero
+# failure. Deliberately more lenient than Test-InstallConnected: a still-starting
+# client shouldn't hard-fail the run, but it also must not be marked complete.
+function Test-InstallSucceeded {
+  return ($script:ClientState -eq "connected" -or $script:ClientState -eq "starting")
+}
+
+# --- Fast-path health probes (honest "nothing to do", not just a checkpoint) --
+
+# Are all four client tools on PATH? Cheap; used to gate the nothing-to-do path.
+function Test-ToolsPresent {
+  foreach ($t in @('docker','kubectl','k3d','helm')) { if (-not (Has $t)) { return $false } }
+  return $true
+}
+
+# Pure: from `k3d cluster list -o json` output, is <Name> present AND running (>=1
+# server node up)? A present-but-STOPPED cluster returns $false so the fast path
+# doesn't skip New-K3dCluster's start/repair. Unknown/corrupt shape -> false (#420 Bugbot).
+function Test-ClusterRunningInList {
+  param([string]$Json, [string]$Name)
+  if ([string]::IsNullOrWhiteSpace($Json)) { return $false }
+  try { $clusters = $Json | ConvertFrom-Json -ErrorAction Stop } catch { return $false }
+  foreach ($c in @($clusters)) {
+    if ($c.name -ne $Name) { continue }
+    if ($c.PSObject.Properties.Name -contains 'serversRunning') { return ([int]$c.serversRunning -ge 1) }
+    return $false   # shape without a running count can't prove the cluster is up
+  }
+  return $false
+}
+
+# Is our k3d cluster present AND running? STATE query, BOUNDED via a job+deadline so a
+# wedged Docker engine can't hang the fast path at the start of every re-run (#420
+# Bugbot). Never-fatal: a timeout / parse failure -> $false (fall through to the walk).
+function Test-ClusterRunning {
+  $job = Start-Job -InitializationScript $JobInit -ScriptBlock {
+    param($n) (k3d cluster list $n -o json 2>$null | Out-String)
+  } -ArgumentList $CLUSTER_NAME
+  $out = ""
+  if (Wait-JobWithProgress -Job $job -TimeoutSec 15 -Message "Checking cluster") {
+    $out = (Receive-Job $job -ErrorAction SilentlyContinue | Out-String)
+  } else {
+    Log "k3d cluster list timed out; treating cluster as not running."
+  }
+  Remove-Job $job -Force -ErrorAction SilentlyContinue
+  return (Test-ClusterRunningInList -Json $out -Name $CLUSTER_NAME)
+}
+
+# The client's three workload deployments in a namespace. Single source of truth for
+# both the readiness gate and the fast-path health check (#420).
+function Get-ClientDeploymentNames {
+  param([string]$Namespace)
+  return @("mysql-client", "$Namespace-jobs-manager", "$Namespace-requests-proxy")
+}
+
+# Is a previously-installed client actually HEALTHY right now? The fast path must not
+# claim "nothing to do" over a running cluster whose client workloads are down (the
+# bash assess path requires Ready workloads too). Finds the installed release's
+# namespace via Get-InstalledClientInfo (bounded), then checks each client deployment
+# with a SHORT rollout deadline -- if any isn't Ready (or the release can't be found),
+# return $false so the run falls through to the repairing walk (#420 Bugbot).
+function Test-ClientHealthy {
+  $info = Get-InstalledClientInfo
+  if ($info.ListUnknown -or -not $info.Ns) { return $false }
+  foreach ($d in (Get-ClientDeploymentNames -Namespace $info.Ns)) {
+    & kubectl rollout status "deployment/$d" -n $info.Ns --timeout=5s 2>&1 | Out-Null
+    if ($LASTEXITCODE -ne 0) { return $false }
+  }
+  return $true
+}
+
+# --- Resume-after-reboot (RunOnce) -------------------------------------------
+
+# Pure: the RunOnce command line that resumes the install after a reboot. Reuses
+# the elevation arg-builder (#421) and adds -Resume so the resumed run auto-continues
+# past the reboot prompt. Prefixed with the powershell.exe host that RunOnce needs.
+function Get-ResumeCommand {
+  param([string]$ScriptPath, [switch]$NoReboot, [switch]$Diagnose, [string]$DailyUser)
+  $inner = Get-ElevationCommand -ScriptPath $ScriptPath -NoReboot:$NoReboot -Diagnose:$Diagnose -DailyUser $DailyUser
+  # Only the durable -File form can carry -Resume; the irm|iex shim has no param
+  # block to bind it (#421), and appending it would sit past -Command's value. The
+  # state file (completed/stages) drives the resume for the one-liner path anyway (#420).
+  if ($inner -match '(^|\s)-File\s') { $inner = "$inner -Resume" }
+  return "powershell.exe $inner"
+}
+
+# Register the RunOnce continuation. Warn-only. Returns $true on success.
+function Register-ResumeAfterReboot {
+  param([string]$ScriptPath, [switch]$NoReboot, [switch]$Diagnose, [string]$DailyUser)
+  try {
+    if (-not (Test-Path $script:RESUME_ROOT)) { New-Item -Path $script:RESUME_ROOT -Force | Out-Null }
+    $cmd = Get-ResumeCommand -ScriptPath $ScriptPath -NoReboot:$NoReboot -Diagnose:$Diagnose -DailyUser $DailyUser
+    New-ItemProperty -Path $script:RESUME_ROOT -Name $script:RESUME_NAME -Value $cmd -PropertyType String -Force -ErrorAction Stop | Out-Null
+    Log "Registered resume-after-reboot: $cmd"
+    return $true
+  } catch { Log "resume registration failed: $_"; return $false }
+}
+
+# Remove the RunOnce continuation. RunOnce self-deletes once it fires, but clear it
+# explicitly on the success path (no reboot happened) and after a manual re-run so a
+# stale entry can never relaunch the installer unexpectedly.
+function Unregister-ResumeAfterReboot {
+  try {
+    if (Test-Path $script:RESUME_ROOT) {
+      Remove-ItemProperty -Path $script:RESUME_ROOT -Name $script:RESUME_NAME -ErrorAction SilentlyContinue
+    }
+  } catch { Log "resume unregister failed: $_" }
 }
 
 # =============================================================================
@@ -815,12 +1018,26 @@ function Enable-VirtualisationFeatures {
 
   if ($rebootNeeded) {
     Warn "A reboot is required to finish enabling system features."
+    # Arm the RunOnce continuation so the install resumes at next sign-in with no
+    # re-pasting -- both for auto-reboot and manual -NoReboot (#420). RunOnce is
+    # written to the CURRENT (elevating) account's hive: the reboot happens here in
+    # Step 1, during that account's session, so that same account signs back in and
+    # continues -- the -DailyUser handoff (#418) only runs at the very end.
+    $resumeArmed = Register-ResumeAfterReboot -ScriptPath $PSCommandPath -NoReboot:$NoReboot -Diagnose:$Diagnose -DailyUser $DailyUser
+    if ($resumeArmed) { Ok "The install will resume automatically the next time you sign in." }
+    # Split-account caveat (reviewer): resume is tied to THIS account. If a different
+    # user will sign in after the reboot, they must re-run the installer to continue.
+    if ($resumeArmed -and $DailyUser -and ($DailyUser -ne $env:USERNAME)) {
+      Hint "Resume is registered for '$env:USERNAME'. Sign back in as '$env:USERNAME' to continue; if '$DailyUser' signs in instead, re-run the installer."
+    }
     if ($NoReboot) {
-      Hint "Reboot manually, then re-run this script."
+      if ($resumeArmed) { Hint "Reboot when ready; the install resumes at your next sign-in." }
+      else              { Hint "Reboot manually, then re-run this installer to continue." }
       exit 2
     }
     $choice = Read-Host "  Reboot now? [y/N]"
     if ($choice -match "^[Yy]$") { Restart-Computer -Force }
+    if (-not $resumeArmed) { Hint "After the reboot, re-run this installer to continue." }
     exit 2
   }
 
@@ -3065,7 +3282,7 @@ function Confirm-Cluster {
 # summary reports the truth: connected | starting | bad_creds | image_pull | crash
 function Wait-ForClientReady {
   $ns = $script:TB_NAMESPACE
-  $deploys = @("mysql-client", "$ns-jobs-manager", "$ns-requests-proxy")
+  $deploys = Get-ClientDeploymentNames -Namespace $ns
   $deadline = (Get-Date).AddSeconds([int]$ReadyTimeout)
   $allReady = $true
 
@@ -3737,8 +3954,25 @@ if ($Diagnose) { Invoke-DiagnoseBundle; exit 0 }
 Confirm-Config
 Initialize-ToolDir
 Start-InstallLog
+# Load the install state up front (#420): drives the fast nothing-to-do path.
+# Missing/corrupt -> a fresh state (never fatal).
+$script:InstallState = Read-InstallState
 Print-Banner
+if ($Resume) { Ok "Resuming the tracebloc install after a reboot..." }
 Print-Roadmap
+
+# Fast path (#420): a prior run completed successfully AND the tools + a RUNNING
+# cluster + Ready client workloads are all still here -> nothing to do. Honest: it
+# verifies live health (not just the checkpoint), so a stopped cluster or a down
+# client falls through to the repairing walk. Skipped on -Resume (a resume must
+# finish the interrupted walk).
+if ((-not $Resume) -and $script:InstallState.completed -and (Test-ToolsPresent) -and (Test-ClusterRunning) -and (Test-ClientHealthy)) {
+  Ok "tracebloc is already installed and the client is healthy -- nothing to do."
+  Hint "Delete $(Get-InstallStatePath) (or set a fresh HOST_DATA_DIR) to force a full reinstall."
+  Unregister-ResumeAfterReboot
+  try { Stop-Transcript | Out-Null } catch {}
+  exit 0
+}
 
 # -- Step 1/6: Check system requirements (honest split from tool install, #422) --
 Step 1 6 "Checking system requirements"
@@ -3780,11 +4014,19 @@ Wait-ForClientReady
 # (#418) so they need zero admin actions later. Warn-only -- never fail the install.
 try { Set-DailyUserProvisioning } catch { Log "daily-user provisioning error: $_" }
 
+# The install reached the end: no reboot is pending, so clear any RunOnce
+# continuation. Record completion ONLY when the client is actually CONNECTED; on any
+# other outcome CLEAR a stale completed flag from an earlier success, so a re-run
+# (likely started because the client is down) can't hit the fast path and skip the
+# documented remediation the summary just printed (#420 reviewer + Bugbot).
+Unregister-ResumeAfterReboot
+if (Test-InstallConnected) { Set-InstallComplete } else { Clear-InstallCompleted }
+
 Print-Summary
 
 try { Stop-Transcript | Out-Null } catch {}
 
 # Exit code reflects reality: connected/starting are OK; failures are non-zero.
-if ($script:ClientState -ne "connected" -and $script:ClientState -ne "starting") { exit 1 }
+if (-not (Test-InstallSucceeded)) { exit 1 }
 
 }  # end TB_PESTER guard (skipped when the test suite dot-sources this file)
