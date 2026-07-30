@@ -47,6 +47,9 @@ curl_secure() {
   done
   local -a _bounds=(--connect-timeout "${TB_CURL_CONNECT_TIMEOUT:-30}")
   (( _stall_bounded )) || _bounds+=(--max-time "${TB_CURL_MAX_TIME:-300}")
+  # checker false positive: _bounds ALWAYS carries --connect-timeout (plus
+  # --max-time unless the call stall-bounds itself) — flags inside a bash
+  # array expansion are invisible to the grep. house-rules: ignore=curl-timeout
   curl --tlsv1.2 "${_bounds[@]}" "$@"
 }
 
@@ -140,6 +143,132 @@ step_header()    { echo -e "  ${TB_HEADING}$1) $2${RESET}"; echo ""; }
 # ── Utility ──────────────────────────────────────────────────────────────────
 has() { command -v "$1" &>/dev/null; }
 
+# _rootless_active — the single source of truth for "this run is a rootless Tier-1
+# install" (RFC 0001 #1177). Slice 1 (#1219) established the condition as
+# INSTALL_TIER==1 AND the opt-in TB_TIER1_ROOTLESS flag; every later slice calls
+# THIS predicate instead of re-testing the pair, so the two markers can never drift
+# (#1221). Lives in common.sh because both setup-linux.sh (the install path) and
+# cluster.sh (the cluster path, sourced standalone by the e2e harness) depend on it.
+_rootless_active() {
+  [ "${INSTALL_TIER:-}" = "1" ] && [ "${TB_TIER1_ROOTLESS:-0}" = "1" ]
+}
+
+# Execute-gate a freshly-installed tool (#411). The old post-install "check" was a
+# log-only interpolation (`... 2>/dev/null || echo present`) that masked failure,
+# so a corrupt or wrong-architecture binary — a partial pkg/brew install, or a
+# download no checksum path guarded — sat on PATH and failed only later, at
+# cluster-create, after a green "System tools". Actually RUN the tool's cheapest
+# self-check; on failure error() with an arch-aware remedy so the tool step fails
+# loudly instead. NOTE: kubectl is gated with `version --client` (NOT --short,
+# removed in kubectl 1.28+); helm with bare `version` (—short may go the same way).
+#
+# Removal is OPT-IN via a leading `--rm <path>`: pass it with the path where the
+# installer PLACES the binary (TB_TOOLS_DIR/<tool>). On failure we remove that path
+# ONLY when the binary that actually ran is that exact file (same inode, `-ef`).
+# So: a broken binary WE installed there (fresh OR left by a prior run) is cleared,
+# letting a re-run self-heal (Bugbot: otherwise `has` stays true → stuck loop);
+# but a brew/pkg-manager copy that lives elsewhere on PATH is never deleted — the
+# resolved binary won't match our path (reviewer). Callers may pass --rm on every
+# path; the `-ef` guard sorts out ownership. macOS/brew callers pass no --rm.
+# Usage: assert_tool_runs [--rm <placed-path>] <name> <version-arg>...
+assert_tool_runs() {
+  local rm_path=""
+  if [[ "${1:-}" == "--rm" ]]; then rm_path="$2"; shift 2; fi
+  local name="$1"; shift
+  local out
+  if out="$("$name" "$@" 2>&1)"; then
+    log "$name OK: $(printf '%s\n' "$out" | head -1)"
+    return 0
+  fi
+  # Remove only the file we placed AND only if it's the binary that just failed.
+  if [[ -n "$rm_path" && -f "$rm_path" ]]; then
+    local resolved; resolved="$(command -v "$name" 2>/dev/null || true)"
+    [[ -n "$resolved" && "$resolved" -ef "$rm_path" ]] && rm -f "$rm_path" 2>/dev/null || true
+  fi
+  error "$name was installed but won't run — a corrupt or wrong-architecture binary (this machine is ${ARCH:-$(uname -m)}). Re-run the installer to re-download it; if it recurs, remove ${rm_path:-the $name on your PATH} (and any package-manager copy) first."
+}
+
+# _bounded SECONDS CMD… — run CMD under timeout(1)/gtimeout(1) when either is
+# present, else bare, so a wedged external call can't hang a headless install
+# (installer rule: every docker/kubectl/helm probe must be bounded). Returns CMD's
+# exit status (124 on timeout). Output is NOT redirected — the caller decides.
+_bounded() {
+  local t="$1"; shift
+  if   has timeout;  then timeout  "$t" "$@"
+  elif has gtimeout; then gtimeout "$t" "$@"
+  else "$@"; fi
+}
+
+# ── Subordinate ID helpers (rootless Docker, RFC 0001 #1220) ──────────────────
+# Pure parsers shared by probe.sh (detection) and setup-linux.sh (remediation), so
+# both read /etc/subuid + /etc/subgid the same way. Lines are `key:start:count`,
+# key = user name OR numeric uid.
+
+# _subid_has_entry FILE NAME UID — true if FILE has a range keyed by NAME or UID.
+# First-field (anchored) match, so a name that is a substring of another user's
+# entry can't false-positive. FILE is world-readable; the read is side-effect-free.
+_subid_has_entry() {
+  local file="$1" name="$2" uid="$3" key
+  [[ -r "$file" ]] || return 1
+  while IFS=: read -r key _ _; do
+    [[ -n "$key" ]] || continue
+    [[ "$key" == "$name" ]] && return 0
+    [[ -n "$uid" && "$key" == "$uid" ]] && return 0
+  done < "$file"
+  return 1
+}
+
+# _next_subid_start FILE... — the next free start offset for a fresh 65536-wide
+# block: max(start+count) across the given files, or 100000 (Docker's default base)
+# when none carry a valid range. Guarantees the new block can't overlap an existing
+# allocation, so remediation is safe to run on a host that already has some ranges.
+_next_subid_start() {
+  local f start count max=100000
+  for f in "$@"; do
+    [[ -r "$f" ]] || continue
+    while IFS=: read -r _ start count; do
+      [[ "$start" =~ ^[0-9]+$ && "$count" =~ ^[0-9]+$ ]] || continue
+      if (( start + count > max )); then max=$(( start + count )); fi
+    done < "$f"
+  done
+  echo "$max"
+}
+
+# _idmap_helper_ok NAME — is a subid-mapping helper (newuidmap/newgidmap) both
+# present AND privileged enough to write ID maps: the setuid bit, OR a cap_setuid
+# file capability. Arch's `shadow` ships these with filecaps rather than setuid
+# (Bugbot, client#458), so a setuid-only test wrongly rejects a working helper and
+# false-hands-off. When getcap is unavailable we can't inspect caps, so fall back to
+# the setuid check alone. Shared by probe.sh (detection) and setup-linux.sh (the
+# post-install re-verify).
+_idmap_helper_ok() {
+  local name="$1" p cap
+  p="$(command -v "$name" 2>/dev/null)" || return 1
+  [[ -n "$p" ]] || return 1
+  [[ -u "$p" ]] && return 0                     # setuid-root covers both helpers
+  # Filecaps path (Arch etc.): newuidmap needs cap_setuid, newgidmap needs
+  # cap_setgid — checking cap_setuid for both wrongly rejects newgidmap (Bugbot #458).
+  case "$name" in
+    newgidmap) cap=cap_setgid ;;
+    *)         cap=cap_setuid ;;
+  esac
+  if has getcap; then
+    local caps; caps="$(getcap "$p" 2>/dev/null)"
+    [[ "$caps" == *"$cap"* ]] && return 0
+  fi
+  return 1
+}
+
+# Sanitize a minutes-valued env override to a base-10 integer, else <default>.
+# The 10# base prefix matters: bash arithmetic reads a leading zero as octal,
+# so 08/09 would ABORT $(( … )) under set -e (mid-create, leaving a partial
+# cluster) and 010 would silently become 8 (Bugbot #442).
+tb_minutes_or() {
+  local v="$1" def="$2"
+  case "$v" in ''|*[!0-9]*) echo "$def"; return 0 ;; esac
+  echo $((10#$v))
+}
+
 # Strip ANSI escape sequences and C0 control characters from a value. A raw
 # `read` captures whatever the terminal sends — this can include:
 #   • bracketed-paste wrappers:  ESC[200~ ... ESC[201~
@@ -193,67 +322,52 @@ _client_workload_deployments() {
   printf '%s\n' "mysql-client" "${ns}-jobs-manager" "${ns}-requests-proxy"
 }
 
-# ── macOS: Docker Desktop architecture vs machine (for wrong-arch UX) ────────
-#  Call early on macOS to fail fast with clear instructions if Docker.app
-#  is for the wrong architecture (e.g. Intel Docker on Apple Silicon).
-#  Returns 0 if OK or not applicable; returns 1 and prints message if mismatch.
-check_docker_arch_mac() {
-  [[ "$(uname -s)" != "Darwin" ]] && return 0
-  [[ ! -d "/Applications/Docker.app" ]] && return 0
-
-  local real_arch
-  if sysctl -n hw.optional.arm64 2>/dev/null | grep -q '1'; then
-    real_arch="arm64"
-  else
-    real_arch="amd64"
-  fi
-
-  # Main executable is com.docker.backend (CFBundleExecutable), not "Docker"
-  local docker_bin_path="/Applications/Docker.app/Contents/MacOS/com.docker.backend"
-  [[ ! -x "$docker_bin_path" ]] && docker_bin_path="/Applications/Docker.app/Contents/MacOS/Docker"
-  local docker_bin_arch
-  docker_bin_arch="$(file "$docker_bin_path" 2>/dev/null || true)"
-  local docker_is_arm=false
-  local docker_is_intel=false
-  echo "$docker_bin_arch" | grep -q 'arm64' && docker_is_arm=true
-  echo "$docker_bin_arch" | grep -q 'x86_64' && docker_is_intel=true
-
-  if [[ "$real_arch" == "arm64" ]] && [[ "$docker_is_intel" == true ]] && [[ "$docker_is_arm" != true ]]; then
-    echo ""
-    warn "Docker is installed for the wrong chip (Intel instead of Apple Silicon)."
-    hint "This can cause slow performance or prevent Docker from starting."
-    echo ""
-    echo -e "  ${BOLD}Fix:${RESET} Re-run the installer — it will replace Docker with the correct version."
-    echo ""
-    return 1
-  fi
-
-  if [[ "$real_arch" == "amd64" ]] && [[ "$docker_is_arm" == true ]]; then
-    echo ""
-    warn "Docker is installed for the wrong chip (Apple Silicon instead of Intel)."
-    hint "Docker may not work correctly."
-    echo ""
-    echo -e "  ${BOLD}Fix:${RESET} Re-run the installer — it will replace Docker with the correct version."
-    echo ""
-    return 1
-  fi
-
-  return 0
-}
-
 # ── Spinner — hides noisy command output behind an animated status line ──────
-#  Usage:  spin <pid> "Installing foo…"
+#  Usage:  spin <pid> "Installing foo…" [deadline_seconds]
 #  The background process's stdout/stderr should already be redirected to a file
 #  before calling spin. spin waits for the PID to exit and returns its exit code.
+#  With the optional third argument, a still-running PID is killed once the
+#  deadline passes and spin returns 124 (GNU timeout's convention) — the
+#  backstop for commands that can wedge indefinitely (#426).
 spin() {
-  local pid="$1" msg="$2"
+  local pid="$1" msg="$2" deadline_s="${3:-}"
   local frames=('⠋' '⠙' '⠹' '⠸' '⠼' '⠴' '⠦' '⠧' '⠇' '⠏')
   local i=0
+  local ticks=0                           # one tick ≈ 0.12s
+  local _spin_kids="" _spin_k=""          # deadline path: captured child PIDs
 
   tput civis 2>/dev/null || true          # hide cursor
   while kill -0 "$pid" 2>/dev/null; do
+    if [[ -n "$deadline_s" ]] && (( ticks * 12 >= deadline_s * 100 )); then
+      # Children FIRST: the pid is often a wrapper subshell (cluster.sh's
+      # `( k3d … ) &`) — signalling only the wrapper orphans the real worker,
+      # which keeps running (k3d keeps creating the cluster) after the install
+      # has already failed, racing any retry (Bugbot #442). Capture the child
+      # PIDs BEFORE any signal: once the wrapper dies they reparent to init
+      # and pkill -P can't see them (Bugbot #442 r2), so the KILL sweep must
+      # address them by captured PID. Harmless when bash exec-optimized the
+      # wrapper away — then $pid IS the worker and there are no children.
+      # Every line below is failure-proofed (`|| true`): pkill returns 1 when
+      # there are no children, kill/wait fail on already-reaped PIDs, and wait
+      # reports the kill signal — under `set -e` any of those would abort the
+      # deadline path before `return 124`, so the caller would never see the
+      # timeout (no warn/hint, no partial-cluster cleanup) (Bugbot #442 r3).
+      _spin_kids="$(pgrep -P "$pid" 2>/dev/null || true)"
+      pkill -TERM -P "$pid" 2>/dev/null || true
+      kill "$pid" 2>/dev/null || true
+      sleep 0.5
+      for _spin_k in $_spin_kids; do
+        kill -9 "$_spin_k" 2>/dev/null || true
+      done
+      kill -9 "$pid" 2>/dev/null || true
+      wait "$pid" 2>/dev/null || true
+      printf "\r\033[K"
+      tput cnorm 2>/dev/null || true
+      return 124
+    fi
     printf "\r  ${CYAN}%s${RESET} %s" "${frames[i]}" "$msg"
     i=$(( (i + 1) % ${#frames[@]} ))
+    ticks=$(( ticks + 1 ))
     sleep 0.12
   done
 
@@ -277,6 +391,32 @@ spin_cmd() {
     echo -e "  ${DIM}Last 10 lines of log:${RESET}" >&2
     tail -10 "$logfile" >&2
     return 1
+  fi
+}
+
+# ── spin_cmd with a hard deadline (#426) ─────────────────────────────────────
+#  Usage:  spin_cmd_bounded <seconds> "Doing the thing…" cmd args…
+#  For commands that can wedge indefinitely against a stuck endpoint (helm
+#  talking to a wedged kube-apiserver). Same quiet-log capture + failure tail
+#  as spin_cmd; returns the command's real exit code, or 124 when the deadline
+#  killed it (with a timeout note so the user knows it was us, not the tool).
+spin_cmd_bounded() {
+  local secs="$1" msg="$2"; shift 2
+  local logfile="${LOG_FILE:-/tmp/tracebloc-spin.log}"
+  "$@" >> "$logfile" 2>&1 &
+  local pid=$!
+  local rc=0
+  spin "$pid" "$msg" "$secs" || rc=$?
+  if (( rc == 124 )); then
+    echo -e "  ${RED}${BOLD}✖ ${msg} — timed out after ${secs}s${RESET}" >&2
+    echo -e "  ${DIM}Last 10 lines of log:${RESET}" >&2
+    tail -10 "$logfile" >&2
+    return 124
+  elif (( rc != 0 )); then
+    echo -e "  ${RED}${BOLD}✖ ${msg}${RESET}" >&2
+    echo -e "  ${DIM}Last 10 lines of log:${RESET}" >&2
+    tail -10 "$logfile" >&2
+    return $rc
   fi
 }
 

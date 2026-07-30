@@ -68,6 +68,19 @@ _diagnose_not_ready() {
   fi
   pods="$(kubectl get pods -n "$ns" --request-timeout=5s 2>/dev/null || true)"
   if printf '%s' "$pods" | grep -qiE 'ImagePullBackOff|ErrImagePull|InvalidImageName'; then
+    # On a TLS-inspecting network the pull fails x509 because the nodes don't trust
+    # the corporate CA (#424). Distinguish it from a generic pull error so the
+    # remedy can name the CA + the env var, not a vague "retry".
+    # Scope the x509 test to the image-pull failure event itself, not any stray
+    # x509 event elsewhere in the ns — a stale/unrelated x509 event must not steer
+    # the user into a delete+recreate for the wrong reason (reviewer). kubectl
+    # prints one event per line, so an x509 on a pull-failure line is that pull.
+    local events pull_fail
+    events="$(kubectl get events -n "$ns" --request-timeout=5s 2>/dev/null || true)"
+    pull_fail="$(printf '%s\n' "$events" | grep -iE 'failed to pull|ErrImagePull' || true)"
+    if printf '%s' "$pull_fail" | grep -qiE 'x509|certificate signed by unknown authority|tls: failed to verify'; then
+      printf 'image_pull_ca'; return
+    fi
     printf 'image_pull'; return
   fi
   if printf '%s' "$pods" | grep -qiE 'CrashLoopBackOff'; then
@@ -183,6 +196,19 @@ print_summary() {
       echo -e "  The environment installed, but tracebloc refused those credentials."
       echo -e "    1. Re-check them at ${TB_LINK}https://ai.tracebloc.io/clients${RESET}"
       echo -e "    2. Re-run this installer ${DIM}(safe to re-run)${RESET}"
+      ;;
+    image_pull_ca)
+      echo -e "  ${TB_ERR}✖ Setup didn't finish — the cluster does not trust your network's TLS-inspection CA.${RESET}" >&2
+      echo ""
+      echo -e "  Your network intercepts HTTPS (break-and-inspect), so the in-cluster image"
+      echo -e "  pulls fail certificate validation (x509). Point the installer at your"
+      echo -e "  corporate CA bundle so the nodes trust it. CA trust is baked in at"
+      echo -e "  cluster-create, so delete the existing cluster first, then re-run with the CA:"
+      echo -e "    ${TB_CMD}k3d cluster delete ${CLUSTER_NAME:-tracebloc}${RESET}"
+      echo -e "    ${TB_CMD}TRACEBLOC_CA_BUNDLE=/path/to/corporate-ca.pem ${TB_INSTALL_CMD:-./install.sh}${RESET}"
+      echo -e "  ${DIM}(CURL_CA_BUNDLE is also honored.) Ask your IT team for the bundle if unsure.${RESET}"
+      echo -e "  Inspect:  ${TB_CMD}kubectl get events -n ${ns} | grep -i x509${RESET}"
+      echo -e "  ${DIM}Re-running this installer is safe.${RESET}"
       ;;
     image_pull|crash)
       local reason="a component didn't start"

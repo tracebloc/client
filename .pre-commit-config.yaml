@@ -1,0 +1,22 @@
+# File used for configuring project pre-commit hooks.
+# Layer 0: an optional local lint guard — CI remains the enforcement layer
+# (standard-checks / installer-tests).
+#
+# LINT-ONLY BY DESIGN: scripts/manifest.sha256 must always match the bytes
+# under scripts/ (see scripts/gen-manifest.sh), so no hook in this file may
+# rewrite a file. Do not add formatters/fixers (end-of-file-fixer, shfmt, ...).
+repos:
+- repo: https://github.com/shellcheck-py/shellcheck-py
+  rev: v0.11.0.1
+  hooks:
+  - id: shellcheck
+    # Same gate as CI: error severity, bash dialect, installer scripts only.
+    args: [--severity=error, --shell=bash]
+    files: ^scripts/.*\.sh$
+- repo: https://github.com/pre-commit/pre-commit-hooks
+  rev: v4.1.0
+  hooks:
+  - id: check-json
+  - id: check-yaml
+    # Helm templates are Go-templated — not parseable as plain YAML.
+    exclude: ^(client|ingestor)/templates/

@@ -139,7 +139,7 @@ IS_TEMP_INSTALLER=0
 case "$CLI_REF" in
   http://*|https://*)
     INSTALLER="$(mktemp)"; IS_TEMP_INSTALLER=1
-    if ! curl -fsSL "$CLI_REF" -o "$INSTALLER"; then
+    if ! curl -fsSL --tlsv1.2 --connect-timeout 30 --max-time 60 "$CLI_REF" -o "$INSTALLER"; then
       echo "RESULT: FAIL — could not download install.sh from ${CLI_REF}"; exit 1
     fi ;;
   *)

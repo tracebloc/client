@@ -54,7 +54,44 @@ if (-not $env:TB_PESTER) {
 function Info($m)          { Write-Host "  " -NoNewline; Write-Host ([char]0x00B7) -ForegroundColor DarkGray -NoNewline; Write-Host " $m" -ForegroundColor DarkGray }
 function Ok($m)            { Write-Host "  " -NoNewline; Write-Host ([char]0x2714) -ForegroundColor Green -NoNewline; Write-Host " $m" }
 function Warn($m)          { Write-Host "  " -NoNewline; Write-Host ([char]0x26A0) -ForegroundColor Yellow -NoNewline; Write-Host "  $m" -ForegroundColor Yellow }
-function Err($m)           { Write-Host "  " -NoNewline; Write-Host ([char]0x2716) -ForegroundColor Red -NoNewline; Write-Host " $m" -ForegroundColor Red; exit 1 }
+# Build the trailing lines every fatal error shows (#423): a short excerpt of the
+# real tool output (last few non-empty lines — the actual reason, not a generic
+# line), then the log path and the -Diagnose support-bundle hint as first-class
+# next steps. Pure (no host writes / no exit) so it is unit-testable.
+function Get-ErrDetailLines([string]$Detail) {
+  $out = @()
+  if ($Detail) {
+    # Drop PowerShell 5.1 ErrorRecord "chrome" that `native 2>&1 | Out-String`
+    # wraps around stderr (the `At <file>:<n> char:<n>` position line and the
+    # `+ ...` / `+ CategoryInfo` / `+ FullyQualifiedErrorId` block). Otherwise a
+    # helm failure's last 5 lines are all chrome and the real `Error:` line is
+    # crowded out of the excerpt (#423 Bugbot).
+    $lines = @($Detail -split "`r?`n" |
+      ForEach-Object { $_.TrimEnd() } |
+      Where-Object {
+        $_ -ne "" -and
+        $_ -notmatch '^\s*At [^ ]+:\d+ char:\d+' -and
+        $_ -notmatch '^\s*\+ '
+      } |
+      Select-Object -Last 5)
+    if ($lines.Count) { $out += "--- details ---"; $out += $lines }
+  }
+  if ($script:LOG_FILE) { $out += "Full log: $script:LOG_FILE" }
+  $out += "Support bundle: re-run with -Diagnose"
+  return $out
+}
+
+# $Detail (optional) is captured tool output (e.g. k3d/helm stderr); its last few
+# non-empty lines are surfaced on screen so the real reason isn't buried in the
+# log (#423). Every failure names the log path + -Diagnose regardless.
+function Err($m, $Detail)  {
+  Write-Host "  " -NoNewline; Write-Host ([char]0x2716) -ForegroundColor Red -NoNewline; Write-Host " $m" -ForegroundColor Red
+  # @(...) forces array enumeration: a single-line result unwraps to a scalar
+  # string, and enumerating that explicitly keeps each line intact (defensive —
+  # the `foreach` statement already iterates a scalar once, not per-char).
+  foreach ($l in @(Get-ErrDetailLines $Detail)) { Write-Host "  $l" -ForegroundColor DarkGray }
+  exit 1
+}
 function Step($n, $t, $l)  { Write-Host ""; Write-Host "Step $n/$t" -ForegroundColor Cyan -NoNewline; Write-Host "  $l" -ForegroundColor White }
 function Log($m)           { if ($script:LOG_FILE) { Add-Content -Path $script:LOG_FILE -Value "[$(Get-Date -Format 'HH:mm:ss')] $m" -ErrorAction SilentlyContinue } }
 function PromptHeader($m)  { Write-Host ""; Write-Host "  $m" -ForegroundColor White }
@@ -64,6 +101,135 @@ function Has($cmd)         { [bool](Get-Command $cmd -ErrorAction SilentlyContin
 function RefreshPath {
   $env:PATH = [System.Environment]::GetEnvironmentVariable("PATH","Machine") + ";" +
               [System.Environment]::GetEnvironmentVariable("PATH","User")
+}
+
+# Shared braille spinner frames for the progress helpers below.
+$script:SpinnerFrames = @([char]0x2807, [char]0x2819, [char]0x2839, [char]0x2838, [char]0x283C, [char]0x2834, [char]0x2826, [char]0x2827, [char]0x2847, [char]0x280F)
+
+# Spin a braille spinner while a process runs, bounded by a deadline (#426):
+# `k3d cluster create --wait` has no timeout of its own, so a stalled image
+# pull would otherwise spin forever. Returns $true when the process exited on
+# its own, $false on deadline expiry (the process is killed best-effort).
+# Extracted as a function so the deadline/kill path is unit-testable (#412).
+function Wait-ProcessWithDeadline {
+  param([object]$Process, [datetime]$Deadline, [string]$Message)
+  $frames = $script:SpinnerFrames
+  $f = 0
+  Write-Host -NoNewline "  "
+  while (-not $Process.HasExited) {
+    if ((Get-Date) -gt $Deadline) {
+      try { $Process.Kill() } catch {}
+      Write-Host "`r                                                   `r" -NoNewline
+      return $false
+    }
+    Write-Host "`r  " -NoNewline
+    Write-Host $frames[$f] -ForegroundColor Cyan -NoNewline
+    Write-Host " $Message" -NoNewline
+    $f = ($f + 1) % $frames.Count
+    Start-Sleep -Seconds 2
+  }
+  Write-Host "`r                                                   `r" -NoNewline
+  return $true
+}
+
+# Wait on a background job with a visible heartbeat so a long step never leaves
+# the console silent for more than a couple of seconds (#415). Prints a spinner +
+# elapsed/timeout line while the job runs; returns $true if the job finished
+# before the deadline, $false on timeout (the job is stopped best-effort; the
+# caller still owns Remove-Job). Extracted so the progress/timeout contract is
+# unit-testable without a real slow job.
+function Wait-JobWithProgress {
+  param(
+    [Parameter(Mandatory)] $Job,
+    [int]$TimeoutSec = 180,
+    [string]$Message = "Working",
+    [int]$PollSeconds = 2
+  )
+  $frames = $script:SpinnerFrames
+  $f = 0; $elapsed = 0
+  while ($Job.State -eq "Running" -and $elapsed -lt $TimeoutSec) {
+    Write-Host "`r  " -NoNewline
+    Write-Host $frames[$f] -ForegroundColor Cyan -NoNewline
+    Write-Host " $Message ... ${elapsed}s / ${TimeoutSec}s" -NoNewline
+    $f = ($f + 1) % $frames.Count
+    Start-Sleep -Seconds $PollSeconds
+    $elapsed += $PollSeconds
+  }
+  Write-Host "`r                                                                      `r" -NoNewline
+  if ($Job.State -eq "Running") {
+    Stop-Job $Job -ErrorAction SilentlyContinue
+    return $false
+  }
+  return $true
+}
+
+# Background jobs spawn their runspace in the user's HOME directory. On managed
+# machines (roaming profiles) HOME is often a UNC share (\\fileserver\home\user);
+# every cmd.exe a job starts there prints "CMD.EXE was started with the above
+# path as the current directory. UNC paths are not supported." and its stderr
+# surfaces as a red RemoteException error record — alarming noise on a healthy
+# install (#409). Every Start-Job below passes this as -InitializationScript to
+# pin the job to a local working directory before it runs anything. (SystemRoot
+# is always local; the guard makes it a no-op on non-Windows Pester runs.)
+$script:JobInit = {
+  if ($env:SystemRoot) { Set-Location $env:SystemRoot }
+  # Job runspaces don't inherit the parent's TLS floor (set once at script top).
+  # Windows PowerShell 5.1 still defaults to TLS 1.0/1.1, which many corporate
+  # proxies and CDNs reject — so in-job HTTPS downloads (kubectl/k3d/helm/winget/
+  # Docker Desktop via Invoke-WithHeartbeat) would fail SSL/TLS without this
+  # (#422 Bugbot). Re-apply TLS 1.2 (OR-in, don't clobber a higher floor).
+  try {
+    [Net.ServicePointManager]::SecurityProtocol =
+      [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
+  } catch {}
+}
+
+# One honest line per system tool once it's ready (#422): name, version, and
+# whatever of {size, elapsed} is known — so "Installing system tools" shows
+# concrete per-tool progress instead of a silent ~700 MB. Pure/formatting-only
+# so it is unit-testable. e.g. "kubectl v1.31.0 (~60 MB, 12s)".
+function Get-ToolSummaryLine {
+  param([string]$Name, [string]$Version = "", [string]$Size = "", [int]$ElapsedSec = -1)
+  $head = if ($Version) { "$Name $Version" } else { "$Name" }
+  $meta = @()
+  if ($Size)          { $meta += $Size }
+  if ($ElapsedSec -ge 0) { $meta += ("{0}s" -f $ElapsedSec) }
+  if ($meta.Count)    { return "$head (" + ($meta -join ", ") + ")" }
+  return $head
+}
+
+# Run a blocking operation with a live spinner heartbeat so Steps 1-2 never sit
+# console-silent for more than a couple of seconds (#422): downloads (progress
+# overlay is off for speed, #471), winget installs, and the Docker Desktop
+# installer are otherwise dead air. The scriptblock runs in a background job
+# (jobs don't inherit functions/vars — pass inputs via -ArgumentList) driven by
+# Wait-JobWithProgress. Returns the job's output; throws on timeout or job
+# failure so callers keep their existing Invoke-WithRetry / try-catch flow.
+function Invoke-WithHeartbeat {
+  param(
+    [Parameter(Mandatory)][scriptblock]$Script,
+    [object[]]$ArgumentList = @(),
+    [string]$Message = "Working",
+    [int]$TimeoutSec = 1800,
+    [int]$PollSeconds = 2
+  )
+  $job = Start-Job -ScriptBlock $Script -ArgumentList $ArgumentList -InitializationScript $script:JobInit
+  $finished = Wait-JobWithProgress -Job $job -TimeoutSec $TimeoutSec -Message $Message -PollSeconds $PollSeconds
+  # Capture BOTH output and error records (2>&1) so a failure's real detail
+  # (e.g. the k3d/installer error the scriptblock threw) can be surfaced, not
+  # swallowed (#422 Bugbot). The job's terminating exception is the most reliable
+  # source of the reason.
+  $out    = @(Receive-Job $job -ErrorAction SilentlyContinue 2>&1)
+  $state  = $job.State
+  $reason = $null
+  try { $reason = $job.ChildJobs[0].JobStateInfo.Reason.Message } catch {}
+  Remove-Job $job -Force -ErrorAction SilentlyContinue
+  if (-not $finished) { throw "Timed out after ${TimeoutSec}s while: ${Message}" }
+  if ($state -eq 'Failed') {
+    $detail = if ($reason) { "$reason" } else { ("$($out -join "`n")").Trim() }
+    throw ("Failed while: ${Message}" + $(if ($detail) { " -- $detail" } else { "" }))
+  }
+  return $out
 }
 
 function Get-WindowsArch {
@@ -93,6 +259,12 @@ function Invoke-WithRetry {
     [int]$DelaySeconds = 5,
     [string]$Label = "Operation"
   )
+  # PS 5.1's progress overlay throttles Invoke-WebRequest massively (its render
+  # loop dominates the transfer) and its "Writing request stream" banner reads
+  # like a hang (#468; same fix as the bootstrap's fetch helpers). Function-local
+  # assignment -- PowerShell's dynamic scoping makes every fetch $ScriptBlock
+  # invoked below see it, and the preference reverts when this function returns.
+  $ProgressPreference = 'SilentlyContinue'
   for ($i = 1; $i -le $MaxAttempts; $i++) {
     try {
       $result = & $ScriptBlock
@@ -104,6 +276,41 @@ function Invoke-WithRetry {
       Start-Sleep -Seconds $DelaySeconds
     }
   }
+}
+
+# Execute-gate a freshly-installed tool (#411). The old post-install "check" was a
+# Log interpolation whose failure is non-terminating, so a corrupt or wrong-arch
+# binary (winget shims / partial installs skip the direct path's checksum verify)
+# still reached "System tools" and only died at cluster-create. Actually RUN the
+# tool's self-check; on failure Err with an arch-aware remedy so Step 1 fails
+# loudly. NOTE: kubectl uses `version --client` (NOT --short — removed in 1.28+);
+# helm uses bare `version` (--short may go the same way).
+#
+# -BinPath is our own install location. On failure we remove it ONLY when the
+# binary that actually ran resolves to it — so a broken copy WE placed (fresh or
+# left by a prior run) self-heals on re-run, while a winget/choco/pre-existing copy
+# elsewhere on PATH is never deleted (reviewer + Bugbot). Callers may pass -BinPath
+# on every path; the resolved-source guard sorts out ownership.
+function Assert-ToolRuns {
+  param(
+    [Parameter(Mandatory)][string]$Name,
+    [Parameter(Mandatory)][string[]]$VersionArgs,
+    [string]$BinPath
+  )
+  $ok = $false; $out = $null
+  try {
+    $out = (& $Name @VersionArgs 2>&1)
+    $ok  = ($LASTEXITCODE -eq 0)
+  } catch { $ok = $false }
+  if (-not $ok) {
+    if ($BinPath -and (Test-Path $BinPath)) {
+      $resolved = (Get-Command $Name -ErrorAction SilentlyContinue).Source
+      if ($resolved -and ($resolved -eq $BinPath)) { Remove-Item $BinPath -Force -ErrorAction SilentlyContinue }
+    }
+    $arch = Get-WindowsArch
+    Err "$Name was installed but won't run -- a corrupt or wrong-architecture binary (this machine is $arch). Re-run this script to re-download it; if it recurs, remove any $Name installed via a package manager (winget/choco) first, then re-run."
+  }
+  Log "$Name OK: $(($out | Select-Object -First 1))"
 }
 
 # Sanitize workspace name to comply with DNS-1123
@@ -175,10 +382,13 @@ Advanced configuration (environment variables):
   K8S_VERSION    k3s image tag                   (default: v1.29.4-k3s1)
   -NoReboot      Skip reboot prompt after enabling Windows features
   HOST_DATA_DIR  Persistent data directory       (default: ~\.tracebloc)
+  TRACEBLOC_CA_BUNDLE  Corporate CA bundle (PEM) to trust on a TLS-inspecting
+                 network, so in-cluster image pulls don't fail x509 (#424).
+                 CURL_CA_BUNDLE is also honored.
 
 Reinstalling on a machine that still holds data:
   A new install won't silently adopt data left under HOST_DATA_DIR (both the
-  flat and per-release layouts) — it stops and asks reuse / wipe / different dir.
+  flat and per-release layouts) -- it stops and asks reuse / wipe / different dir.
   Non-interactive: TB_LEFTOVER_ACTION=reuse|wipe, or HOST_DATA_DIR=<new-path>
   (with no choice and no terminal the install aborts). Bypass entirely with
   TRACEBLOC_SKIP_LEFTOVER_GUARD=1.
@@ -280,6 +490,11 @@ function Print-Banner {
   Hint "  ~\.tracebloc\    (data and config)"
   Hint "  Docker           (container runtime)"
   Write-Host ""
+  # Announce the log path up front (#423) — if anything fails, the user already
+  # knows where the full transcript is instead of hunting for a file support can't
+  # name. Was previously written only inside the log itself.
+  if ($script:LOG_FILE) { Hint "Install log: $script:LOG_FILE" }
+  Write-Host ""
   Log "Cluster='$CLUSTER_NAME'  Servers=$SERVERS  Agents=$AGENTS"
   Log "Host data dir: $HOST_DATA_DIR"
 }
@@ -373,6 +588,40 @@ function Find-Gpu {
 #  WINDOWS VIRTUALISATION FEATURES
 # =============================================================================
 
+# Enable ONE Windows optional feature; returns $true only when the feature was
+# newly enabled (i.e. a reboot is now pending for it). DISM splashes a raw
+# COMException when a feature package simply doesn't exist on the running
+# edition (Server SKUs have no Microsoft-Hyper-V-All package) -- alarming red
+# noise on an otherwise honest flow, and the old code ALSO demanded a reboot
+# for a feature that never got enabled, sending those users into a reboot ->
+# re-run -> same-error loop (#468). Translate instead: name the real situation,
+# and only report reboot-pending on an actual state change.
+function Enable-OneVirtFeature {
+  param(
+    [string]$Key,           # DISM feature name, e.g. Microsoft-Hyper-V-All
+    [string]$Label,          # human name for messages, e.g. Hyper-V
+    $CurrentState,           # .State from Get-WindowsOptionalFeature ($null = package absent)
+    [string]$Edition         # OS caption, for the not-available message
+  )
+  if ($CurrentState -eq "Enabled") {
+    Log "$Label already enabled."
+    return $false
+  }
+  Log "Enabling $Label..."
+  try {
+    Enable-WindowsOptionalFeature -Online -FeatureName $Key -NoRestart -ErrorAction Stop | Out-Null
+    return $true
+  } catch {
+    if ($null -eq $CurrentState) {
+      Warn "$Label is not available on this Windows edition ($Edition) -- skipping."
+    } else {
+      Warn "Could not enable ${Label}: $($_.Exception.Message)"
+      Hint "Enable '$Key' manually (Windows Features / optionalfeatures.exe), then re-run this script."
+    }
+    return $false
+  }
+}
+
 function Enable-VirtualisationFeatures {
   $rebootNeeded = $false
   $features = @{
@@ -388,12 +637,8 @@ function Enable-VirtualisationFeatures {
 
   $features.GetEnumerator() | ForEach-Object {
     $state = (Get-WindowsOptionalFeature -Online -FeatureName $_.Key -ErrorAction SilentlyContinue).State
-    if ($state -ne "Enabled") {
-      Log "Enabling $($_.Value)..."
-      Enable-WindowsOptionalFeature -Online -FeatureName $_.Key -NoRestart | Out-Null
+    if (Enable-OneVirtFeature -Key $_.Key -Label $_.Value -CurrentState $state -Edition $edition) {
       $rebootNeeded = $true
-    } else {
-      Log "$($_.Value) already enabled."
     }
   }
 
@@ -411,7 +656,7 @@ function Enable-VirtualisationFeatures {
   Ok "System features"
 
   Log "Updating WSL..."
-  $wslJob = Start-Job -ScriptBlock { cmd /c "wsl --update 2>&1" }
+  $wslJob = Start-Job -InitializationScript $JobInit -ScriptBlock { cmd /c "wsl --update 2>&1" }
   Write-Host -NoNewline "  "
   $wslTimeoutSec = 90
   $wslElapsed = 0
@@ -433,7 +678,7 @@ function Enable-VirtualisationFeatures {
   }
   Remove-Job -Job $wslJob -Force
 
-  $wslSetJob = Start-Job -ScriptBlock { cmd /c "wsl --set-default-version 2 2>&1" }
+  $wslSetJob = Start-Job -InitializationScript $JobInit -ScriptBlock { cmd /c "wsl --set-default-version 2 2>&1" }
   $wslSetDone = $wslSetJob | Wait-Job -Timeout 20
   if ($wslSetDone) {
     Receive-Job $wslSetJob | Out-Null
@@ -454,12 +699,22 @@ function Install-Winget {
   if (Has "winget") { Log "winget: $(winget --version)"; return }
 
   Log "Installing winget..."
+  # Honest progress (#468): with the overlay silenced this fetch is quiet, so
+  # name the wait before it starts. Size measured 2026-07-29 (207 MB).
+  Info "Downloading winget (~200 MB) -- one-time; a few minutes on a slow network is normal."
   $url  = "https://github.com/microsoft/winget-cli/releases/latest/download/Microsoft.DesktopAppInstaller_8wekyb3d8bbwe.msixbundle"
   $dest = "$env:TEMP\winget-installer.msixbundle"
   Invoke-WithRetry -Label "winget download" -ScriptBlock {
-    Invoke-WebRequest -Uri $url -OutFile $dest -UseBasicParsing
+    Invoke-WithHeartbeat -Message "Downloading winget (~200 MB)" `
+      -ArgumentList @($url, $dest) -Script {
+        param($u, $d); $ProgressPreference = 'SilentlyContinue'
+        Invoke-WebRequest -Uri $u -OutFile $d -UseBasicParsing
+      }
   }
-  Add-AppxPackage -Path $dest
+  # Add-AppxPackage on a ~200 MB bundle is console-silent for a while (#422).
+  Invoke-WithHeartbeat -Message "Installing winget" -ArgumentList @($dest) -Script {
+    param($d); Add-AppxPackage -Path $d
+  } | Out-Null
   Remove-Item $dest -Force -ErrorAction SilentlyContinue
   RefreshPath
   Log "winget installed."
@@ -473,20 +728,71 @@ function Install-DockerDesktop {
   $dockerExe = "$env:ProgramFiles\Docker\Docker\Docker Desktop.exe"
 
   if (-not (Test-Path $dockerExe)) {
+    # Try winget first (if present), then fall back to the direct download when
+    # winget is absent OR its install didn't land the exe — parity with k3d/helm,
+    # so a swallowed winget failure doesn't leave Step 2 to die in the long
+    # Docker-wait later (#422 Bugbot).
     if (Has "winget") {
-      winget install -e --id Docker.DockerDesktop `
-        --accept-package-agreements --accept-source-agreements --silent
-    } else {
-      $ddArch = Get-WindowsArch
-      $installer = "$env:TEMP\DockerDesktopInstaller.exe"
-      Invoke-WithRetry -Label "Docker download" -ScriptBlock {
-        Invoke-WebRequest -Uri "https://desktop.docker.com/win/main/$ddArch/Docker%20Desktop%20Installer.exe" `
-          -OutFile $installer -UseBasicParsing
-      }
-      Start-Process -FilePath $installer -ArgumentList "install --quiet --accept-license" -Wait
-      Remove-Item $installer -Force -ErrorAction SilentlyContinue
+      # winget install is console-silent for minutes on a 600 MB package (#422).
+      # Run it as a tracked PROCESS (not a background job): Wait-ProcessWithDeadline
+      # shows a spinner AND kills the process on timeout, so a stuck install can't
+      # orphan past the step and fall through to a second concurrent install —
+      # Stop-Job would leave the job's child process running (#422 Bugbot).
+      Info "Installing Docker Desktop (~600 MB via winget) -- several minutes is normal."
+      try {
+        $wp = Start-Process -FilePath "winget" -PassThru -ErrorAction Stop -ArgumentList @(
+          "install","-e","--id","Docker.DockerDesktop",
+          "--accept-package-agreements","--accept-source-agreements","--silent")
+        if (-not (Wait-ProcessWithDeadline -Process $wp -Deadline (Get-Date).AddMinutes(40) -Message "Installing Docker Desktop (winget)")) {
+          throw "winget Docker install timed out (process killed)"
+        }
+        if ($wp.ExitCode -ne 0) { throw "winget exited $($wp.ExitCode)" }
+      } catch { Log "Docker Desktop winget install failed (will try direct download): $_" }
+      RefreshPath
     }
-    RefreshPath
+
+    if (-not (Test-Path $dockerExe)) {
+      $ddArch = Get-WindowsArch
+      # Honest progress (#468): the single biggest download of the install.
+      # Size measured 2026-07-29 (613 MB).
+      Info "Downloading Docker Desktop (~600 MB) -- the biggest download of this install; several minutes is normal."
+      $installer = "$env:TEMP\DockerDesktopInstaller.exe"
+      $ddUrl = "https://desktop.docker.com/win/main/$ddArch/Docker%20Desktop%20Installer.exe"
+      Invoke-WithRetry -Label "Docker download" -ScriptBlock {
+        Invoke-WithHeartbeat -Message "Downloading Docker Desktop (~600 MB)" -TimeoutSec 2400 `
+          -ArgumentList @($ddUrl, $installer) -Script {
+            param($u, $d); $ProgressPreference = 'SilentlyContinue'
+            Invoke-WebRequest -Uri $u -OutFile $d -UseBasicParsing
+          }
+      }
+      # Run the installer as a tracked PROCESS with a deadline that KILLS it on
+      # timeout (a background job would orphan the installer, #422 Bugbot).
+      # -ErrorAction Stop catches a spawn failure; the exit code catches a failed
+      # install — either way fail loudly, never continue as if Docker installed.
+      try {
+        $ip = Start-Process -FilePath $installer -ArgumentList "install --quiet --accept-license" `
+          -PassThru -ErrorAction Stop
+      } catch {
+        Remove-Item $installer -Force -ErrorAction SilentlyContinue
+        Err "Docker Desktop installer wouldn't start. Install it manually from https://www.docker.com/products/docker-desktop/ and re-run." "$_"
+      }
+      if (-not (Wait-ProcessWithDeadline -Process $ip -Deadline (Get-Date).AddMinutes(40) -Message "Installing Docker Desktop")) {
+        Remove-Item $installer -Force -ErrorAction SilentlyContinue
+        Err "Docker Desktop installation timed out (installer stopped). Install it manually from https://www.docker.com/products/docker-desktop/ and re-run."
+      }
+      if ($ip.ExitCode -ne 0) {
+        Remove-Item $installer -Force -ErrorAction SilentlyContinue
+        Err "Docker Desktop installation failed (installer exited $($ip.ExitCode)). Install it manually from https://www.docker.com/products/docker-desktop/ and re-run."
+      }
+      Remove-Item $installer -Force -ErrorAction SilentlyContinue
+      RefreshPath
+    }
+
+    # Neither winget nor the direct installer produced the exe — fail loudly now
+    # rather than in the 10-minute Docker-wait below (#422 Bugbot).
+    if (-not (Test-Path $dockerExe)) {
+      Err "Docker Desktop installation didn't complete. Install it manually from https://www.docker.com/products/docker-desktop/ and re-run."
+    }
   }
 
   $dockerRunning = $false
@@ -498,7 +804,13 @@ function Install-DockerDesktop {
   if (-not $dockerRunning) {
     Start-Process $dockerExe -ErrorAction SilentlyContinue
 
-    $maxWait = 60
+    # A first-ever Docker Desktop start on AV-heavy corporate machines
+    # routinely needs 5-10 minutes (WSL bootstrap, image unpack). The old
+    # 3-minute cap turned a normal cold start into a failed install plus a
+    # manual re-run (#413). Default 10 minutes; TB_DOCKER_WAIT_MIN overrides.
+    $waitMin = 10
+    if ("$env:TB_DOCKER_WAIT_MIN" -match '^\d+$') { $waitMin = [int]$env:TB_DOCKER_WAIT_MIN }
+    $maxWait = $waitMin * 20                     # 3s per iteration
     Write-Host -NoNewline "  "
     $frames = @([char]0x2807, [char]0x2819, [char]0x2839, [char]0x2838, [char]0x283C, [char]0x2834, [char]0x2826, [char]0x2827, [char]0x2847, [char]0x280F)
     $f = 0
@@ -508,26 +820,41 @@ function Install-DockerDesktop {
         $dkOut = (docker info --format '{{.ID}}' 2>$null) | Out-String
         if (-not [string]::IsNullOrWhiteSpace($dkOut)) { $dockerRunning = $true; break }
       } catch {}
+      # Honest elapsed status after the first minute — silent dead air on a
+      # slow first start reads as a hang.
+      $label = " Waiting for Docker..."
+      if ($i -ge 20) { $label = " Waiting for Docker... ($([math]::Floor($i / 20)) min elapsed; a first start can take up to $waitMin)" }
       Write-Host "`r  " -NoNewline
       Write-Host $frames[$f] -ForegroundColor Cyan -NoNewline
-      Write-Host " Waiting for Docker..." -NoNewline
+      Write-Host $label -NoNewline
       $f = ($f + 1) % $frames.Count
     }
-    Write-Host "`r                                    `r" -NoNewline
+    Write-Host ("`r" + (" " * 78) + "`r") -NoNewline
 
     if (-not $dockerRunning) {
       Write-Host ""
-      Warn "Docker is not responding yet."
-      Hint "This usually means it's still starting up."
-      Write-Host ""
-      Hint "1. Look for the Docker whale icon in your system tray"
-      Hint "2. If Docker is open, wait until it says 'Docker Desktop is running'"
-      Hint "3. If Docker shows an error window instead (e.g. 'Virtualization support not detected' or a WSL update prompt), fix that first - it may need a reboot"
-      Hint "4. Re-run this script once it's ready"
-      Write-Host ""
-      Hint "Nothing is broken -- Docker just needs a moment."
-      Write-Host ""
-      Err "Docker did not start in time. Re-run this script once Docker is ready."
+      # Name the observed state instead of a generic retry request (#413).
+      $ddProc = Get-Process "Docker Desktop" -ErrorAction SilentlyContinue
+      if (-not $ddProc) {
+        # Exited = crashed/blocked, not slow — the slow-start reassurance and
+        # the wait-override hint would point operators at the wrong fix
+        # (Bugbot #440): raising the wait can't help a dead process.
+        Warn "Docker Desktop is not running (its process exited)."
+        Hint "Start Docker Desktop from the Start menu. If it shows an error window"
+        Hint "(virtualization support, a WSL update prompt), fix that first - it may need a reboot."
+        Write-Host ""
+        Err "Docker Desktop exited before its engine came up. Start it, fix anything it reports, then re-run this script."
+      } else {
+        Warn "Docker Desktop is running, but its engine didn't come up within $waitMin minutes."
+        Hint "1. Look for the Docker whale icon in your system tray"
+        Hint "2. If Docker is open, wait until it says 'Docker Desktop is running'"
+        Hint "3. If Docker shows an error window instead (e.g. 'Virtualization support not detected' or a WSL update prompt), fix that first - it may need a reboot"
+        Write-Host ""
+        Hint "Nothing is broken -- a first start can be slow. Re-run this script once Docker is ready."
+        Hint "(TB_DOCKER_WAIT_MIN overrides the wait, e.g. `$env:TB_DOCKER_WAIT_MIN = '20'.)"
+        Write-Host ""
+        Err "Docker did not start within $waitMin minutes. Re-run this script once Docker is ready."
+      }
     }
   }
 
@@ -538,23 +865,45 @@ function Install-DockerDesktop {
 #  NVIDIA CONTAINER TOOLKIT (inside WSL2)
 # =============================================================================
 
+# Copy-pastable manual remedy printed whenever GPU setup can't finish on its own
+# (#415). Mirrors the steps in the $nctScript heredoc below so a user can run them
+# by hand inside WSL; ends with the `tracebloc doctor` follow-up so "later" is an
+# actual next action rather than a vague pointer.
+function Show-GpuManualRemedy {
+  param([string]$Distro = "Ubuntu")
+  Warn "GPU acceleration isn't set up -- your environment will run in CPU mode."
+  Hint "To enable it later, open '$Distro' from the Start Menu and run:"
+  Hint "    curl -fsSL --tlsv1.2 --connect-timeout 30 --max-time 30 https://nvidia.github.io/libnvidia-container/gpgkey | sudo gpg --dearmor -o /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg"
+  Hint "    curl -fsSL --tlsv1.2 --connect-timeout 30 --max-time 30 https://nvidia.github.io/libnvidia-container/stable/deb/nvidia-container-toolkit.list | sed 's#deb https://#deb [signed-by=/usr/share/keyrings/nvidia-container-toolkit-keyring.gpg] https://#g' | sudo tee /etc/apt/sources.list.d/nvidia-container-toolkit.list"
+  Hint "    sudo apt-get update && sudo apt-get install -y nvidia-container-toolkit"
+  Hint "    sudo nvidia-ctk runtime configure --runtime=docker --set-as-default"
+  Hint "Then check status and re-run tracebloc:  tracebloc doctor"
+}
+
+# GPU setup is best-effort and never fatal: on any failure it prints a runnable
+# manual remedy (#415) and returns, leaving K3D_GPU_FLAG empty so the cluster is
+# created in CPU mode. It runs in Step 1 (before New-K3dCluster) because the
+# --gpus flag is decided here; moving it to a post-install step would mean
+# recreating the cluster to add the flag -- the exact churn #431 warns against --
+# so instead every long sub-step below shows a heartbeat and CPU mode always wins.
 function Install-NvidiaContainerToolkit {
   if ($GPU_VENDOR -ne "nvidia" -or -not $NVIDIA_DRIVER_OK) { return }
 
+  Info "Setting up GPU acceleration (NVIDIA container toolkit) in WSL2 -- optional; CPU mode works either way."
   Log "Setting up NVIDIA container toolkit in WSL2"
 
-  $wslListJob = Start-Job -ScriptBlock {
+  $wslListJob = Start-Job -InitializationScript $JobInit -ScriptBlock {
     $prevEncoding = [Console]::OutputEncoding
     [Console]::OutputEncoding = [System.Text.Encoding]::Unicode
     $raw = wsl --list --quiet 2>$null
     [Console]::OutputEncoding = $prevEncoding
     return $raw
   }
-  $wslListDone = $wslListJob | Wait-Job -Timeout 30
-  if (-not $wslListDone) {
-    Stop-Job $wslListJob; Remove-Job $wslListJob -Force
+  if (-not (Wait-JobWithProgress -Job $wslListJob -TimeoutSec 30 -Message "Checking for a WSL2 distro")) {
+    Remove-Job $wslListJob -Force
     Warn "WSL did not respond in time. Skipping GPU container toolkit."
     Hint "Run 'wsl --update' manually, then re-run this script for GPU support."
+    Show-GpuManualRemedy
     return
   }
   $distroRaw = Receive-Job $wslListJob
@@ -565,15 +914,29 @@ function Install-NvidiaContainerToolkit {
   if (-not $wslDistro -and $distros.Count -gt 0) { $wslDistro = $distros[0] }
 
   if (-not $wslDistro) {
+    Info "No WSL2 distro found -- installing Ubuntu (a few hundred MB; this can take several minutes)..."
     Log "No WSL2 distro found -- installing Ubuntu..."
-    cmd /c "wsl --install -d Ubuntu --no-launch 2>&1" | Out-Null
-    cmd /c "wsl --setdefault Ubuntu 2>&1" | Out-Null
+    $ubuntuJob = Start-Job -InitializationScript $JobInit -ScriptBlock {
+      cmd /c "wsl --install -d Ubuntu --no-launch 2>&1"
+      cmd /c "wsl --setdefault Ubuntu 2>&1"
+    }
+    if (-not (Wait-JobWithProgress -Job $ubuntuJob -TimeoutSec 600 -Message "Downloading and installing Ubuntu")) {
+      Remove-Job $ubuntuJob -Force
+      Warn "Ubuntu WSL2 install timed out."
+      Hint "Install it manually, then re-run this script for GPU support:"
+      Hint "    wsl --install -d Ubuntu"
+      Hint "Then check status and re-run tracebloc:  tracebloc doctor"
+      return
+    }
+    Receive-Job $ubuntuJob | Out-Null
+    Remove-Job $ubuntuJob -Force
     Warn "Ubuntu WSL2 installed but needs first-run setup."
     Hint "Open Ubuntu from the Start Menu and set a username/password."
     Hint "Then re-run this script for GPU support."
     return
   }
 
+  Info "Using WSL2 distro: $wslDistro"
   Log "Using WSL2 distro: $wslDistro"
 
   $nctScript = @'
@@ -612,41 +975,42 @@ echo "NCT installed successfully."
     $wslPath = "/mnt/" + $fwd
   }
 
-  $nctInstallJob = Start-Job -ScriptBlock {
+  $nctInstallJob = Start-Job -InitializationScript $JobInit -ScriptBlock {
     param($d, $p)
     cmd /c "wsl -d $d -- /bin/bash `"$p`" 2>&1"
   } -ArgumentList $wslDistro, $wslPath
 
-  $nctDone = $nctInstallJob | Wait-Job -Timeout 180
-  if (-not $nctDone) {
-    Stop-Job $nctInstallJob; Remove-Job $nctInstallJob -Force
+  if (-not (Wait-JobWithProgress -Job $nctInstallJob -TimeoutSec 180 -Message "Installing NVIDIA container toolkit in $wslDistro")) {
+    Remove-Job $nctInstallJob -Force
     Remove-Item $scriptPath -Force -ErrorAction SilentlyContinue
     Warn "GPU container toolkit installation timed out."
-    Hint "You can set it up manually inside WSL later."
+    Show-GpuManualRemedy -Distro $wslDistro
     return
   }
   Receive-Job $nctInstallJob | Out-Null
   Remove-Job $nctInstallJob -Force
   Remove-Item $scriptPath -Force -ErrorAction SilentlyContinue
 
-  $verJob = Start-Job -ScriptBlock {
+  $verJob = Start-Job -InitializationScript $JobInit -ScriptBlock {
     param($d)
     cmd /c "wsl -d $d -- nvidia-ctk --version 2>&1"
   } -ArgumentList $wslDistro
 
-  $verDone = $verJob | Wait-Job -Timeout 15
-  if ($verDone) {
+  if (Wait-JobWithProgress -Job $verJob -TimeoutSec 15 -Message "Verifying GPU toolkit") {
     $nctVer = (Receive-Job $verJob | Out-String).Trim()
     Remove-Job $verJob -Force
     if ($nctVer -and $nctVer -notmatch 'error|not found') {
+      Ok "GPU acceleration ready -- NVIDIA Container Toolkit in ${wslDistro}: $nctVer"
       Log "NVIDIA Container Toolkit in WSL2: $nctVer"
       $script:K3D_GPU_FLAG = "--gpus=all"
     } else {
-      Warn "GPU setup may need manual attention."
+      Warn "GPU toolkit installed but could not be verified."
+      Show-GpuManualRemedy -Distro $wslDistro
     }
   } else {
-    Stop-Job $verJob; Remove-Job $verJob -Force
-    Warn "GPU setup may need manual attention."
+    Remove-Job $verJob -Force
+    Warn "GPU toolkit verification timed out."
+    Show-GpuManualRemedy -Distro $wslDistro
   }
 }
 
@@ -655,7 +1019,9 @@ echo "NCT installed successfully."
 # =============================================================================
 
 function Install-Kubectl {
-  if (Has "kubectl") { Log "kubectl: $(cmd /c 'kubectl version --client 2>&1' | Select-Object -First 1)"; return }
+  # Execute-gate on both paths (#411): a present-but-broken kubectl is as fatal as
+  # a bad fresh install, and this runs in Step 1, before the cluster step.
+  if (Has "kubectl") { Assert-ToolRuns -Name "kubectl" -VersionArgs @("version","--client") -BinPath "$TOOL_DIR\kubectl.exe"; return }
 
   $arch = Get-WindowsArch
   $kVer = Invoke-WithRetry -Label "version check" -ScriptBlock {
@@ -663,9 +1029,15 @@ function Install-Kubectl {
   }
   Log "Downloading kubectl $kVer ($arch)..."
   $kubectlDest = "$TOOL_DIR\kubectl.exe"
+  $kUrl = "https://dl.k8s.io/release/$kVer/bin/windows/$arch/kubectl.exe"
+  $t0 = Get-Date
+  # Heartbeat during the otherwise-silent transfer (#422); retry wraps it.
   Invoke-WithRetry -Label "download" -ScriptBlock {
-    Invoke-WebRequest "https://dl.k8s.io/release/$kVer/bin/windows/$arch/kubectl.exe" `
-      -OutFile $kubectlDest -UseBasicParsing
+    Invoke-WithHeartbeat -Message "Downloading kubectl $kVer (~60 MB)" `
+      -ArgumentList @($kUrl, $kubectlDest) -Script {
+        param($u, $d); $ProgressPreference = 'SilentlyContinue'
+        Invoke-WebRequest $u -OutFile $d -UseBasicParsing
+      }
   }
   $expectedHash = Invoke-WithRetry -Label "checksum" -ScriptBlock {
     (Invoke-WebRequest "https://dl.k8s.io/release/$kVer/bin/windows/$arch/kubectl.exe.sha256" `
@@ -678,6 +1050,75 @@ function Install-Kubectl {
   }
   RefreshPath
   Log "kubectl $kVer installed."
+  Assert-ToolRuns -Name "kubectl" -VersionArgs @("version","--client") -BinPath $kubectlDest
+  Ok (Get-ToolSummaryLine -Name "kubectl" -Version $kVer -Size "~60 MB" -ElapsedSec ([int]((Get-Date) - $t0).TotalSeconds))
+}
+
+# ── Pinned tool versions (#382 / #410) ──────────────────────────────────────
+# Defaults MUST stay in lockstep with scripts/lib/common.sh (K3D_VERSION /
+# HELM_VERSION) until the shared facts spec (#435) single-sources them. Pinned
+# defaults keep installs deterministic and immune to GitHub's unauthenticated
+# releases/latest API, whose 60 req/hour/IP limit a single shared corporate NAT
+# exhausts. Only the literal value "latest" resolves at install time — via the
+# plain /releases/latest redirect or get.helm.sh, never api.github.com.
+$script:K3dVersion  = if ($env:K3D_VERSION)  { $env:K3D_VERSION }  else { "v5.9.0" }
+$script:HelmVersion = if ($env:HELM_VERSION) { $env:HELM_VERSION } else { "v4.2.3" }
+
+# A tag is interpolated into a download URL — refuse separators and parent-dir
+# tokens (path-traversal lever) and require a release shape. Mirrors the
+# bootstrap's ref gate and cli install.sh's validate_version_tag.
+function Test-ReleaseTagShape {
+  param([string]$Tag)
+  if (-not $Tag -or $Tag -match '/' -or $Tag -match '\.\.') { return $false }
+  return [bool]($Tag -match '^v[0-9]+\.[0-9]+\.[0-9]+([.-][A-Za-z0-9.]+)?$')
+}
+
+# Resolve "latest" for a GitHub project WITHOUT the rate-limited API: read the
+# tag from the /releases/latest redirect's Location header (same trick as
+# cli/scripts/install.ps1 and lib/setup-linux.sh).
+function Get-LatestGitHubTag {
+  param([string]$Repo)
+  $loc = $null
+  try {
+    # -TimeoutSec: a host that accepts the connect but never answers must not
+    # hang the install (parity with the bash lookups' --max-time 30).
+    $resp = Invoke-WebRequest -Uri "https://github.com/$Repo/releases/latest" `
+      -Method Head -MaximumRedirection 0 -UseBasicParsing -TimeoutSec 30 -ErrorAction Stop
+    $loc = $resp.Headers['Location']
+  } catch {
+    # Windows PowerShell 5.1 throws on a 3xx when redirects are disabled; the
+    # response object still carries the Location header we want.
+    $resp = $_.Exception.Response
+    if ($resp) {
+      try { $loc = $resp.Headers['Location'] } catch {}
+      if (-not $loc) { try { $loc = $resp.Headers.Location } catch {} }
+    }
+  }
+  if (-not $loc) { return $null }
+  return ("$loc" -split '/')[-1]
+}
+
+# The version a tool install uses: the pinned default (or the operator's env
+# override) validated for release shape; the literal "latest" resolves via the
+# API-free path above. Aborts rather than building a URL from a bad value.
+function Resolve-ToolVersion {
+  param([string]$Name, [string]$Value, [scriptblock]$LatestResolver)
+  $v = $Value
+  if ($v -eq "latest") {
+    # Retry parity with the old lookups and lib/setup-linux.sh (`retry 3 5`):
+    # a single network blip must not abort the install (Bugbot #438). The
+    # resolver THROWS on failure so Invoke-WithRetry can drive the attempts.
+    try {
+      $v = Invoke-WithRetry -Label "$Name version lookup" -ScriptBlock $LatestResolver
+    } catch {
+      $v = $null
+    }
+    if (-not $v) { Err "Couldn't resolve the latest $Name release. Set $($Name.ToUpper())_VERSION to a release tag and re-run." }
+  }
+  if (-not (Test-ReleaseTagShape $v)) {
+    Err "$($Name.ToUpper())_VERSION '$v' is not a release tag (expected vX.Y.Z) - refusing to build a download URL from it."
+  }
+  return $v
 }
 
 function Install-K3dAndHelm {
@@ -685,22 +1126,38 @@ function Install-K3dAndHelm {
   if (-not (Has "k3d")) {
     if (Has "winget") {
       Log "Installing k3d via winget..."
-      $null = (winget install -e --id Rancher.k3d `
-        --accept-package-agreements --accept-source-agreements --silent 2>&1)
+      # winget install is console-silent; run it as a killable tracked process
+      # (not a job — Stop-Job would orphan the child on timeout) with a spinner +
+      # deadline. Best-effort: on failure the direct download below takes over (#422).
+      try {
+        $kp = Start-Process -FilePath "winget" -PassThru -ErrorAction Stop -ArgumentList @(
+          "install","-e","--id","Rancher.k3d","--accept-package-agreements","--accept-source-agreements","--silent")
+        if (-not (Wait-ProcessWithDeadline -Process $kp -Deadline (Get-Date).AddMinutes(10) -Message "Installing k3d (winget)")) {
+          throw "k3d winget install timed out (process killed)"
+        }
+      } catch { Log "k3d winget install: $_" }
     }
     RefreshPath
 
     if (-not (Has "k3d")) {
       $arch = Get-WindowsArch
+      $t0k3d = Get-Date
       Log "Downloading k3d binary directly ($arch)..."
-      $k3dVer = Invoke-WithRetry -Label "k3d version lookup" -ScriptBlock {
-        (Invoke-WebRequest "https://api.github.com/repos/k3d-io/k3d/releases/latest" `
-          -UseBasicParsing | ConvertFrom-Json).tag_name
-      }
+      # Pinned by default (#382 / #410) — no api.github.com on the default path.
+      $k3dVer = Resolve-ToolVersion -Name "k3d" -Value $K3dVersion `
+        -LatestResolver {
+          $tag = Get-LatestGitHubTag -Repo "k3d-io/k3d"
+          if (-not $tag) { throw "no Location header on the /releases/latest redirect" }
+          $tag
+        }
       $k3dDest = "$TOOL_DIR\k3d.exe"
+      $k3dUrl = "https://github.com/k3d-io/k3d/releases/download/$k3dVer/k3d-windows-$arch.exe"
       Invoke-WithRetry -Label "k3d download" -ScriptBlock {
-        Invoke-WebRequest "https://github.com/k3d-io/k3d/releases/download/$k3dVer/k3d-windows-$arch.exe" `
-          -OutFile $k3dDest -UseBasicParsing
+        Invoke-WithHeartbeat -Message "Downloading k3d $k3dVer (~25 MB)" `
+          -ArgumentList @($k3dUrl, $k3dDest) -Script {
+            param($u, $d); $ProgressPreference = 'SilentlyContinue'
+            Invoke-WebRequest $u -OutFile $d -UseBasicParsing
+          }
       }
       # Fail-closed verification, matching the Linux path and the kubectl
       # precedent: an unfetchable checksums.txt, a missing asset line, or a
@@ -732,30 +1189,51 @@ function Install-K3dAndHelm {
       }
       Log "k3d checksum verified."
       RefreshPath
+      # Compute the summary now (correct elapsed) but print it only AFTER the
+      # execute-gate passes — a corrupt/wrong-arch binary must not show a green
+      # "ready" line before Assert-ToolRuns (#422 Bugbot; kubectl gates first too).
+      $k3dSummary = Get-ToolSummaryLine -Name "k3d" -Version $k3dVer -Size "~25 MB" -ElapsedSec ([int]((Get-Date) - $t0k3d).TotalSeconds)
     }
   }
-  Log "k3d: $(k3d version | Select-Object -First 1)"
+  Assert-ToolRuns -Name "k3d" -VersionArgs @("version") -BinPath "$TOOL_DIR\k3d.exe"
+  if ($k3dSummary) { Ok $k3dSummary }
 
   # -- Helm --
   if (-not (Has "helm")) {
     if (Has "winget") {
       Log "Installing Helm via winget..."
-      $null = (winget install -e --id Helm.Helm `
-        --accept-package-agreements --accept-source-agreements --silent 2>&1)
+      # winget install is console-silent; killable tracked process + spinner/deadline
+      # (a job would orphan the child on timeout). Best-effort: the direct download
+      # below takes over on failure (#422).
+      try {
+        $hp = Start-Process -FilePath "winget" -PassThru -ErrorAction Stop -ArgumentList @(
+          "install","-e","--id","Helm.Helm","--accept-package-agreements","--accept-source-agreements","--silent")
+        if (-not (Wait-ProcessWithDeadline -Process $hp -Deadline (Get-Date).AddMinutes(10) -Message "Installing Helm (winget)")) {
+          throw "helm winget install timed out (process killed)"
+        }
+      } catch { Log "helm winget install: $_" }
       RefreshPath
     }
 
     if (-not (Has "helm")) {
       $arch = Get-WindowsArch
       Log "Downloading Helm binary directly ($arch)..."
-      $helmVer = Invoke-WithRetry -Label "helm version lookup" -ScriptBlock {
-        (Invoke-WebRequest "https://api.github.com/repos/helm/helm/releases/latest" `
-          -UseBasicParsing | ConvertFrom-Json).tag_name
+      # Pinned by default (#410); "latest" resolves via get.helm.sh (no API),
+      # mirroring lib/setup-linux.sh.
+      $helmVer = Resolve-ToolVersion -Name "helm" -Value $HelmVersion -LatestResolver {
+        $c = (Invoke-WebRequest "https://get.helm.sh/helm-latest-version" -UseBasicParsing -TimeoutSec 30).Content.Trim()
+        if (-not $c) { throw "empty helm-latest-version response" }
+        $c
       }
+      $t0helm = Get-Date
       $helmZip = "$env:TEMP\helm-$helmVer-windows-$arch.zip"
+      $helmUrl = "https://get.helm.sh/helm-$helmVer-windows-$arch.zip"
       Invoke-WithRetry -Label "helm download" -ScriptBlock {
-        Invoke-WebRequest "https://get.helm.sh/helm-$helmVer-windows-$arch.zip" `
-          -OutFile $helmZip -UseBasicParsing
+        Invoke-WithHeartbeat -Message "Downloading Helm $helmVer (~20 MB)" `
+          -ArgumentList @($helmUrl, $helmZip) -Script {
+            param($u, $d); $ProgressPreference = 'SilentlyContinue'
+            Invoke-WebRequest $u -OutFile $d -UseBasicParsing
+          }
       }
       $helmExtract = "$env:TEMP\helm-extract"
       if (Test-Path $helmExtract) { Remove-Item $helmExtract -Recurse -Force }
@@ -764,11 +1242,14 @@ function Install-K3dAndHelm {
       Remove-Item $helmZip -Force -ErrorAction SilentlyContinue
       Remove-Item $helmExtract -Recurse -Force -ErrorAction SilentlyContinue
       RefreshPath
+      # Summary printed only after the execute-gate below (#422 Bugbot).
+      $helmSummary = Get-ToolSummaryLine -Name "helm" -Version $helmVer -Size "~20 MB" -ElapsedSec ([int]((Get-Date) - $t0helm).TotalSeconds)
     }
 
     if (-not (Has "helm")) { Err "Helm could not be installed. Install manually from https://helm.sh/docs/intro/install/ and re-run." }
   }
-  Log "helm: $(cmd /c 'helm version --short 2>&1')"
+  Assert-ToolRuns -Name "helm" -VersionArgs @("version") -BinPath "$TOOL_DIR\helm.exe"
+  if ($helmSummary) { Ok $helmSummary }
 
   Ok "System tools"
 }
@@ -828,6 +1309,55 @@ function Write-K3dProxyConfig {
     $lines.Add('  - envVar: "' + $name + '=' + $noProxy + '"')
     $lines.Add('    nodeFilters:')
     $lines.Add('      - all')
+  }
+  $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+  [System.IO.File]::WriteAllLines($cfg, $lines, $utf8NoBom)
+  return $cfg
+}
+
+# --- Corporate MITM CA trust for in-node containerd pulls (#424) --------------
+# Proxy reachability reaches the nodes (above), but on a TLS-inspecting network
+# the nodes still don't TRUST the corporate CA, so in-node image pulls fail x509
+# and get masked into a generic "an image couldn't be pulled". When the operator
+# supplies the CA bundle we mount it into every node and point containerd at it
+# per-registry. Mirrors scripts/lib/cluster.sh (drift check: check-drift.sh).
+$script:TbCaRegistries = @('docker.io','registry-1.docker.io','auth.docker.io','ghcr.io')
+
+# Return the operator's CA bundle path (absolute) when TRACEBLOC_CA_BUNDLE or
+# CURL_CA_BUNDLE is set and readable; $null when neither is set. Err (hard) when a
+# var is set but its file is missing — a silent skip would drop the user straight
+# back into the x509 failure they set the var to fix.
+function Resolve-CaBundle {
+  foreach ($name in @('TRACEBLOC_CA_BUNDLE','CURL_CA_BUNDLE')) {
+    $val = [Environment]::GetEnvironmentVariable($name)
+    if (-not $val) { continue }
+    if (-not (Test-Path -LiteralPath $val -PathType Leaf)) {
+      Err "$name is set to '$val' but no such file exists - point it at your corporate CA bundle (PEM) and re-run."
+    }
+    # Verify it's actually READABLE, not just present (matches bash's `-r`): a file
+    # that exists but can't be opened must hard-fail here, not at k3d mount/pull time.
+    try { [System.IO.File]::OpenRead($val).Dispose() }
+    catch { Err "$name is set to '$val' but that file can't be read ($($_.Exception.Message)) - fix its permissions or point it at a readable CA bundle (PEM), then re-run." }
+    return (Resolve-Path -LiteralPath $val).Path
+  }
+  return $null
+}
+
+# Build a k3d registries.yaml pointing containerd at the mounted CA for every
+# registry in $TbCaRegistries, and return its path. $NodeCa = the CA path INSIDE
+# the node (where the -v mount lands). Written UTF-8 without BOM. Caller removes
+# the parent temp dir.
+function Write-K3dRegistriesConfig {
+  param([Parameter(Mandatory)][string]$NodeCa)
+  $tmpDir = Join-Path ([System.IO.Path]::GetTempPath()) ("tracebloc-k3d-reg-" + [System.IO.Path]::GetRandomFileName())
+  New-Item -ItemType Directory -Path $tmpDir -Force | Out-Null
+  $cfg = Join-Path $tmpDir "registries.yaml"
+  $lines = New-Object System.Collections.Generic.List[string]
+  $lines.Add('configs:')
+  foreach ($reg in $script:TbCaRegistries) {
+    $lines.Add('  "' + $reg + '":')
+    $lines.Add('    tls:')
+    $lines.Add('      ca_file: "' + $NodeCa + '"')
   }
   $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
   [System.IO.File]::WriteAllLines($cfg, $lines, $utf8NoBom)
@@ -1028,6 +1558,31 @@ function Invoke-LeftoverDataGuard {
   }
 }
 
+# When 'k3d cluster create' fails, one cause on a TLS-inspecting network is the
+# HOST Docker daemon hitting x509 while pulling k3d's OWN runtime images
+# (rancher/k3s, k3d-tools, k3d-proxy) -- a different surface than the in-node CA
+# trust (#424), which only covers containerd inside the nodes. Docker Desktop runs
+# the daemon in a VM the installer can't reach, so the node CA mount can't fix it,
+# and this fails before any node boots so Get-NotReadyState never sees it. Detect
+# x509 in the create output and name it with a Windows-specific remedy (#474).
+# No-op unless the output shows a TLS-verification failure. Mirrors the bash
+# _host_ca_create_hint.
+function Write-HostCaCreateHint {
+  param([string]$Output)
+  if ($Output -notmatch '(?i)x509|certificate signed by unknown authority|tls: failed to verify') { return }
+  Write-Host ""
+  Warn "The Docker daemon couldn't pull k3d's runtime images -- TLS verification failed (x509)."
+  Hint "k3d pulls rancher/k3s, k3d-tools and k3d-proxy with the HOST Docker daemon, which does"
+  Hint "not use the in-node CA trust (TRACEBLOC_CA_BUNDLE) this installer configures. Docker"
+  Hint "Desktop runs the daemon in a VM the installer can't reach, so the CA must be trusted by"
+  Hint "the host:"
+  Hint "  Import your corporate CA into the Windows certificate store (Trusted Root Certification"
+  Hint "  Authorities -- 'certlm.msc' for the machine store), then restart Docker Desktop; it reads"
+  Hint "  the Windows trust store on start."
+  Hint "  Details: docs/INSTALL.md (`"TLS-inspecting network`") and https://docs.docker.com/."
+  Write-Host ""
+}
+
 function New-K3dCluster {
   Log "Creating k3d cluster: '$CLUSTER_NAME'"
 
@@ -1048,7 +1603,32 @@ function New-K3dCluster {
       Ok "Compute environment already running."
     } else {
       Log "Cluster '$CLUSTER_NAME' exists but stopped -- starting..."
-      k3d cluster start $CLUSTER_NAME
+      # Run k3d start as a killable tracked PROCESS with a deadline (a background
+      # job would orphan the native k3d child on timeout, #422 Bugbot), capturing
+      # its raw INFO[...] to temp files so it goes to the log, not streamed to the
+      # console. Exit code + timeout are both checked so a failed start Errs with
+      # the real reason instead of falsely reporting "started".
+      $startOutFile = Join-Path $env:TEMP "k3d-start-$(Get-Random).log"
+      $startErrFile = Join-Path $env:TEMP "k3d-start-err-$(Get-Random).log"
+      $sp = $null
+      try {
+        $sp = Start-Process -FilePath "k3d" -ArgumentList @("cluster","start",$CLUSTER_NAME) `
+          -NoNewWindow -PassThru -ErrorAction Stop `
+          -RedirectStandardOutput $startOutFile -RedirectStandardError $startErrFile
+      } catch {
+        Remove-Item $startOutFile, $startErrFile -Force -ErrorAction SilentlyContinue
+        Err "Couldn't start the existing '$CLUSTER_NAME' environment (k3d wouldn't start). Check Docker is running, then re-run." "$_"
+      }
+      $startTimedOut = -not (Wait-ProcessWithDeadline -Process $sp -Deadline (Get-Date).AddMinutes(5) -Message "Starting your secure environment")
+      $startLog = (("$(Get-Content $startErrFile -Raw -ErrorAction SilentlyContinue)`n$(Get-Content $startOutFile -Raw -ErrorAction SilentlyContinue)")).Trim()
+      Remove-Item $startOutFile, $startErrFile -Force -ErrorAction SilentlyContinue
+      if ($startLog) { Log "k3d cluster start: $startLog" }
+      if ($startTimedOut) {
+        Err "Starting the existing '$CLUSTER_NAME' environment timed out (k3d stopped). Check Docker is running, then re-run." $startLog
+      }
+      if ($sp.ExitCode -ne 0) {
+        Err "Couldn't start the existing '$CLUSTER_NAME' environment. Check Docker is running, then re-run." $startLog
+      }
       Ok "Compute environment started."
     }
 
@@ -1064,6 +1644,22 @@ function New-K3dCluster {
         Hint "  k3d cluster delete $CLUSTER_NAME  (then re-run this installer)."
       }
     } catch {}
+
+    # CA trust (like proxy / the dataset mount) is baked into the nodes at create
+    # time (mount + --registry-config). If a CA bundle is set but the existing
+    # cluster was created without it, reuse leaves in-node pulls failing x509 — so
+    # the "set the CA and re-run" remedy does nothing. Warn + point at recreate
+    # (Bugbot #424). Path mirrors New-K3dCluster's mount destination.
+    if ($env:TRACEBLOC_CA_BUNDLE -or $env:CURL_CA_BUNDLE) {
+      $caMounts = ""
+      try { $caMounts = (docker inspect "k3d-$CLUSTER_NAME-server-0" --format '{{range .Mounts}}{{println .Destination}}{{end}}' 2>$null | Out-String) } catch {}
+      if ($caMounts -and ($caMounts -notmatch '(?m)^/etc/ssl/certs/tracebloc-mitm-ca\.crt\s*$')) {
+        Warn "A CA bundle is set, but the existing '$CLUSTER_NAME' cluster was created without it."
+        Hint "k3d bakes CA trust into the nodes at create time -- it can't be added to a running cluster."
+        Hint "If in-cluster image pulls fail x509, recreate the cluster so the CA is applied:"
+        Hint "  k3d cluster delete $CLUSTER_NAME  (then re-run this installer)."
+      }
+    }
 
     # backend#743: the dataset bind mount (HOST_DATASET_DIR -> /tracebloc-data)
     # is baked into the k3d nodes at create time; k3d can't add it to a running
@@ -1130,6 +1726,19 @@ function New-K3dCluster {
       Log "Propagating proxy settings to k3d nodes (authenticated proxies supported; NO_PROXY auto-augmented)."
     }
 
+    # In-node CA trust for TLS-inspecting networks (#424): mount the operator's CA
+    # bundle into every node and point containerd at it per-registry, so in-node
+    # image pulls validate the intercepted certs instead of failing x509.
+    $caBundle = Resolve-CaBundle
+    $registriesCfg = $null
+    if ($caBundle) {
+      $nodeCa = "/etc/ssl/certs/tracebloc-mitm-ca.crt"
+      $k3dArgs += @("-v", "${caBundle}:${nodeCa}@all")
+      $registriesCfg = Write-K3dRegistriesConfig -NodeCa $nodeCa
+      $k3dArgs += @("--registry-config", $registriesCfg)
+      Log "Trusting your network's TLS-inspection CA in the k3d nodes (from $caBundle)."
+    }
+
     Log "Creating cluster: $SERVERS server(s) + $AGENTS agent(s)..."
     Hint "First run may take a few minutes to download components."
 
@@ -1141,32 +1750,81 @@ function New-K3dCluster {
     $k3dOutLog = Join-Path $env:TEMP "k3d-create-$(Get-Random).log"
     $k3dErrLog = Join-Path $env:TEMP "k3d-create-err-$(Get-Random).log"
 
-    $k3dProc = Start-Process -FilePath $k3dExe -ArgumentList $k3dArgString `
-      -NoNewWindow -PassThru `
-      -RedirectStandardOutput $k3dOutLog `
-      -RedirectStandardError $k3dErrLog
-
-    $frames = @([char]0x2807, [char]0x2819, [char]0x2839, [char]0x2838, [char]0x283C, [char]0x2834, [char]0x2826, [char]0x2827, [char]0x2847, [char]0x280F)
-    $f = 0
-    Write-Host -NoNewline "  "
-    while (-not $k3dProc.HasExited) {
-      Write-Host "`r  " -NoNewline
-      Write-Host $frames[$f] -ForegroundColor Cyan -NoNewline
-      Write-Host " Creating compute environment..." -NoNewline
-      $f = ($f + 1) % $frames.Count
-      Start-Sleep -Seconds 2
+    # -ErrorAction Stop + catch: a failed spawn (broken/invalid k3d.exe) used
+    # to leave $k3dProc null, and `while (-not $null.HasExited)` spun the
+    # spinner forever over a dead install (#412). Fail fast instead.
+    $k3dProc = $null
+    try {
+      $k3dProc = Start-Process -FilePath $k3dExe -ArgumentList $k3dArgString `
+        -NoNewWindow -PassThru -ErrorAction Stop `
+        -RedirectStandardOutput $k3dOutLog `
+        -RedirectStandardError $k3dErrLog
+    } catch {
+      Remove-Item $k3dOutLog, $k3dErrLog -Force -ErrorAction SilentlyContinue
+      if ($proxyCfg) { Remove-Item (Split-Path $proxyCfg -Parent) -Recurse -Force -ErrorAction SilentlyContinue }
+      if ($registriesCfg) { Remove-Item (Split-Path $registriesCfg -Parent) -Recurse -Force -ErrorAction SilentlyContinue }
+      # Err prints the log path + -Diagnose itself now (#423); no inline Hint here.
+      Err "Couldn't start k3d ($k3dExe): $($_.Exception.Message). Reinstall it (re-run this script) or check that the binary runs: k3d version"
     }
-    Write-Host "`r                                                   `r" -NoNewline
+
+    $timeoutMin = 15
+    if ("$env:TB_CREATE_TIMEOUT_MIN" -match '^\d+$') { $timeoutMin = [int]$env:TB_CREATE_TIMEOUT_MIN }
+    if (-not (Wait-ProcessWithDeadline -Process $k3dProc -Deadline (Get-Date).AddMinutes($timeoutMin) -Message "Creating compute environment...")) {
+      # Capture the FULL create output before the logs are deleted, so the
+      # host-CA x509 check below can see an x509 that scrolled past the last 5
+      # lines (a hung TLS-inspected pull logs x509 then wedges until the deadline).
+      $timeoutOut = ""
+      if (Test-Path $k3dErrLog) { $timeoutOut += ([string](Get-Content $k3dErrLog -Raw -ErrorAction SilentlyContinue)) }
+      if (Test-Path $k3dOutLog) { $timeoutOut += "`n" + ([string](Get-Content $k3dOutLog -Raw -ErrorAction SilentlyContinue)) }
+      $tail = @()
+      if (Test-Path $k3dErrLog) { $tail = @(Get-Content $k3dErrLog -ErrorAction SilentlyContinue | Select-Object -Last 5) }
+      if (-not $tail -and (Test-Path $k3dOutLog)) { $tail = @(Get-Content $k3dOutLog -ErrorAction SilentlyContinue | Select-Object -Last 5) }
+      foreach ($line in $tail) { Warn "k3d: $line" }
+      # Err prints the log path + -Diagnose itself now (#423); no inline Hint here.
+      Remove-Item $k3dOutLog, $k3dErrLog -Force -ErrorAction SilentlyContinue
+      if ($proxyCfg) { Remove-Item (Split-Path $proxyCfg -Parent) -Recurse -Force -ErrorAction SilentlyContinue }
+      if ($registriesCfg) { Remove-Item (Split-Path $registriesCfg -Parent) -Recurse -Force -ErrorAction SilentlyContinue }
+      # Killing k3d mid --wait skips its own rollback; a leftover partial
+      # cluster would be adopted as "already running" by the next run's
+      # reuse path (Bugbot #439). Remove it — bounded — before failing.
+      Info "Removing the partially created environment..."
+      $partialDeleted = $false
+      try {
+        $delProc = Start-Process -FilePath $k3dExe -ArgumentList "cluster delete $CLUSTER_NAME" `
+          -NoNewWindow -PassThru -ErrorAction Stop
+        if (Wait-ProcessWithDeadline -Process $delProc -Deadline (Get-Date).AddMinutes(2) -Message "Removing partial environment...") {
+          $partialDeleted = ($delProc.ExitCode -eq 0)
+        }
+      } catch {}
+      if (-not $partialDeleted) {
+        Warn "Couldn't remove the partial cluster automatically - run 'k3d cluster delete $CLUSTER_NAME' before re-running."
+      }
+      # A TLS-inspected host pull can log x509 and then hang until the deadline —
+      # surface the CA remedy here too, matching bash's timeout fall-through (#474).
+      Write-HostCaCreateHint -Output $timeoutOut
+      Err "Compute environment creation timed out after $timeoutMin minutes. Check that Docker is healthy and this network can pull images, then re-run. (TB_CREATE_TIMEOUT_MIN overrides the bound.)"
+    }
 
     $k3dExitCode = $k3dProc.ExitCode
     $k3dStdout = if (Test-Path $k3dOutLog) { Get-Content $k3dOutLog -Raw -ErrorAction SilentlyContinue } else { "" }
     $k3dStderr = if (Test-Path $k3dErrLog) { Get-Content $k3dErrLog -Raw -ErrorAction SilentlyContinue } else { "" }
     Remove-Item $k3dOutLog, $k3dErrLog -Force -ErrorAction SilentlyContinue
     if ($proxyCfg) { Remove-Item (Split-Path $proxyCfg -Parent) -Recurse -Force -ErrorAction SilentlyContinue }
+    if ($registriesCfg) { Remove-Item (Split-Path $registriesCfg -Parent) -Recurse -Force -ErrorAction SilentlyContinue }
     if ($k3dStdout) { Log "k3d stdout: $k3dStdout" }
     if ($k3dStderr) { Log "k3d stderr: $k3dStderr" }
 
-    if ($k3dExitCode -ne 0) { Err "Failed to create compute environment." }
+    if ($k3dExitCode -ne 0) {
+      # Host-daemon x509 (k3d runtime image pull on a TLS-inspecting network,
+      # #474) -- name the CA remedy before the generic failure.
+      Write-HostCaCreateHint -Output ("$k3dStdout`n$k3dStderr")
+      # Surface k3d's real reason (image pull / proxy / port / WSL) on screen via
+      # Err's detail excerpt, not only in the log (#423). stderr LAST so its tail
+      # (the FATA/x509/port reason) survives Get-ErrDetailLines' last-5-line window
+      # even if k3d wrote to stdout; matches the Write-HostCaCreateHint order above
+      # (reviewer).
+      Err "Failed to create compute environment." "$k3dStdout`n$k3dStderr"
+    }
     Ok "Compute environment ready."
   }
 
@@ -1558,7 +2216,7 @@ function Get-InstalledClientInfo {
 #   adopted  - cluster already registered: TB_PROV_ID/TB_PROV_NS, no password
 #   fallback - CLI missing/too old -> the legacy manual prompts in the Helm step
 function Invoke-ProvisionClient {
-  Step 4 5 "Registering this machine"
+  Step 5 6 "Registering this machine"
   $script:TB_PROV_MODE = "fallback"
 
   if (Get-ProvisioningPreset) {
@@ -1675,7 +2333,7 @@ function Invoke-ProvisionClient {
     if (Test-Path $createOut) { Get-Content $createOut -ErrorAction SilentlyContinue | ForEach-Object { Log $_ } }
     if ($createRc -ne 0) {
       Print-CreateFailure -OutFile $createOut -Location $clientLocation
-      Err "Couldn't provision the client. Re-run to retry - full log: $LOG_FILE"
+      Err "Couldn't provision the client. Re-run to retry."
     }
     if (-not (Test-Path $credFile)) { Err "client create did not write the credential file ($credFile)." }
     $cred = Read-TraceblocCredentialFile -Path $credFile
@@ -1706,7 +2364,7 @@ function Invoke-ProvisionClient {
 
 function Install-ClientHelm {
   # -- Step 5/5: Install tracebloc client --
-  Step 5 5 "Installing tracebloc client"
+  Step 6 6 "Installing tracebloc client"
 
   if (-not (Test-Path $HOST_DATA_DIR)) {
     New-Item -ItemType Directory -Path $HOST_DATA_DIR -Force | Out-Null
@@ -2009,7 +2667,7 @@ $envBlock
   Log "Adding Helm repo: $TRACEBLOC_HELM_REPO_URL"
   $addOutput = (helm repo add $TRACEBLOC_HELM_REPO_NAME $TRACEBLOC_HELM_REPO_URL --force-update 2>&1) | Out-String
   Log "helm repo add: $addOutput"
-  if ($LASTEXITCODE -ne 0) { Err "Couldn't add the tracebloc chart repo ($TRACEBLOC_HELM_REPO_URL). Helm output:`n$addOutput`nCheck the log for details: $LOG_FILE" }
+  if ($LASTEXITCODE -ne 0) { Err "Couldn't add the tracebloc chart repo ($TRACEBLOC_HELM_REPO_URL)." $addOutput }
 
   Write-Host ""
   if ($adoptedReuse) {
@@ -2021,7 +2679,7 @@ $envBlock
       --reuse-values `
       --set-string "clientId=$TB_CLIENT_ID" 2>&1) | Out-String
     Log "Helm Output: $helmOutput"
-    if ($LASTEXITCODE -ne 0) { Err "Client reconcile failed. Helm output:`n$helmOutput`nCheck the log for details: $LOG_FILE" }
+    if ($LASTEXITCODE -ne 0) { Err "Client reconcile failed." $helmOutput }
     # Keep the LOCAL record in step for future default-reuse prompts: heal only
     # the clientId line, never regenerate — the live release is the truth.
     if (Test-Path $valuesFile) {
@@ -2036,7 +2694,7 @@ $envBlock
       --create-namespace `
       --values $valuesFile 2>&1) | Out-String
     Log "Helm Output: $helmOutput"
-    if ($LASTEXITCODE -ne 0) { Err "Client installation failed. Helm output:`n$helmOutput`nCheck the log for details: $LOG_FILE" }
+    if ($LASTEXITCODE -ne 0) { Err "Client installation failed." $helmOutput }
   }
 
   # Point kubeconfig's current context at the client namespace so kubectl + the
@@ -2099,7 +2757,19 @@ function Get-NotReadyState {
   $jmLogs = (& kubectl logs -n $Namespace "deployment/$Namespace-jobs-manager" --all-containers --tail=50 2>$null | Out-String)
   if ($jmLogs -match '(?i)authentication failed|unable to log in') { return "bad_creds" }
   $pods = (& kubectl get pods -n $Namespace 2>$null | Out-String)
-  if ($pods -match '(?i)ImagePullBackOff|ErrImagePull|InvalidImageName') { return "image_pull" }
+  if ($pods -match '(?i)ImagePullBackOff|ErrImagePull|InvalidImageName') {
+    # On a TLS-inspecting network the pull fails x509 because the nodes don't trust
+    # the corporate CA (#424). Distinguish it so the remedy can name the CA + env
+    # var, not a vague retry. Mirrors scripts/lib/summary.sh::_diagnose_not_ready.
+    # Scope the x509 test to the image-pull failure event itself, not any stray
+    # x509 event elsewhere in the ns -- a stale/unrelated x509 event must not steer
+    # the user into a delete+recreate for the wrong reason (reviewer). Mirrors the
+    # bash _diagnose_not_ready pull_fail filter.
+    $events = (& kubectl get events -n $Namespace --request-timeout=5s 2>$null | Out-String)
+    $pullFail = (($events -split "`n") | Where-Object { $_ -match '(?i)failed to pull|ErrImagePull' }) -join "`n"
+    if ($pullFail -match '(?i)x509|certificate signed by unknown authority|tls: failed to verify') { return "image_pull_ca" }
+    return "image_pull"
+  }
   if ($pods -match '(?i)CrashLoopBackOff') { return "crash" }
   return "starting"
 }
@@ -2161,6 +2831,18 @@ function Print-Summary {
       Write-Host "  The environment installed, but tracebloc refused those credentials."
       Write-Host "    1. Re-check them at https://ai.tracebloc.io/clients" -ForegroundColor Cyan
       Write-Host "    2. Re-run this installer (safe to re-run)"
+    }
+    "image_pull_ca" {
+      Write-Host "  " -NoNewline; Write-Host "$([char]0x2716) Setup didn't finish - the cluster does not trust your network's TLS-inspection CA." -ForegroundColor Red
+      Write-Host ""
+      Write-Host "  Your network intercepts HTTPS (break-and-inspect), so the in-cluster image"
+      Write-Host "  pulls fail certificate validation (x509). CA trust is baked in at"
+      Write-Host "  cluster-create, so delete the existing cluster first, then re-run with the CA:"
+      Write-Host "    k3d cluster delete $CLUSTER_NAME" -ForegroundColor Green
+      Write-Host "    `$env:TRACEBLOC_CA_BUNDLE = 'C:\path\to\corporate-ca.pem'; irm https://tracebloc.io/i.ps1 | iex" -ForegroundColor Green
+      Hint "(CURL_CA_BUNDLE is also honored.) Ask your IT team for the bundle if unsure."
+      Write-Host "  Inspect:  " -NoNewline; Write-Host "kubectl get events -n $ns | Select-String x509" -ForegroundColor Green
+      Hint "Re-running this installer is safe."
     }
     default {
       $reason = "a component didn't start"
@@ -2383,6 +3065,9 @@ function Test-Preflight {
   $backendHost = (Get-BackendUrl) -replace '^https?://','' -replace '/$',''
   $criticals = @(
     @{ label = "Docker Hub (registry-1.docker.io)";           url = "https://registry-1.docker.io/v2/" },
+    # auth.docker.io is Docker Hub's token endpoint: a network that allows
+    # registry-1 but blocks the token host fails only at in-cluster pull time (#416).
+    @{ label = "Docker Hub auth (auth.docker.io)";            url = "https://auth.docker.io/token" },
     @{ label = "GitHub Container Registry (ghcr.io)";         url = "https://ghcr.io/" },
     @{ label = "tracebloc API ($backendHost)";                url = "https://$backendHost/" },
     # The chart repo is probed at its index.yaml, strictly: the site ROOT 404s by
@@ -2390,6 +3075,20 @@ function Test-Preflight {
     # actually exist for `helm repo add` to succeed (#385).
     @{ label = "tracebloc Helm charts (tracebloc.github.io)"; url = "$TRACEBLOC_HELM_REPO_URL/index.yaml"; strict = $true }
   )
+  # Download hosts Step 1 fetches from — promoted to HARD (#416): a blocked one
+  # used to pass preflight then fail the install ~30s later. Added only when the
+  # fetch will actually happen (tool/app absent; a present tool is never
+  # re-downloaded). k3d release assets 302 to objects.githubusercontent.com, so it
+  # is probed explicitly. Kept in lockstep with preflight.sh (drift: check-drift.sh).
+  if (-not (Test-Path "$env:ProgramFiles\Docker\Docker\Docker Desktop.exe")) {
+    $criticals += @{ label = "Docker Desktop (desktop.docker.com)"; url = "https://desktop.docker.com/" }
+  }
+  if (-not (Has "kubectl")) { $criticals += @{ label = "kubectl (dl.k8s.io)"; url = "https://dl.k8s.io/" } }
+  if (-not (Has "helm"))    { $criticals += @{ label = "Helm (get.helm.sh)";  url = "https://get.helm.sh/" } }
+  if (-not (Has "k3d")) {
+    $criticals += @{ label = "k3d download (github.com)";                  url = "https://github.com/" }
+    $criticals += @{ label = "k3d assets (objects.githubusercontent.com)"; url = "https://objects.githubusercontent.com/" }
+  }
   $tlsSeen = $false; $cfail = 0
   foreach ($c in $criticals) {
     $status = Test-PfUrl $c.url -RequireSuccess:([bool]$c.strict)
@@ -2401,8 +3100,11 @@ function Test-Preflight {
       if ($status -eq "tls") { $tlsSeen = $true }
     }
   }
-  if ($tlsSeen)    { Hint "A TLS/certificate error usually means a break-and-inspect (TLS-inspecting) proxy whose corporate CA isn't trusted here - see the proxy notes." }
-  if ($cfail -gt 0){ Hint "Allow HTTPS (443) egress to: registry-1.docker.io, ghcr.io, $backendHost, tracebloc.github.io - or configure your corporate proxy." }
+  if ($tlsSeen)    {
+    Hint "A TLS/certificate error usually means a break-and-inspect (TLS-inspecting) proxy whose corporate CA isn't trusted here."
+    Hint "Fix THESE host checks by importing the CA into the Windows certificate store (Cert:\LocalMachine\Root) - Invoke-WebRequest uses the system store, not an env var. The k3d nodes are trusted separately via `$env:TRACEBLOC_CA_BUNDLE='C:\path\to\corporate-ca.pem' (CURL_CA_BUNDLE also honored) at cluster-create. Ask IT for the bundle if unsure."
+  }
+  if ($cfail -gt 0){ Hint "Allow HTTPS (443) egress to the host(s) named above - the always-needed set is registry-1.docker.io, auth.docker.io, ghcr.io, $backendHost, tracebloc.github.io, plus any tool-download host listed (desktop.docker.com / dl.k8s.io / get.helm.sh / github.com / objects.githubusercontent.com) - or configure your corporate proxy." }
 
   if ($hardFail -gt 0) {
     Write-Host ""
@@ -2578,7 +3280,7 @@ function Install-TraceblocCli {
   # credential in Step 4 (browser sign-in + `client create`). A failed CLI
   # install is still non-fatal: Step 4 falls back to the legacy manual-
   # credential flow, so the machine can always be connected.
-  Step 3 5 "Install the tracebloc CLI"
+  Step 4 6 "Install the tracebloc CLI"
 
   Info "Installing the tracebloc CLI..."
 
@@ -2636,33 +3338,37 @@ Start-InstallLog
 Print-Banner
 Print-Roadmap
 
-# -- Step 1/5: Check system requirements --
-Step 1 5 "Checking system requirements"
+# -- Step 1/6: Check system requirements (honest split from tool install, #422) --
+Step 1 6 "Checking system requirements"
 Test-Preflight
 Find-Gpu
 Enable-VirtualisationFeatures
+
+# -- Step 2/6: Install system tools (~700 MB — Docker Desktop, kubectl, k3d, helm;
+# each names its wait + shows a heartbeat + prints a summary line, #422) --
+Step 2 6 "Installing system tools"
 Install-Winget
 Install-DockerDesktop
 Install-NvidiaContainerToolkit
 Install-Kubectl
 Install-K3dAndHelm
 
-# -- Step 2/5: Set up secure compute environment --
-Step 2 5 "Setting up secure compute environment"
+# -- Step 3/6: Set up secure compute environment --
+Step 3 6 "Setting up secure compute environment"
 New-K3dCluster
 Install-GpuDevicePlugin
 Confirm-GpuNode
 
-# -- Step 3/5: install the tracebloc CLI FIRST (#388) — it mints the machine
-# credential in Step 4; a CLI-install hiccup degrades Step 4 to the legacy
+# -- Step 4/6: install the tracebloc CLI FIRST (#388) — it mints the machine
+# credential in Step 5; a CLI-install hiccup degrades Step 5 to the legacy
 # manual-credential fallback instead of aborting.
 Install-TraceblocCli
 
-# -- Step 4/5: register this machine (browser sign-in + `client create`;
+# -- Step 5/6: register this machine (browser sign-in + `client create`;
 # env-var credentials skip it; missing/old CLI falls back to manual prompts) --
 Invoke-ProvisionClient
 
-# -- Step 5/5 handled inside Install-ClientHelm --
+# -- Step 6/6 handled inside Install-ClientHelm --
 Install-ClientHelm
 
 # Verify the client actually came up before reporting anything

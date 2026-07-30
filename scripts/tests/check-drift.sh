@@ -186,12 +186,118 @@ _drift_cli_contract() {
   fi
 }
 
+# ── Check 4: both installers wire in-node CA trust (#424) ────────────────────
+# cluster.sh (Linux/macOS) and install-k8s.ps1 (Windows) must each resolve the
+# operator's CA bundle, mount it into the nodes, and point containerd at it via
+# --registry-config. If one installer drops any piece, the break-and-inspect x509
+# pull failure reopens on that OS — catch it here, not in a hospital's network.
+# Match tokens in real code only, not comments: strip comment lines first, so
+# deleting the functional `--registry-config` wiring can't be masked by the token
+# lingering in a comment above it (Bugbot: no whole-file grep). No `grep -q` under
+# main()'s pipefail — a SIGPIPE on the upstream grep would false-fail.
+_drift_ca_token() { grep -vE '^[[:space:]]*#' "$1" 2>/dev/null | grep -F -- "$2" >/dev/null 2>&1; }
+_drift_ca_trust() {
+  echo "▸ In-node CA trust wiring (cluster.sh · install-k8s.ps1)"
+  local before=$_drift pat
+  local sh="scripts/lib/cluster.sh" ps1="scripts/install-k8s.ps1"
+  for pat in TRACEBLOC_CA_BUNDLE CURL_CA_BUNDLE _resolve_ca_bundle registry-config tracebloc-mitm-ca.crt _host_ca_create_hint; do
+    _drift_ca_token "$DRIFT_ROOT/$sh" "$pat" || _note "$sh: CA wiring missing '$pat' (#424/#474)"
+  done
+  for pat in TRACEBLOC_CA_BUNDLE CURL_CA_BUNDLE Resolve-CaBundle registry-config tracebloc-mitm-ca.crt Write-HostCaCreateHint; do
+    _drift_ca_token "$DRIFT_ROOT/$ps1" "$pat" || _note "$ps1: CA wiring missing '$pat' (#424/#474)"
+  done
+  if [[ "$_drift" -eq "$before" ]]; then _ok "both installers resolve, mount, and register the corporate CA"; fi
+  return 0
+}
+
+# ── Check 4b: every installer execute-gates every tool (#411) ────────────────
+# The post-install "check" used to be a log-only interpolation that masked a
+# corrupt/wrong-arch binary until cluster-create. All installers now RUN each tool
+# (assert_tool_runs on bash, Assert-ToolRuns on PowerShell). If an installer drops
+# the gate for a tool, the "green System tools then dies in Step 2" bug reopens on
+# that OS — catch it here rather than in the field.
+# Match the actual gate CALL, never a whole-file grep: strip comment lines first,
+# then require the tool's own version-check invocation — `assert_tool_runs … <t>
+# version` (the optional `--rm <path>` sits between and is ignored) on bash,
+# `Assert-ToolRuns -Name "<t>"` on ps1. A commented-out or merely-mentioned gate no
+# longer satisfies the check (reviewer: parity checks must extract structured calls).
+# NOTE: no `grep -q` — under main()'s `set -o pipefail` a -q that closes the pipe
+# early makes the upstream grep exit on SIGPIPE (141), failing the pipeline even on
+# a match. Read to EOF and redirect instead.
+_drift_gate_bash() { grep -vE '^[[:space:]]*#' "$1" 2>/dev/null | grep -F assert_tool_runs | grep -E "(^| )$2 version" >/dev/null 2>&1; }
+_drift_gate_ps1()  { grep -vE '^[[:space:]]*#' "$1" 2>/dev/null | grep -E "Assert-ToolRuns -Name \"$2\"" >/dev/null 2>&1; }
+_drift_execute_gates() {
+  echo "▸ Tool execute-gate parity (setup-linux.sh · setup-macos.sh · install-k8s.ps1)"
+  local before=$_drift f t
+  local bash_files=( scripts/lib/setup-linux.sh scripts/lib/setup-macos.sh )
+  for f in "${bash_files[@]}"; do
+    if [[ ! -f "$DRIFT_ROOT/$f" ]]; then _note "$f is missing"; continue; fi
+    for t in kubectl k3d helm; do
+      _drift_gate_bash "$DRIFT_ROOT/$f" "$t" || \
+        _note "$f: no execute-gate call for '$t' (assert_tool_runs … $t version) — #411"
+    done
+  done
+  local ps1="scripts/install-k8s.ps1"
+  if [[ ! -f "$DRIFT_ROOT/$ps1" ]]; then _note "$ps1 is missing"; fi
+  for t in kubectl k3d helm; do
+    _drift_gate_ps1 "$DRIFT_ROOT/$ps1" "$t" || \
+      _note "$ps1: no execute-gate call for '$t' (Assert-ToolRuns -Name \"$t\") — #411"
+  done
+  if [[ "$_drift" -eq "$before" ]]; then _ok "all installers execute-gate kubectl / k3d / helm"; fi
+  return 0
+}
+
+# ── Check 5: preflight probes the same download hosts on both installers ─────
+# preflight.sh (Linux/macOS) and install-k8s.ps1 (Windows) each probe the hosts
+# the install fetches from (#416). A host added to one installer but not the other
+# silently reopens the "green preflight, blocked download 30s later" gap on
+# whichever OS was missed.
+#
+# We extract only hosts that appear in an actual PROBE URL — preflight.sh entries
+# are "label|https://host/…", install-k8s.ps1 entries are url = "https://host/…" —
+# NOT a whole-file grep. A whole-file grep also matches the same hosts inside
+# comments and the egress-hint strings, so it would pass even if a real probe line
+# were deleted (reviewer: it couldn't detect the drift it exists to catch).
+#
+# The shared-core set is every host BOTH probe as a URL literal on the default
+# path. OS-specific hosts (get.docker.com / download.docker.com on Linux,
+# raw.githubusercontent.com / formulae.brew.sh on macOS) are excluded, as is
+# tracebloc.github.io (install-k8s.ps1 probes it via the $TRACEBLOC_HELM_REPO_URL
+# variable, not a literal — Check 1 already pins the backend/chart host map).
+# Extract ONLY the hosts in a preflight probe entry, not any URL in the file:
+#  - preflight.sh entries are "label|https://host/…" (the pipe is unique to them)
+#  - install-k8s.ps1 entries are @{ label = "…"; url = "https://host/…" } — REQUIRE
+#    the `label =` on the same line so unrelated `$url = "https://…"` assignments
+#    (e.g. the winget download) don't count and mask a deleted probe (Bugbot).
+_drift_probed_hosts_sh()  { grep -oE '\|https://[a-zA-Z0-9.-]+' "$1" 2>/dev/null | sed 's#.*//##' | sort -u; }
+_drift_probed_hosts_ps1() { grep -oE 'label *=.*url *= *"https://[a-zA-Z0-9.-]+' "$1" 2>/dev/null | sed 's#.*https://##' | sort -u; }
+_drift_preflight_hosts() {
+  echo "▸ Preflight download-host parity (probed URLs in preflight.sh · install-k8s.ps1)"
+  local shared=(
+    registry-1.docker.io auth.docker.io ghcr.io
+    dl.k8s.io get.helm.sh github.com objects.githubusercontent.com
+    desktop.docker.com
+  )
+  local before=$_drift h sh_hosts ps_hosts
+  sh_hosts="$(_drift_probed_hosts_sh  "$DRIFT_ROOT/scripts/lib/preflight.sh")"
+  ps_hosts="$(_drift_probed_hosts_ps1 "$DRIFT_ROOT/scripts/install-k8s.ps1")"
+  for h in "${shared[@]}"; do
+    grep -qxF -- "$h" <<<"$sh_hosts" || _note "preflight.sh: '$h' is not in any probe URL — both installers must probe it (#416)"
+    grep -qxF -- "$h" <<<"$ps_hosts" || _note "install-k8s.ps1: '$h' is not in any probe URL — both installers must probe it (#416)"
+  done
+  if [[ "$_drift" -eq "$before" ]]; then _ok "both installers probe the shared download-host set (extracted from probe URLs)"; fi
+  return 0
+}
+
 main() {
   set -uo pipefail
   echo "── source-of-truth drift checks ─────────────────────────────"
   _drift_backend_hosts
   _drift_workload_names
   _drift_cli_contract
+  _drift_ca_trust
+  _drift_execute_gates
+  _drift_preflight_hosts
   echo "─────────────────────────────────────────────────────────────"
   if [[ "$_drift" -gt 0 ]]; then
     echo "DRIFT: $_drift divergence(s) above. Update both sides (or the contract in check-drift.sh) and re-run." >&2

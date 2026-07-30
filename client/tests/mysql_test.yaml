@@ -178,3 +178,10 @@ tests:
           content:
             name: mysql-tmp
             mountPath: /tmp
+
+  - it: pins the mysql-client image by digest (chart default — fleets stay on the 5.7-lineage image)
+    template: templates/mysql-deployment.yaml
+    asserts:
+      - matchRegex:
+          path: spec.template.spec.containers[0].image
+          pattern: ^docker\.io/tracebloc/mysql-client@sha256:[a-f0-9]{64}$
