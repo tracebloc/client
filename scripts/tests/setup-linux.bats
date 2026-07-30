@@ -969,8 +969,9 @@ _stub_install_steps() {
   run install_rootless_docker
   [ "$status" -ne 0 ]                                    # routes to Tier-2 and exits (no blind nohup bring-up)
   [[ "$output" == *"prepare-host"* ]]                    # the Tier-2 remedy
-  [[ "$output" == *"no per-user systemd"* ]]             # names the reason
+  [[ "$output" == *"no per-user systemd"* ]]             # accurate reason (not a vague setuptool failure)
   ! mock_calls | grep -q "systemctl --user enable"       # never attempted the user-systemd bring-up
+  ! mock_calls | grep -q "dockerd-rootless-setuptool.sh install"   # gate is UPFRONT → no partial ~/bin install (Bugbot #485)
 }
 
 @test "install_rootless_docker: daemon never Ready -> Tier-2 prepare-host fall-through, not a silent proceed (#1222)" {

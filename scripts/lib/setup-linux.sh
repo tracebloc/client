@@ -874,6 +874,15 @@ install_rootless_docker() {
   # real name. `id -un` is authoritative; fall back to $USER only if it somehow fails.
   local _user; _user="$(id -un 2>/dev/null || printf '%s' "${USER:-}")"
 
+  # Gate on per-user systemd BEFORE installing anything (Bugbot on #485): the setuptool
+  # sets up a `systemctl --user` unit and fails on a host with no user manager, so
+  # checking first yields the accurate "no per-user systemd" reason and avoids a partial
+  # ~/bin install + user drop-ins before the Tier-2 remedy. The nohup fallback for such
+  # hosts is deferred (#1354); until then, route to prepare-host.
+  if ! _user_systemd_available; then
+    _tier2_fallthrough "this host has no per-user systemd (systemctl --user has no manager); rootless without it needs a one-time admin step"
+  fi
+
   # Preconditions — the subuid/subgid range and the setuid newuidmap/newgidmap
   # helpers — are ensured by _ensure_subid_ranges, called just before this in
   # install_linux's Tier-1 branch (RFC 0001 #1220). So by the time we get here the
@@ -915,24 +924,13 @@ install_rootless_docker() {
   # `systemctl --user enable --now docker` below picks it up.
   _configure_docker_proxy user
 
-  # Start the user daemon and make it survive logout / return after reboot without
-  # an active login session — both user-scoped, no root. Neither is fatal: the
-  # bounded `docker info` verify below is the real gate, so a systemctl hiccup
-  # falls through to actionable guidance instead of a bare set -e abort (mirrors
-  # install_docker_engine's start-then-verify). Linger is optional and can fail on
-  # polkit-locked hosts even when the daemon is up, so it only warns (Bugbot).
-  # Start the daemon under per-user systemd (survives logout via linger). On a host with
-  # NO user systemd (some hardened/HPC login nodes), a rootless daemon can't be brought up
-  # + kept alive reliably, and that path can't be validated without real HPC hardware — so
-  # route to the Tier-2 prepare-host remedy rather than a blind nohup bring-up. The nohup
-  # fallback is deferred to a host-available slice (RFC 0001 #1222; see the follow-up issue).
-  if _user_systemd_available; then
-    systemctl --user enable --now docker || true
-    loginctl enable-linger "$_user" \
-      || warn "Couldn't enable linger (optional) — the rootless daemon may not survive logout. Enable it later with:  loginctl enable-linger ${_user}"
-  else
-    _tier2_fallthrough "this host has no per-user systemd (systemctl --user has no manager); rootless without it needs a one-time admin step"
-  fi
+  # Start the user daemon under per-user systemd (survives logout via linger). We already
+  # gated on _user_systemd_available at the TOP of this function, so this is unconditional
+  # here; neither call is fatal — the bounded `docker info` verify below is the real gate,
+  # and linger can fail on polkit-locked hosts even when the daemon is up (Bugbot).
+  systemctl --user enable --now docker || true
+  loginctl enable-linger "$_user" \
+    || warn "Couldn't enable linger (optional) — the rootless daemon may not survive logout. Enable it later with:  loginctl enable-linger ${_user}"
 
   # Point every later docker/k3d call in this run at the rootless socket. docker and
   # k3d both read DOCKER_HOST from the environment, so exporting it is sufficient
