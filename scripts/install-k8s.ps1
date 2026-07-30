@@ -193,6 +193,43 @@ function Wait-ProcessWithDeadline {
   return $true
 }
 
+# Run a tracked install PROCESS with its stdout+stderr captured to temp files, wait
+# with a KILLING deadline (spinner via Wait-ProcessWithDeadline), fold any captured
+# output into the install log, and return the outcome. Mirrors the WSL / k3d-cluster-
+# start redirect pattern so a failed install leaves the real winget/installer output
+# in the log + -Diagnose bundle instead of only a bare exit code (#500). Never throws;
+# each caller applies its own policy (best-effort fall-through vs fatal Err).
+# Returns @{ State = 'ok'|'spawn-failed'|'timeout'|'failed'; ExitCode; Output }.
+function Invoke-TrackedInstall {
+  param(
+    [string]$FilePath,
+    $ArgumentList,                 # string (PS 5.1 verbatim) or array
+    [string]$Label,
+    [int]$TimeoutMinutes = 40,
+    [string]$Tag = 'install'
+  )
+  $tmp  = [System.IO.Path]::GetTempPath()   # portable (== %TEMP% on Windows); testable off-Windows
+  $outF = Join-Path $tmp "$Tag-$(Get-Random).out.log"
+  $errF = Join-Path $tmp "$Tag-$(Get-Random).err.log"
+  $p = $null
+  try {
+    $p = Start-Process -FilePath $FilePath -ArgumentList $ArgumentList -NoNewWindow -PassThru -ErrorAction Stop `
+      -RedirectStandardOutput $outF -RedirectStandardError $errF
+  } catch {
+    Remove-Item $outF, $errF -Force -ErrorAction SilentlyContinue
+    Log "$Label wouldn't start: $_"
+    return @{ State = 'spawn-failed'; ExitCode = $null; Output = "$_" }
+  }
+  $timedOut = -not (Wait-ProcessWithDeadline -Process $p -Deadline (Get-Date).AddMinutes($TimeoutMinutes) -Message $Label)
+  # stderr first, then stdout (matches the #423 failure-output ordering).
+  $log = ("$(Get-Content $errF -Raw -ErrorAction SilentlyContinue)`n$(Get-Content $outF -Raw -ErrorAction SilentlyContinue)").Trim()
+  Remove-Item $outF, $errF -Force -ErrorAction SilentlyContinue
+  if ($log) { Log "${Label}: $log" }
+  if ($timedOut)          { return @{ State = 'timeout';  ExitCode = $null;        Output = $log } }
+  if ($p.ExitCode -eq 0)  { return @{ State = 'ok';       ExitCode = 0;            Output = $log } }
+  return @{ State = 'failed'; ExitCode = $p.ExitCode; Output = $log }
+}
+
 # Wait on a background job with a visible heartbeat so a long step never leaves
 # the console silent for more than a couple of seconds (#415). Prints a spinner +
 # elapsed/timeout line while the job runs; returns $true if the job finished
@@ -762,14 +799,25 @@ function Print-Banner {
   Log "Host data dir: $HOST_DATA_DIR"
 }
 
+# Single source of truth for the install's top-level steps (#500): the up-front
+# roadmap AND every "Step N/total" header derive their total from this list, so the
+# roadmap can't silently fall out of sync with the runtime step count again (the
+# earlier roadmap listed 5 while the runtime ran 6, mis-numbering every later step).
+$script:INSTALL_STEPS = @(
+  'Check system requirements'
+  'Install system tools'
+  'Set up secure compute environment'
+  'Install the tracebloc CLI'
+  'Register this machine'
+  'Install tracebloc client'
+)
+
 function Print-Roadmap {
   Write-Host "  Steps" -ForegroundColor White
   Hint ([string]([char]0x2500) * 5)
-  Hint "1. Check system requirements"
-  Hint "2. Set up secure compute environment"
-  Hint "3. Install the tracebloc CLI"
-  Hint "4. Register this machine"
-  Hint "5. Install tracebloc client"
+  for ($i = 0; $i -lt $script:INSTALL_STEPS.Count; $i++) {
+    Hint ("{0}. {1}" -f ($i + 1), $script:INSTALL_STEPS[$i])
+  }
   Write-Host ""
 }
 
@@ -1106,23 +1154,21 @@ function Install-DockerDesktop {
       # orphan past the step and fall through to a second concurrent install —
       # Stop-Job would leave the job's child process running (#422 Bugbot).
       Info "Installing Docker Desktop (~600 MB via winget) -- several minutes is normal."
-      try {
-        # Pass Docker Desktop's OWN installer flags through winget (--override
-        # replaces winget's manifest defaults) so a fresh machine reaches a running
-        # WSL2 engine with no license/onboarding GUI prompt (#419). Use a single
-        # command-line STRING, not an array: PS 5.1's Start-Process joins array
-        # elements without quoting, which would split the --override value into
-        # stray tokens; a string is passed verbatim so the quoted value survives
-        # as one argument (#419 Bugbot).
-        $wingetArgs = 'install -e --id Docker.DockerDesktop ' +
-          '--accept-package-agreements --accept-source-agreements --silent ' +
-          '--override "install --quiet --accept-license --backend=wsl-2 --always-run-service"'
-        $wp = Start-Process -FilePath "winget" -PassThru -ErrorAction Stop -ArgumentList $wingetArgs
-        if (-not (Wait-ProcessWithDeadline -Process $wp -Deadline (Get-Date).AddMinutes(40) -Message "Installing Docker Desktop (winget)")) {
-          throw "winget Docker install timed out (process killed)"
-        }
-        if ($wp.ExitCode -ne 0) { throw "winget exited $($wp.ExitCode)" }
-      } catch { Log "Docker Desktop winget install failed (will try direct download): $_" }
+      # Pass Docker Desktop's OWN installer flags through winget (--override
+      # replaces winget's manifest defaults) so a fresh machine reaches a running
+      # WSL2 engine with no license/onboarding GUI prompt (#419). Use a single
+      # command-line STRING, not an array: PS 5.1's Start-Process joins array
+      # elements without quoting, which would split the --override value into
+      # stray tokens; a string is passed verbatim so the quoted value survives
+      # as one argument (#419 Bugbot).
+      $wingetArgs = 'install -e --id Docker.DockerDesktop ' +
+        '--accept-package-agreements --accept-source-agreements --silent ' +
+        '--override "install --quiet --accept-license --backend=wsl-2 --always-run-service"'
+      # Best-effort: on any non-ok outcome the direct download below takes over. Output
+      # is captured to the log so a winget failure is diagnosable, not a bare code (#500).
+      $r = Invoke-TrackedInstall -FilePath "winget" -ArgumentList $wingetArgs `
+        -Label "Installing Docker Desktop (winget)" -TimeoutMinutes 40 -Tag "docker-winget"
+      if ($r.State -ne 'ok') { Log "Docker Desktop winget install failed (will try direct download): state=$($r.State) exit=$($r.ExitCode)" }
       RefreshPath
     }
 
@@ -1141,28 +1187,21 @@ function Install-DockerDesktop {
           }
       }
       # Run the installer as a tracked PROCESS with a deadline that KILLS it on
-      # timeout (a background job would orphan the installer, #422 Bugbot).
-      # -ErrorAction Stop catches a spawn failure; the exit code catches a failed
-      # install — either way fail loudly, never continue as if Docker installed.
-      try {
-        # Same flags as the winget --override path: WSL2 backend + no GUI/license
-        # prompt + the engine service running unattended, so a fresh machine reaches
-        # a running engine with zero Docker Desktop interaction (#419).
-        $ip = Start-Process -FilePath $installer -ArgumentList "install --quiet --accept-license --backend=wsl-2 --always-run-service" `
-          -PassThru -ErrorAction Stop
-      } catch {
-        Remove-Item $installer -Force -ErrorAction SilentlyContinue
-        Err "Docker Desktop installer wouldn't start. Install it manually from https://www.docker.com/products/docker-desktop/ and re-run." "$_"
-      }
-      if (-not (Wait-ProcessWithDeadline -Process $ip -Deadline (Get-Date).AddMinutes(40) -Message "Installing Docker Desktop")) {
-        Remove-Item $installer -Force -ErrorAction SilentlyContinue
-        Err "Docker Desktop installation timed out (installer stopped). Install it manually from https://www.docker.com/products/docker-desktop/ and re-run."
-      }
-      if ($ip.ExitCode -ne 0) {
-        Remove-Item $installer -Force -ErrorAction SilentlyContinue
-        Err "Docker Desktop installation failed (installer exited $($ip.ExitCode)). Install it manually from https://www.docker.com/products/docker-desktop/ and re-run."
-      }
+      # timeout (a background job would orphan the installer, #422 Bugbot) and with
+      # its output captured, so a failed install shows the installer's own message in
+      # the log + -Diagnose bundle, not just an exit code (#500). Same flags as the
+      # winget --override path: WSL2 backend + no GUI/license prompt + the engine
+      # service running unattended, so a fresh machine reaches a running engine with
+      # zero Docker Desktop interaction (#419). Any non-ok outcome fails loudly.
+      $r = Invoke-TrackedInstall -FilePath $installer `
+        -ArgumentList "install --quiet --accept-license --backend=wsl-2 --always-run-service" `
+        -Label "Installing Docker Desktop" -TimeoutMinutes 40 -Tag "docker-direct"
       Remove-Item $installer -Force -ErrorAction SilentlyContinue
+      switch ($r.State) {
+        'spawn-failed' { Err "Docker Desktop installer wouldn't start. Install it manually from https://www.docker.com/products/docker-desktop/ and re-run." "$($r.Output)" }
+        'timeout'      { Err "Docker Desktop installation timed out (installer stopped). Install it manually from https://www.docker.com/products/docker-desktop/ and re-run." }
+        'failed'       { Err "Docker Desktop installation failed (installer exited $($r.ExitCode)). Install it manually from https://www.docker.com/products/docker-desktop/ and re-run." }
+      }
       RefreshPath
     }
 
@@ -1506,14 +1545,11 @@ function Install-K3dAndHelm {
       Log "Installing k3d via winget..."
       # winget install is console-silent; run it as a killable tracked process
       # (not a job — Stop-Job would orphan the child on timeout) with a spinner +
-      # deadline. Best-effort: on failure the direct download below takes over (#422).
-      try {
-        $kp = Start-Process -FilePath "winget" -PassThru -ErrorAction Stop -ArgumentList @(
-          "install","-e","--id","Rancher.k3d","--accept-package-agreements","--accept-source-agreements","--silent")
-        if (-not (Wait-ProcessWithDeadline -Process $kp -Deadline (Get-Date).AddMinutes(10) -Message "Installing k3d (winget)")) {
-          throw "k3d winget install timed out (process killed)"
-        }
-      } catch { Log "k3d winget install: $_" }
+      # deadline, capturing output so a failure is diagnosable (#500). Best-effort:
+      # on any non-ok outcome the direct download below takes over (#422).
+      $r = Invoke-TrackedInstall -FilePath "winget" -Label "Installing k3d (winget)" -TimeoutMinutes 10 -Tag "k3d-winget" `
+        -ArgumentList @("install","-e","--id","Rancher.k3d","--accept-package-agreements","--accept-source-agreements","--silent")
+      if ($r.State -ne 'ok') { Log "k3d winget install: state=$($r.State) exit=$($r.ExitCode)" }
     }
     RefreshPath
 
@@ -1581,15 +1617,11 @@ function Install-K3dAndHelm {
     if (Has "winget") {
       Log "Installing Helm via winget..."
       # winget install is console-silent; killable tracked process + spinner/deadline
-      # (a job would orphan the child on timeout). Best-effort: the direct download
-      # below takes over on failure (#422).
-      try {
-        $hp = Start-Process -FilePath "winget" -PassThru -ErrorAction Stop -ArgumentList @(
-          "install","-e","--id","Helm.Helm","--accept-package-agreements","--accept-source-agreements","--silent")
-        if (-not (Wait-ProcessWithDeadline -Process $hp -Deadline (Get-Date).AddMinutes(10) -Message "Installing Helm (winget)")) {
-          throw "helm winget install timed out (process killed)"
-        }
-      } catch { Log "helm winget install: $_" }
+      # (a job would orphan the child on timeout), capturing output so a failure is
+      # diagnosable (#500). Best-effort: the direct download below takes over (#422).
+      $r = Invoke-TrackedInstall -FilePath "winget" -Label "Installing Helm (winget)" -TimeoutMinutes 10 -Tag "helm-winget" `
+        -ArgumentList @("install","-e","--id","Helm.Helm","--accept-package-agreements","--accept-source-agreements","--silent")
+      if ($r.State -ne 'ok') { Log "helm winget install: state=$($r.State) exit=$($r.ExitCode)" }
       RefreshPath
     }
 
@@ -2772,7 +2804,7 @@ function Get-InstalledClientInfo {
 #   adopted  - cluster already registered: TB_PROV_ID/TB_PROV_NS, no password
 #   fallback - CLI missing/too old -> the legacy manual prompts in the Helm step
 function Invoke-ProvisionClient {
-  Step 5 6 "Registering this machine"
+  Step 5 $script:INSTALL_STEPS.Count "Registering this machine"
   $script:TB_PROV_MODE = "fallback"
 
   if (Get-ProvisioningPreset) {
@@ -2920,7 +2952,7 @@ function Invoke-ProvisionClient {
 
 function Install-ClientHelm {
   # -- Step 5/5: Install tracebloc client --
-  Step 6 6 "Installing tracebloc client"
+  Step 6 $script:INSTALL_STEPS.Count "Installing tracebloc client"
 
   if (-not (Test-Path $HOST_DATA_DIR)) {
     New-Item -ItemType Directory -Path $HOST_DATA_DIR -Force | Out-Null
@@ -3899,7 +3931,7 @@ function Install-TraceblocCli {
   # credential in Step 4 (browser sign-in + `client create`). A failed CLI
   # install is still non-fatal: Step 4 falls back to the legacy manual-
   # credential flow, so the machine can always be connected.
-  Step 4 6 "Install the tracebloc CLI"
+  Step 4 $script:INSTALL_STEPS.Count "Install the tracebloc CLI"
 
   Info "Installing the tracebloc CLI..."
 
@@ -3975,14 +4007,14 @@ if ((-not $Resume) -and $script:InstallState.completed -and (Test-ToolsPresent) 
 }
 
 # -- Step 1/6: Check system requirements (honest split from tool install, #422) --
-Step 1 6 "Checking system requirements"
+Step 1 $script:INSTALL_STEPS.Count "Checking system requirements"
 Test-Preflight
 Find-Gpu
 Enable-VirtualisationFeatures
 
 # -- Step 2/6: Install system tools (~700 MB — Docker Desktop, kubectl, k3d, helm;
 # each names its wait + shows a heartbeat + prints a summary line, #422) --
-Step 2 6 "Installing system tools"
+Step 2 $script:INSTALL_STEPS.Count "Installing system tools"
 Install-Winget
 Install-DockerDesktop
 Install-NvidiaContainerToolkit
@@ -3990,7 +4022,7 @@ Install-Kubectl
 Install-K3dAndHelm
 
 # -- Step 3/6: Set up secure compute environment --
-Step 3 6 "Setting up secure compute environment"
+Step 3 $script:INSTALL_STEPS.Count "Setting up secure compute environment"
 New-K3dCluster
 Install-GpuDevicePlugin
 Confirm-GpuNode
