@@ -298,6 +298,20 @@ Usage: {{ include "tracebloc.ingestorDigest" . }}
 {{- $explicit -}}
 {{- else -}}
 {{- $clientEnv := (default dict .Values.env).CLIENT_ENV | default "prod" -}}
+{{/*
+  Normalize the documented aliases before the lookup. The chart docs and the
+  SDK say dev|staging|prod while these keys are dev|stg|prod, and
+  client-runtime normalizes the same three at runtime
+  (proxy_config.ENV_ALIASES). Without this, CLIENT_ENV=staging -- the value
+  the schema documents -- missed channelTags entirely and fell back to the
+  prod float: the service would talk to the stg backend while spawning the
+  release ingestor, which is precisely the split-brain client-runtime#227
+  was filed for. Review catch on client#494.
+*/}}
+{{- $aliases := dict "development" "dev" "staging" "stg" "production" "prod" -}}
+{{- if hasKey $aliases $clientEnv -}}
+{{- $clientEnv = get $aliases $clientEnv -}}
+{{- end -}}
 {{- $channels := default dict $ing.channelTags -}}
 {{- $channel := get $channels $clientEnv | default "" -}}
 {{- if $channel -}}

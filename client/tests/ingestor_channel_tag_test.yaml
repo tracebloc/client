@@ -97,3 +97,37 @@ tests:
           content:
             name: INGESTOR_IMAGE_DIGEST
             value: ""
+
+  - it: the documented alias "staging" resolves to the stg channel, not the prod float
+    # Review catch (#494): the schema documents dev|staging|prod while these
+    # keys are dev|stg|prod, so CLIENT_ENV=staging previously missed
+    # channelTags and silently fell back to 0.7 while client-runtime
+    # normalized it to stg at runtime — the split-brain of client-runtime#227.
+    set:
+      env.CLIENT_ENV: staging
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: INGESTOR_IMAGE_TAG
+            value: "stg"
+
+  - it: the documented alias "development" resolves to the dev channel
+    set:
+      env.CLIENT_ENV: development
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: INGESTOR_IMAGE_TAG
+            value: "dev"
+
+  - it: the documented alias "production" resolves to the prod float
+    set:
+      env.CLIENT_ENV: production
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: INGESTOR_IMAGE_TAG
+            value: "0.7"
