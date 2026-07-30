@@ -1127,6 +1127,12 @@ Describe "Update-Wsl / WSL install (#414 Store-blocked fallback)" {
   It "no longer uses the bare Store-path 'wsl --update' 90s job" {
     $script:WSRC | Should -Not -Match 'cmd /c "wsl --update 2>&1"'
   }
+  It "decodes wsl --version as UTF-16 so skip-when-current actually fires (Bugbot #414)" {
+    # wsl.exe writes UTF-16LE; without Unicode console encoding the captured output
+    # is null-interleaved and Test-WslCurrent never matches (skip-when-current dies).
+    $script:WSRC | Should -Match 'OutputEncoding = \[System\.Text\.Encoding\]::Unicode[\s\S]{0,160}wsl --version'
+    $script:WSRC | Should -Not -Match 'cmd /c "wsl --version'
+  }
   It "surfaces the exact manual MSI next step on screen, not just the log (#414)" {
     $script:WSRC | Should -Match 'github.com/microsoft/WSL/releases'
     $script:WSRC | Should -Match 'Couldn''t update WSL automatically'

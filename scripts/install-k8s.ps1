@@ -642,8 +642,17 @@ function Test-WslCurrent {
 #     component the API-free /releases/latest redirect can't resolve), and #410 --
 #     enforced by a test -- forbids the rate-limited GitHub API in this installer.
 function Update-Wsl {
-  $verOut = ""
-  try { $verOut = (& cmd /c "wsl --version 2>nul" | Out-String) } catch {}
+  # wsl.exe writes UTF-16LE; capture it with the console encoding set to Unicode
+  # (same pattern as the `wsl --list` reader below), otherwise the output is
+  # null-interleaved and Test-WslCurrent never matches -- skip-when-current would
+  # never fire and every re-run would attempt a full web update (#414 Bugbot).
+  $verOut  = ""
+  $prevEnc = [Console]::OutputEncoding
+  try {
+    [Console]::OutputEncoding = [System.Text.Encoding]::Unicode
+    $verOut = (wsl --version 2>$null | Out-String)
+  } catch {}
+  finally { [Console]::OutputEncoding = $prevEnc }
   if (Test-WslCurrent -VersionOutput $verOut) {
     Log "WSL already current: $($verOut -replace '\r?\n',' ')"
     Ok "WSL is current"
