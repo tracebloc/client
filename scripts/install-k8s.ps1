@@ -742,7 +742,11 @@ function Install-DockerDesktop {
       try {
         $wp = Start-Process -FilePath "winget" -PassThru -ErrorAction Stop -ArgumentList @(
           "install","-e","--id","Docker.DockerDesktop",
-          "--accept-package-agreements","--accept-source-agreements","--silent")
+          "--accept-package-agreements","--accept-source-agreements","--silent",
+          # Pass Docker Desktop's OWN installer flags through winget (--override
+          # replaces winget's manifest defaults) so a fresh machine reaches a
+          # running WSL2 engine with no license/onboarding GUI prompt (#419).
+          "--override","install --quiet --accept-license --backend=wsl-2 --always-run-service")
         if (-not (Wait-ProcessWithDeadline -Process $wp -Deadline (Get-Date).AddMinutes(40) -Message "Installing Docker Desktop (winget)")) {
           throw "winget Docker install timed out (process killed)"
         }
@@ -770,7 +774,10 @@ function Install-DockerDesktop {
       # -ErrorAction Stop catches a spawn failure; the exit code catches a failed
       # install — either way fail loudly, never continue as if Docker installed.
       try {
-        $ip = Start-Process -FilePath $installer -ArgumentList "install --quiet --accept-license" `
+        # Same flags as the winget --override path: WSL2 backend + no GUI/license
+        # prompt + the engine service running unattended, so a fresh machine reaches
+        # a running engine with zero Docker Desktop interaction (#419).
+        $ip = Start-Process -FilePath $installer -ArgumentList "install --quiet --accept-license --backend=wsl-2 --always-run-service" `
           -PassThru -ErrorAction Stop
       } catch {
         Remove-Item $installer -Force -ErrorAction SilentlyContinue

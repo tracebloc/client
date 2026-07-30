@@ -96,7 +96,7 @@ Describe "Step honesty (#422 split check vs install)" {
   It "the Docker installer runs as a killable process, not an orphan-prone job (Bugbot #422)" {
     # Start-Process -PassThru + Wait-ProcessWithDeadline (kills on timeout) + an
     # exit-code check — a background job would orphan the installer on timeout.
-    $script:SRC | Should -Match 'Start-Process -FilePath \$installer[\s\S]{0,80}-PassThru -ErrorAction Stop'
+    $script:SRC | Should -Match 'Start-Process -FilePath \$installer[\s\S]{0,200}-PassThru -ErrorAction Stop'
     $script:SRC | Should -Match 'Wait-ProcessWithDeadline -Process \$ip'
     $script:SRC | Should -Match '\$ip\.ExitCode -ne 0'
   }
@@ -113,6 +113,24 @@ Describe "Step honesty (#422 split check vs install)" {
     $script:SRC | Should -Match 'Wait-ProcessWithDeadline -Process \$wp'
     $script:SRC | Should -Match '\$wp\.ExitCode -ne 0'
     $script:SRC | Should -Match "Docker Desktop installation didn't complete"
+  }
+}
+
+Describe "Docker Desktop install flags (#419 zero GUI interaction)" {
+  BeforeAll { $script:DSRC = Get-Content "$PSScriptRoot/../install-k8s.ps1" -Raw }
+  It "winget path passes Docker's installer flags via --override" {
+    # winget's manifest defaults can't set the backend or accept the license; --override
+    # passes Docker Desktop's own installer args so first launch has no GUI prompt.
+    $script:DSRC | Should -Match '"--override","install --quiet --accept-license --backend=wsl-2'
+  }
+  It "direct path installs unattended with the WSL2 backend" {
+    $script:DSRC | Should -Match 'install --quiet --accept-license --backend=wsl-2 --always-run-service'
+  }
+  It "both install paths select the WSL2 backend explicitly (no implicit choice)" {
+    ([regex]::Matches($script:DSRC, 'backend=wsl-2')).Count | Should -BeGreaterOrEqual 2
+  }
+  It "both paths run the engine service unattended (zero GUI first-run)" {
+    ([regex]::Matches($script:DSRC, 'always-run-service')).Count | Should -BeGreaterOrEqual 2
   }
 }
 
