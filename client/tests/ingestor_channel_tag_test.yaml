@@ -1,0 +1,99 @@
+suite: ingestor per-environment channel tag (backend#1360)
+templates:
+  - templates/jobs-manager-deployment.yaml
+release:
+  name: stg
+  namespace: tracebloc
+set:
+  clientId: "test-id"
+  clientPassword: "test"
+tests:
+  - it: dev edges spawn the :dev internal channel
+    set:
+      env.CLIENT_ENV: dev
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: INGESTOR_IMAGE_TAG
+            value: "dev"
+
+  - it: staging edges spawn the :stg internal channel
+    set:
+      env.CLIENT_ENV: stg
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: INGESTOR_IMAGE_TAG
+            value: "stg"
+
+  - it: prod stays on the semver float, never a :prod tag (none is published)
+    set:
+      env.CLIENT_ENV: prod
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: INGESTOR_IMAGE_TAG
+            value: "0.7"
+
+  - it: defaults to the prod float when CLIENT_ENV is unset
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: INGESTOR_IMAGE_TAG
+            value: "0.7"
+
+  - it: an explicit tag override wins over the channel for every environment
+    set:
+      env.CLIENT_ENV: dev
+      images.ingestor.tag: "0.8.0"
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: INGESTOR_IMAGE_TAG
+            value: "0.8.0"
+
+  - it: an unknown CLIENT_ENV falls back to the literal rather than rendering empty
+    set:
+      env.CLIENT_ENV: produktion
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: INGESTOR_IMAGE_TAG
+            value: "0.7"
+
+  - it: renders for a release predating channelTags (--reuse-values replay)
+    set:
+      env.CLIENT_ENV: dev
+      images.ingestor.channelTags: null
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: INGESTOR_IMAGE_TAG
+            value: "0.7"
+
+  - it: prod still pins by digest, so the tag is not the spawn target there
+    set:
+      env.CLIENT_ENV: prod
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: INGESTOR_IMAGE_DIGEST
+            value: "sha256:9098b3c9b83951f825e262d6ff1e9c47c46c5b5cafbfc8fef1ed82ccbadebb24"
+
+  - it: dev gets no digest, so it spawns by the floating channel tag
+    set:
+      env.CLIENT_ENV: dev
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: INGESTOR_IMAGE_DIGEST
+            value: ""

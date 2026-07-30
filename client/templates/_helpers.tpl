@@ -274,6 +274,40 @@ defeating the pin. Every read is nil-guarded for the same reason.
 
 Usage: {{ include "tracebloc.ingestorDigest" . }}
 */}}
+{{/*
+  Effective floating tag for spawned ingestion Jobs (backend#1360).
+
+  Precedence, mirroring tracebloc.ingestorDigest:
+    1. `images.ingestor.tag`          explicit override, any environment
+    2. `images.ingestor.channelTags[CLIENT_ENV]`   per-environment channel
+    3. "0.7"                          last-resort literal, so a release that
+                                      predates these keys still renders under
+                                      `--reuse-values`
+
+  Only consulted when no digest applies: jobs-manager builds `repo@digest`
+  when tracebloc.ingestorDigest is non-empty, and `repo:tag` otherwise
+  (client-runtime submit_ingestion_run._build_image_reference).
+
+  dev/stg resolve to the UNSIGNED internal channels. Prod is a semver float,
+  not a `:prod` tag — none is published.
+*/}}
+{{- define "tracebloc.ingestorTag" -}}
+{{- $ing := default dict .Values.images.ingestor -}}
+{{- $explicit := $ing.tag | default "" -}}
+{{- if $explicit -}}
+{{- $explicit -}}
+{{- else -}}
+{{- $clientEnv := (default dict .Values.env).CLIENT_ENV | default "prod" -}}
+{{- $channels := default dict $ing.channelTags -}}
+{{- $channel := get $channels $clientEnv | default "" -}}
+{{- if $channel -}}
+{{- $channel -}}
+{{- else -}}
+{{- "0.7" -}}
+{{- end -}}
+{{- end -}}
+{{- end }}
+
 {{- define "tracebloc.ingestorDigest" -}}
 {{- $ing := default dict .Values.images.ingestor -}}
 {{- $explicit := $ing.digest | default "" -}}
