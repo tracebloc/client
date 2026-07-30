@@ -275,6 +275,28 @@ defeating the pin. Every read is nil-guarded for the same reason.
 Usage: {{ include "tracebloc.ingestorDigest" . }}
 */}}
 {{/*
+  Resolved CLIENT_ENV, with the documented aliases normalized to the
+  canonical dev|stg|prod keys.
+
+  ONE definition on purpose. Bugbot caught the first cut normalizing inside
+  tracebloc.ingestorTag only, so CLIENT_ENV=production selected the prod
+  float tag while tracebloc.ingestorDigest still compared the RAW value to
+  "prod" and returned nothing -- silently dropping the reproducibility pin
+  (backend#1028/#1245) on an edge that looked correctly configured. Any future
+  consumer of CLIENT_ENV must go through here rather than re-deriving it, the
+  same reason ENV_ALIASES lives once in client-runtime proxy_config.
+*/}}
+{{- define "tracebloc.clientEnv" -}}
+{{- $raw := (default dict .Values.env).CLIENT_ENV | default "prod" -}}
+{{- $aliases := dict "development" "dev" "staging" "stg" "production" "prod" -}}
+{{- if hasKey $aliases $raw -}}
+{{- get $aliases $raw -}}
+{{- else -}}
+{{- $raw -}}
+{{- end -}}
+{{- end }}
+
+{{/*
   Effective floating tag for spawned ingestion Jobs (backend#1360).
 
   Precedence, mirroring tracebloc.ingestorDigest:
@@ -297,21 +319,7 @@ Usage: {{ include "tracebloc.ingestorDigest" . }}
 {{- if $explicit -}}
 {{- $explicit -}}
 {{- else -}}
-{{- $clientEnv := (default dict .Values.env).CLIENT_ENV | default "prod" -}}
-{{/*
-  Normalize the documented aliases before the lookup. The chart docs and the
-  SDK say dev|staging|prod while these keys are dev|stg|prod, and
-  client-runtime normalizes the same three at runtime
-  (proxy_config.ENV_ALIASES). Without this, CLIENT_ENV=staging -- the value
-  the schema documents -- missed channelTags entirely and fell back to the
-  prod float: the service would talk to the stg backend while spawning the
-  release ingestor, which is precisely the split-brain client-runtime#227
-  was filed for. Review catch on client#494.
-*/}}
-{{- $aliases := dict "development" "dev" "staging" "stg" "production" "prod" -}}
-{{- if hasKey $aliases $clientEnv -}}
-{{- $clientEnv = get $aliases $clientEnv -}}
-{{- end -}}
+{{- $clientEnv := include "tracebloc.clientEnv" . -}}
 {{- $channels := default dict $ing.channelTags -}}
 {{- $channel := get $channels $clientEnv | default "" -}}
 {{- if $channel -}}
@@ -332,7 +340,7 @@ Usage: {{ include "tracebloc.ingestorDigest" . }}
 {{- if hasKey $ing "prodPin" -}}
 {{- $prodPin = $ing.prodPin -}}
 {{- end -}}
-{{- $clientEnv := (default dict .Values.env).CLIENT_ENV | default "prod" -}}
+{{- $clientEnv := include "tracebloc.clientEnv" . -}}
 {{- if and $prodPin (eq $clientEnv "prod") -}}
 {{- $ing.prodDigest | default "" -}}
 {{- end -}}
