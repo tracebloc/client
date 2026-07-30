@@ -899,17 +899,22 @@ _start_rootless_nohup() {
   _launch_dockerd_rootless
   # nohup starts the daemon ASYNC (unlike systemd --now), so poll the socket until it
   # answers or a bounded number of tries elapse — the shared verify below is the gate.
-  local _i
+  local _i _up=0
   for _i in $(seq 1 30); do
-    _bounded 5 docker -H "unix://${XDG_RUNTIME_DIR}/docker.sock" info >/dev/null 2>&1 && break
+    if _bounded 5 docker -H "unix://${XDG_RUNTIME_DIR}/docker.sock" info >/dev/null 2>&1; then _up=1; break; fi
     sleep 1
   done
-  # No linger without user-systemd → be honest that autostart isn't set (AC #1222),
-  # and record the EXACT runtime dir so _persist_docker_host + the restart guidance
-  # target the SAME socket we used (esp. the $HOME fallback, not /run/user) — Bugbot #485.
-  TB_ROOTLESS_NO_LINGER=1
+  # Record the EXACT runtime dir so _persist_docker_host + the restart guidance target
+  # the SAME socket we used (esp. the $HOME fallback, not /run/user) — Bugbot #485.
   TB_ROOTLESS_RUNTIME_DIR="$XDG_RUNTIME_DIR"
-  warn "Started rootless Docker without user-systemd — it will NOT auto-restart after logout or reboot (no linger). Restart it manually with:  XDG_RUNTIME_DIR=${XDG_RUNTIME_DIR} nohup dockerd-rootless.sh &"
+  # Only claim "started" once the daemon actually ANSWERED (Bugbot #485 r2): a bare
+  # "Started…" before a failed poll contradicts the shared verify's "daemon never
+  # answered" fall-through moments later. If it didn't come up, stay silent and let
+  # that verify route to _tier2_fallthrough honestly.
+  if [ "$_up" = "1" ]; then
+    TB_ROOTLESS_NO_LINGER=1   # honest: no linger without user-systemd → no autostart
+    warn "Started rootless Docker without user-systemd — it will NOT auto-restart after logout or reboot (no linger). Restart it manually with:  XDG_RUNTIME_DIR=${XDG_RUNTIME_DIR} nohup dockerd-rootless.sh &"
+  fi
 }
 
 install_rootless_docker() {
@@ -927,14 +932,19 @@ install_rootless_docker() {
   # by docker-ce-rootless-extras when it's already present; otherwise fetch Docker's
   # official rootless installer (same retry + mktemp pattern as install_docker_engine's
   # get.docker.com path), run as the current user — never under sudo.
+  # Guard both install paths: under `set -e` an unguarded spin_cmd failure would
+  # abort with the spinner log tail, NOT the Tier-2 remedy this slice promises for a
+  # setuptool/installer failure — route it through _tier2_fallthrough instead (Bugbot #485 r2).
   if has dockerd-rootless-setuptool.sh; then
-    spin_cmd "Installing rootless Docker…" dockerd-rootless-setuptool.sh install
+    spin_cmd "Installing rootless Docker…" dockerd-rootless-setuptool.sh install \
+      || _tier2_fallthrough "the rootless setup tool (dockerd-rootless-setuptool.sh install) failed"
   else
     local rootless_script
     rootless_script="$(mktemp)"
     retry 3 5 curl_secure -fsSL https://get.docker.com/rootless -o "$rootless_script"
     # No chmod +x — we run it via `sh "$rootless_script"`, which ignores the exec bit (Asad review, #452).
-    spin_cmd "Installing rootless Docker…" sh "$rootless_script"
+    spin_cmd "Installing rootless Docker…" sh "$rootless_script" \
+      || _tier2_fallthrough "the rootless installer (get.docker.com/rootless) failed"
     rm -f "$rootless_script"
   fi
 

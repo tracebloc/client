@@ -990,6 +990,35 @@ _stub_install_steps() {
   [[ "$output" == *"prepare-host"* ]]                    # routes to the Tier-2 remedy
 }
 
+@test "install_rootless_docker: no user-systemd + nohup daemon never answers -> no false 'Started' claim, honest Tier-2 (#485 r2)" {
+  MOCK_CALLS="$(mktemp)"
+  PRESENT_CMDS="newuidmap newgidmap dockerd-rootless-setuptool.sh dockerd-rootless.sh docker"
+  XDG_RUNTIME_DIR="$BATS_TEST_TMPDIR/run"; mkdir -p "$XDG_RUNTIME_DIR"
+  HOME="$BATS_TEST_TMPDIR"
+  systemctl() { :; }                                     # no user manager -> nohup path
+  loginctl()  { :; }
+  _launch_dockerd_rootless() { :; }                      # "launched" but the daemon never comes up
+  docker()    { return 1; }                              # every poll + the shared verify fail
+  sleep()     { :; }                                     # don't actually wait out the 30-try poll
+  run install_rootless_docker
+  [ "$status" -ne 0 ]                                    # honest fall-through, not a silent proceed
+  [[ "$output" != *"Started rootless Docker"* ]]         # NO "Started …" claim on a failed bring-up
+  [[ "$output" == *"prepare-host"* ]]                    # routes to the Tier-2 remedy
+}
+
+@test "install_rootless_docker: setuptool install failure -> Tier-2 fall-through, not a bare set -e abort (#485 r2)" {
+  MOCK_CALLS="$(mktemp)"
+  PRESENT_CMDS="newuidmap newgidmap dockerd-rootless-setuptool.sh docker"
+  XDG_RUNTIME_DIR=/run/user/1000; HOME="$BATS_TEST_TMPDIR"
+  systemctl() { case "$*" in *is-system-running*) echo running ;; esac; }
+  loginctl()  { :; }
+  spin_cmd()  { record "$*"; case "$*" in *"dockerd-rootless-setuptool.sh install"*) return 1 ;; *) return 0 ;; esac; }
+  run install_rootless_docker
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"prepare-host"* ]]                    # routed to the Tier-2 remedy…
+  [[ "$output" == *"setup tool"* ]]                      # …naming the setuptool failure, not a spinner tail
+}
+
 # ── _ensure_subid_ranges: the Tier-1 subuid/subgid gate (RFC 0001 #1220) ─────
 @test "_ensure_subid_ranges: present => proceeds with zero privileged calls" {
   MOCK_CALLS="$(mktemp)"
