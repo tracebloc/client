@@ -65,6 +65,14 @@ Describe "Daily-user provisioning (#418)" {
   It "Get-UserProfileDir returns null for a user who has never signed in" {
     Get-UserProfileDir -User 'nonexistent-user-9d2f' | Should -Be $null
   }
+  It "Test-NameInGroupOutput matches on the bare name (domain-stripped, case-insensitive)" {
+    Test-NameInGroupOutput -Output @('Administrator','MACHINE\JDoe') -User 'CORP\jdoe' | Should -BeTrue
+    Test-NameInGroupOutput -Output @('Administrator','Guest')        -User 'jdoe'      | Should -BeFalse
+  }
+  It "Test-NameInGroupOutput is false for empty output or empty user" {
+    Test-NameInGroupOutput -Output @()          -User 'jdoe' | Should -BeFalse
+    Test-NameInGroupOutput -Output @('jdoe')    -User ''     | Should -BeFalse
+  }
   It "Resolve-DailyUser prefers the param and strips the domain" {
     Resolve-DailyUser -Param 'CORP\jdoe' -CurrentUser 'admin' | Should -Be 'jdoe'
   }
@@ -77,6 +85,16 @@ Describe "Daily-user provisioning wiring (#418 source guards)" {
   BeforeAll { $script:PSRC = Get-Content "$PSScriptRoot/../install-k8s.ps1" -Raw }
   It "adds the daily user to docker-users" {
     $script:PSRC | Should -Match 'net localgroup docker-users'
+  }
+  It "verifies docker-users membership by state query, not by string-matching net /add output" {
+    $script:PSRC | Should -Match "Test-LocalGroupMember -Group 'docker-users'"
+    $script:PSRC | Should -Not -Match "already a member"   # no locale-fragile stderr parse
+    $script:PSRC | Should -Not -Match 'net localgroup docker-users .* /add 2>&1'
+  }
+  It "warns loudly (never green) when the critical docker-users step fails" {
+    $script:PSRC | Should -Match 'Could NOT add .* to docker-users'
+    # the green "Configured for" summary is gated behind dockerUsersOk
+    $script:PSRC | Should -Match 'if \(-not \$dockerUsersOk\)'
   }
   It "merges a sized .wslconfig via Add-WslMemorySetting (preserves other settings)" {
     $script:PSRC | Should -Match 'Add-WslMemorySetting -Existing'

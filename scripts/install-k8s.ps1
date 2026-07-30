@@ -1602,6 +1602,33 @@ function Get-UserProfileDir {
   return $null
 }
 
+# Pure: does the bare (domain-stripped) <User> appear in local-group member output
+# (either Get-LocalGroupMember .Name values or `net localgroup <group>` lines)?
+# Case-insensitive name compare -> locale-independent, no stderr string-matching (#418 Bugbot).
+function Test-NameInGroupOutput {
+  param([string[]]$Output, [string]$User)
+  $short = ($User -replace '^.*\\', '').Trim()
+  if (-not $short) { return $false }
+  foreach ($line in @($Output)) {
+    if ((("$line".Trim() -replace '^.*\\', '')) -ieq $short) { return $true }
+  }
+  return $false
+}
+
+# Is <User> a member of local <Group>? STATE QUERY (not a parse of `net ... /add`
+# output): prefer Get-LocalGroupMember, fall back to `net localgroup <group>`
+# STDOUT (not 2>&1-merged). Used to verify docker-users idempotently (#418 Bugbot).
+function Test-LocalGroupMember {
+  param([string]$Group, [string]$User)
+  try {
+    $names = Get-LocalGroupMember -Group $Group -ErrorAction Stop | ForEach-Object { $_.Name }
+    return (Test-NameInGroupOutput -Output $names -User $User)
+  } catch {
+    try { return (Test-NameInGroupOutput -Output (& net localgroup $Group 2>$null) -User $User) }
+    catch { return $false }
+  }
+}
+
 # Provision Docker for the daily user during the elevated run (#418). Warn-only;
 # TRACEBLOC_SKIP_DAILY_USER opts out. The .wslconfig applies at the daily user's
 # next sign-in (the acceptance scenario), so we do NOT `wsl --shutdown` and tear
@@ -1617,12 +1644,22 @@ function Set-DailyUserProvisioning {
   Info "Configuring Docker for '$user' so no admin rights are needed later..."
   $did = @()
 
-  # 1) docker-users membership -> the standard account can use Docker.
+  # 1) docker-users membership -> the standard account can use Docker. This is the
+  # CRITICAL step: without it the daily account can't use Docker at all. Verify by
+  # STATE QUERY (Test-LocalGroupMember), never by string-matching the localized,
+  # 2>&1-merged output of `net localgroup /add` (#418 Bugbot).
+  $dockerUsersOk = $false
   try {
-    $out = (& net localgroup docker-users "$user" /add 2>&1 | Out-String)
-    if ($LASTEXITCODE -eq 0)                 { $did += "added to docker-users" }
-    elseif ($out -match '(?i)already a member') { $did += "already in docker-users" }
-    else { Log "net localgroup docker-users add: $out" }
+    if (Test-LocalGroupMember -Group 'docker-users' -User $user) {
+      $dockerUsersOk = $true; $did += "already in docker-users"
+    } else {
+      $null = (& net localgroup docker-users "$user" /add 2>$null)   # idempotent; verify below, don't parse
+      if (Test-LocalGroupMember -Group 'docker-users' -User $user) {
+        $dockerUsersOk = $true; $did += "added to docker-users"
+      } else {
+        Log "docker-users add did not take for '$user' (net exit $LASTEXITCODE)"
+      }
+    }
   } catch { Log "docker-users add failed: $_" }
 
   # 2) Docker Desktop autostart via the per-user Run key (current user only -- a
@@ -1660,9 +1697,18 @@ function Set-DailyUserProvisioning {
     }
   } catch { Log ".wslconfig write failed: $_" }
 
-  # 4) Summary so IT can review what changed.
-  if ($did.Count) { Ok ("Configured for '$user': " + ($did -join "; ") + ".") }
-  else            { Warn "Couldn't auto-configure Docker for '$user' -- see the log; add them to docker-users manually if needed." }
+  # 4) Summary. docker-users membership is the make-or-break step: without it the
+  # standard account can't use Docker at all. If it didn't take, WARN loudly even
+  # when other steps succeeded -- never print a green "Configured" over a broken
+  # setup, or IT leaves the elevated window thinking the researcher is ready (#418 Bugbot).
+  if (-not $dockerUsersOk) {
+    if ($did.Count) { Info ("Other steps done for '$user': " + ($did -join "; ") + ".") }
+    Warn "Could NOT add '$user' to docker-users -- the standard account won't be able to use Docker. While you still have admin rights, run:  net localgroup docker-users $user /add"
+  } elseif ($did.Count) {
+    Ok ("Configured for '$user': " + ($did -join "; ") + ".")
+  } else {
+    Warn "Couldn't auto-configure Docker for '$user' -- see the log; add them to docker-users manually if needed."
+  }
 }
 
 # =============================================================================
