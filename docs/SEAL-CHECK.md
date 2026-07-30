@@ -179,11 +179,20 @@ RFC-0003 §8.4: **do not assume** k3d enforces NetworkPolicy — k3s ships an
 embedded (kube-router-based) NetworkPolicy controller that is *expected* to
 enforce egress rules, but expected is not verified.
 
-> **Status: this verification run has NOT yet been executed and recorded by
-> the team.** Until a run below is recorded (backend#1184), treat k3d/k3s
-> egress enforcement as unverified — i.e. unsealed for the egress guarantee.
-> The steps use the existing `egress-enforcement` probe; nothing new needs
-> to be built to execute them.
+> **Status (updated 2026-07-30): the k3s NetworkPolicy _substrate_ is
+> VERIFIED to enforce egress on k3d; the full-chart `egress-enforcement`
+> probe run (steps below) is still the pending end-to-end confirmation.**
+> A standalone deny-egress `NetworkPolicy` (podSelector on a probe pod,
+> `policyTypes: [Egress]`, empty `egress:`) was applied on a throwaway
+> `k3d v5.8.3` cluster running `k3s v1.33.6+k3s1`. A `curl` from the pod to
+> `1.1.1.1:443` went **reachable → BLOCKED under the policy → reachable
+> again after removing it** (HTTP 301 → connect failure → HTTP 301), so the
+> block is attributable to the policy, not a fluke: k3s's embedded
+> (kube-router) controller **does enforce** egress NetworkPolicy on this k3d
+> version — the RFC-0003 §8.4 "do not assume" doubt is resolved for the
+> substrate. What remains (backend#1184) is recording the *full-chart*
+> `egress-enforcement` probe run against a deployed release; until then the
+> §8.3 k3d cell reads "substrate verified; full-probe run pending".
 
 Run on a **local test install** (the lockdown flip below breaks direct
 training-pod egress until reverted — do not run it on a fleet you care
@@ -220,16 +229,22 @@ helm upgrade "$RELEASE" tracebloc/client -n "$NS" --reuse-values \
   --set networkPolicy.training.allowExternalHttps=true
 ```
 
-When the run has been executed, record the result (pass/fail, k3s/k3d
-versions, date) here and fold it into the RFC-0003 §8.3 matrix.
+The *full-chart* probe run (steps 1–4 above, against a deployed release) is
+still to be recorded here (pass/fail, k3s/k3d versions, date) and folded into
+the RFC-0003 §8.3 matrix. The **substrate** result above already confirms the
+k3s controller enforces egress NetworkPolicy on k3d v5.8.3 / k3s v1.33.6+k3s1
+(reachable → blocked → reachable), which is the specific "do not assume k3s
+enforces NetworkPolicy" doubt §8.4 raises.
 
 ## What the suite does not cover yet (follow-ups)
 
 Tracked under backend#1184 unless noted:
 
-- **The live k3d verification run** (§8.4) — the runbook above is
-  documented but has not been executed; the k3d cell in the matrix stays
-  "verification run pending" until it is.
+- **The live k3d verification run** (§8.4) — the *substrate* enforcement is
+  now verified (k3d v5.8.3 / k3s v1.33.6+k3s1 enforces egress NetworkPolicy,
+  recorded above 2026-07-30); the *full-chart* `egress-enforcement` probe run
+  against a deployed release is still pending, and the §8.3 k3d cell stays
+  "substrate verified; full-probe run pending" until it is recorded.
 - **A single aggregated sealed/unsealed verdict with per-guarantee detail**
   — surfaced by the tracebloc CLI on top of this label contract
   (tracebloc/cli#393). Today the aggregate is `helm test`'s exit status
