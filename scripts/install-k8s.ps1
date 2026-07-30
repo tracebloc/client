@@ -622,6 +622,117 @@ function Enable-OneVirtFeature {
   }
 }
 
+# Modern (Store or standalone) WSL prints a version block from `wsl --version`;
+# legacy/absent WSL errors or prints nothing. Returns $true when WSL is already
+# installed and current enough that no update is needed (#414). Takes the command
+# output as a parameter so it's unit-testable without WSL present.
+#
+# True only when WSL is present AND at least $MinVersion -- not merely present.
+# `wsl --version` localizes its labels (Japanese "WSL バージョン:"), so match the
+# version NUMBER, not the "WSL version:" label. The FIRST dotted version in the
+# block is the WSL version (kernel/WSLg follow); require it to meet a floor so a
+# STALE modern WSL (e.g. 2.0.x) still updates instead of being green-OK'd forever
+# (#414 reviewer -- matching any dotted number was effectively Test-WslPresent).
+# The floor is Docker Desktop's documented WSL minimum (2.1.5): below it, Docker
+# Desktop prompts to update WSL, the exact symptom this avoids (#414 Bugbot).
+# TB_WSL_MIN_VERSION overrides it.
+function Test-WslCurrent {
+  param(
+    [string]$VersionOutput,
+    [string]$MinVersion = $(if ($env:TB_WSL_MIN_VERSION) { $env:TB_WSL_MIN_VERSION } else { "2.1.5" })
+  )
+  $m = [regex]::Match($VersionOutput, '\d+\.\d+\.\d+(\.\d+)?')
+  if (-not $m.Success) { return $false }
+  try { return ([version]$m.Value -ge [version]$MinVersion) } catch { return $false }
+}
+
+# `wsl --version` can hang on a wedged LxssManager (plausible on the same corporate
+# boxes this targets), so run it BOUNDED as a job (like the wsl --list reader) and
+# return "" on timeout so skip-when-current treats WSL as not-current and the update
+# still runs (#414 reviewer). Encoding is set to Unicode inside the job (wsl.exe
+# writes UTF-16LE); the restore is wrapped so a throw there can't kill the install.
+function Get-WslVersionOutput {
+  $job = Start-Job -InitializationScript $JobInit -ScriptBlock {
+    $prev = [Console]::OutputEncoding
+    try { [Console]::OutputEncoding = [System.Text.Encoding]::Unicode; (wsl --version 2>$null | Out-String) }
+    finally { try { [Console]::OutputEncoding = $prev } catch {} }
+  }
+  $out = ""
+  if (Wait-JobWithProgress -Job $job -TimeoutSec 20 -Message "Checking WSL") {
+    $out = (Receive-Job $job -ErrorAction SilentlyContinue | Out-String)
+  } else {
+    Log "wsl --version timed out; treating WSL as not current."
+  }
+  Remove-Job $job -Force -ErrorAction SilentlyContinue
+  return $out
+}
+
+# Run `wsl --update [ExtraArgs]` as a tracked process with a deadline, redirecting
+# its output to temp files (logged -- so a failure leaves real WSL evidence in the
+# log and the -Diagnose bundle, and wsl's \r progress doesn't fight the spinner),
+# and classify the outcome: ok / not-found (spawn failed) / timeout / failed (#414
+# reviewer). Returns @{ State; ExitCode }.
+function Invoke-WslUpdate {
+  param([string[]]$ExtraArgs = @())
+  $wslArgs = @("--update") + $ExtraArgs
+  $label   = if ($ExtraArgs -contains "--web-download") { "Updating WSL (web download, bypassing the Store)" } else { "Updating WSL" }
+  $outF = Join-Path $env:TEMP "wsl-update-$(Get-Random).out.log"
+  $errF = Join-Path $env:TEMP "wsl-update-$(Get-Random).err.log"
+  Info "$label..."
+  $p = $null
+  try {
+    $p = Start-Process -FilePath "wsl" -ArgumentList $wslArgs -NoNewWindow -PassThru -ErrorAction Stop `
+      -RedirectStandardOutput $outF -RedirectStandardError $errF
+  } catch {
+    Remove-Item $outF, $errF -Force -ErrorAction SilentlyContinue
+    Log "wsl $($wslArgs -join ' ') wouldn't start: $_"
+    return @{ State = 'not-found'; ExitCode = $null }
+  }
+  $timedOut = -not (Wait-ProcessWithDeadline -Process $p -Deadline (Get-Date).AddMinutes(5) -Message $label)
+  $log = ("$(Get-Content $errF -Raw -ErrorAction SilentlyContinue)`n$(Get-Content $outF -Raw -ErrorAction SilentlyContinue)").Trim()
+  Remove-Item $outF, $errF -Force -ErrorAction SilentlyContinue
+  if ($log) { Log "wsl $($wslArgs -join ' '): $log" }
+  if ($timedOut) { return @{ State = 'timeout'; ExitCode = $null } }
+  if ($p.ExitCode -eq 0) { return @{ State = 'ok'; ExitCode = 0 } }
+  return @{ State = 'failed'; ExitCode = $p.ExitCode }
+}
+
+# Update WSL in a way that survives Store-blocked corporate networks (#414):
+#  1. Skip when already current (bounded probe + version floor; fast <2s re-runs).
+#  2. Prefer `wsl --update --web-download` (Microsoft's servers, not the Store).
+#  3. If that exits non-zero (e.g. an unpatched wsl.exe that rejects --web-download),
+#     retry plain `wsl --update` (Store path) once before giving up.
+#  4. On failure, name the specific cause + the exact manual MSI step ON SCREEN.
+# We deliberately do NOT auto-download the GitHub-releases MSI: that needs
+# api.github.com (asset name unresolvable API-free), which #410 forbids.
+function Update-Wsl {
+  if (Test-WslCurrent -VersionOutput (Get-WslVersionOutput)) {
+    Ok "WSL is current"
+    return
+  }
+
+  $r = Invoke-WslUpdate -ExtraArgs @("--web-download")
+  if ($r.State -eq 'ok') { Ok "WSL updated"; return }
+  # Two-rung ladder: --web-download is only understood by a serviced wsl.exe; an
+  # unpatched box rejects it and exits non-zero fast, where plain --update works
+  # (#414 reviewer). Only retry on a real exit (not timeout / missing wsl.exe).
+  if ($r.State -eq 'failed') {
+    $r2 = Invoke-WslUpdate -ExtraArgs @()
+    if ($r2.State -eq 'ok') { Ok "WSL updated"; return }
+    $r = $r2
+  }
+
+  # Differentiated failure -- "the Store may be blocked" is the one cause
+  # --web-download rules out, so don't say it (#414 reviewer).
+  switch ($r.State) {
+    'not-found' { Warn "Couldn't update WSL: wsl.exe wasn't found." }
+    'timeout'   { Warn "Updating WSL timed out and was stopped." }
+    default     { Warn "Couldn't update WSL automatically (wsl exited $($r.ExitCode))." }
+  }
+  $msiArch = if ((Get-WindowsArch) -eq 'arm64') { 'arm64' } else { 'x64' }
+  Hint "Download the latest WSL MSI (wsl.<version>.$msiArch.msi) from https://github.com/microsoft/WSL/releases, run it, then re-run this installer -- otherwise Docker Desktop will prompt you to install WSL."
+}
+
 function Enable-VirtualisationFeatures {
   $rebootNeeded = $false
   $features = @{
@@ -655,28 +766,7 @@ function Enable-VirtualisationFeatures {
 
   Ok "System features"
 
-  Log "Updating WSL..."
-  $wslJob = Start-Job -InitializationScript $JobInit -ScriptBlock { cmd /c "wsl --update 2>&1" }
-  Write-Host -NoNewline "  "
-  $wslTimeoutSec = 90
-  $wslElapsed = 0
-  while ($wslJob.State -eq "Running" -and $wslElapsed -lt $wslTimeoutSec) {
-    Write-Host -NoNewline "." -ForegroundColor DarkGray
-    Start-Sleep -Seconds 2
-    $wslElapsed += 2
-  }
-  Write-Host ""
-  if ($wslJob.State -eq "Running") {
-    Stop-Job $wslJob
-    Log "WSL update timed out after ${wslTimeoutSec}s -- skipping."
-    Warn "WSL update is taking too long. Skipping for now."
-    Hint "Run 'wsl --update' manually after installation."
-  } else {
-    $wslUpdate = Receive-Job -Job $wslJob
-    $wslExitOk = $wslJob.State -eq "Completed"
-    if (-not $wslExitOk) { Log "WSL update may not have completed cleanly." }
-  }
-  Remove-Job -Job $wslJob -Force
+  Update-Wsl
 
   $wslSetJob = Start-Job -InitializationScript $JobInit -ScriptBlock { cmd /c "wsl --set-default-version 2 2>&1" }
   $wslSetDone = $wslSetJob | Wait-Job -Timeout 20
