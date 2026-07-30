@@ -1683,7 +1683,10 @@ function Set-DailyUserProvisioning {
     if ($null -eq $profileDir) {
       # User has never signed in -> no profile to write into. Note it as a manual step.
       $did += "no profile for '$user' yet -- set [wsl2] memory in their .wslconfig after first sign-in"
-    } elseif ($null -ne $hostGb) {
+    } elseif ($null -eq $hostGb) {
+      # Host RAM undetectable -> can't size the budget. Note it rather than skip silently (#418 Bugbot).
+      $did += "couldn't detect host RAM -- set [wsl2] memory in '$user's .wslconfig manually"
+    } else {
       $wslCfg   = Join-Path $profileDir ".wslconfig"
       $existing = if (Test-Path $wslCfg) { (Get-Content $wslCfg -Raw -ErrorAction SilentlyContinue) } else { "" }
       $memGb    = Get-WslConfigMemoryGb -HostGb $hostGb
