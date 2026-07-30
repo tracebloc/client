@@ -3048,14 +3048,16 @@ function Test-Preflight {
     Warn "Memory: couldn't determine total RAM (skipping)."
   } else {
     $budgetNote = if ($null -ne $budget) { " (Docker's current share: $budget GB)" } else { "" }
-    $recTrain   = Get-PfMemRecommendation -DesiredGb $recMemGb  -HostGb $mem
     if ($mem -lt $minMemGb) {
       Warn "Memory: $mem GB$budgetNote - below the $minMemGb GB the client needs; it will OOM."
       Hint "This machine has $mem GB of RAM total; the client needs at least $minMemGb GB. Free up memory or use a larger machine."
     }
     elseif ($mem -lt $warnMemGb) {
-      Warn "Memory: $mem GB$budgetNote - enough to run, but training (~8 GB/job) may OOM; more RAM helps to train locally."
-      Hint "To train locally, give Docker up to $recTrain GB (the most this $mem GB host can spare): WSL2 backend - [wsl2] memory=${recTrain}GB in %UserProfile%\.wslconfig + 'wsl --shutdown'; Hyper-V - Docker Desktop -> Settings -> Resources -> Advanced."
+      # Runs, but too small for local training: it can't spare a trainable Docker
+      # budget (~8 GB/job + ~2 GB for the OS), so don't dangle a "give Docker N GB
+      # to train" target that this host physically can't meet (#417 Bugbot).
+      Warn "Memory: $mem GB$budgetNote - enough to run the client, but too little for local training (~8 GB/job may OOM)."
+      Hint "The client will run here; for local training use a machine with more RAM (~$($warnMemGb + 2) GB+ total)."
     }
     else {
       Ok "Memory: $mem GB$budgetNote"
@@ -3151,8 +3153,14 @@ function Test-PreflightRuntimeMem {
     $host_ = Get-PfMemGb
     $rec = if ($null -ne $host_) { Get-PfMemRecommendation -DesiredGb $warnMemGb -HostGb $host_ } else { $warnMemGb }
     $hostNote = if ($null -ne $host_) { " of $host_ GB host RAM" } else { "" }
-    Warn "Docker's memory budget is $budget GB$hostNote - the client may OOM under load; $rec GB recommended."
-    Hint "Raise Docker's memory to $rec GB, then re-install: WSL2 backend - [wsl2] memory=${rec}GB in %UserProfile%\.wslconfig + 'wsl --shutdown'; Hyper-V - Docker Desktop -> Settings -> Resources -> Advanced."
+    if ($rec -gt $budget) {
+      Warn "Docker's memory budget is $budget GB$hostNote - the client may OOM under load; $rec GB recommended."
+      Hint "Raise Docker's memory to $rec GB, then re-install: WSL2 backend - [wsl2] memory=${rec}GB in %UserProfile%\.wslconfig + 'wsl --shutdown'; Hyper-V - Docker Desktop -> Settings -> Resources -> Advanced."
+    } else {
+      # Already at (or above) the most this host can spare — "raise to $rec" would
+      # be a no-op, so name the real fix: a bigger machine (#417 Bugbot).
+      Warn "Docker's memory budget is $budget GB$hostNote - the client may OOM under load, and this host can't spare more. Use a machine with more RAM for headroom."
+    }
   }
 }
 

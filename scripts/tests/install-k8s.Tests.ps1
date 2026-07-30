@@ -1128,11 +1128,18 @@ Describe "Test-PreflightRuntimeMem (post-Docker, warn-only)" {
   }
   It "caps its recommendation at host RAM - never advises more than the machine has (#417)" {
     Mock Get-PfRuntimeMemGb { 4 }    # small Docker budget triggers the warn
-    Mock Get-PfMemGb { 6 }           # 6 GB host -> achievable cap is 4 GB
+    Mock Get-PfMemGb { 9 }           # 9 GB host -> achievable cap is 7 GB (< the 8 target)
     $out = (Test-PreflightRuntimeMem 6>&1 | Out-String)
-    $out | Should -Match '4 GB recommended'
+    $out | Should -Match '7 GB recommended'
     $out | Should -Not -Match '8 GB recommended'   # never the impossible raw target
-    $out | Should -Match 'of 6 GB host RAM'
+    $out | Should -Match 'of 9 GB host RAM'
+  }
+  It "avoids a no-op 'raise to' when Docker is already at the host's achievable cap (#417 Bugbot)" {
+    Mock Get-PfRuntimeMemGb { 4 }    # current budget
+    Mock Get-PfMemGb { 6 }           # cap = 4 = current budget -> can't raise further
+    $out = (Test-PreflightRuntimeMem 6>&1 | Out-String)
+    $out | Should -Not -Match 'Raise Docker'       # no impossible/no-op remediation
+    $out | Should -Match "can't spare more"
   }
 }
 
