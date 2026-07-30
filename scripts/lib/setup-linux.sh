@@ -1111,7 +1111,12 @@ install_linux() {
   # two announced prerequisite touches (_ensure_subid_ranges + _ensure_cgroup_
   # delegation), each of which routes to prepare-host when unprivileged.
   if _rootless_active; then
-    info "Setting up a rootless container runtime — no administrator rights needed."
+    # Header stays neutral on privileges: unlike Tier 0 above, this branch has
+    # two conditional privileged prerequisites (subuid ranges, cgroup
+    # delegation). Each announces itself or hands off to prepare-host when it
+    # actually applies — promising "no admin" here first read as a
+    # contradiction on hosts where one fires (Bugbot, #480).
+    info "Setting up a rootless container runtime (user-space install)."
     _ensure_subid_ranges         # RFC 0001 #1220: the one narrow privileged residue — gated + announced, or handed off
     _ensure_cgroup_delegation || true  # RFC 0001 #1221: delegate cpu/cpuset/io so pod CPU/mem limits enforce (best-effort; routes to prepare-host if unprivileged)
     install_rootless_docker
