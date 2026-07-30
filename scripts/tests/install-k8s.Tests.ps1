@@ -1217,6 +1217,93 @@ Describe "Test-PreflightRuntimeMem (post-Docker, warn-only)" {
   }
 }
 
+Describe "Test-WslCurrent (#414 skip-when-current, version floor)" {
+  It "modern WSL at/above the floor -> current" {
+    Test-WslCurrent -VersionOutput "WSL version: 2.3.26.0`nKernel version: 5.15.167.4-1" | Should -BeTrue
+  }
+  It "a STALE modern WSL below the floor -> not current, so it still updates (reviewer)" {
+    Test-WslCurrent -VersionOutput "WSL version: 2.0.0.0`nKernel version: 5.15.90.1" | Should -BeFalse
+  }
+  It "below Docker Desktop's 2.1.5 minimum (e.g. 2.1.4) -> not current (Bugbot #414)" {
+    Test-WslCurrent -VersionOutput "WSL version: 2.1.4.0`nKernel version: 5.15.150.1" | Should -BeFalse
+  }
+  It "empty output (WSL absent) -> not current" {
+    Test-WslCurrent -VersionOutput "" | Should -BeFalse
+  }
+  It "legacy error text (no version block) -> not current" {
+    Test-WslCurrent -VersionOutput "Windows Subsystem for Linux has no installed distributions." | Should -BeFalse
+  }
+  It "non-English (localized) label still graded via the version number (Bugbot #414)" {
+    Test-WslCurrent -VersionOutput "WSL バージョン: 2.3.26.0`nカーネル バージョン: 5.15.167.4-1" | Should -BeTrue
+  }
+  It "honors a custom floor via TB_WSL_MIN_VERSION / -MinVersion" {
+    Test-WslCurrent -VersionOutput "WSL version: 2.3.26.0" -MinVersion "3.0.0" | Should -BeFalse
+  }
+}
+
+Describe "Update-Wsl branching (#414 reviewer — executed, not just grepped)" {
+  BeforeEach { Mock Ok {}; Mock Warn {}; Mock Hint {}; Mock Info {}; Mock Log {}; Mock Get-WindowsArch { "amd64" } }
+  It "already current -> skips the update entirely" {
+    Mock Get-WslVersionOutput { "WSL version: 2.3.26.0" }; Mock Test-WslCurrent { $true }
+    Mock Invoke-WslUpdate { throw "must not run when current" }
+    { Update-Wsl } | Should -Not -Throw
+    Should -Invoke Invoke-WslUpdate -Times 0
+    Should -Invoke Ok -ParameterFilter { $m -match 'current' }
+  }
+  It "web-download succeeds -> no Store-path retry" {
+    Mock Get-WslVersionOutput { "" }; Mock Test-WslCurrent { $false }
+    Mock Invoke-WslUpdate { @{ State = 'ok'; ExitCode = 0 } }
+    Update-Wsl
+    Should -Invoke Invoke-WslUpdate -Times 1
+    Should -Invoke Ok -ParameterFilter { $m -match 'updated' }
+  }
+  It "web-download exits non-zero -> retries the plain Store path (two-rung ladder)" {
+    Mock Get-WslVersionOutput { "" }; Mock Test-WslCurrent { $false }
+    Mock Invoke-WslUpdate { if ($ExtraArgs -contains '--web-download') { @{ State='failed'; ExitCode=1 } } else { @{ State='ok'; ExitCode=0 } } }
+    Update-Wsl
+    Should -Invoke Invoke-WslUpdate -Times 2
+    Should -Invoke Ok -ParameterFilter { $m -match 'updated' }
+  }
+  It "timeout is NOT retried and is reported as a timeout, not 'Store blocked'" {
+    Mock Get-WslVersionOutput { "" }; Mock Test-WslCurrent { $false }
+    Mock Invoke-WslUpdate { @{ State = 'timeout'; ExitCode = $null } }
+    Update-Wsl
+    Should -Invoke Invoke-WslUpdate -Times 1
+    Should -Invoke Warn -ParameterFilter { $m -match 'timed out' }
+  }
+  It "wsl.exe missing -> reports not-found, no retry" {
+    Mock Get-WslVersionOutput { "" }; Mock Test-WslCurrent { $false }
+    Mock Invoke-WslUpdate { @{ State = 'not-found'; ExitCode = $null } }
+    Update-Wsl
+    Should -Invoke Invoke-WslUpdate -Times 1
+    Should -Invoke Warn -ParameterFilter { $m -match "wasn't found" }
+  }
+}
+
+Describe "WSL update wiring (#414 source guards)" {
+  BeforeAll { $script:WSRC = Get-Content "$PSScriptRoot/../install-k8s.ps1" -Raw }
+  It "prefers the Store-free web download (anchored on the invocation, reviewer)" {
+    $script:WSRC | Should -Match 'Invoke-WslUpdate -ExtraArgs @\("--web-download"\)'
+  }
+  It "the wsl --version probe is BOUNDED (job + deadline), not a synchronous hang (reviewer)" {
+    $script:WSRC | Should -Match 'Get-WslVersionOutput'
+    $script:WSRC | Should -Match 'Wait-JobWithProgress -Job \$job -TimeoutSec 20'
+  }
+  It "Invoke-WslUpdate redirects output so failures leave real WSL evidence (reviewer)" {
+    $script:WSRC | Should -Match '-RedirectStandardOutput \$outF -RedirectStandardError \$errF'
+  }
+  It "the OutputEncoding restore is wrapped so a throw can't kill the installer (reviewer)" {
+    $script:WSRC | Should -Match 'finally \{ try \{ \[Console\]::OutputEncoding = \$prev \} catch \{\} \}'
+  }
+  It "no longer uses the bare Store-path 'wsl --update' 90s job" {
+    $script:WSRC | Should -Not -Match 'cmd /c "wsl --update 2>&1"'
+  }
+  It "the manual MSI hint names the arch-matched package, not hardcoded x64 (Bugbot #414)" {
+    $script:WSRC | Should -Match "Get-WindowsArch\) -eq 'arm64'"
+    $script:WSRC | Should -Match 'wsl\.<version>\.\$msiArch\.msi'
+  }
+}
+
 # --- reboot persistence (Set-ClusterAutostart) -------------------------------
 Describe "Set-ClusterAutostart" {
   AfterEach { $env:TRACEBLOC_NO_AUTOSTART = $null }
