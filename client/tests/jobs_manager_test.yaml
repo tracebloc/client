@@ -343,3 +343,39 @@ tests:
           content:
             name: PER_INGESTION_TABLES
             value: "1"
+
+  - it: does not render per-experiment DB-cred env by default (RFC-0003 D10 knob off)
+    asserts:
+      - notContains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: PER_EXPERIMENT_DB_CREDS
+            value: "1"
+      - notContains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: TB_CREDMGR_USER
+            value: "tb_credmgr"
+
+  - it: renders per-experiment DB-cred env (flag + credmgr identity + secret ref) when enabled
+    set:
+      perExperimentDbCreds: true
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: PER_EXPERIMENT_DB_CREDS
+            value: "1"
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: TB_CREDMGR_USER
+            value: "tb_credmgr"
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: TB_CREDMGR_PASSWORD
+            valueFrom:
+              secretKeyRef:
+                name: RELEASE-NAME-secrets
+                key: TB_CREDMGR_PASSWORD

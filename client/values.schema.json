@@ -287,6 +287,10 @@
         }
       }
     },
+    "perExperimentDbCreds": {
+      "type": "boolean",
+      "description": "RFC-0003 D10 (backend#1181): mint a per-experiment MySQL user scoped to the experiment's own table(s), injected via a per-job Secret, instead of the shared edgeuser. Flip per environment, dev first."
+    },
     "perIngestionTables": {
       "type": "boolean",
       "description": "RFC-0003 D16 (backend#1204/#1205): stamp PER_INGESTION_TABLES=1 into every ingestion Job. Flip per environment, dev first; file-bearing categories are refused under the flag until client-runtime#203 phase 2."
