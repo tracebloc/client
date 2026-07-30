@@ -1137,6 +1137,11 @@ Describe "Update-Wsl / WSL install (#414 Store-blocked fallback)" {
     $script:WSRC | Should -Match 'github.com/microsoft/WSL/releases'
     $script:WSRC | Should -Match 'Couldn''t update WSL automatically'
   }
+  It "the manual MSI hint names the arch-matched package, not hardcoded x64 (Bugbot #414)" {
+    # ARM64 hosts need wsl.<version>.arm64.msi; pointing them at x64 recreates the prompt.
+    $script:WSRC | Should -Match "Get-WindowsArch\) -eq 'arm64'"
+    $script:WSRC | Should -Match 'wsl\.<version>\.\$msiArch\.msi'
+  }
   It "does not reintroduce the rate-limited GitHub API for an auto-MSI fallback (#410 invariant)" {
     # An automated GitHub-releases MSI download would need api.github.com (the asset
     # name isn't resolvable via the API-free redirect); #410 forbids it, so we

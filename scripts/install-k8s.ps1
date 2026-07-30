@@ -672,8 +672,12 @@ function Update-Wsl {
   if ($ok) { Ok "WSL updated"; return }
 
   # Surface the failure + the exact manual next step ON SCREEN (not the log).
+  # Name the MSI matching this host's architecture -- GitHub ships both x64 and
+  # arm64, and pointing an ARM operator at the x64 MSI just recreates the WSL
+  # prompt this path exists to avoid (#414 Bugbot).
+  $msiArch = if ((Get-WindowsArch) -eq 'arm64') { 'arm64' } else { 'x64' }
   Warn "Couldn't update WSL automatically (the Microsoft Store may be blocked)."
-  Hint "Download the latest WSL MSI from https://github.com/microsoft/WSL/releases (wsl.<version>.x64.msi), run it, then re-run this installer -- otherwise Docker Desktop will prompt you to install WSL."
+  Hint "Download the latest WSL MSI (wsl.<version>.$msiArch.msi) from https://github.com/microsoft/WSL/releases, run it, then re-run this installer -- otherwise Docker Desktop will prompt you to install WSL."
 }
 
 function Enable-VirtualisationFeatures {
