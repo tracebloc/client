@@ -28,6 +28,259 @@ Describe "Get-BackendUrl" {
   It "unknown -> prod" { $env:CLIENT_ENV = "whatever"; Get-BackendUrl | Should -Be "https://api.tracebloc.io/" }
 }
 
+Describe "Daily-user provisioning (#418)" {
+  It "Get-WslConfigMemoryGb caps at physical - 4 GB" {
+    Get-WslConfigMemoryGb -HostGb 16 | Should -Be 12
+    Get-WslConfigMemoryGb -HostGb 32 | Should -Be 28
+  }
+  It "Get-WslConfigMemoryGb floors at 1 GB on a tiny host" {
+    Get-WslConfigMemoryGb -HostGb 4 | Should -Be 1
+  }
+  It "Get-WslConfigContent writes the [wsl2] memory stanza" {
+    $c = Get-WslConfigContent -MemoryGb 12
+    $c | Should -Match '(?m)^\[wsl2\]'
+    $c | Should -Match 'memory=12GB'
+  }
+  It "Add-WslMemorySetting creates a [wsl2] stanza from empty content" {
+    $c = Add-WslMemorySetting -Existing "" -MemoryGb 12
+    $c | Should -Match '(?m)^\[wsl2\]'
+    $c | Should -Match 'memory=12GB'
+  }
+  It "Add-WslMemorySetting keeps an existing memory= (returns null -> don't clobber)" {
+    Add-WslMemorySetting -Existing "[wsl2]`r`nmemory=6GB`r`nprocessors=4`r`n" -MemoryGb 12 | Should -Be $null
+  }
+  It "Add-WslMemorySetting inserts under an existing [wsl2] header, preserving other settings" {
+    $c = Add-WslMemorySetting -Existing "[wsl2]`r`nprocessors=4`r`nswap=8GB`r`n" -MemoryGb 12
+    $c | Should -Match 'memory=12GB'
+    $c | Should -Match 'processors=4'   # other tuning survives
+    $c | Should -Match 'swap=8GB'
+  }
+  It "Add-WslMemorySetting appends a [wsl2] section when none exists, preserving other sections" {
+    $c = Add-WslMemorySetting -Existing "[experimental]`r`nsparseVhd=true`r`n" -MemoryGb 12
+    $c | Should -Match '(?m)^\[experimental\]'
+    $c | Should -Match 'sparseVhd=true'  # other sections survive
+    $c | Should -Match '(?m)^\[wsl2\]'
+    $c | Should -Match 'memory=12GB'
+  }
+  It "Get-UserProfileDir returns null for a user who has never signed in" {
+    Get-UserProfileDir -User 'nonexistent-user-9d2f' | Should -Be $null
+  }
+  It "Test-NameInGroupOutput matches on the bare name (domain-stripped, case-insensitive)" {
+    Test-NameInGroupOutput -Output @('Administrator','MACHINE\JDoe') -User 'CORP\jdoe' | Should -BeTrue
+    Test-NameInGroupOutput -Output @('Administrator','Guest')        -User 'jdoe'      | Should -BeFalse
+  }
+  It "Test-NameInGroupOutput is false for empty output or empty user" {
+    Test-NameInGroupOutput -Output @()          -User 'jdoe' | Should -BeFalse
+    Test-NameInGroupOutput -Output @('jdoe')    -User ''     | Should -BeFalse
+  }
+  It "Resolve-DailyUser prefers the param and strips the domain" {
+    Resolve-DailyUser -Param 'CORP\jdoe' -CurrentUser 'admin' | Should -Be 'jdoe'
+  }
+  It "Resolve-DailyUser falls back to the current user" {
+    Resolve-DailyUser -Param '' -CurrentUser 'researcher' | Should -Be 'researcher'
+  }
+}
+
+Describe "Daily-user provisioning wiring (#418 source guards)" {
+  BeforeAll { $script:PSRC = Get-Content "$PSScriptRoot/../install-k8s.ps1" -Raw }
+  It "adds the daily user to docker-users" {
+    $script:PSRC | Should -Match 'net localgroup docker-users'
+  }
+  It "verifies docker-users membership by state query, not by string-matching net /add output" {
+    $script:PSRC | Should -Match "Test-LocalGroupMember -Group 'docker-users'"
+    $script:PSRC | Should -Not -Match "already a member"   # no locale-fragile stderr parse
+    $script:PSRC | Should -Not -Match 'net localgroup docker-users .* /add 2>&1'
+  }
+  It "warns loudly (never green) when the critical docker-users step fails" {
+    $script:PSRC | Should -Match 'Could NOT add .* to docker-users'
+    # the green "Configured for" summary is gated behind dockerUsersOk
+    $script:PSRC | Should -Match 'if \(-not \$dockerUsersOk\)'
+  }
+  It "merges a sized .wslconfig via Add-WslMemorySetting (preserves other settings)" {
+    $script:PSRC | Should -Match 'Add-WslMemorySetting -Existing'
+    $script:PSRC | Should -Match '\(\?im\)\^\\s\*memory\\s\*='   # preserves an existing memory= line
+  }
+  It "notes .wslconfig as a manual step when the daily user has no profile yet" {
+    $script:PSRC | Should -Match 'no profile for .* yet'
+  }
+  It "notes .wslconfig as a manual step when host RAM can't be detected (no silent skip)" {
+    $script:PSRC | Should -Match "couldn't detect host RAM"
+  }
+  It "notes .wslconfig as a manual step when the write itself throws (no silent catch)" {
+    $script:PSRC | Should -Match "couldn't write .wslconfig"
+  }
+  It "sanitizes the prompted daily-user name before it hits net localgroup + paths" {
+    $script:PSRC | Should -Match '\$other = ConvertTo-SanitizedInput \$other'
+  }
+  It "forwards -DailyUser through self-elevation so it survives the UAC relaunch" {
+    $script:PSRC | Should -Match 'Invoke-SelfElevate .* -DailyUser \$DailyUser'
+    $script:PSRC | Should -Match "\-DailyUser', "   # Get-ElevationCommand appends it to the forwarded switches
+  }
+  It "is warn-only, opt-out-able, and wired into the elevated run" {
+    $script:PSRC | Should -Match 'Set-DailyUserProvisioning'
+    $script:PSRC | Should -Match 'TRACEBLOC_SKIP_DAILY_USER'
+  }
+}
+
+Describe "Get-ElevationCommand (#421 self-elevate)" {
+  It "returns a single command-line STRING (PS 5.1 quoting-safe, Bugbot #421)" {
+    Get-ElevationCommand -ScriptPath "" | Should -BeOfType [string]
+  }
+  It "re-runs an on-disk script with a QUOTED -File path + forwards the switches" {
+    $c = Get-ElevationCommand -ScriptPath $PSCommandPath -NoReboot -Diagnose   # durable, non-temp
+    $c | Should -Match '-File "'          # path is quoted (survives spaces)
+    $c | Should -Match '-NoReboot'
+    $c | Should -Match '-Diagnose'
+  }
+  It "re-fetches the one-liner when there's no script on disk (irm|iex)" {
+    $c = Get-ElevationCommand -ScriptPath ""
+    $c | Should -Match 'irm https://tracebloc\.io/i\.ps1 \| iex'
+    $c | Should -Not -Match '-File'
+  }
+  It "a bootstrap TEMP-dir script -> re-fetches the one-liner, not -File (deleted-temp, Bugbot #421)" {
+    $tmp = Join-Path ([IO.Path]::GetTempPath()) "install-k8s.ps1"
+    Set-Content -Path $tmp -Value "x" -Force
+    try {
+      $c = Get-ElevationCommand -ScriptPath $tmp
+      $c | Should -Not -Match '-File'
+      $c | Should -Match 'irm https://tracebloc\.io/i\.ps1'
+    } finally { Remove-Item $tmp -Force -ErrorAction SilentlyContinue }
+  }
+  It "does NOT bind switches to the paramless shim on the one-liner path (Bugbot #421)" {
+    # & ([scriptblock]::Create((irm ...))) -Diagnose would fail (shim has no param
+    # block); an iex launch can't have set a switch anyway. Keep plain irm|iex.
+    $c = Get-ElevationCommand -ScriptPath "" -Diagnose
+    $c | Should -Match 'irm https://tracebloc\.io/i\.ps1 \| iex'
+    $c | Should -Not -Match 'scriptblock'
+  }
+  It "omits switches that weren't passed" {
+    $c = Get-ElevationCommand -ScriptPath ""
+    $c | Should -Not -Match '-NoReboot'
+    $c | Should -Not -Match '-Diagnose'
+  }
+}
+
+Describe "Self-elevation gate (#421 source guards)" {
+  BeforeAll { $script:ESRC = Get-Content "$PSScriptRoot/../install-k8s.ps1" -Raw }
+  It "offers to relaunch elevated (UAC) before falling back to instructions" {
+    $script:ESRC | Should -Match 'Invoke-SelfElevate -ScriptPath \$PSCommandPath'
+    $script:ESRC | Should -Match "Start-Process -FilePath 'powershell' -Verb RunAs"
+  }
+  It "only prompts when interactive, else prints the manual Terminal (Admin) steps" {
+    $script:ESRC | Should -Match 'UserInteractive -and -not \[Console\]::IsInputRedirected'
+    $script:ESRC | Should -Match 'Terminal \(Admin\)'
+  }
+}
+
+Describe "Get-ToolSummaryLine (#422 honest per-tool progress)" {
+  It "name + version + size + elapsed" {
+    Get-ToolSummaryLine -Name "kubectl" -Version "v1.31.0" -Size "~60 MB" -ElapsedSec 12 |
+      Should -Be "kubectl v1.31.0 (~60 MB, 12s)"
+  }
+  It "name + version only (no meta parens)" {
+    Get-ToolSummaryLine -Name "helm" -Version "v4.2.3" | Should -Be "helm v4.2.3"
+  }
+  It "name only" { Get-ToolSummaryLine -Name "k3d" | Should -Be "k3d" }
+  It "size without elapsed" {
+    Get-ToolSummaryLine -Name "k3d" -Version "v5.9.0" -Size "~25 MB" |
+      Should -Be "k3d v5.9.0 (~25 MB)"
+  }
+  It "elapsed 0 is shown (not treated as absent)" {
+    Get-ToolSummaryLine -Name "helm" -Version "v4.2.3" -ElapsedSec 0 |
+      Should -Be "helm v4.2.3 (0s)"
+  }
+}
+
+Describe "Invoke-WithHeartbeat (#422 no silent window)" {
+  It "returns the operation output" {
+    (Invoke-WithHeartbeat -Message "adding" -PollSeconds 1 -Script { 40 + 2 }) | Should -Be 42
+  }
+  It "throws when the operation fails (so callers keep retry/abort flow)" {
+    { Invoke-WithHeartbeat -Message "boom" -PollSeconds 1 -Script { throw "kaboom" } } | Should -Throw
+  }
+  It "passes ArgumentList into the job scriptblock" {
+    (Invoke-WithHeartbeat -Message "args" -PollSeconds 1 -ArgumentList @("a","b") -Script { param($x,$y) "$x$y" }) |
+      Should -Be "ab"
+  }
+  It "job runspaces get the TLS 1.2 floor (Bugbot #422)" {
+    # Jobs don't inherit the parent's SecurityProtocol; JobInit must re-apply it,
+    # else in-job HTTPS downloads fail on TLS-1.2-only hosts.
+    (Invoke-WithHeartbeat -Message "tls" -PollSeconds 1 -Script { [Net.ServicePointManager]::SecurityProtocol.ToString() }) |
+      Should -Match 'Tls12'
+  }
+  It "surfaces the real failure detail, not just a generic message (Bugbot #422)" {
+    # A failed job's real error must reach the caller (log + Err), not be swallowed.
+    { Invoke-WithHeartbeat -Message "op" -PollSeconds 1 -Script { throw "REAL_REASON_XYZ" } } |
+      Should -Throw -ExpectedMessage "*REAL_REASON_XYZ*"
+  }
+}
+
+Describe "Step honesty (#422 split check vs install)" {
+  BeforeAll { $script:SRC = Get-Content "$PSScriptRoot/../install-k8s.ps1" -Raw }
+  It "runs six steps, not five" {
+    $script:SRC | Should -Match 'Step 6 6 "'
+    $script:SRC | Should -Not -Match 'Step [0-9] 5 "'
+  }
+  It "has a dedicated 'Installing system tools' step" {
+    $script:SRC | Should -Match 'Step 2 6 "Installing system tools"'
+  }
+  It "the k3d start path runs as a killable process with output to the log, not streamed (Bugbot #422)" {
+    # No bare streaming form; k3d start is a tracked process with its raw INFO[...]
+    # redirected to temp files (logged), so nothing streams to the console.
+    $script:SRC | Should -Not -Match '(?m)^\s*k3d cluster start \$CLUSTER_NAME\s*$'
+    $script:SRC | Should -Match 'Start-Process -FilePath "k3d" -ArgumentList @\("cluster","start"'
+    $script:SRC | Should -Match 'RedirectStandardError \$startErrFile'
+  }
+  It "k3d start Errs on timeout or non-zero exit, never a false 'started' (Bugbot #422)" {
+    # A deadline that KILLS the process (no orphan) plus an exit-code check both
+    # gate the "started" line.
+    $script:SRC | Should -Match 'Wait-ProcessWithDeadline -Process \$sp'
+    $script:SRC | Should -Match '\$sp\.ExitCode -ne 0'
+  }
+  It "the Docker installer runs as a killable process, not an orphan-prone job (Bugbot #422)" {
+    # Start-Process -PassThru + Wait-ProcessWithDeadline (kills on timeout) + an
+    # exit-code check — a background job would orphan the installer on timeout.
+    $script:SRC | Should -Match 'Start-Process -FilePath \$installer[\s\S]{0,200}-PassThru -ErrorAction Stop'
+    $script:SRC | Should -Match 'Wait-ProcessWithDeadline -Process \$ip'
+    $script:SRC | Should -Match '\$ip\.ExitCode -ne 0'
+  }
+  It "k3d/helm print their green summary only after the execute-gate (Bugbot #422)" {
+    # A corrupt/wrong-arch binary must fail Assert-ToolRuns before any green Ok;
+    # the summary is deferred to after the gate (kubectl already does this).
+    $script:SRC | Should -Match 'Assert-ToolRuns -Name "k3d"[\s\S]{0,80}if \(\$k3dSummary\) \{ Ok'
+    $script:SRC | Should -Match 'Assert-ToolRuns -Name "helm"[\s\S]{0,80}if \(\$helmSummary\) \{ Ok'
+  }
+  It "the winget Docker path is killable, checks exit, falls back, and fails loudly (Bugbot #422)" {
+    # winget runs as a tracked process (killable on timeout), its exit is checked
+    # (throw -> fallback), and a final Test-Path guard Errs if nothing landed.
+    $script:SRC | Should -Match 'Docker\.DockerDesktop'
+    $script:SRC | Should -Match 'Start-Process -FilePath "winget"[\s\S]{0,120}-ArgumentList \$wingetArgs'
+    $script:SRC | Should -Match 'Wait-ProcessWithDeadline -Process \$wp'
+    $script:SRC | Should -Match '\$wp\.ExitCode -ne 0'
+    $script:SRC | Should -Match "Docker Desktop installation didn't complete"
+  }
+}
+
+Describe "Docker Desktop install flags (#419 zero GUI interaction)" {
+  BeforeAll { $script:DSRC = Get-Content "$PSScriptRoot/../install-k8s.ps1" -Raw }
+  It "winget path passes Docker's installer flags via a quoted --override (PS 5.1 safe)" {
+    # winget's manifest defaults can't set the backend or accept the license; --override
+    # passes Docker Desktop's own installer args. The value must be a single quoted
+    # argument in a command-line STRING (array elements aren't quoted on PS 5.1).
+    $script:DSRC | Should -Match '--override "install --quiet --accept-license --backend=wsl-2 --always-run-service"'
+    $script:DSRC | Should -Match 'Start-Process -FilePath "winget"[\s\S]{0,120}-ArgumentList \$wingetArgs'
+  }
+  It "direct path installs unattended with the WSL2 backend" {
+    $script:DSRC | Should -Match 'install --quiet --accept-license --backend=wsl-2 --always-run-service'
+  }
+  It "both install paths select the WSL2 backend explicitly (no implicit choice)" {
+    ([regex]::Matches($script:DSRC, 'backend=wsl-2')).Count | Should -BeGreaterOrEqual 2
+  }
+  It "both paths run the engine service unattended (zero GUI first-run)" {
+    ([regex]::Matches($script:DSRC, 'always-run-service')).Count | Should -BeGreaterOrEqual 2
+  }
+}
+
 Describe "Get-ErrDetailLines (#423 honest failure output)" {
   BeforeEach { $script:LOG_FILE = "C:\Users\x\.tracebloc\install-20260729-000000.log" }
   AfterEach  { $script:LOG_FILE = $null }
@@ -886,6 +1139,13 @@ Describe "Get-Pf* resource readers" -Skip:(-not $IsWindows) {
     Mock Get-CimInstance { [pscustomobject]@{ TotalPhysicalMemory = 8GB } }
     Get-PfMemGb | Should -Be 8
   }
+  It "Get-PfMemGb reports host RAM even when Docker reports a smaller budget (#417)" {
+    # The flip-flop bug: same 16 GB host read as ~8 GB while Docker was up. Now the
+    # host figure wins regardless of the Docker VM budget.
+    Mock Get-CimInstance { [pscustomobject]@{ TotalPhysicalMemory = 16GB } }
+    Mock docker { '8589934592' }          # Docker would report 8 GiB; must be IGNORED
+    Get-PfMemGb | Should -Be 16
+  }
   It "Get-PfFreeGb reads free disk in GB" {
     Mock Get-CimInstance { [pscustomobject]@{ FreeSpace = 50GB } }
     Get-PfFreeGb | Should -Be 50
@@ -947,6 +1207,15 @@ Describe "Test-Preflight" {
     Mock Test-PfUrl { "ok" }; Mock Get-PfMemGb { 3 }
     { Test-Preflight } | Should -Not -Throw
   }
+  It "a throttled Docker budget warns even on a large host (not a green Ok) (#417 reviewer)" {
+    # The reviewer's key case: 32 GB host but Docker throttled to 2 GB. Grading the
+    # EFFECTIVE figure must OOM-warn (budget < the 5 GB floor), not green-OK the host.
+    Mock Test-PfUrl { "ok" }; Mock Get-PfMemGb { 32 }; Mock Get-PfRuntimeMemGb { 2 }
+    $out = (Test-Preflight 6>&1 | Out-String)
+    $out | Should -Match 'it will OOM'
+    $out | Should -Match "Docker's current share: 2 GB"   # budget named
+    $out | Should -Match '32 GB'                            # host RAM still the label
+  }
   It "PF_MIN_MEM_GB override relaxes the floor" {
     Mock Test-PfUrl { "ok" }; Mock Get-PfMemGb { 3 }; $env:PF_MIN_MEM_GB = "2"
     { Test-Preflight } | Should -Not -Throw
@@ -985,9 +1254,18 @@ Describe "Get-PfFsType" -Skip:(-not $IsWindows) {
 }
 
 Describe "Get-Pf* runtime (Docker VM) view preference" {
-  It "Get-PfMemGb prefers docker MemTotal over the host" {
+  It "Get-PfRuntimeMemGb follows the docker MemTotal (#417)" {
     Mock docker { '8589934592' }          # 8 GiB, in bytes
-    Get-PfMemGb | Should -Be 8
+    Get-PfRuntimeMemGb | Should -Be 8
+  }
+  It "Get-PfMemGb never consults the Docker VM budget (#417 no flip-flop)" {
+    # Host-independent + cross-platform: the flip-flop bug was Get-PfMemGb reading
+    # the docker budget. Prove it's decoupled by asserting Get-PfMemGb never calls
+    # docker at all. Avoids the flaky "Should -Not -Be 8" on a real 8 GB host; the
+    # exact host figure is locked by the Windows-gated CIM-mocked sibling test.
+    Mock docker { '8589934592' }
+    $null = Get-PfMemGb
+    Should -Invoke docker -Times 0
   }
   It "Get-PfCpu prefers docker NCPU over the host" {
     Mock docker { '2' }
@@ -1003,14 +1281,170 @@ Describe "Get-Pf* runtime (Docker VM) view preference" {
   }
 }
 
+Describe "Get-PfMemRecommendation (#417 achievable memory advice)" {
+  It "caps the recommendation at host RAM - 2 GB" {
+    Get-PfMemRecommendation -DesiredGb 16 -HostGb 15 | Should -Be 13
+  }
+  It "16 GB target on a 15 GB host -> 13, never the impossible 16 (the reported bug)" {
+    Get-PfMemRecommendation -DesiredGb 16 -HostGb 15 | Should -Not -Be 16
+  }
+  It "returns the desired value untouched when it fits" {
+    Get-PfMemRecommendation -DesiredGb 8 -HostGb 32 | Should -Be 8
+  }
+  It "floors at 1 GB on a tiny host (never zero/negative)" {
+    Get-PfMemRecommendation -DesiredGb 8 -HostGb 2 | Should -Be 1
+  }
+}
+
+Describe "Show-MemoryStatus (#417 grade effective, label host)" {
+  It "throttled budget on a big host -> OOM-gated, host labeled, budget named (reviewer 32/2)" {
+    $out = (Show-MemoryStatus -HostGb 32 -BudgetGb 2 6>&1 | Out-String)
+    $out | Should -Match '32 GB'                          # host RAM = the label
+    $out | Should -Match "Docker's current share: 2 GB"   # budget shown
+    $out | Should -Match 'it will OOM'                     # graded on the 2 GB budget
+  }
+  It "the #417 machine (15 GB host / 7 GB budget) warns with a capped 13 GB target" {
+    $out = (Show-MemoryStatus -HostGb 15 -BudgetGb 7 6>&1 | Out-String)
+    $out | Should -Match 'training .* may OOM'
+    $out | Should -Match '13 GB recommended'              # min(recMemGb 16, host-2 13)
+    $out | Should -Not -Match '16 GB recommended'         # never more than the host has
+  }
+  It "Docker down (budget null) -> grades + reports host RAM, no flip-flop" {
+    $out = (Show-MemoryStatus -HostGb 15 -BudgetGb $null 6>&1 | Out-String)
+    $out | Should -Match 'Memory: 15 GB'
+    $out | Should -Not -Match "Docker's current share"
+  }
+  It "host unreadable (CIM blocked) but budget known -> reports the budget, still gated" {
+    $out = (Show-MemoryStatus -HostGb $null -BudgetGb 4 6>&1 | Out-String)
+    $out | Should -Match 'Memory: 4 GB'
+    $out | Should -Match 'host RAM unreadable'
+    $out | Should -Match 'it will OOM'                    # 4 < 5 floor still applies
+  }
+  It "host unknown -> advice isn't capped at the (throttled) budget (#483 Bugbot)" {
+    # No host ceiling is known, so recommend the raw targets, never a backwards
+    # "at least 5 GB (up to 2 GB)" derived from the current 4 GB budget.
+    $out = (Show-MemoryStatus -HostGb $null -BudgetGb 4 6>&1 | Out-String)
+    $out | Should -Match 'at least 5 GB \(up to 8 GB\)'
+    $out | Should -Not -Match 'up to 2 GB'
+  }
+  It "both unreadable -> skips (couldn't determine)" {
+    $out = (Show-MemoryStatus -HostGb $null -BudgetGb $null 6>&1 | Out-String)
+    $out | Should -Match "couldn't determine total RAM"
+  }
+  It "healthy host + healthy budget -> green Ok" {
+    (Show-MemoryStatus -HostGb 32 -BudgetGb 24 6>&1 | Out-String) | Should -Match 'Memory: 32 GB'
+    (Show-MemoryStatus -HostGb 32 -BudgetGb 24 6>&1 | Out-String) | Should -Not -Match 'OOM'
+  }
+}
+
 Describe "Test-PreflightRuntimeMem (post-Docker, warn-only)" {
   It "small Docker VM -> warns, does not throw" {
-    Mock Get-PfRuntimeMemGb { 4 }
+    Mock Get-PfRuntimeMemGb { 4 }; Mock Get-PfMemGb { 16 }
     { Test-PreflightRuntimeMem } | Should -Not -Throw
   }
   It "daemon not reporting (null) -> no-op, does not throw" {
     Mock Get-PfRuntimeMemGb { $null }
     { Test-PreflightRuntimeMem } | Should -Not -Throw
+  }
+  It "grades the budget with both floors and caps the rec at host RAM (#417 reviewer)" {
+    Mock Get-PfRuntimeMemGb { 7 }    # budget in the training-warn band
+    Mock Get-PfMemGb { 15 }          # host -> cap the rec at 13 GB
+    $out = (Test-PreflightRuntimeMem 6>&1 | Out-String)
+    $out | Should -Match '13 GB recommended'
+    $out | Should -Not -Match '16 GB recommended'
+    $out | Should -Match "Docker's current share: 7 GB"
+  }
+  It "a below-floor budget OOM-warns (min floor applies to the budget, not just warn) (#417 reviewer)" {
+    Mock Get-PfRuntimeMemGb { 2 }; Mock Get-PfMemGb { 32 }
+    $out = (Test-PreflightRuntimeMem 6>&1 | Out-String)
+    $out | Should -Match 'it will OOM'
+  }
+}
+
+Describe "Test-WslCurrent (#414 skip-when-current, version floor)" {
+  It "modern WSL at/above the floor -> current" {
+    Test-WslCurrent -VersionOutput "WSL version: 2.3.26.0`nKernel version: 5.15.167.4-1" | Should -BeTrue
+  }
+  It "a STALE modern WSL below the floor -> not current, so it still updates (reviewer)" {
+    Test-WslCurrent -VersionOutput "WSL version: 2.0.0.0`nKernel version: 5.15.90.1" | Should -BeFalse
+  }
+  It "below Docker Desktop's 2.1.5 minimum (e.g. 2.1.4) -> not current (Bugbot #414)" {
+    Test-WslCurrent -VersionOutput "WSL version: 2.1.4.0`nKernel version: 5.15.150.1" | Should -BeFalse
+  }
+  It "empty output (WSL absent) -> not current" {
+    Test-WslCurrent -VersionOutput "" | Should -BeFalse
+  }
+  It "legacy error text (no version block) -> not current" {
+    Test-WslCurrent -VersionOutput "Windows Subsystem for Linux has no installed distributions." | Should -BeFalse
+  }
+  It "non-English (localized) label still graded via the version number (Bugbot #414)" {
+    Test-WslCurrent -VersionOutput "WSL バージョン: 2.3.26.0`nカーネル バージョン: 5.15.167.4-1" | Should -BeTrue
+  }
+  It "honors a custom floor via TB_WSL_MIN_VERSION / -MinVersion" {
+    Test-WslCurrent -VersionOutput "WSL version: 2.3.26.0" -MinVersion "3.0.0" | Should -BeFalse
+  }
+}
+
+Describe "Update-Wsl branching (#414 reviewer — executed, not just grepped)" {
+  BeforeEach { Mock Ok {}; Mock Warn {}; Mock Hint {}; Mock Info {}; Mock Log {}; Mock Get-WindowsArch { "amd64" } }
+  It "already current -> skips the update entirely" {
+    Mock Get-WslVersionOutput { "WSL version: 2.3.26.0" }; Mock Test-WslCurrent { $true }
+    Mock Invoke-WslUpdate { throw "must not run when current" }
+    { Update-Wsl } | Should -Not -Throw
+    Should -Invoke Invoke-WslUpdate -Times 0
+    Should -Invoke Ok -ParameterFilter { $m -match 'current' }
+  }
+  It "web-download succeeds -> no Store-path retry" {
+    Mock Get-WslVersionOutput { "" }; Mock Test-WslCurrent { $false }
+    Mock Invoke-WslUpdate { @{ State = 'ok'; ExitCode = 0 } }
+    Update-Wsl
+    Should -Invoke Invoke-WslUpdate -Times 1
+    Should -Invoke Ok -ParameterFilter { $m -match 'updated' }
+  }
+  It "web-download exits non-zero -> retries the plain Store path (two-rung ladder)" {
+    Mock Get-WslVersionOutput { "" }; Mock Test-WslCurrent { $false }
+    Mock Invoke-WslUpdate { if ($ExtraArgs -contains '--web-download') { @{ State='failed'; ExitCode=1 } } else { @{ State='ok'; ExitCode=0 } } }
+    Update-Wsl
+    Should -Invoke Invoke-WslUpdate -Times 2
+    Should -Invoke Ok -ParameterFilter { $m -match 'updated' }
+  }
+  It "timeout is NOT retried and is reported as a timeout, not 'Store blocked'" {
+    Mock Get-WslVersionOutput { "" }; Mock Test-WslCurrent { $false }
+    Mock Invoke-WslUpdate { @{ State = 'timeout'; ExitCode = $null } }
+    Update-Wsl
+    Should -Invoke Invoke-WslUpdate -Times 1
+    Should -Invoke Warn -ParameterFilter { $m -match 'timed out' }
+  }
+  It "wsl.exe missing -> reports not-found, no retry" {
+    Mock Get-WslVersionOutput { "" }; Mock Test-WslCurrent { $false }
+    Mock Invoke-WslUpdate { @{ State = 'not-found'; ExitCode = $null } }
+    Update-Wsl
+    Should -Invoke Invoke-WslUpdate -Times 1
+    Should -Invoke Warn -ParameterFilter { $m -match "wasn't found" }
+  }
+}
+
+Describe "WSL update wiring (#414 source guards)" {
+  BeforeAll { $script:WSRC = Get-Content "$PSScriptRoot/../install-k8s.ps1" -Raw }
+  It "prefers the Store-free web download (anchored on the invocation, reviewer)" {
+    $script:WSRC | Should -Match 'Invoke-WslUpdate -ExtraArgs @\("--web-download"\)'
+  }
+  It "the wsl --version probe is BOUNDED (job + deadline), not a synchronous hang (reviewer)" {
+    $script:WSRC | Should -Match 'Get-WslVersionOutput'
+    $script:WSRC | Should -Match 'Wait-JobWithProgress -Job \$job -TimeoutSec 20'
+  }
+  It "Invoke-WslUpdate redirects output so failures leave real WSL evidence (reviewer)" {
+    $script:WSRC | Should -Match '-RedirectStandardOutput \$outF -RedirectStandardError \$errF'
+  }
+  It "the OutputEncoding restore is wrapped so a throw can't kill the installer (reviewer)" {
+    $script:WSRC | Should -Match 'finally \{ try \{ \[Console\]::OutputEncoding = \$prev \} catch \{\} \}'
+  }
+  It "no longer uses the bare Store-path 'wsl --update' 90s job" {
+    $script:WSRC | Should -Not -Match 'cmd /c "wsl --update 2>&1"'
+  }
+  It "the manual MSI hint names the arch-matched package, not hardcoded x64 (Bugbot #414)" {
+    $script:WSRC | Should -Match "Get-WindowsArch\) -eq 'arm64'"
+    $script:WSRC | Should -Match 'wsl\.<version>\.\$msiArch\.msi'
   }
 }
 

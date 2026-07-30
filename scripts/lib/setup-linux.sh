@@ -777,17 +777,20 @@ _persist_docker_host() {
   fi
   local rc; rc="$(_tools_rc_for_shell)"
   local marker='# Added by tracebloc installer (RFC 0001 #1221): rootless Docker socket'
-  # Our own prior line → idempotent, nothing to do. Key this off OUR marker, not a
-  # bare 'DOCKER_HOST=' probe: that also matched a user's own DOCKER_HOST (e.g. a
-  # remote/TCP daemon) and made us silently skip — leaving new shells pointed at the
-  # wrong daemon while the install assumes rootless (Asad + Bugbot on #478).
+  # Our own prior line → idempotent, nothing to do. Key off OUR marker, not a bare
+  # 'DOCKER_HOST=' probe (that also matched a user's own DOCKER_HOST and silently skipped
+  # — Asad + Bugbot #478).
   if [ -f "$rc" ] && grep -qF "$marker" "$rc" 2>/dev/null; then return 0; fi
-  # A DOCKER_HOST the user set themselves → don't clobber it, but don't silently
-  # pretend we persisted the rootless socket either: warn so they know to repoint it.
+  # A DOCKER_HOST the user set themselves → don't clobber it, but warn so they know to
+  # repoint it at the rootless socket.
   if [ -f "$rc" ] && grep -qE '^[[:space:]]*(export[[:space:]]+)?DOCKER_HOST=' "$rc" 2>/dev/null; then
     warn "Your ${rc} already sets DOCKER_HOST — left it untouched. If it isn't the rootless socket, new terminals and the tracebloc CLI won't reach the rootless daemon; point it at:  export DOCKER_HOST=\"unix://\$XDG_RUNTIME_DIR/docker.sock\""
     return 0
   fi
+  # Rootless Tier 1 runs under user-systemd, so pam sets XDG_RUNTIME_DIR=/run/user/<uid>
+  # and the socket always lives there — persist the standard template. (The no-systemd
+  # nohup fallback, where the socket could live under $HOME, is descoped from this slice
+  # and deferred until it can be validated on a real HPC host — see the PR/issue.)
   {
     printf '\n%s\n' "$marker"
     printf '%s\n' 'export DOCKER_HOST="unix://${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/docker.sock"'
@@ -840,11 +843,51 @@ _tier0_gpu_flags() {
 # and the no-systemd/HPC fallback + fuse-overlayfs perf (slice 4, #1222). The whole
 # path is gated behind TB_TIER1_ROOTLESS=1 at the call site until the spike's §5
 # host-validation matrix runs (#1176 / #1177).
+# _user_systemd_available — is there a per-user systemd manager to run the rootless
+# daemon under? RFC 0001 #1222. `systemctl --user is-system-running` prints a state
+# word (running/degraded/starting/…) whenever a user manager exists — even when it
+# exits non-zero — and prints NOTHING when there's no user D-Bus/manager (hardened /
+# HPC login nodes) or no systemctl at all. Also require XDG_RUNTIME_DIR, where the
+# user socket must live. A non-empty state ⇒ usable; otherwise take the nohup fallback.
+_user_systemd_available() {
+  [ -n "${XDG_RUNTIME_DIR:-}" ] || return 1
+  [ -n "$(systemctl --user is-system-running 2>/dev/null)" ]
+}
+
+# _tier2_fallthrough REASON — a rootless Tier-1 bring-up failed mid-flight (setuptool
+# error, daemon never Ready) or the host has no per-user systemd. Rather than proceed on
+# a broken/absent socket or die opaquely, route to the Tier-2 prepare-host remedy — the
+# honest "this host needs a one-time admin step" outcome (RFC 0001 #1222). Exits.
+_tier2_fallthrough() {
+  local reason="${1:-rootless setup failed}"
+  # NAME the researcher, matching _ensure_subid_ranges' hand-off (Bugbot on #485): a bare
+  # `prepare-host` provisions nothing for the user — run_prepare_host only grants
+  # docker-group + subuid ranges when TB_PREPARE_USER is set — so an admin who followed a
+  # bare hint would leave the researcher unable to install, looping back to this fall-through.
+  local _user; _user="$(id -un 2>/dev/null || printf '%s' "${USER:-}")"
+  warn "Couldn't complete a rootless install (${reason}) — falling back to the administrator-prepared path."
+  hint "Have an administrator prepare this host once (naming you as the researcher), then re-run as yourself:"
+  hint "  export TB_PREPARE_USER=${_user}"
+  hint "  curl -fsSL https://tracebloc.io/i.sh | bash -s -- prepare-host"
+  hint "  (or, with the CLI:  tracebloc prepare-host ${_user})"
+  error "This host couldn't complete a rootless install (${reason}); an administrator must prepare it for '${_user}' (see above), then re-run. Details: docs/rfcs/0001-least-privilege-install.md"
+}
+
+
 install_rootless_docker() {
   # Resolve the current user robustly: $USER can be empty in headless / su / cron
   # contexts (Saqlain review, #452), and the linger call + success line below need a
   # real name. `id -un` is authoritative; fall back to $USER only if it somehow fails.
   local _user; _user="$(id -un 2>/dev/null || printf '%s' "${USER:-}")"
+
+  # Gate on per-user systemd BEFORE installing anything (Bugbot on #485): the setuptool
+  # sets up a `systemctl --user` unit and fails on a host with no user manager, so
+  # checking first yields the accurate "no per-user systemd" reason and avoids a partial
+  # ~/bin install + user drop-ins before the Tier-2 remedy. The nohup fallback for such
+  # hosts is deferred (#1354); until then, route to prepare-host.
+  if ! _user_systemd_available; then
+    _tier2_fallthrough "this host has no per-user systemd (systemctl --user has no manager); rootless without it needs a one-time admin step"
+  fi
 
   # Preconditions — the subuid/subgid range and the setuid newuidmap/newgidmap
   # helpers — are ensured by _ensure_subid_ranges, called just before this in
@@ -855,14 +898,19 @@ install_rootless_docker() {
   # by docker-ce-rootless-extras when it's already present; otherwise fetch Docker's
   # official rootless installer (same retry + mktemp pattern as install_docker_engine's
   # get.docker.com path), run as the current user — never under sudo.
+  # Guard both install paths: under `set -e` an unguarded spin_cmd failure would
+  # abort with the spinner log tail, NOT the Tier-2 remedy this slice promises for a
+  # setuptool/installer failure — route it through _tier2_fallthrough instead (Bugbot #485 r2).
   if has dockerd-rootless-setuptool.sh; then
-    spin_cmd "Installing rootless Docker…" dockerd-rootless-setuptool.sh install
+    spin_cmd "Installing rootless Docker…" dockerd-rootless-setuptool.sh install \
+      || _tier2_fallthrough "the rootless setup tool (dockerd-rootless-setuptool.sh install) failed"
   else
     local rootless_script
     rootless_script="$(mktemp)"
     retry 3 5 curl_secure -fsSL https://get.docker.com/rootless -o "$rootless_script"
     # No chmod +x — we run it via `sh "$rootless_script"`, which ignores the exec bit (Asad review, #452).
-    spin_cmd "Installing rootless Docker…" sh "$rootless_script"
+    spin_cmd "Installing rootless Docker…" sh "$rootless_script" \
+      || _tier2_fallthrough "the rootless installer (get.docker.com/rootless) failed"
     rm -f "$rootless_script"
   fi
 
@@ -882,12 +930,10 @@ install_rootless_docker() {
   # `systemctl --user enable --now docker` below picks it up.
   _configure_docker_proxy user
 
-  # Start the user daemon and make it survive logout / return after reboot without
-  # an active login session — both user-scoped, no root. Neither is fatal: the
-  # bounded `docker info` verify below is the real gate, so a systemctl hiccup
-  # falls through to actionable guidance instead of a bare set -e abort (mirrors
-  # install_docker_engine's start-then-verify). Linger is optional and can fail on
-  # polkit-locked hosts even when the daemon is up, so it only warns (Bugbot).
+  # Start the user daemon under per-user systemd (survives logout via linger). We already
+  # gated on _user_systemd_available at the TOP of this function, so this is unconditional
+  # here; neither call is fatal — the bounded `docker info` verify below is the real gate,
+  # and linger can fail on polkit-locked hosts even when the daemon is up (Bugbot).
   systemctl --user enable --now docker || true
   loginctl enable-linger "$_user" \
     || warn "Couldn't enable linger (optional) — the rootless daemon may not survive logout. Enable it later with:  loginctl enable-linger ${_user}"
@@ -907,7 +953,7 @@ install_rootless_docker() {
   # a race).
   if ! _bounded 15 docker info >/dev/null 2>&1; then
     _bounded 15 docker info || true
-    error "Rootless Docker didn't come up on ${DOCKER_HOST} (daemon output above). See https://docs.docker.com/engine/security/rootless/ for kernel/uidmap prerequisites."
+    _tier2_fallthrough "the rootless daemon never answered on ${DOCKER_HOST}"
   fi
   # Be honest about privilege: _ensure_subid_ranges may have used one announced sudo
   # touch (subuid range / uidmap install) on the root/sudo_nopw path. Only claim
@@ -1111,7 +1157,12 @@ install_linux() {
   # two announced prerequisite touches (_ensure_subid_ranges + _ensure_cgroup_
   # delegation), each of which routes to prepare-host when unprivileged.
   if _rootless_active; then
-    info "Setting up a rootless container runtime — no administrator rights needed."
+    # Header stays neutral on privileges: unlike Tier 0 above, this branch has
+    # two conditional privileged prerequisites (subuid ranges, cgroup
+    # delegation). Each announces itself or hands off to prepare-host when it
+    # actually applies — promising "no admin" here first read as a
+    # contradiction on hosts where one fires (Bugbot, #480).
+    info "Setting up a rootless container runtime (user-space install)."
     _ensure_subid_ranges         # RFC 0001 #1220: the one narrow privileged residue — gated + announced, or handed off
     _ensure_cgroup_delegation || true  # RFC 0001 #1221: delegate cpu/cpuset/io so pod CPU/mem limits enforce (best-effort; routes to prepare-host if unprivileged)
     install_rootless_docker
