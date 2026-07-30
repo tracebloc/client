@@ -24,7 +24,7 @@
 # =============================================================================
 
 #Requires -Version 5.1
-param([switch]$Help, [switch]$NoReboot, [switch]$Diagnose)
+param([switch]$Help, [switch]$NoReboot, [switch]$Diagnose, [string]$DailyUser)
 
 # --- Self-elevation (#421) ---------------------------------------------------
 # Build the powershell.exe argument list to relaunch this installer ELEVATED.
@@ -35,10 +35,11 @@ param([switch]$Help, [switch]$NoReboot, [switch]$Diagnose)
 # ShellExecute/RunAs doesn't inherit the caller's process env, and putting secrets
 # on a command line is unsafe; an env-driven run should be launched elevated.
 function Get-ElevationCommand {
-  param([string]$ScriptPath, [switch]$NoReboot, [switch]$Diagnose)
+  param([string]$ScriptPath, [switch]$NoReboot, [switch]$Diagnose, [string]$DailyUser)
   $switches = @()
-  if ($NoReboot) { $switches += '-NoReboot' }
-  if ($Diagnose) { $switches += '-Diagnose' }
+  if ($NoReboot)  { $switches += '-NoReboot' }
+  if ($Diagnose)  { $switches += '-Diagnose' }
+  if ($DailyUser) { $switches += @('-DailyUser', "`"$DailyUser`"") }   # forward the daily user (#418 Bugbot)
   # Return a single command-line STRING, not an array: PS 5.1 Start-Process
   # -ArgumentList doesn't quote array elements, so a script path with spaces (or
   # the quoted -Command value) would be split (#421 Bugbot; same class as #419).
@@ -60,8 +61,8 @@ function Get-ElevationCommand {
 # elevated process was started (user accepted UAC), $false if they declined the
 # prompt or the launch failed (Start-Process -Verb RunAs throws on cancel).
 function Invoke-SelfElevate {
-  param([string]$ScriptPath, [switch]$NoReboot, [switch]$Diagnose)
-  $argList = Get-ElevationCommand -ScriptPath $ScriptPath -NoReboot:$NoReboot -Diagnose:$Diagnose
+  param([string]$ScriptPath, [switch]$NoReboot, [switch]$Diagnose, [string]$DailyUser)
+  $argList = Get-ElevationCommand -ScriptPath $ScriptPath -NoReboot:$NoReboot -Diagnose:$Diagnose -DailyUser $DailyUser
   try {
     Start-Process -FilePath 'powershell' -Verb RunAs -ArgumentList $argList -ErrorAction Stop | Out-Null
     return $true
@@ -84,7 +85,7 @@ if (-not $env:TB_PESTER) {
       Write-Host "  " -NoNewline; Write-Host ([char]0x26A0) -ForegroundColor Yellow -NoNewline; Write-Host "  Administrator rights are required to set up Docker + WSL." -ForegroundColor Yellow
       $ans = Read-Host "  Relaunch as Administrator now? A Windows UAC prompt will appear [Y/n]"
       if ($ans -notmatch '^\s*[Nn]') {
-        $elevated = Invoke-SelfElevate -ScriptPath $PSCommandPath -NoReboot:$NoReboot -Diagnose:$Diagnose
+        $elevated = Invoke-SelfElevate -ScriptPath $PSCommandPath -NoReboot:$NoReboot -Diagnose:$Diagnose -DailyUser $DailyUser
         if ($elevated) { Write-Host "  Continuing in the new elevated window -- you can close this one." -ForegroundColor DarkGray }
         else           { Write-Host "  Elevation was cancelled." -ForegroundColor DarkGray }
       }
@@ -1538,6 +1539,184 @@ function Set-ClusterAutostart {
     }
     if ($nodes) { Log "Set restart=unless-stopped on k3d nodes (auto-restart after reboot)." }
   } catch {}
+}
+
+# =============================================================================
+#  DAILY-USER PROVISIONING (#418) — hospital reality: the researcher gets a
+#  temporary admin window (or IT runs the install), then elevation is revoked. The
+#  installer runs elevated, so provision Docker for the standard account NOW:
+#  docker-users membership, Docker autostart, and a training-sized .wslconfig.
+#  All warn-only -- a provisioning hiccup must never fail the install.
+# =============================================================================
+
+# WSL2 VM memory (GB) for .wslconfig: as much as the host can give without starving
+# it -- physical RAM minus a reserve (default 4 GB for the host OS + overhead) --
+# so training pods fit instead of the WSL2 default (~50% of RAM). Pure; floored so
+# a tiny host still yields a positive value (#418).
+function Get-WslConfigMemoryGb {
+  param([int]$HostGb, [int]$ReserveGb = 4)
+  $m = $HostGb - $ReserveGb
+  if ($m -lt 1) { $m = 1 }
+  return $m
+}
+
+# The .wslconfig body granting the WSL2 VM the sized memory budget. Pure (#418).
+function Get-WslConfigContent {
+  param([int]$MemoryGb)
+  return "[wsl2]`r`nmemory=${MemoryGb}GB`r`n"
+}
+
+# Merge a memory budget into EXISTING .wslconfig content without clobbering other
+# settings (processors, swap, ...). Returns the new content, or $null when a
+# memory= is already present (keep the operator's tuning) (#418 Bugbot).
+function Add-WslMemorySetting {
+  param([string]$Existing, [int]$MemoryGb)
+  if ($Existing -match '(?im)^\s*memory\s*=') { return $null }              # already tuned -> keep
+  $line = "memory=${MemoryGb}GB"
+  if ([string]::IsNullOrWhiteSpace($Existing)) { return "[wsl2]`r`n$line`r`n" }
+  if ($Existing -match '(?im)^\s*\[wsl2\]\s*$') {
+    # Insert under the existing [wsl2] header, preserving everything else.
+    return ($Existing -replace '(?im)^(\s*\[wsl2\]\s*)$', "`$1`r`n$line")
+  }
+  # No [wsl2] section -> append one, preserving the existing content.
+  $sep = if ($Existing.EndsWith("`n")) { "" } else { "`r`n" }
+  return "$Existing$sep[wsl2]`r`n$line`r`n"
+}
+
+# Which account to provision for: -DailyUser when given, else the caller-supplied
+# name, else the account running the installer. Returns the bare username (#418).
+function Resolve-DailyUser {
+  param([string]$Param, [string]$CurrentUser = $env:USERNAME)
+  if ($Param) { return ($Param -replace '^.*\\', '').Trim() }
+  return $CurrentUser
+}
+
+# Profile directory for a user: the current user's $env:USERPROFILE, else
+# <SystemDrive>\Users\<user> when it exists. $null when the user has no profile
+# yet (never signed in) -- the caller then notes .wslconfig as a manual step (#418).
+function Get-UserProfileDir {
+  param([string]$User)
+  if ($User -eq $env:USERNAME) { return $env:USERPROFILE }
+  $p = Join-Path "$env:SystemDrive\Users" $User
+  if (Test-Path -LiteralPath $p -PathType Container) { return $p }
+  return $null
+}
+
+# Pure: does the bare (domain-stripped) <User> appear in local-group member output
+# (either Get-LocalGroupMember .Name values or `net localgroup <group>` lines)?
+# Case-insensitive name compare -> locale-independent, no stderr string-matching (#418 Bugbot).
+function Test-NameInGroupOutput {
+  param([string[]]$Output, [string]$User)
+  $short = ($User -replace '^.*\\', '').Trim()
+  if (-not $short) { return $false }
+  foreach ($line in @($Output)) {
+    if ((("$line".Trim() -replace '^.*\\', '')) -ieq $short) { return $true }
+  }
+  return $false
+}
+
+# Is <User> a member of local <Group>? STATE QUERY (not a parse of `net ... /add`
+# output): prefer Get-LocalGroupMember, fall back to `net localgroup <group>`
+# STDOUT (not 2>&1-merged). Used to verify docker-users idempotently (#418 Bugbot).
+function Test-LocalGroupMember {
+  param([string]$Group, [string]$User)
+  try {
+    $names = Get-LocalGroupMember -Group $Group -ErrorAction Stop | ForEach-Object { $_.Name }
+    return (Test-NameInGroupOutput -Output $names -User $User)
+  } catch {
+    try { return (Test-NameInGroupOutput -Output (& net localgroup $Group 2>$null) -User $User) }
+    catch { return $false }
+  }
+}
+
+# Provision Docker for the daily user during the elevated run (#418). Warn-only;
+# TRACEBLOC_SKIP_DAILY_USER opts out. The .wslconfig applies at the daily user's
+# next sign-in (the acceptance scenario), so we do NOT `wsl --shutdown` and tear
+# down the just-built cluster mid-install.
+function Set-DailyUserProvisioning {
+  if ($env:TRACEBLOC_SKIP_DAILY_USER) { return }
+  $user = Resolve-DailyUser -Param $DailyUser
+  if (-not $DailyUser -and (Test-CanPrompt)) {
+    $other = Read-Host "  Configure Docker for the day-to-day user? Enter their username, or press Enter for '$user'"
+    $other = ConvertTo-SanitizedInput $other   # strip paste/ANSI/control chars before it hits net localgroup + paths (#418 Bugbot)
+    if ($other.Trim()) { $user = Resolve-DailyUser -Param $other }
+  }
+  Info "Configuring Docker for '$user' so no admin rights are needed later..."
+  $did = @()
+
+  # 1) docker-users membership -> the standard account can use Docker. This is the
+  # CRITICAL step: without it the daily account can't use Docker at all. Verify by
+  # STATE QUERY (Test-LocalGroupMember), never by string-matching the localized,
+  # 2>&1-merged output of `net localgroup /add` (#418 Bugbot).
+  $dockerUsersOk = $false
+  try {
+    if (Test-LocalGroupMember -Group 'docker-users' -User $user) {
+      $dockerUsersOk = $true; $did += "already in docker-users"
+    } else {
+      $null = (& net localgroup docker-users "$user" /add 2>$null)   # idempotent; verify below, don't parse
+      if (Test-LocalGroupMember -Group 'docker-users' -User $user) {
+        $dockerUsersOk = $true; $did += "added to docker-users"
+      } else {
+        Log "docker-users add did not take for '$user' (net exit $LASTEXITCODE)"
+      }
+    }
+  } catch { Log "docker-users add failed: $_" }
+
+  # 2) Docker Desktop autostart via the per-user Run key (current user only -- a
+  # different user's hive may not be loaded). The engine also runs as a service
+  # (--always-run-service, #419), so Docker is usable on sign-in regardless.
+  try {
+    $ddExe = "$env:ProgramFiles\Docker\Docker\Docker Desktop.exe"
+    if ($user -eq $env:USERNAME -and (Test-Path $ddExe)) {
+      New-ItemProperty -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run' `
+        -Name 'Docker Desktop' -Value "`"$ddExe`"" -PropertyType String -Force -ErrorAction Stop | Out-Null
+      $did += "autostart enabled"
+    }
+  } catch { Log "autostart set failed: $_" }
+
+  # 3) Training-sized .wslconfig in the daily user's profile. Merge the memory
+  # budget in without clobbering any other tuning (processors/swap/...), and keep
+  # an existing memory= as-is. Effective at next WSL start / sign-in.
+  try {
+    $hostGb     = Get-PfMemGb
+    $profileDir = Get-UserProfileDir -User $user
+    if ($null -eq $profileDir) {
+      # User has never signed in -> no profile to write into. Note it as a manual step.
+      $did += "no profile for '$user' yet -- set [wsl2] memory in their .wslconfig after first sign-in"
+    } elseif ($null -eq $hostGb) {
+      # Host RAM undetectable -> can't size the budget. Note it rather than skip silently (#418 Bugbot).
+      $did += "couldn't detect host RAM -- set [wsl2] memory in '$user's .wslconfig manually"
+    } else {
+      $wslCfg   = Join-Path $profileDir ".wslconfig"
+      $existing = if (Test-Path $wslCfg) { (Get-Content $wslCfg -Raw -ErrorAction SilentlyContinue) } else { "" }
+      $memGb    = Get-WslConfigMemoryGb -HostGb $hostGb
+      $merged   = Add-WslMemorySetting -Existing $existing -MemoryGb $memGb
+      if ($null -eq $merged) {
+        $did += "kept existing .wslconfig memory"
+      } else {
+        Set-Content -Path $wslCfg -Value $merged -Encoding ASCII -ErrorAction Stop
+        $did += "set .wslconfig memory=${memGb}GB (applies next sign-in)"
+      }
+    }
+  } catch {
+    # A thrown merge/write (permissions, disk) must surface in the summary too --
+    # don't let a green "Configured for" imply the budget was set (#418 Bugbot).
+    Log ".wslconfig write failed: $_"
+    $did += "couldn't write .wslconfig -- set [wsl2] memory in '$user's profile manually"
+  }
+
+  # 4) Summary. docker-users membership is the make-or-break step: without it the
+  # standard account can't use Docker at all. If it didn't take, WARN loudly even
+  # when other steps succeeded -- never print a green "Configured" over a broken
+  # setup, or IT leaves the elevated window thinking the researcher is ready (#418 Bugbot).
+  if (-not $dockerUsersOk) {
+    if ($did.Count) { Info ("Other steps done for '$user': " + ($did -join "; ") + ".") }
+    Warn "Could NOT add '$user' to docker-users -- the standard account won't be able to use Docker. While you still have admin rights, run:  net localgroup docker-users $user /add"
+  } elseif ($did.Count) {
+    Ok ("Configured for '$user': " + ($did -join "; ") + ".")
+  } else {
+    Warn "Couldn't auto-configure Docker for '$user' -- see the log; add them to docker-users manually if needed."
+  }
 }
 
 # =============================================================================
@@ -3596,6 +3775,10 @@ Install-ClientHelm
 
 # Verify the client actually came up before reporting anything
 Wait-ForClientReady
+
+# Provision Docker for the day-to-day (standard) user during this elevated window
+# (#418) so they need zero admin actions later. Warn-only -- never fail the install.
+try { Set-DailyUserProvisioning } catch { Log "daily-user provisioning error: $_" }
 
 Print-Summary
 

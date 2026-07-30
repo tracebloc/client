@@ -28,6 +28,100 @@ Describe "Get-BackendUrl" {
   It "unknown -> prod" { $env:CLIENT_ENV = "whatever"; Get-BackendUrl | Should -Be "https://api.tracebloc.io/" }
 }
 
+Describe "Daily-user provisioning (#418)" {
+  It "Get-WslConfigMemoryGb caps at physical - 4 GB" {
+    Get-WslConfigMemoryGb -HostGb 16 | Should -Be 12
+    Get-WslConfigMemoryGb -HostGb 32 | Should -Be 28
+  }
+  It "Get-WslConfigMemoryGb floors at 1 GB on a tiny host" {
+    Get-WslConfigMemoryGb -HostGb 4 | Should -Be 1
+  }
+  It "Get-WslConfigContent writes the [wsl2] memory stanza" {
+    $c = Get-WslConfigContent -MemoryGb 12
+    $c | Should -Match '(?m)^\[wsl2\]'
+    $c | Should -Match 'memory=12GB'
+  }
+  It "Add-WslMemorySetting creates a [wsl2] stanza from empty content" {
+    $c = Add-WslMemorySetting -Existing "" -MemoryGb 12
+    $c | Should -Match '(?m)^\[wsl2\]'
+    $c | Should -Match 'memory=12GB'
+  }
+  It "Add-WslMemorySetting keeps an existing memory= (returns null -> don't clobber)" {
+    Add-WslMemorySetting -Existing "[wsl2]`r`nmemory=6GB`r`nprocessors=4`r`n" -MemoryGb 12 | Should -Be $null
+  }
+  It "Add-WslMemorySetting inserts under an existing [wsl2] header, preserving other settings" {
+    $c = Add-WslMemorySetting -Existing "[wsl2]`r`nprocessors=4`r`nswap=8GB`r`n" -MemoryGb 12
+    $c | Should -Match 'memory=12GB'
+    $c | Should -Match 'processors=4'   # other tuning survives
+    $c | Should -Match 'swap=8GB'
+  }
+  It "Add-WslMemorySetting appends a [wsl2] section when none exists, preserving other sections" {
+    $c = Add-WslMemorySetting -Existing "[experimental]`r`nsparseVhd=true`r`n" -MemoryGb 12
+    $c | Should -Match '(?m)^\[experimental\]'
+    $c | Should -Match 'sparseVhd=true'  # other sections survive
+    $c | Should -Match '(?m)^\[wsl2\]'
+    $c | Should -Match 'memory=12GB'
+  }
+  It "Get-UserProfileDir returns null for a user who has never signed in" {
+    Get-UserProfileDir -User 'nonexistent-user-9d2f' | Should -Be $null
+  }
+  It "Test-NameInGroupOutput matches on the bare name (domain-stripped, case-insensitive)" {
+    Test-NameInGroupOutput -Output @('Administrator','MACHINE\JDoe') -User 'CORP\jdoe' | Should -BeTrue
+    Test-NameInGroupOutput -Output @('Administrator','Guest')        -User 'jdoe'      | Should -BeFalse
+  }
+  It "Test-NameInGroupOutput is false for empty output or empty user" {
+    Test-NameInGroupOutput -Output @()          -User 'jdoe' | Should -BeFalse
+    Test-NameInGroupOutput -Output @('jdoe')    -User ''     | Should -BeFalse
+  }
+  It "Resolve-DailyUser prefers the param and strips the domain" {
+    Resolve-DailyUser -Param 'CORP\jdoe' -CurrentUser 'admin' | Should -Be 'jdoe'
+  }
+  It "Resolve-DailyUser falls back to the current user" {
+    Resolve-DailyUser -Param '' -CurrentUser 'researcher' | Should -Be 'researcher'
+  }
+}
+
+Describe "Daily-user provisioning wiring (#418 source guards)" {
+  BeforeAll { $script:PSRC = Get-Content "$PSScriptRoot/../install-k8s.ps1" -Raw }
+  It "adds the daily user to docker-users" {
+    $script:PSRC | Should -Match 'net localgroup docker-users'
+  }
+  It "verifies docker-users membership by state query, not by string-matching net /add output" {
+    $script:PSRC | Should -Match "Test-LocalGroupMember -Group 'docker-users'"
+    $script:PSRC | Should -Not -Match "already a member"   # no locale-fragile stderr parse
+    $script:PSRC | Should -Not -Match 'net localgroup docker-users .* /add 2>&1'
+  }
+  It "warns loudly (never green) when the critical docker-users step fails" {
+    $script:PSRC | Should -Match 'Could NOT add .* to docker-users'
+    # the green "Configured for" summary is gated behind dockerUsersOk
+    $script:PSRC | Should -Match 'if \(-not \$dockerUsersOk\)'
+  }
+  It "merges a sized .wslconfig via Add-WslMemorySetting (preserves other settings)" {
+    $script:PSRC | Should -Match 'Add-WslMemorySetting -Existing'
+    $script:PSRC | Should -Match '\(\?im\)\^\\s\*memory\\s\*='   # preserves an existing memory= line
+  }
+  It "notes .wslconfig as a manual step when the daily user has no profile yet" {
+    $script:PSRC | Should -Match 'no profile for .* yet'
+  }
+  It "notes .wslconfig as a manual step when host RAM can't be detected (no silent skip)" {
+    $script:PSRC | Should -Match "couldn't detect host RAM"
+  }
+  It "notes .wslconfig as a manual step when the write itself throws (no silent catch)" {
+    $script:PSRC | Should -Match "couldn't write .wslconfig"
+  }
+  It "sanitizes the prompted daily-user name before it hits net localgroup + paths" {
+    $script:PSRC | Should -Match '\$other = ConvertTo-SanitizedInput \$other'
+  }
+  It "forwards -DailyUser through self-elevation so it survives the UAC relaunch" {
+    $script:PSRC | Should -Match 'Invoke-SelfElevate .* -DailyUser \$DailyUser'
+    $script:PSRC | Should -Match "\-DailyUser', "   # Get-ElevationCommand appends it to the forwarded switches
+  }
+  It "is warn-only, opt-out-able, and wired into the elevated run" {
+    $script:PSRC | Should -Match 'Set-DailyUserProvisioning'
+    $script:PSRC | Should -Match 'TRACEBLOC_SKIP_DAILY_USER'
+  }
+}
+
 Describe "Get-ElevationCommand (#421 self-elevate)" {
   It "returns a single command-line STRING (PS 5.1 quoting-safe, Bugbot #421)" {
     Get-ElevationCommand -ScriptPath "" | Should -BeOfType [string]
