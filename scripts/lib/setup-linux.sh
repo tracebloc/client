@@ -792,10 +792,14 @@ _persist_docker_host() {
     printf '\n%s\n' "$marker"
     # No-systemd nohup path (Bugbot #485): a fresh login shell won't have
     # XDG_RUNTIME_DIR set, and the socket may live under $HOME rather than
-    # /run/user/<uid> — persist the EXACT dir first so the DOCKER_HOST line below
-    # resolves to the same socket the install used AND the daemon can be restarted.
+    # /run/user/<uid> — persist the dir first so the DOCKER_HOST line below resolves
+    # to the same socket the install used AND the daemon can be restarted.
+    # Guard with ${XDG_RUNTIME_DIR:-…}, NOT a bare export: ~/.bashrc is sourced on
+    # EVERY host that shares this home (HPC NFS), so an unconditional value would
+    # clobber a legitimate pam/systemd /run/user/<uid> on a systemd node and break
+    # user-systemd there. Supply our dir only when the session hasn't (Bugbot #485 r3).
     if [ -n "${TB_ROOTLESS_RUNTIME_DIR:-}" ]; then
-      printf 'export XDG_RUNTIME_DIR="%s"\n' "$TB_ROOTLESS_RUNTIME_DIR"
+      printf 'export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-%s}"\n' "$TB_ROOTLESS_RUNTIME_DIR"
     fi
     printf '%s\n' 'export DOCKER_HOST="unix://${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/docker.sock"'
   } >> "$rc" 2>/dev/null || return 0

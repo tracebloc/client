@@ -1474,17 +1474,19 @@ _stub_install_steps() {
   [ "$output" = "1" ]
 }
 
-@test "_persist_docker_host: no-systemd nohup path persists the EXACT runtime dir so DOCKER_HOST resolves to the same socket (#485)" {
+@test "_persist_docker_host: no-systemd nohup path persists a GUARDED runtime dir — resolves our socket without clobbering a session XDG (#485)" {
   INSTALL_TIER=1; TB_TIER1_ROOTLESS=1
   HOME="$(mktemp -d)"; SHELL=/bin/bash; OS=Linux
   TB_ROOTLESS_RUNTIME_DIR="$HOME/.tracebloc-rootless-run"   # the $HOME fallback dir the nohup path chose
   _persist_docker_host
   run cat "$HOME/.bashrc"
-  [[ "$output" == *"export XDG_RUNTIME_DIR=\"$HOME/.tracebloc-rootless-run\""* ]]   # exact dir persisted first
-  # sourcing the rc with XDG unset must resolve DOCKER_HOST to the SAME socket the
-  # install used (not the /run/user/<uid> template fallback) — the Bugbot #485 fix.
+  [[ "$output" == *"export XDG_RUNTIME_DIR=\"\${XDG_RUNTIME_DIR:-$HOME/.tracebloc-rootless-run}\""* ]]  # guarded, NOT a bare export (#485 r3)
+  # (a) no-systemd host (XDG unset): resolves DOCKER_HOST to the SAME socket the install used.
   run bash -c "unset XDG_RUNTIME_DIR; . '$HOME/.bashrc'; printf '%s' \"\$DOCKER_HOST\""
   [ "$output" = "unix://$HOME/.tracebloc-rootless-run/docker.sock" ]
+  # (b) systemd host sharing this home: a pre-set pam/systemd XDG is PRESERVED, not clobbered.
+  run bash -c "export XDG_RUNTIME_DIR=/run/user/1000; . '$HOME/.bashrc'; printf '%s' \"\$XDG_RUNTIME_DIR\""
+  [ "$output" = "/run/user/1000" ]
 }
 
 @test "_persist_docker_host: flag OFF -> no-op (no rc write)" {
