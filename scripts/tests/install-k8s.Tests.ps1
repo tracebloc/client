@@ -123,42 +123,27 @@ Describe "Daily-user provisioning wiring (#418 source guards)" {
 }
 
 Describe "Install-state pure helpers (#420)" {
-  It "New-InstallState is empty at the current schema" {
+  It "New-InstallState is not-completed at the current schema" {
     $s = New-InstallState
     $s.schema    | Should -Be 1
     $s.completed | Should -BeFalse
-    @($s.stages).Count | Should -Be 0
-  }
-  It "Add-CompletedStage appends, dedups, and preserves order" {
-    $s = New-InstallState
-    $s = Add-CompletedStage -State $s -Name 'step1-requirements'
-    $s = Add-CompletedStage -State $s -Name 'step1-requirements'   # dedup
-    $s = Add-CompletedStage -State $s -Name 'step2-tools'
-    @($s.stages) | Should -Be @('step1-requirements','step2-tools')
-  }
-  It "Test-StateHasStage reports membership" {
-    $s = Add-CompletedStage -State (New-InstallState) -Name 'step3-cluster'
-    Test-StateHasStage -State $s -Name 'step3-cluster' | Should -BeTrue
-    Test-StateHasStage -State $s -Name 'step6-client'  | Should -BeFalse
   }
   It "Test-InstallStateCurrent is true only for a matching schema" {
     Test-InstallStateCurrent -State (New-InstallState) | Should -BeTrue
     Test-InstallStateCurrent -State $null              | Should -BeFalse
     Test-InstallStateCurrent -State ([pscustomobject]@{ schema = 99 }) | Should -BeFalse
   }
-  It "ConvertTo-InstallState round-trips a valid state" {
-    $s = Add-CompletedStage -State (New-InstallState) -Name 'step1-requirements'
+  It "ConvertTo-InstallState round-trips a completed state" {
+    $s = [pscustomobject]@{ schema = 1; completed = $true }
     $r = ConvertTo-InstallState -Json ($s | ConvertTo-Json -Compress)
-    @($r.stages) | Should -Be @('step1-requirements')
-    $r.schema | Should -Be 1
+    $r.schema    | Should -Be 1
+    $r.completed | Should -BeTrue
   }
-  It "ConvertTo-InstallState returns a fresh state on corrupt / empty / wrong-schema JSON" {
-    (ConvertTo-InstallState -Json '{not json').stages.Count | Should -Be 0
-    (ConvertTo-InstallState -Json '').schema                | Should -Be 1
-    $wrong = @{ schema = 99; stages = @('x'); completed = $true } | ConvertTo-Json -Compress
-    $w = ConvertTo-InstallState -Json $wrong
-    @($w.stages).Count | Should -Be 0
-    $w.completed       | Should -BeFalse
+  It "ConvertTo-InstallState returns a fresh (not-completed) state on corrupt / empty / wrong-schema JSON" {
+    (ConvertTo-InstallState -Json '{not json').completed | Should -BeFalse
+    (ConvertTo-InstallState -Json '').schema             | Should -Be 1
+    $wrong = @{ schema = 99; completed = $true } | ConvertTo-Json -Compress
+    (ConvertTo-InstallState -Json $wrong).completed | Should -BeFalse
   }
 }
 
@@ -207,43 +192,40 @@ Describe "Install-state I/O round-trip (#420)" {
   }
   BeforeEach { Remove-Item (Join-Path "$TestDrive" 'install-state.json') -ErrorAction SilentlyContinue }
 
-  It "Read-InstallState returns a fresh state when no file exists" {
+  It "Read-InstallState returns a fresh (not-completed) state when no file exists" {
     $r = Read-InstallState
-    $r.schema | Should -Be 1
-    @($r.stages).Count | Should -Be 0
+    $r.schema    | Should -Be 1
+    $r.completed | Should -BeFalse
   }
-  It "Save-InstallState + Read-InstallState round-trip a full state" {
-    $s = Add-CompletedStage -State (New-InstallState) -Name 'step1-requirements'
-    $s = Add-CompletedStage -State $s -Name 'step2-tools'
-    $s = [pscustomobject]@{ schema = $s.schema; stages = @($s.stages); completed = $true }
-    Save-InstallState -State $s
+  It "Set-InstallComplete persists completed=true, reloadable by Read-InstallState" {
+    Set-InstallComplete
     $r = Read-InstallState
-    @($r.stages) | Should -Be @('step1-requirements','step2-tools')
     $r.completed | Should -BeTrue
-  }
-  It "Set-StageComplete records a stage that Test-StageComplete then sees" {
-    # Both read the same function-scope $script:InstallState, so they stay consistent
-    # regardless of Pester's It-scope; a never-run stage stays unseen.
-    Set-StageComplete 'step4-cli'
-    Test-StageComplete 'step4-cli'  | Should -BeTrue
-    Test-StageComplete 'never-ran'  | Should -BeFalse
+    $r.schema    | Should -Be 1
   }
   It "a corrupt state file degrades to a fresh state instead of throwing" {
     Set-Content -Path (Get-InstallStatePath) -Value '{ broken' -Encoding ASCII
     $r = Read-InstallState
-    $r.schema | Should -Be 1
-    @($r.stages).Count | Should -Be 0
+    $r.schema    | Should -Be 1
+    $r.completed | Should -BeFalse
   }
 }
 
-Describe "Test-InstallSucceeded (#420 Bugbot: don't mark a failed install complete)" {
+Describe "Completion vs exit predicates (#420 reviewer: 'starting' is not 'done')" {
   AfterAll { $script:ClientState = 'starting' }   # restore the module default
-  It "is true only for connected/starting; failure states are false" {
+  It "Test-InstallConnected (arms the fast path) is true ONLY for connected" {
+    $script:ClientState = 'connected'; Test-InstallConnected | Should -BeTrue
+    foreach ($s in 'starting','crash','bad_creds','image_pull','image_pull_ca') {
+      $script:ClientState = $s
+      Test-InstallConnected | Should -BeFalse -Because "'$s' is not a fully-up client, so completion must not arm the fast path"
+    }
+  }
+  It "Test-InstallSucceeded (exit code) also allows starting, but never a failure state" {
     $script:ClientState = 'connected'; Test-InstallSucceeded | Should -BeTrue
     $script:ClientState = 'starting';  Test-InstallSucceeded | Should -BeTrue
     foreach ($s in 'crash','bad_creds','image_pull','image_pull_ca','stopped') {
       $script:ClientState = $s
-      Test-InstallSucceeded | Should -BeFalse -Because "'$s' is a failure that must be re-run, not marked complete"
+      Test-InstallSucceeded | Should -BeFalse -Because "'$s' is a failure that must exit non-zero"
     }
   }
 }
@@ -254,15 +236,21 @@ Describe "Resume-after-reboot wiring (#420 source guards)" {
     $script:PSRC | Should -Match 'param\(\[switch\]\$Help.*\[switch\]\$Resume\)'
     $script:PSRC | Should -Match "if \(\`$Resume\)\s+\{ \`$switches \+= '-Resume' \}"
   }
-  It "registers a RunOnce continuation at the reboot exit and checkpoints it" {
-    $script:PSRC | Should -Match "Set-StageComplete 'features-reboot-pending'"
+  It "registers a RunOnce continuation at the reboot exit" {
     $script:PSRC | Should -Match 'Register-ResumeAfterReboot -ScriptPath \$PSCommandPath'
   }
-  It "checkpoints every step and clears + completes ONLY on success" {
-    foreach ($n in 1..6) { $script:PSRC | Should -Match "Set-StageComplete 'step$n-" }
-    $script:PSRC | Should -Match 'Unregister-ResumeAfterReboot\s*\r?\nif \(Test-InstallSucceeded\) \{ Set-InstallComplete \}'
-    # the exit code shares the same predicate so a failed run never arms the fast path
+  It "warns that resume is tied to the current account in the split -DailyUser case" {
+    $script:PSRC | Should -Match '\$DailyUser -and \(\$DailyUser -ne \$env:USERNAME\)'
+    $script:PSRC | Should -Match 'Resume is registered for'
+  }
+  It "clears the continuation, then completes ONLY when connected (not merely starting)" {
+    $script:PSRC | Should -Match 'Unregister-ResumeAfterReboot\s*\r?\nif \(Test-InstallConnected\) \{ Set-InstallComplete \}'
+    # the exit code is deliberately more lenient (starting is OK) but a failure exits 1
     $script:PSRC | Should -Match 'if \(-not \(Test-InstallSucceeded\)\) \{ exit 1 \}'
+  }
+  It "does not leave dead per-step stage checkpoints behind (reviewer: stages dropped)" {
+    $script:PSRC | Should -Not -Match "Set-StageComplete"
+    $script:PSRC | Should -Not -Match "function Add-CompletedStage"
   }
   It "gates the fast nothing-to-do path on a RUNNING cluster, not just the checkpoint" {
     $script:PSRC | Should -Match '\$script:InstallState\.completed -and \(Test-ToolsPresent\) -and \(Test-ClusterRunning\)'

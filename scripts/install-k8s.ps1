@@ -541,12 +541,12 @@ function Start-InstallLog {
 #  INSTALL STATE + RESUME-AFTER-REBOOT (#420)
 #  Two legitimate reboots (Windows feature enablement; Docker/WSL first boot) can
 #  interrupt the install. Instead of "re-find and re-paste the one-liner", we:
-#   - checkpoint completed stages in a schema-versioned JSON state file under
-#     %USERPROFILE%\.tracebloc\, and
+#   - record a schema-versioned `completed` flag in a JSON state file under
+#     %USERPROFILE%\.tracebloc\ (set only when the client is actually connected), and
 #   - on a reboot, register a RunOnce continuation that resumes automatically at
 #     next sign-in (-Resume).
-#  The state file is ADVISORY: every stage still self-verifies (tools re-checked,
-#  cluster re-derived), so a stale/corrupt checkpoint can never skip real work.
+#  The state is ADVISORY: the fast path still verifies the tools + a RUNNING cluster
+#  before it claims "nothing to do", so a stale flag can never skip real work.
 # =============================================================================
 
 $script:STATE_SCHEMA = 1
@@ -554,10 +554,15 @@ $script:RESUME_ROOT   = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\RunOnce
 $script:RESUME_NAME   = 'TraceblocInstallerResume'
 
 # --- Pure state helpers (no I/O; unit-testable) ------------------------------
+# The state records only `completed` -- what actually drives behavior. Per-stage
+# checkpoints were dropped (reviewer): the six steps set shared $script: state that
+# downstream steps need, so a resume must re-walk them; speed on re-run comes from
+# each step's own self-skip (tools present, WSL current, cluster running), not from
+# skipping the call. `completed` alone arms the nothing-to-do fast path.
 
-# A fresh, empty state at the current schema.
+# A fresh state at the current schema.
 function New-InstallState {
-  return [pscustomobject]@{ schema = $script:STATE_SCHEMA; stages = @(); completed = $false }
+  return [pscustomobject]@{ schema = $script:STATE_SCHEMA; completed = $false }
 }
 
 # Is a parsed state usable by THIS installer (schema matches)? A future/older or
@@ -570,40 +575,22 @@ function Test-InstallStateCurrent {
 }
 
 # Parse a state JSON string -> normalised state object. Corrupt/incompatible/empty
-# -> a fresh empty state, NEVER a throw (a broken checkpoint must not break install).
+# -> a fresh state, NEVER a throw (a broken checkpoint must not break the install).
 function ConvertTo-InstallState {
   param([string]$Json)
   if ([string]::IsNullOrWhiteSpace($Json)) { return (New-InstallState) }
   try { $obj = $Json | ConvertFrom-Json -ErrorAction Stop } catch { return (New-InstallState) }
   if (-not (Test-InstallStateCurrent -State $obj)) { return (New-InstallState) }
-  $stages = @()
-  if (($obj.PSObject.Properties.Name -contains 'stages') -and $obj.stages) { $stages = @($obj.stages) }
   $completed = $false
   if ($obj.PSObject.Properties.Name -contains 'completed') { $completed = [bool]$obj.completed }
-  return [pscustomobject]@{ schema = [int]$obj.schema; stages = $stages; completed = $completed }
-}
-
-# Record a stage complete (idempotent, order-preserving, deduped). Pure -> returns
-# a new state; callers persist it.
-function Add-CompletedStage {
-  param($State, [string]$Name)
-  if ($null -eq $State) { $State = New-InstallState }
-  $stages = @($State.stages)
-  if ($stages -notcontains $Name) { $stages += $Name }
-  return [pscustomobject]@{ schema = $State.schema; stages = $stages; completed = $State.completed }
-}
-
-# Is a stage recorded complete?
-function Test-StateHasStage {
-  param($State, [string]$Name)
-  return ($null -ne $State -and (@($State.stages) -contains $Name))
+  return [pscustomobject]@{ schema = [int]$obj.schema; completed = $completed }
 }
 
 # --- State-file I/O (thin wrappers over the pure helpers) --------------------
 
 function Get-InstallStatePath { return (Join-Path $HOST_DATA_DIR 'install-state.json') }
 
-# Read + parse the on-disk state; missing/unreadable/corrupt -> fresh empty state.
+# Read + parse the on-disk state; missing/unreadable/corrupt -> fresh state.
 function Read-InstallState {
   $path = Get-InstallStatePath
   if (-not (Test-Path -LiteralPath $path)) { return (New-InstallState) }
@@ -611,7 +598,7 @@ function Read-InstallState {
   catch { return (New-InstallState) }
 }
 
-# Persist state. Warn-only: a failed checkpoint must never fail the install.
+# Persist state. Warn-only: a failed write must never fail the install.
 function Save-InstallState {
   param($State)
   try {
@@ -620,32 +607,24 @@ function Save-InstallState {
   } catch { Log "install-state write failed: $_" }
 }
 
-# Mark a stage complete in the live $script:InstallState and persist it.
-function Set-StageComplete {
-  param([string]$Name)
-  $script:InstallState = Add-CompletedStage -State $script:InstallState -Name $Name
-  Save-InstallState -State $script:InstallState
-}
-
-# Is a stage recorded complete in the live state?
-function Test-StageComplete {
-  param([string]$Name)
-  return (Test-StateHasStage -State $script:InstallState -Name $Name)
-}
-
 # Mark the whole install completed + persist (so a later re-run detects nothing-to-do).
 function Set-InstallComplete {
-  if ($null -eq $script:InstallState) { $script:InstallState = New-InstallState }
-  $script:InstallState = [pscustomobject]@{
-    schema = $script:InstallState.schema; stages = @($script:InstallState.stages); completed = $true
-  }
-  Save-InstallState -State $script:InstallState
+  Save-InstallState -State ([pscustomobject]@{ schema = $script:STATE_SCHEMA; completed = $true })
 }
 
-# Did the install actually succeed? The client is up (connected) or on its way
-# (starting); anything else (bad_creds/crash/image_pull/...) is a failure the operator
-# must re-run to fix. This is the SINGLE source of truth shared by the completion
-# checkpoint and the exit code so a failed run never arms the fast path (#420 Bugbot).
+# Did the client actually come UP? Only `connected` (all workloads Ready) proves the
+# install is done. `starting` is Get-NotReadyState's catch-all for a client that
+# isn't Ready yet (Pending pods / a slow pull) -- treating it as done would arm the
+# fast path for a client that never came up, skipping the remediation (reviewer).
+# This gates the completion checkpoint; the exit code is deliberately more lenient.
+function Test-InstallConnected {
+  return ($script:ClientState -eq "connected")
+}
+
+# Is the exit code a success? connected (up) or starting (on its way) both avoid a
+# hard error exit; anything else (bad_creds/crash/image_pull/...) is a non-zero
+# failure. Deliberately more lenient than Test-InstallConnected: a still-starting
+# client shouldn't hard-fail the run, but it also must not be marked complete.
 function Test-InstallSucceeded {
   return ($script:ClientState -eq "connected" -or $script:ClientState -eq "starting")
 }
@@ -1009,11 +988,18 @@ function Enable-VirtualisationFeatures {
 
   if ($rebootNeeded) {
     Warn "A reboot is required to finish enabling system features."
-    # Checkpoint + arm the RunOnce continuation so the install resumes at next
-    # sign-in with no re-pasting -- both for auto-reboot and manual -NoReboot (#420).
-    Set-StageComplete 'features-reboot-pending'
+    # Arm the RunOnce continuation so the install resumes at next sign-in with no
+    # re-pasting -- both for auto-reboot and manual -NoReboot (#420). RunOnce is
+    # written to the CURRENT (elevating) account's hive: the reboot happens here in
+    # Step 1, during that account's session, so that same account signs back in and
+    # continues -- the -DailyUser handoff (#418) only runs at the very end.
     $resumeArmed = Register-ResumeAfterReboot -ScriptPath $PSCommandPath -NoReboot:$NoReboot -Diagnose:$Diagnose -DailyUser $DailyUser
     if ($resumeArmed) { Ok "The install will resume automatically the next time you sign in." }
+    # Split-account caveat (reviewer): resume is tied to THIS account. If a different
+    # user will sign in after the reboot, they must re-run the installer to continue.
+    if ($resumeArmed -and $DailyUser -and ($DailyUser -ne $env:USERNAME)) {
+      Hint "Resume is registered for '$env:USERNAME'. Sign back in as '$env:USERNAME' to continue; if '$DailyUser' signs in instead, re-run the installer."
+    }
     if ($NoReboot) {
       if ($resumeArmed) { Hint "Reboot when ready; the install resumes at your next sign-in." }
       else              { Hint "Reboot manually, then re-run this installer to continue." }
@@ -3938,8 +3924,8 @@ if ($Diagnose) { Invoke-DiagnoseBundle; exit 0 }
 Confirm-Config
 Initialize-ToolDir
 Start-InstallLog
-# Load the checkpoint state up front (#420): drives the resume banner + the fast
-# nothing-to-do path. Missing/corrupt -> a fresh empty state (never fatal).
+# Load the install state up front (#420): drives the fast nothing-to-do path.
+# Missing/corrupt -> a fresh state (never fatal).
 $script:InstallState = Read-InstallState
 Print-Banner
 if ($Resume) { Ok "Resuming the tracebloc install after a reboot..." }
@@ -3962,7 +3948,6 @@ Step 1 6 "Checking system requirements"
 Test-Preflight
 Find-Gpu
 Enable-VirtualisationFeatures
-Set-StageComplete 'step1-requirements'
 
 # -- Step 2/6: Install system tools (~700 MB — Docker Desktop, kubectl, k3d, helm;
 # each names its wait + shows a heartbeat + prints a summary line, #422) --
@@ -3972,29 +3957,24 @@ Install-DockerDesktop
 Install-NvidiaContainerToolkit
 Install-Kubectl
 Install-K3dAndHelm
-Set-StageComplete 'step2-tools'
 
 # -- Step 3/6: Set up secure compute environment --
 Step 3 6 "Setting up secure compute environment"
 New-K3dCluster
 Install-GpuDevicePlugin
 Confirm-GpuNode
-Set-StageComplete 'step3-cluster'
 
 # -- Step 4/6: install the tracebloc CLI FIRST (#388) — it mints the machine
 # credential in Step 5; a CLI-install hiccup degrades Step 5 to the legacy
 # manual-credential fallback instead of aborting.
 Install-TraceblocCli
-Set-StageComplete 'step4-cli'
 
 # -- Step 5/6: register this machine (browser sign-in + `client create`;
 # env-var credentials skip it; missing/old CLI falls back to manual prompts) --
 Invoke-ProvisionClient
-Set-StageComplete 'step5-register'
 
 # -- Step 6/6 handled inside Install-ClientHelm --
 Install-ClientHelm
-Set-StageComplete 'step6-client'
 
 # Verify the client actually came up before reporting anything
 Wait-ForClientReady
@@ -4004,11 +3984,12 @@ Wait-ForClientReady
 try { Set-DailyUserProvisioning } catch { Log "daily-user provisioning error: $_" }
 
 # The install reached the end: no reboot is pending, so clear any RunOnce
-# continuation. Record completion ONLY on success -- a failed client state must not
-# arm the "nothing to do" fast path, or a re-run would skip the documented
-# remediation the summary just printed (#420 Bugbot).
+# continuation. Record completion ONLY when the client is actually CONNECTED -- a
+# still-starting or failed client must not arm the "nothing to do" fast path, or a
+# re-run (likely started because it never came up) would skip the documented
+# remediation the summary just printed (#420 reviewer).
 Unregister-ResumeAfterReboot
-if (Test-InstallSucceeded) { Set-InstallComplete }
+if (Test-InstallConnected) { Set-InstallComplete }
 
 Print-Summary
 
