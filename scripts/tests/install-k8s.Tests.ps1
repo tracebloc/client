@@ -28,6 +28,37 @@ Describe "Get-BackendUrl" {
   It "unknown -> prod" { $env:CLIENT_ENV = "whatever"; Get-BackendUrl | Should -Be "https://api.tracebloc.io/" }
 }
 
+Describe "Get-ElevationCommand (#421 self-elevate)" {
+  It "re-runs an on-disk script with -File + forwards the switches" {
+    $c = Get-ElevationCommand -ScriptPath $PSCommandPath -NoReboot -Diagnose   # $PSCommandPath exists
+    $c | Should -Contain '-File'
+    $c | Should -Contain '-NoReboot'
+    $c | Should -Contain '-Diagnose'
+  }
+  It "re-fetches the one-liner when there's no script on disk (irm|iex)" {
+    $c = Get-ElevationCommand -ScriptPath ""
+    ($c -join ' ') | Should -Match 'irm https://tracebloc\.io/i\.ps1 \| iex'
+    $c | Should -Not -Contain '-File'
+  }
+  It "omits switches that weren't passed" {
+    $c = Get-ElevationCommand -ScriptPath ""
+    $c | Should -Not -Contain '-NoReboot'
+    $c | Should -Not -Contain '-Diagnose'
+  }
+}
+
+Describe "Self-elevation gate (#421 source guards)" {
+  BeforeAll { $script:ESRC = Get-Content "$PSScriptRoot/../install-k8s.ps1" -Raw }
+  It "offers to relaunch elevated (UAC) before falling back to instructions" {
+    $script:ESRC | Should -Match 'Invoke-SelfElevate -ScriptPath \$PSCommandPath'
+    $script:ESRC | Should -Match "Start-Process -FilePath 'powershell' -Verb RunAs"
+  }
+  It "only prompts when interactive, else prints the manual Terminal (Admin) steps" {
+    $script:ESRC | Should -Match 'UserInteractive -and -not \[Console\]::IsInputRedirected'
+    $script:ESRC | Should -Match 'Terminal \(Admin\)'
+  }
+}
+
 Describe "Get-ToolSummaryLine (#422 honest per-tool progress)" {
   It "name + version + size + elapsed" {
     Get-ToolSummaryLine -Name "kubectl" -Version "v1.31.0" -Size "~60 MB" -ElapsedSec 12 |
