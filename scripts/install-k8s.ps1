@@ -1698,7 +1698,12 @@ function Set-DailyUserProvisioning {
         $did += "set .wslconfig memory=${memGb}GB (applies next sign-in)"
       }
     }
-  } catch { Log ".wslconfig write failed: $_" }
+  } catch {
+    # A thrown merge/write (permissions, disk) must surface in the summary too --
+    # don't let a green "Configured for" imply the budget was set (#418 Bugbot).
+    Log ".wslconfig write failed: $_"
+    $did += "couldn't write .wslconfig -- set [wsl2] memory in '$user's profile manually"
+  }
 
   # 4) Summary. docker-users membership is the make-or-break step: without it the
   # standard account can't use Docker at all. If it didn't take, WARN loudly even

@@ -106,6 +106,9 @@ Describe "Daily-user provisioning wiring (#418 source guards)" {
   It "notes .wslconfig as a manual step when host RAM can't be detected (no silent skip)" {
     $script:PSRC | Should -Match "couldn't detect host RAM"
   }
+  It "notes .wslconfig as a manual step when the write itself throws (no silent catch)" {
+    $script:PSRC | Should -Match "couldn't write .wslconfig"
+  }
   It "sanitizes the prompted daily-user name before it hits net localgroup + paths" {
     $script:PSRC | Should -Match '\$other = ConvertTo-SanitizedInput \$other'
   }
