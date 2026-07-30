@@ -1155,6 +1155,13 @@ Describe "Show-MemoryStatus (#417 grade effective, label host)" {
     $out | Should -Match 'host RAM unreadable'
     $out | Should -Match 'it will OOM'                    # 4 < 5 floor still applies
   }
+  It "host unknown -> advice isn't capped at the (throttled) budget (#483 Bugbot)" {
+    # No host ceiling is known, so recommend the raw targets, never a backwards
+    # "at least 5 GB (up to 2 GB)" derived from the current 4 GB budget.
+    $out = (Show-MemoryStatus -HostGb $null -BudgetGb 4 6>&1 | Out-String)
+    $out | Should -Match 'at least 5 GB \(up to 8 GB\)'
+    $out | Should -Not -Match 'up to 2 GB'
+  }
   It "both unreadable -> skips (couldn't determine)" {
     $out = (Show-MemoryStatus -HostGb $null -BudgetGb $null 6>&1 | Out-String)
     $out | Should -Match "couldn't determine total RAM"

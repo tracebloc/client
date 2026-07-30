@@ -3000,16 +3000,23 @@ function Show-MemoryStatus {
     $label = "$BudgetGb GB"
     $budgetNote = " (Docker's share; host RAM unreadable)"
   }
-  # Cap recommendations at the host (or the budget when host is unknown).
-  $capHost  = if ($null -ne $HostGb) { $HostGb } else { $BudgetGb }
-  $recTrain = Get-PfMemRecommendation -DesiredGb $recMemGb -HostGb $capHost
+  # Cap recommendations at the host ceiling ONLY when host RAM is known. When it's
+  # unreadable we have no ceiling (the budget is the current throttled value, not
+  # the max), so advise the raw targets rather than capping at the budget -- which
+  # produced backwards hints like "at least 5 GB (up to 2 GB)" (#483 Bugbot).
+  if ($null -ne $HostGb) {
+    $recTrain = Get-PfMemRecommendation -DesiredGb $recMemGb  -HostGb $HostGb
+    $recRun   = Get-PfMemRecommendation -DesiredGb $warnMemGb -HostGb $HostGb
+  } else {
+    $recTrain = $recMemGb
+    $recRun   = $warnMemGb
+  }
   # A throttled Docker budget is fixed at the daemon; a small host needs more RAM.
   $budgetIsBottleneck = ($null -ne $BudgetGb) -and ($null -eq $HostGb -or $BudgetGb -lt $HostGb)
 
   if ($effective -lt $minMemGb) {
     Warn "Memory: $label$budgetNote - below the $minMemGb GB the client needs; it will OOM."
     if ($budgetIsBottleneck) {
-      $recRun = Get-PfMemRecommendation -DesiredGb $warnMemGb -HostGb $capHost
       Hint "Give Docker at least $minMemGb GB (up to $recRun GB): WSL2 backend - [wsl2] memory=${recRun}GB in %UserProfile%\.wslconfig + 'wsl --shutdown'; Hyper-V - Docker Desktop -> Settings -> Resources -> Advanced."
     } else {
       Hint "This machine has $label of RAM total; the client needs at least $minMemGb GB. Free up memory or use a larger machine."
