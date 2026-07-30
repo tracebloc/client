@@ -896,7 +896,8 @@ _stub_install_steps() {
   MOCK_CALLS="$(mktemp)"
   PRESENT_CMDS="curl newuidmap newgidmap dockerd-rootless-setuptool.sh docker"
   XDG_RUNTIME_DIR=/run/user/1000
-  systemctl() { record "systemctl $*"; }
+  # is-system-running echoes a state word ⇒ user-systemd present ⇒ systemd path (#1222)
+  systemctl() { record "systemctl $*"; case "$*" in *is-system-running*) echo running ;; esac; }
   loginctl()  { record "loginctl $*"; }
   id()        { [ "${1:-}" = "-un" ] && echo testuser || echo "testuser docker"; }  # id -un → clean username (#452)
   install_rootless_docker                              # called directly to observe the exported DOCKER_HOST
@@ -907,12 +908,12 @@ _stub_install_steps() {
   ! mock_calls | grep -q sudo                          # no blanket sudo anywhere on the rootless path
 }
 
-@test "install_rootless_docker: XDG_RUNTIME_DIR unset falls back to /run/user/<uid>" {
+@test "install_rootless_docker: DOCKER_HOST targets the XDG runtime-dir socket (systemd path)" {
   MOCK_CALLS="$(mktemp)"
   PRESENT_CMDS="curl newuidmap newgidmap dockerd-rootless-setuptool.sh docker"
-  unset XDG_RUNTIME_DIR
+  XDG_RUNTIME_DIR=/run/user/1000
   id()        { [ "${1:-}" = "-u" ] && echo 1000 || echo "testuser docker"; }
-  systemctl() { :; }
+  systemctl() { case "$*" in *is-system-running*) echo running ;; esac; }
   loginctl()  { :; }
   install_rootless_docker
   [ "$DOCKER_HOST" = "unix:///run/user/1000/docker.sock" ]
@@ -924,7 +925,7 @@ _stub_install_steps() {
   XDG_RUNTIME_DIR=/run/user/1000
   HOME="$BATS_TEST_TMPDIR"
   curl_secure() { record "curl_secure $*"; return 0; } # no network
-  systemctl()   { :; }
+  systemctl()   { case "$*" in *is-system-running*) echo running ;; esac; }
   loginctl()    { :; }
   install_rootless_docker
   case ":$PATH:" in *":$HOME/bin:"*) : ;; *) return 1 ;; esac   # ~/bin now on PATH for the run
@@ -935,7 +936,7 @@ _stub_install_steps() {
   PRESENT_CMDS="newuidmap newgidmap dockerd-rootless-setuptool.sh docker"
   XDG_RUNTIME_DIR=/run/user/1000
   HOME="$BATS_TEST_TMPDIR"
-  systemctl() { return 1; }                            # user-systemd refuses
+  systemctl() { case "$*" in *is-system-running*) echo degraded ;; *) return 1 ;; esac; }  # present, but enable refuses
   loginctl()  { return 1; }                            # linger blocked (polkit-locked)
   docker()    { return 0; }                            # ...but the daemon is actually up
   install_rootless_docker                              # must reach the export + verify, not set -e abort
@@ -945,7 +946,7 @@ _stub_install_steps() {
 @test "install_rootless_docker: success line is honest about the admin touch (#458)" {
   PRESENT_CMDS="newuidmap newgidmap dockerd-rootless-setuptool.sh docker"
   XDG_RUNTIME_DIR=/run/user/1000; HOME="$BATS_TEST_TMPDIR"
-  systemctl() { :; }; loginctl() { :; }
+  systemctl() { case "$*" in *is-system-running*) echo running ;; esac; }; loginctl() { :; }
   # Zero-root path (gate didn't touch sudo): claims no admin rights.
   MOCK_CALLS="$(mktemp)"; unset TB_ROOTLESS_ADMIN_TOUCH
   run install_rootless_docker
@@ -955,6 +956,37 @@ _stub_install_steps() {
   run install_rootless_docker
   [[ "$output" != *"no administrator rights were used"* ]]
   [[ "$output" == *"one-time admin step"* ]]
+}
+
+# ── no-systemd fallback + Tier-2 fall-through (RFC 0001 #1222) ────────────────
+
+@test "install_rootless_docker: no user-systemd -> nohup fallback, no systemctl enable, no linger promise (#1222)" {
+  MOCK_CALLS="$(mktemp)"
+  PRESENT_CMDS="newuidmap newgidmap dockerd-rootless-setuptool.sh dockerd-rootless.sh docker"
+  XDG_RUNTIME_DIR="$BATS_TEST_TMPDIR/run"; mkdir -p "$XDG_RUNTIME_DIR"
+  HOME="$BATS_TEST_TMPDIR"
+  systemctl() { record "systemctl $*"; }                 # is-system-running → empty ⇒ no user manager
+  loginctl()  { record "loginctl $*"; }
+  _launch_dockerd_rootless() { record "launch dockerd-rootless"; }   # stub the raw nohup start
+  docker()    { return 0; }                              # daemon answers immediately (poll breaks first try)
+  install_rootless_docker
+  mock_calls | grep -q "launch dockerd-rootless"                     # nohup launcher invoked
+  ! mock_calls | grep -q "systemctl --user enable"                   # systemd path NOT taken
+  ! mock_calls | grep -q "loginctl enable-linger"                    # no linger without user-systemd
+  [ "${TB_ROOTLESS_NO_LINGER:-0}" = "1" ]                            # honest: autostart not guaranteed
+  [ "$DOCKER_HOST" = "unix://${XDG_RUNTIME_DIR}/docker.sock" ]
+}
+
+@test "install_rootless_docker: daemon never Ready -> Tier-2 prepare-host fall-through, not a silent proceed (#1222)" {
+  MOCK_CALLS="$(mktemp)"
+  PRESENT_CMDS="newuidmap newgidmap dockerd-rootless-setuptool.sh docker"
+  XDG_RUNTIME_DIR=/run/user/1000; HOME="$BATS_TEST_TMPDIR"
+  systemctl() { case "$*" in *is-system-running*) echo running ;; esac; }  # systemd present
+  loginctl()  { :; }
+  docker()    { return 1; }                              # daemon never answers on the socket
+  run install_rootless_docker
+  [ "$status" -ne 0 ]                                    # exits via fall-through, not onward
+  [[ "$output" == *"prepare-host"* ]]                    # routes to the Tier-2 remedy
 }
 
 # ── _ensure_subid_ranges: the Tier-1 subuid/subgid gate (RFC 0001 #1220) ─────

@@ -840,6 +840,68 @@ _tier0_gpu_flags() {
 # and the no-systemd/HPC fallback + fuse-overlayfs perf (slice 4, #1222). The whole
 # path is gated behind TB_TIER1_ROOTLESS=1 at the call site until the spike's §5
 # host-validation matrix runs (#1176 / #1177).
+# _user_systemd_available — is there a per-user systemd manager to run the rootless
+# daemon under? RFC 0001 #1222. `systemctl --user is-system-running` prints a state
+# word (running/degraded/starting/…) whenever a user manager exists — even when it
+# exits non-zero — and prints NOTHING when there's no user D-Bus/manager (hardened /
+# HPC login nodes) or no systemctl at all. Also require XDG_RUNTIME_DIR, where the
+# user socket must live. A non-empty state ⇒ usable; otherwise take the nohup fallback.
+_user_systemd_available() {
+  [ -n "${XDG_RUNTIME_DIR:-}" ] || return 1
+  [ -n "$(systemctl --user is-system-running 2>/dev/null)" ]
+}
+
+# _tier2_fallthrough REASON — a rootless Tier-1 bring-up failed mid-flight (setuptool
+# error, daemon never Ready, no nohup launcher). Rather than proceed on a broken /
+# absent socket or die opaquely, route to the Tier-2 prepare-host remedy — the honest
+# "this host needs a one-time admin step" outcome (RFC 0001 #1222). Exits.
+_tier2_fallthrough() {
+  local reason="${1:-rootless setup failed}"
+  warn "Couldn't complete a rootless install (${reason}) — falling back to the administrator-prepared path."
+  hint "Have an administrator prepare this host once, then re-run as yourself:"
+  hint "  curl -fsSL https://tracebloc.io/i.sh | bash -s -- prepare-host"
+  hint "  (or, with the CLI:  tracebloc prepare-host)"
+  error "This host couldn't complete a rootless install (${reason}); an administrator must prepare it (see above), then re-run. Details: docs/rfcs/0001-least-privilege-install.md"
+}
+
+# _launch_dockerd_rootless — the raw detached daemon start, isolated into its own
+# function so the bats suite can stub it (nohup can't run a shell-function mock).
+_launch_dockerd_rootless() {
+  nohup dockerd-rootless.sh >"${XDG_RUNTIME_DIR}/dockerd-rootless.log" 2>&1 &
+}
+
+# _start_rootless_nohup — start the rootless daemon WITHOUT user-systemd (RFC 0001
+# #1222): on hardened/HPC nodes `systemctl --user` has no manager to talk to. Ensure
+# an owned XDG_RUNTIME_DIR, launch `dockerd-rootless.sh` under nohup, and poll the
+# socket until Ready. Still user-space, no root, no systemctl. Persistence across
+# logout is NOT guaranteed here (no linger) — surfaced honestly to the user.
+_start_rootless_nohup() {
+  if [ -z "${XDG_RUNTIME_DIR:-}" ] || [ ! -d "${XDG_RUNTIME_DIR}" ]; then
+    local _uid; _uid="$(id -u)"
+    if mkdir -p "/run/user/${_uid}" 2>/dev/null && [ -w "/run/user/${_uid}" ]; then
+      export XDG_RUNTIME_DIR="/run/user/${_uid}"
+    else
+      export XDG_RUNTIME_DIR="${HOME}/.tracebloc-rootless-run"
+      mkdir -p "$XDG_RUNTIME_DIR" 2>/dev/null || true
+    fi
+    chmod 700 "$XDG_RUNTIME_DIR" 2>/dev/null || true
+  fi
+  has dockerd-rootless.sh \
+    || _tier2_fallthrough "no per-user systemd and 'dockerd-rootless.sh' (docker-ce-rootless-extras) isn't on PATH"
+  info "No per-user systemd on this host — starting rootless Docker directly (nohup)…"
+  _launch_dockerd_rootless
+  # nohup starts the daemon ASYNC (unlike systemd --now), so poll the socket until it
+  # answers or a bounded number of tries elapse — the shared verify below is the gate.
+  local _i
+  for _i in $(seq 1 30); do
+    _bounded 5 docker -H "unix://${XDG_RUNTIME_DIR}/docker.sock" info >/dev/null 2>&1 && break
+    sleep 1
+  done
+  # No linger without user-systemd → be honest that autostart isn't set (AC #1222).
+  TB_ROOTLESS_NO_LINGER=1
+  warn "Started rootless Docker without user-systemd — it will NOT auto-restart after logout or reboot (no linger). Restart it manually with:  nohup dockerd-rootless.sh &"
+}
+
 install_rootless_docker() {
   # Resolve the current user robustly: $USER can be empty in headless / su / cron
   # contexts (Saqlain review, #452), and the linger call + success line below need a
@@ -888,9 +950,15 @@ install_rootless_docker() {
   # falls through to actionable guidance instead of a bare set -e abort (mirrors
   # install_docker_engine's start-then-verify). Linger is optional and can fail on
   # polkit-locked hosts even when the daemon is up, so it only warns (Bugbot).
-  systemctl --user enable --now docker || true
-  loginctl enable-linger "$_user" \
-    || warn "Couldn't enable linger (optional) — the rootless daemon may not survive logout. Enable it later with:  loginctl enable-linger ${_user}"
+  # Prefer per-user systemd (survives logout via linger); fall back to nohup on
+  # hardened/HPC nodes with no user systemd (RFC 0001 #1222). Both user-space, no root.
+  if _user_systemd_available; then
+    systemctl --user enable --now docker || true
+    loginctl enable-linger "$_user" \
+      || warn "Couldn't enable linger (optional) — the rootless daemon may not survive logout. Enable it later with:  loginctl enable-linger ${_user}"
+  else
+    _start_rootless_nohup
+  fi
 
   # Point every later docker/k3d call in this run at the rootless socket. docker and
   # k3d both read DOCKER_HOST from the environment, so exporting it is sufficient
@@ -907,7 +975,7 @@ install_rootless_docker() {
   # a race).
   if ! _bounded 15 docker info >/dev/null 2>&1; then
     _bounded 15 docker info || true
-    error "Rootless Docker didn't come up on ${DOCKER_HOST} (daemon output above). See https://docs.docker.com/engine/security/rootless/ for kernel/uidmap prerequisites."
+    _tier2_fallthrough "the rootless daemon never answered on ${DOCKER_HOST}"
   fi
   # Be honest about privilege: _ensure_subid_ranges may have used one announced sudo
   # touch (subuid range / uidmap install) on the root/sudo_nopw path. Only claim

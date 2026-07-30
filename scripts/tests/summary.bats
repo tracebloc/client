@@ -126,6 +126,14 @@ setup() {
   [[ "$output" != *"restarts automatically"* ]]
 }
 
+@test "_reboot_note: Linux rootless no-systemd (no linger) -> honest 'will NOT restart automatically' + takes precedence (#1222)" {
+  OS=Linux; TB_ROOTLESS_NO_LINGER=1; TB_DOCKER_AUTOSTART=1   # no-linger note wins over any autostart flag
+  run _reboot_note
+  [[ "$output" == *"will NOT restart automatically"* ]]
+  [[ "$output" == *"nohup dockerd-rootless.sh"* ]]
+  [[ "$output" != *"tracebloc restarts automatically"* ]]
+}
+
 @test "_reboot_note: macOS -> Docker Desktop start-on-login instruction" {
   OS=Darwin
   run _reboot_note
