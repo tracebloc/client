@@ -974,6 +974,7 @@ _stub_install_steps() {
   ! mock_calls | grep -q "systemctl --user enable"                   # systemd path NOT taken
   ! mock_calls | grep -q "loginctl enable-linger"                    # no linger without user-systemd
   [ "${TB_ROOTLESS_NO_LINGER:-0}" = "1" ]                            # honest: autostart not guaranteed
+  [ "$TB_ROOTLESS_RUNTIME_DIR" = "$XDG_RUNTIME_DIR" ]                # exact dir recorded for persist + restart (#485)
   [ "$DOCKER_HOST" = "unix://${XDG_RUNTIME_DIR}/docker.sock" ]
 }
 
@@ -1442,6 +1443,19 @@ _stub_install_steps() {
   _persist_docker_host                               # second run must not double-append
   run bash -c "grep -c 'DOCKER_HOST=' '$HOME/.bashrc'"
   [ "$output" = "1" ]
+}
+
+@test "_persist_docker_host: no-systemd nohup path persists the EXACT runtime dir so DOCKER_HOST resolves to the same socket (#485)" {
+  INSTALL_TIER=1; TB_TIER1_ROOTLESS=1
+  HOME="$(mktemp -d)"; SHELL=/bin/bash; OS=Linux
+  TB_ROOTLESS_RUNTIME_DIR="$HOME/.tracebloc-rootless-run"   # the $HOME fallback dir the nohup path chose
+  _persist_docker_host
+  run cat "$HOME/.bashrc"
+  [[ "$output" == *"export XDG_RUNTIME_DIR=\"$HOME/.tracebloc-rootless-run\""* ]]   # exact dir persisted first
+  # sourcing the rc with XDG unset must resolve DOCKER_HOST to the SAME socket the
+  # install used (not the /run/user/<uid> template fallback) — the Bugbot #485 fix.
+  run bash -c "unset XDG_RUNTIME_DIR; . '$HOME/.bashrc'; printf '%s' \"\$DOCKER_HOST\""
+  [ "$output" = "unix://$HOME/.tracebloc-rootless-run/docker.sock" ]
 }
 
 @test "_persist_docker_host: flag OFF -> no-op (no rc write)" {

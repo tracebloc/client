@@ -790,6 +790,13 @@ _persist_docker_host() {
   fi
   {
     printf '\n%s\n' "$marker"
+    # No-systemd nohup path (Bugbot #485): a fresh login shell won't have
+    # XDG_RUNTIME_DIR set, and the socket may live under $HOME rather than
+    # /run/user/<uid> — persist the EXACT dir first so the DOCKER_HOST line below
+    # resolves to the same socket the install used AND the daemon can be restarted.
+    if [ -n "${TB_ROOTLESS_RUNTIME_DIR:-}" ]; then
+      printf 'export XDG_RUNTIME_DIR="%s"\n' "$TB_ROOTLESS_RUNTIME_DIR"
+    fi
     printf '%s\n' 'export DOCKER_HOST="unix://${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/docker.sock"'
   } >> "$rc" 2>/dev/null || return 0
   hint "Added DOCKER_HOST to ${rc} so new terminals reach the rootless Docker daemon."
@@ -897,9 +904,12 @@ _start_rootless_nohup() {
     _bounded 5 docker -H "unix://${XDG_RUNTIME_DIR}/docker.sock" info >/dev/null 2>&1 && break
     sleep 1
   done
-  # No linger without user-systemd → be honest that autostart isn't set (AC #1222).
+  # No linger without user-systemd → be honest that autostart isn't set (AC #1222),
+  # and record the EXACT runtime dir so _persist_docker_host + the restart guidance
+  # target the SAME socket we used (esp. the $HOME fallback, not /run/user) — Bugbot #485.
   TB_ROOTLESS_NO_LINGER=1
-  warn "Started rootless Docker without user-systemd — it will NOT auto-restart after logout or reboot (no linger). Restart it manually with:  nohup dockerd-rootless.sh &"
+  TB_ROOTLESS_RUNTIME_DIR="$XDG_RUNTIME_DIR"
+  warn "Started rootless Docker without user-systemd — it will NOT auto-restart after logout or reboot (no linger). Restart it manually with:  XDG_RUNTIME_DIR=${XDG_RUNTIME_DIR} nohup dockerd-rootless.sh &"
 }
 
 install_rootless_docker() {
