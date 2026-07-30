@@ -41,6 +41,30 @@ Describe "Daily-user provisioning (#418)" {
     $c | Should -Match '(?m)^\[wsl2\]'
     $c | Should -Match 'memory=12GB'
   }
+  It "Add-WslMemorySetting creates a [wsl2] stanza from empty content" {
+    $c = Add-WslMemorySetting -Existing "" -MemoryGb 12
+    $c | Should -Match '(?m)^\[wsl2\]'
+    $c | Should -Match 'memory=12GB'
+  }
+  It "Add-WslMemorySetting keeps an existing memory= (returns null -> don't clobber)" {
+    Add-WslMemorySetting -Existing "[wsl2]`r`nmemory=6GB`r`nprocessors=4`r`n" -MemoryGb 12 | Should -Be $null
+  }
+  It "Add-WslMemorySetting inserts under an existing [wsl2] header, preserving other settings" {
+    $c = Add-WslMemorySetting -Existing "[wsl2]`r`nprocessors=4`r`nswap=8GB`r`n" -MemoryGb 12
+    $c | Should -Match 'memory=12GB'
+    $c | Should -Match 'processors=4'   # other tuning survives
+    $c | Should -Match 'swap=8GB'
+  }
+  It "Add-WslMemorySetting appends a [wsl2] section when none exists, preserving other sections" {
+    $c = Add-WslMemorySetting -Existing "[experimental]`r`nsparseVhd=true`r`n" -MemoryGb 12
+    $c | Should -Match '(?m)^\[experimental\]'
+    $c | Should -Match 'sparseVhd=true'  # other sections survive
+    $c | Should -Match '(?m)^\[wsl2\]'
+    $c | Should -Match 'memory=12GB'
+  }
+  It "Get-UserProfileDir returns null for a user who has never signed in" {
+    Get-UserProfileDir -User 'nonexistent-user-9d2f' | Should -Be $null
+  }
   It "Resolve-DailyUser prefers the param and strips the domain" {
     Resolve-DailyUser -Param 'CORP\jdoe' -CurrentUser 'admin' | Should -Be 'jdoe'
   }
@@ -54,9 +78,19 @@ Describe "Daily-user provisioning wiring (#418 source guards)" {
   It "adds the daily user to docker-users" {
     $script:PSRC | Should -Match 'net localgroup docker-users'
   }
-  It "writes a sized .wslconfig without clobbering an existing tuned one" {
-    $script:PSRC | Should -Match 'Get-WslConfigContent -MemoryGb'
+  It "merges a sized .wslconfig via Add-WslMemorySetting (preserves other settings)" {
+    $script:PSRC | Should -Match 'Add-WslMemorySetting -Existing'
     $script:PSRC | Should -Match '\(\?im\)\^\\s\*memory\\s\*='   # preserves an existing memory= line
+  }
+  It "notes .wslconfig as a manual step when the daily user has no profile yet" {
+    $script:PSRC | Should -Match 'no profile for .* yet'
+  }
+  It "sanitizes the prompted daily-user name before it hits net localgroup + paths" {
+    $script:PSRC | Should -Match '\$other = ConvertTo-SanitizedInput \$other'
+  }
+  It "forwards -DailyUser through self-elevation so it survives the UAC relaunch" {
+    $script:PSRC | Should -Match 'Invoke-SelfElevate .* -DailyUser \$DailyUser'
+    $script:PSRC | Should -Match "\-DailyUser', "   # Get-ElevationCommand appends it to the forwarded switches
   }
   It "is warn-only, opt-out-able, and wired into the elevated run" {
     $script:PSRC | Should -Match 'Set-DailyUserProvisioning'

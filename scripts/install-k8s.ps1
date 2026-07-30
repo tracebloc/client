@@ -35,10 +35,11 @@ param([switch]$Help, [switch]$NoReboot, [switch]$Diagnose, [string]$DailyUser)
 # ShellExecute/RunAs doesn't inherit the caller's process env, and putting secrets
 # on a command line is unsafe; an env-driven run should be launched elevated.
 function Get-ElevationCommand {
-  param([string]$ScriptPath, [switch]$NoReboot, [switch]$Diagnose)
+  param([string]$ScriptPath, [switch]$NoReboot, [switch]$Diagnose, [string]$DailyUser)
   $switches = @()
-  if ($NoReboot) { $switches += '-NoReboot' }
-  if ($Diagnose) { $switches += '-Diagnose' }
+  if ($NoReboot)  { $switches += '-NoReboot' }
+  if ($Diagnose)  { $switches += '-Diagnose' }
+  if ($DailyUser) { $switches += @('-DailyUser', "`"$DailyUser`"") }   # forward the daily user (#418 Bugbot)
   # Return a single command-line STRING, not an array: PS 5.1 Start-Process
   # -ArgumentList doesn't quote array elements, so a script path with spaces (or
   # the quoted -Command value) would be split (#421 Bugbot; same class as #419).
@@ -60,8 +61,8 @@ function Get-ElevationCommand {
 # elevated process was started (user accepted UAC), $false if they declined the
 # prompt or the launch failed (Start-Process -Verb RunAs throws on cancel).
 function Invoke-SelfElevate {
-  param([string]$ScriptPath, [switch]$NoReboot, [switch]$Diagnose)
-  $argList = Get-ElevationCommand -ScriptPath $ScriptPath -NoReboot:$NoReboot -Diagnose:$Diagnose
+  param([string]$ScriptPath, [switch]$NoReboot, [switch]$Diagnose, [string]$DailyUser)
+  $argList = Get-ElevationCommand -ScriptPath $ScriptPath -NoReboot:$NoReboot -Diagnose:$Diagnose -DailyUser $DailyUser
   try {
     Start-Process -FilePath 'powershell' -Verb RunAs -ArgumentList $argList -ErrorAction Stop | Out-Null
     return $true
@@ -84,7 +85,7 @@ if (-not $env:TB_PESTER) {
       Write-Host "  " -NoNewline; Write-Host ([char]0x26A0) -ForegroundColor Yellow -NoNewline; Write-Host "  Administrator rights are required to set up Docker + WSL." -ForegroundColor Yellow
       $ans = Read-Host "  Relaunch as Administrator now? A Windows UAC prompt will appear [Y/n]"
       if ($ans -notmatch '^\s*[Nn]') {
-        $elevated = Invoke-SelfElevate -ScriptPath $PSCommandPath -NoReboot:$NoReboot -Diagnose:$Diagnose
+        $elevated = Invoke-SelfElevate -ScriptPath $PSCommandPath -NoReboot:$NoReboot -Diagnose:$Diagnose -DailyUser $DailyUser
         if ($elevated) { Write-Host "  Continuing in the new elevated window -- you can close this one." -ForegroundColor DarkGray }
         else           { Write-Host "  Elevation was cancelled." -ForegroundColor DarkGray }
       }
@@ -1565,6 +1566,23 @@ function Get-WslConfigContent {
   return "[wsl2]`r`nmemory=${MemoryGb}GB`r`n"
 }
 
+# Merge a memory budget into EXISTING .wslconfig content without clobbering other
+# settings (processors, swap, ...). Returns the new content, or $null when a
+# memory= is already present (keep the operator's tuning) (#418 Bugbot).
+function Add-WslMemorySetting {
+  param([string]$Existing, [int]$MemoryGb)
+  if ($Existing -match '(?im)^\s*memory\s*=') { return $null }              # already tuned -> keep
+  $line = "memory=${MemoryGb}GB"
+  if ([string]::IsNullOrWhiteSpace($Existing)) { return "[wsl2]`r`n$line`r`n" }
+  if ($Existing -match '(?im)^\s*\[wsl2\]\s*$') {
+    # Insert under the existing [wsl2] header, preserving everything else.
+    return ($Existing -replace '(?im)^(\s*\[wsl2\]\s*)$', "`$1`r`n$line")
+  }
+  # No [wsl2] section -> append one, preserving the existing content.
+  $sep = if ($Existing.EndsWith("`n")) { "" } else { "`r`n" }
+  return "$Existing$sep[wsl2]`r`n$line`r`n"
+}
+
 # Which account to provision for: -DailyUser when given, else the caller-supplied
 # name, else the account running the installer. Returns the bare username (#418).
 function Resolve-DailyUser {
@@ -1593,6 +1611,7 @@ function Set-DailyUserProvisioning {
   $user = Resolve-DailyUser -Param $DailyUser
   if (-not $DailyUser -and (Test-CanPrompt)) {
     $other = Read-Host "  Configure Docker for the day-to-day user? Enter their username, or press Enter for '$user'"
+    $other = ConvertTo-SanitizedInput $other   # strip paste/ANSI/control chars before it hits net localgroup + paths (#418 Bugbot)
     if ($other.Trim()) { $user = Resolve-DailyUser -Param $other }
   }
   Info "Configuring Docker for '$user' so no admin rights are needed later..."
@@ -1618,18 +1637,24 @@ function Set-DailyUserProvisioning {
     }
   } catch { Log "autostart set failed: $_" }
 
-  # 3) Training-sized .wslconfig in the daily user's profile. Don't clobber an
-  # existing tuned file. Effective at next WSL start / sign-in.
+  # 3) Training-sized .wslconfig in the daily user's profile. Merge the memory
+  # budget in without clobbering any other tuning (processors/swap/...), and keep
+  # an existing memory= as-is. Effective at next WSL start / sign-in.
   try {
-    $hostGb    = Get-PfMemGb
+    $hostGb     = Get-PfMemGb
     $profileDir = Get-UserProfileDir -User $user
-    if ($null -ne $hostGb -and $profileDir) {
-      $wslCfg = Join-Path $profileDir ".wslconfig"
-      if ((Test-Path $wslCfg) -and ((Get-Content $wslCfg -Raw -ErrorAction SilentlyContinue) -match '(?im)^\s*memory\s*=')) {
+    if ($null -eq $profileDir) {
+      # User has never signed in -> no profile to write into. Note it as a manual step.
+      $did += "no profile for '$user' yet -- set [wsl2] memory in their .wslconfig after first sign-in"
+    } elseif ($null -ne $hostGb) {
+      $wslCfg   = Join-Path $profileDir ".wslconfig"
+      $existing = if (Test-Path $wslCfg) { (Get-Content $wslCfg -Raw -ErrorAction SilentlyContinue) } else { "" }
+      $memGb    = Get-WslConfigMemoryGb -HostGb $hostGb
+      $merged   = Add-WslMemorySetting -Existing $existing -MemoryGb $memGb
+      if ($null -eq $merged) {
         $did += "kept existing .wslconfig memory"
       } else {
-        $memGb = Get-WslConfigMemoryGb -HostGb $hostGb
-        Set-Content -Path $wslCfg -Value (Get-WslConfigContent -MemoryGb $memGb) -Encoding ASCII -ErrorAction Stop
+        Set-Content -Path $wslCfg -Value $merged -Encoding ASCII -ErrorAction Stop
         $did += "set .wslconfig memory=${memGb}GB (applies next sign-in)"
       }
     }
