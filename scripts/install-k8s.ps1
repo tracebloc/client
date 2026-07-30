@@ -3052,10 +3052,12 @@ function Test-Preflight {
       Warn "Memory: $mem GB$budgetNote - below the $minMemGb GB the client needs; it will OOM."
       Hint "This machine has $mem GB of RAM total; the client needs at least $minMemGb GB. Free up memory or use a larger machine."
     }
-    elseif ($mem -lt $warnMemGb) {
-      # Runs, but too small for local training: it can't spare a trainable Docker
-      # budget (~8 GB/job + ~2 GB for the OS), so don't dangle a "give Docker N GB
-      # to train" target that this host physically can't meet (#417 Bugbot).
+    elseif ($mem -lt ($warnMemGb + 2)) {
+      # Runs, but too small for local training: to spare a trainable Docker budget
+      # (~warnMemGb for ~8 GB/job) the host also needs ~2 GB for the OS, so the
+      # real floor is warnMemGb + 2 (an 8-9 GB host can't give Docker 8 GB). Warn
+      # here so Step-1 agrees with Step-2 instead of a green Ok the budget check
+      # then contradicts, and don't dangle a target the host can't meet (#417 Bugbot).
       Warn "Memory: $mem GB$budgetNote - enough to run the client, but too little for local training (~8 GB/job may OOM)."
       Hint "The client will run here; for local training use a machine with more RAM (~$($warnMemGb + 2) GB+ total)."
     }

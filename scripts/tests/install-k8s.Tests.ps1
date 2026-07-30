@@ -1042,6 +1042,13 @@ Describe "Test-Preflight" {
     Mock Test-PfUrl { "ok" }; Mock Get-PfMemGb { 3 }
     { Test-Preflight } | Should -Not -Throw
   }
+  It "an 8-9 GB host is flagged too-small-for-training, not a green Ok (#417 Bugbot)" {
+    # host >= warnMemGb(8) but < warnMemGb + 2(10): can't spare an 8 GB Docker
+    # budget, so Step-1 must warn (agreeing with Step-2), not print a green Memory Ok.
+    Mock Test-PfUrl { "ok" }; Mock Get-PfMemGb { 9 }; Mock Get-PfRuntimeMemGb { $null }
+    $out = (Test-Preflight 6>&1 | Out-String)
+    $out | Should -Match 'too little for local training'
+  }
   It "PF_MIN_MEM_GB override relaxes the floor" {
     Mock Test-PfUrl { "ok" }; Mock Get-PfMemGb { 3 }; $env:PF_MIN_MEM_GB = "2"
     { Test-Preflight } | Should -Not -Throw
