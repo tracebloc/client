@@ -449,11 +449,28 @@ jobs:
     env:
       TAG: ${{ github.event.release.tag_name }}
       PRERELEASE: ${{ needs.verify.outputs.prerelease }}
+    permissions:
+      contents: read   # read index.yaml from gh-pages via the API
     steps:
       - name: Assert the public index holds only stable versions
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
-          idx=$(curl -fsSL --retry 3 "https://raw.githubusercontent.com/$GITHUB_REPOSITORY/gh-pages/index.yaml?nocache=$GITHUB_RUN_ID")
+
+          # Read the blob through the CONTENTS API, not raw.githubusercontent.com.
+          # raw.* is CDN-fronted and serves a stale copy for a while after a
+          # gh-pages push; `?nocache=` does not reliably bust it (Bugbot on
+          # client#495). This job runs seconds after `release` may have pushed,
+          # so a stale read could show a clean index while the customer-facing
+          # one is already polluted -- greening the exact backstop this job
+          # exists to be. The API is read-after-write consistent for a ref.
+          idx=$(gh api "repos/$GITHUB_REPOSITORY/contents/index.yaml?ref=gh-pages" \
+                  -H "Accept: application/vnd.github.raw+json")
+          if [ -z "$idx" ]; then
+            echo "::error::could not read index.yaml from gh-pages - refusing to report the invariants as holding on an empty read." >&2
+            exit 1
+          fi
           # No prerelease-shaped chart version may ever be indexed.
           if printf '%s\n' "$idx" | grep -E '^[[:space:]]+version:' | grep -- '-'; then
             echo "::error::public helm index contains prerelease-shaped versions (above) - customer surface polluted."
