@@ -468,7 +468,10 @@ jobs:
           idx=$(gh api "repos/$GITHUB_REPOSITORY/contents/index.yaml?ref=gh-pages" \
                   -H "Accept: application/vnd.github.raw+json")
           if [ -z "$idx" ]; then
-            echo "::error::could not read index.yaml from gh-pages - refusing to report the invariants as holding on an empty read." >&2
+            # stdout, not stderr: Actions parses workflow commands from stdout
+            # only, so an ::error:: on stderr fails the step with no annotation
+            # (Bugbot, client#497). Every sibling ::error:: here uses stdout.
+            echo "::error::could not read index.yaml from gh-pages - refusing to report the invariants as holding on an empty read."
             exit 1
           fi
           # No prerelease-shaped chart version may ever be indexed.
