@@ -1,0 +1,39 @@
+# Chart content can only reach installs via a NEW chart version — a Helm repo
+# publishes on version change, so an unbumped template/values edit reaches
+# nobody (this is exactly how the perIngestionTables flag block shipped to
+# staging but never rendered: PR #472 changed the template without bumping
+# Chart.yaml, so the published 1.9.7 stayed stale). This gate makes the bump
+# non-optional.
+name: Chart version guard
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  require-version-bump:
+    name: chart content ⇒ Chart.yaml version bump
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Require a Chart.yaml version bump when chart content changes
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          set -euo pipefail
+          changed="$(git diff --name-only "${BASE_SHA}...HEAD")"
+          if ! printf '%s\n' "$changed" | grep -qE '^client/(templates/|values\.yaml)'; then
+            echo "No chart template/values change in this PR — guard N/A."
+            exit 0
+          fi
+          if printf '%s\n' "$changed" | grep -qxE 'client/Chart\.yaml' \
+             && git diff "${BASE_SHA}...HEAD" -- client/Chart.yaml | grep -qE '^\+version:'; then
+            echo "Chart content changed and client/Chart.yaml 'version:' was bumped. ✓"
+            exit 0
+          fi
+          echo "::error::client/templates/** or client/values.yaml changed, but client/Chart.yaml 'version:' was NOT bumped. A Helm chart repo publishes only on a version change, so an unbumped edit reaches no installs (this is how the perIngestionTables flag block shipped dark — PR #472). Bump client/Chart.yaml version in this PR."
+          exit 1
