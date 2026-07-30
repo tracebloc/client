@@ -28,6 +28,94 @@ Describe "Get-BackendUrl" {
   It "unknown -> prod" { $env:CLIENT_ENV = "whatever"; Get-BackendUrl | Should -Be "https://api.tracebloc.io/" }
 }
 
+Describe "Get-ToolSummaryLine (#422 honest per-tool progress)" {
+  It "name + version + size + elapsed" {
+    Get-ToolSummaryLine -Name "kubectl" -Version "v1.31.0" -Size "~60 MB" -ElapsedSec 12 |
+      Should -Be "kubectl v1.31.0 (~60 MB, 12s)"
+  }
+  It "name + version only (no meta parens)" {
+    Get-ToolSummaryLine -Name "helm" -Version "v4.2.3" | Should -Be "helm v4.2.3"
+  }
+  It "name only" { Get-ToolSummaryLine -Name "k3d" | Should -Be "k3d" }
+  It "size without elapsed" {
+    Get-ToolSummaryLine -Name "k3d" -Version "v5.9.0" -Size "~25 MB" |
+      Should -Be "k3d v5.9.0 (~25 MB)"
+  }
+  It "elapsed 0 is shown (not treated as absent)" {
+    Get-ToolSummaryLine -Name "helm" -Version "v4.2.3" -ElapsedSec 0 |
+      Should -Be "helm v4.2.3 (0s)"
+  }
+}
+
+Describe "Invoke-WithHeartbeat (#422 no silent window)" {
+  It "returns the operation output" {
+    (Invoke-WithHeartbeat -Message "adding" -PollSeconds 1 -Script { 40 + 2 }) | Should -Be 42
+  }
+  It "throws when the operation fails (so callers keep retry/abort flow)" {
+    { Invoke-WithHeartbeat -Message "boom" -PollSeconds 1 -Script { throw "kaboom" } } | Should -Throw
+  }
+  It "passes ArgumentList into the job scriptblock" {
+    (Invoke-WithHeartbeat -Message "args" -PollSeconds 1 -ArgumentList @("a","b") -Script { param($x,$y) "$x$y" }) |
+      Should -Be "ab"
+  }
+  It "job runspaces get the TLS 1.2 floor (Bugbot #422)" {
+    # Jobs don't inherit the parent's SecurityProtocol; JobInit must re-apply it,
+    # else in-job HTTPS downloads fail on TLS-1.2-only hosts.
+    (Invoke-WithHeartbeat -Message "tls" -PollSeconds 1 -Script { [Net.ServicePointManager]::SecurityProtocol.ToString() }) |
+      Should -Match 'Tls12'
+  }
+  It "surfaces the real failure detail, not just a generic message (Bugbot #422)" {
+    # A failed job's real error must reach the caller (log + Err), not be swallowed.
+    { Invoke-WithHeartbeat -Message "op" -PollSeconds 1 -Script { throw "REAL_REASON_XYZ" } } |
+      Should -Throw -ExpectedMessage "*REAL_REASON_XYZ*"
+  }
+}
+
+Describe "Step honesty (#422 split check vs install)" {
+  BeforeAll { $script:SRC = Get-Content "$PSScriptRoot/../install-k8s.ps1" -Raw }
+  It "runs six steps, not five" {
+    $script:SRC | Should -Match 'Step 6 6 "'
+    $script:SRC | Should -Not -Match 'Step [0-9] 5 "'
+  }
+  It "has a dedicated 'Installing system tools' step" {
+    $script:SRC | Should -Match 'Step 2 6 "Installing system tools"'
+  }
+  It "the k3d start path runs as a killable process with output to the log, not streamed (Bugbot #422)" {
+    # No bare streaming form; k3d start is a tracked process with its raw INFO[...]
+    # redirected to temp files (logged), so nothing streams to the console.
+    $script:SRC | Should -Not -Match '(?m)^\s*k3d cluster start \$CLUSTER_NAME\s*$'
+    $script:SRC | Should -Match 'Start-Process -FilePath "k3d" -ArgumentList @\("cluster","start"'
+    $script:SRC | Should -Match 'RedirectStandardError \$startErrFile'
+  }
+  It "k3d start Errs on timeout or non-zero exit, never a false 'started' (Bugbot #422)" {
+    # A deadline that KILLS the process (no orphan) plus an exit-code check both
+    # gate the "started" line.
+    $script:SRC | Should -Match 'Wait-ProcessWithDeadline -Process \$sp'
+    $script:SRC | Should -Match '\$sp\.ExitCode -ne 0'
+  }
+  It "the Docker installer runs as a killable process, not an orphan-prone job (Bugbot #422)" {
+    # Start-Process -PassThru + Wait-ProcessWithDeadline (kills on timeout) + an
+    # exit-code check — a background job would orphan the installer on timeout.
+    $script:SRC | Should -Match 'Start-Process -FilePath \$installer[\s\S]{0,80}-PassThru -ErrorAction Stop'
+    $script:SRC | Should -Match 'Wait-ProcessWithDeadline -Process \$ip'
+    $script:SRC | Should -Match '\$ip\.ExitCode -ne 0'
+  }
+  It "k3d/helm print their green summary only after the execute-gate (Bugbot #422)" {
+    # A corrupt/wrong-arch binary must fail Assert-ToolRuns before any green Ok;
+    # the summary is deferred to after the gate (kubectl already does this).
+    $script:SRC | Should -Match 'Assert-ToolRuns -Name "k3d"[\s\S]{0,80}if \(\$k3dSummary\) \{ Ok'
+    $script:SRC | Should -Match 'Assert-ToolRuns -Name "helm"[\s\S]{0,80}if \(\$helmSummary\) \{ Ok'
+  }
+  It "the winget Docker path is killable, checks exit, falls back, and fails loudly (Bugbot #422)" {
+    # winget runs as a tracked process (killable on timeout), its exit is checked
+    # (throw -> fallback), and a final Test-Path guard Errs if nothing landed.
+    $script:SRC | Should -Match 'Start-Process -FilePath "winget"[\s\S]{0,240}Docker\.DockerDesktop'
+    $script:SRC | Should -Match 'Wait-ProcessWithDeadline -Process \$wp'
+    $script:SRC | Should -Match '\$wp\.ExitCode -ne 0'
+    $script:SRC | Should -Match "Docker Desktop installation didn't complete"
+  }
+}
+
 Describe "Get-ErrDetailLines (#423 honest failure output)" {
   BeforeEach { $script:LOG_FILE = "C:\Users\x\.tracebloc\install-20260729-000000.log" }
   AfterEach  { $script:LOG_FILE = $null }

@@ -171,7 +171,66 @@ function Wait-JobWithProgress {
 # install (#409). Every Start-Job below passes this as -InitializationScript to
 # pin the job to a local working directory before it runs anything. (SystemRoot
 # is always local; the guard makes it a no-op on non-Windows Pester runs.)
-$script:JobInit = { if ($env:SystemRoot) { Set-Location $env:SystemRoot } }
+$script:JobInit = {
+  if ($env:SystemRoot) { Set-Location $env:SystemRoot }
+  # Job runspaces don't inherit the parent's TLS floor (set once at script top).
+  # Windows PowerShell 5.1 still defaults to TLS 1.0/1.1, which many corporate
+  # proxies and CDNs reject — so in-job HTTPS downloads (kubectl/k3d/helm/winget/
+  # Docker Desktop via Invoke-WithHeartbeat) would fail SSL/TLS without this
+  # (#422 Bugbot). Re-apply TLS 1.2 (OR-in, don't clobber a higher floor).
+  try {
+    [Net.ServicePointManager]::SecurityProtocol =
+      [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
+  } catch {}
+}
+
+# One honest line per system tool once it's ready (#422): name, version, and
+# whatever of {size, elapsed} is known — so "Installing system tools" shows
+# concrete per-tool progress instead of a silent ~700 MB. Pure/formatting-only
+# so it is unit-testable. e.g. "kubectl v1.31.0 (~60 MB, 12s)".
+function Get-ToolSummaryLine {
+  param([string]$Name, [string]$Version = "", [string]$Size = "", [int]$ElapsedSec = -1)
+  $head = if ($Version) { "$Name $Version" } else { "$Name" }
+  $meta = @()
+  if ($Size)          { $meta += $Size }
+  if ($ElapsedSec -ge 0) { $meta += ("{0}s" -f $ElapsedSec) }
+  if ($meta.Count)    { return "$head (" + ($meta -join ", ") + ")" }
+  return $head
+}
+
+# Run a blocking operation with a live spinner heartbeat so Steps 1-2 never sit
+# console-silent for more than a couple of seconds (#422): downloads (progress
+# overlay is off for speed, #471), winget installs, and the Docker Desktop
+# installer are otherwise dead air. The scriptblock runs in a background job
+# (jobs don't inherit functions/vars — pass inputs via -ArgumentList) driven by
+# Wait-JobWithProgress. Returns the job's output; throws on timeout or job
+# failure so callers keep their existing Invoke-WithRetry / try-catch flow.
+function Invoke-WithHeartbeat {
+  param(
+    [Parameter(Mandatory)][scriptblock]$Script,
+    [object[]]$ArgumentList = @(),
+    [string]$Message = "Working",
+    [int]$TimeoutSec = 1800,
+    [int]$PollSeconds = 2
+  )
+  $job = Start-Job -ScriptBlock $Script -ArgumentList $ArgumentList -InitializationScript $script:JobInit
+  $finished = Wait-JobWithProgress -Job $job -TimeoutSec $TimeoutSec -Message $Message -PollSeconds $PollSeconds
+  # Capture BOTH output and error records (2>&1) so a failure's real detail
+  # (e.g. the k3d/installer error the scriptblock threw) can be surfaced, not
+  # swallowed (#422 Bugbot). The job's terminating exception is the most reliable
+  # source of the reason.
+  $out    = @(Receive-Job $job -ErrorAction SilentlyContinue 2>&1)
+  $state  = $job.State
+  $reason = $null
+  try { $reason = $job.ChildJobs[0].JobStateInfo.Reason.Message } catch {}
+  Remove-Job $job -Force -ErrorAction SilentlyContinue
+  if (-not $finished) { throw "Timed out after ${TimeoutSec}s while: ${Message}" }
+  if ($state -eq 'Failed') {
+    $detail = if ($reason) { "$reason" } else { ("$($out -join "`n")").Trim() }
+    throw ("Failed while: ${Message}" + $(if ($detail) { " -- $detail" } else { "" }))
+  }
+  return $out
+}
 
 function Get-WindowsArch {
   switch ($env:PROCESSOR_ARCHITECTURE) {
@@ -646,9 +705,16 @@ function Install-Winget {
   $url  = "https://github.com/microsoft/winget-cli/releases/latest/download/Microsoft.DesktopAppInstaller_8wekyb3d8bbwe.msixbundle"
   $dest = "$env:TEMP\winget-installer.msixbundle"
   Invoke-WithRetry -Label "winget download" -ScriptBlock {
-    Invoke-WebRequest -Uri $url -OutFile $dest -UseBasicParsing
+    Invoke-WithHeartbeat -Message "Downloading winget (~200 MB)" `
+      -ArgumentList @($url, $dest) -Script {
+        param($u, $d); $ProgressPreference = 'SilentlyContinue'
+        Invoke-WebRequest -Uri $u -OutFile $d -UseBasicParsing
+      }
   }
-  Add-AppxPackage -Path $dest
+  # Add-AppxPackage on a ~200 MB bundle is console-silent for a while (#422).
+  Invoke-WithHeartbeat -Message "Installing winget" -ArgumentList @($dest) -Script {
+    param($d); Add-AppxPackage -Path $d
+  } | Out-Null
   Remove-Item $dest -Force -ErrorAction SilentlyContinue
   RefreshPath
   Log "winget installed."
@@ -662,23 +728,71 @@ function Install-DockerDesktop {
   $dockerExe = "$env:ProgramFiles\Docker\Docker\Docker Desktop.exe"
 
   if (-not (Test-Path $dockerExe)) {
+    # Try winget first (if present), then fall back to the direct download when
+    # winget is absent OR its install didn't land the exe — parity with k3d/helm,
+    # so a swallowed winget failure doesn't leave Step 2 to die in the long
+    # Docker-wait later (#422 Bugbot).
     if (Has "winget") {
-      winget install -e --id Docker.DockerDesktop `
-        --accept-package-agreements --accept-source-agreements --silent
-    } else {
+      # winget install is console-silent for minutes on a 600 MB package (#422).
+      # Run it as a tracked PROCESS (not a background job): Wait-ProcessWithDeadline
+      # shows a spinner AND kills the process on timeout, so a stuck install can't
+      # orphan past the step and fall through to a second concurrent install —
+      # Stop-Job would leave the job's child process running (#422 Bugbot).
+      Info "Installing Docker Desktop (~600 MB via winget) -- several minutes is normal."
+      try {
+        $wp = Start-Process -FilePath "winget" -PassThru -ErrorAction Stop -ArgumentList @(
+          "install","-e","--id","Docker.DockerDesktop",
+          "--accept-package-agreements","--accept-source-agreements","--silent")
+        if (-not (Wait-ProcessWithDeadline -Process $wp -Deadline (Get-Date).AddMinutes(40) -Message "Installing Docker Desktop (winget)")) {
+          throw "winget Docker install timed out (process killed)"
+        }
+        if ($wp.ExitCode -ne 0) { throw "winget exited $($wp.ExitCode)" }
+      } catch { Log "Docker Desktop winget install failed (will try direct download): $_" }
+      RefreshPath
+    }
+
+    if (-not (Test-Path $dockerExe)) {
       $ddArch = Get-WindowsArch
       # Honest progress (#468): the single biggest download of the install.
       # Size measured 2026-07-29 (613 MB).
       Info "Downloading Docker Desktop (~600 MB) -- the biggest download of this install; several minutes is normal."
       $installer = "$env:TEMP\DockerDesktopInstaller.exe"
+      $ddUrl = "https://desktop.docker.com/win/main/$ddArch/Docker%20Desktop%20Installer.exe"
       Invoke-WithRetry -Label "Docker download" -ScriptBlock {
-        Invoke-WebRequest -Uri "https://desktop.docker.com/win/main/$ddArch/Docker%20Desktop%20Installer.exe" `
-          -OutFile $installer -UseBasicParsing
+        Invoke-WithHeartbeat -Message "Downloading Docker Desktop (~600 MB)" -TimeoutSec 2400 `
+          -ArgumentList @($ddUrl, $installer) -Script {
+            param($u, $d); $ProgressPreference = 'SilentlyContinue'
+            Invoke-WebRequest -Uri $u -OutFile $d -UseBasicParsing
+          }
       }
-      Start-Process -FilePath $installer -ArgumentList "install --quiet --accept-license" -Wait
+      # Run the installer as a tracked PROCESS with a deadline that KILLS it on
+      # timeout (a background job would orphan the installer, #422 Bugbot).
+      # -ErrorAction Stop catches a spawn failure; the exit code catches a failed
+      # install — either way fail loudly, never continue as if Docker installed.
+      try {
+        $ip = Start-Process -FilePath $installer -ArgumentList "install --quiet --accept-license" `
+          -PassThru -ErrorAction Stop
+      } catch {
+        Remove-Item $installer -Force -ErrorAction SilentlyContinue
+        Err "Docker Desktop installer wouldn't start. Install it manually from https://www.docker.com/products/docker-desktop/ and re-run." "$_"
+      }
+      if (-not (Wait-ProcessWithDeadline -Process $ip -Deadline (Get-Date).AddMinutes(40) -Message "Installing Docker Desktop")) {
+        Remove-Item $installer -Force -ErrorAction SilentlyContinue
+        Err "Docker Desktop installation timed out (installer stopped). Install it manually from https://www.docker.com/products/docker-desktop/ and re-run."
+      }
+      if ($ip.ExitCode -ne 0) {
+        Remove-Item $installer -Force -ErrorAction SilentlyContinue
+        Err "Docker Desktop installation failed (installer exited $($ip.ExitCode)). Install it manually from https://www.docker.com/products/docker-desktop/ and re-run."
+      }
       Remove-Item $installer -Force -ErrorAction SilentlyContinue
+      RefreshPath
     }
-    RefreshPath
+
+    # Neither winget nor the direct installer produced the exe — fail loudly now
+    # rather than in the 10-minute Docker-wait below (#422 Bugbot).
+    if (-not (Test-Path $dockerExe)) {
+      Err "Docker Desktop installation didn't complete. Install it manually from https://www.docker.com/products/docker-desktop/ and re-run."
+    }
   }
 
   $dockerRunning = $false
@@ -914,11 +1028,16 @@ function Install-Kubectl {
     (Invoke-WebRequest "https://dl.k8s.io/release/stable.txt" -UseBasicParsing).Content.Trim()
   }
   Log "Downloading kubectl $kVer ($arch)..."
-  Info "Downloading kubectl $kVer (~60 MB)..."
   $kubectlDest = "$TOOL_DIR\kubectl.exe"
+  $kUrl = "https://dl.k8s.io/release/$kVer/bin/windows/$arch/kubectl.exe"
+  $t0 = Get-Date
+  # Heartbeat during the otherwise-silent transfer (#422); retry wraps it.
   Invoke-WithRetry -Label "download" -ScriptBlock {
-    Invoke-WebRequest "https://dl.k8s.io/release/$kVer/bin/windows/$arch/kubectl.exe" `
-      -OutFile $kubectlDest -UseBasicParsing
+    Invoke-WithHeartbeat -Message "Downloading kubectl $kVer (~60 MB)" `
+      -ArgumentList @($kUrl, $kubectlDest) -Script {
+        param($u, $d); $ProgressPreference = 'SilentlyContinue'
+        Invoke-WebRequest $u -OutFile $d -UseBasicParsing
+      }
   }
   $expectedHash = Invoke-WithRetry -Label "checksum" -ScriptBlock {
     (Invoke-WebRequest "https://dl.k8s.io/release/$kVer/bin/windows/$arch/kubectl.exe.sha256" `
@@ -932,6 +1051,7 @@ function Install-Kubectl {
   RefreshPath
   Log "kubectl $kVer installed."
   Assert-ToolRuns -Name "kubectl" -VersionArgs @("version","--client") -BinPath $kubectlDest
+  Ok (Get-ToolSummaryLine -Name "kubectl" -Version $kVer -Size "~60 MB" -ElapsedSec ([int]((Get-Date) - $t0).TotalSeconds))
 }
 
 # ── Pinned tool versions (#382 / #410) ──────────────────────────────────────
@@ -1006,13 +1126,22 @@ function Install-K3dAndHelm {
   if (-not (Has "k3d")) {
     if (Has "winget") {
       Log "Installing k3d via winget..."
-      $null = (winget install -e --id Rancher.k3d `
-        --accept-package-agreements --accept-source-agreements --silent 2>&1)
+      # winget install is console-silent; run it as a killable tracked process
+      # (not a job — Stop-Job would orphan the child on timeout) with a spinner +
+      # deadline. Best-effort: on failure the direct download below takes over (#422).
+      try {
+        $kp = Start-Process -FilePath "winget" -PassThru -ErrorAction Stop -ArgumentList @(
+          "install","-e","--id","Rancher.k3d","--accept-package-agreements","--accept-source-agreements","--silent")
+        if (-not (Wait-ProcessWithDeadline -Process $kp -Deadline (Get-Date).AddMinutes(10) -Message "Installing k3d (winget)")) {
+          throw "k3d winget install timed out (process killed)"
+        }
+      } catch { Log "k3d winget install: $_" }
     }
     RefreshPath
 
     if (-not (Has "k3d")) {
       $arch = Get-WindowsArch
+      $t0k3d = Get-Date
       Log "Downloading k3d binary directly ($arch)..."
       # Pinned by default (#382 / #410) — no api.github.com on the default path.
       $k3dVer = Resolve-ToolVersion -Name "k3d" -Value $K3dVersion `
@@ -1021,11 +1150,14 @@ function Install-K3dAndHelm {
           if (-not $tag) { throw "no Location header on the /releases/latest redirect" }
           $tag
         }
-      Info "Downloading k3d $k3dVer (~25 MB)..."
       $k3dDest = "$TOOL_DIR\k3d.exe"
+      $k3dUrl = "https://github.com/k3d-io/k3d/releases/download/$k3dVer/k3d-windows-$arch.exe"
       Invoke-WithRetry -Label "k3d download" -ScriptBlock {
-        Invoke-WebRequest "https://github.com/k3d-io/k3d/releases/download/$k3dVer/k3d-windows-$arch.exe" `
-          -OutFile $k3dDest -UseBasicParsing
+        Invoke-WithHeartbeat -Message "Downloading k3d $k3dVer (~25 MB)" `
+          -ArgumentList @($k3dUrl, $k3dDest) -Script {
+            param($u, $d); $ProgressPreference = 'SilentlyContinue'
+            Invoke-WebRequest $u -OutFile $d -UseBasicParsing
+          }
       }
       # Fail-closed verification, matching the Linux path and the kubectl
       # precedent: an unfetchable checksums.txt, a missing asset line, or a
@@ -1057,16 +1189,29 @@ function Install-K3dAndHelm {
       }
       Log "k3d checksum verified."
       RefreshPath
+      # Compute the summary now (correct elapsed) but print it only AFTER the
+      # execute-gate passes — a corrupt/wrong-arch binary must not show a green
+      # "ready" line before Assert-ToolRuns (#422 Bugbot; kubectl gates first too).
+      $k3dSummary = Get-ToolSummaryLine -Name "k3d" -Version $k3dVer -Size "~25 MB" -ElapsedSec ([int]((Get-Date) - $t0k3d).TotalSeconds)
     }
   }
   Assert-ToolRuns -Name "k3d" -VersionArgs @("version") -BinPath "$TOOL_DIR\k3d.exe"
+  if ($k3dSummary) { Ok $k3dSummary }
 
   # -- Helm --
   if (-not (Has "helm")) {
     if (Has "winget") {
       Log "Installing Helm via winget..."
-      $null = (winget install -e --id Helm.Helm `
-        --accept-package-agreements --accept-source-agreements --silent 2>&1)
+      # winget install is console-silent; killable tracked process + spinner/deadline
+      # (a job would orphan the child on timeout). Best-effort: the direct download
+      # below takes over on failure (#422).
+      try {
+        $hp = Start-Process -FilePath "winget" -PassThru -ErrorAction Stop -ArgumentList @(
+          "install","-e","--id","Helm.Helm","--accept-package-agreements","--accept-source-agreements","--silent")
+        if (-not (Wait-ProcessWithDeadline -Process $hp -Deadline (Get-Date).AddMinutes(10) -Message "Installing Helm (winget)")) {
+          throw "helm winget install timed out (process killed)"
+        }
+      } catch { Log "helm winget install: $_" }
       RefreshPath
     }
 
@@ -1080,11 +1225,15 @@ function Install-K3dAndHelm {
         if (-not $c) { throw "empty helm-latest-version response" }
         $c
       }
-      Info "Downloading Helm $helmVer (~20 MB)..."
+      $t0helm = Get-Date
       $helmZip = "$env:TEMP\helm-$helmVer-windows-$arch.zip"
+      $helmUrl = "https://get.helm.sh/helm-$helmVer-windows-$arch.zip"
       Invoke-WithRetry -Label "helm download" -ScriptBlock {
-        Invoke-WebRequest "https://get.helm.sh/helm-$helmVer-windows-$arch.zip" `
-          -OutFile $helmZip -UseBasicParsing
+        Invoke-WithHeartbeat -Message "Downloading Helm $helmVer (~20 MB)" `
+          -ArgumentList @($helmUrl, $helmZip) -Script {
+            param($u, $d); $ProgressPreference = 'SilentlyContinue'
+            Invoke-WebRequest $u -OutFile $d -UseBasicParsing
+          }
       }
       $helmExtract = "$env:TEMP\helm-extract"
       if (Test-Path $helmExtract) { Remove-Item $helmExtract -Recurse -Force }
@@ -1093,11 +1242,14 @@ function Install-K3dAndHelm {
       Remove-Item $helmZip -Force -ErrorAction SilentlyContinue
       Remove-Item $helmExtract -Recurse -Force -ErrorAction SilentlyContinue
       RefreshPath
+      # Summary printed only after the execute-gate below (#422 Bugbot).
+      $helmSummary = Get-ToolSummaryLine -Name "helm" -Version $helmVer -Size "~20 MB" -ElapsedSec ([int]((Get-Date) - $t0helm).TotalSeconds)
     }
 
     if (-not (Has "helm")) { Err "Helm could not be installed. Install manually from https://helm.sh/docs/intro/install/ and re-run." }
   }
   Assert-ToolRuns -Name "helm" -VersionArgs @("version") -BinPath "$TOOL_DIR\helm.exe"
+  if ($helmSummary) { Ok $helmSummary }
 
   Ok "System tools"
 }
@@ -1451,7 +1603,32 @@ function New-K3dCluster {
       Ok "Compute environment already running."
     } else {
       Log "Cluster '$CLUSTER_NAME' exists but stopped -- starting..."
-      k3d cluster start $CLUSTER_NAME
+      # Run k3d start as a killable tracked PROCESS with a deadline (a background
+      # job would orphan the native k3d child on timeout, #422 Bugbot), capturing
+      # its raw INFO[...] to temp files so it goes to the log, not streamed to the
+      # console. Exit code + timeout are both checked so a failed start Errs with
+      # the real reason instead of falsely reporting "started".
+      $startOutFile = Join-Path $env:TEMP "k3d-start-$(Get-Random).log"
+      $startErrFile = Join-Path $env:TEMP "k3d-start-err-$(Get-Random).log"
+      $sp = $null
+      try {
+        $sp = Start-Process -FilePath "k3d" -ArgumentList @("cluster","start",$CLUSTER_NAME) `
+          -NoNewWindow -PassThru -ErrorAction Stop `
+          -RedirectStandardOutput $startOutFile -RedirectStandardError $startErrFile
+      } catch {
+        Remove-Item $startOutFile, $startErrFile -Force -ErrorAction SilentlyContinue
+        Err "Couldn't start the existing '$CLUSTER_NAME' environment (k3d wouldn't start). Check Docker is running, then re-run." "$_"
+      }
+      $startTimedOut = -not (Wait-ProcessWithDeadline -Process $sp -Deadline (Get-Date).AddMinutes(5) -Message "Starting your secure environment")
+      $startLog = (("$(Get-Content $startErrFile -Raw -ErrorAction SilentlyContinue)`n$(Get-Content $startOutFile -Raw -ErrorAction SilentlyContinue)")).Trim()
+      Remove-Item $startOutFile, $startErrFile -Force -ErrorAction SilentlyContinue
+      if ($startLog) { Log "k3d cluster start: $startLog" }
+      if ($startTimedOut) {
+        Err "Starting the existing '$CLUSTER_NAME' environment timed out (k3d stopped). Check Docker is running, then re-run." $startLog
+      }
+      if ($sp.ExitCode -ne 0) {
+        Err "Couldn't start the existing '$CLUSTER_NAME' environment. Check Docker is running, then re-run." $startLog
+      }
       Ok "Compute environment started."
     }
 
@@ -2039,7 +2216,7 @@ function Get-InstalledClientInfo {
 #   adopted  - cluster already registered: TB_PROV_ID/TB_PROV_NS, no password
 #   fallback - CLI missing/too old -> the legacy manual prompts in the Helm step
 function Invoke-ProvisionClient {
-  Step 4 5 "Registering this machine"
+  Step 5 6 "Registering this machine"
   $script:TB_PROV_MODE = "fallback"
 
   if (Get-ProvisioningPreset) {
@@ -2187,7 +2364,7 @@ function Invoke-ProvisionClient {
 
 function Install-ClientHelm {
   # -- Step 5/5: Install tracebloc client --
-  Step 5 5 "Installing tracebloc client"
+  Step 6 6 "Installing tracebloc client"
 
   if (-not (Test-Path $HOST_DATA_DIR)) {
     New-Item -ItemType Directory -Path $HOST_DATA_DIR -Force | Out-Null
@@ -3103,7 +3280,7 @@ function Install-TraceblocCli {
   # credential in Step 4 (browser sign-in + `client create`). A failed CLI
   # install is still non-fatal: Step 4 falls back to the legacy manual-
   # credential flow, so the machine can always be connected.
-  Step 3 5 "Install the tracebloc CLI"
+  Step 4 6 "Install the tracebloc CLI"
 
   Info "Installing the tracebloc CLI..."
 
@@ -3161,33 +3338,37 @@ Start-InstallLog
 Print-Banner
 Print-Roadmap
 
-# -- Step 1/5: Check system requirements --
-Step 1 5 "Checking system requirements"
+# -- Step 1/6: Check system requirements (honest split from tool install, #422) --
+Step 1 6 "Checking system requirements"
 Test-Preflight
 Find-Gpu
 Enable-VirtualisationFeatures
+
+# -- Step 2/6: Install system tools (~700 MB — Docker Desktop, kubectl, k3d, helm;
+# each names its wait + shows a heartbeat + prints a summary line, #422) --
+Step 2 6 "Installing system tools"
 Install-Winget
 Install-DockerDesktop
 Install-NvidiaContainerToolkit
 Install-Kubectl
 Install-K3dAndHelm
 
-# -- Step 2/5: Set up secure compute environment --
-Step 2 5 "Setting up secure compute environment"
+# -- Step 3/6: Set up secure compute environment --
+Step 3 6 "Setting up secure compute environment"
 New-K3dCluster
 Install-GpuDevicePlugin
 Confirm-GpuNode
 
-# -- Step 3/5: install the tracebloc CLI FIRST (#388) — it mints the machine
-# credential in Step 4; a CLI-install hiccup degrades Step 4 to the legacy
+# -- Step 4/6: install the tracebloc CLI FIRST (#388) — it mints the machine
+# credential in Step 5; a CLI-install hiccup degrades Step 5 to the legacy
 # manual-credential fallback instead of aborting.
 Install-TraceblocCli
 
-# -- Step 4/5: register this machine (browser sign-in + `client create`;
+# -- Step 5/6: register this machine (browser sign-in + `client create`;
 # env-var credentials skip it; missing/old CLI falls back to manual prompts) --
 Invoke-ProvisionClient
 
-# -- Step 5/5 handled inside Install-ClientHelm --
+# -- Step 6/6 handled inside Install-ClientHelm --
 Install-ClientHelm
 
 # Verify the client actually came up before reporting anything
