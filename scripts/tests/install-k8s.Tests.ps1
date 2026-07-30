@@ -1042,12 +1042,14 @@ Describe "Test-Preflight" {
     Mock Test-PfUrl { "ok" }; Mock Get-PfMemGb { 3 }
     { Test-Preflight } | Should -Not -Throw
   }
-  It "an 8-9 GB host is flagged too-small-for-training, not a green Ok (#417 Bugbot)" {
-    # host >= warnMemGb(8) but < warnMemGb + 2(10): can't spare an 8 GB Docker
-    # budget, so Step-1 must warn (agreeing with Step-2), not print a green Memory Ok.
-    Mock Test-PfUrl { "ok" }; Mock Get-PfMemGb { 9 }; Mock Get-PfRuntimeMemGb { $null }
+  It "a throttled Docker budget warns even on a large host (not a green Ok) (#417 reviewer)" {
+    # The reviewer's key case: 32 GB host but Docker throttled to 2 GB. Grading the
+    # EFFECTIVE figure must OOM-warn (budget < the 5 GB floor), not green-OK the host.
+    Mock Test-PfUrl { "ok" }; Mock Get-PfMemGb { 32 }; Mock Get-PfRuntimeMemGb { 2 }
     $out = (Test-Preflight 6>&1 | Out-String)
-    $out | Should -Match 'too little for local training'
+    $out | Should -Match 'it will OOM'
+    $out | Should -Match "Docker's current share: 2 GB"   # budget named
+    $out | Should -Match '32 GB'                            # host RAM still the label
   }
   It "PF_MIN_MEM_GB override relaxes the floor" {
     Mock Test-PfUrl { "ok" }; Mock Get-PfMemGb { 3 }; $env:PF_MIN_MEM_GB = "2"
@@ -1129,29 +1131,61 @@ Describe "Get-PfMemRecommendation (#417 achievable memory advice)" {
   }
 }
 
+Describe "Show-MemoryStatus (#417 grade effective, label host)" {
+  It "throttled budget on a big host -> OOM-gated, host labeled, budget named (reviewer 32/2)" {
+    $out = (Show-MemoryStatus -HostGb 32 -BudgetGb 2 6>&1 | Out-String)
+    $out | Should -Match '32 GB'                          # host RAM = the label
+    $out | Should -Match "Docker's current share: 2 GB"   # budget shown
+    $out | Should -Match 'it will OOM'                     # graded on the 2 GB budget
+  }
+  It "the #417 machine (15 GB host / 7 GB budget) warns with a capped 13 GB target" {
+    $out = (Show-MemoryStatus -HostGb 15 -BudgetGb 7 6>&1 | Out-String)
+    $out | Should -Match 'training .* may OOM'
+    $out | Should -Match '13 GB recommended'              # min(recMemGb 16, host-2 13)
+    $out | Should -Not -Match '16 GB recommended'         # never more than the host has
+  }
+  It "Docker down (budget null) -> grades + reports host RAM, no flip-flop" {
+    $out = (Show-MemoryStatus -HostGb 15 -BudgetGb $null 6>&1 | Out-String)
+    $out | Should -Match 'Memory: 15 GB'
+    $out | Should -Not -Match "Docker's current share"
+  }
+  It "host unreadable (CIM blocked) but budget known -> reports the budget, still gated" {
+    $out = (Show-MemoryStatus -HostGb $null -BudgetGb 4 6>&1 | Out-String)
+    $out | Should -Match 'Memory: 4 GB'
+    $out | Should -Match 'host RAM unreadable'
+    $out | Should -Match 'it will OOM'                    # 4 < 5 floor still applies
+  }
+  It "both unreadable -> skips (couldn't determine)" {
+    $out = (Show-MemoryStatus -HostGb $null -BudgetGb $null 6>&1 | Out-String)
+    $out | Should -Match "couldn't determine total RAM"
+  }
+  It "healthy host + healthy budget -> green Ok" {
+    (Show-MemoryStatus -HostGb 32 -BudgetGb 24 6>&1 | Out-String) | Should -Match 'Memory: 32 GB'
+    (Show-MemoryStatus -HostGb 32 -BudgetGb 24 6>&1 | Out-String) | Should -Not -Match 'OOM'
+  }
+}
+
 Describe "Test-PreflightRuntimeMem (post-Docker, warn-only)" {
   It "small Docker VM -> warns, does not throw" {
-    Mock Get-PfRuntimeMemGb { 4 }
+    Mock Get-PfRuntimeMemGb { 4 }; Mock Get-PfMemGb { 16 }
     { Test-PreflightRuntimeMem } | Should -Not -Throw
   }
   It "daemon not reporting (null) -> no-op, does not throw" {
     Mock Get-PfRuntimeMemGb { $null }
     { Test-PreflightRuntimeMem } | Should -Not -Throw
   }
-  It "caps its recommendation at host RAM - never advises more than the machine has (#417)" {
-    Mock Get-PfRuntimeMemGb { 4 }    # small Docker budget triggers the warn
-    Mock Get-PfMemGb { 9 }           # 9 GB host -> achievable cap is 7 GB (< the 8 target)
+  It "grades the budget with both floors and caps the rec at host RAM (#417 reviewer)" {
+    Mock Get-PfRuntimeMemGb { 7 }    # budget in the training-warn band
+    Mock Get-PfMemGb { 15 }          # host -> cap the rec at 13 GB
     $out = (Test-PreflightRuntimeMem 6>&1 | Out-String)
-    $out | Should -Match '7 GB recommended'
-    $out | Should -Not -Match '8 GB recommended'   # never the impossible raw target
-    $out | Should -Match 'of 9 GB host RAM'
+    $out | Should -Match '13 GB recommended'
+    $out | Should -Not -Match '16 GB recommended'
+    $out | Should -Match "Docker's current share: 7 GB"
   }
-  It "avoids a no-op 'raise to' when Docker is already at the host's achievable cap (#417 Bugbot)" {
-    Mock Get-PfRuntimeMemGb { 4 }    # current budget
-    Mock Get-PfMemGb { 6 }           # cap = 4 = current budget -> can't raise further
+  It "a below-floor budget OOM-warns (min floor applies to the budget, not just warn) (#417 reviewer)" {
+    Mock Get-PfRuntimeMemGb { 2 }; Mock Get-PfMemGb { 32 }
     $out = (Test-PreflightRuntimeMem 6>&1 | Out-String)
-    $out | Should -Not -Match 'Raise Docker'       # no impossible/no-op remediation
-    $out | Should -Match "can't spare more"
+    $out | Should -Match 'it will OOM'
   }
 }
 

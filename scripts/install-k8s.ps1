@@ -2959,15 +2959,69 @@ function Get-PfMemGb {
   catch { return $null }
 }
 
+# Single source for the RAM we assume the host OS needs, so Docker is never
+# advised to take all of it. Used to cap recommendations AND to reason about the
+# achievable budget in one place, so the two can't drift (#417 reviewer).
+$script:PfOsReserveGb = 2
+
 # Cap a desired Docker-memory recommendation at what the host can actually give
-# (physical RAM minus ~2 GB reserved for the OS), so we never advise more than the
-# machine physically has — e.g. "give Docker 16 GB" on a 15 GB laptop (#417).
-# Floors at 1 GB so a tiny host still yields a positive number.
+# (physical RAM minus the OS reserve), so we never advise more than the machine
+# physically has — e.g. "give Docker 16 GB" on a 15 GB laptop (#417). Floors at
+# 1 GB so a tiny host still yields a positive number.
 function Get-PfMemRecommendation([int]$DesiredGb, [int]$HostGb) {
-  $cap = $HostGb - 2
+  $cap = $HostGb - $script:PfOsReserveGb
   if ($cap -lt 1) { $cap = 1 }
   if ($DesiredGb -lt $cap) { return $DesiredGb }
   return $cap
+}
+
+# Assess memory and print the consistent warn/ok line(s) (#417). Grades the
+# EFFECTIVE figure the client actually gets — Docker's VM budget when known, else
+# host RAM — so a throttled budget is never green-OK'd (reviewer). ALWAYS reports
+# host RAM as the label so the number doesn't flip-flop across re-runs; if host RAM
+# is unreadable (locked-down machine) but the budget is, reports the budget,
+# labelled as Docker's share. Warn-only. Shared by Step-1 preflight and the
+# post-Docker re-check so their wording never diverges.
+function Show-MemoryStatus {
+  param($HostGb, $BudgetGb)   # either may be $null
+  $minMemGb  = if ($env:PF_MIN_MEM_GB)  { [int]$env:PF_MIN_MEM_GB }  else { 5 }
+  $warnMemGb = if ($env:PF_WARN_MEM_GB) { [int]$env:PF_WARN_MEM_GB } else { 8 }
+  $recMemGb  = if ($env:PF_REC_MEM_GB)  { [int]$env:PF_REC_MEM_GB }  else { 16 }
+
+  # Effective = what the client actually gets; grade on this.
+  $effective = if ($null -ne $BudgetGb) { $BudgetGb } elseif ($null -ne $HostGb) { $HostGb } else { $null }
+  if ($null -eq $effective) { Warn "Memory: couldn't determine total RAM (skipping)."; return }
+
+  # Label = host RAM (consistent). Host unreadable but budget known -> report the budget.
+  if ($null -ne $HostGb) {
+    $label = "$HostGb GB"
+    $budgetNote = if ($null -ne $BudgetGb) { " (Docker's current share: $BudgetGb GB)" } else { "" }
+  } else {
+    $label = "$BudgetGb GB"
+    $budgetNote = " (Docker's share; host RAM unreadable)"
+  }
+  # Cap recommendations at the host (or the budget when host is unknown).
+  $capHost  = if ($null -ne $HostGb) { $HostGb } else { $BudgetGb }
+  $recTrain = Get-PfMemRecommendation -DesiredGb $recMemGb -HostGb $capHost
+  # A throttled Docker budget is fixed at the daemon; a small host needs more RAM.
+  $budgetIsBottleneck = ($null -ne $BudgetGb) -and ($null -eq $HostGb -or $BudgetGb -lt $HostGb)
+
+  if ($effective -lt $minMemGb) {
+    Warn "Memory: $label$budgetNote - below the $minMemGb GB the client needs; it will OOM."
+    if ($budgetIsBottleneck) {
+      $recRun = Get-PfMemRecommendation -DesiredGb $warnMemGb -HostGb $capHost
+      Hint "Give Docker at least $minMemGb GB (up to $recRun GB): WSL2 backend - [wsl2] memory=${recRun}GB in %UserProfile%\.wslconfig + 'wsl --shutdown'; Hyper-V - Docker Desktop -> Settings -> Resources -> Advanced."
+    } else {
+      Hint "This machine has $label of RAM total; the client needs at least $minMemGb GB. Free up memory or use a larger machine."
+    }
+  }
+  elseif ($effective -lt $warnMemGb) {
+    Warn "Memory: $label$budgetNote - enough to run the client, but training (~8 GB/job) may OOM; $recTrain GB recommended to train locally."
+    Hint "For local training, give Docker up to $recTrain GB: WSL2 backend - [wsl2] memory=${recTrain}GB in %UserProfile%\.wslconfig + 'wsl --shutdown'; Hyper-V - Docker Desktop -> Settings -> Resources -> Advanced."
+  }
+  else {
+    Ok "Memory: $label$budgetNote"
+  }
 }
 
 function Get-PfCpu {
@@ -2996,9 +3050,8 @@ function Test-Preflight {
 
   $minDiskGb  = if ($env:PF_MIN_DISK_GB)  { [int]$env:PF_MIN_DISK_GB }  else { 10 }
   $warnDiskGb = if ($env:PF_WARN_DISK_GB) { [int]$env:PF_WARN_DISK_GB } else { 20 }
-  $minMemGb   = if ($env:PF_MIN_MEM_GB)   { [int]$env:PF_MIN_MEM_GB }   else { 5 }
-  $warnMemGb  = if ($env:PF_WARN_MEM_GB)  { [int]$env:PF_WARN_MEM_GB }  else { 8 }
-  $recMemGb   = if ($env:PF_REC_MEM_GB)   { [int]$env:PF_REC_MEM_GB }   else { 16 }
+  # Memory thresholds live in Show-MemoryStatus (it reads the PF_*_MEM_GB env vars
+  # itself), so they aren't declared here anymore (#417 reviewer).
   $minCpu     = if ($env:PF_MIN_CPU)      { [int]$env:PF_MIN_CPU }      else { 2 }
   $recCpu     = if ($env:PF_REC_CPU)      { [int]$env:PF_REC_CPU }      else { 4 }
   $hardFail   = 0
@@ -3036,35 +3089,13 @@ function Test-Preflight {
   elseif  ($cpu -lt $recCpu) { Warn "CPU: $cpu cores - fine to run; $recCpu+ recommended to train locally." }
   else                       { Ok "CPU: $cpu cores" }
 
-  # Memory is warn-only on Windows. Report HOST RAM — identical whether Docker is
-  # up or down (#417) — and, when a runtime is up, Docker's current VM budget as a
-  # separate labeled line (it's a smaller slice of the host). Recommendations are
-  # capped at (host - 2 GB) so we never advise more than the machine has. The
-  # post-Docker re-check (Test-PreflightRuntimeMem) warns on the VM budget once
-  # Docker is running, using the same wording.
-  $mem    = Get-PfMemGb            # host RAM (consistent)
-  $budget = Get-PfRuntimeMemGb     # Docker VM budget, or $null when the daemon is down
-  if ($null -eq $mem) {
-    Warn "Memory: couldn't determine total RAM (skipping)."
-  } else {
-    $budgetNote = if ($null -ne $budget) { " (Docker's current share: $budget GB)" } else { "" }
-    if ($mem -lt $minMemGb) {
-      Warn "Memory: $mem GB$budgetNote - below the $minMemGb GB the client needs; it will OOM."
-      Hint "This machine has $mem GB of RAM total; the client needs at least $minMemGb GB. Free up memory or use a larger machine."
-    }
-    elseif ($mem -lt ($warnMemGb + 2)) {
-      # Runs, but too small for local training: to spare a trainable Docker budget
-      # (~warnMemGb for ~8 GB/job) the host also needs ~2 GB for the OS, so the
-      # real floor is warnMemGb + 2 (an 8-9 GB host can't give Docker 8 GB). Warn
-      # here so Step-1 agrees with Step-2 instead of a green Ok the budget check
-      # then contradicts, and don't dangle a target the host can't meet (#417 Bugbot).
-      Warn "Memory: $mem GB$budgetNote - enough to run the client, but too little for local training (~8 GB/job may OOM)."
-      Hint "The client will run here; for local training use a machine with more RAM (~$($warnMemGb + 2) GB+ total)."
-    }
-    else {
-      Ok "Memory: $mem GB$budgetNote"
-    }
-  }
+  # Memory (warn-only on Windows). Report HOST RAM as the label so the number is
+  # identical whether Docker is up or down (#417), but GRADE the effective figure
+  # the client actually gets — Docker's VM budget when the daemon is already up at
+  # preflight, else host RAM — so a throttled budget is never green-OK'd (reviewer).
+  # At preflight Docker is usually down, so this grades host; Test-PreflightRuntimeMem
+  # re-runs the same assessment once Docker is up and its budget is known.
+  Show-MemoryStatus -HostGb (Get-PfMemGb) -BudgetGb (Get-PfRuntimeMemGb)
 
   $disk = Get-PfFreeGb
   if      ($null -eq $disk)        { Warn "Disk: couldn't determine free space (skipping)." }
@@ -3147,23 +3178,10 @@ function Test-PreflightRuntimeMem {
   if ($env:TRACEBLOC_SKIP_PREFLIGHT) { return }
   $budget = Get-PfRuntimeMemGb
   if ($null -eq $budget) { return }
-  $warnMemGb = if ($env:PF_WARN_MEM_GB) { [int]$env:PF_WARN_MEM_GB } else { 8 }
-  if ($budget -lt $warnMemGb) {
-    # Cap the recommendation at what the host can spare (host - 2 GB) so we never
-    # advise more than the machine physically has (#417). Falls back to the raw
-    # target if host RAM can't be read.
-    $host_ = Get-PfMemGb
-    $rec = if ($null -ne $host_) { Get-PfMemRecommendation -DesiredGb $warnMemGb -HostGb $host_ } else { $warnMemGb }
-    $hostNote = if ($null -ne $host_) { " of $host_ GB host RAM" } else { "" }
-    if ($rec -gt $budget) {
-      Warn "Docker's memory budget is $budget GB$hostNote - the client may OOM under load; $rec GB recommended."
-      Hint "Raise Docker's memory to $rec GB, then re-install: WSL2 backend - [wsl2] memory=${rec}GB in %UserProfile%\.wslconfig + 'wsl --shutdown'; Hyper-V - Docker Desktop -> Settings -> Resources -> Advanced."
-    } else {
-      # Already at (or above) the most this host can spare — "raise to $rec" would
-      # be a no-op, so name the real fix: a bigger machine (#417 Bugbot).
-      Warn "Docker's memory budget is $budget GB$hostNote - the client may OOM under load, and this host can't spare more. Use a machine with more RAM for headroom."
-    }
-  }
+  # Re-run the SAME assessment now that Docker's budget is known, so both floors
+  # (min "will OOM" + warn "training may OOM") apply to the budget and the wording
+  # matches Step-1 (#417 reviewer). Host RAM stays the reported label.
+  Show-MemoryStatus -HostGb (Get-PfMemGb) -BudgetGb $budget
 }
 
 # =============================================================================
