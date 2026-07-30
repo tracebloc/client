@@ -39,23 +39,21 @@ function Get-ElevationCommand {
   $switches = @()
   if ($NoReboot) { $switches += '-NoReboot' }
   if ($Diagnose) { $switches += '-Diagnose' }
-  # Re-run a script FILE only from a DURABLE path. The documented irm|iex flow runs
-  # install-k8s.ps1 from a bootstrap TEMP dir that the un-elevated process deletes
-  # on exit, so -File there would hit a missing script in the elevated window --
-  # re-fetch the one-liner instead (#421 Bugbot).
+  # Return a single command-line STRING, not an array: PS 5.1 Start-Process
+  # -ArgumentList doesn't quote array elements, so a script path with spaces (or
+  # the quoted -Command value) would be split (#421 Bugbot; same class as #419).
   $temp = [System.IO.Path]::GetTempPath()
   if ($ScriptPath -and (Test-Path $ScriptPath) -and ($ScriptPath -notlike "$temp*")) {
-    return @('-NoProfile','-ExecutionPolicy','Bypass','-File',$ScriptPath) + $switches
+    # Durable path: re-run the file (quoted for spaces), forwarding switches. The
+    # documented irm|iex flow runs from a bootstrap TEMP dir the un-elevated process
+    # deletes on exit, so -File is used ONLY for a non-temp path (#421 Bugbot).
+    return (@('-NoProfile','-ExecutionPolicy','Bypass','-File',"`"$ScriptPath`"") + $switches) -join ' '
   }
-  # Re-fetch the one-liner. `iex` can't take args, so when switches must be forwarded
-  # invoke the fetched shim as a scriptblock with them; otherwise keep the exact
-  # documented `irm | iex` form (#421 Bugbot: switches were dropped here).
-  if ($switches.Count) {
-    $inner = "& ([scriptblock]::Create((irm https://tracebloc.io/i.ps1))) $($switches -join ' ')"
-  } else {
-    $inner = 'irm https://tracebloc.io/i.ps1 | iex'
-  }
-  return @('-NoProfile','-ExecutionPolicy','Bypass','-Command',$inner)
+  # Re-fetch the one-liner. Switches are NOT forwarded here: the shim (i.ps1) has no
+  # param block to bind them (& ([scriptblock]) -Diagnose would fail on an unknown
+  # named parameter), and an `irm | iex` launch can't have set a switch anyway
+  # (#421 Bugbot). Keep the exact documented form.
+  return '-NoProfile -ExecutionPolicy Bypass -Command "irm https://tracebloc.io/i.ps1 | iex"'
 }
 
 # Relaunch elevated through UAC, forwarding the switches. Returns $true when the
