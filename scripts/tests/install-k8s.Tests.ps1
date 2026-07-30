@@ -1087,13 +1087,18 @@ Describe "Get-PfFsType" -Skip:(-not $IsWindows) {
 }
 
 Describe "Get-Pf* runtime (Docker VM) view preference" {
-  It "Get-PfMemGb no longer follows the Docker VM budget (#417 no flip-flop)" {
-    # The docker reader still sees the VM budget, but the reported memory figure is
-    # host RAM (or $null off-Windows where CIM is unavailable) — never the smaller
-    # budget. Cross-platform: proves the two are decoupled without needing CIM.
-    Mock docker { '8589934592' }          # Docker reports 8 GiB
-    Get-PfRuntimeMemGb | Should -Be 8     # the runtime reader follows docker...
-    Get-PfMemGb        | Should -Not -Be 8 # ...but the reported memory does not
+  It "Get-PfRuntimeMemGb follows the docker MemTotal (#417)" {
+    Mock docker { '8589934592' }          # 8 GiB, in bytes
+    Get-PfRuntimeMemGb | Should -Be 8
+  }
+  It "Get-PfMemGb never consults the Docker VM budget (#417 no flip-flop)" {
+    # Host-independent + cross-platform: the flip-flop bug was Get-PfMemGb reading
+    # the docker budget. Prove it's decoupled by asserting Get-PfMemGb never calls
+    # docker at all. Avoids the flaky "Should -Not -Be 8" on a real 8 GB host; the
+    # exact host figure is locked by the Windows-gated CIM-mocked sibling test.
+    Mock docker { '8589934592' }
+    $null = Get-PfMemGb
+    Should -Invoke docker -Times 0
   }
   It "Get-PfCpu prefers docker NCPU over the host" {
     Mock docker { '2' }
