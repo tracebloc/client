@@ -622,6 +622,51 @@ function Enable-OneVirtFeature {
   }
 }
 
+# Modern (Store or standalone) WSL prints a version block from `wsl --version`;
+# legacy/absent WSL errors or prints nothing. Returns $true when WSL is already
+# installed and current enough that no update is needed (#414). Takes the command
+# output as a parameter so it's unit-testable without WSL present.
+function Test-WslCurrent {
+  param([string]$VersionOutput)
+  return [bool]($VersionOutput -match '(?im)^\s*WSL version:\s*\d+\.\d+')
+}
+
+# Update WSL in a way that survives Store-blocked corporate networks (#414):
+#  1. Skip when already current (fast <2s re-runs) via `wsl --version`.
+#  2. Use `wsl --update --web-download`, which downloads the update from Microsoft's
+#     servers instead of the Microsoft Store -- corporate networks often block the
+#     Store, the root of the "install WSL yourself" experience.
+#  3. On failure, surface the exact manual MSI step ON SCREEN (not swallowed to the
+#     log). We deliberately do NOT auto-download the GitHub-releases MSI: that would
+#     need api.github.com (the WSL release asset name carries a 4th version
+#     component the API-free /releases/latest redirect can't resolve), and #410 --
+#     enforced by a test -- forbids the rate-limited GitHub API in this installer.
+function Update-Wsl {
+  $verOut = ""
+  try { $verOut = (& cmd /c "wsl --version 2>nul" | Out-String) } catch {}
+  if (Test-WslCurrent -VersionOutput $verOut) {
+    Log "WSL already current: $($verOut -replace '\r?\n',' ')"
+    Ok "WSL is current"
+    return
+  }
+
+  Info "Updating WSL (web download, bypassing the Microsoft Store)..."
+  $ok = $false
+  try {
+    $p = Start-Process -FilePath "wsl" -ArgumentList "--update","--web-download" -NoNewWindow -PassThru -ErrorAction Stop
+    if (Wait-ProcessWithDeadline -Process $p -Deadline (Get-Date).AddMinutes(5) -Message "Updating WSL (web download)") {
+      $ok = ($p.ExitCode -eq 0)
+    } else {
+      Log "wsl --update --web-download timed out (process killed)."
+    }
+  } catch { Log "wsl --update --web-download failed: $_" }
+  if ($ok) { Ok "WSL updated"; return }
+
+  # Surface the failure + the exact manual next step ON SCREEN (not the log).
+  Warn "Couldn't update WSL automatically (the Microsoft Store may be blocked)."
+  Hint "Download the latest WSL MSI from https://github.com/microsoft/WSL/releases (wsl.<version>.x64.msi), run it, then re-run this installer -- otherwise Docker Desktop will prompt you to install WSL."
+}
+
 function Enable-VirtualisationFeatures {
   $rebootNeeded = $false
   $features = @{
@@ -655,28 +700,7 @@ function Enable-VirtualisationFeatures {
 
   Ok "System features"
 
-  Log "Updating WSL..."
-  $wslJob = Start-Job -InitializationScript $JobInit -ScriptBlock { cmd /c "wsl --update 2>&1" }
-  Write-Host -NoNewline "  "
-  $wslTimeoutSec = 90
-  $wslElapsed = 0
-  while ($wslJob.State -eq "Running" -and $wslElapsed -lt $wslTimeoutSec) {
-    Write-Host -NoNewline "." -ForegroundColor DarkGray
-    Start-Sleep -Seconds 2
-    $wslElapsed += 2
-  }
-  Write-Host ""
-  if ($wslJob.State -eq "Running") {
-    Stop-Job $wslJob
-    Log "WSL update timed out after ${wslTimeoutSec}s -- skipping."
-    Warn "WSL update is taking too long. Skipping for now."
-    Hint "Run 'wsl --update' manually after installation."
-  } else {
-    $wslUpdate = Receive-Job -Job $wslJob
-    $wslExitOk = $wslJob.State -eq "Completed"
-    if (-not $wslExitOk) { Log "WSL update may not have completed cleanly." }
-  }
-  Remove-Job -Job $wslJob -Force
+  Update-Wsl
 
   $wslSetJob = Start-Job -InitializationScript $JobInit -ScriptBlock { cmd /c "wsl --set-default-version 2 2>&1" }
   $wslSetDone = $wslSetJob | Wait-Job -Timeout 20

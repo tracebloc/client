@@ -1102,6 +1102,43 @@ Describe "Test-PreflightRuntimeMem (post-Docker, warn-only)" {
   }
 }
 
+Describe "Test-WslCurrent (#414 skip-when-current)" {
+  It "modern WSL version block -> current" {
+    Test-WslCurrent -VersionOutput "WSL version: 2.3.26.0`nKernel version: 5.15.167.4-1" | Should -BeTrue
+  }
+  It "empty output (WSL absent) -> not current" {
+    Test-WslCurrent -VersionOutput "" | Should -BeFalse
+  }
+  It "legacy error text (no version block) -> not current" {
+    Test-WslCurrent -VersionOutput "Windows Subsystem for Linux has no installed distributions." | Should -BeFalse
+  }
+}
+
+Describe "Update-Wsl / WSL install (#414 Store-blocked fallback)" {
+  BeforeAll { $script:WSRC = Get-Content "$PSScriptRoot/../install-k8s.ps1" -Raw }
+  It "prefers the Store-free web download" {
+    # bypasses the Microsoft Store, which corporate networks block
+    $script:WSRC | Should -Match 'wsl["'']?\s*.*--update.*--web-download|"--update","--web-download"'
+  }
+  It "skips work when WSL is already current (fast re-run)" {
+    $script:WSRC | Should -Match 'Test-WslCurrent -VersionOutput'
+    $script:WSRC | Should -Match 'Ok "WSL is current"'
+  }
+  It "no longer uses the bare Store-path 'wsl --update' 90s job" {
+    $script:WSRC | Should -Not -Match 'cmd /c "wsl --update 2>&1"'
+  }
+  It "surfaces the exact manual MSI next step on screen, not just the log (#414)" {
+    $script:WSRC | Should -Match 'github.com/microsoft/WSL/releases'
+    $script:WSRC | Should -Match 'Couldn''t update WSL automatically'
+  }
+  It "does not reintroduce the rate-limited GitHub API for an auto-MSI fallback (#410 invariant)" {
+    # An automated GitHub-releases MSI download would need api.github.com (the asset
+    # name isn't resolvable via the API-free redirect); #410 forbids it, so we
+    # surface a manual step instead. Guard against a regression that re-adds it.
+    $script:WSRC | Should -Not -Match 'https://api\.github\.com'
+  }
+}
+
 # --- reboot persistence (Set-ClusterAutostart) -------------------------------
 Describe "Set-ClusterAutostart" {
   AfterEach { $env:TRACEBLOC_NO_AUTOSTART = $null }
