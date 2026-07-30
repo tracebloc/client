@@ -1203,6 +1203,9 @@ Describe "Test-WslCurrent (#414 skip-when-current, version floor)" {
   It "a STALE modern WSL below the floor -> not current, so it still updates (reviewer)" {
     Test-WslCurrent -VersionOutput "WSL version: 2.0.0.0`nKernel version: 5.15.90.1" | Should -BeFalse
   }
+  It "below Docker Desktop's 2.1.5 minimum (e.g. 2.1.4) -> not current (Bugbot #414)" {
+    Test-WslCurrent -VersionOutput "WSL version: 2.1.4.0`nKernel version: 5.15.150.1" | Should -BeFalse
+  }
   It "empty output (WSL absent) -> not current" {
     Test-WslCurrent -VersionOutput "" | Should -BeFalse
   }

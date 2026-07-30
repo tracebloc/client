@@ -633,11 +633,13 @@ function Enable-OneVirtFeature {
 # block is the WSL version (kernel/WSLg follow); require it to meet a floor so a
 # STALE modern WSL (e.g. 2.0.x) still updates instead of being green-OK'd forever
 # (#414 reviewer -- matching any dotted number was effectively Test-WslPresent).
-# TB_WSL_MIN_VERSION overrides the floor.
+# The floor is Docker Desktop's documented WSL minimum (2.1.5): below it, Docker
+# Desktop prompts to update WSL, the exact symptom this avoids (#414 Bugbot).
+# TB_WSL_MIN_VERSION overrides it.
 function Test-WslCurrent {
   param(
     [string]$VersionOutput,
-    [string]$MinVersion = $(if ($env:TB_WSL_MIN_VERSION) { $env:TB_WSL_MIN_VERSION } else { "2.1.0" })
+    [string]$MinVersion = $(if ($env:TB_WSL_MIN_VERSION) { $env:TB_WSL_MIN_VERSION } else { "2.1.5" })
   )
   $m = [regex]::Match($VersionOutput, '\d+\.\d+\.\d+(\.\d+)?')
   if (-not $m.Success) { return $false }
