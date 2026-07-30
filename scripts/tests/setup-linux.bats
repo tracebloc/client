@@ -999,6 +999,15 @@ _stub_install_steps() {
   [[ "$output" == *"setup tool"* ]]                      # …naming the setuptool failure, not a spinner tail
 }
 
+@test "_tier2_fallthrough: names the researcher in the prepare-host remedy so prepare-host actually provisions them (Bugbot #485)" {
+  id() { [ "${1:-}" = "-un" ] && echo researcher || echo "researcher"; }
+  run _tier2_fallthrough "some reason"
+  [ "$status" -ne 0 ]                                    # exits
+  [[ "$output" == *"export TB_PREPARE_USER=researcher"* ]]   # names the researcher (run_prepare_host keys off this)
+  [[ "$output" == *"tracebloc prepare-host researcher"* ]]   # CLI form names them too
+  [[ "$output" == *"prepare it for 'researcher'"* ]]         # final error names them
+}
+
 # ── _ensure_subid_ranges: the Tier-1 subuid/subgid gate (RFC 0001 #1220) ─────
 @test "_ensure_subid_ranges: present => proceeds with zero privileged calls" {
   MOCK_CALLS="$(mktemp)"

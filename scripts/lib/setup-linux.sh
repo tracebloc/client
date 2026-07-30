@@ -855,16 +855,22 @@ _user_systemd_available() {
 }
 
 # _tier2_fallthrough REASON — a rootless Tier-1 bring-up failed mid-flight (setuptool
-# error, daemon never Ready, no nohup launcher). Rather than proceed on a broken /
-# absent socket or die opaquely, route to the Tier-2 prepare-host remedy — the honest
-# "this host needs a one-time admin step" outcome (RFC 0001 #1222). Exits.
+# error, daemon never Ready) or the host has no per-user systemd. Rather than proceed on
+# a broken/absent socket or die opaquely, route to the Tier-2 prepare-host remedy — the
+# honest "this host needs a one-time admin step" outcome (RFC 0001 #1222). Exits.
 _tier2_fallthrough() {
   local reason="${1:-rootless setup failed}"
+  # NAME the researcher, matching _ensure_subid_ranges' hand-off (Bugbot on #485): a bare
+  # `prepare-host` provisions nothing for the user — run_prepare_host only grants
+  # docker-group + subuid ranges when TB_PREPARE_USER is set — so an admin who followed a
+  # bare hint would leave the researcher unable to install, looping back to this fall-through.
+  local _user; _user="$(id -un 2>/dev/null || printf '%s' "${USER:-}")"
   warn "Couldn't complete a rootless install (${reason}) — falling back to the administrator-prepared path."
-  hint "Have an administrator prepare this host once, then re-run as yourself:"
+  hint "Have an administrator prepare this host once (naming you as the researcher), then re-run as yourself:"
+  hint "  export TB_PREPARE_USER=${_user}"
   hint "  curl -fsSL https://tracebloc.io/i.sh | bash -s -- prepare-host"
-  hint "  (or, with the CLI:  tracebloc prepare-host)"
-  error "This host couldn't complete a rootless install (${reason}); an administrator must prepare it (see above), then re-run. Details: docs/rfcs/0001-least-privilege-install.md"
+  hint "  (or, with the CLI:  tracebloc prepare-host ${_user})"
+  error "This host couldn't complete a rootless install (${reason}); an administrator must prepare it for '${_user}' (see above), then re-run. Details: docs/rfcs/0001-least-privilege-install.md"
 }
 
 
