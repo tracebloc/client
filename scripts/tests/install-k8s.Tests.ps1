@@ -40,6 +40,20 @@ Describe "Get-ElevationCommand (#421 self-elevate)" {
     ($c -join ' ') | Should -Match 'irm https://tracebloc\.io/i\.ps1 \| iex'
     $c | Should -Not -Contain '-File'
   }
+  It "a bootstrap TEMP-dir script -> re-fetches the one-liner, not -File (deleted-temp, Bugbot #421)" {
+    $tmp = Join-Path ([IO.Path]::GetTempPath()) "install-k8s.ps1"
+    Set-Content -Path $tmp -Value "x" -Force
+    try {
+      $c = Get-ElevationCommand -ScriptPath $tmp
+      $c | Should -Not -Contain '-File'
+      ($c -join ' ') | Should -Match 'irm https://tracebloc\.io/i\.ps1'
+    } finally { Remove-Item $tmp -Force -ErrorAction SilentlyContinue }
+  }
+  It "forwards switches through the one-liner via a scriptblock (Bugbot #421)" {
+    $c = Get-ElevationCommand -ScriptPath "" -Diagnose
+    ($c -join ' ') | Should -Match 'scriptblock'
+    ($c -join ' ') | Should -Match '-Diagnose'
+  }
   It "omits switches that weren't passed" {
     $c = Get-ElevationCommand -ScriptPath ""
     $c | Should -Not -Contain '-NoReboot'

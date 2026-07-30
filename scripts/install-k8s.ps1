@@ -39,10 +39,23 @@ function Get-ElevationCommand {
   $switches = @()
   if ($NoReboot) { $switches += '-NoReboot' }
   if ($Diagnose) { $switches += '-Diagnose' }
-  if ($ScriptPath -and (Test-Path $ScriptPath)) {
+  # Re-run a script FILE only from a DURABLE path. The documented irm|iex flow runs
+  # install-k8s.ps1 from a bootstrap TEMP dir that the un-elevated process deletes
+  # on exit, so -File there would hit a missing script in the elevated window --
+  # re-fetch the one-liner instead (#421 Bugbot).
+  $temp = [System.IO.Path]::GetTempPath()
+  if ($ScriptPath -and (Test-Path $ScriptPath) -and ($ScriptPath -notlike "$temp*")) {
     return @('-NoProfile','-ExecutionPolicy','Bypass','-File',$ScriptPath) + $switches
   }
-  return @('-NoProfile','-ExecutionPolicy','Bypass','-Command','irm https://tracebloc.io/i.ps1 | iex')
+  # Re-fetch the one-liner. `iex` can't take args, so when switches must be forwarded
+  # invoke the fetched shim as a scriptblock with them; otherwise keep the exact
+  # documented `irm | iex` form (#421 Bugbot: switches were dropped here).
+  if ($switches.Count) {
+    $inner = "& ([scriptblock]::Create((irm https://tracebloc.io/i.ps1))) $($switches -join ' ')"
+  } else {
+    $inner = 'irm https://tracebloc.io/i.ps1 | iex'
+  }
+  return @('-NoProfile','-ExecutionPolicy','Bypass','-Command',$inner)
 }
 
 # Relaunch elevated through UAC, forwarding the switches. Returns $true when the
