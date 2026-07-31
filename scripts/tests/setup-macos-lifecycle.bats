@@ -68,15 +68,38 @@ setup() {
   [[ "$output" == *"launchctl"* ]]         # registered for this session too
 }
 
-@test "_install_macos_autostart: headless Mac -> LaunchAgent runs 'colima start' at login (#430)" {
-  TB_LAUNCHAGENTS_DIR="$BATS_TEST_TMPDIR/LaunchAgents"
+@test "_install_macos_autostart: headless Mac -> LaunchDAEMON runs 'colima start' at BOOT (not a login-only agent) (#430 Bugbot)" {
+  # A LaunchAgent only loads in a GUI/Aqua login session, which a headless Mac never has,
+  # so headless reboot recovery MUST be a system LaunchDaemon that runs at boot.
+  TB_LAUNCHDAEMONS_DIR="$BATS_TEST_TMPDIR/LaunchDaemons"
   _has_gui_session() { return 1; }
+  sudo() { record "sudo $*"; "$@"; }        # passthrough so tee/mkdir really write
   _install_macos_autostart
-  local plist="$TB_LAUNCHAGENTS_DIR/io.tracebloc.runtime.plist"
+  local plist="$TB_LAUNCHDAEMONS_DIR/io.tracebloc.runtime.plist"
   [ -f "$plist" ]
-  grep -q 'colima</string>' "$plist"       # …/colima
+  grep -q 'colima</string>' "$plist"
   grep -q '<string>start</string>' "$plist"
   grep -q '<key>RunAtLoad</key><true/>' "$plist"
+  grep -q '<key>UserName</key>' "$plist"    # runs as the install user, at boot
+  grep -q '<key>EnvironmentVariables</key>' "$plist"   # HOME/PATH for colima under launchd
+  run mock_calls
+  [[ "$output" == *"sudo launchctl"* ]]     # registered in the SYSTEM domain
+}
+
+@test "_install_macos_autostart: TRACEBLOC_NO_AUTOSTART -> skipped, nothing written, flag unset (#430 Bugbot)" {
+  export TRACEBLOC_NO_AUTOSTART=1
+  TB_LAUNCHAGENTS_DIR="$BATS_TEST_TMPDIR/LaunchAgents"
+  TB_LAUNCHDAEMONS_DIR="$BATS_TEST_TMPDIR/LaunchDaemons"
+  _has_gui_session() { return 0; }
+  TB_MACOS_AUTOSTART=0
+  run _install_macos_autostart
+  [ "$status" -eq 0 ]                        # honored, no error
+  [ ! -e "$TB_LAUNCHAGENTS_DIR/io.tracebloc.runtime.plist" ]
+  # flag stays unset -> the summary won't falsely promise auto-restart
+  _has_gui_session() { return 0; }; TB_MACOS_AUTOSTART=0
+  _install_macos_autostart
+  [ "${TB_MACOS_AUTOSTART:-0}" = "0" ]
+  unset TRACEBLOC_NO_AUTOSTART
 }
 
 @test "_install_macos_autostart: unwritable LaunchAgents dir -> best-effort warn, no crash, flag unset (#430)" {

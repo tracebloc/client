@@ -354,47 +354,91 @@ install_macos_cli_tools() {
 # `open -a Docker` on a GUI Mac, `colima start` on a headless one. Best-effort — never
 # fail the install over autostart. Sets TB_MACOS_AUTOSTART=1 so the summary can honestly
 # promise auto-restart. Dir overridable (TB_LAUNCHAGENTS_DIR) + launchctl mockable for tests.
+# Emit a launchd plist to stdout: Label, RunAtLoad, ProgramArguments=$@, plus any raw
+# EXTRA XML (e.g. a boot daemon's UserName/EnvironmentVariables). Kept separate so the
+# GUI LaunchAgent and the headless LaunchDaemon share one skeleton (bash-3.2-safe).
+_emit_launch_plist() {
+  local label="$1" extra="$2"; shift 2
+  printf '%s\n' '<?xml version="1.0" encoding="UTF-8"?>'
+  printf '%s\n' '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">'
+  printf '%s\n' '<plist version="1.0">'
+  printf '%s\n' '<dict>'
+  printf '  <key>Label</key><string>%s</string>\n' "$label"
+  printf '%s\n' '  <key>ProgramArguments</key>'
+  printf '%s\n' '  <array>'
+  local _a
+  for _a in "$@"; do printf '    <string>%s</string>\n' "$_a"; done
+  printf '%s\n' '  </array>'
+  printf '%s\n' '  <key>RunAtLoad</key><true/>'
+  [[ -n "$extra" ]] && printf '%s\n' "$extra"
+  printf '  <key>StandardOutPath</key><string>%s</string>\n' '/tmp/tracebloc-autostart.log'
+  printf '  <key>StandardErrorPath</key><string>%s</string>\n' '/tmp/tracebloc-autostart.log'
+  printf '%s\n' '</dict>'
+  printf '%s\n' '</plist>'
+}
+
+# Configure autostart so a rebooted Mac brings the container runtime — and thus tracebloc
+# (k3d nodes carry --restart unless-stopped) — back with ZERO human action (#430).
+#   • GUI Mac      → per-user LaunchAgent (~/Library/LaunchAgents, no admin) that opens
+#                    Docker Desktop at each GUI login.
+#   • headless Mac → a LaunchAgent would NEVER run (it loads only in a GUI/Aqua login
+#                    session, which a headless box has none of; #430 Bugbot). Reboot
+#                    recovery needs a system LaunchDaemon (/Library/LaunchDaemons, root)
+#                    that runs `colima start` at BOOT as the install user.
+# Honors TRACEBLOC_NO_AUTOSTART, the same opt-out that gates ensure_cluster_autostart and
+# the Windows peer (#430 Bugbot). Best-effort; TB_MACOS_AUTOSTART is set ONLY on success,
+# so the summary's reboot promise stays honest.
 _install_macos_autostart() {
-  local dir="${TB_LAUNCHAGENTS_DIR:-$HOME/Library/LaunchAgents}"
-  local label="io.tracebloc.runtime"
-  local plist="$dir/${label}.plist"
-  local -a prog
-  if _has_gui_session; then
-    prog=( /usr/bin/open -a Docker )
-  else
-    local _colima; _colima="$(command -v colima 2>/dev/null || echo /usr/local/bin/colima)"
-    prog=( "$_colima" start )
+  if [[ -n "${TRACEBLOC_NO_AUTOSTART:-}" ]]; then
+    log "Autostart skipped (TRACEBLOC_NO_AUTOSTART set)."
+    return 0
   fi
-  mkdir -p "$dir" 2>/dev/null || {
-    warn "Couldn't create ${dir}; skipping login autostart — start the runtime manually after a reboot."
-    return 1
-  }
-  {
-    printf '%s\n' '<?xml version="1.0" encoding="UTF-8"?>'
-    printf '%s\n' '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">'
-    printf '%s\n' '<plist version="1.0">'
-    printf '%s\n' '<dict>'
-    printf '  <key>Label</key><string>%s</string>\n' "$label"
-    printf '%s\n' '  <key>ProgramArguments</key>'
-    printf '%s\n' '  <array>'
-    local _a
-    for _a in "${prog[@]}"; do printf '    <string>%s</string>\n' "$_a"; done
-    printf '%s\n' '  </array>'
-    printf '%s\n' '  <key>RunAtLoad</key><true/>'
-    printf '  <key>StandardOutPath</key><string>%s</string>\n' '/tmp/tracebloc-autostart.log'
-    printf '  <key>StandardErrorPath</key><string>%s</string>\n' '/tmp/tracebloc-autostart.log'
-    printf '%s\n' '</dict>'
-    printf '%s\n' '</plist>'
-  } > "$plist" 2>/dev/null || {
-    warn "Couldn't write the login autostart agent at ${plist}; start the runtime manually after a reboot."
-    return 1
-  }
-  # Register for this session (best-effort; RunAtLoad handles every future login).
-  # bootstrap is the modern form; fall back to load -w on older macOS.
-  launchctl bootstrap "gui/$(id -u)" "$plist" 2>/dev/null \
-    || launchctl load -w "$plist" 2>/dev/null || true
+  local label="io.tracebloc.runtime"
+  if _has_gui_session; then
+    local dir="${TB_LAUNCHAGENTS_DIR:-$HOME/Library/LaunchAgents}"
+    local plist="$dir/${label}.plist"
+    mkdir -p "$dir" 2>/dev/null || {
+      warn "Couldn't create ${dir}; skipping login autostart — open Docker Desktop manually after a reboot."
+      return 1
+    }
+    _emit_launch_plist "$label" "" /usr/bin/open -a Docker > "$plist" 2>/dev/null || {
+      warn "Couldn't write the login autostart agent at ${plist}; open Docker Desktop manually after a reboot."
+      return 1
+    }
+    # RunAtLoad handles every future GUI login; bootstrap it into THIS session too.
+    launchctl bootstrap "gui/$(id -u)" "$plist" 2>/dev/null \
+      || launchctl load -w "$plist" 2>/dev/null || true
+  else
+    local dir="${TB_LAUNCHDAEMONS_DIR:-/Library/LaunchDaemons}"
+    local plist="$dir/${label}.plist"
+    local _colima; _colima="$(command -v colima 2>/dev/null || echo /usr/local/bin/colima)"
+    local _user; _user="$(id -un)"
+    local _home="${HOME:-/Users/$_user}"
+    # A boot daemon has no user env — colima/limactl need HOME + a PATH that finds colima
+    # and its deps, and must run AS the install user (not root), or the VM/socket land in
+    # the wrong place. RunAtLoad fires at boot with no login.
+    local extra
+    printf -v extra '%s\n%s\n%s\n%s\n%s\n%s' \
+      "  <key>UserName</key><string>${_user}</string>" \
+      '  <key>EnvironmentVariables</key>' \
+      '  <dict>' \
+      "    <key>HOME</key><string>${_home}</string>" \
+      '    <key>PATH</key><string>/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>' \
+      '  </dict>'
+    sudo mkdir -p "$dir" 2>/dev/null || {
+      warn "Couldn't create ${dir}; skipping boot autostart — run 'colima start' manually after a reboot."
+      return 1
+    }
+    _emit_launch_plist "$label" "$extra" "$_colima" start | sudo tee "$plist" >/dev/null 2>&1 || {
+      warn "Couldn't write the boot autostart daemon at ${plist}; run 'colima start' manually after a reboot."
+      return 1
+    }
+    # System domain, at boot, no login required.
+    sudo launchctl bootstrap system "$plist" 2>/dev/null \
+      || sudo launchctl load -w "$plist" 2>/dev/null || true
+  fi
   TB_MACOS_AUTOSTART=1
-  success "Login autostart configured — tracebloc returns automatically after a reboot."
+  success "Autostart configured — tracebloc returns automatically after a reboot."
   return 0
 }
 
