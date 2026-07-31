@@ -87,8 +87,10 @@ _docker_default_runtime_is_nvidia() {
 #   2 = UNKNOWN  (has k3d but the bounded probe failed/timed out)
 _k3d_cluster_running() {
   has k3d || return 1
-  local out rc
-  out="$(_bounded "${TB_PROBE_TIMEOUT:-5}" k3d cluster list --no-headers 2>/dev/null)"; rc=$?
+  # `|| rc=$?` (not a bare `; rc=$?`) so a non-zero probe under the installer's `set -e`
+  # captures the code instead of aborting — and the UNKNOWN(2) path stays reachable (#431 Bugbot).
+  local out rc=0
+  out="$(_bounded "${TB_PROBE_TIMEOUT:-5}" k3d cluster list --no-headers 2>/dev/null)" || rc=$?
   (( rc == 0 )) || return 2
   # Decide only in END: an `exit` inside a main rule still runs END, so a per-row
   # `exit 0` would be overridden by an END `exit 1`. Set a flag, exit once.
@@ -103,6 +105,9 @@ _gpu_stack_signature() {
   ctk="$(nvidia-ctk --version 2>/dev/null | head -1 || true)"
   drv="$(nvidia-smi --query-gpu=driver_version --format=csv,noheader 2>/dev/null | head -1 || true)"
   [[ -n "${ctk}${drv}" ]] && printf '%s|%s' "$ctk" "$drv"
+  # Always succeed: the installer runs under `set -e`, and the caller assigns this via
+  # `$(...)` — an empty signature means "don't cache", not "abort the install" (#431 Bugbot).
+  return 0
 }
 
 install_nvidia_container_toolkit() {
@@ -164,8 +169,11 @@ install_nvidia_container_toolkit() {
     # Attempt cluster recovery after the restart when it's running OR when we couldn't
     # confirm its state (a wedged daemon that also failed the nvidia check would fail
     # this probe too) — never leave a live cluster down silently (#431 Bugbot).
-    local cluster_was_running=0 cr
-    _k3d_cluster_running; cr=$?
+    # `|| cr=$?` (not a bare `; cr=$?`): under the installer's `set -e` a non-zero
+    # probe on a first-run GPU host (no cluster yet) would otherwise abort before the
+    # Docker restart, leaving the runtime unapplied (#431 Bugbot).
+    local cluster_was_running=0 cr=0
+    _k3d_cluster_running || cr=$?
     if (( cr == 0 )); then
       cluster_was_running=1
       warn "Applying the NVIDIA runtime needs a Docker restart — the '${CLUSTER_NAME}' cluster will restart with it."

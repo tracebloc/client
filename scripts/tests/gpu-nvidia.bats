@@ -199,3 +199,33 @@ _gpu_mocks() {
   grep -q 'docker run' "$MOCK_CALLS" || return 1               # forced re-verify ran
   [ ! -f "${HOST_DATA_DIR}/.gpu-smoke-ok" ] || return 1         # stale PASS marker removed
 }
+
+# ── #431 Bugbot round 4: set -e safety (the installer sources these under set -euo) ──
+@test "_gpu_stack_signature is set -e safe with no versions (#431 Bugbot)" {
+  run bash -c '
+    set -euo pipefail
+    source "$1/../lib/common.sh"
+    source "$1/../lib/gpu-nvidia.sh"
+    nvidia-ctk() { return 1; }
+    nvidia-smi() { return 1; }
+    sig="$(_gpu_stack_signature)"
+    echo "DONE:[${sig}]"
+  ' _ "$BATS_TEST_DIRNAME"
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  [[ "$output" == *"DONE:[]"* ]] || return 1
+}
+
+@test "_k3d_cluster_running is set -e safe on a failed probe -> UNKNOWN (#431 Bugbot)" {
+  run bash -c '
+    set -euo pipefail
+    source "$1/../lib/common.sh"
+    source "$1/../lib/gpu-nvidia.sh"
+    CLUSTER_NAME=tracebloc
+    has() { case "$1" in k3d) return 0;; *) return 1;; esac; }
+    k3d() { return 1; }
+    cr=0; _k3d_cluster_running || cr=$?
+    echo "DONE:cr=${cr}"
+  ' _ "$BATS_TEST_DIRNAME"
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  [[ "$output" == *"DONE:cr=2"* ]] || return 1
+}
