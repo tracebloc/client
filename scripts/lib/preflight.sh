@@ -338,7 +338,10 @@ _pf_arch() {
     return 0
   fi
   if [[ "$OS" != "Linux" ]]; then
-    _pf_note "Architecture: ${ARCH} — Docker Desktop runs the amd64 client images under emulation (slower, but works)."
+    # Don't ASSUME emulation works here — Docker isn't up yet at preflight, so the real
+    # amd64 smoke runs post-Docker (assert_amd64_emulation, #433). Name the setting now
+    # so the operator can pre-empt it.
+    _pf_note "Architecture: ${ARCH} — the amd64 client images run under emulation; Docker's \"Use Rosetta for x86_64/amd64 emulation\" must be enabled (verified once Docker is running)."
     return 0
   fi
   if _pf_amd64_emulation_available; then
@@ -386,8 +389,10 @@ _pf_memory() {
   kb="$host_kb"; label="machine"
   if [[ -z "$kb" && -n "$rt_kb" ]]; then kb="$rt_kb"; label="Docker VM"; fi
   if [[ -z "$kb" ]]; then warn "Memory: couldn't determine total RAM (skipping)."; return 0; fi
-  gb=$(( kb / 1024 / 1024 ))
   mib=$(( kb / 1024 ))
+  # Same grace-adjusted figure _pf_runtime_mem_status reports, so one budget never
+  # appears as two different numbers across the two messages (Bugbot #445 r4).
+  gb=$(( (mib + PF_VM_MEM_GRACE_MIB) / 1024 ))
   # Compare in MiB with a 64 MiB grace so a VM that reports e.g. 4 GiB a hair under
   # 4*1024^3 (Colima / Docker Desktop) doesn't floor to 3 GB and false-trip the gate.
   floor_mib=$(( PF_MIN_MEM_GB * 1024 - 64 ))
@@ -409,7 +414,7 @@ _pf_memory() {
       # VM (#428), including the honest "use a larger machine" case.
       warn "Memory: ${gb} GB (${label}) — below the ${PF_MIN_MEM_GB} GB the client needs; it will OOM."
     fi
-  elif [[ "$OS" != "Linux" ]] && _pf_host_too_small_for_floor "$gb"; then
+  elif [[ "$OS" != "Linux" && "$label" == "machine" ]] && _pf_host_too_small_for_floor "$gb"; then
     # Above the bare floor, but not by enough to give Docker the floor AND leave
     # the OS its reserve. Saying "enough to run" here contradicted the budget
     # line's "use a larger machine" in the same preflight (Bugbot #445 r3). On

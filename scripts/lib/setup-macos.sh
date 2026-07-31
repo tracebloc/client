@@ -50,6 +50,25 @@ _has_gui_session() {
   [[ -n "$console_user" && "$console_user" != "root" ]]
 }
 
+# Does this Mac support Apple Virtualization.framework (colima --vm-type vz)? It needs
+# macOS 13+ (Ventura); Rosetta x86_64 translation (--vz-rosetta) rides on VZ. Below 13,
+# colima falls back to its QEMU default (amd64 still runs, just slower). Overridable
+# for tests via TB_MACOS_VER (#433).
+_macos_supports_vz() {
+  local v major
+  v="${TB_MACOS_VER:-$(sw_vers -productVersion 2>/dev/null)}"
+  major="${v%%.*}"
+  [[ "$major" =~ ^[0-9]+$ ]] && [ "$major" -ge 13 ]
+}
+
+# Has a colima VM already been created (running OR stopped)? `colima list --json` emits
+# one JSON line per instance and nothing when there are none. colima REFUSES to change
+# vmType on an existing instance, so we only request VZ+Rosetta on a fresh start (#433
+# Bugbot). Mockable via the colima function in tests.
+_colima_instance_exists() {
+  [[ -n "$(colima list --json 2>/dev/null)" ]]
+}
+
 _install_docker_colima() {
   log "Headless environment detected (no GUI session) — using Colima as Docker runtime."
 
@@ -76,7 +95,24 @@ _install_docker_colima() {
   # helper lives in preflight.sh, sourced before this in the bootstrap.
   local _colima_mem="${COLIMA_MEMORY:-$(_macos_vm_mem_gb)}"
   log "Colima memory budget: ${_colima_mem} GB"
-  spin_cmd "Starting Docker runtime…" colima start --cpu "${COLIMA_CPU:-4}" --memory "$_colima_mem" --disk "${COLIMA_DISK:-60}"
+  # Build the arg vector so the arch flags append cleanly (bash-3.2-safe: the array is
+  # never empty, so "${_colima_args[@]}" is fine under set -u). On Apple Silicon the
+  # amd64-only client images need x86_64 acceleration; with VZ (macOS 13+) use Rosetta
+  # — the fast path that matches Docker Desktop's "Use Rosetta for x86_64/amd64
+  # emulation". Without these flags colima's default arm64 QEMU VM runs amd64 images
+  # slowly or not at all, which the post-Docker smoke (assert_amd64_emulation) catches
+  # regardless (#433). Older macOS keeps the QEMU default.
+  local -a _colima_args=( start --cpu "${COLIMA_CPU:-4}" --memory "$_colima_mem" --disk "${COLIMA_DISK:-60}" )
+  # Only request VZ+Rosetta on a FRESH instance: colima rejects a vmType change on an
+  # existing VM, so forcing --vm-type vz onto a prior QEMU instance (earlier install or
+  # reboot) would abort the start (#433 Bugbot). A pre-existing VM is started as-is; if
+  # its amd64 emulation is broken, the post-Docker smoke (assert_amd64_emulation) names
+  # the `colima delete && colima start --vm-type vz --vz-rosetta` recreate remedy.
+  if [[ "$ARCH" == "arm64" ]] && _macos_supports_vz && ! _colima_instance_exists; then
+    _colima_args+=( --vm-type vz --vz-rosetta )
+    log "Apple Silicon + macOS 13+ (fresh VM): starting Colima with VZ + Rosetta for amd64 acceleration."
+  fi
+  spin_cmd "Starting Docker runtime…" colima "${_colima_args[@]}"
 
   if ! docker info &>/dev/null 2>&1; then
     error "Docker did not start. Try running 'colima status' to investigate."
@@ -284,9 +320,41 @@ install_macos_cli_tools() {
   umask "$_saved_umask"
 }
 
+# Verify amd64 emulation ACTUALLY works before a cluster starts scheduling the
+# amd64-only client images (#433). On Apple Silicon a green arch preflight only means
+# Docker *should* emulate — but Docker Desktop's "Use Rosetta for x86_64/amd64
+# emulation" can be off, or colima can lack it, and then the images crash-loop with an
+# exec-format error minutes later with no earlier signal. Force-run a tiny amd64 binary
+# NOW (Docker is up by this point) and fail here, naming the exact setting, instead of
+# in a pod. Intel Macs run amd64 natively — nothing to check. TRACEBLOC_ALLOW_ARM64
+# skips it (same escape hatch as the preflight arch gate). Image overridable for tests.
+assert_amd64_emulation() {
+  [[ "$ARCH" == "arm64" ]] || return 0
+  if [[ -n "${TRACEBLOC_ALLOW_ARM64:-}" ]]; then
+    warn "Skipping the amd64 emulation smoke test (TRACEBLOC_ALLOW_ARM64 set) — amd64 images may crash."
+    return 0
+  fi
+  local _img="${TB_AMD64_SMOKE_IMAGE:-busybox:1.36}"
+  # Time-bounded: a wedged daemon or stuck pull must not hang a headless install
+  # forever behind a spinner (installer rule — every docker call is bounded; #433
+  # Bugbot). spin_cmd_bounded returns 124 on the deadline, which falls through to the
+  # same remediation as a real emulation failure.
+  if spin_cmd_bounded "${TB_AMD64_SMOKE_TIMEOUT:-120}" "Verifying amd64 emulation…" \
+       docker run --rm --platform linux/amd64 "$_img" true; then
+    success "amd64 emulation verified (x86_64 client images will run)."
+    return 0
+  fi
+  warn "amd64 emulation isn't working on this Apple Silicon Mac — the amd64-only tracebloc images would crash-loop, not fail here."
+  hint "  Docker Desktop: Settings → General → enable \"Use Rosetta for x86_64/amd64 emulation\", then restart Docker and re-run."
+  hint "  Colima: recreate the VM with VZ + Rosetta →  colima delete && colima start --vm-type vz --vz-rosetta"
+  hint "  (or set TRACEBLOC_ALLOW_ARM64=1 to proceed anyway — the images may crash.)"
+  error "amd64 emulation unavailable — fix the above and re-run (the client images are amd64-only)."
+}
+
 install_macos() {
   preflight_sudo
   install_homebrew
   install_docker_desktop
+  assert_amd64_emulation      # Docker is up now — prove amd64 runs before the cluster needs it (#433)
   install_macos_cli_tools
 }

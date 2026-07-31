@@ -52,6 +52,14 @@ setup() {
   PF_HARD_FAIL=0; _pf_arch >/dev/null; [ "$PF_HARD_FAIL" -eq 0 ]
 }
 
+@test "_pf_arch: arm64 macOS note names the Rosetta setting + defers to the post-Docker smoke (#433)" {
+  ARCH=arm64; OS=Darwin
+  run _pf_arch
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Use Rosetta for x86_64/amd64 emulation"* ]]   # names the exact setting, not "assume it works"
+  [[ "$output" == *"verified once Docker is running"* ]]          # real check is the post-Docker smoke (#433)
+}
+
 @test "_pf_arch: arm64 + TRACEBLOC_ALLOW_ARM64 -> warn, no hard fail" {
   ARCH=aarch64; OS=Linux; export TRACEBLOC_ALLOW_ARM64=1
   _pf_amd64_emulation_available() { return 1; }
@@ -926,4 +934,28 @@ setup() {
   run _pf_runtime_mem_status 7000
   [[ "$output" == *"budget: 7 GB"* ]] || return 1
   [[ "$output" == *"recommended ≥ 8 GB"* ]] || return 1
+}
+
+@test "_pf_memory: an unreadable host must not let the VM budget be graded as host RAM (Bugbot #445 r4)" {
+  # When host RAM is unreadable _pf_memory falls back to the VM budget and sets
+  # label="Docker VM". Passing that figure to the host-too-small predicate would
+  # call a large machine too small and drop the resize remedy.
+  OS=Darwin
+  _pf_host_mem_kb() { echo ""; }                     # unreadable host
+  _pf_runtime_mem_kb() { echo $((6 * 1024 * 1024)); } # 6 GB VM budget
+  run _pf_memory
+  [[ "$output" != *"larger machine"* ]]
+  [[ "$output" == *"Docker VM"* ]]
+}
+
+@test "_pf_runtime_mem_status: a VM at exactly the warn target is not told to reach it (Bugbot #445 r4)" {
+  # Grading and display must come from the SAME grace-adjusted figure, or a VM
+  # configured at the warn target prints "budget: N GB — recommended >= N GB".
+  OS=Darwin
+  _pf_host_mem_kb() { echo $((32 * 1024 * 1024)); }
+  local warn_eff
+  warn_eff="$(_pf_clamp_mem_gb "$PF_WARN_MEM_GB")"
+  run _pf_runtime_mem_status $(( warn_eff * 1024 - 124 ))
+  [[ "$output" != *"recommended ≥ ${warn_eff} GB"* ]]
+  [[ "$output" == *"budget: ${warn_eff} GB"* ]]
 }
