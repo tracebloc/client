@@ -884,6 +884,23 @@ setup() {
   [ "$status" -ne 0 ]
   [ -z "$output" ]
 }
+@test "_pull_failure_detail: unrelated x509 events don't displace the real pull reason (#425 Bugbot)" {
+  has() { [ "$1" = kubectl ]; }
+  kubectl() {
+    case "$*" in
+      *"get pods"*)   printf '%s\n' "foo-abc  0/1  ImagePullBackOff  0  30s" ;;
+      *"get events"*) printf '%s\n' \
+        'Warning Failed pod/foo Failed to pull image "ghcr.io/x": 403 Forbidden' \
+        'Warning Unrelated pod/bar x509: certificate signed by unknown authority' \
+        'Warning Unrelated pod/baz x509: certificate signed by unknown authority' \
+        'Warning Unrelated pod/qux x509: certificate signed by unknown authority' ;;
+    esac
+  }
+  run _pull_failure_detail tracebloc
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"403 Forbidden"* ]]   # the real pull reason survives the tail
+  [[ "$output" != *"x509"* ]]            # unrelated x509 events are scoped out
+}
 @test "_download_services_progress routes the end copy through the honest selector (#425)" {
   # The end-of-progress copy is chosen by the pure _progress_end_message selector,
   # a 'failed' branch warns loudly, and the background over-promise appears exactly

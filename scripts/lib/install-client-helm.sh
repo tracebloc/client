@@ -477,9 +477,11 @@ _pull_failure_detail() {
   bad="$(printf '%s\n' "$pods" | grep -iE 'ImagePullBackOff|ErrImagePull|InvalidImageName' || true)"
   [[ -n "$bad" ]] || return 1
   events="$(kubectl get events -n "$ns" --request-timeout="$kube_timeout" 2>/dev/null || true)"
-  pull_fail="$(printf '%s\n' "$events" \
-    | grep -iE 'failed to pull|ErrImagePull|x509|certificate signed by unknown authority|tls: failed to verify' \
-    | tail -n 3 || true)"
+  # Scope to the PULL-failure events only (like summary.sh::_diagnose_not_ready and the
+  # PowerShell path) — never a bare x509/TLS match: kubectl prints one event per line,
+  # so an x509 on a pull-failure line is already captured here, while an UNRELATED x509
+  # event elsewhere in the ns must not, via tail, displace the real reason (#425 Bugbot).
+  pull_fail="$(printf '%s\n' "$events" | grep -iE 'failed to pull|ErrImagePull' | tail -n 3 || true)"
   printf '%s\n' "$bad"
   [[ -n "$pull_fail" ]] && printf '%s\n' "$pull_fail"
   return 0
