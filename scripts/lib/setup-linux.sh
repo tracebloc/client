@@ -401,7 +401,9 @@ _set_tools_target() {
   # Tier 0 (a usable runtime, no admin) AND rootless Tier 1 (#1221, possibly no root
   # at all) both install user-space with NO sudo: a `sudo mv → /usr/local/bin` here
   # would abort the rootless install under `set -e` AFTER the daemon is already up,
-  # leaving a half-install on a true no-sudo host (Asad review, #452).
+  # leaving a half-install on a true no-sudo host (Asad review, #452). This is the
+  # LINUX target-selector; macOS (no Tier/rootless model) sets its own target in
+  # install_macos_cli_tools.
   if [ "${INSTALL_TIER:-}" = "0" ] || _rootless_active; then
     TB_TOOLS_DIR="${HOME}/.local/bin"
     TB_TOOLS_SUDO=""
@@ -415,6 +417,10 @@ _set_tools_target() {
 
 _fetch_kubectl() {
   local ver="$1" arch="$2"
+  # Download platform slug: defaults to linux, so Linux (and every bats fetch test
+  # that leaves OS_DL unset) is byte-identical; the macOS path sets OS_DL=darwin so
+  # the SAME pinned/verified fetch honors the pins there too (#429).
+  local os="${OS_DL:-linux}"
   local tmpdir
   tmpdir="$(mktemp -d)"
   # Same bounds as _fetch_k3d_release below, and for the same reason: kubectl is a
@@ -423,10 +429,10 @@ _fetch_kubectl() {
   # knows not to add its default deadline here (Bugbot, backend#1252). Before this
   # the fetch had no bound at all — a mid-stream stall hung the step indefinitely.
   retry 3 5 curl_secure -fsSL --connect-timeout 15 --speed-limit 1024 --speed-time 60 \
-    "https://dl.k8s.io/release/${ver}/bin/linux/${arch}/kubectl" -o "${tmpdir}/kubectl"
+    "https://dl.k8s.io/release/${ver}/bin/${os}/${arch}/kubectl" -o "${tmpdir}/kubectl"
   retry 3 5 curl_secure -fsSL --connect-timeout 15 --speed-limit 1024 --speed-time 60 \
-    "https://dl.k8s.io/release/${ver}/bin/linux/${arch}/kubectl.sha256" -o "${tmpdir}/kubectl.sha256"
-  echo "$(cat "${tmpdir}/kubectl.sha256")  ${tmpdir}/kubectl" | sha256sum --check --quiet \
+    "https://dl.k8s.io/release/${ver}/bin/${os}/${arch}/kubectl.sha256" -o "${tmpdir}/kubectl.sha256"
+  _verify_sha256 "$(cat "${tmpdir}/kubectl.sha256")" "${tmpdir}/kubectl" \
     || { rm -rf "$tmpdir"; error "System tool checksum verification failed"; }
   chmod +x "${tmpdir}/kubectl"
   # Tier 0 → no sudo (TB_TOOLS_SUDO empty, TB_TOOLS_DIR under $HOME).
@@ -469,6 +475,7 @@ install_kubectl() {
 # asset basename.
 _fetch_k3d_release() {
   local tag="$1" arch="$2"
+  local os="${OS_DL:-linux}"   # linux by default; darwin on the macOS path (#429)
   local base="https://github.com/k3d-io/k3d/releases/download/${tag}"
   local tmpdir
   tmpdir="$(mktemp -d)"
@@ -476,14 +483,14 @@ _fetch_k3d_release() {
   # a hard cap would break slow-but-healthy links): a hung transfer under
   # spin_cmd would otherwise spin forever (Bugbot r2).
   retry 3 5 curl_secure -fsSL --connect-timeout 15 --speed-limit 1024 --speed-time 60 \
-    "${base}/k3d-linux-${arch}" -o "${tmpdir}/k3d"
+    "${base}/k3d-${os}-${arch}" -o "${tmpdir}/k3d"
   retry 3 5 curl_secure -fsSL --connect-timeout 15 --speed-limit 1024 --speed-time 60 \
     "${base}/checksums.txt" -o "${tmpdir}/checksums.txt"
   local want
-  want="$(awk -v asset="k3d-linux-${arch}" \
+  want="$(awk -v asset="k3d-${os}-${arch}" \
     '{ n = split($2, p, "/"); if (p[n] == asset) { print $1; exit } }' \
     "${tmpdir}/checksums.txt" 2>/dev/null)"
-  if [ -z "$want" ] || ! echo "${want}  ${tmpdir}/k3d" | sha256sum --check --quiet; then
+  if [ -z "$want" ] || ! _verify_sha256 "$want" "${tmpdir}/k3d"; then
     rm -rf "$tmpdir"
     error "System tool checksum verification failed"
   fi
@@ -618,7 +625,8 @@ _ensure_unpack_tools() {
 # (mirrors _fetch_k3d_release / #382).
 _fetch_helm_release() {
   local tag="$1" arch="$2" tarball tmpdir
-  tarball="helm-${tag}-linux-${arch}.tar.gz"
+  local os="${OS_DL:-linux}"   # linux by default; darwin on the macOS path (#429)
+  tarball="helm-${tag}-${os}-${arch}.tar.gz"
   tmpdir="$(mktemp -d)"
   # --connect-timeout + a stall floor (not --max-time: the tarball is ~17 MB and
   # a hard cap would break slow-but-healthy links) — a hung transfer under
@@ -627,18 +635,21 @@ _fetch_helm_release() {
     "https://get.helm.sh/${tarball}" -o "${tmpdir}/${tarball}"
   retry 3 5 curl_secure -fsSL --connect-timeout 15 --speed-limit 1024 --speed-time 60 \
     "https://get.helm.sh/${tarball}.sha256sum" -o "${tmpdir}/${tarball}.sha256sum"
-  # The published file is "<sha256>  <tarball-name>" — verify in place.
-  if ! (cd "$tmpdir" && sha256sum --check --quiet "${tarball}.sha256sum"); then
+  # The published file is "<sha256>  <tarball-name>" — pull the hash and verify the
+  # tarball with the portable checker (sha256sum on Linux, shasum on macOS; #429).
+  local want
+  want="$(awk 'NR==1{print $1}' "${tmpdir}/${tarball}.sha256sum" 2>/dev/null)"
+  if [ -z "$want" ] || ! _verify_sha256 "$want" "${tmpdir}/${tarball}"; then
     rm -rf "$tmpdir"
     error "System tool checksum verification failed"
   fi
-  tar -xzf "${tmpdir}/${tarball}" -C "$tmpdir" "linux-${arch}/helm"
-  chmod +x "${tmpdir}/linux-${arch}/helm"
+  tar -xzf "${tmpdir}/${tarball}" -C "$tmpdir" "${os}-${arch}/helm"
+  chmod +x "${tmpdir}/${os}-${arch}/helm"
   # Tier 0 → no sudo (TB_TOOLS_SUDO empty, TB_TOOLS_DIR under $HOME).
   if [ -n "$TB_TOOLS_SUDO" ]; then
-    sudo mv "${tmpdir}/linux-${arch}/helm" "$TB_TOOLS_DIR/helm"
+    sudo mv "${tmpdir}/${os}-${arch}/helm" "$TB_TOOLS_DIR/helm"
   else
-    mv "${tmpdir}/linux-${arch}/helm" "$TB_TOOLS_DIR/helm"
+    mv "${tmpdir}/${os}-${arch}/helm" "$TB_TOOLS_DIR/helm"
   fi
   rm -rf "$tmpdir"
 }
