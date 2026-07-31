@@ -29,12 +29,64 @@ Describe "Get-BackendUrl" {
 }
 
 Describe "Daily-user provisioning (#418)" {
-  It "Get-WslConfigMemoryGb caps at physical - 4 GB" {
-    Get-WslConfigMemoryGb -HostGb 16 | Should -Be 12
-    Get-WslConfigMemoryGb -HostGb 32 | Should -Be 28
+  # Get-WslConfigMemoryGb WRITES real config, so it must never emit a budget the
+  # client can't run in. It used to do its own arithmetic with a private 4 GB reserve
+  # (vs the shared 2) and floor at 1 GB, so an 8 GB host -- perfectly viable -- got
+  # memory=4GB, below the client's own floor and a guaranteed OOM crashloop, while
+  # the same run advised "give Docker up to 6 GB". It now delegates to
+  # Get-PfMemRecommendation, so written budget == advised budget, always.
+  It "Get-WslConfigMemoryGb gives an 8 GB host 6 GB, not the OOM-guaranteed 4 (the reported bug)" {
+    Get-WslConfigMemoryGb -HostGb 8 | Should -Be 6
+    Get-WslConfigMemoryGb -HostGb 8 | Should -Not -Be 4
   }
-  It "Get-WslConfigMemoryGb floors at 1 GB on a tiny host" {
-    Get-WslConfigMemoryGb -HostGb 4 | Should -Be 1
+  It "Get-WslConfigMemoryGb never writes below the client's memory floor" {
+    $floor = Get-PfMinMemGb
+    foreach ($h in 7,8,9,12,16,32,64) {
+      Get-WslConfigMemoryGb -HostGb $h |
+        Should -BeGreaterOrEqual $floor -Because "a ${h} GB host can support the floor, so the written budget must clear it"
+    }
+  }
+  It "Get-WslConfigMemoryGb returns 0 (= don't write) when the host can't reach the floor" {
+    # physical - reserve < floor: no budget is worth writing. 6 - 2 = 4 < 5.
+    Get-WslConfigMemoryGb -HostGb 6 | Should -Be 0
+    Get-WslConfigMemoryGb -HostGb 4 | Should -Be 0
+    Get-WslConfigMemoryGb -HostGb 2 | Should -Be 0
+    Get-WslConfigMemoryGb -HostGb 0 | Should -Be 0
+  }
+  It "Get-WslConfigMemoryGb never over-commits the host (the OS keeps its reserve)" {
+    # The old private 4 GB reserve also erred the OTHER way past the cap: a 32 GB
+    # host was handed 28 GB, leaving Windows 4.
+    foreach ($h in 7,8,16,32,64) {
+      $m = Get-WslConfigMemoryGb -HostGb $h
+      $m | Should -BeLessOrEqual ($h - (Get-PfOsReserveGb)) -Because "a ${h} GB host must keep its OS reserve"
+    }
+    Get-WslConfigMemoryGb -HostGb 32 | Should -Not -Be 28
+  }
+  It "Get-WslConfigMemoryGb writes exactly what the preflight advises (one reserve, no drift)" {
+    foreach ($h in 7,8,12,16,32,64) {
+      Get-WslConfigMemoryGb -HostGb $h |
+        Should -Be (Get-PfMemRecommendation -DesiredGb (Get-PfRecMemGb) -HostGb $h) `
+        -Because "a ${h} GB host must be WRITTEN the same budget it is ADVISED"
+    }
+  }
+  It "Get-WslConfigMemoryGb caps at the recommended training budget on a big host" {
+    # No point handing WSL2 more than the client can use to train.
+    Get-WslConfigMemoryGb -HostGb 64  | Should -Be (Get-PfRecMemGb)
+    Get-WslConfigMemoryGb -HostGb 256 | Should -Be (Get-PfRecMemGb)
+  }
+  It "Get-WslConfigMemoryGb honours the PF_MIN_MEM_GB floor override" {
+    try {
+      $env:PF_MIN_MEM_GB = "8"
+      Get-WslConfigMemoryGb -HostGb 9  | Should -Be 0   # 9 - 2 = 7 < 8 -> too small
+      Get-WslConfigMemoryGb -HostGb 10 | Should -Be 8
+    } finally { $env:PF_MIN_MEM_GB = $null }
+  }
+  It "Get-PfOsReserveGb is the single reserve and fails closed (never 0)" {
+    # A 0 reserve would hand WSL2 the entire host; and no caller may pass its own
+    # reserve -- the parameter is gone on purpose, so the 4-vs-2 drift can't return.
+    Get-PfOsReserveGb | Should -Be 2
+    Get-PfOsReserveGb | Should -BeGreaterThan 0
+    (Get-Command Get-WslConfigMemoryGb).Parameters.Keys | Should -Not -Contain 'ReserveGb'
   }
   It "Get-WslConfigContent writes the [wsl2] memory stanza" {
     $c = Get-WslConfigContent -MemoryGb 12
@@ -105,6 +157,21 @@ Describe "Daily-user provisioning wiring (#418 source guards)" {
   }
   It "notes .wslconfig as a manual step when host RAM can't be detected (no silent skip)" {
     $script:PSRC | Should -Match "couldn't detect host RAM"
+  }
+  It "sizes the budget from the shared recommendation, not its own arithmetic" {
+    # The private reserve is what let the written budget drift below the advised one.
+    $script:PSRC | Should -Match 'Get-WslConfigMemoryGb[\s\S]{0,600}?Get-PfMemRecommendation'
+    $script:PSRC | Should -Not -Match '\$ReserveGb\s*=\s*4'
+  }
+  It "skips the memory setting entirely on a host too small for the floor (never writes a known-OOM budget)" {
+    # The 0 return must gate the write, not be passed through to Add-WslMemorySetting.
+    $script:PSRC | Should -Match 'if \(\$memGb -le 0\)'
+    $script:PSRC | Should -Match '\.wslconfig memory left unset'
+  }
+  It "says the machine is too small honestly, with the practical minimum" {
+    $script:PSRC | Should -Match 'too little for tracebloc'
+    $script:PSRC | Should -Match 'practical minimum'
+    $script:PSRC | Should -Match 'Use a larger machine'
   }
   It "notes .wslconfig as a manual step when the write itself throws (no silent catch)" {
     $script:PSRC | Should -Match "couldn't write .wslconfig"
