@@ -269,6 +269,16 @@ tb_minutes_or() {
   echo $((10#$v))
 }
 
+# The real, non-root user the full install acts for — the target of the docker-group
+# grant (#427). An explicit TB_PREPARE_USER wins (an admin naming the researcher, the
+# #418 Windows peer); otherwise the invoking $USER. A sudo-wrapped full run is refused
+# upstream (refuse_sudo_wrapped_install), so $USER here is always the daily user, never
+# root — which is why the rest of the tree's $HOME/$USER paths stay correct.
+_real_install_user() {
+  if [[ -n "${TB_PREPARE_USER:-}" ]]; then printf '%s' "$TB_PREPARE_USER"; return 0; fi
+  printf '%s' "${USER:-$(id -un 2>/dev/null)}"
+}
+
 # Strip ANSI escape sequences and C0 control characters from a value. A raw
 # `read` captures whatever the terminal sends — this can include:
 #   • bracketed-paste wrappers:  ESC[200~ ... ESC[201~

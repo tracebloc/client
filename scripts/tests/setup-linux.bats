@@ -1481,3 +1481,69 @@ _stub_install_steps() {
   [ "$(grep -c 'DOCKER_HOST=' "$HOME/.bashrc")" -eq 1 ]           # we did NOT append the rootless line
 }
 
+
+# ── #427: docker-group grant is not gated on a fresh install ────────────────
+@test "install_docker_engine: pre-installed Docker + user NOT in group -> still grants (#427)" {
+  PRESENT_CMDS="docker curl conntrack"; TEST_DISTRO=ubuntu
+  id() { echo "testuser"; }                 # NOT yet in the docker group
+  run install_docker_engine
+  [ "$status" -eq 0 ]
+  mock_calls | grep -q "sudo usermod -aG docker testuser"
+}
+@test "install_docker_engine: pre-installed Docker + user already in group -> no redundant grant (#427)" {
+  PRESENT_CMDS="docker curl conntrack"; TEST_DISTRO=ubuntu
+  id() { echo "testuser docker"; }          # already a member
+  run install_docker_engine
+  [ "$status" -eq 0 ]
+  ! mock_calls | grep -q "usermod -aG docker"
+}
+@test "install_docker_engine: fresh install still grants the invoking user (#427 regression)" {
+  PRESENT_CMDS="curl conntrack"; TEST_DISTRO=ubuntu   # docker ABSENT -> fresh install
+  id() { echo "testuser"; }
+  run install_docker_engine
+  [ "$status" -eq 0 ]
+  mock_calls | grep -q "sudo usermod -aG docker testuser"
+}
+@test "install_docker_engine: prepare-host mode never grants the invoking admin (#427/#381)" {
+  PRESENT_CMDS="docker curl conntrack"; TEST_DISTRO=ubuntu
+  TB_PREPARE_HOST_MODE=1
+  id() { echo "admin"; }
+  run install_docker_engine
+  ! mock_calls | grep -q "usermod -aG docker admin"
+}
+@test "install_docker_engine: honors TB_PREPARE_USER as the grant target (#427)" {
+  PRESENT_CMDS="docker curl conntrack"; TEST_DISTRO=ubuntu
+  TB_PREPARE_USER=researcher
+  id() { echo "testuser"; }                 # invoker not in group; grant should target researcher
+  run install_docker_engine
+  [ "$status" -eq 0 ]
+  mock_calls | grep -q "sudo usermod -aG docker researcher"
+}
+
+# ── #427: refuse a sudo-wrapped full install ────────────────────────────────
+@test "refuse_sudo_wrapped_install: EUID 0 + SUDO_USER -> refuses, names the user (#427)" {
+  error() { printf 'ERR: %s\n' "$*"; return 1; }
+  id() { echo 0; }
+  SUDO_USER=alice run refuse_sudo_wrapped_install
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"Don't run the installer with sudo"* ]]
+  [[ "$output" == *"alice"* ]]
+}
+@test "refuse_sudo_wrapped_install: genuine root login (no SUDO_USER) is allowed (#427)" {
+  error() { printf 'ERR: %s\n' "$*"; return 1; }
+  id() { echo 0; }
+  SUDO_USER="" run refuse_sudo_wrapped_install
+  [ "$status" -eq 0 ]
+}
+@test "refuse_sudo_wrapped_install: SUDO_USER=root (sudo -i) is allowed (#427)" {
+  error() { printf 'ERR: %s\n' "$*"; return 1; }
+  id() { echo 0; }
+  SUDO_USER=root run refuse_sudo_wrapped_install
+  [ "$status" -eq 0 ]
+}
+@test "refuse_sudo_wrapped_install: non-root run is allowed (#427)" {
+  error() { printf 'ERR: %s\n' "$*"; return 1; }
+  id() { echo 1000; }
+  SUDO_USER=alice run refuse_sudo_wrapped_install
+  [ "$status" -eq 0 ]
+}

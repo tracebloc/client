@@ -527,3 +527,15 @@ setup() {
   [ "$status" -ne 0 ]
   [ -f "$BATS_TEST_TMPDIR/tools/k3d" ]         # NOT removed — it isn't the binary that ran
 }
+
+# ── _real_install_user (#427) ───────────────────────────────────────────────
+@test "_real_install_user: defaults to \$USER" {
+  USER=daily; unset TB_PREPARE_USER
+  run _real_install_user
+  [ "$output" = "daily" ]
+}
+@test "_real_install_user: TB_PREPARE_USER overrides \$USER (admin names the researcher)" {
+  USER=admin; TB_PREPARE_USER=researcher
+  run _real_install_user
+  [ "$output" = "researcher" ]
+}
