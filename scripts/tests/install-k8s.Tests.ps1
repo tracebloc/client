@@ -1571,8 +1571,48 @@ Describe "Get-PfMemRecommendation (#417 achievable memory advice)" {
   It "returns the desired value untouched when it fits" {
     Get-PfMemRecommendation -DesiredGb 8 -HostGb 32 | Should -Be 8
   }
-  It "floors at 1 GB on a tiny host (never zero/negative)" {
-    Get-PfMemRecommendation -DesiredGb 8 -HostGb 2 | Should -Be 1
+  # Floors at the CLIENT MINIMUM, not 1: a sub-floor recommendation is advice the
+  # user cannot act on ("at least 5 GB (up to 4 GB)", memory=4GB). Matches bash's
+  # _pf_clamp_mem_gb so both installers advise the same on the same hardware.
+  It "floors at the client minimum on a tiny host (never zero/negative/sub-floor)" {
+    Get-PfMemRecommendation -DesiredGb 8 -HostGb 2 | Should -Be 5
+  }
+  It "a 6 GB host never yields a sub-floor number (was 4 -> below the 5 GB minimum)" {
+    Get-PfMemRecommendation -DesiredGb 8 -HostGb 6 | Should -Be 5
+  }
+  It "respects a PF_MIN_MEM_GB override as the floor" {
+    $env:PF_MIN_MEM_GB = "3"
+    try { Get-PfMemRecommendation -DesiredGb 8 -HostGb 4 | Should -Be 3 }
+    finally { $env:PF_MIN_MEM_GB = $null }
+  }
+  It "never advises below the minimum for any host size (invariant sweep)" {
+    foreach ($h in 1..24) {
+      Get-PfMemRecommendation -DesiredGb 16 -HostGb $h | Should -BeGreaterOrEqual 5
+    }
+  }
+}
+
+Describe "Show-MemoryStatus: a host too small to reach the floor (#417/#444)" {
+  # A 6 GB host cannot give a 5 GB VM and still leave the 2 GB OS reserve, so no
+  # Docker setting fixes it. Before this, the sub-floor branch printed
+  # "Give Docker at least 5 GB (up to 4 GB)" with a concrete memory=4GB — an empty
+  # range whose value was below the minimum the same sentence demanded.
+  It "says 'use a larger machine' instead of an unachievable resize hint" {
+    $out = (Show-MemoryStatus -HostGb 6 -BudgetGb 3 6>&1 | Out-String)
+    $out | Should -Match 'larger machine'
+    $out | Should -Not -Match 'at least 5 GB \(up to 4 GB\)'
+    $out | Should -Not -Match 'memory=4GB'
+  }
+  It "still offers the resize hint when the host CAN reach the floor (8 GB host)" {
+    $out = (Show-MemoryStatus -HostGb 8 -BudgetGb 4 6>&1 | Out-String)
+    $out | Should -Match 'wslconfig'          # a genuine budget bottleneck
+    $out | Should -Not -Match 'larger machine'
+  }
+  It "prints no sub-floor .wslconfig value on any small host (invariant)" {
+    foreach ($h in 4..8) {
+      $out = (Show-MemoryStatus -HostGb $h -BudgetGb 2 6>&1 | Out-String)
+      $out | Should -Not -Match 'memory=[1-4]GB'
+    }
   }
 }
 

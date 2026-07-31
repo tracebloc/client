@@ -3579,11 +3579,21 @@ $script:PfOsReserveGb = 2
 
 # Cap a desired Docker-memory recommendation at what the host can actually give
 # (physical RAM minus the OS reserve), so we never advise more than the machine
-# physically has — e.g. "give Docker 16 GB" on a 15 GB laptop (#417). Floors at
-# 1 GB so a tiny host still yields a positive number.
+# physically has — e.g. "give Docker 16 GB" on a 15 GB laptop (#417).
+#
+# NEVER returns below the client's own minimum. A floor of 1 GB produced advice
+# the user could not act on: on a 6 GB host the cap is 4, so the sub-floor branch
+# printed "Give Docker at least 5 GB (up to 4 GB)" and a concrete
+# "memory=4GB" — an empty range whose value is below the 5 GB the same sentence
+# demands. Flooring at the minimum keeps every printed figure self-consistent;
+# a host that genuinely cannot reach the floor is handled by the host-too-small
+# branch in Show-MemoryStatus, not by a sub-floor number. This mirrors bash's
+# _pf_clamp_mem_gb exactly (preflight.sh, #428/#513) so the two installers give
+# the same advice on the same hardware.
 function Get-PfMemRecommendation([int]$DesiredGb, [int]$HostGb) {
+  $minMemGb = if ($env:PF_MIN_MEM_GB) { [int]$env:PF_MIN_MEM_GB } else { 5 }
   $cap = $HostGb - $script:PfOsReserveGb
-  if ($cap -lt 1) { $cap = 1 }
+  if ($cap -lt $minMemGb) { $cap = $minMemGb }
   if ($DesiredGb -lt $cap) { return $DesiredGb }
   return $cap
 }
@@ -3625,7 +3635,12 @@ function Show-MemoryStatus {
     $recRun   = $warnMemGb
   }
   # A throttled Docker budget is fixed at the daemon; a small host needs more RAM.
-  $budgetIsBottleneck = ($null -ne $BudgetGb) -and ($null -eq $HostGb -or $BudgetGb -lt $HostGb)
+  # A host that cannot reach the floor even with the OS reserve honoured is too
+  # small for tracebloc no matter how Docker is configured, so it is NOT a budget
+  # bottleneck — a resize hint there is a dead end that repeats an unachievable
+  # size. Mirrors the bash recheck's host-too-small branch (preflight.sh, #428).
+  $hostTooSmall = ($null -ne $HostGb) -and (($HostGb - $script:PfOsReserveGb) -lt $minMemGb)
+  $budgetIsBottleneck = ($null -ne $BudgetGb) -and ($null -eq $HostGb -or $BudgetGb -lt $HostGb) -and (-not $hostTooSmall)
 
   if ($effective -lt $minMemGb) {
     Warn "Memory: $label$budgetNote - below the $minMemGb GB the client needs; it will OOM."
