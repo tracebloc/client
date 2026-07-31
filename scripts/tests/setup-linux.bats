@@ -1511,13 +1511,14 @@ _stub_install_steps() {
   run install_docker_engine
   ! mock_calls | grep -q "usermod -aG docker admin"
 }
-@test "install_docker_engine: honors TB_PREPARE_USER as the grant target (#427)" {
+@test "install_docker_engine: grants the INVOKING user, not TB_PREPARE_USER (#427 Bugbot)" {
   PRESENT_CMDS="docker curl conntrack"; TEST_DISTRO=ubuntu
-  TB_PREPARE_USER=researcher
-  id() { echo "testuser"; }                 # invoker not in group; grant should target researcher
+  TB_PREPARE_USER=researcher                # a leftover export must NOT redirect the grant
+  id() { echo "testuser"; }                 # invoker ($USER) not in group
   run install_docker_engine
   [ "$status" -eq 0 ]
-  mock_calls | grep -q "sudo usermod -aG docker researcher"
+  mock_calls | grep -q "sudo usermod -aG docker testuser"   # $USER, matches the sg re-exec + socket owner
+  ! mock_calls | grep -q "usermod -aG docker researcher"
 }
 
 # ── #427: refuse a sudo-wrapped full install ────────────────────────────────
@@ -1528,6 +1529,8 @@ _stub_install_steps() {
   [ "$status" -ne 0 ]
   [[ "$output" == *"Don't run the installer with sudo"* ]]
   [[ "$output" == *"alice"* ]]
+  # the prepare-host remedy must name TB_PREPARE_USER — bare prepare-host grants nobody (#427 Bugbot)
+  [[ "$output" == *"TB_PREPARE_USER=alice"* ]]
 }
 @test "refuse_sudo_wrapped_install: genuine root login (no SUDO_USER) is allowed (#427)" {
   error() { printf 'ERR: %s\n' "$*"; return 1; }

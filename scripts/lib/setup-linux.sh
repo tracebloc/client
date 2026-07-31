@@ -240,7 +240,12 @@ install_docker_engine() {
   # must not get the socket — only TB_PREPARE_USER does, later (least-privilege,
   # Bugbot #381 / the #377 SUDO_USER rule).
   if [[ -z "${TB_PREPARE_HOST_MODE:-}" ]]; then
-    local _grant_user; _grant_user="$(_real_install_user)"
+    # Grant the INVOKING user ($USER) — not TB_PREPARE_USER: socket access and the
+    # sg-docker re-exec below both key off $USER, and a sudo-wrapped full run is
+    # already refused, so $USER is the real daily user. TB_PREPARE_USER is the
+    # admin-for-someone-else mechanism and is granted only on the prepare-host path
+    # (#427 Bugbot; matches the rest of the tree's identity).
+    local _grant_user="${USER:-$(id -un 2>/dev/null)}"
     if ! id -nG "$_grant_user" 2>/dev/null | grep -qw docker; then
       sudo usermod -aG docker "$_grant_user" 2>/dev/null \
         || warn "Couldn't add ${_grant_user} to the docker group; add it manually:  sudo usermod -aG docker ${_grant_user}"
@@ -1286,7 +1291,7 @@ refuse_sudo_wrapped_install() {
   # test suite can't shadow it — id() can be mocked.
   [[ "$(id -u 2>/dev/null)" == "0" ]] || return 0
   [[ -n "${SUDO_USER:-}" && "${SUDO_USER}" != "root" ]] || return 0
-  error "Don't run the installer with sudo. It elevates each privileged step itself, and running the whole thing as root would grant Docker to root (not you) and root-own ${SUDO_USER}'s ~/.tracebloc + ~/.kube. Re-run WITHOUT sudo as '${SUDO_USER}'. Admin setting up for someone else? Use:  curl -fsSL https://tracebloc.io/i.sh | bash -s -- prepare-host"
+  error "Don't run the installer with sudo. It elevates each privileged step itself, and running the whole thing as root would grant Docker to root (not you) and root-own ${SUDO_USER}'s ~/.tracebloc + ~/.kube. Re-run WITHOUT sudo as '${SUDO_USER}'. Admin setting up for someone else? Name the researcher so they get docker-group access:  export TB_PREPARE_USER=${SUDO_USER}  &&  curl -fsSL https://tracebloc.io/i.sh | bash -s -- prepare-host"
 }
 
 # run_prepare_host — the standalone, admin-run Tier-2 step (RFC 0001 #1178). An
