@@ -61,6 +61,14 @@ _macos_supports_vz() {
   [[ "$major" =~ ^[0-9]+$ ]] && [ "$major" -ge 13 ]
 }
 
+# Has a colima VM already been created (running OR stopped)? `colima list --json` emits
+# one JSON line per instance and nothing when there are none. colima REFUSES to change
+# vmType on an existing instance, so we only request VZ+Rosetta on a fresh start (#433
+# Bugbot). Mockable via the colima function in tests.
+_colima_instance_exists() {
+  [[ -n "$(colima list --json 2>/dev/null)" ]]
+}
+
 _install_docker_colima() {
   log "Headless environment detected (no GUI session) — using Colima as Docker runtime."
 
@@ -95,9 +103,14 @@ _install_docker_colima() {
   # slowly or not at all, which the post-Docker smoke (assert_amd64_emulation) catches
   # regardless (#433). Older macOS keeps the QEMU default.
   local -a _colima_args=( start --cpu "${COLIMA_CPU:-4}" --memory "$_colima_mem" --disk "${COLIMA_DISK:-60}" )
-  if [[ "$ARCH" == "arm64" ]] && _macos_supports_vz; then
+  # Only request VZ+Rosetta on a FRESH instance: colima rejects a vmType change on an
+  # existing VM, so forcing --vm-type vz onto a prior QEMU instance (earlier install or
+  # reboot) would abort the start (#433 Bugbot). A pre-existing VM is started as-is; if
+  # its amd64 emulation is broken, the post-Docker smoke (assert_amd64_emulation) names
+  # the `colima delete && colima start --vm-type vz --vz-rosetta` recreate remedy.
+  if [[ "$ARCH" == "arm64" ]] && _macos_supports_vz && ! _colima_instance_exists; then
     _colima_args+=( --vm-type vz --vz-rosetta )
-    log "Apple Silicon + macOS 13+: starting Colima with VZ + Rosetta for amd64 acceleration."
+    log "Apple Silicon + macOS 13+ (fresh VM): starting Colima with VZ + Rosetta for amd64 acceleration."
   fi
   spin_cmd "Starting Docker runtime…" colima "${_colima_args[@]}"
 
@@ -322,7 +335,12 @@ assert_amd64_emulation() {
     return 0
   fi
   local _img="${TB_AMD64_SMOKE_IMAGE:-busybox:1.36}"
-  if spin_cmd "Verifying amd64 emulation…" docker run --rm --platform linux/amd64 "$_img" true; then
+  # Time-bounded: a wedged daemon or stuck pull must not hang a headless install
+  # forever behind a spinner (installer rule — every docker call is bounded; #433
+  # Bugbot). spin_cmd_bounded returns 124 on the deadline, which falls through to the
+  # same remediation as a real emulation failure.
+  if spin_cmd_bounded "${TB_AMD64_SMOKE_TIMEOUT:-120}" "Verifying amd64 emulation…" \
+       docker run --rm --platform linux/amd64 "$_img" true; then
     success "amd64 emulation verified (x86_64 client images will run)."
     return 0
   fi

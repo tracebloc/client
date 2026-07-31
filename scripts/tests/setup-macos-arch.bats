@@ -20,6 +20,7 @@ setup() {
   ARCH="arm64"; OS="Darwin"
   has()             { case " $PRESENT_CMDS " in *" $1 "*) return 0 ;; *) return 1 ;; esac; }
   spin_cmd()        { local _m="$1"; shift; record "spin_cmd $*"; "$@"; }
+  spin_cmd_bounded(){ local _s="$1" _m="$2"; shift 2; record "spin_cmd_bounded $_s $*"; "$@"; }
   _macos_vm_mem_gb(){ echo 6; }
 }
 
@@ -42,7 +43,14 @@ setup() {
 _colima_env() {
   # docker info fails until colima "starts" (creates the marker), so the function
   # runs its start path exactly once, then the post-start readiness check passes.
-  colima() { record "colima $*"; touch "$BATS_TEST_TMPDIR/up"; }
+  # `colima list --json` reports an existing instance only when COLIMA_HAS_INSTANCE=1.
+  colima() {
+    case "$1" in
+      list)  [[ "${COLIMA_HAS_INSTANCE:-0}" == 1 ]] && echo '{"name":"default","status":"Stopped"}' ;;
+      start) record "colima $*"; touch "$BATS_TEST_TMPDIR/up" ;;
+      *)     record "colima $*" ;;
+    esac
+  }
   docker() { case "$1" in info) [ -f "$BATS_TEST_TMPDIR/up" ] ;; *) return 0 ;; esac; }
 }
 
@@ -53,6 +61,16 @@ _colima_env() {
   run mock_calls
   [[ "$output" == *"colima start"* ]]
   [[ "$output" == *"--vm-type vz --vz-rosetta"* ]]
+}
+
+@test "_install_docker_colima: Apple Silicon + macOS 13+ but an EXISTING VM -> no VZ flags (colima rejects vmType change) (#433 Bugbot)" {
+  _colima_env; ARCH=arm64; TB_MACOS_VER=14.0; COLIMA_HAS_INSTANCE=1
+  run _install_docker_colima
+  [ "$status" -eq 0 ]
+  run mock_calls
+  [[ "$output" == *"colima start"* ]]
+  [[ "$output" != *"--vm-type vz"* ]]     # don't force a vmType change on the existing VM
+  [[ "$output" != *"--vz-rosetta"* ]]
 }
 
 @test "_install_docker_colima: Apple Silicon + macOS 12 -> QEMU default, no VZ flags (#433)" {
@@ -84,7 +102,7 @@ _colima_env() {
   [[ "$output" != *"docker run"* ]]        # native amd64 — nothing to probe
 }
 
-@test "assert_amd64_emulation: Apple Silicon + working emulation -> forces linux/amd64, succeeds (#433)" {
+@test "assert_amd64_emulation: Apple Silicon + working emulation -> forces linux/amd64, time-bounded, succeeds (#433)" {
   ARCH=arm64
   docker() { record "docker $*"; return 0; }
   run assert_amd64_emulation
@@ -93,6 +111,7 @@ _colima_env() {
   run mock_calls
   [[ "$output" == *"docker run --rm --platform linux/amd64"* ]]
   [[ "$output" == *"busybox:1.36 true"* ]]
+  [[ "$output" == *"spin_cmd_bounded 120 docker run"* ]]   # bounded, not an unbounded spin_cmd (#433 Bugbot)
 }
 
 @test "assert_amd64_emulation: Apple Silicon + broken emulation -> hard fail naming the Rosetta setting (#433)" {
