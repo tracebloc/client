@@ -336,6 +336,18 @@ setup() {
   [ "$status" -eq 0 ]
   [[ "$output" == *"Docker is running with 6 GB"* ]]
 }
+@test "_pf_recheck_runtime_mem: host too small -> 'use a larger machine', not a resize loop (#428 Bugbot)" {
+  source "${BATS_TEST_DIRNAME}/../lib/preflight.sh"
+  OS=Darwin
+  _pf_runtime_mem_kb() { echo $((4 * 1024 * 1024)); }   # 4 GB VM < floor
+  _pf_host_mem_gb() { echo 6; }                          # 6 GB Mac: 6 − 2 reserve = 4 < 5 floor
+  error() { printf 'ERR: %s\n' "$*"; exit 1; }
+  run _pf_recheck_runtime_mem
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"too little for tracebloc"* ]]
+  [[ "$output" == *"larger machine"* ]]
+  [[ "$output" != *"colima start --memory"* ]]   # no unachievable resize remedy
+}
 
 @test "_pf_recheck_runtime_mem: daemon not reporting -> silent no-op" {
   source "${BATS_TEST_DIRNAME}/../lib/preflight.sh"
@@ -614,11 +626,19 @@ setup() {
   [ "$(_pf_clamp_mem_gb 16 0)" -eq 16 ]
   [ "$(_pf_clamp_mem_gb 16 abc)" -eq 16 ]
 }
-@test "_macos_vm_mem_gb: derives min(half physical, clamped rec), floored (#428)" {
+@test "_macos_vm_mem_gb: derives min(half physical, clamped rec), with floor headroom (#428)" {
   PF_MIN_MEM_GB=5; PF_WARN_MEM_GB=8; PF_REC_MEM_GB=16; PF_OS_RESERVE_GB=2
-  [ "$(_macos_vm_mem_gb 8)"  -eq 5  ]   # half=4 -> floored to 5 (workable on an 8 GB Mac)
+  # 8 GB: half=4 -> raised to floor+1=6 so the guest MemTotal clears the recheck floor
+  # (sizing EXACTLY 5 would boot then hard-fail on its own choice, #428 Bugbot).
+  [ "$(_macos_vm_mem_gb 8)"  -eq 6  ]
   [ "$(_macos_vm_mem_gb 16)" -eq 8  ]   # half=8, rec clamped 14 -> 8
   [ "$(_macos_vm_mem_gb 64)" -eq 16 ]   # half=32, rec 16 -> 16 (capped at rec)
+}
+@test "_macos_vm_mem_gb: too-small host -> capped at physical − reserve, not over-committed (#428 Bugbot)" {
+  PF_MIN_MEM_GB=5; PF_WARN_MEM_GB=8; PF_REC_MEM_GB=16; PF_OS_RESERVE_GB=2
+  # 6 GB host: floor+1=6 would leave the OS nothing, so cap at physical − reserve = 4.
+  # colima gets 4; the runtime recheck then stops it honestly as "host too small".
+  [ "$(_macos_vm_mem_gb 6)" -eq 4 ]
 }
 @test "_macos_vm_mem_gb: unknown physical -> COLIMA_MEMORY default (#428)" {
   COLIMA_MEMORY=6

@@ -156,12 +156,21 @@ _pf_clamp_mem_gb() {
 # the client floor PF_MIN_MEM_GB. The single sizing helper both macOS paths share.
 # Physical unknown/0 -> the historic COLIMA_MEMORY default. Arg: physical GB (default: host).
 _macos_vm_mem_gb() {
-  local phys="${1:-$(_pf_host_mem_gb)}" half rec budget
+  local phys="${1:-$(_pf_host_mem_gb)}" half rec budget safe_floor cap
   [[ "$phys" =~ ^[0-9]+$ && "$phys" -gt 0 ]] || { printf '%s' "${COLIMA_MEMORY:-6}"; return 0; }
   half=$(( phys / 2 ))
   rec="$(_pf_clamp_mem_gb "$PF_REC_MEM_GB" "$phys")"
   budget=$(( half < rec ? half : rec ))
-  (( budget < PF_MIN_MEM_GB )) && budget=$PF_MIN_MEM_GB
+  # Never size EXACTLY to the floor: the guest MemTotal runs a few hundred MiB below
+  # the configured VM size, so a floor-sized VM boots then trips the runtime recheck's
+  # sub-floor hard-fail on its OWN choice (#428 Bugbot). Give ≥ 1 GB of headroom above
+  # the floor — but never over-commit the host (cap at physical − reserve); a host too
+  # small for that gets less, and the recheck then stops it honestly as "too small".
+  safe_floor=$(( PF_MIN_MEM_GB + 1 ))
+  cap=$(( phys - PF_OS_RESERVE_GB ))
+  (( budget < safe_floor )) && budget=$safe_floor
+  (( budget > cap )) && budget=$cap
+  (( budget < 1 )) && budget=1
   printf '%s' "$budget"
 }
 
@@ -325,7 +334,13 @@ _pf_recheck_runtime_mem() {
   warn_gb="$(_pf_clamp_mem_gb "$PF_WARN_MEM_GB")"
   if [[ "$mib" -lt $(( PF_MIN_MEM_GB * 1024 - 64 )) ]]; then
     # The REAL VM size is now known and it's below the floor — the client OOMs. Stop.
-    if [[ "$OS" == "Linux" ]]; then
+    # If the HOST is too small to ever give the VM the floor (physical − reserve <
+    # floor), no resize helps — say so plainly instead of a remedy that repeats an
+    # unachievable size (#428 Bugbot; mirrors the PowerShell host-too-small branch).
+    local phys_gb; phys_gb="$(_pf_host_mem_gb)"
+    if [[ "$OS" != "Linux" && "$phys_gb" =~ ^[0-9]+$ && "$phys_gb" -gt 0 && $(( phys_gb - PF_OS_RESERVE_GB )) -lt PF_MIN_MEM_GB ]]; then
+      error "This Mac has ${phys_gb} GB RAM — too little for tracebloc: the client needs a ${PF_MIN_MEM_GB} GB Docker VM and macOS needs ~${PF_OS_RESERVE_GB} GB, so about $(( PF_MIN_MEM_GB + PF_OS_RESERVE_GB )) GB physical is the practical minimum. Use a larger machine."
+    elif [[ "$OS" == "Linux" ]]; then
       error "Docker has only ${gb} GB — below the ${PF_MIN_MEM_GB} GB the tracebloc client needs; it will OOM. Free memory (or raise the VM) to ≥ ${warn_gb} GB, then re-run."
     else
       error "Docker's VM has only ${gb} GB — below the ${PF_MIN_MEM_GB} GB the tracebloc client needs; it will OOM. Raise it: Docker Desktop → Settings → Resources → Memory ≥ ${warn_gb} GB (or colima: colima stop && colima start --memory ${warn_gb}), then re-run."
