@@ -139,13 +139,15 @@ _pf_host_mem_gb() {
 }
 
 # Clamp a DESIRED memory figure (GB) so a hint never exceeds this machine (#428):
-# min(DESIRED, physical − PF_OS_RESERVE_GB), never < 1. "raise to 16 GB" on a 16 GB
-# Mac is impossible — this makes every recommended number achievable. Physical
-# unknown/0 -> DESIRED (can't clamp). Args: DESIRED [physical GB (default: host)].
+# min(DESIRED, physical − PF_OS_RESERVE_GB), but NEVER below PF_MIN_MEM_GB — the client
+# needs the floor to run, so a hint must never tell the operator to "raise to" a
+# sub-floor number (Bugbot). "raise to 16 GB" on a 16 GB Mac is impossible; "raise to
+# 4 GB" on a 6 GB Mac is nonsensical (below the floor AND their RAM). Physical unknown/0
+# -> DESIRED (can't clamp). Args: DESIRED [physical GB (default: host)].
 _pf_clamp_mem_gb() {
   local desired="$1" phys="${2:-$(_pf_host_mem_gb)}" cap
   [[ "$phys" =~ ^[0-9]+$ && "$phys" -gt 0 ]] || { printf '%s' "$desired"; return 0; }
-  cap=$(( phys - PF_OS_RESERVE_GB )); (( cap < 1 )) && cap=1
+  cap=$(( phys - PF_OS_RESERVE_GB )); (( cap < PF_MIN_MEM_GB )) && cap=$PF_MIN_MEM_GB
   if (( desired < cap )); then printf '%s' "$desired"; else printf '%s' "$cap"; fi
 }
 
@@ -326,7 +328,7 @@ _pf_recheck_runtime_mem() {
     if [[ "$OS" == "Linux" ]]; then
       error "Docker has only ${gb} GB — below the ${PF_MIN_MEM_GB} GB the tracebloc client needs; it will OOM. Free memory (or raise the VM) to ≥ ${warn_gb} GB, then re-run."
     else
-      error "Docker's VM has only ${gb} GB — below the ${PF_MIN_MEM_GB} GB the tracebloc client needs; it will OOM. Raise it: Docker Desktop → Settings → Resources → Memory ≥ ${warn_gb} GB (or colima: COLIMA_MEMORY=${rec_gb} colima stop && colima start), then re-run."
+      error "Docker's VM has only ${gb} GB — below the ${PF_MIN_MEM_GB} GB the tracebloc client needs; it will OOM. Raise it: Docker Desktop → Settings → Resources → Memory ≥ ${warn_gb} GB (or colima: colima stop && colima start --memory ${warn_gb}), then re-run."
     fi
   fi
   if [[ "$mib" -lt "$(( PF_WARN_MEM_GB * 1024 ))" ]]; then

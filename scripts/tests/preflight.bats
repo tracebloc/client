@@ -596,14 +596,23 @@ setup() {
 
 # ── #428: memory recommendation clamp + macOS VM sizing ─────────────────────
 @test "_pf_clamp_mem_gb: clamps a recommendation to physical − reserve (#428)" {
-  PF_OS_RESERVE_GB=2
+  PF_OS_RESERVE_GB=2; PF_MIN_MEM_GB=5
   [ "$(_pf_clamp_mem_gb 16 16)" -eq 14 ]   # 16 GB Mac: can't recommend 16 -> 14
   [ "$(_pf_clamp_mem_gb 16 8)"  -eq 6  ]   # 8 GB Mac  -> 6
   [ "$(_pf_clamp_mem_gb 8  32)" -eq 8  ]   # plenty of headroom -> desired unchanged
 }
-@test "_pf_clamp_mem_gb: unknown physical -> desired unchanged (can't clamp) (#428)" {
+@test "_pf_clamp_mem_gb: never undershoots the floor on a tiny host (#428 Bugbot)" {
+  PF_OS_RESERVE_GB=2; PF_MIN_MEM_GB=5
+  # 6 GB host: physical − reserve = 4, but a hint must never say "raise to 4" (below
+  # the 5 GB floor) — clamp up to the floor instead.
+  [ "$(_pf_clamp_mem_gb 8  6)" -eq 5 ]
+  [ "$(_pf_clamp_mem_gb 16 6)" -eq 5 ]
+}
+@test "_pf_clamp_mem_gb: non-numeric/unknown physical -> desired unchanged (can't clamp) (#428)" {
+  # An explicit '' would hit the ${2:-host} default and read real host RAM — so test
+  # the genuinely uncatchable cases: 0 and a non-numeric string.
   [ "$(_pf_clamp_mem_gb 16 0)" -eq 16 ]
-  [ "$(_pf_clamp_mem_gb 16 '')" -eq 16 ]
+  [ "$(_pf_clamp_mem_gb 16 abc)" -eq 16 ]
 }
 @test "_macos_vm_mem_gb: derives min(half physical, clamped rec), floored (#428)" {
   PF_MIN_MEM_GB=5; PF_WARN_MEM_GB=8; PF_REC_MEM_GB=16; PF_OS_RESERVE_GB=2
@@ -620,4 +629,12 @@ setup() {
   f="$BATS_TEST_DIRNAME/../lib/setup-macos.sh"
   grep -qE 'COLIMA_MEMORY:-\$\(_macos_vm_mem_gb\)' "$f"
   ! grep -qE '\-\-memory "\$\{COLIMA_MEMORY:-6\}"' "$f"   # the old hard-coded 6 is gone
+}
+
+@test "_pf_recheck_runtime_mem: colima remedy uses a real resize command (#428 Bugbot)" {
+  # colima doesn't read COLIMA_MEMORY, and `VAR=x colima stop && colima start` only
+  # sets VAR for `stop`. The correct resize is `colima stop && colima start --memory N`.
+  f="$BATS_TEST_DIRNAME/../lib/preflight.sh"
+  grep -qE 'colima stop && colima start --memory' "$f"
+  ! grep -qE 'COLIMA_MEMORY=[^ ]* colima stop' "$f"
 }
