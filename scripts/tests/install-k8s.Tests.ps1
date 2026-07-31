@@ -1633,8 +1633,131 @@ Describe "Get-PfMemRecommendation (#417 achievable memory advice)" {
   It "returns the desired value untouched when it fits" {
     Get-PfMemRecommendation -DesiredGb 8 -HostGb 32 | Should -Be 8
   }
-  It "floors at 1 GB on a tiny host (never zero/negative)" {
-    Get-PfMemRecommendation -DesiredGb 8 -HostGb 2 | Should -Be 1
+  # Floors at the CLIENT MINIMUM, not 1: a sub-floor recommendation is advice the
+  # user cannot act on ("at least 5 GB (up to 4 GB)", memory=4GB). Matches bash's
+  # _pf_clamp_mem_gb so both installers advise the same on the same hardware.
+  It "floors at the client minimum on a tiny host (never zero/negative/sub-floor)" {
+    Get-PfMemRecommendation -DesiredGb 8 -HostGb 2 | Should -Be 5
+  }
+  It "a 6 GB host never yields a sub-floor number (was 4 -> below the 5 GB minimum)" {
+    Get-PfMemRecommendation -DesiredGb 8 -HostGb 6 | Should -Be 5
+  }
+  It "respects a PF_MIN_MEM_GB override as the floor" {
+    $env:PF_MIN_MEM_GB = "3"
+    try { Get-PfMemRecommendation -DesiredGb 8 -HostGb 4 | Should -Be 3 }
+    finally { $env:PF_MIN_MEM_GB = $null }
+  }
+  It "never advises below the minimum for any host size (invariant sweep)" {
+    foreach ($h in 1..24) {
+      Get-PfMemRecommendation -DesiredGb 16 -HostGb $h | Should -BeGreaterOrEqual 5
+    }
+  }
+}
+
+Describe "Memory thresholds are single-sourced (#417/#418 no-drift guard)" {
+  BeforeAll { $script:PSRC = Get-Content "$PSScriptRoot/../install-k8s.ps1" -Raw }
+  # The 4-vs-2 reserve drift that wrote a sub-floor .wslconfig (#418) and the
+  # sub-floor advice (#417) both came from paths re-deriving these numbers locally.
+  # Each threshold must now have exactly ONE read site: its accessor.
+  It "each PF_* threshold is read on exactly one line -- its accessor" {
+    # Count LINES, not occurrences: an accessor names its var twice on one line
+    # (the truthiness test and the [int] cast). Two read SITES would be two lines.
+    $lines = Get-Content "$PSScriptRoot/../install-k8s.ps1"
+    foreach ($v in 'PF_MIN_MEM_GB','PF_WARN_MEM_GB','PF_REC_MEM_GB') {
+      @($lines | Where-Object { $_ -match [regex]::Escape("env:$v") }).Count |
+        Should -Be 1 -Because "$v must be read only by its Get-Pf* accessor"
+    }
+  }
+  It "the OS reserve is read only by its accessor (plus its own definition)" {
+    # 3 = the `$script:PfOsReserveGb = 2` assignment + the two reads in Get-PfOsReserveGb.
+    ([regex]::Matches($script:PSRC, [regex]::Escape('$script:PfOsReserveGb'))).Count |
+      Should -Be 3 -Because 'callers must use Get-PfOsReserveGb, not the raw variable'
+  }
+  It "the accessors agree with the documented defaults" {
+    Get-PfMinMemGb | Should -Be 5
+    Get-PfWarnMemGb | Should -Be 8
+    Get-PfRecMemGb | Should -Be 16
+    Get-PfOsReserveGb | Should -Be 2
+  }
+  It "the advice path and the .wslconfig write path cannot disagree" {
+    # The whole point of the accessors: one machine, one number. A host that can
+    # reach the floor is WRITTEN exactly what it is ADVISED; one that cannot is
+    # written nothing at all.
+    foreach ($h in 7,8,12,16,32,64) {
+      Get-WslConfigMemoryGb -HostGb $h |
+        Should -Be (Get-PfMemRecommendation -DesiredGb (Get-PfRecMemGb) -HostGb $h) -Because "host=$h GB"
+    }
+    foreach ($h in 2,4,6) { Get-WslConfigMemoryGb -HostGb $h | Should -Be 0 -Because "host=$h GB can't reach the floor" }
+  }
+}
+
+Describe "Show-MemoryStatus: a host too small to reach the floor (#417/#444)" {
+  # A 6 GB host cannot give a 5 GB VM and still leave the 2 GB OS reserve, so no
+  # Docker setting fixes it. Before this, the sub-floor branch printed
+  # "Give Docker at least 5 GB (up to 4 GB)" with a concrete memory=4GB — an empty
+  # range whose value was below the minimum the same sentence demanded.
+  It "says 'use a larger machine' instead of an unachievable resize hint" {
+    $out = (Show-MemoryStatus -HostGb 6 -BudgetGb 3 6>&1 | Out-String)
+    $out | Should -Match 'larger machine'
+    $out | Should -Not -Match 'at least 5 GB \(up to 4 GB\)'
+    $out | Should -Not -Match 'memory=4GB'
+  }
+  # Without naming the OS reserve, a 6 GB host reads "you have 6, you need 5, get a
+  # bigger machine" — self-contradictory (Bugbot). State the reserve and the
+  # resulting practical minimum, as bash's _pf_recheck_runtime_mem does.
+  It "names the OS reserve and the practical minimum, so the shortfall adds up" {
+    $out = (Show-MemoryStatus -HostGb 6 -BudgetGb 3 6>&1 | Out-String)
+    $out | Should -Match 'the OS needs ~2 GB'
+    $out | Should -Match '7 GB physical is the practical minimum'
+  }
+  It "the arithmetic is reserve-aware for every too-small host (5 and 6 GB both explained)" {
+    foreach ($h in 4..6) {
+      $out = (Show-MemoryStatus -HostGb $h -BudgetGb 2 6>&1 | Out-String)
+      $out | Should -Match 'too little for tracebloc'
+      $out | Should -Match 'practical minimum'
+    }
+  }
+  It "still offers the resize hint when the host CAN reach the floor (8 GB host)" {
+    $out = (Show-MemoryStatus -HostGb 8 -BudgetGb 4 6>&1 | Out-String)
+    $out | Should -Match 'wslconfig'          # a genuine budget bottleneck
+    $out | Should -Not -Match 'larger machine'
+  }
+  It "prints no sub-floor .wslconfig value on any small host (invariant)" {
+    foreach ($h in 4..8) {
+      $out = (Show-MemoryStatus -HostGb $h -BudgetGb 2 6>&1 | Out-String)
+      $out | Should -Not -Match 'memory=[1-4]GB'
+    }
+  }
+
+  # Bugbot: hostTooSmall was only consulted in the below-floor branch, so a 5-6 GB
+  # host with Docker DOWN graded as "enough to run" and the TRAINING hint printed
+  # memory=5GB — leaving the OS 1 GB, a budget this same function calls
+  # unachievable two branches up.
+  It "a too-small host with Docker down gets no training resize number" {
+    $out = (Show-MemoryStatus -HostGb 6 -BudgetGb $null 6>&1 | Out-String)
+    $out | Should -Match 'too little to train locally'
+    $out | Should -Match 'train on a larger machine'
+    $out | Should -Not -Match 'memory=5GB'
+    $out | Should -Not -Match 'give Docker up to'
+  }
+  It "a host that CAN reach the floor still gets the training recommendation" {
+    # 16 GB host, 6 GB budget: between floor and warn, and 16 - 2 >= 5 so the
+    # machine is genuinely tunable -> keep the actionable number.
+    $out = (Show-MemoryStatus -HostGb 16 -BudgetGb 6 6>&1 | Out-String)
+    $out | Should -Match 'give Docker up to 14 GB'
+    $out | Should -Match 'memory=14GB'
+    $out | Should -Not -Match 'larger machine'
+  }
+  # The invariant that closes this class of bug for good: across EVERY branch and
+  # every budget shape, a host that cannot reach the floor while keeping the OS
+  # reserve must never be handed a concrete memory= value to write.
+  It "no branch emits a concrete memory= value for a host that cannot reach the floor" {
+    foreach ($h in 1..6) {                     # 6 - 2 reserve = 4 < 5 floor
+      foreach ($b in @($null, 1, 2, 3, 4, 5, 6)) {
+        $out = (Show-MemoryStatus -HostGb $h -BudgetGb $b 6>&1 | Out-String)
+        $out | Should -Not -Match 'memory=\d+GB' -Because "host=$h budget=$b must not print a writable budget"
+      }
+    }
   }
 }
 
