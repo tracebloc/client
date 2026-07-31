@@ -52,6 +52,14 @@ setup() {
   PF_HARD_FAIL=0; _pf_arch >/dev/null; [ "$PF_HARD_FAIL" -eq 0 ]
 }
 
+@test "_pf_arch: arm64 macOS note names the Rosetta setting + defers to the post-Docker smoke (#433)" {
+  ARCH=arm64; OS=Darwin
+  run _pf_arch
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Use Rosetta for x86_64/amd64 emulation"* ]]   # names the exact setting, not "assume it works"
+  [[ "$output" == *"verified once Docker is running"* ]]          # real check is the post-Docker smoke (#433)
+}
+
 @test "_pf_arch: arm64 + TRACEBLOC_ALLOW_ARM64 -> warn, no hard fail" {
   ARCH=aarch64; OS=Linux; export TRACEBLOC_ALLOW_ARM64=1
   _pf_amd64_emulation_available() { return 1; }
