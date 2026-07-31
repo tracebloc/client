@@ -389,7 +389,31 @@ images:
     # newer categories re-opens the submit-vs-run drift bug (categories
     # accepted at submit that the spawned image can't process). See
     # client-runtime#162 discussion.
-    tag: "0.7"
+    # Empty by DEFAULT: the effective tag now comes from `channelTags` below,
+    # keyed on the resolved CLIENT_ENV. Set this to force one tag on an edge
+    # regardless of environment (to pin an exact immutable image, prefer
+    # `digest` — it wins over any tag). backend#1360.
+    tag: ""
+
+    # -- PER-ENVIRONMENT CHANNELS (backend#1360)
+    #
+    # dev and staging edges track the internal channels published from the
+    # matching data-ingestors branch (`publish-images.yml`: develop -> :dev,
+    # staging -> :stg), so an ingestor change can be validated on a real edge
+    # WITHOUT a production release. Before this, the ingestor image existed
+    # only as a byproduct of a prod release, so testing one change cost a prod
+    # PyPI publish plus an FR-gate override (2026-07-30).
+    #
+    # `prod` deliberately stays a semver float, NOT a `:prod` channel — no
+    # such tag is published; prod normally runs `prodDigest` anyway and this is
+    # only the fallback when pinning is disabled. Keep the prod entry tracking
+    # the current release line for the same submit-vs-run reasons noted above.
+    #
+    # These are unsigned internal images. Do not point a prod edge at them.
+    channelTags:
+      dev: "dev"
+      stg: "stg"
+      prod: "0.7"
 
     # -- PROD REPRODUCIBILITY PIN — the digest prod edges run.
     #
