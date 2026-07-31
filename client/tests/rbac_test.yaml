@@ -76,3 +76,55 @@ tests:
             apiGroups: [""]
             resources: ["pods", "pods/log", "events"]
             verbs: ["get", "list", "watch"]
+
+  # RFC-0003 D10 (backend#1181): the Secret-delete verb the jobs-manager
+  # revoke/sweep path needs must be flag-gated + secrets-only (Saqlain review).
+  - it: default-off grants no delete on configmaps/secrets (byte-for-byte)
+    set:
+      clusterScope: true
+    documentIndex: 1
+    asserts:
+      - contains:
+          path: rules
+          content:
+            apiGroups: [""]
+            resources: ["configmaps", "secrets"]
+            verbs: ["create", "get"]
+      - notContains:
+          path: rules
+          content:
+            apiGroups: [""]
+            resources: ["secrets"]
+            verbs: ["delete"]
+
+  - it: perExperimentDbCreds adds delete on secrets only (ClusterRole)
+    set:
+      clusterScope: true
+      perExperimentDbCreds: true
+    documentIndex: 1
+    asserts:
+      - contains:
+          path: rules
+          content:
+            apiGroups: [""]
+            resources: ["secrets"]
+            verbs: ["delete"]
+      - contains:
+          path: rules
+          content:
+            apiGroups: [""]
+            resources: ["configmaps", "secrets"]
+            verbs: ["create", "get"]
+
+  - it: perExperimentDbCreds adds delete on secrets only (Role)
+    set:
+      clusterScope: false
+      perExperimentDbCreds: true
+    documentIndex: 1
+    asserts:
+      - contains:
+          path: rules
+          content:
+            apiGroups: [""]
+            resources: ["secrets"]
+            verbs: ["delete"]

@@ -123,7 +123,11 @@ tests:
             name: INGESTOR_IMAGE_DIGEST
             value: "sha256:9098b3c9b83951f825e262d6ff1e9c47c46c5b5cafbfc8fef1ed82ccbadebb24"
 
-  - it: keeps the ingestor floating on dev (CLIENT_ENV=dev => no digest)
+  - it: keeps the ingestor floating on dev (CLIENT_ENV=dev => no digest, :dev channel)
+    # Since backend#1360 the dev float is the per-environment INTERNAL
+    # channel (:dev) rather than the 0.7 release float — the point of the
+    # change: a dev edge tracks develop, so an ingestor change can be
+    # validated on a real edge without a production release.
     # dev/staging carry env.CLIENT_ENV in their user-supplied values, so the prod
     # pin does not apply: DIGEST empty => client-runtime spawns repo:tag with
     # imagePullPolicy=Always and the edge is never frozen on a stale build.
@@ -140,7 +144,7 @@ tests:
           path: spec.template.spec.containers[0].env
           content:
             name: INGESTOR_IMAGE_TAG
-            value: "0.7"
+            value: "dev"
 
   - it: keeps the ingestor floating on staging (CLIENT_ENV=stg => no digest)
     set:
@@ -343,3 +347,39 @@ tests:
           content:
             name: PER_INGESTION_TABLES
             value: "1"
+
+  - it: does not render per-experiment DB-cred env by default (RFC-0003 D10 knob off)
+    asserts:
+      - notContains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: PER_EXPERIMENT_DB_CREDS
+            value: "1"
+      - notContains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: TB_CREDMGR_USER
+            value: "tb_credmgr"
+
+  - it: renders per-experiment DB-cred env (flag + credmgr identity + secret ref) when enabled
+    set:
+      perExperimentDbCreds: true
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: PER_EXPERIMENT_DB_CREDS
+            value: "1"
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: TB_CREDMGR_USER
+            value: "tb_credmgr"
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: TB_CREDMGR_PASSWORD
+            valueFrom:
+              secretKeyRef:
+                name: RELEASE-NAME-secrets
+                key: TB_CREDMGR_PASSWORD

@@ -66,6 +66,53 @@ install_nvidia_drivers() {
 }
 
 # ── Container Toolkit ────────────────────────────────────────────────────────
+# Does the RUNNING Docker daemon already default to the NVIDIA runtime? Authoritative
+# live check (reflects the daemon, not just daemon.json), so a re-run can skip the
+# reconfigure + restart that would otherwise bounce a live cluster (#431).
+_docker_default_runtime_is_nvidia() {
+  has docker || return 1
+  # BOUNDED (#431 Bugbot): a wedged Docker daemon must not hang a headless re-run at
+  # this skip gate. _bounded runs under timeout(1)/gtimeout(1) when available.
+  local rt
+  rt="$(_bounded "${TB_PROBE_TIMEOUT:-5}" docker info --format '{{.DefaultRuntime}}' 2>/dev/null || true)"
+  [[ "$rt" == "nvidia" ]]
+}
+
+# k3d cluster state, jq-free (parses the SERVERS "running/total" column, mirroring
+# _cluster_exists' awk approach) and bounded so a wedged daemon can't hang the probe.
+# Tri-state so a probe TIMEOUT isn't mistaken for "not running" — otherwise a live
+# cluster could be left down after the Docker restart with no recovery (#431 Bugbot):
+#   0 = running (>=1 server up)
+#   1 = not running (probe OK: cluster stopped/absent, or no k3d)
+#   2 = UNKNOWN  (has k3d but the bounded probe failed/timed out)
+_k3d_cluster_running() {
+  has k3d || return 1
+  # `|| rc=$?` (not a bare `; rc=$?`) so a non-zero probe under the installer's `set -e`
+  # captures the code instead of aborting — and the UNKNOWN(2) path stays reachable (#431 Bugbot).
+  local out rc=0
+  out="$(_bounded "${TB_PROBE_TIMEOUT:-5}" k3d cluster list --no-headers 2>/dev/null)" || rc=$?
+  (( rc == 0 )) || return 2
+  # Decide only in END: an `exit` inside a main rule still runs END, so a per-row
+  # `exit 0` would be overridden by an END `exit 1`. Set a flag, exit once.
+  printf '%s\n' "$out" | awk -v n="$CLUSTER_NAME" '
+    $1 == n { split($2, s, "/"); running = (s[1] + 0 > 0) } END { exit(running ? 0 : 1) }'
+}
+
+# Signature of the installed GPU stack (toolkit + driver versions). Empty when it
+# can't be determined -> the caller then never caches, so it always re-verifies.
+_gpu_stack_signature() {
+  local ctk drv
+  # BOUNDED (#431 Bugbot): a half-ready driver or a stuck device node can make these
+  # hang; this runs at the smoke-test skip gate on every re-run. On timeout the value
+  # is empty, which already means "don't cache".
+  ctk="$(_bounded "${TB_PROBE_TIMEOUT:-5}" nvidia-ctk --version 2>/dev/null | head -1 || true)"
+  drv="$(_bounded "${TB_PROBE_TIMEOUT:-5}" nvidia-smi --query-gpu=driver_version --format=csv,noheader 2>/dev/null | head -1 || true)"
+  [[ -n "${ctk}${drv}" ]] && printf '%s|%s' "$ctk" "$drv"
+  # Always succeed: the installer runs under `set -e`, and the caller assigns this via
+  # `$(...)` — an empty signature means "don't cache", not "abort the install" (#431 Bugbot).
+  return 0
+}
+
 install_nvidia_container_toolkit() {
   log "Setting up NVIDIA container toolkit"
 
@@ -113,17 +160,75 @@ install_nvidia_container_toolkit() {
   fi
 
   log "Setting NVIDIA as the default Docker runtime..."
-  sudo nvidia-ctk runtime configure --runtime=docker --set-as-default
-  sudo systemctl restart docker
-  sleep 3
+  # Skip-when-satisfied (#431): restarting Docker takes a live k3d cluster down, so
+  # only reconfigure + restart when Docker isn't ALREADY defaulting to the NVIDIA
+  # runtime. A re-run on a configured host does nothing here — no restart, no bounce.
+  local reconfigured=0
+  if _docker_default_runtime_is_nvidia; then
+    log "Docker already defaults to the NVIDIA runtime — skipping reconfigure + restart (no cluster bounce)."
+  else
+    reconfigured=1
+    sudo nvidia-ctk runtime configure --runtime=docker --set-as-default
+    # Attempt cluster recovery after the restart when it's running OR when we couldn't
+    # confirm its state (a wedged daemon that also failed the nvidia check would fail
+    # this probe too) — never leave a live cluster down silently (#431 Bugbot).
+    # `|| cr=$?` (not a bare `; cr=$?`): under the installer's `set -e` a non-zero
+    # probe on a first-run GPU host (no cluster yet) would otherwise abort before the
+    # Docker restart, leaving the runtime unapplied (#431 Bugbot).
+    local cluster_was_running=0 cr=0
+    _k3d_cluster_running || cr=$?
+    if (( cr == 0 )); then
+      cluster_was_running=1
+      warn "Applying the NVIDIA runtime needs a Docker restart — the '${CLUSTER_NAME}' cluster will restart with it."
+    elif (( cr == 2 )); then
+      cluster_was_running=1
+      warn "Couldn't confirm the '${CLUSTER_NAME}' cluster state before the Docker restart — will try to bring it back afterward."
+    fi
+    sudo systemctl restart docker
+    sleep 3
+    # Bring the cluster back deterministically rather than relying only on the nodes'
+    # restart policy, so a re-run that DID change the runtime doesn't leave it down.
+    # Surface a bring-up failure (don't `|| true` it away) so the operator isn't told
+    # the cluster is back when it isn't (#431 Bugbot).
+    if (( cluster_was_running )) && has k3d; then
+      log "Restarting the '${CLUSTER_NAME}' cluster after the Docker restart..."
+      # BOUNDED (#431 Bugbot): `k3d cluster start` defaults to --wait with timeout 0
+      # (wait forever), so a slow post-restart daemon/node bring-up would hang a
+      # headless re-run. --timeout gives it a real deadline that aborts with an error
+      # (better than a SIGKILL), mirroring the bounded `cluster create` (#426).
+      local start_out start_min
+      start_min="$(tb_minutes_or "${TB_CLUSTER_START_TIMEOUT_MIN:-}" 5)"
+      if ! start_out="$(k3d cluster start "$CLUSTER_NAME" --wait --timeout "${start_min}m" 2>&1)"; then
+        warn "Couldn't restart the '${CLUSTER_NAME}' cluster automatically: ${start_out}"
+        hint "Start it manually:  k3d cluster start ${CLUSTER_NAME}"
+      fi
+    fi
+  fi
 
   log "Configuring containerd NVIDIA runtime..."
   sudo nvidia-ctk runtime configure --runtime=containerd --set-as-default 2>/dev/null || true
 
-  if docker run --rm --gpus all nvidia/cuda:12.3.1-base-ubuntu22.04 nvidia-smi &>/dev/null; then
+  # Cache the smoke test (#431): re-pulling nvidia/cuda on every re-run is wasteful,
+  # and a pass won't change while the toolkit + driver are unchanged. The marker
+  # records the signature of the last PASSING test. BUT if we actually reconfigured
+  # the runtime + restarted Docker this run, the cache is stale — re-verify the GPU
+  # path always, so a broken post-restart runtime can't be reported as verified
+  # (#431 Bugbot).
+  local gpu_marker="${HOST_DATA_DIR:-$HOME/.tracebloc}/.gpu-smoke-ok"
+  local gpu_sig
+  gpu_sig="$(_gpu_stack_signature)"
+  if (( ! reconfigured )) && [[ -n "$gpu_sig" && -f "$gpu_marker" && "$(cat "$gpu_marker" 2>/dev/null)" == "$gpu_sig" ]]; then
+    log "Docker GPU smoke-test skipped — toolkit + driver unchanged since last pass."
+  elif docker run --rm --gpus all nvidia/cuda:12.3.1-base-ubuntu22.04 nvidia-smi &>/dev/null; then
     log "Docker GPU smoke-test passed"
+    mkdir -p "$(dirname "$gpu_marker")" 2>/dev/null || true
+    [[ -n "$gpu_sig" ]] && printf '%s' "$gpu_sig" > "$gpu_marker" 2>/dev/null || true
   else
     log "Docker GPU smoke-test skipped (image may need pulling). Continuing..."
+    # Never leave a PASS marker behind a check that just failed: a forced re-verify
+    # that fails must not let the NEXT (reconfigured=0) run skip the test and treat
+    # the stack as previously verified (#431 Bugbot).
+    rm -f "$gpu_marker" 2>/dev/null || true
   fi
 
   K3D_GPU_FLAGS=("--gpus=all")

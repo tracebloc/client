@@ -3340,6 +3340,9 @@ function Wait-ForClientReady {
 # Classify why the client isn't Ready, for an accurate message. Returns a state.
 function Get-NotReadyState {
   param([string]$Namespace)
+  # The concrete pod/event text behind the failure, surfaced in the summary so the
+  # failure copy contains the actual reason, not just a generic line (#425).
+  $script:NotReadyDetail = ""
   # Wrong credentials: jobs-manager authenticates to the backend on startup and
   # crash-loops when rejected -- surfaced as an auth error in its logs.
   $jmLogs = (& kubectl logs -n $Namespace "deployment/$Namespace-jobs-manager" --all-containers --tail=50 2>$null | Out-String)
@@ -3355,16 +3358,36 @@ function Get-NotReadyState {
     # bash _diagnose_not_ready pull_fail filter.
     $events = (& kubectl get events -n $Namespace --request-timeout=5s 2>$null | Out-String)
     $pullFail = (($events -split "`n") | Where-Object { $_ -match '(?i)failed to pull|ErrImagePull' }) -join "`n"
+    # Surface the concrete event (or the failing pod lines when events are empty).
+    $script:NotReadyDetail = ((($pullFail -split "`n") | Where-Object { $_.Trim() } | Select-Object -First 3) -join "`n").Trim()
+    if (-not $script:NotReadyDetail) {
+      $script:NotReadyDetail = ((($pods -split "`n") | Where-Object { $_ -match '(?i)ImagePullBackOff|ErrImagePull|InvalidImageName' } | Select-Object -First 3) -join "`n").Trim()
+    }
     if ($pullFail -match '(?i)x509|certificate signed by unknown authority|tls: failed to verify') { return "image_pull_ca" }
     return "image_pull"
   }
-  if ($pods -match '(?i)CrashLoopBackOff') { return "crash" }
+  if ($pods -match '(?i)CrashLoopBackOff') {
+    $script:NotReadyDetail = ((($pods -split "`n") | Where-Object { $_ -match '(?i)CrashLoopBackOff' } | Select-Object -First 3) -join "`n").Trim()
+    return "crash"
+  }
   return "starting"
 }
 
 # =============================================================================
 #  SUMMARY
 # =============================================================================
+
+# Print the concrete pod/event text behind a not-ready failure (#425), indented, so
+# the failure summary carries the actual reason (the "failed to pull ..." event or
+# the failing pod line) rather than only a generic sentence. No-op when empty.
+function Write-NotReadyDetail {
+  if (-not $script:NotReadyDetail) { return }
+  Write-Host ""
+  Write-Host "  What the cluster reported:" -ForegroundColor DarkGray
+  foreach ($l in ($script:NotReadyDetail -split "`n")) {
+    if ($l.Trim()) { Hint "  $($l.Trim())" }
+  }
+}
 
 # Reports the outcome based on $script:ClientState (set by Wait-ForClientReady).
 # The "secure compute environment / your data never leaves" claim is printed
@@ -3430,6 +3453,7 @@ function Print-Summary {
       Write-Host "    `$env:TRACEBLOC_CA_BUNDLE = 'C:\path\to\corporate-ca.pem'; irm https://tracebloc.io/i.ps1 | iex" -ForegroundColor Green
       Hint "(CURL_CA_BUNDLE is also honored.) Ask your IT team for the bundle if unsure."
       Write-Host "  Inspect:  " -NoNewline; Write-Host "kubectl get events -n $ns | Select-String x509" -ForegroundColor Green
+      Write-NotReadyDetail
       Hint "Re-running this installer is safe."
     }
     default {
@@ -3440,6 +3464,7 @@ function Print-Summary {
       Write-Host ""
       Write-Host "  Inspect:  " -NoNewline; Write-Host "kubectl get pods -n $ns" -ForegroundColor Green
       Write-Host "  Logs:     ~\.tracebloc\install-*.log"
+      Write-NotReadyDetail
       Hint "Re-running this installer is safe."
     }
   }

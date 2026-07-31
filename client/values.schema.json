@@ -11,7 +11,7 @@
         "CLIENT_ENV": {
           "type": "string",
           "default": "prod",
-          "description": "Environment identifier and Docker image tag (dev, staging, prod). Defaults to 'prod' if not set or empty."
+          "description": "Environment identifier and Docker image tag. Canonical values are `dev`, `stg`, `prod`; the documented aliases `development`/`staging`/`production` are accepted and normalized (matching client-runtime proxy_config.ENV_ALIASES). Load-bearing: it selects images.ingestor.channelTags and the prod digest pin. Defaults to 'prod' if not set or empty."
         },
         "HTTP_PROXY_HOST": { "type": "string" },
         "HTTP_PROXY_PORT": { "type": "string" },
@@ -287,6 +287,14 @@
         }
       }
     },
+    "perExperimentDbCreds": {
+      "type": "boolean",
+      "description": "RFC-0003 D10 (backend#1181): mint a per-experiment MySQL user scoped to the experiment's own table(s), injected via a per-job Secret, instead of the shared edgeuser. Flip per environment, dev first."
+    },
+    "credmgrPassword": {
+      "type": "string",
+      "description": "RFC-0003 D10 (backend#1181): optional operator pin for the tb_credmgr account password (3-tier resolution, mirrors podTokenSigningSecret). Empty = generate-and-persist. Set for DR / a pre-created MySQL account / forced rotation, or to keep it stable across a perExperimentDbCreds toggle. Must be alphanumeric."
+    },
     "perIngestionTables": {
       "type": "boolean",
       "description": "RFC-0003 D16 (backend#1204/#1205): stamp PER_INGESTION_TABLES=1 into every ingestion Job. Flip per environment, dev first; file-bearing categories are refused under the flag until client-runtime#203 phase 2."
@@ -468,9 +476,32 @@
             },
             "tag": {
               "type": "string",
-              "minLength": 1,
               "not": { "const": "latest" },
-              "description": "Floating ghcr.io/tracebloc/ingestor tag spawned when no digest applies (imagePullPolicy=Always). `latest` is rejected — spawn behaviour must not drift. Surfaces as INGESTOR_IMAGE_TAG."
+              "description": "Explicit floating-tag override for the spawned ingestor. EMPTY by default: the effective tag then comes from channelTags[CLIENT_ENV] (backend#1360). `latest` is rejected — spawn behaviour must not drift. To pin an exact image prefer `digest`, which wins over any tag. Surfaces as INGESTOR_IMAGE_TAG."
+            },
+            "channelTags": {
+              "type": "object",
+              "description": "Per-environment floating tags, keyed on the resolved CLIENT_ENV, used when `tag` is empty. `dev`/`stg` track the UNSIGNED internal channels published from the matching data-ingestors branch; `prod` stays a semver float because no :prod tag is published. backend#1360.",
+              "properties": {
+                "dev": {
+                  "type": "string",
+                  "minLength": 1,
+                  "not": { "const": "latest" },
+                  "description": "Tag spawned when CLIENT_ENV resolves to dev."
+                },
+                "stg": {
+                  "type": "string",
+                  "minLength": 1,
+                  "not": { "const": "latest" },
+                  "description": "Tag spawned when CLIENT_ENV resolves to stg."
+                },
+                "prod": {
+                  "type": "string",
+                  "minLength": 1,
+                  "not": { "const": "latest" },
+                  "description": "Tag spawned when CLIENT_ENV resolves to prod and no digest applies."
+                }
+              }
             },
             "prodDigest": {
               "type": "string",
