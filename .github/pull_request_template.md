@@ -2,7 +2,7 @@
 <!-- 1–3 sentences. What does this PR do and why? -->
 
 ## Related
-<!-- Same repo: Closes #123 · Cross-repo: Fixes tracebloc/backend#456 (owner-qualified — a bare backend#456 closes nothing). PRs land on develop, not the default branch, so confirm the issue actually closed. -->
+<!-- Same repo: Closes #123 · Cross-repo: Fixes tracebloc/client-runtime#456 (owner-qualified — a bare client-runtime#456 closes nothing). PRs land on develop, not the default branch, so closing keywords do not fire on merge — confirm the issue actually closed. -->
 
 ## Type of change
 - [ ] Feature
@@ -26,5 +26,6 @@
 - [ ] Docs updated if behavior or config changed
 - [ ] No secrets / credentials in the diff
 - [ ] For security-sensitive paths: appropriate reviewer requested
-- [ ] Terminal output follows [STYLE.md](../STYLE.md) — tone helpers (no hardcoded colour/emoji), "secure environment" not "workspace"; `bash scripts/check-style.sh` passes
 - [ ] Cross-repo issues use `Fixes tracebloc/<repo>#N` — a bare `repo#N` closes nothing
+- [ ] If this depends on a change in another repo: shipped **expand-then-contract** (additive first, consumers adopt later), or **Breaking change** ticked above with the rollout order in *Deployment notes* — repos promote independently, so the other change may not ship with this one
+- [ ] Terminal output follows [STYLE.md](../STYLE.md) — tone helpers (no hardcoded colour/emoji), "secure environment" not "workspace"; `bash scripts/check-style.sh` passes
