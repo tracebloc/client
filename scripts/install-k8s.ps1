@@ -3894,7 +3894,18 @@ function Test-PreflightRuntimeMem {
   # on cannot disagree; GB is derived from it rather than read separately.
   $mib = Get-PfRuntimeMemMib
   if ($null -eq $mib) { return }              # daemon not reporting — nothing to add
-  $budget = [int][math]::Floor($mib / 1024)
+  $grace = Get-PfVmMemGraceMib
+  # Grade/report the CONFIGURED size, not the flooring artifact. A guest reports a few
+  # hundred MiB under its configured size, so a VM set to exactly the floor gives
+  # floor(4800/1024) = 4 — and Show-MemoryStatus would then print hard-floor "it will
+  # OOM" copy for a machine the gate below ACCEPTS, telling a correctly configured box
+  # it will crash and then carrying on (Bugbot). Folding in the SAME grace before
+  # flooring recovers the configured GB (4800 + 512 -> 5) and leaves a genuinely
+  # sub-floor VM exactly where it was (4096 + 512 -> 4). Because both the grade and
+  # the gate now pivot on the same grace, their boundaries coincide at
+  # (floor * 1024 - grace) MiB: there is no band that warns "will OOM" yet proceeds,
+  # and none that passes while being called sub-floor.
+  $budget = [int][math]::Floor(($mib + $grace) / 1024)
   $hostGb = Get-PfMemGb
 
   # Re-run the SAME assessment now that Docker's budget is known, so both floors
@@ -3904,8 +3915,9 @@ function Test-PreflightRuntimeMem {
 
   $minGb = Get-PfMinMemGb
   # Grace band, not a bare `-lt $minGb`: see Get-PfRuntimeMemMib. A VM at exactly the
-  # documented floor passes; a genuinely sub-floor one (e.g. 4 GB) does not.
-  if ($mib -ge (($minGb * 1024) - (Get-PfVmMemGraceMib))) { return }
+  # documented floor passes; a genuinely sub-floor one (e.g. 4 GB) does not. Same
+  # $grace as the grade above, so this boundary and that one are the same boundary.
+  if ($mib -ge (($minGb * 1024) - $grace)) { return }
 
   $reserveGb = Get-PfOsReserveGb
   Write-Host ""

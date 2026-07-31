@@ -1820,6 +1820,31 @@ Describe "Test-PreflightRuntimeMem (post-Docker: enforces the floor)" {
     Mock Get-PfRuntimeMemMib { 4800 }; Mock Get-PfMemGb { 16 }
     { Test-PreflightRuntimeMem } | Should -Not -Throw
   }
+  It "and is NOT told it will OOM — the grade and the gate agree (Bugbot)" {
+    # floor(4800/1024) = 4 would have printed hard-floor "it will OOM" copy for a
+    # machine the gate accepts: told a correctly configured box it would crash, then
+    # carried on. The grade folds in the same grace, so it reports the configured 5 GB.
+    Mock Err { }
+    Mock Get-PfRuntimeMemMib { 4800 }; Mock Get-PfMemGb { 16 }
+    $out = (Test-PreflightRuntimeMem 6>&1 | Out-String)
+    $out | Should -Not -Match 'it will OOM'
+    $out | Should -Not -Match 'OOM-crashloop'
+    $out | Should -Match "Docker's current share: 5 GB"   # the configured size
+    $out | Should -Match 'training'                       # the honest warn band
+  }
+  It "the grade boundary and the gate boundary are the SAME boundary" {
+    # The property that makes the contradiction impossible rather than merely absent:
+    # at every MiB either BOTH say sub-floor (fail + OOM copy) or NEITHER does.
+    Mock Err { }
+    Mock Get-PfMemGb { 16 }
+    foreach ($m in 4096, 4607, 4608, 4800, 5120) {
+      Mock Get-PfRuntimeMemMib -MockWith { $m }.GetNewClosure()
+      $out = (Test-PreflightRuntimeMem 6>&1 | Out-String)
+      $saysSubFloor = $out -match 'it will OOM|OOM-crashloop'
+      $gateFails    = $m -lt ((Get-PfMinMemGb) * 1024 - (Get-PfVmMemGraceMib))
+      $saysSubFloor | Should -Be $gateFails -Because "at $m MiB the copy and the gate must agree"
+    }
+  }
   It "the grace band is bounded — just under it still fails" {
     Mock Get-PfMemGb { 16 }
     Mock Get-PfRuntimeMemMib { 4607 }        # floor 5*1024 - 512 grace = 4608
