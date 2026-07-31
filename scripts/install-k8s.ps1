@@ -1798,15 +1798,27 @@ function Set-ClusterAutostart {
 #  All warn-only -- a provisioning hiccup must never fail the install.
 # =============================================================================
 
-# WSL2 VM memory (GB) for .wslconfig: as much as the host can give without starving
-# it -- physical RAM minus a reserve (default 4 GB for the host OS + overhead) --
-# so training pods fit instead of the WSL2 default (~50% of RAM). Pure; floored so
-# a tiny host still yields a positive value (#418).
+# WSL2 VM memory (GB) for .wslconfig -- the SAME budget the preflight advises for
+# this machine, so training pods fit instead of the WSL2 default (~50% of RAM).
+# It DELEGATES to Get-PfMemRecommendation (the recommended training budget, capped
+# at physical RAM minus the shared OS reserve) instead of doing its own arithmetic.
+# That delegation is the point: this path writes REAL config, so a private
+# calculation makes the installer contradict its own advice in the same run. It did
+# -- a private 4 GB reserve (vs the shared 2) told an 8 GB host "give Docker up to
+# 6 GB" while writing memory=4GB, below the client's own PF_MIN_MEM_GB floor and so
+# a guaranteed OOM crashloop; and it over-committed the other end, handing a 32 GB
+# host 28 GB and leaving Windows 4.
+#
+# Returns 0 when the host cannot support the floor (physical - reserve < the floor):
+# there is no budget worth writing, so the caller must skip the setting and say the
+# machine is too small rather than persist one known to OOM. Pure (#418).
 function Get-WslConfigMemoryGb {
-  param([int]$HostGb, [int]$ReserveGb = 4)
-  $m = $HostGb - $ReserveGb
-  if ($m -lt 1) { $m = 1 }
-  return $m
+  param([int]$HostGb, [int]$MinGb = 0)
+  if ($MinGb -le 0) { $MinGb = Get-PfMinMemGb }
+  # No ReserveGb param on purpose: the reserve is single-sourced, so no caller can
+  # reintroduce the drift this function existed to demonstrate.
+  if (($HostGb - (Get-PfOsReserveGb)) -lt $MinGb) { return 0 }
+  return (Get-PfMemRecommendation -DesiredGb (Get-PfRecMemGb) -HostGb $HostGb)
 }
 
 # The .wslconfig body granting the WSL2 VM the sized memory budget. Pure (#418).
@@ -1936,15 +1948,29 @@ function Set-DailyUserProvisioning {
       # Host RAM undetectable -> can't size the budget. Note it rather than skip silently (#418 Bugbot).
       $did += "couldn't detect host RAM -- set [wsl2] memory in '$user's .wslconfig manually"
     } else {
-      $wslCfg   = Join-Path $profileDir ".wslconfig"
-      $existing = if (Test-Path $wslCfg) { (Get-Content $wslCfg -Raw -ErrorAction SilentlyContinue) } else { "" }
-      $memGb    = Get-WslConfigMemoryGb -HostGb $hostGb
-      $merged   = Add-WslMemorySetting -Existing $existing -MemoryGb $memGb
-      if ($null -eq $merged) {
-        $did += "kept existing .wslconfig memory"
+      $memGb = Get-WslConfigMemoryGb -HostGb $hostGb
+      if ($memGb -le 0) {
+        # 0 = this host can't give the VM the client's floor. The biggest budget it
+        # COULD hold would still OOM-crashloop the client, and persisting it would
+        # bake that in for every later run on the daily account. Leave memory unset
+        # (WSL2's own default then applies) and say so plainly -- same honest framing
+        # as the preflight's host-too-small line.
+        $minGb   = Get-PfMinMemGb
+        $reserve = Get-PfOsReserveGb
+        Warn ("This machine has $hostGb GB RAM - too little for tracebloc: the client needs a $minGb GB WSL2 budget " +
+              "and Windows needs ~$reserve GB, so about $($minGb + $reserve) GB physical is the practical minimum.")
+        Hint "Left '$user's .wslconfig memory unset rather than write a budget that would OOM. Use a larger machine to run the client."
+        $did += "machine too small for a $minGb GB WSL2 budget -- .wslconfig memory left unset"
       } else {
-        Set-Content -Path $wslCfg -Value $merged -Encoding ASCII -ErrorAction Stop
-        $did += "set .wslconfig memory=${memGb}GB (applies next sign-in)"
+        $wslCfg   = Join-Path $profileDir ".wslconfig"
+        $existing = if (Test-Path $wslCfg) { (Get-Content $wslCfg -Raw -ErrorAction SilentlyContinue) } else { "" }
+        $merged   = Add-WslMemorySetting -Existing $existing -MemoryGb $memGb
+        if ($null -eq $merged) {
+          $did += "kept existing .wslconfig memory"
+        } else {
+          Set-Content -Path $wslCfg -Value $merged -Encoding ASCII -ErrorAction Stop
+          $did += "set .wslconfig memory=${memGb}GB (applies next sign-in)"
+        }
       }
     }
   } catch {
@@ -3576,6 +3602,16 @@ function Get-PfMemGb {
 # advised to take all of it. Used to cap recommendations AND to reason about the
 # achievable budget in one place, so the two can't drift (#417 reviewer).
 $script:PfOsReserveGb = 2
+
+# Accessors for the three memory numbers, so every path that PRINTS advice and every
+# path that WRITES a real budget reads the same values (#418). Read through these
+# rather than re-deriving: the drift they close is what let the daily-user
+# .wslconfig be sized from a private 4 GB reserve while the preflight advised 2,
+# producing a budget below the client's own floor on an 8 GB host.
+# The reserve fails CLOSED -- never 0, which would hand WSL2 the entire host.
+function Get-PfOsReserveGb { if ($script:PfOsReserveGb -gt 0) { return [int]$script:PfOsReserveGb } else { return 2 } }
+function Get-PfMinMemGb    { if ($env:PF_MIN_MEM_GB) { return [int]$env:PF_MIN_MEM_GB } else { return 5 } }
+function Get-PfRecMemGb    { if ($env:PF_REC_MEM_GB) { return [int]$env:PF_REC_MEM_GB } else { return 16 } }
 
 # Cap a desired Docker-memory recommendation at what the host can actually give
 # (physical RAM minus the OS reserve), so we never advise more than the machine
