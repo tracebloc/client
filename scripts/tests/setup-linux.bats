@@ -1592,3 +1592,25 @@ _stub_install_steps() {
   [[ "$output" == *"active in this session"* ]]
   [[ "$output" != *"NOT active"* ]]
 }
+
+@test "_write_cgroup_delegation: re-run over an existing drop-in still verifies (no silent fast path) (#496 Bugbot)" {
+  TB_USER_UNIT_DROPIN_DIR="$(mktemp -d)/user@.service.d"; mkdir -p "$TB_USER_UNIT_DROPIN_DIR"
+  printf '%s\n[Service]\nDelegate=cpu cpuset io memory pids\n' \
+    '# Managed by tracebloc installer (RFC 0001 #1221)' > "$TB_USER_UNIT_DROPIN_DIR/delegate.conf"   # already present
+  cf="$(mktemp)"; echo "memory pids" > "$cf"; TB_USER_CGROUP_CONTROLLERS="$cf"   # not delegated
+  sudo() { "$@"; }; systemctl() { record "systemctl $*"; }
+  run _write_cgroup_delegation
+  [[ "$output" == *"NOT active in this session"* ]]   # report ran even on the idempotent path
+  run mock_calls
+  [[ "$output" != *"daemon-reload"* ]]                # …and it was the no-reload idempotent path
+}
+@test "_write_cgroup_delegation: prepare-host mode -> researcher-login wording, no cluster-delete (#496 Bugbot)" {
+  TB_USER_UNIT_DROPIN_DIR="$(mktemp -d)/user@.service.d"
+  TB_PREPARE_HOST_MODE=1
+  cf="$(mktemp)"; echo "memory pids" > "$cf"; TB_USER_CGROUP_CONTROLLERS="$cf"   # admin's slice is irrelevant here
+  sudo() { "$@"; }; systemctl() { :; }
+  run _write_cgroup_delegation
+  [[ "$output" == *"researcher's next login"* ]]
+  [[ "$output" != *"k3d cluster delete"* ]]           # prepare-host creates no cluster
+  [[ "$output" != *"NOT active in this session"* ]]   # doesn't judge on the admin's own slice
+}

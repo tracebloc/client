@@ -1229,31 +1229,49 @@ _write_cgroup_delegation() {
   local desired
   printf -v desired '%s\n[Service]\nDelegate=cpu cpuset io memory pids\n' "$marker"
 
-  # Unchanged → don't rewrite / daemon-reload (avoids churning the user manager).
+  # Unchanged → don't rewrite / daemon-reload (avoids churning the user manager), but
+  # STILL report below — a re-run over an existing drop-in must re-surface an inactive
+  # delegation, not take a silent fast path (#496 Bugbot).
   if [[ -f "$conf" ]] && printf '%s' "$desired" | sudo cmp -s - "$conf" 2>/dev/null; then
     log "cgroup delegation drop-in already present."
+  else
+    # Guard the writes: callers run this with `set -e` relaxed (`|| true`, `if !`), so
+    # an unguarded failure would fall through to success and let the install proceed
+    # with pods that can't be given limits (the exact silent breakage this slice
+    # exists to prevent).
+    sudo mkdir -p "$dir" \
+      || { warn "Couldn't create ${dir} for the cgroup delegation drop-in."; return 1; }
+    printf '%s' "$desired" | sudo tee "$conf" >/dev/null \
+      || { warn "Couldn't write the cgroup delegation drop-in at ${conf}."; return 1; }
+    sudo systemctl daemon-reload 2>/dev/null || true
+  fi
+  # Verify + report on EVERY path (#496 Bugbot).
+  _report_cgroup_delegation "$conf"
+}
+
+# Report whether the cgroup delegation is actually in effect (#496). Mode-aware:
+#  - prepare-host (admin): the drop-in is written for the RESEARCHER's FUTURE session —
+#    the admin's own controllers are irrelevant, and prepare-host creates no cluster, so
+#    the "recreate the cluster" advice is wrong here (Bugbot). Just confirm it's written.
+#  - full install: verify THIS session. daemon-reload does NOT restart the running
+#    user@$(id -u).service, so the delegation usually isn't live yet, and the k3d node
+#    inherits the delegation state from when it is CREATED. If inactive, say the real
+#    consequence: limits won't enforce until the user manager restarts AND the cluster
+#    is recreated. With lingering (the rootless path), a re-login may NOT restart the
+#    user manager — a reboot reliably does. We never `systemctl restart user@…`
+#    ourselves: it would kill the user's session processes.
+_report_cgroup_delegation() {
+  local conf="$1"
+  if [[ -n "${TB_PREPARE_HOST_MODE:-}" ]]; then
+    success "Wrote the cgroup delegation drop-in (${conf}); it takes effect at the researcher's next login (before any cluster is created)."
     return 0
   fi
-  # Guard the writes: callers run this with `set -e` relaxed (`|| true`, `if !`), so
-  # an unguarded failure would fall through to success and let the install proceed
-  # with pods that can't be given limits (the exact silent breakage this slice
-  # exists to prevent).
-  sudo mkdir -p "$dir" \
-    || { warn "Couldn't create ${dir} for the cgroup delegation drop-in."; return 1; }
-  printf '%s' "$desired" | sudo tee "$conf" >/dev/null \
-    || { warn "Couldn't write the cgroup delegation drop-in at ${conf}."; return 1; }
-  sudo systemctl daemon-reload 2>/dev/null || true
-  # Verify rather than assume (#496). daemon-reload re-reads unit files but does NOT
-  # restart the running user@$(id -u).service, so the delegation usually isn't live in
-  # THIS session — and the k3d node inherits the delegation state from when it is
-  # CREATED. If the controllers aren't active, say the REAL consequence loudly: pod
-  # CPU/memory limits won't enforce until a re-login AND a cluster recreate. (We don't
-  # `systemctl restart user@…` for the user: it would kill their session processes.)
   if _cgroup_controllers_active; then
     success "Delegated cpu/cpuset/io cgroup controllers (${conf}) — active in this session."
   else
-    warn "Wrote the cgroup delegation drop-in (${conf}), but it is NOT active in this session yet — pod CPU/memory limits will NOT be enforced until you log out and back in AND recreate the cluster:"
-    hint "  k3d cluster delete ${CLUSTER_NAME:-tracebloc}   # then log out/in and re-run"
+    warn "The cgroup delegation drop-in (${conf}) is NOT active in this session yet — pod CPU/memory limits will NOT be enforced until you recreate the cluster after the user manager restarts:"
+    hint "  log out and back in — or, with lingering enabled, reboot (a re-login may not restart your user manager) — then:"
+    hint "  k3d cluster delete ${CLUSTER_NAME:-tracebloc}   # and re-run"
     hint "  (Until then the install looks healthy, but limit-bearing workloads run unconstrained.)"
   fi
 }
