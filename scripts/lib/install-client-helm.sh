@@ -141,7 +141,12 @@ _extract_yaml_value() {
   if [[ "$line" == \'*\' ]]; then
     line="${line#\'}"
     line="${line%\'}"
-    line="${line//\'\'/\'}"
+    # A YAML single-quoted string escapes a quote by doubling it ('' -> '). Use a
+    # variable for the quote in the replacement: bash 3.2 (the macOS system bash)
+    # keeps the backslash in a `\'` REPLACEMENT literal (-> a\'b), corrupting the
+    # value; a variable expands to a bare quote on both bash 3.2 and 4/5.
+    local _sq="'"
+    line="${line//$_sq$_sq/$_sq}"
   else
     line="${line#\"}"
     line="${line%\"}"
