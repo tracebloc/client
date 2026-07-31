@@ -265,7 +265,14 @@ _pf_runtime_mem_status() {
     # two different targets for one problem — the diverging-copy bug this change
     # exists to remove, which survived on exactly this path (Bugbot #445 r3).
     target_gb="$warn_eff"
-  elif (( rt_mib < warn_eff * 1024 )); then
+  # The WARN threshold carries the grace too, not just the floor one. The shown
+  # figure is now (mib + grace)/1024, so grading this branch on the raw threshold
+  # reopened the same self-contradiction one boundary up: every budget in
+  # [warn*1024 - grace, warn*1024) — 7680..8191 MiB at warn 8, a band Docker
+  # Desktop's own defaults land in — printed "budget: 8 GB — recommended ≥ 8 GB".
+  # With both the display and both thresholds pivoting on the grace, shown == target
+  # implies the ✔ branch, so no displayed number can contradict its own grade.
+  elif (( rt_mib < warn_eff * 1024 - PF_VM_MEM_GRACE_MIB )); then
     warn "Docker's memory budget: ${rt_gb} GB — recommended ≥ ${warn_eff} GB (${rec_eff} GB to train); the client may OOM under load."
     # No hard-fail follows this branch, so the remedy can aim at the train figure.
     target_gb="$rec_eff"

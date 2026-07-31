@@ -867,11 +867,11 @@ setup() {
   local warn_eff
   warn_eff="$(_pf_clamp_mem_gb "$PF_WARN_MEM_GB")"
   run _pf_runtime_mem_status $((3 * 1024))
-  [[ "$output" == *"below the"* ]]
-  [[ "$output" == *"Give Docker ${warn_eff} GB"* ]]
-  [[ "$output" == *"--memory ${warn_eff}"* ]]
+  [[ "$output" == *"below the"* ]] || return 1
+  [[ "$output" == *"Give Docker ${warn_eff} GB"* ]] || return 1
+  [[ "$output" == *"--memory ${warn_eff}"* ]] || return 1
   # the recommendation figure must NOT appear as the remedy on this path
-  [[ "$output" != *"Give Docker $(_pf_clamp_mem_gb "$PF_REC_MEM_GB") GB"* ]]
+  [[ "$output" != *"Give Docker $(_pf_clamp_mem_gb "$PF_REC_MEM_GB") GB"* ]] || return 1
 }
 
 @test "_pf_runtime_mem_status: a VM set to the documented floor is not displayed as sub-floor (Bugbot #445 r3)" {
@@ -881,9 +881,9 @@ setup() {
   OS=Darwin
   _pf_host_mem_kb() { echo $((32 * 1024 * 1024)); }
   run _pf_runtime_mem_status $(( PF_MIN_MEM_GB * 1024 - 124 ))   # guest shortfall
-  [[ "$output" == *"budget: ${PF_MIN_MEM_GB} GB"* ]]
-  [[ "$output" != *"budget: $(( PF_MIN_MEM_GB - 1 )) GB"* ]]
-  [[ "$output" != *"below the"* ]]        # grace-aware grading must not call it sub-floor
+  [[ "$output" == *"budget: ${PF_MIN_MEM_GB} GB"* ]] || return 1
+  [[ "$output" != *"budget: $(( PF_MIN_MEM_GB - 1 )) GB"* ]] || return 1
+  [[ "$output" != *"below the"* ]] || return 1        # grace-aware grading must not call it sub-floor
 }
 
 @test "_pf_memory: a host too small for floor+reserve is never called 'enough to run' (Bugbot #445 r3)" {
@@ -895,16 +895,35 @@ setup() {
   _pf_host_mem_kb() { echo $((6 * 1024 * 1024)); }   # 6 GB: 6 - 2 reserve < 5 floor
   _pf_runtime_mem_kb() { echo ""; }                  # no VM line, isolate the machine line
   run _pf_memory
-  [[ "$output" != *"enough to run"* ]]
-  [[ "$output" == *"larger machine"* ]]
+  [[ "$output" != *"enough to run"* ]] || return 1
+  [[ "$output" == *"larger machine"* ]] || return 1
 }
 
 @test "_pf_host_too_small_for_floor: one predicate, and it fails safe on junk input (Bugbot #445 r3)" {
-  _pf_host_too_small_for_floor 6            # 6 - 2 < 5  -> too small
-  _pf_host_too_small_for_floor 5
-  ! _pf_host_too_small_for_floor 8          # 8 - 2 >= 5 -> fine
-  ! _pf_host_too_small_for_floor 16
-  ! _pf_host_too_small_for_floor ""         # unknown must NOT claim too-small
-  ! _pf_host_too_small_for_floor "unknown"
-  ! _pf_host_too_small_for_floor 0
+  _pf_host_too_small_for_floor 6 || return 1            # 6 - 2 < 5  -> too small
+  _pf_host_too_small_for_floor 5 || return 1
+  ! _pf_host_too_small_for_floor 8 || return 1          # 8 - 2 >= 5 -> fine
+  ! _pf_host_too_small_for_floor 16 || return 1
+  ! _pf_host_too_small_for_floor "" || return 1         # unknown must NOT claim too-small
+  ! _pf_host_too_small_for_floor "unknown" || return 1
+  ! _pf_host_too_small_for_floor 0 || return 1
+}
+
+@test "_pf_runtime_mem_status: the shown figure never contradicts its own grade at the WARN boundary" {
+  # Grace on the DISPLAY alone reopened the r3 contradiction one boundary up: every
+  # budget in [warn*1024 - grace, warn*1024) printed "budget: 8 GB — recommended
+  # ≥ 8 GB". Docker Desktop's own defaults land in that ~512 MiB band. Both
+  # thresholds now pivot on the grace, so shown == target implies the ✔ branch.
+  OS=Darwin
+  _pf_host_mem_kb() { echo $((32 * 1024 * 1024)); }   # warn_eff = 8, unclamped
+  local m
+  for m in 7680 8000 8191 8192; do
+    run _pf_runtime_mem_status "$m"
+    [[ "$output" == *"budget: 8 GB"* ]] || return 1
+    [[ "$output" != *"recommended ≥ 8 GB"* ]] || return 1   # would be self-contradictory
+  done
+  # Genuinely below the target still says so, with a figure that matches the grade.
+  run _pf_runtime_mem_status 7000
+  [[ "$output" == *"budget: 7 GB"* ]] || return 1
+  [[ "$output" == *"recommended ≥ 8 GB"* ]] || return 1
 }
