@@ -152,10 +152,23 @@ _yaml_sq_unescape() {                    # body of a '...' scalar -> raw value
   printf '%s' "${1//$_sq$_sq/$_sq}"
 }
 
+# _extract_yaml_value — value of top-level scalar key $2 in values file $1.
+# CONTRACT: echoes nothing and returns 0 when the key is absent (or the file is
+# unreadable). Callers rely on "empty means no value"; they must not have to
+# distinguish absent-key from read-error, and none of them do.
 _extract_yaml_value() {
   local file="$1" key="$2"
   local line
-  line=$(grep -E "^${key}:" "$file" 2>/dev/null | head -1)
+  # `|| line=""`: on an ABSENT key grep exits 1 and, under `set -o pipefail`,
+  # that rc propagates out of the pipeline and out of the assignment — so under
+  # `set -e` the installer would abort HERE and never reach the empty-check on
+  # the next line, the very line that exists to handle "key not found" (#523).
+  # Latent until now only because every call site wraps this in `$( )`, which
+  # suspends errexit for the function body; a bare call aborts the install
+  # mid-step. Same house idiom as assess.sh / common.sh `_chart_version`.
+  # Catching any non-zero also keeps the absent-key path reachable if `head -1`
+  # ever SIGPIPEs grep (141) — the sibling shape fixed in #522.
+  line=$(grep -E "^${key}:" "$file" 2>/dev/null | head -1) || line=""
   [[ -z "$line" ]] && return
   line="${line#*:}"
   line="${line#"${line%%[![:space:]]*}"}"
