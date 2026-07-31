@@ -610,9 +610,27 @@ retry() {
 }
 
 # ── Log file — captures all stdout/stderr alongside the terminal ─────────────
+# Choose the log-file path: under HOST_DATA_DIR when it's creatable AND writable,
+# else a temp file — so setup_log_file never dies on a bare `mkdir -p`/`tee` (#432).
+# This matters for prepare-host, which logs BEFORE the data-dir guard runs: on an NFS
+# home under sudo + root_squash the data dir isn't creatable/writable yet, and a
+# cryptic mkdir failure there predates any friendly message. (The full install's
+# early_data_dir_guard still refuses a network DATA dir before this runs.) Pure-ish
+# (prints the path; no exec redirect) so it's unit-testable.
+_choose_log_file() {
+  local candidate=""
+  if mkdir -p "$HOST_DATA_DIR" 2>/dev/null; then
+    candidate="${HOST_DATA_DIR}/install-$(date +%Y%m%d-%H%M%S).log"
+    : >"$candidate" 2>/dev/null || candidate=""   # confirm it's actually writable
+  fi
+  # Trailing X's (no suffix after): BSD mktemp (macOS) requires the X's at the END
+  # of the template, GNU accepts it too — a `.log` suffix would break macOS.
+  [[ -n "$candidate" ]] || candidate="$(mktemp "${TMPDIR:-/tmp}/tracebloc-install-XXXXXX" 2>/dev/null || echo /dev/null)"
+  printf '%s' "$candidate"
+}
+
 setup_log_file() {
-  mkdir -p "$HOST_DATA_DIR"
-  LOG_FILE="${HOST_DATA_DIR}/install-$(date +%Y%m%d-%H%M%S).log"
+  LOG_FILE="$(_choose_log_file)"
   exec > >(tee -a "$LOG_FILE") 2>&1
   log "Install log: $LOG_FILE"
 }
