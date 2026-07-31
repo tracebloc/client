@@ -856,3 +856,55 @@ setup() {
   grep -qE 'colima stop && colima start --memory' "$f"
   ! grep -qE 'COLIMA_MEMORY=[^ ]* colima stop' "$f"
 }
+
+@test "_pf_runtime_mem_status: sub-floor remedy quotes the SAME size the recheck hard-fails with (Bugbot #445 r3)" {
+  # Sub-floor is the one condition where _pf_recheck_runtime_mem ALSO hard-fails
+  # (the latch suppresses a duplicate warning, never the hard-fail), so a warm
+  # sub-floor install printed "Give Docker <rec>" then "raise to <warn>" — two
+  # sizes for one problem, the diverging-copy bug this change removes.
+  OS=Darwin
+  _pf_host_mem_kb() { echo $((32 * 1024 * 1024)); }   # big host: no host-too-small branch
+  local warn_eff
+  warn_eff="$(_pf_clamp_mem_gb "$PF_WARN_MEM_GB")"
+  run _pf_runtime_mem_status $((3 * 1024))
+  [[ "$output" == *"below the"* ]]
+  [[ "$output" == *"Give Docker ${warn_eff} GB"* ]]
+  [[ "$output" == *"--memory ${warn_eff}"* ]]
+  # the recommendation figure must NOT appear as the remedy on this path
+  [[ "$output" != *"Give Docker $(_pf_clamp_mem_gb "$PF_REC_MEM_GB") GB"* ]]
+}
+
+@test "_pf_runtime_mem_status: a VM set to the documented floor is not displayed as sub-floor (Bugbot #445 r3)" {
+  # A VM asked for N GB reports a few hundred MiB less as MemTotal, so plain
+  # mib/1024 showed a floor-sized VM one GB BELOW the floor — graded correctly by
+  # the grace-aware thresholds, but displayed as a contradiction.
+  OS=Darwin
+  _pf_host_mem_kb() { echo $((32 * 1024 * 1024)); }
+  run _pf_runtime_mem_status $(( PF_MIN_MEM_GB * 1024 - 124 ))   # guest shortfall
+  [[ "$output" == *"budget: ${PF_MIN_MEM_GB} GB"* ]]
+  [[ "$output" != *"budget: $(( PF_MIN_MEM_GB - 1 )) GB"* ]]
+  [[ "$output" != *"below the"* ]]        # grace-aware grading must not call it sub-floor
+}
+
+@test "_pf_memory: a host too small for floor+reserve is never called 'enough to run' (Bugbot #445 r3)" {
+  # _pf_memory compared host RAM straight against the Docker floor, so a 5-6 GB
+  # Mac was graded "enough to run" while the budget line two lines later correctly
+  # said "use a larger machine" — one preflight, two verdicts. Both now read the
+  # same shared predicate.
+  OS=Darwin
+  _pf_host_mem_kb() { echo $((6 * 1024 * 1024)); }   # 6 GB: 6 - 2 reserve < 5 floor
+  _pf_runtime_mem_kb() { echo ""; }                  # no VM line, isolate the machine line
+  run _pf_memory
+  [[ "$output" != *"enough to run"* ]]
+  [[ "$output" == *"larger machine"* ]]
+}
+
+@test "_pf_host_too_small_for_floor: one predicate, and it fails safe on junk input (Bugbot #445 r3)" {
+  _pf_host_too_small_for_floor 6            # 6 - 2 < 5  -> too small
+  _pf_host_too_small_for_floor 5
+  ! _pf_host_too_small_for_floor 8          # 8 - 2 >= 5 -> fine
+  ! _pf_host_too_small_for_floor 16
+  ! _pf_host_too_small_for_floor ""         # unknown must NOT claim too-small
+  ! _pf_host_too_small_for_floor "unknown"
+  ! _pf_host_too_small_for_floor 0
+}
