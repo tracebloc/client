@@ -66,6 +66,33 @@ install_nvidia_drivers() {
 }
 
 # ── Container Toolkit ────────────────────────────────────────────────────────
+# Does the RUNNING Docker daemon already default to the NVIDIA runtime? Authoritative
+# live check (reflects the daemon, not just daemon.json), so a re-run can skip the
+# reconfigure + restart that would otherwise bounce a live cluster (#431).
+_docker_default_runtime_is_nvidia() {
+  has docker || return 1
+  [[ "$(docker info --format '{{.DefaultRuntime}}' 2>/dev/null || true)" == "nvidia" ]]
+}
+
+# Is our k3d cluster currently running (>=1 server up)? jq-free (jq is optional here);
+# parses the SERVERS "running/total" column, mirroring _cluster_exists' awk approach.
+_k3d_cluster_running() {
+  has k3d || return 1
+  # Decide only in END: an `exit` inside a main rule still runs END, so a per-row
+  # `exit 0` would be overridden by an END `exit 1`. Set a flag, exit once.
+  k3d cluster list --no-headers 2>/dev/null | awk -v n="$CLUSTER_NAME" '
+    $1 == n { split($2, s, "/"); running = (s[1] + 0 > 0) } END { exit(running ? 0 : 1) }'
+}
+
+# Signature of the installed GPU stack (toolkit + driver versions). Empty when it
+# can't be determined -> the caller then never caches, so it always re-verifies.
+_gpu_stack_signature() {
+  local ctk drv
+  ctk="$(nvidia-ctk --version 2>/dev/null | head -1 || true)"
+  drv="$(nvidia-smi --query-gpu=driver_version --format=csv,noheader 2>/dev/null | head -1 || true)"
+  [[ -n "${ctk}${drv}" ]] && printf '%s|%s' "$ctk" "$drv"
+}
+
 install_nvidia_container_toolkit() {
   log "Setting up NVIDIA container toolkit"
 
@@ -113,15 +140,43 @@ install_nvidia_container_toolkit() {
   fi
 
   log "Setting NVIDIA as the default Docker runtime..."
-  sudo nvidia-ctk runtime configure --runtime=docker --set-as-default
-  sudo systemctl restart docker
-  sleep 3
+  # Skip-when-satisfied (#431): restarting Docker takes a live k3d cluster down, so
+  # only reconfigure + restart when Docker isn't ALREADY defaulting to the NVIDIA
+  # runtime. A re-run on a configured host does nothing here — no restart, no bounce.
+  if _docker_default_runtime_is_nvidia; then
+    log "Docker already defaults to the NVIDIA runtime — skipping reconfigure + restart (no cluster bounce)."
+  else
+    sudo nvidia-ctk runtime configure --runtime=docker --set-as-default
+    local cluster_was_running=0
+    if _k3d_cluster_running; then
+      cluster_was_running=1
+      warn "Applying the NVIDIA runtime needs a Docker restart — the '${CLUSTER_NAME}' cluster will restart with it."
+    fi
+    sudo systemctl restart docker
+    sleep 3
+    # Bring the cluster back deterministically rather than relying only on the nodes'
+    # restart policy, so a re-run that DID change the runtime doesn't leave it down.
+    if (( cluster_was_running )) && has k3d; then
+      log "Restarting the '${CLUSTER_NAME}' cluster after the Docker restart..."
+      k3d cluster start "$CLUSTER_NAME" >/dev/null 2>&1 || true
+    fi
+  fi
 
   log "Configuring containerd NVIDIA runtime..."
   sudo nvidia-ctk runtime configure --runtime=containerd --set-as-default 2>/dev/null || true
 
-  if docker run --rm --gpus all nvidia/cuda:12.3.1-base-ubuntu22.04 nvidia-smi &>/dev/null; then
+  # Cache the smoke test (#431): re-pulling nvidia/cuda on every re-run is wasteful,
+  # and a pass won't change while the toolkit + driver are unchanged. The marker
+  # records the signature of the last PASSING test.
+  local gpu_marker="${HOST_DATA_DIR:-$HOME/.tracebloc}/.gpu-smoke-ok"
+  local gpu_sig
+  gpu_sig="$(_gpu_stack_signature)"
+  if [[ -n "$gpu_sig" && -f "$gpu_marker" && "$(cat "$gpu_marker" 2>/dev/null)" == "$gpu_sig" ]]; then
+    log "Docker GPU smoke-test skipped — toolkit + driver unchanged since last pass."
+  elif docker run --rm --gpus all nvidia/cuda:12.3.1-base-ubuntu22.04 nvidia-smi &>/dev/null; then
     log "Docker GPU smoke-test passed"
+    mkdir -p "$(dirname "$gpu_marker")" 2>/dev/null || true
+    [[ -n "$gpu_sig" ]] && printf '%s' "$gpu_sig" > "$gpu_marker" 2>/dev/null || true
   else
     log "Docker GPU smoke-test skipped (image may need pulling). Continuing..."
   fi
