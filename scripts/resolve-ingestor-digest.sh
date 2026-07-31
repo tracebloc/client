@@ -42,6 +42,36 @@ write=0
 # Scoped to the images: -> ingestor: block so a sibling image's `tag:`
 # (jobsManager / podsMonitor / requestsProxy / ... each carry their own)
 # can never be picked up by mistake. bash-3.2 / macOS-safe (pure awk).
+read_ingestor_tag() {
+  local file="$1"
+  [[ -f "$file" ]] || return 1
+  awk '
+    # Enter the top-level images: block.
+    /^images:[[:space:]]*$/ { in_images = 1; next }
+    # Any other top-level key (col 0, not a comment) closes it.
+    /^[^[:space:]#]/        { in_images = 0; in_ingestor = 0 }
+    in_images {
+      # A 2-space sibling key under images: — arm the ingestor scope only
+      # while we are inside ingestor:, disarm on the next sibling.
+      if ($0 ~ /^  [A-Za-z_][A-Za-z0-9_]*:[[:space:]]*$/) {
+        in_ingestor = ($0 ~ /^  ingestor:[[:space:]]*$/) ? 1 : 0
+        next
+      }
+      # The 4-space tag: leaf inside ingestor:.
+      if (in_ingestor && $0 ~ /^    tag:[[:space:]]/) {
+        v = $0
+        sub(/^    tag:[[:space:]]*/, "", v)          # drop the key
+        sub(/[[:space:]]+#.*$/, "", v)               # drop a trailing comment
+        gsub(/^[[:space:]]+|[[:space:]]+$/, "", v)   # trim
+        gsub(/^"|"$/, "", v)                         # unwrap double quotes
+        gsub(/^'\''|'\''$/, "", v)                   # unwrap single quotes
+        print v
+        exit
+      }
+    }
+  ' "$file"
+}
+
 # Portable, yq-free reader for images.ingestor.channelTags.prod. Same scoping
 # discipline as read_ingestor_tag: only the 6-space `prod:` leaf inside
 # images: -> ingestor: -> channelTags: can match, so no sibling key can be
@@ -69,36 +99,6 @@ read_ingestor_prod_channel() {
         sub(/[[:space:]]*#.*$/, "", line)
         gsub(/[[:space:]]*$/, "", line)
         if (line != "") { print line; exit }
-      }
-    }
-  ' "$file"
-}
-
-read_ingestor_tag() {
-  local file="$1"
-  [[ -f "$file" ]] || return 1
-  awk '
-    # Enter the top-level images: block.
-    /^images:[[:space:]]*$/ { in_images = 1; next }
-    # Any other top-level key (col 0, not a comment) closes it.
-    /^[^[:space:]#]/        { in_images = 0; in_ingestor = 0 }
-    in_images {
-      # A 2-space sibling key under images: — arm the ingestor scope only
-      # while we are inside ingestor:, disarm on the next sibling.
-      if ($0 ~ /^  [A-Za-z_][A-Za-z0-9_]*:[[:space:]]*$/) {
-        in_ingestor = ($0 ~ /^  ingestor:[[:space:]]*$/) ? 1 : 0
-        next
-      }
-      # The 4-space tag: leaf inside ingestor:.
-      if (in_ingestor && $0 ~ /^    tag:[[:space:]]/) {
-        v = $0
-        sub(/^    tag:[[:space:]]*/, "", v)          # drop the key
-        sub(/[[:space:]]+#.*$/, "", v)               # drop a trailing comment
-        gsub(/^[[:space:]]+|[[:space:]]+$/, "", v)   # trim
-        gsub(/^"|"$/, "", v)                         # unwrap double quotes
-        gsub(/^'\''|'\''$/, "", v)                   # unwrap single quotes
-        print v
-        exit
       }
     }
   ' "$file"
