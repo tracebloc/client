@@ -426,7 +426,13 @@ images:
     channelTags:
       dev: "dev"
       stg: "stg"
-      prod: "0.7"
+      # 0.8 line: carries the ds_<hex> per-ingestion write path (D16,
+      # data-ingestors#408, first released as v0.8.0 on 2026-07-30; line currently
+      # at v0.8.2, 2026-08-04). A prod edge left on 0.7 spawns a pre-D16 ingestor
+      # and silently falls back to the legacy tables even with
+      # `perIngestionTables` on (found on staging). Verified multi-arch against
+      # ghcr.io 2026-08-04 (linux/amd64 + linux/arm64 OCI image index).
+      prod: "0.8"
 
     # -- PROD REPRODUCIBILITY PIN — the digest prod edges run.
     #
@@ -449,10 +455,11 @@ images:
     # unbumped refresh reaches nobody — and commit. CI's `ingestor-multiarch`
     # job validates this value on every PR.
     #
-    # ghcr.io/tracebloc/ingestor multi-arch index for the 0.7 line, == the
-    # published `tag` above — VERIFIED against ghcr.io 2026-07-25 (linux/amd64 +
-    # linux/arm64 OCI image index). The `VERIFIED` note is the audit trail.
-    prodDigest: "sha256:9098b3c9b83951f825e262d6ff1e9c47c46c5b5cafbfc8fef1ed82ccbadebb24"
+    # ghcr.io/tracebloc/ingestor multi-arch index for the 0.8 line (v0.8.2), ==
+    # the `channelTags.prod` float above — VERIFIED against ghcr.io 2026-08-04
+    # (linux/amd64 + linux/arm64 OCI image index; matches the v0.8.2 GitHub
+    # Release digest). The `VERIFIED` note is the audit trail.
+    prodDigest: "sha256:05e124945a2ef61868661a9137abb5e75dac96a090cb41a7b4e8be520c4b5873"
 
     # -- Whether `prodDigest` applies on this edge. Default true, which means
     # "pin on prod only": it takes effect when the resolved CLIENT_ENV is "prod"

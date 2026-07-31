@@ -315,9 +315,11 @@ Usage: {{ include "tracebloc.ingestorDigest" . }}
   Precedence, mirroring tracebloc.ingestorDigest:
     1. `images.ingestor.tag`          explicit override, any environment
     2. `images.ingestor.channelTags[CLIENT_ENV]`   per-environment channel
-    3. "0.7"                          last-resort literal, so a release that
+    3. "0.8"                          last-resort literal, so a release that
                                       predates these keys still renders under
-                                      `--reuse-values`
+                                      `--reuse-values`. Track the current prod
+                                      line: an older literal here would spawn a
+                                      pre-D16 ingestor on such a release.
 
   Only consulted when no digest applies: jobs-manager builds `repo@digest`
   when tracebloc.ingestorDigest is non-empty, and `repo:tag` otherwise
@@ -338,7 +340,7 @@ Usage: {{ include "tracebloc.ingestorDigest" . }}
 {{- if $channel -}}
 {{- $channel -}}
 {{- else -}}
-{{- "0.7" -}}
+{{- "0.8" -}}
 {{- end -}}
 {{- end -}}
 {{- end }}
