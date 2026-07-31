@@ -1203,6 +1203,19 @@ install_linux() {
   dispatch_gpu_setup
 }
 
+# Are the cpu/cpuset/io controllers ACTUALLY delegated to this user session right now?
+# Reads the live cgroup.controllers of the user slice (#496). A `daemon-reload` writes
+# the drop-in but does NOT restart the running user@$(id -u).service, so the delegated
+# controllers only appear after a re-login — this is how we tell "written" from
+# "in effect" instead of assuming. Path overridable (TB_USER_CGROUP_CONTROLLERS) for
+# tests. memory/pids are delegated by default; cpu/cpuset/io are the ones this adds.
+_cgroup_controllers_active() {
+  local f="${TB_USER_CGROUP_CONTROLLERS:-/sys/fs/cgroup/user.slice/user-$(id -u 2>/dev/null).slice/cgroup.controllers}"
+  [[ -r "$f" ]] || return 1
+  local c; c="$(cat "$f" 2>/dev/null)" || return 1
+  [[ " $c " == *" cpu "* && " $c " == *" cpuset "* && " $c " == *" io "* ]]
+}
+
 # _write_cgroup_delegation — the shared, idempotent WRITE of the cgroup v2 controller
 # delegation drop-in, used by BOTH the sudo-available installer path
 # (_ensure_cgroup_delegation) and admin-run prepare-host (run_prepare_host). Always
@@ -1230,7 +1243,19 @@ _write_cgroup_delegation() {
   printf '%s' "$desired" | sudo tee "$conf" >/dev/null \
     || { warn "Couldn't write the cgroup delegation drop-in at ${conf}."; return 1; }
   sudo systemctl daemon-reload 2>/dev/null || true
-  success "Delegated cpu/cpuset/io cgroup controllers (${conf}). A re-login may be needed for it to take effect."
+  # Verify rather than assume (#496). daemon-reload re-reads unit files but does NOT
+  # restart the running user@$(id -u).service, so the delegation usually isn't live in
+  # THIS session — and the k3d node inherits the delegation state from when it is
+  # CREATED. If the controllers aren't active, say the REAL consequence loudly: pod
+  # CPU/memory limits won't enforce until a re-login AND a cluster recreate. (We don't
+  # `systemctl restart user@…` for the user: it would kill their session processes.)
+  if _cgroup_controllers_active; then
+    success "Delegated cpu/cpuset/io cgroup controllers (${conf}) — active in this session."
+  else
+    warn "Wrote the cgroup delegation drop-in (${conf}), but it is NOT active in this session yet — pod CPU/memory limits will NOT be enforced until you log out and back in AND recreate the cluster:"
+    hint "  k3d cluster delete ${CLUSTER_NAME:-tracebloc}   # then log out/in and re-run"
+    hint "  (Until then the install looks healthy, but limit-bearing workloads run unconstrained.)"
+  fi
 }
 
 # _ensure_cgroup_delegation — RFC 0001 #1221 (Tier 1). k3s inside the k3d node needs

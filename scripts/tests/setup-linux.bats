@@ -1561,3 +1561,34 @@ _stub_install_steps() {
   grep -qE 'id -nG "\$_grant_user"[^|]*\| grep -qw docker' "$f"
   ! grep -qE 'id -nG "\$USER"[^|]*\| grep -qw docker' "$f"
 }
+
+# ── #496: cgroup delegation is VERIFIED, not assumed ────────────────────────
+@test "_cgroup_controllers_active: true only when cpu+cpuset+io are all present (#496)" {
+  cf="$(mktemp)"; TB_USER_CGROUP_CONTROLLERS="$cf"
+  echo "cpuset cpu io memory pids" > "$cf"
+  run _cgroup_controllers_active; [ "$status" -eq 0 ]
+  echo "memory pids" > "$cf"                              # cpu/cpuset/io absent (systemd default)
+  run _cgroup_controllers_active; [ "$status" -ne 0 ]
+}
+@test "_cgroup_controllers_active: unreadable controllers file -> not active (#496)" {
+  TB_USER_CGROUP_CONTROLLERS="/no/such/cgroup/controllers"
+  run _cgroup_controllers_active; [ "$status" -ne 0 ]
+}
+@test "_write_cgroup_delegation: controllers NOT active -> warns limits unenforced + recreate (#496)" {
+  TB_USER_UNIT_DROPIN_DIR="$(mktemp -d)/user@.service.d"
+  cf="$(mktemp)"; echo "memory pids" > "$cf"; TB_USER_CGROUP_CONTROLLERS="$cf"   # not delegated yet
+  sudo() { "$@"; }; systemctl() { :; }
+  run _write_cgroup_delegation
+  [[ "$output" == *"NOT active in this session"* ]]
+  [[ "$output" == *"recreate the cluster"* ]]
+  [[ "$output" == *"k3d cluster delete"* ]]
+  [[ "$output" != *"active in this session."* ]]   # never the plain-success wording
+}
+@test "_write_cgroup_delegation: controllers active -> success, no scary warn (#496)" {
+  TB_USER_UNIT_DROPIN_DIR="$(mktemp -d)/user@.service.d"
+  cf="$(mktemp)"; echo "cpuset cpu io memory pids" > "$cf"; TB_USER_CGROUP_CONTROLLERS="$cf"
+  sudo() { "$@"; }; systemctl() { :; }
+  run _write_cgroup_delegation
+  [[ "$output" == *"active in this session"* ]]
+  [[ "$output" != *"NOT active"* ]]
+}
