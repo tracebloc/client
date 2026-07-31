@@ -395,11 +395,11 @@ Describe "Invoke-WithHeartbeat (#422 no silent window)" {
 Describe "Step honesty (#422 split check vs install)" {
   BeforeAll { $script:SRC = Get-Content "$PSScriptRoot/../install-k8s.ps1" -Raw }
   It "runs six steps, not five" {
-    $script:SRC | Should -Match 'Step 6 6 "'
+    $script:SRC | Should -Match 'Step 6 \$script:INSTALL_STEPS\.Count "'
     $script:SRC | Should -Not -Match 'Step [0-9] 5 "'
   }
   It "has a dedicated 'Installing system tools' step" {
-    $script:SRC | Should -Match 'Step 2 6 "Installing system tools"'
+    $script:SRC | Should -Match 'Step 2 \$script:INSTALL_STEPS\.Count "Installing system tools"'
   }
   It "the k3d start path runs as a killable process with output to the log, not streamed (Bugbot #422)" {
     # No bare streaming form; k3d start is a tracked process with its raw INFO[...]
@@ -414,12 +414,13 @@ Describe "Step honesty (#422 split check vs install)" {
     $script:SRC | Should -Match 'Wait-ProcessWithDeadline -Process \$sp'
     $script:SRC | Should -Match '\$sp\.ExitCode -ne 0'
   }
-  It "the Docker installer runs as a killable process, not an orphan-prone job (Bugbot #422)" {
-    # Start-Process -PassThru + Wait-ProcessWithDeadline (kills on timeout) + an
-    # exit-code check — a background job would orphan the installer on timeout.
-    $script:SRC | Should -Match 'Start-Process -FilePath \$installer[\s\S]{0,200}-PassThru -ErrorAction Stop'
-    $script:SRC | Should -Match 'Wait-ProcessWithDeadline -Process \$ip'
-    $script:SRC | Should -Match '\$ip\.ExitCode -ne 0'
+  It "the Docker installer runs as a killable, output-capturing process, not an orphan-prone job (Bugbot #422 / #500)" {
+    # The direct install now goes through Invoke-TrackedInstall (killable via
+    # Wait-ProcessWithDeadline INSIDE the helper, output captured) and Errs on any
+    # non-ok outcome (timeout / failed / spawn-failed).
+    $script:SRC | Should -Match 'Invoke-TrackedInstall -FilePath \$installer[\s\S]{0,220}-Tag "docker-direct"'
+    $script:SRC | Should -Match "'timeout'\s+\{ Err"
+    $script:SRC | Should -Match 'function Invoke-TrackedInstall[\s\S]*Wait-ProcessWithDeadline'
   }
   It "k3d/helm print their green summary only after the execute-gate (Bugbot #422)" {
     # A corrupt/wrong-arch binary must fail Assert-ToolRuns before any green Ok;
@@ -427,13 +428,13 @@ Describe "Step honesty (#422 split check vs install)" {
     $script:SRC | Should -Match 'Assert-ToolRuns -Name "k3d"[\s\S]{0,80}if \(\$k3dSummary\) \{ Ok'
     $script:SRC | Should -Match 'Assert-ToolRuns -Name "helm"[\s\S]{0,80}if \(\$helmSummary\) \{ Ok'
   }
-  It "the winget Docker path is killable, checks exit, falls back, and fails loudly (Bugbot #422)" {
-    # winget runs as a tracked process (killable on timeout), its exit is checked
-    # (throw -> fallback), and a final Test-Path guard Errs if nothing landed.
+  It "the winget Docker path is killable, output-captured, falls back, and fails loudly (Bugbot #422 / #500)" {
+    # winget runs through the killable, output-capturing wrapper; a non-ok state
+    # falls back to the direct download, and a final Test-Path guard Errs if nothing
+    # landed.
     $script:SRC | Should -Match 'Docker\.DockerDesktop'
-    $script:SRC | Should -Match 'Start-Process -FilePath "winget"[\s\S]{0,120}-ArgumentList \$wingetArgs'
-    $script:SRC | Should -Match 'Wait-ProcessWithDeadline -Process \$wp'
-    $script:SRC | Should -Match '\$wp\.ExitCode -ne 0'
+    $script:SRC | Should -Match 'Invoke-TrackedInstall -FilePath "winget" -ArgumentList \$wingetArgs'
+    $script:SRC | Should -Match 'will try direct download\): state='
     $script:SRC | Should -Match "Docker Desktop installation didn't complete"
   }
 }
@@ -445,7 +446,9 @@ Describe "Docker Desktop install flags (#419 zero GUI interaction)" {
     # passes Docker Desktop's own installer args. The value must be a single quoted
     # argument in a command-line STRING (array elements aren't quoted on PS 5.1).
     $script:DSRC | Should -Match '--override "install --quiet --accept-license --backend=wsl-2 --always-run-service"'
-    $script:DSRC | Should -Match 'Start-Process -FilePath "winget"[\s\S]{0,120}-ArgumentList \$wingetArgs'
+    # the --override string still flows as a single verbatim arg via $wingetArgs, now
+    # through the output-capturing Invoke-TrackedInstall wrapper (#500).
+    $script:DSRC | Should -Match 'Invoke-TrackedInstall -FilePath "winget" -ArgumentList \$wingetArgs'
   }
   It "direct path installs unattended with the WSL2 backend" {
     $script:DSRC | Should -Match 'install --quiet --accept-license --backend=wsl-2 --always-run-service'
@@ -455,6 +458,64 @@ Describe "Docker Desktop install flags (#419 zero GUI interaction)" {
   }
   It "both paths run the engine service unattended (zero GUI first-run)" {
     ([regex]::Matches($script:DSRC, 'always-run-service')).Count | Should -BeGreaterOrEqual 2
+  }
+}
+
+Describe "Install roadmap single-source (#500 no drift)" {
+  BeforeAll { $script:RSRC = Get-Content "$PSScriptRoot/../install-k8s.ps1" -Raw }
+  It "INSTALL_STEPS lists all six steps, including the tools phase" {
+    $script:INSTALL_STEPS.Count | Should -Be 6
+    $script:INSTALL_STEPS | Should -Contain 'Install system tools'
+  }
+  It "Print-Roadmap renders every step, numbered, from INSTALL_STEPS" {
+    $out = (Print-Roadmap 6>&1 | Out-String)
+    for ($i = 0; $i -lt $script:INSTALL_STEPS.Count; $i++) {
+      $out | Should -Match ([regex]::Escape("$($i+1). $($script:INSTALL_STEPS[$i])"))
+    }
+  }
+  It "every Step header derives its total from INSTALL_STEPS.Count (no hard-coded /6)" {
+    $script:RSRC | Should -Not -Match 'Step [0-9] 6 "'
+    ([regex]::Matches($script:RSRC, 'Step [0-9] \$script:INSTALL_STEPS\.Count ')).Count | Should -Be 6
+  }
+  It "the number of runtime Step calls equals INSTALL_STEPS.Count (roadmap can't drift)" {
+    ([regex]::Matches($script:RSRC, '(?m)^\s*Step [0-9] ')).Count | Should -Be $script:INSTALL_STEPS.Count
+  }
+}
+
+Describe "Invoke-TrackedInstall (#500 capture installer output)" {
+  BeforeAll { $script:ISRC = Get-Content "$PSScriptRoot/../install-k8s.ps1" -Raw }
+  It "redirects both stdout and stderr to temp files" {
+    $script:ISRC | Should -Match 'function Invoke-TrackedInstall[\s\S]*-RedirectStandardOutput[\s\S]*-RedirectStandardError'
+  }
+  It "folds captured output into the log (stderr first, matching #423 ordering)" {
+    $script:ISRC | Should -Match 'function Invoke-TrackedInstall[\s\S]*Get-Content \$errF[\s\S]*Get-Content \$outF'
+    $script:ISRC | Should -Match 'function Invoke-TrackedInstall[\s\S]*if \(\$log\) \{ Log'
+  }
+  It "all four winget/installer installs go through the capturing wrapper" {
+    foreach ($tag in 'docker-winget','docker-direct','k3d-winget','helm-winget') {
+      $script:ISRC | Should -Match "Invoke-TrackedInstall[\s\S]{0,300}-Tag `"$tag`""
+    }
+  }
+  It "returns ok with the exit code when the process succeeds" {
+    Mock Start-Process { [pscustomobject]@{ ExitCode = 0; HasExited = $true } }
+    Mock Wait-ProcessWithDeadline { $true }
+    $r = Invoke-TrackedInstall -FilePath "x" -ArgumentList @() -Label "t" -Tag "t"
+    $r.State | Should -Be 'ok'; $r.ExitCode | Should -Be 0
+  }
+  It "returns failed with the exit code when the process exits non-zero" {
+    Mock Start-Process { [pscustomobject]@{ ExitCode = 3; HasExited = $true } }
+    Mock Wait-ProcessWithDeadline { $true }
+    $r = Invoke-TrackedInstall -FilePath "x" -ArgumentList @() -Label "t" -Tag "t"
+    $r.State | Should -Be 'failed'; $r.ExitCode | Should -Be 3
+  }
+  It "returns timeout when the deadline is hit" {
+    Mock Start-Process { [pscustomobject]@{ ExitCode = 0; HasExited = $false } }
+    Mock Wait-ProcessWithDeadline { $false }
+    (Invoke-TrackedInstall -FilePath "x" -ArgumentList @() -Label "t" -Tag "t").State | Should -Be 'timeout'
+  }
+  It "returns spawn-failed when the process can't start" {
+    Mock Start-Process { throw "no such file" }
+    (Invoke-TrackedInstall -FilePath "x" -ArgumentList @() -Label "t" -Tag "t").State | Should -Be 'spawn-failed'
   }
 }
 
