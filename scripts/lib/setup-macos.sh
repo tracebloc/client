@@ -354,11 +354,15 @@ install_macos_cli_tools() {
 # `open -a Docker` on a GUI Mac, `colima start` on a headless one. Best-effort — never
 # fail the install over autostart. Sets TB_MACOS_AUTOSTART=1 so the summary can honestly
 # promise auto-restart. Dir overridable (TB_LAUNCHAGENTS_DIR) + launchctl mockable for tests.
-# Emit a launchd plist to stdout: Label, RunAtLoad, ProgramArguments=$@, plus any raw
-# EXTRA XML (e.g. a boot daemon's UserName/EnvironmentVariables). Kept separate so the
-# GUI LaunchAgent and the headless LaunchDaemon share one skeleton (bash-3.2-safe).
+# Emit a launchd plist to stdout: Label, RunAtLoad, ProgramArguments=$@, a per-user
+# LOGPATH for std{out,err}, plus any raw EXTRA XML (e.g. a boot daemon's UserName/
+# EnvironmentVariables). Kept separate so the GUI LaunchAgent and the headless
+# LaunchDaemon share one skeleton (bash-3.2-safe). LOGPATH must be per-user (not a fixed
+# /tmp path): with the installer's umask 077 a shared /tmp log is created 0600 by the
+# first account and a second account's job then can't open it (EX_CONFIG → runtime never
+# starts), and /tmp is symlink-plantable on a shared Mac (#430 Bugbot).
 _emit_launch_plist() {
-  local label="$1" extra="$2"; shift 2
+  local label="$1" extra="$2" logpath="$3"; shift 3
   printf '%s\n' '<?xml version="1.0" encoding="UTF-8"?>'
   printf '%s\n' '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">'
   printf '%s\n' '<plist version="1.0">'
@@ -371,8 +375,8 @@ _emit_launch_plist() {
   printf '%s\n' '  </array>'
   printf '%s\n' '  <key>RunAtLoad</key><true/>'
   [[ -n "$extra" ]] && printf '%s\n' "$extra"
-  printf '  <key>StandardOutPath</key><string>%s</string>\n' '/tmp/tracebloc-autostart.log'
-  printf '  <key>StandardErrorPath</key><string>%s</string>\n' '/tmp/tracebloc-autostart.log'
+  printf '  <key>StandardOutPath</key><string>%s</string>\n' "$logpath"
+  printf '  <key>StandardErrorPath</key><string>%s</string>\n' "$logpath"
   printf '%s\n' '</dict>'
   printf '%s\n' '</plist>'
 }
@@ -401,7 +405,8 @@ _install_macos_autostart() {
       warn "Couldn't create ${dir}; skipping login autostart — open Docker Desktop manually after a reboot."
       return 1
     }
-    _emit_launch_plist "$label" "" /usr/bin/open -a Docker > "$plist" 2>/dev/null || {
+    mkdir -p "$HOME/Library/Logs" 2>/dev/null || true
+    _emit_launch_plist "$label" "" "$HOME/Library/Logs/tracebloc-autostart.log" /usr/bin/open -a Docker > "$plist" 2>/dev/null || {
       warn "Couldn't write the login autostart agent at ${plist}; open Docker Desktop manually after a reboot."
       return 1
     }
@@ -429,7 +434,7 @@ _install_macos_autostart() {
       warn "Couldn't create ${dir}; skipping boot autostart — run 'colima start' manually after a reboot."
       return 1
     }
-    _emit_launch_plist "$label" "$extra" "$_colima" start | sudo tee "$plist" >/dev/null 2>&1 || {
+    _emit_launch_plist "$label" "$extra" "${_home}/Library/Logs/tracebloc-autostart.log" "$_colima" start | sudo tee "$plist" >/dev/null 2>&1 || {
       warn "Couldn't write the boot autostart daemon at ${plist}; run 'colima start' manually after a reboot."
       return 1
     }

@@ -100,9 +100,12 @@ _reboot_note() {
   # Single dim footer line — the LAST line of the summary.
   if [[ "$OS" != "Linux" ]]; then
     if [[ "${TB_MACOS_AUTOSTART:-0}" == "1" ]]; then
-      # macOS login autostart configured (_install_macos_autostart, #430): the runtime
-      # starts at login and the k3d --restart policy brings the cluster back → zero action.
-      echo -e "  ${DIM}After a reboot, tracebloc restarts automatically (login item configured).${RESET}"
+      # macOS autostart configured (_install_macos_autostart, #430): the runtime starts on
+      # boot/login and the k3d --restart policy brings the cluster back → zero action. Don't
+      # name a specific mechanism here — GUI installs a LaunchAgent (login item) but headless
+      # installs a system LaunchDaemon (not a login item), so "login item" would mislead IT
+      # on a headless box (#430 Bugbot).
+      echo -e "  ${DIM}After a reboot, tracebloc restarts automatically.${RESET}"
     else
       # macOS/Windows fallback: Docker Desktop owns boot autostart and must be launched.
       echo -e "  ${DIM}After a reboot, open Docker Desktop to bring tracebloc back.${RESET}"

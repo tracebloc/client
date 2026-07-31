@@ -64,6 +64,8 @@ setup() {
   grep -q '<string>/usr/bin/open</string>' "$plist"
   grep -q '<string>-a</string>' "$plist"
   grep -q '<string>Docker</string>' "$plist"
+  grep -q 'Library/Logs/tracebloc-autostart.log' "$plist"   # per-user log, not shared /tmp (#430 Bugbot)
+  ! grep -q '/tmp/tracebloc-autostart.log' "$plist"
   run mock_calls
   [[ "$output" == *"launchctl"* ]]         # registered for this session too
 }
