@@ -26,6 +26,13 @@ PF_WARN_DISK_GB="${PF_WARN_DISK_GB:-20}"   # warn below this
 PF_MIN_MEM_GB="${PF_MIN_MEM_GB:-5}"        # hard-fail below this (Linux; warn on Mac/Win)
 PF_WARN_MEM_GB="${PF_WARN_MEM_GB:-8}"      # warn below this (comfortable to run)
 PF_REC_MEM_GB="${PF_REC_MEM_GB:-16}"       # recommended to train locally (copy only, not a gate)
+PF_OS_RESERVE_GB="${PF_OS_RESERVE_GB:-2}"  # RAM to leave the OS — recommendations clamp at physical − this (#428)
+# A guest VM's reported MemTotal runs a few hundred MiB below its CONFIGURED size
+# (kernel/reserved). The runtime recheck sees the GUEST figure, so it tolerates this
+# much below the floor — otherwise a Docker Desktop VM set to exactly the documented
+# floor would hard-fail on the guest shortfall, making the effective floor a GB higher
+# than we tell people (#513 reviewer). 512 MiB comfortably covers the observed gap.
+PF_VM_MEM_GRACE_MIB="${PF_VM_MEM_GRACE_MIB:-512}"
 PF_MIN_CPU="${PF_MIN_CPU:-2}"              # warn below this
 PF_REC_CPU="${PF_REC_CPU:-4}"              # recommended (warn) below this
 
@@ -130,6 +137,49 @@ _pf_host_mem_kb() {
   fi
 }
 
+# Host physical RAM in whole GB (0 when undeterminable). (#428)
+_pf_host_mem_gb() {
+  local kb; kb="$(_pf_host_mem_kb)"
+  [[ "$kb" =~ ^[0-9]+$ ]] || { printf '0'; return 0; }
+  printf '%s' "$(( kb / 1024 / 1024 ))"
+}
+
+# Clamp a DESIRED memory figure (GB) so a hint never exceeds this machine (#428):
+# min(DESIRED, physical − PF_OS_RESERVE_GB), but NEVER below PF_MIN_MEM_GB — the client
+# needs the floor to run, so a hint must never tell the operator to "raise to" a
+# sub-floor number (Bugbot). "raise to 16 GB" on a 16 GB Mac is impossible; "raise to
+# 4 GB" on a 6 GB Mac is nonsensical (below the floor AND their RAM). Physical unknown/0
+# -> DESIRED (can't clamp). Args: DESIRED [physical GB (default: host)].
+_pf_clamp_mem_gb() {
+  local desired="$1" phys="${2:-$(_pf_host_mem_gb)}" cap
+  [[ "$phys" =~ ^[0-9]+$ && "$phys" -gt 0 ]] || { printf '%s' "$desired"; return 0; }
+  cap=$(( phys - PF_OS_RESERVE_GB )); (( cap < PF_MIN_MEM_GB )) && cap=$PF_MIN_MEM_GB
+  if (( desired < cap )); then printf '%s' "$desired"; else printf '%s' "$cap"; fi
+}
+
+# The memory budget (GB) to give a macOS VM (colima / Docker Desktop), derived from
+# physical RAM (#428): min(half of physical, the clamped recommendation), never below
+# the client floor PF_MIN_MEM_GB. The single sizing helper both macOS paths share.
+# Physical unknown/0 -> the historic COLIMA_MEMORY default. Arg: physical GB (default: host).
+_macos_vm_mem_gb() {
+  local phys="${1:-$(_pf_host_mem_gb)}" half rec budget safe_floor cap
+  [[ "$phys" =~ ^[0-9]+$ && "$phys" -gt 0 ]] || { printf '%s' "${COLIMA_MEMORY:-6}"; return 0; }
+  half=$(( phys / 2 ))
+  rec="$(_pf_clamp_mem_gb "$PF_REC_MEM_GB" "$phys")"
+  budget=$(( half < rec ? half : rec ))
+  # Never size EXACTLY to the floor: the guest MemTotal runs a few hundred MiB below
+  # the configured VM size, so a floor-sized VM boots then trips the runtime recheck's
+  # sub-floor hard-fail on its OWN choice (#428 Bugbot). Give ≥ 1 GB of headroom above
+  # the floor — but never over-commit the host (cap at physical − reserve); a host too
+  # small for that gets less, and the recheck then stops it honestly as "too small".
+  safe_floor=$(( PF_MIN_MEM_GB + 1 ))
+  cap=$(( phys - PF_OS_RESERVE_GB ))
+  (( budget < safe_floor )) && budget=$safe_floor
+  (( budget > cap )) && budget=$cap
+  (( budget < 1 )) && budget=1
+  printf '%s' "$budget"
+}
+
 # Logical CPU count of the HOST.
 _pf_host_ncpu() {
   if [[ "$OS" == "Darwin" ]]; then
@@ -225,7 +275,7 @@ _pf_cpu() {
 }
 
 _pf_memory() {
-  local kb gb mib floor_mib warn_mib src
+  local kb gb mib floor_mib warn_mib src rec_gb warn_gb
   kb="$(_pf_total_mem_kb)"
   if [[ -z "$kb" ]]; then warn "Memory: couldn't determine total RAM (skipping)."; return 0; fi
   gb=$(( kb / 1024 / 1024 ))
@@ -235,21 +285,26 @@ _pf_memory() {
   floor_mib=$(( PF_MIN_MEM_GB * 1024 - 64 ))
   warn_mib=$(( PF_WARN_MEM_GB * 1024 ))
   src="host"; [[ -n "$(_pf_runtime_mem_kb)" ]] && src="Docker VM"
+  # SHOWN figures clamped to physical RAM so no hint asks for more than the machine
+  # has (#428): "raise to 16 GB" on a 16 GB Mac is impossible.
+  rec_gb="$(_pf_clamp_mem_gb "$PF_REC_MEM_GB")"
+  warn_gb="$(_pf_clamp_mem_gb "$PF_WARN_MEM_GB")"
 
   if [[ "$mib" -lt "$floor_mib" ]]; then
     if [[ "$OS" == "Linux" ]]; then
       _pf_fail_line "Memory: only ${gb} GB (${src}) — need ≥ ${PF_MIN_MEM_GB} GB to run the tracebloc client."
       PF_HARD_FAIL=$(( ${PF_HARD_FAIL:-0} + 1 ))
-      hint "Resize the VM (or free memory) to ≥ ${PF_WARN_MEM_GB} GB; ${PF_REC_MEM_GB} GB to train locally. Then re-run."
+      hint "Resize the VM (or free memory) to ≥ ${warn_gb} GB; ${rec_gb} GB to train locally. Then re-run."
     else
       # Mac/Win: at preflight Docker is usually still down, so this is host RAM —
-      # warn (don't block); the create_cluster re-check sees the real VM size.
+      # warn (don't block); the create_cluster re-check sees the real VM size and
+      # HARD-FAILS a sub-floor VM (#428).
       warn "Memory: ${gb} GB (${src}) — below the ${PF_MIN_MEM_GB} GB the client needs; it will OOM."
-      hint "Docker Desktop → Settings → Resources → Memory: raise to ≥ ${PF_WARN_MEM_GB} GB (${PF_REC_MEM_GB} GB to train), then re-run."
+      hint "Docker Desktop → Settings → Resources → Memory: raise to ≥ ${warn_gb} GB (${rec_gb} GB to train), then re-run."
     fi
   elif [[ "$mib" -lt "$warn_mib" ]]; then
-    warn "Memory: ${gb} GB (${src}) — enough to run, but training (≈8 GB/job) may OOM; ${PF_REC_MEM_GB} GB recommended to train locally."
-    [[ "$OS" != "Linux" ]] && hint "Docker Desktop → Settings → Resources → Memory ≥ ${PF_REC_MEM_GB} GB to train."
+    warn "Memory: ${gb} GB (${src}) — enough to run, but training (≈8 GB/job) may OOM; ${rec_gb} GB recommended to train locally."
+    [[ "$OS" != "Linux" ]] && hint "Docker Desktop → Settings → Resources → Memory ≥ ${rec_gb} GB to train."
   else
     _pf_ok "Memory: ${gb} GB (${src})"
   fi
@@ -271,16 +326,38 @@ _pf_memory() {
 # Re-evaluate memory once Docker is confirmed up. Preflight runs before Docker
 # starts (install-k8s.sh), so on macOS/Windows the first read was host RAM, not the
 # Docker VM's smaller budget. Called from create_cluster (cluster.sh) — the first
-# point `docker info` is reliably up on every OS. WARN-only: the user has already
-# waited for Docker to come up, so aborting here would be jarring.
+# point `docker info` is reliably up on every OS. A sub-FLOOR VM HARD-FAILS here with
+# the exact fix (#428): it will OOM-crashloop the client, so proceeding is worse than
+# the jarring stop the WARN path used to avoid. A between-floor-and-warn VM still only
+# warns (the user has waited for Docker; it can run, just tightly).
 _pf_recheck_runtime_mem() {
   [[ -n "${TRACEBLOC_SKIP_PREFLIGHT:-}" ]] && return 0
-  local kb gb; kb="$(_pf_runtime_mem_kb)"
+  local kb gb mib rec_gb warn_gb; kb="$(_pf_runtime_mem_kb)"
   [[ -z "$kb" ]] && return 0          # daemon still not reporting — nothing to add
   gb=$(( kb / 1024 / 1024 ))
-  if [[ $(( kb / 1024 )) -lt $(( PF_WARN_MEM_GB * 1024 )) ]]; then
-    warn "Docker is running with ${gb} GB — recommended ≥ ${PF_WARN_MEM_GB} GB (${PF_REC_MEM_GB} GB to train); the client may OOM under load."
-    [[ "$OS" != "Linux" ]] && hint "Docker Desktop → Settings → Resources → Memory ≥ ${PF_WARN_MEM_GB} GB, then re-install."
+  mib=$(( kb / 1024 ))
+  rec_gb="$(_pf_clamp_mem_gb "$PF_REC_MEM_GB")"
+  warn_gb="$(_pf_clamp_mem_gb "$PF_WARN_MEM_GB")"
+  if [[ "$mib" -lt $(( PF_MIN_MEM_GB * 1024 - PF_VM_MEM_GRACE_MIB )) ]]; then
+    # The REAL VM size is now known and it's below the floor — the client OOMs. Stop.
+    # Tolerance is PF_VM_MEM_GRACE_MIB (not 64): the guest MemTotal is a few hundred MiB
+    # under the configured size, so a VM set to exactly the documented floor still
+    # passes here rather than hard-failing on the guest shortfall (#513 reviewer).
+    # If the HOST is too small to ever give the VM the floor (physical − reserve <
+    # floor), no resize helps — say so plainly instead of a remedy that repeats an
+    # unachievable size (#428 Bugbot; mirrors the PowerShell host-too-small branch).
+    local phys_gb; phys_gb="$(_pf_host_mem_gb)"
+    if [[ "$OS" != "Linux" && "$phys_gb" =~ ^[0-9]+$ && "$phys_gb" -gt 0 && $(( phys_gb - PF_OS_RESERVE_GB )) -lt PF_MIN_MEM_GB ]]; then
+      error "This Mac has ${phys_gb} GB RAM — too little for tracebloc: the client needs a ${PF_MIN_MEM_GB} GB Docker VM and macOS needs ~${PF_OS_RESERVE_GB} GB, so about $(( PF_MIN_MEM_GB + PF_OS_RESERVE_GB )) GB physical is the practical minimum. Use a larger machine."
+    elif [[ "$OS" == "Linux" ]]; then
+      error "Docker has only ${gb} GB — below the ${PF_MIN_MEM_GB} GB the tracebloc client needs; it will OOM. Free memory (or raise the VM) to ≥ ${warn_gb} GB, then re-run."
+    else
+      error "Docker's VM has only ${gb} GB — below the ${PF_MIN_MEM_GB} GB the tracebloc client needs; it will OOM. Raise it: Docker Desktop → Settings → Resources → Memory ≥ ${warn_gb} GB (or colima: colima stop && colima start --memory ${warn_gb}), then re-run."
+    fi
+  fi
+  if [[ "$mib" -lt "$(( PF_WARN_MEM_GB * 1024 ))" ]]; then
+    warn "Docker is running with ${gb} GB — recommended ≥ ${warn_gb} GB (${rec_gb} GB to train); the client may OOM under load."
+    [[ "$OS" != "Linux" ]] && hint "Docker Desktop → Settings → Resources → Memory ≥ ${warn_gb} GB, then re-install."
   fi
   return 0
 }
