@@ -3658,8 +3658,20 @@ function Show-MemoryStatus {
     }
   }
   elseif ($effective -lt $warnMemGb) {
-    Warn "Memory: $label$budgetNote - enough to run the client, but training (~8 GB/job) may OOM; $recTrain GB recommended to train locally."
-    Hint "For local training, give Docker up to $recTrain GB: WSL2 backend - [wsl2] memory=${recTrain}GB in %UserProfile%\.wslconfig + 'wsl --shutdown'; Hyper-V - Docker Desktop -> Settings -> Resources -> Advanced."
+    # hostTooSmall must be consulted HERE too, not only in the below-floor branch
+    # (Bugbot). A 5-6 GB host with Docker down grades as "enough to run", and the
+    # training hint would then print memory=5GB — a budget that leaves the OS 1 GB
+    # and that this same function calls unachievable two branches up. Such a
+    # machine cannot be tuned into a training box at all, so name that instead of
+    # printing a number: no branch may emit a concrete memory= value for a host
+    # that cannot reach the floor while keeping the OS reserve.
+    if ($hostTooSmall) {
+      Warn "Memory: $label$budgetNote - enough to run the client, but too little to train locally (~8 GB/job)."
+      Hint "This machine has $label of RAM total and the OS needs ~$script:PfOsReserveGb GB, so it cannot give Docker a training-sized budget. Run the client here and train on a larger machine."
+    } else {
+      Warn "Memory: $label$budgetNote - enough to run the client, but training (~8 GB/job) may OOM; $recTrain GB recommended to train locally."
+      Hint "For local training, give Docker up to $recTrain GB: WSL2 backend - [wsl2] memory=${recTrain}GB in %UserProfile%\.wslconfig + 'wsl --shutdown'; Hyper-V - Docker Desktop -> Settings -> Resources -> Advanced."
+    }
   }
   else {
     Ok "Memory: $label$budgetNote"

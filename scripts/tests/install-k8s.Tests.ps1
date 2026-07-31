@@ -1629,6 +1629,37 @@ Describe "Show-MemoryStatus: a host too small to reach the floor (#417/#444)" {
       $out | Should -Not -Match 'memory=[1-4]GB'
     }
   }
+
+  # Bugbot: hostTooSmall was only consulted in the below-floor branch, so a 5-6 GB
+  # host with Docker DOWN graded as "enough to run" and the TRAINING hint printed
+  # memory=5GB — leaving the OS 1 GB, a budget this same function calls
+  # unachievable two branches up.
+  It "a too-small host with Docker down gets no training resize number" {
+    $out = (Show-MemoryStatus -HostGb 6 -BudgetGb $null 6>&1 | Out-String)
+    $out | Should -Match 'too little to train locally'
+    $out | Should -Match 'train on a larger machine'
+    $out | Should -Not -Match 'memory=5GB'
+    $out | Should -Not -Match 'give Docker up to'
+  }
+  It "a host that CAN reach the floor still gets the training recommendation" {
+    # 16 GB host, 6 GB budget: between floor and warn, and 16 - 2 >= 5 so the
+    # machine is genuinely tunable -> keep the actionable number.
+    $out = (Show-MemoryStatus -HostGb 16 -BudgetGb 6 6>&1 | Out-String)
+    $out | Should -Match 'give Docker up to 14 GB'
+    $out | Should -Match 'memory=14GB'
+    $out | Should -Not -Match 'larger machine'
+  }
+  # The invariant that closes this class of bug for good: across EVERY branch and
+  # every budget shape, a host that cannot reach the floor while keeping the OS
+  # reserve must never be handed a concrete memory= value to write.
+  It "no branch emits a concrete memory= value for a host that cannot reach the floor" {
+    foreach ($h in 1..6) {                     # 6 - 2 reserve = 4 < 5 floor
+      foreach ($b in @($null, 1, 2, 3, 4, 5, 6)) {
+        $out = (Show-MemoryStatus -HostGb $h -BudgetGb $b 6>&1 | Out-String)
+        $out | Should -Not -Match 'memory=\d+GB' -Because "host=$h budget=$b must not print a writable budget"
+      }
+    }
+  }
 }
 
 Describe "Show-MemoryStatus (#417 grade effective, label host)" {
