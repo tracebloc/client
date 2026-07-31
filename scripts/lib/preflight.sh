@@ -244,7 +244,10 @@ _pf_arch() {
     return 0
   fi
   if [[ "$OS" != "Linux" ]]; then
-    _pf_note "Architecture: ${ARCH} — Docker Desktop runs the amd64 client images under emulation (slower, but works)."
+    # Don't ASSUME emulation works here — Docker isn't up yet at preflight, so the real
+    # amd64 smoke runs post-Docker (assert_amd64_emulation, #433). Name the setting now
+    # so the operator can pre-empt it.
+    _pf_note "Architecture: ${ARCH} — the amd64 client images run under emulation; Docker's \"Use Rosetta for x86_64/amd64 emulation\" must be enabled (verified once Docker is running)."
     return 0
   fi
   if _pf_amd64_emulation_available; then
