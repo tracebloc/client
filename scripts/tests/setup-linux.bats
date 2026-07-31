@@ -1553,3 +1553,11 @@ _stub_install_steps() {
   SUDO_USER=alice run refuse_sudo_wrapped_install
   [ "$status" -eq 0 ]
 }
+
+@test "install_docker_engine: sg-docker re-exec guard keys off _grant_user, not bare \$USER (#427 reviewer)" {
+  # The grant target and the in-session re-exec guard must agree, or the USER-unset
+  # edge grants but never re-execs -> the dead-end loop returns.
+  f="$BATS_TEST_DIRNAME/../lib/setup-linux.sh"
+  grep -qE 'id -nG "\$_grant_user"[^|]*\| grep -qw docker' "$f"
+  ! grep -qE 'id -nG "\$USER"[^|]*\| grep -qw docker' "$f"
+}

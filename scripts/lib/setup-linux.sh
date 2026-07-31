@@ -197,6 +197,11 @@ install_docker_engine() {
   # below stays testable on hosts without one — e.g. macOS dev machines, where a
   # bash `[[ -f ]]` file-test can't be mocked the way a command like `grep` can.
   local os_release="${TB_OS_RELEASE_FILE:-/etc/os-release}"
+  # The invoking user we grant docker to AND re-exec under — resolved once so the
+  # grant and the sg-docker re-exec guard below always agree, even in the USER-unset
+  # edge (#427 reviewer). A sudo-wrapped full run is already refused, so this is the
+  # real daily user, never root.
+  local _grant_user="${USER:-$(id -un 2>/dev/null)}"
   if ! has docker; then
     if [[ -f "$os_release" ]] && grep -qi 'amzn\|amazon' "$os_release"; then
       if has dnf; then spin_cmd "Installing Docker…" sudo dnf install -y docker
@@ -245,7 +250,6 @@ install_docker_engine() {
     # already refused, so $USER is the real daily user. TB_PREPARE_USER is the
     # admin-for-someone-else mechanism and is granted only on the prepare-host path
     # (#427 Bugbot; matches the rest of the tree's identity).
-    local _grant_user="${USER:-$(id -un 2>/dev/null)}"
     if ! id -nG "$_grant_user" 2>/dev/null | grep -qw docker; then
       sudo usermod -aG docker "$_grant_user" 2>/dev/null \
         || warn "Couldn't add ${_grant_user} to the docker group; add it manually:  sudo usermod -aG docker ${_grant_user}"
@@ -310,8 +314,10 @@ install_docker_engine() {
     error "Fix the Docker error above, then re-run prepare-host."
   fi
   if ! docker info &>/dev/null 2>&1; then
-    # (a) Group not active in THIS shell yet → re-exec under the docker group.
-    if [[ -z "${TB_PREPARE_HOST_MODE:-}" && -z "${_K3S_INSTALL_REEXEC:-}" ]] && id -nG "$USER" 2>/dev/null | grep -qw docker; then
+    # (a) Group not active in THIS shell yet → re-exec under the docker group. Key
+    # off $_grant_user (not bare $USER) so the USER-unset edge the grant handled
+    # still triggers the in-session re-exec instead of dead-ending (#427 reviewer).
+    if [[ -z "${TB_PREPARE_HOST_MODE:-}" && -z "${_K3S_INSTALL_REEXEC:-}" ]] && id -nG "$_grant_user" 2>/dev/null | grep -qw docker; then
       SELF="$(readlink -f "$0" 2>/dev/null || echo "$0")"
       log "Docker group not yet active in this session — re-executing script..."
       exec sg docker -c "_K3S_INSTALL_REEXEC=1 bash '$SELF'"
