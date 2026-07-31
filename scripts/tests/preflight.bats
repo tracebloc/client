@@ -13,7 +13,7 @@ setup() {
   _pf_probe_url() { echo ok; }
   _pf_free_kb() { echo $((50 * 1024 * 1024)); }       # 50 GB
   _pf_fstype() { echo ext4; }                          # local disk (storage check passes)
-  _pf_total_mem_kb() { echo $((8 * 1024 * 1024)); }   # 8 GB
+  _pf_host_mem_kb() { echo $((8 * 1024 * 1024)); }   # 8 GB
   _pf_ncpu() { echo 4; }
   _pf_runtime_mem_kb() { echo ""; }   # daemon "down" in tests → selectors/src use host
   _pf_runtime_ncpu() { echo ""; }
@@ -231,46 +231,147 @@ setup() {
 }
 
 @test "_pf_memory: below floor on Linux -> hard fail + resize hint" {
-  OS=Linux; _pf_total_mem_kb() { echo $((3 * 1024 * 1024)); }   # 3 GB
+  OS=Linux; _pf_host_mem_kb() { echo $((3 * 1024 * 1024)); }   # 3 GB
   run _pf_memory; [[ "$output" == *"to run the tracebloc client"* ]]
   PF_HARD_FAIL=0; _pf_memory >/dev/null 2>&1; [ "$PF_HARD_FAIL" -eq 1 ]
 }
 
 @test "_pf_memory: between floor and warn -> warn, no hard fail" {
-  OS=Linux; _pf_total_mem_kb() { echo $((6 * 1024 * 1024)); }   # 6 GB
+  OS=Linux; _pf_host_mem_kb() { echo $((6 * 1024 * 1024)); }   # 6 GB
   run _pf_memory; [[ "$output" == *"recommended to train"* ]]
   PF_HARD_FAIL=0; _pf_memory >/dev/null 2>&1; [ "$PF_HARD_FAIL" -eq 0 ]
 }
 
 @test "_pf_memory: ample RAM -> success" {
-  OS=Linux; _pf_total_mem_kb() { echo $((16 * 1024 * 1024)); }
+  OS=Linux; _pf_host_mem_kb() { echo $((16 * 1024 * 1024)); }
   run _pf_memory; [[ "$output" == *"16 GB"* ]]
   PF_HARD_FAIL=0; _pf_memory >/dev/null 2>&1; [ "$PF_HARD_FAIL" -eq 0 ]
 }
 
 @test "_pf_memory: macOS below floor -> WARN only, never hard fail" {
-  OS=Darwin; _pf_total_mem_kb() { echo $((3 * 1024 * 1024)); }
-  run _pf_memory; [[ "$output" == *"Settings"* ]]
+  OS=Darwin; _pf_host_mem_kb() { echo $((3 * 1024 * 1024)); }
+  run _pf_memory
+  [[ "$output" == *"below the"* ]]
+  [[ "$output" == *"it will OOM"* ]]
+  # The MACHINE is under the floor — no Docker setting fixes that, so this branch
+  # offers no resize remedy (#417); the post-Docker recheck owns the honest
+  # "use a larger machine" stop.
+  [[ "$output" != *"Settings"* ]]
   PF_HARD_FAIL=0; _pf_memory >/dev/null 2>&1; [ "$PF_HARD_FAIL" -eq 0 ]
 }
 
 @test "_pf_memory: 64 MiB grace -> a hair under the floor still passes" {
-  OS=Linux; _pf_total_mem_kb() { echo $(( 5 * 1024 * 1024 - 1000 )); }   # ~5 GB minus a bit
+  OS=Linux; _pf_host_mem_kb() { echo $(( 5 * 1024 * 1024 - 1000 )); }   # ~5 GB minus a bit
   PF_HARD_FAIL=0; _pf_memory >/dev/null 2>&1; [ "$PF_HARD_FAIL" -eq 0 ]
 }
 
 @test "_pf_memory: PF_MIN_MEM_GB override relaxes the floor" {
   OS=Linux; PF_MIN_MEM_GB=2; PF_WARN_MEM_GB=2
-  _pf_total_mem_kb() { echo $((3 * 1024 * 1024)); }   # 3 GB now passes
+  _pf_host_mem_kb() { echo $((3 * 1024 * 1024)); }   # 3 GB now passes
   run _pf_memory; [[ "$output" == *"3 GB"* ]]
   PF_HARD_FAIL=0; _pf_memory >/dev/null 2>&1; [ "$PF_HARD_FAIL" -eq 0 ]
 }
 
 @test "_pf_memory: Linux MemAvailable tight -> extra warn (total fine)" {
-  OS=Linux; _pf_total_mem_kb() { echo $((16 * 1024 * 1024)); }   # total fine
+  OS=Linux; _pf_host_mem_kb() { echo $((16 * 1024 * 1024)); }   # total fine
   _pf_avail_mem_kb() { echo $((2 * 1024 * 1024)); }              # only 2 GB free now
   run _pf_memory; [[ "$output" == *"available right now"* ]]
   PF_HARD_FAIL=0; _pf_memory >/dev/null 2>&1; [ "$PF_HARD_FAIL" -eq 0 ]
+}
+
+# ── memory truth: machine RAM vs Docker's budget (#417) ──────────────────────
+@test "_pf_memory: label is (machine), never flip-flopping to the VM budget (#417)" {
+  OS=Darwin
+  _pf_host_mem_kb()    { echo $((16 * 1024 * 1024)); }   # 16 GB Mac
+  _pf_runtime_mem_kb() { echo $((6 * 1024 * 1024)); }    # Docker VM only 6 GB
+  run _pf_memory
+  [[ "$output" == *"16 GB (machine)"* ]]     # the gate line reports the MACHINE
+  [[ "$output" != *"6 GB (Docker VM)"* ]]    # the old flip-flopped label is gone
+}
+
+@test "_pf_memory: a smaller Docker budget gets its OWN second line (#417)" {
+  OS=Darwin
+  _pf_host_mem_kb()    { echo $((16 * 1024 * 1024)); }
+  _pf_runtime_mem_kb() { echo $((6 * 1024 * 1024)); }
+  run _pf_memory
+  [[ "$output" == *"16 GB (machine)"* ]]
+  [[ "$output" == *"Docker's memory budget: 6 GB"* ]]
+}
+
+@test "_pf_memory: native Linux does NOT duplicate the same number as a budget line (#417)" {
+  OS=Linux
+  # The Linux daemon sees all host RAM, so both readers agree — one line only.
+  _pf_host_mem_kb()    { echo $((16 * 1024 * 1024)); }
+  _pf_runtime_mem_kb() { echo $((16 * 1024 * 1024)); }
+  run _pf_memory
+  [[ "$output" == *"16 GB (machine)"* ]]
+  [[ "$output" != *"Docker's memory budget"* ]]
+}
+
+@test "_pf_memory: host unreadable -> falls back to the VM budget, labelled honestly (#417)" {
+  OS=Darwin
+  _pf_host_mem_kb()    { echo ""; }                      # hw.memsize unreadable
+  _pf_runtime_mem_kb() { echo $((6 * 1024 * 1024)); }
+  run _pf_memory
+  [[ "$output" == *"6 GB (Docker VM)"* ]]                # labelled as the VM, not "machine"
+  [[ "$output" != *"Docker's memory budget"* ]]          # and not also as a second line
+}
+
+@test "_pf_memory: budget advice is clamped to the machine and floored at the minimum (#417/#428)" {
+  OS=Darwin
+  _pf_host_mem_kb()    { echo $((8 * 1024 * 1024)); }    # 8 GB Mac -> cap 8-2 = 6
+  _pf_runtime_mem_kb() { echo $((5 * 1024 * 1024)); }    # 5 GB budget: >= floor, < warn
+  run _pf_memory
+  [[ "$output" == *"Docker's memory budget: 5 GB"* ]]
+  [[ "$output" == *"6 GB"* ]]              # clamped rec, not the raw PF_REC_MEM_GB=16
+  [[ "$output" != *"16 GB"* ]]             # never advise more than the machine has
+}
+
+@test "_pf_runtime_mem_status: Linux hint avoids the Docker Desktop dead end (Bugbot #445)" {
+  OS=Linux
+  _pf_host_mem_kb() { echo $((16 * 1024 * 1024)); }
+  run _pf_runtime_mem_status 4                            # sub-floor budget
+  [[ "$output" == *"below the"* ]]
+  [[ "$output" != *"Docker Desktop"* ]]                   # headless boxes have no Desktop UI
+  [[ "$output" == *"VM/cgroup limit"* ]]
+}
+
+@test "_pf_runtime_mem_status: macOS hint names Docker Desktop AND a real colima resize" {
+  OS=Darwin
+  _pf_host_mem_kb() { echo $((16 * 1024 * 1024)); }
+  run _pf_runtime_mem_status 4
+  [[ "$output" == *"Docker Desktop"* ]]
+  [[ "$output" == *"colima stop && colima start --memory"* ]]
+}
+
+@test "_pf_runtime_mem_status: healthy budget -> ok line, no latch set" {
+  OS=Darwin
+  _pf_host_mem_kb() { echo $((32 * 1024 * 1024)); }
+  PF_RUNTIME_MEM_WARNED=""
+  _pf_runtime_mem_status 16 >/dev/null
+  [ -z "$PF_RUNTIME_MEM_WARNED" ]          # nothing was warned, so nothing to suppress
+}
+
+@test "_pf_recheck_runtime_mem: latch suppresses the DUPLICATE warn (#417)" {
+  source "${BATS_TEST_DIRNAME}/../lib/preflight.sh"
+  OS=Linux; _pf_runtime_mem_kb() { echo $((6 * 1024 * 1024)); }   # between floor and warn
+  error() { printf 'ERR: %s\n' "$*"; exit 1; }
+  PF_RUNTIME_MEM_WARNED=1                   # preflight already reported this budget
+  run _pf_recheck_runtime_mem
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]                          # silent — no second warning for one condition
+}
+
+@test "_pf_recheck_runtime_mem: the latch must NEVER gate the sub-floor HARD FAIL (#417/#513)" {
+  source "${BATS_TEST_DIRNAME}/../lib/preflight.sh"
+  OS=Darwin
+  _pf_runtime_mem_kb() { echo $((4 * 1024 * 1024)); }   # 4 GB VM < 5 GB floor
+  _pf_host_mem_gb() { echo 16; }                        # ample host: the resize path
+  error() { printf 'ERR: %s\n' "$*"; exit 1; }
+  PF_RUNTIME_MEM_WARNED=1                   # latch set — must not buy a pass
+  run _pf_recheck_runtime_mem
+  [ "$status" -ne 0 ]                       # still hard-fails: the floor is enforced
+  [[ "$output" == *"below the"* ]]
 }
 
 @test "_pf_cpu: too few cores -> warn" {
@@ -289,19 +390,16 @@ setup() {
   PF_HARD_FAIL=0; _pf_cpu >/dev/null; [ "$PF_HARD_FAIL" -eq 0 ]   # CPU never hard-fails
 }
 
-# ── selectors: container-runtime view preferred, host fallback ───────────────
-@test "_pf_total_mem_kb: prefers runtime view over host (the Mac trap)" {
-  source "${BATS_TEST_DIRNAME}/../lib/preflight.sh"   # restore the real selectors
-  _pf_runtime_mem_kb() { echo $((4 * 1024 * 1024)); }    # Docker VM = 4 GB
-  _pf_host_mem_kb()    { echo $((36 * 1024 * 1024)); }   # host = 36 GB
-  run _pf_total_mem_kb; [ "$output" -eq $((4 * 1024 * 1024)) ]
-}
-
-@test "_pf_total_mem_kb: falls back to host when runtime empty" {
-  source "${BATS_TEST_DIRNAME}/../lib/preflight.sh"
-  _pf_runtime_mem_kb() { echo ""; }
-  _pf_host_mem_kb()    { echo $((8 * 1024 * 1024)); }
-  run _pf_total_mem_kb; [ "$output" -eq $((8 * 1024 * 1024)) ]
+# ── selectors ────────────────────────────────────────────────────────────────
+# There is deliberately no "prefer the runtime" MEMORY selector any more (#417).
+# The two tests that used to live here asserted exactly the bug — one was even
+# named "the Mac trap" — so they were removed with the selector: memory has two
+# distinct truths and each caller names the one it means. Guard that it stays gone.
+@test "no _pf_total_mem_kb memory selector: the two truths stay separate (#417)" {
+  f="$BATS_TEST_DIRNAME/../lib/preflight.sh"
+  ! grep -qE '^_pf_total_mem_kb\(\)' "$f"
+  # _pf_memory and the hardware summary must read the HOST reader, not a selector.
+  grep -qE '_pf_host_mem_kb' "$f"
 }
 
 @test "_pf_ncpu: prefers runtime, falls back to host" {
@@ -435,7 +533,7 @@ setup() {
   source "${BATS_TEST_DIRNAME}/../lib/preflight.sh"
   OS="$(uname -s)"
   run _pf_ncpu;         [[ "$output" =~ ^[0-9]+$ ]]
-  run _pf_total_mem_kb; [[ "$output" =~ ^[0-9]+$ ]]
+  run _pf_host_mem_kb; [[ "$output" =~ ^[0-9]+$ ]]
   run _pf_free_kb /;    [[ "$output" =~ ^[0-9]+$ ]]
 }
 
@@ -520,7 +618,7 @@ setup() {
 @test "_pf_hw_summary_line: one line 'arch · N CPU cores · N GB memory · N GB free disk'" {
   ARCH=arm64; OS=Darwin
   _pf_ncpu() { echo 6; }
-  _pf_total_mem_kb() { echo $((11 * 1024 * 1024)); }
+  _pf_host_mem_kb() { echo $((11 * 1024 * 1024)); }
   _pf_free_kb() { echo $((419 * 1024 * 1024)); }
   run _pf_hw_summary_line
   [ "$status" -eq 0 ]
@@ -542,7 +640,7 @@ setup() {
 @test "run_preflight: healthy -> collapsed step-a view, per-check ✔ lines folded away" {
   ARCH=arm64; OS=Darwin
   _pf_ncpu() { echo 6; }
-  _pf_total_mem_kb() { echo $((11 * 1024 * 1024)); }
+  _pf_host_mem_kb() { echo $((11 * 1024 * 1024)); }
   _pf_free_kb() { echo $((419 * 1024 * 1024)); }
   _pf_fstype() { echo apfs; }
   _pf_probe_url() { echo ok; }

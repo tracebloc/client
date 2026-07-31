@@ -204,8 +204,46 @@ _pf_has_gui_session() {
 
 # Selectors: prefer the runtime view, fall back to the host. The checks (and the
 # bats numeric test) call these names; they always emit exactly one integer.
-_pf_total_mem_kb() { local v; v="$(_pf_runtime_mem_kb)"; [[ -n "$v" ]] && { echo "$v"; return 0; }; _pf_host_mem_kb; }
+#
+# There is deliberately NO _pf_total_mem_kb "prefer the runtime" memory selector
+# (#417): conflating the two numbers made the SAME machine report "16 GB (host)"
+# on a cold run and "6 GB (Docker VM)" on a warm one. Memory has two distinct
+# truths and each caller must name the one it means — _pf_host_mem_kb for a
+# hardware fact, _pf_runtime_mem_kb for the budget the pods actually get.
+# CPU keeps the fallback selector: there is no equivalent advice split.
 _pf_ncpu()         { local v; v="$(_pf_runtime_ncpu)";   [[ -n "$v" ]] && { echo "$v"; return 0; }; _pf_host_ncpu; }
+
+# The ONE copy for the Docker-budget status line (#417), shared by _pf_memory
+# (Docker already up on a re-run) and the post-Docker recheck — the two used to
+# print diverging text for the identical condition, and both could fire in one
+# run. WARN-ONLY by design; the sub-floor HARD-FAIL stays in
+# _pf_recheck_runtime_mem, which is the only place the real VM size is known
+# (#428/#513). Sets PF_RUNTIME_MEM_WARNED so one run never warns twice about the
+# same budget — that latch suppresses a duplicate WARNING only and must never
+# gate the hard-fail. Arg: the runtime budget in whole GB.
+_pf_runtime_mem_status() {
+  local rt_gb="$1" warn_eff rec_eff
+  warn_eff="$(_pf_clamp_mem_gb "$PF_WARN_MEM_GB")"
+  rec_eff="$(_pf_clamp_mem_gb "$PF_REC_MEM_GB")"
+  if (( rt_gb < PF_MIN_MEM_GB )); then
+    warn "Docker's memory budget: ${rt_gb} GB — below the ${PF_MIN_MEM_GB} GB the client needs; it will OOM."
+  elif (( rt_gb < warn_eff )); then
+    warn "Docker's memory budget: ${rt_gb} GB — recommended ≥ ${warn_eff} GB (${rec_eff} GB to train); the client may OOM under load."
+  else
+    _pf_ok "Docker's memory budget: ${rt_gb} GB"
+    return 0
+  fi
+  if [[ "$OS" == "Darwin" ]]; then
+    hint "Give Docker ${rec_eff} GB: Docker Desktop → Settings → Resources → Memory (colima: colima stop && colima start --memory ${rec_eff})."
+  else
+    # No Docker Desktop dead end on Linux (Bugbot #445): headless/engine-only
+    # boxes have no Desktop UI — a low budget there is the machine's RAM or a
+    # VM/cgroup limit.
+    hint "Give Docker ${rec_eff} GB: on Linux this budget is the machine's RAM or a VM/cgroup limit — raise that limit or free memory, then restart Docker."
+  fi
+  PF_RUNTIME_MEM_WARNED=1
+  return 0
+}
 
 # Docker data root if the daemon is up; else where it will live / a host proxy.
 _pf_docker_root() {
@@ -275,8 +313,22 @@ _pf_cpu() {
 }
 
 _pf_memory() {
-  local kb gb mib floor_mib warn_mib src rec_gb warn_gb
-  kb="$(_pf_total_mem_kb)"
+  # Two truths, two lines (#417): the machine's RAM (a hardware fact — the gate
+  # runs on it; on native Linux the daemon sees all host RAM so the gate is
+  # unchanged) and, when a runtime VM is up with a meaningfully smaller budget
+  # (macOS Docker Desktop / colima, WSL2), Docker's actual budget on its own
+  # line with achievable advice. The old single line flip-flopped between the
+  # two across re-runs of the SAME installer on the SAME machine — "16 GB
+  # (host)" cold, "6 GB (Docker VM)" warm — depending only on whether Docker
+  # happened to already be running.
+  local host_kb rt_kb rt_gb kb gb mib floor_mib warn_mib label rec_gb warn_gb
+  host_kb="$(_pf_host_mem_kb)"
+  rt_kb="$(_pf_runtime_mem_kb)"
+  [[ -n "$rt_kb" ]] && rt_gb=$(( rt_kb / 1024 / 1024 ))
+  # Gate on the machine; only if the host is unreadable fall back to the VM
+  # budget (rare — /proc/meminfo and hw.memsize are near-universal).
+  kb="$host_kb"; label="machine"
+  if [[ -z "$kb" && -n "$rt_kb" ]]; then kb="$rt_kb"; label="Docker VM"; fi
   if [[ -z "$kb" ]]; then warn "Memory: couldn't determine total RAM (skipping)."; return 0; fi
   gb=$(( kb / 1024 / 1024 ))
   mib=$(( kb / 1024 ))
@@ -284,7 +336,6 @@ _pf_memory() {
   # 4*1024^3 (Colima / Docker Desktop) doesn't floor to 3 GB and false-trip the gate.
   floor_mib=$(( PF_MIN_MEM_GB * 1024 - 64 ))
   warn_mib=$(( PF_WARN_MEM_GB * 1024 ))
-  src="host"; [[ -n "$(_pf_runtime_mem_kb)" ]] && src="Docker VM"
   # SHOWN figures clamped to physical RAM so no hint asks for more than the machine
   # has (#428): "raise to 16 GB" on a 16 GB Mac is impossible.
   rec_gb="$(_pf_clamp_mem_gb "$PF_REC_MEM_GB")"
@@ -292,21 +343,27 @@ _pf_memory() {
 
   if [[ "$mib" -lt "$floor_mib" ]]; then
     if [[ "$OS" == "Linux" ]]; then
-      _pf_fail_line "Memory: only ${gb} GB (${src}) — need ≥ ${PF_MIN_MEM_GB} GB to run the tracebloc client."
+      _pf_fail_line "Memory: only ${gb} GB (${label}) — need ≥ ${PF_MIN_MEM_GB} GB to run the tracebloc client."
       PF_HARD_FAIL=$(( ${PF_HARD_FAIL:-0} + 1 ))
       hint "Resize the VM (or free memory) to ≥ ${warn_gb} GB; ${rec_gb} GB to train locally. Then re-run."
     else
-      # Mac/Win: at preflight Docker is usually still down, so this is host RAM —
-      # warn (don't block); the create_cluster re-check sees the real VM size and
-      # HARD-FAILS a sub-floor VM (#428).
-      warn "Memory: ${gb} GB (${src}) — below the ${PF_MIN_MEM_GB} GB the client needs; it will OOM."
-      hint "Docker Desktop → Settings → Resources → Memory: raise to ≥ ${warn_gb} GB (${rec_gb} GB to train), then re-run."
+      # Mac/Win: the MACHINE itself is below the floor — no Docker setting can
+      # fix that, so don't offer a resize remedy here. Warn (don't block); the
+      # create_cluster re-check sees the real VM size and HARD-FAILS a sub-floor
+      # VM (#428), including the honest "use a larger machine" case.
+      warn "Memory: ${gb} GB (${label}) — below the ${PF_MIN_MEM_GB} GB the client needs; it will OOM."
     fi
   elif [[ "$mib" -lt "$warn_mib" ]]; then
-    warn "Memory: ${gb} GB (${src}) — enough to run, but training (≈8 GB/job) may OOM; ${rec_gb} GB recommended to train locally."
-    [[ "$OS" != "Linux" ]] && hint "Docker Desktop → Settings → Resources → Memory ≥ ${rec_gb} GB to train."
+    warn "Memory: ${gb} GB (${label}) — enough to run, but training (≈8 GB/job) may OOM; ${rec_gb} GB of RAM recommended to train locally."
   else
-    _pf_ok "Memory: ${gb} GB (${src})"
+    _pf_ok "Memory: ${gb} GB (${label})"
+  fi
+
+  # Docker's budget as its own line — only when a runtime is up AND its budget is
+  # meaningfully smaller than the machine (the VM case). On native Linux the
+  # daemon sees host RAM, so this would just repeat the line above.
+  if [[ -n "$rt_kb" && "$label" == "machine" ]] && (( rt_gb + 1 < gb )); then
+    _pf_runtime_mem_status "$rt_gb"
   fi
 
   # Linux: even when total is fine, a busy shared VM may have little free RAM now.
@@ -355,7 +412,13 @@ _pf_recheck_runtime_mem() {
       error "Docker's VM has only ${gb} GB — below the ${PF_MIN_MEM_GB} GB the tracebloc client needs; it will OOM. Raise it: Docker Desktop → Settings → Resources → Memory ≥ ${warn_gb} GB (or colima: colima stop && colima start --memory ${warn_gb}), then re-run."
     fi
   fi
-  if [[ "$mib" -lt "$(( PF_WARN_MEM_GB * 1024 ))" ]]; then
+  # Between floor and warn: warn only. Skipped when preflight ALREADY reported
+  # this same budget on a warm re-run (Docker was up before the installer ran,
+  # so _pf_memory printed the "Docker's memory budget" line) — otherwise one run
+  # warns twice about the identical condition (#417). The latch suppresses a
+  # DUPLICATE WARNING only, and is deliberately tested here rather than at the
+  # top of the function so it can never gate the sub-floor hard-fail above.
+  if [[ "$mib" -lt "$(( PF_WARN_MEM_GB * 1024 ))" && -z "${PF_RUNTIME_MEM_WARNED:-}" ]]; then
     warn "Docker is running with ${gb} GB — recommended ≥ ${warn_gb} GB (${rec_gb} GB to train); the client may OOM under load."
     [[ "$OS" != "Linux" ]] && hint "Docker Desktop → Settings → Resources → Memory ≥ ${warn_gb} GB, then re-install."
   fi
@@ -602,7 +665,11 @@ _pf_hw_summary_line() {
   local -a parts=("$ARCH")
   cpu="$(_pf_ncpu)"
   if [[ -n "$cpu" ]]; then parts+=("${cpu} CPU cores"); fi
-  mem_kb="$(_pf_total_mem_kb)"
+  # Host RAM, not the VM budget (#417): a hardware summary that read "7 GB
+  # memory" on a 15 GB machine (Docker up, WSL2/Desktop VM default) was the same
+  # flip-flop bug in miniature. Fall back to the runtime only if the host is
+  # unreadable, so the field is still populated rather than dropped.
+  mem_kb="$(_pf_host_mem_kb)"; [[ -z "$mem_kb" ]] && mem_kb="$(_pf_runtime_mem_kb)"
   if [[ -n "$mem_kb" ]]; then mem_gb=$(( mem_kb / 1024 / 1024 )); parts+=("${mem_gb} GB memory"); fi
   disk_target="$(_pf_docker_root)"
   if [[ ! -d "$disk_target" ]]; then disk_target="/"; fi
