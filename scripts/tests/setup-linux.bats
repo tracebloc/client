@@ -1390,6 +1390,42 @@ _stub_install_steps() {
   [[ "$output" != *"daemon-reload"* ]]              # unchanged -> no user-manager churn
 }
 
+@test "_cgroup_delegation_active: true only when cpu+cpuset+io are all delegated" {
+  local f; f="$(mktemp)"
+  TB_CGROUP_CONTROLLERS_FILE="$f"
+  printf 'cpuset cpu io memory pids\n' > "$f"
+  run _cgroup_delegation_active
+  [ "$status" -eq 0 ]
+  printf 'memory pids\n' > "$f"                      # cpu/cpuset/io absent
+  run _cgroup_delegation_active
+  [ "$status" -ne 0 ]
+  TB_CGROUP_CONTROLLERS_FILE="$f.missing"            # unreadable -> inactive
+  run _cgroup_delegation_active
+  [ "$status" -ne 0 ]
+}
+
+@test "_write_cgroup_delegation: reports active when controllers are already delegated" {
+  TB_USER_UNIT_DROPIN_DIR="$(mktemp -d)/user@.service.d"
+  TB_CGROUP_CONTROLLERS_FILE="$(mktemp)"; printf 'cpuset cpu io memory pids\n' > "$TB_CGROUP_CONTROLLERS_FILE"
+  sudo()      { "$@"; }
+  systemctl() { record "systemctl $*"; }
+  run _write_cgroup_delegation
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"active for this session"* ]]
+  [[ "$output" != *"will NOT be enforced"* ]]        # no false alarm when it IS active
+}
+
+@test "_write_cgroup_delegation: warns honestly (recreate the cluster) when not yet delegated" {
+  TB_USER_UNIT_DROPIN_DIR="$(mktemp -d)/user@.service.d"
+  TB_CGROUP_CONTROLLERS_FILE="$(mktemp)"; printf 'memory pids\n' > "$TB_CGROUP_CONTROLLERS_FILE"
+  sudo()      { "$@"; }
+  systemctl() { record "systemctl $*"; }
+  run _write_cgroup_delegation
+  [ "$status" -eq 0 ]                                # write succeeded -> non-fatal
+  [[ "$output" == *"will NOT be enforced"* ]]        # states the real consequence
+  [[ "$output" == *"recreate the k3d cluster"* ]]    # not merely "a re-login may be needed"
+}
+
 @test "_ensure_cgroup_delegation: no_sudo -> hands off with the exact path + content, writes nothing" {
   local d; d="$(mktemp -d)/user@.service.d"
   TB_USER_UNIT_DROPIN_DIR="$d"; PROBE_PRIVILEGE=no_sudo
