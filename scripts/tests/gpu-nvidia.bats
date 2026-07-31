@@ -138,6 +138,9 @@ _gpu_mocks() {
   run bash -c "awk '/^_docker_default_runtime_is_nvidia\(\)/{d=1} d&&/_bounded .* docker info/{print \"docker-ok\"; d=0}' '$f'"
   [ "$output" = "docker-ok" ] || return 1
   grep -q '_bounded .* k3d cluster list' "$f" || return 1
+  # the post-restart `k3d cluster start` must carry its own deadline (k3d waits
+  # forever by default) — #431 Bugbot r2.
+  grep -qE 'k3d cluster start "\$CLUSTER_NAME" --wait --timeout' "$f" || return 1
 }
 
 @test "install_nvidia_container_toolkit: a failed cluster restart is surfaced, not swallowed (#431 Bugbot)" {

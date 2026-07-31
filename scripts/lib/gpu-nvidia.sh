@@ -167,8 +167,13 @@ install_nvidia_container_toolkit() {
     # the cluster is back when it isn't (#431 Bugbot).
     if (( cluster_was_running )) && has k3d; then
       log "Restarting the '${CLUSTER_NAME}' cluster after the Docker restart..."
-      local start_out
-      if ! start_out="$(k3d cluster start "$CLUSTER_NAME" 2>&1)"; then
+      # BOUNDED (#431 Bugbot): `k3d cluster start` defaults to --wait with timeout 0
+      # (wait forever), so a slow post-restart daemon/node bring-up would hang a
+      # headless re-run. --timeout gives it a real deadline that aborts with an error
+      # (better than a SIGKILL), mirroring the bounded `cluster create` (#426).
+      local start_out start_min
+      start_min="$(tb_minutes_or "${TB_CLUSTER_START_TIMEOUT_MIN:-}" 5)"
+      if ! start_out="$(k3d cluster start "$CLUSTER_NAME" --wait --timeout "${start_min}m" 2>&1)"; then
         warn "Couldn't restart the '${CLUSTER_NAME}' cluster automatically: ${start_out}"
         hint "Start it manually:  k3d cluster start ${CLUSTER_NAME}"
       fi
