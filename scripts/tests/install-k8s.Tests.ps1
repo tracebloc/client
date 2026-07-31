@@ -1663,7 +1663,7 @@ Describe "Memory thresholds are single-sourced (#417/#418 no-drift guard)" {
     # Count LINES, not occurrences: an accessor names its var twice on one line
     # (the truthiness test and the [int] cast). Two read SITES would be two lines.
     $lines = Get-Content "$PSScriptRoot/../install-k8s.ps1"
-    foreach ($v in 'PF_MIN_MEM_GB','PF_WARN_MEM_GB','PF_REC_MEM_GB') {
+    foreach ($v in 'PF_MIN_MEM_GB','PF_WARN_MEM_GB','PF_REC_MEM_GB','PF_VM_MEM_GRACE_MIB') {
       @($lines | Where-Object { $_ -match [regex]::Escape("env:$v") }).Count |
         Should -Be 1 -Because "$v must be read only by its Get-Pf* accessor"
     }
@@ -1802,27 +1802,133 @@ Describe "Show-MemoryStatus (#417 grade effective, label host)" {
   }
 }
 
-Describe "Test-PreflightRuntimeMem (post-Docker, warn-only)" {
-  It "small Docker VM -> warns, does not throw" {
-    Mock Get-PfRuntimeMemGb { 4 }; Mock Get-PfMemGb { 16 }
+Describe "Test-PreflightRuntimeMem (post-Docker: enforces the floor)" {
+  # Windows used to only WARN here while bash HARD-FAILS on every OS
+  # (_pf_recheck_runtime_mem -> error -> exit 1, #513) -- so the platform this whole
+  # memory story is about was the one still shipping the OOM-crashloop. Budgets are
+  # mocked in MiB: the gate needs sub-GB precision (see Get-PfRuntimeMemMib).
+  BeforeEach { Mock Err { throw "runtime-mem-failed" } }   # Err exits; make it assertable
+  AfterEach  { $env:TRACEBLOC_SKIP_PREFLIGHT = $null }
+
+  It "a genuinely sub-floor VM (4 GB) HARD-FAILS instead of proceeding to crashloop" {
+    Mock Get-PfRuntimeMemMib { 4096 }; Mock Get-PfMemGb { 16 }
+    { Test-PreflightRuntimeMem } | Should -Throw
+  }
+  It "a VM at the documented floor still passes despite the guest shortfall (grace band)" {
+    # 5 GB configured reports ~4.8 GB (guest kernel + reserved). Failing that would
+    # make the effective floor a GB higher than we document (#513 reviewer).
+    Mock Get-PfRuntimeMemMib { 4800 }; Mock Get-PfMemGb { 16 }
+    { Test-PreflightRuntimeMem } | Should -Not -Throw
+  }
+  It "and is NOT told it will OOM — the grade and the gate agree (Bugbot)" {
+    # floor(4800/1024) = 4 would have printed hard-floor "it will OOM" copy for a
+    # machine the gate accepts: told a correctly configured box it would crash, then
+    # carried on. The grade folds in the same grace, so it reports the configured 5 GB.
+    Mock Err { }
+    Mock Get-PfRuntimeMemMib { 4800 }; Mock Get-PfMemGb { 16 }
+    $out = (Test-PreflightRuntimeMem 6>&1 | Out-String)
+    $out | Should -Not -Match 'it will OOM'
+    $out | Should -Not -Match 'OOM-crashloop'
+    $out | Should -Match "Docker's current share: 5 GB"   # the configured size
+    $out | Should -Match 'training'                       # the honest warn band
+  }
+  It "the grade boundary and the gate boundary are the SAME boundary" {
+    # The property that makes the contradiction impossible rather than merely absent:
+    # at every MiB either BOTH say sub-floor (fail + OOM copy) or NEITHER does.
+    Mock Err { }
+    Mock Get-PfMemGb { 16 }
+    foreach ($m in 4096, 4607, 4608, 4800, 5120) {
+      Mock Get-PfRuntimeMemMib -MockWith { $m }.GetNewClosure()
+      $out = (Test-PreflightRuntimeMem 6>&1 | Out-String)
+      $saysSubFloor = $out -match 'it will OOM|OOM-crashloop'
+      $gateFails    = $m -lt ((Get-PfMinMemGb) * 1024 - (Get-PfVmMemGraceMib))
+      $saysSubFloor | Should -Be $gateFails -Because "at $m MiB the copy and the gate must agree"
+    }
+  }
+  It "the grace band is bounded — just under it still fails" {
+    Mock Get-PfMemGb { 16 }
+    Mock Get-PfRuntimeMemMib { 4607 }        # floor 5*1024 - 512 grace = 4608
+    { Test-PreflightRuntimeMem } | Should -Throw
+    Mock Get-PfRuntimeMemMib { 4608 }
     { Test-PreflightRuntimeMem } | Should -Not -Throw
   }
   It "daemon not reporting (null) -> no-op, does not throw" {
-    Mock Get-PfRuntimeMemGb { $null }
+    Mock Get-PfRuntimeMemMib { $null }
+    { Test-PreflightRuntimeMem } | Should -Not -Throw
+  }
+  It "a between-floor-and-warn budget still only warns (it can run, just tightly)" {
+    Mock Get-PfRuntimeMemMib { 7168 }; Mock Get-PfMemGb { 15 }
     { Test-PreflightRuntimeMem } | Should -Not -Throw
   }
   It "grades the budget with both floors and caps the rec at host RAM (#417 reviewer)" {
-    Mock Get-PfRuntimeMemGb { 7 }    # budget in the training-warn band
-    Mock Get-PfMemGb { 15 }          # host -> cap the rec at 13 GB
+    Mock Get-PfRuntimeMemMib { 7168 }   # 7 GB — in the training-warn band
+    Mock Get-PfMemGb { 15 }             # host -> cap the rec at 13 GB
     $out = (Test-PreflightRuntimeMem 6>&1 | Out-String)
     $out | Should -Match '13 GB recommended'
     $out | Should -Not -Match '16 GB recommended'
     $out | Should -Match "Docker's current share: 7 GB"
   }
-  It "a below-floor budget OOM-warns (min floor applies to the budget, not just warn) (#417 reviewer)" {
-    Mock Get-PfRuntimeMemGb { 2 }; Mock Get-PfMemGb { 32 }
+  # Message-content tests let Err return instead of throwing, so the function runs to
+  # completion and every line it prints is capturable. The exit itself is asserted by
+  # the hard-fail tests above.
+  It "sub-floor on a BIG host -> an achievable resize target, clamped to the host" {
+    Mock Err { }
+    Mock Get-PfRuntimeMemMib { 2048 }; Mock Get-PfMemGb { 15 }
     $out = (Test-PreflightRuntimeMem 6>&1 | Out-String)
-    $out | Should -Match 'it will OOM'
+    $out | Should -Match 'OOM-crashloop'
+    $out | Should -Match 'wslconfig'
+    # min(warn target 8, host ceiling 15-2=13) = 8 — same as bash's clamped warn
+    # target. The point is that it FITS the host, not that it equals the ceiling.
+    $out | Should -Match 'memory=8GB'
+    $out | Should -Not -Match 'larger machine'   # this host CAN be fixed
+  }
+  It "sub-floor because the HOST is too small -> 'larger machine', no resize number" {
+    # 6 - 2 reserve = 4 < 5: no Docker setting fixes it, so don't repeat an
+    # unachievable size (mirrors the #428 bash branch + Show-MemoryStatus's copy).
+    Mock Err { }
+    Mock Get-PfRuntimeMemMib { 3072 }; Mock Get-PfMemGb { 6 }
+    $out = (Test-PreflightRuntimeMem 6>&1 | Out-String)
+    $out | Should -Match 'practical minimum'
+    $out | Should -Match 'larger machine'
+    $out | Should -Not -Match 'memory=\d+GB'
+  }
+  It "host RAM unreadable + sub-floor -> still fails, with a raw (uncapped) target" {
+    Mock Get-PfRuntimeMemMib { 2048 }; Mock Get-PfMemGb { $null }
+    { Test-PreflightRuntimeMem } | Should -Throw
+  }
+  It "TRACEBLOC_SKIP_PREFLIGHT overrides the hard fail (documented escape hatch)" {
+    $env:TRACEBLOC_SKIP_PREFLIGHT = "1"
+    Mock Get-PfRuntimeMemMib { 1024 }; Mock Get-PfMemGb { 16 }
+    { Test-PreflightRuntimeMem } | Should -Not -Throw
+  }
+  It "reads the budget ONCE so the printed and enforced numbers can't disagree" {
+    Mock Get-PfRuntimeMemMib { 7168 }; Mock Get-PfMemGb { 16 }
+    Test-PreflightRuntimeMem 6>&1 | Out-Null
+    Should -Invoke Get-PfRuntimeMemMib -Exactly -Times 1
+  }
+}
+
+Describe "Windows/bash memory-floor enforcement parity (#513)" {
+  BeforeAll {
+    $script:PSRC = Get-Content "$PSScriptRoot/../install-k8s.ps1" -Raw
+    $script:BSRC = Get-Content "$PSScriptRoot/../lib/preflight.sh" -Raw
+  }
+  It "bash hard-fails a sub-floor VM in its runtime recheck" {
+    # The behaviour Windows is matching. If bash ever softens this, the two
+    # installers have diverged again and this guard should be revisited.
+    $bashRecheck = [regex]::Match($script:BSRC, '(?s)_pf_recheck_runtime_mem\(\)\s*\{.*?\n\}').Value
+    $bashRecheck | Should -Match 'error '
+  }
+  It "the Windows recheck hard-fails too, not warn-only" {
+    $psRecheck = [regex]::Match($script:PSRC, '(?s)function Test-PreflightRuntimeMem\s*\{.*?\n\}').Value
+    $psRecheck | Should -Match 'Write-PfFail'
+    $psRecheck | Should -Match 'Err '
+    $psRecheck | Should -Not -Match 'WARN-only'
+  }
+  It "both tolerate the guest-vs-configured shortfall by the same grace constant" {
+    $script:BSRC | Should -Match 'PF_VM_MEM_GRACE_MIB'
+    $script:PSRC | Should -Match 'PF_VM_MEM_GRACE_MIB'
+    Get-PfVmMemGraceMib | Should -Be 512
   }
 }
 
