@@ -83,6 +83,15 @@ jobs:
           chmod +x scripts/gen-manifest.sh
           scripts/gen-manifest.sh --check
 
+      - name: Installer facts are single-sourced (#435, RFC D3/D4)
+        # Cross-OS facts (tool version pins) live once in scripts/spec/facts.env and are
+        # stamped into every consumer (bash common.sh, PowerShell install-k8s.ps1). Fail
+        # the PR if a consumer drifted from the spec — so a pin bumped in one OS path but
+        # not the other (the #410 incident) can no longer ship. Fix: check-facts.sh --write.
+        run: |
+          chmod +x scripts/check-facts.sh
+          scripts/check-facts.sh --check
+
       - name: Style + terminology guard
         # Enforces the terminal style system (STYLE.md): no hardcoded brand colour
         # outside the tone engine (common.sh), no status/traffic-light emoji, and
