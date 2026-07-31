@@ -107,6 +107,24 @@ spec:
         - name: PER_INGESTION_TABLES
           value: "1"
         {{- end }}
+        {{- if .Values.perExperimentDbCreds }}
+        # RFC-0003 D10 (backend#1181): per-experiment MySQL credentials. When
+        # on, jobs-manager mints a short-lived MySQL user per experiment scoped
+        # to only its own table(s) and injects it into the training pod via a
+        # per-job Secret — instead of every pod sharing the root-equivalent
+        # edgeuser. TB_CREDMGR_* is the dedicated minting identity (provisioned
+        # by jobs-manager on startup from this generated Secret). Rendered only
+        # when enabled so default installs stay byte-identical.
+        - name: PER_EXPERIMENT_DB_CREDS
+          value: "1"
+        - name: TB_CREDMGR_USER
+          value: "tb_credmgr"
+        - name: TB_CREDMGR_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: {{ include "tracebloc.secretName" . }}
+              key: TB_CREDMGR_PASSWORD
+        {{- end }}
         # Ingestor image wiring for the POST /internal/submit-ingestion-run
         # endpoint. jobs-manager spawns each ingestion Job from these values
         # (see client-runtime submit_ingestion_run._build_image_reference):

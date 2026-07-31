@@ -790,6 +790,30 @@ imageRefresh:
 perIngestionTables: false
 
 # ============================================================
+# Per-experiment DB credentials (RFC-0003 D10 — backend#1181)
+# ============================================================
+# When true, jobs-manager mints a short-lived MySQL user for each experiment
+# scoped to ONLY that experiment's physical table(s), and injects it into the
+# training pod via a per-job Secret — instead of every pod sharing the
+# root-equivalent edgeuser (which today can read every dataset + the metadata
+# DB's Service Bus strings). jobs-manager provisions the dedicated tb_credmgr
+# minting identity on startup and revokes each user when its Job ends.
+#
+# Flip per environment, dev first. Default false: today's shared-credential
+# behavior, byte-for-byte. Retiring edgeuser is a later step once this is
+# universally on. Needs no per-edge action — the tb_credmgr password is a
+# generated, upgrade-stable Secret value.
+perExperimentDbCreds: false
+
+# Optional operator pin for the tb_credmgr account password (mirrors
+# podTokenSigningSecret's 3-tier resolution). Leave "" to generate-and-persist
+# on first install. Set it for DR, to match a pre-created MySQL account, or to
+# force a rotation — and to keep the password stable across a
+# perExperimentDbCreds off→on toggle. Must be alphanumeric ([A-Za-z0-9]+);
+# jobs-manager rejects other characters.
+credmgrPassword: ""
+
+# ============================================================
 # Ingestion endpoint authorization (client-runtime#21)
 # ============================================================
 # jobs-manager's POST /internal/submit-ingestion-run authenticates callers
