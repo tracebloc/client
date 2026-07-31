@@ -330,7 +330,7 @@ setup() {
 @test "_pf_runtime_mem_status: Linux hint avoids the Docker Desktop dead end (Bugbot #445)" {
   OS=Linux
   _pf_host_mem_kb() { echo $((16 * 1024 * 1024)); }
-  run _pf_runtime_mem_status 4                            # sub-floor budget
+  run _pf_runtime_mem_status $((4 * 1024))                # sub-floor budget, in MiB
   [[ "$output" == *"below the"* ]]
   [[ "$output" != *"Docker Desktop"* ]]                   # headless boxes have no Desktop UI
   [[ "$output" == *"VM/cgroup limit"* ]]
@@ -339,7 +339,7 @@ setup() {
 @test "_pf_runtime_mem_status: macOS hint names Docker Desktop AND a real colima resize" {
   OS=Darwin
   _pf_host_mem_kb() { echo $((16 * 1024 * 1024)); }
-  run _pf_runtime_mem_status 4
+  run _pf_runtime_mem_status $((4 * 1024))
   [[ "$output" == *"Docker Desktop"* ]]
   [[ "$output" == *"colima stop && colima start --memory"* ]]
 }
@@ -348,8 +348,77 @@ setup() {
   OS=Darwin
   _pf_host_mem_kb() { echo $((32 * 1024 * 1024)); }
   PF_RUNTIME_MEM_WARNED=""
-  _pf_runtime_mem_status 16 >/dev/null
+  _pf_runtime_mem_status $((16 * 1024)) >/dev/null
   [ -z "$PF_RUNTIME_MEM_WARNED" ]          # nothing was warned, so nothing to suppress
+}
+
+# ── Bugbot #445 r2: one threshold, one copy, no dead-end advice ───────────────
+@test "_pf_runtime_mem_status: a machine too small for the floor gets 'larger machine', not a resize (Bugbot #445 r2)" {
+  OS=Darwin
+  _pf_host_mem_kb() { echo $((4 * 1024 * 1024)); }   # 4 GB Mac: 4 − 2 reserve = 2 < 5 floor
+  run _pf_runtime_mem_status $((2 * 1024))
+  [[ "$output" == *"larger machine"* ]]
+  # No "give Docker N GB" dead end, and no concrete size the machine can't provide.
+  [[ "$output" != *"Give Docker"* ]]
+  [[ "$output" != *"colima start --memory"* ]]
+}
+
+@test "_pf_runtime_mem_status: a host that CAN reach the floor still gets the resize remedy" {
+  OS=Darwin
+  _pf_host_mem_kb() { echo $((16 * 1024 * 1024)); }
+  run _pf_runtime_mem_status $((4 * 1024))
+  [[ "$output" == *"Give Docker"* ]]
+  [[ "$output" != *"larger machine"* ]]
+}
+
+@test "_pf_memory + recheck: a budget preflight OK'd is never re-warned by the recheck (Bugbot #445 r2)" {
+  source "${BATS_TEST_DIRNAME}/../lib/preflight.sh"
+  # 8 GB host clamps warn to 8−2=6, so a 6 GB budget is fine. The recheck used to
+  # grade against the RAW PF_WARN_MEM_GB=8 and warn "recommended >= 6 GB" about a
+  # budget the same run had just ticked.
+  OS=Linux
+  _pf_host_mem_kb() { echo $((8 * 1024 * 1024)); }
+  _pf_runtime_mem_kb() { echo $((6 * 1024 * 1024)); }
+  _pf_avail_mem_kb() { echo $((7 * 1024 * 1024)); }
+  error() { printf 'ERR: %s\n' "$*"; exit 1; }
+  PF_RUNTIME_MEM_WARNED=""
+  run _pf_memory
+  [[ "$output" == *"Docker's memory budget: 6 GB"* ]]
+  [[ "$output" != *"recommended ≥"* ]]           # ticked, not warned
+  # Now the recheck, same run: must be silent about the identical budget.
+  PF_RUNTIME_MEM_WARNED=""
+  run _pf_recheck_runtime_mem
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"recommended ≥"* ]]
+  [[ "$output" != *"memory budget"* ]]
+}
+
+@test "_pf_recheck_runtime_mem: healthy budget -> silent, no duplicate tick (#417)" {
+  source "${BATS_TEST_DIRNAME}/../lib/preflight.sh"
+  OS=Darwin
+  _pf_host_mem_kb() { echo $((32 * 1024 * 1024)); }
+  _pf_runtime_mem_kb() { echo $((16 * 1024 * 1024)); }
+  error() { printf 'ERR: %s\n' "$*"; exit 1; }
+  PF_RUNTIME_MEM_WARNED=""
+  run _pf_recheck_runtime_mem
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]                                # quiet_ok: preflight already ticked it
+}
+
+@test "_pf_recheck_runtime_mem: cold install carries the colima/cgroup guidance (Bugbot #445 r2)" {
+  source "${BATS_TEST_DIRNAME}/../lib/preflight.sh"
+  # Docker was DOWN at preflight (the common path), so the latch is unset and the
+  # recheck is the first to speak. It must use the shared copy, not the old text
+  # that had no colima guidance on macOS and no hint at all on Linux.
+  OS=Darwin
+  _pf_host_mem_kb() { echo $((16 * 1024 * 1024)); }
+  _pf_runtime_mem_kb() { echo $((6 * 1024 * 1024)); }
+  error() { printf 'ERR: %s\n' "$*"; exit 1; }
+  PF_RUNTIME_MEM_WARNED=""
+  run _pf_recheck_runtime_mem
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Docker's memory budget: 6 GB"* ]]
+  [[ "$output" == *"colima stop && colima start --memory"* ]]
 }
 
 @test "_pf_recheck_runtime_mem: latch suppresses the DUPLICATE warn (#417)" {
@@ -432,7 +501,7 @@ setup() {
   error() { printf 'ERR: %s\n' "$*"; exit 1; }
   run _pf_recheck_runtime_mem
   [ "$status" -eq 0 ]
-  [[ "$output" == *"Docker is running with 6 GB"* ]]
+  [[ "$output" == *"Docker's memory budget: 6 GB"* ]]   # the ONE shared copy (#417)
 }
 @test "_pf_recheck_runtime_mem: VM at the documented floor (guest a bit under) -> warn, NOT hard fail (#513 reviewer)" {
   source "${BATS_TEST_DIRNAME}/../lib/preflight.sh"
@@ -444,7 +513,7 @@ setup() {
   error() { printf 'ERR: %s\n' "$*"; exit 1; }
   run _pf_recheck_runtime_mem
   [ "$status" -eq 0 ]                                   # grace covers guest overhead -> no hard fail
-  [[ "$output" == *"Docker is running with"* ]]         # warns instead
+  [[ "$output" == *"Docker's memory budget"* ]]          # warns instead, shared copy
   [[ "$output" != *"below the"* ]]                      # not the hard-fail message
 }
 @test "_pf_recheck_runtime_mem: host too small -> 'use a larger machine', not a resize loop (#428 Bugbot)" {

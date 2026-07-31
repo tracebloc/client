@@ -213,27 +213,49 @@ _pf_has_gui_session() {
 # CPU keeps the fallback selector: there is no equivalent advice split.
 _pf_ncpu()         { local v; v="$(_pf_runtime_ncpu)";   [[ -n "$v" ]] && { echo "$v"; return 0; }; _pf_host_ncpu; }
 
-# The ONE copy for the Docker-budget status line (#417), shared by _pf_memory
-# (Docker already up on a re-run) and the post-Docker recheck — the two used to
-# print diverging text for the identical condition, and both could fire in one
-# run. WARN-ONLY by design; the sub-floor HARD-FAIL stays in
-# _pf_recheck_runtime_mem, which is the only place the real VM size is known
-# (#428/#513). Sets PF_RUNTIME_MEM_WARNED so one run never warns twice about the
-# same budget — that latch suppresses a duplicate WARNING only and must never
-# gate the hard-fail. Arg: the runtime budget in whole GB.
+# The ONE copy AND the one grading threshold for the Docker-budget line (#417),
+# used by BOTH _pf_memory (Docker already up on a warm re-run) and the post-Docker
+# recheck. The two used to print diverging text for the identical condition, and
+# because they also compared against DIFFERENT thresholds — the helper against the
+# clamped target, the recheck against the raw PF_WARN_MEM_GB — one run could print
+# "✔ Docker's memory budget: 6 GB" and then "⚠ recommended ≥ 6 GB" about the very
+# same budget (Bugbot #445 r2). Grading lives here only.
+#
+# Takes MiB, not GB, so it uses the SAME PF_VM_MEM_GRACE_MIB tolerance as the
+# recheck: a VM configured to exactly the documented floor reports a few hundred
+# MiB less as guest MemTotal, and rounding that to whole GB first would misgrade it
+# as sub-floor.
+#
+# WARN-ONLY by design; the sub-floor HARD-FAIL stays in _pf_recheck_runtime_mem,
+# the only place the real VM size is known (#428/#513). Sets
+# PF_RUNTIME_MEM_WARNED so one run never warns twice about the same budget — that
+# latch suppresses a duplicate WARNING only and must never gate the hard-fail.
+# Args: the runtime budget in MiB, and optionally "quiet_ok" to suppress the ✔
+# line when the budget is fine — the post-Docker recheck passes it so a healthy
+# install doesn't print the same ✔ twice (preflight already said it on a warm run).
 _pf_runtime_mem_status() {
-  local rt_gb="$1" warn_eff rec_eff
+  local rt_mib="$1" quiet_ok="${2:-}" rt_gb warn_eff rec_eff host_gb
+  rt_gb=$(( rt_mib / 1024 ))
   warn_eff="$(_pf_clamp_mem_gb "$PF_WARN_MEM_GB")"
   rec_eff="$(_pf_clamp_mem_gb "$PF_REC_MEM_GB")"
-  if (( rt_gb < PF_MIN_MEM_GB )); then
+  if (( rt_mib < PF_MIN_MEM_GB * 1024 - PF_VM_MEM_GRACE_MIB )); then
     warn "Docker's memory budget: ${rt_gb} GB — below the ${PF_MIN_MEM_GB} GB the client needs; it will OOM."
-  elif (( rt_gb < warn_eff )); then
+  elif (( rt_mib < warn_eff * 1024 )); then
     warn "Docker's memory budget: ${rt_gb} GB — recommended ≥ ${warn_eff} GB (${rec_eff} GB to train); the client may OOM under load."
   else
-    _pf_ok "Docker's memory budget: ${rt_gb} GB"
+    [[ -n "$quiet_ok" ]] || _pf_ok "Docker's memory budget: ${rt_gb} GB"
     return 0
   fi
-  if [[ "$OS" == "Darwin" ]]; then
+  # A machine that cannot reach the floor even with the OS reserve honoured is too
+  # small for tracebloc no matter how Docker is configured, so a "give Docker N GB"
+  # remedy is a dead end that asks for more than the machine has (Bugbot #445 r2 —
+  # a 4 GB Mac was told "colima start --memory 5"). Say so plainly instead; the
+  # recheck's own host-too-small branch then stops the install honestly. Mirrors
+  # the PowerShell installer's host-too-small branch (#444).
+  host_gb="$(_pf_host_mem_gb)"
+  if [[ "$host_gb" =~ ^[0-9]+$ ]] && (( host_gb > 0 )) && (( host_gb - PF_OS_RESERVE_GB < PF_MIN_MEM_GB )); then
+    hint "This machine has ${host_gb} GB of RAM total; the client needs a ${PF_MIN_MEM_GB} GB Docker budget and the OS needs ~${PF_OS_RESERVE_GB} GB. Free up memory or use a larger machine."
+  elif [[ "$OS" == "Darwin" ]]; then
     hint "Give Docker ${rec_eff} GB: Docker Desktop → Settings → Resources → Memory (colima: colima stop && colima start --memory ${rec_eff})."
   else
     # No Docker Desktop dead end on Linux (Bugbot #445): headless/engine-only
@@ -363,7 +385,7 @@ _pf_memory() {
   # meaningfully smaller than the machine (the VM case). On native Linux the
   # daemon sees host RAM, so this would just repeat the line above.
   if [[ -n "$rt_kb" && "$label" == "machine" ]] && (( rt_gb + 1 < gb )); then
-    _pf_runtime_mem_status "$rt_gb"
+    _pf_runtime_mem_status $(( rt_kb / 1024 ))
   fi
 
   # Linux: even when total is fine, a busy shared VM may have little free RAM now.
@@ -389,11 +411,12 @@ _pf_memory() {
 # warns (the user has waited for Docker; it can run, just tightly).
 _pf_recheck_runtime_mem() {
   [[ -n "${TRACEBLOC_SKIP_PREFLIGHT:-}" ]] && return 0
-  local kb gb mib rec_gb warn_gb; kb="$(_pf_runtime_mem_kb)"
+  # rec_gb is deliberately not read here: the between-floor-and-warn copy (and its
+  # "N GB to train" figure) now lives solely in _pf_runtime_mem_status.
+  local kb gb mib warn_gb; kb="$(_pf_runtime_mem_kb)"
   [[ -z "$kb" ]] && return 0          # daemon still not reporting — nothing to add
   gb=$(( kb / 1024 / 1024 ))
   mib=$(( kb / 1024 ))
-  rec_gb="$(_pf_clamp_mem_gb "$PF_REC_MEM_GB")"
   warn_gb="$(_pf_clamp_mem_gb "$PF_WARN_MEM_GB")"
   if [[ "$mib" -lt $(( PF_MIN_MEM_GB * 1024 - PF_VM_MEM_GRACE_MIB )) ]]; then
     # The REAL VM size is now known and it's below the floor — the client OOMs. Stop.
@@ -412,15 +435,16 @@ _pf_recheck_runtime_mem() {
       error "Docker's VM has only ${gb} GB — below the ${PF_MIN_MEM_GB} GB the tracebloc client needs; it will OOM. Raise it: Docker Desktop → Settings → Resources → Memory ≥ ${warn_gb} GB (or colima: colima stop && colima start --memory ${warn_gb}), then re-run."
     fi
   fi
-  # Between floor and warn: warn only. Skipped when preflight ALREADY reported
-  # this same budget on a warm re-run (Docker was up before the installer ran,
-  # so _pf_memory printed the "Docker's memory budget" line) — otherwise one run
-  # warns twice about the identical condition (#417). The latch suppresses a
-  # DUPLICATE WARNING only, and is deliberately tested here rather than at the
-  # top of the function so it can never gate the sub-floor hard-fail above.
-  if [[ "$mib" -lt "$(( PF_WARN_MEM_GB * 1024 ))" && -z "${PF_RUNTIME_MEM_WARNED:-}" ]]; then
-    warn "Docker is running with ${gb} GB — recommended ≥ ${warn_gb} GB (${rec_gb} GB to train); the client may OOM under load."
-    [[ "$OS" != "Linux" ]] && hint "Docker Desktop → Settings → Resources → Memory ≥ ${warn_gb} GB, then re-install."
+  # Between floor and warn: warn only, through the ONE shared copy so this and the
+  # Step-1 preflight line can no longer diverge in wording OR in threshold — the
+  # cold-install path (Docker starts mid-run, the common case) previously got its
+  # own text with no colima guidance and no Linux cgroup hint, and graded against
+  # the raw PF_WARN_MEM_GB while preflight used the clamped target (Bugbot #445 r2).
+  # Skipped when preflight ALREADY reported this same budget on a warm re-run. The
+  # latch suppresses a DUPLICATE WARNING only, and is deliberately tested here
+  # rather than at the top of the function so it can never gate the hard-fail above.
+  if [[ -z "${PF_RUNTIME_MEM_WARNED:-}" ]]; then
+    _pf_runtime_mem_status "$mib" quiet_ok
   fi
   return 0
 }
