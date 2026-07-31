@@ -57,7 +57,12 @@ setup() {
 }
 
 # ── _gpu_stack_signature ───────────────────────────────────────────────────
+# `has() { return 1; }` so _bounded takes its passthrough branch and runs the
+# nvidia-ctk/nvidia-smi FUNCTION mocks. Without it, on a runner that HAS timeout(1)
+# (CI) _bounded would exec the real (absent) binaries via `timeout`, which can't see
+# shell-function mocks — the mocks only survive when timeout/gtimeout are reported absent.
 @test "_gpu_stack_signature: combines toolkit + driver versions" {
+  has() { return 1; }
   nvidia-ctk() { echo "NVIDIA Container Toolkit CLI version 1.15.0"; }
   nvidia-smi() { echo "550.54.14"; }
   run _gpu_stack_signature
@@ -65,6 +70,7 @@ setup() {
   [[ "$output" == *"1.15.0"* && "$output" == *"550.54.14"* ]] || return 1
 }
 @test "_gpu_stack_signature: empty when neither tool reports a version" {
+  has() { return 1; }
   nvidia-ctk() { return 1; }
   nvidia-smi() { return 1; }
   run _gpu_stack_signature
