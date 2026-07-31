@@ -197,6 +197,11 @@ install_docker_engine() {
   # below stays testable on hosts without one — e.g. macOS dev machines, where a
   # bash `[[ -f ]]` file-test can't be mocked the way a command like `grep` can.
   local os_release="${TB_OS_RELEASE_FILE:-/etc/os-release}"
+  # The invoking user we grant docker to AND re-exec under — resolved once so the
+  # grant and the sg-docker re-exec guard below always agree, even in the USER-unset
+  # edge (#427 reviewer). A sudo-wrapped full run is already refused, so this is the
+  # real daily user, never root.
+  local _grant_user="${USER:-$(id -un 2>/dev/null)}"
   if ! has docker; then
     if [[ -f "$os_release" ]] && grep -qi 'amzn\|amazon' "$os_release"; then
       if has dnf; then spin_cmd "Installing Docker…" sudo dnf install -y docker
@@ -227,13 +232,28 @@ install_docker_engine() {
     # Enable for boot only (no --now): starting is handled below, where a start
     # failure is diagnosed instead of aborting the whole script under `set -e`.
     sudo systemctl enable docker >/dev/null 2>&1 || true
-    # prepare-host mode: the invoking ADMIN must not be granted the socket —
-    # only the researcher named by TB_PREPARE_USER gets it, later (Bugbot on
-    # #381; same least-privilege rule as the #377 SUDO_USER fix).
-    [[ -n "${TB_PREPARE_HOST_MODE:-}" ]] || sudo usermod -aG docker "$USER"
     success "Docker"
   else
     success "Docker"
+  fi
+
+  # Ensure the invoking user is in the docker group whenever we take the daemon
+  # path — NOT only on a fresh install (#427). On a box where Docker was already
+  # present but the user isn't a member, the old code granted nothing here and the
+  # recovery path below dead-ended at "log out and back in" without ever granting
+  # membership, looping every re-run. prepare-host is exempt: the invoking ADMIN
+  # must not get the socket — only TB_PREPARE_USER does, later (least-privilege,
+  # Bugbot #381 / the #377 SUDO_USER rule).
+  if [[ -z "${TB_PREPARE_HOST_MODE:-}" ]]; then
+    # Grant the INVOKING user ($USER) — not TB_PREPARE_USER: socket access and the
+    # sg-docker re-exec below both key off $USER, and a sudo-wrapped full run is
+    # already refused, so $USER is the real daily user. TB_PREPARE_USER is the
+    # admin-for-someone-else mechanism and is granted only on the prepare-host path
+    # (#427 Bugbot; matches the rest of the tree's identity).
+    if ! id -nG "$_grant_user" 2>/dev/null | grep -qw docker; then
+      sudo usermod -aG docker "$_grant_user" 2>/dev/null \
+        || warn "Couldn't add ${_grant_user} to the docker group; add it manually:  sudo usermod -aG docker ${_grant_user}"
+    fi
   fi
 
   # Load the kernel modules dockerd's bridge driver + k3s need BEFORE starting,
@@ -294,8 +314,10 @@ install_docker_engine() {
     error "Fix the Docker error above, then re-run prepare-host."
   fi
   if ! docker info &>/dev/null 2>&1; then
-    # (a) Group not active in THIS shell yet → re-exec under the docker group.
-    if [[ -z "${TB_PREPARE_HOST_MODE:-}" && -z "${_K3S_INSTALL_REEXEC:-}" ]] && id -nG "$USER" 2>/dev/null | grep -qw docker; then
+    # (a) Group not active in THIS shell yet → re-exec under the docker group. Key
+    # off $_grant_user (not bare $USER) so the USER-unset edge the grant handled
+    # still triggers the in-session re-exec instead of dead-ending (#427 reviewer).
+    if [[ -z "${TB_PREPARE_HOST_MODE:-}" && -z "${_K3S_INSTALL_REEXEC:-}" ]] && id -nG "$_grant_user" 2>/dev/null | grep -qw docker; then
       SELF="$(readlink -f "$0" 2>/dev/null || echo "$0")"
       log "Docker group not yet active in this session — re-executing script..."
       exec sg docker -c "_K3S_INSTALL_REEXEC=1 bash '$SELF'"
@@ -379,7 +401,9 @@ _set_tools_target() {
   # Tier 0 (a usable runtime, no admin) AND rootless Tier 1 (#1221, possibly no root
   # at all) both install user-space with NO sudo: a `sudo mv → /usr/local/bin` here
   # would abort the rootless install under `set -e` AFTER the daemon is already up,
-  # leaving a half-install on a true no-sudo host (Asad review, #452).
+  # leaving a half-install on a true no-sudo host (Asad review, #452). This is the
+  # LINUX target-selector; macOS (no Tier/rootless model) sets its own target in
+  # install_macos_cli_tools.
   if [ "${INSTALL_TIER:-}" = "0" ] || _rootless_active; then
     TB_TOOLS_DIR="${HOME}/.local/bin"
     TB_TOOLS_SUDO=""
@@ -393,6 +417,10 @@ _set_tools_target() {
 
 _fetch_kubectl() {
   local ver="$1" arch="$2"
+  # Download platform slug: defaults to linux, so Linux (and every bats fetch test
+  # that leaves OS_DL unset) is byte-identical; the macOS path sets OS_DL=darwin so
+  # the SAME pinned/verified fetch honors the pins there too (#429).
+  local os="${OS_DL:-linux}"
   local tmpdir
   tmpdir="$(mktemp -d)"
   # Same bounds as _fetch_k3d_release below, and for the same reason: kubectl is a
@@ -401,10 +429,10 @@ _fetch_kubectl() {
   # knows not to add its default deadline here (Bugbot, backend#1252). Before this
   # the fetch had no bound at all — a mid-stream stall hung the step indefinitely.
   retry 3 5 curl_secure -fsSL --connect-timeout 15 --speed-limit 1024 --speed-time 60 \
-    "https://dl.k8s.io/release/${ver}/bin/linux/${arch}/kubectl" -o "${tmpdir}/kubectl"
+    "https://dl.k8s.io/release/${ver}/bin/${os}/${arch}/kubectl" -o "${tmpdir}/kubectl"
   retry 3 5 curl_secure -fsSL --connect-timeout 15 --speed-limit 1024 --speed-time 60 \
-    "https://dl.k8s.io/release/${ver}/bin/linux/${arch}/kubectl.sha256" -o "${tmpdir}/kubectl.sha256"
-  echo "$(cat "${tmpdir}/kubectl.sha256")  ${tmpdir}/kubectl" | sha256sum --check --quiet \
+    "https://dl.k8s.io/release/${ver}/bin/${os}/${arch}/kubectl.sha256" -o "${tmpdir}/kubectl.sha256"
+  _verify_sha256 "$(cat "${tmpdir}/kubectl.sha256")" "${tmpdir}/kubectl" \
     || { rm -rf "$tmpdir"; error "System tool checksum verification failed"; }
   chmod +x "${tmpdir}/kubectl"
   # Tier 0 → no sudo (TB_TOOLS_SUDO empty, TB_TOOLS_DIR under $HOME).
@@ -447,6 +475,7 @@ install_kubectl() {
 # asset basename.
 _fetch_k3d_release() {
   local tag="$1" arch="$2"
+  local os="${OS_DL:-linux}"   # linux by default; darwin on the macOS path (#429)
   local base="https://github.com/k3d-io/k3d/releases/download/${tag}"
   local tmpdir
   tmpdir="$(mktemp -d)"
@@ -454,14 +483,14 @@ _fetch_k3d_release() {
   # a hard cap would break slow-but-healthy links): a hung transfer under
   # spin_cmd would otherwise spin forever (Bugbot r2).
   retry 3 5 curl_secure -fsSL --connect-timeout 15 --speed-limit 1024 --speed-time 60 \
-    "${base}/k3d-linux-${arch}" -o "${tmpdir}/k3d"
+    "${base}/k3d-${os}-${arch}" -o "${tmpdir}/k3d"
   retry 3 5 curl_secure -fsSL --connect-timeout 15 --speed-limit 1024 --speed-time 60 \
     "${base}/checksums.txt" -o "${tmpdir}/checksums.txt"
   local want
-  want="$(awk -v asset="k3d-linux-${arch}" \
+  want="$(awk -v asset="k3d-${os}-${arch}" \
     '{ n = split($2, p, "/"); if (p[n] == asset) { print $1; exit } }' \
     "${tmpdir}/checksums.txt" 2>/dev/null)"
-  if [ -z "$want" ] || ! echo "${want}  ${tmpdir}/k3d" | sha256sum --check --quiet; then
+  if [ -z "$want" ] || ! _verify_sha256 "$want" "${tmpdir}/k3d"; then
     rm -rf "$tmpdir"
     error "System tool checksum verification failed"
   fi
@@ -596,7 +625,8 @@ _ensure_unpack_tools() {
 # (mirrors _fetch_k3d_release / #382).
 _fetch_helm_release() {
   local tag="$1" arch="$2" tarball tmpdir
-  tarball="helm-${tag}-linux-${arch}.tar.gz"
+  local os="${OS_DL:-linux}"   # linux by default; darwin on the macOS path (#429)
+  tarball="helm-${tag}-${os}-${arch}.tar.gz"
   tmpdir="$(mktemp -d)"
   # --connect-timeout + a stall floor (not --max-time: the tarball is ~17 MB and
   # a hard cap would break slow-but-healthy links) — a hung transfer under
@@ -605,18 +635,21 @@ _fetch_helm_release() {
     "https://get.helm.sh/${tarball}" -o "${tmpdir}/${tarball}"
   retry 3 5 curl_secure -fsSL --connect-timeout 15 --speed-limit 1024 --speed-time 60 \
     "https://get.helm.sh/${tarball}.sha256sum" -o "${tmpdir}/${tarball}.sha256sum"
-  # The published file is "<sha256>  <tarball-name>" — verify in place.
-  if ! (cd "$tmpdir" && sha256sum --check --quiet "${tarball}.sha256sum"); then
+  # The published file is "<sha256>  <tarball-name>" — pull the hash and verify the
+  # tarball with the portable checker (sha256sum on Linux, shasum on macOS; #429).
+  local want
+  want="$(awk 'NR==1{print $1}' "${tmpdir}/${tarball}.sha256sum" 2>/dev/null)"
+  if [ -z "$want" ] || ! _verify_sha256 "$want" "${tmpdir}/${tarball}"; then
     rm -rf "$tmpdir"
     error "System tool checksum verification failed"
   fi
-  tar -xzf "${tmpdir}/${tarball}" -C "$tmpdir" "linux-${arch}/helm"
-  chmod +x "${tmpdir}/linux-${arch}/helm"
+  tar -xzf "${tmpdir}/${tarball}" -C "$tmpdir" "${os}-${arch}/helm"
+  chmod +x "${tmpdir}/${os}-${arch}/helm"
   # Tier 0 → no sudo (TB_TOOLS_SUDO empty, TB_TOOLS_DIR under $HOME).
   if [ -n "$TB_TOOLS_SUDO" ]; then
-    sudo mv "${tmpdir}/linux-${arch}/helm" "$TB_TOOLS_DIR/helm"
+    sudo mv "${tmpdir}/${os}-${arch}/helm" "$TB_TOOLS_DIR/helm"
   else
-    mv "${tmpdir}/linux-${arch}/helm" "$TB_TOOLS_DIR/helm"
+    mv "${tmpdir}/${os}-${arch}/helm" "$TB_TOOLS_DIR/helm"
   fi
   rm -rf "$tmpdir"
 }
@@ -1181,6 +1214,33 @@ install_linux() {
   dispatch_gpu_setup
 }
 
+# The cgroup.controllers file that reflects whether `Delegate=` on user@.service is
+# LIVE. It MUST be the user MANAGER's own node — user@$(id -u).service/cgroup.controllers
+# — not the enclosing user-$(id -u).slice: `Delegate=` on user@.service enables the
+# controllers INSIDE user@$UID.service (the path runc/rootless-containers document),
+# whereas the slice node lists whatever user.slice already had in subtree_control, which
+# routinely includes cpu/io by default (DefaultCPUAccounting). Reading the slice would
+# print "active" while the user manager still lacks the delegation and limit-bearing
+# pods run unconstrained (#514 Bugbot, High). Split out so it's unit-testable.
+_cgroup_controllers_path() {
+  local u; u="$(id -u 2>/dev/null)"
+  printf '/sys/fs/cgroup/user.slice/user-%s.slice/user@%s.service/cgroup.controllers' "$u" "$u"
+}
+
+# Are the cpu/cpuset/io controllers ACTUALLY delegated to this user session right now?
+# Reads the live cgroup.controllers of the user MANAGER (#496, path corrected #514). A
+# `daemon-reload` writes the drop-in but does NOT restart the running user@$(id -u).service,
+# so the delegated controllers only appear after a re-login — this is how we tell
+# "written" from "in effect" instead of assuming. Path overridable
+# (TB_USER_CGROUP_CONTROLLERS) for tests. memory/pids are delegated by default;
+# cpu/cpuset/io are the ones this adds.
+_cgroup_controllers_active() {
+  local f="${TB_USER_CGROUP_CONTROLLERS:-$(_cgroup_controllers_path)}"
+  [[ -r "$f" ]] || return 1
+  local c; c="$(cat "$f" 2>/dev/null)" || return 1
+  [[ " $c " == *" cpu "* && " $c " == *" cpuset "* && " $c " == *" io "* ]]
+}
+
 # _write_cgroup_delegation — the shared, idempotent WRITE of the cgroup v2 controller
 # delegation drop-in, used by BOTH the sudo-available installer path
 # (_ensure_cgroup_delegation) and admin-run prepare-host (run_prepare_host). Always
@@ -1194,21 +1254,54 @@ _write_cgroup_delegation() {
   local desired
   printf -v desired '%s\n[Service]\nDelegate=cpu cpuset io memory pids\n' "$marker"
 
-  # Unchanged → don't rewrite / daemon-reload (avoids churning the user manager).
-  if [[ -f "$conf" ]] && printf '%s' "$desired" | sudo cmp -s - "$conf" 2>/dev/null; then
+  # Unchanged → don't rewrite / daemon-reload (avoids churning the user manager), but
+  # STILL report below — a re-run over an existing drop-in must re-surface an inactive
+  # delegation, not take a silent fast path (#496 Bugbot). The drop-in lives under /etc
+  # and is world-readable, so this presence-check is a PLAIN cmp — no sudo — matching
+  # _ensure_cgroup_delegation's unprivileged grep and avoiding a needless elevation on
+  # the idempotent path (#514 reviewer).
+  if [[ -f "$conf" ]] && printf '%s' "$desired" | cmp -s - "$conf" 2>/dev/null; then
     log "cgroup delegation drop-in already present."
+  else
+    # Guard the writes: callers run this with `set -e` relaxed (`|| true`, `if !`), so
+    # an unguarded failure would fall through to success and let the install proceed
+    # with pods that can't be given limits (the exact silent breakage this slice
+    # exists to prevent).
+    sudo mkdir -p "$dir" \
+      || { warn "Couldn't create ${dir} for the cgroup delegation drop-in."; return 1; }
+    printf '%s' "$desired" | sudo tee "$conf" >/dev/null \
+      || { warn "Couldn't write the cgroup delegation drop-in at ${conf}."; return 1; }
+    sudo systemctl daemon-reload 2>/dev/null || true
+  fi
+  # Verify + report on EVERY path (#496 Bugbot).
+  _report_cgroup_delegation "$conf"
+}
+
+# Report whether the cgroup delegation is actually in effect (#496). Mode-aware:
+#  - prepare-host (admin): the drop-in is written for the RESEARCHER's FUTURE session —
+#    the admin's own controllers are irrelevant, and prepare-host creates no cluster, so
+#    the "recreate the cluster" advice is wrong here (Bugbot). Just confirm it's written.
+#  - full install: verify THIS session. daemon-reload does NOT restart the running
+#    user@$(id -u).service, so the delegation usually isn't live yet, and the k3d node
+#    inherits the delegation state from when it is CREATED. If inactive, say the real
+#    consequence: limits won't enforce until the user manager restarts AND the cluster
+#    is recreated. With lingering (the rootless path), a re-login may NOT restart the
+#    user manager — a reboot reliably does. We never `systemctl restart user@…`
+#    ourselves: it would kill the user's session processes.
+_report_cgroup_delegation() {
+  local conf="$1"
+  if [[ -n "${TB_PREPARE_HOST_MODE:-}" ]]; then
+    success "Wrote the cgroup delegation drop-in (${conf}); it takes effect at the researcher's next login (before any cluster is created)."
     return 0
   fi
-  # Guard the writes: callers run this with `set -e` relaxed (`|| true`, `if !`), so
-  # an unguarded failure would fall through to success and let the install proceed
-  # with pods that can't be given limits (the exact silent breakage this slice
-  # exists to prevent).
-  sudo mkdir -p "$dir" \
-    || { warn "Couldn't create ${dir} for the cgroup delegation drop-in."; return 1; }
-  printf '%s' "$desired" | sudo tee "$conf" >/dev/null \
-    || { warn "Couldn't write the cgroup delegation drop-in at ${conf}."; return 1; }
-  sudo systemctl daemon-reload 2>/dev/null || true
-  success "Delegated cpu/cpuset/io cgroup controllers (${conf}). A re-login may be needed for it to take effect."
+  if _cgroup_controllers_active; then
+    success "Delegated cpu/cpuset/io cgroup controllers (${conf}) — active in this session."
+  else
+    warn "The cgroup delegation drop-in (${conf}) is NOT active in this session yet — pod CPU/memory limits will NOT be enforced until you recreate the cluster after the user manager restarts:"
+    hint "  log out and back in — or, with lingering enabled, reboot (a re-login may not restart your user manager) — then:"
+    hint "  k3d cluster delete ${CLUSTER_NAME:-tracebloc}   # and re-run"
+    hint "  (Until then the install looks healthy, but limit-bearing workloads run unconstrained.)"
+  fi
 }
 
 # _ensure_cgroup_delegation — RFC 0001 #1221 (Tier 1). k3s inside the k3d node needs
@@ -1228,10 +1321,13 @@ _write_cgroup_delegation() {
 _ensure_cgroup_delegation() {
   local dir="${TB_USER_UNIT_DROPIN_DIR:-/etc/systemd/system/user@.service.d}"
   local conf="$dir/delegate.conf"
-  # Fast path: already delegated → no privileged call at all (an unprivileged read;
-  # the drop-in is world-readable under /etc).
+  # Fast path: drop-in already present → no privileged call at all (an unprivileged
+  # read; it's world-readable under /etc). But still VERIFY it's active and re-surface
+  # if not — a 2nd run over a written-but-not-yet-live drop-in must NOT take a silent
+  # fast path (the exact #496 "written but not active" case; #514 reviewer). The report
+  # is itself unprivileged (a controllers read), so this keeps the no-sudo property.
   if [[ -f "$conf" ]] && grep -qF 'Delegate=cpu cpuset io memory pids' "$conf" 2>/dev/null; then
-    log "cgroup delegation drop-in already present."
+    _report_cgroup_delegation "$conf"
     return 0
   fi
   case "${PROBE_PRIVILEGE:-no_sudo}" in
@@ -1259,6 +1355,23 @@ _ensure_cgroup_delegation() {
       return 1
       ;;
   esac
+}
+
+# refuse_sudo_wrapped_install — a full provision must run as the DAILY (non-root)
+# user; the installer elevates each privileged step itself (RFC-0002). A
+# `sudo bash install.sh` runs the WHOLE thing as root: `usermod -aG docker` would
+# grant root (not the user), and ~/.tracebloc, ~/.kube/config, and the chmod-600
+# credential would land root-owned under /root — locking the daily user out, with
+# no chown anywhere to undo it (#427). Refuse it early, before any file is created.
+# Exemptions: a genuine root login (no SUDO_USER) is fine — /root IS its home; and
+# prepare-host (the admin path) has already dispatched-and-exited in main() before
+# this runs. Admins provisioning for someone else use prepare-host / TB_PREPARE_USER.
+refuse_sudo_wrapped_install() {
+  # `id -u` (the EFFECTIVE uid) rather than $EUID: EUID is read-only in bash, so the
+  # test suite can't shadow it — id() can be mocked.
+  [[ "$(id -u 2>/dev/null)" == "0" ]] || return 0
+  [[ -n "${SUDO_USER:-}" && "${SUDO_USER}" != "root" ]] || return 0
+  error "Don't run the installer with sudo. It elevates each privileged step itself, and running the whole thing as root would grant Docker to root (not you) and root-own ${SUDO_USER}'s ~/.tracebloc + ~/.kube. Re-run WITHOUT sudo as '${SUDO_USER}'. Admin setting up for someone else? Name the RESEARCHER (not yourself) so they get docker-group access:  export TB_PREPARE_USER=<researcher-username>  &&  curl -fsSL https://tracebloc.io/i.sh | bash -s -- prepare-host"
 }
 
 # run_prepare_host — the standalone, admin-run Tier-2 step (RFC 0001 #1178). An
@@ -1331,9 +1444,16 @@ run_prepare_host() {
   # so writing it once here covers the researcher named above — this is the second
   # half of the prepare-host contract alongside the subuid/subgid range. Best-effort:
   # never fail the whole prep over it.
+  # Report in prepare-host mode: the drop-in is for the RESEARCHER's future session, so
+  # _report_cgroup_delegation must not judge the ADMIN's live controllers nor print the
+  # "recreate the cluster" advice (prepare-host creates none). The mode was reset right
+  # after install_docker_engine, so set it again around this write — otherwise it falls
+  # through to the full-install branch on the admin's slice (#514 reviewer).
+  TB_PREPARE_HOST_MODE=1
   if ! _write_cgroup_delegation; then
     warn "Couldn't write the cgroup delegation drop-in; a rootless install won't enforce pod limits until it's added (see above)."
   fi
+  TB_PREPARE_HOST_MODE=""
 
   echo ""
   success "Host prepared."

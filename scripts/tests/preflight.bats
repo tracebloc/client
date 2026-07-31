@@ -52,6 +52,14 @@ setup() {
   PF_HARD_FAIL=0; _pf_arch >/dev/null; [ "$PF_HARD_FAIL" -eq 0 ]
 }
 
+@test "_pf_arch: arm64 macOS note names the Rosetta setting + defers to the post-Docker smoke (#433)" {
+  ARCH=arm64; OS=Darwin
+  run _pf_arch
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Use Rosetta for x86_64/amd64 emulation"* ]]   # names the exact setting, not "assume it works"
+  [[ "$output" == *"verified once Docker is running"* ]]          # real check is the post-Docker smoke (#433)
+}
+
 @test "_pf_arch: arm64 + TRACEBLOC_ALLOW_ARM64 -> warn, no hard fail" {
   ARCH=aarch64; OS=Linux; export TRACEBLOC_ALLOW_ARM64=1
   _pf_amd64_emulation_available() { return 1; }
@@ -320,11 +328,46 @@ setup() {
 }
 
 # ── _pf_recheck_runtime_mem (post-Docker, warn-only) ─────────────────────────
-@test "_pf_recheck_runtime_mem: small Docker VM -> warn, never hard fail" {
+@test "_pf_recheck_runtime_mem: sub-floor Docker VM -> HARD FAIL with the fix (#428)" {
   source "${BATS_TEST_DIRNAME}/../lib/preflight.sh"
-  OS=Linux; _pf_runtime_mem_kb() { echo $((4 * 1024 * 1024)); }   # 4 GB Docker VM
-  run _pf_recheck_runtime_mem; [[ "$output" == *"Docker is running with 4 GB"* ]]
-  PF_HARD_FAIL=0; _pf_recheck_runtime_mem >/dev/null 2>&1; [ "$PF_HARD_FAIL" -eq 0 ]
+  OS=Darwin; _pf_runtime_mem_kb() { echo $((4 * 1024 * 1024)); }   # 4 GB VM < 5 GB floor
+  error() { printf 'ERR: %s\n' "$*"; exit 1; }                     # real error() exits
+  run _pf_recheck_runtime_mem
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"below the ${PF_MIN_MEM_GB:-5} GB"* ]]
+}
+@test "_pf_recheck_runtime_mem: between floor and warn -> warn, no hard fail (#428)" {
+  source "${BATS_TEST_DIRNAME}/../lib/preflight.sh"
+  OS=Linux; _pf_runtime_mem_kb() { echo $((6 * 1024 * 1024)); }   # 6 GB: >=5 floor, <8 warn
+  error() { printf 'ERR: %s\n' "$*"; exit 1; }
+  run _pf_recheck_runtime_mem
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Docker is running with 6 GB"* ]]
+}
+@test "_pf_recheck_runtime_mem: VM at the documented floor (guest a bit under) -> warn, NOT hard fail (#513 reviewer)" {
+  source "${BATS_TEST_DIRNAME}/../lib/preflight.sh"
+  OS=Darwin
+  # A VM configured to exactly the 5 GB floor reports ~4.8 GB guest — within
+  # PF_VM_MEM_GRACE_MIB of the floor, so it must warn, not hard-fail on the shortfall.
+  _pf_runtime_mem_kb() { echo $(( 4900 * 1024 )); }   # ~4.79 GiB guest
+  _pf_host_mem_gb() { echo 16; }                        # ample host (not the host-too-small path)
+  error() { printf 'ERR: %s\n' "$*"; exit 1; }
+  run _pf_recheck_runtime_mem
+  [ "$status" -eq 0 ]                                   # grace covers guest overhead -> no hard fail
+  [[ "$output" == *"Docker is running with"* ]]         # warns instead
+  [[ "$output" != *"below the"* ]]                      # not the hard-fail message
+}
+@test "_pf_recheck_runtime_mem: host too small -> 'use a larger machine', not a resize loop (#428 Bugbot)" {
+  source "${BATS_TEST_DIRNAME}/../lib/preflight.sh"
+  OS=Darwin
+  _pf_runtime_mem_kb() { echo $((4 * 1024 * 1024)); }   # 4 GB VM < floor
+  _pf_host_mem_gb() { echo 6; }                          # 6 GB Mac: 6 − 2 reserve = 4 < 5 floor
+  error() { printf 'ERR: %s\n' "$*"; exit 1; }
+  run _pf_recheck_runtime_mem
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"too little for tracebloc"* ]]
+  [[ "$output" == *"larger machine"* ]]
+  [[ "$output" != *"colima start --memory"* ]]   # no unachievable resize remedy
 }
 
 @test "_pf_recheck_runtime_mem: daemon not reporting -> silent no-op" {
@@ -429,12 +472,30 @@ setup() {
   PF_HARD_FAIL=0; _pf_storage_type >/dev/null; [ "$PF_HARD_FAIL" -eq 0 ]
 }
 
-@test "_pf_storage_type: NFS -> hard fail naming the cause + local-path hint" {
+@test "_pf_storage_type: NFS -> hard fail with a FOLLOWABLE remedy, not the old ~/.tracebloc advice (#479)" {
   _pf_fstype() { echo nfs; }
   run _pf_storage_type
   [[ "$output" == *"network filesystem (nfs)"* ]]
-  [[ "$output" == *"HOST_DATA_DIR"* ]]
+  # the followable remedy (shared with early_data_dir_guard)
+  [[ "$output" == *"install as a user whose home is on a local disk"* ]]
+  [[ "$output" == *"TRACEBLOC_ALLOW_NETWORK_FS=1"* ]]
+  # NOT the old un-followable advice: on a network home ~/.tracebloc is still NFS,
+  # and validate_config rejects paths outside $HOME (#479).
+  [[ "$output" != *'HOST_DATA_DIR="$HOME/.tracebloc" ./install'* ]]
+  [[ "$output" != *"the default ~/.tracebloc is local"* ]]
   PF_HARD_FAIL=0; _pf_storage_type >/dev/null 2>&1; [ "$PF_HARD_FAIL" -eq 1 ]
+}
+
+@test "_pf_storage_type and early_data_dir_guard share the same network-FS remedy (#479)" {
+  # Both route through _pf_network_fs_remedy — capture it once and assert both callers'
+  # remedy lines match it, so they can't drift.
+  local remedy; remedy="$(_pf_network_fs_remedy)"
+  [[ "$remedy" == *"install as a user whose home is on a local disk"* ]]
+  _pf_fstype() { echo nfs; }
+  run _pf_storage_type
+  [[ "$output" == *"install as a user whose home is on a local disk"* ]]
+  HOST_DATA_DIR="$BATS_TEST_TMPDIR/fresh479/.tracebloc" run early_data_dir_guard
+  [[ "$output" == *"install as a user whose home is on a local disk"* ]]
 }
 
 @test "_pf_storage_type: NFS4 -> hard fail" {
@@ -582,4 +643,57 @@ setup() {
   [ -n "$guard_line" ]
   [ -n "$setup_line" ]
   [ "$guard_line" -lt "$setup_line" ]
+}
+
+# ── #428: memory recommendation clamp + macOS VM sizing ─────────────────────
+@test "_pf_clamp_mem_gb: clamps a recommendation to physical − reserve (#428)" {
+  PF_OS_RESERVE_GB=2; PF_MIN_MEM_GB=5
+  [ "$(_pf_clamp_mem_gb 16 16)" -eq 14 ]   # 16 GB Mac: can't recommend 16 -> 14
+  [ "$(_pf_clamp_mem_gb 16 8)"  -eq 6  ]   # 8 GB Mac  -> 6
+  [ "$(_pf_clamp_mem_gb 8  32)" -eq 8  ]   # plenty of headroom -> desired unchanged
+}
+@test "_pf_clamp_mem_gb: never undershoots the floor on a tiny host (#428 Bugbot)" {
+  PF_OS_RESERVE_GB=2; PF_MIN_MEM_GB=5
+  # 6 GB host: physical − reserve = 4, but a hint must never say "raise to 4" (below
+  # the 5 GB floor) — clamp up to the floor instead.
+  [ "$(_pf_clamp_mem_gb 8  6)" -eq 5 ]
+  [ "$(_pf_clamp_mem_gb 16 6)" -eq 5 ]
+}
+@test "_pf_clamp_mem_gb: non-numeric/unknown physical -> desired unchanged (can't clamp) (#428)" {
+  # An explicit '' would hit the ${2:-host} default and read real host RAM — so test
+  # the genuinely uncatchable cases: 0 and a non-numeric string.
+  [ "$(_pf_clamp_mem_gb 16 0)" -eq 16 ]
+  [ "$(_pf_clamp_mem_gb 16 abc)" -eq 16 ]
+}
+@test "_macos_vm_mem_gb: derives min(half physical, clamped rec), with floor headroom (#428)" {
+  PF_MIN_MEM_GB=5; PF_WARN_MEM_GB=8; PF_REC_MEM_GB=16; PF_OS_RESERVE_GB=2
+  # 8 GB: half=4 -> raised to floor+1=6 so the guest MemTotal clears the recheck floor
+  # (sizing EXACTLY 5 would boot then hard-fail on its own choice, #428 Bugbot).
+  [ "$(_macos_vm_mem_gb 8)"  -eq 6  ]
+  [ "$(_macos_vm_mem_gb 16)" -eq 8  ]   # half=8, rec clamped 14 -> 8
+  [ "$(_macos_vm_mem_gb 64)" -eq 16 ]   # half=32, rec 16 -> 16 (capped at rec)
+}
+@test "_macos_vm_mem_gb: too-small host -> capped at physical − reserve, not over-committed (#428 Bugbot)" {
+  PF_MIN_MEM_GB=5; PF_WARN_MEM_GB=8; PF_REC_MEM_GB=16; PF_OS_RESERVE_GB=2
+  # 6 GB host: floor+1=6 would leave the OS nothing, so cap at physical − reserve = 4.
+  # colima gets 4; the runtime recheck then stops it honestly as "host too small".
+  [ "$(_macos_vm_mem_gb 6)" -eq 4 ]
+}
+@test "_macos_vm_mem_gb: unknown physical -> COLIMA_MEMORY default (#428)" {
+  COLIMA_MEMORY=6
+  [ "$(_macos_vm_mem_gb 0)" -eq 6 ]
+}
+
+@test "setup-macos.sh colima memory is DERIVED via _macos_vm_mem_gb, not hard-coded 6 (#428)" {
+  f="$BATS_TEST_DIRNAME/../lib/setup-macos.sh"
+  grep -qE 'COLIMA_MEMORY:-\$\(_macos_vm_mem_gb\)' "$f"
+  ! grep -qE '\-\-memory "\$\{COLIMA_MEMORY:-6\}"' "$f"   # the old hard-coded 6 is gone
+}
+
+@test "_pf_recheck_runtime_mem: colima remedy uses a real resize command (#428 Bugbot)" {
+  # colima doesn't read COLIMA_MEMORY, and `VAR=x colima stop && colima start` only
+  # sets VAR for `stop`. The correct resize is `colima stop && colima start --memory N`.
+  f="$BATS_TEST_DIRNAME/../lib/preflight.sh"
+  grep -qE 'colima stop && colima start --memory' "$f"
+  ! grep -qE 'COLIMA_MEMORY=[^ ]* colima stop' "$f"
 }

@@ -24,7 +24,7 @@
 # =============================================================================
 
 #Requires -Version 5.1
-param([switch]$Help, [switch]$NoReboot, [switch]$Diagnose, [string]$DailyUser)
+param([switch]$Help, [switch]$NoReboot, [switch]$Diagnose, [string]$DailyUser, [switch]$Resume)
 
 # --- Self-elevation (#421) ---------------------------------------------------
 # Build the powershell.exe argument list to relaunch this installer ELEVATED.
@@ -35,11 +35,12 @@ param([switch]$Help, [switch]$NoReboot, [switch]$Diagnose, [string]$DailyUser)
 # ShellExecute/RunAs doesn't inherit the caller's process env, and putting secrets
 # on a command line is unsafe; an env-driven run should be launched elevated.
 function Get-ElevationCommand {
-  param([string]$ScriptPath, [switch]$NoReboot, [switch]$Diagnose, [string]$DailyUser)
+  param([string]$ScriptPath, [switch]$NoReboot, [switch]$Diagnose, [string]$DailyUser, [switch]$Resume)
   $switches = @()
   if ($NoReboot)  { $switches += '-NoReboot' }
   if ($Diagnose)  { $switches += '-Diagnose' }
   if ($DailyUser) { $switches += @('-DailyUser', "`"$DailyUser`"") }   # forward the daily user (#418 Bugbot)
+  if ($Resume)    { $switches += '-Resume' }                          # forward a resume so a re-elevation stays a continuation (#420)
   # Return a single command-line STRING, not an array: PS 5.1 Start-Process
   # -ArgumentList doesn't quote array elements, so a script path with spaces (or
   # the quoted -Command value) would be split (#421 Bugbot; same class as #419).
@@ -61,8 +62,8 @@ function Get-ElevationCommand {
 # elevated process was started (user accepted UAC), $false if they declined the
 # prompt or the launch failed (Start-Process -Verb RunAs throws on cancel).
 function Invoke-SelfElevate {
-  param([string]$ScriptPath, [switch]$NoReboot, [switch]$Diagnose, [string]$DailyUser)
-  $argList = Get-ElevationCommand -ScriptPath $ScriptPath -NoReboot:$NoReboot -Diagnose:$Diagnose -DailyUser $DailyUser
+  param([string]$ScriptPath, [switch]$NoReboot, [switch]$Diagnose, [string]$DailyUser, [switch]$Resume)
+  $argList = Get-ElevationCommand -ScriptPath $ScriptPath -NoReboot:$NoReboot -Diagnose:$Diagnose -DailyUser $DailyUser -Resume:$Resume
   try {
     Start-Process -FilePath 'powershell' -Verb RunAs -ArgumentList $argList -ErrorAction Stop | Out-Null
     return $true
@@ -85,7 +86,7 @@ if (-not $env:TB_PESTER) {
       Write-Host "  " -NoNewline; Write-Host ([char]0x26A0) -ForegroundColor Yellow -NoNewline; Write-Host "  Administrator rights are required to set up Docker + WSL." -ForegroundColor Yellow
       $ans = Read-Host "  Relaunch as Administrator now? A Windows UAC prompt will appear [Y/n]"
       if ($ans -notmatch '^\s*[Nn]') {
-        $elevated = Invoke-SelfElevate -ScriptPath $PSCommandPath -NoReboot:$NoReboot -Diagnose:$Diagnose -DailyUser $DailyUser
+        $elevated = Invoke-SelfElevate -ScriptPath $PSCommandPath -NoReboot:$NoReboot -Diagnose:$Diagnose -DailyUser $DailyUser -Resume:$Resume
         if ($elevated) { Write-Host "  Continuing in the new elevated window -- you can close this one." -ForegroundColor DarkGray }
         else           { Write-Host "  Elevation was cancelled." -ForegroundColor DarkGray }
       }
@@ -190,6 +191,43 @@ function Wait-ProcessWithDeadline {
   }
   Write-Host "`r                                                   `r" -NoNewline
   return $true
+}
+
+# Run a tracked install PROCESS with its stdout+stderr captured to temp files, wait
+# with a KILLING deadline (spinner via Wait-ProcessWithDeadline), fold any captured
+# output into the install log, and return the outcome. Mirrors the WSL / k3d-cluster-
+# start redirect pattern so a failed install leaves the real winget/installer output
+# in the log + -Diagnose bundle instead of only a bare exit code (#500). Never throws;
+# each caller applies its own policy (best-effort fall-through vs fatal Err).
+# Returns @{ State = 'ok'|'spawn-failed'|'timeout'|'failed'; ExitCode; Output }.
+function Invoke-TrackedInstall {
+  param(
+    [string]$FilePath,
+    $ArgumentList,                 # string (PS 5.1 verbatim) or array
+    [string]$Label,
+    [int]$TimeoutMinutes = 40,
+    [string]$Tag = 'install'
+  )
+  $tmp  = [System.IO.Path]::GetTempPath()   # portable (== %TEMP% on Windows); testable off-Windows
+  $outF = Join-Path $tmp "$Tag-$(Get-Random).out.log"
+  $errF = Join-Path $tmp "$Tag-$(Get-Random).err.log"
+  $p = $null
+  try {
+    $p = Start-Process -FilePath $FilePath -ArgumentList $ArgumentList -NoNewWindow -PassThru -ErrorAction Stop `
+      -RedirectStandardOutput $outF -RedirectStandardError $errF
+  } catch {
+    Remove-Item $outF, $errF -Force -ErrorAction SilentlyContinue
+    Log "$Label wouldn't start: $_"
+    return @{ State = 'spawn-failed'; ExitCode = $null; Output = "$_" }
+  }
+  $timedOut = -not (Wait-ProcessWithDeadline -Process $p -Deadline (Get-Date).AddMinutes($TimeoutMinutes) -Message $Label)
+  # stderr first, then stdout (matches the #423 failure-output ordering).
+  $log = ("$(Get-Content $errF -Raw -ErrorAction SilentlyContinue)`n$(Get-Content $outF -Raw -ErrorAction SilentlyContinue)").Trim()
+  Remove-Item $outF, $errF -Force -ErrorAction SilentlyContinue
+  if ($log) { Log "${Label}: $log" }
+  if ($timedOut)          { return @{ State = 'timeout';  ExitCode = $null;        Output = $log } }
+  if ($p.ExitCode -eq 0)  { return @{ State = 'ok';       ExitCode = 0;            Output = $log } }
+  return @{ State = 'failed'; ExitCode = $p.ExitCode; Output = $log }
 }
 
 # Wait on a background job with a visible heartbeat so a long step never leaves
@@ -433,7 +471,7 @@ tracebloc -- client setup
 
 Usage:
   irm https://raw.githubusercontent.com/tracebloc/client/main/scripts/install.ps1 | iex
-  .\install-k8s.ps1 [-Help] [-NoReboot]
+  .\install-k8s.ps1 [-Help] [-NoReboot] [-Resume]
 
 Advanced configuration (environment variables):
   CLUSTER_NAME   Cluster name                   (default: tracebloc)
@@ -441,6 +479,8 @@ Advanced configuration (environment variables):
   AGENTS         Worker nodes                    (default: 1)
   K8S_VERSION    k3s image tag                   (default: v1.29.4-k3s1)
   -NoReboot      Skip reboot prompt after enabling Windows features
+  -Resume        Continue an install interrupted by a reboot (set automatically
+                 by the registered RunOnce continuation; rarely needed by hand)
   HOST_DATA_DIR  Persistent data directory       (default: ~\.tracebloc)
   TRACEBLOC_CA_BUNDLE  Corporate CA bundle (PEM) to trust on a TLS-inspecting
                  network, so in-cluster image pulls don't fail x509 (#424).
@@ -535,6 +575,206 @@ function Start-InstallLog {
 }
 
 # =============================================================================
+#  INSTALL STATE + RESUME-AFTER-REBOOT (#420)
+#  Two legitimate reboots (Windows feature enablement; Docker/WSL first boot) can
+#  interrupt the install. Instead of "re-find and re-paste the one-liner", we:
+#   - record a schema-versioned `completed` flag in a JSON state file under
+#     %USERPROFILE%\.tracebloc\ (set only when the client is actually connected), and
+#   - on a reboot, register a RunOnce continuation that resumes automatically at
+#     next sign-in (-Resume).
+#  The state is ADVISORY: the fast path still verifies the tools + a RUNNING cluster
+#  before it claims "nothing to do", so a stale flag can never skip real work.
+# =============================================================================
+
+$script:STATE_SCHEMA = 1
+$script:RESUME_ROOT   = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\RunOnce'
+$script:RESUME_NAME   = 'TraceblocInstallerResume'
+
+# --- Pure state helpers (no I/O; unit-testable) ------------------------------
+# The state records only `completed` -- what actually drives behavior. Per-stage
+# checkpoints were dropped (reviewer): the six steps set shared $script: state that
+# downstream steps need, so a resume must re-walk them; speed on re-run comes from
+# each step's own self-skip (tools present, WSL current, cluster running), not from
+# skipping the call. `completed` alone arms the nothing-to-do fast path.
+
+# A fresh state at the current schema.
+function New-InstallState {
+  return [pscustomobject]@{ schema = $script:STATE_SCHEMA; completed = $false }
+}
+
+# Is a parsed state usable by THIS installer (schema matches)? A future/older or
+# malformed schema is treated as absent so we never act on an incompatible file.
+function Test-InstallStateCurrent {
+  param($State)
+  return ($null -ne $State -and
+          ($State.PSObject.Properties.Name -contains 'schema') -and
+          ([int]$State.schema -eq $script:STATE_SCHEMA))
+}
+
+# Parse a state JSON string -> normalised state object. Corrupt/incompatible/empty
+# -> a fresh state, NEVER a throw (a broken checkpoint must not break the install).
+function ConvertTo-InstallState {
+  param([string]$Json)
+  if ([string]::IsNullOrWhiteSpace($Json)) { return (New-InstallState) }
+  try { $obj = $Json | ConvertFrom-Json -ErrorAction Stop } catch { return (New-InstallState) }
+  if (-not (Test-InstallStateCurrent -State $obj)) { return (New-InstallState) }
+  $completed = $false
+  if ($obj.PSObject.Properties.Name -contains 'completed') { $completed = [bool]$obj.completed }
+  return [pscustomobject]@{ schema = [int]$obj.schema; completed = $completed }
+}
+
+# --- State-file I/O (thin wrappers over the pure helpers) --------------------
+
+function Get-InstallStatePath { return (Join-Path $HOST_DATA_DIR 'install-state.json') }
+
+# Read + parse the on-disk state; missing/unreadable/corrupt -> fresh state.
+function Read-InstallState {
+  $path = Get-InstallStatePath
+  if (-not (Test-Path -LiteralPath $path)) { return (New-InstallState) }
+  try { return (ConvertTo-InstallState -Json (Get-Content -LiteralPath $path -Raw -ErrorAction Stop)) }
+  catch { return (New-InstallState) }
+}
+
+# Persist state. Warn-only: a failed write must never fail the install.
+function Save-InstallState {
+  param($State)
+  try {
+    if (-not (Test-Path $HOST_DATA_DIR)) { New-Item -ItemType Directory -Path $HOST_DATA_DIR -Force | Out-Null }
+    ($State | ConvertTo-Json -Compress) | Set-Content -Path (Get-InstallStatePath) -Encoding ASCII -ErrorAction Stop
+  } catch { Log "install-state write failed: $_" }
+}
+
+# Mark the whole install completed + persist (so a later re-run detects nothing-to-do).
+function Set-InstallComplete {
+  Save-InstallState -State ([pscustomobject]@{ schema = $script:STATE_SCHEMA; completed = $true })
+}
+
+# Clear the completed flag (persist not-completed) -- called when a walk ends without
+# a connected client, so a stale `completed` from an earlier success can't keep the
+# fast path armed over a now-broken install (#420 reviewer).
+function Clear-InstallCompleted {
+  Save-InstallState -State (New-InstallState)
+}
+
+# Did the client actually come UP? Only `connected` (all workloads Ready) proves the
+# install is done. `starting` is Get-NotReadyState's catch-all for a client that
+# isn't Ready yet (Pending pods / a slow pull) -- treating it as done would arm the
+# fast path for a client that never came up, skipping the remediation (reviewer).
+# This gates the completion checkpoint; the exit code is deliberately more lenient.
+function Test-InstallConnected {
+  return ($script:ClientState -eq "connected")
+}
+
+# Is the exit code a success? connected (up) or starting (on its way) both avoid a
+# hard error exit; anything else (bad_creds/crash/image_pull/...) is a non-zero
+# failure. Deliberately more lenient than Test-InstallConnected: a still-starting
+# client shouldn't hard-fail the run, but it also must not be marked complete.
+function Test-InstallSucceeded {
+  return ($script:ClientState -eq "connected" -or $script:ClientState -eq "starting")
+}
+
+# --- Fast-path health probes (honest "nothing to do", not just a checkpoint) --
+
+# Are all four client tools on PATH? Cheap; used to gate the nothing-to-do path.
+function Test-ToolsPresent {
+  foreach ($t in @('docker','kubectl','k3d','helm')) { if (-not (Has $t)) { return $false } }
+  return $true
+}
+
+# Pure: from `k3d cluster list -o json` output, is <Name> present AND running (>=1
+# server node up)? A present-but-STOPPED cluster returns $false so the fast path
+# doesn't skip New-K3dCluster's start/repair. Unknown/corrupt shape -> false (#420 Bugbot).
+function Test-ClusterRunningInList {
+  param([string]$Json, [string]$Name)
+  if ([string]::IsNullOrWhiteSpace($Json)) { return $false }
+  try { $clusters = $Json | ConvertFrom-Json -ErrorAction Stop } catch { return $false }
+  foreach ($c in @($clusters)) {
+    if ($c.name -ne $Name) { continue }
+    if ($c.PSObject.Properties.Name -contains 'serversRunning') { return ([int]$c.serversRunning -ge 1) }
+    return $false   # shape without a running count can't prove the cluster is up
+  }
+  return $false
+}
+
+# Is our k3d cluster present AND running? STATE query, BOUNDED via a job+deadline so a
+# wedged Docker engine can't hang the fast path at the start of every re-run (#420
+# Bugbot). Never-fatal: a timeout / parse failure -> $false (fall through to the walk).
+function Test-ClusterRunning {
+  $job = Start-Job -InitializationScript $JobInit -ScriptBlock {
+    param($n) (k3d cluster list $n -o json 2>$null | Out-String)
+  } -ArgumentList $CLUSTER_NAME
+  $out = ""
+  if (Wait-JobWithProgress -Job $job -TimeoutSec 15 -Message "Checking cluster") {
+    $out = (Receive-Job $job -ErrorAction SilentlyContinue | Out-String)
+  } else {
+    Log "k3d cluster list timed out; treating cluster as not running."
+  }
+  Remove-Job $job -Force -ErrorAction SilentlyContinue
+  return (Test-ClusterRunningInList -Json $out -Name $CLUSTER_NAME)
+}
+
+# The client's three workload deployments in a namespace. Single source of truth for
+# both the readiness gate and the fast-path health check (#420).
+function Get-ClientDeploymentNames {
+  param([string]$Namespace)
+  return @("mysql-client", "$Namespace-jobs-manager", "$Namespace-requests-proxy")
+}
+
+# Is a previously-installed client actually HEALTHY right now? The fast path must not
+# claim "nothing to do" over a running cluster whose client workloads are down (the
+# bash assess path requires Ready workloads too). Finds the installed release's
+# namespace via Get-InstalledClientInfo (bounded), then checks each client deployment
+# with a SHORT rollout deadline -- if any isn't Ready (or the release can't be found),
+# return $false so the run falls through to the repairing walk (#420 Bugbot).
+function Test-ClientHealthy {
+  $info = Get-InstalledClientInfo
+  if ($info.ListUnknown -or -not $info.Ns) { return $false }
+  foreach ($d in (Get-ClientDeploymentNames -Namespace $info.Ns)) {
+    & kubectl rollout status "deployment/$d" -n $info.Ns --timeout=5s 2>&1 | Out-Null
+    if ($LASTEXITCODE -ne 0) { return $false }
+  }
+  return $true
+}
+
+# --- Resume-after-reboot (RunOnce) -------------------------------------------
+
+# Pure: the RunOnce command line that resumes the install after a reboot. Reuses
+# the elevation arg-builder (#421) and adds -Resume so the resumed run auto-continues
+# past the reboot prompt. Prefixed with the powershell.exe host that RunOnce needs.
+function Get-ResumeCommand {
+  param([string]$ScriptPath, [switch]$NoReboot, [switch]$Diagnose, [string]$DailyUser)
+  $inner = Get-ElevationCommand -ScriptPath $ScriptPath -NoReboot:$NoReboot -Diagnose:$Diagnose -DailyUser $DailyUser
+  # Only the durable -File form can carry -Resume; the irm|iex shim has no param
+  # block to bind it (#421), and appending it would sit past -Command's value. The
+  # state file (completed/stages) drives the resume for the one-liner path anyway (#420).
+  if ($inner -match '(^|\s)-File\s') { $inner = "$inner -Resume" }
+  return "powershell.exe $inner"
+}
+
+# Register the RunOnce continuation. Warn-only. Returns $true on success.
+function Register-ResumeAfterReboot {
+  param([string]$ScriptPath, [switch]$NoReboot, [switch]$Diagnose, [string]$DailyUser)
+  try {
+    if (-not (Test-Path $script:RESUME_ROOT)) { New-Item -Path $script:RESUME_ROOT -Force | Out-Null }
+    $cmd = Get-ResumeCommand -ScriptPath $ScriptPath -NoReboot:$NoReboot -Diagnose:$Diagnose -DailyUser $DailyUser
+    New-ItemProperty -Path $script:RESUME_ROOT -Name $script:RESUME_NAME -Value $cmd -PropertyType String -Force -ErrorAction Stop | Out-Null
+    Log "Registered resume-after-reboot: $cmd"
+    return $true
+  } catch { Log "resume registration failed: $_"; return $false }
+}
+
+# Remove the RunOnce continuation. RunOnce self-deletes once it fires, but clear it
+# explicitly on the success path (no reboot happened) and after a manual re-run so a
+# stale entry can never relaunch the installer unexpectedly.
+function Unregister-ResumeAfterReboot {
+  try {
+    if (Test-Path $script:RESUME_ROOT) {
+      Remove-ItemProperty -Path $script:RESUME_ROOT -Name $script:RESUME_NAME -ErrorAction SilentlyContinue
+    }
+  } catch { Log "resume unregister failed: $_" }
+}
+
+# =============================================================================
 #  BANNER
 # =============================================================================
 
@@ -559,14 +799,25 @@ function Print-Banner {
   Log "Host data dir: $HOST_DATA_DIR"
 }
 
+# Single source of truth for the install's top-level steps (#500): the up-front
+# roadmap AND every "Step N/total" header derive their total from this list, so the
+# roadmap can't silently fall out of sync with the runtime step count again (the
+# earlier roadmap listed 5 while the runtime ran 6, mis-numbering every later step).
+$script:INSTALL_STEPS = @(
+  'Check system requirements'
+  'Install system tools'
+  'Set up secure compute environment'
+  'Install the tracebloc CLI'
+  'Register this machine'
+  'Install tracebloc client'
+)
+
 function Print-Roadmap {
   Write-Host "  Steps" -ForegroundColor White
   Hint ([string]([char]0x2500) * 5)
-  Hint "1. Check system requirements"
-  Hint "2. Set up secure compute environment"
-  Hint "3. Install the tracebloc CLI"
-  Hint "4. Register this machine"
-  Hint "5. Install tracebloc client"
+  for ($i = 0; $i -lt $script:INSTALL_STEPS.Count; $i++) {
+    Hint ("{0}. {1}" -f ($i + 1), $script:INSTALL_STEPS[$i])
+  }
   Write-Host ""
 }
 
@@ -815,12 +1066,26 @@ function Enable-VirtualisationFeatures {
 
   if ($rebootNeeded) {
     Warn "A reboot is required to finish enabling system features."
+    # Arm the RunOnce continuation so the install resumes at next sign-in with no
+    # re-pasting -- both for auto-reboot and manual -NoReboot (#420). RunOnce is
+    # written to the CURRENT (elevating) account's hive: the reboot happens here in
+    # Step 1, during that account's session, so that same account signs back in and
+    # continues -- the -DailyUser handoff (#418) only runs at the very end.
+    $resumeArmed = Register-ResumeAfterReboot -ScriptPath $PSCommandPath -NoReboot:$NoReboot -Diagnose:$Diagnose -DailyUser $DailyUser
+    if ($resumeArmed) { Ok "The install will resume automatically the next time you sign in." }
+    # Split-account caveat (reviewer): resume is tied to THIS account. If a different
+    # user will sign in after the reboot, they must re-run the installer to continue.
+    if ($resumeArmed -and $DailyUser -and ($DailyUser -ne $env:USERNAME)) {
+      Hint "Resume is registered for '$env:USERNAME'. Sign back in as '$env:USERNAME' to continue; if '$DailyUser' signs in instead, re-run the installer."
+    }
     if ($NoReboot) {
-      Hint "Reboot manually, then re-run this script."
+      if ($resumeArmed) { Hint "Reboot when ready; the install resumes at your next sign-in." }
+      else              { Hint "Reboot manually, then re-run this installer to continue." }
       exit 2
     }
     $choice = Read-Host "  Reboot now? [y/N]"
     if ($choice -match "^[Yy]$") { Restart-Computer -Force }
+    if (-not $resumeArmed) { Hint "After the reboot, re-run this installer to continue." }
     exit 2
   }
 
@@ -889,23 +1154,21 @@ function Install-DockerDesktop {
       # orphan past the step and fall through to a second concurrent install —
       # Stop-Job would leave the job's child process running (#422 Bugbot).
       Info "Installing Docker Desktop (~600 MB via winget) -- several minutes is normal."
-      try {
-        # Pass Docker Desktop's OWN installer flags through winget (--override
-        # replaces winget's manifest defaults) so a fresh machine reaches a running
-        # WSL2 engine with no license/onboarding GUI prompt (#419). Use a single
-        # command-line STRING, not an array: PS 5.1's Start-Process joins array
-        # elements without quoting, which would split the --override value into
-        # stray tokens; a string is passed verbatim so the quoted value survives
-        # as one argument (#419 Bugbot).
-        $wingetArgs = 'install -e --id Docker.DockerDesktop ' +
-          '--accept-package-agreements --accept-source-agreements --silent ' +
-          '--override "install --quiet --accept-license --backend=wsl-2 --always-run-service"'
-        $wp = Start-Process -FilePath "winget" -PassThru -ErrorAction Stop -ArgumentList $wingetArgs
-        if (-not (Wait-ProcessWithDeadline -Process $wp -Deadline (Get-Date).AddMinutes(40) -Message "Installing Docker Desktop (winget)")) {
-          throw "winget Docker install timed out (process killed)"
-        }
-        if ($wp.ExitCode -ne 0) { throw "winget exited $($wp.ExitCode)" }
-      } catch { Log "Docker Desktop winget install failed (will try direct download): $_" }
+      # Pass Docker Desktop's OWN installer flags through winget (--override
+      # replaces winget's manifest defaults) so a fresh machine reaches a running
+      # WSL2 engine with no license/onboarding GUI prompt (#419). Use a single
+      # command-line STRING, not an array: PS 5.1's Start-Process joins array
+      # elements without quoting, which would split the --override value into
+      # stray tokens; a string is passed verbatim so the quoted value survives
+      # as one argument (#419 Bugbot).
+      $wingetArgs = 'install -e --id Docker.DockerDesktop ' +
+        '--accept-package-agreements --accept-source-agreements --silent ' +
+        '--override "install --quiet --accept-license --backend=wsl-2 --always-run-service"'
+      # Best-effort: on any non-ok outcome the direct download below takes over. Output
+      # is captured to the log so a winget failure is diagnosable, not a bare code (#500).
+      $r = Invoke-TrackedInstall -FilePath "winget" -ArgumentList $wingetArgs `
+        -Label "Installing Docker Desktop (winget)" -TimeoutMinutes 40 -Tag "docker-winget"
+      if ($r.State -ne 'ok') { Log "Docker Desktop winget install failed (will try direct download): state=$($r.State) exit=$($r.ExitCode)" }
       RefreshPath
     }
 
@@ -924,28 +1187,21 @@ function Install-DockerDesktop {
           }
       }
       # Run the installer as a tracked PROCESS with a deadline that KILLS it on
-      # timeout (a background job would orphan the installer, #422 Bugbot).
-      # -ErrorAction Stop catches a spawn failure; the exit code catches a failed
-      # install — either way fail loudly, never continue as if Docker installed.
-      try {
-        # Same flags as the winget --override path: WSL2 backend + no GUI/license
-        # prompt + the engine service running unattended, so a fresh machine reaches
-        # a running engine with zero Docker Desktop interaction (#419).
-        $ip = Start-Process -FilePath $installer -ArgumentList "install --quiet --accept-license --backend=wsl-2 --always-run-service" `
-          -PassThru -ErrorAction Stop
-      } catch {
-        Remove-Item $installer -Force -ErrorAction SilentlyContinue
-        Err "Docker Desktop installer wouldn't start. Install it manually from https://www.docker.com/products/docker-desktop/ and re-run." "$_"
-      }
-      if (-not (Wait-ProcessWithDeadline -Process $ip -Deadline (Get-Date).AddMinutes(40) -Message "Installing Docker Desktop")) {
-        Remove-Item $installer -Force -ErrorAction SilentlyContinue
-        Err "Docker Desktop installation timed out (installer stopped). Install it manually from https://www.docker.com/products/docker-desktop/ and re-run."
-      }
-      if ($ip.ExitCode -ne 0) {
-        Remove-Item $installer -Force -ErrorAction SilentlyContinue
-        Err "Docker Desktop installation failed (installer exited $($ip.ExitCode)). Install it manually from https://www.docker.com/products/docker-desktop/ and re-run."
-      }
+      # timeout (a background job would orphan the installer, #422 Bugbot) and with
+      # its output captured, so a failed install shows the installer's own message in
+      # the log + -Diagnose bundle, not just an exit code (#500). Same flags as the
+      # winget --override path: WSL2 backend + no GUI/license prompt + the engine
+      # service running unattended, so a fresh machine reaches a running engine with
+      # zero Docker Desktop interaction (#419). Any non-ok outcome fails loudly.
+      $r = Invoke-TrackedInstall -FilePath $installer `
+        -ArgumentList "install --quiet --accept-license --backend=wsl-2 --always-run-service" `
+        -Label "Installing Docker Desktop" -TimeoutMinutes 40 -Tag "docker-direct"
       Remove-Item $installer -Force -ErrorAction SilentlyContinue
+      switch ($r.State) {
+        'spawn-failed' { Err "Docker Desktop installer wouldn't start. Install it manually from https://www.docker.com/products/docker-desktop/ and re-run." "$($r.Output)" }
+        'timeout'      { Err "Docker Desktop installation timed out (installer stopped). Install it manually from https://www.docker.com/products/docker-desktop/ and re-run." }
+        'failed'       { Err "Docker Desktop installation failed (installer exited $($r.ExitCode)). Install it manually from https://www.docker.com/products/docker-desktop/ and re-run." }
+      }
       RefreshPath
     }
 
@@ -1289,14 +1545,11 @@ function Install-K3dAndHelm {
       Log "Installing k3d via winget..."
       # winget install is console-silent; run it as a killable tracked process
       # (not a job — Stop-Job would orphan the child on timeout) with a spinner +
-      # deadline. Best-effort: on failure the direct download below takes over (#422).
-      try {
-        $kp = Start-Process -FilePath "winget" -PassThru -ErrorAction Stop -ArgumentList @(
-          "install","-e","--id","Rancher.k3d","--accept-package-agreements","--accept-source-agreements","--silent")
-        if (-not (Wait-ProcessWithDeadline -Process $kp -Deadline (Get-Date).AddMinutes(10) -Message "Installing k3d (winget)")) {
-          throw "k3d winget install timed out (process killed)"
-        }
-      } catch { Log "k3d winget install: $_" }
+      # deadline, capturing output so a failure is diagnosable (#500). Best-effort:
+      # on any non-ok outcome the direct download below takes over (#422).
+      $r = Invoke-TrackedInstall -FilePath "winget" -Label "Installing k3d (winget)" -TimeoutMinutes 10 -Tag "k3d-winget" `
+        -ArgumentList @("install","-e","--id","Rancher.k3d","--accept-package-agreements","--accept-source-agreements","--silent")
+      if ($r.State -ne 'ok') { Log "k3d winget install: state=$($r.State) exit=$($r.ExitCode)" }
     }
     RefreshPath
 
@@ -1364,15 +1617,11 @@ function Install-K3dAndHelm {
     if (Has "winget") {
       Log "Installing Helm via winget..."
       # winget install is console-silent; killable tracked process + spinner/deadline
-      # (a job would orphan the child on timeout). Best-effort: the direct download
-      # below takes over on failure (#422).
-      try {
-        $hp = Start-Process -FilePath "winget" -PassThru -ErrorAction Stop -ArgumentList @(
-          "install","-e","--id","Helm.Helm","--accept-package-agreements","--accept-source-agreements","--silent")
-        if (-not (Wait-ProcessWithDeadline -Process $hp -Deadline (Get-Date).AddMinutes(10) -Message "Installing Helm (winget)")) {
-          throw "helm winget install timed out (process killed)"
-        }
-      } catch { Log "helm winget install: $_" }
+      # (a job would orphan the child on timeout), capturing output so a failure is
+      # diagnosable (#500). Best-effort: the direct download below takes over (#422).
+      $r = Invoke-TrackedInstall -FilePath "winget" -Label "Installing Helm (winget)" -TimeoutMinutes 10 -Tag "helm-winget" `
+        -ArgumentList @("install","-e","--id","Helm.Helm","--accept-package-agreements","--accept-source-agreements","--silent")
+      if ($r.State -ne 'ok') { Log "helm winget install: state=$($r.State) exit=$($r.ExitCode)" }
       RefreshPath
     }
 
@@ -1549,21 +1798,27 @@ function Set-ClusterAutostart {
 #  All warn-only -- a provisioning hiccup must never fail the install.
 # =============================================================================
 
-# WSL2 VM memory (GB) for .wslconfig: as much as the host can give without starving
-# it -- physical RAM minus a reserve (default 4 GB for the host OS + overhead) --
-# so training pods fit instead of the WSL2 default (~50% of RAM). Pure; floored so
-# a tiny host still yields a positive value (#418).
+# WSL2 VM memory (GB) for .wslconfig -- the SAME budget the preflight advises for
+# this machine, so training pods fit instead of the WSL2 default (~50% of RAM).
+# It DELEGATES to Get-PfMemRecommendation (the recommended training budget, capped
+# at physical RAM minus the shared OS reserve) instead of doing its own arithmetic.
+# That delegation is the point: this path writes REAL config, so a private
+# calculation makes the installer contradict its own advice in the same run. It did
+# -- a private 4 GB reserve (vs the shared 2) told an 8 GB host "give Docker up to
+# 6 GB" while writing memory=4GB, below the client's own PF_MIN_MEM_GB floor and so
+# a guaranteed OOM crashloop; and it over-committed the other end, handing a 32 GB
+# host 28 GB and leaving Windows 4.
+#
+# Returns 0 when the host cannot support the floor (physical - reserve < the floor):
+# there is no budget worth writing, so the caller must skip the setting and say the
+# machine is too small rather than persist one known to OOM. Pure (#418).
 function Get-WslConfigMemoryGb {
-  param([int]$HostGb, [int]$ReserveGb = 4)
-  $m = $HostGb - $ReserveGb
-  if ($m -lt 1) { $m = 1 }
-  return $m
-}
-
-# The .wslconfig body granting the WSL2 VM the sized memory budget. Pure (#418).
-function Get-WslConfigContent {
-  param([int]$MemoryGb)
-  return "[wsl2]`r`nmemory=${MemoryGb}GB`r`n"
+  param([int]$HostGb, [int]$MinGb = 0)
+  if ($MinGb -le 0) { $MinGb = Get-PfMinMemGb }
+  # No ReserveGb param on purpose: the reserve is single-sourced, so no caller can
+  # reintroduce the drift this function existed to demonstrate.
+  if (($HostGb - (Get-PfOsReserveGb)) -lt $MinGb) { return 0 }
+  return (Get-PfMemRecommendation -DesiredGb (Get-PfRecMemGb) -HostGb $HostGb)
 }
 
 # Merge a memory budget into EXISTING .wslconfig content without clobbering other
@@ -1687,15 +1942,29 @@ function Set-DailyUserProvisioning {
       # Host RAM undetectable -> can't size the budget. Note it rather than skip silently (#418 Bugbot).
       $did += "couldn't detect host RAM -- set [wsl2] memory in '$user's .wslconfig manually"
     } else {
-      $wslCfg   = Join-Path $profileDir ".wslconfig"
-      $existing = if (Test-Path $wslCfg) { (Get-Content $wslCfg -Raw -ErrorAction SilentlyContinue) } else { "" }
-      $memGb    = Get-WslConfigMemoryGb -HostGb $hostGb
-      $merged   = Add-WslMemorySetting -Existing $existing -MemoryGb $memGb
-      if ($null -eq $merged) {
-        $did += "kept existing .wslconfig memory"
+      $memGb = Get-WslConfigMemoryGb -HostGb $hostGb
+      if ($memGb -le 0) {
+        # 0 = this host can't give the VM the client's floor. The biggest budget it
+        # COULD hold would still OOM-crashloop the client, and persisting it would
+        # bake that in for every later run on the daily account. Leave memory unset
+        # (WSL2's own default then applies) and say so plainly -- same honest framing
+        # as the preflight's host-too-small line.
+        $minGb   = Get-PfMinMemGb
+        $reserve = Get-PfOsReserveGb
+        Warn ("This machine has $hostGb GB RAM - too little for tracebloc: the client needs a $minGb GB WSL2 budget " +
+              "and Windows needs ~$reserve GB, so about $($minGb + $reserve) GB physical is the practical minimum.")
+        Hint "Left '$user's .wslconfig memory unset rather than write a budget that would OOM. Use a larger machine to run the client."
+        $did += "machine too small for a $minGb GB WSL2 budget -- .wslconfig memory left unset"
       } else {
-        Set-Content -Path $wslCfg -Value $merged -Encoding ASCII -ErrorAction Stop
-        $did += "set .wslconfig memory=${memGb}GB (applies next sign-in)"
+        $wslCfg   = Join-Path $profileDir ".wslconfig"
+        $existing = if (Test-Path $wslCfg) { (Get-Content $wslCfg -Raw -ErrorAction SilentlyContinue) } else { "" }
+        $merged   = Add-WslMemorySetting -Existing $existing -MemoryGb $memGb
+        if ($null -eq $merged) {
+          $did += "kept existing .wslconfig memory"
+        } else {
+          Set-Content -Path $wslCfg -Value $merged -Encoding ASCII -ErrorAction Stop
+          $did += "set .wslconfig memory=${memGb}GB (applies next sign-in)"
+        }
       }
     }
   } catch {
@@ -2555,7 +2824,7 @@ function Get-InstalledClientInfo {
 #   adopted  - cluster already registered: TB_PROV_ID/TB_PROV_NS, no password
 #   fallback - CLI missing/too old -> the legacy manual prompts in the Helm step
 function Invoke-ProvisionClient {
-  Step 5 6 "Registering this machine"
+  Step 5 $script:INSTALL_STEPS.Count "Registering this machine"
   $script:TB_PROV_MODE = "fallback"
 
   if (Get-ProvisioningPreset) {
@@ -2703,7 +2972,7 @@ function Invoke-ProvisionClient {
 
 function Install-ClientHelm {
   # -- Step 5/5: Install tracebloc client --
-  Step 6 6 "Installing tracebloc client"
+  Step 6 $script:INSTALL_STEPS.Count "Installing tracebloc client"
 
   if (-not (Test-Path $HOST_DATA_DIR)) {
     New-Item -ItemType Directory -Path $HOST_DATA_DIR -Force | Out-Null
@@ -3065,7 +3334,7 @@ function Confirm-Cluster {
 # summary reports the truth: connected | starting | bad_creds | image_pull | crash
 function Wait-ForClientReady {
   $ns = $script:TB_NAMESPACE
-  $deploys = @("mysql-client", "$ns-jobs-manager", "$ns-requests-proxy")
+  $deploys = Get-ClientDeploymentNames -Namespace $ns
   $deadline = (Get-Date).AddSeconds([int]$ReadyTimeout)
   $allReady = $true
 
@@ -3091,6 +3360,9 @@ function Wait-ForClientReady {
 # Classify why the client isn't Ready, for an accurate message. Returns a state.
 function Get-NotReadyState {
   param([string]$Namespace)
+  # The concrete pod/event text behind the failure, surfaced in the summary so the
+  # failure copy contains the actual reason, not just a generic line (#425).
+  $script:NotReadyDetail = ""
   # Wrong credentials: jobs-manager authenticates to the backend on startup and
   # crash-loops when rejected -- surfaced as an auth error in its logs.
   $jmLogs = (& kubectl logs -n $Namespace "deployment/$Namespace-jobs-manager" --all-containers --tail=50 2>$null | Out-String)
@@ -3106,16 +3378,36 @@ function Get-NotReadyState {
     # bash _diagnose_not_ready pull_fail filter.
     $events = (& kubectl get events -n $Namespace --request-timeout=5s 2>$null | Out-String)
     $pullFail = (($events -split "`n") | Where-Object { $_ -match '(?i)failed to pull|ErrImagePull' }) -join "`n"
+    # Surface the concrete event (or the failing pod lines when events are empty).
+    $script:NotReadyDetail = ((($pullFail -split "`n") | Where-Object { $_.Trim() } | Select-Object -First 3) -join "`n").Trim()
+    if (-not $script:NotReadyDetail) {
+      $script:NotReadyDetail = ((($pods -split "`n") | Where-Object { $_ -match '(?i)ImagePullBackOff|ErrImagePull|InvalidImageName' } | Select-Object -First 3) -join "`n").Trim()
+    }
     if ($pullFail -match '(?i)x509|certificate signed by unknown authority|tls: failed to verify') { return "image_pull_ca" }
     return "image_pull"
   }
-  if ($pods -match '(?i)CrashLoopBackOff') { return "crash" }
+  if ($pods -match '(?i)CrashLoopBackOff') {
+    $script:NotReadyDetail = ((($pods -split "`n") | Where-Object { $_ -match '(?i)CrashLoopBackOff' } | Select-Object -First 3) -join "`n").Trim()
+    return "crash"
+  }
   return "starting"
 }
 
 # =============================================================================
 #  SUMMARY
 # =============================================================================
+
+# Print the concrete pod/event text behind a not-ready failure (#425), indented, so
+# the failure summary carries the actual reason (the "failed to pull ..." event or
+# the failing pod line) rather than only a generic sentence. No-op when empty.
+function Write-NotReadyDetail {
+  if (-not $script:NotReadyDetail) { return }
+  Write-Host ""
+  Write-Host "  What the cluster reported:" -ForegroundColor DarkGray
+  foreach ($l in ($script:NotReadyDetail -split "`n")) {
+    if ($l.Trim()) { Hint "  $($l.Trim())" }
+  }
+}
 
 # Reports the outcome based on $script:ClientState (set by Wait-ForClientReady).
 # The "secure compute environment / your data never leaves" claim is printed
@@ -3181,6 +3473,7 @@ function Print-Summary {
       Write-Host "    `$env:TRACEBLOC_CA_BUNDLE = 'C:\path\to\corporate-ca.pem'; irm https://tracebloc.io/i.ps1 | iex" -ForegroundColor Green
       Hint "(CURL_CA_BUNDLE is also honored.) Ask your IT team for the bundle if unsure."
       Write-Host "  Inspect:  " -NoNewline; Write-Host "kubectl get events -n $ns | Select-String x509" -ForegroundColor Green
+      Write-NotReadyDetail
       Hint "Re-running this installer is safe."
     }
     default {
@@ -3191,6 +3484,7 @@ function Print-Summary {
       Write-Host ""
       Write-Host "  Inspect:  " -NoNewline; Write-Host "kubectl get pods -n $ns" -ForegroundColor Green
       Write-Host "  Logs:     ~\.tracebloc\install-*.log"
+      Write-NotReadyDetail
       Hint "Re-running this installer is safe."
     }
   }
@@ -3281,6 +3575,20 @@ function Get-PfRuntimeMemGb {
   } catch {}
   return $null
 }
+
+# The same budget in MiB. The FLOOR CHECK needs sub-GB precision: Get-PfRuntimeMemGb
+# floors to whole GB, and a VM configured at exactly the floor reports a few hundred
+# MiB less than its configured size (guest kernel + reserved), so 5 GB configured ->
+# ~4.8 GB reported -> floors to 4. Enforcing on that would hard-fail a correctly
+# sized machine, so the gate compares MiB against the floor minus a grace band
+# (mirrors bash's PF_VM_MEM_GRACE_MIB, preflight.sh #513). $null if undeterminable.
+function Get-PfRuntimeMemMib {
+  try {
+    $v = ((docker info --format '{{.MemTotal}}' 2>$null) | Out-String).Trim()
+    if ($v -match '^\d+$' -and [int64]$v -gt 0) { return [math]::Floor([int64]$v / 1MB) }
+  } catch {}
+  return $null
+}
 function Get-PfRuntimeCpu {
   try {
     $v = ((docker info --format '{{.NCPU}}' 2>$null) | Out-String).Trim()
@@ -3303,13 +3611,39 @@ function Get-PfMemGb {
 # achievable budget in one place, so the two can't drift (#417 reviewer).
 $script:PfOsReserveGb = 2
 
+# Accessors for the three memory numbers, so every path that PRINTS advice and every
+# path that WRITES a real budget reads the same values (#418). Read through these
+# rather than re-deriving: the drift they close is what let the daily-user
+# .wslconfig be sized from a private 4 GB reserve while the preflight advised 2,
+# producing a budget below the client's own floor on an 8 GB host.
+# The reserve fails CLOSED -- never 0, which would hand WSL2 the entire host.
+function Get-PfOsReserveGb { if ($script:PfOsReserveGb -gt 0) { return [int]$script:PfOsReserveGb } else { return 2 } }
+function Get-PfMinMemGb    { if ($env:PF_MIN_MEM_GB)  { return [int]$env:PF_MIN_MEM_GB }  else { return 5 } }
+function Get-PfWarnMemGb   { if ($env:PF_WARN_MEM_GB) { return [int]$env:PF_WARN_MEM_GB } else { return 8 } }
+function Get-PfRecMemGb    { if ($env:PF_REC_MEM_GB)  { return [int]$env:PF_REC_MEM_GB }  else { return 16 } }
+# How far below the floor a VM may REPORT before the runtime gate calls it sub-floor.
+# A guest's MemTotal runs a few hundred MiB under its configured size, so a VM set to
+# exactly the documented floor must still pass -- otherwise the effective floor is a
+# GB higher than we tell people (bash PF_VM_MEM_GRACE_MIB, #513 reviewer).
+function Get-PfVmMemGraceMib { if ($env:PF_VM_MEM_GRACE_MIB) { return [int]$env:PF_VM_MEM_GRACE_MIB } else { return 512 } }
+
 # Cap a desired Docker-memory recommendation at what the host can actually give
 # (physical RAM minus the OS reserve), so we never advise more than the machine
-# physically has — e.g. "give Docker 16 GB" on a 15 GB laptop (#417). Floors at
-# 1 GB so a tiny host still yields a positive number.
+# physically has — e.g. "give Docker 16 GB" on a 15 GB laptop (#417).
+#
+# NEVER returns below the client's own minimum. A floor of 1 GB produced advice
+# the user could not act on: on a 6 GB host the cap is 4, so the sub-floor branch
+# printed "Give Docker at least 5 GB (up to 4 GB)" and a concrete
+# "memory=4GB" — an empty range whose value is below the 5 GB the same sentence
+# demands. Flooring at the minimum keeps every printed figure self-consistent;
+# a host that genuinely cannot reach the floor is handled by the host-too-small
+# branch in Show-MemoryStatus, not by a sub-floor number. This mirrors bash's
+# _pf_clamp_mem_gb exactly (preflight.sh, #428/#513) so the two installers give
+# the same advice on the same hardware.
 function Get-PfMemRecommendation([int]$DesiredGb, [int]$HostGb) {
-  $cap = $HostGb - $script:PfOsReserveGb
-  if ($cap -lt 1) { $cap = 1 }
+  $minMemGb = Get-PfMinMemGb
+  $cap = $HostGb - (Get-PfOsReserveGb)
+  if ($cap -lt $minMemGb) { $cap = $minMemGb }
   if ($DesiredGb -lt $cap) { return $DesiredGb }
   return $cap
 }
@@ -3323,9 +3657,10 @@ function Get-PfMemRecommendation([int]$DesiredGb, [int]$HostGb) {
 # post-Docker re-check so their wording never diverges.
 function Show-MemoryStatus {
   param($HostGb, $BudgetGb)   # either may be $null
-  $minMemGb  = if ($env:PF_MIN_MEM_GB)  { [int]$env:PF_MIN_MEM_GB }  else { 5 }
-  $warnMemGb = if ($env:PF_WARN_MEM_GB) { [int]$env:PF_WARN_MEM_GB } else { 8 }
-  $recMemGb  = if ($env:PF_REC_MEM_GB)  { [int]$env:PF_REC_MEM_GB }  else { 16 }
+  $minMemGb   = Get-PfMinMemGb
+  $warnMemGb  = Get-PfWarnMemGb
+  $recMemGb   = Get-PfRecMemGb
+  $reserveGb  = Get-PfOsReserveGb
 
   # Effective = what the client actually gets; grade on this.
   $effective = if ($null -ne $BudgetGb) { $BudgetGb } elseif ($null -ne $HostGb) { $HostGb } else { $null }
@@ -3351,19 +3686,43 @@ function Show-MemoryStatus {
     $recRun   = $warnMemGb
   }
   # A throttled Docker budget is fixed at the daemon; a small host needs more RAM.
-  $budgetIsBottleneck = ($null -ne $BudgetGb) -and ($null -eq $HostGb -or $BudgetGb -lt $HostGb)
+  # A host that cannot reach the floor even with the OS reserve honoured is too
+  # small for tracebloc no matter how Docker is configured, so it is NOT a budget
+  # bottleneck — a resize hint there is a dead end that repeats an unachievable
+  # size. Mirrors the bash recheck's host-too-small branch (preflight.sh, #428).
+  $hostTooSmall = ($null -ne $HostGb) -and (($HostGb - $reserveGb) -lt $minMemGb)
+  $budgetIsBottleneck = ($null -ne $BudgetGb) -and ($null -eq $HostGb -or $BudgetGb -lt $HostGb) -and (-not $hostTooSmall)
 
   if ($effective -lt $minMemGb) {
     Warn "Memory: $label$budgetNote - below the $minMemGb GB the client needs; it will OOM."
     if ($budgetIsBottleneck) {
       Hint "Give Docker at least $minMemGb GB (up to $recRun GB): WSL2 backend - [wsl2] memory=${recRun}GB in %UserProfile%\.wslconfig + 'wsl --shutdown'; Hyper-V - Docker Desktop -> Settings -> Resources -> Advanced."
+    } elseif ($hostTooSmall) {
+      # Name the OS reserve and the resulting practical minimum. Without it, a
+      # 5-6 GB host reads "you have 6 GB, you need 5 GB, get a bigger machine",
+      # which looks self-contradictory (Bugbot) — the shortfall only makes sense
+      # once the ~2 GB the OS needs is stated. Mirrors bash's reserve-aware copy
+      # in _pf_recheck_runtime_mem.
+      Hint "This machine has $label of RAM total - too little for tracebloc: the client needs a $minMemGb GB Docker budget and the OS needs ~$reserveGb GB, so about $($minMemGb + $reserveGb) GB physical is the practical minimum. Use a larger machine."
     } else {
       Hint "This machine has $label of RAM total; the client needs at least $minMemGb GB. Free up memory or use a larger machine."
     }
   }
   elseif ($effective -lt $warnMemGb) {
-    Warn "Memory: $label$budgetNote - enough to run the client, but training (~8 GB/job) may OOM; $recTrain GB recommended to train locally."
-    Hint "For local training, give Docker up to $recTrain GB: WSL2 backend - [wsl2] memory=${recTrain}GB in %UserProfile%\.wslconfig + 'wsl --shutdown'; Hyper-V - Docker Desktop -> Settings -> Resources -> Advanced."
+    # hostTooSmall must be consulted HERE too, not only in the below-floor branch
+    # (Bugbot). A 5-6 GB host with Docker down grades as "enough to run", and the
+    # training hint would then print memory=5GB — a budget that leaves the OS 1 GB
+    # and that this same function calls unachievable two branches up. Such a
+    # machine cannot be tuned into a training box at all, so name that instead of
+    # printing a number: no branch may emit a concrete memory= value for a host
+    # that cannot reach the floor while keeping the OS reserve.
+    if ($hostTooSmall) {
+      Warn "Memory: $label$budgetNote - enough to run the client, but too little to train locally (~8 GB/job)."
+      Hint "This machine has $label of RAM total and the OS needs ~$reserveGb GB, so it cannot give Docker a training-sized budget. Run the client here and train on a larger machine."
+    } else {
+      Warn "Memory: $label$budgetNote - enough to run the client, but training (~8 GB/job) may OOM; $recTrain GB recommended to train locally."
+      Hint "For local training, give Docker up to $recTrain GB: WSL2 backend - [wsl2] memory=${recTrain}GB in %UserProfile%\.wslconfig + 'wsl --shutdown'; Hyper-V - Docker Desktop -> Settings -> Resources -> Advanced."
+    }
   }
   else {
     Ok "Memory: $label$budgetNote"
@@ -3518,16 +3877,64 @@ function Test-Preflight {
 
 # Re-evaluate memory once Docker is confirmed up. Test-Preflight runs before Docker
 # Desktop starts, so its read may have been host RAM, not the (smaller) Docker VM
-# budget. Called from New-K3dCluster. WARN-only — the user has already waited for
-# Docker, so aborting here would be jarring.
+# budget. Called from New-K3dCluster, as its FIRST statement — nothing is built yet,
+# so stopping here leaves no half-made cluster behind.
+#
+# A sub-FLOOR budget HARD-FAILS here. This is the one point the REAL VM budget is
+# known, and a VM below the floor OOM-crashloops the client, so proceeding is worse
+# than the jarring stop this used to prefer. bash reached the same conclusion and
+# enforces it on every OS (_pf_recheck_runtime_mem -> error -> exit 1, #513); Windows
+# only ever WARNED, so the platform this whole memory story is about was the one
+# platform that still shipped the crash. A between-floor-and-warn budget still only
+# warns (it can run, just tightly) — that grading stays in Show-MemoryStatus, which
+# remains purely presentational; enforcement lives here, mirroring bash's split.
 function Test-PreflightRuntimeMem {
   if ($env:TRACEBLOC_SKIP_PREFLIGHT) { return }
-  $budget = Get-PfRuntimeMemGb
-  if ($null -eq $budget) { return }
+  # One `docker info` read, in MiB, so the number we PRINT and the number we ENFORCE
+  # on cannot disagree; GB is derived from it rather than read separately.
+  $mib = Get-PfRuntimeMemMib
+  if ($null -eq $mib) { return }              # daemon not reporting — nothing to add
+  $grace = Get-PfVmMemGraceMib
+  # Grade/report the CONFIGURED size, not the flooring artifact. A guest reports a few
+  # hundred MiB under its configured size, so a VM set to exactly the floor gives
+  # floor(4800/1024) = 4 — and Show-MemoryStatus would then print hard-floor "it will
+  # OOM" copy for a machine the gate below ACCEPTS, telling a correctly configured box
+  # it will crash and then carrying on (Bugbot). Folding in the SAME grace before
+  # flooring recovers the configured GB (4800 + 512 -> 5) and leaves a genuinely
+  # sub-floor VM exactly where it was (4096 + 512 -> 4). Because both the grade and
+  # the gate now pivot on the same grace, their boundaries coincide at
+  # (floor * 1024 - grace) MiB: there is no band that warns "will OOM" yet proceeds,
+  # and none that passes while being called sub-floor.
+  $budget = [int][math]::Floor(($mib + $grace) / 1024)
+  $hostGb = Get-PfMemGb
+
   # Re-run the SAME assessment now that Docker's budget is known, so both floors
   # (min "will OOM" + warn "training may OOM") apply to the budget and the wording
   # matches Step-1 (#417 reviewer). Host RAM stays the reported label.
-  Show-MemoryStatus -HostGb (Get-PfMemGb) -BudgetGb $budget
+  Show-MemoryStatus -HostGb $hostGb -BudgetGb $budget
+
+  $minGb = Get-PfMinMemGb
+  # Grace band, not a bare `-lt $minGb`: see Get-PfRuntimeMemMib. A VM at exactly the
+  # documented floor passes; a genuinely sub-floor one (e.g. 4 GB) does not. Same
+  # $grace as the grade above, so this boundary and that one are the same boundary.
+  if ($mib -ge (($minGb * 1024) - $grace)) { return }
+
+  $reserveGb = Get-PfOsReserveGb
+  Write-Host ""
+  if ($null -ne $hostGb -and ($hostGb - $reserveGb) -lt $minGb) {
+    # No Docker setting can fix this one, so don't offer a resize that repeats an
+    # unachievable size — name the practical minimum instead (matches the
+    # host-too-small copy Show-MemoryStatus prints, and bash's #428 branch).
+    Write-PfFail "This machine has $hostGb GB RAM - too little for tracebloc: the client needs a $minGb GB Docker budget and Windows needs ~$reserveGb GB, so about $($minGb + $reserveGb) GB physical is the practical minimum."
+    Hint "No Docker setting fixes this - run the client on a larger machine."
+  } else {
+    # Achievable target: clamped to this host when we know its size, else the raw
+    # run target (no ceiling is known, so don't cap at the throttled budget, #483).
+    $target = if ($null -ne $hostGb) { Get-PfMemRecommendation -DesiredGb (Get-PfWarnMemGb) -HostGb $hostGb } else { Get-PfWarnMemGb }
+    Write-PfFail "Docker's VM has only $budget GB - below the $minGb GB the tracebloc client needs; it will OOM-crashloop."
+    Hint "Raise it to >= $target GB, then re-run: WSL2 backend - set [wsl2] memory=${target}GB in %UserProfile%\.wslconfig and run 'wsl --shutdown'; Hyper-V backend - Docker Desktop -> Settings -> Resources -> Advanced."
+  }
+  Err "Not enough memory for the tracebloc client. (Override at your own risk with `$env:TRACEBLOC_SKIP_PREFLIGHT=1.)"
 }
 
 # =============================================================================
@@ -3682,7 +4089,7 @@ function Install-TraceblocCli {
   # credential in Step 4 (browser sign-in + `client create`). A failed CLI
   # install is still non-fatal: Step 4 falls back to the legacy manual-
   # credential flow, so the machine can always be connected.
-  Step 4 6 "Install the tracebloc CLI"
+  Step 4 $script:INSTALL_STEPS.Count "Install the tracebloc CLI"
 
   Info "Installing the tracebloc CLI..."
 
@@ -3737,18 +4144,35 @@ if ($Diagnose) { Invoke-DiagnoseBundle; exit 0 }
 Confirm-Config
 Initialize-ToolDir
 Start-InstallLog
+# Load the install state up front (#420): drives the fast nothing-to-do path.
+# Missing/corrupt -> a fresh state (never fatal).
+$script:InstallState = Read-InstallState
 Print-Banner
+if ($Resume) { Ok "Resuming the tracebloc install after a reboot..." }
 Print-Roadmap
 
+# Fast path (#420): a prior run completed successfully AND the tools + a RUNNING
+# cluster + Ready client workloads are all still here -> nothing to do. Honest: it
+# verifies live health (not just the checkpoint), so a stopped cluster or a down
+# client falls through to the repairing walk. Skipped on -Resume (a resume must
+# finish the interrupted walk).
+if ((-not $Resume) -and $script:InstallState.completed -and (Test-ToolsPresent) -and (Test-ClusterRunning) -and (Test-ClientHealthy)) {
+  Ok "tracebloc is already installed and the client is healthy -- nothing to do."
+  Hint "Delete $(Get-InstallStatePath) (or set a fresh HOST_DATA_DIR) to force a full reinstall."
+  Unregister-ResumeAfterReboot
+  try { Stop-Transcript | Out-Null } catch {}
+  exit 0
+}
+
 # -- Step 1/6: Check system requirements (honest split from tool install, #422) --
-Step 1 6 "Checking system requirements"
+Step 1 $script:INSTALL_STEPS.Count "Checking system requirements"
 Test-Preflight
 Find-Gpu
 Enable-VirtualisationFeatures
 
 # -- Step 2/6: Install system tools (~700 MB — Docker Desktop, kubectl, k3d, helm;
 # each names its wait + shows a heartbeat + prints a summary line, #422) --
-Step 2 6 "Installing system tools"
+Step 2 $script:INSTALL_STEPS.Count "Installing system tools"
 Install-Winget
 Install-DockerDesktop
 Install-NvidiaContainerToolkit
@@ -3756,7 +4180,7 @@ Install-Kubectl
 Install-K3dAndHelm
 
 # -- Step 3/6: Set up secure compute environment --
-Step 3 6 "Setting up secure compute environment"
+Step 3 $script:INSTALL_STEPS.Count "Setting up secure compute environment"
 New-K3dCluster
 Install-GpuDevicePlugin
 Confirm-GpuNode
@@ -3780,11 +4204,19 @@ Wait-ForClientReady
 # (#418) so they need zero admin actions later. Warn-only -- never fail the install.
 try { Set-DailyUserProvisioning } catch { Log "daily-user provisioning error: $_" }
 
+# The install reached the end: no reboot is pending, so clear any RunOnce
+# continuation. Record completion ONLY when the client is actually CONNECTED; on any
+# other outcome CLEAR a stale completed flag from an earlier success, so a re-run
+# (likely started because the client is down) can't hit the fast path and skip the
+# documented remediation the summary just printed (#420 reviewer + Bugbot).
+Unregister-ResumeAfterReboot
+if (Test-InstallConnected) { Set-InstallComplete } else { Clear-InstallCompleted }
+
 Print-Summary
 
 try { Stop-Transcript | Out-Null } catch {}
 
 # Exit code reflects reality: connected/starting are OK; failures are non-zero.
-if ($script:ClientState -ne "connected" -and $script:ClientState -ne "starting") { exit 1 }
+if (-not (Test-InstallSucceeded)) { exit 1 }
 
 }  # end TB_PESTER guard (skipped when the test suite dot-sources this file)

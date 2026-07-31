@@ -274,6 +274,62 @@ defeating the pin. Every read is nil-guarded for the same reason.
 
 Usage: {{ include "tracebloc.ingestorDigest" . }}
 */}}
+{{/*
+  Resolved CLIENT_ENV, with the documented aliases normalized to the
+  canonical dev|stg|prod keys.
+
+  ONE definition on purpose. Bugbot caught the first cut normalizing inside
+  tracebloc.ingestorTag only, so CLIENT_ENV=production selected the prod
+  float tag while tracebloc.ingestorDigest still compared the RAW value to
+  "prod" and returned nothing -- silently dropping the reproducibility pin
+  (backend#1028/#1245) on an edge that looked correctly configured. Any future
+  consumer of CLIENT_ENV must go through here rather than re-deriving it, the
+  same reason ENV_ALIASES lives once in client-runtime proxy_config.
+*/}}
+{{- define "tracebloc.clientEnv" -}}
+{{- $raw := (default dict .Values.env).CLIENT_ENV | default "prod" -}}
+{{- $aliases := dict "development" "dev" "staging" "stg" "production" "prod" -}}
+{{- if hasKey $aliases $raw -}}
+{{- get $aliases $raw -}}
+{{- else -}}
+{{- $raw -}}
+{{- end -}}
+{{- end }}
+
+{{/*
+  Effective floating tag for spawned ingestion Jobs (backend#1360).
+
+  Precedence, mirroring tracebloc.ingestorDigest:
+    1. `images.ingestor.tag`          explicit override, any environment
+    2. `images.ingestor.channelTags[CLIENT_ENV]`   per-environment channel
+    3. "0.7"                          last-resort literal, so a release that
+                                      predates these keys still renders under
+                                      `--reuse-values`
+
+  Only consulted when no digest applies: jobs-manager builds `repo@digest`
+  when tracebloc.ingestorDigest is non-empty, and `repo:tag` otherwise
+  (client-runtime submit_ingestion_run._build_image_reference).
+
+  dev/stg resolve to the UNSIGNED internal channels. Prod is a semver float,
+  not a `:prod` tag — none is published.
+*/}}
+{{- define "tracebloc.ingestorTag" -}}
+{{- $ing := default dict .Values.images.ingestor -}}
+{{- $explicit := $ing.tag | default "" -}}
+{{- if $explicit -}}
+{{- $explicit -}}
+{{- else -}}
+{{- $clientEnv := include "tracebloc.clientEnv" . -}}
+{{- $channels := default dict $ing.channelTags -}}
+{{- $channel := get $channels $clientEnv | default "" -}}
+{{- if $channel -}}
+{{- $channel -}}
+{{- else -}}
+{{- "0.7" -}}
+{{- end -}}
+{{- end -}}
+{{- end }}
+
 {{- define "tracebloc.ingestorDigest" -}}
 {{- $ing := default dict .Values.images.ingestor -}}
 {{- $explicit := $ing.digest | default "" -}}
@@ -284,7 +340,7 @@ Usage: {{ include "tracebloc.ingestorDigest" . }}
 {{- if hasKey $ing "prodPin" -}}
 {{- $prodPin = $ing.prodPin -}}
 {{- end -}}
-{{- $clientEnv := (default dict .Values.env).CLIENT_ENV | default "prod" -}}
+{{- $clientEnv := include "tracebloc.clientEnv" . -}}
 {{- if and $prodPin (eq $clientEnv "prod") -}}
 {{- $ing.prodDigest | default "" -}}
 {{- end -}}

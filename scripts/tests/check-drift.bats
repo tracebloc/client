@@ -152,6 +152,23 @@ YAML
   _drift=0; _drift_execute_gates >/dev/null 2>&1; [ "$_drift" -ge 1 ]
 }
 
+@test "execute-gates: macOS delegating to the gated install_<tool> counts as a gate -> no drift (#429)" {
+  # setup-macos.sh no longer carries its own assert_tool_runs; it calls the SHARED
+  # install_kubectl/_k3d/_helm (setup-linux.sh), each of which execute-gates. The
+  # contract must accept that delegation so the parity check stays green post-#429.
+  printf 'assert_tool_runs --rm "$D/kubectl" kubectl version --client\nassert_tool_runs --rm "$D/k3d" k3d version\nassert_tool_runs --rm "$D/helm" helm version\n' > "$ROOT/scripts/lib/setup-linux.sh"
+  printf 'install_macos_cli_tools() {\n  install_kubectl\n  install_k3d\n  install_helm\n}\n' > "$ROOT/scripts/lib/setup-macos.sh"
+  printf 'Assert-ToolRuns -Name "kubectl" -VersionArgs @("version","--client")\nAssert-ToolRuns -Name "k3d" -VersionArgs @("version")\nAssert-ToolRuns -Name "helm" -VersionArgs @("version")\n' >> "$ROOT/scripts/install-k8s.ps1"
+  _drift=0; _drift_execute_gates >/dev/null; [ "$_drift" -eq 0 ]
+}
+
+@test "execute-gates: macOS with NEITHER a direct gate NOR the delegating call -> drift (#429)" {
+  printf 'assert_tool_runs kubectl version --client\nassert_tool_runs k3d version\nassert_tool_runs helm version\n' > "$ROOT/scripts/lib/setup-linux.sh"
+  printf 'install_macos_cli_tools() {\n  install_kubectl\n  install_k3d\n}\n' > "$ROOT/scripts/lib/setup-macos.sh"   # no helm gate NOR install_helm
+  printf 'Assert-ToolRuns -Name "kubectl" -VersionArgs @("version","--client")\nAssert-ToolRuns -Name "k3d" -VersionArgs @("version")\nAssert-ToolRuns -Name "helm" -VersionArgs @("version")\n' >> "$ROOT/scripts/install-k8s.ps1"
+  _drift=0; _drift_execute_gates >/dev/null 2>&1; [ "$_drift" -ge 1 ]
+}
+
 # ── Check 5: preflight download-host parity (#416) ───────────────────────────
 # The check extracts hosts from PROBE ENTRIES only — bash "label|https://host/…"
 # and ps1 @{ label = "…"; url = "https://host/…" } (label REQUIRED on the ps1 line,

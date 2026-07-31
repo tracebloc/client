@@ -143,11 +143,27 @@ jobs:
             echo "OK — $label is multi-arch (amd64 + arm64)."
           }
 
-          # The floating tag is the default spawn target — always validate it.
-          if [ -z "$tag" ] || [ "$tag" = "null" ]; then
-            echo "::error::images.ingestor.tag is empty — the chart must define a floating tag to spawn by."; exit 1
+          # Every tag this chart can spawn by must be multi-arch. Since
+          # backend#1360 that is `tag` (an explicit override, empty by default)
+          # PLUS each per-environment entry in `channelTags` — an edge resolves
+          # exactly one of them, so a single-arch value in any of them breaks
+          # ingestion on arm64 for whichever environment lands on it.
+          checked=0
+          if [ -n "$tag" ] && [ "$tag" != "null" ]; then
+            assert_multiarch "${repo}:${tag}" "explicit tag override (images.ingestor.tag)"
+            checked=$((checked + 1))
           fi
-          assert_multiarch "${repo}:${tag}" "floating tag"
+          for env_key in dev stg prod; do
+            channel=$(yq ".images.ingestor.channelTags.${env_key}" client/values.yaml)
+            if [ -z "$channel" ] || [ "$channel" = "null" ]; then
+              continue
+            fi
+            assert_multiarch "${repo}:${channel}" "channelTags.${env_key}"
+            checked=$((checked + 1))
+          done
+          if [ "$checked" -eq 0 ]; then
+            echo "::error::no spawnable ingestor tag is defined — images.ingestor.tag is empty and channelTags has no entries, so an edge with no digest has nothing to spawn."; exit 1
+          fi
 
           # The prod pin is a chart DEFAULT that reaches every prod edge through
           # the fleet auto-upgrade, so a single-arch value here would break
