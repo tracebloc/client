@@ -20,15 +20,15 @@ setup() {
   CLUSTER_NAME=tracebloc; SERVERS=1; AGENTS=1
   HOST_DATA_DIR="$HOME/.tracebloc"
   run validate_config
-  [ "$status" -eq 0 ]
+  [ "$status" -eq 0 ] || return 1
 }
 
 @test "validate_config: empty HOST_DATA_DIR fails closed (#384 bugbot)" {
   HOME="$BATS_TEST_TMPDIR"; USER=tester
   CLUSTER_NAME=tracebloc; SERVERS=1; AGENTS=1; HOST_DATA_DIR=""
   run validate_config
-  [ "$status" -ne 0 ]
-  [[ "$output" == *"must not be empty"* ]]
+  [ "$status" -ne 0 ] || return 1
+  [[ "$output" == *"must not be empty"* ]] || return 1
 }
 
 @test "validate_config: leading tilde in HOST_DATA_DIR expands to \$HOME (#384 bugbot)" {
@@ -40,8 +40,8 @@ setup() {
   run validate_config
   # Pre-fix, `~/x` became the literal "$HOME/~/x" and failed parent resolution;
   # now it resolves to $HOME/tracebloc-new and validates. No `~` may survive.
-  [ "$status" -eq 0 ]
-  [[ "$output" != *"~"* ]]
+  [ "$status" -eq 0 ] || return 1
+  [[ "$output" != *"~"* ]] || return 1
 }
 
 @test "validate_config: HOST_DATA_DIR == \$HOME is rejected, not adopted (#384 bugbot)" {
@@ -50,40 +50,40 @@ setup() {
   HOME="$(cd -P "$BATS_TEST_TMPDIR" && pwd)"; USER=tester
   CLUSTER_NAME=tracebloc; SERVERS=1; AGENTS=1; HOST_DATA_DIR="$HOME"
   run validate_config
-  [ "$status" -ne 0 ]
-  [[ "$output" == *"not \$HOME itself"* ]]
+  [ "$status" -ne 0 ] || return 1
+  [[ "$output" == *"not \$HOME itself"* ]] || return 1
 }
 
 @test "validate_config: bare ~ is rejected (resolves to \$HOME) (#384 bugbot)" {
   HOME="$(cd -P "$BATS_TEST_TMPDIR" && pwd)"; USER=tester
   CLUSTER_NAME=tracebloc; SERVERS=1; AGENTS=1; HOST_DATA_DIR="~"
   run validate_config
-  [ "$status" -ne 0 ]
-  [[ "$output" == *"not \$HOME itself"* ]]
+  [ "$status" -ne 0 ] || return 1
+  [[ "$output" == *"not \$HOME itself"* ]] || return 1
 }
 
 @test "validate_config: invalid CLUSTER_NAME -> error" {
   HOME="$BATS_TEST_TMPDIR"; USER=tester
   CLUSTER_NAME="1nope"; SERVERS=1; AGENTS=1; HOST_DATA_DIR="$HOME/x"
   run validate_config
-  [ "$status" -ne 0 ]
-  [[ "$output" == *"CLUSTER_NAME"* ]]
+  [ "$status" -ne 0 ] || return 1
+  [[ "$output" == *"CLUSTER_NAME"* ]] || return 1
 }
 
 @test "validate_config: invalid SERVERS -> error" {
   HOME="$BATS_TEST_TMPDIR"; USER=tester
   CLUSTER_NAME=ok; SERVERS=0; AGENTS=1; HOST_DATA_DIR="$HOME/x"
   run validate_config
-  [ "$status" -ne 0 ]
-  [[ "$output" == *"SERVERS"* ]]
+  [ "$status" -ne 0 ] || return 1
+  [[ "$output" == *"SERVERS"* ]] || return 1
 }
 
 @test "validate_config: HOST_DATA_DIR outside HOME -> error" {
   HOME="$BATS_TEST_TMPDIR"; USER=tester
   CLUSTER_NAME=ok; SERVERS=1; AGENTS=1; HOST_DATA_DIR="/tmp/not-under-home-$$"
   run validate_config
-  [ "$status" -ne 0 ]
-  [[ "$output" == *"HOST_DATA_DIR"* ]]
+  [ "$status" -ne 0 ] || return 1
+  [[ "$output" == *"HOST_DATA_DIR"* ]] || return 1
 }
 
 # ── validate_config: HOST_DATASET_DIR (backend#743) ──────────────────────────
@@ -95,7 +95,7 @@ setup() {
   CLUSTER_NAME=ok; SERVERS=1; AGENTS=1; HOST_DATA_DIR="$HOME/.tracebloc"
   HOST_DATASET_DIR="$HOME/dataset-mount"; mkdir -p "$HOST_DATASET_DIR"
   run validate_config
-  [ "$status" -eq 0 ]
+  [ "$status" -eq 0 ] || return 1
 }
 
 @test "validate_config: HOST_DATASET_DIR does not exist -> error (never mkdir a share root)" {
@@ -103,8 +103,8 @@ setup() {
   CLUSTER_NAME=ok; SERVERS=1; AGENTS=1; HOST_DATA_DIR="$HOME/.tracebloc"
   HOST_DATASET_DIR="$HOME/nope-$$"
   run validate_config
-  [ "$status" -ne 0 ]
-  [[ "$output" == *"does not exist"* ]]
+  [ "$status" -ne 0 ] || return 1
+  [[ "$output" == *"does not exist"* ]] || return 1
 }
 
 @test "validate_config: HOST_DATASET_DIR not writable -> error" {
@@ -114,8 +114,8 @@ setup() {
   HOST_DATASET_DIR="$HOME/ro-mount"; mkdir -p "$HOST_DATASET_DIR"; chmod 555 "$HOST_DATASET_DIR"
   run validate_config
   chmod 755 "$HOST_DATASET_DIR"   # restore so bats can clean up the tmpdir
-  [ "$status" -ne 0 ]
-  [[ "$output" == *"not writable"* ]]
+  [ "$status" -ne 0 ] || return 1
+  [[ "$output" == *"not writable"* ]] || return 1
 }
 
 @test "validate_config: HOST_DATA_DIR still rejected outside HOME when dataset dir is set" {
@@ -123,8 +123,8 @@ setup() {
   CLUSTER_NAME=ok; SERVERS=1; AGENTS=1; HOST_DATA_DIR="/tmp/not-under-home-$$"
   HOST_DATASET_DIR="$HOME/dataset-mount"; mkdir -p "$HOST_DATASET_DIR"
   run validate_config
-  [ "$status" -ne 0 ]
-  [[ "$output" == *"HOST_DATA_DIR"* ]]
+  [ "$status" -ne 0 ] || return 1
+  [[ "$output" == *"HOST_DATA_DIR"* ]] || return 1
 }
 
 @test "validate_config: node-local + HOST_DATASET_DIR -> error (unsupported combo)" {
@@ -133,8 +133,8 @@ setup() {
   TB_STORAGE_MODE=node-local
   HOST_DATASET_DIR="$HOME/dataset-mount"; mkdir -p "$HOST_DATASET_DIR"
   run validate_config
-  [ "$status" -ne 0 ]
-  [[ "$output" == *"HOST_DATASET_DIR is not supported with TB_STORAGE_MODE=node-local"* ]]
+  [ "$status" -ne 0 ] || return 1
+  [[ "$output" == *"HOST_DATASET_DIR is not supported with TB_STORAGE_MODE=node-local"* ]] || return 1
 }
 
 # ── C1 single-node guarantee (RFC-0003 Option C, load-time) ─────────────────
@@ -144,33 +144,33 @@ setup() {
 @test "C1: node-local forces single-node — AGENTS=0 AND SERVERS=1" {
   run env TB_STORAGE_MODE=node-local AGENTS=4 SERVERS=3 \
     bash -c "source '${LIB_DIR}/common.sh' >/dev/null 2>&1; echo \"\$AGENTS \$SERVERS\""
-  [ "$status" -eq 0 ]
-  [ "$output" = "0 1" ]
+  [ "$status" -eq 0 ] || return 1
+  [ "$output" = "0 1" ] || return 1
 }
 
 @test "C1: hostpath (default) leaves AGENTS/SERVERS untouched" {
   run env TB_STORAGE_MODE=hostpath AGENTS=4 SERVERS=3 \
     bash -c "source '${LIB_DIR}/common.sh' >/dev/null 2>&1; echo \"\$AGENTS \$SERVERS\""
-  [ "$status" -eq 0 ]
-  [ "$output" = "4 3" ]
+  [ "$status" -eq 0 ] || return 1
+  [ "$output" = "4 3" ] || return 1
 }
 
 # ── install_cleanup: the CLIENT_STATE guard (#716) ─────────────────────────
 @test "install_cleanup: exit 0 -> silent" {
   out="$( ( exit 0 ); install_cleanup 2>&1 )"
-  [[ "$out" != *"did not complete"* ]]
+  [[ "$out" != *"did not complete"* ]] || return 1
 }
 
 @test "install_cleanup: failure + CLIENT_STATE set -> suppresses generic message" {
   CLIENT_STATE=connected
   out="$( ( exit 1 ); install_cleanup 2>&1 )"
-  [[ "$out" != *"did not complete"* ]]
+  [[ "$out" != *"did not complete"* ]] || return 1
 }
 
 @test "install_cleanup: failure + CLIENT_STATE unset -> shows generic message" {
   unset CLIENT_STATE
   out="$( ( exit 1 ); install_cleanup 2>&1 )"
-  [[ "$out" == *"did not complete"* ]]
+  [[ "$out" == *"did not complete"* ]] || return 1
 }
 
 @test "install_cleanup: exit 2 -> re-run hint" {
@@ -182,19 +182,19 @@ setup() {
 # ── retry ──────────────────────────────────────────────────────────────────
 @test "retry: succeeds on first attempt" {
   run retry 3 1 true
-  [ "$status" -eq 0 ]
+  [ "$status" -eq 0 ] || return 1
 }
 
 @test "retry: gives up after max attempts" {
   run retry 2 0 false
-  [ "$status" -ne 0 ]
+  [ "$status" -ne 0 ] || return 1
 }
 
 @test "retry: succeeds after a transient failure" {
   marker="$BATS_TEST_TMPDIR/m"
   flaky() { if [ -f "$marker" ]; then return 0; fi; touch "$marker"; return 1; }
   run retry 3 0 flaky
-  [ "$status" -eq 0 ]
+  [ "$status" -eq 0 ] || return 1
 }
 
 # ── curl_secure (backend#1252) ─────────────────────────────────────────────
@@ -206,23 +206,23 @@ setup() {
 @test "curl_secure: always passes the minimum TLS version, caller args intact" {
   curl() { printf '%s' "$*"; }
   run curl_secure -fsSL https://example.com
-  [ "$status" -eq 0 ]
-  [[ "$output" == *"--tlsv1.2"* ]]
-  [[ "$output" == *"-fsSL https://example.com"* ]]
+  [ "$status" -eq 0 ] || return 1
+  [[ "$output" == *"--tlsv1.2"* ]] || return 1
+  [[ "$output" == *"-fsSL https://example.com"* ]] || return 1
 }
 
 @test "curl_secure: supplies default time bounds when the caller sets none" {
   curl() { printf '%s' "$*"; }
   run curl_secure -fsSL https://example.com
-  [[ "$output" == *"--connect-timeout 30"* ]]
-  [[ "$output" == *"--max-time 300"* ]]
+  [[ "$output" == *"--connect-timeout 30"* ]] || return 1
+  [[ "$output" == *"--max-time 300"* ]] || return 1
 }
 
 @test "curl_secure: a caller's own deadline wins (lands after the default)" {
   curl() { printf '%s' "$*"; }
   run curl_secure -sS -m 60 https://example.com
   # curl honours the LAST occurrence, so -m 60 must come after --max-time 300.
-  [[ "$output" == *"--max-time 300"*"-m 60"* ]]
+  [[ "$output" == *"--max-time 300"*"-m 60"* ]] || return 1
 }
 
 @test "curl_secure: a stall-bounded transfer gets NO overall deadline" {
@@ -231,8 +231,8 @@ setup() {
   # slow-but-healthy link on a big download. The wrapper must not add one.
   curl() { printf '%s' "$*"; }
   run curl_secure -fSL --speed-limit 1024 --speed-time 60 -o /tmp/x https://example.com
-  [[ "$output" == *"--tlsv1.2"* ]]
-  [[ "$output" != *"--max-time"* ]]
+  [[ "$output" == *"--tlsv1.2"* ]] || return 1
+  [[ "$output" != *"--max-time"* ]] || return 1
 }
 
 @test "curl_secure: default bounds are overridable by env" {
@@ -240,8 +240,8 @@ setup() {
   TB_CURL_CONNECT_TIMEOUT=5
   TB_CURL_MAX_TIME=7
   run curl_secure https://example.com
-  [[ "$output" == *"--connect-timeout 5"* ]]
-  [[ "$output" == *"--max-time 7"* ]]
+  [[ "$output" == *"--connect-timeout 5"* ]] || return 1
+  [[ "$output" == *"--max-time 7"* ]] || return 1
 }
 
 @test "curl_secure: dispatches through curl, so the suite can still mock it" {
@@ -249,11 +249,11 @@ setup() {
   # substitutes a curl shell function, which `command` would bypass.
   curl() { return 42; }
   run curl_secure https://example.com
-  [ "$status" -eq 42 ]
+  [ "$status" -eq 42 ] || return 1
 }
 
 @test "curl_secure: CURL_SECURE stays defined for out-of-tree callers" {
-  [ "$CURL_SECURE" = "--tlsv1.2" ]
+  [ "$CURL_SECURE" = "--tlsv1.2" ] || return 1
 }
 
 # ── has ────────────────────────────────────────────────────────────────────
@@ -263,46 +263,46 @@ setup() {
 # ── count_bar (first-run: honest N-of-M for multi-image pulls) ───────────────
 @test "count_bar: renders 'N of M <noun>'" {
   run count_bar 3 6 services
-  [ "$status" -eq 0 ]
-  [[ "$output" == *"3 of 6 services"* ]]
+  [ "$status" -eq 0 ] || return 1
+  [[ "$output" == *"3 of 6 services"* ]] || return 1
 }
 
 @test "count_bar: clamps current above total (never over-reports)" {
   run count_bar 9 6 services
-  [[ "$output" == *"6 of 6 services"* ]]
-  [[ "$output" != *"9 of 6"* ]]
+  [[ "$output" == *"6 of 6 services"* ]] || return 1
+  [[ "$output" != *"9 of 6"* ]] || return 1
 }
 
 @test "count_bar: non-numeric current -> 0 (no crash)" {
   run count_bar nope 6 services
-  [ "$status" -eq 0 ]
-  [[ "$output" == *"0 of 6 services"* ]]
+  [ "$status" -eq 0 ] || return 1
+  [[ "$output" == *"0 of 6 services"* ]] || return 1
 }
 
 @test "count_bar: total<1 floored to 1 (no divide-by-zero)" {
   run count_bar 0 0 services
-  [ "$status" -eq 0 ]
-  [[ "$output" == *"0 of 1 services"* ]]
+  [ "$status" -eq 0 ] || return 1
+  [[ "$output" == *"0 of 1 services"* ]] || return 1
 }
 
 # ── step_header (first-run: bold a–f running headers) ────────────────────────
 @test "step_header: renders '<letter>) <Title>'" {
   run step_header a "Checking your machine"
-  [ "$status" -eq 0 ]
-  [[ "$output" == *"a) Checking your machine"* ]]
+  [ "$status" -eq 0 ] || return 1
+  [[ "$output" == *"a) Checking your machine"* ]] || return 1
 }
 
 # ── print_roadmap (the '2. Installing' a–f plan) ─────────────────────────────
 @test "print_roadmap: lists the a–f plan under '2. Installing'" {
   run print_roadmap
-  [ "$status" -eq 0 ]
-  [[ "$output" == *"2. Installing"* ]]
-  [[ "$output" == *"a) Check your machine"* ]]
-  [[ "$output" == *"b) Install what tracebloc needs"* ]]
-  [[ "$output" == *"c) Create your secure environment"* ]]
-  [[ "$output" == *"d) Register this machine"* ]]
-  [[ "$output" == *"e) Install tracebloc"* ]]
-  [[ "$output" == *"f) Connect to the tracebloc network"* ]]
+  [ "$status" -eq 0 ] || return 1
+  [[ "$output" == *"2. Installing"* ]] || return 1
+  [[ "$output" == *"a) Check your machine"* ]] || return 1
+  [[ "$output" == *"b) Install what tracebloc needs"* ]] || return 1
+  [[ "$output" == *"c) Create your secure environment"* ]] || return 1
+  [[ "$output" == *"d) Register this machine"* ]] || return 1
+  [[ "$output" == *"e) Install tracebloc"* ]] || return 1
+  [[ "$output" == *"f) Connect to the tracebloc network"* ]] || return 1
 }
 
 # ── print_banner (title + version; suppressed after the bootstrap drew it) ───
@@ -311,10 +311,10 @@ setup() {
   TB_VERSION="v1.9.3"; OS=Darwin; ARCH=arm64
   CLUSTER_NAME=tracebloc; SERVERS=1; AGENTS=1; HOST_DATA_DIR="$BATS_TEST_TMPDIR/.tracebloc"
   run print_banner
-  [ "$status" -eq 0 ]
-  [[ "$output" == *"Setting up"* ]]
-  [[ "$output" == *"tracebloc"* ]]
-  [[ "$output" == *"v1.9.3"* ]]
+  [ "$status" -eq 0 ] || return 1
+  [[ "$output" == *"Setting up"* ]] || return 1
+  [[ "$output" == *"tracebloc"* ]] || return 1
+  [[ "$output" == *"v1.9.3"* ]] || return 1
 }
 
 @test "print_banner: suppressed when the bootstrap already drew it (TRACEBLOC_BANNER_SHOWN)" {
@@ -322,8 +322,8 @@ setup() {
   OS=Darwin; ARCH=arm64; CLUSTER_NAME=tracebloc; SERVERS=1; AGENTS=1
   HOST_DATA_DIR="$BATS_TEST_TMPDIR/.tracebloc"
   run print_banner
-  [ "$status" -eq 0 ]
-  [[ "$output" != *"Setting up"* ]]
+  [ "$status" -eq 0 ] || return 1
+  [[ "$output" != *"Setting up"* ]] || return 1
   unset TRACEBLOC_BANNER_SHOWN
 }
 
@@ -337,9 +337,9 @@ setup() {
   modprobe() { record "modprobe $*"; }
   _real_sudo() { record "real_sudo $*"; }
   run sudo modprobe overlay
-  [ "$status" -eq 0 ]
+  [ "$status" -eq 0 ] || return 1
   mock_calls | grep -q "modprobe overlay"
-  ! mock_calls | grep -q "real_sudo"
+  ! mock_calls | grep -q "real_sudo" || return 1
 }
 
 @test "sudo(): non-root with sudo present defers to the real sudo" {
@@ -348,7 +348,7 @@ setup() {
   _have_sudo_bin() { return 0; }
   _real_sudo() { record "real_sudo $*"; }
   run sudo modprobe overlay
-  [ "$status" -eq 0 ]
+  [ "$status" -eq 0 ] || return 1
   mock_calls | grep -q "real_sudo modprobe overlay"
 }
 
@@ -365,14 +365,14 @@ setup() {
   _have_sudo_bin() { return 1; }   # even with NO sudo, root is fine
   _real_sudo() { echo "must-not-run"; return 1; }
   run preflight_sudo
-  [ "$status" -eq 0 ]
+  [ "$status" -eq 0 ] || return 1
 }
 
 @test "preflight_sudo: non-root + no sudo => accurate error, not 'no sudo access'" {
   id() { echo 1000; }
   _have_sudo_bin() { return 1; }
   run preflight_sudo
-  [ "$status" -ne 0 ]
+  [ "$status" -ne 0 ] || return 1
   printf '%s\n' "$output" | grep -qF "isn't installed"
 }
 
@@ -381,7 +381,7 @@ setup() {
   _have_sudo_bin() { return 0; }
   _real_sudo() { case "$*" in "-n true") return 0 ;; *) return 1 ;; esac; }
   run preflight_sudo
-  [ "$status" -eq 0 ]
+  [ "$status" -eq 0 ] || return 1
 }
 
 @test "sudo(): exported so a bash -c subshell inherits the shadow (#372)" {
@@ -389,8 +389,8 @@ setup() {
   # RHEL-rebuild Docker install) must route through OUR shadow, not the real sudo.
   # A child bash sees the function only if it was exported (export -f in common.sh).
   run bash -c 'declare -F sudo >/dev/null && declare -f sudo | grep -q _real_sudo && echo INHERITED'
-  [ "$status" -eq 0 ]
-  [[ "$output" == *"INHERITED"* ]]
+  [ "$status" -eq 0 ] || return 1
+  [[ "$output" == *"INHERITED"* ]] || return 1
 }
 
 @test "_have_sudo_bin: set -e safe when sudo is absent (no command substitution, #372)" {
@@ -400,9 +400,9 @@ setup() {
   # no-sudo path aborted before preflight_sudo could print its clear message.
   # The whole-body `type -P` form has no substitution and must survive.
   run bash -c "set -e; PATH=/nonexistent; $(declare -f _have_sudo_bin); if _have_sudo_bin; then echo yes; else echo no; fi; echo survived"
-  [ "$status" -eq 0 ]
-  [[ "$output" == *"no"* ]]
-  [[ "$output" == *"survived"* ]]
+  [ "$status" -eq 0 ] || return 1
+  [[ "$output" == *"no"* ]] || return 1
+  [[ "$output" == *"survived"* ]] || return 1
 }
 
 # ── spin deadline + spin_cmd_bounded (#426) ──────────────────────────────────
@@ -410,9 +410,9 @@ setup() {
   sleep 30 &
   local stuck_pid=$!
   run spin "$stuck_pid" "waiting…" 1
-  [ "$status" -eq 124 ]
+  [ "$status" -eq 124 ] || return 1
   # the stuck process is gone (kill -0 fails)
-  ! kill -0 "$stuck_pid" 2>/dev/null
+  ! kill -0 "$stuck_pid" 2>/dev/null || return 1
 }
 
 @test "spin: deadline kills the wrapper's CHILDREN too, not just the subshell (Bugbot #442)" {
@@ -423,11 +423,11 @@ setup() {
   sleep 0.3                                  # let the subshell fork its child
   local child
   child="$(pgrep -P "$wrapper" | head -1)"
-  [ -n "$child" ]
+  [ -n "$child" ] || return 1
   run spin "$wrapper" "waiting…" 1
-  [ "$status" -eq 124 ]
-  ! kill -0 "$wrapper" 2>/dev/null
-  ! kill -0 "$child" 2>/dev/null
+  [ "$status" -eq 124 ] || return 1
+  ! kill -0 "$wrapper" 2>/dev/null || return 1
+  ! kill -0 "$child" 2>/dev/null || return 1
 }
 
 @test "spin: deadline KILLs a TERM-immune child even after the wrapper died (Bugbot #442 r2)" {
@@ -438,18 +438,18 @@ setup() {
   sleep 0.4
   local child
   child="$(pgrep -P "$wrapper" | head -1)"
-  [ -n "$child" ]
+  [ -n "$child" ] || return 1
   run spin "$wrapper" "waiting…" 1
-  [ "$status" -eq 124 ]
-  ! kill -0 "$child" 2>/dev/null
+  [ "$status" -eq 124 ] || return 1
+  ! kill -0 "$child" 2>/dev/null || return 1
 }
 
 @test "tb_minutes_or: base-10 normalization defuses the octal trap (Bugbot #442 r6)" {
-  [ "$(tb_minutes_or 08 15)" = "8" ]      # would abort $(( )) as invalid octal
-  [ "$(tb_minutes_or 010 15)" = "10" ]    # would silently read as 8
-  [ "$(tb_minutes_or 25 15)" = "25" ]
-  [ "$(tb_minutes_or '' 15)" = "15" ]
-  [ "$(tb_minutes_or 20m 15)" = "15" ]
+  [ "$(tb_minutes_or 08 15)" = "8" ] || return 1      # would abort $(( )) as invalid octal
+  [ "$(tb_minutes_or 010 15)" = "10" ] || return 1    # would silently read as 8
+  [ "$(tb_minutes_or 25 15)" = "25" ] || return 1
+  [ "$(tb_minutes_or '' 15)" = "15" ] || return 1
+  [ "$(tb_minutes_or 20m 15)" = "15" ] || return 1
 }
 
 @test "spin: deadline path survives set -e end-to-end (Bugbot #442 r3)" {
@@ -458,7 +458,7 @@ setup() {
   # before `return 124` and the caller sees 143/1 — no timeout copy, no
   # partial-cluster cleanup. The whole path must still deliver 124.
   run bash -c "set -euo pipefail; source '${BATS_TEST_DIRNAME}/../lib/common.sh'; LOG_FILE=/dev/null; sleep 30 & spin \$! 'waiting…' 1"
-  [ "$status" -eq 124 ]
+  [ "$status" -eq 124 ] || return 1
 }
 
 @test "spin: without a deadline behaviour is unchanged (returns the pid's rc)" {
@@ -467,26 +467,26 @@ setup() {
   bash -c 'exit 7' &
   local rc=0
   spin "$!" "quick…" >/dev/null || rc=$?
-  [ "$rc" -eq 7 ]
+  [ "$rc" -eq 7 ] || return 1
 }
 
 @test "spin_cmd_bounded: fast success passes through rc 0, no output" {
   run spin_cmd_bounded 5 "quick…" true
-  [ "$status" -eq 0 ]
+  [ "$status" -eq 0 ] || return 1
 }
 
 @test "spin_cmd_bounded: failure preserves the command's exit code + tails the log" {
   LOG_FILE="$BATS_TEST_TMPDIR/spin.log"   # load_lib pins LOG_FILE=/dev/null; tail needs a real file
   run spin_cmd_bounded 5 "failing…" bash -c 'echo boom; exit 3'
-  [ "$status" -eq 3 ]
-  [[ "$output" == *"Last 10 lines of log:"* ]]
-  [[ "$output" == *"boom"* ]]
+  [ "$status" -eq 3 ] || return 1
+  [[ "$output" == *"Last 10 lines of log:"* ]] || return 1
+  [[ "$output" == *"boom"* ]] || return 1
 }
 
 @test "spin_cmd_bounded: deadline -> 124 with an explicit timeout note" {
   run spin_cmd_bounded 1 "stuck…" sleep 30
-  [ "$status" -eq 124 ]
-  [[ "$output" == *"timed out after 1s"* ]]
+  [ "$status" -eq 124 ] || return 1
+  [[ "$output" == *"timed out after 1s"* ]] || return 1
 }
 
 # ── assert_tool_runs (execute-gate, #411) ────────────────────────────────────
@@ -496,8 +496,8 @@ setup() {
   chmod +x "$BATS_TEST_TMPDIR/bin/k3d"
   PATH="$BATS_TEST_TMPDIR/bin:$PATH"
   run assert_tool_runs k3d version
-  [ "$status" -eq 0 ]
-  [ -f "$BATS_TEST_TMPDIR/bin/k3d" ]
+  [ "$status" -eq 0 ] || return 1
+  [ -f "$BATS_TEST_TMPDIR/bin/k3d" ] || return 1
 }
 
 @test "assert_tool_runs: a broken tool with --rm errors and removes the binary WE placed (#411)" {
@@ -506,9 +506,9 @@ setup() {
   chmod +x "$BATS_TEST_TMPDIR/bin/k3d"
   PATH="$BATS_TEST_TMPDIR/bin:$PATH"
   run assert_tool_runs --rm "$BATS_TEST_TMPDIR/bin/k3d" k3d version
-  [ "$status" -ne 0 ]
-  [[ "$output" == *"won't run"* ]]
-  [ ! -f "$BATS_TEST_TMPDIR/bin/k3d" ]        # the binary we placed was removed
+  [ "$status" -ne 0 ] || return 1
+  [[ "$output" == *"won't run"* ]] || return 1
+  [ ! -f "$BATS_TEST_TMPDIR/bin/k3d" ] || return 1        # the binary we placed was removed
 }
 
 @test "assert_tool_runs: a broken tool WITHOUT --rm errors but leaves the binary (#411 review)" {
@@ -519,9 +519,9 @@ setup() {
   chmod +x "$BATS_TEST_TMPDIR/bin/k3d"
   PATH="$BATS_TEST_TMPDIR/bin:$PATH"
   run assert_tool_runs k3d version
-  [ "$status" -ne 0 ]
-  [[ "$output" == *"won't run"* ]]
-  [ -f "$BATS_TEST_TMPDIR/bin/k3d" ]          # NOT removed — we didn't place it
+  [ "$status" -ne 0 ] || return 1
+  [[ "$output" == *"won't run"* ]] || return 1
+  [ -f "$BATS_TEST_TMPDIR/bin/k3d" ] || return 1          # NOT removed — we didn't place it
 }
 
 @test "assert_tool_runs: --rm removes ONLY the binary that actually ran, not a decoy copy (#411 Bugbot)" {
@@ -532,23 +532,23 @@ setup() {
   : > "$BATS_TEST_TMPDIR/tools/k3d"
   PATH="$BATS_TEST_TMPDIR/bin:$PATH"
   run assert_tool_runs --rm "$BATS_TEST_TMPDIR/tools/k3d" k3d version
-  [ "$status" -ne 0 ]
-  [ -f "$BATS_TEST_TMPDIR/tools/k3d" ]         # NOT removed — it isn't the binary that ran
+  [ "$status" -ne 0 ] || return 1
+  [ -f "$BATS_TEST_TMPDIR/tools/k3d" ] || return 1         # NOT removed — it isn't the binary that ran
 }
 
 # ── setup_log_file / _choose_log_file temp fallback (#432 prepare-host residual) ──
 @test "_choose_log_file: writable HOST_DATA_DIR -> a path under it" {
   HOST_DATA_DIR="$BATS_TEST_TMPDIR/data"
   run _choose_log_file
-  [ "$status" -eq 0 ]
-  [[ "$output" == "$HOST_DATA_DIR"* ]]
-  [ -f "$output" ]
+  [ "$status" -eq 0 ] || return 1
+  [[ "$output" == "$HOST_DATA_DIR"* ]] || return 1
+  [ -f "$output" ] || return 1
 }
 @test "_choose_log_file: uncreatable HOST_DATA_DIR -> temp fallback, never a bare failure (#432)" {
   ro="$BATS_TEST_TMPDIR/ro"; mkdir -p "$ro"; chmod 500 "$ro"
   HOST_DATA_DIR="$ro/cannot/make"
   run _choose_log_file
   chmod 700 "$ro"
-  [ "$status" -eq 0 ]
-  [[ "$output" == *tracebloc-install-* ]]
+  [ "$status" -eq 0 ] || return 1
+  [[ "$output" == *tracebloc-install-* ]] || return 1
 }

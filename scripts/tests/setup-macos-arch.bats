@@ -36,7 +36,7 @@ setup() {
   unset TB_MACOS_VER
   sw_vers() { echo ""; }               # can't read the version → treat as unsupported
   run _macos_supports_vz
-  [ "$status" -ne 0 ]
+  [ "$status" -ne 0 ] || return 1
 }
 
 # ── colima VZ/Rosetta flags ──────────────────────────────────────────────────
@@ -57,39 +57,39 @@ _colima_env() {
 @test "_install_docker_colima: Apple Silicon + macOS 13+ -> colima start with VZ + Rosetta (#433)" {
   _colima_env; ARCH=arm64; TB_MACOS_VER=14.0
   run _install_docker_colima
-  [ "$status" -eq 0 ]
+  [ "$status" -eq 0 ] || return 1
   run mock_calls
-  [[ "$output" == *"colima start"* ]]
-  [[ "$output" == *"--vm-type vz --vz-rosetta"* ]]
+  [[ "$output" == *"colima start"* ]] || return 1
+  [[ "$output" == *"--vm-type vz --vz-rosetta"* ]] || return 1
 }
 
 @test "_install_docker_colima: Apple Silicon + macOS 13+ but an EXISTING VM -> no VZ flags (colima rejects vmType change) (#433 Bugbot)" {
   _colima_env; ARCH=arm64; TB_MACOS_VER=14.0; COLIMA_HAS_INSTANCE=1
   run _install_docker_colima
-  [ "$status" -eq 0 ]
+  [ "$status" -eq 0 ] || return 1
   run mock_calls
-  [[ "$output" == *"colima start"* ]]
-  [[ "$output" != *"--vm-type vz"* ]]     # don't force a vmType change on the existing VM
-  [[ "$output" != *"--vz-rosetta"* ]]
+  [[ "$output" == *"colima start"* ]] || return 1
+  [[ "$output" != *"--vm-type vz"* ]] || return 1     # don't force a vmType change on the existing VM
+  [[ "$output" != *"--vz-rosetta"* ]] || return 1
 }
 
 @test "_install_docker_colima: Apple Silicon + macOS 12 -> QEMU default, no VZ flags (#433)" {
   _colima_env; ARCH=arm64; TB_MACOS_VER=12.7
   run _install_docker_colima
-  [ "$status" -eq 0 ]
+  [ "$status" -eq 0 ] || return 1
   run mock_calls
-  [[ "$output" == *"colima start"* ]]
-  [[ "$output" != *"--vm-type vz"* ]]
-  [[ "$output" != *"--vz-rosetta"* ]]
+  [[ "$output" == *"colima start"* ]] || return 1
+  [[ "$output" != *"--vm-type vz"* ]] || return 1
+  [[ "$output" != *"--vz-rosetta"* ]] || return 1
 }
 
 @test "_install_docker_colima: Intel Mac -> no VZ/Rosetta flags (amd64 native) (#433)" {
   _colima_env; ARCH=x86_64; TB_MACOS_VER=14.0
   run _install_docker_colima
-  [ "$status" -eq 0 ]
+  [ "$status" -eq 0 ] || return 1
   run mock_calls
-  [[ "$output" == *"colima start"* ]]
-  [[ "$output" != *"--vm-type vz"* ]]
+  [[ "$output" == *"colima start"* ]] || return 1
+  [[ "$output" != *"--vm-type vz"* ]] || return 1
 }
 
 # ── assert_amd64_emulation (post-Docker smoke) ───────────────────────────────
@@ -97,41 +97,41 @@ _colima_env() {
   ARCH=x86_64
   docker() { record "docker $*"; return 0; }
   run assert_amd64_emulation
-  [ "$status" -eq 0 ]
+  [ "$status" -eq 0 ] || return 1
   run mock_calls
-  [[ "$output" != *"docker run"* ]]        # native amd64 — nothing to probe
+  [[ "$output" != *"docker run"* ]] || return 1        # native amd64 — nothing to probe
 }
 
 @test "assert_amd64_emulation: Apple Silicon + working emulation -> forces linux/amd64, time-bounded, succeeds (#433)" {
   ARCH=arm64
   docker() { record "docker $*"; return 0; }
   run assert_amd64_emulation
-  [ "$status" -eq 0 ]
-  [[ "$output" == *"amd64 emulation verified"* ]]
+  [ "$status" -eq 0 ] || return 1
+  [[ "$output" == *"amd64 emulation verified"* ]] || return 1
   run mock_calls
-  [[ "$output" == *"docker run --rm --platform linux/amd64"* ]]
-  [[ "$output" == *"busybox:1.36 true"* ]]
-  [[ "$output" == *"spin_cmd_bounded 120 docker run"* ]]   # bounded, not an unbounded spin_cmd (#433 Bugbot)
+  [[ "$output" == *"docker run --rm --platform linux/amd64"* ]] || return 1
+  [[ "$output" == *"busybox:1.36 true"* ]] || return 1
+  [[ "$output" == *"spin_cmd_bounded 120 docker run"* ]] || return 1   # bounded, not an unbounded spin_cmd (#433 Bugbot)
 }
 
 @test "assert_amd64_emulation: Apple Silicon + broken emulation -> hard fail naming the Rosetta setting (#433)" {
   ARCH=arm64
   docker() { record "docker $*"; return 1; }   # exec-format error / no emulation
   run assert_amd64_emulation
-  [ "$status" -ne 0 ]                           # error() exits — caught in the field before a crash-looping pod
-  [[ "$output" == *"Use Rosetta for x86_64/amd64 emulation"* ]]   # names the exact setting
-  [[ "$output" == *"colima start --vm-type vz --vz-rosetta"* ]]   # and the colima remedy
-  [[ "$output" == *"TRACEBLOC_ALLOW_ARM64=1"* ]]                  # and the escape hatch
+  [ "$status" -ne 0 ] || return 1                           # error() exits — caught in the field before a crash-looping pod
+  [[ "$output" == *"Use Rosetta for x86_64/amd64 emulation"* ]] || return 1   # names the exact setting
+  [[ "$output" == *"colima start --vm-type vz --vz-rosetta"* ]] || return 1   # and the colima remedy
+  [[ "$output" == *"TRACEBLOC_ALLOW_ARM64=1"* ]] || return 1                  # and the escape hatch
 }
 
 @test "assert_amd64_emulation: TRACEBLOC_ALLOW_ARM64 set -> skipped with a warning, no docker run (#433)" {
   ARCH=arm64; export TRACEBLOC_ALLOW_ARM64=1
   docker() { record "docker $*"; return 1; }
   run assert_amd64_emulation
-  [ "$status" -eq 0 ]
-  [[ "$output" == *"Skipping the amd64 emulation smoke test"* ]]
+  [ "$status" -eq 0 ] || return 1
+  [[ "$output" == *"Skipping the amd64 emulation smoke test"* ]] || return 1
   run mock_calls
-  [[ "$output" != *"docker run"* ]]
+  [[ "$output" != *"docker run"* ]] || return 1
   unset TRACEBLOC_ALLOW_ARM64
 }
 
@@ -139,7 +139,7 @@ _colima_env() {
   ARCH=arm64; TB_AMD64_SMOKE_IMAGE="alpine:3.20"
   docker() { record "docker $*"; return 0; }
   run assert_amd64_emulation
-  [ "$status" -eq 0 ]
+  [ "$status" -eq 0 ] || return 1
   run mock_calls
-  [[ "$output" == *"--platform linux/amd64 alpine:3.20 true"* ]]
+  [[ "$output" == *"--platform linux/amd64 alpine:3.20 true"* ]] || return 1
 }

@@ -28,16 +28,16 @@ setup() {
 @test "_pf_arch: amd64 -> success, no hard fail" {
   ARCH=x86_64
   run _pf_arch
-  [ "$status" -eq 0 ]
-  [[ "$output" == *"amd64"* ]]
+  [ "$status" -eq 0 ] || return 1
+  [[ "$output" == *"amd64"* ]] || return 1
 }
 
 @test "_pf_arch: arm64 Linux without emulation -> hard fail + binfmt remedy" {
   ARCH=aarch64; OS=Linux
   _pf_amd64_emulation_available() { return 1; }
   run _pf_arch
-  [[ "$output" == *"amd64-only"* ]]
-  [[ "$output" == *"tonistiigi/binfmt"* ]]
+  [[ "$output" == *"amd64-only"* ]] || return 1
+  [[ "$output" == *"tonistiigi/binfmt"* ]] || return 1
   PF_HARD_FAIL=0; _pf_arch >/dev/null 2>&1; [ "$PF_HARD_FAIL" -eq 1 ]
 }
 
@@ -55,16 +55,16 @@ setup() {
 @test "_pf_arch: arm64 macOS note names the Rosetta setting + defers to the post-Docker smoke (#433)" {
   ARCH=arm64; OS=Darwin
   run _pf_arch
-  [ "$status" -eq 0 ]
-  [[ "$output" == *"Use Rosetta for x86_64/amd64 emulation"* ]]   # names the exact setting, not "assume it works"
-  [[ "$output" == *"verified once Docker is running"* ]]          # real check is the post-Docker smoke (#433)
+  [ "$status" -eq 0 ] || return 1
+  [[ "$output" == *"Use Rosetta for x86_64/amd64 emulation"* ]] || return 1   # names the exact setting, not "assume it works"
+  [[ "$output" == *"verified once Docker is running"* ]] || return 1          # real check is the post-Docker smoke (#433)
 }
 
 @test "_pf_arch: arm64 + TRACEBLOC_ALLOW_ARM64 -> warn, no hard fail" {
   ARCH=aarch64; OS=Linux; export TRACEBLOC_ALLOW_ARM64=1
   _pf_amd64_emulation_available() { return 1; }
   run _pf_arch
-  [[ "$output" == *"proceeding"* ]]
+  [[ "$output" == *"proceeding"* ]] || return 1
   PF_HARD_FAIL=0; _pf_arch >/dev/null; [ "$PF_HARD_FAIL" -eq 0 ]
   unset TRACEBLOC_ALLOW_ARM64
 }
@@ -78,22 +78,22 @@ setup() {
 @test "_pf_connectivity: a critical host blocked -> hard fail + allowlist hint" {
   _pf_probe_url() { case "$1" in *ghcr*) echo blocked ;; *) echo ok ;; esac; }
   run _pf_connectivity
-  [[ "$output" == *"ghcr.io) unreachable"* ]]
-  [[ "$output" == *"Allow HTTPS"* ]]
+  [[ "$output" == *"ghcr.io) unreachable"* ]] || return 1
+  [[ "$output" == *"Allow HTTPS"* ]] || return 1
   PF_HARD_FAIL=0; _pf_connectivity >/dev/null 2>&1; [ "$PF_HARD_FAIL" -eq 1 ]
 }
 
 @test "_pf_connectivity: TLS error -> break-and-inspect (Gap D) hint" {
   _pf_probe_url() { case "$1" in *registry-1.docker*) echo tls ;; *) echo ok ;; esac; }
   run _pf_connectivity
-  [[ "$output" == *"break-and-inspect"* ]]
+  [[ "$output" == *"break-and-inspect"* ]] || return 1
 }
 
 @test "_pf_connectivity: tool host skipped when the tool is present" {
   _pf_probe_url() { echo ok; }
   has() { return 0; }
   run _pf_connectivity
-  [[ "$output" != *"get.docker.com"* ]]
+  [[ "$output" != *"get.docker.com"* ]] || return 1
 }
 
 @test "_pf_connectivity: Docker-engine host is WARN not hard — path-dependent (Bugbot #416)" {
@@ -104,7 +104,7 @@ setup() {
   has() { [[ "$1" == "curl" ]]; }   # docker + all tools missing
   OS=Linux
   run _pf_connectivity
-  [[ "$output" == *"get.docker.com) unreachable"* ]]                            # still surfaced…
+  [[ "$output" == *"get.docker.com) unreachable"* ]] || return 1                            # still surfaced…
   PF_HARD_FAIL=0; _pf_connectivity >/dev/null 2>&1; [ "$PF_HARD_FAIL" -eq 0 ]   # …but NOT a hard fail
 }
 
@@ -113,7 +113,7 @@ setup() {
   has() { [[ "$1" == "curl" ]]; }   # tools missing -> their download hosts probed
   OS=Linux
   run _pf_connectivity
-  [[ "$output" == *"dl.k8s.io) unreachable"* ]]
+  [[ "$output" == *"dl.k8s.io) unreachable"* ]] || return 1
   PF_HARD_FAIL=0; _pf_connectivity >/dev/null 2>&1; [ "$PF_HARD_FAIL" -ge 1 ]
 }
 
@@ -124,7 +124,7 @@ setup() {
   has() { [[ "$1" == "curl" ]]; }
   OS=Linux
   run _pf_connectivity
-  [[ "$output" == *"objects.githubusercontent.com) unreachable"* ]]
+  [[ "$output" == *"objects.githubusercontent.com) unreachable"* ]] || return 1
 }
 
 @test "_pf_connectivity: auth.docker.io (Docker Hub token host) is probed hard (#416)" {
@@ -132,7 +132,7 @@ setup() {
   has() { return 0; }               # all tools present -> only always-critical hosts probed
   OS=Linux
   run _pf_connectivity
-  [[ "$output" == *"auth.docker.io) unreachable"* ]]
+  [[ "$output" == *"auth.docker.io) unreachable"* ]] || return 1
 }
 
 @test "_pf_connectivity: macOS hard-probes formulae.brew.sh when a brew tool is absent (reviewer #416)" {
@@ -142,7 +142,7 @@ setup() {
   has() { case "$1" in curl|brew|docker) return 0 ;; *) return 1 ;; esac; }  # brew+docker present, kubectl/k3d/helm absent
   OS=Darwin
   run _pf_connectivity
-  [[ "$output" == *"formulae.brew.sh) unreachable"* ]]
+  [[ "$output" == *"formulae.brew.sh) unreachable"* ]] || return 1
   PF_HARD_FAIL=0; _pf_connectivity >/dev/null 2>&1; [ "$PF_HARD_FAIL" -ge 1 ]
 }
 
@@ -154,7 +154,7 @@ setup() {
   _pf_has_gui_session() { return 0; }   # GUI session -> Docker Desktop path
   OS=Darwin
   run _pf_connectivity
-  [[ "$output" != *"formulae.brew.sh"* ]]              # not probed at all
+  [[ "$output" != *"formulae.brew.sh"* ]] || return 1              # not probed at all
   PF_HARD_FAIL=0; _pf_connectivity >/dev/null 2>&1; [ "$PF_HARD_FAIL" -eq 0 ]
 }
 
@@ -166,7 +166,7 @@ setup() {
   _pf_has_gui_session() { return 1; }   # headless -> colima via brew
   OS=Darwin
   run _pf_connectivity
-  [[ "$output" == *"formulae.brew.sh) unreachable"* ]]
+  [[ "$output" == *"formulae.brew.sh) unreachable"* ]] || return 1
   PF_HARD_FAIL=0; _pf_connectivity >/dev/null 2>&1; [ "$PF_HARD_FAIL" -ge 1 ]
 }
 
@@ -177,7 +177,7 @@ setup() {
   has() { [[ "$1" == "curl" ]]; }   # brew missing -> clone host probed
   OS=Darwin
   run _pf_connectivity
-  [[ "$output" == *"github.com) unreachable"* ]]
+  [[ "$output" == *"github.com) unreachable"* ]] || return 1
   PF_HARD_FAIL=0; _pf_connectivity >/dev/null 2>&1; [ "$PF_HARD_FAIL" -ge 1 ]
 }
 
@@ -189,7 +189,7 @@ setup() {
   _pf_has_gui_session() { return 0; }   # GUI -> Docker Desktop
   OS=Darwin
   run _pf_connectivity
-  [[ "$output" == *"desktop.docker.com) unreachable"* ]]
+  [[ "$output" == *"desktop.docker.com) unreachable"* ]] || return 1
   PF_HARD_FAIL=0; _pf_connectivity >/dev/null 2>&1; [ "$PF_HARD_FAIL" -ge 1 ]
 }
 
@@ -201,7 +201,7 @@ setup() {
   _pf_has_gui_session() { return 1; }   # headless -> colima via brew
   OS=Darwin
   run _pf_connectivity
-  [[ "$output" != *"desktop.docker.com"* ]]
+  [[ "$output" != *"desktop.docker.com"* ]] || return 1
   PF_HARD_FAIL=0; _pf_connectivity >/dev/null 2>&1; [ "$PF_HARD_FAIL" -eq 0 ]
 }
 
@@ -210,7 +210,7 @@ setup() {
   has() { case "$1" in curl|kubectl) return 0 ;; *) return 1 ;; esac; }   # kubectl present
   OS=Linux
   run _pf_connectivity
-  [[ "$output" != *"dl.k8s.io"* ]]  # present tool is never re-downloaded -> host not probed
+  [[ "$output" != *"dl.k8s.io"* ]] || return 1  # present tool is never re-downloaded -> host not probed
   PF_HARD_FAIL=0; _pf_connectivity >/dev/null 2>&1; [ "$PF_HARD_FAIL" -eq 0 ]
 }
 
@@ -333,16 +333,16 @@ setup() {
   OS=Darwin; _pf_runtime_mem_kb() { echo $((4 * 1024 * 1024)); }   # 4 GB VM < 5 GB floor
   error() { printf 'ERR: %s\n' "$*"; exit 1; }                     # real error() exits
   run _pf_recheck_runtime_mem
-  [ "$status" -ne 0 ]
-  [[ "$output" == *"below the ${PF_MIN_MEM_GB:-5} GB"* ]]
+  [ "$status" -ne 0 ] || return 1
+  [[ "$output" == *"below the ${PF_MIN_MEM_GB:-5} GB"* ]] || return 1
 }
 @test "_pf_recheck_runtime_mem: between floor and warn -> warn, no hard fail (#428)" {
   source "${BATS_TEST_DIRNAME}/../lib/preflight.sh"
   OS=Linux; _pf_runtime_mem_kb() { echo $((6 * 1024 * 1024)); }   # 6 GB: >=5 floor, <8 warn
   error() { printf 'ERR: %s\n' "$*"; exit 1; }
   run _pf_recheck_runtime_mem
-  [ "$status" -eq 0 ]
-  [[ "$output" == *"Docker is running with 6 GB"* ]]
+  [ "$status" -eq 0 ] || return 1
+  [[ "$output" == *"Docker is running with 6 GB"* ]] || return 1
 }
 @test "_pf_recheck_runtime_mem: VM at the documented floor (guest a bit under) -> warn, NOT hard fail (#513 reviewer)" {
   source "${BATS_TEST_DIRNAME}/../lib/preflight.sh"
@@ -353,9 +353,9 @@ setup() {
   _pf_host_mem_gb() { echo 16; }                        # ample host (not the host-too-small path)
   error() { printf 'ERR: %s\n' "$*"; exit 1; }
   run _pf_recheck_runtime_mem
-  [ "$status" -eq 0 ]                                   # grace covers guest overhead -> no hard fail
-  [[ "$output" == *"Docker is running with"* ]]         # warns instead
-  [[ "$output" != *"below the"* ]]                      # not the hard-fail message
+  [ "$status" -eq 0 ] || return 1                                   # grace covers guest overhead -> no hard fail
+  [[ "$output" == *"Docker is running with"* ]] || return 1         # warns instead
+  [[ "$output" != *"below the"* ]] || return 1                      # not the hard-fail message
 }
 @test "_pf_recheck_runtime_mem: host too small -> 'use a larger machine', not a resize loop (#428 Bugbot)" {
   source "${BATS_TEST_DIRNAME}/../lib/preflight.sh"
@@ -364,10 +364,10 @@ setup() {
   _pf_host_mem_gb() { echo 6; }                          # 6 GB Mac: 6 − 2 reserve = 4 < 5 floor
   error() { printf 'ERR: %s\n' "$*"; exit 1; }
   run _pf_recheck_runtime_mem
-  [ "$status" -ne 0 ]
-  [[ "$output" == *"too little for tracebloc"* ]]
-  [[ "$output" == *"larger machine"* ]]
-  [[ "$output" != *"colima start --memory"* ]]   # no unachievable resize remedy
+  [ "$status" -ne 0 ] || return 1
+  [[ "$output" == *"too little for tracebloc"* ]] || return 1
+  [[ "$output" == *"larger machine"* ]] || return 1
+  [[ "$output" != *"colima start --memory"* ]] || return 1   # no unachievable resize remedy
 }
 
 @test "_pf_recheck_runtime_mem: daemon not reporting -> silent no-op" {
@@ -380,8 +380,8 @@ setup() {
 @test "run_preflight: TRACEBLOC_SKIP_PREFLIGHT -> skipped, exit 0" {
   export TRACEBLOC_SKIP_PREFLIGHT=1
   run run_preflight
-  [ "$status" -eq 0 ]
-  [[ "$output" == *"skipped"* ]]
+  [ "$status" -eq 0 ] || return 1
+  [[ "$output" == *"skipped"* ]] || return 1
   unset TRACEBLOC_SKIP_PREFLIGHT
 }
 
@@ -389,15 +389,15 @@ setup() {
   ARCH=x86_64; OS=Linux
   _pf_probe_url() { case "$1" in *registry-1.docker*) echo blocked ;; *) echo ok ;; esac; }
   run run_preflight
-  [ "$status" -ne 0 ]
-  [[ "$output" == *"Preflight failed"* ]]
+  [ "$status" -ne 0 ] || return 1
+  [[ "$output" == *"Preflight failed"* ]] || return 1
 }
 
 @test "run_preflight: healthy environment -> exit 0" {
   ARCH=x86_64; OS=Linux
   _pf_probe_url() { echo ok; }
   run run_preflight
-  [ "$status" -eq 0 ]
+  [ "$status" -eq 0 ] || return 1
 }
 
 # ── real _pf_probe_url + readers (setup() stubs them; re-source for the real ones) ──
@@ -427,8 +427,8 @@ setup() {
 @test "_pf_connectivity: chart-repo index probed strictly — 404 hard-fails preflight (#385)" {
   _pf_probe_url() { case "${1}|${2:-}" in *index.yaml*\|strict) echo "http 404" ;; *) echo ok ;; esac; }
   run _pf_connectivity
-  [[ "$output" == *"tracebloc Helm charts"* ]]
-  [[ "$output" == *"http 404"* ]]
+  [[ "$output" == *"tracebloc Helm charts"* ]] || return 1
+  [[ "$output" == *"http 404"* ]] || return 1
   PF_HARD_FAIL=0; _pf_connectivity >/dev/null 2>&1; [ "$PF_HARD_FAIL" -eq 1 ]
 }
 
@@ -436,7 +436,7 @@ setup() {
   source "${BATS_TEST_DIRNAME}/../lib/preflight.sh"
   has() { return 1; }
   run _pf_probe_url https://x
-  [ "$output" = "nocurl" ]
+  [ "$output" = "nocurl" ] || return 1
 }
 
 @test "_pf readers return a number on this host" {
@@ -452,7 +452,7 @@ setup() {
 @test "_pf_connectivity: no curl -> warn + skip, not a hard fail" {
   has() { return 1; }
   run _pf_connectivity
-  [[ "$output" == *"Skipping connectivity"* ]]
+  [[ "$output" == *"Skipping connectivity"* ]] || return 1
   PF_HARD_FAIL=0; _pf_connectivity >/dev/null 2>&1; [ "$PF_HARD_FAIL" -eq 0 ]
 }
 
@@ -475,14 +475,14 @@ setup() {
 @test "_pf_storage_type: NFS -> hard fail with a FOLLOWABLE remedy, not the old ~/.tracebloc advice (#479)" {
   _pf_fstype() { echo nfs; }
   run _pf_storage_type
-  [[ "$output" == *"network filesystem (nfs)"* ]]
+  [[ "$output" == *"network filesystem (nfs)"* ]] || return 1
   # the followable remedy (shared with early_data_dir_guard)
-  [[ "$output" == *"install as a user whose home is on a local disk"* ]]
-  [[ "$output" == *"TRACEBLOC_ALLOW_NETWORK_FS=1"* ]]
+  [[ "$output" == *"install as a user whose home is on a local disk"* ]] || return 1
+  [[ "$output" == *"TRACEBLOC_ALLOW_NETWORK_FS=1"* ]] || return 1
   # NOT the old un-followable advice: on a network home ~/.tracebloc is still NFS,
   # and validate_config rejects paths outside $HOME (#479).
-  [[ "$output" != *'HOST_DATA_DIR="$HOME/.tracebloc" ./install'* ]]
-  [[ "$output" != *"the default ~/.tracebloc is local"* ]]
+  [[ "$output" != *'HOST_DATA_DIR="$HOME/.tracebloc" ./install'* ]] || return 1
+  [[ "$output" != *"the default ~/.tracebloc is local"* ]] || return 1
   PF_HARD_FAIL=0; _pf_storage_type >/dev/null 2>&1; [ "$PF_HARD_FAIL" -eq 1 ]
 }
 
@@ -490,12 +490,12 @@ setup() {
   # Both route through _pf_network_fs_remedy — capture it once and assert both callers'
   # remedy lines match it, so they can't drift.
   local remedy; remedy="$(_pf_network_fs_remedy)"
-  [[ "$remedy" == *"install as a user whose home is on a local disk"* ]]
+  [[ "$remedy" == *"install as a user whose home is on a local disk"* ]] || return 1
   _pf_fstype() { echo nfs; }
   run _pf_storage_type
-  [[ "$output" == *"install as a user whose home is on a local disk"* ]]
+  [[ "$output" == *"install as a user whose home is on a local disk"* ]] || return 1
   HOST_DATA_DIR="$BATS_TEST_TMPDIR/fresh479/.tracebloc" run early_data_dir_guard
-  [[ "$output" == *"install as a user whose home is on a local disk"* ]]
+  [[ "$output" == *"install as a user whose home is on a local disk"* ]] || return 1
 }
 
 @test "_pf_storage_type: NFS4 -> hard fail" {
@@ -531,14 +531,14 @@ setup() {
   has() { [[ "$1" == "findmnt" ]]; }   # only findmnt 'present'
   findmnt() { echo NFS4; }             # upper-case, ignores args
   run _pf_fstype "${BATS_TEST_TMPDIR}/does/not/exist/yet"
-  [ "$output" = "nfs4" ]
+  [ "$output" = "nfs4" ] || return 1
 }
 
 @test "_pf_fstype: real reader on this host -> a token or empty, never crashes" {
   source "${BATS_TEST_DIRNAME}/../lib/preflight.sh"
   OS="$(uname -s)"
   run _pf_fstype /
-  [ "$status" -eq 0 ]
+  [ "$status" -eq 0 ] || return 1
   [[ -z "$output" || "$output" =~ ^[a-z0-9._/]+$ ]]
 }
 
@@ -549,20 +549,20 @@ setup() {
   _pf_total_mem_kb() { echo $((11 * 1024 * 1024)); }
   _pf_free_kb() { echo $((419 * 1024 * 1024)); }
   run _pf_hw_summary_line
-  [ "$status" -eq 0 ]
-  [[ "$output" == *"arm64"* ]]
-  [[ "$output" == *"6 CPU cores"* ]]
-  [[ "$output" == *"11 GB memory"* ]]
-  [[ "$output" == *"419 GB free disk"* ]]
+  [ "$status" -eq 0 ] || return 1
+  [[ "$output" == *"arm64"* ]] || return 1
+  [[ "$output" == *"6 CPU cores"* ]] || return 1
+  [[ "$output" == *"11 GB memory"* ]] || return 1
+  [[ "$output" == *"419 GB free disk"* ]] || return 1
 }
 
 @test "_pf_connectivity: all reachable -> single combined 'Connected:' line" {
   _pf_probe_url() { echo ok; }
   run _pf_connectivity
-  [ "$status" -eq 0 ]
-  [[ "$output" == *"Connected: tracebloc.io"* ]]
-  [[ "$output" == *"Docker Hub (registry-1.docker.io)"* ]]
-  [[ "$output" == *"GitHub (ghcr.io)"* ]]
+  [ "$status" -eq 0 ] || return 1
+  [[ "$output" == *"Connected: tracebloc.io"* ]] || return 1
+  [[ "$output" == *"Docker Hub (registry-1.docker.io)"* ]] || return 1
+  [[ "$output" == *"GitHub (ghcr.io)"* ]] || return 1
 }
 
 @test "run_preflight: healthy -> collapsed step-a view, per-check ✔ lines folded away" {
@@ -574,13 +574,13 @@ setup() {
   _pf_probe_url() { echo ok; }
   HOST_DATA_DIR="$HOME/.tracebloc"
   run run_preflight
-  [ "$status" -eq 0 ]
-  [[ "$output" == *"6 CPU cores"* ]]        # collapsed hardware line
-  [[ "$output" == *"Connected:"* ]]         # connectivity combined line
-  [[ "$output" == *"Local storage"* ]]      # storage line
+  [ "$status" -eq 0 ] || return 1
+  [[ "$output" == *"6 CPU cores"* ]] || return 1        # collapsed hardware line
+  [[ "$output" == *"Connected:"* ]] || return 1         # connectivity combined line
+  [[ "$output" == *"Local storage"* ]] || return 1      # storage line
   # the individual arch/memory ✔ lines are suppressed inside run_preflight
-  [[ "$output" != *"Architecture:"* ]]
-  [[ "$output" != *"Memory:"* ]]
+  [[ "$output" != *"Architecture:"* ]] || return 1
+  [[ "$output" != *"Memory:"* ]] || return 1
 }
 
 # ── early_data_dir_guard — pre-log network-FS refusal (#432) ─────────────────
@@ -588,51 +588,51 @@ setup() {
   _pf_is_network_fstype nfs4
   _pf_is_network_fstype cifs
   _pf_is_network_fstype fuse.sshfs
-  ! _pf_is_network_fstype ext4
-  ! _pf_is_network_fstype apfs
-  ! _pf_is_network_fstype ""
+  ! _pf_is_network_fstype ext4 || return 1
+  ! _pf_is_network_fstype apfs || return 1
+  ! _pf_is_network_fstype "" || return 1
 }
 
 @test "early_data_dir_guard: local filesystem -> silent pass" {
   _pf_fstype() { echo ext4; }
   run early_data_dir_guard
-  [ "$status" -eq 0 ]
-  [ -z "$output" ]
+  [ "$status" -eq 0 ] || return 1
+  [ -z "$output" ] || return 1
 }
 
 @test "early_data_dir_guard: undetermined filesystem -> pass (assume local)" {
   _pf_fstype() { echo ""; }
   run early_data_dir_guard
-  [ "$status" -eq 0 ]
+  [ "$status" -eq 0 ] || return 1
 }
 
 @test "early_data_dir_guard: NFS + existing data dir -> silent pass (healthy re-run reaches assess; Bugbot #441)" {
   _pf_fstype() { echo nfs4; }
   mkdir -p "$BATS_TEST_TMPDIR/existing/.tracebloc"
   HOST_DATA_DIR="$BATS_TEST_TMPDIR/existing/.tracebloc" run early_data_dir_guard
-  [ "$status" -eq 0 ]
-  [ -z "$output" ]
+  [ "$status" -eq 0 ] || return 1
+  [ -z "$output" ] || return 1
 }
 
 @test "early_data_dir_guard: NFS -> refuses before any mkdir, names the fix" {
   _pf_fstype() { echo nfs4; }
   HOST_DATA_DIR="$BATS_TEST_TMPDIR/fresh/.tracebloc" run early_data_dir_guard
-  [ "$status" -eq 1 ]
-  [[ "$output" == *"network filesystem (nfs4)"* ]]
-  [[ "$output" == *"HOST_DATA_DIR"* ]]
-  [[ "$output" == *"Refusing to create the data directory"* ]]
+  [ "$status" -eq 1 ] || return 1
+  [[ "$output" == *"network filesystem (nfs4)"* ]] || return 1
+  [[ "$output" == *"HOST_DATA_DIR"* ]] || return 1
+  [[ "$output" == *"Refusing to create the data directory"* ]] || return 1
   # The remediation must be followable (Bugbot #441): validate_config rejects
   # paths outside $HOME, so the guard must not advise HOST_DATA_DIR=/local/path.
-  [[ "$output" != *"/local/path"* ]]
-  [[ "$output" == *"TRACEBLOC_ALLOW_NETWORK_FS=1"* ]]
-  [[ "$output" == *"local disk"* ]]
+  [[ "$output" != *"/local/path"* ]] || return 1
+  [[ "$output" == *"TRACEBLOC_ALLOW_NETWORK_FS=1"* ]] || return 1
+  [[ "$output" == *"local disk"* ]] || return 1
 }
 
 @test "early_data_dir_guard: TRACEBLOC_ALLOW_NETWORK_FS defers to the full check" {
   _pf_fstype() { echo nfs4; }
   TRACEBLOC_ALLOW_NETWORK_FS=1 run early_data_dir_guard
-  [ "$status" -eq 0 ]
-  [ -z "$output" ]
+  [ "$status" -eq 0 ] || return 1
+  [ -z "$output" ] || return 1
 }
 
 @test "install-k8s.sh runs the early guard before setup_log_file (#432 ordering)" {
@@ -640,54 +640,54 @@ setup() {
   local guard_line setup_line
   guard_line=$(grep -n 'early_data_dir_guard' "$main_sh" | head -1 | cut -d: -f1)
   setup_line=$(grep -n '^  setup_log_file' "$main_sh" | head -1 | cut -d: -f1)
-  [ -n "$guard_line" ]
-  [ -n "$setup_line" ]
-  [ "$guard_line" -lt "$setup_line" ]
+  [ -n "$guard_line" ] || return 1
+  [ -n "$setup_line" ] || return 1
+  [ "$guard_line" -lt "$setup_line" ] || return 1
 }
 
 # ── #428: memory recommendation clamp + macOS VM sizing ─────────────────────
 @test "_pf_clamp_mem_gb: clamps a recommendation to physical − reserve (#428)" {
   PF_OS_RESERVE_GB=2; PF_MIN_MEM_GB=5
-  [ "$(_pf_clamp_mem_gb 16 16)" -eq 14 ]   # 16 GB Mac: can't recommend 16 -> 14
-  [ "$(_pf_clamp_mem_gb 16 8)"  -eq 6  ]   # 8 GB Mac  -> 6
-  [ "$(_pf_clamp_mem_gb 8  32)" -eq 8  ]   # plenty of headroom -> desired unchanged
+  [ "$(_pf_clamp_mem_gb 16 16)" -eq 14 ] || return 1   # 16 GB Mac: can't recommend 16 -> 14
+  [ "$(_pf_clamp_mem_gb 16 8)"  -eq 6  ] || return 1   # 8 GB Mac  -> 6
+  [ "$(_pf_clamp_mem_gb 8  32)" -eq 8  ] || return 1   # plenty of headroom -> desired unchanged
 }
 @test "_pf_clamp_mem_gb: never undershoots the floor on a tiny host (#428 Bugbot)" {
   PF_OS_RESERVE_GB=2; PF_MIN_MEM_GB=5
   # 6 GB host: physical − reserve = 4, but a hint must never say "raise to 4" (below
   # the 5 GB floor) — clamp up to the floor instead.
-  [ "$(_pf_clamp_mem_gb 8  6)" -eq 5 ]
-  [ "$(_pf_clamp_mem_gb 16 6)" -eq 5 ]
+  [ "$(_pf_clamp_mem_gb 8  6)" -eq 5 ] || return 1
+  [ "$(_pf_clamp_mem_gb 16 6)" -eq 5 ] || return 1
 }
 @test "_pf_clamp_mem_gb: non-numeric/unknown physical -> desired unchanged (can't clamp) (#428)" {
   # An explicit '' would hit the ${2:-host} default and read real host RAM — so test
   # the genuinely uncatchable cases: 0 and a non-numeric string.
-  [ "$(_pf_clamp_mem_gb 16 0)" -eq 16 ]
-  [ "$(_pf_clamp_mem_gb 16 abc)" -eq 16 ]
+  [ "$(_pf_clamp_mem_gb 16 0)" -eq 16 ] || return 1
+  [ "$(_pf_clamp_mem_gb 16 abc)" -eq 16 ] || return 1
 }
 @test "_macos_vm_mem_gb: derives min(half physical, clamped rec), with floor headroom (#428)" {
   PF_MIN_MEM_GB=5; PF_WARN_MEM_GB=8; PF_REC_MEM_GB=16; PF_OS_RESERVE_GB=2
   # 8 GB: half=4 -> raised to floor+1=6 so the guest MemTotal clears the recheck floor
   # (sizing EXACTLY 5 would boot then hard-fail on its own choice, #428 Bugbot).
-  [ "$(_macos_vm_mem_gb 8)"  -eq 6  ]
-  [ "$(_macos_vm_mem_gb 16)" -eq 8  ]   # half=8, rec clamped 14 -> 8
-  [ "$(_macos_vm_mem_gb 64)" -eq 16 ]   # half=32, rec 16 -> 16 (capped at rec)
+  [ "$(_macos_vm_mem_gb 8)"  -eq 6  ] || return 1
+  [ "$(_macos_vm_mem_gb 16)" -eq 8  ] || return 1   # half=8, rec clamped 14 -> 8
+  [ "$(_macos_vm_mem_gb 64)" -eq 16 ] || return 1   # half=32, rec 16 -> 16 (capped at rec)
 }
 @test "_macos_vm_mem_gb: too-small host -> capped at physical − reserve, not over-committed (#428 Bugbot)" {
   PF_MIN_MEM_GB=5; PF_WARN_MEM_GB=8; PF_REC_MEM_GB=16; PF_OS_RESERVE_GB=2
   # 6 GB host: floor+1=6 would leave the OS nothing, so cap at physical − reserve = 4.
   # colima gets 4; the runtime recheck then stops it honestly as "host too small".
-  [ "$(_macos_vm_mem_gb 6)" -eq 4 ]
+  [ "$(_macos_vm_mem_gb 6)" -eq 4 ] || return 1
 }
 @test "_macos_vm_mem_gb: unknown physical -> COLIMA_MEMORY default (#428)" {
   COLIMA_MEMORY=6
-  [ "$(_macos_vm_mem_gb 0)" -eq 6 ]
+  [ "$(_macos_vm_mem_gb 0)" -eq 6 ] || return 1
 }
 
 @test "setup-macos.sh colima memory is DERIVED via _macos_vm_mem_gb, not hard-coded 6 (#428)" {
   f="$BATS_TEST_DIRNAME/../lib/setup-macos.sh"
   grep -qE 'COLIMA_MEMORY:-\$\(_macos_vm_mem_gb\)' "$f"
-  ! grep -qE '\-\-memory "\$\{COLIMA_MEMORY:-6\}"' "$f"   # the old hard-coded 6 is gone
+  ! grep -qE '\-\-memory "\$\{COLIMA_MEMORY:-6\}"' "$f" || return 1   # the old hard-coded 6 is gone
 }
 
 @test "_pf_recheck_runtime_mem: colima remedy uses a real resize command (#428 Bugbot)" {
@@ -695,5 +695,5 @@ setup() {
   # sets VAR for `stop`. The correct resize is `colima stop && colima start --memory N`.
   f="$BATS_TEST_DIRNAME/../lib/preflight.sh"
   grep -qE 'colima stop && colima start --memory' "$f"
-  ! grep -qE 'COLIMA_MEMORY=[^ ]* colima stop' "$f"
+  ! grep -qE 'COLIMA_MEMORY=[^ ]* colima stop' "$f" || return 1
 }

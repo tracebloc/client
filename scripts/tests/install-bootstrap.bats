@@ -128,9 +128,9 @@ run_boot_hermetic() {
 
 @test "mutable BRANCH ref fails closed without the opt-in" {
   REF="" BRANCH="develop" run_boot
-  [ "$status" -ne 0 ]
-  [[ "$output" == *"not an immutable release tag"* ]]
-  [ ! -f "$SBX/k8s-ran" ]            # never reached the privileged step
+  [ "$status" -ne 0 ] || return 1
+  [[ "$output" == *"not an immutable release tag"* ]] || return 1
+  [ ! -f "$SBX/k8s-ran" ] || return 1            # never reached the privileged step
 }
 
 @test "path-traversal ref disguised as a tag fails closed without the opt-in" {
@@ -139,21 +139,21 @@ run_boot_hermetic() {
   # branch — the immutable-tag pin bypassed with no opt-in (RFC-0001 R8). It must
   # now be REJECTED: exit non-zero, never fetch, never reach the privileged step.
   REF="v1.2.3-../../heads/main" COSIGN_RESULT=0 run_boot
-  [ "$status" -ne 0 ]
+  [ "$status" -ne 0 ] || return 1
   # Either the tag-shape gate or the path-separator belt rejects it; both name R8.
   [[ "$output" == *"not an immutable release tag"* \
      || "$output" == *"path separator or '..'"* ]]
-  [ ! -f "$SBX/k8s-ran" ]            # privileged step never reached
+  [ ! -f "$SBX/k8s-ran" ] || return 1            # privileged step never reached
 }
 
 @test "tag with a bare path separator fails closed without the opt-in" {
   # A '/' in the ref (e.g. a heads/ ref dressed as a tag) is a traversal lever
   # into a mutable location; reject it like the '..' case above.
   REF="v1.2.3/heads/main" COSIGN_RESULT=0 run_boot
-  [ "$status" -ne 0 ]
+  [ "$status" -ne 0 ] || return 1
   [[ "$output" == *"not an immutable release tag"* \
      || "$output" == *"path separator or '..'"* ]]
-  [ ! -f "$SBX/k8s-ran" ]
+  [ ! -f "$SBX/k8s-ran" ] || return 1
 }
 
 @test "un-stamped DEFAULT_REF fails closed (placeholder still present)" {
@@ -161,26 +161,26 @@ run_boot_hermetic() {
   # running it directly (no REF/BRANCH) must refuse rather than guess. Hermetic:
   # with no REF/BRANCH set, a host tracebloc CLI would trip the healthy-bailout.
   run_boot_hermetic
-  [ "$status" -ne 0 ]
-  [[ "$output" == *"wasn't stamped with a pinned release tag"* ]]
-  [ ! -f "$SBX/k8s-ran" ]
+  [ "$status" -ne 0 ] || return 1
+  [[ "$output" == *"wasn't stamped with a pinned release tag"* ]] || return 1
+  [ ! -f "$SBX/k8s-ran" ] || return 1
 }
 
 @test "happy path: immutable tag + valid manifest + good signature runs install-k8s.sh" {
   REF="v9.9.9" COSIGN_RESULT=0 run_boot
-  [ "$status" -eq 0 ]
-  [[ "$output" == *"files intact"* ]]   # first-run copy: "All N files intact — nothing was altered"
-  [ -f "$SBX/k8s-ran" ]              # privileged step reached only after verify
+  [ "$status" -eq 0 ] || return 1
+  [[ "$output" == *"files intact"* ]] || return 1   # first-run copy: "All N files intact — nothing was altered"
+  [ -f "$SBX/k8s-ran" ] || return 1              # privileged step reached only after verify
 }
 
 @test "tampered sub-script aborts before the privileged step" {
   # Mutate a fetched file AFTER the manifest was built → digest mismatch.
   echo "rm -rf / # evil" >> "$SERVE/scripts/lib/provision.sh"
   REF="v9.9.9" COSIGN_RESULT=0 run_boot
-  [ "$status" -ne 0 ]
-  [[ "$output" == *"Integrity check FAILED"* ]]
-  [[ "$output" == *"provision.sh"* ]]
-  [ ! -f "$SBX/k8s-ran" ]
+  [ "$status" -ne 0 ] || return 1
+  [[ "$output" == *"Integrity check FAILED"* ]] || return 1
+  [[ "$output" == *"provision.sh"* ]] || return 1
+  [ ! -f "$SBX/k8s-ran" ] || return 1
 }
 
 @test "a file missing from the manifest aborts" {
@@ -188,32 +188,32 @@ run_boot_hermetic() {
   grep -v 'scripts/lib/provision.sh' "$SERVE_REL/manifest.sha256" > "$SERVE_REL/m.tmp"
   mv "$SERVE_REL/m.tmp" "$SERVE_REL/manifest.sha256"
   REF="v9.9.9" COSIGN_RESULT=0 run_boot
-  [ "$status" -ne 0 ]
-  [[ "$output" == *"no entry in manifest"* ]]
-  [ ! -f "$SBX/k8s-ran" ]
+  [ "$status" -ne 0 ] || return 1
+  [[ "$output" == *"no entry in manifest"* ]] || return 1
+  [ ! -f "$SBX/k8s-ran" ] || return 1
 }
 
 @test "cosign signature failure aborts (no degrade to same-channel sha256)" {
   REF="v9.9.9" COSIGN_RESULT=1 run_boot
-  [ "$status" -ne 0 ]
-  [[ "$output" == *"signature verification FAILED"* ]]
-  [ ! -f "$SBX/k8s-ran" ]
+  [ "$status" -ne 0 ] || return 1
+  [[ "$output" == *"signature verification FAILED"* ]] || return 1
+  [ ! -f "$SBX/k8s-ran" ] || return 1
 }
 
 @test "cosign absent on default path fails closed (can't bootstrap in sandbox)" {
   # cosign genuinely absent (PATH=$BIN only). The cosign download is unmapped in
   # mock curl (exit 22), so ensure_cosign fails → fail-closed on the default path.
   REF="v9.9.9" run_boot_no_cosign
-  [ "$status" -ne 0 ]
-  [[ "$output" == *"cosign is required"* ]]
-  [ ! -f "$SBX/k8s-ran" ]
+  [ "$status" -ne 0 ] || return 1
+  [[ "$output" == *"cosign is required"* ]] || return 1
+  [ ! -f "$SBX/k8s-ran" ] || return 1
 }
 
 @test "unverified opt-in degrades gracefully when cosign is absent" {
   REF="v9.9.9" TRACEBLOC_ALLOW_UNVERIFIED=1 run_boot_no_cosign
-  [ "$status" -eq 0 ]
-  [[ "$output" == *"manifest signature NOT verified"* ]]
-  [ -f "$SBX/k8s-ran" ]             # checksum integrity still enforced; runs
+  [ "$status" -eq 0 ] || return 1
+  [[ "$output" == *"manifest signature NOT verified"* ]] || return 1
+  [ -f "$SBX/k8s-ran" ] || return 1             # checksum integrity still enforced; runs
 }
 
 # ── Early bailout: already-healthy machine skips the whole download ──────────
@@ -233,10 +233,10 @@ run_boot_hermetic() {
 EOF
   chmod +x "$BIN/tracebloc"
   run_boot                                   # NO REF -> bailout is eligible
-  [ "$status" -eq 0 ]
-  [[ "$output" == *"Already set up and healthy"* ]]
-  [ -f "$SBX/home-ran" ]                      # handed off to the home screen
-  [ ! -f "$SBX/k8s-ran" ]                     # never downloaded / ran install-k8s.sh
+  [ "$status" -eq 0 ] || return 1
+  [[ "$output" == *"Already set up and healthy"* ]] || return 1
+  [ -f "$SBX/home-ran" ] || return 1                      # handed off to the home screen
+  [ ! -f "$SBX/k8s-ran" ] || return 1                     # never downloaded / ran install-k8s.sh
 }
 
 @test "early bailout: unhealthy tracebloc doctor -> does NOT bail" {
@@ -247,8 +247,8 @@ EOF
   chmod +x "$BIN/tracebloc"
   run_boot                                   # NO REF: proceeds past bailout, then
                                              # hits the un-stamped-ref refusal
-  [[ "$output" != *"Already set up and healthy"* ]]
-  [ ! -f "$SBX/home-ran" ]                    # no hand-off
+  [[ "$output" != *"Already set up and healthy"* ]] || return 1
+  [ ! -f "$SBX/home-ran" ] || return 1                    # no hand-off
 }
 
 @test "early bailout: --force skips the bailout even when healthy" {
@@ -258,8 +258,8 @@ EOF
 EOF
   chmod +x "$BIN/tracebloc"
   run_boot --force
-  [[ "$output" != *"Already set up and healthy"* ]]
-  [ ! -f "$SBX/home-ran" ]
+  [[ "$output" != *"Already set up and healthy"* ]] || return 1
+  [ ! -f "$SBX/home-ran" ] || return 1
 }
 
 # ── Reinstall intent reaches install-k8s.sh's stop-and-check gate ────────────
@@ -283,16 +283,16 @@ EOF
 @test "pinned REF exports TB_FORCE_REINSTALL so the assess gate can't short-circuit" {
   _capture_k8s_force
   REF="v9.9.9" COSIGN_RESULT=0 run_boot
-  [ "$status" -eq 0 ]
-  [ -f "$SBX/k8s-ran" ]
-  [[ "$(cat "$SBX/k8s-ran")" == "TB_FORCE_REINSTALL=1" ]]
+  [ "$status" -eq 0 ] || return 1
+  [ -f "$SBX/k8s-ran" ] || return 1
+  [[ "$(cat "$SBX/k8s-ran")" == "TB_FORCE_REINSTALL=1" ]] || return 1
 }
 
 @test "--force also exports TB_FORCE_REINSTALL to install-k8s.sh" {
   _capture_k8s_force
   REF="v9.9.9" COSIGN_RESULT=0 run_boot --force
-  [ "$status" -eq 0 ]
-  [[ "$(cat "$SBX/k8s-ran")" == "TB_FORCE_REINSTALL=1" ]]
+  [ "$status" -eq 0 ] || return 1
+  [[ "$(cat "$SBX/k8s-ran")" == "TB_FORCE_REINSTALL=1" ]] || return 1
 }
 
 # prepare-host is useful precisely on a machine that is already set up (grant
@@ -313,8 +313,8 @@ EOF
   # bootstrap would still see itself as unstamped.
   sed 's/^DEFAULT_REF=.*/DEFAULT_REF="v9.9.9"/' "$BOOT" > "$SBX/boot.stamped"
   PATH="$BIN:$PATH" run bash "$SBX/boot.stamped" prepare-host
-  [ "$status" -eq 0 ]
-  [[ "$output" != *"Already set up and healthy"* ]]
-  [ -f "$SBX/k8s-ran" ]
-  [[ "$(cat "$SBX/k8s-ran")" == "TB_FORCE_REINSTALL=unset" ]]
+  [ "$status" -eq 0 ] || return 1
+  [[ "$output" != *"Already set up and healthy"* ]] || return 1
+  [ -f "$SBX/k8s-ran" ] || return 1
+  [[ "$(cat "$SBX/k8s-ran")" == "TB_FORCE_REINSTALL=unset" ]] || return 1
 }
