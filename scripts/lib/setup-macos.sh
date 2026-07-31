@@ -65,12 +65,16 @@ _macos_user_is_admin() {
 # (and root) pass through untouched to the normal sudo priming.
 _macos_require_admin() {
   _macos_user_is_admin && return 0
-  warn "This Mac account isn't an administrator, but installing Docker + the tracebloc runtime needs admin rights once."
-  hint "Ask your IT/admin to do ONE of these on this Mac, then re-run the installer as yourself:"
-  hint "  • install Docker Desktop (https://desktop.docker.com) and grant this account access, or"
-  hint "  • grant this account administrator rights (System Settings → Users & Groups), or"
-  hint "  • run this installer themselves once as an administrator (the macOS prepare-host step)."
-  error "Administrator rights required on this Mac — see the one-time IT step above, then re-run."
+  # Be accurate about what actually unblocks this (#430 Bugbot): re-running as the same
+  # non-admin account hits this gate again, and there is NO macOS prepare-host (it errors
+  # on Darwin). The install steps (Docker, brew, /usr/local/bin) genuinely need admin, so
+  # the only real remedies are to gain admin on this account, or to install from an
+  # account that already has it.
+  warn "This Mac account isn't an administrator, but installing Docker + the tracebloc runtime on macOS needs admin rights (there is no non-admin macOS path yet)."
+  hint "Ask your IT/admin to do ONE of these:"
+  hint "  • grant THIS account administrator rights (System Settings → Users & Groups → this user → \"Allow this user to administer this computer\"), then re-run as yourself, or"
+  hint "  • have an administrator run this installer on this Mac from their OWN admin account."
+  error "Administrator rights required on this Mac — grant this account admin (or install from an admin account), then re-run."
 }
 
 # Does this Mac support Apple Virtualization.framework (colima --vm-type vz)? It needs
@@ -432,5 +436,9 @@ install_macos() {
   install_docker_desktop
   assert_amd64_emulation      # Docker is up now — prove amd64 runs before the cluster needs it (#433)
   install_macos_cli_tools
-  _install_macos_autostart    # #430: login autostart so a rebooted Mac returns with zero action
+  # Best-effort: autostart returns 1 on a mkdir/write failure, and this runs under
+  # `set -e` after Docker + tools are already installed — so `|| true` keeps a failed
+  # login-item from aborting an otherwise-complete install (#430 Bugbot). The summary
+  # stays honest either way: TB_MACOS_AUTOSTART is only set on success.
+  _install_macos_autostart || true   # #430: login autostart so a rebooted Mac returns with zero action
 }

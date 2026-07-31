@@ -39,15 +39,16 @@ setup() {
   [ -z "$output" ]                         # no scary output for a normal admin
 }
 
-@test "_macos_require_admin: no-admin Mac -> hard fail with a named IT remedy, not a generic sudo error (#430)" {
+@test "_macos_require_admin: no-admin Mac -> hard fail with an ACCURATE remedy, not a generic sudo error (#430)" {
   TB_MACOS_ADMIN_GROUPS="staff everyone"   # not an admin
   run _macos_require_admin
   [ "$status" -ne 0 ]                       # error() exits — fails fast up front
   [[ "$output" == *"isn't an administrator"* ]]
-  [[ "$output" == *"IT/admin"* ]]
-  [[ "$output" == *"Docker Desktop"* ]]
-  [[ "$output" == *"prepare-host"* ]]      # names the macOS prepare-host analog
-  [[ "$output" != *"sudo authentication failed"* ]]   # NOT the old generic message
+  [[ "$output" == *"administrator rights"* ]]              # the remedy that actually unblocks it
+  [[ "$output" == *"admin account"* ]]                     # …or install from an admin account
+  [[ "$output" != *"prepare-host"* ]]                      # NO macOS prepare-host exists (it errors on Darwin) (#430 Bugbot)
+  [[ "$output" != *"grant this account access"* ]]         # not the re-run-as-non-admin loop (#430 Bugbot)
+  [[ "$output" != *"sudo authentication failed"* ]]        # NOT the old generic message
 }
 
 # ── _install_macos_autostart (LaunchAgent) ───────────────────────────────────
@@ -92,6 +93,25 @@ setup() {
 }
 
 # ── _reboot_note reflects the configured autostart ───────────────────────────
+@test "install_macos: a failing autostart does NOT abort an otherwise-complete install (best-effort) (#430 Bugbot)" {
+  # All prior steps succeed; autostart fails (mkdir/write). Under set -e the bare call
+  # would have aborted the whole install after Docker + tools were already in — `|| true`
+  # must keep it best-effort.
+  _macos_require_admin()     { :; }
+  preflight_sudo()           { :; }
+  install_homebrew()         { :; }
+  install_docker_desktop()   { :; }
+  assert_amd64_emulation()   { :; }   # present once #433 merged; harmless no-op here
+  install_macos_cli_tools()  { :; }
+  _install_macos_autostart() { return 1; }   # simulate a LaunchAgents write failure
+  run bash -c 'set -e; source "'"${LIB_DIR}"'/common.sh"; source "'"${LIB_DIR}"'/setup-macos.sh"
+    _macos_require_admin(){ :; }; preflight_sudo(){ :; }; install_homebrew(){ :; }
+    install_docker_desktop(){ :; }; assert_amd64_emulation(){ :; }; install_macos_cli_tools(){ :; }
+    _install_macos_autostart(){ return 1; }
+    install_macos'
+  [ "$status" -eq 0 ]      # install completes despite the autostart failure
+}
+
 @test "_reboot_note: macOS + autostart configured -> promises automatic restart (#430)" {
   OS=Darwin; TB_MACOS_AUTOSTART=1
   run _reboot_note
