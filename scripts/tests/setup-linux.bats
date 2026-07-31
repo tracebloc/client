@@ -1529,8 +1529,11 @@ _stub_install_steps() {
   [ "$status" -ne 0 ]
   [[ "$output" == *"Don't run the installer with sudo"* ]]
   [[ "$output" == *"alice"* ]]
-  # the prepare-host remedy must name TB_PREPARE_USER — bare prepare-host grants nobody (#427 Bugbot)
-  [[ "$output" == *"TB_PREPARE_USER=alice"* ]]
+  # the prepare-host remedy must name TB_PREPARE_USER (bare prepare-host grants nobody),
+  # but with a RESEARCHER placeholder — never the admin's $SUDO_USER, which would grant
+  # the admin and recreate the #377 footgun (#427 Bugbot r2).
+  [[ "$output" == *"TB_PREPARE_USER=<researcher-username>"* ]]
+  [[ "$output" != *"TB_PREPARE_USER=alice"* ]]
 }
 @test "refuse_sudo_wrapped_install: genuine root login (no SUDO_USER) is allowed (#427)" {
   error() { printf 'ERR: %s\n' "$*"; return 1; }

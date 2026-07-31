@@ -1291,7 +1291,7 @@ refuse_sudo_wrapped_install() {
   # test suite can't shadow it — id() can be mocked.
   [[ "$(id -u 2>/dev/null)" == "0" ]] || return 0
   [[ -n "${SUDO_USER:-}" && "${SUDO_USER}" != "root" ]] || return 0
-  error "Don't run the installer with sudo. It elevates each privileged step itself, and running the whole thing as root would grant Docker to root (not you) and root-own ${SUDO_USER}'s ~/.tracebloc + ~/.kube. Re-run WITHOUT sudo as '${SUDO_USER}'. Admin setting up for someone else? Name the researcher so they get docker-group access:  export TB_PREPARE_USER=${SUDO_USER}  &&  curl -fsSL https://tracebloc.io/i.sh | bash -s -- prepare-host"
+  error "Don't run the installer with sudo. It elevates each privileged step itself, and running the whole thing as root would grant Docker to root (not you) and root-own ${SUDO_USER}'s ~/.tracebloc + ~/.kube. Re-run WITHOUT sudo as '${SUDO_USER}'. Admin setting up for someone else? Name the RESEARCHER (not yourself) so they get docker-group access:  export TB_PREPARE_USER=<researcher-username>  &&  curl -fsSL https://tracebloc.io/i.sh | bash -s -- prepare-host"
 }
 
 # run_prepare_host — the standalone, admin-run Tier-2 step (RFC 0001 #1178). An
