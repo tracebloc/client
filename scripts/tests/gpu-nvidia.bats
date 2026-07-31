@@ -169,3 +169,33 @@ _gpu_mocks() {
   [ "$status" -eq 0 ] || { echo "$output"; return 1; }
   grep -q 'docker run' "$MOCK_CALLS" || return 1              # cache bypassed: smoke test STILL ran
 }
+
+# ── #431 Bugbot round 3: tri-state cluster probe + stale marker on failed smoke ──
+@test "_k3d_cluster_running: a failed/timed-out probe is UNKNOWN (rc 2), not 'not running' (#431 Bugbot)" {
+  has() { case "$1" in k3d) return 0;; *) return 1;; esac; }
+  k3d() { return 1; }                    # `cluster list` fails (wedged daemon)
+  run _k3d_cluster_running
+  [ "$status" -eq 2 ] || return 1
+}
+
+@test "install_nvidia_container_toolkit: unknown cluster state still attempts recovery + warns (#431 Bugbot)" {
+  _gpu_mocks
+  K3D_PRESENT=0                          # has k3d -> true
+  k3d() { record "k3d $*"; case "$*" in *"cluster list"*) return 1;; *"cluster start"*) return 0;; esac; }
+  docker() { record "docker $*"; case "$*" in *info*) echo runc;; esac; }   # not-nvidia -> reconfigure
+  run install_nvidia_container_toolkit
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  [[ "$output" == *"Couldn't confirm"* ]] || return 1        # unknown-state warn
+  grep -q 'k3d cluster start' "$MOCK_CALLS" || return 1       # recovery attempted anyway
+}
+
+@test "install_nvidia_container_toolkit: a failed forced smoke test clears the stale pass marker (#431 Bugbot)" {
+  _gpu_mocks
+  K3D_PRESENT=1                          # no live cluster
+  docker() { record "docker $*"; case "$*" in *info*) echo runc;; *"run"*) return 1;; esac; }  # reconfigure + smoke FAILS
+  printf 'toolkit 1.15.0|550.00' > "${HOST_DATA_DIR}/.gpu-smoke-ok"
+  run install_nvidia_container_toolkit
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  grep -q 'docker run' "$MOCK_CALLS" || return 1               # forced re-verify ran
+  [ ! -f "${HOST_DATA_DIR}/.gpu-smoke-ok" ] || return 1         # stale PASS marker removed
+}

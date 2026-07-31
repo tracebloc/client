@@ -78,14 +78,21 @@ _docker_default_runtime_is_nvidia() {
   [[ "$rt" == "nvidia" ]]
 }
 
-# Is our k3d cluster currently running (>=1 server up)? jq-free (jq is optional here);
-# parses the SERVERS "running/total" column, mirroring _cluster_exists' awk approach.
-# Bounded too, so a wedged daemon can't hang the probe (#431 Bugbot).
+# k3d cluster state, jq-free (parses the SERVERS "running/total" column, mirroring
+# _cluster_exists' awk approach) and bounded so a wedged daemon can't hang the probe.
+# Tri-state so a probe TIMEOUT isn't mistaken for "not running" — otherwise a live
+# cluster could be left down after the Docker restart with no recovery (#431 Bugbot):
+#   0 = running (>=1 server up)
+#   1 = not running (probe OK: cluster stopped/absent, or no k3d)
+#   2 = UNKNOWN  (has k3d but the bounded probe failed/timed out)
 _k3d_cluster_running() {
   has k3d || return 1
+  local out rc
+  out="$(_bounded "${TB_PROBE_TIMEOUT:-5}" k3d cluster list --no-headers 2>/dev/null)"; rc=$?
+  (( rc == 0 )) || return 2
   # Decide only in END: an `exit` inside a main rule still runs END, so a per-row
   # `exit 0` would be overridden by an END `exit 1`. Set a flag, exit once.
-  _bounded "${TB_PROBE_TIMEOUT:-5}" k3d cluster list --no-headers 2>/dev/null | awk -v n="$CLUSTER_NAME" '
+  printf '%s\n' "$out" | awk -v n="$CLUSTER_NAME" '
     $1 == n { split($2, s, "/"); running = (s[1] + 0 > 0) } END { exit(running ? 0 : 1) }'
 }
 
@@ -154,10 +161,17 @@ install_nvidia_container_toolkit() {
   else
     reconfigured=1
     sudo nvidia-ctk runtime configure --runtime=docker --set-as-default
-    local cluster_was_running=0
-    if _k3d_cluster_running; then
+    # Attempt cluster recovery after the restart when it's running OR when we couldn't
+    # confirm its state (a wedged daemon that also failed the nvidia check would fail
+    # this probe too) — never leave a live cluster down silently (#431 Bugbot).
+    local cluster_was_running=0 cr
+    _k3d_cluster_running; cr=$?
+    if (( cr == 0 )); then
       cluster_was_running=1
       warn "Applying the NVIDIA runtime needs a Docker restart — the '${CLUSTER_NAME}' cluster will restart with it."
+    elif (( cr == 2 )); then
+      cluster_was_running=1
+      warn "Couldn't confirm the '${CLUSTER_NAME}' cluster state before the Docker restart — will try to bring it back afterward."
     fi
     sudo systemctl restart docker
     sleep 3
@@ -200,6 +214,10 @@ install_nvidia_container_toolkit() {
     [[ -n "$gpu_sig" ]] && printf '%s' "$gpu_sig" > "$gpu_marker" 2>/dev/null || true
   else
     log "Docker GPU smoke-test skipped (image may need pulling). Continuing..."
+    # Never leave a PASS marker behind a check that just failed: a forced re-verify
+    # that fails must not let the NEXT (reconfigured=0) run skip the test and treat
+    # the stack as previously verified (#431 Bugbot).
+    rm -f "$gpu_marker" 2>/dev/null || true
   fi
 
   K3D_GPU_FLAGS=("--gpus=all")
