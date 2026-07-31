@@ -1481,3 +1481,83 @@ _stub_install_steps() {
   [ "$(grep -c 'DOCKER_HOST=' "$HOME/.bashrc")" -eq 1 ]           # we did NOT append the rootless line
 }
 
+
+# ── #427: docker-group grant is not gated on a fresh install ────────────────
+@test "install_docker_engine: pre-installed Docker + user NOT in group -> still grants (#427)" {
+  PRESENT_CMDS="docker curl conntrack"; TEST_DISTRO=ubuntu
+  id() { echo "testuser"; }                 # NOT yet in the docker group
+  run install_docker_engine
+  [ "$status" -eq 0 ]
+  mock_calls | grep -q "sudo usermod -aG docker testuser"
+}
+@test "install_docker_engine: pre-installed Docker + user already in group -> no redundant grant (#427)" {
+  PRESENT_CMDS="docker curl conntrack"; TEST_DISTRO=ubuntu
+  id() { echo "testuser docker"; }          # already a member
+  run install_docker_engine
+  [ "$status" -eq 0 ]
+  ! mock_calls | grep -q "usermod -aG docker"
+}
+@test "install_docker_engine: fresh install still grants the invoking user (#427 regression)" {
+  PRESENT_CMDS="curl conntrack"; TEST_DISTRO=ubuntu   # docker ABSENT -> fresh install
+  id() { echo "testuser"; }
+  run install_docker_engine
+  [ "$status" -eq 0 ]
+  mock_calls | grep -q "sudo usermod -aG docker testuser"
+}
+@test "install_docker_engine: prepare-host mode never grants the invoking admin (#427/#381)" {
+  PRESENT_CMDS="docker curl conntrack"; TEST_DISTRO=ubuntu
+  TB_PREPARE_HOST_MODE=1
+  id() { echo "admin"; }
+  run install_docker_engine
+  ! mock_calls | grep -q "usermod -aG docker admin"
+}
+@test "install_docker_engine: grants the INVOKING user, not TB_PREPARE_USER (#427 Bugbot)" {
+  PRESENT_CMDS="docker curl conntrack"; TEST_DISTRO=ubuntu
+  TB_PREPARE_USER=researcher                # a leftover export must NOT redirect the grant
+  id() { echo "testuser"; }                 # invoker ($USER) not in group
+  run install_docker_engine
+  [ "$status" -eq 0 ]
+  mock_calls | grep -q "sudo usermod -aG docker testuser"   # $USER, matches the sg re-exec + socket owner
+  ! mock_calls | grep -q "usermod -aG docker researcher"
+}
+
+# ── #427: refuse a sudo-wrapped full install ────────────────────────────────
+@test "refuse_sudo_wrapped_install: EUID 0 + SUDO_USER -> refuses, names the user (#427)" {
+  error() { printf 'ERR: %s\n' "$*"; return 1; }
+  id() { echo 0; }
+  SUDO_USER=alice run refuse_sudo_wrapped_install
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"Don't run the installer with sudo"* ]]
+  [[ "$output" == *"alice"* ]]
+  # the prepare-host remedy must name TB_PREPARE_USER (bare prepare-host grants nobody),
+  # but with a RESEARCHER placeholder — never the admin's $SUDO_USER, which would grant
+  # the admin and recreate the #377 footgun (#427 Bugbot r2).
+  [[ "$output" == *"TB_PREPARE_USER=<researcher-username>"* ]]
+  [[ "$output" != *"TB_PREPARE_USER=alice"* ]]
+}
+@test "refuse_sudo_wrapped_install: genuine root login (no SUDO_USER) is allowed (#427)" {
+  error() { printf 'ERR: %s\n' "$*"; return 1; }
+  id() { echo 0; }
+  SUDO_USER="" run refuse_sudo_wrapped_install
+  [ "$status" -eq 0 ]
+}
+@test "refuse_sudo_wrapped_install: SUDO_USER=root (sudo -i) is allowed (#427)" {
+  error() { printf 'ERR: %s\n' "$*"; return 1; }
+  id() { echo 0; }
+  SUDO_USER=root run refuse_sudo_wrapped_install
+  [ "$status" -eq 0 ]
+}
+@test "refuse_sudo_wrapped_install: non-root run is allowed (#427)" {
+  error() { printf 'ERR: %s\n' "$*"; return 1; }
+  id() { echo 1000; }
+  SUDO_USER=alice run refuse_sudo_wrapped_install
+  [ "$status" -eq 0 ]
+}
+
+@test "install_docker_engine: sg-docker re-exec guard keys off _grant_user, not bare \$USER (#427 reviewer)" {
+  # The grant target and the in-session re-exec guard must agree, or the USER-unset
+  # edge grants but never re-execs -> the dead-end loop returns.
+  f="$BATS_TEST_DIRNAME/../lib/setup-linux.sh"
+  grep -qE 'id -nG "\$_grant_user"[^|]*\| grep -qw docker' "$f"
+  ! grep -qE 'id -nG "\$USER"[^|]*\| grep -qw docker' "$f"
+}
