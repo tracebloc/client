@@ -238,6 +238,23 @@ _pf_ncpu()         { local v; v="$(_pf_runtime_ncpu)";   [[ -n "$v" ]] && { echo
 # the budget remedy (_pf_runtime_mem_status) must reach the same verdict from ONE
 # definition — a 5-6 GB host was being graded "enough to run" on one line and told
 # to "use a larger machine" two lines later, in the same preflight (Bugbot #445 r3).
+# Displayed GB for a CONFIGURED memory size, given MiB. ONE definition: this
+# figure is rendered in four places (_pf_memory, _pf_runtime_mem_status,
+# _pf_recheck_runtime_mem, _pf_hw_summary_line) and every review round on this PR
+# found another pair of them disagreeing — most recently a collapsed hardware
+# summary printing a different size from the memory line in the same preflight
+# (Bugbot #445 r6).
+#
+# The grace compensates for a guest reporting MemTotal a few hundred MiB below the
+# size it was configured with, so it belongs on anything claiming "this is how much
+# memory X has". It deliberately does NOT belong on live measurements
+# (MemAvailable) — inflating those would hide a real shortage — nor on
+# _pf_host_mem_gb, which reports physical RAM needing no compensation and is the
+# input _pf_host_too_small_for_floor grades.
+_pf_display_gb_from_mib() {
+  echo $(( ( ${1:-0} + PF_VM_MEM_GRACE_MIB ) / 1024 ))
+}
+
 _pf_host_too_small_for_floor() {
   local host_gb="${1:-}"
   [[ "$host_gb" =~ ^[0-9]+$ ]] || return 1
@@ -254,7 +271,7 @@ _pf_runtime_mem_status() {
   # displayed as if sub-floor, which reads as a contradiction. Adding the same
   # grace before the division recovers the configured figure. Mirrors the
   # PowerShell peer's (mib + grace) / 1024 (Bugbot #445 r3).
-  rt_gb=$(( (rt_mib + PF_VM_MEM_GRACE_MIB) / 1024 ))
+  rt_gb="$(_pf_display_gb_from_mib "$rt_mib")"
   warn_eff="$(_pf_clamp_mem_gb "$PF_WARN_MEM_GB")"
   rec_eff="$(_pf_clamp_mem_gb "$PF_REC_MEM_GB")"
   if (( rt_mib < PF_MIN_MEM_GB * 1024 - PF_VM_MEM_GRACE_MIB )); then
@@ -383,7 +400,10 @@ _pf_memory() {
   local host_kb rt_kb rt_gb kb gb mib floor_mib warn_mib label rec_gb warn_gb
   host_kb="$(_pf_host_mem_kb)"
   rt_kb="$(_pf_runtime_mem_kb)"
-  [[ -n "$rt_kb" ]] && rt_gb=$(( rt_kb / 1024 / 1024 ))
+  # Same converter as $gb below: this feeds the "is the VM meaningfully smaller
+  # than the machine" comparison, and grading one side grace-adjusted against a
+  # raw other side is the exact mistake this PR keeps rediscovering.
+  [[ -n "$rt_kb" ]] && rt_gb="$(_pf_display_gb_from_mib "$(( rt_kb / 1024 ))")"
   # Gate on the machine; only if the host is unreadable fall back to the VM
   # budget (rare — /proc/meminfo and hw.memsize are near-universal).
   kb="$host_kb"; label="machine"
@@ -392,7 +412,7 @@ _pf_memory() {
   mib=$(( kb / 1024 ))
   # Same grace-adjusted figure _pf_runtime_mem_status reports, so one budget never
   # appears as two different numbers across the two messages (Bugbot #445 r4).
-  gb=$(( (mib + PF_VM_MEM_GRACE_MIB) / 1024 ))
+  gb="$(_pf_display_gb_from_mib "$mib")"
   # Compare in MiB with a 64 MiB grace so a VM that reports e.g. 4 GiB a hair under
   # 4*1024^3 (Colima / Docker Desktop) doesn't floor to 3 GB and false-trip the gate.
   # Tolerance must match the grace already applied to the SHOWN figure above, or
@@ -469,8 +489,12 @@ _pf_recheck_runtime_mem() {
   # "N GB to train" figure) now lives solely in _pf_runtime_mem_status.
   local kb gb mib warn_gb; kb="$(_pf_runtime_mem_kb)"
   [[ -z "$kb" ]] && return 0          # daemon still not reporting — nothing to add
-  gb=$(( kb / 1024 / 1024 ))
   mib=$(( kb / 1024 ))
+  # Same converter the status line uses, so the hard-fail can never quote a
+  # different size for the same budget (Bugbot #445 r4 — this fix was written then
+  # but landed in the wrong function, because the two-line pattern it anchored on
+  # existed in _pf_memory too and the replace took the first match).
+  gb="$(_pf_display_gb_from_mib "$mib")"
   warn_gb="$(_pf_clamp_mem_gb "$PF_WARN_MEM_GB")"
   if [[ "$mib" -lt $(( PF_MIN_MEM_GB * 1024 - PF_VM_MEM_GRACE_MIB )) ]]; then
     # The REAL VM size is now known and it's below the floor — the client OOMs. Stop.
@@ -755,7 +779,9 @@ _pf_hw_summary_line() {
   # flip-flop bug in miniature. Fall back to the runtime only if the host is
   # unreadable, so the field is still populated rather than dropped.
   mem_kb="$(_pf_host_mem_kb)"; [[ -z "$mem_kb" ]] && mem_kb="$(_pf_runtime_mem_kb)"
-  if [[ -n "$mem_kb" ]]; then mem_gb=$(( mem_kb / 1024 / 1024 )); parts+=("${mem_gb} GB memory"); fi
+  # Through the shared converter so the collapsed summary can never disagree with
+  # the memory line above it (Bugbot #445 r6).
+  if [[ -n "$mem_kb" ]]; then mem_gb="$(_pf_display_gb_from_mib "$(( mem_kb / 1024 ))")"; parts+=("${mem_gb} GB memory"); fi
   disk_target="$(_pf_docker_root)"
   if [[ ! -d "$disk_target" ]]; then disk_target="/"; fi
   if [[ "$OS" != "Linux" ]]; then disk_target="$HOME"; fi   # Desktop VM disk is opaque; report host

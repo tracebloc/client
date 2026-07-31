@@ -980,3 +980,31 @@ setup() {
   grep -qE '_pf_host_too_small_for_floor "\$\(_pf_host_mem_gb\)"' "$BATS_TEST_DIRNAME/../lib/preflight.sh"
   ! grep -qE '_pf_host_too_small_for_floor "\$gb"' "$BATS_TEST_DIRNAME/../lib/preflight.sh"
 }
+
+@test "memory GB is rendered through ONE converter, so no two lines can disagree (Bugbot #445 r6)" {
+  # Six review rounds each found another pair of render/grade sites disagreeing.
+  # This pins the structural fix rather than the symptom: every configured-size
+  # display goes through _pf_display_gb_from_mib. MemAvailable and disk stay raw
+  # (live measurements / not memory), and _pf_host_mem_gb stays raw because it
+  # reports physical RAM and is what the too-small predicate grades.
+  f="$BATS_TEST_DIRNAME/../lib/preflight.sh"
+  grep -qE '^_pf_display_gb_from_mib\(\)' "$f"
+  for v in 'rt_gb' 'mem_gb'; do
+    ! grep -qE "^\s*.*${v}=\\\$\(\( .*1024 / 1024" "$f"
+  done
+  # _pf_hw_summary_line must not compute its own memory GB
+  ! grep -qE 'mem_gb=\$\(\( mem_kb / 1024 / 1024 \)\)' "$f"
+}
+
+@test "_pf_hw_summary_line agrees with the memory line on the same host (Bugbot #445 r6)" {
+  OS=Linux
+  _pf_host_mem_kb() { echo $(( (PF_MIN_MEM_GB * 1024 - 124) * 1024 )); }   # just under a round GB
+  _pf_runtime_mem_kb() { echo ""; }
+  _pf_avail_mem_kb() { echo $(( 8 * 1024 * 1024 )); }
+  run _pf_memory
+  local mem_line="$output"
+  run _pf_hw_summary_line
+  # both must name the same figure
+  [[ "$mem_line" == *"${PF_MIN_MEM_GB} GB"* ]]
+  [[ "$output" == *"${PF_MIN_MEM_GB} GB memory"* ]]
+}
