@@ -102,8 +102,11 @@ _k3d_cluster_running() {
 # can't be determined -> the caller then never caches, so it always re-verifies.
 _gpu_stack_signature() {
   local ctk drv
-  ctk="$(nvidia-ctk --version 2>/dev/null | head -1 || true)"
-  drv="$(nvidia-smi --query-gpu=driver_version --format=csv,noheader 2>/dev/null | head -1 || true)"
+  # BOUNDED (#431 Bugbot): a half-ready driver or a stuck device node can make these
+  # hang; this runs at the smoke-test skip gate on every re-run. On timeout the value
+  # is empty, which already means "don't cache".
+  ctk="$(_bounded "${TB_PROBE_TIMEOUT:-5}" nvidia-ctk --version 2>/dev/null | head -1 || true)"
+  drv="$(_bounded "${TB_PROBE_TIMEOUT:-5}" nvidia-smi --query-gpu=driver_version --format=csv,noheader 2>/dev/null | head -1 || true)"
   [[ -n "${ctk}${drv}" ]] && printf '%s|%s' "$ctk" "$drv"
   # Always succeed: the installer runs under `set -e`, and the caller assigns this via
   # `$(...)` — an empty signature means "don't cache", not "abort the install" (#431 Bugbot).

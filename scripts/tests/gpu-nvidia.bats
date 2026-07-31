@@ -141,6 +141,9 @@ _gpu_mocks() {
   # the post-restart `k3d cluster start` must carry its own deadline (k3d waits
   # forever by default) — #431 Bugbot r2.
   grep -qE 'k3d cluster start "\$CLUSTER_NAME" --wait --timeout' "$f" || return 1
+  # the signature probes (nvidia-ctk/nvidia-smi) run at the skip gate too — bounded — #431 Bugbot r5.
+  grep -q '_bounded .* nvidia-ctk --version' "$f" || return 1
+  grep -q '_bounded .* nvidia-smi --query' "$f" || return 1
 }
 
 @test "install_nvidia_container_toolkit: a failed cluster restart is surfaced, not swallowed (#431 Bugbot)" {
