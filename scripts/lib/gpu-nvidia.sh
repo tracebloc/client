@@ -101,12 +101,22 @@ _k3d_cluster_running() {
 # Signature of the installed GPU stack (toolkit + driver versions). Empty when it
 # can't be determined -> the caller then never caches, so it always re-verifies.
 _gpu_stack_signature() {
-  local ctk drv
+  local ctk drv ctk_out drv_out
   # BOUNDED (#431 Bugbot): a half-ready driver or a stuck device node can make these
   # hang; this runs at the smoke-test skip gate on every re-run. On timeout the value
   # is empty, which already means "don't cache".
-  ctk="$(_bounded "${TB_PROBE_TIMEOUT:-5}" nvidia-ctk --version 2>/dev/null | head -1 || true)"
-  drv="$(_bounded "${TB_PROBE_TIMEOUT:-5}" nvidia-smi --query-gpu=driver_version --format=csv,noheader 2>/dev/null | head -1 || true)"
+  #
+  # Capture whole, then take the first line with `%%$'\n'*` — NOT `… | head -1`.
+  # Under `set -o pipefail` head closes the pipe after line 1, so a chatty/wedged
+  # probe whose output passes the ~64KB pipe buffer makes the producer take SIGPIPE
+  # and the pipeline exit 141. That used to be papered over by a trailing `|| true`,
+  # which is a fail-open: it swallowed the 141 AND every real failure code alike.
+  # `|| …_out=""` keeps the documented contract (absent tool / timeout ⇒ empty ⇒
+  # don't cache) explicit and set -e safe, with no pipe left to break.
+  ctk_out="$(_bounded "${TB_PROBE_TIMEOUT:-5}" nvidia-ctk --version 2>/dev/null)" || ctk_out=""
+  drv_out="$(_bounded "${TB_PROBE_TIMEOUT:-5}" nvidia-smi --query-gpu=driver_version --format=csv,noheader 2>/dev/null)" || drv_out=""
+  ctk="${ctk_out%%$'\n'*}"
+  drv="${drv_out%%$'\n'*}"
   [[ -n "${ctk}${drv}" ]] && printf '%s|%s' "$ctk" "$drv"
   # Always succeed: the installer runs under `set -e`, and the caller assigns this via
   # `$(...)` — an empty signature means "don't cache", not "abort the install" (#431 Bugbot).
