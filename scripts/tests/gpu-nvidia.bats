@@ -130,3 +130,39 @@ _gpu_mocks() {
   grep -q 'docker run' "$MOCK_CALLS" || return 1                              # ran the smoke test
   [ -f "${HOST_DATA_DIR}/.gpu-smoke-ok" ] || return 1                          # cached its result
 }
+
+# ── #431 Bugbot round: bounded probes, surfaced restart failure, forced re-verify ──
+@test "both probes are bounded (no unbounded docker/k3d call at the skip gate) (#431 Bugbot)" {
+  f="$BATS_TEST_DIRNAME/../lib/gpu-nvidia.sh"
+  # _docker_default_runtime_is_nvidia + _k3d_cluster_running must go through _bounded.
+  run bash -c "awk '/^_docker_default_runtime_is_nvidia\(\)/{d=1} d&&/_bounded .* docker info/{print \"docker-ok\"; d=0}' '$f'"
+  [ "$output" = "docker-ok" ] || return 1
+  grep -q '_bounded .* k3d cluster list' "$f" || return 1
+}
+
+@test "install_nvidia_container_toolkit: a failed cluster restart is surfaced, not swallowed (#431 Bugbot)" {
+  _gpu_mocks
+  K3D_PRESENT=0
+  k3d() {
+    record "k3d $*"
+    case "$*" in
+      *"cluster list"*)  printf '%s\n' "tracebloc 1/1 0/0 true" ;;
+      *"cluster start"*) echo "k3d: docker daemon not responding" >&2; return 1 ;;
+    esac
+  }
+  docker() { record "docker $*"; case "$*" in *info*) echo runc;; esac; }
+  run install_nvidia_container_toolkit
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  [[ "$output" == *"Couldn't restart"* ]] || return 1
+  [[ "$output" == *"Start it manually"* ]] || return 1
+}
+
+@test "install_nvidia_container_toolkit: a reconfigure re-verifies even with a matching marker (#431 Bugbot)" {
+  _gpu_mocks
+  K3D_PRESENT=1                                                # no live cluster (has k3d -> false)
+  docker() { record "docker $*"; case "$*" in *info*) echo runc;; esac; }   # NOT nvidia -> reconfigure
+  printf 'toolkit 1.15.0|550.00' > "${HOST_DATA_DIR}/.gpu-smoke-ok"          # marker matches the signature
+  run install_nvidia_container_toolkit
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  grep -q 'docker run' "$MOCK_CALLS" || return 1              # cache bypassed: smoke test STILL ran
+}
