@@ -959,3 +959,24 @@ setup() {
   [[ "$output" != *"recommended ≥ ${warn_eff} GB"* ]]
   [[ "$output" == *"budget: ${warn_eff} GB"* ]]
 }
+
+@test "_pf_memory: a floor-sized VM is never told it is below the floor it meets (Bugbot #445 r5)" {
+  # The shown GB is grace-adjusted; the gate must use the SAME tolerance or a
+  # 5 GB VM reporting ~4900 MiB prints "Memory: 5 GB — below the 5 GB the client
+  # needs". High severity because on Linux that path hard-fails.
+  OS=Linux
+  _pf_host_mem_kb() { echo $(( (PF_MIN_MEM_GB * 1024 - 124) * 1024 )); }
+  _pf_runtime_mem_kb() { echo ""; }
+  _pf_avail_mem_kb() { echo $(( 8 * 1024 * 1024 )); }   # plenty free: isolate the total line
+  run _pf_memory
+  [[ "$output" == *"${PF_MIN_MEM_GB} GB (machine)"* ]]
+  [[ "$output" != *"below the ${PF_MIN_MEM_GB} GB"* ]]
+}
+
+@test "_pf_memory + _pf_runtime_mem_status feed the predicate the same host figure (Bugbot #445 r5)" {
+  # A shared predicate only helps if both call sites give it the same input:
+  # _pf_memory passed a grace-adjusted VM-or-host figure while the status path
+  # passed _pf_host_mem_gb, so the two could still disagree.
+  grep -qE '_pf_host_too_small_for_floor "\$\(_pf_host_mem_gb\)"' "$BATS_TEST_DIRNAME/../lib/preflight.sh"
+  ! grep -qE '_pf_host_too_small_for_floor "\$gb"' "$BATS_TEST_DIRNAME/../lib/preflight.sh"
+}

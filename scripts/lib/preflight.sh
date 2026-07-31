@@ -395,8 +395,15 @@ _pf_memory() {
   gb=$(( (mib + PF_VM_MEM_GRACE_MIB) / 1024 ))
   # Compare in MiB with a 64 MiB grace so a VM that reports e.g. 4 GiB a hair under
   # 4*1024^3 (Colima / Docker Desktop) doesn't floor to 3 GB and false-trip the gate.
-  floor_mib=$(( PF_MIN_MEM_GB * 1024 - 64 ))
-  warn_mib=$(( PF_WARN_MEM_GB * 1024 ))
+  # Tolerance must match the grace already applied to the SHOWN figure above, or
+  # the two disagree: a 5 GB VM whose MemTotal sits a few hundred MiB under the
+  # configured size displayed as "5 GB" while a 64 MiB tolerance graded it
+  # sub-floor, producing "Memory: 5 GB — below the 5 GB the client needs"
+  # (Bugbot #445 r5, High). PF_VM_MEM_GRACE_MIB is the same tolerance
+  # _pf_runtime_mem_status uses for its own floor and warn tests, so all three
+  # now agree on where the boundaries are.
+  floor_mib=$(( PF_MIN_MEM_GB * 1024 - PF_VM_MEM_GRACE_MIB ))
+  warn_mib=$(( PF_WARN_MEM_GB * 1024 - PF_VM_MEM_GRACE_MIB ))
   # SHOWN figures clamped to physical RAM so no hint asks for more than the machine
   # has (#428): "raise to 16 GB" on a 16 GB Mac is impossible.
   rec_gb="$(_pf_clamp_mem_gb "$PF_REC_MEM_GB")"
@@ -414,7 +421,8 @@ _pf_memory() {
       # VM (#428), including the honest "use a larger machine" case.
       warn "Memory: ${gb} GB (${label}) — below the ${PF_MIN_MEM_GB} GB the client needs; it will OOM."
     fi
-  elif [[ "$OS" != "Linux" && "$label" == "machine" ]] && _pf_host_too_small_for_floor "$gb"; then
+  elif [[ "$OS" != "Linux" && "$label" == "machine" ]] \
+     && _pf_host_too_small_for_floor "$(_pf_host_mem_gb)"; then
     # Above the bare floor, but not by enough to give Docker the floor AND leave
     # the OS its reserve. Saying "enough to run" here contradicted the budget
     # line's "use a larger machine" in the same preflight (Bugbot #445 r3). On
