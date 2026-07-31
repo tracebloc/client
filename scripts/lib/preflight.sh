@@ -27,6 +27,12 @@ PF_MIN_MEM_GB="${PF_MIN_MEM_GB:-5}"        # hard-fail below this (Linux; warn o
 PF_WARN_MEM_GB="${PF_WARN_MEM_GB:-8}"      # warn below this (comfortable to run)
 PF_REC_MEM_GB="${PF_REC_MEM_GB:-16}"       # recommended to train locally (copy only, not a gate)
 PF_OS_RESERVE_GB="${PF_OS_RESERVE_GB:-2}"  # RAM to leave the OS — recommendations clamp at physical − this (#428)
+# A guest VM's reported MemTotal runs a few hundred MiB below its CONFIGURED size
+# (kernel/reserved). The runtime recheck sees the GUEST figure, so it tolerates this
+# much below the floor — otherwise a Docker Desktop VM set to exactly the documented
+# floor would hard-fail on the guest shortfall, making the effective floor a GB higher
+# than we tell people (#513 reviewer). 512 MiB comfortably covers the observed gap.
+PF_VM_MEM_GRACE_MIB="${PF_VM_MEM_GRACE_MIB:-512}"
 PF_MIN_CPU="${PF_MIN_CPU:-2}"              # warn below this
 PF_REC_CPU="${PF_REC_CPU:-4}"              # recommended (warn) below this
 
@@ -332,8 +338,11 @@ _pf_recheck_runtime_mem() {
   mib=$(( kb / 1024 ))
   rec_gb="$(_pf_clamp_mem_gb "$PF_REC_MEM_GB")"
   warn_gb="$(_pf_clamp_mem_gb "$PF_WARN_MEM_GB")"
-  if [[ "$mib" -lt $(( PF_MIN_MEM_GB * 1024 - 64 )) ]]; then
+  if [[ "$mib" -lt $(( PF_MIN_MEM_GB * 1024 - PF_VM_MEM_GRACE_MIB )) ]]; then
     # The REAL VM size is now known and it's below the floor — the client OOMs. Stop.
+    # Tolerance is PF_VM_MEM_GRACE_MIB (not 64): the guest MemTotal is a few hundred MiB
+    # under the configured size, so a VM set to exactly the documented floor still
+    # passes here rather than hard-failing on the guest shortfall (#513 reviewer).
     # If the HOST is too small to ever give the VM the floor (physical − reserve <
     # floor), no resize helps — say so plainly instead of a remedy that repeats an
     # unachievable size (#428 Bugbot; mirrors the PowerShell host-too-small branch).

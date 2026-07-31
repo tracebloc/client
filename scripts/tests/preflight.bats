@@ -336,6 +336,19 @@ setup() {
   [ "$status" -eq 0 ]
   [[ "$output" == *"Docker is running with 6 GB"* ]]
 }
+@test "_pf_recheck_runtime_mem: VM at the documented floor (guest a bit under) -> warn, NOT hard fail (#513 reviewer)" {
+  source "${BATS_TEST_DIRNAME}/../lib/preflight.sh"
+  OS=Darwin
+  # A VM configured to exactly the 5 GB floor reports ~4.8 GB guest — within
+  # PF_VM_MEM_GRACE_MIB of the floor, so it must warn, not hard-fail on the shortfall.
+  _pf_runtime_mem_kb() { echo $(( 4900 * 1024 )); }   # ~4.79 GiB guest
+  _pf_host_mem_gb() { echo 16; }                        # ample host (not the host-too-small path)
+  error() { printf 'ERR: %s\n' "$*"; exit 1; }
+  run _pf_recheck_runtime_mem
+  [ "$status" -eq 0 ]                                   # grace covers guest overhead -> no hard fail
+  [[ "$output" == *"Docker is running with"* ]]         # warns instead
+  [[ "$output" != *"below the"* ]]                      # not the hard-fail message
+}
 @test "_pf_recheck_runtime_mem: host too small -> 'use a larger machine', not a resize loop (#428 Bugbot)" {
   source "${BATS_TEST_DIRNAME}/../lib/preflight.sh"
   OS=Darwin
