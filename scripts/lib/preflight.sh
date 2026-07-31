@@ -505,8 +505,17 @@ _pf_recheck_runtime_mem() {
     # floor), no resize helps — say so plainly instead of a remedy that repeats an
     # unachievable size (#428 Bugbot; mirrors the PowerShell host-too-small branch).
     local phys_gb; phys_gb="$(_pf_host_mem_gb)"
-    if [[ "$OS" != "Linux" && "$phys_gb" =~ ^[0-9]+$ && "$phys_gb" -gt 0 && $(( phys_gb - PF_OS_RESERVE_GB )) -lt PF_MIN_MEM_GB ]]; then
-      error "This Mac has ${phys_gb} GB RAM — too little for tracebloc: the client needs a ${PF_MIN_MEM_GB} GB Docker VM and macOS needs ~${PF_OS_RESERVE_GB} GB, so about $(( PF_MIN_MEM_GB + PF_OS_RESERVE_GB )) GB physical is the practical minimum. Use a larger machine."
+    # Through the SHARED predicate, and on every OS. Two divergences lived here
+    # (Bugbot #445 r7, High): the arithmetic was inlined rather than calling
+    # _pf_host_too_small_for_floor, and the branch was gated OS != Linux while
+    # _pf_runtime_mem_status applies it everywhere. On a warm Linux install with a
+    # sub-floor cgroup/VM budget, preflight therefore said "use a larger machine"
+    # and this hard-fail then advised raising Docker to a size that machine cannot
+    # give — the same remedy contradiction, one OS gate apart.
+    if _pf_host_too_small_for_floor "$phys_gb"; then
+      local host_noun="machine"
+      [[ "$OS" == "Darwin" ]] && host_noun="Mac"
+      error "This ${host_noun} has ${phys_gb} GB RAM — too little for tracebloc: the client needs a ${PF_MIN_MEM_GB} GB Docker budget and the OS needs ~${PF_OS_RESERVE_GB} GB, so about $(( PF_MIN_MEM_GB + PF_OS_RESERVE_GB )) GB physical is the practical minimum. Use a larger machine."
     elif [[ "$OS" == "Linux" ]]; then
       error "Docker has only ${gb} GB — below the ${PF_MIN_MEM_GB} GB the tracebloc client needs; it will OOM. Free memory (or raise the VM) to ≥ ${warn_gb} GB, then re-run."
     else

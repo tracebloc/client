@@ -1008,3 +1008,24 @@ setup() {
   [[ "$mem_line" == *"${PF_MIN_MEM_GB} GB"* ]]
   [[ "$output" == *"${PF_MIN_MEM_GB} GB memory"* ]]
 }
+
+@test "_pf_recheck_runtime_mem: host-too-small applies on Linux too, matching preflight (Bugbot #445 r7)" {
+  # The status line applied the predicate on every OS while the hard-fail gated it
+  # OS != Linux, so a warm Linux install with a sub-floor budget was told "use a
+  # larger machine" and then advised to raise Docker to a size the machine cannot
+  # give.
+  OS=Linux
+  _pf_host_mem_gb() { echo $(( PF_MIN_MEM_GB + PF_OS_RESERVE_GB - 1 )); }   # too small
+  _pf_runtime_mem_kb() { echo $(( 3 * 1024 * 1024 )); }                     # sub-floor budget
+  PF_RUNTIME_MEM_WARNED=1
+  run _pf_recheck_runtime_mem
+  [[ "$output" == *"larger machine"* ]]
+  [[ "$output" != *"Free memory (or raise the VM) to"* ]]   # the impossible remedy
+}
+
+@test "_pf_recheck_runtime_mem uses the shared too-small predicate, not inlined arithmetic (Bugbot #445 r7)" {
+  f="$BATS_TEST_DIRNAME/../lib/preflight.sh"
+  # the reserve arithmetic must exist in exactly one place: the predicate itself
+  [ "$(grep -cE 'PF_OS_RESERVE_GB \)\) -lt PF_MIN_MEM_GB|- PF_OS_RESERVE_GB < PF_MIN_MEM_GB' "$f")" -le 1 ]
+  grep -qE '_pf_host_too_small_for_floor "\$phys_gb"' "$f"
+}
