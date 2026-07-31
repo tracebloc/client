@@ -50,6 +50,29 @@ _has_gui_session() {
   [[ -n "$console_user" && "$console_user" != "root" ]]
 }
 
+# Is the current user a macOS administrator (or root)? Admin group members can sudo
+# (default /etc/sudoers: `%admin ALL=(ALL) ALL`); a managed/standard account can't.
+# Overridable for tests via TB_MACOS_ADMIN_GROUPS.
+_macos_user_is_admin() {
+  [ "$(id -u)" -eq 0 ] && return 0
+  local groups="${TB_MACOS_ADMIN_GROUPS:-$(id -Gn 2>/dev/null)}"
+  printf '%s\n' $groups | grep -qx admin
+}
+
+# Fail FAST on a no-admin Mac with a named, IT-facing remedy — the macOS analog of
+# Linux prepare-host (#430). Without this, a managed/standard account fell through to
+# preflight_sudo's generic "sudo authentication failed" after a wasted prompt. Admins
+# (and root) pass through untouched to the normal sudo priming.
+_macos_require_admin() {
+  _macos_user_is_admin && return 0
+  warn "This Mac account isn't an administrator, but installing Docker + the tracebloc runtime needs admin rights once."
+  hint "Ask your IT/admin to do ONE of these on this Mac, then re-run the installer as yourself:"
+  hint "  • install Docker Desktop (https://desktop.docker.com) and grant this account access, or"
+  hint "  • grant this account administrator rights (System Settings → Users & Groups), or"
+  hint "  • run this installer themselves once as an administrator (the macOS prepare-host step)."
+  error "Administrator rights required on this Mac — see the one-time IT step above, then re-run."
+}
+
 _install_docker_colima() {
   log "Headless environment detected (no GUI session) — using Colima as Docker runtime."
 
@@ -216,6 +239,7 @@ install_docker_desktop() {
       echo -e "  ${BOLD}Docker Desktop is starting for the first time.${RESET}"
       echo -e "  Please do the following in the Docker window that just opened:"
       echo ""
+      echo -e "    ${CYAN}Approve the privileged-helper prompt${RESET} — macOS asks for your admin password once"
       echo -e "    ${CYAN}Accept the license agreement${RESET} when prompted"
       echo ""
       echo -e "  ${BOLD}The installer will continue automatically once Docker is ready.${RESET}"
@@ -284,9 +308,61 @@ install_macos_cli_tools() {
   umask "$_saved_umask"
 }
 
+# Configure login autostart so a rebooted Mac brings the container runtime — and thus
+# tracebloc (the k3d nodes carry --restart unless-stopped) — back with ZERO human
+# action (#430). A per-user LaunchAgent (no admin needed) runs at each login:
+# `open -a Docker` on a GUI Mac, `colima start` on a headless one. Best-effort — never
+# fail the install over autostart. Sets TB_MACOS_AUTOSTART=1 so the summary can honestly
+# promise auto-restart. Dir overridable (TB_LAUNCHAGENTS_DIR) + launchctl mockable for tests.
+_install_macos_autostart() {
+  local dir="${TB_LAUNCHAGENTS_DIR:-$HOME/Library/LaunchAgents}"
+  local label="io.tracebloc.runtime"
+  local plist="$dir/${label}.plist"
+  local -a prog
+  if _has_gui_session; then
+    prog=( /usr/bin/open -a Docker )
+  else
+    local _colima; _colima="$(command -v colima 2>/dev/null || echo /usr/local/bin/colima)"
+    prog=( "$_colima" start )
+  fi
+  mkdir -p "$dir" 2>/dev/null || {
+    warn "Couldn't create ${dir}; skipping login autostart — start the runtime manually after a reboot."
+    return 1
+  }
+  {
+    printf '%s\n' '<?xml version="1.0" encoding="UTF-8"?>'
+    printf '%s\n' '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">'
+    printf '%s\n' '<plist version="1.0">'
+    printf '%s\n' '<dict>'
+    printf '  <key>Label</key><string>%s</string>\n' "$label"
+    printf '%s\n' '  <key>ProgramArguments</key>'
+    printf '%s\n' '  <array>'
+    local _a
+    for _a in "${prog[@]}"; do printf '    <string>%s</string>\n' "$_a"; done
+    printf '%s\n' '  </array>'
+    printf '%s\n' '  <key>RunAtLoad</key><true/>'
+    printf '  <key>StandardOutPath</key><string>%s</string>\n' '/tmp/tracebloc-autostart.log'
+    printf '  <key>StandardErrorPath</key><string>%s</string>\n' '/tmp/tracebloc-autostart.log'
+    printf '%s\n' '</dict>'
+    printf '%s\n' '</plist>'
+  } > "$plist" 2>/dev/null || {
+    warn "Couldn't write the login autostart agent at ${plist}; start the runtime manually after a reboot."
+    return 1
+  }
+  # Register for this session (best-effort; RunAtLoad handles every future login).
+  # bootstrap is the modern form; fall back to load -w on older macOS.
+  launchctl bootstrap "gui/$(id -u)" "$plist" 2>/dev/null \
+    || launchctl load -w "$plist" 2>/dev/null || true
+  TB_MACOS_AUTOSTART=1
+  success "Login autostart configured — tracebloc returns automatically after a reboot."
+  return 0
+}
+
 install_macos() {
+  _macos_require_admin        # #430: no-admin Macs get a named IT remedy, not a generic sudo error
   preflight_sudo
   install_homebrew
   install_docker_desktop
   install_macos_cli_tools
+  _install_macos_autostart    # #430: login autostart so a rebooted Mac returns with zero action
 }

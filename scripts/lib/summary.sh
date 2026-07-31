@@ -99,8 +99,14 @@ _diagnose_not_ready() {
 _reboot_note() {
   # Single dim footer line — the LAST line of the summary.
   if [[ "$OS" != "Linux" ]]; then
-    # macOS/Windows: Docker Desktop owns boot autostart and must be launched.
-    echo -e "  ${DIM}After a reboot, open Docker Desktop to bring tracebloc back.${RESET}"
+    if [[ "${TB_MACOS_AUTOSTART:-0}" == "1" ]]; then
+      # macOS login autostart configured (_install_macos_autostart, #430): the runtime
+      # starts at login and the k3d --restart policy brings the cluster back → zero action.
+      echo -e "  ${DIM}After a reboot, tracebloc restarts automatically (login item configured).${RESET}"
+    else
+      # macOS/Windows fallback: Docker Desktop owns boot autostart and must be launched.
+      echo -e "  ${DIM}After a reboot, open Docker Desktop to bring tracebloc back.${RESET}"
+    fi
   elif [[ "${TB_DOCKER_AUTOSTART:-0}" == "1" ]]; then
     # docker.service is enabled on boot (ensure_cluster_autostart) and the k3d
     # nodes carry --restart unless-stopped → the cluster returns on its own.
