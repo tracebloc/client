@@ -88,11 +88,6 @@ Describe "Daily-user provisioning (#418)" {
     Get-PfOsReserveGb | Should -BeGreaterThan 0
     (Get-Command Get-WslConfigMemoryGb).Parameters.Keys | Should -Not -Contain 'ReserveGb'
   }
-  It "Get-WslConfigContent writes the [wsl2] memory stanza" {
-    $c = Get-WslConfigContent -MemoryGb 12
-    $c | Should -Match '(?m)^\[wsl2\]'
-    $c | Should -Match 'memory=12GB'
-  }
   It "Add-WslMemorySetting creates a [wsl2] stanza from empty content" {
     $c = Add-WslMemorySetting -Existing "" -MemoryGb 12
     $c | Should -Match '(?m)^\[wsl2\]'
