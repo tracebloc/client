@@ -69,9 +69,14 @@ _install_docker_colima() {
     return
   fi
 
-  # Colima VM sizing must clear the preflight floor — the client needs ~5 GB just
-  # to run (control plane + k3s + OS), 16 GB to train locally. Overridable per box.
-  spin_cmd "Starting Docker runtime…" colima start --cpu "${COLIMA_CPU:-4}" --memory "${COLIMA_MEMORY:-6}" --disk "${COLIMA_DISK:-60}"
+  # Colima VM memory is DERIVED from physical RAM (#428): _macos_vm_mem_gb gives
+  # min(half of physical, the clamped recommendation), never below the preflight
+  # floor (~5 GB: control plane + k3s + OS). The old hard-coded 6 was too big for a
+  # ≤8 GB Mac to spare and never scaled up. COLIMA_MEMORY overrides per box; the
+  # helper lives in preflight.sh, sourced before this in the bootstrap.
+  local _colima_mem="${COLIMA_MEMORY:-$(_macos_vm_mem_gb)}"
+  log "Colima memory budget: ${_colima_mem} GB"
+  spin_cmd "Starting Docker runtime…" colima start --cpu "${COLIMA_CPU:-4}" --memory "$_colima_mem" --disk "${COLIMA_DISK:-60}"
 
   if ! docker info &>/dev/null 2>&1; then
     error "Docker did not start. Try running 'colima status' to investigate."

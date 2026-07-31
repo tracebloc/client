@@ -320,11 +320,21 @@ setup() {
 }
 
 # ── _pf_recheck_runtime_mem (post-Docker, warn-only) ─────────────────────────
-@test "_pf_recheck_runtime_mem: small Docker VM -> warn, never hard fail" {
+@test "_pf_recheck_runtime_mem: sub-floor Docker VM -> HARD FAIL with the fix (#428)" {
   source "${BATS_TEST_DIRNAME}/../lib/preflight.sh"
-  OS=Linux; _pf_runtime_mem_kb() { echo $((4 * 1024 * 1024)); }   # 4 GB Docker VM
-  run _pf_recheck_runtime_mem; [[ "$output" == *"Docker is running with 4 GB"* ]]
-  PF_HARD_FAIL=0; _pf_recheck_runtime_mem >/dev/null 2>&1; [ "$PF_HARD_FAIL" -eq 0 ]
+  OS=Darwin; _pf_runtime_mem_kb() { echo $((4 * 1024 * 1024)); }   # 4 GB VM < 5 GB floor
+  error() { printf 'ERR: %s\n' "$*"; exit 1; }                     # real error() exits
+  run _pf_recheck_runtime_mem
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"below the ${PF_MIN_MEM_GB:-5} GB"* ]]
+}
+@test "_pf_recheck_runtime_mem: between floor and warn -> warn, no hard fail (#428)" {
+  source "${BATS_TEST_DIRNAME}/../lib/preflight.sh"
+  OS=Linux; _pf_runtime_mem_kb() { echo $((6 * 1024 * 1024)); }   # 6 GB: >=5 floor, <8 warn
+  error() { printf 'ERR: %s\n' "$*"; exit 1; }
+  run _pf_recheck_runtime_mem
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Docker is running with 6 GB"* ]]
 }
 
 @test "_pf_recheck_runtime_mem: daemon not reporting -> silent no-op" {
@@ -582,4 +592,32 @@ setup() {
   [ -n "$guard_line" ]
   [ -n "$setup_line" ]
   [ "$guard_line" -lt "$setup_line" ]
+}
+
+# ── #428: memory recommendation clamp + macOS VM sizing ─────────────────────
+@test "_pf_clamp_mem_gb: clamps a recommendation to physical − reserve (#428)" {
+  PF_OS_RESERVE_GB=2
+  [ "$(_pf_clamp_mem_gb 16 16)" -eq 14 ]   # 16 GB Mac: can't recommend 16 -> 14
+  [ "$(_pf_clamp_mem_gb 16 8)"  -eq 6  ]   # 8 GB Mac  -> 6
+  [ "$(_pf_clamp_mem_gb 8  32)" -eq 8  ]   # plenty of headroom -> desired unchanged
+}
+@test "_pf_clamp_mem_gb: unknown physical -> desired unchanged (can't clamp) (#428)" {
+  [ "$(_pf_clamp_mem_gb 16 0)" -eq 16 ]
+  [ "$(_pf_clamp_mem_gb 16 '')" -eq 16 ]
+}
+@test "_macos_vm_mem_gb: derives min(half physical, clamped rec), floored (#428)" {
+  PF_MIN_MEM_GB=5; PF_WARN_MEM_GB=8; PF_REC_MEM_GB=16; PF_OS_RESERVE_GB=2
+  [ "$(_macos_vm_mem_gb 8)"  -eq 5  ]   # half=4 -> floored to 5 (workable on an 8 GB Mac)
+  [ "$(_macos_vm_mem_gb 16)" -eq 8  ]   # half=8, rec clamped 14 -> 8
+  [ "$(_macos_vm_mem_gb 64)" -eq 16 ]   # half=32, rec 16 -> 16 (capped at rec)
+}
+@test "_macos_vm_mem_gb: unknown physical -> COLIMA_MEMORY default (#428)" {
+  COLIMA_MEMORY=6
+  [ "$(_macos_vm_mem_gb 0)" -eq 6 ]
+}
+
+@test "setup-macos.sh colima memory is DERIVED via _macos_vm_mem_gb, not hard-coded 6 (#428)" {
+  f="$BATS_TEST_DIRNAME/../lib/setup-macos.sh"
+  grep -qE 'COLIMA_MEMORY:-\$\(_macos_vm_mem_gb\)' "$f"
+  ! grep -qE '\-\-memory "\$\{COLIMA_MEMORY:-6\}"' "$f"   # the old hard-coded 6 is gone
 }
