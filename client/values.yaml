@@ -781,6 +781,14 @@ perIngestionTables: false
 # generated, upgrade-stable Secret value.
 perExperimentDbCreds: false
 
+# Optional operator pin for the tb_credmgr account password (mirrors
+# podTokenSigningSecret's 3-tier resolution). Leave "" to generate-and-persist
+# on first install. Set it for DR, to match a pre-created MySQL account, or to
+# force a rotation — and to keep the password stable across a
+# perExperimentDbCreds off→on toggle. Must be alphanumeric ([A-Za-z0-9]+);
+# jobs-manager rejects other characters.
+credmgrPassword: ""
+
 # ============================================================
 # Ingestion endpoint authorization (client-runtime#21)
 # ============================================================
