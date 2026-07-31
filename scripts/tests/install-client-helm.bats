@@ -908,6 +908,6 @@ setup() {
   local f="$BATS_TEST_DIRNAME/../lib/install-client-helm.sh"
   grep -q 'outcome="\$(_progress_end_message' "$f"
   grep -qE '^\s*failed\)' "$f"
-  grep -q 'Some images failed to pull' "$f"
+  grep -q 'look stuck pulling' "$f"
   [ "$(grep -c 'Services are still downloading' "$f")" -eq 1 ]
 }

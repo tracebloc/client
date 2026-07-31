@@ -482,7 +482,9 @@ _pull_failure_detail() {
   # so an x509 on a pull-failure line is already captured here, while an UNRELATED x509
   # event elsewhere in the ns must not, via tail, displace the real reason (#425 Bugbot).
   pull_fail="$(printf '%s\n' "$events" | grep -iE 'failed to pull|ErrImagePull' | tail -n 3 || true)"
-  printf '%s\n' "$bad"
+  # Cap the failing-pod lines (like the PowerShell path's Select-Object -First 3) so a
+  # cluster with many stuck pods doesn't print a wall of indented lines (reviewer).
+  printf '%s\n' "$bad" | head -n 3
   [[ -n "$pull_fail" ]] && printf '%s\n' "$pull_fail"
   return 0
 }
@@ -555,7 +557,10 @@ _download_services_progress() {
     done)
       success "Downloaded — ${total} services" ;;
     failed)
-      warn "Some images failed to pull — this won't finish on its own:"
+      # Soften the wording (reviewer): ImagePullBackOff can also be a transient blip /
+      # registry 429 that kubelet keeps retrying, so wait_for_client_ready may still
+      # reach "connected" — don't state an absolute that a later ✔ could contradict.
+      warn "Some images look stuck pulling — this usually needs action, not just more time:"
       printf '%s\n' "$fail_detail" | sed 's/^/      /'
       info "Likely a blocked registry, an untrusted TLS-inspection CA, or auth — see the diagnosis below." ;;
     downloading)
