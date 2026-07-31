@@ -483,6 +483,18 @@ _pf_is_network_fstype() {
   esac
 }
 
+# The FOLLOWABLE remedy for a network-filesystem HOST_DATA_DIR (#479). validate_config
+# requires the data dir UNDER $HOME (security, Bugbot #384), so "set HOST_DATA_DIR to
+# ~/.tracebloc" is un-followable on a network HOME — that path is still NFS. Name the
+# options that actually work. Shared by _pf_storage_type and early_data_dir_guard so
+# the two remedies can never drift (early_data_dir_guard already had the good text).
+_pf_network_fs_remedy() {
+  hint "HOST_DATA_DIR must be a LOCAL disk under your \$HOME (paths outside \$HOME are rejected), so on a network home either:"
+  hint "  1. install as a user whose home is on a local disk (ask your admin), or"
+  hint "  2. set TRACEBLOC_ALLOW_NETWORK_FS=1 to proceed anyway - NOT recommended: the database can corrupt."
+  hint "(Datasets may stay on network storage via HOST_DATASET_DIR - only the data dir must be local.)"
+}
+
 # Pre-log guard (#432): main() creates HOST_DATA_DIR and tees the session log
 # onto it (setup_log_file) BEFORE run_preflight fires — on an NFS home under
 # sudo + root_squash that unguarded mkdir fails with a bare error (or the log
@@ -503,13 +515,7 @@ early_data_dir_guard() {
   _pf_is_network_fstype "$fstype" || return 0
   warn "Storage: ${target} is on a network filesystem (${fstype})."
   hint "The client database (MySQL/InnoDB) corrupts or crash-loops on network storage, and NFS root_squash blocks data-dir setup."
-  # No "HOST_DATA_DIR=/local/path" advice here: validate_config requires the
-  # data dir UNDER \$HOME (security, Bugbot #384), so on a network home that
-  # advice is un-followable (Bugbot #441). Name the two paths that work today.
-  hint "HOST_DATA_DIR must be a LOCAL disk under your \$HOME (paths outside \$HOME are rejected), so on a network home either:"
-  hint "  1. install as a user whose home is on a local disk (ask your admin), or"
-  hint "  2. set TRACEBLOC_ALLOW_NETWORK_FS=1 to proceed anyway - NOT recommended: the database can corrupt."
-  hint "(Datasets may stay on network storage via HOST_DATASET_DIR - only the data dir must be local.)"
+  _pf_network_fs_remedy   # shared followable remedy (#479)
   error "Refusing to create the data directory on ${fstype} before logging starts."
 }
 
@@ -535,9 +541,10 @@ _pf_storage_type() {
       fi
       _pf_fail_line "Storage: ${target} is on a network filesystem (${fstype}) — the tracebloc client database (MySQL/InnoDB) corrupts or crash-loops on network storage, and NFS root_squash blocks data-dir setup."
       PF_HARD_FAIL=$(( ${PF_HARD_FAIL:-0} + 1 ))
-      hint "Fix: point HOST_DATA_DIR at a LOCAL disk — the default ~/.tracebloc is local:"
-      hint "  HOST_DATA_DIR=\"\$HOME/.tracebloc\" ./install-k8s.sh"
-      hint "  (or set TRACEBLOC_ALLOW_NETWORK_FS=1 to proceed anyway — not recommended for the database.)"
+      # The old remedy suggested HOST_DATA_DIR=$HOME/.tracebloc — but on a network HOME
+      # that's still NFS, and validate_config rejects paths OUTSIDE $HOME, so it could
+      # never work. Use the shared followable remedy (#479).
+      _pf_network_fs_remedy
   else
       log "Storage: ${target} (${fstype})"
       success "Local storage (${disp})"

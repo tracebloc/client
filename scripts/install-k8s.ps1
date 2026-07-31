@@ -1798,21 +1798,27 @@ function Set-ClusterAutostart {
 #  All warn-only -- a provisioning hiccup must never fail the install.
 # =============================================================================
 
-# WSL2 VM memory (GB) for .wslconfig: as much as the host can give without starving
-# it -- physical RAM minus a reserve (default 4 GB for the host OS + overhead) --
-# so training pods fit instead of the WSL2 default (~50% of RAM). Pure; floored so
-# a tiny host still yields a positive value (#418).
+# WSL2 VM memory (GB) for .wslconfig -- the SAME budget the preflight advises for
+# this machine, so training pods fit instead of the WSL2 default (~50% of RAM).
+# It DELEGATES to Get-PfMemRecommendation (the recommended training budget, capped
+# at physical RAM minus the shared OS reserve) instead of doing its own arithmetic.
+# That delegation is the point: this path writes REAL config, so a private
+# calculation makes the installer contradict its own advice in the same run. It did
+# -- a private 4 GB reserve (vs the shared 2) told an 8 GB host "give Docker up to
+# 6 GB" while writing memory=4GB, below the client's own PF_MIN_MEM_GB floor and so
+# a guaranteed OOM crashloop; and it over-committed the other end, handing a 32 GB
+# host 28 GB and leaving Windows 4.
+#
+# Returns 0 when the host cannot support the floor (physical - reserve < the floor):
+# there is no budget worth writing, so the caller must skip the setting and say the
+# machine is too small rather than persist one known to OOM. Pure (#418).
 function Get-WslConfigMemoryGb {
-  param([int]$HostGb, [int]$ReserveGb = 4)
-  $m = $HostGb - $ReserveGb
-  if ($m -lt 1) { $m = 1 }
-  return $m
-}
-
-# The .wslconfig body granting the WSL2 VM the sized memory budget. Pure (#418).
-function Get-WslConfigContent {
-  param([int]$MemoryGb)
-  return "[wsl2]`r`nmemory=${MemoryGb}GB`r`n"
+  param([int]$HostGb, [int]$MinGb = 0)
+  if ($MinGb -le 0) { $MinGb = Get-PfMinMemGb }
+  # No ReserveGb param on purpose: the reserve is single-sourced, so no caller can
+  # reintroduce the drift this function existed to demonstrate.
+  if (($HostGb - (Get-PfOsReserveGb)) -lt $MinGb) { return 0 }
+  return (Get-PfMemRecommendation -DesiredGb (Get-PfRecMemGb) -HostGb $HostGb)
 }
 
 # Merge a memory budget into EXISTING .wslconfig content without clobbering other
@@ -1936,15 +1942,29 @@ function Set-DailyUserProvisioning {
       # Host RAM undetectable -> can't size the budget. Note it rather than skip silently (#418 Bugbot).
       $did += "couldn't detect host RAM -- set [wsl2] memory in '$user's .wslconfig manually"
     } else {
-      $wslCfg   = Join-Path $profileDir ".wslconfig"
-      $existing = if (Test-Path $wslCfg) { (Get-Content $wslCfg -Raw -ErrorAction SilentlyContinue) } else { "" }
-      $memGb    = Get-WslConfigMemoryGb -HostGb $hostGb
-      $merged   = Add-WslMemorySetting -Existing $existing -MemoryGb $memGb
-      if ($null -eq $merged) {
-        $did += "kept existing .wslconfig memory"
+      $memGb = Get-WslConfigMemoryGb -HostGb $hostGb
+      if ($memGb -le 0) {
+        # 0 = this host can't give the VM the client's floor. The biggest budget it
+        # COULD hold would still OOM-crashloop the client, and persisting it would
+        # bake that in for every later run on the daily account. Leave memory unset
+        # (WSL2's own default then applies) and say so plainly -- same honest framing
+        # as the preflight's host-too-small line.
+        $minGb   = Get-PfMinMemGb
+        $reserve = Get-PfOsReserveGb
+        Warn ("This machine has $hostGb GB RAM - too little for tracebloc: the client needs a $minGb GB WSL2 budget " +
+              "and Windows needs ~$reserve GB, so about $($minGb + $reserve) GB physical is the practical minimum.")
+        Hint "Left '$user's .wslconfig memory unset rather than write a budget that would OOM. Use a larger machine to run the client."
+        $did += "machine too small for a $minGb GB WSL2 budget -- .wslconfig memory left unset"
       } else {
-        Set-Content -Path $wslCfg -Value $merged -Encoding ASCII -ErrorAction Stop
-        $did += "set .wslconfig memory=${memGb}GB (applies next sign-in)"
+        $wslCfg   = Join-Path $profileDir ".wslconfig"
+        $existing = if (Test-Path $wslCfg) { (Get-Content $wslCfg -Raw -ErrorAction SilentlyContinue) } else { "" }
+        $merged   = Add-WslMemorySetting -Existing $existing -MemoryGb $memGb
+        if ($null -eq $merged) {
+          $did += "kept existing .wslconfig memory"
+        } else {
+          Set-Content -Path $wslCfg -Value $merged -Encoding ASCII -ErrorAction Stop
+          $did += "set .wslconfig memory=${memGb}GB (applies next sign-in)"
+        }
       }
     }
   } catch {
@@ -3555,6 +3575,20 @@ function Get-PfRuntimeMemGb {
   } catch {}
   return $null
 }
+
+# The same budget in MiB. The FLOOR CHECK needs sub-GB precision: Get-PfRuntimeMemGb
+# floors to whole GB, and a VM configured at exactly the floor reports a few hundred
+# MiB less than its configured size (guest kernel + reserved), so 5 GB configured ->
+# ~4.8 GB reported -> floors to 4. Enforcing on that would hard-fail a correctly
+# sized machine, so the gate compares MiB against the floor minus a grace band
+# (mirrors bash's PF_VM_MEM_GRACE_MIB, preflight.sh #513). $null if undeterminable.
+function Get-PfRuntimeMemMib {
+  try {
+    $v = ((docker info --format '{{.MemTotal}}' 2>$null) | Out-String).Trim()
+    if ($v -match '^\d+$' -and [int64]$v -gt 0) { return [math]::Floor([int64]$v / 1MB) }
+  } catch {}
+  return $null
+}
 function Get-PfRuntimeCpu {
   try {
     $v = ((docker info --format '{{.NCPU}}' 2>$null) | Out-String).Trim()
@@ -3577,13 +3611,39 @@ function Get-PfMemGb {
 # achievable budget in one place, so the two can't drift (#417 reviewer).
 $script:PfOsReserveGb = 2
 
+# Accessors for the three memory numbers, so every path that PRINTS advice and every
+# path that WRITES a real budget reads the same values (#418). Read through these
+# rather than re-deriving: the drift they close is what let the daily-user
+# .wslconfig be sized from a private 4 GB reserve while the preflight advised 2,
+# producing a budget below the client's own floor on an 8 GB host.
+# The reserve fails CLOSED -- never 0, which would hand WSL2 the entire host.
+function Get-PfOsReserveGb { if ($script:PfOsReserveGb -gt 0) { return [int]$script:PfOsReserveGb } else { return 2 } }
+function Get-PfMinMemGb    { if ($env:PF_MIN_MEM_GB)  { return [int]$env:PF_MIN_MEM_GB }  else { return 5 } }
+function Get-PfWarnMemGb   { if ($env:PF_WARN_MEM_GB) { return [int]$env:PF_WARN_MEM_GB } else { return 8 } }
+function Get-PfRecMemGb    { if ($env:PF_REC_MEM_GB)  { return [int]$env:PF_REC_MEM_GB }  else { return 16 } }
+# How far below the floor a VM may REPORT before the runtime gate calls it sub-floor.
+# A guest's MemTotal runs a few hundred MiB under its configured size, so a VM set to
+# exactly the documented floor must still pass -- otherwise the effective floor is a
+# GB higher than we tell people (bash PF_VM_MEM_GRACE_MIB, #513 reviewer).
+function Get-PfVmMemGraceMib { if ($env:PF_VM_MEM_GRACE_MIB) { return [int]$env:PF_VM_MEM_GRACE_MIB } else { return 512 } }
+
 # Cap a desired Docker-memory recommendation at what the host can actually give
 # (physical RAM minus the OS reserve), so we never advise more than the machine
-# physically has — e.g. "give Docker 16 GB" on a 15 GB laptop (#417). Floors at
-# 1 GB so a tiny host still yields a positive number.
+# physically has — e.g. "give Docker 16 GB" on a 15 GB laptop (#417).
+#
+# NEVER returns below the client's own minimum. A floor of 1 GB produced advice
+# the user could not act on: on a 6 GB host the cap is 4, so the sub-floor branch
+# printed "Give Docker at least 5 GB (up to 4 GB)" and a concrete
+# "memory=4GB" — an empty range whose value is below the 5 GB the same sentence
+# demands. Flooring at the minimum keeps every printed figure self-consistent;
+# a host that genuinely cannot reach the floor is handled by the host-too-small
+# branch in Show-MemoryStatus, not by a sub-floor number. This mirrors bash's
+# _pf_clamp_mem_gb exactly (preflight.sh, #428/#513) so the two installers give
+# the same advice on the same hardware.
 function Get-PfMemRecommendation([int]$DesiredGb, [int]$HostGb) {
-  $cap = $HostGb - $script:PfOsReserveGb
-  if ($cap -lt 1) { $cap = 1 }
+  $minMemGb = Get-PfMinMemGb
+  $cap = $HostGb - (Get-PfOsReserveGb)
+  if ($cap -lt $minMemGb) { $cap = $minMemGb }
   if ($DesiredGb -lt $cap) { return $DesiredGb }
   return $cap
 }
@@ -3597,9 +3657,10 @@ function Get-PfMemRecommendation([int]$DesiredGb, [int]$HostGb) {
 # post-Docker re-check so their wording never diverges.
 function Show-MemoryStatus {
   param($HostGb, $BudgetGb)   # either may be $null
-  $minMemGb  = if ($env:PF_MIN_MEM_GB)  { [int]$env:PF_MIN_MEM_GB }  else { 5 }
-  $warnMemGb = if ($env:PF_WARN_MEM_GB) { [int]$env:PF_WARN_MEM_GB } else { 8 }
-  $recMemGb  = if ($env:PF_REC_MEM_GB)  { [int]$env:PF_REC_MEM_GB }  else { 16 }
+  $minMemGb   = Get-PfMinMemGb
+  $warnMemGb  = Get-PfWarnMemGb
+  $recMemGb   = Get-PfRecMemGb
+  $reserveGb  = Get-PfOsReserveGb
 
   # Effective = what the client actually gets; grade on this.
   $effective = if ($null -ne $BudgetGb) { $BudgetGb } elseif ($null -ne $HostGb) { $HostGb } else { $null }
@@ -3625,19 +3686,43 @@ function Show-MemoryStatus {
     $recRun   = $warnMemGb
   }
   # A throttled Docker budget is fixed at the daemon; a small host needs more RAM.
-  $budgetIsBottleneck = ($null -ne $BudgetGb) -and ($null -eq $HostGb -or $BudgetGb -lt $HostGb)
+  # A host that cannot reach the floor even with the OS reserve honoured is too
+  # small for tracebloc no matter how Docker is configured, so it is NOT a budget
+  # bottleneck — a resize hint there is a dead end that repeats an unachievable
+  # size. Mirrors the bash recheck's host-too-small branch (preflight.sh, #428).
+  $hostTooSmall = ($null -ne $HostGb) -and (($HostGb - $reserveGb) -lt $minMemGb)
+  $budgetIsBottleneck = ($null -ne $BudgetGb) -and ($null -eq $HostGb -or $BudgetGb -lt $HostGb) -and (-not $hostTooSmall)
 
   if ($effective -lt $minMemGb) {
     Warn "Memory: $label$budgetNote - below the $minMemGb GB the client needs; it will OOM."
     if ($budgetIsBottleneck) {
       Hint "Give Docker at least $minMemGb GB (up to $recRun GB): WSL2 backend - [wsl2] memory=${recRun}GB in %UserProfile%\.wslconfig + 'wsl --shutdown'; Hyper-V - Docker Desktop -> Settings -> Resources -> Advanced."
+    } elseif ($hostTooSmall) {
+      # Name the OS reserve and the resulting practical minimum. Without it, a
+      # 5-6 GB host reads "you have 6 GB, you need 5 GB, get a bigger machine",
+      # which looks self-contradictory (Bugbot) — the shortfall only makes sense
+      # once the ~2 GB the OS needs is stated. Mirrors bash's reserve-aware copy
+      # in _pf_recheck_runtime_mem.
+      Hint "This machine has $label of RAM total - too little for tracebloc: the client needs a $minMemGb GB Docker budget and the OS needs ~$reserveGb GB, so about $($minMemGb + $reserveGb) GB physical is the practical minimum. Use a larger machine."
     } else {
       Hint "This machine has $label of RAM total; the client needs at least $minMemGb GB. Free up memory or use a larger machine."
     }
   }
   elseif ($effective -lt $warnMemGb) {
-    Warn "Memory: $label$budgetNote - enough to run the client, but training (~8 GB/job) may OOM; $recTrain GB recommended to train locally."
-    Hint "For local training, give Docker up to $recTrain GB: WSL2 backend - [wsl2] memory=${recTrain}GB in %UserProfile%\.wslconfig + 'wsl --shutdown'; Hyper-V - Docker Desktop -> Settings -> Resources -> Advanced."
+    # hostTooSmall must be consulted HERE too, not only in the below-floor branch
+    # (Bugbot). A 5-6 GB host with Docker down grades as "enough to run", and the
+    # training hint would then print memory=5GB — a budget that leaves the OS 1 GB
+    # and that this same function calls unachievable two branches up. Such a
+    # machine cannot be tuned into a training box at all, so name that instead of
+    # printing a number: no branch may emit a concrete memory= value for a host
+    # that cannot reach the floor while keeping the OS reserve.
+    if ($hostTooSmall) {
+      Warn "Memory: $label$budgetNote - enough to run the client, but too little to train locally (~8 GB/job)."
+      Hint "This machine has $label of RAM total and the OS needs ~$reserveGb GB, so it cannot give Docker a training-sized budget. Run the client here and train on a larger machine."
+    } else {
+      Warn "Memory: $label$budgetNote - enough to run the client, but training (~8 GB/job) may OOM; $recTrain GB recommended to train locally."
+      Hint "For local training, give Docker up to $recTrain GB: WSL2 backend - [wsl2] memory=${recTrain}GB in %UserProfile%\.wslconfig + 'wsl --shutdown'; Hyper-V - Docker Desktop -> Settings -> Resources -> Advanced."
+    }
   }
   else {
     Ok "Memory: $label$budgetNote"
@@ -3792,16 +3877,64 @@ function Test-Preflight {
 
 # Re-evaluate memory once Docker is confirmed up. Test-Preflight runs before Docker
 # Desktop starts, so its read may have been host RAM, not the (smaller) Docker VM
-# budget. Called from New-K3dCluster. WARN-only — the user has already waited for
-# Docker, so aborting here would be jarring.
+# budget. Called from New-K3dCluster, as its FIRST statement — nothing is built yet,
+# so stopping here leaves no half-made cluster behind.
+#
+# A sub-FLOOR budget HARD-FAILS here. This is the one point the REAL VM budget is
+# known, and a VM below the floor OOM-crashloops the client, so proceeding is worse
+# than the jarring stop this used to prefer. bash reached the same conclusion and
+# enforces it on every OS (_pf_recheck_runtime_mem -> error -> exit 1, #513); Windows
+# only ever WARNED, so the platform this whole memory story is about was the one
+# platform that still shipped the crash. A between-floor-and-warn budget still only
+# warns (it can run, just tightly) — that grading stays in Show-MemoryStatus, which
+# remains purely presentational; enforcement lives here, mirroring bash's split.
 function Test-PreflightRuntimeMem {
   if ($env:TRACEBLOC_SKIP_PREFLIGHT) { return }
-  $budget = Get-PfRuntimeMemGb
-  if ($null -eq $budget) { return }
+  # One `docker info` read, in MiB, so the number we PRINT and the number we ENFORCE
+  # on cannot disagree; GB is derived from it rather than read separately.
+  $mib = Get-PfRuntimeMemMib
+  if ($null -eq $mib) { return }              # daemon not reporting — nothing to add
+  $grace = Get-PfVmMemGraceMib
+  # Grade/report the CONFIGURED size, not the flooring artifact. A guest reports a few
+  # hundred MiB under its configured size, so a VM set to exactly the floor gives
+  # floor(4800/1024) = 4 — and Show-MemoryStatus would then print hard-floor "it will
+  # OOM" copy for a machine the gate below ACCEPTS, telling a correctly configured box
+  # it will crash and then carrying on (Bugbot). Folding in the SAME grace before
+  # flooring recovers the configured GB (4800 + 512 -> 5) and leaves a genuinely
+  # sub-floor VM exactly where it was (4096 + 512 -> 4). Because both the grade and
+  # the gate now pivot on the same grace, their boundaries coincide at
+  # (floor * 1024 - grace) MiB: there is no band that warns "will OOM" yet proceeds,
+  # and none that passes while being called sub-floor.
+  $budget = [int][math]::Floor(($mib + $grace) / 1024)
+  $hostGb = Get-PfMemGb
+
   # Re-run the SAME assessment now that Docker's budget is known, so both floors
   # (min "will OOM" + warn "training may OOM") apply to the budget and the wording
   # matches Step-1 (#417 reviewer). Host RAM stays the reported label.
-  Show-MemoryStatus -HostGb (Get-PfMemGb) -BudgetGb $budget
+  Show-MemoryStatus -HostGb $hostGb -BudgetGb $budget
+
+  $minGb = Get-PfMinMemGb
+  # Grace band, not a bare `-lt $minGb`: see Get-PfRuntimeMemMib. A VM at exactly the
+  # documented floor passes; a genuinely sub-floor one (e.g. 4 GB) does not. Same
+  # $grace as the grade above, so this boundary and that one are the same boundary.
+  if ($mib -ge (($minGb * 1024) - $grace)) { return }
+
+  $reserveGb = Get-PfOsReserveGb
+  Write-Host ""
+  if ($null -ne $hostGb -and ($hostGb - $reserveGb) -lt $minGb) {
+    # No Docker setting can fix this one, so don't offer a resize that repeats an
+    # unachievable size — name the practical minimum instead (matches the
+    # host-too-small copy Show-MemoryStatus prints, and bash's #428 branch).
+    Write-PfFail "This machine has $hostGb GB RAM - too little for tracebloc: the client needs a $minGb GB Docker budget and Windows needs ~$reserveGb GB, so about $($minGb + $reserveGb) GB physical is the practical minimum."
+    Hint "No Docker setting fixes this - run the client on a larger machine."
+  } else {
+    # Achievable target: clamped to this host when we know its size, else the raw
+    # run target (no ceiling is known, so don't cap at the throttled budget, #483).
+    $target = if ($null -ne $hostGb) { Get-PfMemRecommendation -DesiredGb (Get-PfWarnMemGb) -HostGb $hostGb } else { Get-PfWarnMemGb }
+    Write-PfFail "Docker's VM has only $budget GB - below the $minGb GB the tracebloc client needs; it will OOM-crashloop."
+    Hint "Raise it to >= $target GB, then re-run: WSL2 backend - set [wsl2] memory=${target}GB in %UserProfile%\.wslconfig and run 'wsl --shutdown'; Hyper-V backend - Docker Desktop -> Settings -> Resources -> Advanced."
+  }
+  Err "Not enough memory for the tracebloc client. (Override at your own risk with `$env:TRACEBLOC_SKIP_PREFLIGHT=1.)"
 }
 
 # =============================================================================

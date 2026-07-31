@@ -1203,6 +1203,33 @@ install_linux() {
   dispatch_gpu_setup
 }
 
+# The cgroup.controllers file that reflects whether `Delegate=` on user@.service is
+# LIVE. It MUST be the user MANAGER's own node — user@$(id -u).service/cgroup.controllers
+# — not the enclosing user-$(id -u).slice: `Delegate=` on user@.service enables the
+# controllers INSIDE user@$UID.service (the path runc/rootless-containers document),
+# whereas the slice node lists whatever user.slice already had in subtree_control, which
+# routinely includes cpu/io by default (DefaultCPUAccounting). Reading the slice would
+# print "active" while the user manager still lacks the delegation and limit-bearing
+# pods run unconstrained (#514 Bugbot, High). Split out so it's unit-testable.
+_cgroup_controllers_path() {
+  local u; u="$(id -u 2>/dev/null)"
+  printf '/sys/fs/cgroup/user.slice/user-%s.slice/user@%s.service/cgroup.controllers' "$u" "$u"
+}
+
+# Are the cpu/cpuset/io controllers ACTUALLY delegated to this user session right now?
+# Reads the live cgroup.controllers of the user MANAGER (#496, path corrected #514). A
+# `daemon-reload` writes the drop-in but does NOT restart the running user@$(id -u).service,
+# so the delegated controllers only appear after a re-login — this is how we tell
+# "written" from "in effect" instead of assuming. Path overridable
+# (TB_USER_CGROUP_CONTROLLERS) for tests. memory/pids are delegated by default;
+# cpu/cpuset/io are the ones this adds.
+_cgroup_controllers_active() {
+  local f="${TB_USER_CGROUP_CONTROLLERS:-$(_cgroup_controllers_path)}"
+  [[ -r "$f" ]] || return 1
+  local c; c="$(cat "$f" 2>/dev/null)" || return 1
+  [[ " $c " == *" cpu "* && " $c " == *" cpuset "* && " $c " == *" io "* ]]
+}
+
 # _write_cgroup_delegation — the shared, idempotent WRITE of the cgroup v2 controller
 # delegation drop-in, used by BOTH the sudo-available installer path
 # (_ensure_cgroup_delegation) and admin-run prepare-host (run_prepare_host). Always
@@ -1216,21 +1243,54 @@ _write_cgroup_delegation() {
   local desired
   printf -v desired '%s\n[Service]\nDelegate=cpu cpuset io memory pids\n' "$marker"
 
-  # Unchanged → don't rewrite / daemon-reload (avoids churning the user manager).
-  if [[ -f "$conf" ]] && printf '%s' "$desired" | sudo cmp -s - "$conf" 2>/dev/null; then
+  # Unchanged → don't rewrite / daemon-reload (avoids churning the user manager), but
+  # STILL report below — a re-run over an existing drop-in must re-surface an inactive
+  # delegation, not take a silent fast path (#496 Bugbot). The drop-in lives under /etc
+  # and is world-readable, so this presence-check is a PLAIN cmp — no sudo — matching
+  # _ensure_cgroup_delegation's unprivileged grep and avoiding a needless elevation on
+  # the idempotent path (#514 reviewer).
+  if [[ -f "$conf" ]] && printf '%s' "$desired" | cmp -s - "$conf" 2>/dev/null; then
     log "cgroup delegation drop-in already present."
+  else
+    # Guard the writes: callers run this with `set -e` relaxed (`|| true`, `if !`), so
+    # an unguarded failure would fall through to success and let the install proceed
+    # with pods that can't be given limits (the exact silent breakage this slice
+    # exists to prevent).
+    sudo mkdir -p "$dir" \
+      || { warn "Couldn't create ${dir} for the cgroup delegation drop-in."; return 1; }
+    printf '%s' "$desired" | sudo tee "$conf" >/dev/null \
+      || { warn "Couldn't write the cgroup delegation drop-in at ${conf}."; return 1; }
+    sudo systemctl daemon-reload 2>/dev/null || true
+  fi
+  # Verify + report on EVERY path (#496 Bugbot).
+  _report_cgroup_delegation "$conf"
+}
+
+# Report whether the cgroup delegation is actually in effect (#496). Mode-aware:
+#  - prepare-host (admin): the drop-in is written for the RESEARCHER's FUTURE session —
+#    the admin's own controllers are irrelevant, and prepare-host creates no cluster, so
+#    the "recreate the cluster" advice is wrong here (Bugbot). Just confirm it's written.
+#  - full install: verify THIS session. daemon-reload does NOT restart the running
+#    user@$(id -u).service, so the delegation usually isn't live yet, and the k3d node
+#    inherits the delegation state from when it is CREATED. If inactive, say the real
+#    consequence: limits won't enforce until the user manager restarts AND the cluster
+#    is recreated. With lingering (the rootless path), a re-login may NOT restart the
+#    user manager — a reboot reliably does. We never `systemctl restart user@…`
+#    ourselves: it would kill the user's session processes.
+_report_cgroup_delegation() {
+  local conf="$1"
+  if [[ -n "${TB_PREPARE_HOST_MODE:-}" ]]; then
+    success "Wrote the cgroup delegation drop-in (${conf}); it takes effect at the researcher's next login (before any cluster is created)."
     return 0
   fi
-  # Guard the writes: callers run this with `set -e` relaxed (`|| true`, `if !`), so
-  # an unguarded failure would fall through to success and let the install proceed
-  # with pods that can't be given limits (the exact silent breakage this slice
-  # exists to prevent).
-  sudo mkdir -p "$dir" \
-    || { warn "Couldn't create ${dir} for the cgroup delegation drop-in."; return 1; }
-  printf '%s' "$desired" | sudo tee "$conf" >/dev/null \
-    || { warn "Couldn't write the cgroup delegation drop-in at ${conf}."; return 1; }
-  sudo systemctl daemon-reload 2>/dev/null || true
-  success "Delegated cpu/cpuset/io cgroup controllers (${conf}). A re-login may be needed for it to take effect."
+  if _cgroup_controllers_active; then
+    success "Delegated cpu/cpuset/io cgroup controllers (${conf}) — active in this session."
+  else
+    warn "The cgroup delegation drop-in (${conf}) is NOT active in this session yet — pod CPU/memory limits will NOT be enforced until you recreate the cluster after the user manager restarts:"
+    hint "  log out and back in — or, with lingering enabled, reboot (a re-login may not restart your user manager) — then:"
+    hint "  k3d cluster delete ${CLUSTER_NAME:-tracebloc}   # and re-run"
+    hint "  (Until then the install looks healthy, but limit-bearing workloads run unconstrained.)"
+  fi
 }
 
 # _ensure_cgroup_delegation — RFC 0001 #1221 (Tier 1). k3s inside the k3d node needs
@@ -1250,10 +1310,13 @@ _write_cgroup_delegation() {
 _ensure_cgroup_delegation() {
   local dir="${TB_USER_UNIT_DROPIN_DIR:-/etc/systemd/system/user@.service.d}"
   local conf="$dir/delegate.conf"
-  # Fast path: already delegated → no privileged call at all (an unprivileged read;
-  # the drop-in is world-readable under /etc).
+  # Fast path: drop-in already present → no privileged call at all (an unprivileged
+  # read; it's world-readable under /etc). But still VERIFY it's active and re-surface
+  # if not — a 2nd run over a written-but-not-yet-live drop-in must NOT take a silent
+  # fast path (the exact #496 "written but not active" case; #514 reviewer). The report
+  # is itself unprivileged (a controllers read), so this keeps the no-sudo property.
   if [[ -f "$conf" ]] && grep -qF 'Delegate=cpu cpuset io memory pids' "$conf" 2>/dev/null; then
-    log "cgroup delegation drop-in already present."
+    _report_cgroup_delegation "$conf"
     return 0
   fi
   case "${PROBE_PRIVILEGE:-no_sudo}" in
@@ -1370,9 +1433,16 @@ run_prepare_host() {
   # so writing it once here covers the researcher named above — this is the second
   # half of the prepare-host contract alongside the subuid/subgid range. Best-effort:
   # never fail the whole prep over it.
+  # Report in prepare-host mode: the drop-in is for the RESEARCHER's future session, so
+  # _report_cgroup_delegation must not judge the ADMIN's live controllers nor print the
+  # "recreate the cluster" advice (prepare-host creates none). The mode was reset right
+  # after install_docker_engine, so set it again around this write — otherwise it falls
+  # through to the full-install branch on the admin's slice (#514 reviewer).
+  TB_PREPARE_HOST_MODE=1
   if ! _write_cgroup_delegation; then
     warn "Couldn't write the cgroup delegation drop-in; a rootless install won't enforce pod limits until it's added (see above)."
   fi
+  TB_PREPARE_HOST_MODE=""
 
   echo ""
   success "Host prepared."
