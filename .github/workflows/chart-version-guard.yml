@@ -4,6 +4,12 @@
 # staging but never rendered: PR #472 changed the template without bumping
 # Chart.yaml, so the published 1.9.7 stayed stale). This gate makes the bump
 # non-optional.
+#
+# The logic lives in scripts/chart-version-guard.sh so that it can be TESTED:
+# scripts/tests/chart-version-guard.bats runs under the required `Unit tests`
+# check, which this workflow is not. Keeping it inline is why the guard's own
+# coverage gap went unnoticed (client#519 — it classified only client/**, while
+# release-helm-chart.yaml also packages ./ingestor into the same index.yaml).
 name: Chart version guard
 
 on:
@@ -22,59 +28,7 @@ jobs:
           fetch-depth: 0
       - name: Require a Chart.yaml version bump when chart content changes
         env:
+          # A SHA, not attacker-controlled text — and read via env, never
+          # interpolated into the run: body.
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
-        run: |
-          set -euo pipefail
-
-          # Fail CLOSED on an unusable base: without a diff we cannot know whether
-          # chart content changed, and "don't know" must never read as "nothing
-          # changed" — that is the same dark ship the gate exists to stop.
-          if [[ -z "${BASE_SHA:-}" ]]; then
-            echo "::error::Chart version guard could not determine the PR base SHA — refusing to report N/A without checking."
-            exit 1
-          fi
-          if ! changed="$(git diff --name-only "${BASE_SHA}...HEAD")"; then
-            echo "::error::Chart version guard could not diff ${BASE_SHA}...HEAD — refusing to report N/A without checking."
-            exit 1
-          fi
-
-          # Classify with bash builtins — NOT `printf … | grep -q`. Under the
-          # `set -o pipefail` above, `grep -q` closes the pipe on its FIRST match,
-          # so once the changed-file list passes the ~64KB pipe buffer `printf`
-          # takes SIGPIPE, the pipeline exits 141, and `if ! <pipeline>` reads a
-          # REAL client/templates/** change as "guard N/A" — silently skipping the
-          # bump check. Measured on ubuntu-24.04 (bash 5.2.21 / GNU grep 3.11):
-          # 65,622 bytes of paths already flips it. The mirror case is just as bad:
-          # a SIGPIPE on the `grep -qx 'client/Chart.yaml'` MATCH short-circuits the
-          # `&&` and fails a PR that did bump the version. No pipe here ⇒ neither is
-          # reachable, and no `|| true` (which would re-introduce a fail-open).
-          chart_content=0
-          chart_yaml=0
-          while IFS= read -r path; do
-            # Disjoint patterns, so one `case` covers both and always exits 0 —
-            # a `[[ … ]] && var=1` tail would itself trip `set -e` on a non-match.
-            case "$path" in
-              client/templates/*|client/values.yaml*) chart_content=1 ;;
-              client/Chart.yaml)                      chart_yaml=1 ;;
-            esac
-          done <<< "$changed"
-
-          if (( ! chart_content )); then
-            echo "No chart template/values change in this PR — guard N/A."
-            exit 0
-          fi
-          if (( chart_yaml )); then
-            if ! chart_diff="$(git diff "${BASE_SHA}...HEAD" -- client/Chart.yaml)"; then
-              echo "::error::Chart version guard could not diff client/Chart.yaml — refusing to pass without checking."
-              exit 1
-            fi
-            while IFS= read -r line; do
-              case "$line" in
-                '+version:'*)
-                  echo "Chart content changed and client/Chart.yaml 'version:' was bumped. ✓"
-                  exit 0 ;;
-              esac
-            done <<< "$chart_diff"
-          fi
-          echo "::error::client/templates/** or client/values.yaml changed, but client/Chart.yaml 'version:' was NOT bumped. A Helm chart repo publishes only on a version change, so an unbumped edit reaches no installs (this is how the perIngestionTables flag block shipped dark — PR #472). Bump client/Chart.yaml version in this PR."
-          exit 1
+        run: bash scripts/chart-version-guard.sh
