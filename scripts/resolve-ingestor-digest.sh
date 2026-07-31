@@ -94,10 +94,11 @@ read_ingestor_prod_channel() {
       }
       if (in_channels && $0 ~ /^      prod:[[:space:]]*/) {
         line = $0
-        sub(/^      prod:[[:space:]]*/, "", line)
-        gsub(/^["'"'"']|["'"'"']$/, "", line)
-        sub(/[[:space:]]*#.*$/, "", line)
-        gsub(/[[:space:]]*$/, "", line)
+        sub(/^      prod:[[:space:]]*/, "", line)     # drop the key
+        sub(/[[:space:]]+#.*$/, "", line)              # drop a trailing comment
+        gsub(/^[[:space:]]+|[[:space:]]+$/, "", line)  # trim
+        gsub(/^"|"$/, "", line)                        # unwrap double quotes
+        gsub(/^'"'"'|'"'"'$/, "", line)                        # unwrap single quotes
         if (line != "") { print line; exit }
       }
     }
