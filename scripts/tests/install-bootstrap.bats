@@ -115,11 +115,13 @@ run_boot_no_cosign() {
   PATH="$BIN" run bash "$BOOT" "$@"
 }
 
-# Run hermetically: PATH=$BIN alone AND a sandboxed HOME. Needed by any test
-# that passes NO REF/BRANCH (so _tb_bail_ok stays 1): on a dev box with a real
-# `tracebloc` CLI on PATH — or in ~/.local/bin, which the bootstrap re-prepends
-# — the already-installed bail-out would run the host's real `tracebloc doctor`
-# and, on a healthy box, exec the host CLI and exit 0 before the gates under test.
+# Run hermetically: PATH=$BIN alone AND a sandboxed HOME. Needed when a test
+# passes NO REF/BRANCH (so _tb_bail_ok stays 1) *and* provides no mock `tracebloc`
+# of its own: the already-installed bail-out would then find the HOST's real CLI —
+# on PATH, or in ~/.local/bin which the bootstrap re-prepends — run its
+# `tracebloc doctor`, and on a healthy box exec it and exit 0 before reaching the
+# gate under test. Tests that DO install their own mock into $BIN (the bail-out
+# cases below) stay on plain run_boot; they are already hermetic by construction.
 run_boot_hermetic() {
   HOME="$SBX" PATH="$BIN" run bash "$BOOT" "$@"
 }

@@ -131,6 +131,27 @@ _training_resources() {
   printf '%s' "$_TRAINING_DEFAULT"
 }
 
+# YAML single-quoted-scalar escaping, in one place (Saqlain review, #443).
+#
+# A YAML single-quoted string escapes a quote by DOUBLING it: a'b -> 'a''b'.
+# Both directions must build the replacement from a VARIABLE, never a `\'`
+# literal: bash 3.2 (the macOS system bash) keeps the backslash in an escaped-quote
+# REPLACEMENT, so "${v//\'/\'\'}" yields a\'\'b and corrupts the value. A variable
+# expands to a bare quote on 3.2 and 4/5 alike. Verified on GNU bash 3.2.57:
+#   input a'b -> escaped-literal form a\'\'b (WRONG) · variable form a''b (right)
+#
+# Keep these two as the ONLY place that rule is encoded — every credential written
+# into or read back out of the generated values file goes through them, so the
+# portability constraint can't drift between call sites.
+_yaml_sq_escape() {                      # raw value -> body of a '...' scalar
+  local _sq="'"
+  printf '%s' "${1//$_sq/$_sq$_sq}"
+}
+_yaml_sq_unescape() {                    # body of a '...' scalar -> raw value
+  local _sq="'"
+  printf '%s' "${1//$_sq$_sq/$_sq}"
+}
+
 _extract_yaml_value() {
   local file="$1" key="$2"
   local line
@@ -141,12 +162,7 @@ _extract_yaml_value() {
   if [[ "$line" == \'*\' ]]; then
     line="${line#\'}"
     line="${line%\'}"
-    # A YAML single-quoted string escapes a quote by doubling it ('' -> '). Use a
-    # variable for the quote in the replacement: bash 3.2 (the macOS system bash)
-    # keeps the backslash in a `\'` REPLACEMENT literal (-> a\'b), corrupting the
-    # value; a variable expands to a bare quote on both bash 3.2 and 4/5.
-    local _sq="'"
-    line="${line//$_sq$_sq/$_sq}"
+    line="$(_yaml_sq_unescape "$line")"
   else
     line="${line#\"}"
     line="${line%\"}"
@@ -791,11 +807,15 @@ install_client_helm() {
     TB_NAMESPACE="$existing_ns"
   fi
 
-  # ' -> '' via $_sq, not \': bash 3.2 keeps the backslash in an escaped-quote
-  # replacement (same constraint as _extract_yaml_value's unescape above), which
-  # would corrupt a password containing a quote into a\'\'b inside the values file.
-  local _sq="'"
-  TB_CLIENT_PASSWORD_ESCAPED="${TB_CLIENT_PASSWORD//$_sq/$_sq$_sq}"
+  # Both credentials go into SINGLE-quoted YAML scalars through the shared
+  # escaper. clientId used to be interpolated raw into a DOUBLE-quoted scalar
+  # (clientId: "$TB_CLIENT_ID"), where a `"` or `\` in the value would corrupt the
+  # generated values file — the same bug class as the password, and unguarded:
+  # _sanitize_credential only strips paste/non-printable characters. In practice
+  # verify_credentials gates it to UUIDs, so this is hardening rather than a live
+  # break, but the interpolation itself is now safe (Saqlain review, #443).
+  TB_CLIENT_ID_ESCAPED="$(_yaml_sq_escape "$TB_CLIENT_ID")"
+  TB_CLIENT_PASSWORD_ESCAPED="$(_yaml_sq_escape "$TB_CLIENT_PASSWORD")"
 
   # ── GPU limits ──────────────────────────────────────────────────────────
   local gpu_val
@@ -880,7 +900,7 @@ pvcAccessMode: ReadWriteOnce
 
 clusterScope: true
 
-clientId: "$TB_CLIENT_ID"
+clientId: '$TB_CLIENT_ID_ESCAPED'
 clientPassword: '$TB_CLIENT_PASSWORD_ESCAPED'
 
 EOF
