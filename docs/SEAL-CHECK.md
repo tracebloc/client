@@ -155,7 +155,7 @@ on the live cluster when the corresponding check runs.*
 
 | Guarantee | k3d local (k3s) | EKS | AKS | OpenShift | bare metal |
 |---|---|---|---|---|---|
-| Training egress blocked (NetworkPolicy) | Conditional — k3s-embedded controller expected to enforce, **verification run pending** (runbook below; do not assume) | Conditional on CNI (VPC CNI netpol agent / Calico / Cilium) — **verified** by `egress-enforcement` once the lockdown is flipped | Conditional on CNI (Azure NPM / Calico) — **verified** by `egress-enforcement` once the lockdown is flipped | OVN-Kubernetes enforces by default — still **verified** by `egress-enforcement` | Conditional on CNI (Flannel alone does not enforce) — **verified** by `egress-enforcement` |
+| Training egress blocked (NetworkPolicy) | **Substrate verified; full-probe run pending** — k3s enforces egress NetworkPolicy (k3d v5.8.3 / k3s v1.33.6+k3s1, 2026-07-30; see §8.4 Status), full-chart `egress-enforcement` probe run not yet recorded | Conditional on CNI (VPC CNI netpol agent / Calico / Cilium) — **verified** by `egress-enforcement` once the lockdown is flipped | Conditional on CNI (Azure NPM / Calico) — **verified** by `egress-enforcement` once the lockdown is flipped | OVN-Kubernetes enforces by default — still **verified** by `egress-enforcement` | Conditional on CNI (Flannel alone does not enforce) — **verified** by `egress-enforcement` |
 | Backend reachability (required egress) | **Verified** by `backend-reachability` | **Verified** | **Verified** | **Verified** | **Verified** |
 | Storage on the declared class, bound | **Verified** by `storage-assertions` | **Verified** | **Verified** | **Verified** (PV scan degraded if `clusterScope=false`) | **Verified** |
 | No unmanaged hostPath backing (dynamic mode) | **Verified** once the Option C flip lands (today's installer still declares hostPath mode → sub-check SKIPs, honestly) | **Verified** | **Verified** | **Verified** with `clusterScope=true`; partial (name check + explicit WARNING) otherwise | n/a — hostPath *is* the declared model (SKIP) |
@@ -179,20 +179,22 @@ RFC-0003 §8.4: **do not assume** k3d enforces NetworkPolicy — k3s ships an
 embedded (kube-router-based) NetworkPolicy controller that is *expected* to
 enforce egress rules, but expected is not verified.
 
-> **Status (updated 2026-07-30): the k3s NetworkPolicy _substrate_ is
-> VERIFIED to enforce egress on k3d; the full-chart `egress-enforcement`
-> probe run (steps below) is still the pending end-to-end confirmation.**
-> A standalone deny-egress `NetworkPolicy` (podSelector on a probe pod,
-> `policyTypes: [Egress]`, empty `egress:`) was applied on a throwaway
-> `k3d v5.8.3` cluster running `k3s v1.33.6+k3s1`. A `curl` from the pod to
-> `1.1.1.1:443` went **reachable → BLOCKED under the policy → reachable
-> again after removing it** (HTTP 301 → connect failure → HTTP 301), so the
-> block is attributable to the policy, not a fluke: k3s's embedded
-> (kube-router) controller **does enforce** egress NetworkPolicy on this k3d
-> version — the RFC-0003 §8.4 "do not assume" doubt is resolved for the
-> substrate. What remains (backend#1184) is recording the *full-chart*
-> `egress-enforcement` probe run against a deployed release; until then the
-> §8.3 k3d cell reads "substrate verified; full-probe run pending".
+> **Status (updated 2026-07-30): still UNSEALED for the egress guarantee on
+> k3d until the full-chart `egress-enforcement` probe run is recorded — but
+> the k3s NetworkPolicy _substrate_ that guarantee rests on is now VERIFIED.**
+> The distinction is deliberate: only a standalone probe-pod NetworkPolicy was
+> tested, not the chart's training-labelled selector via the full probe, so
+> the egress guarantee is not yet sealed on k3d. Evidence for the substrate: a
+> deny-egress `NetworkPolicy` (podSelector on a probe pod, `policyTypes:
+> [Egress]`, empty `egress:`) on a throwaway `k3d v5.8.3` cluster running
+> `k3s v1.33.6+k3s1` took a `curl` from the pod to `1.1.1.1:443`
+> **reachable → BLOCKED under the policy → reachable again after removal**
+> (HTTP 301 → connect failure → HTTP 301), so the block is attributable to the
+> policy, not a fluke. k3s's embedded (kube-router) controller therefore
+> **does enforce** egress NetworkPolicy on this k3d version, resolving the
+> §8.4 "do not assume" doubt for the substrate. **This note is the single
+> record of that run** — the paragraph after the runbook, the follow-ups list,
+> and the §8.3 k3d cell reference it rather than restate the evidence.
 
 Run on a **local test install** (the lockdown flip below breaks direct
 training-pod egress until reverted — do not run it on a fleet you care
@@ -231,20 +233,19 @@ helm upgrade "$RELEASE" tracebloc/client -n "$NS" --reuse-values \
 
 The *full-chart* probe run (steps 1–4 above, against a deployed release) is
 still to be recorded here (pass/fail, k3s/k3d versions, date) and folded into
-the RFC-0003 §8.3 matrix. The **substrate** result above already confirms the
-k3s controller enforces egress NetworkPolicy on k3d v5.8.3 / k3s v1.33.6+k3s1
-(reachable → blocked → reachable), which is the specific "do not assume k3s
-enforces NetworkPolicy" doubt §8.4 raises.
+the RFC-0003 §8.3 matrix. The **substrate** enforcement it builds on is already
+verified — see the Status note at the top of this section (the single record
+of that run).
 
 ## What the suite does not cover yet (follow-ups)
 
 Tracked under backend#1184 unless noted:
 
 - **The live k3d verification run** (§8.4) — the *substrate* enforcement is
-  now verified (k3d v5.8.3 / k3s v1.33.6+k3s1 enforces egress NetworkPolicy,
-  recorded above 2026-07-30); the *full-chart* `egress-enforcement` probe run
-  against a deployed release is still pending, and the §8.3 k3d cell stays
-  "substrate verified; full-probe run pending" until it is recorded.
+  verified (see the §8.4 Status note for the recorded evidence); the
+  *full-chart* `egress-enforcement` probe run against a deployed release is
+  still pending, and the §8.3 k3d cell reads "substrate verified; full-probe
+  run pending" until it is recorded.
 - **A single aggregated sealed/unsealed verdict with per-guarantee detail**
   — surfaced by the tracebloc CLI on top of this label contract
   (tracebloc/cli#393). Today the aggregate is `helm test`'s exit status
