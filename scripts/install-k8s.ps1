@@ -1821,12 +1821,6 @@ function Get-WslConfigMemoryGb {
   return (Get-PfMemRecommendation -DesiredGb (Get-PfRecMemGb) -HostGb $HostGb)
 }
 
-# The .wslconfig body granting the WSL2 VM the sized memory budget. Pure (#418).
-function Get-WslConfigContent {
-  param([int]$MemoryGb)
-  return "[wsl2]`r`nmemory=${MemoryGb}GB`r`n"
-}
-
 # Merge a memory budget into EXISTING .wslconfig content without clobbering other
 # settings (processors, swap, ...). Returns the new content, or $null when a
 # memory= is already present (keep the operator's tuning) (#418 Bugbot).
