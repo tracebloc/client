@@ -197,6 +197,11 @@ install_docker_engine() {
   # below stays testable on hosts without one — e.g. macOS dev machines, where a
   # bash `[[ -f ]]` file-test can't be mocked the way a command like `grep` can.
   local os_release="${TB_OS_RELEASE_FILE:-/etc/os-release}"
+  # The invoking user we grant docker to AND re-exec under — resolved once so the
+  # grant and the sg-docker re-exec guard below always agree, even in the USER-unset
+  # edge (#427 reviewer). A sudo-wrapped full run is already refused, so this is the
+  # real daily user, never root.
+  local _grant_user="${USER:-$(id -un 2>/dev/null)}"
   if ! has docker; then
     if [[ -f "$os_release" ]] && grep -qi 'amzn\|amazon' "$os_release"; then
       if has dnf; then spin_cmd "Installing Docker…" sudo dnf install -y docker
@@ -227,13 +232,28 @@ install_docker_engine() {
     # Enable for boot only (no --now): starting is handled below, where a start
     # failure is diagnosed instead of aborting the whole script under `set -e`.
     sudo systemctl enable docker >/dev/null 2>&1 || true
-    # prepare-host mode: the invoking ADMIN must not be granted the socket —
-    # only the researcher named by TB_PREPARE_USER gets it, later (Bugbot on
-    # #381; same least-privilege rule as the #377 SUDO_USER fix).
-    [[ -n "${TB_PREPARE_HOST_MODE:-}" ]] || sudo usermod -aG docker "$USER"
     success "Docker"
   else
     success "Docker"
+  fi
+
+  # Ensure the invoking user is in the docker group whenever we take the daemon
+  # path — NOT only on a fresh install (#427). On a box where Docker was already
+  # present but the user isn't a member, the old code granted nothing here and the
+  # recovery path below dead-ended at "log out and back in" without ever granting
+  # membership, looping every re-run. prepare-host is exempt: the invoking ADMIN
+  # must not get the socket — only TB_PREPARE_USER does, later (least-privilege,
+  # Bugbot #381 / the #377 SUDO_USER rule).
+  if [[ -z "${TB_PREPARE_HOST_MODE:-}" ]]; then
+    # Grant the INVOKING user ($USER) — not TB_PREPARE_USER: socket access and the
+    # sg-docker re-exec below both key off $USER, and a sudo-wrapped full run is
+    # already refused, so $USER is the real daily user. TB_PREPARE_USER is the
+    # admin-for-someone-else mechanism and is granted only on the prepare-host path
+    # (#427 Bugbot; matches the rest of the tree's identity).
+    if ! id -nG "$_grant_user" 2>/dev/null | grep -qw docker; then
+      sudo usermod -aG docker "$_grant_user" 2>/dev/null \
+        || warn "Couldn't add ${_grant_user} to the docker group; add it manually:  sudo usermod -aG docker ${_grant_user}"
+    fi
   fi
 
   # Load the kernel modules dockerd's bridge driver + k3s need BEFORE starting,
@@ -294,8 +314,10 @@ install_docker_engine() {
     error "Fix the Docker error above, then re-run prepare-host."
   fi
   if ! docker info &>/dev/null 2>&1; then
-    # (a) Group not active in THIS shell yet → re-exec under the docker group.
-    if [[ -z "${TB_PREPARE_HOST_MODE:-}" && -z "${_K3S_INSTALL_REEXEC:-}" ]] && id -nG "$USER" 2>/dev/null | grep -qw docker; then
+    # (a) Group not active in THIS shell yet → re-exec under the docker group. Key
+    # off $_grant_user (not bare $USER) so the USER-unset edge the grant handled
+    # still triggers the in-session re-exec instead of dead-ending (#427 reviewer).
+    if [[ -z "${TB_PREPARE_HOST_MODE:-}" && -z "${_K3S_INSTALL_REEXEC:-}" ]] && id -nG "$_grant_user" 2>/dev/null | grep -qw docker; then
       SELF="$(readlink -f "$0" 2>/dev/null || echo "$0")"
       log "Docker group not yet active in this session — re-executing script..."
       exec sg docker -c "_K3S_INSTALL_REEXEC=1 bash '$SELF'"
@@ -1259,6 +1281,23 @@ _ensure_cgroup_delegation() {
       return 1
       ;;
   esac
+}
+
+# refuse_sudo_wrapped_install — a full provision must run as the DAILY (non-root)
+# user; the installer elevates each privileged step itself (RFC-0002). A
+# `sudo bash install.sh` runs the WHOLE thing as root: `usermod -aG docker` would
+# grant root (not the user), and ~/.tracebloc, ~/.kube/config, and the chmod-600
+# credential would land root-owned under /root — locking the daily user out, with
+# no chown anywhere to undo it (#427). Refuse it early, before any file is created.
+# Exemptions: a genuine root login (no SUDO_USER) is fine — /root IS its home; and
+# prepare-host (the admin path) has already dispatched-and-exited in main() before
+# this runs. Admins provisioning for someone else use prepare-host / TB_PREPARE_USER.
+refuse_sudo_wrapped_install() {
+  # `id -u` (the EFFECTIVE uid) rather than $EUID: EUID is read-only in bash, so the
+  # test suite can't shadow it — id() can be mocked.
+  [[ "$(id -u 2>/dev/null)" == "0" ]] || return 0
+  [[ -n "${SUDO_USER:-}" && "${SUDO_USER}" != "root" ]] || return 0
+  error "Don't run the installer with sudo. It elevates each privileged step itself, and running the whole thing as root would grant Docker to root (not you) and root-own ${SUDO_USER}'s ~/.tracebloc + ~/.kube. Re-run WITHOUT sudo as '${SUDO_USER}'. Admin setting up for someone else? Name the RESEARCHER (not yourself) so they get docker-group access:  export TB_PREPARE_USER=<researcher-username>  &&  curl -fsSL https://tracebloc.io/i.sh | bash -s -- prepare-host"
 }
 
 # run_prepare_host — the standalone, admin-run Tier-2 step (RFC 0001 #1178). An

@@ -527,3 +527,20 @@ setup() {
   [ "$status" -ne 0 ]
   [ -f "$BATS_TEST_TMPDIR/tools/k3d" ]         # NOT removed — it isn't the binary that ran
 }
+
+# ── setup_log_file / _choose_log_file temp fallback (#432 prepare-host residual) ──
+@test "_choose_log_file: writable HOST_DATA_DIR -> a path under it" {
+  HOST_DATA_DIR="$BATS_TEST_TMPDIR/data"
+  run _choose_log_file
+  [ "$status" -eq 0 ]
+  [[ "$output" == "$HOST_DATA_DIR"* ]]
+  [ -f "$output" ]
+}
+@test "_choose_log_file: uncreatable HOST_DATA_DIR -> temp fallback, never a bare failure (#432)" {
+  ro="$BATS_TEST_TMPDIR/ro"; mkdir -p "$ro"; chmod 500 "$ro"
+  HOST_DATA_DIR="$ro/cannot/make"
+  run _choose_log_file
+  chmod 700 "$ro"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *tracebloc-install-* ]]
+}
