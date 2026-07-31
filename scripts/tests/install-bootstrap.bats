@@ -115,6 +115,17 @@ run_boot_no_cosign() {
   PATH="$BIN" run bash "$BOOT" "$@"
 }
 
+# Run hermetically: PATH=$BIN alone AND a sandboxed HOME. Needed when a test
+# passes NO REF/BRANCH (so _tb_bail_ok stays 1) *and* provides no mock `tracebloc`
+# of its own: the already-installed bail-out would then find the HOST's real CLI —
+# on PATH, or in ~/.local/bin which the bootstrap re-prepends — run its
+# `tracebloc doctor`, and on a healthy box exec it and exit 0 before reaching the
+# gate under test. Tests that DO install their own mock into $BIN (the bail-out
+# cases below) stay on plain run_boot; they are already hermetic by construction.
+run_boot_hermetic() {
+  HOME="$SBX" PATH="$BIN" run bash "$BOOT" "$@"
+}
+
 @test "mutable BRANCH ref fails closed without the opt-in" {
   REF="" BRANCH="develop" run_boot
   [ "$status" -ne 0 ]
@@ -147,8 +158,9 @@ run_boot_no_cosign() {
 
 @test "un-stamped DEFAULT_REF fails closed (placeholder still present)" {
   # The committed install.sh ships the __TRACEBLOC_RELEASE_REF__ placeholder;
-  # running it directly (no REF/BRANCH) must refuse rather than guess.
-  run_boot
+  # running it directly (no REF/BRANCH) must refuse rather than guess. Hermetic:
+  # with no REF/BRANCH set, a host tracebloc CLI would trip the healthy-bailout.
+  run_boot_hermetic
   [ "$status" -ne 0 ]
   [[ "$output" == *"wasn't stamped with a pinned release tag"* ]]
   [ ! -f "$SBX/k8s-ran" ]
