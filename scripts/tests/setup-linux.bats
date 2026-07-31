@@ -1563,6 +1563,14 @@ _stub_install_steps() {
 }
 
 # ── #496: cgroup delegation is VERIFIED, not assumed ────────────────────────
+# The delegation check MUST read the user MANAGER's node (user@$UID.service), not the
+# enclosing slice — the slice lists cpu/io by default (DefaultCPUAccounting) and would
+# read "active" before the drop-in takes effect (#514 Bugbot, High).
+@test "_cgroup_controllers_path: points at user@\$UID.service (not the bare slice) (#514)" {
+  run _cgroup_controllers_path
+  [[ "$output" == *"/user@$(id -u).service/cgroup.controllers" ]]
+  [[ "$output" != *".slice/cgroup.controllers" ]]   # NOT the slice-level node
+}
 @test "_cgroup_controllers_active: true only when cpu+cpuset+io are all present (#496)" {
   cf="$(mktemp)"; TB_USER_CGROUP_CONTROLLERS="$cf"
   echo "cpuset cpu io memory pids" > "$cf"

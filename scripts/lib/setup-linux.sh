@@ -1203,14 +1203,28 @@ install_linux() {
   dispatch_gpu_setup
 }
 
+# The cgroup.controllers file that reflects whether `Delegate=` on user@.service is
+# LIVE. It MUST be the user MANAGER's own node — user@$(id -u).service/cgroup.controllers
+# — not the enclosing user-$(id -u).slice: `Delegate=` on user@.service enables the
+# controllers INSIDE user@$UID.service (the path runc/rootless-containers document),
+# whereas the slice node lists whatever user.slice already had in subtree_control, which
+# routinely includes cpu/io by default (DefaultCPUAccounting). Reading the slice would
+# print "active" while the user manager still lacks the delegation and limit-bearing
+# pods run unconstrained (#514 Bugbot, High). Split out so it's unit-testable.
+_cgroup_controllers_path() {
+  local u; u="$(id -u 2>/dev/null)"
+  printf '/sys/fs/cgroup/user.slice/user-%s.slice/user@%s.service/cgroup.controllers' "$u" "$u"
+}
+
 # Are the cpu/cpuset/io controllers ACTUALLY delegated to this user session right now?
-# Reads the live cgroup.controllers of the user slice (#496). A `daemon-reload` writes
-# the drop-in but does NOT restart the running user@$(id -u).service, so the delegated
-# controllers only appear after a re-login — this is how we tell "written" from
-# "in effect" instead of assuming. Path overridable (TB_USER_CGROUP_CONTROLLERS) for
-# tests. memory/pids are delegated by default; cpu/cpuset/io are the ones this adds.
+# Reads the live cgroup.controllers of the user MANAGER (#496, path corrected #514). A
+# `daemon-reload` writes the drop-in but does NOT restart the running user@$(id -u).service,
+# so the delegated controllers only appear after a re-login — this is how we tell
+# "written" from "in effect" instead of assuming. Path overridable
+# (TB_USER_CGROUP_CONTROLLERS) for tests. memory/pids are delegated by default;
+# cpu/cpuset/io are the ones this adds.
 _cgroup_controllers_active() {
-  local f="${TB_USER_CGROUP_CONTROLLERS:-/sys/fs/cgroup/user.slice/user-$(id -u 2>/dev/null).slice/cgroup.controllers}"
+  local f="${TB_USER_CGROUP_CONTROLLERS:-$(_cgroup_controllers_path)}"
   [[ -r "$f" ]] || return 1
   local c; c="$(cat "$f" 2>/dev/null)" || return 1
   [[ " $c " == *" cpu "* && " $c " == *" cpuset "* && " $c " == *" io "* ]]
@@ -1231,8 +1245,11 @@ _write_cgroup_delegation() {
 
   # Unchanged → don't rewrite / daemon-reload (avoids churning the user manager), but
   # STILL report below — a re-run over an existing drop-in must re-surface an inactive
-  # delegation, not take a silent fast path (#496 Bugbot).
-  if [[ -f "$conf" ]] && printf '%s' "$desired" | sudo cmp -s - "$conf" 2>/dev/null; then
+  # delegation, not take a silent fast path (#496 Bugbot). The drop-in lives under /etc
+  # and is world-readable, so this presence-check is a PLAIN cmp — no sudo — matching
+  # _ensure_cgroup_delegation's unprivileged grep and avoiding a needless elevation on
+  # the idempotent path (#514 reviewer).
+  if [[ -f "$conf" ]] && printf '%s' "$desired" | cmp -s - "$conf" 2>/dev/null; then
     log "cgroup delegation drop-in already present."
   else
     # Guard the writes: callers run this with `set -e` relaxed (`|| true`, `if !`), so
