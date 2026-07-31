@@ -3604,16 +3604,27 @@ $script:PfOsReserveGb = 2
 # producing a budget below the client's own floor on an 8 GB host.
 # The reserve fails CLOSED -- never 0, which would hand WSL2 the entire host.
 function Get-PfOsReserveGb { if ($script:PfOsReserveGb -gt 0) { return [int]$script:PfOsReserveGb } else { return 2 } }
-function Get-PfMinMemGb    { if ($env:PF_MIN_MEM_GB) { return [int]$env:PF_MIN_MEM_GB } else { return 5 } }
-function Get-PfRecMemGb    { if ($env:PF_REC_MEM_GB) { return [int]$env:PF_REC_MEM_GB } else { return 16 } }
+function Get-PfMinMemGb    { if ($env:PF_MIN_MEM_GB)  { return [int]$env:PF_MIN_MEM_GB }  else { return 5 } }
+function Get-PfWarnMemGb   { if ($env:PF_WARN_MEM_GB) { return [int]$env:PF_WARN_MEM_GB } else { return 8 } }
+function Get-PfRecMemGb    { if ($env:PF_REC_MEM_GB)  { return [int]$env:PF_REC_MEM_GB }  else { return 16 } }
 
 # Cap a desired Docker-memory recommendation at what the host can actually give
 # (physical RAM minus the OS reserve), so we never advise more than the machine
-# physically has — e.g. "give Docker 16 GB" on a 15 GB laptop (#417). Floors at
-# 1 GB so a tiny host still yields a positive number.
+# physically has — e.g. "give Docker 16 GB" on a 15 GB laptop (#417).
+#
+# NEVER returns below the client's own minimum. A floor of 1 GB produced advice
+# the user could not act on: on a 6 GB host the cap is 4, so the sub-floor branch
+# printed "Give Docker at least 5 GB (up to 4 GB)" and a concrete
+# "memory=4GB" — an empty range whose value is below the 5 GB the same sentence
+# demands. Flooring at the minimum keeps every printed figure self-consistent;
+# a host that genuinely cannot reach the floor is handled by the host-too-small
+# branch in Show-MemoryStatus, not by a sub-floor number. This mirrors bash's
+# _pf_clamp_mem_gb exactly (preflight.sh, #428/#513) so the two installers give
+# the same advice on the same hardware.
 function Get-PfMemRecommendation([int]$DesiredGb, [int]$HostGb) {
-  $cap = $HostGb - $script:PfOsReserveGb
-  if ($cap -lt 1) { $cap = 1 }
+  $minMemGb = Get-PfMinMemGb
+  $cap = $HostGb - (Get-PfOsReserveGb)
+  if ($cap -lt $minMemGb) { $cap = $minMemGb }
   if ($DesiredGb -lt $cap) { return $DesiredGb }
   return $cap
 }
@@ -3627,9 +3638,10 @@ function Get-PfMemRecommendation([int]$DesiredGb, [int]$HostGb) {
 # post-Docker re-check so their wording never diverges.
 function Show-MemoryStatus {
   param($HostGb, $BudgetGb)   # either may be $null
-  $minMemGb  = if ($env:PF_MIN_MEM_GB)  { [int]$env:PF_MIN_MEM_GB }  else { 5 }
-  $warnMemGb = if ($env:PF_WARN_MEM_GB) { [int]$env:PF_WARN_MEM_GB } else { 8 }
-  $recMemGb  = if ($env:PF_REC_MEM_GB)  { [int]$env:PF_REC_MEM_GB }  else { 16 }
+  $minMemGb   = Get-PfMinMemGb
+  $warnMemGb  = Get-PfWarnMemGb
+  $recMemGb   = Get-PfRecMemGb
+  $reserveGb  = Get-PfOsReserveGb
 
   # Effective = what the client actually gets; grade on this.
   $effective = if ($null -ne $BudgetGb) { $BudgetGb } elseif ($null -ne $HostGb) { $HostGb } else { $null }
@@ -3655,19 +3667,43 @@ function Show-MemoryStatus {
     $recRun   = $warnMemGb
   }
   # A throttled Docker budget is fixed at the daemon; a small host needs more RAM.
-  $budgetIsBottleneck = ($null -ne $BudgetGb) -and ($null -eq $HostGb -or $BudgetGb -lt $HostGb)
+  # A host that cannot reach the floor even with the OS reserve honoured is too
+  # small for tracebloc no matter how Docker is configured, so it is NOT a budget
+  # bottleneck — a resize hint there is a dead end that repeats an unachievable
+  # size. Mirrors the bash recheck's host-too-small branch (preflight.sh, #428).
+  $hostTooSmall = ($null -ne $HostGb) -and (($HostGb - $reserveGb) -lt $minMemGb)
+  $budgetIsBottleneck = ($null -ne $BudgetGb) -and ($null -eq $HostGb -or $BudgetGb -lt $HostGb) -and (-not $hostTooSmall)
 
   if ($effective -lt $minMemGb) {
     Warn "Memory: $label$budgetNote - below the $minMemGb GB the client needs; it will OOM."
     if ($budgetIsBottleneck) {
       Hint "Give Docker at least $minMemGb GB (up to $recRun GB): WSL2 backend - [wsl2] memory=${recRun}GB in %UserProfile%\.wslconfig + 'wsl --shutdown'; Hyper-V - Docker Desktop -> Settings -> Resources -> Advanced."
+    } elseif ($hostTooSmall) {
+      # Name the OS reserve and the resulting practical minimum. Without it, a
+      # 5-6 GB host reads "you have 6 GB, you need 5 GB, get a bigger machine",
+      # which looks self-contradictory (Bugbot) — the shortfall only makes sense
+      # once the ~2 GB the OS needs is stated. Mirrors bash's reserve-aware copy
+      # in _pf_recheck_runtime_mem.
+      Hint "This machine has $label of RAM total - too little for tracebloc: the client needs a $minMemGb GB Docker budget and the OS needs ~$reserveGb GB, so about $($minMemGb + $reserveGb) GB physical is the practical minimum. Use a larger machine."
     } else {
       Hint "This machine has $label of RAM total; the client needs at least $minMemGb GB. Free up memory or use a larger machine."
     }
   }
   elseif ($effective -lt $warnMemGb) {
-    Warn "Memory: $label$budgetNote - enough to run the client, but training (~8 GB/job) may OOM; $recTrain GB recommended to train locally."
-    Hint "For local training, give Docker up to $recTrain GB: WSL2 backend - [wsl2] memory=${recTrain}GB in %UserProfile%\.wslconfig + 'wsl --shutdown'; Hyper-V - Docker Desktop -> Settings -> Resources -> Advanced."
+    # hostTooSmall must be consulted HERE too, not only in the below-floor branch
+    # (Bugbot). A 5-6 GB host with Docker down grades as "enough to run", and the
+    # training hint would then print memory=5GB — a budget that leaves the OS 1 GB
+    # and that this same function calls unachievable two branches up. Such a
+    # machine cannot be tuned into a training box at all, so name that instead of
+    # printing a number: no branch may emit a concrete memory= value for a host
+    # that cannot reach the floor while keeping the OS reserve.
+    if ($hostTooSmall) {
+      Warn "Memory: $label$budgetNote - enough to run the client, but too little to train locally (~8 GB/job)."
+      Hint "This machine has $label of RAM total and the OS needs ~$reserveGb GB, so it cannot give Docker a training-sized budget. Run the client here and train on a larger machine."
+    } else {
+      Warn "Memory: $label$budgetNote - enough to run the client, but training (~8 GB/job) may OOM; $recTrain GB recommended to train locally."
+      Hint "For local training, give Docker up to $recTrain GB: WSL2 backend - [wsl2] memory=${recTrain}GB in %UserProfile%\.wslconfig + 'wsl --shutdown'; Hyper-V - Docker Desktop -> Settings -> Resources -> Advanced."
+    }
   }
   else {
     Ok "Memory: $label$budgetNote"

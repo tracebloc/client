@@ -464,12 +464,30 @@ setup() {
   PF_HARD_FAIL=0; _pf_storage_type >/dev/null; [ "$PF_HARD_FAIL" -eq 0 ]
 }
 
-@test "_pf_storage_type: NFS -> hard fail naming the cause + local-path hint" {
+@test "_pf_storage_type: NFS -> hard fail with a FOLLOWABLE remedy, not the old ~/.tracebloc advice (#479)" {
   _pf_fstype() { echo nfs; }
   run _pf_storage_type
   [[ "$output" == *"network filesystem (nfs)"* ]]
-  [[ "$output" == *"HOST_DATA_DIR"* ]]
+  # the followable remedy (shared with early_data_dir_guard)
+  [[ "$output" == *"install as a user whose home is on a local disk"* ]]
+  [[ "$output" == *"TRACEBLOC_ALLOW_NETWORK_FS=1"* ]]
+  # NOT the old un-followable advice: on a network home ~/.tracebloc is still NFS,
+  # and validate_config rejects paths outside $HOME (#479).
+  [[ "$output" != *'HOST_DATA_DIR="$HOME/.tracebloc" ./install'* ]]
+  [[ "$output" != *"the default ~/.tracebloc is local"* ]]
   PF_HARD_FAIL=0; _pf_storage_type >/dev/null 2>&1; [ "$PF_HARD_FAIL" -eq 1 ]
+}
+
+@test "_pf_storage_type and early_data_dir_guard share the same network-FS remedy (#479)" {
+  # Both route through _pf_network_fs_remedy — capture it once and assert both callers'
+  # remedy lines match it, so they can't drift.
+  local remedy; remedy="$(_pf_network_fs_remedy)"
+  [[ "$remedy" == *"install as a user whose home is on a local disk"* ]]
+  _pf_fstype() { echo nfs; }
+  run _pf_storage_type
+  [[ "$output" == *"install as a user whose home is on a local disk"* ]]
+  HOST_DATA_DIR="$BATS_TEST_TMPDIR/fresh479/.tracebloc" run early_data_dir_guard
+  [[ "$output" == *"install as a user whose home is on a local disk"* ]]
 }
 
 @test "_pf_storage_type: NFS4 -> hard fail" {

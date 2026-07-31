@@ -1,6 +1,10 @@
 #!/usr/bin/env bats
 # Tests for scripts/lib/common.sh — config validation, the install_cleanup
 # CLIENT_STATE guard (#716), retry, has.
+# 1.7.0, not 1.5.0: `run -<code>` landed in 1.5.0 but bats_require_minimum_version
+# itself only exists from 1.7.0, so a 1.5.x-1.6.x bats would die on THIS line
+# before the guard could help. 1.7.0 is the real floor. (Saqlain review, #443.)
+bats_require_minimum_version 1.7.0
 load test_helper
 
 setup() {
@@ -9,7 +13,10 @@ setup() {
 
 # ── validate_config ────────────────────────────────────────────────────────
 @test "validate_config: valid config passes" {
-  HOME="$BATS_TEST_TMPDIR"; USER=tester
+  # cd -P like the tilde tests below: macOS puts BATS_TEST_TMPDIR under the
+  # /var -> /private/var symlink, and validate_config resolves the dir via
+  # `cd -P` — an unresolved $HOME would spuriously fail the under-$HOME check.
+  HOME="$(cd -P "$BATS_TEST_TMPDIR" && pwd)"; USER=tester
   CLUSTER_NAME=tracebloc; SERVERS=1; AGENTS=1
   HOST_DATA_DIR="$HOME/.tracebloc"
   run validate_config
@@ -348,8 +355,9 @@ setup() {
 @test "sudo(): non-root without sudo returns 127 (best-effort friendly), never exits" {
   id() { echo 1000; }
   _have_sudo_bin() { return 1; }
-  run sudo modprobe overlay
-  [ "$status" -eq 127 ]
+  # `run -127` makes bats assert the 127 itself and fail the test at this line on
+  # any other code, so a following [ "$status" -eq 127 ] would be unreachable.
+  run -127 sudo modprobe overlay
 }
 
 @test "preflight_sudo: root returns 0 with no sudo binary needed" {
