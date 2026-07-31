@@ -1293,10 +1293,13 @@ _report_cgroup_delegation() {
 _ensure_cgroup_delegation() {
   local dir="${TB_USER_UNIT_DROPIN_DIR:-/etc/systemd/system/user@.service.d}"
   local conf="$dir/delegate.conf"
-  # Fast path: already delegated → no privileged call at all (an unprivileged read;
-  # the drop-in is world-readable under /etc).
+  # Fast path: drop-in already present → no privileged call at all (an unprivileged
+  # read; it's world-readable under /etc). But still VERIFY it's active and re-surface
+  # if not — a 2nd run over a written-but-not-yet-live drop-in must NOT take a silent
+  # fast path (the exact #496 "written but not active" case; #514 reviewer). The report
+  # is itself unprivileged (a controllers read), so this keeps the no-sudo property.
   if [[ -f "$conf" ]] && grep -qF 'Delegate=cpu cpuset io memory pids' "$conf" 2>/dev/null; then
-    log "cgroup delegation drop-in already present."
+    _report_cgroup_delegation "$conf"
     return 0
   fi
   case "${PROBE_PRIVILEGE:-no_sudo}" in
@@ -1413,9 +1416,16 @@ run_prepare_host() {
   # so writing it once here covers the researcher named above — this is the second
   # half of the prepare-host contract alongside the subuid/subgid range. Best-effort:
   # never fail the whole prep over it.
+  # Report in prepare-host mode: the drop-in is for the RESEARCHER's future session, so
+  # _report_cgroup_delegation must not judge the ADMIN's live controllers nor print the
+  # "recreate the cluster" advice (prepare-host creates none). The mode was reset right
+  # after install_docker_engine, so set it again around this write — otherwise it falls
+  # through to the full-install branch on the admin's slice (#514 reviewer).
+  TB_PREPARE_HOST_MODE=1
   if ! _write_cgroup_delegation; then
     warn "Couldn't write the cgroup delegation drop-in; a rootless install won't enforce pod limits until it's added (see above)."
   fi
+  TB_PREPARE_HOST_MODE=""
 
   echo ""
   success "Host prepared."

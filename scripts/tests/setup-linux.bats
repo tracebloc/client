@@ -1614,3 +1614,57 @@ _stub_install_steps() {
   [[ "$output" != *"k3d cluster delete"* ]]           # prepare-host creates no cluster
   [[ "$output" != *"NOT active in this session"* ]]   # doesn't judge on the admin's own slice
 }
+
+# _ensure_cgroup_delegation is the ONLY full-install caller, and it short-circuits at
+# its own fast path BEFORE reaching _write_cgroup_delegation. So the #496 "re-surface
+# an inactive drop-in on re-run" guarantee has to hold on THAT path too, or the whole
+# fix is dead on every 2nd+ full install (the exact #514 reviewer catch).
+@test "_ensure_cgroup_delegation: drop-in present but NOT active -> fast path re-surfaces the warning, still no privileged call (#514)" {
+  TB_USER_UNIT_DROPIN_DIR="$(mktemp -d)/user@.service.d"; mkdir -p "$TB_USER_UNIT_DROPIN_DIR"
+  printf '[Service]\nDelegate=cpu cpuset io memory pids\n' > "$TB_USER_UNIT_DROPIN_DIR/delegate.conf"
+  cf="$(mktemp)"; echo "memory pids" > "$cf"; TB_USER_CGROUP_CONTROLLERS="$cf"   # written last run, not live yet
+  PROBE_PRIVILEGE=no_sudo
+  sudo() { record "sudo $*"; }
+  run _ensure_cgroup_delegation
+  [[ "$output" == *"NOT active in this session"* ]]   # NOT a silent "already present" log
+  [[ "$output" == *"k3d cluster delete"* ]]           # full-install remedy (not prepare-host mode here)
+  run mock_calls
+  [ -z "$output" ]                                     # …and still no sudo/systemctl (unprivileged read only)
+}
+
+@test "_ensure_cgroup_delegation: drop-in present AND active -> fast path confirms active, no privileged call (#514)" {
+  TB_USER_UNIT_DROPIN_DIR="$(mktemp -d)/user@.service.d"; mkdir -p "$TB_USER_UNIT_DROPIN_DIR"
+  printf '[Service]\nDelegate=cpu cpuset io memory pids\n' > "$TB_USER_UNIT_DROPIN_DIR/delegate.conf"
+  cf="$(mktemp)"; echo "cpuset cpu io memory pids" > "$cf"; TB_USER_CGROUP_CONTROLLERS="$cf"
+  PROBE_PRIVILEGE=no_sudo
+  sudo() { record "sudo $*"; }
+  run _ensure_cgroup_delegation
+  [[ "$output" == *"active in this session"* ]]
+  [[ "$output" != *"NOT active"* ]]
+  run mock_calls
+  [ -z "$output" ]
+}
+
+# The prepare-host caller resets TB_PREPARE_HOST_MODE right after install_docker_engine,
+# so without re-setting it around the cgroup write the report would judge the ADMIN's
+# live slice and print the "recreate the cluster" advice prepare-host can't act on
+# (#514 reviewer). Drive the REAL run_prepare_host, not _write_cgroup_delegation direct.
+@test "run_prepare_host: cgroup drop-in is reported in prepare-host mode — researcher wording, no cluster-delete, admin slice ignored (#514)" {
+  MOCK_CALLS="$(mktemp)"
+  OS=Linux; TB_PREPARE_USER=researcher
+  TB_USER_UNIT_DROPIN_DIR="$(mktemp -d)/user@.service.d"
+  cf="$(mktemp)"; echo "memory pids" > "$cf"; TB_USER_CGROUP_CONTROLLERS="$cf"   # admin's own slice: inactive
+  host_audit()           { :; }
+  preflight_sudo()       { :; }
+  setup_pm()             { :; }
+  apt_wait_for_lock()    { :; }
+  install_docker_engine(){ :; }
+  install_system_deps()  { :; }
+  systemctl()            { :; }
+  sudo()                 { record "sudo $*"; return 0; }   # fakes the drop-in write (idempotent path)
+  run run_prepare_host
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"researcher's next login"* ]]      # mode-aware wording, not judged on the admin
+  [[ "$output" != *"k3d cluster delete"* ]]           # prepare-host creates no cluster to recreate
+  [[ "$output" != *"NOT active in this session"* ]]
+}
