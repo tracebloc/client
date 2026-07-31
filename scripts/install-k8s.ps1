@@ -3575,6 +3575,20 @@ function Get-PfRuntimeMemGb {
   } catch {}
   return $null
 }
+
+# The same budget in MiB. The FLOOR CHECK needs sub-GB precision: Get-PfRuntimeMemGb
+# floors to whole GB, and a VM configured at exactly the floor reports a few hundred
+# MiB less than its configured size (guest kernel + reserved), so 5 GB configured ->
+# ~4.8 GB reported -> floors to 4. Enforcing on that would hard-fail a correctly
+# sized machine, so the gate compares MiB against the floor minus a grace band
+# (mirrors bash's PF_VM_MEM_GRACE_MIB, preflight.sh #513). $null if undeterminable.
+function Get-PfRuntimeMemMib {
+  try {
+    $v = ((docker info --format '{{.MemTotal}}' 2>$null) | Out-String).Trim()
+    if ($v -match '^\d+$' -and [int64]$v -gt 0) { return [math]::Floor([int64]$v / 1MB) }
+  } catch {}
+  return $null
+}
 function Get-PfRuntimeCpu {
   try {
     $v = ((docker info --format '{{.NCPU}}' 2>$null) | Out-String).Trim()
@@ -3607,6 +3621,11 @@ function Get-PfOsReserveGb { if ($script:PfOsReserveGb -gt 0) { return [int]$scr
 function Get-PfMinMemGb    { if ($env:PF_MIN_MEM_GB)  { return [int]$env:PF_MIN_MEM_GB }  else { return 5 } }
 function Get-PfWarnMemGb   { if ($env:PF_WARN_MEM_GB) { return [int]$env:PF_WARN_MEM_GB } else { return 8 } }
 function Get-PfRecMemGb    { if ($env:PF_REC_MEM_GB)  { return [int]$env:PF_REC_MEM_GB }  else { return 16 } }
+# How far below the floor a VM may REPORT before the runtime gate calls it sub-floor.
+# A guest's MemTotal runs a few hundred MiB under its configured size, so a VM set to
+# exactly the documented floor must still pass -- otherwise the effective floor is a
+# GB higher than we tell people (bash PF_VM_MEM_GRACE_MIB, #513 reviewer).
+function Get-PfVmMemGraceMib { if ($env:PF_VM_MEM_GRACE_MIB) { return [int]$env:PF_VM_MEM_GRACE_MIB } else { return 512 } }
 
 # Cap a desired Docker-memory recommendation at what the host can actually give
 # (physical RAM minus the OS reserve), so we never advise more than the machine
@@ -3858,16 +3877,52 @@ function Test-Preflight {
 
 # Re-evaluate memory once Docker is confirmed up. Test-Preflight runs before Docker
 # Desktop starts, so its read may have been host RAM, not the (smaller) Docker VM
-# budget. Called from New-K3dCluster. WARN-only — the user has already waited for
-# Docker, so aborting here would be jarring.
+# budget. Called from New-K3dCluster, as its FIRST statement — nothing is built yet,
+# so stopping here leaves no half-made cluster behind.
+#
+# A sub-FLOOR budget HARD-FAILS here. This is the one point the REAL VM budget is
+# known, and a VM below the floor OOM-crashloops the client, so proceeding is worse
+# than the jarring stop this used to prefer. bash reached the same conclusion and
+# enforces it on every OS (_pf_recheck_runtime_mem -> error -> exit 1, #513); Windows
+# only ever WARNED, so the platform this whole memory story is about was the one
+# platform that still shipped the crash. A between-floor-and-warn budget still only
+# warns (it can run, just tightly) — that grading stays in Show-MemoryStatus, which
+# remains purely presentational; enforcement lives here, mirroring bash's split.
 function Test-PreflightRuntimeMem {
   if ($env:TRACEBLOC_SKIP_PREFLIGHT) { return }
-  $budget = Get-PfRuntimeMemGb
-  if ($null -eq $budget) { return }
+  # One `docker info` read, in MiB, so the number we PRINT and the number we ENFORCE
+  # on cannot disagree; GB is derived from it rather than read separately.
+  $mib = Get-PfRuntimeMemMib
+  if ($null -eq $mib) { return }              # daemon not reporting — nothing to add
+  $budget = [int][math]::Floor($mib / 1024)
+  $hostGb = Get-PfMemGb
+
   # Re-run the SAME assessment now that Docker's budget is known, so both floors
   # (min "will OOM" + warn "training may OOM") apply to the budget and the wording
   # matches Step-1 (#417 reviewer). Host RAM stays the reported label.
-  Show-MemoryStatus -HostGb (Get-PfMemGb) -BudgetGb $budget
+  Show-MemoryStatus -HostGb $hostGb -BudgetGb $budget
+
+  $minGb = Get-PfMinMemGb
+  # Grace band, not a bare `-lt $minGb`: see Get-PfRuntimeMemMib. A VM at exactly the
+  # documented floor passes; a genuinely sub-floor one (e.g. 4 GB) does not.
+  if ($mib -ge (($minGb * 1024) - (Get-PfVmMemGraceMib))) { return }
+
+  $reserveGb = Get-PfOsReserveGb
+  Write-Host ""
+  if ($null -ne $hostGb -and ($hostGb - $reserveGb) -lt $minGb) {
+    # No Docker setting can fix this one, so don't offer a resize that repeats an
+    # unachievable size — name the practical minimum instead (matches the
+    # host-too-small copy Show-MemoryStatus prints, and bash's #428 branch).
+    Write-PfFail "This machine has $hostGb GB RAM - too little for tracebloc: the client needs a $minGb GB Docker budget and Windows needs ~$reserveGb GB, so about $($minGb + $reserveGb) GB physical is the practical minimum."
+    Hint "No Docker setting fixes this - run the client on a larger machine."
+  } else {
+    # Achievable target: clamped to this host when we know its size, else the raw
+    # run target (no ceiling is known, so don't cap at the throttled budget, #483).
+    $target = if ($null -ne $hostGb) { Get-PfMemRecommendation -DesiredGb (Get-PfWarnMemGb) -HostGb $hostGb } else { Get-PfWarnMemGb }
+    Write-PfFail "Docker's VM has only $budget GB - below the $minGb GB the tracebloc client needs; it will OOM-crashloop."
+    Hint "Raise it to >= $target GB, then re-run: WSL2 backend - set [wsl2] memory=${target}GB in %UserProfile%\.wslconfig and run 'wsl --shutdown'; Hyper-V backend - Docker Desktop -> Settings -> Resources -> Advanced."
+  }
+  Err "Not enough memory for the tracebloc client. (Override at your own risk with `$env:TRACEBLOC_SKIP_PREFLIGHT=1.)"
 }
 
 # =============================================================================
