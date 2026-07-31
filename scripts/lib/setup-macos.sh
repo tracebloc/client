@@ -258,27 +258,30 @@ install_docker_desktop() {
 }
 
 install_macos_cli_tools() {
-  # brew delivers these binaries with no checksum of our own (#429), so the
-  # execute-gate (#411) is the only thing standing between a partial/wrong-arch
-  # install and a green "System tools" that dies at cluster-create.
-  if ! has kubectl; then
-    spin_cmd "Installing system tools…" brew install kubectl
-  fi
-  assert_tool_runs kubectl version --client
-
-  if ! has k3d; then
-    spin_cmd "Installing system tools…" brew install k3d
-  fi
-  assert_tool_runs k3d version
-
-  if ! has helm; then
-    spin_cmd "Installing system tools…" brew install helm
-  fi
-  # bare `helm version` (not --short: may be dropped like kubectl's). No --rm:
-  # brew owns these binaries; deleting a formula's symlink just wedges the re-run.
-  assert_tool_runs helm version
-
-  success "System tools ready"
+  # kubectl/k3d/helm now come from the SAME pinned, checksum-verified direct-download
+  # path as Linux — install_kubectl / install_k3d / install_helm (setup-linux.sh, always
+  # sourced) are OS-aware via OS_DL, so the K3D_VERSION / HELM_VERSION pins are honored
+  # on macOS instead of brew floating to latest and diverging from the chart-tested
+  # Linux installs (#429). brew still delivers Docker/colima (install_docker_desktop) —
+  # this only moves the version-pinned CLI tools onto the shared path. Each installer
+  # ends in the execute-gate (#411, assert_tool_runs), so a broken/wrong-arch binary
+  # fails the "System tools" step loudly rather than printing a false success.
+  OS_DL="darwin"
+  # macOS has no Tier/rootless model, so it does NOT use _set_tools_target (the Linux
+  # selector): land the pinned binaries in /usr/local/bin, which is on the default
+  # login PATH (/etc/paths) on BOTH Intel and Apple Silicon — no PATH-persistence
+  # dance needed. It needs sudo to write and may not exist yet on Apple Silicon
+  # (Homebrew uses /opt/homebrew), so create it best-effort.
+  TB_TOOLS_DIR="/usr/local/bin"
+  TB_TOOLS_SUDO="sudo"
+  sudo mkdir -p "$TB_TOOLS_DIR" 2>/dev/null || true
+  local _saved_umask
+  _saved_umask=$(umask)
+  umask 022                # binaries must be world-executable, not owner-only (umask 077)
+  install_kubectl
+  install_k3d
+  install_helm             # ends with success "System tools"
+  umask "$_saved_umask"
 }
 
 install_macos() {
