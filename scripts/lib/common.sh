@@ -53,6 +53,40 @@ curl_secure() {
   curl --tlsv1.2 "${_bounds[@]}" "$@"
 }
 
+# Verify FILE against an EXPECTED sha256, portably and FAIL-CLOSED. Linux ships
+# sha256sum (coreutils); macOS ships NO sha256sum but has shasum -a 256 — so the
+# same pinned-download verification works on both (#429). We feed "<hash>  <file>"
+# to `--check` (exit-code only) rather than recomputing and string-comparing, so
+# the bats fetch mocks that stub `sha256sum` keep working unchanged. `command -v`
+# (not has()) picks the tool: has() is mocked per-test on PRESENT_CMDS, but the
+# checksum tool is a RUNTIME detail, and the tests provide it as a shell function
+# that command -v resolves. An EMPTY expected hash fails closed here too.
+_verify_sha256() {
+  local expected="$1" file="$2"
+  [[ -n "$expected" ]] || return 2
+  # Tool choice: Linux ships GNU sha256sum (coreutils, on even minimal cloud images).
+  # macOS ALSO ships a /sbin/sha256sum, but it's a BSD build (Darwin 1.0) that does
+  # NOT understand GNU --check — only `shasum -a 256` does — so on real macOS prefer
+  # shasum. The `type -t` guard keeps this from disturbing the bats fetch tests, which
+  # run on macOS dev boxes and provide sha256sum as a shell FUNCTION (a mock): a
+  # function means we're under test, so honor it rather than the Darwin fallback.
+  # Both real tools read "<hash>  <file>" on stdin and report via exit code with
+  # --check --status, which is exactly what those mocks stub.
+  local tool=""
+  if [[ "$OS" == "Darwin" && "$(type -t sha256sum)" != function ]]; then
+    command -v shasum >/dev/null 2>&1 && tool=shasum
+  elif command -v sha256sum >/dev/null 2>&1; then
+    tool=sha256sum
+  elif command -v shasum >/dev/null 2>&1; then
+    tool=shasum
+  fi
+  case "$tool" in
+    sha256sum) printf '%s  %s\n' "$expected" "$file" | sha256sum --check --status 2>/dev/null ;;
+    shasum)    printf '%s  %s\n' "$expected" "$file" | shasum -a 256 --check --status 2>/dev/null ;;
+    *)         return 2 ;;
+  esac
+}
+
 # ── Colours ──────────────────────────────────────────────────────────────────
 # One brand-grounded palette (design-system tokens): cyan #01a5cc = structure,
 # lime #91e947 = action — mirrors the Go CLI's internal/ui engine. Each tone

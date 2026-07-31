@@ -226,6 +226,14 @@ _drift_ca_trust() {
 # a match. Read to EOF and redirect instead.
 _drift_gate_bash() { grep -vE '^[[:space:]]*#' "$1" 2>/dev/null | grep -F assert_tool_runs | grep -E "(^| )$2 version" >/dev/null 2>&1; }
 _drift_gate_ps1()  { grep -vE '^[[:space:]]*#' "$1" 2>/dev/null | grep -E "Assert-ToolRuns -Name \"$2\"" >/dev/null 2>&1; }
+# macOS now installs kubectl/k3d/helm through the SHARED install_<tool> functions in
+# setup-linux.sh (each of which execute-gates via assert_tool_runs) instead of a bare
+# brew install + its own gate call (#429) — so for setup-macos.sh the gate is satisfied
+# EITHER by a direct assert_tool_runs OR by delegating to the gated shared installer.
+_drift_gate_macos() {
+  _drift_gate_bash "$1" "$2" && return 0
+  grep -vE '^[[:space:]]*#' "$1" 2>/dev/null | grep -E "(^| )install_$2( |\$)" >/dev/null 2>&1
+}
 _drift_execute_gates() {
   echo "▸ Tool execute-gate parity (setup-linux.sh · setup-macos.sh · install-k8s.ps1)"
   local before=$_drift f t
@@ -233,8 +241,13 @@ _drift_execute_gates() {
   for f in "${bash_files[@]}"; do
     if [[ ! -f "$DRIFT_ROOT/$f" ]]; then _note "$f is missing"; continue; fi
     for t in kubectl k3d helm; do
-      _drift_gate_bash "$DRIFT_ROOT/$f" "$t" || \
-        _note "$f: no execute-gate call for '$t' (assert_tool_runs … $t version) — #411"
+      if [[ "$f" == *setup-macos.sh ]]; then
+        _drift_gate_macos "$DRIFT_ROOT/$f" "$t" || \
+          _note "$f: no execute-gate for '$t' (assert_tool_runs … $t version, or a call to the gated install_$t) — #429/#411"
+      else
+        _drift_gate_bash "$DRIFT_ROOT/$f" "$t" || \
+          _note "$f: no execute-gate call for '$t' (assert_tool_runs … $t version) — #411"
+      fi
     done
   done
   local ps1="scripts/install-k8s.ps1"
