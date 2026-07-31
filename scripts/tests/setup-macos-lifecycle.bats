@@ -70,20 +70,25 @@ setup() {
   [[ "$output" == *"launchctl"* ]]         # registered for this session too
 }
 
-@test "_install_macos_autostart: headless Mac -> LaunchDAEMON runs 'colima start' at BOOT (not a login-only agent) (#430 Bugbot)" {
+@test "_install_macos_autostart: headless Mac -> resilient LaunchDAEMON runs 'colima start' at BOOT (not a login-only agent) (#430 Bugbot)" {
   # A LaunchAgent only loads in a GUI/Aqua login session, which a headless Mac never has,
   # so headless reboot recovery MUST be a system LaunchDaemon that runs at boot.
   TB_LAUNCHDAEMONS_DIR="$BATS_TEST_TMPDIR/LaunchDaemons"
+  HOME="$BATS_TEST_TMPDIR/home"             # daemon log dir lands under a temp home
   _has_gui_session() { return 1; }
   sudo() { record "sudo $*"; "$@"; }        # passthrough so tee/mkdir really write
   _install_macos_autostart
   local plist="$TB_LAUNCHDAEMONS_DIR/io.tracebloc.runtime.plist"
   [ -f "$plist" ]
-  grep -q 'colima</string>' "$plist"
-  grep -q '<string>start</string>' "$plist"
+  [ -d "$HOME/Library/Logs" ]                          # log dir created, else launchd EX_CONFIG (#430 Bugbot)
+  grep -q '<string>/bin/bash</string>' "$plist"        # resilient wrapper, not a bare oneshot (#430 Bugbot)
+  grep -q 'colima start' "$plist"
+  grep -q 'colima stop' "$plist"                        # retry force-stops stale VZ state between attempts
   grep -q '<key>RunAtLoad</key><true/>' "$plist"
-  grep -q '<key>UserName</key>' "$plist"    # runs as the install user, at boot
-  grep -q '<key>EnvironmentVariables</key>' "$plist"   # HOME/PATH for colima under launchd
+  grep -q '<key>UserName</key>' "$plist"                # runs as the install user, at boot
+  grep -q '<key>EnvironmentVariables</key>' "$plist"    # HOME/PATH for colima under launchd
+  grep -q 'Library/Logs/tracebloc-autostart.log' "$plist"
+  ! grep -q '/tmp/tracebloc-autostart.log' "$plist"
   run mock_calls
   [[ "$output" == *"sudo launchctl"* ]]     # registered in the SYSTEM domain
 }

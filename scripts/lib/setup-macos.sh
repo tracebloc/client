@@ -434,7 +434,17 @@ _install_macos_autostart() {
       warn "Couldn't create ${dir}; skipping boot autostart — run 'colima start' manually after a reboot."
       return 1
     }
-    _emit_launch_plist "$label" "$extra" "${_home}/Library/Logs/tracebloc-autostart.log" "$_colima" start | sudo tee "$plist" >/dev/null 2>&1 || {
+    # The daemon logs as the install user; create the log dir first — a fresh headless
+    # account may lack ~/Library/Logs, and launchd fails EX_CONFIG (colima never runs) when
+    # the StandardOutPath directory is missing (#430 Bugbot). Same mkdir the GUI path does.
+    mkdir -p "${_home}/Library/Logs" 2>/dev/null || true
+    # Resilient boot start: a bare oneshot `colima start` at boot is fragile — the VZ+Rosetta
+    # stack commonly leaves stale VM state across a reboot, so the first start fails. Retry a
+    # few times, force-stopping between attempts to clear the stale state (#430 Bugbot). The
+    # loop body has no <, >, or & so it stays valid inside the plist <string>.
+    local _boot
+    _boot="tries=0; until ${_colima} start; do tries=\$((tries+1)); if [ \$tries -ge 3 ]; then exit 1; fi; ${_colima} stop; sleep 15; done"
+    _emit_launch_plist "$label" "$extra" "${_home}/Library/Logs/tracebloc-autostart.log" /bin/bash -c "$_boot" | sudo tee "$plist" >/dev/null 2>&1 || {
       warn "Couldn't write the boot autostart daemon at ${plist}; run 'colima start' manually after a reboot."
       return 1
     }
