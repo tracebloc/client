@@ -518,7 +518,14 @@ _pull_failure_detail() {
   pull_fail="$(printf '%s\n' "$events" | grep -iE 'failed to pull|ErrImagePull' | tail -n 3 || true)"
   # Cap the failing-pod lines (like the PowerShell path's Select-Object -First 3) so a
   # cluster with many stuck pods doesn't print a wall of indented lines (reviewer).
-  printf '%s\n' "$bad" | head -n 3
+  # Herestring, NOT `printf … | head -n 3`: under `set -o pipefail` head closes the
+  # pipe after its 3rd line, so a namespace with enough stuck pods to push `$bad`
+  # past the ~64KB pipe buffer makes printf take SIGPIPE → the pipeline exits 141 →
+  # with errexit live this function aborts HERE and drops the scoped pull event
+  # below — the one actionable line (x509 / blocked registry / auth). Measured on
+  # bash 5.2.21 + coreutils 9.4: 65,622 bytes is already enough. `<<<` reads from a
+  # temp file, so there is no writer left to signal and no `|| true` to mask it.
+  head -n 3 <<< "$bad"
   [[ -n "$pull_fail" ]] && printf '%s\n' "$pull_fail"
   return 0
 }
