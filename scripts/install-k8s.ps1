@@ -3646,6 +3646,13 @@ function Show-MemoryStatus {
     Warn "Memory: $label$budgetNote - below the $minMemGb GB the client needs; it will OOM."
     if ($budgetIsBottleneck) {
       Hint "Give Docker at least $minMemGb GB (up to $recRun GB): WSL2 backend - [wsl2] memory=${recRun}GB in %UserProfile%\.wslconfig + 'wsl --shutdown'; Hyper-V - Docker Desktop -> Settings -> Resources -> Advanced."
+    } elseif ($hostTooSmall) {
+      # Name the OS reserve and the resulting practical minimum. Without it, a
+      # 5-6 GB host reads "you have 6 GB, you need 5 GB, get a bigger machine",
+      # which looks self-contradictory (Bugbot) — the shortfall only makes sense
+      # once the ~2 GB the OS needs is stated. Mirrors bash's reserve-aware copy
+      # in _pf_recheck_runtime_mem.
+      Hint "This machine has $label of RAM total - too little for tracebloc: the client needs a $minMemGb GB Docker budget and the OS needs ~$script:PfOsReserveGb GB, so about $($minMemGb + $script:PfOsReserveGb) GB physical is the practical minimum. Use a larger machine."
     } else {
       Hint "This machine has $label of RAM total; the client needs at least $minMemGb GB. Free up memory or use a larger machine."
     }

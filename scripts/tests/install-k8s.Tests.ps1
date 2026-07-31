@@ -1603,6 +1603,21 @@ Describe "Show-MemoryStatus: a host too small to reach the floor (#417/#444)" {
     $out | Should -Not -Match 'at least 5 GB \(up to 4 GB\)'
     $out | Should -Not -Match 'memory=4GB'
   }
+  # Without naming the OS reserve, a 6 GB host reads "you have 6, you need 5, get a
+  # bigger machine" — self-contradictory (Bugbot). State the reserve and the
+  # resulting practical minimum, as bash's _pf_recheck_runtime_mem does.
+  It "names the OS reserve and the practical minimum, so the shortfall adds up" {
+    $out = (Show-MemoryStatus -HostGb 6 -BudgetGb 3 6>&1 | Out-String)
+    $out | Should -Match 'the OS needs ~2 GB'
+    $out | Should -Match '7 GB physical is the practical minimum'
+  }
+  It "the arithmetic is reserve-aware for every too-small host (5 and 6 GB both explained)" {
+    foreach ($h in 4..6) {
+      $out = (Show-MemoryStatus -HostGb $h -BudgetGb 2 6>&1 | Out-String)
+      $out | Should -Match 'too little for tracebloc'
+      $out | Should -Match 'practical minimum'
+    }
+  }
   It "still offers the resize hint when the host CAN reach the floor (8 GB host)" {
     $out = (Show-MemoryStatus -HostGb 8 -BudgetGb 4 6>&1 | Out-String)
     $out | Should -Match 'wslconfig'          # a genuine budget bottleneck
