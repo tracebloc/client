@@ -791,7 +791,11 @@ install_client_helm() {
     TB_NAMESPACE="$existing_ns"
   fi
 
-  TB_CLIENT_PASSWORD_ESCAPED="${TB_CLIENT_PASSWORD//\'/\'\'}"
+  # ' -> '' via $_sq, not \': bash 3.2 keeps the backslash in an escaped-quote
+  # replacement (same constraint as _extract_yaml_value's unescape above), which
+  # would corrupt a password containing a quote into a\'\'b inside the values file.
+  local _sq="'"
+  TB_CLIENT_PASSWORD_ESCAPED="${TB_CLIENT_PASSWORD//$_sq/$_sq$_sq}"
 
   # ── GPU limits ──────────────────────────────────────────────────────────
   local gpu_val

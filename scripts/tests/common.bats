@@ -1,6 +1,7 @@
 #!/usr/bin/env bats
 # Tests for scripts/lib/common.sh — config validation, the install_cleanup
 # CLIENT_STATE guard (#716), retry, has.
+bats_require_minimum_version 1.5.0   # for `run -<code>` (expected-exit syntax)
 load test_helper
 
 setup() {
@@ -9,7 +10,10 @@ setup() {
 
 # ── validate_config ────────────────────────────────────────────────────────
 @test "validate_config: valid config passes" {
-  HOME="$BATS_TEST_TMPDIR"; USER=tester
+  # cd -P like the tilde tests below: macOS puts BATS_TEST_TMPDIR under the
+  # /var -> /private/var symlink, and validate_config resolves the dir via
+  # `cd -P` — an unresolved $HOME would spuriously fail the under-$HOME check.
+  HOME="$(cd -P "$BATS_TEST_TMPDIR" && pwd)"; USER=tester
   CLUSTER_NAME=tracebloc; SERVERS=1; AGENTS=1
   HOST_DATA_DIR="$HOME/.tracebloc"
   run validate_config
@@ -348,7 +352,7 @@ setup() {
 @test "sudo(): non-root without sudo returns 127 (best-effort friendly), never exits" {
   id() { echo 1000; }
   _have_sudo_bin() { return 1; }
-  run sudo modprobe overlay
+  run -127 sudo modprobe overlay   # -127: expected here — silences bats BW01
   [ "$status" -eq 127 ]
 }
 
