@@ -580,6 +580,48 @@ Describe "Get-NotReadyState" {
     Mock kubectl { if ($args -match 'logs') { "booting" } else { "x 0/1 ContainerCreating" } }
     Get-NotReadyState -Namespace ns | Should -Be "starting"
   }
+  It "captures the x509 pull event into NotReadyDetail (#425)" {
+    Mock kubectl {
+      if ($args -match 'logs') { return "booting" }
+      if ($args -match 'events') { return 'Failed to pull image "ghcr.io/x": x509: certificate signed by unknown authority' }
+      return "foo 0/1 ImagePullBackOff 0 30s"
+    }
+    Get-NotReadyState -Namespace ns | Should -Be "image_pull_ca"
+    $script:NotReadyDetail | Should -Match 'x509'
+  }
+  It "captures a non-x509 pull event into NotReadyDetail and stays image_pull (#425)" {
+    Mock kubectl {
+      if ($args -match 'logs') { return "booting" }
+      if ($args -match 'events') { return 'Failed to pull image "ghcr.io/x": 403 Forbidden' }
+      return "foo 0/1 ErrImagePull 0 30s"
+    }
+    Get-NotReadyState -Namespace ns | Should -Be "image_pull"
+    $script:NotReadyDetail | Should -Match '403 Forbidden'
+  }
+  It "falls back to the failing pod line when there is no pull event (#425)" {
+    Mock kubectl {
+      if ($args -match 'logs') { return "booting" }
+      if ($args -match 'events') { return "" }
+      return "foo 0/1 ImagePullBackOff 0 30s"
+    }
+    Get-NotReadyState -Namespace ns | Should -Be "image_pull"
+    $script:NotReadyDetail | Should -Match 'ImagePullBackOff'
+  }
+}
+
+Describe "Write-NotReadyDetail (#425 failure copy carries the event text)" {
+  AfterAll { $script:NotReadyDetail = "" }
+  It "prints the captured cluster detail under a labelled block" {
+    $script:NotReadyDetail = "Failed to pull image `"ghcr.io/x`": x509: certificate signed by unknown authority`nfoo 0/1 ImagePullBackOff"
+    $out = Write-NotReadyDetail 6>&1 | Out-String
+    $out | Should -Match 'What the cluster reported'
+    $out | Should -Match 'x509'
+    $out | Should -Match 'ImagePullBackOff'
+  }
+  It "is a no-op when there is no detail (never an empty labelled block)" {
+    $script:NotReadyDetail = ""
+    ((Write-NotReadyDetail 6>&1 | Out-String).Trim()) | Should -BeNullOrEmpty
+  }
 }
 
 Describe "Print-Summary" {

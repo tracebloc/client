@@ -463,6 +463,43 @@ _no_interactive_creds_die() {
 # or fail the install — the authoritative readiness gate is wait_for_client_ready
 # (step f). Skipped entirely when TB_NO_SERVICE_PROGRESS is set (the bats suite,
 # where kubectl is mocked and a poll loop would hang) or kubectl is unavailable.
+# Detect a PERMANENT image-pull failure among the namespace's pods, so the progress
+# copy can tell the truth instead of "still downloading" (#425). On a visible pull
+# failure it prints the concrete pod status line(s) + the matching pull event and
+# returns 0; when no pull failure is visible it prints nothing and returns 1.
+# Bounded + non-fatal; mirrors summary.sh::_diagnose_not_ready's pull signals but is
+# self-contained so it needs no cross-lib sourcing.
+_pull_failure_detail() {
+  local ns="$1" kube_timeout="${TB_PROGRESS_KUBECTL_TIMEOUT:-5s}" pods bad events pull_fail
+  has kubectl || return 1
+  [[ -n "$ns" ]] || return 1
+  pods="$(kubectl get pods -n "$ns" --request-timeout="$kube_timeout" 2>/dev/null || true)"
+  bad="$(printf '%s\n' "$pods" | grep -iE 'ImagePullBackOff|ErrImagePull|InvalidImageName' || true)"
+  [[ -n "$bad" ]] || return 1
+  events="$(kubectl get events -n "$ns" --request-timeout="$kube_timeout" 2>/dev/null || true)"
+  pull_fail="$(printf '%s\n' "$events" \
+    | grep -iE 'failed to pull|ErrImagePull|x509|certificate signed by unknown authority|tls: failed to verify' \
+    | tail -n 3 || true)"
+  printf '%s\n' "$bad"
+  [[ -n "$pull_fail" ]] && printf '%s\n' "$pull_fail"
+  return 0
+}
+
+# Pure: pick the honest end-of-progress outcome (#425). Prints one token:
+#   done       — every container has an image (pulled >= total)
+#   failed     — a permanent pull failure is visible (has_fail non-empty)
+#   downloading— no failure, but pulls demonstrably progressed (max_pulled > 0)
+#   stalled    — nothing pulled and no failure signal yet (pods stuck Pending, etc.)
+# A permanent failure NEVER maps to "downloading", so it can't be sold as background
+# progress. Kept pure so the decision is unit-testable without a live cluster.
+_progress_end_message() {
+  local pulled="$1" total="$2" max_pulled="$3" has_fail="$4"
+  if (( pulled >= total )); then printf 'done'; return; fi
+  if [[ -n "$has_fail" ]];  then printf 'failed'; return; fi
+  if (( max_pulled > 0 ));   then printf 'downloading'; return; fi
+  printf 'stalled'
+}
+
 _download_services_progress() {
   local ns="$1"
   if [[ -n "${TB_NO_SERVICE_PROGRESS:-}" ]]; then return 0; fi
@@ -487,7 +524,7 @@ _download_services_progress() {
   done
   if (( total < 1 )); then return 0; fi   # never saw pods — skip the bar silently
 
-  local deadline pulled=0
+  local deadline pulled=0 max_pulled=0
   deadline=$(( $(date +%s) + ${TB_PULL_TIMEOUT:-300} ))
   tput civis 2>/dev/null || true
   while :; do
@@ -496,6 +533,7 @@ _download_services_progress() {
       | grep -c '.')" || pulled=0
     [[ "$pulled" =~ ^[0-9]+$ ]] || pulled=0
     if (( pulled > total )); then pulled=$total; fi
+    if (( pulled > max_pulled )); then max_pulled=$pulled; fi
     count_bar "$pulled" "$total" "services"
     if (( pulled >= total )); then break; fi
     if (( $(date +%s) >= deadline )); then break; fi
@@ -503,11 +541,26 @@ _download_services_progress() {
   done
   printf "\r\033[K"
   tput cnorm 2>/dev/null || true
-  if (( pulled >= total )); then
-    success "Downloaded — ${total} services"
-  else
-    info "Services are still downloading — they'll finish starting in the background."
-  fi
+
+  # Tell the truth on timeout: a permanent pull failure (x509/blocked registry/auth)
+  # must NOT be sold as "downloading in the background" (#425). Classify, then print
+  # copy that matches reality; the authoritative diagnosis still follows in the
+  # readiness gate + summary.
+  local fail_detail="" outcome
+  if (( pulled < total )); then fail_detail="$(_pull_failure_detail "$ns" || true)"; fi
+  outcome="$(_progress_end_message "$pulled" "$total" "$max_pulled" "$fail_detail")"
+  case "$outcome" in
+    done)
+      success "Downloaded — ${total} services" ;;
+    failed)
+      warn "Some images failed to pull — this won't finish on its own:"
+      printf '%s\n' "$fail_detail" | sed 's/^/      /'
+      info "Likely a blocked registry, an untrusted TLS-inspection CA, or auth — see the diagnosis below." ;;
+    downloading)
+      info "Services are still downloading — they'll finish starting in the background." ;;
+    stalled)
+      info "Services haven't started pulling yet — see the diagnosis below if this persists." ;;
+  esac
   return 0
 }
 

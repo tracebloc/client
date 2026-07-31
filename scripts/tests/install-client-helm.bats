@@ -846,3 +846,51 @@ setup() {
   # must name the RELEASE (\$_rel), not the namespace (Bugbot #442 r5).
   grep -q 'helm -n \$_ns rollback \$_rel' "$f"
 }
+
+# ── #425: honest pull status (never sell a permanent failure as "downloading") ──
+@test "_progress_end_message: complete -> done" {
+  run _progress_end_message 3 3 3 ""
+  [ "$output" = "done" ]
+}
+@test "_progress_end_message: a pull failure -> failed, even with partial progress" {
+  run _progress_end_message 1 3 1 "pod/foo ImagePullBackOff"
+  [ "$output" = "failed" ]
+}
+@test "_progress_end_message: progress, no failure -> downloading" {
+  run _progress_end_message 2 3 2 ""
+  [ "$output" = "downloading" ]
+}
+@test "_progress_end_message: no progress, no failure -> stalled (not 'downloading')" {
+  run _progress_end_message 0 3 0 ""
+  [ "$output" = "stalled" ]
+}
+@test "_pull_failure_detail: ImagePullBackOff -> prints pod + event, returns 0" {
+  has() { [ "$1" = kubectl ]; }
+  kubectl() {
+    case "$*" in
+      *"get pods"*)   printf '%s\n' "foo-abc  0/1  ImagePullBackOff  0  30s" ;;
+      *"get events"*) printf '%s\n' '10s Warning Failed pod/foo Failed to pull image "ghcr.io/x": x509: certificate signed by unknown authority' ;;
+    esac
+  }
+  run _pull_failure_detail tracebloc
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"ImagePullBackOff"* ]]
+  [[ "$output" == *"x509"* ]]
+}
+@test "_pull_failure_detail: healthy pods -> returns 1, prints nothing" {
+  has() { [ "$1" = kubectl ]; }
+  kubectl() { case "$*" in *"get pods"*) printf '%s\n' "foo-abc 1/1 Running 0 1m" ;; esac; }
+  run _pull_failure_detail tracebloc
+  [ "$status" -ne 0 ]
+  [ -z "$output" ]
+}
+@test "_download_services_progress routes the end copy through the honest selector (#425)" {
+  # The end-of-progress copy is chosen by the pure _progress_end_message selector,
+  # a 'failed' branch warns loudly, and the background over-promise appears exactly
+  # once — so a permanent failure can never be printed as background progress.
+  local f="$BATS_TEST_DIRNAME/../lib/install-client-helm.sh"
+  grep -q 'outcome="\$(_progress_end_message' "$f"
+  grep -qE '^\s*failed\)' "$f"
+  grep -q 'Some images failed to pull' "$f"
+  [ "$(grep -c 'Services are still downloading' "$f")" -eq 1 ]
+}
