@@ -109,21 +109,60 @@ function classify(logical, fnr,   tail, word) {
         printf "%s:%d: %s\n", FILENAME, fnr, logical
 }
 
+# Is position `pos` of s inside a quoted string? Walks shell quoting state from the
+# start of the line: '...' suppresses ", "..." suppresses ', and a backslash escapes
+# the next character everywhere except inside single quotes.
+function quoted_at(s, pos,   i, c, sq, dq) {
+    sq = 0; dq = 0
+    for (i = 1; i < pos; i++) {
+        c = substr(s, i, 1)
+        if (c == "\\" && !sq)      { i++ }
+        else if (c == "'" && !dq)  { sq = !sq }
+        else if (c == "\"" && !sq) { dq = !dq }
+    }
+    return (sq || dq)
+}
+
+# The heredoc tag this line opens, or "" if it opens none. A `<<TAG` INSIDE a quoted
+# string is text, not a redirection: `printf "cat <<'EOF'"` was putting the scanner
+# into heredoc-skip mode with no bare terminator to leave it again, so every later
+# line in that file was silently ignored (Bugbot).
+function heredoc_tag_of(line,   s, off, pos, tag) {
+    s = line; off = 0
+    while (match(s, /<<-?[[:space:]]*['"]?[A-Za-z_][A-Za-z0-9_]*['"]?/)) {
+        pos = off + RSTART
+        # `<<<` is a herestring, not a heredoc: `run cmd <<< "r"` matched here from
+        # the second `<` and opened a body that never closed (leftover-guard.bats).
+        if (pos > 1 && substr(line, pos - 1, 1) == "<") { }
+        else if (!quoted_at(line, pos)) {
+            tag = substr(s, RSTART, RLENGTH)
+            sub(/^<<-?[[:space:]]*/, "", tag)
+            gsub(/['"]/, "", tag)
+            sub(/[^A-Za-z0-9_].*$/, "", tag)
+            return tag
+        }
+        off = off + RSTART + RLENGTH - 1
+        s = substr(s, RSTART + RLENGTH)
+    }
+    return ""
+}
+
 FILENAME != prev { prev = FILENAME; in_test = 0; in_heredoc = 0; heredoc_tag = ""; pending = ""; parts = 0 }
 
 # ── heredoc tracking: skip the body so embedded fixture code isn't scanned ──
 in_heredoc {
-    line = trim($0)
-    if (line == heredoc_tag) { in_heredoc = 0; heredoc_tag = "" }
-    next
+    # Safety valve: a heredoc body cannot span an @test at column 0, so even a
+    # mis-detected opener can never swallow more than one test's worth of lines.
+    if ($0 ~ /^@test/) { in_heredoc = 0; heredoc_tag = "" }
+    else {
+        line = trim($0)
+        if (line == heredoc_tag) { in_heredoc = 0; heredoc_tag = "" }
+        next
+    }
 }
-/<<-?[[:space:]]*['"]?[A-Za-z_][A-Za-z0-9_]*['"]?/ {
-    tag = $0
-    sub(/^.*<<-?[[:space:]]*/, "", tag)
-    gsub(/['"]/, "", tag)
-    sub(/[^A-Za-z0-9_].*$/, "", tag)
-    if (tag != "") { in_heredoc = 1; heredoc_tag = tag; pending = ""; parts = 0 }
-    next
+{
+    tag = heredoc_tag_of($0)
+    if (tag != "") { in_heredoc = 1; heredoc_tag = tag; pending = ""; parts = 0; next }
 }
 
 /^@test/ { in_test = 1; pending = ""; parts = 0; next }

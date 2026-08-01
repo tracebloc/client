@@ -124,6 +124,56 @@ setup() {
   [[ "$(printf '%s' "$out" | grep -c .)" == "2" ]] || return 1
 }
 
+@test "the scanner does not mistake a quoted <<TAG or a herestring for a heredoc (Bugbot)" {
+  # A `<<TAG` inside a quoted string is text, and `<<<` is a herestring — neither
+  # opens a heredoc. Treating them as openers put the scanner into skip mode with no
+  # bare terminator to leave it, so it silently ignored the REST OF THE FILE. Both
+  # shapes were live: this file's own `printf "cat <<'EOF'"` line, and three
+  # `run guard_leftover_data <<< "r"` lines in leftover-guard.bats.
+  local fixture="$BATS_TEST_TMPDIR/fake-heredoc.bats" out n
+  {
+    printf '@test "example" {\n'
+    printf '  echo "cat <<\x27EOF\x27"\n'                 # 2: quoted << -> NOT an opener
+    printf '  [[ "abc" == *"zzz"* ]]\n'                   # 3: flagged (was invisible)
+    printf '  run guard <<< "r"\n'                        # 4: herestring -> NOT an opener
+    printf '  [ "1" = "2" ]\n'                            # 5: flagged (was invisible)
+    printf '  cat > g <<\x27EOF\x27\n'                    # 6: a REAL heredoc opener
+    printf '  [[ "embedded" == "fixture" ]]\n'            # 7: heredoc body -> spared
+    printf 'EOF\n'                                        # 8: terminator
+    printf '  [[ "abc" == *"yyy"* ]]\n'                   # 9: flagged
+    printf '}\n'
+  } > "$fixture"
+
+  out="$(awk -f "$SCANNER" "$fixture")"
+  for n in 3 5 9; do
+    [[ "$out" == *":$n:"* ]] || { printf 'expected line %s to be flagged, got:\n%s\n' "$n" "$out" >&2; return 1; }
+  done
+  # line 7 is a genuine heredoc body and must STILL be spared — otherwise the fix
+  # would just be "stop tracking heredocs at all"
+  [[ "$out" != *":7:"* ]] || { printf 'line 7 (real heredoc body) must be spared, got:\n%s\n' "$out" >&2; return 1; }
+  [[ "$(printf '%s' "$out" | grep -c .)" == "3" ]] || { printf 'expected exactly 3 offenders, got:\n%s\n' "$out" >&2; return 1; }
+}
+
+@test "an unterminated heredoc cannot swallow past the next @test (Bugbot)" {
+  # Belt for the same failure mode: whatever else is ever misread as an opener, the
+  # skip must end at an @test in column 0, so it can never hide more than one test.
+  local fixture="$BATS_TEST_TMPDIR/unterminated.bats" out
+  {
+    printf '@test "unterminated" {\n'
+    printf '  cat > f <<\x27NOPE\x27\n'                   # 2: real opener, never terminated
+    printf '  [[ "swallowed" == "ok" ]]\n'                # 3: genuinely in the body -> spared
+    printf '}\n'
+    printf '@test "next" {\n'                            # 5: safety valve fires here
+    printf '  [ "1" = "2" ]\n'                           # 6: flagged
+    printf '}\n'
+  } > "$fixture"
+
+  out="$(awk -f "$SCANNER" "$fixture")"
+  [[ "$out" == *":6:"* ]] || { printf 'expected line 6 to be flagged, got:\n%s\n' "$out" >&2; return 1; }
+  [[ "$out" != *":3:"* ]] || { printf 'line 3 is inside the heredoc body, got:\n%s\n' "$out" >&2; return 1; }
+  [[ "$(printf '%s' "$out" | grep -c .)" == "1" ]] || { printf 'expected exactly 1 offender, got:\n%s\n' "$out" >&2; return 1; }
+}
+
 @test "the scanner ignores control flow, chained lines, helpers and heredoc bodies" {
   local fixture="$BATS_TEST_TMPDIR/quiet.bats" out
   {
