@@ -142,7 +142,7 @@ run_boot_hermetic() {
   [ "$status" -ne 0 ] || return 1
   # Either the tag-shape gate or the path-separator belt rejects it; both name R8.
   [[ "$output" == *"not an immutable release tag"* \
-     || "$output" == *"path separator or '..'"* ]]
+     || "$output" == *"path separator or '..'"* ]] || return 1
   [ ! -f "$SBX/k8s-ran" ] || return 1            # privileged step never reached
 }
 
@@ -152,7 +152,7 @@ run_boot_hermetic() {
   REF="v1.2.3/heads/main" COSIGN_RESULT=0 run_boot
   [ "$status" -ne 0 ] || return 1
   [[ "$output" == *"not an immutable release tag"* \
-     || "$output" == *"path separator or '..'"* ]]
+     || "$output" == *"path separator or '..'"* ]] || return 1
   [ ! -f "$SBX/k8s-ran" ] || return 1
 }
 

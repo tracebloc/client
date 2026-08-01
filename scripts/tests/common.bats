@@ -176,7 +176,7 @@ setup() {
 @test "install_cleanup: exit 2 -> re-run hint" {
   unset CLIENT_STATE
   out="$( ( exit 2 ); install_cleanup 2>&1 )"
-  [[ "$out" == *"Re-run required"* || "$out" == *"Complete the step"* ]]
+  [[ "$out" == *"Re-run required"* || "$out" == *"Complete the step"* ]] || return 1
 }
 
 # ── retry ──────────────────────────────────────────────────────────────────

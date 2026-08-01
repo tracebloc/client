@@ -70,7 +70,7 @@ setup() {
   [[ "$output" == *"What's next"* ]] || return 1
   [[ "$output" == *"tracebloc data ingest"* ]] || return 1
   [[ "$output" == *"my-use-cases"* ]] || return 1
-  [[ "$output" == *"Run"* && "$output" == *"to get started"* ]]
+  [[ "$output" == *"Run"* && "$output" == *"to get started"* ]] || return 1
 }
 
 @test "print_summary connected: shows the client version" {

@@ -2,9 +2,16 @@
 # =============================================================================
 #  bats-hygiene.bats — keep every assertion in this suite ENFORCING.
 #
-#  Under Bats (verified on 1.13.0) a failing command that is NOT the last one in a
-#  test body does NOT fail the test — only the final command's exit status is
-#  checked. So a body like
+#  Bats (verified on 1.13.0) runs a test body under errexit, but two classes of
+#  assertion escape it, so a failing one that is NOT the last command in the body
+#  is silently ignored:
+#
+#    [[ ... ]]   on bash 3.2 — the system bash on macOS — errexit does not fire
+#                for a failing conditional expression
+#    ! cmd       POSIX: a status inverted with '!' is never propagated, so this
+#                escapes on EVERY bash, not just 3.2
+#
+#  So a body like
 #
 #      run _augment_no_proxy
 #      [[ "$output" == *"localhost"* ]]            # FALSE -> ignored
@@ -13,7 +20,10 @@
 #  passes while ignoring the first assertion. That is not theoretical: with the
 #  pre-hardening suite, deleting `localhost` from TB_NO_PROXY_DEFAULTS — the entry
 #  that keeps a corporate proxy from intercepting loopback — left that exact test
-#  green. Hardened, it fails.
+#  green. Hardened, it fails. Same story for the R8 tag gate: blanking install.sh's
+#  "not an immutable release tag" message left install-bootstrap.bats's two
+#  path-traversal tests green, because their message assertion was a multi-line
+#  `[[ a || b ]]` the scanner used to skip (Bugbot). Hardened, both fail.
 #
 #  Convention: every standalone assertion inside an @test body ends in
 #  `|| return 1`. The scanner lives in unenforced-assertions.awk (one
@@ -54,6 +64,64 @@ setup() {
   [[ "$out" == *":2:"* ]] || return 1
   [[ "$out" == *":3:"* ]] || return 1
   [[ "$out" != *":4:"* ]] || return 1
+}
+
+@test "the scanner flags an internal-OR assertion: || inside the brackets is not enforcing (Bugbot)" {
+  # `[[ a || b ]]` is ONE assertion whose ||/&& is internal; it exits non-zero on
+  # failure exactly like a plain one, so it needs `|| return 1` too. Skipping every
+  # line that merely CONTAINS ||/&& let this class through, on one line and across
+  # several — including `||` that is only text inside a quoted pattern.
+  local fixture="$BATS_TEST_TMPDIR/internal-or.bats" out
+  {
+    printf '@test "example" {\n'
+    printf '  [[ "abc" == *"zzz"* || "abc" == *"yyy"* ]]\n'          # 2: internal || -> flagged
+    printf '  [[ "abc" == *"zzz"* && "abc" == *"yyy"* ]]\n'          # 3: internal && -> flagged
+    printf '  [ "$(grep -c \x27|| rc=$?\x27 f)" -eq 2 ]\n'           # 4: || only in a pattern -> flagged
+    printf '  [[ "abc" == *"zzz"* \\\n     || "abc" == *"yyy"* ]]\n' # 5: continued, backslash -> flagged
+    printf '  [[ "abc" == *"zzz"* ||\n     "abc" == *"yyy"* ]]\n'    # 7: continued, no backslash -> flagged
+    printf '  [[ "abc" == *"zzz"* || "abc" == *"abc"* ]] || return 1\n'  # 9: enforcing -> spared
+    printf '  [[ "abc" == *"zzz"* \\\n     || "abc" == *"a"* ]] || return 1\n' # 10: enforcing -> spared
+    printf '  [[ 1 == 1 ]] || [[ 2 == 2 ]]\n'                        # 12: TOP-level chain -> spared
+    printf '}\n'
+  } > "$fixture"
+
+  out="$(awk -f "$SCANNER" "$fixture")"
+  # multi-line assertions are reported at their FIRST line
+  local n
+  for n in 2 3 4 5 7; do
+    [[ "$out" == *":$n:"* ]] || { printf 'expected line %s to be flagged, got:\n%s\n' "$n" "$out" >&2; return 1; }
+  done
+  for n in 9 10 12; do
+    [[ "$out" != *":$n:"* ]] || { printf 'line %s should be spared, got:\n%s\n' "$n" "$out" >&2; return 1; }
+  done
+  # each offender is one output line, and a joined one stays on one line
+  [[ "$(printf '%s' "$out" | grep -c .)" == "5" ]] || return 1
+}
+
+@test "the scanner flags an un-hardened negated bare command (Bugbot)" {
+  # `! cmd` is the one class that escapes errexit on EVERY bash — POSIX says a
+  # status inverted with '!' is never propagated — so an unhardened one is
+  # advisory everywhere, not just on bash 3.2. The suite has 61 of them.
+  local fixture="$BATS_TEST_TMPDIR/negated.bats" out
+  {
+    printf '@test "example" {\n'
+    printf '  ! mock_calls | grep -q preflight_sudo\n'               # 2: un-hardened -> flagged
+    printf '  ! grep -q needle "$f"\n'                               # 3: un-hardened -> flagged
+    printf '  ! mock_calls | grep -q install_docker || return 1\n'   # 4: enforcing  -> spared
+    printf '  if ! grep -q needle "$f"; then :; fi\n'                # 5: control flow -> spared
+    printf '  grep -q needle "$f"\n'                                 # 6: bare cmd, errexit fires -> spared
+    printf '  run ! grep -q needle "$f"\n'                           # 7: bats run -> spared
+    printf '}\n'
+  } > "$fixture"
+
+  out="$(awk -f "$SCANNER" "$fixture")"
+  [[ "$out" == *":2:"* ]] || return 1
+  [[ "$out" == *":3:"* ]] || return 1
+  local n
+  for n in 4 5 6 7; do
+    [[ "$out" != *":$n:"* ]] || { printf 'line %s should be spared, got:\n%s\n' "$n" "$out" >&2; return 1; }
+  done
+  [[ "$(printf '%s' "$out" | grep -c .)" == "2" ]] || return 1
 }
 
 @test "the scanner ignores control flow, chained lines, helpers and heredoc bodies" {

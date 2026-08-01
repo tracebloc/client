@@ -539,7 +539,7 @@ setup() {
   OS="$(uname -s)"
   run _pf_fstype /
   [ "$status" -eq 0 ] || return 1
-  [[ -z "$output" || "$output" =~ ^[a-z0-9._/]+$ ]]
+  [[ -z "$output" || "$output" =~ ^[a-z0-9._/]+$ ]] || return 1
 }
 
 # ── first-run step a: collapsed hardware summary + connectivity combined line ─

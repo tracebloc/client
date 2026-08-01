@@ -884,7 +884,7 @@ setup() {
   # timeout case can print its unwedge guidance before error (Bugbot #442).
   # Match the invocation lines only (comments also mention the helper).
   [ "$(grep -c 'spin_cmd_bounded "\$(( _helm_timeout_min \* 60 ))"' "$f")" -eq 2 ] || return 1
-  [ "$(grep -c '|| _helm_rc=\$?' "$f")" -eq 2 ]
+  [ "$(grep -c '|| _helm_rc=\$?' "$f")" -eq 2 ] || return 1
 }
 
 @test "helm timeout (124) names the pending-release unwedge commands (Bugbot #442)" {
