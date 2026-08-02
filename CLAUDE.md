@@ -20,4 +20,6 @@ Integration branch for this repo (and all tracebloc repos) is `develop`, not `ma
 
 ## PR conventions
 
-Every PR you create must be assigned to `saadqbal` (Asad). Pass `--assignee @me` on `gh pr create`, or `--assignee saadqbal` if running unauthenticated. No exceptions — orphaned PRs without an assignee fall through the review queue.
+Every PR must be assigned to **whoever is doing the work** — the author sets it when opening the PR. Assignee and reviewer are different roles: the assignee owns getting it merged, the reviewer owns judging it. On handover the assignee changes; the author does not (RFC-BACKEND-0008 D31).
+
+Do not default the assignee to one person. This file used to name `saadqbal` unconditionally, from when he was the de-facto code owner here; that is no longer true, and a fixed assignee re-creates exactly the bystander effect the author-picks model was adopted to remove. Reviewer assignment is also the author's call — there is no automation that picks one.
