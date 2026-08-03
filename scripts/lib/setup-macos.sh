@@ -50,6 +50,33 @@ _has_gui_session() {
   [[ -n "$console_user" && "$console_user" != "root" ]]
 }
 
+# Is the current user a macOS administrator (or root)? Admin group members can sudo
+# (default /etc/sudoers: `%admin ALL=(ALL) ALL`); a managed/standard account can't.
+# Overridable for tests via TB_MACOS_ADMIN_GROUPS.
+_macos_user_is_admin() {
+  [ "$(id -u)" -eq 0 ] && return 0
+  local groups="${TB_MACOS_ADMIN_GROUPS:-$(id -Gn 2>/dev/null)}"
+  printf '%s\n' $groups | grep -qx admin
+}
+
+# Fail FAST on a no-admin Mac with a named, IT-facing remedy — the macOS analog of
+# Linux prepare-host (#430). Without this, a managed/standard account fell through to
+# preflight_sudo's generic "sudo authentication failed" after a wasted prompt. Admins
+# (and root) pass through untouched to the normal sudo priming.
+_macos_require_admin() {
+  _macos_user_is_admin && return 0
+  # Be accurate about what actually unblocks this (#430 Bugbot): re-running as the same
+  # non-admin account hits this gate again, and there is NO macOS prepare-host (it errors
+  # on Darwin). The install steps (Docker, brew, /usr/local/bin) genuinely need admin, so
+  # the only real remedies are to gain admin on this account, or to install from an
+  # account that already has it.
+  warn "This Mac account isn't an administrator, but installing Docker + the tracebloc runtime on macOS needs admin rights (there is no non-admin macOS path yet)."
+  hint "Ask your IT/admin to do ONE of these:"
+  hint "  • grant THIS account administrator rights (System Settings → Users & Groups → this user → \"Allow this user to administer this computer\"), then re-run as yourself, or"
+  hint "  • have an administrator run this installer on this Mac from their OWN admin account."
+  error "Administrator rights required on this Mac — grant this account admin (or install from an admin account), then re-run."
+}
+
 # Does this Mac support Apple Virtualization.framework (colima --vm-type vz)? It needs
 # macOS 13+ (Ventura); Rosetta x86_64 translation (--vz-rosetta) rides on VZ. Below 13,
 # colima falls back to its QEMU default (amd64 still runs, just slower). Overridable
@@ -252,6 +279,7 @@ install_docker_desktop() {
       echo -e "  ${BOLD}Docker Desktop is starting for the first time.${RESET}"
       echo -e "  Please do the following in the Docker window that just opened:"
       echo ""
+      echo -e "    ${CYAN}Approve the privileged-helper prompt${RESET} — macOS asks for your admin password once"
       echo -e "    ${CYAN}Accept the license agreement${RESET} when prompted"
       echo ""
       echo -e "  ${BOLD}The installer will continue automatically once Docker is ready.${RESET}"
@@ -320,6 +348,127 @@ install_macos_cli_tools() {
   umask "$_saved_umask"
 }
 
+# Configure login autostart so a rebooted Mac brings the container runtime — and thus
+# tracebloc (the k3d nodes carry --restart unless-stopped) — back with ZERO human
+# action (#430). A per-user LaunchAgent (no admin needed) runs at each login:
+# `open -a Docker` on a GUI Mac, `colima start` on a headless one. Best-effort — never
+# fail the install over autostart. Sets TB_MACOS_AUTOSTART=1 so the summary can honestly
+# promise auto-restart. Dir overridable (TB_LAUNCHAGENTS_DIR) + launchctl mockable for tests.
+# Emit a launchd plist to stdout: Label, RunAtLoad, ProgramArguments=$@, a per-user
+# LOGPATH for std{out,err}, plus any raw EXTRA XML (e.g. a boot daemon's UserName/
+# EnvironmentVariables). Kept separate so the GUI LaunchAgent and the headless
+# LaunchDaemon share one skeleton (bash-3.2-safe). LOGPATH must be per-user (not a fixed
+# /tmp path): with the installer's umask 077 a shared /tmp log is created 0600 by the
+# first account and a second account's job then can't open it (EX_CONFIG → runtime never
+# starts), and /tmp is symlink-plantable on a shared Mac (#430 Bugbot).
+_emit_launch_plist() {
+  local label="$1" extra="$2" logpath="$3"; shift 3
+  printf '%s\n' '<?xml version="1.0" encoding="UTF-8"?>'
+  printf '%s\n' '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">'
+  printf '%s\n' '<plist version="1.0">'
+  printf '%s\n' '<dict>'
+  printf '  <key>Label</key><string>%s</string>\n' "$label"
+  printf '%s\n' '  <key>ProgramArguments</key>'
+  printf '%s\n' '  <array>'
+  local _a
+  for _a in "$@"; do printf '    <string>%s</string>\n' "$_a"; done
+  printf '%s\n' '  </array>'
+  printf '%s\n' '  <key>RunAtLoad</key><true/>'
+  [[ -n "$extra" ]] && printf '%s\n' "$extra"
+  printf '  <key>StandardOutPath</key><string>%s</string>\n' "$logpath"
+  printf '  <key>StandardErrorPath</key><string>%s</string>\n' "$logpath"
+  printf '%s\n' '</dict>'
+  printf '%s\n' '</plist>'
+}
+
+# Configure autostart so a rebooted Mac brings the container runtime — and thus tracebloc
+# (k3d nodes carry --restart unless-stopped) — back with ZERO human action (#430).
+#   • GUI Mac      → per-user LaunchAgent (~/Library/LaunchAgents, no admin) that opens
+#                    Docker Desktop at each GUI login.
+#   • headless Mac → a LaunchAgent would NEVER run (it loads only in a GUI/Aqua login
+#                    session, which a headless box has none of; #430 Bugbot). Reboot
+#                    recovery needs a system LaunchDaemon (/Library/LaunchDaemons, root)
+#                    that runs `colima start` at BOOT as the install user.
+# Honors TRACEBLOC_NO_AUTOSTART, the same opt-out that gates ensure_cluster_autostart and
+# the Windows peer (#430 Bugbot). Best-effort; TB_MACOS_AUTOSTART is set ONLY on success,
+# so the summary's reboot promise stays honest.
+_install_macos_autostart() {
+  if [[ -n "${TRACEBLOC_NO_AUTOSTART:-}" ]]; then
+    log "Autostart skipped (TRACEBLOC_NO_AUTOSTART set)."
+    return 0
+  fi
+  local label="io.tracebloc.runtime"
+  if _has_gui_session; then
+    local dir="${TB_LAUNCHAGENTS_DIR:-$HOME/Library/LaunchAgents}"
+    local plist="$dir/${label}.plist"
+    mkdir -p "$dir" 2>/dev/null || {
+      warn "Couldn't create ${dir}; skipping login autostart — open Docker Desktop manually after a reboot."
+      return 1
+    }
+    mkdir -p "$HOME/Library/Logs" 2>/dev/null || true
+    _emit_launch_plist "$label" "" "$HOME/Library/Logs/tracebloc-autostart.log" /usr/bin/open -a Docker > "$plist" 2>/dev/null || {
+      warn "Couldn't write the login autostart agent at ${plist}; open Docker Desktop manually after a reboot."
+      return 1
+    }
+    # RunAtLoad handles every future GUI login; bootstrap it into THIS session too.
+    launchctl bootstrap "gui/$(id -u)" "$plist" 2>/dev/null \
+      || launchctl load -w "$plist" 2>/dev/null || true
+  else
+    # The headless daemon runs colima — but only if colima is ACTUALLY the runtime here.
+    # install_docker_desktop installs colima ONLY when Docker was down; if Docker was
+    # already up by other means colima may be absent, so a colima daemon would be bogus and
+    # the auto-restart promise false (#430 Bugbot). Resolve colima's REAL path (Homebrew is
+    # /opt/homebrew/bin on Apple Silicon, /usr/local/bin on Intel) instead of baking a fixed
+    # one; if it isn't installed, skip autostart honestly (best-effort — caller's `|| true`)
+    # rather than promise recovery via a runtime that isn't there.
+    local _colima; _colima="$(command -v colima 2>/dev/null || true)"
+    if [[ -z "$_colima" ]]; then
+      warn "Headless autostart needs colima, but it isn't installed on this host; skipping boot autostart — start your Docker runtime manually after a reboot."
+      return 1
+    fi
+    local dir="${TB_LAUNCHDAEMONS_DIR:-/Library/LaunchDaemons}"
+    local plist="$dir/${label}.plist"
+    local _user; _user="$(id -un)"
+    local _home="${HOME:-/Users/$_user}"
+    # A boot daemon has no user env — colima/limactl need HOME + a PATH that finds colima
+    # and its deps, and must run AS the install user (not root), or the VM/socket land in
+    # the wrong place. RunAtLoad fires at boot with no login.
+    local extra
+    printf -v extra '%s\n%s\n%s\n%s\n%s\n%s' \
+      "  <key>UserName</key><string>${_user}</string>" \
+      '  <key>EnvironmentVariables</key>' \
+      '  <dict>' \
+      "    <key>HOME</key><string>${_home}</string>" \
+      '    <key>PATH</key><string>/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>' \
+      '  </dict>'
+    sudo mkdir -p "$dir" 2>/dev/null || {
+      warn "Couldn't create ${dir}; skipping boot autostart — run 'colima start' manually after a reboot."
+      return 1
+    }
+    # The daemon logs as the install user; create the log dir first — a fresh headless
+    # account may lack ~/Library/Logs, and launchd fails EX_CONFIG (colima never runs) when
+    # the StandardOutPath directory is missing (#430 Bugbot). Same mkdir the GUI path does.
+    mkdir -p "${_home}/Library/Logs" 2>/dev/null || true
+    # Resilient boot start: a bare oneshot `colima start` at boot is fragile — the VZ+Rosetta
+    # stack commonly leaves stale VM state across a reboot, so the first start fails. Retry a
+    # few times, `colima stop --force`-ing between attempts to actually clear the orphaned VZ
+    # driver state (a bare `stop` neither clears it nor is guaranteed to return; #430 Bugbot).
+    # The loop body has no <, >, or & so it stays valid inside the plist <string>.
+    local _boot
+    _boot="tries=0; until ${_colima} start; do tries=\$((tries+1)); if [ \$tries -ge 3 ]; then exit 1; fi; ${_colima} stop --force; sleep 15; done"
+    _emit_launch_plist "$label" "$extra" "${_home}/Library/Logs/tracebloc-autostart.log" /bin/bash -c "$_boot" | sudo tee "$plist" >/dev/null 2>&1 || {
+      warn "Couldn't write the boot autostart daemon at ${plist}; run 'colima start' manually after a reboot."
+      return 1
+    }
+    # System domain, at boot, no login required.
+    sudo launchctl bootstrap system "$plist" 2>/dev/null \
+      || sudo launchctl load -w "$plist" 2>/dev/null || true
+  fi
+  TB_MACOS_AUTOSTART=1
+  success "Autostart configured — tracebloc returns automatically after a reboot."
+  return 0
+}
+
 # Verify amd64 emulation ACTUALLY works before a cluster starts scheduling the
 # amd64-only client images (#433). On Apple Silicon a green arch preflight only means
 # Docker *should* emulate — but Docker Desktop's "Use Rosetta for x86_64/amd64
@@ -352,9 +501,15 @@ assert_amd64_emulation() {
 }
 
 install_macos() {
+  _macos_require_admin        # #430: no-admin Macs get a named IT remedy, not a generic sudo error
   preflight_sudo
   install_homebrew
   install_docker_desktop
   assert_amd64_emulation      # Docker is up now — prove amd64 runs before the cluster needs it (#433)
   install_macos_cli_tools
+  # Best-effort: autostart returns 1 on a mkdir/write failure, and this runs under
+  # `set -e` after Docker + tools are already installed — so `|| true` keeps a failed
+  # login-item from aborting an otherwise-complete install (#430 Bugbot). The summary
+  # stays honest either way: TB_MACOS_AUTOSTART is only set on success.
+  _install_macos_autostart || true   # #430: login autostart so a rebooted Mac returns with zero action
 }
