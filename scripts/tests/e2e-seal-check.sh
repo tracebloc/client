@@ -81,7 +81,11 @@ PROBE="${NS}-egress-enforcement-check"
 # release before testing — a renamed/ungated probe fails here, loudly, instead
 # of passing vacuously.
 echo "── verify the probe hook is in the release ──"
-helm get hooks "$NS" --namespace "$NS" | grep -q "name: ${PROBE}" ||
+# Capture first, then grep a here-string — piping `helm get hooks | grep -q`
+# lets grep close the pipe on its first match, which SIGPIPEs helm mid-write and
+# (under `set -o pipefail`) false-fails this guard even though the hook exists.
+hooks="$(helm get hooks "$NS" --namespace "$NS")"
+grep -q "name: ${PROBE}" <<<"$hooks" ||
   fail "probe hook ${PROBE} not found in release hooks — --filter would match nothing"
 
 echo "── helm test --filter name=${PROBE} ──"
