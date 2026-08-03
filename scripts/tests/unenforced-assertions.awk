@@ -85,7 +85,7 @@ function bracket_open(line,   s) {
 }
 
 function classify(logical, fnr,   tail, word) {
-    if (logical ~ /\|\| return 1/)                                  return  # enforcing
+    if (is_enforcing(logical))                                      return  # a REAL, unquoted, uncommented `|| return 1`
     if (logical ~ /^[[:space:]]*#/)                                 return  # comment
 
     # control flow — a condition, not an assertion. Compared as a word rather than
@@ -121,6 +121,39 @@ function quoted_at(s, pos,   i, c, sq, dq) {
         else if (c == "\"" && !sq) { dq = !dq }
     }
     return (sq || dq)
+}
+
+# The line with any UNQUOTED trailing comment removed: everything up to the first
+# `#` that starts a word (line start or after whitespace) and sits outside quotes.
+# A `#` inside a quoted pattern, or mid-word, is not a comment.
+function strip_comment(s,   i, c, sq, dq) {
+    sq = 0; dq = 0; i = 1
+    while (i <= length(s)) {
+        c = substr(s, i, 1)
+        if (c == "\\" && !sq)      { i += 2; continue }
+        else if (c == "'" && !dq)  { sq = !sq }
+        else if (c == "\"" && !sq) { dq = !dq }
+        else if (c == "#" && !sq && !dq && (i == 1 || substr(s, i - 1, 1) ~ /[[:space:]]/))
+            return substr(s, 1, i - 1)
+        i++
+    }
+    return s
+}
+
+# Is the line actually hardened — a REAL `|| return 1` that is CODE, not text? A
+# line-wide substring match spared an unhardened `[[ … *"|| return 1"* ]]` (the
+# marker inside a quoted pattern) or `[[ … ]]  # … || return 1` (only in a trailing
+# comment), since neither actually enforces (Bugbot). Require the `||` to be outside
+# quotes and outside the comment.
+function is_enforcing(logical,   code, i, p, pos) {
+    code = strip_comment(logical)
+    i = 1
+    while ((p = index(substr(code, i), "|| return 1")) > 0) {
+        pos = i + p - 1
+        if (!quoted_at(code, pos)) return 1
+        i = pos + 1
+    }
+    return 0
 }
 
 # The heredoc tag this line opens, or "" if it opens none. A `<<TAG` INSIDE a quoted

@@ -98,6 +98,27 @@ setup() {
   [[ "$(printf '%s' "$out" | grep -c .)" == "5" ]] || return 1
 }
 
+@test "the scanner is not fooled by '|| return 1' inside a pattern or comment (Bugbot)" {
+  # The enforcing check was a line-wide substring match, so any assertion whose
+  # quoted pattern or trailing comment merely MENTIONED `|| return 1` was treated as
+  # hardened though neither enforces. Both must still be flagged; a real top-level
+  # `|| return 1` is still spared.
+  local fixture="$BATS_TEST_TMPDIR/substr.bats" out
+  {
+    printf '@test "example" {\n'
+    printf '  [[ "$output" == *"|| return 1"* ]]\n'              # 2: marker in a pattern -> flagged
+    printf '  [ "$x" = "y" ]   # remember to add || return 1\n'  # 3: marker in a comment -> flagged
+    printf '  [[ "$output" == *"ok"* ]] || return 1\n'          # 4: really hardened -> spared
+    printf '}\n'
+  } > "$fixture"
+
+  out="$(awk -f "$SCANNER" "$fixture")"
+  [[ "$out" == *":2:"* ]] || return 1
+  [[ "$out" == *":3:"* ]] || return 1
+  [[ "$out" != *":4:"* ]] || return 1
+  [[ "$(printf '%s' "$out" | grep -c .)" == "2" ]] || return 1
+}
+
 @test "the scanner flags an un-hardened negated bare command (Bugbot)" {
   # `! cmd` is the one class that escapes errexit on EVERY bash — POSIX says a
   # status inverted with '!' is never propagated — so an unhardened one is
