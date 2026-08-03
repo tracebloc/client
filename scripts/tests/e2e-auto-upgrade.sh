@@ -184,7 +184,14 @@ echo "── isolate path 2 from path 1's --reuse-values contamination (#459) �
 # contract on an edge no one hand-upgraded. (A contaminated REAL edge is a separate
 # fleet-audit concern; remediation is exactly this: helm upgrade --reset-values, then
 # re-apply the genuinely intended overrides.)
-helm upgrade "$NS" "$CHART_DIR" --namespace "$NS" --reset-values \
+#
+# Reset to the PUBLISHED chart ($PREV), NOT $CHART_DIR: the local chart's new defaults
+# (the working-tree prod pin, the egress gateway) must arrive via path 2's upgrade, not be
+# pre-applied here — otherwise path 2 becomes a same-version no-op whose assertions already
+# hold from this step, and a --reset-then-reuse-values → --reuse-values regression would
+# slip through (computed values would still carry the local pin). Resetting to the baseline
+# keeps path 2 a genuine published→local upgrade that MUST pull the new defaults (#459 Bugbot).
+helm upgrade "$NS" "${REPO_NAME}/client" --version "$PREV" --namespace "$NS" --reset-values \
   --set clientId=ci-e2e-upgrade \
   --set clientPassword=ci-e2e-upgrade \
   --set storageClass.provisioner=rancher.io/local-path
