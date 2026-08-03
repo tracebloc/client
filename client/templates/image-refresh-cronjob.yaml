@@ -238,7 +238,13 @@ spec:
   jobTemplate:
     spec:
       backoffLimit: 2
-      activeDeadlineSeconds: 300
+      # MUST exceed imageRefresh.rolloutTimeout (default 10m): a legitimate tick does
+      # `rollout restart` and then waits on `rollout status` for up to that long, so a
+      # deadline below it would kill the wait mid-flight and the post-success digest
+      # annotation would never land, causing later ticks to re-restart forever (#572).
+      # This is only a backstop -- every API call is already --request-timeout-bounded;
+      # it just caps the total wall-clock well above any sane rollout wait.
+      activeDeadlineSeconds: 1800
       template:
         metadata:
           labels:
