@@ -233,6 +233,21 @@ jobs:
       - name: Upgrade from last published release through both flag paths
         run: bash scripts/tests/e2e-auto-upgrade.sh
 
+  seal-check-e2e:
+    timeout-minutes: 20
+    # RFC-0003 D12 (backend#1184): run the egress-enforcement seal-check LIVE on
+    # a real k3d cluster with the lockdown engaged, closing the SEAL-CHECK §8.4
+    # "full-chart probe run pending" gap (the k3s netpol substrate was verified
+    # in #504). Zero secrets — a public curl image vs 1.1.1.1; no private images,
+    # no backend. Proves the probe fires and the CNI actually blocks a
+    # training-labelled pod's egress once allowExternalHttps=false.
+    name: Seal-check egress-enforcement (k3d)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run the live egress-enforcement seal-check
+        run: bash scripts/tests/e2e-seal-check.sh
+
   # Installer script tests (bats + Pester) + the cross-distro prerequisite matrix
   # live in their own workflow: .github/workflows/installer-tests.yaml
   # (triggered on scripts/** changes).
