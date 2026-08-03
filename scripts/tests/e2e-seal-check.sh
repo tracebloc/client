@@ -73,17 +73,26 @@ helm install "$NS" "$CHART_DIR" --namespace "$NS" --create-namespace \
 # exact name so the --filter below can never silently drift off it.
 PROBE="${NS}-egress-enforcement-check"
 
+# Guard the silent-pass trap FIRST: `helm test --filter` exits 0 when the filter
+# matches NOTHING (no test runs). So confirm the probe hook is actually in the
+# release before testing — a renamed/ungated probe fails here, loudly, instead
+# of passing vacuously.
+echo "── verify the probe hook is in the release ──"
+helm get hooks "$NS" --namespace "$NS" | grep -q "name: ${PROBE}" ||
+  fail "probe hook ${PROBE} not found in release hooks — --filter would match nothing"
+
 echo "── helm test --filter name=${PROBE} ──"
-# `helm test --filter` exits 0 when the filter matches NOTHING (no test runs) —
-# a silent false-pass. So success requires BOTH a zero exit AND the probe's own
-# marker in the logs; either one missing is a hard failure.
-LOG="$(mktemp)"
-if ! helm test "$NS" --namespace "$NS" --filter "name=${PROBE}" --logs >"$LOG" 2>&1; then
-  cat "$LOG"
+# Drive off the EXIT CODE, not --logs. The probe Job exits 0 ONLY when egress is
+# verified blocked, so a passing `helm test` == the lockdown is enforced. --logs
+# is unreliable for a Job-type hook: it looks up the pod by the Job's bare name
+# (the pod carries a generated suffix → "pods not found"), and hook-succeeded
+# deletes the Job on success anyway. On FAILURE the Job persists, so dump its
+# pod log for triage.
+if ! helm test "$NS" --namespace "$NS" --filter "name=${PROBE}" --timeout 360s; then
+  echo "── probe pod log (Job persists on failure) ──"
+  kubectl logs -n "$NS" -l "job-name=${PROBE}" --tail=-1 2>/dev/null ||
+    kubectl describe job -n "$NS" "${PROBE}" 2>/dev/null || true
   fail "helm test reported failure for ${PROBE} — egress lockdown NOT verified"
 fi
-cat "$LOG"
-grep -q "OK  egress lockdown verified" "$LOG" ||
-  fail "no egress-enforcement success marker in helm-test logs — did --filter match the probe? (guards the filter-silent-pass trap)"
 
-echo "PASS: live seal-check — egress-enforcement probe fired and verified the lockdown."
+echo "PASS: live seal-check — egress-enforcement probe passed; the CNI enforced the egress lockdown."
