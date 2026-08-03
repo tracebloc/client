@@ -18,7 +18,7 @@ It is **schedule-only** (nightly + manual `workflow_dispatch`), not per-PR, and 
 
    The workflow targets `runs-on: [self-hosted, windows, nested-virt]` — all three labels must be present.
 
-4. **Runner account rights:** the runner service account must be able to install user-space tools (`kubectl` / `k3d` / `helm`) and create k3d clusters (Docker access). Running the runner as a user in the `docker-users` group with Docker Desktop available is sufficient.
+4. **The runner must run as Administrator.** The Windows installer is inherently elevated — it creates `%ProgramFiles%\tracebloc\bin`, writes the **Machine** `PATH`, and (in a full install) installs Docker Desktop. Register/run the self-hosted runner service under an account with Administrator rights (or configure the runner service to run elevated). The e2e asserts elevation up front and fails fast with a pointer if it isn't. The account also needs Docker access (member of `docker-users`, Docker Desktop running).
 
 ## What "green" means
 

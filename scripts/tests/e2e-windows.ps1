@@ -50,6 +50,16 @@ $stubNs = if ($env:TB_NAMESPACE) { $env:TB_NAMESPACE } else { 'tracebloc' }
 
 try {
   Write-E2e "cluster=$env:CLUSTER_NAME  data=$env:HOST_DATA_DIR  ns=$stubNs"
+  # The Windows installer is inherently ADMIN: Initialize-ToolDir creates
+  # %ProgramFiles%\tracebloc\bin and writes the MACHINE PATH, and the tool installs land
+  # there. TB_PESTER=1 skips the installer's own self-elevation gate, so assert elevation
+  # here — fail fast with a clear pointer instead of a confusing mid-run failure at tool
+  # setup (#436 Bugbot; the runner must run as Administrator — see docs/WINDOWS-E2E.md).
+  $isAdmin = ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+  if (-not $isAdmin) {
+    Stop-E2e "the self-hosted runner must run as Administrator — the Windows installer creates %ProgramFiles%\tracebloc\bin and writes the Machine PATH (see docs/WINDOWS-E2E.md)."
+  }
+
   Confirm-Config          # validates CLUSTER_NAME / HOST_DATA_DIR (no credentials involved)
   Initialize-ToolDir
   Start-InstallLog        # -> $HOST_DATA_DIR\install-<ts>.log (uploaded on failure)
@@ -68,14 +78,14 @@ try {
 
   # 3. Cluster — the installer's REAL bring-up path (Step 3).
   New-K3dCluster
-  kubectl wait --for=condition=Ready nodes --all --timeout=180s
+  kubectl wait --for=condition=Ready nodes --all --timeout=180s --request-timeout=30s
   Confirm-NativeOk "nodes did not reach Ready"
   Write-E2e "Cluster is up and all nodes are Ready."
 
   # 4. Credential-free stub the CLI's discovery keys off (LABELS, not values) — mirrors
   #    e2e-journey.sh Step 3. No private image needed; pause is plenty (the pod never has to
   #    go Ready — discovery reads the Deployment's labels + the 'ingestor' ServiceAccount).
-  kubectl create namespace $stubNs 2>$null | Out-Null
+  kubectl create namespace $stubNs --request-timeout=30s 2>$null | Out-Null
   $stub = @"
 apiVersion: v1
 kind: ServiceAccount
@@ -108,22 +118,26 @@ spec:
         - name: pause
           image: registry.k8s.io/pause:3.9
 "@
-  $stub | kubectl apply -f -
+  $stub | kubectl apply --request-timeout=30s -f -
   Confirm-NativeOk "stub release apply"
 
   # 5. Assert the discovery-shaped state exists (what DiscoverParentRelease selects on).
-  $dep = (kubectl get deploy -n $stubNs -l app.kubernetes.io/name=client -o name) -join ''
+  $dep = (kubectl get deploy -n $stubNs -l app.kubernetes.io/name=client -o name --request-timeout=30s) -join ''
   if (-not $dep) { Stop-E2e "stub discovery: no client-labelled Deployment found" }
-  kubectl get serviceaccount ingestor -n $stubNs *> $null
+  kubectl get serviceaccount ingestor -n $stubNs --request-timeout=30s *> $null
   Confirm-NativeOk "stub discovery: 'ingestor' ServiceAccount missing"
   Write-E2e "Stub parent release is present and discovery-shaped ($dep)."
 
   # 6. "Copy catalog on the way" — assert the installer emitted its expected copy into the
   #    transcript (a smoke check that the installer output didn't silently drift/regress).
-  if ($script:LOG_FILE -and (Test-Path $script:LOG_FILE)) {
-    if ((Get-Content -Raw $script:LOG_FILE) -notmatch 'Creating k3d cluster') {
-      Stop-E2e "install log is missing the expected 'Creating k3d cluster' copy — installer output drifted"
-    }
+  # Fail if the log is missing — never report PASS on an unverified copy check (seal-check
+  # rule: unsealed, never SILENTLY sealed; #436 Bugbot). Start-InstallLog set $LOG_FILE, so
+  # its absence means the installer never got that far.
+  if (-not ($script:LOG_FILE -and (Test-Path $script:LOG_FILE))) {
+    Stop-E2e "install log not found ($($script:LOG_FILE)) — cannot verify the installer's copy; refusing to report PASS."
+  }
+  if ((Get-Content -Raw $script:LOG_FILE) -notmatch 'Creating k3d cluster') {
+    Stop-E2e "install log is missing the expected 'Creating k3d cluster' copy — installer output drifted"
   }
 
   Write-E2e "PASS: bootstrap -> Docker up -> tools -> cluster -> credential-free stub discovery."
