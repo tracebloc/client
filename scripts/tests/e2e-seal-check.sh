@@ -43,8 +43,18 @@ trap cleanup EXIT
 
 fail() { echo "FAIL: $*" >&2; exit 1; }
 
+# Prerequisites. The sourced libs DEFINE these installers but do not call them;
+# create_cluster + helm need the binaries on PATH first, and a stock GitHub
+# runner ships none of k3d/helm/kubectl. Mirror e2e-auto-upgrade.sh exactly.
+has docker || fail "Docker is not available on this host."
+umask 022
+install_kubectl
+install_k3d
+install_helm
+
 echo "── create_cluster() — real k3d bring-up (k3s enforces egress NetworkPolicy) ──"
 create_cluster
+kubectl wait --for=condition=Ready nodes --all --timeout=180s
 
 echo "── helm install (public images, egress lockdown ENGAGED) ──"
 # Local working-tree chart, public images (no registry secret), local-path
