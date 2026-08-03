@@ -30,7 +30,10 @@ CHART_DIR="$HERE/../../client"
 # restart policy / runs `systemctl enable docker` (matches the sibling e2e-*.sh).
 export CLUSTER_NAME="${CLUSTER_NAME:-tbseal}"
 export TRACEBLOC_NO_AUTOSTART=1
-NS="tbseal"
+# Derive NS from CLUSTER_NAME so `CLUSTER_NAME=foo bash ...` isolates a second
+# run under ONE name — cluster + release + namespace move together instead of
+# splitting the run's identity across two names (Saqlain review).
+NS="$CLUSTER_NAME"
 
 # shellcheck source=/dev/null
 source "$LIB/common.sh"
@@ -64,12 +67,44 @@ echo "── helm install (public images, egress lockdown ENGAGED) ──"
 # storage, and allowExternalHttps=false so the training-egress NetworkPolicy is
 # rendered and the egress-enforcement-check Job renders (it is gated on the
 # lockdown flag + a non-empty enforcementProbeHost, chart default 1.1.1.1).
+# enforcementProbeTimeoutSeconds is bumped from the 60s chart default to 240s:
+# on a cold GHA runner k3s's kube-router can take >60s to program the pod's
+# iptables while the chart is still installing, and the probe is single-shot
+# (backoffLimit 0) — 240s is well inside the 360s helm-test budget so a slow
+# reconcile no longer false-fails on a cluster that DOES enforce (Saqlain review).
 helm install "$NS" "$CHART_DIR" --namespace "$NS" --create-namespace \
   -f "$CHART_DIR/tests/values-public-images.yaml" \
   --set clientId=ci-e2e-seal \
   --set clientPassword=ci-e2e-seal \
   --set storageClass.provisioner=rancher.io/local-path \
-  --set networkPolicy.training.allowExternalHttps=false
+  --set networkPolicy.training.allowExternalHttps=false \
+  --set networkPolicy.training.enforcementProbeTimeoutSeconds=240
+
+# Positive control (Saqlain review): before trusting a BLOCKED probe result,
+# prove the cluster can actually REACH the probe host. Otherwise egress failing
+# for an unrelated reason (a runner firewall, a target outage, a rate-limit)
+# makes the probe print OK and the seal-check pass green while the NetworkPolicy
+# did nothing. A pod in `default` is governed by NO training-egress policy (the
+# policy is namespace-scoped to the release ns), so if IT reaches the host, the
+# training pod's block below is attributable to the policy, not the environment.
+# Same image + curl invocation as the probe; HOST matches the chart default the
+# install leaves in place.
+HOST=1.1.1.1
+echo "── positive control: a non-policied pod must REACH ${HOST}:443 ──"
+kubectl run seal-poscheck --namespace default --restart=Never \
+  --image="curlimages/curl:8.20.0" \
+  --command -- curl --noproxy '*' -k -sS -m 15 -o /dev/null "https://${HOST}"
+posphase=""
+for _ in $(seq 1 40); do
+  posphase="$(kubectl get pod seal-poscheck -n default -o jsonpath='{.status.phase}' 2>/dev/null || true)"
+  { [ "$posphase" = "Succeeded" ] || [ "$posphase" = "Failed" ]; } && break
+  sleep 3
+done
+kubectl logs seal-poscheck -n default 2>/dev/null || true
+kubectl delete pod seal-poscheck -n default --ignore-not-found --now >/dev/null 2>&1 || true
+[ "$posphase" = "Succeeded" ] ||
+  fail "positive control FAILED — a non-policied pod could not reach ${HOST}:443 (phase=${posphase:-none}). A blocked training pod would NOT be attributable to the NetworkPolicy (runner egress / target issue), so the seal-check is inconclusive — refusing to report a false PASS."
+echo "positive control OK — ${HOST}:443 reachable; a training-pod block is now attributable to the policy."
 
 # The one probe we exercise. Its Job is `<release>-egress-enforcement-check`
 # (templates/egress-enforcement-check.yaml). The helm-unittest suite pins this
