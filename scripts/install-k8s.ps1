@@ -280,6 +280,15 @@ $script:JobInit = {
     [Net.ServicePointManager]::SecurityProtocol =
       [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
   } catch {}
+  # Same story for the progress overlay: a fresh runspace resets
+  # $ProgressPreference to 'Continue', so the parent's silence (Invoke-WithRetry,
+  # the bootstrap's fetch helpers) is NOT inherited. On Windows PowerShell 5.1
+  # that overlay's render loop dominates an Invoke-WebRequest transfer -- the
+  # #468/#471 throttle -- and every in-job download goes through
+  # Invoke-WithHeartbeat, so silencing it belongs HERE, once, rather than in
+  # each caller's scriptblock where a new call site can forget it (Bugbot,
+  # client#515). Callers may still set it locally; this is the floor.
+  $ProgressPreference = 'SilentlyContinue'
 }
 
 # One honest line per system tool once it's ready (#422): name, version, and
