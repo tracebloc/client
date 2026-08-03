@@ -56,8 +56,11 @@ jobs:
         shell: pwsh
         run: pwsh -NoProfile -File scripts/tests/e2e-windows.ps1
 
-      - name: Upload install log on failure
-        if: failure()
+      - name: Upload install log on any non-success
+        # NOT just failure(): a timeout-minutes hit CANCELS the job (failure() is false), yet
+        # that's exactly when the log matters most. !success() covers failed + cancelled/timed
+        # out; this runs before the teardown below so the log survives the data-dir cleanup.
+        if: ${{ !success() }}
         uses: actions/upload-artifact@v4
         with:
           name: windows-e2e-install-log
@@ -71,6 +74,11 @@ jobs:
         run: |
           # The driver already deletes the cluster in its finally; this is a belt-and-braces
           # net for a driver that died before its finally ran, plus the data-dir cleanup we
-          # deliberately deferred so the log survived for the upload above.
-          try { k3d cluster delete $env:CLUSTER_NAME 2>$null } catch { }
+          # deliberately deferred so the log survived for the upload above. Bound the delete
+          # so a wedged Docker/WSL teardown can't hang the shared runner (#436 Bugbot).
+          try {
+            $p = Start-Process k3d -ArgumentList "cluster","delete",$env:CLUSTER_NAME -NoNewWindow -PassThru
+            $p | Wait-Process -Timeout 120 -ErrorAction SilentlyContinue
+            if (-not $p.HasExited) { $p | Stop-Process -Force -ErrorAction SilentlyContinue }
+          } catch { }
           if ($env:HOST_DATA_DIR) { Remove-Item -Recurse -Force $env:HOST_DATA_DIR -ErrorAction SilentlyContinue }

@@ -90,7 +90,12 @@ try {
   Install-Kubectl
   Install-K3dAndHelm
 
-  # 3. Cluster — the installer's REAL bring-up path (Step 3).
+  # 3. Cluster — the installer's REAL bring-up path (Step 3). On this PERSISTENT runner a
+  #    leftover cluster from a prior run would send New-K3dCluster down its reuse path (which
+  #    still logs 'Creating k3d cluster'), so the copy check + PASS could succeed WITHOUT a
+  #    real create. Pre-clean any stale cluster first so every run genuinely creates one
+  #    (#436 Bugbot). Bounded so a wedged delete can't hang the runner.
+  Invoke-Bounded 120 "k3d" @("cluster","delete",$env:CLUSTER_NAME) "pre-clean stale cluster" | Out-Null
   New-K3dCluster
   kubectl wait --for=condition=Ready nodes --all --timeout=180s --request-timeout=30s
   Confirm-NativeOk "nodes did not reach Ready"
