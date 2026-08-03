@@ -54,17 +54,19 @@ FACT_NAMES=(
   "common.sh:K8S_VERSION"
   "install-k8s.ps1:K3dVersion"
   "install-k8s.ps1:HelmVersion"
+  "install-k8s.ps1:K8S_VERSION"
   "summary.sh:READY_TIMEOUT"
   "install-k8s.ps1:ReadyTimeout"
 )
-FACT_FILES=( "$COMMON" "$COMMON" "$COMMON" "$PS1" "$PS1" "$SUMMARY" "$PS1" )
-FACT_KEYS=( K3D_VERSION HELM_VERSION K8S_VERSION K3D_VERSION HELM_VERSION READY_TIMEOUT READY_TIMEOUT )
+FACT_FILES=( "$COMMON" "$COMMON" "$COMMON" "$PS1" "$PS1" "$PS1" "$SUMMARY" "$PS1" )
+FACT_KEYS=( K3D_VERSION HELM_VERSION K8S_VERSION K3D_VERSION HELM_VERSION K8S_VERSION READY_TIMEOUT READY_TIMEOUT )
 FACT_EXTRACT=(
   's/^K3D_VERSION="\${K3D_VERSION:-\(.*\)}".*/\1/p'
   's/^HELM_VERSION="\${HELM_VERSION:-\(.*\)}".*/\1/p'
   's/^K8S_VERSION="\${K8S_VERSION:-\(.*\)}".*/\1/p'
   's/.*\$script:K3dVersion .*else { "\([^"]*\)" }.*/\1/p'
   's/.*\$script:HelmVersion .*else { "\([^"]*\)" }.*/\1/p'
+  's/.*\$K8S_VERSION .*else { "\([^"]*\)" }.*/\1/p'
   's/^READY_TIMEOUT="\${READY_TIMEOUT:-\(.*\)}".*/\1/p'
   's/.*\$ReadyTimeout .*else { "\([^"]*\)" }.*/\1/p'
 )
@@ -77,6 +79,7 @@ FACT_REWRITE=(
   's|^\(K8S_VERSION="${K8S_VERSION:-\)[^}]*\(}"\)|\1@@VAL@@\2|'
   's|\(\$script:K3dVersion .*else { "\)[^"]*\(" }\)|\1@@VAL@@\2|'
   's|\(\$script:HelmVersion .*else { "\)[^"]*\(" }\)|\1@@VAL@@\2|'
+  's|\(\$K8S_VERSION .*else { "\)[^"]*\(" }\)|\1@@VAL@@\2|'
   's|^\(READY_TIMEOUT="${READY_TIMEOUT:-\)[^}]*\(}"\)|\1@@VAL@@\2|'
   's|\(\$ReadyTimeout .*else { "\)[^"]*\(" }\)|\1@@VAL@@\2|'
 )

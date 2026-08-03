@@ -23,6 +23,7 @@ SH
   cat > "$REPO/scripts/install-k8s.ps1" <<'PS'
 $script:K3dVersion  = if ($env:K3D_VERSION)  { $env:K3D_VERSION }  else { "v5.9.0" }
 $script:HelmVersion = if ($env:HELM_VERSION) { $env:HELM_VERSION } else { "v4.2.3" }
+$K8S_VERSION   = if ($env:K8S_VERSION)   { $env:K8S_VERSION }   else { "v1.29.4-k3s1" }
 $ReadyTimeout     = if ($env:READY_TIMEOUT) { $env:READY_TIMEOUT } else { "300" }
 PS
   cat > "$REPO/scripts/lib/summary.sh" <<'SH'
@@ -37,6 +38,24 @@ _set_spec() { local tmp; tmp="$(mktemp)"; sed "s|^$1=.*|$1=$2|" "$REPO/scripts/s
   run _facts --check
   [ "$status" -eq 0 ]
   [[ "$output" == *"all installer facts match"* ]]
+}
+
+@test "check-facts --check: K8S_VERSION drift in PowerShell (not just bash) -> RED (#435 Bugbot)" {
+  # install-k8s.ps1 pins K8S_VERSION too (--image rancher/k3s:$K8S_VERSION), so the spec
+  # must enforce it in BOTH consumers — bumping bash alone can't leave Windows stale.
+  local tmp; tmp="$(mktemp)"
+  sed 's|"v1.29.4-k3s1"|"v1.30.0-k3s1"|' "$REPO/scripts/install-k8s.ps1" > "$tmp" && mv "$tmp" "$REPO/scripts/install-k8s.ps1"
+  run _facts --check
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"install-k8s.ps1:K8S_VERSION"* ]]
+}
+
+@test "check-facts --write: a K8S_VERSION bump stamps BOTH bash and PowerShell (#435 Bugbot)" {
+  _set_spec K8S_VERSION v1.31.0-k3s1
+  _facts --write
+  grep -q 'K8S_VERSION="${K8S_VERSION:-v1.31.0-k3s1}"' "$REPO/scripts/lib/common.sh"   # bash
+  grep -q 'else { "v1.31.0-k3s1" }' "$REPO/scripts/install-k8s.ps1"                     # PowerShell
+  run _facts --check; [ "$status" -eq 0 ]
 }
 
 @test "check-facts --check: #410 incident — bash pin bumped, PowerShell NOT -> RED (#435)" {
