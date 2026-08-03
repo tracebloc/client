@@ -44,6 +44,13 @@ tests:
           count: 1
       - isKind:
           of: Job
+      # The live e2e seal-check (scripts/tests/e2e-seal-check.sh) selects this
+      # Job via `helm test --filter name=<release>-egress-enforcement-check`.
+      # Pin the name so the filter can never silently drift off it — a wrong
+      # name makes --filter match nothing and helm test falsely exit 0.
+      - equal:
+          path: metadata.name
+          value: RELEASE-NAME-egress-enforcement-check
       - equal:
           path: metadata.annotations["helm.sh/hook"]
           value: test
