@@ -145,6 +145,7 @@ tests:
       networkPolicy:
         training:
           enabled: true
+          allowExternalHttps: true  # pin the default — this asserts the rule-2 hole
           dnsNamespace: kube-system
           dnsSelector:
             k8s-app: kube-dns
@@ -176,6 +177,7 @@ tests:
       networkPolicy:
         training:
           enabled: true
+          allowExternalHttps: true  # pin: MySQL sits at egress[2] only while rule 2 renders
           dnsNamespace: kube-system
           dnsSelector:
             k8s-app: kube-dns
@@ -199,6 +201,7 @@ tests:
       networkPolicy:
         training:
           enabled: true
+          allowExternalHttps: true  # pin: asserts rule 2's except-block at egress[1]
           dnsNamespace: openshift-dns
           dnsSelector:
             dns.operator.openshift.io/daemonset-dns: default
@@ -221,3 +224,53 @@ tests:
       - contains:
           path: spec.egress[1].to[0].ipBlock.except
           content: 172.30.0.0/16
+
+  # RFC-0003 D6 (#199): characterize the LOCKED-DOWN policy so the default flip
+  # (#199-2) has a regression net. When allowExternalHttps is false the rule-2
+  # external-HTTPS hole drops and the remaining allowlist (MySQL, requests-proxy,
+  # egress-proxy) carries training.
+  - it: locks down external HTTPS — rule-2 hole drops, allowlist survives (allowExternalHttps false)
+    set:
+      networkPolicy:
+        training:
+          enabled: true
+          allowExternalHttps: false
+          dnsNamespace: kube-system
+          dnsSelector:
+            k8s-app: kube-dns
+          clusterCidrs:
+            - 10.0.0.0/8
+    asserts:
+      # the 0.0.0.0/0 external rule is gone — MySQL shifts up from egress[2] to egress[1]
+      - equal:
+          path: spec.egress[1].to[0].podSelector.matchLabels.app
+          value: mysql-client
+      # requests-proxy egress is UNCONDITIONAL — pods must still POST results/FLOPs (8888)
+      - equal:
+          path: spec.egress[2].to[0].podSelector.matchLabels.app
+          value: requests-proxy
+      - contains:
+          path: spec.egress[2].ports
+          content:
+            port: 8888
+            protocol: TCP
+
+  - it: locked down — renders the egress-proxy allowlist rule when egressProxy is enabled
+    set:
+      networkPolicy:
+        training:
+          enabled: true
+          allowExternalHttps: false
+          clusterCidrs:
+            - 10.0.0.0/8
+      egressProxy:
+        enabled: true
+    asserts:
+      - equal:
+          path: spec.egress[3].to[0].podSelector.matchLabels.app
+          value: egress-proxy
+      - contains:
+          path: spec.egress[3].ports
+          content:
+            port: 3128
+            protocol: TCP
