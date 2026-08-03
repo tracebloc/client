@@ -104,10 +104,12 @@ jobs:
         run: |
           Set-PSRepository PSGallery -InstallationPolicy Trusted
           Install-Module PSScriptAnalyzer -Force -SkipPublisherCheck -Scope CurrentUser
-          # Both PowerShell entrypoints: the bootstrap (install.ps1, R8 trust root)
-          # and the main installer (install-k8s.ps1).
+          # Both PowerShell entrypoints (the bootstrap install.ps1, R8 trust root, and the
+          # main installer install-k8s.ps1) plus the Windows e2e driver (#436) — the driver
+          # only RUNS on the self-hosted nested-virt runner, but lint it here on every push
+          # so a syntax/verb regression fails fast instead of at the nightly run.
           $issues = @()
-          foreach ($p in 'scripts/install.ps1', 'scripts/install-k8s.ps1') {
+          foreach ($p in 'scripts/install.ps1', 'scripts/install-k8s.ps1', 'scripts/tests/e2e-windows.ps1') {
             $issues += Invoke-ScriptAnalyzer -Path $p -Severity Error,Warning
           }
           if ($issues) { $issues | Format-Table -AutoSize }
