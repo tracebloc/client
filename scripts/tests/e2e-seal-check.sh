@@ -91,9 +91,16 @@ helm install "$NS" "$CHART_DIR" --namespace "$NS" --create-namespace \
 # install leaves in place.
 HOST=1.1.1.1
 echo "── positive control: a non-policied pod must REACH ${HOST}:443 ──"
+# A fast runner can schedule the pod before the `default` ServiceAccount is
+# created ("serviceaccount default not found"), which aborts under set -e before
+# the attribution failure below. Wait for the SA to exist first (Bugbot).
+for _ in $(seq 1 20); do
+  kubectl get serviceaccount default -n default >/dev/null 2>&1 && break
+  sleep 1
+done
 kubectl run seal-poscheck --namespace default --restart=Never \
   --image="curlimages/curl:8.20.0" \
-  --command -- curl --noproxy '*' -k -sS -m 15 -o /dev/null "https://${HOST}"
+  --command -- curl --noproxy '*' --tlsv1.2 -k -sS -m 15 -o /dev/null "https://${HOST}"
 posphase=""
 for _ in $(seq 1 40); do
   posphase="$(kubectl get pod seal-poscheck -n default -o jsonpath='{.status.phase}' 2>/dev/null || true)"
