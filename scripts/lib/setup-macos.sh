@@ -440,10 +440,11 @@ _install_macos_autostart() {
     mkdir -p "${_home}/Library/Logs" 2>/dev/null || true
     # Resilient boot start: a bare oneshot `colima start` at boot is fragile — the VZ+Rosetta
     # stack commonly leaves stale VM state across a reboot, so the first start fails. Retry a
-    # few times, force-stopping between attempts to clear the stale state (#430 Bugbot). The
-    # loop body has no <, >, or & so it stays valid inside the plist <string>.
+    # few times, `colima stop --force`-ing between attempts to actually clear the orphaned VZ
+    # driver state (a bare `stop` neither clears it nor is guaranteed to return; #430 Bugbot).
+    # The loop body has no <, >, or & so it stays valid inside the plist <string>.
     local _boot
-    _boot="tries=0; until ${_colima} start; do tries=\$((tries+1)); if [ \$tries -ge 3 ]; then exit 1; fi; ${_colima} stop; sleep 15; done"
+    _boot="tries=0; until ${_colima} start; do tries=\$((tries+1)); if [ \$tries -ge 3 ]; then exit 1; fi; ${_colima} stop --force; sleep 15; done"
     _emit_launch_plist "$label" "$extra" "${_home}/Library/Logs/tracebloc-autostart.log" /bin/bash -c "$_boot" | sudo tee "$plist" >/dev/null 2>&1 || {
       warn "Couldn't write the boot autostart daemon at ${plist}; run 'colima start' manually after a reboot."
       return 1

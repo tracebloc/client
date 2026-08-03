@@ -83,7 +83,7 @@ setup() {
   [ -d "$HOME/Library/Logs" ]                          # log dir created, else launchd EX_CONFIG (#430 Bugbot)
   grep -q '<string>/bin/bash</string>' "$plist"        # resilient wrapper, not a bare oneshot (#430 Bugbot)
   grep -q 'colima start' "$plist"
-  grep -q 'colima stop' "$plist"                        # retry force-stops stale VZ state between attempts
+  grep -q 'colima stop --force' "$plist"                # retry FORCE-stops to clear stale VZ state (#430 Bugbot)
   grep -q '<key>RunAtLoad</key><true/>' "$plist"
   grep -q '<key>UserName</key>' "$plist"                # runs as the install user, at boot
   grep -q '<key>EnvironmentVariables</key>' "$plist"    # HOME/PATH for colima under launchd
