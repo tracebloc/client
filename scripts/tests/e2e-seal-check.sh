@@ -25,8 +25,11 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 LIB="$HERE/../lib"
 CHART_DIR="$HERE/../../client"
 
-# Isolated cluster + release so we never touch a real 'tracebloc' install.
+# Isolated cluster + release so we never touch a real 'tracebloc' install, and
+# opt out of autostart so create_cluster never reconfigures the host's Docker
+# restart policy / runs `systemctl enable docker` (matches the sibling e2e-*.sh).
 export CLUSTER_NAME="${CLUSTER_NAME:-tbseal}"
+export TRACEBLOC_NO_AUTOSTART=1
 NS="tbseal"
 
 # shellcheck source=/dev/null

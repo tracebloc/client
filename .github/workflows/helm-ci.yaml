@@ -7,6 +7,7 @@ on:
       - 'client/**'
       - 'ingestor/**'
       - 'scripts/tests/e2e-auto-upgrade.sh'
+      - 'scripts/tests/e2e-seal-check.sh'
       - '.github/workflows/helm-ci.yaml'
   pull_request:
     branches: [main, develop, openshift]
@@ -14,6 +15,7 @@ on:
       - 'client/**'
       - 'ingestor/**'
       - 'scripts/tests/e2e-auto-upgrade.sh'
+      - 'scripts/tests/e2e-seal-check.sh'
       - '.github/workflows/helm-ci.yaml'
 
 concurrency:
