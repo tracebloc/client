@@ -590,7 +590,11 @@ _check_existing_cluster_k8s_version() {
   [[ -z "${K8S_VERSION:-}" || "$K8S_VERSION" == "latest" ]] && return 0
   local server_container="k3d-${CLUSTER_NAME}-server-0"
   local image
-  image=$(docker inspect "$server_container" --format '{{.Config.Image}}' 2>/dev/null) || return 0
+  # Bounded (installer rule: every docker/kubectl probe must have a deadline): both
+  # healthy fast-paths call this, so a wedged Docker engine must not hang an
+  # "already healthy" re-run after success is printed (#565 Bugbot). 124 on timeout
+  # → the `|| return 0` makes it a silent no-op, same as an inspect failure.
+  image=$(_bounded "${TB_DOCKER_INSPECT_TIMEOUT:-10}" docker inspect "$server_container" --format '{{.Config.Image}}' 2>/dev/null) || return 0
   [[ -z "$image" ]] && return 0
   case "$image" in
     *rancher/k3s:*) : ;;

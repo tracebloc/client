@@ -2211,8 +2211,19 @@ function Write-HostCaCreateHint {
 # (e.g. a digest-only pin) -- never false-warn.
 function Test-K3sVersionDrift {
   if ($K8S_VERSION -eq "" -or $K8S_VERSION -eq "latest") { return }
+  # Bounded (installer rule: every docker probe must have a deadline) so a wedged
+  # Docker engine can't hang the "already healthy" fast-path after success prints
+  # (#565 Bugbot). Mirrors Test-ClusterRunning's Start-Job + timeout pattern.
   $k3sImage = ""
-  try { $k3sImage = (docker inspect "k3d-$CLUSTER_NAME-server-0" --format '{{.Config.Image}}' 2>$null | Out-String).Trim() } catch {}
+  $job = Start-Job -InitializationScript $JobInit -ScriptBlock {
+    param($n) (docker inspect "k3d-$n-server-0" --format '{{.Config.Image}}' 2>$null | Out-String)
+  } -ArgumentList $CLUSTER_NAME
+  if (Wait-JobWithProgress -Job $job -TimeoutSec 15 -Message "Checking k3s version") {
+    $k3sImage = (Receive-Job $job -ErrorAction SilentlyContinue | Out-String).Trim()
+  } else {
+    Log "docker inspect (k3s version) timed out; skipping the version-drift check."
+  }
+  Remove-Job $job -Force -ErrorAction SilentlyContinue
   if ($k3sImage -match 'rancher/k3s:([^@\s]+)') {
     $runningK3s = $Matches[1]
     if ($runningK3s -ne $K8S_VERSION) {

@@ -2968,9 +2968,14 @@ Describe "k3s version pin: create + reuse drift (#547 source guards)" {
   }
   It "defines Test-K3sVersionDrift which inspects the node image and compares the tag to the pin" {
     $script:PSRC | Should -Match 'function Test-K3sVersionDrift'
-    $script:PSRC | Should -Match "docker inspect ""k3d-\`$CLUSTER_NAME-server-0"" --format '{{\.Config\.Image}}'"
+    $script:PSRC | Should -Match "docker inspect ""k3d-\`$n-server-0"" --format '{{\.Config\.Image}}'"
     $script:PSRC | Should -Match 'rancher/k3s:\(\[\^@'      # the tag-extract regex
     $script:PSRC | Should -Match '\$runningK3s -ne \$K8S_VERSION'
+  }
+  It "bounds the docker inspect probe with a deadline (no hang on a wedged engine, Bugbot #565)" {
+    # Start-Job + Wait-JobWithProgress -TimeoutSec, same bounded pattern as Test-ClusterRunning;
+    # the distinctive -Message ties the deadline to THIS probe.
+    $script:PSRC | Should -Match 'Wait-JobWithProgress -Job \$job -TimeoutSec 15 -Message "Checking k3s version"'
   }
   It "warns with the recreate remedy on drift" {
     $script:PSRC | Should -Match 'not the validated pin'

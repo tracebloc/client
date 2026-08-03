@@ -29,6 +29,11 @@ setup() {
     return 0
   }
   docker() { record "docker $*"; return 0; }
+  # _bounded wraps probes in timeout(1), which can't exec a `docker` shell-function
+  # mock — on Linux CI (where `timeout` exists) that would bypass the mock. Run the
+  # command directly so mocks work everywhere; the timeout wrapper is common.sh's
+  # concern, not this unit's (#565 Bugbot).
+  _bounded() { shift; "$@"; }
 }
 
 # ── _augment_no_proxy (Gap B) ───────────────────────────────────────────────
