@@ -44,7 +44,7 @@ jobs:
           shellcheck --version | grep version
           shellcheck --severity=error --shell=bash \
             scripts/install.sh scripts/install-k8s.sh scripts/resolve-ingestor-digest.sh scripts/lib/*.sh \
-            scripts/tests/distro-prereqs.sh scripts/tests/e2e-cluster.sh scripts/tests/e2e-proxy.sh scripts/tests/e2e-auto-upgrade.sh scripts/tests/e2e-seal-check.sh
+            scripts/tests/distro-prereqs.sh scripts/tests/e2e-cluster.sh scripts/tests/e2e-proxy.sh scripts/tests/e2e-auto-upgrade.sh scripts/tests/e2e-seal-check.sh scripts/tests/lib/e2e-common.sh
 
   unit-tests:
     name: Unit tests
