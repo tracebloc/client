@@ -36,8 +36,8 @@ _set_spec() { local tmp; tmp="$(mktemp)"; sed "s|^$1=.*|$1=$2|" "$REPO/scripts/s
 
 @test "check-facts --check: all consumers match the spec -> passes (#435)" {
   run _facts --check
-  [ "$status" -eq 0 ]
-  [[ "$output" == *"all installer facts match"* ]]
+  [ "$status" -eq 0 ] || return 1
+  [[ "$output" == *"all installer facts match"* ]] || return 1
 }
 
 @test "check-facts --check: K8S_VERSION drift in PowerShell (not just bash) -> RED (#435 Bugbot)" {
@@ -46,8 +46,8 @@ _set_spec() { local tmp; tmp="$(mktemp)"; sed "s|^$1=.*|$1=$2|" "$REPO/scripts/s
   local tmp; tmp="$(mktemp)"
   sed 's|"v1.29.4-k3s1"|"v1.30.0-k3s1"|' "$REPO/scripts/install-k8s.ps1" > "$tmp" && mv "$tmp" "$REPO/scripts/install-k8s.ps1"
   run _facts --check
-  [ "$status" -ne 0 ]
-  [[ "$output" == *"install-k8s.ps1:K8S_VERSION"* ]]
+  [ "$status" -ne 0 ] || return 1
+  [[ "$output" == *"install-k8s.ps1:K8S_VERSION"* ]] || return 1
 }
 
 @test "check-facts --write: a K8S_VERSION bump stamps BOTH bash and PowerShell (#435 Bugbot)" {
@@ -64,27 +64,27 @@ _set_spec() { local tmp; tmp="$(mktemp)"; sed "s|^$1=.*|$1=$2|" "$REPO/scripts/s
   local tmp; tmp="$(mktemp)"
   sed 's|v5.9.0|v5.9.9|' "$REPO/scripts/lib/common.sh" > "$tmp" && mv "$tmp" "$REPO/scripts/lib/common.sh"
   run _facts --check
-  [ "$status" -ne 0 ]                                  # red CI check
-  [[ "$output" == *"common.sh:K3D_VERSION"* ]]
-  [[ "$output" == *"drifted"* ]]
+  [ "$status" -ne 0 ] || return 1   # red CI check
+  [[ "$output" == *"common.sh:K3D_VERSION"* ]] || return 1
+  [[ "$output" == *"drifted"* ]] || return 1
 }
 
 @test "check-facts --check: PowerShell pin drifts from bash+spec -> RED (#435)" {
   local tmp; tmp="$(mktemp)"
   sed 's|"v5.9.0"|"v5.8.0"|' "$REPO/scripts/install-k8s.ps1" > "$tmp" && mv "$tmp" "$REPO/scripts/install-k8s.ps1"
   run _facts --check
-  [ "$status" -ne 0 ]
-  [[ "$output" == *"install-k8s.ps1:K3dVersion"* ]]
+  [ "$status" -ne 0 ] || return 1
+  [[ "$output" == *"install-k8s.ps1:K3dVersion"* ]] || return 1
 }
 
 @test "check-facts --write: bumping the spec stamps EVERY consumer, then --check passes (#435)" {
   _set_spec K3D_VERSION v9.9.9
   run _facts --write
-  [ "$status" -eq 0 ]
+  [ "$status" -eq 0 ] || return 1
   grep -q 'K3D_VERSION="${K3D_VERSION:-v9.9.9}"' "$REPO/scripts/lib/common.sh"          # bash stamped
   grep -q 'else { "v9.9.9" }' "$REPO/scripts/install-k8s.ps1"                            # PowerShell stamped
   run _facts --check                                                                     # now consistent
-  [ "$status" -eq 0 ]
+  [ "$status" -eq 0 ] || return 1
 }
 
 @test "check-facts --write: HELM + K8S bumps stamp their consumers (#435)" {
@@ -101,8 +101,8 @@ _set_spec() { local tmp; tmp="$(mktemp)"; sed "s|^$1=.*|$1=$2|" "$REPO/scripts/s
   local tmp; tmp="$(mktemp)"
   sed 's|"300"|"600"|' "$REPO/scripts/install-k8s.ps1" > "$tmp" && mv "$tmp" "$REPO/scripts/install-k8s.ps1"
   run _facts --check
-  [ "$status" -ne 0 ]
-  [[ "$output" == *"install-k8s.ps1:ReadyTimeout"* ]]
+  [ "$status" -ne 0 ] || return 1
+  [[ "$output" == *"install-k8s.ps1:ReadyTimeout"* ]] || return 1
 }
 
 @test "check-facts --write: bumping the READY_TIMEOUT budget stamps bash + PowerShell (#435)" {
@@ -116,11 +116,11 @@ _set_spec() { local tmp; tmp="$(mktemp)"; sed "s|^$1=.*|$1=$2|" "$REPO/scripts/s
 @test "check-facts: a missing pattern (consumer refactored away) fails closed, not silently green (#435)" {
   echo "# no k3d pin here anymore" > "$REPO/scripts/lib/common.sh"
   run _facts --check
-  [ "$status" -ne 0 ]
-  [[ "$output" == *"no pinned value found"* ]]
+  [ "$status" -ne 0 ] || return 1
+  [[ "$output" == *"no pinned value found"* ]] || return 1
 }
 
 @test "check-facts: an unknown mode is rejected (#435)" {
   run _facts --bogus
-  [ "$status" -eq 2 ]
+  [ "$status" -eq 2 ] || return 1
 }

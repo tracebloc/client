@@ -259,12 +259,12 @@ setup() {
 @test "_pf_memory: macOS below floor -> WARN only, never hard fail" {
   OS=Darwin; _pf_host_mem_kb() { echo $((3 * 1024 * 1024)); }
   run _pf_memory
-  [[ "$output" == *"below the"* ]]
-  [[ "$output" == *"it will OOM"* ]]
+  [[ "$output" == *"below the"* ]] || return 1
+  [[ "$output" == *"it will OOM"* ]] || return 1
   # The MACHINE is under the floor — no Docker setting fixes that, so this branch
   # offers no resize remedy (#417); the post-Docker recheck owns the honest
   # "use a larger machine" stop.
-  [[ "$output" != *"Settings"* ]]
+  [[ "$output" != *"Settings"* ]] || return 1
   PF_HARD_FAIL=0; _pf_memory >/dev/null 2>&1; [ "$PF_HARD_FAIL" -eq 0 ]
 }
 
@@ -293,8 +293,8 @@ setup() {
   _pf_host_mem_kb()    { echo $((16 * 1024 * 1024)); }   # 16 GB Mac
   _pf_runtime_mem_kb() { echo $((6 * 1024 * 1024)); }    # Docker VM only 6 GB
   run _pf_memory
-  [[ "$output" == *"16 GB (machine)"* ]]     # the gate line reports the MACHINE
-  [[ "$output" != *"6 GB (Docker VM)"* ]]    # the old flip-flopped label is gone
+  [[ "$output" == *"16 GB (machine)"* ]] || return 1   # the gate line reports the MACHINE
+  [[ "$output" != *"6 GB (Docker VM)"* ]] || return 1   # the old flip-flopped label is gone
 }
 
 @test "_pf_memory: a smaller Docker budget gets its OWN second line (#417)" {
@@ -302,8 +302,8 @@ setup() {
   _pf_host_mem_kb()    { echo $((16 * 1024 * 1024)); }
   _pf_runtime_mem_kb() { echo $((6 * 1024 * 1024)); }
   run _pf_memory
-  [[ "$output" == *"16 GB (machine)"* ]]
-  [[ "$output" == *"Docker's memory budget: 6 GB"* ]]
+  [[ "$output" == *"16 GB (machine)"* ]] || return 1
+  [[ "$output" == *"Docker's memory budget: 6 GB"* ]] || return 1
 }
 
 @test "_pf_memory: native Linux does NOT duplicate the same number as a budget line (#417)" {
@@ -312,8 +312,8 @@ setup() {
   _pf_host_mem_kb()    { echo $((16 * 1024 * 1024)); }
   _pf_runtime_mem_kb() { echo $((16 * 1024 * 1024)); }
   run _pf_memory
-  [[ "$output" == *"16 GB (machine)"* ]]
-  [[ "$output" != *"Docker's memory budget"* ]]
+  [[ "$output" == *"16 GB (machine)"* ]] || return 1
+  [[ "$output" != *"Docker's memory budget"* ]] || return 1
 }
 
 @test "_pf_memory: host unreadable -> falls back to the VM budget, labelled honestly (#417)" {
@@ -321,8 +321,8 @@ setup() {
   _pf_host_mem_kb()    { echo ""; }                      # hw.memsize unreadable
   _pf_runtime_mem_kb() { echo $((6 * 1024 * 1024)); }
   run _pf_memory
-  [[ "$output" == *"6 GB (Docker VM)"* ]]                # labelled as the VM, not "machine"
-  [[ "$output" != *"Docker's memory budget"* ]]          # and not also as a second line
+  [[ "$output" == *"6 GB (Docker VM)"* ]] || return 1   # labelled as the VM, not "machine"
+  [[ "$output" != *"Docker's memory budget"* ]] || return 1   # and not also as a second line
 }
 
 @test "_pf_memory: budget advice is clamped to the machine and floored at the minimum (#417/#428)" {
@@ -330,26 +330,26 @@ setup() {
   _pf_host_mem_kb()    { echo $((8 * 1024 * 1024)); }    # 8 GB Mac -> cap 8-2 = 6
   _pf_runtime_mem_kb() { echo $((5 * 1024 * 1024)); }    # 5 GB budget: >= floor, < warn
   run _pf_memory
-  [[ "$output" == *"Docker's memory budget: 5 GB"* ]]
-  [[ "$output" == *"6 GB"* ]]              # clamped rec, not the raw PF_REC_MEM_GB=16
-  [[ "$output" != *"16 GB"* ]]             # never advise more than the machine has
+  [[ "$output" == *"Docker's memory budget: 5 GB"* ]] || return 1
+  [[ "$output" == *"6 GB"* ]] || return 1   # clamped rec, not the raw PF_REC_MEM_GB=16
+  [[ "$output" != *"16 GB"* ]] || return 1   # never advise more than the machine has
 }
 
 @test "_pf_runtime_mem_status: Linux hint avoids the Docker Desktop dead end (Bugbot #445)" {
   OS=Linux
   _pf_host_mem_kb() { echo $((16 * 1024 * 1024)); }
   run _pf_runtime_mem_status $((4 * 1024))                # sub-floor budget, in MiB
-  [[ "$output" == *"below the"* ]]
-  [[ "$output" != *"Docker Desktop"* ]]                   # headless boxes have no Desktop UI
-  [[ "$output" == *"VM/cgroup limit"* ]]
+  [[ "$output" == *"below the"* ]] || return 1
+  [[ "$output" != *"Docker Desktop"* ]] || return 1   # headless boxes have no Desktop UI
+  [[ "$output" == *"VM/cgroup limit"* ]] || return 1
 }
 
 @test "_pf_runtime_mem_status: macOS hint names Docker Desktop AND a real colima resize" {
   OS=Darwin
   _pf_host_mem_kb() { echo $((16 * 1024 * 1024)); }
   run _pf_runtime_mem_status $((4 * 1024))
-  [[ "$output" == *"Docker Desktop"* ]]
-  [[ "$output" == *"colima stop && colima start --memory"* ]]
+  [[ "$output" == *"Docker Desktop"* ]] || return 1
+  [[ "$output" == *"colima stop && colima start --memory"* ]] || return 1
 }
 
 @test "_pf_runtime_mem_status: healthy budget -> ok line, no latch set" {
@@ -357,7 +357,7 @@ setup() {
   _pf_host_mem_kb() { echo $((32 * 1024 * 1024)); }
   PF_RUNTIME_MEM_WARNED=""
   _pf_runtime_mem_status $((16 * 1024)) >/dev/null
-  [ -z "$PF_RUNTIME_MEM_WARNED" ]          # nothing was warned, so nothing to suppress
+  [ -z "$PF_RUNTIME_MEM_WARNED" ] || return 1   # nothing was warned, so nothing to suppress
 }
 
 # ── Bugbot #445 r2: one threshold, one copy, no dead-end advice ───────────────
@@ -365,18 +365,18 @@ setup() {
   OS=Darwin
   _pf_host_mem_kb() { echo $((4 * 1024 * 1024)); }   # 4 GB Mac: 4 − 2 reserve = 2 < 5 floor
   run _pf_runtime_mem_status $((2 * 1024))
-  [[ "$output" == *"larger machine"* ]]
+  [[ "$output" == *"larger machine"* ]] || return 1
   # No "give Docker N GB" dead end, and no concrete size the machine can't provide.
-  [[ "$output" != *"Give Docker"* ]]
-  [[ "$output" != *"colima start --memory"* ]]
+  [[ "$output" != *"Give Docker"* ]] || return 1
+  [[ "$output" != *"colima start --memory"* ]] || return 1
 }
 
 @test "_pf_runtime_mem_status: a host that CAN reach the floor still gets the resize remedy" {
   OS=Darwin
   _pf_host_mem_kb() { echo $((16 * 1024 * 1024)); }
   run _pf_runtime_mem_status $((4 * 1024))
-  [[ "$output" == *"Give Docker"* ]]
-  [[ "$output" != *"larger machine"* ]]
+  [[ "$output" == *"Give Docker"* ]] || return 1
+  [[ "$output" != *"larger machine"* ]] || return 1
 }
 
 @test "_pf_memory + recheck: a budget preflight OK'd is never re-warned by the recheck (Bugbot #445 r2)" {
@@ -391,14 +391,14 @@ setup() {
   error() { printf 'ERR: %s\n' "$*"; exit 1; }
   PF_RUNTIME_MEM_WARNED=""
   run _pf_memory
-  [[ "$output" == *"Docker's memory budget: 6 GB"* ]]
-  [[ "$output" != *"recommended ≥"* ]]           # ticked, not warned
+  [[ "$output" == *"Docker's memory budget: 6 GB"* ]] || return 1
+  [[ "$output" != *"recommended ≥"* ]] || return 1   # ticked, not warned
   # Now the recheck, same run: must be silent about the identical budget.
   PF_RUNTIME_MEM_WARNED=""
   run _pf_recheck_runtime_mem
-  [ "$status" -eq 0 ]
-  [[ "$output" != *"recommended ≥"* ]]
-  [[ "$output" != *"memory budget"* ]]
+  [ "$status" -eq 0 ] || return 1
+  [[ "$output" != *"recommended ≥"* ]] || return 1
+  [[ "$output" != *"memory budget"* ]] || return 1
 }
 
 @test "_pf_recheck_runtime_mem: healthy budget -> silent, no duplicate tick (#417)" {
@@ -409,8 +409,8 @@ setup() {
   error() { printf 'ERR: %s\n' "$*"; exit 1; }
   PF_RUNTIME_MEM_WARNED=""
   run _pf_recheck_runtime_mem
-  [ "$status" -eq 0 ]
-  [ -z "$output" ]                                # quiet_ok: preflight already ticked it
+  [ "$status" -eq 0 ] || return 1
+  [ -z "$output" ] || return 1   # quiet_ok: preflight already ticked it
 }
 
 @test "_pf_recheck_runtime_mem: cold install carries the colima/cgroup guidance (Bugbot #445 r2)" {
@@ -424,9 +424,9 @@ setup() {
   error() { printf 'ERR: %s\n' "$*"; exit 1; }
   PF_RUNTIME_MEM_WARNED=""
   run _pf_recheck_runtime_mem
-  [ "$status" -eq 0 ]
-  [[ "$output" == *"Docker's memory budget: 6 GB"* ]]
-  [[ "$output" == *"colima stop && colima start --memory"* ]]
+  [ "$status" -eq 0 ] || return 1
+  [[ "$output" == *"Docker's memory budget: 6 GB"* ]] || return 1
+  [[ "$output" == *"colima stop && colima start --memory"* ]] || return 1
 }
 
 @test "_pf_recheck_runtime_mem: latch suppresses the DUPLICATE warn (#417)" {
@@ -435,8 +435,8 @@ setup() {
   error() { printf 'ERR: %s\n' "$*"; exit 1; }
   PF_RUNTIME_MEM_WARNED=1                   # preflight already reported this budget
   run _pf_recheck_runtime_mem
-  [ "$status" -eq 0 ]
-  [ -z "$output" ]                          # silent — no second warning for one condition
+  [ "$status" -eq 0 ] || return 1
+  [ -z "$output" ] || return 1   # silent — no second warning for one condition
 }
 
 @test "_pf_recheck_runtime_mem: the latch must NEVER gate the sub-floor HARD FAIL (#417/#513)" {
@@ -447,8 +447,8 @@ setup() {
   error() { printf 'ERR: %s\n' "$*"; exit 1; }
   PF_RUNTIME_MEM_WARNED=1                   # latch set — must not buy a pass
   run _pf_recheck_runtime_mem
-  [ "$status" -ne 0 ]                       # still hard-fails: the floor is enforced
-  [[ "$output" == *"below the"* ]]
+  [ "$status" -ne 0 ] || return 1   # still hard-fails: the floor is enforced
+  [[ "$output" == *"below the"* ]] || return 1
 }
 
 @test "_pf_cpu: too few cores -> warn" {
@@ -474,7 +474,7 @@ setup() {
 # distinct truths and each caller names the one it means. Guard that it stays gone.
 @test "no _pf_total_mem_kb memory selector: the two truths stay separate (#417)" {
   f="$BATS_TEST_DIRNAME/../lib/preflight.sh"
-  ! grep -qE '^_pf_total_mem_kb\(\)' "$f"
+  ! grep -qE '^_pf_total_mem_kb\(\)' "$f" || return 1
   # _pf_memory and the hardware summary must read the HOST reader, not a selector.
   grep -qE '_pf_host_mem_kb' "$f"
 }
@@ -944,8 +944,8 @@ setup() {
   _pf_host_mem_kb() { echo ""; }                     # unreadable host
   _pf_runtime_mem_kb() { echo $((6 * 1024 * 1024)); } # 6 GB VM budget
   run _pf_memory
-  [[ "$output" != *"larger machine"* ]]
-  [[ "$output" == *"Docker VM"* ]]
+  [[ "$output" != *"larger machine"* ]] || return 1
+  [[ "$output" == *"Docker VM"* ]] || return 1
 }
 
 @test "_pf_runtime_mem_status: a VM at exactly the warn target is not told to reach it (Bugbot #445 r4)" {
@@ -956,8 +956,8 @@ setup() {
   local warn_eff
   warn_eff="$(_pf_clamp_mem_gb "$PF_WARN_MEM_GB")"
   run _pf_runtime_mem_status $(( warn_eff * 1024 - 124 ))
-  [[ "$output" != *"recommended ≥ ${warn_eff} GB"* ]]
-  [[ "$output" == *"budget: ${warn_eff} GB"* ]]
+  [[ "$output" != *"recommended ≥ ${warn_eff} GB"* ]] || return 1
+  [[ "$output" == *"budget: ${warn_eff} GB"* ]] || return 1
 }
 
 @test "_pf_memory: a floor-sized VM is never told it is below the floor it meets (Bugbot #445 r5)" {
@@ -969,8 +969,8 @@ setup() {
   _pf_runtime_mem_kb() { echo ""; }
   _pf_avail_mem_kb() { echo $(( 8 * 1024 * 1024 )); }   # plenty free: isolate the total line
   run _pf_memory
-  [[ "$output" == *"${PF_MIN_MEM_GB} GB (machine)"* ]]
-  [[ "$output" != *"below the ${PF_MIN_MEM_GB} GB"* ]]
+  [[ "$output" == *"${PF_MIN_MEM_GB} GB (machine)"* ]] || return 1
+  [[ "$output" != *"below the ${PF_MIN_MEM_GB} GB"* ]] || return 1
 }
 
 @test "_pf_memory + _pf_runtime_mem_status feed the predicate the same host figure (Bugbot #445 r5)" {
@@ -978,7 +978,7 @@ setup() {
   # _pf_memory passed a grace-adjusted VM-or-host figure while the status path
   # passed _pf_host_mem_gb, so the two could still disagree.
   grep -qE '_pf_host_too_small_for_floor "\$\(_pf_host_mem_gb\)"' "$BATS_TEST_DIRNAME/../lib/preflight.sh"
-  ! grep -qE '_pf_host_too_small_for_floor "\$gb"' "$BATS_TEST_DIRNAME/../lib/preflight.sh"
+  ! grep -qE '_pf_host_too_small_for_floor "\$gb"' "$BATS_TEST_DIRNAME/../lib/preflight.sh" || return 1
 }
 
 @test "memory GB is rendered through ONE converter, so no two lines can disagree (Bugbot #445 r6)" {
@@ -990,10 +990,10 @@ setup() {
   f="$BATS_TEST_DIRNAME/../lib/preflight.sh"
   grep -qE '^_pf_display_gb_from_mib\(\)' "$f"
   for v in 'rt_gb' 'mem_gb'; do
-    ! grep -qE "^\s*.*${v}=\\\$\(\( .*1024 / 1024" "$f"
+    ! grep -qE "^\s*.*${v}=\\\$\(\( .*1024 / 1024" "$f" || return 1
   done
   # _pf_hw_summary_line must not compute its own memory GB
-  ! grep -qE 'mem_gb=\$\(\( mem_kb / 1024 / 1024 \)\)' "$f"
+  ! grep -qE 'mem_gb=\$\(\( mem_kb / 1024 / 1024 \)\)' "$f" || return 1
 }
 
 @test "_pf_hw_summary_line agrees with the memory line on the same host (Bugbot #445 r6)" {
@@ -1005,8 +1005,8 @@ setup() {
   local mem_line="$output"
   run _pf_hw_summary_line
   # both must name the same figure
-  [[ "$mem_line" == *"${PF_MIN_MEM_GB} GB"* ]]
-  [[ "$output" == *"${PF_MIN_MEM_GB} GB memory"* ]]
+  [[ "$mem_line" == *"${PF_MIN_MEM_GB} GB"* ]] || return 1
+  [[ "$output" == *"${PF_MIN_MEM_GB} GB memory"* ]] || return 1
 }
 
 @test "_pf_recheck_runtime_mem: host-too-small applies on Linux too, matching preflight (Bugbot #445 r7)" {
@@ -1019,13 +1019,13 @@ setup() {
   _pf_runtime_mem_kb() { echo $(( 3 * 1024 * 1024 )); }                     # sub-floor budget
   PF_RUNTIME_MEM_WARNED=1
   run _pf_recheck_runtime_mem
-  [[ "$output" == *"larger machine"* ]]
-  [[ "$output" != *"Free memory (or raise the VM) to"* ]]   # the impossible remedy
+  [[ "$output" == *"larger machine"* ]] || return 1
+  [[ "$output" != *"Free memory (or raise the VM) to"* ]] || return 1   # the impossible remedy
 }
 
 @test "_pf_recheck_runtime_mem uses the shared too-small predicate, not inlined arithmetic (Bugbot #445 r7)" {
   f="$BATS_TEST_DIRNAME/../lib/preflight.sh"
   # the reserve arithmetic must exist in exactly one place: the predicate itself
-  [ "$(grep -cE 'PF_OS_RESERVE_GB \)\) -lt PF_MIN_MEM_GB|- PF_OS_RESERVE_GB < PF_MIN_MEM_GB' "$f")" -le 1 ]
+  [ "$(grep -cE 'PF_OS_RESERVE_GB \)\) -lt PF_MIN_MEM_GB|- PF_OS_RESERVE_GB < PF_MIN_MEM_GB' "$f")" -le 1 ] || return 1
   grep -qE '_pf_host_too_small_for_floor "\$phys_gb"' "$f"
 }
