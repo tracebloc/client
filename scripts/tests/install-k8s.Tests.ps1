@@ -2966,14 +2966,21 @@ Describe "k3s version pin: create + reuse drift (#547 source guards)" {
     $script:PSRC | Should -Match 'K8S_VERSION=latest runs an UNVALIDATED k3s'
     $script:PSRC | Should -Match 'if \(\$K8S_VERSION -eq "latest"\)'
   }
-  It "reuse path inspects the running node image and compares the k3s tag to the pin" {
+  It "defines Test-K3sVersionDrift which inspects the node image and compares the tag to the pin" {
+    $script:PSRC | Should -Match 'function Test-K3sVersionDrift'
     $script:PSRC | Should -Match "docker inspect ""k3d-\`$CLUSTER_NAME-server-0"" --format '{{\.Config\.Image}}'"
     $script:PSRC | Should -Match 'rancher/k3s:\(\[\^@'      # the tag-extract regex
     $script:PSRC | Should -Match '\$runningK3s -ne \$K8S_VERSION'
   }
-  It "reuse path warns with the recreate remedy on drift" {
+  It "warns with the recreate remedy on drift" {
     $script:PSRC | Should -Match 'not the validated pin'
     $script:PSRC | Should -Match 'k3d cluster delete \$CLUSTER_NAME'
+  }
+  It "runs the drift check on BOTH the reuse path and the healthy fast-path (Bugbot #565)" {
+    # 1 definition + 2 call sites = at least 3 mentions
+    ([regex]::Matches($script:PSRC, 'Test-K3sVersionDrift')).Count | Should -BeGreaterOrEqual 3
+    # the completed+healthy fast-path calls it (right after the "nothing to do" line)
+    $script:PSRC | Should -Match 'client is healthy -- nothing to do[\s\S]{0,320}?Test-K3sVersionDrift'
   }
   It "header docs no longer advertise 'default: latest'" {
     $script:PSRC | Should -Not -Match 'default: latest'

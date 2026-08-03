@@ -364,3 +364,26 @@ _depname() {
   refute_has "first time" "$output"            # no ceremony when a cluster already exists
   refute_has "HOME_SCREEN" "$output"
 }
+
+# ── healthy fast-path still surfaces k3s drift (#547, Bugbot #565) ───────────
+# The reuse-path drift check in _handle_existing_cluster is never reached when a
+# re-run classifies as healthy (it hands off + exits), so assess_existing_install
+# must run the check itself before the handoff — else a healthy-but-drifted
+# cluster (a client already up on a floated k3s) is silently reused.
+@test "assess_existing_install: healthy branch runs the k3s drift check before handoff" {
+  _assess_classify() { INSTALL_STATE=healthy; INSTALL_STATE_REASON=""; }
+  _check_existing_cluster_k8s_version() { echo "DRIFT_CHECK_RAN"; }
+  _assess_handoff() { echo "HANDOFF_RAN"; }        # stub: don't exit under `run`
+  run assess_existing_install
+  [ "$status" -eq 0 ]
+  assert_has "DRIFT_CHECK_RAN" "$output"
+  assert_has "HANDOFF_RAN" "$output"
+}
+
+@test "assess_existing_install: --force bypass skips the drift check entirely" {
+  export TB_FORCE_REINSTALL=1
+  _check_existing_cluster_k8s_version() { echo "DRIFT_CHECK_RAN"; }
+  run assess_existing_install
+  [ "$status" -eq 0 ]
+  refute_has "DRIFT_CHECK_RAN" "$output"
+}

@@ -2201,6 +2201,31 @@ function Write-HostCaCreateHint {
   Write-Host ""
 }
 
+# Warn (never fatal) when the RUNNING cluster's k3s differs from the validated pin.
+# k3s is baked in at create time; a cluster born unpinned, on an older installer, or
+# with K8S_VERSION=latest keeps its version across later pinned re-runs -- the #547
+# incident (a client ran k3s v1.35.5 while the pin was v1.29.4-k3s1). Called from
+# BOTH the reuse path in New-K3dCluster AND the completed+healthy fast-path in main
+# (Bugbot #565), so a healthy-but-drifted cluster still gets the recreate guidance.
+# Silent no-op if the image can't be read or isn't a parseable rancher/k3s:<tag>
+# (e.g. a digest-only pin) -- never false-warn.
+function Test-K3sVersionDrift {
+  if ($K8S_VERSION -eq "" -or $K8S_VERSION -eq "latest") { return }
+  $k3sImage = ""
+  try { $k3sImage = (docker inspect "k3d-$CLUSTER_NAME-server-0" --format '{{.Config.Image}}' 2>$null | Out-String).Trim() } catch {}
+  if ($k3sImage -match 'rancher/k3s:([^@\s]+)') {
+    $runningK3s = $Matches[1]
+    if ($runningK3s -ne $K8S_VERSION) {
+      Warn "The existing '$CLUSTER_NAME' cluster runs k3s '$runningK3s', not the validated pin '$K8S_VERSION'."
+      Hint "k3s version is fixed when the cluster is created -- it can't be changed on a running cluster."
+      Hint "This cluster was created by an older/unpinned installer or with K8S_VERSION=latest (#547). To move"
+      Hint "onto the validated version, recreate it:"
+      Hint "  k3d cluster delete $CLUSTER_NAME  (then re-run this installer)."
+      Hint "  (data under HOST_DATA_DIR is kept; recreate rebinds it.)"
+    }
+  }
+}
+
 function New-K3dCluster {
   Log "Creating k3d cluster: '$CLUSTER_NAME'"
 
@@ -2297,28 +2322,10 @@ function New-K3dCluster {
       }
     }
 
-    # k3s version is fixed when the cluster is created (baked into the node image);
-    # it can't be changed on a running cluster. A cluster created by an older/
-    # unpinned installer or with K8S_VERSION=latest keeps whatever k3s it was born
-    # with, EVEN across later correctly-pinned re-runs -- the #547 incident, where a
-    # client ran k3s v1.35.5 while the pin was v1.29.4-k3s1 and every re-run silently
-    # reused the drifted cluster. Warn + point at recreate. Silent no-op if the image
-    # can't be read or isn't a parseable rancher/k3s:<tag> (e.g. a digest-only pin).
-    if ($K8S_VERSION -ne "" -and $K8S_VERSION -ne "latest") {
-      $k3sImage = ""
-      try { $k3sImage = (docker inspect "k3d-$CLUSTER_NAME-server-0" --format '{{.Config.Image}}' 2>$null | Out-String).Trim() } catch {}
-      if ($k3sImage -match 'rancher/k3s:([^@\s]+)') {
-        $runningK3s = $Matches[1]
-        if ($runningK3s -ne $K8S_VERSION) {
-          Warn "The existing '$CLUSTER_NAME' cluster runs k3s '$runningK3s', not the validated pin '$K8S_VERSION'."
-          Hint "k3s version is fixed when the cluster is created -- it can't be changed on a running cluster."
-          Hint "This cluster was created by an older/unpinned installer or with K8S_VERSION=latest (#547). To move"
-          Hint "onto the validated version, recreate it:"
-          Hint "  k3d cluster delete $CLUSTER_NAME  (then re-run this installer)."
-          Hint "  (data under HOST_DATA_DIR is kept; recreate rebinds it.)"
-        }
-      }
-    }
+    # k3s version drift: a cluster born unpinned/old/latest keeps its k3s across
+    # pinned re-runs (#547). Shared with the completed+healthy fast-path in main so
+    # a healthy-but-drifted cluster is warned too (Bugbot #565).
+    Test-K3sVersionDrift
   } else {
     # Creating a FRESH cluster — never silently adopt data an earlier install
     # left under HOST_DATA_DIR (RFC-0003 §4 / #376; parity with the bash guard).
@@ -4202,6 +4209,10 @@ Print-Roadmap
 # finish the interrupted walk).
 if ((-not $Resume) -and $script:InstallState.completed -and (Test-ToolsPresent) -and (Test-ClusterRunning) -and (Test-ClientHealthy)) {
   Ok "tracebloc is already installed and the client is healthy -- nothing to do."
+  # A healthy cluster can still be running a DRIFTED k3s (the #547 steady state);
+  # this fast-path exits before New-K3dCluster's reuse check, so warn here too
+  # (Bugbot #565). Non-fatal: the client is healthy, we just flag the version.
+  Test-K3sVersionDrift
   Hint "Delete $(Get-InstallStatePath) (or set a fresh HOST_DATA_DIR) to force a full reinstall."
   Unregister-ResumeAfterReboot
   try { Stop-Transcript | Out-Null } catch {}
