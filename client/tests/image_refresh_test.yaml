@@ -132,6 +132,13 @@ tests:
       - matchRegex:
           path: data["image-refresh.sh"]
           pattern: "registry-1.docker.io"
+      # Regression guard (#546): the tick MUST skip when the deployment isn't settled,
+      # so a stuck/unschedulable jobs-manager (e.g. the RWO-PVC deadlock #545) can't be
+      # re-restarted every tick into a ReplicaSet storm. The guard runs `rollout status`
+      # and exits early before the digest loop.
+      - matchRegex:
+          path: data["image-refresh.sh"]
+          pattern: "not settled .* skipping this refresh tick"
       # Regression guard: the digest-pinned skip MUST stay in the script.
       - matchRegex:
           path: data["image-refresh.sh"]

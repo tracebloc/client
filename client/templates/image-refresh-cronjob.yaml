@@ -120,6 +120,18 @@ data:
         | jq -r --arg k "$_key" '.metadata.annotations[$k] // empty'
     }
 
+    # Skip the whole tick if the deployment isn't currently SETTLED (#546). A rollout
+    # already in progress, or a pod stuck (e.g. Pending on volume binding), means a restart
+    # can't help — it only churns ReplicaSets, and on a single-node local-path cluster that
+    # churn itself wedges provisioning (incident #545: RWO deadlock produced 19 restarts
+    # because each tick's rollout timed out and the next re-restarted, the digest annotation
+    # only landing after a rollout SUCCEEDS). concurrencyPolicy: Forbid stops overlapping
+    # JOBS; this stops the SEQUENTIAL restart storm. Retry on the next tick once settled.
+    if ! kubectl rollout status -n "$RELEASE_NAMESPACE" "deployment/${DEPLOYMENT_NAME}" --timeout=10s >/dev/null 2>&1; then
+      log "deployment/${DEPLOYMENT_NAME} not settled (rollout in progress or pod not Ready) -- skipping this refresh tick; will retry when settled"
+      exit 0
+    fi
+
     # =================================================================
     # Pass 1 — class-1 images: jobs-manager + pods-monitor.
     # docker.io, floating CLIENT_ENV tag, annotation-based source of
