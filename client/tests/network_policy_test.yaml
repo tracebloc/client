@@ -254,6 +254,15 @@ tests:
           content:
             port: 8888
             protocol: TCP
+      # locked-down egress is exactly 4 rules: DNS + MySQL + requests-proxy +
+      # egress-proxy. NOTE: `egressProxy.enabled` DEFAULTS TRUE (values.yaml —
+      # only `routeWorkloads` defaults false), so the gateway's permit rule
+      # renders here even though this case doesn't set it. The direct length
+      # assertion makes the shape unmissable and catches a stray appended rule
+      # (Saqlain review on #537).
+      - lengthEqual:
+          path: spec.egress
+          count: 4
 
   - it: locked down — renders the egress-proxy allowlist rule when egressProxy is enabled
     set:
@@ -274,3 +283,8 @@ tests:
           content:
             port: 3128
             protocol: TCP
+      # with egressProxy enabled: DNS + MySQL + requests-proxy + egress-proxy
+      # (4 rules) — pin the count so a stray appended rule can't slip in.
+      - lengthEqual:
+          path: spec.egress
+          count: 4
