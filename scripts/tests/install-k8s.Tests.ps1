@@ -2399,6 +2399,34 @@ Describe "UNC-safe background jobs (#409)" {
       $env:SystemRoot = $prev
     }
   }
+
+  It "JobInit silences the progress overlay in the job runspace (Bugbot #515)" {
+    # A fresh runspace resets $ProgressPreference to 'Continue' -- the parent's
+    # silence is not inherited -- and on PS 5.1 that overlay throttles
+    # Invoke-WebRequest badly (#468/#471). It must be set by the init script so
+    # every runspace gets it, not by each caller remembering to.
+    $job = Start-Job -InitializationScript $JobInit -ScriptBlock { "$ProgressPreference" }
+    Receive-Job -Job ($job | Wait-Job) | Should -Be 'SilentlyContinue'
+    Remove-Job $job -Force
+  }
+
+  It "a caller that forgets ProgressPreference still runs silenced (Bugbot #515)" {
+    # The whole point of moving it into JobInit: Invoke-WithHeartbeat is how every
+    # in-job download runs, and its scriptblock must not have to opt in.
+    (Invoke-WithHeartbeat -Message "progress" -PollSeconds 1 -Script { "$ProgressPreference" }) |
+      Should -Be 'SilentlyContinue'
+  }
+
+  It "the silence lives in JobInit itself, not only at the call sites" {
+    # Source-level gate: the assignment must be inside the $script:JobInit block,
+    # so a new Start-Job call site inherits it without an edit. Slice the block
+    # out first (non-greedy to the first closing brace at column 0) — matching
+    # against the whole file would be satisfied by any caller-local assignment.
+    $src   = Get-Content "$PSScriptRoot/../install-k8s.ps1" -Raw
+    $block = [regex]::Match($src, '(?s)\$script:JobInit = \{.*?\r?\n\}')
+    $block.Success | Should -BeTrue
+    $block.Value | Should -Match '\$ProgressPreference = ''SilentlyContinue'''
+  }
 }
 
 Describe "Pinned tool versions - no api.github.com (#382 / #410)" {

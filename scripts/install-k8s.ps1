@@ -280,6 +280,15 @@ $script:JobInit = {
     [Net.ServicePointManager]::SecurityProtocol =
       [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
   } catch {}
+  # Same story for the progress overlay: a fresh runspace resets
+  # $ProgressPreference to 'Continue', so the parent's silence (Invoke-WithRetry,
+  # the bootstrap's fetch helpers) is NOT inherited. On Windows PowerShell 5.1
+  # that overlay's render loop dominates an Invoke-WebRequest transfer -- the
+  # #468/#471 throttle -- and every in-job download goes through
+  # Invoke-WithHeartbeat, so silencing it belongs HERE, once, rather than in
+  # each caller's scriptblock where a new call site can forget it (Bugbot,
+  # client#515). Callers may still set it locally; this is the floor.
+  $ProgressPreference = 'SilentlyContinue'
 }
 
 # One honest line per system tool once it's ready (#422): name, version, and
@@ -1472,8 +1481,9 @@ function Install-Kubectl {
 }
 
 # ── Pinned tool versions (#382 / #410) ──────────────────────────────────────
-# Defaults MUST stay in lockstep with scripts/lib/common.sh (K3D_VERSION /
-# HELM_VERSION) until the shared facts spec (#435) single-sources them. Pinned
+# Defaults are single-sourced from scripts/spec/facts.env and stamped here by
+# scripts/check-facts.sh (#435); CI's `check-facts.sh --check` fails the PR if this drifts
+# from the spec or from scripts/lib/common.sh (K3D_VERSION / HELM_VERSION). Pinned
 # defaults keep installs deterministic and immune to GitHub's unauthenticated
 # releases/latest API, whose 60 req/hour/IP limit a single shared corporate NAT
 # exhausts. Only the literal value "latest" resolves at install time — via the

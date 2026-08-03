@@ -174,6 +174,36 @@ else
 fi
 echo "   OK: upgrade succeeded, lockdown stayed off, ingestor pin matches the baseline era (${BASELINE_PROD_DIGEST:-floating})"
 
+echo "── isolate path 2 from path 1's --reuse-values contamination (#459) ──"
+# path 1's --reuse-values rewrote THIS release's recorded values to the baseline's FULL
+# computed set — chart defaults (incl. any baseline prod pin) frozen as if user-supplied.
+# Left in place, path 2's --reset-then-reuse-values would replay that stale baseline pin
+# OVER the new chart default (the replay-contamination bug) and its assertion would pass
+# only until a prodDigest bump. Reset the recorded values to just the genuine install-time
+# overrides so paths 2-4 assert CLEAN-edge auto-upgrade behavior — the fleet's real
+# contract on an edge no one hand-upgraded. (A contaminated REAL edge is a separate
+# fleet-audit concern; remediation is exactly this: helm upgrade --reset-values, then
+# re-apply the genuinely intended overrides.)
+#
+# Reset to the PUBLISHED chart ($PREV), NOT $CHART_DIR: the local chart's new defaults
+# (the working-tree prod pin, the egress gateway) must arrive via path 2's upgrade, not be
+# pre-applied here — otherwise path 2 becomes a same-version no-op whose assertions already
+# hold from this step, and a --reset-then-reuse-values → --reuse-values regression would
+# slip through (computed values would still carry the local pin). Resetting to the baseline
+# keeps path 2 a genuine published→local upgrade that MUST pull the new defaults (#459 Bugbot).
+helm upgrade "$NS" "${REPO_NAME}/client" --version "$PREV" --namespace "$NS" --reset-values \
+  --set clientId=ci-e2e-upgrade \
+  --set clientPassword=ci-e2e-upgrade \
+  --set storageClass.provisioner=rancher.io/local-path
+# Verify the contamination is actually gone: `helm get values` WITHOUT --all reports only
+# USER-SUPPLIED values, so a chart-default key like images.ingestor.prodDigest showing up
+# there is exactly the past-–reuse-values fingerprint the issue describes. After the reset
+# it must be absent — only the three genuine overrides remain (matches `netpol && fail`
+# idiom: safe under set -e, jq's non-zero on absence is the non-final && operand).
+helm get values "$NS" -n "$NS" -o json | jq -e '.images.ingestor.prodDigest // empty' >/dev/null 2>&1 \
+  && fail "reset-values left images.ingestor.prodDigest in the user-supplied values — path 2 would not test a clean edge (#459)"
+echo "   OK: recorded values reset to the genuine overrides — path 2 now tests a clean edge"
+
 echo "── path 2: the fleet auto-upgrade — helm upgrade --reset-then-reuse-values ──"
 helm upgrade "$NS" "$CHART_DIR" --namespace "$NS" --reset-then-reuse-values
 netpol_has_external_443 || fail "auto-upgrade dropped the external 443 rule (allowExternalHttps default did not flow)"
@@ -192,14 +222,14 @@ DEPLOYED="$(helm list -n "$NS" --filter "^${NS}\$" -o yaml \
 # pin arriving here is what the old `-f values-prod.yaml` overlay could never
 # do — an overlay value is user-supplied, so it would be replayed verbatim
 # forever while the chart's copy was ignored.
-# ERA NOTE: path 1's --reuse-values rewrote this release's recorded values to
-# the baseline's full computed set, so against a post-pin baseline the replayed
-# pin and the local chart default coincide only while nobody has bumped the
-# pin. If a pin bump makes them differ, the assertion below fails — and that
-# failure is a real signal, not test noise: an edge that was ever hand-upgraded
-# with --reuse-values stops receiving chart pin updates the same way. Tracked
-# in client#459 — the first prodDigest bump trips this deliberately; decide
-# there whether to isolate path 2 from path 1 or fix the replay contamination.
+# #459 RESOLVED (was the ERA NOTE tripwire): path 1's --reuse-values froze the baseline's
+# full computed set (chart defaults as user-supplied), so this assertion used to hold only
+# while the baseline pin and the working-tree pin coincided — the first prodDigest bump
+# would trip it. We now RESET the recorded values above (path 2 runs on a clean edge), so
+# the auto-upgrade genuinely resets to the new chart defaults and re-applies only real
+# overrides: the working-tree pin lands here regardless of the baseline era, no false trip.
+# (Contaminated REAL edges — ones an operator hand-upgraded with --reuse-values — stay a
+# separate fleet-audit concern; the remediation is the reset performed above.)
 WANT_DIGEST="$(local_prod_digest)"
 [ -n "$WANT_DIGEST" ] \
   || fail "images.ingestor.prodDigest is empty in the working-tree chart — prod would silently lose its reproducibility pin"
