@@ -75,6 +75,8 @@ setup() {
   # so headless reboot recovery MUST be a system LaunchDaemon that runs at boot.
   TB_LAUNCHDAEMONS_DIR="$BATS_TEST_TMPDIR/LaunchDaemons"
   HOME="$BATS_TEST_TMPDIR/home"             # daemon log dir lands under a temp home
+  mkdir -p "$BATS_TEST_TMPDIR/bin"; printf '#!/bin/sh\n' > "$BATS_TEST_TMPDIR/bin/colima"
+  chmod +x "$BATS_TEST_TMPDIR/bin/colima"; PATH="$BATS_TEST_TMPDIR/bin:$PATH"   # colima IS the runtime
   _has_gui_session() { return 1; }
   sudo() { record "sudo $*"; "$@"; }        # passthrough so tee/mkdir really write
   _install_macos_autostart
@@ -91,6 +93,25 @@ setup() {
   ! grep -q '/tmp/tracebloc-autostart.log' "$plist"
   run mock_calls
   [[ "$output" == *"sudo launchctl"* ]]     # registered in the SYSTEM domain
+}
+
+@test "_install_macos_autostart: headless but colima NOT installed -> skip honestly, no bogus daemon, flag unset (#430 Bugbot)" {
+  # install_docker_desktop only installs colima when Docker was down; if Docker is already
+  # up by other means colima may be absent, so we must NOT write a colima daemon or promise
+  # auto-restart.
+  TB_LAUNCHDAEMONS_DIR="$BATS_TEST_TMPDIR/LaunchDaemons"
+  _has_gui_session() { return 1; }
+  command() { if [ "$2" = colima ]; then return 1; fi; builtin command "$@"; }   # colima absent
+  sudo() { record "sudo $*"; "$@"; }
+  TB_MACOS_AUTOSTART=0
+  run _install_macos_autostart
+  [ "$status" -ne 0 ]                                    # best-effort skip (caller's || true)
+  [[ "$output" == *"isn't installed"* ]]
+  [ ! -e "$TB_LAUNCHDAEMONS_DIR/io.tracebloc.runtime.plist" ]   # no bogus daemon
+  command() { if [ "$2" = colima ]; then return 1; fi; builtin command "$@"; }
+  _has_gui_session() { return 1; }; TB_MACOS_AUTOSTART=0
+  _install_macos_autostart || true
+  [ "${TB_MACOS_AUTOSTART:-0}" = "0" ]                   # summary won't falsely promise restart
 }
 
 @test "_install_macos_autostart: TRACEBLOC_NO_AUTOSTART -> skipped, nothing written, flag unset (#430 Bugbot)" {

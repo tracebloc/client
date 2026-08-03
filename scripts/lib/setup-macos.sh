@@ -414,9 +414,20 @@ _install_macos_autostart() {
     launchctl bootstrap "gui/$(id -u)" "$plist" 2>/dev/null \
       || launchctl load -w "$plist" 2>/dev/null || true
   else
+    # The headless daemon runs colima — but only if colima is ACTUALLY the runtime here.
+    # install_docker_desktop installs colima ONLY when Docker was down; if Docker was
+    # already up by other means colima may be absent, so a colima daemon would be bogus and
+    # the auto-restart promise false (#430 Bugbot). Resolve colima's REAL path (Homebrew is
+    # /opt/homebrew/bin on Apple Silicon, /usr/local/bin on Intel) instead of baking a fixed
+    # one; if it isn't installed, skip autostart honestly (best-effort — caller's `|| true`)
+    # rather than promise recovery via a runtime that isn't there.
+    local _colima; _colima="$(command -v colima 2>/dev/null || true)"
+    if [[ -z "$_colima" ]]; then
+      warn "Headless autostart needs colima, but it isn't installed on this host; skipping boot autostart — start your Docker runtime manually after a reboot."
+      return 1
+    fi
     local dir="${TB_LAUNCHDAEMONS_DIR:-/Library/LaunchDaemons}"
     local plist="$dir/${label}.plist"
-    local _colima; _colima="$(command -v colima 2>/dev/null || echo /usr/local/bin/colima)"
     local _user; _user="$(id -un)"
     local _home="${HOME:-/Users/$_user}"
     # A boot daemon has no user env — colima/limactl need HOME + a PATH that finds colima
