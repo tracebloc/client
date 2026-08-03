@@ -30,6 +30,21 @@ function Write-E2e([string]$Message) { Write-Host "[e2e-windows] $Message" }
 function Stop-E2e([string]$Message)  { Write-Host "[e2e-windows] FAIL: $Message" -ForegroundColor Red; exit 1 }
 function Confirm-NativeOk([string]$What) { if ($LASTEXITCODE -ne 0) { Stop-E2e "$What (exit $LASTEXITCODE)" } }
 
+# Run a native command under a KILLING deadline (Wait-ProcessWithDeadline, dot-sourced from
+# the installer, kills on timeout). Returns the exit code, or 124 if the deadline fired.
+# Used for docker info + k3d teardown so a wedged Docker/WSL or a stuck delete fails fast
+# instead of hanging the shared runner to the 45-min job cap (#436 Bugbot).
+function Invoke-Bounded([int]$TimeoutSec, [string]$File, [string[]]$CmdArgs, [string]$Label) {
+  $o = Join-Path $env:TEMP ("e2e-win-{0}-{1}.log" -f $Label, (Get-Random))
+  $e = "$o.err"
+  $p = Start-Process -FilePath $File -ArgumentList $CmdArgs -NoNewWindow -PassThru `
+        -RedirectStandardOutput $o -RedirectStandardError $e
+  $done = Wait-ProcessWithDeadline -Process $p -Deadline (Get-Date).AddSeconds($TimeoutSec) -Message $Label
+  Remove-Item $o, $e -Force -ErrorAction SilentlyContinue
+  if (-not $done) { return 124 }
+  return $p.ExitCode
+}
+
 $here = Split-Path -Parent $MyInvocation.MyCommand.Path
 $repo = (Resolve-Path (Join-Path $here '..\..')).Path
 
@@ -66,9 +81,8 @@ try {
 
   # 1. Docker/WSL must be UP. Docker Desktop + WSL2 + nested virt are runner prerequisites
   #    (docs/WINDOWS-E2E.md) — we verify, we do NOT reinstall Docker Desktop per run.
-  docker info *> $null
-  if ($LASTEXITCODE -ne 0) {
-    Stop-E2e "Docker isn't running on this runner. Docker Desktop + WSL2 + nested virtualization are self-hosted-runner prerequisites for the Windows e2e (see docs/WINDOWS-E2E.md)."
+  if ((Invoke-Bounded 30 "docker" @("info") "checking Docker") -ne 0) {
+    Stop-E2e "Docker isn't running (or didn't respond within 30s) on this runner. Docker Desktop + WSL2 + nested virtualization are self-hosted-runner prerequisites for the Windows e2e (see docs/WINDOWS-E2E.md)."
   }
   Write-E2e "Docker is up."
 
@@ -121,9 +135,12 @@ spec:
   $stub | kubectl apply --request-timeout=30s -f -
   Confirm-NativeOk "stub release apply"
 
-  # 5. Assert the discovery-shaped state exists (what DiscoverParentRelease selects on).
-  $dep = (kubectl get deploy -n $stubNs -l app.kubernetes.io/name=client -o name --request-timeout=30s) -join ''
-  if (-not $dep) { Stop-E2e "stub discovery: no client-labelled Deployment found" }
+  # 5. Assert the FULL discovery selector DiscoverParentRelease uses (#436 Bugbot): labels
+  #    name=client AND managed-by=Helm, AND the Deployment name is (or ends in) -jobs-manager
+  #    — not just the name label, or a stub missing the discovery keys would reach PASS.
+  $dep = (kubectl get deploy -n $stubNs -l 'app.kubernetes.io/name=client,app.kubernetes.io/managed-by=Helm' -o name --request-timeout=30s) -join "`n"
+  if (-not $dep) { Stop-E2e "stub discovery: no Deployment matches the CLI's label selector (name=client, managed-by=Helm)" }
+  if ($dep -notmatch '(/|-)jobs-manager$') { Stop-E2e "stub discovery: Deployment name doesn't end in -jobs-manager (got '$dep')" }
   kubectl get serviceaccount ingestor -n $stubNs --request-timeout=30s *> $null
   Confirm-NativeOk "stub discovery: 'ingestor' ServiceAccount missing"
   Write-E2e "Stub parent release is present and discovery-shaped ($dep)."
@@ -146,5 +163,5 @@ finally {
   # Teardown so the PERSISTENT runner is reusable (there is no per-run VM to destroy here).
   # Cluster only — leave $HOST_DATA_DIR\install-*.log for the workflow to upload on failure;
   # the workflow's always() step removes the data dir after the upload. Best-effort.
-  try { k3d cluster delete $env:CLUSTER_NAME 2>$null | Out-Null } catch { }
+  try { Invoke-Bounded 120 "k3d" @("cluster","delete",$env:CLUSTER_NAME) "cluster teardown" | Out-Null } catch { }
 }
