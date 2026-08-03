@@ -26,6 +26,7 @@ SPEC="scripts/spec/facts.env"
 COMMON="scripts/lib/common.sh"
 SUMMARY="scripts/lib/summary.sh"
 PS1="scripts/install-k8s.ps1"
+CLUSTER="scripts/lib/cluster.sh"
 
 MODE="write"
 case "${1:-}" in
@@ -124,6 +125,26 @@ while [ "$i" -lt "${#FACT_NAMES[@]}" ]; do
   fi
   i=$(( i + 1 ))
 done
+
+# Structural guard (#547 / F4): the fact table above only compares the pinned
+# VERSION STRINGS — it does NOT verify the create command actually WIRES the k3s
+# pin into the cluster. #547 drifted precisely because `--image rancher/k3s:<ver>`
+# can be dropped/gated while the version string stays correct and CI stays green.
+# Assert the create-time wiring is present in both installers so a refactor can't
+# silently unpin k3s. Fixed-string (grep -F): these are literal shell/PS tokens.
+_check_wiring() {  # name  file  literal
+  if [[ ! -f "$2" ]]; then
+    echo "  ✖ ${1}: ${2} not found" >&2; return 1
+  fi
+  if grep -qF "$3" "$2"; then
+    echo "  ✔ ${1}: k3s --image pin present in ${2}"; return 0
+  fi
+  echo "  ✖ ${1}: create-time '${3}' not found in ${2} — k3s could float (#547)" >&2; return 1
+}
+if [[ "$MODE" == "check" ]]; then
+  _check_wiring "cluster.sh:k3s-image-pin"      "$CLUSTER" 'rancher/k3s:${K8S_VERSION}' || drift=$(( drift + 1 ))
+  _check_wiring "install-k8s.ps1:k3s-image-pin" "$PS1"     'rancher/k3s:$K8S_VERSION'    || drift=$(( drift + 1 ))
+fi
 
 if [[ "$MODE" == "check" ]]; then
   if [[ "$drift" -ne 0 ]]; then

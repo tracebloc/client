@@ -2955,3 +2955,28 @@ Describe "Enable-OneVirtFeature -- translated DISM failures, honest reboot flag 
     Should -Invoke Hint -ParameterFilter { $m -like "*Enable 'Microsoft-Hyper-V-All' manually*" }
   }
 }
+
+Describe "k3s version pin: create + reuse drift (#547 source guards)" {
+  BeforeAll { $script:PSRC = Get-Content "$PSScriptRoot/../install-k8s.ps1" -Raw }
+
+  It "passes --image rancher/k3s:<pin> on create" {
+    $script:PSRC | Should -Match '"--image", "rancher/k3s:\$K8S_VERSION"'
+  }
+  It "warns loudly (not silently floats) when K8S_VERSION=latest" {
+    $script:PSRC | Should -Match 'K8S_VERSION=latest runs an UNVALIDATED k3s'
+    $script:PSRC | Should -Match 'if \(\$K8S_VERSION -eq "latest"\)'
+  }
+  It "reuse path inspects the running node image and compares the k3s tag to the pin" {
+    $script:PSRC | Should -Match "docker inspect ""k3d-\`$CLUSTER_NAME-server-0"" --format '{{\.Config\.Image}}'"
+    $script:PSRC | Should -Match 'rancher/k3s:\(\[\^@'      # the tag-extract regex
+    $script:PSRC | Should -Match '\$runningK3s -ne \$K8S_VERSION'
+  }
+  It "reuse path warns with the recreate remedy on drift" {
+    $script:PSRC | Should -Match 'not the validated pin'
+    $script:PSRC | Should -Match 'k3d cluster delete \$CLUSTER_NAME'
+  }
+  It "header docs no longer advertise 'default: latest'" {
+    $script:PSRC | Should -Not -Match 'default: latest'
+    $script:PSRC | Should -Match 'pinned \+ validated'
+  }
+}

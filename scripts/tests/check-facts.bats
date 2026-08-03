@@ -25,9 +25,14 @@ $script:K3dVersion  = if ($env:K3D_VERSION)  { $env:K3D_VERSION }  else { "v5.9.
 $script:HelmVersion = if ($env:HELM_VERSION) { $env:HELM_VERSION } else { "v4.2.3" }
 $K8S_VERSION   = if ($env:K8S_VERSION)   { $env:K8S_VERSION }   else { "v1.29.4-k3s1" }
 $ReadyTimeout     = if ($env:READY_TIMEOUT) { $env:READY_TIMEOUT } else { "300" }
+$k3dArgs += @("--image", "rancher/k3s:$K8S_VERSION")
 PS
   cat > "$REPO/scripts/lib/summary.sh" <<'SH'
 READY_TIMEOUT="${READY_TIMEOUT:-300}"
+SH
+  # cluster.sh carries the create-time k3s --image pin the #547 wiring guard checks.
+  cat > "$REPO/scripts/lib/cluster.sh" <<'SH'
+K3D_ARGS+=(--image "rancher/k3s:${K8S_VERSION}")
 SH
 }
 

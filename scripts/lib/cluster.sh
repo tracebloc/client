@@ -574,6 +574,41 @@ _handle_existing_cluster() {
   _check_existing_cluster_bind
   _check_existing_cluster_dataset_mount
   _check_existing_cluster_storage_mode
+  _check_existing_cluster_k8s_version
+}
+
+# k3s version is fixed when the cluster is created (baked into the node image);
+# it can't be changed on a running cluster. A cluster created by an older/unpinned
+# installer or with K8S_VERSION=latest keeps whatever k3s it was born with, EVEN
+# ACROSS later correctly-pinned re-runs — the single best explanation for the #547
+# incident, where a client ran k3s v1.35.5 while the pin was v1.29.4-k3s1 and every
+# re-run silently reused the drifted cluster. Warn on drift with the recreate
+# remedy so it's surfaced instead of reused. Silent no-op if Docker is down, the
+# server can't be inspected, or the image isn't a parseable rancher/k3s:<tag>
+# (e.g. a digest-only pin) — never false-warn.
+_check_existing_cluster_k8s_version() {
+  [[ -z "${K8S_VERSION:-}" || "$K8S_VERSION" == "latest" ]] && return 0
+  local server_container="k3d-${CLUSTER_NAME}-server-0"
+  local image
+  image=$(docker inspect "$server_container" --format '{{.Config.Image}}' 2>/dev/null) || return 0
+  [[ -z "$image" ]] && return 0
+  case "$image" in
+    *rancher/k3s:*) : ;;
+    *) return 0 ;;   # unexpected image ref — don't guess
+  esac
+  local running="${image##*rancher/k3s:}"   # strip up to the tag
+  running="${running%%@*}"                   # drop any @sha256:... digest suffix
+  [[ -z "$running" ]] && return 0
+  if [[ "$running" != "$K8S_VERSION" ]]; then
+    echo ""
+    warn "The existing '$CLUSTER_NAME' cluster runs k3s '$running', not the validated pin '$K8S_VERSION'."
+    hint "k3s version is fixed when the cluster is created — it can't be changed on a running cluster."
+    hint "This cluster was created by an older/unpinned installer or with K8S_VERSION=latest (#547). To move"
+    hint "onto the validated version, recreate it:"
+    hint "  k3d cluster delete $CLUSTER_NAME  &&  re-run this installer."
+    hint "  (hostpath mode keeps your data under ${HOST_DATA_DIR:-your data dir}; node-local mode loses in-cluster data on recreate.)"
+    echo ""
+  fi
 }
 
 # k3d bakes proxy env into containers at create time; it cannot be added to a
@@ -807,7 +842,20 @@ _create_new_cluster() {
   # while mysql + logs stay on the local /tracebloc tree. No-op when unset.
   [[ -n "${HOST_DATASET_DIR:-}" ]] && K3D_ARGS+=(-v "${HOST_DATASET_DIR}:/tracebloc-data@all")
 
-  [[ -n "$K8S_VERSION" && "$K8S_VERSION" != "latest" ]] && K3D_ARGS+=(--image "rancher/k3s:${K8S_VERSION}")
+  # Pin k3s at create time. common.sh defaults K8S_VERSION to the validated pin,
+  # so a normal install ALWAYS passes --image; the version is fixed into the node
+  # image and can't be changed later. An explicit K8S_VERSION=latest is an
+  # unsupported opt-out that floats to k3d's OWN bundled default k3s — the exact
+  # drift that stranded a client on v1.35.5 while the pin was v1.29.4 (#547) — so
+  # honour it but warn loudly. (Empty only happens when cluster.sh is sourced
+  # without common.sh, e.g. the unit harness; leave it a no-op there.)
+  if [[ "$K8S_VERSION" == "latest" ]]; then
+    warn "K8S_VERSION=latest runs an UNVALIDATED k3s (k3d's bundled default), not the tested pin."
+    hint "The chart is validated against a specific k3s release; 'latest' is unsupported and has stranded installs (#547)."
+    hint "Unset K8S_VERSION (or pin it to a validated tag) to use the tested version."
+  elif [[ -n "$K8S_VERSION" ]]; then
+    K3D_ARGS+=(--image "rancher/k3s:${K8S_VERSION}")
+  fi
 
   if [[ ${#K3D_GPU_FLAGS[@]} -gt 0 ]]; then
     K3D_ARGS+=("${K3D_GPU_FLAGS[@]}")
