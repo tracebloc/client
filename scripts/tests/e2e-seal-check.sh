@@ -25,14 +25,13 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 LIB="$HERE/../lib"
 CHART_DIR="$HERE/../../client"
 
-# Isolated cluster + release so we never touch a real 'tracebloc' install, and
-# opt out of autostart so create_cluster never reconfigures the host's Docker
-# restart policy / runs `systemctl enable docker` (matches the sibling e2e-*.sh).
-export CLUSTER_NAME="${CLUSTER_NAME:-tbseal}"
-export TRACEBLOC_NO_AUTOSTART=1
-# Derive NS from CLUSTER_NAME so `CLUSTER_NAME=foo bash ...` isolates a second
-# run under ONE name — cluster + release + namespace move together instead of
-# splitting the run's identity across two names (Saqlain review).
+# Shared bring-up contract (isolation env + tool-install prereqs), same as the
+# sibling e2e-*.sh.
+# shellcheck source=/dev/null
+source "$HERE/lib/e2e-common.sh"
+e2e_isolate_env tbseal
+# NS follows CLUSTER_NAME so a CLUSTER_NAME override isolates a whole run under
+# ONE name — cluster + release + namespace move together (Saqlain review).
 NS="$CLUSTER_NAME"
 
 # shellcheck source=/dev/null
@@ -49,24 +48,25 @@ trap cleanup EXIT
 
 fail() { echo "FAIL: $*" >&2; exit 1; }
 
-# Prerequisites. The sourced libs DEFINE these installers but do not call them;
-# create_cluster + helm need the binaries on PATH first, and a stock GitHub
-# runner ships none of k3d/helm/kubectl. Mirror e2e-auto-upgrade.sh exactly.
-has docker || fail "Docker is not available on this host."
-umask 022
-install_kubectl
-install_k3d
-install_helm
+# Tool prerequisites — shared with the sibling e2e-*.sh via e2e-common.sh
+# (docker check + umask + install_{kubectl,k3d,helm}).
+e2e_install_prereqs
 
 echo "── create_cluster() — real k3d bring-up (k3s enforces egress NetworkPolicy) ──"
 create_cluster
 kubectl wait --for=condition=Ready nodes --all --timeout=180s
 
+# The probe host — the SINGLE source shared by the enforcement probe and the
+# positive control below. Pin it explicitly on the install (rather than leaning
+# on the chart default) so the two can never target different hosts (Saqlain
+# nit on #541).
+HOST=1.1.1.1
+
 echo "── helm install (public images, egress lockdown ENGAGED) ──"
 # Local working-tree chart, public images (no registry secret), local-path
 # storage, and allowExternalHttps=false so the training-egress NetworkPolicy is
-# rendered and the egress-enforcement-check Job renders (it is gated on the
-# lockdown flag + a non-empty enforcementProbeHost, chart default 1.1.1.1).
+# rendered and the egress-enforcement-check Job renders (gated on the lockdown
+# flag + a non-empty enforcementProbeHost, pinned to $HOST below).
 # enforcementProbeTimeoutSeconds is bumped from the 60s chart default to 240s:
 # on a cold GHA runner k3s's kube-router can take >60s to program the pod's
 # iptables while the chart is still installing, and the probe is single-shot
@@ -78,6 +78,7 @@ helm install "$NS" "$CHART_DIR" --namespace "$NS" --create-namespace \
   --set clientPassword=ci-e2e-seal \
   --set storageClass.provisioner=rancher.io/local-path \
   --set networkPolicy.training.allowExternalHttps=false \
+  --set networkPolicy.training.enforcementProbeHost="$HOST" \
   --set networkPolicy.training.enforcementProbeTimeoutSeconds=240
 
 # Positive control (Saqlain review): before trusting a BLOCKED probe result,
@@ -87,9 +88,9 @@ helm install "$NS" "$CHART_DIR" --namespace "$NS" --create-namespace \
 # did nothing. A pod in `default` is governed by NO training-egress policy (the
 # policy is namespace-scoped to the release ns), so if IT reaches the host, the
 # training pod's block below is attributable to the policy, not the environment.
-# Same image + curl invocation as the probe; HOST matches the chart default the
-# install leaves in place.
-HOST=1.1.1.1
+# Same image + curl invocation as the probe, targeting the SAME $HOST pinned on
+# the install above — so a reachable positive here is attributable to exactly
+# the host the probe is blocked from (no hardcoded-vs-chart-default drift).
 echo "── positive control: a non-policied pod must REACH ${HOST}:443 ──"
 # A fast runner can schedule the pod before the `default` ServiceAccount is
 # created ("serviceaccount default not found"), which aborts under set -e before
