@@ -174,4 +174,7 @@ _set_spec() { local tmp; tmp="$(mktemp)"; sed "s|^$1=.*|$1=$2|" "$REPO/scripts/s
   # must name it as a wiring gap with the hand-fix
   printf '%s\n' "$output" | grep -qF "WIRING gap"
   printf '%s\n' "$output" | grep -qF "cannot fix it"
+  # the hand-fix hint must name BOTH shell forms — PS uses no braces (#565 Bugbot)
+  printf '%s\n' "$output" | grep -qF 'rancher/k3s:${K8S_VERSION}'
+  printf '%s\n' "$output" | grep -qF 'rancher/k3s:$K8S_VERSION'
 }

@@ -161,7 +161,9 @@ if [[ "$MODE" == "check" ]]; then
     echo "" >&2
     echo "check-facts: the k3s --image pin is missing from the create path in ${wiring_fail} file(s) (see ✖ above)." >&2
     echo "check-facts: this is a WIRING gap, not a version bump — '--write' cannot fix it. Restore the create-time" >&2
-    echo "             '--image rancher/k3s:\${K8S_VERSION}' flag by hand (cluster.sh / install-k8s.ps1) so k3s can't float (#547)." >&2
+    echo "             --image k3s pin by hand using the EXACT literal each ✖ line above shows — the two shells differ:" >&2
+    echo "             bash cluster.sh uses 'rancher/k3s:\${K8S_VERSION}' (braces); PowerShell install-k8s.ps1 uses" >&2
+    echo "             'rancher/k3s:\$K8S_VERSION' (no braces). So k3s can't float (#547)." >&2
     rc=1
   fi
   [[ "$rc" -eq 0 ]] || exit 1
