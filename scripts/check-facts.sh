@@ -39,8 +39,13 @@ esac
 # Read a bare KEY=value from the spec (comments/blank lines ignored). Fails closed:
 # a missing/empty key is a spec error, not a silent pass.
 _spec_get() {
-  local key="$1" val
-  val="$(sed -n "s/^${key}=\(.*\)$/\1/p" "$SPEC" | head -1)"
+  local key="$1" all val
+  # Capture whole, then take the first line with `%%$'\n'*` — NOT `… | head -1`.
+  # Under `set -o pipefail` a duplicate key makes head close the pipe after line 1,
+  # sed takes SIGPIPE, and the pipeline exits 141 — aborting the facts gate before
+  # any drift message prints (a crash/fail-open on duplicate input).
+  all="$(sed -n "s/^${key}=\(.*\)$/\1/p" "$SPEC")"
+  val="${all%%$'\n'*}"
   [[ -n "$val" ]] || { echo "check-facts: '${key}' missing from ${SPEC}" >&2; exit 2; }
   printf '%s' "$val"
 }
@@ -84,7 +89,9 @@ FACT_REWRITE=(
   's|\(\$ReadyTimeout .*else { "\)[^"]*\(" }\)|\1@@VAL@@\2|'
 )
 
-_extract() { sed -n "$2" "$1" | head -1; }
+# Capture whole, then take the first line with `%%$'\n'*` — NOT `… | head -1`, which
+# SIGPIPEs sed (exit 141) under `set -o pipefail` when a file has a second match.
+_extract() { local all; all="$(sed -n "$2" "$1")"; printf '%s' "${all%%$'\n'*}"; }
 
 drift=0
 i=0

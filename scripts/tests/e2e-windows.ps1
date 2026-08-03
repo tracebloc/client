@@ -95,7 +95,15 @@ try {
   #    still logs 'Creating k3d cluster'), so the copy check + PASS could succeed WITHOUT a
   #    real create. Pre-clean any stale cluster first so every run genuinely creates one
   #    (#436 Bugbot). Bounded so a wedged delete can't hang the runner.
-  Invoke-Bounded 120 "k3d" @("cluster","delete",$env:CLUSTER_NAME) "pre-clean stale cluster" | Out-Null
+  #    The delete's exit code MUST gate the run: `k3d cluster delete` is idempotent (exit 0
+  #    even when no such cluster exists), so a non-zero code means a timeout (124) or a real
+  #    failure that may have LEFT the cluster in place. Swallowing it (the old `| Out-Null`)
+  #    let New-K3dCluster silently reuse the stale cluster and still reach a false PASS — the
+  #    exact false-green this pre-clean exists to prevent. Fail loudly instead (#542 Bugbot).
+  $preclean = Invoke-Bounded 120 "k3d" @("cluster","delete",$env:CLUSTER_NAME) "pre-clean stale cluster"
+  if ($preclean -ne 0) {
+    Stop-E2e ("pre-clean 'k3d cluster delete $env:CLUSTER_NAME' " + $(if ($preclean -eq 124) { "timed out after 120s" } else { "failed (exit $preclean)" }) + " — a stale cluster may remain, which would send New-K3dCluster down its reuse path and yield a false PASS without a real create. Delete it by hand and re-run.")
+  }
   New-K3dCluster
   kubectl wait --for=condition=Ready nodes --all --timeout=180s --request-timeout=30s
   Confirm-NativeOk "nodes did not reach Ready"
