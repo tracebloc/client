@@ -44,13 +44,17 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Resolve isolated data dir (under %USERPROFILE%, per Confirm-DataDir)
+      - name: Resolve isolated data dir + tool PATH
         shell: pwsh
         run: |
-          # Publish it to $GITHUB_ENV so the driver inherits it AND the artifact/teardown
-          # steps can reference ${{ env.HOST_DATA_DIR }} — all in lockstep with the driver's
-          # own default of $USERPROFILE\.tracebloc-e2e.
+          # Publish HOST_DATA_DIR to $GITHUB_ENV so the driver inherits it AND the artifact/
+          # teardown steps can reference ${{ env.HOST_DATA_DIR }} — in lockstep with the
+          # driver's own default of $USERPROFILE\.tracebloc-e2e.
           Add-Content -Path $env:GITHUB_ENV -Value "HOST_DATA_DIR=$env:USERPROFILE\.tracebloc-e2e"
+          # Put the installer's tool dir on PATH for LATER steps (the safety-net teardown's
+          # bare `k3d`). Initialize-ToolDir writes the MACHINE PATH, which a fresh step
+          # process doesn't pick up mid-job; GITHUB_PATH does prepend it for later steps (#436 Bugbot).
+          Add-Content -Path $env:GITHUB_PATH -Value "$env:ProgramFiles\tracebloc\bin"
 
       - name: Run the real installer e2e (credential-free)
         shell: pwsh
