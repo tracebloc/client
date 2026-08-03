@@ -141,17 +141,30 @@ _check_wiring() {  # name  file  literal
   fi
   echo "  ✖ ${1}: create-time '${3}' not found in ${2} — k3s could float (#547)" >&2; return 1
 }
+# Wiring failures are tracked SEPARATELY from version drift: `--write` restamps
+# version strings but CANNOT restore create-time wiring, so a wiring gap must not
+# emit the "run --write" hint (Bugbot #565) — it needs a hand-fix.
+wiring_fail=0
 if [[ "$MODE" == "check" ]]; then
-  _check_wiring "cluster.sh:k3s-image-pin"      "$CLUSTER" 'rancher/k3s:${K8S_VERSION}' || drift=$(( drift + 1 ))
-  _check_wiring "install-k8s.ps1:k3s-image-pin" "$PS1"     'rancher/k3s:$K8S_VERSION'    || drift=$(( drift + 1 ))
+  _check_wiring "cluster.sh:k3s-image-pin"      "$CLUSTER" 'rancher/k3s:${K8S_VERSION}' || wiring_fail=$(( wiring_fail + 1 ))
+  _check_wiring "install-k8s.ps1:k3s-image-pin" "$PS1"     'rancher/k3s:$K8S_VERSION'    || wiring_fail=$(( wiring_fail + 1 ))
 fi
 
 if [[ "$MODE" == "check" ]]; then
+  rc=0
   if [[ "$drift" -ne 0 ]]; then
     echo "" >&2
     echo "check-facts: ${drift} fact(s) drifted from ${SPEC}. Run 'scripts/check-facts.sh --write' and commit." >&2
-    exit 1
+    rc=1
   fi
+  if [[ "$wiring_fail" -ne 0 ]]; then
+    echo "" >&2
+    echo "check-facts: the k3s --image pin is missing from the create path in ${wiring_fail} file(s) (see ✖ above)." >&2
+    echo "check-facts: this is a WIRING gap, not a version bump — '--write' cannot fix it. Restore the create-time" >&2
+    echo "             '--image rancher/k3s:\${K8S_VERSION}' flag by hand (cluster.sh / install-k8s.ps1) so k3s can't float (#547)." >&2
+    rc=1
+  fi
+  [[ "$rc" -eq 0 ]] || exit 1
   echo "check-facts: all installer facts match ${SPEC}."
 else
   [[ "$drift" -eq 0 ]] || { echo "check-facts: ${drift} consumer(s) could not be stamped (see above)." >&2; exit 1; }

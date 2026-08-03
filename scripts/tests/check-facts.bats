@@ -161,3 +161,17 @@ _set_spec() { local tmp; tmp="$(mktemp)"; sed "s|^$1=.*|$1=$2|" "$REPO/scripts/s
   [ "$status" -eq 0 ]
   [[ "$output" == *"all installer facts match"* ]]
 }
+
+@test "check-facts --check: a missing create-time --image pin fails with a WIRING message, not the --write hint (#547 / Bugbot)" {
+  # versions all still correct, but strip the k3s --image wiring from cluster.sh
+  printf '%s\n' '# stub without the k3s --image pin' > "$REPO/scripts/lib/cluster.sh"
+  run _facts --check
+  [ "$status" -ne 0 ]
+  # must NOT point the dev at --write (it cannot restore create-time wiring)
+  if printf '%s\n' "$output" | grep -qF "Run 'scripts/check-facts.sh --write'"; then
+    echo "unexpected --write hint for a wiring failure:" >&2; printf '%s\n' "$output" >&2; return 1
+  fi
+  # must name it as a wiring gap with the hand-fix
+  printf '%s\n' "$output" | grep -qF "WIRING gap"
+  printf '%s\n' "$output" | grep -qF "cannot fix it"
+}
