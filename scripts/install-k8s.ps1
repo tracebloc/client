@@ -1481,8 +1481,9 @@ function Install-Kubectl {
 }
 
 # ── Pinned tool versions (#382 / #410) ──────────────────────────────────────
-# Defaults MUST stay in lockstep with scripts/lib/common.sh (K3D_VERSION /
-# HELM_VERSION) until the shared facts spec (#435) single-sources them. Pinned
+# Defaults are single-sourced from scripts/spec/facts.env and stamped here by
+# scripts/check-facts.sh (#435); CI's `check-facts.sh --check` fails the PR if this drifts
+# from the spec or from scripts/lib/common.sh (K3D_VERSION / HELM_VERSION). Pinned
 # defaults keep installs deterministic and immune to GitHub's unauthenticated
 # releases/latest API, whose 60 req/hour/IP limit a single shared corporate NAT
 # exhausts. Only the literal value "latest" resolves at install time — via the
