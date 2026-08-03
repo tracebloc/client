@@ -122,6 +122,58 @@ setup() {
   [ "$output" = "" ]
 }
 
+# ── _yaml_sq_escape / _yaml_sq_unescape (Saqlain review, #443) ──────────────
+# The bash-3.2 portability rule lives in exactly these two helpers now, so both
+# directions and their round-trip are pinned here.
+@test "_yaml_sq_escape: doubles a quote (no stray backslash on bash 3.2)" {
+  run _yaml_sq_escape "a'b"
+  [ "$output" = "a''b" ]
+}
+
+@test "_yaml_sq_escape: leaves a quote-free value untouched" {
+  run _yaml_sq_escape 'plain-uuid-123'
+  [ "$output" = 'plain-uuid-123' ]
+}
+
+@test "_yaml_sq_unescape: collapses a doubled quote" {
+  run _yaml_sq_unescape "a''b"
+  [ "$output" = "a'b" ]
+}
+
+@test "_yaml_sq_escape then _yaml_sq_unescape round-trips quote-heavy values" {
+  for v in "a'b" "'" "''" "it's a 'test'" "no-quotes"; do
+    esc="$(_yaml_sq_escape "$v")"
+    [ "$(_yaml_sq_unescape "$esc")" = "$v" ]
+  done
+}
+
+# clientId used to be written raw into a DOUBLE-quoted scalar, so a `"` or `\`
+# in it corrupted the values file. Both credentials now go through the escaper
+# into single-quoted scalars, and must survive the write -> read round-trip.
+@test "clientId survives a round-trip through a single-quoted scalar (quote in the value)" {
+  f="$BATS_TEST_TMPDIR/v"
+  raw="ab'cd"
+  printf "clientId: '%s'\n" "$(_yaml_sq_escape "$raw")" >"$f"
+  run _extract_yaml_value "$f" clientId
+  [ "$output" = "$raw" ]
+}
+
+@test "a double-quote in clientId no longer breaks the scalar" {
+  f="$BATS_TEST_TMPDIR/v"
+  raw='ab"cd'
+  printf "clientId: '%s'\n" "$(_yaml_sq_escape "$raw")" >"$f"
+  # In a single-quoted YAML scalar a double quote is literal — no escaping needed,
+  # and crucially it can no longer terminate the scalar early.
+  run _extract_yaml_value "$f" clientId
+  [ "$output" = "$raw" ]
+}
+
+@test "the generated values file quotes clientId with the escaper, not raw interpolation" {
+  f="$BATS_TEST_DIRNAME/../lib/install-client-helm.sh"
+  grep -qE "^clientId: '\\\$TB_CLIENT_ID_ESCAPED'" "$f"
+  ! grep -qE '^clientId: "\$TB_CLIENT_ID"' "$f"
+}
+
 # ── _ensure_helm_runnable (happy path) ─────────────────────────────────────
 @test "_ensure_helm_runnable: helm runs -> ok" {
   helm() { return 0; }
@@ -141,7 +193,7 @@ setup() {
   [ "$status" -eq 0 ]
   [[ "$output" == *"Credentials verified"* ]]
   [[ "$output" == *"tracebloc installed"* ]]
-  grep -q 'clientId: "myid"' "$HOST_DATA_DIR/values.yaml"
+  grep -q "clientId: 'myid'" "$HOST_DATA_DIR/values.yaml"
   grep -q "clientPassword: 'mypw'" "$HOST_DATA_DIR/values.yaml"
   # client-runtime#92: installer-provisioned k3d is a fixed single-host cluster,
   # so it declares SINGLE_NODE=true -> jobs-manager applies the hard CPU/GPU rule.
@@ -193,7 +245,7 @@ setup() {
   [ "$status" -eq 0 ]
   [[ "$output" == *"Credentials verified"* ]]
   [[ "$output" != *"Client ID:"* ]]
-  grep -q 'clientId: "envid"' "$HOST_DATA_DIR/values.yaml"
+  grep -q "clientId: 'envid'" "$HOST_DATA_DIR/values.yaml"
   grep -q "clientPassword: 'envpw'" "$HOST_DATA_DIR/values.yaml"
   mock_calls | grep -q "helm upgrade --install tracebloc"
 }
@@ -378,7 +430,7 @@ setup() {
   [ "$status" -eq 0 ]
   [[ "$output" == *"rejected"* ]]
   [[ "$output" == *"Credentials verified"* ]]
-  grep -q 'clientId: "goodid"' "$HOST_DATA_DIR/values.yaml"
+  grep -q "clientId: 'goodid'" "$HOST_DATA_DIR/values.yaml"
 }
 
 @test "install_client_helm: inactive account -> errors, no helm install" {
@@ -434,7 +486,7 @@ setup() {
   # use-previous=y, ClientID=Enter(keep previd), password=Enter(keep prevpw)
   run install_client_helm <<< $'y\n\n\n'
   [ "$status" -eq 0 ]
-  grep -q 'clientId: "previd"' "$HOST_DATA_DIR/values.yaml"
+  grep -q "clientId: 'previd'" "$HOST_DATA_DIR/values.yaml"
   grep -q "clientPassword: 'prevpw'" "$HOST_DATA_DIR/values.yaml"
 }
 
@@ -666,7 +718,7 @@ setup() {
   grep -q 'HTTP_PROXY_PORT: "8080"' "$HOST_DATA_DIR/values.yaml"
   grep -q 'NO_PROXY: ".charite.de"' "$HOST_DATA_DIR/values.yaml"
   # injection must not corrupt the rest of the env: block / file
-  grep -q 'clientId: "myid"' "$HOST_DATA_DIR/values.yaml"
+  grep -q "clientId: 'myid'" "$HOST_DATA_DIR/values.yaml"
   grep -q 'SINGLE_NODE: "true"' "$HOST_DATA_DIR/values.yaml"
 }
 
@@ -845,4 +897,69 @@ setup() {
   # The adopt path tracks release and namespace separately — the rollback hint
   # must name the RELEASE (\$_rel), not the namespace (Bugbot #442 r5).
   grep -q 'helm -n \$_ns rollback \$_rel' "$f"
+}
+
+# ── #425: honest pull status (never sell a permanent failure as "downloading") ──
+@test "_progress_end_message: complete -> done" {
+  run _progress_end_message 3 3 3 ""
+  [ "$output" = "done" ]
+}
+@test "_progress_end_message: a pull failure -> failed, even with partial progress" {
+  run _progress_end_message 1 3 1 "pod/foo ImagePullBackOff"
+  [ "$output" = "failed" ]
+}
+@test "_progress_end_message: progress, no failure -> downloading" {
+  run _progress_end_message 2 3 2 ""
+  [ "$output" = "downloading" ]
+}
+@test "_progress_end_message: no progress, no failure -> stalled (not 'downloading')" {
+  run _progress_end_message 0 3 0 ""
+  [ "$output" = "stalled" ]
+}
+@test "_pull_failure_detail: ImagePullBackOff -> prints pod + event, returns 0" {
+  has() { [ "$1" = kubectl ]; }
+  kubectl() {
+    case "$*" in
+      *"get pods"*)   printf '%s\n' "foo-abc  0/1  ImagePullBackOff  0  30s" ;;
+      *"get events"*) printf '%s\n' '10s Warning Failed pod/foo Failed to pull image "ghcr.io/x": x509: certificate signed by unknown authority' ;;
+    esac
+  }
+  run _pull_failure_detail tracebloc
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"ImagePullBackOff"* ]]
+  [[ "$output" == *"x509"* ]]
+}
+@test "_pull_failure_detail: healthy pods -> returns 1, prints nothing" {
+  has() { [ "$1" = kubectl ]; }
+  kubectl() { case "$*" in *"get pods"*) printf '%s\n' "foo-abc 1/1 Running 0 1m" ;; esac; }
+  run _pull_failure_detail tracebloc
+  [ "$status" -ne 0 ]
+  [ -z "$output" ]
+}
+@test "_pull_failure_detail: unrelated x509 events don't displace the real pull reason (#425 Bugbot)" {
+  has() { [ "$1" = kubectl ]; }
+  kubectl() {
+    case "$*" in
+      *"get pods"*)   printf '%s\n' "foo-abc  0/1  ImagePullBackOff  0  30s" ;;
+      *"get events"*) printf '%s\n' \
+        'Warning Failed pod/foo Failed to pull image "ghcr.io/x": 403 Forbidden' \
+        'Warning Unrelated pod/bar x509: certificate signed by unknown authority' \
+        'Warning Unrelated pod/baz x509: certificate signed by unknown authority' \
+        'Warning Unrelated pod/qux x509: certificate signed by unknown authority' ;;
+    esac
+  }
+  run _pull_failure_detail tracebloc
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"403 Forbidden"* ]]   # the real pull reason survives the tail
+  [[ "$output" != *"x509"* ]]            # unrelated x509 events are scoped out
+}
+@test "_download_services_progress routes the end copy through the honest selector (#425)" {
+  # The end-of-progress copy is chosen by the pure _progress_end_message selector,
+  # a 'failed' branch warns loudly, and the background over-promise appears exactly
+  # once — so a permanent failure can never be printed as background progress.
+  local f="$BATS_TEST_DIRNAME/../lib/install-client-helm.sh"
+  grep -q 'outcome="\$(_progress_end_message' "$f"
+  grep -qE '^\s*failed\)' "$f"
+  grep -q 'look stuck pulling' "$f"
+  [ "$(grep -c 'Services are still downloading' "$f")" -eq 1 ]
 }

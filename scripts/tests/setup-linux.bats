@@ -896,7 +896,8 @@ _stub_install_steps() {
   MOCK_CALLS="$(mktemp)"
   PRESENT_CMDS="curl newuidmap newgidmap dockerd-rootless-setuptool.sh docker"
   XDG_RUNTIME_DIR=/run/user/1000
-  systemctl() { record "systemctl $*"; }
+  # is-system-running echoes a state word ⇒ user-systemd present ⇒ systemd path (#1222)
+  systemctl() { record "systemctl $*"; case "$*" in *is-system-running*) echo running ;; esac; }
   loginctl()  { record "loginctl $*"; }
   id()        { [ "${1:-}" = "-un" ] && echo testuser || echo "testuser docker"; }  # id -un → clean username (#452)
   install_rootless_docker                              # called directly to observe the exported DOCKER_HOST
@@ -907,12 +908,12 @@ _stub_install_steps() {
   ! mock_calls | grep -q sudo                          # no blanket sudo anywhere on the rootless path
 }
 
-@test "install_rootless_docker: XDG_RUNTIME_DIR unset falls back to /run/user/<uid>" {
+@test "install_rootless_docker: DOCKER_HOST targets the XDG runtime-dir socket (systemd path)" {
   MOCK_CALLS="$(mktemp)"
   PRESENT_CMDS="curl newuidmap newgidmap dockerd-rootless-setuptool.sh docker"
-  unset XDG_RUNTIME_DIR
+  XDG_RUNTIME_DIR=/run/user/1000
   id()        { [ "${1:-}" = "-u" ] && echo 1000 || echo "testuser docker"; }
-  systemctl() { :; }
+  systemctl() { case "$*" in *is-system-running*) echo running ;; esac; }
   loginctl()  { :; }
   install_rootless_docker
   [ "$DOCKER_HOST" = "unix:///run/user/1000/docker.sock" ]
@@ -924,7 +925,7 @@ _stub_install_steps() {
   XDG_RUNTIME_DIR=/run/user/1000
   HOME="$BATS_TEST_TMPDIR"
   curl_secure() { record "curl_secure $*"; return 0; } # no network
-  systemctl()   { :; }
+  systemctl()   { case "$*" in *is-system-running*) echo running ;; esac; }
   loginctl()    { :; }
   install_rootless_docker
   case ":$PATH:" in *":$HOME/bin:"*) : ;; *) return 1 ;; esac   # ~/bin now on PATH for the run
@@ -935,7 +936,7 @@ _stub_install_steps() {
   PRESENT_CMDS="newuidmap newgidmap dockerd-rootless-setuptool.sh docker"
   XDG_RUNTIME_DIR=/run/user/1000
   HOME="$BATS_TEST_TMPDIR"
-  systemctl() { return 1; }                            # user-systemd refuses
+  systemctl() { case "$*" in *is-system-running*) echo degraded ;; *) return 1 ;; esac; }  # present, but enable refuses
   loginctl()  { return 1; }                            # linger blocked (polkit-locked)
   docker()    { return 0; }                            # ...but the daemon is actually up
   install_rootless_docker                              # must reach the export + verify, not set -e abort
@@ -945,7 +946,7 @@ _stub_install_steps() {
 @test "install_rootless_docker: success line is honest about the admin touch (#458)" {
   PRESENT_CMDS="newuidmap newgidmap dockerd-rootless-setuptool.sh docker"
   XDG_RUNTIME_DIR=/run/user/1000; HOME="$BATS_TEST_TMPDIR"
-  systemctl() { :; }; loginctl() { :; }
+  systemctl() { case "$*" in *is-system-running*) echo running ;; esac; }; loginctl() { :; }
   # Zero-root path (gate didn't touch sudo): claims no admin rights.
   MOCK_CALLS="$(mktemp)"; unset TB_ROOTLESS_ADMIN_TOUCH
   run install_rootless_docker
@@ -955,6 +956,56 @@ _stub_install_steps() {
   run install_rootless_docker
   [[ "$output" != *"no administrator rights were used"* ]]
   [[ "$output" == *"one-time admin step"* ]]
+}
+
+# ── no-systemd fallback + Tier-2 fall-through (RFC 0001 #1222) ────────────────
+
+@test "install_rootless_docker: no user-systemd -> Tier-2 prepare-host fall-through (nohup fallback descoped, #1222)" {
+  MOCK_CALLS="$(mktemp)"
+  PRESENT_CMDS="newuidmap newgidmap dockerd-rootless-setuptool.sh docker"
+  XDG_RUNTIME_DIR=/run/user/1000; HOME="$BATS_TEST_TMPDIR"
+  systemctl() { record "systemctl $*"; }                 # is-system-running → empty ⇒ no user manager
+  loginctl()  { record "loginctl $*"; }
+  run install_rootless_docker
+  [ "$status" -ne 0 ]                                    # routes to Tier-2 and exits (no blind nohup bring-up)
+  [[ "$output" == *"prepare-host"* ]]                    # the Tier-2 remedy
+  [[ "$output" == *"no per-user systemd"* ]]             # accurate reason (not a vague setuptool failure)
+  ! mock_calls | grep -q "systemctl --user enable"       # never attempted the user-systemd bring-up
+  ! mock_calls | grep -q "dockerd-rootless-setuptool.sh install"   # gate is UPFRONT → no partial ~/bin install (Bugbot #485)
+}
+
+@test "install_rootless_docker: daemon never Ready -> Tier-2 prepare-host fall-through, not a silent proceed (#1222)" {
+  MOCK_CALLS="$(mktemp)"
+  PRESENT_CMDS="newuidmap newgidmap dockerd-rootless-setuptool.sh docker"
+  XDG_RUNTIME_DIR=/run/user/1000; HOME="$BATS_TEST_TMPDIR"
+  systemctl() { case "$*" in *is-system-running*) echo running ;; esac; }  # systemd present
+  loginctl()  { :; }
+  docker()    { return 1; }                              # daemon never answers on the socket
+  run install_rootless_docker
+  [ "$status" -ne 0 ]                                    # exits via fall-through, not onward
+  [[ "$output" == *"prepare-host"* ]]                    # routes to the Tier-2 remedy
+}
+
+@test "install_rootless_docker: setuptool install failure -> Tier-2 fall-through, not a bare set -e abort (#485 r2)" {
+  MOCK_CALLS="$(mktemp)"
+  PRESENT_CMDS="newuidmap newgidmap dockerd-rootless-setuptool.sh docker"
+  XDG_RUNTIME_DIR=/run/user/1000; HOME="$BATS_TEST_TMPDIR"
+  systemctl() { case "$*" in *is-system-running*) echo running ;; esac; }
+  loginctl()  { :; }
+  spin_cmd()  { record "$*"; case "$*" in *"dockerd-rootless-setuptool.sh install"*) return 1 ;; *) return 0 ;; esac; }
+  run install_rootless_docker
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"prepare-host"* ]]                    # routed to the Tier-2 remedy…
+  [[ "$output" == *"setup tool"* ]]                      # …naming the setuptool failure, not a spinner tail
+}
+
+@test "_tier2_fallthrough: names the researcher in the prepare-host remedy so prepare-host actually provisions them (Bugbot #485)" {
+  id() { [ "${1:-}" = "-un" ] && echo researcher || echo "researcher"; }
+  run _tier2_fallthrough "some reason"
+  [ "$status" -ne 0 ]                                    # exits
+  [[ "$output" == *"export TB_PREPARE_USER=researcher"* ]]   # names the researcher (run_prepare_host keys off this)
+  [[ "$output" == *"tracebloc prepare-host researcher"* ]]   # CLI form names them too
+  [[ "$output" == *"prepare it for 'researcher'"* ]]         # final error names them
 }
 
 # ── _ensure_subid_ranges: the Tier-1 subuid/subgid gate (RFC 0001 #1220) ─────
@@ -1428,4 +1479,200 @@ _stub_install_steps() {
   [[ "$output" == *"already sets DOCKER_HOST"* ]]                 # warned, not silent
   grep -q 'tcp://10.0.0.5:2375' "$HOME/.bashrc"                   # their line left untouched
   [ "$(grep -c 'DOCKER_HOST=' "$HOME/.bashrc")" -eq 1 ]           # we did NOT append the rootless line
+}
+
+
+# ── #427: docker-group grant is not gated on a fresh install ────────────────
+@test "install_docker_engine: pre-installed Docker + user NOT in group -> still grants (#427)" {
+  PRESENT_CMDS="docker curl conntrack"; TEST_DISTRO=ubuntu
+  id() { echo "testuser"; }                 # NOT yet in the docker group
+  run install_docker_engine
+  [ "$status" -eq 0 ]
+  mock_calls | grep -q "sudo usermod -aG docker testuser"
+}
+@test "install_docker_engine: pre-installed Docker + user already in group -> no redundant grant (#427)" {
+  PRESENT_CMDS="docker curl conntrack"; TEST_DISTRO=ubuntu
+  id() { echo "testuser docker"; }          # already a member
+  run install_docker_engine
+  [ "$status" -eq 0 ]
+  ! mock_calls | grep -q "usermod -aG docker"
+}
+@test "install_docker_engine: fresh install still grants the invoking user (#427 regression)" {
+  PRESENT_CMDS="curl conntrack"; TEST_DISTRO=ubuntu   # docker ABSENT -> fresh install
+  id() { echo "testuser"; }
+  run install_docker_engine
+  [ "$status" -eq 0 ]
+  mock_calls | grep -q "sudo usermod -aG docker testuser"
+}
+@test "install_docker_engine: prepare-host mode never grants the invoking admin (#427/#381)" {
+  PRESENT_CMDS="docker curl conntrack"; TEST_DISTRO=ubuntu
+  TB_PREPARE_HOST_MODE=1
+  id() { echo "admin"; }
+  run install_docker_engine
+  ! mock_calls | grep -q "usermod -aG docker admin"
+}
+@test "install_docker_engine: grants the INVOKING user, not TB_PREPARE_USER (#427 Bugbot)" {
+  PRESENT_CMDS="docker curl conntrack"; TEST_DISTRO=ubuntu
+  TB_PREPARE_USER=researcher                # a leftover export must NOT redirect the grant
+  id() { echo "testuser"; }                 # invoker ($USER) not in group
+  run install_docker_engine
+  [ "$status" -eq 0 ]
+  mock_calls | grep -q "sudo usermod -aG docker testuser"   # $USER, matches the sg re-exec + socket owner
+  ! mock_calls | grep -q "usermod -aG docker researcher"
+}
+
+# ── #427: refuse a sudo-wrapped full install ────────────────────────────────
+@test "refuse_sudo_wrapped_install: EUID 0 + SUDO_USER -> refuses, names the user (#427)" {
+  error() { printf 'ERR: %s\n' "$*"; return 1; }
+  id() { echo 0; }
+  SUDO_USER=alice run refuse_sudo_wrapped_install
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"Don't run the installer with sudo"* ]]
+  [[ "$output" == *"alice"* ]]
+  # the prepare-host remedy must name TB_PREPARE_USER (bare prepare-host grants nobody),
+  # but with a RESEARCHER placeholder — never the admin's $SUDO_USER, which would grant
+  # the admin and recreate the #377 footgun (#427 Bugbot r2).
+  [[ "$output" == *"TB_PREPARE_USER=<researcher-username>"* ]]
+  [[ "$output" != *"TB_PREPARE_USER=alice"* ]]
+}
+@test "refuse_sudo_wrapped_install: genuine root login (no SUDO_USER) is allowed (#427)" {
+  error() { printf 'ERR: %s\n' "$*"; return 1; }
+  id() { echo 0; }
+  SUDO_USER="" run refuse_sudo_wrapped_install
+  [ "$status" -eq 0 ]
+}
+@test "refuse_sudo_wrapped_install: SUDO_USER=root (sudo -i) is allowed (#427)" {
+  error() { printf 'ERR: %s\n' "$*"; return 1; }
+  id() { echo 0; }
+  SUDO_USER=root run refuse_sudo_wrapped_install
+  [ "$status" -eq 0 ]
+}
+@test "refuse_sudo_wrapped_install: non-root run is allowed (#427)" {
+  error() { printf 'ERR: %s\n' "$*"; return 1; }
+  id() { echo 1000; }
+  SUDO_USER=alice run refuse_sudo_wrapped_install
+  [ "$status" -eq 0 ]
+}
+
+@test "install_docker_engine: sg-docker re-exec guard keys off _grant_user, not bare \$USER (#427 reviewer)" {
+  # The grant target and the in-session re-exec guard must agree, or the USER-unset
+  # edge grants but never re-execs -> the dead-end loop returns.
+  f="$BATS_TEST_DIRNAME/../lib/setup-linux.sh"
+  grep -qE 'id -nG "\$_grant_user"[^|]*\| grep -qw docker' "$f"
+  ! grep -qE 'id -nG "\$USER"[^|]*\| grep -qw docker' "$f"
+}
+
+# ── #496: cgroup delegation is VERIFIED, not assumed ────────────────────────
+# The delegation check MUST read the user MANAGER's node (user@$UID.service), not the
+# enclosing slice — the slice lists cpu/io by default (DefaultCPUAccounting) and would
+# read "active" before the drop-in takes effect (#514 Bugbot, High).
+@test "_cgroup_controllers_path: points at user@\$UID.service (not the bare slice) (#514)" {
+  run _cgroup_controllers_path
+  [[ "$output" == *"/user@$(id -u).service/cgroup.controllers" ]]
+  [[ "$output" != *".slice/cgroup.controllers" ]]   # NOT the slice-level node
+}
+@test "_cgroup_controllers_active: true only when cpu+cpuset+io are all present (#496)" {
+  cf="$(mktemp)"; TB_USER_CGROUP_CONTROLLERS="$cf"
+  echo "cpuset cpu io memory pids" > "$cf"
+  run _cgroup_controllers_active; [ "$status" -eq 0 ]
+  echo "memory pids" > "$cf"                              # cpu/cpuset/io absent (systemd default)
+  run _cgroup_controllers_active; [ "$status" -ne 0 ]
+}
+@test "_cgroup_controllers_active: unreadable controllers file -> not active (#496)" {
+  TB_USER_CGROUP_CONTROLLERS="/no/such/cgroup/controllers"
+  run _cgroup_controllers_active; [ "$status" -ne 0 ]
+}
+@test "_write_cgroup_delegation: controllers NOT active -> warns limits unenforced + recreate (#496)" {
+  TB_USER_UNIT_DROPIN_DIR="$(mktemp -d)/user@.service.d"
+  cf="$(mktemp)"; echo "memory pids" > "$cf"; TB_USER_CGROUP_CONTROLLERS="$cf"   # not delegated yet
+  sudo() { "$@"; }; systemctl() { :; }
+  run _write_cgroup_delegation
+  [[ "$output" == *"NOT active in this session"* ]]
+  [[ "$output" == *"recreate the cluster"* ]]
+  [[ "$output" == *"k3d cluster delete"* ]]
+  [[ "$output" != *"active in this session."* ]]   # never the plain-success wording
+}
+@test "_write_cgroup_delegation: controllers active -> success, no scary warn (#496)" {
+  TB_USER_UNIT_DROPIN_DIR="$(mktemp -d)/user@.service.d"
+  cf="$(mktemp)"; echo "cpuset cpu io memory pids" > "$cf"; TB_USER_CGROUP_CONTROLLERS="$cf"
+  sudo() { "$@"; }; systemctl() { :; }
+  run _write_cgroup_delegation
+  [[ "$output" == *"active in this session"* ]]
+  [[ "$output" != *"NOT active"* ]]
+}
+
+@test "_write_cgroup_delegation: re-run over an existing drop-in still verifies (no silent fast path) (#496 Bugbot)" {
+  TB_USER_UNIT_DROPIN_DIR="$(mktemp -d)/user@.service.d"; mkdir -p "$TB_USER_UNIT_DROPIN_DIR"
+  printf '%s\n[Service]\nDelegate=cpu cpuset io memory pids\n' \
+    '# Managed by tracebloc installer (RFC 0001 #1221)' > "$TB_USER_UNIT_DROPIN_DIR/delegate.conf"   # already present
+  cf="$(mktemp)"; echo "memory pids" > "$cf"; TB_USER_CGROUP_CONTROLLERS="$cf"   # not delegated
+  sudo() { "$@"; }; systemctl() { record "systemctl $*"; }
+  run _write_cgroup_delegation
+  [[ "$output" == *"NOT active in this session"* ]]   # report ran even on the idempotent path
+  run mock_calls
+  [[ "$output" != *"daemon-reload"* ]]                # …and it was the no-reload idempotent path
+}
+@test "_write_cgroup_delegation: prepare-host mode -> researcher-login wording, no cluster-delete (#496 Bugbot)" {
+  TB_USER_UNIT_DROPIN_DIR="$(mktemp -d)/user@.service.d"
+  TB_PREPARE_HOST_MODE=1
+  cf="$(mktemp)"; echo "memory pids" > "$cf"; TB_USER_CGROUP_CONTROLLERS="$cf"   # admin's slice is irrelevant here
+  sudo() { "$@"; }; systemctl() { :; }
+  run _write_cgroup_delegation
+  [[ "$output" == *"researcher's next login"* ]]
+  [[ "$output" != *"k3d cluster delete"* ]]           # prepare-host creates no cluster
+  [[ "$output" != *"NOT active in this session"* ]]   # doesn't judge on the admin's own slice
+}
+
+# _ensure_cgroup_delegation is the ONLY full-install caller, and it short-circuits at
+# its own fast path BEFORE reaching _write_cgroup_delegation. So the #496 "re-surface
+# an inactive drop-in on re-run" guarantee has to hold on THAT path too, or the whole
+# fix is dead on every 2nd+ full install (the exact #514 reviewer catch).
+@test "_ensure_cgroup_delegation: drop-in present but NOT active -> fast path re-surfaces the warning, still no privileged call (#514)" {
+  TB_USER_UNIT_DROPIN_DIR="$(mktemp -d)/user@.service.d"; mkdir -p "$TB_USER_UNIT_DROPIN_DIR"
+  printf '[Service]\nDelegate=cpu cpuset io memory pids\n' > "$TB_USER_UNIT_DROPIN_DIR/delegate.conf"
+  cf="$(mktemp)"; echo "memory pids" > "$cf"; TB_USER_CGROUP_CONTROLLERS="$cf"   # written last run, not live yet
+  PROBE_PRIVILEGE=no_sudo
+  sudo() { record "sudo $*"; }
+  run _ensure_cgroup_delegation
+  [[ "$output" == *"NOT active in this session"* ]]   # NOT a silent "already present" log
+  [[ "$output" == *"k3d cluster delete"* ]]           # full-install remedy (not prepare-host mode here)
+  run mock_calls
+  [ -z "$output" ]                                     # …and still no sudo/systemctl (unprivileged read only)
+}
+
+@test "_ensure_cgroup_delegation: drop-in present AND active -> fast path confirms active, no privileged call (#514)" {
+  TB_USER_UNIT_DROPIN_DIR="$(mktemp -d)/user@.service.d"; mkdir -p "$TB_USER_UNIT_DROPIN_DIR"
+  printf '[Service]\nDelegate=cpu cpuset io memory pids\n' > "$TB_USER_UNIT_DROPIN_DIR/delegate.conf"
+  cf="$(mktemp)"; echo "cpuset cpu io memory pids" > "$cf"; TB_USER_CGROUP_CONTROLLERS="$cf"
+  PROBE_PRIVILEGE=no_sudo
+  sudo() { record "sudo $*"; }
+  run _ensure_cgroup_delegation
+  [[ "$output" == *"active in this session"* ]]
+  [[ "$output" != *"NOT active"* ]]
+  run mock_calls
+  [ -z "$output" ]
+}
+
+# The prepare-host caller resets TB_PREPARE_HOST_MODE right after install_docker_engine,
+# so without re-setting it around the cgroup write the report would judge the ADMIN's
+# live slice and print the "recreate the cluster" advice prepare-host can't act on
+# (#514 reviewer). Drive the REAL run_prepare_host, not _write_cgroup_delegation direct.
+@test "run_prepare_host: cgroup drop-in is reported in prepare-host mode — researcher wording, no cluster-delete, admin slice ignored (#514)" {
+  MOCK_CALLS="$(mktemp)"
+  OS=Linux; TB_PREPARE_USER=researcher
+  TB_USER_UNIT_DROPIN_DIR="$(mktemp -d)/user@.service.d"
+  cf="$(mktemp)"; echo "memory pids" > "$cf"; TB_USER_CGROUP_CONTROLLERS="$cf"   # admin's own slice: inactive
+  host_audit()           { :; }
+  preflight_sudo()       { :; }
+  setup_pm()             { :; }
+  apt_wait_for_lock()    { :; }
+  install_docker_engine(){ :; }
+  install_system_deps()  { :; }
+  systemctl()            { :; }
+  sudo()                 { record "sudo $*"; return 0; }   # fakes the drop-in write (idempotent path)
+  run run_prepare_host
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"researcher's next login"* ]]      # mode-aware wording, not judged on the admin
+  [[ "$output" != *"k3d cluster delete"* ]]           # prepare-host creates no cluster to recreate
+  [[ "$output" != *"NOT active in this session"* ]]
 }

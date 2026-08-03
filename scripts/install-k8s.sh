@@ -157,6 +157,15 @@ main() {
     esac
   done
 
+  # Refuse a sudo-wrapped full run BEFORE any file is created (#427): running the
+  # whole install as root grants Docker to root and root-owns the user's ~/.tracebloc
+  # + ~/.kube. prepare-host (the admin path) already dispatched-and-exited above;
+  # a genuine root login (no SUDO_USER) is allowed. Guarded so a stale bootstrap
+  # without the helper proceeds as before (same pattern as early_data_dir_guard).
+  if declare -F refuse_sudo_wrapped_install >/dev/null 2>&1; then
+    refuse_sudo_wrapped_install
+  fi
+
   validate_config
   # Pre-log network-FS guard (#432): setup_log_file mkdirs HOST_DATA_DIR and
   # redirects the whole session's output onto it — refuse a network-FS target

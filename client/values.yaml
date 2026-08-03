@@ -389,7 +389,31 @@ images:
     # newer categories re-opens the submit-vs-run drift bug (categories
     # accepted at submit that the spawned image can't process). See
     # client-runtime#162 discussion.
-    tag: "0.7"
+    # Empty by DEFAULT: the effective tag now comes from `channelTags` below,
+    # keyed on the resolved CLIENT_ENV. Set this to force one tag on an edge
+    # regardless of environment (to pin an exact immutable image, prefer
+    # `digest` — it wins over any tag). backend#1360.
+    tag: ""
+
+    # -- PER-ENVIRONMENT CHANNELS (backend#1360)
+    #
+    # dev and staging edges track the internal channels published from the
+    # matching data-ingestors branch (`publish-images.yml`: develop -> :dev,
+    # staging -> :stg), so an ingestor change can be validated on a real edge
+    # WITHOUT a production release. Before this, the ingestor image existed
+    # only as a byproduct of a prod release, so testing one change cost a prod
+    # PyPI publish plus an FR-gate override (2026-07-30).
+    #
+    # `prod` deliberately stays a semver float, NOT a `:prod` channel — no
+    # such tag is published; prod normally runs `prodDigest` anyway and this is
+    # only the fallback when pinning is disabled. Keep the prod entry tracking
+    # the current release line for the same submit-vs-run reasons noted above.
+    #
+    # These are unsigned internal images. Do not point a prod edge at them.
+    channelTags:
+      dev: "dev"
+      stg: "stg"
+      prod: "0.7"
 
     # -- PROD REPRODUCIBILITY PIN — the digest prod edges run.
     #
@@ -764,6 +788,30 @@ imageRefresh:
 # phase 2) — row-only categories (tabular / time-series) are the v1 target.
 # Default false: legacy shared label-named tables, byte-for-byte.
 perIngestionTables: false
+
+# ============================================================
+# Per-experiment DB credentials (RFC-0003 D10 — backend#1181)
+# ============================================================
+# When true, jobs-manager mints a short-lived MySQL user for each experiment
+# scoped to ONLY that experiment's physical table(s), and injects it into the
+# training pod via a per-job Secret — instead of every pod sharing the
+# root-equivalent edgeuser (which today can read every dataset + the metadata
+# DB's Service Bus strings). jobs-manager provisions the dedicated tb_credmgr
+# minting identity on startup and revokes each user when its Job ends.
+#
+# Flip per environment, dev first. Default false: today's shared-credential
+# behavior, byte-for-byte. Retiring edgeuser is a later step once this is
+# universally on. Needs no per-edge action — the tb_credmgr password is a
+# generated, upgrade-stable Secret value.
+perExperimentDbCreds: false
+
+# Optional operator pin for the tb_credmgr account password (mirrors
+# podTokenSigningSecret's 3-tier resolution). Leave "" to generate-and-persist
+# on first install. Set it for DR, to match a pre-created MySQL account, or to
+# force a rotation — and to keep the password stable across a
+# perExperimentDbCreds off→on toggle. Must be alphanumeric ([A-Za-z0-9]+);
+# jobs-manager rejects other characters.
+credmgrPassword: ""
 
 # ============================================================
 # Ingestion endpoint authorization (client-runtime#21)

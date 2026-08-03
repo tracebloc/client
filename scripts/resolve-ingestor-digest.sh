@@ -72,6 +72,39 @@ read_ingestor_tag() {
   ' "$file"
 }
 
+# Portable, yq-free reader for images.ingestor.channelTags.prod. Same scoping
+# discipline as read_ingestor_tag: only the 6-space `prod:` leaf inside
+# images: -> ingestor: -> channelTags: can match, so no sibling key can be
+# picked up by mistake. bash-3.2 / macOS-safe.
+read_ingestor_prod_channel() {
+  local file="$1"
+  [[ -f "$file" ]] || return 1
+  awk '
+    /^images:[[:space:]]*$/ { in_images = 1; next }
+    /^[^[:space:]#]/        { in_images = 0; in_ingestor = 0; in_channels = 0 }
+    in_images {
+      if ($0 ~ /^  [A-Za-z_][A-Za-z0-9_]*:[[:space:]]*$/) {
+        in_ingestor = ($0 ~ /^  ingestor:[[:space:]]*$/) ? 1 : 0
+        in_channels = 0
+        next
+      }
+      if (in_ingestor && $0 ~ /^    [A-Za-z_][A-Za-z0-9_]*:[[:space:]]*$/) {
+        in_channels = ($0 ~ /^    channelTags:[[:space:]]*$/) ? 1 : 0
+        next
+      }
+      if (in_channels && $0 ~ /^      prod:[[:space:]]*/) {
+        line = $0
+        sub(/^      prod:[[:space:]]*/, "", line)     # drop the key
+        sub(/[[:space:]]+#.*$/, "", line)              # drop a trailing comment
+        gsub(/^[[:space:]]+|[[:space:]]+$/, "", line)  # trim
+        gsub(/^"|"$/, "", line)                        # unwrap double quotes
+        gsub(/^'"'"'|'"'"'$/, "", line)                        # unwrap single quotes
+        if (line != "") { print line; exit }
+      }
+    }
+  ' "$file"
+}
+
 if [[ -z "$tag" ]]; then
   # No explicit TAG arg → default to the chart's images.ingestor.tag so this
   # helper always resolves the SAME line the chart ships. NEVER hardcode a
@@ -79,15 +112,30 @@ if [[ -z "$tag" ]]; then
   # after the chart tag moves (e.g. 0.7 -> 0.8) while appearing to follow the
   # chart. Prefer yq; fall back to the portable yq-free parse above; if
   # neither can determine it, fail loudly rather than guess.
+  # Since backend#1360 `images.ingestor.tag` is an OVERRIDE that is empty by
+  # default, and the prod float lives in `images.ingestor.channelTags.prod`.
+  # This script resolves the PROD pin, so prefer the explicit override when an
+  # operator set one and otherwise read the prod channel. Without this the
+  # documented no-arg / --write path exits on an empty tag -- which is the very
+  # command the chart comments and the ingestor-multiarch CI error tell people
+  # to run (Bugbot, #494).
   if command -v yq >/dev/null 2>&1 && [[ -f "$chart_values" ]]; then
     tag="$(yq -r '.images.ingestor.tag' "$chart_values")"
-    [[ "$tag" == "null" ]] && tag=""   # yq prints literal "null" for a missing key
+    [[ "$tag" == "null" ]] && tag=""
+    if [[ -z "$tag" ]]; then
+      tag="$(yq -r '.images.ingestor.channelTags.prod' "$chart_values")"
+      [[ "$tag" == "null" ]] && tag=""
+    fi
   else
     tag="$(read_ingestor_tag "$chart_values" || true)"
+    if [[ -z "$tag" ]]; then
+      tag="$(read_ingestor_prod_channel "$chart_values" || true)"
+    fi
   fi
   if [[ -z "$tag" ]]; then
     echo "ERROR: could not determine the default ingestor tag from ${chart_values#$here/../}." >&2
-    echo "       (images.ingestor.tag was unreadable: file missing, key absent, or yq not" >&2
+    echo "       (neither images.ingestor.tag nor images.ingestor.channelTags.prod was" >&2
+    echo "        readable: file missing, keys absent, or yq not" >&2
     echo "        installed and the yq-free parse found nothing.)" >&2
     echo "       Fix: pass TAG explicitly — scripts/resolve-ingestor-digest.sh <TAG> [--write] —" >&2
     echo "       or install yq. Refusing to fall back to a hardcoded tag." >&2
