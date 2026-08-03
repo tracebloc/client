@@ -17,7 +17,7 @@
 #    $env:CLUSTER_NAME  = "myapp"          default: tracebloc
 #    $env:SERVERS       = "1"              default: 1  (control-plane nodes)
 #    $env:AGENTS        = "1"              default: 1  (worker nodes)
-#    $env:K8S_VERSION   = "v1.29.4-k3s1"  default: latest
+#    $env:K8S_VERSION   = "v1.29.4-k3s1"  default: v1.29.4-k3s1 (pinned + validated; "latest" is UNSUPPORTED — see #547)
 #    $env:HOST_DATA_DIR = "C:\data"        default: $env:USERPROFILE\.tracebloc (LOCAL disk; no NFS/UNC)
 #    $env:CLIENT_ENV    = "dev"            optional; if not set, CLIENT_ENV is not added to env in values
 #    $env:TRACEBLOC_TRAINING_RESOURCES = "cpu=4,memory=16Gi"   optional; overrides the machine-sized training default
@@ -2201,6 +2201,42 @@ function Write-HostCaCreateHint {
   Write-Host ""
 }
 
+# Warn (never fatal) when the RUNNING cluster's k3s differs from the validated pin.
+# k3s is baked in at create time; a cluster born unpinned, on an older installer, or
+# with K8S_VERSION=latest keeps its version across later pinned re-runs -- the #547
+# incident (a client ran k3s v1.35.5 while the pin was v1.29.4-k3s1). Called from
+# BOTH the reuse path in New-K3dCluster AND the completed+healthy fast-path in main
+# (Bugbot #565), so a healthy-but-drifted cluster still gets the recreate guidance.
+# Silent no-op if the image can't be read or isn't a parseable rancher/k3s:<tag>
+# (e.g. a digest-only pin) -- never false-warn.
+function Test-K3sVersionDrift {
+  if ($K8S_VERSION -eq "" -or $K8S_VERSION -eq "latest") { return }
+  # Bounded (installer rule: every docker probe must have a deadline) so a wedged
+  # Docker engine can't hang the "already healthy" fast-path after success prints
+  # (#565 Bugbot). Mirrors Test-ClusterRunning's Start-Job + timeout pattern.
+  $k3sImage = ""
+  $job = Start-Job -InitializationScript $JobInit -ScriptBlock {
+    param($n) (docker inspect "k3d-$n-server-0" --format '{{.Config.Image}}' 2>$null | Out-String)
+  } -ArgumentList $CLUSTER_NAME
+  if (Wait-JobWithProgress -Job $job -TimeoutSec 15 -Message "Checking k3s version") {
+    $k3sImage = (Receive-Job $job -ErrorAction SilentlyContinue | Out-String).Trim()
+  } else {
+    Log "docker inspect (k3s version) timed out; skipping the version-drift check."
+  }
+  Remove-Job $job -Force -ErrorAction SilentlyContinue
+  if ($k3sImage -match 'rancher/k3s:([^@\s]+)') {
+    $runningK3s = $Matches[1]
+    if ($runningK3s -ne $K8S_VERSION) {
+      Warn "The existing '$CLUSTER_NAME' cluster runs k3s '$runningK3s', not the validated pin '$K8S_VERSION'."
+      Hint "k3s version is fixed when the cluster is created -- it can't be changed on a running cluster."
+      Hint "This cluster was created by an older/unpinned installer or with K8S_VERSION=latest (#547). To move"
+      Hint "onto the validated version, recreate it:"
+      Hint "  k3d cluster delete $CLUSTER_NAME  (then re-run this installer)."
+      Hint "  (data under HOST_DATA_DIR is kept; recreate rebinds it.)"
+    }
+  }
+}
+
 function New-K3dCluster {
   Log "Creating k3d cluster: '$CLUSTER_NAME'"
 
@@ -2296,6 +2332,11 @@ function New-K3dCluster {
         Err "Existing cluster is missing the dataset bind mount - refusing to install datasets onto ephemeral storage."
       }
     }
+
+    # k3s version drift: a cluster born unpinned/old/latest keeps its k3s across
+    # pinned re-runs (#547). Shared with the completed+healthy fast-path in main so
+    # a healthy-but-drifted cluster is warned too (Bugbot #565).
+    Test-K3sVersionDrift
   } else {
     # Creating a FRESH cluster — never silently adopt data an earlier install
     # left under HOST_DATA_DIR (RFC-0003 §4 / #376; parity with the bash guard).
@@ -2328,7 +2369,18 @@ function New-K3dCluster {
     # local /tracebloc tree. No-op when unset.
     if ($HOST_DATASET_DIR) { $k3dArgs += @("-v", "${HOST_DATASET_DIR}:/tracebloc-data@all") }
 
-    if ($K8S_VERSION -ne "" -and $K8S_VERSION -ne "latest") { $k3dArgs += @("--image", "rancher/k3s:$K8S_VERSION") }
+    # Pin k3s at create time (#547). $K8S_VERSION defaults to the validated pin, so
+    # a normal install ALWAYS passes --image; the version is baked into the node
+    # image and can't change later. K8S_VERSION=latest is an unsupported opt-out
+    # that floats to k3d's own bundled default (how a client landed on v1.35.5) —
+    # honour it but warn loudly.
+    if ($K8S_VERSION -eq "latest") {
+      Warn "K8S_VERSION=latest runs an UNVALIDATED k3s (k3d's bundled default), not the tested pin."
+      Hint "The chart is validated against a specific k3s release; 'latest' is unsupported and has stranded installs (#547)."
+      Hint "Unset K8S_VERSION (or pin it to a validated tag) to use the tested version."
+    } elseif ($K8S_VERSION -ne "") {
+      $k3dArgs += @("--image", "rancher/k3s:$K8S_VERSION")
+    }
     if ($K3D_GPU_FLAG -ne "") {
       $k3dArgs += $K3D_GPU_FLAG
       Log "GPU flag active: $K3D_GPU_FLAG"
@@ -4168,6 +4220,10 @@ Print-Roadmap
 # finish the interrupted walk).
 if ((-not $Resume) -and $script:InstallState.completed -and (Test-ToolsPresent) -and (Test-ClusterRunning) -and (Test-ClientHealthy)) {
   Ok "tracebloc is already installed and the client is healthy -- nothing to do."
+  # A healthy cluster can still be running a DRIFTED k3s (the #547 steady state);
+  # this fast-path exits before New-K3dCluster's reuse check, so warn here too
+  # (Bugbot #565). Non-fatal: the client is healthy, we just flag the version.
+  Test-K3sVersionDrift
   Hint "Delete $(Get-InstallStatePath) (or set a fresh HOST_DATA_DIR) to force a full reinstall."
   Unregister-ResumeAfterReboot
   try { Stop-Transcript | Out-Null } catch {}
