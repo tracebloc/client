@@ -236,7 +236,11 @@ jobs:
         run: bash scripts/tests/e2e-auto-upgrade.sh
 
   seal-check-e2e:
-    timeout-minutes: 20
+    # 30m to match the sibling k3d job (upgrade-e2e): the script's own bounds
+    # (create_cluster up to 15m + helm test 360s + tool install + install)
+    # can exceed a 20m GHA cap on a slow cluster bring-up and false-fail even
+    # while every component is still inside its own timeout (Bugbot).
+    timeout-minutes: 30
     # RFC-0003 D12 (backend#1184): run the egress-enforcement seal-check LIVE on
     # a real k3d cluster with the lockdown engaged, closing the SEAL-CHECK §8.4
     # "full-chart probe run pending" gap (the k3s netpol substrate was verified
