@@ -80,9 +80,28 @@ jobs:
           # net for a driver that died before its finally ran, plus the data-dir cleanup we
           # deliberately deferred so the log survived for the upload above. Bound the delete
           # so a wedged Docker/WSL teardown can't hang the shared runner (#436 Bugbot).
+          # The delete must not fail OPEN. This net exists precisely because a leftover
+          # tbe2ewin cluster on the shared runner sends the NEXT run's New-K3dCluster down
+          # its reuse path and yields a false PASS with no real create (#542 Bugbot). The
+          # old form swallowed everything in an empty catch: Start-Process without
+          # -ErrorAction Stop, and no null-check on $p, so a SPAWN failure left $p null,
+          # $p.HasExited threw, the catch ate it, and the stale cluster survived unseen.
+          $ErrorActionPreference = 'Stop'
+          $deleted = $false
           try {
             $p = Start-Process k3d -ArgumentList "cluster","delete",$env:CLUSTER_NAME -NoNewWindow -PassThru
+            if ($null -eq $p) { throw "k3d cluster delete did not start (Start-Process returned null)" }
             $p | Wait-Process -Timeout 120 -ErrorAction SilentlyContinue
-            if (-not $p.HasExited) { $p | Stop-Process -Force -ErrorAction SilentlyContinue }
-          } catch { }
+            if (-not $p.HasExited) {
+              $p | Stop-Process -Force -ErrorAction SilentlyContinue
+              throw "k3d cluster delete did not finish within 120s and was killed"
+            }
+            if ($p.ExitCode -ne 0) { throw "k3d cluster delete exited $($p.ExitCode)" }
+            $deleted = $true
+          } catch {
+            # always() teardown: the run is already over, so do not fail it here. But a
+            # leftover cluster MUST be visible, or the next run false-passes silently.
+            Write-Host "::warning::teardown safety-net could not confirm '$env:CLUSTER_NAME' was deleted: $_. A stale cluster may remain on this persistent runner and would send the next run's create down the reuse path. Delete it by hand: k3d cluster delete $env:CLUSTER_NAME"
+          }
+          if ($deleted) { Write-Host "teardown: '$env:CLUSTER_NAME' deleted" }
           if ($env:HOST_DATA_DIR) { Remove-Item -Recurse -Force $env:HOST_DATA_DIR -ErrorAction SilentlyContinue }
