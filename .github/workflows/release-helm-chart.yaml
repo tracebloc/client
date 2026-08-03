@@ -452,7 +452,17 @@ jobs:
     permissions:
       contents: read   # read index.yaml from gh-pages via the API
     steps:
-      - uses: actions/checkout@v4   # for scripts/index-invariants.sh
+      # Pinned and ref'd exactly like the three sibling jobs in this workflow.
+      # Bare `@v4` with no ref (Bugbot, client#534): on a `release: published` run
+      # github.ref intermittently arrives empty (actions/runner#2788), and checkout
+      # then falls back to the DEFAULT BRANCH -- so this backstop would verify the
+      # published index using whatever index-invariants.sh is on develop, not the
+      # one that shipped. A post-publish check reading a different script than the
+      # release is worse than no check, because it still reports.
+      - name: Check out the released tag (for scripts/index-invariants.sh)
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          ref: ${{ github.event.release.tag_name }}
       - name: Assert the public index holds only stable versions
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
