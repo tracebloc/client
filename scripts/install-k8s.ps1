@@ -618,7 +618,11 @@ function Start-InstallLog {
   # on-screen output: no user PII, no tracebloc internals. Best-effort — if the
   # file can't be created, logging silently no-ops and the install continues.
   try {
-    Set-Content -Path $LOG_FILE -Value "tracebloc client installer log - $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')" -Encoding UTF8 -ErrorAction Stop
+    # UTF-8 without BOM, matching the file's other writers (UTF8Encoding($false) at
+    # L1780/L1829/L4226): Set-Content -Encoding UTF8 prepends a BOM on PS 5.1, so the
+    # log would start with EF BB BF (Saqlain, #591). WriteAllText throws into the catch
+    # on failure like -ErrorAction Stop; the trailing CRLF keeps Set-Content's newline.
+    [System.IO.File]::WriteAllText($LOG_FILE, "tracebloc client installer log - $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')`r`n", (New-Object System.Text.UTF8Encoding($false)))
     Log "Install log: $LOG_FILE"
   } catch {
     $script:LOG_FILE = $null
