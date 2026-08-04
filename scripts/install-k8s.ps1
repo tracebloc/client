@@ -2580,10 +2580,22 @@ function Install-GpuDevicePlugin {
       Invoke-WithRetry -Label "GPU plugin download" -ScriptBlock {
         Invoke-WebRequest -Uri $dpUrl -OutFile $dpTmp -UseBasicParsing
       }
+      $gpuOk = $false
       if ((Get-Item $dpTmp).Length -gt 0) {
-        $null = (kubectl apply -f $dpTmp 2>&1)   # capture raw stderr (#577)
-        $null = (kubectl rollout status daemonset/nvidia-device-plugin-daemonset `
-          -n kube-system --timeout=120s 2>&1)
+        # kubectl is a native command: a non-zero exit does NOT throw, so without an
+        # explicit $LASTEXITCODE gate a failed apply/rollout would fall through to a
+        # false "GPU acceleration enabled." Capture each call's output to the log and
+        # gate the success message on the exit code (mirrors bash gpu-plugins.sh).
+        $applyOut = (kubectl apply -f $dpTmp 2>&1 | Out-String)
+        Log "GPU plugin apply: $applyOut"
+        if ($LASTEXITCODE -eq 0) {
+          $rollOut = (kubectl rollout status daemonset/nvidia-device-plugin-daemonset `
+            -n kube-system --timeout=120s 2>&1 | Out-String)
+          Log "GPU plugin rollout: $rollOut"
+          $gpuOk = ($LASTEXITCODE -eq 0)
+        }
+      }
+      if ($gpuOk) {
         Ok "GPU acceleration enabled."
       } else {
         Warn "Couldn't enable GPU acceleration - continuing in CPU mode. Re-run the installer later to retry."

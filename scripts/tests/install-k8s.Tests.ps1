@@ -3111,4 +3111,14 @@ Describe "GPU device-plugin failure is recoverable, not fatal (#577)" {
     $script:PSRCGPU | Should -Match 'continuing in CPU mode'
     $script:PSRCGPU | Should -Match 'GPU device-plugin setup error'
   }
+  It "gates the success message on the kubectl exit code — never a false 'enabled' (Bugbot)" {
+    # Native kubectl doesn't throw on a non-zero exit, so the GPU apply/rollout must be
+    # $LASTEXITCODE-checked; otherwise a failed apply prints "GPU acceleration enabled."
+    $gpuFn = ($script:PSRCGPU -split "function Install-GpuDevicePlugin")[1]
+    # No fire-and-forget discard of the apply into $null (the false-success pattern).
+    $gpuFn | Should -Not -Match '\$null = \(kubectl apply'
+    # The success message is guarded, and the apply output is written to the log.
+    $gpuFn | Should -Match '\$LASTEXITCODE'
+    $gpuFn | Should -Match 'Log "GPU plugin apply'
+  }
 }
