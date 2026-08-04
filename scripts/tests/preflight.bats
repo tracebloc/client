@@ -11,6 +11,10 @@ setup() {
   PF_HARD_FAIL=0
   # Default-safe stubs (a healthy amd64 box); individual tests override.
   _pf_probe_url() { echo ok; }
+  # Hermetic default: the TLS-inspection probe does a live openssl call to github.com
+  # in production, so stub it here (like _pf_probe_url) — nothing touches the real
+  # network. Tests of the REAL probe source preflight.sh fresh in a subshell (Bugbot).
+  _pf_detect_tls_inspection() { echo "unknown"; }
   _pf_free_kb() { echo $((50 * 1024 * 1024)); }       # 50 GB
   _pf_fstype() { echo ext4; }                          # local disk (storage check passes)
   _pf_host_mem_kb() { echo $((8 * 1024 * 1024)); }   # 8 GB
@@ -1093,9 +1097,19 @@ setup() {
 }
 
 @test "_pf_detect_tls_inspection: unknown when openssl is unavailable (never hangs)" {
-  has() { [[ "$1" != "openssl" ]]; }   # openssl absent
-  run _pf_detect_tls_inspection
+  # Source fresh so we exercise the REAL probe, not setup()'s hermetic stub.
+  run bash -c '
+    source "'"$BATS_TEST_DIRNAME"'/../lib/common.sh" 2>/dev/null || true
+    source "'"$BATS_TEST_DIRNAME"'/../lib/preflight.sh"
+    has() { [[ "$1" != "openssl" ]]; }   # openssl absent
+    _pf_detect_tls_inspection
+  '
   [ "$output" = "unknown" ]
+}
+
+@test "_pf_urldecode: percent-decodes (parity with PS UnescapeDataString)" {
+  run _pf_urldecode "p%40ss%3Aword"
+  [ "$output" = "p@ss:word" ]
 }
 
 @test "_pf_env_proxy_raw: preserves credentials (probe connection only, never displayed)" {
@@ -1107,22 +1121,47 @@ setup() {
   [ "$output" = "px.corp:3128" ]
 }
 
-@test "_pf_detect_tls_inspection: passes proxy credentials to openssl on an auth proxy (Bugbot)" {
-  # An authenticated proxy needs -proxy_user/-proxy_pass on the CONNECT, else it 407s
-  # and inspection reads as a false 'unknown'. Credentials reach openssl but never
-  # the returned result.
+@test "_pf_detect_tls_inspection: auth proxy -> creds to openssl via env:, never argv (Bugbot)" {
+  # An authenticated proxy needs credentials on the CONNECT, else it 407s and
+  # inspection reads as a false 'unknown'. The password must travel via env: (openssl
+  # reads $_TB_PROXY_PASS), NEVER argv/ps. Sourced fresh to exercise the real probe.
   cap="$BATS_TEST_TMPDIR/args"
-  HTTPS_PROXY="http://user:secret@px.corp:3128"
-  has() { return 0; }                 # openssl + timeout present
-  _bounded() { shift; "$@"; }
-  openssl() {
-    if [[ "$1" == "s_client" && "$*" == *"-help"* ]]; then echo " -proxy_user val"; return 0; fi
-    if [[ "$1" == "s_client" ]]; then printf '%s\n' "$@" > "$cap"; echo "-----BEGIN CERTIFICATE-----"; return 0; fi
-    if [[ "$1" == "x509" ]]; then echo "issuer=CN=Acme Corp Proxy CA"; return 0; fi
-  }
-  run _pf_detect_tls_inspection
-  [ "$output" = "yes" ]                         # Acme = corporate re-signer
-  grep -q -- '-proxy_user' "$cap"               # credentials passed to the connect
-  grep -q 'user' "$cap"
-  [[ "$output" != *"secret"* ]]                 # password never leaks into the result
+  run bash -c '
+    source "'"$BATS_TEST_DIRNAME"'/../lib/common.sh" 2>/dev/null || true
+    source "'"$BATS_TEST_DIRNAME"'/../lib/preflight.sh"
+    export HTTPS_PROXY="http://user:secret@px.corp:3128"
+    has() { return 0; }
+    _bounded() { shift; "$@"; }
+    openssl() {
+      if [[ "$1" == "s_client" && "$*" == *"-help"* ]]; then echo " -proxy_user val"; return 0; fi
+      if [[ "$1" == "s_client" ]]; then printf "%s\n" "$@" > "'"$cap"'"; echo "-----BEGIN CERTIFICATE-----"; return 0; fi
+      if [[ "$1" == "x509" ]]; then echo "issuer=CN=Acme Corp Proxy CA"; return 0; fi
+    }
+    _pf_detect_tls_inspection
+  '
+  [ "$output" = "yes" ]                          # Acme = corporate re-signer
+  grep -q -- '-proxy_user' "$cap"                # username passed to the connect
+  grep -q 'env:_TB_PROXY_PASS' "$cap"            # password by env reference, not literal
+  ! grep -q 'secret' "$cap"                      # password NEVER in openssl argv
+  [[ "$output" != *"secret"* ]]                  # nor in the result
+}
+
+@test "_pf_detect_tls_inspection: username-only proxy doesn't reuse the username as password (Bugbot)" {
+  cap="$BATS_TEST_TMPDIR/args-uo"
+  run bash -c '
+    source "'"$BATS_TEST_DIRNAME"'/../lib/common.sh" 2>/dev/null || true
+    source "'"$BATS_TEST_DIRNAME"'/../lib/preflight.sh"
+    export HTTPS_PROXY="http://onlyuser@px.corp:3128"
+    has() { return 0; }
+    _bounded() { shift; "$@"; }
+    openssl() {
+      if [[ "$1" == "s_client" && "$*" == *"-help"* ]]; then echo " -proxy_user val"; return 0; fi
+      if [[ "$1" == "s_client" ]]; then printf "%s\n" "$@" > "'"$cap"'"; echo "-----BEGIN CERTIFICATE-----"; return 0; fi
+      if [[ "$1" == "x509" ]]; then echo "issuer=CN=Acme"; return 0; fi
+    }
+    _pf_detect_tls_inspection
+  '
+  grep -q -- '-proxy_user' "$cap"
+  # username must appear exactly once (as -proxy_user), never reused as the password
+  [ "$(grep -c 'onlyuser' "$cap")" -eq 1 ]
 }

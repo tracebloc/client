@@ -687,6 +687,15 @@ _pf_env_proxy_raw() {
   return 0
 }
 
+# Percent-decode a URL-encoded string (proxy userinfo). Mirrors PowerShell's
+# [Uri]::UnescapeDataString so an encoded credential (e.g. a "%40" in a password)
+# authenticates identically on both platforms (Bugbot). Percent-only: userinfo does
+# not use '+'-for-space, so '+' is left literal.
+_pf_urldecode() {
+  local s="${1:-}"
+  printf '%b' "${s//%/\\x}"
+}
+
 # Echo the configured corporate CA bundle path when TRACEBLOC_CA_BUNDLE or
 # CURL_CA_BUNDLE points at a readable file; empty otherwise. SOFT (never errors) —
 # the hard validation lives in cluster.sh's _resolve_ca_bundle at cluster-create.
@@ -712,25 +721,38 @@ _pf_issuer_is_public() {
 _pf_detect_tls_inspection() {
   has openssl || { echo "unknown"; return 0; }
   { has timeout || has gtimeout; } || { echo "unknown"; return 0; }
-  local host="github.com" raw issuer creds
+  local host="github.com" raw issuer creds user="" pass=""
   local -a args=(s_client -connect "${host}:443" -servername "$host")
   # Connect THROUGH the proxy using the raw value: -proxy takes host:port (creds
   # stripped), and an authenticated proxy additionally needs -proxy_user/-proxy_pass
   # (openssl >= 3.0) or it 407s and issuer capture fails → a false 'unknown' on the
   # exact TLS-inspecting networks this exists to detect (Bugbot). Credentials go to
-  # openssl only; they are never printed or logged.
+  # openssl only, URL-decoded (parity with the PS peer) and NEVER printed/logged.
   raw="$(_pf_env_proxy_raw)"
   if [[ -n "$raw" ]]; then
     args+=(-proxy "$(_pf_proxy_hostport "$raw")")
     if [[ "$raw" == *"@"* ]] && openssl s_client -help 2>&1 | grep -q -- '-proxy_user'; then
-      creds="${raw#*://}"; creds="${creds%%@*}"   # user:pass
-      args+=(-proxy_user "${creds%%:*}" -proxy_pass "pass:${creds#*:}")
+      creds="${raw#*://}"; creds="${creds%%@*}"          # user[:pass], percent-encoded
+      if [[ "$creds" == *:* ]]; then
+        user="$(_pf_urldecode "${creds%%:*}")"; pass="$(_pf_urldecode "${creds#*:}")"
+      else
+        user="$(_pf_urldecode "$creds")"; pass=""        # user@ with no password
+      fi
+      # Pass the password via env: (openssl reads $_TB_PROXY_PASS) so it never lands
+      # in argv / ps / /proc/*/cmdline on a shared host (Bugbot). Username isn't secret.
+      args+=(-proxy_user "$user" -proxy_pass "env:_TB_PROXY_PASS")
     fi
   fi
   # echo | : send EOF so s_client returns after the handshake. We deliberately do
   # NOT pass -verify_return_error — we want the served cert's issuer even when the
-  # corporate CA isn't trusted, so we can name the inspection.
-  issuer="$(echo | _bounded 8 openssl "${args[@]}" 2>/dev/null | openssl x509 -noout -issuer 2>/dev/null)"
+  # corporate CA isn't trusted, so we can name the inspection. The password is
+  # exported ONLY inside this command-substitution subshell (openssl reads it via
+  # env:), so it never reaches argv or the parent shell. `|| issuer=""` keeps a
+  # failed/timed-out probe from aborting under `set -euo pipefail` (like _pf_probe_url).
+  issuer="$(
+    export _TB_PROXY_PASS="$pass"
+    echo | _bounded 8 openssl "${args[@]}" 2>/dev/null | openssl x509 -noout -issuer 2>/dev/null
+  )" || issuer=""
   [[ -z "$issuer" ]] && { echo "unknown"; return 0; }
   if _pf_issuer_is_public "$issuer"; then echo "no"; else echo "yes"; fi
 }
