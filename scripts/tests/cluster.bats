@@ -767,14 +767,27 @@ _stub_create_cluster_deps() {
 }
 
 @test "wire_ca_trust: macOS announce names only git + hints Keychain for cosign/helm (Bugbot)" {
-  # Go ignores SSL_CERT_FILE on macOS (Keychain), so the announce must not claim to
-  # wire cosign/helm there — it points the user at the Keychain instead.
+  # Go reads the Keychain on macOS (not SSL_CERT_FILE) and Apple's system git
+  # (SecureTransport) ignores GIT_SSL_CAINFO — so on Darwin the function wires
+  # NOTHING and claims nothing: it points at the Keychain for all three tools
+  # (Bugbot ×2: inert-but-hazardous SSL_CERT_FILE, false git claim).
   local ca="$BATS_TEST_TMPDIR/ca.pem"; echo pem > "$ca"
   TRACEBLOC_CA_BUNDLE="$ca"; OS="Darwin"
   run wire_ca_trust
-  [[ "$output" == *"certificate for git."* ]] || return 1
-  [[ "$output" != *"cosign, helm"* ]] || return 1
+  [[ "$output" != *"Trusting"* ]] || return 1        # no success claim — nothing was wired
+  [[ "$output" == *"git, cosign and helm"* ]] || return 1
   [[ "$output" == *"Keychain"* ]] || return 1
+}
+
+@test "wire_ca_trust: Darwin exports NEITHER trust var (inert for Go, hazardous for curl, Bugbot)" {
+  # SSL_CERT_FILE would shrink OpenSSL-curl's download trust to the corp root
+  # while helping neither cosign nor helm; GIT_SSL_CAINFO is ignored by the
+  # system git that runs Homebrew's own bootstrap clone.
+  local ca="$BATS_TEST_TMPDIR/ca.pem"; echo pem > "$ca"
+  TRACEBLOC_CA_BUNDLE="$ca"; OS="Darwin"
+  wire_ca_trust >/dev/null
+  [ -z "${SSL_CERT_FILE:-}" ] || return 1
+  [ -z "${GIT_SSL_CAINFO:-}" ] || return 1
 }
 
 @test "wire_ca_trust: does NOT clobber a user's CURL_CA_BUNDLE (replace-not-augment, Bugbot)" {

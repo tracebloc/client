@@ -349,7 +349,11 @@ _bootstrap_wire_ca() {
     fi
     # Don't clobber a fuller pre-set SSL_CERT_FILE (replace-not-augment): only set it
     # when the user hasn't already (Bugbot). Effective for cosign on Linux (note above).
-    [[ -z "${SSL_CERT_FILE:-}" ]] && export SSL_CERT_FILE="$ca"
+    # NOT on macOS: Go reads the Keychain there, so the export helps cosign not at all,
+    # while OpenSSL curl honors SSL_CERT_FILE replace-not-augment — a corp-root-only
+    # bundle would shrink download trust for zero gain (Bugbot). The readability
+    # fail-fast above still runs on every platform.
+    [[ "$(uname -s)" != "Darwin" && -z "${SSL_CERT_FILE:-}" ]] && export SSL_CERT_FILE="$ca"
     return 0
   done
 }

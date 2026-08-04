@@ -159,6 +159,17 @@ wire_ca_trust() {
     error "$ca is set but its CA bundle file can't be read — fix its path/permissions and re-run."
   fi
   [[ -z "$ca" ]] && return 0
+  # On macOS, wire NOTHING (same decision as Windows, and for the same reason):
+  # Go reads the Keychain, not SSL_CERT_FILE, so exporting it helps neither
+  # cosign nor helm — while OpenSSL-backed curl DOES honor it, replace-not-
+  # augment, so a corp-root-only bundle would shrink download trust for zero
+  # gain (Bugbot). And Apple's system git (SecureTransport) ignores
+  # GIT_SSL_CAINFO, so claiming git trust from it was false — the clone that
+  # matters most, Homebrew's own bootstrap, runs system git (Bugbot).
+  if [[ "$OS" == "Darwin" ]]; then
+    hint "On macOS, git, cosign and helm read the system Keychain, not a PEM file — add your company's CA to the login Keychain (or use the offline installer) so they trust the proxy."
+    return 0
+  fi
   # Only set trust vars the user hasn't already set: SSL_CERT_FILE and GIT_SSL_CAINFO
   # are replace-not-augment (Go / OpenSSL), so overwriting a fuller pre-set bundle with
   # a corp-root-only one would drop the public roots those tools need elsewhere (Bugbot).
@@ -167,12 +178,7 @@ wire_ca_trust() {
   # Name only what this actually wires: SSL_CERT_FILE (cosign/helm, Linux) and
   # GIT_SSL_CAINFO (git). curl "downloads" trust the user's own CURL_CA_BUNDLE, which we
   # deliberately don't touch — so we don't claim it here (Bugbot).
-  if [[ "$OS" == "Darwin" ]]; then
-    success "Trusting your company's certificate for git."
-    hint "On macOS, cosign and helm read the system Keychain, not a PEM file — add the CA to your keychain (or use the offline installer) so they trust it too."
-  else
-    success "Trusting your company's certificate for cosign, helm and git."
-  fi
+  success "Trusting your company's certificate for cosign, helm and git."
 }
 
 # Write a k3d registries.yaml pointing containerd at the mounted CA for every
