@@ -426,7 +426,7 @@ function Invoke-Bootstrap {
   }
   New-Item -ItemType Directory -Path $tmpDir | Out-Null
   try {
-    Info "Downloading Tracebloc client installer (ref: $ref)..."
+    Info "Downloading tracebloc client installer (ref: $ref)..."
 
     # ── Fetch the sub-scripts from the immutable tag tree ──
     foreach ($f in $Files) {
@@ -454,7 +454,7 @@ function Invoke-Bootstrap {
 
     # ── Run the verified main installer ──
     $k8s = Join-Path $tmpDir "install-k8s.ps1"
-    Info "Running Tracebloc environment setup..."
+    Info "Running tracebloc environment setup..."
     if ($ChildArgs -and $ChildArgs.Count -gt 0) {
       & powershell.exe -ExecutionPolicy Bypass -File $k8s @ChildArgs
     } else {
