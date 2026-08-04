@@ -249,9 +249,12 @@ _gpu_mocks() {
 }
 
 @test "GPU success is gated on the rollout exit code — no false 'enabled' after a failed rollout (Bugbot)" {
-  # A timed-out/failed rollout means the plugin isn't confirmed ready; the success
-  # line must live in the then-branch, with a CPU-mode warn on failure.
-  grep -q 'if kubectl rollout status daemonset/nvidia-device-plugin-daemonset' \
+  # A timed-out/failed rollout means the plugin isn't confirmed ready. Gating now
+  # lives in the shared _gpu_rollout_gate (the nvidia path delegates to it); the gate
+  # puts success in the rollout then-branch with a CPU-mode warn on failure.
+  grep -q '_gpu_rollout_gate nvidia-device-plugin-daemonset' \
+    "$BATS_TEST_DIRNAME/../lib/gpu-plugins.sh"
+  grep -q 'rollout status "daemonset/' \
     "$BATS_TEST_DIRNAME/../lib/gpu-plugins.sh"
   grep -q "Couldn't confirm GPU acceleration is ready" \
     "$BATS_TEST_DIRNAME/../lib/gpu-plugins.sh"
@@ -274,4 +277,47 @@ _gpu_mocks() {
   '
   [ "$status" -eq 0 ] || { echo "$output"; return 1; }
   [[ "$output" == *"RC1"* ]] || { echo "expected non-zero return; got: $output"; return 1; }
+}
+
+@test "_gpu_rollout_gate: rollout failure -> warn CPU-mode + non-zero, no success (reviewer)" {
+  run bash -c '
+    set -euo pipefail
+    LOG_FILE=/dev/null
+    log(){ :; }; success(){ echo "SUCCESS:$*"; }; warn(){ echo "WARN:$*"; }
+    source "'"$BATS_TEST_DIRNAME"'/../lib/gpu-plugins.sh"
+    kubectl(){ return 1; }   # rollout status fails
+    _gpu_rollout_gate amdgpu-device-plugin && echo RC0 || echo "RC$?"
+  '
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  [[ "$output" == *"WARN:"* ]] || return 1
+  [[ "$output" == *"RC1"* ]] || return 1
+  [[ "$output" != *"SUCCESS:"* ]] || return 1
+}
+
+@test "_gpu_rollout_gate: rollout success -> success + return 0" {
+  run bash -c '
+    set -euo pipefail
+    LOG_FILE=/dev/null
+    log(){ :; }; success(){ echo "SUCCESS:$*"; }; warn(){ echo "WARN:$*"; }
+    source "'"$BATS_TEST_DIRNAME"'/../lib/gpu-plugins.sh"
+    kubectl(){ return 0; }   # rollout status ok
+    _gpu_rollout_gate nvidia-device-plugin-daemonset && echo RC0 || echo "RC$?"
+  '
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  [[ "$output" == *"SUCCESS:"* ]] || return 1
+  [[ "$output" == *"RC0"* ]] || return 1
+}
+
+@test "GPU existence probes are bounded with --request-timeout (reviewer parity)" {
+  # Both the nvidia and amd 'already installed?' checks must carry a request timeout
+  # so a wedged API can't hang before the bounded apply is ever reached.
+  run grep -cE 'kubectl get daemonset .*--request-timeout=' "$BATS_TEST_DIRNAME/../lib/gpu-plugins.sh"
+  [ "$output" -ge 2 ]
+}
+
+@test "amd primary AND master fallback both gate on rollout (reviewer)" {
+  # A master apply that never rolls out must warn CPU-mode via the shared gate, not
+  # return a false success that makes the caller's verify poll ~90s.
+  run grep -c '_gpu_rollout_gate amdgpu-device-plugin' "$BATS_TEST_DIRNAME/../lib/gpu-plugins.sh"
+  [ "$output" -eq 2 ]
 }

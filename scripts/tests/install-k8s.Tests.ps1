@@ -3149,4 +3149,10 @@ Describe "GPU device-plugin failure is recoverable, not fatal (#577)" {
     $gpuFn | Should -Match 'return \$true'
     $gpuFn | Should -Match 'return \$false'
   }
+  It "the PS GPU kubectl probes are bounded with --request-timeout (reviewer parity)" {
+    # The existence check and Confirm-GpuNode's node probe must carry a request
+    # timeout so a wedged API can't hang before/around the bounded apply (bash parity).
+    $script:PSRCGPU | Should -Match 'kubectl get daemonset -n kube-system nvidia-device-plugin-daemonset --request-timeout='
+    $script:PSRCGPU | Should -Match 'kubectl get node -o jsonpath.*--request-timeout='
+  }
 }

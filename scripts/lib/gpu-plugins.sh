@@ -32,9 +32,28 @@ _apply_remote_manifest() {
   kubectl apply -f "$tmp_yml" --request-timeout=30s >> "${LOG_FILE:-/dev/null}" 2>&1
 }
 
+# Wait for a just-applied device-plugin daemonset to become Ready and gate the
+# success message on it: success + return 0 when it rolls out, else warn + continue
+# in CPU mode + return 1. Shared by the nvidia and amd paths (including the amd
+# master fallback) so "no false enabled, no dead ~90s verify wait" behaves
+# identically everywhere (reviewer). Output goes to the log; the caller surfaces
+# only the curated line.
+_gpu_rollout_gate() {
+  local ds="$1"
+  if kubectl rollout status "daemonset/$ds" -n kube-system --timeout=120s \
+       >> "${LOG_FILE:-/dev/null}" 2>&1; then
+    success "GPU acceleration enabled."
+    return 0
+  fi
+  warn "Couldn't confirm GPU acceleration is ready — continuing in CPU mode. Re-run the installer later to retry."
+  return 1
+}
+
 _deploy_nvidia_plugin() {
   log "Deploying NVIDIA k8s device plugin"
-  if kubectl get daemonset -n kube-system nvidia-device-plugin-daemonset &>/dev/null 2>&1; then
+  # --request-timeout bounds the existence probe so a wedged API server can't hang
+  # here before the bounded apply is reached (reviewer; parity with verify_gpu).
+  if kubectl get daemonset -n kube-system nvidia-device-plugin-daemonset --request-timeout=5s &>/dev/null 2>&1; then
     success "GPU acceleration enabled."
     return 0
   fi
@@ -49,21 +68,13 @@ _deploy_nvidia_plugin() {
     warn "Couldn't enable GPU acceleration — continuing in CPU mode. Re-run the installer later to retry."
     return 1
   fi
-  # Gate the success message on the rollout exit code (Bugbot; parity with the PS
-  # peer): a timed-out/failed rollout means the plugin isn't confirmed ready, so
-  # don't claim it's enabled — warn + continue in CPU mode. Re-running re-checks it.
-  if kubectl rollout status daemonset/nvidia-device-plugin-daemonset \
-       -n kube-system --timeout=120s >> "${LOG_FILE:-/dev/null}" 2>&1; then
-    success "GPU acceleration enabled."
-    return 0
-  fi
-  warn "Couldn't confirm GPU acceleration is ready — continuing in CPU mode. Re-run the installer later to retry."
-  return 1
+  _gpu_rollout_gate nvidia-device-plugin-daemonset
 }
 
 _deploy_amd_plugin() {
   log "Deploying AMD GPU k8s device plugin"
-  if kubectl get daemonset -n kube-system amdgpu-device-plugin &>/dev/null 2>&1; then
+  # --request-timeout bounds the existence probe (reviewer; parity with verify_gpu).
+  if kubectl get daemonset -n kube-system amdgpu-device-plugin --request-timeout=5s &>/dev/null 2>&1; then
     success "GPU acceleration enabled."
     return 0
   fi
@@ -72,19 +83,16 @@ _deploy_amd_plugin() {
   # for a plugin that was never deployed (Bugbot).
   log "Downloading and applying AMD GPU device plugin DaemonSet..."
   if _apply_remote_manifest "$AMD_DEVICE_PLUGIN_URL" "AMD device plugin"; then
-    # Gate success on the rollout exit code (Bugbot; same as the nvidia path).
-    if kubectl rollout status daemonset/amdgpu-device-plugin \
-         -n kube-system --timeout=120s >> "${LOG_FILE:-/dev/null}" 2>&1; then
-      success "GPU acceleration enabled."
-      return 0
-    fi
-    warn "Couldn't confirm GPU acceleration is ready — continuing in CPU mode. Re-run the installer later to retry."
-    return 1
+    _gpu_rollout_gate amdgpu-device-plugin
+    return $?
   fi
   log "Pinned AMD plugin ${AMD_DEVICE_PLUGIN_VERSION} failed; trying master..."
-  # Master fallback applied: let the caller's verify confirm readiness (return 0).
+  # Master fallback: gate on rollout too (reviewer) — a master apply that never
+  # rolls out must warn + continue in CPU mode, not return success and make the
+  # caller's verify poll ~90s before a vaguer "still initializing".
   if _apply_remote_manifest "https://raw.githubusercontent.com/RadeonOpenCompute/k8s-device-plugin/master/k8s-ds-amdgpu-dp.yaml" "AMD device plugin (master)"; then
-    return 0
+    _gpu_rollout_gate amdgpu-device-plugin
+    return $?
   fi
   warn "GPU acceleration setup may need manual attention — continuing in CPU mode."
   return 1

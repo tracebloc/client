@@ -2579,7 +2579,9 @@ function Install-GpuDevicePlugin {
 
   Log "Deploying NVIDIA k8s device plugin"
 
-  $dpExists = kubectl get daemonset -n kube-system nvidia-device-plugin-daemonset 2>&1
+  # --request-timeout bounds the existence probe so a wedged API server can't hang
+  # here before the bounded apply is reached (reviewer; parity with bash + verify).
+  $dpExists = kubectl get daemonset -n kube-system nvidia-device-plugin-daemonset --request-timeout=5s 2>&1
   if ($LASTEXITCODE -eq 0) {
     Ok "GPU acceleration enabled."
     return $true
@@ -2634,7 +2636,7 @@ function Confirm-GpuNode {
   $gpuCount = 0
   for ($i = 1; $i -le 18; $i++) {
     Start-Sleep -Seconds 5
-    $alloc = kubectl get node -o jsonpath='{.items[0].status.allocatable}' 2>$null
+    $alloc = kubectl get node -o jsonpath='{.items[0].status.allocatable}' --request-timeout=5s 2>$null
     if ($alloc -match '"nvidia\.com/gpu":"?(\d+)') { $gpuCount = [int]$Matches[1]; break }
   }
 
