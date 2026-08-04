@@ -3035,3 +3035,16 @@ Describe "Preflight + summary failures reach the curated log (#576 Bugbot)" {
     } finally { $script:LOG_FILE = $null }
   }
 }
+
+Describe "Print-Summary logs the classified outcome for every state (#576 Bugbot)" {
+  BeforeEach { $script:TB_NAMESPACE = "ns"; $GPU_VENDOR = "none"; $NVIDIA_DRIVER_OK = $false }
+  It "records the final client state in the log (covers the default/image_pull/crash branch)" {
+    $log = Join-Path $TestDrive "install-sum.log"
+    $script:LOG_FILE = $log
+    $script:ClientState = "image_pull"
+    try {
+      Print-Summary 6>&1 | Out-Null
+      (Get-Content $log -Raw) | Should -Match 'Final client state: image_pull'
+    } finally { $script:LOG_FILE = $null }
+  }
+}

@@ -3493,6 +3493,11 @@ function Print-Summary {
   $line = [string]([char]0x2501) * 46
 
   Write-Host ""
+  # Central outcome log (#576 / Bugbot #579): record the classified final state
+  # for EVERY branch, so no summary case can silently miss the log after the
+  # Start-Transcript removal (connected / starting / bad_creds / image_pull_ca /
+  # image_pull / crash / other).
+  Log "Final client state: $script:ClientState"
   switch ($script:ClientState) {
     "connected" {
       Write-Host "  $line" -ForegroundColor Green
@@ -3553,7 +3558,7 @@ function Print-Summary {
       $reason = "a component didn't start"
       if ($script:ClientState -eq "image_pull") { $reason = "an image couldn't be pulled" }
       if ($script:ClientState -eq "crash")      { $reason = "a container is restarting (crash loop)" }
-      Write-Host "  " -NoNewline; Write-Host "$([char]0x2716) Setup didn't finish - $reason." -ForegroundColor Red
+      Write-Host "  " -NoNewline; Write-Host "$([char]0x2716) Setup didn't finish - $reason." -ForegroundColor Red; Log "Setup did not finish - $reason."
       Write-Host ""
       Write-Host "  Inspect:  " -NoNewline; Write-Host "kubectl get pods -n $ns" -ForegroundColor Green
       Write-Host "  Logs:     ~\.tracebloc\install-*.log"
