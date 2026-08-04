@@ -2992,3 +2992,35 @@ Describe "k3s version pin: create + reuse drift (#547 source guards)" {
     $script:PSRC | Should -Match 'pinned \+ validated'
   }
 }
+
+Describe "Log hygiene: no Start-Transcript, helpers feed the curated log (#576)" {
+  BeforeAll { $script:PSRC576 = Get-Content "$PSScriptRoot/../install-k8s.ps1" -Raw }
+
+  It "does not use Start-Transcript / Stop-Transcript (the transcript header is the PII leak)" {
+    $script:PSRC576 | Should -Not -Match 'Start-Transcript -Path'
+    $script:PSRC576 | Should -Not -Match 'Stop-Transcript'
+  }
+
+  It "routes the message helpers through Log() so the log stays useful without a transcript" {
+    $log = Join-Path $TestDrive "install-576.log"
+    $script:LOG_FILE = $log
+    try {
+      Ok   "route-check-ok"
+      Warn "route-check-warn"
+      Info "route-check-info"
+      Step 1 6 "route-check-step"
+      Hint "route-check-hint"
+      $content = Get-Content $log -Raw
+      $content | Should -Match 'route-check-ok'
+      $content | Should -Match 'route-check-warn'
+      $content | Should -Match 'route-check-info'
+      $content | Should -Match 'route-check-step'
+      $content | Should -Match 'route-check-hint'
+      # curated by construction: the PowerShell transcript identity header (the PII)
+      # can never appear, because Log() only ever writes what we pass it.
+      $content | Should -Not -Match 'Username:'
+      $content | Should -Not -Match 'Machine:'
+      $content | Should -Not -Match 'PowerShell transcript'
+    } finally { $script:LOG_FILE = $null }
+  }
+}

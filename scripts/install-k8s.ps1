@@ -112,9 +112,9 @@ if (-not $env:TB_PESTER) {
 #  HELPERS — logging functions matching bash UX
 # =============================================================================
 
-function Info($m)          { Write-Host "  " -NoNewline; Write-Host ([char]0x00B7) -ForegroundColor DarkGray -NoNewline; Write-Host " $m" -ForegroundColor DarkGray }
-function Ok($m)            { Write-Host "  " -NoNewline; Write-Host ([char]0x2714) -ForegroundColor Green -NoNewline; Write-Host " $m" }
-function Warn($m)          { Write-Host "  " -NoNewline; Write-Host ([char]0x26A0) -ForegroundColor Yellow -NoNewline; Write-Host "  $m" -ForegroundColor Yellow }
+function Info($m)          { Write-Host "  " -NoNewline; Write-Host ([char]0x00B7) -ForegroundColor DarkGray -NoNewline; Write-Host " $m" -ForegroundColor DarkGray; Log $m }
+function Ok($m)            { Write-Host "  " -NoNewline; Write-Host ([char]0x2714) -ForegroundColor Green -NoNewline; Write-Host " $m"; Log "OK: $m" }
+function Warn($m)          { Write-Host "  " -NoNewline; Write-Host ([char]0x26A0) -ForegroundColor Yellow -NoNewline; Write-Host "  $m" -ForegroundColor Yellow; Log "WARN: $m" }
 # Build the trailing lines every fatal error shows (#423): a short excerpt of the
 # real tool output (last few non-empty lines — the actual reason, not a generic
 # line), then the log path and the -Diagnose support-bundle hint as first-class
@@ -150,13 +150,17 @@ function Err($m, $Detail)  {
   # @(...) forces array enumeration: a single-line result unwraps to a scalar
   # string, and enumerating that explicitly keeps each line intact (defensive —
   # the `foreach` statement already iterates a scalar once, not per-char).
-  foreach ($l in @(Get-ErrDetailLines $Detail)) { Write-Host "  $l" -ForegroundColor DarkGray }
+  $det = @(Get-ErrDetailLines $Detail)
+  foreach ($l in $det) { Write-Host "  $l" -ForegroundColor DarkGray }
+  # Mirror to the curated log too (#576) — Get-ErrDetailLines already strips the
+  # `At <file>:<line> char:` / `+ …` source-dump lines, so nothing internal leaks.
+  Log "ERROR: $m"; foreach ($l in $det) { Log $l }
   exit 1
 }
-function Step($n, $t, $l)  { Write-Host ""; Write-Host "Step $n/$t" -ForegroundColor Cyan -NoNewline; Write-Host "  $l" -ForegroundColor White }
+function Step($n, $t, $l)  { Write-Host ""; Write-Host "Step $n/$t" -ForegroundColor Cyan -NoNewline; Write-Host "  $l" -ForegroundColor White; Log "== Step $n/$t : $l ==" }
 function Log($m)           { if ($script:LOG_FILE) { Add-Content -Path $script:LOG_FILE -Value "[$(Get-Date -Format 'HH:mm:ss')] $m" -ErrorAction SilentlyContinue } }
-function PromptHeader($m)  { Write-Host ""; Write-Host "  $m" -ForegroundColor White }
-function Hint($m)          { Write-Host "  $m" -ForegroundColor DarkGray }
+function PromptHeader($m)  { Write-Host ""; Write-Host "  $m" -ForegroundColor White; Log $m }
+function Hint($m)          { Write-Host "  $m" -ForegroundColor DarkGray; Log $m }
 function Has($cmd)         { [bool](Get-Command $cmd -ErrorAction SilentlyContinue) }
 
 function RefreshPath {
@@ -575,11 +579,18 @@ function Start-InstallLog {
     New-Item -ItemType Directory -Path $HOST_DATA_DIR -Force | Out-Null
   }
   $script:LOG_FILE = "$HOST_DATA_DIR\install-$(Get-Date -Format 'yyyyMMdd-HHmmss').log"
+  # Curated, PII-free log (#576). We deliberately DO NOT use Start-Transcript: its
+  # fixed header records Username / RunAs / Machine / PID (a real client's shared
+  # log leaked their Windows identity), and it also captures PowerShell's raw error
+  # rendering — source lines, internal identifiers. Instead the message helpers
+  # (Info/Ok/Warn/Err/Step/…) route through Log(), so the log mirrors the curated
+  # on-screen output: no user PII, no tracebloc internals. Best-effort — if the
+  # file can't be created, logging silently no-ops and the install continues.
   try {
-    Start-Transcript -Path $LOG_FILE -Append | Out-Null
+    Set-Content -Path $LOG_FILE -Value "tracebloc client installer log - $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')" -ErrorAction Stop
     Log "Install log: $LOG_FILE"
   } catch {
-    Log "Could not start transcript logging: $_"
+    $script:LOG_FILE = $null
   }
 }
 
@@ -4226,7 +4237,7 @@ if ((-not $Resume) -and $script:InstallState.completed -and (Test-ToolsPresent) 
   Test-K3sVersionDrift
   Hint "Delete $(Get-InstallStatePath) (or set a fresh HOST_DATA_DIR) to force a full reinstall."
   Unregister-ResumeAfterReboot
-  try { Stop-Transcript | Out-Null } catch {}
+  Log "Already installed and healthy - nothing to do."
   exit 0
 }
 
@@ -4280,7 +4291,7 @@ if (Test-InstallConnected) { Set-InstallComplete } else { Clear-InstallCompleted
 
 Print-Summary
 
-try { Stop-Transcript | Out-Null } catch {}
+Log "Install finished."
 
 # Exit code reflects reality: connected/starting are OK; failures are non-zero.
 if (-not (Test-InstallSucceeded)) { exit 1 }
