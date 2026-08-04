@@ -373,3 +373,25 @@ setup() {
   done
   [[ "$(printf '%s' "$out" | grep -c .)" == "3" ]] || { printf 'expected 3 offenders, got:\n%s\n' "$out" >&2; return 1; }
 }
+
+@test "a bracket closer inside a quoted pattern is not mistaken for the end (Bugbot)" {
+  # after_close finds `]]`/`]` by a blank-before/blank-after heuristic; it must also
+  # skip a closer that sits INSIDE quotes (`[[ "$x" == "a ]] b" ]]`), or the real
+  # closer at the end is missed and an unhardened assertion looks non-standalone.
+  local fixture="$BATS_TEST_TMPDIR/quoted-closer.bats" out n
+  {
+    printf '@test "q" {\n'
+    printf '  [[ "$x" == "a ]] b" ]]\n'                 # 2: quoted ]] -> real closer at end -> flagged
+    printf '  [ "$x" = "] y" ]\n'                        # 3: quoted ] -> flagged
+    printf '  run z; [[ "$o" == "p ]] q" ]]\n'           # 4: compound + quoted ]] -> flagged
+    printf '  [[ "$x" == "a ]] b" ]] || return 1\n'      # 5: hardened -> spared
+    printf '}\n'
+  } > "$fixture"
+
+  out="$(awk -f "$SCANNER" "$fixture")"
+  for n in 2 3 4; do
+    [[ "$out" == *":$n:"* ]] || { printf 'expected line %s flagged, got:\n%s\n' "$n" "$out" >&2; return 1; }
+  done
+  [[ "$out" != *":5:"* ]] || { printf 'line 5 (hardened) should be spared, got:\n%s\n' "$out" >&2; return 1; }
+  [[ "$(printf '%s' "$out" | grep -c .)" == "3" ]] || { printf 'expected 3 offenders, got:\n%s\n' "$out" >&2; return 1; }
+}

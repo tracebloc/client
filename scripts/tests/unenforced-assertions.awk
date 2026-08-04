@@ -46,9 +46,11 @@ function opens(s, op,   nxt) {
 }
 
 # Text following the closer that matches `op`, or NOCLOSE when s does not open
-# that bracket or the closer has not appeared yet. The closer only counts as a
-# word of its own (blank before, blank or end-of-line after) so `]]` inside a
-# quoted pattern is not mistaken for the end of the test.
+# that bracket or the closer has not appeared yet. The closer only counts when it
+# is UNQUOTED and a word of its own (blank before, blank or end-of-line after), so
+# a blank-delimited `]]` inside a quoted pattern (`[[ "$x" == "a ]] b" ]]`) is not
+# mistaken for the end of the assertion — matching the quote-awareness of the other
+# structural walkers (Bugbot).
 function after_close(s, op, cl,   rest, p, hit, cp, before, after) {
     if (!opens(s, op)) return NOCLOSE
     rest = substr(s, length(op) + 1)
@@ -59,7 +61,7 @@ function after_close(s, op, cl,   rest, p, hit, cp, before, after) {
         cp = p + hit - 1
         before = (cp > 1) ? substr(rest, cp - 1, 1) : ""
         after = substr(rest, cp + length(cl))
-        if ((before == " " || before == "\t") && (after == "" || after ~ /^[[:space:]]/))
+        if (!quoted_at(rest, cp) && (before == " " || before == "\t") && (after == "" || after ~ /^[[:space:]]/))
             return after
         p = cp + 1
     }
