@@ -1037,45 +1037,45 @@ setup() {
 # ── network profile (#582) ───────────────────────────────────────────────────
 @test "_pf_proxy_hostport: strips scheme and user:pass credentials (PII)" {
   run _pf_proxy_hostport "http://user:pass@proxy.corp:8080/path"
-  [ "$output" = "proxy.corp:8080" ]
-  [[ "$output" != *"user"* ]]
+  [ "$output" = "proxy.corp:8080" ] || return 1
+  [[ "$output" != *"user"* ]] || return 1
 }
 
 @test "_pf_env_proxy: HTTPS_PROXY wins and credentials are stripped" {
   HTTP_PROXY="http://h:1"; HTTPS_PROXY="http://user:secret@sproxy.corp:3128"
   run _pf_env_proxy
-  [ "$output" = "sproxy.corp:3128" ]
-  [[ "$output" != *"secret"* ]]
+  [ "$output" = "sproxy.corp:3128" ] || return 1
+  [[ "$output" != *"secret"* ]] || return 1
 }
 
 @test "_pf_env_proxy: empty when no proxy env is set" {
   unset HTTP_PROXY HTTPS_PROXY http_proxy https_proxy
   run _pf_env_proxy
-  [ -z "$output" ]
+  [ -z "$output" ] || return 1
 }
 
 @test "_pf_env_ca_bundle: readable CA file returned, empty when unset" {
   ca="$BATS_TEST_TMPDIR/ca.pem"; echo x > "$ca"
   TRACEBLOC_CA_BUNDLE="$ca"
   run _pf_env_ca_bundle
-  [ "$output" = "$ca" ]
+  [ "$output" = "$ca" ] || return 1
   unset TRACEBLOC_CA_BUNDLE CURL_CA_BUNDLE
   run _pf_env_ca_bundle
-  [ -z "$output" ]
+  [ -z "$output" ] || return 1
 }
 
 @test "_pf_issuer_is_public: public CA yes, corporate re-signer no" {
   run _pf_issuer_is_public "CN=DigiCert Global G2,O=DigiCert Inc"
-  [ "$status" -eq 0 ]
+  [ "$status" -eq 0 ] || return 1
   run _pf_issuer_is_public "CN=Acme Corp Proxy CA,O=Acme Corp"
-  [ "$status" -ne 0 ]
+  [ "$status" -ne 0 ] || return 1
 }
 
 @test "_pf_network_profile: direct (no proxy, no inspection) is silent" {
   unset HTTP_PROXY HTTPS_PROXY http_proxy https_proxy TRACEBLOC_CA_BUNDLE CURL_CA_BUNDLE
   _pf_detect_tls_inspection() { echo "no"; }
   run _pf_network_profile
-  [ -z "$output" ]
+  [ -z "$output" ] || return 1
 }
 
 @test "_pf_network_profile: proxy + inspection -> one plain-language line, no creds" {
@@ -1083,9 +1083,9 @@ setup() {
   HTTPS_PROXY="http://u:p@proxy.corp:8080"
   _pf_detect_tls_inspection() { echo "yes"; }
   run _pf_network_profile
-  [[ "$output" == *"corporate proxy detected (proxy.corp:8080)"* ]]
-  [[ "$output" == *"TLS inspection detected"* ]]
-  [[ "$output" != *"u:p"* ]]
+  [[ "$output" == *"corporate proxy detected (proxy.corp:8080)"* ]] || return 1
+  [[ "$output" == *"TLS inspection detected"* ]] || return 1
+  [[ "$output" != *"u:p"* ]] || return 1
 }
 
 @test "_pf_network_profile: a configured CA bundle is announced" {
@@ -1093,7 +1093,7 @@ setup() {
   HTTPS_PROXY="http://proxy.corp:8080"; TRACEBLOC_CA_BUNDLE="$ca"
   _pf_detect_tls_inspection() { echo "yes"; }
   run _pf_network_profile
-  [[ "$output" == *"your company's certificate is configured"* ]]
+  [[ "$output" == *"your company's certificate is configured"* ]] || return 1
 }
 
 @test "_pf_detect_tls_inspection: unknown when openssl is unavailable (never hangs)" {
@@ -1104,21 +1104,21 @@ setup() {
     has() { [[ "$1" != "openssl" ]]; }   # openssl absent
     _pf_detect_tls_inspection
   '
-  [ "$output" = "unknown" ]
+  [ "$output" = "unknown" ] || return 1
 }
 
 @test "_pf_urldecode: percent-decodes (parity with PS UnescapeDataString)" {
   run _pf_urldecode "p%40ss%3Aword"
-  [ "$output" = "p@ss:word" ]
+  [ "$output" = "p@ss:word" ] || return 1
 }
 
 @test "_pf_env_proxy_raw: preserves credentials (probe connection only, never displayed)" {
   HTTPS_PROXY="http://user:secret@px.corp:3128"
   run _pf_env_proxy_raw
-  [ "$output" = "http://user:secret@px.corp:3128" ]
+  [ "$output" = "http://user:secret@px.corp:3128" ] || return 1
   # display path still strips (the two must not be confused)
   run _pf_env_proxy
-  [ "$output" = "px.corp:3128" ]
+  [ "$output" = "px.corp:3128" ] || return 1
 }
 
 @test "_pf_detect_tls_inspection: auth proxy -> creds to openssl via env:, never argv (Bugbot)" {
@@ -1139,11 +1139,11 @@ setup() {
     }
     _pf_detect_tls_inspection
   '
-  [ "$output" = "yes" ]                          # Acme = corporate re-signer
+  [ "$output" = "yes" ] || return 1                          # Acme = corporate re-signer
   grep -q -- '-proxy_user' "$cap"                # username passed to the connect
   grep -q 'env:_TB_PROXY_PASS' "$cap"            # password by env reference, not literal
-  ! grep -q 'secret' "$cap"                      # password NEVER in openssl argv
-  [[ "$output" != *"secret"* ]]                  # nor in the result
+  ! grep -q 'secret' "$cap" || return 1                      # password NEVER in openssl argv
+  [[ "$output" != *"secret"* ]] || return 1                  # nor in the result
 }
 
 @test "_pf_detect_tls_inspection: username-only proxy doesn't reuse the username as password (Bugbot)" {
@@ -1163,5 +1163,5 @@ setup() {
   '
   grep -q -- '-proxy_user' "$cap"
   # username must appear exactly once (as -proxy_user), never reused as the password
-  [ "$(grep -c 'onlyuser' "$cap")" -eq 1 ]
+  [ "$(grep -c 'onlyuser' "$cap")" -eq 1 ] || return 1
 }

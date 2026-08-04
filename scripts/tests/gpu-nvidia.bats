@@ -312,12 +312,12 @@ _gpu_mocks() {
   # Both the nvidia and amd 'already installed?' checks must carry a request timeout
   # so a wedged API can't hang before the bounded apply is ever reached.
   run grep -cE 'kubectl get daemonset .*--request-timeout=' "$BATS_TEST_DIRNAME/../lib/gpu-plugins.sh"
-  [ "$output" -ge 2 ]
+  [ "$output" -ge 2 ] || return 1
 }
 
 @test "amd primary AND master fallback both gate on rollout (reviewer)" {
   # A master apply that never rolls out must warn CPU-mode via the shared gate, not
   # return a false success that makes the caller's verify poll ~90s.
   run grep -c '_gpu_rollout_gate amdgpu-device-plugin' "$BATS_TEST_DIRNAME/../lib/gpu-plugins.sh"
-  [ "$output" -eq 2 ]
+  [ "$output" -eq 2 ] || return 1
 }
