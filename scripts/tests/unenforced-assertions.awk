@@ -253,8 +253,7 @@ function brace_delta(s,   i, c, sq, dq, d) {
 }
 
 # The body of a `@test "name" { … }` line: everything after the first UNQUOTED `{`.
-# "" when the line opens no brace. For a one-line test this still includes the
-# trailing `}`, which classify() harmlessly ignores (a bare `}` is not an assertion).
+# "" when the line opens no brace.
 function after_first_brace(s,   i, c, sq, dq) {
     sq = 0; dq = 0
     for (i = 1; i <= length(s); i++) {
@@ -265,6 +264,24 @@ function after_first_brace(s,   i, c, sq, dq) {
         else if (c == "{" && !sq && !dq) return substr(s, i + 1)
     }
     return ""
+}
+
+# Drop a one-line @test's group-closing `}` — the LAST unquoted `}` — and anything
+# after it. A bracket assertion sitting directly before it (`{ … [ a ] }`, or the
+# no-space `[ a ]}` where the closer is not even recognised) would otherwise keep a
+# `}` in its post-closer tail and read as non-standalone, so the one-liner stays
+# invisible. (Valid bats needs a `;` before `}`, which already splits it off — this
+# is belt-and-suspenders for the degenerate shapes, Bugbot.)
+function strip_group_close(s,   i, c, sq, dq, last) {
+    sq = 0; dq = 0; last = 0
+    for (i = 1; i <= length(s); i++) {
+        c = substr(s, i, 1)
+        if (c == "\\" && !sq)      { i++ }
+        else if (c == "'" && !dq)  { sq = !sq }
+        else if (c == "\"" && !sq) { dq = !dq }
+        else if (c == "}" && !sq && !dq) last = i
+    }
+    return (last > 0) ? substr(s, 1, last - 1) : s
 }
 
 # Is there a `||` or `&&` at the TOP level — outside quotes AND outside a `( )` /
@@ -316,7 +333,7 @@ in_heredoc {
 # closer does not end the scan early (Bugbot), and scan any inline body so
 # one-line tests are not skipped (Bugbot). ──
 /^@test/ {
-    body = after_first_brace($0)
+    body = strip_group_close(after_first_brace(strip_comment($0)))
     if (trim(body) != "") classify(body, FNR)
     depth = brace_delta(strip_comment($0))
     if (depth < 0) depth = 0

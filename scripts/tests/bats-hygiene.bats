@@ -349,3 +349,27 @@ setup() {
   [[ "$out" != *":4:"* ]] || { printf 'line 4 (hardened) should be spared, got:\n%s\n' "$out" >&2; return 1; }
   [[ "$(printf '%s' "$out" | grep -c .)" == "1" ]] || { printf 'expected 1 offender, got:\n%s\n' "$out" >&2; return 1; }
 }
+
+@test "one-line tests with a bare or no-space closer are still scanned (Bugbot)" {
+  # A one-liner whose bracket sits directly before the group-closing `}` (`[ a ] }`,
+  # or the no-space `[ a ]}` / `[[ a ]]}` where the closer is not even recognised)
+  # must still be flagged. Valid bats needs a `;` before `}`, which already splits
+  # the assertion off — this is belt-and-suspenders for the degenerate shapes.
+  local fixture="$BATS_TEST_TMPDIR/bare-closer.bats" out n
+  {
+    printf '@test "a" { run foo; [ "$s" -eq 0 ] }\n'              # 1: bare } -> flagged
+    printf '@test "b" { run foo; [ "$s" -eq 0 ]}\n'               # 2: no-space ]} -> flagged
+    printf '@test "c" { run foo; [[ "$o" == x ]]}\n'              # 3: ]]} -> flagged
+    printf '@test "d" { run foo; [ "$s" -eq 0 ] || return 1; }\n' # 4: hardened -> spared
+    printf '@test "e" { run foo; }\n'                             # 5: no assertion -> spared
+  } > "$fixture"
+
+  out="$(awk -f "$SCANNER" "$fixture")"
+  for n in 1 2 3; do
+    [[ "$out" == *":$n:"* ]] || { printf 'expected line %s flagged, got:\n%s\n' "$n" "$out" >&2; return 1; }
+  done
+  for n in 4 5; do
+    [[ "$out" != *":$n:"* ]] || { printf 'line %s should be spared, got:\n%s\n' "$n" "$out" >&2; return 1; }
+  done
+  [[ "$(printf '%s' "$out" | grep -c .)" == "3" ]] || { printf 'expected 3 offenders, got:\n%s\n' "$out" >&2; return 1; }
+}
