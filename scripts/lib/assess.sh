@@ -207,6 +207,12 @@ assess_existing_install() {
   case "$INSTALL_STATE" in
     healthy)
       echo ""
+      # A healthy cluster can still be running a DRIFTED k3s (born unpinned, on an
+      # older installer, or with K8S_VERSION=latest) — the #547 STEADY STATE. This
+      # fast-path hands off and exits before _handle_existing_cluster, so its
+      # reuse-path drift check never runs; surface the warning here too so a
+      # healthy-but-drifted client still sees the recreate guidance (Bugbot #565).
+      declare -F _check_existing_cluster_k8s_version >/dev/null 2>&1 && _check_existing_cluster_k8s_version
       _assess_handoff        # prints the "already set up" line, runs `tracebloc`, exit 0
       ;;
     degraded)

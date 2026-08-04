@@ -29,6 +29,11 @@ setup() {
     return 0
   }
   docker() { record "docker $*"; return 0; }
+  # _bounded wraps probes in timeout(1), which can't exec a `docker` shell-function
+  # mock — on Linux CI (where `timeout` exists) that would bypass the mock. Run the
+  # command directly so mocks work everywhere; the timeout wrapper is common.sh's
+  # concern, not this unit's (#565 Bugbot).
+  _bounded() { shift; "$@"; }
 }
 
 # ── _augment_no_proxy (Gap B) ───────────────────────────────────────────────
@@ -675,4 +680,63 @@ _stub_create_cluster_deps() {
   run mock_calls
   [[ "$output" == *"sudo systemctl enable docker"* ]] || return 1
   [[ "$output" != *"systemctl --user enable docker"* ]] || return 1
+}
+
+# ── _check_existing_cluster_k8s_version (#547 — k3s pin drift on reuse) ──────
+@test "_check_existing_cluster_k8s_version: K8S_VERSION empty -> no-op" {
+  K8S_VERSION=""
+  docker() { echo "rancher/k3s:v1.35.5-k3s1"; }   # would mismatch, but pin unset
+  run _check_existing_cluster_k8s_version
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+}
+
+@test "_check_existing_cluster_k8s_version: K8S_VERSION=latest -> no-op (explicit opt-out)" {
+  K8S_VERSION="latest"
+  docker() { echo "rancher/k3s:v1.35.5-k3s1"; }
+  run _check_existing_cluster_k8s_version
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+}
+
+@test "_check_existing_cluster_k8s_version: running k3s matches the pin -> silent pass" {
+  K8S_VERSION="v1.29.4-k3s1"
+  docker() { echo "rancher/k3s:v1.29.4-k3s1"; }
+  run _check_existing_cluster_k8s_version
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+}
+
+@test "_check_existing_cluster_k8s_version: running k3s drifted from the pin -> recreate warning" {
+  K8S_VERSION="v1.29.4-k3s1"
+  docker() { echo "rancher/k3s:v1.35.5-k3s1"; }    # the #547 observation
+  run _check_existing_cluster_k8s_version
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"v1.35.5-k3s1"* ]]
+  [[ "$output" == *"not the validated pin"* ]]
+  [[ "$output" == *"k3d cluster delete"* ]]
+}
+
+@test "_check_existing_cluster_k8s_version: registry-qualified + digest suffix still compares the tag" {
+  K8S_VERSION="v1.29.4-k3s1"
+  docker() { echo "docker.io/rancher/k3s:v1.29.4-k3s1@sha256:deadbeef"; }
+  run _check_existing_cluster_k8s_version
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]                                  # tag matches -> no warning
+}
+
+@test "_check_existing_cluster_k8s_version: unparseable image ref -> silent no-op (no false warn)" {
+  K8S_VERSION="v1.29.4-k3s1"
+  docker() { echo "some-mirror/other-image:tag"; }  # not rancher/k3s
+  run _check_existing_cluster_k8s_version
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+}
+
+@test "_check_existing_cluster_k8s_version: docker inspect fails -> silent no-op" {
+  K8S_VERSION="v1.29.4-k3s1"
+  docker() { return 1; }
+  run _check_existing_cluster_k8s_version
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
 }

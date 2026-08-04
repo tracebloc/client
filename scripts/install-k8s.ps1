@@ -17,7 +17,7 @@
 #    $env:CLUSTER_NAME  = "myapp"          default: tracebloc
 #    $env:SERVERS       = "1"              default: 1  (control-plane nodes)
 #    $env:AGENTS        = "1"              default: 1  (worker nodes)
-#    $env:K8S_VERSION   = "v1.29.4-k3s1"  default: latest
+#    $env:K8S_VERSION   = "v1.29.4-k3s1"  default: v1.29.4-k3s1 (pinned + validated; "latest" is UNSUPPORTED — see #547)
 #    $env:HOST_DATA_DIR = "C:\data"        default: $env:USERPROFILE\.tracebloc (LOCAL disk; no NFS/UNC)
 #    $env:CLIENT_ENV    = "dev"            optional; if not set, CLIENT_ENV is not added to env in values
 #    $env:TRACEBLOC_TRAINING_RESOURCES = "cpu=4,memory=16Gi"   optional; overrides the machine-sized training default
@@ -112,9 +112,9 @@ if (-not $env:TB_PESTER) {
 #  HELPERS — logging functions matching bash UX
 # =============================================================================
 
-function Info($m)          { Write-Host "  " -NoNewline; Write-Host ([char]0x00B7) -ForegroundColor DarkGray -NoNewline; Write-Host " $m" -ForegroundColor DarkGray }
-function Ok($m)            { Write-Host "  " -NoNewline; Write-Host ([char]0x2714) -ForegroundColor Green -NoNewline; Write-Host " $m" }
-function Warn($m)          { Write-Host "  " -NoNewline; Write-Host ([char]0x26A0) -ForegroundColor Yellow -NoNewline; Write-Host "  $m" -ForegroundColor Yellow }
+function Info($m)          { Write-Host "  " -NoNewline; Write-Host ([char]0x00B7) -ForegroundColor DarkGray -NoNewline; Write-Host " $m" -ForegroundColor DarkGray; Log $m }
+function Ok($m)            { Write-Host "  " -NoNewline; Write-Host ([char]0x2714) -ForegroundColor Green -NoNewline; Write-Host " $m"; Log "OK: $m" }
+function Warn($m)          { Write-Host "  " -NoNewline; Write-Host ([char]0x26A0) -ForegroundColor Yellow -NoNewline; Write-Host "  $m" -ForegroundColor Yellow; Log "WARN: $m" }
 # Build the trailing lines every fatal error shows (#423): a short excerpt of the
 # real tool output (last few non-empty lines — the actual reason, not a generic
 # line), then the log path and the -Diagnose support-bundle hint as first-class
@@ -150,13 +150,17 @@ function Err($m, $Detail)  {
   # @(...) forces array enumeration: a single-line result unwraps to a scalar
   # string, and enumerating that explicitly keeps each line intact (defensive —
   # the `foreach` statement already iterates a scalar once, not per-char).
-  foreach ($l in @(Get-ErrDetailLines $Detail)) { Write-Host "  $l" -ForegroundColor DarkGray }
+  $det = @(Get-ErrDetailLines $Detail)
+  foreach ($l in $det) { Write-Host "  $l" -ForegroundColor DarkGray }
+  # Mirror to the curated log too (#576) — Get-ErrDetailLines already strips the
+  # `At <file>:<line> char:` / `+ …` source-dump lines, so nothing internal leaks.
+  Log "ERROR: $m"; foreach ($l in $det) { Log $l }
   exit 1
 }
-function Step($n, $t, $l)  { Write-Host ""; Write-Host "Step $n/$t" -ForegroundColor Cyan -NoNewline; Write-Host "  $l" -ForegroundColor White }
+function Step($n, $t, $l)  { Write-Host ""; Write-Host "Step $n/$t" -ForegroundColor Cyan -NoNewline; Write-Host "  $l" -ForegroundColor White; Log "== Step $n/$t : $l ==" }
 function Log($m)           { if ($script:LOG_FILE) { Add-Content -Path $script:LOG_FILE -Value "[$(Get-Date -Format 'HH:mm:ss')] $m" -ErrorAction SilentlyContinue } }
-function PromptHeader($m)  { Write-Host ""; Write-Host "  $m" -ForegroundColor White }
-function Hint($m)          { Write-Host "  $m" -ForegroundColor DarkGray }
+function PromptHeader($m)  { Write-Host ""; Write-Host "  $m" -ForegroundColor White; Log $m }
+function Hint($m)          { Write-Host "  $m" -ForegroundColor DarkGray; Log $m }
 function Has($cmd)         { [bool](Get-Command $cmd -ErrorAction SilentlyContinue) }
 
 function RefreshPath {
@@ -575,11 +579,18 @@ function Start-InstallLog {
     New-Item -ItemType Directory -Path $HOST_DATA_DIR -Force | Out-Null
   }
   $script:LOG_FILE = "$HOST_DATA_DIR\install-$(Get-Date -Format 'yyyyMMdd-HHmmss').log"
+  # Curated, PII-free log (#576). We deliberately DO NOT use Start-Transcript: its
+  # fixed header records Username / RunAs / Machine / PID (a real client's shared
+  # log leaked their Windows identity), and it also captures PowerShell's raw error
+  # rendering — source lines, internal identifiers. Instead the message helpers
+  # (Info/Ok/Warn/Err/Step/…) route through Log(), so the log mirrors the curated
+  # on-screen output: no user PII, no tracebloc internals. Best-effort — if the
+  # file can't be created, logging silently no-ops and the install continues.
   try {
-    Start-Transcript -Path $LOG_FILE -Append | Out-Null
+    Set-Content -Path $LOG_FILE -Value "tracebloc client installer log - $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')" -ErrorAction Stop
     Log "Install log: $LOG_FILE"
   } catch {
-    Log "Could not start transcript logging: $_"
+    $script:LOG_FILE = $null
   }
 }
 
@@ -2201,6 +2212,42 @@ function Write-HostCaCreateHint {
   Write-Host ""
 }
 
+# Warn (never fatal) when the RUNNING cluster's k3s differs from the validated pin.
+# k3s is baked in at create time; a cluster born unpinned, on an older installer, or
+# with K8S_VERSION=latest keeps its version across later pinned re-runs -- the #547
+# incident (a client ran k3s v1.35.5 while the pin was v1.29.4-k3s1). Called from
+# BOTH the reuse path in New-K3dCluster AND the completed+healthy fast-path in main
+# (Bugbot #565), so a healthy-but-drifted cluster still gets the recreate guidance.
+# Silent no-op if the image can't be read or isn't a parseable rancher/k3s:<tag>
+# (e.g. a digest-only pin) -- never false-warn.
+function Test-K3sVersionDrift {
+  if ($K8S_VERSION -eq "" -or $K8S_VERSION -eq "latest") { return }
+  # Bounded (installer rule: every docker probe must have a deadline) so a wedged
+  # Docker engine can't hang the "already healthy" fast-path after success prints
+  # (#565 Bugbot). Mirrors Test-ClusterRunning's Start-Job + timeout pattern.
+  $k3sImage = ""
+  $job = Start-Job -InitializationScript $JobInit -ScriptBlock {
+    param($n) (docker inspect "k3d-$n-server-0" --format '{{.Config.Image}}' 2>$null | Out-String)
+  } -ArgumentList $CLUSTER_NAME
+  if (Wait-JobWithProgress -Job $job -TimeoutSec 15 -Message "Checking k3s version") {
+    $k3sImage = (Receive-Job $job -ErrorAction SilentlyContinue | Out-String).Trim()
+  } else {
+    Log "docker inspect (k3s version) timed out; skipping the version-drift check."
+  }
+  Remove-Job $job -Force -ErrorAction SilentlyContinue
+  if ($k3sImage -match 'rancher/k3s:([^@\s]+)') {
+    $runningK3s = $Matches[1]
+    if ($runningK3s -ne $K8S_VERSION) {
+      Warn "The existing '$CLUSTER_NAME' cluster runs k3s '$runningK3s', not the validated pin '$K8S_VERSION'."
+      Hint "k3s version is fixed when the cluster is created -- it can't be changed on a running cluster."
+      Hint "This cluster was created by an older/unpinned installer or with K8S_VERSION=latest (#547). To move"
+      Hint "onto the validated version, recreate it:"
+      Hint "  k3d cluster delete $CLUSTER_NAME  (then re-run this installer)."
+      Hint "  (data under HOST_DATA_DIR is kept; recreate rebinds it.)"
+    }
+  }
+}
+
 function New-K3dCluster {
   Log "Creating k3d cluster: '$CLUSTER_NAME'"
 
@@ -2296,6 +2343,11 @@ function New-K3dCluster {
         Err "Existing cluster is missing the dataset bind mount - refusing to install datasets onto ephemeral storage."
       }
     }
+
+    # k3s version drift: a cluster born unpinned/old/latest keeps its k3s across
+    # pinned re-runs (#547). Shared with the completed+healthy fast-path in main so
+    # a healthy-but-drifted cluster is warned too (Bugbot #565).
+    Test-K3sVersionDrift
   } else {
     # Creating a FRESH cluster — never silently adopt data an earlier install
     # left under HOST_DATA_DIR (RFC-0003 §4 / #376; parity with the bash guard).
@@ -2328,7 +2380,18 @@ function New-K3dCluster {
     # local /tracebloc tree. No-op when unset.
     if ($HOST_DATASET_DIR) { $k3dArgs += @("-v", "${HOST_DATASET_DIR}:/tracebloc-data@all") }
 
-    if ($K8S_VERSION -ne "" -and $K8S_VERSION -ne "latest") { $k3dArgs += @("--image", "rancher/k3s:$K8S_VERSION") }
+    # Pin k3s at create time (#547). $K8S_VERSION defaults to the validated pin, so
+    # a normal install ALWAYS passes --image; the version is baked into the node
+    # image and can't change later. K8S_VERSION=latest is an unsupported opt-out
+    # that floats to k3d's own bundled default (how a client landed on v1.35.5) —
+    # honour it but warn loudly.
+    if ($K8S_VERSION -eq "latest") {
+      Warn "K8S_VERSION=latest runs an UNVALIDATED k3s (k3d's bundled default), not the tested pin."
+      Hint "The chart is validated against a specific k3s release; 'latest' is unsupported and has stranded installs (#547)."
+      Hint "Unset K8S_VERSION (or pin it to a validated tag) to use the tested version."
+    } elseif ($K8S_VERSION -ne "") {
+      $k3dArgs += @("--image", "rancher/k3s:$K8S_VERSION")
+    }
     if ($K3D_GPU_FLAG -ne "") {
       $k3dArgs += $K3D_GPU_FLAG
       Log "GPU flag active: $K3D_GPU_FLAG"
@@ -3430,6 +3493,11 @@ function Print-Summary {
   $line = [string]([char]0x2501) * 46
 
   Write-Host ""
+  # Central outcome log (#576 / Bugbot #579): record the classified final state
+  # for EVERY branch, so no summary case can silently miss the log after the
+  # Start-Transcript removal (connected / starting / bad_creds / image_pull_ca /
+  # image_pull / crash / other).
+  Log "Final client state: $script:ClientState"
   switch ($script:ClientState) {
     "connected" {
       Write-Host "  $line" -ForegroundColor Green
@@ -3467,14 +3535,14 @@ function Print-Summary {
       Hint "Re-running this installer is safe."
     }
     "bad_creds" {
-      Write-Host "  " -NoNewline; Write-Host "$([char]0x2716) Couldn't connect - your Client ID or password was rejected." -ForegroundColor Red
+      Write-Host "  " -NoNewline; Write-Host "$([char]0x2716) Couldn't connect - your Client ID or password was rejected." -ForegroundColor Red; Log "Couldn't connect - Client ID or password rejected by tracebloc."
       Write-Host ""
       Write-Host "  The environment installed, but tracebloc refused those credentials."
       Write-Host "    1. Re-check them at https://ai.tracebloc.io/clients" -ForegroundColor Cyan
       Write-Host "    2. Re-run this installer (safe to re-run)"
     }
     "image_pull_ca" {
-      Write-Host "  " -NoNewline; Write-Host "$([char]0x2716) Setup didn't finish - the cluster does not trust your network's TLS-inspection CA." -ForegroundColor Red
+      Write-Host "  " -NoNewline; Write-Host "$([char]0x2716) Setup didn't finish - the cluster does not trust your network's TLS-inspection CA." -ForegroundColor Red; Log "Setup did not finish - cluster does not trust the network's TLS-inspection CA (in-cluster image pulls fail x509)."
       Write-Host ""
       Write-Host "  Your network intercepts HTTPS (break-and-inspect), so the in-cluster image"
       Write-Host "  pulls fail certificate validation (x509). CA trust is baked in at"
@@ -3490,7 +3558,7 @@ function Print-Summary {
       $reason = "a component didn't start"
       if ($script:ClientState -eq "image_pull") { $reason = "an image couldn't be pulled" }
       if ($script:ClientState -eq "crash")      { $reason = "a container is restarting (crash loop)" }
-      Write-Host "  " -NoNewline; Write-Host "$([char]0x2716) Setup didn't finish - $reason." -ForegroundColor Red
+      Write-Host "  " -NoNewline; Write-Host "$([char]0x2716) Setup didn't finish - $reason." -ForegroundColor Red; Log "Setup did not finish - $reason."
       Write-Host ""
       Write-Host "  Inspect:  " -NoNewline; Write-Host "kubectl get pods -n $ns" -ForegroundColor Green
       Write-Host "  Logs:     ~\.tracebloc\install-*.log"
@@ -3524,7 +3592,7 @@ function Print-Summary {
 # =============================================================================
 
 # Non-exiting failure line (Err exits; preflight must finish all checks first).
-function Write-PfFail($m) { Write-Host "  " -NoNewline; Write-Host ([char]0x2716) -ForegroundColor Red -NoNewline; Write-Host " $m" -ForegroundColor Red }
+function Write-PfFail($m) { Write-Host "  " -NoNewline; Write-Host ([char]0x2716) -ForegroundColor Red -NoNewline; Write-Host " $m" -ForegroundColor Red; Log "PREFLIGHT FAIL: $m" }
 
 # Probe a URL for reachability. Returns: ok|tls|dns|timeout|blocked (or "http <code>"
 # under -RequireSuccess). By default any HTTP response (incl. 401/403/404) counts as
@@ -4030,7 +4098,7 @@ function Invoke-DiagnoseBundle {
     Write-Host "    $bundle"
     Hint "Send this file to tracebloc support -- it has logs + status with passwords removed."
   } else {
-    Write-Host "  Could not create the diagnostics archive." -ForegroundColor Red
+    Write-Host "  Could not create the diagnostics archive." -ForegroundColor Red; Log "Could not create the diagnostics archive."
   }
 }
 
@@ -4168,9 +4236,13 @@ Print-Roadmap
 # finish the interrupted walk).
 if ((-not $Resume) -and $script:InstallState.completed -and (Test-ToolsPresent) -and (Test-ClusterRunning) -and (Test-ClientHealthy)) {
   Ok "tracebloc is already installed and the client is healthy -- nothing to do."
+  # A healthy cluster can still be running a DRIFTED k3s (the #547 steady state);
+  # this fast-path exits before New-K3dCluster's reuse check, so warn here too
+  # (Bugbot #565). Non-fatal: the client is healthy, we just flag the version.
+  Test-K3sVersionDrift
   Hint "Delete $(Get-InstallStatePath) (or set a fresh HOST_DATA_DIR) to force a full reinstall."
   Unregister-ResumeAfterReboot
-  try { Stop-Transcript | Out-Null } catch {}
+  Log "Already installed and healthy - nothing to do."
   exit 0
 }
 
@@ -4224,7 +4296,7 @@ if (Test-InstallConnected) { Set-InstallComplete } else { Clear-InstallCompleted
 
 Print-Summary
 
-try { Stop-Transcript | Out-Null } catch {}
+Log "Install finished."
 
 # Exit code reflects reality: connected/starting are OK; failures are non-zero.
 if (-not (Test-InstallSucceeded)) { exit 1 }

@@ -196,7 +196,9 @@ run_boot_hermetic() {
 @test "cosign signature failure aborts (no degrade to same-channel sha256)" {
   REF="v9.9.9" COSIGN_RESULT=1 run_boot
   [ "$status" -ne 0 ] || return 1
-  [[ "$output" == *"signature verification FAILED"* ]] || return 1
+  # Message sanitized for #576 (no internal identifiers); behaviour coverage
+  # (aborts + never degrades to a same-channel sha256) is unchanged.
+  [[ "$output" == *"Couldn't confirm the installer download is authentic"* ]] || return 1
   [ ! -f "$SBX/k8s-ran" ] || return 1
 }
 

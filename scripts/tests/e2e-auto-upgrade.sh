@@ -46,11 +46,10 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 LIB="$HERE/../lib"
 CHART_DIR="$HERE/../../client"
 
-# Isolated cluster + release so we never touch a real 'tracebloc' install; opt
-# out of autostart so we don't reconfigure docker.service on the host.
-export USER="${USER:-$(id -un)}"
-export CLUSTER_NAME="${CLUSTER_NAME:-tbupg}"
-export TRACEBLOC_NO_AUTOSTART=1
+# Shared bring-up contract (isolation env + tool-install prereqs).
+# shellcheck source=/dev/null
+source "$HERE/lib/e2e-common.sh"
+e2e_isolate_env tbupg
 NS="tbupg"
 REPO_NAME="tracebloc"
 REPO_URL="https://tracebloc.github.io/client"
@@ -103,15 +102,11 @@ echo "════════════════════════�
 echo "  E2E auto-upgrade gate   arch: $(uname -m)   kernel: $(uname -r)"
 echo "═══════════════════════════════════════════════════════════════════════"
 
-has docker || error "Docker is not available on this host."
 # jq reads the baseline release's computed values (BASELINE_PROD_DIGEST).
 # Preinstalled on GitHub-hosted runners; local runs must bring their own —
 # fail fast here instead of a mid-run pipeline abort.
 has jq || error "jq is required (it reads the baseline release's computed values)."
-umask 022
-install_kubectl
-install_k3d
-install_helm
+e2e_install_prereqs
 
 echo "── create_cluster() — the installer's real cluster-bring-up path ──"
 create_cluster

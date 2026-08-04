@@ -26,6 +26,7 @@ SPEC="scripts/spec/facts.env"
 COMMON="scripts/lib/common.sh"
 SUMMARY="scripts/lib/summary.sh"
 PS1="scripts/install-k8s.ps1"
+CLUSTER="scripts/lib/cluster.sh"
 
 MODE="write"
 case "${1:-}" in
@@ -39,8 +40,13 @@ esac
 # Read a bare KEY=value from the spec (comments/blank lines ignored). Fails closed:
 # a missing/empty key is a spec error, not a silent pass.
 _spec_get() {
-  local key="$1" val
-  val="$(sed -n "s/^${key}=\(.*\)$/\1/p" "$SPEC" | head -1)"
+  local key="$1" all val
+  # Capture whole, then take the first line with `%%$'\n'*` — NOT `… | head -1`.
+  # Under `set -o pipefail` a duplicate key makes head close the pipe after line 1,
+  # sed takes SIGPIPE, and the pipeline exits 141 — aborting the facts gate before
+  # any drift message prints (a crash/fail-open on duplicate input).
+  all="$(sed -n "s/^${key}=\(.*\)$/\1/p" "$SPEC")"
+  val="${all%%$'\n'*}"
   [[ -n "$val" ]] || { echo "check-facts: '${key}' missing from ${SPEC}" >&2; exit 2; }
   printf '%s' "$val"
 }
@@ -84,7 +90,9 @@ FACT_REWRITE=(
   's|\(\$ReadyTimeout .*else { "\)[^"]*\(" }\)|\1@@VAL@@\2|'
 )
 
-_extract() { sed -n "$2" "$1" | head -1; }
+# Capture whole, then take the first line with `%%$'\n'*` — NOT `… | head -1`, which
+# SIGPIPEs sed (exit 141) under `set -o pipefail` when a file has a second match.
+_extract() { local all; all="$(sed -n "$2" "$1")"; printf '%s' "${all%%$'\n'*}"; }
 
 drift=0
 i=0
@@ -118,12 +126,47 @@ while [ "$i" -lt "${#FACT_NAMES[@]}" ]; do
   i=$(( i + 1 ))
 done
 
+# Structural guard (#547 / F4): the fact table above only compares the pinned
+# VERSION STRINGS — it does NOT verify the create command actually WIRES the k3s
+# pin into the cluster. #547 drifted precisely because `--image rancher/k3s:<ver>`
+# can be dropped/gated while the version string stays correct and CI stays green.
+# Assert the create-time wiring is present in both installers so a refactor can't
+# silently unpin k3s. Fixed-string (grep -F): these are literal shell/PS tokens.
+_check_wiring() {  # name  file  literal
+  if [[ ! -f "$2" ]]; then
+    echo "  ✖ ${1}: ${2} not found" >&2; return 1
+  fi
+  if grep -qF "$3" "$2"; then
+    echo "  ✔ ${1}: k3s --image pin present in ${2}"; return 0
+  fi
+  echo "  ✖ ${1}: create-time '${3}' not found in ${2} — k3s could float (#547)" >&2; return 1
+}
+# Wiring failures are tracked SEPARATELY from version drift: `--write` restamps
+# version strings but CANNOT restore create-time wiring, so a wiring gap must not
+# emit the "run --write" hint (Bugbot #565) — it needs a hand-fix.
+wiring_fail=0
 if [[ "$MODE" == "check" ]]; then
+  _check_wiring "cluster.sh:k3s-image-pin"      "$CLUSTER" 'rancher/k3s:${K8S_VERSION}' || wiring_fail=$(( wiring_fail + 1 ))
+  _check_wiring "install-k8s.ps1:k3s-image-pin" "$PS1"     'rancher/k3s:$K8S_VERSION'    || wiring_fail=$(( wiring_fail + 1 ))
+fi
+
+if [[ "$MODE" == "check" ]]; then
+  rc=0
   if [[ "$drift" -ne 0 ]]; then
     echo "" >&2
     echo "check-facts: ${drift} fact(s) drifted from ${SPEC}. Run 'scripts/check-facts.sh --write' and commit." >&2
-    exit 1
+    rc=1
   fi
+  if [[ "$wiring_fail" -ne 0 ]]; then
+    echo "" >&2
+    echo "check-facts: the k3s --image pin is missing from the create path in ${wiring_fail} file(s) (see ✖ above)." >&2
+    echo "check-facts: this is a WIRING gap, not a version bump — '--write' cannot fix it. Restore the create-time" >&2
+    echo "             --image k3s pin by hand using the EXACT literal each ✖ line above shows — the two shells differ:" >&2
+    echo "             bash cluster.sh uses 'rancher/k3s:\${K8S_VERSION}' (braces); PowerShell install-k8s.ps1 uses" >&2
+    echo "             'rancher/k3s:\$K8S_VERSION' (no braces). So k3s can't float (#547)." >&2
+    rc=1
+  fi
+  [[ "$rc" -eq 0 ]] || exit 1
   echo "check-facts: all installer facts match ${SPEC}."
 else
   [[ "$drift" -eq 0 ]] || { echo "check-facts: ${drift} consumer(s) could not be stamped (see above)." >&2; exit 1; }

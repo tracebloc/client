@@ -25,9 +25,14 @@ $script:K3dVersion  = if ($env:K3D_VERSION)  { $env:K3D_VERSION }  else { "v5.9.
 $script:HelmVersion = if ($env:HELM_VERSION) { $env:HELM_VERSION } else { "v4.2.3" }
 $K8S_VERSION   = if ($env:K8S_VERSION)   { $env:K8S_VERSION }   else { "v1.29.4-k3s1" }
 $ReadyTimeout     = if ($env:READY_TIMEOUT) { $env:READY_TIMEOUT } else { "300" }
+$k3dArgs += @("--image", "rancher/k3s:$K8S_VERSION")
 PS
   cat > "$REPO/scripts/lib/summary.sh" <<'SH'
 READY_TIMEOUT="${READY_TIMEOUT:-300}"
+SH
+  # cluster.sh carries the create-time k3s --image pin the #547 wiring guard checks.
+  cat > "$REPO/scripts/lib/cluster.sh" <<'SH'
+K3D_ARGS+=(--image "rancher/k3s:${K8S_VERSION}")
 SH
 }
 
@@ -123,4 +128,53 @@ _set_spec() { local tmp; tmp="$(mktemp)"; sed "s|^$1=.*|$1=$2|" "$REPO/scripts/s
 @test "check-facts: an unknown mode is rejected (#435)" {
   run _facts --bogus
   [ "$status" -eq 2 ] || return 1
+}
+
+# --- pipefail + `sed | head -1` SIGPIPE regressions (#542 Bugbot) -----------
+# Both helpers used to pipe `sed … | head -1` under `set -o pipefail`: on a second
+# match large enough to fill the ~64KB pipe buffer, head closes after line 1, sed takes
+# SIGPIPE, and the pipeline exits 141. In `_extract` the pipeline is the function's
+# terminal command, so that 141 propagates out of `got="$(_extract …)"` and aborts the
+# facts gate BEFORE any drift message prints (a crash / fail-open on duplicate input) —
+# the test below reproduced exactly that on the pre-fix code. In `_spec_get` a trailing
+# `printf` masked the pipeline status on some shells, so it did not always abort there,
+# but the same fragile pipe was present. The fix removes both pipes: capture the whole
+# output, take the first line with `${all%%$'\n'*}`. Each test feeds enough duplicate
+# matches to trip the old pipe; the first value still equals the spec, so --check passes.
+
+@test "check-facts --check: a duplicated spec key returns the first value, no SIGPIPE (#542 Bugbot)" {
+  # A second (identical) K3D_VERSION= line in facts.env, repeated past the pipe buffer.
+  # Locks the contract that _spec_get yields the FIRST value and never aborts the gate —
+  # even if a future edit drops the trailing printf that masked the old pipe's exit code.
+  { i=0; while [ "$i" -lt 20000 ]; do echo "K3D_VERSION=v5.9.0"; i=$((i + 1)); done; } >> "$REPO/scripts/spec/facts.env"
+  run _facts --check
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"all installer facts match"* ]]
+}
+
+@test "check-facts --check: a duplicated consumer pin does not SIGPIPE _extract (#542 Bugbot)" {
+  # Many identical K3D_VERSION default lines in common.sh — each matches the extractor,
+  # so the old `sed | head -1` in _extract exited 141 (verified against the pre-fix code)
+  # and aborted the gate. The first line still equals the spec, so drift is zero.
+  { i=0; while [ "$i" -lt 20000 ]; do echo 'K3D_VERSION="${K3D_VERSION:-v5.9.0}"'; i=$((i + 1)); done; } >> "$REPO/scripts/lib/common.sh"
+  run _facts --check
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"all installer facts match"* ]]
+}
+
+@test "check-facts --check: a missing create-time --image pin fails with a WIRING message, not the --write hint (#547 / Bugbot)" {
+  # versions all still correct, but strip the k3s --image wiring from cluster.sh
+  printf '%s\n' '# stub without the k3s --image pin' > "$REPO/scripts/lib/cluster.sh"
+  run _facts --check
+  [ "$status" -ne 0 ]
+  # must NOT point the dev at --write (it cannot restore create-time wiring)
+  if printf '%s\n' "$output" | grep -qF "Run 'scripts/check-facts.sh --write'"; then
+    echo "unexpected --write hint for a wiring failure:" >&2; printf '%s\n' "$output" >&2; return 1
+  fi
+  # must name it as a wiring gap with the hand-fix
+  printf '%s\n' "$output" | grep -qF "WIRING gap"
+  printf '%s\n' "$output" | grep -qF "cannot fix it"
+  # the hand-fix hint must name BOTH shell forms — PS uses no braces (#565 Bugbot)
+  printf '%s\n' "$output" | grep -qF 'rancher/k3s:${K8S_VERSION}'
+  printf '%s\n' "$output" | grep -qF 'rancher/k3s:$K8S_VERSION'
 }

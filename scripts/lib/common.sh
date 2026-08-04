@@ -781,7 +781,7 @@ validate_config() {
     local ddir="$HOST_DATASET_DIR" rddir
     [[ "$ddir" == /* ]] || error "HOST_DATASET_DIR must be an absolute path (got '$HOST_DATASET_DIR')"
     [[ -d "$ddir" ]]    || error "HOST_DATASET_DIR does not exist: $ddir (mount the dataset volume before installing)"
-    [[ -w "$ddir" ]]    || error "HOST_DATASET_DIR is not writable by $(id -un) (uid $(id -u)): $ddir"
+    [[ -w "$ddir" ]]    || error "HOST_DATASET_DIR is not writable (uid $(id -u)): $ddir — check its permissions."
     rddir="$(cd -P "$ddir" 2>/dev/null && pwd)" || error "HOST_DATASET_DIR could not be resolved: $ddir"
     case "$rddir" in
       /) error "HOST_DATASET_DIR cannot be root (/)" ;;
