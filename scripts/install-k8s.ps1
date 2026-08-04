@@ -155,6 +155,7 @@ function Err($m, $Detail)  {
   # Mirror to the curated log too (#576) — Get-ErrDetailLines already strips the
   # `At <file>:<line> char:` / `+ …` source-dump lines, so nothing internal leaks.
   Log "ERROR: $m"; foreach ($l in $det) { Log $l }
+  $script:OutcomeReported = $true   # Err IS a reported outcome (guards the finally)
   exit 1
 }
 function Step($n, $t, $l)  { Write-Host ""; Write-Host "Step $n/$t" -ForegroundColor Cyan -NoNewline; Write-Host "  $l" -ForegroundColor White; Log "== Step $n/$t : $l ==" }
@@ -169,6 +170,7 @@ function Has($cmd)         { [bool](Get-Command $cmd -ErrorAction SilentlyContin
 # the throw sites, #576); the stack trace is deliberately NOT shown or logged, so
 # no tracebloc internals leak. The user always sees what happened + what to do.
 function Show-FatalError($err) {
+  $script:OutcomeReported = $true   # this IS the reported outcome (guards the finally)
   $reason = ""
   try { $reason = [string]$err.Exception.Message } catch {}
   if (-not $reason) { $reason = [string]$err }
@@ -178,6 +180,18 @@ function Show-FatalError($err) {
   if ($reason) { Write-Host "  $reason" -ForegroundColor DarkGray }
   if ($script:LOG_FILE) { Hint "Details saved to: $script:LOG_FILE" }
   Hint "It's safe to re-run this installer. If it keeps failing, send that log to tracebloc support."
+}
+
+# The guaranteed finally's closer (#577): fires ONLY when the run ended without
+# reporting an outcome — i.e. an interruption (Ctrl-C) or an abnormal termination
+# that wasn't a handled Err, a caught crash, or a normal finish — so the window
+# never just vanishes. Mirrors bash's exit-code-guarded install_cleanup.
+function Show-Interrupted {
+  Log "Installation interrupted before completion."
+  Write-Host ""
+  Write-Host "  " -NoNewline; Write-Host ([char]0x26A0) -ForegroundColor Yellow -NoNewline; Write-Host "  Installation was interrupted before it finished." -ForegroundColor Yellow
+  if ($script:LOG_FILE) { Hint "Log: $script:LOG_FILE" }
+  Hint "It's safe to re-run this installer."
 }
 
 function RefreshPath {
@@ -4238,10 +4252,17 @@ if (-not $env:TB_PESTER) {
 # `exit` calls (fast-path, Err, final) pass straight through; only real crashes are
 # caught. $ErrorActionPreference is left as-is so existing non-terminating-error
 # flows are unchanged — this catches the throw-based crashes that leaked/killed.
+# The `finally` is the guaranteed closer (mirrors bash's install_cleanup): it fires
+# on every exit, and shows the interrupted line only when no outcome was reported
+# (Ctrl-C / abnormal termination). The `trap` is the last-resort net for anything
+# that terminates OUTSIDE the try below (defined inside the guard so it never fires
+# under the test dot-source).
+$script:OutcomeReported = $false
+trap { Show-FatalError $_; exit 1 }
 try {
 
-if ($Help) { Print-Help }
-if ($Diagnose) { Invoke-DiagnoseBundle; exit 0 }
+if ($Help) { $script:OutcomeReported = $true; Print-Help }
+if ($Diagnose) { $script:OutcomeReported = $true; Invoke-DiagnoseBundle; exit 0 }
 
 Confirm-Config
 Initialize-ToolDir
@@ -4267,6 +4288,7 @@ if ((-not $Resume) -and $script:InstallState.completed -and (Test-ToolsPresent) 
   Hint "Delete $(Get-InstallStatePath) (or set a fresh HOST_DATA_DIR) to force a full reinstall."
   Unregister-ResumeAfterReboot
   Log "Already installed and healthy - nothing to do."
+  $script:OutcomeReported = $true
   exit 0
 }
 
@@ -4319,6 +4341,7 @@ Unregister-ResumeAfterReboot
 if (Test-InstallConnected) { Set-InstallComplete } else { Clear-InstallCompleted }
 
 Print-Summary
+$script:OutcomeReported = $true   # Print-Summary reported the outcome (guards the finally)
 
 Log "Install finished."
 
@@ -4327,9 +4350,15 @@ if (-not (Test-InstallSucceeded)) { exit 1 }
 
 } catch {
   # Any crash the run didn't handle itself lands here as a clean message, not a
-  # raw stack (#577).
+  # raw stack (#577). Show-FatalError sets $script:OutcomeReported.
   Show-FatalError $_
   exit 1
+} finally {
+  # Guaranteed closer: this runs on EVERY exit above. Every reported path (normal
+  # finish, Err, caught crash, fast-path, help/diagnose) set OutcomeReported; if it
+  # is still false we were interrupted (Ctrl-C / abnormal), so surface a clean line
+  # rather than letting the window vanish silently (#577).
+  if (-not $script:OutcomeReported) { Show-Interrupted }
 }
 
 }  # end TB_PESTER guard (skipped when the test suite dot-sources this file)

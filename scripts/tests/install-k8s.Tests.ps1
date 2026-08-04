@@ -3078,3 +3078,28 @@ Describe "Top-level error boundary: crashes become a clean message, never a stac
     } finally { $script:LOG_FILE = $null }
   }
 }
+
+Describe "Graceful failure: guaranteed finally + trap, guarded closer (#577)" {
+  BeforeAll { $script:PSRC577b = Get-Content "$PSScriptRoot/../install-k8s.ps1" -Raw }
+
+  It "wraps the main run in try/catch/finally with a last-resort trap" {
+    $script:PSRC577b | Should -Match 'trap \{ Show-FatalError \$_; exit 1 \}'
+    $script:PSRC577b | Should -Match '\} finally \{'
+    $script:PSRC577b | Should -Match 'if \(-not \$script:OutcomeReported\) \{ Show-Interrupted \}'
+  }
+
+  It "marks the outcome reported on every terminal path (guards against a spurious interrupted line)" {
+    ([regex]::Matches($script:PSRC577b, '\$script:OutcomeReported = \$true')).Count | Should -BeGreaterOrEqual 5
+  }
+
+  It "Show-Interrupted renders a clean interrupted line (log + re-run, no stack)" {
+    $log = Join-Path $TestDrive "int-577.log"; $script:LOG_FILE = $log
+    try {
+      $out = Show-Interrupted 6>&1 | Out-String
+      $out | Should -Match 'interrupted'
+      $out | Should -Match 're-run'
+      $out | Should -Not -Match 'ScriptStackTrace'
+      (Get-Content $log -Raw) | Should -Match 'interrupted'
+    } finally { $script:LOG_FILE = $null }
+  }
+}
