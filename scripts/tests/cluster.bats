@@ -749,13 +749,21 @@ _stub_create_cluster_deps() {
 }
 
 # ── wire_ca_trust: extend the corporate CA to every host tool (#583) ─────────
-@test "wire_ca_trust: exports SSL_CERT_FILE / GIT_SSL_CAINFO / CURL_CA_BUNDLE from a CA (#583)" {
+@test "wire_ca_trust: exports SSL_CERT_FILE + GIT_SSL_CAINFO from a CA (#583)" {
   local ca="$BATS_TEST_TMPDIR/ca.pem"; echo pem > "$ca"
   TRACEBLOC_CA_BUNDLE="$ca"
   wire_ca_trust >/dev/null
   [ "$SSL_CERT_FILE" = "$ca" ]
   [ "$GIT_SSL_CAINFO" = "$ca" ]
-  [ "$CURL_CA_BUNDLE" = "$ca" ]
+}
+
+@test "wire_ca_trust: does NOT clobber a user's CURL_CA_BUNDLE (replace-not-augment, Bugbot)" {
+  local ca="$BATS_TEST_TMPDIR/corp.pem";       echo pem > "$ca"
+  local full="$BATS_TEST_TMPDIR/full-bundle.pem"; echo pem > "$full"
+  TRACEBLOC_CA_BUNDLE="$ca"; CURL_CA_BUNDLE="$full"
+  wire_ca_trust >/dev/null
+  [ "$SSL_CERT_FILE" = "$ca" ]       # cosign/helm/git get the corp CA
+  [ "$CURL_CA_BUNDLE" = "$full" ]    # curl's own bundle is left intact (not overwritten)
 }
 
 @test "wire_ca_trust: no-op when no CA is configured (#583)" {

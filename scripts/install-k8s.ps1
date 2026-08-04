@@ -1810,18 +1810,18 @@ function Resolve-CaBundle {
   return $null
 }
 
-# Wire the resolved corporate CA into the host tools that do NOT inherit the Windows
-# store on their own - cosign (SSL_CERT_FILE), helm and any Go tool (SSL_CERT_FILE),
-# git (GIT_SSL_CAINFO) - so a TLS-inspecting proxy that re-signs HTTPS is trusted
-# end-to-end (#583). Invoke-WebRequest already uses the system store; the k3d nodes
-# are trusted at cluster-create (#424). No-op when no CA is configured; Resolve-CaBundle
-# fails fast (before any privileged step) on a set-but-unreadable bundle.
+# Wire the resolved corporate CA into the host tools that do NOT honor a CA env on
+# their own - cosign & helm & any Go tool (SSL_CERT_FILE), git (GIT_SSL_CAINFO) - so
+# a TLS-inspecting proxy that re-signs HTTPS is trusted end-to-end (#583). We do NOT
+# re-export CURL_CA_BUNDLE: curl already honors the user's own, and deriving it from a
+# corp-root-only bundle would drop the public roots (replace-not-augment) (Bugbot).
+# Invoke-WebRequest uses the Windows store; the k3d nodes are trusted at cluster-create
+# (#424). No-op when unconfigured; Resolve-CaBundle fails fast on an unreadable bundle.
 function Set-ToolTrust {
   $ca = Resolve-CaBundle
   if (-not $ca) { return }
   $env:SSL_CERT_FILE  = $ca
   $env:GIT_SSL_CAINFO = $ca
-  $env:CURL_CA_BUNDLE = $ca
   Ok "Trusting your company's certificate for cosign, helm, git and downloads."
 }
 

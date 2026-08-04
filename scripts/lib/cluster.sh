@@ -142,13 +142,14 @@ _resolve_ca_bundle() {
   return 0
 }
 
-# Wire the resolved corporate CA into every HOST tool that does NOT inherit the
-# system trust store on its own — cosign (SSL_CERT_FILE), helm and any Go tool
-# (SSL_CERT_FILE), git (GIT_SSL_CAINFO), curl (CURL_CA_BUNDLE) — so a TLS-inspecting
-# proxy that re-signs HTTPS is trusted end-to-end, not just by curl (#583). The k3d
-# NODES are trusted separately at cluster-create (#424, containerd registries.yaml).
-# Idempotent; a no-op when no CA is configured. Fails fast (before any privileged
-# step) on a set-but-unreadable bundle, mirroring _resolve_ca_bundle's contract.
+# Wire the resolved corporate CA into the HOST tools that do NOT honor a CA env on
+# their own — cosign & helm & any Go tool (SSL_CERT_FILE), git (GIT_SSL_CAINFO) — so
+# a TLS-inspecting proxy that re-signs HTTPS is trusted beyond just curl (#583). curl
+# ALREADY honors the user's own CURL_CA_BUNDLE natively, so we do NOT re-export it:
+# CURL_CA_BUNDLE is replace-not-augment, and deriving it from a corp-root-only
+# TRACEBLOC_CA_BUNDLE would drop the public roots curl needs elsewhere (Bugbot). The
+# k3d NODES are trusted separately at cluster-create (#424). Idempotent; a no-op when
+# no CA is configured; fails fast on a set-but-unreadable bundle.
 wire_ca_trust() {
   local ca rc=0
   ca="$(_resolve_ca_bundle)" || rc=$?
@@ -156,7 +157,7 @@ wire_ca_trust() {
     error "$ca is set but its CA bundle file can't be read — fix its path/permissions and re-run."
   fi
   [[ -z "$ca" ]] && return 0
-  export SSL_CERT_FILE="$ca" CURL_CA_BUNDLE="$ca" GIT_SSL_CAINFO="$ca"
+  export SSL_CERT_FILE="$ca" GIT_SSL_CAINFO="$ca"
   success "Trusting your company's certificate for cosign, helm, git and downloads."
 }
 
