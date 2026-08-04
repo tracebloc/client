@@ -437,10 +437,11 @@ verify_manifest_signature() {
         --certificate "$cert" \
         --signature "$sig" \
         "$manifest" >/dev/null 2>&1; then
-    printf '  %s✔%s Signature verified — published by tracebloc (Sigstore keyless)\n' "$_G" "$_R"
+    printf '  %s✔%s Download verified as published by tracebloc\n' "$_G" "$_R"
   else
-    echo "[ERROR] cosign signature verification FAILED for manifest.sha256 — refusing" >&2
-    echo "        to install." >&2
+    # Plain language, no internal identifiers — parity with install.ps1 (#576).
+    echo "[ERROR] Couldn't confirm the installer download is authentic, so the install" >&2
+    echo "        stopped before changing anything on your machine." >&2
     exit 1
   fi
 }
