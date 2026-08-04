@@ -185,17 +185,17 @@ exit 0
 EOF
   chmod +x "$BIN/cosign"
   REF="v9.9.9" TRACEBLOC_CA_BUNDLE="$ca" run_boot
-  [ "$status" -eq 0 ]
-  [ "$(cat "$SBX/cosign-ssl")" = "$ca" ]
+  [ "$status" -eq 0 ] || return 1
+  [ "$(cat "$SBX/cosign-ssl")" = "$ca" ] || return 1
 }
 
 @test "bootstrap fails fast on a set-but-unreadable CA bundle (#583 Bugbot)" {
   # A bad CA path must fail here with a clear message, not silently no-op and surface
   # later as a generic cosign authenticity error.
   REF="v9.9.9" TRACEBLOC_CA_BUNDLE="/no/such/corporate-ca.pem" run_boot
-  [ "$status" -ne 0 ]
-  [[ "$output" == *"can't be read"* ]]
-  [ ! -f "$SBX/k8s-ran" ]
+  [ "$status" -ne 0 ] || return 1
+  [[ "$output" == *"can't be read"* ]] || return 1
+  [ ! -f "$SBX/k8s-ran" ] || return 1
 }
 
 @test "tampered sub-script aborts before the privileged step" {

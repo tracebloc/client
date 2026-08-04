@@ -754,16 +754,16 @@ _stub_create_cluster_deps() {
   local ca="$BATS_TEST_TMPDIR/ca.pem"; echo pem > "$ca"
   TRACEBLOC_CA_BUNDLE="$ca"; OS="Linux"
   wire_ca_trust >/dev/null
-  [ "$SSL_CERT_FILE" = "$ca" ]
-  [ "$GIT_SSL_CAINFO" = "$ca" ]
+  [ "$SSL_CERT_FILE" = "$ca" ] || return 1
+  [ "$GIT_SSL_CAINFO" = "$ca" ] || return 1
 }
 
 @test "wire_ca_trust: Linux announce names cosign/helm/git (SSL_CERT_FILE effective there)" {
   local ca="$BATS_TEST_TMPDIR/ca.pem"; echo pem > "$ca"
   TRACEBLOC_CA_BUNDLE="$ca"; OS="Linux"
   run wire_ca_trust
-  [[ "$output" == *"cosign, helm and git"* ]]
-  [[ "$output" != *"downloads"* ]]   # curl trust is the user's CURL_CA_BUNDLE; don't over-claim
+  [[ "$output" == *"cosign, helm and git"* ]] || return 1
+  [[ "$output" != *"downloads"* ]] || return 1   # curl trust is the user's CURL_CA_BUNDLE; don't over-claim
 }
 
 @test "wire_ca_trust: macOS announce names only git + hints Keychain for cosign/helm (Bugbot)" {
@@ -772,9 +772,9 @@ _stub_create_cluster_deps() {
   local ca="$BATS_TEST_TMPDIR/ca.pem"; echo pem > "$ca"
   TRACEBLOC_CA_BUNDLE="$ca"; OS="Darwin"
   run wire_ca_trust
-  [[ "$output" == *"certificate for git."* ]]
-  [[ "$output" != *"cosign, helm"* ]]
-  [[ "$output" == *"Keychain"* ]]
+  [[ "$output" == *"certificate for git."* ]] || return 1
+  [[ "$output" != *"cosign, helm"* ]] || return 1
+  [[ "$output" == *"Keychain"* ]] || return 1
 }
 
 @test "wire_ca_trust: does NOT clobber a user's CURL_CA_BUNDLE (replace-not-augment, Bugbot)" {
@@ -782,8 +782,8 @@ _stub_create_cluster_deps() {
   local full="$BATS_TEST_TMPDIR/full-bundle.pem"; echo pem > "$full"
   TRACEBLOC_CA_BUNDLE="$ca"; CURL_CA_BUNDLE="$full"; OS="Linux"
   wire_ca_trust >/dev/null
-  [ "$SSL_CERT_FILE" = "$ca" ]       # cosign/helm/git get the corp CA
-  [ "$CURL_CA_BUNDLE" = "$full" ]    # curl's own bundle is left intact (not overwritten)
+  [ "$SSL_CERT_FILE" = "$ca" ] || return 1       # cosign/helm/git get the corp CA
+  [ "$CURL_CA_BUNDLE" = "$full" ] || return 1    # curl's own bundle is left intact (not overwritten)
 }
 
 @test "wire_ca_trust: does NOT clobber pre-set SSL_CERT_FILE / GIT_SSL_CAINFO (replace-not-augment, Bugbot)" {
@@ -791,20 +791,20 @@ _stub_create_cluster_deps() {
   local uf="$BATS_TEST_TMPDIR/user-full.pem"; echo pem > "$uf"
   TRACEBLOC_CA_BUNDLE="$ca"; SSL_CERT_FILE="$uf"; GIT_SSL_CAINFO="$uf"; OS="Linux"
   wire_ca_trust >/dev/null
-  [ "$SSL_CERT_FILE" = "$uf" ]     # user's fuller bundles are left intact...
-  [ "$GIT_SSL_CAINFO" = "$uf" ]    # ...not overwritten with the corp-root-only one
+  [ "$SSL_CERT_FILE" = "$uf" ] || return 1     # user's fuller bundles are left intact...
+  [ "$GIT_SSL_CAINFO" = "$uf" ] || return 1    # ...not overwritten with the corp-root-only one
 }
 
 @test "wire_ca_trust: no-op when no CA is configured (#583)" {
   unset TRACEBLOC_CA_BUNDLE CURL_CA_BUNDLE SSL_CERT_FILE GIT_SSL_CAINFO
   wire_ca_trust >/dev/null
-  [ -z "${SSL_CERT_FILE:-}" ]
-  [ -z "${GIT_SSL_CAINFO:-}" ]
+  [ -z "${SSL_CERT_FILE:-}" ] || return 1
+  [ -z "${GIT_SSL_CAINFO:-}" ] || return 1
 }
 
 @test "wire_ca_trust: hard-fails early on a set-but-unreadable bundle (#583)" {
   TRACEBLOC_CA_BUNDLE="/no/such/corporate-ca.pem"
   run wire_ca_trust
-  [ "$status" -ne 0 ]
-  [[ "$output" == *"can't be read"* ]]
+  [ "$status" -ne 0 ] || return 1
+  [[ "$output" == *"can't be read"* ]] || return 1
 }
