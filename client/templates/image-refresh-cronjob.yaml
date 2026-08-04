@@ -127,9 +127,20 @@ data:
     # because each tick's rollout timed out and the next re-restarted, the digest annotation
     # only landing after a rollout SUCCEEDS). concurrencyPolicy: Forbid stops overlapping
     # JOBS; this stops the SEQUENTIAL restart storm. Retry on the next tick once settled.
-    if ! kubectl rollout status -n "$RELEASE_NAMESPACE" "deployment/${DEPLOYMENT_NAME}" --timeout=10s >/dev/null 2>&1; then
-      log "deployment/${DEPLOYMENT_NAME} not settled (rollout in progress or pod not Ready) -- skipping this refresh tick; will retry when settled"
-      exit 0
+    # A non-zero rollout status is NOT automatically "in progress -- skip" (#571). It is
+    # also NotFound, RBAC denial, and API errors -- treating those as a benign skip
+    # (exit 0) leaves the CronJob GREEN forever while refresh never runs. Only a
+    # genuinely-present-but-unsettled deployment is a legit skip; anything else the job
+    # must SURFACE. --request-timeout bounds each API CALL (not just the rollout wait),
+    # so a wedged API cannot hang the tick with no activeDeadlineSeconds while
+    # concurrencyPolicy: Forbid blocks every later tick.
+    if ! kubectl rollout status -n "$RELEASE_NAMESPACE" "deployment/${DEPLOYMENT_NAME}" --request-timeout=15s --timeout=10s >/dev/null 2>&1; then
+      if kubectl get deployment -n "$RELEASE_NAMESPACE" "$DEPLOYMENT_NAME" --request-timeout=15s >/dev/null 2>&1; then
+        log "deployment/${DEPLOYMENT_NAME} not settled (rollout in progress or pod not Ready) -- skipping this refresh tick; will retry when settled"
+        exit 0
+      fi
+      log "ERROR: cannot read deployment/${DEPLOYMENT_NAME} (NotFound, RBAC denial, or API error) -- not a benign skip; failing the tick so it is visible"
+      exit 1
     fi
 
     # =================================================================
@@ -227,6 +238,13 @@ spec:
   jobTemplate:
     spec:
       backoffLimit: 2
+      # MUST exceed imageRefresh.rolloutTimeout (default 10m): a legitimate tick does
+      # `rollout restart` and then waits on `rollout status` for up to that long, so a
+      # deadline below it would kill the wait mid-flight and the post-success digest
+      # annotation would never land, causing later ticks to re-restart forever (#572).
+      # This is only a backstop -- every API call is already --request-timeout-bounded;
+      # it just caps the total wall-clock well above any sane rollout wait.
+      activeDeadlineSeconds: 1800
       template:
         metadata:
           labels:
