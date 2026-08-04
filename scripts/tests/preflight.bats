@@ -11,9 +11,13 @@ setup() {
   PF_HARD_FAIL=0
   # Default-safe stubs (a healthy amd64 box); individual tests override.
   _pf_probe_url() { echo ok; }
+  # Hermetic default: the TLS-inspection probe does a live openssl call to github.com
+  # in production, so stub it here (like _pf_probe_url) — nothing touches the real
+  # network. Tests of the REAL probe source preflight.sh fresh in a subshell (Bugbot).
+  _pf_detect_tls_inspection() { echo "unknown"; }
   _pf_free_kb() { echo $((50 * 1024 * 1024)); }       # 50 GB
   _pf_fstype() { echo ext4; }                          # local disk (storage check passes)
-  _pf_total_mem_kb() { echo $((8 * 1024 * 1024)); }   # 8 GB
+  _pf_host_mem_kb() { echo $((8 * 1024 * 1024)); }   # 8 GB
   _pf_ncpu() { echo 4; }
   _pf_runtime_mem_kb() { echo ""; }   # daemon "down" in tests → selectors/src use host
   _pf_runtime_ncpu() { echo ""; }
@@ -50,6 +54,14 @@ setup() {
 @test "_pf_arch: arm64 macOS -> info (Desktop emulation), no hard fail" {
   ARCH=arm64; OS=Darwin
   PF_HARD_FAIL=0; _pf_arch >/dev/null; [ "$PF_HARD_FAIL" -eq 0 ]
+}
+
+@test "_pf_arch: arm64 macOS note names the Rosetta setting + defers to the post-Docker smoke (#433)" {
+  ARCH=arm64; OS=Darwin
+  run _pf_arch
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Use Rosetta for x86_64/amd64 emulation"* ]]   # names the exact setting, not "assume it works"
+  [[ "$output" == *"verified once Docker is running"* ]]          # real check is the post-Docker smoke (#433)
 }
 
 @test "_pf_arch: arm64 + TRACEBLOC_ALLOW_ARM64 -> warn, no hard fail" {
@@ -231,46 +243,216 @@ setup() {
 }
 
 @test "_pf_memory: below floor on Linux -> hard fail + resize hint" {
-  OS=Linux; _pf_total_mem_kb() { echo $((3 * 1024 * 1024)); }   # 3 GB
+  OS=Linux; _pf_host_mem_kb() { echo $((3 * 1024 * 1024)); }   # 3 GB
   run _pf_memory; [[ "$output" == *"to run the tracebloc client"* ]]
   PF_HARD_FAIL=0; _pf_memory >/dev/null 2>&1; [ "$PF_HARD_FAIL" -eq 1 ]
 }
 
 @test "_pf_memory: between floor and warn -> warn, no hard fail" {
-  OS=Linux; _pf_total_mem_kb() { echo $((6 * 1024 * 1024)); }   # 6 GB
+  OS=Linux; _pf_host_mem_kb() { echo $((6 * 1024 * 1024)); }   # 6 GB
   run _pf_memory; [[ "$output" == *"recommended to train"* ]]
   PF_HARD_FAIL=0; _pf_memory >/dev/null 2>&1; [ "$PF_HARD_FAIL" -eq 0 ]
 }
 
 @test "_pf_memory: ample RAM -> success" {
-  OS=Linux; _pf_total_mem_kb() { echo $((16 * 1024 * 1024)); }
+  OS=Linux; _pf_host_mem_kb() { echo $((16 * 1024 * 1024)); }
   run _pf_memory; [[ "$output" == *"16 GB"* ]]
   PF_HARD_FAIL=0; _pf_memory >/dev/null 2>&1; [ "$PF_HARD_FAIL" -eq 0 ]
 }
 
 @test "_pf_memory: macOS below floor -> WARN only, never hard fail" {
-  OS=Darwin; _pf_total_mem_kb() { echo $((3 * 1024 * 1024)); }
-  run _pf_memory; [[ "$output" == *"Settings"* ]]
+  OS=Darwin; _pf_host_mem_kb() { echo $((3 * 1024 * 1024)); }
+  run _pf_memory
+  [[ "$output" == *"below the"* ]]
+  [[ "$output" == *"it will OOM"* ]]
+  # The MACHINE is under the floor — no Docker setting fixes that, so this branch
+  # offers no resize remedy (#417); the post-Docker recheck owns the honest
+  # "use a larger machine" stop.
+  [[ "$output" != *"Settings"* ]]
   PF_HARD_FAIL=0; _pf_memory >/dev/null 2>&1; [ "$PF_HARD_FAIL" -eq 0 ]
 }
 
 @test "_pf_memory: 64 MiB grace -> a hair under the floor still passes" {
-  OS=Linux; _pf_total_mem_kb() { echo $(( 5 * 1024 * 1024 - 1000 )); }   # ~5 GB minus a bit
+  OS=Linux; _pf_host_mem_kb() { echo $(( 5 * 1024 * 1024 - 1000 )); }   # ~5 GB minus a bit
   PF_HARD_FAIL=0; _pf_memory >/dev/null 2>&1; [ "$PF_HARD_FAIL" -eq 0 ]
 }
 
 @test "_pf_memory: PF_MIN_MEM_GB override relaxes the floor" {
   OS=Linux; PF_MIN_MEM_GB=2; PF_WARN_MEM_GB=2
-  _pf_total_mem_kb() { echo $((3 * 1024 * 1024)); }   # 3 GB now passes
+  _pf_host_mem_kb() { echo $((3 * 1024 * 1024)); }   # 3 GB now passes
   run _pf_memory; [[ "$output" == *"3 GB"* ]]
   PF_HARD_FAIL=0; _pf_memory >/dev/null 2>&1; [ "$PF_HARD_FAIL" -eq 0 ]
 }
 
 @test "_pf_memory: Linux MemAvailable tight -> extra warn (total fine)" {
-  OS=Linux; _pf_total_mem_kb() { echo $((16 * 1024 * 1024)); }   # total fine
+  OS=Linux; _pf_host_mem_kb() { echo $((16 * 1024 * 1024)); }   # total fine
   _pf_avail_mem_kb() { echo $((2 * 1024 * 1024)); }              # only 2 GB free now
   run _pf_memory; [[ "$output" == *"available right now"* ]]
   PF_HARD_FAIL=0; _pf_memory >/dev/null 2>&1; [ "$PF_HARD_FAIL" -eq 0 ]
+}
+
+# ── memory truth: machine RAM vs Docker's budget (#417) ──────────────────────
+@test "_pf_memory: label is (machine), never flip-flopping to the VM budget (#417)" {
+  OS=Darwin
+  _pf_host_mem_kb()    { echo $((16 * 1024 * 1024)); }   # 16 GB Mac
+  _pf_runtime_mem_kb() { echo $((6 * 1024 * 1024)); }    # Docker VM only 6 GB
+  run _pf_memory
+  [[ "$output" == *"16 GB (machine)"* ]]     # the gate line reports the MACHINE
+  [[ "$output" != *"6 GB (Docker VM)"* ]]    # the old flip-flopped label is gone
+}
+
+@test "_pf_memory: a smaller Docker budget gets its OWN second line (#417)" {
+  OS=Darwin
+  _pf_host_mem_kb()    { echo $((16 * 1024 * 1024)); }
+  _pf_runtime_mem_kb() { echo $((6 * 1024 * 1024)); }
+  run _pf_memory
+  [[ "$output" == *"16 GB (machine)"* ]]
+  [[ "$output" == *"Docker's memory budget: 6 GB"* ]]
+}
+
+@test "_pf_memory: native Linux does NOT duplicate the same number as a budget line (#417)" {
+  OS=Linux
+  # The Linux daemon sees all host RAM, so both readers agree — one line only.
+  _pf_host_mem_kb()    { echo $((16 * 1024 * 1024)); }
+  _pf_runtime_mem_kb() { echo $((16 * 1024 * 1024)); }
+  run _pf_memory
+  [[ "$output" == *"16 GB (machine)"* ]]
+  [[ "$output" != *"Docker's memory budget"* ]]
+}
+
+@test "_pf_memory: host unreadable -> falls back to the VM budget, labelled honestly (#417)" {
+  OS=Darwin
+  _pf_host_mem_kb()    { echo ""; }                      # hw.memsize unreadable
+  _pf_runtime_mem_kb() { echo $((6 * 1024 * 1024)); }
+  run _pf_memory
+  [[ "$output" == *"6 GB (Docker VM)"* ]]                # labelled as the VM, not "machine"
+  [[ "$output" != *"Docker's memory budget"* ]]          # and not also as a second line
+}
+
+@test "_pf_memory: budget advice is clamped to the machine and floored at the minimum (#417/#428)" {
+  OS=Darwin
+  _pf_host_mem_kb()    { echo $((8 * 1024 * 1024)); }    # 8 GB Mac -> cap 8-2 = 6
+  _pf_runtime_mem_kb() { echo $((5 * 1024 * 1024)); }    # 5 GB budget: >= floor, < warn
+  run _pf_memory
+  [[ "$output" == *"Docker's memory budget: 5 GB"* ]]
+  [[ "$output" == *"6 GB"* ]]              # clamped rec, not the raw PF_REC_MEM_GB=16
+  [[ "$output" != *"16 GB"* ]]             # never advise more than the machine has
+}
+
+@test "_pf_runtime_mem_status: Linux hint avoids the Docker Desktop dead end (Bugbot #445)" {
+  OS=Linux
+  _pf_host_mem_kb() { echo $((16 * 1024 * 1024)); }
+  run _pf_runtime_mem_status $((4 * 1024))                # sub-floor budget, in MiB
+  [[ "$output" == *"below the"* ]]
+  [[ "$output" != *"Docker Desktop"* ]]                   # headless boxes have no Desktop UI
+  [[ "$output" == *"VM/cgroup limit"* ]]
+}
+
+@test "_pf_runtime_mem_status: macOS hint names Docker Desktop AND a real colima resize" {
+  OS=Darwin
+  _pf_host_mem_kb() { echo $((16 * 1024 * 1024)); }
+  run _pf_runtime_mem_status $((4 * 1024))
+  [[ "$output" == *"Docker Desktop"* ]]
+  [[ "$output" == *"colima stop && colima start --memory"* ]]
+}
+
+@test "_pf_runtime_mem_status: healthy budget -> ok line, no latch set" {
+  OS=Darwin
+  _pf_host_mem_kb() { echo $((32 * 1024 * 1024)); }
+  PF_RUNTIME_MEM_WARNED=""
+  _pf_runtime_mem_status $((16 * 1024)) >/dev/null
+  [ -z "$PF_RUNTIME_MEM_WARNED" ]          # nothing was warned, so nothing to suppress
+}
+
+# ── Bugbot #445 r2: one threshold, one copy, no dead-end advice ───────────────
+@test "_pf_runtime_mem_status: a machine too small for the floor gets 'larger machine', not a resize (Bugbot #445 r2)" {
+  OS=Darwin
+  _pf_host_mem_kb() { echo $((4 * 1024 * 1024)); }   # 4 GB Mac: 4 − 2 reserve = 2 < 5 floor
+  run _pf_runtime_mem_status $((2 * 1024))
+  [[ "$output" == *"larger machine"* ]]
+  # No "give Docker N GB" dead end, and no concrete size the machine can't provide.
+  [[ "$output" != *"Give Docker"* ]]
+  [[ "$output" != *"colima start --memory"* ]]
+}
+
+@test "_pf_runtime_mem_status: a host that CAN reach the floor still gets the resize remedy" {
+  OS=Darwin
+  _pf_host_mem_kb() { echo $((16 * 1024 * 1024)); }
+  run _pf_runtime_mem_status $((4 * 1024))
+  [[ "$output" == *"Give Docker"* ]]
+  [[ "$output" != *"larger machine"* ]]
+}
+
+@test "_pf_memory + recheck: a budget preflight OK'd is never re-warned by the recheck (Bugbot #445 r2)" {
+  source "${BATS_TEST_DIRNAME}/../lib/preflight.sh"
+  # 8 GB host clamps warn to 8−2=6, so a 6 GB budget is fine. The recheck used to
+  # grade against the RAW PF_WARN_MEM_GB=8 and warn "recommended >= 6 GB" about a
+  # budget the same run had just ticked.
+  OS=Linux
+  _pf_host_mem_kb() { echo $((8 * 1024 * 1024)); }
+  _pf_runtime_mem_kb() { echo $((6 * 1024 * 1024)); }
+  _pf_avail_mem_kb() { echo $((7 * 1024 * 1024)); }
+  error() { printf 'ERR: %s\n' "$*"; exit 1; }
+  PF_RUNTIME_MEM_WARNED=""
+  run _pf_memory
+  [[ "$output" == *"Docker's memory budget: 6 GB"* ]]
+  [[ "$output" != *"recommended ≥"* ]]           # ticked, not warned
+  # Now the recheck, same run: must be silent about the identical budget.
+  PF_RUNTIME_MEM_WARNED=""
+  run _pf_recheck_runtime_mem
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"recommended ≥"* ]]
+  [[ "$output" != *"memory budget"* ]]
+}
+
+@test "_pf_recheck_runtime_mem: healthy budget -> silent, no duplicate tick (#417)" {
+  source "${BATS_TEST_DIRNAME}/../lib/preflight.sh"
+  OS=Darwin
+  _pf_host_mem_kb() { echo $((32 * 1024 * 1024)); }
+  _pf_runtime_mem_kb() { echo $((16 * 1024 * 1024)); }
+  error() { printf 'ERR: %s\n' "$*"; exit 1; }
+  PF_RUNTIME_MEM_WARNED=""
+  run _pf_recheck_runtime_mem
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]                                # quiet_ok: preflight already ticked it
+}
+
+@test "_pf_recheck_runtime_mem: cold install carries the colima/cgroup guidance (Bugbot #445 r2)" {
+  source "${BATS_TEST_DIRNAME}/../lib/preflight.sh"
+  # Docker was DOWN at preflight (the common path), so the latch is unset and the
+  # recheck is the first to speak. It must use the shared copy, not the old text
+  # that had no colima guidance on macOS and no hint at all on Linux.
+  OS=Darwin
+  _pf_host_mem_kb() { echo $((16 * 1024 * 1024)); }
+  _pf_runtime_mem_kb() { echo $((6 * 1024 * 1024)); }
+  error() { printf 'ERR: %s\n' "$*"; exit 1; }
+  PF_RUNTIME_MEM_WARNED=""
+  run _pf_recheck_runtime_mem
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Docker's memory budget: 6 GB"* ]]
+  [[ "$output" == *"colima stop && colima start --memory"* ]]
+}
+
+@test "_pf_recheck_runtime_mem: latch suppresses the DUPLICATE warn (#417)" {
+  source "${BATS_TEST_DIRNAME}/../lib/preflight.sh"
+  OS=Linux; _pf_runtime_mem_kb() { echo $((6 * 1024 * 1024)); }   # between floor and warn
+  error() { printf 'ERR: %s\n' "$*"; exit 1; }
+  PF_RUNTIME_MEM_WARNED=1                   # preflight already reported this budget
+  run _pf_recheck_runtime_mem
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]                          # silent — no second warning for one condition
+}
+
+@test "_pf_recheck_runtime_mem: the latch must NEVER gate the sub-floor HARD FAIL (#417/#513)" {
+  source "${BATS_TEST_DIRNAME}/../lib/preflight.sh"
+  OS=Darwin
+  _pf_runtime_mem_kb() { echo $((4 * 1024 * 1024)); }   # 4 GB VM < 5 GB floor
+  _pf_host_mem_gb() { echo 16; }                        # ample host: the resize path
+  error() { printf 'ERR: %s\n' "$*"; exit 1; }
+  PF_RUNTIME_MEM_WARNED=1                   # latch set — must not buy a pass
+  run _pf_recheck_runtime_mem
+  [ "$status" -ne 0 ]                       # still hard-fails: the floor is enforced
+  [[ "$output" == *"below the"* ]]
 }
 
 @test "_pf_cpu: too few cores -> warn" {
@@ -289,19 +471,16 @@ setup() {
   PF_HARD_FAIL=0; _pf_cpu >/dev/null; [ "$PF_HARD_FAIL" -eq 0 ]   # CPU never hard-fails
 }
 
-# ── selectors: container-runtime view preferred, host fallback ───────────────
-@test "_pf_total_mem_kb: prefers runtime view over host (the Mac trap)" {
-  source "${BATS_TEST_DIRNAME}/../lib/preflight.sh"   # restore the real selectors
-  _pf_runtime_mem_kb() { echo $((4 * 1024 * 1024)); }    # Docker VM = 4 GB
-  _pf_host_mem_kb()    { echo $((36 * 1024 * 1024)); }   # host = 36 GB
-  run _pf_total_mem_kb; [ "$output" -eq $((4 * 1024 * 1024)) ]
-}
-
-@test "_pf_total_mem_kb: falls back to host when runtime empty" {
-  source "${BATS_TEST_DIRNAME}/../lib/preflight.sh"
-  _pf_runtime_mem_kb() { echo ""; }
-  _pf_host_mem_kb()    { echo $((8 * 1024 * 1024)); }
-  run _pf_total_mem_kb; [ "$output" -eq $((8 * 1024 * 1024)) ]
+# ── selectors ────────────────────────────────────────────────────────────────
+# There is deliberately no "prefer the runtime" MEMORY selector any more (#417).
+# The two tests that used to live here asserted exactly the bug — one was even
+# named "the Mac trap" — so they were removed with the selector: memory has two
+# distinct truths and each caller names the one it means. Guard that it stays gone.
+@test "no _pf_total_mem_kb memory selector: the two truths stay separate (#417)" {
+  f="$BATS_TEST_DIRNAME/../lib/preflight.sh"
+  ! grep -qE '^_pf_total_mem_kb\(\)' "$f"
+  # _pf_memory and the hardware summary must read the HOST reader, not a selector.
+  grep -qE '_pf_host_mem_kb' "$f"
 }
 
 @test "_pf_ncpu: prefers runtime, falls back to host" {
@@ -334,7 +513,7 @@ setup() {
   error() { printf 'ERR: %s\n' "$*"; exit 1; }
   run _pf_recheck_runtime_mem
   [ "$status" -eq 0 ]
-  [[ "$output" == *"Docker is running with 6 GB"* ]]
+  [[ "$output" == *"Docker's memory budget: 6 GB"* ]]   # the ONE shared copy (#417)
 }
 @test "_pf_recheck_runtime_mem: VM at the documented floor (guest a bit under) -> warn, NOT hard fail (#513 reviewer)" {
   source "${BATS_TEST_DIRNAME}/../lib/preflight.sh"
@@ -346,7 +525,7 @@ setup() {
   error() { printf 'ERR: %s\n' "$*"; exit 1; }
   run _pf_recheck_runtime_mem
   [ "$status" -eq 0 ]                                   # grace covers guest overhead -> no hard fail
-  [[ "$output" == *"Docker is running with"* ]]         # warns instead
+  [[ "$output" == *"Docker's memory budget"* ]]          # warns instead, shared copy
   [[ "$output" != *"below the"* ]]                      # not the hard-fail message
 }
 @test "_pf_recheck_runtime_mem: host too small -> 'use a larger machine', not a resize loop (#428 Bugbot)" {
@@ -435,7 +614,7 @@ setup() {
   source "${BATS_TEST_DIRNAME}/../lib/preflight.sh"
   OS="$(uname -s)"
   run _pf_ncpu;         [[ "$output" =~ ^[0-9]+$ ]]
-  run _pf_total_mem_kb; [[ "$output" =~ ^[0-9]+$ ]]
+  run _pf_host_mem_kb; [[ "$output" =~ ^[0-9]+$ ]]
   run _pf_free_kb /;    [[ "$output" =~ ^[0-9]+$ ]]
 }
 
@@ -538,7 +717,7 @@ setup() {
 @test "_pf_hw_summary_line: one line 'arch · N CPU cores · N GB memory · N GB free disk'" {
   ARCH=arm64; OS=Darwin
   _pf_ncpu() { echo 6; }
-  _pf_total_mem_kb() { echo $((11 * 1024 * 1024)); }
+  _pf_host_mem_kb() { echo $((11 * 1024 * 1024)); }
   _pf_free_kb() { echo $((419 * 1024 * 1024)); }
   run _pf_hw_summary_line
   [ "$status" -eq 0 ]
@@ -560,7 +739,7 @@ setup() {
 @test "run_preflight: healthy -> collapsed step-a view, per-check ✔ lines folded away" {
   ARCH=arm64; OS=Darwin
   _pf_ncpu() { echo 6; }
-  _pf_total_mem_kb() { echo $((11 * 1024 * 1024)); }
+  _pf_host_mem_kb() { echo $((11 * 1024 * 1024)); }
   _pf_free_kb() { echo $((419 * 1024 * 1024)); }
   _pf_fstype() { echo apfs; }
   _pf_probe_url() { echo ok; }
@@ -688,4 +867,301 @@ setup() {
   f="$BATS_TEST_DIRNAME/../lib/preflight.sh"
   grep -qE 'colima stop && colima start --memory' "$f"
   ! grep -qE 'COLIMA_MEMORY=[^ ]* colima stop' "$f"
+}
+
+@test "_pf_runtime_mem_status: sub-floor remedy quotes the SAME size the recheck hard-fails with (Bugbot #445 r3)" {
+  # Sub-floor is the one condition where _pf_recheck_runtime_mem ALSO hard-fails
+  # (the latch suppresses a duplicate warning, never the hard-fail), so a warm
+  # sub-floor install printed "Give Docker <rec>" then "raise to <warn>" — two
+  # sizes for one problem, the diverging-copy bug this change removes.
+  OS=Darwin
+  _pf_host_mem_kb() { echo $((32 * 1024 * 1024)); }   # big host: no host-too-small branch
+  local warn_eff
+  warn_eff="$(_pf_clamp_mem_gb "$PF_WARN_MEM_GB")"
+  run _pf_runtime_mem_status $((3 * 1024))
+  [[ "$output" == *"below the"* ]] || return 1
+  [[ "$output" == *"Give Docker ${warn_eff} GB"* ]] || return 1
+  [[ "$output" == *"--memory ${warn_eff}"* ]] || return 1
+  # the recommendation figure must NOT appear as the remedy on this path
+  [[ "$output" != *"Give Docker $(_pf_clamp_mem_gb "$PF_REC_MEM_GB") GB"* ]] || return 1
+}
+
+@test "_pf_runtime_mem_status: a VM set to the documented floor is not displayed as sub-floor (Bugbot #445 r3)" {
+  # A VM asked for N GB reports a few hundred MiB less as MemTotal, so plain
+  # mib/1024 showed a floor-sized VM one GB BELOW the floor — graded correctly by
+  # the grace-aware thresholds, but displayed as a contradiction.
+  OS=Darwin
+  _pf_host_mem_kb() { echo $((32 * 1024 * 1024)); }
+  run _pf_runtime_mem_status $(( PF_MIN_MEM_GB * 1024 - 124 ))   # guest shortfall
+  [[ "$output" == *"budget: ${PF_MIN_MEM_GB} GB"* ]] || return 1
+  [[ "$output" != *"budget: $(( PF_MIN_MEM_GB - 1 )) GB"* ]] || return 1
+  [[ "$output" != *"below the"* ]] || return 1        # grace-aware grading must not call it sub-floor
+}
+
+@test "_pf_memory: a host too small for floor+reserve is never called 'enough to run' (Bugbot #445 r3)" {
+  # _pf_memory compared host RAM straight against the Docker floor, so a 5-6 GB
+  # Mac was graded "enough to run" while the budget line two lines later correctly
+  # said "use a larger machine" — one preflight, two verdicts. Both now read the
+  # same shared predicate.
+  OS=Darwin
+  _pf_host_mem_kb() { echo $((6 * 1024 * 1024)); }   # 6 GB: 6 - 2 reserve < 5 floor
+  _pf_runtime_mem_kb() { echo ""; }                  # no VM line, isolate the machine line
+  run _pf_memory
+  [[ "$output" != *"enough to run"* ]] || return 1
+  [[ "$output" == *"larger machine"* ]] || return 1
+}
+
+@test "_pf_host_too_small_for_floor: one predicate, and it fails safe on junk input (Bugbot #445 r3)" {
+  _pf_host_too_small_for_floor 6 || return 1            # 6 - 2 < 5  -> too small
+  _pf_host_too_small_for_floor 5 || return 1
+  ! _pf_host_too_small_for_floor 8 || return 1          # 8 - 2 >= 5 -> fine
+  ! _pf_host_too_small_for_floor 16 || return 1
+  ! _pf_host_too_small_for_floor "" || return 1         # unknown must NOT claim too-small
+  ! _pf_host_too_small_for_floor "unknown" || return 1
+  ! _pf_host_too_small_for_floor 0 || return 1
+}
+
+@test "_pf_runtime_mem_status: the shown figure never contradicts its own grade at the WARN boundary" {
+  # Grace on the DISPLAY alone reopened the r3 contradiction one boundary up: every
+  # budget in [warn*1024 - grace, warn*1024) printed "budget: 8 GB — recommended
+  # ≥ 8 GB". Docker Desktop's own defaults land in that ~512 MiB band. Both
+  # thresholds now pivot on the grace, so shown == target implies the ✔ branch.
+  OS=Darwin
+  _pf_host_mem_kb() { echo $((32 * 1024 * 1024)); }   # warn_eff = 8, unclamped
+  local m
+  for m in 7680 8000 8191 8192; do
+    run _pf_runtime_mem_status "$m"
+    [[ "$output" == *"budget: 8 GB"* ]] || return 1
+    [[ "$output" != *"recommended ≥ 8 GB"* ]] || return 1   # would be self-contradictory
+  done
+  # Genuinely below the target still says so, with a figure that matches the grade.
+  run _pf_runtime_mem_status 7000
+  [[ "$output" == *"budget: 7 GB"* ]] || return 1
+  [[ "$output" == *"recommended ≥ 8 GB"* ]] || return 1
+}
+
+@test "_pf_memory: an unreadable host must not let the VM budget be graded as host RAM (Bugbot #445 r4)" {
+  # When host RAM is unreadable _pf_memory falls back to the VM budget and sets
+  # label="Docker VM". Passing that figure to the host-too-small predicate would
+  # call a large machine too small and drop the resize remedy.
+  OS=Darwin
+  _pf_host_mem_kb() { echo ""; }                     # unreadable host
+  _pf_runtime_mem_kb() { echo $((6 * 1024 * 1024)); } # 6 GB VM budget
+  run _pf_memory
+  [[ "$output" != *"larger machine"* ]]
+  [[ "$output" == *"Docker VM"* ]]
+}
+
+@test "_pf_runtime_mem_status: a VM at exactly the warn target is not told to reach it (Bugbot #445 r4)" {
+  # Grading and display must come from the SAME grace-adjusted figure, or a VM
+  # configured at the warn target prints "budget: N GB — recommended >= N GB".
+  OS=Darwin
+  _pf_host_mem_kb() { echo $((32 * 1024 * 1024)); }
+  local warn_eff
+  warn_eff="$(_pf_clamp_mem_gb "$PF_WARN_MEM_GB")"
+  run _pf_runtime_mem_status $(( warn_eff * 1024 - 124 ))
+  [[ "$output" != *"recommended ≥ ${warn_eff} GB"* ]]
+  [[ "$output" == *"budget: ${warn_eff} GB"* ]]
+}
+
+@test "_pf_memory: a floor-sized VM is never told it is below the floor it meets (Bugbot #445 r5)" {
+  # The shown GB is grace-adjusted; the gate must use the SAME tolerance or a
+  # 5 GB VM reporting ~4900 MiB prints "Memory: 5 GB — below the 5 GB the client
+  # needs". High severity because on Linux that path hard-fails.
+  OS=Linux
+  _pf_host_mem_kb() { echo $(( (PF_MIN_MEM_GB * 1024 - 124) * 1024 )); }
+  _pf_runtime_mem_kb() { echo ""; }
+  _pf_avail_mem_kb() { echo $(( 8 * 1024 * 1024 )); }   # plenty free: isolate the total line
+  run _pf_memory
+  [[ "$output" == *"${PF_MIN_MEM_GB} GB (machine)"* ]]
+  [[ "$output" != *"below the ${PF_MIN_MEM_GB} GB"* ]]
+}
+
+@test "_pf_memory + _pf_runtime_mem_status feed the predicate the same host figure (Bugbot #445 r5)" {
+  # A shared predicate only helps if both call sites give it the same input:
+  # _pf_memory passed a grace-adjusted VM-or-host figure while the status path
+  # passed _pf_host_mem_gb, so the two could still disagree.
+  grep -qE '_pf_host_too_small_for_floor "\$\(_pf_host_mem_gb\)"' "$BATS_TEST_DIRNAME/../lib/preflight.sh"
+  ! grep -qE '_pf_host_too_small_for_floor "\$gb"' "$BATS_TEST_DIRNAME/../lib/preflight.sh"
+}
+
+@test "memory GB is rendered through ONE converter, so no two lines can disagree (Bugbot #445 r6)" {
+  # Six review rounds each found another pair of render/grade sites disagreeing.
+  # This pins the structural fix rather than the symptom: every configured-size
+  # display goes through _pf_display_gb_from_mib. MemAvailable and disk stay raw
+  # (live measurements / not memory), and _pf_host_mem_gb stays raw because it
+  # reports physical RAM and is what the too-small predicate grades.
+  f="$BATS_TEST_DIRNAME/../lib/preflight.sh"
+  grep -qE '^_pf_display_gb_from_mib\(\)' "$f"
+  for v in 'rt_gb' 'mem_gb'; do
+    ! grep -qE "^\s*.*${v}=\\\$\(\( .*1024 / 1024" "$f"
+  done
+  # _pf_hw_summary_line must not compute its own memory GB
+  ! grep -qE 'mem_gb=\$\(\( mem_kb / 1024 / 1024 \)\)' "$f"
+}
+
+@test "_pf_hw_summary_line agrees with the memory line on the same host (Bugbot #445 r6)" {
+  OS=Linux
+  _pf_host_mem_kb() { echo $(( (PF_MIN_MEM_GB * 1024 - 124) * 1024 )); }   # just under a round GB
+  _pf_runtime_mem_kb() { echo ""; }
+  _pf_avail_mem_kb() { echo $(( 8 * 1024 * 1024 )); }
+  run _pf_memory
+  local mem_line="$output"
+  run _pf_hw_summary_line
+  # both must name the same figure
+  [[ "$mem_line" == *"${PF_MIN_MEM_GB} GB"* ]]
+  [[ "$output" == *"${PF_MIN_MEM_GB} GB memory"* ]]
+}
+
+@test "_pf_recheck_runtime_mem: host-too-small applies on Linux too, matching preflight (Bugbot #445 r7)" {
+  # The status line applied the predicate on every OS while the hard-fail gated it
+  # OS != Linux, so a warm Linux install with a sub-floor budget was told "use a
+  # larger machine" and then advised to raise Docker to a size the machine cannot
+  # give.
+  OS=Linux
+  _pf_host_mem_gb() { echo $(( PF_MIN_MEM_GB + PF_OS_RESERVE_GB - 1 )); }   # too small
+  _pf_runtime_mem_kb() { echo $(( 3 * 1024 * 1024 )); }                     # sub-floor budget
+  PF_RUNTIME_MEM_WARNED=1
+  run _pf_recheck_runtime_mem
+  [[ "$output" == *"larger machine"* ]]
+  [[ "$output" != *"Free memory (or raise the VM) to"* ]]   # the impossible remedy
+}
+
+@test "_pf_recheck_runtime_mem uses the shared too-small predicate, not inlined arithmetic (Bugbot #445 r7)" {
+  f="$BATS_TEST_DIRNAME/../lib/preflight.sh"
+  # the reserve arithmetic must exist in exactly one place: the predicate itself
+  [ "$(grep -cE 'PF_OS_RESERVE_GB \)\) -lt PF_MIN_MEM_GB|- PF_OS_RESERVE_GB < PF_MIN_MEM_GB' "$f")" -le 1 ]
+  grep -qE '_pf_host_too_small_for_floor "\$phys_gb"' "$f"
+}
+
+# ── network profile (#582) ───────────────────────────────────────────────────
+@test "_pf_proxy_hostport: strips scheme and user:pass credentials (PII)" {
+  run _pf_proxy_hostport "http://user:pass@proxy.corp:8080/path"
+  [ "$output" = "proxy.corp:8080" ]
+  [[ "$output" != *"user"* ]]
+}
+
+@test "_pf_env_proxy: HTTPS_PROXY wins and credentials are stripped" {
+  HTTP_PROXY="http://h:1"; HTTPS_PROXY="http://user:secret@sproxy.corp:3128"
+  run _pf_env_proxy
+  [ "$output" = "sproxy.corp:3128" ]
+  [[ "$output" != *"secret"* ]]
+}
+
+@test "_pf_env_proxy: empty when no proxy env is set" {
+  unset HTTP_PROXY HTTPS_PROXY http_proxy https_proxy
+  run _pf_env_proxy
+  [ -z "$output" ]
+}
+
+@test "_pf_env_ca_bundle: readable CA file returned, empty when unset" {
+  ca="$BATS_TEST_TMPDIR/ca.pem"; echo x > "$ca"
+  TRACEBLOC_CA_BUNDLE="$ca"
+  run _pf_env_ca_bundle
+  [ "$output" = "$ca" ]
+  unset TRACEBLOC_CA_BUNDLE CURL_CA_BUNDLE
+  run _pf_env_ca_bundle
+  [ -z "$output" ]
+}
+
+@test "_pf_issuer_is_public: public CA yes, corporate re-signer no" {
+  run _pf_issuer_is_public "CN=DigiCert Global G2,O=DigiCert Inc"
+  [ "$status" -eq 0 ]
+  run _pf_issuer_is_public "CN=Acme Corp Proxy CA,O=Acme Corp"
+  [ "$status" -ne 0 ]
+}
+
+@test "_pf_network_profile: direct (no proxy, no inspection) is silent" {
+  unset HTTP_PROXY HTTPS_PROXY http_proxy https_proxy TRACEBLOC_CA_BUNDLE CURL_CA_BUNDLE
+  _pf_detect_tls_inspection() { echo "no"; }
+  run _pf_network_profile
+  [ -z "$output" ]
+}
+
+@test "_pf_network_profile: proxy + inspection -> one plain-language line, no creds" {
+  unset TRACEBLOC_CA_BUNDLE CURL_CA_BUNDLE
+  HTTPS_PROXY="http://u:p@proxy.corp:8080"
+  _pf_detect_tls_inspection() { echo "yes"; }
+  run _pf_network_profile
+  [[ "$output" == *"corporate proxy detected (proxy.corp:8080)"* ]]
+  [[ "$output" == *"TLS inspection detected"* ]]
+  [[ "$output" != *"u:p"* ]]
+}
+
+@test "_pf_network_profile: a configured CA bundle is announced" {
+  ca="$BATS_TEST_TMPDIR/ca.pem"; echo x > "$ca"
+  HTTPS_PROXY="http://proxy.corp:8080"; TRACEBLOC_CA_BUNDLE="$ca"
+  _pf_detect_tls_inspection() { echo "yes"; }
+  run _pf_network_profile
+  [[ "$output" == *"your company's certificate is configured"* ]]
+}
+
+@test "_pf_detect_tls_inspection: unknown when openssl is unavailable (never hangs)" {
+  # Source fresh so we exercise the REAL probe, not setup()'s hermetic stub.
+  run bash -c '
+    source "'"$BATS_TEST_DIRNAME"'/../lib/common.sh" 2>/dev/null || true
+    source "'"$BATS_TEST_DIRNAME"'/../lib/preflight.sh"
+    has() { [[ "$1" != "openssl" ]]; }   # openssl absent
+    _pf_detect_tls_inspection
+  '
+  [ "$output" = "unknown" ]
+}
+
+@test "_pf_urldecode: percent-decodes (parity with PS UnescapeDataString)" {
+  run _pf_urldecode "p%40ss%3Aword"
+  [ "$output" = "p@ss:word" ]
+}
+
+@test "_pf_env_proxy_raw: preserves credentials (probe connection only, never displayed)" {
+  HTTPS_PROXY="http://user:secret@px.corp:3128"
+  run _pf_env_proxy_raw
+  [ "$output" = "http://user:secret@px.corp:3128" ]
+  # display path still strips (the two must not be confused)
+  run _pf_env_proxy
+  [ "$output" = "px.corp:3128" ]
+}
+
+@test "_pf_detect_tls_inspection: auth proxy -> creds to openssl via env:, never argv (Bugbot)" {
+  # An authenticated proxy needs credentials on the CONNECT, else it 407s and
+  # inspection reads as a false 'unknown'. The password must travel via env: (openssl
+  # reads $_TB_PROXY_PASS), NEVER argv/ps. Sourced fresh to exercise the real probe.
+  cap="$BATS_TEST_TMPDIR/args"
+  run bash -c '
+    source "'"$BATS_TEST_DIRNAME"'/../lib/common.sh" 2>/dev/null || true
+    source "'"$BATS_TEST_DIRNAME"'/../lib/preflight.sh"
+    export HTTPS_PROXY="http://user:secret@px.corp:3128"
+    has() { return 0; }
+    _bounded() { shift; "$@"; }
+    openssl() {
+      if [[ "$1" == "s_client" && "$*" == *"-help"* ]]; then echo " -proxy_user val"; return 0; fi
+      if [[ "$1" == "s_client" ]]; then printf "%s\n" "$@" > "'"$cap"'"; echo "-----BEGIN CERTIFICATE-----"; return 0; fi
+      if [[ "$1" == "x509" ]]; then echo "issuer=CN=Acme Corp Proxy CA"; return 0; fi
+    }
+    _pf_detect_tls_inspection
+  '
+  [ "$output" = "yes" ]                          # Acme = corporate re-signer
+  grep -q -- '-proxy_user' "$cap"                # username passed to the connect
+  grep -q 'env:_TB_PROXY_PASS' "$cap"            # password by env reference, not literal
+  ! grep -q 'secret' "$cap"                      # password NEVER in openssl argv
+  [[ "$output" != *"secret"* ]]                  # nor in the result
+}
+
+@test "_pf_detect_tls_inspection: username-only proxy doesn't reuse the username as password (Bugbot)" {
+  cap="$BATS_TEST_TMPDIR/args-uo"
+  run bash -c '
+    source "'"$BATS_TEST_DIRNAME"'/../lib/common.sh" 2>/dev/null || true
+    source "'"$BATS_TEST_DIRNAME"'/../lib/preflight.sh"
+    export HTTPS_PROXY="http://onlyuser@px.corp:3128"
+    has() { return 0; }
+    _bounded() { shift; "$@"; }
+    openssl() {
+      if [[ "$1" == "s_client" && "$*" == *"-help"* ]]; then echo " -proxy_user val"; return 0; fi
+      if [[ "$1" == "s_client" ]]; then printf "%s\n" "$@" > "'"$cap"'"; echo "-----BEGIN CERTIFICATE-----"; return 0; fi
+      if [[ "$1" == "x509" ]]; then echo "issuer=CN=Acme"; return 0; fi
+    }
+    _pf_detect_tls_inspection
+  '
+  grep -q -- '-proxy_user' "$cap"
+  # username must appear exactly once (as -proxy_user), never reused as the password
+  [ "$(grep -c 'onlyuser' "$cap")" -eq 1 ]
 }

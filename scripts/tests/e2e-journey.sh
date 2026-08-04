@@ -43,12 +43,10 @@ set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 LIB="$HERE/../lib"
 
-# Isolated cluster name so we never touch a real 'tracebloc' cluster; opt out of
-# autostart so we don't reconfigure docker.service / restart policies on the host
-# (identical isolation posture to e2e-cluster.sh).
-export USER="${USER:-$(id -un)}"
-export CLUSTER_NAME="${CLUSTER_NAME:-tbe2e-journey}"
-export TRACEBLOC_NO_AUTOSTART=1
+# Shared bring-up contract (isolation env + tool-install prereqs).
+# shellcheck source=/dev/null
+source "$HERE/lib/e2e-common.sh"
+e2e_isolate_env tbe2e-journey
 
 TB_NAMESPACE="${TB_NAMESPACE:-tracebloc}"
 # Cosmetic stand-ins for the chart's real values — discovery keys off the LABELS
@@ -117,11 +115,7 @@ echo "  install → CLI → cluster info (fresh shell) → dataset push --dry-ru
 echo "═══════════════════════════════════════════════════════════════════════"
 
 # ── Step 1: bring the cluster up via the installer's real path ───────────────
-has docker || error "Docker is not available on this host."
-umask 022
-install_kubectl
-install_k3d
-install_helm
+e2e_install_prereqs
 
 echo ""
 echo "── Step 1: create_cluster() — the installer's real cluster-bring-up ─────"

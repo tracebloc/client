@@ -7,6 +7,8 @@ on:
       - 'client/**'
       - 'ingestor/**'
       - 'scripts/tests/e2e-auto-upgrade.sh'
+      - 'scripts/tests/e2e-seal-check.sh'
+      - 'scripts/lib/**'
       - '.github/workflows/helm-ci.yaml'
   pull_request:
     branches: [main, develop, openshift]
@@ -14,6 +16,8 @@ on:
       - 'client/**'
       - 'ingestor/**'
       - 'scripts/tests/e2e-auto-upgrade.sh'
+      - 'scripts/tests/e2e-seal-check.sh'
+      - 'scripts/lib/**'
       - '.github/workflows/helm-ci.yaml'
 
 concurrency:
@@ -61,6 +65,12 @@ jobs:
     strategy:
       matrix:
         platform: [aks, bm, eks, oc]
+    env:
+      # Pinned by version AND digest. To bump, change both together, taking the
+      # digest from the upstream `CHECKSUMS` release asset:
+      #   https://github.com/yannh/kubeconform/releases/download/v<version>/CHECKSUMS
+      KUBECONFORM_VERSION: "0.8.0"
+      KUBECONFORM_SHA256: "9bc2bffbf71f261128533edaf912153948b7ff238f9a531ae6d34466ec287883"
     steps:
       - uses: actions/checkout@v4
 
@@ -76,10 +86,39 @@ jobs:
             > /tmp/rendered-${{ matrix.platform }}.yaml
           echo "Rendered $(wc -l < /tmp/rendered-${{ matrix.platform }}.yaml) lines"
 
-      - name: Install kubeconform
+      - name: Install kubeconform (version + digest pinned)
+        # Was `curl .../releases/latest/... | tar xz -C /usr/local/bin`, which
+        # had two problems. `releases/latest` is a mutable pointer, so a new
+        # upstream release silently changed the binary this job executed; and
+        # piping straight into tar means the bytes are extracted before anything
+        # can inspect them, so there was no point at which a digest could be
+        # checked. Download to a file, verify against the pinned digest, and only
+        # then install.
         run: |
-          curl -sSL https://github.com/yannh/kubeconform/releases/latest/download/kubeconform-linux-amd64.tar.gz \
-            | tar xz -C /usr/local/bin
+          set -euo pipefail
+          # Assert the digest is a full SHA-256 before trusting it. `sha256sum -c`
+          # reports a malformed line as "no properly formatted checksum lines
+          # found", and whether that is a non-zero exit depends on the coreutils
+          # build (GNU exits 1; the macOS sha256sum exits 0). An empty or
+          # truncated env var must be a hard failure here, not a verification
+          # that quietly checks nothing and lets the install proceed.
+          if [[ ! "${KUBECONFORM_SHA256}" =~ ^[0-9a-f]{64}$ ]]; then
+            echo "::error::KUBECONFORM_SHA256 is not a 64-character hex SHA-256 digest."
+            exit 1
+          fi
+          TARBALL="kubeconform-linux-amd64.tar.gz"
+          URL="https://github.com/yannh/kubeconform/releases/download/v${KUBECONFORM_VERSION}/${TARBALL}"
+          # -f so an HTTP error is a curl failure rather than an error page
+          # written to disk and handed to sha256sum. --connect-timeout/--max-time
+          # bound the download so a stalled endpoint fails the step fast instead of
+          # hanging the template matrix to the GitHub Actions cap (backend#1497).
+          curl -fsSL --retry 3 --retry-delay 2 --connect-timeout 15 --max-time 120 -o "$RUNNER_TEMP/$TARBALL" "$URL"
+          # Any mismatch exits non-zero here, and `set -e` fails the step before
+          # the binary is extracted or placed on PATH.
+          echo "${KUBECONFORM_SHA256}  $RUNNER_TEMP/$TARBALL" | sha256sum -c -
+          tar -xzf "$RUNNER_TEMP/$TARBALL" -C "$RUNNER_TEMP" kubeconform
+          install -m 0755 "$RUNNER_TEMP/kubeconform" /usr/local/bin/kubeconform
+          kubeconform -v
 
       - name: Validate Kubernetes manifests
         run: |
@@ -199,6 +238,25 @@ jobs:
       - uses: actions/checkout@v4
       - name: Upgrade from last published release through both flag paths
         run: bash scripts/tests/e2e-auto-upgrade.sh
+
+  seal-check-e2e:
+    # 30m to match the sibling k3d job (upgrade-e2e): the script's own bounds
+    # (create_cluster up to 15m + helm test 360s + tool install + install)
+    # can exceed a 20m GHA cap on a slow cluster bring-up and false-fail even
+    # while every component is still inside its own timeout (Bugbot).
+    timeout-minutes: 30
+    # RFC-0003 D12 (backend#1184): run the egress-enforcement seal-check LIVE on
+    # a real k3d cluster with the lockdown engaged, closing the SEAL-CHECK §8.4
+    # "full-chart probe run pending" gap (the k3s netpol substrate was verified
+    # in #504). Zero secrets — a public curl image vs 1.1.1.1; no private images,
+    # no backend. Proves the probe fires and the CNI actually blocks a
+    # training-labelled pod's egress once allowExternalHttps=false.
+    name: Seal-check egress-enforcement (k3d)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run the live egress-enforcement seal-check
+        run: bash scripts/tests/e2e-seal-check.sh
 
   # Installer script tests (bats + Pester) + the cross-distro prerequisite matrix
   # live in their own workflow: .github/workflows/installer-tests.yaml

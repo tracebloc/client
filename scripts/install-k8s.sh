@@ -19,7 +19,7 @@
 #                                not prompted — the client is identified by its credentials)
 #    SERVERS=1                   default: 1  (control-plane nodes)
 #    AGENTS=1                    default: 1  (worker nodes)
-#    K8S_VERSION=v1.29.4-k3s1   default: latest stable k3s
+#    K8S_VERSION=v1.29.4-k3s1   default: v1.29.4-k3s1 (pinned + validated; "latest" is UNSUPPORTED — see #547)
 #    K3D_VERSION=v5.9.0          default: v5.9.0  (k3d release tag; "latest" resolves at install time)
 #    HOST_DATA_DIR=~/.tracebloc  default: ~/.tracebloc
 #    TB_STORAGE_MODE=node-local  default: hostpath  (RFC-0003 Option C, flag-gated)
@@ -229,8 +229,13 @@ main() {
   # ── c) Create your secure environment ────────────────────────────────────
   step_header c "Creating your secure environment"
   create_cluster
-  deploy_gpu_device_plugin
-  verify_gpu
+  # Only verify the GPU on the node when the device plugin actually deployed; a
+  # failed/CPU-mode deploy returns non-zero, so skipping verify avoids a ~90s wait
+  # and a contradictory "still initializing" warning for a plugin never applied
+  # (Bugbot). The `if` also keeps a non-zero deploy from tripping set -e.
+  if deploy_gpu_device_plugin; then
+    verify_gpu
+  fi
   echo ""; echo ""
 
   # ── d) Register this machine ─────────────────────────────────────────────

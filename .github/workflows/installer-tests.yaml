@@ -66,12 +66,12 @@ jobs:
           # common.sh and consumed in other sourced files. Warnings are printed
           # below for visibility but don't fail the gate.
           shellcheck --severity=error --shell=bash \
-            scripts/install.sh scripts/install-k8s.sh scripts/gen-manifest.sh scripts/check-style.sh scripts/resolve-ingestor-digest.sh scripts/lib/*.sh \
-            scripts/tests/check-drift.sh scripts/tests/distro-prereqs.sh scripts/tests/e2e-auto-upgrade.sh scripts/tests/e2e-cluster.sh scripts/tests/e2e-journey.sh scripts/tests/e2e-proxy.sh scripts/tests/path-persist.sh
+            scripts/install.sh scripts/install-k8s.sh scripts/gen-manifest.sh scripts/check-facts.sh scripts/check-style.sh scripts/resolve-ingestor-digest.sh scripts/lib/*.sh \
+            scripts/tests/check-drift.sh scripts/tests/distro-prereqs.sh scripts/tests/e2e-auto-upgrade.sh scripts/tests/e2e-seal-check.sh scripts/tests/e2e-cluster.sh scripts/tests/e2e-journey.sh scripts/tests/e2e-proxy.sh scripts/tests/lib/e2e-common.sh scripts/tests/path-persist.sh
           echo "── shellcheck warnings (advisory, non-blocking) ──"
           shellcheck --severity=warning --shell=bash \
-            scripts/install.sh scripts/install-k8s.sh scripts/gen-manifest.sh scripts/check-style.sh scripts/resolve-ingestor-digest.sh scripts/lib/*.sh \
-            scripts/tests/check-drift.sh scripts/tests/distro-prereqs.sh scripts/tests/e2e-auto-upgrade.sh scripts/tests/e2e-cluster.sh scripts/tests/e2e-journey.sh scripts/tests/e2e-proxy.sh scripts/tests/path-persist.sh || true
+            scripts/install.sh scripts/install-k8s.sh scripts/gen-manifest.sh scripts/check-facts.sh scripts/check-style.sh scripts/resolve-ingestor-digest.sh scripts/lib/*.sh \
+            scripts/tests/check-drift.sh scripts/tests/distro-prereqs.sh scripts/tests/e2e-auto-upgrade.sh scripts/tests/e2e-seal-check.sh scripts/tests/e2e-cluster.sh scripts/tests/e2e-journey.sh scripts/tests/e2e-proxy.sh scripts/tests/lib/e2e-common.sh scripts/tests/path-persist.sh || true
 
       - name: Installer manifest is current (supply-chain, R8)
         # The bootstrap verifies each sub-script against scripts/manifest.sha256
@@ -82,6 +82,15 @@ jobs:
         run: |
           chmod +x scripts/gen-manifest.sh
           scripts/gen-manifest.sh --check
+
+      - name: Installer facts are single-sourced (#435, RFC D3/D4)
+        # Cross-OS facts (tool version pins) live once in scripts/spec/facts.env and are
+        # stamped into every consumer (bash common.sh, PowerShell install-k8s.ps1). Fail
+        # the PR if a consumer drifted from the spec — so a pin bumped in one OS path but
+        # not the other (the #410 incident) can no longer ship. Fix: check-facts.sh --write.
+        run: |
+          chmod +x scripts/check-facts.sh
+          scripts/check-facts.sh --check
 
       - name: Style + terminology guard
         # Enforces the terminal style system (STYLE.md): no hardcoded brand colour
@@ -95,10 +104,12 @@ jobs:
         run: |
           Set-PSRepository PSGallery -InstallationPolicy Trusted
           Install-Module PSScriptAnalyzer -Force -SkipPublisherCheck -Scope CurrentUser
-          # Both PowerShell entrypoints: the bootstrap (install.ps1, R8 trust root)
-          # and the main installer (install-k8s.ps1).
+          # Both PowerShell entrypoints (the bootstrap install.ps1, R8 trust root, and the
+          # main installer install-k8s.ps1) plus the Windows e2e driver (#436) — the driver
+          # only RUNS on the self-hosted nested-virt runner, but lint it here on every push
+          # so a syntax/verb regression fails fast instead of at the nightly run.
           $issues = @()
-          foreach ($p in 'scripts/install.ps1', 'scripts/install-k8s.ps1') {
+          foreach ($p in 'scripts/install.ps1', 'scripts/install-k8s.ps1', 'scripts/tests/e2e-windows.ps1') {
             $issues += Invoke-ScriptAnalyzer -Path $p -Severity Error,Warning
           }
           if ($issues) { $issues | Format-Table -AutoSize }

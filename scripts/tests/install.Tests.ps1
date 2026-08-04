@@ -149,3 +149,19 @@ Describe "Confirm-ScriptIntegrity — integrity gate before any privileged step"
       Should -Throw -ExpectedMessage "*no entry in manifest*"
   }
 }
+
+Describe "Bootstrap log hygiene: cosign output captured, no internals leaked (#576)" {
+  BeforeAll { $script:BOOTSRC = Get-Content "$PSScriptRoot/../install.ps1" -Raw }
+
+  It "captures cosign output instead of letting PowerShell dump the raw native error + source line" {
+    $script:BOOTSRC | Should -Not -Match '& \$cosign @cosignArgs 2>\$null 1>\$null'
+    $script:BOOTSRC | Should -Match '& \$cosign @cosignArgs 2>&1 \| Out-Null'
+  }
+  It "the verification-failure message carries no internal identifiers (no source, no RFC/manifest codes)" {
+    $script:BOOTSRC | Should -Not -Match 'cosign signature verification FAILED for manifest\.sha256'
+    $script:BOOTSRC | Should -Match "Couldn't confirm the installer download is authentic"
+  }
+  It "still fails closed (throws, stops before changing the machine)" {
+    $script:BOOTSRC | Should -Match 'install stopped before changing anything on your machine'
+  }
+}

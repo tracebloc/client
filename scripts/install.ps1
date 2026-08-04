@@ -356,15 +356,26 @@ function Confirm-ManifestSignature {
   # (fail-open). The sentinel + the catch below make BOTH the won't-launch and the
   # returns-nonzero cases fail closed (parity with install.sh's `if cosign; else`).
   $global:LASTEXITCODE = 255
+  $prevEAP = $ErrorActionPreference
   try {
-    & $cosign @cosignArgs 2>$null 1>$null
+    # Merge cosign's stderr into stdout and discard both. A native tool writing to
+    # stderr otherwise surfaces as a NativeCommandError that dumps THIS script's
+    # source line + internal identifiers into the console / any transcript (#576 —
+    # a client's log exposed `& $cosign @cosignArgs` and our internal codes). Only
+    # a curated message is ever shown. ($ErrorActionPreference=Continue so a native
+    # non-zero doesn't terminate before we check $LASTEXITCODE; #578 will capture
+    # this output to guide users whose network blocks the verification service.)
+    $ErrorActionPreference = 'Continue'
+    & $cosign @cosignArgs 2>&1 | Out-Null
   } catch {
-    throw "cosign could not be executed to verify manifest.sha256 -- refusing to install (RFC-0001 R8): $_"
+    throw "Couldn't run the download-verification step, so the install stopped before changing anything on your machine."
+  } finally {
+    $ErrorActionPreference = $prevEAP
   }
   if ($LASTEXITCODE -ne 0) {
-    throw "cosign signature verification FAILED for manifest.sha256 -- refusing to install (RFC-0001 R8)."
+    throw "Couldn't confirm the installer download is authentic, so the install stopped before changing anything on your machine."
   }
-  Ok "manifest signature verified (cosign keyless)"
+  Ok "Download verified as published by tracebloc."
 }
 
 # Verify each fetched sub-script against the signed manifest. A missing manifest
@@ -415,7 +426,7 @@ function Invoke-Bootstrap {
   }
   New-Item -ItemType Directory -Path $tmpDir | Out-Null
   try {
-    Info "Downloading Tracebloc client installer (ref: $ref)..."
+    Info "Downloading tracebloc client installer (ref: $ref)..."
 
     # ── Fetch the sub-scripts from the immutable tag tree ──
     foreach ($f in $Files) {
@@ -443,7 +454,7 @@ function Invoke-Bootstrap {
 
     # ── Run the verified main installer ──
     $k8s = Join-Path $tmpDir "install-k8s.ps1"
-    Info "Running Tracebloc environment setup..."
+    Info "Running tracebloc environment setup..."
     if ($ChildArgs -and $ChildArgs.Count -gt 0) {
       & powershell.exe -ExecutionPolicy Bypass -File $k8s @ChildArgs
     } else {
@@ -474,7 +485,11 @@ if (-not $env:TB_PESTER) {
   try {
     Invoke-Bootstrap -ChildArgs $args
   } catch {
-    Err "$_"
+    # Clean, branded failure — never a raw stack (#577). "$_" stringifies to the
+    # exception MESSAGE (curated at the throw sites, #576), not the source/stack.
+    Write-Host ""
+    Err "Installation stopped: $_"
+    Write-Host "  It's safe to re-run this installer. If it keeps failing, share the output above with tracebloc support." -ForegroundColor DarkGray
     exit 1
   }
 }

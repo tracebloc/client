@@ -204,8 +204,119 @@ _pf_has_gui_session() {
 
 # Selectors: prefer the runtime view, fall back to the host. The checks (and the
 # bats numeric test) call these names; they always emit exactly one integer.
-_pf_total_mem_kb() { local v; v="$(_pf_runtime_mem_kb)"; [[ -n "$v" ]] && { echo "$v"; return 0; }; _pf_host_mem_kb; }
+#
+# There is deliberately NO _pf_total_mem_kb "prefer the runtime" memory selector
+# (#417): conflating the two numbers made the SAME machine report "16 GB (host)"
+# on a cold run and "6 GB (Docker VM)" on a warm one. Memory has two distinct
+# truths and each caller must name the one it means — _pf_host_mem_kb for a
+# hardware fact, _pf_runtime_mem_kb for the budget the pods actually get.
+# CPU keeps the fallback selector: there is no equivalent advice split.
 _pf_ncpu()         { local v; v="$(_pf_runtime_ncpu)";   [[ -n "$v" ]] && { echo "$v"; return 0; }; _pf_host_ncpu; }
+
+# The ONE copy AND the one grading threshold for the Docker-budget line (#417),
+# used by BOTH _pf_memory (Docker already up on a warm re-run) and the post-Docker
+# recheck. The two used to print diverging text for the identical condition, and
+# because they also compared against DIFFERENT thresholds — the helper against the
+# clamped target, the recheck against the raw PF_WARN_MEM_GB — one run could print
+# "✔ Docker's memory budget: 6 GB" and then "⚠ recommended ≥ 6 GB" about the very
+# same budget (Bugbot #445 r2). Grading lives here only.
+#
+# Takes MiB, not GB, so it uses the SAME PF_VM_MEM_GRACE_MIB tolerance as the
+# recheck: a VM configured to exactly the documented floor reports a few hundred
+# MiB less as guest MemTotal, and rounding that to whole GB first would misgrade it
+# as sub-floor.
+#
+# WARN-ONLY by design; the sub-floor HARD-FAIL stays in _pf_recheck_runtime_mem,
+# the only place the real VM size is known (#428/#513). Sets
+# PF_RUNTIME_MEM_WARNED so one run never warns twice about the same budget — that
+# latch suppresses a duplicate WARNING only and must never gate the hard-fail.
+# Args: the runtime budget in MiB, and optionally "quiet_ok" to suppress the ✔
+# line when the budget is fine — the post-Docker recheck passes it so a healthy
+# install doesn't print the same ✔ twice (preflight already said it on a warm run).
+# True when the MACHINE cannot give Docker the floor while leaving the OS its
+# reserve. No Docker setting fixes that, so both the machine line (_pf_memory) and
+# the budget remedy (_pf_runtime_mem_status) must reach the same verdict from ONE
+# definition — a 5-6 GB host was being graded "enough to run" on one line and told
+# to "use a larger machine" two lines later, in the same preflight (Bugbot #445 r3).
+# Displayed GB for a CONFIGURED memory size, given MiB. ONE definition: this
+# figure is rendered in four places (_pf_memory, _pf_runtime_mem_status,
+# _pf_recheck_runtime_mem, _pf_hw_summary_line) and every review round on this PR
+# found another pair of them disagreeing — most recently a collapsed hardware
+# summary printing a different size from the memory line in the same preflight
+# (Bugbot #445 r6).
+#
+# The grace compensates for a guest reporting MemTotal a few hundred MiB below the
+# size it was configured with, so it belongs on anything claiming "this is how much
+# memory X has". It deliberately does NOT belong on live measurements
+# (MemAvailable) — inflating those would hide a real shortage — nor on
+# _pf_host_mem_gb, which reports physical RAM needing no compensation and is the
+# input _pf_host_too_small_for_floor grades.
+_pf_display_gb_from_mib() {
+  echo $(( ( ${1:-0} + PF_VM_MEM_GRACE_MIB ) / 1024 ))
+}
+
+_pf_host_too_small_for_floor() {
+  local host_gb="${1:-}"
+  [[ "$host_gb" =~ ^[0-9]+$ ]] || return 1
+  (( host_gb > 0 )) || return 1
+  (( host_gb - PF_OS_RESERVE_GB < PF_MIN_MEM_GB ))
+}
+
+_pf_runtime_mem_status() {
+  local rt_mib="$1" quiet_ok="${2:-}" rt_gb warn_eff rec_eff host_gb target_gb
+  # Report the CONFIGURED size, not the guest-visible one. A VM asked for N GB
+  # reports a few hundred MiB less as MemTotal (kernel + firmware reservations),
+  # so plain rt_mib/1024 showed a VM set to exactly the documented floor as one
+  # GB BELOW it — graded correctly by the grace-aware thresholds below, but
+  # displayed as if sub-floor, which reads as a contradiction. Adding the same
+  # grace before the division recovers the configured figure. Mirrors the
+  # PowerShell peer's (mib + grace) / 1024 (Bugbot #445 r3).
+  rt_gb="$(_pf_display_gb_from_mib "$rt_mib")"
+  warn_eff="$(_pf_clamp_mem_gb "$PF_WARN_MEM_GB")"
+  rec_eff="$(_pf_clamp_mem_gb "$PF_REC_MEM_GB")"
+  if (( rt_mib < PF_MIN_MEM_GB * 1024 - PF_VM_MEM_GRACE_MIB )); then
+    warn "Docker's memory budget: ${rt_gb} GB — below the ${PF_MIN_MEM_GB} GB the client needs; it will OOM."
+    # Sub-floor is the ONE condition where _pf_recheck_runtime_mem also hard-fails
+    # (the latch suppresses a duplicate warning, never the hard-fail), so this
+    # remedy has to quote the SAME size that failure quotes or one install prints
+    # two different targets for one problem — the diverging-copy bug this change
+    # exists to remove, which survived on exactly this path (Bugbot #445 r3).
+    target_gb="$warn_eff"
+  # The WARN threshold carries the grace too, not just the floor one. The shown
+  # figure is now (mib + grace)/1024, so grading this branch on the raw threshold
+  # reopened the same self-contradiction one boundary up: every budget in
+  # [warn*1024 - grace, warn*1024) — 7680..8191 MiB at warn 8, a band Docker
+  # Desktop's own defaults land in — printed "budget: 8 GB — recommended ≥ 8 GB".
+  # With both the display and both thresholds pivoting on the grace, shown == target
+  # implies the ✔ branch, so no displayed number can contradict its own grade.
+  elif (( rt_mib < warn_eff * 1024 - PF_VM_MEM_GRACE_MIB )); then
+    warn "Docker's memory budget: ${rt_gb} GB — recommended ≥ ${warn_eff} GB (${rec_eff} GB to train); the client may OOM under load."
+    # No hard-fail follows this branch, so the remedy can aim at the train figure.
+    target_gb="$rec_eff"
+  else
+    [[ -n "$quiet_ok" ]] || _pf_ok "Docker's memory budget: ${rt_gb} GB"
+    return 0
+  fi
+  # A machine that cannot reach the floor even with the OS reserve honoured is too
+  # small for tracebloc no matter how Docker is configured, so a "give Docker N GB"
+  # remedy is a dead end that asks for more than the machine has (Bugbot #445 r2 —
+  # a 4 GB Mac was told "colima start --memory 5"). Say so plainly instead; the
+  # recheck's own host-too-small branch then stops the install honestly. Mirrors
+  # the PowerShell installer's host-too-small branch (#444).
+  host_gb="$(_pf_host_mem_gb)"
+  if _pf_host_too_small_for_floor "$host_gb"; then
+    hint "This machine has ${host_gb} GB of RAM total; the client needs a ${PF_MIN_MEM_GB} GB Docker budget and the OS needs ~${PF_OS_RESERVE_GB} GB. Free up memory or use a larger machine."
+  elif [[ "$OS" == "Darwin" ]]; then
+    hint "Give Docker ${target_gb} GB: Docker Desktop → Settings → Resources → Memory (colima: colima stop && colima start --memory ${target_gb})."
+  else
+    # No Docker Desktop dead end on Linux (Bugbot #445): headless/engine-only
+    # boxes have no Desktop UI — a low budget there is the machine's RAM or a
+    # VM/cgroup limit.
+    hint "Give Docker ${target_gb} GB: on Linux this budget is the machine's RAM or a VM/cgroup limit — raise that limit or free memory, then restart Docker."
+  fi
+  PF_RUNTIME_MEM_WARNED=1
+  return 0
+}
 
 # Docker data root if the daemon is up; else where it will live / a host proxy.
 _pf_docker_root() {
@@ -244,7 +355,10 @@ _pf_arch() {
     return 0
   fi
   if [[ "$OS" != "Linux" ]]; then
-    _pf_note "Architecture: ${ARCH} — Docker Desktop runs the amd64 client images under emulation (slower, but works)."
+    # Don't ASSUME emulation works here — Docker isn't up yet at preflight, so the real
+    # amd64 smoke runs post-Docker (assert_amd64_emulation, #433). Name the setting now
+    # so the operator can pre-empt it.
+    _pf_note "Architecture: ${ARCH} — the amd64 client images run under emulation; Docker's \"Use Rosetta for x86_64/amd64 emulation\" must be enabled (verified once Docker is running)."
     return 0
   fi
   if _pf_amd64_emulation_available; then
@@ -275,16 +389,41 @@ _pf_cpu() {
 }
 
 _pf_memory() {
-  local kb gb mib floor_mib warn_mib src rec_gb warn_gb
-  kb="$(_pf_total_mem_kb)"
+  # Two truths, two lines (#417): the machine's RAM (a hardware fact — the gate
+  # runs on it; on native Linux the daemon sees all host RAM so the gate is
+  # unchanged) and, when a runtime VM is up with a meaningfully smaller budget
+  # (macOS Docker Desktop / colima, WSL2), Docker's actual budget on its own
+  # line with achievable advice. The old single line flip-flopped between the
+  # two across re-runs of the SAME installer on the SAME machine — "16 GB
+  # (host)" cold, "6 GB (Docker VM)" warm — depending only on whether Docker
+  # happened to already be running.
+  local host_kb rt_kb rt_gb kb gb mib floor_mib warn_mib label rec_gb warn_gb
+  host_kb="$(_pf_host_mem_kb)"
+  rt_kb="$(_pf_runtime_mem_kb)"
+  # Same converter as $gb below: this feeds the "is the VM meaningfully smaller
+  # than the machine" comparison, and grading one side grace-adjusted against a
+  # raw other side is the exact mistake this PR keeps rediscovering.
+  [[ -n "$rt_kb" ]] && rt_gb="$(_pf_display_gb_from_mib "$(( rt_kb / 1024 ))")"
+  # Gate on the machine; only if the host is unreadable fall back to the VM
+  # budget (rare — /proc/meminfo and hw.memsize are near-universal).
+  kb="$host_kb"; label="machine"
+  if [[ -z "$kb" && -n "$rt_kb" ]]; then kb="$rt_kb"; label="Docker VM"; fi
   if [[ -z "$kb" ]]; then warn "Memory: couldn't determine total RAM (skipping)."; return 0; fi
-  gb=$(( kb / 1024 / 1024 ))
   mib=$(( kb / 1024 ))
+  # Same grace-adjusted figure _pf_runtime_mem_status reports, so one budget never
+  # appears as two different numbers across the two messages (Bugbot #445 r4).
+  gb="$(_pf_display_gb_from_mib "$mib")"
   # Compare in MiB with a 64 MiB grace so a VM that reports e.g. 4 GiB a hair under
   # 4*1024^3 (Colima / Docker Desktop) doesn't floor to 3 GB and false-trip the gate.
-  floor_mib=$(( PF_MIN_MEM_GB * 1024 - 64 ))
-  warn_mib=$(( PF_WARN_MEM_GB * 1024 ))
-  src="host"; [[ -n "$(_pf_runtime_mem_kb)" ]] && src="Docker VM"
+  # Tolerance must match the grace already applied to the SHOWN figure above, or
+  # the two disagree: a 5 GB VM whose MemTotal sits a few hundred MiB under the
+  # configured size displayed as "5 GB" while a 64 MiB tolerance graded it
+  # sub-floor, producing "Memory: 5 GB — below the 5 GB the client needs"
+  # (Bugbot #445 r5, High). PF_VM_MEM_GRACE_MIB is the same tolerance
+  # _pf_runtime_mem_status uses for its own floor and warn tests, so all three
+  # now agree on where the boundaries are.
+  floor_mib=$(( PF_MIN_MEM_GB * 1024 - PF_VM_MEM_GRACE_MIB ))
+  warn_mib=$(( PF_WARN_MEM_GB * 1024 - PF_VM_MEM_GRACE_MIB ))
   # SHOWN figures clamped to physical RAM so no hint asks for more than the machine
   # has (#428): "raise to 16 GB" on a 16 GB Mac is impossible.
   rec_gb="$(_pf_clamp_mem_gb "$PF_REC_MEM_GB")"
@@ -292,21 +431,35 @@ _pf_memory() {
 
   if [[ "$mib" -lt "$floor_mib" ]]; then
     if [[ "$OS" == "Linux" ]]; then
-      _pf_fail_line "Memory: only ${gb} GB (${src}) — need ≥ ${PF_MIN_MEM_GB} GB to run the tracebloc client."
+      _pf_fail_line "Memory: only ${gb} GB (${label}) — need ≥ ${PF_MIN_MEM_GB} GB to run the tracebloc client."
       PF_HARD_FAIL=$(( ${PF_HARD_FAIL:-0} + 1 ))
       hint "Resize the VM (or free memory) to ≥ ${warn_gb} GB; ${rec_gb} GB to train locally. Then re-run."
     else
-      # Mac/Win: at preflight Docker is usually still down, so this is host RAM —
-      # warn (don't block); the create_cluster re-check sees the real VM size and
-      # HARD-FAILS a sub-floor VM (#428).
-      warn "Memory: ${gb} GB (${src}) — below the ${PF_MIN_MEM_GB} GB the client needs; it will OOM."
-      hint "Docker Desktop → Settings → Resources → Memory: raise to ≥ ${warn_gb} GB (${rec_gb} GB to train), then re-run."
+      # Mac/Win: the MACHINE itself is below the floor — no Docker setting can
+      # fix that, so don't offer a resize remedy here. Warn (don't block); the
+      # create_cluster re-check sees the real VM size and HARD-FAILS a sub-floor
+      # VM (#428), including the honest "use a larger machine" case.
+      warn "Memory: ${gb} GB (${label}) — below the ${PF_MIN_MEM_GB} GB the client needs; it will OOM."
     fi
+  elif [[ "$OS" != "Linux" && "$label" == "machine" ]] \
+     && _pf_host_too_small_for_floor "$(_pf_host_mem_gb)"; then
+    # Above the bare floor, but not by enough to give Docker the floor AND leave
+    # the OS its reserve. Saying "enough to run" here contradicted the budget
+    # line's "use a larger machine" in the same preflight (Bugbot #445 r3). On
+    # native Linux the daemon sees host RAM directly, so the reserve arithmetic
+    # does not apply and that path keeps the original wording.
+    warn "Memory: ${gb} GB (${label}) — the client needs a ${PF_MIN_MEM_GB} GB Docker budget and the OS needs ~${PF_OS_RESERVE_GB} GB, so this machine is below the practical minimum of about $(( PF_MIN_MEM_GB + PF_OS_RESERVE_GB )) GB. Free up memory or use a larger machine."
   elif [[ "$mib" -lt "$warn_mib" ]]; then
-    warn "Memory: ${gb} GB (${src}) — enough to run, but training (≈8 GB/job) may OOM; ${rec_gb} GB recommended to train locally."
-    [[ "$OS" != "Linux" ]] && hint "Docker Desktop → Settings → Resources → Memory ≥ ${rec_gb} GB to train."
+    warn "Memory: ${gb} GB (${label}) — enough to run, but training (≈8 GB/job) may OOM; ${rec_gb} GB of RAM recommended to train locally."
   else
-    _pf_ok "Memory: ${gb} GB (${src})"
+    _pf_ok "Memory: ${gb} GB (${label})"
+  fi
+
+  # Docker's budget as its own line — only when a runtime is up AND its budget is
+  # meaningfully smaller than the machine (the VM case). On native Linux the
+  # daemon sees host RAM, so this would just repeat the line above.
+  if [[ -n "$rt_kb" && "$label" == "machine" ]] && (( rt_gb + 1 < gb )); then
+    _pf_runtime_mem_status $(( rt_kb / 1024 ))
   fi
 
   # Linux: even when total is fine, a busy shared VM may have little free RAM now.
@@ -332,11 +485,16 @@ _pf_memory() {
 # warns (the user has waited for Docker; it can run, just tightly).
 _pf_recheck_runtime_mem() {
   [[ -n "${TRACEBLOC_SKIP_PREFLIGHT:-}" ]] && return 0
-  local kb gb mib rec_gb warn_gb; kb="$(_pf_runtime_mem_kb)"
+  # rec_gb is deliberately not read here: the between-floor-and-warn copy (and its
+  # "N GB to train" figure) now lives solely in _pf_runtime_mem_status.
+  local kb gb mib warn_gb; kb="$(_pf_runtime_mem_kb)"
   [[ -z "$kb" ]] && return 0          # daemon still not reporting — nothing to add
-  gb=$(( kb / 1024 / 1024 ))
   mib=$(( kb / 1024 ))
-  rec_gb="$(_pf_clamp_mem_gb "$PF_REC_MEM_GB")"
+  # Same converter the status line uses, so the hard-fail can never quote a
+  # different size for the same budget (Bugbot #445 r4 — this fix was written then
+  # but landed in the wrong function, because the two-line pattern it anchored on
+  # existed in _pf_memory too and the replace took the first match).
+  gb="$(_pf_display_gb_from_mib "$mib")"
   warn_gb="$(_pf_clamp_mem_gb "$PF_WARN_MEM_GB")"
   if [[ "$mib" -lt $(( PF_MIN_MEM_GB * 1024 - PF_VM_MEM_GRACE_MIB )) ]]; then
     # The REAL VM size is now known and it's below the floor — the client OOMs. Stop.
@@ -347,17 +505,33 @@ _pf_recheck_runtime_mem() {
     # floor), no resize helps — say so plainly instead of a remedy that repeats an
     # unachievable size (#428 Bugbot; mirrors the PowerShell host-too-small branch).
     local phys_gb; phys_gb="$(_pf_host_mem_gb)"
-    if [[ "$OS" != "Linux" && "$phys_gb" =~ ^[0-9]+$ && "$phys_gb" -gt 0 && $(( phys_gb - PF_OS_RESERVE_GB )) -lt PF_MIN_MEM_GB ]]; then
-      error "This Mac has ${phys_gb} GB RAM — too little for tracebloc: the client needs a ${PF_MIN_MEM_GB} GB Docker VM and macOS needs ~${PF_OS_RESERVE_GB} GB, so about $(( PF_MIN_MEM_GB + PF_OS_RESERVE_GB )) GB physical is the practical minimum. Use a larger machine."
+    # Through the SHARED predicate, and on every OS. Two divergences lived here
+    # (Bugbot #445 r7, High): the arithmetic was inlined rather than calling
+    # _pf_host_too_small_for_floor, and the branch was gated OS != Linux while
+    # _pf_runtime_mem_status applies it everywhere. On a warm Linux install with a
+    # sub-floor cgroup/VM budget, preflight therefore said "use a larger machine"
+    # and this hard-fail then advised raising Docker to a size that machine cannot
+    # give — the same remedy contradiction, one OS gate apart.
+    if _pf_host_too_small_for_floor "$phys_gb"; then
+      local host_noun="machine"
+      [[ "$OS" == "Darwin" ]] && host_noun="Mac"
+      error "This ${host_noun} has ${phys_gb} GB RAM — too little for tracebloc: the client needs a ${PF_MIN_MEM_GB} GB Docker budget and the OS needs ~${PF_OS_RESERVE_GB} GB, so about $(( PF_MIN_MEM_GB + PF_OS_RESERVE_GB )) GB physical is the practical minimum. Use a larger machine."
     elif [[ "$OS" == "Linux" ]]; then
       error "Docker has only ${gb} GB — below the ${PF_MIN_MEM_GB} GB the tracebloc client needs; it will OOM. Free memory (or raise the VM) to ≥ ${warn_gb} GB, then re-run."
     else
       error "Docker's VM has only ${gb} GB — below the ${PF_MIN_MEM_GB} GB the tracebloc client needs; it will OOM. Raise it: Docker Desktop → Settings → Resources → Memory ≥ ${warn_gb} GB (or colima: colima stop && colima start --memory ${warn_gb}), then re-run."
     fi
   fi
-  if [[ "$mib" -lt "$(( PF_WARN_MEM_GB * 1024 ))" ]]; then
-    warn "Docker is running with ${gb} GB — recommended ≥ ${warn_gb} GB (${rec_gb} GB to train); the client may OOM under load."
-    [[ "$OS" != "Linux" ]] && hint "Docker Desktop → Settings → Resources → Memory ≥ ${warn_gb} GB, then re-install."
+  # Between floor and warn: warn only, through the ONE shared copy so this and the
+  # Step-1 preflight line can no longer diverge in wording OR in threshold — the
+  # cold-install path (Docker starts mid-run, the common case) previously got its
+  # own text with no colima guidance and no Linux cgroup hint, and graded against
+  # the raw PF_WARN_MEM_GB while preflight used the clamped target (Bugbot #445 r2).
+  # Skipped when preflight ALREADY reported this same budget on a warm re-run. The
+  # latch suppresses a DUPLICATE WARNING only, and is deliberately tested here
+  # rather than at the top of the function so it can never gate the hard-fail above.
+  if [[ -z "${PF_RUNTIME_MEM_WARNED:-}" ]]; then
+    _pf_runtime_mem_status "$mib" quiet_ok
   fi
   return 0
 }
@@ -471,7 +645,141 @@ _pf_storage_type() {
   return 0
 }
 
+# ── Network profile (#582) ───────────────────────────────────────────────────
+# A plain-language read of the network BEFORE the endpoint probes, so a user on a
+# restricted/corporate network sees what's happening up front instead of a cryptic
+# failure minutes in. Detects an explicit proxy, a configured corporate CA bundle,
+# and (best-effort) TLS inspection. Never fatal, bounded, PII-free (proxy
+# credentials are stripped and never printed/logged). The connectivity probes and
+# the break-and-inspect hint below still own the actionable fix guidance.
+
+# Strip scheme:// and any user:pass@ credentials from a proxy URL; echo bare
+# host:port. Credentials must NEVER reach the screen or log (#576).
+_pf_proxy_hostport() {
+  local u="${1:-}"
+  u="${u#*://}"     # drop scheme://
+  u="${u#*@}"       # drop user:pass@ credentials (PII)
+  u="${u%%/*}"      # drop any /path
+  echo "$u"
+}
+
+# Echo the first explicit proxy from the environment as a bare host:port (creds
+# stripped), or empty when none is set. HTTPS takes precedence (that's the one that
+# matters for our all-HTTPS egress).
+_pf_env_proxy() {
+  local v val
+  for v in HTTPS_PROXY https_proxy HTTP_PROXY http_proxy; do
+    val="${!v:-}"; [[ -n "$val" ]] && { _pf_proxy_hostport "$val"; return 0; }
+  done
+  return 0
+}
+
+# Echo the first explicit proxy from the environment VERBATIM (scheme + any
+# user:pass credentials intact), or empty. For the probe CONNECTION only — an
+# authenticated proxy needs the credentials to answer the CONNECT, or it 407s and
+# the inspection probe silently returns 'unknown' (Bugbot). NEVER print/log this;
+# display always uses the credential-stripped _pf_env_proxy.
+_pf_env_proxy_raw() {
+  local v val
+  for v in HTTPS_PROXY https_proxy HTTP_PROXY http_proxy; do
+    val="${!v:-}"; [[ -n "$val" ]] && { printf '%s' "$val"; return 0; }
+  done
+  return 0
+}
+
+# Percent-decode a URL-encoded string (proxy userinfo). Mirrors PowerShell's
+# [Uri]::UnescapeDataString so an encoded credential (e.g. a "%40" in a password)
+# authenticates identically on both platforms (Bugbot). Percent-only: userinfo does
+# not use '+'-for-space, so '+' is left literal.
+_pf_urldecode() {
+  local s="${1:-}"
+  printf '%b' "${s//%/\\x}"
+}
+
+# Echo the configured corporate CA bundle path when TRACEBLOC_CA_BUNDLE or
+# CURL_CA_BUNDLE points at a readable file; empty otherwise. SOFT (never errors) —
+# the hard validation lives in cluster.sh's _resolve_ca_bundle at cluster-create.
+_pf_env_ca_bundle() {
+  local v val
+  for v in TRACEBLOC_CA_BUNDLE CURL_CA_BUNDLE; do
+    val="${!v:-}"; [[ -n "$val" && -f "$val" && -r "$val" ]] && { echo "$val"; return 0; }
+  done
+  return 0
+}
+
+# Return 0 if an X.509 issuer string names a well-known PUBLIC CA (a normal direct
+# chain); 1 otherwise (a corporate re-signer — i.e. TLS inspection). Pure/testable.
+_pf_issuer_is_public() {
+  printf '%s' "${1:-}" | grep -qiE "DigiCert|Sectigo|Comodo|Let'?s Encrypt|ISRG|Google Trust|GTS |GlobalSign|Amazon|Entrust|GeoTrust|Baltimore|USERTrust|Actalis|Buypass|SSL\.com|Certum|IdenTrust|Microsoft (Azure|RSA|ECC)"
+}
+
+# Best-effort affirmative TLS-inspection probe. Echo yes|no|unknown. Reads the
+# issuer of the cert served for a well-known public host (through the proxy when
+# one is set); a non-public issuer means a corporate CA is re-signing TLS. Bounded
+# and non-hanging: needs openssl AND a timeout tool, else 'unknown' (we never run
+# an unbounded openssl s_client that a blackholed 443 could hang forever).
+_pf_detect_tls_inspection() {
+  has openssl || { echo "unknown"; return 0; }
+  { has timeout || has gtimeout; } || { echo "unknown"; return 0; }
+  local host="github.com" raw issuer creds user="" pass=""
+  local -a args=(s_client -connect "${host}:443" -servername "$host")
+  # Connect THROUGH the proxy using the raw value: -proxy takes host:port (creds
+  # stripped), and an authenticated proxy additionally needs -proxy_user/-proxy_pass
+  # (openssl >= 3.0) or it 407s and issuer capture fails → a false 'unknown' on the
+  # exact TLS-inspecting networks this exists to detect (Bugbot). Credentials go to
+  # openssl only, URL-decoded (parity with the PS peer) and NEVER printed/logged.
+  raw="$(_pf_env_proxy_raw)"
+  if [[ -n "$raw" ]]; then
+    args+=(-proxy "$(_pf_proxy_hostport "$raw")")
+    if [[ "$raw" == *"@"* ]] && openssl s_client -help 2>&1 | grep -q -- '-proxy_user'; then
+      creds="${raw#*://}"; creds="${creds%%@*}"          # user[:pass], percent-encoded
+      if [[ "$creds" == *:* ]]; then
+        user="$(_pf_urldecode "${creds%%:*}")"; pass="$(_pf_urldecode "${creds#*:}")"
+      else
+        user="$(_pf_urldecode "$creds")"; pass=""        # user@ with no password
+      fi
+      # Pass the password via env: (openssl reads $_TB_PROXY_PASS) so it never lands
+      # in argv / ps / /proc/*/cmdline on a shared host (Bugbot). Username isn't secret.
+      args+=(-proxy_user "$user" -proxy_pass "env:_TB_PROXY_PASS")
+    fi
+  fi
+  # echo | : send EOF so s_client returns after the handshake. We deliberately do
+  # NOT pass -verify_return_error — we want the served cert's issuer even when the
+  # corporate CA isn't trusted, so we can name the inspection. The password is
+  # exported ONLY inside this command-substitution subshell (openssl reads it via
+  # env:), so it never reaches argv or the parent shell. `|| issuer=""` keeps a
+  # failed/timed-out probe from aborting under `set -euo pipefail` (like _pf_probe_url).
+  issuer="$(
+    export _TB_PROXY_PASS="$pass"
+    echo | _bounded 8 openssl "${args[@]}" 2>/dev/null | openssl x509 -noout -issuer 2>/dev/null
+  )" || issuer=""
+  [[ -z "$issuer" ]] && { echo "unknown"; return 0; }
+  if _pf_issuer_is_public "$issuer"; then echo "no"; else echo "yes"; fi
+}
+
+# Print the plain-language network profile line (only when noteworthy — a plain
+# direct connection stays silent; the "Connected:" line already confirms egress).
+# Exports PF_NET_PROXY / PF_NET_CA / PF_NET_INSPECT for later reuse.
+_pf_network_profile() {
+  PF_NET_PROXY="$(_pf_env_proxy)"
+  PF_NET_CA="$(_pf_env_ca_bundle)"
+  PF_NET_INSPECT="$(_pf_detect_tls_inspection)"
+
+  # Nothing noteworthy: no proxy and inspection not affirmatively detected.
+  [[ -z "$PF_NET_PROXY" && "$PF_NET_INSPECT" != "yes" ]] && return 0
+
+  local -a parts=()
+  [[ -n "$PF_NET_PROXY" ]]            && parts+=("corporate proxy detected (${PF_NET_PROXY})")
+  [[ "$PF_NET_INSPECT" == "yes" ]]    && parts+=("TLS inspection detected")
+  [[ -n "$PF_NET_CA" ]]               && parts+=("your company's certificate is configured")
+  local joined="" p
+  for p in "${parts[@]}"; do joined="${joined:+$joined; }$p"; done
+  info "Network: ${joined}."
+  return 0
+}
+
 _pf_connectivity() {
+  _pf_network_profile   # #582: announce the network profile before the probes
   # Can't probe without curl — and on the direct ./install-k8s.sh path the
   # installer hasn't installed it yet. Skip with a warning rather than hard-fail
   # with a misleading "egress blocked" (curl is installed downstream).
@@ -609,8 +917,14 @@ _pf_hw_summary_line() {
   local -a parts=("$ARCH")
   cpu="$(_pf_ncpu)"
   if [[ -n "$cpu" ]]; then parts+=("${cpu} CPU cores"); fi
-  mem_kb="$(_pf_total_mem_kb)"
-  if [[ -n "$mem_kb" ]]; then mem_gb=$(( mem_kb / 1024 / 1024 )); parts+=("${mem_gb} GB memory"); fi
+  # Host RAM, not the VM budget (#417): a hardware summary that read "7 GB
+  # memory" on a 15 GB machine (Docker up, WSL2/Desktop VM default) was the same
+  # flip-flop bug in miniature. Fall back to the runtime only if the host is
+  # unreadable, so the field is still populated rather than dropped.
+  mem_kb="$(_pf_host_mem_kb)"; [[ -z "$mem_kb" ]] && mem_kb="$(_pf_runtime_mem_kb)"
+  # Through the shared converter so the collapsed summary can never disagree with
+  # the memory line above it (Bugbot #445 r6).
+  if [[ -n "$mem_kb" ]]; then mem_gb="$(_pf_display_gb_from_mib "$(( mem_kb / 1024 ))")"; parts+=("${mem_gb} GB memory"); fi
   disk_target="$(_pf_docker_root)"
   if [[ ! -d "$disk_target" ]]; then disk_target="/"; fi
   if [[ "$OS" != "Linux" ]]; then disk_target="$HOME"; fi   # Desktop VM disk is opaque; report host

@@ -15,11 +15,17 @@ spec:
     matchLabels:
       app: manager
   replicas: 1
+  # Recreate, NOT RollingUpdate: jobs-manager mounts ReadWriteOnce PVCs (client-pvc,
+  # client-logs-pvc). RollingUpdate's maxSurge:1 brings up a SECOND pod before the old
+  # one is gone; both then contend for the same RWO volume. On a single-node local-path
+  # (WaitForFirstConsumer) cluster that permanently deadlocks provisioning after a node
+  # restart — two unscheduled consumers → the scheduler's VolumeBinding times out
+  # (context deadline exceeded) — and image-refresh then re-restarts every tick forever
+  # (its digest annotation only lands after a rollout succeeds, which it never does).
+  # Recreate keeps exactly ONE consumer, so provisioning + restarts always converge.
+  # mysql-deployment already uses Recreate for the same RWO-PVC reason.
   strategy:
-    type: RollingUpdate
-    rollingUpdate:
-      maxUnavailable: 0
-      maxSurge: 1
+    type: Recreate
   template:
     metadata:
       labels:

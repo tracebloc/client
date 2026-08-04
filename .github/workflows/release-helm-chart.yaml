@@ -452,6 +452,17 @@ jobs:
     permissions:
       contents: read   # read index.yaml from gh-pages via the API
     steps:
+      # Pinned and ref'd exactly like the three sibling jobs in this workflow.
+      # Bare `@v4` with no ref (Bugbot, client#534): on a `release: published` run
+      # github.ref intermittently arrives empty (actions/runner#2788), and checkout
+      # then falls back to the DEFAULT BRANCH -- so this backstop would verify the
+      # published index using whatever index-invariants.sh is on develop, not the
+      # one that shipped. A post-publish check reading a different script than the
+      # release is worse than no check, because it still reports.
+      - name: Check out the released tag (for scripts/index-invariants.sh)
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          ref: ${{ github.event.release.tag_name }}
       - name: Assert the public index holds only stable versions
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -465,23 +476,14 @@ jobs:
           # so a stale read could show a clean index while the customer-facing
           # one is already polluted -- greening the exact backstop this job
           # exists to be. The API is read-after-write consistent for a ref.
-          idx=$(gh api "repos/$GITHUB_REPOSITORY/contents/index.yaml?ref=gh-pages" \
-                  -H "Accept: application/vnd.github.raw+json")
-          if [ -z "$idx" ]; then
-            # stdout, not stderr: Actions parses workflow commands from stdout
-            # only, so an ::error:: on stderr fails the step with no annotation
-            # (Bugbot, client#497). Every sibling ::error:: here uses stdout.
-            echo "::error::could not read index.yaml from gh-pages - refusing to report the invariants as holding on an empty read."
-            exit 1
-          fi
-          # No prerelease-shaped chart version may ever be indexed.
-          if printf '%s\n' "$idx" | grep -E '^[[:space:]]+version:' | grep -- '-'; then
-            echo "::error::public helm index contains prerelease-shaped versions (above) - customer surface polluted."
-            exit 1
-          fi
-          # A prerelease run must not have indexed its own version.
-          if [ "$PRERELEASE" = "true" ] && printf '%s\n' "$idx" | grep -qF "${TAG#v}"; then
-            echo "::error::prerelease $TAG leaked into the public index."
-            exit 1
-          fi
-          echo "Index invariants hold: stable-only, $TAG handled correctly."
+          #
+          # Written to a FILE, and the invariants live in a script that greps
+          # that file. The old inline form ended `... | grep -qF "${TAG#v}"`,
+          # and under `set -o pipefail` grep -q closing the pipe on its first
+          # match SIGPIPEs the producer -- so a REAL leak exited 141 and read
+          # as "invariants hold" (Bugbot, client#515). The script is covered by
+          # scripts/tests/index-invariants.bats under the required `Unit tests`
+          # check, which this release-only workflow is not.
+          gh api "repos/$GITHUB_REPOSITORY/contents/index.yaml?ref=gh-pages" \
+            -H "Accept: application/vnd.github.raw+json" > index.fetched.yaml
+          INDEX_FILE=index.fetched.yaml bash scripts/index-invariants.sh
