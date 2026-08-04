@@ -3092,6 +3092,13 @@ Describe "Graceful failure: guaranteed finally + trap, guarded closer (#577)" {
     ([regex]::Matches($script:PSRC577b, '\$script:OutcomeReported = \$true')).Count | Should -BeGreaterOrEqual 5
   }
 
+  It "the reboot-pending stop marks the outcome reported before exiting (Bugbot)" {
+    # A reboot-pending exit is an intentional, reported stop (guidance is printed),
+    # not an interruption; without the flag the finally appends a contradictory
+    # Show-Interrupted line. The flag must be set before the block's exit 2.
+    $script:PSRC577b | Should -Match '(?s)if \(\$rebootNeeded\) \{.*?\$script:OutcomeReported = \$true.*?exit 2'
+  }
+
   It "Show-Interrupted renders a clean interrupted line (log + re-run, no stack)" {
     $log = Join-Path $TestDrive "int-577.log"; $script:LOG_FILE = $log
     try {

@@ -1117,6 +1117,11 @@ function Enable-VirtualisationFeatures {
 
   if ($rebootNeeded) {
     Warn "A reboot is required to finish enabling system features."
+    # A reboot-pending stop IS a reported outcome (Bugbot): the guidance below tells
+    # the user exactly what happens next. Set the flag so the top-level finally does
+    # not then append a contradictory "interrupted" line. Covers every exit from this
+    # block (both `exit 2` paths and the Restart-Computer path).
+    $script:OutcomeReported = $true
     # Arm the RunOnce continuation so the install resumes at next sign-in with no
     # re-pasting -- both for auto-reboot and manual -NoReboot (#420). RunOnce is
     # written to the CURRENT (elevating) account's hive: the reboot happens here in
