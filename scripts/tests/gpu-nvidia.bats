@@ -238,3 +238,12 @@ _gpu_mocks() {
   [ "$status" -eq 0 ] || { echo "$output"; return 1; }
   [[ "$output" == *"DONE:cr=2"* ]] || return 1
 }
+
+# ── bounded GPU apply (Bugbot) ───────────────────────────────────────────────
+@test "the GPU manifest apply is bounded: --request-timeout, so a wedged API can't hang it (Bugbot)" {
+  # _apply_remote_manifest redirects apply output to the log; without a request
+  # timeout a wedged API server would hang silently instead of failing into the
+  # caller's recoverable CPU-mode warn.
+  grep -Eq 'kubectl apply -f "\$tmp_yml" --request-timeout=' \
+    "$BATS_TEST_DIRNAME/../lib/gpu-plugins.sh"
+}

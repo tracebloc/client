@@ -26,7 +26,10 @@ _apply_remote_manifest() {
   retry 3 5 curl_secure -fsSL "$url" -o "$tmp_yml" || { rm -f "$tmp_yml"; return 1; }
   [[ -s "$tmp_yml" ]] || { warn "Downloaded $label manifest is empty"; rm -f "$tmp_yml"; return 1; }
   # Raw stderr to the log; the caller surfaces a curated line on failure (#577).
-  kubectl apply -f "$tmp_yml" >> "${LOG_FILE:-/dev/null}" 2>&1
+  # --request-timeout bounds the API call so a wedged API server fails into that
+  # curated warn instead of hanging silently behind the log redirect (Bugbot);
+  # mirrors the node-probe's --request-timeout below.
+  kubectl apply -f "$tmp_yml" --request-timeout=30s >> "${LOG_FILE:-/dev/null}" 2>&1
 }
 
 _deploy_nvidia_plugin() {

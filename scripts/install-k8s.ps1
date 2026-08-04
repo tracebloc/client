@@ -2591,7 +2591,9 @@ function Install-GpuDevicePlugin {
         # explicit $LASTEXITCODE gate a failed apply/rollout would fall through to a
         # false "GPU acceleration enabled." Capture each call's output to the log and
         # gate the success message on the exit code (mirrors bash gpu-plugins.sh).
-        $applyOut = (kubectl apply -f $dpTmp 2>&1 | Out-String)
+        # --request-timeout bounds the API call so a wedged API server fails into the
+        # CPU-mode warn below instead of hanging silently (Bugbot; parity with bash).
+        $applyOut = (kubectl apply -f $dpTmp --request-timeout=30s 2>&1 | Out-String)
         Log "GPU plugin apply: $applyOut"
         if ($LASTEXITCODE -eq 0) {
           $rollOut = (kubectl rollout status daemonset/nvidia-device-plugin-daemonset `

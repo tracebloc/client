@@ -567,7 +567,12 @@ _handle_existing_cluster() {
     log "Cluster '$CLUSTER_NAME' exists but is stopped — starting it..."
     # Capture the tool's raw stderr to the log and surface only a curated line on
     # failure — graceful failure, not a raw k3d dump before the closer (#577).
-    k3d cluster start "$CLUSTER_NAME" >> "${LOG_FILE:-/dev/null}" 2>&1 \
+    # Bounded start (Bugbot): `k3d cluster start` waits for the server with no
+    # deadline by default, so behind the log redirect a wedged Docker would hang a
+    # headless install forever instead of reaching the curated error below. --wait
+    # --timeout bounds it (parity with the Windows installer's 5-minute start
+    # deadline) so a stuck start fails cleanly into that message.
+    k3d cluster start "$CLUSTER_NAME" --wait --timeout 5m >> "${LOG_FILE:-/dev/null}" 2>&1 \
       || error "Couldn't start your existing secure environment. Check Docker is running, then re-run."
     success "Secure environment started."
   fi

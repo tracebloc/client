@@ -3128,4 +3128,11 @@ Describe "GPU device-plugin failure is recoverable, not fatal (#577)" {
     $gpuFn | Should -Match '\$LASTEXITCODE'
     $gpuFn | Should -Match 'Log "GPU plugin apply'
   }
+  It "bounds the GPU apply with --request-timeout so a wedged API can't hang it (Bugbot)" {
+    # Parity with bash gpu-plugins.sh: the apply output is captured to the log, so
+    # without a request timeout a wedged API server would hang instead of falling
+    # through to the CPU-mode warn.
+    $gpuFn = ($script:PSRCGPU -split "function Install-GpuDevicePlugin")[1]
+    $gpuFn | Should -Match 'kubectl apply -f \$dpTmp --request-timeout='
+  }
 }
