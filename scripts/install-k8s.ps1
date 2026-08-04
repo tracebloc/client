@@ -155,6 +155,7 @@ function Err($m, $Detail)  {
   # Mirror to the curated log too (#576) — Get-ErrDetailLines already strips the
   # `At <file>:<line> char:` / `+ …` source-dump lines, so nothing internal leaks.
   Log "ERROR: $m"; foreach ($l in $det) { Log $l }
+  $script:OutcomeReported = $true   # Err IS a reported outcome (guards the finally)
   exit 1
 }
 function Step($n, $t, $l)  { Write-Host ""; Write-Host "Step $n/$t" -ForegroundColor Cyan -NoNewline; Write-Host "  $l" -ForegroundColor White; Log "== Step $n/$t : $l ==" }
@@ -162,6 +163,36 @@ function Log($m)           { if ($script:LOG_FILE) { Add-Content -Path $script:L
 function PromptHeader($m)  { Write-Host ""; Write-Host "  $m" -ForegroundColor White; Log $m }
 function Hint($m)          { Write-Host "  $m" -ForegroundColor DarkGray; Log $m }
 function Has($cmd)         { [bool](Get-Command $cmd -ErrorAction SilentlyContinue) }
+
+# Top-level fatal handler (#577): convert ANY unhandled terminating error into a
+# clean, branded message — never PowerShell's raw source line + stack trace — then
+# the caller exits non-zero. The reason shown is the exception MESSAGE (curated at
+# the throw sites, #576); the stack trace is deliberately NOT shown or logged, so
+# no tracebloc internals leak. The user always sees what happened + what to do.
+function Show-FatalError($err) {
+  $script:OutcomeReported = $true   # this IS the reported outcome (guards the finally)
+  $reason = ""
+  try { $reason = [string]$err.Exception.Message } catch {}
+  if (-not $reason) { $reason = [string]$err }
+  Log "FATAL: $reason"
+  Write-Host ""
+  Write-Host "  " -NoNewline; Write-Host ([char]0x2716) -ForegroundColor Red -NoNewline; Write-Host " Installation stopped." -ForegroundColor Red
+  if ($reason) { Write-Host "  $reason" -ForegroundColor DarkGray }
+  if ($script:LOG_FILE) { Hint "Details saved to: $script:LOG_FILE" }
+  Hint "It's safe to re-run this installer. If it keeps failing, send that log to tracebloc support."
+}
+
+# The guaranteed finally's closer (#577): fires ONLY when the run ended without
+# reporting an outcome — i.e. an interruption (Ctrl-C) or an abnormal termination
+# that wasn't a handled Err, a caught crash, or a normal finish — so the window
+# never just vanishes. Mirrors bash's exit-code-guarded install_cleanup.
+function Show-Interrupted {
+  Log "Installation interrupted before completion."
+  Write-Host ""
+  Write-Host "  " -NoNewline; Write-Host ([char]0x26A0) -ForegroundColor Yellow -NoNewline; Write-Host "  Installation was interrupted before it finished." -ForegroundColor Yellow
+  if ($script:LOG_FILE) { Hint "Log: $script:LOG_FILE" }
+  Hint "It's safe to re-run this installer."
+}
 
 function RefreshPath {
   $env:PATH = [System.Environment]::GetEnvironmentVariable("PATH","Machine") + ";" +
@@ -1086,6 +1117,11 @@ function Enable-VirtualisationFeatures {
 
   if ($rebootNeeded) {
     Warn "A reboot is required to finish enabling system features."
+    # A reboot-pending stop IS a reported outcome (Bugbot): the guidance below tells
+    # the user exactly what happens next. Set the flag so the top-level finally does
+    # not then append a contradictory "interrupted" line. Covers every exit from this
+    # block (both `exit 2` paths and the Restart-Computer path).
+    $script:OutcomeReported = $true
     # Arm the RunOnce continuation so the install resumes at next sign-in with no
     # re-pasting -- both for auto-reboot and manual -NoReboot (#420). RunOnce is
     # written to the CURRENT (elevating) account's hive: the reboot happens here in
@@ -2535,26 +2571,57 @@ function New-K3dCluster {
 # =============================================================================
 
 function Install-GpuDevicePlugin {
-  if ($GPU_VENDOR -ne "nvidia" -or -not $NVIDIA_DRIVER_OK -or $K3D_GPU_FLAG -eq "") { return }
+  # Returns $true when the GPU plugin is (believed) deployed, $false otherwise, so
+  # the caller can skip Confirm-GpuNode's ~90s wait for a plugin never applied
+  # (Bugbot). Every message helper uses Write-Host, so the only pipeline output is
+  # the boolean below (the Invoke-WithRetry result is sunk to $null to be safe).
+  if ($GPU_VENDOR -ne "nvidia" -or -not $NVIDIA_DRIVER_OK -or $K3D_GPU_FLAG -eq "") { return $false }
 
   Log "Deploying NVIDIA k8s device plugin"
 
-  $dpExists = kubectl get daemonset -n kube-system nvidia-device-plugin-daemonset 2>&1
+  # --request-timeout bounds the existence probe so a wedged API server can't hang
+  # here before the bounded apply is reached (reviewer; parity with bash + verify).
+  $dpExists = kubectl get daemonset -n kube-system nvidia-device-plugin-daemonset --request-timeout=5s 2>&1
   if ($LASTEXITCODE -eq 0) {
     Ok "GPU acceleration enabled."
+    return $true
   } else {
     $dpUrl = "https://raw.githubusercontent.com/NVIDIA/k8s-device-plugin/v0.14.5/nvidia-device-plugin.yml"
     $dpTmp = [System.IO.Path]::GetTempFileName()
     try {
-      Invoke-WithRetry -Label "GPU plugin download" -ScriptBlock {
+      $null = Invoke-WithRetry -Label "GPU plugin download" -ScriptBlock {
         Invoke-WebRequest -Uri $dpUrl -OutFile $dpTmp -UseBasicParsing
       }
+      $gpuOk = $false
       if ((Get-Item $dpTmp).Length -gt 0) {
-        kubectl apply -f $dpTmp
-        $null = (kubectl rollout status daemonset/nvidia-device-plugin-daemonset `
-          -n kube-system --timeout=120s 2>&1)
+        # kubectl is a native command: a non-zero exit does NOT throw, so without an
+        # explicit $LASTEXITCODE gate a failed apply/rollout would fall through to a
+        # false "GPU acceleration enabled." Capture each call's output to the log and
+        # gate the success message on the exit code (mirrors bash gpu-plugins.sh).
+        # --request-timeout bounds the API call so a wedged API server fails into the
+        # CPU-mode warn below instead of hanging silently (Bugbot; parity with bash).
+        $applyOut = (kubectl apply -f $dpTmp --request-timeout=30s 2>&1 | Out-String)
+        Log "GPU plugin apply: $applyOut"
+        if ($LASTEXITCODE -eq 0) {
+          $rollOut = (kubectl rollout status daemonset/nvidia-device-plugin-daemonset `
+            -n kube-system --timeout=120s 2>&1 | Out-String)
+          Log "GPU plugin rollout: $rollOut"
+          $gpuOk = ($LASTEXITCODE -eq 0)
+        }
+      }
+      if ($gpuOk) {
         Ok "GPU acceleration enabled."
-      } else { Err "Failed to enable GPU acceleration." }
+      } else {
+        Warn "Couldn't enable GPU acceleration - continuing in CPU mode. Re-run the installer later to retry."
+      }
+      return $gpuOk
+    } catch {
+      # GPU is OPTIONAL: a plugin download/apply failure must NOT abort the install
+      # (#577 fatal-vs-recoverable) — otherwise the throw would reach the top-level
+      # boundary and stop everything. Warn and continue in CPU mode.
+      Warn "Couldn't enable GPU acceleration - continuing in CPU mode. Re-run the installer later to retry."
+      Log "GPU device-plugin setup error: $($_.Exception.Message)"
+      return $false
     } finally {
       Remove-Item $dpTmp -Force -ErrorAction SilentlyContinue
     }
@@ -2569,7 +2636,7 @@ function Confirm-GpuNode {
   $gpuCount = 0
   for ($i = 1; $i -le 18; $i++) {
     Start-Sleep -Seconds 5
-    $alloc = kubectl get node -o jsonpath='{.items[0].status.allocatable}' 2>$null
+    $alloc = kubectl get node -o jsonpath='{.items[0].status.allocatable}' --request-timeout=5s 2>$null
     if ($alloc -match '"nvidia\.com/gpu":"?(\d+)') { $gpuCount = [int]$Matches[1]; break }
   }
 
@@ -4215,9 +4282,23 @@ function Install-TraceblocCli {
 # =============================================================================
 
 if (-not $env:TB_PESTER) {
+# Top-level error boundary (#577): any unhandled terminating error in the install
+# run below is converted to a clean "Installation stopped" message + exit — never
+# PowerShell's raw stack/source dump, and the session never just dies. Intentional
+# `exit` calls (fast-path, Err, final) pass straight through; only real crashes are
+# caught. $ErrorActionPreference is left as-is so existing non-terminating-error
+# flows are unchanged — this catches the throw-based crashes that leaked/killed.
+# The `finally` is the guaranteed closer (mirrors bash's install_cleanup): it fires
+# on every exit, and shows the interrupted line only when no outcome was reported
+# (Ctrl-C / abnormal termination). The `trap` is the last-resort net for anything
+# that terminates OUTSIDE the try below (defined inside the guard so it never fires
+# under the test dot-source).
+$script:OutcomeReported = $false
+trap { Show-FatalError $_; exit 1 }
+try {
 
-if ($Help) { Print-Help }
-if ($Diagnose) { Invoke-DiagnoseBundle; exit 0 }
+if ($Help) { $script:OutcomeReported = $true; Print-Help }
+if ($Diagnose) { Invoke-DiagnoseBundle; $script:OutcomeReported = $true; exit 0 }  # flag AFTER the long collection: an interrupt mid-diagnose must still hit Show-Interrupted (Bugbot)
 
 Confirm-Config
 Initialize-ToolDir
@@ -4243,6 +4324,7 @@ if ((-not $Resume) -and $script:InstallState.completed -and (Test-ToolsPresent) 
   Hint "Delete $(Get-InstallStatePath) (or set a fresh HOST_DATA_DIR) to force a full reinstall."
   Unregister-ResumeAfterReboot
   Log "Already installed and healthy - nothing to do."
+  $script:OutcomeReported = $true
   exit 0
 }
 
@@ -4264,8 +4346,10 @@ Install-K3dAndHelm
 # -- Step 3/6: Set up secure compute environment --
 Step 3 $script:INSTALL_STEPS.Count "Setting up secure compute environment"
 New-K3dCluster
-Install-GpuDevicePlugin
-Confirm-GpuNode
+# Only verify the GPU on the node when the plugin actually deployed; a failed/
+# CPU-mode deploy returns $false, so skipping verify avoids a ~90s wait and a
+# contradictory "still initializing" warning for a plugin never applied (Bugbot).
+if (Install-GpuDevicePlugin) { Confirm-GpuNode }
 
 # -- Step 4/6: install the tracebloc CLI FIRST (#388) — it mints the machine
 # credential in Step 5; a CLI-install hiccup degrades Step 5 to the legacy
@@ -4295,10 +4379,24 @@ Unregister-ResumeAfterReboot
 if (Test-InstallConnected) { Set-InstallComplete } else { Clear-InstallCompleted }
 
 Print-Summary
+$script:OutcomeReported = $true   # Print-Summary reported the outcome (guards the finally)
 
 Log "Install finished."
 
 # Exit code reflects reality: connected/starting are OK; failures are non-zero.
 if (-not (Test-InstallSucceeded)) { exit 1 }
+
+} catch {
+  # Any crash the run didn't handle itself lands here as a clean message, not a
+  # raw stack (#577). Show-FatalError sets $script:OutcomeReported.
+  Show-FatalError $_
+  exit 1
+} finally {
+  # Guaranteed closer: this runs on EVERY exit above. Every reported path (normal
+  # finish, Err, caught crash, fast-path, help/diagnose) set OutcomeReported; if it
+  # is still false we were interrupted (Ctrl-C / abnormal), so surface a clean line
+  # rather than letting the window vanish silently (#577).
+  if (-not $script:OutcomeReported) { Show-Interrupted }
+}
 
 }  # end TB_PESTER guard (skipped when the test suite dot-sources this file)

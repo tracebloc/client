@@ -3048,3 +3048,111 @@ Describe "Print-Summary logs the classified outcome for every state (#576 Bugbot
     } finally { $script:LOG_FILE = $null }
   }
 }
+
+Describe "Top-level error boundary: crashes become a clean message, never a stack (#577)" {
+  BeforeAll { $script:PSRC577 = Get-Content "$PSScriptRoot/../install-k8s.ps1" -Raw }
+
+  It "the main run is wrapped in a top-level try/catch that calls Show-FatalError" {
+    $script:PSRC577 | Should -Match 'Show-FatalError \$_'
+    $script:PSRC577 | Should -Match 'if \(-not \$env:TB_PESTER\)[\s\S]{0,600}?try \{'
+  }
+
+  It "Show-FatalError renders a clean 'stopped' message with reason + re-run hint, no stack" {
+    $er = $null; try { throw "widget exploded" } catch { $er = $_ }
+    $out = Show-FatalError $er 6>&1 | Out-String
+    $out | Should -Match 'Installation stopped'
+    $out | Should -Match 'widget exploded'
+    $out | Should -Match 're-run'
+    $out | Should -Not -Match 'char:\d'
+    $out | Should -Not -Match 'ScriptStackTrace'
+  }
+
+  It "Show-FatalError logs the reason but never the stack" {
+    $log = Join-Path $TestDrive "fatal-577.log"; $script:LOG_FILE = $log
+    try {
+      $er = $null; try { throw "disk on fire" } catch { $er = $_ }
+      Show-FatalError $er 6>&1 | Out-Null
+      $c = Get-Content $log -Raw
+      $c | Should -Match 'FATAL: disk on fire'
+      $c | Should -Not -Match 'ScriptStackTrace'
+    } finally { $script:LOG_FILE = $null }
+  }
+}
+
+Describe "Graceful failure: guaranteed finally + trap, guarded closer (#577)" {
+  BeforeAll { $script:PSRC577b = Get-Content "$PSScriptRoot/../install-k8s.ps1" -Raw }
+
+  It "wraps the main run in try/catch/finally with a last-resort trap" {
+    $script:PSRC577b | Should -Match 'trap \{ Show-FatalError \$_; exit 1 \}'
+    $script:PSRC577b | Should -Match '\} finally \{'
+    $script:PSRC577b | Should -Match 'if \(-not \$script:OutcomeReported\) \{ Show-Interrupted \}'
+  }
+
+  It "marks the outcome reported on every terminal path (guards against a spurious interrupted line)" {
+    ([regex]::Matches($script:PSRC577b, '\$script:OutcomeReported = \$true')).Count | Should -BeGreaterOrEqual 5
+  }
+
+  It "the -Diagnose path marks the outcome reported only after the bundle completes (Bugbot)" {
+    # Setting the flag before the long collection would skip Show-Interrupted on an
+    # interrupt mid-diagnose - the silent death this boundary exists to prevent.
+    $script:PSRC577b | Should -Match 'Invoke-DiagnoseBundle; \$script:OutcomeReported = \$true'
+  }
+
+  It "the reboot-pending stop marks the outcome reported before exiting (Bugbot)" {
+    # A reboot-pending exit is an intentional, reported stop (guidance is printed),
+    # not an interruption; without the flag the finally appends a contradictory
+    # Show-Interrupted line. The flag must be set before the block's exit 2.
+    $script:PSRC577b | Should -Match '(?s)if \(\$rebootNeeded\) \{.*?\$script:OutcomeReported = \$true.*?exit 2'
+  }
+
+  It "Show-Interrupted renders a clean interrupted line (log + re-run, no stack)" {
+    $log = Join-Path $TestDrive "int-577.log"; $script:LOG_FILE = $log
+    try {
+      $out = Show-Interrupted 6>&1 | Out-String
+      $out | Should -Match 'interrupted'
+      $out | Should -Match 're-run'
+      $out | Should -Not -Match 'ScriptStackTrace'
+      (Get-Content $log -Raw) | Should -Match 'interrupted'
+    } finally { $script:LOG_FILE = $null }
+  }
+}
+
+Describe "GPU device-plugin failure is recoverable, not fatal (#577)" {
+  BeforeAll { $script:PSRCGPU = Get-Content "$PSScriptRoot/../install-k8s.ps1" -Raw }
+  It "warns + continues in CPU mode instead of a fatal Err on a plugin failure" {
+    $script:PSRCGPU | Should -Not -Match 'Err "Failed to enable GPU acceleration'
+    $script:PSRCGPU | Should -Match 'continuing in CPU mode'
+    $script:PSRCGPU | Should -Match 'GPU device-plugin setup error'
+  }
+  It "gates the success message on the kubectl exit code — never a false 'enabled' (Bugbot)" {
+    # Native kubectl doesn't throw on a non-zero exit, so the GPU apply/rollout must be
+    # $LASTEXITCODE-checked; otherwise a failed apply prints "GPU acceleration enabled."
+    $gpuFn = ($script:PSRCGPU -split "function Install-GpuDevicePlugin")[1]
+    # No fire-and-forget discard of the apply into $null (the false-success pattern).
+    $gpuFn | Should -Not -Match '\$null = \(kubectl apply'
+    # The success message is guarded, and the apply output is written to the log.
+    $gpuFn | Should -Match '\$LASTEXITCODE'
+    $gpuFn | Should -Match 'Log "GPU plugin apply'
+  }
+  It "bounds the GPU apply with --request-timeout so a wedged API can't hang it (Bugbot)" {
+    # Parity with bash gpu-plugins.sh: the apply output is captured to the log, so
+    # without a request timeout a wedged API server would hang instead of falling
+    # through to the CPU-mode warn.
+    $gpuFn = ($script:PSRCGPU -split "function Install-GpuDevicePlugin")[1]
+    $gpuFn | Should -Match 'kubectl apply -f \$dpTmp --request-timeout='
+  }
+  It "verify runs only when the plugin deployed - CPU-mode skips Confirm-GpuNode (Bugbot)" {
+    # A failed/CPU-mode deploy returns $false; the caller must gate Confirm-GpuNode
+    # on it so the user doesn't wait ~90s for a plugin that was never applied.
+    $script:PSRCGPU | Should -Match 'if \(Install-GpuDevicePlugin\) \{ Confirm-GpuNode \}'
+    $gpuFn = ($script:PSRCGPU -split "function Install-GpuDevicePlugin")[1]
+    $gpuFn | Should -Match 'return \$true'
+    $gpuFn | Should -Match 'return \$false'
+  }
+  It "the PS GPU kubectl probes are bounded with --request-timeout (reviewer parity)" {
+    # The existence check and Confirm-GpuNode's node probe must carry a request
+    # timeout so a wedged API can't hang before/around the bounded apply (bash parity).
+    $script:PSRCGPU | Should -Match 'kubectl get daemonset -n kube-system nvidia-device-plugin-daemonset --request-timeout='
+    $script:PSRCGPU | Should -Match 'kubectl get node -o jsonpath.*--request-timeout='
+  }
+}
