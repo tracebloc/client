@@ -1029,3 +1029,71 @@ setup() {
   [ "$(grep -cE 'PF_OS_RESERVE_GB \)\) -lt PF_MIN_MEM_GB|- PF_OS_RESERVE_GB < PF_MIN_MEM_GB' "$f")" -le 1 ]
   grep -qE '_pf_host_too_small_for_floor "\$phys_gb"' "$f"
 }
+
+# ── network profile (#582) ───────────────────────────────────────────────────
+@test "_pf_proxy_hostport: strips scheme and user:pass credentials (PII)" {
+  run _pf_proxy_hostport "http://user:pass@proxy.corp:8080/path"
+  [ "$output" = "proxy.corp:8080" ]
+  [[ "$output" != *"user"* ]]
+}
+
+@test "_pf_env_proxy: HTTPS_PROXY wins and credentials are stripped" {
+  HTTP_PROXY="http://h:1"; HTTPS_PROXY="http://user:secret@sproxy.corp:3128"
+  run _pf_env_proxy
+  [ "$output" = "sproxy.corp:3128" ]
+  [[ "$output" != *"secret"* ]]
+}
+
+@test "_pf_env_proxy: empty when no proxy env is set" {
+  unset HTTP_PROXY HTTPS_PROXY http_proxy https_proxy
+  run _pf_env_proxy
+  [ -z "$output" ]
+}
+
+@test "_pf_env_ca_bundle: readable CA file returned, empty when unset" {
+  ca="$BATS_TEST_TMPDIR/ca.pem"; echo x > "$ca"
+  TRACEBLOC_CA_BUNDLE="$ca"
+  run _pf_env_ca_bundle
+  [ "$output" = "$ca" ]
+  unset TRACEBLOC_CA_BUNDLE CURL_CA_BUNDLE
+  run _pf_env_ca_bundle
+  [ -z "$output" ]
+}
+
+@test "_pf_issuer_is_public: public CA yes, corporate re-signer no" {
+  run _pf_issuer_is_public "CN=DigiCert Global G2,O=DigiCert Inc"
+  [ "$status" -eq 0 ]
+  run _pf_issuer_is_public "CN=Acme Corp Proxy CA,O=Acme Corp"
+  [ "$status" -ne 0 ]
+}
+
+@test "_pf_network_profile: direct (no proxy, no inspection) is silent" {
+  unset HTTP_PROXY HTTPS_PROXY http_proxy https_proxy TRACEBLOC_CA_BUNDLE CURL_CA_BUNDLE
+  _pf_detect_tls_inspection() { echo "no"; }
+  run _pf_network_profile
+  [ -z "$output" ]
+}
+
+@test "_pf_network_profile: proxy + inspection -> one plain-language line, no creds" {
+  unset TRACEBLOC_CA_BUNDLE CURL_CA_BUNDLE
+  HTTPS_PROXY="http://u:p@proxy.corp:8080"
+  _pf_detect_tls_inspection() { echo "yes"; }
+  run _pf_network_profile
+  [[ "$output" == *"corporate proxy detected (proxy.corp:8080)"* ]]
+  [[ "$output" == *"TLS inspection detected"* ]]
+  [[ "$output" != *"u:p"* ]]
+}
+
+@test "_pf_network_profile: a configured CA bundle is announced" {
+  ca="$BATS_TEST_TMPDIR/ca.pem"; echo x > "$ca"
+  HTTPS_PROXY="http://proxy.corp:8080"; TRACEBLOC_CA_BUNDLE="$ca"
+  _pf_detect_tls_inspection() { echo "yes"; }
+  run _pf_network_profile
+  [[ "$output" == *"your company's certificate is configured"* ]]
+}
+
+@test "_pf_detect_tls_inspection: unknown when openssl is unavailable (never hangs)" {
+  has() { [[ "$1" != "openssl" ]]; }   # openssl absent
+  run _pf_detect_tls_inspection
+  [ "$output" = "unknown" ]
+}

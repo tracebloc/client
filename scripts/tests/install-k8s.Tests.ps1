@@ -3048,3 +3048,63 @@ Describe "Print-Summary logs the classified outcome for every state (#576 Bugbot
     } finally { $script:LOG_FILE = $null }
   }
 }
+
+Describe "Network profile: plain-language proxy / TLS-inspection read (#582)" {
+  BeforeEach {
+    $env:HTTP_PROXY = $null; $env:HTTPS_PROXY = $null
+    $env:http_proxy = $null; $env:https_proxy = $null
+    $env:TRACEBLOC_CA_BUNDLE = $null; $env:CURL_CA_BUNDLE = $null
+  }
+  AfterAll {
+    $env:HTTP_PROXY = $null; $env:HTTPS_PROXY = $null
+    $env:http_proxy = $null; $env:https_proxy = $null
+    $env:TRACEBLOC_CA_BUNDLE = $null; $env:CURL_CA_BUNDLE = $null
+  }
+
+  It "Get-EnvProxyHostPort strips scheme + user:pass credentials (PII)" {
+    Get-EnvProxyHostPort "http://user:pass@proxy.corp:8080/x" | Should -Be "proxy.corp:8080"
+  }
+
+  It "Get-EnvProxy: HTTPS wins and credentials are stripped" {
+    $env:HTTP_PROXY = "http://h:1"; $env:HTTPS_PROXY = "http://user:secret@sproxy.corp:3128"
+    $p = Get-EnvProxy
+    $p | Should -Be "sproxy.corp:3128"
+    $p | Should -Not -Match "secret"
+  }
+
+  It "Test-IssuerIsPublic: public CA true, corporate re-signer false" {
+    Test-IssuerIsPublic "CN=DigiCert Global G2, O=DigiCert Inc" | Should -BeTrue
+    Test-IssuerIsPublic "CN=Acme Corp Proxy CA, O=Acme Corp"    | Should -BeFalse
+  }
+
+  It "Get-EnvCaBundle: readable CA file returned, null when unset" {
+    $ca = Join-Path $TestDrive "ca.pem"; "x" | Set-Content -LiteralPath $ca
+    $env:TRACEBLOC_CA_BUNDLE = $ca
+    Get-EnvCaBundle | Should -Be $ca
+    $env:TRACEBLOC_CA_BUNDLE = $null
+    Get-EnvCaBundle | Should -BeNullOrEmpty
+  }
+
+  It "Show-NetworkProfile: direct connection is silent" {
+    Mock Get-TlsInspectionState { "no" }
+    $out = Show-NetworkProfile 6>&1 | Out-String
+    $out.Trim() | Should -BeNullOrEmpty
+  }
+
+  It "Show-NetworkProfile: proxy + inspection -> one PII-free line" {
+    $env:HTTPS_PROXY = "http://u:p@proxy.corp:8080"
+    Mock Get-TlsInspectionState { "yes" }
+    $out = Show-NetworkProfile 6>&1 | Out-String
+    $out | Should -Match "corporate proxy detected \(proxy\.corp:8080\)"
+    $out | Should -Match "TLS inspection detected"
+    $out | Should -Not -Match "u:p"
+  }
+
+  It "Show-NetworkProfile: a configured CA bundle is announced" {
+    $ca = Join-Path $TestDrive "ca2.pem"; "x" | Set-Content -LiteralPath $ca
+    $env:HTTPS_PROXY = "http://proxy.corp:8080"; $env:TRACEBLOC_CA_BUNDLE = $ca
+    Mock Get-TlsInspectionState { "yes" }
+    $out = Show-NetworkProfile 6>&1 | Out-String
+    $out | Should -Match "your company's certificate is configured"
+  }
+}
