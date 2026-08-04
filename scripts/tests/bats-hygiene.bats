@@ -241,3 +241,66 @@ setup() {
   out="$(awk -f "$SCANNER" "$fixture")"
   [[ -z "$out" ]] || return 1
 }
+
+@test "the scanner follows the test body across a nested function's braces (Bugbot)" {
+  # A `name() { ... }` stub inside an @test — e.g. a `helm() { cat <<'YAML' ... }`
+  # mock — closes with a column-0 `}`. Ending the scan at the FIRST such `}` (instead
+  # of tracking brace depth) skipped every assertion after the stub. check-drift.bats
+  # had exactly this: an un-hardened `[ "$_drift" -ge 1 ]` after a helm() stub.
+  local fixture="$BATS_TEST_TMPDIR/nested.bats" out
+  {
+    printf '@test "nested" {\n'                     # 1
+    printf '  helm() { cat <<\x27YAML\x27\n'         # 2: nested-fn brace + heredoc opener
+    printf 'kind: Deployment\n'                      # 3: heredoc body -> spared
+    printf 'YAML\n'                                  # 4: terminator
+    printf '}\n'                                      # 5: closes helm() at column 0
+    printf '  [ "$x" -ge 1 ]\n'                      # 6: AFTER the nested } -> flagged
+    printf '  [[ "$y" == ok ]] || return 1\n'        # 7: hardened -> spared
+    printf '}\n'                                      # 8: real end of the @test
+  } > "$fixture"
+
+  out="$(awk -f "$SCANNER" "$fixture")"
+  [[ "$out" == *":6:"* ]] || { printf 'expected line 6 to be flagged, got:\n%s\n' "$out" >&2; return 1; }
+  [[ "$out" != *":3:"* ]] || { printf 'line 3 (heredoc body) must be spared, got:\n%s\n' "$out" >&2; return 1; }
+  [[ "$out" != *":7:"* ]] || { printf 'line 7 (hardened) must be spared, got:\n%s\n' "$out" >&2; return 1; }
+  [[ "$(printf '%s' "$out" | grep -c .)" == "1" ]] || { printf 'expected exactly 1 offender, got:\n%s\n' "$out" >&2; return 1; }
+}
+
+@test "the scanner scans one-line @test bodies (Bugbot)" {
+  # `@test "x" { run foo; [ "$status" -eq 0 ]; }` puts the whole body on the @test
+  # line. Consuming that line as merely an opener never scanned the inline assertion.
+  # common.bats has two of these (`has: present command` / `has: absent command`).
+  local fixture="$BATS_TEST_TMPDIR/oneline.bats" out
+  {
+    printf '@test "unhardened" { run has bash; [ "$status" -eq 0 ]; }\n'            # 1: flagged
+    printf '@test "hardened" { run has bash; [ "$status" -eq 0 ] || return 1; }\n'  # 2: spared
+    printf '@test "no assertion" { run has bash; }\n'                               # 3: spared
+  } > "$fixture"
+
+  out="$(awk -f "$SCANNER" "$fixture")"
+  [[ "$out" == *":1:"* ]] || { printf 'expected line 1 to be flagged, got:\n%s\n' "$out" >&2; return 1; }
+  [[ "$out" != *":2:"* ]] || { printf 'line 2 (hardened) must be spared, got:\n%s\n' "$out" >&2; return 1; }
+  [[ "$out" != *":3:"* ]] || { printf 'line 3 (no assertion) must be spared, got:\n%s\n' "$out" >&2; return 1; }
+  [[ "$(printf '%s' "$out" | grep -c .)" == "1" ]] || { printf 'expected exactly 1 offender, got:\n%s\n' "$out" >&2; return 1; }
+}
+
+@test "a semicolon inside a subshell does not split a hardened assertion (Bugbot)" {
+  # Splitting a compound line on ';' to check each statement must ignore a ';' inside
+  # a ( ) subshell or $( ) substitution, or `! ( a; b ) || return 1` is torn into
+  # `! ( a` and reported though it is hardened. probe.bats has three of these.
+  local fixture="$BATS_TEST_TMPDIR/subshell.bats" out n
+  {
+    printf '@test "subshell" {\n'                              # 1
+    printf '  ! ( cd /tmp; grep -q needle f ) || return 1\n'   # 2: ; in ( ) -> spared
+    printf '  x=$(a; b); [ -n "$x" ] || return 1\n'            # 3: ; in $( ) -> spared
+    printf '  ! ( cd /tmp; grep -q needle f )\n'               # 4: UNHARDENED -> flagged
+    printf '}\n'                                                # 5
+  } > "$fixture"
+
+  out="$(awk -f "$SCANNER" "$fixture")"
+  [[ "$out" == *":4:"* ]] || { printf 'expected line 4 to be flagged, got:\n%s\n' "$out" >&2; return 1; }
+  for n in 2 3; do
+    [[ "$out" != *":$n:"* ]] || { printf 'line %s should be spared, got:\n%s\n' "$n" "$out" >&2; return 1; }
+  done
+  [[ "$(printf '%s' "$out" | grep -c .)" == "1" ]] || { printf 'expected exactly 1 offender, got:\n%s\n' "$out" >&2; return 1; }
+}

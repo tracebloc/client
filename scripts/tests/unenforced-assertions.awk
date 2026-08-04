@@ -84,48 +84,50 @@ function bracket_open(line,   s) {
     return (bracket_tail(line) == NOCLOSE)
 }
 
-function classify(logical, fnr,   tail, word, seg, stail) {
-    if (is_enforcing(logical))                                      return  # a REAL, unquoted, uncommented `|| return 1`
-    if (logical ~ /^[[:space:]]*#/)                                 return  # comment
+# Report `logical` once if ANY of its top-level (`;`-separated) statements is an
+# unhardened assertion. Splitting on unquoted `;` lets us see an assertion that is
+# not the LAST command of a compound or one-line body — `run x; [[ y ]]`, or
+# `@test "…" { run x; [ y ]; }` — which a line-start-only match would miss (Bugbot).
+function classify(logical, fnr,   code, seg_arr, n, i) {
+    # Strip any trailing/whole-line comment BEFORE splitting: a `;` inside a comment
+    # (`# … run foo; [ x ]`) must not be treated as a statement separator, or the
+    # comment's text is mis-read as a bare assertion.
+    code = strip_comment(logical)
+    n = split_segments(code, seg_arr)
+    for (i = 1; i <= n; i++) {
+        if (stmt_is_unhardened_assertion(trim(seg_arr[i]))) {
+            printf "%s:%d: %s\n", FILENAME, fnr, logical
+            return
+        }
+    }
+}
+
+# Is one statement a standalone `[[ … ]]` / `[ … ]` / `! cmd` that lacks a
+# top-level `|| return 1`? An `||`/`&&` INSIDE the brackets does not exempt it
+# (bracket_tail looks only AFTER the closer); a real top-level chain does.
+function stmt_is_unhardened_assertion(seg,   word, tail) {
+    if (seg == "")                     return 0
+    if (is_enforcing(seg))             return 0   # a REAL, unquoted, uncommented `|| return 1`
+    if (seg ~ /^#/)                    return 0   # comment
 
     # control flow — a condition, not an assertion. Compared as a word rather than
     # with \b, which is not portable across awk implementations.
-    word = trim(logical)
+    word = seg
     sub(/[[:space:]].*$/, "", word)
     if (word == "if" || word == "elif" || word == "while" || word == "until" || word == "case")
-        return
+        return 0
 
     # standalone bracket assertion — internal ||/&& is not a top-level chain
-    tail = bracket_tail(logical)
-    if (tail != NOCLOSE && (trim(tail) == "" || trim(tail) ~ /^#/)) {
-        printf "%s:%d: %s\n", FILENAME, fnr, logical
-        return
-    }
+    tail = bracket_tail(seg)
+    if (tail != NOCLOSE && (trim(tail) == "" || trim(tail) ~ /^#/))
+        return 1
 
-    # A bracket assertion / negated bare command that is the LAST command of a
-    # compound line (`run x; [[ ... ]]`, `run x; ! grep -q y`) is not at line
-    # start, so the checks above miss it — but on bash 3.2 the `[[` still cannot
-    # fail the test and a negated `! cmd` never propagates its status (Bugbot).
-    # bracket_tail on the segment distinguishes an internal `||` (empty tail →
-    # report) from a real top-level chain (`|| fail` in the tail → exempt).
-    seg = last_segment(logical)
-    if (seg != logical) {
-        stail = bracket_tail(seg)
-        if (stail != NOCLOSE && (trim(stail) == "" || trim(stail) ~ /^#/)) {
-            printf "%s:%d: %s\n", FILENAME, fnr, logical
-            return
-        }
-        if (seg !~ /&&|\|\|/ && trim(seg) ~ /^![[:space:]]*[^[:space:]]/) {
-            printf "%s:%d: %s\n", FILENAME, fnr, logical
-            return
-        }
-    }
-
-    if (logical ~ /&&|\|\|/)                                        return  # already chained
+    if (seg ~ /&&|\|\|/)               return 0   # already chained at top level
 
     # standalone negated bare command: `! cmd ...`
-    if (logical ~ /^[[:space:]]*![[:space:]]*[^[:space:]]/)
-        printf "%s:%d: %s\n", FILENAME, fnr, logical
+    if (seg ~ /^![[:space:]]*[^[:space:]]/)
+        return 1
+    return 0
 }
 
 # Is position `pos` of s inside a quoted string? Walks shell quoting state from the
@@ -199,22 +201,61 @@ function heredoc_tag_of(line,   s, off, pos, tag) {
     return ""
 }
 
-# The substring after the last UNQUOTED `;` — the last command of a compound
-# line. Returns the whole line when there is no top-level `;`. A `;` inside a
-# quoted pattern (e.g. `[[ "$x" == *";"* ]]`) does not split.
-function last_segment(line,   i, c, sq, dq, cut) {
-    sq = 0; dq = 0; cut = 0
+# Split a line into its top-level statements on UNQUOTED `;`, filling arr[1..n]
+# and returning n. A `;` inside a quoted pattern (`[[ "$x" == *";"* ]]`) or inside
+# a `( … )` subshell / `$( … )` substitution (`! ( a; b ) || return 1`) does not
+# split. This is how a compound / one-line body is broken into individually
+# checkable assertions.
+function split_segments(line, arr,   i, c, sq, dq, pd, start, n) {
+    sq = 0; dq = 0; pd = 0; start = 1; n = 0
     for (i = 1; i <= length(line); i++) {
         c = substr(line, i, 1)
+        if (c == "\\" && !sq)              { i++ }
+        else if (c == "'" && !dq)          { sq = !sq }
+        else if (c == "\"" && !sq)         { dq = !dq }
+        else if (sq || dq)                 { continue }
+        else if (c == "(")                 { pd++ }
+        else if (c == ")")                 { if (pd > 0) pd-- }
+        else if (c == ";" && pd == 0)      { n++; arr[n] = substr(line, start, i - start); start = i + 1 }
+    }
+    n++; arr[n] = substr(line, start)
+    return n
+}
+
+# Net UNQUOTED brace balance of a line (`{` = +1, `}` = -1). Used to follow the
+# test body across a nested `name() { … }` stub so its closing `}` is not mistaken
+# for the end of the @test (Bugbot). `${var}` balances to 0; a brace in a quoted
+# string is ignored, and callers pass strip_comment(line) so a brace in a trailing
+# comment is ignored too.
+function brace_delta(s,   i, c, sq, dq, d) {
+    sq = 0; dq = 0; d = 0
+    for (i = 1; i <= length(s); i++) {
+        c = substr(s, i, 1)
         if (c == "\\" && !sq)      { i++ }
         else if (c == "'" && !dq)  { sq = !sq }
         else if (c == "\"" && !sq) { dq = !dq }
-        else if (c == ";" && !sq && !dq) { cut = i }
+        else if (c == "{" && !sq && !dq) { d++ }
+        else if (c == "}" && !sq && !dq) { d-- }
     }
-    return (cut == 0) ? line : substr(line, cut + 1)
+    return d
 }
 
-FILENAME != prev { prev = FILENAME; in_test = 0; in_heredoc = 0; heredoc_tag = ""; pending = ""; parts = 0 }
+# The body of a `@test "name" { … }` line: everything after the first UNQUOTED `{`.
+# "" when the line opens no brace. For a one-line test this still includes the
+# trailing `}`, which classify() harmlessly ignores (a bare `}` is not an assertion).
+function after_first_brace(s,   i, c, sq, dq) {
+    sq = 0; dq = 0
+    for (i = 1; i <= length(s); i++) {
+        c = substr(s, i, 1)
+        if (c == "\\" && !sq)      { i++ }
+        else if (c == "'" && !dq)  { sq = !sq }
+        else if (c == "\"" && !sq) { dq = !dq }
+        else if (c == "{" && !sq && !dq) return substr(s, i + 1)
+    }
+    return ""
+}
+
+FILENAME != prev { prev = FILENAME; depth = 0; in_heredoc = 0; heredoc_tag = ""; pending = ""; parts = 0 }
 
 # ── heredoc tracking: skip the body so embedded fixture code isn't scanned ──
 in_heredoc {
@@ -229,14 +270,33 @@ in_heredoc {
 }
 {
     tag = heredoc_tag_of($0)
-    if (tag != "") { in_heredoc = 1; heredoc_tag = tag; pending = ""; parts = 0; next }
+    if (tag != "") {
+        # Count this opener's own braces before skipping the body: the `{` of
+        # `helm() { cat <<'EOF'` belongs to the test-body brace depth, but the
+        # heredoc body we skip must not be counted.
+        if (depth > 0) { depth += brace_delta(strip_comment($0)); if (depth < 0) depth = 0 }
+        in_heredoc = 1; heredoc_tag = tag; pending = ""; parts = 0; next
+    }
 }
 
-/^@test/ { in_test = 1; pending = ""; parts = 0; next }
-/^}/     { in_test = 0; pending = ""; parts = 0; next }
-!in_test { pending = ""; parts = 0; next }
+# ── @test opener: a one-line body, or the start of a multi-line one. Track the
+# body by brace depth (not the first column-0 `}`) so a nested `name() { … }`
+# closer does not end the scan early (Bugbot), and scan any inline body so
+# one-line tests are not skipped (Bugbot). ──
+/^@test/ {
+    body = after_first_brace($0)
+    if (trim(body) != "") classify(body, FNR)
+    depth = brace_delta(strip_comment($0))
+    if (depth < 0) depth = 0
+    pending = ""; parts = 0; next
+}
 
+depth <= 0 { pending = ""; parts = 0; next }     # outside any @test body
+
+# ── inside a test body ──
 {
+    d = brace_delta(strip_comment($0))
+
     cur = $0
     if (pending != "") {
         sub(/^[[:space:]]+/, "", cur)
@@ -254,10 +314,14 @@ in_heredoc {
         if (parts < 8) {
             sub(/[[:space:]]*\\[[:space:]]*$/, "", logical)
             pending = logical; pending_fnr = at; parts++
+            depth += d; if (depth <= 0) { depth = 0; pending = ""; parts = 0 }
             next
         }
     }
     pending = ""; parts = 0
 
     classify(logical, at)
+
+    depth += d
+    if (depth <= 0) depth = 0
 }

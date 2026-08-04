@@ -148,8 +148,8 @@ _set_spec() { local tmp; tmp="$(mktemp)"; sed "s|^$1=.*|$1=$2|" "$REPO/scripts/s
   # even if a future edit drops the trailing printf that masked the old pipe's exit code.
   { i=0; while [ "$i" -lt 20000 ]; do echo "K3D_VERSION=v5.9.0"; i=$((i + 1)); done; } >> "$REPO/scripts/spec/facts.env"
   run _facts --check
-  [ "$status" -eq 0 ]
-  [[ "$output" == *"all installer facts match"* ]]
+  [ "$status" -eq 0 ] || return 1
+  [[ "$output" == *"all installer facts match"* ]] || return 1
 }
 
 @test "check-facts --check: a duplicated consumer pin does not SIGPIPE _extract (#542 Bugbot)" {
@@ -158,15 +158,15 @@ _set_spec() { local tmp; tmp="$(mktemp)"; sed "s|^$1=.*|$1=$2|" "$REPO/scripts/s
   # and aborted the gate. The first line still equals the spec, so drift is zero.
   { i=0; while [ "$i" -lt 20000 ]; do echo 'K3D_VERSION="${K3D_VERSION:-v5.9.0}"'; i=$((i + 1)); done; } >> "$REPO/scripts/lib/common.sh"
   run _facts --check
-  [ "$status" -eq 0 ]
-  [[ "$output" == *"all installer facts match"* ]]
+  [ "$status" -eq 0 ] || return 1
+  [[ "$output" == *"all installer facts match"* ]] || return 1
 }
 
 @test "check-facts --check: a missing create-time --image pin fails with a WIRING message, not the --write hint (#547 / Bugbot)" {
   # versions all still correct, but strip the k3s --image wiring from cluster.sh
   printf '%s\n' '# stub without the k3s --image pin' > "$REPO/scripts/lib/cluster.sh"
   run _facts --check
-  [ "$status" -ne 0 ]
+  [ "$status" -ne 0 ] || return 1
   # must NOT point the dev at --write (it cannot restore create-time wiring)
   if printf '%s\n' "$output" | grep -qF "Run 'scripts/check-facts.sh --write'"; then
     echo "unexpected --write hint for a wiring failure:" >&2; printf '%s\n' "$output" >&2; return 1

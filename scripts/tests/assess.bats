@@ -375,7 +375,7 @@ _depname() {
   _check_existing_cluster_k8s_version() { echo "DRIFT_CHECK_RAN"; }
   _assess_handoff() { echo "HANDOFF_RAN"; }        # stub: don't exit under `run`
   run assess_existing_install
-  [ "$status" -eq 0 ]
+  [ "$status" -eq 0 ] || return 1
   assert_has "DRIFT_CHECK_RAN" "$output"
   assert_has "HANDOFF_RAN" "$output"
 }
@@ -384,6 +384,6 @@ _depname() {
   export TB_FORCE_REINSTALL=1
   _check_existing_cluster_k8s_version() { echo "DRIFT_CHECK_RAN"; }
   run assess_existing_install
-  [ "$status" -eq 0 ]
+  [ "$status" -eq 0 ] || return 1
   refute_has "DRIFT_CHECK_RAN" "$output"
 }

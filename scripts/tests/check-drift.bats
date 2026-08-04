@@ -81,7 +81,7 @@ metadata:
   name: tracebloc-resource-monitor
 YAML
 }   # tracebloc-requests-proxy is absent
-  _drift=0; _drift_workload_names >/dev/null 2>&1; [ "$_drift" -ge 1 ]
+  _drift=0; _drift_workload_names >/dev/null 2>&1; [ "$_drift" -ge 1 ] || return 1
 }
 
 @test "workloads: helm unavailable -> 2b skipped, no drift from the render half" {

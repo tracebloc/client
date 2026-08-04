@@ -257,8 +257,8 @@ setup() {
 }
 
 # ── has ────────────────────────────────────────────────────────────────────
-@test "has: present command" { run has bash; [ "$status" -eq 0 ]; }
-@test "has: absent command" { run has nope-not-a-real-cmd-xyz; [ "$status" -ne 0 ]; }
+@test "has: present command" { run has bash; [ "$status" -eq 0 ] || return 1; }
+@test "has: absent command" { run has nope-not-a-real-cmd-xyz; [ "$status" -ne 0 ] || return 1; }
 
 # ── count_bar (first-run: honest N-of-M for multi-image pulls) ───────────────
 @test "count_bar: renders 'N of M <noun>'" {

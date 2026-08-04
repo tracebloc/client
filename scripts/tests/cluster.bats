@@ -687,56 +687,56 @@ _stub_create_cluster_deps() {
   K8S_VERSION=""
   docker() { echo "rancher/k3s:v1.35.5-k3s1"; }   # would mismatch, but pin unset
   run _check_existing_cluster_k8s_version
-  [ "$status" -eq 0 ]
-  [ -z "$output" ]
+  [ "$status" -eq 0 ] || return 1
+  [ -z "$output" ] || return 1
 }
 
 @test "_check_existing_cluster_k8s_version: K8S_VERSION=latest -> no-op (explicit opt-out)" {
   K8S_VERSION="latest"
   docker() { echo "rancher/k3s:v1.35.5-k3s1"; }
   run _check_existing_cluster_k8s_version
-  [ "$status" -eq 0 ]
-  [ -z "$output" ]
+  [ "$status" -eq 0 ] || return 1
+  [ -z "$output" ] || return 1
 }
 
 @test "_check_existing_cluster_k8s_version: running k3s matches the pin -> silent pass" {
   K8S_VERSION="v1.29.4-k3s1"
   docker() { echo "rancher/k3s:v1.29.4-k3s1"; }
   run _check_existing_cluster_k8s_version
-  [ "$status" -eq 0 ]
-  [ -z "$output" ]
+  [ "$status" -eq 0 ] || return 1
+  [ -z "$output" ] || return 1
 }
 
 @test "_check_existing_cluster_k8s_version: running k3s drifted from the pin -> recreate warning" {
   K8S_VERSION="v1.29.4-k3s1"
   docker() { echo "rancher/k3s:v1.35.5-k3s1"; }    # the #547 observation
   run _check_existing_cluster_k8s_version
-  [ "$status" -eq 0 ]
-  [[ "$output" == *"v1.35.5-k3s1"* ]]
-  [[ "$output" == *"not the validated pin"* ]]
-  [[ "$output" == *"k3d cluster delete"* ]]
+  [ "$status" -eq 0 ] || return 1
+  [[ "$output" == *"v1.35.5-k3s1"* ]] || return 1
+  [[ "$output" == *"not the validated pin"* ]] || return 1
+  [[ "$output" == *"k3d cluster delete"* ]] || return 1
 }
 
 @test "_check_existing_cluster_k8s_version: registry-qualified + digest suffix still compares the tag" {
   K8S_VERSION="v1.29.4-k3s1"
   docker() { echo "docker.io/rancher/k3s:v1.29.4-k3s1@sha256:deadbeef"; }
   run _check_existing_cluster_k8s_version
-  [ "$status" -eq 0 ]
-  [ -z "$output" ]                                  # tag matches -> no warning
+  [ "$status" -eq 0 ] || return 1
+  [ -z "$output" ] || return 1                                  # tag matches -> no warning
 }
 
 @test "_check_existing_cluster_k8s_version: unparseable image ref -> silent no-op (no false warn)" {
   K8S_VERSION="v1.29.4-k3s1"
   docker() { echo "some-mirror/other-image:tag"; }  # not rancher/k3s
   run _check_existing_cluster_k8s_version
-  [ "$status" -eq 0 ]
-  [ -z "$output" ]
+  [ "$status" -eq 0 ] || return 1
+  [ -z "$output" ] || return 1
 }
 
 @test "_check_existing_cluster_k8s_version: docker inspect fails -> silent no-op" {
   K8S_VERSION="v1.29.4-k3s1"
   docker() { return 1; }
   run _check_existing_cluster_k8s_version
-  [ "$status" -eq 0 ]
-  [ -z "$output" ]
+  [ "$status" -eq 0 ] || return 1
+  [ -z "$output" ] || return 1
 }
