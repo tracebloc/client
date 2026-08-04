@@ -159,7 +159,7 @@ function Err($m, $Detail)  {
   exit 1
 }
 function Step($n, $t, $l)  { Write-Host ""; Write-Host "Step $n/$t" -ForegroundColor Cyan -NoNewline; Write-Host "  $l" -ForegroundColor White; Log "== Step $n/$t : $l ==" }
-function Log($m)           { if ($script:LOG_FILE) { Add-Content -Path $script:LOG_FILE -Value "[$(Get-Date -Format 'HH:mm:ss')] $m" -ErrorAction SilentlyContinue } }
+function Log($m)           { if ($script:LOG_FILE) { Add-Content -Path $script:LOG_FILE -Value "[$(Get-Date -Format 'HH:mm:ss')] $m" -Encoding UTF8 -ErrorAction SilentlyContinue } }
 function PromptHeader($m)  { Write-Host ""; Write-Host "  $m" -ForegroundColor White; Log $m }
 function Hint($m)          { Write-Host "  $m" -ForegroundColor DarkGray; Log $m }
 function Has($cmd)         { [bool](Get-Command $cmd -ErrorAction SilentlyContinue) }
@@ -618,7 +618,11 @@ function Start-InstallLog {
   # on-screen output: no user PII, no tracebloc internals. Best-effort — if the
   # file can't be created, logging silently no-ops and the install continues.
   try {
-    Set-Content -Path $LOG_FILE -Value "tracebloc client installer log - $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')" -ErrorAction Stop
+    # UTF-8 without BOM, matching the file's other writers (UTF8Encoding($false) at
+    # L1780/L1829/L4226): Set-Content -Encoding UTF8 prepends a BOM on PS 5.1, so the
+    # log would start with EF BB BF (Saqlain, #591). WriteAllText throws into the catch
+    # on failure like -ErrorAction Stop; the trailing CRLF keeps Set-Content's newline.
+    [System.IO.File]::WriteAllText($LOG_FILE, "tracebloc client installer log - $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')`r`n", (New-Object System.Text.UTF8Encoding($false)))
     Log "Install log: $LOG_FILE"
   } catch {
     $script:LOG_FILE = $null
@@ -4216,7 +4220,13 @@ function Test-PreflightRuntimeMem {
 function Edit-Redaction([string]$Path) {
   if (-not (Test-Path $Path)) { return }
   try {
-    $t = Get-Content -Path $Path -Raw -ErrorAction Stop
+    # -Encoding UTF8 so the read matches how these files were written. The curated
+    # install log is now UTF-8 WITHOUT a BOM (Start-InstallLog), and on PS 5.1 a
+    # bare Get-Content -Raw would decode a BOM-less file as ANSI and mojibake every
+    # non-ASCII host path/message in the -Diagnose bundle -- the exact corruption
+    # this change set out to fix (Bugbot, #591). UTF8 also reads the BOM'd Out-File
+    # outputs here correctly (the BOM is detected and stripped).
+    $t = Get-Content -Path $Path -Raw -Encoding UTF8 -ErrorAction Stop
     # First rule redacts ANY *password key (clientPassword, dockerRegistry
     # password, HTTP_PROXY_PASSWORD, ...) in : or = form, not just clientPassword.
     $t = $t -replace '(?i)([A-Za-z0-9_.-]*password\s*[:=]\s*).*', '$1[REDACTED]'
