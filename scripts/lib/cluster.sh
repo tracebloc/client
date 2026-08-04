@@ -143,13 +143,15 @@ _resolve_ca_bundle() {
 }
 
 # Wire the resolved corporate CA into the HOST tools that do NOT honor a CA env on
-# their own — cosign & helm & any Go tool (SSL_CERT_FILE), git (GIT_SSL_CAINFO) — so
-# a TLS-inspecting proxy that re-signs HTTPS is trusted beyond just curl (#583). curl
-# ALREADY honors the user's own CURL_CA_BUNDLE natively, so we do NOT re-export it:
-# CURL_CA_BUNDLE is replace-not-augment, and deriving it from a corp-root-only
-# TRACEBLOC_CA_BUNDLE would drop the public roots curl needs elsewhere (Bugbot). The
-# k3d NODES are trusted separately at cluster-create (#424). Idempotent; a no-op when
-# no CA is configured; fails fast on a set-but-unreadable bundle.
+# their own (#583). git (OpenSSL-backed) honors GIT_SSL_CAINFO on Linux + macOS. The
+# Go tools (cosign/helm) read SSL_CERT_FILE on LINUX only — on macOS Go uses the
+# system Keychain and IGNORES SSL_CERT_FILE (Bugbot), so there the CA must live in the
+# Keychain (or use the offline path, #584). curl ALREADY honors the user's own
+# CURL_CA_BUNDLE natively, so we do NOT re-export it (it's replace-not-augment, and a
+# corp-root-only bundle would drop the public roots). The k3d NODES are trusted
+# separately at cluster-create (#424). Idempotent; no-op when no CA is configured;
+# fails fast on a set-but-unreadable bundle. The announce names only what actually
+# takes effect on this platform.
 wire_ca_trust() {
   local ca rc=0
   ca="$(_resolve_ca_bundle)" || rc=$?
@@ -158,7 +160,12 @@ wire_ca_trust() {
   fi
   [[ -z "$ca" ]] && return 0
   export SSL_CERT_FILE="$ca" GIT_SSL_CAINFO="$ca"
-  success "Trusting your company's certificate for cosign, helm, git and downloads."
+  if [[ "$OS" == "Darwin" ]]; then
+    success "Trusting your company's certificate for git and downloads."
+    hint "On macOS, cosign and helm read the system Keychain, not a PEM file — add the CA to your keychain (or use the offline installer) so they trust it too."
+  else
+    success "Trusting your company's certificate for cosign, helm, git and downloads."
+  fi
 }
 
 # Write a k3d registries.yaml pointing containerd at the mounted CA for every

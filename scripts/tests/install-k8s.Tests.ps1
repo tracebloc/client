@@ -3237,16 +3237,17 @@ Describe "Set-ToolTrust: wire the corporate CA into cosign/helm/git (#583)" {
   BeforeEach { $env:TRACEBLOC_CA_BUNDLE=$null; $env:CURL_CA_BUNDLE=$null; $env:SSL_CERT_FILE=$null; $env:GIT_SSL_CAINFO=$null }
   AfterAll  { $env:TRACEBLOC_CA_BUNDLE=$null; $env:CURL_CA_BUNDLE=$null; $env:SSL_CERT_FILE=$null; $env:GIT_SSL_CAINFO=$null }
 
-  It "exports SSL_CERT_FILE + GIT_SSL_CAINFO from a configured CA bundle" {
+  It "exports GIT_SSL_CAINFO but NOT SSL_CERT_FILE (Go ignores it on Windows), points cosign/helm at the store (Bugbot)" {
     $ca = Join-Path $TestDrive "ca.pem"; "pem" | Set-Content -LiteralPath $ca
     $env:TRACEBLOC_CA_BUNDLE = $ca
-    Set-ToolTrust *> $null
-    $env:SSL_CERT_FILE  | Should -Be (Resolve-Path -LiteralPath $ca).Path
+    $out = Set-ToolTrust 6>&1 | Out-String
     $env:GIT_SSL_CAINFO | Should -Be (Resolve-Path -LiteralPath $ca).Path
+    $env:SSL_CERT_FILE  | Should -BeNullOrEmpty      # inert on Windows; deliberately not set
+    $out | Should -Match 'certificate store'         # cosign/helm directed to the store
   }
 
   It "no-op when no CA is configured" {
     Set-ToolTrust *> $null
-    $env:SSL_CERT_FILE | Should -BeNullOrEmpty
+    $env:GIT_SSL_CAINFO | Should -BeNullOrEmpty
   }
 }

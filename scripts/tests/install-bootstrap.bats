@@ -189,6 +189,15 @@ EOF
   [ "$(cat "$SBX/cosign-ssl")" = "$ca" ]
 }
 
+@test "bootstrap fails fast on a set-but-unreadable CA bundle (#583 Bugbot)" {
+  # A bad CA path must fail here with a clear message, not silently no-op and surface
+  # later as a generic cosign authenticity error.
+  REF="v9.9.9" TRACEBLOC_CA_BUNDLE="/no/such/corporate-ca.pem" run_boot
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"can't be read"* ]]
+  [ ! -f "$SBX/k8s-ran" ]
+}
+
 @test "tampered sub-script aborts before the privileged step" {
   # Mutate a fetched file AFTER the manifest was built → digest mismatch.
   echo "rm -rf / # evil" >> "$SERVE/scripts/lib/provision.sh"

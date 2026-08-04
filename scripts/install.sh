@@ -330,18 +330,26 @@ _sha256_of() {
 # A missing manifest, a missing line, or a digest mismatch ABORTS — before any
 # privileged sub-script (provision.sh mints+writes the credential; install-
 # client-helm.sh runs Helm) is executed.
-# Wire an explicitly-provided corporate CA into cosign (SSL_CERT_FILE) so a
-# TLS-inspecting proxy that re-signs HTTPS doesn't fail the signature check with an
-# x509 error (#583) — the class behind the field TLS-inspection failures. Only
-# SSL_CERT_FILE (cosign's Go HTTPS client reads it): curl ALREADY honors the user's
-# own CURL_CA_BUNDLE natively, and we must NOT re-export it from a corp-root-only
-# TRACEBLOC_CA_BUNDLE — CURL_CA_BUNDLE is replace-not-augment, so that would drop the
-# public roots curl needs for the manifest/sig fetches (Bugbot). No-op when unset;
-# helm/git wiring is done by the main installer's wire_ca_trust.
+# Wire an explicitly-provided corporate CA into cosign so a TLS-inspecting proxy that
+# re-signs HTTPS doesn't fail the signature check with an x509 error (#583). cosign is
+# Go: it reads SSL_CERT_FILE on LINUX, but on macOS Go uses the system Keychain and
+# IGNORES SSL_CERT_FILE (Bugbot) — so on macOS the CA must live in the Keychain, or
+# use the offline installer path (#584). curl ALREADY honors the user's own
+# CURL_CA_BUNDLE natively, and we must NOT re-export it from a corp-root-only
+# TRACEBLOC_CA_BUNDLE (CURL_CA_BUNDLE is replace-not-augment). Fail fast on a
+# set-but-unreadable bundle rather than a later generic cosign error.
 _bootstrap_wire_ca() {
-  local ca="${TRACEBLOC_CA_BUNDLE:-${CURL_CA_BUNDLE:-}}"
-  [[ -n "$ca" && -f "$ca" && -r "$ca" ]] || return 0
-  export SSL_CERT_FILE="$ca"
+  local var ca
+  for var in TRACEBLOC_CA_BUNDLE CURL_CA_BUNDLE; do
+    ca="${!var:-}"; [[ -z "$ca" ]] && continue
+    if [[ ! -f "$ca" || ! -r "$ca" ]]; then
+      echo "[ERROR] $var is set to '$ca' but that CA bundle file can't be read —" >&2
+      echo "        fix its path/permissions and re-run." >&2
+      exit 1
+    fi
+    export SSL_CERT_FILE="$ca"   # effective for cosign on Linux (see note above)
+    return 0
+  done
 }
 
 verify_against_manifest() {

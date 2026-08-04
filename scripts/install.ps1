@@ -319,13 +319,16 @@ function Confirm-ManifestSignature {
     [string]$TmpDir,
     [bool]$AllowUnverified
   )
-  # Wire an explicitly-provided corporate CA into cosign (SSL_CERT_FILE) before its
-  # HTTPS calls, so a TLS-inspecting proxy that re-signs HTTPS doesn't fail the
-  # signature check with an x509 error (#583). Invoke-WebRequest uses the system
-  # store; cosign's Go client reads SSL_CERT_FILE (added to the roots on modern Go,
-  # incl. Windows). No-op when unset; helm/git wiring happens in the main installer.
+  # An explicit corporate CA can't be wired into cosign via env on Windows: cosign is
+  # Go, and Go on Windows reads the certificate store and IGNORES SSL_CERT_FILE
+  # (Bugbot). So there's nothing to export here — the CA must live in the Windows
+  # store (Cert:\LocalMachine\Root), or use the offline installer path (#584).
+  # We still validate the path so a typo fails fast with a clear message rather than
+  # a later generic cosign authenticity error.
   $ca = if ($env:TRACEBLOC_CA_BUNDLE) { $env:TRACEBLOC_CA_BUNDLE } elseif ($env:CURL_CA_BUNDLE) { $env:CURL_CA_BUNDLE } else { $null }
-  if ($ca -and (Test-Path -LiteralPath $ca -PathType Leaf)) { $env:SSL_CERT_FILE = $ca }
+  if ($ca -and -not (Test-Path -LiteralPath $ca -PathType Leaf)) {
+    throw "A CA bundle is set (TRACEBLOC_CA_BUNDLE/CURL_CA_BUNDLE) but '$ca' can't be read - fix its path and re-run."
+  }
 
   $cosign = Resolve-Cosign -TmpDir $TmpDir
   if (-not $cosign) {

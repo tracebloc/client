@@ -751,16 +751,34 @@ _stub_create_cluster_deps() {
 # ── wire_ca_trust: extend the corporate CA to every host tool (#583) ─────────
 @test "wire_ca_trust: exports SSL_CERT_FILE + GIT_SSL_CAINFO from a CA (#583)" {
   local ca="$BATS_TEST_TMPDIR/ca.pem"; echo pem > "$ca"
-  TRACEBLOC_CA_BUNDLE="$ca"
+  TRACEBLOC_CA_BUNDLE="$ca"; OS="Linux"
   wire_ca_trust >/dev/null
   [ "$SSL_CERT_FILE" = "$ca" ]
   [ "$GIT_SSL_CAINFO" = "$ca" ]
 }
 
+@test "wire_ca_trust: Linux announce names cosign/helm/git (SSL_CERT_FILE effective there)" {
+  local ca="$BATS_TEST_TMPDIR/ca.pem"; echo pem > "$ca"
+  TRACEBLOC_CA_BUNDLE="$ca"; OS="Linux"
+  run wire_ca_trust
+  [[ "$output" == *"cosign, helm, git and downloads"* ]]
+}
+
+@test "wire_ca_trust: macOS announce names only git + hints Keychain for cosign/helm (Bugbot)" {
+  # Go ignores SSL_CERT_FILE on macOS (Keychain), so the announce must not claim to
+  # wire cosign/helm there — it points the user at the Keychain instead.
+  local ca="$BATS_TEST_TMPDIR/ca.pem"; echo pem > "$ca"
+  TRACEBLOC_CA_BUNDLE="$ca"; OS="Darwin"
+  run wire_ca_trust
+  [[ "$output" == *"git and downloads"* ]]
+  [[ "$output" != *"cosign, helm"* ]]
+  [[ "$output" == *"Keychain"* ]]
+}
+
 @test "wire_ca_trust: does NOT clobber a user's CURL_CA_BUNDLE (replace-not-augment, Bugbot)" {
   local ca="$BATS_TEST_TMPDIR/corp.pem";       echo pem > "$ca"
   local full="$BATS_TEST_TMPDIR/full-bundle.pem"; echo pem > "$full"
-  TRACEBLOC_CA_BUNDLE="$ca"; CURL_CA_BUNDLE="$full"
+  TRACEBLOC_CA_BUNDLE="$ca"; CURL_CA_BUNDLE="$full"; OS="Linux"
   wire_ca_trust >/dev/null
   [ "$SSL_CERT_FILE" = "$ca" ]       # cosign/helm/git get the corp CA
   [ "$CURL_CA_BUNDLE" = "$full" ]    # curl's own bundle is left intact (not overwritten)
