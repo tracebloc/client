@@ -128,3 +128,50 @@ tests:
             apiGroups: [""]
             resources: ["secrets"]
             verbs: ["delete"]
+
+  # RFC-0003 D9 Track B (client-runtime#203/#261): the PV/PVC provisioning +
+  # GC verbs jobs-manager needs are flag-gated and cluster-scope-only.
+  - it: default-off grants nothing on persistentvolumes/persistentvolumeclaims (byte-for-byte)
+    set:
+      clusterScope: true
+    documentIndex: 1
+    asserts:
+      - notContains:
+          path: rules
+          content:
+            apiGroups: [""]
+            resources: ["persistentvolumes"]
+            verbs: ["create", "get", "list", "patch", "delete"]
+      - notContains:
+          path: rules
+          content:
+            apiGroups: [""]
+            resources: ["persistentvolumeclaims"]
+            verbs: ["create", "list", "delete"]
+
+  - it: perDatasetPvcs adds PV provisioning/GC + PVC grants (ClusterRole)
+    set:
+      clusterScope: true
+      perDatasetPvcs: true
+    documentIndex: 1
+    asserts:
+      - contains:
+          path: rules
+          content:
+            apiGroups: [""]
+            resources: ["persistentvolumes"]
+            verbs: ["create", "get", "list", "patch", "delete"]
+      - contains:
+          path: rules
+          content:
+            apiGroups: [""]
+            resources: ["persistentvolumeclaims"]
+            verbs: ["create", "list", "delete"]
+
+  - it: perDatasetPvcs with clusterScope false fails the render (PVs not grantable by a namespace Role)
+    set:
+      clusterScope: false
+      perDatasetPvcs: true
+    asserts:
+      - failedTemplate:
+          errorPattern: "perDatasetPvcs requires clusterScope"
