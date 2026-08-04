@@ -4220,7 +4220,13 @@ function Test-PreflightRuntimeMem {
 function Edit-Redaction([string]$Path) {
   if (-not (Test-Path $Path)) { return }
   try {
-    $t = Get-Content -Path $Path -Raw -ErrorAction Stop
+    # -Encoding UTF8 so the read matches how these files were written. The curated
+    # install log is now UTF-8 WITHOUT a BOM (Start-InstallLog), and on PS 5.1 a
+    # bare Get-Content -Raw would decode a BOM-less file as ANSI and mojibake every
+    # non-ASCII host path/message in the -Diagnose bundle -- the exact corruption
+    # this change set out to fix (Bugbot, #591). UTF8 also reads the BOM'd Out-File
+    # outputs here correctly (the BOM is detected and stripped).
+    $t = Get-Content -Path $Path -Raw -Encoding UTF8 -ErrorAction Stop
     # First rule redacts ANY *password key (clientPassword, dockerRegistry
     # password, HTTP_PROXY_PASSWORD, ...) in : or = form, not just clientPassword.
     $t = $t -replace '(?i)([A-Za-z0-9_.-]*password\s*[:=]\s*).*', '$1[REDACTED]'
