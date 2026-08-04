@@ -645,7 +645,141 @@ _pf_storage_type() {
   return 0
 }
 
+# ── Network profile (#582) ───────────────────────────────────────────────────
+# A plain-language read of the network BEFORE the endpoint probes, so a user on a
+# restricted/corporate network sees what's happening up front instead of a cryptic
+# failure minutes in. Detects an explicit proxy, a configured corporate CA bundle,
+# and (best-effort) TLS inspection. Never fatal, bounded, PII-free (proxy
+# credentials are stripped and never printed/logged). The connectivity probes and
+# the break-and-inspect hint below still own the actionable fix guidance.
+
+# Strip scheme:// and any user:pass@ credentials from a proxy URL; echo bare
+# host:port. Credentials must NEVER reach the screen or log (#576).
+_pf_proxy_hostport() {
+  local u="${1:-}"
+  u="${u#*://}"     # drop scheme://
+  u="${u#*@}"       # drop user:pass@ credentials (PII)
+  u="${u%%/*}"      # drop any /path
+  echo "$u"
+}
+
+# Echo the first explicit proxy from the environment as a bare host:port (creds
+# stripped), or empty when none is set. HTTPS takes precedence (that's the one that
+# matters for our all-HTTPS egress).
+_pf_env_proxy() {
+  local v val
+  for v in HTTPS_PROXY https_proxy HTTP_PROXY http_proxy; do
+    val="${!v:-}"; [[ -n "$val" ]] && { _pf_proxy_hostport "$val"; return 0; }
+  done
+  return 0
+}
+
+# Echo the first explicit proxy from the environment VERBATIM (scheme + any
+# user:pass credentials intact), or empty. For the probe CONNECTION only — an
+# authenticated proxy needs the credentials to answer the CONNECT, or it 407s and
+# the inspection probe silently returns 'unknown' (Bugbot). NEVER print/log this;
+# display always uses the credential-stripped _pf_env_proxy.
+_pf_env_proxy_raw() {
+  local v val
+  for v in HTTPS_PROXY https_proxy HTTP_PROXY http_proxy; do
+    val="${!v:-}"; [[ -n "$val" ]] && { printf '%s' "$val"; return 0; }
+  done
+  return 0
+}
+
+# Percent-decode a URL-encoded string (proxy userinfo). Mirrors PowerShell's
+# [Uri]::UnescapeDataString so an encoded credential (e.g. a "%40" in a password)
+# authenticates identically on both platforms (Bugbot). Percent-only: userinfo does
+# not use '+'-for-space, so '+' is left literal.
+_pf_urldecode() {
+  local s="${1:-}"
+  printf '%b' "${s//%/\\x}"
+}
+
+# Echo the configured corporate CA bundle path when TRACEBLOC_CA_BUNDLE or
+# CURL_CA_BUNDLE points at a readable file; empty otherwise. SOFT (never errors) —
+# the hard validation lives in cluster.sh's _resolve_ca_bundle at cluster-create.
+_pf_env_ca_bundle() {
+  local v val
+  for v in TRACEBLOC_CA_BUNDLE CURL_CA_BUNDLE; do
+    val="${!v:-}"; [[ -n "$val" && -f "$val" && -r "$val" ]] && { echo "$val"; return 0; }
+  done
+  return 0
+}
+
+# Return 0 if an X.509 issuer string names a well-known PUBLIC CA (a normal direct
+# chain); 1 otherwise (a corporate re-signer — i.e. TLS inspection). Pure/testable.
+_pf_issuer_is_public() {
+  printf '%s' "${1:-}" | grep -qiE "DigiCert|Sectigo|Comodo|Let'?s Encrypt|ISRG|Google Trust|GTS |GlobalSign|Amazon|Entrust|GeoTrust|Baltimore|USERTrust|Actalis|Buypass|SSL\.com|Certum|IdenTrust|Microsoft (Azure|RSA|ECC)"
+}
+
+# Best-effort affirmative TLS-inspection probe. Echo yes|no|unknown. Reads the
+# issuer of the cert served for a well-known public host (through the proxy when
+# one is set); a non-public issuer means a corporate CA is re-signing TLS. Bounded
+# and non-hanging: needs openssl AND a timeout tool, else 'unknown' (we never run
+# an unbounded openssl s_client that a blackholed 443 could hang forever).
+_pf_detect_tls_inspection() {
+  has openssl || { echo "unknown"; return 0; }
+  { has timeout || has gtimeout; } || { echo "unknown"; return 0; }
+  local host="github.com" raw issuer creds user="" pass=""
+  local -a args=(s_client -connect "${host}:443" -servername "$host")
+  # Connect THROUGH the proxy using the raw value: -proxy takes host:port (creds
+  # stripped), and an authenticated proxy additionally needs -proxy_user/-proxy_pass
+  # (openssl >= 3.0) or it 407s and issuer capture fails → a false 'unknown' on the
+  # exact TLS-inspecting networks this exists to detect (Bugbot). Credentials go to
+  # openssl only, URL-decoded (parity with the PS peer) and NEVER printed/logged.
+  raw="$(_pf_env_proxy_raw)"
+  if [[ -n "$raw" ]]; then
+    args+=(-proxy "$(_pf_proxy_hostport "$raw")")
+    if [[ "$raw" == *"@"* ]] && openssl s_client -help 2>&1 | grep -q -- '-proxy_user'; then
+      creds="${raw#*://}"; creds="${creds%%@*}"          # user[:pass], percent-encoded
+      if [[ "$creds" == *:* ]]; then
+        user="$(_pf_urldecode "${creds%%:*}")"; pass="$(_pf_urldecode "${creds#*:}")"
+      else
+        user="$(_pf_urldecode "$creds")"; pass=""        # user@ with no password
+      fi
+      # Pass the password via env: (openssl reads $_TB_PROXY_PASS) so it never lands
+      # in argv / ps / /proc/*/cmdline on a shared host (Bugbot). Username isn't secret.
+      args+=(-proxy_user "$user" -proxy_pass "env:_TB_PROXY_PASS")
+    fi
+  fi
+  # echo | : send EOF so s_client returns after the handshake. We deliberately do
+  # NOT pass -verify_return_error — we want the served cert's issuer even when the
+  # corporate CA isn't trusted, so we can name the inspection. The password is
+  # exported ONLY inside this command-substitution subshell (openssl reads it via
+  # env:), so it never reaches argv or the parent shell. `|| issuer=""` keeps a
+  # failed/timed-out probe from aborting under `set -euo pipefail` (like _pf_probe_url).
+  issuer="$(
+    export _TB_PROXY_PASS="$pass"
+    echo | _bounded 8 openssl "${args[@]}" 2>/dev/null | openssl x509 -noout -issuer 2>/dev/null
+  )" || issuer=""
+  [[ -z "$issuer" ]] && { echo "unknown"; return 0; }
+  if _pf_issuer_is_public "$issuer"; then echo "no"; else echo "yes"; fi
+}
+
+# Print the plain-language network profile line (only when noteworthy — a plain
+# direct connection stays silent; the "Connected:" line already confirms egress).
+# Exports PF_NET_PROXY / PF_NET_CA / PF_NET_INSPECT for later reuse.
+_pf_network_profile() {
+  PF_NET_PROXY="$(_pf_env_proxy)"
+  PF_NET_CA="$(_pf_env_ca_bundle)"
+  PF_NET_INSPECT="$(_pf_detect_tls_inspection)"
+
+  # Nothing noteworthy: no proxy and inspection not affirmatively detected.
+  [[ -z "$PF_NET_PROXY" && "$PF_NET_INSPECT" != "yes" ]] && return 0
+
+  local -a parts=()
+  [[ -n "$PF_NET_PROXY" ]]            && parts+=("corporate proxy detected (${PF_NET_PROXY})")
+  [[ "$PF_NET_INSPECT" == "yes" ]]    && parts+=("TLS inspection detected")
+  [[ -n "$PF_NET_CA" ]]               && parts+=("your company's certificate is configured")
+  local joined="" p
+  for p in "${parts[@]}"; do joined="${joined:+$joined; }$p"; done
+  info "Network: ${joined}."
+  return 0
+}
+
 _pf_connectivity() {
+  _pf_network_profile   # #582: announce the network profile before the probes
   # Can't probe without curl — and on the direct ./install-k8s.sh path the
   # installer hasn't installed it yet. Skip with a warning rather than hard-fail
   # with a misleading "egress blocked" (curl is installed downstream).

@@ -155,13 +155,44 @@ function Err($m, $Detail)  {
   # Mirror to the curated log too (#576) — Get-ErrDetailLines already strips the
   # `At <file>:<line> char:` / `+ …` source-dump lines, so nothing internal leaks.
   Log "ERROR: $m"; foreach ($l in $det) { Log $l }
+  $script:OutcomeReported = $true   # Err IS a reported outcome (guards the finally)
   exit 1
 }
 function Step($n, $t, $l)  { Write-Host ""; Write-Host "Step $n/$t" -ForegroundColor Cyan -NoNewline; Write-Host "  $l" -ForegroundColor White; Log "== Step $n/$t : $l ==" }
-function Log($m)           { if ($script:LOG_FILE) { Add-Content -Path $script:LOG_FILE -Value "[$(Get-Date -Format 'HH:mm:ss')] $m" -ErrorAction SilentlyContinue } }
+function Log($m)           { if ($script:LOG_FILE) { Add-Content -Path $script:LOG_FILE -Value "[$(Get-Date -Format 'HH:mm:ss')] $m" -Encoding UTF8 -ErrorAction SilentlyContinue } }
 function PromptHeader($m)  { Write-Host ""; Write-Host "  $m" -ForegroundColor White; Log $m }
 function Hint($m)          { Write-Host "  $m" -ForegroundColor DarkGray; Log $m }
 function Has($cmd)         { [bool](Get-Command $cmd -ErrorAction SilentlyContinue) }
+
+# Top-level fatal handler (#577): convert ANY unhandled terminating error into a
+# clean, branded message — never PowerShell's raw source line + stack trace — then
+# the caller exits non-zero. The reason shown is the exception MESSAGE (curated at
+# the throw sites, #576); the stack trace is deliberately NOT shown or logged, so
+# no tracebloc internals leak. The user always sees what happened + what to do.
+function Show-FatalError($err) {
+  $script:OutcomeReported = $true   # this IS the reported outcome (guards the finally)
+  $reason = ""
+  try { $reason = [string]$err.Exception.Message } catch {}
+  if (-not $reason) { $reason = [string]$err }
+  Log "FATAL: $reason"
+  Write-Host ""
+  Write-Host "  " -NoNewline; Write-Host ([char]0x2716) -ForegroundColor Red -NoNewline; Write-Host " Installation stopped." -ForegroundColor Red
+  if ($reason) { Write-Host "  $reason" -ForegroundColor DarkGray }
+  if ($script:LOG_FILE) { Hint "Details saved to: $script:LOG_FILE" }
+  Hint "It's safe to re-run this installer. If it keeps failing, send that log to tracebloc support."
+}
+
+# The guaranteed finally's closer (#577): fires ONLY when the run ended without
+# reporting an outcome — i.e. an interruption (Ctrl-C) or an abnormal termination
+# that wasn't a handled Err, a caught crash, or a normal finish — so the window
+# never just vanishes. Mirrors bash's exit-code-guarded install_cleanup.
+function Show-Interrupted {
+  Log "Installation interrupted before completion."
+  Write-Host ""
+  Write-Host "  " -NoNewline; Write-Host ([char]0x26A0) -ForegroundColor Yellow -NoNewline; Write-Host "  Installation was interrupted before it finished." -ForegroundColor Yellow
+  if ($script:LOG_FILE) { Hint "Log: $script:LOG_FILE" }
+  Hint "It's safe to re-run this installer."
+}
 
 function RefreshPath {
   $env:PATH = [System.Environment]::GetEnvironmentVariable("PATH","Machine") + ";" +
@@ -587,7 +618,11 @@ function Start-InstallLog {
   # on-screen output: no user PII, no tracebloc internals. Best-effort — if the
   # file can't be created, logging silently no-ops and the install continues.
   try {
-    Set-Content -Path $LOG_FILE -Value "tracebloc client installer log - $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')" -ErrorAction Stop
+    # UTF-8 without BOM, matching the file's other writers (UTF8Encoding($false) at
+    # L1780/L1829/L4226): Set-Content -Encoding UTF8 prepends a BOM on PS 5.1, so the
+    # log would start with EF BB BF (Saqlain, #591). WriteAllText throws into the catch
+    # on failure like -ErrorAction Stop; the trailing CRLF keeps Set-Content's newline.
+    [System.IO.File]::WriteAllText($LOG_FILE, "tracebloc client installer log - $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')`r`n", (New-Object System.Text.UTF8Encoding($false)))
     Log "Install log: $LOG_FILE"
   } catch {
     $script:LOG_FILE = $null
@@ -1086,6 +1121,11 @@ function Enable-VirtualisationFeatures {
 
   if ($rebootNeeded) {
     Warn "A reboot is required to finish enabling system features."
+    # A reboot-pending stop IS a reported outcome (Bugbot): the guidance below tells
+    # the user exactly what happens next. Set the flag so the top-level finally does
+    # not then append a contradictory "interrupted" line. Covers every exit from this
+    # block (both `exit 2` paths and the Restart-Computer path).
+    $script:OutcomeReported = $true
     # Arm the RunOnce continuation so the install resumes at next sign-in with no
     # re-pasting -- both for auto-reboot and manual -NoReboot (#420). RunOnce is
     # written to the CURRENT (elevating) account's hive: the reboot happens here in
@@ -2535,26 +2575,57 @@ function New-K3dCluster {
 # =============================================================================
 
 function Install-GpuDevicePlugin {
-  if ($GPU_VENDOR -ne "nvidia" -or -not $NVIDIA_DRIVER_OK -or $K3D_GPU_FLAG -eq "") { return }
+  # Returns $true when the GPU plugin is (believed) deployed, $false otherwise, so
+  # the caller can skip Confirm-GpuNode's ~90s wait for a plugin never applied
+  # (Bugbot). Every message helper uses Write-Host, so the only pipeline output is
+  # the boolean below (the Invoke-WithRetry result is sunk to $null to be safe).
+  if ($GPU_VENDOR -ne "nvidia" -or -not $NVIDIA_DRIVER_OK -or $K3D_GPU_FLAG -eq "") { return $false }
 
   Log "Deploying NVIDIA k8s device plugin"
 
-  $dpExists = kubectl get daemonset -n kube-system nvidia-device-plugin-daemonset 2>&1
+  # --request-timeout bounds the existence probe so a wedged API server can't hang
+  # here before the bounded apply is reached (reviewer; parity with bash + verify).
+  $dpExists = kubectl get daemonset -n kube-system nvidia-device-plugin-daemonset --request-timeout=5s 2>&1
   if ($LASTEXITCODE -eq 0) {
     Ok "GPU acceleration enabled."
+    return $true
   } else {
     $dpUrl = "https://raw.githubusercontent.com/NVIDIA/k8s-device-plugin/v0.14.5/nvidia-device-plugin.yml"
     $dpTmp = [System.IO.Path]::GetTempFileName()
     try {
-      Invoke-WithRetry -Label "GPU plugin download" -ScriptBlock {
+      $null = Invoke-WithRetry -Label "GPU plugin download" -ScriptBlock {
         Invoke-WebRequest -Uri $dpUrl -OutFile $dpTmp -UseBasicParsing
       }
+      $gpuOk = $false
       if ((Get-Item $dpTmp).Length -gt 0) {
-        kubectl apply -f $dpTmp
-        $null = (kubectl rollout status daemonset/nvidia-device-plugin-daemonset `
-          -n kube-system --timeout=120s 2>&1)
+        # kubectl is a native command: a non-zero exit does NOT throw, so without an
+        # explicit $LASTEXITCODE gate a failed apply/rollout would fall through to a
+        # false "GPU acceleration enabled." Capture each call's output to the log and
+        # gate the success message on the exit code (mirrors bash gpu-plugins.sh).
+        # --request-timeout bounds the API call so a wedged API server fails into the
+        # CPU-mode warn below instead of hanging silently (Bugbot; parity with bash).
+        $applyOut = (kubectl apply -f $dpTmp --request-timeout=30s 2>&1 | Out-String)
+        Log "GPU plugin apply: $applyOut"
+        if ($LASTEXITCODE -eq 0) {
+          $rollOut = (kubectl rollout status daemonset/nvidia-device-plugin-daemonset `
+            -n kube-system --timeout=120s 2>&1 | Out-String)
+          Log "GPU plugin rollout: $rollOut"
+          $gpuOk = ($LASTEXITCODE -eq 0)
+        }
+      }
+      if ($gpuOk) {
         Ok "GPU acceleration enabled."
-      } else { Err "Failed to enable GPU acceleration." }
+      } else {
+        Warn "Couldn't enable GPU acceleration - continuing in CPU mode. Re-run the installer later to retry."
+      }
+      return $gpuOk
+    } catch {
+      # GPU is OPTIONAL: a plugin download/apply failure must NOT abort the install
+      # (#577 fatal-vs-recoverable) — otherwise the throw would reach the top-level
+      # boundary and stop everything. Warn and continue in CPU mode.
+      Warn "Couldn't enable GPU acceleration - continuing in CPU mode. Re-run the installer later to retry."
+      Log "GPU device-plugin setup error: $($_.Exception.Message)"
+      return $false
     } finally {
       Remove-Item $dpTmp -Force -ErrorAction SilentlyContinue
     }
@@ -2569,7 +2640,7 @@ function Confirm-GpuNode {
   $gpuCount = 0
   for ($i = 1; $i -le 18; $i++) {
     Start-Sleep -Seconds 5
-    $alloc = kubectl get node -o jsonpath='{.items[0].status.allocatable}' 2>$null
+    $alloc = kubectl get node -o jsonpath='{.items[0].status.allocatable}' --request-timeout=5s 2>$null
     if ($alloc -match '"nvidia\.com/gpu":"?(\d+)') { $gpuCount = [int]$Matches[1]; break }
   }
 
@@ -3828,6 +3899,129 @@ function Get-PfVirtualization {
   } catch { return $null }
 }
 
+# ── Network profile (#582) ───────────────────────────────────────────────────
+# A plain-language read of the network BEFORE the endpoint probes, so a user on a
+# restricted/corporate network sees what's happening up front instead of a cryptic
+# failure minutes in. Detects an explicit proxy, a configured corporate CA bundle,
+# and (best-effort) TLS inspection. Never fatal, PII-free (proxy credentials are
+# stripped and never printed/logged). One-to-one with preflight.sh's _pf_network_*.
+
+# Strip scheme:// and any user:pass@ credentials from a proxy URL; return bare
+# host:port. Credentials must NEVER reach the screen or log (#576).
+function Get-EnvProxyHostPort {
+  param([string]$Url)
+  $u = $Url
+  $u = $u -replace '^[a-zA-Z][a-zA-Z0-9+.-]*://', ''   # drop scheme://
+  $u = $u -replace '^[^@/]*@', ''                       # drop user:pass@ (PII)
+  $u = $u -replace '/.*$', ''                           # drop any /path
+  return $u
+}
+
+# First explicit proxy from the environment as bare host:port (creds stripped), or
+# $null when none is set. HTTPS takes precedence (our egress is all HTTPS).
+function Get-EnvProxy {
+  foreach ($name in @('HTTPS_PROXY','https_proxy','HTTP_PROXY','http_proxy')) {
+    $val = [Environment]::GetEnvironmentVariable($name)
+    if ($val) { return (Get-EnvProxyHostPort $val) }
+  }
+  return $null
+}
+
+# First explicit proxy from the environment VERBATIM (scheme + any user:pass intact),
+# or $null. For the probe CONNECTION only — an authenticated proxy needs the
+# credentials to answer the CONNECT, or it 407s and the inspection probe silently
+# returns 'unknown' (Bugbot). NEVER print/log this; display uses Get-EnvProxy.
+function Get-EnvProxyRaw {
+  foreach ($name in @('HTTPS_PROXY','https_proxy','HTTP_PROXY','http_proxy')) {
+    $val = [Environment]::GetEnvironmentVariable($name)
+    if ($val) { return $val }
+  }
+  return $null
+}
+
+# Configured corporate CA bundle path when TRACEBLOC_CA_BUNDLE/CURL_CA_BUNDLE points
+# at a readable file; $null otherwise. SOFT (never errors) — Resolve-CaBundle does
+# the hard validation at cluster-create.
+function Get-EnvCaBundle {
+  foreach ($name in @('TRACEBLOC_CA_BUNDLE','CURL_CA_BUNDLE')) {
+    $val = [Environment]::GetEnvironmentVariable($name)
+    if ($val -and (Test-Path -LiteralPath $val -PathType Leaf)) { return $val }
+  }
+  return $null
+}
+
+# $true if an X.509 issuer string names a well-known PUBLIC CA (a normal direct
+# chain); $false otherwise (a corporate re-signer — i.e. TLS inspection).
+function Test-IssuerIsPublic {
+  param([string]$Issuer)
+  return ($Issuer -imatch "DigiCert|Sectigo|Comodo|Let'?s Encrypt|ISRG|Google Trust|GTS |GlobalSign|Amazon|Entrust|GeoTrust|Baltimore|USERTrust|Actalis|Buypass|SSL\.com|Certum|IdenTrust|Microsoft (Azure|RSA|ECC)")
+}
+
+# Best-effort affirmative TLS-inspection probe. Returns 'yes'|'no'|'unknown'. Reads
+# the issuer of the cert served for a well-known public host (through the proxy when
+# one is set); a non-public issuer means a corporate CA is re-signing TLS. Bounded
+# (8s) and non-throwing; 'unknown' on any error.
+function Get-TlsInspectionState {
+  $prev = [System.Net.ServicePointManager]::ServerCertificateValidationCallback
+  $script:TbProbeIssuer = $null
+  try {
+    # Accept the cert for THIS probe only, capturing its issuer, so we can name the
+    # inspection even when the corporate CA isn't trusted here.
+    [System.Net.ServicePointManager]::ServerCertificateValidationCallback = {
+      param($theSender, $cert, $chain, $errors)
+      if ($cert) { $script:TbProbeIssuer = $cert.Issuer }
+      return $true
+    }
+    $req = [System.Net.HttpWebRequest]::Create("https://github.com/")
+    $req.Method = "HEAD"
+    $req.Timeout = 8000
+    $req.AllowAutoRedirect = $false
+    # Connect THROUGH the proxy using the raw value: an authenticated proxy needs
+    # its credentials on the CONNECT or it 407s and issuer capture fails → a false
+    # 'unknown' on the exact TLS-inspecting networks this exists to detect (Bugbot).
+    # Credentials go to the WebProxy only; display still uses the stripped Get-EnvProxy.
+    $raw = Get-EnvProxyRaw
+    if ($raw) {
+      try {
+        $u  = [System.Uri]$raw
+        $wp = New-Object System.Net.WebProxy(("{0}://{1}:{2}" -f $u.Scheme, $u.Host, $u.Port))
+        if ($u.UserInfo) {
+          $ui    = $u.UserInfo.Split(":", 2)
+          $puser = [System.Uri]::UnescapeDataString($ui[0])
+          $ppass = if ($ui.Count -gt 1) { [System.Uri]::UnescapeDataString($ui[1]) } else { "" }
+          $wp.Credentials = New-Object System.Net.NetworkCredential($puser, $ppass)
+        }
+        $req.Proxy = $wp
+      } catch { }
+    }
+    try { $resp = $req.GetResponse(); $resp.Close() } catch { }   # issuer captured in the callback regardless
+    if (-not $script:TbProbeIssuer) { return "unknown" }
+    if (Test-IssuerIsPublic $script:TbProbeIssuer) { return "no" } else { return "yes" }
+  } catch {
+    return "unknown"
+  } finally {
+    [System.Net.ServicePointManager]::ServerCertificateValidationCallback = $prev
+    $script:TbProbeIssuer = $null
+  }
+}
+
+# Print the plain-language network profile line (only when noteworthy — a plain
+# direct connection stays silent; the reachability lines already confirm egress).
+# Sets $script:NetProxy / $script:NetCa / $script:NetInspect for reuse.
+function Show-NetworkProfile {
+  $script:NetProxy   = Get-EnvProxy
+  $script:NetCa      = Get-EnvCaBundle
+  $script:NetInspect = Get-TlsInspectionState
+
+  if (-not $script:NetProxy -and $script:NetInspect -ne "yes") { return }
+
+  $parts = @()
+  if ($script:NetProxy)             { $parts += "corporate proxy detected ($script:NetProxy)" }
+  if ($script:NetInspect -eq "yes") { $parts += "TLS inspection detected" }
+  if ($script:NetCa)                { $parts += "your company's certificate is configured" }
+  Info ("Network: " + ($parts -join "; ") + ".")
+}
+
 function Test-Preflight {
   if ($env:TRACEBLOC_SKIP_PREFLIGHT) { Info "Preflight checks skipped (TRACEBLOC_SKIP_PREFLIGHT set)."; return }
 
@@ -3902,6 +4096,7 @@ function Test-Preflight {
   }
   else                       { Ok "Storage: $HOST_DATA_DIR local disk" }
 
+  Show-NetworkProfile   # #582: announce the network profile before the probes
   Info "Checking outbound connectivity to required services..."
   $backendHost = (Get-BackendUrl) -replace '^https?://','' -replace '/$',''
   $criticals = @(
@@ -4025,7 +4220,13 @@ function Test-PreflightRuntimeMem {
 function Edit-Redaction([string]$Path) {
   if (-not (Test-Path $Path)) { return }
   try {
-    $t = Get-Content -Path $Path -Raw -ErrorAction Stop
+    # -Encoding UTF8 so the read matches how these files were written. The curated
+    # install log is now UTF-8 WITHOUT a BOM (Start-InstallLog), and on PS 5.1 a
+    # bare Get-Content -Raw would decode a BOM-less file as ANSI and mojibake every
+    # non-ASCII host path/message in the -Diagnose bundle -- the exact corruption
+    # this change set out to fix (Bugbot, #591). UTF8 also reads the BOM'd Out-File
+    # outputs here correctly (the BOM is detected and stripped).
+    $t = Get-Content -Path $Path -Raw -Encoding UTF8 -ErrorAction Stop
     # First rule redacts ANY *password key (clientPassword, dockerRegistry
     # password, HTTP_PROXY_PASSWORD, ...) in : or = form, not just clientPassword.
     $t = $t -replace '(?i)([A-Za-z0-9_.-]*password\s*[:=]\s*).*', '$1[REDACTED]'
@@ -4215,9 +4416,23 @@ function Install-TraceblocCli {
 # =============================================================================
 
 if (-not $env:TB_PESTER) {
+# Top-level error boundary (#577): any unhandled terminating error in the install
+# run below is converted to a clean "Installation stopped" message + exit — never
+# PowerShell's raw stack/source dump, and the session never just dies. Intentional
+# `exit` calls (fast-path, Err, final) pass straight through; only real crashes are
+# caught. $ErrorActionPreference is left as-is so existing non-terminating-error
+# flows are unchanged — this catches the throw-based crashes that leaked/killed.
+# The `finally` is the guaranteed closer (mirrors bash's install_cleanup): it fires
+# on every exit, and shows the interrupted line only when no outcome was reported
+# (Ctrl-C / abnormal termination). The `trap` is the last-resort net for anything
+# that terminates OUTSIDE the try below (defined inside the guard so it never fires
+# under the test dot-source).
+$script:OutcomeReported = $false
+trap { Show-FatalError $_; exit 1 }
+try {
 
-if ($Help) { Print-Help }
-if ($Diagnose) { Invoke-DiagnoseBundle; exit 0 }
+if ($Help) { $script:OutcomeReported = $true; Print-Help }
+if ($Diagnose) { Invoke-DiagnoseBundle; $script:OutcomeReported = $true; exit 0 }  # flag AFTER the long collection: an interrupt mid-diagnose must still hit Show-Interrupted (Bugbot)
 
 Confirm-Config
 Initialize-ToolDir
@@ -4243,6 +4458,7 @@ if ((-not $Resume) -and $script:InstallState.completed -and (Test-ToolsPresent) 
   Hint "Delete $(Get-InstallStatePath) (or set a fresh HOST_DATA_DIR) to force a full reinstall."
   Unregister-ResumeAfterReboot
   Log "Already installed and healthy - nothing to do."
+  $script:OutcomeReported = $true
   exit 0
 }
 
@@ -4264,8 +4480,10 @@ Install-K3dAndHelm
 # -- Step 3/6: Set up secure compute environment --
 Step 3 $script:INSTALL_STEPS.Count "Setting up secure compute environment"
 New-K3dCluster
-Install-GpuDevicePlugin
-Confirm-GpuNode
+# Only verify the GPU on the node when the plugin actually deployed; a failed/
+# CPU-mode deploy returns $false, so skipping verify avoids a ~90s wait and a
+# contradictory "still initializing" warning for a plugin never applied (Bugbot).
+if (Install-GpuDevicePlugin) { Confirm-GpuNode }
 
 # -- Step 4/6: install the tracebloc CLI FIRST (#388) — it mints the machine
 # credential in Step 5; a CLI-install hiccup degrades Step 5 to the legacy
@@ -4295,10 +4513,24 @@ Unregister-ResumeAfterReboot
 if (Test-InstallConnected) { Set-InstallComplete } else { Clear-InstallCompleted }
 
 Print-Summary
+$script:OutcomeReported = $true   # Print-Summary reported the outcome (guards the finally)
 
 Log "Install finished."
 
 # Exit code reflects reality: connected/starting are OK; failures are non-zero.
 if (-not (Test-InstallSucceeded)) { exit 1 }
+
+} catch {
+  # Any crash the run didn't handle itself lands here as a clean message, not a
+  # raw stack (#577). Show-FatalError sets $script:OutcomeReported.
+  Show-FatalError $_
+  exit 1
+} finally {
+  # Guaranteed closer: this runs on EVERY exit above. Every reported path (normal
+  # finish, Err, caught crash, fast-path, help/diagnose) set OutcomeReported; if it
+  # is still false we were interrupted (Ctrl-C / abnormal), so surface a clean line
+  # rather than letting the window vanish silently (#577).
+  if (-not $script:OutcomeReported) { Show-Interrupted }
+}
 
 }  # end TB_PESTER guard (skipped when the test suite dot-sources this file)

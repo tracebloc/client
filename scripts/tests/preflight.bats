@@ -11,6 +11,10 @@ setup() {
   PF_HARD_FAIL=0
   # Default-safe stubs (a healthy amd64 box); individual tests override.
   _pf_probe_url() { echo ok; }
+  # Hermetic default: the TLS-inspection probe does a live openssl call to github.com
+  # in production, so stub it here (like _pf_probe_url) — nothing touches the real
+  # network. Tests of the REAL probe source preflight.sh fresh in a subshell (Bugbot).
+  _pf_detect_tls_inspection() { echo "unknown"; }
   _pf_free_kb() { echo $((50 * 1024 * 1024)); }       # 50 GB
   _pf_fstype() { echo ext4; }                          # local disk (storage check passes)
   _pf_host_mem_kb() { echo $((8 * 1024 * 1024)); }   # 8 GB
@@ -1028,4 +1032,136 @@ setup() {
   # the reserve arithmetic must exist in exactly one place: the predicate itself
   [ "$(grep -cE 'PF_OS_RESERVE_GB \)\) -lt PF_MIN_MEM_GB|- PF_OS_RESERVE_GB < PF_MIN_MEM_GB' "$f")" -le 1 ] || return 1
   grep -qE '_pf_host_too_small_for_floor "\$phys_gb"' "$f"
+}
+
+# ── network profile (#582) ───────────────────────────────────────────────────
+@test "_pf_proxy_hostport: strips scheme and user:pass credentials (PII)" {
+  run _pf_proxy_hostport "http://user:pass@proxy.corp:8080/path"
+  [ "$output" = "proxy.corp:8080" ]
+  [[ "$output" != *"user"* ]]
+}
+
+@test "_pf_env_proxy: HTTPS_PROXY wins and credentials are stripped" {
+  HTTP_PROXY="http://h:1"; HTTPS_PROXY="http://user:secret@sproxy.corp:3128"
+  run _pf_env_proxy
+  [ "$output" = "sproxy.corp:3128" ]
+  [[ "$output" != *"secret"* ]]
+}
+
+@test "_pf_env_proxy: empty when no proxy env is set" {
+  unset HTTP_PROXY HTTPS_PROXY http_proxy https_proxy
+  run _pf_env_proxy
+  [ -z "$output" ]
+}
+
+@test "_pf_env_ca_bundle: readable CA file returned, empty when unset" {
+  ca="$BATS_TEST_TMPDIR/ca.pem"; echo x > "$ca"
+  TRACEBLOC_CA_BUNDLE="$ca"
+  run _pf_env_ca_bundle
+  [ "$output" = "$ca" ]
+  unset TRACEBLOC_CA_BUNDLE CURL_CA_BUNDLE
+  run _pf_env_ca_bundle
+  [ -z "$output" ]
+}
+
+@test "_pf_issuer_is_public: public CA yes, corporate re-signer no" {
+  run _pf_issuer_is_public "CN=DigiCert Global G2,O=DigiCert Inc"
+  [ "$status" -eq 0 ]
+  run _pf_issuer_is_public "CN=Acme Corp Proxy CA,O=Acme Corp"
+  [ "$status" -ne 0 ]
+}
+
+@test "_pf_network_profile: direct (no proxy, no inspection) is silent" {
+  unset HTTP_PROXY HTTPS_PROXY http_proxy https_proxy TRACEBLOC_CA_BUNDLE CURL_CA_BUNDLE
+  _pf_detect_tls_inspection() { echo "no"; }
+  run _pf_network_profile
+  [ -z "$output" ]
+}
+
+@test "_pf_network_profile: proxy + inspection -> one plain-language line, no creds" {
+  unset TRACEBLOC_CA_BUNDLE CURL_CA_BUNDLE
+  HTTPS_PROXY="http://u:p@proxy.corp:8080"
+  _pf_detect_tls_inspection() { echo "yes"; }
+  run _pf_network_profile
+  [[ "$output" == *"corporate proxy detected (proxy.corp:8080)"* ]]
+  [[ "$output" == *"TLS inspection detected"* ]]
+  [[ "$output" != *"u:p"* ]]
+}
+
+@test "_pf_network_profile: a configured CA bundle is announced" {
+  ca="$BATS_TEST_TMPDIR/ca.pem"; echo x > "$ca"
+  HTTPS_PROXY="http://proxy.corp:8080"; TRACEBLOC_CA_BUNDLE="$ca"
+  _pf_detect_tls_inspection() { echo "yes"; }
+  run _pf_network_profile
+  [[ "$output" == *"your company's certificate is configured"* ]]
+}
+
+@test "_pf_detect_tls_inspection: unknown when openssl is unavailable (never hangs)" {
+  # Source fresh so we exercise the REAL probe, not setup()'s hermetic stub.
+  run bash -c '
+    source "'"$BATS_TEST_DIRNAME"'/../lib/common.sh" 2>/dev/null || true
+    source "'"$BATS_TEST_DIRNAME"'/../lib/preflight.sh"
+    has() { [[ "$1" != "openssl" ]]; }   # openssl absent
+    _pf_detect_tls_inspection
+  '
+  [ "$output" = "unknown" ]
+}
+
+@test "_pf_urldecode: percent-decodes (parity with PS UnescapeDataString)" {
+  run _pf_urldecode "p%40ss%3Aword"
+  [ "$output" = "p@ss:word" ]
+}
+
+@test "_pf_env_proxy_raw: preserves credentials (probe connection only, never displayed)" {
+  HTTPS_PROXY="http://user:secret@px.corp:3128"
+  run _pf_env_proxy_raw
+  [ "$output" = "http://user:secret@px.corp:3128" ]
+  # display path still strips (the two must not be confused)
+  run _pf_env_proxy
+  [ "$output" = "px.corp:3128" ]
+}
+
+@test "_pf_detect_tls_inspection: auth proxy -> creds to openssl via env:, never argv (Bugbot)" {
+  # An authenticated proxy needs credentials on the CONNECT, else it 407s and
+  # inspection reads as a false 'unknown'. The password must travel via env: (openssl
+  # reads $_TB_PROXY_PASS), NEVER argv/ps. Sourced fresh to exercise the real probe.
+  cap="$BATS_TEST_TMPDIR/args"
+  run bash -c '
+    source "'"$BATS_TEST_DIRNAME"'/../lib/common.sh" 2>/dev/null || true
+    source "'"$BATS_TEST_DIRNAME"'/../lib/preflight.sh"
+    export HTTPS_PROXY="http://user:secret@px.corp:3128"
+    has() { return 0; }
+    _bounded() { shift; "$@"; }
+    openssl() {
+      if [[ "$1" == "s_client" && "$*" == *"-help"* ]]; then echo " -proxy_user val"; return 0; fi
+      if [[ "$1" == "s_client" ]]; then printf "%s\n" "$@" > "'"$cap"'"; echo "-----BEGIN CERTIFICATE-----"; return 0; fi
+      if [[ "$1" == "x509" ]]; then echo "issuer=CN=Acme Corp Proxy CA"; return 0; fi
+    }
+    _pf_detect_tls_inspection
+  '
+  [ "$output" = "yes" ]                          # Acme = corporate re-signer
+  grep -q -- '-proxy_user' "$cap"                # username passed to the connect
+  grep -q 'env:_TB_PROXY_PASS' "$cap"            # password by env reference, not literal
+  ! grep -q 'secret' "$cap"                      # password NEVER in openssl argv
+  [[ "$output" != *"secret"* ]]                  # nor in the result
+}
+
+@test "_pf_detect_tls_inspection: username-only proxy doesn't reuse the username as password (Bugbot)" {
+  cap="$BATS_TEST_TMPDIR/args-uo"
+  run bash -c '
+    source "'"$BATS_TEST_DIRNAME"'/../lib/common.sh" 2>/dev/null || true
+    source "'"$BATS_TEST_DIRNAME"'/../lib/preflight.sh"
+    export HTTPS_PROXY="http://onlyuser@px.corp:3128"
+    has() { return 0; }
+    _bounded() { shift; "$@"; }
+    openssl() {
+      if [[ "$1" == "s_client" && "$*" == *"-help"* ]]; then echo " -proxy_user val"; return 0; fi
+      if [[ "$1" == "s_client" ]]; then printf "%s\n" "$@" > "'"$cap"'"; echo "-----BEGIN CERTIFICATE-----"; return 0; fi
+      if [[ "$1" == "x509" ]]; then echo "issuer=CN=Acme"; return 0; fi
+    }
+    _pf_detect_tls_inspection
+  '
+  grep -q -- '-proxy_user' "$cap"
+  # username must appear exactly once (as -proxy_user), never reused as the password
+  [ "$(grep -c 'onlyuser' "$cap")" -eq 1 ]
 }
