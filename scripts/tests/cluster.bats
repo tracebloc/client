@@ -468,6 +468,13 @@ setup() {
   grep -q -- '--wait --timeout' "$BATS_TEST_DIRNAME/../lib/cluster.sh"
 }
 
+@test "k3d cluster start is bounded: --timeout, so a wedged start can't hang (Bugbot)" {
+  # The start output is redirected to the log; without a deadline a stuck start
+  # would hang headless forever instead of reaching the curated error line.
+  grep -Eq 'k3d cluster start "\$CLUSTER_NAME" .*--timeout' \
+    "$BATS_TEST_DIRNAME/../lib/cluster.sh"
+}
+
 @test "create spin carries the backstop deadline (#426)" {
   grep -q 'spin "\$!" "Creating your secure environment…" "\$(( (_create_timeout_min + 5) \* 60 ))"' \
     "$BATS_TEST_DIRNAME/../lib/cluster.sh"
