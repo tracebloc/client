@@ -16,6 +16,7 @@ setup() {
   HOST_DATA_DIR="$BATS_TEST_TMPDIR/data"
   SERVERS=1; AGENTS=0; K8S_VERSION=""; K3D_GPU_FLAGS=()
   unset HTTP_PROXY HTTPS_PROXY NO_PROXY http_proxy https_proxy no_proxy
+  unset TRACEBLOC_CA_BUNDLE CURL_CA_BUNDLE SSL_CERT_FILE GIT_SSL_CAINFO
 
   # k3d mock: record argv; if a --config <path> is present, snapshot the file so
   # a test can assert its contents (cluster.sh deletes the temp dir after create).
@@ -746,4 +747,105 @@ _stub_create_cluster_deps() {
   run _check_existing_cluster_k8s_version
   [ "$status" -eq 0 ]
   [ -z "$output" ]
+}
+
+# ── wire_ca_trust: extend the corporate CA to every host tool (#583) ─────────
+@test "wire_ca_trust: exports SSL_CERT_FILE + GIT_SSL_CAINFO from a CA (#583)" {
+  local ca="$BATS_TEST_TMPDIR/ca.pem"; echo pem > "$ca"
+  TRACEBLOC_CA_BUNDLE="$ca"; OS="Linux"
+  wire_ca_trust >/dev/null
+  [ "$SSL_CERT_FILE" = "$ca" ] || return 1
+  [ "$GIT_SSL_CAINFO" = "$ca" ] || return 1
+}
+
+@test "wire_ca_trust: Linux announce names cosign/helm/git (SSL_CERT_FILE effective there)" {
+  local ca="$BATS_TEST_TMPDIR/ca.pem"; echo pem > "$ca"
+  TRACEBLOC_CA_BUNDLE="$ca"; OS="Linux"
+  run wire_ca_trust
+  [[ "$output" == *"cosign, helm and git"* ]] || return 1
+  [[ "$output" != *"downloads"* ]] || return 1   # curl trust is the user's CURL_CA_BUNDLE; don't over-claim
+}
+
+@test "wire_ca_trust: macOS announce names only git + hints Keychain for cosign/helm (Bugbot)" {
+  # Go reads the Keychain on macOS (not SSL_CERT_FILE) and Apple's system git
+  # (SecureTransport) ignores GIT_SSL_CAINFO — so on Darwin the function wires
+  # NOTHING and claims nothing: it points at the Keychain for all three tools
+  # (Bugbot ×2: inert-but-hazardous SSL_CERT_FILE, false git claim).
+  local ca="$BATS_TEST_TMPDIR/ca.pem"; echo pem > "$ca"
+  TRACEBLOC_CA_BUNDLE="$ca"; OS="Darwin"
+  run wire_ca_trust
+  [[ "$output" != *"Trusting"* ]] || return 1        # no success claim — nothing was wired
+  [[ "$output" == *"git, cosign and helm"* ]] || return 1
+  [[ "$output" == *"Keychain"* ]] || return 1
+}
+
+@test "wire_ca_trust: Darwin exports NEITHER trust var (inert for Go, hazardous for curl, Bugbot)" {
+  # SSL_CERT_FILE would shrink OpenSSL-curl's download trust to the corp root
+  # while helping neither cosign nor helm; GIT_SSL_CAINFO is ignored by the
+  # system git that runs Homebrew's own bootstrap clone.
+  local ca="$BATS_TEST_TMPDIR/ca.pem"; echo pem > "$ca"
+  TRACEBLOC_CA_BUNDLE="$ca"; OS="Darwin"
+  wire_ca_trust >/dev/null
+  [ -z "${SSL_CERT_FILE:-}" ] || return 1
+  [ -z "${GIT_SSL_CAINFO:-}" ] || return 1
+}
+
+@test "wire_ca_trust: does NOT clobber a user's CURL_CA_BUNDLE (replace-not-augment, Bugbot)" {
+  local ca="$BATS_TEST_TMPDIR/corp.pem";       echo pem > "$ca"
+  local full="$BATS_TEST_TMPDIR/full-bundle.pem"; echo pem > "$full"
+  TRACEBLOC_CA_BUNDLE="$ca"; CURL_CA_BUNDLE="$full"; OS="Linux"
+  wire_ca_trust >/dev/null
+  [ "$SSL_CERT_FILE" = "$ca" ] || return 1       # cosign/helm/git get the corp CA
+  [ "$CURL_CA_BUNDLE" = "$full" ] || return 1    # curl's own bundle is left intact (not overwritten)
+}
+
+@test "wire_ca_trust: does NOT clobber pre-set SSL_CERT_FILE / GIT_SSL_CAINFO (replace-not-augment, Bugbot)" {
+  local ca="$BATS_TEST_TMPDIR/corp.pem";  echo pem > "$ca"
+  local uf="$BATS_TEST_TMPDIR/user-full.pem"; echo pem > "$uf"
+  TRACEBLOC_CA_BUNDLE="$ca"; SSL_CERT_FILE="$uf"; GIT_SSL_CAINFO="$uf"; OS="Linux"
+  wire_ca_trust >/dev/null
+  [ "$SSL_CERT_FILE" = "$uf" ] || return 1     # user's fuller bundles are left intact...
+  [ "$GIT_SSL_CAINFO" = "$uf" ] || return 1    # ...not overwritten with the corp-root-only one
+}
+
+@test "wire_ca_trust: skipped exports are not claimed as success (Bugbot)" {
+  # With both vars pre-set every export is skipped — a green "Trusting…" then
+  # reports wiring that did not happen and masks a pre-set bundle that may
+  # still lack the corporate CA. Say what was kept, claim nothing.
+  local ca="$BATS_TEST_TMPDIR/corp.pem";  echo pem > "$ca"
+  local uf="$BATS_TEST_TMPDIR/user-full.pem"; echo pem > "$uf"
+  TRACEBLOC_CA_BUNDLE="$ca"; SSL_CERT_FILE="$uf"; GIT_SSL_CAINFO="$uf"; OS="Linux"
+  run wire_ca_trust
+  [ "$status" -eq 0 ] || return 1
+  [[ "$output" != *"Trusting"* ]] || return 1
+  [[ "$output" == *"Keeping your pre-set"* ]] || return 1
+  [[ "$output" == *"make sure that bundle includes your company's CA"* ]] || return 1
+}
+
+@test "wire_ca_trust: partial pre-set claims only the wired half (Bugbot)" {
+  # SSL_CERT_FILE pre-set, GIT_SSL_CAINFO free: success must name git alone,
+  # and the kept half gets the check-your-bundle hint.
+  local ca="$BATS_TEST_TMPDIR/corp.pem";  echo pem > "$ca"
+  local uf="$BATS_TEST_TMPDIR/user-full.pem"; echo pem > "$uf"
+  TRACEBLOC_CA_BUNDLE="$ca"; SSL_CERT_FILE="$uf"; OS="Linux"
+  unset GIT_SSL_CAINFO
+  run wire_ca_trust
+  [ "$status" -eq 0 ] || return 1
+  [[ "$output" == *"Trusting your company's certificate for git."* ]] || return 1
+  [[ "$output" != *"for cosign"* ]] || return 1     # the wired claim must not cover the kept half
+  [[ "$output" == *"Keeping your pre-set SSL_CERT_FILE"* ]] || return 1
+}
+
+@test "wire_ca_trust: no-op when no CA is configured (#583)" {
+  unset TRACEBLOC_CA_BUNDLE CURL_CA_BUNDLE SSL_CERT_FILE GIT_SSL_CAINFO
+  wire_ca_trust >/dev/null
+  [ -z "${SSL_CERT_FILE:-}" ] || return 1
+  [ -z "${GIT_SSL_CAINFO:-}" ] || return 1
+}
+
+@test "wire_ca_trust: hard-fails early on a set-but-unreadable bundle (#583)" {
+  TRACEBLOC_CA_BUNDLE="/no/such/corporate-ca.pem"
+  run wire_ca_trust
+  [ "$status" -ne 0 ] || return 1
+  [[ "$output" == *"can't be read"* ]] || return 1
 }

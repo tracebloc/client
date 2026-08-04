@@ -1814,6 +1814,29 @@ function Resolve-CaBundle {
   return $null
 }
 
+# Wire the resolved corporate CA into git (Git-for-Windows is OpenSSL-backed and honors
+# GIT_SSL_CAINFO) (#583). cosign & helm are Go, and Go on Windows reads the certificate
+# store and IGNORES SSL_CERT_FILE (Bugbot) — so we do NOT set it (it would be inert and
+# misleading); those trust the CA only when it's in the Windows store. curl/
+# Invoke-WebRequest already use the Windows store, and we never re-export CURL_CA_BUNDLE
+# (replace-not-augment). The k3d nodes are trusted at cluster-create (#424). No-op when
+# unconfigured; Resolve-CaBundle fails fast on an unreadable bundle.
+function Set-ToolTrust {
+  $ca = Resolve-CaBundle
+  if (-not $ca) { return }
+  # Don't clobber a fuller pre-set GIT_SSL_CAINFO (replace-not-augment): only set it
+  # when the user hasn't already (Bugbot). And say only what actually happened: a
+  # green "Trusting..." while the export was skipped reported wiring that did not
+  # happen - masking a pre-set bundle that may still lack the corporate CA (Bugbot).
+  if (-not $env:GIT_SSL_CAINFO) {
+    $env:GIT_SSL_CAINFO = $ca
+    Ok "Trusting your company's certificate for git."
+  } else {
+    Hint "Keeping your pre-set GIT_SSL_CAINFO - make sure that bundle includes your company's CA, or git will still fail x509."
+  }
+  Hint "On Windows, cosign, helm and the installer's downloads read the certificate store, not a PEM file - import your corporate CA into Cert:\LocalMachine\Root (or use the offline installer) so they trust it too."
+}
+
 # Build a k3d registries.yaml pointing containerd at the mounted CA for every
 # registry in $TbCaRegistries, and return its path. $NodeCa = the CA path INSIDE
 # the node (where the -v mount lands). Written UTF-8 without BOM. Caller removes
@@ -4461,6 +4484,12 @@ if ((-not $Resume) -and $script:InstallState.completed -and (Test-ToolsPresent) 
   $script:OutcomeReported = $true
   exit 0
 }
+
+# Trust an explicit corporate CA across every host tool (cosign/helm/git) BEFORE the
+# preflight probes and any tool download, so a TLS-inspecting proxy is handled
+# end-to-end (#583). Invoke-WebRequest already uses the Windows store; the k3d nodes
+# are trusted at cluster-create (#424).
+Set-ToolTrust
 
 # -- Step 1/6: Check system requirements (honest split from tool install, #422) --
 Step 1 $script:INSTALL_STEPS.Count "Checking system requirements"
