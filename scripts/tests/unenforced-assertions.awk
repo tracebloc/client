@@ -180,13 +180,24 @@ function strip_comment(s,   i, c, sq, dq) {
 # marker inside a quoted pattern) or `[[ … ]]  # … || return 1` (only in a trailing
 # comment), since neither actually enforces (Bugbot). Require the `||` to be outside
 # quotes and outside the comment.
-function is_enforcing(logical,   code, i, p, pos) {
+function is_enforcing(logical,   code, i, c, sq, dq, pd) {
+    # ...and outside PARENS: a `|| return 1` inside `( )`/`$( )` is not
+    # hardening -- in `! ( cmd || return 1 )` the return only exits the
+    # subshell while the `!` still escapes errexit, so the statement stays
+    # advisory, yet the old quote-only scan spared it (Bugbot). Same
+    # quote+paren walker as has_toplevel_chain.
     code = strip_comment(logical)
-    i = 1
-    while ((p = index(substr(code, i), "|| return 1")) > 0) {
-        pos = i + p - 1
-        if (!quoted_at(code, pos)) return 1
-        i = pos + 1
+    sq = 0; dq = 0; pd = 0
+    for (i = 1; i <= length(code); i++) {
+        c = substr(code, i, 1)
+        if (c == "\\" && !sq)              { i++ }
+        else if (c == "'" && !dq)          { sq = !sq }
+        else if (c == "\"" && !sq)         { dq = !dq }
+        else if (sq || dq)                 { continue }
+        else if (c == "(")                 { pd++ }
+        else if (c == ")")                 { if (pd > 0) pd-- }
+        else if (pd > 0)                   { continue }
+        else if (substr(code, i, 11) == "|| return 1") return 1
     }
     return 0
 }

@@ -395,3 +395,27 @@ setup() {
   [[ "$out" != *":5:"* ]] || { printf 'line 5 (hardened) should be spared, got:\n%s\n' "$out" >&2; return 1; }
   [[ "$(printf '%s' "$out" | grep -c .)" == "3" ]] || { printf 'expected 3 offenders, got:\n%s\n' "$out" >&2; return 1; }
 }
+
+@test "a || return 1 inside a subshell is not hardening (Bugbot)" {
+  # In `! ( cmd || return 1 )` the return only exits the SUBSHELL while the `!`
+  # still escapes errexit — the statement stays advisory. is_enforcing must
+  # require the `|| return 1` at paren depth 0, or this shape is spared.
+  local fixture="$BATS_TEST_TMPDIR/subshell-return.bats" out n
+  {
+    printf '@test "s" {\n'
+    printf '  ! ( grep -q x f || return 1 )\n'            # 2: return inside ( ) -> flagged
+    printf '  [ "$(cmd || return 1)" = y ]\n'             # 3: return inside $( ) -> flagged
+    printf '  ! ( grep -q x f ) || return 1\n'            # 4: top-level return -> spared
+    printf '  [ "$(cmd || true)" = y ] || return 1\n'     # 5: top-level return -> spared
+    printf '}\n'
+  } > "$fixture"
+
+  out="$(awk -f "$SCANNER" "$fixture")"
+  for n in 2 3; do
+    [[ "$out" == *":$n:"* ]] || { printf 'expected line %s flagged, got:\n%s\n' "$n" "$out" >&2; return 1; }
+  done
+  for n in 4 5; do
+    [[ "$out" != *":$n:"* ]] || { printf 'line %s (hardened) should be spared, got:\n%s\n' "$n" "$out" >&2; return 1; }
+  done
+  [[ "$(printf '%s' "$out" | grep -c .)" == "2" ]] || { printf 'expected 2 offenders, got:\n%s\n' "$out" >&2; return 1; }
+}
