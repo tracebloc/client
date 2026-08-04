@@ -37,7 +37,13 @@ _deploy_nvidia_plugin() {
   fi
 
   log "Downloading and applying NVIDIA device plugin DaemonSet..."
-  _apply_remote_manifest "$NVIDIA_DEVICE_PLUGIN_URL" "NVIDIA device plugin" || error "Failed to enable GPU acceleration."
+  # GPU is OPTIONAL: a plugin download/apply failure must NOT abort the install
+  # (#577 fatal-vs-recoverable). Warn and continue in CPU mode — same spirit as the
+  # NVIDIA-container-toolkit timeout, which already warns and carries on.
+  if ! _apply_remote_manifest "$NVIDIA_DEVICE_PLUGIN_URL" "NVIDIA device plugin"; then
+    warn "Couldn't enable GPU acceleration — continuing in CPU mode. Re-run the installer later to retry."
+    return 0
+  fi
   kubectl rollout status daemonset/nvidia-device-plugin-daemonset \
     -n kube-system --timeout=120s >> "${LOG_FILE:-/dev/null}" 2>&1 \
     || warn "GPU setup still in progress — it may take a moment to finish."

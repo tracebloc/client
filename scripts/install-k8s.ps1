@@ -2581,11 +2581,19 @@ function Install-GpuDevicePlugin {
         Invoke-WebRequest -Uri $dpUrl -OutFile $dpTmp -UseBasicParsing
       }
       if ((Get-Item $dpTmp).Length -gt 0) {
-        kubectl apply -f $dpTmp
+        $null = (kubectl apply -f $dpTmp 2>&1)   # capture raw stderr (#577)
         $null = (kubectl rollout status daemonset/nvidia-device-plugin-daemonset `
           -n kube-system --timeout=120s 2>&1)
         Ok "GPU acceleration enabled."
-      } else { Err "Failed to enable GPU acceleration." }
+      } else {
+        Warn "Couldn't enable GPU acceleration - continuing in CPU mode. Re-run the installer later to retry."
+      }
+    } catch {
+      # GPU is OPTIONAL: a plugin download/apply failure must NOT abort the install
+      # (#577 fatal-vs-recoverable) — otherwise the throw would reach the top-level
+      # boundary and stop everything. Warn and continue in CPU mode.
+      Warn "Couldn't enable GPU acceleration - continuing in CPU mode. Re-run the installer later to retry."
+      Log "GPU device-plugin setup error: $($_.Exception.Message)"
     } finally {
       Remove-Item $dpTmp -Force -ErrorAction SilentlyContinue
     }

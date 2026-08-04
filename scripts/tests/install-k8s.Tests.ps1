@@ -3103,3 +3103,12 @@ Describe "Graceful failure: guaranteed finally + trap, guarded closer (#577)" {
     } finally { $script:LOG_FILE = $null }
   }
 }
+
+Describe "GPU device-plugin failure is recoverable, not fatal (#577)" {
+  BeforeAll { $script:PSRCGPU = Get-Content "$PSScriptRoot/../install-k8s.ps1" -Raw }
+  It "warns + continues in CPU mode instead of a fatal Err on a plugin failure" {
+    $script:PSRCGPU | Should -Not -Match 'Err "Failed to enable GPU acceleration'
+    $script:PSRCGPU | Should -Match 'continuing in CPU mode'
+    $script:PSRCGPU | Should -Match 'GPU device-plugin setup error'
+  }
+}
