@@ -232,13 +232,17 @@ install_docker_engine() {
       # the spinner until something else killed the process — in CI that was the
       # 20-minute job timeout, three times in one day, with nothing in the log but
       # "Installing Docker…" (backend, 2026-08-04). A healthy install takes 1-3
-      # minutes; 10 is network trouble, not a slow link. timeout(1) is coreutils,
-      # present on every distro this branch serves.
-      if ! spin_cmd "Installing Docker…" sudo env DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a timeout 600 bash "$docker_script"; then
-        rm -f "$docker_script"
-        error "Docker install did not finish within 10 minutes — the download from get.docker.com/download.docker.com stalled. Check your network/proxy and re-run the installer; it resumes safely."
-      fi
+      # minutes; 10 is network trouble, not a slow link. spin_cmd_bounded returns
+      # 124 ONLY on the deadline, so a fast real apt/script failure keeps its own
+      # error instead of being mislabelled as a stall (Bugbot).
+      local _dk_rc=0
+      spin_cmd_bounded 600 "Installing Docker…" sudo env DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a bash "$docker_script" || _dk_rc=$?
       rm -f "$docker_script"
+      if (( _dk_rc == 124 )); then
+        error "Docker install did not finish within 10 minutes — the download from get.docker.com/download.docker.com stalled. Check your network/proxy and re-run the installer; it resumes safely."
+      elif (( _dk_rc != 0 )); then
+        error "Docker install failed (the log tail above has the reason). Fix the reported problem and re-run the installer."
+      fi
     fi
     # Enable for boot only (no --now): starting is handled below, where a start
     # failure is diagnosed instead of aborting the whole script under `set -e`.

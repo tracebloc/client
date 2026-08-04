@@ -189,15 +189,17 @@ jobs:
       # fails the job in seconds (registry-1.docker.io timeout, exit 125) or
       # stalls it until timeout-minutes kills it at 20 -- both hit three times
       # on 2026-08-04 (#525/#592), always infra, never the diff. Three bounded
-      # attempts turn that into a cheap retry with an honest error.
+      # attempts turn that into a cheap retry with an honest error. Bounds are
+      # sized so the WORST case (~5.5 min) still leaves the 20-minute job most
+      # of its budget for the real work (Bugbot): a healthy pull takes seconds.
       - name: Pull ${{ matrix.distro }} (bounded, retried)
         env:
           DISTRO: ${{ matrix.distro }}
         run: |
           for i in 1 2 3; do
-            timeout 300 docker pull -q "$DISTRO" && exit 0
+            timeout 90 docker pull -q "$DISTRO" && exit 0
             echo "::warning::pull of $DISTRO stalled or failed (attempt $i/3)"
-            sleep $((i*15))
+            sleep $((i*10))
           done
           echo "::error::could not pull $DISTRO from Docker Hub in 3 bounded attempts - runner-to-registry connectivity, not this PR. Re-run this job."
           exit 1
@@ -276,15 +278,17 @@ jobs:
       # fails the job in seconds (registry-1.docker.io timeout, exit 125) or
       # stalls it until timeout-minutes kills it at 20 -- both hit three times
       # on 2026-08-04 (#525/#592), always infra, never the diff. Three bounded
-      # attempts turn that into a cheap retry with an honest error.
+      # attempts turn that into a cheap retry with an honest error. Bounds are
+      # sized so the WORST case (~5.5 min) still leaves the 20-minute job most
+      # of its budget for the real work (Bugbot): a healthy pull takes seconds.
       - name: Pull ${{ matrix.distro }} (bounded, retried)
         env:
           DISTRO: ${{ matrix.distro }}
         run: |
           for i in 1 2 3; do
-            timeout 300 docker pull -q "$DISTRO" && exit 0
+            timeout 90 docker pull -q "$DISTRO" && exit 0
             echo "::warning::pull of $DISTRO stalled or failed (attempt $i/3)"
-            sleep $((i*15))
+            sleep $((i*10))
           done
           echo "::error::could not pull $DISTRO from Docker Hub in 3 bounded attempts - runner-to-registry connectivity, not this PR. Re-run this job."
           exit 1

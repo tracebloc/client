@@ -13,6 +13,9 @@ setup() {
 
   has()       { case " $PRESENT_CMDS " in *" $1 "*) return 0 ;; *) return 1 ;; esac; }
   spin_cmd()  { record "$*"; return 0; }
+  # Same default as spin_cmd: record + succeed. Tests that need the deadline
+  # semantics (rc 124) override it locally.
+  spin_cmd_bounded() { record "spin_cmd_bounded $*"; return 0; }
   sudo()      { record "sudo $*"; return 0; }
   systemctl() { return 0; }
   usermod()   { return 0; }
@@ -170,7 +173,7 @@ setup() {
   PRESENT_CMDS="curl"; TEST_DISTRO=ubuntu
   run install_docker_engine
   run mock_calls
-  [[ "$output" == *"timeout 600 bash"* ]] || return 1
+  [[ "$output" == *"spin_cmd_bounded 600 "* ]] || return 1
 }
 
 @test "install_docker_engine: docker already present -> no install" {
