@@ -229,8 +229,13 @@ main() {
   # ── c) Create your secure environment ────────────────────────────────────
   step_header c "Creating your secure environment"
   create_cluster
-  deploy_gpu_device_plugin
-  verify_gpu
+  # Only verify the GPU on the node when the device plugin actually deployed; a
+  # failed/CPU-mode deploy returns non-zero, so skipping verify avoids a ~90s wait
+  # and a contradictory "still initializing" warning for a plugin never applied
+  # (Bugbot). The `if` also keeps a non-zero deploy from tripping set -e.
+  if deploy_gpu_device_plugin; then
+    verify_gpu
+  fi
   echo ""; echo ""
 
   # ── d) Register this machine ─────────────────────────────────────────────

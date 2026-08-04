@@ -256,3 +256,22 @@ _gpu_mocks() {
   grep -q "Couldn't confirm GPU acceleration is ready" \
     "$BATS_TEST_DIRNAME/../lib/gpu-plugins.sh"
 }
+
+@test "GPU verify is gated on a successful deploy so CPU-mode skips the ~90s wait (Bugbot)" {
+  grep -Eq 'if deploy_gpu_device_plugin; then' "$BATS_TEST_DIRNAME/../install-k8s.sh"
+}
+
+@test "_deploy_nvidia_plugin returns non-zero on a CPU-mode (apply-failure) path (Bugbot)" {
+  # A failed deploy must signal non-zero so the caller skips verify_gpu.
+  run bash -c '
+    set -euo pipefail
+    GPU_VENDOR=nvidia; NVIDIA_DEVICE_PLUGIN_URL=http://example/x.yml; LOG_FILE=/dev/null
+    log(){ :; }; success(){ :; }; warn(){ :; }
+    source "'"$BATS_TEST_DIRNAME"'/../lib/gpu-plugins.sh"
+    _apply_remote_manifest(){ return 1; }   # override AFTER source: simulate apply failure
+    kubectl(){ return 1; }                    # get daemonset -> not present
+    _deploy_nvidia_plugin && echo RC0 || echo "RC$?"
+  '
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  [[ "$output" == *"RC1"* ]] || { echo "expected non-zero return; got: $output"; return 1; }
+}

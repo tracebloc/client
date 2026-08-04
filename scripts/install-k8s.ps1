@@ -2571,18 +2571,23 @@ function New-K3dCluster {
 # =============================================================================
 
 function Install-GpuDevicePlugin {
-  if ($GPU_VENDOR -ne "nvidia" -or -not $NVIDIA_DRIVER_OK -or $K3D_GPU_FLAG -eq "") { return }
+  # Returns $true when the GPU plugin is (believed) deployed, $false otherwise, so
+  # the caller can skip Confirm-GpuNode's ~90s wait for a plugin never applied
+  # (Bugbot). Every message helper uses Write-Host, so the only pipeline output is
+  # the boolean below (the Invoke-WithRetry result is sunk to $null to be safe).
+  if ($GPU_VENDOR -ne "nvidia" -or -not $NVIDIA_DRIVER_OK -or $K3D_GPU_FLAG -eq "") { return $false }
 
   Log "Deploying NVIDIA k8s device plugin"
 
   $dpExists = kubectl get daemonset -n kube-system nvidia-device-plugin-daemonset 2>&1
   if ($LASTEXITCODE -eq 0) {
     Ok "GPU acceleration enabled."
+    return $true
   } else {
     $dpUrl = "https://raw.githubusercontent.com/NVIDIA/k8s-device-plugin/v0.14.5/nvidia-device-plugin.yml"
     $dpTmp = [System.IO.Path]::GetTempFileName()
     try {
-      Invoke-WithRetry -Label "GPU plugin download" -ScriptBlock {
+      $null = Invoke-WithRetry -Label "GPU plugin download" -ScriptBlock {
         Invoke-WebRequest -Uri $dpUrl -OutFile $dpTmp -UseBasicParsing
       }
       $gpuOk = $false
@@ -2607,12 +2612,14 @@ function Install-GpuDevicePlugin {
       } else {
         Warn "Couldn't enable GPU acceleration - continuing in CPU mode. Re-run the installer later to retry."
       }
+      return $gpuOk
     } catch {
       # GPU is OPTIONAL: a plugin download/apply failure must NOT abort the install
       # (#577 fatal-vs-recoverable) — otherwise the throw would reach the top-level
       # boundary and stop everything. Warn and continue in CPU mode.
       Warn "Couldn't enable GPU acceleration - continuing in CPU mode. Re-run the installer later to retry."
       Log "GPU device-plugin setup error: $($_.Exception.Message)"
+      return $false
     } finally {
       Remove-Item $dpTmp -Force -ErrorAction SilentlyContinue
     }
@@ -4337,8 +4344,10 @@ Install-K3dAndHelm
 # -- Step 3/6: Set up secure compute environment --
 Step 3 $script:INSTALL_STEPS.Count "Setting up secure compute environment"
 New-K3dCluster
-Install-GpuDevicePlugin
-Confirm-GpuNode
+# Only verify the GPU on the node when the plugin actually deployed; a failed/
+# CPU-mode deploy returns $false, so skipping verify avoids a ~90s wait and a
+# contradictory "still initializing" warning for a plugin never applied (Bugbot).
+if (Install-GpuDevicePlugin) { Confirm-GpuNode }
 
 # -- Step 4/6: install the tracebloc CLI FIRST (#388) — it mints the machine
 # credential in Step 5; a CLI-install hiccup degrades Step 5 to the legacy

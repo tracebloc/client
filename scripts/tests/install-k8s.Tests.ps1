@@ -3141,4 +3141,12 @@ Describe "GPU device-plugin failure is recoverable, not fatal (#577)" {
     $gpuFn = ($script:PSRCGPU -split "function Install-GpuDevicePlugin")[1]
     $gpuFn | Should -Match 'kubectl apply -f \$dpTmp --request-timeout='
   }
+  It "verify runs only when the plugin deployed - CPU-mode skips Confirm-GpuNode (Bugbot)" {
+    # A failed/CPU-mode deploy returns $false; the caller must gate Confirm-GpuNode
+    # on it so the user doesn't wait ~90s for a plugin that was never applied.
+    $script:PSRCGPU | Should -Match 'if \(Install-GpuDevicePlugin\) \{ Confirm-GpuNode \}'
+    $gpuFn = ($script:PSRCGPU -split "function Install-GpuDevicePlugin")[1]
+    $gpuFn | Should -Match 'return \$true'
+    $gpuFn | Should -Match 'return \$false'
+  }
 }

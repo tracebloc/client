@@ -36,16 +36,18 @@ _deploy_nvidia_plugin() {
   log "Deploying NVIDIA k8s device plugin"
   if kubectl get daemonset -n kube-system nvidia-device-plugin-daemonset &>/dev/null 2>&1; then
     success "GPU acceleration enabled."
-    return
+    return 0
   fi
 
   log "Downloading and applying NVIDIA device plugin DaemonSet..."
   # GPU is OPTIONAL: a plugin download/apply failure must NOT abort the install
   # (#577 fatal-vs-recoverable). Warn and continue in CPU mode — same spirit as the
-  # NVIDIA-container-toolkit timeout, which already warns and carries on.
+  # NVIDIA-container-toolkit timeout, which already warns and carries on. Return
+  # non-zero on every CPU-mode path so the caller skips the GPU verify wait for a
+  # plugin that was never deployed (Bugbot).
   if ! _apply_remote_manifest "$NVIDIA_DEVICE_PLUGIN_URL" "NVIDIA device plugin"; then
     warn "Couldn't enable GPU acceleration — continuing in CPU mode. Re-run the installer later to retry."
-    return 0
+    return 1
   fi
   # Gate the success message on the rollout exit code (Bugbot; parity with the PS
   # peer): a timed-out/failed rollout means the plugin isn't confirmed ready, so
@@ -53,31 +55,39 @@ _deploy_nvidia_plugin() {
   if kubectl rollout status daemonset/nvidia-device-plugin-daemonset \
        -n kube-system --timeout=120s >> "${LOG_FILE:-/dev/null}" 2>&1; then
     success "GPU acceleration enabled."
-  else
-    warn "Couldn't confirm GPU acceleration is ready — continuing in CPU mode. Re-run the installer later to retry."
+    return 0
   fi
+  warn "Couldn't confirm GPU acceleration is ready — continuing in CPU mode. Re-run the installer later to retry."
+  return 1
 }
 
 _deploy_amd_plugin() {
   log "Deploying AMD GPU k8s device plugin"
   if kubectl get daemonset -n kube-system amdgpu-device-plugin &>/dev/null 2>&1; then
     success "GPU acceleration enabled."
-    return
+    return 0
   fi
 
+  # Return non-zero on every CPU-mode path so the caller skips the GPU verify wait
+  # for a plugin that was never deployed (Bugbot).
   log "Downloading and applying AMD GPU device plugin DaemonSet..."
   if _apply_remote_manifest "$AMD_DEVICE_PLUGIN_URL" "AMD device plugin"; then
     # Gate success on the rollout exit code (Bugbot; same as the nvidia path).
     if kubectl rollout status daemonset/amdgpu-device-plugin \
          -n kube-system --timeout=120s >> "${LOG_FILE:-/dev/null}" 2>&1; then
       success "GPU acceleration enabled."
-    else
-      warn "Couldn't confirm GPU acceleration is ready — continuing in CPU mode. Re-run the installer later to retry."
+      return 0
     fi
-  else
-    log "Pinned AMD plugin ${AMD_DEVICE_PLUGIN_VERSION} failed; trying master..."
-    _apply_remote_manifest "https://raw.githubusercontent.com/RadeonOpenCompute/k8s-device-plugin/master/k8s-ds-amdgpu-dp.yaml" "AMD device plugin (master)" || warn "GPU acceleration setup may need manual attention."
+    warn "Couldn't confirm GPU acceleration is ready — continuing in CPU mode. Re-run the installer later to retry."
+    return 1
   fi
+  log "Pinned AMD plugin ${AMD_DEVICE_PLUGIN_VERSION} failed; trying master..."
+  # Master fallback applied: let the caller's verify confirm readiness (return 0).
+  if _apply_remote_manifest "https://raw.githubusercontent.com/RadeonOpenCompute/k8s-device-plugin/master/k8s-ds-amdgpu-dp.yaml" "AMD device plugin (master)"; then
+    return 0
+  fi
+  warn "GPU acceleration setup may need manual attention — continuing in CPU mode."
+  return 1
 }
 
 # ── Node-level GPU verification ─────────────────────────────────────────────
