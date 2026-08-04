@@ -1810,6 +1810,21 @@ function Resolve-CaBundle {
   return $null
 }
 
+# Wire the resolved corporate CA into the host tools that do NOT inherit the Windows
+# store on their own - cosign (SSL_CERT_FILE), helm and any Go tool (SSL_CERT_FILE),
+# git (GIT_SSL_CAINFO) - so a TLS-inspecting proxy that re-signs HTTPS is trusted
+# end-to-end (#583). Invoke-WebRequest already uses the system store; the k3d nodes
+# are trusted at cluster-create (#424). No-op when no CA is configured; Resolve-CaBundle
+# fails fast (before any privileged step) on a set-but-unreadable bundle.
+function Set-ToolTrust {
+  $ca = Resolve-CaBundle
+  if (-not $ca) { return }
+  $env:SSL_CERT_FILE  = $ca
+  $env:GIT_SSL_CAINFO = $ca
+  $env:CURL_CA_BUNDLE = $ca
+  Ok "Trusting your company's certificate for cosign, helm, git and downloads."
+}
+
 # Build a k3d registries.yaml pointing containerd at the mounted CA for every
 # registry in $TbCaRegistries, and return its path. $NodeCa = the CA path INSIDE
 # the node (where the -v mount lands). Written UTF-8 without BOM. Caller removes
@@ -4327,6 +4342,12 @@ if ((-not $Resume) -and $script:InstallState.completed -and (Test-ToolsPresent) 
   $script:OutcomeReported = $true
   exit 0
 }
+
+# Trust an explicit corporate CA across every host tool (cosign/helm/git) BEFORE the
+# preflight probes and any tool download, so a TLS-inspecting proxy is handled
+# end-to-end (#583). Invoke-WebRequest already uses the Windows store; the k3d nodes
+# are trusted at cluster-create (#424).
+Set-ToolTrust
 
 # -- Step 1/6: Check system requirements (honest split from tool install, #422) --
 Step 1 $script:INSTALL_STEPS.Count "Checking system requirements"

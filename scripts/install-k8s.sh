@@ -191,6 +191,14 @@ main() {
 
   print_roadmap
 
+  # Trust an explicit corporate CA across every host tool (cosign/helm/git/curl)
+  # BEFORE preflight's HTTPS probes and any tool download, so a TLS-inspecting proxy
+  # is handled end-to-end (#583). Guarded so a stale bootstrap without the helper
+  # proceeds as before (same pattern as the assess/early_data_dir gates).
+  if declare -F wire_ca_trust >/dev/null 2>&1; then
+    wire_ca_trust
+  fi
+
   # ── a) Check your machine ────────────────────────────────────────────────
   step_header a "Checking your machine"
   run_preflight

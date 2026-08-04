@@ -142,6 +142,24 @@ _resolve_ca_bundle() {
   return 0
 }
 
+# Wire the resolved corporate CA into every HOST tool that does NOT inherit the
+# system trust store on its own — cosign (SSL_CERT_FILE), helm and any Go tool
+# (SSL_CERT_FILE), git (GIT_SSL_CAINFO), curl (CURL_CA_BUNDLE) — so a TLS-inspecting
+# proxy that re-signs HTTPS is trusted end-to-end, not just by curl (#583). The k3d
+# NODES are trusted separately at cluster-create (#424, containerd registries.yaml).
+# Idempotent; a no-op when no CA is configured. Fails fast (before any privileged
+# step) on a set-but-unreadable bundle, mirroring _resolve_ca_bundle's contract.
+wire_ca_trust() {
+  local ca rc=0
+  ca="$(_resolve_ca_bundle)" || rc=$?
+  if [[ "$rc" -eq 2 ]]; then
+    error "$ca is set but its CA bundle file can't be read — fix its path/permissions and re-run."
+  fi
+  [[ -z "$ca" ]] && return 0
+  export SSL_CERT_FILE="$ca" CURL_CA_BUNDLE="$ca" GIT_SSL_CAINFO="$ca"
+  success "Trusting your company's certificate for cosign, helm, git and downloads."
+}
+
 # Write a k3d registries.yaml pointing containerd at the mounted CA for every
 # registry in TB_CA_REGISTRIES, and echo its path. $1 = the CA path INSIDE the
 # node (where the -v mount lands). Caller removes the temp dir.

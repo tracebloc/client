@@ -165,3 +165,12 @@ Describe "Bootstrap log hygiene: cosign output captured, no internals leaked (#5
     $script:BOOTSRC | Should -Match 'install stopped before changing anything on your machine'
   }
 }
+
+Describe "Bootstrap wires the corporate CA into cosign (#583)" {
+  It "Confirm-ManifestSignature sets SSL_CERT_FILE from the CA env before cosign" {
+    $src = Get-Content "$PSScriptRoot/../install.ps1" -Raw
+    $fn  = (($src -split "function Confirm-ManifestSignature")[1] -split "`nfunction ")[0]
+    $fn | Should -Match 'TRACEBLOC_CA_BUNDLE'
+    $fn | Should -Match '\$env:SSL_CERT_FILE = \$ca'
+  }
+}

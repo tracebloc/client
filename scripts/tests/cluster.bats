@@ -747,3 +747,27 @@ _stub_create_cluster_deps() {
   [ "$status" -eq 0 ]
   [ -z "$output" ]
 }
+
+# ── wire_ca_trust: extend the corporate CA to every host tool (#583) ─────────
+@test "wire_ca_trust: exports SSL_CERT_FILE / GIT_SSL_CAINFO / CURL_CA_BUNDLE from a CA (#583)" {
+  local ca="$BATS_TEST_TMPDIR/ca.pem"; echo pem > "$ca"
+  TRACEBLOC_CA_BUNDLE="$ca"
+  wire_ca_trust >/dev/null
+  [ "$SSL_CERT_FILE" = "$ca" ]
+  [ "$GIT_SSL_CAINFO" = "$ca" ]
+  [ "$CURL_CA_BUNDLE" = "$ca" ]
+}
+
+@test "wire_ca_trust: no-op when no CA is configured (#583)" {
+  unset TRACEBLOC_CA_BUNDLE CURL_CA_BUNDLE SSL_CERT_FILE GIT_SSL_CAINFO
+  wire_ca_trust >/dev/null
+  [ -z "${SSL_CERT_FILE:-}" ]
+  [ -z "${GIT_SSL_CAINFO:-}" ]
+}
+
+@test "wire_ca_trust: hard-fails early on a set-but-unreadable bundle (#583)" {
+  TRACEBLOC_CA_BUNDLE="/no/such/corporate-ca.pem"
+  run wire_ca_trust
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"can't be read"* ]]
+}

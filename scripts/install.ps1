@@ -319,6 +319,14 @@ function Confirm-ManifestSignature {
     [string]$TmpDir,
     [bool]$AllowUnverified
   )
+  # Wire an explicitly-provided corporate CA into cosign (SSL_CERT_FILE) before its
+  # HTTPS calls, so a TLS-inspecting proxy that re-signs HTTPS doesn't fail the
+  # signature check with an x509 error (#583). Invoke-WebRequest uses the system
+  # store; cosign's Go client reads SSL_CERT_FILE (added to the roots on modern Go,
+  # incl. Windows). No-op when unset; helm/git wiring happens in the main installer.
+  $ca = if ($env:TRACEBLOC_CA_BUNDLE) { $env:TRACEBLOC_CA_BUNDLE } elseif ($env:CURL_CA_BUNDLE) { $env:CURL_CA_BUNDLE } else { $null }
+  if ($ca -and (Test-Path -LiteralPath $ca -PathType Leaf)) { $env:SSL_CERT_FILE = $ca }
+
   $cosign = Resolve-Cosign -TmpDir $TmpDir
   if (-not $cosign) {
     if ($AllowUnverified) {
