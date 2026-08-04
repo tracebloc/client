@@ -762,7 +762,8 @@ _stub_create_cluster_deps() {
   local ca="$BATS_TEST_TMPDIR/ca.pem"; echo pem > "$ca"
   TRACEBLOC_CA_BUNDLE="$ca"; OS="Linux"
   run wire_ca_trust
-  [[ "$output" == *"cosign, helm, git and downloads"* ]]
+  [[ "$output" == *"cosign, helm and git"* ]]
+  [[ "$output" != *"downloads"* ]]   # curl trust is the user's CURL_CA_BUNDLE; don't over-claim
 }
 
 @test "wire_ca_trust: macOS announce names only git + hints Keychain for cosign/helm (Bugbot)" {
@@ -771,7 +772,7 @@ _stub_create_cluster_deps() {
   local ca="$BATS_TEST_TMPDIR/ca.pem"; echo pem > "$ca"
   TRACEBLOC_CA_BUNDLE="$ca"; OS="Darwin"
   run wire_ca_trust
-  [[ "$output" == *"git and downloads"* ]]
+  [[ "$output" == *"certificate for git."* ]]
   [[ "$output" != *"cosign, helm"* ]]
   [[ "$output" == *"Keychain"* ]]
 }

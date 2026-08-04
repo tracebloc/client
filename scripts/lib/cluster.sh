@@ -164,11 +164,14 @@ wire_ca_trust() {
   # a corp-root-only one would drop the public roots those tools need elsewhere (Bugbot).
   [[ -z "${SSL_CERT_FILE:-}" ]]  && export SSL_CERT_FILE="$ca"
   [[ -z "${GIT_SSL_CAINFO:-}" ]] && export GIT_SSL_CAINFO="$ca"
+  # Name only what this actually wires: SSL_CERT_FILE (cosign/helm, Linux) and
+  # GIT_SSL_CAINFO (git). curl "downloads" trust the user's own CURL_CA_BUNDLE, which we
+  # deliberately don't touch — so we don't claim it here (Bugbot).
   if [[ "$OS" == "Darwin" ]]; then
-    success "Trusting your company's certificate for git and downloads."
+    success "Trusting your company's certificate for git."
     hint "On macOS, cosign and helm read the system Keychain, not a PEM file — add the CA to your keychain (or use the offline installer) so they trust it too."
   else
-    success "Trusting your company's certificate for cosign, helm, git and downloads."
+    success "Trusting your company's certificate for cosign, helm and git."
   fi
 }
 

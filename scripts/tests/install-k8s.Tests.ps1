@@ -3243,7 +3243,8 @@ Describe "Set-ToolTrust: wire the corporate CA into cosign/helm/git (#583)" {
     $out = Set-ToolTrust 6>&1 | Out-String
     $env:GIT_SSL_CAINFO | Should -Be (Resolve-Path -LiteralPath $ca).Path
     $env:SSL_CERT_FILE  | Should -BeNullOrEmpty      # inert on Windows; deliberately not set
-    $out | Should -Match 'certificate store'         # cosign/helm directed to the store
+    $out | Should -Match 'certificate for git'       # success names only what's wired
+    $out | Should -Match 'downloads read the certificate store'  # downloads/cosign/helm -> store
   }
 
   It "no-op when no CA is configured" {

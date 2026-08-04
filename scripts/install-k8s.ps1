@@ -1823,8 +1823,8 @@ function Set-ToolTrust {
   # Don't clobber a fuller pre-set GIT_SSL_CAINFO (replace-not-augment): only set it
   # when the user hasn't already (Bugbot).
   if (-not $env:GIT_SSL_CAINFO) { $env:GIT_SSL_CAINFO = $ca }
-  Ok "Trusting your company's certificate for git and downloads."
-  Hint "On Windows, cosign and helm read the certificate store, not a PEM file - import your corporate CA into Cert:\LocalMachine\Root (or use the offline installer) so they trust it too."
+  Ok "Trusting your company's certificate for git."
+  Hint "On Windows, cosign, helm and the installer's downloads read the certificate store, not a PEM file - import your corporate CA into Cert:\LocalMachine\Root (or use the offline installer) so they trust it too."
 }
 
 # Build a k3d registries.yaml pointing containerd at the mounted CA for every
