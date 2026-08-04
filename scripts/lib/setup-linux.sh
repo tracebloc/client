@@ -238,10 +238,16 @@ install_docker_engine() {
       local _dk_rc=0
       spin_cmd_bounded 600 "Installing Docker…" sudo env DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a bash "$docker_script" || _dk_rc=$?
       rm -f "$docker_script"
+      # Re-run advice by mode, matching the daemon-check errors below: telling a
+      # prepare-host ADMIN to "re-run the installer" points them at a full
+      # provision as themselves — the exact outcome prepare-host exists to
+      # prevent (Bugbot).
+      local _rerun="the installer"
+      [[ -n "${TB_PREPARE_HOST_MODE:-}" ]] && _rerun="prepare-host"
       if (( _dk_rc == 124 )); then
-        error "Docker install did not finish within 10 minutes — the download from get.docker.com/download.docker.com stalled. Check your network/proxy and re-run the installer; it resumes safely."
+        error "Docker install did not finish within 10 minutes — the download from get.docker.com/download.docker.com stalled. Check your network/proxy and re-run ${_rerun}; it resumes safely."
       elif (( _dk_rc != 0 )); then
-        error "Docker install failed (the log tail above has the reason). Fix the reported problem and re-run the installer."
+        error "Docker install failed (the log tail above has the reason). Fix the reported problem and re-run ${_rerun}."
       fi
     fi
     # Enable for boot only (no --now): starting is handled below, where a start
