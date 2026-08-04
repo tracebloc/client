@@ -1097,3 +1097,32 @@ setup() {
   run _pf_detect_tls_inspection
   [ "$output" = "unknown" ]
 }
+
+@test "_pf_env_proxy_raw: preserves credentials (probe connection only, never displayed)" {
+  HTTPS_PROXY="http://user:secret@px.corp:3128"
+  run _pf_env_proxy_raw
+  [ "$output" = "http://user:secret@px.corp:3128" ]
+  # display path still strips (the two must not be confused)
+  run _pf_env_proxy
+  [ "$output" = "px.corp:3128" ]
+}
+
+@test "_pf_detect_tls_inspection: passes proxy credentials to openssl on an auth proxy (Bugbot)" {
+  # An authenticated proxy needs -proxy_user/-proxy_pass on the CONNECT, else it 407s
+  # and inspection reads as a false 'unknown'. Credentials reach openssl but never
+  # the returned result.
+  cap="$BATS_TEST_TMPDIR/args"
+  HTTPS_PROXY="http://user:secret@px.corp:3128"
+  has() { return 0; }                 # openssl + timeout present
+  _bounded() { shift; "$@"; }
+  openssl() {
+    if [[ "$1" == "s_client" && "$*" == *"-help"* ]]; then echo " -proxy_user val"; return 0; fi
+    if [[ "$1" == "s_client" ]]; then printf '%s\n' "$@" > "$cap"; echo "-----BEGIN CERTIFICATE-----"; return 0; fi
+    if [[ "$1" == "x509" ]]; then echo "issuer=CN=Acme Corp Proxy CA"; return 0; fi
+  }
+  run _pf_detect_tls_inspection
+  [ "$output" = "yes" ]                         # Acme = corporate re-signer
+  grep -q -- '-proxy_user' "$cap"               # credentials passed to the connect
+  grep -q 'user' "$cap"
+  [[ "$output" != *"secret"* ]]                 # password never leaks into the result
+}

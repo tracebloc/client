@@ -3923,6 +3923,18 @@ function Get-EnvProxy {
   return $null
 }
 
+# First explicit proxy from the environment VERBATIM (scheme + any user:pass intact),
+# or $null. For the probe CONNECTION only — an authenticated proxy needs the
+# credentials to answer the CONNECT, or it 407s and the inspection probe silently
+# returns 'unknown' (Bugbot). NEVER print/log this; display uses Get-EnvProxy.
+function Get-EnvProxyRaw {
+  foreach ($name in @('HTTPS_PROXY','https_proxy','HTTP_PROXY','http_proxy')) {
+    $val = [Environment]::GetEnvironmentVariable($name)
+    if ($val) { return $val }
+  }
+  return $null
+}
+
 # Configured corporate CA bundle path when TRACEBLOC_CA_BUNDLE/CURL_CA_BUNDLE points
 # at a readable file; $null otherwise. SOFT (never errors) — Resolve-CaBundle does
 # the hard validation at cluster-create.
@@ -3960,8 +3972,24 @@ function Get-TlsInspectionState {
     $req.Method = "HEAD"
     $req.Timeout = 8000
     $req.AllowAutoRedirect = $false
-    $p = Get-EnvProxy
-    if ($p) { $req.Proxy = New-Object System.Net.WebProxy("http://$p") }
+    # Connect THROUGH the proxy using the raw value: an authenticated proxy needs
+    # its credentials on the CONNECT or it 407s and issuer capture fails → a false
+    # 'unknown' on the exact TLS-inspecting networks this exists to detect (Bugbot).
+    # Credentials go to the WebProxy only; display still uses the stripped Get-EnvProxy.
+    $raw = Get-EnvProxyRaw
+    if ($raw) {
+      try {
+        $u  = [System.Uri]$raw
+        $wp = New-Object System.Net.WebProxy(("{0}://{1}:{2}" -f $u.Scheme, $u.Host, $u.Port))
+        if ($u.UserInfo) {
+          $ui    = $u.UserInfo.Split(":", 2)
+          $puser = [System.Uri]::UnescapeDataString($ui[0])
+          $ppass = if ($ui.Count -gt 1) { [System.Uri]::UnescapeDataString($ui[1]) } else { "" }
+          $wp.Credentials = New-Object System.Net.NetworkCredential($puser, $ppass)
+        }
+        $req.Proxy = $wp
+      } catch { }
+    }
     try { $resp = $req.GetResponse(); $resp.Close() } catch { }   # issuer captured in the callback regardless
     if (-not $script:TbProbeIssuer) { return "unknown" }
     if (Test-IssuerIsPublic $script:TbProbeIssuer) { return "no" } else { return "yes" }

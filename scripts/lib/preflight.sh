@@ -674,6 +674,19 @@ _pf_env_proxy() {
   return 0
 }
 
+# Echo the first explicit proxy from the environment VERBATIM (scheme + any
+# user:pass credentials intact), or empty. For the probe CONNECTION only — an
+# authenticated proxy needs the credentials to answer the CONNECT, or it 407s and
+# the inspection probe silently returns 'unknown' (Bugbot). NEVER print/log this;
+# display always uses the credential-stripped _pf_env_proxy.
+_pf_env_proxy_raw() {
+  local v val
+  for v in HTTPS_PROXY https_proxy HTTP_PROXY http_proxy; do
+    val="${!v:-}"; [[ -n "$val" ]] && { printf '%s' "$val"; return 0; }
+  done
+  return 0
+}
+
 # Echo the configured corporate CA bundle path when TRACEBLOC_CA_BUNDLE or
 # CURL_CA_BUNDLE points at a readable file; empty otherwise. SOFT (never errors) —
 # the hard validation lives in cluster.sh's _resolve_ca_bundle at cluster-create.
@@ -699,9 +712,21 @@ _pf_issuer_is_public() {
 _pf_detect_tls_inspection() {
   has openssl || { echo "unknown"; return 0; }
   { has timeout || has gtimeout; } || { echo "unknown"; return 0; }
-  local host="github.com" proxy issuer
+  local host="github.com" raw issuer creds
   local -a args=(s_client -connect "${host}:443" -servername "$host")
-  proxy="$(_pf_env_proxy)"; [[ -n "$proxy" ]] && args+=(-proxy "$proxy")
+  # Connect THROUGH the proxy using the raw value: -proxy takes host:port (creds
+  # stripped), and an authenticated proxy additionally needs -proxy_user/-proxy_pass
+  # (openssl >= 3.0) or it 407s and issuer capture fails → a false 'unknown' on the
+  # exact TLS-inspecting networks this exists to detect (Bugbot). Credentials go to
+  # openssl only; they are never printed or logged.
+  raw="$(_pf_env_proxy_raw)"
+  if [[ -n "$raw" ]]; then
+    args+=(-proxy "$(_pf_proxy_hostport "$raw")")
+    if [[ "$raw" == *"@"* ]] && openssl s_client -help 2>&1 | grep -q -- '-proxy_user'; then
+      creds="${raw#*://}"; creds="${creds%%@*}"   # user:pass
+      args+=(-proxy_user "${creds%%:*}" -proxy_pass "pass:${creds#*:}")
+    fi
+  fi
   # echo | : send EOF so s_client returns after the handshake. We deliberately do
   # NOT pass -verify_return_error — we want the served cert's issuer even when the
   # corporate CA isn't trusted, so we can name the inspection.

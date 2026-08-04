@@ -3107,6 +3107,22 @@ Describe "Network profile: plain-language proxy / TLS-inspection read (#582)" {
     $out = Show-NetworkProfile 6>&1 | Out-String
     $out | Should -Match "your company's certificate is configured"
   }
+
+  It "Get-EnvProxyRaw: preserves credentials (probe connection only, never displayed)" {
+    $env:HTTPS_PROXY = "http://user:secret@px.corp:3128"
+    Get-EnvProxyRaw | Should -Be "http://user:secret@px.corp:3128"
+    Get-EnvProxy    | Should -Be "px.corp:3128"   # display path still strips
+  }
+
+  It "the TLS probe connects with proxy credentials, but display strips them (Bugbot)" {
+    $src = Get-Content "$PSScriptRoot/../install-k8s.ps1" -Raw
+    $probeFn = (($src -split "function Get-TlsInspectionState")[1] -split "`nfunction ")[0]
+    $probeFn | Should -Match 'Get-EnvProxyRaw'      # connect uses the raw (credentialed) proxy
+    $probeFn | Should -Match 'NetworkCredential'
+    $showFn = (($src -split "function Show-NetworkProfile")[1] -split "`nfunction ")[0]
+    $showFn | Should -Match 'Get-EnvProxy\b'        # display uses the stripped proxy
+    $showFn | Should -Not -Match 'Get-EnvProxyRaw'
+  }
 }
 
 Describe "Top-level error boundary: crashes become a clean message, never a stack (#577)" {
