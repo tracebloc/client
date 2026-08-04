@@ -3024,3 +3024,14 @@ Describe "Log hygiene: no Start-Transcript, helpers feed the curated log (#576)"
     } finally { $script:LOG_FILE = $null }
   }
 }
+
+Describe "Preflight + summary failures reach the curated log (#576 Bugbot)" {
+  It "Write-PfFail routes preflight hard-fail lines to the log (not screen-only)" {
+    $log = Join-Path $TestDrive "install-pf.log"
+    $script:LOG_FILE = $log
+    try {
+      Write-PfFail "Disk: only 5 GB free (need 40)"
+      (Get-Content $log -Raw) | Should -Match 'PREFLIGHT FAIL: Disk: only 5 GB free'
+    } finally { $script:LOG_FILE = $null }
+  }
+}

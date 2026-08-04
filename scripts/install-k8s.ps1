@@ -3530,14 +3530,14 @@ function Print-Summary {
       Hint "Re-running this installer is safe."
     }
     "bad_creds" {
-      Write-Host "  " -NoNewline; Write-Host "$([char]0x2716) Couldn't connect - your Client ID or password was rejected." -ForegroundColor Red
+      Write-Host "  " -NoNewline; Write-Host "$([char]0x2716) Couldn't connect - your Client ID or password was rejected." -ForegroundColor Red; Log "Couldn't connect - Client ID or password rejected by tracebloc."
       Write-Host ""
       Write-Host "  The environment installed, but tracebloc refused those credentials."
       Write-Host "    1. Re-check them at https://ai.tracebloc.io/clients" -ForegroundColor Cyan
       Write-Host "    2. Re-run this installer (safe to re-run)"
     }
     "image_pull_ca" {
-      Write-Host "  " -NoNewline; Write-Host "$([char]0x2716) Setup didn't finish - the cluster does not trust your network's TLS-inspection CA." -ForegroundColor Red
+      Write-Host "  " -NoNewline; Write-Host "$([char]0x2716) Setup didn't finish - the cluster does not trust your network's TLS-inspection CA." -ForegroundColor Red; Log "Setup did not finish - cluster does not trust the network's TLS-inspection CA (in-cluster image pulls fail x509)."
       Write-Host ""
       Write-Host "  Your network intercepts HTTPS (break-and-inspect), so the in-cluster image"
       Write-Host "  pulls fail certificate validation (x509). CA trust is baked in at"
@@ -3587,7 +3587,7 @@ function Print-Summary {
 # =============================================================================
 
 # Non-exiting failure line (Err exits; preflight must finish all checks first).
-function Write-PfFail($m) { Write-Host "  " -NoNewline; Write-Host ([char]0x2716) -ForegroundColor Red -NoNewline; Write-Host " $m" -ForegroundColor Red }
+function Write-PfFail($m) { Write-Host "  " -NoNewline; Write-Host ([char]0x2716) -ForegroundColor Red -NoNewline; Write-Host " $m" -ForegroundColor Red; Log "PREFLIGHT FAIL: $m" }
 
 # Probe a URL for reachability. Returns: ok|tls|dns|timeout|blocked (or "http <code>"
 # under -RequireSuccess). By default any HTTP response (incl. 401/403/404) counts as
@@ -4093,7 +4093,7 @@ function Invoke-DiagnoseBundle {
     Write-Host "    $bundle"
     Hint "Send this file to tracebloc support -- it has logs + status with passwords removed."
   } else {
-    Write-Host "  Could not create the diagnostics archive." -ForegroundColor Red
+    Write-Host "  Could not create the diagnostics archive." -ForegroundColor Red; Log "Could not create the diagnostics archive."
   }
 }
 
