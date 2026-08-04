@@ -32,9 +32,9 @@ setup() {
 @test "_verify_sha256: correct hash passes, wrong fails, empty expected fails closed (#429)" {
   local f="$BATS_TEST_TMPDIR/empty"; : > "$f"     # 0-byte file → the well-known empty sha256
   local empty_sha=e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
-  run _verify_sha256 "$empty_sha" "$f"; [ "$status" -eq 0 ]        # matches (real sha256sum/shasum)
-  run _verify_sha256 deadbeefdeadbeef "$f"; [ "$status" -ne 0 ]    # mismatch
-  run _verify_sha256 "" "$f"; [ "$status" -ne 0 ]                  # empty expected → fail closed
+  run _verify_sha256 "$empty_sha" "$f"; [ "$status" -eq 0 ] || return 1        # matches (real sha256sum/shasum)
+  run _verify_sha256 deadbeefdeadbeef "$f"; [ "$status" -ne 0 ] || return 1    # mismatch
+  run _verify_sha256 "" "$f"; [ "$status" -ne 0 ] || return 1                  # empty expected → fail closed
 }
 
 @test "_verify_sha256: falls back to shasum when sha256sum is unavailable (macOS ships no sha256sum) (#429)" {

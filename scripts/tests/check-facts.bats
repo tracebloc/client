@@ -55,7 +55,7 @@ _set_spec() { local tmp; tmp="$(mktemp)"; sed "s|^$1=.*|$1=$2|" "$REPO/scripts/s
   _facts --write
   grep -q 'K8S_VERSION="${K8S_VERSION:-v1.31.0-k3s1}"' "$REPO/scripts/lib/common.sh"   # bash
   grep -q 'else { "v1.31.0-k3s1" }' "$REPO/scripts/install-k8s.ps1"                     # PowerShell
-  run _facts --check; [ "$status" -eq 0 ]
+  run _facts --check; [ "$status" -eq 0 ] || return 1
 }
 
 @test "check-facts --check: #410 incident — bash pin bumped, PowerShell NOT -> RED (#435)" {
@@ -94,7 +94,7 @@ _set_spec() { local tmp; tmp="$(mktemp)"; sed "s|^$1=.*|$1=$2|" "$REPO/scripts/s
   grep -q 'HELM_VERSION="${HELM_VERSION:-v5.0.0}"' "$REPO/scripts/lib/common.sh"
   grep -q 'else { "v5.0.0" }' "$REPO/scripts/install-k8s.ps1"
   grep -q 'K8S_VERSION="${K8S_VERSION:-v1.30.0-k3s1}"' "$REPO/scripts/lib/common.sh"
-  run _facts --check; [ "$status" -eq 0 ]
+  run _facts --check; [ "$status" -eq 0 ] || return 1
 }
 
 @test "check-facts --check: READY_TIMEOUT (a real timeout budget) drift in ps1 -> RED (#435)" {
@@ -110,7 +110,7 @@ _set_spec() { local tmp; tmp="$(mktemp)"; sed "s|^$1=.*|$1=$2|" "$REPO/scripts/s
   _facts --write
   grep -q 'READY_TIMEOUT="${READY_TIMEOUT:-600}"' "$REPO/scripts/lib/summary.sh"   # bash consumer
   grep -q 'else { "600" }' "$REPO/scripts/install-k8s.ps1"                          # PowerShell consumer
-  run _facts --check; [ "$status" -eq 0 ]
+  run _facts --check; [ "$status" -eq 0 ] || return 1
 }
 
 @test "check-facts: a missing pattern (consumer refactored away) fails closed, not silently green (#435)" {

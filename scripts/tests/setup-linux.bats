@@ -1185,10 +1185,10 @@ _stub_install_steps() {
 # ── _tools_rc_for_shell + _persist_tools_on_path: keep Tier-0 tools on PATH (#375) ─
 @test "_tools_rc_for_shell: zsh/bash-linux/bash-mac/other" {
   HOME=/h
-  SHELL=/bin/zsh;  [ "$(_tools_rc_for_shell)" = "/h/.zshrc" ]
-  SHELL=/bin/bash; OS=Linux;  [ "$(_tools_rc_for_shell)" = "/h/.bashrc" ]
-  SHELL=/bin/bash; OS=Darwin; [ "$(_tools_rc_for_shell)" = "/h/.bash_profile" ]
-  SHELL=/bin/dash; OS=Linux;  [ "$(_tools_rc_for_shell)" = "/h/.profile" ]
+  SHELL=/bin/zsh;  [ "$(_tools_rc_for_shell)" = "/h/.zshrc" ] || return 1
+  SHELL=/bin/bash; OS=Linux;  [ "$(_tools_rc_for_shell)" = "/h/.bashrc" ] || return 1
+  SHELL=/bin/bash; OS=Darwin; [ "$(_tools_rc_for_shell)" = "/h/.bash_profile" ] || return 1
+  SHELL=/bin/dash; OS=Linux;  [ "$(_tools_rc_for_shell)" = "/h/.profile" ] || return 1
 }
 
 @test "_persist_tools_on_path: Tier 0 appends ~/.local/bin to the shell rc (#375)" {
@@ -1574,13 +1574,13 @@ _stub_install_steps() {
 @test "_cgroup_controllers_active: true only when cpu+cpuset+io are all present (#496)" {
   cf="$(mktemp)"; TB_USER_CGROUP_CONTROLLERS="$cf"
   echo "cpuset cpu io memory pids" > "$cf"
-  run _cgroup_controllers_active; [ "$status" -eq 0 ]
+  run _cgroup_controllers_active; [ "$status" -eq 0 ] || return 1
   echo "memory pids" > "$cf"                              # cpu/cpuset/io absent (systemd default)
-  run _cgroup_controllers_active; [ "$status" -ne 0 ]
+  run _cgroup_controllers_active; [ "$status" -ne 0 ] || return 1
 }
 @test "_cgroup_controllers_active: unreadable controllers file -> not active (#496)" {
   TB_USER_CGROUP_CONTROLLERS="/no/such/cgroup/controllers"
-  run _cgroup_controllers_active; [ "$status" -ne 0 ]
+  run _cgroup_controllers_active; [ "$status" -ne 0 ] || return 1
 }
 @test "_write_cgroup_delegation: controllers NOT active -> warns limits unenforced + recreate (#496)" {
   TB_USER_UNIT_DROPIN_DIR="$(mktemp -d)/user@.service.d"

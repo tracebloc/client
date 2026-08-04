@@ -38,18 +38,18 @@ setup() {
   run _pf_arch
   [[ "$output" == *"amd64-only"* ]] || return 1
   [[ "$output" == *"tonistiigi/binfmt"* ]] || return 1
-  PF_HARD_FAIL=0; _pf_arch >/dev/null 2>&1; [ "$PF_HARD_FAIL" -eq 1 ]
+  PF_HARD_FAIL=0; _pf_arch >/dev/null 2>&1; [ "$PF_HARD_FAIL" -eq 1 ] || return 1
 }
 
 @test "_pf_arch: arm64 Linux WITH emulation -> info, no hard fail" {
   ARCH=aarch64; OS=Linux
   _pf_amd64_emulation_available() { return 0; }
-  PF_HARD_FAIL=0; _pf_arch >/dev/null; [ "$PF_HARD_FAIL" -eq 0 ]
+  PF_HARD_FAIL=0; _pf_arch >/dev/null; [ "$PF_HARD_FAIL" -eq 0 ] || return 1
 }
 
 @test "_pf_arch: arm64 macOS -> info (Desktop emulation), no hard fail" {
   ARCH=arm64; OS=Darwin
-  PF_HARD_FAIL=0; _pf_arch >/dev/null; [ "$PF_HARD_FAIL" -eq 0 ]
+  PF_HARD_FAIL=0; _pf_arch >/dev/null; [ "$PF_HARD_FAIL" -eq 0 ] || return 1
 }
 
 @test "_pf_arch: arm64 macOS note names the Rosetta setting + defers to the post-Docker smoke (#433)" {
@@ -65,14 +65,14 @@ setup() {
   _pf_amd64_emulation_available() { return 1; }
   run _pf_arch
   [[ "$output" == *"proceeding"* ]] || return 1
-  PF_HARD_FAIL=0; _pf_arch >/dev/null; [ "$PF_HARD_FAIL" -eq 0 ]
+  PF_HARD_FAIL=0; _pf_arch >/dev/null; [ "$PF_HARD_FAIL" -eq 0 ] || return 1
   unset TRACEBLOC_ALLOW_ARM64
 }
 
 # ── _pf_connectivity ─────────────────────────────────────────────────────────
 @test "_pf_connectivity: all reachable -> no hard fail" {
   _pf_probe_url() { echo ok; }
-  PF_HARD_FAIL=0; _pf_connectivity >/dev/null 2>&1; [ "$PF_HARD_FAIL" -eq 0 ]
+  PF_HARD_FAIL=0; _pf_connectivity >/dev/null 2>&1; [ "$PF_HARD_FAIL" -eq 0 ] || return 1
 }
 
 @test "_pf_connectivity: a critical host blocked -> hard fail + allowlist hint" {
@@ -80,7 +80,7 @@ setup() {
   run _pf_connectivity
   [[ "$output" == *"ghcr.io) unreachable"* ]] || return 1
   [[ "$output" == *"Allow HTTPS"* ]] || return 1
-  PF_HARD_FAIL=0; _pf_connectivity >/dev/null 2>&1; [ "$PF_HARD_FAIL" -eq 1 ]
+  PF_HARD_FAIL=0; _pf_connectivity >/dev/null 2>&1; [ "$PF_HARD_FAIL" -eq 1 ] || return 1
 }
 
 @test "_pf_connectivity: TLS error -> break-and-inspect (Gap D) hint" {
@@ -105,7 +105,7 @@ setup() {
   OS=Linux
   run _pf_connectivity
   [[ "$output" == *"get.docker.com) unreachable"* ]] || return 1                            # still surfaced…
-  PF_HARD_FAIL=0; _pf_connectivity >/dev/null 2>&1; [ "$PF_HARD_FAIL" -eq 0 ]   # …but NOT a hard fail
+  PF_HARD_FAIL=0; _pf_connectivity >/dev/null 2>&1; [ "$PF_HARD_FAIL" -eq 0 ] || return 1   # …but NOT a hard fail
 }
 
 @test "_pf_connectivity: kubectl host (dl.k8s.io) blocked -> HARD fail (#416)" {
@@ -114,7 +114,7 @@ setup() {
   OS=Linux
   run _pf_connectivity
   [[ "$output" == *"dl.k8s.io) unreachable"* ]] || return 1
-  PF_HARD_FAIL=0; _pf_connectivity >/dev/null 2>&1; [ "$PF_HARD_FAIL" -ge 1 ]
+  PF_HARD_FAIL=0; _pf_connectivity >/dev/null 2>&1; [ "$PF_HARD_FAIL" -ge 1 ] || return 1
 }
 
 @test "_pf_connectivity: k3d asset host objects.githubusercontent.com is probed (#416)" {
@@ -143,7 +143,7 @@ setup() {
   OS=Darwin
   run _pf_connectivity
   [[ "$output" == *"formulae.brew.sh) unreachable"* ]] || return 1
-  PF_HARD_FAIL=0; _pf_connectivity >/dev/null 2>&1; [ "$PF_HARD_FAIL" -ge 1 ]
+  PF_HARD_FAIL=0; _pf_connectivity >/dev/null 2>&1; [ "$PF_HARD_FAIL" -ge 1 ] || return 1
 }
 
 @test "_pf_connectivity: GUI Mac, only docker missing -> formulae.brew.sh NOT probed (Bugbot #416)" {
@@ -155,7 +155,7 @@ setup() {
   OS=Darwin
   run _pf_connectivity
   [[ "$output" != *"formulae.brew.sh"* ]] || return 1              # not probed at all
-  PF_HARD_FAIL=0; _pf_connectivity >/dev/null 2>&1; [ "$PF_HARD_FAIL" -eq 0 ]
+  PF_HARD_FAIL=0; _pf_connectivity >/dev/null 2>&1; [ "$PF_HARD_FAIL" -eq 0 ] || return 1
 }
 
 @test "_pf_connectivity: headless Mac, only docker missing -> formulae.brew.sh IS probed (Bugbot #416)" {
@@ -167,7 +167,7 @@ setup() {
   OS=Darwin
   run _pf_connectivity
   [[ "$output" == *"formulae.brew.sh) unreachable"* ]] || return 1
-  PF_HARD_FAIL=0; _pf_connectivity >/dev/null 2>&1; [ "$PF_HARD_FAIL" -ge 1 ]
+  PF_HARD_FAIL=0; _pf_connectivity >/dev/null 2>&1; [ "$PF_HARD_FAIL" -ge 1 ] || return 1
 }
 
 @test "_pf_connectivity: macOS hard-probes github.com for the Homebrew clone when brew absent (Bugbot #416)" {
@@ -178,7 +178,7 @@ setup() {
   OS=Darwin
   run _pf_connectivity
   [[ "$output" == *"github.com) unreachable"* ]] || return 1
-  PF_HARD_FAIL=0; _pf_connectivity >/dev/null 2>&1; [ "$PF_HARD_FAIL" -ge 1 ]
+  PF_HARD_FAIL=0; _pf_connectivity >/dev/null 2>&1; [ "$PF_HARD_FAIL" -ge 1 ] || return 1
 }
 
 @test "_pf_connectivity: GUI Mac, docker missing -> desktop.docker.com HARD (Bugbot #416)" {
@@ -190,7 +190,7 @@ setup() {
   OS=Darwin
   run _pf_connectivity
   [[ "$output" == *"desktop.docker.com) unreachable"* ]] || return 1
-  PF_HARD_FAIL=0; _pf_connectivity >/dev/null 2>&1; [ "$PF_HARD_FAIL" -ge 1 ]
+  PF_HARD_FAIL=0; _pf_connectivity >/dev/null 2>&1; [ "$PF_HARD_FAIL" -ge 1 ] || return 1
 }
 
 @test "_pf_connectivity: headless Mac, docker missing -> desktop.docker.com NOT probed (Colima path; Bugbot #416)" {
@@ -202,7 +202,7 @@ setup() {
   OS=Darwin
   run _pf_connectivity
   [[ "$output" != *"desktop.docker.com"* ]] || return 1
-  PF_HARD_FAIL=0; _pf_connectivity >/dev/null 2>&1; [ "$PF_HARD_FAIL" -eq 0 ]
+  PF_HARD_FAIL=0; _pf_connectivity >/dev/null 2>&1; [ "$PF_HARD_FAIL" -eq 0 ] || return 1
 }
 
 @test "_pf_connectivity: a download host is NOT probed when its tool is present (#416)" {
@@ -211,49 +211,49 @@ setup() {
   OS=Linux
   run _pf_connectivity
   [[ "$output" != *"dl.k8s.io"* ]] || return 1  # present tool is never re-downloaded -> host not probed
-  PF_HARD_FAIL=0; _pf_connectivity >/dev/null 2>&1; [ "$PF_HARD_FAIL" -eq 0 ]
+  PF_HARD_FAIL=0; _pf_connectivity >/dev/null 2>&1; [ "$PF_HARD_FAIL" -eq 0 ] || return 1
 }
 
 # ── _pf_disk / _pf_memory / _pf_cpu ──────────────────────────────────────────
 @test "_pf_disk: ample free space -> success" {
   OS=Linux; _pf_free_kb() { echo $((50 * 1024 * 1024)); }
-  run _pf_disk; [[ "$output" == *"50 GB free"* ]]
-  PF_HARD_FAIL=0; _pf_disk >/dev/null; [ "$PF_HARD_FAIL" -eq 0 ]
+  run _pf_disk; [[ "$output" == *"50 GB free"* ]] || return 1
+  PF_HARD_FAIL=0; _pf_disk >/dev/null; [ "$PF_HARD_FAIL" -eq 0 ] || return 1
 }
 
 @test "_pf_disk: low (<20 GB) -> warn, no hard fail" {
   OS=Linux; _pf_free_kb() { echo $((10 * 1024 * 1024)); }
-  run _pf_disk; [[ "$output" == *"recommended"* ]]
-  PF_HARD_FAIL=0; _pf_disk >/dev/null; [ "$PF_HARD_FAIL" -eq 0 ]
+  run _pf_disk; [[ "$output" == *"recommended"* ]] || return 1
+  PF_HARD_FAIL=0; _pf_disk >/dev/null; [ "$PF_HARD_FAIL" -eq 0 ] || return 1
 }
 
 @test "_pf_disk: critically low (<5 GB) -> hard fail" {
   OS=Linux; _pf_free_kb() { echo $((2 * 1024 * 1024)); }
-  run _pf_disk; [[ "$output" == *"need"* ]]
-  PF_HARD_FAIL=0; _pf_disk >/dev/null 2>&1; [ "$PF_HARD_FAIL" -eq 1 ]
+  run _pf_disk; [[ "$output" == *"need"* ]] || return 1
+  PF_HARD_FAIL=0; _pf_disk >/dev/null 2>&1; [ "$PF_HARD_FAIL" -eq 1 ] || return 1
 }
 
 @test "_pf_disk: macOS -> info only (Desktop VM disk is opaque)" {
   OS=Darwin; _pf_free_kb() { echo $((2 * 1024 * 1024)); }   # even 'low' must not fail
-  PF_HARD_FAIL=0; _pf_disk >/dev/null; [ "$PF_HARD_FAIL" -eq 0 ]
+  PF_HARD_FAIL=0; _pf_disk >/dev/null; [ "$PF_HARD_FAIL" -eq 0 ] || return 1
 }
 
 @test "_pf_memory: below floor on Linux -> hard fail + resize hint" {
   OS=Linux; _pf_host_mem_kb() { echo $((3 * 1024 * 1024)); }   # 3 GB
-  run _pf_memory; [[ "$output" == *"to run the tracebloc client"* ]]
-  PF_HARD_FAIL=0; _pf_memory >/dev/null 2>&1; [ "$PF_HARD_FAIL" -eq 1 ]
+  run _pf_memory; [[ "$output" == *"to run the tracebloc client"* ]] || return 1
+  PF_HARD_FAIL=0; _pf_memory >/dev/null 2>&1; [ "$PF_HARD_FAIL" -eq 1 ] || return 1
 }
 
 @test "_pf_memory: between floor and warn -> warn, no hard fail" {
   OS=Linux; _pf_host_mem_kb() { echo $((6 * 1024 * 1024)); }   # 6 GB
-  run _pf_memory; [[ "$output" == *"recommended to train"* ]]
-  PF_HARD_FAIL=0; _pf_memory >/dev/null 2>&1; [ "$PF_HARD_FAIL" -eq 0 ]
+  run _pf_memory; [[ "$output" == *"recommended to train"* ]] || return 1
+  PF_HARD_FAIL=0; _pf_memory >/dev/null 2>&1; [ "$PF_HARD_FAIL" -eq 0 ] || return 1
 }
 
 @test "_pf_memory: ample RAM -> success" {
   OS=Linux; _pf_host_mem_kb() { echo $((16 * 1024 * 1024)); }
-  run _pf_memory; [[ "$output" == *"16 GB"* ]]
-  PF_HARD_FAIL=0; _pf_memory >/dev/null 2>&1; [ "$PF_HARD_FAIL" -eq 0 ]
+  run _pf_memory; [[ "$output" == *"16 GB"* ]] || return 1
+  PF_HARD_FAIL=0; _pf_memory >/dev/null 2>&1; [ "$PF_HARD_FAIL" -eq 0 ] || return 1
 }
 
 @test "_pf_memory: macOS below floor -> WARN only, never hard fail" {
@@ -265,26 +265,26 @@ setup() {
   # offers no resize remedy (#417); the post-Docker recheck owns the honest
   # "use a larger machine" stop.
   [[ "$output" != *"Settings"* ]] || return 1
-  PF_HARD_FAIL=0; _pf_memory >/dev/null 2>&1; [ "$PF_HARD_FAIL" -eq 0 ]
+  PF_HARD_FAIL=0; _pf_memory >/dev/null 2>&1; [ "$PF_HARD_FAIL" -eq 0 ] || return 1
 }
 
 @test "_pf_memory: 64 MiB grace -> a hair under the floor still passes" {
   OS=Linux; _pf_host_mem_kb() { echo $(( 5 * 1024 * 1024 - 1000 )); }   # ~5 GB minus a bit
-  PF_HARD_FAIL=0; _pf_memory >/dev/null 2>&1; [ "$PF_HARD_FAIL" -eq 0 ]
+  PF_HARD_FAIL=0; _pf_memory >/dev/null 2>&1; [ "$PF_HARD_FAIL" -eq 0 ] || return 1
 }
 
 @test "_pf_memory: PF_MIN_MEM_GB override relaxes the floor" {
   OS=Linux; PF_MIN_MEM_GB=2; PF_WARN_MEM_GB=2
   _pf_host_mem_kb() { echo $((3 * 1024 * 1024)); }   # 3 GB now passes
-  run _pf_memory; [[ "$output" == *"3 GB"* ]]
-  PF_HARD_FAIL=0; _pf_memory >/dev/null 2>&1; [ "$PF_HARD_FAIL" -eq 0 ]
+  run _pf_memory; [[ "$output" == *"3 GB"* ]] || return 1
+  PF_HARD_FAIL=0; _pf_memory >/dev/null 2>&1; [ "$PF_HARD_FAIL" -eq 0 ] || return 1
 }
 
 @test "_pf_memory: Linux MemAvailable tight -> extra warn (total fine)" {
   OS=Linux; _pf_host_mem_kb() { echo $((16 * 1024 * 1024)); }   # total fine
   _pf_avail_mem_kb() { echo $((2 * 1024 * 1024)); }              # only 2 GB free now
-  run _pf_memory; [[ "$output" == *"available right now"* ]]
-  PF_HARD_FAIL=0; _pf_memory >/dev/null 2>&1; [ "$PF_HARD_FAIL" -eq 0 ]
+  run _pf_memory; [[ "$output" == *"available right now"* ]] || return 1
+  PF_HARD_FAIL=0; _pf_memory >/dev/null 2>&1; [ "$PF_HARD_FAIL" -eq 0 ] || return 1
 }
 
 # ── memory truth: machine RAM vs Docker's budget (#417) ──────────────────────
@@ -453,18 +453,18 @@ setup() {
 
 @test "_pf_cpu: too few cores -> warn" {
   _pf_ncpu() { echo 1; }
-  run _pf_cpu; [[ "$output" == *"recommended"* ]]
+  run _pf_cpu; [[ "$output" == *"recommended"* ]] || return 1
 }
 
 @test "_pf_cpu: enough cores -> success" {
   _pf_ncpu() { echo 4; }
-  run _pf_cpu; [[ "$output" == *"4 cores"* ]]
+  run _pf_cpu; [[ "$output" == *"4 cores"* ]] || return 1
 }
 
 @test "_pf_cpu: between min and recommended -> warn (train), no hard fail" {
   _pf_ncpu() { echo 3; }
-  run _pf_cpu; [[ "$output" == *"recommended to train"* ]]
-  PF_HARD_FAIL=0; _pf_cpu >/dev/null; [ "$PF_HARD_FAIL" -eq 0 ]   # CPU never hard-fails
+  run _pf_cpu; [[ "$output" == *"recommended to train"* ]] || return 1
+  PF_HARD_FAIL=0; _pf_cpu >/dev/null; [ "$PF_HARD_FAIL" -eq 0 ] || return 1   # CPU never hard-fails
 }
 
 # ── selectors ────────────────────────────────────────────────────────────────
@@ -482,16 +482,16 @@ setup() {
 @test "_pf_ncpu: prefers runtime, falls back to host" {
   source "${BATS_TEST_DIRNAME}/../lib/preflight.sh"
   _pf_runtime_ncpu() { echo 2; }; _pf_host_ncpu() { echo 16; }
-  run _pf_ncpu; [ "$output" -eq 2 ]
+  run _pf_ncpu; [ "$output" -eq 2 ] || return 1
   _pf_runtime_ncpu() { echo ""; }
-  run _pf_ncpu; [ "$output" -eq 16 ]
+  run _pf_ncpu; [ "$output" -eq 16 ] || return 1
 }
 
 @test "_pf_runtime_mem_kb: junk/zero MemTotal -> empty (forces fallback)" {
   source "${BATS_TEST_DIRNAME}/../lib/preflight.sh"
   has() { return 0; }
   docker() { case "$*" in *MemTotal*) echo 0 ;; *) return 0 ;; esac; }
-  run _pf_runtime_mem_kb; [ -z "$output" ]
+  run _pf_runtime_mem_kb; [ -z "$output" ] || return 1
 }
 
 # ── _pf_recheck_runtime_mem (post-Docker, warn-only) ─────────────────────────
@@ -540,7 +540,7 @@ setup() {
 @test "_pf_recheck_runtime_mem: daemon not reporting -> silent no-op" {
   source "${BATS_TEST_DIRNAME}/../lib/preflight.sh"
   _pf_runtime_mem_kb() { echo ""; }
-  run _pf_recheck_runtime_mem; [ -z "$output" ]
+  run _pf_recheck_runtime_mem; [ -z "$output" ] || return 1
 }
 
 # ── run_preflight orchestration ──────────────────────────────────────────────
@@ -571,11 +571,11 @@ setup() {
 @test "_pf_probe_url: maps curl outcomes to tokens" {
   source "${BATS_TEST_DIRNAME}/../lib/preflight.sh"   # restore the real function
   has() { return 0; }                                  # 'has curl' true
-  curl() { return 6; };             run _pf_probe_url https://x; [ "$output" = "dns" ]
-  curl() { return 7; };             run _pf_probe_url https://x; [ "$output" = "refused" ]
-  curl() { return 28; };            run _pf_probe_url https://x; [ "$output" = "timeout" ]
-  curl() { return 60; };            run _pf_probe_url https://x; [ "$output" = "tls" ]
-  curl() { printf '200'; return 0;};run _pf_probe_url https://x; [ "$output" = "ok" ]
+  curl() { return 6; };             run _pf_probe_url https://x; [ "$output" = "dns" ] || return 1
+  curl() { return 7; };             run _pf_probe_url https://x; [ "$output" = "refused" ] || return 1
+  curl() { return 28; };            run _pf_probe_url https://x; [ "$output" = "timeout" ] || return 1
+  curl() { return 60; };            run _pf_probe_url https://x; [ "$output" = "tls" ] || return 1
+  curl() { printf '200'; return 0;};run _pf_probe_url https://x; [ "$output" = "ok" ] || return 1
 }
 
 # strict mode (#385): content must exist — an HTTP error is a failure, not
@@ -584,11 +584,11 @@ setup() {
 @test "_pf_probe_url: strict maps HTTP errors to 'http <code>', 2xx to ok (#385)" {
   source "${BATS_TEST_DIRNAME}/../lib/preflight.sh"
   has() { return 0; }
-  curl() { printf '404'; return 0; }; run _pf_probe_url https://x strict; [ "$output" = "http 404" ]
-  curl() { printf '200'; return 0; }; run _pf_probe_url https://x strict; [ "$output" = "ok" ]
-  curl() { printf '301'; return 0; }; run _pf_probe_url https://x strict; [ "$output" = "ok" ]
-  curl() { printf '404'; return 0; }; run _pf_probe_url https://x;        [ "$output" = "ok" ]
-  curl() { return 6;    };            run _pf_probe_url https://x strict; [ "$output" = "dns" ]
+  curl() { printf '404'; return 0; }; run _pf_probe_url https://x strict; [ "$output" = "http 404" ] || return 1
+  curl() { printf '200'; return 0; }; run _pf_probe_url https://x strict; [ "$output" = "ok" ] || return 1
+  curl() { printf '301'; return 0; }; run _pf_probe_url https://x strict; [ "$output" = "ok" ] || return 1
+  curl() { printf '404'; return 0; }; run _pf_probe_url https://x;        [ "$output" = "ok" ] || return 1
+  curl() { return 6;    };            run _pf_probe_url https://x strict; [ "$output" = "dns" ] || return 1
 }
 
 @test "_pf_connectivity: chart-repo index probed strictly — 404 hard-fails preflight (#385)" {
@@ -596,7 +596,7 @@ setup() {
   run _pf_connectivity
   [[ "$output" == *"tracebloc Helm charts"* ]] || return 1
   [[ "$output" == *"http 404"* ]] || return 1
-  PF_HARD_FAIL=0; _pf_connectivity >/dev/null 2>&1; [ "$PF_HARD_FAIL" -eq 1 ]
+  PF_HARD_FAIL=0; _pf_connectivity >/dev/null 2>&1; [ "$PF_HARD_FAIL" -eq 1 ] || return 1
 }
 
 @test "_pf_probe_url: missing curl -> nocurl" {
@@ -609,9 +609,9 @@ setup() {
 @test "_pf readers return a number on this host" {
   source "${BATS_TEST_DIRNAME}/../lib/preflight.sh"
   OS="$(uname -s)"
-  run _pf_ncpu;         [[ "$output" =~ ^[0-9]+$ ]]
-  run _pf_host_mem_kb; [[ "$output" =~ ^[0-9]+$ ]]
-  run _pf_free_kb /;    [[ "$output" =~ ^[0-9]+$ ]]
+  run _pf_ncpu;         [[ "$output" =~ ^[0-9]+$ ]] || return 1
+  run _pf_host_mem_kb; [[ "$output" =~ ^[0-9]+$ ]] || return 1
+  run _pf_free_kb /;    [[ "$output" =~ ^[0-9]+$ ]] || return 1
 }
 
 # Code review: curl absent must SKIP connectivity (curl is installed downstream),
@@ -620,7 +620,7 @@ setup() {
   has() { return 1; }
   run _pf_connectivity
   [[ "$output" == *"Skipping connectivity"* ]] || return 1
-  PF_HARD_FAIL=0; _pf_connectivity >/dev/null 2>&1; [ "$PF_HARD_FAIL" -eq 0 ]
+  PF_HARD_FAIL=0; _pf_connectivity >/dev/null 2>&1; [ "$PF_HARD_FAIL" -eq 0 ] || return 1
 }
 
 # ── _pf_storage_type (network-FS guard for HOST_DATA_DIR) ────────────────────
@@ -630,13 +630,13 @@ setup() {
   _pf_fstype() { echo ext4; }
   # First-run copy: the visible line is the clean "Local storage (…)"; the fstype
   # detail (ext4) moved to the log, so assert the user-facing line, not the fstype.
-  run _pf_storage_type; [[ "$output" == *"Local storage"* ]]
-  PF_HARD_FAIL=0; _pf_storage_type >/dev/null; [ "$PF_HARD_FAIL" -eq 0 ]
+  run _pf_storage_type; [[ "$output" == *"Local storage"* ]] || return 1
+  PF_HARD_FAIL=0; _pf_storage_type >/dev/null; [ "$PF_HARD_FAIL" -eq 0 ] || return 1
 }
 
 @test "_pf_storage_type: overlay (CI/containers) -> success, never blocked" {
   _pf_fstype() { echo overlay; }
-  PF_HARD_FAIL=0; _pf_storage_type >/dev/null; [ "$PF_HARD_FAIL" -eq 0 ]
+  PF_HARD_FAIL=0; _pf_storage_type >/dev/null; [ "$PF_HARD_FAIL" -eq 0 ] || return 1
 }
 
 @test "_pf_storage_type: NFS -> hard fail with a FOLLOWABLE remedy, not the old ~/.tracebloc advice (#479)" {
@@ -650,7 +650,7 @@ setup() {
   # and validate_config rejects paths outside $HOME (#479).
   [[ "$output" != *'HOST_DATA_DIR="$HOME/.tracebloc" ./install'* ]] || return 1
   [[ "$output" != *"the default ~/.tracebloc is local"* ]] || return 1
-  PF_HARD_FAIL=0; _pf_storage_type >/dev/null 2>&1; [ "$PF_HARD_FAIL" -eq 1 ]
+  PF_HARD_FAIL=0; _pf_storage_type >/dev/null 2>&1; [ "$PF_HARD_FAIL" -eq 1 ] || return 1
 }
 
 @test "_pf_storage_type and early_data_dir_guard share the same network-FS remedy (#479)" {
@@ -667,29 +667,29 @@ setup() {
 
 @test "_pf_storage_type: NFS4 -> hard fail" {
   _pf_fstype() { echo nfs4; }
-  PF_HARD_FAIL=0; _pf_storage_type >/dev/null 2>&1; [ "$PF_HARD_FAIL" -eq 1 ]
+  PF_HARD_FAIL=0; _pf_storage_type >/dev/null 2>&1; [ "$PF_HARD_FAIL" -eq 1 ] || return 1
 }
 
 @test "_pf_storage_type: CIFS -> hard fail" {
   _pf_fstype() { echo cifs; }
-  PF_HARD_FAIL=0; _pf_storage_type >/dev/null 2>&1; [ "$PF_HARD_FAIL" -eq 1 ]
+  PF_HARD_FAIL=0; _pf_storage_type >/dev/null 2>&1; [ "$PF_HARD_FAIL" -eq 1 ] || return 1
 }
 
 @test "_pf_storage_type: fuse.sshfs -> hard fail (covers fuse.* network mounts)" {
   _pf_fstype() { echo fuse.sshfs; }
-  PF_HARD_FAIL=0; _pf_storage_type >/dev/null 2>&1; [ "$PF_HARD_FAIL" -eq 1 ]
+  PF_HARD_FAIL=0; _pf_storage_type >/dev/null 2>&1; [ "$PF_HARD_FAIL" -eq 1 ] || return 1
 }
 
 @test "_pf_storage_type: NFS + TRACEBLOC_ALLOW_NETWORK_FS -> warn, no hard fail" {
   _pf_fstype() { echo nfs; }; export TRACEBLOC_ALLOW_NETWORK_FS=1
-  run _pf_storage_type; [[ "$output" == *"proceeding"* ]]
-  PF_HARD_FAIL=0; _pf_storage_type >/dev/null; [ "$PF_HARD_FAIL" -eq 0 ]
+  run _pf_storage_type; [[ "$output" == *"proceeding"* ]] || return 1
+  PF_HARD_FAIL=0; _pf_storage_type >/dev/null; [ "$PF_HARD_FAIL" -eq 0 ] || return 1
   unset TRACEBLOC_ALLOW_NETWORK_FS
 }
 
 @test "_pf_storage_type: undetermined fstype -> no hard fail (assume local)" {
   _pf_fstype() { echo ""; }
-  PF_HARD_FAIL=0; _pf_storage_type >/dev/null; [ "$PF_HARD_FAIL" -eq 0 ]
+  PF_HARD_FAIL=0; _pf_storage_type >/dev/null; [ "$PF_HARD_FAIL" -eq 0 ] || return 1
 }
 
 # ── _pf_fstype reader (re-source for the real function) ──────────────────────

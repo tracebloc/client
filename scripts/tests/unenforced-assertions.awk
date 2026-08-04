@@ -84,7 +84,7 @@ function bracket_open(line,   s) {
     return (bracket_tail(line) == NOCLOSE)
 }
 
-function classify(logical, fnr,   tail, word) {
+function classify(logical, fnr,   tail, word, seg, stail) {
     if (is_enforcing(logical))                                      return  # a REAL, unquoted, uncommented `|| return 1`
     if (logical ~ /^[[:space:]]*#/)                                 return  # comment
 
@@ -100,6 +100,25 @@ function classify(logical, fnr,   tail, word) {
     if (tail != NOCLOSE && (trim(tail) == "" || trim(tail) ~ /^#/)) {
         printf "%s:%d: %s\n", FILENAME, fnr, logical
         return
+    }
+
+    # A bracket assertion / negated bare command that is the LAST command of a
+    # compound line (`run x; [[ ... ]]`, `run x; ! grep -q y`) is not at line
+    # start, so the checks above miss it — but on bash 3.2 the `[[` still cannot
+    # fail the test and a negated `! cmd` never propagates its status (Bugbot).
+    # bracket_tail on the segment distinguishes an internal `||` (empty tail →
+    # report) from a real top-level chain (`|| fail` in the tail → exempt).
+    seg = last_segment(logical)
+    if (seg != logical) {
+        stail = bracket_tail(seg)
+        if (stail != NOCLOSE && (trim(stail) == "" || trim(stail) ~ /^#/)) {
+            printf "%s:%d: %s\n", FILENAME, fnr, logical
+            return
+        }
+        if (seg !~ /&&|\|\|/ && trim(seg) ~ /^![[:space:]]*[^[:space:]]/) {
+            printf "%s:%d: %s\n", FILENAME, fnr, logical
+            return
+        }
     }
 
     if (logical ~ /&&|\|\|/)                                        return  # already chained
@@ -178,6 +197,21 @@ function heredoc_tag_of(line,   s, off, pos, tag) {
         s = substr(s, RSTART + RLENGTH)
     }
     return ""
+}
+
+# The substring after the last UNQUOTED `;` — the last command of a compound
+# line. Returns the whole line when there is no top-level `;`. A `;` inside a
+# quoted pattern (e.g. `[[ "$x" == *";"* ]]`) does not split.
+function last_segment(line,   i, c, sq, dq, cut) {
+    sq = 0; dq = 0; cut = 0
+    for (i = 1; i <= length(line); i++) {
+        c = substr(line, i, 1)
+        if (c == "\\" && !sq)      { i++ }
+        else if (c == "'" && !dq)  { sq = !sq }
+        else if (c == "\"" && !sq) { dq = !dq }
+        else if (c == ";" && !sq && !dq) { cut = i }
+    }
+    return (cut == 0) ? line : substr(line, cut + 1)
 }
 
 FILENAME != prev { prev = FILENAME; in_test = 0; in_heredoc = 0; heredoc_tag = ""; pending = ""; parts = 0 }

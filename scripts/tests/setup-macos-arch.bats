@@ -26,10 +26,10 @@ setup() {
 
 # ── _macos_supports_vz ───────────────────────────────────────────────────────
 @test "_macos_supports_vz: macOS 13+ -> yes; 12 -> no; junk -> no (#433)" {
-  TB_MACOS_VER=14.5; run _macos_supports_vz; [ "$status" -eq 0 ]
-  TB_MACOS_VER=13.0; run _macos_supports_vz; [ "$status" -eq 0 ]
-  TB_MACOS_VER=12.7; run _macos_supports_vz; [ "$status" -ne 0 ]
-  TB_MACOS_VER=abc;  run _macos_supports_vz; [ "$status" -ne 0 ]
+  TB_MACOS_VER=14.5; run _macos_supports_vz; [ "$status" -eq 0 ] || return 1
+  TB_MACOS_VER=13.0; run _macos_supports_vz; [ "$status" -eq 0 ] || return 1
+  TB_MACOS_VER=12.7; run _macos_supports_vz; [ "$status" -ne 0 ] || return 1
+  TB_MACOS_VER=abc;  run _macos_supports_vz; [ "$status" -ne 0 ] || return 1
 }
 
 @test "_macos_supports_vz: undeterminable version (sw_vers empty) -> no (fail closed to QEMU) (#433)" {

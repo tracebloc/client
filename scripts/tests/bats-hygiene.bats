@@ -145,6 +145,33 @@ setup() {
   [[ "$(printf '%s' "$out" | grep -c .)" == "2" ]] || return 1
 }
 
+@test "the scanner flags a bracket / negated assertion that is the last command of a compound line (Bugbot)" {
+  # `run x; [[ ... ]]` puts the `[[` mid-line, not at line start; on bash 3.2 the
+  # `[[` still cannot fail the test, so it is advisory. The preflight suite is
+  # full of these (`run _pf_disk; [[ "$output" == *…* ]]`).
+  local fixture="$BATS_TEST_TMPDIR/compound.bats" out
+  {
+    printf '@test "example" {\n'
+    printf '  run _pf_disk; [[ "$output" == *"free"* ]]\n'          # 2: bracket last -> flagged
+    printf '  x=0; check >/dev/null; [ "$x" -eq 0 ]\n'              # 3: single-bracket last -> flagged
+    printf '  run _pf_disk; ! grep -q needle "$f"\n'               # 4: negated last -> flagged
+    printf '  run x; [[ "$output" == *"free"* ]] || return 1\n'    # 5: enforcing -> spared
+    printf '  run x; [[ "$o" == *"a"* ]] || fail msg\n'            # 6: top-level chain -> spared
+    printf '  a=1; b=2\n'                                          # 7: bare cmds -> spared
+    printf '}\n'
+  } > "$fixture"
+
+  out="$(awk -f "$SCANNER" "$fixture")"
+  [[ "$out" == *":2:"* ]] || return 1
+  [[ "$out" == *":3:"* ]] || return 1
+  [[ "$out" == *":4:"* ]] || return 1
+  local n
+  for n in 5 6 7; do
+    [[ "$out" != *":$n:"* ]] || { printf 'line %s should be spared, got:\n%s\n' "$n" "$out" >&2; return 1; }
+  done
+  [[ "$(printf '%s' "$out" | grep -c .)" == "3" ]] || return 1
+}
+
 @test "the scanner does not mistake a quoted <<TAG or a herestring for a heredoc (Bugbot)" {
   # A `<<TAG` inside a quoted string is text, and `<<<` is a herestring — neither
   # opens a heredoc. Treating them as openers put the scanner into skip mode with no

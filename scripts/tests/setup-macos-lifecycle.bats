@@ -21,8 +21,8 @@ setup() {
 
 # ── _macos_user_is_admin ─────────────────────────────────────────────────────
 @test "_macos_user_is_admin: admin group -> yes; standard account -> no (#430)" {
-  TB_MACOS_ADMIN_GROUPS="staff admin everyone"; run _macos_user_is_admin; [ "$status" -eq 0 ]
-  TB_MACOS_ADMIN_GROUPS="staff everyone";       run _macos_user_is_admin; [ "$status" -ne 0 ]
+  TB_MACOS_ADMIN_GROUPS="staff admin everyone"; run _macos_user_is_admin; [ "$status" -eq 0 ] || return 1
+  TB_MACOS_ADMIN_GROUPS="staff everyone";       run _macos_user_is_admin; [ "$status" -ne 0 ] || return 1
 }
 
 @test "_macos_user_is_admin: root -> yes (#430)" {
