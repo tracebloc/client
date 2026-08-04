@@ -304,3 +304,48 @@ setup() {
   done
   [[ "$(printf '%s' "$out" | grep -c .)" == "1" ]] || { printf 'expected exactly 1 offender, got:\n%s\n' "$out" >&2; return 1; }
 }
+
+@test "a ||/&& only inside quotes or a subshell is not a top-level chain (Bugbot)" {
+  # The chain exemption must see a REAL top-level `||`/`&&`, not one that appears only
+  # inside a quoted pattern (`! grep -q "a||b"`) or a `( )` subshell — else an
+  # unhardened negated command is silently treated as already chained.
+  local fixture="$BATS_TEST_TMPDIR/chain-quotes.bats" out n
+  {
+    printf '@test "chain" {\n'
+    printf '  ! grep -q "a||b" f\n'                 # 2: || in quotes -> flagged
+    printf '  ! grep -q "a&&b" f\n'                 # 3: && in quotes -> flagged
+    printf '  ! ( cd /tmp; grep -q x f )\n'         # 4: unhardened subshell -> flagged
+    printf '  ! grep -q "x||y" f || return 1\n'     # 5: really hardened -> spared
+    printf '  ! grep -q x f || fail msg\n'          # 6: top-level chain -> spared
+    printf '}\n'
+  } > "$fixture"
+
+  out="$(awk -f "$SCANNER" "$fixture")"
+  for n in 2 3 4; do
+    [[ "$out" == *":$n:"* ]] || { printf 'expected line %s flagged, got:\n%s\n' "$n" "$out" >&2; return 1; }
+  done
+  for n in 5 6; do
+    [[ "$out" != *":$n:"* ]] || { printf 'line %s should be spared, got:\n%s\n' "$n" "$out" >&2; return 1; }
+  done
+  [[ "$(printf '%s' "$out" | grep -c .)" == "3" ]] || { printf 'expected 3 offenders, got:\n%s\n' "$out" >&2; return 1; }
+}
+
+@test "a bracket that opens mid-line and continues across lines is joined and flagged (Bugbot)" {
+  # `run x; [[ a ||` continued onto the next line opens the bracket mid-line, not at
+  # line start; the join must still assemble it, or a multi-line compound bracket is
+  # never seen. Reported at its FIRST line.
+  local fixture="$BATS_TEST_TMPDIR/compound-multiline.bats" out
+  {
+    printf '@test "compound" {\n'
+    printf '  run foo; [[ "$o" == *"a"* ||\n'        # 2: opens mid-line, continues
+    printf '     "$o" == *"b"* ]]\n'                 # 3: closes -> unhardened -> flagged at 2
+    printf '  run bar; [[ "$o" == *"c"* ||\n'        # 4: continues
+    printf '     "$o" == *"d"* ]] || return 1\n'     # 5: hardened -> spared
+    printf '}\n'
+  } > "$fixture"
+
+  out="$(awk -f "$SCANNER" "$fixture")"
+  [[ "$out" == *":2:"* ]] || { printf 'expected line 2 flagged, got:\n%s\n' "$out" >&2; return 1; }
+  [[ "$out" != *":4:"* ]] || { printf 'line 4 (hardened) should be spared, got:\n%s\n' "$out" >&2; return 1; }
+  [[ "$(printf '%s' "$out" | grep -c .)" == "1" ]] || { printf 'expected 1 offender, got:\n%s\n' "$out" >&2; return 1; }
+}

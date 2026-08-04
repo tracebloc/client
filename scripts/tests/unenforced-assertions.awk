@@ -76,12 +76,24 @@ function bracket_tail(line,   s, r) {
     return r
 }
 
-# Is this a bracket assertion whose closer has not been reached yet?
-function bracket_open(line,   s) {
+# Is this a bracket assertion whose closer has not been reached yet? True whether
+# the `[[`/`[` opens the whole line OR opens the LAST statement of a `;`-compound
+# (`run x; [[ a ||` continued onto the next line) — the latter would otherwise never
+# be joined, so a multi-line compound bracket stayed invisible (Bugbot).
+function bracket_open(line,   s, seg_arr, n) {
     s = trim(line)
     sub(/^![[:space:]]*/, "", s)
-    if (!opens(s, "[[") && !opens(s, "[")) return 0
-    return (bracket_tail(line) == NOCLOSE)
+    if (opens(s, "[[") || opens(s, "["))
+        return (bracket_tail(line) == NOCLOSE)
+
+    n = split_segments(strip_comment(line), seg_arr)
+    if (n > 1) {
+        s = trim(seg_arr[n])
+        sub(/^![[:space:]]*/, "", s)
+        if (opens(s, "[[") || opens(s, "["))
+            return (bracket_tail(seg_arr[n]) == NOCLOSE)
+    }
+    return 0
 }
 
 # Report `logical` once if ANY of its top-level (`;`-separated) statements is an
@@ -122,7 +134,7 @@ function stmt_is_unhardened_assertion(seg,   word, tail) {
     if (tail != NOCLOSE && (trim(tail) == "" || trim(tail) ~ /^#/))
         return 1
 
-    if (seg ~ /&&|\|\|/)               return 0   # already chained at top level
+    if (has_toplevel_chain(seg))       return 0   # already chained at top level
 
     # standalone negated bare command: `! cmd ...`
     if (seg ~ /^![[:space:]]*[^[:space:]]/)
@@ -253,6 +265,26 @@ function after_first_brace(s,   i, c, sq, dq) {
         else if (c == "{" && !sq && !dq) return substr(s, i + 1)
     }
     return ""
+}
+
+# Is there a `||` or `&&` at the TOP level — outside quotes AND outside a `( )` /
+# `$( )`? A `||`/`&&` that appears only inside a pattern (`! grep -q "a||b"`) or a
+# subshell is not a chain that makes the statement enforcing, so it must not buy an
+# exemption (Bugbot).
+function has_toplevel_chain(s,   i, c, sq, dq, pd) {
+    sq = 0; dq = 0; pd = 0
+    for (i = 1; i <= length(s); i++) {
+        c = substr(s, i, 1)
+        if (c == "\\" && !sq)              { i++ }
+        else if (c == "'" && !dq)          { sq = !sq }
+        else if (c == "\"" && !sq)         { dq = !dq }
+        else if (sq || dq)                 { continue }
+        else if (c == "(")                 { pd++ }
+        else if (c == ")")                 { if (pd > 0) pd-- }
+        else if (pd > 0)                   { continue }
+        else if (substr(s, i, 2) == "||" || substr(s, i, 2) == "&&") return 1
+    }
+    return 0
 }
 
 FILENAME != prev { prev = FILENAME; depth = 0; in_heredoc = 0; heredoc_tag = ""; pending = ""; parts = 0 }
