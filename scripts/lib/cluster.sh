@@ -565,7 +565,10 @@ _handle_existing_cluster() {
     success "Secure environment already running."
   else
     log "Cluster '$CLUSTER_NAME' exists but is stopped — starting it..."
-    k3d cluster start "$CLUSTER_NAME"
+    # Capture the tool's raw stderr to the log and surface only a curated line on
+    # failure — graceful failure, not a raw k3d dump before the closer (#577).
+    k3d cluster start "$CLUSTER_NAME" >> "${LOG_FILE:-/dev/null}" 2>&1 \
+      || error "Couldn't start your existing secure environment. Check Docker is running, then re-run."
     success "Secure environment started."
   fi
 

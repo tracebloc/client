@@ -25,7 +25,8 @@ _apply_remote_manifest() {
   trap "rm -f '$tmp_yml'" RETURN
   retry 3 5 curl_secure -fsSL "$url" -o "$tmp_yml" || { rm -f "$tmp_yml"; return 1; }
   [[ -s "$tmp_yml" ]] || { warn "Downloaded $label manifest is empty"; rm -f "$tmp_yml"; return 1; }
-  kubectl apply -f "$tmp_yml"
+  # Raw stderr to the log; the caller surfaces a curated line on failure (#577).
+  kubectl apply -f "$tmp_yml" >> "${LOG_FILE:-/dev/null}" 2>&1
 }
 
 _deploy_nvidia_plugin() {
@@ -38,7 +39,7 @@ _deploy_nvidia_plugin() {
   log "Downloading and applying NVIDIA device plugin DaemonSet..."
   _apply_remote_manifest "$NVIDIA_DEVICE_PLUGIN_URL" "NVIDIA device plugin" || error "Failed to enable GPU acceleration."
   kubectl rollout status daemonset/nvidia-device-plugin-daemonset \
-    -n kube-system --timeout=120s \
+    -n kube-system --timeout=120s >> "${LOG_FILE:-/dev/null}" 2>&1 \
     || warn "GPU setup still in progress — it may take a moment to finish."
   success "GPU acceleration enabled."
 }
