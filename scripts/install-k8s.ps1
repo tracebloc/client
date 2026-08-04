@@ -163,6 +163,23 @@ function PromptHeader($m)  { Write-Host ""; Write-Host "  $m" -ForegroundColor W
 function Hint($m)          { Write-Host "  $m" -ForegroundColor DarkGray; Log $m }
 function Has($cmd)         { [bool](Get-Command $cmd -ErrorAction SilentlyContinue) }
 
+# Top-level fatal handler (#577): convert ANY unhandled terminating error into a
+# clean, branded message — never PowerShell's raw source line + stack trace — then
+# the caller exits non-zero. The reason shown is the exception MESSAGE (curated at
+# the throw sites, #576); the stack trace is deliberately NOT shown or logged, so
+# no tracebloc internals leak. The user always sees what happened + what to do.
+function Show-FatalError($err) {
+  $reason = ""
+  try { $reason = [string]$err.Exception.Message } catch {}
+  if (-not $reason) { $reason = [string]$err }
+  Log "FATAL: $reason"
+  Write-Host ""
+  Write-Host "  " -NoNewline; Write-Host ([char]0x2716) -ForegroundColor Red -NoNewline; Write-Host " Installation stopped." -ForegroundColor Red
+  if ($reason) { Write-Host "  $reason" -ForegroundColor DarkGray }
+  if ($script:LOG_FILE) { Hint "Details saved to: $script:LOG_FILE" }
+  Hint "It's safe to re-run this installer. If it keeps failing, send that log to tracebloc support."
+}
+
 function RefreshPath {
   $env:PATH = [System.Environment]::GetEnvironmentVariable("PATH","Machine") + ";" +
               [System.Environment]::GetEnvironmentVariable("PATH","User")
@@ -4215,6 +4232,13 @@ function Install-TraceblocCli {
 # =============================================================================
 
 if (-not $env:TB_PESTER) {
+# Top-level error boundary (#577): any unhandled terminating error in the install
+# run below is converted to a clean "Installation stopped" message + exit — never
+# PowerShell's raw stack/source dump, and the session never just dies. Intentional
+# `exit` calls (fast-path, Err, final) pass straight through; only real crashes are
+# caught. $ErrorActionPreference is left as-is so existing non-terminating-error
+# flows are unchanged — this catches the throw-based crashes that leaked/killed.
+try {
 
 if ($Help) { Print-Help }
 if ($Diagnose) { Invoke-DiagnoseBundle; exit 0 }
@@ -4300,5 +4324,12 @@ Log "Install finished."
 
 # Exit code reflects reality: connected/starting are OK; failures are non-zero.
 if (-not (Test-InstallSucceeded)) { exit 1 }
+
+} catch {
+  # Any crash the run didn't handle itself lands here as a clean message, not a
+  # raw stack (#577).
+  Show-FatalError $_
+  exit 1
+}
 
 }  # end TB_PESTER guard (skipped when the test suite dot-sources this file)

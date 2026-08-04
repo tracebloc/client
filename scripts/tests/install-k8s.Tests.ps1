@@ -3048,3 +3048,33 @@ Describe "Print-Summary logs the classified outcome for every state (#576 Bugbot
     } finally { $script:LOG_FILE = $null }
   }
 }
+
+Describe "Top-level error boundary: crashes become a clean message, never a stack (#577)" {
+  BeforeAll { $script:PSRC577 = Get-Content "$PSScriptRoot/../install-k8s.ps1" -Raw }
+
+  It "the main run is wrapped in a top-level try/catch that calls Show-FatalError" {
+    $script:PSRC577 | Should -Match 'Show-FatalError \$_'
+    $script:PSRC577 | Should -Match 'if \(-not \$env:TB_PESTER\)[\s\S]{0,600}?try \{'
+  }
+
+  It "Show-FatalError renders a clean 'stopped' message with reason + re-run hint, no stack" {
+    $er = $null; try { throw "widget exploded" } catch { $er = $_ }
+    $out = Show-FatalError $er 6>&1 | Out-String
+    $out | Should -Match 'Installation stopped'
+    $out | Should -Match 'widget exploded'
+    $out | Should -Match 're-run'
+    $out | Should -Not -Match 'char:\d'
+    $out | Should -Not -Match 'ScriptStackTrace'
+  }
+
+  It "Show-FatalError logs the reason but never the stack" {
+    $log = Join-Path $TestDrive "fatal-577.log"; $script:LOG_FILE = $log
+    try {
+      $er = $null; try { throw "disk on fire" } catch { $er = $_ }
+      Show-FatalError $er 6>&1 | Out-Null
+      $c = Get-Content $log -Raw
+      $c | Should -Match 'FATAL: disk on fire'
+      $c | Should -Not -Match 'ScriptStackTrace'
+    } finally { $script:LOG_FILE = $null }
+  }
+}

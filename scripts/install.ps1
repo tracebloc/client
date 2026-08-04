@@ -485,7 +485,11 @@ if (-not $env:TB_PESTER) {
   try {
     Invoke-Bootstrap -ChildArgs $args
   } catch {
-    Err "$_"
+    # Clean, branded failure — never a raw stack (#577). "$_" stringifies to the
+    # exception MESSAGE (curated at the throw sites, #576), not the source/stack.
+    Write-Host ""
+    Err "Installation stopped: $_"
+    Write-Host "  It's safe to re-run this installer. If it keeps failing, share the output above with tracebloc support." -ForegroundColor DarkGray
     exit 1
   }
 }
