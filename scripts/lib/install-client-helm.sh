@@ -166,9 +166,16 @@ _extract_yaml_value() {
   # Latent until now only because every call site wraps this in `$( )`, which
   # suspends errexit for the function body; a bare call aborts the install
   # mid-step. Same house idiom as assess.sh / common.sh `_chart_version`.
-  # Catching any non-zero also keeps the absent-key path reachable if `head -1`
-  # ever SIGPIPEs grep (141) — the sibling shape fixed in #522.
-  line=$(grep -E "^${key}:" "$file" 2>/dev/null | head -1) || line=""
+  #
+  # NO `| head -1` on the pipeline: with head in play, a DUPLICATE key makes
+  # head exit after the first line and SIGPIPE grep (141) — and under pipefail
+  # `|| line=""` would then wipe the successfully captured value, so
+  # detect_installed_client could miss a clientId and fail open toward
+  # overwrite (Bugbot, #525). Capture every match, then take the first line in
+  # the shell, where nothing can signal anything: grep's rc is 1 only when
+  # there is genuinely no match.
+  line=$(grep -E "^${key}:" "$file" 2>/dev/null) || line=""
+  line="${line%%$'\n'*}"
   [[ -z "$line" ]] && return
   line="${line#*:}"
   line="${line#"${line%%[![:space:]]*}"}"

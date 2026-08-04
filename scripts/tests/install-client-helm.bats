@@ -145,6 +145,25 @@ setup() {
   [ "$output" = "REACHED_NOT_FOUND_PATH" ] || return 1
 }
 
+# The first fix used `grep | head -1 || line=""`. On a DUPLICATE key, head
+# exits after line one and SIGPIPEs grep (141); under pipefail the fallback
+# then wiped the successfully captured value, so detect_installed_client could
+# miss a clientId and fail open toward overwrite (Bugbot). The pipeline is gone
+# — grep captures every match, the shell takes the first — so a duplicate key
+# must yield the FIRST value, under the same bare-call errexit shape as above.
+@test "_extract_yaml_value: duplicate key under set -euo pipefail keeps the first value (Bugbot #525)" {
+  f="$BATS_TEST_TMPDIR/v"; printf 'clientId: "first"\nclientId: "second"\n' >"$f"
+  run bash -c '
+    set -euo pipefail
+    source "'"${LIB_DIR}"'/common.sh"
+    source "'"${LIB_DIR}"'/install-client-helm.sh"
+    LOG_FILE=/dev/null
+    _extract_yaml_value "'"$f"'" clientId
+  '
+  [ "$status" -eq 0 ] || return 1
+  [ "$output" = "first" ] || return 1
+}
+
 # ── _yaml_sq_escape / _yaml_sq_unescape (Saqlain review, #443) ──────────────
 # The bash-3.2 portability rule lives in exactly these two helpers now, so both
 # directions and their round-trip are pinned here.
