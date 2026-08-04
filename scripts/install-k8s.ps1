@@ -3895,6 +3895,129 @@ function Get-PfVirtualization {
   } catch { return $null }
 }
 
+# ── Network profile (#582) ───────────────────────────────────────────────────
+# A plain-language read of the network BEFORE the endpoint probes, so a user on a
+# restricted/corporate network sees what's happening up front instead of a cryptic
+# failure minutes in. Detects an explicit proxy, a configured corporate CA bundle,
+# and (best-effort) TLS inspection. Never fatal, PII-free (proxy credentials are
+# stripped and never printed/logged). One-to-one with preflight.sh's _pf_network_*.
+
+# Strip scheme:// and any user:pass@ credentials from a proxy URL; return bare
+# host:port. Credentials must NEVER reach the screen or log (#576).
+function Get-EnvProxyHostPort {
+  param([string]$Url)
+  $u = $Url
+  $u = $u -replace '^[a-zA-Z][a-zA-Z0-9+.-]*://', ''   # drop scheme://
+  $u = $u -replace '^[^@/]*@', ''                       # drop user:pass@ (PII)
+  $u = $u -replace '/.*$', ''                           # drop any /path
+  return $u
+}
+
+# First explicit proxy from the environment as bare host:port (creds stripped), or
+# $null when none is set. HTTPS takes precedence (our egress is all HTTPS).
+function Get-EnvProxy {
+  foreach ($name in @('HTTPS_PROXY','https_proxy','HTTP_PROXY','http_proxy')) {
+    $val = [Environment]::GetEnvironmentVariable($name)
+    if ($val) { return (Get-EnvProxyHostPort $val) }
+  }
+  return $null
+}
+
+# First explicit proxy from the environment VERBATIM (scheme + any user:pass intact),
+# or $null. For the probe CONNECTION only — an authenticated proxy needs the
+# credentials to answer the CONNECT, or it 407s and the inspection probe silently
+# returns 'unknown' (Bugbot). NEVER print/log this; display uses Get-EnvProxy.
+function Get-EnvProxyRaw {
+  foreach ($name in @('HTTPS_PROXY','https_proxy','HTTP_PROXY','http_proxy')) {
+    $val = [Environment]::GetEnvironmentVariable($name)
+    if ($val) { return $val }
+  }
+  return $null
+}
+
+# Configured corporate CA bundle path when TRACEBLOC_CA_BUNDLE/CURL_CA_BUNDLE points
+# at a readable file; $null otherwise. SOFT (never errors) — Resolve-CaBundle does
+# the hard validation at cluster-create.
+function Get-EnvCaBundle {
+  foreach ($name in @('TRACEBLOC_CA_BUNDLE','CURL_CA_BUNDLE')) {
+    $val = [Environment]::GetEnvironmentVariable($name)
+    if ($val -and (Test-Path -LiteralPath $val -PathType Leaf)) { return $val }
+  }
+  return $null
+}
+
+# $true if an X.509 issuer string names a well-known PUBLIC CA (a normal direct
+# chain); $false otherwise (a corporate re-signer — i.e. TLS inspection).
+function Test-IssuerIsPublic {
+  param([string]$Issuer)
+  return ($Issuer -imatch "DigiCert|Sectigo|Comodo|Let'?s Encrypt|ISRG|Google Trust|GTS |GlobalSign|Amazon|Entrust|GeoTrust|Baltimore|USERTrust|Actalis|Buypass|SSL\.com|Certum|IdenTrust|Microsoft (Azure|RSA|ECC)")
+}
+
+# Best-effort affirmative TLS-inspection probe. Returns 'yes'|'no'|'unknown'. Reads
+# the issuer of the cert served for a well-known public host (through the proxy when
+# one is set); a non-public issuer means a corporate CA is re-signing TLS. Bounded
+# (8s) and non-throwing; 'unknown' on any error.
+function Get-TlsInspectionState {
+  $prev = [System.Net.ServicePointManager]::ServerCertificateValidationCallback
+  $script:TbProbeIssuer = $null
+  try {
+    # Accept the cert for THIS probe only, capturing its issuer, so we can name the
+    # inspection even when the corporate CA isn't trusted here.
+    [System.Net.ServicePointManager]::ServerCertificateValidationCallback = {
+      param($theSender, $cert, $chain, $errors)
+      if ($cert) { $script:TbProbeIssuer = $cert.Issuer }
+      return $true
+    }
+    $req = [System.Net.HttpWebRequest]::Create("https://github.com/")
+    $req.Method = "HEAD"
+    $req.Timeout = 8000
+    $req.AllowAutoRedirect = $false
+    # Connect THROUGH the proxy using the raw value: an authenticated proxy needs
+    # its credentials on the CONNECT or it 407s and issuer capture fails → a false
+    # 'unknown' on the exact TLS-inspecting networks this exists to detect (Bugbot).
+    # Credentials go to the WebProxy only; display still uses the stripped Get-EnvProxy.
+    $raw = Get-EnvProxyRaw
+    if ($raw) {
+      try {
+        $u  = [System.Uri]$raw
+        $wp = New-Object System.Net.WebProxy(("{0}://{1}:{2}" -f $u.Scheme, $u.Host, $u.Port))
+        if ($u.UserInfo) {
+          $ui    = $u.UserInfo.Split(":", 2)
+          $puser = [System.Uri]::UnescapeDataString($ui[0])
+          $ppass = if ($ui.Count -gt 1) { [System.Uri]::UnescapeDataString($ui[1]) } else { "" }
+          $wp.Credentials = New-Object System.Net.NetworkCredential($puser, $ppass)
+        }
+        $req.Proxy = $wp
+      } catch { }
+    }
+    try { $resp = $req.GetResponse(); $resp.Close() } catch { }   # issuer captured in the callback regardless
+    if (-not $script:TbProbeIssuer) { return "unknown" }
+    if (Test-IssuerIsPublic $script:TbProbeIssuer) { return "no" } else { return "yes" }
+  } catch {
+    return "unknown"
+  } finally {
+    [System.Net.ServicePointManager]::ServerCertificateValidationCallback = $prev
+    $script:TbProbeIssuer = $null
+  }
+}
+
+# Print the plain-language network profile line (only when noteworthy — a plain
+# direct connection stays silent; the reachability lines already confirm egress).
+# Sets $script:NetProxy / $script:NetCa / $script:NetInspect for reuse.
+function Show-NetworkProfile {
+  $script:NetProxy   = Get-EnvProxy
+  $script:NetCa      = Get-EnvCaBundle
+  $script:NetInspect = Get-TlsInspectionState
+
+  if (-not $script:NetProxy -and $script:NetInspect -ne "yes") { return }
+
+  $parts = @()
+  if ($script:NetProxy)             { $parts += "corporate proxy detected ($script:NetProxy)" }
+  if ($script:NetInspect -eq "yes") { $parts += "TLS inspection detected" }
+  if ($script:NetCa)                { $parts += "your company's certificate is configured" }
+  Info ("Network: " + ($parts -join "; ") + ".")
+}
+
 function Test-Preflight {
   if ($env:TRACEBLOC_SKIP_PREFLIGHT) { Info "Preflight checks skipped (TRACEBLOC_SKIP_PREFLIGHT set)."; return }
 
@@ -3969,6 +4092,7 @@ function Test-Preflight {
   }
   else                       { Ok "Storage: $HOST_DATA_DIR local disk" }
 
+  Show-NetworkProfile   # #582: announce the network profile before the probes
   Info "Checking outbound connectivity to required services..."
   $backendHost = (Get-BackendUrl) -replace '^https?://','' -replace '/$',''
   $criticals = @(
