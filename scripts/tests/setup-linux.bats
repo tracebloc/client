@@ -161,6 +161,18 @@ setup() {
   [[ "$output" == *"DEBIAN_FRONTEND=noninteractive"* ]]
   [[ "$output" == *"NEEDRESTART_MODE=a"* ]]
 }
+# The get.docker.com script's internal apt/download.docker.com fetches carry no
+# timeout of their own, so a stalled connection hung "Installing Docker…"
+# silently until something else killed the process — in CI the 20-minute job
+# timeout, three times on 2026-08-04 (#525/#592). The run must be bounded so a
+# stall fails in minutes with a clear message instead.
+@test "install_docker_engine: get.docker.com run is bounded with timeout (CI hang 2026-08-04)" {
+  PRESENT_CMDS="curl"; TEST_DISTRO=ubuntu
+  run install_docker_engine
+  run mock_calls
+  [[ "$output" == *"timeout 600 bash"* ]] || return 1
+}
+
 @test "install_docker_engine: docker already present -> no install" {
   PRESENT_CMDS="docker"; TEST_DISTRO=ubuntu
   run install_docker_engine

@@ -226,7 +226,18 @@ install_docker_engine() {
       chmod +x "$docker_script"
       # Same needrestart guard as setup_pm: get.docker.com runs `apt-get install`
       # internally, so under spin_cmd it can hit the same hidden prompt and hang.
-      spin_cmd "Installing Docker…" sudo env DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a bash "$docker_script"
+      #
+      # And BOUND it: the script's internal apt/download.docker.com fetches carry
+      # no timeout of their own, so a stalled connection hung here silently behind
+      # the spinner until something else killed the process — in CI that was the
+      # 20-minute job timeout, three times in one day, with nothing in the log but
+      # "Installing Docker…" (backend, 2026-08-04). A healthy install takes 1-3
+      # minutes; 10 is network trouble, not a slow link. timeout(1) is coreutils,
+      # present on every distro this branch serves.
+      if ! spin_cmd "Installing Docker…" sudo env DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a timeout 600 bash "$docker_script"; then
+        rm -f "$docker_script"
+        error "Docker install did not finish within 10 minutes — the download from get.docker.com/download.docker.com stalled. Check your network/proxy and re-run the installer; it resumes safely."
+      fi
       rm -f "$docker_script"
     fi
     # Enable for boot only (no --now): starting is handled below, where a start
