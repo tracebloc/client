@@ -1820,7 +1820,9 @@ function Resolve-CaBundle {
 function Set-ToolTrust {
   $ca = Resolve-CaBundle
   if (-not $ca) { return }
-  $env:GIT_SSL_CAINFO = $ca
+  # Don't clobber a fuller pre-set GIT_SSL_CAINFO (replace-not-augment): only set it
+  # when the user hasn't already (Bugbot).
+  if (-not $env:GIT_SSL_CAINFO) { $env:GIT_SSL_CAINFO = $ca }
   Ok "Trusting your company's certificate for git and downloads."
   Hint "On Windows, cosign and helm read the certificate store, not a PEM file - import your corporate CA into Cert:\LocalMachine\Root (or use the offline installer) so they trust it too."
 }

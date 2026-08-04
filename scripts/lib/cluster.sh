@@ -159,7 +159,11 @@ wire_ca_trust() {
     error "$ca is set but its CA bundle file can't be read — fix its path/permissions and re-run."
   fi
   [[ -z "$ca" ]] && return 0
-  export SSL_CERT_FILE="$ca" GIT_SSL_CAINFO="$ca"
+  # Only set trust vars the user hasn't already set: SSL_CERT_FILE and GIT_SSL_CAINFO
+  # are replace-not-augment (Go / OpenSSL), so overwriting a fuller pre-set bundle with
+  # a corp-root-only one would drop the public roots those tools need elsewhere (Bugbot).
+  [[ -z "${SSL_CERT_FILE:-}" ]]  && export SSL_CERT_FILE="$ca"
+  [[ -z "${GIT_SSL_CAINFO:-}" ]] && export GIT_SSL_CAINFO="$ca"
   if [[ "$OS" == "Darwin" ]]; then
     success "Trusting your company's certificate for git and downloads."
     hint "On macOS, cosign and helm read the system Keychain, not a PEM file — add the CA to your keychain (or use the offline installer) so they trust it too."

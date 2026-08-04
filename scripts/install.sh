@@ -347,7 +347,9 @@ _bootstrap_wire_ca() {
       echo "        fix its path/permissions and re-run." >&2
       exit 1
     fi
-    export SSL_CERT_FILE="$ca"   # effective for cosign on Linux (see note above)
+    # Don't clobber a fuller pre-set SSL_CERT_FILE (replace-not-augment): only set it
+    # when the user hasn't already (Bugbot). Effective for cosign on Linux (note above).
+    [[ -z "${SSL_CERT_FILE:-}" ]] && export SSL_CERT_FILE="$ca"
     return 0
   done
 }

@@ -3250,4 +3250,13 @@ Describe "Set-ToolTrust: wire the corporate CA into cosign/helm/git (#583)" {
     Set-ToolTrust *> $null
     $env:GIT_SSL_CAINFO | Should -BeNullOrEmpty
   }
+
+  It "does NOT clobber a user's pre-set GIT_SSL_CAINFO (replace-not-augment, Bugbot)" {
+    $ca = Join-Path $TestDrive "corp.pem"; "pem" | Set-Content -LiteralPath $ca
+    $uf = Join-Path $TestDrive "user-full.pem"; "pem" | Set-Content -LiteralPath $uf
+    $env:TRACEBLOC_CA_BUNDLE = $ca
+    $env:GIT_SSL_CAINFO = $uf
+    Set-ToolTrust *> $null
+    $env:GIT_SSL_CAINFO | Should -Be $uf     # user's fuller bundle left intact
+  }
 }

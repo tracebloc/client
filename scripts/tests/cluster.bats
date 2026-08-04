@@ -16,6 +16,7 @@ setup() {
   HOST_DATA_DIR="$BATS_TEST_TMPDIR/data"
   SERVERS=1; AGENTS=0; K8S_VERSION=""; K3D_GPU_FLAGS=()
   unset HTTP_PROXY HTTPS_PROXY NO_PROXY http_proxy https_proxy no_proxy
+  unset TRACEBLOC_CA_BUNDLE CURL_CA_BUNDLE SSL_CERT_FILE GIT_SSL_CAINFO
 
   # k3d mock: record argv; if a --config <path> is present, snapshot the file so
   # a test can assert its contents (cluster.sh deletes the temp dir after create).
@@ -782,6 +783,15 @@ _stub_create_cluster_deps() {
   wire_ca_trust >/dev/null
   [ "$SSL_CERT_FILE" = "$ca" ]       # cosign/helm/git get the corp CA
   [ "$CURL_CA_BUNDLE" = "$full" ]    # curl's own bundle is left intact (not overwritten)
+}
+
+@test "wire_ca_trust: does NOT clobber pre-set SSL_CERT_FILE / GIT_SSL_CAINFO (replace-not-augment, Bugbot)" {
+  local ca="$BATS_TEST_TMPDIR/corp.pem";  echo pem > "$ca"
+  local uf="$BATS_TEST_TMPDIR/user-full.pem"; echo pem > "$uf"
+  TRACEBLOC_CA_BUNDLE="$ca"; SSL_CERT_FILE="$uf"; GIT_SSL_CAINFO="$uf"; OS="Linux"
+  wire_ca_trust >/dev/null
+  [ "$SSL_CERT_FILE" = "$uf" ]     # user's fuller bundles are left intact...
+  [ "$GIT_SSL_CAINFO" = "$uf" ]    # ...not overwritten with the corp-root-only one
 }
 
 @test "wire_ca_trust: no-op when no CA is configured (#583)" {
