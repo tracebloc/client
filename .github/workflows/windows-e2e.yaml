@@ -1,0 +1,107 @@
+name: Windows e2e (self-hosted)
+
+# Real end-to-end exercise of the Windows installer (install-k8s.ps1) on a self-hosted
+# runner with NESTED VIRTUALIZATION — the coverage GitHub's windows-latest runners can't
+# give (they can't nest virt, so the PS installer otherwise has only mocked Pester). This
+# is decision D5 of RFC-CLIENT-0003 (#436).
+#
+# SCHEDULE-ONLY (nightly) + manual dispatch — NOT per-PR: the run provisions a real k3d
+# cluster inside WSL2/Docker on a shared, persistent box, so it must not contend with every
+# push. Cost is bounded by being schedule-only + tearing the cluster down every run.
+#
+# ── Runner prerequisites (one-time; see docs/WINDOWS-E2E.md) ───────────────────────────
+#   • a self-hosted Windows runner registered with the labels:  self-hosted, windows, nested-virt
+#   • WSL2 enabled + a nested-virt-capable host (bare metal, or a VM with nested virt on)
+#   • Docker Desktop installed and running (WSL2 backend)
+#   • the runner service account may install user-space tools (kubectl/k3d/helm) + create k3d clusters
+# The e2e VERIFIES Docker is up (it does not reinstall Docker Desktop per run — a persistent
+# runner must not reboot itself nightly).
+
+on:
+  schedule:
+    - cron: '0 4 * * *'      # nightly 04:00 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  # One Windows e2e at a time per ref — the k3d cluster + WSL state on the shared runner
+  # are not safe to run concurrently. Never cancel a run mid-teardown.
+  group: windows-e2e-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  windows-e2e:
+    name: Windows installer e2e (nested-virt)
+    runs-on: [self-hosted, windows, nested-virt]
+    timeout-minutes: 45
+    env:
+      # Isolated from any real install on the box. HOST_DATA_DIR is resolved in the first
+      # step below (it MUST live under %USERPROFILE% — Confirm-DataDir rejects anything
+      # else — and $USERPROFILE isn't available in the ${{ env }} context, only at runtime).
+      CLUSTER_NAME: tbe2ewin
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve isolated data dir + tool PATH
+        shell: pwsh
+        run: |
+          # Publish HOST_DATA_DIR to $GITHUB_ENV so the driver inherits it AND the artifact/
+          # teardown steps can reference ${{ env.HOST_DATA_DIR }} — in lockstep with the
+          # driver's own default of $USERPROFILE\.tracebloc-e2e.
+          Add-Content -Path $env:GITHUB_ENV -Value "HOST_DATA_DIR=$env:USERPROFILE\.tracebloc-e2e"
+          # Put the installer's tool dir on PATH for LATER steps (the safety-net teardown's
+          # bare `k3d`). Initialize-ToolDir writes the MACHINE PATH, which a fresh step
+          # process doesn't pick up mid-job; GITHUB_PATH does prepend it for later steps (#436 Bugbot).
+          Add-Content -Path $env:GITHUB_PATH -Value "$env:ProgramFiles\tracebloc\bin"
+
+      - name: Run the real installer e2e (credential-free)
+        shell: pwsh
+        run: pwsh -NoProfile -File scripts/tests/e2e-windows.ps1
+
+      - name: Upload install log on any non-success
+        # NOT just failure(): a timeout-minutes hit CANCELS the job (failure() is false), yet
+        # that's exactly when the log matters most. !success() covers failed + cancelled/timed
+        # out; this runs before the teardown below so the log survives the data-dir cleanup.
+        if: ${{ !success() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-e2e-install-log
+          path: ${{ env.HOST_DATA_DIR }}\install-*.log
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Teardown (safety net)
+        if: always()
+        shell: pwsh
+        run: |
+          # The driver already deletes the cluster in its finally; this is a belt-and-braces
+          # net for a driver that died before its finally ran, plus the data-dir cleanup we
+          # deliberately deferred so the log survived for the upload above. Bound the delete
+          # so a wedged Docker/WSL teardown can't hang the shared runner (#436 Bugbot).
+          # The delete must not fail OPEN. This net exists precisely because a leftover
+          # tbe2ewin cluster on the shared runner sends the NEXT run's New-K3dCluster down
+          # its reuse path and yields a false PASS with no real create (#542 Bugbot). The
+          # old form swallowed everything in an empty catch: Start-Process without
+          # -ErrorAction Stop, and no null-check on $p, so a SPAWN failure left $p null,
+          # $p.HasExited threw, the catch ate it, and the stale cluster survived unseen.
+          $ErrorActionPreference = 'Stop'
+          $deleted = $false
+          try {
+            $p = Start-Process k3d -ArgumentList "cluster","delete",$env:CLUSTER_NAME -NoNewWindow -PassThru
+            if ($null -eq $p) { throw "k3d cluster delete did not start (Start-Process returned null)" }
+            $p | Wait-Process -Timeout 120 -ErrorAction SilentlyContinue
+            if (-not $p.HasExited) {
+              $p | Stop-Process -Force -ErrorAction SilentlyContinue
+              throw "k3d cluster delete did not finish within 120s and was killed"
+            }
+            if ($p.ExitCode -ne 0) { throw "k3d cluster delete exited $($p.ExitCode)" }
+            $deleted = $true
+          } catch {
+            # always() teardown: the run is already over, so do not fail it here. But a
+            # leftover cluster MUST be visible, or the next run false-passes silently.
+            Write-Host "::warning::teardown safety-net could not confirm '$env:CLUSTER_NAME' was deleted: $_. A stale cluster may remain on this persistent runner and would send the next run's create down the reuse path. Delete it by hand: k3d cluster delete $env:CLUSTER_NAME"
+          }
+          if ($deleted) { Write-Host "teardown: '$env:CLUSTER_NAME' deleted" }
+          if ($env:HOST_DATA_DIR) { Remove-Item -Recurse -Force $env:HOST_DATA_DIR -ErrorAction SilentlyContinue }

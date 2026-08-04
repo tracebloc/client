@@ -21,11 +21,10 @@ set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 LIB="$HERE/../lib"
 
-# Isolated cluster name so we never touch a real 'tracebloc' cluster; opt out of
-# autostart so we don't reconfigure docker.service / restart policies on the host.
-export USER="${USER:-$(id -un)}"
-export CLUSTER_NAME="${CLUSTER_NAME:-tbe2e}"
-export TRACEBLOC_NO_AUTOSTART=1
+# Shared bring-up contract (isolation env + tool-install prereqs).
+# shellcheck source=/dev/null
+source "$HERE/lib/e2e-common.sh"
+e2e_isolate_env tbe2e
 
 # shellcheck source=/dev/null
 source "$LIB/common.sh"
@@ -45,11 +44,7 @@ echo "════════════════════════�
 
 # Docker is preinstalled + running on the runner; we only need the CLI tools the
 # cluster step uses. (We do NOT run install_docker_engine — no daemon gymnastics.)
-has docker || error "Docker is not available on this host."
-umask 022
-install_kubectl
-install_k3d
-install_helm
+e2e_install_prereqs
 
 echo "── create_cluster() — the installer's real cluster-bring-up path ──"
 create_cluster

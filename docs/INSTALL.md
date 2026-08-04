@@ -279,6 +279,31 @@ With the client running, the typical follow-up is to land a dataset in the clust
 
 The chart **does not transport data into the cluster** — it points at data already accessible on the cluster's shared PVC (`client-pvc` by default, mounted at `/data/shared/` inside the ingestor Pod). Stage your CSV + image / text / annotation files there first; the ingestor chart README documents the `kubectl cp` pattern and production sync alternatives.
 
+### Staging on a local (hostpath) install
+
+On a laptop install (`hostPath.enabled: true`, the default for the OS installers) `/data/shared/` is just a folder on your machine — the dataset dir is `HOST_DATA_DIR\data\<dataset>` on Windows, `$HOST_DATA_DIR/data/<dataset>` on macOS/Linux — so you stage a dataset by copying it there directly (no `kubectl cp` needed).
+
+Use **idempotent** commands so re-running the step (for example after the installer got re-run) never errors on an already-staged dataset:
+
+**Windows (PowerShell)** — `New-Item -Force` doesn't fail when the folder already exists, and `robocopy` merges into an existing target instead of throwing `already exists`:
+
+```powershell
+$dst = "$env:USERPROFILE\.tracebloc\data\shapes-demo"    # HOST_DATA_DIR\data\<dataset>
+New-Item -ItemType Directory -Force -Path $dst | Out-Null
+robocopy "$env:USERPROFILE\Downloads\sample_dataset\shapes-demo" $dst /E
+# robocopy exit codes 0-7 are success (>=8 is a real error); safe to re-run.
+```
+
+> Plain `mkdir` and `Copy-Item -Recurse` are **not** idempotent — a second run throws `An item with the specified name … already exists` even though the earlier copy succeeded. That error is harmless (the data is already staged), but the commands above avoid it.
+
+**macOS / Linux** — `mkdir -p` and `cp -R` (or `rsync -a`) are already idempotent:
+
+```bash
+dst="$HOME/.tracebloc/data/shapes-demo"                  # $HOST_DATA_DIR/data/<dataset>
+mkdir -p "$dst"
+cp -R ~/Downloads/sample_dataset/shapes-demo/. "$dst/"
+```
+
 Example: once you've staged a cats-vs-dogs image classification dataset under `/data/shared/cats-dogs/` on the PVC, the `ingest.yaml` describes what's there:
 
 ```yaml

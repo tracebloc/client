@@ -18,6 +18,19 @@ tests:
           path: metadata.name
           value: RELEASE-NAME-jobs-manager
 
+  # jobs-manager mounts ReadWriteOnce PVCs (client-pvc, client-logs-pvc); it MUST use
+  # Recreate, never RollingUpdate. RollingUpdate's maxSurge brings up a second pod that
+  # contends for the RWO volume and permanently deadlocks WaitForFirstConsumer
+  # provisioning on a single-node local-path cluster after a restart (production incident:
+  # jobs-manager Pending for hours, blocking ingestion). Regression guard for that fix.
+  - it: must use the Recreate strategy (RWO PVC — no surge pod), not RollingUpdate
+    asserts:
+      - equal:
+          path: spec.strategy.type
+          value: Recreate
+      - notExists:
+          path: spec.strategy.rollingUpdate
+
   - it: should have standard labels
     asserts:
       - exists:

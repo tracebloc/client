@@ -23,9 +23,10 @@ set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 LIB="$HERE/../lib"
 
-export USER="${USER:-$(id -un)}"
-export CLUSTER_NAME="${CLUSTER_NAME:-tbproxy}"
-export TRACEBLOC_NO_AUTOSTART=1
+# Shared bring-up contract (isolation env + tool-install prereqs).
+# shellcheck source=/dev/null
+source "$HERE/lib/e2e-common.sh"
+e2e_isolate_env tbproxy
 
 PROXY_USER="tbuser"
 PROXY_PASS="tb-Pass.123"          # contains no '@', but the URL form does: user:pass@host
@@ -51,14 +52,9 @@ echo "════════════════════════�
 echo "  Authenticated-proxy E2E   arch: $(uname -m)"
 echo "═══════════════════════════════════════════════════════════════════════"
 
-has docker || error "Docker is not available on this host."
-
-# Install the CLI tools directly (the proxy below is exercised by the cluster
-# NODES, which is where the auth-proxy hardening lives).
-umask 022
-install_kubectl
-install_k3d
-install_helm
+# The proxy below is exercised by the cluster NODES, which is where the
+# auth-proxy hardening lives — so we just need the CLI tools + a cluster.
+e2e_install_prereqs
 
 # ── 1. squid that REQUIRES basic auth ───────────────────────────────────────
 echo "── starting an authenticated squid proxy ──"

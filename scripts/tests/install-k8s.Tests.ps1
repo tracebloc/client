@@ -2399,6 +2399,34 @@ Describe "UNC-safe background jobs (#409)" {
       $env:SystemRoot = $prev
     }
   }
+
+  It "JobInit silences the progress overlay in the job runspace (Bugbot #515)" {
+    # A fresh runspace resets $ProgressPreference to 'Continue' -- the parent's
+    # silence is not inherited -- and on PS 5.1 that overlay throttles
+    # Invoke-WebRequest badly (#468/#471). It must be set by the init script so
+    # every runspace gets it, not by each caller remembering to.
+    $job = Start-Job -InitializationScript $JobInit -ScriptBlock { "$ProgressPreference" }
+    Receive-Job -Job ($job | Wait-Job) | Should -Be 'SilentlyContinue'
+    Remove-Job $job -Force
+  }
+
+  It "a caller that forgets ProgressPreference still runs silenced (Bugbot #515)" {
+    # The whole point of moving it into JobInit: Invoke-WithHeartbeat is how every
+    # in-job download runs, and its scriptblock must not have to opt in.
+    (Invoke-WithHeartbeat -Message "progress" -PollSeconds 1 -Script { "$ProgressPreference" }) |
+      Should -Be 'SilentlyContinue'
+  }
+
+  It "the silence lives in JobInit itself, not only at the call sites" {
+    # Source-level gate: the assignment must be inside the $script:JobInit block,
+    # so a new Start-Job call site inherits it without an edit. Slice the block
+    # out first (non-greedy to the first closing brace at column 0) — matching
+    # against the whole file would be satisfied by any caller-local assignment.
+    $src   = Get-Content "$PSScriptRoot/../install-k8s.ps1" -Raw
+    $block = [regex]::Match($src, '(?s)\$script:JobInit = \{.*?\r?\n\}')
+    $block.Success | Should -BeTrue
+    $block.Value | Should -Match '\$ProgressPreference = ''SilentlyContinue'''
+  }
 }
 
 Describe "Pinned tool versions - no api.github.com (#382 / #410)" {
@@ -2925,5 +2953,42 @@ Describe "Enable-OneVirtFeature -- translated DISM failures, honest reboot flag 
       Should -BeFalse
     Should -Invoke Warn -ParameterFilter { $m -like 'Could not enable*' }
     Should -Invoke Hint -ParameterFilter { $m -like "*Enable 'Microsoft-Hyper-V-All' manually*" }
+  }
+}
+
+Describe "k3s version pin: create + reuse drift (#547 source guards)" {
+  BeforeAll { $script:PSRC = Get-Content "$PSScriptRoot/../install-k8s.ps1" -Raw }
+
+  It "passes --image rancher/k3s:<pin> on create" {
+    $script:PSRC | Should -Match '"--image", "rancher/k3s:\$K8S_VERSION"'
+  }
+  It "warns loudly (not silently floats) when K8S_VERSION=latest" {
+    $script:PSRC | Should -Match 'K8S_VERSION=latest runs an UNVALIDATED k3s'
+    $script:PSRC | Should -Match 'if \(\$K8S_VERSION -eq "latest"\)'
+  }
+  It "defines Test-K3sVersionDrift which inspects the node image and compares the tag to the pin" {
+    $script:PSRC | Should -Match 'function Test-K3sVersionDrift'
+    $script:PSRC | Should -Match "docker inspect ""k3d-\`$n-server-0"" --format '{{\.Config\.Image}}'"
+    $script:PSRC | Should -Match 'rancher/k3s:\(\[\^@'      # the tag-extract regex
+    $script:PSRC | Should -Match '\$runningK3s -ne \$K8S_VERSION'
+  }
+  It "bounds the docker inspect probe with a deadline (no hang on a wedged engine, Bugbot #565)" {
+    # Start-Job + Wait-JobWithProgress -TimeoutSec, same bounded pattern as Test-ClusterRunning;
+    # the distinctive -Message ties the deadline to THIS probe.
+    $script:PSRC | Should -Match 'Wait-JobWithProgress -Job \$job -TimeoutSec 15 -Message "Checking k3s version"'
+  }
+  It "warns with the recreate remedy on drift" {
+    $script:PSRC | Should -Match 'not the validated pin'
+    $script:PSRC | Should -Match 'k3d cluster delete \$CLUSTER_NAME'
+  }
+  It "runs the drift check on BOTH the reuse path and the healthy fast-path (Bugbot #565)" {
+    # 1 definition + 2 call sites = at least 3 mentions
+    ([regex]::Matches($script:PSRC, 'Test-K3sVersionDrift')).Count | Should -BeGreaterOrEqual 3
+    # the completed+healthy fast-path calls it (right after the "nothing to do" line)
+    $script:PSRC | Should -Match 'client is healthy -- nothing to do[\s\S]{0,320}?Test-K3sVersionDrift'
+  }
+  It "header docs no longer advertise 'default: latest'" {
+    $script:PSRC | Should -Not -Match 'default: latest'
+    $script:PSRC | Should -Match 'pinned \+ validated'
   }
 }
