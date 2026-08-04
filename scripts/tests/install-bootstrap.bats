@@ -173,6 +173,56 @@ run_boot_hermetic() {
   [ -f "$SBX/k8s-ran" ]              # privileged step reached only after verify
 }
 
+@test "bootstrap wires an explicit CA into cosign via SSL_CERT_FILE (#583)" {
+  # cosign's Go HTTPS client reads SSL_CERT_FILE; behind a TLS-inspecting proxy the
+  # bootstrap must set it from TRACEBLOC_CA_BUNDLE before running cosign, or the
+  # signature check fails x509. Record what SSL_CERT_FILE cosign actually saw.
+  # The export is Linux-only (Go reads the Keychain on macOS — next test), so pin
+  # the platform: without the stub this test flips by whichever OS runs the suite.
+  local ca="$SBX/corp-ca.pem"; printf 'PEM\n' > "$ca"
+  rm -f "$BIN/uname"; printf '#!/usr/bin/env bash\necho Linux\n' > "$BIN/uname"; chmod +x "$BIN/uname"
+  cat > "$BIN/cosign" <<EOF
+#!/usr/bin/env bash
+printf '%s' "\${SSL_CERT_FILE:-}" > "$SBX/cosign-ssl"
+exit 0
+EOF
+  chmod +x "$BIN/cosign"
+  REF="v9.9.9" TRACEBLOC_CA_BUNDLE="$ca" run_boot
+  [ "$status" -eq 0 ] || return 1
+  [ "$(cat "$SBX/cosign-ssl")" = "$ca" ] || return 1
+}
+
+@test "bootstrap on macOS does NOT export SSL_CERT_FILE (inert for Go, shrinks curl trust, Bugbot)" {
+  # On Darwin, Go reads the Keychain — the export would help cosign not at all,
+  # while OpenSSL curl honors SSL_CERT_FILE replace-not-augment, so a corp-root-only
+  # bundle would cut download trust for zero gain. Validation still runs (next test
+  # covers fail-fast); only the export is platform-gated.
+  local ca="$SBX/corp-ca.pem"; printf 'PEM\n' > "$ca"
+  rm -f "$BIN/uname"; cat > "$BIN/uname" <<'EOF'
+#!/usr/bin/env bash
+echo Darwin
+EOF
+  chmod +x "$BIN/uname"
+  cat > "$BIN/cosign" <<EOF
+#!/usr/bin/env bash
+printf '%s' "\${SSL_CERT_FILE:-}" > "$SBX/cosign-ssl"
+exit 0
+EOF
+  chmod +x "$BIN/cosign"
+  REF="v9.9.9" TRACEBLOC_CA_BUNDLE="$ca" run_boot
+  [ "$status" -eq 0 ] || return 1
+  [ -z "$(cat "$SBX/cosign-ssl")" ] || return 1
+}
+
+@test "bootstrap fails fast on a set-but-unreadable CA bundle (#583 Bugbot)" {
+  # A bad CA path must fail here with a clear message, not silently no-op and surface
+  # later as a generic cosign authenticity error.
+  REF="v9.9.9" TRACEBLOC_CA_BUNDLE="/no/such/corporate-ca.pem" run_boot
+  [ "$status" -ne 0 ] || return 1
+  [[ "$output" == *"can't be read"* ]] || return 1
+  [ ! -f "$SBX/k8s-ran" ] || return 1
+}
+
 @test "tampered sub-script aborts before the privileged step" {
   # Mutate a fetched file AFTER the manifest was built → digest mismatch.
   echo "rm -rf / # evil" >> "$SERVE/scripts/lib/provision.sh"

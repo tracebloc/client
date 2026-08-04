@@ -3232,3 +3232,45 @@ Describe "GPU device-plugin failure is recoverable, not fatal (#577)" {
     $script:PSRCGPU | Should -Match 'kubectl get node -o jsonpath.*--request-timeout='
   }
 }
+
+Describe "Set-ToolTrust: wire the corporate CA into cosign/helm/git (#583)" {
+  BeforeEach { $env:TRACEBLOC_CA_BUNDLE=$null; $env:CURL_CA_BUNDLE=$null; $env:SSL_CERT_FILE=$null; $env:GIT_SSL_CAINFO=$null }
+  AfterAll  { $env:TRACEBLOC_CA_BUNDLE=$null; $env:CURL_CA_BUNDLE=$null; $env:SSL_CERT_FILE=$null; $env:GIT_SSL_CAINFO=$null }
+
+  It "exports GIT_SSL_CAINFO but NOT SSL_CERT_FILE (Go ignores it on Windows), points cosign/helm at the store (Bugbot)" {
+    $ca = Join-Path $TestDrive "ca.pem"; "pem" | Set-Content -LiteralPath $ca
+    $env:TRACEBLOC_CA_BUNDLE = $ca
+    $out = Set-ToolTrust 6>&1 | Out-String
+    $env:GIT_SSL_CAINFO | Should -Be (Resolve-Path -LiteralPath $ca).Path
+    $env:SSL_CERT_FILE  | Should -BeNullOrEmpty      # inert on Windows; deliberately not set
+    $out | Should -Match 'certificate for git'       # success names only what's wired
+    $out | Should -Match 'downloads read the certificate store'  # downloads/cosign/helm -> store
+  }
+
+  It "no-op when no CA is configured" {
+    Set-ToolTrust *> $null
+    $env:GIT_SSL_CAINFO | Should -BeNullOrEmpty
+  }
+
+  It "does NOT clobber a user's pre-set GIT_SSL_CAINFO (replace-not-augment, Bugbot)" {
+    $ca = Join-Path $TestDrive "corp.pem"; "pem" | Set-Content -LiteralPath $ca
+    $uf = Join-Path $TestDrive "user-full.pem"; "pem" | Set-Content -LiteralPath $uf
+    $env:TRACEBLOC_CA_BUNDLE = $ca
+    $env:GIT_SSL_CAINFO = $uf
+    Set-ToolTrust *> $null
+    $env:GIT_SSL_CAINFO | Should -Be $uf     # user's fuller bundle left intact
+  }
+
+  It "a skipped export is not claimed as success (Bugbot)" {
+    # With GIT_SSL_CAINFO pre-set the export is skipped — a green "Trusting..."
+    # would report wiring that did not happen and mask a pre-set bundle that
+    # still lacks the corporate CA. Say what was kept, claim nothing.
+    $ca = Join-Path $TestDrive "corp.pem"; "pem" | Set-Content -LiteralPath $ca
+    $uf = Join-Path $TestDrive "user-full.pem"; "pem" | Set-Content -LiteralPath $uf
+    $env:TRACEBLOC_CA_BUNDLE = $ca
+    $env:GIT_SSL_CAINFO = $uf
+    $out = Set-ToolTrust 6>&1 | Out-String
+    $out | Should -Not -Match 'Trusting'
+    $out | Should -Match 'Keeping your pre-set GIT_SSL_CAINFO'
+  }
+}

@@ -165,3 +165,13 @@ Describe "Bootstrap log hygiene: cosign output captured, no internals leaked (#5
     $script:BOOTSRC | Should -Match 'install stopped before changing anything on your machine'
   }
 }
+
+Describe "Bootstrap CA handling for cosign on Windows (#583)" {
+  It "validates the CA path (fail fast) but does NOT set SSL_CERT_FILE (Go ignores it on Windows)" {
+    $src = Get-Content "$PSScriptRoot/../install.ps1" -Raw
+    $fn  = (($src -split "function Confirm-ManifestSignature")[1] -split "`nfunction ")[0]
+    $fn | Should -Match 'TRACEBLOC_CA_BUNDLE'
+    $fn | Should -Match "can't be read"                     # fail fast on a bad path
+    $fn | Should -Not -Match '\$env:SSL_CERT_FILE = \$ca'   # inert on Windows; not wired
+  }
+}
