@@ -173,12 +173,25 @@ wire_ca_trust() {
   # Only set trust vars the user hasn't already set: SSL_CERT_FILE and GIT_SSL_CAINFO
   # are replace-not-augment (Go / OpenSSL), so overwriting a fuller pre-set bundle with
   # a corp-root-only one would drop the public roots those tools need elsewhere (Bugbot).
-  [[ -z "${SSL_CERT_FILE:-}" ]]  && export SSL_CERT_FILE="$ca"
-  [[ -z "${GIT_SSL_CAINFO:-}" ]] && export GIT_SSL_CAINFO="$ca"
-  # Name only what this actually wires: SSL_CERT_FILE (cosign/helm, Linux) and
-  # GIT_SSL_CAINFO (git). curl "downloads" trust the user's own CURL_CA_BUNDLE, which we
-  # deliberately don't touch — so we don't claim it here (Bugbot).
-  success "Trusting your company's certificate for cosign, helm and git."
+  #
+  # And SAY only what actually happened: a green "Trusting…" while every export was
+  # skipped reported wiring that did not happen — masking a pre-set bundle that may
+  # still lack the corporate CA (Bugbot). curl "downloads" trust the user's own
+  # CURL_CA_BUNDLE, which we deliberately don't touch, so it is never claimed here.
+  local wired="" kept=""
+  if [[ -z "${SSL_CERT_FILE:-}" ]]; then
+    export SSL_CERT_FILE="$ca";  wired="cosign, helm"
+  else
+    kept="SSL_CERT_FILE (cosign/helm)"
+  fi
+  if [[ -z "${GIT_SSL_CAINFO:-}" ]]; then
+    export GIT_SSL_CAINFO="$ca"; wired="${wired:+$wired and }git"
+  else
+    kept="${kept:+$kept and }GIT_SSL_CAINFO (git)"
+  fi
+  [[ -n "$wired" ]] && success "Trusting your company's certificate for $wired."
+  [[ -n "$kept" ]]  && hint "Keeping your pre-set $kept — make sure that bundle includes your company's CA, or those tools will still fail x509."
+  return 0
 }
 
 # Write a k3d registries.yaml pointing containerd at the mounted CA for every

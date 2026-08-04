@@ -808,6 +808,34 @@ _stub_create_cluster_deps() {
   [ "$GIT_SSL_CAINFO" = "$uf" ] || return 1    # ...not overwritten with the corp-root-only one
 }
 
+@test "wire_ca_trust: skipped exports are not claimed as success (Bugbot)" {
+  # With both vars pre-set every export is skipped — a green "Trusting…" then
+  # reports wiring that did not happen and masks a pre-set bundle that may
+  # still lack the corporate CA. Say what was kept, claim nothing.
+  local ca="$BATS_TEST_TMPDIR/corp.pem";  echo pem > "$ca"
+  local uf="$BATS_TEST_TMPDIR/user-full.pem"; echo pem > "$uf"
+  TRACEBLOC_CA_BUNDLE="$ca"; SSL_CERT_FILE="$uf"; GIT_SSL_CAINFO="$uf"; OS="Linux"
+  run wire_ca_trust
+  [ "$status" -eq 0 ] || return 1
+  [[ "$output" != *"Trusting"* ]] || return 1
+  [[ "$output" == *"Keeping your pre-set"* ]] || return 1
+  [[ "$output" == *"make sure that bundle includes your company's CA"* ]] || return 1
+}
+
+@test "wire_ca_trust: partial pre-set claims only the wired half (Bugbot)" {
+  # SSL_CERT_FILE pre-set, GIT_SSL_CAINFO free: success must name git alone,
+  # and the kept half gets the check-your-bundle hint.
+  local ca="$BATS_TEST_TMPDIR/corp.pem";  echo pem > "$ca"
+  local uf="$BATS_TEST_TMPDIR/user-full.pem"; echo pem > "$uf"
+  TRACEBLOC_CA_BUNDLE="$ca"; SSL_CERT_FILE="$uf"; OS="Linux"
+  unset GIT_SSL_CAINFO
+  run wire_ca_trust
+  [ "$status" -eq 0 ] || return 1
+  [[ "$output" == *"Trusting your company's certificate for git."* ]] || return 1
+  [[ "$output" != *"for cosign"* ]] || return 1     # the wired claim must not cover the kept half
+  [[ "$output" == *"Keeping your pre-set SSL_CERT_FILE"* ]] || return 1
+}
+
 @test "wire_ca_trust: no-op when no CA is configured (#583)" {
   unset TRACEBLOC_CA_BUNDLE CURL_CA_BUNDLE SSL_CERT_FILE GIT_SSL_CAINFO
   wire_ca_trust >/dev/null

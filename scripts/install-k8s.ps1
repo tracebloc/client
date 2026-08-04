@@ -1825,9 +1825,15 @@ function Set-ToolTrust {
   $ca = Resolve-CaBundle
   if (-not $ca) { return }
   # Don't clobber a fuller pre-set GIT_SSL_CAINFO (replace-not-augment): only set it
-  # when the user hasn't already (Bugbot).
-  if (-not $env:GIT_SSL_CAINFO) { $env:GIT_SSL_CAINFO = $ca }
-  Ok "Trusting your company's certificate for git."
+  # when the user hasn't already (Bugbot). And say only what actually happened: a
+  # green "Trusting..." while the export was skipped reported wiring that did not
+  # happen - masking a pre-set bundle that may still lack the corporate CA (Bugbot).
+  if (-not $env:GIT_SSL_CAINFO) {
+    $env:GIT_SSL_CAINFO = $ca
+    Ok "Trusting your company's certificate for git."
+  } else {
+    Hint "Keeping your pre-set GIT_SSL_CAINFO - make sure that bundle includes your company's CA, or git will still fail x509."
+  }
   Hint "On Windows, cosign, helm and the installer's downloads read the certificate store, not a PEM file - import your corporate CA into Cert:\LocalMachine\Root (or use the offline installer) so they trust it too."
 }
 

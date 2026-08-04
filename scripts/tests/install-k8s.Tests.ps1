@@ -3260,4 +3260,17 @@ Describe "Set-ToolTrust: wire the corporate CA into cosign/helm/git (#583)" {
     Set-ToolTrust *> $null
     $env:GIT_SSL_CAINFO | Should -Be $uf     # user's fuller bundle left intact
   }
+
+  It "a skipped export is not claimed as success (Bugbot)" {
+    # With GIT_SSL_CAINFO pre-set the export is skipped — a green "Trusting..."
+    # would report wiring that did not happen and mask a pre-set bundle that
+    # still lacks the corporate CA. Say what was kept, claim nothing.
+    $ca = Join-Path $TestDrive "corp.pem"; "pem" | Set-Content -LiteralPath $ca
+    $uf = Join-Path $TestDrive "user-full.pem"; "pem" | Set-Content -LiteralPath $uf
+    $env:TRACEBLOC_CA_BUNDLE = $ca
+    $env:GIT_SSL_CAINFO = $uf
+    $out = Set-ToolTrust 6>&1 | Out-String
+    $out | Should -Not -Match 'Trusting'
+    $out | Should -Match 'Keeping your pre-set GIT_SSL_CAINFO'
+  }
 }
