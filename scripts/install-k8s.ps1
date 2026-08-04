@@ -158,7 +158,7 @@ function Err($m, $Detail)  {
   exit 1
 }
 function Step($n, $t, $l)  { Write-Host ""; Write-Host "Step $n/$t" -ForegroundColor Cyan -NoNewline; Write-Host "  $l" -ForegroundColor White; Log "== Step $n/$t : $l ==" }
-function Log($m)           { if ($script:LOG_FILE) { Add-Content -Path $script:LOG_FILE -Value "[$(Get-Date -Format 'HH:mm:ss')] $m" -ErrorAction SilentlyContinue } }
+function Log($m)           { if ($script:LOG_FILE) { Add-Content -Path $script:LOG_FILE -Value "[$(Get-Date -Format 'HH:mm:ss')] $m" -Encoding UTF8 -ErrorAction SilentlyContinue } }
 function PromptHeader($m)  { Write-Host ""; Write-Host "  $m" -ForegroundColor White; Log $m }
 function Hint($m)          { Write-Host "  $m" -ForegroundColor DarkGray; Log $m }
 function Has($cmd)         { [bool](Get-Command $cmd -ErrorAction SilentlyContinue) }
@@ -587,7 +587,7 @@ function Start-InstallLog {
   # on-screen output: no user PII, no tracebloc internals. Best-effort — if the
   # file can't be created, logging silently no-ops and the install continues.
   try {
-    Set-Content -Path $LOG_FILE -Value "tracebloc client installer log - $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')" -ErrorAction Stop
+    Set-Content -Path $LOG_FILE -Value "tracebloc client installer log - $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')" -Encoding UTF8 -ErrorAction Stop
     Log "Install log: $LOG_FILE"
   } catch {
     $script:LOG_FILE = $null
