@@ -419,3 +419,27 @@ setup() {
   done
   [[ "$(printf '%s' "$out" | grep -c .)" == "2" ]] || { printf 'expected 2 offenders, got:\n%s\n' "$out" >&2; return 1; }
 }
+
+@test "a <<TAG in a trailing comment does not open heredoc-skip mode (Bugbot)" {
+  # A comment DOCUMENTING heredocs (`# ... <<EOF ...`) matched the heredoc
+  # opener scan, so the scanner entered skip mode with no terminator coming
+  # and swallowed the rest of the @test body — assertions after it could
+  # never be flagged. The scan must run on the comment-stripped line.
+  local fixture="$BATS_TEST_TMPDIR/comment-heredoc.bats" out
+  {
+    printf '@test "c" {\n'
+    printf '  run x   # the payload goes through cat <<EOF later\n'  # 2: comment only — no skip
+    printf '  [ "$status" -eq 0 ]\n'                                 # 3: must still be flagged
+    printf '  cat <<REAL\n'                                          # 4: real heredoc opens
+    printf '  [ not an assertion, heredoc text ]\n'                  # 5: skipped as body
+    printf 'REAL\n'                                                  # 6: closes it
+    printf '  [ "$output" = y ]\n'                                   # 7: must be flagged again
+    printf '}\n'
+  } > "$fixture"
+
+  out="$(awk -f "$SCANNER" "$fixture")"
+  [[ "$out" == *":3:"* ]] || { printf 'expected line 3 flagged, got:\n%s\n' "$out" >&2; return 1; }
+  [[ "$out" == *":7:"* ]] || { printf 'expected line 7 flagged, got:\n%s\n' "$out" >&2; return 1; }
+  [[ "$out" != *":5:"* ]] || { printf 'heredoc body line 5 must not be flagged, got:\n%s\n' "$out" >&2; return 1; }
+  [[ "$(printf '%s' "$out" | grep -c .)" == "2" ]] || { printf 'expected 2 offenders, got:\n%s\n' "$out" >&2; return 1; }
+}

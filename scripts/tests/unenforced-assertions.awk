@@ -205,15 +205,19 @@ function is_enforcing(logical,   code, i, c, sq, dq, pd) {
 # The heredoc tag this line opens, or "" if it opens none. A `<<TAG` INSIDE a quoted
 # string is text, not a redirection: `printf "cat <<'EOF'"` was putting the scanner
 # into heredoc-skip mode with no bare terminator to leave it again, so every later
-# line in that file was silently ignored (Bugbot).
-function heredoc_tag_of(line,   s, off, pos, tag) {
-    s = line; off = 0
+# line in that file was silently ignored (Bugbot). Same for a `<<TAG` in a trailing
+# `#` comment — a COMMENT documenting heredocs opened skip mode too, swallowing the
+# rest of the @test body, so the scan runs on the comment-stripped line (Bugbot).
+# strip_comment returns a prefix, so every position in `code` matches `line`.
+function heredoc_tag_of(line,   code, s, off, pos, tag) {
+    code = strip_comment(line)
+    s = code; off = 0
     while (match(s, /<<-?[[:space:]]*['"]?[A-Za-z_][A-Za-z0-9_]*['"]?/)) {
         pos = off + RSTART
         # `<<<` is a herestring, not a heredoc: `run cmd <<< "r"` matched here from
         # the second `<` and opened a body that never closed (leftover-guard.bats).
-        if (pos > 1 && substr(line, pos - 1, 1) == "<") { }
-        else if (!quoted_at(line, pos)) {
+        if (pos > 1 && substr(code, pos - 1, 1) == "<") { }
+        else if (!quoted_at(code, pos)) {
             tag = substr(s, RSTART, RLENGTH)
             sub(/^<<-?[[:space:]]*/, "", tag)
             gsub(/['"]/, "", tag)
