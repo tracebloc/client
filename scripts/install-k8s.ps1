@@ -4289,7 +4289,7 @@ trap { Show-FatalError $_; exit 1 }
 try {
 
 if ($Help) { $script:OutcomeReported = $true; Print-Help }
-if ($Diagnose) { $script:OutcomeReported = $true; Invoke-DiagnoseBundle; exit 0 }
+if ($Diagnose) { Invoke-DiagnoseBundle; $script:OutcomeReported = $true; exit 0 }  # flag AFTER the long collection: an interrupt mid-diagnose must still hit Show-Interrupted (Bugbot)
 
 Confirm-Config
 Initialize-ToolDir

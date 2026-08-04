@@ -47,10 +47,15 @@ _deploy_nvidia_plugin() {
     warn "Couldn't enable GPU acceleration — continuing in CPU mode. Re-run the installer later to retry."
     return 0
   fi
-  kubectl rollout status daemonset/nvidia-device-plugin-daemonset \
-    -n kube-system --timeout=120s >> "${LOG_FILE:-/dev/null}" 2>&1 \
-    || warn "GPU setup still in progress — it may take a moment to finish."
-  success "GPU acceleration enabled."
+  # Gate the success message on the rollout exit code (Bugbot; parity with the PS
+  # peer): a timed-out/failed rollout means the plugin isn't confirmed ready, so
+  # don't claim it's enabled — warn + continue in CPU mode. Re-running re-checks it.
+  if kubectl rollout status daemonset/nvidia-device-plugin-daemonset \
+       -n kube-system --timeout=120s >> "${LOG_FILE:-/dev/null}" 2>&1; then
+    success "GPU acceleration enabled."
+  else
+    warn "Couldn't confirm GPU acceleration is ready — continuing in CPU mode. Re-run the installer later to retry."
+  fi
 }
 
 _deploy_amd_plugin() {
@@ -62,8 +67,13 @@ _deploy_amd_plugin() {
 
   log "Downloading and applying AMD GPU device plugin DaemonSet..."
   if _apply_remote_manifest "$AMD_DEVICE_PLUGIN_URL" "AMD device plugin"; then
-    kubectl rollout status daemonset/amdgpu-device-plugin -n kube-system --timeout=120s 2>/dev/null || true
-    success "GPU acceleration enabled."
+    # Gate success on the rollout exit code (Bugbot; same as the nvidia path).
+    if kubectl rollout status daemonset/amdgpu-device-plugin \
+         -n kube-system --timeout=120s >> "${LOG_FILE:-/dev/null}" 2>&1; then
+      success "GPU acceleration enabled."
+    else
+      warn "Couldn't confirm GPU acceleration is ready — continuing in CPU mode. Re-run the installer later to retry."
+    fi
   else
     log "Pinned AMD plugin ${AMD_DEVICE_PLUGIN_VERSION} failed; trying master..."
     _apply_remote_manifest "https://raw.githubusercontent.com/RadeonOpenCompute/k8s-device-plugin/master/k8s-ds-amdgpu-dp.yaml" "AMD device plugin (master)" || warn "GPU acceleration setup may need manual attention."

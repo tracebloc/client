@@ -247,3 +247,12 @@ _gpu_mocks() {
   grep -Eq 'kubectl apply -f "\$tmp_yml" --request-timeout=' \
     "$BATS_TEST_DIRNAME/../lib/gpu-plugins.sh"
 }
+
+@test "GPU success is gated on the rollout exit code — no false 'enabled' after a failed rollout (Bugbot)" {
+  # A timed-out/failed rollout means the plugin isn't confirmed ready; the success
+  # line must live in the then-branch, with a CPU-mode warn on failure.
+  grep -q 'if kubectl rollout status daemonset/nvidia-device-plugin-daemonset' \
+    "$BATS_TEST_DIRNAME/../lib/gpu-plugins.sh"
+  grep -q "Couldn't confirm GPU acceleration is ready" \
+    "$BATS_TEST_DIRNAME/../lib/gpu-plugins.sh"
+}

@@ -3092,6 +3092,12 @@ Describe "Graceful failure: guaranteed finally + trap, guarded closer (#577)" {
     ([regex]::Matches($script:PSRC577b, '\$script:OutcomeReported = \$true')).Count | Should -BeGreaterOrEqual 5
   }
 
+  It "the -Diagnose path marks the outcome reported only after the bundle completes (Bugbot)" {
+    # Setting the flag before the long collection would skip Show-Interrupted on an
+    # interrupt mid-diagnose - the silent death this boundary exists to prevent.
+    $script:PSRC577b | Should -Match 'Invoke-DiagnoseBundle; \$script:OutcomeReported = \$true'
+  }
+
   It "the reboot-pending stop marks the outcome reported before exiting (Bugbot)" {
     # A reboot-pending exit is an intentional, reported stop (guidance is printed),
     # not an interruption; without the flag the finally appends a contradictory
