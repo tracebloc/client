@@ -403,13 +403,22 @@ _image_mirror_yaml() {
   fi
   if [[ -n "$reg_user" || -n "$reg_pass" ]]; then
     # dockerRegistry.server is the imagePullSecret's auths key and the chart schema
-    # requires a URI (format:uri) — derive an https:// URI from the mirror host.
-    # An explicit TRACEBLOC_REGISTRY_SERVER wins (e.g. a registry whose auth realm
-    # differs from the image host, or a non-https scheme).
+    # REQUIRES it whenever create is true (format:uri), so it must ALWAYS be
+    # emitted here. Precedence: an explicit TRACEBLOC_REGISTRY_SERVER wins (e.g. a
+    # registry whose auth realm differs from the image host); else derive
+    # https://<mirror-host> when a mirror is set; else fall back to Docker Hub so
+    # creds-only (authenticate to docker.io, no mirror) still renders a valid
+    # secret instead of a schema error.
     local server="${TRACEBLOC_REGISTRY_SERVER:-}"
-    [[ -z "$server" && -n "$mirror_host" ]] && server="https://$mirror_host"
+    if [[ -z "$server" ]]; then
+      if [[ -n "$mirror_host" ]]; then
+        server="https://$mirror_host"
+      else
+        server="https://index.docker.io/v1/"
+      fi
+    fi
     printf '\ndockerRegistry:\n  create: true\n'
-    [[ -n "$server" ]] && printf '  server: '\''%s'\''\n' "$(_yaml_sq_escape "$server")"
+    printf '  server: '\''%s'\''\n' "$(_yaml_sq_escape "$server")"
     printf '  username: '\''%s'\''\n' "$(_yaml_sq_escape "$reg_user")"
     printf '  password: '\''%s'\''\n' "$(_yaml_sq_escape "$reg_pass")"
     printf '  email: '\''%s'\''\n' "$(_yaml_sq_escape "${TRACEBLOC_REGISTRY_EMAIL:-}")"

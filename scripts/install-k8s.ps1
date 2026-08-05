@@ -2720,15 +2720,21 @@ function Get-ImageMirrorYaml {
   }
   if ($regUser -or $regPass) {
     # dockerRegistry.server is the imagePullSecret auths key and the chart schema
-    # requires a URI (format:uri) — derive an https:// URI from the mirror host.
-    # An explicit TRACEBLOC_REGISTRY_SERVER wins.
+    # REQUIRES it whenever create is true (format:uri), so it must ALWAYS be
+    # emitted. Precedence: an explicit TRACEBLOC_REGISTRY_SERVER wins; else derive
+    # https://<mirror-host> when a mirror is set; else fall back to Docker Hub so
+    # creds-only (authenticate to docker.io, no mirror) still renders a valid
+    # secret instead of a schema error.
     $server = $env:TRACEBLOC_REGISTRY_SERVER
-    if (-not $server -and $mirrorHost) { $server = "https://$mirrorHost" }
+    if (-not $server) {
+      if ($mirrorHost) { $server = "https://$mirrorHost" } else { $server = "https://index.docker.io/v1/" }
+    }
     $userE  = $regUser -replace "'", "''"
     $passE  = $regPass -replace "'", "''"
     $emailE = ($env:TRACEBLOC_REGISTRY_EMAIL) -replace "'", "''"
+    $srvE   = $server -replace "'", "''"
     $block += "`ndockerRegistry:`n  create: true`n"
-    if ($server) { $srvE = $server -replace "'", "''"; $block += "  server: '$srvE'`n" }
+    $block += "  server: '$srvE'`n"
     $block += "  username: '$userE'`n"
     $block += "  password: '$passE'`n"
     $block += "  email: '$emailE'`n"

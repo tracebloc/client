@@ -1076,3 +1076,13 @@ setup() {
   ! echo "$output" | grep -q "^global:" || return 1
   echo "$output" | grep -q "^dockerRegistry:" || return 1
 }
+
+@test "_image_mirror_yaml: creds without a mirror still emit server (Docker Hub) - schema requires it (Bugbot)" {
+  # The chart schema requires dockerRegistry.server whenever create is true, so a
+  # creds-only config must NOT omit it (else helm install fails with a schema error).
+  unset TRACEBLOC_IMAGE_REGISTRY TRACEBLOC_REGISTRY_SERVER TRACEBLOC_REGISTRY_EMAIL
+  export TRACEBLOC_REGISTRY_USERNAME=svc
+  export TRACEBLOC_REGISTRY_PASSWORD=secret
+  run _image_mirror_yaml
+  echo "$output" | grep -q "server: 'https://index.docker.io/v1/'" || return 1
+}

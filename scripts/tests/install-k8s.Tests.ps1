@@ -3349,4 +3349,11 @@ Describe "Get-ImageMirrorYaml (private registry mirror / air-gap, #585)" {
     $out | Should -Not -Match "(?m)^global:"
     $out | Should -Match "(?m)^dockerRegistry:"
   }
+
+  It "creds without a mirror still emit server (Docker Hub) - schema requires it (Bugbot)" {
+    # The chart schema requires dockerRegistry.server whenever create is true.
+    $env:TRACEBLOC_REGISTRY_USERNAME = "svc"
+    $env:TRACEBLOC_REGISTRY_PASSWORD = "secret"
+    (Get-ImageMirrorYaml) | Should -Match "server: 'https://index.docker.io/v1/'"
+  }
 }
