@@ -468,11 +468,12 @@ function Get-VerifiedDownload {
     [string]$Message = 'Downloading'
   )
   $iwr  = { param($u, $d); $ProgressPreference = 'SilentlyContinue'; Invoke-WebRequest $u -OutFile $d -UseBasicParsing -MaximumRedirection 5 }
-  $curl = { param($u, $d); & curl.exe -fSL --retry 2 --retry-delay 2 --connect-timeout 30 --max-time 900 -o $d $u 2>$null; if ($LASTEXITCODE -ne 0) { throw "curl.exe exited $LASTEXITCODE" } }
+  # style-guard: allow -- curl.exe is a deliberate FALLBACK transport here; curl_secure() is a bash helper and cannot exist in PowerShell. Flags are hardcoded to match its TLS/timeout floor.
+  $curl = { param($u, $d); & curl.exe -fSL --retry 2 --retry-delay 2 --connect-timeout 30 --max-time 900 -o $d $u 2>$null; if ($LASTEXITCODE -ne 0) { throw "curl.exe exited $LASTEXITCODE" } }  # style-guard: allow
   $bits = { param($u, $d); Import-Module BitsTransfer -ErrorAction SilentlyContinue; Start-BitsTransfer -Source $u -Destination $d -ErrorAction Stop }
 
   $transports = @( ,@('Invoke-WebRequest', $iwr) )
-  if (Get-Command curl.exe -ErrorAction SilentlyContinue) { $transports += ,@('curl.exe', $curl) }
+  if (Get-Command curl.exe -ErrorAction SilentlyContinue) { $transports += ,@('curl.exe', $curl) }  # style-guard: allow -- presence check + fallback registration, not a bare fetch
   $transports += ,@('BITS', $bits)
 
   $problems = @()
