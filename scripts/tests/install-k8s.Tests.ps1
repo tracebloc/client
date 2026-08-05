@@ -553,10 +553,20 @@ Describe "Invoke-TrackedInstall (#500 capture installer output)" {
     $script:ISRC | Should -Match 'function Invoke-TrackedInstall[\s\S]*Get-Content \$errF[\s\S]*Get-Content \$outF'
     $script:ISRC | Should -Match 'function Invoke-TrackedInstall[\s\S]*if \(\$log\) \{ Log'
   }
-  It "all four winget/installer installs go through the capturing wrapper" {
-    foreach ($tag in 'docker-winget','docker-direct','k3d-winget','helm-winget') {
+  It "every winget/installer install goes through the capturing wrapper" {
+    # k3d-winget was removed in #607: k3d has no winget manifest, so that branch
+    # only ever logged "No package found" before the (now resilient) direct
+    # download ran. The remaining installs must still go through the wrapper.
+    foreach ($tag in 'docker-winget','docker-direct','helm-winget') {
       $script:ISRC | Should -Match "Invoke-TrackedInstall[\s\S]{0,300}-Tag `"$tag`""
     }
+  }
+  It "no longer runs a k3d winget install (#607: k3d has no winget manifest)" {
+    # The comment in install-k8s.ps1 still names Rancher.k3d to explain the removal,
+    # so assert on the tracked-install TAG (unique to the actual invocation), not
+    # on any mention of the id.
+    $script:ISRC | Should -Not -Match '-Tag "k3d-winget"'
+    $script:ISRC | Should -Not -Match 'install","-e","--id","Rancher\.k3d"'
   }
   It "returns ok with the exit code when the process succeeds" {
     Mock Start-Process { [pscustomobject]@{ ExitCode = 0; HasExited = $true } }
@@ -3355,5 +3365,57 @@ Describe "Get-ImageMirrorYaml (private registry mirror / air-gap, #585)" {
     $env:TRACEBLOC_REGISTRY_USERNAME = "svc"
     $env:TRACEBLOC_REGISTRY_PASSWORD = "secret"
     (Get-ImageMirrorYaml) | Should -Match "server: 'https://index.docker.io/v1/'"
+  }
+}
+
+Describe "Test-DownloadComplete (resilient tool download, #607)" {
+  BeforeAll {
+    $script:dl = Join-Path ([System.IO.Path]::GetTempPath()) ("tbdl-" + [guid]::NewGuid().ToString("N"))
+    New-Item -ItemType Directory -Path $script:dl | Out-Null
+    $script:exe = Join-Path $script:dl "k3d.exe"
+    [System.IO.File]::WriteAllBytes($script:exe, ([byte[]](0x4D,0x5A) + (New-Object byte[] 2000000)))   # MZ + 2MB
+    $script:zip = Join-Path $script:dl "helm.zip"
+    [System.IO.File]::WriteAllBytes($script:zip, ([byte[]](0x50,0x4B,0x03,0x04) + (New-Object byte[] 2000000))) # PK + 2MB
+    $script:err = Join-Path $script:dl "err.html"
+    [System.IO.File]::WriteAllText($script:err, "<html>blocked by proxy</html>")
+  }
+  AfterAll { Remove-Item $script:dl -Recurse -Force -ErrorAction SilentlyContinue }
+
+  It "passes a complete .exe (MZ) above the size floor" {
+    Test-DownloadComplete -Path $script:exe -MinBytes 1MB -Magic 'MZ' | Should -BeNullOrEmpty
+  }
+  It "passes a complete .zip (PK) above the size floor" {
+    Test-DownloadComplete -Path $script:zip -MinBytes 1MB -Magic 'PK' | Should -BeNullOrEmpty
+  }
+  It "flags a truncated/blocked transfer (below the size floor) as a transfer failure" {
+    Test-DownloadComplete -Path $script:err -MinBytes 1MB -Magic 'MZ' | Should -Match 'truncated or blocked'
+  }
+  It "flags a complete-but-too-small file (size floor not met)" {
+    Test-DownloadComplete -Path $script:exe -MinBytes 5MB -Magic 'MZ' | Should -Match 'expected at least'
+  }
+  It "flags a wrong magic (an error page or altered binary), not a checksum problem" {
+    Test-DownloadComplete -Path $script:exe -MinBytes 1MB -Magic 'PK' | Should -Match "not a valid 'PK'"
+  }
+  It "flags a missing file" {
+    Test-DownloadComplete -Path (Join-Path $script:dl "nope.bin") -MinBytes 1MB -Magic 'MZ' | Should -Match 'no file was written'
+  }
+  It "skips the magic check when no magic is given (size floor only)" {
+    Test-DownloadComplete -Path $script:err -MinBytes 10 | Should -BeNullOrEmpty
+  }
+}
+
+Describe "Get-VerifiedDownload resilience guards (#607, Bugbot)" {
+  BeforeAll { $script:GVD = Get-Content "$PSScriptRoot/../install-k8s.ps1" -Raw }
+
+  It "the curl.exe fallback names the TLS 1.2 floor (parity with curl_secure)" {
+    # Bugbot: the fallback must not be able to negotiate below TLS 1.2 on the very
+    # proxy networks this targets.
+    $script:GVD | Should -Match 'curl\.exe --tlsv1\.2'
+  }
+
+  It "wraps the post-download validation so an I/O error tries the next transport, not aborts" {
+    # Bugbot: Get-Item/OpenRead can throw if AV locks the just-written file; that
+    # must fall through to curl.exe/BITS, not escape Get-VerifiedDownload.
+    $script:GVD | Should -Match 'try \{\s*\$bad = Test-DownloadComplete[\s\S]{0,220}catch \{\s*\$bad ='
   }
 }
