@@ -1100,52 +1100,52 @@ _engine_fixture() {
 @test "_resolve_mysql_engine: explicit TB_MYSQL_ENGINE=8.4 wins on any arch" {
   _engine_fixture; ARCH=x86_64; TB_MYSQL_ENGINE=8.4
   _resolve_mysql_engine
-  [ "$TB_MYSQL_ENGINE_RESOLVED" = "8.4" ]
+  [ "$TB_MYSQL_ENGINE_RESOLVED" = "8.4" ] || return 1
 }
 
 @test "_resolve_mysql_engine: explicit TB_MYSQL_ENGINE=5.7 wins on arm64" {
   _engine_fixture; ARCH=arm64; TB_MYSQL_ENGINE=5.7
   _resolve_mysql_engine
-  [ "$TB_MYSQL_ENGINE_RESOLVED" = "5.7" ]
+  [ "$TB_MYSQL_ENGINE_RESOLVED" = "5.7" ] || return 1
 }
 
 @test "_resolve_mysql_engine: invalid value fails closed with the allowed set" {
   _engine_fixture; ARCH=arm64; TB_MYSQL_ENGINE=9.0
   run _resolve_mysql_engine
-  [ "$status" -ne 0 ]
-  [[ "$output" == *"'auto', '5.7' or '8.4'"* ]]
+  [ "$status" -ne 0 ] || return 1
+  [[ "$output" == *"'auto', '5.7' or '8.4'"* ]] || return 1
 }
 
 @test "_resolve_mysql_engine: auto on a fresh arm64 install picks 8.4" {
   _engine_fixture; ARCH=arm64
   _resolve_mysql_engine
-  [ "$TB_MYSQL_ENGINE_RESOLVED" = "8.4" ]
+  [ "$TB_MYSQL_ENGINE_RESOLVED" = "8.4" ] || return 1
 }
 
 @test "_resolve_mysql_engine: auto on a fresh amd64 install stays 5.7" {
   _engine_fixture; ARCH=x86_64
   _resolve_mysql_engine
-  [ "$TB_MYSQL_ENGINE_RESOLVED" = "5.7" ]
+  [ "$TB_MYSQL_ENGINE_RESOLVED" = "5.7" ] || return 1
 }
 
 @test "_resolve_mysql_engine: an existing release pins 5.7 even on arm64" {
   _engine_fixture; ARCH=arm64; existing_id="someclient"
   _resolve_mysql_engine
-  [ "$TB_MYSQL_ENGINE_RESOLVED" = "5.7" ]
+  [ "$TB_MYSQL_ENGINE_RESOLVED" = "5.7" ] || return 1
 }
 
 @test "_resolve_mysql_engine: legacy datadir content pins 5.7 even on arm64" {
   _engine_fixture; ARCH=arm64
   touch "$HOST_DATA_DIR/mysql/ibdata1"
   _resolve_mysql_engine
-  [ "$TB_MYSQL_ENGINE_RESOLVED" = "5.7" ]
+  [ "$TB_MYSQL_ENGINE_RESOLVED" = "5.7" ] || return 1
 }
 
 @test "_resolve_mysql_engine: per-release datadir content pins 5.7 even on arm64" {
   _engine_fixture; ARCH=arm64
   mkdir -p "$HOST_DATA_DIR/$TB_NAMESPACE/mysql"; touch "$HOST_DATA_DIR/$TB_NAMESPACE/mysql/ibdata1"
   _resolve_mysql_engine
-  [ "$TB_MYSQL_ENGINE_RESOLVED" = "5.7" ]
+  [ "$TB_MYSQL_ENGINE_RESOLVED" = "5.7" ] || return 1
 }
 
 @test "_resolve_mysql_engine: an UNLISTABLE mysql dir pins 5.7 even on arm64 (fail closed)" {
@@ -1157,14 +1157,14 @@ _engine_fixture() {
   _resolve_mysql_engine
   status_engine="$TB_MYSQL_ENGINE_RESOLVED"
   chmod 700 "$HOST_DATA_DIR/mysql"
-  [ "$status_engine" = "5.7" ]
+  [ "$status_engine" = "5.7" ] || return 1
 }
 
 @test "_resolve_mysql_engine: a previous 8.4 opt-in is sticky across re-runs (amd64)" {
   _engine_fixture; ARCH=x86_64
   printf 'images:\n  mysqlClient:\n    tag: "8.4"\n    digest: ""\n' > "$values_file"
   _resolve_mysql_engine
-  [ "$TB_MYSQL_ENGINE_RESOLVED" = "8.4" ]
+  [ "$TB_MYSQL_ENGINE_RESOLVED" = "8.4" ] || return 1
 }
 
 # ── install_client_helm flow: the generated values carry the engine choice ──
