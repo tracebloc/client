@@ -154,8 +154,10 @@ Describe "Bootstrap log hygiene: cosign output captured, no internals leaked (#5
   BeforeAll { $script:BOOTSRC = Get-Content "$PSScriptRoot/../install.ps1" -Raw }
 
   It "captures cosign output instead of letting PowerShell dump the raw native error + source line" {
-    $script:BOOTSRC | Should -Not -Match '& \$cosign @cosignArgs 2>\$null 1>\$null'
-    $script:BOOTSRC | Should -Match '& \$cosign @cosignArgs 2>&1 \| Out-Null'
+    # The capture hardening now lives in the shared Invoke-CosignVerifyBlob helper (#584);
+    # the leaky discard form must be gone and the stderr-merged capture present.
+    $script:BOOTSRC | Should -Not -Match '2>\$null 1>\$null'
+    $script:BOOTSRC | Should -Match '& \$Cosign @VerifyArgs 2>&1 \| Out-Null'
   }
   It "the verification-failure message carries no internal identifiers (no source, no RFC/manifest codes)" {
     $script:BOOTSRC | Should -Not -Match 'cosign signature verification FAILED for manifest\.sha256'
@@ -173,5 +175,22 @@ Describe "Bootstrap CA handling for cosign on Windows (#583)" {
     $fn | Should -Match 'TRACEBLOC_CA_BUNDLE'
     $fn | Should -Match "can't be read"                     # fail fast on a bad path
     $fn | Should -Not -Match '\$env:SSL_CERT_FILE = \$ca'   # inert on Windows; not wired
+  }
+}
+
+Describe "Bootstrap prefers the offline Sigstore bundle (#584)" {
+  It "Confirm-ManifestSignature verifies --bundle --offline first, with a sig/cert fallback" {
+    $src = Get-Content "$PSScriptRoot/../install.ps1" -Raw
+    $fn  = (($src -split "function Confirm-ManifestSignature")[1] -split "`nfunction ")[0]
+    $fn | Should -Match 'manifest\.sha256\.bundle'
+    $fn | Should -Match "'--bundle'"
+    $fn | Should -Match "'--offline'"
+    $fn | Should -Match "'--signature'"   # online fallback path retained
+  }
+  It "Invoke-CosignVerifyBlob is fail-closed (nonzero LASTEXITCODE sentinel + stderr suppressed)" {
+    $src = Get-Content "$PSScriptRoot/../install.ps1" -Raw
+    $fn  = (($src -split "function Invoke-CosignVerifyBlob")[1] -split "`nfunction ")[0]
+    $fn | Should -Match '\$global:LASTEXITCODE = 255'
+    $fn | Should -Match '2>&1 \| Out-Null'
   }
 }

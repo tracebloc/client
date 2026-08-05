@@ -267,9 +267,17 @@ jobs:
           COSIGN_YES: 'true'
         run: |
           cd scripts
+          # Emit an offline Sigstore BUNDLE (#584) alongside the .sig/.cert. The
+          # bundle carries the Rekor inclusion proof (SET), so the installer can
+          # `verify-blob --bundle --offline` with NO live Rekor call — the fix for
+          # sigstore-blocked / TLS-inspecting networks, where the short-lived keyless
+          # cert is expired by install time and only the bundle's embedded timestamp
+          # proves it was valid at signing. The .sig/.cert stay for older installers'
+          # online path (backward compatible).
           cosign sign-blob \
             --output-certificate manifest.sha256.cert \
             --output-signature   manifest.sha256.sig \
+            --bundle             manifest.sha256.bundle \
             manifest.sha256
           echo "Signed manifest.sha256"
           ls -l manifest.sha256*
@@ -436,6 +444,7 @@ jobs:
             scripts/manifest.sha256
             scripts/manifest.sha256.sig
             scripts/manifest.sha256.cert
+            scripts/manifest.sha256.bundle
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
   # Post-publish invariant check: turns the 2026-07-29 manual leak catch into
