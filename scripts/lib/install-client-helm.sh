@@ -684,6 +684,19 @@ _download_services_progress() {
 # Reads (bash dynamic scope, set by install_client_helm before the call):
 # values_file, existing_id, HOST_DATA_DIR, TB_NAMESPACE, ARCH.
 # Sets: TB_MYSQL_ENGINE_RESOLVED.
+# Content test for a host mysql datadir, FAIL-CLOSED on unlistable dirs
+# (mirrors _leftover_data_dirs, and the same Bugbot ownership case): a
+# uid-999/root-owned dir the host user can't read/enter cannot be proven
+# empty — treat it as content, so `auto` keeps 5.7 rather than opting a
+# reused datadir into 8.4 that the format guard would then refuse to boot.
+# Symlinks are never trusted as data (same stance as the leftover guard).
+_mysql_dir_has_content() {
+  local d="$1"
+  [[ -d "$d" && ! -L "$d" ]] || return 1   # absent -> no content
+  [[ -r "$d" && -x "$d" ]] || return 0     # unlistable -> fail closed
+  [[ -n "$(ls -A "$d" 2>/dev/null)" ]]
+}
+
 _resolve_mysql_engine() {
   local requested="${TB_MYSQL_ENGINE:-auto}"
   case "$requested" in
@@ -704,10 +717,11 @@ _resolve_mysql_engine() {
   fi
   # Never auto-flip existing state: a found release or real datadir content
   # means a 5.7-format datadir may exist, and 8.4 refuses to open it. The
-  # empty dirs _ensure_tracebloc_dirs just created don't count — only files.
+  # empty dirs _ensure_tracebloc_dirs just created don't count — only files —
+  # but an UNLISTABLE dir counts as content (fail closed; see the helper).
   if [[ -n "${existing_id:-}" ]] \
-    || [[ -n "$(ls -A "${HOST_DATA_DIR:-/nonexistent}/mysql" 2>/dev/null)" ]] \
-    || [[ -n "$(ls -A "${HOST_DATA_DIR:-/nonexistent}/${TB_NAMESPACE:-}/mysql" 2>/dev/null)" ]]; then
+    || _mysql_dir_has_content "${HOST_DATA_DIR:-/nonexistent}/mysql" \
+    || _mysql_dir_has_content "${HOST_DATA_DIR:-/nonexistent}/${TB_NAMESPACE:-}/mysql"; then
     TB_MYSQL_ENGINE_RESOLVED="5.7"
     return 0
   fi

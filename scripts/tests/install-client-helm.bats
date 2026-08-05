@@ -1148,6 +1148,18 @@ _engine_fixture() {
   [ "$TB_MYSQL_ENGINE_RESOLVED" = "5.7" ]
 }
 
+@test "_resolve_mysql_engine: an UNLISTABLE mysql dir pins 5.7 even on arm64 (fail closed)" {
+  # The uid-999 ownership case (Bugbot): --reuse-data leaves a mysql dir the
+  # host user cannot list; that must read as "content", never "empty" — an
+  # 8.4 opt-in here would wedge the reuse behind the format guard.
+  _engine_fixture; ARCH=arm64
+  chmod 000 "$HOST_DATA_DIR/mysql"
+  _resolve_mysql_engine
+  status_engine="$TB_MYSQL_ENGINE_RESOLVED"
+  chmod 700 "$HOST_DATA_DIR/mysql"
+  [ "$status_engine" = "5.7" ]
+}
+
 @test "_resolve_mysql_engine: a previous 8.4 opt-in is sticky across re-runs (amd64)" {
   _engine_fixture; ARCH=x86_64
   printf 'images:\n  mysqlClient:\n    tag: "8.4"\n    digest: ""\n' > "$values_file"
@@ -1166,7 +1178,7 @@ _engine_fixture() {
   helm() { record "helm $*"; return 0; }
   verify_credentials() { printf valid; }
   run install_client_helm <<< $'myid\nmypw'
-  [ "$status" -eq 0 ]
+  [ "$status" -eq 0 ] || return 1
   grep -q 'tag: "8.4"' "$HOST_DATA_DIR/values.yaml"
   grep -A3 'mysqlClient:' "$HOST_DATA_DIR/values.yaml" | grep -q 'digest: ""'
 }
@@ -1180,8 +1192,8 @@ _engine_fixture() {
   helm() { record "helm $*"; return 0; }
   verify_credentials() { printf valid; }
   run install_client_helm <<< $'myid\nmypw'
-  [ "$status" -eq 0 ]
-  ! grep -q 'mysqlClient:' "$HOST_DATA_DIR/values.yaml"
+  [ "$status" -eq 0 ] || return 1
+  ! grep -q 'mysqlClient:' "$HOST_DATA_DIR/values.yaml" || return 1
 }
 
 @test "install_client_helm: fresh arm64 auto -> values carry the 8.4 mysqlClient block" {
@@ -1193,7 +1205,7 @@ _engine_fixture() {
   helm() { record "helm $*"; return 0; }
   verify_credentials() { printf valid; }
   run install_client_helm <<< $'myid\nmypw'
-  [ "$status" -eq 0 ]
+  [ "$status" -eq 0 ] || return 1
   grep -q 'tag: "8.4"' "$HOST_DATA_DIR/values.yaml"
 }
 
@@ -1207,6 +1219,6 @@ _engine_fixture() {
   helm() { record "helm $*"; return 0; }
   verify_credentials() { printf valid; }
   run install_client_helm <<< $'myid\nmypw'
-  [ "$status" -eq 0 ]
-  ! grep -q 'mysqlClient:' "$HOST_DATA_DIR/values.yaml"
+  [ "$status" -eq 0 ] || return 1
+  ! grep -q 'mysqlClient:' "$HOST_DATA_DIR/values.yaml" || return 1
 }
