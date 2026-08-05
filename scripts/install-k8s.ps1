@@ -420,6 +420,91 @@ function Invoke-WithRetry {
   }
 }
 
+# Is the file at $Path a COMPLETE download (#607)? Returns $null when it is, else a
+# short reason. A proxy/AV that truncates or rewrites a binary mid-transfer leaves a
+# short error page or partial file that Invoke-WebRequest reports as "success"; the
+# only old signal was the downstream checksum, so a user dead-ended at the cryptic
+# "System tool checksum verification failed". Validate the payload is present, at
+# least $MinBytes, and (when given) starts with the expected magic bytes -- "MZ" for
+# a Windows .exe, "PK" for a .zip -- so a bad TRANSFER is caught distinctly from a
+# checksum mismatch on a complete file. Pure (file in, reason out) so Pester can
+# exercise every branch without a network.
+function Test-DownloadComplete {
+  param(
+    [Parameter(Mandatory)][string]$Path,
+    [int]$MinBytes = 1MB,
+    [string]$Magic = ''
+  )
+  if (-not (Test-Path -LiteralPath $Path)) { return "no file was written" }
+  $len = (Get-Item -LiteralPath $Path).Length
+  if ($len -lt $MinBytes) { return "got $len bytes (expected at least $MinBytes) -- the transfer was truncated or blocked" }
+  if ($Magic) {
+    $fs = [System.IO.File]::OpenRead($Path)
+    try {
+      $buf = New-Object byte[] ($Magic.Length)
+      $n = $fs.Read($buf, 0, $Magic.Length)
+    } finally { $fs.Close() }
+    $got = -join (@($buf)[0..([Math]::Max(0, $n - 1))] | ForEach-Object { [char][int]$_ })
+    if ($got -ne $Magic) { return "the file is not a valid '$Magic' file (starts with '$got') -- likely an error page or an altered binary" }
+  }
+  return $null
+}
+
+# Resilient tool download (#607): fetch $Url to $Dest and only return once a
+# COMPLETE file has landed. The transfer runs under the heartbeat spinner
+# (Invoke-WithHeartbeat) as before, but is now tried over several transports in
+# turn -- Invoke-WebRequest, then curl.exe, then BITS. Each uses a different HTTP
+# stack, so when a proxy/AV blocks or truncates one, another commonly succeeds.
+# After each transport Test-DownloadComplete gates the result, so an incomplete
+# transfer moves on to the next method instead of poisoning the downstream
+# checksum. Every transport failing throws one specific, actionable message.
+function Get-VerifiedDownload {
+  param(
+    [Parameter(Mandatory)][string]$Url,
+    [Parameter(Mandatory)][string]$Dest,
+    [int]$MinBytes = 1MB,
+    [string]$Magic = '',
+    [string]$Label = 'download',
+    [string]$Message = 'Downloading'
+  )
+  $iwr  = { param($u, $d); $ProgressPreference = 'SilentlyContinue'; Invoke-WebRequest $u -OutFile $d -UseBasicParsing -MaximumRedirection 5 }
+  # style-guard: allow -- curl.exe is a deliberate FALLBACK transport here; curl_secure() is a bash helper and cannot exist in PowerShell. --tlsv1.2 mirrors its TLS floor (Bugbot).
+  $curl = { param($u, $d); & curl.exe --tlsv1.2 -fSL --retry 2 --retry-delay 2 --connect-timeout 30 --max-time 900 -o $d $u 2>$null; if ($LASTEXITCODE -ne 0) { throw "curl.exe exited $LASTEXITCODE" } }  # style-guard: allow
+  $bits = { param($u, $d); Import-Module BitsTransfer -ErrorAction SilentlyContinue; Start-BitsTransfer -Source $u -Destination $d -ErrorAction Stop }
+
+  $transports = @( ,@('Invoke-WebRequest', $iwr) )
+  if (Get-Command curl.exe -ErrorAction SilentlyContinue) { $transports += ,@('curl.exe', $curl) }  # style-guard: allow -- presence check + fallback registration, not a bare fetch
+  $transports += ,@('BITS', $bits)
+
+  $problems = @()
+  foreach ($t in $transports) {
+    $name = $t[0]; $block = $t[1]
+    Remove-Item -LiteralPath $Dest -Force -ErrorAction SilentlyContinue
+    try {
+      Invoke-WithHeartbeat -Message $Message -ArgumentList @($Url, $Dest) -Script $block
+    } catch {
+      $problems += "${name}: $($_.Exception.Message)"
+      continue
+    }
+    # Validation must not escape the loop: Get-Item/OpenRead can throw if AV locks
+    # or quarantines the just-written file, and that is exactly a case where the
+    # NEXT transport should be tried, not the whole download aborted (Bugbot).
+    try {
+      $bad = Test-DownloadComplete -Path $Dest -MinBytes $MinBytes -Magic $Magic
+    } catch {
+      $bad = "could not read the downloaded file ($($_.Exception.Message)) -- it may be locked or quarantined by antivirus"
+    }
+    if (-not $bad) { return }        # complete + valid -- done
+    $problems += "${name}: $bad"
+    Warn "$Label via $name looked incomplete ($bad); trying another method..."
+  }
+  Remove-Item -LiteralPath $Dest -Force -ErrorAction SilentlyContinue
+  throw ("Couldn't download a complete file from $Url (tried: $(($transports | ForEach-Object { $_[0] }) -join ', ')). " +
+         ($problems -join ' | ') + ". On a filtered network a proxy or antivirus may be blocking or " +
+         "rewriting the binary -- allowlist github.com, objects.githubusercontent.com, dl.k8s.io and " +
+         "get.helm.sh (or exclude the tools folder from AV scanning), then re-run.")
+}
+
 # Execute-gate a freshly-installed tool (#411). The old post-install "check" was a
 # Log interpolation whose failure is non-terminating, so a corrupt or wrong-arch
 # binary (winget shims / partial installs skip the direct path's checksum verify)
@@ -1509,13 +1594,8 @@ function Install-Kubectl {
   $kUrl = "https://dl.k8s.io/release/$kVer/bin/windows/$arch/kubectl.exe"
   $t0 = Get-Date
   # Heartbeat during the otherwise-silent transfer (#422); retry wraps it.
-  Invoke-WithRetry -Label "download" -ScriptBlock {
-    Invoke-WithHeartbeat -Message "Downloading kubectl $kVer (~60 MB)" `
-      -ArgumentList @($kUrl, $kubectlDest) -Script {
-        param($u, $d); $ProgressPreference = 'SilentlyContinue'
-        Invoke-WebRequest $u -OutFile $d -UseBasicParsing
-      }
-  }
+  Get-VerifiedDownload -Url $kUrl -Dest $kubectlDest -MinBytes 20MB -Magic 'MZ' `
+    -Label "kubectl download" -Message "Downloading kubectl $kVer (~60 MB)"
   $expectedHash = Invoke-WithRetry -Label "checksum" -ScriptBlock {
     (Invoke-WebRequest "https://dl.k8s.io/release/$kVer/bin/windows/$arch/kubectl.exe.sha256" `
       -UseBasicParsing).Content.Trim()
@@ -1601,20 +1681,14 @@ function Resolve-ToolVersion {
 
 function Install-K3dAndHelm {
   # -- k3d --
+  # No winget path: k3d has no manifest in the winget community repo (verified
+  # #607 — `Rancher.k3d` and every id variant 404), so `winget install` only ever
+  # returned "No package found", burning ~4s and muddying diagnosis before the
+  # direct download ran anyway. The direct download below is now resilient
+  # (Get-VerifiedDownload: multi-transport + completeness validation), so it is the
+  # single, reliable path. Re-add a winget branch here only if k3d is ever
+  # published to winget.
   if (-not (Has "k3d")) {
-    if (Has "winget") {
-      Log "Installing k3d via winget..."
-      # winget install is console-silent; run it as a killable tracked process
-      # (not a job — Stop-Job would orphan the child on timeout) with a spinner +
-      # deadline, capturing output so a failure is diagnosable (#500). Best-effort:
-      # on any non-ok outcome the direct download below takes over (#422).
-      $r = Invoke-TrackedInstall -FilePath "winget" -Label "Installing k3d (winget)" -TimeoutMinutes 10 -Tag "k3d-winget" `
-        -ArgumentList @("install","-e","--id","Rancher.k3d","--accept-package-agreements","--accept-source-agreements","--silent")
-      if ($r.State -ne 'ok') { Log "k3d winget install: state=$($r.State) exit=$($r.ExitCode)" }
-    }
-    RefreshPath
-
-    if (-not (Has "k3d")) {
       $arch = Get-WindowsArch
       $t0k3d = Get-Date
       Log "Downloading k3d binary directly ($arch)..."
@@ -1627,13 +1701,8 @@ function Install-K3dAndHelm {
         }
       $k3dDest = "$TOOL_DIR\k3d.exe"
       $k3dUrl = "https://github.com/k3d-io/k3d/releases/download/$k3dVer/k3d-windows-$arch.exe"
-      Invoke-WithRetry -Label "k3d download" -ScriptBlock {
-        Invoke-WithHeartbeat -Message "Downloading k3d $k3dVer (~25 MB)" `
-          -ArgumentList @($k3dUrl, $k3dDest) -Script {
-            param($u, $d); $ProgressPreference = 'SilentlyContinue'
-            Invoke-WebRequest $u -OutFile $d -UseBasicParsing
-          }
-      }
+      Get-VerifiedDownload -Url $k3dUrl -Dest $k3dDest -MinBytes 10MB -Magic 'MZ' `
+        -Label "k3d download" -Message "Downloading k3d $k3dVer (~25 MB)"
       # Fail-closed verification, matching the Linux path and the kubectl
       # precedent: an unfetchable checksums.txt, a missing asset line, or a
       # mismatch all abort and remove the download — never install unverified
@@ -1668,7 +1737,6 @@ function Install-K3dAndHelm {
       # execute-gate passes — a corrupt/wrong-arch binary must not show a green
       # "ready" line before Assert-ToolRuns (#422 Bugbot; kubectl gates first too).
       $k3dSummary = Get-ToolSummaryLine -Name "k3d" -Version $k3dVer -Size "~25 MB" -ElapsedSec ([int]((Get-Date) - $t0k3d).TotalSeconds)
-    }
   }
   Assert-ToolRuns -Name "k3d" -VersionArgs @("version") -BinPath "$TOOL_DIR\k3d.exe"
   if ($k3dSummary) { Ok $k3dSummary }
@@ -1699,13 +1767,8 @@ function Install-K3dAndHelm {
       $t0helm = Get-Date
       $helmZip = "$env:TEMP\helm-$helmVer-windows-$arch.zip"
       $helmUrl = "https://get.helm.sh/helm-$helmVer-windows-$arch.zip"
-      Invoke-WithRetry -Label "helm download" -ScriptBlock {
-        Invoke-WithHeartbeat -Message "Downloading Helm $helmVer (~20 MB)" `
-          -ArgumentList @($helmUrl, $helmZip) -Script {
-            param($u, $d); $ProgressPreference = 'SilentlyContinue'
-            Invoke-WebRequest $u -OutFile $d -UseBasicParsing
-          }
-      }
+      Get-VerifiedDownload -Url $helmUrl -Dest $helmZip -MinBytes 5MB -Magic 'PK' `
+        -Label "helm download" -Message "Downloading Helm $helmVer (~20 MB)"
       $helmExtract = "$env:TEMP\helm-extract"
       if (Test-Path $helmExtract) { Remove-Item $helmExtract -Recurse -Force }
       Expand-Archive -Path $helmZip -DestinationPath $helmExtract -Force

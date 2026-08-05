@@ -552,3 +552,50 @@ setup() {
   [ "$status" -eq 0 ] || return 1
   [[ "$output" == *tracebloc-install-* ]] || return 1
 }
+
+# ── _assert_download_size (resilient tool download, #607) ────────────────────
+# Catches a proxy/AV-truncated or blocked binary transfer as a TRANSFER failure,
+# before _verify_sha256 misreports it as a checksum ("tampering") failure.
+@test "_assert_download_size: a complete file above the floor passes" {
+  local f="$BATS_TEST_TMPDIR/big.bin"; head -c 1200000 /dev/zero > "$f"
+  run _assert_download_size "$f" 1000000 "kubectl"
+  [ "$status" -eq 0 ] || return 1
+}
+
+@test "_assert_download_size: a truncated/blocked payload fails with a transfer message" {
+  local f="$BATS_TEST_TMPDIR/tiny.html"; printf '<html>blocked by proxy</html>' > "$f"
+  run _assert_download_size "$f" 1000000 "k3d"
+  [ "$status" -ne 0 ] || return 1
+  [[ "$output" == *"truncated or blocked"* ]] || return 1
+  [[ "$output" == *"proxy or antivirus"* ]] || return 1
+}
+
+@test "_assert_download_size: a missing file fails closed" {
+  run _assert_download_size "$BATS_TEST_TMPDIR/nope.bin" 100 "helm"
+  [ "$status" -ne 0 ] || return 1
+  [[ "$output" == *"truncated or blocked"* ]] || return 1
+}
+
+@test "_assert_download_size: TB_MIN_DOWNLOAD_BYTES=0 relaxes the floor (bats fetch-mock hook)" {
+  export TB_MIN_DOWNLOAD_BYTES=0
+  local f="$BATS_TEST_TMPDIR/small.bin"; printf 'x' > "$f"
+  run _assert_download_size "$f" 1000000 "k3d"
+  [ "$status" -eq 0 ] || return 1
+}
+
+@test "_assert_download_size: removes the caller's tmp tree on a truncated transfer (#607 Bugbot)" {
+  local tmp; tmp="$(mktemp -d)"
+  printf '<html>blocked</html>' > "$tmp/k3d"
+  run _assert_download_size "$tmp/k3d" 1000000 "k3d" "$tmp"
+  [ "$status" -ne 0 ] || return 1
+  [ ! -d "$tmp" ] || { rm -rf "$tmp"; return 1; }
+}
+
+@test "_assert_download_size: a complete file leaves the caller's tmp tree intact" {
+  local tmp; tmp="$(mktemp -d)"
+  head -c 1200000 /dev/zero > "$tmp/k3d"
+  run _assert_download_size "$tmp/k3d" 1000000 "k3d" "$tmp"
+  [ "$status" -eq 0 ] || { rm -rf "$tmp"; return 1; }
+  [ -d "$tmp" ] || return 1
+  rm -rf "$tmp"
+}

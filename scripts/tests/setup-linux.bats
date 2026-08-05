@@ -5,6 +5,9 @@ load test_helper
 
 setup() {
   load_lib setup-linux.sh
+  # Fetch-test curl mocks write tiny fixture files; relax the #607 size floor
+  # so _assert_download_size does not reject them (real floor applies in prod).
+  export TB_MIN_DOWNLOAD_BYTES=0
   MOCK_CALLS="$(mktemp)"
   PRESENT_CMDS="curl conntrack"
   TEST_DISTRO=ubuntu
