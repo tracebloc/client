@@ -3416,6 +3416,39 @@ Describe "Get-VerifiedDownload resilience guards (#607, Bugbot)" {
   It "wraps the post-download validation so an I/O error tries the next transport, not aborts" {
     # Bugbot: Get-Item/OpenRead can throw if AV locks the just-written file; that
     # must fall through to curl.exe/BITS, not escape Get-VerifiedDownload.
-    $script:GVD | Should -Match 'try \{\s*\$bad = Test-DownloadComplete[\s\S]{0,220}catch \{\s*\$bad ='
+    $script:GVD | Should -Match 'try \{\s*\$bad = Test-DownloadComplete[\s\S]{0,700}catch \{\s*\$bad ='
+  }
+}
+
+Describe "Checksum-driven tool download (#609)" {
+  BeforeAll { $script:CDD = Get-Content "$PSScriptRoot/../install-k8s.ps1" -Raw }
+
+  It "Get-VerifiedDownload exposes the -Sha256 and -MustContain gates" {
+    $script:CDD | Should -Match '\[string\]\$Sha256'
+    $script:CDD | Should -Match '\[string\]\$MustContain'
+  }
+
+  It "a checksum mismatch is treated as a bad transport (retries the next one), not a dead end" {
+    # The whole point: -Sha256 makes the checksum the completeness test, so a
+    # truncated/altered copy triggers curl.exe/BITS instead of failing the install.
+    $script:CDD | Should -Match "if \(-not \`$bad -and \`$Sha256\)[\s\S]{0,200}checksum mismatch"
+  }
+
+  It "k3d gates the binary download on the checksum fetched first" {
+    $script:CDD | Should -Match 'checksums\.txt[\s\S]{0,160}-MustContain'
+    $script:CDD | Should -Match '\$k3dUrl[\s\S]{0,160}-Sha256'
+  }
+
+  It "kubectl gates the binary download on the .sha256 fetched first" {
+    $script:CDD | Should -Match 'Get-VerifiedDownload[\s\S]{0,80}kubectl\.exe\.sha256'
+    $script:CDD | Should -Match '\$kUrl[\s\S]{0,160}-Sha256'
+  }
+
+  It "helm gates the zip download on its published sha256sum (PS parity with bash)" {
+    $script:CDD | Should -Match '\$helmUrl[\s\S]{0,160}-Sha256'
+  }
+
+  It "each extracted checksum is validated as 64 hex before it gates a download" {
+    ([regex]::Matches($script:CDD, "notmatch '\^\[0-9a-fA-F\]\{64\}\`$'")).Count | Should -BeGreaterOrEqual 2
   }
 }

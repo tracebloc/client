@@ -464,6 +464,19 @@ function Get-VerifiedDownload {
     [Parameter(Mandatory)][string]$Dest,
     [int]$MinBytes = 1MB,
     [string]$Magic = '',
+    # When set, the CHECKSUM is the authoritative completeness test (#609): after a
+    # transport lands a size/magic-valid file, its SHA-256 must equal $Sha256 or the
+    # transport is treated as failed and the NEXT one is tried. A size floor alone
+    # lets a mid-transfer truncation (>MinBytes, still starts with the magic bytes)
+    # slip through and dead-end at a downstream checksum with no retry -- the real
+    # field failure. With $Sha256, a truncated/corrupt copy just triggers curl.exe/
+    # BITS until a byte-correct copy lands.
+    [string]$Sha256 = '',
+    # When set, the downloaded TEXT must contain this substring or the transport is
+    # treated as failed (#609). Used for the small checksum-list files (checksums.txt
+    # / *.sha256), which have no fixed hash but must carry the expected asset line --
+    # a proxy error page that lacks it is caught and the next transport is tried.
+    [string]$MustContain = '',
     [string]$Label = 'download',
     [string]$Message = 'Downloading'
   )
@@ -491,10 +504,22 @@ function Get-VerifiedDownload {
     # NEXT transport should be tried, not the whole download aborted (Bugbot).
     try {
       $bad = Test-DownloadComplete -Path $Dest -MinBytes $MinBytes -Magic $Magic
+      if (-not $bad -and $Sha256) {
+        $got = (Get-FileHash -LiteralPath $Dest -Algorithm SHA256).Hash.ToLower()
+        if ($got -ne $Sha256.ToLower()) {
+          $bad = "checksum mismatch (got $got) -- the download is truncated or altered"
+        }
+      }
+      if (-not $bad -and $MustContain) {
+        $text = Get-Content -LiteralPath $Dest -Raw -ErrorAction Stop
+        if ($text -notmatch [regex]::Escape($MustContain)) {
+          $bad = "the file did not contain the expected entry '$MustContain' -- likely an error page"
+        }
+      }
     } catch {
       $bad = "could not read the downloaded file ($($_.Exception.Message)) -- it may be locked or quarantined by antivirus"
     }
-    if (-not $bad) { return }        # complete + valid -- done
+    if (-not $bad) { return }        # complete + (checksum/content) valid -- done
     $problems += "${name}: $bad"
     Warn "$Label via $name looked incomplete ($bad); trying another method..."
   }
@@ -1593,18 +1618,25 @@ function Install-Kubectl {
   $kubectlDest = "$TOOL_DIR\kubectl.exe"
   $kUrl = "https://dl.k8s.io/release/$kVer/bin/windows/$arch/kubectl.exe"
   $t0 = Get-Date
-  # Heartbeat during the otherwise-silent transfer (#422); retry wraps it.
-  Get-VerifiedDownload -Url $kUrl -Dest $kubectlDest -MinBytes 20MB -Magic 'MZ' `
+  # Fetch the .sha256 FIRST, then make it the download gate (#609): with -Sha256 the
+  # binary download retries transports (Invoke-WebRequest -> curl.exe -> BITS) until a
+  # byte-correct copy lands, so a mid-transfer truncation self-heals instead of
+  # dead-ending at a post-hoc checksum. dl.k8s.io publishes the bare 64-hex hash.
+  $kSums = "$env:TEMP\kubectl-sha-$([System.IO.Path]::GetRandomFileName()).txt"
+  try {
+    Get-VerifiedDownload -Url "https://dl.k8s.io/release/$kVer/bin/windows/$arch/kubectl.exe.sha256" `
+      -Dest $kSums -MinBytes 1 -Label "kubectl checksum" -Message "Fetching kubectl checksum"
+  } catch {
+    Remove-Item $kSums -Force -ErrorAction SilentlyContinue
+    Err "Couldn't fetch the kubectl checksum ($_). Check egress to dl.k8s.io and re-run."
+  }
+  $expectedHash = ((Get-Content $kSums -Raw).Trim())
+  Remove-Item $kSums -Force -ErrorAction SilentlyContinue
+  if ($expectedHash -notmatch '^[0-9a-fA-F]{64}$') {
+    Err "Couldn't read a valid kubectl checksum (got an error page?). Check egress to dl.k8s.io and re-run."
+  }
+  Get-VerifiedDownload -Url $kUrl -Dest $kubectlDest -MinBytes 20MB -Magic 'MZ' -Sha256 $expectedHash `
     -Label "kubectl download" -Message "Downloading kubectl $kVer (~60 MB)"
-  $expectedHash = Invoke-WithRetry -Label "checksum" -ScriptBlock {
-    (Invoke-WebRequest "https://dl.k8s.io/release/$kVer/bin/windows/$arch/kubectl.exe.sha256" `
-      -UseBasicParsing).Content.Trim()
-  }
-  $actualHash = (Get-FileHash $kubectlDest -Algorithm SHA256).Hash.ToLower()
-  if ($actualHash -ne $expectedHash.ToLower()) {
-    Remove-Item $kubectlDest -Force
-    Err "System tool checksum verification failed."
-  }
   RefreshPath
   Log "kubectl $kVer installed."
   Assert-ToolRuns -Name "kubectl" -VersionArgs @("version","--client") -BinPath $kubectlDest
@@ -1701,36 +1733,31 @@ function Install-K3dAndHelm {
         }
       $k3dDest = "$TOOL_DIR\k3d.exe"
       $k3dUrl = "https://github.com/k3d-io/k3d/releases/download/$k3dVer/k3d-windows-$arch.exe"
-      Get-VerifiedDownload -Url $k3dUrl -Dest $k3dDest -MinBytes 10MB -Magic 'MZ' `
-        -Label "k3d download" -Message "Downloading k3d $k3dVer (~25 MB)"
-      # Fail-closed verification, matching the Linux path and the kubectl
-      # precedent: an unfetchable checksums.txt, a missing asset line, or a
-      # mismatch all abort and remove the download — never install unverified
-      # bytes on a privileged path (Bugbot r3). The release's checksum asset is
-      # named checksums.txt ("<sha256>  _dist/<asset>" lines); the previous
-      # sha256sum.txt URL never existed, so the old fail-open verification
-      # silently never ran (#382).
+      # Fetch the checksum list FIRST, then make the SHA the download gate (#609).
+      # The release's checksum asset is checksums.txt ("<sha256>  _dist/<asset>"
+      # lines). Fetching it resiliently (multi-transport + must contain the asset
+      # line) means a proxy error page is retried, and passing the extracted hash to
+      # Get-VerifiedDownload makes the binary download retry transports until a
+      # byte-correct copy lands -- the fix for a mid-transfer truncation that used to
+      # slip past the size floor and dead-end at the checksum (the #607 field case).
+      $k3dSums = "$env:TEMP\k3d-checksums-$([System.IO.Path]::GetRandomFileName()).txt"
       try {
-        $checksums = Invoke-WithRetry -Label "k3d checksums" -ScriptBlock {
-          (Invoke-WebRequest "https://github.com/k3d-io/k3d/releases/download/$k3dVer/checksums.txt" `
-            -UseBasicParsing).Content
-        }
+        Get-VerifiedDownload -Url "https://github.com/k3d-io/k3d/releases/download/$k3dVer/checksums.txt" `
+          -Dest $k3dSums -MinBytes 1 -MustContain "k3d-windows-$arch.exe" `
+          -Label "k3d checksums" -Message "Fetching k3d checksums"
       } catch {
-        Remove-Item $k3dDest -Force -ErrorAction SilentlyContinue
+        Remove-Item $k3dSums -Force -ErrorAction SilentlyContinue
         Err "Couldn't fetch the k3d checksums ($_). Check egress to github.com and re-run."
       }
-      $expectedHash = (($checksums -split "`n" |
-        Where-Object { $_ -match "k3d-windows-$arch\.exe" }) -replace '\s+.*','' |
+      $expectedHash = (((Get-Content $k3dSums) |
+        Where-Object { $_ -match "k3d-windows-$arch\.exe" }) -replace '\s+.*', '' |
         Select-Object -First 1)
-      if (-not $expectedHash) {
-        Remove-Item $k3dDest -Force -ErrorAction SilentlyContinue
-        Err "System tool checksum verification failed."
+      Remove-Item $k3dSums -Force -ErrorAction SilentlyContinue
+      if ($expectedHash -notmatch '^[0-9a-fA-F]{64}$') {
+        Err "Couldn't read a valid k3d checksum from checksums.txt. Check egress to github.com and re-run."
       }
-      $actualHash = (Get-FileHash $k3dDest -Algorithm SHA256).Hash.ToLower()
-      if ($actualHash -ne $expectedHash.Trim().ToLower()) {
-        Remove-Item $k3dDest -Force
-        Err "System tool checksum verification failed."
-      }
+      Get-VerifiedDownload -Url $k3dUrl -Dest $k3dDest -MinBytes 10MB -Magic 'MZ' -Sha256 $expectedHash.Trim() `
+        -Label "k3d download" -Message "Downloading k3d $k3dVer (~25 MB)"
       Log "k3d checksum verified."
       RefreshPath
       # Compute the summary now (correct elapsed) but print it only AFTER the
@@ -1767,7 +1794,26 @@ function Install-K3dAndHelm {
       $t0helm = Get-Date
       $helmZip = "$env:TEMP\helm-$helmVer-windows-$arch.zip"
       $helmUrl = "https://get.helm.sh/helm-$helmVer-windows-$arch.zip"
-      Get-VerifiedDownload -Url $helmUrl -Dest $helmZip -MinBytes 5MB -Magic 'PK' `
+      # Checksum-gated like k3d/kubectl (#609): get.helm.sh publishes
+      # <zip>.sha256sum ("<hash>  <zip-name>"). Fetch it first so the zip download
+      # retries transports until byte-correct -- a truncated zip that used to pass
+      # size+magic and then fail at Expand-Archive now self-heals. (The PS path had
+      # no helm checksum at all before; this also brings it to parity with the
+      # bash path, which already verifies helm.)
+      $helmSums = "$env:TEMP\helm-sha-$([System.IO.Path]::GetRandomFileName()).txt"
+      try {
+        Get-VerifiedDownload -Url "$helmUrl.sha256sum" -Dest $helmSums -MinBytes 1 `
+          -MustContain "helm-$helmVer-windows-$arch.zip" -Label "helm checksum" -Message "Fetching Helm checksum"
+      } catch {
+        Remove-Item $helmSums -Force -ErrorAction SilentlyContinue
+        Err "Couldn't fetch the Helm checksum ($_). Check egress to get.helm.sh and re-run."
+      }
+      $helmHash = (((Get-Content $helmSums) -split '\s+' | Select-Object -First 1))
+      Remove-Item $helmSums -Force -ErrorAction SilentlyContinue
+      if ($helmHash -notmatch '^[0-9a-fA-F]{64}$') {
+        Err "Couldn't read a valid Helm checksum from get.helm.sh. Check egress and re-run."
+      }
+      Get-VerifiedDownload -Url $helmUrl -Dest $helmZip -MinBytes 5MB -Magic 'PK' -Sha256 $helmHash `
         -Label "helm download" -Message "Downloading Helm $helmVer (~20 MB)"
       $helmExtract = "$env:TEMP\helm-extract"
       if (Test-Path $helmExtract) { Remove-Item $helmExtract -Recurse -Force }
