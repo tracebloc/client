@@ -582,3 +582,20 @@ setup() {
   run _assert_download_size "$f" 1000000 "k3d"
   [ "$status" -eq 0 ] || return 1
 }
+
+@test "_assert_download_size: removes the caller's tmp tree on a truncated transfer (#607 Bugbot)" {
+  local tmp; tmp="$(mktemp -d)"
+  printf '<html>blocked</html>' > "$tmp/k3d"
+  run _assert_download_size "$tmp/k3d" 1000000 "k3d" "$tmp"
+  [ "$status" -ne 0 ] || return 1
+  [ ! -d "$tmp" ] || { rm -rf "$tmp"; return 1; }
+}
+
+@test "_assert_download_size: a complete file leaves the caller's tmp tree intact" {
+  local tmp; tmp="$(mktemp -d)"
+  head -c 1200000 /dev/zero > "$tmp/k3d"
+  run _assert_download_size "$tmp/k3d" 1000000 "k3d" "$tmp"
+  [ "$status" -eq 0 ] || { rm -rf "$tmp"; return 1; }
+  [ -d "$tmp" ] || return 1
+  rm -rf "$tmp"
+}
