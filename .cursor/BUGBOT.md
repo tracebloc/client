@@ -112,6 +112,11 @@ for *what the operator sees and can act on*, not code elegance.
   identifier support needs, not a secret (`scripts/lib/diagnose.sh:13`).
 - Existing `# shellcheck disable=…` lines each carry a stated reason — don't re-litigate them.
 - `docs/`, chart lockfiles, and generated sections of `client/values.schema.json`.
+- A `code-quality-caller.yml` that passes **no `secrets:` line** is correct, not an omission.
+  The shared `code-quality.yml` reusable references no secrets by contract
+  (RFC-BACKEND-1405 Q5, backend#1526): secretless callees get no secrets line, and if the
+  reusable ever gains one, callers switch to explicit per-secret passing — never
+  `secrets: inherit`. Flag the *addition* of `secrets: inherit` on this caller instead.
 
 ## Tone
 
