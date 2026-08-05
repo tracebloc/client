@@ -693,6 +693,11 @@ _pf_env_proxy_raw() {
 # not use '+'-for-space, so '+' is left literal.
 _pf_urldecode() {
   local s="${1:-}"
+  # Escape literal backslashes first so printf '%b' expands ONLY the percent-escapes
+  # we turn into \xHH below -- otherwise a '\' (or a '\n'/'\t') in the password is
+  # taken as an escape, diverging from the PS peer's percent-only UnescapeDataString
+  # (Bugbot, client#589).
+  s="${s//\\/\\\\}"
   printf '%b' "${s//%/\\x}"
 }
 
@@ -731,7 +736,10 @@ _pf_detect_tls_inspection() {
   raw="$(_pf_env_proxy_raw)"
   if [[ -n "$raw" ]]; then
     args+=(-proxy "$(_pf_proxy_hostport "$raw")")
-    if [[ "$raw" == *"@"* ]] && openssl s_client -help 2>&1 | grep -q -- '-proxy_user'; then
+    # Capture-then-match, not `openssl -help | grep -q`: under pipefail, grep -q closing
+    # the pipe early makes openssl take SIGPIPE and the pipeline fail, dropping the
+    # credential flags on exactly the authenticated proxies this handles (Bugbot, client#589).
+    if [[ "$raw" == *"@"* ]] && { _pf_ossl_help="$(openssl s_client -help 2>&1 || true)"; [[ "$_pf_ossl_help" == *"-proxy_user"* ]]; }; then
       creds="${raw#*://}"; creds="${creds%%@*}"          # user[:pass], percent-encoded
       if [[ "$creds" == *:* ]]; then
         user="$(_pf_urldecode "${creds%%:*}")"; pass="$(_pf_urldecode "${creds#*:}")"
@@ -752,7 +760,9 @@ _pf_detect_tls_inspection() {
   issuer="$(
     export _TB_PROXY_PASS="$pass"
     echo | _bounded 8 openssl "${args[@]}" 2>/dev/null | openssl x509 -noout -issuer 2>/dev/null
-  )" || issuer=""
+  )" || true   # keep a captured issuer: s_client often exits non-zero (SIGPIPE after
+                # x509 finishes) even on a good handshake; a genuinely empty capture is
+                # still caught by the [[ -z ]] below (Bugbot High, client#589).
   [[ -z "$issuer" ]] && { echo "unknown"; return 0; }
   if _pf_issuer_is_public "$issuer"; then echo "no"; else echo "yes"; fi
 }
