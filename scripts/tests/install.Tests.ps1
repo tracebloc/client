@@ -146,7 +146,7 @@ Describe "Confirm-ScriptIntegrity — integrity gate before any privileged step"
     $mf = Join-Path $TestDrive 'missing.sha256'
     "zzzz  scripts/other.ps1" | Set-Content -LiteralPath $mf
     { Confirm-ScriptIntegrity -Manifest $mf -TmpDir $script:tmp -Files @('scripts/install-k8s.ps1') } |
-      Should -Throw -ExpectedMessage "*no entry in manifest*"
+      Should -Throw -ExpectedMessage "*isn't in the installer's signed checksum list*"
   }
 }
 

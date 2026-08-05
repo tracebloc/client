@@ -375,12 +375,12 @@ verify_against_manifest() {
 
   if ! download_manifest "$manifest"; then
     if [[ "$ALLOW_UNVERIFIED" == "1" ]]; then
-      echo "[WARN]  No manifest.sha256 at ref '$REF' — skipping integrity check (TRACEBLOC_ALLOW_UNVERIFIED=1)." >&2
+      echo "[WARN]  No integrity checksums published at ref '$REF' — skipping the integrity check (TRACEBLOC_ALLOW_UNVERIFIED=1)." >&2
       return 0
     fi
-    echo "[ERROR] Couldn't fetch manifest.sha256 for ref '$REF' — refusing to run" >&2
+    echo "[ERROR] Couldn't fetch the installer's integrity checksums for ref '$REF' — refusing to run" >&2
     echo "        unverified installer scripts. If this ref pre-dates" >&2
-    echo "        signed manifests, pin a newer release tag." >&2
+    echo "        signed releases, pin a newer release tag." >&2
     exit 1
   fi
 
@@ -395,7 +395,7 @@ verify_against_manifest() {
     # many spaces the sha tool emits); take its first field as the digest.
     expected="$(awk -v p="$rel" '$NF == p {print $1; exit}' "$manifest")"
     if [[ -z "$expected" ]]; then
-      echo "[ERROR] $rel has no entry in manifest.sha256 — refusing to run it." >&2
+      echo "[ERROR] $rel isn't in the installer's signed checksum list — refusing to run it." >&2
       exit 1
     fi
     actual="$(_sha256_of "$TMPDIR/${f#scripts/}")"
@@ -443,11 +443,11 @@ verify_manifest_signature() {
 
   if ! ensure_cosign; then
     if [[ "$ALLOW_UNVERIFIED" == "1" ]]; then
-      echo "[WARN]  cosign unavailable — manifest signature NOT verified (TRACEBLOC_ALLOW_UNVERIFIED=1)." >&2
+      echo "[WARN]  cosign unavailable — the installer's signature NOT verified (TRACEBLOC_ALLOW_UNVERIFIED=1)." >&2
       echo "[WARN]  Proceeding on checksum-only integrity. Not for production." >&2
       return 0
     fi
-    echo "[ERROR] cosign is required to verify the installer's signed manifest and" >&2
+    echo "[ERROR] cosign is required to verify the installer's signature and" >&2
     echo "        couldn't be found or bootstrapped. Refusing to fall back to an" >&2
     echo "        unauthenticated, same-channel checksum." >&2
     echo "        Fix: install cosign (https://docs.sigstore.dev/cosign/installation/)" >&2
@@ -478,11 +478,11 @@ verify_manifest_signature() {
   if ! curl -fsSL --tlsv1.2 --connect-timeout 30 --max-time 300 "$REPO_REL/manifest.sha256.sig"  -o "$sig"  2>/dev/null \
      || ! curl -fsSL --tlsv1.2 --connect-timeout 30 --max-time 300 "$REPO_REL/manifest.sha256.cert" -o "$cert" 2>/dev/null; then
     if [[ "$ALLOW_UNVERIFIED" == "1" ]]; then
-      echo "[WARN]  manifest signature/cert not published for ref '$REF' — not verified (TRACEBLOC_ALLOW_UNVERIFIED=1)." >&2
+      echo "[WARN]  The installer's signature isn't published for ref '$REF' — not verified (TRACEBLOC_ALLOW_UNVERIFIED=1)." >&2
       return 0
     fi
-    echo "[ERROR] manifest.sha256.sig / .cert not published for release '$REF' — can't" >&2
-    echo "        authenticate the manifest. Pin a release tag that ships them." >&2
+    echo "[ERROR] The installer's signature isn't published for release '$REF' — can't" >&2
+    echo "        confirm the download is authentic. Pin a release tag that ships it." >&2
     exit 1
   fi
 
