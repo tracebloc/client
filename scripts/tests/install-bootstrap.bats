@@ -66,8 +66,9 @@ done
 serve="$SERVE"; serve_rel="$SERVE_REL"
 case "\$url" in
   *"/releases/download/"*/manifest.sha256)      src="\$serve_rel/manifest.sha256" ;;
-  *"/releases/download/"*/manifest.sha256.sig)  src="\$serve_rel/manifest.sha256.sig" ;;
-  *"/releases/download/"*/manifest.sha256.cert) src="\$serve_rel/manifest.sha256.cert" ;;
+  *"/releases/download/"*/manifest.sha256.sig)    src="\$serve_rel/manifest.sha256.sig" ;;
+  *"/releases/download/"*/manifest.sha256.cert)   src="\$serve_rel/manifest.sha256.cert" ;;
+  *"/releases/download/"*/manifest.sha256.bundle) src="\$serve_rel/manifest.sha256.bundle" ;;
   *raw.githubusercontent.com/*/scripts/*)       src="\$serve/scripts/\${url#*/scripts/}" ;;
   *) echo "mock curl: unmapped \$url" >&2; exit 22 ;;
 esac
@@ -212,6 +213,71 @@ EOF
   REF="v9.9.9" TRACEBLOC_CA_BUNDLE="$ca" run_boot
   [ "$status" -eq 0 ] || return 1
   [ -z "$(cat "$SBX/cosign-ssl")" ] || return 1
+}
+
+@test "bootstrap prefers the offline Sigstore bundle: verify-blob --bundle --offline (#584)" {
+  # When a manifest.sha256.bundle is published, the bootstrap must verify it OFFLINE
+  # (no live Rekor) and NOT fall back to the .sig/.cert online path — that's what makes
+  # a fresh install work on a sigstore-blocked / TLS-inspecting network.
+  printf 'BUNDLE\n' > "$SERVE_REL/manifest.sha256.bundle"
+  cat > "$BIN/cosign" <<EOF
+#!/usr/bin/env bash
+printf '%s\n' "\$@" >> "$SBX/cosign-args"
+exit 0
+EOF
+  chmod +x "$BIN/cosign"
+  REF="v9.9.9" run_boot
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  [ -f "$SBX/k8s-ran" ] || return 1
+  grep -q -- '--bundle' "$SBX/cosign-args" || return 1
+  grep -q -- '--offline' "$SBX/cosign-args" || return 1
+  # bundle verified => the online sig/cert path is NOT taken
+  ! grep -q -- '--signature' "$SBX/cosign-args" || return 1
+}
+
+@test "bootstrap falls back to sig+cert when the bundle is present but fails offline verify (#584, reviewer)" {
+  # Exercise the bundle-present-but-verify-fails -> sig/cert fallback (not covered by
+  # the exit-0 bundle tests). cosign REJECTS the --bundle call but ACCEPTS sig/cert.
+  printf 'BUNDLE\n' > "$SERVE_REL/manifest.sha256.bundle"
+  cat > "$BIN/cosign" <<EOF
+#!/usr/bin/env bash
+printf '%s\n' "\$@" >> "$SBX/cosign-args"
+for a in "\$@"; do [ "\$a" = "--bundle" ] && exit 1; done   # offline bundle verify fails
+exit 0                                                        # online sig/cert verify passes
+EOF
+  chmod +x "$BIN/cosign"
+  REF="v9.9.9" run_boot
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  [ -f "$SBX/k8s-ran" ] || return 1
+  grep -q -- '--bundle' "$SBX/cosign-args" || return 1       # bundle path WAS attempted
+  grep -q -- '--signature' "$SBX/cosign-args" || return 1    # ...then fell back to sig/cert
+}
+
+@test "bootstrap fails closed when BOTH the bundle and sig/cert verify fail (#584, reviewer)" {
+  # Bundle present, but every cosign verify fails -> must abort, never reach the
+  # privileged step (no silent fall-through to running unverified scripts).
+  printf 'BUNDLE\n' > "$SERVE_REL/manifest.sha256.bundle"
+  COSIGN_RESULT=1 REF="v9.9.9" run_boot
+  [ "$status" -ne 0 ] || { echo "$output"; return 1; }
+  [ ! -f "$SBX/k8s-ran" ] || return 1
+  [[ "$output" == *"Couldn't confirm the installer download is authentic"* ]] || return 1
+}
+
+@test "bootstrap falls back to sig+cert when no bundle is published (older release) (#584)" {
+  # No bundle asset (a release cut before #584): the bundle fetch 404s and the
+  # bootstrap must fall through to the online .sig/.cert keyless verification.
+  [ ! -f "$SERVE_REL/manifest.sha256.bundle" ] || return 1   # precondition: no bundle
+  cat > "$BIN/cosign" <<EOF
+#!/usr/bin/env bash
+printf '%s\n' "\$@" >> "$SBX/cosign-args"
+exit 0
+EOF
+  chmod +x "$BIN/cosign"
+  REF="v9.9.9" run_boot
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  [ -f "$SBX/k8s-ran" ] || return 1
+  grep -q -- '--signature' "$SBX/cosign-args" || return 1   # online path used
+  ! grep -q -- '--bundle' "$SBX/cosign-args" || return 1     # bundle path not taken
 }
 
 @test "bootstrap fails fast on a set-but-unreadable CA bundle (#583 Bugbot)" {

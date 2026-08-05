@@ -435,6 +435,11 @@ verify_manifest_signature() {
   local manifest="$1"
   local sig="$TMPDIR/manifest.sha256.sig"
   local cert="$TMPDIR/manifest.sha256.cert"
+  local bundle="$TMPDIR/manifest.sha256.bundle"
+  # The keyless signing identity: the release workflow's OIDC cert. Shared by both
+  # the offline-bundle and the online sig/cert verification paths below.
+  local id_re='https://github.com/tracebloc/client/\.github/workflows/.*@.*'
+  local issuer='https://token.actions.githubusercontent.com'
 
   if ! ensure_cosign; then
     if [[ "$ALLOW_UNVERIFIED" == "1" ]]; then
@@ -450,6 +455,26 @@ verify_manifest_signature() {
     exit 1
   fi
 
+  # OFFLINE Sigstore bundle first (#584): the bundle carries the Rekor inclusion
+  # proof, so this verifies signature + cert identity + tlog inclusion with NO live
+  # Rekor call — immune to networks that block/TLS-inspect sigstore, and the ONLY
+  # path that verifies our short-lived keyless cert once it has expired (its embedded
+  # timestamp proves the cert was valid at signing). Releases cut before the bundle
+  # existed simply 404 here and fall through to the online .sig/.cert path below;
+  # so does any bundle that doesn't verify — the online path does the SAME full
+  # keyless check, just needing live Rekor, so this is a fallback, never a downgrade.
+  if curl -fsSL --tlsv1.2 --connect-timeout 30 --max-time 300 "$REPO_REL/manifest.sha256.bundle" -o "$bundle" 2>/dev/null; then
+    if "$COSIGN_BIN" verify-blob \
+          --bundle "$bundle" \
+          --certificate-identity-regexp "$id_re" \
+          --certificate-oidc-issuer "$issuer" \
+          --offline \
+          "$manifest" >/dev/null 2>&1; then
+      printf '  %s✔%s Download verified as published by tracebloc\n' "$_G" "$_R"
+      return 0
+    fi
+  fi
+
   if ! curl -fsSL --tlsv1.2 --connect-timeout 30 --max-time 300 "$REPO_REL/manifest.sha256.sig"  -o "$sig"  2>/dev/null \
      || ! curl -fsSL --tlsv1.2 --connect-timeout 30 --max-time 300 "$REPO_REL/manifest.sha256.cert" -o "$cert" 2>/dev/null; then
     if [[ "$ALLOW_UNVERIFIED" == "1" ]]; then
@@ -462,9 +487,8 @@ verify_manifest_signature() {
   fi
 
   if "$COSIGN_BIN" verify-blob \
-        --certificate-identity-regexp \
-          'https://github.com/tracebloc/client/\.github/workflows/.*@.*' \
-        --certificate-oidc-issuer 'https://token.actions.githubusercontent.com' \
+        --certificate-identity-regexp "$id_re" \
+        --certificate-oidc-issuer "$issuer" \
         --certificate "$cert" \
         --signature "$sig" \
         "$manifest" >/dev/null 2>&1; then
