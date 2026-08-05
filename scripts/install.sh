@@ -438,11 +438,11 @@ verify_manifest_signature() {
 
   if ! ensure_cosign; then
     if [[ "$ALLOW_UNVERIFIED" == "1" ]]; then
-      echo "[WARN]  cosign unavailable — manifest signature NOT verified (TRACEBLOC_ALLOW_UNVERIFIED=1)." >&2
+      echo "[WARN]  cosign unavailable — the installer's signature NOT verified (TRACEBLOC_ALLOW_UNVERIFIED=1)." >&2
       echo "[WARN]  Proceeding on checksum-only integrity. Not for production." >&2
       return 0
     fi
-    echo "[ERROR] cosign is required to verify the installer's signed manifest and" >&2
+    echo "[ERROR] cosign is required to verify the installer's signature and" >&2
     echo "        couldn't be found or bootstrapped. Refusing to fall back to an" >&2
     echo "        unauthenticated, same-channel checksum." >&2
     echo "        Fix: install cosign (https://docs.sigstore.dev/cosign/installation/)" >&2

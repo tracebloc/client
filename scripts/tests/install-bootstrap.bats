@@ -264,7 +264,7 @@ EOF
 @test "unverified opt-in degrades gracefully when cosign is absent" {
   REF="v9.9.9" TRACEBLOC_ALLOW_UNVERIFIED=1 run_boot_no_cosign
   [ "$status" -eq 0 ] || return 1
-  [[ "$output" == *"manifest signature NOT verified"* ]] || return 1
+  [[ "$output" == *"the installer's signature NOT verified"* ]] || return 1
   [ -f "$SBX/k8s-ran" ] || return 1             # checksum integrity still enforced; runs
 }
 

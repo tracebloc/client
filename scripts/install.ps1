@@ -339,11 +339,11 @@ function Confirm-ManifestSignature {
   $cosign = Resolve-Cosign -TmpDir $TmpDir
   if (-not $cosign) {
     if ($AllowUnverified) {
-      Warn "cosign unavailable -- manifest signature NOT verified (TRACEBLOC_ALLOW_UNVERIFIED=1)."
+      Warn "cosign unavailable -- the installer's signature NOT verified (TRACEBLOC_ALLOW_UNVERIFIED=1)."
       Warn "Proceeding on checksum-only integrity. Not for production."
       return
     }
-    throw "cosign is required to verify the installer's signed manifest and couldn't be found or bootstrapped. Refusing to fall back to an unauthenticated, same-channel checksum. Fix: install cosign (https://docs.sigstore.dev/cosign/installation/) and re-run, or for local development only set `$env:TRACEBLOC_ALLOW_UNVERIFIED = '1'`."
+    throw "cosign is required to verify the installer's signature and couldn't be found or bootstrapped. Refusing to fall back to an unauthenticated, same-channel checksum. Fix: install cosign (https://docs.sigstore.dev/cosign/installation/) and re-run, or for local development only set `$env:TRACEBLOC_ALLOW_UNVERIFIED = '1'`."
   }
 
   $sig  = Join-Path $TmpDir "manifest.sha256.sig"
