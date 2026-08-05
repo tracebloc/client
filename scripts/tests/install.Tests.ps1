@@ -194,3 +194,26 @@ Describe "Bootstrap prefers the offline Sigstore bundle (#584)" {
     $fn | Should -Match '2>&1 \| Out-Null'
   }
 }
+
+Describe "Confirm-ManifestSignature: offline-bundle -> sig/cert fallback behaviour (#584, reviewer)" {
+  # Behavioural (not source-text): drive the fallback + fail-closed branches directly.
+  BeforeEach {
+    $env:TRACEBLOC_CA_BUNDLE = $null; $env:CURL_CA_BUNDLE = $null   # skip the CA fast-fail
+    Mock Resolve-Cosign { "cosign" }
+    Mock Get-Optional   { $true }        # bundle + sig + cert all "published/fetched"
+    Mock Ok {}; Mock Warn {}
+  }
+
+  It "falls back to the sig/cert path when the bundle verify fails, and verifies" {
+    Mock Invoke-CosignVerifyBlob { if ($VerifyArgs -contains '--bundle') { $false } else { $true } }
+    { Confirm-ManifestSignature -Manifest 'm' -RepoRel 'r' -TmpDir $TestDrive -AllowUnverified $false } |
+      Should -Not -Throw
+    Should -Invoke Invoke-CosignVerifyBlob -Times 2 -Exactly   # bundle attempt + sig/cert fallback
+  }
+
+  It "fails closed when BOTH the bundle and the sig/cert verify fail" {
+    Mock Invoke-CosignVerifyBlob { $false }
+    { Confirm-ManifestSignature -Manifest 'm' -RepoRel 'r' -TmpDir $TestDrive -AllowUnverified $false } |
+      Should -Throw -ExpectedMessage "*Couldn't confirm the installer download is authentic*"
+  }
+}
