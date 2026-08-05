@@ -20,7 +20,6 @@ global:
 
 # -- Environment variables passed to containers
 env: {
-  # CLIENT_ENV: prod
   # Optional proxy settings
   # HTTP_PROXY_HOST: ""
   # HTTP_PROXY_PORT: ""
