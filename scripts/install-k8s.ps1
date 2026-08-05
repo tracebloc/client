@@ -473,10 +473,16 @@ function Get-VerifiedDownload {
     # BITS until a byte-correct copy lands.
     [string]$Sha256 = '',
     # When set, the downloaded TEXT must contain this substring or the transport is
-    # treated as failed (#609). Used for the small checksum-list files (checksums.txt
-    # / *.sha256), which have no fixed hash but must carry the expected asset line --
-    # a proxy error page that lacks it is caught and the next transport is tried.
+    # treated as failed (#609). Used for checksum-list files that carry the expected
+    # asset line (k3d checksums.txt, helm *.sha256sum) -- a proxy error page that
+    # lacks it is caught and the next transport is tried.
     [string]$MustContain = '',
+    # Like $MustContain but a REGEX (#611): the downloaded text must match it, else
+    # the transport is treated as failed. Used for checksum files with no fixed
+    # substring -- e.g. kubectl's .sha256 is a bare 64-hex hash, so '[0-9a-fA-F]{64}'
+    # makes a proxy HTML page (which has no such run) fall through to curl.exe/BITS
+    # instead of "succeeding" and dying at the later hex check (Bugbot).
+    [string]$MatchPattern = '',
     [string]$Label = 'download',
     [string]$Message = 'Downloading'
   )
@@ -514,6 +520,12 @@ function Get-VerifiedDownload {
         $text = Get-Content -LiteralPath $Dest -Raw -ErrorAction Stop
         if ($text -notmatch [regex]::Escape($MustContain)) {
           $bad = "the file did not contain the expected entry '$MustContain' -- likely an error page"
+        }
+      }
+      if (-not $bad -and $MatchPattern) {
+        $text = Get-Content -LiteralPath $Dest -Raw -ErrorAction Stop
+        if ($text -notmatch $MatchPattern) {
+          $bad = "the file did not match the expected pattern -- likely an error page"
         }
       }
     } catch {
@@ -1625,7 +1637,8 @@ function Install-Kubectl {
   $kSums = "$env:TEMP\kubectl-sha-$([System.IO.Path]::GetRandomFileName()).txt"
   try {
     Get-VerifiedDownload -Url "https://dl.k8s.io/release/$kVer/bin/windows/$arch/kubectl.exe.sha256" `
-      -Dest $kSums -MinBytes 1 -Label "kubectl checksum" -Message "Fetching kubectl checksum"
+      -Dest $kSums -MinBytes 1 -MatchPattern '[0-9a-fA-F]{64}' `
+      -Label "kubectl checksum" -Message "Fetching kubectl checksum"
   } catch {
     Remove-Item $kSums -Force -ErrorAction SilentlyContinue
     Err "Couldn't fetch the kubectl checksum ($_). Check egress to dl.k8s.io and re-run."

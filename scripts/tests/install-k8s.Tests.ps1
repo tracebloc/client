@@ -3416,16 +3416,26 @@ Describe "Get-VerifiedDownload resilience guards (#607, Bugbot)" {
   It "wraps the post-download validation so an I/O error tries the next transport, not aborts" {
     # Bugbot: Get-Item/OpenRead can throw if AV locks the just-written file; that
     # must fall through to curl.exe/BITS, not escape Get-VerifiedDownload.
-    $script:GVD | Should -Match 'try \{\s*\$bad = Test-DownloadComplete[\s\S]{0,700}catch \{\s*\$bad ='
+    # Distance-independent: the try wraps the validation, and a catch turns an I/O
+    # error into a recorded problem (so the loop tries the next transport).
+    $script:GVD | Should -Match 'try \{\s*\$bad = Test-DownloadComplete'
+    $script:GVD | Should -Match 'catch \{\s*\$bad = "could not read the downloaded file'
   }
 }
 
 Describe "Checksum-driven tool download (#609)" {
   BeforeAll { $script:CDD = Get-Content "$PSScriptRoot/../install-k8s.ps1" -Raw }
 
-  It "Get-VerifiedDownload exposes the -Sha256 and -MustContain gates" {
+  It "Get-VerifiedDownload exposes the -Sha256, -MustContain and -MatchPattern gates" {
     $script:CDD | Should -Match '\[string\]\$Sha256'
     $script:CDD | Should -Match '\[string\]\$MustContain'
+    $script:CDD | Should -Match '\[string\]\$MatchPattern'
+  }
+
+  It "the kubectl .sha256 fetch has a content gate so a proxy page retries transports (Bugbot #611)" {
+    # kubectl's .sha256 is a bare hash (no fixed substring), so it must gate on a
+    # regex; -MinBytes 1 alone let a proxy error page 'succeed' and skip the fallbacks.
+    $script:CDD | Should -Match "kubectl\.exe\.sha256[\s\S]{0,120}-MatchPattern"
   }
 
   It "a checksum mismatch is treated as a bad transport (retries the next one), not a dead end" {
