@@ -276,7 +276,11 @@ jobs:
     # Until the secrets are provisioned the job SKIPS green with a notice —
     # see docs/SEAL-CHECK.md § Full-suite dev harness.
     if: github.event_name != 'pull_request'
-    timeout-minutes: 30
+    # 45m, deliberately above the sibling's 30m: this script stacks a 300s PVC
+    # wait, two 300s rollouts and a 600s unfiltered helm test on top of
+    # create_cluster's 15m bound — a slow-but-healthy run must not be killed
+    # by GHA while inside every one of its own timeouts (Bugbot).
+    timeout-minutes: 45
     # One dev-agent session at a time: two clusters authenticating as the same
     # client id would read as a duplicate/capacity anomaly on the platform.
     concurrency:

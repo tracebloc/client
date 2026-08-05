@@ -57,7 +57,15 @@ source "$LIB/cluster.sh"
 # shellcheck source=/dev/null
 source "$LIB/preflight.sh" # provides _pf_recheck_runtime_mem (called by create_cluster)
 
-cleanup() { k3d cluster delete "$CLUSTER_NAME" >/dev/null 2>&1 || true; }
+# The credentials travel in a mode-0600 values file, never on argv (a shared
+# runner's process list is world-readable, and helm --set mangles commas/
+# braces a password may contain) — same stance as the installer's generated
+# values.yaml. Removed on every exit path together with the cluster.
+CREDS_FILE=""
+cleanup() {
+  [ -n "$CREDS_FILE" ] && rm -f "$CREDS_FILE"
+  k3d cluster delete "$CLUSTER_NAME" >/dev/null 2>&1 || true
+}
 trap cleanup EXIT
 
 fail() { echo "FAIL: $*" >&2; exit 1; }
@@ -78,10 +86,18 @@ echo "── helm install (dev backend, REAL credentials, lockdown ENGAGED — f
 # images, local-path storage, lockdown on with the 240s probe budget), plus the
 # real credentials and CLIENT_ENV=dev: the backend the reachability check must
 # round-trip to, and the login that makes the release come up for real.
+# Single-quoted YAML scalars with the standard '' escape, matching the
+# installer's _yaml_sq_escape treatment of the same two values.
+_sq() { printf %s "$1" | sed "s/'/''/g"; }
+CREDS_FILE="$(mktemp)"
+chmod 600 "$CREDS_FILE"
+{
+  printf "clientId: '%s'\n" "$(_sq "$TB_E2E_CLIENT_ID")"
+  printf "clientPassword: '%s'\n" "$(_sq "$TB_E2E_CLIENT_PASSWORD")"
+} > "$CREDS_FILE"
 helm install "$NS" "$CHART_DIR" --namespace "$NS" --create-namespace \
   -f "$CHART_DIR/tests/values-public-images.yaml" \
-  --set clientId="$TB_E2E_CLIENT_ID" \
-  --set clientPassword="$TB_E2E_CLIENT_PASSWORD" \
+  -f "$CREDS_FILE" \
   --set env.CLIENT_ENV=dev \
   --set storageClass.provisioner=rancher.io/local-path \
   --set networkPolicy.training.allowExternalHttps=false \
@@ -96,8 +112,12 @@ echo "── wait: every release PVC Bound (storage-assertions' precondition, as
 total=0
 deadline=$(( $(date +%s) + 300 ))
 while :; do
-  unbound="$(kubectl --request-timeout=10s get pvc -n "$NS" --no-headers 2>/dev/null | awk '$2 != "Bound" {print $1" ("$2")"}' || true)"
-  total="$(kubectl --request-timeout=10s get pvc -n "$NS" --no-headers 2>/dev/null | wc -l | tr -d ' ')"
+  # One guarded fetch per iteration: a transient kubectl failure yields an
+  # empty snapshot (total=0, keep waiting) instead of aborting the script
+  # under set -euo pipefail mid-wait (Bugbot).
+  pvcs="$(kubectl --request-timeout=10s get pvc -n "$NS" --no-headers 2>/dev/null || true)"
+  unbound="$(awk '$2 != "Bound" {print $1" ("$2")"}' <<<"$pvcs")"
+  total="$(grep -c . <<<"$pvcs" || true)"
   [ "$total" -gt 0 ] && [ -z "$unbound" ] && break
   [ "$(date +%s)" -ge "$deadline" ] &&
     fail "release PVCs not all Bound after 300s (total=${total}): ${unbound:-none listed} — storage-assertions would fail; failing here with the crisper reason."
