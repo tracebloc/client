@@ -12,25 +12,25 @@ setup() {
 @test "_diagnose_not_ready: jobs-manager auth error -> bad_creds" {
   kubectl() { case "$*" in *logs*) echo "Exception: Authentication failed: Unable to log in with provided credentials";; *) echo "x 0/2 CrashLoopBackOff";; esac; }
   run _diagnose_not_ready testns
-  [ "$output" = "bad_creds" ]
+  [ "$output" = "bad_creds" ] || return 1
 }
 
 @test "_diagnose_not_ready: ImagePullBackOff -> image_pull" {
   kubectl() { case "$*" in *logs*) echo "booting";; *) echo "x 0/1 ImagePullBackOff";; esac; }
   run _diagnose_not_ready testns
-  [ "$output" = "image_pull" ]
+  [ "$output" = "image_pull" ] || return 1
 }
 
 @test "_diagnose_not_ready: CrashLoopBackOff (no auth err) -> crash" {
   kubectl() { case "$*" in *logs*) echo "booting";; *) echo "x 0/1 CrashLoopBackOff";; esac; }
   run _diagnose_not_ready testns
-  [ "$output" = "crash" ]
+  [ "$output" = "crash" ] || return 1
 }
 
 @test "_diagnose_not_ready: still creating -> starting" {
   kubectl() { case "$*" in *logs*) echo "booting";; *) echo "x 0/1 ContainerCreating";; esac; }
   run _diagnose_not_ready testns
-  [ "$output" = "starting" ]
+  [ "$output" = "starting" ] || return 1
 }
 
 # ── wait_for_client_ready ──────────────────────────────────────────────────
@@ -39,7 +39,7 @@ setup() {
   READY_TIMEOUT=20
   CLIENT_STATE=""
   wait_for_client_ready
-  [ "$CLIENT_STATE" = "connected" ]
+  [ "$CLIENT_STATE" = "connected" ] || return 1
 }
 
 @test "wait_for_client_ready: a rollout fails -> diagnosed (bad_creds)" {
@@ -53,7 +53,7 @@ setup() {
   READY_TIMEOUT=20
   CLIENT_STATE=""
   wait_for_client_ready
-  [ "$CLIENT_STATE" = "bad_creds" ]
+  [ "$CLIENT_STATE" = "bad_creds" ] || return 1
 }
 
 # ── print_summary: the trust claim must appear ONLY when connected ─────────
@@ -61,60 +61,60 @@ setup() {
   CLIENT_STATE=connected
   TB_CLI_USABLE_NOW=1   # pin CLI-usable so the CTA is the deterministic "Run …" variant (B2)
   run print_summary
-  [[ "$output" == *"Connected to tracebloc"* ]]
-  [[ "$output" == *"never leaves this machine"* ]]   # trust claim (was "data never leaves")
+  [[ "$output" == *"Connected to tracebloc"* ]] || return 1
+  [[ "$output" == *"never leaves this machine"* ]] || return 1   # trust claim (was "data never leaves")
   # rich summary from the run-through
-  [[ "$output" == *"Environment"* ]]
-  [[ "$output" == *"Mode"* ]]
-  [[ "$output" == *"Your secure environment is live"* ]]   # live-status heading (lime ● replaced the 🟢 emoji)
-  [[ "$output" == *"What's next"* ]]
-  [[ "$output" == *"tracebloc data ingest"* ]]
-  [[ "$output" == *"my-use-cases"* ]]
-  [[ "$output" == *"Run"* && "$output" == *"to get started"* ]]
+  [[ "$output" == *"Environment"* ]] || return 1
+  [[ "$output" == *"Mode"* ]] || return 1
+  [[ "$output" == *"Your secure environment is live"* ]] || return 1   # live-status heading (lime ● replaced the 🟢 emoji)
+  [[ "$output" == *"What's next"* ]] || return 1
+  [[ "$output" == *"tracebloc data ingest"* ]] || return 1
+  [[ "$output" == *"my-use-cases"* ]] || return 1
+  [[ "$output" == *"Run"* && "$output" == *"to get started"* ]] || return 1
 }
 
 @test "print_summary connected: shows the client version" {
   CLIENT_STATE=connected
   helm() { echo "tracebloc tracebloc 1 now deployed client-1.4.4 1.4.4"; }
   run print_summary
-  [[ "$output" == *"Version"* ]]
-  [[ "$output" == *"1.4.4"* ]]
+  [[ "$output" == *"Version"* ]] || return 1
+  [[ "$output" == *"1.4.4"* ]] || return 1
 }
 
 @test "print_summary starting: 'still starting', no trust claim" {
   CLIENT_STATE=starting
   run print_summary
-  [[ "$output" == *"still starting"* ]]
-  [[ "$output" != *"never leaves this machine"* ]]
+  [[ "$output" == *"still starting"* ]] || return 1
+  [[ "$output" != *"never leaves this machine"* ]] || return 1
 }
 
 @test "print_summary bad_creds: 'rejected', no trust claim" {
   CLIENT_STATE=bad_creds
   run print_summary
-  [[ "$output" == *"rejected"* ]]
-  [[ "$output" != *"never leaves this machine"* ]]
+  [[ "$output" == *"rejected"* ]] || return 1
+  [[ "$output" != *"never leaves this machine"* ]] || return 1
 }
 
 @test "print_summary image_pull: image message, no trust claim" {
   CLIENT_STATE=image_pull
   run print_summary
-  [[ "$output" == *"image couldn't be pulled"* ]]
-  [[ "$output" != *"never leaves this machine"* ]]
+  [[ "$output" == *"image couldn't be pulled"* ]] || return 1
+  [[ "$output" != *"never leaves this machine"* ]] || return 1
 }
 
 @test "print_summary crash: crash-loop message" {
   CLIENT_STATE=crash
   run print_summary
-  [[ "$output" == *"crash loop"* ]]
-  [[ "$output" != *"never leaves this machine"* ]]
+  [[ "$output" == *"crash loop"* ]] || return 1
+  [[ "$output" != *"never leaves this machine"* ]] || return 1
 }
 
 # ── _reboot_note (reboot persistence) ───────────────────────────────────────
 @test "_reboot_note: Linux with docker autostart -> survives-reboot line" {
   OS=Linux; TB_DOCKER_AUTOSTART=1
   run _reboot_note
-  [[ "$output" == *"restarts automatically"* ]]
-  [[ "$output" != *"Docker Desktop"* ]]
+  [[ "$output" == *"restarts automatically"* ]] || return 1
+  [[ "$output" != *"Docker Desktop"* ]] || return 1
 }
 
 @test "_reboot_note: Linux without docker autostart -> honest 'start Docker' line" {
@@ -122,21 +122,21 @@ setup() {
   # promise an automatic restart (Bugbot r3645585369).
   OS=Linux; TB_DOCKER_AUTOSTART=0
   run _reboot_note
-  [[ "$output" == *"start Docker"* ]]
-  [[ "$output" != *"restarts automatically"* ]]
+  [[ "$output" == *"start Docker"* ]] || return 1
+  [[ "$output" != *"restarts automatically"* ]] || return 1
 }
 
 @test "_reboot_note: macOS -> Docker Desktop start-on-login instruction" {
   OS=Darwin
   run _reboot_note
-  [[ "$output" == *"Docker Desktop"* ]]
-  [[ "$output" == *"open Docker Desktop"* ]]
+  [[ "$output" == *"Docker Desktop"* ]] || return 1
+  [[ "$output" == *"open Docker Desktop"* ]] || return 1
 }
 
 @test "print_summary connected: includes the reboot note" {
   CLIENT_STATE=connected; OS=Linux; TB_DOCKER_AUTOSTART=1
   run print_summary
-  [[ "$output" == *"restarts automatically"* ]]
+  [[ "$output" == *"restarts automatically"* ]] || return 1
 }
 
 @test "print_summary connected: node-local storage -> in-node data path, no host /tracebloc" {
@@ -144,14 +144,14 @@ setup() {
   # (RFC-0003 Option C) — the summary must not point at one (Bugbot r3645585376).
   CLIENT_STATE=connected; OS=Linux; TB_DOCKER_AUTOSTART=1; TB_STORAGE_MODE=node-local
   run print_summary
-  [[ "$output" == *"in-node (k3s local-path)"* ]]
-  [[ "$output" != *"Data /tracebloc/"* ]]
+  [[ "$output" == *"in-node (k3s local-path)"* ]] || return 1
+  [[ "$output" != *"Data /tracebloc/"* ]] || return 1
 }
 
 @test "print_summary connected: hostpath storage -> host /tracebloc data path" {
   CLIENT_STATE=connected; OS=Linux; TB_DOCKER_AUTOSTART=1; TB_STORAGE_MODE=hostpath
   run print_summary
-  [[ "$output" == *"Data /tracebloc/testns"* ]]
+  [[ "$output" == *"Data /tracebloc/testns"* ]] || return 1
 }
 
 # ── B2: PATH-aware CTA (grep-based so a false check fails loudly on bash 3.2) ──
@@ -161,7 +161,7 @@ setup() {
   TB_CLI_USABLE_NOW=1
   run print_summary
   printf '%s\n' "$output" | grep -qE "Run[[:space:]]+tracebloc"   # the "Run …" branch specifically
-  ! printf '%s\n' "$output" | grep -qF "Open a new terminal"
+  ! printf '%s\n' "$output" | grep -qF "Open a new terminal" || return 1
 }
 
 @test "print_summary connected: CTA says 'open a new terminal' when persisted but this shell can't see it yet (case A, B2)" {
@@ -180,7 +180,7 @@ setup() {
   has() { [ "$1" = tracebloc ] && return 1; command -v "$1" >/dev/null 2>&1; }
   run print_summary
   printf '%s\n' "$output" | grep -qF "Add tracebloc to your PATH"   # matches install-cli.sh's PATH-fix step
-  ! printf '%s\n' "$output" | grep -qF "Open a new terminal"        # never the useless new-terminal advice
+  ! printf '%s\n' "$output" | grep -qF "Open a new terminal" || return 1        # never the useless new-terminal advice
 }
 
 @test "print_summary connected: UNSET fresh-path flag falls back to 'open a new terminal', not the 'see above' PATH fix (#371)" {
@@ -193,7 +193,7 @@ setup() {
   has() { [ "$1" = tracebloc ] && return 1; command -v "$1" >/dev/null 2>&1; }
   run print_summary
   printf '%s\n' "$output" | grep -qF "Open a new terminal"
-  ! printf '%s\n' "$output" | grep -qF "Add tracebloc to your PATH"
+  ! printf '%s\n' "$output" | grep -qF "Add tracebloc to your PATH" || return 1
 }
 
 # ── CA-trust diagnosis (#424) ────────────────────────────────────────────────
@@ -206,7 +206,7 @@ setup() {
     esac
   }
   run _diagnose_not_ready testns
-  [ "$output" = "image_pull_ca" ]
+  [ "$output" = "image_pull_ca" ] || return 1
 }
 
 @test "_diagnose_not_ready: ImagePullBackOff without x509 stays image_pull (#424)" {
@@ -218,7 +218,7 @@ setup() {
     esac
   }
   run _diagnose_not_ready testns
-  [ "$output" = "image_pull" ]
+  [ "$output" = "image_pull" ] || return 1
 }
 
 @test "_diagnose_not_ready: x509 on an unrelated event (not the pull) stays image_pull (Bugbot #424)" {
@@ -235,15 +235,15 @@ setup() {
     esac
   }
   run _diagnose_not_ready testns
-  [ "$output" = "image_pull" ]
+  [ "$output" = "image_pull" ] || return 1
 }
 
 @test "print_summary image_pull_ca: names the CA problem + env var, not a generic pull error (#424)" {
   CLIENT_STATE=image_pull_ca
   TB_NAMESPACE=testns
   run print_summary
-  [[ "$output" == *"TLS-inspection CA"* ]]
-  [[ "$output" == *"TRACEBLOC_CA_BUNDLE"* ]]
-  [[ "$output" == *"x509"* ]]
-  [[ "$output" != *"an image couldn't be pulled"* ]]   # not the generic message
+  [[ "$output" == *"TLS-inspection CA"* ]] || return 1
+  [[ "$output" == *"TRACEBLOC_CA_BUNDLE"* ]] || return 1
+  [[ "$output" == *"x509"* ]] || return 1
+  [[ "$output" != *"an image couldn't be pulled"* ]] || return 1   # not the generic message
 }

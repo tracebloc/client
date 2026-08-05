@@ -2992,3 +2992,285 @@ Describe "k3s version pin: create + reuse drift (#547 source guards)" {
     $script:PSRC | Should -Match 'pinned \+ validated'
   }
 }
+
+Describe "Log hygiene: no Start-Transcript, helpers feed the curated log (#576)" {
+  BeforeAll { $script:PSRC576 = Get-Content "$PSScriptRoot/../install-k8s.ps1" -Raw }
+
+  It "does not use Start-Transcript / Stop-Transcript (the transcript header is the PII leak)" {
+    $script:PSRC576 | Should -Not -Match 'Start-Transcript -Path'
+    $script:PSRC576 | Should -Not -Match 'Stop-Transcript'
+  }
+
+  It "routes the message helpers through Log() so the log stays useful without a transcript" {
+    $log = Join-Path $TestDrive "install-576.log"
+    $script:LOG_FILE = $log
+    try {
+      Ok   "route-check-ok"
+      Warn "route-check-warn"
+      Info "route-check-info"
+      Step 1 6 "route-check-step"
+      Hint "route-check-hint"
+      $content = Get-Content $log -Raw
+      $content | Should -Match 'route-check-ok'
+      $content | Should -Match 'route-check-warn'
+      $content | Should -Match 'route-check-info'
+      $content | Should -Match 'route-check-step'
+      $content | Should -Match 'route-check-hint'
+      # curated by construction: the PowerShell transcript identity header (the PII)
+      # can never appear, because Log() only ever writes what we pass it.
+      $content | Should -Not -Match 'Username:'
+      $content | Should -Not -Match 'Machine:'
+      $content | Should -Not -Match 'PowerShell transcript'
+    } finally { $script:LOG_FILE = $null }
+  }
+}
+
+Describe "Preflight + summary failures reach the curated log (#576 Bugbot)" {
+  It "Write-PfFail routes preflight hard-fail lines to the log (not screen-only)" {
+    $log = Join-Path $TestDrive "install-pf.log"
+    $script:LOG_FILE = $log
+    try {
+      Write-PfFail "Disk: only 5 GB free (need 40)"
+      (Get-Content $log -Raw) | Should -Match 'PREFLIGHT FAIL: Disk: only 5 GB free'
+    } finally { $script:LOG_FILE = $null }
+  }
+}
+
+Describe "Print-Summary logs the classified outcome for every state (#576 Bugbot)" {
+  BeforeEach { $script:TB_NAMESPACE = "ns"; $GPU_VENDOR = "none"; $NVIDIA_DRIVER_OK = $false }
+  It "records the final client state in the log (covers the default/image_pull/crash branch)" {
+    $log = Join-Path $TestDrive "install-sum.log"
+    $script:LOG_FILE = $log
+    $script:ClientState = "image_pull"
+    try {
+      Print-Summary 6>&1 | Out-Null
+      (Get-Content $log -Raw) | Should -Match 'Final client state: image_pull'
+    } finally { $script:LOG_FILE = $null }
+  }
+}
+
+Describe "Network profile: plain-language proxy / TLS-inspection read (#582)" {
+  BeforeEach {
+    $env:HTTP_PROXY = $null; $env:HTTPS_PROXY = $null
+    $env:http_proxy = $null; $env:https_proxy = $null
+    $env:TRACEBLOC_CA_BUNDLE = $null; $env:CURL_CA_BUNDLE = $null
+  }
+  AfterAll {
+    $env:HTTP_PROXY = $null; $env:HTTPS_PROXY = $null
+    $env:http_proxy = $null; $env:https_proxy = $null
+    $env:TRACEBLOC_CA_BUNDLE = $null; $env:CURL_CA_BUNDLE = $null
+  }
+
+  It "Get-EnvProxyHostPort strips scheme + user:pass credentials (PII)" {
+    Get-EnvProxyHostPort "http://user:pass@proxy.corp:8080/x" | Should -Be "proxy.corp:8080"
+  }
+
+  It "Get-EnvProxy: HTTPS wins and credentials are stripped" {
+    $env:HTTP_PROXY = "http://h:1"; $env:HTTPS_PROXY = "http://user:secret@sproxy.corp:3128"
+    $p = Get-EnvProxy
+    $p | Should -Be "sproxy.corp:3128"
+    $p | Should -Not -Match "secret"
+  }
+
+  It "Test-IssuerIsPublic: public CA true, corporate re-signer false" {
+    Test-IssuerIsPublic "CN=DigiCert Global G2, O=DigiCert Inc" | Should -BeTrue
+    Test-IssuerIsPublic "CN=Acme Corp Proxy CA, O=Acme Corp"    | Should -BeFalse
+  }
+
+  It "Get-EnvCaBundle: readable CA file returned, null when unset" {
+    $ca = Join-Path $TestDrive "ca.pem"; "x" | Set-Content -LiteralPath $ca
+    $env:TRACEBLOC_CA_BUNDLE = $ca
+    Get-EnvCaBundle | Should -Be $ca
+    $env:TRACEBLOC_CA_BUNDLE = $null
+    Get-EnvCaBundle | Should -BeNullOrEmpty
+  }
+
+  It "Show-NetworkProfile: direct connection is silent" {
+    Mock Get-TlsInspectionState { "no" }
+    $out = Show-NetworkProfile 6>&1 | Out-String
+    $out.Trim() | Should -BeNullOrEmpty
+  }
+
+  It "Show-NetworkProfile: proxy + inspection -> one PII-free line" {
+    $env:HTTPS_PROXY = "http://u:p@proxy.corp:8080"
+    Mock Get-TlsInspectionState { "yes" }
+    $out = Show-NetworkProfile 6>&1 | Out-String
+    $out | Should -Match "corporate proxy detected \(proxy\.corp:8080\)"
+    $out | Should -Match "TLS inspection detected"
+    $out | Should -Not -Match "u:p"
+  }
+
+  It "Show-NetworkProfile: a configured CA bundle is announced" {
+    $ca = Join-Path $TestDrive "ca2.pem"; "x" | Set-Content -LiteralPath $ca
+    $env:HTTPS_PROXY = "http://proxy.corp:8080"; $env:TRACEBLOC_CA_BUNDLE = $ca
+    Mock Get-TlsInspectionState { "yes" }
+    $out = Show-NetworkProfile 6>&1 | Out-String
+    $out | Should -Match "your company's certificate is configured"
+  }
+
+  It "Get-EnvProxyRaw: preserves credentials (probe connection only, never displayed)" {
+    $env:HTTPS_PROXY = "http://user:secret@px.corp:3128"
+    Get-EnvProxyRaw | Should -Be "http://user:secret@px.corp:3128"
+    Get-EnvProxy    | Should -Be "px.corp:3128"   # display path still strips
+  }
+
+  It "the TLS probe connects with proxy credentials, but display strips them (Bugbot)" {
+    $src = Get-Content "$PSScriptRoot/../install-k8s.ps1" -Raw
+    $probeFn = (($src -split "function Get-TlsInspectionState")[1] -split "`nfunction ")[0]
+    $probeFn | Should -Match 'Get-EnvProxyRaw'      # connect uses the raw (credentialed) proxy
+    $probeFn | Should -Match 'NetworkCredential'
+    $showFn = (($src -split "function Show-NetworkProfile")[1] -split "`nfunction ")[0]
+    $showFn | Should -Match 'Get-EnvProxy\b'        # display uses the stripped proxy
+    $showFn | Should -Not -Match 'Get-EnvProxyRaw'
+  }
+}
+
+Describe "Top-level error boundary: crashes become a clean message, never a stack (#577)" {
+  BeforeAll { $script:PSRC577 = Get-Content "$PSScriptRoot/../install-k8s.ps1" -Raw }
+
+  It "the main run is wrapped in a top-level try/catch that calls Show-FatalError" {
+    $script:PSRC577 | Should -Match 'Show-FatalError \$_'
+    $script:PSRC577 | Should -Match 'if \(-not \$env:TB_PESTER\)[\s\S]{0,600}?try \{'
+  }
+
+  It "Show-FatalError renders a clean 'stopped' message with reason + re-run hint, no stack" {
+    $er = $null; try { throw "widget exploded" } catch { $er = $_ }
+    $out = Show-FatalError $er 6>&1 | Out-String
+    $out | Should -Match 'Installation stopped'
+    $out | Should -Match 'widget exploded'
+    $out | Should -Match 're-run'
+    $out | Should -Not -Match 'char:\d'
+    $out | Should -Not -Match 'ScriptStackTrace'
+  }
+
+  It "Show-FatalError logs the reason but never the stack" {
+    $log = Join-Path $TestDrive "fatal-577.log"; $script:LOG_FILE = $log
+    try {
+      $er = $null; try { throw "disk on fire" } catch { $er = $_ }
+      Show-FatalError $er 6>&1 | Out-Null
+      $c = Get-Content $log -Raw
+      $c | Should -Match 'FATAL: disk on fire'
+      $c | Should -Not -Match 'ScriptStackTrace'
+    } finally { $script:LOG_FILE = $null }
+  }
+}
+
+Describe "Graceful failure: guaranteed finally + trap, guarded closer (#577)" {
+  BeforeAll { $script:PSRC577b = Get-Content "$PSScriptRoot/../install-k8s.ps1" -Raw }
+
+  It "wraps the main run in try/catch/finally with a last-resort trap" {
+    $script:PSRC577b | Should -Match 'trap \{ Show-FatalError \$_; exit 1 \}'
+    $script:PSRC577b | Should -Match '\} finally \{'
+    $script:PSRC577b | Should -Match 'if \(-not \$script:OutcomeReported\) \{ Show-Interrupted \}'
+  }
+
+  It "marks the outcome reported on every terminal path (guards against a spurious interrupted line)" {
+    ([regex]::Matches($script:PSRC577b, '\$script:OutcomeReported = \$true')).Count | Should -BeGreaterOrEqual 5
+  }
+
+  It "the -Diagnose path marks the outcome reported only after the bundle completes (Bugbot)" {
+    # Setting the flag before the long collection would skip Show-Interrupted on an
+    # interrupt mid-diagnose - the silent death this boundary exists to prevent.
+    $script:PSRC577b | Should -Match 'Invoke-DiagnoseBundle; \$script:OutcomeReported = \$true'
+  }
+
+  It "the reboot-pending stop marks the outcome reported before exiting (Bugbot)" {
+    # A reboot-pending exit is an intentional, reported stop (guidance is printed),
+    # not an interruption; without the flag the finally appends a contradictory
+    # Show-Interrupted line. The flag must be set before the block's exit 2.
+    $script:PSRC577b | Should -Match '(?s)if \(\$rebootNeeded\) \{.*?\$script:OutcomeReported = \$true.*?exit 2'
+  }
+
+  It "Show-Interrupted renders a clean interrupted line (log + re-run, no stack)" {
+    $log = Join-Path $TestDrive "int-577.log"; $script:LOG_FILE = $log
+    try {
+      $out = Show-Interrupted 6>&1 | Out-String
+      $out | Should -Match 'interrupted'
+      $out | Should -Match 're-run'
+      $out | Should -Not -Match 'ScriptStackTrace'
+      (Get-Content $log -Raw) | Should -Match 'interrupted'
+    } finally { $script:LOG_FILE = $null }
+  }
+}
+
+Describe "GPU device-plugin failure is recoverable, not fatal (#577)" {
+  BeforeAll { $script:PSRCGPU = Get-Content "$PSScriptRoot/../install-k8s.ps1" -Raw }
+  It "warns + continues in CPU mode instead of a fatal Err on a plugin failure" {
+    $script:PSRCGPU | Should -Not -Match 'Err "Failed to enable GPU acceleration'
+    $script:PSRCGPU | Should -Match 'continuing in CPU mode'
+    $script:PSRCGPU | Should -Match 'GPU device-plugin setup error'
+  }
+  It "gates the success message on the kubectl exit code — never a false 'enabled' (Bugbot)" {
+    # Native kubectl doesn't throw on a non-zero exit, so the GPU apply/rollout must be
+    # $LASTEXITCODE-checked; otherwise a failed apply prints "GPU acceleration enabled."
+    $gpuFn = ($script:PSRCGPU -split "function Install-GpuDevicePlugin")[1]
+    # No fire-and-forget discard of the apply into $null (the false-success pattern).
+    $gpuFn | Should -Not -Match '\$null = \(kubectl apply'
+    # The success message is guarded, and the apply output is written to the log.
+    $gpuFn | Should -Match '\$LASTEXITCODE'
+    $gpuFn | Should -Match 'Log "GPU plugin apply'
+  }
+  It "bounds the GPU apply with --request-timeout so a wedged API can't hang it (Bugbot)" {
+    # Parity with bash gpu-plugins.sh: the apply output is captured to the log, so
+    # without a request timeout a wedged API server would hang instead of falling
+    # through to the CPU-mode warn.
+    $gpuFn = ($script:PSRCGPU -split "function Install-GpuDevicePlugin")[1]
+    $gpuFn | Should -Match 'kubectl apply -f \$dpTmp --request-timeout='
+  }
+  It "verify runs only when the plugin deployed - CPU-mode skips Confirm-GpuNode (Bugbot)" {
+    # A failed/CPU-mode deploy returns $false; the caller must gate Confirm-GpuNode
+    # on it so the user doesn't wait ~90s for a plugin that was never applied.
+    $script:PSRCGPU | Should -Match 'if \(Install-GpuDevicePlugin\) \{ Confirm-GpuNode \}'
+    $gpuFn = ($script:PSRCGPU -split "function Install-GpuDevicePlugin")[1]
+    $gpuFn | Should -Match 'return \$true'
+    $gpuFn | Should -Match 'return \$false'
+  }
+  It "the PS GPU kubectl probes are bounded with --request-timeout (reviewer parity)" {
+    # The existence check and Confirm-GpuNode's node probe must carry a request
+    # timeout so a wedged API can't hang before/around the bounded apply (bash parity).
+    $script:PSRCGPU | Should -Match 'kubectl get daemonset -n kube-system nvidia-device-plugin-daemonset --request-timeout='
+    $script:PSRCGPU | Should -Match 'kubectl get node -o jsonpath.*--request-timeout='
+  }
+}
+
+Describe "Set-ToolTrust: wire the corporate CA into cosign/helm/git (#583)" {
+  BeforeEach { $env:TRACEBLOC_CA_BUNDLE=$null; $env:CURL_CA_BUNDLE=$null; $env:SSL_CERT_FILE=$null; $env:GIT_SSL_CAINFO=$null }
+  AfterAll  { $env:TRACEBLOC_CA_BUNDLE=$null; $env:CURL_CA_BUNDLE=$null; $env:SSL_CERT_FILE=$null; $env:GIT_SSL_CAINFO=$null }
+
+  It "exports GIT_SSL_CAINFO but NOT SSL_CERT_FILE (Go ignores it on Windows), points cosign/helm at the store (Bugbot)" {
+    $ca = Join-Path $TestDrive "ca.pem"; "pem" | Set-Content -LiteralPath $ca
+    $env:TRACEBLOC_CA_BUNDLE = $ca
+    $out = Set-ToolTrust 6>&1 | Out-String
+    $env:GIT_SSL_CAINFO | Should -Be (Resolve-Path -LiteralPath $ca).Path
+    $env:SSL_CERT_FILE  | Should -BeNullOrEmpty      # inert on Windows; deliberately not set
+    $out | Should -Match 'certificate for git'       # success names only what's wired
+    $out | Should -Match 'downloads read the certificate store'  # downloads/cosign/helm -> store
+  }
+
+  It "no-op when no CA is configured" {
+    Set-ToolTrust *> $null
+    $env:GIT_SSL_CAINFO | Should -BeNullOrEmpty
+  }
+
+  It "does NOT clobber a user's pre-set GIT_SSL_CAINFO (replace-not-augment, Bugbot)" {
+    $ca = Join-Path $TestDrive "corp.pem"; "pem" | Set-Content -LiteralPath $ca
+    $uf = Join-Path $TestDrive "user-full.pem"; "pem" | Set-Content -LiteralPath $uf
+    $env:TRACEBLOC_CA_BUNDLE = $ca
+    $env:GIT_SSL_CAINFO = $uf
+    Set-ToolTrust *> $null
+    $env:GIT_SSL_CAINFO | Should -Be $uf     # user's fuller bundle left intact
+  }
+
+  It "a skipped export is not claimed as success (Bugbot)" {
+    # With GIT_SSL_CAINFO pre-set the export is skipped — a green "Trusting..."
+    # would report wiring that did not happen and mask a pre-set bundle that
+    # still lacks the corporate CA. Say what was kept, claim nothing.
+    $ca = Join-Path $TestDrive "corp.pem"; "pem" | Set-Content -LiteralPath $ca
+    $uf = Join-Path $TestDrive "user-full.pem"; "pem" | Set-Content -LiteralPath $uf
+    $env:TRACEBLOC_CA_BUNDLE = $ca
+    $env:GIT_SSL_CAINFO = $uf
+    $out = Set-ToolTrust 6>&1 | Out-String
+    $out | Should -Not -Match 'Trusting'
+    $out | Should -Match 'Keeping your pre-set GIT_SSL_CAINFO'
+  }
+}

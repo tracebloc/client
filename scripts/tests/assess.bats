@@ -62,20 +62,20 @@ _depname() {
 @test "_assess_cluster_servers_running: running cluster -> >=1" {
   k3d() { printf 'tracebloc 1/1 0/0\n'; }
   run _assess_cluster_servers_running
-  [ "$status" -eq 0 ]
-  [ "$output" = "1" ]
+  [ "$status" -eq 0 ] || return 1
+  [ "$output" = "1" ] || return 1
 }
 
 @test "_assess_cluster_servers_running: stopped cluster -> 0" {
   k3d() { printf 'tracebloc 0/1 0/0\n'; }
   run _assess_cluster_servers_running
-  [ "$output" = "0" ]
+  [ "$output" = "0" ] || return 1
 }
 
 @test "_assess_cluster_servers_running: k3d error -> 0 (never non-numeric)" {
   k3d() { return 1; }
   run _assess_cluster_servers_running
-  [ "$output" = "0" ]
+  [ "$output" = "0" ] || return 1
 }
 
 # ── _assess_workload_ready (ALL shared workloads; bounded, read-only) ───────
@@ -88,54 +88,54 @@ _depname() {
   has() { [ "$1" = kubectl ]; }
   kubectl() { echo 1; }                          # every workload reports 1 ready
   run _assess_workload_ready tracebloc
-  [ "$status" -eq 0 ]
+  [ "$status" -eq 0 ] || return 1
 }
 
 @test "_assess_workload_ready: mysql-client down -> not ready (1)" {
   has() { [ "$1" = kubectl ]; }
   kubectl() { case "$(_depname "$@")" in mysql-client) echo "";; *) echo 1;; esac; }
   run _assess_workload_ready tracebloc
-  [ "$status" -ne 0 ]
+  [ "$status" -ne 0 ] || return 1
 }
 
 @test "_assess_workload_ready: jobs-manager has 0 ready -> not ready (1)" {
   has() { [ "$1" = kubectl ]; }
   kubectl() { case "$(_depname "$@")" in *-jobs-manager) echo 0;; *) echo 1;; esac; }
   run _assess_workload_ready tracebloc
-  [ "$status" -ne 0 ]
+  [ "$status" -ne 0 ] || return 1
 }
 
 @test "_assess_workload_ready: requests-proxy down (training egress) -> not ready (1)" {
   has() { [ "$1" = kubectl ]; }
   kubectl() { case "$(_depname "$@")" in *-requests-proxy) echo "";; *) echo 1;; esac; }
   run _assess_workload_ready tracebloc
-  [ "$status" -ne 0 ]
+  [ "$status" -ne 0 ] || return 1
 }
 
 @test "_assess_workload_ready: a deployment absent (kubectl errors) -> not ready (1)" {
   has() { [ "$1" = kubectl ]; }
   kubectl() { case "$(_depname "$@")" in *-requests-proxy) return 1;; *) echo 1;; esac; }
   run _assess_workload_ready tracebloc
-  [ "$status" -ne 0 ]
+  [ "$status" -ne 0 ] || return 1
 }
 
 @test "_assess_workload_ready: kubectl absent -> not ready (1)" {
   has() { return 1; }
   run _assess_workload_ready tracebloc
-  [ "$status" -ne 0 ]
+  [ "$status" -ne 0 ] || return 1
 }
 
 @test "_assess_workload_ready: empty namespace -> not ready (1)" {
   has() { return 0; }
   run _assess_workload_ready ""
-  [ "$status" -ne 0 ]
+  [ "$status" -ne 0 ] || return 1
 }
 
 @test "_assess_workload_ready: probes ALL three, each with a bounded --request-timeout" {
   has() { [ "$1" = kubectl ]; }
   kubectl() { printf '%s | %s\n' "$(_depname "$@")" "$*" >>"$MOCK_CALLS"; echo 1; }
   run _assess_workload_ready tracebloc
-  [ "$status" -eq 0 ]
+  [ "$status" -eq 0 ] || return 1
   run mock_calls
   assert_has "mysql-client" "$output"
   assert_has "tracebloc-jobs-manager" "$output"
@@ -147,7 +147,7 @@ _depname() {
 @test "_assess_cli_present: on PATH -> present (0)" {
   has() { [ "$1" = tracebloc ]; }
   run _assess_cli_present
-  [ "$status" -eq 0 ]
+  [ "$status" -eq 0 ] || return 1
 }
 
 @test "_assess_cli_present: only in ~/.local/bin -> present (0)" {
@@ -155,14 +155,14 @@ _depname() {
   HOME="$BATS_TEST_TMPDIR/h"; mkdir -p "$HOME/.local/bin"
   printf '#!/bin/sh\n' > "$HOME/.local/bin/tracebloc"; chmod +x "$HOME/.local/bin/tracebloc"
   run _assess_cli_present
-  [ "$status" -eq 0 ]
+  [ "$status" -eq 0 ] || return 1
 }
 
 @test "_assess_cli_present: absent everywhere -> not present (1)" {
   has() { return 1; }
   HOME="$BATS_TEST_TMPDIR/empty"; mkdir -p "$HOME"
   run _assess_cli_present
-  [ "$status" -ne 0 ]
+  [ "$status" -ne 0 ] || return 1
 }
 
 # ── _assess_classify (decision logic; leaf probes forced) ───────────────────
@@ -170,8 +170,8 @@ _depname() {
   has() { return 1; }                          # no k3d
   _cluster_exists() { return 1; }
   _assess_classify
-  [ "$INSTALL_STATE" = fresh ]
-  [ "$INSTALL_STATE_REASON" = no-cluster ]
+  [ "$INSTALL_STATE" = fresh ] || return 1
+  [ "$INSTALL_STATE_REASON" = no-cluster ] || return 1
 }
 
 @test "_assess_classify: running cluster but no tracebloc release -> fresh (cluster-no-release)" {
@@ -180,8 +180,8 @@ _depname() {
   _assess_cluster_servers_running() { echo 1; }  # running: reached only after the servers check
   detect_installed_client() { INSTALLED_CLIENT_ID=""; INSTALLED_CLIENT_NS=""; }
   _assess_classify
-  [ "$INSTALL_STATE" = fresh ]
-  [ "$INSTALL_STATE_REASON" = cluster-no-release ]
+  [ "$INSTALL_STATE" = fresh ] || return 1
+  [ "$INSTALL_STATE_REASON" = cluster-no-release ] || return 1
 }
 
 @test "_assess_classify: release present but cluster stopped -> degraded (cluster-stopped)" {
@@ -190,8 +190,8 @@ _depname() {
   detect_installed_client() { INSTALLED_CLIENT_ID=uuid; INSTALLED_CLIENT_NS=tracebloc; }
   _assess_cluster_servers_running() { echo 0; }
   _assess_classify
-  [ "$INSTALL_STATE" = degraded ]
-  [ "$INSTALL_STATE_REASON" = cluster-stopped ]
+  [ "$INSTALL_STATE" = degraded ] || return 1
+  [ "$INSTALL_STATE_REASON" = cluster-stopped ] || return 1
 }
 
 # Ordering guard (Bugbot: "Assess probes Helm before cluster runs"): a stopped
@@ -203,8 +203,8 @@ _depname() {
   _assess_cluster_servers_running() { echo 0; }               # stopped
   detect_installed_client() { touch "$BATS_TEST_TMPDIR/helm-probed"; }  # must NOT run
   _assess_classify
-  [ "$INSTALL_STATE_REASON" = cluster-stopped ]
-  [ ! -f "$BATS_TEST_TMPDIR/helm-probed" ]                    # Helm was never touched
+  [ "$INSTALL_STATE_REASON" = cluster-stopped ] || return 1
+  [ ! -f "$BATS_TEST_TMPDIR/helm-probed" ] || return 1                    # Helm was never touched
 }
 
 # healthy requires ALL three workloads: with the REAL _assess_workload_ready
@@ -217,8 +217,8 @@ _depname() {
   _assess_cli_present() { return 0; }
   kubectl() { case "$(_depname "$@")" in *-requests-proxy) echo "";; *) echo 1;; esac; }
   _assess_classify
-  [ "$INSTALL_STATE" = degraded ]
-  [ "$INSTALL_STATE_REASON" = workload-not-ready ]
+  [ "$INSTALL_STATE" = degraded ] || return 1
+  [ "$INSTALL_STATE_REASON" = workload-not-ready ] || return 1
 }
 
 @test "_assess_classify: up + all workloads Ready but CLI missing -> degraded (cli-missing)" {
@@ -229,8 +229,8 @@ _depname() {
   kubectl() { echo 1; }                          # all workloads Ready
   HOME="$BATS_TEST_TMPDIR/nocli"; mkdir -p "$HOME"   # and no ~/.local/bin/tracebloc
   _assess_classify
-  [ "$INSTALL_STATE" = degraded ]
-  [ "$INSTALL_STATE_REASON" = cli-missing ]
+  [ "$INSTALL_STATE" = degraded ] || return 1
+  [ "$INSTALL_STATE_REASON" = cli-missing ] || return 1
 }
 
 @test "_assess_classify: all signals true (all three workloads Ready + CLI) -> healthy" {
@@ -240,7 +240,7 @@ _depname() {
   _assess_cluster_servers_running() { echo 1; }
   kubectl() { echo 1; }                          # every workload Ready
   _assess_classify
-  [ "$INSTALL_STATE" = healthy ]
+  [ "$INSTALL_STATE" = healthy ] || return 1
   assert_has "munich" "$INSTALL_STATE_REASON"
 }
 
@@ -255,7 +255,7 @@ _depname() {
   tracebloc() { echo "HOME_SCREEN"; }        # writes to whatever stdout it's given
   TB_TTY="$BATS_TEST_TMPDIR/tty"; : > "$TB_TTY"
   run _assess_handoff
-  [ "$status" -eq 0 ]
+  [ "$status" -eq 0 ] || return 1
   assert_has "Already set up on this machine" "$output"   # the success line: script stdout
   assert_has "HOME_SCREEN" "$(cat "$TB_TTY")"             # home screen: the terminal, not the pipe
   refute_has "HOME_SCREEN" "$output"                      # proves stdout was redirected off the pipe
@@ -266,7 +266,7 @@ _depname() {
   tracebloc() { echo "ARGS=[$*]"; }
   TB_TTY="$BATS_TEST_TMPDIR/tty"; : > "$TB_TTY"
   run _assess_handoff
-  [ "$status" -eq 0 ]
+  [ "$status" -eq 0 ] || return 1
   assert_has "ARGS=[]" "$(cat "$TB_TTY")"      # invoked bare, not a subcommand
 }
 
@@ -275,7 +275,7 @@ _depname() {
   tracebloc() { echo "HOME_SCREEN"; }
   TB_TTY="$BATS_TEST_TMPDIR/nope/tty"          # parent dir absent -> not openable
   run _assess_handoff
-  [ "$status" -eq 0 ]
+  [ "$status" -eq 0 ] || return 1
   assert_has "Already set up on this machine" "$output"
   assert_has "HOME_SCREEN" "$output"           # fallback leaves stdout on the (captured) pipe
 }
@@ -284,7 +284,7 @@ _depname() {
   has() { return 1; }
   HOME="$BATS_TEST_TMPDIR/emptyhome"; mkdir -p "$HOME"
   run _assess_handoff
-  [ "$status" -eq 0 ]
+  [ "$status" -eq 0 ] || return 1
   assert_has "Already set up on this machine" "$output"
   assert_has "tracebloc" "$output"             # tells the user the command to run
 }
@@ -296,7 +296,7 @@ _depname() {
   tracebloc() { echo "HOME_SCREEN"; }
   TB_TTY="$BATS_TEST_TMPDIR/tty"; : > "$TB_TTY"
   run assess_existing_install
-  [ "$status" -eq 0 ]
+  [ "$status" -eq 0 ] || return 1
   assert_has "Already set up on this machine" "$output"
   assert_has "HOME_SCREEN" "$(cat "$TB_TTY")"
 }
@@ -309,7 +309,7 @@ _depname() {
   tracebloc() { echo "HANDED_OFF"; }
   TB_TTY="$BATS_TEST_TMPDIR/nope/tty"          # unopenable -> fallback keeps stdout captured
   run assess_existing_install
-  [ "$status" -eq 0 ]
+  [ "$status" -eq 0 ] || return 1
   assert_has "HANDED_OFF" "$output"
 }
 
@@ -318,7 +318,7 @@ _depname() {
   _assess_classify() { echo "CLASSIFY_RAN"; INSTALL_STATE=healthy; }   # must NOT run
   tracebloc() { echo "HOME_SCREEN"; }
   run assess_existing_install
-  [ "$status" -eq 0 ]
+  [ "$status" -eq 0 ] || return 1
   refute_has "CLASSIFY_RAN" "$output"
   refute_has "HOME_SCREEN" "$output"
 }
@@ -327,7 +327,7 @@ _depname() {
   _assess_classify() { INSTALL_STATE=degraded; INSTALL_STATE_REASON=cluster-stopped; }
   tracebloc() { echo "HOME_SCREEN"; }          # must NOT be called on a fall-through
   run assess_existing_install
-  [ "$status" -eq 0 ]
+  [ "$status" -eq 0 ] || return 1
   assert_has "secure environment is stopped" "$output"
   refute_has "HOME_SCREEN" "$output"
 }
@@ -335,14 +335,14 @@ _depname() {
 @test "assess_existing_install: degraded (cli-missing) -> names the CLI, returns 0" {
   _assess_classify() { INSTALL_STATE=degraded; INSTALL_STATE_REASON=cli-missing; }
   run assess_existing_install
-  [ "$status" -eq 0 ]
+  [ "$status" -eq 0 ] || return 1
   assert_has "CLI isn't installed" "$output"
 }
 
 @test "assess_existing_install: degraded says 'secure environment', never 'client'" {
   _assess_classify() { INSTALL_STATE=degraded; INSTALL_STATE_REASON=workload-not-ready; }
   run assess_existing_install
-  [ "$status" -eq 0 ]
+  [ "$status" -eq 0 ] || return 1
   assert_has "secure environment" "$output"
   refute_has "client" "$output"
 }
@@ -351,7 +351,7 @@ _depname() {
   _assess_classify() { INSTALL_STATE=fresh; INSTALL_STATE_REASON=no-cluster; }
   tracebloc() { echo "HOME_SCREEN"; }
   run assess_existing_install
-  [ "$status" -eq 0 ]
+  [ "$status" -eq 0 ] || return 1
   assert_has "first time" "$output"
   refute_has "HOME_SCREEN" "$output"
 }
@@ -360,7 +360,7 @@ _depname() {
   _assess_classify() { INSTALL_STATE=fresh; INSTALL_STATE_REASON=cluster-no-release; }
   tracebloc() { echo "HOME_SCREEN"; }
   run assess_existing_install
-  [ "$status" -eq 0 ]
+  [ "$status" -eq 0 ] || return 1
   refute_has "first time" "$output"            # no ceremony when a cluster already exists
   refute_has "HOME_SCREEN" "$output"
 }
@@ -375,7 +375,7 @@ _depname() {
   _check_existing_cluster_k8s_version() { echo "DRIFT_CHECK_RAN"; }
   _assess_handoff() { echo "HANDOFF_RAN"; }        # stub: don't exit under `run`
   run assess_existing_install
-  [ "$status" -eq 0 ]
+  [ "$status" -eq 0 ] || return 1
   assert_has "DRIFT_CHECK_RAN" "$output"
   assert_has "HANDOFF_RAN" "$output"
 }
@@ -384,6 +384,6 @@ _depname() {
   export TB_FORCE_REINSTALL=1
   _check_existing_cluster_k8s_version() { echo "DRIFT_CHECK_RAN"; }
   run assess_existing_install
-  [ "$status" -eq 0 ]
+  [ "$status" -eq 0 ] || return 1
   refute_has "DRIFT_CHECK_RAN" "$output"
 }

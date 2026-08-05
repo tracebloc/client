@@ -149,3 +149,29 @@ Describe "Confirm-ScriptIntegrity — integrity gate before any privileged step"
       Should -Throw -ExpectedMessage "*no entry in manifest*"
   }
 }
+
+Describe "Bootstrap log hygiene: cosign output captured, no internals leaked (#576)" {
+  BeforeAll { $script:BOOTSRC = Get-Content "$PSScriptRoot/../install.ps1" -Raw }
+
+  It "captures cosign output instead of letting PowerShell dump the raw native error + source line" {
+    $script:BOOTSRC | Should -Not -Match '& \$cosign @cosignArgs 2>\$null 1>\$null'
+    $script:BOOTSRC | Should -Match '& \$cosign @cosignArgs 2>&1 \| Out-Null'
+  }
+  It "the verification-failure message carries no internal identifiers (no source, no RFC/manifest codes)" {
+    $script:BOOTSRC | Should -Not -Match 'cosign signature verification FAILED for manifest\.sha256'
+    $script:BOOTSRC | Should -Match "Couldn't confirm the installer download is authentic"
+  }
+  It "still fails closed (throws, stops before changing the machine)" {
+    $script:BOOTSRC | Should -Match 'install stopped before changing anything on your machine'
+  }
+}
+
+Describe "Bootstrap CA handling for cosign on Windows (#583)" {
+  It "validates the CA path (fail fast) but does NOT set SSL_CERT_FILE (Go ignores it on Windows)" {
+    $src = Get-Content "$PSScriptRoot/../install.ps1" -Raw
+    $fn  = (($src -split "function Confirm-ManifestSignature")[1] -split "`nfunction ")[0]
+    $fn | Should -Match 'TRACEBLOC_CA_BUNDLE'
+    $fn | Should -Match "can't be read"                     # fail fast on a bad path
+    $fn | Should -Not -Match '\$env:SSL_CERT_FILE = \$ca'   # inert on Windows; not wired
+  }
+}

@@ -32,9 +32,9 @@ setup() {
 @test "_verify_sha256: correct hash passes, wrong fails, empty expected fails closed (#429)" {
   local f="$BATS_TEST_TMPDIR/empty"; : > "$f"     # 0-byte file → the well-known empty sha256
   local empty_sha=e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
-  run _verify_sha256 "$empty_sha" "$f"; [ "$status" -eq 0 ]        # matches (real sha256sum/shasum)
-  run _verify_sha256 deadbeefdeadbeef "$f"; [ "$status" -ne 0 ]    # mismatch
-  run _verify_sha256 "" "$f"; [ "$status" -ne 0 ]                  # empty expected → fail closed
+  run _verify_sha256 "$empty_sha" "$f"; [ "$status" -eq 0 ] || return 1        # matches (real sha256sum/shasum)
+  run _verify_sha256 deadbeefdeadbeef "$f"; [ "$status" -ne 0 ] || return 1    # mismatch
+  run _verify_sha256 "" "$f"; [ "$status" -ne 0 ] || return 1                  # empty expected → fail closed
 }
 
 @test "_verify_sha256: falls back to shasum when sha256sum is unavailable (macOS ships no sha256sum) (#429)" {
@@ -43,9 +43,9 @@ setup() {
   command() { case "$2" in sha256sum) return 1 ;; *) builtin command "$@" ;; esac; }
   shasum()  { record "shasum $*"; cat >/dev/null; return 0; }
   run _verify_sha256 abc123 "$f"
-  [ "$status" -eq 0 ]
+  [ "$status" -eq 0 ] || return 1
   run mock_calls
-  [[ "$output" == *"shasum -a 256 --check"* ]]     # the macOS fallback tool was used
+  [[ "$output" == *"shasum -a 256 --check"* ]] || return 1     # the macOS fallback tool was used
 }
 
 # ── OS_DL platform selection in the shared fetchers ──────────────────────────
@@ -71,21 +71,21 @@ _k3d_dl_setup_darwin() {
 @test "_fetch_k3d_release: OS_DL=darwin fetches + verifies the darwin asset, never the linux one (#429)" {
   _k3d_dl_setup_darwin
   run _fetch_k3d_release v5.9.0 amd64
-  [ "$status" -eq 0 ]
-  [ -f "$TB_TOOLS_DIR/k3d" ]
+  [ "$status" -eq 0 ] || return 1
+  [ -f "$TB_TOOLS_DIR/k3d" ] || return 1
   run mock_calls
-  [[ "$output" == *"releases/download/v5.9.0/k3d-darwin-amd64"* ]]   # darwin asset
-  [[ "$output" == *"sha256sum --check"* ]]                           # still verified
-  [[ "$output" != *"k3d-linux-"* ]]                                  # not the linux asset
+  [[ "$output" == *"releases/download/v5.9.0/k3d-darwin-amd64"* ]] || return 1   # darwin asset
+  [[ "$output" == *"sha256sum --check"* ]] || return 1                           # still verified
+  [[ "$output" != *"k3d-linux-"* ]] || return 1                                  # not the linux asset
 }
 
 @test "_fetch_k3d_release: OS_DL=darwin + checksum mismatch fails closed, nothing installed (#429)" {
   _k3d_dl_setup_darwin
   SHA_RC=1
   run _fetch_k3d_release v5.9.0 amd64
-  [ "$status" -ne 0 ]
-  [[ "$output" == *"checksum verification failed"* ]]
-  [ ! -f "$TB_TOOLS_DIR/k3d" ]
+  [ "$status" -ne 0 ] || return 1
+  [[ "$output" == *"checksum verification failed"* ]] || return 1
+  [ ! -f "$TB_TOOLS_DIR/k3d" ] || return 1
 }
 
 @test "_fetch_kubectl: OS_DL=darwin uses the darwin download path (#429)" {
@@ -98,10 +98,10 @@ _k3d_dl_setup_darwin() {
     return 0
   }
   run _fetch_kubectl v1.29.4 amd64
-  [ "$status" -eq 0 ]
+  [ "$status" -eq 0 ] || return 1
   run mock_calls
-  [[ "$output" == *"/bin/darwin/amd64/kubectl"* ]]
-  [[ "$output" != *"/bin/linux/"* ]]
+  [[ "$output" == *"/bin/darwin/amd64/kubectl"* ]] || return 1
+  [[ "$output" != *"/bin/linux/"* ]] || return 1
 }
 
 _helm_dl_setup_darwin() {
@@ -132,13 +132,13 @@ _helm_dl_setup_darwin() {
 @test "_fetch_helm_release: OS_DL=darwin fetches + unpacks the darwin tarball (#429)" {
   _helm_dl_setup_darwin
   run _fetch_helm_release v4.2.3 amd64
-  [ "$status" -eq 0 ]
-  [ -f "$TB_TOOLS_DIR/helm" ]
+  [ "$status" -eq 0 ] || return 1
+  [ -f "$TB_TOOLS_DIR/helm" ] || return 1
   run mock_calls
-  [[ "$output" == *"get.helm.sh/helm-v4.2.3-darwin-amd64.tar.gz"* ]]
-  [[ "$output" == *"helm-v4.2.3-darwin-amd64.tar.gz.sha256sum"* ]]
-  [[ "$output" == *"sha256sum --check"* ]]
-  [[ "$output" != *"-linux-"* ]]
+  [[ "$output" == *"get.helm.sh/helm-v4.2.3-darwin-amd64.tar.gz"* ]] || return 1
+  [[ "$output" == *"helm-v4.2.3-darwin-amd64.tar.gz.sha256sum"* ]] || return 1
+  [[ "$output" == *"sha256sum --check"* ]] || return 1
+  [[ "$output" != *"-linux-"* ]] || return 1
 }
 
 # ── install_macos_cli_tools: routes through the shared pinned installers ──────
@@ -149,13 +149,13 @@ _helm_dl_setup_darwin() {
   install_helm()    { record "install_helm OS_DL=$OS_DL"; success "System tools"; }
   brew()            { record "brew $*"; }            # must NOT be used for the CLI tools
   run install_macos_cli_tools
-  [ "$status" -eq 0 ]
+  [ "$status" -eq 0 ] || return 1
   run mock_calls
-  [[ "$output" == *"install_kubectl OS_DL=darwin DIR=/usr/local/bin SUDO=sudo"* ]]
-  [[ "$output" == *"install_k3d OS_DL=darwin"* ]]
-  [[ "$output" == *"install_helm OS_DL=darwin"* ]]
-  [[ "$output" == *"sudo mkdir -p /usr/local/bin"* ]]
-  [[ "$output" != *"brew install kubectl"* ]]        # pins no longer floated by brew
-  [[ "$output" != *"brew install k3d"* ]]
-  [[ "$output" != *"brew install helm"* ]]
+  [[ "$output" == *"install_kubectl OS_DL=darwin DIR=/usr/local/bin SUDO=sudo"* ]] || return 1
+  [[ "$output" == *"install_k3d OS_DL=darwin"* ]] || return 1
+  [[ "$output" == *"install_helm OS_DL=darwin"* ]] || return 1
+  [[ "$output" == *"sudo mkdir -p /usr/local/bin"* ]] || return 1
+  [[ "$output" != *"brew install kubectl"* ]] || return 1        # pins no longer floated by brew
+  [[ "$output" != *"brew install k3d"* ]] || return 1
+  [[ "$output" != *"brew install helm"* ]] || return 1
 }

@@ -330,8 +330,39 @@ _sha256_of() {
 # A missing manifest, a missing line, or a digest mismatch ABORTS — before any
 # privileged sub-script (provision.sh mints+writes the credential; install-
 # client-helm.sh runs Helm) is executed.
+# Wire an explicitly-provided corporate CA into cosign so a TLS-inspecting proxy that
+# re-signs HTTPS doesn't fail the signature check with an x509 error (#583). cosign is
+# Go: it reads SSL_CERT_FILE on LINUX, but on macOS Go uses the system Keychain and
+# IGNORES SSL_CERT_FILE (Bugbot) — so on macOS the CA must live in the Keychain, or
+# use the offline installer path (#584). curl ALREADY honors the user's own
+# CURL_CA_BUNDLE natively, and we must NOT re-export it from a corp-root-only
+# TRACEBLOC_CA_BUNDLE (CURL_CA_BUNDLE is replace-not-augment). Fail fast on a
+# set-but-unreadable bundle rather than a later generic cosign error.
+_bootstrap_wire_ca() {
+  local var ca
+  for var in TRACEBLOC_CA_BUNDLE CURL_CA_BUNDLE; do
+    ca="${!var:-}"; [[ -z "$ca" ]] && continue
+    if [[ ! -f "$ca" || ! -r "$ca" ]]; then
+      echo "[ERROR] $var is set to '$ca' but that CA bundle file can't be read —" >&2
+      echo "        fix its path/permissions and re-run." >&2
+      exit 1
+    fi
+    # Don't clobber a fuller pre-set SSL_CERT_FILE (replace-not-augment): only set it
+    # when the user hasn't already (Bugbot). Effective for cosign on Linux (note above).
+    # NOT on macOS: Go reads the Keychain there, so the export helps cosign not at all,
+    # while OpenSSL curl honors SSL_CERT_FILE replace-not-augment — a corp-root-only
+    # bundle would shrink download trust for zero gain (Bugbot). The readability
+    # fail-fast above still runs on every platform.
+    [[ "$(uname -s)" != "Darwin" && -z "${SSL_CERT_FILE:-}" ]] && export SSL_CERT_FILE="$ca"
+    return 0
+  done
+}
+
 verify_against_manifest() {
   local manifest="$TMPDIR/manifest.sha256"
+
+  # Trust an explicit corporate CA before cosign's HTTPS calls (#583).
+  _bootstrap_wire_ca
 
   printf "  %sVerifying it's authentic (cosign)…%s\n" "$_D" "$_R"
 
@@ -437,10 +468,11 @@ verify_manifest_signature() {
         --certificate "$cert" \
         --signature "$sig" \
         "$manifest" >/dev/null 2>&1; then
-    printf '  %s✔%s Signature verified — published by tracebloc (Sigstore keyless)\n' "$_G" "$_R"
+    printf '  %s✔%s Download verified as published by tracebloc\n' "$_G" "$_R"
   else
-    echo "[ERROR] cosign signature verification FAILED for manifest.sha256 — refusing" >&2
-    echo "        to install." >&2
+    # Plain language, no internal identifiers — parity with install.ps1 (#576).
+    echo "[ERROR] Couldn't confirm the installer download is authentic, so the install" >&2
+    echo "        stopped before changing anything on your machine." >&2
     exit 1
   fi
 }

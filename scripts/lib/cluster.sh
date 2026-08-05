@@ -142,6 +142,58 @@ _resolve_ca_bundle() {
   return 0
 }
 
+# Wire the resolved corporate CA into the HOST tools that do NOT honor a CA env on
+# their own (#583). git (OpenSSL-backed) honors GIT_SSL_CAINFO on Linux + macOS. The
+# Go tools (cosign/helm) read SSL_CERT_FILE on LINUX only — on macOS Go uses the
+# system Keychain and IGNORES SSL_CERT_FILE (Bugbot), so there the CA must live in the
+# Keychain (or use the offline path, #584). curl ALREADY honors the user's own
+# CURL_CA_BUNDLE natively, so we do NOT re-export it (it's replace-not-augment, and a
+# corp-root-only bundle would drop the public roots). The k3d NODES are trusted
+# separately at cluster-create (#424). Idempotent; no-op when no CA is configured;
+# fails fast on a set-but-unreadable bundle. The announce names only what actually
+# takes effect on this platform.
+wire_ca_trust() {
+  local ca rc=0
+  ca="$(_resolve_ca_bundle)" || rc=$?
+  if [[ "$rc" -eq 2 ]]; then
+    error "$ca is set but its CA bundle file can't be read — fix its path/permissions and re-run."
+  fi
+  [[ -z "$ca" ]] && return 0
+  # On macOS, wire NOTHING (same decision as Windows, and for the same reason):
+  # Go reads the Keychain, not SSL_CERT_FILE, so exporting it helps neither
+  # cosign nor helm — while OpenSSL-backed curl DOES honor it, replace-not-
+  # augment, so a corp-root-only bundle would shrink download trust for zero
+  # gain (Bugbot). And Apple's system git (SecureTransport) ignores
+  # GIT_SSL_CAINFO, so claiming git trust from it was false — the clone that
+  # matters most, Homebrew's own bootstrap, runs system git (Bugbot).
+  if [[ "$OS" == "Darwin" ]]; then
+    hint "On macOS, git, cosign and helm read the system Keychain, not a PEM file — add your company's CA to the login Keychain (or use the offline installer) so they trust the proxy."
+    return 0
+  fi
+  # Only set trust vars the user hasn't already set: SSL_CERT_FILE and GIT_SSL_CAINFO
+  # are replace-not-augment (Go / OpenSSL), so overwriting a fuller pre-set bundle with
+  # a corp-root-only one would drop the public roots those tools need elsewhere (Bugbot).
+  #
+  # And SAY only what actually happened: a green "Trusting…" while every export was
+  # skipped reported wiring that did not happen — masking a pre-set bundle that may
+  # still lack the corporate CA (Bugbot). curl "downloads" trust the user's own
+  # CURL_CA_BUNDLE, which we deliberately don't touch, so it is never claimed here.
+  local wired="" kept=""
+  if [[ -z "${SSL_CERT_FILE:-}" ]]; then
+    export SSL_CERT_FILE="$ca";  wired="cosign, helm"
+  else
+    kept="SSL_CERT_FILE (cosign/helm)"
+  fi
+  if [[ -z "${GIT_SSL_CAINFO:-}" ]]; then
+    export GIT_SSL_CAINFO="$ca"; wired="${wired:+$wired and }git"
+  else
+    kept="${kept:+$kept and }GIT_SSL_CAINFO (git)"
+  fi
+  [[ -n "$wired" ]] && success "Trusting your company's certificate for $wired."
+  [[ -n "$kept" ]]  && hint "Keeping your pre-set $kept — make sure that bundle includes your company's CA, or those tools will still fail x509."
+  return 0
+}
+
 # Write a k3d registries.yaml pointing containerd at the mounted CA for every
 # registry in TB_CA_REGISTRIES, and echo its path. $1 = the CA path INSIDE the
 # node (where the -v mount lands). Caller removes the temp dir.
@@ -565,7 +617,15 @@ _handle_existing_cluster() {
     success "Secure environment already running."
   else
     log "Cluster '$CLUSTER_NAME' exists but is stopped — starting it..."
-    k3d cluster start "$CLUSTER_NAME"
+    # Capture the tool's raw stderr to the log and surface only a curated line on
+    # failure — graceful failure, not a raw k3d dump before the closer (#577).
+    # Bounded start (Bugbot): `k3d cluster start` waits for the server with no
+    # deadline by default, so behind the log redirect a wedged Docker would hang a
+    # headless install forever instead of reaching the curated error below. --wait
+    # --timeout bounds it (parity with the Windows installer's 5-minute start
+    # deadline) so a stuck start fails cleanly into that message.
+    k3d cluster start "$CLUSTER_NAME" --wait --timeout 5m >> "${LOG_FILE:-/dev/null}" 2>&1 \
+      || error "Couldn't start your existing secure environment. Check Docker is running, then re-run."
     success "Secure environment started."
   fi
 
