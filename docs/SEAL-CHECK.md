@@ -237,26 +237,41 @@ the RFC-0003 §8.3 matrix. The **substrate** enforcement it builds on is already
 verified — see the Status note at the top of this section (the single record
 of that run).
 
-## What the suite does not cover yet (follow-ups)
+## CI coverage — what runs where
 
-Tracked under backend#1184 unless noted:
+- **`egress-enforcement`, live on every push/PR** — helm-ci's `seal-check-e2e`
+  job (`scripts/tests/e2e-seal-check.sh`, client#541 + #566): real k3d
+  cluster, lockdown engaged, positive control, then the probe via
+  `helm test --filter`. Zero secrets, so it runs everywhere.
+- **The FULL suite vs the dev backend** — helm-ci's `full-seal-e2e` job
+  (`scripts/tests/e2e-full-seal.sh`, the backend#1184 deferred fast-follow):
+  installs the working-tree chart on k3d **as the dedicated dev
+  `e2e-test-agent` client with real credentials** (`CLIENT_ENV=dev`), waits
+  for every release PVC to Bind and for jobs-manager to hold a real backend
+  session, then runs `helm test` **unfiltered** — `egress-enforcement` +
+  `backend-reachability` + `storage-assertions` in one release, with a
+  guard that all three hooks are present so a regated check can never
+  vanish silently. Push/`workflow_dispatch` only (never PRs), one run at a
+  time (the platform sees one agent session).
 
-- **The live k3d verification run** (§8.4) — the *substrate* enforcement is
-  verified (see the §8.4 Status note for the recorded evidence); the
-  *full-chart* `egress-enforcement` probe run against a deployed release is
-  still pending, and the §8.3 k3d cell reads "substrate verified; full-probe
-  run pending" until it is recorded.
+  **Activation:** the job skips green with a `::notice` until the dev
+  platform has a dedicated `e2e-test-agent` client and the repo carries its
+  two Actions secrets — `TB_E2E_CLIENT_ID` / `TB_E2E_CLIENT_PASSWORD`.
+  Never use a real customer's or a person's shared dev identity (login
+  churn invalidates tokens — the backend#1180 failure class). Record the
+  first green run here, with date + run link.
+
+## What the suite does not cover (by design or elsewhere)
+
 - **A single aggregated sealed/unsealed verdict with per-guarantee detail**
-  — surfaced by the tracebloc CLI on top of this label contract
-  (tracebloc/cli#393). Today the aggregate is `helm test`'s exit status
-  plus per-Job logs.
+  — shipped in the tracebloc CLI on this label contract
+  (tracebloc/cli#393, v0.10.0); `helm test` remains the raw substrate.
 - **`~/.tracebloc` host-tree check** (post-Option-C: nothing of the
   environment left under the operator's home) — host-side by construction,
   not observable from in-cluster; belongs to the CLI/installer offboard
   verification lineage (cli#389), not to a helm-test Job.
-- **Wiring the suite into the e2e harness dev runs.**
-- **Filling the RFC-0003 §8.3 matrix precisely** in the RFC itself — the
-  table above is the chart-side input.
+- **The RFC-0003 §8.3 matrix** is filled in the RFC (tracebloc/cli#449) —
+  the table above remains the chart-side input it is derived from.
 - **The Option C storage flip on local installs** (client#368) — the
   storage-assertions check is forward-compatible either way: it gates on
   `hostPath.enabled` and verifies whichever model the install declares.

@@ -8,6 +8,8 @@ on:
       - 'ingestor/**'
       - 'scripts/tests/e2e-auto-upgrade.sh'
       - 'scripts/tests/e2e-seal-check.sh'
+      - 'scripts/tests/e2e-full-seal.sh'
+      - 'scripts/tests/lib/e2e-common.sh'
       - 'scripts/lib/**'
       - '.github/workflows/helm-ci.yaml'
   pull_request:
@@ -17,8 +19,13 @@ on:
       - 'ingestor/**'
       - 'scripts/tests/e2e-auto-upgrade.sh'
       - 'scripts/tests/e2e-seal-check.sh'
+      - 'scripts/tests/e2e-full-seal.sh'
+      - 'scripts/tests/lib/e2e-common.sh'
       - 'scripts/lib/**'
       - '.github/workflows/helm-ci.yaml'
+  # Manual runs — mainly to fire full-seal-e2e on demand (e.g. right after the
+  # e2e-test-agent secrets are provisioned, or to re-record a seal run).
+  workflow_dispatch:
 
 concurrency:
   # Cancel superseded runs on PRs — this is the repo's heaviest workflow
@@ -257,6 +264,42 @@ jobs:
       - uses: actions/checkout@v4
       - name: Run the live egress-enforcement seal-check
         run: bash scripts/tests/e2e-seal-check.sh
+
+  full-seal-e2e:
+    # backend#1184 deferred fast-follow: the FULL seal suite — egress-
+    # enforcement + backend-reachability + bound-PVC storage-assertions — on a
+    # real k3d cluster installed against the DEV backend as the dedicated
+    # e2e-test-agent client. Real credentials, so it runs on push/dispatch
+    # only, never on PRs: fork PRs can't read the secrets anyway, and a real
+    # dev-backend login per PR push would be platform churn + runner cost for
+    # no extra signal (the secret-free enforcement probe above covers PRs).
+    # Until the secrets are provisioned the job SKIPS green with a notice —
+    # see docs/SEAL-CHECK.md § Full-suite dev harness.
+    if: github.event_name != 'pull_request'
+    # 45m, deliberately above the sibling's 30m: this script stacks a 300s PVC
+    # wait, two 300s rollouts and a 600s unfiltered helm test on top of
+    # create_cluster's 15m bound — a slow-but-healthy run must not be killed
+    # by GHA while inside every one of its own timeouts (Bugbot).
+    timeout-minutes: 45
+    # One dev-agent session at a time: two clusters authenticating as the same
+    # client id would read as a duplicate/capacity anomaly on the platform.
+    concurrency:
+      group: full-seal-e2e-dev-agent
+      cancel-in-progress: false
+    name: Full seal suite vs dev (e2e-test-agent)
+    runs-on: ubuntu-latest
+    env:
+      TB_E2E_CLIENT_ID: ${{ secrets.TB_E2E_CLIENT_ID }}
+      TB_E2E_CLIENT_PASSWORD: ${{ secrets.TB_E2E_CLIENT_PASSWORD }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run the full seal suite (skips until the e2e-test-agent is provisioned)
+        run: |
+          if [ -z "$TB_E2E_CLIENT_ID" ] || [ -z "$TB_E2E_CLIENT_PASSWORD" ]; then
+            echo "::notice::TB_E2E_CLIENT_ID / TB_E2E_CLIENT_PASSWORD are not set — skipping the full seal suite. Provision the dedicated dev e2e-test-agent client and add both repo Actions secrets to activate this job (backend#1184 residual; docs/SEAL-CHECK.md)."
+            exit 0
+          fi
+          bash scripts/tests/e2e-full-seal.sh
 
   # Installer script tests (bats + Pester) + the cross-distro prerequisite matrix
   # live in their own workflow: .github/workflows/installer-tests.yaml
