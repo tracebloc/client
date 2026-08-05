@@ -43,7 +43,14 @@ spec:
           type: RuntimeDefault
       containers:
         - name: squid
-          image: {{ include "tracebloc.image" (dict "repository" ($img.repository | default "ubuntu/squid") "tag" ($img.tag | default "6.6-24.04_beta") "digest" ($img.digest | default "") "registry" (dig "imageRegistry" ($img.registry | default "docker.io") (.Values.global | default dict))) | quote }}
+          # Registry precedence (#585): the global mirror wins when set; else the
+          # per-image egressProxy.image.registry; else docker.io. The outer
+          # `| default` is required because the chart-default global.imageRegistry
+          # is "" and `dig` treats a present-but-empty value as found — without it,
+          # an empty global would silently drop an explicit per-image registry
+          # (Bugbot). dig's own default is "" so the fall-through applies to both an
+          # empty and an absent global.
+          image: {{ include "tracebloc.image" (dict "repository" ($img.repository | default "ubuntu/squid") "tag" ($img.tag | default "6.6-24.04_beta") "digest" ($img.digest | default "") "registry" ((dig "imageRegistry" "" (.Values.global | default dict)) | default ($img.registry | default "docker.io"))) | quote }}
           imagePullPolicy: IfNotPresent
           command: ["squid"]
           # -N: no daemon (run in foreground). Logs go to the std streams via

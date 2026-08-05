@@ -188,3 +188,17 @@ tests:
       - matchRegex:
           path: spec.template.spec.containers[0].image
           pattern: "^mirror\\.corp\\.example/ubuntu/squid@"
+
+  - it: honors an explicit egressProxy.image.registry when no global mirror is set (Bugbot)
+    # The chart-default global.imageRegistry is "", and dig treats a present-but-
+    # empty value as found — so without the `| default` fall-through the empty
+    # global silently dropped this per-image registry down to docker.io.
+    template: templates/egress-proxy-deployment.yaml
+    set:
+      egressProxy:
+        image:
+          registry: quay.io
+    asserts:
+      - matchRegex:
+          path: spec.template.spec.containers[0].image
+          pattern: "^quay\\.io/ubuntu/squid@"
