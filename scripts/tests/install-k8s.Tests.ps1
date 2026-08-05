@@ -3462,3 +3462,18 @@ Describe "Checksum-driven tool download (#609)" {
     ([regex]::Matches($script:CDD, "notmatch '\^\[0-9a-fA-F\]\{64\}\`$'")).Count | Should -BeGreaterOrEqual 2
   }
 }
+
+Describe "Cluster-create exit-code reliability (#611)" {
+  BeforeAll { $script:CEC = Get-Content "$PSScriptRoot/../install-k8s.ps1" -Raw }
+
+  It "Wait-ProcessWithDeadline calls WaitForExit before returning success" {
+    # HasExited can flip true before redirected stdout/stderr drain, leaving
+    # $proc.ExitCode null; WaitForExit flushes them so every caller reads a real code.
+    $script:CEC | Should -Match 'function Wait-ProcessWithDeadline[\s\S]{0,1600}\$Process\.WaitForExit\(\)[\s\S]{0,80}return \$true'
+  }
+
+  It "cluster-create does not fail a cluster k3d reported up when the exit code is unreadable" {
+    # Defense-in-depth: a null exit code falls back to k3d's 'created successfully' marker.
+    $script:CEC | Should -Match "if \(\`$null -eq \`$k3dExitCode\)[\s\S]{0,160}created successfully"
+  }
+}

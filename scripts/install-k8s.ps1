@@ -225,6 +225,14 @@ function Wait-ProcessWithDeadline {
     Start-Sleep -Seconds 2
   }
   Write-Host "`r                                                   `r" -NoNewline
+  # HasExited can flip true before the process's redirected stdout/stderr streams
+  # are fully drained, and in that window Start-Process -RedirectStandardOutput
+  # leaves $Process.ExitCode $null. Callers then read a null code and `$null -ne 0`
+  # misreads a SUCCESSFUL run as a failure -- the #611 field case: k3d printed
+  # "Cluster created successfully!" with empty stderr, yet the install aborted with
+  # the cluster actually up. WaitForExit() (bounded: the process has already exited)
+  # flushes the streams and guarantees ExitCode is populated for every caller.
+  try { $Process.WaitForExit() } catch {}
   return $true
 }
 
@@ -2671,9 +2679,15 @@ function New-K3dCluster {
       Err "Compute environment creation timed out after $timeoutMin minutes. Check that Docker is healthy and this network can pull images, then re-run. (TB_CREATE_TIMEOUT_MIN overrides the bound.)"
     }
 
-    $k3dExitCode = $k3dProc.ExitCode
     $k3dStdout = if (Test-Path $k3dOutLog) { Get-Content $k3dOutLog -Raw -ErrorAction SilentlyContinue } else { "" }
     $k3dStderr = if (Test-Path $k3dErrLog) { Get-Content $k3dErrLog -Raw -ErrorAction SilentlyContinue } else { "" }
+    $k3dExitCode = $k3dProc.ExitCode
+    # Defense-in-depth (#611): if the exit code is STILL unreadable after
+    # WaitForExit (Wait-ProcessWithDeadline), do not fail a cluster that k3d itself
+    # reported up -- trust its authoritative success marker over a null code.
+    if ($null -eq $k3dExitCode) {
+      $k3dExitCode = if ($k3dStdout -match 'created successfully') { 0 } else { 1 }
+    }
     Remove-Item $k3dOutLog, $k3dErrLog -Force -ErrorAction SilentlyContinue
     if ($proxyCfg) { Remove-Item (Split-Path $proxyCfg -Parent) -Recurse -Force -ErrorAction SilentlyContinue }
     if ($registriesCfg) { Remove-Item (Split-Path $registriesCfg -Parent) -Recurse -Force -ErrorAction SilentlyContinue }
