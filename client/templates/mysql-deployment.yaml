@@ -70,7 +70,7 @@ spec:
       # The 8.0 transit hop and unknown/custom pins are deliberately allowed —
       # this is a backstop against accidental engine flips, not a gate.
       - name: mysql-format-guard
-        image: {{ include "tracebloc.image" (dict "repository" "library/busybox" "tag" .Values.images.busybox.tag "digest" .Values.images.busybox.digest "registry" "docker.io") | quote }}
+        image: {{ include "tracebloc.image" (dict "repository" "library/busybox" "tag" .Values.images.busybox.tag "digest" .Values.images.busybox.digest "registry" (dig "imageRegistry" "docker.io" (.Values.global | default dict))) | quote }}
         env:
         - name: TB_EXPECTED_ENGINE
           value: {{ include "tracebloc.mysqlEngineMajor" . | quote }}

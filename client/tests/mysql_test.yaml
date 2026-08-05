@@ -261,3 +261,13 @@ tests:
       - equal:
           path: spec.template.spec.initContainers[1].name
           value: mysql-format-guard
+
+  - it: the format guard re-homes onto a private mirror like every other image (#585)
+    template: templates/mysql-deployment.yaml
+    set:
+      global:
+        imageRegistry: mirror.corp.example
+    asserts:
+      - equal:
+          path: spec.template.spec.initContainers[0].image
+          value: mirror.corp.example/library/busybox:1.35
