@@ -4006,7 +4006,11 @@ function Get-TlsInspectionState {
     $raw = Get-EnvProxyRaw
     if ($raw) {
       try {
-        $u  = [System.Uri]$raw
+        # [System.Uri] rejects schemeless curl-style values (proxy.corp:8080); prepend a
+        # scheme so the probe matches the display path (which already strips schemeless
+        # URLs) -- otherwise corporate proxies get a false 'unknown' (Bugbot, client#589).
+        $rawUri = if ($raw -match '^[A-Za-z][A-Za-z0-9+.\-]*://') { $raw } else { "http://$raw" }
+        $u  = [System.Uri]$rawUri
         $wp = New-Object System.Net.WebProxy(("{0}://{1}:{2}" -f $u.Scheme, $u.Host, $u.Port))
         if ($u.UserInfo) {
           $ui    = $u.UserInfo.Split(":", 2)
