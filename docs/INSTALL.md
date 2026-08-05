@@ -49,6 +49,35 @@ On **Linux**, the installer also fetches tooling from `get.docker.com`, `raw.git
 > - **Docker Desktop (macOS / Windows / Linux):** the daemon runs in a VM the installer can't reach. Trust the CA in the host OS store — the **macOS keychain** (set "Always Trust"), the **Windows Trusted Root** store (`certlm.msc`), or the **Linux system trust store** (the native-Docker commands above) — then restart Docker Desktop, which re-reads the host store on start. See [docs.docker.com](https://docs.docker.com/).
 > - **Colima (headless macOS):** the daemon runs in a Lima VM that does **not** read the macOS keychain. Add the CA *inside* the VM — `colima ssh`, copy the PEM into the VM's system trust store and refresh it — then `colima restart`.
 
+### Blocked container registry (mirror / air-gapped)
+
+Some sites hard-block Docker Hub / GHCR outright — the images aren't reachable directly at all (this is different from a proxy or TLS-inspection, which the section above covers). The preflight check detects a blocked registry and points you here rather than failing with a raw pull error. Two options:
+
+**1. A private/mirror registry your site *can* reach.** Mirror the tracebloc images into it, then point the install at the mirror by supplying a values file (`TRACEBLOC_VALUES_FILE=/path/to/mirror-values.yaml`) that overrides each image's registry:
+
+```yaml
+# mirror-values.yaml — repoint every image at your mirror (which must host the
+# same tags/digests). docker.io images use images.<name>.registry; the ingestor
+# carries its registry in the repository field.
+images:
+  jobsManager:  { registry: mirror.corp.example }
+  podsMonitor:  { registry: mirror.corp.example }
+  requestsProxy: { registry: mirror.corp.example }
+  mysql:        { registry: mirror.corp.example }
+  busybox:      { registry: mirror.corp.example }
+  ingestor:     { repository: mirror.corp.example/tracebloc/ingestor }
+# If the mirror needs credentials, add a pull secret:
+dockerRegistry:
+  create: true
+  server: mirror.corp.example
+  username: <user>
+  password: <token>
+```
+
+**2. A fully air-gapped site (no reachable mirror).** Pre-load the images into the cluster's node(s) as an offline bundle. *(This path is being wired up — track [#585](https://github.com/tracebloc/client/issues/585).)*
+
+> **Honest limit:** a site that blocks the registries **and** offers no reachable mirror **and** won't accept an offline bundle cannot be served — the software isn't reachable by definition. Everything short of that is handleable.
+
 ---
 
 ## 1. Add the Helm repository (recommended for production)

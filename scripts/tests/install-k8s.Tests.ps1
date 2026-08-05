@@ -3274,3 +3274,14 @@ Describe "Set-ToolTrust: wire the corporate CA into cosign/helm/git (#583)" {
     $out | Should -Match 'Keeping your pre-set GIT_SSL_CAINFO'
   }
 }
+
+Describe "Registry-block detection + guidance (#585)" {
+  It "Test-Preflight flags a blocked container registry and points to the mirror/offline docs" {
+    $src = Get-Content "$PSScriptRoot/../install-k8s.ps1" -Raw
+    $fn  = (($src -split "function Test-Preflight")[1] -split "`nfunction ")[0]
+    $fn | Should -Match '\$regBlocked'                 # detection flag
+    $fn | Should -Match 'ghcr\.io'                     # registry match in the detection
+    $fn | Should -Match 'container registries'         # the guidance line
+    $fn | Should -Match 'docs/INSTALL\.md'             # points at the mirror/offline docs
+  }
+}
