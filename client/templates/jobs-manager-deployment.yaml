@@ -113,6 +113,17 @@ spec:
         - name: PER_INGESTION_TABLES
           value: "1"
         {{- end }}
+        {{- if .Values.perDatasetPvcs }}
+        # RFC-0003 D9 Track B (client-runtime#203 / #261): per-dataset
+        # hostPath PV/PVCs. When on, jobs-manager mounts each training pod's
+        # dataset(s) as dedicated read-only dataset-<handle> PVCs instead of
+        # a subPath view of the shared data PVC (single-node/hostPath
+        # clusters only — elastic clusters log a warning and fall back to
+        # subPath). Needs the flag-gated PV/PVC grants in rbac.yaml. Rendered
+        # only when enabled so default installs stay byte-identical.
+        - name: PER_DATASET_PVCS
+          value: "1"
+        {{- end }}
         {{- if .Values.perExperimentDbCreds }}
         # RFC-0003 D10 (backend#1181): per-experiment MySQL credentials. When
         # on, jobs-manager mints a short-lived MySQL user per experiment scoped

@@ -299,6 +299,10 @@
       "type": "boolean",
       "description": "RFC-0003 D16 (backend#1204/#1205): stamp PER_INGESTION_TABLES=1 into every ingestion Job. Flip per environment, dev first; file-bearing categories are refused under the flag until client-runtime#203 phase 2."
     },
+    "perDatasetPvcs": {
+      "type": "boolean",
+      "description": "RFC-0003 D9 Track B (client-runtime#203/#261): stamp PER_DATASET_PVCS=1 into jobs-manager — training pods get one read-only hostPath PV/PVC per dataset handle instead of a subPath view of the shared PVC. Single-node/hostPath clusters only; requires clusterScope (PVs are cluster-scoped)."
+    },
     "ingestionAuthz": {
       "type": "object",
       "description": "Authorization policy for POST /internal/submit-ingestion-run on jobs-manager (client-runtime#21). Rendered into the ingestion-authz ConfigMap.",
