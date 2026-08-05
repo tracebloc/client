@@ -41,8 +41,8 @@ _set_spec() { local tmp; tmp="$(mktemp)"; sed "s|^$1=.*|$1=$2|" "$REPO/scripts/s
 
 @test "check-facts --check: all consumers match the spec -> passes (#435)" {
   run _facts --check
-  [ "$status" -eq 0 ]
-  [[ "$output" == *"all installer facts match"* ]]
+  [ "$status" -eq 0 ] || return 1
+  [[ "$output" == *"all installer facts match"* ]] || return 1
 }
 
 @test "check-facts --check: K8S_VERSION drift in PowerShell (not just bash) -> RED (#435 Bugbot)" {
@@ -51,8 +51,8 @@ _set_spec() { local tmp; tmp="$(mktemp)"; sed "s|^$1=.*|$1=$2|" "$REPO/scripts/s
   local tmp; tmp="$(mktemp)"
   sed 's|"v1.29.4-k3s1"|"v1.30.0-k3s1"|' "$REPO/scripts/install-k8s.ps1" > "$tmp" && mv "$tmp" "$REPO/scripts/install-k8s.ps1"
   run _facts --check
-  [ "$status" -ne 0 ]
-  [[ "$output" == *"install-k8s.ps1:K8S_VERSION"* ]]
+  [ "$status" -ne 0 ] || return 1
+  [[ "$output" == *"install-k8s.ps1:K8S_VERSION"* ]] || return 1
 }
 
 @test "check-facts --write: a K8S_VERSION bump stamps BOTH bash and PowerShell (#435 Bugbot)" {
@@ -60,7 +60,7 @@ _set_spec() { local tmp; tmp="$(mktemp)"; sed "s|^$1=.*|$1=$2|" "$REPO/scripts/s
   _facts --write
   grep -q 'K8S_VERSION="${K8S_VERSION:-v1.31.0-k3s1}"' "$REPO/scripts/lib/common.sh"   # bash
   grep -q 'else { "v1.31.0-k3s1" }' "$REPO/scripts/install-k8s.ps1"                     # PowerShell
-  run _facts --check; [ "$status" -eq 0 ]
+  run _facts --check; [ "$status" -eq 0 ] || return 1
 }
 
 @test "check-facts --check: #410 incident — bash pin bumped, PowerShell NOT -> RED (#435)" {
@@ -69,27 +69,27 @@ _set_spec() { local tmp; tmp="$(mktemp)"; sed "s|^$1=.*|$1=$2|" "$REPO/scripts/s
   local tmp; tmp="$(mktemp)"
   sed 's|v5.9.0|v5.9.9|' "$REPO/scripts/lib/common.sh" > "$tmp" && mv "$tmp" "$REPO/scripts/lib/common.sh"
   run _facts --check
-  [ "$status" -ne 0 ]                                  # red CI check
-  [[ "$output" == *"common.sh:K3D_VERSION"* ]]
-  [[ "$output" == *"drifted"* ]]
+  [ "$status" -ne 0 ] || return 1   # red CI check
+  [[ "$output" == *"common.sh:K3D_VERSION"* ]] || return 1
+  [[ "$output" == *"drifted"* ]] || return 1
 }
 
 @test "check-facts --check: PowerShell pin drifts from bash+spec -> RED (#435)" {
   local tmp; tmp="$(mktemp)"
   sed 's|"v5.9.0"|"v5.8.0"|' "$REPO/scripts/install-k8s.ps1" > "$tmp" && mv "$tmp" "$REPO/scripts/install-k8s.ps1"
   run _facts --check
-  [ "$status" -ne 0 ]
-  [[ "$output" == *"install-k8s.ps1:K3dVersion"* ]]
+  [ "$status" -ne 0 ] || return 1
+  [[ "$output" == *"install-k8s.ps1:K3dVersion"* ]] || return 1
 }
 
 @test "check-facts --write: bumping the spec stamps EVERY consumer, then --check passes (#435)" {
   _set_spec K3D_VERSION v9.9.9
   run _facts --write
-  [ "$status" -eq 0 ]
+  [ "$status" -eq 0 ] || return 1
   grep -q 'K3D_VERSION="${K3D_VERSION:-v9.9.9}"' "$REPO/scripts/lib/common.sh"          # bash stamped
   grep -q 'else { "v9.9.9" }' "$REPO/scripts/install-k8s.ps1"                            # PowerShell stamped
   run _facts --check                                                                     # now consistent
-  [ "$status" -eq 0 ]
+  [ "$status" -eq 0 ] || return 1
 }
 
 @test "check-facts --write: HELM + K8S bumps stamp their consumers (#435)" {
@@ -99,15 +99,15 @@ _set_spec() { local tmp; tmp="$(mktemp)"; sed "s|^$1=.*|$1=$2|" "$REPO/scripts/s
   grep -q 'HELM_VERSION="${HELM_VERSION:-v5.0.0}"' "$REPO/scripts/lib/common.sh"
   grep -q 'else { "v5.0.0" }' "$REPO/scripts/install-k8s.ps1"
   grep -q 'K8S_VERSION="${K8S_VERSION:-v1.30.0-k3s1}"' "$REPO/scripts/lib/common.sh"
-  run _facts --check; [ "$status" -eq 0 ]
+  run _facts --check; [ "$status" -eq 0 ] || return 1
 }
 
 @test "check-facts --check: READY_TIMEOUT (a real timeout budget) drift in ps1 -> RED (#435)" {
   local tmp; tmp="$(mktemp)"
   sed 's|"300"|"600"|' "$REPO/scripts/install-k8s.ps1" > "$tmp" && mv "$tmp" "$REPO/scripts/install-k8s.ps1"
   run _facts --check
-  [ "$status" -ne 0 ]
-  [[ "$output" == *"install-k8s.ps1:ReadyTimeout"* ]]
+  [ "$status" -ne 0 ] || return 1
+  [[ "$output" == *"install-k8s.ps1:ReadyTimeout"* ]] || return 1
 }
 
 @test "check-facts --write: bumping the READY_TIMEOUT budget stamps bash + PowerShell (#435)" {
@@ -115,19 +115,19 @@ _set_spec() { local tmp; tmp="$(mktemp)"; sed "s|^$1=.*|$1=$2|" "$REPO/scripts/s
   _facts --write
   grep -q 'READY_TIMEOUT="${READY_TIMEOUT:-600}"' "$REPO/scripts/lib/summary.sh"   # bash consumer
   grep -q 'else { "600" }' "$REPO/scripts/install-k8s.ps1"                          # PowerShell consumer
-  run _facts --check; [ "$status" -eq 0 ]
+  run _facts --check; [ "$status" -eq 0 ] || return 1
 }
 
 @test "check-facts: a missing pattern (consumer refactored away) fails closed, not silently green (#435)" {
   echo "# no k3d pin here anymore" > "$REPO/scripts/lib/common.sh"
   run _facts --check
-  [ "$status" -ne 0 ]
-  [[ "$output" == *"no pinned value found"* ]]
+  [ "$status" -ne 0 ] || return 1
+  [[ "$output" == *"no pinned value found"* ]] || return 1
 }
 
 @test "check-facts: an unknown mode is rejected (#435)" {
   run _facts --bogus
-  [ "$status" -eq 2 ]
+  [ "$status" -eq 2 ] || return 1
 }
 
 # --- pipefail + `sed | head -1` SIGPIPE regressions (#542 Bugbot) -----------
@@ -148,8 +148,8 @@ _set_spec() { local tmp; tmp="$(mktemp)"; sed "s|^$1=.*|$1=$2|" "$REPO/scripts/s
   # even if a future edit drops the trailing printf that masked the old pipe's exit code.
   { i=0; while [ "$i" -lt 20000 ]; do echo "K3D_VERSION=v5.9.0"; i=$((i + 1)); done; } >> "$REPO/scripts/spec/facts.env"
   run _facts --check
-  [ "$status" -eq 0 ]
-  [[ "$output" == *"all installer facts match"* ]]
+  [ "$status" -eq 0 ] || return 1
+  [[ "$output" == *"all installer facts match"* ]] || return 1
 }
 
 @test "check-facts --check: a duplicated consumer pin does not SIGPIPE _extract (#542 Bugbot)" {
@@ -158,15 +158,15 @@ _set_spec() { local tmp; tmp="$(mktemp)"; sed "s|^$1=.*|$1=$2|" "$REPO/scripts/s
   # and aborted the gate. The first line still equals the spec, so drift is zero.
   { i=0; while [ "$i" -lt 20000 ]; do echo 'K3D_VERSION="${K3D_VERSION:-v5.9.0}"'; i=$((i + 1)); done; } >> "$REPO/scripts/lib/common.sh"
   run _facts --check
-  [ "$status" -eq 0 ]
-  [[ "$output" == *"all installer facts match"* ]]
+  [ "$status" -eq 0 ] || return 1
+  [[ "$output" == *"all installer facts match"* ]] || return 1
 }
 
 @test "check-facts --check: a missing create-time --image pin fails with a WIRING message, not the --write hint (#547 / Bugbot)" {
   # versions all still correct, but strip the k3s --image wiring from cluster.sh
   printf '%s\n' '# stub without the k3s --image pin' > "$REPO/scripts/lib/cluster.sh"
   run _facts --check
-  [ "$status" -ne 0 ]
+  [ "$status" -ne 0 ] || return 1
   # must NOT point the dev at --write (it cannot restore create-time wiring)
   if printf '%s\n' "$output" | grep -qF "Run 'scripts/check-facts.sh --write'"; then
     echo "unexpected --write hint for a wiring failure:" >&2; printf '%s\n' "$output" >&2; return 1

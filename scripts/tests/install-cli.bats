@@ -27,21 +27,21 @@ setup() {
 @test "install_tracebloc_cli: download failure is non-fatal (returns 0, warns)" {
   curl() { return 22; }                  # curl HTTP failure (exit 22)
   run install_tracebloc_cli
-  [ "$status" -eq 0 ]
-  [[ "$output" == *"WARN: Couldn't download"* ]]
+  [ "$status" -eq 0 ] || return 1
+  [[ "$output" == *"WARN: Couldn't download"* ]] || return 1
 }
 
 @test "install_tracebloc_cli: installer-script failure is non-fatal (returns 0, warns)" {
   curl() { : > "${@: -1}"; return 0; }   # 'download' OK (creates the -o target)
   sh()   { return 1; }                   # the CLI installer itself fails
   run install_tracebloc_cli
-  [ "$status" -eq 0 ]
-  [[ "$output" == *"WARN: Couldn't install"* ]]
+  [ "$status" -eq 0 ] || return 1
+  [[ "$output" == *"WARN: Couldn't install"* ]] || return 1
   # This step is by-design non-fatal, so a failure must NOT show spin_cmd's hard
   # red "✖ …" + log dump (which would look like a hard failure). We drive `spin`
   # directly to keep the failure path soft (Bugbot: fatal-looking CLI install UX).
-  [[ "$output" != *"Last 10 lines"* ]]
-  [[ "$output" != *"✖ Installing the tracebloc CLI"* ]]
+  [[ "$output" != *"Last 10 lines"* ]] || return 1
+  [[ "$output" != *"✖ Installing the tracebloc CLI"* ]] || return 1
 }
 
 @test "install_tracebloc_cli: success path reports installed" {
@@ -51,10 +51,10 @@ setup() {
   _cli_on_fresh_path() { return 0; }     # a fresh terminal finds it (don't spawn real shells)
   tracebloc()        { echo "tracebloc 0.2.0"; }
   run install_tracebloc_cli
-  [ "$status" -eq 0 ]
+  [ "$status" -eq 0 ] || return 1
   # tracebloc was already present at the same version → "up to date" (a re-run
   # that bumped the version would say "updated (vOLD → vNEW)").
-  [[ "$output" == *"SUCCESS: tracebloc CLI up to date"* ]]
+  [[ "$output" == *"SUCCESS: tracebloc CLI up to date"* ]] || return 1
 }
 
 # ── Self-verification (#738) ────────────────────────────────────────────────
@@ -71,14 +71,14 @@ setup() {
   _cli_at_system_dir() { return 0; }     # installed to a system dir → usable in THIS shell too
   tracebloc()        { echo "tracebloc 0.2.0"; }
   run install_tracebloc_cli
-  [ "$status" -eq 0 ]
-  [[ "$output" == *"to use it"* ]]                      # usable-now verdict ("… — run tb to use it")
-  [[ "$output" == *'`tb`'* ]]                           # prefers the short alias when it's present
-  [[ "$output" == *"0.2.0"* ]]                          # real proof via `tracebloc version`
-  [[ "$output" != *"open a new terminal"* ]]            # not the new-terminal (edge) message
+  [ "$status" -eq 0 ] || return 1
+  [[ "$output" == *"to use it"* ]] || return 1                      # usable-now verdict ("… — run tb to use it")
+  [[ "$output" == *'`tb`'* ]] || return 1                           # prefers the short alias when it's present
+  [[ "$output" == *"0.2.0"* ]] || return 1                          # real proof via `tracebloc version`
+  [[ "$output" != *"open a new terminal"* ]] || return 1            # not the new-terminal (edge) message
   # The canonical dataset-push next step lives in summary.sh — don't duplicate it
   # here on the fully-verified path (#738: "don't duplicate; keep consistent").
-  [[ "$output" != *"tracebloc dataset push"* ]]
+  [[ "$output" != *"tracebloc dataset push"* ]] || return 1
 }
 
 @test "install_tracebloc_cli: names 'tracebloc' when the 'tb' alias wasn't created" {
@@ -92,9 +92,9 @@ setup() {
   _cli_at_system_dir() { return 0; }                    # system dir → usable-now verdict path
   tracebloc()        { echo "tracebloc 0.2.0"; }
   run install_tracebloc_cli
-  [ "$status" -eq 0 ]
-  [[ "$output" == *'run `tracebloc` to use it'* ]]      # named the real binary
-  [[ "$output" != *'`tb`'* ]]                           # never a bare `tb` when it doesn't resolve
+  [ "$status" -eq 0 ] || return 1
+  [[ "$output" == *'run `tracebloc` to use it'* ]] || return 1      # named the real binary
+  [[ "$output" != *'`tb`'* ]] || return 1                           # never a bare `tb` when it doesn't resolve
 }
 
 @test "install_tracebloc_cli: on PATH via ~/.local/bin (not a system dir) → new-terminal verdict, never 'run it now' (#371)" {
@@ -111,9 +111,9 @@ setup() {
   SHELL="/bin/zsh"; OS="Linux"
   tracebloc()        { echo "tracebloc 0.2.0"; }
   run install_tracebloc_cli
-  [ "$status" -eq 0 ]
-  [[ "$output" == *"open a new terminal"* ]]     # matches the summary CTA
-  [[ "$output" != *"to use it"* ]]               # NEVER the usable-now verdict on this path
+  [ "$status" -eq 0 ] || return 1
+  [[ "$output" == *"open a new terminal"* ]] || return 1     # matches the summary CTA
+  [[ "$output" != *"to use it"* ]] || return 1               # NEVER the usable-now verdict on this path
 }
 
 @test "install_tracebloc_cli: fresh shell finds it but the CURRENT shell can't → 'new terminals' verdict + load-it-now hint (#304)" {
@@ -127,12 +127,12 @@ setup() {
   SHELL="/bin/zsh"; OS="Linux"          # zsh → ~/.zshrc
   tracebloc()        { echo "tracebloc 0.2.0"; }
   run install_tracebloc_cli
-  [ "$status" -eq 0 ]                                   # still non-fatal
-  [[ "$output" == *"open a new terminal"* ]]            # honest: persisted, but not usable in THIS shell
-  [[ "$output" == *"source $HOME/.zshrc"* ]]            # how to use it in THIS shell now
-  [[ "$output" != *"to use it"* ]]                      # never claim the usable-now verdict for this shell
+  [ "$status" -eq 0 ] || return 1                                   # still non-fatal
+  [[ "$output" == *"open a new terminal"* ]] || return 1            # honest: persisted, but not usable in THIS shell
+  [[ "$output" == *"source $HOME/.zshrc"* ]] || return 1            # how to use it in THIS shell now
+  [[ "$output" != *"to use it"* ]] || return 1                      # never claim the usable-now verdict for this shell
   # It's already in the rc (fresh shell found it) — don't tell the user to re-append.
-  [[ "$output" != *"echo '"* ]]
+  [[ "$output" != *"echo '"* ]] || return 1
 }
 
 @test "install_tracebloc_cli: CLI-missing-from-fresh-shell prints an actionable, shell-correct PATH hint" {
@@ -141,13 +141,13 @@ setup() {
   _cli_on_fresh_path() { return 1; }     # installed, but a fresh terminal does NOT find it
   SHELL="/bin/zsh"; OS="Linux"          # zsh → ~/.zshrc (rc routing under test)
   run install_tracebloc_cli
-  [ "$status" -eq 0 ]
+  [ "$status" -eq 0 ] || return 1
   # Append the exact PATH line to the rc, THEN source it — fixes this terminal
   # and every new one (the old code printed a bare `export` + a `source` of an
   # rc that didn't contain the line, so nothing persisted).
-  [[ "$output" == *"echo 'export PATH=\"$HOME/.local/bin:\$PATH\"' >> $HOME/.zshrc"* ]]
-  [[ "$output" == *"source $HOME/.zshrc"* ]]                       # the right rc for zsh
-  [[ "$output" != *"open a new terminal"* ]]                       # never the generic line
+  [[ "$output" == *"echo 'export PATH=\"$HOME/.local/bin:\$PATH\"' >> $HOME/.zshrc"* ]] || return 1
+  [[ "$output" == *"source $HOME/.zshrc"* ]] || return 1                       # the right rc for zsh
+  [[ "$output" != *"open a new terminal"* ]] || return 1                       # never the generic line
 }
 
 @test "install_tracebloc_cli: fish gets a fish-correct fix (fish_add_path, no source needed)" {
@@ -156,12 +156,12 @@ setup() {
   _cli_on_fresh_path() { return 1; }
   SHELL="/usr/bin/fish"; OS="Linux"
   run install_tracebloc_cli
-  [ "$status" -eq 0 ]
-  [[ "$output" == *"fish_add_path \"$HOME/.local/bin\""* ]]        # fish's idiom, not POSIX export
-  [[ "$output" != *"export PATH"* ]]                               # never a POSIX export for fish
+  [ "$status" -eq 0 ] || return 1
+  [[ "$output" == *"fish_add_path \"$HOME/.local/bin\""* ]] || return 1        # fish's idiom, not POSIX export
+  [[ "$output" != *"export PATH"* ]] || return 1                               # never a POSIX export for fish
   # fish_add_path persists (universal var) AND applies to the running shell, so
   # fish users must NOT be told to `source` anything (the old guidance did).
-  [[ "$output" != *"source "* ]]
+  [[ "$output" != *"source "* ]] || return 1
 }
 
 @test "install_tracebloc_cli: verification failure is still NON-FATAL (status 0)" {
@@ -171,7 +171,7 @@ setup() {
   _cli_on_fresh_path() { return 2; }
   _cli_rc_for_shell()  { return 7; }     # even if rc resolution itself errors
   run install_tracebloc_cli
-  [ "$status" -eq 0 ]
+  [ "$status" -eq 0 ] || return 1
 }
 
 @test "install_tracebloc_cli: NON-FATAL even under the orchestrator's set -e" {
@@ -185,7 +185,7 @@ setup() {
   install_tracebloc_cli
   local rc=$?
   set +e
-  [ "$rc" -eq 0 ]
+  [ "$rc" -eq 0 ] || return 1
 }
 
 # ── _cli_at_system_dir: the summary-CTA usable-now gate (Bugbot #371) ─────────
@@ -193,9 +193,9 @@ setup() {
   HOME=/home/tester
   _cli_at_system_dir /usr/local/bin/tracebloc                 # system → usable now
   _cli_at_system_dir /usr/bin/tracebloc
-  ! _cli_at_system_dir /home/tester/.local/bin/tracebloc      # $HOME → conservative
-  ! _cli_at_system_dir /home/tester/bin/tracebloc
-  ! _cli_at_system_dir ""                                     # unresolved → conservative
+  ! _cli_at_system_dir /home/tester/.local/bin/tracebloc || return 1      # $HOME → conservative
+  ! _cli_at_system_dir /home/tester/bin/tracebloc || return 1
+  ! _cli_at_system_dir "" || return 1                                     # unresolved → conservative
 }
 
 # ── TB_CLI_USABLE_NOW default seeded from pre-install state (Bugbot #371) ─────
@@ -209,7 +209,7 @@ setup() {
   mktemp() { return 1; }                 # force the early "(no temp dir)" return
   TB_CLI_USABLE_NOW=
   install_tracebloc_cli >/dev/null 2>&1 || true
-  [ "$TB_CLI_USABLE_NOW" = "1" ]
+  [ "$TB_CLI_USABLE_NOW" = "1" ] || return 1
 }
 
 @test "install_tracebloc_cli: pre-existing ~/.local/bin tracebloc + install step fails → TB_CLI_USABLE_NOW=0 (#371)" {
@@ -222,5 +222,5 @@ setup() {
   mktemp() { return 1; }
   TB_CLI_USABLE_NOW=
   install_tracebloc_cli >/dev/null 2>&1 || true
-  [ "$TB_CLI_USABLE_NOW" = "0" ]
+  [ "$TB_CLI_USABLE_NOW" = "0" ] || return 1
 }

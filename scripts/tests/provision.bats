@@ -56,17 +56,17 @@ _stub_tracebloc() {
   export TRACEBLOC_CLIENT_ID=abc TRACEBLOC_CLIENT_PASSWORD=xyz
   tracebloc() { echo "TRACEBLOC $*"; }   # must NOT be called for login/create
   run provision_client
-  [ "$status" -eq 0 ]
-  [[ "$output" == *"skipping browser sign-in"* ]]
-  [[ "$output" != *"TRACEBLOC login"* ]]
+  [ "$status" -eq 0 ] || return 1
+  [[ "$output" == *"skipping browser sign-in"* ]] || return 1
+  [[ "$output" != *"TRACEBLOC login"* ]] || return 1
 }
 
 @test "provision_client: dual-mode (values file) skips browser sign-in" {
   export TRACEBLOC_VALUES_FILE=/tmp/values.yaml
   tracebloc() { echo "TRACEBLOC $*"; }
   run provision_client
-  [ "$status" -eq 0 ]
-  [[ "$output" == *"skipping browser sign-in"* ]]
+  [ "$status" -eq 0 ] || return 1
+  [[ "$output" == *"skipping browser sign-in"* ]] || return 1
 }
 
 @test "provision_client: a CLI too old to provision falls back to manual sign-in (not fatal)" {
@@ -75,19 +75,19 @@ _stub_tracebloc() {
   # install_client_helm collect credentials, NOT hard-fail on `tracebloc login`.
   tracebloc() { case "$1" in login|client) return 1 ;; *) return 0 ;; esac; }
   run provision_client
-  [ "$status" -eq 0 ]
-  [[ "$output" == *"falling back to manual sign-in"* ]]
-  [[ "$output" != *"approve this machine in your browser"* ]]   # never entered the login flow
+  [ "$status" -eq 0 ] || return 1
+  [[ "$output" == *"falling back to manual sign-in"* ]] || return 1
+  [[ "$output" != *"approve this machine in your browser"* ]] || return 1   # never entered the login flow
 }
 
 @test "provision_client: mint hands id+password+namespace to Helm" {
   _stub_tracebloc 'TRACEBLOC_CLIENT_ID=5\nTRACEBLOC_CLIENT_PASSWORD=pw9\nTB_NAMESPACE=my-ns\n'
   provision_client                       # called directly so exports persist
-  [ "$TRACEBLOC_CLIENT_ID" = "5" ]
-  [ "$TRACEBLOC_CLIENT_PASSWORD" = "pw9" ]
-  [ "$TB_NAMESPACE" = "my-ns" ]
+  [ "$TRACEBLOC_CLIENT_ID" = "5" ] || return 1
+  [ "$TRACEBLOC_CLIENT_PASSWORD" = "pw9" ] || return 1
+  [ "$TB_NAMESPACE" = "my-ns" ] || return 1
   # the credential file is transient — removed after sourcing
-  [ ! -f "${HOST_DATA_DIR}/client-credential.env" ]
+  [ ! -f "${HOST_DATA_DIR}/client-credential.env" ] || return 1
 }
 
 @test "provision_client: a stale TRACEBLOC_CLIENT_ADOPTED in the env does not misroute a mint" {
@@ -95,26 +95,26 @@ _stub_tracebloc() {
   _stub_tracebloc 'TRACEBLOC_CLIENT_ID=7\nTRACEBLOC_CLIENT_PASSWORD=pw\nTB_NAMESPACE=mns\n'  # mint: no ADOPTED line
   provision_client
   # mint path must win: the credential is handed to Helm, not dropped as if adopted
-  [ "$TRACEBLOC_CLIENT_ID" = "7" ]
-  [ "$TRACEBLOC_CLIENT_PASSWORD" = "pw" ]
-  [ "$TB_NAMESPACE" = "mns" ]
+  [ "$TRACEBLOC_CLIENT_ID" = "7" ] || return 1
+  [ "$TRACEBLOC_CLIENT_PASSWORD" = "pw" ] || return 1
+  [ "$TB_NAMESPACE" = "mns" ] || return 1
 }
 
 @test "provision_client: adopt hands only the namespace (no password)" {
   _stub_tracebloc 'TRACEBLOC_CLIENT_ID=8\nTB_NAMESPACE=ex-ns\nTRACEBLOC_CLIENT_ADOPTED=1\n'
   provision_client
-  [ "$TB_NAMESPACE" = "ex-ns" ]
-  [ -z "${TRACEBLOC_CLIENT_PASSWORD:-}" ]   # no fresh credential on adopt
-  [ "$TRACEBLOC_CLIENT_ID" = "8" ]          # adopted id kept → Step 5 heals the release's clientId to it
-  [ "$TRACEBLOC_CLIENT_ADOPTED" = "1" ]     # marker kept → Step 5 takes the reconcile branch
+  [ "$TB_NAMESPACE" = "ex-ns" ] || return 1
+  [ -z "${TRACEBLOC_CLIENT_PASSWORD:-}" ] || return 1   # no fresh credential on adopt
+  [ "$TRACEBLOC_CLIENT_ID" = "8" ] || return 1          # adopted id kept → Step 5 heals the release's clientId to it
+  [ "$TRACEBLOC_CLIENT_ADOPTED" = "1" ] || return 1     # marker kept → Step 5 takes the reconcile branch
 }
 
 @test "provision_client: missing CLI after install is fatal" {
   has() { return 1; }                    # CLI not resolvable after install
   tracebloc() { return 0; }
   run provision_client
-  [ "$status" -ne 0 ]
-  [[ "$output" == *"tracebloc CLI is required"* ]]
+  [ "$status" -ne 0 ] || return 1
+  [[ "$output" == *"tracebloc CLI is required"* ]] || return 1
 }
 
 @test "provision_client: failed sign-in is fatal" {
@@ -122,15 +122,15 @@ _stub_tracebloc() {
   # sign-in fails — that must still be fatal, not a silent fall-through.
   tracebloc() { [[ "$*" == *--help ]] && return 0; [ "$1" = "login" ] && return 1; return 0; }
   run provision_client
-  [ "$status" -ne 0 ]
-  [[ "$output" == *"Sign-in didn't complete"* ]]
+  [ "$status" -ne 0 ] || return 1
+  [[ "$output" == *"Sign-in didn't complete"* ]] || return 1
 }
 
 @test "provision_client: client create writing no credential file is fatal" {
   tracebloc() { return 0; }              # login OK, create "succeeds" but writes nothing
   run provision_client
-  [ "$status" -ne 0 ]
-  [[ "$output" == *"did not write the credential file"* ]]
+  [ "$status" -ne 0 ] || return 1
+  [[ "$output" == *"did not write the credential file"* ]] || return 1
 }
 
 @test "provision_client: a failed client create leaves no credential file behind" {
@@ -144,8 +144,8 @@ _stub_tracebloc() {
     return 1
   }
   run provision_client
-  [ "$status" -ne 0 ]
-  [ ! -f "${HOST_DATA_DIR}/client-credential.env" ]
+  [ "$status" -ne 0 ] || return 1
+  [ ! -f "${HOST_DATA_DIR}/client-credential.env" ] || return 1
 }
 
 @test "provision_client: mint passes --name (+ --location) through to client create" {
@@ -156,8 +156,8 @@ _stub_tracebloc() {
   _stub_tracebloc 'TRACEBLOC_CLIENT_ID=1\nTRACEBLOC_CLIENT_PASSWORD=p\nTB_NAMESPACE=ns\n'
   provision_client
   run cat "$CREATE_ARGS_FILE"
-  [[ "$output" == *"--name lab box 3"* ]]
-  [[ "$output" == *"--location DE"* ]]
+  [[ "$output" == *"--name lab box 3"* ]] || return 1
+  [[ "$output" == *"--location DE"* ]] || return 1
 }
 
 @test "provision_client: refuses BEFORE minting when a foreign client already runs here (#303)" {
@@ -177,10 +177,10 @@ _stub_tracebloc() {
     return 0
   }
   run provision_client
-  [ "$status" -ne 0 ]
-  [[ "$output" == *"isn't in the account you just signed in as"* ]]
-  [[ "$output" == *"Refusing to provision a second client"* ]]
-  [ ! -s "$CREATE_ARGS_FILE" ]          # create was never called — no orphan minted
+  [ "$status" -ne 0 ] || return 1
+  [[ "$output" == *"isn't in the account you just signed in as"* ]] || return 1
+  [[ "$output" == *"Refusing to provision a second client"* ]] || return 1
+  [ ! -s "$CREATE_ARGS_FILE" ] || return 1          # create was never called — no orphan minted
 }
 
 @test "provision_client: unknown helm state (list failed) refuses BEFORE minting — no orphan (#303)" {
@@ -196,9 +196,9 @@ _stub_tracebloc() {
     return 0
   }
   run provision_client
-  [ "$status" -ne 0 ]
-  [[ "$output" == *"Couldn't determine whether a tracebloc client is already installed"* ]]
-  [ ! -s "$CREATE_ARGS_FILE" ]          # create never ran — no orphan minted
+  [ "$status" -ne 0 ] || return 1
+  [[ "$output" == *"Couldn't determine whether a tracebloc client is already installed"* ]] || return 1
+  [ ! -s "$CREATE_ARGS_FILE" ] || return 1          # create never ran — no orphan minted
 }
 
 @test "provision_client: same-account re-run with a local client still provisions (adopt path intact) (#303)" {
@@ -216,8 +216,8 @@ _stub_tracebloc() {
     return 0
   }
   provision_client
-  [ "$TB_NAMESPACE" = "my-ns" ]
-  [ "$TRACEBLOC_CLIENT_ADOPTED" = "1" ]     # adopt path reached, not refused
+  [ "$TB_NAMESPACE" = "my-ns" ] || return 1
+  [ "$TRACEBLOC_CLIENT_ADOPTED" = "1" ] || return 1     # adopt path reached, not refused
 }
 
 @test "provision_client: an unreadable client list falls through to create, not a refusal (#303)" {
@@ -233,8 +233,8 @@ _stub_tracebloc() {
     return 0
   }
   provision_client
-  [ "$TRACEBLOC_CLIENT_ID" = "9" ]          # create ran despite the inconclusive list
-  [ "$TB_NAMESPACE" = "fresh-ns" ]
+  [ "$TRACEBLOC_CLIENT_ID" = "9" ] || return 1          # create ran despite the inconclusive list
+  [ "$TB_NAMESPACE" = "fresh-ns" ] || return 1
 }
 
 @test "provision_client: legacy 'tracebloc' namespace absent from the account is NOT refused — defers to create + guard (#306 Bugbot)" {
@@ -255,7 +255,7 @@ _stub_tracebloc() {
     return 0
   }
   provision_client                          # must NOT refuse (a direct call fails the test if error exits)
-  [ "$TRACEBLOC_CLIENT_ID" = "9" ]           # deferred to create, which ran
+  [ "$TRACEBLOC_CLIENT_ID" = "9" ] || return 1           # deferred to create, which ran
 }
 
 @test "provision_client: no name and no TTY to prompt is fatal (can't provision blind)" {
@@ -263,10 +263,10 @@ _stub_tracebloc() {
   _prompt_tty() { return 1; }   # non-interactive: no terminal to prompt on
   _stub_tracebloc 'TRACEBLOC_CLIENT_ID=1\nTRACEBLOC_CLIENT_PASSWORD=p\nTB_NAMESPACE=ns\n'
   run provision_client
-  [ "$status" -ne 0 ]
-  [[ "$output" == *"name for this client is required"* ]]
+  [ "$status" -ne 0 ] || return 1
+  [[ "$output" == *"name for this client is required"* ]] || return 1
   # and it must not have called client create (no argv recorded)
-  [ ! -s "$CREATE_ARGS_FILE" ]
+  [ ! -s "$CREATE_ARGS_FILE" ] || return 1
 }
 
 @test "provision_client: type-ahead blank lines are re-prompted, not accepted as the name (2026-07-09)" {
@@ -280,9 +280,9 @@ _stub_tracebloc() {
   TB_TTY=/dev/stdin
   _stub_tracebloc 'TRACEBLOC_CLIENT_ID=1\nTRACEBLOC_CLIENT_PASSWORD=p\nTB_NAMESPACE=ns\n'
   run provision_client <<< $'\n\nMyBox\n'  # two type-ahead blanks, then the real name
-  [ "$status" -eq 0 ]
+  [ "$status" -eq 0 ] || return 1
   run cat "$CREATE_ARGS_FILE"
-  [[ "$output" == *"--name MyBox"* ]]      # the real name survived the stray blanks
+  [[ "$output" == *"--name MyBox"* ]] || return 1      # the real name survived the stray blanks
 }
 
 @test "provision_client: a dead input tty (EOF, no keystrokes) fails fast with the actionable error" {
@@ -295,9 +295,9 @@ _stub_tracebloc() {
   TB_TTY=/dev/stdin
   _stub_tracebloc 'TRACEBLOC_CLIENT_ID=1\nTRACEBLOC_CLIENT_PASSWORD=p\nTB_NAMESPACE=ns\n'
   run provision_client </dev/null          # read returns EOF immediately
-  [ "$status" -ne 0 ]
-  [[ "$output" == *"name for this client is required"* ]]
-  [ ! -s "$CREATE_ARGS_FILE" ]
+  [ "$status" -ne 0 ] || return 1
+  [[ "$output" == *"name for this client is required"* ]] || return 1
+  [ ! -s "$CREATE_ARGS_FILE" ] || return 1
 }
 
 @test "provision_client: interactive install auto-derives location from the timezone — never prompts (#354)" {
@@ -311,11 +311,11 @@ _stub_tracebloc() {
   _detect_location_zone() { printf 'FR Europe/Paris\n'; }   # detection succeeds
   _stub_tracebloc 'TRACEBLOC_CLIENT_ID=1\nTRACEBLOC_CLIENT_PASSWORD=p\nTB_NAMESPACE=ns\n'
   run provision_client <<< $'MyBox\n'
-  [ "$status" -eq 0 ]
-  [[ "$output" != *"carbon reporting"* ]]   # the location prompt is gone
+  [ "$status" -eq 0 ] || return 1
+  [[ "$output" != *"carbon reporting"* ]] || return 1   # the location prompt is gone
   run cat "$CREATE_ARGS_FILE"
-  [[ "$output" == *"--name MyBox"* ]]
-  [[ "$output" == *"--location FR"* ]]       # zone came from the timezone, silently
+  [[ "$output" == *"--name MyBox"* ]] || return 1
+  [[ "$output" == *"--location FR"* ]] || return 1       # zone came from the timezone, silently
 }
 
 @test "provision_client: interactive install with no detectable zone provisions with NO location — never prompts (#354)" {
@@ -328,12 +328,12 @@ _stub_tracebloc() {
   _detect_location_zone() { return 0; }      # nothing detected
   _stub_tracebloc 'TRACEBLOC_CLIENT_ID=1\nTRACEBLOC_CLIENT_PASSWORD=p\nTB_NAMESPACE=ns\n'
   run provision_client <<< $'MyBox\n'
-  [ "$status" -eq 0 ]                        # no location is not fatal anymore
-  [[ "$output" != *"carbon reporting"* ]]    # never prompted
-  [[ "$output" != *"location zone is required"* ]]
+  [ "$status" -eq 0 ] || return 1                        # no location is not fatal anymore
+  [[ "$output" != *"carbon reporting"* ]] || return 1    # never prompted
+  [[ "$output" != *"location zone is required"* ]] || return 1
   run cat "$CREATE_ARGS_FILE"
-  [[ "$output" == *"--name MyBox"* ]]
-  [[ "$output" != *"--location"* ]]          # provisioned with no location
+  [[ "$output" == *"--name MyBox"* ]] || return 1
+  [[ "$output" != *"--location"* ]] || return 1          # provisioned with no location
 }
 
 # ── cli#141: the #303 pre-flight's grep contract with `tracebloc client list` ──
@@ -374,23 +374,23 @@ _stub_client_list_plain() {
 
   # Owned → 0 (provision proceeds to create, which adopts).
   run _account_owns_namespace "acme-prod-01"
-  [ "$status" -eq 0 ]
+  [ "$status" -eq 0 ] || return 1
 
   # List read OK but the namespace is absent → 1 (the FOREIGN-client refuse signal).
   run _account_owns_namespace "acme-prod-99"
-  [ "$status" -eq 1 ]
+  [ "$status" -eq 1 ] || return 1
 
   # Strict prefix must NOT match: after "acme-prod-0" comes "1", not whitespace/EOL,
   # so the account does not "own" acme-prod-0 just because it owns acme-prod-01.
   # This pins the ([[:space:]]|$) anchor the installer's grep depends on — without
   # it a prefix collision would silently mis-classify ownership.
   run _account_owns_namespace "acme-prod-0"
-  [ "$status" -eq 1 ]
+  [ "$status" -eq 1 ] || return 1
 
   # The pre-flight MUST invoke the hidden list with --plain (the #141 output
   # contract). grep gives a real exit code, so this holds on bash 3.2 too.
   run grep -qF -- '--plain' "$LIST_ARGV_FILE"
-  [ "$status" -eq 0 ]
+  [ "$status" -eq 0 ] || return 1
 }
 
 @test "cli#141: _account_owns_namespace reports 'couldn't read the list' as rc 2, distinct from 'absent' rc 1" {
@@ -399,7 +399,7 @@ _stub_client_list_plain() {
   # transient blip — the distinction the #303 pre-flight branches on.
   tracebloc() { if [ "$1" = "client" ] && [ "$2" = "list" ]; then return 7; fi; return 0; }
   run _account_owns_namespace "any-ns"
-  [ "$status" -eq 2 ]
+  [ "$status" -eq 2 ] || return 1
 }
 
 # ── _report_create_failure: rejected-zone hint names the real source (Bugbot #356) ──
@@ -411,24 +411,24 @@ _stub_client_list_plain() {
   local out; out="$(mktemp)"
   printf '%s\n' "Error: location: 'ZZ' is not a valid choice." > "$out"
   run _report_create_failure "$out" "ZZ" "env"
-  [ "$status" -eq 0 ]
-  [[ "$output" == *"came from TRACEBLOC_CLIENT_LOCATION"* ]]
-  [[ "$output" != *"auto-derived from this machine's timezone"* ]]
+  [ "$status" -eq 0 ] || return 1
+  [[ "$output" == *"came from TRACEBLOC_CLIENT_LOCATION"* ]] || return 1
+  [[ "$output" != *"auto-derived from this machine's timezone"* ]] || return 1
 }
 
 @test "bugbot#356: rejected auto-derived zone still blames the timezone and offers the override" {
   local out; out="$(mktemp)"
   printf '%s\n' "Error: location: 'XX' is not a valid choice." > "$out"
   run _report_create_failure "$out" "XX" "auto"
-  [ "$status" -eq 0 ]
-  [[ "$output" == *"auto-derived from this machine's timezone"* ]]
-  [[ "$output" == *"TRACEBLOC_CLIENT_LOCATION"* ]]
+  [ "$status" -eq 0 ] || return 1
+  [[ "$output" == *"auto-derived from this machine's timezone"* ]] || return 1
+  [[ "$output" == *"TRACEBLOC_CLIENT_LOCATION"* ]] || return 1
 }
 
 @test "bugbot#356: source defaults to auto when the caller omits it" {
   local out; out="$(mktemp)"
   printf '%s\n' "Error: location: 'XX' is not a valid choice." > "$out"
   run _report_create_failure "$out" "XX"
-  [ "$status" -eq 0 ]
-  [[ "$output" == *"auto-derived from this machine's timezone"* ]]
+  [ "$status" -eq 0 ] || return 1
+  [[ "$output" == *"auto-derived from this machine's timezone"* ]] || return 1
 }

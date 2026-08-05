@@ -25,101 +25,101 @@ setup() {
 @test "_backend_url: default (unset) -> prod" {
   unset CLIENT_ENV
   run _backend_url
-  [ "$output" = "https://api.tracebloc.io/" ]
+  [ "$output" = "https://api.tracebloc.io/" ] || return 1
 }
 
 @test "_backend_url: dev" {
   CLIENT_ENV=dev
   run _backend_url
-  [ "$output" = "https://dev-api.tracebloc.io/" ]
+  [ "$output" = "https://dev-api.tracebloc.io/" ] || return 1
 }
 
 @test "_backend_url: stg" {
   CLIENT_ENV=stg
   run _backend_url
-  [ "$output" = "https://stg-api.tracebloc.io/" ]
+  [ "$output" = "https://stg-api.tracebloc.io/" ] || return 1
 }
 
 @test "_backend_url: unknown -> prod" {
   CLIENT_ENV=whatever
   run _backend_url
-  [ "$output" = "https://api.tracebloc.io/" ]
+  [ "$output" = "https://api.tracebloc.io/" ] || return 1
 }
 
 # ── verify_credentials (mock curl's http_code on stdout) ───────────────────
 @test "verify_credentials: HTTP 200 -> valid" {
   curl() { echo 200; }
   run verify_credentials id pw
-  [ "$output" = valid ]
+  [ "$output" = valid ] || return 1
 }
 
 @test "verify_credentials: HTTP 400 -> invalid" {
   curl() { echo 400; }
   run verify_credentials id pw
-  [ "$output" = invalid ]
+  [ "$output" = invalid ] || return 1
 }
 
 @test "verify_credentials: HTTP 401 -> inactive" {
   curl() { echo 401; }
   run verify_credentials id pw
-  [ "$output" = inactive ]
+  [ "$output" = inactive ] || return 1
 }
 
 @test "verify_credentials: HTTP 429 -> unverified" {
   curl() { echo 429; }
   run verify_credentials id pw
-  [ "$output" = unverified ]
+  [ "$output" = unverified ] || return 1
 }
 
 @test "verify_credentials: connection failure -> unverified" {
   curl() { return 7; }
   run verify_credentials id pw
-  [ "$output" = unverified ]
+  [ "$output" = unverified ] || return 1
 }
 
 # ── sanitizers ─────────────────────────────────────────────────────────────
 @test "_strip_paste_garbage: unwraps bracketed-paste ESC markers" {
   run _strip_paste_garbage "$(printf '\e[200~secret\e[201~')"
-  [ "$output" = "secret" ]
+  [ "$output" = "secret" ] || return 1
 }
 
 @test "_strip_paste_garbage: strips C0 control chars, keeps text" {
   run _strip_paste_garbage "$(printf 'ab\001cd')"
-  [ "$output" = "abcd" ]
+  [ "$output" = "abcd" ] || return 1
 }
 
 @test "_sanitize_workspace_name: lowercases + dashes" {
   run _sanitize_workspace_name "My Team_1"
-  [ "$output" = "my-team-1" ]
+  [ "$output" = "my-team-1" ] || return 1
 }
 
 @test "_sanitize_workspace_name: all-invalid -> default" {
   run _sanitize_workspace_name "@@@"
-  [ "$output" = "default" ]
+  [ "$output" = "default" ] || return 1
 }
 
 @test "_sanitize_workspace_name: collapses + trims dashes" {
   run _sanitize_workspace_name "a--b-"
-  [ "$output" = "a-b" ]
+  [ "$output" = "a-b" ] || return 1
 }
 
 # ── _extract_yaml_value ────────────────────────────────────────────────────
 @test "_extract_yaml_value: double-quoted" {
   f="$BATS_TEST_TMPDIR/v"; printf 'clientId: "abc-123"\n' >"$f"
   run _extract_yaml_value "$f" clientId
-  [ "$output" = "abc-123" ]
+  [ "$output" = "abc-123" ] || return 1
 }
 
 @test "_extract_yaml_value: single-quoted with '' escape" {
   f="$BATS_TEST_TMPDIR/v"; printf "clientPassword: 'a''b'\n" >"$f"
   run _extract_yaml_value "$f" clientPassword
-  [ "$output" = "a'b" ]
+  [ "$output" = "a'b" ] || return 1
 }
 
 @test "_extract_yaml_value: missing key -> empty" {
   f="$BATS_TEST_TMPDIR/v"; printf 'other: x\n' >"$f"
   run _extract_yaml_value "$f" clientId
-  [ "$output" = "" ]
+  [ "$output" = "" ] || return 1
 }
 
 # The BARE-statement shape is the one that used to die (#523): on an absent key
@@ -169,23 +169,23 @@ setup() {
 # directions and their round-trip are pinned here.
 @test "_yaml_sq_escape: doubles a quote (no stray backslash on bash 3.2)" {
   run _yaml_sq_escape "a'b"
-  [ "$output" = "a''b" ]
+  [ "$output" = "a''b" ] || return 1
 }
 
 @test "_yaml_sq_escape: leaves a quote-free value untouched" {
   run _yaml_sq_escape 'plain-uuid-123'
-  [ "$output" = 'plain-uuid-123' ]
+  [ "$output" = 'plain-uuid-123' ] || return 1
 }
 
 @test "_yaml_sq_unescape: collapses a doubled quote" {
   run _yaml_sq_unescape "a''b"
-  [ "$output" = "a'b" ]
+  [ "$output" = "a'b" ] || return 1
 }
 
 @test "_yaml_sq_escape then _yaml_sq_unescape round-trips quote-heavy values" {
   for v in "a'b" "'" "''" "it's a 'test'" "no-quotes"; do
     esc="$(_yaml_sq_escape "$v")"
-    [ "$(_yaml_sq_unescape "$esc")" = "$v" ]
+    [ "$(_yaml_sq_unescape "$esc")" = "$v" ] || return 1
   done
 }
 
@@ -197,7 +197,7 @@ setup() {
   raw="ab'cd"
   printf "clientId: '%s'\n" "$(_yaml_sq_escape "$raw")" >"$f"
   run _extract_yaml_value "$f" clientId
-  [ "$output" = "$raw" ]
+  [ "$output" = "$raw" ] || return 1
 }
 
 @test "a double-quote in clientId no longer breaks the scalar" {
@@ -207,20 +207,20 @@ setup() {
   # In a single-quoted YAML scalar a double quote is literal — no escaping needed,
   # and crucially it can no longer terminate the scalar early.
   run _extract_yaml_value "$f" clientId
-  [ "$output" = "$raw" ]
+  [ "$output" = "$raw" ] || return 1
 }
 
 @test "the generated values file quotes clientId with the escaper, not raw interpolation" {
   f="$BATS_TEST_DIRNAME/../lib/install-client-helm.sh"
   grep -qE "^clientId: '\\\$TB_CLIENT_ID_ESCAPED'" "$f"
-  ! grep -qE '^clientId: "\$TB_CLIENT_ID"' "$f"
+  ! grep -qE '^clientId: "\$TB_CLIENT_ID"' "$f" || return 1
 }
 
 # ── _ensure_helm_runnable (happy path) ─────────────────────────────────────
 @test "_ensure_helm_runnable: helm runs -> ok" {
   helm() { return 0; }
   run _ensure_helm_runnable
-  [ "$status" -eq 0 ]
+  [ "$status" -eq 0 ] || return 1
 }
 
 # ── install_client_helm: full flow with mocks ──────────────────────────────
@@ -232,9 +232,9 @@ setup() {
   helm() { record "helm $*"; return 0; }
   verify_credentials() { printf valid; }
   run install_client_helm <<< $'myid\nmypw'
-  [ "$status" -eq 0 ]
-  [[ "$output" == *"Credentials verified"* ]]
-  [[ "$output" == *"tracebloc installed"* ]]
+  [ "$status" -eq 0 ] || return 1
+  [[ "$output" == *"Credentials verified"* ]] || return 1
+  [[ "$output" == *"tracebloc installed"* ]] || return 1
   grep -q "clientId: 'myid'" "$HOST_DATA_DIR/values.yaml"
   grep -q "clientPassword: 'mypw'" "$HOST_DATA_DIR/values.yaml"
   # client-runtime#92: installer-provisioned k3d is a fixed single-host cluster,
@@ -255,7 +255,7 @@ setup() {
   helm() { record "helm $*"; return 0; }
   verify_credentials() { printf valid; }
   run install_client_helm <<< $'myid\nmypw'
-  [ "$status" -eq 0 ]
+  [ "$status" -eq 0 ] || return 1
   grep -q 'datasetPath: /tracebloc-data' "$HOST_DATA_DIR/values.yaml"
   grep -qE 'HOST_UID: "[0-9]+"' "$HOST_DATA_DIR/values.yaml"
   grep -qE 'HOST_GID: "[0-9]+"' "$HOST_DATA_DIR/values.yaml"
@@ -270,9 +270,9 @@ setup() {
   helm() { record "helm $*"; return 0; }
   verify_credentials() { printf valid; }
   run install_client_helm <<< $'myid\nmypw'
-  [ "$status" -eq 0 ]
-  ! grep -q 'datasetPath:' "$HOST_DATA_DIR/values.yaml"
-  ! grep -q 'HOST_UID:' "$HOST_DATA_DIR/values.yaml"
+  [ "$status" -eq 0 ] || return 1
+  ! grep -q 'datasetPath:' "$HOST_DATA_DIR/values.yaml" || return 1
+  ! grep -q 'HOST_UID:' "$HOST_DATA_DIR/values.yaml" || return 1
 }
 
 @test "install_client_helm: TRACEBLOC_CLIENT_* env -> non-interactive (no prompt), writes values.yaml + helm" {
@@ -284,9 +284,9 @@ setup() {
   verify_credentials() { printf valid; }
   export TRACEBLOC_CLIENT_ID=envid TRACEBLOC_CLIENT_PASSWORD=envpw
   run install_client_helm </dev/null    # no stdin: must not prompt
-  [ "$status" -eq 0 ]
-  [[ "$output" == *"Credentials verified"* ]]
-  [[ "$output" != *"Client ID:"* ]]
+  [ "$status" -eq 0 ] || return 1
+  [[ "$output" == *"Credentials verified"* ]] || return 1
+  [[ "$output" != *"Client ID:"* ]] || return 1
   grep -q "clientId: 'envid'" "$HOST_DATA_DIR/values.yaml"
   grep -q "clientPassword: 'envpw'" "$HOST_DATA_DIR/values.yaml"
   mock_calls | grep -q "helm upgrade --install tracebloc"
@@ -311,18 +311,18 @@ setup() {
   # heal a cli#125-era numeric clientId on the existing release.
   export TRACEBLOC_CLIENT_ADOPTED=1 TRACEBLOC_CLIENT_ID=0e9db54e-c9c0-4bf3-9ff2-1646da307019
   run install_client_helm </dev/null              # no stdin: must not prompt
-  [ "$status" -eq 0 ]
-  [[ "$output" != *"Client ID:"* ]]                # no credential prompt
-  [[ "$output" != *"VERIFY_CALLED"* ]]             # no verify
-  [[ "$output" == *"reconciling"* ]]
-  [[ "$output" == *"tracebloc installed"* ]]
+  [ "$status" -eq 0 ] || return 1
+  [[ "$output" != *"Client ID:"* ]] || return 1                # no credential prompt
+  [[ "$output" != *"VERIFY_CALLED"* ]] || return 1             # no verify
+  [[ "$output" == *"reconciling"* ]] || return 1
+  [[ "$output" == *"tracebloc installed"* ]] || return 1
   # Reconciled the LIVE release in place (name 'munich') AND healed clientId to the
   # adopted UUID, reusing the stored password — NOT a fresh --install, no duplicate.
   mock_calls | grep -q "helm upgrade munich"
   mock_calls | grep -q -- "--reset-then-reuse-values"
   mock_calls | grep -q -- "--set clientId=0e9db54e-c9c0-4bf3-9ff2-1646da307019"
   run mock_calls
-  [[ "$output" != *"helm upgrade --install"* ]]
+  [[ "$output" != *"helm upgrade --install"* ]] || return 1
 }
 
 @test "install_client_helm: adopt with NO client id (rebuilt host / R7) reconciles WITHOUT a heal — no prompt, no bail" {
@@ -341,15 +341,15 @@ setup() {
   # R7 orphan). Reconcile the LIVE release WITHOUT a heal — must not bail to a prompt.
   export TRACEBLOC_CLIENT_ADOPTED=1
   run install_client_helm </dev/null
-  [ "$status" -eq 0 ]
-  [[ "$output" != *"Client ID:"* ]]                # no prompt (no bail)
-  [[ "$output" != *"VERIFY_CALLED"* ]]             # no verify
-  [[ "$output" == *"tracebloc installed"* ]]
+  [ "$status" -eq 0 ] || return 1
+  [[ "$output" != *"Client ID:"* ]] || return 1                # no prompt (no bail)
+  [[ "$output" != *"VERIFY_CALLED"* ]] || return 1             # no verify
+  [[ "$output" == *"tracebloc installed"* ]] || return 1
   mock_calls | grep -q "helm upgrade munich"
   mock_calls | grep -q -- "--reset-then-reuse-values"
   run mock_calls
-  [[ "$output" != *"helm upgrade --install"* ]]
-  [[ "$output" != *"--set clientId"* ]]            # nothing to heal with → no --set
+  [[ "$output" != *"helm upgrade --install"* ]] || return 1
+  [[ "$output" != *"--set clientId"* ]] || return 1            # nothing to heal with → no --set
 }
 
 @test "install_client_helm: adopt on older Helm (no --reset-then-reuse-values) falls back to --reuse-values" {
@@ -366,10 +366,10 @@ setup() {
   verify_credentials() { echo "VERIFY_CALLED"; printf invalid; }
   export TRACEBLOC_CLIENT_ADOPTED=1
   run install_client_helm </dev/null
-  [ "$status" -eq 0 ]
+  [ "$status" -eq 0 ] || return 1
   mock_calls | grep -q -- "--reuse-values"
   run mock_calls
-  [[ "$output" != *"--reset-then-reuse-values"* ]]
+  [[ "$output" != *"--reset-then-reuse-values"* ]] || return 1
 }
 
 @test "install_client_helm: adopted but no live release -> falls back to the normal connect (fresh install)" {
@@ -385,8 +385,8 @@ setup() {
   verify_credentials() { printf valid; }
   export TRACEBLOC_CLIENT_ADOPTED=1
   run install_client_helm <<< $'typed-id\ntyped-pw'   # must fall through to the prompt
-  [ "$status" -eq 0 ]
-  [[ "$output" == *"no live tracebloc release"* ]]     # explained the fallback
+  [ "$status" -eq 0 ] || return 1
+  [[ "$output" == *"no live tracebloc release"* ]] || return 1     # explained the fallback
   mock_calls | grep -q "helm upgrade --install tracebloc"
 }
 
@@ -399,10 +399,10 @@ setup() {
   verify_credentials() { printf invalid; }
   export TRACEBLOC_CLIENT_ID=envid TRACEBLOC_CLIENT_PASSWORD=envpw
   run install_client_helm </dev/null
-  [ "$status" -ne 0 ]
-  [[ "$output" == *"rejected"* ]]
+  [ "$status" -ne 0 ] || return 1
+  [[ "$output" == *"rejected"* ]] || return 1
   run mock_calls
-  [[ "$output" != *"helm upgrade"* ]]
+  [[ "$output" != *"helm upgrade"* ]] || return 1
 }
 
 @test "install_client_helm: no credentials + no terminal -> actionable error, no helm (curl|bash)" {
@@ -418,10 +418,10 @@ setup() {
   unset TRACEBLOC_CLIENT_ID TRACEBLOC_CLIENT_PASSWORD
   export TB_TTY="$BATS_TEST_TMPDIR/no-such-tty"
   run install_client_helm </dev/null
-  [ "$status" -ne 0 ]
-  [[ "$output" == *"TRACEBLOC_CLIENT_ID"* ]]
+  [ "$status" -ne 0 ] || return 1
+  [[ "$output" == *"TRACEBLOC_CLIENT_ID"* ]] || return 1
   run mock_calls
-  [[ "$output" != *"helm upgrade"* ]]
+  [[ "$output" != *"helm upgrade"* ]] || return 1
 }
 
 @test "install_client_helm: readable-but-dead-input tty (EOF) fails fast, doesn't abort mid-read (#326 review)" {
@@ -439,10 +439,10 @@ setup() {
   unset TRACEBLOC_CLIENT_ID TRACEBLOC_CLIENT_PASSWORD
   TB_TTY=/dev/stdin
   run install_client_helm </dev/null   # tty is readable, but yields EOF immediately
-  [ "$status" -ne 0 ]
-  [[ "$output" == *"TRACEBLOC_CLIENT_ID"* ]]
+  [ "$status" -ne 0 ] || return 1
+  [[ "$output" == *"TRACEBLOC_CLIENT_ID"* ]] || return 1
   run mock_calls
-  [[ "$output" != *"helm upgrade"* ]]
+  [[ "$output" != *"helm upgrade"* ]] || return 1
 }
 
 @test "install_client_helm: points kubeconfig at the client namespace (so the CLI needs no -n)" {
@@ -454,7 +454,7 @@ setup() {
   kubectl() { record "kubectl $*"; return 0; }
   verify_credentials() { printf valid; }
   run install_client_helm <<< $'myid\nmypw'
-  [ "$status" -eq 0 ]
+  [ "$status" -eq 0 ] || return 1
   mock_calls | grep -q "kubectl config set-context --current --namespace tracebloc"
 }
 
@@ -469,9 +469,9 @@ setup() {
     if [ "$n" -ge 2 ]; then printf valid; else printf invalid; fi
   }
   run install_client_helm <<< $'badid\nbadpw\ngoodid\ngoodpw'
-  [ "$status" -eq 0 ]
-  [[ "$output" == *"rejected"* ]]
-  [[ "$output" == *"Credentials verified"* ]]
+  [ "$status" -eq 0 ] || return 1
+  [[ "$output" == *"rejected"* ]] || return 1
+  [[ "$output" == *"Credentials verified"* ]] || return 1
   grep -q "clientId: 'goodid'" "$HOST_DATA_DIR/values.yaml"
 }
 
@@ -483,10 +483,10 @@ setup() {
   helm() { record "helm $*"; return 0; }
   verify_credentials() { printf inactive; }
   run install_client_helm <<< $'myid\nmypw'
-  [ "$status" -ne 0 ]
-  [[ "$output" == *"not active"* ]]
+  [ "$status" -ne 0 ] || return 1
+  [[ "$output" == *"not active"* ]] || return 1
   run mock_calls
-  [[ "$output" != *"helm upgrade"* ]]
+  [[ "$output" != *"helm upgrade"* ]] || return 1
 }
 
 @test "install_client_helm: unverified backend -> proceeds with install" {
@@ -497,10 +497,10 @@ setup() {
   helm() { record "helm $*"; return 0; }
   verify_credentials() { printf unverified; }
   run install_client_helm <<< $'myid\nmypw'
-  [ "$status" -eq 0 ]
-  [[ "$output" == *"Couldn't reach tracebloc"* ]]
+  [ "$status" -eq 0 ] || return 1
+  [[ "$output" == *"Couldn't reach tracebloc"* ]] || return 1
   run mock_calls
-  [[ "$output" == *"helm upgrade --install"* ]]
+  [[ "$output" == *"helm upgrade --install"* ]] || return 1
 }
 
 @test "install_client_helm: dev-mode uses caller values file, skips prompts" {
@@ -512,9 +512,9 @@ setup() {
   helm() { record "helm $*"; return 0; }
   TRACEBLOC_VALUES_FILE="$vf"; TB_NAMESPACE=devns
   run install_client_helm
-  [ "$status" -eq 0 ]
+  [ "$status" -eq 0 ] || return 1
   run mock_calls
-  [[ "$output" == *"helm upgrade --install devns"* ]]
+  [[ "$output" == *"helm upgrade --install devns"* ]] || return 1
 }
 
 @test "install_client_helm: reuses previous clientId/password defaults" {
@@ -527,7 +527,7 @@ setup() {
   verify_credentials() { printf valid; }
   # use-previous=y, ClientID=Enter(keep previd), password=Enter(keep prevpw)
   run install_client_helm <<< $'y\n\n\n'
-  [ "$status" -eq 0 ]
+  [ "$status" -eq 0 ] || return 1
   grep -q "clientId: 'previd'" "$HOST_DATA_DIR/values.yaml"
   grep -q "clientPassword: 'prevpw'" "$HOST_DATA_DIR/values.yaml"
 }
@@ -540,10 +540,10 @@ setup() {
   helm() { record "helm $*"; return 0; }
   verify_credentials() { printf invalid; }
   run install_client_helm <<< $'i1\np1\ni2\np2\ni3\np3\ni4\np4\ni5\np5'
-  [ "$status" -ne 0 ]
-  [[ "$output" == *"Too many failed attempts"* ]]
+  [ "$status" -ne 0 ] || return 1
+  [[ "$output" == *"Too many failed attempts"* ]] || return 1
   run mock_calls
-  [[ "$output" != *"helm upgrade"* ]]
+  [[ "$output" != *"helm upgrade"* ]] || return 1
 }
 
 # ── One-client-per-machine guard ────────────────────────────────────────────
@@ -564,11 +564,11 @@ setup() {
   }
   verify_credentials() { printf valid; }
   run install_client_helm <<< $'newclient\nmypw'
-  [ "$status" -ne 0 ]
-  [[ "$output" == *"already runs the tracebloc client 'otherclient'"* ]]
-  [[ "$output" == *"one client per machine"* ]]
+  [ "$status" -ne 0 ] || return 1
+  [[ "$output" == *"already runs the tracebloc client 'otherclient'"* ]] || return 1
+  [[ "$output" == *"one client per machine"* ]] || return 1
   run mock_calls
-  [[ "$output" != *"helm upgrade"* ]]
+  [[ "$output" != *"helm upgrade"* ]] || return 1
 }
 
 @test "install_client_helm: helm list failure -> fails CLOSED (refuses, no upgrade)" {
@@ -585,10 +585,10 @@ setup() {
   }
   verify_credentials() { printf valid; }
   run install_client_helm <<< $'newclient\nmypw'
-  [ "$status" -ne 0 ]
-  [[ "$output" == *"Couldn't determine which tracebloc client"* ]]
+  [ "$status" -ne 0 ] || return 1
+  [[ "$output" == *"Couldn't determine which tracebloc client"* ]] || return 1
   run mock_calls
-  [[ "$output" != *"helm upgrade"* ]]
+  [[ "$output" != *"helm upgrade"* ]] || return 1
 }
 
 @test "install_client_helm: unreadable client values -> fails CLOSED (refuses, no upgrade)" {
@@ -610,10 +610,10 @@ setup() {
   }
   verify_credentials() { printf valid; }
   run install_client_helm <<< $'newclient\nmypw'
-  [ "$status" -ne 0 ]
-  [[ "$output" == *"Couldn't determine which tracebloc client"* ]]
+  [ "$status" -ne 0 ] || return 1
+  [[ "$output" == *"Couldn't determine which tracebloc client"* ]] || return 1
   run mock_calls
-  [[ "$output" != *"helm upgrade"* ]]
+  [[ "$output" != *"helm upgrade"* ]] || return 1
 }
 
 @test "install_client_helm: same client re-run is allowed (upgrade in place)" {
@@ -632,9 +632,9 @@ setup() {
   }
   verify_credentials() { printf valid; }
   run install_client_helm <<< $'sameid\nmypw'
-  [ "$status" -eq 0 ]
+  [ "$status" -eq 0 ] || return 1
   run mock_calls
-  [[ "$output" == *"helm upgrade --install tracebloc"* ]]
+  [[ "$output" == *"helm upgrade --install tracebloc"* ]] || return 1
 }
 
 @test "install_client_helm: same client in a different namespace -> upgrades in place, no duplicate" {
@@ -657,10 +657,10 @@ setup() {
   }
   verify_credentials() { printf valid; }
   run install_client_helm <<< $'sameid\nmypw'
-  [ "$status" -eq 0 ]
+  [ "$status" -eq 0 ] || return 1
   run mock_calls
-  [[ "$output" == *"helm upgrade --install tracebloc"* ]]   # reused existing namespace
-  [[ "$output" != *"acme-corp"* ]]                          # no second release forked
+  [[ "$output" == *"helm upgrade --install tracebloc"* ]] || return 1   # reused existing namespace
+  [[ "$output" != *"acme-corp"* ]] || return 1                          # no second release forked
 }
 
 @test "install_client_helm: different-namespace reconcile works WITHOUT jq (Bugbot #284)" {
@@ -686,61 +686,61 @@ setup() {
   }
   verify_credentials() { printf valid; }
   run install_client_helm <<< $'sameid\nmypw'
-  [ "$status" -eq 0 ]
+  [ "$status" -eq 0 ] || return 1
   run mock_calls
-  [[ "$output" == *"helm upgrade --install tracebloc"* ]]   # reused existing namespace
-  [[ "$output" != *"acme-corp"* ]]                          # no second release forked
+  [[ "$output" == *"helm upgrade --install tracebloc"* ]] || return 1   # reused existing namespace
+  [[ "$output" != *"acme-corp"* ]] || return 1                          # no second release forked
 }
 
 # ── _chart_proxy_env_yaml (#242: host proxy -> split chart keys) ─────────────
 @test "_chart_proxy_env_yaml: no proxy on host -> empty" {
   run _chart_proxy_env_yaml
-  [ "$status" -eq 0 ]
-  [ -z "$output" ]
+  [ "$status" -eq 0 ] || return 1
+  [ -z "$output" ] || return 1
 }
 
 @test "_chart_proxy_env_yaml: host:port -> HTTP_PROXY_HOST + HTTP_PROXY_PORT" {
   HTTP_PROXY="http://proxy.charite.de:8080"
   run _chart_proxy_env_yaml
-  [[ "$output" == *'HTTP_PROXY_HOST: "proxy.charite.de"'* ]]
-  [[ "$output" == *'HTTP_PROXY_PORT: "8080"'* ]]
-  [[ "$output" != *"HTTP_PROXY_USERNAME"* ]]
+  [[ "$output" == *'HTTP_PROXY_HOST: "proxy.charite.de"'* ]] || return 1
+  [[ "$output" == *'HTTP_PROXY_PORT: "8080"'* ]] || return 1
+  [[ "$output" != *"HTTP_PROXY_USERNAME"* ]] || return 1
 }
 
 @test "_chart_proxy_env_yaml: prefers HTTPS_PROXY when HTTP_PROXY unset" {
   HTTPS_PROXY="http://proxy.example.com:3128"
   run _chart_proxy_env_yaml
-  [[ "$output" == *'HTTP_PROXY_HOST: "proxy.example.com"'* ]]
-  [[ "$output" == *'HTTP_PROXY_PORT: "3128"'* ]]
+  [[ "$output" == *'HTTP_PROXY_HOST: "proxy.example.com"'* ]] || return 1
+  [[ "$output" == *'HTTP_PROXY_PORT: "3128"'* ]] || return 1
 }
 
 @test "_chart_proxy_env_yaml: authenticated proxy -> username/password split" {
   HTTPS_PROXY="http://user:s3cr3t@proxy.example.com:3128"
   run _chart_proxy_env_yaml
-  [[ "$output" == *'HTTP_PROXY_HOST: "proxy.example.com"'* ]]
-  [[ "$output" == *'HTTP_PROXY_PORT: "3128"'* ]]
-  [[ "$output" == *'HTTP_PROXY_USERNAME: "user"'* ]]
-  [[ "$output" == *'HTTP_PROXY_PASSWORD: "s3cr3t"'* ]]
+  [[ "$output" == *'HTTP_PROXY_HOST: "proxy.example.com"'* ]] || return 1
+  [[ "$output" == *'HTTP_PROXY_PORT: "3128"'* ]] || return 1
+  [[ "$output" == *'HTTP_PROXY_USERNAME: "user"'* ]] || return 1
+  [[ "$output" == *'HTTP_PROXY_PASSWORD: "s3cr3t"'* ]] || return 1
 }
 
 @test "_chart_proxy_env_yaml: '@' in password tolerated (split on last @)" {
   http_proxy="http://user:p@ss@proxy.example.com:8080"
   run _chart_proxy_env_yaml
-  [[ "$output" == *'HTTP_PROXY_HOST: "proxy.example.com"'* ]]
-  [[ "$output" == *'HTTP_PROXY_PASSWORD: "p@ss"'* ]]
+  [[ "$output" == *'HTTP_PROXY_HOST: "proxy.example.com"'* ]] || return 1
+  [[ "$output" == *'HTTP_PROXY_PASSWORD: "p@ss"'* ]] || return 1
 }
 
 @test "_chart_proxy_env_yaml: no port -> HTTP_PROXY_HOST only, no PORT line" {
   HTTP_PROXY="http://proxy.example.com"
   run _chart_proxy_env_yaml
-  [[ "$output" == *'HTTP_PROXY_HOST: "proxy.example.com"'* ]]
-  [[ "$output" != *"HTTP_PROXY_PORT"* ]]
+  [[ "$output" == *'HTTP_PROXY_HOST: "proxy.example.com"'* ]] || return 1
+  [[ "$output" != *"HTTP_PROXY_PORT"* ]] || return 1
 }
 
 @test "_chart_proxy_env_yaml: passes host NO_PROXY through (proxyEnv unions cluster ranges)" {
   HTTP_PROXY="http://proxy:8080"; NO_PROXY="myinternal.example,.corp"
   run _chart_proxy_env_yaml
-  [[ "$output" == *'NO_PROXY: "myinternal.example,.corp"'* ]]
+  [[ "$output" == *'NO_PROXY: "myinternal.example,.corp"'* ]] || return 1
 }
 
 # ── install_client_helm: host proxy propagated into the generated values ────
@@ -753,7 +753,7 @@ setup() {
   verify_credentials() { printf valid; }
   HTTP_PROXY="http://proxy.charite.de:8080"; NO_PROXY=".charite.de"
   run install_client_helm <<< $'myid\nmypw'
-  [ "$status" -eq 0 ]
+  [ "$status" -eq 0 ] || return 1
   # NB: the "Corporate proxy detected" notice goes through log(), which the test
   # harness routes to /dev/null — so assert on the generated file, not $output.
   grep -q 'HTTP_PROXY_HOST: "proxy.charite.de"' "$HOST_DATA_DIR/values.yaml"
@@ -772,8 +772,8 @@ setup() {
   helm() { record "helm $*"; return 0; }
   verify_credentials() { printf valid; }
   run install_client_helm <<< $'myid\nmypw'
-  [ "$status" -eq 0 ]
-  ! grep -q 'HTTP_PROXY_HOST' "$HOST_DATA_DIR/values.yaml"
+  [ "$status" -eq 0 ] || return 1
+  ! grep -q 'HTTP_PROXY_HOST' "$HOST_DATA_DIR/values.yaml" || return 1
 }
 
 @test "install_client_helm: TRACEBLOC_TRAINING_RESOURCES overrides the training size in generated values" {
@@ -785,7 +785,7 @@ setup() {
   verify_credentials() { printf valid; }
   export TRACEBLOC_TRAINING_RESOURCES="cpu=4,memory=16Gi"
   run install_client_helm <<< $'myid\nmypw'
-  [ "$status" -eq 0 ]
+  [ "$status" -eq 0 ] || return 1
   grep -q 'RESOURCE_LIMITS: "cpu=4,memory=16Gi"' "$HOST_DATA_DIR/values.yaml"
   grep -q 'RESOURCE_REQUESTS: "cpu=4,memory=16Gi"' "$HOST_DATA_DIR/values.yaml"
 }
@@ -800,7 +800,7 @@ setup() {
   verify_credentials() { printf valid; }
   unset TRACEBLOC_TRAINING_RESOURCES
   run install_client_helm <<< $'myid\nmypw'
-  [ "$status" -eq 0 ]
+  [ "$status" -eq 0 ] || return 1
   grep -q 'RESOURCE_LIMITS: "cpu=2,memory=8Gi"' "$HOST_DATA_DIR/values.yaml"
   grep -q 'RESOURCE_REQUESTS: "cpu=2,memory=8Gi"' "$HOST_DATA_DIR/values.yaml"
 }
@@ -811,9 +811,9 @@ setup() {
   helm() { record "helm $*"; return 1; }
   kubectl() { record "kubectl $*"; return 1; }
   run _training_resources
-  [ "$output" = "cpu=4,memory=16Gi" ]
+  [ "$output" = "cpu=4,memory=16Gi" ] || return 1
   run mock_calls
-  [ -z "$output" ]
+  [ -z "$output" ] || return 1
   unset TRACEBLOC_TRAINING_RESOURCES
 }
 
@@ -828,13 +828,13 @@ setup() {
     case "$*" in *"get namespace"*--request-timeout=*) return 0 ;; *) return 1 ;; esac
   }
   run _training_resources
-  [ "$output" = "cpu=4,memory=12Gi" ]
+  [ "$output" = "cpu=4,memory=12Gi" ] || return 1
   run mock_calls
-  [[ "$output" != *"get nodes"* ]]   # machine sizing never consulted
+  [[ "$output" != *"get nodes"* ]] || return 1   # machine sizing never consulted
   # and the QUOTED form (our own values file style) parses identically
   helm() { printf 'env:\n  RESOURCE_LIMITS: "cpu=4,memory=12Gi"\n'; }
   run _training_resources
-  [ "$output" = "cpu=4,memory=12Gi" ]
+  [ "$output" = "cpu=4,memory=12Gi" ] || return 1
 }
 
 @test "training size: the historic static default is NOT carried — re-install gets sized" {
@@ -852,7 +852,7 @@ setup() {
     esac
   }
   run _training_resources
-  [ "$output" = "cpu=11,memory=3Gi" ]
+  [ "$output" = "cpu=11,memory=3Gi" ] || return 1
 }
 
 @test "training size: fresh install sized to the largest node minus overhead" {
@@ -871,7 +871,7 @@ setup() {
     esac
   }
   run _training_resources
-  [ "$output" = "cpu=11,memory=3Gi" ]   # 12−1 CPU; 6.76−3 GiB floored
+  [ "$output" = "cpu=11,memory=3Gi" ] || return 1   # 12−1 CPU; 6.76−3 GiB floored
 }
 
 @test "training size: below-floor machine falls back to the static default" {
@@ -881,7 +881,7 @@ setup() {
   has() { return 0; }
   kubectl() { printf '2 4Gi\n'; }        # 4−3 GiB = 1 GiB < the 2 GiB floor
   run _training_resources
-  [ "$output" = "cpu=2,memory=8Gi" ]
+  [ "$output" = "cpu=2,memory=8Gi" ] || return 1
 }
 
 @test "training size: kubectl absent falls back to the static default" {
@@ -891,42 +891,42 @@ setup() {
   kubectl() { return 1; }   # the probe also fails -> carry skipped hermetically
   has() { case "$1" in kubectl) return 1 ;; *) return 0 ;; esac; }
   run _training_resources
-  [ "$output" = "cpu=2,memory=8Gi" ]
+  [ "$output" = "cpu=2,memory=8Gi" ] || return 1
 }
 
 # ── _download_services_progress (step-e count bar; must never hang/fail) ─────
 @test "_download_services_progress: TB_NO_SERVICE_PROGRESS set -> immediate no-op" {
   export TB_NO_SERVICE_PROGRESS=1
   run _download_services_progress tracebloc
-  [ "$status" -eq 0 ]
-  [ -z "$output" ]
+  [ "$status" -eq 0 ] || return 1
+  [ -z "$output" ] || return 1
 }
 
 @test "_download_services_progress: kubectl absent -> silent skip (never fatal)" {
   unset TB_NO_SERVICE_PROGRESS
   has() { return 1; }                 # kubectl not present
   run _download_services_progress tracebloc
-  [ "$status" -eq 0 ]
-  [ -z "$output" ]
+  [ "$status" -eq 0 ] || return 1
+  [ -z "$output" ] || return 1
 }
 
 @test "_download_services_progress: empty namespace -> no-op" {
   unset TB_NO_SERVICE_PROGRESS
   has() { return 0; }
   run _download_services_progress ""
-  [ "$status" -eq 0 ]
-  [ -z "$output" ]
+  [ "$status" -eq 0 ] || return 1
+  [ -z "$output" ] || return 1
 }
 
 # ── bounded helm calls (#426) ────────────────────────────────────────────────
 @test "both helm invocations run under a deadline, none unbounded (#426)" {
   local f="$BATS_TEST_DIRNAME/../lib/install-client-helm.sh"
-  ! grep -qE 'spin_cmd "(Reconciling the existing client|Installing the tracebloc client)' "$f"
+  ! grep -qE 'spin_cmd "(Reconciling the existing client|Installing the tracebloc client)' "$f" || return 1
   # rc is captured (|| _helm_rc=$?) rather than tested via `if !` so the 124
   # timeout case can print its unwedge guidance before error (Bugbot #442).
   # Match the invocation lines only (comments also mention the helper).
-  [ "$(grep -c 'spin_cmd_bounded "\$(( _helm_timeout_min \* 60 ))"' "$f")" -eq 2 ]
-  [ "$(grep -c '|| _helm_rc=\$?' "$f")" -eq 2 ]
+  [ "$(grep -c 'spin_cmd_bounded "\$(( _helm_timeout_min \* 60 ))"' "$f")" -eq 2 ] || return 1
+  [ "$(grep -c '|| _helm_rc=\$?' "$f")" -eq 2 ] || return 1
 }
 
 @test "helm timeout (124) names the pending-release unwedge commands (Bugbot #442)" {
@@ -934,7 +934,7 @@ setup() {
   # fails with "another operation is in progress" — both call sites must
   # point at the unwedge command. Match the hint lines, not the comments.
   local f="$BATS_TEST_DIRNAME/../lib/install-client-helm.sh"
-  [ "$(grep -c "reports 'another operation is in progress'" "$f")" -eq 2 ]
+  [ "$(grep -c "reports 'another operation is in progress'" "$f")" -eq 2 ] || return 1
   grep -q 'helm -n \$TB_NAMESPACE uninstall \$TB_NAMESPACE' "$f"
   # The adopt path tracks release and namespace separately — the rollback hint
   # must name the RELEASE (\$_rel), not the namespace (Bugbot #442 r5).
@@ -944,19 +944,19 @@ setup() {
 # ── #425: honest pull status (never sell a permanent failure as "downloading") ──
 @test "_progress_end_message: complete -> done" {
   run _progress_end_message 3 3 3 ""
-  [ "$output" = "done" ]
+  [ "$output" = "done" ] || return 1
 }
 @test "_progress_end_message: a pull failure -> failed, even with partial progress" {
   run _progress_end_message 1 3 1 "pod/foo ImagePullBackOff"
-  [ "$output" = "failed" ]
+  [ "$output" = "failed" ] || return 1
 }
 @test "_progress_end_message: progress, no failure -> downloading" {
   run _progress_end_message 2 3 2 ""
-  [ "$output" = "downloading" ]
+  [ "$output" = "downloading" ] || return 1
 }
 @test "_progress_end_message: no progress, no failure -> stalled (not 'downloading')" {
   run _progress_end_message 0 3 0 ""
-  [ "$output" = "stalled" ]
+  [ "$output" = "stalled" ] || return 1
 }
 @test "_pull_failure_detail: ImagePullBackOff -> prints pod + event, returns 0" {
   has() { [ "$1" = kubectl ]; }
@@ -967,16 +967,16 @@ setup() {
     esac
   }
   run _pull_failure_detail tracebloc
-  [ "$status" -eq 0 ]
-  [[ "$output" == *"ImagePullBackOff"* ]]
-  [[ "$output" == *"x509"* ]]
+  [ "$status" -eq 0 ] || return 1
+  [[ "$output" == *"ImagePullBackOff"* ]] || return 1
+  [[ "$output" == *"x509"* ]] || return 1
 }
 @test "_pull_failure_detail: healthy pods -> returns 1, prints nothing" {
   has() { [ "$1" = kubectl ]; }
   kubectl() { case "$*" in *"get pods"*) printf '%s\n' "foo-abc 1/1 Running 0 1m" ;; esac; }
   run _pull_failure_detail tracebloc
-  [ "$status" -ne 0 ]
-  [ -z "$output" ]
+  [ "$status" -ne 0 ] || return 1
+  [ -z "$output" ] || return 1
 }
 @test "_pull_failure_detail: unrelated x509 events don't displace the real pull reason (#425 Bugbot)" {
   has() { [ "$1" = kubectl ]; }
@@ -991,9 +991,9 @@ setup() {
     esac
   }
   run _pull_failure_detail tracebloc
-  [ "$status" -eq 0 ]
-  [[ "$output" == *"403 Forbidden"* ]]   # the real pull reason survives the tail
-  [[ "$output" != *"x509"* ]]            # unrelated x509 events are scoped out
+  [ "$status" -eq 0 ] || return 1
+  [[ "$output" == *"403 Forbidden"* ]] || return 1   # the real pull reason survives the tail
+  [[ "$output" != *"x509"* ]] || return 1            # unrelated x509 events are scoped out
 }
 @test "_download_services_progress routes the end copy through the honest selector (#425)" {
   # The end-of-progress copy is chosen by the pure _progress_end_message selector,
@@ -1003,5 +1003,5 @@ setup() {
   grep -q 'outcome="\$(_progress_end_message' "$f"
   grep -qE '^\s*failed\)' "$f"
   grep -q 'look stuck pulling' "$f"
-  [ "$(grep -c 'Services are still downloading' "$f")" -eq 1 ]
+  [ "$(grep -c 'Services are still downloading' "$f")" -eq 1 ] || return 1
 }

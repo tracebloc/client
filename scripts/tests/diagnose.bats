@@ -16,7 +16,7 @@ setup() {
   f="$BATS_TEST_TMPDIR/v.yaml"
   printf 'clientId: "abc-123"\nclientPassword: '\''S3cr3tP@ss'\''\n' > "$f"
   _redact_file "$f"
-  ! grep -q 'S3cr3tP@ss' "$f"
+  ! grep -q 'S3cr3tP@ss' "$f" || return 1
   grep -q 'clientPassword: \[REDACTED\]' "$f"
   grep -q 'abc-123' "$f"
 }
@@ -25,7 +25,7 @@ setup() {
   f="$BATS_TEST_TMPDIR/p.txt"
   echo 'HTTP_PROXY=http://user:s3cr3t@proxy.corp:8080' > "$f"
   _redact_file "$f"
-  ! grep -q 's3cr3t' "$f"
+  ! grep -q 's3cr3t' "$f" || return 1
   grep -q 'http://\[REDACTED\]@proxy.corp:8080' "$f"
 }
 
@@ -33,8 +33,8 @@ setup() {
   f="$BATS_TEST_TMPDIR/l.txt"
   printf 'POST password=hunter2&x=1\ntoken: ghp_SECRETTOKEN\n' > "$f"
   _redact_file "$f"
-  ! grep -q 'hunter2' "$f"
-  ! grep -q 'ghp_SECRETTOKEN' "$f"
+  ! grep -q 'hunter2' "$f" || return 1
+  ! grep -q 'ghp_SECRETTOKEN' "$f" || return 1
 }
 
 @test "_redact_file: non-secret content left intact" {
@@ -50,14 +50,14 @@ setup() {
   f="$BATS_TEST_TMPDIR/g.yaml"
   printf 'dockerRegistry:\n  password: dckr_REGTOKEN\nHTTP_PROXY_PASSWORD: PROXYPW123\nMYSQL_ROOT_PASSWORD=ROOTPW123\n' > "$f"
   _redact_file "$f"
-  ! grep -q 'dckr_REGTOKEN' "$f"
-  ! grep -q 'PROXYPW123' "$f"
-  ! grep -q 'ROOTPW123' "$f"
+  ! grep -q 'dckr_REGTOKEN' "$f" || return 1
+  ! grep -q 'PROXYPW123' "$f" || return 1
+  ! grep -q 'ROOTPW123' "$f" || return 1
 }
 
 @test "_redact_file: missing file is a no-op (no error)" {
   run _redact_file "$BATS_TEST_TMPDIR/nope.txt"
-  [ "$status" -eq 0 ]
+  [ "$status" -eq 0 ] || return 1
 }
 
 # ── run_diagnose (end-to-end, the headline security proof) ──────────────────
@@ -66,12 +66,12 @@ setup() {
   echo "installer log line" > "$HOST_DATA_DIR/install-20260101-000000.log"
   has() { return 1; }                  # no kubectl/docker/helm -> best-effort path
   run run_diagnose
-  [ "$status" -eq 0 ]
-  [[ "$output" == *"Diagnostics saved"* ]]
+  [ "$status" -eq 0 ] || return 1
+  [[ "$output" == *"Diagnostics saved"* ]] || return 1
   tgz="$(ls "$HOST_DATA_DIR"/tracebloc-diagnose-*.tgz 2>/dev/null | head -1)"
-  [ -n "$tgz" ]
+  [ -n "$tgz" ] || return 1
   # extract to stdout and confirm the secret was redacted before archiving
-  ! tar -xzOf "$tgz" 2>/dev/null | grep -q 'LEAKME123'
+  ! tar -xzOf "$tgz" 2>/dev/null | grep -q 'LEAKME123' || return 1
   # but the bundle still contains useful content (the host section)
   tar -tzf "$tgz" 2>/dev/null | grep -q '00-host.txt'
 }
@@ -79,8 +79,8 @@ setup() {
 @test "run_diagnose: best-effort with no cluster (does not crash)" {
   has() { return 1; }
   run run_diagnose
-  [ "$status" -eq 0 ]
-  [[ "$output" == *"Diagnostics saved"* ]]
+  [ "$status" -eq 0 ] || return 1
+  [[ "$output" == *"Diagnostics saved"* ]] || return 1
 }
 
 @test "run_diagnose: exercises the cluster-data collection when tools are present" {
@@ -94,24 +94,24 @@ setup() {
   docker() { printf 'docker %s\n' "$*"; }
   helm()   { printf 'helm %s\n' "$*"; }
   run run_diagnose
-  [ "$status" -eq 0 ]
+  [ "$status" -eq 0 ] || return 1
   tgz="$(ls "$HOST_DATA_DIR"/tracebloc-diagnose-*.tgz 2>/dev/null | head -1)"
-  [ -n "$tgz" ]
+  [ -n "$tgz" ] || return 1
   # the kubectl + helm + per-workload-log collection branches ran
   tar -tzf "$tgz" | grep -q '02-kubectl.txt'
   tar -tzf "$tgz" | grep -q '04-helm.txt'
   tar -tzf "$tgz" | grep -q 'logs/mysql-client.log'
   # Finding 2 (security review): `helm get manifest` (base64 Secrets) is NOT collected
-  ! tar -xzOf "$tgz" 2>/dev/null | grep -q 'get manifest'
+  ! tar -xzOf "$tgz" 2>/dev/null | grep -q 'get manifest' || return 1
 }
 
 @test "run_diagnose: surfaces + records the client version" {
   has() { case "$1" in helm) return 0 ;; *) return 1 ;; esac; }   # only helm present
   helm() { echo "tracebloc tracebloc 1 now deployed client-1.4.4 1.4.4"; }
   run run_diagnose
-  [ "$status" -eq 0 ]
-  [[ "$output" == *"client version: 1.4.4"* ]]
+  [ "$status" -eq 0 ] || return 1
+  [[ "$output" == *"client version: 1.4.4"* ]] || return 1
   tgz="$(ls "$HOST_DATA_DIR"/tracebloc-diagnose-*.tgz 2>/dev/null | head -1)"
-  [ -n "$tgz" ]
+  [ -n "$tgz" ] || return 1
   tar -xzOf "$tgz" 2>/dev/null | grep -q 'CLIENT VERSION: 1.4.4'
 }
