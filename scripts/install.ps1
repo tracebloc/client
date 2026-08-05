@@ -351,7 +351,7 @@ function Confirm-ManifestSignature {
   if (-not (Get-Optional "$RepoRel/manifest.sha256.sig"  $sig) -or
       -not (Get-Optional "$RepoRel/manifest.sha256.cert" $cert)) {
     if ($AllowUnverified) {
-      Warn "manifest signature/cert not published for this ref -- not verified (TRACEBLOC_ALLOW_UNVERIFIED=1)."
+      Warn "The installer's signature isn't published for this ref -- not verified (TRACEBLOC_ALLOW_UNVERIFIED=1)."
       return
     }
     throw "The installer's signature isn't published for this release -- can't confirm the download is authentic. Pin a release tag that ships it."
