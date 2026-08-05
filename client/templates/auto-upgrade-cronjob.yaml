@@ -128,7 +128,7 @@ spec:
               type: RuntimeDefault
           containers:
             - name: helm
-              image: "{{ .Values.autoUpgrade.image.repository }}:{{ .Values.autoUpgrade.image.tag }}"
+              image: "{{ include "tracebloc.mirrorPrefix" $ }}{{ .Values.autoUpgrade.image.repository }}:{{ .Values.autoUpgrade.image.tag }}"
               imagePullPolicy: {{ .Values.autoUpgrade.image.pullPolicy }}
               # `helm` is the entrypoint on alpine/helm; override so we run
               # our script instead.

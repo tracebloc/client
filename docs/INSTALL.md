@@ -49,6 +49,66 @@ On **Linux**, the installer also fetches tooling from `get.docker.com`, `raw.git
 > - **Docker Desktop (macOS / Windows / Linux):** the daemon runs in a VM the installer can't reach. Trust the CA in the host OS store — the **macOS keychain** (set "Always Trust"), the **Windows Trusted Root** store (`certlm.msc`), or the **Linux system trust store** (the native-Docker commands above) — then restart Docker Desktop, which re-reads the host store on start. See [docs.docker.com](https://docs.docker.com/).
 > - **Colima (headless macOS):** the daemon runs in a Lima VM that does **not** read the macOS keychain. Add the CA *inside* the VM — `colima ssh`, copy the PEM into the VM's system trust store and refresh it — then `colima restart`.
 
+### Blocked container registry (mirror / air-gapped)
+
+Some sites hard-block Docker Hub / GHCR outright — the images aren't reachable directly at all (this is different from a proxy or TLS-inspection, which the section above covers). The preflight check detects a blocked registry and points you here rather than failing with a raw pull error.
+
+The chart follows the **`global.imageRegistry`** convention: set it once and **every** image the chart pulls — the tracebloc services, the spawned ingestor, the training-job images, and the `alpine/*`, `ubuntu/squid`, `busybox`, `curl` helper images — is re-homed onto your registry. No per-image overrides.
+
+**1. A private/mirror registry your site *can* reach.**
+
+First mirror the images into it. List exactly what to copy (tags/digests stay authoritative across chart versions) with:
+
+```bash
+# Every image this chart pulls, at the version you're installing:
+helm template tracebloc/client | grep -oE 'image: "[^"]+"' | sort -u
+```
+
+Copy each into your registry under the **same repository path and tag/digest** (e.g. `mirror.corp.example/tracebloc/jobs-manager:<tag>`, `mirror.corp.example/library/busybox:1.35`). The spawned **ingestor** (`ghcr.io/tracebloc/ingestor`) and its floating tag also need mirroring — jobs-manager pulls it at run time.
+
+Then point the install at the mirror. **With the standalone installer**, one environment variable does it:
+
+```bash
+# bash (Linux/macOS) — the installer writes global.imageRegistry into the
+# generated values.yaml, so every image resolves to the mirror.
+export TRACEBLOC_IMAGE_REGISTRY=mirror.corp.example
+# If the mirror needs credentials, add these and it mints the pull secret too:
+export TRACEBLOC_REGISTRY_USERNAME=<user>
+export TRACEBLOC_REGISTRY_PASSWORD=<token>
+```
+
+```powershell
+# Windows (install-k8s.ps1) — same knobs:
+$env:TRACEBLOC_IMAGE_REGISTRY    = "mirror.corp.example"
+$env:TRACEBLOC_REGISTRY_USERNAME = "<user>"
+$env:TRACEBLOC_REGISTRY_PASSWORD = "<token>"
+```
+
+**With plain Helm** (no installer), set the same value directly:
+
+```bash
+helm install my-tracebloc tracebloc/client -n tracebloc --create-namespace \
+  -f my-values.yaml \
+  --set global.imageRegistry=mirror.corp.example
+```
+
+```yaml
+# ...or in my-values.yaml. If the mirror needs credentials, add the pull secret.
+global:
+  imageRegistry: mirror.corp.example
+dockerRegistry:
+  create: true
+  server: https://mirror.corp.example   # must be a URL (scheme required)
+  username: <user>
+  password: <token>
+```
+
+> `global.imageRegistry` is a **bare host** (no scheme); `dockerRegistry.server` is the pull-secret's auths key and must be a **URL**. The installer derives `https://<host>` for you.
+
+**2. A fully air-gapped site (no reachable mirror).** Stand up a registry the cluster *can* reach (an internal Harbor/Nexus/Artifactory, or a registry running inside the cluster), mirror the images into it as in option 1 — moving the tarballs across the air gap with `docker save` / `docker load` or `skopeo copy` — then install with `global.imageRegistry` pointed at that internal registry. The single knob is the whole air-gap story: there is no separate offline code path to configure.
+
+> **Honest limit:** a site that blocks the registries **and** offers no reachable mirror (not even an internal one) cannot be served — the software isn't reachable by definition. Everything short of that is handleable.
+
 ---
 
 ## 1. Add the Helm repository (recommended for production)

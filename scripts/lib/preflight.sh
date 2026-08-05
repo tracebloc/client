@@ -913,6 +913,18 @@ _pf_connectivity() {
   if [[ "$cfail" -gt 0 ]]; then
     hint "Allow HTTPS (443) egress to the host(s) named above — the always-needed set is registry-1.docker.io, auth.docker.io, ghcr.io, ${backend_host}, tracebloc.github.io, plus any tool-download host listed (dl.k8s.io / get.helm.sh / github.com / objects.githubusercontent.com) — or set HTTP_PROXY if you use a corporate proxy."
   fi
+  # #585: when the CONTAINER REGISTRIES themselves are blocked (not just any host),
+  # the images can't be pulled directly at all — surface the mirror / offline options
+  # in plain language instead of leaving the generic egress hint as the only guidance.
+  local ff reg_blocked=0
+  for ff in ${fails[@]+"${fails[@]}"}; do
+    case "${ff%%|*}" in
+      *registry-1.docker.io*|*auth.docker.io*|*ghcr.io*) reg_blocked=1 ;;
+    esac
+  done
+  if [[ "$reg_blocked" -eq 1 ]]; then
+    hint "The container registries (Docker Hub / GHCR) look blocked here, so the images can't be pulled directly. If your site runs a mirror you CAN reach, point the install at it; for a fully offline site, an air-gapped image bundle is the alternative. See the 'Blocked container registry' section of docs/INSTALL.md."
+  fi
   return 0
 }
 

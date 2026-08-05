@@ -23,7 +23,7 @@ spec:
       containers:
         - name: proxy
           {{- $rpDigest := (dig "requestsProxy" "digest" "" .Values.images) }}
-          image: {{ include "tracebloc.image" (dict "repository" "tracebloc/jobs-manager" "tag" .Values.env.CLIENT_ENV "digest" $rpDigest "registry" "docker.io") | quote }}
+          image: {{ include "tracebloc.image" (dict "repository" "tracebloc/jobs-manager" "tag" .Values.env.CLIENT_ENV "digest" $rpDigest "registry" (dig "imageRegistry" "docker.io" (.Values.global | default dict))) | quote }}
           # digest set -> repo@digest + IfNotPresent (restart-safe offline); empty ->
           # repo:tag + Always. Was hardcoded Always, which ignored a pinned digest and
           # re-pulled on every restart even when the image was already cached (#552).

@@ -3274,3 +3274,86 @@ Describe "Set-ToolTrust: wire the corporate CA into cosign/helm/git (#583)" {
     $out | Should -Match 'Keeping your pre-set GIT_SSL_CAINFO'
   }
 }
+
+Describe "Registry-block detection + guidance (#585)" {
+  It "Test-Preflight flags a blocked container registry and points to the mirror/offline docs" {
+    $src = Get-Content "$PSScriptRoot/../install-k8s.ps1" -Raw
+    $fn  = (($src -split "function Test-Preflight")[1] -split "`nfunction ")[0]
+    $fn | Should -Match '\$regBlocked'                 # detection flag
+    $fn | Should -Match 'ghcr\.io'                     # registry match in the detection
+    $fn | Should -Match 'container registries'         # the guidance line
+    $fn | Should -Match 'docs/INSTALL\.md'             # points at the mirror/offline docs
+  }
+}
+
+Describe "Get-ImageMirrorYaml (private registry mirror / air-gap, #585)" {
+  # Bash parity: lib/install-client-helm.sh::_image_mirror_yaml + its bats tests.
+  AfterEach {
+    $env:TRACEBLOC_IMAGE_REGISTRY     = $null
+    $env:TRACEBLOC_REGISTRY_USERNAME  = $null
+    $env:TRACEBLOC_REGISTRY_PASSWORD  = $null
+    $env:TRACEBLOC_REGISTRY_SERVER    = $null
+    $env:TRACEBLOC_REGISTRY_EMAIL     = $null
+  }
+
+  It "returns empty when no mirror/creds are set (default install unchanged)" {
+    Get-ImageMirrorYaml | Should -BeExactly ""
+  }
+
+  It "emits global.imageRegistry for a mirror-only install and no dockerRegistry" {
+    $env:TRACEBLOC_IMAGE_REGISTRY = "mirror.corp.example"
+    $out = Get-ImageMirrorYaml
+    $out | Should -Match "(?m)^global:"
+    $out | Should -Match "imageRegistry: 'mirror.corp.example'"
+    $out | Should -Not -Match "dockerRegistry:"
+  }
+
+  It "strips a pasted scheme from the mirror host" {
+    $env:TRACEBLOC_IMAGE_REGISTRY = "https://mirror.corp.example"
+    $out = Get-ImageMirrorYaml
+    $out | Should -Match "imageRegistry: 'mirror.corp.example'"
+    $out | Should -Not -Match "imageRegistry: 'https://"
+  }
+
+  It "mints a dockerRegistry with a derived https:// server when creds are given" {
+    $env:TRACEBLOC_IMAGE_REGISTRY    = "mirror.corp.example"
+    $env:TRACEBLOC_REGISTRY_USERNAME = "svc"
+    $env:TRACEBLOC_REGISTRY_PASSWORD = "secret"
+    $out = Get-ImageMirrorYaml
+    $out | Should -Match "(?m)^dockerRegistry:"
+    $out | Should -Match "create: true"
+    $out | Should -Match "server: 'https://mirror.corp.example'"
+    $out | Should -Match "username: 'svc'"
+    $out | Should -Match "password: 'secret'"
+  }
+
+  It "lets an explicit TRACEBLOC_REGISTRY_SERVER win over the derived URI" {
+    $env:TRACEBLOC_IMAGE_REGISTRY    = "mirror.corp.example"
+    $env:TRACEBLOC_REGISTRY_USERNAME = "svc"
+    $env:TRACEBLOC_REGISTRY_PASSWORD = "secret"
+    $env:TRACEBLOC_REGISTRY_SERVER   = "https://auth.corp.example/v2/"
+    (Get-ImageMirrorYaml) | Should -Match "server: 'https://auth.corp.example/v2/'"
+  }
+
+  It "doubles single quotes in the password (YAML-safe)" {
+    $env:TRACEBLOC_IMAGE_REGISTRY    = "mirror.corp.example"
+    $env:TRACEBLOC_REGISTRY_USERNAME = "svc"
+    $env:TRACEBLOC_REGISTRY_PASSWORD = "s3cr3t'q"
+    (Get-ImageMirrorYaml) | Should -Match "password: 's3cr3t''q'"
+  }
+
+  It "emits dockerRegistry but no global when creds are given without a mirror" {
+    $env:TRACEBLOC_REGISTRY_USERNAME = "svc"
+    $env:TRACEBLOC_REGISTRY_PASSWORD = "secret"
+    $out = Get-ImageMirrorYaml
+    $out | Should -Not -Match "(?m)^global:"
+    $out | Should -Match "(?m)^dockerRegistry:"
+  }
+
+  It "creds without a mirror still emit server (Docker Hub) - schema requires it (Bugbot)" {
+    # The chart schema requires dockerRegistry.server whenever create is true.
+    $env:TRACEBLOC_REGISTRY_USERNAME = "svc"
+    $env:TRACEBLOC_REGISTRY_PASSWORD = "secret"
+    (Get-ImageMirrorYaml) | Should -Match "server: 'https://index.docker.io/v1/'"
+  }
+}

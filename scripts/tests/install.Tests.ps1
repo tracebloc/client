@@ -146,7 +146,7 @@ Describe "Confirm-ScriptIntegrity — integrity gate before any privileged step"
     $mf = Join-Path $TestDrive 'missing.sha256'
     "zzzz  scripts/other.ps1" | Set-Content -LiteralPath $mf
     { Confirm-ScriptIntegrity -Manifest $mf -TmpDir $script:tmp -Files @('scripts/install-k8s.ps1') } |
-      Should -Throw -ExpectedMessage "*no entry in manifest*"
+      Should -Throw -ExpectedMessage "*isn't in the installer's signed checksum list*"
   }
 }
 
@@ -154,8 +154,10 @@ Describe "Bootstrap log hygiene: cosign output captured, no internals leaked (#5
   BeforeAll { $script:BOOTSRC = Get-Content "$PSScriptRoot/../install.ps1" -Raw }
 
   It "captures cosign output instead of letting PowerShell dump the raw native error + source line" {
-    $script:BOOTSRC | Should -Not -Match '& \$cosign @cosignArgs 2>\$null 1>\$null'
-    $script:BOOTSRC | Should -Match '& \$cosign @cosignArgs 2>&1 \| Out-Null'
+    # The capture hardening now lives in the shared Invoke-CosignVerifyBlob helper (#584);
+    # the leaky discard form must be gone and the stderr-merged capture present.
+    $script:BOOTSRC | Should -Not -Match '2>\$null 1>\$null'
+    $script:BOOTSRC | Should -Match '& \$Cosign @VerifyArgs 2>&1 \| Out-Null'
   }
   It "the verification-failure message carries no internal identifiers (no source, no RFC/manifest codes)" {
     $script:BOOTSRC | Should -Not -Match 'cosign signature verification FAILED for manifest\.sha256'
@@ -173,5 +175,45 @@ Describe "Bootstrap CA handling for cosign on Windows (#583)" {
     $fn | Should -Match 'TRACEBLOC_CA_BUNDLE'
     $fn | Should -Match "can't be read"                     # fail fast on a bad path
     $fn | Should -Not -Match '\$env:SSL_CERT_FILE = \$ca'   # inert on Windows; not wired
+  }
+}
+
+Describe "Bootstrap prefers the offline Sigstore bundle (#584)" {
+  It "Confirm-ManifestSignature verifies --bundle --offline first, with a sig/cert fallback" {
+    $src = Get-Content "$PSScriptRoot/../install.ps1" -Raw
+    $fn  = (($src -split "function Confirm-ManifestSignature")[1] -split "`nfunction ")[0]
+    $fn | Should -Match 'manifest\.sha256\.bundle'
+    $fn | Should -Match "'--bundle'"
+    $fn | Should -Match "'--offline'"
+    $fn | Should -Match "'--signature'"   # online fallback path retained
+  }
+  It "Invoke-CosignVerifyBlob is fail-closed (nonzero LASTEXITCODE sentinel + stderr suppressed)" {
+    $src = Get-Content "$PSScriptRoot/../install.ps1" -Raw
+    $fn  = (($src -split "function Invoke-CosignVerifyBlob")[1] -split "`nfunction ")[0]
+    $fn | Should -Match '\$global:LASTEXITCODE = 255'
+    $fn | Should -Match '2>&1 \| Out-Null'
+  }
+}
+
+Describe "Confirm-ManifestSignature: offline-bundle -> sig/cert fallback behaviour (#584, reviewer)" {
+  # Behavioural (not source-text): drive the fallback + fail-closed branches directly.
+  BeforeEach {
+    $env:TRACEBLOC_CA_BUNDLE = $null; $env:CURL_CA_BUNDLE = $null   # skip the CA fast-fail
+    Mock Resolve-Cosign { "cosign" }
+    Mock Get-Optional   { $true }        # bundle + sig + cert all "published/fetched"
+    Mock Ok {}; Mock Warn {}
+  }
+
+  It "falls back to the sig/cert path when the bundle verify fails, and verifies" {
+    Mock Invoke-CosignVerifyBlob { if ($VerifyArgs -contains '--bundle') { $false } else { $true } }
+    { Confirm-ManifestSignature -Manifest 'm' -RepoRel 'r' -TmpDir $TestDrive -AllowUnverified $false } |
+      Should -Not -Throw
+    Should -Invoke Invoke-CosignVerifyBlob -Times 2 -Exactly   # bundle attempt + sig/cert fallback
+  }
+
+  It "fails closed when BOTH the bundle and the sig/cert verify fail" {
+    Mock Invoke-CosignVerifyBlob { $false }
+    { Confirm-ManifestSignature -Manifest 'm' -RepoRel 'r' -TmpDir $TestDrive -AllowUnverified $false } |
+      Should -Throw -ExpectedMessage "*Couldn't confirm the installer download is authentic*"
   }
 }

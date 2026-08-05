@@ -2694,6 +2694,54 @@ $TRACEBLOC_CHART_NAME = "client"
 #      overhead (a pod schedules onto ONE node; k3d's server+agent are the same
 #      machine, so summing would double-count)
 #   4. the historic static default (tiny or undeterminable machines)
+# Get-ImageMirrorYaml — top-level chart values that re-home every image the chart
+# pulls onto a private registry mirror (#585 / restricted-network + air-gapped
+# installs). Bash parity: lib/install-client-helm.sh::_image_mirror_yaml.
+# TRACEBLOC_IMAGE_REGISTRY sets global.imageRegistry (the chart's convention that
+# re-homes tracebloc/*, the spawned ingestor + training-job images, and the
+# alpine/* + ubuntu/squid utility images). When the mirror needs auth,
+# TRACEBLOC_REGISTRY_USERNAME / TRACEBLOC_REGISTRY_PASSWORD also mint the chart's
+# imagePullSecret (dockerRegistry), whose server defaults to https://<mirror>.
+# Returns "" when nothing is configured, so a default install's values are byte-
+# identical. Pure (env in, string out) so it is unit-testable under Pester.
+function Get-ImageMirrorYaml {
+  $mirrorRaw = $env:TRACEBLOC_IMAGE_REGISTRY
+  $regUser   = $env:TRACEBLOC_REGISTRY_USERNAME
+  $regPass   = $env:TRACEBLOC_REGISTRY_PASSWORD
+  if (-not ($mirrorRaw -or $regUser -or $regPass)) { return "" }
+
+  $block = ""
+  # global.imageRegistry is a BARE host (mirror.corp.example[:port]); strip a
+  # pasted scheme so the image ref (<host>/repo) stays well-formed.
+  $mirrorHost = $mirrorRaw -replace '^[a-zA-Z][a-zA-Z0-9+.\-]*://', ''
+  if ($mirrorHost) {
+    $mh = $mirrorHost -replace "'", "''"
+    $block += "global:`n  imageRegistry: '$mh'`n"
+  }
+  if ($regUser -or $regPass) {
+    # dockerRegistry.server is the imagePullSecret auths key and the chart schema
+    # REQUIRES it whenever create is true (format:uri), so it must ALWAYS be
+    # emitted. Precedence: an explicit TRACEBLOC_REGISTRY_SERVER wins; else derive
+    # https://<mirror-host> when a mirror is set; else fall back to Docker Hub so
+    # creds-only (authenticate to docker.io, no mirror) still renders a valid
+    # secret instead of a schema error.
+    $server = $env:TRACEBLOC_REGISTRY_SERVER
+    if (-not $server) {
+      if ($mirrorHost) { $server = "https://$mirrorHost" } else { $server = "https://index.docker.io/v1/" }
+    }
+    $userE  = $regUser -replace "'", "''"
+    $passE  = $regPass -replace "'", "''"
+    $emailE = ($env:TRACEBLOC_REGISTRY_EMAIL) -replace "'", "''"
+    $srvE   = $server -replace "'", "''"
+    $block += "`ndockerRegistry:`n  create: true`n"
+    $block += "  server: '$srvE'`n"
+    $block += "  username: '$userE'`n"
+    $block += "  password: '$passE'`n"
+    $block += "  email: '$emailE'`n"
+  }
+  return $block
+}
+
 function Get-TrainingResources {
   if ($env:TRACEBLOC_TRAINING_RESOURCES) { return $env:TRACEBLOC_TRAINING_RESOURCES }
   try {
@@ -3372,6 +3420,26 @@ function Install-ClientHelm {
   if (-not $adoptedReuse) {
   $passwordEscaped = $TB_CLIENT_PASSWORD -replace "'", "''"
 
+  # Private registry mirror (#585): re-home every image the chart pulls onto a
+  # private mirror for restricted-network / air-gapped installs. Bash parity:
+  # lib/install-client-helm.sh::_image_mirror_yaml. TRACEBLOC_IMAGE_REGISTRY sets
+  # global.imageRegistry (the chart's convention that re-homes tracebloc/*, the
+  # spawned ingestor + training-job images, and the alpine/* + ubuntu/squid
+  # utility images). When the mirror needs auth, TRACEBLOC_REGISTRY_USERNAME /
+  # TRACEBLOC_REGISTRY_PASSWORD also mint the chart's imagePullSecret
+  # (dockerRegistry). Empty when no mirror is configured, so default installs are
+  # unchanged.
+  # Private registry mirror (#585): re-home every image onto the mirror for
+  # restricted-network / air-gapped installs. Empty when no mirror is configured.
+  $imageMirrorBlock = Get-ImageMirrorYaml
+  if ($env:TRACEBLOC_IMAGE_REGISTRY) {
+    $mirrorHostLog = $env:TRACEBLOC_IMAGE_REGISTRY -replace '^[a-zA-Z][a-zA-Z0-9+.\-]*://', ''
+    Log "Image registry mirror configured -- pulling all images from $mirrorHostLog."
+  }
+  if ($env:TRACEBLOC_REGISTRY_USERNAME -or $env:TRACEBLOC_REGISTRY_PASSWORD) {
+    Log "Mirror credentials provided -- minting an imagePullSecret for the mirror."
+  }
+
   $gpuVal = ""
   if ($GPU_VENDOR -eq "nvidia" -and $NVIDIA_DRIVER_OK) {
     $gpuVal = "nvidia.com/gpu=1"
@@ -3415,7 +3483,7 @@ pvc:
 pvcAccessMode: ReadWriteOnce
 
 clusterScope: true
-
+$imageMirrorBlock
 clientId: "$TB_CLIENT_ID"
 clientPassword: '$passwordEscaped'
 
@@ -4152,7 +4220,7 @@ function Test-Preflight {
     $criticals += @{ label = "k3d download (github.com)";                  url = "https://github.com/" }
     $criticals += @{ label = "k3d assets (objects.githubusercontent.com)"; url = "https://objects.githubusercontent.com/" }
   }
-  $tlsSeen = $false; $cfail = 0
+  $tlsSeen = $false; $cfail = 0; $regBlocked = $false
   foreach ($c in $criticals) {
     $status = Test-PfUrl $c.url -RequireSuccess:([bool]$c.strict)
     if ($status -ne "ok") { $status = Test-PfUrl $c.url -RequireSuccess:([bool]$c.strict) }   # one retry for transient blips
@@ -4161,6 +4229,8 @@ function Test-Preflight {
       Write-PfFail "$($c.label) unreachable ($status)"
       $hardFail++; $cfail++
       if ($status -eq "tls") { $tlsSeen = $true }
+      # #585: was it a CONTAINER REGISTRY that's blocked (images can't be pulled)?
+      if ($c.url -match 'registry-1\.docker\.io|auth\.docker\.io|ghcr\.io') { $regBlocked = $true }
     }
   }
   if ($tlsSeen)    {
@@ -4168,6 +4238,9 @@ function Test-Preflight {
     Hint "Fix THESE host checks by importing the CA into the Windows certificate store (Cert:\LocalMachine\Root) - Invoke-WebRequest uses the system store, not an env var. The k3d nodes are trusted separately via `$env:TRACEBLOC_CA_BUNDLE='C:\path\to\corporate-ca.pem' (CURL_CA_BUNDLE also honored) at cluster-create. Ask IT for the bundle if unsure."
   }
   if ($cfail -gt 0){ Hint "Allow HTTPS (443) egress to the host(s) named above - the always-needed set is registry-1.docker.io, auth.docker.io, ghcr.io, $backendHost, tracebloc.github.io, plus any tool-download host listed (desktop.docker.com / dl.k8s.io / get.helm.sh / github.com / objects.githubusercontent.com) - or configure your corporate proxy." }
+  # #585: when the CONTAINER REGISTRIES themselves are blocked, images can't be pulled
+  # directly at all - surface the mirror / offline options in plain language.
+  if ($regBlocked) { Hint "The container registries (Docker Hub / GHCR) look blocked here, so the images can't be pulled directly. If your site runs a mirror you CAN reach, point the install at it; for a fully offline site, an air-gapped image bundle is the alternative. See the 'Blocked container registry' section of docs/INSTALL.md." }
 
   if ($hardFail -gt 0) {
     Write-Host ""
