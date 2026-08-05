@@ -239,7 +239,7 @@ EOF
   mv "$SERVE_REL/m.tmp" "$SERVE_REL/manifest.sha256"
   REF="v9.9.9" COSIGN_RESULT=0 run_boot
   [ "$status" -ne 0 ] || return 1
-  [[ "$output" == *"no entry in manifest"* ]] || return 1
+  [[ "$output" == *"isn't in the installer's signed checksum list"* ]] || return 1
   [ ! -f "$SBX/k8s-ran" ] || return 1
 }
 

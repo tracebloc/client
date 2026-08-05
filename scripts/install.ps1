@@ -116,7 +116,7 @@ function Resolve-InstallRef {
       Warn "production box. A moved ref here can run arbitrary privileged code."
       Warn "============================================================================"
     } else {
-      throw "'$ref' is not an immutable release tag (expected vX.Y.Z). The bootstrap only trusts content-addressable release tags so a moved branch ref can't change what runs as Administrator on your box (RFC-0001 R8). Use a release tag, or for local dev set `$env:TRACEBLOC_ALLOW_UNVERIFIED = '1'`."
+      throw "'$ref' is not an immutable release tag (expected vX.Y.Z). The bootstrap only trusts content-addressable release tags so a moved branch ref can't change what runs as Administrator on your box. Use a release tag, or for local dev set `$env:TRACEBLOC_ALLOW_UNVERIFIED = '1'`."
     }
   }
 
@@ -125,7 +125,7 @@ function Resolve-InstallRef {
   # A '/' or '..' here is a path-traversal lever (it could escape the pinned tag
   # onto a mutable branch) — independent of which branch above let it through.
   if ($ref -match '/' -or $ref -match '\.\.') {
-    throw "Ref '$ref' contains a path separator or '..' -- refusing to build a fetch URL from it (path-traversal guard, RFC-0001 R8)."
+    throw "Ref '$ref' contains a path separator or '..' -- refusing to build a fetch URL from it (path-traversal guard)."
   }
 
   return $ref
@@ -343,7 +343,7 @@ function Confirm-ManifestSignature {
       Warn "Proceeding on checksum-only integrity. Not for production."
       return
     }
-    throw "cosign is required to verify the installer's signed manifest and couldn't be found or bootstrapped. Refusing to fall back to an unauthenticated, same-channel checksum (RFC-0001 R8). Fix: install cosign (https://docs.sigstore.dev/cosign/installation/) and re-run, or for local development only set `$env:TRACEBLOC_ALLOW_UNVERIFIED = '1'`."
+    throw "cosign is required to verify the installer's signed manifest and couldn't be found or bootstrapped. Refusing to fall back to an unauthenticated, same-channel checksum. Fix: install cosign (https://docs.sigstore.dev/cosign/installation/) and re-run, or for local development only set `$env:TRACEBLOC_ALLOW_UNVERIFIED = '1'`."
   }
 
   $sig  = Join-Path $TmpDir "manifest.sha256.sig"
@@ -354,7 +354,7 @@ function Confirm-ManifestSignature {
       Warn "manifest signature/cert not published for this ref -- not verified (TRACEBLOC_ALLOW_UNVERIFIED=1)."
       return
     }
-    throw "manifest.sha256.sig / .cert not published for this release -- can't authenticate the manifest. Pin a release tag that ships them (RFC-0001 R8)."
+    throw "The installer's signature isn't published for this release -- can't confirm the download is authentic. Pin a release tag that ships it."
   }
 
   # The identity is the client release workflow (release-helm-chart.yaml) — the
@@ -408,11 +408,11 @@ function Confirm-ScriptIntegrity {
     $local    = Join-Path $TmpDir ($f -replace '^scripts/', '')
     $expected = Find-ManifestDigest -ManifestPath $Manifest -Key $rel
     if (-not $expected) {
-      throw "$rel has no entry in manifest.sha256 -- refusing to run it (RFC-0001 R8)."
+      throw "$rel isn't in the installer's signed checksum list -- refusing to run it."
     }
     $actual = Get-Sha256 -Path $local
     if ($actual -ne $expected) {
-      throw "Integrity check FAILED for $rel`n          expected: $expected`n          actual:   $actual`n        Someone may have tampered with the installer. Aborting before any privileged step runs (RFC-0001 R8)."
+      throw "Integrity check FAILED for $rel`n          expected: $expected`n          actual:   $actual`n        Someone may have tampered with the installer. Aborting before any privileged step runs."
     }
   }
   Ok "all installer scripts verified against the signed manifest"
@@ -439,7 +439,7 @@ function Invoke-Bootstrap {
   # before the integrity check (parity with install.sh's `mktemp -d`, 0700).
   $tmpDir = Join-Path $env:TEMP ("tracebloc-installer-" + [guid]::NewGuid().ToString('N'))
   if (Test-Path -LiteralPath $tmpDir) {
-    throw "temp dir $tmpDir already exists -- refusing to reuse it (RFC-0001 R8)."
+    throw "temp dir $tmpDir already exists -- refusing to reuse it."
   }
   New-Item -ItemType Directory -Path $tmpDir | Out-Null
   try {
@@ -455,12 +455,12 @@ function Invoke-Bootstrap {
     $manifest = Join-Path $tmpDir "manifest.sha256"
     if (-not (Get-Optional "$repoRel/manifest.sha256" $manifest)) {
       if ($allowUnverified -and (Get-Optional "$repoRaw/scripts/manifest.sha256" $manifest)) {
-        Warn "Using in-repo manifest.sha256 from ref '$ref' (TRACEBLOC_ALLOW_UNVERIFIED=1)."
+        Warn "Using in-repo integrity checksums from ref '$ref' (TRACEBLOC_ALLOW_UNVERIFIED=1)."
       } elseif ($allowUnverified) {
-        Warn "No manifest.sha256 for ref '$ref' -- skipping integrity check (TRACEBLOC_ALLOW_UNVERIFIED=1)."
+        Warn "No integrity checksums for ref '$ref' -- skipping the integrity check (TRACEBLOC_ALLOW_UNVERIFIED=1)."
         $manifest = $null
       } else {
-        throw "Couldn't fetch manifest.sha256 for ref '$ref' -- refusing to run unverified installer scripts (RFC-0001 R8). If this ref pre-dates signed manifests, pin a newer release tag."
+        throw "Couldn't fetch the installer's integrity checksums for ref '$ref' -- refusing to run unverified installer scripts. If this ref pre-dates signed releases, pin a newer release tag."
       }
     }
 
