@@ -2694,6 +2694,54 @@ $TRACEBLOC_CHART_NAME = "client"
 #      overhead (a pod schedules onto ONE node; k3d's server+agent are the same
 #      machine, so summing would double-count)
 #   4. the historic static default (tiny or undeterminable machines)
+# Get-ImageMirrorYaml — top-level chart values that re-home every image the chart
+# pulls onto a private registry mirror (#585 / restricted-network + air-gapped
+# installs). Bash parity: lib/install-client-helm.sh::_image_mirror_yaml.
+# TRACEBLOC_IMAGE_REGISTRY sets global.imageRegistry (the chart's convention that
+# re-homes tracebloc/*, the spawned ingestor + training-job images, and the
+# alpine/* + ubuntu/squid utility images). When the mirror needs auth,
+# TRACEBLOC_REGISTRY_USERNAME / TRACEBLOC_REGISTRY_PASSWORD also mint the chart's
+# imagePullSecret (dockerRegistry), whose server defaults to https://<mirror>.
+# Returns "" when nothing is configured, so a default install's values are byte-
+# identical. Pure (env in, string out) so it is unit-testable under Pester.
+function Get-ImageMirrorYaml {
+  $mirrorRaw = $env:TRACEBLOC_IMAGE_REGISTRY
+  $regUser   = $env:TRACEBLOC_REGISTRY_USERNAME
+  $regPass   = $env:TRACEBLOC_REGISTRY_PASSWORD
+  if (-not ($mirrorRaw -or $regUser -or $regPass)) { return "" }
+
+  $block = ""
+  # global.imageRegistry is a BARE host (mirror.corp.example[:port]); strip a
+  # pasted scheme so the image ref (<host>/repo) stays well-formed.
+  $mirrorHost = $mirrorRaw -replace '^[a-zA-Z][a-zA-Z0-9+.\-]*://', ''
+  if ($mirrorHost) {
+    $mh = $mirrorHost -replace "'", "''"
+    $block += "global:`n  imageRegistry: '$mh'`n"
+  }
+  if ($regUser -or $regPass) {
+    # dockerRegistry.server is the imagePullSecret auths key and the chart schema
+    # REQUIRES it whenever create is true (format:uri), so it must ALWAYS be
+    # emitted. Precedence: an explicit TRACEBLOC_REGISTRY_SERVER wins; else derive
+    # https://<mirror-host> when a mirror is set; else fall back to Docker Hub so
+    # creds-only (authenticate to docker.io, no mirror) still renders a valid
+    # secret instead of a schema error.
+    $server = $env:TRACEBLOC_REGISTRY_SERVER
+    if (-not $server) {
+      if ($mirrorHost) { $server = "https://$mirrorHost" } else { $server = "https://index.docker.io/v1/" }
+    }
+    $userE  = $regUser -replace "'", "''"
+    $passE  = $regPass -replace "'", "''"
+    $emailE = ($env:TRACEBLOC_REGISTRY_EMAIL) -replace "'", "''"
+    $srvE   = $server -replace "'", "''"
+    $block += "`ndockerRegistry:`n  create: true`n"
+    $block += "  server: '$srvE'`n"
+    $block += "  username: '$userE'`n"
+    $block += "  password: '$passE'`n"
+    $block += "  email: '$emailE'`n"
+  }
+  return $block
+}
+
 function Get-TrainingResources {
   if ($env:TRACEBLOC_TRAINING_RESOURCES) { return $env:TRACEBLOC_TRAINING_RESOURCES }
   try {
@@ -3372,6 +3420,26 @@ function Install-ClientHelm {
   if (-not $adoptedReuse) {
   $passwordEscaped = $TB_CLIENT_PASSWORD -replace "'", "''"
 
+  # Private registry mirror (#585): re-home every image the chart pulls onto a
+  # private mirror for restricted-network / air-gapped installs. Bash parity:
+  # lib/install-client-helm.sh::_image_mirror_yaml. TRACEBLOC_IMAGE_REGISTRY sets
+  # global.imageRegistry (the chart's convention that re-homes tracebloc/*, the
+  # spawned ingestor + training-job images, and the alpine/* + ubuntu/squid
+  # utility images). When the mirror needs auth, TRACEBLOC_REGISTRY_USERNAME /
+  # TRACEBLOC_REGISTRY_PASSWORD also mint the chart's imagePullSecret
+  # (dockerRegistry). Empty when no mirror is configured, so default installs are
+  # unchanged.
+  # Private registry mirror (#585): re-home every image onto the mirror for
+  # restricted-network / air-gapped installs. Empty when no mirror is configured.
+  $imageMirrorBlock = Get-ImageMirrorYaml
+  if ($env:TRACEBLOC_IMAGE_REGISTRY) {
+    $mirrorHostLog = $env:TRACEBLOC_IMAGE_REGISTRY -replace '^[a-zA-Z][a-zA-Z0-9+.\-]*://', ''
+    Log "Image registry mirror configured -- pulling all images from $mirrorHostLog."
+  }
+  if ($env:TRACEBLOC_REGISTRY_USERNAME -or $env:TRACEBLOC_REGISTRY_PASSWORD) {
+    Log "Mirror credentials provided -- minting an imagePullSecret for the mirror."
+  }
+
   $gpuVal = ""
   if ($GPU_VENDOR -eq "nvidia" -and $NVIDIA_DRIVER_OK) {
     $gpuVal = "nvidia.com/gpu=1"
@@ -3415,7 +3483,7 @@ pvc:
 pvcAccessMode: ReadWriteOnce
 
 clusterScope: true
-
+$imageMirrorBlock
 clientId: "$TB_CLIENT_ID"
 clientPassword: '$passwordEscaped'
 

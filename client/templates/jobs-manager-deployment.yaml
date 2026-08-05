@@ -39,7 +39,7 @@ spec:
           type: RuntimeDefault
       containers:
       - name: api
-        image: {{ include "tracebloc.image" (dict "repository" "tracebloc/jobs-manager" "tag" .Values.env.CLIENT_ENV "digest" .Values.images.jobsManager.digest "registry" "docker.io") | quote }}
+        image: {{ include "tracebloc.image" (dict "repository" "tracebloc/jobs-manager" "tag" .Values.env.CLIENT_ENV "digest" .Values.images.jobsManager.digest "registry" (dig "imageRegistry" "docker.io" (.Values.global | default dict))) | quote }}
         imagePullPolicy: {{ if .Values.images.jobsManager.digest }}IfNotPresent{{ else }}Always{{ end }}
         securityContext:
           allowPrivilegeEscalation: false
@@ -167,7 +167,17 @@ spec:
         # nil-guarded so `--reuse-values` from a release that predates the
         # `images.ingestor` key still renders.
         - name: INGESTOR_IMAGE_REPOSITORY
-          value: {{ (default dict .Values.images.ingestor).repository | default "ghcr.io/tracebloc/ingestor" | quote }}
+          # Precedence (#585): an explicit images.ingestor.repository always wins
+          # (someone who names a full repo means it). Otherwise, when a private
+          # mirror is set via global.imageRegistry, the still-default repository is
+          # re-homed onto that mirror (<mirror>/tracebloc/ingestor) so a single
+          # knob points the ingestor at the same registry as the chart's own
+          # images. With neither, it falls back to the ghcr.io default. Nil-guarded
+          # for --reset-then-reuse-values upgrades that predate images.ingestor.
+          {{- $ingRepo := (default dict .Values.images.ingestor).repository | default "ghcr.io/tracebloc/ingestor" }}
+          {{- $ingMirror := dig "imageRegistry" "" (.Values.global | default dict) }}
+          {{- if and $ingMirror (eq $ingRepo "ghcr.io/tracebloc/ingestor") }}{{ $ingRepo = printf "%s/tracebloc/ingestor" $ingMirror }}{{ end }}
+          value: {{ $ingRepo | quote }}
         - name: INGESTOR_IMAGE_TAG
           value: {{ include "tracebloc.ingestorTag" . | quote }}
         - name: INGESTOR_IMAGE_DIGEST
@@ -181,8 +191,14 @@ spec:
         - name: EGRESS_PROXY_URL
           value: "http://egress-proxy-service:{{ (default dict .Values.egressProxy).port | default 3128 }}"
         {{- end }}
+        # JOB_IMAGE_HOST is the registry prefix jobs-manager stamps onto every
+        # training-job image it spawns. Honour a private mirror set via
+        # global.imageRegistry (#585) so an air-gapped/mirrored install pulls job
+        # images from the same registry as the chart's own images; defaults to
+        # docker.io/ when no mirror is configured. Nil-guarded for pre-this-key
+        # --reset-then-reuse-values upgrades.
         - name: JOB_IMAGE_HOST
-          value: "docker.io/"
+          value: {{ printf "%s/" (dig "imageRegistry" "docker.io" (.Values.global | default dict) | default "docker.io") | quote }}
         - name: CLIENT_ENV
           value: {{ .Values.env.CLIENT_ENV | default "prod" | quote }}
         - name: RESOURCE_REQUESTS
@@ -214,7 +230,7 @@ spec:
         {{- end }}
         {{- end }}
       - name: pods-monitor-container
-        image: {{ include "tracebloc.image" (dict "repository" "tracebloc/pods-monitor" "tag" .Values.env.CLIENT_ENV "digest" .Values.images.podsMonitor.digest "registry" "docker.io") | quote }}
+        image: {{ include "tracebloc.image" (dict "repository" "tracebloc/pods-monitor" "tag" .Values.env.CLIENT_ENV "digest" .Values.images.podsMonitor.digest "registry" (dig "imageRegistry" "docker.io" (.Values.global | default dict))) | quote }}
         imagePullPolicy: {{ if .Values.images.podsMonitor.digest }}IfNotPresent{{ else }}Always{{ end }}
         securityContext:
           allowPrivilegeEscalation: false
@@ -244,8 +260,10 @@ spec:
               key: CLIENT_PASSWORD
         - name: CLIENT_LOGS_PVC
           value: {{ include "tracebloc.clientLogsPvc" . | quote }}
+        # See the api container's JOB_IMAGE_HOST note (#585): honour a private
+        # mirror set via global.imageRegistry, defaulting to docker.io/.
         - name: JOB_IMAGE_HOST
-          value: "docker.io/"
+          value: {{ printf "%s/" (dig "imageRegistry" "docker.io" (.Values.global | default dict) | default "docker.io") | quote }}
         - name: CLIENT_ENV
           value: {{ .Values.env.CLIENT_ENV | default "prod" | quote }}
         - name: RESOURCE_REQUESTS

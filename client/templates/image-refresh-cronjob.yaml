@@ -266,7 +266,7 @@ spec:
               type: RuntimeDefault
           containers:
             - name: refresh
-              image: "{{ .Values.imageRefresh.image.repository }}:{{ .Values.imageRefresh.image.tag }}"
+              image: "{{ include "tracebloc.mirrorPrefix" $ }}{{ .Values.imageRefresh.image.repository }}:{{ .Values.imageRefresh.image.tag }}"
               imagePullPolicy: {{ .Values.imageRefresh.image.pullPolicy }}
               # alpine/k8s entrypoint is kubectl; override to run our script.
               command: ["/bin/sh", "/scripts/image-refresh.sh"]

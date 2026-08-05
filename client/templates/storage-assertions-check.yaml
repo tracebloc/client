@@ -100,7 +100,7 @@ spec:
         - name: assert
           # Same kubectl-capable image the image-refresh CronJob uses; the tag
           # pins kubectl so behaviour cannot drift if upstream re-tags.
-          image: "{{ $img.repository | default "alpine/k8s" }}:{{ $img.tag | default "1.30.5" }}"
+          image: "{{ include "tracebloc.mirrorPrefix" $ }}{{ $img.repository | default "alpine/k8s" }}:{{ $img.tag | default "1.30.5" }}"
           imagePullPolicy: {{ $img.pullPolicy | default "IfNotPresent" }}
           securityContext:
             allowPrivilegeEscalation: false
