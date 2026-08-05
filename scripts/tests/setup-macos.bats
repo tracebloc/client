@@ -18,6 +18,9 @@ setup() {
   # shellcheck source=/dev/null
   source "${LIB_DIR}/setup-macos.sh"
   LOG_FILE=/dev/null
+  # Fetch-test curl mocks write tiny fixture files; relax the #607 size floor so
+  # _assert_download_size does not reject them (the real floor applies in prod).
+  export TB_MIN_DOWNLOAD_BYTES=0
   MOCK_CALLS="$(mktemp)"
   PRESENT_CMDS="curl tar gzip"
   ARCH_DL="amd64"

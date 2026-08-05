@@ -87,6 +87,26 @@ _verify_sha256() {
   esac
 }
 
+# Fail-fast when a just-downloaded FILE is shorter than a real tool binary can be
+# (#607). On a filtered network a proxy or antivirus can return a truncated stream
+# or a small error page under HTTP 200 — `curl -f` can't see it (it's not an HTTP
+# error), and the only downstream signal was _verify_sha256, which misreports a
+# blocked TRANSFER as "checksum verification failed" (tampering). Catching the short
+# payload here gives the user the real, actionable reason. `wc -c` is the portable
+# size read (GNU `stat -c%s` vs BSD `stat -f%z` differ). FAIL-CLOSED: a missing or
+# unreadable file reads as 0 bytes and fails.
+_assert_download_size() {
+  # TB_MIN_DOWNLOAD_BYTES overrides the floor (set to 0 by the bats fetch tests,
+  # whose curl mocks write tiny fixture files); unset in production, so the real
+  # per-tool floor passed as $2 applies.
+  local file="$1" min="${TB_MIN_DOWNLOAD_BYTES:-$2}" label="$3" size=0
+  [ -f "$file" ] && size="$(wc -c < "$file" 2>/dev/null | tr -d '[:space:]')"
+  [ -n "$size" ] || size=0
+  if [ "$size" -lt "$min" ]; then
+    error "Download of ${label} was truncated or blocked — got ${size} bytes (expected at least ${min}). On a filtered network a proxy or antivirus may be cutting the transfer; allowlist the download host (github.com / objects.githubusercontent.com / dl.k8s.io / get.helm.sh) or exclude the tools directory from AV scanning, then re-run."
+  fi
+}
+
 # ── Colours ──────────────────────────────────────────────────────────────────
 # One brand-grounded palette (design-system tokens): cyan #01a5cc = structure,
 # lime #91e947 = action — mirrors the Go CLI's internal/ui engine. Each tone
