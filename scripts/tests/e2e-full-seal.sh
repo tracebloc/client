@@ -88,6 +88,10 @@ echo "── helm install (dev backend, REAL credentials, lockdown ENGAGED — f
 # round-trip to, and the login that makes the release come up for real.
 # Single-quoted YAML scalars with the standard '' escape, matching the
 # installer's _yaml_sq_escape treatment of the same two values.
+# pvcAccessMode=ReadWriteOnce: the chart's PVC default is ReadWriteMany, which
+# local-path never provisions — claims would sit Pending forever and both the
+# Bound pre-wait and storage-assertions would fail (Bugbot). The installer
+# writes exactly this value for the same storage path.
 _sq() { printf %s "$1" | sed "s/'/''/g"; }
 CREDS_FILE="$(mktemp)"
 chmod 600 "$CREDS_FILE"
@@ -100,6 +104,7 @@ helm install "$NS" "$CHART_DIR" --namespace "$NS" --create-namespace \
   -f "$CREDS_FILE" \
   --set env.CLIENT_ENV=dev \
   --set storageClass.provisioner=rancher.io/local-path \
+  --set pvcAccessMode=ReadWriteOnce \
   --set networkPolicy.training.allowExternalHttps=false \
   --set networkPolicy.training.enforcementProbeHost="$HOST" \
   --set networkPolicy.training.enforcementProbeTimeoutSeconds=240
