@@ -1170,9 +1170,9 @@ setup() {
 @test "_pf_connectivity: blocked container registry -> mirror/offline guidance (#585)" {
   _pf_probe_url() { case "$1" in *registry-1.docker*|*auth.docker*|*ghcr.io*) echo blocked ;; *) echo ok ;; esac; }
   run _pf_connectivity
-  [[ "$output" == *"container registries"* ]]
-  [[ "$output" == *"mirror"* ]]
-  [[ "$output" == *"docs/INSTALL.md"* ]]
+  [[ "$output" == *"container registries"* ]] || return 1
+  [[ "$output" == *"mirror"* ]] || return 1
+  [[ "$output" == *"docs/INSTALL.md"* ]] || return 1
 }
 
 @test "_pf_connectivity: a non-registry host blocked does NOT trigger the registry guidance (#585)" {
@@ -1180,5 +1180,5 @@ setup() {
   # hint only, no registry-mirror guidance.
   _pf_probe_url() { case "$1" in *api.tracebloc.io*|*dev-api*|*stg-api*) echo blocked ;; *) echo ok ;; esac; }
   run _pf_connectivity
-  [[ "$output" != *"container registries"* ]]
+  [[ "$output" != *"container registries"* ]] || return 1
 }
