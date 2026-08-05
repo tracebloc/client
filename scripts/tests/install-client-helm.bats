@@ -1085,6 +1085,8 @@ setup() {
   export TRACEBLOC_REGISTRY_PASSWORD=secret
   run _image_mirror_yaml
   echo "$output" | grep -q "server: 'https://index.docker.io/v1/'" || return 1
+}
+
 # ── _resolve_mysql_engine (backend#723, decision A2) ────────────────────────
 # Unit tests: the function reads values_file/existing_id/HOST_DATA_DIR/
 # TB_NAMESPACE/ARCH from the caller's scope and sets TB_MYSQL_ENGINE_RESOLVED.
