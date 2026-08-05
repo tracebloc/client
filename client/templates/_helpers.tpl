@@ -397,3 +397,36 @@ Usage inside a container's env: list:
   value: {{ $noProxy | quote }}
 {{- end }}
 {{- end -}}
+
+{{/*
+tracebloc.mysqlEngineMajor — the MySQL engine major the chart is about to run,
+for the mysql-format-guard init container (backend#723). Resolution mirrors
+tracebloc.image's digest-wins precedence:
+  digest set   -> the known 5.7-lineage pin maps to "5.7"; any other digest is
+                  "unknown" (custom pin — the guard stands down).
+  digest empty -> derive from the tag: ""/prod/5.7* -> 5.7, 8.4* -> 8.4,
+                  8.0* -> 8.0, anything else -> unknown.
+The sha256 literal below MUST equal the images.mysqlClient.digest default in
+values.yaml — mysql_test.yaml pins the default render to "5.7", so re-pinning
+the digest without updating this helper fails CI instead of silently
+disarming the guard.
+*/}}
+{{- define "tracebloc.mysqlEngineMajor" -}}
+{{- $digest := .Values.images.mysqlClient.digest | default "" -}}
+{{- $tag := .Values.images.mysqlClient.tag | default "prod" -}}
+{{- if $digest -}}
+{{- if eq $digest "sha256:f546e47fb339e0982c902cef063b081ccf2cbbaf35b475287d583b9bf3163354" -}}
+5.7
+{{- else -}}
+unknown
+{{- end -}}
+{{- else if or (eq $tag "prod") (hasPrefix "5.7" $tag) -}}
+5.7
+{{- else if hasPrefix "8.4" $tag -}}
+8.4
+{{- else if hasPrefix "8.0" $tag -}}
+8.0
+{{- else -}}
+unknown
+{{- end -}}
+{{- end -}}

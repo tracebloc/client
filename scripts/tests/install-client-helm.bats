@@ -1085,4 +1085,128 @@ setup() {
   export TRACEBLOC_REGISTRY_PASSWORD=secret
   run _image_mirror_yaml
   echo "$output" | grep -q "server: 'https://index.docker.io/v1/'" || return 1
+# ── _resolve_mysql_engine (backend#723, decision A2) ────────────────────────
+# Unit tests: the function reads values_file/existing_id/HOST_DATA_DIR/
+# TB_NAMESPACE/ARCH from the caller's scope and sets TB_MYSQL_ENGINE_RESOLVED.
+
+_engine_fixture() {
+  HOST_DATA_DIR="$BATS_TEST_TMPDIR/data"; mkdir -p "$HOST_DATA_DIR/mysql"
+  values_file="$HOST_DATA_DIR/values.yaml"
+  existing_id=""
+  TB_NAMESPACE="tracebloc"
+  unset TB_MYSQL_ENGINE TB_MYSQL_ENGINE_RESOLVED
+}
+
+@test "_resolve_mysql_engine: explicit TB_MYSQL_ENGINE=8.4 wins on any arch" {
+  _engine_fixture; ARCH=x86_64; TB_MYSQL_ENGINE=8.4
+  _resolve_mysql_engine
+  [ "$TB_MYSQL_ENGINE_RESOLVED" = "8.4" ]
+}
+
+@test "_resolve_mysql_engine: explicit TB_MYSQL_ENGINE=5.7 wins on arm64" {
+  _engine_fixture; ARCH=arm64; TB_MYSQL_ENGINE=5.7
+  _resolve_mysql_engine
+  [ "$TB_MYSQL_ENGINE_RESOLVED" = "5.7" ]
+}
+
+@test "_resolve_mysql_engine: invalid value fails closed with the allowed set" {
+  _engine_fixture; ARCH=arm64; TB_MYSQL_ENGINE=9.0
+  run _resolve_mysql_engine
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"'auto', '5.7' or '8.4'"* ]]
+}
+
+@test "_resolve_mysql_engine: auto on a fresh arm64 install picks 8.4" {
+  _engine_fixture; ARCH=arm64
+  _resolve_mysql_engine
+  [ "$TB_MYSQL_ENGINE_RESOLVED" = "8.4" ]
+}
+
+@test "_resolve_mysql_engine: auto on a fresh amd64 install stays 5.7" {
+  _engine_fixture; ARCH=x86_64
+  _resolve_mysql_engine
+  [ "$TB_MYSQL_ENGINE_RESOLVED" = "5.7" ]
+}
+
+@test "_resolve_mysql_engine: an existing release pins 5.7 even on arm64" {
+  _engine_fixture; ARCH=arm64; existing_id="someclient"
+  _resolve_mysql_engine
+  [ "$TB_MYSQL_ENGINE_RESOLVED" = "5.7" ]
+}
+
+@test "_resolve_mysql_engine: legacy datadir content pins 5.7 even on arm64" {
+  _engine_fixture; ARCH=arm64
+  touch "$HOST_DATA_DIR/mysql/ibdata1"
+  _resolve_mysql_engine
+  [ "$TB_MYSQL_ENGINE_RESOLVED" = "5.7" ]
+}
+
+@test "_resolve_mysql_engine: per-release datadir content pins 5.7 even on arm64" {
+  _engine_fixture; ARCH=arm64
+  mkdir -p "$HOST_DATA_DIR/$TB_NAMESPACE/mysql"; touch "$HOST_DATA_DIR/$TB_NAMESPACE/mysql/ibdata1"
+  _resolve_mysql_engine
+  [ "$TB_MYSQL_ENGINE_RESOLVED" = "5.7" ]
+}
+
+@test "_resolve_mysql_engine: a previous 8.4 opt-in is sticky across re-runs (amd64)" {
+  _engine_fixture; ARCH=x86_64
+  printf 'images:\n  mysqlClient:\n    tag: "8.4"\n    digest: ""\n' > "$values_file"
+  _resolve_mysql_engine
+  [ "$TB_MYSQL_ENGINE_RESOLVED" = "8.4" ]
+}
+
+# ── install_client_helm flow: the generated values carry the engine choice ──
+
+@test "install_client_helm: TB_MYSQL_ENGINE=8.4 -> values carry the 8.4 mysqlClient block" {
+  HOST_DATA_DIR="$BATS_TEST_TMPDIR/data"; mkdir -p "$HOST_DATA_DIR"
+  ARCH=x86_64; TB_MYSQL_ENGINE=8.4
+  _ensure_tracebloc_dirs() { :; }
+  _ensure_release_dirs() { :; }
+  _ensure_helm_runnable() { :; }
+  helm() { record "helm $*"; return 0; }
+  verify_credentials() { printf valid; }
+  run install_client_helm <<< $'myid\nmypw'
+  [ "$status" -eq 0 ]
+  grep -q 'tag: "8.4"' "$HOST_DATA_DIR/values.yaml"
+  grep -A3 'mysqlClient:' "$HOST_DATA_DIR/values.yaml" | grep -q 'digest: ""'
+}
+
+@test "install_client_helm: amd64 auto -> values carry no mysqlClient block (byte-identical default)" {
+  HOST_DATA_DIR="$BATS_TEST_TMPDIR/data"; mkdir -p "$HOST_DATA_DIR"
+  ARCH=x86_64; unset TB_MYSQL_ENGINE
+  _ensure_tracebloc_dirs() { :; }
+  _ensure_release_dirs() { :; }
+  _ensure_helm_runnable() { :; }
+  helm() { record "helm $*"; return 0; }
+  verify_credentials() { printf valid; }
+  run install_client_helm <<< $'myid\nmypw'
+  [ "$status" -eq 0 ]
+  ! grep -q 'mysqlClient:' "$HOST_DATA_DIR/values.yaml"
+}
+
+@test "install_client_helm: fresh arm64 auto -> values carry the 8.4 mysqlClient block" {
+  HOST_DATA_DIR="$BATS_TEST_TMPDIR/data"; mkdir -p "$HOST_DATA_DIR"
+  ARCH=arm64; unset TB_MYSQL_ENGINE
+  _ensure_tracebloc_dirs() { :; }
+  _ensure_release_dirs() { :; }
+  _ensure_helm_runnable() { :; }
+  helm() { record "helm $*"; return 0; }
+  verify_credentials() { printf valid; }
+  run install_client_helm <<< $'myid\nmypw'
+  [ "$status" -eq 0 ]
+  grep -q 'tag: "8.4"' "$HOST_DATA_DIR/values.yaml"
+}
+
+@test "install_client_helm: arm64 auto with existing mysql data -> stays 5.7 (no engine flip)" {
+  HOST_DATA_DIR="$BATS_TEST_TMPDIR/data"; mkdir -p "$HOST_DATA_DIR/mysql"
+  touch "$HOST_DATA_DIR/mysql/ibdata1"
+  ARCH=arm64; unset TB_MYSQL_ENGINE
+  _ensure_tracebloc_dirs() { :; }
+  _ensure_release_dirs() { :; }
+  _ensure_helm_runnable() { :; }
+  helm() { record "helm $*"; return 0; }
+  verify_credentials() { printf valid; }
+  run install_client_helm <<< $'myid\nmypw'
+  [ "$status" -eq 0 ]
+  ! grep -q 'mysqlClient:' "$HOST_DATA_DIR/values.yaml"
 }

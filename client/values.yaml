@@ -508,6 +508,18 @@ images:
     # unchanged (arm64 hosts keep running it emulated). A future re-pin
     # (the 8.4 multi-arch image, backend#723) should pin the manifest-INDEX
     # digest, like images.ingestor.prodDigest does.
+    #
+    # 8.4 OPT-IN (backend#723, decision A2 2026-08-05) — FRESH datadirs only:
+    #   tag: "8.4"
+    #   digest: ""
+    # The bash installer sets exactly this on fresh arm64 installs (native
+    # multi-arch engine instead of amd64 emulation) and keeps it sticky across
+    # re-runs; TB_MYSQL_ENGINE=8.4|5.7 overrides. NEVER set it on an edge with
+    # an existing 5.7 datadir: 8.4 refuses to open 5.7 data (staged
+    # 5.7 -> 8.0 -> 8.4 only) — the mysql-format-guard init container blocks
+    # the mismatch with an actionable message instead of a mysqld CrashLoop.
+    # If you re-pin this digest, update tracebloc.mysqlEngineMajor in
+    # _helpers.tpl in the same commit (mysql_test.yaml enforces the pair).
     digest: "sha256:f546e47fb339e0982c902cef063b081ccf2cbbaf35b475287d583b9bf3163354"
   busybox:
     tag: "1.35"
