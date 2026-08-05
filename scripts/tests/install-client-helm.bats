@@ -122,6 +122,48 @@ setup() {
   [ "$output" = "" ]
 }
 
+# The BARE-statement shape is the one that used to die (#523): on an absent key
+# grep exits 1, `pipefail` carries that out of the assignment, and `set -e` kills
+# the installer before the empty-check on the next line — the line that exists
+# precisely to handle "key not found" — can run. Every call site wraps the
+# function in `$( )` today, which suspends errexit for the body, so asserting
+# those still work proves nothing about this. Exercise the bare call directly:
+# under `set -e` a non-zero rc from it would abort, so reaching the sentinel IS
+# the proof the not-found path is reachable.
+@test "_extract_yaml_value: absent key under set -euo pipefail, bare call, does not abort (#523)" {
+  f="$BATS_TEST_TMPDIR/v"; printf 'other: x\n' >"$f"
+  run bash -c '
+    set -euo pipefail
+    source "'"${LIB_DIR}"'/common.sh"
+    source "'"${LIB_DIR}"'/install-client-helm.sh"
+    LOG_FILE=/dev/null
+    _extract_yaml_value "'"$f"'" clientId
+    echo "REACHED_NOT_FOUND_PATH"
+  '
+  [ "$status" -eq 0 ] || return 1
+  # Sole output => the absent key emitted nothing, and execution continued.
+  [ "$output" = "REACHED_NOT_FOUND_PATH" ] || return 1
+}
+
+# The first fix used `grep | head -1 || line=""`. On a DUPLICATE key, head
+# exits after line one and SIGPIPEs grep (141); under pipefail the fallback
+# then wiped the successfully captured value, so detect_installed_client could
+# miss a clientId and fail open toward overwrite (Bugbot). The pipeline is gone
+# — grep captures every match, the shell takes the first — so a duplicate key
+# must yield the FIRST value, under the same bare-call errexit shape as above.
+@test "_extract_yaml_value: duplicate key under set -euo pipefail keeps the first value (Bugbot #525)" {
+  f="$BATS_TEST_TMPDIR/v"; printf 'clientId: "first"\nclientId: "second"\n' >"$f"
+  run bash -c '
+    set -euo pipefail
+    source "'"${LIB_DIR}"'/common.sh"
+    source "'"${LIB_DIR}"'/install-client-helm.sh"
+    LOG_FILE=/dev/null
+    _extract_yaml_value "'"$f"'" clientId
+  '
+  [ "$status" -eq 0 ] || return 1
+  [ "$output" = "first" ] || return 1
+}
+
 # ── _yaml_sq_escape / _yaml_sq_unescape (Saqlain review, #443) ──────────────
 # The bash-3.2 portability rule lives in exactly these two helpers now, so both
 # directions and their round-trip are pinned here.
