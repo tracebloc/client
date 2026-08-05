@@ -468,8 +468,8 @@ function Get-VerifiedDownload {
     [string]$Message = 'Downloading'
   )
   $iwr  = { param($u, $d); $ProgressPreference = 'SilentlyContinue'; Invoke-WebRequest $u -OutFile $d -UseBasicParsing -MaximumRedirection 5 }
-  # style-guard: allow -- curl.exe is a deliberate FALLBACK transport here; curl_secure() is a bash helper and cannot exist in PowerShell. Flags are hardcoded to match its TLS/timeout floor.
-  $curl = { param($u, $d); & curl.exe -fSL --retry 2 --retry-delay 2 --connect-timeout 30 --max-time 900 -o $d $u 2>$null; if ($LASTEXITCODE -ne 0) { throw "curl.exe exited $LASTEXITCODE" } }  # style-guard: allow
+  # style-guard: allow -- curl.exe is a deliberate FALLBACK transport here; curl_secure() is a bash helper and cannot exist in PowerShell. --tlsv1.2 mirrors its TLS floor (Bugbot).
+  $curl = { param($u, $d); & curl.exe --tlsv1.2 -fSL --retry 2 --retry-delay 2 --connect-timeout 30 --max-time 900 -o $d $u 2>$null; if ($LASTEXITCODE -ne 0) { throw "curl.exe exited $LASTEXITCODE" } }  # style-guard: allow
   $bits = { param($u, $d); Import-Module BitsTransfer -ErrorAction SilentlyContinue; Start-BitsTransfer -Source $u -Destination $d -ErrorAction Stop }
 
   $transports = @( ,@('Invoke-WebRequest', $iwr) )
@@ -486,7 +486,14 @@ function Get-VerifiedDownload {
       $problems += "${name}: $($_.Exception.Message)"
       continue
     }
-    $bad = Test-DownloadComplete -Path $Dest -MinBytes $MinBytes -Magic $Magic
+    # Validation must not escape the loop: Get-Item/OpenRead can throw if AV locks
+    # or quarantines the just-written file, and that is exactly a case where the
+    # NEXT transport should be tried, not the whole download aborted (Bugbot).
+    try {
+      $bad = Test-DownloadComplete -Path $Dest -MinBytes $MinBytes -Magic $Magic
+    } catch {
+      $bad = "could not read the downloaded file ($($_.Exception.Message)) -- it may be locked or quarantined by antivirus"
+    }
     if (-not $bad) { return }        # complete + valid -- done
     $problems += "${name}: $bad"
     Warn "$Label via $name looked incomplete ($bad); trying another method..."

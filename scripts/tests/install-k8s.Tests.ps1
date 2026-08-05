@@ -3403,3 +3403,19 @@ Describe "Test-DownloadComplete (resilient tool download, #607)" {
     Test-DownloadComplete -Path $script:err -MinBytes 10 | Should -BeNullOrEmpty
   }
 }
+
+Describe "Get-VerifiedDownload resilience guards (#607, Bugbot)" {
+  BeforeAll { $script:GVD = Get-Content "$PSScriptRoot/../install-k8s.ps1" -Raw }
+
+  It "the curl.exe fallback names the TLS 1.2 floor (parity with curl_secure)" {
+    # Bugbot: the fallback must not be able to negotiate below TLS 1.2 on the very
+    # proxy networks this targets.
+    $script:GVD | Should -Match 'curl\.exe --tlsv1\.2'
+  }
+
+  It "wraps the post-download validation so an I/O error tries the next transport, not aborts" {
+    # Bugbot: Get-Item/OpenRead can throw if AV locks the just-written file; that
+    # must fall through to curl.exe/BITS, not escape Get-VerifiedDownload.
+    $script:GVD | Should -Match 'try \{\s*\$bad = Test-DownloadComplete[\s\S]{0,220}catch \{\s*\$bad ='
+  }
+}
