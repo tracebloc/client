@@ -4148,7 +4148,7 @@ function Test-Preflight {
     $criticals += @{ label = "k3d download (github.com)";                  url = "https://github.com/" }
     $criticals += @{ label = "k3d assets (objects.githubusercontent.com)"; url = "https://objects.githubusercontent.com/" }
   }
-  $tlsSeen = $false; $cfail = 0
+  $tlsSeen = $false; $cfail = 0; $regBlocked = $false
   foreach ($c in $criticals) {
     $status = Test-PfUrl $c.url -RequireSuccess:([bool]$c.strict)
     if ($status -ne "ok") { $status = Test-PfUrl $c.url -RequireSuccess:([bool]$c.strict) }   # one retry for transient blips
@@ -4157,6 +4157,8 @@ function Test-Preflight {
       Write-PfFail "$($c.label) unreachable ($status)"
       $hardFail++; $cfail++
       if ($status -eq "tls") { $tlsSeen = $true }
+      # #585: was it a CONTAINER REGISTRY that's blocked (images can't be pulled)?
+      if ($c.url -match 'registry-1\.docker\.io|auth\.docker\.io|ghcr\.io') { $regBlocked = $true }
     }
   }
   if ($tlsSeen)    {
@@ -4164,6 +4166,9 @@ function Test-Preflight {
     Hint "Fix THESE host checks by importing the CA into the Windows certificate store (Cert:\LocalMachine\Root) - Invoke-WebRequest uses the system store, not an env var. The k3d nodes are trusted separately via `$env:TRACEBLOC_CA_BUNDLE='C:\path\to\corporate-ca.pem' (CURL_CA_BUNDLE also honored) at cluster-create. Ask IT for the bundle if unsure."
   }
   if ($cfail -gt 0){ Hint "Allow HTTPS (443) egress to the host(s) named above - the always-needed set is registry-1.docker.io, auth.docker.io, ghcr.io, $backendHost, tracebloc.github.io, plus any tool-download host listed (desktop.docker.com / dl.k8s.io / get.helm.sh / github.com / objects.githubusercontent.com) - or configure your corporate proxy." }
+  # #585: when the CONTAINER REGISTRIES themselves are blocked, images can't be pulled
+  # directly at all - surface the mirror / offline options in plain language.
+  if ($regBlocked) { Hint "The container registries (Docker Hub / GHCR) look blocked here, so the images can't be pulled directly. If your site runs a mirror you CAN reach, point the install at it; for a fully offline site, an air-gapped image bundle is the alternative. See the 'Blocked container registry' section of docs/INSTALL.md." }
 
   if ($hardFail -gt 0) {
     Write-Host ""

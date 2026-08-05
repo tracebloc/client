@@ -1165,3 +1165,20 @@ setup() {
   # username must appear exactly once (as -proxy_user), never reused as the password
   [ "$(grep -c 'onlyuser' "$cap")" -eq 1 ] || return 1
 }
+
+# ── registry-block detection + guidance (#585) ───────────────────────────────
+@test "_pf_connectivity: blocked container registry -> mirror/offline guidance (#585)" {
+  _pf_probe_url() { case "$1" in *registry-1.docker*|*auth.docker*|*ghcr.io*) echo blocked ;; *) echo ok ;; esac; }
+  run _pf_connectivity
+  [[ "$output" == *"container registries"* ]]
+  [[ "$output" == *"mirror"* ]]
+  [[ "$output" == *"docs/INSTALL.md"* ]]
+}
+
+@test "_pf_connectivity: a non-registry host blocked does NOT trigger the registry guidance (#585)" {
+  # Only the backend API host fails; the registries are reachable -> generic egress
+  # hint only, no registry-mirror guidance.
+  _pf_probe_url() { case "$1" in *api.tracebloc.io*|*dev-api*|*stg-api*) echo blocked ;; *) echo ok ;; esac; }
+  run _pf_connectivity
+  [[ "$output" != *"container registries"* ]]
+}
