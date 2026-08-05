@@ -1005,3 +1005,74 @@ setup() {
   grep -q 'look stuck pulling' "$f"
   [ "$(grep -c 'Services are still downloading' "$f")" -eq 1 ] || return 1
 }
+
+# ── _image_mirror_yaml (private registry mirror / air-gap, #585) ────────────
+# Emits the top-level chart values that re-home every image onto a private
+# mirror. Empty unless TRACEBLOC_IMAGE_REGISTRY / TRACEBLOC_REGISTRY_* are set.
+@test "_image_mirror_yaml: no knobs -> empty (default install unchanged)" {
+  unset TRACEBLOC_IMAGE_REGISTRY TRACEBLOC_REGISTRY_USERNAME TRACEBLOC_REGISTRY_PASSWORD TRACEBLOC_REGISTRY_SERVER TRACEBLOC_REGISTRY_EMAIL
+  run _image_mirror_yaml
+  [ "$status" -eq 0 ] || return 1
+  [ -z "$output" ] || return 1
+}
+
+@test "_image_mirror_yaml: mirror only -> global.imageRegistry, no dockerRegistry" {
+  unset TRACEBLOC_REGISTRY_USERNAME TRACEBLOC_REGISTRY_PASSWORD TRACEBLOC_REGISTRY_SERVER TRACEBLOC_REGISTRY_EMAIL
+  export TRACEBLOC_IMAGE_REGISTRY=mirror.corp.example
+  run _image_mirror_yaml
+  [ "$status" -eq 0 ] || return 1
+  echo "$output" | grep -q "imageRegistry: 'mirror.corp.example'" || return 1
+  echo "$output" | grep -q "^global:" || return 1
+  ! echo "$output" | grep -q "dockerRegistry:" || return 1
+}
+
+@test "_image_mirror_yaml: strips a pasted scheme from the mirror host" {
+  unset TRACEBLOC_REGISTRY_USERNAME TRACEBLOC_REGISTRY_PASSWORD TRACEBLOC_REGISTRY_SERVER TRACEBLOC_REGISTRY_EMAIL
+  export TRACEBLOC_IMAGE_REGISTRY=https://mirror.corp.example
+  run _image_mirror_yaml
+  echo "$output" | grep -q "imageRegistry: 'mirror.corp.example'" || return 1
+  ! echo "$output" | grep -q "https://mirror.corp.example'" || return 1
+}
+
+@test "_image_mirror_yaml: mirror + creds -> dockerRegistry with derived https server" {
+  export TRACEBLOC_IMAGE_REGISTRY=mirror.corp.example
+  export TRACEBLOC_REGISTRY_USERNAME=svc
+  export TRACEBLOC_REGISTRY_PASSWORD=secret
+  unset TRACEBLOC_REGISTRY_SERVER TRACEBLOC_REGISTRY_EMAIL
+  run _image_mirror_yaml
+  [ "$status" -eq 0 ] || return 1
+  echo "$output" | grep -q "^dockerRegistry:" || return 1
+  echo "$output" | grep -q "create: true" || return 1
+  echo "$output" | grep -q "server: 'https://mirror.corp.example'" || return 1
+  echo "$output" | grep -q "username: 'svc'" || return 1
+  echo "$output" | grep -q "password: 'secret'" || return 1
+}
+
+@test "_image_mirror_yaml: an explicit TRACEBLOC_REGISTRY_SERVER wins over the derived URI" {
+  export TRACEBLOC_IMAGE_REGISTRY=mirror.corp.example
+  export TRACEBLOC_REGISTRY_USERNAME=svc
+  export TRACEBLOC_REGISTRY_PASSWORD=secret
+  export TRACEBLOC_REGISTRY_SERVER=https://auth.corp.example/v2/
+  unset TRACEBLOC_REGISTRY_EMAIL
+  run _image_mirror_yaml
+  echo "$output" | grep -q "server: 'https://auth.corp.example/v2/'" || return 1
+}
+
+@test "_image_mirror_yaml: doubles single quotes in the password (YAML-safe)" {
+  export TRACEBLOC_IMAGE_REGISTRY=mirror.corp.example
+  export TRACEBLOC_REGISTRY_USERNAME=svc
+  export TRACEBLOC_REGISTRY_PASSWORD="s3cr3t'q"
+  unset TRACEBLOC_REGISTRY_SERVER TRACEBLOC_REGISTRY_EMAIL
+  run _image_mirror_yaml
+  echo "$output" | grep -q "password: 's3cr3t''q'" || return 1
+}
+
+@test "_image_mirror_yaml: creds without a mirror -> dockerRegistry only, no global" {
+  unset TRACEBLOC_IMAGE_REGISTRY TRACEBLOC_REGISTRY_SERVER TRACEBLOC_REGISTRY_EMAIL
+  export TRACEBLOC_REGISTRY_USERNAME=svc
+  export TRACEBLOC_REGISTRY_PASSWORD=secret
+  run _image_mirror_yaml
+  [ "$status" -eq 0 ] || return 1
+  ! echo "$output" | grep -q "^global:" || return 1
+  echo "$output" | grep -q "^dockerRegistry:" || return 1
+}

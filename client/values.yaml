@@ -5,6 +5,19 @@
 # Platform-specific behaviour is controlled by the values below.
 # Use per-environment value files (e.g. ci/aks-values.yaml) to override.
 
+# -- Cross-cutting settings shared by all sub-resources.
+global:
+  # Private registry mirror for restricted-network / air-gapped installs (#585).
+  # A BARE host (no scheme), e.g. "mirror.corp.example" or "mirror.corp.example:5000".
+  # When set, EVERY image the chart pulls is re-homed onto this host — the
+  # tracebloc services, the spawned ingestor + training-job images, and the
+  # alpine/*, ubuntu/squid, busybox, curl helper images — which must already host
+  # the same repositories + tags/digests. Unset (the default) pulls tracebloc/*
+  # and the helper images from docker.io and the ingestor from ghcr.io. If the
+  # mirror needs authentication, also set dockerRegistry below. The standalone
+  # installer writes this from TRACEBLOC_IMAGE_REGISTRY. See docs/INSTALL.md.
+  imageRegistry: ""
+
 # -- Environment variables passed to containers
 env: {
   # CLIENT_ENV: prod

@@ -1,0 +1,190 @@
+suite: global.imageRegistry private-mirror re-homing (#585)
+# One knob, --set global.imageRegistry=<mirror>, must re-home EVERY image the
+# chart pulls onto that mirror so an air-gapped / registry-mirrored install
+# pulls nothing from a public registry. This is the Bitnami `global.imageRegistry`
+# convention. Two invariants are pinned here:
+#   1. Set  -> every image (tracebloc/*, the spawned ingestor + training jobs,
+#      and the alpine/*, ubuntu/squid utility images) carries the mirror prefix.
+#   2. Unset -> byte-identical to the pre-#585 chart: tracebloc/* + squid on
+#      docker.io, ingestor on ghcr.io, alpine/* unprefixed (docker.io implicit).
+# Precedence guards: an explicit images.ingestor.repository still wins over the
+# mirror (someone who names a full repo means it); an explicit per-image
+# registry (egressProxy.image.registry) is overridden by the global mirror.
+templates:
+  - templates/jobs-manager-deployment.yaml
+  - templates/resource-monitor-daemonset.yaml
+  - templates/egress-proxy-deployment.yaml
+  - templates/egress-proxy-configmap.yaml
+  - templates/image-refresh-cronjob.yaml
+  - templates/auto-upgrade-cronjob.yaml
+  - templates/storage-assertions-check.yaml
+release:
+  name: t
+  namespace: tracebloc
+set:
+  clientId: "test-id"
+  clientPassword: "test"
+tests:
+  # ---------------------------------------------------------------------------
+  # 1. Mirror SET -> every image re-homed
+  # ---------------------------------------------------------------------------
+  - it: re-homes the jobs-manager (tracebloc.image) container onto the mirror
+    template: templates/jobs-manager-deployment.yaml
+    set:
+      global:
+        imageRegistry: mirror.corp.example
+    asserts:
+      - matchRegex:
+          path: spec.template.spec.containers[0].image
+          pattern: "^mirror\\.corp\\.example/tracebloc/jobs-manager"
+
+  - it: re-homes the resource-monitor DaemonSet onto the mirror
+    template: templates/resource-monitor-daemonset.yaml
+    set:
+      global:
+        imageRegistry: mirror.corp.example
+    asserts:
+      - matchRegex:
+          path: spec.template.spec.containers[0].image
+          pattern: "^mirror\\.corp\\.example/tracebloc/resource-monitor"
+
+  - it: re-homes the squid egress gateway onto the mirror
+    template: templates/egress-proxy-deployment.yaml
+    set:
+      global:
+        imageRegistry: mirror.corp.example
+    asserts:
+      - matchRegex:
+          path: spec.template.spec.containers[0].image
+          pattern: "^mirror\\.corp\\.example/ubuntu/squid@"
+
+  - it: re-homes the alpine/k8s image-refresh CronJob onto the mirror
+    template: templates/image-refresh-cronjob.yaml
+    documentSelector: {path: kind, value: CronJob}
+    set:
+      global:
+        imageRegistry: mirror.corp.example
+    asserts:
+      - equal:
+          path: spec.jobTemplate.spec.template.spec.containers[0].image
+          value: "mirror.corp.example/alpine/k8s:1.30.5"
+
+  - it: re-homes the alpine/helm auto-upgrade CronJob onto the mirror
+    template: templates/auto-upgrade-cronjob.yaml
+    documentSelector: {path: kind, value: CronJob}
+    set:
+      global:
+        imageRegistry: mirror.corp.example
+    asserts:
+      - equal:
+          path: spec.jobTemplate.spec.template.spec.containers[0].image
+          value: "mirror.corp.example/alpine/helm:3.16.4"
+
+  - it: re-homes the alpine/k8s storage-assertions Job onto the mirror
+    template: templates/storage-assertions-check.yaml
+    documentSelector: {path: kind, value: Job}
+    set:
+      global:
+        imageRegistry: mirror.corp.example
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].image
+          value: "mirror.corp.example/alpine/k8s:1.30.5"
+
+  - it: re-homes the spawned-ingestor repository env onto the mirror
+    template: templates/jobs-manager-deployment.yaml
+    set:
+      global:
+        imageRegistry: mirror.corp.example
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: INGESTOR_IMAGE_REPOSITORY
+            value: "mirror.corp.example/tracebloc/ingestor"
+
+  - it: re-homes the training-job image host (JOB_IMAGE_HOST) onto the mirror
+    template: templates/jobs-manager-deployment.yaml
+    set:
+      global:
+        imageRegistry: mirror.corp.example
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: JOB_IMAGE_HOST
+            value: "mirror.corp.example/"
+
+  # ---------------------------------------------------------------------------
+  # 2. Mirror UNSET -> byte-identical to pre-#585 defaults
+  # ---------------------------------------------------------------------------
+  - it: leaves tracebloc.image on docker.io when no mirror is set
+    template: templates/jobs-manager-deployment.yaml
+    asserts:
+      - matchRegex:
+          path: spec.template.spec.containers[0].image
+          pattern: "^docker\\.io/tracebloc/jobs-manager"
+
+  - it: leaves the ingestor repository on ghcr.io when no mirror is set
+    template: templates/jobs-manager-deployment.yaml
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: INGESTOR_IMAGE_REPOSITORY
+            value: "ghcr.io/tracebloc/ingestor"
+
+  - it: leaves JOB_IMAGE_HOST on docker.io when no mirror is set
+    template: templates/jobs-manager-deployment.yaml
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: JOB_IMAGE_HOST
+            value: "docker.io/"
+
+  - it: leaves the alpine/helm auto-upgrade image unprefixed when no mirror is set
+    template: templates/auto-upgrade-cronjob.yaml
+    documentSelector: {path: kind, value: CronJob}
+    asserts:
+      - equal:
+          path: spec.jobTemplate.spec.template.spec.containers[0].image
+          value: "alpine/helm:3.16.4"
+
+  - it: leaves the squid gateway on docker.io when no mirror is set
+    template: templates/egress-proxy-deployment.yaml
+    asserts:
+      - matchRegex:
+          path: spec.template.spec.containers[0].image
+          pattern: "^docker\\.io/ubuntu/squid@"
+
+  # ---------------------------------------------------------------------------
+  # 3. Precedence guards
+  # ---------------------------------------------------------------------------
+  - it: an explicit images.ingestor.repository wins over the global mirror
+    template: templates/jobs-manager-deployment.yaml
+    set:
+      global:
+        imageRegistry: mirror.corp.example
+      images:
+        ingestor:
+          repository: priv.example/team/ingestor
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: INGESTOR_IMAGE_REPOSITORY
+            value: "priv.example/team/ingestor"
+
+  - it: the global mirror overrides an explicit egressProxy.image.registry
+    template: templates/egress-proxy-deployment.yaml
+    set:
+      global:
+        imageRegistry: mirror.corp.example
+      egressProxy:
+        image:
+          registry: quay.io
+    asserts:
+      - matchRegex:
+          path: spec.template.spec.containers[0].image
+          pattern: "^mirror\\.corp\\.example/ubuntu/squid@"

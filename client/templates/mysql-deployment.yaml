@@ -39,7 +39,7 @@ spec:
       # deployments (EKS/AKS/OC) skip this and rely on fsGroup.
       initContainers:
       - name: init-mysql-data
-        image: {{ include "tracebloc.image" (dict "repository" "library/busybox" "tag" .Values.images.busybox.tag "digest" .Values.images.busybox.digest "registry" "docker.io") | quote }}
+        image: {{ include "tracebloc.image" (dict "repository" "library/busybox" "tag" .Values.images.busybox.tag "digest" .Values.images.busybox.digest "registry" (dig "imageRegistry" "docker.io" (.Values.global | default dict))) | quote }}
         # Must run as root to chown the hostPath mount; kubelet does not apply
         # fsGroup to hostPath volumes (kubernetes/kubernetes#138411).
         # Scope privilege tightly: only CHOWN is needed — no FOWNER, so do not
@@ -62,7 +62,7 @@ spec:
           mountPath: /var/lib/mysql/
       {{- end }}
       containers:
-      - image: {{ include "tracebloc.image" (dict "repository" "tracebloc/mysql-client" "tag" (.Values.images.mysqlClient.tag | default "prod") "digest" .Values.images.mysqlClient.digest "registry" "docker.io") | quote }}
+      - image: {{ include "tracebloc.image" (dict "repository" "tracebloc/mysql-client" "tag" (.Values.images.mysqlClient.tag | default "prod") "digest" .Values.images.mysqlClient.digest "registry" (dig "imageRegistry" "docker.io" (.Values.global | default dict))) | quote }}
         imagePullPolicy: IfNotPresent
         name: mysql-client
         securityContext:

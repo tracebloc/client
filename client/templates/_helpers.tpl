@@ -248,6 +248,19 @@ Usage: {{ include "tracebloc.image" (dict "repository" "tracebloc/jobs-manager" 
 {{- end }}
 
 {{/*
+tracebloc.mirrorPrefix — registry prefix for images whose repository is a
+registry-less path (docker.io implicit), e.g. the alpine/* utility-pod images.
+When a private mirror is set via global.imageRegistry (#585), returns
+"<registry>/" so an air-gapped install re-homes those images onto the mirror;
+returns "" when no mirror is set, so default installs render byte-identically.
+Nil-guarded for --reset-then-reuse-values upgrades that predate global. Call
+with the ROOT context (e.g. `include "tracebloc.mirrorPrefix" $`).
+*/}}
+{{- define "tracebloc.mirrorPrefix" -}}
+{{- with (dig "imageRegistry" "" (.Values.global | default dict)) }}{{ . }}/{{ end -}}
+{{- end -}}
+
+{{/*
 tracebloc.ingestorDigest — the ONE effective digest for the spawned ingestor
 image. Renders the digest to pin to, or nothing at all to float on
 `images.ingestor.tag`. Every consumer of the ingestor image must go through
