@@ -553,10 +553,20 @@ Describe "Invoke-TrackedInstall (#500 capture installer output)" {
     $script:ISRC | Should -Match 'function Invoke-TrackedInstall[\s\S]*Get-Content \$errF[\s\S]*Get-Content \$outF'
     $script:ISRC | Should -Match 'function Invoke-TrackedInstall[\s\S]*if \(\$log\) \{ Log'
   }
-  It "all four winget/installer installs go through the capturing wrapper" {
-    foreach ($tag in 'docker-winget','docker-direct','k3d-winget','helm-winget') {
+  It "every winget/installer install goes through the capturing wrapper" {
+    # k3d-winget was removed in #607: k3d has no winget manifest, so that branch
+    # only ever logged "No package found" before the (now resilient) direct
+    # download ran. The remaining installs must still go through the wrapper.
+    foreach ($tag in 'docker-winget','docker-direct','helm-winget') {
       $script:ISRC | Should -Match "Invoke-TrackedInstall[\s\S]{0,300}-Tag `"$tag`""
     }
+  }
+  It "no longer runs a k3d winget install (#607: k3d has no winget manifest)" {
+    # The comment in install-k8s.ps1 still names Rancher.k3d to explain the removal,
+    # so assert on the tracked-install TAG (unique to the actual invocation), not
+    # on any mention of the id.
+    $script:ISRC | Should -Not -Match '-Tag "k3d-winget"'
+    $script:ISRC | Should -Not -Match 'install","-e","--id","Rancher\.k3d"'
   }
   It "returns ok with the exit code when the process succeeds" {
     Mock Start-Process { [pscustomobject]@{ ExitCode = 0; HasExited = $true } }
@@ -977,6 +987,25 @@ Describe "Install-ClientHelm" {
     }
     Install-ClientHelm
     Should -Invoke helm -ParameterFilter { ($args -contains "upgrade") -and ($args -contains "--reuse-values") }
+  }
+  It "adopted mode prefers --reset-then-reuse-values when Helm >= 3.14 exposes it (bash parity: new chart defaults reach adopted edges)" {
+    # When `helm upgrade --help` advertises --reset-then-reuse-values (Helm >= 3.14),
+    # the reconcile must use it so NEW chart defaults land on adopted Windows edges on
+    # auto-upgrade — not stay pinned to stored values as plain --reuse-values would.
+    $HOST_DATA_DIR = "$TestDrive/d-adopt-reset"
+    $script:TB_PROV_MODE = "adopted"; $script:TB_PROV_ID = "uuid-9"; $script:TB_PROV_NS = "lukas-01"
+    Mock helm {
+      if (($args -contains "upgrade") -and ($args -contains "--help")) { "      --reset-then-reuse-values   reset then reuse"; $global:LASTEXITCODE = 0; return }
+      if ($args -contains "list") { '[{"name":"oldrel","namespace":"lukas-01","chart":"client-1.4.3"}]'; $global:LASTEXITCODE = 0; return }
+      if ($args -contains "get") {
+        if ($args -contains "json") { '{"clientId":"uuid-9"}' } else { 'clientId: uuid-9' }
+        $global:LASTEXITCODE = 0; return
+      }
+      $global:LASTEXITCODE = 0
+    }
+    Install-ClientHelm
+    Should -Invoke helm -ParameterFilter { ($args -contains "upgrade") -and ($args -contains "--reset-then-reuse-values") }
+    Should -Not -Invoke helm -ParameterFilter { ($args -contains "upgrade") -and ($args -contains "--reuse-values") }
   }
   It "a DIFFERENT existing client still refuses outside adopted mode (guard intact)" {
     $HOST_DATA_DIR = "$TestDrive/d-guard-minted"
@@ -3355,5 +3384,141 @@ Describe "Get-ImageMirrorYaml (private registry mirror / air-gap, #585)" {
     $env:TRACEBLOC_REGISTRY_USERNAME = "svc"
     $env:TRACEBLOC_REGISTRY_PASSWORD = "secret"
     (Get-ImageMirrorYaml) | Should -Match "server: 'https://index.docker.io/v1/'"
+  }
+}
+
+Describe "Test-DownloadComplete (resilient tool download, #607)" {
+  BeforeAll {
+    $script:dl = Join-Path ([System.IO.Path]::GetTempPath()) ("tbdl-" + [guid]::NewGuid().ToString("N"))
+    New-Item -ItemType Directory -Path $script:dl | Out-Null
+    $script:exe = Join-Path $script:dl "k3d.exe"
+    [System.IO.File]::WriteAllBytes($script:exe, ([byte[]](0x4D,0x5A) + (New-Object byte[] 2000000)))   # MZ + 2MB
+    $script:zip = Join-Path $script:dl "helm.zip"
+    [System.IO.File]::WriteAllBytes($script:zip, ([byte[]](0x50,0x4B,0x03,0x04) + (New-Object byte[] 2000000))) # PK + 2MB
+    $script:err = Join-Path $script:dl "err.html"
+    [System.IO.File]::WriteAllText($script:err, "<html>blocked by proxy</html>")
+  }
+  AfterAll { Remove-Item $script:dl -Recurse -Force -ErrorAction SilentlyContinue }
+
+  It "passes a complete .exe (MZ) above the size floor" {
+    Test-DownloadComplete -Path $script:exe -MinBytes 1MB -Magic 'MZ' | Should -BeNullOrEmpty
+  }
+  It "passes a complete .zip (PK) above the size floor" {
+    Test-DownloadComplete -Path $script:zip -MinBytes 1MB -Magic 'PK' | Should -BeNullOrEmpty
+  }
+  It "flags a truncated/blocked transfer (below the size floor) as a transfer failure" {
+    Test-DownloadComplete -Path $script:err -MinBytes 1MB -Magic 'MZ' | Should -Match 'truncated or blocked'
+  }
+  It "flags a complete-but-too-small file (size floor not met)" {
+    Test-DownloadComplete -Path $script:exe -MinBytes 5MB -Magic 'MZ' | Should -Match 'expected at least'
+  }
+  It "flags a wrong magic (an error page or altered binary), not a checksum problem" {
+    Test-DownloadComplete -Path $script:exe -MinBytes 1MB -Magic 'PK' | Should -Match "not a valid 'PK'"
+  }
+  It "flags a missing file" {
+    Test-DownloadComplete -Path (Join-Path $script:dl "nope.bin") -MinBytes 1MB -Magic 'MZ' | Should -Match 'no file was written'
+  }
+  It "skips the magic check when no magic is given (size floor only)" {
+    Test-DownloadComplete -Path $script:err -MinBytes 10 | Should -BeNullOrEmpty
+  }
+}
+
+Describe "Get-VerifiedDownload resilience guards (#607, Bugbot)" {
+  BeforeAll { $script:GVD = Get-Content "$PSScriptRoot/../install-k8s.ps1" -Raw }
+
+  It "the curl.exe fallback names the TLS 1.2 floor (parity with curl_secure)" {
+    # Bugbot: the fallback must not be able to negotiate below TLS 1.2 on the very
+    # proxy networks this targets.
+    $script:GVD | Should -Match 'curl\.exe --tlsv1\.2'
+  }
+
+  It "wraps the post-download validation so an I/O error tries the next transport, not aborts" {
+    # Bugbot: Get-Item/OpenRead can throw if AV locks the just-written file; that
+    # must fall through to curl.exe/BITS, not escape Get-VerifiedDownload.
+    # Distance-independent: the try wraps the validation, and a catch turns an I/O
+    # error into a recorded problem (so the loop tries the next transport).
+    $script:GVD | Should -Match 'try \{\s*\$bad = Test-DownloadComplete'
+    $script:GVD | Should -Match 'catch \{\s*\$bad = "could not read the downloaded file'
+  }
+}
+
+Describe "Checksum-driven tool download (#609)" {
+  BeforeAll { $script:CDD = Get-Content "$PSScriptRoot/../install-k8s.ps1" -Raw }
+
+  It "Get-VerifiedDownload exposes -Sha256 and -MatchPattern, and no fail-open substring gate" {
+    $script:CDD | Should -Match '\[string\]\$Sha256'
+    $script:CDD | Should -Match '\[string\]\$MatchPattern'
+    # -MustContain removed (Bugbot #611): a substring gate is fail-open because the
+    # asset name also appears in the request URL that a proxy error page can echo.
+    $script:CDD | Should -Not -Match 'MustContain'
+  }
+
+  It "the kubectl .sha256 gate is START-anchored so a proxy page retries transports (Bugbot #611)" {
+    # kubectl's .sha256 is a bare hash; the gate must be anchored ('^...64hex') so an
+    # HTML error page (which starts with '<') fails it and falls through to curl.exe/
+    # BITS. An unanchored [0-9a-fA-F]{64} would pass on any page with a 64-hex run.
+    $script:CDD | Should -Match "kubectl\.exe\.sha256[\s\S]{0,140}-MatchPattern '\^"
+  }
+
+  It "a checksum mismatch is treated as a bad transport (retries the next one), not a dead end" {
+    # The whole point: -Sha256 makes the checksum the completeness test, so a
+    # truncated/altered copy triggers curl.exe/BITS instead of failing the install.
+    $script:CDD | Should -Match "if \(-not \`$bad -and \`$Sha256\)[\s\S]{0,200}checksum mismatch"
+  }
+
+  It "k3d gates the binary on the checksum fetched first, via a hash-anchored gate" {
+    # The checksum-list gate requires a 64-hex hash adjacent to the asset, not a bare
+    # asset-name substring (which also appears in the URL and would fail open) (Bugbot).
+    $script:CDD | Should -Match 'checksums\.txt[\s\S]{0,160}-MatchPattern "\[0-9a-fA-F\]\{64\}'
+    $script:CDD | Should -Match '\$k3dUrl[\s\S]{0,160}-Sha256'
+  }
+
+  It "kubectl gates the binary download on the .sha256 fetched first" {
+    $script:CDD | Should -Match 'Get-VerifiedDownload[\s\S]{0,80}kubectl\.exe\.sha256'
+    $script:CDD | Should -Match '\$kUrl[\s\S]{0,160}-Sha256'
+  }
+
+  It "helm gates the zip on its sha256sum with a hash-anchored gate (PS parity with bash)" {
+    $script:CDD | Should -Match '\$helmUrl[\s\S]{0,160}-Sha256'
+    $script:CDD | Should -Match 'sha256sum[\s\S]{0,160}-MatchPattern "\[0-9a-fA-F\]\{64\}'
+  }
+
+  It "each extracted checksum is validated as 64 hex before it gates a download" {
+    ([regex]::Matches($script:CDD, "notmatch '\^\[0-9a-fA-F\]\{64\}\`$'")).Count | Should -BeGreaterOrEqual 2
+  }
+}
+
+Describe "Cluster-create exit-code reliability (#611)" {
+  BeforeAll { $script:CEC = Get-Content "$PSScriptRoot/../install-k8s.ps1" -Raw }
+
+  It "Wait-ProcessWithDeadline calls WaitForExit before returning success" {
+    # HasExited can flip true before redirected stdout/stderr drain, leaving
+    # $proc.ExitCode null; WaitForExit flushes them so every caller reads a real code.
+    $script:CEC | Should -Match 'function Wait-ProcessWithDeadline[\s\S]{0,1600}\$Process\.WaitForExit\(\)[\s\S]{0,80}return \$true'
+  }
+
+  It "the null-exit fallback checks BOTH k3d streams (logrus success goes to stderr) (Bugbot)" {
+    # k3d's 'Cluster created successfully!' is a logrus line on STDERR, so the null-
+    # exit fallback must inspect $k3dStderr too, not only $k3dStdout.
+    $script:CEC | Should -Match 'if \(\$null -eq \$k3dExitCode\)[\s\S]{0,120}k3dStdout[\s\S]{0,20}k3dStderr[\s\S]{0,40}created successfully'
+  }
+}
+
+Describe "Local chart path support (#611 — Windows/bash parity)" {
+  BeforeAll { $script:LCP = Get-Content "$PSScriptRoot/../install-k8s.ps1" -Raw }
+
+  It "uses TRACEBLOC_CHART_PATH as the chart ref when set (test an unreleased chart)" {
+    $script:LCP | Should -Match 'if \(\$env:TRACEBLOC_CHART_PATH\)'
+    $script:LCP | Should -Match '\$chartRef = \$env:TRACEBLOC_CHART_PATH'
+  }
+  It "installs from `$chartRef, not a hardcoded repo path" {
+    $script:LCP | Should -Match 'helm upgrade --install \$TB_NAMESPACE \$chartRef'
+    $script:LCP | Should -Match 'helm upgrade \$existingName \$chartRef'
+  }
+  It "skips 'helm repo add' when a local chart path is given (it's in the else branch)" {
+    $script:LCP | Should -Match '\$chartRef = "\$TRACEBLOC_HELM_REPO_NAME/\$TRACEBLOC_CHART_NAME"[\s\S]{0,140}helm repo add'
+  }
+  It "errors if TRACEBLOC_CHART_PATH is set but is not a directory" {
+    $script:LCP | Should -Match 'TRACEBLOC_CHART_PATH is set but is not a directory'
   }
 }

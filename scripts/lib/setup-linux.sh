@@ -453,6 +453,9 @@ _fetch_kubectl() {
     "https://dl.k8s.io/release/${ver}/bin/${os}/${arch}/kubectl" -o "${tmpdir}/kubectl"
   retry 3 5 curl_secure -fsSL --connect-timeout 15 --speed-limit 1024 --speed-time 60 \
     "https://dl.k8s.io/release/${ver}/bin/${os}/${arch}/kubectl.sha256" -o "${tmpdir}/kubectl.sha256"
+  # Catch a truncated/blocked transfer as a TRANSFER failure before the checksum
+  # misreports it as tampering (#607). kubectl is ~50 MB; 20 MB is a safe floor.
+  _assert_download_size "${tmpdir}/kubectl" 20000000 "kubectl" "$tmpdir"
   _verify_sha256 "$(cat "${tmpdir}/kubectl.sha256")" "${tmpdir}/kubectl" \
     || { rm -rf "$tmpdir"; error "System tool checksum verification failed"; }
   chmod +x "${tmpdir}/kubectl"
@@ -511,6 +514,9 @@ _fetch_k3d_release() {
   want="$(awk -v asset="k3d-${os}-${arch}" \
     '{ n = split($2, p, "/"); if (p[n] == asset) { print $1; exit } }' \
     "${tmpdir}/checksums.txt" 2>/dev/null)"
+  # Transfer-vs-checksum distinction (#607): k3d is ~50 MB; 10 MB floor catches a
+  # truncated/blocked download before the checksum misreports it as tampering.
+  _assert_download_size "${tmpdir}/k3d" 10000000 "k3d" "$tmpdir"
   if [ -z "$want" ] || ! _verify_sha256 "$want" "${tmpdir}/k3d"; then
     rm -rf "$tmpdir"
     error "System tool checksum verification failed"
@@ -660,6 +666,9 @@ _fetch_helm_release() {
   # tarball with the portable checker (sha256sum on Linux, shasum on macOS; #429).
   local want
   want="$(awk 'NR==1{print $1}' "${tmpdir}/${tarball}.sha256sum" 2>/dev/null)"
+  # Transfer-vs-checksum distinction (#607): the Helm tarball is ~17 MB; 5 MB floor
+  # catches a truncated/blocked download before the checksum misreports tampering.
+  _assert_download_size "${tmpdir}/${tarball}" 5000000 "Helm" "$tmpdir"
   if [ -z "$want" ] || ! _verify_sha256 "$want" "${tmpdir}/${tarball}"; then
     rm -rf "$tmpdir"
     error "System tool checksum verification failed"
