@@ -45,7 +45,7 @@ RUN export DEBIAN_FRONTEND=noninteractive \
 # Copy the pinned k3s rootfs over the CUDA base. Exclude /bin on the first copy
 # so the Ubuntu userland (curl, apt, nvidia-ctk) survives, then bring in k3s's
 # own /bin (the k3s binary + /bin/aux) explicitly — the official recipe's split.
-COPY --from=k3s --exclude=/bin / /
+COPY --from=k3s / / --exclude=/bin
 COPY --from=k3s /bin /bin
 
 # Auto-deploy the NVIDIA device plugin + `nvidia` RuntimeClass on first server
