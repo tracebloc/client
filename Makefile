@@ -91,10 +91,17 @@ setup:
 # lint: standard-checks.yml `Lint` + installer-tests.yaml `static`.
 # .bats files are bats DSL, not valid bash — they are exercised by
 # actually running them in the `bats` target.
+#
+# The parse loop is `xargs -0 -n1`, NOT `while read -r -d ''`. Make runs
+# recipes under /bin/sh, which on Debian and Ubuntu is dash, and dash
+# rejects `read -d` outright — the loop body would never execute and the
+# pipeline would still exit 0, so `make check` would cheerfully print
+# "all shell scripts parse" having parsed nothing. GitHub Actions uses
+# bash, so CI never showed it. xargs is POSIX, NUL-safe, and propagates
+# a child failure as a non-zero exit. (Bugbot, #630.)
 .PHONY: lint
 lint:
-	@find scripts -type f -name '*.sh' -print0 \
-	  | while IFS= read -r -d '' f; do bash -n "$$f" || exit 1; done
+	@find scripts -type f -name '*.sh' -print0 | xargs -0 -n1 bash -n
 	@echo "all shell scripts parse"
 	shellcheck --severity=error --shell=bash $(SHELLCHECK_FILES)
 
