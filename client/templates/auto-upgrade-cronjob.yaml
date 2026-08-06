@@ -69,6 +69,24 @@ data:
     fi
 
     log "upgrading $CURRENT -> $LATEST"
+    # #554: a PRIOR helm run killed mid-upgrade (OOM at the 256Mi limit, node
+    # reboot, or cluster restart during the upgrade window) leaves the release
+    # in a pending-* state. The next `helm upgrade` then fails with "another
+    # operation is in progress", exit 1 — and with concurrencyPolicy: Forbid
+    # every subsequent hourly tick fails the same way, forever, until a human
+    # runs `helm rollback`. Reconcile first: if the release is stuck pending-*,
+    # roll back to the last deployed revision before upgrading. Best-effort
+    # (|| true) so a benign race can't abort the tick. jq-free awk over
+    # `helm status -o yaml`, matching the parsing style above.
+    STATUS="$(helm status "$RELEASE_NAME" -n "$RELEASE_NAMESPACE" -o yaml 2>/dev/null \
+      | awk '/^[[:space:]]*status:/ {print $2; exit}')"
+    case "$STATUS" in
+      pending-upgrade|pending-rollback)
+        log "release wedged in $STATUS (a prior run was killed mid-op); rolling back to the last deployed revision"
+        helm rollback "$RELEASE_NAME" -n "$RELEASE_NAMESPACE" \
+          --wait --timeout "$UPGRADE_TIMEOUT" || true
+        ;;
+    esac
     # --reset-then-reuse-values (helm 3.14+) is critical here: --reuse-values
     # alone re-uses the LAST RELEASE'S COMPUTED VALUES, so any new keys added
     # to values.yaml in the upgraded chart (e.g. a future autoUpgrade.foo
@@ -78,12 +96,19 @@ data:
     # layers the customer's user-supplied values on top, so operator overrides
     # (clientId, dockerRegistry creds, autoUpgrade.enabled=false, etc.) are
     # preserved while new defaults flow through.
+    # #554: --atomic --cleanup-on-fail so a THIS-run upgrade failure auto-rolls
+    # back to the last deployed revision (and deletes any half-created
+    # resources) instead of leaving the release pending-upgrade. --atomic
+    # covers a failure helm itself observes; the pending-* reconcile above
+    # covers the case where helm is abruptly KILLED and never gets to roll back.
     helm upgrade "$RELEASE_NAME" "${REPO_NAME}/${CHART_NAME}" \
       --namespace "$RELEASE_NAMESPACE" \
       --version "$LATEST" \
       --reset-then-reuse-values \
       --wait \
-      --timeout "$UPGRADE_TIMEOUT"
+      --timeout "$UPGRADE_TIMEOUT" \
+      --atomic \
+      --cleanup-on-fail
     log "upgrade complete: $CURRENT -> $LATEST"
 ---
 apiVersion: batch/v1

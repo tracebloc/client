@@ -456,6 +456,37 @@ _resolve_chart_ref() {
 # installs from the cli#125 window stored the numeric dashboard id, which can't
 # authenticate. Returns 0 on a successful reconcile; non-zero (caller falls back to
 # the normal connect flow) when no live tracebloc release is found to reconcile.
+# #554: a helm/k3d process killed mid-operation (Ctrl-C, OOM at a memory limit,
+# reboot, laptop sleep) leaves the release in a pending-install /
+# pending-upgrade / pending-rollback state. The NEXT `helm upgrade` then fails
+# with "another operation is in progress" (exit 1, NOT 124), so the old
+# `-eq 124`-guarded hint never fired and the install/reconcile was permanently
+# wedged with no auto-recovery. Detect a stuck pending-* status and reconcile it
+# in place BEFORE the upgrade:
+#   pending-install                    -> uninstall the half-installed release
+#                                         (there is no prior revision to roll back to)
+#   pending-upgrade / pending-rollback -> roll back to the last deployed revision
+# jq-free (awk over `helm status -o yaml`, matching this file's conventions) and
+# best-effort — a failure here is non-fatal; the subsequent upgrade (and its
+# error path) still runs.
+_reconcile_pending_release() {
+  local _rel="$1" _ns="$2" _status
+  _status="$(helm status "$_rel" -n "$_ns" -o yaml 2>/dev/null \
+    | awk '/^[[:space:]]*status:/ {print $2; exit}')"
+  case "$_status" in
+    pending-install)
+      log "Release '$_rel' is wedged in pending-install (a prior run was killed mid-install); uninstalling the half-installed release before retrying."
+      spin_cmd_bounded 120 "Clearing a half-finished install…" \
+        helm uninstall "$_rel" -n "$_ns" || true
+      ;;
+    pending-upgrade|pending-rollback)
+      log "Release '$_rel' is wedged in $_status (a prior run was killed mid-op); rolling back to the last deployed revision before retrying."
+      spin_cmd_bounded 120 "Recovering a half-finished upgrade…" \
+        helm rollback "$_rel" -n "$_ns" || true
+      ;;
+  esac
+}
+
 _reconcile_adopted_client() {
   # provision_client (Step 3) hands over the adopted client id (UUID) + the marker on
   # adopt (no password — the existing credential stands). Find the live client release
@@ -497,6 +528,10 @@ _reconcile_adopted_client() {
   # node-local (RFC-0003 Option C) has no hostPath dirs to pre-create.
   [[ "${TB_STORAGE_MODE:-hostpath}" != "node-local" ]] && _ensure_release_dirs "$_ns"
 
+  # #554: auto-recover a release left pending-* by a previously-killed helm run
+  # before we try to reconcile it, so a re-run isn't permanently wedged.
+  _reconcile_pending_release "$_rel" "$_ns"
+
   # Reconcile blocks too — same spinner treatment (RFC-0002 §2), bounded so a
   # wedged kube-apiserver can't hang it forever (#426).
   local _helm_timeout_min
@@ -504,13 +539,13 @@ _reconcile_adopted_client() {
   local _helm_rc=0
   spin_cmd_bounded "$(( _helm_timeout_min * 60 ))" "Reconciling the existing client…" helm "${_args[@]}" || _helm_rc=$?
   if [[ "$_helm_rc" -ne 0 ]]; then
-    if [[ "$_helm_rc" -eq 124 ]]; then
-      # A SIGKILLed helm can leave the release wedged as pending-upgrade; the
-      # NEXT run then fails with "another operation is in progress" and no
-      # clue (Bugbot #442). Name the unwedge command now.
-      hint "If the next run reports 'another operation is in progress', unwedge the release first:"
-      hint "  helm -n $_ns rollback $_rel    (returns to the previous, working release)"
-    fi
+    # A helm run killed mid-operation (our timeout=124, or an earlier
+    # Ctrl-C/OOM/reboot) can leave the release wedged pending-*; we auto-recover
+    # before the upgrade (see _reconcile_pending_release), but surface the
+    # manual remedy on ANY failure (#554) — not only our own timeout — since the
+    # next run's "another operation is in progress" also exits 1.
+    hint "If a re-run reports 'another operation is in progress', unwedge the release first:"
+    hint "  helm -n $_ns rollback $_rel    (returns to the previous, working release)"
     error "Reconcile of the existing client failed. Check the log for details: ${LOG_FILE:-}"
   fi
 
@@ -1150,6 +1185,11 @@ EOF
   spin_cmd_bounded "$(( _metrics_wait_s + 60 ))" "Waiting for the metrics API to register…" \
     _wait_for_metrics_apiservice || true
 
+  # #554: auto-recover a release left pending-* by a previously-killed helm run
+  # (Ctrl-C, OOM, reboot, laptop sleep) before we try to install/upgrade, so a
+  # re-run isn't permanently wedged on "another operation is in progress".
+  _reconcile_pending_release "$TB_NAMESPACE" "$TB_NAMESPACE"
+
   # The chart install blocks ~10-15s (render + apply + image pull), so run it
   # behind a spinner instead of a frozen terminal — spin_cmd_bounded streams
   # helm output to $LOG_FILE and, on failure, tails the log to stderr. Honours
@@ -1164,14 +1204,14 @@ EOF
     --create-namespace \
     --values "$values_file" || _helm_rc=$?
   if [[ "$_helm_rc" -ne 0 ]]; then
-    if [[ "$_helm_rc" -eq 124 ]]; then
-      # A SIGKILLed helm can leave the release wedged as pending-install /
-      # pending-upgrade; the NEXT run then fails with "another operation is
-      # in progress" and no clue (Bugbot #442). Name the unwedge command now.
-      hint "If the next run reports 'another operation is in progress', unwedge the release first:"
-      hint "  first install:  helm -n $TB_NAMESPACE uninstall $TB_NAMESPACE    (removes only the half-installed release)"
-      hint "  upgrade:        helm -n $TB_NAMESPACE rollback $TB_NAMESPACE     (returns to the previous release)"
-    fi
+    # A helm run killed mid-operation (our timeout=124, or an earlier
+    # Ctrl-C/OOM/reboot) can leave the release wedged pending-*; we auto-recover
+    # before the upgrade (see _reconcile_pending_release), but surface the
+    # manual remedy on ANY failure (#554) — not only our own timeout — since the
+    # next run's "another operation is in progress" also exits 1.
+    hint "If a re-run reports 'another operation is in progress', unwedge the release first:"
+    hint "  first install:  helm -n $TB_NAMESPACE uninstall $TB_NAMESPACE    (removes only the half-installed release)"
+    hint "  upgrade:        helm -n $TB_NAMESPACE rollback $TB_NAMESPACE     (returns to the previous release)"
     error "Client installation failed. Check the log for details: ${LOG_FILE:-}"
   fi
 
