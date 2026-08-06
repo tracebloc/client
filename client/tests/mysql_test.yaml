@@ -185,3 +185,89 @@ tests:
       - matchRegex:
           path: spec.template.spec.containers[0].image
           pattern: ^docker\.io/tracebloc/mysql-client@sha256:[a-f0-9]{64}$
+
+  # ── Engine/datadir format guard (backend#723, decision A2) ──
+  # The first assert doubles as the digest↔helper sync pin: re-pinning
+  # images.mysqlClient.digest without updating tracebloc.mysqlEngineMajor
+  # makes the default render report "unknown" and fails here.
+  - it: renders the format guard armed for 5.7 by default (digest pin recognized)
+    template: templates/mysql-deployment.yaml
+    asserts:
+      - equal:
+          path: spec.template.spec.initContainers[0].name
+          value: mysql-format-guard
+      - contains:
+          path: spec.template.spec.initContainers[0].env
+          content:
+            name: TB_EXPECTED_ENGINE
+            value: "5.7"
+      - equal:
+          path: spec.template.spec.initContainers[0].volumeMounts[0].readOnly
+          value: true
+
+  - it: 8.4 opt-in (tag 8.4, empty digest) runs the 8.4 image and arms the guard for 8.4
+    template: templates/mysql-deployment.yaml
+    set:
+      images:
+        mysqlClient:
+          tag: "8.4"
+          digest: ""
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].image
+          value: docker.io/tracebloc/mysql-client:8.4
+      - contains:
+          path: spec.template.spec.initContainers[0].env
+          content:
+            name: TB_EXPECTED_ENGINE
+            value: "8.4"
+
+  - it: the 8.0 transit hop is recognized (guard stands down for the staged upgrade)
+    template: templates/mysql-deployment.yaml
+    set:
+      images:
+        mysqlClient:
+          tag: "8.0"
+          digest: ""
+    asserts:
+      - contains:
+          path: spec.template.spec.initContainers[0].env
+          content:
+            name: TB_EXPECTED_ENGINE
+            value: "8.0"
+
+  - it: a custom digest pin disarms the guard (engine unknown)
+    template: templates/mysql-deployment.yaml
+    set:
+      images:
+        mysqlClient:
+          digest: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    asserts:
+      - contains:
+          path: spec.template.spec.initContainers[0].env
+          content:
+            name: TB_EXPECTED_ENGINE
+            value: "unknown"
+
+  - it: hostPath keeps the chown bootstrap first and the guard second
+    template: templates/mysql-deployment.yaml
+    set:
+      hostPath:
+        enabled: true
+    asserts:
+      - equal:
+          path: spec.template.spec.initContainers[0].name
+          value: init-mysql-data
+      - equal:
+          path: spec.template.spec.initContainers[1].name
+          value: mysql-format-guard
+
+  - it: the format guard re-homes onto a private mirror like every other image (#585)
+    template: templates/mysql-deployment.yaml
+    set:
+      global:
+        imageRegistry: mirror.corp.example
+    asserts:
+      - equal:
+          path: spec.template.spec.initContainers[0].image
+          value: mirror.corp.example/library/busybox:1.35
