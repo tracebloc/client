@@ -44,17 +44,20 @@ spec:
           type: RuntimeDefault
       {{- if .Values.hostPath.enabled }}
       # kubelet does NOT apply fsGroup to hostPath volumes (kubernetes/kubernetes#138411),
-      # so /data/shared is created root-owned and non-root pods can't write to it. That
-      # breaks dataset ingest: `tb data ingest` streams files into a staging pod that does
-      # `mkdir /data/shared/.tracebloc-staging/` and hits "Permission denied" (#611). Unlike
-      # mysql-data (one writer, UID 999), the shared volume has MULTIPLE non-root writers —
+      # so /data/shared AND /data/logs are created root-owned and non-root pods can't write
+      # to them. Two failures this causes: (1) dataset ingest — `tb data ingest` streams files
+      # into a staging pod that does `mkdir /data/shared/.tracebloc-staging/` (#611); and
+      # (2) training — a spawned training pod does `os.makedirs('/data/logs/<run>')` and hits
+      # "Permission denied". Both are the SAME hostPath dirs those spawned pods mount
+      # (client-pvc / client-logs-pvc), so fixing them once here reaches those pods too.
+      # Unlike mysql-data (one writer, UID 999), these have MULTIPLE non-root writers —
       # jobs-manager, the training/ingestor pods it spawns, and the CLI's ingest-staging pod,
-      # whose UID this chart does not control — so it must be world-writable, not chowned to
+      # whose UID this chart does not control — so they must be world-writable, not chowned to
       # a single UID. setgid (2) makes new files inherit GID 1000; runs as root only long
-      # enough to fix the mount, with FOWNER so the chmod is idempotent on re-install. CSI
+      # enough to fix the mounts, with FOWNER so the chmod is idempotent on re-install. CSI
       # clusters rely on fsGroup above and skip this.
       initContainers:
-      - name: init-shared-data
+      - name: init-writable-data
         image: {{ include "tracebloc.image" (dict "repository" "library/busybox" "tag" .Values.images.busybox.tag "digest" .Values.images.busybox.digest "registry" (dig "imageRegistry" "docker.io" (.Values.global | default dict))) | quote }}
         securityContext:
           runAsUser: 0
@@ -66,10 +69,12 @@ spec:
             add: ["CHOWN", "FOWNER"]
           seccompProfile:
             type: RuntimeDefault
-        command: ['sh', '-c', 'chown 1000:1000 /data/shared && chmod 2777 /data/shared']
+        command: ['sh', '-c', 'chown 1000:1000 /data/shared /data/logs && chmod 2777 /data/shared /data/logs']
         volumeMounts:
         - name: shared-volume
           mountPath: /data/shared
+        - name: logs-volume
+          mountPath: /data/logs
       {{- end }}
       containers:
       - name: api
