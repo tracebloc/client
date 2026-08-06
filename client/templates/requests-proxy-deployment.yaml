@@ -45,6 +45,36 @@ spec:
             - "requests_proxy_server:create_app()"
           ports:
             - containerPort: 8888
+          # #1143: without probes the pod is "Ready" the instant the container
+          # process starts — before gunicorn has bound :8888 — so tb doctor's
+          # "Service Bus egress (requests-proxy) ready" (which reads
+          # ReadyReplicas) shows a false green even when the proxy can't relay.
+          # tcpSocket (not httpGet): the proxy app lives in client-runtime and
+          # exposes no chart-visible HTTP health path, and a probe against an
+          # unknown path would 404 and wedge the pod. A successful TCP accept on
+          # the gunicorn listen port is the honest "the proxy is serving" signal.
+          # Mirrors mysql-deployment.yaml's startup/liveness/readiness structure.
+          startupProbe:
+            tcpSocket:
+              port: 8888
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 12
+          livenessProbe:
+            tcpSocket:
+              port: 8888
+            initialDelaySeconds: 0
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 5
+          readinessProbe:
+            tcpSocket:
+              port: 8888
+            initialDelaySeconds: 0
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 3
           securityContext:
             runAsNonRoot: true
             runAsUser: 1001
