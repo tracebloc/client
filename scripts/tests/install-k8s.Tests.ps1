@@ -244,6 +244,39 @@ Describe "Test-ClusterRunningInList (#420 Bugbot: running, not just present)" {
   }
 }
 
+# #557 Bugbot (High, CID 3728714531): "absent cluster misclassified as unknown".
+# The classifier keys off a FULL `k3d cluster list` (no name filter), so an absent
+# cluster is a definite 'down' (a foreign 6550 listener still hard-fails), and only
+# a timed-out / failed list is 'unknown' (warn-and-proceed).
+Describe "Get-ClusterRunState tri-state (#557 Bugbot 3728714531: absent != unknown)" {
+  Context "Get-ClusterRunStateFromList (pure, full 'k3d cluster list' output)" {
+    It "named cluster present with >=1 server -> 'running'" {
+      Get-ClusterRunStateFromList -Json '[{"name":"tracebloc","serversRunning":1}]' -Name 'tracebloc' | Should -Be 'running'
+    }
+    It "named cluster present but STOPPED (serversRunning=0) -> 'down'" {
+      Get-ClusterRunStateFromList -Json '[{"name":"tracebloc","serversRunning":0}]' -Name 'tracebloc' | Should -Be 'down'
+    }
+    It "cluster ABSENT from a successful list -> 'down', NOT 'unknown' (the bug)" {
+      Get-ClusterRunStateFromList -Json '[{"name":"other","serversRunning":1}]' -Name 'tracebloc' | Should -Be 'down'
+    }
+    It "empty list [] (no clusters at all) -> 'down'" {
+      Get-ClusterRunStateFromList -Json '[]' -Name 'tracebloc' | Should -Be 'down'
+    }
+    It "empty / unparseable output (k3d itself failed) -> 'unknown'" {
+      Get-ClusterRunStateFromList -Json ''          -Name 'tracebloc' | Should -Be 'unknown'
+      Get-ClusterRunStateFromList -Json '{not json' -Name 'tracebloc' | Should -Be 'unknown'
+    }
+  }
+  # NOTE: the bounded Get-ClusterRunState wrapper (timeout -> 'unknown',
+  # completed -> classify) is intentionally NOT unit-tested here. Mocking the
+  # Start-Job / Wait-JobWithProgress / Receive-Job machinery is fragile and
+  # environment-dependent (it fails under CI's Pester). Coverage is provided
+  # instead by two stable sources: the pure classifier is exercised directly
+  # above via Get-ClusterRunStateFromList, and the bounded-job wrapping itself
+  # is asserted by the source-of-truth regex guard on Test-ClusterRunning
+  # (Start-Job + Wait-JobWithProgress + deadline). See #557 Bugbot 3728714531.
+}
+
 Describe "Test-ClientHealthy (#420 Bugbot: verify workloads Ready, not just cluster)" {
   It "Get-ClientDeploymentNames lists the three client workloads for a namespace" {
     Get-ClientDeploymentNames -Namespace 'acme' |
@@ -1545,6 +1578,27 @@ Describe "Get-Pf* resource readers" -Skip:(-not $IsWindows) {
     Mock Get-CimInstance { [pscustomobject]@{ VirtualizationFirmwareEnabled = $false } } -ParameterFilter { $ClassName -eq 'Win32_Processor' }
     Get-PfVirtualization | Should -Be $false
   }
+  # #557: port-6550 conflict detection.
+  It "Get-PfPortListening: a bound listener -> true" {
+    Mock Get-NetTCPConnection { [pscustomobject]@{ LocalPort = 6550; State = 'Listen' } }
+    Get-PfPortListening 6550 | Should -Be $true
+  }
+  It "Get-PfPortListening: no listener (empty result) -> false" {
+    Mock Get-NetTCPConnection { }
+    Get-PfPortListening 6550 | Should -Be $false
+  }
+  It "Get-PfPortListening: no listener (ObjectNotFound throw) -> false (#557)" {
+    # Real Get-NetTCPConnection THROWS an ObjectNotFound error when nothing matches
+    # the filter; -ErrorAction Stop routes it to the catch, which reads it as free.
+    Mock Get-NetTCPConnection { throw "CmdletizationQuery_NotFound_LocalPort" }
+    Get-PfPortListening 6550 | Should -Be $false
+  }
+  It "Get-PfPortListening: a genuine probe error -> null, never fails open (#557 Bugbot)" {
+    # A real CIM/access failure must NOT be conflated with a free port -- the old
+    # -ErrorAction SilentlyContinue swallowed it into an empty (= free) result.
+    Mock Get-NetTCPConnection { throw "CIM server is unavailable" }
+    Get-PfPortListening 6550 | Should -Be $null
+  }
 }
 
 Describe "Test-Preflight" {
@@ -1554,6 +1608,7 @@ Describe "Test-Preflight" {
     Mock Get-WindowsArch { "amd64" }
     Mock Get-PfFsType { "local" }
     Mock Get-PfVirtualization { $true }
+    Mock Get-PfPortListening { $false }   # #557: default to port 6550 free
   }
   AfterEach { $env:TRACEBLOC_SKIP_PREFLIGHT = $null; $env:TRACEBLOC_ALLOW_ARM64 = $null; $env:TRACEBLOC_ALLOW_NETWORK_FS = $null }
 
@@ -1587,6 +1642,57 @@ Describe "Test-Preflight" {
   It "virtualization undeterminable -> skipped, not a fail (#387)" {
     Mock Test-PfUrl { "ok" }
     Mock Get-PfVirtualization { $null }
+    { Test-Preflight } | Should -Not -Throw
+  }
+  # #557: port 6550 bound by something that is NOT our cluster -> hard fail with
+  # an actionable message, instead of k3d's raw stderr at cluster-create.
+  It "port 6550 in use by a foreign process (no k3d) -> fails (Err throws) (#557)" {
+    Mock Test-PfUrl { "ok" }
+    Mock Get-PfPortListening { $true }
+    Mock Has { $false }   # no k3d (nor any tool) -> the listener can't be our cluster
+    { Test-Preflight } | Should -Throw
+  }
+  # #557 Bugbot (Med): a STOPPED leftover cluster named $CLUSTER_NAME plus a
+  # foreign listener on 6550 must still hard-fail -- ownership is gated on the
+  # cluster actually RUNNING ('running'), not mere presence. Get-ClusterRunState
+  # returns 'down' for a present-but-stopped (or absent) cluster.
+  It "port 6550 busy + our cluster present but STOPPED -> fails (Err throws) (#557)" {
+    Mock Test-PfUrl { "ok" }
+    Mock Get-PfPortListening { $true }
+    Mock Has { $true }                     # k3d present, so run-state is consulted
+    Mock Get-ClusterRunState { 'down' }    # enumerated: ours is stopped/absent -> foreign listener
+    { Test-Preflight } | Should -Throw
+  }
+  # #557: port 6550 held by OUR own running cluster -> reused, not a conflict.
+  # Ownership passes here, so Test-Preflight continues into the
+  # network-reachability block (which also calls Has for kubectl/helm/k3d); a
+  # plain default Has mock (all tools present -> only always-critical hosts
+  # probed) covers every call and keeps that block from throwing.
+  It "port 6550 in use by our running cluster -> ok, does not throw (#557)" {
+    Mock Test-PfUrl { "ok" }
+    Mock Get-PfPortListening { $true }
+    Mock Has { $true }
+    Mock Get-ClusterRunState { 'running' }
+    { Test-Preflight } | Should -Not -Throw
+  }
+  # #557 Bugbot (Med, CID 3728340365): a slow/wedged Docker can make
+  # `k3d cluster list` time out (Get-ClusterRunState -> 'unknown'). That is
+  # "can't determine", NOT "confidently foreign" -- a normal re-run of an
+  # existing install must NOT be hard-blocked with stop/delete hints. Downgrade
+  # to a warning and proceed; New-K3dCluster's start/repair path settles it.
+  It "port 6550 busy + cluster run-state indeterminate (list timed out) -> warns, does NOT hard-fail (#557 Bugbot)" {
+    Mock Test-PfUrl { "ok" }
+    Mock Get-PfPortListening { $true }
+    Mock Has { $true }                       # k3d present, but...
+    Mock Get-ClusterRunState { 'unknown' }   # ...the bounded list timed out / was unreadable
+    { Test-Preflight } | Should -Not -Throw
+    $out = (Test-Preflight 6>&1 | Out-String)
+    $out | Should -Match "run-state couldn't be determined"   # warned, not hard-failed
+    $out | Should -Not -Match 'will be reused'                # and not misreported as ours
+  }
+  It "port 6550 listener state undeterminable -> skipped, not a fail (#557)" {
+    Mock Test-PfUrl { "ok" }
+    Mock Get-PfPortListening { $null }
     { Test-Preflight } | Should -Not -Throw
   }
   It "memory below floor -> warn-only on Windows (does not throw)" {
