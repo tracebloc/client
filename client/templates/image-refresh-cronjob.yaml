@@ -50,6 +50,27 @@ data:
     log "release=$RELEASE_NAME namespace=$RELEASE_NAMESPACE deployment=$DEPLOYMENT_NAME"
     log "  client images: tracebloc/{jobs-manager,pods-monitor} on docker.io under tag=$IMAGE_TAG"
 
+    # kubectl in the alpine/k8s image does NOT reliably auto-detect in-cluster
+    # config in this Job's pod: with no kubeconfig on disk it falls back to
+    # http://localhost:8080 and every API call fails ("connection refused"),
+    # even though the SA token and KUBERNETES_SERVICE_* env are both present
+    # (#634 — observed failing fleet-wide, where it masqueraded as the generic
+    # "cannot read deployment" below and cost a full live investigation). Build
+    # an explicit in-cluster kubeconfig from the mounted ServiceAccount so every
+    # `kubectl` below targets the real API server regardless of that quirk.
+    # These `kubectl config` calls only write the local kubeconfig file
+    # ($KUBECONFIG, on the writable /tmp emptyDir) — they make no API call.
+    SA_DIR=/var/run/secrets/kubernetes.io/serviceaccount
+    export KUBECONFIG=/tmp/kubeconfig
+    kubectl config set-cluster in-cluster \
+      --server="https://${KUBERNETES_SERVICE_HOST}:${KUBERNETES_SERVICE_PORT}" \
+      --certificate-authority="${SA_DIR}/ca.crt" >/dev/null
+    kubectl config set-credentials in-cluster \
+      --token="$(cat "${SA_DIR}/token")" >/dev/null
+    kubectl config set-context in-cluster \
+      --cluster=in-cluster --user=in-cluster --namespace="$RELEASE_NAMESPACE" >/dev/null
+    kubectl config use-context in-cluster >/dev/null
+
     # Get an anonymous pull-scope token for one repository on a
     # registry. Both docker.io and ghcr.io support anonymous tokens for
     # public images; only the issuer URL differs. tr cleanup handles
@@ -139,7 +160,12 @@ data:
         log "deployment/${DEPLOYMENT_NAME} not settled (rollout in progress or pod not Ready) -- skipping this refresh tick; will retry when settled"
         exit 0
       fi
-      log "ERROR: cannot read deployment/${DEPLOYMENT_NAME} (NotFound, RBAC denial, or API error) -- not a benign skip; failing the tick so it is visible"
+      # Surface the REAL API error instead of swallowing it: the generic
+      # message alone was indistinguishable between NotFound, a 403, and the
+      # `localhost:8080` connection-refused of #634. Re-run the read capturing
+      # only stderr so the failing tick names the actual cause in one log line.
+      err="$(kubectl get deployment -n "$RELEASE_NAMESPACE" "$DEPLOYMENT_NAME" --request-timeout=15s 2>&1 >/dev/null || true)"
+      log "ERROR: cannot read deployment/${DEPLOYMENT_NAME} (NotFound, RBAC denial, or API error): ${err:-unknown error} -- not a benign skip; failing the tick so it is visible"
       exit 1
     fi
 
