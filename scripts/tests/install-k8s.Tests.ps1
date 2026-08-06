@@ -171,6 +171,21 @@ Describe "Daily-user provisioning wiring (#418 source guards)" {
   It "notes .wslconfig as a manual step when the write itself throws (no silent catch)" {
     $script:PSRC | Should -Match "couldn't write .wslconfig"
   }
+  It "autostarts Docker Desktop for a provisioned DIFFERENT user via a Startup-folder shortcut (#558)" {
+    # A different user's hive isn't loaded, so the per-user Run key can't be written
+    # for them; a .lnk in THEIR Startup folder is the hive-free equivalent.
+    $script:PSRC | Should -Match 'CreateShortcut'
+    $script:PSRC | Should -Match 'Start Menu\\Programs\\Startup'
+    $script:PSRC | Should -Match 'autostart enabled \(Startup shortcut'
+  }
+  It "notes autostart as a manual step when the Startup-shortcut path throws (no silent catch) (#558)" {
+    # COM/dir/permission failures in the cross-user autostart path must append a
+    # manual-step note to $did, mirroring the .wslconfig catch -- otherwise
+    # docker-users succeeding prints a green "Configured for" with no autostart note
+    # and IT leaves thinking the daily user is ready while Docker Desktop won't launch.
+    $script:PSRC | Should -Match "couldn't set Docker Desktop autostart"
+    $script:PSRC | Should -Match "Start Docker Desktop when you sign in"
+  }
   It "sanitizes the prompted daily-user name before it hits net localgroup + paths" {
     $script:PSRC | Should -Match '\$other = ConvertTo-SanitizedInput \$other'
   }

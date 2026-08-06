@@ -2124,17 +2124,59 @@ function Set-DailyUserProvisioning {
     }
   } catch { Log "docker-users add failed: $_" }
 
-  # 2) Docker Desktop autostart via the per-user Run key (current user only -- a
-  # different user's hive may not be loaded). The engine also runs as a service
-  # (--always-run-service, #419), so Docker is usable on sign-in regardless.
+  # 2) Docker Desktop autostart. On the WSL2 backend, dockerd runs INSIDE the
+  # docker-desktop distro that the Docker Desktop GUI boots; without the GUI
+  # autostarting on the daily user's login, the engine isn't up after a reboot,
+  # so the k3d containers (which carry --restart unless-stopped) have no daemon
+  # to restart into and the client is down until someone opens Docker Desktop
+  # manually (#558). For the CURRENT user the per-user Run key is simplest. For
+  # a PROVISIONED DIFFERENT user (the hospital IT-installs-elevated case), their
+  # registry hive isn't loaded, so the Run key can't be written for them; drop a
+  # shortcut into THEIR Startup folder instead — the same "launch at this user's
+  # logon" mechanism, no hive needed. --always-run-service (#419) is kept as a
+  # backstop, but its headless-engine behaviour is Docker-Desktop-version
+  # dependent, so autostart is no longer left to it alone for the second user.
   try {
     $ddExe = "$env:ProgramFiles\Docker\Docker\Docker Desktop.exe"
-    if ($user -eq $env:USERNAME -and (Test-Path $ddExe)) {
+    if (-not (Test-Path $ddExe)) {
+      Log "autostart skipped: Docker Desktop not found at $ddExe"
+    } elseif ($user -eq $env:USERNAME) {
       New-ItemProperty -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run' `
         -Name 'Docker Desktop' -Value "`"$ddExe`"" -PropertyType String -Force -ErrorAction Stop | Out-Null
       $did += "autostart enabled"
+    } else {
+      $profileDir = Get-UserProfileDir -User $user
+      if ($null -eq $profileDir) {
+        # Never signed in -> no profile/Startup folder to write into. Name the
+        # one-click GUI setting they can flip after first sign-in.
+        $did += "no profile for '$user' yet -- have them enable Docker Desktop's 'Start Docker Desktop when you sign in' (Settings > General) after first sign-in"
+      } else {
+        $startupDir = Join-Path $profileDir 'AppData\Roaming\Microsoft\Windows\Start Menu\Programs\Startup'
+        if (-not (Test-Path $startupDir)) { New-Item -ItemType Directory -Path $startupDir -Force -ErrorAction Stop | Out-Null }
+        $lnkPath = Join-Path $startupDir 'Docker Desktop.lnk'
+        $wsh = New-Object -ComObject WScript.Shell
+        try {
+          $sc = $wsh.CreateShortcut($lnkPath)
+          $sc.TargetPath       = $ddExe
+          $sc.WorkingDirectory = (Split-Path $ddExe)
+          $sc.Save()
+        } finally {
+          [System.Runtime.InteropServices.Marshal]::ReleaseComObject($wsh) | Out-Null
+        }
+        $did += "autostart enabled (Startup shortcut in '$user's profile)"
+      }
     }
-  } catch { Log "autostart set failed: $_" }
+  } catch {
+    # A thrown COM/dir/permission failure here (creating the Startup folder, the
+    # WScript.Shell COM object, or saving the .lnk) must surface in the summary too
+    # -- otherwise docker-users succeeding prints a green "Configured for" with no
+    # autostart note, and IT leaves the elevated window thinking the daily user is
+    # ready while Docker Desktop won't launch on their login and the client is down
+    # after every reboot (#558 Bugbot). Mirror the .wslconfig catch below: log AND
+    # append a manual-step note to $did so the summary is honest about what's left.
+    Log "autostart set failed: $_"
+    $did += "couldn't set Docker Desktop autostart -- have '$user' enable Docker Desktop's 'Start Docker Desktop when you sign in' (Settings > General)"
+  }
 
   # 3) Training-sized .wslconfig in the daily user's profile. Merge the memory
   # budget in without clobbering any other tuning (processors/swap/...), and keep
