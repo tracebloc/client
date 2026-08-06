@@ -2166,7 +2166,17 @@ function Set-DailyUserProvisioning {
         $did += "autostart enabled (Startup shortcut in '$user's profile)"
       }
     }
-  } catch { Log "autostart set failed: $_" }
+  } catch {
+    # A thrown COM/dir/permission failure here (creating the Startup folder, the
+    # WScript.Shell COM object, or saving the .lnk) must surface in the summary too
+    # -- otherwise docker-users succeeding prints a green "Configured for" with no
+    # autostart note, and IT leaves the elevated window thinking the daily user is
+    # ready while Docker Desktop won't launch on their login and the client is down
+    # after every reboot (#558 Bugbot). Mirror the .wslconfig catch below: log AND
+    # append a manual-step note to $did so the summary is honest about what's left.
+    Log "autostart set failed: $_"
+    $did += "couldn't set Docker Desktop autostart -- have '$user' enable Docker Desktop's 'Start Docker Desktop when you sign in' (Settings > General)"
+  }
 
   # 3) Training-sized .wslconfig in the daily user's profile. Merge the memory
   # budget in without clobbering any other tuning (processors/swap/...), and keep
