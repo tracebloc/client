@@ -255,8 +255,15 @@ spec:
           value: {{ if hasKey .Values.env "RESOURCE_LIMITS" }}{{ .Values.env.RESOURCE_LIMITS | quote }}{{ else }}"cpu=2,memory=8Gi"{{ end }}
         - name: GPU_REQUESTS
           value: {{ if hasKey .Values.env "GPU_REQUESTS" }}{{ .Values.env.GPU_REQUESTS | quote }}{{ else }}"nvidia.com/gpu=1"{{ end }}
+        # #343: only stamp GPU_LIMITS when a GPU is actually configured. A
+        # CPU-only install writes GPU_LIMITS: "" (empty), and a chart-direct
+        # install may omit the key entirely — in both cases emitting the var
+        # (or its "nvidia.com/gpu=1" default) surfaces a phantom GPU in the
+        # CLI resources view. Render it only for a non-empty value.
+        {{- if (default "" .Values.env.GPU_LIMITS) }}
         - name: GPU_LIMITS
-          value: {{ if hasKey .Values.env "GPU_LIMITS" }}{{ .Values.env.GPU_LIMITS | quote }}{{ else }}"nvidia.com/gpu=1"{{ end }}
+          value: {{ .Values.env.GPU_LIMITS | quote }}
+        {{- end }}
         - name: RUNTIME_CLASS_NAME
           value: {{ if hasKey .Values.env "RUNTIME_CLASS_NAME" }}{{ .Values.env.RUNTIME_CLASS_NAME | quote }}{{ else }}""{{ end }}
         # client-runtime#92: gates jobs-manager's GPU->CPU pending-job fallback.
@@ -320,8 +327,12 @@ spec:
           value: {{ if hasKey .Values.env "RESOURCE_LIMITS" }}{{ .Values.env.RESOURCE_LIMITS | quote }}{{ else }}"cpu=2,memory=8Gi"{{ end }}
         - name: GPU_REQUESTS
           value: {{ if hasKey .Values.env "GPU_REQUESTS" }}{{ .Values.env.GPU_REQUESTS | quote }}{{ else }}"nvidia.com/gpu=1"{{ end }}
+        # #343: only stamp GPU_LIMITS when a GPU is actually configured (see the
+        # api container above) — a phantom GPU otherwise leaks to the CLI view.
+        {{- if (default "" .Values.env.GPU_LIMITS) }}
         - name: GPU_LIMITS
-          value: {{ if hasKey .Values.env "GPU_LIMITS" }}{{ .Values.env.GPU_LIMITS | quote }}{{ else }}"nvidia.com/gpu=1"{{ end }}
+          value: {{ .Values.env.GPU_LIMITS | quote }}
+        {{- end }}
         - name: RUNTIME_CLASS_NAME
           value: {{ if hasKey .Values.env "RUNTIME_CLASS_NAME" }}{{ .Values.env.RUNTIME_CLASS_NAME | quote }}{{ else }}""{{ end }}
         # Kept in sync with the api container (client-runtime#92). pods-monitor
