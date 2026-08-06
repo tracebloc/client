@@ -55,8 +55,11 @@ spec:
       # whose UID this chart does not control — so they must be world-writable, not chowned to
       # a single UID. Mode 3777 = setgid (2) so new files inherit GID 1000 + sticky (1) so one
       # writer can't unlink or rename another writer's files (/tmp semantics); runs as root only
-      # long enough to fix the mounts, with FOWNER so the chmod is idempotent on re-install. CSI
-      # clusters rely on fsGroup above and skip this.
+      # long enough to fix the mounts. Caps: CHOWN for the chown; FOWNER so the chmod is idempotent
+      # on re-install; FSETID so the setgid bit survives the chmod — after the chown to GID 1000 the
+      # dir's group no longer matches the process (fsgid 0), and a root process without FSETID has
+      # the kernel silently strip S_ISGID, landing the mount at 1777 (setgid lost). CSI clusters
+      # rely on fsGroup above and skip this.
       initContainers:
       - name: init-writable-data
         image: {{ include "tracebloc.image" (dict "repository" "library/busybox" "tag" .Values.images.busybox.tag "digest" .Values.images.busybox.digest "registry" (dig "imageRegistry" "docker.io" (.Values.global | default dict))) | quote }}
@@ -67,7 +70,7 @@ spec:
           readOnlyRootFilesystem: true
           capabilities:
             drop: ["ALL"]
-            add: ["CHOWN", "FOWNER"]
+            add: ["CHOWN", "FOWNER", "FSETID"]
           seccompProfile:
             type: RuntimeDefault
         command: ['sh', '-c', 'chown 1000:1000 /data/shared /data/logs && chmod 3777 /data/shared /data/logs']

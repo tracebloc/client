@@ -439,6 +439,11 @@ tests:
       - contains:
           path: spec.template.spec.initContainers[0].securityContext.capabilities.add
           content: FOWNER
+      # FSETID is required or the kernel strips the setgid bit when chmod runs after
+      # the chown to GID 1000 (root without FSETID can't set setgid on a non-owned-group dir)
+      - contains:
+          path: spec.template.spec.initContainers[0].securityContext.capabilities.add
+          content: FSETID
       - matchRegex:
           path: spec.template.spec.initContainers[0].command[2]
           pattern: "chown 1000:1000 /data/shared /data/logs && chmod 3777 /data/shared /data/logs"
