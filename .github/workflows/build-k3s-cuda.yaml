@@ -1,0 +1,46 @@
+name: build-k3s-cuda
+
+# Build (and optionally publish) the custom k3s node image with NVIDIA GPU
+# support for GPU-enabled edges (#616). Manual only — a ~GB CUDA image build
+# should never run on every push. Set push=true to publish to GHCR.
+on:
+  workflow_dispatch:
+    inputs:
+      k3s_tag:
+        description: "k3s image tag — MUST match K8S_VERSION (scripts/lib/common.sh)"
+        default: "v1.29.4-k3s1"
+      cuda_tag:
+        description: "NVIDIA CUDA base tag"
+        default: "12.4.1-base-ubuntu22.04"
+      push:
+        description: "Publish to ghcr.io (otherwise build-only validation)"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      # Plain docker CLI (no unpinned marketplace actions -> passes action-pins).
+      - name: Prepare buildx
+        run: docker buildx create --use --name k3scuda || docker buildx use k3scuda
+
+      - name: Log in to GHCR
+        if: ${{ inputs.push }}
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+
+      - name: Build${{ inputs.push && ' and push' || ' (validate only)' }}
+        env:
+          K3S_TAG: ${{ inputs.k3s_tag }}
+          CUDA_TAG: ${{ inputs.cuda_tag }}
+          PUSH: ${{ inputs.push }}
+          IMAGE_REGISTRY: ghcr.io
+          IMAGE_REPOSITORY: ${{ github.repository_owner }}/k3s-cuda
+          PLATFORM: linux/amd64
+        run: bash docker/k3s-cuda/build.sh
