@@ -47,11 +47,16 @@ data:
 
     log() { printf '[image-refresh] %s\n' "$*" >&2; }
 
-    # #563: after this many consecutive FAILED rollout attempts for the same
-    # target digest set, back off instead of re-restarting a flapping deployment
-    # every tick. The attempt count + target signature live in one annotation.
+    # #563: guard a FLAPPING deployment. After this many consecutive FAILED
+    # rollout attempts in a row, STOP re-restarting and flag the deployment for a
+    # human instead of churning ReplicaSets every tick (no auto-resume). The
+    # count is a plain integer in ATTEMPT_KEY that means one thing: consecutive
+    # failed refresh attempts. It resets to 0 only on a genuinely successful
+    # settled rollout. Once a flap is detected it is marked in FLAP_KEY so
+    # a human / monitoring can see it.
     MAX_REFRESH_ATTEMPTS="${MAX_REFRESH_ATTEMPTS:-3}"
     ATTEMPT_KEY="tracebloc.io/refresh-attempt"
+    FLAP_KEY="tracebloc.io/refresh-flap-detected"
 
     log "release=$RELEASE_NAME namespace=$RELEASE_NAMESPACE deployment=$DEPLOYMENT_NAME"
     log "  client images: tracebloc/{jobs-manager,pods-monitor} on docker.io under tag=$IMAGE_TAG"
@@ -253,100 +258,65 @@ data:
     # freeze the deployment on the old image (next tick sees
     # recorded == latest and skips).
     if [ "$restart_needed" -eq 1 ]; then
-      # #563: back off on a FLAPPING deployment. If readiness oscillates (Ready,
-      # then crashes after warmup near the rollout-status timeout) the rollout
-      # below fails; under `set -e` the tick then exits BEFORE the success
-      # annotation lands, so `recorded` stays old and every later settled tick
-      # re-issues the identical restart (~every schedule). Record the ATTEMPT
-      # (target signature + a consecutive-failure count) BEFORE the restart so it
-      # survives that early exit; once the same targets have failed
-      # MAX_REFRESH_ATTEMPTS times in a row, stop restarting and surface the
-      # flapping deployment instead of churning ReplicaSets forever. The count
-      # resets when the target digest changes or a rollout finally succeeds.
+      # #563: guard a FLAPPING deployment with a plain consecutive-failure
+      # counter. If readiness oscillates (becomes Ready, then crashes after
+      # warmup near the rollout-status timeout) the rollout below fails; under
+      # `set -e` the tick then exits BEFORE the success reset lands, so `recorded`
+      # stays old and every later settled tick re-detects the same change. We
+      # persist an incremented failure count BEFORE the restart so it survives
+      # that early exit; once MAX_REFRESH_ATTEMPTS failures accrue in a row we
+      # STOP restarting and flag the deployment for a human (see below). The
+      # counter resets ONLY on a genuinely successful settled rollout -- there is
+      # deliberately no signature/target-change reset (it was fragile, CID
+      # 3728806670) and no auto-resume (a wedged flap needs manual attention).
       #
-      # #563 review (must-resume): back-off must not be a DEAD END. Reaching this
-      # branch means THIS tick already passed the top-of-tick settled guard --
-      # the deployment is settled right now. Once we stop churning it, a flap
-      # that has genuinely cleared will STAY settled tick after tick, whereas a
-      # still-flapping one is only intermittently settled (its unsettled ticks
-      # are skipped before they ever get here). So we count the settled ticks
-      # observed WHILE in back-off and, once BACKOFF_RESUME_AFTER of them accrue,
-      # reset the counter and retry the refresh. A now-healthy deployment resumes
-      # and reaches `recorded == latest`; a still-flapping one accrues slowly and
-      # is retried at most once per cooldown (bounded churn), never every tick.
-      BACKOFF_RESUME_AFTER="${BACKOFF_RESUME_AFTER:-4}"
-      signature="$(printf '%s' "$annotate_args" | tr -s ' ' | sed 's/^ //; s/ $//')"
-      # #626: read the attempt counter FAIL-CLOSED. Previously this used
-      # `get_annotation ... || true`, so a failed kubectl/jq collapsed to an
-      # empty value that the logic below reads as "no prior attempts" (0) —
-      # failing OPEN past the back-off and re-restarting a possibly-flapping
-      # deployment. get_annotation now returns non-zero on a read error and
-      # zero-with-empty-output only when the annotation is genuinely absent, so
-      # we can tell the two apart. On a read error we cannot confirm we are
-      # clear to restart, so take the SAFE branch: skip the restart this tick.
+      # #626: read the counter FAIL-CLOSED. A failed kubectl/jq must NOT collapse
+      # to "0 attempts" (which would fail OPEN past the guard and re-restart a
+      # possibly-flapping deployment). get_annotation returns non-zero on a read
+      # error and zero-with-empty-output only when the annotation is genuinely
+      # absent, so we can tell the two apart. On a read error we cannot confirm
+      # we are clear to restart, so take the SAFE branch: skip this tick.
       if ! attempt="$(get_annotation "$ATTEMPT_KEY")"; then
         log "  WARN: could not read ${ATTEMPT_KEY} annotation (kubectl/jq error); cannot confirm the rollout attempt count -- skipping the restart this tick rather than risk churning a flapping deployment. Will retry next tick."
         log "tick complete"
         exit 0
       fi
-      # Reached only on a successful read; empty $attempt means the annotation
-      # is genuinely absent (legitimately zero prior attempts).
-      prev_sig="${attempt% *}"
-      prev_count="${attempt##* }"
-      case "$prev_count" in ''|*[!0-9]*) prev_count=0 ;; esac
-      # A changed target (or no prior attempt) starts a fresh failure count.
-      [ -n "$attempt" ] && [ "$prev_sig" = "$signature" ] || prev_count=0
+      # Empty $attempt means the annotation is genuinely absent (zero prior
+      # failures); anything non-numeric is treated the same, defensively.
+      case "$attempt" in ''|*[!0-9]*) attempt=0 ;; esac
 
-      if [ "$prev_count" -ge "$MAX_REFRESH_ATTEMPTS" ]; then
-        # In back-off. Counts at/above MAX encode MAX failures plus one extra per
-        # settled tick spent waiting for the flap to clear. Reaching this branch
-        # means THIS tick already passed the top-of-tick settled guard, so it is
-        # itself a settled observation -- the number of settled cooldown ticks
-        # seen INCLUDING this one is settled_ticks + 1.
-        settled_ticks=$(( prev_count - MAX_REFRESH_ATTEMPTS ))
-        cooldown_seen=$(( settled_ticks + 1 ))
-        # #626 review (off-by-one): resume on the tick that REACHES
-        # BACKOFF_RESUME_AFTER settled observations, not the one after it. The
-        # earlier `settled_ticks -lt RESUME` logged "Settled 4/4" and still
-        # exited, delaying resume by one whole tick (~15m). Compare the count
-        # INCLUDING this tick, so 4/4 resumes now.
-        if [ "$cooldown_seen" -lt "$BACKOFF_RESUME_AFTER" ]; then
-          # Still cooling down: record this settled observation to advance the
-          # cooldown and skip the restart -- do NOT churn a flapping deployment.
-          kubectl annotate deployment -n "$RELEASE_NAMESPACE" "$DEPLOYMENT_NAME" \
-            "${ATTEMPT_KEY}=${signature} $(( prev_count + 1 ))" \
-            --overwrite --request-timeout=15s
-          log "  WARN: rollout for the current target digest(s) failed ${MAX_REFRESH_ATTEMPTS} time(s) in a row; backing off (not restarting). deployment/${DEPLOYMENT_NAME} is likely flapping (becomes Ready then crashes) -- investigate it. Settled ${cooldown_seen}/${BACKOFF_RESUME_AFTER} cooldown tick(s); refresh retries once it stays settled through the cooldown, or immediately if the target digest changes."
-          log "tick complete"
-          exit 0
-        fi
-        # Stayed settled for the full cooldown -- grant exactly ONE resume
-        # attempt. #626 review (burst): do NOT reset the counter to 0. That would
-        # hand a still-flapping deployment a fresh budget of MAX restarts on the
-        # next few consecutive settled ticks -- a ReplicaSet-churn burst that
-        # breaks the "at most once per cooldown" guarantee. Instead set
-        # prev_count = MAX-1 so new_count = MAX below and a SINGLE restart is
-        # issued; if that attempt also fails, the persisted count is MAX and the
-        # very next settled tick re-enters back-off immediately. A genuinely
-        # healthy deployment succeeds on this one attempt and clears the counter.
-        log "  deployment/${DEPLOYMENT_NAME} stayed settled through the back-off cooldown (${BACKOFF_RESUME_AFTER}/${BACKOFF_RESUME_AFTER} tick(s)); granting exactly one resume restart attempt (re-enters back-off immediately if it fails again)"
-        prev_count=$(( MAX_REFRESH_ATTEMPTS - 1 ))
+      if [ "$attempt" -ge "$MAX_REFRESH_ATTEMPTS" ]; then
+        # Flap detected: MAX consecutive failed rollouts. STOP restarting and
+        # SURFACE it -- do NOT auto-resume. Reaching this branch means the tick
+        # already passed the top-of-tick settled guard, so a deployment that
+        # keeps landing here is only intermittently settled: a genuine flap.
+        # Churning it further only orphans ReplicaSets. Mark it for a human /
+        # monitoring via FLAP_KEY (value = the failure count) and leave the count
+        # in place; refresh re-arms once someone clears the ${ATTEMPT_KEY}
+        # annotation (or fixes the image so the next rollout settles).
+        log "  WARN: rollout for the current image digest(s) failed ${attempt} time(s) in a row (>= MAX_REFRESH_ATTEMPTS=${MAX_REFRESH_ATTEMPTS}) -- FLAP DETECTED. NOT restarting deployment/${DEPLOYMENT_NAME} (it becomes Ready then crashes; further restarts only churn ReplicaSets). MANUAL ATTENTION NEEDED: investigate the deployment, then clear its ${ATTEMPT_KEY} annotation to re-arm refresh."
+        kubectl annotate deployment -n "$RELEASE_NAMESPACE" "$DEPLOYMENT_NAME" \
+          "${FLAP_KEY}=${attempt}" --overwrite --request-timeout=15s
+        log "tick complete"
+        exit 0
       fi
 
-      new_count=$(( prev_count + 1 ))
-      # Persist the attempt BEFORE restarting so a failed rollout (which exits
-      # the tick under set -e) still advances the counter for the next tick.
+      new_count=$(( attempt + 1 ))
+      # Persist the incremented failure count BEFORE restarting so a failed
+      # rollout (which exits the tick under set -e) still advances the counter
+      # for the next tick. A successful rollout resets it below.
       kubectl annotate deployment -n "$RELEASE_NAMESPACE" "$DEPLOYMENT_NAME" \
-        "${ATTEMPT_KEY}=${signature} ${new_count}" --overwrite --request-timeout=15s
+        "${ATTEMPT_KEY}=${new_count}" --overwrite --request-timeout=15s
 
       log "rolling restart of deployment/${DEPLOYMENT_NAME} (attempt ${new_count}/${MAX_REFRESH_ATTEMPTS})"
       kubectl rollout restart -n "$RELEASE_NAMESPACE" "deployment/${DEPLOYMENT_NAME}"
       kubectl rollout status  -n "$RELEASE_NAMESPACE" "deployment/${DEPLOYMENT_NAME}" \
         --timeout="$ROLLOUT_TIMEOUT"
       log "rollout complete"
-      # Success: clear the attempt annotation so a future change starts fresh
-      # (batched into the final annotate below; `key-` removes the annotation).
-      annotate_args="$annotate_args ${ATTEMPT_KEY}-"
+      # Success (settled rollout): reset the failure counter to 0 and clear any
+      # flap marker so a future change starts fresh. Batched into the final
+      # annotate below; `key-` removes the annotation (a no-op if absent).
+      annotate_args="$annotate_args ${ATTEMPT_KEY}- ${FLAP_KEY}-"
     fi
 
     if [ -n "$annotate_args" ]; then
@@ -429,7 +399,7 @@ spec:
                   value: {{ .Values.env.CLIENT_ENV | default "prod" | quote }}
                 - name: ROLLOUT_TIMEOUT
                   value: {{ .Values.imageRefresh.rolloutTimeout | quote }}
-                # #563: consecutive failed-rollout back-off threshold.
+                # #563: consecutive failed-rollout threshold; stop + flag after this.
                 - name: MAX_REFRESH_ATTEMPTS
                   value: {{ .Values.imageRefresh.maxRefreshAttempts | default 3 | quote }}
                 # Per-image opt-out flags. Pinning a class-1 image is

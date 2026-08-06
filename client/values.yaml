@@ -783,16 +783,16 @@ imageRefresh:
   # on bare-metal first-boot can take minutes, and the CronJob slot
   # shouldn't hold all night if a rollout genuinely wedges.
   rolloutTimeout: "10m"
-  # #563: consecutive failed rollout attempts (for the same target digest) after
-  # which the refresh backs off instead of re-restarting every tick. A deployment
-  # whose readiness FLAPS (becomes Ready, then crashes after warmup near the
+  # #563: consecutive failed rollout attempts after which the refresh STOPS
+  # re-restarting and flags the deployment for a human. A deployment whose
+  # readiness FLAPS (becomes Ready, then crashes after warmup near the
   # rollout-status timeout) fails the rollout, so `recorded` never advances and
-  # every later settled tick re-issues the same restart. After this many
-  # in-a-row failures the job stops restarting and surfaces the flapping
-  # deployment. Refresh resumes automatically once the deployment stays settled
-  # through the back-off cooldown (i.e. the flap clears) or the target changes;
-  # a still-flapping deployment is retried at most once per cooldown, never
-  # every tick.
+  # every later settled tick re-issues the same restart. After this many in-a-row
+  # failures the job stops restarting and annotates a "flap detected" marker
+  # (tracebloc.io/refresh-flap-detected) so monitoring can surface it. There is
+  # no auto-resume: a human investigates and clears the
+  # tracebloc.io/refresh-attempt annotation to re-arm (or a rollout that finally
+  # settles resets the counter on its own).
   maxRefreshAttempts: 3
   # CronJob spec knobs. Override per-cluster if needed.
   suspend: false
