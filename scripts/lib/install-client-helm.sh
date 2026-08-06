@@ -520,6 +520,14 @@ _reconcile_pending_release() {
   # command substitution and abort the installer HERE — before `helm upgrade
   # --install` ever runs (Bugbot). A missing release simply means "nothing to
   # recover", so swallow the failure and fall through with empty output.
+  #
+  # This is a deliberate fail-OPEN (unlike the CronJob, which fails closed): the
+  # installer cannot distinguish "no release" (must proceed to a fresh install)
+  # from a transient probe error without breaking first-time installs, and it
+  # never silently succeeds on a missed wedge — recovery is best-effort and the
+  # `helm upgrade --install` that follows still surfaces a real wedge as "another
+  # operation is in progress" (error + the unwedge hint below). The CronJob has
+  # no such downstream guard, so it fails closed on a bad probe instead (Bugbot #619).
   _raw="$(_bounded "${TB_HELM_STATUS_TIMEOUT:-30}" \
     helm status "$_rel" -n "$_ns" -o yaml 2>/dev/null)" || _raw=""
   # First status line, parsed in the shell — NO awk `exit` / `head` on a live

@@ -73,16 +73,26 @@ data:
     # parse + already-latest exit: a release wedged pending-* whose version
     # already reads as latest would otherwise exit 0 below and never be
     # recovered. `helm status` surfaces pending states that `helm list` hides by
-    # default. jq-free awk over `helm status -o yaml`, matching the style below.
-    # Bounded so a wedged apiserver can't hang the probe. (`awk … exit` is safe
-    # here — this script runs under `set -eu` with NO pipefail, so a SIGPIPE on
-    # the upstream `helm status` can't fail the pipeline; the installer, which
-    # runs under pipefail, parses off the pipe instead — Bugbot #619.)
+    # default. jq-free awk over `helm status -o yaml`. Bounded so a wedged
+    # apiserver can't hang the probe.
+    #
+    # Fail CLOSED on a broken probe (Bugbot #619): this upgrade job only ever runs
+    # for a release that exists, so a failed / timed-out / unreadable `helm status`
+    # is a real error — NOT the "no release" case. If we swallowed it to an empty,
+    # non-pending status, a latest-version release wedged pending-* could slide
+    # into the "already at latest" success below while still wedged. Capture the rc
+    # separately (this script is `set -eu`, no pipefail) and exit non-zero if the
+    # probe failed, so the tick surfaces in the CronJob's failed-Job history.
+    STATUS_RC=0
+    STATUS_RAW="$(run_bounded 30 helm status "$RELEASE_NAME" -n "$RELEASE_NAMESPACE" -o yaml 2>/dev/null)" || STATUS_RC=$?
+    if [ "$STATUS_RC" -ne 0 ]; then
+      log "ERROR: could not read release status (helm status rc=$STATUS_RC); failing closed rather than risk masking a wedge. Check the cluster and re-run."
+      exit 1
+    fi
     # Anchor at exactly-2-space indent so we read `info.status`, not a `status:`
     # line inside the deeper-indented `info.notes` block helm emits before it.
-    STATUS="$(run_bounded 30 \
-      helm status "$RELEASE_NAME" -n "$RELEASE_NAMESPACE" -o yaml 2>/dev/null \
-      | awk '/^  status:/ {print $2; exit}')" || STATUS=""
+    # Parse off the captured var (no `awk exit` on a live pipe).
+    STATUS="$(printf '%s\n' "$STATUS_RAW" | awk '/^  status:/ {print $2; exit}')"
     case "$STATUS" in
       pending-upgrade|pending-rollback)
         # Roll back to the last KNOWN-GOOD revision, not a bare `helm rollback`
@@ -114,8 +124,14 @@ data:
         # upgrade job has no client values/password to reinstall from — so fail
         # closed rather than fall through to the version check, which would read
         # the wedged release as "already at latest" and exit 0, masking it
-        # (Bugbot #619). Recovery is a human uninstall + re-run of the installer.
-        log "ERROR: release wedged in pending-install (initial install was killed); the auto-upgrade job cannot safely recover this. Manual recovery: helm -n $RELEASE_NAMESPACE uninstall $RELEASE_NAME, then re-run the installer."
+        # (Bugbot #619).
+        #
+        # Recovery is to RE-RUN THE INSTALLER, which reconciles a pending-install
+        # in place. Do NOT tell the operator to `helm uninstall` first: for an
+        # ADOPTED client the wedged release holds the ONLY copy of the write-only
+        # clientPassword, and uninstalling it up front would destroy the very
+        # values the installer's adopt path preserves to recover from (Bugbot #619).
+        log "ERROR: release wedged in pending-install (initial install was killed); the auto-upgrade job cannot recover this. Re-run the tracebloc installer to reconcile it — do NOT 'helm uninstall' first (that would drop an adopted client's only stored password)."
         exit 1
         ;;
     esac
