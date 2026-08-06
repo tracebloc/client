@@ -4187,6 +4187,20 @@ function Get-PfVirtualization {
   } catch { return $null }
 }
 
+# $true when a local TCP listener is bound to $Port, $false when the port is free,
+# $null when we can't tell (Get-NetTCPConnection unavailable, e.g. non-Windows
+# under Pester). Used by Test-Preflight's port-6550 conflict check (#557). A
+# no-match with -ErrorAction SilentlyContinue yields no objects (not an error),
+# so an empty result is a genuine "port free".
+function Get-PfPortListening {
+  param([int]$Port)
+  if (-not (Get-Command Get-NetTCPConnection -ErrorAction SilentlyContinue)) { return $null }
+  try {
+    $conns = @(Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue)
+    return ($conns.Count -gt 0)
+  } catch { return $null }
+}
+
 # ── Network profile (#582) ───────────────────────────────────────────────────
 # A plain-language read of the network BEFORE the endpoint probes, so a user on a
 # restricted/corporate network sees what's happening up front instead of a cryptic
@@ -4387,6 +4401,35 @@ function Test-Preflight {
     }
   }
   else                       { Ok "Storage: $HOST_DATA_DIR local disk" }
+
+  # API port 6550 (#557): New-K3dCluster binds the cluster's API server to
+  # 127.0.0.1:6550. If that port is already bound by something else — a
+  # leftover/other k3d cluster, or an unrelated service — `k3d cluster create`
+  # fails and the installer surfaces k3d's raw stderr instead of a clear cause.
+  # Catch it here with an actionable message. A port bound by OUR OWN
+  # already-running cluster is fine (that run reuses it), so a busy port only
+  # hard-fails when the listener is NOT this installer's cluster.
+  $portBusy = Get-PfPortListening 6550
+  if ($null -eq $portBusy)      { Info "API port 6550: couldn't determine listener state (skipping)." }
+  elseif (-not $portBusy)       { Ok "API port 6550 free" }
+  else {
+    $ownedByUs = $false
+    if (Has "k3d") {
+      try {
+        $cl = k3d cluster list -o json 2>$null | Out-String | ConvertFrom-Json
+        if ($cl | Where-Object { $_.name -eq $CLUSTER_NAME }) { $ownedByUs = $true }
+      } catch {}
+    }
+    if ($ownedByUs) {
+      Ok "API port 6550 in use by the existing tracebloc cluster (will be reused)"
+    } else {
+      Write-PfFail "API port 6550 is already in use by another process or cluster - k3d needs it for the tracebloc cluster's API server."
+      $hardFail++
+      Hint "Find and stop whatever is listening on 6550, then re-run:"
+      Hint "  Get-NetTCPConnection -LocalPort 6550 -State Listen | Select-Object OwningProcess"
+      Hint "  then: Get-Process -Id <pid> to identify it and stop it - or 'k3d cluster delete <name>' if it's a leftover k3d cluster."
+    }
+  }
 
   Show-NetworkProfile   # #582: announce the network profile before the probes
   Info "Checking outbound connectivity to required services..."

@@ -1545,6 +1545,15 @@ Describe "Get-Pf* resource readers" -Skip:(-not $IsWindows) {
     Mock Get-CimInstance { [pscustomobject]@{ VirtualizationFirmwareEnabled = $false } } -ParameterFilter { $ClassName -eq 'Win32_Processor' }
     Get-PfVirtualization | Should -Be $false
   }
+  # #557: port-6550 conflict detection.
+  It "Get-PfPortListening: a bound listener -> true" {
+    Mock Get-NetTCPConnection { [pscustomobject]@{ LocalPort = 6550; State = 'Listen' } }
+    Get-PfPortListening 6550 | Should -Be $true
+  }
+  It "Get-PfPortListening: no listener -> false" {
+    Mock Get-NetTCPConnection { }   # no match: SilentlyContinue yields nothing
+    Get-PfPortListening 6550 | Should -Be $false
+  }
 }
 
 Describe "Test-Preflight" {
@@ -1554,6 +1563,7 @@ Describe "Test-Preflight" {
     Mock Get-WindowsArch { "amd64" }
     Mock Get-PfFsType { "local" }
     Mock Get-PfVirtualization { $true }
+    Mock Get-PfPortListening { $false }   # #557: default to port 6550 free
   }
   AfterEach { $env:TRACEBLOC_SKIP_PREFLIGHT = $null; $env:TRACEBLOC_ALLOW_ARM64 = $null; $env:TRACEBLOC_ALLOW_NETWORK_FS = $null }
 
@@ -1587,6 +1597,19 @@ Describe "Test-Preflight" {
   It "virtualization undeterminable -> skipped, not a fail (#387)" {
     Mock Test-PfUrl { "ok" }
     Mock Get-PfVirtualization { $null }
+    { Test-Preflight } | Should -Not -Throw
+  }
+  # #557: port 6550 bound by something that is NOT our cluster -> hard fail with
+  # an actionable message, instead of k3d's raw stderr at cluster-create.
+  It "port 6550 in use by a foreign process -> fails (Err throws) (#557)" {
+    Mock Test-PfUrl { "ok" }
+    Mock Get-PfPortListening { $true }
+    Mock Has { $false } -ParameterFilter { $cmd -eq "k3d" }   # no k3d -> can't be our cluster
+    { Test-Preflight } | Should -Throw
+  }
+  It "port 6550 listener state undeterminable -> skipped, not a fail (#557)" {
+    Mock Test-PfUrl { "ok" }
+    Mock Get-PfPortListening { $null }
     { Test-Preflight } | Should -Not -Throw
   }
   It "memory below floor -> warn-only on Windows (does not throw)" {
