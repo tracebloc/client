@@ -1550,9 +1550,21 @@ Describe "Get-Pf* resource readers" -Skip:(-not $IsWindows) {
     Mock Get-NetTCPConnection { [pscustomobject]@{ LocalPort = 6550; State = 'Listen' } }
     Get-PfPortListening 6550 | Should -Be $true
   }
-  It "Get-PfPortListening: no listener -> false" {
-    Mock Get-NetTCPConnection { }   # no match: SilentlyContinue yields nothing
+  It "Get-PfPortListening: no listener (empty result) -> false" {
+    Mock Get-NetTCPConnection { }
     Get-PfPortListening 6550 | Should -Be $false
+  }
+  It "Get-PfPortListening: no listener (ObjectNotFound throw) -> false (#557)" {
+    # Real Get-NetTCPConnection THROWS an ObjectNotFound error when nothing matches
+    # the filter; -ErrorAction Stop routes it to the catch, which reads it as free.
+    Mock Get-NetTCPConnection { throw "CmdletizationQuery_NotFound_LocalPort" }
+    Get-PfPortListening 6550 | Should -Be $false
+  }
+  It "Get-PfPortListening: a genuine probe error -> null, never fails open (#557 Bugbot)" {
+    # A real CIM/access failure must NOT be conflated with a free port -- the old
+    # -ErrorAction SilentlyContinue swallowed it into an empty (= free) result.
+    Mock Get-NetTCPConnection { throw "CIM server is unavailable" }
+    Get-PfPortListening 6550 | Should -Be $null
   }
 }
 
@@ -1601,11 +1613,29 @@ Describe "Test-Preflight" {
   }
   # #557: port 6550 bound by something that is NOT our cluster -> hard fail with
   # an actionable message, instead of k3d's raw stderr at cluster-create.
-  It "port 6550 in use by a foreign process -> fails (Err throws) (#557)" {
+  It "port 6550 in use by a foreign process (no k3d) -> fails (Err throws) (#557)" {
     Mock Test-PfUrl { "ok" }
     Mock Get-PfPortListening { $true }
     Mock Has { $false } -ParameterFilter { $cmd -eq "k3d" }   # no k3d -> can't be our cluster
     { Test-Preflight } | Should -Throw
+  }
+  # #557 Bugbot (Med): a STOPPED leftover cluster named $CLUSTER_NAME plus a
+  # foreign listener on 6550 must still hard-fail -- ownership is gated on the
+  # cluster actually RUNNING (Test-ClusterRunning), not mere presence.
+  It "port 6550 busy + our cluster present but STOPPED -> fails (Err throws) (#557)" {
+    Mock Test-PfUrl { "ok" }
+    Mock Get-PfPortListening { $true }
+    Mock Has { $true } -ParameterFilter { $cmd -eq "k3d" }
+    Mock Test-ClusterRunning { $false }   # present-but-stopped is not "ours, running"
+    { Test-Preflight } | Should -Throw
+  }
+  # #557: port 6550 held by OUR own running cluster -> reused, not a conflict.
+  It "port 6550 in use by our running cluster -> ok, does not throw (#557)" {
+    Mock Test-PfUrl { "ok" }
+    Mock Get-PfPortListening { $true }
+    Mock Has { $true } -ParameterFilter { $cmd -eq "k3d" }
+    Mock Test-ClusterRunning { $true }
+    { Test-Preflight } | Should -Not -Throw
   }
   It "port 6550 listener state undeterminable -> skipped, not a fail (#557)" {
     Mock Test-PfUrl { "ok" }

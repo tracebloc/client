@@ -4189,16 +4189,27 @@ function Get-PfVirtualization {
 
 # $true when a local TCP listener is bound to $Port, $false when the port is free,
 # $null when we can't tell (Get-NetTCPConnection unavailable, e.g. non-Windows
-# under Pester). Used by Test-Preflight's port-6550 conflict check (#557). A
-# no-match with -ErrorAction SilentlyContinue yields no objects (not an error),
-# so an empty result is a genuine "port free".
+# under Pester; or a genuine CIM/access probe error). Used by Test-Preflight's
+# port-6550 conflict check (#557).
+#
+# Must NOT fail open: -ErrorAction SilentlyContinue swallowed real CIM/access
+# errors into the same empty result as a free port, so a busy port we couldn't
+# read green-OK'd (Bugbot). With -ErrorAction Stop every failure reaches the
+# catch. Get-NetTCPConnection THROWS an ObjectNotFound error when no connection
+# matches the filter -- that specific error is a genuine "port free" ($false);
+# any OTHER error means we truly can't tell ($null), so a busy port is never
+# green-OK'd on a swallowed error.
 function Get-PfPortListening {
   param([int]$Port)
   if (-not (Get-Command Get-NetTCPConnection -ErrorAction SilentlyContinue)) { return $null }
   try {
-    $conns = @(Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue)
+    $conns = @(Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction Stop)
     return ($conns.Count -gt 0)
-  } catch { return $null }
+  } catch {
+    if ($_.CategoryInfo.Category -eq 'ObjectNotFound' -or
+        $_.FullyQualifiedErrorId -match 'NotFound') { return $false }  # no listener -> port free
+    return $null                                                        # real probe error -> unknown
+  }
 }
 
 # ── Network profile (#582) ───────────────────────────────────────────────────
@@ -4407,19 +4418,20 @@ function Test-Preflight {
   # leftover/other k3d cluster, or an unrelated service — `k3d cluster create`
   # fails and the installer surfaces k3d's raw stderr instead of a clear cause.
   # Catch it here with an actionable message. A port bound by OUR OWN
-  # already-running cluster is fine (that run reuses it), so a busy port only
-  # hard-fails when the listener is NOT this installer's cluster.
+  # already-RUNNING cluster is fine (that run reuses it), so a busy port only
+  # hard-fails when the listener is NOT this installer's running cluster.
   $portBusy = Get-PfPortListening 6550
   if ($null -eq $portBusy)      { Info "API port 6550: couldn't determine listener state (skipping)." }
   elseif (-not $portBusy)       { Ok "API port 6550 free" }
   else {
+    # Ownership must mean a RUNNING cluster of ours, via the bounded helper:
+    #  - Test-ClusterRunning wraps `k3d cluster list` in the same ~15s job
+    #    deadline it uses elsewhere, so a wedged Docker engine can't hang the
+    #    preflight here (was an unbounded raw call -- Bugbot High).
+    #  - It gates on serversRunning >= 1, so a STOPPED leftover cluster named
+    #    $CLUSTER_NAME no longer masks a foreign listener on 6550 (Bugbot Med).
     $ownedByUs = $false
-    if (Has "k3d") {
-      try {
-        $cl = k3d cluster list -o json 2>$null | Out-String | ConvertFrom-Json
-        if ($cl | Where-Object { $_.name -eq $CLUSTER_NAME }) { $ownedByUs = $true }
-      } catch {}
-    }
+    if (Has "k3d") { $ownedByUs = Test-ClusterRunning }
     if ($ownedByUs) {
       Ok "API port 6550 in use by the existing tracebloc cluster (will be reused)"
     } else {
