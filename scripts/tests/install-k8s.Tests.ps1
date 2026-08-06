@@ -568,6 +568,20 @@ Describe "Invoke-TrackedInstall (#500 capture installer output)" {
     $script:ISRC | Should -Not -Match '-Tag "k3d-winget"'
     $script:ISRC | Should -Not -Match 'install","-e","--id","Rancher\.k3d"'
   }
+  # #567 (F3 follow-up from #547): k3d's CLI version must be deterministic on
+  # Windows. winget could install whatever version its manifest floated to; the
+  # pinned, checksum-verified direct download is now the SINGLE k3d path (matching
+  # Linux/macOS which honor the pin). These positive source guards lock that in so
+  # a future edit can't silently reintroduce a floating/unpinned k3d source.
+  It "installs k3d from the PINNED release version (#567)" {
+    $script:ISRC | Should -Match 'Resolve-ToolVersion -Name "k3d" -Value \$K3dVersion'
+    $script:ISRC | Should -Match '\$k3dUrl = "https://github\.com/k3d-io/k3d/releases/download/\$k3dVer/k3d-windows-\$arch\.exe"'
+  }
+  It "verifies the k3d download (fail-closed) rather than trusting an unpinned source (#567)" {
+    $script:ISRC | Should -Match 'Get-VerifiedDownload -Url \$k3dUrl'
+    # checksum mismatch / unfetchable checksums both abort (fail-closed).
+    $script:ISRC | Should -Match 'k3d checksums[\s\S]{0,600}Err "System tool checksum verification failed."'
+  }
   It "returns ok with the exit code when the process succeeds" {
     Mock Start-Process { [pscustomobject]@{ ExitCode = 0; HasExited = $true } }
     Mock Wait-ProcessWithDeadline { $true }
