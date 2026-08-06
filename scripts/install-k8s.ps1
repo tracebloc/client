@@ -3661,12 +3661,20 @@ $envBlock
 
   Write-Host ""
   if ($adoptedReuse) {
-    # Surgical reconcile of the LIVE release: --reuse-values preserves the
-    # deployed configuration + secret; only clientId is healed (#397 r2).
-    Log "Reconciling release '$existingName' in namespace '$existingNs' (adopted; --reuse-values; healing clientId)..."
+    # Surgical reconcile of the LIVE release: preserve the deployed configuration +
+    # secret; only clientId is healed (#397 r2). Prefer --reset-then-reuse-values
+    # (Helm >= 3.14: reset to chart defaults, then re-apply the user's overrides, so
+    # NEW chart defaults reach adopted edges on auto-upgrade) over --reuse-values
+    # (keeps only stored values, so new chart defaults never land); feature-detect via
+    # --help and fall back on older Helm (bash parity: install-client-helm.sh).
+    $reuseFlag = "--reuse-values"
+    if ((helm upgrade --help 2>$null | Out-String) -match '--reset-then-reuse-values') {
+      $reuseFlag = "--reset-then-reuse-values"
+    }
+    Log "Reconciling release '$existingName' in namespace '$existingNs' (adopted; $reuseFlag; healing clientId)..."
     $helmOutput = (helm upgrade $existingName $chartRef `
       --namespace $existingNs `
-      --reuse-values `
+      $reuseFlag `
       --set-string "clientId=$TB_CLIENT_ID" 2>&1) | Out-String
     Log "Helm Output: $helmOutput"
     if ($LASTEXITCODE -ne 0) { Err "Client reconcile failed." $helmOutput }

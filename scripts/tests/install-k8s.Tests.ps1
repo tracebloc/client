@@ -988,6 +988,25 @@ Describe "Install-ClientHelm" {
     Install-ClientHelm
     Should -Invoke helm -ParameterFilter { ($args -contains "upgrade") -and ($args -contains "--reuse-values") }
   }
+  It "adopted mode prefers --reset-then-reuse-values when Helm >= 3.14 exposes it (bash parity: new chart defaults reach adopted edges)" {
+    # When `helm upgrade --help` advertises --reset-then-reuse-values (Helm >= 3.14),
+    # the reconcile must use it so NEW chart defaults land on adopted Windows edges on
+    # auto-upgrade — not stay pinned to stored values as plain --reuse-values would.
+    $HOST_DATA_DIR = "$TestDrive/d-adopt-reset"
+    $script:TB_PROV_MODE = "adopted"; $script:TB_PROV_ID = "uuid-9"; $script:TB_PROV_NS = "lukas-01"
+    Mock helm {
+      if (($args -contains "upgrade") -and ($args -contains "--help")) { "      --reset-then-reuse-values   reset then reuse"; $global:LASTEXITCODE = 0; return }
+      if ($args -contains "list") { '[{"name":"oldrel","namespace":"lukas-01","chart":"client-1.4.3"}]'; $global:LASTEXITCODE = 0; return }
+      if ($args -contains "get") {
+        if ($args -contains "json") { '{"clientId":"uuid-9"}' } else { 'clientId: uuid-9' }
+        $global:LASTEXITCODE = 0; return
+      }
+      $global:LASTEXITCODE = 0
+    }
+    Install-ClientHelm
+    Should -Invoke helm -ParameterFilter { ($args -contains "upgrade") -and ($args -contains "--reset-then-reuse-values") }
+    Should -Not -Invoke helm -ParameterFilter { ($args -contains "upgrade") -and ($args -contains "--reuse-values") }
+  }
   It "a DIFFERENT existing client still refuses outside adopted mode (guard intact)" {
     $HOST_DATA_DIR = "$TestDrive/d-guard-minted"
     $script:TB_PROV_MODE = "minted"; $script:TB_PROV_ID = "uuid-new"

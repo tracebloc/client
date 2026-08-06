@@ -441,7 +441,7 @@ tests:
           content: FOWNER
       - matchRegex:
           path: spec.template.spec.initContainers[0].command[2]
-          pattern: "chown 1000:1000 /data/shared /data/logs && chmod 2777 /data/shared /data/logs"
+          pattern: "chown 1000:1000 /data/shared /data/logs && chmod 3777 /data/shared /data/logs"
       # the init must mount BOTH hostPath volumes it chowns, or the chown is a no-op
       - contains:
           path: spec.template.spec.initContainers[0].volumeMounts

@@ -53,8 +53,9 @@ spec:
       # Unlike mysql-data (one writer, UID 999), these have MULTIPLE non-root writers —
       # jobs-manager, the training/ingestor pods it spawns, and the CLI's ingest-staging pod,
       # whose UID this chart does not control — so they must be world-writable, not chowned to
-      # a single UID. setgid (2) makes new files inherit GID 1000; runs as root only long
-      # enough to fix the mounts, with FOWNER so the chmod is idempotent on re-install. CSI
+      # a single UID. Mode 3777 = setgid (2) so new files inherit GID 1000 + sticky (1) so one
+      # writer can't unlink or rename another writer's files (/tmp semantics); runs as root only
+      # long enough to fix the mounts, with FOWNER so the chmod is idempotent on re-install. CSI
       # clusters rely on fsGroup above and skip this.
       initContainers:
       - name: init-writable-data
@@ -69,7 +70,7 @@ spec:
             add: ["CHOWN", "FOWNER"]
           seccompProfile:
             type: RuntimeDefault
-        command: ['sh', '-c', 'chown 1000:1000 /data/shared /data/logs && chmod 2777 /data/shared /data/logs']
+        command: ['sh', '-c', 'chown 1000:1000 /data/shared /data/logs && chmod 3777 /data/shared /data/logs']
         volumeMounts:
         - name: shared-volume
           mountPath: /data/shared
