@@ -112,7 +112,7 @@ spec:
       # fetches can hang on a TCP black-hole with no timeout, and with
       # concurrencyPolicy: Forbid a single hung Job skips every future tick.
       # This backstop fails the Job so the next tick can run.
-      activeDeadlineSeconds: {{ .Values.autoUpgrade.activeDeadlineSeconds }}
+      activeDeadlineSeconds: {{ .Values.autoUpgrade.activeDeadlineSeconds | default 900 }}
       template:
         metadata:
           labels:
