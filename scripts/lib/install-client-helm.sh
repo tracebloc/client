@@ -576,8 +576,12 @@ _reconcile_pending_release() {
         fi
       fi
       log "Release '$_rel' is wedged in pending-install (a prior run was killed mid-install); uninstalling the half-installed release before retrying."
+      # --wait so the uninstall blocks until its resources are actually gone: the
+      # adopt path reinstalls the SAME release right after, and without --wait the
+      # reinstall can race still-terminating objects and fail on "already exists" /
+      # "being deleted" (Bugbot #619). Bounded by the spinner deadline.
       spin_cmd_bounded 120 "Clearing a half-finished install…" \
-        helm uninstall "$_rel" -n "$_ns" || true
+        helm uninstall "$_rel" -n "$_ns" --wait || true
       ;;
     pending-upgrade|pending-rollback)
       _target="$(_last_deployed_revision "$_rel" "$_ns")"
@@ -672,20 +676,50 @@ _reconcile_adopted_client() {
   _helm_timeout_min="$(tb_minutes_or "${TB_HELM_TIMEOUT_MIN:-}" 10)"
   local _helm_rc=0
   spin_cmd_bounded "$(( _helm_timeout_min * 60 ))" "Reconciling the existing client…" helm "${_args[@]}" || _helm_rc=$?
-  # The preserve file carries the write-only clientPassword — shred it as soon as
-  # the reconcile has consumed it, regardless of outcome, and clear the var so
-  # install_cleanup's backstop has nothing left to do (Bugbot #619).
-  if [[ -n "${_TB_PENDING_VALUES_FILE:-}" && "$_TB_PENDING_VALUES_FILE" != /dev/null ]]; then
-    rm -f "$_TB_PENDING_VALUES_FILE"; unset _TB_PENDING_VALUES_FILE
+  # Dispose of the preserved clientPassword based on the outcome (Bugbot #619).
+  # The credential is write-only: for an adopted client the wedged release was its
+  # only copy, so we must NOT shred the preserved copy while it's still the only
+  # one that exists.
+  local _reinstalled="${TB_PENDING_REINSTALL:-0}"
+  if [[ "$_helm_rc" -eq 0 || "$_reinstalled" != "1" ]]; then
+    # Success (credential now stored in the reconciled release), OR a plain
+    # --reuse-values upgrade that FAILED but left the existing release — and its
+    # stored credential — intact. Either way the temp copy is redundant: shred it.
+    [[ -n "${_TB_PENDING_VALUES_FILE:-}" && "$_TB_PENDING_VALUES_FILE" != /dev/null ]] && rm -f "$_TB_PENDING_VALUES_FILE"
+    unset _TB_PENDING_VALUES_FILE
+  else
+    # Reinstall FAILED after the wedged release was already uninstalled: the temp
+    # copy is now the ONLY copy of the write-only clientPassword. Persist it to a
+    # durable 0600 file under HOST_DATA_DIR (the dir that already holds the normal
+    # values.yaml) so it survives this failed run and a re-run can recover from it,
+    # rather than losing the credential for good.
+    local _recovery=""
+    if [[ -n "${HOST_DATA_DIR:-}" && -s "${_TB_PENDING_VALUES_FILE:-/dev/null}" ]] && mkdir -p "$HOST_DATA_DIR" 2>/dev/null; then
+      _recovery="${HOST_DATA_DIR}/.tb-adopt-recovery-values.yaml"
+      if cp "$_TB_PENDING_VALUES_FILE" "$_recovery" 2>/dev/null; then
+        chmod 600 "$_recovery" 2>/dev/null || true
+      else
+        _recovery=""
+      fi
+    fi
+    [[ -n "${_TB_PENDING_VALUES_FILE:-}" && "$_TB_PENDING_VALUES_FILE" != /dev/null ]] && rm -f "$_TB_PENDING_VALUES_FILE"
+    unset _TB_PENDING_VALUES_FILE
+    if [[ -n "$_recovery" ]]; then
+      warn "Reinstall failed after the wedged release was removed. Your client credential is saved (0600) at: $_recovery"
+      hint "Re-run the installer to retry, or reconcile manually:"
+      hint "  helm -n $_ns upgrade --install $_rel $chart_ref -f $_recovery"
+    else
+      warn "Reinstall failed after the wedged release was removed and the credential copy could not be saved."
+      hint "Re-adopt this client from the dashboard to reissue access."
+    fi
+    error "Reconcile of the existing client failed. Check the log for details: ${LOG_FILE:-}"
   fi
   if [[ "$_helm_rc" -ne 0 ]]; then
-    # A helm run killed mid-operation (our timeout=124, or an earlier
-    # Ctrl-C/OOM/reboot) can leave the release wedged pending-*; we auto-recover
-    # before the upgrade (see _reconcile_pending_release), but surface the
-    # manual remedy on ANY failure (#554) — not only our own timeout — since the
-    # next run's "another operation is in progress" also exits 1. Point at the
-    # last DEPLOYED revision, never a bare `helm rollback` (= previous revision,
-    # which after an interrupted atomic rollback is the failed upgrade — Bugbot #619).
+    # Non-reinstall failure path (the release still exists). A helm run killed
+    # mid-operation can leave it wedged pending-*; surface the manual remedy on
+    # ANY failure (#554). Point at the last DEPLOYED revision, never a bare
+    # `helm rollback` (= previous revision, which after an interrupted atomic
+    # rollback is the failed upgrade — Bugbot #619).
     hint "If a re-run reports 'another operation is in progress', unwedge the release first:"
     hint "  helm -n $_ns history $_rel     (find the newest DEPLOYED revision, then:)"
     hint "  helm -n $_ns rollback $_rel <REVISION>    (roll back to that revision)"

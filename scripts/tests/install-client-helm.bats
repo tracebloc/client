@@ -1294,6 +1294,32 @@ setup() {
   [[ "$output" == *"--set clientId=0e9db54e-c9c0-4bf3-9ff2-1646da307019"* ]] || return 1
 }
 
+@test "install_client_helm: adopt + pending-install, FAILED reinstall preserves the credential durably (Bugbot #619)" {
+  HOST_DATA_DIR="$BATS_TEST_TMPDIR/data"; mkdir -p "$HOST_DATA_DIR"
+  _ensure_tracebloc_dirs() { :; }
+  _ensure_release_dirs() { :; }
+  _ensure_helm_runnable() { :; }
+  kubectl() { record "kubectl $*"; return 0; }
+  # Reinstall FAILS after the wedged release was uninstalled. The write-only
+  # clientPassword lived only in that release, so it must NOT be lost — it must be
+  # persisted to a durable 0600 file for a re-run to recover from.
+  helm() {
+    if [[ "$1" == list ]];               then echo "munich munich 1 now pending-install client-1.8.2 1.8.2"; return 0; fi
+    if [[ "$1" == status ]];             then printf 'info:\n  status: pending-install\n'; return 0; fi
+    if [[ "$1 $2" == "get values" ]];    then printf 'clientId: "123"\nclientPassword: "s3cr3t"\n'; return 0; fi
+    if [[ "$1 $2" == "upgrade --install" ]]; then record "helm $*"; return 1; fi   # reinstall fails
+    record "helm $*"; return 0
+  }
+  verify_credentials() { printf invalid; }
+  export TRACEBLOC_CLIENT_ADOPTED=1 TRACEBLOC_CLIENT_ID=0e9db54e-c9c0-4bf3-9ff2-1646da307019
+  run install_client_helm </dev/null
+  [ "$status" -ne 0 ] || return 1                               # reconcile errored out
+  # Credential was NOT lost — saved durably, 0600, with the password intact.
+  [ -s "$HOST_DATA_DIR/.tb-adopt-recovery-values.yaml" ] || return 1
+  grep -q 'clientPassword' "$HOST_DATA_DIR/.tb-adopt-recovery-values.yaml" || return 1
+  [[ "$output" == *".tb-adopt-recovery-values.yaml"* ]] || return 1   # operator told where it is
+}
+
 @test "install_cleanup shreds a lingering preserved-values credential file (Bugbot #619)" {
   # A signal between capture and the normal rm must not leave the write-only
   # clientPassword on disk — install_cleanup is the EXIT/INT/TERM backstop.
