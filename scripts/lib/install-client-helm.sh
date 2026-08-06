@@ -553,10 +553,14 @@ _reconcile_pending_release() {
            && [[ -s "$_preserve" ]] && [[ "$(head -1 "$_preserve" 2>/dev/null)" != "null" ]]; then
           TB_PENDING_REINSTALL=1
         else
-          # Couldn't read the wedged release's values — do NOT uninstall, or the
-          # adopt reconcile is stranded with no password. Leave it for the
-          # manual remedy the caller prints on failure (Bugbot #619).
-          warn "Release '$_rel' is wedged in pending-install but its stored values could not be read; leaving it in place. Recover manually: helm -n $_ns uninstall $_rel"
+          # Couldn't read the wedged release's values — do NOT uninstall, and do
+          # NOT tell the operator to either: for an adopted client the wedged
+          # release holds the ONLY copy of the write-only clientPassword, so
+          # uninstalling when preservation just failed destroys it for good
+          # (Bugbot #619). Leave it in place; re-running the installer retries
+          # the preserve, and a persistent wedge is recovered by re-adopting from
+          # the dashboard (which re-issues access) — never by uninstalling.
+          warn "Release '$_rel' is wedged in pending-install and its stored values could not be read; leaving it in place. Re-run the installer to retry recovery. Do NOT 'helm uninstall' — for an adopted client that drops the only stored clientPassword; if it stays wedged, re-adopt this client from the dashboard."
           return 0
         fi
       fi
