@@ -150,10 +150,18 @@ data:
     #
     # Uses jq because kubectl-go's jsonpath parser returns empty for
     # bracket-notation keys that contain `.` or `/` (#156).
+    #
+    # #626: capture kubectl SEPARATELY (not straight into the jq pipe) so a
+    # kubectl failure cannot be masked by jq succeeding on empty stdin — there
+    # is no `pipefail` here, so a bare `kubectl | jq` pipeline would exit 0 even
+    # when kubectl died. Return non-zero on EITHER a kubectl or a jq error.
+    # A caller can then distinguish two cases that must not be conflated:
+    #   * success + empty output  → the annotation is genuinely absent
+    #   * non-zero return         → we could not read it (do NOT assume absent)
     get_annotation() {
       _key="$1"
-      kubectl get deployment -n "$RELEASE_NAMESPACE" "$DEPLOYMENT_NAME" -o json \
-        | jq -r --arg k "$_key" '.metadata.annotations[$k] // empty'
+      _json="$(kubectl get deployment -n "$RELEASE_NAMESPACE" "$DEPLOYMENT_NAME" -o json)" || return 1
+      printf '%s\n' "$_json" | jq -r --arg k "$_key" '.metadata.annotations[$k] // empty'
     }
 
     # Skip the whole tick if the deployment isn't currently SETTLED (#546). A rollout
@@ -265,7 +273,21 @@ data:
       # is retried at most once per cooldown (bounded churn), never every tick.
       BACKOFF_RESUME_AFTER="${BACKOFF_RESUME_AFTER:-4}"
       signature="$(printf '%s' "$annotate_args" | tr -s ' ' | sed 's/^ //; s/ $//')"
-      attempt="$(get_annotation "$ATTEMPT_KEY" || true)"
+      # #626: read the attempt counter FAIL-CLOSED. Previously this used
+      # `get_annotation ... || true`, so a failed kubectl/jq collapsed to an
+      # empty value that the logic below reads as "no prior attempts" (0) —
+      # failing OPEN past the back-off and re-restarting a possibly-flapping
+      # deployment. get_annotation now returns non-zero on a read error and
+      # zero-with-empty-output only when the annotation is genuinely absent, so
+      # we can tell the two apart. On a read error we cannot confirm we are
+      # clear to restart, so take the SAFE branch: skip the restart this tick.
+      if ! attempt="$(get_annotation "$ATTEMPT_KEY")"; then
+        log "  WARN: could not read ${ATTEMPT_KEY} annotation (kubectl/jq error); cannot confirm the rollout attempt count -- skipping the restart this tick rather than risk churning a flapping deployment. Will retry next tick."
+        log "tick complete"
+        exit 0
+      fi
+      # Reached only on a successful read; empty $attempt means the annotation
+      # is genuinely absent (legitimately zero prior attempts).
       prev_sig="${attempt% *}"
       prev_count="${attempt##* }"
       case "$prev_count" in ''|*[!0-9]*) prev_count=0 ;; esac
