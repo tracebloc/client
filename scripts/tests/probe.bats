@@ -44,49 +44,49 @@ setup() {
 @test "classify: usable runtime => Tier 0" {
   OS=Linux; PROBE_RUNTIME_USABLE=1; PROBE_CGROUP2=0; PROBE_USERNS=0
   _classify_from_probes
-  [ "$INSTALL_TIER" = 0 ]
-  [ "$INSTALL_TIER_REASON" = runtime-usable ]
+  [ "$INSTALL_TIER" = 0 ] || return 1
+  [ "$INSTALL_TIER_REASON" = runtime-usable ] || return 1
 }
 
 @test "classify: runtime wins even on a non-rootless kernel" {
   OS=Linux; PROBE_RUNTIME_USABLE=1; PROBE_CGROUP2=0; PROBE_USERNS=0
   _classify_from_probes
-  [ "$INSTALL_TIER" = 0 ]
+  [ "$INSTALL_TIER" = 0 ] || return 1
 }
 
 @test "classify: Linux, no runtime, rootless-capable => Tier 1" {
   OS=Linux; PROBE_RUNTIME_USABLE=0; PROBE_CGROUP2=1; PROBE_USERNS=1
   _classify_from_probes
-  [ "$INSTALL_TIER" = 1 ]
-  [ "$INSTALL_TIER_REASON" = rootless-capable ]
+  [ "$INSTALL_TIER" = 1 ] || return 1
+  [ "$INSTALL_TIER_REASON" = rootless-capable ] || return 1
 }
 
 @test "classify: Linux, userns disabled => Tier 2 (no-userns)" {
   OS=Linux; PROBE_RUNTIME_USABLE=0; PROBE_CGROUP2=1; PROBE_USERNS=0
   _classify_from_probes
-  [ "$INSTALL_TIER" = 2 ]
-  [ "$INSTALL_TIER_REASON" = no-userns ]
+  [ "$INSTALL_TIER" = 2 ] || return 1
+  [ "$INSTALL_TIER_REASON" = no-userns ] || return 1
 }
 
 @test "classify: Linux, no cgroup v2 => Tier 2 (no-cgroup2)" {
   OS=Linux; PROBE_RUNTIME_USABLE=0; PROBE_CGROUP2=0; PROBE_USERNS=1
   _classify_from_probes
-  [ "$INSTALL_TIER" = 2 ]
-  [ "$INSTALL_TIER_REASON" = no-cgroup2 ]
+  [ "$INSTALL_TIER" = 2 ] || return 1
+  [ "$INSTALL_TIER_REASON" = no-cgroup2 ] || return 1
 }
 
 @test "classify: macOS, no runtime => Tier 2 (needs-docker-desktop)" {
   OS=Darwin; PROBE_RUNTIME_USABLE=0
   _classify_from_probes
-  [ "$INSTALL_TIER" = 2 ]
-  [ "$INSTALL_TIER_REASON" = needs-docker-desktop ]
+  [ "$INSTALL_TIER" = 2 ] || return 1
+  [ "$INSTALL_TIER_REASON" = needs-docker-desktop ] || return 1
 }
 
 @test "classify: other non-Linux (Git Bash/MINGW) => Tier 2 (unsupported-os), not Docker Desktop (#370)" {
   OS="MINGW64_NT-10.0"; PROBE_RUNTIME_USABLE=0
   _classify_from_probes
-  [ "$INSTALL_TIER" = 2 ]
-  [ "$INSTALL_TIER_REASON" = unsupported-os ]
+  [ "$INSTALL_TIER" = 2 ] || return 1
+  [ "$INSTALL_TIER_REASON" = unsupported-os ] || return 1
 }
 
 # ── _probe_privilege: the four postures ──────────────────────────────────────
@@ -94,7 +94,7 @@ setup() {
 @test "privilege: uid 0 => root" {
   id() { echo 0; }
   run _probe_privilege
-  [ "$output" = root ]
+  [ "$output" = root ] || return 1
 }
 
 @test "privilege: not root, sudo absent => no_sudo" {
@@ -102,7 +102,7 @@ setup() {
   # No real sudo binary — even if the A2 sudo() shadow is defined (Bugbot #372).
   _have_sudo_bin() { return 1; }
   run _probe_privilege
-  [ "$output" = no_sudo ]
+  [ "$output" = no_sudo ] || return 1
 }
 
 @test "privilege: not root, passwordless sudo => sudo_nopw" {
@@ -110,7 +110,7 @@ setup() {
   _have_sudo_bin() { return 0; }
   _real_sudo() { return 0; }
   run _probe_privilege
-  [ "$output" = sudo_nopw ]
+  [ "$output" = sudo_nopw ] || return 1
 }
 
 @test "privilege: not root, sudo needs a password => sudo_pw" {
@@ -118,7 +118,7 @@ setup() {
   _have_sudo_bin() { return 0; }
   _real_sudo() { return 1; }
   run _probe_privilege
-  [ "$output" = sudo_pw ]
+  [ "$output" = sudo_pw ] || return 1
 }
 
 # ── _probe_subid_ranges / _probe_uidmap_helpers (rootless prereqs, #1220) ─────
@@ -147,14 +147,14 @@ setup() {
   printf 'testuser:100000:65536\n' >"$TB_SUBUID_FILE"
   : >"$TB_SUBGID_FILE"
   run _probe_subid_ranges
-  [ "$status" -ne 0 ]
+  [ "$status" -ne 0 ] || return 1
 }
 
 @test "subid: both files empty => not present" {
   USER=testuser; id() { [ "$1" = "-un" ] && echo testuser || echo 1000; }
   TB_SUBUID_FILE="$(mktemp)"; TB_SUBGID_FILE="$(mktemp)"
   run _probe_subid_ranges
-  [ "$status" -ne 0 ]
+  [ "$status" -ne 0 ] || return 1
 }
 
 @test "subid: keyed off id -un not \$USER — su/cron divergence can't false-positive (#458)" {
@@ -165,7 +165,7 @@ setup() {
   printf 'alice:100000:65536\n' >"$TB_SUBUID_FILE"
   printf 'alice:100000:65536\n' >"$TB_SUBGID_FILE"
   run _probe_subid_ranges
-  [ "$status" -ne 0 ]
+  [ "$status" -ne 0 ] || return 1
 }
 
 @test "subid: a name that is a substring of another entry does NOT false-positive" {
@@ -174,7 +174,7 @@ setup() {
   printf 'testuser:100000:65536\n' >"$TB_SUBUID_FILE"
   printf 'testuser:100000:65536\n' >"$TB_SUBGID_FILE"
   run _probe_subid_ranges
-  [ "$status" -ne 0 ]
+  [ "$status" -ne 0 ] || return 1
 }
 
 # NOTE: these clobber PATH to $bin for a hermetic probe (hide any system newuidmap),
@@ -204,7 +204,7 @@ setup() {
   chmod +x "$bin/newuidmap" "$bin/newgidmap"
   # Both report cap_setuid; newgidmap actually needs cap_setgid, so it must be rejected.
   getcap() { printf '%s cap_setuid=ep\n' "$1"; }
-  ! ( PATH="$bin"; _probe_uidmap_helpers )
+  ! ( PATH="$bin"; _probe_uidmap_helpers ) || return 1
 }
 
 @test "uidmap: present with neither setuid bit nor cap_setuid => not satisfied" {
@@ -212,13 +212,13 @@ setup() {
   : >"$bin/newuidmap"; : >"$bin/newgidmap"
   chmod +x "$bin/newuidmap" "$bin/newgidmap"
   getcap() { printf '%s =\n' "$1"; }               # getcap present, no caps
-  ! ( PATH="$bin"; _probe_uidmap_helpers )
+  ! ( PATH="$bin"; _probe_uidmap_helpers ) || return 1
 }
 
 @test "uidmap: one helper missing => not satisfied" {
   bin="$(mktemp -d)"
   : >"$bin/newuidmap"; chmod u+s "$bin/newuidmap"   # newgidmap absent
-  ! ( PATH="$bin"; _probe_uidmap_helpers )
+  ! ( PATH="$bin"; _probe_uidmap_helpers ) || return 1
 }
 
 @test "subid probes: side-effect-free — fixtures unchanged after run_host_probes" {
@@ -233,9 +233,9 @@ setup() {
   _probe_privilege()      { echo no_sudo; }
   _probe_uidmap_helpers() { return 0; }
   run_host_probes
-  [ "$PROBE_SUBID" = 1 ]
-  [ "$(cat "$TB_SUBUID_FILE")" = "$before_u" ]
-  [ "$(cat "$TB_SUBGID_FILE")" = "$before_g" ]
+  [ "$PROBE_SUBID" = 1 ] || return 1
+  [ "$(cat "$TB_SUBUID_FILE")" = "$before_u" ] || return 1
+  [ "$(cat "$TB_SUBGID_FILE")" = "$before_g" ] || return 1
 }
 
 # ── read-only guarantee ───────────────────────────────────────────────────────
@@ -248,7 +248,7 @@ setup() {
   run_host_probes
   refute_has "docker run"  "$(mock_calls)"
   refute_has "docker pull" "$(mock_calls)"
-  [ "$INSTALL_TIER" = 0 ]          # docker info OK => Tier 0
+  [ "$INSTALL_TIER" = 0 ] || return 1          # docker info OK => Tier 0
 }
 
 # The default-path daemon check must be bounded so a wedged Docker can't hang a
@@ -273,7 +273,7 @@ setup() {
   has() { case "$1" in docker) return 0 ;; timeout|gtimeout) return 1 ;; *) return 1 ;; esac; }
   docker() { return 1; }              # daemon unreachable, or timeout killed it (124)
   run _probe_runtime_usable
-  [ "$status" -ne 0 ]                 # "not usable" — no error thrown
+  [ "$status" -ne 0 ] || return 1                 # "not usable" — no error thrown
 }
 
 @test "verify probe pulls only when --verify is set" {
@@ -293,8 +293,8 @@ setup() {
   id() { echo 1000; }
   has() { case "$1" in docker) return 0 ;; sudo) return 1 ;; *) command -v "$1" >/dev/null 2>&1 ;; esac; }
   run_host_probes
-  [ "$PROBE_RUNTIME_USABLE" = 0 ]   # docker info OK but `docker run` failed => not usable
-  [ "$INSTALL_TIER" != 0 ]          # so NOT Tier 0
+  [ "$PROBE_RUNTIME_USABLE" = 0 ] || return 1   # docker info OK but `docker run` failed => not usable
+  [ "$INSTALL_TIER" != 0 ] || return 1          # so NOT Tier 0
 }
 
 # ── render_host_audit: the panel ──────────────────────────────────────────────
@@ -361,7 +361,7 @@ setup() {
   TB_OSRELEASE_FILE="$(mktemp)"; printf '6.8.0-generic\n' > "$TB_OSRELEASE_FILE"
   TB_PROC_VERSION_FILE="$(mktemp)"; printf 'Linux version 6.8.0-generic (gcc 13)\n' > "$TB_PROC_VERSION_FILE"
   run _probe_wsl
-  [ "$status" -ne 0 ]
+  [ "$status" -ne 0 ] || return 1
 }
 
 @test "run_host_probes: sets PROBE_WSL=1 inside WSL2 (Linux)" {
@@ -373,7 +373,7 @@ setup() {
   _probe_uidmap_helpers() { return 0; }
   _probe_privilege()      { echo no_sudo; }
   run_host_probes
-  [ "$PROBE_WSL" = "1" ]
+  [ "$PROBE_WSL" = "1" ] || return 1
 }
 
 # ── audit: WSL2-aware rows/messages (#1179) ───────────────────────────────────

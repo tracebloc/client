@@ -101,6 +101,19 @@ report "bare 'curl' — call curl_secure() from ${ENGINE} so the TLS floor and t
       | grep -vE '(has curl|command -v curl)' \
       | grep -vE 'curl[^|]*\|[[:space:]]*(sh|bash)' || true)"
 
+# 4) Product name is lowercase 'tracebloc' in user-facing text — never capital-T
+#    'Tracebloc'. The installer copy must feel one-to-one across platforms; the
+#    bash script is the gold standard (#576). Exempt: comments, and PascalCase code
+#    identifiers — function names (Get-Tracebloc… , matched by a leading '-') and
+#    the 'TraceblocInstallerResume' resume key (matched by a following uppercase
+#    letter). Opt out a real edge with a trailing `# style-guard: allow`.
+scan 'Tracebloc'
+report "capital-T 'Tracebloc' in user-facing text — the product name is lowercase 'tracebloc' (see STYLE.md)" \
+  "$(printf '%s' "$hits" \
+      | grep -vE '^[^:]+:[0-9]+:[[:space:]]*#' \
+      | grep -vE 'Tracebloc[A-Z]' \
+      | grep -vE '[-]Tracebloc' || true)"
+
 if [[ "$guard_error" -ne 0 ]]; then
   echo "  [!] the guard hit an internal error — failing closed (exit 2)" >&2
   exit 2

@@ -553,10 +553,20 @@ Describe "Invoke-TrackedInstall (#500 capture installer output)" {
     $script:ISRC | Should -Match 'function Invoke-TrackedInstall[\s\S]*Get-Content \$errF[\s\S]*Get-Content \$outF'
     $script:ISRC | Should -Match 'function Invoke-TrackedInstall[\s\S]*if \(\$log\) \{ Log'
   }
-  It "all four winget/installer installs go through the capturing wrapper" {
-    foreach ($tag in 'docker-winget','docker-direct','k3d-winget','helm-winget') {
+  It "every winget/installer install goes through the capturing wrapper" {
+    # k3d-winget was removed in #607: k3d has no winget manifest, so that branch
+    # only ever logged "No package found" before the (now resilient) direct
+    # download ran. The remaining installs must still go through the wrapper.
+    foreach ($tag in 'docker-winget','docker-direct','helm-winget') {
       $script:ISRC | Should -Match "Invoke-TrackedInstall[\s\S]{0,300}-Tag `"$tag`""
     }
+  }
+  It "no longer runs a k3d winget install (#607: k3d has no winget manifest)" {
+    # The comment in install-k8s.ps1 still names Rancher.k3d to explain the removal,
+    # so assert on the tracked-install TAG (unique to the actual invocation), not
+    # on any mention of the id.
+    $script:ISRC | Should -Not -Match '-Tag "k3d-winget"'
+    $script:ISRC | Should -Not -Match 'install","-e","--id","Rancher\.k3d"'
   }
   It "returns ok with the exit code when the process succeeds" {
     Mock Start-Process { [pscustomobject]@{ ExitCode = 0; HasExited = $true } }
@@ -2990,5 +3000,422 @@ Describe "k3s version pin: create + reuse drift (#547 source guards)" {
   It "header docs no longer advertise 'default: latest'" {
     $script:PSRC | Should -Not -Match 'default: latest'
     $script:PSRC | Should -Match 'pinned \+ validated'
+  }
+}
+
+Describe "Log hygiene: no Start-Transcript, helpers feed the curated log (#576)" {
+  BeforeAll { $script:PSRC576 = Get-Content "$PSScriptRoot/../install-k8s.ps1" -Raw }
+
+  It "does not use Start-Transcript / Stop-Transcript (the transcript header is the PII leak)" {
+    $script:PSRC576 | Should -Not -Match 'Start-Transcript -Path'
+    $script:PSRC576 | Should -Not -Match 'Stop-Transcript'
+  }
+
+  It "routes the message helpers through Log() so the log stays useful without a transcript" {
+    $log = Join-Path $TestDrive "install-576.log"
+    $script:LOG_FILE = $log
+    try {
+      Ok   "route-check-ok"
+      Warn "route-check-warn"
+      Info "route-check-info"
+      Step 1 6 "route-check-step"
+      Hint "route-check-hint"
+      $content = Get-Content $log -Raw
+      $content | Should -Match 'route-check-ok'
+      $content | Should -Match 'route-check-warn'
+      $content | Should -Match 'route-check-info'
+      $content | Should -Match 'route-check-step'
+      $content | Should -Match 'route-check-hint'
+      # curated by construction: the PowerShell transcript identity header (the PII)
+      # can never appear, because Log() only ever writes what we pass it.
+      $content | Should -Not -Match 'Username:'
+      $content | Should -Not -Match 'Machine:'
+      $content | Should -Not -Match 'PowerShell transcript'
+    } finally { $script:LOG_FILE = $null }
+  }
+}
+
+Describe "Preflight + summary failures reach the curated log (#576 Bugbot)" {
+  It "Write-PfFail routes preflight hard-fail lines to the log (not screen-only)" {
+    $log = Join-Path $TestDrive "install-pf.log"
+    $script:LOG_FILE = $log
+    try {
+      Write-PfFail "Disk: only 5 GB free (need 40)"
+      (Get-Content $log -Raw) | Should -Match 'PREFLIGHT FAIL: Disk: only 5 GB free'
+    } finally { $script:LOG_FILE = $null }
+  }
+}
+
+Describe "Print-Summary logs the classified outcome for every state (#576 Bugbot)" {
+  BeforeEach { $script:TB_NAMESPACE = "ns"; $GPU_VENDOR = "none"; $NVIDIA_DRIVER_OK = $false }
+  It "records the final client state in the log (covers the default/image_pull/crash branch)" {
+    $log = Join-Path $TestDrive "install-sum.log"
+    $script:LOG_FILE = $log
+    $script:ClientState = "image_pull"
+    try {
+      Print-Summary 6>&1 | Out-Null
+      (Get-Content $log -Raw) | Should -Match 'Final client state: image_pull'
+    } finally { $script:LOG_FILE = $null }
+  }
+}
+
+Describe "Network profile: plain-language proxy / TLS-inspection read (#582)" {
+  BeforeEach {
+    $env:HTTP_PROXY = $null; $env:HTTPS_PROXY = $null
+    $env:http_proxy = $null; $env:https_proxy = $null
+    $env:TRACEBLOC_CA_BUNDLE = $null; $env:CURL_CA_BUNDLE = $null
+  }
+  AfterAll {
+    $env:HTTP_PROXY = $null; $env:HTTPS_PROXY = $null
+    $env:http_proxy = $null; $env:https_proxy = $null
+    $env:TRACEBLOC_CA_BUNDLE = $null; $env:CURL_CA_BUNDLE = $null
+  }
+
+  It "Get-EnvProxyHostPort strips scheme + user:pass credentials (PII)" {
+    Get-EnvProxyHostPort "http://user:pass@proxy.corp:8080/x" | Should -Be "proxy.corp:8080"
+  }
+
+  It "Get-EnvProxy: HTTPS wins and credentials are stripped" {
+    $env:HTTP_PROXY = "http://h:1"; $env:HTTPS_PROXY = "http://user:secret@sproxy.corp:3128"
+    $p = Get-EnvProxy
+    $p | Should -Be "sproxy.corp:3128"
+    $p | Should -Not -Match "secret"
+  }
+
+  It "Test-IssuerIsPublic: public CA true, corporate re-signer false" {
+    Test-IssuerIsPublic "CN=DigiCert Global G2, O=DigiCert Inc" | Should -BeTrue
+    Test-IssuerIsPublic "CN=Acme Corp Proxy CA, O=Acme Corp"    | Should -BeFalse
+  }
+
+  It "Get-EnvCaBundle: readable CA file returned, null when unset" {
+    $ca = Join-Path $TestDrive "ca.pem"; "x" | Set-Content -LiteralPath $ca
+    $env:TRACEBLOC_CA_BUNDLE = $ca
+    Get-EnvCaBundle | Should -Be $ca
+    $env:TRACEBLOC_CA_BUNDLE = $null
+    Get-EnvCaBundle | Should -BeNullOrEmpty
+  }
+
+  It "Show-NetworkProfile: direct connection is silent" {
+    Mock Get-TlsInspectionState { "no" }
+    $out = Show-NetworkProfile 6>&1 | Out-String
+    $out.Trim() | Should -BeNullOrEmpty
+  }
+
+  It "Show-NetworkProfile: proxy + inspection -> one PII-free line" {
+    $env:HTTPS_PROXY = "http://u:p@proxy.corp:8080"
+    Mock Get-TlsInspectionState { "yes" }
+    $out = Show-NetworkProfile 6>&1 | Out-String
+    $out | Should -Match "corporate proxy detected \(proxy\.corp:8080\)"
+    $out | Should -Match "TLS inspection detected"
+    $out | Should -Not -Match "u:p"
+  }
+
+  It "Show-NetworkProfile: a configured CA bundle is announced" {
+    $ca = Join-Path $TestDrive "ca2.pem"; "x" | Set-Content -LiteralPath $ca
+    $env:HTTPS_PROXY = "http://proxy.corp:8080"; $env:TRACEBLOC_CA_BUNDLE = $ca
+    Mock Get-TlsInspectionState { "yes" }
+    $out = Show-NetworkProfile 6>&1 | Out-String
+    $out | Should -Match "your company's certificate is configured"
+  }
+
+  It "Get-EnvProxyRaw: preserves credentials (probe connection only, never displayed)" {
+    $env:HTTPS_PROXY = "http://user:secret@px.corp:3128"
+    Get-EnvProxyRaw | Should -Be "http://user:secret@px.corp:3128"
+    Get-EnvProxy    | Should -Be "px.corp:3128"   # display path still strips
+  }
+
+  It "the TLS probe connects with proxy credentials, but display strips them (Bugbot)" {
+    $src = Get-Content "$PSScriptRoot/../install-k8s.ps1" -Raw
+    $probeFn = (($src -split "function Get-TlsInspectionState")[1] -split "`nfunction ")[0]
+    $probeFn | Should -Match 'Get-EnvProxyRaw'      # connect uses the raw (credentialed) proxy
+    $probeFn | Should -Match 'NetworkCredential'
+    $showFn = (($src -split "function Show-NetworkProfile")[1] -split "`nfunction ")[0]
+    $showFn | Should -Match 'Get-EnvProxy\b'        # display uses the stripped proxy
+    $showFn | Should -Not -Match 'Get-EnvProxyRaw'
+  }
+}
+
+Describe "Top-level error boundary: crashes become a clean message, never a stack (#577)" {
+  BeforeAll { $script:PSRC577 = Get-Content "$PSScriptRoot/../install-k8s.ps1" -Raw }
+
+  It "the main run is wrapped in a top-level try/catch that calls Show-FatalError" {
+    $script:PSRC577 | Should -Match 'Show-FatalError \$_'
+    $script:PSRC577 | Should -Match 'if \(-not \$env:TB_PESTER\)[\s\S]{0,600}?try \{'
+  }
+
+  It "Show-FatalError renders a clean 'stopped' message with reason + re-run hint, no stack" {
+    $er = $null; try { throw "widget exploded" } catch { $er = $_ }
+    $out = Show-FatalError $er 6>&1 | Out-String
+    $out | Should -Match 'Installation stopped'
+    $out | Should -Match 'widget exploded'
+    $out | Should -Match 're-run'
+    $out | Should -Not -Match 'char:\d'
+    $out | Should -Not -Match 'ScriptStackTrace'
+  }
+
+  It "Show-FatalError logs the reason but never the stack" {
+    $log = Join-Path $TestDrive "fatal-577.log"; $script:LOG_FILE = $log
+    try {
+      $er = $null; try { throw "disk on fire" } catch { $er = $_ }
+      Show-FatalError $er 6>&1 | Out-Null
+      $c = Get-Content $log -Raw
+      $c | Should -Match 'FATAL: disk on fire'
+      $c | Should -Not -Match 'ScriptStackTrace'
+    } finally { $script:LOG_FILE = $null }
+  }
+}
+
+Describe "Graceful failure: guaranteed finally + trap, guarded closer (#577)" {
+  BeforeAll { $script:PSRC577b = Get-Content "$PSScriptRoot/../install-k8s.ps1" -Raw }
+
+  It "wraps the main run in try/catch/finally with a last-resort trap" {
+    $script:PSRC577b | Should -Match 'trap \{ Show-FatalError \$_; exit 1 \}'
+    $script:PSRC577b | Should -Match '\} finally \{'
+    $script:PSRC577b | Should -Match 'if \(-not \$script:OutcomeReported\) \{ Show-Interrupted \}'
+  }
+
+  It "marks the outcome reported on every terminal path (guards against a spurious interrupted line)" {
+    ([regex]::Matches($script:PSRC577b, '\$script:OutcomeReported = \$true')).Count | Should -BeGreaterOrEqual 5
+  }
+
+  It "the -Diagnose path marks the outcome reported only after the bundle completes (Bugbot)" {
+    # Setting the flag before the long collection would skip Show-Interrupted on an
+    # interrupt mid-diagnose - the silent death this boundary exists to prevent.
+    $script:PSRC577b | Should -Match 'Invoke-DiagnoseBundle; \$script:OutcomeReported = \$true'
+  }
+
+  It "the reboot-pending stop marks the outcome reported before exiting (Bugbot)" {
+    # A reboot-pending exit is an intentional, reported stop (guidance is printed),
+    # not an interruption; without the flag the finally appends a contradictory
+    # Show-Interrupted line. The flag must be set before the block's exit 2.
+    $script:PSRC577b | Should -Match '(?s)if \(\$rebootNeeded\) \{.*?\$script:OutcomeReported = \$true.*?exit 2'
+  }
+
+  It "Show-Interrupted renders a clean interrupted line (log + re-run, no stack)" {
+    $log = Join-Path $TestDrive "int-577.log"; $script:LOG_FILE = $log
+    try {
+      $out = Show-Interrupted 6>&1 | Out-String
+      $out | Should -Match 'interrupted'
+      $out | Should -Match 're-run'
+      $out | Should -Not -Match 'ScriptStackTrace'
+      (Get-Content $log -Raw) | Should -Match 'interrupted'
+    } finally { $script:LOG_FILE = $null }
+  }
+}
+
+Describe "GPU device-plugin failure is recoverable, not fatal (#577)" {
+  BeforeAll { $script:PSRCGPU = Get-Content "$PSScriptRoot/../install-k8s.ps1" -Raw }
+  It "warns + continues in CPU mode instead of a fatal Err on a plugin failure" {
+    $script:PSRCGPU | Should -Not -Match 'Err "Failed to enable GPU acceleration'
+    $script:PSRCGPU | Should -Match 'continuing in CPU mode'
+    $script:PSRCGPU | Should -Match 'GPU device-plugin setup error'
+  }
+  It "gates the success message on the kubectl exit code — never a false 'enabled' (Bugbot)" {
+    # Native kubectl doesn't throw on a non-zero exit, so the GPU apply/rollout must be
+    # $LASTEXITCODE-checked; otherwise a failed apply prints "GPU acceleration enabled."
+    $gpuFn = ($script:PSRCGPU -split "function Install-GpuDevicePlugin")[1]
+    # No fire-and-forget discard of the apply into $null (the false-success pattern).
+    $gpuFn | Should -Not -Match '\$null = \(kubectl apply'
+    # The success message is guarded, and the apply output is written to the log.
+    $gpuFn | Should -Match '\$LASTEXITCODE'
+    $gpuFn | Should -Match 'Log "GPU plugin apply'
+  }
+  It "bounds the GPU apply with --request-timeout so a wedged API can't hang it (Bugbot)" {
+    # Parity with bash gpu-plugins.sh: the apply output is captured to the log, so
+    # without a request timeout a wedged API server would hang instead of falling
+    # through to the CPU-mode warn.
+    $gpuFn = ($script:PSRCGPU -split "function Install-GpuDevicePlugin")[1]
+    $gpuFn | Should -Match 'kubectl apply -f \$dpTmp --request-timeout='
+  }
+  It "verify runs only when the plugin deployed - CPU-mode skips Confirm-GpuNode (Bugbot)" {
+    # A failed/CPU-mode deploy returns $false; the caller must gate Confirm-GpuNode
+    # on it so the user doesn't wait ~90s for a plugin that was never applied.
+    $script:PSRCGPU | Should -Match 'if \(Install-GpuDevicePlugin\) \{ Confirm-GpuNode \}'
+    $gpuFn = ($script:PSRCGPU -split "function Install-GpuDevicePlugin")[1]
+    $gpuFn | Should -Match 'return \$true'
+    $gpuFn | Should -Match 'return \$false'
+  }
+  It "the PS GPU kubectl probes are bounded with --request-timeout (reviewer parity)" {
+    # The existence check and Confirm-GpuNode's node probe must carry a request
+    # timeout so a wedged API can't hang before/around the bounded apply (bash parity).
+    $script:PSRCGPU | Should -Match 'kubectl get daemonset -n kube-system nvidia-device-plugin-daemonset --request-timeout='
+    $script:PSRCGPU | Should -Match 'kubectl get node -o jsonpath.*--request-timeout='
+  }
+}
+
+Describe "Set-ToolTrust: wire the corporate CA into cosign/helm/git (#583)" {
+  BeforeEach { $env:TRACEBLOC_CA_BUNDLE=$null; $env:CURL_CA_BUNDLE=$null; $env:SSL_CERT_FILE=$null; $env:GIT_SSL_CAINFO=$null }
+  AfterAll  { $env:TRACEBLOC_CA_BUNDLE=$null; $env:CURL_CA_BUNDLE=$null; $env:SSL_CERT_FILE=$null; $env:GIT_SSL_CAINFO=$null }
+
+  It "exports GIT_SSL_CAINFO but NOT SSL_CERT_FILE (Go ignores it on Windows), points cosign/helm at the store (Bugbot)" {
+    $ca = Join-Path $TestDrive "ca.pem"; "pem" | Set-Content -LiteralPath $ca
+    $env:TRACEBLOC_CA_BUNDLE = $ca
+    $out = Set-ToolTrust 6>&1 | Out-String
+    $env:GIT_SSL_CAINFO | Should -Be (Resolve-Path -LiteralPath $ca).Path
+    $env:SSL_CERT_FILE  | Should -BeNullOrEmpty      # inert on Windows; deliberately not set
+    $out | Should -Match 'certificate for git'       # success names only what's wired
+    $out | Should -Match 'downloads read the certificate store'  # downloads/cosign/helm -> store
+  }
+
+  It "no-op when no CA is configured" {
+    Set-ToolTrust *> $null
+    $env:GIT_SSL_CAINFO | Should -BeNullOrEmpty
+  }
+
+  It "does NOT clobber a user's pre-set GIT_SSL_CAINFO (replace-not-augment, Bugbot)" {
+    $ca = Join-Path $TestDrive "corp.pem"; "pem" | Set-Content -LiteralPath $ca
+    $uf = Join-Path $TestDrive "user-full.pem"; "pem" | Set-Content -LiteralPath $uf
+    $env:TRACEBLOC_CA_BUNDLE = $ca
+    $env:GIT_SSL_CAINFO = $uf
+    Set-ToolTrust *> $null
+    $env:GIT_SSL_CAINFO | Should -Be $uf     # user's fuller bundle left intact
+  }
+
+  It "a skipped export is not claimed as success (Bugbot)" {
+    # With GIT_SSL_CAINFO pre-set the export is skipped — a green "Trusting..."
+    # would report wiring that did not happen and mask a pre-set bundle that
+    # still lacks the corporate CA. Say what was kept, claim nothing.
+    $ca = Join-Path $TestDrive "corp.pem"; "pem" | Set-Content -LiteralPath $ca
+    $uf = Join-Path $TestDrive "user-full.pem"; "pem" | Set-Content -LiteralPath $uf
+    $env:TRACEBLOC_CA_BUNDLE = $ca
+    $env:GIT_SSL_CAINFO = $uf
+    $out = Set-ToolTrust 6>&1 | Out-String
+    $out | Should -Not -Match 'Trusting'
+    $out | Should -Match 'Keeping your pre-set GIT_SSL_CAINFO'
+  }
+}
+
+Describe "Registry-block detection + guidance (#585)" {
+  It "Test-Preflight flags a blocked container registry and points to the mirror/offline docs" {
+    $src = Get-Content "$PSScriptRoot/../install-k8s.ps1" -Raw
+    $fn  = (($src -split "function Test-Preflight")[1] -split "`nfunction ")[0]
+    $fn | Should -Match '\$regBlocked'                 # detection flag
+    $fn | Should -Match 'ghcr\.io'                     # registry match in the detection
+    $fn | Should -Match 'container registries'         # the guidance line
+    $fn | Should -Match 'docs/INSTALL\.md'             # points at the mirror/offline docs
+  }
+}
+
+Describe "Get-ImageMirrorYaml (private registry mirror / air-gap, #585)" {
+  # Bash parity: lib/install-client-helm.sh::_image_mirror_yaml + its bats tests.
+  AfterEach {
+    $env:TRACEBLOC_IMAGE_REGISTRY     = $null
+    $env:TRACEBLOC_REGISTRY_USERNAME  = $null
+    $env:TRACEBLOC_REGISTRY_PASSWORD  = $null
+    $env:TRACEBLOC_REGISTRY_SERVER    = $null
+    $env:TRACEBLOC_REGISTRY_EMAIL     = $null
+  }
+
+  It "returns empty when no mirror/creds are set (default install unchanged)" {
+    Get-ImageMirrorYaml | Should -BeExactly ""
+  }
+
+  It "emits global.imageRegistry for a mirror-only install and no dockerRegistry" {
+    $env:TRACEBLOC_IMAGE_REGISTRY = "mirror.corp.example"
+    $out = Get-ImageMirrorYaml
+    $out | Should -Match "(?m)^global:"
+    $out | Should -Match "imageRegistry: 'mirror.corp.example'"
+    $out | Should -Not -Match "dockerRegistry:"
+  }
+
+  It "strips a pasted scheme from the mirror host" {
+    $env:TRACEBLOC_IMAGE_REGISTRY = "https://mirror.corp.example"
+    $out = Get-ImageMirrorYaml
+    $out | Should -Match "imageRegistry: 'mirror.corp.example'"
+    $out | Should -Not -Match "imageRegistry: 'https://"
+  }
+
+  It "mints a dockerRegistry with a derived https:// server when creds are given" {
+    $env:TRACEBLOC_IMAGE_REGISTRY    = "mirror.corp.example"
+    $env:TRACEBLOC_REGISTRY_USERNAME = "svc"
+    $env:TRACEBLOC_REGISTRY_PASSWORD = "secret"
+    $out = Get-ImageMirrorYaml
+    $out | Should -Match "(?m)^dockerRegistry:"
+    $out | Should -Match "create: true"
+    $out | Should -Match "server: 'https://mirror.corp.example'"
+    $out | Should -Match "username: 'svc'"
+    $out | Should -Match "password: 'secret'"
+  }
+
+  It "lets an explicit TRACEBLOC_REGISTRY_SERVER win over the derived URI" {
+    $env:TRACEBLOC_IMAGE_REGISTRY    = "mirror.corp.example"
+    $env:TRACEBLOC_REGISTRY_USERNAME = "svc"
+    $env:TRACEBLOC_REGISTRY_PASSWORD = "secret"
+    $env:TRACEBLOC_REGISTRY_SERVER   = "https://auth.corp.example/v2/"
+    (Get-ImageMirrorYaml) | Should -Match "server: 'https://auth.corp.example/v2/'"
+  }
+
+  It "doubles single quotes in the password (YAML-safe)" {
+    $env:TRACEBLOC_IMAGE_REGISTRY    = "mirror.corp.example"
+    $env:TRACEBLOC_REGISTRY_USERNAME = "svc"
+    $env:TRACEBLOC_REGISTRY_PASSWORD = "s3cr3t'q"
+    (Get-ImageMirrorYaml) | Should -Match "password: 's3cr3t''q'"
+  }
+
+  It "emits dockerRegistry but no global when creds are given without a mirror" {
+    $env:TRACEBLOC_REGISTRY_USERNAME = "svc"
+    $env:TRACEBLOC_REGISTRY_PASSWORD = "secret"
+    $out = Get-ImageMirrorYaml
+    $out | Should -Not -Match "(?m)^global:"
+    $out | Should -Match "(?m)^dockerRegistry:"
+  }
+
+  It "creds without a mirror still emit server (Docker Hub) - schema requires it (Bugbot)" {
+    # The chart schema requires dockerRegistry.server whenever create is true.
+    $env:TRACEBLOC_REGISTRY_USERNAME = "svc"
+    $env:TRACEBLOC_REGISTRY_PASSWORD = "secret"
+    (Get-ImageMirrorYaml) | Should -Match "server: 'https://index.docker.io/v1/'"
+  }
+}
+
+Describe "Test-DownloadComplete (resilient tool download, #607)" {
+  BeforeAll {
+    $script:dl = Join-Path ([System.IO.Path]::GetTempPath()) ("tbdl-" + [guid]::NewGuid().ToString("N"))
+    New-Item -ItemType Directory -Path $script:dl | Out-Null
+    $script:exe = Join-Path $script:dl "k3d.exe"
+    [System.IO.File]::WriteAllBytes($script:exe, ([byte[]](0x4D,0x5A) + (New-Object byte[] 2000000)))   # MZ + 2MB
+    $script:zip = Join-Path $script:dl "helm.zip"
+    [System.IO.File]::WriteAllBytes($script:zip, ([byte[]](0x50,0x4B,0x03,0x04) + (New-Object byte[] 2000000))) # PK + 2MB
+    $script:err = Join-Path $script:dl "err.html"
+    [System.IO.File]::WriteAllText($script:err, "<html>blocked by proxy</html>")
+  }
+  AfterAll { Remove-Item $script:dl -Recurse -Force -ErrorAction SilentlyContinue }
+
+  It "passes a complete .exe (MZ) above the size floor" {
+    Test-DownloadComplete -Path $script:exe -MinBytes 1MB -Magic 'MZ' | Should -BeNullOrEmpty
+  }
+  It "passes a complete .zip (PK) above the size floor" {
+    Test-DownloadComplete -Path $script:zip -MinBytes 1MB -Magic 'PK' | Should -BeNullOrEmpty
+  }
+  It "flags a truncated/blocked transfer (below the size floor) as a transfer failure" {
+    Test-DownloadComplete -Path $script:err -MinBytes 1MB -Magic 'MZ' | Should -Match 'truncated or blocked'
+  }
+  It "flags a complete-but-too-small file (size floor not met)" {
+    Test-DownloadComplete -Path $script:exe -MinBytes 5MB -Magic 'MZ' | Should -Match 'expected at least'
+  }
+  It "flags a wrong magic (an error page or altered binary), not a checksum problem" {
+    Test-DownloadComplete -Path $script:exe -MinBytes 1MB -Magic 'PK' | Should -Match "not a valid 'PK'"
+  }
+  It "flags a missing file" {
+    Test-DownloadComplete -Path (Join-Path $script:dl "nope.bin") -MinBytes 1MB -Magic 'MZ' | Should -Match 'no file was written'
+  }
+  It "skips the magic check when no magic is given (size floor only)" {
+    Test-DownloadComplete -Path $script:err -MinBytes 10 | Should -BeNullOrEmpty
+  }
+}
+
+Describe "Get-VerifiedDownload resilience guards (#607, Bugbot)" {
+  BeforeAll { $script:GVD = Get-Content "$PSScriptRoot/../install-k8s.ps1" -Raw }
+
+  It "the curl.exe fallback names the TLS 1.2 floor (parity with curl_secure)" {
+    # Bugbot: the fallback must not be able to negotiate below TLS 1.2 on the very
+    # proxy networks this targets.
+    $script:GVD | Should -Match 'curl\.exe --tlsv1\.2'
+  }
+
+  It "wraps the post-download validation so an I/O error tries the next transport, not aborts" {
+    # Bugbot: Get-Item/OpenRead can throw if AV locks the just-written file; that
+    # must fall through to curl.exe/BITS, not escape Get-VerifiedDownload.
+    $script:GVD | Should -Match 'try \{\s*\$bad = Test-DownloadComplete[\s\S]{0,220}catch \{\s*\$bad ='
   }
 }

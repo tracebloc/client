@@ -49,3 +49,43 @@ e2e_install_prereqs() {
   install_k3d
   install_helm
 }
+
+# ── e2e_egress_positive_control <host> ──────────────────────────────────────
+# Positive control for the egress seal-checks (Saqlain review on #541): before
+# trusting a BLOCKED probe result, prove the cluster can actually REACH the
+# probe host. Otherwise egress failing for an unrelated reason (a runner
+# firewall, a target outage, a rate-limit) makes the probe print OK and the
+# seal-check pass green while the NetworkPolicy did nothing. A pod in `default`
+# is governed by NO training-egress policy (the policy is namespace-scoped to
+# the release ns), so if IT reaches the host, a training pod's block is
+# attributable to the policy, not the environment. Same image + curl invocation
+# as the probe, targeting the SAME host pinned on the caller's install — so a
+# reachable positive is attributable to exactly the host the probe is blocked
+# from (no hardcoded-vs-chart-default drift).
+# Moved verbatim from e2e-seal-check.sh (#541) so e2e-full-seal.sh shares the
+# one copy. Contract: the caller defines fail() (every e2e-*.sh does).
+e2e_egress_positive_control() {
+  local host="$1"
+  echo "── positive control: a non-policied pod must REACH ${host}:443 ──"
+  # A fast runner can schedule the pod before the `default` ServiceAccount is
+  # created ("serviceaccount default not found"), which aborts under set -e
+  # before the attribution failure below. Wait for the SA first (Bugbot).
+  for _ in $(seq 1 20); do
+    kubectl --request-timeout=10s get serviceaccount default -n default >/dev/null 2>&1 && break
+    sleep 1
+  done
+  kubectl --request-timeout=10s run seal-poscheck --namespace default --restart=Never \
+    --image="curlimages/curl:8.20.0" \
+    --command -- curl --noproxy '*' --tlsv1.2 -k -sS -m 15 -o /dev/null "https://${host}"
+  local posphase=""
+  for _ in $(seq 1 40); do
+    posphase="$(kubectl --request-timeout=10s get pod seal-poscheck -n default -o jsonpath='{.status.phase}' 2>/dev/null || true)"
+    { [ "$posphase" = "Succeeded" ] || [ "$posphase" = "Failed" ]; } && break
+    sleep 3
+  done
+  kubectl --request-timeout=10s logs seal-poscheck -n default 2>/dev/null || true
+  kubectl --request-timeout=10s delete pod seal-poscheck -n default --ignore-not-found --now >/dev/null 2>&1 || true
+  [ "$posphase" = "Succeeded" ] ||
+    fail "positive control FAILED — a non-policied pod could not reach ${host}:443 (phase=${posphase:-none}). A blocked training pod would NOT be attributable to the NetworkPolicy (runner egress / target issue), so the seal-check is inconclusive — refusing to report a false PASS."
+  echo "positive control OK — ${host}:443 reachable; a training-pod block is now attributable to the policy."
+}

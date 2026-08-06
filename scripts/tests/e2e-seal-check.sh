@@ -81,38 +81,9 @@ helm install "$NS" "$CHART_DIR" --namespace "$NS" --create-namespace \
   --set networkPolicy.training.enforcementProbeHost="$HOST" \
   --set networkPolicy.training.enforcementProbeTimeoutSeconds=240
 
-# Positive control (Saqlain review): before trusting a BLOCKED probe result,
-# prove the cluster can actually REACH the probe host. Otherwise egress failing
-# for an unrelated reason (a runner firewall, a target outage, a rate-limit)
-# makes the probe print OK and the seal-check pass green while the NetworkPolicy
-# did nothing. A pod in `default` is governed by NO training-egress policy (the
-# policy is namespace-scoped to the release ns), so if IT reaches the host, the
-# training pod's block below is attributable to the policy, not the environment.
-# Same image + curl invocation as the probe, targeting the SAME $HOST pinned on
-# the install above — so a reachable positive here is attributable to exactly
-# the host the probe is blocked from (no hardcoded-vs-chart-default drift).
-echo "── positive control: a non-policied pod must REACH ${HOST}:443 ──"
-# A fast runner can schedule the pod before the `default` ServiceAccount is
-# created ("serviceaccount default not found"), which aborts under set -e before
-# the attribution failure below. Wait for the SA to exist first (Bugbot).
-for _ in $(seq 1 20); do
-  kubectl get serviceaccount default -n default >/dev/null 2>&1 && break
-  sleep 1
-done
-kubectl run seal-poscheck --namespace default --restart=Never \
-  --image="curlimages/curl:8.20.0" \
-  --command -- curl --noproxy '*' --tlsv1.2 -k -sS -m 15 -o /dev/null "https://${HOST}"
-posphase=""
-for _ in $(seq 1 40); do
-  posphase="$(kubectl get pod seal-poscheck -n default -o jsonpath='{.status.phase}' 2>/dev/null || true)"
-  { [ "$posphase" = "Succeeded" ] || [ "$posphase" = "Failed" ]; } && break
-  sleep 3
-done
-kubectl logs seal-poscheck -n default 2>/dev/null || true
-kubectl delete pod seal-poscheck -n default --ignore-not-found --now >/dev/null 2>&1 || true
-[ "$posphase" = "Succeeded" ] ||
-  fail "positive control FAILED — a non-policied pod could not reach ${HOST}:443 (phase=${posphase:-none}). A blocked training pod would NOT be attributable to the NetworkPolicy (runner egress / target issue), so the seal-check is inconclusive — refusing to report a false PASS."
-echo "positive control OK — ${HOST}:443 reachable; a training-pod block is now attributable to the policy."
+# Positive control — factored into scripts/tests/lib/e2e-common.sh verbatim
+# (shared with e2e-full-seal.sh); rationale + #541 review provenance live there.
+e2e_egress_positive_control "$HOST"
 
 # The one probe we exercise. Its Job is `<release>-egress-enforcement-check`
 # (templates/egress-enforcement-check.yaml). The helm-unittest suite pins this
@@ -140,8 +111,8 @@ echo "── helm test --filter name=${PROBE} ──"
 # pod log for triage.
 if ! helm test "$NS" --namespace "$NS" --filter "name=${PROBE}" --timeout 360s; then
   echo "── probe pod log (Job persists on failure) ──"
-  kubectl logs -n "$NS" -l "job-name=${PROBE}" --tail=-1 2>/dev/null ||
-    kubectl describe job -n "$NS" "${PROBE}" 2>/dev/null || true
+  kubectl --request-timeout=10s logs -n "$NS" -l "job-name=${PROBE}" --tail=-1 2>/dev/null ||
+    kubectl --request-timeout=10s describe job -n "$NS" "${PROBE}" 2>/dev/null || true
   fail "helm test reported failure for ${PROBE} — egress lockdown NOT verified"
 fi
 

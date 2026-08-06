@@ -1,3 +1,6 @@
+{{- if and .Values.perDatasetPvcs (eq .Values.clusterScope false) }}
+{{- fail "perDatasetPvcs requires clusterScope: PersistentVolumes are cluster-scoped, so the namespaced Role cannot grant the PV provisioning/GC verbs jobs-manager needs — Job spawns would 403 at runtime. Set clusterScope: true (the default) or disable perDatasetPvcs." }}
+{{- end }}
 ---
 apiVersion: v1
 kind: ServiceAccount
@@ -58,6 +61,22 @@ rules:
   - apiGroups: [""]
     resources: ["secrets"]
     verbs: ["delete"]
+{{- end }}
+{{- if .Values.perDatasetPvcs }}
+  # Per-dataset PVCs only (RFC-0003 D9 Track B, client-runtime#203/#261):
+  # jobs-manager provisions one static hostPath PV + pre-bound PVC per
+  # dataset handle before spawning a training Job (`create`; PV `get`/`patch`
+  # to recover a Released PV's claimRef for reuse) and garbage-collects
+  # PV/PVCs no live Job references (`list` + `delete`). Cluster-scope only:
+  # PVs cannot be granted by a namespace Role, so the Role branch below
+  # omits this and rendering fails on the combination (guard at the top).
+  # Flag-gated so a default install grants nothing extra — least privilege.
+  - apiGroups: [""]
+    resources: ["persistentvolumes"]
+    verbs: ["create", "get", "list", "patch", "delete"]
+  - apiGroups: [""]
+    resources: ["persistentvolumeclaims"]
+    verbs: ["create", "list", "delete"]
 {{- end }}
 ---
 apiVersion: rbac.authorization.k8s.io/v1

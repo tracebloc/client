@@ -54,8 +54,8 @@ guard()   { run env BASE_SHA="$BASE" bash "$GUARD_SH"; }
   printf 'kind: Job\nnew: true\n' >ingestor/templates/job.yaml
   commit
   guard
-  [ "$status" -eq 1 ]
-  [[ "$output" == *"ingestor/Chart.yaml 'version:' was NOT bumped"* ]]
+  [ "$status" -eq 1 ] || return 1
+  [[ "$output" == *"ingestor/Chart.yaml 'version:' was NOT bumped"* ]] || return 1
 }
 
 @test "ingestor/templates change WITH an ingestor bump passes" {
@@ -63,24 +63,24 @@ guard()   { run env BASE_SHA="$BASE" bash "$GUARD_SH"; }
   bump ingestor
   commit
   guard
-  [ "$status" -eq 0 ]
-  [[ "$output" == *"ingestor chart content changed and ingestor/Chart.yaml 'version:' was bumped"* ]]
+  [ "$status" -eq 0 ] || return 1
+  [[ "$output" == *"ingestor chart content changed and ingestor/Chart.yaml 'version:' was bumped"* ]] || return 1
 }
 
 @test "ingestor/values.yaml change without a bump is REJECTED" {
   printf 'replicas: 3\n' >ingestor/values.yaml
   commit
   guard
-  [ "$status" -eq 1 ]
-  [[ "$output" == *"ingestor/Chart.yaml"* ]]
+  [ "$status" -eq 1 ] || return 1
+  [[ "$output" == *"ingestor/Chart.yaml"* ]] || return 1
 }
 
 @test "deleting an ingestor template without a bump is REJECTED" {
   git rm -q ingestor/templates/job.yaml
   commit
   guard
-  [ "$status" -eq 1 ]
-  [[ "$output" == *"ingestor/Chart.yaml"* ]]
+  [ "$status" -eq 1 ] || return 1
+  [[ "$output" == *"ingestor/Chart.yaml"* ]] || return 1
 }
 
 @test "bumping the WRONG chart does not satisfy the other chart" {
@@ -88,8 +88,8 @@ guard()   { run env BASE_SHA="$BASE" bash "$GUARD_SH"; }
   bump client            # client bumped, ingestor is the one that changed
   commit
   guard
-  [ "$status" -eq 1 ]
-  [[ "$output" == *"ingestor/Chart.yaml 'version:' was NOT bumped"* ]]
+  [ "$status" -eq 1 ] || return 1
+  [[ "$output" == *"ingestor/Chart.yaml 'version:' was NOT bumped"* ]] || return 1
 }
 
 # ── client chart: preserved behaviour + the newly covered schema ─────────────
@@ -98,8 +98,8 @@ guard()   { run env BASE_SHA="$BASE" bash "$GUARD_SH"; }
   printf 'kind: Deployment\nnew: true\n' >client/templates/app.yaml
   commit
   guard
-  [ "$status" -eq 1 ]
-  [[ "$output" == *"client/Chart.yaml 'version:' was NOT bumped"* ]]
+  [ "$status" -eq 1 ] || return 1
+  [[ "$output" == *"client/Chart.yaml 'version:' was NOT bumped"* ]] || return 1
 }
 
 @test "client/templates change WITH a client bump passes" {
@@ -107,15 +107,15 @@ guard()   { run env BASE_SHA="$BASE" bash "$GUARD_SH"; }
   bump client
   commit
   guard
-  [ "$status" -eq 0 ]
+  [ "$status" -eq 0 ] || return 1
 }
 
 @test "client/values.schema.json change without a bump is REJECTED" {
   printf '{"type":"object","required":["x"]}\n' >client/values.schema.json
   commit
   guard
-  [ "$status" -eq 1 ]
-  [[ "$output" == *"client/Chart.yaml 'version:' was NOT bumped"* ]]
+  [ "$status" -eq 1 ] || return 1
+  [[ "$output" == *"client/Chart.yaml 'version:' was NOT bumped"* ]] || return 1
 }
 
 @test "an appVersion-only edit is NOT a version bump" {
@@ -123,7 +123,7 @@ guard()   { run env BASE_SHA="$BASE" bash "$GUARD_SH"; }
   sed -i.bak 's/^appVersion: .*/appVersion: "2.0.0"/' client/Chart.yaml && rm -f client/Chart.yaml.bak
   commit
   guard
-  [ "$status" -eq 1 ]
+  [ "$status" -eq 1 ] || return 1
 }
 
 # ── both charts in one PR ────────────────────────────────────────────────────
@@ -133,9 +133,9 @@ guard()   { run env BASE_SHA="$BASE" bash "$GUARD_SH"; }
   printf 'kind: Job\nnew: true\n'        >ingestor/templates/job.yaml
   commit
   guard
-  [ "$status" -eq 1 ]
-  [[ "$output" == *"client/Chart.yaml 'version:' was NOT bumped"*   ]]
-  [[ "$output" == *"ingestor/Chart.yaml 'version:' was NOT bumped"* ]]
+  [ "$status" -eq 1 ] || return 1
+  [[ "$output" == *"client/Chart.yaml 'version:' was NOT bumped"*   ]] || return 1
+  [[ "$output" == *"ingestor/Chart.yaml 'version:' was NOT bumped"* ]] || return 1
 }
 
 @test "both charts changed, only one bumped: fails naming just the unbumped one" {
@@ -144,9 +144,9 @@ guard()   { run env BASE_SHA="$BASE" bash "$GUARD_SH"; }
   bump client
   commit
   guard
-  [ "$status" -eq 1 ]
-  [[ "$output" == *"client chart content changed and client/Chart.yaml 'version:' was bumped"* ]]
-  [[ "$output" == *"ingestor/Chart.yaml 'version:' was NOT bumped"* ]]
+  [ "$status" -eq 1 ] || return 1
+  [[ "$output" == *"client chart content changed and client/Chart.yaml 'version:' was bumped"* ]] || return 1
+  [[ "$output" == *"ingestor/Chart.yaml 'version:' was NOT bumped"* ]] || return 1
 }
 
 @test "both charts changed and both bumped passes" {
@@ -156,7 +156,7 @@ guard()   { run env BASE_SHA="$BASE" bash "$GUARD_SH"; }
   bump ingestor
   commit
   guard
-  [ "$status" -eq 0 ]
+  [ "$status" -eq 0 ] || return 1
 }
 
 # ── not chart content ────────────────────────────────────────────────────────
@@ -165,8 +165,8 @@ guard()   { run env BASE_SHA="$BASE" bash "$GUARD_SH"; }
   printf '# migration notes\nmore\n' >client/MIGRATION.md
   commit
   guard
-  [ "$status" -eq 0 ]
-  [[ "$output" == *"guard N/A"* ]]
+  [ "$status" -eq 0 ] || return 1
+  [[ "$output" == *"guard N/A"* ]] || return 1
 }
 
 @test "ci/ and tests/ values are packaged but never rendered: N/A" {
@@ -174,16 +174,16 @@ guard()   { run env BASE_SHA="$BASE" bash "$GUARD_SH"; }
   printf 'public: false\n' >client/tests/values-public-images.yaml
   commit
   guard
-  [ "$status" -eq 0 ]
-  [[ "$output" == *"guard N/A"* ]]
+  [ "$status" -eq 0 ] || return 1
+  [[ "$output" == *"guard N/A"* ]] || return 1
 }
 
 @test "a Chart.yaml bump with no content change is N/A, not an error" {
   bump client
   commit
   guard
-  [ "$status" -eq 0 ]
-  [[ "$output" == *"guard N/A"* ]]
+  [ "$status" -eq 0 ] || return 1
+  [[ "$output" == *"guard N/A"* ]] || return 1
 }
 
 # ── the chart list is DERIVED, so a new published chart is guarded on day one ─
@@ -199,8 +199,8 @@ guard()   { run env BASE_SHA="$BASE" bash "$GUARD_SH"; }
   printf 'kind: ConfigMap\nnew: true\n' >extra/templates/cm.yaml
   commit
   guard
-  [ "$status" -eq 1 ]
-  [[ "$output" == *"extra/Chart.yaml 'version:' was NOT bumped"* ]]
+  [ "$status" -eq 1 ] || return 1
+  [[ "$output" == *"extra/Chart.yaml 'version:' was NOT bumped"* ]] || return 1
 }
 
 @test "a chart removed from the release workflow stops being guarded" {
@@ -208,22 +208,22 @@ guard()   { run env BASE_SHA="$BASE" bash "$GUARD_SH"; }
   printf 'kind: Job\nnew: true\n' >ingestor/templates/job.yaml
   commit
   guard
-  [ "$status" -eq 0 ]
-  [[ "$output" == *"guard N/A"* ]]
+  [ "$status" -eq 0 ] || return 1
+  [[ "$output" == *"guard N/A"* ]] || return 1
 }
 
 # ── fail closed: a guard that cannot verify must not claim it did ────────────
 
 @test "missing BASE_SHA fails closed" {
   run env -u BASE_SHA bash "$GUARD_SH"
-  [ "$status" -eq 1 ]
-  [[ "$output" == *"could not determine the PR base SHA"* ]]
+  [ "$status" -eq 1 ] || return 1
+  [[ "$output" == *"could not determine the PR base SHA"* ]] || return 1
 }
 
 @test "unusable BASE_SHA fails closed" {
   run env BASE_SHA=0000000000000000000000000000000000000000 bash "$GUARD_SH"
-  [ "$status" -eq 1 ]
-  [[ "$output" == *"refusing to report N/A without checking"* ]]
+  [ "$status" -eq 1 ] || return 1
+  [[ "$output" == *"refusing to report N/A without checking"* ]] || return 1
 }
 
 @test "an absent release workflow fails closed" {
@@ -231,8 +231,8 @@ guard()   { run env BASE_SHA="$BASE" bash "$GUARD_SH"; }
   printf 'kind: Job\nnew: true\n' >ingestor/templates/job.yaml
   commit
   guard
-  [ "$status" -eq 1 ]
-  [[ "$output" == *"could not read the packaged chart list"* ]]
+  [ "$status" -eq 1 ] || return 1
+  [[ "$output" == *"could not read the packaged chart list"* ]] || return 1
 }
 
 @test "a release workflow that packages nothing fails closed" {
@@ -240,16 +240,16 @@ guard()   { run env BASE_SHA="$BASE" bash "$GUARD_SH"; }
   printf 'kind: Job\nnew: true\n'    >ingestor/templates/job.yaml
   commit
   guard
-  [ "$status" -eq 1 ]
-  [[ "$output" == *"could not read the packaged chart list"* ]]
+  [ "$status" -eq 1 ] || return 1
+  [[ "$output" == *"could not read the packaged chart list"* ]] || return 1
 }
 
 @test "a packaged chart with no Chart.yaml fails closed" {
   seed_workflow './client' './ingestor' './ghost'
   commit
   guard
-  [ "$status" -eq 1 ]
-  [[ "$output" == *"ghost/Chart.yaml does not exist"* ]]
+  [ "$status" -eq 1 ] || return 1
+  [[ "$output" == *"ghost/Chart.yaml does not exist"* ]] || return 1
 }
 
 # ── the SIGPIPE class this guard must never regress into ────────────────────
@@ -265,8 +265,8 @@ guard()   { run env BASE_SHA="$BASE" bash "$GUARD_SH"; }
   commit
   # Prove the list really is past the buffer that flipped the old pipeline.
   bytes="$(git diff --name-only "${BASE}...HEAD" | wc -c)"
-  [ "$bytes" -gt 65622 ]
+  [ "$bytes" -gt 65622 ] || return 1
   guard
-  [ "$status" -eq 1 ]
-  [[ "$output" == *"ingestor/Chart.yaml 'version:' was NOT bumped"* ]]
+  [ "$status" -eq 1 ] || return 1
+  [[ "$output" == *"ingestor/Chart.yaml 'version:' was NOT bumped"* ]] || return 1
 }

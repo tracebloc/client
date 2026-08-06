@@ -361,6 +361,24 @@ tests:
             name: PER_INGESTION_TABLES
             value: "1"
 
+  - it: does not render PER_DATASET_PVCS by default (RFC-0003 D9 Track B knob off)
+    asserts:
+      - notContains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: PER_DATASET_PVCS
+            value: "1"
+
+  - it: renders PER_DATASET_PVCS=1 when perDatasetPvcs is enabled
+    set:
+      perDatasetPvcs: true
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: PER_DATASET_PVCS
+            value: "1"
+
   - it: does not render per-experiment DB-cred env by default (RFC-0003 D10 knob off)
     asserts:
       - notContains:

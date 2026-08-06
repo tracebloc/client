@@ -55,22 +55,22 @@ guard() { run env INDEX_FILE="$IDX" TAG="${TAG:-}" PRERELEASE="${PRERELEASE:-}" 
 
 @test "a stable-only index passes" {
   guard
-  [ "$status" -eq 0 ]
-  [[ "$output" == *"Index invariants hold"* ]]
+  [ "$status" -eq 0 ] || return 1
+  [[ "$output" == *"Index invariants hold"* ]] || return 1
 }
 
 @test "a prerelease-shaped version in the index is REJECTED" {
   seed_index '1.9.9-rc1'
   guard
-  [ "$status" -eq 1 ]
-  [[ "$output" == *"prerelease-shaped versions"* ]]
-  [[ "$output" == *"1.9.9-rc1"* ]]
+  [ "$status" -eq 1 ] || return 1
+  [[ "$output" == *"prerelease-shaped versions"* ]] || return 1
+  [[ "$output" == *"1.9.9-rc1"* ]] || return 1
 }
 
 @test "a hyphen in a chart NAME is not a prerelease version" {
   printf '  my-ingestor-chart:\n  - name: my-ingestor-chart\n    version: 0.2.0\n' >>"$IDX"
   guard
-  [ "$status" -eq 0 ]
+  [ "$status" -eq 0 ] || return 1
 }
 
 @test "a hyphen in a URL is not a prerelease version" {
@@ -78,7 +78,7 @@ guard() { run env INDEX_FILE="$IDX" TAG="${TAG:-}" PRERELEASE="${PRERELEASE:-}" 
   # line; the url lines it skipped are the reason that shape looked safe. Pin
   # that the tightened single-grep form still ignores them.
   guard
-  [ "$status" -eq 0 ]
+  [ "$status" -eq 0 ] || return 1
 }
 
 # ── invariant 2: a prerelease run must not index its own version ─────────────
@@ -86,51 +86,51 @@ guard() { run env INDEX_FILE="$IDX" TAG="${TAG:-}" PRERELEASE="${PRERELEASE:-}" 
 @test "a prerelease run whose version IS indexed is REJECTED" {
   seed_index '2.0.0'
   TAG='v2.0.0' PRERELEASE='true' guard
-  [ "$status" -eq 1 ]
-  [[ "$output" == *"leaked into the public index"* ]]
+  [ "$status" -eq 1 ] || return 1
+  [[ "$output" == *"leaked into the public index"* ]] || return 1
 }
 
 @test "a prerelease run whose version is NOT indexed passes" {
   TAG='v2.0.0-rc1' PRERELEASE='true' guard
-  [ "$status" -eq 0 ]
+  [ "$status" -eq 0 ] || return 1
 }
 
 @test "a STABLE run does not trip invariant 2 on its own indexed version" {
   TAG='v1.9.8' PRERELEASE='false' guard
-  [ "$status" -eq 0 ]
+  [ "$status" -eq 0 ] || return 1
 }
 
 @test "the tag is matched literally, not as a regex" {
   # 1.9x8 must not match the indexed 1.9.8 through a live `.` metacharacter.
   TAG='v1.9x8' PRERELEASE='true' guard
-  [ "$status" -eq 0 ]
+  [ "$status" -eq 0 ] || return 1
 }
 
 # ── fail closed: a guard that cannot check must not claim the index is clean ──
 
 @test "a missing INDEX_FILE fails closed" {
   run env -u INDEX_FILE bash "$GUARD_SH"
-  [ "$status" -eq 1 ]
-  [[ "$output" == *"INDEX_FILE is not set"* ]]
+  [ "$status" -eq 1 ] || return 1
+  [[ "$output" == *"INDEX_FILE is not set"* ]] || return 1
 }
 
 @test "a nonexistent index file fails closed" {
   run env INDEX_FILE="$BATS_TEST_TMPDIR/absent.yaml" bash "$GUARD_SH"
-  [ "$status" -eq 1 ]
-  [[ "$output" == *"does not exist"* ]]
+  [ "$status" -eq 1 ] || return 1
+  [[ "$output" == *"does not exist"* ]] || return 1
 }
 
 @test "an empty index read fails closed" {
   : >"$IDX"
   guard
-  [ "$status" -eq 1 ]
-  [[ "$output" == *"empty read"* ]]
+  [ "$status" -eq 1 ] || return 1
+  [[ "$output" == *"empty read"* ]] || return 1
 }
 
 @test "PRERELEASE=true with no TAG fails closed" {
   TAG='' PRERELEASE='true' guard
-  [ "$status" -eq 1 ]
-  [[ "$output" == *"TAG is empty"* ]]
+  [ "$status" -eq 1 ] || return 1
+  [[ "$output" == *"TAG is empty"* ]] || return 1
 }
 
 @test "grep erroring out (exit >= 2) fails closed, it is not 'no leak'" {
@@ -138,8 +138,8 @@ guard() { run env INDEX_FILE="$IDX" TAG="${TAG:-}" PRERELEASE="${PRERELEASE:-}" 
   printf '#!/usr/bin/env bash\nexit 2\n' >"$BATS_TEST_TMPDIR/bin/grep"
   chmod +x "$BATS_TEST_TMPDIR/bin/grep"
   run env PATH="$BATS_TEST_TMPDIR/bin:$PATH" INDEX_FILE="$IDX" bash "$GUARD_SH"
-  [ "$status" -eq 1 ]
-  [[ "$output" == *"grep exited 2"* ]]
+  [ "$status" -eq 1 ] || return 1
+  [[ "$output" == *"grep exited 2"* ]] || return 1
 }
 
 # ── the SIGPIPE class this guard must never regress into (Bugbot #515) ───────
@@ -148,29 +148,29 @@ guard() { run env INDEX_FILE="$IDX" TAG="${TAG:-}" PRERELEASE="${PRERELEASE:-}" 
   seed_index '2.0.0'          # the match is in the first few hundred bytes...
   pad_index                    # ...and the rest is far past the pipe buffer
   bytes="$(wc -c <"$IDX")"
-  [ "$bytes" -gt 65622 ]       # prove the input really is past the buffer
+  [ "$bytes" -gt 65622 ] || return 1   # prove the input really is past the buffer
   TAG='v2.0.0' PRERELEASE='true' guard
-  [ "$status" -eq 1 ]
-  [[ "$output" == *"leaked into the public index"* ]]
+  [ "$status" -eq 1 ] || return 1
+  [[ "$output" == *"leaked into the public index"* ]] || return 1
 }
 
 @test "a prerelease-shaped version at the TOP of a large index is still caught" {
   seed_index '1.9.9-rc1'
   pad_index
   bytes="$(wc -c <"$IDX")"
-  [ "$bytes" -gt 65622 ]
+  [ "$bytes" -gt 65622 ] || return 1
   guard
-  [ "$status" -eq 1 ]
-  [[ "$output" == *"prerelease-shaped versions"* ]]
+  [ "$status" -eq 1 ] || return 1
+  [[ "$output" == *"prerelease-shaped versions"* ]] || return 1
 }
 
 @test "a large CLEAN index still passes (the fix did not just invert the verdict)" {
   pad_index
   bytes="$(wc -c <"$IDX")"
-  [ "$bytes" -gt 65622 ]
+  [ "$bytes" -gt 65622 ] || return 1
   TAG='v2.0.0' PRERELEASE='true' guard
-  [ "$status" -eq 0 ]
-  [[ "$output" == *"Index invariants hold"* ]]
+  [ "$status" -eq 0 ] || return 1
+  [[ "$output" == *"Index invariants hold"* ]] || return 1
 }
 
 # ── the workflow actually calls the script (extraction stays wired up) ───────
@@ -184,5 +184,5 @@ guard() { run env INDEX_FILE="$IDX" TAG="${TAG:-}" PRERELEASE="${PRERELEASE:-}" 
   # is written in full before grep can close the pipe, so SIGPIPE is
   # unreachable there. The index read is the one that could exceed the buffer.)
   run grep -n '\$idx' "$wf"
-  [ "$status" -eq 1 ]
+  [ "$status" -eq 1 ] || return 1
 }

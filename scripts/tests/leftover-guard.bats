@@ -24,8 +24,8 @@ seed_release_data() { mkdir -p "$HOST_DATA_DIR/tracebloc/data/ds1"; : >"$HOST_DA
 # ── _leftover_data_dirs (detection) ──────────────────────────────────────────
 @test "_leftover_data_dirs: nonexistent HOST_DATA_DIR -> nothing" {
   run _leftover_data_dirs
-  [ "$status" -eq 0 ]
-  [ -z "$output" ]
+  [ "$status" -eq 0 ] || return 1
+  [ -z "$output" ] || return 1
 }
 
 @test "_leftover_data_dirs: empty dirs / values.yaml / log are not data" {
@@ -33,20 +33,20 @@ seed_release_data() { mkdir -p "$HOST_DATA_DIR/tracebloc/data/ds1"; : >"$HOST_DA
   : >"$HOST_DATA_DIR/values.yaml"
   : >"$HOST_DATA_DIR/install-20260101-000000.log"
   run _leftover_data_dirs
-  [ "$status" -eq 0 ]
-  [ -z "$output" ]
+  [ "$status" -eq 0 ] || return 1
+  [ -z "$output" ] || return 1
 }
 
 @test "_leftover_data_dirs: flat mysql data detected" {
   seed_flat_mysql
   run _leftover_data_dirs
-  [[ "$output" == *"$HOST_DATA_DIR/mysql"* ]]
+  [[ "$output" == *"$HOST_DATA_DIR/mysql"* ]] || return 1
 }
 
 @test "_leftover_data_dirs: per-release layout detected" {
   seed_release_data
   run _leftover_data_dirs
-  [[ "$output" == *"$HOST_DATA_DIR/tracebloc/data"* ]]
+  [[ "$output" == *"$HOST_DATA_DIR/tracebloc/data"* ]] || return 1
 }
 
 @test "_leftover_data_dirs: flat MySQL datadir's nested 'mysql' schema is not a second root (#384 bugbot)" {
@@ -57,8 +57,8 @@ seed_release_data() { mkdir -p "$HOST_DATA_DIR/tracebloc/data/ds1"; : >"$HOST_DA
   : >"$HOST_DATA_DIR/mysql/ibdata1"
   : >"$HOST_DATA_DIR/mysql/mysql/user.frm"
   run _leftover_data_dirs
-  [ "$status" -eq 0 ]
-  [ "$output" = "$HOST_DATA_DIR/mysql" ]   # exactly one root; nested schema not double-reported
+  [ "$status" -eq 0 ] || return 1
+  [ "$output" = "$HOST_DATA_DIR/mysql" ] || return 1   # exactly one root; nested schema not double-reported
 }
 
 @test "_leftover_data_dirs: unreadable (root/container-owned) dir is detected, not skipped (#384 bugbot)" {
@@ -67,8 +67,8 @@ seed_release_data() { mkdir -p "$HOST_DATA_DIR/tracebloc/data/ds1"; : >"$HOST_DA
   chmod 000 "$HOST_DATA_DIR/mysql"            # host user can't list it (find errors)
   run _leftover_data_dirs
   chmod 755 "$HOST_DATA_DIR/mysql"            # restore for teardown
-  [ "$status" -eq 0 ]
-  [[ "$output" == *"$HOST_DATA_DIR/mysql"* ]] # detected via find's error, not skipped
+  [ "$status" -eq 0 ] || return 1
+  [[ "$output" == *"$HOST_DATA_DIR/mysql"* ]] || return 1 # detected via find's error, not skipped
 }
 
 @test "_leftover_data_dirs: readable dir with an unreadable subdir is detected (#384 bugbot)" {
@@ -77,8 +77,8 @@ seed_release_data() { mkdir -p "$HOST_DATA_DIR/tracebloc/data/ds1"; : >"$HOST_DA
   chmod 000 "$HOST_DATA_DIR/mysql/sub"        # top readable, subdir not -> find errors
   run _leftover_data_dirs
   chmod 755 "$HOST_DATA_DIR/mysql/sub"        # restore for teardown
-  [ "$status" -eq 0 ]
-  [[ "$output" == *"$HOST_DATA_DIR/mysql"* ]]
+  [ "$status" -eq 0 ] || return 1
+  [[ "$output" == *"$HOST_DATA_DIR/mysql"* ]] || return 1
 }
 
 @test "_leftover_data_dirs: large multi-file MySQL dir detected under pipefail (#384 bugbot)" {
@@ -90,27 +90,27 @@ seed_release_data() { mkdir -p "$HOST_DATA_DIR/tracebloc/data/ds1"; : >"$HOST_DA
   set -o pipefail
   run _leftover_data_dirs
   set +o pipefail
-  [ "$status" -eq 0 ]
-  [[ "$output" == *"$HOST_DATA_DIR/mysql"* ]]
+  [ "$status" -eq 0 ] || return 1
+  [[ "$output" == *"$HOST_DATA_DIR/mysql"* ]] || return 1
 }
 
 # ── guard_leftover_data (decision) ───────────────────────────────────────────
 @test "guard: clean slate -> proceeds silently" {
   run guard_leftover_data
-  [ "$status" -eq 0 ]
+  [ "$status" -eq 0 ] || return 1
 }
 
 @test "guard: TRACEBLOC_SKIP_LEFTOVER_GUARD bypasses even with data present" {
   seed_flat_mysql
   TRACEBLOC_SKIP_LEFTOVER_GUARD=1 run guard_leftover_data
-  [ "$status" -eq 0 ]
-  [ -e "$HOST_DATA_DIR/mysql/ibdata1" ]   # untouched
+  [ "$status" -eq 0 ] || return 1
+  [ -e "$HOST_DATA_DIR/mysql/ibdata1" ] || return 1   # untouched
 }
 
 @test "guard: --reuse-data (TB_LEFTOVER_ACTION=reuse) keeps the data and proceeds" {
   seed_flat_mysql
   TB_LEFTOVER_ACTION=reuse guard_leftover_data
-  [ -e "$HOST_DATA_DIR/mysql/ibdata1" ]   # kept
+  [ -e "$HOST_DATA_DIR/mysql/ibdata1" ] || return 1   # kept
 }
 
 # node-local has no /tracebloc host bind-mount, so "reuse" cannot adopt the host
@@ -119,29 +119,29 @@ seed_release_data() { mkdir -p "$HOST_DATA_DIR/tracebloc/data/ds1"; : >"$HOST_DA
 @test "guard: node-local reuse keeps data on disk but says it is NOT adopted" {
   seed_flat_mysql
   TB_STORAGE_MODE=node-local TB_LEFTOVER_ACTION=reuse run guard_leftover_data
-  [ "$status" -eq 0 ]
-  [ -e "$HOST_DATA_DIR/mysql/ibdata1" ]              # left on disk (not wiped)
-  [[ "$output" == *"can't adopt"* ]]                # honest: not adopted
-  [[ "$output" == *"starts empty"* ]]
-  [[ "$output" != *"keep and adopt the existing data"* ]]
+  [ "$status" -eq 0 ] || return 1
+  [ -e "$HOST_DATA_DIR/mysql/ibdata1" ] || return 1              # left on disk (not wiped)
+  [[ "$output" == *"can't adopt"* ]] || return 1                # honest: not adopted
+  [[ "$output" == *"starts empty"* ]] || return 1
+  [[ "$output" != *"keep and adopt the existing data"* ]] || return 1
 }
 
 @test "guard: node-local interactive reuse ('r') -> honest label, no false adopt claim" {
   seed_flat_mysql
   TB_STORAGE_MODE=node-local TB_TTY=/dev/stdin run guard_leftover_data <<< "r"
-  [ "$status" -eq 0 ]
-  [ -e "$HOST_DATA_DIR/mysql/ibdata1" ]              # kept, not wiped
-  [[ "$output" == *"NOT adopted"* ]]                # honest option label
-  [[ "$output" != *"reuse — keep and adopt the existing data"* ]]
+  [ "$status" -eq 0 ] || return 1
+  [ -e "$HOST_DATA_DIR/mysql/ibdata1" ] || return 1              # kept, not wiped
+  [[ "$output" == *"NOT adopted"* ]] || return 1                # honest option label
+  [[ "$output" != *"reuse — keep and adopt the existing data"* ]] || return 1
 }
 
 # hostpath reuse is unchanged: it still adopts, no node-local warning.
 @test "guard: hostpath reuse still adopts (no node-local 'can't adopt' warning)" {
   seed_flat_mysql
   TB_STORAGE_MODE=hostpath TB_LEFTOVER_ACTION=reuse run guard_leftover_data
-  [ "$status" -eq 0 ]
-  [ -e "$HOST_DATA_DIR/mysql/ibdata1" ]
-  [[ "$output" != *"can't adopt"* ]]
+  [ "$status" -eq 0 ] || return 1
+  [ -e "$HOST_DATA_DIR/mysql/ibdata1" ] || return 1
+  [[ "$output" != *"can't adopt"* ]] || return 1
 }
 
 # The node-local prompt shows "[r] keep …" — the parser must accept the shown
@@ -151,9 +151,9 @@ seed_release_data() { mkdir -p "$HOST_DATA_DIR/tracebloc/data/ds1"; : >"$HOST_DA
   for word in keep k reuse r KEEP Keep K R Reuse; do
     seed_flat_mysql
     TB_STORAGE_MODE=node-local TB_TTY=/dev/stdin run guard_leftover_data <<< "$word"
-    [ "$status" -eq 0 ]                          # continues (reuse action), not abort
-    [ -e "$HOST_DATA_DIR/mysql/ibdata1" ]         # data kept
-    [[ "$output" == *"starts empty"* ]]           # took the honest node-local reuse branch
+    [ "$status" -eq 0 ] || return 1                          # continues (reuse action), not abort
+    [ -e "$HOST_DATA_DIR/mysql/ibdata1" ] || return 1         # data kept
+    [[ "$output" == *"starts empty"* ]] || return 1           # took the honest node-local reuse branch
   done
 }
 
@@ -162,40 +162,40 @@ seed_release_data() { mkdir -p "$HOST_DATA_DIR/tracebloc/data/ds1"; : >"$HOST_DA
 @test "guard: non-interactive node-local --reuse-data guidance is honest (NOT adopted)" {
   seed_flat_mysql
   TB_STORAGE_MODE=node-local TB_TTY=/no/such/tty run guard_leftover_data
-  [ "$status" -eq 1 ]
-  [[ "$output" == *"no choice was given"* ]]
-  [[ "$output" == *"NOT adopted"* ]]              # honest --reuse-data description
-  [[ "$output" != *"--reuse-data                    adopt the existing data"* ]]
-  [ -e "$HOST_DATA_DIR/mysql/ibdata1" ]           # fail-safe: data untouched
+  [ "$status" -eq 1 ] || return 1
+  [[ "$output" == *"no choice was given"* ]] || return 1
+  [[ "$output" == *"NOT adopted"* ]] || return 1              # honest --reuse-data description
+  [[ "$output" != *"--reuse-data                    adopt the existing data"* ]] || return 1
+  [ -e "$HOST_DATA_DIR/mysql/ibdata1" ] || return 1           # fail-safe: data untouched
 }
 
 @test "guard: non-interactive hostpath --reuse-data still says 'adopt' (unchanged)" {
   seed_flat_mysql
   TB_STORAGE_MODE=hostpath TB_TTY=/no/such/tty run guard_leftover_data
-  [ "$status" -eq 1 ]
-  [[ "$output" == *"adopt the existing data"* ]]
+  [ "$status" -eq 1 ] || return 1
+  [[ "$output" == *"adopt the existing data"* ]] || return 1
 }
 
 @test "guard: --wipe-data (TB_LEFTOVER_ACTION=wipe) removes the detected data dirs" {
   seed_flat_mysql
   seed_release_data
   TB_LEFTOVER_ACTION=wipe guard_leftover_data
-  [ ! -e "$HOST_DATA_DIR/mysql/ibdata1" ]
-  [ ! -e "$HOST_DATA_DIR/tracebloc/data/ds1/rows.csv" ]
+  [ ! -e "$HOST_DATA_DIR/mysql/ibdata1" ] || return 1
+  [ ! -e "$HOST_DATA_DIR/tracebloc/data/ds1/rows.csv" ] || return 1
 }
 
 @test "_wipe_leftover_data: refuses when HOST_DATA_DIR is empty (#384 wipe-safety)" {
   HOST_DATA_DIR=""
   run _wipe_leftover_data "/some/path/mysql"
-  [ "$status" -ne 0 ]
-  [[ "$output" == *"Refusing to wipe"* ]]
+  [ "$status" -ne 0 ] || return 1
+  [[ "$output" == *"Refusing to wipe"* ]] || return 1
 }
 
 @test "_wipe_leftover_data: refuses when HOST_DATA_DIR is outside \$HOME (#384 wipe-safety)" {
   HOST_DATA_DIR="/var/tmp/evil"
   run _wipe_leftover_data "/var/tmp/evil/mysql"
-  [ "$status" -ne 0 ]
-  [[ "$output" == *"Refusing to wipe"* ]]
+  [ "$status" -ne 0 ] || return 1
+  [[ "$output" == *"Refusing to wipe"* ]] || return 1
 }
 
 @test "guard: wipe that cannot remove data fails closed, does not adopt (#384 bugbot)" {
@@ -204,9 +204,9 @@ seed_release_data() { mkdir -p "$HOST_DATA_DIR/tracebloc/data/ds1"; : >"$HOST_DA
   chmod a-w "$HOST_DATA_DIR/mysql"            # make ibdata1 unremovable
   TB_LEFTOVER_ACTION=wipe TB_TTY=/dev/null run guard_leftover_data
   chmod u+w "$HOST_DATA_DIR/mysql"            # restore so teardown can clean up
-  [ "$status" -eq 1 ]                          # aborted, did not proceed
-  [[ "$output" == *"Could not fully wipe"* ]]
-  [ -e "$HOST_DATA_DIR/mysql/ibdata1" ]        # survivor NOT silently adopted
+  [ "$status" -eq 1 ] || return 1                          # aborted, did not proceed
+  [[ "$output" == *"Could not fully wipe"* ]] || return 1
+  [ -e "$HOST_DATA_DIR/mysql/ibdata1" ] || return 1        # survivor NOT silently adopted
 }
 
 @test "_leftover_data_dirs: symlinked subdir is not a wipeable candidate (#384 bugbot)" {
@@ -214,8 +214,8 @@ seed_release_data() { mkdir -p "$HOST_DATA_DIR/tracebloc/data/ds1"; : >"$HOST_DA
   local target="$BATS_TEST_TMPDIR/outside"; mkdir -p "$target/mysql"; : >"$target/mysql/ibdata1"
   ln -s "$target" "$HOST_DATA_DIR/evil"       # $HOST_DATA_DIR/evil -> outside the data dir
   run _leftover_data_dirs
-  [ "$status" -eq 0 ]
-  [[ "$output" != *"/evil/"* ]]               # symlink not walked into a candidate
+  [ "$status" -eq 0 ] || return 1
+  [[ "$output" != *"/evil/"* ]] || return 1               # symlink not walked into a candidate
 }
 
 @test "_wipe_leftover_data: refuses to delete a symlink, target preserved (#384 bugbot)" {
@@ -223,9 +223,9 @@ seed_release_data() { mkdir -p "$HOST_DATA_DIR/tracebloc/data/ds1"; : >"$HOST_DA
   local target="$BATS_TEST_TMPDIR/outside"; mkdir -p "$target"; : >"$target/keep"
   ln -s "$target" "$HOST_DATA_DIR/link"
   run _wipe_leftover_data "$HOST_DATA_DIR/link"
-  [ "$status" -ne 0 ]
-  [ -e "$target/keep" ]                        # target outside HOST_DATA_DIR untouched
-  [ -L "$HOST_DATA_DIR/link" ]                  # symlink itself left for the user
+  [ "$status" -ne 0 ] || return 1
+  [ -e "$target/keep" ] || return 1                        # target outside HOST_DATA_DIR untouched
+  [ -L "$HOST_DATA_DIR/link" ] || return 1                  # symlink itself left for the user
 }
 
 @test "guard: wipe never touches HOST_DATASET_DIR (shared mount)" {
@@ -233,16 +233,16 @@ seed_release_data() { mkdir -p "$HOST_DATA_DIR/tracebloc/data/ds1"; : >"$HOST_DA
   HOST_DATASET_DIR="$BATS_TEST_TMPDIR/netmount"
   mkdir -p "$HOST_DATASET_DIR/data"; : >"$HOST_DATASET_DIR/data/keep.csv"
   TB_LEFTOVER_ACTION=wipe guard_leftover_data
-  [ ! -e "$HOST_DATA_DIR/mysql/ibdata1" ]     # local data wiped
-  [ -e "$HOST_DATASET_DIR/data/keep.csv" ]    # network mount preserved
+  [ ! -e "$HOST_DATA_DIR/mysql/ibdata1" ] || return 1     # local data wiped
+  [ -e "$HOST_DATASET_DIR/data/keep.csv" ] || return 1    # network mount preserved
 }
 
 @test "guard: no terminal + no action -> fail-safe abort (exit 1, data untouched)" {
   seed_flat_mysql
   TB_TTY=/no/such/tty run guard_leftover_data
-  [ "$status" -eq 1 ]
-  [[ "$output" == *"no choice was given"* ]]
-  [ -e "$HOST_DATA_DIR/mysql/ibdata1" ]   # abort leaves data as-is
+  [ "$status" -eq 1 ] || return 1
+  [[ "$output" == *"no choice was given"* ]] || return 1
+  [ -e "$HOST_DATA_DIR/mysql/ibdata1" ] || return 1   # abort leaves data as-is
 }
 
 @test "guard: readable-but-unopenable TB_TTY -> non-interactive guidance, not generic abort (#384 bugbot)" {
@@ -255,31 +255,31 @@ seed_release_data() { mkdir -p "$HOST_DATA_DIR/tracebloc/data/ds1"; : >"$HOST_DA
   { : </dev/tty; } 2>/dev/null && skip "/dev/tty is openable here (interactive shell)"
   seed_flat_mysql
   TB_TTY=/dev/tty run guard_leftover_data
-  [ "$status" -eq 1 ]
-  [[ "$output" == *"no choice was given"* ]]   # non-interactive guidance, not generic abort
-  [ -e "$HOST_DATA_DIR/mysql/ibdata1" ]          # fail-safe: data untouched
+  [ "$status" -eq 1 ] || return 1
+  [[ "$output" == *"no choice was given"* ]] || return 1   # non-interactive guidance, not generic abort
+  [ -e "$HOST_DATA_DIR/mysql/ibdata1" ] || return 1          # fail-safe: data untouched
 }
 
 # ── interactive prompt (input fed via TB_TTY=/dev/stdin) ─────────────────────
 @test "guard: interactive 'w' wipes" {
   seed_flat_mysql
   TB_TTY=/dev/stdin run guard_leftover_data <<< "w"
-  [ "$status" -eq 0 ]
-  [ ! -e "$HOST_DATA_DIR/mysql/ibdata1" ]
+  [ "$status" -eq 0 ] || return 1
+  [ ! -e "$HOST_DATA_DIR/mysql/ibdata1" ] || return 1
 }
 
 @test "guard: interactive 'a' (and unrecognised input) aborts" {
   seed_flat_mysql
   TB_TTY=/dev/stdin run guard_leftover_data <<< "a"
-  [ "$status" -eq 1 ]
-  [ -e "$HOST_DATA_DIR/mysql/ibdata1" ]
+  [ "$status" -eq 1 ] || return 1
+  [ -e "$HOST_DATA_DIR/mysql/ibdata1" ] || return 1
 }
 
 @test "guard: interactive default (empty input) aborts" {
   seed_flat_mysql
   TB_TTY=/dev/stdin run guard_leftover_data <<< ""
-  [ "$status" -eq 1 ]
-  [ -e "$HOST_DATA_DIR/mysql/ibdata1" ]
+  [ "$status" -eq 1 ] || return 1
+  [ -e "$HOST_DATA_DIR/mysql/ibdata1" ] || return 1
 }
 
 # ── input sanitizing (#384 bugbot: paste garbage + whitespace) ───────────────
@@ -287,20 +287,20 @@ seed_release_data() { mkdir -p "$HOST_DATA_DIR/tracebloc/data/ds1"; : >"$HOST_DA
   TB_TTY=/dev/stdin
   local got="unset"
   _read_sanitized "" got <<< "$(printf ' \033[Dhello world ')"
-  [ "$got" = "hello world" ]
+  [ "$got" = "hello world" ] || return 1
 }
 
 @test "_read_sanitized: whitespace-only input -> empty" {
   TB_TTY=/dev/stdin
   local got="unset"
   _read_sanitized "" got <<< "   "
-  [ -z "$got" ]
+  [ -z "$got" ] || return 1
 }
 
 @test "guard: new-dir choice with whitespace-only path aborts (#384 bugbot)" {
   seed_flat_mysql
   TB_LEFTOVER_ACTION=newdir TB_TTY=/dev/stdin run guard_leftover_data <<< "   "
-  [ "$status" -eq 1 ]
-  [[ "$output" == *"No new directory given"* ]]
-  [ -e "$HOST_DATA_DIR/mysql/ibdata1" ]   # untouched
+  [ "$status" -eq 1 ] || return 1
+  [[ "$output" == *"No new directory given"* ]] || return 1
+  [ -e "$HOST_DATA_DIR/mysql/ibdata1" ] || return 1   # untouched
 }

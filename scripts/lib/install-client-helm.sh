@@ -152,10 +152,30 @@ _yaml_sq_unescape() {                    # body of a '...' scalar -> raw value
   printf '%s' "${1//$_sq$_sq/$_sq}"
 }
 
+# _extract_yaml_value — value of top-level scalar key $2 in values file $1.
+# CONTRACT: echoes nothing and returns 0 when the key is absent (or the file is
+# unreadable). Callers rely on "empty means no value"; they must not have to
+# distinguish absent-key from read-error, and none of them do.
 _extract_yaml_value() {
   local file="$1" key="$2"
   local line
-  line=$(grep -E "^${key}:" "$file" 2>/dev/null | head -1)
+  # `|| line=""`: on an ABSENT key grep exits 1 and, under `set -o pipefail`,
+  # that rc propagates out of the pipeline and out of the assignment — so under
+  # `set -e` the installer would abort HERE and never reach the empty-check on
+  # the next line, the very line that exists to handle "key not found" (#523).
+  # Latent until now only because every call site wraps this in `$( )`, which
+  # suspends errexit for the function body; a bare call aborts the install
+  # mid-step. Same house idiom as assess.sh / common.sh `_chart_version`.
+  #
+  # NO `| head -1` on the pipeline: with head in play, a DUPLICATE key makes
+  # head exit after the first line and SIGPIPE grep (141) — and under pipefail
+  # `|| line=""` would then wipe the successfully captured value, so
+  # detect_installed_client could miss a clientId and fail open toward
+  # overwrite (Bugbot, #525). Capture every match, then take the first line in
+  # the shell, where nothing can signal anything: grep's rc is 1 only when
+  # there is genuinely no match.
+  line=$(grep -E "^${key}:" "$file" 2>/dev/null) || line=""
+  line="${line%%$'\n'*}"
   [[ -z "$line" ]] && return
   line="${line#*:}"
   line="${line#"${line%%[![:space:]]*}"}"
@@ -354,6 +374,55 @@ _chart_proxy_env_yaml() {
   # cluster-internal bypass list (mirrors cluster.sh's node-side _augment_no_proxy).
   local hostnp="${NO_PROXY:-${no_proxy:-}}"
   [[ -n "$hostnp" ]] && printf '\n  NO_PROXY: "%s"' "$hostnp"
+  return 0
+}
+
+# _image_mirror_yaml — emit the top-level chart values that point every image the
+# chart pulls at a private registry mirror (#585 / restricted-network installs).
+# TRACEBLOC_IMAGE_REGISTRY sets global.imageRegistry: the chart's
+# global.imageRegistry convention re-homes tracebloc/*, the spawned ingestor and
+# training-job images, and the alpine/* + ubuntu/squid utility images onto that
+# host, so an air-gapped / mirror-only network pulls nothing from a public
+# registry. When the mirror needs authentication, TRACEBLOC_REGISTRY_USERNAME /
+# TRACEBLOC_REGISTRY_PASSWORD also mint the chart's imagePullSecret
+# (dockerRegistry), whose server defaults to the mirror host. Emits nothing when
+# no mirror is configured, so a default install's values are unchanged.
+_image_mirror_yaml() {
+  local mirror="${TRACEBLOC_IMAGE_REGISTRY:-}"
+  local reg_user="${TRACEBLOC_REGISTRY_USERNAME:-}"
+  local reg_pass="${TRACEBLOC_REGISTRY_PASSWORD:-}"
+  [[ -z "$mirror" && -z "$reg_user" && -z "$reg_pass" ]] && return 0
+
+  # global.imageRegistry is a BARE host (mirror.corp.example[:port]) — it becomes the
+  # prefix of every image reference, so strip a pasted scheme to keep <host>/repo
+  # well-formed.
+  local mirror_host="${mirror#*://}"
+
+  if [[ -n "$mirror_host" ]]; then
+    printf '\nglobal:\n  imageRegistry: '\''%s'\''\n' "$(_yaml_sq_escape "$mirror_host")"
+  fi
+  if [[ -n "$reg_user" || -n "$reg_pass" ]]; then
+    # dockerRegistry.server is the imagePullSecret's auths key and the chart schema
+    # REQUIRES it whenever create is true (format:uri), so it must ALWAYS be
+    # emitted here. Precedence: an explicit TRACEBLOC_REGISTRY_SERVER wins (e.g. a
+    # registry whose auth realm differs from the image host); else derive
+    # https://<mirror-host> when a mirror is set; else fall back to Docker Hub so
+    # creds-only (authenticate to docker.io, no mirror) still renders a valid
+    # secret instead of a schema error.
+    local server="${TRACEBLOC_REGISTRY_SERVER:-}"
+    if [[ -z "$server" ]]; then
+      if [[ -n "$mirror_host" ]]; then
+        server="https://$mirror_host"
+      else
+        server="https://index.docker.io/v1/"
+      fi
+    fi
+    printf '\ndockerRegistry:\n  create: true\n'
+    printf '  server: '\''%s'\''\n' "$(_yaml_sq_escape "$server")"
+    printf '  username: '\''%s'\''\n' "$(_yaml_sq_escape "$reg_user")"
+    printf '  password: '\''%s'\''\n' "$(_yaml_sq_escape "$reg_pass")"
+    printf '  email: '\''%s'\''\n' "$(_yaml_sq_escape "${TRACEBLOC_REGISTRY_EMAIL:-}")"
+  fi
   return 0
 }
 
@@ -844,6 +913,15 @@ install_client_helm() {
   proxy_env_yaml="$(_chart_proxy_env_yaml)"
   [[ -n "$proxy_env_yaml" ]] && log "Corporate proxy detected on host — propagating to client workloads via chart values."
 
+  # Private registry mirror (#585): re-home every image onto TRACEBLOC_IMAGE_REGISTRY
+  # for restricted-network / air-gapped installs. Empty when unset (values unchanged).
+  local image_mirror_yaml
+  image_mirror_yaml="$(_image_mirror_yaml)"
+  if [[ -n "${TRACEBLOC_IMAGE_REGISTRY:-}" ]]; then
+    log "Image registry mirror configured — pulling all images from ${TRACEBLOC_IMAGE_REGISTRY}."
+    [[ -n "${TRACEBLOC_REGISTRY_USERNAME:-}" ]] && log "Mirror credentials provided — minting an imagePullSecret for the mirror."
+  fi
+
   # backend#1236 (option A): size the default training budget to this machine.
   local training_size
   training_size="$(_training_resources)"
@@ -906,7 +984,7 @@ pvc:
 pvcAccessMode: ReadWriteOnce
 
 clusterScope: true
-
+${image_mirror_yaml}
 clientId: '$TB_CLIENT_ID_ESCAPED'
 clientPassword: '$TB_CLIENT_PASSWORD_ESCAPED'
 

@@ -5,9 +5,21 @@
 # Platform-specific behaviour is controlled by the values below.
 # Use per-environment value files (e.g. ci/aks-values.yaml) to override.
 
+# -- Cross-cutting settings shared by all sub-resources.
+global:
+  # Private registry mirror for restricted-network / air-gapped installs (#585).
+  # A BARE host (no scheme), e.g. "mirror.corp.example" or "mirror.corp.example:5000".
+  # When set, EVERY image the chart pulls is re-homed onto this host — the
+  # tracebloc services, the spawned ingestor + training-job images, and the
+  # alpine/*, ubuntu/squid, busybox, curl helper images — which must already host
+  # the same repositories + tags/digests. Unset (the default) pulls tracebloc/*
+  # and the helper images from docker.io and the ingestor from ghcr.io. If the
+  # mirror needs authentication, also set dockerRegistry below. The standalone
+  # installer writes this from TRACEBLOC_IMAGE_REGISTRY. See docs/INSTALL.md.
+  imageRegistry: ""
+
 # -- Environment variables passed to containers
 env: {
-  # CLIENT_ENV: prod
   # Optional proxy settings
   # HTTP_PROXY_HOST: ""
   # HTTP_PROXY_PORT: ""
@@ -788,6 +800,27 @@ imageRefresh:
 # phase 2) — row-only categories (tabular / time-series) are the v1 target.
 # Default false: legacy shared label-named tables, byte-for-byte.
 perIngestionTables: false
+
+# ============================================================
+# Per-dataset PVC mounts (RFC-0003 D9 Track B — client-runtime#203 / #261)
+# ============================================================
+# When true, jobs-manager stamps PER_DATASET_PVCS=1 into its own environment:
+# each spawned training pod then gets one dedicated READ-ONLY hostPath PV/PVC
+# per dataset handle, mounted at /data/shared/<handle>, and the shared data
+# volume is removed from the pod entirely — the mount table references only
+# the pod's own dataset(s), so no other dataset on the edge is even nameable.
+# Off (default), training pods keep the subPath-scoped view of the shared PVC
+# (Track A) — that is also the rollback: flip off and pods revert on the next
+# spawn; the static PV/PVCs left behind are garbage-collected by jobs-manager.
+#
+# Effective only on single-node/hostPath clusters (node-local Option C,
+# client#368): on elastic clusters the runtime logs a warning and falls back
+# to subPath scoping. Requires clusterScope (the default): PersistentVolumes
+# are cluster-scoped, so the namespaced Role cannot grant them — rendering
+# fails on the invalid combination rather than letting Job spawns 403.
+# Grants jobs-manager PV/PVC provisioning + GC verbs only while on (see
+# templates/rbac.yaml). Default false: byte-for-byte identical rendering.
+perDatasetPvcs: false
 
 # ============================================================
 # Per-experiment DB credentials (RFC-0003 D10 — backend#1181)

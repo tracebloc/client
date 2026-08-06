@@ -50,7 +50,7 @@ spec:
             entry). `dig` is not usable here — it rejects chartutil.Values.
           */}}
           {{- $rmDigest := (default (dict) (default (dict) .Values.images).resourceMonitor).digest | default "" }}
-          image: {{ include "tracebloc.image" (dict "repository" "tracebloc/resource-monitor" "tag" .Values.env.CLIENT_ENV "digest" $rmDigest "registry" "docker.io") | quote }}
+          image: {{ include "tracebloc.image" (dict "repository" "tracebloc/resource-monitor" "tag" .Values.env.CLIENT_ENV "digest" $rmDigest "registry" (dig "imageRegistry" "docker.io" (.Values.global | default dict))) | quote }}
           imagePullPolicy: {{ if $rmDigest }}IfNotPresent{{ else }}Always{{ end }}
           securityContext:
             allowPrivilegeEscalation: false

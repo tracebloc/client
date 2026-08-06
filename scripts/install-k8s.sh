@@ -191,6 +191,14 @@ main() {
 
   print_roadmap
 
+  # Trust an explicit corporate CA across every host tool (cosign/helm/git/curl)
+  # BEFORE preflight's HTTPS probes and any tool download, so a TLS-inspecting proxy
+  # is handled end-to-end (#583). Guarded so a stale bootstrap without the helper
+  # proceeds as before (same pattern as the assess/early_data_dir gates).
+  if declare -F wire_ca_trust >/dev/null 2>&1; then
+    wire_ca_trust
+  fi
+
   # ── a) Check your machine ────────────────────────────────────────────────
   step_header a "Checking your machine"
   run_preflight
@@ -229,8 +237,13 @@ main() {
   # ── c) Create your secure environment ────────────────────────────────────
   step_header c "Creating your secure environment"
   create_cluster
-  deploy_gpu_device_plugin
-  verify_gpu
+  # Only verify the GPU on the node when the device plugin actually deployed; a
+  # failed/CPU-mode deploy returns non-zero, so skipping verify avoids a ~90s wait
+  # and a contradictory "still initializing" warning for a plugin never applied
+  # (Bugbot). The `if` also keeps a non-zero deploy from tripping set -e.
+  if deploy_gpu_device_plugin; then
+    verify_gpu
+  fi
   echo ""; echo ""
 
   # ── d) Register this machine ─────────────────────────────────────────────

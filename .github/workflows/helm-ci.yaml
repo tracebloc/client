@@ -8,6 +8,8 @@ on:
       - 'ingestor/**'
       - 'scripts/tests/e2e-auto-upgrade.sh'
       - 'scripts/tests/e2e-seal-check.sh'
+      - 'scripts/tests/e2e-full-seal.sh'
+      - 'scripts/tests/lib/e2e-common.sh'
       - 'scripts/lib/**'
       - '.github/workflows/helm-ci.yaml'
   pull_request:
@@ -17,8 +19,13 @@ on:
       - 'ingestor/**'
       - 'scripts/tests/e2e-auto-upgrade.sh'
       - 'scripts/tests/e2e-seal-check.sh'
+      - 'scripts/tests/e2e-full-seal.sh'
+      - 'scripts/tests/lib/e2e-common.sh'
       - 'scripts/lib/**'
       - '.github/workflows/helm-ci.yaml'
+  # Manual runs — mainly to fire full-seal-e2e on demand (e.g. right after the
+  # e2e-test-agent secrets are provisioned, or to re-record a seal run).
+  workflow_dispatch:
 
 concurrency:
   # Cancel superseded runs on PRs — this is the repo's heaviest workflow
@@ -33,10 +40,10 @@ jobs:
     name: Helm lint
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Set up Helm
-        uses: azure/setup-helm@v4
+        uses: azure/setup-helm@1a275c3b69536ee54be43f2070a358922e12c8d4 # v4.3.1
         with:
           version: v3.15.4
 
@@ -72,10 +79,10 @@ jobs:
       KUBECONFORM_VERSION: "0.8.0"
       KUBECONFORM_SHA256: "9bc2bffbf71f261128533edaf912153948b7ff238f9a531ae6d34466ec287883"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Set up Helm
-        uses: azure/setup-helm@v4
+        uses: azure/setup-helm@1a275c3b69536ee54be43f2070a358922e12c8d4 # v4.3.1
         with:
           version: v3.15.4
 
@@ -109,8 +116,10 @@ jobs:
           TARBALL="kubeconform-linux-amd64.tar.gz"
           URL="https://github.com/yannh/kubeconform/releases/download/v${KUBECONFORM_VERSION}/${TARBALL}"
           # -f so an HTTP error is a curl failure rather than an error page
-          # written to disk and handed to sha256sum.
-          curl -fsSL --retry 3 --retry-delay 2 -o "$RUNNER_TEMP/$TARBALL" "$URL"
+          # written to disk and handed to sha256sum. --connect-timeout/--max-time
+          # bound the download so a stalled endpoint fails the step fast instead of
+          # hanging the template matrix to the GitHub Actions cap (backend#1497).
+          curl -fsSL --retry 3 --retry-delay 2 --connect-timeout 15 --max-time 120 -o "$RUNNER_TEMP/$TARBALL" "$URL"
           # Any mismatch exits non-zero here, and `set -e` fails the step before
           # the binary is extracted or placed on PATH.
           echo "${KUBECONFORM_SHA256}  $RUNNER_TEMP/$TARBALL" | sha256sum -c -
@@ -131,10 +140,10 @@ jobs:
     name: Helm unit tests
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Set up Helm
-        uses: azure/setup-helm@v4
+        uses: azure/setup-helm@1a275c3b69536ee54be43f2070a358922e12c8d4 # v4.3.1
         with:
           version: v3.15.4
 
@@ -160,7 +169,7 @@ jobs:
     name: Spawned ingestor image is multi-arch
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - name: Assert the ingestor tag and pinned digests are multi-arch
         run: |
           repo=$(yq '.images.ingestor.repository' client/values.yaml)
@@ -233,7 +242,7 @@ jobs:
     name: Fleet auto-upgrade E2E (k3d)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - name: Upgrade from last published release through both flag paths
         run: bash scripts/tests/e2e-auto-upgrade.sh
 
@@ -252,9 +261,45 @@ jobs:
     name: Seal-check egress-enforcement (k3d)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - name: Run the live egress-enforcement seal-check
         run: bash scripts/tests/e2e-seal-check.sh
+
+  full-seal-e2e:
+    # backend#1184 deferred fast-follow: the FULL seal suite — egress-
+    # enforcement + backend-reachability + bound-PVC storage-assertions — on a
+    # real k3d cluster installed against the DEV backend as the dedicated
+    # e2e-test-agent client. Real credentials, so it runs on push/dispatch
+    # only, never on PRs: fork PRs can't read the secrets anyway, and a real
+    # dev-backend login per PR push would be platform churn + runner cost for
+    # no extra signal (the secret-free enforcement probe above covers PRs).
+    # Until the secrets are provisioned the job SKIPS green with a notice —
+    # see docs/SEAL-CHECK.md § Full-suite dev harness.
+    if: github.event_name != 'pull_request'
+    # 45m, deliberately above the sibling's 30m: this script stacks a 300s PVC
+    # wait, two 300s rollouts and a 600s unfiltered helm test on top of
+    # create_cluster's 15m bound — a slow-but-healthy run must not be killed
+    # by GHA while inside every one of its own timeouts (Bugbot).
+    timeout-minutes: 45
+    # One dev-agent session at a time: two clusters authenticating as the same
+    # client id would read as a duplicate/capacity anomaly on the platform.
+    concurrency:
+      group: full-seal-e2e-dev-agent
+      cancel-in-progress: false
+    name: Full seal suite vs dev (e2e-test-agent)
+    runs-on: ubuntu-latest
+    env:
+      TB_E2E_CLIENT_ID: ${{ secrets.TB_E2E_CLIENT_ID }}
+      TB_E2E_CLIENT_PASSWORD: ${{ secrets.TB_E2E_CLIENT_PASSWORD }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: Run the full seal suite (skips until the e2e-test-agent is provisioned)
+        run: |
+          if [ -z "$TB_E2E_CLIENT_ID" ] || [ -z "$TB_E2E_CLIENT_PASSWORD" ]; then
+            echo "::notice::TB_E2E_CLIENT_ID / TB_E2E_CLIENT_PASSWORD are not set — skipping the full seal suite. Provision the dedicated dev e2e-test-agent client and add both repo Actions secrets to activate this job (backend#1184 residual; docs/SEAL-CHECK.md)."
+            exit 0
+          fi
+          bash scripts/tests/e2e-full-seal.sh
 
   # Installer script tests (bats + Pester) + the cross-distro prerequisite matrix
   # live in their own workflow: .github/workflows/installer-tests.yaml

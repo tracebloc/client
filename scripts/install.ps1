@@ -116,7 +116,7 @@ function Resolve-InstallRef {
       Warn "production box. A moved ref here can run arbitrary privileged code."
       Warn "============================================================================"
     } else {
-      throw "'$ref' is not an immutable release tag (expected vX.Y.Z). The bootstrap only trusts content-addressable release tags so a moved branch ref can't change what runs as Administrator on your box (RFC-0001 R8). Use a release tag, or for local dev set `$env:TRACEBLOC_ALLOW_UNVERIFIED = '1'`."
+      throw "'$ref' is not an immutable release tag (expected vX.Y.Z). The bootstrap only trusts content-addressable release tags so a moved branch ref can't change what runs as Administrator on your box. Use a release tag, or for local dev set `$env:TRACEBLOC_ALLOW_UNVERIFIED = '1'`."
     }
   }
 
@@ -125,7 +125,7 @@ function Resolve-InstallRef {
   # A '/' or '..' here is a path-traversal lever (it could escape the pinned tag
   # onto a mutable branch) — independent of which branch above let it through.
   if ($ref -match '/' -or $ref -match '\.\.') {
-    throw "Ref '$ref' contains a path separator or '..' -- refusing to build a fetch URL from it (path-traversal guard, RFC-0001 R8)."
+    throw "Ref '$ref' contains a path separator or '..' -- refusing to build a fetch URL from it (path-traversal guard)."
   }
 
   return $ref
@@ -308,6 +308,30 @@ function Resolve-Cosign {
   return $bin
 }
 
+# Run cosign verify-blob with the fail-closed sentinel + stderr suppression, returning
+# $true iff it verified. Shared by Confirm-ManifestSignature's offline-bundle and online
+# sig/cert paths so the hardening lives in ONE place:
+#  - $LASTEXITCODE is seeded to a NONZERO sentinel first, so a cosign that returns
+#    WITHOUT setting it (corrupt / AV-quarantined / wrong exec format) fails closed,
+#    never a stale 0 read as "verified".
+#  - stderr is merged to stdout and discarded: a native tool writing to stderr would
+#    otherwise surface as a NativeCommandError dumping this script's source line +
+#    internal identifiers into the console/transcript (#576).
+function Invoke-CosignVerifyBlob {
+  param([Parameter(Mandatory)][string]$Cosign, [Parameter(Mandatory)][string[]]$VerifyArgs)
+  $global:LASTEXITCODE = 255
+  $prevEAP = $ErrorActionPreference
+  try {
+    $ErrorActionPreference = 'Continue'
+    & $Cosign @VerifyArgs 2>&1 | Out-Null
+  } catch {
+    return $false
+  } finally {
+    $ErrorActionPreference = $prevEAP
+  }
+  return ($LASTEXITCODE -eq 0)
+}
+
 # Authenticate manifest.sha256 with cosign keyless before trusting a single digest
 # in it. The signing identity is the client release workflow's OIDC certificate
 # (same chain as install.sh + the CLI binary). Fail-closed unless the operator
@@ -319,14 +343,58 @@ function Confirm-ManifestSignature {
     [string]$TmpDir,
     [bool]$AllowUnverified
   )
+  # An explicit corporate CA can't be wired into cosign via env on Windows: cosign is
+  # Go, and Go on Windows reads the certificate store and IGNORES SSL_CERT_FILE
+  # (Bugbot). So there's nothing to export here — the CA must live in the Windows
+  # store (Cert:\LocalMachine\Root), or use the offline installer path (#584).
+  # We still validate the path so a typo fails fast with a clear message rather than
+  # a later generic cosign authenticity error.
+  $ca = if ($env:TRACEBLOC_CA_BUNDLE) { $env:TRACEBLOC_CA_BUNDLE } elseif ($env:CURL_CA_BUNDLE) { $env:CURL_CA_BUNDLE } else { $null }
+  if ($ca) {
+    if (-not (Test-Path -LiteralPath $ca -PathType Leaf)) {
+      throw "A CA bundle is set (TRACEBLOC_CA_BUNDLE/CURL_CA_BUNDLE) but no such file exists at '$ca' - fix its path and re-run."
+    }
+    # Existence isn't enough: a present-but-unreadable file must fail here too (mirrors
+    # bash's -r and Resolve-CaBundle), not as a later generic cosign error (Bugbot).
+    try { [System.IO.File]::OpenRead($ca).Dispose() }
+    catch { throw "A CA bundle is set (TRACEBLOC_CA_BUNDLE/CURL_CA_BUNDLE) but '$ca' can't be read ($($_.Exception.Message)) - fix its permissions and re-run." }
+  }
+
   $cosign = Resolve-Cosign -TmpDir $TmpDir
   if (-not $cosign) {
     if ($AllowUnverified) {
-      Warn "cosign unavailable -- manifest signature NOT verified (TRACEBLOC_ALLOW_UNVERIFIED=1)."
+      Warn "cosign unavailable -- the installer's signature NOT verified (TRACEBLOC_ALLOW_UNVERIFIED=1)."
       Warn "Proceeding on checksum-only integrity. Not for production."
       return
     }
-    throw "cosign is required to verify the installer's signed manifest and couldn't be found or bootstrapped. Refusing to fall back to an unauthenticated, same-channel checksum (RFC-0001 R8). Fix: install cosign (https://docs.sigstore.dev/cosign/installation/) and re-run, or for local development only set `$env:TRACEBLOC_ALLOW_UNVERIFIED = '1'`."
+    throw "cosign is required to verify the installer's signature and couldn't be found or bootstrapped. Refusing to fall back to an unauthenticated, same-channel checksum. Fix: install cosign (https://docs.sigstore.dev/cosign/installation/) and re-run, or for local development only set `$env:TRACEBLOC_ALLOW_UNVERIFIED = '1'`."
+  }
+
+  # The keyless signing identity: the release workflow's OIDC cert. SAME pins as
+  # install.sh; shared by both verification paths below.
+  $idRe   = 'https://github.com/tracebloc/client/\.github/workflows/.*@.*'
+  $issuer = 'https://token.actions.githubusercontent.com'
+
+  # OFFLINE Sigstore bundle first (#584): the bundle carries the Rekor inclusion
+  # proof, so this verifies signature + cert identity + tlog inclusion with NO live
+  # Rekor call — immune to networks that block/TLS-inspect sigstore, and the only
+  # path that verifies our short-lived keyless cert once it has expired (its embedded
+  # timestamp proves the cert was valid at signing). Releases cut before the bundle
+  # existed 404 here and fall through to the online .sig/.cert path; so does a bundle
+  # that doesn't verify — the online path does the SAME full keyless check, just
+  # needing live Rekor, so this is a fallback, never a downgrade.
+  $bundle = Join-Path $TmpDir "manifest.sha256.bundle"
+  if (Get-Optional "$RepoRel/manifest.sha256.bundle" $bundle) {
+    if (Invoke-CosignVerifyBlob $cosign @(
+          'verify-blob',
+          '--bundle', $bundle,
+          '--certificate-identity-regexp', $idRe,
+          '--certificate-oidc-issuer', $issuer,
+          '--offline',
+          $Manifest)) {
+      Ok "Download verified as published by tracebloc."
+      return
+    }
   }
 
   $sig  = Join-Path $TmpDir "manifest.sha256.sig"
@@ -334,37 +402,23 @@ function Confirm-ManifestSignature {
   if (-not (Get-Optional "$RepoRel/manifest.sha256.sig"  $sig) -or
       -not (Get-Optional "$RepoRel/manifest.sha256.cert" $cert)) {
     if ($AllowUnverified) {
-      Warn "manifest signature/cert not published for this ref -- not verified (TRACEBLOC_ALLOW_UNVERIFIED=1)."
+      Warn "The installer's signature isn't published for this ref -- not verified (TRACEBLOC_ALLOW_UNVERIFIED=1)."
       return
     }
-    throw "manifest.sha256.sig / .cert not published for this release -- can't authenticate the manifest. Pin a release tag that ships them (RFC-0001 R8)."
+    throw "The installer's signature isn't published for this release -- can't confirm the download is authentic. Pin a release tag that ships it."
   }
 
-  # The identity is the client release workflow (release-helm-chart.yaml) — the
-  # keyless signer that produced the manifest. SAME pins as install.sh.
-  $cosignArgs = @(
-    'verify-blob',
-    '--certificate-identity-regexp', 'https://github.com/tracebloc/client/\.github/workflows/.*@.*',
-    '--certificate-oidc-issuer', 'https://token.actions.githubusercontent.com',
-    '--certificate', $cert,
-    '--signature', $sig,
-    $Manifest
-  )
-  # Reset to a NONZERO sentinel first: a cosign that exists but can't launch
-  # (corrupt, AV-quarantined, wrong exec format) can return WITHOUT setting
-  # $LASTEXITCODE, leaving a stale prior value — a stale 0 would read as "verified"
-  # (fail-open). The sentinel + the catch below make BOTH the won't-launch and the
-  # returns-nonzero cases fail closed (parity with install.sh's `if cosign; else`).
-  $global:LASTEXITCODE = 255
-  try {
-    & $cosign @cosignArgs 2>$null 1>$null
-  } catch {
-    throw "cosign could not be executed to verify manifest.sha256 -- refusing to install (RFC-0001 R8): $_"
+  if (Invoke-CosignVerifyBlob $cosign @(
+        'verify-blob',
+        '--certificate-identity-regexp', $idRe,
+        '--certificate-oidc-issuer', $issuer,
+        '--certificate', $cert,
+        '--signature', $sig,
+        $Manifest)) {
+    Ok "Download verified as published by tracebloc."
+  } else {
+    throw "Couldn't confirm the installer download is authentic, so the install stopped before changing anything on your machine."
   }
-  if ($LASTEXITCODE -ne 0) {
-    throw "cosign signature verification FAILED for manifest.sha256 -- refusing to install (RFC-0001 R8)."
-  }
-  Ok "manifest signature verified (cosign keyless)"
 }
 
 # Verify each fetched sub-script against the signed manifest. A missing manifest
@@ -380,11 +434,11 @@ function Confirm-ScriptIntegrity {
     $local    = Join-Path $TmpDir ($f -replace '^scripts/', '')
     $expected = Find-ManifestDigest -ManifestPath $Manifest -Key $rel
     if (-not $expected) {
-      throw "$rel has no entry in manifest.sha256 -- refusing to run it (RFC-0001 R8)."
+      throw "$rel isn't in the installer's signed checksum list -- refusing to run it."
     }
     $actual = Get-Sha256 -Path $local
     if ($actual -ne $expected) {
-      throw "Integrity check FAILED for $rel`n          expected: $expected`n          actual:   $actual`n        Someone may have tampered with the installer. Aborting before any privileged step runs (RFC-0001 R8)."
+      throw "Integrity check FAILED for $rel`n          expected: $expected`n          actual:   $actual`n        Someone may have tampered with the installer. Aborting before any privileged step runs."
     }
   }
   Ok "all installer scripts verified against the signed manifest"
@@ -411,11 +465,11 @@ function Invoke-Bootstrap {
   # before the integrity check (parity with install.sh's `mktemp -d`, 0700).
   $tmpDir = Join-Path $env:TEMP ("tracebloc-installer-" + [guid]::NewGuid().ToString('N'))
   if (Test-Path -LiteralPath $tmpDir) {
-    throw "temp dir $tmpDir already exists -- refusing to reuse it (RFC-0001 R8)."
+    throw "temp dir $tmpDir already exists -- refusing to reuse it."
   }
   New-Item -ItemType Directory -Path $tmpDir | Out-Null
   try {
-    Info "Downloading Tracebloc client installer (ref: $ref)..."
+    Info "Downloading tracebloc client installer (ref: $ref)..."
 
     # ── Fetch the sub-scripts from the immutable tag tree ──
     foreach ($f in $Files) {
@@ -427,12 +481,12 @@ function Invoke-Bootstrap {
     $manifest = Join-Path $tmpDir "manifest.sha256"
     if (-not (Get-Optional "$repoRel/manifest.sha256" $manifest)) {
       if ($allowUnverified -and (Get-Optional "$repoRaw/scripts/manifest.sha256" $manifest)) {
-        Warn "Using in-repo manifest.sha256 from ref '$ref' (TRACEBLOC_ALLOW_UNVERIFIED=1)."
+        Warn "Using in-repo integrity checksums from ref '$ref' (TRACEBLOC_ALLOW_UNVERIFIED=1)."
       } elseif ($allowUnverified) {
-        Warn "No manifest.sha256 for ref '$ref' -- skipping integrity check (TRACEBLOC_ALLOW_UNVERIFIED=1)."
+        Warn "No integrity checksums for ref '$ref' -- skipping the integrity check (TRACEBLOC_ALLOW_UNVERIFIED=1)."
         $manifest = $null
       } else {
-        throw "Couldn't fetch manifest.sha256 for ref '$ref' -- refusing to run unverified installer scripts (RFC-0001 R8). If this ref pre-dates signed manifests, pin a newer release tag."
+        throw "Couldn't fetch the installer's integrity checksums for ref '$ref' -- refusing to run unverified installer scripts. If this ref pre-dates signed releases, pin a newer release tag."
       }
     }
 
@@ -443,7 +497,7 @@ function Invoke-Bootstrap {
 
     # ── Run the verified main installer ──
     $k8s = Join-Path $tmpDir "install-k8s.ps1"
-    Info "Running Tracebloc environment setup..."
+    Info "Running tracebloc environment setup..."
     if ($ChildArgs -and $ChildArgs.Count -gt 0) {
       & powershell.exe -ExecutionPolicy Bypass -File $k8s @ChildArgs
     } else {
@@ -474,7 +528,11 @@ if (-not $env:TB_PESTER) {
   try {
     Invoke-Bootstrap -ChildArgs $args
   } catch {
-    Err "$_"
+    # Clean, branded failure — never a raw stack (#577). "$_" stringifies to the
+    # exception MESSAGE (curated at the throw sites, #576), not the source/stack.
+    Write-Host ""
+    Err "Installation stopped: $_"
+    Write-Host "  It's safe to re-run this installer. If it keeps failing, share the output above with tracebloc support." -ForegroundColor DarkGray
     exit 1
   }
 }

@@ -79,6 +79,30 @@ tests:
           path: spec.template.spec.containers[0].image
           pattern: "^docker\\.io/tracebloc/jobs-manager[:@]"
 
+  - it: floats on the tag with imagePullPolicy Always when no digest is pinned (default)
+    asserts:
+      - matchRegex:
+          path: spec.template.spec.containers[0].image
+          pattern: "^docker\\.io/tracebloc/jobs-manager:"
+      - equal:
+          path: spec.template.spec.containers[0].imagePullPolicy
+          value: Always
+
+  - it: pins repo@digest with imagePullPolicy IfNotPresent when a digest is set (#552)
+    # Was hardcoded Always — a pinned digest was ignored for the pull policy, so a
+    # restart re-pulled instead of using the cached image. Now digest-aware.
+    set:
+      images:
+        requestsProxy:
+          digest: "sha256:dfdaa7e633a8df0f46b403e9422eba5c16bdb7d9c39047e6d3738f9e38fbdba8"
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].image
+          value: docker.io/tracebloc/jobs-manager@sha256:dfdaa7e633a8df0f46b403e9422eba5c16bdb7d9c39047e6d3738f9e38fbdba8
+      - equal:
+          path: spec.template.spec.containers[0].imagePullPolicy
+          value: IfNotPresent
+
   - it: should expose the proxy on container port 8888
     asserts:
       - equal:

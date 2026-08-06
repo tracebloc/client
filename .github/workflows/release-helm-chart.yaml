@@ -92,7 +92,7 @@ jobs:
           fetch-depth: 0
 
       - name: Set up Helm
-        uses: azure/setup-helm@v4
+        uses: azure/setup-helm@1a275c3b69536ee54be43f2070a358922e12c8d4 # v4.3.1
         with:
           version: v3.15.4
 
@@ -134,7 +134,7 @@ jobs:
           ls -la *.tgz
 
       - name: Upload chart artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: helm-charts
           # Glob picks up both client-*.tgz and ingestor-*.tgz.
@@ -170,7 +170,7 @@ jobs:
           fi
 
       - name: Download chart artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: helm-charts
 
@@ -267,9 +267,17 @@ jobs:
           COSIGN_YES: 'true'
         run: |
           cd scripts
+          # Emit an offline Sigstore BUNDLE (#584) alongside the .sig/.cert. The
+          # bundle carries the Rekor inclusion proof (SET), so the installer can
+          # `verify-blob --bundle --offline` with NO live Rekor call — the fix for
+          # sigstore-blocked / TLS-inspecting networks, where the short-lived keyless
+          # cert is expired by install time and only the bundle's embedded timestamp
+          # proves it was valid at signing. The .sig/.cert stay for older installers'
+          # online path (backward compatible).
           cosign sign-blob \
             --output-certificate manifest.sha256.cert \
             --output-signature   manifest.sha256.sig \
+            --bundle             manifest.sha256.bundle \
             manifest.sha256
           echo "Signed manifest.sha256"
           ls -l manifest.sha256*
@@ -436,6 +444,7 @@ jobs:
             scripts/manifest.sha256
             scripts/manifest.sha256.sig
             scripts/manifest.sha256.cert
+            scripts/manifest.sha256.bundle
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
   # Post-publish invariant check: turns the 2026-07-29 manual leak catch into

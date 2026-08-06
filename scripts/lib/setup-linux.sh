@@ -226,8 +226,29 @@ install_docker_engine() {
       chmod +x "$docker_script"
       # Same needrestart guard as setup_pm: get.docker.com runs `apt-get install`
       # internally, so under spin_cmd it can hit the same hidden prompt and hang.
-      spin_cmd "Installing Docker…" sudo env DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a bash "$docker_script"
+      #
+      # And BOUND it: the script's internal apt/download.docker.com fetches carry
+      # no timeout of their own, so a stalled connection hung here silently behind
+      # the spinner until something else killed the process — in CI that was the
+      # 20-minute job timeout, three times in one day, with nothing in the log but
+      # "Installing Docker…" (backend, 2026-08-04). A healthy install takes 1-3
+      # minutes; 10 is network trouble, not a slow link. spin_cmd_bounded returns
+      # 124 ONLY on the deadline, so a fast real apt/script failure keeps its own
+      # error instead of being mislabelled as a stall (Bugbot).
+      local _dk_rc=0
+      spin_cmd_bounded 600 "Installing Docker…" sudo env DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a bash "$docker_script" || _dk_rc=$?
       rm -f "$docker_script"
+      # Re-run advice by mode, matching the daemon-check errors below: telling a
+      # prepare-host ADMIN to "re-run the installer" points them at a full
+      # provision as themselves — the exact outcome prepare-host exists to
+      # prevent (Bugbot).
+      local _rerun="the installer"
+      [[ -n "${TB_PREPARE_HOST_MODE:-}" ]] && _rerun="prepare-host"
+      if (( _dk_rc == 124 )); then
+        error "Docker install did not finish within 10 minutes — the download from get.docker.com/download.docker.com stalled. Check your network/proxy and re-run ${_rerun}; it resumes safely."
+      elif (( _dk_rc != 0 )); then
+        error "Docker install failed (the log tail above has the reason). Fix the reported problem and re-run ${_rerun}."
+      fi
     fi
     # Enable for boot only (no --now): starting is handled below, where a start
     # failure is diagnosed instead of aborting the whole script under `set -e`.
@@ -432,6 +453,9 @@ _fetch_kubectl() {
     "https://dl.k8s.io/release/${ver}/bin/${os}/${arch}/kubectl" -o "${tmpdir}/kubectl"
   retry 3 5 curl_secure -fsSL --connect-timeout 15 --speed-limit 1024 --speed-time 60 \
     "https://dl.k8s.io/release/${ver}/bin/${os}/${arch}/kubectl.sha256" -o "${tmpdir}/kubectl.sha256"
+  # Catch a truncated/blocked transfer as a TRANSFER failure before the checksum
+  # misreports it as tampering (#607). kubectl is ~50 MB; 20 MB is a safe floor.
+  _assert_download_size "${tmpdir}/kubectl" 20000000 "kubectl" "$tmpdir"
   _verify_sha256 "$(cat "${tmpdir}/kubectl.sha256")" "${tmpdir}/kubectl" \
     || { rm -rf "$tmpdir"; error "System tool checksum verification failed"; }
   chmod +x "${tmpdir}/kubectl"
@@ -490,6 +514,9 @@ _fetch_k3d_release() {
   want="$(awk -v asset="k3d-${os}-${arch}" \
     '{ n = split($2, p, "/"); if (p[n] == asset) { print $1; exit } }' \
     "${tmpdir}/checksums.txt" 2>/dev/null)"
+  # Transfer-vs-checksum distinction (#607): k3d is ~50 MB; 10 MB floor catches a
+  # truncated/blocked download before the checksum misreports it as tampering.
+  _assert_download_size "${tmpdir}/k3d" 10000000 "k3d" "$tmpdir"
   if [ -z "$want" ] || ! _verify_sha256 "$want" "${tmpdir}/k3d"; then
     rm -rf "$tmpdir"
     error "System tool checksum verification failed"
@@ -639,6 +666,9 @@ _fetch_helm_release() {
   # tarball with the portable checker (sha256sum on Linux, shasum on macOS; #429).
   local want
   want="$(awk 'NR==1{print $1}' "${tmpdir}/${tarball}.sha256sum" 2>/dev/null)"
+  # Transfer-vs-checksum distinction (#607): the Helm tarball is ~17 MB; 5 MB floor
+  # catches a truncated/blocked download before the checksum misreports tampering.
+  _assert_download_size "${tmpdir}/${tarball}" 5000000 "Helm" "$tmpdir"
   if [ -z "$want" ] || ! _verify_sha256 "$want" "${tmpdir}/${tarball}"; then
     rm -rf "$tmpdir"
     error "System tool checksum verification failed"

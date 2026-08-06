@@ -330,8 +330,39 @@ _sha256_of() {
 # A missing manifest, a missing line, or a digest mismatch ABORTS — before any
 # privileged sub-script (provision.sh mints+writes the credential; install-
 # client-helm.sh runs Helm) is executed.
+# Wire an explicitly-provided corporate CA into cosign so a TLS-inspecting proxy that
+# re-signs HTTPS doesn't fail the signature check with an x509 error (#583). cosign is
+# Go: it reads SSL_CERT_FILE on LINUX, but on macOS Go uses the system Keychain and
+# IGNORES SSL_CERT_FILE (Bugbot) — so on macOS the CA must live in the Keychain, or
+# use the offline installer path (#584). curl ALREADY honors the user's own
+# CURL_CA_BUNDLE natively, and we must NOT re-export it from a corp-root-only
+# TRACEBLOC_CA_BUNDLE (CURL_CA_BUNDLE is replace-not-augment). Fail fast on a
+# set-but-unreadable bundle rather than a later generic cosign error.
+_bootstrap_wire_ca() {
+  local var ca
+  for var in TRACEBLOC_CA_BUNDLE CURL_CA_BUNDLE; do
+    ca="${!var:-}"; [[ -z "$ca" ]] && continue
+    if [[ ! -f "$ca" || ! -r "$ca" ]]; then
+      echo "[ERROR] $var is set to '$ca' but that CA bundle file can't be read —" >&2
+      echo "        fix its path/permissions and re-run." >&2
+      exit 1
+    fi
+    # Don't clobber a fuller pre-set SSL_CERT_FILE (replace-not-augment): only set it
+    # when the user hasn't already (Bugbot). Effective for cosign on Linux (note above).
+    # NOT on macOS: Go reads the Keychain there, so the export helps cosign not at all,
+    # while OpenSSL curl honors SSL_CERT_FILE replace-not-augment — a corp-root-only
+    # bundle would shrink download trust for zero gain (Bugbot). The readability
+    # fail-fast above still runs on every platform.
+    [[ "$(uname -s)" != "Darwin" && -z "${SSL_CERT_FILE:-}" ]] && export SSL_CERT_FILE="$ca"
+    return 0
+  done
+}
+
 verify_against_manifest() {
   local manifest="$TMPDIR/manifest.sha256"
+
+  # Trust an explicit corporate CA before cosign's HTTPS calls (#583).
+  _bootstrap_wire_ca
 
   printf "  %sVerifying it's authentic (cosign)…%s\n" "$_D" "$_R"
 
@@ -344,12 +375,12 @@ verify_against_manifest() {
 
   if ! download_manifest "$manifest"; then
     if [[ "$ALLOW_UNVERIFIED" == "1" ]]; then
-      echo "[WARN]  No manifest.sha256 at ref '$REF' — skipping integrity check (TRACEBLOC_ALLOW_UNVERIFIED=1)." >&2
+      echo "[WARN]  No integrity checksums published at ref '$REF' — skipping the integrity check (TRACEBLOC_ALLOW_UNVERIFIED=1)." >&2
       return 0
     fi
-    echo "[ERROR] Couldn't fetch manifest.sha256 for ref '$REF' — refusing to run" >&2
+    echo "[ERROR] Couldn't fetch the installer's integrity checksums for ref '$REF' — refusing to run" >&2
     echo "        unverified installer scripts. If this ref pre-dates" >&2
-    echo "        signed manifests, pin a newer release tag." >&2
+    echo "        signed releases, pin a newer release tag." >&2
     exit 1
   fi
 
@@ -364,7 +395,7 @@ verify_against_manifest() {
     # many spaces the sha tool emits); take its first field as the digest.
     expected="$(awk -v p="$rel" '$NF == p {print $1; exit}' "$manifest")"
     if [[ -z "$expected" ]]; then
-      echo "[ERROR] $rel has no entry in manifest.sha256 — refusing to run it." >&2
+      echo "[ERROR] $rel isn't in the installer's signed checksum list — refusing to run it." >&2
       exit 1
     fi
     actual="$(_sha256_of "$TMPDIR/${f#scripts/}")"
@@ -404,14 +435,19 @@ verify_manifest_signature() {
   local manifest="$1"
   local sig="$TMPDIR/manifest.sha256.sig"
   local cert="$TMPDIR/manifest.sha256.cert"
+  local bundle="$TMPDIR/manifest.sha256.bundle"
+  # The keyless signing identity: the release workflow's OIDC cert. Shared by both
+  # the offline-bundle and the online sig/cert verification paths below.
+  local id_re='https://github.com/tracebloc/client/\.github/workflows/.*@.*'
+  local issuer='https://token.actions.githubusercontent.com'
 
   if ! ensure_cosign; then
     if [[ "$ALLOW_UNVERIFIED" == "1" ]]; then
-      echo "[WARN]  cosign unavailable — manifest signature NOT verified (TRACEBLOC_ALLOW_UNVERIFIED=1)." >&2
+      echo "[WARN]  cosign unavailable — the installer's signature NOT verified (TRACEBLOC_ALLOW_UNVERIFIED=1)." >&2
       echo "[WARN]  Proceeding on checksum-only integrity. Not for production." >&2
       return 0
     fi
-    echo "[ERROR] cosign is required to verify the installer's signed manifest and" >&2
+    echo "[ERROR] cosign is required to verify the installer's signature and" >&2
     echo "        couldn't be found or bootstrapped. Refusing to fall back to an" >&2
     echo "        unauthenticated, same-channel checksum." >&2
     echo "        Fix: install cosign (https://docs.sigstore.dev/cosign/installation/)" >&2
@@ -419,28 +455,48 @@ verify_manifest_signature() {
     exit 1
   fi
 
+  # OFFLINE Sigstore bundle first (#584): the bundle carries the Rekor inclusion
+  # proof, so this verifies signature + cert identity + tlog inclusion with NO live
+  # Rekor call — immune to networks that block/TLS-inspect sigstore, and the ONLY
+  # path that verifies our short-lived keyless cert once it has expired (its embedded
+  # timestamp proves the cert was valid at signing). Releases cut before the bundle
+  # existed simply 404 here and fall through to the online .sig/.cert path below;
+  # so does any bundle that doesn't verify — the online path does the SAME full
+  # keyless check, just needing live Rekor, so this is a fallback, never a downgrade.
+  if curl -fsSL --tlsv1.2 --connect-timeout 30 --max-time 300 "$REPO_REL/manifest.sha256.bundle" -o "$bundle" 2>/dev/null; then
+    if "$COSIGN_BIN" verify-blob \
+          --bundle "$bundle" \
+          --certificate-identity-regexp "$id_re" \
+          --certificate-oidc-issuer "$issuer" \
+          --offline \
+          "$manifest" >/dev/null 2>&1; then
+      printf '  %s✔%s Download verified as published by tracebloc\n' "$_G" "$_R"
+      return 0
+    fi
+  fi
+
   if ! curl -fsSL --tlsv1.2 --connect-timeout 30 --max-time 300 "$REPO_REL/manifest.sha256.sig"  -o "$sig"  2>/dev/null \
      || ! curl -fsSL --tlsv1.2 --connect-timeout 30 --max-time 300 "$REPO_REL/manifest.sha256.cert" -o "$cert" 2>/dev/null; then
     if [[ "$ALLOW_UNVERIFIED" == "1" ]]; then
-      echo "[WARN]  manifest signature/cert not published for ref '$REF' — not verified (TRACEBLOC_ALLOW_UNVERIFIED=1)." >&2
+      echo "[WARN]  The installer's signature isn't published for ref '$REF' — not verified (TRACEBLOC_ALLOW_UNVERIFIED=1)." >&2
       return 0
     fi
-    echo "[ERROR] manifest.sha256.sig / .cert not published for release '$REF' — can't" >&2
-    echo "        authenticate the manifest. Pin a release tag that ships them." >&2
+    echo "[ERROR] The installer's signature isn't published for release '$REF' — can't" >&2
+    echo "        confirm the download is authentic. Pin a release tag that ships it." >&2
     exit 1
   fi
 
   if "$COSIGN_BIN" verify-blob \
-        --certificate-identity-regexp \
-          'https://github.com/tracebloc/client/\.github/workflows/.*@.*' \
-        --certificate-oidc-issuer 'https://token.actions.githubusercontent.com' \
+        --certificate-identity-regexp "$id_re" \
+        --certificate-oidc-issuer "$issuer" \
         --certificate "$cert" \
         --signature "$sig" \
         "$manifest" >/dev/null 2>&1; then
-    printf '  %s✔%s Signature verified — published by tracebloc (Sigstore keyless)\n' "$_G" "$_R"
+    printf '  %s✔%s Download verified as published by tracebloc\n' "$_G" "$_R"
   else
-    echo "[ERROR] cosign signature verification FAILED for manifest.sha256 — refusing" >&2
-    echo "        to install." >&2
+    # Plain language, no internal identifiers — parity with install.ps1 (#576).
+    echo "[ERROR] Couldn't confirm the installer download is authentic, so the install" >&2
+    echo "        stopped before changing anything on your machine." >&2
     exit 1
   fi
 }
