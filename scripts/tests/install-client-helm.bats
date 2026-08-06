@@ -584,14 +584,14 @@ setup() {
   _ensure_helm_runnable() { :; }
   # The other client's release is wedged in pending-install. helm hides pending
   # releases from a plain `helm list`, so the ownership guard must enumerate with
-  # --all — otherwise a re-run under a different clientId slips past it and the
+  # --pending — otherwise a re-run under a different clientId slips past it and the
   # pending-recovery would uninstall/roll back someone else's release.
   helm() {
     if [ "$1" = list ]; then
       case "$*" in
-        *--all*) printf '%s\n' 'NAME NAMESPACE REVISION UPDATED STATUS CHART APP VERSION' \
-                               'wedged default 1 2026-01-01 pending-install client-1.4.3 1.4.3' ;;
-        *)       printf '%s\n' 'NAME NAMESPACE REVISION UPDATED STATUS CHART APP VERSION' ;;  # plain list hides pending
+        *--pending*) printf '%s\n' 'NAME NAMESPACE REVISION UPDATED STATUS CHART APP VERSION' \
+                                   'wedged default 1 2026-01-01 pending-install client-1.4.3 1.4.3' ;;
+        *)           printf '%s\n' 'NAME NAMESPACE REVISION UPDATED STATUS CHART APP VERSION' ;;  # plain list hides pending
       esac
       return 0
     fi
@@ -607,6 +607,37 @@ setup() {
   [[ "$output" != *"helm uninstall"* ]] || return 1
   [[ "$output" != *"helm rollback"* ]] || return 1
   [[ "$output" != *"helm upgrade"* ]] || return 1
+}
+
+@test "install_client_helm: an UNINSTALLED (keep-history) release does NOT block a reinstall (Bugbot #619)" {
+  HOST_DATA_DIR="$BATS_TEST_TMPDIR/data"; mkdir -p "$HOST_DATA_DIR"
+  _ensure_tracebloc_dirs() { :; }
+  _ensure_release_dirs() { :; }
+  _ensure_helm_runnable() { :; }
+  # A previously-removed client lingers as an `uninstalled` release (helm
+  # --keep-history). The guard enumerates with --pending, which (like helm's
+  # default) EXCLUDES uninstalled releases — so it must NOT be seen as installed.
+  # `--all` WOULD surface it; the mock returns it only for --all to prove we don't
+  # use that.
+  helm() {
+    if [ "$1" = list ]; then
+      case "$*" in
+        *--all*)     printf '%s\n' 'NAME NAMESPACE REVISION UPDATED STATUS CHART APP VERSION' \
+                                   'gone default 2 2026-01-01 uninstalled client-1.4.3 1.4.3' ;;
+        *)           printf '%s\n' 'NAME NAMESPACE REVISION UPDATED STATUS CHART APP VERSION' ;;  # --pending / plain exclude uninstalled
+      esac
+      return 0
+    fi
+    if [ "$1" = get ] && [ "$2" = values ]; then echo 'clientId: "goneclient"'; return 0; fi
+    record "helm $*"; return 0
+  }
+  verify_credentials() { printf valid; }
+  run install_client_helm <<< $'newclient\nmypw'
+  [ "$status" -eq 0 ] || return 1
+  # Not treated as an existing different client -> no ownership bail.
+  [[ "$output" != *"already runs the tracebloc client"* ]] || return 1
+  # Reinstall proceeds.
+  mock_calls | grep -q "helm upgrade --install"
 }
 
 @test "install_client_helm: helm list failure -> fails CLOSED (refuses, no upgrade)" {
