@@ -35,8 +35,42 @@ spec:
       serviceAccountName: {{ include "tracebloc.serviceAccountName" . }}
       securityContext:
         runAsNonRoot: true
+        # CSI-backed clusters (EKS/AKS/OC) apply this to the shared data volume so
+        # every non-root writer shares GID 1000; hostPath ignores it (see the init
+        # below). fsGroupChangePolicy limits the relabel to a root-owned mount.
+        fsGroup: 1000
+        fsGroupChangePolicy: "OnRootMismatch"
         seccompProfile:
           type: RuntimeDefault
+      {{- if .Values.hostPath.enabled }}
+      # kubelet does NOT apply fsGroup to hostPath volumes (kubernetes/kubernetes#138411),
+      # so /data/shared is created root-owned and non-root pods can't write to it. That
+      # breaks dataset ingest: `tb data ingest` streams files into a staging pod that does
+      # `mkdir /data/shared/.tracebloc-staging/` and hits "Permission denied" (#611). Unlike
+      # mysql-data (one writer, UID 999), the shared volume has MULTIPLE non-root writers —
+      # jobs-manager, the training/ingestor pods it spawns, and the CLI's ingest-staging pod,
+      # whose UID this chart does not control — so it must be world-writable, not chowned to
+      # a single UID. setgid (2) makes new files inherit GID 1000; runs as root only long
+      # enough to fix the mount, with FOWNER so the chmod is idempotent on re-install. CSI
+      # clusters rely on fsGroup above and skip this.
+      initContainers:
+      - name: init-shared-data
+        image: {{ include "tracebloc.image" (dict "repository" "library/busybox" "tag" .Values.images.busybox.tag "digest" .Values.images.busybox.digest "registry" (dig "imageRegistry" "docker.io" (.Values.global | default dict))) | quote }}
+        securityContext:
+          runAsUser: 0
+          runAsNonRoot: false
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop: ["ALL"]
+            add: ["CHOWN", "FOWNER"]
+          seccompProfile:
+            type: RuntimeDefault
+        command: ['sh', '-c', 'chown 1000:1000 /data/shared && chmod 2777 /data/shared']
+        volumeMounts:
+        - name: shared-volume
+          mountPath: /data/shared
+      {{- end }}
       containers:
       - name: api
         image: {{ include "tracebloc.image" (dict "repository" "tracebloc/jobs-manager" "tag" .Values.env.CLIENT_ENV "digest" .Values.images.jobsManager.digest "registry" (dig "imageRegistry" "docker.io" (.Values.global | default dict))) | quote }}

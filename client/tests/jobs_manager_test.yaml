@@ -414,3 +414,41 @@ tests:
               secretKeyRef:
                 name: RELEASE-NAME-secrets
                 key: TB_CREDMGR_PASSWORD
+
+  # #611: /data/shared (client-pvc) must be writable by the non-root ingest-staging
+  # pod. hostPath ignores fsGroup (k8s#138411), so a privileged init makes the shared
+  # volume world-writable; CSI relies on fsGroup and skips the init.
+  - it: "hostPath install adds init-shared-data to make /data/shared writable for ingest (#611)"
+    set:
+      hostPath:
+        enabled: true
+    asserts:
+      - equal:
+          path: spec.template.spec.securityContext.fsGroup
+          value: 1000
+      - equal:
+          path: spec.template.spec.initContainers[0].name
+          value: init-shared-data
+      - equal:
+          path: spec.template.spec.initContainers[0].securityContext.runAsUser
+          value: 0
+      - contains:
+          path: spec.template.spec.initContainers[0].securityContext.capabilities.add
+          content: CHOWN
+      - contains:
+          path: spec.template.spec.initContainers[0].securityContext.capabilities.add
+          content: FOWNER
+      - matchRegex:
+          path: spec.template.spec.initContainers[0].command[2]
+          pattern: "chown 1000:1000 /data/shared && chmod 2777 /data/shared"
+
+  - it: "CSI install (hostPath disabled) keeps fsGroup but skips the privileged init (#611)"
+    set:
+      hostPath:
+        enabled: false
+    asserts:
+      - equal:
+          path: spec.template.spec.securityContext.fsGroup
+          value: 1000
+      - notExists:
+          path: spec.template.spec.initContainers
