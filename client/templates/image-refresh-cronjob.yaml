@@ -309,21 +309,33 @@ data:
         "${ATTEMPT_KEY}=${new_count}" --overwrite --request-timeout=15s
 
       log "rolling restart of deployment/${DEPLOYMENT_NAME} (attempt ${new_count}/${MAX_REFRESH_ATTEMPTS})"
-      kubectl rollout restart -n "$RELEASE_NAMESPACE" "deployment/${DEPLOYMENT_NAME}"
+      kubectl rollout restart -n "$RELEASE_NAMESPACE" "deployment/${DEPLOYMENT_NAME}" \
+        --request-timeout=15s
       kubectl rollout status  -n "$RELEASE_NAMESPACE" "deployment/${DEPLOYMENT_NAME}" \
         --timeout="$ROLLOUT_TIMEOUT"
       log "rollout complete"
-      # Success (settled rollout): reset the failure counter to 0 and clear any
-      # flap marker so a future change starts fresh. Batched into the final
-      # annotate below; `key-` removes the annotation (a no-op if absent).
-      annotate_args="$annotate_args ${ATTEMPT_KEY}- ${FLAP_KEY}-"
+      # Success (settled rollout): reset the failure counter and clear any flap
+      # marker so a future change starts fresh. #626 (CID 3729110045): do this in
+      # its OWN bounded annotate BEFORE the digest record below -- do NOT batch it
+      # into the final annotate. Batching made the reset contingent on the digest
+      # write: if that later annotate hung or failed under `set -e`, the rollout
+      # had genuinely succeeded yet `refresh-attempt` stayed elevated, so
+      # subsequent ticks could burn the budget and PERMANENTLY trip the flap
+      # lockout while the CronJob stayed green. A dedicated --request-timeout-bounded
+      # annotate makes the success reset reliable and independent of the digest
+      # write. `key-` removes the annotation (a no-op if absent).
+      kubectl annotate deployment -n "$RELEASE_NAMESPACE" "$DEPLOYMENT_NAME" \
+        "${ATTEMPT_KEY}-" "${FLAP_KEY}-" --overwrite --request-timeout=15s
     fi
 
     if [ -n "$annotate_args" ]; then
       log "updating deployment annotations:$annotate_args"
       # shellcheck disable=SC2086  # word-split annotate_args intentional
+      # #626: bound the digest-record annotate too (was unbounded, the root of CID
+      # 3729110045). Even if this fails, the success reset above has already
+      # landed, so a flap lockout can never stick after a successful rollout.
       kubectl annotate deployment -n "$RELEASE_NAMESPACE" "$DEPLOYMENT_NAME" \
-        $annotate_args --overwrite
+        $annotate_args --overwrite --request-timeout=15s
     fi
 
     log "tick complete"
