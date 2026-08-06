@@ -734,6 +734,36 @@ _resolve_mysql_engine() {
   esac
 }
 
+# #553: give the bundled metrics-server APIService a bounded window to register
+# before helm renders. On a freshly created k3d cluster k3s applies its bundled
+# metrics-server (and the v1beta1.metrics.k8s.io APIService) shortly AFTER the
+# API server is ready; `k3d cluster create --wait` only gates on node/serverlb
+# readiness, not bundled addons. The resource-monitor DaemonSet template calls
+# `{{ fail }}` at render time if that APIService isn't registered yet, so on a
+# slow WSL2/laptop helm can render in that window and abort the WHOLE install.
+# Best-effort: if the APIService never registers here we fall through and let
+# the chart's render-time guard produce its actionable error, so a genuinely
+# missing metrics-server is still caught (issue's preferred option (a)).
+_wait_for_metrics_apiservice() {
+  local _timeout_s="${TB_METRICS_WAIT_S:-}"
+  case "$_timeout_s" in ''|*[!0-9]*) _timeout_s=120 ;; *) _timeout_s=$((10#$_timeout_s)) ;; esac
+  local _deadline=$(( SECONDS + _timeout_s ))
+  while (( SECONDS < _deadline )); do
+    if kubectl get apiservice v1beta1.metrics.k8s.io --request-timeout=10s >/dev/null 2>&1; then
+      # Registered — give it a moment to also report Available, but don't fail
+      # the install if it's merely slow to become ready; the DaemonSet only
+      # needs the APIService present at render time.
+      kubectl wait --for=condition=Available apiservice/v1beta1.metrics.k8s.io \
+        --timeout=30s >/dev/null 2>&1 || true
+      log "metrics.k8s.io APIService registered — proceeding with helm install."
+      return 0
+    fi
+    sleep 3
+  done
+  log "metrics.k8s.io APIService not registered after ${_timeout_s}s — proceeding; the chart guards if metrics-server is genuinely absent."
+  return 0
+}
+
 install_client_helm() {
   # Step e (Install tracebloc) — main() prints the "e) Installing tracebloc"
   # header. The credential + namespace were provisioned in step d
@@ -1098,6 +1128,17 @@ EOF
   # root:root from kubelet's DirectoryOrCreate. See _ensure_release_dirs.
   # node-local (RFC-0003 Option C) has no hostPath dirs to pre-create.
   [[ "${TB_STORAGE_MODE:-hostpath}" != "node-local" ]] && _ensure_release_dirs "$TB_NAMESPACE"
+
+  # #553: wait out the metrics-server APIService registration race before helm
+  # renders the resource-monitor DaemonSet (whose template hard-fails if the
+  # metrics API isn't registered yet). Bounded + best-effort. The outer spinner
+  # deadline must never truncate the configured inner wait, so derive it from
+  # TB_METRICS_WAIT_S (same parse as _wait_for_metrics_apiservice) plus slack for
+  # the post-registration `kubectl wait --for=Available` (30s) and jitter.
+  local _metrics_wait_s="${TB_METRICS_WAIT_S:-}"
+  case "$_metrics_wait_s" in ''|*[!0-9]*) _metrics_wait_s=120 ;; *) _metrics_wait_s=$((10#$_metrics_wait_s)) ;; esac
+  spin_cmd_bounded "$(( _metrics_wait_s + 60 ))" "Waiting for the metrics API to register…" \
+    _wait_for_metrics_apiservice || true
 
   # The chart install blocks ~10-15s (render + apply + image pull), so run it
   # behind a spinner instead of a frozen terminal — spin_cmd_bounded streams
