@@ -28,10 +28,47 @@ data:
 
     log() { printf '[auto-upgrade] %s\n' "$*"; }
 
+    # Bound a read-only probe so a wedged kube-apiserver can't hang the job.
+    # `timeout` ships with busybox in the alpine/helm image (coreutils-style
+    # DURATION CMD); fall back to running bare if it is somehow absent. The
+    # mutating rollback/upgrade below carry helm's own --timeout.
+    run_bounded() {
+      _t="$1"; shift
+      if command -v timeout >/dev/null 2>&1; then
+        timeout "$_t" "$@"
+      else
+        "$@"
+      fi
+    }
+
     log "release=$RELEASE_NAME namespace=$RELEASE_NAMESPACE repo=$REPO_URL"
 
     helm repo add "$REPO_NAME" "$REPO_URL" >/dev/null
     helm repo update "$REPO_NAME" >/dev/null
+
+    # #554: reconcile a wedged pending-* release FIRST — before parsing the
+    # deployed version or taking the already-latest early exit below. A release
+    # left pending-* by a killed helm run (OOM at the 256Mi limit, node reboot,
+    # or cluster restart mid-upgrade) makes the next `helm upgrade` fail with
+    # "another operation is in progress" (exit 1); with concurrencyPolicy:
+    # Forbid every subsequent hourly tick then fails the same way, forever,
+    # until a human runs `helm rollback`. This MUST run before the version
+    # parse + already-latest exit: a release wedged pending-* whose version
+    # already reads as latest would otherwise exit 0 below and never be
+    # recovered. `helm status` surfaces pending states that `helm list` hides by
+    # default. Best-effort (|| true) so a benign race can't abort the tick;
+    # jq-free awk over `helm status -o yaml`, matching the parsing style below.
+    # Bounded so a wedged apiserver can't hang the probe.
+    STATUS="$(run_bounded 30 \
+      helm status "$RELEASE_NAME" -n "$RELEASE_NAMESPACE" -o yaml 2>/dev/null \
+      | awk '/^[[:space:]]*status:/ {print $2; exit}')" || STATUS=""
+    case "$STATUS" in
+      pending-upgrade|pending-rollback)
+        log "release wedged in $STATUS (a prior run was killed mid-op); rolling back to the last deployed revision"
+        helm rollback "$RELEASE_NAME" -n "$RELEASE_NAMESPACE" \
+          --wait --timeout "$UPGRADE_TIMEOUT" || true
+        ;;
+    esac
 
     # Latest published version. Helm orders search results newest-first,
     # so the first `version:` line in the YAML output is the latest.
@@ -39,9 +76,11 @@ data:
       | awk '/^[[:space:]]*version:/ {print $2; exit}')"
 
     # Currently deployed chart version. `helm list -o yaml` emits
-    # `chart: client-<version>` for the matching release.
+    # `chart: client-<version>` for the matching release. --all so a release
+    # still settling (e.g. a pending-* we just rolled back above) is visible:
+    # plain `helm list` hides pending releases (Bugbot).
     CURRENT_CHART="$(helm list -n "$RELEASE_NAMESPACE" \
-      --filter "^${RELEASE_NAME}\$" -o yaml \
+      --all --filter "^${RELEASE_NAME}\$" -o yaml \
       | awk '/^[[:space:]]*chart:/ {print $2; exit}')"
     CURRENT="${CURRENT_CHART#${CHART_NAME}-}"
 
@@ -69,24 +108,8 @@ data:
     fi
 
     log "upgrading $CURRENT -> $LATEST"
-    # #554: a PRIOR helm run killed mid-upgrade (OOM at the 256Mi limit, node
-    # reboot, or cluster restart during the upgrade window) leaves the release
-    # in a pending-* state. The next `helm upgrade` then fails with "another
-    # operation is in progress", exit 1 — and with concurrencyPolicy: Forbid
-    # every subsequent hourly tick fails the same way, forever, until a human
-    # runs `helm rollback`. Reconcile first: if the release is stuck pending-*,
-    # roll back to the last deployed revision before upgrading. Best-effort
-    # (|| true) so a benign race can't abort the tick. jq-free awk over
-    # `helm status -o yaml`, matching the parsing style above.
-    STATUS="$(helm status "$RELEASE_NAME" -n "$RELEASE_NAMESPACE" -o yaml 2>/dev/null \
-      | awk '/^[[:space:]]*status:/ {print $2; exit}')"
-    case "$STATUS" in
-      pending-upgrade|pending-rollback)
-        log "release wedged in $STATUS (a prior run was killed mid-op); rolling back to the last deployed revision"
-        helm rollback "$RELEASE_NAME" -n "$RELEASE_NAMESPACE" \
-          --wait --timeout "$UPGRADE_TIMEOUT" || true
-        ;;
-    esac
+    # The pending-* wedge reconcile ran up front (see above the version parse),
+    # so by here the release is either deployed or freshly rolled back.
     # --reset-then-reuse-values (helm 3.14+) is critical here: --reuse-values
     # alone re-uses the LAST RELEASE'S COMPUTED VALUES, so any new keys added
     # to values.yaml in the upgraded chart (e.g. a future autoUpgrade.foo

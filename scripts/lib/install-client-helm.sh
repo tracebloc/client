@@ -471,8 +471,21 @@ _resolve_chart_ref() {
 # error path) still runs.
 _reconcile_pending_release() {
   local _rel="$1" _ns="$2" _status
-  _status="$(helm status "$_rel" -n "$_ns" -o yaml 2>/dev/null \
-    | awk '/^[[:space:]]*status:/ {print $2; exit}')"
+  # `helm status` has no request timeout of its own, so a wedged kube-apiserver
+  # could hang this recovery probe forever — bound it with _bounded
+  # (timeout(1)/gtimeout(1)), the same mechanism the file's other helm/kubectl
+  # probes use (Bugbot). On the deadline _bounded returns 124, which the
+  # `|| _status=""` below folds into the benign "nothing to recover" path.
+  #
+  # `|| _status=""`: on a FIRST-TIME install there is NO release, so `helm
+  # status` exits non-zero; under `set -euo pipefail` that rc propagates out of
+  # the command substitution and would abort the installer HERE — before
+  # `helm upgrade --install` ever runs (Bugbot). A missing release simply means
+  # "nothing to recover", so swallow the failure and fall through with an empty
+  # status; the case below then matches nothing and the install/upgrade proceeds.
+  _status="$(_bounded "${TB_HELM_STATUS_TIMEOUT:-30}" \
+    helm status "$_rel" -n "$_ns" -o yaml 2>/dev/null \
+    | awk '/^[[:space:]]*status:/ {print $2; exit}')" || _status=""
   case "$_status" in
     pending-install)
       log "Release '$_rel' is wedged in pending-install (a prior run was killed mid-install); uninstalling the half-installed release before retrying."
@@ -493,9 +506,13 @@ _reconcile_adopted_client() {
   # and reconcile it in place. Enumerate it the same jq-free way the one-per-machine
   # guard does. One client per machine, so take the first.
   local _rel="" _ns="" _r _n
+  # --all so a release wedged in a pending-* state is still discoverable here:
+  # plain `helm list` hides pending releases, so without it this enumeration
+  # would miss the very release _reconcile_pending_release (below) needs to
+  # unwedge, and the adopt reconcile would never recover it (Bugbot).
   while read -r _r _n; do
     [[ -n "$_r" ]] && { _rel="$_r"; _ns="$_n"; break; }
-  done < <(helm list -A 2>/dev/null | awk '/[[:space:]]client-[0-9]/ { print $1, $2 }')
+  done < <(helm list -A --all 2>/dev/null | awk '/[[:space:]]client-[0-9]/ { print $1, $2 }')
   if [[ -z "$_rel" ]]; then
     warn "This client is already registered, but no live tracebloc release was found here to reconcile — continuing with a normal connect."
     return 1

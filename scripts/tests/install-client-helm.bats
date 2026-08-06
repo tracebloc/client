@@ -19,6 +19,12 @@ setup() {
   # would otherwise spin against fake output. The bar is cosmetic + covered by
   # its own reasoning; the readiness gate (summary.bats) is the real contract.
   export TB_NO_SERVICE_PROGRESS=1
+  # _bounded wraps probes in timeout(1) (the pending-* recovery `helm status`),
+  # which can't exec a `helm` shell-function mock: on a runner that HAS timeout(1)
+  # it would exec the real helm binary instead of the stub. Passthrough so the
+  # mocked helm stays visible; _bounded's deadline behaviour is covered in
+  # common.bats. Same pattern as cluster.bats / preflight.bats.
+  _bounded() { shift; "$@"; }
 }
 
 # ── _backend_url ───────────────────────────────────────────────────────────
