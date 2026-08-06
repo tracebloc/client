@@ -859,36 +859,64 @@ function Test-ToolsPresent {
   return $true
 }
 
+# Pure TRI-STATE classifier from `k3d cluster list -o json` output. Distinguishes
+# "confidently not ours" from "can't tell" so callers never conflate an
+# indeterminate read with a definitive answer (#557 Bugbot 3728340365):
+#   'running' — <Name> is present with >=1 server node up
+#   'down'    — output parsed OK, but <Name> is absent or stopped (0 servers)
+#   'unknown' — empty/whitespace or unparseable output; nothing can be concluded
+function Get-ClusterRunStateFromList {
+  param([string]$Json, [string]$Name)
+  if ([string]::IsNullOrWhiteSpace($Json)) { return 'unknown' }
+  try { $clusters = $Json | ConvertFrom-Json -ErrorAction Stop } catch { return 'unknown' }
+  foreach ($c in @($clusters)) {
+    if ($c.name -ne $Name) { continue }
+    if ($c.PSObject.Properties.Name -contains 'serversRunning') {
+      if ([int]$c.serversRunning -ge 1) { return 'running' }
+      return 'down'   # present but 0 servers -> stopped
+    }
+    return 'down'     # shape without a running count can't prove the cluster is up
+  }
+  return 'down'       # enumerated fine; our cluster simply isn't in the list
+}
+
 # Pure: from `k3d cluster list -o json` output, is <Name> present AND running (>=1
 # server node up)? A present-but-STOPPED cluster returns $false so the fast path
 # doesn't skip New-K3dCluster's start/repair. Unknown/corrupt shape -> false (#420 Bugbot).
 function Test-ClusterRunningInList {
   param([string]$Json, [string]$Name)
-  if ([string]::IsNullOrWhiteSpace($Json)) { return $false }
-  try { $clusters = $Json | ConvertFrom-Json -ErrorAction Stop } catch { return $false }
-  foreach ($c in @($clusters)) {
-    if ($c.name -ne $Name) { continue }
-    if ($c.PSObject.Properties.Name -contains 'serversRunning') { return ([int]$c.serversRunning -ge 1) }
-    return $false   # shape without a running count can't prove the cluster is up
-  }
-  return $false
+  return ((Get-ClusterRunStateFromList -Json $Json -Name $Name) -eq 'running')
 }
 
-# Is our k3d cluster present AND running? STATE query, BOUNDED via a job+deadline so a
-# wedged Docker engine can't hang the fast path at the start of every re-run (#420
-# Bugbot). Never-fatal: a timeout / parse failure -> $false (fall through to the walk).
+# Is our k3d cluster present AND running? Boolean fast-path gate; delegates to the
+# BOUNDED Get-ClusterRunState below (job+deadline) so a wedged Docker engine can't
+# hang the fast path at the start of every re-run (#420 Bugbot). Never-fatal: a
+# timeout / parse failure classifies as not-running -> $false (fall through).
 function Test-ClusterRunning {
+  return ((Get-ClusterRunState) -eq 'running')
+}
+
+# TRI-STATE, BOUNDED run-state of our k3d cluster, for the port-6550 ownership
+# decision (#557 Bugbot 3728340365). Wraps `k3d cluster list` in a job+deadline
+# (~15s) so a wedged Docker can't hang preflight, and returns:
+#   'running' — our cluster is up (it legitimately owns port 6550 -> reuse)
+#   'down'    — we enumerated clusters and ours is absent/stopped (listener is foreign)
+#   'unknown' — the list timed out or its output was unparseable (can't tell; do
+#               NOT treat as foreign -- warn and let New-K3dCluster settle it)
+function Get-ClusterRunState {
   $job = Start-Job -InitializationScript $JobInit -ScriptBlock {
     param($n) (k3d cluster list $n -o json 2>$null | Out-String)
   } -ArgumentList $CLUSTER_NAME
-  $out = ""
+  $out = ""; $timedOut = $false
   if (Wait-JobWithProgress -Job $job -TimeoutSec 15 -Message "Checking cluster") {
     $out = (Receive-Job $job -ErrorAction SilentlyContinue | Out-String)
   } else {
-    Log "k3d cluster list timed out; treating cluster as not running."
+    $timedOut = $true
+    Log "k3d cluster list timed out; cluster run-state indeterminate."
   }
   Remove-Job $job -Force -ErrorAction SilentlyContinue
-  return (Test-ClusterRunningInList -Json $out -Name $CLUSTER_NAME)
+  if ($timedOut) { return 'unknown' }
+  return (Get-ClusterRunStateFromList -Json $out -Name $CLUSTER_NAME)
 }
 
 # The client's three workload deployments in a namespace. Single source of truth for
@@ -4424,16 +4452,25 @@ function Test-Preflight {
   if ($null -eq $portBusy)      { Info "API port 6550: couldn't determine listener state (skipping)." }
   elseif (-not $portBusy)       { Ok "API port 6550 free" }
   else {
-    # Ownership must mean a RUNNING cluster of ours, via the bounded helper:
-    #  - Test-ClusterRunning wraps `k3d cluster list` in the same ~15s job
-    #    deadline it uses elsewhere, so a wedged Docker engine can't hang the
-    #    preflight here (was an unbounded raw call -- Bugbot High).
-    #  - It gates on serversRunning >= 1, so a STOPPED leftover cluster named
-    #    $CLUSTER_NAME no longer masks a foreign listener on 6550 (Bugbot Med).
-    $ownedByUs = $false
-    if (Has "k3d") { $ownedByUs = Test-ClusterRunning }
-    if ($ownedByUs) {
+    # Ownership is TRI-STATE, via the bounded Get-ClusterRunState helper, so we
+    # only HARD-FAIL when CONFIDENT the listener is not ours (#557 Bugbot Med
+    # 3728340365):
+    #  - It wraps `k3d cluster list` in the same ~15s job deadline used
+    #    elsewhere, so a wedged Docker engine can't hang preflight here.
+    #  - 'running' (serversRunning >= 1) -> our cluster owns 6550 -> reuse.
+    #  - 'down' -> we enumerated clusters and ours is absent/STOPPED (a stopped
+    #    cluster doesn't bind 6550), so the listener is confidently foreign ->
+    #    hard fail (Bugbot Med, #557). No k3d installed at all is likewise a
+    #    confident "not ours".
+    #  - 'unknown' -> the list timed out / was unreadable: "can't tell", NOT
+    #    "foreign". A slow Docker on a normal re-run must not be blocked with
+    #    stop/delete hints, so downgrade to a warning and proceed; New-K3dCluster
+    #    starts/repairs the existing cluster (or surfaces a real conflict) itself.
+    $state = if (Has "k3d") { Get-ClusterRunState } else { 'down' }
+    if ($state -eq 'running') {
       Ok "API port 6550 in use by the existing tracebloc cluster (will be reused)"
+    } elseif ($state -eq 'unknown') {
+      Warn "API port 6550 is in use but the cluster's run-state couldn't be determined ('k3d cluster list' timed out or was unreadable) - proceeding; New-K3dCluster will start/repair the existing cluster or surface a genuine conflict."
     } else {
       Write-PfFail "API port 6550 is already in use by another process or cluster - k3d needs it for the tracebloc cluster's API server."
       $hardFail++

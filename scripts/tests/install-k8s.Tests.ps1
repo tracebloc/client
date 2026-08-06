@@ -1616,31 +1616,46 @@ Describe "Test-Preflight" {
   It "port 6550 in use by a foreign process (no k3d) -> fails (Err throws) (#557)" {
     Mock Test-PfUrl { "ok" }
     Mock Get-PfPortListening { $true }
-    Mock Has { $false } -ParameterFilter { $cmd -eq "k3d" }   # no k3d -> can't be our cluster
+    Mock Has { $false }   # no k3d (nor any tool) -> the listener can't be our cluster
     { Test-Preflight } | Should -Throw
   }
   # #557 Bugbot (Med): a STOPPED leftover cluster named $CLUSTER_NAME plus a
   # foreign listener on 6550 must still hard-fail -- ownership is gated on the
-  # cluster actually RUNNING (Test-ClusterRunning), not mere presence.
+  # cluster actually RUNNING ('running'), not mere presence. Get-ClusterRunState
+  # returns 'down' for a present-but-stopped (or absent) cluster.
   It "port 6550 busy + our cluster present but STOPPED -> fails (Err throws) (#557)" {
     Mock Test-PfUrl { "ok" }
     Mock Get-PfPortListening { $true }
-    Mock Has { $true } -ParameterFilter { $cmd -eq "k3d" }
-    Mock Test-ClusterRunning { $false }   # present-but-stopped is not "ours, running"
+    Mock Has { $true }                     # k3d present, so run-state is consulted
+    Mock Get-ClusterRunState { 'down' }    # enumerated: ours is stopped/absent -> foreign listener
     { Test-Preflight } | Should -Throw
   }
   # #557: port 6550 held by OUR own running cluster -> reused, not a conflict.
+  # Ownership passes here, so Test-Preflight continues into the
+  # network-reachability block (which also calls Has for kubectl/helm/k3d); a
+  # plain default Has mock (all tools present -> only always-critical hosts
+  # probed) covers every call and keeps that block from throwing.
   It "port 6550 in use by our running cluster -> ok, does not throw (#557)" {
     Mock Test-PfUrl { "ok" }
     Mock Get-PfPortListening { $true }
-    # Unlike the foreign/stopped cases, ownership passes here so Test-Preflight
-    # continues into the network-reachability block, which also calls Has (for
-    # kubectl/helm/k3d). A plain default mock (k3d present + tools present ->
-    # only always-critical hosts probed) covers every call; a k3d-only
-    # -ParameterFilter would leave those later Has calls unmatched (#612 merge).
     Mock Has { $true }
-    Mock Test-ClusterRunning { $true }
+    Mock Get-ClusterRunState { 'running' }
     { Test-Preflight } | Should -Not -Throw
+  }
+  # #557 Bugbot (Med, CID 3728340365): a slow/wedged Docker can make
+  # `k3d cluster list` time out (Get-ClusterRunState -> 'unknown'). That is
+  # "can't determine", NOT "confidently foreign" -- a normal re-run of an
+  # existing install must NOT be hard-blocked with stop/delete hints. Downgrade
+  # to a warning and proceed; New-K3dCluster's start/repair path settles it.
+  It "port 6550 busy + cluster run-state indeterminate (list timed out) -> warns, does NOT hard-fail (#557 Bugbot)" {
+    Mock Test-PfUrl { "ok" }
+    Mock Get-PfPortListening { $true }
+    Mock Has { $true }                       # k3d present, but...
+    Mock Get-ClusterRunState { 'unknown' }   # ...the bounded list timed out / was unreadable
+    { Test-Preflight } | Should -Not -Throw
+    $out = (Test-Preflight 6>&1 | Out-String)
+    $out | Should -Match "run-state couldn't be determined"   # warned, not hard-failed
+    $out | Should -Not -Match 'will be reused'                # and not misreported as ours
   }
   It "port 6550 listener state undeterminable -> skipped, not a fail (#557)" {
     Mock Test-PfUrl { "ok" }
