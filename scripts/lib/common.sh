@@ -838,6 +838,11 @@ install_cleanup() {
   # _PROVISION_CRED_FILE before minting and removes it after sourcing — this is the
   # backstop for an error/signal between mint and that cleanup.
   [[ -n "${_PROVISION_CRED_FILE:-}" ]] && rm -f "$_PROVISION_CRED_FILE" 2>/dev/null || true
+  # Same backstop for the adopt-path pending-install recovery: _reconcile_adopted_client
+  # stashes the wedged release's user values (incl. the write-only clientPassword) to
+  # this temp file before uninstalling, and clears it after the reconcile — shred it
+  # here if a signal lands in that window (Bugbot #619).
+  [[ -n "${_TB_PENDING_VALUES_FILE:-}" ]] && rm -f "$_TB_PENDING_VALUES_FILE" 2>/dev/null || true
   if [[ $exit_code -eq 2 ]]; then
     echo ""
     if [[ -n "${TRACEBLOC_DOCKER_FIRST_RUN_EXIT:-}" ]]; then

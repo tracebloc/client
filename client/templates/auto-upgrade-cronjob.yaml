@@ -108,6 +108,16 @@ data:
           exit 1
         fi
         ;;
+      pending-install)
+        # A CronJob created before an interrupted INITIAL install can observe
+        # pending-install. There's no prior revision to roll back to, and this
+        # upgrade job has no client values/password to reinstall from — so fail
+        # closed rather than fall through to the version check, which would read
+        # the wedged release as "already at latest" and exit 0, masking it
+        # (Bugbot #619). Recovery is a human uninstall + re-run of the installer.
+        log "ERROR: release wedged in pending-install (initial install was killed); the auto-upgrade job cannot safely recover this. Manual recovery: helm -n $RELEASE_NAMESPACE uninstall $RELEASE_NAME, then re-run the installer."
+        exit 1
+        ;;
     esac
 
     # Latest published version. Helm orders search results newest-first,

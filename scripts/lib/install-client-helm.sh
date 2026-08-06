@@ -616,8 +616,12 @@ _reconcile_adopted_client() {
   # there first and sets TB_PENDING_REINSTALL=1, and we reinstall from them below
   # rather than run a --reuse-values upgrade against a release that no longer
   # exists (Bugbot #619).
-  local _preserve; _preserve="$(mktemp 2>/dev/null)" || _preserve="${HOST_DATA_DIR:+${HOST_DATA_DIR}/.tb-pending-values.$$}"
-  _reconcile_pending_release "$_rel" "$_ns" "$_preserve"
+  # Track the temp path in a module var (NOT `local`) so install_cleanup's
+  # EXIT/INT/TERM trap can shred it if a signal lands between capture and the rm
+  # below — it holds the write-only clientPassword. Same backstop pattern as
+  # _PROVISION_CRED_FILE (#838 / Bugbot #619).
+  _TB_PENDING_VALUES_FILE="$(mktemp 2>/dev/null)" || _TB_PENDING_VALUES_FILE="${HOST_DATA_DIR:+${HOST_DATA_DIR}/.tb-pending-values.$$}"
+  _reconcile_pending_release "$_rel" "$_ns" "$_TB_PENDING_VALUES_FILE"
 
   # Build the reconcile command as an array (bash-3.2 safe for the optional
   # --set). Normal case: in-place upgrade reusing the release's stored values
@@ -628,8 +632,8 @@ _reconcile_adopted_client() {
   # uninstalled, so --reuse-values has nothing to reuse — reinstall with
   # --install from the preserved user values instead (Bugbot #619).
   local _args
-  if [[ "${TB_PENDING_REINSTALL:-0}" == "1" && -s "$_preserve" ]]; then
-    _args=(upgrade --install "$_rel" "$chart_ref" --namespace "$_ns" --values "$_preserve")
+  if [[ "${TB_PENDING_REINSTALL:-0}" == "1" && -s "$_TB_PENDING_VALUES_FILE" ]]; then
+    _args=(upgrade --install "$_rel" "$chart_ref" --namespace "$_ns" --values "$_TB_PENDING_VALUES_FILE")
   else
     local _reuse="--reuse-values"
     helm upgrade --help 2>/dev/null | grep -q -- '--reset-then-reuse-values' && _reuse="--reset-then-reuse-values"
@@ -643,18 +647,23 @@ _reconcile_adopted_client() {
   _helm_timeout_min="$(tb_minutes_or "${TB_HELM_TIMEOUT_MIN:-}" 10)"
   local _helm_rc=0
   spin_cmd_bounded "$(( _helm_timeout_min * 60 ))" "Reconciling the existing client…" helm "${_args[@]}" || _helm_rc=$?
-  # The preserve file carries the write-only clientPassword — drop it as soon as
-  # the reconcile has consumed it, regardless of outcome (the install-wide EXIT
-  # trap also clears $TMPDIR, but don't leave a credential on disk a moment longer).
-  [[ -n "$_preserve" && "$_preserve" != /dev/null ]] && rm -f "$_preserve"
+  # The preserve file carries the write-only clientPassword — shred it as soon as
+  # the reconcile has consumed it, regardless of outcome, and clear the var so
+  # install_cleanup's backstop has nothing left to do (Bugbot #619).
+  if [[ -n "${_TB_PENDING_VALUES_FILE:-}" && "$_TB_PENDING_VALUES_FILE" != /dev/null ]]; then
+    rm -f "$_TB_PENDING_VALUES_FILE"; unset _TB_PENDING_VALUES_FILE
+  fi
   if [[ "$_helm_rc" -ne 0 ]]; then
     # A helm run killed mid-operation (our timeout=124, or an earlier
     # Ctrl-C/OOM/reboot) can leave the release wedged pending-*; we auto-recover
     # before the upgrade (see _reconcile_pending_release), but surface the
     # manual remedy on ANY failure (#554) — not only our own timeout — since the
-    # next run's "another operation is in progress" also exits 1.
+    # next run's "another operation is in progress" also exits 1. Point at the
+    # last DEPLOYED revision, never a bare `helm rollback` (= previous revision,
+    # which after an interrupted atomic rollback is the failed upgrade — Bugbot #619).
     hint "If a re-run reports 'another operation is in progress', unwedge the release first:"
-    hint "  helm -n $_ns rollback $_rel    (returns to the previous, working release)"
+    hint "  helm -n $_ns history $_rel     (find the newest DEPLOYED revision, then:)"
+    hint "  helm -n $_ns rollback $_rel <REVISION>    (roll back to that revision)"
     error "Reconcile of the existing client failed. Check the log for details: ${LOG_FILE:-}"
   fi
 
@@ -1320,7 +1329,8 @@ EOF
     # next run's "another operation is in progress" also exits 1.
     hint "If a re-run reports 'another operation is in progress', unwedge the release first:"
     hint "  first install:  helm -n $TB_NAMESPACE uninstall $TB_NAMESPACE    (removes only the half-installed release)"
-    hint "  upgrade:        helm -n $TB_NAMESPACE rollback $TB_NAMESPACE     (returns to the previous release)"
+    hint "  upgrade:        helm -n $TB_NAMESPACE history $TB_NAMESPACE      (find the newest DEPLOYED revision, then:)"
+    hint "                  helm -n $TB_NAMESPACE rollback $TB_NAMESPACE <REVISION>   (roll back to that revision, not a bare rollback)"
     error "Client installation failed. Check the log for details: ${LOG_FILE:-}"
   fi
 
