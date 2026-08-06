@@ -745,6 +745,16 @@ _resolve_mysql_engine() {
 # the chart's render-time guard produce its actionable error, so a genuinely
 # missing metrics-server is still caught (issue's preferred option (a)).
 _wait_for_metrics_apiservice() {
+  # Skipped entirely under the bats suite (TB_NO_SERVICE_PROGRESS, set in setup())
+  # or when kubectl is unavailable — same guard the neighbouring network-y step
+  # _download_services_progress uses. Without this the poll loop below would
+  # `sleep 3` up to the full ${TB_METRICS_WAIT_S:-120}s in every mocked
+  # install_client_helm test (kubectl absent on the CI runner just makes each
+  # `kubectl get` fail instantly, so the loop still burns its whole deadline),
+  # blowing the job's 10-min deadline. Real installs never set the flag and
+  # always have kubectl, so the wait is unchanged for them.
+  [[ -n "${TB_NO_SERVICE_PROGRESS:-}" ]] && return 0
+  has kubectl || return 0
   local _timeout_s="${TB_METRICS_WAIT_S:-}"
   case "$_timeout_s" in ''|*[!0-9]*) _timeout_s=120 ;; *) _timeout_s=$((10#$_timeout_s)) ;; esac
   local _deadline=$(( SECONDS + _timeout_s ))
