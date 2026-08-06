@@ -1633,7 +1633,12 @@ Describe "Test-Preflight" {
   It "port 6550 in use by our running cluster -> ok, does not throw (#557)" {
     Mock Test-PfUrl { "ok" }
     Mock Get-PfPortListening { $true }
-    Mock Has { $true } -ParameterFilter { $cmd -eq "k3d" }
+    # Unlike the foreign/stopped cases, ownership passes here so Test-Preflight
+    # continues into the network-reachability block, which also calls Has (for
+    # kubectl/helm/k3d). A plain default mock (k3d present + tools present ->
+    # only always-critical hosts probed) covers every call; a k3d-only
+    # -ParameterFilter would leave those later Has calls unmatched (#612 merge).
+    Mock Has { $true }
     Mock Test-ClusterRunning { $true }
     { Test-Preflight } | Should -Not -Throw
   }
