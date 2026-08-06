@@ -480,16 +480,15 @@ function Get-VerifiedDownload {
     # field failure. With $Sha256, a truncated/corrupt copy just triggers curl.exe/
     # BITS until a byte-correct copy lands.
     [string]$Sha256 = '',
-    # When set, the downloaded TEXT must contain this substring or the transport is
-    # treated as failed (#609). Used for checksum-list files that carry the expected
-    # asset line (k3d checksums.txt, helm *.sha256sum) -- a proxy error page that
-    # lacks it is caught and the next transport is tried.
-    [string]$MustContain = '',
-    # Like $MustContain but a REGEX (#611): the downloaded text must match it, else
-    # the transport is treated as failed. Used for checksum files with no fixed
-    # substring -- e.g. kubectl's .sha256 is a bare 64-hex hash, so '[0-9a-fA-F]{64}'
-    # makes a proxy HTML page (which has no such run) fall through to curl.exe/BITS
-    # instead of "succeeding" and dying at the later hex check (Bugbot).
+    # When set, the downloaded TEXT must MATCH this regex or the transport is treated
+    # as failed and the next one (curl.exe/BITS) is tried (#611). Used to gate the
+    # checksum-LIST files on the actual hash STRUCTURE, not a weak substring: an
+    # asset-name substring also appears in the request URL, so a proxy error page
+    # echoing the URL would satisfy a substring gate, "succeed" on the first
+    # transport, skip the retry, and then abort at the later hex parse (Bugbot). The
+    # call sites therefore require a 64-hex hash adjacent to the asset (k3d/helm) or
+    # anchored at the start of the body (kubectl's bare-hash .sha256) -- structure a
+    # proxy/HTML error page can't accidentally satisfy.
     [string]$MatchPattern = '',
     [string]$Label = 'download',
     [string]$Message = 'Downloading'
@@ -524,16 +523,10 @@ function Get-VerifiedDownload {
           $bad = "checksum mismatch (got $got) -- the download is truncated or altered"
         }
       }
-      if (-not $bad -and $MustContain) {
-        $text = Get-Content -LiteralPath $Dest -Raw -ErrorAction Stop
-        if ($text -notmatch [regex]::Escape($MustContain)) {
-          $bad = "the file did not contain the expected entry '$MustContain' -- likely an error page"
-        }
-      }
       if (-not $bad -and $MatchPattern) {
         $text = Get-Content -LiteralPath $Dest -Raw -ErrorAction Stop
         if ($text -notmatch $MatchPattern) {
-          $bad = "the file did not match the expected pattern -- likely an error page"
+          $bad = "the file did not match the expected checksum pattern -- likely a proxy error page; trying another method"
         }
       }
     } catch {
@@ -1645,7 +1638,7 @@ function Install-Kubectl {
   $kSums = "$env:TEMP\kubectl-sha-$([System.IO.Path]::GetRandomFileName()).txt"
   try {
     Get-VerifiedDownload -Url "https://dl.k8s.io/release/$kVer/bin/windows/$arch/kubectl.exe.sha256" `
-      -Dest $kSums -MinBytes 1 -MatchPattern '[0-9a-fA-F]{64}' `
+      -Dest $kSums -MinBytes 1 -MatchPattern '^\s*[0-9a-fA-F]{64}' `
       -Label "kubectl checksum" -Message "Fetching kubectl checksum"
   } catch {
     Remove-Item $kSums -Force -ErrorAction SilentlyContinue
@@ -1764,7 +1757,7 @@ function Install-K3dAndHelm {
       $k3dSums = "$env:TEMP\k3d-checksums-$([System.IO.Path]::GetRandomFileName()).txt"
       try {
         Get-VerifiedDownload -Url "https://github.com/k3d-io/k3d/releases/download/$k3dVer/checksums.txt" `
-          -Dest $k3dSums -MinBytes 1 -MustContain "k3d-windows-$arch.exe" `
+          -Dest $k3dSums -MinBytes 1 -MatchPattern "[0-9a-fA-F]{64}\s+\S*k3d-windows-$arch\.exe" `
           -Label "k3d checksums" -Message "Fetching k3d checksums"
       } catch {
         Remove-Item $k3dSums -Force -ErrorAction SilentlyContinue
@@ -1824,7 +1817,7 @@ function Install-K3dAndHelm {
       $helmSums = "$env:TEMP\helm-sha-$([System.IO.Path]::GetRandomFileName()).txt"
       try {
         Get-VerifiedDownload -Url "$helmUrl.sha256sum" -Dest $helmSums -MinBytes 1 `
-          -MustContain "helm-$helmVer-windows-$arch.zip" -Label "helm checksum" -Message "Fetching Helm checksum"
+          -MatchPattern "[0-9a-fA-F]{64}\s+\S*helm-\S*windows-$arch\.zip" -Label "helm checksum" -Message "Fetching Helm checksum"
       } catch {
         Remove-Item $helmSums -Force -ErrorAction SilentlyContinue
         Err "Couldn't fetch the Helm checksum ($_). Check egress to get.helm.sh and re-run."
@@ -2684,9 +2677,12 @@ function New-K3dCluster {
     $k3dExitCode = $k3dProc.ExitCode
     # Defense-in-depth (#611): if the exit code is STILL unreadable after
     # WaitForExit (Wait-ProcessWithDeadline), do not fail a cluster that k3d itself
-    # reported up -- trust its authoritative success marker over a null code.
+    # reported up -- trust its authoritative success marker over a null code. k3d
+    # logs via logrus to STDERR, so its "Cluster created successfully!" line lands in
+    # $k3dStderr, not $k3dStdout -- check BOTH streams or a real success is misread
+    # as failure (Bugbot).
     if ($null -eq $k3dExitCode) {
-      $k3dExitCode = if ($k3dStdout -match 'created successfully') { 0 } else { 1 }
+      $k3dExitCode = if ("$k3dStdout`n$k3dStderr" -match 'created successfully') { 0 } else { 1 }
     }
     Remove-Item $k3dOutLog, $k3dErrLog -Force -ErrorAction SilentlyContinue
     if ($proxyCfg) { Remove-Item (Split-Path $proxyCfg -Parent) -Recurse -Force -ErrorAction SilentlyContinue }

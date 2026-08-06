@@ -3426,16 +3426,19 @@ Describe "Get-VerifiedDownload resilience guards (#607, Bugbot)" {
 Describe "Checksum-driven tool download (#609)" {
   BeforeAll { $script:CDD = Get-Content "$PSScriptRoot/../install-k8s.ps1" -Raw }
 
-  It "Get-VerifiedDownload exposes the -Sha256, -MustContain and -MatchPattern gates" {
+  It "Get-VerifiedDownload exposes -Sha256 and -MatchPattern, and no fail-open substring gate" {
     $script:CDD | Should -Match '\[string\]\$Sha256'
-    $script:CDD | Should -Match '\[string\]\$MustContain'
     $script:CDD | Should -Match '\[string\]\$MatchPattern'
+    # -MustContain removed (Bugbot #611): a substring gate is fail-open because the
+    # asset name also appears in the request URL that a proxy error page can echo.
+    $script:CDD | Should -Not -Match 'MustContain'
   }
 
-  It "the kubectl .sha256 fetch has a content gate so a proxy page retries transports (Bugbot #611)" {
-    # kubectl's .sha256 is a bare hash (no fixed substring), so it must gate on a
-    # regex; -MinBytes 1 alone let a proxy error page 'succeed' and skip the fallbacks.
-    $script:CDD | Should -Match "kubectl\.exe\.sha256[\s\S]{0,120}-MatchPattern"
+  It "the kubectl .sha256 gate is START-anchored so a proxy page retries transports (Bugbot #611)" {
+    # kubectl's .sha256 is a bare hash; the gate must be anchored ('^...64hex') so an
+    # HTML error page (which starts with '<') fails it and falls through to curl.exe/
+    # BITS. An unanchored [0-9a-fA-F]{64} would pass on any page with a 64-hex run.
+    $script:CDD | Should -Match "kubectl\.exe\.sha256[\s\S]{0,140}-MatchPattern '\^"
   }
 
   It "a checksum mismatch is treated as a bad transport (retries the next one), not a dead end" {
@@ -3444,8 +3447,10 @@ Describe "Checksum-driven tool download (#609)" {
     $script:CDD | Should -Match "if \(-not \`$bad -and \`$Sha256\)[\s\S]{0,200}checksum mismatch"
   }
 
-  It "k3d gates the binary download on the checksum fetched first" {
-    $script:CDD | Should -Match 'checksums\.txt[\s\S]{0,160}-MustContain'
+  It "k3d gates the binary on the checksum fetched first, via a hash-anchored gate" {
+    # The checksum-list gate requires a 64-hex hash adjacent to the asset, not a bare
+    # asset-name substring (which also appears in the URL and would fail open) (Bugbot).
+    $script:CDD | Should -Match 'checksums\.txt[\s\S]{0,160}-MatchPattern "\[0-9a-fA-F\]\{64\}'
     $script:CDD | Should -Match '\$k3dUrl[\s\S]{0,160}-Sha256'
   }
 
@@ -3454,8 +3459,9 @@ Describe "Checksum-driven tool download (#609)" {
     $script:CDD | Should -Match '\$kUrl[\s\S]{0,160}-Sha256'
   }
 
-  It "helm gates the zip download on its published sha256sum (PS parity with bash)" {
+  It "helm gates the zip on its sha256sum with a hash-anchored gate (PS parity with bash)" {
     $script:CDD | Should -Match '\$helmUrl[\s\S]{0,160}-Sha256'
+    $script:CDD | Should -Match 'sha256sum[\s\S]{0,160}-MatchPattern "\[0-9a-fA-F\]\{64\}'
   }
 
   It "each extracted checksum is validated as 64 hex before it gates a download" {
@@ -3472,8 +3478,9 @@ Describe "Cluster-create exit-code reliability (#611)" {
     $script:CEC | Should -Match 'function Wait-ProcessWithDeadline[\s\S]{0,1600}\$Process\.WaitForExit\(\)[\s\S]{0,80}return \$true'
   }
 
-  It "cluster-create does not fail a cluster k3d reported up when the exit code is unreadable" {
-    # Defense-in-depth: a null exit code falls back to k3d's 'created successfully' marker.
-    $script:CEC | Should -Match "if \(\`$null -eq \`$k3dExitCode\)[\s\S]{0,160}created successfully"
+  It "the null-exit fallback checks BOTH k3d streams (logrus success goes to stderr) (Bugbot)" {
+    # k3d's 'Cluster created successfully!' is a logrus line on STDERR, so the null-
+    # exit fallback must inspect $k3dStderr too, not only $k3dStdout.
+    $script:CEC | Should -Match 'if \(\$null -eq \$k3dExitCode\)[\s\S]{0,120}k3dStdout[\s\S]{0,20}k3dStderr[\s\S]{0,40}created successfully'
   }
 }
