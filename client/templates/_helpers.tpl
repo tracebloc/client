@@ -430,3 +430,26 @@ unknown
 unknown
 {{- end -}}
 {{- end -}}
+
+{{/*
+tracebloc.durationSeconds — parse a Go/Helm duration string (as accepted by
+`helm --timeout`, e.g. "10m", "30m", "1h", "600s", "1h30m") into a whole
+number of seconds. Sums every `<int><unit>` component so compound durations
+work; recognises s/m/h/d, ignores anything else. Empty/nil input -> 0.
+Used by auto-upgrade-cronjob.yaml (#555) so the Job's activeDeadlineSeconds
+can be kept above the configured helm timeout.
+*/}}
+{{- define "tracebloc.durationSeconds" -}}
+{{- $d := . | toString -}}
+{{- $total := 0 -}}
+{{- range regexFindAll "[0-9]+[smhd]" $d -1 -}}
+{{- $num := regexFind "[0-9]+" . | atoi -}}
+{{- $unit := regexFind "[smhd]" . -}}
+{{- if eq $unit "s" -}}{{- $total = add $total $num -}}
+{{- else if eq $unit "m" -}}{{- $total = add $total (mul $num 60) -}}
+{{- else if eq $unit "h" -}}{{- $total = add $total (mul $num 3600) -}}
+{{- else if eq $unit "d" -}}{{- $total = add $total (mul $num 86400) -}}
+{{- end -}}
+{{- end -}}
+{{- $total -}}
+{{- end -}}
