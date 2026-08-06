@@ -789,6 +789,20 @@ Describe "Print-Summary" {
     $out | Should -Match "Version"
     $out | Should -Match "1\.4\.4"
   }
+  It "GPU detected but not enabled: summary says CPU + the reason, not 'NVIDIA GPU' (#616)" {
+    $script:ClientState = "connected"
+    $GPU_VENDOR = "nvidia"; $NVIDIA_DRIVER_OK = $true; $K3D_GPU_FLAG = ""
+    $GPU_SKIP_REASON = "WSL2 Ubuntu needs first-run setup (open Ubuntu once, set a username/password, then re-run)"
+    $out = Print-Summary 6>&1 | Out-String
+    $out | Should -Match "GPU detected but not enabled"
+    $out | Should -Match "first-run setup"
+  }
+  It "GPU wired into the cluster: summary shows NVIDIA GPU (#616)" {
+    $script:ClientState = "connected"
+    $GPU_VENDOR = "nvidia"; $NVIDIA_DRIVER_OK = $true; $K3D_GPU_FLAG = "--gpus=all"
+    $out = Print-Summary 6>&1 | Out-String
+    $out | Should -Match "NVIDIA GPU"
+  }
 }
 
 Describe "ConvertTo-WorkspaceName" {
@@ -1336,6 +1350,34 @@ Describe "Install-ClientHelm" {
     { Install-ClientHelm } | Should -Throw
     $script:lastErr | Should -Match 'not a valid chart repository'
     Should -Not -Invoke helm -ParameterFilter { $args -contains "upgrade" }
+  }
+  It "GPU detected but NOT wired into the cluster: jobs request no GPU (#616 CPU fallback)" {
+    # The core #616 fix: requesting nvidia.com/gpu while the node advertises 0 GPUs strands every
+    # job Pending until the SINGLE_NODE fallback rescues it. So when the GPU wasn't enabled
+    # ($K3D_GPU_FLAG empty) the values must carry NO gpu request — training runs on CPU cleanly.
+    $HOST_DATA_DIR = "$TestDrive/d-gpu-skip"
+    $script:TB_PROV_MODE = "minted"; $script:TB_PROV_ID = "uuid-g1"
+    $script:TB_PROV_PASSWORD = "pw"; $script:TB_PROV_NS = "ws-g1"
+    $GPU_VENDOR = "nvidia"; $NVIDIA_DRIVER_OK = $true; $K3D_GPU_FLAG = ""
+    Mock Read-Host { throw "must not prompt" }
+    Mock Test-Credentials { "valid" }
+    Install-ClientHelm
+    $vals = Get-Content "$HOST_DATA_DIR/values.yaml" -Raw
+    $vals | Should -Match 'GPU_REQUESTS: ""'
+    $vals | Should -Match 'GPU_LIMITS: ""'
+    $vals | Should -Not -Match 'nvidia\.com/gpu'
+  }
+  It "GPU wired into the cluster: jobs request nvidia.com/gpu (#616)" {
+    $HOST_DATA_DIR = "$TestDrive/d-gpu-on"
+    $script:TB_PROV_MODE = "minted"; $script:TB_PROV_ID = "uuid-g2"
+    $script:TB_PROV_PASSWORD = "pw"; $script:TB_PROV_NS = "ws-g2"
+    $GPU_VENDOR = "nvidia"; $NVIDIA_DRIVER_OK = $true; $K3D_GPU_FLAG = "--gpus=all"
+    Mock Read-Host { throw "must not prompt" }
+    Mock Test-Credentials { "valid" }
+    Install-ClientHelm
+    $vals = Get-Content "$HOST_DATA_DIR/values.yaml" -Raw
+    $vals | Should -Match 'GPU_REQUESTS: "nvidia\.com/gpu=1"'
+    $vals | Should -Match 'GPU_LIMITS: "nvidia\.com/gpu=1"'
   }
 }
 

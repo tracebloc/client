@@ -621,6 +621,10 @@ $CLIENT_ENV    = $env:CLIENT_ENV
 $GPU_VENDOR       = "none"
 $NVIDIA_DRIVER_OK = $false
 $K3D_GPU_FLAG     = ""
+# #616: when a GPU + driver are present but the GPU can't be wired into the cluster, this
+# holds the human-readable reason so Print-Summary + the doctor can say WHY we fell back to
+# CPU instead of silently running CPU-only. Empty = GPU enabled, or no GPU to begin with.
+$GPU_SKIP_REASON  = ""
 $ReadyTimeout     = if ($env:READY_TIMEOUT) { $env:READY_TIMEOUT } else { "300" }
 $script:ClientState = "starting"
 
@@ -1489,6 +1493,12 @@ function Show-GpuManualRemedy {
 function Install-NvidiaContainerToolkit {
   if ($GPU_VENDOR -ne "nvidia" -or -not $NVIDIA_DRIVER_OK) { return }
 
+  # #616: a GPU + valid driver are present, so from here we WANT to enable the GPU. Assume the
+  # enable won't complete and record a reason; each early-return below refines it, and the success
+  # path clears it. Print-Summary + the doctor surface $GPU_SKIP_REASON so a GPU box that silently
+  # falls back to CPU tells the user WHY, instead of looking like it "just uses CPU".
+  $script:GPU_SKIP_REASON = "the NVIDIA container-toolkit / WSL2 GPU setup did not complete (see the install log for the specific step)"
+
   Info "Setting up GPU acceleration (NVIDIA container toolkit) in WSL2 -- optional; CPU mode works either way."
   Log "Setting up NVIDIA container toolkit in WSL2"
 
@@ -1503,6 +1513,7 @@ function Install-NvidiaContainerToolkit {
     Remove-Job $wslListJob -Force
     Warn "WSL did not respond in time. Skipping GPU container toolkit."
     Hint "Run 'wsl --update' manually, then re-run this script for GPU support."
+    $script:GPU_SKIP_REASON = "WSL did not respond (run 'wsl --update', then re-run the installer)"
     Show-GpuManualRemedy
     return
   }
@@ -1526,6 +1537,7 @@ function Install-NvidiaContainerToolkit {
       Hint "Install it manually, then re-run this script for GPU support:"
       Hint "    wsl --install -d Ubuntu"
       Hint "Then check status and re-run tracebloc:  tracebloc doctor"
+      $script:GPU_SKIP_REASON = "WSL2 Ubuntu install timed out (install it manually: wsl --install -d Ubuntu, then re-run)"
       return
     }
     Receive-Job $ubuntuJob | Out-Null
@@ -1533,6 +1545,7 @@ function Install-NvidiaContainerToolkit {
     Warn "Ubuntu WSL2 installed but needs first-run setup."
     Hint "Open Ubuntu from the Start Menu and set a username/password."
     Hint "Then re-run this script for GPU support."
+    $script:GPU_SKIP_REASON = "WSL2 Ubuntu needs first-run setup (open Ubuntu once, set a username/password, then re-run)"
     return
   }
 
@@ -1584,6 +1597,7 @@ echo "NCT installed successfully."
     Remove-Job $nctInstallJob -Force
     Remove-Item $scriptPath -Force -ErrorAction SilentlyContinue
     Warn "GPU container toolkit installation timed out."
+    $script:GPU_SKIP_REASON = "NVIDIA Container Toolkit install timed out (often a blocked apt repo / proxy on restricted networks)"
     Show-GpuManualRemedy -Distro $wslDistro
     return
   }
@@ -1603,13 +1617,16 @@ echo "NCT installed successfully."
       Ok "GPU acceleration ready -- NVIDIA Container Toolkit in ${wslDistro}: $nctVer"
       Log "NVIDIA Container Toolkit in WSL2: $nctVer"
       $script:K3D_GPU_FLAG = "--gpus=all"
+      $script:GPU_SKIP_REASON = ""   # GPU fully wired into the cluster -- nothing to warn about
     } else {
       Warn "GPU toolkit installed but could not be verified."
+      $script:GPU_SKIP_REASON = "NVIDIA Container Toolkit installed but could not be verified"
       Show-GpuManualRemedy -Distro $wslDistro
     }
   } else {
     Remove-Job $verJob -Force
     Warn "GPU toolkit verification timed out."
+    $script:GPU_SKIP_REASON = "NVIDIA Container Toolkit verification timed out"
     Show-GpuManualRemedy -Distro $wslDistro
   }
 }
@@ -3572,10 +3589,21 @@ function Install-ClientHelm {
     Log "Mirror credentials provided -- minting an imagePullSecret for the mirror."
   }
 
+  # #616: request a GPU for training jobs ONLY when the GPU was actually wired into the cluster
+  # ($K3D_GPU_FLAG, set by Install-NvidiaContainerToolkit). Requesting nvidia.com/gpu while the
+  # node advertises 0 GPUs strands every job Pending ("Insufficient nvidia.com/gpu") until the
+  # SINGLE_NODE fallback downgrades it to CPU -- so gate on the SAME condition that PROVISIONS the
+  # GPU (device plugin + --gpus=all), not merely on detection. CPU stays the safe fallback: an
+  # empty gpuVal means no GPU request and training runs on CPU.
   $gpuVal = ""
-  if ($GPU_VENDOR -eq "nvidia" -and $NVIDIA_DRIVER_OK) {
+  if ($GPU_VENDOR -eq "nvidia" -and $NVIDIA_DRIVER_OK -and $K3D_GPU_FLAG -ne "") {
     $gpuVal = "nvidia.com/gpu=1"
-    Log "NVIDIA GPU -- setting GPU_LIMITS and GPU_REQUESTS to nvidia.com/gpu=1"
+    Log "NVIDIA GPU enabled in the cluster -- setting GPU_LIMITS/GPU_REQUESTS to nvidia.com/gpu=1"
+  } elseif ($GPU_VENDOR -eq "nvidia" -and $NVIDIA_DRIVER_OK) {
+    # GPU + driver present but not wired into the cluster -- do NOT request it (would strand jobs).
+    Log "NVIDIA GPU detected but NOT enabled in the cluster -- GPU_LIMITS/GPU_REQUESTS left empty (CPU mode)"
+    if ($GPU_SKIP_REASON) { Warn ("GPU detected but not enabled -- running CPU-only: " + $GPU_SKIP_REASON) }
+    else { Warn "GPU detected but not enabled -- running CPU-only (see the install log for details)." }
   } else {
     Log "No NVIDIA GPU -- GPU_LIMITS and GPU_REQUESTS left empty"
   }
@@ -3803,8 +3831,12 @@ function Write-NotReadyDetail {
 # The "secure compute environment / your data never leaves" claim is printed
 # ONLY when the client is verifiably connected -- never on a partial/failed run.
 function Print-Summary {
+  # #616: only claim "NVIDIA GPU" when the GPU was actually wired into the cluster
+  # ($K3D_GPU_FLAG). A GPU detected but not enabled runs CPU-only, and the summary says so
+  # (with the reason) rather than implying acceleration that isn't there.
   $mode = "CPU"
-  if ($GPU_VENDOR -eq "nvidia" -and $NVIDIA_DRIVER_OK) { $mode = "NVIDIA GPU" }
+  if ($GPU_VENDOR -eq "nvidia" -and $NVIDIA_DRIVER_OK -and $K3D_GPU_FLAG -ne "") { $mode = "NVIDIA GPU" }
+  elseif ($GPU_VENDOR -eq "nvidia" -and $NVIDIA_DRIVER_OK) { $mode = if ($GPU_SKIP_REASON) { "CPU (GPU detected but not enabled: $GPU_SKIP_REASON)" } else { "CPU (GPU detected but not enabled)" } }
   elseif ($GPU_VENDOR -eq "nvidia" -and -not $NVIDIA_DRIVER_OK) { $mode = "CPU (NVIDIA driver update needed)" }
   $ns = $script:TB_NAMESPACE
   $line = [string]([char]0x2501) * 46
@@ -3898,7 +3930,7 @@ function Print-Summary {
   Log "  k3d cluster stop $CLUSTER_NAME"
   Log "  k3d cluster start $CLUSTER_NAME"
   Log "  k3d cluster delete $CLUSTER_NAME"
-  if ($GPU_VENDOR -eq "nvidia" -and $NVIDIA_DRIVER_OK) {
+  if ($GPU_VENDOR -eq "nvidia" -and $NVIDIA_DRIVER_OK -and $K3D_GPU_FLAG -ne "") {
     Log '  GPU test: kubectl run gpu-test --rm -it --image=nvidia/cuda:12.3.1-base-ubuntu22.04 --limits="nvidia.com/gpu=1" -- nvidia-smi'
   }
   Log "=== End Advanced Info ==="
