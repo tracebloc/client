@@ -296,22 +296,38 @@ data:
 
       if [ "$prev_count" -ge "$MAX_REFRESH_ATTEMPTS" ]; then
         # In back-off. Counts at/above MAX encode MAX failures plus one extra per
-        # settled tick spent waiting for the flap to clear.
+        # settled tick spent waiting for the flap to clear. Reaching this branch
+        # means THIS tick already passed the top-of-tick settled guard, so it is
+        # itself a settled observation -- the number of settled cooldown ticks
+        # seen INCLUDING this one is settled_ticks + 1.
         settled_ticks=$(( prev_count - MAX_REFRESH_ATTEMPTS ))
-        if [ "$settled_ticks" -lt "$BACKOFF_RESUME_AFTER" ]; then
+        cooldown_seen=$(( settled_ticks + 1 ))
+        # #626 review (off-by-one): resume on the tick that REACHES
+        # BACKOFF_RESUME_AFTER settled observations, not the one after it. The
+        # earlier `settled_ticks -lt RESUME` logged "Settled 4/4" and still
+        # exited, delaying resume by one whole tick (~15m). Compare the count
+        # INCLUDING this tick, so 4/4 resumes now.
+        if [ "$cooldown_seen" -lt "$BACKOFF_RESUME_AFTER" ]; then
           # Still cooling down: record this settled observation to advance the
           # cooldown and skip the restart -- do NOT churn a flapping deployment.
           kubectl annotate deployment -n "$RELEASE_NAMESPACE" "$DEPLOYMENT_NAME" \
             "${ATTEMPT_KEY}=${signature} $(( prev_count + 1 ))" \
             --overwrite --request-timeout=15s
-          log "  WARN: rollout for the current target digest(s) failed ${MAX_REFRESH_ATTEMPTS} time(s) in a row; backing off (not restarting). deployment/${DEPLOYMENT_NAME} is likely flapping (becomes Ready then crashes) -- investigate it. Settled $(( settled_ticks + 1 ))/${BACKOFF_RESUME_AFTER} cooldown tick(s); refresh retries once it stays settled through the cooldown, or immediately if the target digest changes."
+          log "  WARN: rollout for the current target digest(s) failed ${MAX_REFRESH_ATTEMPTS} time(s) in a row; backing off (not restarting). deployment/${DEPLOYMENT_NAME} is likely flapping (becomes Ready then crashes) -- investigate it. Settled ${cooldown_seen}/${BACKOFF_RESUME_AFTER} cooldown tick(s); refresh retries once it stays settled through the cooldown, or immediately if the target digest changes."
           log "tick complete"
           exit 0
         fi
-        # Stayed settled through the whole cooldown -- the flap has cleared.
-        # Reset and retry the refresh from scratch.
-        log "  deployment/${DEPLOYMENT_NAME} stayed settled through the back-off cooldown (${BACKOFF_RESUME_AFTER} tick(s)); resetting attempt counter and resuming refresh"
-        prev_count=0
+        # Stayed settled for the full cooldown -- grant exactly ONE resume
+        # attempt. #626 review (burst): do NOT reset the counter to 0. That would
+        # hand a still-flapping deployment a fresh budget of MAX restarts on the
+        # next few consecutive settled ticks -- a ReplicaSet-churn burst that
+        # breaks the "at most once per cooldown" guarantee. Instead set
+        # prev_count = MAX-1 so new_count = MAX below and a SINGLE restart is
+        # issued; if that attempt also fails, the persisted count is MAX and the
+        # very next settled tick re-enters back-off immediately. A genuinely
+        # healthy deployment succeeds on this one attempt and clears the counter.
+        log "  deployment/${DEPLOYMENT_NAME} stayed settled through the back-off cooldown (${BACKOFF_RESUME_AFTER}/${BACKOFF_RESUME_AFTER} tick(s)); granting exactly one resume restart attempt (re-enters back-off immediately if it fails again)"
+        prev_count=$(( MAX_REFRESH_ATTEMPTS - 1 ))
       fi
 
       new_count=$(( prev_count + 1 ))
