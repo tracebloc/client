@@ -40,7 +40,7 @@ jobs:
     name: Helm lint
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Set up Helm
         uses: azure/setup-helm@1a275c3b69536ee54be43f2070a358922e12c8d4 # v4.3.1
@@ -79,7 +79,7 @@ jobs:
       KUBECONFORM_VERSION: "0.8.0"
       KUBECONFORM_SHA256: "9bc2bffbf71f261128533edaf912153948b7ff238f9a531ae6d34466ec287883"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Set up Helm
         uses: azure/setup-helm@1a275c3b69536ee54be43f2070a358922e12c8d4 # v4.3.1
@@ -140,7 +140,7 @@ jobs:
     name: Helm unit tests
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Set up Helm
         uses: azure/setup-helm@1a275c3b69536ee54be43f2070a358922e12c8d4 # v4.3.1
@@ -169,7 +169,7 @@ jobs:
     name: Spawned ingestor image is multi-arch
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - name: Assert the ingestor tag and pinned digests are multi-arch
         run: |
           repo=$(yq '.images.ingestor.repository' client/values.yaml)
@@ -242,7 +242,7 @@ jobs:
     name: Fleet auto-upgrade E2E (k3d)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - name: Upgrade from last published release through both flag paths
         run: bash scripts/tests/e2e-auto-upgrade.sh
 
@@ -261,7 +261,7 @@ jobs:
     name: Seal-check egress-enforcement (k3d)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - name: Run the live egress-enforcement seal-check
         run: bash scripts/tests/e2e-seal-check.sh
 
@@ -292,7 +292,7 @@ jobs:
       TB_E2E_CLIENT_ID: ${{ secrets.TB_E2E_CLIENT_ID }}
       TB_E2E_CLIENT_PASSWORD: ${{ secrets.TB_E2E_CLIENT_PASSWORD }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - name: Run the full seal suite (skips until the e2e-test-agent is provisioned)
         run: |
           if [ -z "$TB_E2E_CLIENT_ID" ] || [ -z "$TB_E2E_CLIENT_PASSWORD" ]; then
