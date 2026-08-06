@@ -160,7 +160,10 @@ data:
     #   * non-zero return         → we could not read it (do NOT assume absent)
     get_annotation() {
       _key="$1"
-      _json="$(kubectl get deployment -n "$RELEASE_NAMESPACE" "$DEPLOYMENT_NAME" -o json)" || return 1
+      # --request-timeout bounds the API call so a wedged apiserver returns a read
+      # ERROR (→ non-zero → fail-closed skip) instead of hanging the tick until
+      # activeDeadlineSeconds while concurrencyPolicy:Forbid blocks later runs.
+      _json="$(kubectl get deployment -n "$RELEASE_NAMESPACE" "$DEPLOYMENT_NAME" -o json --request-timeout=15s)" || return 1
       printf '%s\n' "$_json" | jq -r --arg k "$_key" '.metadata.annotations[$k] // empty'
     }
 
