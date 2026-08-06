@@ -3596,9 +3596,13 @@ Describe "GPU cluster wiring (#616 source guards)" {
     $script:GSRC | Should -Match '\$k3dArgs \+= @\("--image", \$K3S_CUDA_IMAGE\)'
     $script:GSRC | Should -Match '\$k3dArgs \+= @\("--image", "rancher/k3s:\$K8S_VERSION"\)'
   }
-  It "the custom image ref defaults to the GHCR k3s-cuda tag and is env-overridable" {
+  It "the custom image ref defaults to GHCR, is env-overridable, and re-homes onto a mirror" {
     $script:GSRC | Should -Match 'TRACEBLOC_K3S_CUDA_IMAGE'
-    $script:GSRC | Should -Match 'ghcr\.io/tracebloc/k3s-cuda:\$K8S_VERSION-cuda-\$CUDA_BASE_TAG'
+    $script:GSRC | Should -Match '\$cudaRepo = "tracebloc/k3s-cuda:\$K8S_VERSION-cuda-\$CUDA_BASE_TAG"'
+    $script:GSRC | Should -Match '"ghcr\.io/\$cudaRepo"'
+    # air-gap: the one installer command re-homes the GPU image onto the mirror (#585)
+    $script:GSRC | Should -Match 'TRACEBLOC_IMAGE_REGISTRY'
+    $script:GSRC | Should -Match '"\$mirrorHost/\$cudaRepo"'
   }
   It "the docker-run probe is the authoritative gate: it sets/clears K3D_GPU_FLAG" {
     $script:GSRC | Should -Match 'if \(Confirm-DockerGpu\)'

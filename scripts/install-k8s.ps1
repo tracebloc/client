@@ -627,10 +627,23 @@ $K3D_GPU_FLAG     = ""
 $GPU_SKIP_REASON  = ""
 # #616: the CUDA base + custom k3s-CUDA node image used when the GPU is enabled. The k3s-CUDA
 # tag encodes both the k3s pin ($K8S_VERSION) and the CUDA base, matching docker/k3s-cuda/build.sh.
-# TRACEBLOC_K3S_CUDA_IMAGE overrides the whole ref (e.g. a private mirror); TRACEBLOC_CUDA_BASE_TAG
-# overrides just the CUDA base used for the capability probe and the default tag.
+# The installer PULLS this image automatically at cluster-create — the user never builds or pulls
+# anything by hand. TRACEBLOC_K3S_CUDA_IMAGE overrides the whole ref; TRACEBLOC_CUDA_BASE_TAG
+# overrides just the CUDA base used for the capability probe and the default tag. When a private
+# mirror is configured (TRACEBLOC_IMAGE_REGISTRY, #585) the default re-homes onto it so the one
+# installer command works air-gapped, same as every other image.
 $CUDA_BASE_TAG  = if ($env:TRACEBLOC_CUDA_BASE_TAG) { $env:TRACEBLOC_CUDA_BASE_TAG } else { "12.4.1-base-ubuntu22.04" }
-$K3S_CUDA_IMAGE = if ($env:TRACEBLOC_K3S_CUDA_IMAGE) { $env:TRACEBLOC_K3S_CUDA_IMAGE } else { "ghcr.io/tracebloc/k3s-cuda:$K8S_VERSION-cuda-$CUDA_BASE_TAG" }
+$K3S_CUDA_IMAGE = if ($env:TRACEBLOC_K3S_CUDA_IMAGE) {
+  $env:TRACEBLOC_K3S_CUDA_IMAGE
+} else {
+  $cudaRepo = "tracebloc/k3s-cuda:$K8S_VERSION-cuda-$CUDA_BASE_TAG"
+  if ($env:TRACEBLOC_IMAGE_REGISTRY) {
+    $mirrorHost = ($env:TRACEBLOC_IMAGE_REGISTRY -replace '^[a-zA-Z][a-zA-Z0-9+.\-]*://', '') -replace '/+$', ''
+    "$mirrorHost/$cudaRepo"
+  } else {
+    "ghcr.io/$cudaRepo"
+  }
+}
 $ReadyTimeout     = if ($env:READY_TIMEOUT) { $env:READY_TIMEOUT } else { "300" }
 $script:ClientState = "starting"
 
