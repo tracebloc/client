@@ -625,6 +625,12 @@ $K3D_GPU_FLAG     = ""
 # holds the human-readable reason so Print-Summary + the doctor can say WHY we fell back to
 # CPU instead of silently running CPU-only. Empty = GPU enabled, or no GPU to begin with.
 $GPU_SKIP_REASON  = ""
+# #616: the CUDA base + custom k3s-CUDA node image used when the GPU is enabled. The k3s-CUDA
+# tag encodes both the k3s pin ($K8S_VERSION) and the CUDA base, matching docker/k3s-cuda/build.sh.
+# TRACEBLOC_K3S_CUDA_IMAGE overrides the whole ref (e.g. a private mirror); TRACEBLOC_CUDA_BASE_TAG
+# overrides just the CUDA base used for the capability probe and the default tag.
+$CUDA_BASE_TAG  = if ($env:TRACEBLOC_CUDA_BASE_TAG) { $env:TRACEBLOC_CUDA_BASE_TAG } else { "12.4.1-base-ubuntu22.04" }
+$K3S_CUDA_IMAGE = if ($env:TRACEBLOC_K3S_CUDA_IMAGE) { $env:TRACEBLOC_K3S_CUDA_IMAGE } else { "ghcr.io/tracebloc/k3s-cuda:$K8S_VERSION-cuda-$CUDA_BASE_TAG" }
 $ReadyTimeout     = if ($env:READY_TIMEOUT) { $env:READY_TIMEOUT } else { "300" }
 $script:ClientState = "starting"
 
@@ -1631,6 +1637,31 @@ echo "NCT installed successfully."
   }
 }
 
+# #616: the AUTHORITATIVE GPU gate. Install-NvidiaContainerToolkit configures the user's own
+# WSL distro, but k3d talks to Docker Desktop's OWN daemon (the `docker-desktop` distro), so
+# toolkit-in-Ubuntu success is not a reliable signal that a GPU can reach a container. The only
+# reliable test is to actually run one: `docker run --gpus all ... nvidia-smi`. With the custom
+# k3s-CUDA node image providing the in-cluster runtime, this Docker-Desktop passthrough is the
+# real prerequisite. Gating on it means we enable GPU only when the cluster will really get one,
+# and never create a `--gpus` cluster that would fail. Best-effort + bounded; failure => CPU.
+function Confirm-DockerGpu {
+  if ($GPU_VENDOR -ne "nvidia" -or -not $NVIDIA_DRIVER_OK) { return $false }
+  $probeImg = "nvidia/cuda:$CUDA_BASE_TAG"
+  Log "Probing Docker GPU passthrough: docker run --rm --gpus all $probeImg nvidia-smi"
+  try {
+    $out = (docker run --rm --gpus all $probeImg nvidia-smi 2>&1 | Out-String)
+    if ($LASTEXITCODE -eq 0 -and $out -match 'NVIDIA-SMI|CUDA Version|Driver Version') {
+      Log "Docker GPU passthrough OK"
+      return $true
+    }
+    Log "Docker GPU probe failed (exit $LASTEXITCODE): $out"
+    return $false
+  } catch {
+    Log "Docker GPU probe error: $($_.Exception.Message)"
+    return $false
+  }
+}
+
 # =============================================================================
 #  SYSTEM TOOLS (kubectl, k3d, helm)
 # =============================================================================
@@ -2593,7 +2624,15 @@ function New-K3dCluster {
       Hint "The chart is validated against a specific k3s release; 'latest' is unsupported and has stranded installs (#547)."
       Hint "Unset K8S_VERSION (or pin it to a validated tag) to use the tested version."
     } elseif ($K8S_VERSION -ne "") {
-      $k3dArgs += @("--image", "rancher/k3s:$K8S_VERSION")
+      # #616: a GPU-enabled cluster needs the custom k3s-CUDA node image (NVIDIA runtime +
+      # device plugin baked in); a normal cluster uses the stock k3s. Both are the SAME pinned
+      # k3s ($K8S_VERSION) -- the CUDA image just rebuilds it on a GPU-capable base.
+      if ($K3D_GPU_FLAG -ne "") {
+        $k3dArgs += @("--image", $K3S_CUDA_IMAGE)
+        Log "GPU node image: $K3S_CUDA_IMAGE"
+      } else {
+        $k3dArgs += @("--image", "rancher/k3s:$K8S_VERSION")
+      }
     }
     if ($K3D_GPU_FLAG -ne "") {
       $k3dArgs += $K3D_GPU_FLAG
@@ -3596,9 +3635,13 @@ function Install-ClientHelm {
   # GPU (device plugin + --gpus=all), not merely on detection. CPU stays the safe fallback: an
   # empty gpuVal means no GPU request and training runs on CPU.
   $gpuVal = ""
+  $runtimeClass = ""
   if ($GPU_VENDOR -eq "nvidia" -and $NVIDIA_DRIVER_OK -and $K3D_GPU_FLAG -ne "") {
     $gpuVal = "nvidia.com/gpu=1"
-    Log "NVIDIA GPU enabled in the cluster -- setting GPU_LIMITS/GPU_REQUESTS to nvidia.com/gpu=1"
+    # #616: spawned training pods must run under the `nvidia` RuntimeClass (baked into the custom
+    # k3s-CUDA image) to actually use the GPU; jobs-manager threads RUNTIME_CLASS_NAME into every pod.
+    $runtimeClass = "nvidia"
+    Log "NVIDIA GPU enabled -- GPU_LIMITS/GPU_REQUESTS=nvidia.com/gpu=1, RUNTIME_CLASS_NAME=nvidia"
   } elseif ($GPU_VENDOR -eq "nvidia" -and $NVIDIA_DRIVER_OK) {
     # GPU + driver present but not wired into the cluster -- do NOT request it (would strand jobs).
     Log "NVIDIA GPU detected but NOT enabled in the cluster -- GPU_LIMITS/GPU_REQUESTS left empty (CPU mode)"
@@ -3623,7 +3666,7 @@ function Install-ClientHelm {
   RESOURCE_REQUESTS: "$trainingSize"
   GPU_LIMITS: "$gpuVal"
   GPU_REQUESTS: "$gpuVal"
-  RUNTIME_CLASS_NAME: ""
+  RUNTIME_CLASS_NAME: "$runtimeClass"
 
 storageClass:
   create: true
@@ -4767,6 +4810,24 @@ Step 2 $script:INSTALL_STEPS.Count "Installing system tools"
 Install-Winget
 Install-DockerDesktop
 Install-NvidiaContainerToolkit
+# #616: the docker-run probe is the AUTHORITATIVE GPU gate. Docker Desktop uses its own WSL
+# distro, so the toolkit-in-Ubuntu step above isn't a reliable signal; and with the custom
+# k3s-CUDA node image providing the in-cluster runtime, what actually matters is whether Docker
+# can expose the GPU to a container. Enable GPU iff the probe passes -- else CPU fallback
+# (Layer 1) with a clear reason, and never create a --gpus cluster that would fail.
+if ($GPU_VENDOR -eq "nvidia" -and $NVIDIA_DRIVER_OK) {
+  if (Confirm-DockerGpu) {
+    $K3D_GPU_FLAG = "--gpus=all"
+    $GPU_SKIP_REASON = ""
+    Ok "GPU enabled -- cluster will use the custom k3s-CUDA image with --gpus=all"
+  } else {
+    $K3D_GPU_FLAG = ""
+    if (-not $GPU_SKIP_REASON) {
+      $GPU_SKIP_REASON = "Docker Desktop can't expose the GPU to containers (enable GPU support in Docker Desktop, and update the WSL2 NVIDIA driver)"
+    }
+    Warn ("GPU detected but not enabled -- running CPU-only: " + $GPU_SKIP_REASON)
+  }
+}
 Install-Kubectl
 Install-K3dAndHelm
 

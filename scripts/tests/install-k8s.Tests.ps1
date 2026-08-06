@@ -1366,6 +1366,7 @@ Describe "Install-ClientHelm" {
     $vals | Should -Match 'GPU_REQUESTS: ""'
     $vals | Should -Match 'GPU_LIMITS: ""'
     $vals | Should -Not -Match 'nvidia\.com/gpu'
+    $vals | Should -Match 'RUNTIME_CLASS_NAME: ""'
   }
   It "GPU wired into the cluster: jobs request nvidia.com/gpu (#616)" {
     $HOST_DATA_DIR = "$TestDrive/d-gpu-on"
@@ -1378,6 +1379,7 @@ Describe "Install-ClientHelm" {
     $vals = Get-Content "$HOST_DATA_DIR/values.yaml" -Raw
     $vals | Should -Match 'GPU_REQUESTS: "nvidia\.com/gpu=1"'
     $vals | Should -Match 'GPU_LIMITS: "nvidia\.com/gpu=1"'
+    $vals | Should -Match 'RUNTIME_CLASS_NAME: "nvidia"'
   }
 }
 
@@ -3562,5 +3564,48 @@ Describe "Local chart path support (#611 — Windows/bash parity)" {
   }
   It "errors if TRACEBLOC_CHART_PATH is set but is not a directory" {
     $script:LCP | Should -Match 'TRACEBLOC_CHART_PATH is set but is not a directory'
+  }
+}
+
+Describe "Confirm-DockerGpu (#616 authoritative GPU gate)" {
+  BeforeEach { $GPU_VENDOR = "nvidia"; $NVIDIA_DRIVER_OK = $true; $CUDA_BASE_TAG = "12.4.1-base-ubuntu22.04" }
+  It "returns true when 'docker run --gpus all ... nvidia-smi' succeeds" {
+    Mock docker { $global:LASTEXITCODE = 0; "NVIDIA-SMI 550.x   Driver Version: 550.x   CUDA Version: 12.4" }
+    Confirm-DockerGpu | Should -BeTrue
+    Should -Invoke docker -ParameterFilter { ($args -contains "run") -and ($args -contains "--gpus") }
+  }
+  It "returns false when docker exits non-zero (no GPU passthrough)" {
+    Mock docker { $global:LASTEXITCODE = 125; "docker: could not select device driver with capabilities: [[gpu]]" }
+    Confirm-DockerGpu | Should -BeFalse
+  }
+  It "returns false when output lacks the nvidia-smi banner even on exit 0" {
+    Mock docker { $global:LASTEXITCODE = 0; "some unrelated output" }
+    Confirm-DockerGpu | Should -BeFalse
+  }
+  It "short-circuits to false without invoking docker when there is no NVIDIA GPU" {
+    $GPU_VENDOR = "none"; $NVIDIA_DRIVER_OK = $false
+    Mock docker { throw "docker must not be probed without a GPU" }
+    Confirm-DockerGpu | Should -BeFalse
+    Should -Not -Invoke docker
+  }
+}
+
+Describe "GPU cluster wiring (#616 source guards)" {
+  BeforeAll { $script:GSRC = Get-Content "$PSScriptRoot/../install-k8s.ps1" -Raw }
+  It "a GPU cluster uses the custom k3s-CUDA image, a normal one uses stock k3s" {
+    $script:GSRC | Should -Match '\$k3dArgs \+= @\("--image", \$K3S_CUDA_IMAGE\)'
+    $script:GSRC | Should -Match '\$k3dArgs \+= @\("--image", "rancher/k3s:\$K8S_VERSION"\)'
+  }
+  It "the custom image ref defaults to the GHCR k3s-cuda tag and is env-overridable" {
+    $script:GSRC | Should -Match 'TRACEBLOC_K3S_CUDA_IMAGE'
+    $script:GSRC | Should -Match 'ghcr\.io/tracebloc/k3s-cuda:\$K8S_VERSION-cuda-\$CUDA_BASE_TAG'
+  }
+  It "the docker-run probe is the authoritative gate: it sets/clears K3D_GPU_FLAG" {
+    $script:GSRC | Should -Match 'if \(Confirm-DockerGpu\)'
+    $script:GSRC | Should -Match '\$K3D_GPU_FLAG = "--gpus=all"'
+  }
+  It "GPU-enabled installs request the nvidia RuntimeClass for spawned pods" {
+    $script:GSRC | Should -Match '\$runtimeClass = "nvidia"'
+    $script:GSRC | Should -Match 'RUNTIME_CLASS_NAME: "\$runtimeClass"'
   }
 }
