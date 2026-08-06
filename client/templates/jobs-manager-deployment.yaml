@@ -253,14 +253,17 @@ spec:
           value: {{ if hasKey .Values.env "RESOURCE_REQUESTS" }}{{ .Values.env.RESOURCE_REQUESTS | quote }}{{ else }}"cpu=2,memory=8Gi"{{ end }}
         - name: RESOURCE_LIMITS
           value: {{ if hasKey .Values.env "RESOURCE_LIMITS" }}{{ .Values.env.RESOURCE_LIMITS | quote }}{{ else }}"cpu=2,memory=8Gi"{{ end }}
-        - name: GPU_REQUESTS
-          value: {{ if hasKey .Values.env "GPU_REQUESTS" }}{{ .Values.env.GPU_REQUESTS | quote }}{{ else }}"nvidia.com/gpu=1"{{ end }}
-        # #343: only stamp GPU_LIMITS when a GPU is actually configured. A
+        # #343: only stamp the GPU vars when a GPU is actually configured. A
         # CPU-only install writes GPU_LIMITS: "" (empty), and a chart-direct
         # install may omit the key entirely — in both cases emitting the var
         # (or its "nvidia.com/gpu=1" default) surfaces a phantom GPU in the
-        # CLI resources view. Render it only for a non-empty value.
+        # CLI resources view. GPU_REQUESTS is gated on the SAME condition so a
+        # CPU-only install emits NEITHER var, and a GPU install emits BOTH
+        # (a lone GPU request with no matching limit is rejected by the API
+        # server). Render only for a non-empty GPU_LIMITS value.
         {{- if (default "" .Values.env.GPU_LIMITS) }}
+        - name: GPU_REQUESTS
+          value: {{ if hasKey .Values.env "GPU_REQUESTS" }}{{ .Values.env.GPU_REQUESTS | quote }}{{ else }}"nvidia.com/gpu=1"{{ end }}
         - name: GPU_LIMITS
           value: {{ .Values.env.GPU_LIMITS | quote }}
         {{- end }}
@@ -325,11 +328,13 @@ spec:
           value: {{ if hasKey .Values.env "RESOURCE_REQUESTS" }}{{ .Values.env.RESOURCE_REQUESTS | quote }}{{ else }}"cpu=2,memory=8Gi"{{ end }}
         - name: RESOURCE_LIMITS
           value: {{ if hasKey .Values.env "RESOURCE_LIMITS" }}{{ .Values.env.RESOURCE_LIMITS | quote }}{{ else }}"cpu=2,memory=8Gi"{{ end }}
+        # #343: only stamp the GPU vars when a GPU is actually configured (see
+        # the api container above) — GPU_REQUESTS and GPU_LIMITS share one gate
+        # so a CPU-only install emits neither (no phantom GPU in the CLI view)
+        # and a GPU install emits both (request == limit).
+        {{- if (default "" .Values.env.GPU_LIMITS) }}
         - name: GPU_REQUESTS
           value: {{ if hasKey .Values.env "GPU_REQUESTS" }}{{ .Values.env.GPU_REQUESTS | quote }}{{ else }}"nvidia.com/gpu=1"{{ end }}
-        # #343: only stamp GPU_LIMITS when a GPU is actually configured (see the
-        # api container above) — a phantom GPU otherwise leaks to the CLI view.
-        {{- if (default "" .Values.env.GPU_LIMITS) }}
         - name: GPU_LIMITS
           value: {{ .Values.env.GPU_LIMITS | quote }}
         {{- end }}
