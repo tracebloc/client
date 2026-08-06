@@ -244,6 +244,47 @@ Describe "Test-ClusterRunningInList (#420 Bugbot: running, not just present)" {
   }
 }
 
+# #557 Bugbot (High, CID 3728714531): "absent cluster misclassified as unknown".
+# The classifier keys off a FULL `k3d cluster list` (no name filter), so an absent
+# cluster is a definite 'down' (a foreign 6550 listener still hard-fails), and only
+# a timed-out / failed list is 'unknown' (warn-and-proceed).
+Describe "Get-ClusterRunState tri-state (#557 Bugbot 3728714531: absent != unknown)" {
+  Context "Get-ClusterRunStateFromList (pure, full 'k3d cluster list' output)" {
+    It "named cluster present with >=1 server -> 'running'" {
+      Get-ClusterRunStateFromList -Json '[{"name":"tracebloc","serversRunning":1}]' -Name 'tracebloc' | Should -Be 'running'
+    }
+    It "named cluster present but STOPPED (serversRunning=0) -> 'down'" {
+      Get-ClusterRunStateFromList -Json '[{"name":"tracebloc","serversRunning":0}]' -Name 'tracebloc' | Should -Be 'down'
+    }
+    It "cluster ABSENT from a successful list -> 'down', NOT 'unknown' (the bug)" {
+      Get-ClusterRunStateFromList -Json '[{"name":"other","serversRunning":1}]' -Name 'tracebloc' | Should -Be 'down'
+    }
+    It "empty list [] (no clusters at all) -> 'down'" {
+      Get-ClusterRunStateFromList -Json '[]' -Name 'tracebloc' | Should -Be 'down'
+    }
+    It "empty / unparseable output (k3d itself failed) -> 'unknown'" {
+      Get-ClusterRunStateFromList -Json ''          -Name 'tracebloc' | Should -Be 'unknown'
+      Get-ClusterRunStateFromList -Json '{not json' -Name 'tracebloc' | Should -Be 'unknown'
+    }
+  }
+  Context "Get-ClusterRunState (bounded: timeout vs completed)" {
+    It "a full-list TIMEOUT -> 'unknown' (warn-and-proceed, never treated as foreign)" {
+      Mock Start-Job { [pscustomobject]@{ Id = 1 } }
+      Mock Wait-JobWithProgress { $false }         # deadline hit -> indeterminate
+      Mock Receive-Job { }
+      Mock Remove-Job { }
+      Get-ClusterRunState | Should -Be 'unknown'
+    }
+    It "an ABSENT cluster from a COMPLETED list -> 'down' (confidently not ours -> hard-fail)" {
+      Mock Start-Job { [pscustomobject]@{ Id = 1 } }
+      Mock Wait-JobWithProgress { $true }          # list ran to completion
+      Mock Receive-Job { '[]' }                    # ...and there are no clusters
+      Mock Remove-Job { }
+      Get-ClusterRunState | Should -Be 'down'
+    }
+  }
+}
+
 Describe "Test-ClientHealthy (#420 Bugbot: verify workloads Ready, not just cluster)" {
   It "Get-ClientDeploymentNames lists the three client workloads for a namespace" {
     Get-ClientDeploymentNames -Namespace 'acme' |

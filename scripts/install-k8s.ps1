@@ -859,12 +859,16 @@ function Test-ToolsPresent {
   return $true
 }
 
-# Pure TRI-STATE classifier from `k3d cluster list -o json` output. Distinguishes
-# "confidently not ours" from "can't tell" so callers never conflate an
-# indeterminate read with a definitive answer (#557 Bugbot 3728340365):
+# Pure TRI-STATE classifier from a FULL `k3d cluster list -o json` (no name filter)
+# output. Distinguishes "confidently not ours" from "can't tell" so callers never
+# conflate an indeterminate read with a definitive answer (#557 Bugbot 3728340365,
+# 3728714531). Keyed on a SUCCESSFUL full listing (which always emits at least `[]`),
+# so an ABSENT cluster is a definite answer, not an error:
 #   'running' — <Name> is present with >=1 server node up
-#   'down'    — output parsed OK, but <Name> is absent or stopped (0 servers)
-#   'unknown' — empty/whitespace or unparseable output; nothing can be concluded
+#   'down'    — the list parsed OK but does NOT contain a running <Name> (absent,
+#               stopped, or an empty `[]` = no clusters at all) -> confidently not ours
+#   'unknown' — empty/whitespace or unparseable output; the list itself FAILED (k3d
+#               errored / produced no JSON), so nothing can be concluded
 function Get-ClusterRunStateFromList {
   param([string]$Json, [string]$Name)
   if ([string]::IsNullOrWhiteSpace($Json)) { return 'unknown' }
@@ -897,16 +901,23 @@ function Test-ClusterRunning {
 }
 
 # TRI-STATE, BOUNDED run-state of our k3d cluster, for the port-6550 ownership
-# decision (#557 Bugbot 3728340365). Wraps `k3d cluster list` in a job+deadline
-# (~15s) so a wedged Docker can't hang preflight, and returns:
+# decision (#557 Bugbot 3728340365, 3728714531). Lists ALL clusters (no name
+# filter) inside a job+deadline (~15s) so a wedged Docker can't hang preflight,
+# then classifies:
 #   'running' — our cluster is up (it legitimately owns port 6550 -> reuse)
-#   'down'    — we enumerated clusters and ours is absent/stopped (listener is foreign)
-#   'unknown' — the list timed out or its output was unparseable (can't tell; do
-#               NOT treat as foreign -- warn and let New-K3dCluster settle it)
+#   'down'    — the full list came back and $CLUSTER_NAME isn't running in it
+#               (absent/stopped, or no clusters at all) -> listener is foreign
+#   'unknown' — the list TIMED OUT, or completed but emitted no/garbage JSON
+#               (k3d itself failed): can't tell; do NOT treat as foreign -- warn
+#               and let New-K3dCluster settle it.
+# A NAMED list (`k3d cluster list <name>`) fatals with empty stdout when the name
+# is absent, which the classifier would read as 'unknown' and wrongly let a
+# genuinely-foreign listener proceed (Bugbot 3728714531). The full list always
+# emits at least `[]` on success, so absent-vs-error stays separable.
 function Get-ClusterRunState {
   $job = Start-Job -InitializationScript $JobInit -ScriptBlock {
-    param($n) (k3d cluster list $n -o json 2>$null | Out-String)
-  } -ArgumentList $CLUSTER_NAME
+    (k3d cluster list -o json 2>$null | Out-String)
+  }
   $out = ""; $timedOut = $false
   if (Wait-JobWithProgress -Job $job -TimeoutSec 15 -Message "Checking cluster") {
     $out = (Receive-Job $job -ErrorAction SilentlyContinue | Out-String)
