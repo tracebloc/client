@@ -179,12 +179,19 @@ wire_ca_trust() {
   # still lack the corporate CA (Bugbot). curl "downloads" trust the user's own
   # CURL_CA_BUNDLE, which we deliberately don't touch, so it is never claimed here.
   local wired="" kept=""
-  if [[ -z "${SSL_CERT_FILE:-}" ]]; then
+  # A var already pointing at OUR CA ($ca) -- whether the installer set it from
+  # TRACEBLOC_CA_BUNDLE (the curl|bash path exports SSL_CERT_FILE before launching
+  # install-k8s.sh) or the operator set it to the same file -- is WIRED, not a
+  # foreign pre-set to keep-and-verify. Reporting it as "keeping your pre-set, verify
+  # it" was misleading for a value the installer itself set, and hid the cosign/helm
+  # wiring (Bugbot client#631). Only a DIFFERENT pre-set bundle takes the kept branch.
+  # `-ef` compares by file identity, robust to relative/absolute/symlink differences.
+  if [[ -z "${SSL_CERT_FILE:-}" || "${SSL_CERT_FILE}" -ef "$ca" ]]; then
     export SSL_CERT_FILE="$ca";  wired="cosign, helm"
   else
     kept="SSL_CERT_FILE (cosign/helm)"
   fi
-  if [[ -z "${GIT_SSL_CAINFO:-}" ]]; then
+  if [[ -z "${GIT_SSL_CAINFO:-}" || "${GIT_SSL_CAINFO}" -ef "$ca" ]]; then
     export GIT_SSL_CAINFO="$ca"; wired="${wired:+$wired and }git"
   else
     kept="${kept:+$kept and }GIT_SSL_CAINFO (git)"
