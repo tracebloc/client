@@ -609,6 +609,35 @@ setup() {
   [[ "$output" != *"helm upgrade"* ]] || return 1
 }
 
+@test "install_client_helm: a DEPLOYED different client is still detected with the status flags (Bugbot #619)" {
+  HOST_DATA_DIR="$BATS_TEST_TMPDIR/data"; mkdir -p "$HOST_DATA_DIR"
+  _ensure_tracebloc_dirs() { :; }
+  _ensure_release_dirs() { :; }
+  _ensure_helm_runnable() { :; }
+  # Regression guard for the --pending-only bug: `helm list` only auto-enables
+  # --deployed when NO other status flag is given, so a lone --pending drops
+  # deployed clients. This mock returns the deployed release only when --deployed
+  # is present, so the guard must pass --deployed explicitly or it misses it.
+  helm() {
+    if [ "$1" = list ]; then
+      case "$*" in
+        *--deployed*) printf '%s\n' 'NAME NAMESPACE REVISION UPDATED STATUS CHART APP VERSION' \
+                                    'depl default 1 2026-01-01 deployed client-1.4.3 1.4.3' ;;
+        *)            printf '%s\n' 'NAME NAMESPACE REVISION UPDATED STATUS CHART APP VERSION' ;;  # --pending-only would miss it
+      esac
+      return 0
+    fi
+    if [ "$1" = get ] && [ "$2" = values ]; then echo 'clientId: "otherclient"'; return 0; fi
+    record "helm $*"; return 0
+  }
+  verify_credentials() { printf valid; }
+  run install_client_helm <<< $'newclient\nmypw'
+  [ "$status" -ne 0 ] || return 1
+  [[ "$output" == *"already runs the tracebloc client 'otherclient'"* ]] || return 1
+  run mock_calls
+  [[ "$output" != *"helm upgrade"* ]] || return 1
+}
+
 @test "install_client_helm: an UNINSTALLED (keep-history) release does NOT block a reinstall (Bugbot #619)" {
   HOST_DATA_DIR="$BATS_TEST_TMPDIR/data"; mkdir -p "$HOST_DATA_DIR"
   _ensure_tracebloc_dirs() { :; }

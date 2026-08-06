@@ -221,15 +221,17 @@ detect_installed_client() {
   # empty output when there are genuinely no releases, so only a non-zero exit is
   # "unknown".
   #
-  # --pending so a client release wedged in a pending-* state is COUNTED by the
-  # one-client ownership guard: plain `helm list` hides pending releases, so
-  # without it a re-run under a DIFFERENT clientId would slip past the guard and
-  # let _reconcile_pending_release uninstall / roll back another client's wedged
-  # release with no ownership check. --pending (deployed|failed + pending-*), NOT
-  # --all: `--all` would also surface `uninstalled` releases kept via
-  # --keep-history, and counting a REMOVED client as still installed would block a
-  # legitimate reinstall (Bugbot #619).
-  if ! _list="$(helm list -A --pending 2>/dev/null)"; then
+  # Enumerate deployed + failed + pending client releases. All three are stated
+  # EXPLICITLY: `helm list` only auto-enables --deployed "if no other status flag
+  # is specified", so a lone --pending would return pending-only and drop the
+  # deployed clients the guard exists to protect (Bugbot #619). We need:
+  #   - deployed/failed: the normal "a client already runs here" case;
+  #   - pending-*: a client wedged by a killed helm run — plain `helm list` hides
+  #     these, so without them a re-run under a DIFFERENT clientId would slip past
+  #     the guard and let _reconcile_pending_release mutate another client's release.
+  # NOT --all / --uninstalled: an `uninstalled` (keep-history) release is a REMOVED
+  # client and must not count as installed, or it would block a legitimate reinstall.
+  if ! _list="$(helm list -A --deployed --failed --pending 2>/dev/null)"; then
     INSTALLED_CLIENT_UNKNOWN=1; rm -f "$_gvf"; return 0
   fi
   while read -r _rel _ns; do
@@ -599,15 +601,15 @@ _reconcile_adopted_client() {
   # and reconcile it in place. Enumerate it the same jq-free way the one-per-machine
   # guard does. One client per machine, so take the first.
   local _rel="" _ns="" _r _n
-  # --pending so a release wedged in a pending-* state is still discoverable here:
-  # plain `helm list` hides pending releases, so without it this enumeration would
-  # miss the very release _reconcile_pending_release (below) needs to unwedge, and
-  # the adopt reconcile would never recover it. --pending (deployed|failed +
-  # pending-*), NOT --all: `--all` would also surface `uninstalled` keep-history
-  # releases and adoption could pick a stale removed one to reconcile (Bugbot #619).
+  # Enumerate deployed + failed + pending, all three stated EXPLICITLY: `helm list`
+  # only auto-enables --deployed "if no other status flag is specified", so a lone
+  # --pending would return pending-only and miss a normally-deployed adopted client
+  # (Bugbot #619). --pending keeps a release wedged by a killed helm run discoverable
+  # (plain `helm list` hides those) so _reconcile_pending_release can unwedge it. NOT
+  # --all/--uninstalled: adoption must not pick a stale removed keep-history release.
   while read -r _r _n; do
     [[ -n "$_r" ]] && { _rel="$_r"; _ns="$_n"; break; }
-  done < <(helm list -A --pending 2>/dev/null | awk '/[[:space:]]client-[0-9]/ { print $1, $2 }')
+  done < <(helm list -A --deployed --failed --pending 2>/dev/null | awk '/[[:space:]]client-[0-9]/ { print $1, $2 }')
   if [[ -z "$_rel" ]]; then
     warn "This client is already registered, but no live tracebloc release was found here to reconcile — continuing with a normal connect."
     return 1
