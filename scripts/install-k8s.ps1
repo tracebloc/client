@@ -3639,17 +3639,32 @@ $envBlock
   # with this script's own ...\tracebloc-installer-<n>\install-k8s.ps1 temp path --
   # which contains "tracebloc" -- so the guard skipped the add on every fresh
   # install and Step 4 died later with "Error: repo tracebloc not found". #385)
-  Log "Adding Helm repo: $TRACEBLOC_HELM_REPO_URL"
-  $addOutput = (helm repo add $TRACEBLOC_HELM_REPO_NAME $TRACEBLOC_HELM_REPO_URL --force-update 2>&1) | Out-String
-  Log "helm repo add: $addOutput"
-  if ($LASTEXITCODE -ne 0) { Err "Couldn't add the tracebloc chart repo ($TRACEBLOC_HELM_REPO_URL)." $addOutput }
+  # Chart source: $env:TRACEBLOC_CHART_PATH points at a LOCAL chart directory for
+  # dev/testing an unreleased chart (parity with the bash installer's
+  # _resolve_chart_ref, lib/install-client-helm.sh) -- without it, Windows could only
+  # ever install the published chart, so branch-only chart fixes were untestable here.
+  # A local path skips `helm repo add` entirely; otherwise use the published repo.
+  if ($env:TRACEBLOC_CHART_PATH) {
+    if (-not (Test-Path -LiteralPath $env:TRACEBLOC_CHART_PATH -PathType Container)) {
+      Err "TRACEBLOC_CHART_PATH is set but is not a directory: $($env:TRACEBLOC_CHART_PATH)"
+    }
+    $chartRef = $env:TRACEBLOC_CHART_PATH
+    Info "Dev mode: installing the chart from local path $chartRef (skipping the Helm repo)."
+    Log "Using local chart: $chartRef"
+  } else {
+    $chartRef = "$TRACEBLOC_HELM_REPO_NAME/$TRACEBLOC_CHART_NAME"
+    Log "Adding Helm repo: $TRACEBLOC_HELM_REPO_URL"
+    $addOutput = (helm repo add $TRACEBLOC_HELM_REPO_NAME $TRACEBLOC_HELM_REPO_URL --force-update 2>&1) | Out-String
+    Log "helm repo add: $addOutput"
+    if ($LASTEXITCODE -ne 0) { Err "Couldn't add the tracebloc chart repo ($TRACEBLOC_HELM_REPO_URL)." $addOutput }
+  }
 
   Write-Host ""
   if ($adoptedReuse) {
     # Surgical reconcile of the LIVE release: --reuse-values preserves the
     # deployed configuration + secret; only clientId is healed (#397 r2).
     Log "Reconciling release '$existingName' in namespace '$existingNs' (adopted; --reuse-values; healing clientId)..."
-    $helmOutput = (helm upgrade $existingName "$TRACEBLOC_HELM_REPO_NAME/$TRACEBLOC_CHART_NAME" `
+    $helmOutput = (helm upgrade $existingName $chartRef `
       --namespace $existingNs `
       --reuse-values `
       --set-string "clientId=$TB_CLIENT_ID" 2>&1) | Out-String
@@ -3663,8 +3678,8 @@ $envBlock
       Set-Content -Path $valuesFile -Value $vals -Encoding UTF8
     }
   } else {
-    Log "Installing $TB_NAMESPACE from $TRACEBLOC_HELM_REPO_NAME/$TRACEBLOC_CHART_NAME in namespace '$TB_NAMESPACE'..."
-    $helmOutput = (helm upgrade --install $TB_NAMESPACE "$TRACEBLOC_HELM_REPO_NAME/$TRACEBLOC_CHART_NAME" `
+    Log "Installing $TB_NAMESPACE from $chartRef in namespace '$TB_NAMESPACE'..."
+    $helmOutput = (helm upgrade --install $TB_NAMESPACE $chartRef `
       --namespace $TB_NAMESPACE `
       --create-namespace `
       --values $valuesFile 2>&1) | Out-String

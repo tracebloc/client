@@ -3484,3 +3484,22 @@ Describe "Cluster-create exit-code reliability (#611)" {
     $script:CEC | Should -Match 'if \(\$null -eq \$k3dExitCode\)[\s\S]{0,120}k3dStdout[\s\S]{0,20}k3dStderr[\s\S]{0,40}created successfully'
   }
 }
+
+Describe "Local chart path support (#611 — Windows/bash parity)" {
+  BeforeAll { $script:LCP = Get-Content "$PSScriptRoot/../install-k8s.ps1" -Raw }
+
+  It "uses TRACEBLOC_CHART_PATH as the chart ref when set (test an unreleased chart)" {
+    $script:LCP | Should -Match 'if \(\$env:TRACEBLOC_CHART_PATH\)'
+    $script:LCP | Should -Match '\$chartRef = \$env:TRACEBLOC_CHART_PATH'
+  }
+  It "installs from `$chartRef, not a hardcoded repo path" {
+    $script:LCP | Should -Match 'helm upgrade --install \$TB_NAMESPACE \$chartRef'
+    $script:LCP | Should -Match 'helm upgrade \$existingName \$chartRef'
+  }
+  It "skips 'helm repo add' when a local chart path is given (it's in the else branch)" {
+    $script:LCP | Should -Match '\$chartRef = "\$TRACEBLOC_HELM_REPO_NAME/\$TRACEBLOC_CHART_NAME"[\s\S]{0,140}helm repo add'
+  }
+  It "errors if TRACEBLOC_CHART_PATH is set but is not a directory" {
+    $script:LCP | Should -Match 'TRACEBLOC_CHART_PATH is set but is not a directory'
+  }
+}
