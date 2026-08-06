@@ -41,6 +41,23 @@ data:
       fi
     }
 
+    # last_deployed_revision REL NS — echo the newest release revision whose
+    # status is deployed|superseded (a known-good, fully-rolled-out revision),
+    # or nothing if there is none. jq-free awk over `helm history -o yaml`; no
+    # awk `exit`, so it reads the whole stream. Used to roll a wedged release
+    # back to the last GOOD revision rather than a bare `helm rollback`, which
+    # targets the previous revision — the FAILED upgrade after an interrupted
+    # atomic rollback (Bugbot #619).
+    last_deployed_revision() {
+      run_bounded 30 helm history "$1" -n "$2" -o yaml 2>/dev/null | awk '
+        function flush() { if (rev != "" && (st == "deployed" || st == "superseded") && rev+0 > best+0) best = rev+0 }
+        /^-[[:space:]]/          { flush(); rev=""; st="" }
+        /^[[:space:]]*revision:/ { v=$0; sub(/.*revision:[[:space:]]*/, "", v); gsub(/[^0-9]/, "", v); rev=v }
+        /^[[:space:]]*status:/   { v=$0; sub(/.*status:[[:space:]]*/, "", v);   gsub(/[^a-z-]/, "", v);  st=v }
+        END { flush(); if (best+0 > 0) print best }
+      '
+    }
+
     log "release=$RELEASE_NAME namespace=$RELEASE_NAMESPACE repo=$REPO_URL"
 
     helm repo add "$REPO_NAME" "$REPO_URL" >/dev/null
@@ -56,17 +73,40 @@ data:
     # parse + already-latest exit: a release wedged pending-* whose version
     # already reads as latest would otherwise exit 0 below and never be
     # recovered. `helm status` surfaces pending states that `helm list` hides by
-    # default. Best-effort (|| true) so a benign race can't abort the tick;
-    # jq-free awk over `helm status -o yaml`, matching the parsing style below.
-    # Bounded so a wedged apiserver can't hang the probe.
+    # default. jq-free awk over `helm status -o yaml`, matching the style below.
+    # Bounded so a wedged apiserver can't hang the probe. (`awk … exit` is safe
+    # here — this script runs under `set -eu` with NO pipefail, so a SIGPIPE on
+    # the upstream `helm status` can't fail the pipeline; the installer, which
+    # runs under pipefail, parses off the pipe instead — Bugbot #619.)
+    # Anchor at exactly-2-space indent so we read `info.status`, not a `status:`
+    # line inside the deeper-indented `info.notes` block helm emits before it.
     STATUS="$(run_bounded 30 \
       helm status "$RELEASE_NAME" -n "$RELEASE_NAMESPACE" -o yaml 2>/dev/null \
-      | awk '/^[[:space:]]*status:/ {print $2; exit}')" || STATUS=""
+      | awk '/^  status:/ {print $2; exit}')" || STATUS=""
     case "$STATUS" in
       pending-upgrade|pending-rollback)
-        log "release wedged in $STATUS (a prior run was killed mid-op); rolling back to the last deployed revision"
-        helm rollback "$RELEASE_NAME" -n "$RELEASE_NAMESPACE" \
-          --wait --timeout "$UPGRADE_TIMEOUT" || true
+        # Roll back to the last KNOWN-GOOD revision, not a bare `helm rollback`
+        # (= previous revision): after an interrupted atomic rollback the
+        # previous revision is the FAILED upgrade, so a bare rollback would
+        # redeploy the broken chart and mark it healthy (Bugbot #619).
+        TARGET="$(last_deployed_revision "$RELEASE_NAME" "$RELEASE_NAMESPACE")"
+        if [ -z "$TARGET" ]; then
+          # Nothing good to land on. Do NOT fall through to the version check —
+          # it would read the still-pending release as "already at latest" and
+          # exit 0, masking the wedge (Bugbot #619). Fail loudly so the tick
+          # surfaces in the CronJob's failed-Job history for a human.
+          log "ERROR: release wedged in $STATUS with no prior deployed revision to roll back to; manual recovery needed (helm -n $RELEASE_NAMESPACE history $RELEASE_NAME)"
+          exit 1
+        fi
+        log "release wedged in $STATUS (a prior run was killed mid-op); rolling back to last deployed revision r$TARGET"
+        # Fail closed: if the rollback itself fails, exit non-zero rather than
+        # `|| true`-ing past it and letting the already-latest check below
+        # report success on a still-wedged release (Bugbot #619).
+        if ! helm rollback "$RELEASE_NAME" "$TARGET" -n "$RELEASE_NAMESPACE" \
+             --wait --timeout "$UPGRADE_TIMEOUT"; then
+          log "ERROR: rollback of wedged release ($STATUS -> r$TARGET) failed; manual recovery needed (helm -n $RELEASE_NAMESPACE history $RELEASE_NAME)"
+          exit 1
+        fi
         ;;
     esac
 

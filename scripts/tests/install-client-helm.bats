@@ -1230,3 +1230,112 @@ _engine_fixture() {
   [ "$status" -eq 0 ] || return 1
   ! grep -q 'mysqlClient:' "$HOST_DATA_DIR/values.yaml" || return 1
 }
+
+# ── pending-* wedge recovery (#554 / Bugbot #619) ──────────────────────────
+@test "_last_deployed_revision: newest deployed/superseded revision, ignoring failed + pending (Bugbot #619)" {
+  # An interrupted atomic rollback: r3 was the last good release, r4 the failed
+  # upgrade, r5 the pending rollback. The recovery target is r3 — NOT r4 (which a
+  # bare `helm rollback` would land on).
+  helm() {
+    printf -- '- chart: client-1.9.19\n  revision: 3\n  status: superseded\n'
+    printf -- '- chart: client-1.9.20\n  revision: 4\n  status: failed\n'
+    printf -- '- chart: client-1.9.20\n  revision: 5\n  status: pending-rollback\n'
+  }
+  run _last_deployed_revision munich munich
+  [ "$status" -eq 0 ] || return 1
+  [ "$output" = "3" ] || return 1
+}
+
+@test "_last_deployed_revision: no good revision -> empty (never a bad target)" {
+  helm() {
+    printf -- '- revision: 1\n  status: failed\n- revision: 2\n  status: pending-install\n'
+  }
+  run _last_deployed_revision munich munich
+  [ "$status" -eq 0 ] || return 1
+  [ -z "$output" ] || return 1
+}
+
+@test "_reconcile_pending_release: pending-upgrade rolls back to the last DEPLOYED revision, not a bare rollback (Bugbot #619)" {
+  spin_cmd_bounded() { shift 2; "$@"; }   # exec the mutating cmd so the mock records it
+  helm() {
+    if [ "$1" = status ];  then printf 'info:\n  status: pending-upgrade\n'; return 0; fi
+    if [ "$1" = history ]; then printf -- '- chart: client-1.9.18\n  revision: 6\n  status: superseded\n- chart: client-1.9.19\n  revision: 7\n  status: deployed\n- chart: client-1.9.20\n  revision: 8\n  status: pending-upgrade\n'; return 0; fi
+    record "helm $*"; return 0
+  }
+  run _reconcile_pending_release munich munich
+  [ "$status" -eq 0 ] || return 1
+  mock_calls | grep -q "helm rollback munich 7 -n munich"       # explicit last-good revision
+  run mock_calls
+  [[ "$output" != *"helm rollback munich -n munich"* ]] || return 1   # never a bare rollback
+}
+
+@test "_reconcile_pending_release: pending-* with no deployed revision leaves it wedged, no bad rollback (Bugbot #619)" {
+  spin_cmd_bounded() { shift 2; "$@"; }
+  helm() {
+    if [ "$1" = status ];  then printf 'info:\n  status: pending-rollback\n'; return 0; fi
+    if [ "$1" = history ]; then printf -- '- chart: client-1.9.20\n  revision: 1\n  status: failed\n- chart: client-1.9.20\n  revision: 2\n  status: pending-rollback\n'; return 0; fi
+    record "helm $*"; return 0
+  }
+  run _reconcile_pending_release munich munich
+  [ "$status" -eq 0 ] || return 1
+  [[ "$output" == *"no prior deployed revision"* ]] || return 1
+  run mock_calls
+  [[ "$output" != *"helm rollback"* ]] || return 1
+}
+
+@test "_reconcile_pending_release: pending-install WITH a preserve file stashes values + flags a reinstall (Bugbot #619)" {
+  spin_cmd_bounded() { shift 2; "$@"; }
+  local pf; pf="$(mktemp)"
+  helm() {
+    if [ "$1" = status ];        then printf 'info:\n  status: pending-install\n'; return 0; fi
+    if [ "$1 $2" = "get values" ]; then printf 'clientId: "123"\nclientPassword: "s3cr3t"\n'; return 0; fi
+    record "helm $*"; return 0
+  }
+  TB_PENDING_REINSTALL=0
+  _reconcile_pending_release munich munich "$pf"
+  [ "$TB_PENDING_REINSTALL" = "1" ] || return 1                 # caller must reinstall
+  grep -q "clientPassword" "$pf" || return 1                    # the write-only password was preserved
+  mock_calls | grep -q "helm uninstall munich -n munich"
+}
+
+@test "_reconcile_pending_release: pending-install WITHOUT a preserve file just uninstalls (normal install path)" {
+  spin_cmd_bounded() { shift 2; "$@"; }
+  helm() {
+    if [ "$1" = status ]; then printf 'info:\n  status: pending-install\n'; return 0; fi
+    record "helm $*"; return 0
+  }
+  TB_PENDING_REINSTALL=9
+  _reconcile_pending_release munich munich
+  [ "$TB_PENDING_REINSTALL" = "0" ] || return 1                 # no reinstall signalled
+  mock_calls | grep -q "helm uninstall munich -n munich"
+  run mock_calls
+  [[ "$output" != *"helm get values"* ]] || return 1           # never reads values on the normal path
+}
+
+@test "install_client_helm: adopt + pending-install recovers by reinstalling from preserved values, not --reuse-values (Bugbot #619)" {
+  HOST_DATA_DIR="$BATS_TEST_TMPDIR/data"; mkdir -p "$HOST_DATA_DIR"
+  _ensure_tracebloc_dirs() { :; }
+  _ensure_release_dirs() { :; }
+  _ensure_helm_runnable() { :; }
+  kubectl() { record "kubectl $*"; return 0; }
+  # The adopted client's release is wedged in pending-install (a first install was
+  # killed). Recovery must uninstall it, but the write-only password lives ONLY in
+  # that release's stored values — so we preserve them and reinstall, rather than a
+  # --reuse-values upgrade against a release that no longer exists.
+  helm() {
+    if [[ "$1" == list ]];            then echo "munich munich 1 now pending-install client-1.8.2 1.8.2"; return 0; fi
+    if [[ "$1 $2" == "upgrade --help" ]]; then echo "  --reset-then-reuse-values"; return 0; fi
+    if [[ "$1" == status ]];          then printf 'info:\n  status: pending-install\n'; return 0; fi
+    if [[ "$1 $2" == "get values" ]]; then printf 'clientId: "123"\nclientPassword: "s3cr3t"\n'; return 0; fi
+    record "helm $*"; return 0
+  }
+  verify_credentials() { echo "VERIFY_CALLED"; printf invalid; }
+  export TRACEBLOC_CLIENT_ADOPTED=1 TRACEBLOC_CLIENT_ID=0e9db54e-c9c0-4bf3-9ff2-1646da307019
+  run install_client_helm </dev/null
+  [ "$status" -eq 0 ] || return 1
+  mock_calls | grep -q "helm uninstall munich"                  # cleared the half-installed release
+  mock_calls | grep -q "helm upgrade --install munich"          # reinstalled (not an in-place upgrade)
+  run mock_calls
+  [[ "$output" != *"--reuse-values"* ]] || return 1             # nothing to reuse — release was gone
+  [[ "$output" == *"--set clientId=0e9db54e-c9c0-4bf3-9ff2-1646da307019"* ]] || return 1
+}

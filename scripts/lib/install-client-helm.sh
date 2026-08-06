@@ -469,33 +469,105 @@ _resolve_chart_ref() {
 # jq-free (awk over `helm status -o yaml`, matching this file's conventions) and
 # best-effort — a failure here is non-fatal; the subsequent upgrade (and its
 # error path) still runs.
+# _last_deployed_revision REL NS — echo the revision number of the most recent
+# release revision whose status is `deployed` or `superseded` (a known-good,
+# fully-rolled-out revision), or nothing if there is none. jq-free awk over
+# `helm history -o yaml`, bounded like the other probes.
+#
+# Why not a bare `helm rollback REL` (previous revision)? After an interrupted
+# ATOMIC rollback the immediately-preceding revision is the FAILED upgrade that
+# atomic was undoing, so a bare rollback would redeploy the broken chart and
+# mark it deployed (Bugbot #619). Roll back to the last KNOWN-GOOD revision
+# explicitly instead. The awk carries NO `exit`: it reads the whole stream so
+# the `helm history | awk` pipe can't SIGPIPE helm and trip pipefail.
+_last_deployed_revision() {
+  local _rel="$1" _ns="$2" _hist
+  _hist="$(_bounded "${TB_HELM_STATUS_TIMEOUT:-30}" \
+    helm history "$_rel" -n "$_ns" -o yaml 2>/dev/null)" || _hist=""
+  printf '%s\n' "$_hist" | awk '
+    function flush() {
+      if (rev != "" && (st == "deployed" || st == "superseded") && rev+0 > best+0) best = rev+0
+    }
+    /^-[[:space:]]/          { flush(); rev=""; st="" }
+    /^[[:space:]]*revision:/ { v=$0; sub(/.*revision:[[:space:]]*/, "", v); gsub(/[^0-9]/, "", v); rev=v }
+    /^[[:space:]]*status:/   { v=$0; sub(/.*status:[[:space:]]*/, "", v);   gsub(/[^a-z-]/, "", v);  st=v }
+    END { flush(); if (best+0 > 0) print best }
+  '
+}
+
+# _reconcile_pending_release REL NS [PRESERVE_VALUES_FILE]
+#
+# PRESERVE_VALUES_FILE (optional, adopt path only): on pending-install the
+# uninstall drops the release AND its stored values — including the write-only
+# clientPassword the adopt reconcile has no other copy of (adopt issues no new
+# password). When a path is given, capture the release's user-supplied values
+# there BEFORE uninstalling and set TB_PENDING_REINSTALL=1, so the caller can
+# reinstall from those values (`--install -f FILE`) instead of a `--reuse-values`
+# upgrade against a release that no longer exists (Bugbot #619). The normal
+# install path re-supplies its own values file and passes no path, keeping the
+# plain uninstall.
 _reconcile_pending_release() {
-  local _rel="$1" _ns="$2" _status
+  local _rel="$1" _ns="$2" _preserve="${3:-}" _raw _status _target
+  TB_PENDING_REINSTALL=0
   # `helm status` has no request timeout of its own, so a wedged kube-apiserver
   # could hang this recovery probe forever — bound it with _bounded
   # (timeout(1)/gtimeout(1)), the same mechanism the file's other helm/kubectl
   # probes use (Bugbot). On the deadline _bounded returns 124, which the
-  # `|| _status=""` below folds into the benign "nothing to recover" path.
+  # `|| _raw=""` below folds into the benign "nothing to recover" path.
   #
-  # `|| _status=""`: on a FIRST-TIME install there is NO release, so `helm
-  # status` exits non-zero; under `set -euo pipefail` that rc propagates out of
-  # the command substitution and would abort the installer HERE — before
-  # `helm upgrade --install` ever runs (Bugbot). A missing release simply means
-  # "nothing to recover", so swallow the failure and fall through with an empty
-  # status; the case below then matches nothing and the install/upgrade proceeds.
-  _status="$(_bounded "${TB_HELM_STATUS_TIMEOUT:-30}" \
-    helm status "$_rel" -n "$_ns" -o yaml 2>/dev/null \
-    | awk '/^[[:space:]]*status:/ {print $2; exit}')" || _status=""
+  # `|| _raw=""`: on a FIRST-TIME install there is NO release, so `helm status`
+  # exits non-zero; under `set -euo pipefail` that rc would propagate out of the
+  # command substitution and abort the installer HERE — before `helm upgrade
+  # --install` ever runs (Bugbot). A missing release simply means "nothing to
+  # recover", so swallow the failure and fall through with empty output.
+  _raw="$(_bounded "${TB_HELM_STATUS_TIMEOUT:-30}" \
+    helm status "$_rel" -n "$_ns" -o yaml 2>/dev/null)" || _raw=""
+  # First status line, parsed in the shell — NO awk `exit` / `head` on a live
+  # pipe: under pipefail an early close SIGPIPEs `helm status` on a large
+  # release (exit 141) and the `||` fallback would then wipe the captured
+  # status, so a real wedge looks absent (Bugbot #619). Same house idiom as
+  # _extract_yaml_value: read the whole stream, take the first line in the shell.
+  # Anchor at exactly-2-space indent so we match `info.status` and not some
+  # `status:` line inside the deeper-indented `info.notes` block (which helm
+  # emits BEFORE status, alphabetically).
+  _status="$(printf '%s\n' "$_raw" | awk '/^  status:/ {print $2}')"
+  _status="${_status%%$'\n'*}"
   case "$_status" in
     pending-install)
+      if [[ -n "$_preserve" ]]; then
+        # Adopt path: stash the wedged release's user values before we drop it,
+        # so the caller can reinstall with the only copy of the write-only
+        # password. `-o yaml` (not the default header form) so the file feeds
+        # straight back with `-f`; helm prints literal `null` when there are no
+        # user values.
+        if _bounded "${TB_HELM_STATUS_TIMEOUT:-30}" \
+             helm get values "$_rel" -n "$_ns" -o yaml > "$_preserve" 2>/dev/null \
+           && [[ -s "$_preserve" ]] && [[ "$(head -1 "$_preserve" 2>/dev/null)" != "null" ]]; then
+          TB_PENDING_REINSTALL=1
+        else
+          # Couldn't read the wedged release's values — do NOT uninstall, or the
+          # adopt reconcile is stranded with no password. Leave it for the
+          # manual remedy the caller prints on failure (Bugbot #619).
+          warn "Release '$_rel' is wedged in pending-install but its stored values could not be read; leaving it in place. Recover manually: helm -n $_ns uninstall $_rel"
+          return 0
+        fi
+      fi
       log "Release '$_rel' is wedged in pending-install (a prior run was killed mid-install); uninstalling the half-installed release before retrying."
       spin_cmd_bounded 120 "Clearing a half-finished install…" \
         helm uninstall "$_rel" -n "$_ns" || true
       ;;
     pending-upgrade|pending-rollback)
-      log "Release '$_rel' is wedged in $_status (a prior run was killed mid-op); rolling back to the last deployed revision before retrying."
+      _target="$(_last_deployed_revision "$_rel" "$_ns")"
+      if [[ -z "$_target" ]]; then
+        # No known-good revision to roll back to — a bare `helm rollback` here
+        # would land on the failed upgrade (Bugbot #619). Leave it wedged for
+        # the manual remedy rather than redeploy a broken revision.
+        warn "Release '$_rel' is wedged in $_status but has no prior deployed revision to roll back to; leaving it in place. Inspect: helm -n $_ns history $_rel"
+        return 0
+      fi
+      log "Release '$_rel' is wedged in $_status (a prior run was killed mid-op); rolling back to the last deployed revision (r$_target) before retrying."
       spin_cmd_bounded 120 "Recovering a half-finished upgrade…" \
-        helm rollback "$_rel" -n "$_ns" || true
+        helm rollback "$_rel" "$_target" -n "$_ns" || true
       ;;
   esac
 }
@@ -525,29 +597,45 @@ _reconcile_adopted_client() {
   local chart_ref=""
   _resolve_chart_ref
 
-  # Reconcile in place, reusing the release's stored values (clientPassword +
-  # install-time config). Prefer --reset-then-reuse-values (Helm >= 3.14: reset to
-  # chart defaults, then re-apply the stored user values, picking up new chart
-  # defaults); fall back to --reuse-values on older Helm.
-  local _reuse="--reuse-values"
-  helm upgrade --help 2>/dev/null | grep -q -- '--reset-then-reuse-values' && _reuse="--reset-then-reuse-values"
-
   # Heal the stored clientId to the adopted UUID when provision_client handed one
   # over (export TRACEBLOC_CLIENT_ID on the adopt path): a cli#125-era install stored
   # the numeric dashboard id, which can't authenticate, and --reuse-values alone
   # would preserve it (the reused password is still correct). With no id (rebuilt
   # host / R7 orphan) reconcile WITHOUT a heal rather than bail — the existing
-  # credential stands. Built as an array so the optional --set is bash-3.2 safe.
-  local _args=(upgrade "$_rel" "$chart_ref" --namespace "$_ns" "$_reuse")
+  # credential stands.
   local _uuid; _uuid="$(_sanitize_credential "${TRACEBLOC_CLIENT_ID:-}")"
-  [[ -n "$_uuid" ]] && _args+=(--set "clientId=$_uuid")
 
   # node-local (RFC-0003 Option C) has no hostPath dirs to pre-create.
   [[ "${TB_STORAGE_MODE:-hostpath}" != "node-local" ]] && _ensure_release_dirs "$_ns"
 
   # #554: auto-recover a release left pending-* by a previously-killed helm run
-  # before we try to reconcile it, so a re-run isn't permanently wedged.
-  _reconcile_pending_release "$_rel" "$_ns"
+  # before we reconcile it, so a re-run isn't permanently wedged. Pass a preserve
+  # file: if the release is wedged in pending-install, recovery must uninstall
+  # it, which drops the ONLY copy of the write-only clientPassword the adopt path
+  # depends on — so _reconcile_pending_release stashes the release's user values
+  # there first and sets TB_PENDING_REINSTALL=1, and we reinstall from them below
+  # rather than run a --reuse-values upgrade against a release that no longer
+  # exists (Bugbot #619).
+  local _preserve; _preserve="$(mktemp 2>/dev/null)" || _preserve="${HOST_DATA_DIR:+${HOST_DATA_DIR}/.tb-pending-values.$$}"
+  _reconcile_pending_release "$_rel" "$_ns" "$_preserve"
+
+  # Build the reconcile command as an array (bash-3.2 safe for the optional
+  # --set). Normal case: in-place upgrade reusing the release's stored values
+  # (clientPassword + install-time config), preferring --reset-then-reuse-values
+  # (Helm >= 3.14: reset to chart defaults, then re-apply the stored user values
+  # so new chart defaults flow through) over plain --reuse-values on older Helm.
+  # Recovered-from-pending-install case (TB_PENDING_REINSTALL=1): the release was
+  # uninstalled, so --reuse-values has nothing to reuse — reinstall with
+  # --install from the preserved user values instead (Bugbot #619).
+  local _args
+  if [[ "${TB_PENDING_REINSTALL:-0}" == "1" && -s "$_preserve" ]]; then
+    _args=(upgrade --install "$_rel" "$chart_ref" --namespace "$_ns" --values "$_preserve")
+  else
+    local _reuse="--reuse-values"
+    helm upgrade --help 2>/dev/null | grep -q -- '--reset-then-reuse-values' && _reuse="--reset-then-reuse-values"
+    _args=(upgrade "$_rel" "$chart_ref" --namespace "$_ns" "$_reuse")
+  fi
+  [[ -n "$_uuid" ]] && _args+=(--set "clientId=$_uuid")
 
   # Reconcile blocks too — same spinner treatment (RFC-0002 §2), bounded so a
   # wedged kube-apiserver can't hang it forever (#426).
@@ -555,6 +643,10 @@ _reconcile_adopted_client() {
   _helm_timeout_min="$(tb_minutes_or "${TB_HELM_TIMEOUT_MIN:-}" 10)"
   local _helm_rc=0
   spin_cmd_bounded "$(( _helm_timeout_min * 60 ))" "Reconciling the existing client…" helm "${_args[@]}" || _helm_rc=$?
+  # The preserve file carries the write-only clientPassword — drop it as soon as
+  # the reconcile has consumed it, regardless of outcome (the install-wide EXIT
+  # trap also clears $TMPDIR, but don't leave a credential on disk a moment longer).
+  [[ -n "$_preserve" && "$_preserve" != /dev/null ]] && rm -f "$_preserve"
   if [[ "$_helm_rc" -ne 0 ]]; then
     # A helm run killed mid-operation (our timeout=124, or an earlier
     # Ctrl-C/OOM/reboot) can leave the release wedged pending-*; we auto-recover
