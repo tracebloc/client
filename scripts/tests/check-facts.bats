@@ -34,6 +34,25 @@ SH
   cat > "$REPO/scripts/lib/cluster.sh" <<'SH'
 K3D_ARGS+=(--image "rancher/k3s:${K8S_VERSION}")
 SH
+  # #616: the GPU node image's k3s pin lives in the Dockerfile ARG, build.sh, and the
+  # workflow input default — all check-facts consumers of K8S_VERSION. Seed them to
+  # match the spec so a bump can't leave a GPU image tag that was never published.
+  mkdir -p "$REPO/docker/k3s-cuda" "$REPO/.github/workflows"
+  cat > "$REPO/docker/k3s-cuda/Dockerfile" <<'DF'
+ARG K3S_TAG="v1.29.4-k3s1"
+ARG CUDA_TAG="12.4.1-base-ubuntu22.04"
+DF
+  cat > "$REPO/docker/k3s-cuda/build.sh" <<'SH'
+K3S_TAG="${K3S_TAG:-v1.29.4-k3s1}"
+SH
+  # Two defaults on purpose: the extractor must pick the k3s_tag one (v… tag) and
+  # leave the cuda_tag default (12.4.1…) alone.
+  cat > "$REPO/.github/workflows/build-k3s-cuda.yaml" <<'YML'
+      k3s_tag:
+        default: "v1.29.4-k3s1"
+      cuda_tag:
+        default: "12.4.1-base-ubuntu22.04"
+YML
 }
 
 _facts() { bash "$REPO/scripts/check-facts.sh" "$@"; }
