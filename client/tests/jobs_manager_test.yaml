@@ -418,15 +418,16 @@ tests:
   # #611: /data/shared (client-pvc) AND /data/logs (client-logs-pvc) must be writable by
   # the non-root pods that mount them — the ingest-staging pod writes to /data/shared, the
   # spawned training pods write to /data/logs. hostPath ignores fsGroup (k8s#138411), so a
-  # privileged init makes both volumes world-writable; CSI relies on fsGroup and skips it.
+  # privileged init makes both volumes world-writable. No fsGroup is set: it's a no-op on
+  # hostPath and on CSI would strip the spawned pods' group-0 access; CSI skips the init.
   - it: "hostPath install adds init-writable-data to make /data/shared and /data/logs writable (#611)"
     set:
       hostPath:
         enabled: true
     asserts:
-      - equal:
+      # no fsGroup — no-op on hostPath, and a regression risk on CSI (see template comment)
+      - notExists:
           path: spec.template.spec.securityContext.fsGroup
-          value: 1000
       - equal:
           path: spec.template.spec.initContainers[0].name
           value: init-writable-data
@@ -444,9 +445,15 @@ tests:
       - contains:
           path: spec.template.spec.initContainers[0].securityContext.capabilities.add
           content: FSETID
+      # each dir is fixed INDEPENDENTLY (a for-loop): chown 1000:1000 then chmod 3777
       - matchRegex:
           path: spec.template.spec.initContainers[0].command[2]
-          pattern: "chown 1000:1000 /data/shared /data/logs && chmod 3777 /data/shared /data/logs"
+          pattern: "for d in /data/shared /data/logs.*chown 1000:1000.*chmod 3777"
+      # best-effort: a failing chown/chmod is logged, not fatal, so the other dir is still fixed
+      # and jobs-manager still starts (e.g. /data/shared on an NFS root_squash export)
+      - matchRegex:
+          path: spec.template.spec.initContainers[0].command[2]
+          pattern: "\\|\\| echo"
       # the init must mount BOTH hostPath volumes it chowns, or the chown is a no-op
       - contains:
           path: spec.template.spec.initContainers[0].volumeMounts
@@ -459,13 +466,12 @@ tests:
             name: logs-volume
             mountPath: /data/logs
 
-  - it: "CSI install (hostPath disabled) keeps fsGroup but skips the privileged init (#611)"
+  - it: "CSI install (hostPath disabled) skips the privileged init and sets no fsGroup (#611)"
     set:
       hostPath:
         enabled: false
     asserts:
-      - equal:
+      - notExists:
           path: spec.template.spec.securityContext.fsGroup
-          value: 1000
       - notExists:
           path: spec.template.spec.initContainers

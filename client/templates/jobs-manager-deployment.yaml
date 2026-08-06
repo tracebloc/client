@@ -35,11 +35,13 @@ spec:
       serviceAccountName: {{ include "tracebloc.serviceAccountName" . }}
       securityContext:
         runAsNonRoot: true
-        # CSI-backed clusters (EKS/AKS/OC) apply this to the shared data volume so
-        # every non-root writer shares GID 1000; hostPath ignores it (see the init
-        # below). fsGroupChangePolicy limits the relabel to a root-owned mount.
-        fsGroup: 1000
-        fsGroupChangePolicy: "OnRootMismatch"
+        # No fsGroup here (deliberately). On hostPath kubelet ignores it
+        # (kubernetes/kubernetes#138411) — the init below does the work. On CSI an fsGroup
+        # relabel would only add GID 1000 to jobs-manager's OWN processes, yet it would flip
+        # the shared/logs volumes' group to 1000 (OnRootMismatch, first restart) — stripping
+        # the group-0 access the spawned training pods (UID 1001 / OpenShift arbitrary-UID,
+        # GID 0) and the host-UID ingestion pods actually rely on (see docs/SECURITY.md §5.3).
+        # It never reaches those spawned writers, so it's all risk and no gain.
         seccompProfile:
           type: RuntimeDefault
       {{- if .Values.hostPath.enabled }}
@@ -58,8 +60,11 @@ spec:
       # long enough to fix the mounts. Caps: CHOWN for the chown; FOWNER so the chmod is idempotent
       # on re-install; FSETID so the setgid bit survives the chmod — after the chown to GID 1000 the
       # dir's group no longer matches the process (fsgid 0), and a root process without FSETID has
-      # the kernel silently strip S_ISGID, landing the mount at 1777 (setgid lost). CSI clusters
-      # rely on fsGroup above and skip this.
+      # the kernel silently strip S_ISGID, landing the mount at 1777 (setgid lost). Each dir is
+      # fixed INDEPENDENTLY and best-effort: a chown/chmod that can't complete (e.g. /data/shared on
+      # an NFS root_squash export via HOST_DATASET_DIR) is logged and skipped so the OTHER dir is
+      # still repaired and jobs-manager still starts — a genuinely unwritable mount then surfaces as
+      # a clear error at the writer pod rather than wedging the whole edge in Init. CSI skips this.
       initContainers:
       - name: init-writable-data
         image: {{ include "tracebloc.image" (dict "repository" "library/busybox" "tag" .Values.images.busybox.tag "digest" .Values.images.busybox.digest "registry" (dig "imageRegistry" "docker.io" (.Values.global | default dict))) | quote }}
@@ -73,7 +78,7 @@ spec:
             add: ["CHOWN", "FOWNER", "FSETID"]
           seccompProfile:
             type: RuntimeDefault
-        command: ['sh', '-c', 'chown 1000:1000 /data/shared /data/logs && chmod 3777 /data/shared /data/logs']
+        command: ['sh', '-c', 'for d in /data/shared /data/logs; do chown 1000:1000 "$d" && chmod 3777 "$d" || echo "init-writable-data: could not adjust $d (pre-provisioned or root_squash mount?); leaving as-is"; done']
         volumeMounts:
         - name: shared-volume
           mountPath: /data/shared
