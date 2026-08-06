@@ -62,11 +62,20 @@ data:
     # ($KUBECONFIG, on the writable /tmp emptyDir) — they make no API call.
     SA_DIR=/var/run/secrets/kubernetes.io/serviceaccount
     export KUBECONFIG=/tmp/kubeconfig
+    # Bracket an IPv6 API host for the URL authority: client-go's in-cluster
+    # config uses net.JoinHostPort, and a bare IPv6 literal without brackets is
+    # an invalid server URL — dual-stack / IPv6 clusters would otherwise hit the
+    # very refresh outage this change fixes.
+    api_host="$KUBERNETES_SERVICE_HOST"
+    case "$api_host" in *:*) api_host="[$api_host]" ;; esac
     kubectl config set-cluster in-cluster \
-      --server="https://${KUBERNETES_SERVICE_HOST}:${KUBERNETES_SERVICE_PORT}" \
+      --server="https://${api_host}:${KUBERNETES_SERVICE_PORT}" \
       --certificate-authority="${SA_DIR}/ca.crt" >/dev/null
-    kubectl config set-credentials in-cluster \
-      --token="$(cat "${SA_DIR}/token")" >/dev/null
+    # tokenFile (a PATH), not --token=<value>: the bearer token must never land
+    # on the kubectl process argv (readable via procfs), and a path lets kubectl
+    # re-read the rotating projected ServiceAccount token on every call. No
+    # token value is written to $KUBECONFIG either.
+    kubectl config set "users.in-cluster.tokenFile" "${SA_DIR}/token" >/dev/null
     kubectl config set-context in-cluster \
       --cluster=in-cluster --user=in-cluster --namespace="$RELEASE_NAMESPACE" >/dev/null
     kubectl config use-context in-cluster >/dev/null
