@@ -668,6 +668,72 @@ _download_services_progress() {
   return 0
 }
 
+# ── MySQL engine channel (backend#723, decision A2 2026-08-05) ─────────────
+# The chart's frozen 5.7 digest pin stays the default for every existing
+# install; FRESH installs may opt into the multi-arch 8.4 engine. `auto`
+# picks 8.4 only on a fresh arm64 install — the one cohort 5.7 actually hurts
+# (amd64-only image under emulation). Anything that smells like existing
+# state stays 5.7: an existing release, real mysql datadir content on the
+# host (legacy or per-release layout), or nothing at all to suggest 8.4.
+# A previous opt-in stays sticky across re-runs (the values file is
+# regenerated every run, so it is re-derived from the old file first). The
+# chart's mysql-format-guard init container backstops whatever this
+# heuristic misses — a wrong pick fails loudly before mysqld starts, it
+# never opens a datadir with the wrong engine.
+#   TB_MYSQL_ENGINE=auto|5.7|8.4    explicit value always wins (default auto)
+# Reads (bash dynamic scope, set by install_client_helm before the call):
+# values_file, existing_id, HOST_DATA_DIR, TB_NAMESPACE, ARCH.
+# Sets: TB_MYSQL_ENGINE_RESOLVED.
+# Content test for a host mysql datadir, FAIL-CLOSED on unlistable dirs
+# (mirrors _leftover_data_dirs, and the same Bugbot ownership case): a
+# uid-999/root-owned dir the host user can't read/enter cannot be proven
+# empty — treat it as content, so `auto` keeps 5.7 rather than opting a
+# reused datadir into 8.4 that the format guard would then refuse to boot.
+# Symlinks are never trusted as data (same stance as the leftover guard).
+_mysql_dir_has_content() {
+  local d="$1"
+  [[ -d "$d" && ! -L "$d" ]] || return 1   # absent -> no content
+  [[ -r "$d" && -x "$d" ]] || return 0     # unlistable -> fail closed
+  [[ -n "$(ls -A "$d" 2>/dev/null)" ]]
+}
+
+_resolve_mysql_engine() {
+  local requested="${TB_MYSQL_ENGINE:-auto}"
+  case "$requested" in
+    5.7|8.4)
+      TB_MYSQL_ENGINE_RESOLVED="$requested"
+      log "MySQL engine: ${requested} (explicit TB_MYSQL_ENGINE)"
+      return 0 ;;
+    auto) ;;
+    *)
+      error "TB_MYSQL_ENGINE must be 'auto', '5.7' or '8.4' (got '${requested}')" ;;
+  esac
+  # Sticky: an edge that opted into 8.4 stays there on every later re-run.
+  if [[ -f "${values_file:-}" ]] \
+    && grep -A 3 'mysqlClient:' "${values_file}" 2>/dev/null | grep -q 'tag: "8.4"'; then
+    TB_MYSQL_ENGINE_RESOLVED="8.4"
+    log "MySQL engine: 8.4 (kept from this machine's existing values.yaml)"
+    return 0
+  fi
+  # Never auto-flip existing state: a found release or real datadir content
+  # means a 5.7-format datadir may exist, and 8.4 refuses to open it. The
+  # empty dirs _ensure_tracebloc_dirs just created don't count — only files —
+  # but an UNLISTABLE dir counts as content (fail closed; see the helper).
+  if [[ -n "${existing_id:-}" ]] \
+    || _mysql_dir_has_content "${HOST_DATA_DIR:-/nonexistent}/mysql" \
+    || _mysql_dir_has_content "${HOST_DATA_DIR:-/nonexistent}/${TB_NAMESPACE:-}/mysql"; then
+    TB_MYSQL_ENGINE_RESOLVED="5.7"
+    return 0
+  fi
+  case "${ARCH:-$(uname -m)}" in
+    x86_64|amd64)
+      TB_MYSQL_ENGINE_RESOLVED="5.7" ;;
+    *)
+      TB_MYSQL_ENGINE_RESOLVED="8.4"
+      log "MySQL engine: 8.4 (fresh install on ${ARCH:-$(uname -m)} — native multi-arch engine, backend#723)" ;;
+  esac
+}
+
 install_client_helm() {
   # Step e (Install tracebloc) — main() prints the "e) Installing tracebloc"
   # header. The credential + namespace were provisioned in step d
@@ -903,6 +969,10 @@ install_client_helm() {
     log "No NVIDIA GPU — GPU_LIMITS and GPU_REQUESTS left empty"
   fi
 
+  # backend#723 A2: pick the MySQL engine for this install (before the heredoc
+  # below is rendered; see _resolve_mysql_engine for the full decision rules).
+  _resolve_mysql_engine
+
   # ── Write generated values.yaml ─────────────────────────────────────────
   log "Writing values to $values_file"
 
@@ -975,6 +1045,21 @@ hostPath:
   enabled: true
 STORAGE
 [ -n "${HOST_DATASET_DIR:-}" ] && printf '  datasetPath: /tracebloc-data\n'
+fi)
+$(if [[ "${TB_MYSQL_ENGINE_RESOLVED:-5.7}" == "8.4" ]]; then
+cat <<'MYSQL84'
+
+# MySQL engine opt-in (backend#723, decision A2): this install runs the
+# multi-arch 8.4 engine natively — fresh datadirs only; the chart's
+# mysql-format-guard init container refuses a mismatched datadir. Explicit
+# tag + empty digest: the chart's 5.7 reproducibility pin stays for installs
+# on the default engine. Sticky across installer re-runs; override with
+# TB_MYSQL_ENGINE=5.7|8.4.
+images:
+  mysqlClient:
+    tag: "8.4"
+    digest: ""
+MYSQL84
 fi)
 pvc:
   mysql: 2Gi

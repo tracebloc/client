@@ -225,6 +225,14 @@ function Wait-ProcessWithDeadline {
     Start-Sleep -Seconds 2
   }
   Write-Host "`r                                                   `r" -NoNewline
+  # HasExited can flip true before the process's redirected stdout/stderr streams
+  # are fully drained, and in that window Start-Process -RedirectStandardOutput
+  # leaves $Process.ExitCode $null. Callers then read a null code and `$null -ne 0`
+  # misreads a SUCCESSFUL run as a failure -- the #611 field case: k3d printed
+  # "Cluster created successfully!" with empty stderr, yet the install aborted with
+  # the cluster actually up. WaitForExit() (bounded: the process has already exited)
+  # flushes the streams and guarantees ExitCode is populated for every caller.
+  try { $Process.WaitForExit() } catch {}
   return $true
 }
 
@@ -464,6 +472,24 @@ function Get-VerifiedDownload {
     [Parameter(Mandatory)][string]$Dest,
     [int]$MinBytes = 1MB,
     [string]$Magic = '',
+    # When set, the CHECKSUM is the authoritative completeness test (#609): after a
+    # transport lands a size/magic-valid file, its SHA-256 must equal $Sha256 or the
+    # transport is treated as failed and the NEXT one is tried. A size floor alone
+    # lets a mid-transfer truncation (>MinBytes, still starts with the magic bytes)
+    # slip through and dead-end at a downstream checksum with no retry -- the real
+    # field failure. With $Sha256, a truncated/corrupt copy just triggers curl.exe/
+    # BITS until a byte-correct copy lands.
+    [string]$Sha256 = '',
+    # When set, the downloaded TEXT must MATCH this regex or the transport is treated
+    # as failed and the next one (curl.exe/BITS) is tried (#611). Used to gate the
+    # checksum-LIST files on the actual hash STRUCTURE, not a weak substring: an
+    # asset-name substring also appears in the request URL, so a proxy error page
+    # echoing the URL would satisfy a substring gate, "succeed" on the first
+    # transport, skip the retry, and then abort at the later hex parse (Bugbot). The
+    # call sites therefore require a 64-hex hash adjacent to the asset (k3d/helm) or
+    # anchored at the start of the body (kubectl's bare-hash .sha256) -- structure a
+    # proxy/HTML error page can't accidentally satisfy.
+    [string]$MatchPattern = '',
     [string]$Label = 'download',
     [string]$Message = 'Downloading'
   )
@@ -491,10 +517,22 @@ function Get-VerifiedDownload {
     # NEXT transport should be tried, not the whole download aborted (Bugbot).
     try {
       $bad = Test-DownloadComplete -Path $Dest -MinBytes $MinBytes -Magic $Magic
+      if (-not $bad -and $Sha256) {
+        $got = (Get-FileHash -LiteralPath $Dest -Algorithm SHA256).Hash.ToLower()
+        if ($got -ne $Sha256.ToLower()) {
+          $bad = "checksum mismatch (got $got) -- the download is truncated or altered"
+        }
+      }
+      if (-not $bad -and $MatchPattern) {
+        $text = Get-Content -LiteralPath $Dest -Raw -ErrorAction Stop
+        if ($text -notmatch $MatchPattern) {
+          $bad = "the file did not match the expected checksum pattern -- likely a proxy error page; trying another method"
+        }
+      }
     } catch {
       $bad = "could not read the downloaded file ($($_.Exception.Message)) -- it may be locked or quarantined by antivirus"
     }
-    if (-not $bad) { return }        # complete + valid -- done
+    if (-not $bad) { return }        # complete + (checksum/content) valid -- done
     $problems += "${name}: $bad"
     Warn "$Label via $name looked incomplete ($bad); trying another method..."
   }
@@ -1593,18 +1631,26 @@ function Install-Kubectl {
   $kubectlDest = "$TOOL_DIR\kubectl.exe"
   $kUrl = "https://dl.k8s.io/release/$kVer/bin/windows/$arch/kubectl.exe"
   $t0 = Get-Date
-  # Heartbeat during the otherwise-silent transfer (#422); retry wraps it.
-  Get-VerifiedDownload -Url $kUrl -Dest $kubectlDest -MinBytes 20MB -Magic 'MZ' `
+  # Fetch the .sha256 FIRST, then make it the download gate (#609): with -Sha256 the
+  # binary download retries transports (Invoke-WebRequest -> curl.exe -> BITS) until a
+  # byte-correct copy lands, so a mid-transfer truncation self-heals instead of
+  # dead-ending at a post-hoc checksum. dl.k8s.io publishes the bare 64-hex hash.
+  $kSums = "$env:TEMP\kubectl-sha-$([System.IO.Path]::GetRandomFileName()).txt"
+  try {
+    Get-VerifiedDownload -Url "https://dl.k8s.io/release/$kVer/bin/windows/$arch/kubectl.exe.sha256" `
+      -Dest $kSums -MinBytes 1 -MatchPattern '^\s*[0-9a-fA-F]{64}' `
+      -Label "kubectl checksum" -Message "Fetching kubectl checksum"
+  } catch {
+    Remove-Item $kSums -Force -ErrorAction SilentlyContinue
+    Err "Couldn't fetch the kubectl checksum ($_). Check egress to dl.k8s.io and re-run."
+  }
+  $expectedHash = ((Get-Content $kSums -Raw).Trim())
+  Remove-Item $kSums -Force -ErrorAction SilentlyContinue
+  if ($expectedHash -notmatch '^[0-9a-fA-F]{64}$') {
+    Err "Couldn't read a valid kubectl checksum (got an error page?). Check egress to dl.k8s.io and re-run."
+  }
+  Get-VerifiedDownload -Url $kUrl -Dest $kubectlDest -MinBytes 20MB -Magic 'MZ' -Sha256 $expectedHash `
     -Label "kubectl download" -Message "Downloading kubectl $kVer (~60 MB)"
-  $expectedHash = Invoke-WithRetry -Label "checksum" -ScriptBlock {
-    (Invoke-WebRequest "https://dl.k8s.io/release/$kVer/bin/windows/$arch/kubectl.exe.sha256" `
-      -UseBasicParsing).Content.Trim()
-  }
-  $actualHash = (Get-FileHash $kubectlDest -Algorithm SHA256).Hash.ToLower()
-  if ($actualHash -ne $expectedHash.ToLower()) {
-    Remove-Item $kubectlDest -Force
-    Err "System tool checksum verification failed."
-  }
   RefreshPath
   Log "kubectl $kVer installed."
   Assert-ToolRuns -Name "kubectl" -VersionArgs @("version","--client") -BinPath $kubectlDest
@@ -1701,36 +1747,31 @@ function Install-K3dAndHelm {
         }
       $k3dDest = "$TOOL_DIR\k3d.exe"
       $k3dUrl = "https://github.com/k3d-io/k3d/releases/download/$k3dVer/k3d-windows-$arch.exe"
-      Get-VerifiedDownload -Url $k3dUrl -Dest $k3dDest -MinBytes 10MB -Magic 'MZ' `
-        -Label "k3d download" -Message "Downloading k3d $k3dVer (~25 MB)"
-      # Fail-closed verification, matching the Linux path and the kubectl
-      # precedent: an unfetchable checksums.txt, a missing asset line, or a
-      # mismatch all abort and remove the download — never install unverified
-      # bytes on a privileged path (Bugbot r3). The release's checksum asset is
-      # named checksums.txt ("<sha256>  _dist/<asset>" lines); the previous
-      # sha256sum.txt URL never existed, so the old fail-open verification
-      # silently never ran (#382).
+      # Fetch the checksum list FIRST, then make the SHA the download gate (#609).
+      # The release's checksum asset is checksums.txt ("<sha256>  _dist/<asset>"
+      # lines). Fetching it resiliently (multi-transport + must contain the asset
+      # line) means a proxy error page is retried, and passing the extracted hash to
+      # Get-VerifiedDownload makes the binary download retry transports until a
+      # byte-correct copy lands -- the fix for a mid-transfer truncation that used to
+      # slip past the size floor and dead-end at the checksum (the #607 field case).
+      $k3dSums = "$env:TEMP\k3d-checksums-$([System.IO.Path]::GetRandomFileName()).txt"
       try {
-        $checksums = Invoke-WithRetry -Label "k3d checksums" -ScriptBlock {
-          (Invoke-WebRequest "https://github.com/k3d-io/k3d/releases/download/$k3dVer/checksums.txt" `
-            -UseBasicParsing).Content
-        }
+        Get-VerifiedDownload -Url "https://github.com/k3d-io/k3d/releases/download/$k3dVer/checksums.txt" `
+          -Dest $k3dSums -MinBytes 1 -MatchPattern "[0-9a-fA-F]{64}\s+\S*k3d-windows-$arch\.exe" `
+          -Label "k3d checksums" -Message "Fetching k3d checksums"
       } catch {
-        Remove-Item $k3dDest -Force -ErrorAction SilentlyContinue
+        Remove-Item $k3dSums -Force -ErrorAction SilentlyContinue
         Err "Couldn't fetch the k3d checksums ($_). Check egress to github.com and re-run."
       }
-      $expectedHash = (($checksums -split "`n" |
-        Where-Object { $_ -match "k3d-windows-$arch\.exe" }) -replace '\s+.*','' |
+      $expectedHash = (((Get-Content $k3dSums) |
+        Where-Object { $_ -match "k3d-windows-$arch\.exe" }) -replace '\s+.*', '' |
         Select-Object -First 1)
-      if (-not $expectedHash) {
-        Remove-Item $k3dDest -Force -ErrorAction SilentlyContinue
-        Err "System tool checksum verification failed."
+      Remove-Item $k3dSums -Force -ErrorAction SilentlyContinue
+      if ($expectedHash -notmatch '^[0-9a-fA-F]{64}$') {
+        Err "Couldn't read a valid k3d checksum from checksums.txt. Check egress to github.com and re-run."
       }
-      $actualHash = (Get-FileHash $k3dDest -Algorithm SHA256).Hash.ToLower()
-      if ($actualHash -ne $expectedHash.Trim().ToLower()) {
-        Remove-Item $k3dDest -Force
-        Err "System tool checksum verification failed."
-      }
+      Get-VerifiedDownload -Url $k3dUrl -Dest $k3dDest -MinBytes 10MB -Magic 'MZ' -Sha256 $expectedHash.Trim() `
+        -Label "k3d download" -Message "Downloading k3d $k3dVer (~25 MB)"
       Log "k3d checksum verified."
       RefreshPath
       # Compute the summary now (correct elapsed) but print it only AFTER the
@@ -1767,7 +1808,26 @@ function Install-K3dAndHelm {
       $t0helm = Get-Date
       $helmZip = "$env:TEMP\helm-$helmVer-windows-$arch.zip"
       $helmUrl = "https://get.helm.sh/helm-$helmVer-windows-$arch.zip"
-      Get-VerifiedDownload -Url $helmUrl -Dest $helmZip -MinBytes 5MB -Magic 'PK' `
+      # Checksum-gated like k3d/kubectl (#609): get.helm.sh publishes
+      # <zip>.sha256sum ("<hash>  <zip-name>"). Fetch it first so the zip download
+      # retries transports until byte-correct -- a truncated zip that used to pass
+      # size+magic and then fail at Expand-Archive now self-heals. (The PS path had
+      # no helm checksum at all before; this also brings it to parity with the
+      # bash path, which already verifies helm.)
+      $helmSums = "$env:TEMP\helm-sha-$([System.IO.Path]::GetRandomFileName()).txt"
+      try {
+        Get-VerifiedDownload -Url "$helmUrl.sha256sum" -Dest $helmSums -MinBytes 1 `
+          -MatchPattern "[0-9a-fA-F]{64}\s+\S*helm-\S*windows-$arch\.zip" -Label "helm checksum" -Message "Fetching Helm checksum"
+      } catch {
+        Remove-Item $helmSums -Force -ErrorAction SilentlyContinue
+        Err "Couldn't fetch the Helm checksum ($_). Check egress to get.helm.sh and re-run."
+      }
+      $helmHash = (((Get-Content $helmSums) -split '\s+' | Select-Object -First 1))
+      Remove-Item $helmSums -Force -ErrorAction SilentlyContinue
+      if ($helmHash -notmatch '^[0-9a-fA-F]{64}$') {
+        Err "Couldn't read a valid Helm checksum from get.helm.sh. Check egress and re-run."
+      }
+      Get-VerifiedDownload -Url $helmUrl -Dest $helmZip -MinBytes 5MB -Magic 'PK' -Sha256 $helmHash `
         -Label "helm download" -Message "Downloading Helm $helmVer (~20 MB)"
       $helmExtract = "$env:TEMP\helm-extract"
       if (Test-Path $helmExtract) { Remove-Item $helmExtract -Recurse -Force }
@@ -2612,9 +2672,18 @@ function New-K3dCluster {
       Err "Compute environment creation timed out after $timeoutMin minutes. Check that Docker is healthy and this network can pull images, then re-run. (TB_CREATE_TIMEOUT_MIN overrides the bound.)"
     }
 
-    $k3dExitCode = $k3dProc.ExitCode
     $k3dStdout = if (Test-Path $k3dOutLog) { Get-Content $k3dOutLog -Raw -ErrorAction SilentlyContinue } else { "" }
     $k3dStderr = if (Test-Path $k3dErrLog) { Get-Content $k3dErrLog -Raw -ErrorAction SilentlyContinue } else { "" }
+    $k3dExitCode = $k3dProc.ExitCode
+    # Defense-in-depth (#611): if the exit code is STILL unreadable after
+    # WaitForExit (Wait-ProcessWithDeadline), do not fail a cluster that k3d itself
+    # reported up -- trust its authoritative success marker over a null code. k3d
+    # logs via logrus to STDERR, so its "Cluster created successfully!" line lands in
+    # $k3dStderr, not $k3dStdout -- check BOTH streams or a real success is misread
+    # as failure (Bugbot).
+    if ($null -eq $k3dExitCode) {
+      $k3dExitCode = if ("$k3dStdout`n$k3dStderr" -match 'created successfully') { 0 } else { 1 }
+    }
     Remove-Item $k3dOutLog, $k3dErrLog -Force -ErrorAction SilentlyContinue
     if ($proxyCfg) { Remove-Item (Split-Path $proxyCfg -Parent) -Recurse -Force -ErrorAction SilentlyContinue }
     if ($registriesCfg) { Remove-Item (Split-Path $registriesCfg -Parent) -Recurse -Force -ErrorAction SilentlyContinue }
@@ -3570,19 +3639,42 @@ $envBlock
   # with this script's own ...\tracebloc-installer-<n>\install-k8s.ps1 temp path --
   # which contains "tracebloc" -- so the guard skipped the add on every fresh
   # install and Step 4 died later with "Error: repo tracebloc not found". #385)
-  Log "Adding Helm repo: $TRACEBLOC_HELM_REPO_URL"
-  $addOutput = (helm repo add $TRACEBLOC_HELM_REPO_NAME $TRACEBLOC_HELM_REPO_URL --force-update 2>&1) | Out-String
-  Log "helm repo add: $addOutput"
-  if ($LASTEXITCODE -ne 0) { Err "Couldn't add the tracebloc chart repo ($TRACEBLOC_HELM_REPO_URL)." $addOutput }
+  # Chart source: $env:TRACEBLOC_CHART_PATH points at a LOCAL chart directory for
+  # dev/testing an unreleased chart (parity with the bash installer's
+  # _resolve_chart_ref, lib/install-client-helm.sh) -- without it, Windows could only
+  # ever install the published chart, so branch-only chart fixes were untestable here.
+  # A local path skips `helm repo add` entirely; otherwise use the published repo.
+  if ($env:TRACEBLOC_CHART_PATH) {
+    if (-not (Test-Path -LiteralPath $env:TRACEBLOC_CHART_PATH -PathType Container)) {
+      Err "TRACEBLOC_CHART_PATH is set but is not a directory: $($env:TRACEBLOC_CHART_PATH)"
+    }
+    $chartRef = $env:TRACEBLOC_CHART_PATH
+    Info "Dev mode: installing the chart from local path $chartRef (skipping the Helm repo)."
+    Log "Using local chart: $chartRef"
+  } else {
+    $chartRef = "$TRACEBLOC_HELM_REPO_NAME/$TRACEBLOC_CHART_NAME"
+    Log "Adding Helm repo: $TRACEBLOC_HELM_REPO_URL"
+    $addOutput = (helm repo add $TRACEBLOC_HELM_REPO_NAME $TRACEBLOC_HELM_REPO_URL --force-update 2>&1) | Out-String
+    Log "helm repo add: $addOutput"
+    if ($LASTEXITCODE -ne 0) { Err "Couldn't add the tracebloc chart repo ($TRACEBLOC_HELM_REPO_URL)." $addOutput }
+  }
 
   Write-Host ""
   if ($adoptedReuse) {
-    # Surgical reconcile of the LIVE release: --reuse-values preserves the
-    # deployed configuration + secret; only clientId is healed (#397 r2).
-    Log "Reconciling release '$existingName' in namespace '$existingNs' (adopted; --reuse-values; healing clientId)..."
-    $helmOutput = (helm upgrade $existingName "$TRACEBLOC_HELM_REPO_NAME/$TRACEBLOC_CHART_NAME" `
+    # Surgical reconcile of the LIVE release: preserve the deployed configuration +
+    # secret; only clientId is healed (#397 r2). Prefer --reset-then-reuse-values
+    # (Helm >= 3.14: reset to chart defaults, then re-apply the user's overrides, so
+    # NEW chart defaults reach adopted edges on auto-upgrade) over --reuse-values
+    # (keeps only stored values, so new chart defaults never land); feature-detect via
+    # --help and fall back on older Helm (bash parity: install-client-helm.sh).
+    $reuseFlag = "--reuse-values"
+    if ((helm upgrade --help 2>$null | Out-String) -match '--reset-then-reuse-values') {
+      $reuseFlag = "--reset-then-reuse-values"
+    }
+    Log "Reconciling release '$existingName' in namespace '$existingNs' (adopted; $reuseFlag; healing clientId)..."
+    $helmOutput = (helm upgrade $existingName $chartRef `
       --namespace $existingNs `
-      --reuse-values `
+      $reuseFlag `
       --set-string "clientId=$TB_CLIENT_ID" 2>&1) | Out-String
     Log "Helm Output: $helmOutput"
     if ($LASTEXITCODE -ne 0) { Err "Client reconcile failed." $helmOutput }
@@ -3594,8 +3686,8 @@ $envBlock
       Set-Content -Path $valuesFile -Value $vals -Encoding UTF8
     }
   } else {
-    Log "Installing $TB_NAMESPACE from $TRACEBLOC_HELM_REPO_NAME/$TRACEBLOC_CHART_NAME in namespace '$TB_NAMESPACE'..."
-    $helmOutput = (helm upgrade --install $TB_NAMESPACE "$TRACEBLOC_HELM_REPO_NAME/$TRACEBLOC_CHART_NAME" `
+    Log "Installing $TB_NAMESPACE from $chartRef in namespace '$TB_NAMESPACE'..."
+    $helmOutput = (helm upgrade --install $TB_NAMESPACE $chartRef `
       --namespace $TB_NAMESPACE `
       --create-namespace `
       --values $valuesFile 2>&1) | Out-String
