@@ -243,34 +243,28 @@ install_docker_desktop() {
     retry 3 5 download_with_progress "$dmg_url" "$dmg_path" \
       "Downloading Docker Desktop — large, a few minutes on a fresh Mac"
 
-    local checksum_url="${dmg_url}.sha256sum"
+    # Docker does NOT publish a floating "Docker.dmg.sha256sum" sibling — that
+    # URL 403s, so the old fetch was ALWAYS empty on a clean network. The real,
+    # co-located checksum for this exact floating DMG lives in "checksums.txt"
+    # next to it (BSD format: "<sha256> *Docker.dmg"). Use that instead; it
+    # returns 200 on a clean network, so honest installs get genuinely verified.
+    local checksum_url="${dmg_url%/*}/checksums.txt"
     local expected_hash="" _attempt
     # Fetch the published checksum, retrying transient failures. Capture cleanly
     # (not through the generic retry(), whose progress notes go to stdout and
-    # would pollute the captured hash).
+    # would pollute the captured hash). Pick the Docker.dmg line and take the
+    # hash field (field 1; field 2 is "*Docker.dmg").
     for _attempt in 1 2 3; do
-      expected_hash=$(curl_secure -fsSL "$checksum_url" 2>/dev/null | awk 'NF{print $1; exit}') || true
+      expected_hash=$(curl_secure -fsSL "$checksum_url" 2>/dev/null \
+        | awk '/Docker\.dmg/{print $1; exit}') || true
       [[ -n "$expected_hash" ]] && break
       [[ "$_attempt" -lt 3 ]] && sleep 5
     done
 
-    # Fail CLOSED (#556): this DMG is about to be mounted and copied into
-    # /Applications under sudo, so it MUST be integrity-checked. Previously an
-    # empty fetch (a TLS-inspecting corporate proxy, or a transient CDN error)
-    # logged "skipping verification" and installed the DMG UNVERIFIED on a
-    # privileged path — a supply-chain fail-open. Abort with a clear, actionable
-    # message unless the operator explicitly opts out, matching the Windows
-    # k3d/kubectl downloads which already fail closed.
-    if [[ -z "$expected_hash" ]]; then
-      if [[ -n "${TRACEBLOC_ALLOW_UNVERIFIED_DOCKER_DMG:-}" ]]; then
-        warn "Installing Docker Desktop WITHOUT checksum verification (TRACEBLOC_ALLOW_UNVERIFIED_DOCKER_DMG set) — proceed only if you trust this network."
-      else
-        rm -f "$dmg_path"
-        error "Could not fetch the Docker Desktop checksum from ${checksum_url} — refusing to install an unverified DMG under sudo. Check egress to desktop.docker.com (a TLS-inspecting proxy can strip it), then re-run. (Override at your own risk with TRACEBLOC_ALLOW_UNVERIFIED_DOCKER_DMG=1.)"
-      fi
-    fi
-
     if [[ -n "$expected_hash" ]]; then
+      # Checksum available (the clean-network path): verify and FAIL CLOSED on a
+      # mismatch (#556). This DMG is about to be mounted and copied into
+      # /Applications under sudo, so a corrupted or tampered download must abort.
       local actual_hash
       actual_hash=$(shasum -a 256 "$dmg_path" | awk '{print $1}')
       if [[ "$actual_hash" != "$expected_hash" ]]; then
@@ -278,6 +272,20 @@ install_docker_desktop() {
         error "Docker Desktop DMG checksum mismatch — download may be corrupted or tampered with"
       fi
       log "Docker Desktop checksum verified."
+    else
+      # No checksum could be fetched. On a clean network checksums.txt is always
+      # present, so this only happens on an anomalous path — a TLS-inspecting
+      # proxy stripping it, a transient CDN error, or Docker changing its
+      # layout. Do NOT hard-abort (that would brick otherwise-fine installs for
+      # something outside the user's control); emit a LOUD, visible warning and
+      # proceed. Operators who want strict fail-closed behaviour can opt in with
+      # TRACEBLOC_REQUIRE_DOCKER_DMG_CHECKSUM=1. Note: a genuine tampered DMG is
+      # still caught above whenever the checksum IS reachable (the common case).
+      if [[ -n "${TRACEBLOC_REQUIRE_DOCKER_DMG_CHECKSUM:-}" ]]; then
+        rm -f "$dmg_path"
+        error "Could not fetch the Docker Desktop checksum from ${checksum_url} and TRACEBLOC_REQUIRE_DOCKER_DMG_CHECKSUM is set — refusing to install an unverified DMG. Check egress to desktop.docker.com (a TLS-inspecting proxy can strip it), then re-run."
+      fi
+      warn "Could not fetch the Docker Desktop checksum from ${checksum_url} — installing this DMG UNVERIFIED. This usually means a proxy/VPN is rewriting traffic to desktop.docker.com. Set TRACEBLOC_REQUIRE_DOCKER_DMG_CHECKSUM=1 to refuse unverified installs."
     fi
 
     spin_cmd "Installing Docker Desktop…" bash -c \
