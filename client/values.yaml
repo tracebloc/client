@@ -789,7 +789,10 @@ imageRefresh:
   # rollout-status timeout) fails the rollout, so `recorded` never advances and
   # every later settled tick re-issues the same restart. After this many
   # in-a-row failures the job stops restarting and surfaces the flapping
-  # deployment; refresh resumes once it settles healthy or the target changes.
+  # deployment. Refresh resumes automatically once the deployment stays settled
+  # through the back-off cooldown (i.e. the flap clears) or the target changes;
+  # a still-flapping deployment is retried at most once per cooldown, never
+  # every tick.
   maxRefreshAttempts: 3
   # CronJob spec knobs. Override per-cluster if needed.
   suspend: false

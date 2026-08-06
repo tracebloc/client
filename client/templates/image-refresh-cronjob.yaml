@@ -249,27 +249,54 @@ data:
       # re-issues the identical restart (~every schedule). Record the ATTEMPT
       # (target signature + a consecutive-failure count) BEFORE the restart so it
       # survives that early exit; once the same targets have failed
-      # MAX_REFRESH_ATTEMPTS times in a row, skip the restart and surface the
+      # MAX_REFRESH_ATTEMPTS times in a row, stop restarting and surface the
       # flapping deployment instead of churning ReplicaSets forever. The count
       # resets when the target digest changes or a rollout finally succeeds.
+      #
+      # #563 review (must-resume): back-off must not be a DEAD END. Reaching this
+      # branch means THIS tick already passed the top-of-tick settled guard --
+      # the deployment is settled right now. Once we stop churning it, a flap
+      # that has genuinely cleared will STAY settled tick after tick, whereas a
+      # still-flapping one is only intermittently settled (its unsettled ticks
+      # are skipped before they ever get here). So we count the settled ticks
+      # observed WHILE in back-off and, once BACKOFF_RESUME_AFTER of them accrue,
+      # reset the counter and retry the refresh. A now-healthy deployment resumes
+      # and reaches `recorded == latest`; a still-flapping one accrues slowly and
+      # is retried at most once per cooldown (bounded churn), never every tick.
+      BACKOFF_RESUME_AFTER="${BACKOFF_RESUME_AFTER:-4}"
       signature="$(printf '%s' "$annotate_args" | tr -s ' ' | sed 's/^ //; s/ $//')"
       attempt="$(get_annotation "$ATTEMPT_KEY" || true)"
       prev_sig="${attempt% *}"
       prev_count="${attempt##* }"
       case "$prev_count" in ''|*[!0-9]*) prev_count=0 ;; esac
+      # A changed target (or no prior attempt) starts a fresh failure count.
+      [ -n "$attempt" ] && [ "$prev_sig" = "$signature" ] || prev_count=0
 
-      if [ -n "$attempt" ] && [ "$prev_sig" = "$signature" ] && [ "$prev_count" -ge "$MAX_REFRESH_ATTEMPTS" ]; then
-        log "  WARN: rollout for the current target digest(s) has failed ${prev_count} time(s) in a row; backing off (not restarting again). deployment/${DEPLOYMENT_NAME} is likely flapping (becomes Ready then crashes) -- investigate it. Refresh resumes automatically once it settles healthy or the target digest changes."
-        log "tick complete"
-        exit 0
+      if [ "$prev_count" -ge "$MAX_REFRESH_ATTEMPTS" ]; then
+        # In back-off. Counts at/above MAX encode MAX failures plus one extra per
+        # settled tick spent waiting for the flap to clear.
+        settled_ticks=$(( prev_count - MAX_REFRESH_ATTEMPTS ))
+        if [ "$settled_ticks" -lt "$BACKOFF_RESUME_AFTER" ]; then
+          # Still cooling down: record this settled observation to advance the
+          # cooldown and skip the restart -- do NOT churn a flapping deployment.
+          kubectl annotate deployment -n "$RELEASE_NAMESPACE" "$DEPLOYMENT_NAME" \
+            "${ATTEMPT_KEY}=${signature} $(( prev_count + 1 ))" \
+            --overwrite --request-timeout=15s
+          log "  WARN: rollout for the current target digest(s) failed ${MAX_REFRESH_ATTEMPTS} time(s) in a row; backing off (not restarting). deployment/${DEPLOYMENT_NAME} is likely flapping (becomes Ready then crashes) -- investigate it. Settled $(( settled_ticks + 1 ))/${BACKOFF_RESUME_AFTER} cooldown tick(s); refresh retries once it stays settled through the cooldown, or immediately if the target digest changes."
+          log "tick complete"
+          exit 0
+        fi
+        # Stayed settled through the whole cooldown -- the flap has cleared.
+        # Reset and retry the refresh from scratch.
+        log "  deployment/${DEPLOYMENT_NAME} stayed settled through the back-off cooldown (${BACKOFF_RESUME_AFTER} tick(s)); resetting attempt counter and resuming refresh"
+        prev_count=0
       fi
 
       new_count=$(( prev_count + 1 ))
-      [ "$prev_sig" = "$signature" ] || new_count=1
       # Persist the attempt BEFORE restarting so a failed rollout (which exits
       # the tick under set -e) still advances the counter for the next tick.
       kubectl annotate deployment -n "$RELEASE_NAMESPACE" "$DEPLOYMENT_NAME" \
-        "${ATTEMPT_KEY}=${signature} ${new_count}" --overwrite
+        "${ATTEMPT_KEY}=${signature} ${new_count}" --overwrite --request-timeout=15s
 
       log "rolling restart of deployment/${DEPLOYMENT_NAME} (attempt ${new_count}/${MAX_REFRESH_ATTEMPTS})"
       kubectl rollout restart -n "$RELEASE_NAMESPACE" "deployment/${DEPLOYMENT_NAME}"
