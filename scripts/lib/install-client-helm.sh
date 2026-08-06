@@ -220,7 +220,13 @@ detect_installed_client() {
   # a re-install silently overwrite an existing client. `helm list` returns 0 with
   # empty output when there are genuinely no releases, so only a non-zero exit is
   # "unknown".
-  if ! _list="$(helm list -A 2>/dev/null)"; then
+  #
+  # --all so a client release wedged in a pending-* (or failed) state is COUNTED by
+  # the one-client ownership guard. Plain `helm list` hides pending releases, so
+  # without it a re-run under a DIFFERENT clientId would slip past the guard and let
+  # _reconcile_pending_release uninstall / roll back another client's wedged release
+  # without any ownership check. Same --all rationale as the adopt enumeration (Bugbot #619).
+  if ! _list="$(helm list -A --all 2>/dev/null)"; then
     INSTALLED_CLIENT_UNKNOWN=1; rm -f "$_gvf"; return 0
   fi
   while read -r _rel _ns; do
