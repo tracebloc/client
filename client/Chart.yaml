@@ -2,8 +2,8 @@ apiVersion: v2
 name: client
 description: A unified Helm chart for tracebloc on AKS, EKS, bare-metal, and OpenShift
 type: application
-version: 1.9.20
-appVersion: "1.9.20"
+version: 1.9.21
+appVersion: "1.9.21"
 keywords:
   - tracebloc
   - kubernetes
