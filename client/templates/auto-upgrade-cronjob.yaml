@@ -107,6 +107,12 @@ spec:
   jobTemplate:
     spec:
       backoffLimit: 2
+      # #555: hard wall-clock cap on the Job. `timeout` bounds only
+      # `helm upgrade --wait`; the earlier `helm repo add`/`helm repo update`
+      # fetches can hang on a TCP black-hole with no timeout, and with
+      # concurrencyPolicy: Forbid a single hung Job skips every future tick.
+      # This backstop fails the Job so the next tick can run.
+      activeDeadlineSeconds: {{ .Values.autoUpgrade.activeDeadlineSeconds }}
       template:
         metadata:
           labels:

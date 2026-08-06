@@ -737,6 +737,10 @@
           "type": "integer",
           "minimum": 0
         },
+        "activeDeadlineSeconds": {
+          "type": "integer",
+          "minimum": 1
+        },
         "image": {
           "type": "object",
           "required": ["repository", "tag"],

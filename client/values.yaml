@@ -687,6 +687,16 @@ autoUpgrade:
   successfulJobsHistoryLimit: 3
   failedJobsHistoryLimit: 5
   startingDeadlineSeconds: 600
+  # Hard wall-clock cap on the whole Job (#555). `timeout` above only bounds
+  # `helm upgrade --wait`; the earlier `helm repo add`/`helm repo update`
+  # HTTPS fetches have no timeout of their own, so on a TCP black-hole (a
+  # corporate proxy that drops packets with no RST) the Job can hang
+  # indefinitely — and with concurrencyPolicy: Forbid that hung Job makes
+  # every future tick "still active" and skipped, wedging auto-upgrade until a
+  # human kills the pod. activeDeadlineSeconds is the backstop that fails the
+  # Job instead. Keep it comfortably above `timeout` (600s) plus repo-update
+  # headroom so a slow-but-healthy upgrade is never killed mid-flight.
+  activeDeadlineSeconds: 900
   # Pod image: helm CLI only. alpine/helm is small and the tag pins the
   # helm version, so behaviour cannot drift if upstream re-tags.
   image:
