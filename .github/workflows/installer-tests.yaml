@@ -16,6 +16,11 @@ on:
     paths:
       - 'scripts/**'
       - '.github/workflows/installer-tests.yaml'
+      # #616: the check-facts drift gate enforces the GPU node image's k3s pin against
+      # facts.env — run it when those files change too, else a K3S_TAG edit could drift
+      # and merge green (Bugbot).
+      - 'docker/k3s-cuda/**'
+      - '.github/workflows/build-k3s-cuda.yaml'
   pull_request:
     # `labeled` is required so adding the `e2e` label to an open PR starts the
     # e2e-journey job immediately — with the default types it would only fire on
@@ -25,6 +30,11 @@ on:
     paths:
       - 'scripts/**'
       - '.github/workflows/installer-tests.yaml'
+      # #616: the check-facts drift gate enforces the GPU node image's k3s pin against
+      # facts.env — run it when those files change too, else a K3S_TAG edit could drift
+      # and merge green (Bugbot).
+      - 'docker/k3s-cuda/**'
+      - '.github/workflows/build-k3s-cuda.yaml'
   schedule:
     - cron: '0 3 * * 1'   # Mondays 03:00 UTC — catch drift as distro base images move
   workflow_dispatch:
