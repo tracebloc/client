@@ -3605,11 +3605,46 @@ Describe "GPU cluster wiring (#616 source guards)" {
     $script:GSRC | Should -Match '"\$mirrorHost/\$cudaRepo"'
   }
   It "the docker-run probe is the authoritative gate: it sets/clears K3D_GPU_FLAG" {
-    $script:GSRC | Should -Match 'if \(Confirm-DockerGpu\)'
+    $script:GSRC | Should -Match 'Confirm-DockerGpu'
     $script:GSRC | Should -Match '\$K3D_GPU_FLAG = "--gpus=all"'
   }
   It "GPU-enabled installs request the nvidia RuntimeClass for spawned pods" {
     $script:GSRC | Should -Match '\$runtimeClass = "nvidia"'
     $script:GSRC | Should -Match 'RUNTIME_CLASS_NAME: "\$runtimeClass"'
+  }
+}
+
+Describe "Confirm-GpuImagePullable (#616 private GPU image, no public package)" {
+  BeforeAll { $script:GSRC2 = Get-Content "$PSScriptRoot/../install-k8s.ps1" -Raw }
+  BeforeEach {
+    $K3S_CUDA_IMAGE = "ghcr.io/tracebloc/k3s-cuda:v1.29.4-k3s1-cuda-12.4.1-base-ubuntu22.04"
+    $script:GPU_SKIP_REASON = ""
+    $env:TRACEBLOC_REGISTRY_USERNAME = $null; $env:TRACEBLOC_REGISTRY_PASSWORD = $null
+  }
+  AfterEach { $env:TRACEBLOC_REGISTRY_USERNAME = $null; $env:TRACEBLOC_REGISTRY_PASSWORD = $null }
+
+  It "logs Docker in with the registry creds then returns true when the pull succeeds" {
+    $env:TRACEBLOC_REGISTRY_USERNAME = "bot"; $env:TRACEBLOC_REGISTRY_PASSWORD = "tok"
+    Mock docker { $global:LASTEXITCODE = 0 }
+    Confirm-GpuImagePullable | Should -BeTrue
+    Should -Invoke docker -ParameterFilter { ($args -contains "login") -and ($args -contains "ghcr.io") }
+    Should -Invoke docker -ParameterFilter { $args -contains "pull" }
+  }
+  It "returns false with a credentials hint when the pull fails despite creds" {
+    $env:TRACEBLOC_REGISTRY_USERNAME = "bot"; $env:TRACEBLOC_REGISTRY_PASSWORD = "tok"
+    Mock docker { if ($args -contains "login") { $global:LASTEXITCODE = 0; return }; $global:LASTEXITCODE = 1 }
+    Confirm-GpuImagePullable | Should -BeFalse
+    $script:GPU_SKIP_REASON | Should -Match "credentials"
+  }
+  It "without creds: no docker login, and the reason names the env vars to set" {
+    Mock docker { $global:LASTEXITCODE = 1 }
+    Confirm-GpuImagePullable | Should -BeFalse
+    Should -Not -Invoke docker -ParameterFilter { $args -contains "login" }
+    $script:GPU_SKIP_REASON | Should -Match "TRACEBLOC_REGISTRY_USERNAME"
+  }
+  It "the GPU gate requires BOTH the passthrough probe and the image pull (source guard)" {
+    $script:GSRC2 | Should -Match '\(Confirm-DockerGpu\) -and \(Confirm-GpuImagePullable\)'
+    $script:GSRC2 | Should -Match 'docker login \$regHost -u \$regUser --password-stdin'
+    $script:GSRC2 | Should -Match 'docker pull \$K3S_CUDA_IMAGE'
   }
 }

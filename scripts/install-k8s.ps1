@@ -1675,6 +1675,38 @@ function Confirm-DockerGpu {
   }
 }
 
+# #616: the custom GPU node image is kept PRIVATE (not published public), so the installer must
+# authenticate to pull it — the end user still runs ONE command; the creds come from env, not a
+# separate `docker login`. Log Docker in to the image's registry with the provided registry creds
+# (TRACEBLOC_REGISTRY_USERNAME/PASSWORD — the same vars the mirror uses, #585) and verify the image
+# is actually pullable BEFORE committing to a --gpus cluster. On failure we fall back to CPU
+# cleanly instead of a cluster-create that dies pulling an unauthorized image. The pull here also
+# pre-loads the image, so k3d cluster-create reuses the local copy (no second pull).
+function Confirm-GpuImagePullable {
+  $regHost = ($K3S_CUDA_IMAGE -split '/')[0]
+  $regUser = $env:TRACEBLOC_REGISTRY_USERNAME
+  $regPass = $env:TRACEBLOC_REGISTRY_PASSWORD
+  if ($regUser -and $regPass) {
+    Log "Authenticating Docker to $regHost for the private GPU node image"
+    try { $regPass | docker login $regHost -u $regUser --password-stdin 2>&1 | Out-Null } catch {}
+    if ($LASTEXITCODE -ne 0) { Log "docker login to $regHost did not succeed (exit $LASTEXITCODE)" }
+  }
+  Log "Pulling the GPU node image (verifies access + pre-loads for cluster-create): $K3S_CUDA_IMAGE"
+  try {
+    $null = (docker pull $K3S_CUDA_IMAGE 2>&1 | Out-String)
+    if ($LASTEXITCODE -eq 0) { Log "GPU node image pulled OK"; return $true }
+    Log "GPU node image pull failed (exit $LASTEXITCODE)"
+  } catch {
+    Log "GPU node image pull error: $($_.Exception.Message)"
+  }
+  if ($regUser -and $regPass) {
+    $script:GPU_SKIP_REASON = "the GPU node image ($K3S_CUDA_IMAGE) couldn't be pulled even with the provided registry credentials -- check they have read access"
+  } else {
+    $script:GPU_SKIP_REASON = "the GPU node image ($K3S_CUDA_IMAGE) is on a private registry -- set TRACEBLOC_REGISTRY_USERNAME and TRACEBLOC_REGISTRY_PASSWORD (a read:packages token) to enable GPU"
+  }
+  return $false
+}
+
 # =============================================================================
 #  SYSTEM TOOLS (kubectl, k3d, helm)
 # =============================================================================
@@ -4829,7 +4861,10 @@ Install-NvidiaContainerToolkit
 # can expose the GPU to a container. Enable GPU iff the probe passes -- else CPU fallback
 # (Layer 1) with a clear reason, and never create a --gpus cluster that would fail.
 if ($GPU_VENDOR -eq "nvidia" -and $NVIDIA_DRIVER_OK) {
-  if (Confirm-DockerGpu) {
+  # Enable GPU only if BOTH the Docker GPU passthrough probe passes AND the (private) GPU
+  # node image is pullable. -and short-circuits, so we don't try to pull if the GPU can't
+  # be exposed anyway; either failure leaves a specific $GPU_SKIP_REASON for the summary.
+  if ((Confirm-DockerGpu) -and (Confirm-GpuImagePullable)) {
     $K3D_GPU_FLAG = "--gpus=all"
     $GPU_SKIP_REASON = ""
     Ok "GPU enabled -- cluster will use the custom k3s-CUDA image with --gpus=all"
