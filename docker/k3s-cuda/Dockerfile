@@ -11,8 +11,10 @@
 # Based on the official k3d CUDA recipe (https://k3d.io/.../usage/advanced/cuda/).
 #
 # IMPORTANT: K3S_TAG MUST match the installer's K8S_VERSION pin
-# (scripts/lib/common.sh: K8S_VERSION) so a GPU node runs the exact same
-# validated k3s as a normal CPU node. The build workflow enforces this.
+# (scripts/spec/facts.env / scripts/lib/common.sh) so a GPU node runs the exact
+# same validated k3s as a normal CPU node. scripts/check-facts.sh enforces this:
+# this ARG, build.sh, and the workflow input default are all checked against
+# facts.env's K8S_VERSION, so a bump can't leave the GPU image tag stale (#547).
 ARG K3S_TAG="v1.29.4-k3s1"
 ARG CUDA_TAG="12.4.1-base-ubuntu22.04"
 
@@ -23,13 +25,15 @@ FROM nvcr.io/nvidia/cuda:${CUDA_TAG}
 # NVIDIA Container Toolkit, then point containerd at the `nvidia` runtime. The
 # gpg key + apt list are pinned via the keyring the same way the in-WSL toolkit
 # install does (scripts/install-k8s.ps1) so a restricted-network mirror can
-# re-home them consistently.
+# re-home them consistently. curl carries the TLS floor + bounded timeouts inline
+# (a Dockerfile can't source common.sh's curl_secure()) so a stalled or downgraded
+# connection to nvidia.github.io fails fast instead of hanging the build (house rule).
 RUN export DEBIAN_FRONTEND=noninteractive \
     && apt-get update \
     && apt-get install -y --no-install-recommends curl ca-certificates gnupg \
-    && curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey \
+    && curl -fsSL --tlsv1.2 --connect-timeout 30 --max-time 60 https://nvidia.github.io/libnvidia-container/gpgkey \
          | gpg --dearmor -o /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg \
-    && curl -fsSL https://nvidia.github.io/libnvidia-container/stable/deb/nvidia-container-toolkit.list \
+    && curl -fsSL --tlsv1.2 --connect-timeout 30 --max-time 60 https://nvidia.github.io/libnvidia-container/stable/deb/nvidia-container-toolkit.list \
          | sed 's#deb https://#deb [signed-by=/usr/share/keyrings/nvidia-container-toolkit-keyring.gpg] https://#g' \
          | tee /etc/apt/sources.list.d/nvidia-container-toolkit.list \
     && apt-get update \

@@ -24,6 +24,9 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-latest
+    # Bound the ~GB CUDA build so a stalled nvcr.io pull or wedged push fails fast
+    # instead of spinning to the 6h default (parity with helm-ci / installer-tests).
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
@@ -31,9 +34,15 @@ jobs:
       - name: Prepare buildx
         run: docker buildx create --use --name k3scuda || docker buildx use k3scuda
 
+      # Pass the token + actor through env (NOT interpolated into the run line): context
+      # values are substituted before the shell parses, so a metacharacter in the expansion
+      # would become shell syntax in a packages:write job. Quoted env vars keep them inert.
       - name: Log in to GHCR
         if: ${{ inputs.push }}
-        run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GHCR_USER: ${{ github.actor }}
+        run: echo "$GHCR_TOKEN" | docker login ghcr.io -u "$GHCR_USER" --password-stdin
 
       - name: Build${{ inputs.push && ' and push' || ' (validate only)' }}
         env:
