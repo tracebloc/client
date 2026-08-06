@@ -47,6 +47,12 @@ data:
 
     log() { printf '[image-refresh] %s\n' "$*" >&2; }
 
+    # #563: after this many consecutive FAILED rollout attempts for the same
+    # target digest set, back off instead of re-restarting a flapping deployment
+    # every tick. The attempt count + target signature live in one annotation.
+    MAX_REFRESH_ATTEMPTS="${MAX_REFRESH_ATTEMPTS:-3}"
+    ATTEMPT_KEY="tracebloc.io/refresh-attempt"
+
     log "release=$RELEASE_NAME namespace=$RELEASE_NAMESPACE deployment=$DEPLOYMENT_NAME"
     log "  client images: tracebloc/{jobs-manager,pods-monitor} on docker.io under tag=$IMAGE_TAG"
 
@@ -236,11 +242,43 @@ data:
     # freeze the deployment on the old image (next tick sees
     # recorded == latest and skips).
     if [ "$restart_needed" -eq 1 ]; then
-      log "rolling restart of deployment/${DEPLOYMENT_NAME}"
+      # #563: back off on a FLAPPING deployment. If readiness oscillates (Ready,
+      # then crashes after warmup near the rollout-status timeout) the rollout
+      # below fails; under `set -e` the tick then exits BEFORE the success
+      # annotation lands, so `recorded` stays old and every later settled tick
+      # re-issues the identical restart (~every schedule). Record the ATTEMPT
+      # (target signature + a consecutive-failure count) BEFORE the restart so it
+      # survives that early exit; once the same targets have failed
+      # MAX_REFRESH_ATTEMPTS times in a row, skip the restart and surface the
+      # flapping deployment instead of churning ReplicaSets forever. The count
+      # resets when the target digest changes or a rollout finally succeeds.
+      signature="$(printf '%s' "$annotate_args" | tr -s ' ' | sed 's/^ //; s/ $//')"
+      attempt="$(get_annotation "$ATTEMPT_KEY" || true)"
+      prev_sig="${attempt% *}"
+      prev_count="${attempt##* }"
+      case "$prev_count" in ''|*[!0-9]*) prev_count=0 ;; esac
+
+      if [ -n "$attempt" ] && [ "$prev_sig" = "$signature" ] && [ "$prev_count" -ge "$MAX_REFRESH_ATTEMPTS" ]; then
+        log "  WARN: rollout for the current target digest(s) has failed ${prev_count} time(s) in a row; backing off (not restarting again). deployment/${DEPLOYMENT_NAME} is likely flapping (becomes Ready then crashes) -- investigate it. Refresh resumes automatically once it settles healthy or the target digest changes."
+        log "tick complete"
+        exit 0
+      fi
+
+      new_count=$(( prev_count + 1 ))
+      [ "$prev_sig" = "$signature" ] || new_count=1
+      # Persist the attempt BEFORE restarting so a failed rollout (which exits
+      # the tick under set -e) still advances the counter for the next tick.
+      kubectl annotate deployment -n "$RELEASE_NAMESPACE" "$DEPLOYMENT_NAME" \
+        "${ATTEMPT_KEY}=${signature} ${new_count}" --overwrite
+
+      log "rolling restart of deployment/${DEPLOYMENT_NAME} (attempt ${new_count}/${MAX_REFRESH_ATTEMPTS})"
       kubectl rollout restart -n "$RELEASE_NAMESPACE" "deployment/${DEPLOYMENT_NAME}"
       kubectl rollout status  -n "$RELEASE_NAMESPACE" "deployment/${DEPLOYMENT_NAME}" \
         --timeout="$ROLLOUT_TIMEOUT"
       log "rollout complete"
+      # Success: clear the attempt annotation so a future change starts fresh
+      # (batched into the final annotate below; `key-` removes the annotation).
+      annotate_args="$annotate_args ${ATTEMPT_KEY}-"
     fi
 
     if [ -n "$annotate_args" ]; then
@@ -323,6 +361,9 @@ spec:
                   value: {{ .Values.env.CLIENT_ENV | default "prod" | quote }}
                 - name: ROLLOUT_TIMEOUT
                   value: {{ .Values.imageRefresh.rolloutTimeout | quote }}
+                # #563: consecutive failed-rollout back-off threshold.
+                - name: MAX_REFRESH_ATTEMPTS
+                  value: {{ .Values.imageRefresh.maxRefreshAttempts | default 3 | quote }}
                 # Per-image opt-out flags. Pinning a class-1 image is
                 # signalled by setting `images.<image>.digest` to a non-empty
                 # value — the same signal the deployment uses to switch

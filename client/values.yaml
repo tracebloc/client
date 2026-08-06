@@ -783,6 +783,14 @@ imageRefresh:
   # on bare-metal first-boot can take minutes, and the CronJob slot
   # shouldn't hold all night if a rollout genuinely wedges.
   rolloutTimeout: "10m"
+  # #563: consecutive failed rollout attempts (for the same target digest) after
+  # which the refresh backs off instead of re-restarting every tick. A deployment
+  # whose readiness FLAPS (becomes Ready, then crashes after warmup near the
+  # rollout-status timeout) fails the rollout, so `recorded` never advances and
+  # every later settled tick re-issues the same restart. After this many
+  # in-a-row failures the job stops restarting and surfaces the flapping
+  # deployment; refresh resumes once it settles healthy or the target changes.
+  maxRefreshAttempts: 3
   # CronJob spec knobs. Override per-cluster if needed.
   suspend: false
   # Lower history limits than autoUpgrade — this Job runs ~96x/day, the
