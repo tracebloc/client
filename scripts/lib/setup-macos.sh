@@ -244,8 +244,32 @@ install_docker_desktop() {
       "Downloading Docker Desktop — large, a few minutes on a fresh Mac"
 
     local checksum_url="${dmg_url}.sha256sum"
-    local expected_hash
-    expected_hash=$(curl_secure -fsSL "$checksum_url" 2>/dev/null | awk '{print $1}' || true)
+    local expected_hash="" _attempt
+    # Fetch the published checksum, retrying transient failures. Capture cleanly
+    # (not through the generic retry(), whose progress notes go to stdout and
+    # would pollute the captured hash).
+    for _attempt in 1 2 3; do
+      expected_hash=$(curl_secure -fsSL "$checksum_url" 2>/dev/null | awk 'NF{print $1; exit}') || true
+      [[ -n "$expected_hash" ]] && break
+      [[ "$_attempt" -lt 3 ]] && sleep 5
+    done
+
+    # Fail CLOSED (#556): this DMG is about to be mounted and copied into
+    # /Applications under sudo, so it MUST be integrity-checked. Previously an
+    # empty fetch (a TLS-inspecting corporate proxy, or a transient CDN error)
+    # logged "skipping verification" and installed the DMG UNVERIFIED on a
+    # privileged path — a supply-chain fail-open. Abort with a clear, actionable
+    # message unless the operator explicitly opts out, matching the Windows
+    # k3d/kubectl downloads which already fail closed.
+    if [[ -z "$expected_hash" ]]; then
+      if [[ -n "${TRACEBLOC_ALLOW_UNVERIFIED_DOCKER_DMG:-}" ]]; then
+        warn "Installing Docker Desktop WITHOUT checksum verification (TRACEBLOC_ALLOW_UNVERIFIED_DOCKER_DMG set) — proceed only if you trust this network."
+      else
+        rm -f "$dmg_path"
+        error "Could not fetch the Docker Desktop checksum from ${checksum_url} — refusing to install an unverified DMG under sudo. Check egress to desktop.docker.com (a TLS-inspecting proxy can strip it), then re-run. (Override at your own risk with TRACEBLOC_ALLOW_UNVERIFIED_DOCKER_DMG=1.)"
+      fi
+    fi
+
     if [[ -n "$expected_hash" ]]; then
       local actual_hash
       actual_hash=$(shasum -a 256 "$dmg_path" | awk '{print $1}')
@@ -254,8 +278,6 @@ install_docker_desktop() {
         error "Docker Desktop DMG checksum mismatch — download may be corrupted or tampered with"
       fi
       log "Docker Desktop checksum verified."
-    else
-      log "Could not fetch Docker Desktop checksum — skipping verification."
     fi
 
     spin_cmd "Installing Docker Desktop…" bash -c \
