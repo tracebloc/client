@@ -798,6 +798,11 @@
           "pattern": "^[0-9]+(s|m|h)$",
           "description": "Passed to `kubectl rollout status --timeout`. Allow headroom for bare-metal image pull."
         },
+        "maxRefreshAttempts": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Consecutive failed rollout attempts (same target digest) after which the refresh backs off instead of re-restarting a flapping deployment every tick (#563)."
+        },
         "suspend": {
           "type": "boolean",
           "default": false,
