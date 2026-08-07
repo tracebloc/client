@@ -203,6 +203,30 @@ spec:
               name: {{ include "tracebloc.secretName" . }}
               key: TB_CREDMGR_PASSWORD
         {{- end }}
+        {{- if .Values.serviceDbAccounts }}
+        # backend#1528 S1 (RFC-0003 D10 close-out): dedicated MySQL service
+        # identities that replace the root-equivalent edgeuser. jobs-manager
+        # mints tb_meta (owns the metadata DB) and tb_ingest (writes the dataset
+        # DB) at startup from these generated Secrets. Additive — nothing
+        # consumes the accounts until S2 — so this is rendered only when enabled
+        # and a default install stays byte-identical.
+        - name: SERVICE_DB_ACCOUNTS
+          value: "1"
+        - name: TB_META_USER
+          value: "tb_meta"
+        - name: TB_META_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: {{ include "tracebloc.secretName" . }}
+              key: TB_META_PASSWORD
+        - name: TB_INGEST_USER
+          value: "tb_ingest"
+        - name: TB_INGEST_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: {{ include "tracebloc.secretName" . }}
+              key: TB_INGEST_PASSWORD
+        {{- end }}
         # Ingestor image wiring for the POST /internal/submit-ingestion-run
         # endpoint. jobs-manager spawns each ingestion Job from these values
         # (see client-runtime submit_ingestion_run._build_image_reference):

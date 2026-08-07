@@ -890,6 +890,26 @@ perExperimentDbCreds: false
 # jobs-manager rejects other characters.
 credmgrPassword: ""
 
+# backend#1528 S1 (RFC-0003 D10 close-out): provision the dedicated MySQL
+# service identities tb_meta (owns the metadata DB) and tb_ingest (writes the
+# dataset DB) that replace the root-equivalent edgeuser for jobs-manager,
+# requests-proxy and the ingestor. jobs-manager mints both at startup from the
+# generated Secret below (SERVICE_DB_ACCOUNTS). Additive: nothing consumes them
+# until the S2 consumer switch, so a default install is byte-identical.
+#
+# Flip per environment, dev first. Default false: today's shared-edgeuser
+# behavior, byte-for-byte. Needs no per-edge action — the passwords are
+# generated, upgrade-stable Secret values.
+serviceDbAccounts: false
+
+# Optional operator pins for the tb_meta / tb_ingest account passwords (each
+# mirrors credmgrPassword's 3-tier resolution). Leave "" to generate-and-persist
+# on first install. Set for DR, to match a pre-created MySQL account, or to
+# force a rotation. Must be alphanumeric ([A-Za-z0-9]+); jobs-manager rejects
+# other characters.
+tbMetaPassword: ""
+tbIngestPassword: ""
+
 # ============================================================
 # Ingestion endpoint authorization (client-runtime#21)
 # ============================================================
