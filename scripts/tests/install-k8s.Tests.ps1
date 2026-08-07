@@ -3778,8 +3778,9 @@ Describe "Confirm-GpuImagePullable (#616 private GPU image, no public package)" 
     $script:GSRC2 | Should -Match 'Invoke-DockerCli -DockerArgs @\("run"'
     $script:GSRC2 | Should -Match 'Invoke-DockerCli -DockerArgs @\("login"'
     $script:GSRC2 | Should -Match 'Invoke-DockerCli -DockerArgs @\("pull", \$K3S_CUDA_IMAGE\) -TimeoutSec'
-    # the helper itself is bounded: background job + Wait-JobWithProgress deadline
+    # the helper itself is bounded AND kills docker.exe on timeout (no orphaned native process)
     $script:GSRC2 | Should -Match 'function Invoke-DockerCli'
-    $script:GSRC2 | Should -Match 'Wait-JobWithProgress -Job \$job -TimeoutSec \$TimeoutSec'
+    $script:GSRC2 | Should -Match '\$proc.WaitForExit\(\$TimeoutSec \* 1000\)'
+    $script:GSRC2 | Should -Match '\$proc.Kill\(\)'
   }
 }

@@ -1707,21 +1707,29 @@ function Invoke-DockerCli {
     [int]$TimeoutSec = 120,
     [string]$Stdin = ""
   )
-  $job = Start-Job -InitializationScript $script:JobInit -ScriptBlock {
-    param($p)
-    $a = $p.CmdArgs
-    if ($p.Stdin) { $out = ($p.Stdin | & docker @a 2>&1 | Out-String) }
-    else          { $out = (& docker @a 2>&1 | Out-String) }
-    [pscustomobject]@{ Code = $LASTEXITCODE; Output = $out }
-  } -ArgumentList (@{ CmdArgs = $DockerArgs; Stdin = $Stdin })
-  if (Wait-JobWithProgress -Job $job -TimeoutSec $TimeoutSec -Message ("docker " + $DockerArgs[0])) {
-    $r = @(Receive-Job $job) | Select-Object -Last 1
-    Remove-Job $job -Force -ErrorAction SilentlyContinue
-    if ($r) { return $r }
-    return [pscustomobject]@{ Code = 1; Output = "" }
+  # Run docker as a real child PROCESS, not a Start-Job: Stop-Job stops the PS job but can
+  # orphan the native docker.exe it spawned (Bugbot), so a timed-out run/login/pull would keep
+  # going after we've fallen back to CPU. A direct Process handle lets us Kill() docker.exe on
+  # timeout. Our GPU args contain no spaces (flags + image tags), so a plain join is safe; any
+  # stdin (a login token) is written in-memory, never to disk/argv/logs. 5.1-safe API.
+  $psi = New-Object System.Diagnostics.ProcessStartInfo
+  $psi.FileName = "docker"
+  $psi.Arguments = ($DockerArgs -join ' ')
+  $psi.UseShellExecute = $false
+  $psi.CreateNoWindow = $true
+  $psi.RedirectStandardOutput = $true
+  $psi.RedirectStandardError = $true
+  if ($Stdin) { $psi.RedirectStandardInput = $true }
+  try { $proc = [System.Diagnostics.Process]::Start($psi) }
+  catch { return [pscustomobject]@{ Code = 1; Output = "could not start docker: $($_.Exception.Message)" } }
+  if ($Stdin) { $proc.StandardInput.Write($Stdin); $proc.StandardInput.Close() }
+  $outTask = $proc.StandardOutput.ReadToEndAsync()
+  $errTask = $proc.StandardError.ReadToEndAsync()
+  if ($proc.WaitForExit($TimeoutSec * 1000)) {
+    return [pscustomobject]@{ Code = $proc.ExitCode; Output = ($outTask.Result + $errTask.Result) }
   }
-  Stop-Job $job -ErrorAction SilentlyContinue
-  Remove-Job $job -Force -ErrorAction SilentlyContinue
+  # timed out -> kill docker.exe so it can't keep running after the CPU fallback
+  try { $proc.Kill() } catch {}
   return [pscustomobject]@{ Code = 124; Output = ("docker " + $DockerArgs[0] + " timed out after " + $TimeoutSec + "s") }
 }
 
