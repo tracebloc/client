@@ -1696,22 +1696,46 @@ echo "NCT installed successfully."
 # k3s-CUDA node image providing the in-cluster runtime, this Docker-Desktop passthrough is the
 # real prerequisite. Gating on it means we enable GPU only when the cluster will really get one,
 # and never create a `--gpus` cluster that would fail. Best-effort + bounded; failure => CPU.
+# #616/Bugbot: run a docker CLI command with a HARD timeout so a wedged daemon, registry, or proxy
+# can't hang the installer forever (installer external-call timeout rule). Runs docker in a bounded
+# background job; on timeout the job is killed and Code=124 is returned so callers fall back to CPU
+# cleanly. Returns @{ Code = <int>; Output = <string> }. Any stdin (e.g. a login token) is passed
+# in-memory via the arg hashtable — never written to disk, never placed in argv or logged.
+function Invoke-DockerCli {
+  param(
+    [Parameter(Mandatory)][string[]]$DockerArgs,
+    [int]$TimeoutSec = 120,
+    [string]$Stdin = ""
+  )
+  $job = Start-Job -InitializationScript $script:JobInit -ScriptBlock {
+    param($p)
+    $a = $p.CmdArgs
+    if ($p.Stdin) { $out = ($p.Stdin | & docker @a 2>&1 | Out-String) }
+    else          { $out = (& docker @a 2>&1 | Out-String) }
+    [pscustomobject]@{ Code = $LASTEXITCODE; Output = $out }
+  } -ArgumentList (@{ CmdArgs = $DockerArgs; Stdin = $Stdin })
+  if (Wait-JobWithProgress -Job $job -TimeoutSec $TimeoutSec -Message ("docker " + $DockerArgs[0])) {
+    $r = @(Receive-Job $job) | Select-Object -Last 1
+    Remove-Job $job -Force -ErrorAction SilentlyContinue
+    if ($r) { return $r }
+    return [pscustomobject]@{ Code = 1; Output = "" }
+  }
+  Stop-Job $job -ErrorAction SilentlyContinue
+  Remove-Job $job -Force -ErrorAction SilentlyContinue
+  return [pscustomobject]@{ Code = 124; Output = ("docker " + $DockerArgs[0] + " timed out after " + $TimeoutSec + "s") }
+}
+
 function Confirm-DockerGpu {
   if ($GPU_VENDOR -ne "nvidia" -or -not $NVIDIA_DRIVER_OK) { return $false }
   $probeImg = "nvidia/cuda:$CUDA_BASE_TAG"
-  Log "Probing Docker GPU passthrough: docker run --rm --gpus all $probeImg nvidia-smi"
-  try {
-    $out = (docker run --rm --gpus all $probeImg nvidia-smi 2>&1 | Out-String)
-    if ($LASTEXITCODE -eq 0 -and $out -match 'NVIDIA-SMI|CUDA Version|Driver Version') {
-      Log "Docker GPU passthrough OK"
-      return $true
-    }
-    Log "Docker GPU probe failed (exit $LASTEXITCODE): $out"
-    return $false
-  } catch {
-    Log "Docker GPU probe error: $($_.Exception.Message)"
-    return $false
+  Log "Probing Docker GPU passthrough: docker run --rm --gpus all $probeImg nvidia-smi (bounded)"
+  $r = Invoke-DockerCli -DockerArgs @("run", "--rm", "--gpus", "all", $probeImg, "nvidia-smi") -TimeoutSec 180
+  if ($r.Code -eq 0 -and $r.Output -match 'NVIDIA-SMI|CUDA Version|Driver Version') {
+    Log "Docker GPU passthrough OK"
+    return $true
   }
+  Log "Docker GPU probe failed (exit $($r.Code)): $($r.Output)"
+  return $false
 }
 
 # #616: the custom GPU node image is kept PRIVATE (not published public), so the installer must
@@ -1720,24 +1744,21 @@ function Confirm-DockerGpu {
 # (TRACEBLOC_REGISTRY_USERNAME/PASSWORD — the same vars the mirror uses, #585) and verify the image
 # is actually pullable BEFORE committing to a --gpus cluster. On failure we fall back to CPU
 # cleanly instead of a cluster-create that dies pulling an unauthorized image. The pull here also
-# pre-loads the image, so k3d cluster-create reuses the local copy (no second pull).
+# pre-loads the image, so k3d cluster-create reuses the local copy (no second pull). Every docker
+# call is bounded via Invoke-DockerCli, so a wedged daemon/registry/proxy can't hang the install.
 function Confirm-GpuImagePullable {
   $regHost = ($K3S_CUDA_IMAGE -split '/')[0]
   $regUser = $env:TRACEBLOC_REGISTRY_USERNAME
   $regPass = $env:TRACEBLOC_REGISTRY_PASSWORD
   if ($regUser -and $regPass) {
     Log "Authenticating Docker to $regHost for the private GPU node image"
-    try { $regPass | docker login $regHost -u $regUser --password-stdin 2>&1 | Out-Null } catch {}
-    if ($LASTEXITCODE -ne 0) { Log "docker login to $regHost did not succeed (exit $LASTEXITCODE)" }
+    $lr = Invoke-DockerCli -DockerArgs @("login", $regHost, "-u", $regUser, "--password-stdin") -TimeoutSec 60 -Stdin $regPass
+    if ($lr.Code -ne 0) { Log "docker login to $regHost did not succeed (exit $($lr.Code))" }
   }
   Log "Pulling the GPU node image (verifies access + pre-loads for cluster-create): $K3S_CUDA_IMAGE"
-  try {
-    $null = (docker pull $K3S_CUDA_IMAGE 2>&1 | Out-String)
-    if ($LASTEXITCODE -eq 0) { Log "GPU node image pulled OK"; return $true }
-    Log "GPU node image pull failed (exit $LASTEXITCODE)"
-  } catch {
-    Log "GPU node image pull error: $($_.Exception.Message)"
-  }
+  $pr = Invoke-DockerCli -DockerArgs @("pull", $K3S_CUDA_IMAGE) -TimeoutSec 900
+  if ($pr.Code -eq 0) { Log "GPU node image pulled OK"; return $true }
+  Log "GPU node image pull failed (exit $($pr.Code)): $($pr.Output)"
   if ($regUser -and $regPass) {
     $script:GPU_SKIP_REASON = "the GPU node image ($K3S_CUDA_IMAGE) couldn't be pulled even with the provided registry credentials -- check they have read access"
   } else {

@@ -3690,24 +3690,28 @@ Describe "Local chart path support (#611 — Windows/bash parity)" {
 
 Describe "Confirm-DockerGpu (#616 authoritative GPU gate)" {
   BeforeEach { $GPU_VENDOR = "nvidia"; $NVIDIA_DRIVER_OK = $true; $CUDA_BASE_TAG = "12.4.1-base-ubuntu22.04" }
-  It "returns true when 'docker run --gpus all ... nvidia-smi' succeeds" {
-    Mock docker { $global:LASTEXITCODE = 0; "NVIDIA-SMI 550.x   Driver Version: 550.x   CUDA Version: 12.4" }
+  It "returns true when the bounded docker-run probe succeeds" {
+    Mock Invoke-DockerCli { [pscustomobject]@{ Code = 0; Output = "NVIDIA-SMI 550.x   Driver Version: 550.x   CUDA Version: 12.4" } }
     Confirm-DockerGpu | Should -BeTrue
-    Should -Invoke docker -ParameterFilter { ($args -contains "run") -and ($args -contains "--gpus") }
+    Should -Invoke Invoke-DockerCli -ParameterFilter { ($DockerArgs -contains "run") -and ($DockerArgs -contains "--gpus") }
   }
-  It "returns false when docker exits non-zero (no GPU passthrough)" {
-    Mock docker { $global:LASTEXITCODE = 125; "docker: could not select device driver with capabilities: [[gpu]]" }
+  It "returns false when the probe exits non-zero (no GPU passthrough)" {
+    Mock Invoke-DockerCli { [pscustomobject]@{ Code = 125; Output = "could not select device driver with capabilities: [[gpu]]" } }
     Confirm-DockerGpu | Should -BeFalse
   }
   It "returns false when output lacks the nvidia-smi banner even on exit 0" {
-    Mock docker { $global:LASTEXITCODE = 0; "some unrelated output" }
+    Mock Invoke-DockerCli { [pscustomobject]@{ Code = 0; Output = "some unrelated output" } }
     Confirm-DockerGpu | Should -BeFalse
   }
-  It "short-circuits to false without invoking docker when there is no NVIDIA GPU" {
-    $GPU_VENDOR = "none"; $NVIDIA_DRIVER_OK = $false
-    Mock docker { throw "docker must not be probed without a GPU" }
+  It "returns false on a probe TIMEOUT (Code 124) instead of hanging" {
+    Mock Invoke-DockerCli { [pscustomobject]@{ Code = 124; Output = "docker run timed out after 180s" } }
     Confirm-DockerGpu | Should -BeFalse
-    Should -Not -Invoke docker
+  }
+  It "short-circuits to false without probing when there is no NVIDIA GPU" {
+    $GPU_VENDOR = "none"; $NVIDIA_DRIVER_OK = $false
+    Mock Invoke-DockerCli { throw "must not probe without a GPU" }
+    Confirm-DockerGpu | Should -BeFalse
+    Should -Not -Invoke Invoke-DockerCli
   }
 }
 
@@ -3746,26 +3750,36 @@ Describe "Confirm-GpuImagePullable (#616 private GPU image, no public package)" 
 
   It "logs Docker in with the registry creds then returns true when the pull succeeds" {
     $env:TRACEBLOC_REGISTRY_USERNAME = "bot"; $env:TRACEBLOC_REGISTRY_PASSWORD = "tok"
-    Mock docker { $global:LASTEXITCODE = 0 }
+    Mock Invoke-DockerCli { [pscustomobject]@{ Code = 0; Output = "" } }
     Confirm-GpuImagePullable | Should -BeTrue
-    Should -Invoke docker -ParameterFilter { ($args -contains "login") -and ($args -contains "ghcr.io") }
-    Should -Invoke docker -ParameterFilter { $args -contains "pull" }
+    Should -Invoke Invoke-DockerCli -ParameterFilter { ($DockerArgs -contains "login") -and ($DockerArgs -contains "ghcr.io") }
+    Should -Invoke Invoke-DockerCli -ParameterFilter { $DockerArgs -contains "pull" }
   }
   It "returns false with a credentials hint when the pull fails despite creds" {
     $env:TRACEBLOC_REGISTRY_USERNAME = "bot"; $env:TRACEBLOC_REGISTRY_PASSWORD = "tok"
-    Mock docker { if ($args -contains "login") { $global:LASTEXITCODE = 0; return }; $global:LASTEXITCODE = 1 }
+    Mock Invoke-DockerCli { if ($DockerArgs -contains "login") { [pscustomobject]@{ Code = 0; Output = "" } } else { [pscustomobject]@{ Code = 1; Output = "denied" } } }
     Confirm-GpuImagePullable | Should -BeFalse
     $script:GPU_SKIP_REASON | Should -Match "credentials"
   }
   It "without creds: no docker login, and the reason names the env vars to set" {
-    Mock docker { $global:LASTEXITCODE = 1 }
+    Mock Invoke-DockerCli { [pscustomobject]@{ Code = 1; Output = "denied" } }
     Confirm-GpuImagePullable | Should -BeFalse
-    Should -Not -Invoke docker -ParameterFilter { $args -contains "login" }
+    Should -Not -Invoke Invoke-DockerCli -ParameterFilter { $DockerArgs -contains "login" }
     $script:GPU_SKIP_REASON | Should -Match "TRACEBLOC_REGISTRY_USERNAME"
   }
-  It "the GPU gate requires BOTH the passthrough probe and the image pull (source guard)" {
+  It "a pull TIMEOUT (Code 124) falls back to CPU, not a hang" {
+    $env:TRACEBLOC_REGISTRY_USERNAME = "bot"; $env:TRACEBLOC_REGISTRY_PASSWORD = "tok"
+    Mock Invoke-DockerCli { if ($DockerArgs -contains "login") { [pscustomobject]@{ Code = 0; Output = "" } } else { [pscustomobject]@{ Code = 124; Output = "docker pull timed out after 900s" } } }
+    Confirm-GpuImagePullable | Should -BeFalse
+  }
+  It "GPU gate + BOUNDED docker calls (source guard: installer timeout rule)" {
     $script:GSRC2 | Should -Match '\(Confirm-DockerGpu\) -and \(Confirm-GpuImagePullable\)'
-    $script:GSRC2 | Should -Match 'docker login \$regHost -u \$regUser --password-stdin'
-    $script:GSRC2 | Should -Match 'docker pull \$K3S_CUDA_IMAGE'
+    # every GPU docker call goes through the bounded helper with an explicit timeout
+    $script:GSRC2 | Should -Match 'Invoke-DockerCli -DockerArgs @\("run"'
+    $script:GSRC2 | Should -Match 'Invoke-DockerCli -DockerArgs @\("login"'
+    $script:GSRC2 | Should -Match 'Invoke-DockerCli -DockerArgs @\("pull", \$K3S_CUDA_IMAGE\) -TimeoutSec'
+    # the helper itself is bounded: background job + Wait-JobWithProgress deadline
+    $script:GSRC2 | Should -Match 'function Invoke-DockerCli'
+    $script:GSRC2 | Should -Match 'Wait-JobWithProgress -Job \$job -TimeoutSec \$TimeoutSec'
   }
 }
