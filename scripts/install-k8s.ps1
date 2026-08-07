@@ -1788,10 +1788,16 @@ function Connect-GpuRegistry {
   $regUser = $env:TRACEBLOC_REGISTRY_USERNAME
   $regPass = $env:TRACEBLOC_REGISTRY_PASSWORD
   if (-not ($regUser -and $regPass)) { return }
-  $regHost = Get-RegistryHost $K3S_CUDA_IMAGE
-  Log "Authenticating Docker to $regHost for the GPU image"
-  $lr = Invoke-DockerCli -DockerArgs @("login", $regHost, "-u", $regUser, "--password-stdin") -TimeoutSec 60 -Stdin $regPass
-  if ($lr.Code -ne 0) { Log "docker login to $regHost did not succeed (exit $($lr.Code))" }
+  # Log into EVERY distinct registry an auth-requiring GPU image is pulled from: the node image
+  # ($K3S_CUDA_IMAGE) AND the probe image ($CUDA_PROBE_IMAGE). With TRACEBLOC_K3S_CUDA_IMAGE and
+  # TRACEBLOC_IMAGE_REGISTRY set to DIFFERENT hosts these differ, and logging into only one leaves
+  # the other's pull unauthenticated -> the probe is rejected and GPU is needlessly disabled (Bugbot).
+  $hosts = @((Get-RegistryHost $K3S_CUDA_IMAGE), (Get-RegistryHost $CUDA_PROBE_IMAGE)) | Select-Object -Unique
+  foreach ($regHost in $hosts) {
+    Log "Authenticating Docker to $regHost for the GPU image(s)"
+    $lr = Invoke-DockerCli -DockerArgs @("login", $regHost, "-u", $regUser, "--password-stdin") -TimeoutSec 60 -Stdin $regPass
+    if ($lr.Code -ne 0) { Log "docker login to $regHost did not succeed (exit $($lr.Code))" }
+  }
 }
 
 function Confirm-GpuImagePullable {
@@ -3262,7 +3268,16 @@ function Confirm-GpuNode {
     Ok "GPU verified and available."
     Log "Allocatable GPU count: $gpuCount"
   } else {
-    Warn "GPU may still be initializing. Check back shortly."
+    # The node advertises 0 nvidia.com/gpu after the wait -- the device plugin never became ready
+    # (e.g. its image nvcr.io/nvidia/k8s-device-plugin couldn't be pulled on a mirror/air-gap
+    # network, or the runtime isn't exposing the GPU). Leaving GPU requests active here would
+    # strand every job Pending against a 0-GPU node, so make the node the AUTHORITATIVE signal:
+    # disable GPU for this run (clear the flag BEFORE Install-ClientHelm writes values) -> CPU
+    # fallback (Bugbot). The cluster stays GPU-capable; only this run's chart values go CPU.
+    $script:K3D_GPU_FLAG = ""
+    $script:GPU_SKIP_REASON = "the cluster node never advertised a GPU (the NVIDIA device plugin didn't become ready -- on a mirror/air-gap network its image nvcr.io/nvidia/k8s-device-plugin may be blocked)"
+    Warn "GPU didn't come up on the node -- running CPU-only so jobs aren't stranded Pending."
+    Hint "If this is a restricted network, ensure the NVIDIA device-plugin image is reachable (mirror it), then re-run."
   }
 }
 

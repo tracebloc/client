@@ -3890,11 +3890,39 @@ Describe "GPU registry login happens BEFORE the probe (#616 Bugbot: authenticate
   }
   It "with a bare Docker Hub override, login uses docker.io (behavioural)" {
     $K3S_CUDA_IMAGE = "owner/private-image:tag"
+    $CUDA_PROBE_IMAGE = "nvidia/cuda:tag"
     $env:TRACEBLOC_REGISTRY_USERNAME = "bot"; $env:TRACEBLOC_REGISTRY_PASSWORD = "tok"
     Mock Invoke-DockerCli { [pscustomobject]@{ Code = 0; Output = "" } }
     Connect-GpuRegistry
     Should -Invoke Invoke-DockerCli -ParameterFilter { ($DockerArgs -contains "login") -and ($DockerArgs -contains "docker.io") }
     $env:TRACEBLOC_REGISTRY_USERNAME = $null; $env:TRACEBLOC_REGISTRY_PASSWORD = $null
+  }
+  It "logs into BOTH the node-image host and the probe-image host when they differ (#616 Bugbot)" {
+    $K3S_CUDA_IMAGE  = "nodehost.corp/tracebloc/k3s-cuda:tag"
+    $CUDA_PROBE_IMAGE = "mirrorhost.corp/nvidia/cuda:tag"
+    $env:TRACEBLOC_REGISTRY_USERNAME = "bot"; $env:TRACEBLOC_REGISTRY_PASSWORD = "tok"
+    Mock Invoke-DockerCli { [pscustomobject]@{ Code = 0; Output = "" } }
+    Connect-GpuRegistry
+    Should -Invoke Invoke-DockerCli -ParameterFilter { ($DockerArgs -contains "login") -and ($DockerArgs -contains "nodehost.corp") }
+    Should -Invoke Invoke-DockerCli -ParameterFilter { ($DockerArgs -contains "login") -and ($DockerArgs -contains "mirrorhost.corp") }
+    $env:TRACEBLOC_REGISTRY_USERNAME = $null; $env:TRACEBLOC_REGISTRY_PASSWORD = $null
+  }
+}
+
+Describe "Confirm-GpuNode disables GPU when the node never advertises one (#616 Bugbot: air-gap plugin)" {
+  BeforeAll { $script:GNSRC = Get-Content "$PSScriptRoot/../install-k8s.ps1" -Raw }
+  It "the 0-GPU branch clears K3D_GPU_FLAG (CPU fallback) with a reason, not just a warning" {
+    $fn = ($script:GNSRC -split 'function Confirm-GpuNode')[1]
+    # it waits on allocatable nvidia.com/gpu ...
+    $fn | Should -Match "nvidia\\\.com/gpu"
+    # ... and if the count stays 0, it makes the node authoritative: disable GPU for this run.
+    $else = ($fn -split '\$gpuCount -gt 0')[1]
+    $else | Should -Match '\$script:K3D_GPU_FLAG = ""'
+    $else | Should -Match '\$script:GPU_SKIP_REASON ='
+  }
+  It "runs before the chart values are written, so the CPU fallback reaches Install-ClientHelm" {
+    # main flow: New-K3dCluster (Step 3) -> Confirm-GpuNode -> ... -> Install-ClientHelm (Step 5)
+    $script:GNSRC | Should -Match 'if \(Install-GpuDevicePlugin\) \{ Confirm-GpuNode \}[\s\S]*Install-TraceblocCli'
   }
 }
 
