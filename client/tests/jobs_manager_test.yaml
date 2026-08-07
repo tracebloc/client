@@ -70,16 +70,17 @@ tests:
           path: spec.template.spec.containers[0].resources.requests
       - isNotEmpty:
           path: spec.template.spec.containers[0].resources.limits
-      # v1.1.0 floor: 512Mi/1Gi for api, after the prod OOM investigation.
+      # #1144: requests.memory pinned == limits.memory (1Gi api / 512Mi
+      # pods-monitor) to lower oom_score_adj during a mass restart.
       - equal:
           path: spec.template.spec.containers[0].resources.requests.memory
-          value: 512Mi
+          value: 1Gi
       - equal:
           path: spec.template.spec.containers[0].resources.limits.memory
           value: 1Gi
       - equal:
           path: spec.template.spec.containers[1].resources.requests.memory
-          value: 256Mi
+          value: 512Mi
       - equal:
           path: spec.template.spec.containers[1].resources.limits.memory
           value: 512Mi
@@ -297,7 +298,7 @@ tests:
   # own default when they are absent. Pin the rendered value here so the two
   # cannot silently diverge again, on BOTH containers that receive it
   # (api + pods-monitor).
-  - it: defaults spawned-job RESOURCE_REQUESTS/LIMITS to cpu=2,memory=8Gi (req==limit => Guaranteed QoS)
+  - it: defaults spawned-job RESOURCE_REQUESTS/LIMITS to cpu=2,memory=8Gi (req==limit)
     asserts:
       - contains:
           path: spec.template.spec.containers[0].env

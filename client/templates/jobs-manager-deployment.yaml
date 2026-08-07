@@ -98,10 +98,23 @@ spec:
         # pod becomes the OOM-killer's preferred target on the node, and
         # mysqld dies as collateral. 512Mi/1Gi covers steady state with
         # headroom; revisit if heap profiling shows the working set growing.
+        #
+        # #1144: requests.memory now == limits.memory (1Gi). On a single-node
+        # cluster-recovery mass restart every pod restarts at once and contends
+        # for node memory + CPU; with requests (512Mi) below the limit (1Gi)
+        # jobs-manager ran Burstable and was the kernel OOM-killer's preferred
+        # victim once its working set exceeded the request — the observed
+        # exit-137 kill of both containers. Pinning requests.memory==limits.memory
+        # lowers the container's oom_score_adj so it is a less-preferred victim
+        # when the node runs out of memory — the pod stays Burstable (cpu request
+        # != limit), exactly as mysql-deployment.yaml already does (mysql has no
+        # cpu limit either). requests.cpu is
+        # also raised (100m -> 250m) so a mass restart doesn't throttle its
+        # startup to a crawl (the ~9m recovery seen on lukas-test).
         resources:
           requests:
-            cpu: {{ .Values.resources.jobsManager.requests.cpu | default "100m" | quote }}
-            memory: {{ .Values.resources.jobsManager.requests.memory | default "512Mi" | quote }}
+            cpu: {{ .Values.resources.jobsManager.requests.cpu | default "250m" | quote }}
+            memory: {{ .Values.resources.jobsManager.requests.memory | default "1Gi" | quote }}
           limits:
             cpu: {{ .Values.resources.jobsManager.limits.cpu | default "1000m" | quote }}
             memory: {{ .Values.resources.jobsManager.limits.memory | default "1Gi" | quote }}
@@ -294,10 +307,16 @@ spec:
           allowPrivilegeEscalation: false
           capabilities:
             drop: ["ALL"]
+        # #1144: same cluster-recovery treatment as the api container above —
+        # pods-monitor was also exit-137 killed in the mass restart. Pin
+        # requests.memory == limits.memory (512Mi) to lower its oom_score_adj
+        # (a less-preferred node OOM victim; the pod stays Burstable), and raise
+        # requests.cpu (50m -> 100m) so its startup is not starved under
+        # contention.
         resources:
           requests:
-            cpu: {{ .Values.resources.podsMonitor.requests.cpu | default "50m" | quote }}
-            memory: {{ .Values.resources.podsMonitor.requests.memory | default "256Mi" | quote }}
+            cpu: {{ .Values.resources.podsMonitor.requests.cpu | default "100m" | quote }}
+            memory: {{ .Values.resources.podsMonitor.requests.memory | default "512Mi" | quote }}
           limits:
             cpu: {{ .Values.resources.podsMonitor.limits.cpu | default "500m" | quote }}
             memory: {{ .Values.resources.podsMonitor.limits.memory | default "512Mi" | quote }}
