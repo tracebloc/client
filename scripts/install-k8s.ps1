@@ -1829,10 +1829,25 @@ $script:K3S_CUDA_DEVICEPLUGIN_B64 = 'IyA9PT09PT09PT09PT09PT09PT09PT09PT09PT09PT0
 # installer command builds the node image on the user's own machine (#616). Idempotent
 # (reuses an already-built image), bounded with a visible progress bar (installer rule),
 # and any failure falls back to CPU with a clear reason rather than stranding the install.
+# Sanity-check that the GPU node image actually runs k3s (the ENTRYPOINT is /bin/k3s, so
+# `docker run --rm <img> --version` prints "k3s version ..."). Catches a broken rootfs -- e.g.
+# the COPY --exclude mis-parse that once shipped a non-working /bin/k3s. Bounded.
+function Test-GpuImageRunsK3s {
+  $ver = Invoke-DockerCli -DockerArgs @("run", "--rm", $K3S_CUDA_IMAGE, "--version") -TimeoutSec 60
+  return ($ver.Code -eq 0 -and $ver.Output -match 'k3s version')
+}
+
 function Build-GpuNodeImage {
-  # Idempotent: a prior run already built it -> reuse, don't rebuild (bounded probe).
+  # Idempotent: a prior run already built it -> reuse WITHOUT rebuilding, but ONLY if it still
+  # passes the k3s sanity check. A build that completed yet produced a broken image (failed the
+  # post-build check) leaves the tag behind; blindly reusing it would create a cluster from a
+  # known-broken image (Bugbot). If the existing tag is broken, fall through and rebuild (the
+  # `docker build -t` below overwrites it).
   $have = Invoke-DockerCli -DockerArgs @("image","inspect",$K3S_CUDA_IMAGE) -TimeoutSec 30
-  if ($have.Code -eq 0) { Log "GPU node image already built ($K3S_CUDA_IMAGE) -- reusing"; return $true }
+  if ($have.Code -eq 0) {
+    if (Test-GpuImageRunsK3s) { Log "GPU node image already built + verified ($K3S_CUDA_IMAGE) -- reusing"; return $true }
+    Log "An existing GPU node image ($K3S_CUDA_IMAGE) failed its k3s sanity check -- rebuilding it."
+  }
 
   # BuildKit is required for the Dockerfile's `# syntax=...:1.7-labs` + `COPY --exclude`.
   # Docker Desktop defaults to BuildKit; set it explicitly so the child build inherits it
@@ -1893,12 +1908,11 @@ function Build-GpuNodeImage {
       return $false
     }
 
-    # Sanity-check the built image actually runs k3s (catches a broken rootfs like the
-    # COPY --exclude mis-parse that once shipped a non-working /bin/k3s). Bounded.
-    $ver = Invoke-DockerCli -DockerArgs @("run","--rm",$K3S_CUDA_IMAGE,"--version") -TimeoutSec 60
-    if ($ver.Code -ne 0 -or $ver.Output -notmatch 'k3s version') {
+    # Sanity-check the freshly built image actually runs k3s (same check reused on the
+    # idempotent-reuse path above, so a broken image is never trusted from either direction).
+    if (-not (Test-GpuImageRunsK3s)) {
       $script:GPU_SKIP_REASON = "the freshly built GPU node image didn't run k3s correctly -- running CPU-only (see the install log)"
-      Log "GPU node image sanity check failed (exit $($ver.Code)): $($ver.Output)"
+      Log "GPU node image sanity check failed after build"
       return $false
     }
     Ok "GPU node image built locally -- no registry login required."
@@ -3994,6 +4008,27 @@ function Install-ClientHelm {
     Err "Can't reconcile the existing client without its password."
   }
 
+  # #616: decide the GPU chart values for THIS run BEFORE the adopted/fresh split, so BOTH paths
+  # reconcile GPU the same way. Request a GPU for training jobs ONLY when the GPU was actually
+  # wired into the cluster ($K3D_GPU_FLAG). Requesting nvidia.com/gpu while the node advertises 0
+  # GPUs strands every job Pending -- so gate on the SAME condition that PROVISIONS the GPU, not
+  # merely on detection. Empty gpuVal = no GPU request = CPU (the safe fallback).
+  $gpuVal = ""
+  $runtimeClass = ""
+  if ($GPU_VENDOR -eq "nvidia" -and $NVIDIA_DRIVER_OK -and $K3D_GPU_FLAG -ne "") {
+    $gpuVal = "nvidia.com/gpu=1"
+    # spawned training pods must run under the `nvidia` RuntimeClass (baked into the k3s-CUDA
+    # image); jobs-manager threads RUNTIME_CLASS_NAME into every pod.
+    $runtimeClass = "nvidia"
+    Log "NVIDIA GPU enabled -- GPU_LIMITS/GPU_REQUESTS=nvidia.com/gpu=1, RUNTIME_CLASS_NAME=nvidia"
+  } elseif ($GPU_VENDOR -eq "nvidia" -and $NVIDIA_DRIVER_OK) {
+    Log "NVIDIA GPU detected but NOT enabled in the cluster -- GPU_LIMITS/GPU_REQUESTS left empty (CPU mode)"
+    if ($GPU_SKIP_REASON) { Warn ("GPU detected but not enabled -- running CPU-only: " + $GPU_SKIP_REASON) }
+    else { Warn "GPU detected but not enabled -- running CPU-only (see the install log for details)." }
+  } else {
+    Log "No NVIDIA GPU -- GPU_LIMITS and GPU_REQUESTS left empty"
+  }
+
   if (-not $adoptedReuse) {
   $passwordEscaped = $TB_CLIENT_PASSWORD -replace "'", "''"
 
@@ -4017,29 +4052,7 @@ function Install-ClientHelm {
     Log "Mirror credentials provided -- minting an imagePullSecret for the mirror."
   }
 
-  # #616: request a GPU for training jobs ONLY when the GPU was actually wired into the cluster
-  # ($K3D_GPU_FLAG, set by Install-NvidiaContainerToolkit). Requesting nvidia.com/gpu while the
-  # node advertises 0 GPUs strands every job Pending ("Insufficient nvidia.com/gpu") until the
-  # SINGLE_NODE fallback downgrades it to CPU -- so gate on the SAME condition that PROVISIONS the
-  # GPU (device plugin + --gpus=all), not merely on detection. CPU stays the safe fallback: an
-  # empty gpuVal means no GPU request and training runs on CPU.
-  $gpuVal = ""
-  $runtimeClass = ""
-  if ($GPU_VENDOR -eq "nvidia" -and $NVIDIA_DRIVER_OK -and $K3D_GPU_FLAG -ne "") {
-    $gpuVal = "nvidia.com/gpu=1"
-    # #616: spawned training pods must run under the `nvidia` RuntimeClass (baked into the custom
-    # k3s-CUDA image) to actually use the GPU; jobs-manager threads RUNTIME_CLASS_NAME into every pod.
-    $runtimeClass = "nvidia"
-    Log "NVIDIA GPU enabled -- GPU_LIMITS/GPU_REQUESTS=nvidia.com/gpu=1, RUNTIME_CLASS_NAME=nvidia"
-  } elseif ($GPU_VENDOR -eq "nvidia" -and $NVIDIA_DRIVER_OK) {
-    # GPU + driver present but not wired into the cluster -- do NOT request it (would strand jobs).
-    Log "NVIDIA GPU detected but NOT enabled in the cluster -- GPU_LIMITS/GPU_REQUESTS left empty (CPU mode)"
-    if ($GPU_SKIP_REASON) { Warn ("GPU detected but not enabled -- running CPU-only: " + $GPU_SKIP_REASON) }
-    else { Warn "GPU detected but not enabled -- running CPU-only (see the install log for details)." }
-  } else {
-    Log "No NVIDIA GPU -- GPU_LIMITS and GPU_REQUESTS left empty"
-  }
-
+  # ($gpuVal / $runtimeClass were decided before the adopted/fresh split above.)
   Log "Writing values to $valuesFile"
   $envBlock = "env:`n"
   if ($CLIENT_ENV) {
@@ -4131,11 +4144,18 @@ $envBlock
     if ((helm upgrade --help 2>$null | Out-String) -match '--reset-then-reuse-values') {
       $reuseFlag = "--reset-then-reuse-values"
     }
-    Log "Reconciling release '$existingName' in namespace '$existingNs' (adopted; $reuseFlag; healing clientId)..."
+    # Reconcile the GPU request to THIS run's decision even under --reuse-values (Bugbot): an
+    # older release's GPU_REQUESTS/GPU_LIMITS would otherwise survive after cluster reconciliation
+    # cleared $K3D_GPU_FLAG, stranding every job Pending on a CPU-only node. --set-string wins over
+    # the reused values, so we force the three GPU keys to match $gpuVal/$runtimeClass (empty = CPU).
+    Log "Reconciling release '$existingName' in namespace '$existingNs' (adopted; $reuseFlag; healing clientId + GPU request)..."
     $helmOutput = (helm upgrade $existingName $chartRef `
       --namespace $existingNs `
       $reuseFlag `
-      --set-string "clientId=$TB_CLIENT_ID" 2>&1) | Out-String
+      --set-string "clientId=$TB_CLIENT_ID" `
+      --set-string "env.GPU_REQUESTS=$gpuVal" `
+      --set-string "env.GPU_LIMITS=$gpuVal" `
+      --set-string "env.RUNTIME_CLASS_NAME=$runtimeClass" 2>&1) | Out-String
     Log "Helm Output: $helmOutput"
     if ($LASTEXITCODE -ne 0) { Err "Client reconcile failed." $helmOutput }
     # Keep the LOCAL record in step for future default-reuse prompts: heal only

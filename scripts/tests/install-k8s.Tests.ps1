@@ -3898,6 +3898,24 @@ Describe "GPU registry login happens BEFORE the probe (#616 Bugbot: authenticate
   }
 }
 
+Describe "Adopted-reuse reconciles the GPU request (#616 Bugbot: no stale GPU under --reuse-values)" {
+  BeforeAll { $script:ESRC = Get-Content "$PSScriptRoot/../install-k8s.ps1" -Raw }
+  It "the GPU value decision is made BEFORE the adopted/fresh split so both paths use it" {
+    $script:ESRC | Should -Match 'BEFORE the adopted/fresh split[\s\S]{0,1400}?if \(-not \$adoptedReuse\)'
+  }
+  It "the adopted helm upgrade forces the GPU env keys to this run's decision via --set-string" {
+    # else a prior release's GPU_REQUESTS/GPU_LIMITS survives --reuse-values after a CPU fallback.
+    $adopted = ($script:ESRC -split 'if \(\$adoptedReuse\) \{')[1]
+    $adopted | Should -Match '--set-string "env.GPU_REQUESTS=\$gpuVal"'
+    $adopted | Should -Match '--set-string "env.GPU_LIMITS=\$gpuVal"'
+    $adopted | Should -Match '--set-string "env.RUNTIME_CLASS_NAME=\$runtimeClass"'
+  }
+  It "the fresh (non-adopted) values.yaml still carries the same gpuVal/runtimeClass" {
+    $script:ESRC | Should -Match 'GPU_LIMITS: "\$gpuVal"'
+    $script:ESRC | Should -Match 'RUNTIME_CLASS_NAME: "\$runtimeClass"'
+  }
+}
+
 Describe "Build-GpuNodeImage (#616: local build from public bases, no registry login)" {
   BeforeEach {
     $K3S_CUDA_IMAGE = "ghcr.io/tracebloc/k3s-cuda:v1.29.4-k3s1-cuda-12.4.1-base-ubuntu22.04"
@@ -3909,11 +3927,29 @@ Describe "Build-GpuNodeImage (#616: local build from public bases, no registry l
     # NB: leave $script:K3S_CUDA_DOCKERFILE_B64 as the real embedded value; Start-Process is
     # mocked so the decoded content is never actually built here.
   }
-  It "idempotent: an already-built image is reused, nothing is built" {
-    Mock Invoke-DockerCli { [pscustomobject]@{ Code = 0; Output = "" } }   # image inspect OK
-    Mock Start-Process { throw "must not build when the image already exists" }
+  It "idempotent: an already-built image that PASSES the sanity check is reused, nothing is built" {
+    Mock Invoke-DockerCli {
+      if ($DockerArgs -contains "inspect") { return [pscustomobject]@{ Code = 0; Output = "" } }   # present
+      if ($DockerArgs -contains "run")     { return [pscustomobject]@{ Code = 0; Output = "k3s version v1.29.4+k3s1" } }  # runs k3s
+      return [pscustomobject]@{ Code = 0; Output = "" }
+    }
+    Mock Start-Process { throw "must not build when a healthy image already exists" }
     Build-GpuNodeImage | Should -BeTrue
     Should -Not -Invoke Start-Process
+  }
+  It "an existing but BROKEN image (fails sanity) is NOT reused -- it rebuilds (#616 Bugbot)" {
+    Mock Invoke-DockerCli {
+      if ($DockerArgs -contains "inspect") { return [pscustomobject]@{ Code = 0; Output = "" } }   # present
+      if ($DockerArgs -contains "run")     { return [pscustomobject]@{ Code = 127; Output = "exec /bin/k3s: no such file" } }  # broken
+      return [pscustomobject]@{ Code = 0; Output = "" }
+    }
+    $script:__built = $false
+    Mock Start-Process { $script:__built = $true; [pscustomobject]@{ ExitCode = 0; HasExited = $true } }
+    Mock Wait-ProcessWithDeadline { $true }
+    # inspect(present) -> sanity fails -> rebuild -> post-build sanity still fails (127) -> CPU fallback,
+    # but the key assertion is that a rebuild WAS attempted rather than the broken image reused.
+    Build-GpuNodeImage | Out-Null
+    Should -Invoke Start-Process -ParameterFilter { $ArgumentList -match 'build' }
   }
   It "builds locally with NO docker login and verifies k3s runs -> true" {
     Mock Invoke-DockerCli {
