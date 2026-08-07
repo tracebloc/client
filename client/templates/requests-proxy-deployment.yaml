@@ -52,8 +52,15 @@ spec:
           # tcpSocket (not httpGet): the proxy app lives in client-runtime and
           # exposes no chart-visible HTTP health path, and a probe against an
           # unknown path would 404 and wedge the pod. A successful TCP accept on
-          # the gunicorn listen port is the honest "the proxy is serving" signal.
-          # Mirrors mysql-deployment.yaml's startup/liveness/readiness structure.
+          # :8888 confirms the gunicorn MASTER has bound the listen socket. That
+          # is a strict improvement over no probes — it catches a container that
+          # never starts — but it does NOT fully close the false-green: the
+          # master binds the socket before the single worker finishes importing
+          # create_app(), and keeps it bound while a worker crash-loops on that
+          # import, so a proxy that can't actually relay can still read Ready.
+          # Fully closing it would need a real /healthz served from
+          # client-runtime. Mirrors mysql-deployment.yaml's
+          # startup/liveness/readiness structure.
           startupProbe:
             tcpSocket:
               port: 8888
