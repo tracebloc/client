@@ -1934,11 +1934,14 @@ function Build-GpuNodeImage {
   $env:DOCKER_BUILDKIT = "1"
 
   # Write the build context (embedded Dockerfile + device-plugin manifest) to a fresh temp dir.
+  # Everything that can throw -- the dir creation AND the writes -- lives INSIDE the try so a
+  # temp-dir permission / antivirus / disk error degrades to CPU instead of reaching the
+  # top-level fatal trap and aborting an otherwise-fine install (Bugbot).
   $ctx = Join-Path $env:TEMP ("tracebloc-k3s-cuda-" + [guid]::NewGuid().ToString('N'))
-  New-Item -ItemType Directory -Path $ctx | Out-Null
   $outLog = Join-Path $env:TEMP "k3s-cuda-build-$(Get-Random).log"
   $errLog = Join-Path $env:TEMP "k3s-cuda-build-err-$(Get-Random).log"
   try {
+    New-Item -ItemType Directory -Path $ctx -ErrorAction Stop | Out-Null
     [System.IO.File]::WriteAllText((Join-Path $ctx "Dockerfile"), ($script:K3S_CUDA_DOCKERFILE -replace "`r`n","`n"))
     [System.IO.File]::WriteAllText((Join-Path $ctx "nvidia-device-plugin-daemonset.yaml"), ($script:K3S_CUDA_DEVICEPLUGIN -replace "`r`n","`n"))
 
@@ -1995,6 +1998,13 @@ function Build-GpuNodeImage {
     Ok "GPU node image built locally -- no registry login required."
     Log "GPU node image built + verified: $K3S_CUDA_IMAGE"
     return $true
+  } catch {
+    # GPU is OPTIONAL: a temp-dir permission/AV/disk error while staging the build
+    # context (or any unexpected build error) must degrade to CPU, never reach the
+    # top-level fatal trap and abort the whole install (Bugbot). CPU fallback stays safe.
+    Log "GPU node image build errored: $($_.Exception.Message)"
+    $script:GPU_SKIP_REASON = "the GPU node image couldn't be built ($($_.Exception.Message)) -- running CPU-only"
+    return $false
   } finally {
     Remove-Item $ctx -Recurse -Force -ErrorAction SilentlyContinue
     Remove-Item $outLog, $errLog -Force -ErrorAction SilentlyContinue
@@ -2880,13 +2890,18 @@ function Test-K3sVersionDrift {
 # requested but the reused node isn't the CUDA image, DISABLE GPU for this run (CPU
 # fallback stays safe) and tell the user to recreate the cluster to get GPU. Bounded
 # docker inspect (installer rule) mirrors Test-K3sVersionDrift's job+deadline pattern.
-# Pure: can a reused cluster's server-node image schedule GPU pods? Only the custom
-# k3s-CUDA image (…/k3s-cuda:<tag>) carries the NVIDIA runtime; a stock rancher/k3s
-# image -- or an unreadable/empty one -- cannot, and must fail safe to CPU. Kept pure
-# (string in, bool out) so the decision is unit-testable without a background job.
+# Pure: can a reused cluster's server-node image schedule GPU pods? The default GPU image
+# name carries `k3s-cuda:`, BUT an operator can override it (TRACEBLOC_K3S_CUDA_IMAGE) to a
+# renamed or digest-only mirror ref that doesn't -- so we ALSO accept an exact match against
+# the image this run is configured to use ($Configured). A stock rancher/k3s image -- or an
+# unreadable/empty one -- is not GPU-capable and must fail safe to CPU. Kept pure (strings in,
+# bool out) so the decision is unit-testable without a background job.
 function Test-NodeImageGpuCapable {
-  param([string]$Image)
-  return ($Image -match 'k3s-cuda:')
+  param([string]$Image, [string]$Configured)
+  if (-not $Image) { return $false }
+  if ($Image -match 'k3s-cuda:') { return $true }
+  if ($Configured -and ($Image -eq $Configured)) { return $true }
+  return $false
 }
 
 function Confirm-ReusedClusterGpuCapable {
@@ -2903,9 +2918,10 @@ function Confirm-ReusedClusterGpuCapable {
     Log "docker inspect (GPU capability) timed out; treating the reused cluster as CPU-only to stay safe."
   }
   Remove-Job $job -Force -ErrorAction SilentlyContinue
-  # A CUDA node image can schedule GPU pods; a stock or unreadable one fails safe to CPU
+  # A CUDA node image (or the exact image this run is configured to use, for renamed/digest
+  # mirror overrides) can schedule GPU pods; a stock or unreadable one fails safe to CPU
   # rather than stranding jobs Pending against a node that advertises 0 GPUs.
-  if (Test-NodeImageGpuCapable $img) { return }
+  if (Test-NodeImageGpuCapable -Image $img -Configured $K3S_CUDA_IMAGE) { return }
   $script:K3D_GPU_FLAG = ""
   $script:GPU_SKIP_REASON = "the existing '$CLUSTER_NAME' cluster runs a CPU-only node (GPU capability is fixed when the cluster is created); delete it (k3d cluster delete $CLUSTER_NAME) and re-run to rebuild it with GPU support"
   Warn "GPU detected, but the existing '$CLUSTER_NAME' cluster is CPU-only -- running CPU mode so jobs aren't stranded Pending."
@@ -2913,6 +2929,34 @@ function Confirm-ReusedClusterGpuCapable {
   Hint "To enable GPU on this machine, recreate the cluster:"
   Hint "  k3d cluster delete $CLUSTER_NAME   (then re-run this installer)"
   Hint "  (data under HOST_DATA_DIR is kept; recreate rebinds it.)"
+}
+
+# Fast-path GPU consistency (Bugbot): the completed+healthy fast path exits BEFORE the GPU
+# gate + cluster reconciliation, so a cluster whose values.yaml requests GPU while its node is
+# CPU-only (a half-finished GPU attempt, or the k3s-CUDA image was removed) would keep every
+# GPU experiment Pending while the control plane still looks healthy. Detect that mismatch and
+# WARN with the recreate remedy -- non-fatal (the client is up), shared with the fast path so a
+# healthy-but-inconsistent cluster is flagged, not silently exited. Bounded inspect.
+function Test-HealthyClusterGpuConsistent {
+  $valuesFile = Join-Path $HOST_DATA_DIR "values.yaml"
+  if (-not (Test-Path $valuesFile)) { return }
+  $vals = Get-Content $valuesFile -Raw -ErrorAction SilentlyContinue
+  # Only relevant when the chart is actually REQUESTING a GPU (non-empty GPU_REQUESTS).
+  if ($vals -notmatch '(?m)^\s*GPU_REQUESTS:\s*"[^"]+"') { return }
+  $img = ""
+  $job = Start-Job -InitializationScript $JobInit -ScriptBlock {
+    param($n) (docker inspect "k3d-$n-server-0" --format '{{.Config.Image}}' 2>$null | Out-String)
+  } -ArgumentList $CLUSTER_NAME
+  if (Wait-JobWithProgress -Job $job -TimeoutSec 15 -Message "Checking GPU consistency") {
+    $img = (Receive-Job $job -ErrorAction SilentlyContinue | Out-String).Trim()
+  }
+  Remove-Job $job -Force -ErrorAction SilentlyContinue
+  if (-not $img) { return }                                                    # couldn't read -> don't false-warn
+  if (Test-NodeImageGpuCapable -Image $img -Configured $K3S_CUDA_IMAGE) { return }  # consistent (GPU node) -> fine
+  Warn "This cluster's values request GPU but it runs a CPU-only node -- GPU experiments will stay Pending."
+  Hint "GPU capability is fixed when the cluster is created; it can't be added to a running cluster."
+  Hint "Recreate the cluster to fix (data under HOST_DATA_DIR is kept):"
+  Hint "  k3d cluster delete $CLUSTER_NAME   (then re-run this installer)"
 }
 
 function New-K3dCluster {
@@ -4953,11 +4997,26 @@ function Test-Preflight {
     $criticals += @{ label = "k3d download (github.com)";                  url = "https://github.com/" }
     $criticals += @{ label = "k3d assets (objects.githubusercontent.com)"; url = "https://objects.githubusercontent.com/" }
   }
+  # GPU build download chain (#616): the default GPU path builds the k3s-CUDA node image
+  # locally from NVIDIA's public CUDA base (nvcr.io) + the toolkit apt repo (nvidia.github.io).
+  # Probe them ONLY when an NVIDIA GPU is present AND we'll actually build (no prebuilt image /
+  # mirror override) -- so a restricted network is flagged here instead of after a green check.
+  # SOFT (not $hardFail): GPU is optional and degrades to CPU, so a block here shouldn't stop a
+  # CPU-capable install; it just warns that GPU will fall back.
+  if ($GPU_VENDOR -eq "nvidia" -and $NVIDIA_DRIVER_OK -and -not ($env:TRACEBLOC_K3S_CUDA_IMAGE -or $env:TRACEBLOC_IMAGE_REGISTRY)) {
+    $criticals += @{ label = "NVIDIA CUDA base (nvcr.io)";            url = "https://nvcr.io/"; gpuSoft = $true }
+    $criticals += @{ label = "NVIDIA toolkit repo (nvidia.github.io)"; url = "https://nvidia.github.io/"; gpuSoft = $true }
+  }
   $tlsSeen = $false; $cfail = 0; $regBlocked = $false
   foreach ($c in $criticals) {
     $status = Test-PfUrl $c.url -RequireSuccess:([bool]$c.strict)
     if ($status -ne "ok") { $status = Test-PfUrl $c.url -RequireSuccess:([bool]$c.strict) }   # one retry for transient blips
     if ($status -eq "ok") { Ok "$($c.label) reachable" }
+    elseif ($c.gpuSoft) {
+      # GPU build host blocked: warn only. GPU is optional and degrades to CPU, so this must
+      # not hard-fail an otherwise-fine CPU-capable install (#616).
+      Warn "$($c.label) unreachable ($status) -- the GPU node image can't be built here, so the install will run CPU-only."
+    }
     else {
       Write-PfFail "$($c.label) unreachable ($status)"
       $hardFail++; $cfail++
@@ -5288,6 +5347,9 @@ if ((-not $Resume) -and $script:InstallState.completed -and (Test-ToolsPresent) 
   # this fast-path exits before New-K3dCluster's reuse check, so warn here too
   # (Bugbot #565). Non-fatal: the client is healthy, we just flag the version.
   Test-K3sVersionDrift
+  # Same reasoning for GPU: a healthy cluster whose values request GPU but whose node is
+  # CPU-only would strand GPU experiments; flag it here since the fast path skips the gate (Bugbot).
+  Test-HealthyClusterGpuConsistent
   Hint "Delete $(Get-InstallStatePath) (or set a fresh HOST_DATA_DIR) to force a full reinstall."
   Unregister-ResumeAfterReboot
   Log "Already installed and healthy - nothing to do."
@@ -5303,8 +5365,10 @@ Set-ToolTrust
 
 # -- Step 1/6: Check system requirements (honest split from tool install, #422) --
 Step 1 $script:INSTALL_STEPS.Count "Checking system requirements"
-Test-Preflight
+# Detect the GPU BEFORE preflight so preflight's connectivity probes can include the
+# GPU build's download hosts (nvcr.io) only when an NVIDIA GPU is actually present (#616).
 Find-Gpu
+Test-Preflight
 Enable-VirtualisationFeatures
 
 # -- Step 2/6: Install system tools (~700 MB — Docker Desktop, kubectl, k3d, helm;
@@ -5318,7 +5382,15 @@ Install-NvidiaContainerToolkit
 # k3s-CUDA node image providing the in-cluster runtime, what actually matters is whether Docker
 # can expose the GPU to a container. Enable GPU iff the probe passes -- else CPU fallback
 # (Layer 1) with a clear reason, and never create a --gpus cluster that would fail.
-if ($GPU_VENDOR -eq "nvidia" -and $NVIDIA_DRIVER_OK) {
+if ($GPU_VENDOR -eq "nvidia" -and $NVIDIA_DRIVER_OK -and ($K8S_VERSION -eq "latest" -or $K8S_VERSION -eq "")) {
+  # GPU needs the pinned k3s-CUDA node image, whose tag is derived from $K8S_VERSION. With
+  # K8S_VERSION=latest (the unsupported opt-out, #547) cluster-create adds NO --image, so k3d
+  # would make a STOCK node (no NVIDIA runtime) while the chart requests nvidia.com/gpu +
+  # runtimeClassName=nvidia -- stranding every job (Bugbot). GPU + 'latest' is incompatible, so
+  # fall back to CPU here (never build/enable) with a reason that points at the fix.
+  $GPU_SKIP_REASON = "GPU requires the validated pinned k3s (K8S_VERSION), but K8S_VERSION=latest is set -- unset it (use the pinned default) to enable GPU"
+  Warn "GPU detected but not enabled: K8S_VERSION=latest is unsupported for GPU (the GPU node image is tied to the validated pin). Running CPU-only."
+} elseif ($GPU_VENDOR -eq "nvidia" -and $NVIDIA_DRIVER_OK) {
   # How we obtain the GPU node image: by DEFAULT we BUILD it locally from public bases so a
   # GPU install needs no registry login and no private package -- one command, like a CPU
   # install (#616). If an explicit prebuilt image / mirror is configured (air-gap tenants),

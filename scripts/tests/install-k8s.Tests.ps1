@@ -3731,6 +3731,14 @@ Describe "Test-NodeImageGpuCapable (#616 Bugbot: only the CUDA node can schedule
   It "an unreadable/empty image fails safe to NOT GPU-capable" {
     Test-NodeImageGpuCapable "" | Should -BeFalse
   }
+  It "a renamed/digest-only override that equals the configured image IS recognized (#616 Bugbot)" {
+    # An operator override (TRACEBLOC_K3S_CUDA_IMAGE) may not contain 'k3s-cuda:' -- accept an
+    # exact match against the image this run is configured to use.
+    Test-NodeImageGpuCapable -Image "mirror.corp/gpu-node@sha256:abc123" -Configured "mirror.corp/gpu-node@sha256:abc123" | Should -BeTrue
+  }
+  It "a stock node is NOT recognized even when a custom GPU image is configured" {
+    Test-NodeImageGpuCapable -Image "rancher/k3s:v1.29.4-k3s1" -Configured "mirror.corp/gpu-node:v1" | Should -BeFalse
+  }
 }
 
 Describe "Confirm-ReusedClusterGpuCapable (#616 Bugbot: reused stock cluster can't adopt GPU)" {
@@ -3754,7 +3762,7 @@ Describe "GPU capability is reconciled on cluster REUSE (#616 Bugbot source guar
     $fn | Should -Match 'Start-Job'
     $fn | Should -Match 'Wait-JobWithProgress -Job \$job -TimeoutSec 15'
     $fn | Should -Match "Config.Image"
-    $fn | Should -Match 'Test-NodeImageGpuCapable \$img'
+    $fn | Should -Match 'Test-NodeImageGpuCapable -Image \$img -Configured \$K3S_CUDA_IMAGE'
   }
   It "when the reused node isn't CUDA it clears the flag (CPU fallback) with a recreate reason" {
     $fn = ($script:RSRC -split 'function Confirm-ReusedClusterGpuCapable')[1]
@@ -3909,6 +3917,13 @@ Describe "Build-GpuNodeImage (#616: local build from public bases, no registry l
     Build-GpuNodeImage | Should -BeFalse
     $script:GPU_SKIP_REASON | Should -Match "didn't run k3s"
   }
+  It "a build-context error (temp-dir permission/AV/disk) degrades to CPU, never aborts (#616 Bugbot)" {
+    Mock Invoke-DockerCli { [pscustomobject]@{ Code = 1 } }   # image not present -> proceeds to build
+    Mock New-Item { throw "Access to the path is denied" }     # context dir creation fails
+    Mock Start-Process { throw "must not reach docker build after a context error" }
+    Build-GpuNodeImage | Should -BeFalse                        # returns, does NOT rethrow (no abort)
+    $script:GPU_SKIP_REASON | Should -Match "couldn't be built"
+  }
 }
 
 Describe "Embedded GPU build inputs stay in sync with docker/k3s-cuda (#616 drift guard)" {
@@ -3921,5 +3936,59 @@ Describe "Embedded GPU build inputs stay in sync with docker/k3s-cuda (#616 drif
     $norm = { param($s) (($s -replace "`r`n","`n").TrimEnd() -split "`n" | ForEach-Object { $_.TrimEnd() }) -join "`n" }
     $file = Get-Content "$PSScriptRoot/../../docker/k3s-cuda/nvidia-device-plugin-daemonset.yaml" -Raw
     (& $norm $script:K3S_CUDA_DEVICEPLUGIN) | Should -Be (& $norm $file)
+  }
+}
+
+Describe "GPU + K8S_VERSION=latest is refused (#616 Bugbot: latest bypasses the CUDA image)" {
+  BeforeAll { $script:LSRC = Get-Content "$PSScriptRoot/../install-k8s.ps1" -Raw }
+  It "the GPU gate has a latest/empty branch that never enables GPU and gives a reason" {
+    # latest adds no --image, so k3d makes a stock node; enabling GPU there strands jobs.
+    $script:LSRC | Should -Match 'if \(\$GPU_VENDOR -eq "nvidia" -and \$NVIDIA_DRIVER_OK -and \(\$K8S_VERSION -eq "latest" -or \$K8S_VERSION -eq ""\)\)'
+    $gate = ($script:LSRC -split 'if \(\$GPU_VENDOR -eq "nvidia" -and \$NVIDIA_DRIVER_OK -and \(\$K8S_VERSION')[1]
+    # this branch must NOT set the --gpus flag; it only records a skip reason (CPU fallback)
+    ($gate -split '\} elseif')[0] | Should -Not -Match '\$K3D_GPU_FLAG = "--gpus=all"'
+    ($gate -split '\} elseif')[0] | Should -Match '\$GPU_SKIP_REASON ='
+  }
+}
+
+Describe "GPU download hosts are in the connectivity preflight (#616 Bugbot: nvcr.io coverage)" {
+  BeforeAll { $script:PSRC4 = Get-Content "$PSScriptRoot/../install-k8s.ps1" -Raw }
+  It "GPU is detected BEFORE preflight so preflight can probe the build hosts" {
+    $script:PSRC4 | Should -Match '(?m)^Find-Gpu\s*$[\s\S]{0,300}?^Test-Preflight\s*$'
+  }
+  It "nvcr.io + nvidia.github.io are probed only when an NVIDIA GPU is present and we'll build" {
+    $script:PSRC4 | Should -Match '\$GPU_VENDOR -eq "nvidia" -and \$NVIDIA_DRIVER_OK -and -not \(\$env:TRACEBLOC_K3S_CUDA_IMAGE -or \$env:TRACEBLOC_IMAGE_REGISTRY\)'
+    $script:PSRC4 | Should -Match 'url = "https://nvcr\.io/"; gpuSoft = \$true'
+    $script:PSRC4 | Should -Match 'url = "https://nvidia\.github\.io/"; gpuSoft = \$true'
+  }
+  It "a blocked GPU host WARNS (CPU fallback), it does not hard-fail a CPU-capable install" {
+    # gpuSoft branch must not increment the fail counters
+    $script:PSRC4 | Should -Match 'elseif \(\$c\.gpuSoft\) \{'
+    $block = ($script:PSRC4 -split 'elseif \(\$c\.gpuSoft\) \{')[1]
+    ($block -split '\}')[0] | Should -Not -Match '\$hardFail\+\+'
+  }
+}
+
+Describe "Test-HealthyClusterGpuConsistent (#616 Bugbot: healthy reinstall flags a stale GPU request)" {
+  BeforeEach {
+    $script:CLUSTER_NAME = "tracebloc"
+    $script:HOST_DATA_DIR = Join-Path ([System.IO.Path]::GetTempPath()) ("tb-gpucheck-" + [guid]::NewGuid().ToString('N'))
+    New-Item -ItemType Directory -Path $script:HOST_DATA_DIR -Force | Out-Null
+  }
+  AfterEach { Remove-Item $script:HOST_DATA_DIR -Recurse -Force -ErrorAction SilentlyContinue }
+  It "no values.yaml: no-op, never inspects the node" {
+    Mock Start-Job { throw "must not inspect when there is no values.yaml" }
+    { Test-HealthyClusterGpuConsistent } | Should -Not -Throw
+    Should -Not -Invoke Start-Job
+  }
+  It "values.yaml requests NO GPU (empty): no-op, never inspects the node" {
+    Set-Content (Join-Path $script:HOST_DATA_DIR "values.yaml") "env:`n  GPU_REQUESTS: `"`"`n  GPU_LIMITS: `"`"`n"
+    Mock Start-Job { throw "must not inspect when GPU is not requested" }
+    { Test-HealthyClusterGpuConsistent } | Should -Not -Throw
+    Should -Not -Invoke Start-Job
+  }
+  It "the fast path calls it so a healthy-but-inconsistent cluster is flagged (source guard)" {
+    $psrc = Get-Content "$PSScriptRoot/../install-k8s.ps1" -Raw
+    $psrc | Should -Match 'client is healthy -- nothing to do[\s\S]{0,800}?Test-HealthyClusterGpuConsistent'
   }
 }
