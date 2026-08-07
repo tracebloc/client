@@ -2938,12 +2938,11 @@ function Test-RunningClusterGpuCapable {
   return ("$alloc" -match '[1-9]\d*')
 }
 
-function Test-HealthyClusterGpuConsistent {
-  # Read the GPU request from the LIVE Helm release, not local values.yaml: on the adopted-reuse
-  # path only clientId is healed locally (GPU is reconciled via helm --set-string), so the local
-  # file goes stale and would false-warn or miss the live request (Bugbot). Bounded helm query;
-  # if we can't determine it confidently, skip (never false-warn).
-  $gpuRequested = $false
+# Does the LIVE Helm release request a GPU (non-empty env.GPU_REQUESTS)? Read from Helm, not local
+# values.yaml -- on the adopted-reuse path only clientId is healed locally (GPU is reconciled via
+# helm --set-string), so the local file goes stale (Bugbot). Bounded; unreadable -> $false.
+function Test-LiveReleaseRequestsGpu {
+  $requested = $false
   $vjob = Start-Job -InitializationScript $JobInit -ScriptBlock {
     try {
       $releases = helm list -A -o json 2>$null | ConvertFrom-Json
@@ -2954,11 +2953,15 @@ function Test-HealthyClusterGpuConsistent {
     } catch {}
     return $false
   }
-  if (Wait-JobWithProgress -Job $vjob -TimeoutSec 20 -Message "Checking GPU consistency") {
-    $gpuRequested = [bool](Receive-Job $vjob -ErrorAction SilentlyContinue)
+  if (Wait-JobWithProgress -Job $vjob -TimeoutSec 20 -Message "Checking the live GPU request") {
+    $requested = [bool](Receive-Job $vjob -ErrorAction SilentlyContinue)
   }
   Remove-Job $vjob -Force -ErrorAction SilentlyContinue
-  if (-not $gpuRequested) { return }   # live release doesn't request GPU -> nothing to reconcile
+  return $requested
+}
+
+function Test-HealthyClusterGpuConsistent {
+  if (-not (Test-LiveReleaseRequestsGpu)) { return }   # live release doesn't request GPU -> nothing to reconcile
   $img = ""
   $job = Start-Job -InitializationScript $JobInit -ScriptBlock {
     param($n) (docker inspect "k3d-$n-server-0" --format '{{.Config.Image}}' 2>$null | Out-String)
@@ -5400,13 +5403,19 @@ Find-Gpu
 # client falls through to the repairing walk. Skipped on -Resume (a resume must
 # finish the interrupted walk).
 if ((-not $Resume) -and $script:InstallState.completed -and (Test-ToolsPresent) -and (Test-ClusterRunning) -and (Test-ClientHealthy)) {
-  if ($GPU_VENDOR -eq "nvidia" -and $NVIDIA_DRIVER_OK -and -not (Test-RunningClusterGpuCapable)) {
-    # An NVIDIA GPU is present but the running cluster is CPU-only -- do NOT shortcut. The operator
-    # may have just fixed Docker/driver/registry access, and the CPU-fallback guidance explicitly
-    # tells them to re-run to enable GPU; the fast path would otherwise say "nothing to do" and never
-    # retry GPU (Bugbot). Fall through to the full walk, which re-evaluates and can enable GPU.
-    Info "An NVIDIA GPU is present but this cluster is running CPU-only -- re-checking to try enabling GPU."
-    Log "Fast-path skipped: GPU present but running cluster is CPU-only; re-evaluating GPU."
+  # GPU is "fully enabled" only when the node ACTUALLY advertises a GPU AND the live release
+  # requests one. If an NVIDIA GPU is present but EITHER is missing, do NOT shortcut -- the state is
+  # inconsistent in one of two ways (Bugbot), both of which a re-run should fix:
+  #   * node not advertising (device-plugin/driver just fixed) -> enable GPU, or
+  #   * node advertising but the release still requests CPU (a delayed GPU recovery) -> reconcile
+  #     GPU_REQUESTS so training stops silently running on CPU.
+  # The CPU-fallback guidance explicitly tells operators to re-run, so honour that by falling through.
+  $gpuPresent = ($GPU_VENDOR -eq "nvidia" -and $NVIDIA_DRIVER_OK)
+  $gpuFullyEnabled = $false
+  if ($gpuPresent) { $gpuFullyEnabled = ((Test-RunningClusterGpuCapable) -and (Test-LiveReleaseRequestsGpu)) }
+  if ($gpuPresent -and -not $gpuFullyEnabled) {
+    Info "An NVIDIA GPU is present but not fully enabled here -- re-checking to reconcile GPU (node advertisement + chart request)."
+    Log "Fast-path skipped: GPU present but not fully enabled; re-evaluating GPU."
   } else {
     Ok "tracebloc is already installed and the client is healthy -- nothing to do."
     # A healthy cluster can still be running a DRIFTED k3s (the #547 steady state);

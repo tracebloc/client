@@ -4180,19 +4180,20 @@ Describe "GPU download hosts are in the connectivity preflight (#616 Bugbot: nvc
 Describe "Test-HealthyClusterGpuConsistent (#616 Bugbot: healthy reinstall flags a stale GPU request)" {
   BeforeAll { $script:HCSRC = Get-Content "$PSScriptRoot/../install-k8s.ps1" -Raw }
   It "reads the GPU request from the LIVE Helm release, not the (stale-on-adopt) local values.yaml (#616 Bugbot)" {
-    # bound $fn to just this function's body (up to the next 'function ' definition)
+    # the helm query now lives in the shared Test-LiveReleaseRequestsGpu helper
+    $lr = (($script:HCSRC -split 'function Test-LiveReleaseRequestsGpu')[1] -split '\nfunction ')[0]
+    $lr | Should -Match 'helm list -A -o json'
+    $lr | Should -Match 'helm get values \$r\.name -n \$r\.namespace'
+    $lr | Should -Match '\$v\.env\.GPU_REQUESTS'
+    $lr | Should -Match 'Wait-JobWithProgress -Job \$vjob -TimeoutSec 20'
+    # the consistency check must NOT read the local values.yaml file anymore
     $fn = (($script:HCSRC -split 'function Test-HealthyClusterGpuConsistent')[1] -split '\nfunction ')[0]
-    $fn | Should -Match 'helm list -A -o json'
-    $fn | Should -Match 'helm get values \$r\.name -n \$r\.namespace'
-    $fn | Should -Match '\$v\.env\.GPU_REQUESTS'
-    # it must NOT read the local values.yaml file anymore (the comment may still mention it)
     $fn | Should -Not -Match 'Join-Path \$HOST_DATA_DIR "values\.yaml"'
     $fn | Should -Not -Match 'Get-Content .*values\.yaml'
   }
-  It "returns early when no live release requests GPU, and is bounded" {
+  It "returns early when no live release requests GPU (via the shared helper)" {
     $fn = (($script:HCSRC -split 'function Test-HealthyClusterGpuConsistent')[1] -split '\nfunction ')[0]
-    $fn | Should -Match 'if \(-not \$gpuRequested\) \{ return \}'
-    $fn | Should -Match 'Wait-JobWithProgress -Job \$vjob -TimeoutSec 20'
+    $fn | Should -Match 'if \(-not \(Test-LiveReleaseRequestsGpu\)\) \{ return \}'
   }
   It "warns with the recreate remedy when the live release wants GPU but the node is CPU-only" {
     $fn = (($script:HCSRC -split 'function Test-HealthyClusterGpuConsistent')[1] -split '\nfunction ')[0]
@@ -4206,10 +4207,13 @@ Describe "Test-HealthyClusterGpuConsistent (#616 Bugbot: healthy reinstall flags
 
 Describe "Fast path retries GPU on a CPU-only cluster (#616 Bugbot: re-run can enable GPU)" {
   BeforeAll { $script:FPSRC = Get-Content "$PSScriptRoot/../install-k8s.ps1" -Raw }
-  It "the fast-path health check is gated so a GPU-present + CPU-only cluster falls through to retry" {
-    # if GPU present AND the running cluster isn't GPU-capable -> do NOT exit 'nothing to do'.
-    $script:FPSRC | Should -Match 'if \(\$GPU_VENDOR -eq "nvidia" -and \$NVIDIA_DRIVER_OK -and -not \(Test-RunningClusterGpuCapable\)\) \{'
-    # within the fast-path block, the 'nothing to do' exit lives in the else branch (no GPU retry).
+  It "the fast path shortcuts ONLY when GPU is fully consistent -- else it falls through to reconcile" {
+    # GPU 'fully enabled' = node advertises a GPU AND the live release requests one; any other combo
+    # on a GPU machine (node not advertising, OR release still CPU after a delayed recovery) must
+    # NOT shortcut (Bugbot -- both directions).
+    $script:FPSRC | Should -Match '\$gpuFullyEnabled = \(\(Test-RunningClusterGpuCapable\) -and \(Test-LiveReleaseRequestsGpu\)\)'
+    $script:FPSRC | Should -Match 'if \(\$gpuPresent -and -not \$gpuFullyEnabled\) \{'
+    # within the fast-path block, the 'nothing to do' exit lives in the else branch (no reconcile).
     $fastpath = (($script:FPSRC -split 'Fast path \(#420\)')[1] -split 'Trust an explicit corporate CA')[0]
     $fastpath | Should -Match '\} else \{[\s\S]*?nothing to do[\s\S]*?exit 0'
   }
