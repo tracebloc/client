@@ -1858,16 +1858,33 @@ function Test-GpuImageRunsK3s {
   return ($ver.Code -eq 0 -and $ver.Output -match 'k3s version')
 }
 
+# Short content hash of the build inputs (embedded Dockerfile + device-plugin manifest). Stamped
+# as a label on the built image and checked on reuse, so ANY change to the build inputs (e.g.
+# adding NVIDIA_DISABLE_REQUIRE) invalidates a cached image built from OLDER content -- the image
+# TAG alone doesn't change when the Dockerfile does, so a stale cached image would otherwise be
+# reused and then fail cluster-create on an older driver (Bugbot).
+function Get-GpuBuildContentHash {
+  $bytes = [System.Text.Encoding]::UTF8.GetBytes("$($script:K3S_CUDA_DOCKERFILE_B64)|$($script:K3S_CUDA_DEVICEPLUGIN_B64)")
+  $sha = [System.Security.Cryptography.SHA256]::Create()
+  try { return (([System.BitConverter]::ToString($sha.ComputeHash($bytes))) -replace '-','').Substring(0,12).ToLower() }
+  finally { $sha.Dispose() }
+}
+
 function Build-GpuNodeImage {
-  # Idempotent: a prior run already built it -> reuse WITHOUT rebuilding, but ONLY if it still
-  # passes the k3s sanity check. A build that completed yet produced a broken image (failed the
-  # post-build check) leaves the tag behind; blindly reusing it would create a cluster from a
-  # known-broken image (Bugbot). If the existing tag is broken, fall through and rebuild (the
-  # `docker build -t` below overwrites it).
-  $have = Invoke-DockerCli -DockerArgs @("image","inspect",$K3S_CUDA_IMAGE) -TimeoutSec 30
+  $contentHash = Get-GpuBuildContentHash
+  # Idempotent: a prior run already built it -> reuse WITHOUT rebuilding, but ONLY if (a) it was
+  # built from the CURRENT build inputs (its stamped content-hash label matches) AND (b) it still
+  # passes the k3s sanity check. A cached image built from OLDER content (e.g. before the
+  # NVIDIA_DISABLE_REQUIRE fix) has a different/absent label -> we rebuild instead of reusing a
+  # stale image that would fail cluster-create on an older driver (Bugbot). {{.Config.Labels}} is
+  # a single space-free arg; we regex the label out of the rendered map.
+  $have = Invoke-DockerCli -DockerArgs @("image","inspect",$K3S_CUDA_IMAGE,"--format","{{.Config.Labels}}") -TimeoutSec 30
   if ($have.Code -eq 0) {
-    if (Test-GpuImageRunsK3s) { Log "GPU node image already built + verified ($K3S_CUDA_IMAGE) -- reusing"; return $true }
-    Log "An existing GPU node image ($K3S_CUDA_IMAGE) failed its k3s sanity check -- rebuilding it."
+    if (($have.Output -match "tracebloc\.k3s-cuda-content:$contentHash") -and (Test-GpuImageRunsK3s)) {
+      Log "GPU node image already built from current inputs + verified ($K3S_CUDA_IMAGE) -- reusing"
+      return $true
+    }
+    Log "An existing GPU node image ($K3S_CUDA_IMAGE) is stale (built from older inputs) or failed its sanity check -- rebuilding it."
   }
 
   # BuildKit is required for the Dockerfile's `# syntax=...:1.7-labs` + `COPY --exclude`.
@@ -1894,6 +1911,7 @@ function Build-GpuNodeImage {
       "build",
       "--build-arg", "K3S_TAG=$K8S_VERSION",
       "--build-arg", "CUDA_TAG=$CUDA_BASE_TAG",
+      "--label", "tracebloc.k3s-cuda-content=$contentHash",   # stamps the content hash for reuse detection
       "-t", $K3S_CUDA_IMAGE,
       $ctx
     )

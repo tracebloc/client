@@ -3975,29 +3975,46 @@ Describe "Build-GpuNodeImage (#616: local build from public bases, no registry l
     # NB: leave $script:K3S_CUDA_DOCKERFILE_B64 as the real embedded value; Start-Process is
     # mocked so the decoded content is never actually built here.
   }
-  It "idempotent: an already-built image that PASSES the sanity check is reused, nothing is built" {
+  It "idempotent: a cached image with the CURRENT content hash that passes sanity is reused, nothing is built" {
+    Mock Get-GpuBuildContentHash { "abc123def456" }
     Mock Invoke-DockerCli {
-      if ($DockerArgs -contains "inspect") { return [pscustomobject]@{ Code = 0; Output = "" } }   # present
+      if ($DockerArgs -contains "inspect") { return [pscustomobject]@{ Code = 0; Output = "map[tracebloc.k3s-cuda-content:abc123def456]" } }  # present + current
       if ($DockerArgs -contains "run")     { return [pscustomobject]@{ Code = 0; Output = "k3s version v1.29.4+k3s1" } }  # runs k3s
       return [pscustomobject]@{ Code = 0; Output = "" }
     }
-    Mock Start-Process { throw "must not build when a healthy image already exists" }
+    Mock Start-Process { throw "must not build when a healthy, current image already exists" }
     Build-GpuNodeImage | Should -BeTrue
     Should -Not -Invoke Start-Process
   }
-  It "an existing but BROKEN image (fails sanity) is NOT reused -- it rebuilds (#616 Bugbot)" {
+  It "a STALE cached image (content hash mismatch) is rebuilt, not reused (#616 Bugbot: e.g. pre-NVIDIA_DISABLE_REQUIRE)" {
+    Mock Get-GpuBuildContentHash { "newhash999999" }
     Mock Invoke-DockerCli {
-      if ($DockerArgs -contains "inspect") { return [pscustomobject]@{ Code = 0; Output = "" } }   # present
+      if ($DockerArgs -contains "inspect") { return [pscustomobject]@{ Code = 0; Output = "map[tracebloc.k3s-cuda-content:oldhash000000]" } }  # present but OLD content
+      if ($DockerArgs -contains "run")     { return [pscustomobject]@{ Code = 0; Output = "k3s version v1.29.4+k3s1" } }  # even if it "runs k3s"
+      return [pscustomobject]@{ Code = 0; Output = "" }
+    }
+    Mock Start-Process { [pscustomobject]@{ ExitCode = 0; HasExited = $true } }
+    Mock Wait-ProcessWithDeadline { $true }
+    Build-GpuNodeImage | Out-Null
+    Should -Invoke Start-Process -ParameterFilter { $ArgumentList -match 'build' }   # rebuilt despite the cached image running k3s
+  }
+  It "an existing image with the current hash but BROKEN (fails sanity) is NOT reused -- it rebuilds (#616 Bugbot)" {
+    Mock Get-GpuBuildContentHash { "abc123def456" }
+    Mock Invoke-DockerCli {
+      if ($DockerArgs -contains "inspect") { return [pscustomobject]@{ Code = 0; Output = "map[tracebloc.k3s-cuda-content:abc123def456]" } }  # present + current
       if ($DockerArgs -contains "run")     { return [pscustomobject]@{ Code = 127; Output = "exec /bin/k3s: no such file" } }  # broken
       return [pscustomobject]@{ Code = 0; Output = "" }
     }
-    $script:__built = $false
-    Mock Start-Process { $script:__built = $true; [pscustomobject]@{ ExitCode = 0; HasExited = $true } }
+    Mock Start-Process { [pscustomobject]@{ ExitCode = 0; HasExited = $true } }
     Mock Wait-ProcessWithDeadline { $true }
-    # inspect(present) -> sanity fails -> rebuild -> post-build sanity still fails (127) -> CPU fallback,
-    # but the key assertion is that a rebuild WAS attempted rather than the broken image reused.
     Build-GpuNodeImage | Out-Null
     Should -Invoke Start-Process -ParameterFilter { $ArgumentList -match 'build' }
+  }
+  It "the build stamps the content-hash label so the reuse check can detect stale images (#616 Bugbot)" {
+    $psrc = Get-Content "$PSScriptRoot/../install-k8s.ps1" -Raw
+    $fn = ($psrc -split 'function Build-GpuNodeImage')[1]
+    $fn | Should -Match '"--label", "tracebloc.k3s-cuda-content=\$contentHash"'
+    $fn | Should -Match 'tracebloc\\\.k3s-cuda-content:\$contentHash'
   }
   It "builds locally with NO docker login and verifies k3s runs -> true" {
     Mock Invoke-DockerCli {
