@@ -3819,12 +3819,25 @@ Describe "Confirm-GpuImagePullable (#616 private GPU image, no public package)" 
   }
   AfterEach { $env:TRACEBLOC_REGISTRY_USERNAME = $null; $env:TRACEBLOC_REGISTRY_PASSWORD = $null }
 
-  It "logs Docker in with the registry creds then returns true when the pull succeeds" {
+  It "logs Docker in with the registry creds, pulls, and sanity-checks -> true" {
     $env:TRACEBLOC_REGISTRY_USERNAME = "bot"; $env:TRACEBLOC_REGISTRY_PASSWORD = "tok"
-    Mock Invoke-DockerCli { [pscustomobject]@{ Code = 0; Output = "" } }
+    Mock Invoke-DockerCli {
+      if ($DockerArgs -contains "run") { return [pscustomobject]@{ Code = 0; Output = "k3s version v1.29.4+k3s1" } }  # sanity OK
+      return [pscustomobject]@{ Code = 0; Output = "" }   # login + pull OK
+    }
     Confirm-GpuImagePullable | Should -BeTrue
     Should -Invoke Invoke-DockerCli -ParameterFilter { ($DockerArgs -contains "login") -and ($DockerArgs -contains "ghcr.io") }
     Should -Invoke Invoke-DockerCli -ParameterFilter { $DockerArgs -contains "pull" }
+    Should -Invoke Invoke-DockerCli -ParameterFilter { $DockerArgs -contains "run" }   # sanity check ran
+  }
+  It "a pulled but BROKEN image (fails the k3s sanity check) -> CPU fallback, not cluster-create abort (#616 Bugbot)" {
+    $env:TRACEBLOC_REGISTRY_USERNAME = "bot"; $env:TRACEBLOC_REGISTRY_PASSWORD = "tok"
+    Mock Invoke-DockerCli {
+      if ($DockerArgs -contains "run") { return [pscustomobject]@{ Code = 127; Output = "exec /bin/k3s: no such file" } }  # broken
+      return [pscustomobject]@{ Code = 0; Output = "" }   # login + pull succeed
+    }
+    Confirm-GpuImagePullable | Should -BeFalse
+    $script:GPU_SKIP_REASON | Should -Match "doesn't run k3s"
   }
   It "returns false with a credentials hint when the pull fails despite creds" {
     $env:TRACEBLOC_REGISTRY_USERNAME = "bot"; $env:TRACEBLOC_REGISTRY_PASSWORD = "tok"
@@ -4062,17 +4075,20 @@ Describe "GPU download hosts are in the connectivity preflight (#616 Bugbot: nvc
   It "GPU is detected BEFORE preflight so preflight can probe the build hosts" {
     $script:PSRC4 | Should -Match '(?m)^Find-Gpu\s*$[\s\S]{0,300}?^Test-Preflight\s*$'
   }
-  It "the BUILD path probes nvcr.io + nvidia.github.io (no prebuilt image / mirror override)" {
-    $script:PSRC4 | Should -Match 'if \(-not \(\$env:TRACEBLOC_K3S_CUDA_IMAGE -or \$env:TRACEBLOC_IMAGE_REGISTRY\)\)'
+  It "nvcr.io (device plugin) is probed on BOTH paths whenever GPU is enabled (#616 Bugbot)" {
+    # nvcr.io/nvidia/k8s-device-plugin is baked in + pulled at runtime regardless of build/pull.
     $script:PSRC4 | Should -Match 'url = "https://nvcr\.io/"; gpuSoft = \$true'
+  }
+  It "the BUILD path also probes the toolkit apt repo (nvidia.github.io)" {
+    $script:PSRC4 | Should -Match 'if \(-not \(\$env:TRACEBLOC_K3S_CUDA_IMAGE -or \$env:TRACEBLOC_IMAGE_REGISTRY\)\)'
     $script:PSRC4 | Should -Match 'url = "https://nvidia\.github\.io/"; gpuSoft = \$true'
   }
-  It "the PULL path (custom image / mirror) probes the configured GPU registry host (#616 Bugbot)" {
-    # else-branch: an unreachable custom/mirror registry must surface at preflight, not pull time.
-    $script:PSRC4 | Should -Match '\$gpuHost = \(\$K3S_CUDA_IMAGE -split ''/''\)\[0\]'
+  It "the PULL path probes EVERY distinct host across the node + probe images (#616 Bugbot)" {
+    # node image and probe image can be on different hosts when both overrides are set.
+    $script:PSRC4 | Should -Match '\$gpuHosts = @\(\(Get-RegistryHost \$K3S_CUDA_IMAGE\), \(Get-RegistryHost \$CUDA_PROBE_IMAGE\)\) \| Select-Object -Unique'
     $script:PSRC4 | Should -Match 'label = "GPU image registry \(\$gpuHost\)"; url = "https://\$gpuHost/"; gpuSoft = \$true'
-    # a bare docker.io repo (no host) is skipped -- already covered by the Docker Hub probe
-    $script:PSRC4 | Should -Match "\`$gpuHost -match '\[.:\]'"
+    # bare docker.io + already-added nvcr.io are skipped
+    $script:PSRC4 | Should -Match "\`$gpuHost -match '\[.:\]' -and \`$gpuHost -ne 'docker.io' -and \`$gpuHost -ne 'nvcr.io'"
   }
   It "a blocked GPU host WARNS (CPU fallback), it does not hard-fail a CPU-capable install" {
     # gpuSoft branch must not increment the fail counters

@@ -1806,7 +1806,15 @@ function Confirm-GpuImagePullable {
   Connect-GpuRegistry   # logs into the correct host (Get-RegistryHost); no-op without creds
   Log "Pulling the GPU node image (verifies access + pre-loads for cluster-create): $K3S_CUDA_IMAGE"
   $pr = Invoke-DockerCli -DockerArgs @("pull", $K3S_CUDA_IMAGE) -TimeoutSec 900
-  if ($pr.Code -eq 0) { Log "GPU node image pulled OK"; return $true }
+  if ($pr.Code -eq 0) {
+    # Sanity-check the PULLED image runs k3s, exactly as the local build path does -- a mis-tagged
+    # or broken mirror/custom image would otherwise enable GPU and then abort k3d cluster-create
+    # instead of taking the CPU fallback (Bugbot).
+    if (Test-GpuImageRunsK3s) { Log "GPU node image pulled + verified OK"; return $true }
+    $script:GPU_SKIP_REASON = "the pulled GPU node image ($K3S_CUDA_IMAGE) doesn't run k3s (mis-tagged or broken image) -- running CPU-only"
+    Log "Pulled GPU node image failed its k3s sanity check"
+    return $false
+  }
   Log "GPU node image pull failed (exit $($pr.Code)): $($pr.Output)"
   # Reason reflects the ACTUAL failure (Bugbot): a pull timeout is not an auth error.
   if ($pr.Code -eq 124) {
@@ -4943,20 +4951,25 @@ function Test-Preflight {
   # not $hardFail): GPU is optional and degrades to CPU, so a block here must not stop a
   # CPU-capable install -- it just warns that GPU will fall back.
   if ($GPU_VENDOR -eq "nvidia" -and $NVIDIA_DRIVER_OK) {
+    # The NVIDIA device-plugin image (nvcr.io/nvidia/k8s-device-plugin) is baked into the node
+    # image and pulled at runtime on BOTH paths, so nvcr.io is always part of the GPU download
+    # chain -- probe it whenever GPU is enabled (Bugbot).
+    $criticals += @{ label = "NVIDIA device plugin / CUDA (nvcr.io)"; url = "https://nvcr.io/"; gpuSoft = $true }
     if (-not ($env:TRACEBLOC_K3S_CUDA_IMAGE -or $env:TRACEBLOC_IMAGE_REGISTRY)) {
-      # DEFAULT: we BUILD locally from NVIDIA's public CUDA base (nvcr.io) + the toolkit apt repo
-      # (nvidia.github.io); the probe's nvidia/cuda comes from Docker Hub, already probed above.
-      $criticals += @{ label = "NVIDIA CUDA base (nvcr.io)";            url = "https://nvcr.io/"; gpuSoft = $true }
+      # DEFAULT: we BUILD locally, which also fetches the toolkit apt repo (nvidia.github.io); the
+      # probe's nvidia/cuda comes from Docker Hub, already probed above.
       $criticals += @{ label = "NVIDIA toolkit repo (nvidia.github.io)"; url = "https://nvidia.github.io/"; gpuSoft = $true }
     } else {
-      # PREBUILT/MIRROR: we PULL the node image AND the probe's CUDA image from the configured
-      # registry (Confirm-GpuImagePullable / the mirror-homed probe). Probe THAT host so an
-      # unreachable custom registry is surfaced at preflight, not at pull time (Bugbot).
-      $gpuHost = ($K3S_CUDA_IMAGE -split '/')[0]
-      # Only a real registry host (contains '.' or ':') -- a bare 'repo/name' is Docker Hub,
-      # already covered by the registry-1.docker.io probe above.
-      if ($gpuHost -match '[.:]') {
-        $criticals += @{ label = "GPU image registry ($gpuHost)"; url = "https://$gpuHost/"; gpuSoft = $true }
+      # PREBUILT/MIRROR: we PULL the node image ($K3S_CUDA_IMAGE) AND the probe's CUDA image
+      # ($CUDA_PROBE_IMAGE) -- which can be on DIFFERENT hosts when both overrides are set. Probe
+      # EVERY distinct real registry host so an unreachable one is surfaced at preflight (Bugbot).
+      $gpuHosts = @((Get-RegistryHost $K3S_CUDA_IMAGE), (Get-RegistryHost $CUDA_PROBE_IMAGE)) | Select-Object -Unique
+      foreach ($gpuHost in $gpuHosts) {
+        # Skip bare Docker Hub (already covered by the registry-1.docker.io probe) and nvcr.io
+        # (added above). Only probe a real registry host.
+        if ($gpuHost -match '[.:]' -and $gpuHost -ne 'docker.io' -and $gpuHost -ne 'nvcr.io') {
+          $criticals += @{ label = "GPU image registry ($gpuHost)"; url = "https://$gpuHost/"; gpuSoft = $true }
+        }
       }
     }
   }
