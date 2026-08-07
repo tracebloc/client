@@ -4013,6 +4013,30 @@ Describe "Build-GpuNodeImage (#616: local build from public bases, no registry l
     Build-GpuNodeImage | Should -BeFalse
     $script:GPU_SKIP_REASON | Should -Match "build failed"
   }
+  It "a NULL build exit code is not a failure -- the k3s sanity check is authoritative (#616 Bugbot)" {
+    # With redirected stdout/stderr, $proc.ExitCode can stay null after exit; a successful build
+    # must not be misclassified as failed and silently lose GPU.
+    Mock Invoke-DockerCli {
+      if ($DockerArgs -contains "inspect") { return [pscustomobject]@{ Code = 1 } }                             # not present -> build
+      if ($DockerArgs -contains "run")     { return [pscustomobject]@{ Code = 0; Output = "k3s version v1.29.4+k3s1" } }  # image works
+      return [pscustomobject]@{ Code = 0; Output = "" }
+    }
+    Mock Start-Process { [pscustomobject]@{ ExitCode = $null; HasExited = $true } }   # exit code unreadable
+    Mock Wait-ProcessWithDeadline { $true }
+    Build-GpuNodeImage | Should -BeTrue
+    $script:GPU_SKIP_REASON | Should -Be ""
+  }
+  It "a NULL build exit code with a BROKEN image still falls back to CPU (sanity check catches it)" {
+    Mock Invoke-DockerCli {
+      if ($DockerArgs -contains "inspect") { return [pscustomobject]@{ Code = 1 } }
+      if ($DockerArgs -contains "run")     { return [pscustomobject]@{ Code = 127; Output = "exec /bin/k3s: no such file" } }
+      return [pscustomobject]@{ Code = 0; Output = "" }
+    }
+    Mock Start-Process { [pscustomobject]@{ ExitCode = $null; HasExited = $true } }
+    Mock Wait-ProcessWithDeadline { $true }
+    Build-GpuNodeImage | Should -BeFalse
+    $script:GPU_SKIP_REASON | Should -Match "didn't run k3s"
+  }
   It "build TIMES OUT -> CPU fallback with a timeout reason, returns false" {
     Mock Invoke-DockerCli { [pscustomobject]@{ Code = 1 } }
     Mock Start-Process { [pscustomobject]@{ ExitCode = 0; HasExited = $false } }

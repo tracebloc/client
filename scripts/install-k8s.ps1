@@ -1917,13 +1917,22 @@ function Build-GpuNodeImage {
     }
     $buildOut = (("$(Get-Content $errLog -Raw -ErrorAction SilentlyContinue)`n$(Get-Content $outLog -Raw -ErrorAction SilentlyContinue)")).Trim()
     if ($buildOut) { Log "docker build output (tail): $(( $buildOut -split "`n" | Select-Object -Last 8) -join "`n")" }
-    if ($proc.ExitCode -ne 0) {
-      $script:GPU_SKIP_REASON = "the GPU node image build failed (docker build exit $($proc.ExitCode)) -- see the install log; running CPU-only"
+    # Defense-in-depth (#611 idiom / Bugbot): with redirected stdout/stderr, $proc.ExitCode can
+    # stay $null after the process exits even though Wait-ProcessWithDeadline called WaitForExit().
+    # `$null -ne 0` would then misclassify a SUCCESSFUL build as failed and silently drop GPU. So
+    # fail only on a CONFIRMED non-zero exit; a null code defers to the k3s sanity check below,
+    # which is the authoritative "did the build produce a working image" success marker.
+    $buildExit = $proc.ExitCode
+    if ($null -eq $buildExit) {
+      Log "docker build exit code unreadable after WaitForExit; relying on the image sanity check as the success marker."
+    } elseif ($buildExit -ne 0) {
+      $script:GPU_SKIP_REASON = "the GPU node image build failed (docker build exit $buildExit) -- see the install log; running CPU-only"
       return $false
     }
 
     # Sanity-check the freshly built image actually runs k3s (same check reused on the
     # idempotent-reuse path above, so a broken image is never trusted from either direction).
+    # This is ALSO the authoritative success marker when the exit code was unreadable.
     if (-not (Test-GpuImageRunsK3s)) {
       $script:GPU_SKIP_REASON = "the freshly built GPU node image didn't run k3s correctly -- running CPU-only (see the install log)"
       Log "GPU node image sanity check failed after build"
