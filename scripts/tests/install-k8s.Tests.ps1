@@ -4213,10 +4213,19 @@ Describe "Fast path retries GPU on a CPU-only cluster (#616 Bugbot: re-run can e
     $fastpath = (($script:FPSRC -split 'Fast path \(#420\)')[1] -split 'Trust an explicit corporate CA')[0]
     $fastpath | Should -Match '\} else \{[\s\S]*?nothing to do[\s\S]*?exit 0'
   }
-  It "Test-RunningClusterGpuCapable is bounded and classifies the node via Test-NodeImageGpuCapable" {
+  It "Test-RunningClusterGpuCapable checks LIVE allocatable GPU (not the image name) and is bounded (#616 Bugbot)" {
+    # a CUDA image with 0 allocatable GPUs (device-plugin failure) must read as NOT live, so the
+    # fast path retries -- the image name alone is not proof of a working GPU.
     $fn = (($script:FPSRC -split 'function Test-RunningClusterGpuCapable')[1] -split '\nfunction ')[0]
-    $fn | Should -Match 'Wait-JobWithProgress -Job \$job -TimeoutSec 15'
-    $fn | Should -Match 'Test-NodeImageGpuCapable -Image \$img -Configured \$K3S_CUDA_IMAGE'
+    $fn | Should -Match "allocatable\.nvidia\\\.com/gpu"
+    $fn | Should -Match '--request-timeout=5s'
+    $fn | Should -Match "-match '\[1-9\]"
+    $fn | Should -Not -Match 'Config\.Image'   # no longer keyed on the image name
+  }
+  It "Find-Gpu's nvidia-smi probes are bounded so a wedged driver can't hang a re-run (#616 Bugbot)" {
+    $drv = (($script:FPSRC -split 'function Confirm-NvidiaDriver')[1] -split '\nfunction ')[0]
+    $drv | Should -Match 'Invoke-BoundedProcess -FileName \$nvSmi'
+    $drv | Should -Not -Match '& \$nvSmi'   # no unbounded native invocation
   }
   It "the image sanity check runs WITH --gpus so it catches a stale image on an older driver (#616 Bugbot)" {
     # Test-GpuImageRunsK3s must exercise the same requirement gate cluster-create hits (no -e bypass).

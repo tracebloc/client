@@ -1091,7 +1091,12 @@ function Confirm-NvidiaDriver {
       return
     }
 
-    $driverVer = (& $nvSmi --query-gpu=driver_version --format=csv,noheader 2>&1).Trim()
+    # Bounded (installer external-call timeout rule / Bugbot): a wedged driver must not hang the
+    # install -- and Find-Gpu now runs before the fast path, so an unbounded nvidia-smi would hang
+    # every "nothing to do" re-run too.
+    $dr = Invoke-BoundedProcess -FileName $nvSmi -Arguments @("--query-gpu=driver_version","--format=csv,noheader") -TimeoutSec 15
+    if ($dr.Code -ne 0) { Warn "Couldn't query the NVIDIA driver (nvidia-smi failed or timed out) -- GPU checks skipped."; return }
+    $driverVer = ($dr.Output -split "`n" | Select-Object -First 1).Trim()
     $majorVer  = [int]($driverVer -replace '\..*', '')
     if ($majorVer -ge 460) {
       $script:NVIDIA_DRIVER_OK = $true
@@ -1100,7 +1105,8 @@ function Confirm-NvidiaDriver {
       # every check but are too small for real training (field: a 2 GB GT 710
       # installed fine and could never fit a model).
       try {
-        $vramMiB = [int]((& $nvSmi --query-gpu=memory.total --format=csv,noheader,nounits 2>&1 | Select-Object -First 1).Trim())
+        $vr = Invoke-BoundedProcess -FileName $nvSmi -Arguments @("--query-gpu=memory.total","--format=csv,noheader,nounits") -TimeoutSec 15
+        $vramMiB = if ($vr.Code -eq 0) { [int](($vr.Output -split "`n" | Select-Object -First 1).Trim()) } else { 0 }
         if ($vramMiB -gt 0 -and $vramMiB -lt 8192) {
           Hint "This GPU has $([math]::Round($vramMiB / 1024, 1)) GB VRAM - fine for setup; real training typically needs 8 GB+."
         }
@@ -1710,36 +1716,48 @@ echo "NCT installed successfully."
 # background job; on timeout the job is killed and Code=124 is returned so callers fall back to CPU
 # cleanly. Returns @{ Code = <int>; Output = <string> }. Any stdin (e.g. a login token) is passed
 # in-memory via the arg hashtable — never written to disk, never placed in argv or logged.
-function Invoke-DockerCli {
+# Run ANY external command as a real child PROCESS with a HARD timeout (installer external-call
+# timeout rule). NOT a Start-Job: Stop-Job stops the PS job but can orphan the native child it
+# spawned (Bugbot), so a timed-out call would keep running; a direct Process handle lets us Kill()
+# the child on timeout. Args are joined with spaces (callers pass space-free tokens); any stdin
+# (e.g. a login token) is written in-memory, never to disk/argv/logs. 5.1-safe. Returns
+# @{ Code = <int>; Output = <string> } with Code=124 on timeout.
+function Invoke-BoundedProcess {
   param(
-    [Parameter(Mandatory)][string[]]$DockerArgs,
+    [Parameter(Mandatory)][string]$FileName,
+    [Parameter(Mandatory)][string[]]$Arguments,
     [int]$TimeoutSec = 120,
     [string]$Stdin = ""
   )
-  # Run docker as a real child PROCESS, not a Start-Job: Stop-Job stops the PS job but can
-  # orphan the native docker.exe it spawned (Bugbot), so a timed-out run/login/pull would keep
-  # going after we've fallen back to CPU. A direct Process handle lets us Kill() docker.exe on
-  # timeout. Our GPU args contain no spaces (flags + image tags), so a plain join is safe; any
-  # stdin (a login token) is written in-memory, never to disk/argv/logs. 5.1-safe API.
   $psi = New-Object System.Diagnostics.ProcessStartInfo
-  $psi.FileName = "docker"
-  $psi.Arguments = ($DockerArgs -join ' ')
+  $psi.FileName = $FileName
+  $psi.Arguments = ($Arguments -join ' ')
   $psi.UseShellExecute = $false
   $psi.CreateNoWindow = $true
   $psi.RedirectStandardOutput = $true
   $psi.RedirectStandardError = $true
   if ($Stdin) { $psi.RedirectStandardInput = $true }
   try { $proc = [System.Diagnostics.Process]::Start($psi) }
-  catch { return [pscustomobject]@{ Code = 1; Output = "could not start docker: $($_.Exception.Message)" } }
+  catch { return [pscustomobject]@{ Code = 1; Output = "could not start ${FileName}: $($_.Exception.Message)" } }
   if ($Stdin) { $proc.StandardInput.Write($Stdin); $proc.StandardInput.Close() }
   $outTask = $proc.StandardOutput.ReadToEndAsync()
   $errTask = $proc.StandardError.ReadToEndAsync()
   if ($proc.WaitForExit($TimeoutSec * 1000)) {
     return [pscustomobject]@{ Code = $proc.ExitCode; Output = ($outTask.Result + $errTask.Result) }
   }
-  # timed out -> kill docker.exe so it can't keep running after the CPU fallback
+  # timed out -> kill the child so it can't keep running after we've moved on
   try { $proc.Kill() } catch {}
-  return [pscustomobject]@{ Code = 124; Output = ("docker " + $DockerArgs[0] + " timed out after " + $TimeoutSec + "s") }
+  return [pscustomobject]@{ Code = 124; Output = ($FileName + " " + $Arguments[0] + " timed out after " + $TimeoutSec + "s") }
+}
+
+# Thin docker wrapper over Invoke-BoundedProcess (keeps every docker call bounded + killable).
+function Invoke-DockerCli {
+  param(
+    [Parameter(Mandatory)][string[]]$DockerArgs,
+    [int]$TimeoutSec = 120,
+    [string]$Stdin = ""
+  )
+  return Invoke-BoundedProcess -FileName "docker" -Arguments $DockerArgs -TimeoutSec $TimeoutSec -Stdin $Stdin
 }
 
 function Confirm-DockerGpu {
@@ -2910,20 +2928,14 @@ function Confirm-ReusedClusterGpuCapable {
 # GPU experiment Pending while the control plane still looks healthy. Detect that mismatch and
 # WARN with the recreate remedy -- non-fatal (the client is up), shared with the fast path so a
 # healthy-but-inconsistent cluster is flagged, not silently exited. Bounded inspect.
-# Fast-path helper: is the RUNNING cluster's server node a GPU-capable (CUDA) image? Lets the
-# fast path decide whether a "healthy" but CPU-only install should fall through to retry GPU
-# rather than exit "nothing to do" (Bugbot). Bounded inspect; unreadable -> treat as NOT capable
-# so we err toward re-checking (a full walk is idempotent) rather than silently skipping GPU.
+# Fast-path helper: is the GPU actually LIVE on the running cluster -- i.e. does the node ADVERTISE
+# nvidia.com/gpu? The node IMAGE being CUDA is NOT proof (the device plugin can fail, leaving a
+# CUDA node with 0 GPUs -- the real failure mode), so we check allocatable GPU directly, the same
+# authoritative signal Confirm-GpuNode uses (Bugbot). Lets the fast path fall through to retry GPU
+# when a GPU is present but not live. Bounded via --request-timeout; unreadable/0 -> not live.
 function Test-RunningClusterGpuCapable {
-  $img = ""
-  $job = Start-Job -InitializationScript $JobInit -ScriptBlock {
-    param($n) (docker inspect "k3d-$n-server-0" --format '{{.Config.Image}}' 2>$null | Out-String)
-  } -ArgumentList $CLUSTER_NAME
-  if (Wait-JobWithProgress -Job $job -TimeoutSec 15 -Message "Checking cluster GPU capability") {
-    $img = (Receive-Job $job -ErrorAction SilentlyContinue | Out-String).Trim()
-  }
-  Remove-Job $job -Force -ErrorAction SilentlyContinue
-  return (Test-NodeImageGpuCapable -Image $img -Configured $K3S_CUDA_IMAGE)
+  $alloc = kubectl get nodes -o jsonpath='{.items[*].status.allocatable.nvidia\.com/gpu}' --request-timeout=5s 2>$null
+  return ("$alloc" -match '[1-9]\d*')
 }
 
 function Test-HealthyClusterGpuConsistent {
