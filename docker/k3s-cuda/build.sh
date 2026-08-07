@@ -51,8 +51,9 @@ if grep -qE '(^|/)--exclude' "${rootfs}"; then
   grep -E '(^|/)--exclude' "${rootfs}" | head >&2
   rm -f "${rootfs}"; exit 1
 fi
-if ! grep -qE '^bin/k3s$' "${rootfs}"; then
-  echo "ERROR: /bin/k3s missing — k3s binary not overlaid correctly." >&2
+# k3s lands at usr/bin/k3s (copied into /usr/bin via the kept /bin symlink) or bin/k3s.
+if ! grep -qE '(^|/)bin/k3s$' "${rootfs}"; then
+  echo "ERROR: k3s binary (…bin/k3s) missing — rootfs not overlaid correctly." >&2
   rm -f "${rootfs}"; exit 1
 fi
 rm -f "${rootfs}"
