@@ -539,12 +539,13 @@ images:
 # jobs-manager: 256Mi was too tight under load; bumped to 512Mi/1Gi so
 # the Service Bus client + pod watcher have headroom before OOM. In v1.x
 # (#1144) requests.memory was raised to EQUAL limits.memory (1Gi api /
-# 512Mi pods-monitor) so both containers hold a Guaranteed memory
-# reservation — on a single-node cluster-recovery mass restart they were
-# otherwise the kernel OOM-killer's preferred (Burstable) victims and were
-# exit-137 killed, taking ~9m to recover. requests.cpu was also raised so a
-# mass restart does not throttle their startup. Same requests==limits
-# philosophy mysql already uses.
+# 512Mi pods-monitor) to lower each container's oom_score_adj — on a
+# single-node cluster-recovery mass restart they were otherwise the kernel
+# OOM-killer's preferred victims and were exit-137 killed, taking ~9m to
+# recover. The pods stay Burstable (cpu request != limit); pinning memory
+# just makes them less-preferred OOM victims. requests.cpu was also raised so
+# a mass restart does not throttle their startup. Same requests.memory==limits
+# philosophy mysql already uses (mysql likewise omits its cpu limit).
 resources:
   mysql:
     requests:
