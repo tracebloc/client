@@ -10,7 +10,10 @@ install_homebrew() {
     brew_script="$(mktemp)"
     curl_secure -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh \
       -o "$brew_script"
-    spin_cmd "Installing Homebrew…" env NONINTERACTIVE=1 /bin/bash "$brew_script"
+    # #561: bounded so a wedged Homebrew install (network stall, a hung Command
+    # Line Tools fetch) can't hang the installer forever behind the spinner.
+    # Generous (30m) — a fresh Mac may pull the Xcode CLT here.
+    spin_cmd_bounded 1800 "Installing Homebrew…" env NONINTERACTIVE=1 /bin/bash "$brew_script"
     rm -f "$brew_script"
     if [[ "$ARCH" == "arm64" ]] && [[ -f /opt/homebrew/bin/brew ]]; then
       eval "$(/opt/homebrew/bin/brew shellenv)"
@@ -100,14 +103,16 @@ _install_docker_colima() {
   log "Headless environment detected (no GUI session) — using Colima as Docker runtime."
 
   if ! has docker; then
-    spin_cmd "Installing Docker…" brew install docker
+    # #561: bounded so a wedged brew (network stall) can't hang forever.
+    spin_cmd_bounded 900 "Installing Docker…" brew install docker
     success "Docker"
   else
     success "Docker"
   fi
 
   if ! has colima; then
-    spin_cmd "Installing container runtime…" brew install colima
+    # #561: bounded so a wedged brew (network stall) can't hang forever.
+    spin_cmd_bounded 900 "Installing container runtime…" brew install colima
   fi
 
   if docker info &>/dev/null 2>&1; then
@@ -139,7 +144,8 @@ _install_docker_colima() {
     _colima_args+=( --vm-type vz --vz-rosetta )
     log "Apple Silicon + macOS 13+ (fresh VM): starting Colima with VZ + Rosetta for amd64 acceleration."
   fi
-  spin_cmd "Starting Docker runtime…" colima "${_colima_args[@]}"
+  # #561: bounded so a hung colima start (stale VZ VM) can't hang forever.
+  spin_cmd_bounded 900 "Starting Docker runtime…" colima "${_colima_args[@]}"
 
   if ! docker info &>/dev/null 2>&1; then
     error "Docker did not start. Try running 'colima status' to investigate."
@@ -288,7 +294,8 @@ install_docker_desktop() {
       warn "Could not fetch the Docker Desktop checksum from ${checksum_url} — installing this DMG UNVERIFIED. This usually means a proxy/VPN is rewriting traffic to desktop.docker.com. Set TRACEBLOC_REQUIRE_DOCKER_DMG_CHECKSUM=1 to refuse unverified installs."
     fi
 
-    spin_cmd "Installing Docker Desktop…" bash -c \
+    # #561: bounded so hdiutil on a bad/corrupt DMG can't hang forever.
+    spin_cmd_bounded 900 "Installing Docker Desktop…" bash -c \
       "hdiutil attach '$dmg_path' -nobrowse -quiet && \
        cp -R '/Volumes/Docker/Docker.app' /Applications/ && \
        xattr -cr /Applications/Docker.app && \
