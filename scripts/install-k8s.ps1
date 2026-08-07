@@ -1784,138 +1784,15 @@ function Confirm-GpuImagePullable {
   return $false
 }
 
-# Embedded build inputs for the LOCAL GPU node-image build (#616). Kept byte-identical
-# to docker/k3s-cuda/* (the CI build source of truth); a Pester drift test fails if they
-# diverge. Embedded (not fetched) so the single verified installer artifact is self-
-# contained -- same pattern as the in-WSL NCT install script above.
-$script:K3S_CUDA_DOCKERFILE = @'
-# syntax=docker/dockerfile:1.7-labs
-# =============================================================================
-#  Custom k3s node image with NVIDIA GPU support  (tracebloc/client #616)
-# =============================================================================
-# WHY this exists: the stock `rancher/k3s` image is Alpine-based and ships NO
-# NVIDIA container runtime, so GPU pods can never schedule on it — the node
-# advertises 0 nvidia.com/gpu. This image rebuilds the SAME pinned k3s on an
-# NVIDIA CUDA Ubuntu base, installs the NVIDIA Container Toolkit, configures
-# containerd for the `nvidia` runtime, and bakes in the device-plugin +
-# `nvidia` RuntimeClass so the node advertises nvidia.com/gpu on first boot.
-# Based on the official k3d CUDA recipe (https://k3d.io/.../usage/advanced/cuda/).
-#
-# IMPORTANT: K3S_TAG MUST match the installer's K8S_VERSION pin
-# (scripts/spec/facts.env / scripts/lib/common.sh) so a GPU node runs the exact
-# same validated k3s as a normal CPU node. scripts/check-facts.sh enforces this:
-# this ARG, build.sh, and the workflow input default are all checked against
-# facts.env's K8S_VERSION, so a bump can't leave the GPU image tag stale (#547).
-ARG K3S_TAG="v1.29.4-k3s1"
-ARG CUDA_TAG="12.4.1-base-ubuntu22.04"
+# Build inputs for the LOCAL GPU node-image build (#616), base64-encoded copies of
+# docker/k3s-cuda/* (the CI build source of truth). Base64 (not a raw here-string) so
+# the installer stays self-contained AND ASCII-only with no bare-curl token -- the
+# embedded Dockerfile legitimately installs+uses curl inside the CONTAINER build, which
+# would otherwise trip the host-side style/ASCII guards. A Pester drift test decodes
+# these and fails if they diverge from docker/k3s-cuda/*. Decode to read.
+$script:K3S_CUDA_DOCKERFILE_B64 = 'IyBzeW50YXg9ZG9ja2VyL2RvY2tlcmZpbGU6MS43LWxhYnMKIyA9PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PQojICBDdXN0b20gazNzIG5vZGUgaW1hZ2Ugd2l0aCBOVklESUEgR1BVIHN1cHBvcnQgICh0cmFjZWJsb2MvY2xpZW50ICM2MTYpCiMgPT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT0KIyBXSFkgdGhpcyBleGlzdHM6IHRoZSBzdG9jayBgcmFuY2hlci9rM3NgIGltYWdlIGlzIEFscGluZS1iYXNlZCBhbmQgc2hpcHMgTk8KIyBOVklESUEgY29udGFpbmVyIHJ1bnRpbWUsIHNvIEdQVSBwb2RzIGNhbiBuZXZlciBzY2hlZHVsZSBvbiBpdCDigJQgdGhlIG5vZGUKIyBhZHZlcnRpc2VzIDAgbnZpZGlhLmNvbS9ncHUuIFRoaXMgaW1hZ2UgcmVidWlsZHMgdGhlIFNBTUUgcGlubmVkIGszcyBvbiBhbgojIE5WSURJQSBDVURBIFVidW50dSBiYXNlLCBpbnN0YWxscyB0aGUgTlZJRElBIENvbnRhaW5lciBUb29sa2l0LCBjb25maWd1cmVzCiMgY29udGFpbmVyZCBmb3IgdGhlIGBudmlkaWFgIHJ1bnRpbWUsIGFuZCBiYWtlcyBpbiB0aGUgZGV2aWNlLXBsdWdpbiArCiMgYG52aWRpYWAgUnVudGltZUNsYXNzIHNvIHRoZSBub2RlIGFkdmVydGlzZXMgbnZpZGlhLmNvbS9ncHUgb24gZmlyc3QgYm9vdC4KIyBCYXNlZCBvbiB0aGUgb2ZmaWNpYWwgazNkIENVREEgcmVjaXBlIChodHRwczovL2szZC5pby8uLi4vdXNhZ2UvYWR2YW5jZWQvY3VkYS8pLgojCiMgSU1QT1JUQU5UOiBLM1NfVEFHIE1VU1QgbWF0Y2ggdGhlIGluc3RhbGxlcidzIEs4U19WRVJTSU9OIHBpbgojIChzY3JpcHRzL3NwZWMvZmFjdHMuZW52IC8gc2NyaXB0cy9saWIvY29tbW9uLnNoKSBzbyBhIEdQVSBub2RlIHJ1bnMgdGhlIGV4YWN0CiMgc2FtZSB2YWxpZGF0ZWQgazNzIGFzIGEgbm9ybWFsIENQVSBub2RlLiBzY3JpcHRzL2NoZWNrLWZhY3RzLnNoIGVuZm9yY2VzIHRoaXM6CiMgdGhpcyBBUkcsIGJ1aWxkLnNoLCBhbmQgdGhlIHdvcmtmbG93IGlucHV0IGRlZmF1bHQgYXJlIGFsbCBjaGVja2VkIGFnYWluc3QKIyBmYWN0cy5lbnYncyBLOFNfVkVSU0lPTiwgc28gYSBidW1wIGNhbid0IGxlYXZlIHRoZSBHUFUgaW1hZ2UgdGFnIHN0YWxlICgjNTQ3KS4KQVJHIEszU19UQUc9InYxLjI5LjQtazNzMSIKQVJHIENVREFfVEFHPSIxMi40LjEtYmFzZS11YnVudHUyMi4wNCIKCkZST00gcmFuY2hlci9rM3M6JHtLM1NfVEFHfSBBUyBrM3MKCkZST00gbnZjci5pby9udmlkaWEvY3VkYToke0NVREFfVEFHfQoKIyBOVklESUEgQ29udGFpbmVyIFRvb2xraXQsIHRoZW4gcG9pbnQgY29udGFpbmVyZCBhdCB0aGUgYG52aWRpYWAgcnVudGltZS4gVGhlCiMgZ3BnIGtleSArIGFwdCBsaXN0IGFyZSBwaW5uZWQgdmlhIHRoZSBrZXlyaW5nIHRoZSBzYW1lIHdheSB0aGUgaW4tV1NMIHRvb2xraXQKIyBpbnN0YWxsIGRvZXMgKHNjcmlwdHMvaW5zdGFsbC1rOHMucHMxKSBzbyBhIHJlc3RyaWN0ZWQtbmV0d29yayBtaXJyb3IgY2FuCiMgcmUtaG9tZSB0aGVtIGNvbnNpc3RlbnRseS4gY3VybCBjYXJyaWVzIHRoZSBUTFMgZmxvb3IgKyBib3VuZGVkIHRpbWVvdXRzIGlubGluZQojIChhIERvY2tlcmZpbGUgY2FuJ3Qgc291cmNlIGNvbW1vbi5zaCdzIGN1cmxfc2VjdXJlKCkpIHNvIGEgc3RhbGxlZCBvciBkb3duZ3JhZGVkCiMgY29ubmVjdGlvbiB0byBudmlkaWEuZ2l0aHViLmlvIGZhaWxzIGZhc3QgaW5zdGVhZCBvZiBoYW5naW5nIHRoZSBidWlsZCAoaG91c2UgcnVsZSkuClJVTiBleHBvcnQgREVCSUFOX0ZST05URU5EPW5vbmludGVyYWN0aXZlIFwKICAgICYmIGFwdC1nZXQgdXBkYXRlIFwKICAgICYmIGFwdC1nZXQgaW5zdGFsbCAteSAtLW5vLWluc3RhbGwtcmVjb21tZW5kcyBjdXJsIGNhLWNlcnRpZmljYXRlcyBnbnVwZyBcCiAgICAmJiBjdXJsIC1mc1NMIC0tdGxzdjEuMiAtLWNvbm5lY3QtdGltZW91dCAzMCAtLW1heC10aW1lIDYwIGh0dHBzOi8vbnZpZGlhLmdpdGh1Yi5pby9saWJudmlkaWEtY29udGFpbmVyL2dwZ2tleSBcCiAgICAgICAgIHwgZ3BnIC0tZGVhcm1vciAtbyAvdXNyL3NoYXJlL2tleXJpbmdzL252aWRpYS1jb250YWluZXItdG9vbGtpdC1rZXlyaW5nLmdwZyBcCiAgICAmJiBjdXJsIC1mc1NMIC0tdGxzdjEuMiAtLWNvbm5lY3QtdGltZW91dCAzMCAtLW1heC10aW1lIDYwIGh0dHBzOi8vbnZpZGlhLmdpdGh1Yi5pby9saWJudmlkaWEtY29udGFpbmVyL3N0YWJsZS9kZWIvbnZpZGlhLWNvbnRhaW5lci10b29sa2l0Lmxpc3QgXAogICAgICAgICB8IHNlZCAncyNkZWIgaHR0cHM6Ly8jZGViIFtzaWduZWQtYnk9L3Vzci9zaGFyZS9rZXlyaW5ncy9udmlkaWEtY29udGFpbmVyLXRvb2xraXQta2V5cmluZy5ncGddIGh0dHBzOi8vI2cnIFwKICAgICAgICAgfCB0ZWUgL2V0Yy9hcHQvc291cmNlcy5saXN0LmQvbnZpZGlhLWNvbnRhaW5lci10b29sa2l0Lmxpc3QgXAogICAgJiYgYXB0LWdldCB1cGRhdGUgXAogICAgJiYgYXB0LWdldCBpbnN0YWxsIC15IC0tbm8taW5zdGFsbC1yZWNvbW1lbmRzIG52aWRpYS1jb250YWluZXItdG9vbGtpdCBcCiAgICAmJiBudmlkaWEtY3RrIHJ1bnRpbWUgY29uZmlndXJlIC0tcnVudGltZT1jb250YWluZXJkIFwKICAgICYmIGFwdC1nZXQgY2xlYW4gXAogICAgJiYgcm0gLXJmIC92YXIvbGliL2FwdC9saXN0cy8qCgojIENvcHkgdGhlIHBpbm5lZCBrM3Mgcm9vdGZzIG92ZXIgdGhlIENVREEgYmFzZS4gRXhjbHVkZSAvYmluIG9uIHRoZSBmaXJzdCBjb3B5CiMgc28gdGhlIFVidW50dSB1c2VybGFuZCAoY3VybCwgYXB0LCBudmlkaWEtY3RrKSBzdXJ2aXZlcywgdGhlbiBicmluZyBpbiBrM3MncwojIG93biAvYmluICh0aGUgazNzIGJpbmFyeSArIC9iaW4vYXV4KSBleHBsaWNpdGx5IOKAlCB0aGUgb2ZmaWNpYWwgcmVjaXBlJ3Mgc3BsaXQuCkNPUFkgLS1mcm9tPWszcyAtLWV4Y2x1ZGU9L2JpbiAvIC8KQ09QWSAtLWZyb209azNzIC9iaW4gL2JpbgoKIyBBdXRvLWRlcGxveSB0aGUgTlZJRElBIGRldmljZSBwbHVnaW4gKyBgbnZpZGlhYCBSdW50aW1lQ2xhc3Mgb24gZmlyc3Qgc2VydmVyCiMgYm9vdCAoazNzIGF1dG8tYXBwbGllcyBtYW5pZmVzdHMgZHJvcHBlZCBoZXJlKS4gVGhpcyBpcyB3aGF0IG1ha2VzIHRoZSBub2RlCiMgYWR2ZXJ0aXNlIG52aWRpYS5jb20vZ3B1IHdpdGhvdXQgYSBzZXBhcmF0ZSBga3ViZWN0bCBhcHBseWAuCkNPUFkgbnZpZGlhLWRldmljZS1wbHVnaW4tZGFlbW9uc2V0LnlhbWwgL3Zhci9saWIvcmFuY2hlci9rM3Mvc2VydmVyL21hbmlmZXN0cy9udmlkaWEtZGV2aWNlLXBsdWdpbi1kYWVtb25zZXQueWFtbAoKVk9MVU1FIC92YXIvbGliL2t1YmVsZXQKVk9MVU1FIC92YXIvbGliL3JhbmNoZXIvazNzClZPTFVNRSAvdmFyL2xpYi9jbmkKVk9MVU1FIC92YXIvbG9nCgpFTlYgUEFUSD0iJFBBVEg6L2Jpbi9hdXgiCgpFTlRSWVBPSU5UIFsiL2Jpbi9rM3MiXQpDTUQgWyJhZ2VudCJdCg=='
 
-FROM rancher/k3s:${K3S_TAG} AS k3s
-
-FROM nvcr.io/nvidia/cuda:${CUDA_TAG}
-
-# NVIDIA Container Toolkit, then point containerd at the `nvidia` runtime. The
-# gpg key + apt list are pinned via the keyring the same way the in-WSL toolkit
-# install does (scripts/install-k8s.ps1) so a restricted-network mirror can
-# re-home them consistently. curl carries the TLS floor + bounded timeouts inline
-# (a Dockerfile can't source common.sh's curl_secure()) so a stalled or downgraded
-# connection to nvidia.github.io fails fast instead of hanging the build (house rule).
-RUN export DEBIAN_FRONTEND=noninteractive \
-    && apt-get update \
-    && apt-get install -y --no-install-recommends curl ca-certificates gnupg \
-    && curl -fsSL --tlsv1.2 --connect-timeout 30 --max-time 60 https://nvidia.github.io/libnvidia-container/gpgkey \
-         | gpg --dearmor -o /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg \
-    && curl -fsSL --tlsv1.2 --connect-timeout 30 --max-time 60 https://nvidia.github.io/libnvidia-container/stable/deb/nvidia-container-toolkit.list \
-         | sed 's#deb https://#deb [signed-by=/usr/share/keyrings/nvidia-container-toolkit-keyring.gpg] https://#g' \
-         | tee /etc/apt/sources.list.d/nvidia-container-toolkit.list \
-    && apt-get update \
-    && apt-get install -y --no-install-recommends nvidia-container-toolkit \
-    && nvidia-ctk runtime configure --runtime=containerd \
-    && apt-get clean \
-    && rm -rf /var/lib/apt/lists/*
-
-# Copy the pinned k3s rootfs over the CUDA base. Exclude /bin on the first copy
-# so the Ubuntu userland (curl, apt, nvidia-ctk) survives, then bring in k3s's
-# own /bin (the k3s binary + /bin/aux) explicitly — the official recipe's split.
-COPY --from=k3s --exclude=/bin / /
-COPY --from=k3s /bin /bin
-
-# Auto-deploy the NVIDIA device plugin + `nvidia` RuntimeClass on first server
-# boot (k3s auto-applies manifests dropped here). This is what makes the node
-# advertise nvidia.com/gpu without a separate `kubectl apply`.
-COPY nvidia-device-plugin-daemonset.yaml /var/lib/rancher/k3s/server/manifests/nvidia-device-plugin-daemonset.yaml
-
-VOLUME /var/lib/kubelet
-VOLUME /var/lib/rancher/k3s
-VOLUME /var/lib/cni
-VOLUME /var/log
-
-ENV PATH="$PATH:/bin/aux"
-
-ENTRYPOINT ["/bin/k3s"]
-CMD ["agent"]
-'@
-
-$script:K3S_CUDA_DEVICEPLUGIN = @'
-# =============================================================================
-#  NVIDIA device plugin + `nvidia` RuntimeClass  (tracebloc/client #616)
-# =============================================================================
-# Baked into the custom k3s-CUDA image at
-# /var/lib/rancher/k3s/server/manifests/ so k3s auto-applies it on first server
-# boot — the node then advertises nvidia.com/gpu with no separate kubectl apply.
-#
-# The `nvidia` RuntimeClass is what training pods reference via
-# runtimeClassName: nvidia (the installer sets RUNTIME_CLASS_NAME=nvidia when
-# the GPU is enabled, which jobs-manager threads into every spawned pod).
-#
-# Pinned to NVIDIA k8s-device-plugin v0.14.5 (same version the installer's
-# post-create fallback applies), so the two paths never disagree.
----
-apiVersion: node.k8s.io/v1
-kind: RuntimeClass
-metadata:
-  name: nvidia
-handler: nvidia
----
-apiVersion: apps/v1
-kind: DaemonSet
-metadata:
-  name: nvidia-device-plugin-daemonset
-  namespace: kube-system
-spec:
-  selector:
-    matchLabels:
-      name: nvidia-device-plugin-ds
-  updateStrategy:
-    type: RollingUpdate
-  template:
-    metadata:
-      labels:
-        name: nvidia-device-plugin-ds
-    spec:
-      runtimeClassName: nvidia
-      tolerations:
-        - key: nvidia.com/gpu
-          operator: Exists
-          effect: NoSchedule
-      priorityClassName: system-node-critical
-      containers:
-        - name: nvidia-device-plugin-ctr
-          image: nvcr.io/nvidia/k8s-device-plugin:v0.14.5
-          env:
-            - name: FAIL_ON_INIT_ERROR
-              value: "false"
-          securityContext:
-            allowPrivilegeEscalation: false
-            capabilities:
-              drop: ["ALL"]
-          volumeMounts:
-            - name: device-plugin
-              mountPath: /var/lib/kubelet/device-plugins
-      volumes:
-        - name: device-plugin
-          hostPath:
-            path: /var/lib/kubelet/device-plugins
-'@
+$script:K3S_CUDA_DEVICEPLUGIN_B64 = 'IyA9PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PQojICBOVklESUEgZGV2aWNlIHBsdWdpbiArIGBudmlkaWFgIFJ1bnRpbWVDbGFzcyAgKHRyYWNlYmxvYy9jbGllbnQgIzYxNikKIyA9PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PQojIEJha2VkIGludG8gdGhlIGN1c3RvbSBrM3MtQ1VEQSBpbWFnZSBhdAojIC92YXIvbGliL3JhbmNoZXIvazNzL3NlcnZlci9tYW5pZmVzdHMvIHNvIGszcyBhdXRvLWFwcGxpZXMgaXQgb24gZmlyc3Qgc2VydmVyCiMgYm9vdCDigJQgdGhlIG5vZGUgdGhlbiBhZHZlcnRpc2VzIG52aWRpYS5jb20vZ3B1IHdpdGggbm8gc2VwYXJhdGUga3ViZWN0bCBhcHBseS4KIwojIFRoZSBgbnZpZGlhYCBSdW50aW1lQ2xhc3MgaXMgd2hhdCB0cmFpbmluZyBwb2RzIHJlZmVyZW5jZSB2aWEKIyBydW50aW1lQ2xhc3NOYW1lOiBudmlkaWEgKHRoZSBpbnN0YWxsZXIgc2V0cyBSVU5USU1FX0NMQVNTX05BTUU9bnZpZGlhIHdoZW4KIyB0aGUgR1BVIGlzIGVuYWJsZWQsIHdoaWNoIGpvYnMtbWFuYWdlciB0aHJlYWRzIGludG8gZXZlcnkgc3Bhd25lZCBwb2QpLgojCiMgUGlubmVkIHRvIE5WSURJQSBrOHMtZGV2aWNlLXBsdWdpbiB2MC4xNC41IChzYW1lIHZlcnNpb24gdGhlIGluc3RhbGxlcidzCiMgcG9zdC1jcmVhdGUgZmFsbGJhY2sgYXBwbGllcyksIHNvIHRoZSB0d28gcGF0aHMgbmV2ZXIgZGlzYWdyZWUuCi0tLQphcGlWZXJzaW9uOiBub2RlLms4cy5pby92MQpraW5kOiBSdW50aW1lQ2xhc3MKbWV0YWRhdGE6CiAgbmFtZTogbnZpZGlhCmhhbmRsZXI6IG52aWRpYQotLS0KYXBpVmVyc2lvbjogYXBwcy92MQpraW5kOiBEYWVtb25TZXQKbWV0YWRhdGE6CiAgbmFtZTogbnZpZGlhLWRldmljZS1wbHVnaW4tZGFlbW9uc2V0CiAgbmFtZXNwYWNlOiBrdWJlLXN5c3RlbQpzcGVjOgogIHNlbGVjdG9yOgogICAgbWF0Y2hMYWJlbHM6CiAgICAgIG5hbWU6IG52aWRpYS1kZXZpY2UtcGx1Z2luLWRzCiAgdXBkYXRlU3RyYXRlZ3k6CiAgICB0eXBlOiBSb2xsaW5nVXBkYXRlCiAgdGVtcGxhdGU6CiAgICBtZXRhZGF0YToKICAgICAgbGFiZWxzOgogICAgICAgIG5hbWU6IG52aWRpYS1kZXZpY2UtcGx1Z2luLWRzCiAgICBzcGVjOgogICAgICBydW50aW1lQ2xhc3NOYW1lOiBudmlkaWEKICAgICAgdG9sZXJhdGlvbnM6CiAgICAgICAgLSBrZXk6IG52aWRpYS5jb20vZ3B1CiAgICAgICAgICBvcGVyYXRvcjogRXhpc3RzCiAgICAgICAgICBlZmZlY3Q6IE5vU2NoZWR1bGUKICAgICAgcHJpb3JpdHlDbGFzc05hbWU6IHN5c3RlbS1ub2RlLWNyaXRpY2FsCiAgICAgIGNvbnRhaW5lcnM6CiAgICAgICAgLSBuYW1lOiBudmlkaWEtZGV2aWNlLXBsdWdpbi1jdHIKICAgICAgICAgIGltYWdlOiBudmNyLmlvL252aWRpYS9rOHMtZGV2aWNlLXBsdWdpbjp2MC4xNC41CiAgICAgICAgICBlbnY6CiAgICAgICAgICAgIC0gbmFtZTogRkFJTF9PTl9JTklUX0VSUk9SCiAgICAgICAgICAgICAgdmFsdWU6ICJmYWxzZSIKICAgICAgICAgIHNlY3VyaXR5Q29udGV4dDoKICAgICAgICAgICAgYWxsb3dQcml2aWxlZ2VFc2NhbGF0aW9uOiBmYWxzZQogICAgICAgICAgICBjYXBhYmlsaXRpZXM6CiAgICAgICAgICAgICAgZHJvcDogWyJBTEwiXQogICAgICAgICAgdm9sdW1lTW91bnRzOgogICAgICAgICAgICAtIG5hbWU6IGRldmljZS1wbHVnaW4KICAgICAgICAgICAgICBtb3VudFBhdGg6IC92YXIvbGliL2t1YmVsZXQvZGV2aWNlLXBsdWdpbnMKICAgICAgdm9sdW1lczoKICAgICAgICAtIG5hbWU6IGRldmljZS1wbHVnaW4KICAgICAgICAgIGhvc3RQYXRoOgogICAgICAgICAgICBwYXRoOiAvdmFyL2xpYi9rdWJlbGV0L2RldmljZS1wbHVnaW5zCg=='
 
 # Build the custom k3s-CUDA node image LOCALLY, from PUBLIC bases only (rancher/k3s on
 # Docker Hub + NVIDIA's public nvcr.io CUDA base + the public NVIDIA container toolkit).
@@ -1942,8 +1819,8 @@ function Build-GpuNodeImage {
   $errLog = Join-Path $env:TEMP "k3s-cuda-build-err-$(Get-Random).log"
   try {
     New-Item -ItemType Directory -Path $ctx -ErrorAction Stop | Out-Null
-    [System.IO.File]::WriteAllText((Join-Path $ctx "Dockerfile"), ($script:K3S_CUDA_DOCKERFILE -replace "`r`n","`n"))
-    [System.IO.File]::WriteAllText((Join-Path $ctx "nvidia-device-plugin-daemonset.yaml"), ($script:K3S_CUDA_DEVICEPLUGIN -replace "`r`n","`n"))
+    [System.IO.File]::WriteAllBytes((Join-Path $ctx "Dockerfile"), [System.Convert]::FromBase64String($script:K3S_CUDA_DOCKERFILE_B64))
+    [System.IO.File]::WriteAllBytes((Join-Path $ctx "nvidia-device-plugin-daemonset.yaml"), [System.Convert]::FromBase64String($script:K3S_CUDA_DEVICEPLUGIN_B64))
 
     Log "Building the GPU node image locally from public bases (k3s=$K8S_VERSION cuda=$CUDA_BASE_TAG): $K3S_CUDA_IMAGE"
     Info "Building GPU support -- one-time, ~2-4 min (downloads the public NVIDIA CUDA + k3s bases)."

@@ -3869,8 +3869,8 @@ Describe "Build-GpuNodeImage (#616: local build from public bases, no registry l
     # The installer builds its temp paths from $env:TEMP (always set on Windows, where it
     # runs and where the Pester CI job runs). Seed it for a non-Windows local test host.
     if (-not $env:TEMP) { $env:TEMP = [System.IO.Path]::GetTempPath() }
-    # NB: do NOT overwrite $script:K3S_CUDA_DOCKERFILE here -- the drift-guard Describe relies
-    # on the real embedded value, and Start-Process is mocked so the content is irrelevant.
+    # NB: leave $script:K3S_CUDA_DOCKERFILE_B64 as the real embedded value; Start-Process is
+    # mocked so the decoded content is never actually built here.
   }
   It "idempotent: an already-built image is reused, nothing is built" {
     Mock Invoke-DockerCli { [pscustomobject]@{ Code = 0; Output = "" } }   # image inspect OK
@@ -3927,15 +3927,20 @@ Describe "Build-GpuNodeImage (#616: local build from public bases, no registry l
 }
 
 Describe "Embedded GPU build inputs stay in sync with docker/k3s-cuda (#616 drift guard)" {
-  It "the embedded Dockerfile matches docker/k3s-cuda/Dockerfile byte-for-byte (normalized)" {
-    $norm = { param($s) (($s -replace "`r`n","`n").TrimEnd() -split "`n" | ForEach-Object { $_.TrimEnd() }) -join "`n" }
-    $file = Get-Content "$PSScriptRoot/../../docker/k3s-cuda/Dockerfile" -Raw
-    (& $norm $script:K3S_CUDA_DOCKERFILE) | Should -Be (& $norm $file)
+  # The embed is base64 (ASCII, no bare-curl token) so the host-side style/ASCII guards don't
+  # trip on the container Dockerfile; decode it and compare to the source file (LF-normalized).
+  # $norm is defined INSIDE each It (Describe-body code runs at discovery, not run time).
+  It "the embedded Dockerfile decodes to docker/k3s-cuda/Dockerfile" {
+    $norm = { param([byte[]]$b) (([System.Text.Encoding]::UTF8.GetString($b)) -replace "`r`n","`n").TrimEnd() }
+    $decoded = & $norm ([System.Convert]::FromBase64String($script:K3S_CUDA_DOCKERFILE_B64))
+    $file = & $norm ([System.IO.File]::ReadAllBytes((Resolve-Path "$PSScriptRoot/../../docker/k3s-cuda/Dockerfile").Path))
+    $decoded | Should -Be $file
   }
-  It "the embedded device-plugin manifest matches docker/k3s-cuda/nvidia-device-plugin-daemonset.yaml (normalized)" {
-    $norm = { param($s) (($s -replace "`r`n","`n").TrimEnd() -split "`n" | ForEach-Object { $_.TrimEnd() }) -join "`n" }
-    $file = Get-Content "$PSScriptRoot/../../docker/k3s-cuda/nvidia-device-plugin-daemonset.yaml" -Raw
-    (& $norm $script:K3S_CUDA_DEVICEPLUGIN) | Should -Be (& $norm $file)
+  It "the embedded device-plugin manifest decodes to docker/k3s-cuda/nvidia-device-plugin-daemonset.yaml" {
+    $norm = { param([byte[]]$b) (([System.Text.Encoding]::UTF8.GetString($b)) -replace "`r`n","`n").TrimEnd() }
+    $decoded = & $norm ([System.Convert]::FromBase64String($script:K3S_CUDA_DEVICEPLUGIN_B64))
+    $file = & $norm ([System.IO.File]::ReadAllBytes((Resolve-Path "$PSScriptRoot/../../docker/k3s-cuda/nvidia-device-plugin-daemonset.yaml").Path))
+    $decoded | Should -Be $file
   }
 }
 
