@@ -1769,15 +1769,35 @@ function Confirm-DockerGpu {
 # cleanly instead of a cluster-create that dies pulling an unauthorized image. The pull here also
 # pre-loads the image, so k3d cluster-create reuses the local copy (no second pull). Every docker
 # call is bounded via Invoke-DockerCli, so a wedged daemon/registry/proxy can't hang the install.
-function Confirm-GpuImagePullable {
-  $regHost = ($K3S_CUDA_IMAGE -split '/')[0]
+# Pure: which host does `docker login` target for an image ref? Docker treats the first path
+# segment as a REGISTRY only when it has a '.'/':' or is 'localhost'; otherwise the ref is a
+# Docker Hub repo (owner/name) and login must target Docker Hub, NOT the owner segment -- else
+# creds for a private Docker Hub image go to the wrong endpoint and the pull fails (Bugbot).
+function Get-RegistryHost {
+  param([string]$ImageRef)
+  $first = ($ImageRef -split '/')[0]
+  if ($first -match '[.:]' -or $first -eq 'localhost') { return $first }
+  return 'docker.io'
+}
+
+# docker login to the GPU image's registry with the supplied creds. Called BEFORE both the GPU
+# probe (which may pull a mirror-hosted CUDA image) and the node-image pull, so an authenticated
+# mirror/private registry is never hit unauthenticated first -- which would short-circuit a
+# credentialed install to CPU (Bugbot). No-op without creds; idempotent (safe to call twice).
+function Connect-GpuRegistry {
   $regUser = $env:TRACEBLOC_REGISTRY_USERNAME
   $regPass = $env:TRACEBLOC_REGISTRY_PASSWORD
-  if ($regUser -and $regPass) {
-    Log "Authenticating Docker to $regHost for the private GPU node image"
-    $lr = Invoke-DockerCli -DockerArgs @("login", $regHost, "-u", $regUser, "--password-stdin") -TimeoutSec 60 -Stdin $regPass
-    if ($lr.Code -ne 0) { Log "docker login to $regHost did not succeed (exit $($lr.Code))" }
-  }
+  if (-not ($regUser -and $regPass)) { return }
+  $regHost = Get-RegistryHost $K3S_CUDA_IMAGE
+  Log "Authenticating Docker to $regHost for the GPU image"
+  $lr = Invoke-DockerCli -DockerArgs @("login", $regHost, "-u", $regUser, "--password-stdin") -TimeoutSec 60 -Stdin $regPass
+  if ($lr.Code -ne 0) { Log "docker login to $regHost did not succeed (exit $($lr.Code))" }
+}
+
+function Confirm-GpuImagePullable {
+  $regUser = $env:TRACEBLOC_REGISTRY_USERNAME
+  $regPass = $env:TRACEBLOC_REGISTRY_PASSWORD
+  Connect-GpuRegistry   # logs into the correct host (Get-RegistryHost); no-op without creds
   Log "Pulling the GPU node image (verifies access + pre-loads for cluster-create): $K3S_CUDA_IMAGE"
   $pr = Invoke-DockerCli -DockerArgs @("pull", $K3S_CUDA_IMAGE) -TimeoutSec 900
   if ($pr.Code -eq 0) { Log "GPU node image pulled OK"; return $true }
@@ -5296,6 +5316,10 @@ if ($GPU_VENDOR -eq "nvidia" -and $NVIDIA_DRIVER_OK -and ($K8S_VERSION -eq "late
   # they ship a prebuilt image). Either way it's a single function that leaves a specific
   # $GPU_SKIP_REASON on failure. Guarded by the docker-run probe first (-and short-circuits),
   # so we never build/pull if the GPU can't be exposed anyway.
+  # Authenticate to the GPU image's registry FIRST when a mirror/private image is configured,
+  # so the GPU probe's mirror-hosted CUDA pull (and the node-image pull) are already logged in.
+  # No-op without creds / on the default public build path (Bugbot). Runs before the probe.
+  if ($env:TRACEBLOC_K3S_CUDA_IMAGE -or $env:TRACEBLOC_IMAGE_REGISTRY) { Connect-GpuRegistry }
   $gpuImageReady = { if ($env:TRACEBLOC_K3S_CUDA_IMAGE -or $env:TRACEBLOC_IMAGE_REGISTRY) { Confirm-GpuImagePullable } else { Build-GpuNodeImage } }
   if ((Confirm-DockerGpu) -and (& $gpuImageReady)) {
     $K3D_GPU_FLAG = "--gpus=all"

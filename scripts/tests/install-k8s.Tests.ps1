@@ -3861,6 +3861,43 @@ Describe "Confirm-GpuImagePullable (#616 private GPU image, no public package)" 
   }
 }
 
+Describe "Get-RegistryHost (#616 Bugbot: docker login targets the right host)" {
+  It "a qualified registry host is used as-is" {
+    Get-RegistryHost "ghcr.io/tracebloc/k3s-cuda:tag" | Should -Be "ghcr.io"
+  }
+  It "a custom mirror host is used as-is" {
+    Get-RegistryHost "mirror.corp/tracebloc/k3s-cuda:tag" | Should -Be "mirror.corp"
+  }
+  It "a host:port is recognized" {
+    Get-RegistryHost "localhost:5000/gpu-node:tag" | Should -Be "localhost:5000"
+  }
+  It "a bare Docker Hub repo (owner/name) logs into docker.io, NOT the owner (#616 Bugbot)" {
+    Get-RegistryHost "owner/private-image:tag" | Should -Be "docker.io"
+  }
+}
+
+Describe "GPU registry login happens BEFORE the probe (#616 Bugbot: authenticated mirror)" {
+  BeforeAll { $script:LSRC2 = Get-Content "$PSScriptRoot/../install-k8s.ps1" -Raw }
+  It "the gate calls Connect-GpuRegistry before the Confirm-DockerGpu probe for a mirror/custom image" {
+    # Otherwise the mirror-homed CUDA probe pull is unauthenticated -> CPU fallback despite creds.
+    $script:LSRC2 | Should -Match 'if \(\$env:TRACEBLOC_K3S_CUDA_IMAGE -or \$env:TRACEBLOC_IMAGE_REGISTRY\) \{ Connect-GpuRegistry \}[\s\S]{0,400}?\(Confirm-DockerGpu\) -and'
+  }
+  It "Connect-GpuRegistry logs into the host from Get-RegistryHost and no-ops without creds" {
+    $fn = ($script:LSRC2 -split 'function Connect-GpuRegistry')[1]
+    $fn | Should -Match 'if \(-not \(\$regUser -and \$regPass\)\) \{ return \}'
+    $fn | Should -Match 'Get-RegistryHost \$K3S_CUDA_IMAGE'
+    $fn | Should -Match 'Invoke-DockerCli -DockerArgs @\("login", \$regHost'
+  }
+  It "with a bare Docker Hub override, login uses docker.io (behavioural)" {
+    $K3S_CUDA_IMAGE = "owner/private-image:tag"
+    $env:TRACEBLOC_REGISTRY_USERNAME = "bot"; $env:TRACEBLOC_REGISTRY_PASSWORD = "tok"
+    Mock Invoke-DockerCli { [pscustomobject]@{ Code = 0; Output = "" } }
+    Connect-GpuRegistry
+    Should -Invoke Invoke-DockerCli -ParameterFilter { ($DockerArgs -contains "login") -and ($DockerArgs -contains "docker.io") }
+    $env:TRACEBLOC_REGISTRY_USERNAME = $null; $env:TRACEBLOC_REGISTRY_PASSWORD = $null
+  }
+}
+
 Describe "Build-GpuNodeImage (#616: local build from public bases, no registry login)" {
   BeforeEach {
     $K3S_CUDA_IMAGE = "ghcr.io/tracebloc/k3s-cuda:v1.29.4-k3s1-cuda-12.4.1-base-ubuntu22.04"
