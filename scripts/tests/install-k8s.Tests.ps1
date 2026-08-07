@@ -3838,7 +3838,10 @@ Describe "Confirm-GpuImagePullable (#616 private GPU image, no public package)" 
     $script:GPU_SKIP_REASON | Should -Not -Match "credentials"
   }
   It "GPU gate + BOUNDED docker calls (source guard: installer timeout rule)" {
-    $script:GSRC2 | Should -Match '\(Confirm-DockerGpu\) -and \(Confirm-GpuImagePullable\)'
+    # Default = local BUILD (no login); explicit prebuilt image / mirror = PULL. Both gated
+    # behind the docker-run probe, which short-circuits before any build/pull.
+    $script:GSRC2 | Should -Match '\(Confirm-DockerGpu\) -and \(& \$gpuImageReady\)'
+    $script:GSRC2 | Should -Match 'if \(\$env:TRACEBLOC_K3S_CUDA_IMAGE -or \$env:TRACEBLOC_IMAGE_REGISTRY\) \{ Confirm-GpuImagePullable \} else \{ Build-GpuNodeImage \}'
     # every GPU docker call goes through the bounded helper with an explicit timeout
     $script:GSRC2 | Should -Match 'Invoke-DockerCli -DockerArgs @\("run"'
     $script:GSRC2 | Should -Match 'Invoke-DockerCli -DockerArgs @\("login"'
@@ -3847,5 +3850,76 @@ Describe "Confirm-GpuImagePullable (#616 private GPU image, no public package)" 
     $script:GSRC2 | Should -Match 'function Invoke-DockerCli'
     $script:GSRC2 | Should -Match '\$proc.WaitForExit\(\$TimeoutSec \* 1000\)'
     $script:GSRC2 | Should -Match '\$proc.Kill\(\)'
+  }
+}
+
+Describe "Build-GpuNodeImage (#616: local build from public bases, no registry login)" {
+  BeforeEach {
+    $K3S_CUDA_IMAGE = "ghcr.io/tracebloc/k3s-cuda:v1.29.4-k3s1-cuda-12.4.1-base-ubuntu22.04"
+    $K8S_VERSION = "v1.29.4-k3s1"; $CUDA_BASE_TAG = "12.4.1-base-ubuntu22.04"
+    $script:GPU_SKIP_REASON = ""
+    # The installer builds its temp paths from $env:TEMP (always set on Windows, where it
+    # runs and where the Pester CI job runs). Seed it for a non-Windows local test host.
+    if (-not $env:TEMP) { $env:TEMP = [System.IO.Path]::GetTempPath() }
+    # NB: do NOT overwrite $script:K3S_CUDA_DOCKERFILE here -- the drift-guard Describe relies
+    # on the real embedded value, and Start-Process is mocked so the content is irrelevant.
+  }
+  It "idempotent: an already-built image is reused, nothing is built" {
+    Mock Invoke-DockerCli { [pscustomobject]@{ Code = 0; Output = "" } }   # image inspect OK
+    Mock Start-Process { throw "must not build when the image already exists" }
+    Build-GpuNodeImage | Should -BeTrue
+    Should -Not -Invoke Start-Process
+  }
+  It "builds locally with NO docker login and verifies k3s runs -> true" {
+    Mock Invoke-DockerCli {
+      if ($DockerArgs -contains "inspect") { return [pscustomobject]@{ Code = 1; Output = "" } }              # not present yet
+      if ($DockerArgs -contains "run")     { return [pscustomobject]@{ Code = 0; Output = "k3s version v1.29.4+k3s1" } }
+      return [pscustomobject]@{ Code = 0; Output = "" }
+    }
+    Mock Start-Process { [pscustomobject]@{ ExitCode = 0; HasExited = $true } }
+    Mock Wait-ProcessWithDeadline { $true }
+    Build-GpuNodeImage | Should -BeTrue
+    Should -Invoke Start-Process -ParameterFilter { $ArgumentList -match 'build' }
+    # the whole point: a GPU install never logs into a registry
+    Should -Not -Invoke Invoke-DockerCli -ParameterFilter { $DockerArgs -contains "login" }
+    $script:GPU_SKIP_REASON | Should -Be ""
+  }
+  It "build FAILS (non-zero exit) -> CPU fallback with a reason, returns false" {
+    Mock Invoke-DockerCli { if ($DockerArgs -contains "inspect") { [pscustomobject]@{ Code = 1 } } else { [pscustomobject]@{ Code = 0; Output = "k3s version" } } }
+    Mock Start-Process { [pscustomobject]@{ ExitCode = 1; HasExited = $true } }
+    Mock Wait-ProcessWithDeadline { $true }
+    Build-GpuNodeImage | Should -BeFalse
+    $script:GPU_SKIP_REASON | Should -Match "build failed"
+  }
+  It "build TIMES OUT -> CPU fallback with a timeout reason, returns false" {
+    Mock Invoke-DockerCli { [pscustomobject]@{ Code = 1 } }
+    Mock Start-Process { [pscustomobject]@{ ExitCode = 0; HasExited = $false } }
+    Mock Wait-ProcessWithDeadline { $false }
+    Build-GpuNodeImage | Should -BeFalse
+    $script:GPU_SKIP_REASON | Should -Match "timed out"
+  }
+  It "built image can't run k3s (broken rootfs) -> CPU fallback, returns false" {
+    Mock Invoke-DockerCli {
+      if ($DockerArgs -contains "inspect") { return [pscustomobject]@{ Code = 1 } }
+      if ($DockerArgs -contains "run")     { return [pscustomobject]@{ Code = 127; Output = "exec /bin/k3s: no such file" } }
+      return [pscustomobject]@{ Code = 0; Output = "" }
+    }
+    Mock Start-Process { [pscustomobject]@{ ExitCode = 0; HasExited = $true } }
+    Mock Wait-ProcessWithDeadline { $true }
+    Build-GpuNodeImage | Should -BeFalse
+    $script:GPU_SKIP_REASON | Should -Match "didn't run k3s"
+  }
+}
+
+Describe "Embedded GPU build inputs stay in sync with docker/k3s-cuda (#616 drift guard)" {
+  It "the embedded Dockerfile matches docker/k3s-cuda/Dockerfile byte-for-byte (normalized)" {
+    $norm = { param($s) (($s -replace "`r`n","`n").TrimEnd() -split "`n" | ForEach-Object { $_.TrimEnd() }) -join "`n" }
+    $file = Get-Content "$PSScriptRoot/../../docker/k3s-cuda/Dockerfile" -Raw
+    (& $norm $script:K3S_CUDA_DOCKERFILE) | Should -Be (& $norm $file)
+  }
+  It "the embedded device-plugin manifest matches docker/k3s-cuda/nvidia-device-plugin-daemonset.yaml (normalized)" {
+    $norm = { param($s) (($s -replace "`r`n","`n").TrimEnd() -split "`n" | ForEach-Object { $_.TrimEnd() }) -join "`n" }
+    $file = Get-Content "$PSScriptRoot/../../docker/k3s-cuda/nvidia-device-plugin-daemonset.yaml" -Raw
+    (& $norm $script:K3S_CUDA_DEVICEPLUGIN) | Should -Be (& $norm $file)
   }
 }

@@ -1784,6 +1784,223 @@ function Confirm-GpuImagePullable {
   return $false
 }
 
+# Embedded build inputs for the LOCAL GPU node-image build (#616). Kept byte-identical
+# to docker/k3s-cuda/* (the CI build source of truth); a Pester drift test fails if they
+# diverge. Embedded (not fetched) so the single verified installer artifact is self-
+# contained -- same pattern as the in-WSL NCT install script above.
+$script:K3S_CUDA_DOCKERFILE = @'
+# syntax=docker/dockerfile:1.7-labs
+# =============================================================================
+#  Custom k3s node image with NVIDIA GPU support  (tracebloc/client #616)
+# =============================================================================
+# WHY this exists: the stock `rancher/k3s` image is Alpine-based and ships NO
+# NVIDIA container runtime, so GPU pods can never schedule on it — the node
+# advertises 0 nvidia.com/gpu. This image rebuilds the SAME pinned k3s on an
+# NVIDIA CUDA Ubuntu base, installs the NVIDIA Container Toolkit, configures
+# containerd for the `nvidia` runtime, and bakes in the device-plugin +
+# `nvidia` RuntimeClass so the node advertises nvidia.com/gpu on first boot.
+# Based on the official k3d CUDA recipe (https://k3d.io/.../usage/advanced/cuda/).
+#
+# IMPORTANT: K3S_TAG MUST match the installer's K8S_VERSION pin
+# (scripts/spec/facts.env / scripts/lib/common.sh) so a GPU node runs the exact
+# same validated k3s as a normal CPU node. scripts/check-facts.sh enforces this:
+# this ARG, build.sh, and the workflow input default are all checked against
+# facts.env's K8S_VERSION, so a bump can't leave the GPU image tag stale (#547).
+ARG K3S_TAG="v1.29.4-k3s1"
+ARG CUDA_TAG="12.4.1-base-ubuntu22.04"
+
+FROM rancher/k3s:${K3S_TAG} AS k3s
+
+FROM nvcr.io/nvidia/cuda:${CUDA_TAG}
+
+# NVIDIA Container Toolkit, then point containerd at the `nvidia` runtime. The
+# gpg key + apt list are pinned via the keyring the same way the in-WSL toolkit
+# install does (scripts/install-k8s.ps1) so a restricted-network mirror can
+# re-home them consistently. curl carries the TLS floor + bounded timeouts inline
+# (a Dockerfile can't source common.sh's curl_secure()) so a stalled or downgraded
+# connection to nvidia.github.io fails fast instead of hanging the build (house rule).
+RUN export DEBIAN_FRONTEND=noninteractive \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends curl ca-certificates gnupg \
+    && curl -fsSL --tlsv1.2 --connect-timeout 30 --max-time 60 https://nvidia.github.io/libnvidia-container/gpgkey \
+         | gpg --dearmor -o /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg \
+    && curl -fsSL --tlsv1.2 --connect-timeout 30 --max-time 60 https://nvidia.github.io/libnvidia-container/stable/deb/nvidia-container-toolkit.list \
+         | sed 's#deb https://#deb [signed-by=/usr/share/keyrings/nvidia-container-toolkit-keyring.gpg] https://#g' \
+         | tee /etc/apt/sources.list.d/nvidia-container-toolkit.list \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends nvidia-container-toolkit \
+    && nvidia-ctk runtime configure --runtime=containerd \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy the pinned k3s rootfs over the CUDA base. Exclude /bin on the first copy
+# so the Ubuntu userland (curl, apt, nvidia-ctk) survives, then bring in k3s's
+# own /bin (the k3s binary + /bin/aux) explicitly — the official recipe's split.
+COPY --from=k3s --exclude=/bin / /
+COPY --from=k3s /bin /bin
+
+# Auto-deploy the NVIDIA device plugin + `nvidia` RuntimeClass on first server
+# boot (k3s auto-applies manifests dropped here). This is what makes the node
+# advertise nvidia.com/gpu without a separate `kubectl apply`.
+COPY nvidia-device-plugin-daemonset.yaml /var/lib/rancher/k3s/server/manifests/nvidia-device-plugin-daemonset.yaml
+
+VOLUME /var/lib/kubelet
+VOLUME /var/lib/rancher/k3s
+VOLUME /var/lib/cni
+VOLUME /var/log
+
+ENV PATH="$PATH:/bin/aux"
+
+ENTRYPOINT ["/bin/k3s"]
+CMD ["agent"]
+'@
+
+$script:K3S_CUDA_DEVICEPLUGIN = @'
+# =============================================================================
+#  NVIDIA device plugin + `nvidia` RuntimeClass  (tracebloc/client #616)
+# =============================================================================
+# Baked into the custom k3s-CUDA image at
+# /var/lib/rancher/k3s/server/manifests/ so k3s auto-applies it on first server
+# boot — the node then advertises nvidia.com/gpu with no separate kubectl apply.
+#
+# The `nvidia` RuntimeClass is what training pods reference via
+# runtimeClassName: nvidia (the installer sets RUNTIME_CLASS_NAME=nvidia when
+# the GPU is enabled, which jobs-manager threads into every spawned pod).
+#
+# Pinned to NVIDIA k8s-device-plugin v0.14.5 (same version the installer's
+# post-create fallback applies), so the two paths never disagree.
+---
+apiVersion: node.k8s.io/v1
+kind: RuntimeClass
+metadata:
+  name: nvidia
+handler: nvidia
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: nvidia-device-plugin-daemonset
+  namespace: kube-system
+spec:
+  selector:
+    matchLabels:
+      name: nvidia-device-plugin-ds
+  updateStrategy:
+    type: RollingUpdate
+  template:
+    metadata:
+      labels:
+        name: nvidia-device-plugin-ds
+    spec:
+      runtimeClassName: nvidia
+      tolerations:
+        - key: nvidia.com/gpu
+          operator: Exists
+          effect: NoSchedule
+      priorityClassName: system-node-critical
+      containers:
+        - name: nvidia-device-plugin-ctr
+          image: nvcr.io/nvidia/k8s-device-plugin:v0.14.5
+          env:
+            - name: FAIL_ON_INIT_ERROR
+              value: "false"
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: device-plugin
+              mountPath: /var/lib/kubelet/device-plugins
+      volumes:
+        - name: device-plugin
+          hostPath:
+            path: /var/lib/kubelet/device-plugins
+'@
+
+# Build the custom k3s-CUDA node image LOCALLY, from PUBLIC bases only (rancher/k3s on
+# Docker Hub + NVIDIA's public nvcr.io CUDA base + the public NVIDIA container toolkit).
+# This is why a GPU install needs no registry login and no private package: the one
+# installer command builds the node image on the user's own machine (#616). Idempotent
+# (reuses an already-built image), bounded with a visible progress bar (installer rule),
+# and any failure falls back to CPU with a clear reason rather than stranding the install.
+function Build-GpuNodeImage {
+  # Idempotent: a prior run already built it -> reuse, don't rebuild (bounded probe).
+  $have = Invoke-DockerCli -DockerArgs @("image","inspect",$K3S_CUDA_IMAGE) -TimeoutSec 30
+  if ($have.Code -eq 0) { Log "GPU node image already built ($K3S_CUDA_IMAGE) -- reusing"; return $true }
+
+  # BuildKit is required for the Dockerfile's `# syntax=...:1.7-labs` + `COPY --exclude`.
+  # Docker Desktop defaults to BuildKit; set it explicitly so the child build inherits it
+  # (PS 5.1 Start-Process has no -Environment, so we set the process env, which children inherit).
+  $env:DOCKER_BUILDKIT = "1"
+
+  # Write the build context (embedded Dockerfile + device-plugin manifest) to a fresh temp dir.
+  $ctx = Join-Path $env:TEMP ("tracebloc-k3s-cuda-" + [guid]::NewGuid().ToString('N'))
+  New-Item -ItemType Directory -Path $ctx | Out-Null
+  $outLog = Join-Path $env:TEMP "k3s-cuda-build-$(Get-Random).log"
+  $errLog = Join-Path $env:TEMP "k3s-cuda-build-err-$(Get-Random).log"
+  try {
+    [System.IO.File]::WriteAllText((Join-Path $ctx "Dockerfile"), ($script:K3S_CUDA_DOCKERFILE -replace "`r`n","`n"))
+    [System.IO.File]::WriteAllText((Join-Path $ctx "nvidia-device-plugin-daemonset.yaml"), ($script:K3S_CUDA_DEVICEPLUGIN -replace "`r`n","`n"))
+
+    Log "Building the GPU node image locally from public bases (k3s=$K8S_VERSION cuda=$CUDA_BASE_TAG): $K3S_CUDA_IMAGE"
+    Info "Building GPU support -- one-time, ~2-4 min (downloads the public NVIDIA CUDA + k3s bases)."
+
+    $buildArgs = @(
+      "build",
+      "--build-arg", "K3S_TAG=$K8S_VERSION",
+      "--build-arg", "CUDA_TAG=$CUDA_BASE_TAG",
+      "-t", $K3S_CUDA_IMAGE,
+      $ctx
+    )
+    $dExe = (Get-Command docker -ErrorAction SilentlyContinue).Source
+    if (-not $dExe) { $dExe = "docker" }
+    $argStr = ($buildArgs | ForEach-Object { if ($_ -match '[\s]') { "`"$_`"" } else { $_ } }) -join " "
+
+    $proc = $null
+    try {
+      $proc = Start-Process -FilePath $dExe -ArgumentList $argStr -NoNewWindow -PassThru -ErrorAction Stop `
+        -RedirectStandardOutput $outLog -RedirectStandardError $errLog
+    } catch {
+      Log "Couldn't start docker build: $($_.Exception.Message)"
+      $script:GPU_SKIP_REASON = "couldn't start 'docker build' to create the GPU node image -- is Docker running? (running CPU-only)"
+      return $false
+    }
+
+    # Bounded with a heartbeat (progress bar), same pattern as cluster-create. Generous
+    # deadline: the first build downloads a multi-hundred-MB CUDA base + installs packages.
+    $buildMin = 20
+    if ("$env:TB_GPU_BUILD_TIMEOUT_MIN" -match '^\d+$') { $buildMin = [int]$env:TB_GPU_BUILD_TIMEOUT_MIN }
+    if (-not (Wait-ProcessWithDeadline -Process $proc -Deadline (Get-Date).AddMinutes($buildMin) -Message "Building GPU support (one-time, a few minutes)...")) {
+      $tail = @()
+      if (Test-Path $errLog) { $tail = @(Get-Content $errLog -ErrorAction SilentlyContinue | Select-Object -Last 5) }
+      foreach ($line in $tail) { Log "docker build: $line" }
+      $script:GPU_SKIP_REASON = "building the GPU node image timed out -- slow or blocked network reaching the public CUDA/k3s bases (running CPU-only)"
+      return $false
+    }
+    $buildOut = (("$(Get-Content $errLog -Raw -ErrorAction SilentlyContinue)`n$(Get-Content $outLog -Raw -ErrorAction SilentlyContinue)")).Trim()
+    if ($buildOut) { Log "docker build output (tail): $(( $buildOut -split "`n" | Select-Object -Last 8) -join "`n")" }
+    if ($proc.ExitCode -ne 0) {
+      $script:GPU_SKIP_REASON = "the GPU node image build failed (docker build exit $($proc.ExitCode)) -- see the install log; running CPU-only"
+      return $false
+    }
+
+    # Sanity-check the built image actually runs k3s (catches a broken rootfs like the
+    # COPY --exclude mis-parse that once shipped a non-working /bin/k3s). Bounded.
+    $ver = Invoke-DockerCli -DockerArgs @("run","--rm",$K3S_CUDA_IMAGE,"--version") -TimeoutSec 60
+    if ($ver.Code -ne 0 -or $ver.Output -notmatch 'k3s version') {
+      $script:GPU_SKIP_REASON = "the freshly built GPU node image didn't run k3s correctly -- running CPU-only (see the install log)"
+      Log "GPU node image sanity check failed (exit $($ver.Code)): $($ver.Output)"
+      return $false
+    }
+    Ok "GPU node image built locally -- no registry login required."
+    Log "GPU node image built + verified: $K3S_CUDA_IMAGE"
+    return $true
+  } finally {
+    Remove-Item $ctx -Recurse -Force -ErrorAction SilentlyContinue
+    Remove-Item $outLog, $errLog -Force -ErrorAction SilentlyContinue
+  }
+}
+
 # =============================================================================
 #  SYSTEM TOOLS (kubectl, k3d, helm)
 # =============================================================================
@@ -5102,10 +5319,15 @@ Install-NvidiaContainerToolkit
 # can expose the GPU to a container. Enable GPU iff the probe passes -- else CPU fallback
 # (Layer 1) with a clear reason, and never create a --gpus cluster that would fail.
 if ($GPU_VENDOR -eq "nvidia" -and $NVIDIA_DRIVER_OK) {
-  # Enable GPU only if BOTH the Docker GPU passthrough probe passes AND the (private) GPU
-  # node image is pullable. -and short-circuits, so we don't try to pull if the GPU can't
-  # be exposed anyway; either failure leaves a specific $GPU_SKIP_REASON for the summary.
-  if ((Confirm-DockerGpu) -and (Confirm-GpuImagePullable)) {
+  # How we obtain the GPU node image: by DEFAULT we BUILD it locally from public bases so a
+  # GPU install needs no registry login and no private package -- one command, like a CPU
+  # install (#616). If an explicit prebuilt image / mirror is configured (air-gap tenants),
+  # PULL that instead of building (a mirror implies no egress to the public CUDA base, and
+  # they ship a prebuilt image). Either way it's a single function that leaves a specific
+  # $GPU_SKIP_REASON on failure. Guarded by the docker-run probe first (-and short-circuits),
+  # so we never build/pull if the GPU can't be exposed anyway.
+  $gpuImageReady = { if ($env:TRACEBLOC_K3S_CUDA_IMAGE -or $env:TRACEBLOC_IMAGE_REGISTRY) { Confirm-GpuImagePullable } else { Build-GpuNodeImage } }
+  if ((Confirm-DockerGpu) -and (& $gpuImageReady)) {
     $K3D_GPU_FLAG = "--gpus=all"
     $GPU_SKIP_REASON = ""
     # Single physical GPU vs multi-node cluster (Bugbot): k3d's --gpus=all exposes the
