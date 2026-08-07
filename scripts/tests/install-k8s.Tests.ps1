@@ -3695,6 +3695,13 @@ Describe "Confirm-DockerGpu (#616 authoritative GPU gate)" {
     Confirm-DockerGpu | Should -BeTrue
     Should -Invoke Invoke-DockerCli -ParameterFilter { ($DockerArgs -contains "run") -and ($DockerArgs -contains "--gpus") }
   }
+  It "the probe disables the CUDA requirement gate so an older driver isn't a false negative (#616)" {
+    # NVIDIA_REQUIRE_CUDA in the base image would reject the container on a driver older than the
+    # base's CUDA (e.g. 532.x = CUDA 12.1 vs a 12.4 base) -- reading a working GPU as unavailable.
+    Mock Invoke-DockerCli { [pscustomobject]@{ Code = 0; Output = "NVIDIA-SMI 532.10   Driver Version: 532.10   CUDA Version: 12.1" } }
+    Confirm-DockerGpu | Should -BeTrue
+    Should -Invoke Invoke-DockerCli -ParameterFilter { ($DockerArgs -contains "-e") -and ($DockerArgs -contains "NVIDIA_DISABLE_REQUIRE=1") }
+  }
   It "probe exits non-zero: false + a GPU-unavailable reason (not a timeout one)" {
     Mock Invoke-DockerCli { [pscustomobject]@{ Code = 125; Output = "could not select device driver with capabilities: [[gpu]]" } }
     Confirm-DockerGpu | Should -BeFalse
@@ -4079,6 +4086,10 @@ Describe "Embedded GPU build inputs stay in sync with docker/k3s-cuda (#616 drif
     $decoded = & $norm ([System.Convert]::FromBase64String($script:K3S_CUDA_DEVICEPLUGIN_B64))
     $file = & $norm ([System.IO.File]::ReadAllBytes((Resolve-Path "$PSScriptRoot/../../docker/k3s-cuda/nvidia-device-plugin-daemonset.yaml").Path))
     $decoded | Should -Be $file
+  }
+  It "the node image disables the CUDA requirement gate so it boots on an older-but-valid driver (#616)" {
+    $decoded = [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String($script:K3S_CUDA_DOCKERFILE_B64))
+    $decoded | Should -Match 'ENV NVIDIA_DISABLE_REQUIRE=1'
   }
 }
 

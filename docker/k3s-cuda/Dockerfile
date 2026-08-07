@@ -22,6 +22,13 @@ FROM rancher/k3s:${K3S_TAG} AS k3s
 
 FROM nvcr.io/nvidia/cuda:${CUDA_TAG}
 
+# The CUDA base bakes in NVIDIA_REQUIRE_CUDA (e.g. cuda>=12.4); with --gpus the container runtime
+# then REFUSES to start this node on any driver older than that base ("unsatisfied condition:
+# cuda>=12.4"), so a valid GPU on a slightly older driver (e.g. 532.x = CUDA 12.1) can't run the
+# cluster at all. This node runs k3s, not CUDA workloads -- the real CUDA/driver compatibility is
+# enforced per-pod by each TRAINING image -- so disable the requirement gate here (#616).
+ENV NVIDIA_DISABLE_REQUIRE=1
+
 # NVIDIA Container Toolkit, then point containerd at the `nvidia` runtime. The
 # gpg key + apt list are pinned via the keyring the same way the in-WSL toolkit
 # install does (scripts/install-k8s.ps1) so a restricted-network mirror can
