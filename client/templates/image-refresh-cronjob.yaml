@@ -47,6 +47,17 @@ data:
 
     log() { printf '[image-refresh] %s\n' "$*" >&2; }
 
+    # #563: guard a FLAPPING deployment. After this many consecutive FAILED
+    # rollout attempts in a row, STOP re-restarting and flag the deployment for a
+    # human instead of churning ReplicaSets every tick (no auto-resume). The
+    # count is a plain integer in ATTEMPT_KEY that means one thing: consecutive
+    # failed refresh attempts. It resets to 0 only on a genuinely successful
+    # settled rollout. Once a flap is detected it is marked in FLAP_KEY so
+    # a human / monitoring can see it.
+    MAX_REFRESH_ATTEMPTS="${MAX_REFRESH_ATTEMPTS:-3}"
+    ATTEMPT_KEY="tracebloc.io/refresh-attempt"
+    FLAP_KEY="tracebloc.io/refresh-flap-detected"
+
     log "release=$RELEASE_NAME namespace=$RELEASE_NAMESPACE deployment=$DEPLOYMENT_NAME"
     log "  client images: tracebloc/{jobs-manager,pods-monitor} on docker.io under tag=$IMAGE_TAG"
 
@@ -144,10 +155,21 @@ data:
     #
     # Uses jq because kubectl-go's jsonpath parser returns empty for
     # bracket-notation keys that contain `.` or `/` (#156).
+    #
+    # #626: capture kubectl SEPARATELY (not straight into the jq pipe) so a
+    # kubectl failure cannot be masked by jq succeeding on empty stdin — there
+    # is no `pipefail` here, so a bare `kubectl | jq` pipeline would exit 0 even
+    # when kubectl died. Return non-zero on EITHER a kubectl or a jq error.
+    # A caller can then distinguish two cases that must not be conflated:
+    #   * success + empty output  → the annotation is genuinely absent
+    #   * non-zero return         → we could not read it (do NOT assume absent)
     get_annotation() {
       _key="$1"
-      kubectl get deployment -n "$RELEASE_NAMESPACE" "$DEPLOYMENT_NAME" -o json \
-        | jq -r --arg k "$_key" '.metadata.annotations[$k] // empty'
+      # --request-timeout bounds the API call so a wedged apiserver returns a read
+      # ERROR (→ non-zero → fail-closed skip) instead of hanging the tick until
+      # activeDeadlineSeconds while concurrencyPolicy:Forbid blocks later runs.
+      _json="$(kubectl get deployment -n "$RELEASE_NAMESPACE" "$DEPLOYMENT_NAME" -o json --request-timeout=15s)" || return 1
+      printf '%s\n' "$_json" | jq -r --arg k "$_key" '.metadata.annotations[$k] // empty'
     }
 
     # Skip the whole tick if the deployment isn't currently SETTLED (#546). A rollout
@@ -236,18 +258,84 @@ data:
     # freeze the deployment on the old image (next tick sees
     # recorded == latest and skips).
     if [ "$restart_needed" -eq 1 ]; then
-      log "rolling restart of deployment/${DEPLOYMENT_NAME}"
-      kubectl rollout restart -n "$RELEASE_NAMESPACE" "deployment/${DEPLOYMENT_NAME}"
+      # #563: guard a FLAPPING deployment with a plain consecutive-failure
+      # counter. If readiness oscillates (becomes Ready, then crashes after
+      # warmup near the rollout-status timeout) the rollout below fails; under
+      # `set -e` the tick then exits BEFORE the success reset lands, so `recorded`
+      # stays old and every later settled tick re-detects the same change. We
+      # persist an incremented failure count BEFORE the restart so it survives
+      # that early exit; once MAX_REFRESH_ATTEMPTS failures accrue in a row we
+      # STOP restarting and flag the deployment for a human (see below). The
+      # counter resets ONLY on a genuinely successful settled rollout -- there is
+      # deliberately no signature/target-change reset (it was fragile, CID
+      # 3728806670) and no auto-resume (a wedged flap needs manual attention).
+      #
+      # #626: read the counter FAIL-CLOSED. A failed kubectl/jq must NOT collapse
+      # to "0 attempts" (which would fail OPEN past the guard and re-restart a
+      # possibly-flapping deployment). get_annotation returns non-zero on a read
+      # error and zero-with-empty-output only when the annotation is genuinely
+      # absent, so we can tell the two apart. On a read error we cannot confirm
+      # we are clear to restart, so take the SAFE branch: skip this tick.
+      if ! attempt="$(get_annotation "$ATTEMPT_KEY")"; then
+        log "  WARN: could not read ${ATTEMPT_KEY} annotation (kubectl/jq error); cannot confirm the rollout attempt count -- skipping the restart this tick rather than risk churning a flapping deployment. Will retry next tick."
+        log "tick complete"
+        exit 0
+      fi
+      # Empty $attempt means the annotation is genuinely absent (zero prior
+      # failures); anything non-numeric is treated the same, defensively.
+      case "$attempt" in ''|*[!0-9]*) attempt=0 ;; esac
+
+      if [ "$attempt" -ge "$MAX_REFRESH_ATTEMPTS" ]; then
+        # Flap detected: MAX consecutive failed rollouts. STOP restarting and
+        # SURFACE it -- do NOT auto-resume. Reaching this branch means the tick
+        # already passed the top-of-tick settled guard, so a deployment that
+        # keeps landing here is only intermittently settled: a genuine flap.
+        # Churning it further only orphans ReplicaSets. Mark it for a human /
+        # monitoring via FLAP_KEY (value = the failure count) and leave the count
+        # in place; refresh re-arms once someone clears the ${ATTEMPT_KEY}
+        # annotation (or fixes the image so the next rollout settles).
+        log "  WARN: rollout for the current image digest(s) failed ${attempt} time(s) in a row (>= MAX_REFRESH_ATTEMPTS=${MAX_REFRESH_ATTEMPTS}) -- FLAP DETECTED. NOT restarting deployment/${DEPLOYMENT_NAME} (it becomes Ready then crashes; further restarts only churn ReplicaSets). MANUAL ATTENTION NEEDED: investigate the deployment, then clear its ${ATTEMPT_KEY} annotation to re-arm refresh."
+        kubectl annotate deployment -n "$RELEASE_NAMESPACE" "$DEPLOYMENT_NAME" \
+          "${FLAP_KEY}=${attempt}" --overwrite --request-timeout=15s
+        log "tick complete"
+        exit 0
+      fi
+
+      new_count=$(( attempt + 1 ))
+      # Persist the incremented failure count BEFORE restarting so a failed
+      # rollout (which exits the tick under set -e) still advances the counter
+      # for the next tick. A successful rollout resets it below.
+      kubectl annotate deployment -n "$RELEASE_NAMESPACE" "$DEPLOYMENT_NAME" \
+        "${ATTEMPT_KEY}=${new_count}" --overwrite --request-timeout=15s
+
+      log "rolling restart of deployment/${DEPLOYMENT_NAME} (attempt ${new_count}/${MAX_REFRESH_ATTEMPTS})"
+      kubectl rollout restart -n "$RELEASE_NAMESPACE" "deployment/${DEPLOYMENT_NAME}" \
+        --request-timeout=15s
       kubectl rollout status  -n "$RELEASE_NAMESPACE" "deployment/${DEPLOYMENT_NAME}" \
         --timeout="$ROLLOUT_TIMEOUT"
       log "rollout complete"
+      # Success (settled rollout): reset the failure counter and clear any flap
+      # marker so a future change starts fresh. #626 (CID 3729110045): do this in
+      # its OWN bounded annotate BEFORE the digest record below -- do NOT batch it
+      # into the final annotate. Batching made the reset contingent on the digest
+      # write: if that later annotate hung or failed under `set -e`, the rollout
+      # had genuinely succeeded yet `refresh-attempt` stayed elevated, so
+      # subsequent ticks could burn the budget and PERMANENTLY trip the flap
+      # lockout while the CronJob stayed green. A dedicated --request-timeout-bounded
+      # annotate makes the success reset reliable and independent of the digest
+      # write. `key-` removes the annotation (a no-op if absent).
+      kubectl annotate deployment -n "$RELEASE_NAMESPACE" "$DEPLOYMENT_NAME" \
+        "${ATTEMPT_KEY}-" "${FLAP_KEY}-" --overwrite --request-timeout=15s
     fi
 
     if [ -n "$annotate_args" ]; then
       log "updating deployment annotations:$annotate_args"
       # shellcheck disable=SC2086  # word-split annotate_args intentional
+      # #626: bound the digest-record annotate too (was unbounded, the root of CID
+      # 3729110045). Even if this fails, the success reset above has already
+      # landed, so a flap lockout can never stick after a successful rollout.
       kubectl annotate deployment -n "$RELEASE_NAMESPACE" "$DEPLOYMENT_NAME" \
-        $annotate_args --overwrite
+        $annotate_args --overwrite --request-timeout=15s
     fi
 
     log "tick complete"
@@ -323,6 +411,9 @@ spec:
                   value: {{ .Values.env.CLIENT_ENV | default "prod" | quote }}
                 - name: ROLLOUT_TIMEOUT
                   value: {{ .Values.imageRefresh.rolloutTimeout | quote }}
+                # #563: consecutive failed-rollout threshold; stop + flag after this.
+                - name: MAX_REFRESH_ATTEMPTS
+                  value: {{ .Values.imageRefresh.maxRefreshAttempts | default 3 | quote }}
                 # Per-image opt-out flags. Pinning a class-1 image is
                 # signalled by setting `images.<image>.digest` to a non-empty
                 # value — the same signal the deployment uses to switch

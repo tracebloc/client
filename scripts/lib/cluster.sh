@@ -1061,14 +1061,21 @@ _merge_kubeconfig() {
 
 _wait_for_api() {
   local logfile="${LOG_FILE:-/tmp/tracebloc-spin.log}"
-  local attempt max=30
-  log "Waiting for API server to become ready..."
+  # #562: how long to wait for the API to answer, in seconds. The old hard 60s
+  # cap (max=30 × sleep 2) false-failed a slow/proxied laptop that was still
+  # loading images on its first kubectl even though `k3d --wait` had returned.
+  # Default raised to 180s and made env-tunable (TB_API_WAIT_S); re-running the
+  # installer is always safe, so a timeout here is a retryable state in practice.
+  local _budget_s
+  case "${TB_API_WAIT_S:-}" in ''|*[!0-9]*) _budget_s=180 ;; *) _budget_s=$((10#${TB_API_WAIT_S})) ;; esac
+  log "Waiting for API server to become ready (up to ${_budget_s}s)..."
 
   tput civis 2>/dev/null || true
   local frames=('⠋' '⠙' '⠹' '⠸' '⠼' '⠴' '⠦' '⠧' '⠇' '⠏')
   local f=0
-  for attempt in $(seq 1 $max); do
-    # --request-timeout bounds the call itself: the 60s cap here is only re-checked
+  local _deadline=$(( $(date +%s) + _budget_s ))
+  while [[ $(date +%s) -lt $_deadline ]]; do
+    # --request-timeout bounds the call itself: the budget here is only re-checked
     # BETWEEN iterations, so an unbounded cluster-info against an API that accepts
     # the TCP connection but never responds (corporate-proxy intercept of
     # localhost, half-booted apiserver) would hang this gate forever.
@@ -1090,7 +1097,7 @@ _wait_for_api() {
   # multi-file layouts can adapt the sed command themselves.
   local kc="${KUBECONFIG:-${HOME}/.kube/config}"
   kc="${kc%%:*}"
-  error "kubectl cluster-info failed for 60s. Cluster reports running, but the API is unreachable. Possible causes:
+  error "kubectl cluster-info failed for ${_budget_s}s. Cluster reports running, but the API is unreachable. It's safe to re-run this installer; on a slow or proxied machine, extend the wait with TB_API_WAIT_S=<seconds>. Possible causes:
    (a) Docker daemon stopped (run 'docker ps' to verify);
    (b) corporate HTTP/HTTPS proxy intercepting localhost — this installer auto-adds 127.0.0.1/localhost + private ranges to NO_PROXY; a custom proxy wrapper may still override it;
    (c) kubeconfig has 0.0.0.0 — try: sed -i.bak 's|0.0.0.0|127.0.0.1|g' ${kc} && rm ${kc}.bak"

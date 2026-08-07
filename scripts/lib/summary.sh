@@ -24,7 +24,10 @@ _log_cluster_status() {
 # early failure (before the readiness gate, CLIENT_STATE still empty) from a
 # reported outcome, and still print the "check the log / safe to re-run" hint.
 CLIENT_STATE=""
-READY_TIMEOUT="${READY_TIMEOUT:-300}"
+# #562: default raised 300 -> 600 so a slow/proxied laptop pulling several GB of
+# images isn't reported "not connected" while still healthily starting. Kept in
+# sync with scripts/spec/facts.env (check-facts.sh); override via READY_TIMEOUT.
+READY_TIMEOUT="${READY_TIMEOUT:-600}"
 
 wait_for_client_ready() {
   local ns="${TB_NAMESPACE:-default}"

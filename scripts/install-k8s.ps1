@@ -644,7 +644,7 @@ $K3S_CUDA_IMAGE = if ($env:TRACEBLOC_K3S_CUDA_IMAGE) {
     "ghcr.io/$cudaRepo"
   }
 }
-$ReadyTimeout     = if ($env:READY_TIMEOUT) { $env:READY_TIMEOUT } else { "300" }
+$ReadyTimeout     = if ($env:READY_TIMEOUT) { $env:READY_TIMEOUT } else { "600" }   # #562: raised 300 -> 600 for slow/proxied machines; kept in sync with facts.env (check-facts.sh)
 $script:ClientState = "starting"
 
 # =============================================================================

@@ -687,6 +687,19 @@ autoUpgrade:
   successfulJobsHistoryLimit: 3
   failedJobsHistoryLimit: 5
   startingDeadlineSeconds: 600
+  # Hard wall-clock cap on the whole Job (#555). `timeout` above only bounds
+  # `helm upgrade --wait`; the earlier `helm repo add`/`helm repo update`
+  # HTTPS fetches have no timeout of their own, so on a TCP black-hole (a
+  # corporate proxy that drops packets with no RST) the Job can hang
+  # indefinitely — and with concurrencyPolicy: Forbid that hung Job makes
+  # every future tick "still active" and skipped, wedging auto-upgrade until a
+  # human kills the pod. activeDeadlineSeconds is the backstop that fails the
+  # Job instead. This is a FLOOR, not the final value: the template renders
+  # activeDeadlineSeconds as max(this, parsed `timeout` + 300s repo-fetch
+  # headroom), so raising `timeout` above ~10m automatically lifts the deadline
+  # too and a slow-but-healthy upgrade is never killed mid-flight. Raise this
+  # only to give even more slack than the timeout-derived value.
+  activeDeadlineSeconds: 900
   # Pod image: helm CLI only. alpine/helm is small and the tag pins the
   # helm version, so behaviour cannot drift if upstream re-tags.
   image:
@@ -770,6 +783,17 @@ imageRefresh:
   # on bare-metal first-boot can take minutes, and the CronJob slot
   # shouldn't hold all night if a rollout genuinely wedges.
   rolloutTimeout: "10m"
+  # #563: consecutive failed rollout attempts after which the refresh STOPS
+  # re-restarting and flags the deployment for a human. A deployment whose
+  # readiness FLAPS (becomes Ready, then crashes after warmup near the
+  # rollout-status timeout) fails the rollout, so `recorded` never advances and
+  # every later settled tick re-issues the same restart. After this many in-a-row
+  # failures the job stops restarting and annotates a "flap detected" marker
+  # (tracebloc.io/refresh-flap-detected) so monitoring can surface it. There is
+  # no auto-resume: a human investigates and clears the
+  # tracebloc.io/refresh-attempt annotation to re-arm (or a rollout that finally
+  # settles resets the counter on its own).
+  maxRefreshAttempts: 3
   # CronJob spec knobs. Override per-cluster if needed.
   suspend: false
   # Lower history limits than autoUpgrade — this Job runs ~96x/day, the

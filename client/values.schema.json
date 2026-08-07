@@ -737,6 +737,10 @@
           "type": "integer",
           "minimum": 0
         },
+        "activeDeadlineSeconds": {
+          "type": "integer",
+          "minimum": 1
+        },
         "image": {
           "type": "object",
           "required": ["repository", "tag"],
@@ -793,6 +797,11 @@
           "type": "string",
           "pattern": "^[0-9]+(s|m|h)$",
           "description": "Passed to `kubectl rollout status --timeout`. Allow headroom for bare-metal image pull."
+        },
+        "maxRefreshAttempts": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Consecutive failed rollout attempts (same target digest) after which the refresh backs off instead of re-restarting a flapping deployment every tick (#563)."
         },
         "suspend": {
           "type": "boolean",
