@@ -27,15 +27,38 @@ IMAGE="${IMAGE_REGISTRY}/${IMAGE_REPOSITORY}:${TAG}"
 cd "$(dirname "$0")"
 echo "Building ${IMAGE}  (k3s=${K3S_TAG} cuda=${CUDA_TAG} platform=${PLATFORM} push=${PUSH})"
 
-args=(build
-  --build-arg "K3S_TAG=${K3S_TAG}"
-  --build-arg "CUDA_TAG=${CUDA_TAG}"
-  --platform "${PLATFORM}"
-  -t "${IMAGE}"
-  .)
+# Always build + LOAD locally first (even when publishing) so we can VERIFY the rootfs
+# before anything is pushed.
+docker buildx build \
+  --build-arg "K3S_TAG=${K3S_TAG}" \
+  --build-arg "CUDA_TAG=${CUDA_TAG}" \
+  --platform "${PLATFORM}" \
+  -t "${IMAGE}" \
+  --load \
+  .
+
+# Verify the k3s rootfs overlay actually landed at / — a mis-parsed `COPY --exclude` (trailing
+# flag, or wrong path) copies the rootfs under /--exclude=... and lets the build "succeed" with
+# a broken image (#616 Bugbot). Export the flattened image filesystem and assert its structure;
+# no in-image shell is needed (the overlay can replace /bin).
+echo "Verifying rootfs layout..."
+cid="$(docker create "${IMAGE}")"
+rootfs="$(mktemp)"
+docker export "${cid}" | tar -tf - > "${rootfs}"
+docker rm -f "${cid}" >/dev/null
+if grep -qE '(^|/)--exclude' "${rootfs}"; then
+  echo "ERROR: image contains a '--exclude' path — COPY --exclude was mis-parsed as a destination:" >&2
+  grep -E '(^|/)--exclude' "${rootfs}" | head >&2
+  rm -f "${rootfs}"; exit 1
+fi
+if ! grep -qE '^bin/k3s$' "${rootfs}"; then
+  echo "ERROR: /bin/k3s missing — k3s binary not overlaid correctly." >&2
+  rm -f "${rootfs}"; exit 1
+fi
+rm -f "${rootfs}"
+echo "rootfs verify OK"
+
 if [[ "${PUSH}" == "true" ]]; then
-  docker buildx "${args[@]}" --push
-else
-  docker buildx "${args[@]}" --load
+  docker push "${IMAGE}"
 fi
 echo "Done: ${IMAGE}"

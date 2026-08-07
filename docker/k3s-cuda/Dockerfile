@@ -42,10 +42,15 @@ RUN export DEBIAN_FRONTEND=noninteractive \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy the pinned k3s rootfs over the CUDA base. Exclude /bin on the first copy
-# so the Ubuntu userland (curl, apt, nvidia-ctk) survives, then bring in k3s's
-# own /bin (the k3s binary + /bin/aux) explicitly — the official recipe's split.
-COPY --from=k3s / / --exclude=/bin
+# Copy the pinned k3s rootfs over the CUDA base, then bring in k3s's own /bin explicitly.
+# --exclude MUST come BEFORE the src/dest: a TRAILING `--exclude` is parsed as the
+# destination, so the rootfs silently copies to /--exclude=... instead of / — the build
+# "passes" but the image is broken (Bugbot). The exclude path is RELATIVE to the source
+# (`bin`, not `/bin`): excluding k3s's real /bin dir avoids colliding with the CUDA base's
+# merged-/usr /bin symlink (which would else error "cannot copy to non-directory"), while
+# keeping the Ubuntu userland (curl/apt/nvidia-ctk). build.sh verifies the overlay landed
+# at / after the build, so a mis-parse can never publish a broken image.
+COPY --from=k3s --exclude=bin / /
 COPY --from=k3s /bin /bin
 
 # Auto-deploy the NVIDIA device plugin + `nvidia` RuntimeClass on first server
