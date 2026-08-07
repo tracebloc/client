@@ -3689,23 +3689,26 @@ Describe "Local chart path support (#611 — Windows/bash parity)" {
 }
 
 Describe "Confirm-DockerGpu (#616 authoritative GPU gate)" {
-  BeforeEach { $GPU_VENDOR = "nvidia"; $NVIDIA_DRIVER_OK = $true; $CUDA_BASE_TAG = "12.4.1-base-ubuntu22.04" }
+  BeforeEach { $GPU_VENDOR = "nvidia"; $NVIDIA_DRIVER_OK = $true; $CUDA_BASE_TAG = "12.4.1-base-ubuntu22.04"; $script:GPU_SKIP_REASON = "" }
   It "returns true when the bounded docker-run probe succeeds" {
     Mock Invoke-DockerCli { [pscustomobject]@{ Code = 0; Output = "NVIDIA-SMI 550.x   Driver Version: 550.x   CUDA Version: 12.4" } }
     Confirm-DockerGpu | Should -BeTrue
     Should -Invoke Invoke-DockerCli -ParameterFilter { ($DockerArgs -contains "run") -and ($DockerArgs -contains "--gpus") }
   }
-  It "returns false when the probe exits non-zero (no GPU passthrough)" {
+  It "probe exits non-zero: false + a GPU-unavailable reason (not a timeout one)" {
     Mock Invoke-DockerCli { [pscustomobject]@{ Code = 125; Output = "could not select device driver with capabilities: [[gpu]]" } }
     Confirm-DockerGpu | Should -BeFalse
+    $script:GPU_SKIP_REASON | Should -Match "can't expose the GPU"
   }
   It "returns false when output lacks the nvidia-smi banner even on exit 0" {
     Mock Invoke-DockerCli { [pscustomobject]@{ Code = 0; Output = "some unrelated output" } }
     Confirm-DockerGpu | Should -BeFalse
   }
-  It "returns false on a probe TIMEOUT (Code 124) instead of hanging" {
+  It "probe TIMEOUT (Code 124): false + a reason that says timed out, not GPU-unavailable (#616 Bugbot)" {
     Mock Invoke-DockerCli { [pscustomobject]@{ Code = 124; Output = "docker run timed out after 180s" } }
     Confirm-DockerGpu | Should -BeFalse
+    $script:GPU_SKIP_REASON | Should -Match "timed out"
+    $script:GPU_SKIP_REASON | Should -Not -Match "can't expose the GPU"
   }
   It "short-circuits to false without probing when there is no NVIDIA GPU" {
     $GPU_VENDOR = "none"; $NVIDIA_DRIVER_OK = $false
@@ -3732,6 +3735,10 @@ Describe "GPU cluster wiring (#616 source guards)" {
   It "the docker-run probe is the authoritative gate: it sets/clears K3D_GPU_FLAG" {
     $script:GSRC | Should -Match 'Confirm-DockerGpu'
     $script:GSRC | Should -Match '\$K3D_GPU_FLAG = "--gpus=all"'
+  }
+  It "k3s drift detection also recognizes the GPU node image, not just rancher/k3s (#616 Bugbot)" {
+    $script:GSRC | Should -Match "k3sImage -match 'k3s-cuda:"
+    $script:GSRC | Should -Match '\^\(\.\+\?\)-cuda-'
   }
   It "GPU-enabled installs request the nvidia RuntimeClass for spawned pods" {
     $script:GSRC | Should -Match '\$runtimeClass = "nvidia"'
@@ -3767,10 +3774,12 @@ Describe "Confirm-GpuImagePullable (#616 private GPU image, no public package)" 
     Should -Not -Invoke Invoke-DockerCli -ParameterFilter { $DockerArgs -contains "login" }
     $script:GPU_SKIP_REASON | Should -Match "TRACEBLOC_REGISTRY_USERNAME"
   }
-  It "a pull TIMEOUT (Code 124) falls back to CPU, not a hang" {
+  It "a pull TIMEOUT (Code 124) falls back to CPU with a timeout reason, not an auth error (#616 Bugbot)" {
     $env:TRACEBLOC_REGISTRY_USERNAME = "bot"; $env:TRACEBLOC_REGISTRY_PASSWORD = "tok"
     Mock Invoke-DockerCli { if ($DockerArgs -contains "login") { [pscustomobject]@{ Code = 0; Output = "" } } else { [pscustomobject]@{ Code = 124; Output = "docker pull timed out after 900s" } } }
     Confirm-GpuImagePullable | Should -BeFalse
+    $script:GPU_SKIP_REASON | Should -Match "timed out"
+    $script:GPU_SKIP_REASON | Should -Not -Match "credentials"
   }
   It "GPU gate + BOUNDED docker calls (source guard: installer timeout rule)" {
     $script:GSRC2 | Should -Match '\(Confirm-DockerGpu\) -and \(Confirm-GpuImagePullable\)'

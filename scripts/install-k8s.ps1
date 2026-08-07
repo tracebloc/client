@@ -1743,6 +1743,12 @@ function Confirm-DockerGpu {
     return $true
   }
   Log "Docker GPU probe failed (exit $($r.Code)): $($r.Output)"
+  # Set the reason from what ACTUALLY failed (Bugbot): a timeout is not a GPU-unavailable error.
+  if ($r.Code -eq 124) {
+    $script:GPU_SKIP_REASON = "the Docker GPU probe (docker run --gpus all) timed out -- Docker Desktop may be busy, or the CUDA base image pull is blocked"
+  } else {
+    $script:GPU_SKIP_REASON = "Docker Desktop can't expose the GPU to a container (enable GPU support in Docker Desktop, and update the WSL2 NVIDIA driver)"
+  }
   return $false
 }
 
@@ -1767,7 +1773,10 @@ function Confirm-GpuImagePullable {
   $pr = Invoke-DockerCli -DockerArgs @("pull", $K3S_CUDA_IMAGE) -TimeoutSec 900
   if ($pr.Code -eq 0) { Log "GPU node image pulled OK"; return $true }
   Log "GPU node image pull failed (exit $($pr.Code)): $($pr.Output)"
-  if ($regUser -and $regPass) {
+  # Reason reflects the ACTUAL failure (Bugbot): a pull timeout is not an auth error.
+  if ($pr.Code -eq 124) {
+    $script:GPU_SKIP_REASON = "pulling the GPU node image ($K3S_CUDA_IMAGE) timed out -- slow or blocked network/registry"
+  } elseif ($regUser -and $regPass) {
     $script:GPU_SKIP_REASON = "the GPU node image ($K3S_CUDA_IMAGE) couldn't be pulled even with the provided registry credentials -- check they have read access"
   } else {
     $script:GPU_SKIP_REASON = "the GPU node image ($K3S_CUDA_IMAGE) is on a private registry -- set TRACEBLOC_REGISTRY_USERNAME and TRACEBLOC_REGISTRY_PASSWORD (a read:packages token) to enable GPU"
@@ -2624,16 +2633,23 @@ function Test-K3sVersionDrift {
     Log "docker inspect (k3s version) timed out; skipping the version-drift check."
   }
   Remove-Job $job -Force -ErrorAction SilentlyContinue
+  # Extract the running k3s pin from EITHER the stock image (rancher/k3s:<ver>) or the GPU
+  # node image (…/k3s-cuda:<ver>-cuda-<base>) — else a GPU cluster silently escapes the
+  # drift check and stays on an old, unvalidated k3s after a pin bump (Bugbot).
+  $runningK3s = ""
   if ($k3sImage -match 'rancher/k3s:([^@\s]+)') {
     $runningK3s = $Matches[1]
-    if ($runningK3s -ne $K8S_VERSION) {
-      Warn "The existing '$CLUSTER_NAME' cluster runs k3s '$runningK3s', not the validated pin '$K8S_VERSION'."
-      Hint "k3s version is fixed when the cluster is created -- it can't be changed on a running cluster."
-      Hint "This cluster was created by an older/unpinned installer or with K8S_VERSION=latest (#547). To move"
-      Hint "onto the validated version, recreate it:"
-      Hint "  k3d cluster delete $CLUSTER_NAME  (then re-run this installer)."
-      Hint "  (data under HOST_DATA_DIR is kept; recreate rebinds it.)"
-    }
+  } elseif ($k3sImage -match 'k3s-cuda:([^@\s]+)') {
+    $cudaTag = $Matches[1]
+    if ($cudaTag -match '^(.+?)-cuda-') { $runningK3s = $Matches[1] } else { $runningK3s = $cudaTag }
+  }
+  if ($runningK3s -ne "" -and $runningK3s -ne $K8S_VERSION) {
+    Warn "The existing '$CLUSTER_NAME' cluster runs k3s '$runningK3s', not the validated pin '$K8S_VERSION'."
+    Hint "k3s version is fixed when the cluster is created -- it can't be changed on a running cluster."
+    Hint "This cluster was created by an older/unpinned installer or with K8S_VERSION=latest (#547). To move"
+    Hint "onto the validated version, recreate it:"
+    Hint "  k3d cluster delete $CLUSTER_NAME  (then re-run this installer)."
+    Hint "  (data under HOST_DATA_DIR is kept; recreate rebinds it.)"
   }
 }
 
