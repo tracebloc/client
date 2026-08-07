@@ -644,6 +644,15 @@ $K3S_CUDA_IMAGE = if ($env:TRACEBLOC_K3S_CUDA_IMAGE) {
     "ghcr.io/$cudaRepo"
   }
 }
+# The GPU-passthrough probe (Confirm-DockerGpu) runs nvidia-smi in a CUDA container. Re-home
+# that image onto the mirror too when one is set (#585 / Bugbot), so a mirrored/air-gapped
+# GPU install doesn't fall back to CPU just because Docker Hub's nvidia/cuda is blocked.
+$CUDA_PROBE_IMAGE = if ($env:TRACEBLOC_IMAGE_REGISTRY) {
+  $mp = ($env:TRACEBLOC_IMAGE_REGISTRY -replace '^[a-zA-Z][a-zA-Z0-9+.\-]*://', '') -replace '/+$', ''
+  "$mp/nvidia/cuda:$CUDA_BASE_TAG"
+} else {
+  "nvidia/cuda:$CUDA_BASE_TAG"
+}
 $ReadyTimeout     = if ($env:READY_TIMEOUT) { $env:READY_TIMEOUT } else { "600" }   # #562: raised 300 -> 600 for slow/proxied machines; kept in sync with facts.env (check-facts.sh)
 $script:ClientState = "starting"
 
@@ -1735,7 +1744,7 @@ function Invoke-DockerCli {
 
 function Confirm-DockerGpu {
   if ($GPU_VENDOR -ne "nvidia" -or -not $NVIDIA_DRIVER_OK) { return $false }
-  $probeImg = "nvidia/cuda:$CUDA_BASE_TAG"
+  $probeImg = $CUDA_PROBE_IMAGE   # mirror-homed when TRACEBLOC_IMAGE_REGISTRY is set (#585)
   Log "Probing Docker GPU passthrough: docker run --rm --gpus all $probeImg nvidia-smi (bounded)"
   $r = Invoke-DockerCli -DockerArgs @("run", "--rm", "--gpus", "all", $probeImg, "nvidia-smi") -TimeoutSec 180
   if ($r.Code -eq 0 -and $r.Output -match 'NVIDIA-SMI|CUDA Version|Driver Version') {
@@ -4874,15 +4883,27 @@ function Test-Preflight {
     $criticals += @{ label = "k3d download (github.com)";                  url = "https://github.com/" }
     $criticals += @{ label = "k3d assets (objects.githubusercontent.com)"; url = "https://objects.githubusercontent.com/" }
   }
-  # GPU build download chain (#616): the default GPU path builds the k3s-CUDA node image
-  # locally from NVIDIA's public CUDA base (nvcr.io) + the toolkit apt repo (nvidia.github.io).
-  # Probe them ONLY when an NVIDIA GPU is present AND we'll actually build (no prebuilt image /
-  # mirror override) -- so a restricted network is flagged here instead of after a green check.
-  # SOFT (not $hardFail): GPU is optional and degrades to CPU, so a block here shouldn't stop a
-  # CPU-capable install; it just warns that GPU will fall back.
-  if ($GPU_VENDOR -eq "nvidia" -and $NVIDIA_DRIVER_OK -and -not ($env:TRACEBLOC_K3S_CUDA_IMAGE -or $env:TRACEBLOC_IMAGE_REGISTRY)) {
-    $criticals += @{ label = "NVIDIA CUDA base (nvcr.io)";            url = "https://nvcr.io/"; gpuSoft = $true }
-    $criticals += @{ label = "NVIDIA toolkit repo (nvidia.github.io)"; url = "https://nvidia.github.io/"; gpuSoft = $true }
+  # GPU download chain (#616): whichever way we obtain the GPU node image, probe its hosts here
+  # so a restricted network is flagged BEFORE a green check, not after (Bugbot). All SOFT (warn,
+  # not $hardFail): GPU is optional and degrades to CPU, so a block here must not stop a
+  # CPU-capable install -- it just warns that GPU will fall back.
+  if ($GPU_VENDOR -eq "nvidia" -and $NVIDIA_DRIVER_OK) {
+    if (-not ($env:TRACEBLOC_K3S_CUDA_IMAGE -or $env:TRACEBLOC_IMAGE_REGISTRY)) {
+      # DEFAULT: we BUILD locally from NVIDIA's public CUDA base (nvcr.io) + the toolkit apt repo
+      # (nvidia.github.io); the probe's nvidia/cuda comes from Docker Hub, already probed above.
+      $criticals += @{ label = "NVIDIA CUDA base (nvcr.io)";            url = "https://nvcr.io/"; gpuSoft = $true }
+      $criticals += @{ label = "NVIDIA toolkit repo (nvidia.github.io)"; url = "https://nvidia.github.io/"; gpuSoft = $true }
+    } else {
+      # PREBUILT/MIRROR: we PULL the node image AND the probe's CUDA image from the configured
+      # registry (Confirm-GpuImagePullable / the mirror-homed probe). Probe THAT host so an
+      # unreachable custom registry is surfaced at preflight, not at pull time (Bugbot).
+      $gpuHost = ($K3S_CUDA_IMAGE -split '/')[0]
+      # Only a real registry host (contains '.' or ':') -- a bare 'repo/name' is Docker Hub,
+      # already covered by the registry-1.docker.io probe above.
+      if ($gpuHost -match '[.:]') {
+        $criticals += @{ label = "GPU image registry ($gpuHost)"; url = "https://$gpuHost/"; gpuSoft = $true }
+      }
+    }
   }
   $tlsSeen = $false; $cfail = 0; $regBlocked = $false
   foreach ($c in $criticals) {

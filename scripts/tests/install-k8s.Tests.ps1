@@ -3961,16 +3961,30 @@ Describe "GPU download hosts are in the connectivity preflight (#616 Bugbot: nvc
   It "GPU is detected BEFORE preflight so preflight can probe the build hosts" {
     $script:PSRC4 | Should -Match '(?m)^Find-Gpu\s*$[\s\S]{0,300}?^Test-Preflight\s*$'
   }
-  It "nvcr.io + nvidia.github.io are probed only when an NVIDIA GPU is present and we'll build" {
-    $script:PSRC4 | Should -Match '\$GPU_VENDOR -eq "nvidia" -and \$NVIDIA_DRIVER_OK -and -not \(\$env:TRACEBLOC_K3S_CUDA_IMAGE -or \$env:TRACEBLOC_IMAGE_REGISTRY\)'
+  It "the BUILD path probes nvcr.io + nvidia.github.io (no prebuilt image / mirror override)" {
+    $script:PSRC4 | Should -Match 'if \(-not \(\$env:TRACEBLOC_K3S_CUDA_IMAGE -or \$env:TRACEBLOC_IMAGE_REGISTRY\)\)'
     $script:PSRC4 | Should -Match 'url = "https://nvcr\.io/"; gpuSoft = \$true'
     $script:PSRC4 | Should -Match 'url = "https://nvidia\.github\.io/"; gpuSoft = \$true'
+  }
+  It "the PULL path (custom image / mirror) probes the configured GPU registry host (#616 Bugbot)" {
+    # else-branch: an unreachable custom/mirror registry must surface at preflight, not pull time.
+    $script:PSRC4 | Should -Match '\$gpuHost = \(\$K3S_CUDA_IMAGE -split ''/''\)\[0\]'
+    $script:PSRC4 | Should -Match 'label = "GPU image registry \(\$gpuHost\)"; url = "https://\$gpuHost/"; gpuSoft = \$true'
+    # a bare docker.io repo (no host) is skipped -- already covered by the Docker Hub probe
+    $script:PSRC4 | Should -Match "\`$gpuHost -match '\[.:\]'"
   }
   It "a blocked GPU host WARNS (CPU fallback), it does not hard-fail a CPU-capable install" {
     # gpuSoft branch must not increment the fail counters
     $script:PSRC4 | Should -Match 'elseif \(\$c\.gpuSoft\) \{'
     $block = ($script:PSRC4 -split 'elseif \(\$c\.gpuSoft\) \{')[1]
     ($block -split '\}')[0] | Should -Not -Match '\$hardFail\+\+'
+  }
+  It "the GPU passthrough probe uses the mirror-homed CUDA image (#616 Bugbot: mirror path)" {
+    # $CUDA_PROBE_IMAGE re-homes nvidia/cuda onto the mirror when TRACEBLOC_IMAGE_REGISTRY is set,
+    # so a mirrored/air-gapped GPU install doesn't fall back to CPU on a blocked Docker Hub.
+    $script:PSRC4 | Should -Match '\$CUDA_PROBE_IMAGE = if \(\$env:TRACEBLOC_IMAGE_REGISTRY\)'
+    $script:PSRC4 | Should -Match '"\$mp/nvidia/cuda:\$CUDA_BASE_TAG"'
+    $script:PSRC4 | Should -Match '\$probeImg = \$CUDA_PROBE_IMAGE'
   }
 }
 
