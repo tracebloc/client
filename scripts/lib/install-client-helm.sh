@@ -229,9 +229,15 @@ detect_installed_client() {
   #   - pending-*: a client wedged by a killed helm run — plain `helm list` hides
   #     these, so without them a re-run under a DIFFERENT clientId would slip past
   #     the guard and let _reconcile_pending_release mutate another client's release.
+  #   - uninstalling: an interrupted `helm uninstall --wait` (timed out mid-removal)
+  #     leaves the release in `uninstalling`; its resources are still present, so it
+  #     is still an OWNED release. Without this a re-run under a DIFFERENT clientId
+  #     would see "no client here" and mutate/replace resources still being removed
+  #     (Bugbot #619) — the ownership guard must fail CLOSED on it.
   # NOT --all / --uninstalled: an `uninstalled` (keep-history) release is a REMOVED
-  # client and must not count as installed, or it would block a legitimate reinstall.
-  if ! _list="$(helm list -A --deployed --failed --pending 2>/dev/null)"; then
+  # client (removal finished) and must not count as installed, or it would block a
+  # legitimate reinstall — unlike `uninstalling`, whose removal never completed.
+  if ! _list="$(helm list -A --deployed --failed --pending --uninstalling 2>/dev/null)"; then
     INSTALLED_CLIENT_UNKNOWN=1; rm -f "$_gvf"; return 0
   fi
   while read -r _rel _ns; do
@@ -604,16 +610,29 @@ _reconcile_adopted_client() {
   # adopt (no password — the existing credential stands). Find the live client release
   # and reconcile it in place. Enumerate it the same jq-free way the one-per-machine
   # guard does. One client per machine, so take the first.
-  local _rel="" _ns="" _r _n _recovery_reuse=""
-  # Enumerate deployed + failed + pending, all three stated EXPLICITLY: `helm list`
-  # only auto-enables --deployed "if no other status flag is specified", so a lone
-  # --pending would return pending-only and miss a normally-deployed adopted client
-  # (Bugbot #619). --pending keeps a release wedged by a killed helm run discoverable
-  # (plain `helm list` hides those) so _reconcile_pending_release can unwedge it. NOT
+  local _rel="" _ns="" _r _n _recovery_reuse="" _list="" _list_rc=0
+  # Enumerate deployed + failed + pending + uninstalling, all stated EXPLICITLY:
+  # `helm list` only auto-enables --deployed "if no other status flag is specified",
+  # so a lone --pending would return pending-only and miss a normally-deployed
+  # adopted client (Bugbot #619). --pending keeps a release wedged by a killed helm
+  # run discoverable (plain `helm list` hides those) so _reconcile_pending_release
+  # can unwedge it; --uninstalling keeps an interrupted `helm uninstall --wait`
+  # discoverable as the OWNED release it still is (Bugbot #619). NOT
   # --all/--uninstalled: adoption must not pick a stale removed keep-history release.
+  #
+  # Capture the enumeration output AND its exit status explicitly (no process
+  # substitution, which discards helm's rc): a FAILED `helm list` (unreachable API,
+  # kubeconfig glitch) must NOT read as "no live release" and then, with a durable
+  # recovery file present, fall through to `helm upgrade --install` — that fails OPEN
+  # and mutates the cluster without proving which client already exists. On a
+  # non-zero enumeration, FAIL CLOSED: abort rather than reinstall (Bugbot #619).
+  _list="$(helm list -A --deployed --failed --pending --uninstalling 2>/dev/null)" || _list_rc=$?
+  if [[ "$_list_rc" -ne 0 ]]; then
+    error "Could not enumerate existing tracebloc releases (helm list failed); aborting rather than risk overwriting a client that may already be installed. Check cluster/kubeconfig access and re-run."
+  fi
   while read -r _r _n; do
     [[ -n "$_r" ]] && { _rel="$_r"; _ns="$_n"; break; }
-  done < <(helm list -A --deployed --failed --pending 2>/dev/null | awk '/[[:space:]]client-[0-9]/ { print $1, $2 }')
+  done < <(printf '%s\n' "$_list" | awk '/[[:space:]]client-[0-9]/ { print $1, $2 }')
   if [[ -z "$_rel" ]]; then
     # No live release — but a PRIOR adopt reconcile may have uninstalled a wedged
     # pending-install release, failed to reinstall it, and saved the write-only
@@ -649,6 +668,14 @@ _reconcile_adopted_client() {
   # host / R7 orphan) reconcile WITHOUT a heal rather than bail — the existing
   # credential stands.
   local _uuid; _uuid="$(_sanitize_credential "${TRACEBLOC_CLIENT_ID:-}")"
+  # The automated reconcile below applies `--set clientId=$_uuid` to heal an older
+  # adopted release whose preserved values carry a numeric dashboard id (can't
+  # authenticate). Any MANUAL recovery command we print must carry the SAME override,
+  # or an operator following it reinstalls an unauthenticating client even though
+  # helm reports success (Bugbot #619). Empty _uuid (rebuilt host / R7 orphan) => no
+  # override, matching the automated path.
+  local _id_override=""
+  [[ -n "$_uuid" ]] && _id_override=" --set clientId=$_uuid"
 
   # node-local (RFC-0003 Option C) has no hostPath dirs to pre-create.
   [[ "${TB_STORAGE_MODE:-hostpath}" != "node-local" ]] && _ensure_release_dirs "$_ns"
@@ -718,7 +745,7 @@ _reconcile_adopted_client() {
     fi
     warn "Recovery from the saved credential file failed; it is kept (0600) at: $_recovery_reuse"
     hint "Re-run the installer to retry, or reconcile manually:"
-    hint "  helm -n $_ns upgrade --install $_rel $chart_ref -f $_recovery_reuse"
+    hint "  helm -n $_ns upgrade --install $_rel $chart_ref -f $_recovery_reuse$_id_override"
     error "Reconcile of the existing client failed. Check the log for details: ${LOG_FILE:-}"
   fi
 
@@ -753,7 +780,7 @@ _reconcile_adopted_client() {
     if [[ -n "$_recovery" ]]; then
       warn "Reinstall failed after the wedged release was removed. Your client credential is saved (0600) at: $_recovery"
       hint "Re-run the installer to retry, or reconcile manually:"
-      hint "  helm -n $_ns upgrade --install $_rel $chart_ref -f $_recovery"
+      hint "  helm -n $_ns upgrade --install $_rel $chart_ref -f $_recovery$_id_override"
     else
       warn "Reinstall failed after the wedged release was removed and the credential copy could not be saved."
       hint "Re-adopt this client from the dashboard to reissue access."

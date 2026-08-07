@@ -609,6 +609,38 @@ setup() {
   [[ "$output" != *"helm upgrade"* ]] || return 1
 }
 
+@test "install_client_helm: a client wedged in UNINSTALLING (interrupted uninstall) is still caught by the ownership guard (Bugbot #619)" {
+  HOST_DATA_DIR="$BATS_TEST_TMPDIR/data"; mkdir -p "$HOST_DATA_DIR"
+  _ensure_tracebloc_dirs() { :; }
+  _ensure_release_dirs() { :; }
+  _ensure_helm_runnable() { :; }
+  # A timed-out `helm uninstall --wait` leaves the release in `uninstalling` with
+  # its resources still present — it is still an OWNED release. helm's default and
+  # the other status flags EXCLUDE that status, so the guard must enumerate with
+  # --uninstalling; otherwise a re-run under a DIFFERENT clientId reads "no client
+  # here" and overwrites resources still being removed. The mock returns the release
+  # only when --uninstalling is present, so the guard must pass it explicitly.
+  helm() {
+    if [ "$1" = list ]; then
+      case "$*" in
+        *--uninstalling*) printf '%s\n' 'NAME NAMESPACE REVISION UPDATED STATUS CHART APP VERSION' \
+                                        'goingaway default 1 2026-01-01 uninstalling client-1.4.3 1.4.3' ;;
+        *)                printf '%s\n' 'NAME NAMESPACE REVISION UPDATED STATUS CHART APP VERSION' ;;  # other flags hide uninstalling
+      esac
+      return 0
+    fi
+    if [ "$1" = get ] && [ "$2" = values ]; then echo 'clientId: "otherclient"'; return 0; fi
+    record "helm $*"; return 0
+  }
+  verify_credentials() { printf valid; }
+  run install_client_helm <<< $'newclient\nmypw'
+  [ "$status" -ne 0 ] || return 1
+  [[ "$output" == *"already runs the tracebloc client 'otherclient'"* ]] || return 1
+  run mock_calls
+  # The release still being removed must NOT be mutated/overwritten.
+  [[ "$output" != *"helm upgrade"* ]] || return 1
+}
+
 @test "install_client_helm: a DEPLOYED different client is still detected with the status flags (Bugbot #619)" {
   HOST_DATA_DIR="$BATS_TEST_TMPDIR/data"; mkdir -p "$HOST_DATA_DIR"
   _ensure_tracebloc_dirs() { :; }
@@ -1318,6 +1350,9 @@ setup() {
   [ -s "$HOST_DATA_DIR/.tb-adopt-recovery-values.yaml" ] || return 1
   grep -q 'clientPassword' "$HOST_DATA_DIR/.tb-adopt-recovery-values.yaml" || return 1
   [[ "$output" == *".tb-adopt-recovery-values.yaml"* ]] || return 1   # operator told where it is
+  # The printed manual remedy must carry the adopted-UUID clientId override, so
+  # following it reconciles identically to the automated path (Bugbot #619).
+  [[ "$output" == *"--set clientId=0e9db54e-c9c0-4bf3-9ff2-1646da307019"* ]] || return 1
 }
 
 @test "install_cleanup shreds a lingering preserved-values credential file (Bugbot #619)" {
@@ -1367,6 +1402,60 @@ setup() {
   mock_calls | grep -q -- "--values $HOST_DATA_DIR/.tb-adopt-recovery-values.yaml"
   [ ! -e "$HOST_DATA_DIR/.tb-adopt-recovery-values.yaml" ] || return 1     # shredded on success
   [[ "$output" != *"VERIFY_CALLED"* ]] || return 1                         # never prompted/verified
+}
+
+@test "install_client_helm: adopt re-run FAILS CLOSED when release enumeration errors, even with a durable recovery file present (Bugbot #619)" {
+  # A prior interrupted run left the durable credential file — but this time the
+  # release enumeration itself ERRORS (unreachable API / kubeconfig glitch). An
+  # empty result from a FAILED `helm list` must NOT read as "no live release" and
+  # drive a blind reinstall off the recovery file: that fails OPEN and mutates the
+  # cluster without proving which client already exists. It must abort instead, and
+  # the durable file must be left intact for a genuine retry.
+  HOST_DATA_DIR="$BATS_TEST_TMPDIR/data"; mkdir -p "$HOST_DATA_DIR"
+  printf 'clientId: "123"\nclientPassword: "s3cr3t"\n' > "$HOST_DATA_DIR/.tb-adopt-recovery-values.yaml"
+  _ensure_tracebloc_dirs() { :; }
+  _ensure_release_dirs() { :; }
+  _ensure_helm_runnable() { :; }
+  kubectl() { record "kubectl $*"; return 0; }
+  helm() {
+    if [[ "$1" == list ]]; then return 1; fi   # enumeration ERRORS
+    record "helm $*"; return 0
+  }
+  verify_credentials() { echo "VERIFY_CALLED"; printf invalid; }
+  export TRACEBLOC_CLIENT_ADOPTED=1 TRACEBLOC_CLIENT_ID=0e9db54e-c9c0-4bf3-9ff2-1646da307019
+  run install_client_helm </dev/null
+  [ "$status" -ne 0 ] || return 1
+  [[ "$output" == *"Could not enumerate existing tracebloc releases"* ]] || return 1
+  run mock_calls
+  [[ "$output" != *"helm upgrade"* ]] || return 1                          # no mutation
+  # The sole copy of the write-only credential is preserved for a real retry.
+  [ -s "$HOST_DATA_DIR/.tb-adopt-recovery-values.yaml" ] || return 1
+}
+
+@test "install_client_helm: adopt re-run recovery, FAILED reinstall prints a manual command carrying the clientId override (Bugbot #619)" {
+  # When the recovery reinstall fails, the printed MANUAL remedy must reconcile
+  # IDENTICALLY to the automated path — i.e. carry the adopted-UUID clientId
+  # override. Without it an operator following the remedy reinstalls an
+  # unauthenticating client whose preserved values hold a numeric dashboard id,
+  # even though helm reports success.
+  HOST_DATA_DIR="$BATS_TEST_TMPDIR/data"; mkdir -p "$HOST_DATA_DIR"
+  printf 'clientId: "123"\nclientPassword: "s3cr3t"\n' > "$HOST_DATA_DIR/.tb-adopt-recovery-values.yaml"
+  _ensure_tracebloc_dirs() { :; }
+  _ensure_release_dirs() { :; }
+  _ensure_helm_runnable() { :; }
+  kubectl() { record "kubectl $*"; return 0; }
+  helm() {
+    if [[ "$1" == list ]]; then return 0; fi                     # no live release
+    if [[ "$1 $2" == "upgrade --install" ]]; then return 1; fi   # recovery reinstall FAILS
+    record "helm $*"; return 0
+  }
+  verify_credentials() { printf invalid; }
+  export TRACEBLOC_CLIENT_ADOPTED=1 TRACEBLOC_CLIENT_ID=0e9db54e-c9c0-4bf3-9ff2-1646da307019
+  run install_client_helm </dev/null
+  [ "$status" -ne 0 ] || return 1
+  [[ "$output" == *"--set clientId=0e9db54e-c9c0-4bf3-9ff2-1646da307019"* ]] || return 1
+  # The durable credential file is kept (still the only copy) for a retry.
+  [ -s "$HOST_DATA_DIR/.tb-adopt-recovery-values.yaml" ] || return 1
 }
 
 # ── _resolve_mysql_engine (backend#723, decision A2) ────────────────────────
