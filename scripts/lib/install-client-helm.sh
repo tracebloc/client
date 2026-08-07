@@ -604,7 +604,7 @@ _reconcile_adopted_client() {
   # adopt (no password — the existing credential stands). Find the live client release
   # and reconcile it in place. Enumerate it the same jq-free way the one-per-machine
   # guard does. One client per machine, so take the first.
-  local _rel="" _ns="" _r _n
+  local _rel="" _ns="" _r _n _recovery_reuse=""
   # Enumerate deployed + failed + pending, all three stated EXPLICITLY: `helm list`
   # only auto-enables --deployed "if no other status flag is specified", so a lone
   # --pending would return pending-only and miss a normally-deployed adopted client
@@ -615,8 +615,24 @@ _reconcile_adopted_client() {
     [[ -n "$_r" ]] && { _rel="$_r"; _ns="$_n"; break; }
   done < <(helm list -A --deployed --failed --pending 2>/dev/null | awk '/[[:space:]]client-[0-9]/ { print $1, $2 }')
   if [[ -z "$_rel" ]]; then
-    warn "This client is already registered, but no live tracebloc release was found here to reconcile — continuing with a normal connect."
-    return 1
+    # No live release — but a PRIOR adopt reconcile may have uninstalled a wedged
+    # pending-install release, failed to reinstall it, and saved the write-only
+    # clientPassword to the durable recovery file (Bugbot #619). If that file is
+    # here, the release is simply absent (not un-adopted): recover from it by
+    # reinstalling, rather than fall through to the normal connect flow, which
+    # would prompt for a password the adopt path never holds (adopt re-issues
+    # none). The failure message that pointed operators at this file (below) is
+    # now honoured by an actual read here. Uses the same fixed namespace/release
+    # name a fresh adopt install would ($TB_NAMESPACE, set by the caller).
+    _recovery_reuse="${HOST_DATA_DIR:+${HOST_DATA_DIR}/${_TB_ADOPT_RECOVERY_BASENAME}}"
+    if [[ -n "$_recovery_reuse" && -s "$_recovery_reuse" ]]; then
+      _rel="$TB_NAMESPACE"; _ns="$TB_NAMESPACE"
+      info "Recovering this client from the credential saved by a prior interrupted run ($_recovery_reuse)."
+    else
+      _recovery_reuse=""
+      warn "This client is already registered, but no live tracebloc release was found here to reconcile — continuing with a normal connect."
+      return 1
+    fi
   fi
 
   TB_NAMESPACE="$_ns"
@@ -649,8 +665,14 @@ _reconcile_adopted_client() {
   # EXIT/INT/TERM trap can shred it if a signal lands between capture and the rm
   # below — it holds the write-only clientPassword. Same backstop pattern as
   # _PROVISION_CRED_FILE (#838 / Bugbot #619).
-  _TB_PENDING_VALUES_FILE="$(mktemp 2>/dev/null)" || _TB_PENDING_VALUES_FILE="${HOST_DATA_DIR:+${HOST_DATA_DIR}/.tb-pending-values.$$}"
-  _reconcile_pending_release "$_rel" "$_ns" "$_TB_PENDING_VALUES_FILE"
+  # Skip when recovering from the durable file: there is no live release to probe
+  # or unwedge, and the credential already lives in $_recovery_reuse (Bugbot #619).
+  if [[ -z "$_recovery_reuse" ]]; then
+    _TB_PENDING_VALUES_FILE="$(mktemp 2>/dev/null)" || _TB_PENDING_VALUES_FILE="${HOST_DATA_DIR:+${HOST_DATA_DIR}/.tb-pending-values.$$}"
+    _reconcile_pending_release "$_rel" "$_ns" "$_TB_PENDING_VALUES_FILE"
+  else
+    TB_PENDING_REINSTALL=0
+  fi
 
   # Build the reconcile command as an array (bash-3.2 safe for the optional
   # --set). Normal case: in-place upgrade reusing the release's stored values
@@ -661,7 +683,11 @@ _reconcile_adopted_client() {
   # uninstalled, so --reuse-values has nothing to reuse — reinstall with
   # --install from the preserved user values instead (Bugbot #619).
   local _args
-  if [[ "${TB_PENDING_REINSTALL:-0}" == "1" && -s "$_TB_PENDING_VALUES_FILE" ]]; then
+  if [[ -n "$_recovery_reuse" ]]; then
+    # Re-run recovery: the release is gone; reinstall from the durable saved
+    # credential file (Bugbot #619).
+    _args=(upgrade --install "$_rel" "$chart_ref" --namespace "$_ns" --values "$_recovery_reuse")
+  elif [[ "${TB_PENDING_REINSTALL:-0}" == "1" && -s "$_TB_PENDING_VALUES_FILE" ]]; then
     _args=(upgrade --install "$_rel" "$chart_ref" --namespace "$_ns" --values "$_TB_PENDING_VALUES_FILE")
   else
     local _reuse="--reuse-values"
@@ -676,6 +702,26 @@ _reconcile_adopted_client() {
   _helm_timeout_min="$(tb_minutes_or "${TB_HELM_TIMEOUT_MIN:-}" 10)"
   local _helm_rc=0
   spin_cmd_bounded "$(( _helm_timeout_min * 60 ))" "Reconciling the existing client…" helm "${_args[@]}" || _helm_rc=$?
+
+  # Re-run recovery (reinstalled from the durable saved credential file): dispose of
+  # the saved copy on the outcome (Bugbot #619). On success the credential now lives
+  # in the reinstalled release, so the durable copy is redundant — shred it. On
+  # failure KEEP it (still the only copy of the write-only clientPassword) so the
+  # next re-run can retry. Handled here, ahead of the temp-file disposal below,
+  # because this path created no temp file and must not fall into the generic
+  # pending-* wedge remedy (there is no live release to roll back).
+  if [[ -n "$_recovery_reuse" ]]; then
+    if [[ "$_helm_rc" -eq 0 ]]; then
+      rm -f "$_recovery_reuse" 2>/dev/null || true
+      kubectl config set-context --current --namespace "$_ns" >/dev/null 2>&1 || true
+      return 0
+    fi
+    warn "Recovery from the saved credential file failed; it is kept (0600) at: $_recovery_reuse"
+    hint "Re-run the installer to retry, or reconcile manually:"
+    hint "  helm -n $_ns upgrade --install $_rel $chart_ref -f $_recovery_reuse"
+    error "Reconcile of the existing client failed. Check the log for details: ${LOG_FILE:-}"
+  fi
+
   # Dispose of the preserved clientPassword based on the outcome (Bugbot #619).
   # The credential is write-only: for an adopted client the wedged release was its
   # only copy, so we must NOT shred the preserved copy while it's still the only
@@ -695,7 +741,7 @@ _reconcile_adopted_client() {
     # rather than losing the credential for good.
     local _recovery=""
     if [[ -n "${HOST_DATA_DIR:-}" && -s "${_TB_PENDING_VALUES_FILE:-/dev/null}" ]] && mkdir -p "$HOST_DATA_DIR" 2>/dev/null; then
-      _recovery="${HOST_DATA_DIR}/.tb-adopt-recovery-values.yaml"
+      _recovery="${HOST_DATA_DIR}/${_TB_ADOPT_RECOVERY_BASENAME}"
       if cp "$_TB_PENDING_VALUES_FILE" "$_recovery" 2>/dev/null; then
         chmod 600 "$_recovery" 2>/dev/null || true
       else

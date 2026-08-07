@@ -1329,6 +1329,46 @@ setup() {
   [ ! -e "$f" ] || return 1
 }
 
+@test "install_cleanup: in the reinstall window it PERSISTS the sole credential copy to the durable file, not just shred (Bugbot #619)" {
+  # A signal after the wedged release was uninstalled (TB_PENDING_REINSTALL=1) but
+  # before the reinstall re-stored the credential: this temp file is the ONLY copy
+  # of the write-only clientPassword, so the backstop must save it to the durable
+  # 0600 recovery file first, then shred the temp — never lose it.
+  HOST_DATA_DIR="$BATS_TEST_TMPDIR/data"; mkdir -p "$HOST_DATA_DIR"
+  local f; f="$(mktemp)"; printf 'clientId: "123"\nclientPassword: "s3cr3t"\n' > "$f"
+  _TB_PENDING_VALUES_FILE="$f"
+  TB_PENDING_REINSTALL=1
+  install_cleanup >/dev/null 2>&1 || true
+  [ ! -e "$f" ] || return 1                                            # temp still shredded
+  [ -s "$HOST_DATA_DIR/.tb-adopt-recovery-values.yaml" ] || return 1   # but persisted first
+  grep -q 'clientPassword' "$HOST_DATA_DIR/.tb-adopt-recovery-values.yaml" || return 1
+}
+
+@test "install_client_helm: adopt re-run with no live release recovers from the durable saved file, then shreds it (Bugbot #619)" {
+  # A prior run uninstalled the wedged release, failed to reinstall, and saved the
+  # credential durably. On re-run `helm list` finds NO release — the fix must read
+  # the saved file and reinstall from it, not fall through to a password prompt the
+  # adopt path can't answer. On success the saved copy is shredded.
+  HOST_DATA_DIR="$BATS_TEST_TMPDIR/data"; mkdir -p "$HOST_DATA_DIR"
+  printf 'clientId: "123"\nclientPassword: "s3cr3t"\n' > "$HOST_DATA_DIR/.tb-adopt-recovery-values.yaml"
+  _ensure_tracebloc_dirs() { :; }
+  _ensure_release_dirs() { :; }
+  _ensure_helm_runnable() { :; }
+  kubectl() { record "kubectl $*"; return 0; }
+  helm() {
+    if [[ "$1" == list ]]; then return 0; fi   # no release anywhere
+    record "helm $*"; return 0
+  }
+  verify_credentials() { echo "VERIFY_CALLED"; printf invalid; }
+  export TRACEBLOC_CLIENT_ADOPTED=1 TRACEBLOC_CLIENT_ID=0e9db54e-c9c0-4bf3-9ff2-1646da307019
+  run install_client_helm </dev/null
+  [ "$status" -eq 0 ] || return 1
+  mock_calls | grep -q "helm upgrade --install tracebloc"                  # reinstalled from the saved file
+  mock_calls | grep -q -- "--values $HOST_DATA_DIR/.tb-adopt-recovery-values.yaml"
+  [ ! -e "$HOST_DATA_DIR/.tb-adopt-recovery-values.yaml" ] || return 1     # shredded on success
+  [[ "$output" != *"VERIFY_CALLED"* ]] || return 1                         # never prompted/verified
+}
+
 # ── _resolve_mysql_engine (backend#723, decision A2) ────────────────────────
 # Unit tests: the function reads values_file/existing_id/HOST_DATA_DIR/
 # TB_NAMESPACE/ARCH from the caller's scope and sets TB_MYSQL_ENGINE_RESOLVED.

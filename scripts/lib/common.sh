@@ -830,6 +830,14 @@ K3D_GPU_FLAGS=()           # extra flags appended to k3d cluster create
 PM_INSTALL=""
 PM_UPDATE=""
 
+# Durable 0600 file that carries an adopted client's write-only credential across
+# a failed pending-install recovery — the window where the wedged release has been
+# uninstalled but the reinstall has not yet re-stored the credential. Written by
+# _reconcile_adopted_client (and by install_cleanup's signal backstop below), then
+# read back by a re-run of _reconcile_adopted_client. Basename only; the full path
+# is ${HOST_DATA_DIR}/${_TB_ADOPT_RECOVERY_BASENAME} (Bugbot #619).
+_TB_ADOPT_RECOVERY_BASENAME=".tb-adopt-recovery-values.yaml"
+
 # ── Cleanup on exit ──────────────────────────────────────────────────────────
 install_cleanup() {
   local exit_code=$?
@@ -838,11 +846,24 @@ install_cleanup() {
   # _PROVISION_CRED_FILE before minting and removes it after sourcing — this is the
   # backstop for an error/signal between mint and that cleanup.
   [[ -n "${_PROVISION_CRED_FILE:-}" ]] && rm -f "$_PROVISION_CRED_FILE" 2>/dev/null || true
-  # Same backstop for the adopt-path pending-install recovery: _reconcile_adopted_client
+  # Backstop for the adopt-path pending-install recovery: _reconcile_adopted_client
   # stashes the wedged release's user values (incl. the write-only clientPassword) to
-  # this temp file before uninstalling, and clears it after the reconcile — shred it
-  # here if a signal lands in that window (Bugbot #619).
-  [[ -n "${_TB_PENDING_VALUES_FILE:-}" ]] && rm -f "$_TB_PENDING_VALUES_FILE" 2>/dev/null || true
+  # this temp file before uninstalling, and disposes of it after the reconcile.
+  # If a signal lands AFTER the uninstall (TB_PENDING_REINSTALL=1) but before the
+  # reinstall has re-stored the credential, this temp file is the ONLY copy of the
+  # write-only clientPassword — shredding it there would lose the credential for good
+  # (Bugbot #619). In that window, persist it to the durable 0600 recovery file first
+  # (a re-run recovers from it), THEN remove the temp. Outside the window (release
+  # still holds the values) it's redundant, so just shred.
+  if [[ -n "${_TB_PENDING_VALUES_FILE:-}" ]]; then
+    if [[ "${TB_PENDING_REINSTALL:-0}" == "1" && -s "$_TB_PENDING_VALUES_FILE" \
+          && -n "${HOST_DATA_DIR:-}" ]] && mkdir -p "$HOST_DATA_DIR" 2>/dev/null; then
+      if cp "$_TB_PENDING_VALUES_FILE" "${HOST_DATA_DIR}/${_TB_ADOPT_RECOVERY_BASENAME}" 2>/dev/null; then
+        chmod 600 "${HOST_DATA_DIR}/${_TB_ADOPT_RECOVERY_BASENAME}" 2>/dev/null || true
+      fi
+    fi
+    rm -f "$_TB_PENDING_VALUES_FILE" 2>/dev/null || true
+  fi
   if [[ $exit_code -eq 2 ]]; then
     echo ""
     if [[ -n "${TRACEBLOC_DOCKER_FIRST_RUN_EXIT:-}" ]]; then
