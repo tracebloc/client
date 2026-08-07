@@ -2881,11 +2881,26 @@ function Confirm-ReusedClusterGpuCapable {
 # WARN with the recreate remedy -- non-fatal (the client is up), shared with the fast path so a
 # healthy-but-inconsistent cluster is flagged, not silently exited. Bounded inspect.
 function Test-HealthyClusterGpuConsistent {
-  $valuesFile = Join-Path $HOST_DATA_DIR "values.yaml"
-  if (-not (Test-Path $valuesFile)) { return }
-  $vals = Get-Content $valuesFile -Raw -ErrorAction SilentlyContinue
-  # Only relevant when the chart is actually REQUESTING a GPU (non-empty GPU_REQUESTS).
-  if ($vals -notmatch '(?m)^\s*GPU_REQUESTS:\s*"[^"]+"') { return }
+  # Read the GPU request from the LIVE Helm release, not local values.yaml: on the adopted-reuse
+  # path only clientId is healed locally (GPU is reconciled via helm --set-string), so the local
+  # file goes stale and would false-warn or miss the live request (Bugbot). Bounded helm query;
+  # if we can't determine it confidently, skip (never false-warn).
+  $gpuRequested = $false
+  $vjob = Start-Job -InitializationScript $JobInit -ScriptBlock {
+    try {
+      $releases = helm list -A -o json 2>$null | ConvertFrom-Json
+      foreach ($r in $releases) {
+        $v = helm get values $r.name -n $r.namespace -a -o json 2>$null | ConvertFrom-Json
+        if ($v.env.GPU_REQUESTS) { return $true }
+      }
+    } catch {}
+    return $false
+  }
+  if (Wait-JobWithProgress -Job $vjob -TimeoutSec 20 -Message "Checking GPU consistency") {
+    $gpuRequested = [bool](Receive-Job $vjob -ErrorAction SilentlyContinue)
+  }
+  Remove-Job $vjob -Force -ErrorAction SilentlyContinue
+  if (-not $gpuRequested) { return }   # live release doesn't request GPU -> nothing to reconcile
   $img = ""
   $job = Start-Job -InitializationScript $JobInit -ScriptBlock {
     param($n) (docker inspect "k3d-$n-server-0" --format '{{.Config.Image}}' 2>$null | Out-String)
@@ -3277,8 +3292,13 @@ function Confirm-GpuNode {
   $gpuCount = 0
   for ($i = 1; $i -le 18; $i++) {
     Start-Sleep -Seconds 5
-    $alloc = kubectl get node -o jsonpath='{.items[0].status.allocatable}' --request-timeout=5s 2>$null
-    if ($alloc -match '"nvidia\.com/gpu":"?(\d+)') { $gpuCount = [int]$Matches[1]; break }
+    # Target the GPU field DIRECTLY. `jsonpath='{...allocatable}'` on the whole map renders Go's
+    # `map[nvidia.com/gpu:1 ...]` (no JSON quotes), so a regex expecting "nvidia.com/gpu":"1" NEVER
+    # matched -> every healthy GPU read as 0 -> (with the 0-count fallback below) reverted ALL GPU
+    # installs to CPU (Bugbot). Selecting the scalar field returns just its value ("1" or empty),
+    # independent of map-vs-JSON rendering. The key's dot is escaped; the '/' is literal.
+    $alloc = kubectl get nodes -o jsonpath='{.items[*].status.allocatable.nvidia\.com/gpu}' --request-timeout=5s 2>$null
+    if ("$alloc" -match '([1-9]\d*)') { $gpuCount = [int]$Matches[1]; break }
   }
 
   if ($gpuCount -gt 0) {
@@ -5363,6 +5383,9 @@ if ($GPU_VENDOR -eq "nvidia" -and $NVIDIA_DRIVER_OK -and ($K8S_VERSION -eq "late
   # would make a STOCK node (no NVIDIA runtime) while the chart requests nvidia.com/gpu +
   # runtimeClassName=nvidia -- stranding every job (Bugbot). GPU + 'latest' is incompatible, so
   # fall back to CPU here (never build/enable) with a reason that points at the fix.
+  # Install-NvidiaContainerToolkit (above) may ALREADY have set K3D_GPU_FLAG=--gpus=all, so CLEAR
+  # it here -- otherwise a fresh 'latest' cluster gets --gpus=all with a stock (non-CUDA) node.
+  $K3D_GPU_FLAG = ""
   $GPU_SKIP_REASON = "GPU requires the validated pinned k3s (K8S_VERSION), but K8S_VERSION=latest is set -- unset it (use the pinned default) to enable GPU"
   Warn "GPU detected but not enabled: K8S_VERSION=latest is unsupported for GPU (the GPU node image is tied to the validated pin). Running CPU-only."
 } elseif ($GPU_VENDOR -eq "nvidia" -and $NVIDIA_DRIVER_OK) {
@@ -5414,7 +5437,17 @@ New-K3dCluster
 # Only verify the GPU on the node when the plugin actually deployed; a failed/
 # CPU-mode deploy returns $false, so skipping verify avoids a ~90s wait and a
 # contradictory "still initializing" warning for a plugin never applied (Bugbot).
-if (Install-GpuDevicePlugin) { Confirm-GpuNode }
+if (Install-GpuDevicePlugin) {
+  Confirm-GpuNode
+} elseif ($K3D_GPU_FLAG -ne "") {
+  # GPU was requested (flag still set) but the device-plugin setup FAILED -- returning $false here
+  # is a real failure, not the "GPU not requested" early return. Leaving the flag set would make
+  # Install-ClientHelm request nvidia.com/gpu the node can't provide, stranding jobs. Fall back to
+  # CPU (Bugbot). (When GPU wasn't requested the flag is already empty, so this branch no-ops.)
+  $K3D_GPU_FLAG = ""
+  if (-not $GPU_SKIP_REASON) { $GPU_SKIP_REASON = "the NVIDIA device plugin couldn't be set up on the cluster -- running CPU-only" }
+  Warn "GPU device-plugin setup failed -- running CPU-only so jobs aren't stranded Pending."
+}
 
 # -- Step 4/6: install the tracebloc CLI FIRST (#388) — it mints the machine
 # credential in Step 5; a CLI-install hiccup degrades Step 5 to the legacy

@@ -3414,7 +3414,7 @@ Describe "GPU device-plugin failure is recoverable, not fatal (#577)" {
   It "verify runs only when the plugin deployed - CPU-mode skips Confirm-GpuNode (Bugbot)" {
     # A failed/CPU-mode deploy returns $false; the caller must gate Confirm-GpuNode
     # on it so the user doesn't wait ~90s for a plugin that was never applied.
-    $script:PSRCGPU | Should -Match 'if \(Install-GpuDevicePlugin\) \{ Confirm-GpuNode \}'
+    $script:PSRCGPU | Should -Match 'if \(Install-GpuDevicePlugin\) \{\s*Confirm-GpuNode'
     $gpuFn = ($script:PSRCGPU -split "function Install-GpuDevicePlugin")[1]
     $gpuFn | Should -Match 'return \$true'
     $gpuFn | Should -Match 'return \$false'
@@ -3423,7 +3423,7 @@ Describe "GPU device-plugin failure is recoverable, not fatal (#577)" {
     # The existence check and Confirm-GpuNode's node probe must carry a request
     # timeout so a wedged API can't hang before/around the bounded apply (bash parity).
     $script:PSRCGPU | Should -Match 'kubectl get daemonset -n kube-system nvidia-device-plugin-daemonset --request-timeout='
-    $script:PSRCGPU | Should -Match 'kubectl get node -o jsonpath.*--request-timeout='
+    $script:PSRCGPU | Should -Match 'kubectl get nodes? -o jsonpath.*--request-timeout='
   }
 }
 
@@ -3935,7 +3935,7 @@ Describe "Confirm-GpuNode disables GPU when the node never advertises one (#616 
   }
   It "runs before the chart values are written, so the CPU fallback reaches Install-ClientHelm" {
     # main flow: New-K3dCluster (Step 3) -> Confirm-GpuNode -> ... -> Install-ClientHelm (Step 5)
-    $script:GNSRC | Should -Match 'if \(Install-GpuDevicePlugin\) \{ Confirm-GpuNode \}[\s\S]*Install-TraceblocCli'
+    $script:GNSRC | Should -Match 'if \(Install-GpuDevicePlugin\) \{\s*Confirm-GpuNode[\s\S]*Install-TraceblocCli'
   }
 }
 
@@ -4092,6 +4092,23 @@ Describe "GPU + K8S_VERSION=latest is refused (#616 Bugbot: latest bypasses the 
     ($gate -split '\} elseif')[0] | Should -Not -Match '\$K3D_GPU_FLAG = "--gpus=all"'
     ($gate -split '\} elseif')[0] | Should -Match '\$GPU_SKIP_REASON ='
   }
+  It "the latest branch CLEARS any flag Install-NvidiaContainerToolkit already set (#616 Bugbot)" {
+    # Install-NvidiaContainerToolkit runs first and may set K3D_GPU_FLAG=--gpus=all; the latest
+    # branch must clear it or a stock 'latest' cluster gets --gpus=all without the CUDA image.
+    $gate = ($script:LSRC -split 'if \(\$GPU_VENDOR -eq "nvidia" -and \$NVIDIA_DRIVER_OK -and \(\$K8S_VERSION')[1]
+    ($gate -split '\} elseif')[0] | Should -Match '\$K3D_GPU_FLAG = ""'
+  }
+}
+
+Describe "Device-plugin setup failure falls back to CPU (#616 Bugbot: don't leave GPU requests)" {
+  BeforeAll { $script:MSRC = Get-Content "$PSScriptRoot/../install-k8s.ps1" -Raw }
+  It "a failed Install-GpuDevicePlugin (flag still set) clears K3D_GPU_FLAG before values are written" {
+    # if (Install-GpuDevicePlugin) { Confirm-GpuNode } elseif ($K3D_GPU_FLAG -ne "") { clear + reason }
+    $script:MSRC | Should -Match 'if \(Install-GpuDevicePlugin\) \{[\s\S]{0,80}?Confirm-GpuNode[\s\S]{0,80}?\} elseif \(\$K3D_GPU_FLAG -ne ""\) \{'
+    $branch = ($script:MSRC -split '\} elseif \(\$K3D_GPU_FLAG -ne ""\) \{')[1]
+    ($branch -split '\n\}')[0] | Should -Match '\$K3D_GPU_FLAG = ""'
+    ($branch -split '\n\}')[0] | Should -Match 'GPU_SKIP_REASON'
+  }
 }
 
 Describe "GPU download hosts are in the connectivity preflight (#616 Bugbot: nvcr.io coverage)" {
@@ -4130,25 +4147,28 @@ Describe "GPU download hosts are in the connectivity preflight (#616 Bugbot: nvc
 }
 
 Describe "Test-HealthyClusterGpuConsistent (#616 Bugbot: healthy reinstall flags a stale GPU request)" {
-  BeforeEach {
-    $script:CLUSTER_NAME = "tracebloc"
-    $script:HOST_DATA_DIR = Join-Path ([System.IO.Path]::GetTempPath()) ("tb-gpucheck-" + [guid]::NewGuid().ToString('N'))
-    New-Item -ItemType Directory -Path $script:HOST_DATA_DIR -Force | Out-Null
+  BeforeAll { $script:HCSRC = Get-Content "$PSScriptRoot/../install-k8s.ps1" -Raw }
+  It "reads the GPU request from the LIVE Helm release, not the (stale-on-adopt) local values.yaml (#616 Bugbot)" {
+    # bound $fn to just this function's body (up to the next 'function ' definition)
+    $fn = (($script:HCSRC -split 'function Test-HealthyClusterGpuConsistent')[1] -split '\nfunction ')[0]
+    $fn | Should -Match 'helm list -A -o json'
+    $fn | Should -Match 'helm get values \$r\.name -n \$r\.namespace'
+    $fn | Should -Match '\$v\.env\.GPU_REQUESTS'
+    # it must NOT read the local values.yaml file anymore (the comment may still mention it)
+    $fn | Should -Not -Match 'Join-Path \$HOST_DATA_DIR "values\.yaml"'
+    $fn | Should -Not -Match 'Get-Content .*values\.yaml'
   }
-  AfterEach { Remove-Item $script:HOST_DATA_DIR -Recurse -Force -ErrorAction SilentlyContinue }
-  It "no values.yaml: no-op, never inspects the node" {
-    Mock Start-Job { throw "must not inspect when there is no values.yaml" }
-    { Test-HealthyClusterGpuConsistent } | Should -Not -Throw
-    Should -Not -Invoke Start-Job
+  It "returns early when no live release requests GPU, and is bounded" {
+    $fn = (($script:HCSRC -split 'function Test-HealthyClusterGpuConsistent')[1] -split '\nfunction ')[0]
+    $fn | Should -Match 'if \(-not \$gpuRequested\) \{ return \}'
+    $fn | Should -Match 'Wait-JobWithProgress -Job \$vjob -TimeoutSec 20'
   }
-  It "values.yaml requests NO GPU (empty): no-op, never inspects the node" {
-    Set-Content (Join-Path $script:HOST_DATA_DIR "values.yaml") "env:`n  GPU_REQUESTS: `"`"`n  GPU_LIMITS: `"`"`n"
-    Mock Start-Job { throw "must not inspect when GPU is not requested" }
-    { Test-HealthyClusterGpuConsistent } | Should -Not -Throw
-    Should -Not -Invoke Start-Job
+  It "warns with the recreate remedy when the live release wants GPU but the node is CPU-only" {
+    $fn = (($script:HCSRC -split 'function Test-HealthyClusterGpuConsistent')[1] -split '\nfunction ')[0]
+    $fn | Should -Match 'Test-NodeImageGpuCapable -Image \$img -Configured \$K3S_CUDA_IMAGE'
+    $fn | Should -Match 'k3d cluster delete \$CLUSTER_NAME'
   }
   It "the fast path calls it so a healthy-but-inconsistent cluster is flagged (source guard)" {
-    $psrc = Get-Content "$PSScriptRoot/../install-k8s.ps1" -Raw
-    $psrc | Should -Match 'client is healthy -- nothing to do[\s\S]{0,800}?Test-HealthyClusterGpuConsistent'
+    $script:HCSRC | Should -Match 'client is healthy -- nothing to do[\s\S]{0,800}?Test-HealthyClusterGpuConsistent'
   }
 }
