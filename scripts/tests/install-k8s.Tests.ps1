@@ -3744,6 +3744,16 @@ Describe "GPU cluster wiring (#616 source guards)" {
     $script:GSRC | Should -Match '\$runtimeClass = "nvidia"'
     $script:GSRC | Should -Match 'RUNTIME_CLASS_NAME: "\$runtimeClass"'
   }
+  It "enabling the GPU collapses the cluster to a single node so one card isn't double-counted (#616 Bugbot)" {
+    # --gpus=all exposes the SAME host GPU to every k3d node + the device-plugin registers
+    # it per node, so a server+agent cluster advertises 2 GPUs for 1 card. When GPU is on,
+    # AGENTS must be forced to 0 (the block sits under the K3D_GPU_FLAG="--gpus=all" branch).
+    $gate = ($script:GSRC -split '\$K3D_GPU_FLAG = "--gpus=all"')[1]
+    $gate | Should -Match '\$AGENTS = "0"'
+    # an explicit user AGENTS is overridden LOUDLY, not silently
+    $gate | Should -Match 'if \(\$env:AGENTS\)'
+    $gate | Should -Match 'double-count'
+  }
 }
 
 Describe "Confirm-GpuImagePullable (#616 private GPU image, no public package)" {

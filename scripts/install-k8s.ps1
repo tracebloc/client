@@ -5057,6 +5057,21 @@ if ($GPU_VENDOR -eq "nvidia" -and $NVIDIA_DRIVER_OK) {
   if ((Confirm-DockerGpu) -and (Confirm-GpuImagePullable)) {
     $K3D_GPU_FLAG = "--gpus=all"
     $GPU_SKIP_REASON = ""
+    # Single physical GPU vs multi-node cluster (Bugbot): k3d's --gpus=all exposes the
+    # SAME host GPU to EVERY node container, and the baked-in device-plugin DaemonSet
+    # registers it once per node -- so a default server+agent cluster advertises
+    # nvidia.com/gpu=1 on BOTH nodes (2 allocatable for 1 physical card) and can schedule
+    # two jobs onto the same device. Extra k3d nodes live on the same Docker host and all
+    # see the same card, so multi-node can NEVER add real GPUs -- it only double-counts.
+    # Collapse to a single node whenever GPU is on: one node -> the card is advertised once.
+    if ($AGENTS -ne "0") {
+      if ($env:AGENTS) {
+        Warn ("GPU mode forces a single node (agents=0) so the one physical GPU isn't double-counted; overriding your AGENTS=$AGENTS. Extra k3d nodes share the same host GPU and only re-advertise it.")
+      } else {
+        Log "GPU mode: using a single node (agents=0) so the one physical GPU is advertised exactly once."
+      }
+      $AGENTS = "0"
+    }
     Ok "GPU enabled -- cluster will use the custom k3s-CUDA image with --gpus=all"
   } else {
     $K3D_GPU_FLAG = ""
