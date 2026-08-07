@@ -52,7 +52,10 @@ RUN export DEBIAN_FRONTEND=noninteractive \
 # all four (keeping Ubuntu's glibc userland: curl/apt/nvidia-ctk) and overlay only k3s's own
 # /bin (the static k3s + /bin/aux) into /usr/bin via the kept /bin symlink. build.sh verifies
 # the overlay landed correctly after the build, so a mis-parse can never publish a broken image.
-COPY --from=k3s --exclude=bin --exclude=sbin --exclude=lib --exclude=lib64 / /
+COPY --from=k3s \
+     --exclude=bin --exclude=sbin --exclude=lib --exclude=lib32 --exclude=lib64 --exclude=libx32 \
+     --exclude=var/run --exclude=var/lock \
+     / /
 COPY --from=k3s /bin /bin
 
 # Auto-deploy the NVIDIA device plugin + `nvidia` RuntimeClass on first server
