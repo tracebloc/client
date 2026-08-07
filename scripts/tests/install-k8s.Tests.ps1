@@ -4141,8 +4141,11 @@ Describe "Device-plugin setup failure falls back to CPU (#616 Bugbot: don't leav
 
 Describe "GPU download hosts are in the connectivity preflight (#616 Bugbot: nvcr.io coverage)" {
   BeforeAll { $script:PSRC4 = Get-Content "$PSScriptRoot/../install-k8s.ps1" -Raw }
-  It "GPU is detected BEFORE preflight so preflight can probe the build hosts" {
-    $script:PSRC4 | Should -Match '(?m)^Find-Gpu\s*$[\s\S]{0,300}?^Test-Preflight\s*$'
+  It "GPU is detected BEFORE preflight (and before the fast path) so both can use it" {
+    # Find-Gpu now runs before the fast path (so it can decide GPU retry) -- still before Test-Preflight.
+    $script:PSRC4 | Should -Match '(?m)^Find-Gpu\s*$[\s\S]*?^Test-Preflight\s*$'
+    # ordering: the single Find-Gpu call precedes the fast-path health check
+    $script:PSRC4 | Should -Match '(?m)^Find-Gpu\s*$[\s\S]{0,400}?InstallState\.completed'
   }
   It "nvcr.io (device plugin) is probed on BOTH paths whenever GPU is enabled (#616 Bugbot)" {
     # nvcr.io/nvidia/k8s-device-plugin is baked in + pulled at runtime regardless of build/pull.
@@ -4198,5 +4201,28 @@ Describe "Test-HealthyClusterGpuConsistent (#616 Bugbot: healthy reinstall flags
   }
   It "the fast path calls it so a healthy-but-inconsistent cluster is flagged (source guard)" {
     $script:HCSRC | Should -Match 'client is healthy -- nothing to do[\s\S]{0,800}?Test-HealthyClusterGpuConsistent'
+  }
+}
+
+Describe "Fast path retries GPU on a CPU-only cluster (#616 Bugbot: re-run can enable GPU)" {
+  BeforeAll { $script:FPSRC = Get-Content "$PSScriptRoot/../install-k8s.ps1" -Raw }
+  It "the fast-path health check is gated so a GPU-present + CPU-only cluster falls through to retry" {
+    # if GPU present AND the running cluster isn't GPU-capable -> do NOT exit 'nothing to do'.
+    $script:FPSRC | Should -Match 'if \(\$GPU_VENDOR -eq "nvidia" -and \$NVIDIA_DRIVER_OK -and -not \(Test-RunningClusterGpuCapable\)\) \{'
+    # within the fast-path block, the 'nothing to do' exit lives in the else branch (no GPU retry).
+    $fastpath = (($script:FPSRC -split 'Fast path \(#420\)')[1] -split 'Trust an explicit corporate CA')[0]
+    $fastpath | Should -Match '\} else \{[\s\S]*?nothing to do[\s\S]*?exit 0'
+  }
+  It "Test-RunningClusterGpuCapable is bounded and classifies the node via Test-NodeImageGpuCapable" {
+    $fn = (($script:FPSRC -split 'function Test-RunningClusterGpuCapable')[1] -split '\nfunction ')[0]
+    $fn | Should -Match 'Wait-JobWithProgress -Job \$job -TimeoutSec 15'
+    $fn | Should -Match 'Test-NodeImageGpuCapable -Image \$img -Configured \$K3S_CUDA_IMAGE'
+  }
+  It "the image sanity check runs WITH --gpus so it catches a stale image on an older driver (#616 Bugbot)" {
+    # Test-GpuImageRunsK3s must exercise the same requirement gate cluster-create hits (no -e bypass).
+    $fn = (($script:FPSRC -split 'function Test-GpuImageRunsK3s')[1] -split '\nfunction ')[0]
+    $fn | Should -Match '"run", "--rm", "--gpus", "all", \$K3S_CUDA_IMAGE, "--version"'
+    # the actual docker call must NOT bypass the requirement gate (comment may mention it)
+    $fn | Should -Not -Match 'Invoke-DockerCli[^\n]*NVIDIA_DISABLE_REQUIRE'
   }
 }

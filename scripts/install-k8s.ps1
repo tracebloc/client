@@ -1854,7 +1854,12 @@ $script:K3S_CUDA_DEVICEPLUGIN_B64 = 'IyA9PT09PT09PT09PT09PT09PT09PT09PT09PT09PT0
 # `docker run --rm <img> --version` prints "k3s version ..."). Catches a broken rootfs -- e.g.
 # the COPY --exclude mis-parse that once shipped a non-working /bin/k3s. Bounded.
 function Test-GpuImageRunsK3s {
-  $ver = Invoke-DockerCli -DockerArgs @("run", "--rm", $K3S_CUDA_IMAGE, "--version") -TimeoutSec 60
+  # Run WITH --gpus (no -e NVIDIA_DISABLE_REQUIRE) so this exercises the EXACT container-create path
+  # k3d cluster-create will take: a stale image lacking the baked NVIDIA_DISABLE_REQUIRE would fail
+  # the CUDA-requirement gate here on an older driver and drop us to CPU, instead of passing a
+  # no-gpus check and then aborting cluster-create (Bugbot). Our own images bake the bypass, so they
+  # pass on any driver. Callers only reach here after Confirm-DockerGpu, so --gpus is available.
+  $ver = Invoke-DockerCli -DockerArgs @("run", "--rm", "--gpus", "all", $K3S_CUDA_IMAGE, "--version") -TimeoutSec 60
   return ($ver.Code -eq 0 -and $ver.Output -match 'k3s version')
 }
 
@@ -2905,6 +2910,22 @@ function Confirm-ReusedClusterGpuCapable {
 # GPU experiment Pending while the control plane still looks healthy. Detect that mismatch and
 # WARN with the recreate remedy -- non-fatal (the client is up), shared with the fast path so a
 # healthy-but-inconsistent cluster is flagged, not silently exited. Bounded inspect.
+# Fast-path helper: is the RUNNING cluster's server node a GPU-capable (CUDA) image? Lets the
+# fast path decide whether a "healthy" but CPU-only install should fall through to retry GPU
+# rather than exit "nothing to do" (Bugbot). Bounded inspect; unreadable -> treat as NOT capable
+# so we err toward re-checking (a full walk is idempotent) rather than silently skipping GPU.
+function Test-RunningClusterGpuCapable {
+  $img = ""
+  $job = Start-Job -InitializationScript $JobInit -ScriptBlock {
+    param($n) (docker inspect "k3d-$n-server-0" --format '{{.Config.Image}}' 2>$null | Out-String)
+  } -ArgumentList $CLUSTER_NAME
+  if (Wait-JobWithProgress -Job $job -TimeoutSec 15 -Message "Checking cluster GPU capability") {
+    $img = (Receive-Job $job -ErrorAction SilentlyContinue | Out-String).Trim()
+  }
+  Remove-Job $job -Force -ErrorAction SilentlyContinue
+  return (Test-NodeImageGpuCapable -Image $img -Configured $K3S_CUDA_IMAGE)
+}
+
 function Test-HealthyClusterGpuConsistent {
   # Read the GPU request from the LIVE Helm release, not local values.yaml: on the adopted-reuse
   # path only clientId is healed locally (GPU is reconciled via helm --set-string), so the local
@@ -5356,25 +5377,39 @@ Print-Banner
 if ($Resume) { Ok "Resuming the tracebloc install after a reboot..." }
 Print-Roadmap
 
+# Detect the GPU BEFORE the fast path so it can tell whether a "healthy" CPU-only install should
+# still be re-evaluated for GPU (and so preflight's nvcr.io probe is gated on GPU presence). Cheap
+# + pure detection (Get-CimInstance + driver check); sets $GPU_VENDOR / $NVIDIA_DRIVER_OK (#616).
+Find-Gpu
+
 # Fast path (#420): a prior run completed successfully AND the tools + a RUNNING
 # cluster + Ready client workloads are all still here -> nothing to do. Honest: it
 # verifies live health (not just the checkpoint), so a stopped cluster or a down
 # client falls through to the repairing walk. Skipped on -Resume (a resume must
 # finish the interrupted walk).
 if ((-not $Resume) -and $script:InstallState.completed -and (Test-ToolsPresent) -and (Test-ClusterRunning) -and (Test-ClientHealthy)) {
-  Ok "tracebloc is already installed and the client is healthy -- nothing to do."
-  # A healthy cluster can still be running a DRIFTED k3s (the #547 steady state);
-  # this fast-path exits before New-K3dCluster's reuse check, so warn here too
-  # (Bugbot #565). Non-fatal: the client is healthy, we just flag the version.
-  Test-K3sVersionDrift
-  # Same reasoning for GPU: a healthy cluster whose values request GPU but whose node is
-  # CPU-only would strand GPU experiments; flag it here since the fast path skips the gate (Bugbot).
-  Test-HealthyClusterGpuConsistent
-  Hint "Delete $(Get-InstallStatePath) (or set a fresh HOST_DATA_DIR) to force a full reinstall."
-  Unregister-ResumeAfterReboot
-  Log "Already installed and healthy - nothing to do."
-  $script:OutcomeReported = $true
-  exit 0
+  if ($GPU_VENDOR -eq "nvidia" -and $NVIDIA_DRIVER_OK -and -not (Test-RunningClusterGpuCapable)) {
+    # An NVIDIA GPU is present but the running cluster is CPU-only -- do NOT shortcut. The operator
+    # may have just fixed Docker/driver/registry access, and the CPU-fallback guidance explicitly
+    # tells them to re-run to enable GPU; the fast path would otherwise say "nothing to do" and never
+    # retry GPU (Bugbot). Fall through to the full walk, which re-evaluates and can enable GPU.
+    Info "An NVIDIA GPU is present but this cluster is running CPU-only -- re-checking to try enabling GPU."
+    Log "Fast-path skipped: GPU present but running cluster is CPU-only; re-evaluating GPU."
+  } else {
+    Ok "tracebloc is already installed and the client is healthy -- nothing to do."
+    # A healthy cluster can still be running a DRIFTED k3s (the #547 steady state);
+    # this fast-path exits before New-K3dCluster's reuse check, so warn here too
+    # (Bugbot #565). Non-fatal: the client is healthy, we just flag the version.
+    Test-K3sVersionDrift
+    # Same reasoning for GPU: a healthy cluster whose values request GPU but whose node is
+    # CPU-only would strand GPU experiments; flag it here since the fast path skips the gate (Bugbot).
+    Test-HealthyClusterGpuConsistent
+    Hint "Delete $(Get-InstallStatePath) (or set a fresh HOST_DATA_DIR) to force a full reinstall."
+    Unregister-ResumeAfterReboot
+    Log "Already installed and healthy - nothing to do."
+    $script:OutcomeReported = $true
+    exit 0
+  }
 }
 
 # Trust an explicit corporate CA across every host tool (cosign/helm/git) BEFORE the
@@ -5385,9 +5420,7 @@ Set-ToolTrust
 
 # -- Step 1/6: Check system requirements (honest split from tool install, #422) --
 Step 1 $script:INSTALL_STEPS.Count "Checking system requirements"
-# Detect the GPU BEFORE preflight so preflight's connectivity probes can include the
-# GPU build's download hosts (nvcr.io) only when an NVIDIA GPU is actually present (#616).
-Find-Gpu
+# ($GPU_VENDOR / driver were detected before the fast-path so it could decide whether to retry GPU.)
 Test-Preflight
 Enable-VirtualisationFeatures
 
