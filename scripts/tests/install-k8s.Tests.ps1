@@ -3718,6 +3718,52 @@ Describe "Confirm-DockerGpu (#616 authoritative GPU gate)" {
   }
 }
 
+Describe "Test-NodeImageGpuCapable (#616 Bugbot: only the CUDA node can schedule GPU pods)" {
+  It "the custom k3s-CUDA image is GPU-capable" {
+    Test-NodeImageGpuCapable "ghcr.io/tracebloc/k3s-cuda:v1.29.4-k3s1-cuda-12.4.1-base-ubuntu22.04" | Should -BeTrue
+  }
+  It "a mirror-hosted CUDA image is still recognized" {
+    Test-NodeImageGpuCapable "registry.internal/tracebloc/k3s-cuda:v1.29.4-k3s1-cuda-12.4.1-base-ubuntu22.04" | Should -BeTrue
+  }
+  It "a stock rancher/k3s image is NOT GPU-capable (the reused CPU cluster)" {
+    Test-NodeImageGpuCapable "rancher/k3s:v1.29.4-k3s1" | Should -BeFalse
+  }
+  It "an unreadable/empty image fails safe to NOT GPU-capable" {
+    Test-NodeImageGpuCapable "" | Should -BeFalse
+  }
+}
+
+Describe "Confirm-ReusedClusterGpuCapable (#616 Bugbot: reused stock cluster can't adopt GPU)" {
+  It "GPU not requested: no-op that never inspects the node" {
+    $script:K3D_GPU_FLAG = ""
+    Mock Start-Job { throw "must not inspect the node when GPU was not requested" }
+    { Confirm-ReusedClusterGpuCapable } | Should -Not -Throw
+    $script:K3D_GPU_FLAG | Should -Be ""
+    Should -Not -Invoke Start-Job
+  }
+}
+
+Describe "GPU capability is reconciled on cluster REUSE (#616 Bugbot source guards)" {
+  BeforeAll { $script:RSRC = Get-Content "$PSScriptRoot/../install-k8s.ps1" -Raw }
+  It "the reuse path calls Confirm-ReusedClusterGpuCapable so a stock node can't get GPU values" {
+    # It must run inside the reuse branch, after the drift check, before the fresh-create else.
+    $script:RSRC | Should -Match 'Test-K3sVersionDrift[\s\S]{0,500}?Confirm-ReusedClusterGpuCapable[\s\S]{0,400}?\} else \{'
+  }
+  It "the reconciler is bounded (job + deadline) like the other reuse-time docker probes" {
+    $fn = ($script:RSRC -split 'function Confirm-ReusedClusterGpuCapable')[1]
+    $fn | Should -Match 'Start-Job'
+    $fn | Should -Match 'Wait-JobWithProgress -Job \$job -TimeoutSec 15'
+    $fn | Should -Match "Config.Image"
+    $fn | Should -Match 'Test-NodeImageGpuCapable \$img'
+  }
+  It "when the reused node isn't CUDA it clears the flag (CPU fallback) with a recreate reason" {
+    $fn = ($script:RSRC -split 'function Confirm-ReusedClusterGpuCapable')[1]
+    $fn | Should -Match '\$script:K3D_GPU_FLAG = ""'
+    $fn | Should -Match '\$script:GPU_SKIP_REASON = "the existing'
+    $fn | Should -Match 'k3d cluster delete \$CLUSTER_NAME'
+  }
+}
+
 Describe "GPU cluster wiring (#616 source guards)" {
   BeforeAll { $script:GSRC = Get-Content "$PSScriptRoot/../install-k8s.ps1" -Raw }
   It "a GPU cluster uses the custom k3s-CUDA image, a normal one uses stock k3s" {

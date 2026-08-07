@@ -2653,6 +2653,51 @@ function Test-K3sVersionDrift {
   }
 }
 
+# Reconcile the GPU decision against a REUSED cluster (Bugbot). The GPU gate in main
+# enables --gpus=all + GPU chart values BEFORE New-K3dCluster runs, but a re-install
+# reuses an existing cluster in place rather than recreating it. A cluster first built
+# in CPU mode has a stock rancher/k3s node (no NVIDIA runtime, advertises 0 GPUs, no
+# `nvidia` RuntimeClass) -- and the k3s node image is fixed at create time, so GPU
+# can't be bolted onto a running node. Writing GPU values against it would strand every
+# experiment Pending: exactly the #616 failure this PR removes. So when GPU was
+# requested but the reused node isn't the CUDA image, DISABLE GPU for this run (CPU
+# fallback stays safe) and tell the user to recreate the cluster to get GPU. Bounded
+# docker inspect (installer rule) mirrors Test-K3sVersionDrift's job+deadline pattern.
+# Pure: can a reused cluster's server-node image schedule GPU pods? Only the custom
+# k3s-CUDA image (…/k3s-cuda:<tag>) carries the NVIDIA runtime; a stock rancher/k3s
+# image -- or an unreadable/empty one -- cannot, and must fail safe to CPU. Kept pure
+# (string in, bool out) so the decision is unit-testable without a background job.
+function Test-NodeImageGpuCapable {
+  param([string]$Image)
+  return ($Image -match 'k3s-cuda:')
+}
+
+function Confirm-ReusedClusterGpuCapable {
+  # Read + write via $script: so the flag the top-level GPU gate set is the same one we
+  # clear here (and that Install-ClientHelm later reads) regardless of call depth.
+  if ($script:K3D_GPU_FLAG -eq "") { return }   # GPU not requested -> nothing to reconcile
+  $img = ""
+  $job = Start-Job -InitializationScript $JobInit -ScriptBlock {
+    param($n) (docker inspect "k3d-$n-server-0" --format '{{.Config.Image}}' 2>$null | Out-String)
+  } -ArgumentList $CLUSTER_NAME
+  if (Wait-JobWithProgress -Job $job -TimeoutSec 15 -Message "Checking the existing cluster's GPU capability") {
+    $img = (Receive-Job $job -ErrorAction SilentlyContinue | Out-String).Trim()
+  } else {
+    Log "docker inspect (GPU capability) timed out; treating the reused cluster as CPU-only to stay safe."
+  }
+  Remove-Job $job -Force -ErrorAction SilentlyContinue
+  # A CUDA node image can schedule GPU pods; a stock or unreadable one fails safe to CPU
+  # rather than stranding jobs Pending against a node that advertises 0 GPUs.
+  if (Test-NodeImageGpuCapable $img) { return }
+  $script:K3D_GPU_FLAG = ""
+  $script:GPU_SKIP_REASON = "the existing '$CLUSTER_NAME' cluster runs a CPU-only node (GPU capability is fixed when the cluster is created); delete it (k3d cluster delete $CLUSTER_NAME) and re-run to rebuild it with GPU support"
+  Warn "GPU detected, but the existing '$CLUSTER_NAME' cluster is CPU-only -- running CPU mode so jobs aren't stranded Pending."
+  Hint "k3s node image (and thus GPU capability) is fixed when the cluster is created; it can't be added to a running cluster."
+  Hint "To enable GPU on this machine, recreate the cluster:"
+  Hint "  k3d cluster delete $CLUSTER_NAME   (then re-run this installer)"
+  Hint "  (data under HOST_DATA_DIR is kept; recreate rebinds it.)"
+}
+
 function New-K3dCluster {
   Log "Creating k3d cluster: '$CLUSTER_NAME'"
 
@@ -2753,6 +2798,12 @@ function New-K3dCluster {
     # pinned re-runs (#547). Shared with the completed+healthy fast-path in main so
     # a healthy-but-drifted cluster is warned too (Bugbot #565).
     Test-K3sVersionDrift
+
+    # GPU capability is baked into the node image at create time. If GPU was enabled
+    # for this run but we're reusing a cluster whose node is stock CPU k3s, drop back
+    # to CPU here (before the chart values are written) so we never request GPUs the
+    # reused node can't provide -- which would strand every job Pending (Bugbot).
+    Confirm-ReusedClusterGpuCapable
   } else {
     # Creating a FRESH cluster — never silently adopt data an earlier install
     # left under HOST_DATA_DIR (RFC-0003 §4 / #376; parity with the bash guard).
