@@ -1404,6 +1404,84 @@ setup() {
   [[ "$output" != *"VERIFY_CALLED"* ]] || return 1                         # never prompted/verified
 }
 
+@test "install_client_helm: adopt re-run recovery reinstalls into the ORIGINAL namespace/release from the sidecar, not the current TB_NAMESPACE (Bugbot #619)" {
+  # A prior interrupted run saved the credential AND a sidecar recording the
+  # adopted release's original identity (a custom namespace 'munich', NOT the
+  # default). The current env defaults TB_NAMESPACE=tracebloc. Recovery must
+  # reinstall into munich/munich — re-deriving from TB_NAMESPACE would drop the
+  # client into the wrong namespace/release and disconnect its kept PVCs/data.
+  HOST_DATA_DIR="$BATS_TEST_TMPDIR/data"; mkdir -p "$HOST_DATA_DIR"
+  printf 'clientId: "123"\nclientPassword: "s3cr3t"\n' > "$HOST_DATA_DIR/.tb-adopt-recovery-values.yaml"
+  printf 'name=munich\nnamespace=munich\n' > "$HOST_DATA_DIR/.tb-adopt-recovery-meta"
+  _ensure_tracebloc_dirs() { :; }
+  _ensure_release_dirs() { :; }
+  _ensure_helm_runnable() { :; }
+  kubectl() { record "kubectl $*"; return 0; }
+  helm() {
+    if [[ "$1" == list ]]; then return 0; fi   # no release anywhere
+    record "helm $*"; return 0
+  }
+  verify_credentials() { echo "VERIFY_CALLED"; printf invalid; }
+  export TRACEBLOC_CLIENT_ADOPTED=1 TRACEBLOC_CLIENT_ID=0e9db54e-c9c0-4bf3-9ff2-1646da307019
+  run install_client_helm </dev/null
+  [ "$status" -eq 0 ] || return 1
+  mock_calls | grep -q -- "helm upgrade --install munich .* --namespace munich"   # ORIGINAL identity
+  run mock_calls
+  [[ "$output" != *"upgrade --install tracebloc"* ]] || return 1                  # NOT the current TB_NAMESPACE
+  [[ "$output" != *"--namespace tracebloc"* ]] || return 1
+  # Both the credential file and its sidecar are disposed on success.
+  [ ! -e "$HOST_DATA_DIR/.tb-adopt-recovery-values.yaml" ] || return 1
+  [ ! -e "$HOST_DATA_DIR/.tb-adopt-recovery-meta" ] || return 1
+}
+
+@test "install_client_helm: adopt re-run recovery WITHOUT a sidecar falls back to TB_NAMESPACE with a warning (older recovery file — Bugbot #619)" {
+  # A recovery file written before this fix has no identity sidecar. Recovery must
+  # not crash: fall back to the current TB_NAMESPACE and warn the operator to set
+  # it if the client lived in a custom namespace.
+  HOST_DATA_DIR="$BATS_TEST_TMPDIR/data"; mkdir -p "$HOST_DATA_DIR"
+  printf 'clientId: "123"\nclientPassword: "s3cr3t"\n' > "$HOST_DATA_DIR/.tb-adopt-recovery-values.yaml"
+  _ensure_tracebloc_dirs() { :; }
+  _ensure_release_dirs() { :; }
+  _ensure_helm_runnable() { :; }
+  kubectl() { record "kubectl $*"; return 0; }
+  helm() {
+    if [[ "$1" == list ]]; then return 0; fi
+    record "helm $*"; return 0
+  }
+  verify_credentials() { printf invalid; }
+  export TRACEBLOC_CLIENT_ADOPTED=1 TRACEBLOC_CLIENT_ID=0e9db54e-c9c0-4bf3-9ff2-1646da307019
+  run install_client_helm </dev/null
+  [ "$status" -eq 0 ] || return 1
+  mock_calls | grep -q "helm upgrade --install tracebloc"        # fell back to current TB_NAMESPACE
+  [[ "$output" == *"No recovery metadata found"* ]] || return 1  # warned the operator
+}
+
+@test "install_client_helm: adopt + pending-install FAILED reinstall records the ORIGINAL identity in the sidecar (Bugbot #619)" {
+  # The wedged release lives in a custom namespace 'munich'. When the reinstall
+  # fails after the uninstall, the durable credential file AND an identity sidecar
+  # naming munich/munich must both be written, so a later re-run reinstalls there.
+  HOST_DATA_DIR="$BATS_TEST_TMPDIR/data"; mkdir -p "$HOST_DATA_DIR"
+  _ensure_tracebloc_dirs() { :; }
+  _ensure_release_dirs() { :; }
+  _ensure_helm_runnable() { :; }
+  kubectl() { record "kubectl $*"; return 0; }
+  helm() {
+    if [[ "$1" == list ]];               then echo "munich munich 1 now pending-install client-1.8.2 1.8.2"; return 0; fi
+    if [[ "$1" == status ]];             then printf 'info:\n  status: pending-install\n'; return 0; fi
+    if [[ "$1 $2" == "get values" ]];    then printf 'clientId: "123"\nclientPassword: "s3cr3t"\n'; return 0; fi
+    if [[ "$1 $2" == "upgrade --install" ]]; then record "helm $*"; return 1; fi   # reinstall fails
+    record "helm $*"; return 0
+  }
+  verify_credentials() { printf invalid; }
+  export TRACEBLOC_CLIENT_ADOPTED=1 TRACEBLOC_CLIENT_ID=0e9db54e-c9c0-4bf3-9ff2-1646da307019
+  run install_client_helm </dev/null
+  [ "$status" -ne 0 ] || return 1
+  [ -s "$HOST_DATA_DIR/.tb-adopt-recovery-values.yaml" ] || return 1
+  [ -s "$HOST_DATA_DIR/.tb-adopt-recovery-meta" ] || return 1
+  grep -q '^name=munich$'      "$HOST_DATA_DIR/.tb-adopt-recovery-meta" || return 1
+  grep -q '^namespace=munich$' "$HOST_DATA_DIR/.tb-adopt-recovery-meta" || return 1
+}
+
 @test "install_client_helm: adopt re-run FAILS CLOSED when release enumeration errors, even with a durable recovery file present (Bugbot #619)" {
   # A prior interrupted run left the durable credential file — but this time the
   # release enumeration itself ERRORS (unreachable API / kubeconfig glitch). An

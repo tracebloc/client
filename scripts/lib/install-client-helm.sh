@@ -610,7 +610,7 @@ _reconcile_adopted_client() {
   # adopt (no password — the existing credential stands). Find the live client release
   # and reconcile it in place. Enumerate it the same jq-free way the one-per-machine
   # guard does. One client per machine, so take the first.
-  local _rel="" _ns="" _r _n _recovery_reuse="" _list="" _list_rc=0
+  local _rel="" _ns="" _r _n _recovery_reuse="" _list="" _list_rc=0 _meta_rel="" _meta_ns=""
   # Enumerate deployed + failed + pending + uninstalling, all stated EXPLICITLY:
   # `helm list` only auto-enables --deployed "if no other status flag is specified",
   # so a lone --pending would return pending-only and miss a normally-deployed
@@ -641,11 +641,22 @@ _reconcile_adopted_client() {
     # reinstalling, rather than fall through to the normal connect flow, which
     # would prompt for a password the adopt path never holds (adopt re-issues
     # none). The failure message that pointed operators at this file (below) is
-    # now honoured by an actual read here. Uses the same fixed namespace/release
-    # name a fresh adopt install would ($TB_NAMESPACE, set by the caller).
+    # now honoured by an actual read here. The removed release's ORIGINAL name +
+    # namespace were stashed in the sidecar when the credential was saved; reinstall
+    # into THOSE, not into a name/ns re-derived from the current TB_NAMESPACE — a
+    # legacy or custom-namespace client would otherwise be reinstalled into the
+    # wrong namespace/release (Bugbot #619). Fall back to TB_NAMESPACE only when the
+    # sidecar is absent (a recovery file written before this fix), with a warning.
     _recovery_reuse="${HOST_DATA_DIR:+${HOST_DATA_DIR}/${_TB_ADOPT_RECOVERY_BASENAME}}"
     if [[ -n "$_recovery_reuse" && -s "$_recovery_reuse" ]]; then
-      _rel="$TB_NAMESPACE"; _ns="$TB_NAMESPACE"
+      _meta_rel="$(_read_adopt_recovery_meta_field name)"
+      _meta_ns="$(_read_adopt_recovery_meta_field namespace)"
+      if [[ -n "$_meta_rel" && -n "$_meta_ns" ]]; then
+        _rel="$_meta_rel"; _ns="$_meta_ns"
+      else
+        _rel="$TB_NAMESPACE"; _ns="$TB_NAMESPACE"
+        warn "No recovery metadata found; assuming release name and namespace '$TB_NAMESPACE'. If this client was installed into a custom namespace, re-run with TB_NAMESPACE set to that namespace."
+      fi
       info "Recovering this client from the credential saved by a prior interrupted run ($_recovery_reuse)."
     else
       _recovery_reuse=""
@@ -655,6 +666,11 @@ _reconcile_adopted_client() {
   fi
 
   TB_NAMESPACE="$_ns"
+  # Record the adopted release's ORIGINAL identity in module vars (NOT local) so
+  # install_cleanup's signal backstop can stash the SAME name/namespace into the
+  # recovery sidecar if a signal lands mid-recovery — a re-run then reinstalls into
+  # this identity, not one re-derived from the current TB_NAMESPACE (Bugbot #619).
+  _TB_ADOPT_REL="$_rel"; _TB_ADOPT_NS="$_ns"
   info "This machine already runs a tracebloc client — reconciling '${_rel}' (namespace '${_ns}') in place."
 
   _ensure_helm_runnable
@@ -740,6 +756,9 @@ _reconcile_adopted_client() {
   if [[ -n "$_recovery_reuse" ]]; then
     if [[ "$_helm_rc" -eq 0 ]]; then
       rm -f "$_recovery_reuse" 2>/dev/null || true
+      # Drop the identity sidecar too — it is only meaningful paired with the
+      # credential file we just shredded (Bugbot #619).
+      [[ -n "${HOST_DATA_DIR:-}" ]] && rm -f "${HOST_DATA_DIR}/${_TB_ADOPT_RECOVERY_META_BASENAME}" 2>/dev/null || true
       kubectl config set-context --current --namespace "$_ns" >/dev/null 2>&1 || true
       return 0
     fi
@@ -771,6 +790,10 @@ _reconcile_adopted_client() {
       _recovery="${HOST_DATA_DIR}/${_TB_ADOPT_RECOVERY_BASENAME}"
       if cp "$_TB_PENDING_VALUES_FILE" "$_recovery" 2>/dev/null; then
         chmod 600 "$_recovery" 2>/dev/null || true
+        # Persist the ORIGINAL release identity next to the credential so a re-run
+        # reinstalls into THIS namespace/release, not one re-derived from the
+        # current TB_NAMESPACE (Bugbot #619).
+        _write_adopt_recovery_meta "$_rel" "$_ns"
       else
         _recovery=""
       fi

@@ -838,6 +838,49 @@ PM_UPDATE=""
 # is ${HOST_DATA_DIR}/${_TB_ADOPT_RECOVERY_BASENAME} (Bugbot #619).
 _TB_ADOPT_RECOVERY_BASENAME=".tb-adopt-recovery-values.yaml"
 
+# Companion metadata sidecar for the durable recovery file: records the adopted
+# release's ORIGINAL identity (release name + namespace) at the moment its
+# credential is stashed. A re-run reinstalls into THOSE — not into a name/ns
+# re-derived from the current TB_NAMESPACE, which would drop a legacy or
+# custom-namespace client into the wrong namespace/release (or one that doesn't
+# exist), disconnecting its kept PVCs and data (Bugbot #619). Written next to the
+# values file by _reconcile_adopted_client and install_cleanup's signal backstop;
+# read back on the recovery path. Paired with (and disposed alongside) the values
+# file; when absent — a recovery file written before this fix — the reader falls
+# back to current env. Basename only; full path
+# ${HOST_DATA_DIR}/${_TB_ADOPT_RECOVERY_META_BASENAME}.
+_TB_ADOPT_RECOVERY_META_BASENAME=".tb-adopt-recovery-meta"
+
+# _write_adopt_recovery_meta REL NS
+# Record the recovery sidecar (0600) with the adopted release's original identity.
+# Best-effort: a silent no-op when HOST_DATA_DIR is unusable — the reader falls
+# back to current env, matching an older recovery file with no sidecar.
+_write_adopt_recovery_meta() {
+  local _rel="$1" _ns="$2" _meta
+  [[ -n "${HOST_DATA_DIR:-}" ]] || return 0
+  mkdir -p "$HOST_DATA_DIR" 2>/dev/null || return 0
+  _meta="${HOST_DATA_DIR}/${_TB_ADOPT_RECOVERY_META_BASENAME}"
+  { printf 'name=%s\n' "$_rel"; printf 'namespace=%s\n' "$_ns"; } > "$_meta" 2>/dev/null || return 0
+  chmod 600 "$_meta" 2>/dev/null || true
+}
+
+# _read_adopt_recovery_meta_field FIELD  (FIELD = name | namespace)
+# Echo the recorded value for FIELD from the sidecar, or nothing if the sidecar
+# is absent/unreadable or the field is missing. Parses key=value line-by-line in
+# the shell (no eval) and takes the last occurrence.
+_read_adopt_recovery_meta_field() {
+  local _field="$1" _meta _line _val=""
+  [[ -n "${HOST_DATA_DIR:-}" ]] || return 0
+  _meta="${HOST_DATA_DIR}/${_TB_ADOPT_RECOVERY_META_BASENAME}"
+  [[ -s "$_meta" ]] || return 0
+  while IFS= read -r _line || [[ -n "$_line" ]]; do
+    case "$_line" in
+      "${_field}="*) _val="${_line#*=}" ;;
+    esac
+  done < "$_meta"
+  printf '%s' "$_val"
+}
+
 # ── Cleanup on exit ──────────────────────────────────────────────────────────
 install_cleanup() {
   local exit_code=$?
@@ -860,6 +903,12 @@ install_cleanup() {
           && -n "${HOST_DATA_DIR:-}" ]] && mkdir -p "$HOST_DATA_DIR" 2>/dev/null; then
       if cp "$_TB_PENDING_VALUES_FILE" "${HOST_DATA_DIR}/${_TB_ADOPT_RECOVERY_BASENAME}" 2>/dev/null; then
         chmod 600 "${HOST_DATA_DIR}/${_TB_ADOPT_RECOVERY_BASENAME}" 2>/dev/null || true
+        # Stash the release identity alongside the credential so a re-run
+        # reinstalls into the ORIGINAL namespace/release, not one re-derived from
+        # the current TB_NAMESPACE (Bugbot #619). _reconcile_adopted_client
+        # exports the original name/ns into these module vars; fall back to
+        # TB_NAMESPACE only if the signal landed before they were set.
+        _write_adopt_recovery_meta "${_TB_ADOPT_REL:-${TB_NAMESPACE:-}}" "${_TB_ADOPT_NS:-${TB_NAMESPACE:-}}"
       fi
     fi
     rm -f "$_TB_PENDING_VALUES_FILE" 2>/dev/null || true
