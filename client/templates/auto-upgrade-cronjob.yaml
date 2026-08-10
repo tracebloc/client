@@ -147,6 +147,28 @@ data:
         log "ERROR: release wedged in pending-install (initial install was killed); the auto-upgrade job cannot recover this. Re-run the tracebloc installer to reconcile it — do NOT 'helm uninstall' first (that would drop an adopted client's only stored password)."
         exit 1
         ;;
+      uninstalling)
+        # A prior `helm uninstall --wait` timed out mid-removal (an operator's, or
+        # the installer's own pending-install recovery on an earlier run) and left
+        # the release in `uninstalling`, its resources still terminating. helm
+        # refuses to `upgrade` a release in this state, so — exactly like
+        # pending-install — this MUST be handled here and NOT fall through to the
+        # version check, which would read the wedged release as "already at latest"
+        # and exit 0, masking a still-wedged release (Bugbot #619).
+        #
+        # Fail closed: the auto-upgrade job has no client values/password to
+        # reinstall from, so it cannot finish the clear+reinstall the installer's
+        # same-client `uninstalling` path performs (scripts/lib/install-client-helm.sh
+        # _reconcile_pending_release). Recovery is to RE-RUN THE INSTALLER, which
+        # finishes clearing the release and reinstalls it in place from preserved
+        # values. Do NOT `helm uninstall` again here: for an ADOPTED client the
+        # wedged release still holds the ONLY copy of the write-only clientPassword
+        # (helm drops the release record only after the resources drain), which the
+        # installer's adopt path preserves before clearing — a blind uninstall here
+        # would destroy it (Bugbot #619).
+        log "ERROR: release wedged in uninstalling (a prior 'helm uninstall --wait' timed out mid-removal); the auto-upgrade job cannot recover this. Re-run the tracebloc installer to reconcile it — do NOT 'helm uninstall' first (that would drop an adopted client's only stored password)."
+        exit 1
+        ;;
     esac
 
     # Latest published version. Helm orders search results newest-first,

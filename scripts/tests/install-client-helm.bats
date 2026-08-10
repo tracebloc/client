@@ -1303,6 +1303,54 @@ setup() {
   [ "$output" = "7" ] || return 1
 }
 
+@test "auto-upgrade cronjob: an 'uninstalling' release fails closed, is NOT reported 'already at latest' (Bugbot #619 CID 3748282383)" {
+  # A timed-out `helm uninstall --wait` leaves the release in `uninstalling`. The
+  # cronjob's pending-* reconcile runs BEFORE the version check, but `uninstalling`
+  # was missing from its case → the release fell through to the version check and,
+  # when the deployed chart already matched latest, the job exited 0 "already at
+  # latest; nothing to do", masking a still-wedged release (CID 3748282383). It
+  # must be HANDLED and fail closed instead. Extract the FULL embedded script from
+  # the ConfigMap and run it against a helm mock that reports `uninstalling` AND
+  # current==latest (the exact masking scenario).
+  local tmpl="$BATS_TEST_DIRNAME/../../client/templates/auto-upgrade-cronjob.yaml"
+  [ -f "$tmpl" ] || skip "auto-upgrade-cronjob.yaml not found"
+
+  local dir; dir="$(mktemp -d)"
+  local script="$dir/auto-upgrade.sh"
+  # Pull the `auto-upgrade.sh: |` block-scalar body out of the ConfigMap and dedent
+  # the 4-space indentation into a runnable script.
+  awk '/^  auto-upgrade\.sh: \|/{c=1;next} c{ if ($0 ~ /^---/) exit; print }' "$tmpl" \
+    | sed 's/^    //' > "$script"
+  [ -s "$script" ] || return 1
+
+  # Fake helm on PATH so the script's run_bounded (bare or via `timeout`) resolves
+  # to it. status=uninstalling with current==latest is the masking scenario.
+  # 2-space-indented mapping keys under a `- ` marker match the real `helm search`
+  # / `helm list -o yaml` shape the script's version/chart awk parses — so WITHOUT
+  # the fix the release falls through to the "already at latest; nothing to do"
+  # exit 0, the exact masking path this test guards against.
+  cat > "$dir/helm" <<'EOF'
+#!/bin/sh
+case "$1" in
+  repo)   exit 0 ;;
+  status) printf 'info:\n  status: uninstalling\n' ;;
+  search) printf -- '- name: tracebloc/client\n  version: 1.9.29\n' ;;
+  list)   printf -- '- name: munich\n  chart: client-1.9.29\n' ;;
+  *)      exit 0 ;;
+esac
+EOF
+  chmod +x "$dir/helm"
+
+  export RELEASE_NAME=munich RELEASE_NAMESPACE=munich REPO_URL=http://example
+  export REPO_NAME=tracebloc CHART_NAME=client UPGRADE_TIMEOUT=300s
+  export PATH="$dir:$PATH"
+  run sh "$script"
+
+  [ "$status" -ne 0 ] || return 1                       # fails closed, not exit 0
+  [[ "$output" == *"uninstalling"* ]] || return 1       # names the wedge it handled
+  [[ "$output" != *"already at latest"* ]] || return 1  # never the masking success path
+}
+
 @test "_reconcile_pending_release: pending-upgrade rolls back to the last DEPLOYED revision, not a bare rollback (Bugbot #619)" {
   spin_cmd_bounded() { shift 2; "$@"; }   # exec the mutating cmd so the mock records it
   helm() {
