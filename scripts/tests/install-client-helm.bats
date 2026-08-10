@@ -1515,6 +1515,36 @@ EOF
   [[ "$output" == *"--set clientId=0e9db54e-c9c0-4bf3-9ff2-1646da307019"* ]] || return 1
 }
 
+@test "install_client_helm: adopt FAILED reinstall KEEPS the credential when the durable persist itself fails (Bugbot #619)" {
+  # Same as the durable-persist test, but HOST_DATA_DIR is a FILE, so the recovery
+  # mkdir/cp fails. The temp is STILL the only copy of the write-only clientPassword,
+  # so it must be kept (0600) with its path surfaced — never shred it into oblivion.
+  HOST_DATA_DIR="$BATS_TEST_TMPDIR/notadir"; : > "$HOST_DATA_DIR"   # a FILE, not a dir → mkdir -p fails
+  _ensure_tracebloc_dirs() { :; }
+  _ensure_release_dirs() { :; }
+  _ensure_helm_runnable() { :; }
+  kubectl() { record "kubectl $*"; return 0; }
+  helm() {
+    if [[ "$1" == list ]];               then echo "munich munich 1 now pending-install client-1.8.2 1.8.2"; return 0; fi
+    if [[ "$1" == status ]];             then printf 'info:\n  status: pending-install\n'; return 0; fi
+    if [[ "$1 $2" == "get values" ]];    then printf 'clientId: "123"\nclientPassword: "s3cr3t"\n'; return 0; fi
+    if [[ "$1 $2" == "upgrade --install" ]]; then record "helm $*"; return 1; fi   # reinstall fails
+    record "helm $*"; return 0
+  }
+  verify_credentials() { printf invalid; }
+  export TRACEBLOC_CLIENT_ADOPTED=1 TRACEBLOC_CLIENT_ID=0e9db54e-c9c0-4bf3-9ff2-1646da307019
+  run install_client_helm </dev/null
+  [ "$status" -ne 0 ] || return 1
+  [[ "$output" == *"ONLY copy"* ]] || return 1                        # operator warned it's the sole copy
+  [[ "$output" == *"could not be saved to the data directory"* ]] || return 1
+  # Extract the kept path from the message and prove the credential survived on disk.
+  local kept; kept="$(printf '%s\n' "$output" | sed -n 's/.*kept (0600) at: \(.*\)$/\1/p' | tail -1)"
+  [ -n "$kept" ] || return 1
+  [ -s "$kept" ] || return 1
+  grep -q 'clientPassword' "$kept" || return 1
+  rm -f "$kept"
+}
+
 @test "install_client_helm: adopt + pending-install, FAILED uninstall does NOT reinstall (fail closed) and keeps the recovery file (Bugbot #619)" {
   HOST_DATA_DIR="$BATS_TEST_TMPDIR/data"; mkdir -p "$HOST_DATA_DIR"
   _ensure_tracebloc_dirs() { :; }
@@ -1592,6 +1622,21 @@ EOF
   [ ! -e "$f" ] || return 1                                            # temp still shredded
   [ -s "$HOST_DATA_DIR/.tb-adopt-recovery-values.yaml" ] || return 1   # but persisted first
   grep -q 'clientPassword' "$HOST_DATA_DIR/.tb-adopt-recovery-values.yaml" || return 1
+}
+
+@test "install_cleanup: in the reinstall window it KEEPS the sole credential when the durable persist fails, not shred (Bugbot #619)" {
+  # Same sole-copy window (TB_PENDING_REINSTALL=1), but there is nowhere to persist
+  # (HOST_DATA_DIR unset), so the durable cp cannot happen. The backstop must NOT
+  # shred the temp — that would destroy the write-only clientPassword for good; keep
+  # it (0600) so a re-run / the operator can still recover it.
+  unset HOST_DATA_DIR
+  local f; f="$(mktemp)"; printf 'clientId: "123"\nclientPassword: "s3cr3t"\n' > "$f"
+  _TB_PENDING_VALUES_FILE="$f"
+  TB_PENDING_REINSTALL=1
+  install_cleanup >/dev/null 2>&1 || true
+  [ -e "$f" ] || return 1                                              # KEPT — credential not lost
+  grep -q 'clientPassword' "$f" || return 1
+  rm -f "$f"
 }
 
 @test "install_client_helm: adopt re-run with no live release recovers from the durable saved file, then shreds it (Bugbot #619)" {

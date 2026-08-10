@@ -899,9 +899,13 @@ install_cleanup() {
   # (a re-run recovers from it), THEN remove the temp. Outside the window (release
   # still holds the values) it's redundant, so just shred.
   if [[ -n "${_TB_PENDING_VALUES_FILE:-}" ]]; then
-    if [[ "${TB_PENDING_REINSTALL:-0}" == "1" && -s "$_TB_PENDING_VALUES_FILE" \
-          && -n "${HOST_DATA_DIR:-}" ]] && mkdir -p "$HOST_DATA_DIR" 2>/dev/null; then
-      if cp "$_TB_PENDING_VALUES_FILE" "${HOST_DATA_DIR}/${_TB_ADOPT_RECOVERY_BASENAME}" 2>/dev/null; then
+    local _tb_sole_copy=0 _tb_persisted=0
+    if [[ "${TB_PENDING_REINSTALL:-0}" == "1" && -s "$_TB_PENDING_VALUES_FILE" ]]; then
+      # Sole-copy window: the release was already uninstalled, so this temp holds
+      # the ONLY copy of the write-only clientPassword.
+      _tb_sole_copy=1
+      if [[ -n "${HOST_DATA_DIR:-}" ]] && mkdir -p "$HOST_DATA_DIR" 2>/dev/null \
+         && cp "$_TB_PENDING_VALUES_FILE" "${HOST_DATA_DIR}/${_TB_ADOPT_RECOVERY_BASENAME}" 2>/dev/null; then
         chmod 600 "${HOST_DATA_DIR}/${_TB_ADOPT_RECOVERY_BASENAME}" 2>/dev/null || true
         # Stash the release identity alongside the credential so a re-run
         # reinstalls into the ORIGINAL namespace/release, not one re-derived from
@@ -909,9 +913,18 @@ install_cleanup() {
         # exports the original name/ns into these module vars; fall back to
         # TB_NAMESPACE only if the signal landed before they were set.
         _write_adopt_recovery_meta "${_TB_ADOPT_REL:-${TB_NAMESPACE:-}}" "${_TB_ADOPT_NS:-${TB_NAMESPACE:-}}"
+        _tb_persisted=1
       fi
     fi
-    rm -f "$_TB_PENDING_VALUES_FILE" 2>/dev/null || true
+    # Shred the temp UNLESS it is the sole surviving copy of the write-only
+    # clientPassword and the durable persist failed — in that window keep it (0600)
+    # rather than destroy the credential for good (Bugbot #619). A re-run / the
+    # operator can still recover it; outside the window the temp is redundant.
+    if [[ "$_tb_sole_copy" == "1" && "$_tb_persisted" == "0" ]]; then
+      chmod 600 "$_TB_PENDING_VALUES_FILE" 2>/dev/null || true
+    else
+      rm -f "$_TB_PENDING_VALUES_FILE" 2>/dev/null || true
+    fi
   fi
   if [[ $exit_code -eq 2 ]]; then
     echo ""

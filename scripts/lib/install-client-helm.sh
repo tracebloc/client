@@ -857,15 +857,28 @@ _reconcile_adopted_client() {
         _recovery=""
       fi
     fi
-    [[ -n "${_TB_PENDING_VALUES_FILE:-}" && "$_TB_PENDING_VALUES_FILE" != /dev/null ]] && rm -f "$_TB_PENDING_VALUES_FILE"
-    unset _TB_PENDING_VALUES_FILE
     if [[ -n "$_recovery" ]]; then
+      # Durable copy safely written — the temp is now redundant, shred it.
+      [[ -n "${_TB_PENDING_VALUES_FILE:-}" && "$_TB_PENDING_VALUES_FILE" != /dev/null ]] && rm -f "$_TB_PENDING_VALUES_FILE"
+      unset _TB_PENDING_VALUES_FILE
       warn "Reinstall failed after the wedged release was removed. Your client credential is saved (0600) at: $_recovery"
       hint "Re-run the installer to retry, or reconcile manually:"
       hint "  helm -n $_ns upgrade --install $_rel $chart_ref --create-namespace -f $_recovery$_id_override"
     else
-      warn "Reinstall failed after the wedged release was removed and the credential copy could not be saved."
-      hint "Re-adopt this client from the dashboard to reissue access."
+      # Durable persist FAILED (no HOST_DATA_DIR, or a mkdir/cp error) — the temp is
+      # STILL the only copy of the write-only clientPassword. Do NOT shred it, or the
+      # credential is lost for good (Bugbot #619). Keep it 0600 where it is, drop it
+      # from the EXIT trap's shred list, and tell the operator so they can rescue it.
+      local _leftover="${_TB_PENDING_VALUES_FILE:-}"
+      unset _TB_PENDING_VALUES_FILE
+      if [[ -n "$_leftover" && "$_leftover" != /dev/null && -s "$_leftover" ]]; then
+        chmod 600 "$_leftover" 2>/dev/null || true
+        warn "Reinstall failed after the wedged release was removed and the credential could not be saved to the data directory. It is kept (0600) at: $_leftover"
+        hint "Copy that file somewhere safe now — it is the ONLY copy of your client credential — then re-run the installer, or re-adopt this client from the dashboard to reissue access."
+      else
+        warn "Reinstall failed after the wedged release was removed and the credential copy could not be saved."
+        hint "Re-adopt this client from the dashboard to reissue access."
+      fi
     fi
     error "Reconcile of the existing client failed. Check the log for details: ${LOG_FILE:-}"
   fi
