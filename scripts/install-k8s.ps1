@@ -4621,15 +4621,23 @@ function Print-Summary {
     # --overrides is required; (b) on WSL2/CDI `nvidia-smi` inside a pod FAILS (NVML is not
     # supported through the paravirtualized GPU) even when CUDA compute works perfectly --
     # verified on real hardware -- so there we suggest a CUDA workload, not nvidia-smi.
+    # (c) EVERY double quote in an --overrides JSON must be printed ESCAPED as \" : Windows
+    # PowerShell strips unescaped quotes when building a native command line, so a copy-pasted
+    # command dies with "error: Invalid JSON Patch". (Same class of bug that broke the capacity
+    # patch itself -- verified on a live box.) A suggested command that can't be pasted is worse
+    # than none, so the escapes are part of the guidance.
+    $q = '\"'
     if ($GPU_DEVICE_SELECTOR) {
       Log ('  GPU test (WSL2/CDI -- runs CUDA; note nvidia-smi does NOT work in a pod here): ' +
         'kubectl run gpu-test --rm -it --restart=Never --image=nvidia/samples:vectoradd-cuda11.2.1 ' +
-        '--overrides=''{"spec":{"runtimeClassName":"nvidia","containers":[{"name":"gpu-test",' +
-        '"image":"nvidia/samples:vectoradd-cuda11.2.1","env":[{"name":"NVIDIA_VISIBLE_DEVICES",' +
-        '"value":"' + $GPU_DEVICE_SELECTOR + '"}],"resources":{"limits":{"nvidia.com/gpu":"1"}}}]}}''')
+        "--overrides='{${q}spec${q}:{${q}runtimeClassName${q}:${q}nvidia${q},${q}containers${q}:" +
+        "[{${q}name${q}:${q}gpu-test${q},${q}image${q}:${q}nvidia/samples:vectoradd-cuda11.2.1${q}," +
+        "${q}env${q}:[{${q}name${q}:${q}NVIDIA_VISIBLE_DEVICES${q},${q}value${q}:${q}$GPU_DEVICE_SELECTOR${q}}]," +
+        "${q}resources${q}:{${q}limits${q}:{${q}nvidia.com/gpu${q}:${q}1${q}}}}]}}'")
     } else {
       Log ('  GPU test: kubectl run gpu-test --rm -it --restart=Never --image=nvidia/cuda:12.3.1-base-ubuntu22.04 ' +
-        '--overrides=''{"spec":{"runtimeClassName":"nvidia"}}'' --limits="nvidia.com/gpu=1" -- nvidia-smi')
+        "--overrides='{${q}spec${q}:{${q}runtimeClassName${q}:${q}nvidia${q}}}' " +
+        '--limits="nvidia.com/gpu=1" -- nvidia-smi')
     }
   }
   Log "=== End Advanced Info ==="

@@ -4234,9 +4234,15 @@ Describe "WSL2 GPU: node-advertised capacity replaces the NVML device plugin (#6
     $doctor | Should -Match 'runtimeClassName'
     $doctor | Should -Match 'vectoradd'                     # CUDA workload, not nvidia-smi
     $doctor | Should -Match 'NVIDIA_VISIBLE_DEVICES'
+    # every quote in the --overrides JSON is printed ESCAPED, else PowerShell strips them and the
+    # pasted command dies with "error: Invalid JSON Patch" (seen on a live box). The source builds
+    # the JSON from $q, which holds an escaped quote.
+    $doctor | Should -Match 'q\}spec\$\{q\}'
+    # $q must hold a BACKSLASH followed by a quote
+    ($script:CDISRC.Contains('$q = ' + [char]39 + [char]92 + [char]34 + [char]39)) | Should -BeTrue
     # and the non-CDI (device-plugin) command also carries the RuntimeClass
     $plugin = (($script:CDISRC -split '\} else \{\s*\n\s*Log \(''  GPU test: kubectl run')[1] -split '\n    \}')[0]
-    $plugin | Should -Match 'runtimeClassName":"nvidia'
+    $plugin | Should -Match 'q\}runtimeClassName\$\{q\}'
     $plugin | Should -Match 'nvidia-smi'
   }
   It "the selector is EMPTY on a normal device-plugin (Linux) node -- the plugin owns that var (#616)" {
