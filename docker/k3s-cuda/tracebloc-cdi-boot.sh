@@ -42,6 +42,37 @@ if [ -e /dev/dxg ]; then
     ' /etc/cdi/nvidia.yaml > /etc/cdi/nvidia.yaml.new 2>/dev/null \
       && mv /etc/cdi/nvidia.yaml.new /etc/cdi/nvidia.yaml 2>/dev/null || true
   fi
+
+  # Keep nvidia.com/gpu advertised across restarts (Bugbot, HIGH). A manually patched
+  # extended resource is NOT durable: the kubelet re-reports node status on every
+  # start, zeroing it -- so after a Docker Desktop or Windows restart the installer's
+  # one-shot patch is gone, the chart still requests a GPU, and every job would sit
+  # Pending with "Insufficient nvidia.com/gpu" until someone re-ran the installer.
+  # There's no device plugin to own the resource here, so this node re-asserts it
+  # itself: a background reconciler waits for the local API, then re-patches whenever
+  # the capacity is missing. Runs on EVERY node start (this is the entrypoint), so a
+  # reboot self-heals with no user action. Fully guarded + backgrounded: it can never
+  # delay or block k3s. Interval override: TRACEBLOC_GPU_RECONCILE_SECS.
+  (
+    interval="${TRACEBLOC_GPU_RECONCILE_SECS:-60}"
+    kube="/etc/rancher/k3s/k3s.yaml"
+    while :; do
+      if [ -s "$kube" ]; then
+        current="$(/bin/k3s kubectl --kubeconfig "$kube" get node "$(hostname)" \
+          -o "jsonpath={.status.capacity.nvidia\\.com/gpu}" \
+          --request-timeout=10s 2>/dev/null || true)"
+        case "$current" in
+          ''|0)
+            /bin/k3s kubectl --kubeconfig "$kube" patch node "$(hostname)" \
+              --subresource=status --type=json --request-timeout=15s \
+              -p '[{"op":"add","path":"/status/capacity/nvidia.com~1gpu","value":"1"}]' \
+              >/dev/null 2>&1 || true
+            ;;
+        esac
+      fi
+      sleep "$interval"
+    done
+  ) &
 fi
 
 exec /bin/k3s "$@"

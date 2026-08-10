@@ -4131,6 +4131,18 @@ Describe "Embedded GPU build inputs stay in sync with docker/k3s-cuda (#616 drif
     # k3s must start regardless of the GPU setup outcome
     $boot | Should -Match 'exec /bin/k3s "\$@"'
   }
+  It "the node re-asserts nvidia.com/gpu capacity across restarts (#616 Bugbot HIGH: kubelet zeroes it)" {
+    # A manually patched extended resource is not durable -- the kubelet re-reports node
+    # status on start, so a Docker Desktop / Windows restart would drop the GPU and strand
+    # jobs. The node reconciles it itself, in the background, on every start.
+    $boot = [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String($script:K3S_CUDA_BOOT_B64))
+    $boot | Should -Match 'capacity/nvidia\.com~1gpu'
+    $boot | Should -Match '--subresource=status'
+    $boot | Should -Match 'TRACEBLOC_GPU_RECONCILE_SECS'
+    # backgrounded so it can never delay/block k3s, and it re-patches only when missing/0
+    $boot | Should -Match "case \`"\`$current\`" in"
+    $boot | Should -Match '\) &'
+  }
   It "the boot script wires CDI on WSL2 (mode=cdi baked, generate spec, inject libdxcore) (#616)" {
     $boot = [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String($script:K3S_CUDA_BOOT_B64))
     $boot | Should -Match 'nvidia-ctk cdi generate --mode=wsl'
@@ -4166,6 +4178,15 @@ Describe "WSL2 GPU: node-advertised capacity replaces the NVML device plugin (#6
     $fn = (($script:CDISRC -split 'function Install-GpuDevicePlugin')[1] -split '\nfunction ')[0]
     $fn | Should -Match 'Invoke-DockerCli -DockerArgs @\("exec", "k3d-\$CLUSTER_NAME-server-0", "test", "-e", "/dev/dxg"\)'
     $fn | Should -Match 'if \(Set-NodeGpuCapacity\) \{ Ok "GPU acceleration enabled \(WSL2/CDI\)\."; return \$true \}'
+  }
+  It "the CDI spec is VERIFIED before claiming GPU is ready (#616 Bugbot)" {
+    # the boot script guards every step with `|| true`; without this check a failed
+    # `cdi generate` would leave us advertising a GPU pods can't actually use.
+    $fn = (($script:CDISRC -split 'function Install-GpuDevicePlugin')[1] -split '\nfunction ')[0]
+    $fn | Should -Match '"test", "-s", "/etc/cdi/nvidia\.yaml"'
+    # and the spec check must come BEFORE the success path
+    $fn | Should -Match '/etc/cdi/nvidia\.yaml"\)[\s\S]{0,600}?Set-NodeGpuCapacity'
+    $fn | Should -Match '\$script:GPU_SKIP_REASON = "the node couldn''t generate its WSL GPU \(CDI\) spec'
   }
   It "a failed capacity advertisement returns false so the caller falls back to CPU" {
     $fn = (($script:CDISRC -split 'function Install-GpuDevicePlugin')[1] -split '\nfunction ')[0]
