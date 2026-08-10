@@ -1231,6 +1231,7 @@ _engine_fixture() {
 # is in progress". These cover the auto-recovery that clears the wedge.
 
 @test "_recover_pending_helm_release: fresh/absent release -> no-op, rc 0" {
+  _bounded() { shift; "$@"; }               # bypass timeout(1) so the helm mock is used
   helm() { record "helm $*"; return 1; }   # `helm status` errors when absent
   run _recover_pending_helm_release rel ns
   [ "$status" -eq 0 ] || return 1
@@ -1240,6 +1241,7 @@ _engine_fixture() {
 }
 
 @test "_recover_pending_helm_release: deployed release -> no-op, rc 0" {
+  _bounded() { shift; "$@"; }
   helm() {
     if [[ "$1" == status ]]; then printf 'NAME: rel\nSTATUS: deployed\nREVISION: 4\n'; return 0; fi
     record "helm $*"; return 0
@@ -1252,6 +1254,7 @@ _engine_fixture() {
 }
 
 @test "_recover_pending_helm_release: pending-upgrade -> rolls back, rc 0" {
+  _bounded() { shift; "$@"; }
   helm() {
     if [[ "$1" == status ]]; then printf 'NAME: rel\nSTATUS: pending-upgrade\nREVISION: 5\n'; return 0; fi
     record "helm $*"; return 0
@@ -1264,6 +1267,7 @@ _engine_fixture() {
 }
 
 @test "_recover_pending_helm_release: pending-install -> uninstalls the half-install, rc 0" {
+  _bounded() { shift; "$@"; }
   helm() {
     if [[ "$1" == status ]]; then printf 'NAME: rel\nSTATUS: pending-install\nREVISION: 1\n'; return 0; fi
     record "helm $*"; return 0
@@ -1276,6 +1280,7 @@ _engine_fixture() {
 }
 
 @test "_recover_pending_helm_release: uninstalling -> finishes the uninstall, rc 0" {
+  _bounded() { shift; "$@"; }
   helm() {
     if [[ "$1" == status ]]; then printf 'NAME: rel\nSTATUS: uninstalling\nREVISION: 3\n'; return 0; fi
     record "helm $*"; return 0
@@ -1286,6 +1291,7 @@ _engine_fixture() {
 }
 
 @test "_recover_pending_helm_release: failed rollback -> rc 1 (caller fails closed)" {
+  _bounded() { shift; "$@"; }
   helm() {
     if [[ "$1" == status ]]; then printf 'NAME: rel\nSTATUS: pending-upgrade\nREVISION: 5\n'; return 0; fi
     if [[ "$1" == rollback ]]; then return 1; fi
@@ -1296,6 +1302,7 @@ _engine_fixture() {
 }
 
 @test "_recover_pending_helm_release: failed uninstall -> rc 1 (caller fails closed)" {
+  _bounded() { shift; "$@"; }
   helm() {
     if [[ "$1" == status ]]; then printf 'NAME: rel\nSTATUS: pending-install\nREVISION: 1\n'; return 0; fi
     if [[ "$1" == uninstall ]]; then return 1; fi
@@ -1315,6 +1322,7 @@ _engine_fixture() {
   _ensure_tracebloc_dirs() { :; }
   _ensure_release_dirs() { :; }
   _ensure_helm_runnable() { :; }
+  _bounded() { shift; "$@"; }
   # list: empty (pending releases are hidden from the guard). status: wedged.
   helm() {
     if [[ "$1" == list ]]; then return 0; fi
@@ -1338,6 +1346,7 @@ _engine_fixture() {
   _ensure_tracebloc_dirs() { :; }
   _ensure_release_dirs() { :; }
   _ensure_helm_runnable() { :; }
+  _bounded() { shift; "$@"; }
   helm() {
     if [[ "$1" == list ]]; then return 0; fi
     if [[ "$1" == status ]]; then printf 'NAME: n\nSTATUS: pending-upgrade\nREVISION: 5\n'; return 0; fi
@@ -1360,6 +1369,7 @@ _engine_fixture() {
   _ensure_helm_runnable() { :; }
   # Clean status (no wedge to recover), but the install upgrade itself fails 1 —
   # NOT the 124 timeout. The remedy must still be surfaced (issue #554).
+  _bounded() { shift; "$@"; }
   helm() {
     if [[ "$1" == list ]]; then return 0; fi
     if [[ "$1" == status ]]; then return 0; fi
@@ -1370,4 +1380,34 @@ _engine_fixture() {
   run install_client_helm <<< $'myid\nmypw'
   [ "$status" -ne 0 ] || return 1
   [[ "$output" == *"another operation is in progress"* ]] || return 1
+}
+
+@test "install_client_helm: a DIFFERENT client WEDGED in pending-* is still seen and blocked (#554)" {
+  HOST_DATA_DIR="$BATS_TEST_TMPDIR/data"; mkdir -p "$HOST_DATA_DIR"
+  _ensure_tracebloc_dirs() { :; }
+  _ensure_release_dirs() { :; }
+  _ensure_helm_runnable() { :; }
+  _bounded() { shift; "$@"; }
+  # Helm 3 hides pending-* from a bare `helm list`, so the one-client guard must
+  # enumerate those states explicitly — otherwise a foreign client wedged by a
+  # killed helm op is invisible and a re-run with a different id would overwrite
+  # it once recovery clears the wedge. The mock returns a pending-upgrade row.
+  helm() {
+    if [ "$1" = list ]; then
+      record "helm $*"
+      printf '%s\n' 'NAME NAMESPACE REVISION UPDATED STATUS CHART APP VERSION' \
+                    'oldrel default 3 2026-01-01 pending-upgrade client-1.4.3 1.4.3'
+      return 0
+    fi
+    if [ "$1" = get ] && [ "$2" = values ]; then echo 'clientId: "otherclient"'; return 0; fi
+    record "helm $*"; return 0
+  }
+  verify_credentials() { printf valid; }
+  run install_client_helm <<< $'newclient\nmypw'
+  [ "$status" -ne 0 ] || return 1
+  [[ "$output" == *"already runs the tracebloc client 'otherclient'"* ]] || return 1
+  # the enumeration must name pending explicitly, or the wedge would be invisible
+  mock_calls | grep -q -- '--pending'
+  run mock_calls
+  [[ "$output" != *"helm upgrade"* ]] || return 1
 }

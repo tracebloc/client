@@ -220,7 +220,13 @@ detect_installed_client() {
   # a re-install silently overwrite an existing client. `helm list` returns 0 with
   # empty output when there are genuinely no releases, so only a non-zero exit is
   # "unknown".
-  if ! _list="$(helm list -A 2>/dev/null)"; then
+  # --deployed --pending --failed is mandatory (#554): Helm 3's `helm list` shows
+  # only deployed releases unless states are named explicitly, so a client wedged
+  # in pending-install/pending-upgrade (a helm op killed mid-flight) would be
+  # INVISIBLE here — the one-client guard would then wave through a re-install with
+  # a DIFFERENT clientId and silently overwrite it. Naming the states keeps a
+  # wedged (or failed) client visible so the guard still fails closed.
+  if ! _list="$(helm list -A --deployed --pending --failed 2>/dev/null)"; then
     INSTALLED_CLIENT_UNKNOWN=1; rm -f "$_gvf"; return 0
   fi
   while read -r _rel _ns; do
@@ -476,7 +482,17 @@ _resolve_chart_ref() {
 # same wedge.
 _recover_pending_helm_release() {
   local _rel="$1" _ns="$2" _status
-  _status="$(helm status "$_rel" -n "$_ns" 2>/dev/null \
+  # Bound the status READ (#554 Bugbot): every helm/kubectl probe in this installer
+  # must be bounded so a wedged/unreachable API can't hang a headless run — and
+  # this read gates everything below, so bounding it bounds the whole recovery. A
+  # timeout (or any error) yields an empty status → no-op → we hand off to the
+  # bounded upgrade, which surfaces the API failure with its own deadline. The
+  # mutating ops below are NOT wrapped in a kill-based bound on purpose: SIGKILLing
+  # a helm rollback/uninstall midway would recreate the very pending-* wedge we are
+  # clearing. rollback is a fast metadata write (and only runs once this read has
+  # proven the API responsive); uninstall is bounded gracefully by helm's own
+  # --wait --timeout.
+  _status="$(_bounded 30 helm status "$_rel" -n "$_ns" 2>/dev/null \
     | awk '/^STATUS:/ {print $2; exit}')"
   case "$_status" in
     pending-upgrade|pending-rollback)
@@ -520,11 +536,14 @@ _reconcile_adopted_client() {
   # provision_client (Step 3) hands over the adopted client id (UUID) + the marker on
   # adopt (no password — the existing credential stands). Find the live client release
   # and reconcile it in place. Enumerate it the same jq-free way the one-per-machine
-  # guard does. One client per machine, so take the first.
+  # guard does — including pending/failed states (#554): Helm 3's `helm list` hides
+  # pending-* by default, so a release wedged by a killed helm op would go undiscovered
+  # here and adopt would fall through to a password prompt it can't satisfy. One client
+  # per machine, so take the first.
   local _rel="" _ns="" _r _n
   while read -r _r _n; do
     [[ -n "$_r" ]] && { _rel="$_r"; _ns="$_n"; break; }
-  done < <(helm list -A 2>/dev/null | awk '/[[:space:]]client-[0-9]/ { print $1, $2 }')
+  done < <(helm list -A --deployed --pending --failed 2>/dev/null | awk '/[[:space:]]client-[0-9]/ { print $1, $2 }')
   if [[ -z "$_rel" ]]; then
     warn "This client is already registered, but no live tracebloc release was found here to reconcile — continuing with a normal connect."
     return 1
