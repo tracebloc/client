@@ -461,6 +461,7 @@ _resolve_chart_ref() {
 # own. Detect that state and clear it so the caller's helm op can proceed.
 #
 #   $1 = release name   $2 = namespace
+#   $3 = mode: "full" (default) or "no-destroy" (see below)
 #
 # Reads the STATUS: line of `helm status` (jq-free on purpose — parsed the same
 # way the auto-upgrade cronjob does, whose alpine/helm image ships without jq):
@@ -477,11 +478,19 @@ _resolve_chart_ref() {
 #                                        leaves the PVCs in place (docs/MIGRATIONS).
 #   uninstalling                       → a killed `helm uninstall`; finish it.
 #
+# mode="no-destroy" (the adopt/reconcile path, #554 Bugbot): rollback is still
+# performed (non-destructive — it restores a deployed revision, so the reconcile's
+# --reuse-values stays valid), but the destructive uninstall branch is REFUSED
+# (returns 1). Adopt reuses the release's STORED credential (the account password
+# is write-only on the backend and lives only in that release); uninstalling a
+# pending-install there would silently drop it. Better to fail closed with a
+# manual remedy than to auto-destroy the sole copy of the credential.
+#
 # Returns 0 when the release is clear (or was already), non-zero when recovery was
-# attempted and FAILED — the caller must fail closed rather than march into the
-# same wedge.
+# attempted and FAILED, or was refused under no-destroy — the caller must fail
+# closed rather than march into the same wedge.
 _recover_pending_helm_release() {
-  local _rel="$1" _ns="$2" _status
+  local _rel="$1" _ns="$2" _mode="${3:-full}" _status
   # Bound the status READ (#554 Bugbot): every helm/kubectl probe in this installer
   # must be bounded so a wedged/unreachable API can't hang a headless run — and
   # this read gates everything below, so bounding it bounds the whole recovery. A
@@ -506,6 +515,13 @@ _recover_pending_helm_release() {
       ;;
     pending-install|uninstalling)
       warn "A previous helm operation on '$_rel' was interrupted (status: $_status)."
+      if [[ "$_mode" == no-destroy ]]; then
+        # Clearing pending-install/uninstalling can only be done by uninstalling
+        # (a never-deployed revision can't be rolled back), which would drop this
+        # client's stored credential — refuse on the reconcile path (#554 Bugbot).
+        warn "Clearing '$_rel' would require an uninstall that could drop the client's stored credential — refusing to auto-recover it here."
+        return 1
+      fi
       info "Clearing the half-finished release '$_rel' before continuing…"
       if ! helm uninstall "$_rel" -n "$_ns" --wait --timeout 5m >> "${LOG_FILE:-/dev/null}" 2>&1; then
         warn "Automatic cleanup of '$_rel' failed."
@@ -578,10 +594,15 @@ _reconcile_adopted_client() {
 
   # #554: clear any pending-* wedge left by a previously killed helm op before we
   # upgrade — otherwise this reconcile just fails with "another operation is in
-  # progress". Fail closed if recovery itself couldn't clear it.
-  if ! _recover_pending_helm_release "$_rel" "$_ns"; then
-    hint "Couldn't automatically clear the interrupted release. Recover it by hand, then re-run:"
-    hint "  helm -n $_ns rollback $_rel    (returns to the previous, working release)"
+  # progress". no-destroy: reconcile REUSES the release's stored credential (the
+  # account password is write-only on the backend and lives only here), so only a
+  # non-destructive rollback is allowed; a pending-install/uninstalling wedge is
+  # refused rather than auto-uninstalled, which would drop that sole copy (#554
+  # Bugbot). Fail closed with a manual remedy if recovery couldn't clear it.
+  if ! _recover_pending_helm_release "$_rel" "$_ns" no-destroy; then
+    hint "Couldn't safely clear the interrupted release without risking its stored credential. Recover it by hand, then re-run:"
+    hint "  helm -n $_ns status $_rel     (see what state it's in)"
+    hint "  helm -n $_ns rollback $_rel   (if pending-upgrade: returns to the previous, working release)"
     error "Reconcile blocked by an interrupted previous helm operation. Check the log for details: ${LOG_FILE:-}"
   fi
 

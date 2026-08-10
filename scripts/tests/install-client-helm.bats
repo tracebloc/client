@@ -1411,3 +1411,43 @@ _engine_fixture() {
   run mock_calls
   [[ "$output" != *"helm upgrade"* ]] || return 1
 }
+
+# ── _recover_pending_helm_release no-destroy mode (adopt path, #554 Bugbot) ──
+# The reconcile/adopt path reuses the release's STORED credential, so recovery
+# there must never uninstall a pending-install (that would drop the sole copy of
+# the write-only credential). Rollback (non-destructive) is still allowed.
+
+@test "_recover_pending_helm_release no-destroy: pending-install is REFUSED, never uninstalled" {
+  _bounded() { shift; "$@"; }
+  helm() {
+    if [[ "$1" == status ]]; then printf 'NAME: rel\nSTATUS: pending-install\nREVISION: 1\n'; return 0; fi
+    record "helm $*"; return 0
+  }
+  run _recover_pending_helm_release rel ns no-destroy
+  [ "$status" -eq 1 ] || return 1                 # caller fails closed
+  run mock_calls
+  [[ "$output" != *"helm uninstall"* ]] || return 1   # credential preserved
+}
+
+@test "_recover_pending_helm_release no-destroy: uninstalling is REFUSED, never uninstalled" {
+  _bounded() { shift; "$@"; }
+  helm() {
+    if [[ "$1" == status ]]; then printf 'NAME: rel\nSTATUS: uninstalling\nREVISION: 3\n'; return 0; fi
+    record "helm $*"; return 0
+  }
+  run _recover_pending_helm_release rel ns no-destroy
+  [ "$status" -eq 1 ] || return 1
+  run mock_calls
+  [[ "$output" != *"helm uninstall"* ]] || return 1
+}
+
+@test "_recover_pending_helm_release no-destroy: pending-upgrade STILL rolls back (non-destructive)" {
+  _bounded() { shift; "$@"; }
+  helm() {
+    if [[ "$1" == status ]]; then printf 'NAME: rel\nSTATUS: pending-upgrade\nREVISION: 5\n'; return 0; fi
+    record "helm $*"; return 0
+  }
+  run _recover_pending_helm_release rel ns no-destroy
+  [ "$status" -eq 0 ] || return 1
+  mock_calls | grep -q "helm rollback rel -n ns"
+}
