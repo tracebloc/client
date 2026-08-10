@@ -10,7 +10,7 @@ that:
 2. installs the NVIDIA Container Toolkit, configures containerd for the `nvidia`
    runtime, and puts that runtime in **CDI mode**,
 3. bakes in the `nvidia` `RuntimeClass`, and
-4. generates a **WSL CDI spec at node boot** (`tracebloc-cdi-boot.sh`).
+4. generates a **WSL CDI spec at node boot** (`k3d-entrypoint-tracebloc-cdi.sh`).
 
 Based on the official [k3d CUDA recipe](https://k3d.io/v5.7.4/usage/advanced/cuda/),
 plus the WSL2 findings below.

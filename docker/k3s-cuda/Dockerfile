@@ -6,8 +6,10 @@
 # NVIDIA container runtime, so GPU pods can never schedule on it — the node
 # advertises 0 nvidia.com/gpu. This image rebuilds the SAME pinned k3s on an
 # NVIDIA CUDA Ubuntu base, installs the NVIDIA Container Toolkit, configures
-# containerd for the `nvidia` runtime, and bakes in the device-plugin +
-# `nvidia` RuntimeClass so the node advertises nvidia.com/gpu on first boot.
+# containerd for the `nvidia` runtime (in CDI mode), and bakes in the `nvidia`
+# RuntimeClass plus a k3d entrypoint drop-in that generates the WSL CDI spec on
+# every node start. GPU capacity is advertised by the installer + that drop-in --
+# NOT by the NVML device plugin, which cannot work on WSL2 (see README).
 # Based on the official k3d CUDA recipe (https://k3d.io/.../usage/advanced/cuda/).
 #
 # IMPORTANT: K3S_TAG MUST match the installer's K8S_VERSION pin
@@ -71,13 +73,17 @@ COPY --from=k3s /bin /bin
 # on Docker Desktop/WSL2 it can't init NVML, would register 0 GPUs, and (owning the
 # nvidia.com/gpu extended resource) would overwrite the installer's node-resource patch
 # with 0 -- stranding jobs. GPU capacity is advertised by the installer via a node patch,
-# and pods get the real GPU through the CDI spec generated at boot (see tracebloc-cdi-boot.sh).
+# and pods get the real GPU through the CDI spec generated at boot (see k3d-entrypoint-tracebloc-cdi.sh).
 COPY nvidia-runtimeclass.yaml /var/lib/rancher/k3s/server/manifests/nvidia-runtimeclass.yaml
 
-# Boot wrapper: generate the WSL CDI spec (+ libdxcore) before starting k3s, so pods can
-# use the GPU on Docker Desktop/WSL2. No-op on non-WSL2 nodes. (#616)
-COPY tracebloc-cdi-boot.sh /usr/local/bin/tracebloc-cdi-boot.sh
-RUN chmod +x /usr/local/bin/tracebloc-cdi-boot.sh
+# Node GPU setup: generate the WSL CDI spec (+ libdxcore) and keep nvidia.com/gpu
+# advertised, so pods can use the GPU on Docker Desktop/WSL2. No-op on non-WSL2 nodes.
+#
+# It MUST be installed as a /bin/k3d-entrypoint-*.sh DROP-IN, not as the image ENTRYPOINT:
+# k3d replaces the image entrypoint with its own /bin/k3d-entrypoint.sh, which runs these
+# drop-ins and then execs k3s. An ENTRYPOINT wrapper here is silently never run (#616).
+COPY k3d-entrypoint-tracebloc-cdi.sh /bin/k3d-entrypoint-tracebloc-cdi.sh
+RUN chmod +x /bin/k3d-entrypoint-tracebloc-cdi.sh
 
 VOLUME /var/lib/kubelet
 VOLUME /var/lib/rancher/k3s
@@ -86,5 +92,8 @@ VOLUME /var/log
 
 ENV PATH="$PATH:/bin/aux"
 
-ENTRYPOINT ["/usr/local/bin/tracebloc-cdi-boot.sh"]
+# Stock k3s entrypoint (same as rancher/k3s). k3d overrides it with its own
+# /bin/k3d-entrypoint.sh, which runs our drop-in above before exec'ing k3s; keeping the
+# stock value means the image also behaves normally outside k3d.
+ENTRYPOINT ["/bin/k3s"]
 CMD ["agent"]

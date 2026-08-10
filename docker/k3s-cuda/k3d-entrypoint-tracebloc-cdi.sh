@@ -1,10 +1,20 @@
 #!/bin/sh
 # =============================================================================
-#  tracebloc GPU-on-WSL2 boot setup (#616)
+#  tracebloc GPU-on-WSL2 node setup — k3d entrypoint DROP-IN (#616)
 # =============================================================================
+# WHY THE FILENAME MATTERS: k3d does NOT use the image's ENTRYPOINT. It replaces it
+# with its own /bin/k3d-entrypoint.sh, which runs every /bin/k3d-entrypoint-*.sh
+# drop-in and then execs k3s. An image ENTRYPOINT wrapper is therefore silently
+# never executed (that's exactly how this shipped broken the first time: the CDI spec
+# was never generated, and the installer correctly fell back to CPU). So this ships as
+# /bin/k3d-entrypoint-tracebloc-cdi.sh and must:
+#   * RETURN (never exec k3s — k3d's entrypoint does that afterwards), and
+#   * always `exit 0` — k3d runs drop-ins with `|| exit 1`, so a non-zero exit here
+#     would abort the whole node. GPU is optional; it must never break the cluster.
+#
 # On Docker Desktop / WSL2 the NVIDIA k8s device plugin can't work (NVML returns
 # ERROR_NOT_SUPPORTED through the paravirtualized GPU), so we wire the GPU into
-# pods via CDI instead. This MUST run at node boot: the WSL driver-store path is a
+# pods via CDI instead. This MUST run at node start: the WSL driver-store path is a
 # dynamic per-machine hash, so the CDI spec has to be generated live on this node.
 # Entirely no-op on a non-WSL2 node (no /dev/dxg) -> a normal (Linux/CPU) node is
 # unaffected and k3s starts exactly as before.
@@ -50,9 +60,13 @@ if [ -e /dev/dxg ]; then
   # Pending with "Insufficient nvidia.com/gpu" until someone re-ran the installer.
   # There's no device plugin to own the resource here, so this node re-asserts it
   # itself: a background reconciler waits for the local API, then re-patches whenever
-  # the capacity is missing. Runs on EVERY node start (this is the entrypoint), so a
-  # reboot self-heals with no user action. Fully guarded + backgrounded: it can never
-  # delay or block k3s. Interval override: TRACEBLOC_GPU_RECONCILE_SECS.
+  # the capacity is missing. Runs on EVERY node start (k3d runs this drop-in each time),
+  # so a reboot self-heals with no user action. Fully guarded + backgrounded: it can
+  # never delay or block k3s. Interval override: TRACEBLOC_GPU_RECONCILE_SECS.
+  #
+  # Fully DETACHED (</dev/null, output to /dev/null): this drop-in exits immediately after
+  # forking, so the loop is orphaned and reparented to PID 1 (k3s, which k3d's entrypoint
+  # execs). Holding the inherited stdio would risk blocking on a closed pipe.
   (
     interval="${TRACEBLOC_GPU_RECONCILE_SECS:-60}"
     kube="/etc/rancher/k3s/k3s.yaml"
@@ -72,7 +86,9 @@ if [ -e /dev/dxg ]; then
       fi
       sleep "$interval"
     done
-  ) &
+  ) </dev/null >/dev/null 2>&1 &
 fi
 
-exec /bin/k3s "$@"
+# Return control to k3d's entrypoint, which runs the remaining drop-ins and then execs
+# k3s. ALWAYS 0: k3d aborts the node on a non-zero drop-in exit, and GPU is optional.
+exit 0

@@ -6,7 +6,7 @@
 # runtimeClassName: nvidia (the installer sets RUNTIME_CLASS_NAME=nvidia when GPU
 # is enabled, which jobs-manager threads into every spawned pod), so the node's
 # containerd invokes the nvidia container runtime -- which, in CDI mode (see
-# tracebloc-cdi-boot.sh), injects the GPU into the pod from the WSL CDI spec.
+# k3d-entrypoint-tracebloc-cdi.sh), injects the GPU into the pod from the WSL CDI spec.
 #
 # NOTE: we intentionally do NOT ship the NVML device-plugin DaemonSet here. On
 # Docker Desktop/WSL2 it can't initialise NVML (ERROR_NOT_SUPPORTED), would

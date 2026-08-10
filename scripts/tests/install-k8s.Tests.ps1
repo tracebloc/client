@@ -4104,10 +4104,10 @@ Describe "Embedded GPU build inputs stay in sync with docker/k3s-cuda (#616 drif
     $file = & $norm ([System.IO.File]::ReadAllBytes((Resolve-Path "$PSScriptRoot/../../docker/k3s-cuda/nvidia-runtimeclass.yaml").Path))
     $decoded | Should -Be $file
   }
-  It "the embedded CDI boot script decodes to docker/k3s-cuda/tracebloc-cdi-boot.sh" {
+  It "the embedded CDI drop-in decodes to docker/k3s-cuda/k3d-entrypoint-tracebloc-cdi.sh" {
     $norm = { param([byte[]]$b) (([System.Text.Encoding]::UTF8.GetString($b)) -replace "`r`n","`n").TrimEnd() }
     $decoded = & $norm ([System.Convert]::FromBase64String($script:K3S_CUDA_BOOT_B64))
-    $file = & $norm ([System.IO.File]::ReadAllBytes((Resolve-Path "$PSScriptRoot/../../docker/k3s-cuda/tracebloc-cdi-boot.sh").Path))
+    $file = & $norm ([System.IO.File]::ReadAllBytes((Resolve-Path "$PSScriptRoot/../../docker/k3s-cuda/k3d-entrypoint-tracebloc-cdi.sh").Path))
     $decoded | Should -Be $file
   }
   It "the node image disables the CUDA requirement gate so it boots on an older-but-valid driver (#616)" {
@@ -4125,11 +4125,26 @@ Describe "Embedded GPU build inputs stay in sync with docker/k3s-cuda (#616 drif
     $rc | Should -Match 'handler: nvidia'
     $rc | Should -Not -Match 'kind: DaemonSet'
   }
-  It "the CDI boot script is a strict no-op without /dev/dxg (Linux/CPU nodes unaffected) (#616)" {
+  It "the CDI setup ships as a k3d ENTRYPOINT DROP-IN, not the image ENTRYPOINT (#616 regression)" {
+    # This shipped broken once: k3d REPLACES the image entrypoint with its own
+    # /bin/k3d-entrypoint.sh (verified on a live node), so an ENTRYPOINT wrapper never ran and
+    # the CDI spec was never generated. k3d runs /bin/k3d-entrypoint-*.sh drop-ins instead.
+    $df = [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String($script:K3S_CUDA_DOCKERFILE_B64))
+    $df | Should -Match 'COPY k3d-entrypoint-tracebloc-cdi\.sh /bin/k3d-entrypoint-tracebloc-cdi\.sh'
+    $df | Should -Match 'chmod \+x /bin/k3d-entrypoint-tracebloc-cdi\.sh'
+    # the image entrypoint must stay the stock k3s one -- never our script
+    $df | Should -Match 'ENTRYPOINT \["/bin/k3s"\]'
+    $df | Should -Not -Match 'ENTRYPOINT \["/usr/local/bin/tracebloc'
+  }
+  It "the drop-in RETURNS (never execs k3s) and always exits 0 so it can't abort the node (#616)" {
+    # k3d runs drop-ins with `|| exit 1` and execs k3s itself afterwards.
+    $boot = [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String($script:K3S_CUDA_BOOT_B64))
+    $boot | Should -Not -Match 'exec /bin/k3s'
+    $boot.TrimEnd() | Should -Match 'exit 0$'
+  }
+  It "the CDI setup is a strict no-op without /dev/dxg (Linux/CPU nodes unaffected) (#616)" {
     $boot = [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String($script:K3S_CUDA_BOOT_B64))
     $boot | Should -Match 'if \[ -e /dev/dxg \]'
-    # k3s must start regardless of the GPU setup outcome
-    $boot | Should -Match 'exec /bin/k3s "\$@"'
   }
   It "the node re-asserts nvidia.com/gpu capacity across restarts (#616 Bugbot HIGH: kubelet zeroes it)" {
     # A manually patched extended resource is not durable -- the kubelet re-reports node
@@ -4141,16 +4156,16 @@ Describe "Embedded GPU build inputs stay in sync with docker/k3s-cuda (#616 drif
     $boot | Should -Match 'TRACEBLOC_GPU_RECONCILE_SECS'
     # backgrounded so it can never delay/block k3s, and it re-patches only when missing/0
     $boot | Should -Match "case \`"\`$current\`" in"
-    $boot | Should -Match '\) &'
+    $boot | Should -Match '\) </dev/null >/dev/null 2>&1 &'
   }
-  It "the boot script wires CDI on WSL2 (mode=cdi baked, generate spec, inject libdxcore) (#616)" {
+  It "the drop-in wires CDI on WSL2 (mode=cdi baked, generate spec, inject libdxcore) (#616)" {
     $boot = [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String($script:K3S_CUDA_BOOT_B64))
     $boot | Should -Match 'nvidia-ctk cdi generate --mode=wsl'
     $boot | Should -Match 'libdxcore\.so'
-    $boot | Should -Match 'exec /bin/k3s'
+    $boot | Should -Not -Match 'exec /bin/k3s'
     $df = [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String($script:K3S_CUDA_DOCKERFILE_B64))
     $df | Should -Match 'nvidia-container-runtime\.mode=cdi'
-    $df | Should -Match 'tracebloc-cdi-boot\.sh'
+    $df | Should -Match 'k3d-entrypoint-tracebloc-cdi\.sh'
   }
 }
 
