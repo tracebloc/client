@@ -3344,6 +3344,23 @@ function Install-GpuDevicePlugin {
       Warn "GPU couldn't be wired into the cluster (CDI spec missing) - continuing in CPU mode."
       return $false
     }
+    # Remove a LEFTOVER NVML device plugin before advertising capacity ourselves (Bugbot, HIGH).
+    # A device plugin OWNS the nvidia.com/gpu extended resource: on WSL2 it registers 0 GPUs and
+    # re-reports that on every sync, overwriting our patch -- so a DaemonSet left behind by an
+    # older install (or by a run where the /dev/dxg probe transiently missed and we took the
+    # plugin path) would keep GPU permanently disabled, even across re-runs. Idempotent:
+    # --ignore-not-found makes the normal "nothing there" case a clean no-op.
+    $dpGone = Invoke-BoundedProcess -FileName "kubectl" -Arguments @(
+      "delete", "daemonset", "-n", "kube-system", "nvidia-device-plugin-daemonset",
+      "--ignore-not-found", "--request-timeout=20s") -TimeoutSec 30
+    if ($dpGone.Code -eq 0) {
+      if ($dpGone.Output -match 'deleted') { Log "Removed a leftover NVML device plugin (it would pin nvidia.com/gpu at 0 on WSL2): $($dpGone.Output)" }
+    } else {
+      # Not fatal on its own -- but say so, because it's the one thing that can silently
+      # re-zero the capacity we're about to set.
+      Log "Couldn't check/remove a leftover NVML device plugin (exit $($dpGone.Code)): $($dpGone.Output)"
+    }
+
     if (Set-NodeGpuCapacity) {
       # Tell the chart to thread the CDI selector into GPU training pods; without it a pod
       # schedules but CUDA fails (client-runtime#291). Only set on this WSL2/CDI path.
@@ -3351,6 +3368,9 @@ function Install-GpuDevicePlugin {
       Ok "GPU acceleration enabled (WSL2/CDI)."
       return $true
     }
+    # Set the reason HERE: this path never uses the device plugin, so letting the caller's
+    # generic fallback fill in a device-plugin failure would name the wrong cause (Bugbot).
+    $script:GPU_SKIP_REASON = "the installer couldn't advertise nvidia.com/gpu on the cluster node (this machine uses the WSL2/CDI path, where the installer advertises the GPU itself) -- re-run to retry"
     Warn "Couldn't advertise GPU capacity on the node - continuing in CPU mode. Re-run the installer later to retry."
     return $false
   }
@@ -5587,6 +5607,18 @@ if ($GPU_VENDOR -eq "nvidia" -and $NVIDIA_DRIVER_OK -and ($K8S_VERSION -eq "late
         Log "GPU mode: using a single node (agents=0) so the one physical GPU is advertised exactly once."
       }
       $AGENTS = "0"
+    }
+    # SERVERS needs the same collapse (Bugbot): agents=0 alone still leaves SERVERS>1 possible,
+    # and EVERY server node runs the boot reconciler and advertises nvidia.com/gpu=1 for the SAME
+    # physical card -- so a 3-server cluster would offer 3 GPUs and schedule 3 jobs onto one
+    # device. One server => the card is advertised exactly once.
+    if ($SERVERS -ne "1") {
+      if ($env:SERVERS) {
+        Warn ("GPU mode forces a single server (servers=1) so the one physical GPU isn't double-counted; overriding your SERVERS=$SERVERS. Every k3d node shares the same host GPU and would re-advertise it.")
+      } else {
+        Log "GPU mode: using a single server (servers=1) so the one physical GPU is advertised exactly once."
+      }
+      $SERVERS = "1"
     }
     Ok "GPU enabled -- cluster will use the custom k3s-CUDA image with --gpus=all"
   } else {

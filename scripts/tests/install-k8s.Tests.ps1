@@ -4224,8 +4224,32 @@ Describe "WSL2 GPU: node-advertised capacity replaces the NVML device plugin (#6
     $fn = (($script:CDISRC -split 'function Install-GpuDevicePlugin')[1] -split '\nfunction ')[0]
     $fn | Should -Match '"test", "-s", "/etc/cdi/nvidia\.yaml"'
     # and the spec check must come BEFORE the success path
-    $fn | Should -Match '/etc/cdi/nvidia\.yaml"\)[\s\S]{0,600}?Set-NodeGpuCapacity'
+    $fn | Should -Match '/etc/cdi/nvidia\.yaml"\)[\s\S]{0,1800}?Set-NodeGpuCapacity'
     $fn | Should -Match '\$script:GPU_SKIP_REASON = "the node couldn''t generate its WSL GPU \(CDI\) spec'
+  }
+  It "a leftover NVML device plugin is REMOVED before advertising capacity (#616 Bugbot HIGH)" {
+    # A device plugin owns the nvidia.com/gpu extended resource and re-reports 0 on WSL2 every
+    # sync, so one left behind by an older install would permanently defeat the capacity patch.
+    $fn = (($script:CDISRC -split 'function Install-GpuDevicePlugin')[1] -split '\nfunction ')[0]
+    $fn | Should -Match 'delete", "daemonset", "-n", "kube-system", "nvidia-device-plugin-daemonset"'
+    $fn | Should -Match '--ignore-not-found'          # idempotent: clean no-op when absent
+    # and it must happen BEFORE we patch capacity
+    $fn | Should -Match 'nvidia-device-plugin-daemonset"[\s\S]{0,900}?Set-NodeGpuCapacity'
+  }
+  It "a failed capacity patch names the CDI cause, not a device-plugin failure (#616 Bugbot)" {
+    # this path never uses the plugin, so the caller's generic fallback reason would mislead
+    $fn = (($script:CDISRC -split 'function Install-GpuDevicePlugin')[1] -split '\nfunction ')[0]
+    $tail = ($fn -split 'if \(Set-NodeGpuCapacity\) \{')[1]
+    $tail | Should -Match '\$script:GPU_SKIP_REASON = "the installer couldn''t advertise nvidia\.com/gpu'
+    $tail | Should -Match 'WSL2/CDI path'
+  }
+  It "GPU mode collapses SERVERS to 1 as well as AGENTS to 0 (#616 Bugbot: one card, one advertiser)" {
+    # every server node runs the boot reconciler and advertises nvidia.com/gpu=1 for the SAME
+    # physical card, so SERVERS>1 would offer N GPUs for one device.
+    $gate = ($script:CDISRC -split '\$K3D_GPU_FLAG = "--gpus=all"')[1]
+    $gate | Should -Match '\$AGENTS = "0"'
+    $gate | Should -Match '\$SERVERS = "1"'
+    $gate | Should -Match 'if \(\$env:SERVERS\)'      # an explicit user value is overridden LOUDLY
   }
   It "a failed capacity advertisement returns false so the caller falls back to CPU" {
     $fn = (($script:CDISRC -split 'function Install-GpuDevicePlugin')[1] -split '\nfunction ')[0]
