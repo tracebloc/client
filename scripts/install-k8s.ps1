@@ -3310,12 +3310,36 @@ function Set-NodeGpuCapacity {
   # One GPU per node: k3d maps the SAME host GPU into every node container, and GPU mode already
   # forces a single node (see the gate), so 1 is correct and never double-counts (Bugbot).
   $nodeName = "k3d-$CLUSTER_NAME-server-0"
-  $patch = '[{"op":"add","path":"/status/capacity/nvidia.com~1gpu","value":"1"}]'
+  # Pass the JSON patch via --patch-file, NEVER as an inline -p argument. Windows PowerShell 5.1
+  # does not preserve embedded double quotes when it builds a native command line, so
+  # `-p '[{"op":...}]'` reaches kubectl as `[{op:...}]` -> "invalid character 'o'" and the patch
+  # always fails (the real cause of "Couldn't advertise GPU capacity" on a live box; the same
+  # command works by hand only when each quote is escaped as \"). A file sidesteps the shell
+  # entirely. UTF8 WITHOUT BOM: a BOM makes kubectl's JSON parse fail.
+  $patchFile = Join-Path $env:TEMP ("tb-gpu-capacity-" + [guid]::NewGuid().ToString('N') + ".json")
+  $patchJson = '[{"op":"add","path":"/status/capacity/nvidia.com~1gpu","value":"1"}]'
   Log "Advertising nvidia.com/gpu=1 on $nodeName (node extended resource; the NVML device plugin can't work on WSL2)"
-  $out = (kubectl patch node $nodeName --subresource=status --type=json -p $patch --request-timeout=15s 2>&1 | Out-String)
-  Log "kubectl patch node (gpu capacity): $out"
-  if ($LASTEXITCODE -eq 0) { return $true }
-  Log "Advertising GPU capacity failed (exit $LASTEXITCODE)"
+  try {
+    [System.IO.File]::WriteAllText($patchFile, $patchJson, (New-Object System.Text.UTF8Encoding($false)))
+  } catch {
+    Log "Couldn't stage the GPU capacity patch file: $($_.Exception.Message)"
+    return $false
+  }
+  try {
+    # Retry: right after cluster-create the API server / node object can still be settling, and a
+    # 404 on the node here would drop an otherwise-working GPU to CPU for the whole run.
+    for ($i = 1; $i -le 6; $i++) {
+      $r = Invoke-BoundedProcess -FileName "kubectl" -Arguments @(
+        "patch", "node", $nodeName, "--subresource=status", "--type=json",
+        "--patch-file", "`"$patchFile`"", "--request-timeout=15s") -TimeoutSec 30
+      Log "kubectl patch node (gpu capacity, attempt ${i}): exit=$($r.Code) $($r.Output)"
+      if ($r.Code -eq 0) { return $true }
+      Start-Sleep -Seconds 5
+    }
+  } finally {
+    Remove-Item $patchFile -Force -ErrorAction SilentlyContinue
+  }
+  Log "Advertising GPU capacity failed after retries"
   return $false
 }
 

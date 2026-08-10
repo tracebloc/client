@@ -4183,6 +4183,18 @@ Describe "WSL2 GPU: node-advertised capacity replaces the NVML device plugin (#6
     # single GPU per node -- GPU mode already forces one node, so 1 never double-counts
     $fn | Should -Match '"value":"1"'
   }
+  It "the JSON patch goes via --patch-file, never an inline -p (PS 5.1 eats the quotes) (#616 regression)" {
+    # Windows PowerShell 5.1 does not preserve embedded double quotes when building a native
+    # command line, so `-p '[{"op":...}]'` reached kubectl as `[{op:...}]` and the patch ALWAYS
+    # failed on a real box. A file sidesteps the shell entirely.
+    $fn = (($script:CDISRC -split 'function Set-NodeGpuCapacity')[1] -split '\nfunction ')[0]
+    $fn | Should -Match '"--patch-file"'
+    $fn | Should -Not -Match '-p \$patch'
+    # written without a BOM (a BOM breaks kubectl's JSON parse)
+    $fn | Should -Match 'UTF8Encoding\(\$false\)'
+    # and retried, since the node object can still be settling right after cluster-create
+    $fn | Should -Match 'for \(\$i = 1; \$i -le 6; \$i\+\+\)'
+  }
   It "Set-NodeGpuCapacity no-ops when GPU isn't enabled" {
     $K3D_GPU_FLAG = ""
     Mock kubectl { throw "must not patch the node when GPU is not enabled" }
