@@ -40,6 +40,10 @@
           "description": "Optional GPU limits for spawned jobs (defaults to 'nvidia.com/gpu=1' if not set)"
         },
         "RUNTIME_CLASS_NAME": { "type": "string" },
+        "GPU_VISIBLE_DEVICES": {
+          "type": "string",
+          "description": "Optional CDI device selector threaded into GPU training pods as NVIDIA_VISIBLE_DEVICES (client-runtime#291). Set only where the NVIDIA device plugin can't run and the GPU is injected via CDI instead (Docker Desktop / WSL2, where NVML returns ERROR_NOT_SUPPORTED — tracebloc/client#616; the Windows installer sets it automatically there). Leave empty on a normal device-plugin node, which owns NVIDIA_VISIBLE_DEVICES itself."
+        },
         "SINGLE_NODE": {
           "type": "string",
           "description": "Single-node (fixed, non-elastic) cluster flag. Gates jobs-manager's GPU->CPU pending-job fallback (client-runtime#92). 'true' -> downgrade a stuck Pending GPU pod to CPU (correct on fixed single-host clusters where GPU presence is known at install time); 'false' -> leave it for the autoscaler/backend (correct for EKS/AKS/OpenShift). If unset, defaults to hostPath.enabled."

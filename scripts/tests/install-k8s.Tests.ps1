@@ -3949,7 +3949,7 @@ Describe "Confirm-GpuNode disables GPU when the node never advertises one (#616 
 Describe "Adopted-reuse reconciles the GPU request (#616 Bugbot: no stale GPU under --reuse-values)" {
   BeforeAll { $script:ESRC = Get-Content "$PSScriptRoot/../install-k8s.ps1" -Raw }
   It "the GPU value decision is made BEFORE the adopted/fresh split so both paths use it" {
-    $script:ESRC | Should -Match 'BEFORE the adopted/fresh split[\s\S]{0,1400}?if \(-not \$adoptedReuse\)'
+    $script:ESRC | Should -Match 'BEFORE the adopted/fresh split[\s\S]{0,2200}?if \(-not \$adoptedReuse\)'
   }
   It "the adopted helm upgrade forces the GPU env keys to this run's decision via --set-string" {
     # else a prior release's GPU_REQUESTS/GPU_LIMITS survives --reuse-values after a CPU fallback.
@@ -4177,7 +4177,46 @@ Describe "WSL2 GPU: node-advertised capacity replaces the NVML device plugin (#6
   It "Install-GpuDevicePlugin takes the CDI path when the node has /dev/dxg (WSL2)" {
     $fn = (($script:CDISRC -split 'function Install-GpuDevicePlugin')[1] -split '\nfunction ')[0]
     $fn | Should -Match 'Invoke-DockerCli -DockerArgs @\("exec", "k3d-\$CLUSTER_NAME-server-0", "test", "-e", "/dev/dxg"\)'
-    $fn | Should -Match 'if \(Set-NodeGpuCapacity\) \{ Ok "GPU acceleration enabled \(WSL2/CDI\)\."; return \$true \}'
+    $fn | Should -Match 'if \(Set-NodeGpuCapacity\) \{[\s\S]{0,400}?Ok "GPU acceleration enabled \(WSL2/CDI\)\."[\s\S]{0,80}?return \$true'
+  }
+  It "the WSL2/CDI path sets the chart's GPU device selector for training pods (#616)" {
+    # without GPU_VISIBLE_DEVICES a pod schedules but CUDA fails (client-runtime#291)
+    $fn = (($script:CDISRC -split 'function Install-GpuDevicePlugin')[1] -split '\nfunction ')[0]
+    $fn | Should -Match '\$script:GPU_DEVICE_SELECTOR = "nvidia\.com/gpu=all"'
+    # values carry it, gated on the same condition as gpuVal (empty when GPU is off)
+    $script:CDISRC | Should -Match '\$gpuSelector = if \(\$gpuVal\) \{ \$GPU_DEVICE_SELECTOR \} else \{ "" \}'
+    $script:CDISRC | Should -Match 'GPU_VISIBLE_DEVICES: "\$gpuSelector"'
+    # and the adopted-reuse reconcile forces it too, so a stale value can't survive
+    $script:CDISRC | Should -Match '--set-string "env\.GPU_VISIBLE_DEVICES=\$gpuSelector"'
+  }
+  It "the 0-GPU reason names the RIGHT cause per path -- no dead-end advice (#616 Bugbot)" {
+    # on WSL2/CDI there is no device plugin, so blaming a blocked nvcr.io plugin image would
+    # send operators down a dead end.
+    $fn = (($script:CDISRC -split 'function Confirm-GpuNode')[1] -split '\nfunction ')[0]
+    $fn | Should -Match 'if \(\$GPU_DEVICE_SELECTOR\) \{'
+    $wsl = ($fn -split 'if \(\$GPU_DEVICE_SELECTOR\) \{')[1]
+    ($wsl -split '\} else \{')[0] | Should -Match 'WSL2/CDI path'
+    ($wsl -split '\} else \{')[0] | Should -Not -Match 'k8s-device-plugin'
+    # the non-CDI branch keeps the device-plugin guidance
+    ($wsl -split '\} else \{')[1] | Should -Match 'k8s-device-plugin'
+  }
+  It "the doctor's GPU smoke test matches how the cluster delivers the GPU (#616 Bugbot)" {
+    # pods only get the GPU under the nvidia RuntimeClass, and on WSL2 nvidia-smi FAILS in a pod
+    # even when CUDA works -- so the suggested command must not make a working cluster look broken.
+    $doctor = (($script:CDISRC -split 'GPU test \(WSL2/CDI')[1] -split '\n  \}')[0]
+    $doctor | Should -Match 'runtimeClassName'
+    $doctor | Should -Match 'vectoradd'                     # CUDA workload, not nvidia-smi
+    $doctor | Should -Match 'NVIDIA_VISIBLE_DEVICES'
+    # and the non-CDI (device-plugin) command also carries the RuntimeClass
+    $plugin = (($script:CDISRC -split '\} else \{\s*\n\s*Log \(''  GPU test: kubectl run')[1] -split '\n    \}')[0]
+    $plugin | Should -Match 'runtimeClassName":"nvidia'
+    $plugin | Should -Match 'nvidia-smi'
+  }
+  It "the selector is EMPTY on a normal device-plugin (Linux) node -- the plugin owns that var (#616)" {
+    # $GPU_DEVICE_SELECTOR is only ever assigned inside the WSL2/CDI branch; the global default
+    # is empty, so a Linux/device-plugin install writes GPU_VISIBLE_DEVICES: "".
+    $script:CDISRC | Should -Match '(?m)^\$GPU_DEVICE_SELECTOR = ""'
+    ([regex]::Matches($script:CDISRC, '\$script:GPU_DEVICE_SELECTOR = "')).Count | Should -Be 1
   }
   It "the CDI spec is VERIFIED before claiming GPU is ready (#616 Bugbot)" {
     # the boot script guards every step with `|| true`; without this check a failed

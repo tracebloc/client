@@ -625,6 +625,13 @@ $K3D_GPU_FLAG     = ""
 # holds the human-readable reason so Print-Summary + the doctor can say WHY we fell back to
 # CPU instead of silently running CPU-only. Empty = GPU enabled, or no GPU to begin with.
 $GPU_SKIP_REASON  = ""
+# #616: CDI device selector for GPU training pods, set ONLY on the Docker Desktop/WSL2 path
+# (where the NVML device plugin can't work and pods get the GPU via a CDI spec). Written to the
+# chart as env.GPU_VISIBLE_DEVICES, which jobs-manager threads into GPU pods as
+# NVIDIA_VISIBLE_DEVICES (client-runtime#291). Deliberately EMPTY on a normal device-plugin
+# (Linux) node: there the plugin owns NVIDIA_VISIBLE_DEVICES and sets concrete GPU UUIDs, so
+# forcing a CDI selector would break device resolution. Empty => the chart passes nothing.
+$GPU_DEVICE_SELECTOR = ""
 # #616: the CUDA base + custom k3s-CUDA node image used when the GPU is enabled. The k3s-CUDA
 # tag encodes both the k3s pin ($K8S_VERSION) and the CUDA base, matching docker/k3s-cuda/build.sh.
 # The installer PULLS this image automatically at cluster-create — the user never builds or pulls
@@ -3337,7 +3344,13 @@ function Install-GpuDevicePlugin {
       Warn "GPU couldn't be wired into the cluster (CDI spec missing) - continuing in CPU mode."
       return $false
     }
-    if (Set-NodeGpuCapacity) { Ok "GPU acceleration enabled (WSL2/CDI)."; return $true }
+    if (Set-NodeGpuCapacity) {
+      # Tell the chart to thread the CDI selector into GPU training pods; without it a pod
+      # schedules but CUDA fails (client-runtime#291). Only set on this WSL2/CDI path.
+      $script:GPU_DEVICE_SELECTOR = "nvidia.com/gpu=all"
+      Ok "GPU acceleration enabled (WSL2/CDI)."
+      return $true
+    }
     Warn "Couldn't advertise GPU capacity on the node - continuing in CPU mode. Re-run the installer later to retry."
     return $false
   }
@@ -3414,16 +3427,23 @@ function Confirm-GpuNode {
     Ok "GPU verified and available."
     Log "Allocatable GPU count: $gpuCount"
   } else {
-    # The node advertises 0 nvidia.com/gpu after the wait -- the device plugin never became ready
-    # (e.g. its image nvcr.io/nvidia/k8s-device-plugin couldn't be pulled on a mirror/air-gap
-    # network, or the runtime isn't exposing the GPU). Leaving GPU requests active here would
+    # The node advertises 0 nvidia.com/gpu after the wait. Leaving GPU requests active here would
     # strand every job Pending against a 0-GPU node, so make the node the AUTHORITATIVE signal:
     # disable GPU for this run (clear the flag BEFORE Install-ClientHelm writes values) -> CPU
     # fallback (Bugbot). The cluster stays GPU-capable; only this run's chart values go CPU.
     $script:K3D_GPU_FLAG = ""
-    $script:GPU_SKIP_REASON = "the cluster node never advertised a GPU (the NVIDIA device plugin didn't become ready -- on a mirror/air-gap network its image nvcr.io/nvidia/k8s-device-plugin may be blocked)"
-    Warn "GPU didn't come up on the node -- running CPU-only so jobs aren't stranded Pending."
-    Hint "If this is a restricted network, ensure the NVIDIA device-plugin image is reachable (mirror it), then re-run."
+    # The CAUSE differs per path, and pointing at the wrong one sends operators down a dead end
+    # (Bugbot): on WSL2/CDI there IS no device plugin -- capacity comes from Set-NodeGpuCapacity --
+    # so blaming a blocked nvcr.io device-plugin image would be actively misleading.
+    if ($GPU_DEVICE_SELECTOR) {
+      $script:GPU_SKIP_REASON = "the cluster node never advertised a GPU (this machine uses the WSL2/CDI path, where the installer advertises the GPU itself -- the node may still have been starting, or the capacity patch didn't take)"
+      Warn "GPU didn't come up on the node -- running CPU-only so jobs aren't stranded Pending."
+      Hint "Re-run the installer to retry; the node also re-asserts GPU capacity itself shortly after it starts."
+    } else {
+      $script:GPU_SKIP_REASON = "the cluster node never advertised a GPU (the NVIDIA device plugin didn't become ready -- on a mirror/air-gap network its image nvcr.io/nvidia/k8s-device-plugin may be blocked)"
+      Warn "GPU didn't come up on the node -- running CPU-only so jobs aren't stranded Pending."
+      Hint "If this is a restricted network, ensure the NVIDIA device-plugin image is reachable (mirror it), then re-run."
+    }
   }
 }
 
@@ -4189,6 +4209,11 @@ function Install-ClientHelm {
   } else {
     Log "No NVIDIA GPU -- GPU_LIMITS and GPU_REQUESTS left empty"
   }
+  # CDI device selector rides the SAME gate as gpuVal: only meaningful when a GPU is actually
+  # wired in, and only non-empty on the WSL2/CDI path ($GPU_DEVICE_SELECTOR). Empty everywhere
+  # else so a device-plugin (Linux) node keeps owning NVIDIA_VISIBLE_DEVICES itself (#616).
+  $gpuSelector = if ($gpuVal) { $GPU_DEVICE_SELECTOR } else { "" }
+  if ($gpuSelector) { Log "GPU device selector for training pods: GPU_VISIBLE_DEVICES=$gpuSelector" }
 
   if (-not $adoptedReuse) {
   $passwordEscaped = $TB_CLIENT_PASSWORD -replace "'", "''"
@@ -4230,6 +4255,7 @@ function Install-ClientHelm {
   GPU_LIMITS: "$gpuVal"
   GPU_REQUESTS: "$gpuVal"
   RUNTIME_CLASS_NAME: "$runtimeClass"
+  GPU_VISIBLE_DEVICES: "$gpuSelector"
 
 storageClass:
   create: true
@@ -4316,7 +4342,8 @@ $envBlock
       --set-string "clientId=$TB_CLIENT_ID" `
       --set-string "env.GPU_REQUESTS=$gpuVal" `
       --set-string "env.GPU_LIMITS=$gpuVal" `
-      --set-string "env.RUNTIME_CLASS_NAME=$runtimeClass" 2>&1) | Out-String
+      --set-string "env.RUNTIME_CLASS_NAME=$runtimeClass" `
+      --set-string "env.GPU_VISIBLE_DEVICES=$gpuSelector" 2>&1) | Out-String
     Log "Helm Output: $helmOutput"
     if ($LASTEXITCODE -ne 0) { Err "Client reconcile failed." $helmOutput }
     # Keep the LOCAL record in step for future default-reuse prompts: heal only
@@ -4544,7 +4571,22 @@ function Print-Summary {
   Log "  k3d cluster start $CLUSTER_NAME"
   Log "  k3d cluster delete $CLUSTER_NAME"
   if ($GPU_VENDOR -eq "nvidia" -and $NVIDIA_DRIVER_OK -and $K3D_GPU_FLAG -ne "") {
-    Log '  GPU test: kubectl run gpu-test --rm -it --image=nvidia/cuda:12.3.1-base-ubuntu22.04 --limits="nvidia.com/gpu=1" -- nvidia-smi'
+    # The smoke test MUST match how this cluster actually delivers the GPU, or an operator
+    # testing a WORKING cluster sees a failure and concludes GPU is broken (Bugbot). Two
+    # differences that matter: (a) pods only get the GPU under the `nvidia` RuntimeClass, so
+    # --overrides is required; (b) on WSL2/CDI `nvidia-smi` inside a pod FAILS (NVML is not
+    # supported through the paravirtualized GPU) even when CUDA compute works perfectly --
+    # verified on real hardware -- so there we suggest a CUDA workload, not nvidia-smi.
+    if ($GPU_DEVICE_SELECTOR) {
+      Log ('  GPU test (WSL2/CDI -- runs CUDA; note nvidia-smi does NOT work in a pod here): ' +
+        'kubectl run gpu-test --rm -it --restart=Never --image=nvidia/samples:vectoradd-cuda11.2.1 ' +
+        '--overrides=''{"spec":{"runtimeClassName":"nvidia","containers":[{"name":"gpu-test",' +
+        '"image":"nvidia/samples:vectoradd-cuda11.2.1","env":[{"name":"NVIDIA_VISIBLE_DEVICES",' +
+        '"value":"' + $GPU_DEVICE_SELECTOR + '"}],"resources":{"limits":{"nvidia.com/gpu":"1"}}}]}}''')
+    } else {
+      Log ('  GPU test: kubectl run gpu-test --rm -it --restart=Never --image=nvidia/cuda:12.3.1-base-ubuntu22.04 ' +
+        '--overrides=''{"spec":{"runtimeClassName":"nvidia"}}'' --limits="nvidia.com/gpu=1" -- nvidia-smi')
+    }
   }
   Log "=== End Advanced Info ==="
 }
