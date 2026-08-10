@@ -1615,6 +1615,10 @@ EOF
   [ "$status" -eq 0 ] || return 1
   mock_calls | grep -q "helm upgrade --install tracebloc"                  # reinstalled from the saved file
   mock_calls | grep -q -- "--values $HOST_DATA_DIR/.tb-adopt-recovery-values.yaml"
+  # Durable recovery is the path that survives a cluster recreate (host data kept,
+  # namespace gone), so the reinstall MUST pass --create-namespace like the normal
+  # install path — otherwise helm fails "namespace not found" (Bugbot #619).
+  mock_calls | grep -q -- "--create-namespace"
   [ ! -e "$HOST_DATA_DIR/.tb-adopt-recovery-values.yaml" ] || return 1     # shredded on success
   [[ "$output" != *"VERIFY_CALLED"* ]] || return 1                         # never prompted/verified
 }

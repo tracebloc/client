@@ -778,9 +778,9 @@ _reconcile_adopted_client() {
   if [[ -n "$_recovery_reuse" ]]; then
     # Re-run recovery: the release is gone; reinstall from the durable saved
     # credential file (Bugbot #619).
-    _args=(upgrade --install "$_rel" "$chart_ref" --namespace "$_ns" --values "$_recovery_reuse")
+    _args=(upgrade --install "$_rel" "$chart_ref" --namespace "$_ns" --create-namespace --values "$_recovery_reuse")
   elif [[ "${TB_PENDING_REINSTALL:-0}" == "1" && -s "$_TB_PENDING_VALUES_FILE" ]]; then
-    _args=(upgrade --install "$_rel" "$chart_ref" --namespace "$_ns" --values "$_TB_PENDING_VALUES_FILE")
+    _args=(upgrade --install "$_rel" "$chart_ref" --namespace "$_ns" --create-namespace --values "$_TB_PENDING_VALUES_FILE")
   else
     local _reuse="--reuse-values"
     helm upgrade --help 2>/dev/null | grep -q -- '--reset-then-reuse-values' && _reuse="--reset-then-reuse-values"
@@ -823,7 +823,7 @@ _reconcile_adopted_client() {
     fi
     warn "Recovery from the saved credential file failed; it is kept (0600) at: $_recovery_reuse"
     hint "Re-run the installer to retry, or reconcile manually:"
-    hint "  helm -n $_ns upgrade --install $_rel $chart_ref -f $_recovery_reuse$_id_override"
+    hint "  helm -n $_ns upgrade --install $_rel $chart_ref --create-namespace -f $_recovery_reuse$_id_override"
     error "Reconcile of the existing client failed. Check the log for details: ${LOG_FILE:-}"
   fi
 
@@ -862,7 +862,7 @@ _reconcile_adopted_client() {
     if [[ -n "$_recovery" ]]; then
       warn "Reinstall failed after the wedged release was removed. Your client credential is saved (0600) at: $_recovery"
       hint "Re-run the installer to retry, or reconcile manually:"
-      hint "  helm -n $_ns upgrade --install $_rel $chart_ref -f $_recovery$_id_override"
+      hint "  helm -n $_ns upgrade --install $_rel $chart_ref --create-namespace -f $_recovery$_id_override"
     else
       warn "Reinstall failed after the wedged release was removed and the credential copy could not be saved."
       hint "Re-adopt this client from the dashboard to reissue access."
