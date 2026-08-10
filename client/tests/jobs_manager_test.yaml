@@ -476,3 +476,54 @@ tests:
           path: spec.template.spec.securityContext.fsGroup
       - notExists:
           path: spec.template.spec.initContainers
+
+  # backend#1528 S1: the tb_meta / tb_ingest env is flag-gated on
+  # serviceDbAccounts so a default install is byte-identical.
+  - it: service DB account env absent by default (byte-for-byte off)
+    asserts:
+      - notContains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: SERVICE_DB_ACCOUNTS
+            value: "1"
+      - notContains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: TB_META_USER
+            value: "tb_meta"
+
+  - it: service DB account env wired when serviceDbAccounts is on
+    set:
+      serviceDbAccounts: true
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: SERVICE_DB_ACCOUNTS
+            value: "1"
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: TB_META_USER
+            value: "tb_meta"
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: TB_INGEST_USER
+            value: "tb_ingest"
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: TB_META_PASSWORD
+            valueFrom:
+              secretKeyRef:
+                name: RELEASE-NAME-secrets
+                key: TB_META_PASSWORD
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: TB_INGEST_PASSWORD
+            valueFrom:
+              secretKeyRef:
+                name: RELEASE-NAME-secrets
+                key: TB_INGEST_PASSWORD
