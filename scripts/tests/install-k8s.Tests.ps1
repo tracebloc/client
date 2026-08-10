@@ -4169,6 +4169,26 @@ Describe "Embedded GPU build inputs stay in sync with docker/k3s-cuda (#616 drif
     # and the edit is only adopted if the spec still parses
     $boot | Should -Match 'nvidia-ctk cdi list'
   }
+  It "the toolkit version is PINNED with a fallback -- reproducible across machines (#616)" {
+    # unpinned, two machines built weeks apart get different toolkit builds, and a release that
+    # changes the CDI YAML shape breaks GPU on new installs while old ones keep working.
+    $df = [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String($script:K3S_CUDA_DOCKERFILE_B64))
+    $df | Should -Match 'ARG NCT_VERSION='
+    $df | Should -Match 'nvidia-container-toolkit=\$\{NCT_VERSION\}'
+    # a pin that has aged out of the repo must NOT fail the build (that would cost GPU entirely)
+    $df | Should -Match 'falling back to latest'
+    $df | Should -Match 'nvidia-ctk --version'          # record what actually got installed
+  }
+  It "the CDI gate does NOT require `nvidia-ctk cdi list` to exist (#616: no false negative)" {
+    # `cdi list` is version-dependent; keying the decision on it would disable a working GPU on a
+    # toolkit build that lacks the subcommand. Structural, format-stable checks decide instead.
+    $boot = [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String($script:K3S_CUDA_BOOT_B64))
+    $boot | Should -Match "grep -q 'nvidia\\.com/gpu'"
+    $boot | Should -Match "grep -q '/dev/dxg'"
+    $boot | Should -Match "grep -q 'libdxcore"
+    # cdi list is only an EXTRA veto, and only when available
+    $boot | Should -Match 'nvidia-ctk cdi list --help'
+  }
   It "the reconciler only advertises GPU when CDI is USABLE (#616 Bugbot HIGH)" {
     # re-asserting capacity onto a node whose CDI spec is broken is worse than not advertising:
     # pods schedule then fail CUDA with no cluster-level signal.

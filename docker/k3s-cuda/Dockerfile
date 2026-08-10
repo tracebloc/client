@@ -19,6 +19,15 @@
 # facts.env's K8S_VERSION, so a bump can't leave the GPU image tag stale (#547).
 ARG K3S_TAG="v1.29.4-k3s1"
 ARG CUDA_TAG="12.4.1-base-ubuntu22.04"
+# NVIDIA Container Toolkit version. PINNED to the build validated on real hardware (an RTX 4050
+# laptop, driver 532.10) because the whole WSL2 GPU path depends on version-sensitive surfaces:
+# `cdi generate --mode=wsl`, `config --set nvidia-container-runtime.mode=cdi`, and the exact YAML
+# the generator emits (our libdxcore injection parses it). Unpinned, two machines built weeks
+# apart could get different toolkit builds and behave differently -- and a future release changing
+# the spec shape would break GPU on new installs while existing ones kept working.
+# The install below FALLS BACK to the latest if this version has aged out of the apt repo, so a
+# stale pin degrades to "unpinned" rather than failing the build (which would cost GPU entirely).
+ARG NCT_VERSION="1.19.1-1"
 
 FROM rancher/k3s:${K3S_TAG} AS k3s
 
@@ -46,7 +55,10 @@ RUN export DEBIAN_FRONTEND=noninteractive \
          | sed 's#deb https://#deb [signed-by=/usr/share/keyrings/nvidia-container-toolkit-keyring.gpg] https://#g' \
          | tee /etc/apt/sources.list.d/nvidia-container-toolkit.list \
     && apt-get update \
-    && apt-get install -y --no-install-recommends nvidia-container-toolkit \
+    && ( apt-get install -y --no-install-recommends "nvidia-container-toolkit=${NCT_VERSION}" \
+         || { echo "NCT ${NCT_VERSION} unavailable in the repo -- falling back to latest"; \
+              apt-get install -y --no-install-recommends nvidia-container-toolkit; } ) \
+    && nvidia-ctk --version \
     && nvidia-ctk runtime configure --runtime=containerd \
     && nvidia-ctk config --in-place --set nvidia-container-runtime.mode=cdi \
     && apt-get clean \

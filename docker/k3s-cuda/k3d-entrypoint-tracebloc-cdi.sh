@@ -94,11 +94,21 @@ if [ -e /dev/dxg ]; then
   # misleading driver error, and no cluster-level signal says why (Bugbot, HIGH). The installer
   # already refuses in that case, but this reconciler runs again on every restart -- so it must
   # apply the SAME standard rather than re-asserting capacity onto a broken node.
+  # Structural checks first, and NOT gated on `nvidia-ctk cdi list` existing: that subcommand is
+  # version-dependent, so keying the decision on it would disable a perfectly working GPU on a
+  # toolkit build that lacks it (a false negative on someone else's machine). We require the spec
+  # to be non-empty, to declare the nvidia.com/gpu kind, to expose /dev/dxg, and to carry our
+  # libdxcore mount -- all format-stable facts. `cdi list` is then used only as an EXTRA veto when
+  # it is available, so a spec it actively rejects still can't advertise a GPU.
   cdi_ok=0
   if [ -s /etc/cdi/nvidia.yaml ] \
-       && grep -q 'libdxcore\.so' /etc/cdi/nvidia.yaml \
-       && nvidia-ctk cdi list >/dev/null 2>&1; then
+       && grep -q 'nvidia\.com/gpu' /etc/cdi/nvidia.yaml \
+       && grep -q '/dev/dxg' /etc/cdi/nvidia.yaml \
+       && grep -q 'libdxcore\.so' /etc/cdi/nvidia.yaml; then
     cdi_ok=1
+    if nvidia-ctk cdi list --help >/dev/null 2>&1; then
+      nvidia-ctk cdi list >/dev/null 2>&1 || cdi_ok=0
+    fi
   fi
 
   # Keep nvidia.com/gpu advertised across restarts (Bugbot, HIGH). A manually patched
