@@ -497,6 +497,16 @@ _resolve_chart_ref() {
 # mark it deployed (Bugbot #619). Roll back to the last KNOWN-GOOD revision
 # explicitly instead. The awk carries NO `exit`: it reads the whole stream so
 # the `helm history | awk` pipe can't SIGPIPE helm and trip pipefail.
+#
+# helm marshals each history entry from a Go struct whose FIRST field is
+# `revision`, so the real `-o yaml` shape carries the revision on the list-item
+# marker line itself — `- revision: N` — with `status:` on a following indented
+# line. The parser must therefore associate the revision from EITHER the `- `
+# marker line or an indented key line with the entry's status (Bugbot #619): the
+# `^-` rule flushes+resets the previous entry FIRST, then the revision rule (which
+# also matches the `- revision:` marker) captures this entry's revision. Both key
+# rules are anchored to the line start so a value inside `description:` (which can
+# legitimately contain the text `revision:`) is never mistaken for a key.
 _last_deployed_revision() {
   local _rel="$1" _ns="$2" _hist
   _hist="$(_bounded "${TB_HELM_STATUS_TIMEOUT:-30}" \
@@ -505,9 +515,9 @@ _last_deployed_revision() {
     function flush() {
       if (rev != "" && (st == "deployed" || st == "superseded") && rev+0 > best+0) best = rev+0
     }
-    /^-[[:space:]]/          { flush(); rev=""; st="" }
-    /^[[:space:]]*revision:/ { v=$0; sub(/.*revision:[[:space:]]*/, "", v); gsub(/[^0-9]/, "", v); rev=v }
-    /^[[:space:]]*status:/   { v=$0; sub(/.*status:[[:space:]]*/, "", v);   gsub(/[^a-z-]/, "", v);  st=v }
+    /^-[[:space:]]/                          { flush(); rev=""; st="" }
+    /^(-|[[:space:]])[[:space:]]*revision:/  { v=$0; sub(/.*revision:[[:space:]]*/, "", v); gsub(/[^0-9]/, "", v); rev=v }
+    /^(-|[[:space:]])[[:space:]]*status:/    { v=$0; sub(/.*status:[[:space:]]*/, "", v);   gsub(/[^a-z-]/, "", v);  st=v }
     END { flush(); if (best+0 > 0) print best }
   '
 }
@@ -526,6 +536,10 @@ _last_deployed_revision() {
 _reconcile_pending_release() {
   local _rel="$1" _ns="$2" _preserve="${3:-}" _raw _status _target
   TB_PENDING_REINSTALL=0
+  # Set to 1 only when a pending-install uninstall FAILED/timed out, so the caller
+  # fails closed and skips the reinstall instead of racing still-present resources
+  # (Bugbot #619). Reset every call so a stale value from an earlier probe can't leak.
+  TB_PENDING_UNINSTALL_FAILED=0
   # `helm status` has no request timeout of its own, so a wedged kube-apiserver
   # could hang this recovery probe forever — bound it with _bounded
   # (timeout(1)/gtimeout(1)), the same mechanism the file's other helm/kubectl
@@ -586,8 +600,20 @@ _reconcile_pending_release() {
       # adopt path reinstalls the SAME release right after, and without --wait the
       # reinstall can race still-terminating objects and fail on "already exists" /
       # "being deleted" (Bugbot #619). Bounded by the spinner deadline.
-      spin_cmd_bounded 120 "Clearing a half-finished install…" \
-        helm uninstall "$_rel" -n "$_ns" --wait || true
+      #
+      # Check the uninstall's exit status and fail CLOSED on failure/timeout: a
+      # `|| true` here would let a timed-out uninstall (resources still present or
+      # terminating) fall through to `helm upgrade --install`, racing exactly the
+      # objects --wait exists to drain (Bugbot #619). On failure, do NOT reinstall
+      # — signal the caller (TB_PENDING_UNINSTALL_FAILED=1) to skip the reinstall
+      # and persist the preserved credential to the durable recovery file so a
+      # re-run can retry. TB_PENDING_REINSTALL stays 1 so the caller still treats
+      # the preserved values as the only copy of the write-only clientPassword.
+      if ! spin_cmd_bounded 120 "Clearing a half-finished install…" \
+             helm uninstall "$_rel" -n "$_ns" --wait; then
+        TB_PENDING_UNINSTALL_FAILED=1
+        warn "Uninstall of the wedged pending-install release '$_rel' failed or timed out; not reinstalling, to avoid racing still-terminating resources. Re-run the installer to retry."
+      fi
       ;;
     pending-upgrade|pending-rollback)
       _target="$(_last_deployed_revision "$_rel" "$_ns")"
@@ -744,7 +770,17 @@ _reconcile_adopted_client() {
   local _helm_timeout_min
   _helm_timeout_min="$(tb_minutes_or "${TB_HELM_TIMEOUT_MIN:-}" 10)"
   local _helm_rc=0
-  spin_cmd_bounded "$(( _helm_timeout_min * 60 ))" "Reconciling the existing client…" helm "${_args[@]}" || _helm_rc=$?
+  if [[ "${TB_PENDING_UNINSTALL_FAILED:-0}" == "1" ]]; then
+    # Fail closed: the pending-install uninstall failed/timed out, so the release's
+    # resources may still be present or terminating. Running `helm upgrade --install`
+    # now would race them (the bug --wait exists to prevent). Skip the reinstall and
+    # drop into the failure path below (_helm_rc != 0 with TB_PENDING_REINSTALL=1),
+    # which persists the preserved credential to the durable recovery file so a
+    # re-run can retry, then aborts (Bugbot #619).
+    _helm_rc=1
+  else
+    spin_cmd_bounded "$(( _helm_timeout_min * 60 ))" "Reconciling the existing client…" helm "${_args[@]}" || _helm_rc=$?
+  fi
 
   # Re-run recovery (reinstalled from the durable saved credential file): dispose of
   # the saved copy on the outcome (Bugbot #619). On success the credential now lives

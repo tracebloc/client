@@ -1241,6 +1241,38 @@ setup() {
   [ -z "$output" ] || return 1
 }
 
+@test "_last_deployed_revision: real 'helm history -o yaml' shape (revision ON the list-item line) picks the highest known-good (Bugbot #619)" {
+  # Helm marshals each history entry from a Go struct whose FIRST field is
+  # `revision`, so the real `-o yaml` output carries `- revision: N` on the
+  # list-item marker line, with `status:` on a following indented line and the
+  # rest of the fields (updated/chart/app_version/description) interleaved. r7
+  # (deployed) is the recovery target; r8 (pending-upgrade) and r6 (failed) must
+  # be ignored. The pre-fix awk reset state on the `- ` line and never captured
+  # that line's revision, so against this realistic sample it always returned
+  # empty and auto-recovery never rolled back.
+  helm() {
+    printf -- '- revision: 6\n  updated: "2026-01-01 00:00:00"\n  status: failed\n  chart: client-1.9.18\n  app_version: 1.9.18\n  description: Upgrade "failed"\n'
+    printf -- '- revision: 7\n  updated: "2026-01-02 00:00:00"\n  status: deployed\n  chart: client-1.9.19\n  app_version: 1.9.19\n  description: Upgrade complete\n'
+    printf -- '- revision: 8\n  updated: "2026-01-03 00:00:00"\n  status: pending-upgrade\n  chart: client-1.9.20\n  app_version: 1.9.20\n  description: Preparing upgrade\n'
+  }
+  run _last_deployed_revision munich munich
+  [ "$status" -eq 0 ] || return 1
+  [ "$output" = "7" ] || return 1
+}
+
+@test "_last_deployed_revision: real shape, a description containing 'revision:' is not mistaken for the key (Bugbot #619)" {
+  # A rollback's description legitimately contains the text 'revision:'. The key
+  # rules are anchored to the line start, so the deeper-indented description value
+  # must not overwrite the entry's real revision — r2 (deployed) stays the target.
+  helm() {
+    printf -- '- revision: 1\n  status: superseded\n  description: Rollback to revision: 9 (fake)\n'
+    printf -- '- revision: 2\n  status: deployed\n  description: Upgrade complete\n'
+  }
+  run _last_deployed_revision munich munich
+  [ "$status" -eq 0 ] || return 1
+  [ "$output" = "2" ] || return 1
+}
+
 @test "_reconcile_pending_release: pending-upgrade rolls back to the last DEPLOYED revision, not a bare rollback (Bugbot #619)" {
   spin_cmd_bounded() { shift 2; "$@"; }   # exec the mutating cmd so the mock records it
   helm() {
@@ -1353,6 +1385,36 @@ setup() {
   # The printed manual remedy must carry the adopted-UUID clientId override, so
   # following it reconciles identically to the automated path (Bugbot #619).
   [[ "$output" == *"--set clientId=0e9db54e-c9c0-4bf3-9ff2-1646da307019"* ]] || return 1
+}
+
+@test "install_client_helm: adopt + pending-install, FAILED uninstall does NOT reinstall (fail closed) and keeps the recovery file (Bugbot #619)" {
+  HOST_DATA_DIR="$BATS_TEST_TMPDIR/data"; mkdir -p "$HOST_DATA_DIR"
+  _ensure_tracebloc_dirs() { :; }
+  _ensure_release_dirs() { :; }
+  _ensure_helm_runnable() { :; }
+  kubectl() { record "kubectl $*"; return 0; }
+  # The wedged pending-install uninstall FAILS/times out. A `|| true` here would
+  # let recovery fall through to `helm upgrade --install`, racing still-present or
+  # terminating resources (the bug --wait exists to prevent). Recovery must fail
+  # closed: skip the reinstall entirely and persist the preserved credential to the
+  # durable recovery file so a re-run can retry.
+  helm() {
+    if [[ "$1" == list ]];            then echo "munich munich 1 now pending-install client-1.8.2 1.8.2"; return 0; fi
+    if [[ "$1" == status ]];          then printf 'info:\n  status: pending-install\n'; return 0; fi
+    if [[ "$1 $2" == "get values" ]]; then printf 'clientId: "123"\nclientPassword: "s3cr3t"\n'; return 0; fi
+    if [[ "$1" == uninstall ]];       then record "helm $*"; return 1; fi   # uninstall fails / times out
+    record "helm $*"; return 0
+  }
+  verify_credentials() { printf invalid; }
+  export TRACEBLOC_CLIENT_ADOPTED=1 TRACEBLOC_CLIENT_ID=0e9db54e-c9c0-4bf3-9ff2-1646da307019
+  run install_client_helm </dev/null
+  [ "$status" -ne 0 ] || return 1                                       # aborted, did not silently proceed
+  mock_calls | grep -q "helm uninstall munich"                         # it did attempt the uninstall
+  run mock_calls
+  [[ "$output" != *"helm upgrade --install munich"* ]] || return 1     # fail closed: NO reinstall after a failed uninstall
+  # Credential preserved durably (0600) so a re-run can retry — never lost.
+  [ -s "$HOST_DATA_DIR/.tb-adopt-recovery-values.yaml" ] || return 1
+  grep -q 'clientPassword' "$HOST_DATA_DIR/.tb-adopt-recovery-values.yaml" || return 1
 }
 
 @test "install_cleanup shreds a lingering preserved-values credential file (Bugbot #619)" {
