@@ -7,12 +7,35 @@ that:
 
 1. rebuilds the **same pinned k3s** (`K3S_TAG`, matched to the installer's
    `K8S_VERSION`) on an NVIDIA CUDA Ubuntu base,
-2. installs the NVIDIA Container Toolkit and configures containerd for the
-   `nvidia` runtime, and
-3. bakes in the NVIDIA device plugin + an `nvidia` `RuntimeClass`, so the node
-   advertises `nvidia.com/gpu` on first boot.
+2. installs the NVIDIA Container Toolkit, configures containerd for the `nvidia`
+   runtime, and puts that runtime in **CDI mode**,
+3. bakes in the `nvidia` `RuntimeClass`, and
+4. generates a **WSL CDI spec at node boot** (`k3d-entrypoint-tracebloc-cdi.sh`).
 
-Based on the official [k3d CUDA recipe](https://k3d.io/v5.7.4/usage/advanced/cuda/).
+Based on the official [k3d CUDA recipe](https://k3d.io/v5.7.4/usage/advanced/cuda/),
+plus the WSL2 findings below.
+
+## Why CDI, and why no device plugin (Docker Desktop / WSL2)
+
+On Docker Desktop the GPU reaches WSL2 **paravirtualized** (`/dev/dxg` + a
+WSL-specific driver store), not through the usual `/dev/nvidia*` interface. Two
+consequences, both validated on real hardware (RTX 4050, driver 532.10):
+
+* The **NVIDIA k8s device plugin cannot work here** — `nvmlInit()` returns
+  `ERROR_NOT_SUPPORTED`, so it registers 0 GPUs. Worse, because it owns the
+  `nvidia.com/gpu` extended resource it would hold the node at 0 and strand every
+  job. So this image ships **only the RuntimeClass**; the installer advertises
+  `nvidia.com/gpu` itself via a node-status patch (`Set-NodeGpuCapacity`).
+* **CUDA itself works fine** via CDI. `nvidia-ctk cdi generate --mode=wsl` maps
+  `/dev/dxg` + the WSL `libcuda`/`libnvidia-ml` into the pod. It must run **at
+  boot**, not at build time: the driver-store path contains a per-machine hash.
+  One gap the generator has: it **omits `libdxcore.so`** (that lives in the
+  standard lib path, not the driver store), and without it `libcuda` loads but
+  can't reach `/dev/dxg` — surfacing as a misleading *"CUDA driver version is
+  insufficient for CUDA runtime version"*. The boot script injects it.
+
+The boot script is a strict no-op when `/dev/dxg` is absent, so a native-Linux
+node behaves exactly as before (there, the standard device plugin path applies).
 
 ## How it's used
 

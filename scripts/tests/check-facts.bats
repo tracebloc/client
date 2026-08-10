@@ -24,6 +24,7 @@ SH
 $script:K3dVersion  = if ($env:K3D_VERSION)  { $env:K3D_VERSION }  else { "v5.9.0" }
 $script:HelmVersion = if ($env:HELM_VERSION) { $env:HELM_VERSION } else { "v4.2.3" }
 $K8S_VERSION   = if ($env:K8S_VERSION)   { $env:K8S_VERSION }   else { "v1.29.4-k3s1" }
+$CUDA_BASE_TAG  = if ($env:TRACEBLOC_CUDA_BASE_TAG) { $env:TRACEBLOC_CUDA_BASE_TAG } else { "12.4.1-base-ubuntu22.04" }
 $ReadyTimeout     = if ($env:READY_TIMEOUT) { $env:READY_TIMEOUT } else { "600" }
 $k3dArgs += @("--image", "rancher/k3s:$K8S_VERSION")
 PS
@@ -44,6 +45,7 @@ ARG CUDA_TAG="12.4.1-base-ubuntu22.04"
 DF
   cat > "$REPO/docker/k3s-cuda/build.sh" <<'SH'
 K3S_TAG="${K3S_TAG:-v1.29.4-k3s1}"
+CUDA_TAG="${CUDA_TAG:-12.4.1-base-ubuntu22.04}"
 SH
   # Two defaults on purpose: the extractor must pick the k3s_tag one (v… tag) and
   # leave the cuda_tag default (12.4.1…) alone.
