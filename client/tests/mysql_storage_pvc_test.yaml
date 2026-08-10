@@ -48,6 +48,17 @@ tests:
           path: spec.accessModes[0]
           value: ReadWriteMany
 
+  - it: should default the PVC access mode to ReadWriteOnce on hostPath (matches the PV)
+    set:
+      hostPath:
+        enabled: true
+      platform: bm
+    asserts:
+      - equal:
+          path: spec.accessModes[0]
+          value: ReadWriteOnce
+        documentIndex: 1
+
   - it: PVC requests the default 2Gi of storage
     set:
       hostPath:
