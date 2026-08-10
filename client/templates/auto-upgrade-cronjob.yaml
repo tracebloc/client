@@ -48,12 +48,25 @@ data:
     # back to the last GOOD revision rather than a bare `helm rollback`, which
     # targets the previous revision — the FAILED upgrade after an interrupted
     # atomic rollback (Bugbot #619).
+    #
+    # helm marshals each history entry from a Go struct whose FIRST field is
+    # `revision`, so the real `-o yaml` shape carries the revision on the
+    # list-item MARKER line itself — `- revision: N` — with `status:` on a
+    # following indented line. The parser must therefore capture the revision
+    # from EITHER the `- ` marker line OR an indented key line: the `^-` rule
+    # flushes+resets the previous entry FIRST, then the revision rule (which
+    # also matches the `- revision:` marker) captures this entry's revision.
+    # Both key rules are anchored to the line start so a value inside
+    # `description:` (which can legitimately contain the text `revision:`) is
+    # never mistaken for a key. This MUST stay identical to the installer's
+    # _last_deployed_revision (scripts/lib/install-client-helm.sh) — the two
+    # parse the same helm output and must not drift (Bugbot #619).
     last_deployed_revision() {
       run_bounded 30 helm history "$1" -n "$2" -o yaml 2>/dev/null | awk '
         function flush() { if (rev != "" && (st == "deployed" || st == "superseded") && rev+0 > best+0) best = rev+0 }
-        /^-[[:space:]]/          { flush(); rev=""; st="" }
-        /^[[:space:]]*revision:/ { v=$0; sub(/.*revision:[[:space:]]*/, "", v); gsub(/[^0-9]/, "", v); rev=v }
-        /^[[:space:]]*status:/   { v=$0; sub(/.*status:[[:space:]]*/, "", v);   gsub(/[^a-z-]/, "", v);  st=v }
+        /^-[[:space:]]/                          { flush(); rev=""; st="" }
+        /^(-|[[:space:]])[[:space:]]*revision:/  { v=$0; sub(/.*revision:[[:space:]]*/, "", v); gsub(/[^0-9]/, "", v); rev=v }
+        /^(-|[[:space:]])[[:space:]]*status:/    { v=$0; sub(/.*status:[[:space:]]*/, "", v);   gsub(/[^a-z-]/, "", v);  st=v }
         END { flush(); if (best+0 > 0) print best }
       '
     }

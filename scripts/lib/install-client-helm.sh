@@ -480,8 +480,10 @@ _resolve_chart_ref() {
 # `-eq 124`-guarded hint never fired and the install/reconcile was permanently
 # wedged with no auto-recovery. Detect a stuck pending-* status and reconcile it
 # in place BEFORE the upgrade:
-#   pending-install                    -> uninstall the half-installed release
-#                                         (there is no prior revision to roll back to)
+#   pending-install / uninstalling     -> clear the release and reinstall from
+#                                         preserved values (no prior revision to
+#                                         roll back to; `uninstalling` is a prior
+#                                         run's timed-out uninstall — Bugbot #619)
 #   pending-upgrade / pending-rollback -> roll back to the last deployed revision
 # jq-free (awk over `helm status -o yaml`, matching this file's conventions) and
 # best-effort — a failure here is non-fatal; the subsequent upgrade (and its
@@ -572,13 +574,32 @@ _reconcile_pending_release() {
   _status="$(printf '%s\n' "$_raw" | awk '/^  status:/ {print $2}')"
   _status="${_status%%$'\n'*}"
   case "$_status" in
-    pending-install)
+    pending-install|uninstalling)
+      # Two wedges recover the SAME way — clear the release, then reinstall from
+      # preserved values:
+      #   pending-install — an initial install killed mid-op left a half-created
+      #     release with no prior revision to roll back to.
+      #   uninstalling — an earlier `helm uninstall --wait` timed out mid-removal
+      #     (typically THIS recovery's own uninstall below, on a prior run) and
+      #     left the release in `uninstalling`, its resources still terminating.
+      # helm refuses to `upgrade` a release in EITHER state, so a same-client
+      # re-run must finish clearing it and reinstall rather than fall through to a
+      # --reuse-values upgrade that cannot proceed (Bugbot #619).
+      #
+      # This unblocks only OUR OWN release: the ownership guard
+      # (detect_installed_client) still enumerates `uninstalling` and blocks a
+      # DIFFERENT client before it ever reaches here, and _reconcile_adopted_client
+      # is entered only on the adopt path (provision already matched this cluster
+      # to THIS client). So finishing an `uninstalling` release here never mutates
+      # a foreign client's release (Bugbot #619).
       if [[ -n "$_preserve" ]]; then
         # Adopt path: stash the wedged release's user values before we drop it,
         # so the caller can reinstall with the only copy of the write-only
-        # password. `-o yaml` (not the default header form) so the file feeds
-        # straight back with `-f`; helm prints literal `null` when there are no
-        # user values.
+        # password. An `uninstalling` release still holds its stored values
+        # (helm removes the release record only after the resources drain), so
+        # `helm get values` reads them here too. `-o yaml` (not the default
+        # header form) so the file feeds straight back with `-f`; helm prints
+        # literal `null` when there are no user values.
         if _bounded "${TB_HELM_STATUS_TIMEOUT:-30}" \
              helm get values "$_rel" -n "$_ns" -o yaml > "$_preserve" 2>/dev/null \
            && [[ -s "$_preserve" ]] && [[ "$(head -1 "$_preserve" 2>/dev/null)" != "null" ]]; then
@@ -591,15 +612,17 @@ _reconcile_pending_release() {
           # (Bugbot #619). Leave it in place; re-running the installer retries
           # the preserve, and a persistent wedge is recovered by re-adopting from
           # the dashboard (which re-issues access) — never by uninstalling.
-          warn "Release '$_rel' is wedged in pending-install and its stored values could not be read; leaving it in place. Re-run the installer to retry recovery. Do NOT 'helm uninstall' — for an adopted client that drops the only stored clientPassword; if it stays wedged, re-adopt this client from the dashboard."
+          warn "Release '$_rel' is wedged in $_status and its stored values could not be read; leaving it in place. Re-run the installer to retry recovery. Do NOT 'helm uninstall' — for an adopted client that drops the only stored clientPassword; if it stays wedged, re-adopt this client from the dashboard."
           return 0
         fi
       fi
-      log "Release '$_rel' is wedged in pending-install (a prior run was killed mid-install); uninstalling the half-installed release before retrying."
+      log "Release '$_rel' is wedged in $_status (a prior run was killed mid-op); clearing the release before reinstalling."
       # --wait so the uninstall blocks until its resources are actually gone: the
       # adopt path reinstalls the SAME release right after, and without --wait the
       # reinstall can race still-terminating objects and fail on "already exists" /
-      # "being deleted" (Bugbot #619). Bounded by the spinner deadline.
+      # "being deleted" (Bugbot #619). Bounded by the spinner deadline. On an
+      # already-`uninstalling` release this simply resumes/finishes the interrupted
+      # removal, which is idempotent.
       #
       # Check the uninstall's exit status and fail CLOSED on failure/timeout: a
       # `|| true` here would let a timed-out uninstall (resources still present or
@@ -612,7 +635,7 @@ _reconcile_pending_release() {
       if ! spin_cmd_bounded 120 "Clearing a half-finished install…" \
              helm uninstall "$_rel" -n "$_ns" --wait; then
         TB_PENDING_UNINSTALL_FAILED=1
-        warn "Uninstall of the wedged pending-install release '$_rel' failed or timed out; not reinstalling, to avoid racing still-terminating resources. Re-run the installer to retry."
+        warn "Uninstall of the wedged release '$_rel' ($_status) failed or timed out; not reinstalling, to avoid racing still-terminating resources. Re-run the installer to retry."
       fi
       ;;
     pending-upgrade|pending-rollback)
@@ -856,6 +879,19 @@ _reconcile_adopted_client() {
     hint "  helm -n $_ns history $_rel     (find the newest DEPLOYED revision, then:)"
     hint "  helm -n $_ns rollback $_rel <REVISION>    (roll back to that revision)"
     error "Reconcile of the existing client failed. Check the log for details: ${LOG_FILE:-}"
+  fi
+
+  # Reconcile succeeded. A PRIOR interrupted run may have left a durable recovery
+  # credential file (+ identity sidecar) after a timed-out pending-install uninstall
+  # — e.g. the re-run that just recovered an `uninstalling` release by reinstalling
+  # from the live release's preserved values (Bugbot #619). The credential now lives
+  # in the reconciled release, so that copy is redundant: shred it rather than leave a
+  # write-only clientPassword lingering in plaintext on disk. Best-effort; the
+  # _recovery_reuse success path above already shreds its own source file and returns
+  # before here, so this only clears a leftover from a DIFFERENT prior run.
+  if [[ -n "${HOST_DATA_DIR:-}" ]]; then
+    rm -f "${HOST_DATA_DIR}/${_TB_ADOPT_RECOVERY_BASENAME}" \
+          "${HOST_DATA_DIR}/${_TB_ADOPT_RECOVERY_META_BASENAME}" 2>/dev/null || true
   fi
 
   kubectl config set-context --current --namespace "$_ns" >/dev/null 2>&1 || true

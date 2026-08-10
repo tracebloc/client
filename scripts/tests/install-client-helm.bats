@@ -1273,6 +1273,36 @@ setup() {
   [ "$output" = "2" ] || return 1
 }
 
+@test "auto-upgrade cronjob last_deployed_revision: real 'helm history -o yaml' shape + description trap (Bugbot #619)" {
+  # The CronJob (client/templates/auto-upgrade-cronjob.yaml) carries its OWN copy of
+  # the helm-history parser and had the SAME bug the installer's _last_deployed_revision
+  # was fixed for: the real `-o yaml` shape puts the revision on the `- revision: N`
+  # list-item marker line, and the pre-fix awk required a leading space on the key
+  # rules so it never captured the marker-line revision → always empty → cronjob
+  # rollback never found the last-good revision. Extract the function straight from the
+  # template and exercise it against a realistic sample: r7 (deployed) is the target;
+  # r6 (failed) + r8 (pending-upgrade) are ignored, and r6's description legitimately
+  # containing the text 'revision:' must not be mistaken for the key.
+  local tmpl="$BATS_TEST_DIRNAME/../../client/templates/auto-upgrade-cronjob.yaml"
+  [ -f "$tmpl" ] || skip "auto-upgrade-cronjob.yaml not found"
+  local fn; fn="$(mktemp)"
+  # Pull the `last_deployed_revision() { … }` block (4-space-indented inside the
+  # ConfigMap script) and dedent it into a sourceable shell function.
+  awk '/last_deployed_revision\(\) \{/{c=1} c{print} c&&/^    \}$/{exit}' "$tmpl" \
+    | sed 's/^    //' > "$fn"
+  [ -s "$fn" ] || return 1
+  run_bounded() { shift; "$@"; }               # drop the timeout arg, exec bare
+  helm() {
+    printf -- '- revision: 6\n  updated: "2026-01-01"\n  status: failed\n  description: Rollback to revision: 99 (fake)\n'
+    printf -- '- revision: 7\n  updated: "2026-01-02"\n  status: deployed\n  chart: client-1.9.19\n  description: Upgrade complete\n'
+    printf -- '- revision: 8\n  updated: "2026-01-03"\n  status: pending-upgrade\n  description: Preparing upgrade\n'
+  }
+  source "$fn"
+  run last_deployed_revision munich munich
+  [ "$status" -eq 0 ] || return 1
+  [ "$output" = "7" ] || return 1
+}
+
 @test "_reconcile_pending_release: pending-upgrade rolls back to the last DEPLOYED revision, not a bare rollback (Bugbot #619)" {
   spin_cmd_bounded() { shift 2; "$@"; }   # exec the mutating cmd so the mock records it
   helm() {
@@ -1355,6 +1385,56 @@ setup() {
   mock_calls | grep -q "helm upgrade --install munich"          # reinstalled (not an in-place upgrade)
   run mock_calls
   [[ "$output" != *"--reuse-values"* ]] || return 1             # nothing to reuse — release was gone
+  [[ "$output" == *"--set clientId=0e9db54e-c9c0-4bf3-9ff2-1646da307019"* ]] || return 1
+}
+
+@test "_reconcile_pending_release: uninstalling (interrupted uninstall) preserves values + flags a reinstall (Bugbot #619)" {
+  # An earlier `helm uninstall --wait` timed out and left the release in `uninstalling`.
+  # A same-client re-run must recover it the SAME way as pending-install: preserve the
+  # write-only credential, finish the removal, and signal a reinstall — never fall
+  # through to a --reuse-values upgrade helm would refuse on an uninstalling release.
+  spin_cmd_bounded() { shift 2; "$@"; }
+  local pf; pf="$(mktemp)"
+  helm() {
+    if [ "$1" = status ];          then printf 'info:\n  status: uninstalling\n'; return 0; fi
+    if [ "$1 $2" = "get values" ]; then printf 'clientId: "123"\nclientPassword: "s3cr3t"\n'; return 0; fi
+    record "helm $*"; return 0
+  }
+  TB_PENDING_REINSTALL=0
+  _reconcile_pending_release munich munich "$pf"
+  [ "$TB_PENDING_REINSTALL" = "1" ] || return 1                 # caller must reinstall
+  grep -q "clientPassword" "$pf" || return 1                    # write-only password preserved
+  mock_calls | grep -q "helm uninstall munich -n munich"        # finished the interrupted removal
+}
+
+@test "install_client_helm: adopt + UNINSTALLING same-client re-run recovers by reinstalling, not stuck (Bugbot #619)" {
+  HOST_DATA_DIR="$BATS_TEST_TMPDIR/data"; mkdir -p "$HOST_DATA_DIR"
+  _ensure_tracebloc_dirs() { :; }
+  _ensure_release_dirs() { :; }
+  _ensure_helm_runnable() { :; }
+  kubectl() { record "kubectl $*"; return 0; }
+  # A prior recovery's `helm uninstall --wait` timed out and left THIS client's release
+  # in `uninstalling`. The ownership enumeration counts `uninstalling` (so a foreign
+  # client stays blocked — see the guard test above), which used to ALSO trap the
+  # legitimate same-client re-run: a --reuse-values upgrade against an `uninstalling`
+  # release cannot proceed, so recovery was stuck. It must instead finish the removal
+  # and reinstall from the release's preserved values.
+  helm() {
+    if [[ "$1" == list ]];                then echo "munich munich 1 now uninstalling client-1.8.2 1.8.2"; return 0; fi
+    if [[ "$1 $2" == "upgrade --help" ]]; then echo "  --reset-then-reuse-values"; return 0; fi
+    if [[ "$1" == status ]];              then printf 'info:\n  status: uninstalling\n'; return 0; fi
+    if [[ "$1 $2" == "get values" ]];     then printf 'clientId: "123"\nclientPassword: "s3cr3t"\n'; return 0; fi
+    record "helm $*"; return 0
+  }
+  verify_credentials() { echo "VERIFY_CALLED"; printf invalid; }
+  export TRACEBLOC_CLIENT_ADOPTED=1 TRACEBLOC_CLIENT_ID=0e9db54e-c9c0-4bf3-9ff2-1646da307019
+  run install_client_helm </dev/null
+  [ "$status" -eq 0 ] || return 1                               # recovered, not stuck
+  mock_calls | grep -q "helm uninstall munich"                  # finished the interrupted removal
+  mock_calls | grep -q "helm upgrade --install munich"          # reinstalled from preserved values
+  run mock_calls
+  [[ "$output" != *"--reuse-values"* ]] || return 1             # never a --reuse-values upgrade on uninstalling
+  [[ "$output" != *"VERIFY_CALLED"* ]] || return 1              # adopt reconciles silently, no credential prompt/verify
   [[ "$output" == *"--set clientId=0e9db54e-c9c0-4bf3-9ff2-1646da307019"* ]] || return 1
 }
 
