@@ -6,8 +6,10 @@
 # NVIDIA container runtime, so GPU pods can never schedule on it — the node
 # advertises 0 nvidia.com/gpu. This image rebuilds the SAME pinned k3s on an
 # NVIDIA CUDA Ubuntu base, installs the NVIDIA Container Toolkit, configures
-# containerd for the `nvidia` runtime, and bakes in the device-plugin +
-# `nvidia` RuntimeClass so the node advertises nvidia.com/gpu on first boot.
+# containerd for the `nvidia` runtime (in CDI mode), and bakes in the `nvidia`
+# RuntimeClass plus a k3d entrypoint drop-in that generates the WSL CDI spec on
+# every node start. GPU capacity is advertised by the installer + that drop-in --
+# NOT by the NVML device plugin, which cannot work on WSL2 (see README).
 # Based on the official k3d CUDA recipe (https://k3d.io/.../usage/advanced/cuda/).
 #
 # IMPORTANT: K3S_TAG MUST match the installer's K8S_VERSION pin
@@ -17,10 +19,26 @@
 # facts.env's K8S_VERSION, so a bump can't leave the GPU image tag stale (#547).
 ARG K3S_TAG="v1.29.4-k3s1"
 ARG CUDA_TAG="12.4.1-base-ubuntu22.04"
+# NVIDIA Container Toolkit version. PINNED to the build validated on real hardware (an RTX 4050
+# laptop, driver 532.10) because the whole WSL2 GPU path depends on version-sensitive surfaces:
+# `cdi generate --mode=wsl`, `config --set nvidia-container-runtime.mode=cdi`, and the exact YAML
+# the generator emits (our libdxcore injection parses it). Unpinned, two machines built weeks
+# apart could get different toolkit builds and behave differently -- and a future release changing
+# the spec shape would break GPU on new installs while existing ones kept working.
+# The install below FALLS BACK to the latest if this version has aged out of the apt repo, so a
+# stale pin degrades to "unpinned" rather than failing the build (which would cost GPU entirely).
+ARG NCT_VERSION="1.19.1-1"
 
 FROM rancher/k3s:${K3S_TAG} AS k3s
 
 FROM nvcr.io/nvidia/cuda:${CUDA_TAG}
+
+# The CUDA base bakes in NVIDIA_REQUIRE_CUDA (e.g. cuda>=12.4); with --gpus the container runtime
+# then REFUSES to start this node on any driver older than that base ("unsatisfied condition:
+# cuda>=12.4"), so a valid GPU on a slightly older driver (e.g. 532.x = CUDA 12.1) can't run the
+# cluster at all. This node runs k3s, not CUDA workloads -- the real CUDA/driver compatibility is
+# enforced per-pod by each TRAINING image -- so disable the requirement gate here (#616).
+ENV NVIDIA_DISABLE_REQUIRE=1
 
 # NVIDIA Container Toolkit, then point containerd at the `nvidia` runtime. The
 # gpg key + apt list are pinned via the keyring the same way the in-WSL toolkit
@@ -37,8 +55,12 @@ RUN export DEBIAN_FRONTEND=noninteractive \
          | sed 's#deb https://#deb [signed-by=/usr/share/keyrings/nvidia-container-toolkit-keyring.gpg] https://#g' \
          | tee /etc/apt/sources.list.d/nvidia-container-toolkit.list \
     && apt-get update \
-    && apt-get install -y --no-install-recommends nvidia-container-toolkit \
+    && ( apt-get install -y --no-install-recommends "nvidia-container-toolkit=${NCT_VERSION}" \
+         || { echo "NCT ${NCT_VERSION} unavailable in the repo -- falling back to latest"; \
+              apt-get install -y --no-install-recommends nvidia-container-toolkit; } ) \
+    && nvidia-ctk --version \
     && nvidia-ctk runtime configure --runtime=containerd \
+    && nvidia-ctk config --in-place --set nvidia-container-runtime.mode=cdi \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
@@ -58,10 +80,22 @@ COPY --from=k3s \
      / /
 COPY --from=k3s /bin /bin
 
-# Auto-deploy the NVIDIA device plugin + `nvidia` RuntimeClass on first server
-# boot (k3s auto-applies manifests dropped here). This is what makes the node
-# advertise nvidia.com/gpu without a separate `kubectl apply`.
-COPY nvidia-device-plugin-daemonset.yaml /var/lib/rancher/k3s/server/manifests/nvidia-device-plugin-daemonset.yaml
+# Auto-deploy ONLY the `nvidia` RuntimeClass on first server boot (k3s auto-applies
+# manifests dropped here). We deliberately do NOT ship the NVML device-plugin DaemonSet:
+# on Docker Desktop/WSL2 it can't init NVML, would register 0 GPUs, and (owning the
+# nvidia.com/gpu extended resource) would overwrite the installer's node-resource patch
+# with 0 -- stranding jobs. GPU capacity is advertised by the installer via a node patch,
+# and pods get the real GPU through the CDI spec generated at boot (see k3d-entrypoint-tracebloc-cdi.sh).
+COPY nvidia-runtimeclass.yaml /var/lib/rancher/k3s/server/manifests/nvidia-runtimeclass.yaml
+
+# Node GPU setup: generate the WSL CDI spec (+ libdxcore) and keep nvidia.com/gpu
+# advertised, so pods can use the GPU on Docker Desktop/WSL2. No-op on non-WSL2 nodes.
+#
+# It MUST be installed as a /bin/k3d-entrypoint-*.sh DROP-IN, not as the image ENTRYPOINT:
+# k3d replaces the image entrypoint with its own /bin/k3d-entrypoint.sh, which runs these
+# drop-ins and then execs k3s. An ENTRYPOINT wrapper here is silently never run (#616).
+COPY k3d-entrypoint-tracebloc-cdi.sh /bin/k3d-entrypoint-tracebloc-cdi.sh
+RUN chmod +x /bin/k3d-entrypoint-tracebloc-cdi.sh
 
 VOLUME /var/lib/kubelet
 VOLUME /var/lib/rancher/k3s
@@ -70,5 +104,8 @@ VOLUME /var/log
 
 ENV PATH="$PATH:/bin/aux"
 
+# Stock k3s entrypoint (same as rancher/k3s). k3d overrides it with its own
+# /bin/k3d-entrypoint.sh, which runs our drop-in above before exec'ing k3s; keeping the
+# stock value means the image also behaves normally outside k3d.
 ENTRYPOINT ["/bin/k3s"]
 CMD ["agent"]

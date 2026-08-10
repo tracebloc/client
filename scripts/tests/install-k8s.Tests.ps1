@@ -837,6 +837,20 @@ Describe "Print-Summary" {
     $out | Should -Match "Version"
     $out | Should -Match "1\.4\.4"
   }
+  It "GPU detected but not enabled: summary says CPU + the reason, not 'NVIDIA GPU' (#616)" {
+    $script:ClientState = "connected"
+    $GPU_VENDOR = "nvidia"; $NVIDIA_DRIVER_OK = $true; $K3D_GPU_FLAG = ""
+    $GPU_SKIP_REASON = "WSL2 Ubuntu needs first-run setup (open Ubuntu once, set a username/password, then re-run)"
+    $out = Print-Summary 6>&1 | Out-String
+    $out | Should -Match "GPU detected but not enabled"
+    $out | Should -Match "first-run setup"
+  }
+  It "GPU wired into the cluster: summary shows NVIDIA GPU (#616)" {
+    $script:ClientState = "connected"
+    $GPU_VENDOR = "nvidia"; $NVIDIA_DRIVER_OK = $true; $K3D_GPU_FLAG = "--gpus=all"
+    $out = Print-Summary 6>&1 | Out-String
+    $out | Should -Match "NVIDIA GPU"
+  }
 }
 
 Describe "ConvertTo-WorkspaceName" {
@@ -1384,6 +1398,36 @@ Describe "Install-ClientHelm" {
     { Install-ClientHelm } | Should -Throw
     $script:lastErr | Should -Match 'not a valid chart repository'
     Should -Not -Invoke helm -ParameterFilter { $args -contains "upgrade" }
+  }
+  It "GPU detected but NOT wired into the cluster: jobs request no GPU (#616 CPU fallback)" {
+    # The core #616 fix: requesting nvidia.com/gpu while the node advertises 0 GPUs strands every
+    # job Pending until the SINGLE_NODE fallback rescues it. So when the GPU wasn't enabled
+    # ($K3D_GPU_FLAG empty) the values must carry NO gpu request — training runs on CPU cleanly.
+    $HOST_DATA_DIR = "$TestDrive/d-gpu-skip"
+    $script:TB_PROV_MODE = "minted"; $script:TB_PROV_ID = "uuid-g1"
+    $script:TB_PROV_PASSWORD = "pw"; $script:TB_PROV_NS = "ws-g1"
+    $GPU_VENDOR = "nvidia"; $NVIDIA_DRIVER_OK = $true; $K3D_GPU_FLAG = ""
+    Mock Read-Host { throw "must not prompt" }
+    Mock Test-Credentials { "valid" }
+    Install-ClientHelm
+    $vals = Get-Content "$HOST_DATA_DIR/values.yaml" -Raw
+    $vals | Should -Match 'GPU_REQUESTS: ""'
+    $vals | Should -Match 'GPU_LIMITS: ""'
+    $vals | Should -Not -Match 'nvidia\.com/gpu'
+    $vals | Should -Match 'RUNTIME_CLASS_NAME: ""'
+  }
+  It "GPU wired into the cluster: jobs request nvidia.com/gpu (#616)" {
+    $HOST_DATA_DIR = "$TestDrive/d-gpu-on"
+    $script:TB_PROV_MODE = "minted"; $script:TB_PROV_ID = "uuid-g2"
+    $script:TB_PROV_PASSWORD = "pw"; $script:TB_PROV_NS = "ws-g2"
+    $GPU_VENDOR = "nvidia"; $NVIDIA_DRIVER_OK = $true; $K3D_GPU_FLAG = "--gpus=all"
+    Mock Read-Host { throw "must not prompt" }
+    Mock Test-Credentials { "valid" }
+    Install-ClientHelm
+    $vals = Get-Content "$HOST_DATA_DIR/values.yaml" -Raw
+    $vals | Should -Match 'GPU_REQUESTS: "nvidia\.com/gpu=1"'
+    $vals | Should -Match 'GPU_LIMITS: "nvidia\.com/gpu=1"'
+    $vals | Should -Match 'RUNTIME_CLASS_NAME: "nvidia"'
   }
 }
 
@@ -3370,7 +3414,7 @@ Describe "GPU device-plugin failure is recoverable, not fatal (#577)" {
   It "verify runs only when the plugin deployed - CPU-mode skips Confirm-GpuNode (Bugbot)" {
     # A failed/CPU-mode deploy returns $false; the caller must gate Confirm-GpuNode
     # on it so the user doesn't wait ~90s for a plugin that was never applied.
-    $script:PSRCGPU | Should -Match 'if \(Install-GpuDevicePlugin\) \{ Confirm-GpuNode \}'
+    $script:PSRCGPU | Should -Match 'if \(Install-GpuDevicePlugin\) \{\s*Confirm-GpuNode'
     $gpuFn = ($script:PSRCGPU -split "function Install-GpuDevicePlugin")[1]
     $gpuFn | Should -Match 'return \$true'
     $gpuFn | Should -Match 'return \$false'
@@ -3379,7 +3423,7 @@ Describe "GPU device-plugin failure is recoverable, not fatal (#577)" {
     # The existence check and Confirm-GpuNode's node probe must carry a request
     # timeout so a wedged API can't hang before/around the bounded apply (bash parity).
     $script:PSRCGPU | Should -Match 'kubectl get daemonset -n kube-system nvidia-device-plugin-daemonset --request-timeout='
-    $script:PSRCGPU | Should -Match 'kubectl get node -o jsonpath.*--request-timeout='
+    $script:PSRCGPU | Should -Match 'kubectl get nodes? -o jsonpath.*--request-timeout='
   }
 }
 
@@ -3641,5 +3685,1002 @@ Describe "Local chart path support (#611 — Windows/bash parity)" {
   }
   It "errors if TRACEBLOC_CHART_PATH is set but is not a directory" {
     $script:LCP | Should -Match 'TRACEBLOC_CHART_PATH is set but is not a directory'
+  }
+}
+
+Describe "Confirm-DockerGpu (#616 authoritative GPU gate)" {
+  BeforeEach { $GPU_VENDOR = "nvidia"; $NVIDIA_DRIVER_OK = $true; $CUDA_BASE_TAG = "12.4.1-base-ubuntu22.04"; $script:GPU_SKIP_REASON = "" }
+  It "returns true when the bounded docker-run probe succeeds" {
+    Mock Invoke-DockerCli { [pscustomobject]@{ Code = 0; Output = "NVIDIA-SMI 550.x   Driver Version: 550.x   CUDA Version: 12.4" } }
+    Confirm-DockerGpu | Should -BeTrue
+    Should -Invoke Invoke-DockerCli -ParameterFilter { ($DockerArgs -contains "run") -and ($DockerArgs -contains "--gpus") }
+  }
+  It "the probe disables the CUDA requirement gate so an older driver isn't a false negative (#616)" {
+    # NVIDIA_REQUIRE_CUDA in the base image would reject the container on a driver older than the
+    # base's CUDA (e.g. 532.x = CUDA 12.1 vs a 12.4 base) -- reading a working GPU as unavailable.
+    Mock Invoke-DockerCli { [pscustomobject]@{ Code = 0; Output = "NVIDIA-SMI 532.10   Driver Version: 532.10   CUDA Version: 12.1" } }
+    Confirm-DockerGpu | Should -BeTrue
+    Should -Invoke Invoke-DockerCli -ParameterFilter { ($DockerArgs -contains "-e") -and ($DockerArgs -contains "NVIDIA_DISABLE_REQUIRE=1") }
+  }
+  It "probe exits non-zero: false + a GPU-unavailable reason (not a timeout one)" {
+    Mock Invoke-DockerCli { [pscustomobject]@{ Code = 125; Output = "could not select device driver with capabilities: [[gpu]]" } }
+    Confirm-DockerGpu | Should -BeFalse
+    $script:GPU_SKIP_REASON | Should -Match "can't expose the GPU"
+  }
+  It "returns false when output lacks the nvidia-smi banner even on exit 0" {
+    Mock Invoke-DockerCli { [pscustomobject]@{ Code = 0; Output = "some unrelated output" } }
+    Confirm-DockerGpu | Should -BeFalse
+  }
+  It "probe TIMEOUT (Code 124): false + a reason that says timed out, not GPU-unavailable (#616 Bugbot)" {
+    Mock Invoke-DockerCli { [pscustomobject]@{ Code = 124; Output = "docker run timed out after 180s" } }
+    Confirm-DockerGpu | Should -BeFalse
+    $script:GPU_SKIP_REASON | Should -Match "timed out"
+    $script:GPU_SKIP_REASON | Should -Not -Match "can't expose the GPU"
+  }
+  It "short-circuits to false without probing when there is no NVIDIA GPU" {
+    $GPU_VENDOR = "none"; $NVIDIA_DRIVER_OK = $false
+    Mock Invoke-DockerCli { throw "must not probe without a GPU" }
+    Confirm-DockerGpu | Should -BeFalse
+    Should -Not -Invoke Invoke-DockerCli
+  }
+}
+
+Describe "Test-NodeImageGpuCapable (#616 Bugbot: only the CUDA node can schedule GPU pods)" {
+  It "the custom k3s-CUDA image is GPU-capable" {
+    Test-NodeImageGpuCapable "ghcr.io/tracebloc/k3s-cuda:v1.29.4-k3s1-cuda-12.4.1-base-ubuntu22.04" | Should -BeTrue
+  }
+  It "a mirror-hosted CUDA image is still recognized" {
+    Test-NodeImageGpuCapable "registry.internal/tracebloc/k3s-cuda:v1.29.4-k3s1-cuda-12.4.1-base-ubuntu22.04" | Should -BeTrue
+  }
+  It "a stock rancher/k3s image is NOT GPU-capable (the reused CPU cluster)" {
+    Test-NodeImageGpuCapable "rancher/k3s:v1.29.4-k3s1" | Should -BeFalse
+  }
+  It "an unreadable/empty image fails safe to NOT GPU-capable" {
+    Test-NodeImageGpuCapable "" | Should -BeFalse
+  }
+  It "a renamed/digest-only override that equals the configured image IS recognized (#616 Bugbot)" {
+    # An operator override (TRACEBLOC_K3S_CUDA_IMAGE) may not contain 'k3s-cuda:' -- accept an
+    # exact match against the image this run is configured to use.
+    Test-NodeImageGpuCapable -Image "mirror.corp/gpu-node@sha256:abc123" -Configured "mirror.corp/gpu-node@sha256:abc123" | Should -BeTrue
+  }
+  It "a stock node is NOT recognized even when a custom GPU image is configured" {
+    Test-NodeImageGpuCapable -Image "rancher/k3s:v1.29.4-k3s1" -Configured "mirror.corp/gpu-node:v1" | Should -BeFalse
+  }
+}
+
+Describe "Confirm-ReusedClusterGpuCapable (#616 Bugbot: reused stock cluster can't adopt GPU)" {
+  It "GPU not requested: no-op that never inspects the node" {
+    $script:K3D_GPU_FLAG = ""
+    Mock Start-Job { throw "must not inspect the node when GPU was not requested" }
+    { Confirm-ReusedClusterGpuCapable } | Should -Not -Throw
+    $script:K3D_GPU_FLAG | Should -Be ""
+    Should -Not -Invoke Start-Job
+  }
+}
+
+Describe "GPU capability is reconciled on cluster REUSE (#616 Bugbot source guards)" {
+  BeforeAll { $script:RSRC = Get-Content "$PSScriptRoot/../install-k8s.ps1" -Raw }
+  It "the reuse path calls Confirm-ReusedClusterGpuCapable so a stock node can't get GPU values" {
+    # It must run inside the reuse branch, after the drift check, before the fresh-create else.
+    $script:RSRC | Should -Match 'Test-K3sVersionDrift[\s\S]{0,500}?Confirm-ReusedClusterGpuCapable[\s\S]{0,400}?\} else \{'
+  }
+  It "the reconciler is bounded (job + deadline) like the other reuse-time docker probes" {
+    $fn = ($script:RSRC -split 'function Confirm-ReusedClusterGpuCapable')[1]
+    $fn | Should -Match 'Start-Job'
+    $fn | Should -Match 'Wait-JobWithProgress -Job \$job -TimeoutSec 15'
+    $fn | Should -Match "Config.Image"
+    $fn | Should -Match 'Test-NodeImageGpuCapable -Image \$img -Configured \$K3S_CUDA_IMAGE'
+  }
+  It "when the reused node isn't CUDA it clears the flag (CPU fallback) with a recreate reason" {
+    $fn = ($script:RSRC -split 'function Confirm-ReusedClusterGpuCapable')[1]
+    $fn | Should -Match '\$script:K3D_GPU_FLAG = ""'
+    $fn | Should -Match '\$script:GPU_SKIP_REASON = "the existing'
+    $fn | Should -Match 'k3d cluster delete \$CLUSTER_NAME'
+  }
+}
+
+Describe "GPU cluster wiring (#616 source guards)" {
+  BeforeAll { $script:GSRC = Get-Content "$PSScriptRoot/../install-k8s.ps1" -Raw }
+  It "a GPU cluster uses the custom k3s-CUDA image, a normal one uses stock k3s" {
+    $script:GSRC | Should -Match '\$k3dArgs \+= @\("--image", \$K3S_CUDA_IMAGE\)'
+    $script:GSRC | Should -Match '\$k3dArgs \+= @\("--image", "rancher/k3s:\$K8S_VERSION"\)'
+  }
+  It "the custom image ref defaults to GHCR, is env-overridable, and re-homes onto a mirror" {
+    $script:GSRC | Should -Match 'TRACEBLOC_K3S_CUDA_IMAGE'
+    $script:GSRC | Should -Match '\$cudaRepo = "tracebloc/k3s-cuda:\$K8S_VERSION-cuda-\$CUDA_BASE_TAG"'
+    $script:GSRC | Should -Match '"ghcr\.io/\$cudaRepo"'
+    # air-gap: the one installer command re-homes the GPU image onto the mirror (#585)
+    $script:GSRC | Should -Match 'TRACEBLOC_IMAGE_REGISTRY'
+    $script:GSRC | Should -Match '"\$mirrorHost/\$cudaRepo"'
+  }
+  It "the docker-run probe is the authoritative gate: it sets/clears K3D_GPU_FLAG" {
+    $script:GSRC | Should -Match 'Confirm-DockerGpu'
+    $script:GSRC | Should -Match '\$K3D_GPU_FLAG = "--gpus=all"'
+  }
+  It "k3s drift detection also recognizes the GPU node image, not just rancher/k3s (#616 Bugbot)" {
+    $script:GSRC | Should -Match "k3sImage -match 'k3s-cuda:"
+    $script:GSRC | Should -Match '\^\(\.\+\?\)-cuda-'
+  }
+  It "GPU-enabled installs request the nvidia RuntimeClass for spawned pods" {
+    $script:GSRC | Should -Match '\$runtimeClass = "nvidia"'
+    $script:GSRC | Should -Match 'RUNTIME_CLASS_NAME: "\$runtimeClass"'
+  }
+  It "enabling the GPU collapses the cluster to a single node so one card isn't double-counted (#616 Bugbot)" {
+    # --gpus=all exposes the SAME host GPU to every k3d node + the device-plugin registers
+    # it per node, so a server+agent cluster advertises 2 GPUs for 1 card. When GPU is on,
+    # AGENTS must be forced to 0 (the block sits under the K3D_GPU_FLAG="--gpus=all" branch).
+    $gate = ($script:GSRC -split '\$K3D_GPU_FLAG = "--gpus=all"')[1]
+    $gate | Should -Match '\$AGENTS = "0"'
+    # an explicit user AGENTS is overridden LOUDLY, not silently
+    $gate | Should -Match 'if \(\$env:AGENTS\)'
+    $gate | Should -Match 'double-count'
+  }
+}
+
+Describe "Confirm-GpuImagePullable (#616 private GPU image, no public package)" {
+  BeforeAll { $script:GSRC2 = Get-Content "$PSScriptRoot/../install-k8s.ps1" -Raw }
+  BeforeEach {
+    $K3S_CUDA_IMAGE = "ghcr.io/tracebloc/k3s-cuda:v1.29.4-k3s1-cuda-12.4.1-base-ubuntu22.04"
+    $script:GPU_SKIP_REASON = ""
+    $env:TRACEBLOC_REGISTRY_USERNAME = $null; $env:TRACEBLOC_REGISTRY_PASSWORD = $null
+  }
+  AfterEach { $env:TRACEBLOC_REGISTRY_USERNAME = $null; $env:TRACEBLOC_REGISTRY_PASSWORD = $null }
+
+  It "logs Docker in with the registry creds, pulls, and sanity-checks -> true" {
+    $env:TRACEBLOC_REGISTRY_USERNAME = "bot"; $env:TRACEBLOC_REGISTRY_PASSWORD = "tok"
+    Mock Invoke-DockerCli {
+      if ($DockerArgs -contains "run") { return [pscustomobject]@{ Code = 0; Output = "k3s version v1.29.4+k3s1" } }  # sanity OK
+      return [pscustomobject]@{ Code = 0; Output = "" }   # login + pull OK
+    }
+    Confirm-GpuImagePullable | Should -BeTrue
+    Should -Invoke Invoke-DockerCli -ParameterFilter { ($DockerArgs -contains "login") -and ($DockerArgs -contains "ghcr.io") }
+    Should -Invoke Invoke-DockerCli -ParameterFilter { $DockerArgs -contains "pull" }
+    Should -Invoke Invoke-DockerCli -ParameterFilter { $DockerArgs -contains "run" }   # sanity check ran
+  }
+  It "a pulled but BROKEN image (fails the k3s sanity check) -> CPU fallback, not cluster-create abort (#616 Bugbot)" {
+    $env:TRACEBLOC_REGISTRY_USERNAME = "bot"; $env:TRACEBLOC_REGISTRY_PASSWORD = "tok"
+    Mock Invoke-DockerCli {
+      if ($DockerArgs -contains "run") { return [pscustomobject]@{ Code = 127; Output = "exec /bin/k3s: no such file" } }  # broken
+      return [pscustomobject]@{ Code = 0; Output = "" }   # login + pull succeed
+    }
+    Confirm-GpuImagePullable | Should -BeFalse
+    $script:GPU_SKIP_REASON | Should -Match "doesn't run k3s"
+  }
+  It "returns false with a credentials hint when the pull fails despite creds" {
+    $env:TRACEBLOC_REGISTRY_USERNAME = "bot"; $env:TRACEBLOC_REGISTRY_PASSWORD = "tok"
+    Mock Invoke-DockerCli { if ($DockerArgs -contains "login") { [pscustomobject]@{ Code = 0; Output = "" } } else { [pscustomobject]@{ Code = 1; Output = "denied" } } }
+    Confirm-GpuImagePullable | Should -BeFalse
+    $script:GPU_SKIP_REASON | Should -Match "credentials"
+  }
+  It "without creds: no docker login, and the reason names the env vars to set" {
+    Mock Invoke-DockerCli { [pscustomobject]@{ Code = 1; Output = "denied" } }
+    Confirm-GpuImagePullable | Should -BeFalse
+    Should -Not -Invoke Invoke-DockerCli -ParameterFilter { $DockerArgs -contains "login" }
+    $script:GPU_SKIP_REASON | Should -Match "TRACEBLOC_REGISTRY_USERNAME"
+  }
+  It "a pull TIMEOUT (Code 124) falls back to CPU with a timeout reason, not an auth error (#616 Bugbot)" {
+    $env:TRACEBLOC_REGISTRY_USERNAME = "bot"; $env:TRACEBLOC_REGISTRY_PASSWORD = "tok"
+    Mock Invoke-DockerCli { if ($DockerArgs -contains "login") { [pscustomobject]@{ Code = 0; Output = "" } } else { [pscustomobject]@{ Code = 124; Output = "docker pull timed out after 900s" } } }
+    Confirm-GpuImagePullable | Should -BeFalse
+    $script:GPU_SKIP_REASON | Should -Match "timed out"
+    $script:GPU_SKIP_REASON | Should -Not -Match "credentials"
+  }
+  It "GPU gate + BOUNDED docker calls (source guard: installer timeout rule)" {
+    # Default = local BUILD (no login); explicit prebuilt image / mirror = PULL. Both gated
+    # behind the docker-run probe, which short-circuits before any build/pull.
+    $script:GSRC2 | Should -Match '\(Confirm-DockerGpu\) -and \(& \$gpuImageReady\)'
+    $script:GSRC2 | Should -Match 'if \(\$env:TRACEBLOC_K3S_CUDA_IMAGE -or \$env:TRACEBLOC_IMAGE_REGISTRY\) \{ Confirm-GpuImagePullable \} else \{ Build-GpuNodeImage \}'
+    # every GPU docker call goes through the bounded helper with an explicit timeout
+    $script:GSRC2 | Should -Match 'Invoke-DockerCli -DockerArgs @\("run"'
+    $script:GSRC2 | Should -Match 'Invoke-DockerCli -DockerArgs @\("login"'
+    $script:GSRC2 | Should -Match 'Invoke-DockerCli -DockerArgs @\("pull", \$K3S_CUDA_IMAGE\) -TimeoutSec'
+    # the helper itself is bounded AND kills docker.exe on timeout (no orphaned native process)
+    $script:GSRC2 | Should -Match 'function Invoke-DockerCli'
+    $script:GSRC2 | Should -Match '\$proc.WaitForExit\(\$TimeoutSec \* 1000\)'
+    $script:GSRC2 | Should -Match '\$proc.Kill\(\)'
+  }
+}
+
+Describe "Get-RegistryHost (#616 Bugbot: docker login targets the right host)" {
+  It "a qualified registry host is used as-is" {
+    Get-RegistryHost "ghcr.io/tracebloc/k3s-cuda:tag" | Should -Be "ghcr.io"
+  }
+  It "a custom mirror host is used as-is" {
+    Get-RegistryHost "mirror.corp/tracebloc/k3s-cuda:tag" | Should -Be "mirror.corp"
+  }
+  It "a host:port is recognized" {
+    Get-RegistryHost "localhost:5000/gpu-node:tag" | Should -Be "localhost:5000"
+  }
+  It "a bare Docker Hub repo (owner/name) logs into docker.io, NOT the owner (#616 Bugbot)" {
+    Get-RegistryHost "owner/private-image:tag" | Should -Be "docker.io"
+  }
+}
+
+Describe "GPU registry login happens BEFORE the probe (#616 Bugbot: authenticated mirror)" {
+  BeforeAll { $script:LSRC2 = Get-Content "$PSScriptRoot/../install-k8s.ps1" -Raw }
+  It "the gate calls Connect-GpuRegistry before the Confirm-DockerGpu probe for a mirror/custom image" {
+    # Otherwise the mirror-homed CUDA probe pull is unauthenticated -> CPU fallback despite creds.
+    $script:LSRC2 | Should -Match 'if \(\$env:TRACEBLOC_K3S_CUDA_IMAGE -or \$env:TRACEBLOC_IMAGE_REGISTRY\) \{ Connect-GpuRegistry \}[\s\S]{0,1600}?\(Confirm-DockerGpu\) -and'
+  }
+  It "Connect-GpuRegistry logs into the host from Get-RegistryHost and no-ops without creds" {
+    $fn = ($script:LSRC2 -split 'function Connect-GpuRegistry')[1]
+    $fn | Should -Match 'if \(-not \(\$regUser -and \$regPass\)\) \{ return \}'
+    $fn | Should -Match 'Get-RegistryHost \$K3S_CUDA_IMAGE'
+    $fn | Should -Match 'Invoke-DockerCli -DockerArgs @\("login", \$regHost'
+  }
+  It "with a bare Docker Hub override, login uses docker.io (behavioural)" {
+    $K3S_CUDA_IMAGE = "owner/private-image:tag"
+    $CUDA_PROBE_IMAGE = "nvidia/cuda:tag"
+    $env:TRACEBLOC_REGISTRY_USERNAME = "bot"; $env:TRACEBLOC_REGISTRY_PASSWORD = "tok"
+    Mock Invoke-DockerCli { [pscustomobject]@{ Code = 0; Output = "" } }
+    Connect-GpuRegistry
+    Should -Invoke Invoke-DockerCli -ParameterFilter { ($DockerArgs -contains "login") -and ($DockerArgs -contains "docker.io") }
+    $env:TRACEBLOC_REGISTRY_USERNAME = $null; $env:TRACEBLOC_REGISTRY_PASSWORD = $null
+  }
+  It "logs into BOTH the node-image host and the probe-image host when they differ (#616 Bugbot)" {
+    $K3S_CUDA_IMAGE  = "nodehost.corp/tracebloc/k3s-cuda:tag"
+    $CUDA_PROBE_IMAGE = "mirrorhost.corp/nvidia/cuda:tag"
+    $env:TRACEBLOC_REGISTRY_USERNAME = "bot"; $env:TRACEBLOC_REGISTRY_PASSWORD = "tok"
+    Mock Invoke-DockerCli { [pscustomobject]@{ Code = 0; Output = "" } }
+    Connect-GpuRegistry
+    Should -Invoke Invoke-DockerCli -ParameterFilter { ($DockerArgs -contains "login") -and ($DockerArgs -contains "nodehost.corp") }
+    Should -Invoke Invoke-DockerCli -ParameterFilter { ($DockerArgs -contains "login") -and ($DockerArgs -contains "mirrorhost.corp") }
+    $env:TRACEBLOC_REGISTRY_USERNAME = $null; $env:TRACEBLOC_REGISTRY_PASSWORD = $null
+  }
+}
+
+Describe "Confirm-GpuNode disables GPU when the node never advertises one (#616 Bugbot: air-gap plugin)" {
+  BeforeAll { $script:GNSRC = Get-Content "$PSScriptRoot/../install-k8s.ps1" -Raw }
+  It "the 0-GPU branch clears K3D_GPU_FLAG (CPU fallback) with a reason, not just a warning" {
+    $fn = ($script:GNSRC -split 'function Confirm-GpuNode')[1]
+    # it waits on allocatable nvidia.com/gpu ...
+    $fn | Should -Match "nvidia\\\.com/gpu"
+    # ... and if the count stays 0, it makes the node authoritative: disable GPU for this run.
+    $else = ($fn -split '\$gpuCount -gt 0')[1]
+    $else | Should -Match '\$script:K3D_GPU_FLAG = ""'
+    $else | Should -Match '\$script:GPU_SKIP_REASON ='
+  }
+  It "runs before the chart values are written, so the CPU fallback reaches Install-ClientHelm" {
+    # main flow: New-K3dCluster (Step 3) -> Confirm-GpuNode -> ... -> Install-ClientHelm (Step 5)
+    $script:GNSRC | Should -Match 'if \(Install-GpuDevicePlugin\) \{\s*Confirm-GpuNode[\s\S]*Install-TraceblocCli'
+  }
+}
+
+Describe "Adopted-reuse reconciles the GPU request (#616 Bugbot: no stale GPU under --reuse-values)" {
+  BeforeAll { $script:ESRC = Get-Content "$PSScriptRoot/../install-k8s.ps1" -Raw }
+  It "the GPU value decision is made BEFORE the adopted/fresh split so both paths use it" {
+    $script:ESRC | Should -Match 'BEFORE the adopted/fresh split[\s\S]{0,2200}?if \(-not \$adoptedReuse\)'
+  }
+  It "the adopted helm upgrade forces the GPU env keys to this run's decision via --set-string" {
+    # else a prior release's GPU_REQUESTS/GPU_LIMITS survives --reuse-values after a CPU fallback.
+    $adopted = ($script:ESRC -split 'if \(\$adoptedReuse\) \{')[1]
+    $adopted | Should -Match '--set-string "env.GPU_REQUESTS=\$gpuVal"'
+    $adopted | Should -Match '--set-string "env.GPU_LIMITS=\$gpuVal"'
+    $adopted | Should -Match '--set-string "env.RUNTIME_CLASS_NAME=\$runtimeClass"'
+  }
+  It "the fresh (non-adopted) values.yaml still carries the same gpuVal/runtimeClass" {
+    $script:ESRC | Should -Match 'GPU_LIMITS: "\$gpuVal"'
+    $script:ESRC | Should -Match 'RUNTIME_CLASS_NAME: "\$runtimeClass"'
+  }
+}
+
+Describe "Build-GpuNodeImage (#616: local build from public bases, no registry login)" {
+  BeforeEach {
+    $K3S_CUDA_IMAGE = "ghcr.io/tracebloc/k3s-cuda:v1.29.4-k3s1-cuda-12.4.1-base-ubuntu22.04"
+    $K8S_VERSION = "v1.29.4-k3s1"; $CUDA_BASE_TAG = "12.4.1-base-ubuntu22.04"
+    $script:GPU_SKIP_REASON = ""
+    # The installer builds its temp paths from $env:TEMP (always set on Windows, where it
+    # runs and where the Pester CI job runs). Seed it for a non-Windows local test host.
+    if (-not $env:TEMP) { $env:TEMP = [System.IO.Path]::GetTempPath() }
+    # NB: leave $script:K3S_CUDA_DOCKERFILE_B64 as the real embedded value; Start-Process is
+    # mocked so the decoded content is never actually built here.
+  }
+  It "idempotent: a cached image with the CURRENT content hash that passes sanity is reused, nothing is built" {
+    Mock Get-GpuBuildContentHash { "abc123def456" }
+    Mock Invoke-DockerCli {
+      if ($DockerArgs -contains "inspect") { return [pscustomobject]@{ Code = 0; Output = "map[tracebloc.k3s-cuda-content:abc123def456]" } }  # present + current
+      if ($DockerArgs -contains "run")     { return [pscustomobject]@{ Code = 0; Output = "k3s version v1.29.4+k3s1" } }  # runs k3s
+      return [pscustomobject]@{ Code = 0; Output = "" }
+    }
+    Mock Start-Process { throw "must not build when a healthy, current image already exists" }
+    Build-GpuNodeImage | Should -BeTrue
+    Should -Not -Invoke Start-Process
+  }
+  It "a STALE cached image (content hash mismatch) is rebuilt, not reused (#616 Bugbot: e.g. pre-NVIDIA_DISABLE_REQUIRE)" {
+    Mock Get-GpuBuildContentHash { "newhash999999" }
+    Mock Invoke-DockerCli {
+      if ($DockerArgs -contains "inspect") { return [pscustomobject]@{ Code = 0; Output = "map[tracebloc.k3s-cuda-content:oldhash000000]" } }  # present but OLD content
+      if ($DockerArgs -contains "run")     { return [pscustomobject]@{ Code = 0; Output = "k3s version v1.29.4+k3s1" } }  # even if it "runs k3s"
+      return [pscustomobject]@{ Code = 0; Output = "" }
+    }
+    Mock Start-Process { [pscustomobject]@{ ExitCode = 0; HasExited = $true } }
+    Mock Wait-ProcessWithDeadline { $true }
+    Build-GpuNodeImage | Out-Null
+    Should -Invoke Start-Process -ParameterFilter { $ArgumentList -match 'build' }   # rebuilt despite the cached image running k3s
+  }
+  It "an existing image with the current hash but BROKEN (fails sanity) is NOT reused -- it rebuilds (#616 Bugbot)" {
+    Mock Get-GpuBuildContentHash { "abc123def456" }
+    Mock Invoke-DockerCli {
+      if ($DockerArgs -contains "inspect") { return [pscustomobject]@{ Code = 0; Output = "map[tracebloc.k3s-cuda-content:abc123def456]" } }  # present + current
+      if ($DockerArgs -contains "run")     { return [pscustomobject]@{ Code = 127; Output = "exec /bin/k3s: no such file" } }  # broken
+      return [pscustomobject]@{ Code = 0; Output = "" }
+    }
+    Mock Start-Process { [pscustomobject]@{ ExitCode = 0; HasExited = $true } }
+    Mock Wait-ProcessWithDeadline { $true }
+    Build-GpuNodeImage | Out-Null
+    Should -Invoke Start-Process -ParameterFilter { $ArgumentList -match 'build' }
+  }
+  It "the build stamps the content-hash label so the reuse check can detect stale images (#616 Bugbot)" {
+    $psrc = Get-Content "$PSScriptRoot/../install-k8s.ps1" -Raw
+    $fn = ($psrc -split 'function Build-GpuNodeImage')[1]
+    $fn | Should -Match '"--label", "tracebloc.k3s-cuda-content=\$contentHash"'
+    $fn | Should -Match 'tracebloc\\\.k3s-cuda-content:\$contentHash'
+  }
+  It "builds locally with NO docker login and verifies k3s runs -> true" {
+    Mock Invoke-DockerCli {
+      if ($DockerArgs -contains "inspect") { return [pscustomobject]@{ Code = 1; Output = "" } }              # not present yet
+      if ($DockerArgs -contains "run")     { return [pscustomobject]@{ Code = 0; Output = "k3s version v1.29.4+k3s1" } }
+      return [pscustomobject]@{ Code = 0; Output = "" }
+    }
+    Mock Start-Process { [pscustomobject]@{ ExitCode = 0; HasExited = $true } }
+    Mock Wait-ProcessWithDeadline { $true }
+    Build-GpuNodeImage | Should -BeTrue
+    Should -Invoke Start-Process -ParameterFilter { $ArgumentList -match 'build' }
+    # the whole point: a GPU install never logs into a registry
+    Should -Not -Invoke Invoke-DockerCli -ParameterFilter { $DockerArgs -contains "login" }
+    $script:GPU_SKIP_REASON | Should -Be ""
+  }
+  It "build FAILS (non-zero exit) -> CPU fallback with a reason, returns false" {
+    Mock Invoke-DockerCli { if ($DockerArgs -contains "inspect") { [pscustomobject]@{ Code = 1 } } else { [pscustomobject]@{ Code = 0; Output = "k3s version" } } }
+    Mock Start-Process { [pscustomobject]@{ ExitCode = 1; HasExited = $true } }
+    Mock Wait-ProcessWithDeadline { $true }
+    Build-GpuNodeImage | Should -BeFalse
+    $script:GPU_SKIP_REASON | Should -Match "build failed"
+  }
+  It "a NULL build exit code is not a failure -- the k3s sanity check is authoritative (#616 Bugbot)" {
+    # With redirected stdout/stderr, $proc.ExitCode can stay null after exit; a successful build
+    # must not be misclassified as failed and silently lose GPU.
+    Mock Invoke-DockerCli {
+      if ($DockerArgs -contains "inspect") { return [pscustomobject]@{ Code = 1 } }                             # not present -> build
+      if ($DockerArgs -contains "run")     { return [pscustomobject]@{ Code = 0; Output = "k3s version v1.29.4+k3s1" } }  # image works
+      return [pscustomobject]@{ Code = 0; Output = "" }
+    }
+    Mock Start-Process { [pscustomobject]@{ ExitCode = $null; HasExited = $true } }   # exit code unreadable
+    Mock Wait-ProcessWithDeadline { $true }
+    Build-GpuNodeImage | Should -BeTrue
+    $script:GPU_SKIP_REASON | Should -Be ""
+  }
+  It "a NULL build exit code with a BROKEN image still falls back to CPU (sanity check catches it)" {
+    Mock Invoke-DockerCli {
+      if ($DockerArgs -contains "inspect") { return [pscustomobject]@{ Code = 1 } }
+      if ($DockerArgs -contains "run")     { return [pscustomobject]@{ Code = 127; Output = "exec /bin/k3s: no such file" } }
+      return [pscustomobject]@{ Code = 0; Output = "" }
+    }
+    Mock Start-Process { [pscustomobject]@{ ExitCode = $null; HasExited = $true } }
+    Mock Wait-ProcessWithDeadline { $true }
+    Build-GpuNodeImage | Should -BeFalse
+    $script:GPU_SKIP_REASON | Should -Match "didn't run k3s"
+  }
+  It "build TIMES OUT -> CPU fallback with a timeout reason, returns false" {
+    Mock Invoke-DockerCli { [pscustomobject]@{ Code = 1 } }
+    Mock Start-Process { [pscustomobject]@{ ExitCode = 0; HasExited = $false } }
+    Mock Wait-ProcessWithDeadline { $false }
+    Build-GpuNodeImage | Should -BeFalse
+    $script:GPU_SKIP_REASON | Should -Match "timed out"
+  }
+  It "built image can't run k3s (broken rootfs) -> CPU fallback, returns false" {
+    Mock Invoke-DockerCli {
+      if ($DockerArgs -contains "inspect") { return [pscustomobject]@{ Code = 1 } }
+      if ($DockerArgs -contains "run")     { return [pscustomobject]@{ Code = 127; Output = "exec /bin/k3s: no such file" } }
+      return [pscustomobject]@{ Code = 0; Output = "" }
+    }
+    Mock Start-Process { [pscustomobject]@{ ExitCode = 0; HasExited = $true } }
+    Mock Wait-ProcessWithDeadline { $true }
+    Build-GpuNodeImage | Should -BeFalse
+    $script:GPU_SKIP_REASON | Should -Match "didn't run k3s"
+  }
+  It "a build-context error (temp-dir permission/AV/disk) degrades to CPU, never aborts (#616 Bugbot)" {
+    Mock Invoke-DockerCli { [pscustomobject]@{ Code = 1 } }   # image not present -> proceeds to build
+    Mock New-Item { throw "Access to the path is denied" }     # context dir creation fails
+    Mock Start-Process { throw "must not reach docker build after a context error" }
+    Build-GpuNodeImage | Should -BeFalse                        # returns, does NOT rethrow (no abort)
+    $script:GPU_SKIP_REASON | Should -Match "couldn't be built"
+  }
+}
+
+Describe "Embedded GPU build inputs stay in sync with docker/k3s-cuda (#616 drift guard)" {
+  # The embed is base64 (ASCII, no bare-curl token) so the host-side style/ASCII guards don't
+  # trip on the container Dockerfile; decode it and compare to the source file (LF-normalized).
+  # $norm is defined INSIDE each It (Describe-body code runs at discovery, not run time).
+  It "the embedded Dockerfile decodes to docker/k3s-cuda/Dockerfile" {
+    $norm = { param([byte[]]$b) (([System.Text.Encoding]::UTF8.GetString($b)) -replace "`r`n","`n").TrimEnd() }
+    $decoded = & $norm ([System.Convert]::FromBase64String($script:K3S_CUDA_DOCKERFILE_B64))
+    $file = & $norm ([System.IO.File]::ReadAllBytes((Resolve-Path "$PSScriptRoot/../../docker/k3s-cuda/Dockerfile").Path))
+    $decoded | Should -Be $file
+  }
+  It "the embedded RuntimeClass manifest decodes to docker/k3s-cuda/nvidia-runtimeclass.yaml" {
+    $norm = { param([byte[]]$b) (([System.Text.Encoding]::UTF8.GetString($b)) -replace "`r`n","`n").TrimEnd() }
+    $decoded = & $norm ([System.Convert]::FromBase64String($script:K3S_CUDA_RUNTIMECLASS_B64))
+    $file = & $norm ([System.IO.File]::ReadAllBytes((Resolve-Path "$PSScriptRoot/../../docker/k3s-cuda/nvidia-runtimeclass.yaml").Path))
+    $decoded | Should -Be $file
+  }
+  It "the embedded CDI drop-in decodes to docker/k3s-cuda/k3d-entrypoint-tracebloc-cdi.sh" {
+    $norm = { param([byte[]]$b) (([System.Text.Encoding]::UTF8.GetString($b)) -replace "`r`n","`n").TrimEnd() }
+    $decoded = & $norm ([System.Convert]::FromBase64String($script:K3S_CUDA_BOOT_B64))
+    $file = & $norm ([System.IO.File]::ReadAllBytes((Resolve-Path "$PSScriptRoot/../../docker/k3s-cuda/k3d-entrypoint-tracebloc-cdi.sh").Path))
+    $decoded | Should -Be $file
+  }
+  It "the node image disables the CUDA requirement gate so it boots on an older-but-valid driver (#616)" {
+    $decoded = [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String($script:K3S_CUDA_DOCKERFILE_B64))
+    $decoded | Should -Match 'ENV NVIDIA_DISABLE_REQUIRE=1'
+  }
+  It "the node image ships ONLY the RuntimeClass, never the NVML device-plugin DaemonSet (#616 WSL2)" {
+    # the NVML plugin can't init on WSL2; shipping it would register 0 GPUs and overwrite the
+    # installer's node-capacity patch, stranding jobs.
+    $df = [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String($script:K3S_CUDA_DOCKERFILE_B64))
+    $df | Should -Match 'COPY nvidia-runtimeclass\.yaml /var/lib/rancher/k3s/server/manifests/'
+    $df | Should -Not -Match 'COPY nvidia-device-plugin-daemonset\.yaml'
+    $rc = [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String($script:K3S_CUDA_RUNTIMECLASS_B64))
+    $rc | Should -Match 'kind: RuntimeClass'
+    $rc | Should -Match 'handler: nvidia'
+    $rc | Should -Not -Match 'kind: DaemonSet'
+  }
+  It "the CDI setup ships as a k3d ENTRYPOINT DROP-IN, not the image ENTRYPOINT (#616 regression)" {
+    # This shipped broken once: k3d REPLACES the image entrypoint with its own
+    # /bin/k3d-entrypoint.sh (verified on a live node), so an ENTRYPOINT wrapper never ran and
+    # the CDI spec was never generated. k3d runs /bin/k3d-entrypoint-*.sh drop-ins instead.
+    $df = [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String($script:K3S_CUDA_DOCKERFILE_B64))
+    $df | Should -Match 'COPY k3d-entrypoint-tracebloc-cdi\.sh /bin/k3d-entrypoint-tracebloc-cdi\.sh'
+    $df | Should -Match 'chmod \+x /bin/k3d-entrypoint-tracebloc-cdi\.sh'
+    # the image entrypoint must stay the stock k3s one -- never our script
+    $df | Should -Match 'ENTRYPOINT \["/bin/k3s"\]'
+    $df | Should -Not -Match 'ENTRYPOINT \["/usr/local/bin/tracebloc'
+  }
+  It "the drop-in RETURNS (never execs k3s) and always exits 0 so it can't abort the node (#616)" {
+    # k3d runs drop-ins with `|| exit 1` and execs k3s itself afterwards.
+    $boot = [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String($script:K3S_CUDA_BOOT_B64))
+    $boot | Should -Not -Match 'exec /bin/k3s'
+    $boot.TrimEnd() | Should -Match 'exit 0$'
+  }
+  It "the CDI setup is a strict no-op without /dev/dxg (Linux/CPU nodes unaffected) (#616)" {
+    $boot = [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String($script:K3S_CUDA_BOOT_B64))
+    $boot | Should -Match 'if \[ -e /dev/dxg \]'
+  }
+  It "the node re-asserts nvidia.com/gpu capacity across restarts (#616 Bugbot HIGH: kubelet zeroes it)" {
+    # A manually patched extended resource is not durable -- the kubelet re-reports node
+    # status on start, so a Docker Desktop / Windows restart would drop the GPU and strand
+    # jobs. The node reconciles it itself, in the background, on every start.
+    $boot = [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String($script:K3S_CUDA_BOOT_B64))
+    $boot | Should -Match 'capacity/nvidia\.com~1gpu'
+    $boot | Should -Match '--subresource=status'
+    $boot | Should -Match 'TRACEBLOC_GPU_RECONCILE_SECS'
+    # backgrounded so it can never delay/block k3s, and it re-patches only when missing/0
+    $boot | Should -Match "case \`"\`$current\`" in"
+    $boot | Should -Match '\) </dev/null >/dev/null 2>&1 &'
+  }
+  It "the libdxcore injection MIRRORS the generator's indentation, never hardcodes it (#616 regression)" {
+    # nvidia-ctk (yaml.v3) indents with 4 spaces, so the original `^  mounts:$` anchor never
+    # matched and libdxcore was silently never injected -> pods died with a misleading
+    # "CUDA driver version is insufficient" error. Verified on a live box.
+    $boot = [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String($script:K3S_CUDA_BOOT_B64))
+    $boot | Should -Match '\[\[:space:\]\]\*mounts:'      # indent-agnostic anchor
+    $boot | Should -Not -Match "\^  mounts:\\\$"           # never the fixed 2-space anchor
+    $boot | Should -Match 'item = substr\(\$0, 1, RLENGTH - 2\)'   # mirror the item's indent
+    # and the edit is only adopted if the spec still parses
+    $boot | Should -Match 'nvidia-ctk cdi list'
+  }
+  It "the toolkit version is PINNED with a fallback -- reproducible across machines (#616)" {
+    # unpinned, two machines built weeks apart get different toolkit builds, and a release that
+    # changes the CDI YAML shape breaks GPU on new installs while old ones keep working.
+    $df = [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String($script:K3S_CUDA_DOCKERFILE_B64))
+    $df | Should -Match 'ARG NCT_VERSION='
+    $df | Should -Match 'nvidia-container-toolkit=\$\{NCT_VERSION\}'
+    # a pin that has aged out of the repo must NOT fail the build (that would cost GPU entirely)
+    $df | Should -Match 'falling back to latest'
+    $df | Should -Match 'nvidia-ctk --version'          # record what actually got installed
+  }
+  It "EVERY `cdi list` use is availability-gated -- incl. the revert (#616 Bugbot)" {
+    # The revert originally called `cdi list` unconditionally, so a toolkit without that
+    # subcommand reverted a PERFECTLY GOOD libdxcore injection -- and the installer then reported
+    # "spec is missing libdxcore", which is false and unactionable. Verified with a dash harness:
+    # with `cdi list` absent the injection survives and the GPU is advertised.
+    $boot = [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String($script:K3S_CUDA_BOOT_B64))
+    # exactly two availability probes: one per call site (revert + cdi_ok)
+    ([regex]::Matches($boot, 'nvidia-ctk cdi list --help')).Count | Should -Be 2
+    # and every EXECUTABLE bare use (comments excluded) sits inside such a guard
+    $bare = @($boot -split "`n" | Where-Object { $_ -match 'nvidia-ctk cdi list' -and $_ -notmatch '--help' -and $_.TrimStart() -notmatch '^#' })
+    $bare.Count | Should -Be 2
+    # the revert shape: guard, then the vetoing call
+    $boot | Should -Match 'cdi list --help >/dev/null 2>&1; then\s*\n\s*if ! nvidia-ctk cdi list'
+    # the cdi_ok shape: guard, then veto by clearing the flag
+    $boot | Should -Match 'cdi list --help >/dev/null 2>&1; then\s*\n\s*nvidia-ctk cdi list >/dev/null 2>&1 \|\| cdi_ok=0'
+  }
+  It "the CDI gate does NOT require `nvidia-ctk cdi list` to exist (#616: no false negative)" {
+    # `cdi list` is version-dependent; keying the decision on it would disable a working GPU on a
+    # toolkit build that lacks the subcommand. Structural, format-stable checks decide instead.
+    $boot = [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String($script:K3S_CUDA_BOOT_B64))
+    $boot | Should -Match "grep -q 'nvidia\\.com/gpu'"
+    $boot | Should -Match "grep -q '/dev/dxg'"
+    $boot | Should -Match "grep -q 'libdxcore"
+    # cdi list is only an EXTRA veto, and only when available
+    $boot | Should -Match 'nvidia-ctk cdi list --help'
+  }
+  It "the reconciler only advertises GPU when CDI is USABLE (#616 Bugbot HIGH)" {
+    # re-asserting capacity onto a node whose CDI spec is broken is worse than not advertising:
+    # pods schedule then fail CUDA with no cluster-level signal.
+    $boot = [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String($script:K3S_CUDA_BOOT_B64))
+    $boot | Should -Match 'cdi_ok=0'
+    $boot | Should -Match "grep -q 'libdxcore"
+    $boot | Should -Match 'nvidia-ctk cdi list'
+    $boot | Should -Match 'if \[ "\$cdi_ok" = "1" \]'
+  }
+  It "libdxcore is DISCOVERED across known locations, not hardcoded to one path (#616 Bugbot)" {
+    # it lives in different places across Docker Desktop / WSL2 versions; a miss silently
+    # skipped the injection while the spec still looked fine.
+    $boot = [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String($script:K3S_CUDA_BOOT_B64))
+    $boot | Should -Match '/usr/lib/wsl/lib/libdxcore\.so'
+    $boot | Should -Match '/usr/lib/wsl/drivers/\*/libdxcore\.so'
+    $boot | Should -Match 'ldconfig -p'                       # last-resort discovery
+    $boot | Should -Match 'awk -v dx="\$DXCORE"'              # mounted at the path found
+  }
+  It "the drop-in wires CDI on WSL2 (mode=cdi baked, generate spec, inject libdxcore) (#616)" {
+    $boot = [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String($script:K3S_CUDA_BOOT_B64))
+    $boot | Should -Match 'nvidia-ctk cdi generate --mode=wsl'
+    $boot | Should -Match 'libdxcore\.so'
+    $boot | Should -Not -Match 'exec /bin/k3s'
+    $df = [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String($script:K3S_CUDA_DOCKERFILE_B64))
+    $df | Should -Match 'nvidia-container-runtime\.mode=cdi'
+    $df | Should -Match 'k3d-entrypoint-tracebloc-cdi\.sh'
+  }
+}
+
+Describe "Get-GpuBuildFailureReason (#616: every GPU failure names an actionable cause)" {
+  BeforeEach { $CUDA_BASE_TAG = "12.4.1-base-ubuntu22.04" }
+  It "old Docker Desktop / missing BuildKit labs frontend -> says update Docker Desktop" {
+    $r = Get-GpuBuildFailureReason -BuildOutput 'failed to solve with frontend dockerfile.v0' -ExitCode 1
+    $r | Should -Match 'Docker Desktop is too old'
+    $r | Should -Match 'TRACEBLOC_K3S_CUDA_IMAGE'      # the escape hatch
+  }
+  It "unknown --exclude flag (older frontend) is also recognised" {
+    (Get-GpuBuildFailureReason -BuildOutput 'unknown flag: --exclude' -ExitCode 1) | Should -Match 'too old'
+  }
+  It "full disk -> says free up space" {
+    (Get-GpuBuildFailureReason -BuildOutput 'write /tmp/x: no space left on device' -ExitCode 1) | Should -Match 'ran out of disk'
+  }
+  It "retired CUDA tag -> names the tag and the override" {
+    $r = Get-GpuBuildFailureReason -BuildOutput 'nvcr.io/nvidia/cuda:12.4.1: manifest unknown' -ExitCode 1
+    $r | Should -Match 'no longer exists upstream'
+    $r | Should -Match 'TRACEBLOC_CUDA_BASE_TAG'
+  }
+  It "TLS-inspecting proxy -> points at the CA bundle" {
+    $r = Get-GpuBuildFailureReason -BuildOutput 'x509: certificate signed by unknown authority' -ExitCode 1
+    $r | Should -Match 'TRACEBLOC_CA_BUNDLE'
+  }
+  It "blocked/offline registry -> points at the mirror override" {
+    $r = Get-GpuBuildFailureReason -BuildOutput 'dial tcp 1.2.3.4:443: i/o timeout' -ExitCode 1
+    $r | Should -Match "couldn't download its base images"
+    $r | Should -Match 'TRACEBLOC_IMAGE_REGISTRY'
+  }
+  It "registry rate limit is called out separately" {
+    (Get-GpuBuildFailureReason -BuildOutput 'toomanyrequests: rate limit exceeded' -ExitCode 1) | Should -Match 'rate-limited'
+  }
+  It "an unrecognised failure still names the exit code AND the log" {
+    $r = Get-GpuBuildFailureReason -BuildOutput 'something odd happened' -ExitCode 7
+    $r | Should -Match 'exit 7'
+    $r | Should -Match 'install log'
+  }
+  It "every branch ends by stating the outcome (running CPU-only)" {
+    foreach ($o in @('failed to solve with frontend', 'no space left on device', 'manifest unknown',
+                     'x509: bad cert', 'i/o timeout', 'toomanyrequests', 'mystery')) {
+      (Get-GpuBuildFailureReason -BuildOutput $o -ExitCode 1) | Should -Match 'running CPU-only'
+    }
+  }
+}
+
+Describe "Bounded process quotes whitespace arguments (#616 Bugbot)" {
+  BeforeAll { $script:QSRC = Get-Content "$PSScriptRoot/../install-k8s.ps1" -Raw }
+  It "the joiner quotes-on-whitespace and skips already-quoted values (source guard)" {
+    # The args are joined into ONE command line, so an unquoted value with a space -- a registry
+    # username, or a temp path under a profile like C:\Users\First Last\... -- would silently
+    # become two arguments and corrupt the command.
+    $fn = (($script:QSRC -split 'function Invoke-BoundedProcess')[1] -split '\nfunction ')[0]
+    $fn | Should -Match 'ForEach-Object'
+    $fn | Should -Match 'notmatch'                 # the already-quoted escape hatch
+    $fn | Should -Match 'Quote any argument containing whitespace'
+  }
+  It "behavioural: a username with a space survives as ONE argument" {
+    # exercises the same expression the function uses
+    $parts = @("login", "ghcr.io", "-u", "First Last", "--password-stdin")
+    $joined = (($parts | ForEach-Object {
+      if ($_ -eq "") { '""' } elseif ($_ -match '\s' -and $_ -notmatch '^".*"$') { '"' + $_ + '"' } else { $_ }
+    }) -join ' ')
+    $joined | Should -Be 'login ghcr.io -u "First Last" --password-stdin'
+  }
+  It "behavioural: an already-quoted path is not double-quoted, and empty survives" {
+    $parts = @('"C:\Temp\a b\p.json"', "", "plain")
+    $joined = (($parts | ForEach-Object {
+      if ($_ -eq "") { '""' } elseif ($_ -match '\s' -and $_ -notmatch '^".*"$') { '"' + $_ + '"' } else { $_ }
+    }) -join ' ')
+    $joined | Should -Be '"C:\Temp\a b\p.json" "" plain'
+  }
+}
+
+Describe "GPU setup fails fast when preflight already found the hosts unreachable (#616 Bugbot)" {
+  BeforeAll { $script:FFSRC = Get-Content "$PSScriptRoot/../install-k8s.ps1" -Raw }
+  It "preflight records the unreachable GPU host" {
+    $script:FFSRC | Should -Match '\$script:GPU_HOSTS_UNREACHABLE = "\$\(\$c\.label\) is unreachable'
+  }
+  It "nvcr.io is NON-blocking on the mirror/prebuilt path -- air-gap keeps its GPU (#616 Bugbot HIGH)" {
+    # Regression I introduced: treating EVERY soft GPU probe as blocking disabled GPU on
+    # air-gapped mirror installs, where nvcr.io is blocked BY DESIGN and images come from the
+    # mirror -- and the remedy told them to configure the mirror they had configured.
+    $script:FFSRC | Should -Match '\$nvcrBlocking = -not \(\$env:TRACEBLOC_K3S_CUDA_IMAGE -or \$env:TRACEBLOC_IMAGE_REGISTRY\)'
+    $script:FFSRC | Should -Match 'url = "https://nvcr\.io/"; gpuSoft = \$true; gpuBlocking = \$nvcrBlocking'
+    # the hosts the path DOES need are blocking
+    $script:FFSRC | Should -Match 'nvidia\.github\.io/"; gpuSoft = \$true; gpuBlocking = \$true'
+    $script:FFSRC | Should -Match 'GPU image registry \(\$gpuHost\)"; url = "https://\$gpuHost/"; gpuSoft = \$true; gpuBlocking = \$true'
+    # and only a blocking probe arms the short-circuit
+    $script:FFSRC | Should -Match 'if \(\$c\.gpuBlocking\) \{ \$script:GPU_HOSTS_UNREACHABLE'
+  }
+  It "the skip remedy matches the path -- no 'set a mirror' to someone who set one (#616 Bugbot)" {
+    $script:FFSRC | Should -Match "can't be pulled -- check that your configured GPU image registry is reachable"
+    $script:FFSRC | Should -Match "can't be built -- on a restricted network set TRACEBLOC_IMAGE_REGISTRY"
+  }
+  It "the gate short-circuits BEFORE the probe, with an actionable reason" {
+    # otherwise a re-run (which our own CPU-fallback advice recommends) burns 3-15 minutes of
+    # timeouts on hosts already known to be blocked, and looks hung.
+    $script:FFSRC | Should -Match 'if \(\$GPU_HOSTS_UNREACHABLE\) \{[\s\S]{0,2000}?\}\s*\n\s*elseif \(\(Confirm-DockerGpu\)'
+    $script:FFSRC | Should -Match 'Skipping GPU setup --'
+  }
+  It "the global defaults empty so a reachable machine is unaffected" {
+    $script:FFSRC | Should -Match '(?m)^\$GPU_HOSTS_UNREACHABLE = ""'
+  }
+}
+
+Describe "No green line may claim GPU is enabled before verification (#616 Bugbot, x3 instances)" {
+  BeforeAll { $script:PSRC_OK = Get-Content "$PSScriptRoot/../install-k8s.ps1" -Raw }
+  It "only two Ok-level GPU lines exist, and both state a VERIFIED fact" {
+    # This defect recurred three times (WSL2/CDI branch, the top-level gate, the device-plugin
+    # branch): a green "GPU enabled" printed while cluster-create / CDI wiring / Confirm-GpuNode
+    # could still clear K3D_GPU_FLAG, so the operator saw success then a CPU-only summary.
+    # Ok is reserved for facts already established; intent uses Info.
+    $oks = [regex]::Matches($script:PSRC_OK, 'Ok "GPU[^"]*"') | ForEach-Object { $_.Value }
+    $oks.Count | Should -Be 2
+    # the image really was built AND passed the k3s sanity check before this line
+    ($oks -join ' | ') | Should -Match 'GPU node image built locally'
+    # the node really was observed advertising a GPU before this line
+    ($oks -join ' | ') | Should -Match 'GPU verified and available'
+  }
+  It "no Ok line claims 'acceleration enabled' or 'GPU enabled' anywhere" {
+    $script:PSRC_OK | Should -Not -Match 'Ok "GPU acceleration enabled'
+    $script:PSRC_OK | Should -Not -Match 'Ok "GPU enabled'
+  }
+  It "the pre-verification lines are Info and say verification is still pending" {
+    $script:PSRC_OK | Should -Match 'Info "GPU support prepared'
+    $script:PSRC_OK | Should -Match 'Info "GPU wired up \(WSL2/CDI\)'
+    $script:PSRC_OK | Should -Match 'Info "NVIDIA device plugin deployed -- verifying'
+    $script:PSRC_OK | Should -Match 'Info "NVIDIA device plugin already present -- verifying'
+  }
+}
+
+Describe "GPU-not-enabled is surfaced prominently with a fix (#616)" {
+  BeforeAll { $script:SUMSRC = Get-Content "$PSScriptRoot/../install-k8s.ps1" -Raw }
+  It "the summary gives it its own block, not a cramped Mode line" {
+    $script:SUMSRC | Should -Match 'GPU found but not enabled -- training will run on CPU'
+    $script:SUMSRC | Should -Match 'Why: \$GPU_SKIP_REASON'
+    $script:SUMSRC | Should -Match 're-run this installer to enable GPU'
+    $script:SUMSRC | Should -Match 'Full detail: \$script:LOG_FILE'
+    # and the Mode line no longer carries the whole reason
+    $script:SUMSRC | Should -Not -Match 'CPU \(GPU detected but not enabled: \$GPU_SKIP_REASON\)'
+  }
+  It "the block is gated on GPU present but not enabled" {
+    $script:SUMSRC | Should -Match 'if \(\$GPU_VENDOR -eq "nvidia" -and \$NVIDIA_DRIVER_OK -and \$K3D_GPU_FLAG -eq ""\) \{'
+  }
+  It "the probe reason quotes the detected driver and a concrete minimum" {
+    $script:SUMSRC | Should -Match 'NVIDIA_DRIVER_VERSION'
+    $script:SUMSRC | Should -Match 'update the NVIDIA Windows driver to 525 or newer'
+  }
+}
+
+Describe "WSL2 GPU: node-advertised capacity replaces the NVML device plugin (#616)" {
+  BeforeAll { $script:CDISRC = Get-Content "$PSScriptRoot/../install-k8s.ps1" -Raw }
+  BeforeEach {
+    $script:CLUSTER_NAME = "tracebloc"
+    $GPU_VENDOR = "nvidia"; $NVIDIA_DRIVER_OK = $true; $K3D_GPU_FLAG = "--gpus=all"
+  }
+  It "Set-NodeGpuCapacity patches nvidia.com/gpu=1 onto the node status (bounded)" {
+    $fn = (($script:CDISRC -split 'function Set-NodeGpuCapacity')[1] -split '\nfunction ')[0]
+    $fn | Should -Match '/status/capacity/nvidia\.com~1gpu'
+    $fn | Should -Match '--subresource=status'
+    $fn | Should -Match '--request-timeout=15s'
+    # single GPU per node -- GPU mode already forces one node, so 1 never double-counts
+    $fn | Should -Match '"value":"1"'
+  }
+  It "the JSON patch goes via --patch-file, never an inline -p (PS 5.1 eats the quotes) (#616 regression)" {
+    # Windows PowerShell 5.1 does not preserve embedded double quotes when building a native
+    # command line, so `-p '[{"op":...}]'` reached kubectl as `[{op:...}]` and the patch ALWAYS
+    # failed on a real box. A file sidesteps the shell entirely.
+    $fn = (($script:CDISRC -split 'function Set-NodeGpuCapacity')[1] -split '\nfunction ')[0]
+    $fn | Should -Match '"--patch-file"'
+    $fn | Should -Not -Match '-p \$patch'
+    # written without a BOM (a BOM breaks kubectl's JSON parse)
+    $fn | Should -Match 'UTF8Encoding\(\$false\)'
+    # and retried, since the node object can still be settling right after cluster-create
+    $fn | Should -Match 'for \(\$i = 1; \$i -le 6; \$i\+\+\)'
+  }
+  It "Set-NodeGpuCapacity no-ops when GPU isn't enabled" {
+    $K3D_GPU_FLAG = ""
+    Mock kubectl { throw "must not patch the node when GPU is not enabled" }
+    Set-NodeGpuCapacity | Should -BeFalse
+    Should -Not -Invoke kubectl
+  }
+  It "Install-GpuDevicePlugin takes the CDI path when the node has /dev/dxg (WSL2)" {
+    $fn = (($script:CDISRC -split 'function Install-GpuDevicePlugin')[1] -split '\nfunction ')[0]
+    $fn | Should -Match 'Invoke-DockerCli -DockerArgs @\("exec", "k3d-\$CLUSTER_NAME-server-0", "test", "-e", "/dev/dxg"\)'
+    $fn | Should -Match 'if \(Set-NodeGpuCapacity\) \{[\s\S]{0,700}?Info "GPU wired up \(WSL2/CDI\)[\s\S]{0,120}?return \$true'
+  }
+  It "the WSL2/CDI path sets the chart's GPU device selector for training pods (#616)" {
+    # without GPU_VISIBLE_DEVICES a pod schedules but CUDA fails (client-runtime#291)
+    $fn = (($script:CDISRC -split 'function Install-GpuDevicePlugin')[1] -split '\nfunction ')[0]
+    $fn | Should -Match '\$script:GPU_DEVICE_SELECTOR = "nvidia\.com/gpu=all"'
+    # values carry it, gated on the same condition as gpuVal (empty when GPU is off)
+    $script:CDISRC | Should -Match '\$gpuSelector = if \(\$gpuVal\) \{ \$GPU_DEVICE_SELECTOR \} else \{ "" \}'
+    $script:CDISRC | Should -Match 'GPU_VISIBLE_DEVICES: "\$gpuSelector"'
+    # and the adopted-reuse reconcile forces it too, so a stale value can't survive
+    $script:CDISRC | Should -Match '--set-string "env\.GPU_VISIBLE_DEVICES=\$gpuSelector"'
+  }
+  It "the 0-GPU reason names the RIGHT cause per path -- no dead-end advice (#616 Bugbot)" {
+    # on WSL2/CDI there is no device plugin, so blaming a blocked nvcr.io plugin image would
+    # send operators down a dead end.
+    $fn = (($script:CDISRC -split 'function Confirm-GpuNode')[1] -split '\nfunction ')[0]
+    $fn | Should -Match 'if \(\$GPU_DEVICE_SELECTOR\) \{'
+    $wsl = ($fn -split 'if \(\$GPU_DEVICE_SELECTOR\) \{')[1]
+    ($wsl -split '\} else \{')[0] | Should -Match 'WSL2/CDI path'
+    ($wsl -split '\} else \{')[0] | Should -Not -Match 'k8s-device-plugin'
+    # the non-CDI branch keeps the device-plugin guidance
+    ($wsl -split '\} else \{')[1] | Should -Match 'k8s-device-plugin'
+  }
+  It "the WSL2/CDI smoke-test --overrides payload is VALID JSON (#616 Bugbot: claimed stray brace)" {
+    # A scanner reported an "extra closing brace before the containers array close". It was a
+    # false positive -- the `}}}` closes limits, resources and the container in turn -- but the
+    # only durable answer is to PARSE it, so a genuine brace slip can never ship a command that
+    # errors on a healthy cluster.
+    $cmd = Get-GpuSmokeTestCommand -Selector "nvidia.com/gpu=all"
+    if ($cmd -notmatch "--overrides='(.*)'$") { throw "no --overrides payload in: $cmd" }
+    $json = $Matches[1] -replace '\\"', '"'          # undo the PowerShell-paste escaping
+    $obj = $json | ConvertFrom-Json                    # throws on malformed JSON
+    $obj.spec.runtimeClassName | Should -Be "nvidia"
+    $obj.spec.containers[0].resources.limits."nvidia.com/gpu" | Should -Be "1"
+    $obj.spec.containers[0].env[0].name | Should -Be "NVIDIA_VISIBLE_DEVICES"
+    $obj.spec.containers[0].env[0].value | Should -Be "nvidia.com/gpu=all"
+    $obj.spec.containers[0].image | Should -Match 'vectoradd'   # CUDA workload, not nvidia-smi
+  }
+  It "the device-plugin smoke-test --overrides payload is VALID JSON too (#616)" {
+    $cmd = Get-GpuSmokeTestCommand -Selector ""
+    if ($cmd -notmatch "--overrides='([^']*)'") { throw "no --overrides payload in: $cmd" }
+    $obj = ($Matches[1] -replace '\\"', '"') | ConvertFrom-Json
+    $obj.spec.runtimeClassName | Should -Be "nvidia"
+    $cmd | Should -Match 'nvidia-smi'                  # NVML works on a device-plugin node
+  }
+  It "the doctor's GPU smoke test matches how the cluster delivers the GPU (#616 Bugbot)" {
+    # pods only get the GPU under the nvidia RuntimeClass, and on WSL2 nvidia-smi FAILS in a pod
+    # even when CUDA works -- so the suggested command must not make a working cluster look broken.
+    $wsl = Get-GpuSmokeTestCommand -Selector "nvidia.com/gpu=all"
+    $wsl | Should -Match 'runtimeClassName'
+    $wsl | Should -Match 'vectoradd'                  # CUDA workload, not nvidia-smi
+    $wsl | Should -Match 'NVIDIA_VISIBLE_DEVICES'
+    # every quote in the payload is ESCAPED, else PowerShell strips them and the pasted
+    # command dies with "error: Invalid JSON Patch" (seen on a live box).
+    $wsl | Should -Match ([regex]::Escape('\"spec\"'))
+    # and the device-plugin variant also carries the RuntimeClass + keeps nvidia-smi
+    $plugin = Get-GpuSmokeTestCommand -Selector ""
+    $plugin | Should -Match 'runtimeClassName'
+    $plugin | Should -Match 'nvidia-smi'
+    # the diagnostics bundle prints it through the builder (one source of truth)
+    $script:CDISRC | Should -Match 'Get-GpuSmokeTestCommand -Selector \$GPU_DEVICE_SELECTOR'
+  }
+  It "the selector is EMPTY on a normal device-plugin (Linux) node -- the plugin owns that var (#616)" {
+    # $GPU_DEVICE_SELECTOR is only ever assigned inside the WSL2/CDI branch; the global default
+    # is empty, so a Linux/device-plugin install writes GPU_VISIBLE_DEVICES: "".
+    $script:CDISRC | Should -Match '(?m)^\$GPU_DEVICE_SELECTOR = ""'
+    ([regex]::Matches($script:CDISRC, '\$script:GPU_DEVICE_SELECTOR = "')).Count | Should -Be 1
+  }
+  It "the installer verifies libdxcore is IN the spec, not just that a spec exists (#616 regression)" {
+    $fn = (($script:CDISRC -split 'function Install-GpuDevicePlugin')[1] -split '\nfunction ')[0]
+    $fn | Should -Match '"grep", "-q", "libdxcore"'
+    $fn | Should -Match 'missing libdxcore'
+  }
+  It "K3D_GPU_FLAG is set in exactly ONE place -- the authoritative gate (#616 Bugbot)" {
+    # Install-NvidiaContainerToolkit used to set it (and clear GPU_SKIP_REASON) after the
+    # in-WSL toolkit check, before the Docker GPU probe that actually decides. That made a
+    # later CPU fallback look enabled and dropped the real skip reason.
+    ([regex]::Matches($script:CDISRC, '\$(script:)?K3D_GPU_FLAG = "--gpus=all"')).Count | Should -Be 1
+    $tk = (($script:CDISRC -split 'function Install-NvidiaContainerToolkit')[1] -split '\nfunction ')[0]
+    $tk | Should -Not -Match 'K3D_GPU_FLAG = "--gpus=all"'
+    $tk | Should -Not -Match 'GPU_SKIP_REASON = ""'
+    # it reports only what it established, and says GPU is still gated
+    $tk | Should -Match 'NVIDIA Container Toolkit present in'
+    $tk | Should -Match 'still gated on the Docker GPU probe'
+  }
+  It "no green GPU-success line before Confirm-GpuNode verifies the node (#616 Bugbot)" {
+    # claiming success at the capacity patch produced a green "enabled" immediately followed
+    # by a CPU fallback when verification cleared the flag.
+    $fn = (($script:CDISRC -split 'function Install-GpuDevicePlugin')[1] -split '\nfunction ')[0]
+    $cdiBranch = ($fn -split 'if \(\$dxg\.Code -eq 0\) \{')[1]
+    ($cdiBranch -split '\n  \}')[0] | Should -Not -Match 'Ok "GPU acceleration enabled \(WSL2/CDI\)'
+    ($cdiBranch -split '\n  \}')[0] | Should -Match 'Info "GPU wired up \(WSL2/CDI\)'
+  }
+  It "the soft GPU preflight warning names the path actually in use (#616 Bugbot)" {
+    # "can't be built" was wrong on the pull/mirror path, where nothing is built locally.
+    $script:CDISRC | Should -Match "can't be pulled here"
+    $script:CDISRC | Should -Match "can't be built here"
+  }
+  It "the CDI spec is VERIFIED before claiming GPU is ready (#616 Bugbot)" {
+    # the boot script guards every step with `|| true`; without this check a failed
+    # `cdi generate` would leave us advertising a GPU pods can't actually use.
+    $fn = (($script:CDISRC -split 'function Install-GpuDevicePlugin')[1] -split '\nfunction ')[0]
+    $fn | Should -Match '"test", "-s", "/etc/cdi/nvidia\.yaml"'
+    # and the spec check must come BEFORE the success path
+    $fn | Should -Match '/etc/cdi/nvidia\.yaml"\)[\s\S]{0,1800}?Set-NodeGpuCapacity'
+    $fn | Should -Match '\$script:GPU_SKIP_REASON = "the node couldn''t generate its WSL GPU \(CDI\) spec'
+  }
+  It "a leftover NVML device plugin is REMOVED before advertising capacity (#616 Bugbot HIGH)" {
+    # A device plugin owns the nvidia.com/gpu extended resource and re-reports 0 on WSL2 every
+    # sync, so one left behind by an older install would permanently defeat the capacity patch.
+    $fn = (($script:CDISRC -split 'function Install-GpuDevicePlugin')[1] -split '\nfunction ')[0]
+    $fn | Should -Match 'delete", "daemonset", "-n", "kube-system", "nvidia-device-plugin-daemonset"'
+    $fn | Should -Match '--ignore-not-found'          # idempotent: clean no-op when absent
+    # and it must happen BEFORE we patch capacity
+    $fn | Should -Match 'nvidia-device-plugin-daemonset"[\s\S]{0,900}?Set-NodeGpuCapacity'
+  }
+  It "a failed capacity patch names the CDI cause, not a device-plugin failure (#616 Bugbot)" {
+    # this path never uses the plugin, so the caller's generic fallback reason would mislead
+    $fn = (($script:CDISRC -split 'function Install-GpuDevicePlugin')[1] -split '\nfunction ')[0]
+    $tail = ($fn -split 'if \(Set-NodeGpuCapacity\) \{')[1]
+    $tail | Should -Match '\$script:GPU_SKIP_REASON = "the installer couldn''t advertise nvidia\.com/gpu'
+    $tail | Should -Match 'WSL2/CDI path'
+  }
+  It "GPU mode collapses SERVERS to 1 as well as AGENTS to 0 (#616 Bugbot: one card, one advertiser)" {
+    # every server node runs the boot reconciler and advertises nvidia.com/gpu=1 for the SAME
+    # physical card, so SERVERS>1 would offer N GPUs for one device.
+    $gate = ($script:CDISRC -split '\$K3D_GPU_FLAG = "--gpus=all"')[1]
+    $gate | Should -Match '\$AGENTS = "0"'
+    $gate | Should -Match '\$SERVERS = "1"'
+    $gate | Should -Match 'if \(\$env:SERVERS\)'      # an explicit user value is overridden LOUDLY
+  }
+  It "a failed capacity advertisement returns false so the caller falls back to CPU" {
+    $fn = (($script:CDISRC -split 'function Install-GpuDevicePlugin')[1] -split '\nfunction ')[0]
+    $dxgBranch = ($fn -split 'if \(\$dxg\.Code -eq 0\) \{')[1]
+    ($dxgBranch -split '\n  \}')[0] | Should -Match 'return \$false'
+  }
+}
+
+Describe "GPU + K8S_VERSION=latest is refused (#616 Bugbot: latest bypasses the CUDA image)" {
+  BeforeAll { $script:LSRC = Get-Content "$PSScriptRoot/../install-k8s.ps1" -Raw }
+  It "the GPU gate has a latest/empty branch that never enables GPU and gives a reason" {
+    # latest adds no --image, so k3d makes a stock node; enabling GPU there strands jobs.
+    $script:LSRC | Should -Match 'if \(\$GPU_VENDOR -eq "nvidia" -and \$NVIDIA_DRIVER_OK -and \(\$K8S_VERSION -eq "latest" -or \$K8S_VERSION -eq ""\)\)'
+    $gate = ($script:LSRC -split 'if \(\$GPU_VENDOR -eq "nvidia" -and \$NVIDIA_DRIVER_OK -and \(\$K8S_VERSION')[1]
+    # this branch must NOT set the --gpus flag; it only records a skip reason (CPU fallback)
+    ($gate -split '\} elseif')[0] | Should -Not -Match '\$K3D_GPU_FLAG = "--gpus=all"'
+    ($gate -split '\} elseif')[0] | Should -Match '\$GPU_SKIP_REASON ='
+  }
+  It "the latest branch CLEARS any flag Install-NvidiaContainerToolkit already set (#616 Bugbot)" {
+    # Install-NvidiaContainerToolkit runs first and may set K3D_GPU_FLAG=--gpus=all; the latest
+    # branch must clear it or a stock 'latest' cluster gets --gpus=all without the CUDA image.
+    $gate = ($script:LSRC -split 'if \(\$GPU_VENDOR -eq "nvidia" -and \$NVIDIA_DRIVER_OK -and \(\$K8S_VERSION')[1]
+    ($gate -split '\} elseif')[0] | Should -Match '\$K3D_GPU_FLAG = ""'
+  }
+}
+
+Describe "Device-plugin setup failure falls back to CPU (#616 Bugbot: don't leave GPU requests)" {
+  BeforeAll { $script:MSRC = Get-Content "$PSScriptRoot/../install-k8s.ps1" -Raw }
+  It "a failed Install-GpuDevicePlugin (flag still set) clears K3D_GPU_FLAG before values are written" {
+    # if (Install-GpuDevicePlugin) { Confirm-GpuNode } elseif ($K3D_GPU_FLAG -ne "") { clear + reason }
+    $script:MSRC | Should -Match 'if \(Install-GpuDevicePlugin\) \{[\s\S]{0,80}?Confirm-GpuNode[\s\S]{0,80}?\} elseif \(\$K3D_GPU_FLAG -ne ""\) \{'
+    $branch = ($script:MSRC -split '\} elseif \(\$K3D_GPU_FLAG -ne ""\) \{')[1]
+    ($branch -split '\n\}')[0] | Should -Match '\$K3D_GPU_FLAG = ""'
+    ($branch -split '\n\}')[0] | Should -Match 'GPU_SKIP_REASON'
+  }
+}
+
+Describe "GPU download hosts are in the connectivity preflight (#616 Bugbot: nvcr.io coverage)" {
+  BeforeAll { $script:PSRC4 = Get-Content "$PSScriptRoot/../install-k8s.ps1" -Raw }
+  It "GPU is detected BEFORE preflight (and before the fast path) so both can use it" {
+    # Find-Gpu now runs before the fast path (so it can decide GPU retry) -- still before Test-Preflight.
+    $script:PSRC4 | Should -Match '(?m)^Find-Gpu\s*$[\s\S]*?^Test-Preflight\s*$'
+    # ordering: the single Find-Gpu call precedes the fast-path health check
+    $script:PSRC4 | Should -Match '(?m)^Find-Gpu\s*$[\s\S]{0,400}?InstallState\.completed'
+  }
+  It "nvcr.io (device plugin) is probed on BOTH paths whenever GPU is enabled (#616 Bugbot)" {
+    # nvcr.io/nvidia/k8s-device-plugin is baked in + pulled at runtime regardless of build/pull.
+    $script:PSRC4 | Should -Match 'url = "https://nvcr\.io/"; gpuSoft = \$true'
+  }
+  It "the BUILD path also probes the toolkit apt repo (nvidia.github.io)" {
+    $script:PSRC4 | Should -Match 'if \(-not \(\$env:TRACEBLOC_K3S_CUDA_IMAGE -or \$env:TRACEBLOC_IMAGE_REGISTRY\)\)'
+    $script:PSRC4 | Should -Match 'url = "https://nvidia\.github\.io/"; gpuSoft = \$true'
+  }
+  It "the PULL path probes EVERY distinct host across the node + probe images (#616 Bugbot)" {
+    # node image and probe image can be on different hosts when both overrides are set.
+    $script:PSRC4 | Should -Match '\$gpuHosts = @\(\(Get-RegistryHost \$K3S_CUDA_IMAGE\), \(Get-RegistryHost \$CUDA_PROBE_IMAGE\)\) \| Select-Object -Unique'
+    $script:PSRC4 | Should -Match 'label = "GPU image registry \(\$gpuHost\)"; url = "https://\$gpuHost/"; gpuSoft = \$true'
+    # bare docker.io + already-added nvcr.io are skipped
+    $script:PSRC4 | Should -Match "\`$gpuHost -match '\[.:\]' -and \`$gpuHost -ne 'docker.io' -and \`$gpuHost -ne 'nvcr.io'"
+  }
+  It "a blocked GPU host WARNS (CPU fallback), it does not hard-fail a CPU-capable install" {
+    # gpuSoft branch must not increment the fail counters
+    $script:PSRC4 | Should -Match 'elseif \(\$c\.gpuSoft\) \{'
+    $block = ($script:PSRC4 -split 'elseif \(\$c\.gpuSoft\) \{')[1]
+    ($block -split '\}')[0] | Should -Not -Match '\$hardFail\+\+'
+  }
+  It "the GPU passthrough probe uses the mirror-homed CUDA image (#616 Bugbot: mirror path)" {
+    # $CUDA_PROBE_IMAGE re-homes nvidia/cuda onto the mirror when TRACEBLOC_IMAGE_REGISTRY is set,
+    # so a mirrored/air-gapped GPU install doesn't fall back to CPU on a blocked Docker Hub.
+    $script:PSRC4 | Should -Match '\$CUDA_PROBE_IMAGE = if \(\$env:TRACEBLOC_IMAGE_REGISTRY\)'
+    $script:PSRC4 | Should -Match '"\$mp/nvidia/cuda:\$CUDA_BASE_TAG"'
+    $script:PSRC4 | Should -Match '\$probeImg = \$CUDA_PROBE_IMAGE'
+  }
+}
+
+Describe "Test-HealthyClusterGpuConsistent (#616 Bugbot: healthy reinstall flags a stale GPU request)" {
+  BeforeAll { $script:HCSRC = Get-Content "$PSScriptRoot/../install-k8s.ps1" -Raw }
+  It "reads the GPU request from the LIVE Helm release, not the (stale-on-adopt) local values.yaml (#616 Bugbot)" {
+    # the helm query now lives in the shared Test-LiveReleaseRequestsGpu helper
+    $lr = (($script:HCSRC -split 'function Test-LiveReleaseRequestsGpu')[1] -split '\nfunction ')[0]
+    $lr | Should -Match 'helm list -A -o json'
+    $lr | Should -Match 'helm get values \$r\.name -n \$r\.namespace'
+    $lr | Should -Match '\$v\.env\.GPU_REQUESTS'
+    $lr | Should -Match 'Wait-JobWithProgress -Job \$vjob -TimeoutSec 20'
+    # the consistency check must NOT read the local values.yaml file anymore
+    $fn = (($script:HCSRC -split 'function Test-HealthyClusterGpuConsistent')[1] -split '\nfunction ')[0]
+    $fn | Should -Not -Match 'Join-Path \$HOST_DATA_DIR "values\.yaml"'
+    $fn | Should -Not -Match 'Get-Content .*values\.yaml'
+  }
+  It "returns early when no live release requests GPU (via the shared helper)" {
+    $fn = (($script:HCSRC -split 'function Test-HealthyClusterGpuConsistent')[1] -split '\nfunction ')[0]
+    $fn | Should -Match 'if \(-not \(Test-LiveReleaseRequestsGpu\)\) \{ return \}'
+  }
+  It "warns with the recreate remedy when the live release wants GPU but the node is CPU-only" {
+    $fn = (($script:HCSRC -split 'function Test-HealthyClusterGpuConsistent')[1] -split '\nfunction ')[0]
+    $fn | Should -Match 'Test-NodeImageGpuCapable -Image \$img -Configured \$K3S_CUDA_IMAGE'
+    $fn | Should -Match 'k3d cluster delete \$CLUSTER_NAME'
+  }
+  It "the fast path calls it so a healthy-but-inconsistent cluster is flagged (source guard)" {
+    $script:HCSRC | Should -Match 'client is healthy -- nothing to do[\s\S]{0,800}?Test-HealthyClusterGpuConsistent'
+  }
+}
+
+Describe "Fast path retries GPU on a CPU-only cluster (#616 Bugbot: re-run can enable GPU)" {
+  BeforeAll { $script:FPSRC = Get-Content "$PSScriptRoot/../install-k8s.ps1" -Raw }
+  It "the fast path shortcuts ONLY when GPU is fully consistent -- else it falls through to reconcile" {
+    # GPU 'fully enabled' = node advertises a GPU AND the live release requests one; any other combo
+    # on a GPU machine (node not advertising, OR release still CPU after a delayed recovery) must
+    # NOT shortcut (Bugbot -- both directions).
+    $script:FPSRC | Should -Match '\$gpuFullyEnabled = \(\(Test-RunningClusterGpuCapable\) -and \(Test-LiveReleaseRequestsGpu\)\)'
+    $script:FPSRC | Should -Match 'if \(\$gpuPresent -and -not \$gpuFullyEnabled\) \{'
+    # within the fast-path block, the 'nothing to do' exit lives in the else branch (no reconcile).
+    $fastpath = (($script:FPSRC -split 'Fast path \(#420\)')[1] -split 'Trust an explicit corporate CA')[0]
+    $fastpath | Should -Match '\} else \{[\s\S]*?nothing to do[\s\S]*?exit 0'
+  }
+  It "Test-RunningClusterGpuCapable checks LIVE allocatable GPU (not the image name) and is bounded (#616 Bugbot)" {
+    # a CUDA image with 0 allocatable GPUs (device-plugin failure) must read as NOT live, so the
+    # fast path retries -- the image name alone is not proof of a working GPU.
+    $fn = (($script:FPSRC -split 'function Test-RunningClusterGpuCapable')[1] -split '\nfunction ')[0]
+    $fn | Should -Match "allocatable\.nvidia\\\.com/gpu"
+    $fn | Should -Match '--request-timeout=5s'
+    $fn | Should -Match "-match '\[1-9\]"
+    $fn | Should -Not -Match 'Config\.Image'   # no longer keyed on the image name
+  }
+  It "Find-Gpu's nvidia-smi probes are bounded so a wedged driver can't hang a re-run (#616 Bugbot)" {
+    $drv = (($script:FPSRC -split 'function Confirm-NvidiaDriver')[1] -split '\nfunction ')[0]
+    $drv | Should -Match 'Invoke-BoundedProcess -FileName \$nvSmi'
+    $drv | Should -Not -Match '& \$nvSmi'   # no unbounded native invocation
+  }
+  It "the image sanity check runs WITH --gpus so it catches a stale image on an older driver (#616 Bugbot)" {
+    # Test-GpuImageRunsK3s must exercise the same requirement gate cluster-create hits (no -e bypass).
+    $fn = (($script:FPSRC -split 'function Test-GpuImageRunsK3s')[1] -split '\nfunction ')[0]
+    $fn | Should -Match '"run", "--rm", "--gpus", "all", \$K3S_CUDA_IMAGE, "--version"'
+    # the actual docker call must NOT bypass the requirement gate (comment may mention it)
+    $fn | Should -Not -Match 'Invoke-DockerCli[^\n]*NVIDIA_DISABLE_REQUIRE'
   }
 }

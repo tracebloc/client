@@ -621,6 +621,52 @@ $CLIENT_ENV    = $env:CLIENT_ENV
 $GPU_VENDOR       = "none"
 $NVIDIA_DRIVER_OK = $false
 $K3D_GPU_FLAG     = ""
+# #616: when a GPU + driver are present but the GPU can't be wired into the cluster, this
+# holds the human-readable reason so Print-Summary + the doctor can say WHY we fell back to
+# CPU instead of silently running CPU-only. Empty = GPU enabled, or no GPU to begin with.
+$GPU_SKIP_REASON  = ""
+# #616: CDI device selector for GPU training pods, set ONLY on the Docker Desktop/WSL2 path
+# (where the NVML device plugin can't work and pods get the GPU via a CDI spec). Written to the
+# chart as env.GPU_VISIBLE_DEVICES, which jobs-manager threads into GPU pods as
+# NVIDIA_VISIBLE_DEVICES (client-runtime#291). Deliberately EMPTY on a normal device-plugin
+# (Linux) node: there the plugin owns NVIDIA_VISIBLE_DEVICES and sets concrete GPU UUIDs, so
+# forcing a CDI selector would break device resolution. Empty => the chart passes nothing.
+$GPU_DEVICE_SELECTOR = ""
+# Detected NVIDIA driver version, quoted back in a GPU-skip reason so the operator can tell at a
+# glance whether theirs is new enough for WSL2 CUDA (#616). Empty until Confirm-NvidiaDriver runs.
+$NVIDIA_DRIVER_VERSION = ""
+# Set by preflight when a GPU download host (nvcr.io / nvidia.github.io / the configured GPU
+# registry) is unreachable. The GPU gate short-circuits on it so we fail fast to CPU with that
+# reason instead of burning minutes on probes/pulls that cannot succeed (#616 Bugbot).
+$GPU_HOSTS_UNREACHABLE = ""
+# #616: the CUDA base + custom k3s-CUDA node image used when the GPU is enabled. The k3s-CUDA
+# tag encodes both the k3s pin ($K8S_VERSION) and the CUDA base, matching docker/k3s-cuda/build.sh.
+# The installer PULLS this image automatically at cluster-create — the user never builds or pulls
+# anything by hand. TRACEBLOC_K3S_CUDA_IMAGE overrides the whole ref; TRACEBLOC_CUDA_BASE_TAG
+# overrides just the CUDA base used for the capability probe and the default tag. When a private
+# mirror is configured (TRACEBLOC_IMAGE_REGISTRY, #585) the default re-homes onto it so the one
+# installer command works air-gapped, same as every other image.
+$CUDA_BASE_TAG  = if ($env:TRACEBLOC_CUDA_BASE_TAG) { $env:TRACEBLOC_CUDA_BASE_TAG } else { "12.4.1-base-ubuntu22.04" }
+$K3S_CUDA_IMAGE = if ($env:TRACEBLOC_K3S_CUDA_IMAGE) {
+  $env:TRACEBLOC_K3S_CUDA_IMAGE
+} else {
+  $cudaRepo = "tracebloc/k3s-cuda:$K8S_VERSION-cuda-$CUDA_BASE_TAG"
+  if ($env:TRACEBLOC_IMAGE_REGISTRY) {
+    $mirrorHost = ($env:TRACEBLOC_IMAGE_REGISTRY -replace '^[a-zA-Z][a-zA-Z0-9+.\-]*://', '') -replace '/+$', ''
+    "$mirrorHost/$cudaRepo"
+  } else {
+    "ghcr.io/$cudaRepo"
+  }
+}
+# The GPU-passthrough probe (Confirm-DockerGpu) runs nvidia-smi in a CUDA container. Re-home
+# that image onto the mirror too when one is set (#585 / Bugbot), so a mirrored/air-gapped
+# GPU install doesn't fall back to CPU just because Docker Hub's nvidia/cuda is blocked.
+$CUDA_PROBE_IMAGE = if ($env:TRACEBLOC_IMAGE_REGISTRY) {
+  $mp = ($env:TRACEBLOC_IMAGE_REGISTRY -replace '^[a-zA-Z][a-zA-Z0-9+.\-]*://', '') -replace '/+$', ''
+  "$mp/nvidia/cuda:$CUDA_BASE_TAG"
+} else {
+  "nvidia/cuda:$CUDA_BASE_TAG"
+}
 $ReadyTimeout     = if ($env:READY_TIMEOUT) { $env:READY_TIMEOUT } else { "600" }   # #562: raised 300 -> 600 for slow/proxied machines; kept in sync with facts.env (check-facts.sh)
 $script:ClientState = "starting"
 
@@ -1059,16 +1105,23 @@ function Confirm-NvidiaDriver {
       return
     }
 
-    $driverVer = (& $nvSmi --query-gpu=driver_version --format=csv,noheader 2>&1).Trim()
+    # Bounded (installer external-call timeout rule / Bugbot): a wedged driver must not hang the
+    # install -- and Find-Gpu now runs before the fast path, so an unbounded nvidia-smi would hang
+    # every "nothing to do" re-run too.
+    $dr = Invoke-BoundedProcess -FileName $nvSmi -Arguments @("--query-gpu=driver_version","--format=csv,noheader") -TimeoutSec 15
+    if ($dr.Code -ne 0) { Warn "Couldn't query the NVIDIA driver (nvidia-smi failed or timed out) -- GPU checks skipped."; return }
+    $driverVer = ($dr.Output -split "`n" | Select-Object -First 1).Trim()
     $majorVer  = [int]($driverVer -replace '\..*', '')
     if ($majorVer -ge 460) {
       $script:NVIDIA_DRIVER_OK = $true
+      $script:NVIDIA_DRIVER_VERSION = $driverVer   # quoted back in a GPU-skip reason (#616)
       Ok "NVIDIA GPU ready (driver $driverVer)"
       # Expectation-setting only, never a gate (#387): entry-level cards pass
       # every check but are too small for real training (field: a 2 GB GT 710
       # installed fine and could never fit a model).
       try {
-        $vramMiB = [int]((& $nvSmi --query-gpu=memory.total --format=csv,noheader,nounits 2>&1 | Select-Object -First 1).Trim())
+        $vr = Invoke-BoundedProcess -FileName $nvSmi -Arguments @("--query-gpu=memory.total","--format=csv,noheader,nounits") -TimeoutSec 15
+        $vramMiB = if ($vr.Code -eq 0) { [int](($vr.Output -split "`n" | Select-Object -First 1).Trim()) } else { 0 }
         if ($vramMiB -gt 0 -and $vramMiB -lt 8192) {
           Hint "This GPU has $([math]::Round($vramMiB / 1024, 1)) GB VRAM - fine for setup; real training typically needs 8 GB+."
         }
@@ -1528,6 +1581,12 @@ function Show-GpuManualRemedy {
 function Install-NvidiaContainerToolkit {
   if ($GPU_VENDOR -ne "nvidia" -or -not $NVIDIA_DRIVER_OK) { return }
 
+  # #616: a GPU + valid driver are present, so from here we WANT to enable the GPU. Assume the
+  # enable won't complete and record a reason; each early-return below refines it, and the success
+  # path clears it. Print-Summary + the doctor surface $GPU_SKIP_REASON so a GPU box that silently
+  # falls back to CPU tells the user WHY, instead of looking like it "just uses CPU".
+  $script:GPU_SKIP_REASON = "the NVIDIA container-toolkit / WSL2 GPU setup did not complete (see the install log for the specific step)"
+
   Info "Setting up GPU acceleration (NVIDIA container toolkit) in WSL2 -- optional; CPU mode works either way."
   Log "Setting up NVIDIA container toolkit in WSL2"
 
@@ -1542,6 +1601,7 @@ function Install-NvidiaContainerToolkit {
     Remove-Job $wslListJob -Force
     Warn "WSL did not respond in time. Skipping GPU container toolkit."
     Hint "Run 'wsl --update' manually, then re-run this script for GPU support."
+    $script:GPU_SKIP_REASON = "WSL did not respond (run 'wsl --update', then re-run the installer)"
     Show-GpuManualRemedy
     return
   }
@@ -1565,6 +1625,7 @@ function Install-NvidiaContainerToolkit {
       Hint "Install it manually, then re-run this script for GPU support:"
       Hint "    wsl --install -d Ubuntu"
       Hint "Then check status and re-run tracebloc:  tracebloc doctor"
+      $script:GPU_SKIP_REASON = "WSL2 Ubuntu install timed out (install it manually: wsl --install -d Ubuntu, then re-run)"
       return
     }
     Receive-Job $ubuntuJob | Out-Null
@@ -1572,6 +1633,7 @@ function Install-NvidiaContainerToolkit {
     Warn "Ubuntu WSL2 installed but needs first-run setup."
     Hint "Open Ubuntu from the Start Menu and set a username/password."
     Hint "Then re-run this script for GPU support."
+    $script:GPU_SKIP_REASON = "WSL2 Ubuntu needs first-run setup (open Ubuntu once, set a username/password, then re-run)"
     return
   }
 
@@ -1623,6 +1685,7 @@ echo "NCT installed successfully."
     Remove-Job $nctInstallJob -Force
     Remove-Item $scriptPath -Force -ErrorAction SilentlyContinue
     Warn "GPU container toolkit installation timed out."
+    $script:GPU_SKIP_REASON = "NVIDIA Container Toolkit install timed out (often a blocked apt repo / proxy on restricted networks)"
     Show-GpuManualRemedy -Distro $wslDistro
     return
   }
@@ -1639,17 +1702,369 @@ echo "NCT installed successfully."
     $nctVer = (Receive-Job $verJob | Out-String).Trim()
     Remove-Job $verJob -Force
     if ($nctVer -and $nctVer -notmatch 'error|not found') {
-      Ok "GPU acceleration ready -- NVIDIA Container Toolkit in ${wslDistro}: $nctVer"
-      Log "NVIDIA Container Toolkit in WSL2: $nctVer"
-      $script:K3D_GPU_FLAG = "--gpus=all"
+      # Report only what this step actually established -- the toolkit is present in the WSL
+      # distro. It is NOT "GPU acceleration ready" (Bugbot): Confirm-DockerGpu is the
+      # authoritative gate and runs later, so a green ready line here could be followed by a
+      # CPU fallback. For the same reason this must NOT set K3D_GPU_FLAG (the gate owns it,
+      # and setting it early made a skipped/failed gate look enabled) and must NOT clear
+      # GPU_SKIP_REASON (that would drop the real cause recorded by whatever failed).
+      Info "NVIDIA Container Toolkit present in ${wslDistro}: $nctVer"
+      Log "NVIDIA Container Toolkit in WSL2: $nctVer -- GPU still gated on the Docker GPU probe"
     } else {
       Warn "GPU toolkit installed but could not be verified."
+      $script:GPU_SKIP_REASON = "NVIDIA Container Toolkit installed but could not be verified"
       Show-GpuManualRemedy -Distro $wslDistro
     }
   } else {
     Remove-Job $verJob -Force
     Warn "GPU toolkit verification timed out."
+    $script:GPU_SKIP_REASON = "NVIDIA Container Toolkit verification timed out"
     Show-GpuManualRemedy -Distro $wslDistro
+  }
+}
+
+# #616: the AUTHORITATIVE GPU gate. Install-NvidiaContainerToolkit configures the user's own
+# WSL distro, but k3d talks to Docker Desktop's OWN daemon (the `docker-desktop` distro), so
+# toolkit-in-Ubuntu success is not a reliable signal that a GPU can reach a container. The only
+# reliable test is to actually run one: `docker run --gpus all ... nvidia-smi`. With the custom
+# k3s-CUDA node image providing the in-cluster runtime, this Docker-Desktop passthrough is the
+# real prerequisite. Gating on it means we enable GPU only when the cluster will really get one,
+# and never create a `--gpus` cluster that would fail. Best-effort + bounded; failure => CPU.
+# #616/Bugbot: run a docker CLI command with a HARD timeout so a wedged daemon, registry, or proxy
+# can't hang the installer forever (installer external-call timeout rule). Runs docker in a bounded
+# background job; on timeout the job is killed and Code=124 is returned so callers fall back to CPU
+# cleanly. Returns @{ Code = <int>; Output = <string> }. Any stdin (e.g. a login token) is passed
+# in-memory via the arg hashtable — never written to disk, never placed in argv or logged.
+# Run ANY external command as a real child PROCESS with a HARD timeout (installer external-call
+# timeout rule). NOT a Start-Job: Stop-Job stops the PS job but can orphan the native child it
+# spawned (Bugbot), so a timed-out call would keep running; a direct Process handle lets us Kill()
+# the child on timeout. Args are joined with spaces (callers pass space-free tokens); any stdin
+# (e.g. a login token) is written in-memory, never to disk/argv/logs. 5.1-safe. Returns
+# @{ Code = <int>; Output = <string> } with Code=124 on timeout.
+function Invoke-BoundedProcess {
+  param(
+    [Parameter(Mandatory)][string]$FileName,
+    [Parameter(Mandatory)][string[]]$Arguments,
+    [int]$TimeoutSec = 120,
+    [string]$Stdin = ""
+  )
+  $psi = New-Object System.Diagnostics.ProcessStartInfo
+  $psi.FileName = $FileName
+  # Quote any argument containing whitespace (Bugbot): the args are joined into a single command
+  # line, so an unquoted value with a space -- a registry username, a temp path under a profile
+  # like "C:\Users\First Last\..." -- would be split into two arguments and silently corrupt the
+  # command. Already-quoted values are left alone so call sites that quote themselves don't get
+  # double-quoted. Empty strings are quoted too, so they survive as a present-but-empty argument.
+  $psi.Arguments = (($Arguments | ForEach-Object {
+    if ($_ -eq "") { '""' }
+    elseif ($_ -match '\s' -and $_ -notmatch '^".*"$') { '"' + $_ + '"' }
+    else { $_ }
+  }) -join ' ')
+  $psi.UseShellExecute = $false
+  $psi.CreateNoWindow = $true
+  $psi.RedirectStandardOutput = $true
+  $psi.RedirectStandardError = $true
+  if ($Stdin) { $psi.RedirectStandardInput = $true }
+  try { $proc = [System.Diagnostics.Process]::Start($psi) }
+  catch { return [pscustomobject]@{ Code = 1; Output = "could not start ${FileName}: $($_.Exception.Message)" } }
+  if ($Stdin) { $proc.StandardInput.Write($Stdin); $proc.StandardInput.Close() }
+  $outTask = $proc.StandardOutput.ReadToEndAsync()
+  $errTask = $proc.StandardError.ReadToEndAsync()
+  if ($proc.WaitForExit($TimeoutSec * 1000)) {
+    return [pscustomobject]@{ Code = $proc.ExitCode; Output = ($outTask.Result + $errTask.Result) }
+  }
+  # timed out -> kill the child so it can't keep running after we've moved on
+  try { $proc.Kill() } catch {}
+  return [pscustomobject]@{ Code = 124; Output = ($FileName + " " + $Arguments[0] + " timed out after " + $TimeoutSec + "s") }
+}
+
+# Thin docker wrapper over Invoke-BoundedProcess (keeps every docker call bounded + killable).
+function Invoke-DockerCli {
+  param(
+    [Parameter(Mandatory)][string[]]$DockerArgs,
+    [int]$TimeoutSec = 120,
+    [string]$Stdin = ""
+  )
+  return Invoke-BoundedProcess -FileName "docker" -Arguments $DockerArgs -TimeoutSec $TimeoutSec -Stdin $Stdin
+}
+
+function Confirm-DockerGpu {
+  if ($GPU_VENDOR -ne "nvidia" -or -not $NVIDIA_DRIVER_OK) { return $false }
+  $probeImg = $CUDA_PROBE_IMAGE   # mirror-homed when TRACEBLOC_IMAGE_REGISTRY is set (#585)
+  # -e NVIDIA_DISABLE_REQUIRE=1: the CUDA base image bakes in NVIDIA_REQUIRE_CUDA (e.g. cuda>=12.4),
+  # and the container runtime REFUSES to start the container when the driver is older than that
+  # ("unsatisfied condition: cuda>=12.4") -- so a perfectly good GPU on a slightly older driver
+  # (e.g. 532.x = CUDA 12.1) reads as "can't expose the GPU" and drops to CPU. We only want to know
+  # whether Docker can pass the GPU through (nvidia-smi is driver-level, version-agnostic); the real
+  # CUDA-vs-driver compatibility for TRAINING is enforced per-pod by the training image. So disable
+  # the requirement gate for the probe -- and the node image does the same (#616).
+  Log "Probing Docker GPU passthrough: docker run --rm --gpus all -e NVIDIA_DISABLE_REQUIRE=1 $probeImg nvidia-smi (bounded)"
+  $r = Invoke-DockerCli -DockerArgs @("run", "--rm", "--gpus", "all", "-e", "NVIDIA_DISABLE_REQUIRE=1", $probeImg, "nvidia-smi") -TimeoutSec 180
+  if ($r.Code -eq 0 -and $r.Output -match 'NVIDIA-SMI|CUDA Version|Driver Version') {
+    Log "Docker GPU passthrough OK"
+    return $true
+  }
+  Log "Docker GPU probe failed (exit $($r.Code)): $($r.Output)"
+  # Set the reason from what ACTUALLY failed (Bugbot): a timeout is not a GPU-unavailable error.
+  if ($r.Code -eq 124) {
+    $script:GPU_SKIP_REASON = "the Docker GPU probe (docker run --gpus all) timed out -- Docker Desktop may be busy, or the CUDA base image pull is blocked"
+  } else {
+    # Name the DETECTED driver and a concrete minimum: our install gate accepts 460+, but CUDA
+    # on WSL2 realistically needs a much newer driver, so "update the driver" alone left people
+    # guessing whether theirs qualified (#616).
+    $drv = if ($script:NVIDIA_DRIVER_VERSION) { " (this machine reports driver $($script:NVIDIA_DRIVER_VERSION))" } else { "" }
+    $script:GPU_SKIP_REASON = "Docker Desktop can't expose the GPU to a container$drv -- enable GPU support in Docker Desktop, and update the NVIDIA Windows driver to 525 or newer (WSL2 CUDA needs a recent driver)"
+  }
+  return $false
+}
+
+# #616: the custom GPU node image is kept PRIVATE (not published public), so the installer must
+# authenticate to pull it — the end user still runs ONE command; the creds come from env, not a
+# separate `docker login`. Log Docker in to the image's registry with the provided registry creds
+# (TRACEBLOC_REGISTRY_USERNAME/PASSWORD — the same vars the mirror uses, #585) and verify the image
+# is actually pullable BEFORE committing to a --gpus cluster. On failure we fall back to CPU
+# cleanly instead of a cluster-create that dies pulling an unauthorized image. The pull here also
+# pre-loads the image, so k3d cluster-create reuses the local copy (no second pull). Every docker
+# call is bounded via Invoke-DockerCli, so a wedged daemon/registry/proxy can't hang the install.
+# Pure: which host does `docker login` target for an image ref? Docker treats the first path
+# segment as a REGISTRY only when it has a '.'/':' or is 'localhost'; otherwise the ref is a
+# Docker Hub repo (owner/name) and login must target Docker Hub, NOT the owner segment -- else
+# creds for a private Docker Hub image go to the wrong endpoint and the pull fails (Bugbot).
+function Get-RegistryHost {
+  param([string]$ImageRef)
+  $first = ($ImageRef -split '/')[0]
+  if ($first -match '[.:]' -or $first -eq 'localhost') { return $first }
+  return 'docker.io'
+}
+
+# docker login to the GPU image's registry with the supplied creds. Called BEFORE both the GPU
+# probe (which may pull a mirror-hosted CUDA image) and the node-image pull, so an authenticated
+# mirror/private registry is never hit unauthenticated first -- which would short-circuit a
+# credentialed install to CPU (Bugbot). No-op without creds; idempotent (safe to call twice).
+function Connect-GpuRegistry {
+  $regUser = $env:TRACEBLOC_REGISTRY_USERNAME
+  $regPass = $env:TRACEBLOC_REGISTRY_PASSWORD
+  if (-not ($regUser -and $regPass)) { return }
+  # Log into EVERY distinct registry an auth-requiring GPU image is pulled from: the node image
+  # ($K3S_CUDA_IMAGE) AND the probe image ($CUDA_PROBE_IMAGE). With TRACEBLOC_K3S_CUDA_IMAGE and
+  # TRACEBLOC_IMAGE_REGISTRY set to DIFFERENT hosts these differ, and logging into only one leaves
+  # the other's pull unauthenticated -> the probe is rejected and GPU is needlessly disabled (Bugbot).
+  $hosts = @((Get-RegistryHost $K3S_CUDA_IMAGE), (Get-RegistryHost $CUDA_PROBE_IMAGE)) | Select-Object -Unique
+  foreach ($regHost in $hosts) {
+    Log "Authenticating Docker to $regHost for the GPU image(s)"
+    $lr = Invoke-DockerCli -DockerArgs @("login", $regHost, "-u", $regUser, "--password-stdin") -TimeoutSec 60 -Stdin $regPass
+    if ($lr.Code -ne 0) { Log "docker login to $regHost did not succeed (exit $($lr.Code))" }
+  }
+}
+
+function Confirm-GpuImagePullable {
+  $regUser = $env:TRACEBLOC_REGISTRY_USERNAME
+  $regPass = $env:TRACEBLOC_REGISTRY_PASSWORD
+  Connect-GpuRegistry   # logs into the correct host (Get-RegistryHost); no-op without creds
+  Log "Pulling the GPU node image (verifies access + pre-loads for cluster-create): $K3S_CUDA_IMAGE"
+  $pr = Invoke-DockerCli -DockerArgs @("pull", $K3S_CUDA_IMAGE) -TimeoutSec 900
+  if ($pr.Code -eq 0) {
+    # Sanity-check the PULLED image runs k3s, exactly as the local build path does -- a mis-tagged
+    # or broken mirror/custom image would otherwise enable GPU and then abort k3d cluster-create
+    # instead of taking the CPU fallback (Bugbot).
+    if (Test-GpuImageRunsK3s) { Log "GPU node image pulled + verified OK"; return $true }
+    $script:GPU_SKIP_REASON = "the pulled GPU node image ($K3S_CUDA_IMAGE) doesn't run k3s (mis-tagged or broken image) -- running CPU-only"
+    Log "Pulled GPU node image failed its k3s sanity check"
+    return $false
+  }
+  Log "GPU node image pull failed (exit $($pr.Code)): $($pr.Output)"
+  # Reason reflects the ACTUAL failure (Bugbot): a pull timeout is not an auth error.
+  if ($pr.Code -eq 124) {
+    $script:GPU_SKIP_REASON = "pulling the GPU node image ($K3S_CUDA_IMAGE) timed out -- slow or blocked network/registry"
+  } elseif ($regUser -and $regPass) {
+    $script:GPU_SKIP_REASON = "the GPU node image ($K3S_CUDA_IMAGE) couldn't be pulled even with the provided registry credentials -- check they have read access"
+  } else {
+    $script:GPU_SKIP_REASON = "the GPU node image ($K3S_CUDA_IMAGE) is on a private registry -- set TRACEBLOC_REGISTRY_USERNAME and TRACEBLOC_REGISTRY_PASSWORD (a read:packages token) to enable GPU"
+  }
+  return $false
+}
+
+# Build inputs for the LOCAL GPU node-image build (#616), base64-encoded copies of
+# docker/k3s-cuda/* (the CI build source of truth). Base64 (not raw here-strings) so the
+# installer stays self-contained AND ASCII-only with no bare-curl token; a Pester drift
+# test decodes each and fails if it diverges from docker/k3s-cuda/*. Decode to read.
+$script:K3S_CUDA_DOCKERFILE_B64 = 'IyBzeW50YXg9ZG9ja2VyL2RvY2tlcmZpbGU6MS43LWxhYnMKIyA9PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PQojICBDdXN0b20gazNzIG5vZGUgaW1hZ2Ugd2l0aCBOVklESUEgR1BVIHN1cHBvcnQgICh0cmFjZWJsb2MvY2xpZW50ICM2MTYpCiMgPT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT0KIyBXSFkgdGhpcyBleGlzdHM6IHRoZSBzdG9jayBgcmFuY2hlci9rM3NgIGltYWdlIGlzIEFscGluZS1iYXNlZCBhbmQgc2hpcHMgTk8KIyBOVklESUEgY29udGFpbmVyIHJ1bnRpbWUsIHNvIEdQVSBwb2RzIGNhbiBuZXZlciBzY2hlZHVsZSBvbiBpdCDigJQgdGhlIG5vZGUKIyBhZHZlcnRpc2VzIDAgbnZpZGlhLmNvbS9ncHUuIFRoaXMgaW1hZ2UgcmVidWlsZHMgdGhlIFNBTUUgcGlubmVkIGszcyBvbiBhbgojIE5WSURJQSBDVURBIFVidW50dSBiYXNlLCBpbnN0YWxscyB0aGUgTlZJRElBIENvbnRhaW5lciBUb29sa2l0LCBjb25maWd1cmVzCiMgY29udGFpbmVyZCBmb3IgdGhlIGBudmlkaWFgIHJ1bnRpbWUgKGluIENESSBtb2RlKSwgYW5kIGJha2VzIGluIHRoZSBgbnZpZGlhYAojIFJ1bnRpbWVDbGFzcyBwbHVzIGEgazNkIGVudHJ5cG9pbnQgZHJvcC1pbiB0aGF0IGdlbmVyYXRlcyB0aGUgV1NMIENESSBzcGVjIG9uCiMgZXZlcnkgbm9kZSBzdGFydC4gR1BVIGNhcGFjaXR5IGlzIGFkdmVydGlzZWQgYnkgdGhlIGluc3RhbGxlciArIHRoYXQgZHJvcC1pbiAtLQojIE5PVCBieSB0aGUgTlZNTCBkZXZpY2UgcGx1Z2luLCB3aGljaCBjYW5ub3Qgd29yayBvbiBXU0wyIChzZWUgUkVBRE1FKS4KIyBCYXNlZCBvbiB0aGUgb2ZmaWNpYWwgazNkIENVREEgcmVjaXBlIChodHRwczovL2szZC5pby8uLi4vdXNhZ2UvYWR2YW5jZWQvY3VkYS8pLgojCiMgSU1QT1JUQU5UOiBLM1NfVEFHIE1VU1QgbWF0Y2ggdGhlIGluc3RhbGxlcidzIEs4U19WRVJTSU9OIHBpbgojIChzY3JpcHRzL3NwZWMvZmFjdHMuZW52IC8gc2NyaXB0cy9saWIvY29tbW9uLnNoKSBzbyBhIEdQVSBub2RlIHJ1bnMgdGhlIGV4YWN0CiMgc2FtZSB2YWxpZGF0ZWQgazNzIGFzIGEgbm9ybWFsIENQVSBub2RlLiBzY3JpcHRzL2NoZWNrLWZhY3RzLnNoIGVuZm9yY2VzIHRoaXM6CiMgdGhpcyBBUkcsIGJ1aWxkLnNoLCBhbmQgdGhlIHdvcmtmbG93IGlucHV0IGRlZmF1bHQgYXJlIGFsbCBjaGVja2VkIGFnYWluc3QKIyBmYWN0cy5lbnYncyBLOFNfVkVSU0lPTiwgc28gYSBidW1wIGNhbid0IGxlYXZlIHRoZSBHUFUgaW1hZ2UgdGFnIHN0YWxlICgjNTQ3KS4KQVJHIEszU19UQUc9InYxLjI5LjQtazNzMSIKQVJHIENVREFfVEFHPSIxMi40LjEtYmFzZS11YnVudHUyMi4wNCIKIyBOVklESUEgQ29udGFpbmVyIFRvb2xraXQgdmVyc2lvbi4gUElOTkVEIHRvIHRoZSBidWlsZCB2YWxpZGF0ZWQgb24gcmVhbCBoYXJkd2FyZSAoYW4gUlRYIDQwNTAKIyBsYXB0b3AsIGRyaXZlciA1MzIuMTApIGJlY2F1c2UgdGhlIHdob2xlIFdTTDIgR1BVIHBhdGggZGVwZW5kcyBvbiB2ZXJzaW9uLXNlbnNpdGl2ZSBzdXJmYWNlczoKIyBgY2RpIGdlbmVyYXRlIC0tbW9kZT13c2xgLCBgY29uZmlnIC0tc2V0IG52aWRpYS1jb250YWluZXItcnVudGltZS5tb2RlPWNkaWAsIGFuZCB0aGUgZXhhY3QgWUFNTAojIHRoZSBnZW5lcmF0b3IgZW1pdHMgKG91ciBsaWJkeGNvcmUgaW5qZWN0aW9uIHBhcnNlcyBpdCkuIFVucGlubmVkLCB0d28gbWFjaGluZXMgYnVpbHQgd2Vla3MKIyBhcGFydCBjb3VsZCBnZXQgZGlmZmVyZW50IHRvb2xraXQgYnVpbGRzIGFuZCBiZWhhdmUgZGlmZmVyZW50bHkgLS0gYW5kIGEgZnV0dXJlIHJlbGVhc2UgY2hhbmdpbmcKIyB0aGUgc3BlYyBzaGFwZSB3b3VsZCBicmVhayBHUFUgb24gbmV3IGluc3RhbGxzIHdoaWxlIGV4aXN0aW5nIG9uZXMga2VwdCB3b3JraW5nLgojIFRoZSBpbnN0YWxsIGJlbG93IEZBTExTIEJBQ0sgdG8gdGhlIGxhdGVzdCBpZiB0aGlzIHZlcnNpb24gaGFzIGFnZWQgb3V0IG9mIHRoZSBhcHQgcmVwbywgc28gYQojIHN0YWxlIHBpbiBkZWdyYWRlcyB0byAidW5waW5uZWQiIHJhdGhlciB0aGFuIGZhaWxpbmcgdGhlIGJ1aWxkICh3aGljaCB3b3VsZCBjb3N0IEdQVSBlbnRpcmVseSkuCkFSRyBOQ1RfVkVSU0lPTj0iMS4xOS4xLTEiCgpGUk9NIHJhbmNoZXIvazNzOiR7SzNTX1RBR30gQVMgazNzCgpGUk9NIG52Y3IuaW8vbnZpZGlhL2N1ZGE6JHtDVURBX1RBR30KCiMgVGhlIENVREEgYmFzZSBiYWtlcyBpbiBOVklESUFfUkVRVUlSRV9DVURBIChlLmcuIGN1ZGE+PTEyLjQpOyB3aXRoIC0tZ3B1cyB0aGUgY29udGFpbmVyIHJ1bnRpbWUKIyB0aGVuIFJFRlVTRVMgdG8gc3RhcnQgdGhpcyBub2RlIG9uIGFueSBkcml2ZXIgb2xkZXIgdGhhbiB0aGF0IGJhc2UgKCJ1bnNhdGlzZmllZCBjb25kaXRpb246CiMgY3VkYT49MTIuNCIpLCBzbyBhIHZhbGlkIEdQVSBvbiBhIHNsaWdodGx5IG9sZGVyIGRyaXZlciAoZS5nLiA1MzIueCA9IENVREEgMTIuMSkgY2FuJ3QgcnVuIHRoZQojIGNsdXN0ZXIgYXQgYWxsLiBUaGlzIG5vZGUgcnVucyBrM3MsIG5vdCBDVURBIHdvcmtsb2FkcyAtLSB0aGUgcmVhbCBDVURBL2RyaXZlciBjb21wYXRpYmlsaXR5IGlzCiMgZW5mb3JjZWQgcGVyLXBvZCBieSBlYWNoIFRSQUlOSU5HIGltYWdlIC0tIHNvIGRpc2FibGUgdGhlIHJlcXVpcmVtZW50IGdhdGUgaGVyZSAoIzYxNikuCkVOViBOVklESUFfRElTQUJMRV9SRVFVSVJFPTEKCiMgTlZJRElBIENvbnRhaW5lciBUb29sa2l0LCB0aGVuIHBvaW50IGNvbnRhaW5lcmQgYXQgdGhlIGBudmlkaWFgIHJ1bnRpbWUuIFRoZQojIGdwZyBrZXkgKyBhcHQgbGlzdCBhcmUgcGlubmVkIHZpYSB0aGUga2V5cmluZyB0aGUgc2FtZSB3YXkgdGhlIGluLVdTTCB0b29sa2l0CiMgaW5zdGFsbCBkb2VzIChzY3JpcHRzL2luc3RhbGwtazhzLnBzMSkgc28gYSByZXN0cmljdGVkLW5ldHdvcmsgbWlycm9yIGNhbgojIHJlLWhvbWUgdGhlbSBjb25zaXN0ZW50bHkuIGN1cmwgY2FycmllcyB0aGUgVExTIGZsb29yICsgYm91bmRlZCB0aW1lb3V0cyBpbmxpbmUKIyAoYSBEb2NrZXJmaWxlIGNhbid0IHNvdXJjZSBjb21tb24uc2gncyBjdXJsX3NlY3VyZSgpKSBzbyBhIHN0YWxsZWQgb3IgZG93bmdyYWRlZAojIGNvbm5lY3Rpb24gdG8gbnZpZGlhLmdpdGh1Yi5pbyBmYWlscyBmYXN0IGluc3RlYWQgb2YgaGFuZ2luZyB0aGUgYnVpbGQgKGhvdXNlIHJ1bGUpLgpSVU4gZXhwb3J0IERFQklBTl9GUk9OVEVORD1ub25pbnRlcmFjdGl2ZSBcCiAgICAmJiBhcHQtZ2V0IHVwZGF0ZSBcCiAgICAmJiBhcHQtZ2V0IGluc3RhbGwgLXkgLS1uby1pbnN0YWxsLXJlY29tbWVuZHMgY3VybCBjYS1jZXJ0aWZpY2F0ZXMgZ251cGcgXAogICAgJiYgY3VybCAtZnNTTCAtLXRsc3YxLjIgLS1jb25uZWN0LXRpbWVvdXQgMzAgLS1tYXgtdGltZSA2MCBodHRwczovL252aWRpYS5naXRodWIuaW8vbGlibnZpZGlhLWNvbnRhaW5lci9ncGdrZXkgXAogICAgICAgICB8IGdwZyAtLWRlYXJtb3IgLW8gL3Vzci9zaGFyZS9rZXlyaW5ncy9udmlkaWEtY29udGFpbmVyLXRvb2xraXQta2V5cmluZy5ncGcgXAogICAgJiYgY3VybCAtZnNTTCAtLXRsc3YxLjIgLS1jb25uZWN0LXRpbWVvdXQgMzAgLS1tYXgtdGltZSA2MCBodHRwczovL252aWRpYS5naXRodWIuaW8vbGlibnZpZGlhLWNvbnRhaW5lci9zdGFibGUvZGViL252aWRpYS1jb250YWluZXItdG9vbGtpdC5saXN0IFwKICAgICAgICAgfCBzZWQgJ3MjZGViIGh0dHBzOi8vI2RlYiBbc2lnbmVkLWJ5PS91c3Ivc2hhcmUva2V5cmluZ3MvbnZpZGlhLWNvbnRhaW5lci10b29sa2l0LWtleXJpbmcuZ3BnXSBodHRwczovLyNnJyBcCiAgICAgICAgIHwgdGVlIC9ldGMvYXB0L3NvdXJjZXMubGlzdC5kL252aWRpYS1jb250YWluZXItdG9vbGtpdC5saXN0IFwKICAgICYmIGFwdC1nZXQgdXBkYXRlIFwKICAgICYmICggYXB0LWdldCBpbnN0YWxsIC15IC0tbm8taW5zdGFsbC1yZWNvbW1lbmRzICJudmlkaWEtY29udGFpbmVyLXRvb2xraXQ9JHtOQ1RfVkVSU0lPTn0iIFwKICAgICAgICAgfHwgeyBlY2hvICJOQ1QgJHtOQ1RfVkVSU0lPTn0gdW5hdmFpbGFibGUgaW4gdGhlIHJlcG8gLS0gZmFsbGluZyBiYWNrIHRvIGxhdGVzdCI7IFwKICAgICAgICAgICAgICBhcHQtZ2V0IGluc3RhbGwgLXkgLS1uby1pbnN0YWxsLXJlY29tbWVuZHMgbnZpZGlhLWNvbnRhaW5lci10b29sa2l0OyB9ICkgXAogICAgJiYgbnZpZGlhLWN0ayAtLXZlcnNpb24gXAogICAgJiYgbnZpZGlhLWN0ayBydW50aW1lIGNvbmZpZ3VyZSAtLXJ1bnRpbWU9Y29udGFpbmVyZCBcCiAgICAmJiBudmlkaWEtY3RrIGNvbmZpZyAtLWluLXBsYWNlIC0tc2V0IG52aWRpYS1jb250YWluZXItcnVudGltZS5tb2RlPWNkaSBcCiAgICAmJiBhcHQtZ2V0IGNsZWFuIFwKICAgICYmIHJtIC1yZiAvdmFyL2xpYi9hcHQvbGlzdHMvKgoKIyBDb3B5IHRoZSBwaW5uZWQgazNzIHJvb3RmcyBvdmVyIHRoZSBDVURBIGJhc2UsIHRoZW4gYnJpbmcgaW4gazNzJ3Mgb3duIC9iaW4gZXhwbGljaXRseS4KIyAtLWV4Y2x1ZGUgTVVTVCBjb21lIEJFRk9SRSB0aGUgc3JjL2Rlc3Q6IGEgVFJBSUxJTkcgYC0tZXhjbHVkZWAgaXMgcGFyc2VkIGFzIHRoZQojIGRlc3RpbmF0aW9uLCBzbyB0aGUgcm9vdGZzIHNpbGVudGx5IGNvcGllcyB0byAvLS1leGNsdWRlPS4uLiBpbnN0ZWFkIG9mIC8g4oCUIHRoZSBidWlsZAojICJwYXNzZXMiIGJ1dCB0aGUgaW1hZ2UgaXMgYnJva2VuIChCdWdib3QpLiBQYXRocyBhcmUgUkVMQVRJVkUgdG8gdGhlIHNvdXJjZSAoYGJpbmAsIG5vdAojIGAvYmluYCkuIFVidW50dSAyMi4wNCBpcyBtZXJnZWQtL3Vzciwgc28gL2JpbiAvc2JpbiAvbGliIC9saWI2NCBhcmUgU1lNTElOS1MgdG8gL3Vzci8qLAojIHdoaWxlIHRoZSBBbHBpbmUgazNzIGltYWdlIHNoaXBzIHRoZW0gYXMgcmVhbCBkaXJzIOKAlCBjb3B5aW5nIHRob3NlIG92ZXIgdGhlIHN5bWxpbmtzIGVycm9ycwojICJjYW5ub3QgY29weSB0byBub24tZGlyZWN0b3J5Ii4gazNzIGlzIGEgU1RBVElDIGJpbmFyeSAobmVlZHMgbm8gc2hhcmVkIGxpYnMpLCBzbyB3ZSBleGNsdWRlCiMgYWxsIGZvdXIgKGtlZXBpbmcgVWJ1bnR1J3MgZ2xpYmMgdXNlcmxhbmQ6IGN1cmwvYXB0L252aWRpYS1jdGspIGFuZCBvdmVybGF5IG9ubHkgazNzJ3Mgb3duCiMgL2JpbiAodGhlIHN0YXRpYyBrM3MgKyAvYmluL2F1eCkgaW50byAvdXNyL2JpbiB2aWEgdGhlIGtlcHQgL2JpbiBzeW1saW5rLiBidWlsZC5zaCB2ZXJpZmllcwojIHRoZSBvdmVybGF5IGxhbmRlZCBjb3JyZWN0bHkgYWZ0ZXIgdGhlIGJ1aWxkLCBzbyBhIG1pcy1wYXJzZSBjYW4gbmV2ZXIgcHVibGlzaCBhIGJyb2tlbiBpbWFnZS4KQ09QWSAtLWZyb209azNzIFwKICAgICAtLWV4Y2x1ZGU9YmluIC0tZXhjbHVkZT1zYmluIC0tZXhjbHVkZT1saWIgLS1leGNsdWRlPWxpYjMyIC0tZXhjbHVkZT1saWI2NCAtLWV4Y2x1ZGU9bGlieDMyIFwKICAgICAtLWV4Y2x1ZGU9dmFyL3J1biAtLWV4Y2x1ZGU9dmFyL2xvY2sgXAogICAgIC8gLwpDT1BZIC0tZnJvbT1rM3MgL2JpbiAvYmluCgojIEF1dG8tZGVwbG95IE9OTFkgdGhlIGBudmlkaWFgIFJ1bnRpbWVDbGFzcyBvbiBmaXJzdCBzZXJ2ZXIgYm9vdCAoazNzIGF1dG8tYXBwbGllcwojIG1hbmlmZXN0cyBkcm9wcGVkIGhlcmUpLiBXZSBkZWxpYmVyYXRlbHkgZG8gTk9UIHNoaXAgdGhlIE5WTUwgZGV2aWNlLXBsdWdpbiBEYWVtb25TZXQ6CiMgb24gRG9ja2VyIERlc2t0b3AvV1NMMiBpdCBjYW4ndCBpbml0IE5WTUwsIHdvdWxkIHJlZ2lzdGVyIDAgR1BVcywgYW5kIChvd25pbmcgdGhlCiMgbnZpZGlhLmNvbS9ncHUgZXh0ZW5kZWQgcmVzb3VyY2UpIHdvdWxkIG92ZXJ3cml0ZSB0aGUgaW5zdGFsbGVyJ3Mgbm9kZS1yZXNvdXJjZSBwYXRjaAojIHdpdGggMCAtLSBzdHJhbmRpbmcgam9icy4gR1BVIGNhcGFjaXR5IGlzIGFkdmVydGlzZWQgYnkgdGhlIGluc3RhbGxlciB2aWEgYSBub2RlIHBhdGNoLAojIGFuZCBwb2RzIGdldCB0aGUgcmVhbCBHUFUgdGhyb3VnaCB0aGUgQ0RJIHNwZWMgZ2VuZXJhdGVkIGF0IGJvb3QgKHNlZSBrM2QtZW50cnlwb2ludC10cmFjZWJsb2MtY2RpLnNoKS4KQ09QWSBudmlkaWEtcnVudGltZWNsYXNzLnlhbWwgL3Zhci9saWIvcmFuY2hlci9rM3Mvc2VydmVyL21hbmlmZXN0cy9udmlkaWEtcnVudGltZWNsYXNzLnlhbWwKCiMgTm9kZSBHUFUgc2V0dXA6IGdlbmVyYXRlIHRoZSBXU0wgQ0RJIHNwZWMgKCsgbGliZHhjb3JlKSBhbmQga2VlcCBudmlkaWEuY29tL2dwdQojIGFkdmVydGlzZWQsIHNvIHBvZHMgY2FuIHVzZSB0aGUgR1BVIG9uIERvY2tlciBEZXNrdG9wL1dTTDIuIE5vLW9wIG9uIG5vbi1XU0wyIG5vZGVzLgojCiMgSXQgTVVTVCBiZSBpbnN0YWxsZWQgYXMgYSAvYmluL2szZC1lbnRyeXBvaW50LSouc2ggRFJPUC1JTiwgbm90IGFzIHRoZSBpbWFnZSBFTlRSWVBPSU5UOgojIGszZCByZXBsYWNlcyB0aGUgaW1hZ2UgZW50cnlwb2ludCB3aXRoIGl0cyBvd24gL2Jpbi9rM2QtZW50cnlwb2ludC5zaCwgd2hpY2ggcnVucyB0aGVzZQojIGRyb3AtaW5zIGFuZCB0aGVuIGV4ZWNzIGszcy4gQW4gRU5UUllQT0lOVCB3cmFwcGVyIGhlcmUgaXMgc2lsZW50bHkgbmV2ZXIgcnVuICgjNjE2KS4KQ09QWSBrM2QtZW50cnlwb2ludC10cmFjZWJsb2MtY2RpLnNoIC9iaW4vazNkLWVudHJ5cG9pbnQtdHJhY2VibG9jLWNkaS5zaApSVU4gY2htb2QgK3ggL2Jpbi9rM2QtZW50cnlwb2ludC10cmFjZWJsb2MtY2RpLnNoCgpWT0xVTUUgL3Zhci9saWIva3ViZWxldApWT0xVTUUgL3Zhci9saWIvcmFuY2hlci9rM3MKVk9MVU1FIC92YXIvbGliL2NuaQpWT0xVTUUgL3Zhci9sb2cKCkVOViBQQVRIPSIkUEFUSDovYmluL2F1eCIKCiMgU3RvY2sgazNzIGVudHJ5cG9pbnQgKHNhbWUgYXMgcmFuY2hlci9rM3MpLiBrM2Qgb3ZlcnJpZGVzIGl0IHdpdGggaXRzIG93bgojIC9iaW4vazNkLWVudHJ5cG9pbnQuc2gsIHdoaWNoIHJ1bnMgb3VyIGRyb3AtaW4gYWJvdmUgYmVmb3JlIGV4ZWMnaW5nIGszczsga2VlcGluZyB0aGUKIyBzdG9jayB2YWx1ZSBtZWFucyB0aGUgaW1hZ2UgYWxzbyBiZWhhdmVzIG5vcm1hbGx5IG91dHNpZGUgazNkLgpFTlRSWVBPSU5UIFsiL2Jpbi9rM3MiXQpDTUQgWyJhZ2VudCJdCg=='
+
+$script:K3S_CUDA_RUNTIMECLASS_B64 = 'IyA9PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PQojICBgbnZpZGlhYCBSdW50aW1lQ2xhc3MgICh0cmFjZWJsb2MvY2xpZW50ICM2MTYpCiMgPT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT0KIyBCYWtlZCBpbnRvIHRoZSBjdXN0b20gazNzLUNVREEgaW1hZ2UgYXQgL3Zhci9saWIvcmFuY2hlci9rM3Mvc2VydmVyL21hbmlmZXN0cy8KIyBzbyBrM3MgYXV0by1hcHBsaWVzIGl0IG9uIGZpcnN0IHNlcnZlciBib290LiBUcmFpbmluZyBwb2RzIHJlZmVyZW5jZSBpdCB2aWEKIyBydW50aW1lQ2xhc3NOYW1lOiBudmlkaWEgKHRoZSBpbnN0YWxsZXIgc2V0cyBSVU5USU1FX0NMQVNTX05BTUU9bnZpZGlhIHdoZW4gR1BVCiMgaXMgZW5hYmxlZCwgd2hpY2ggam9icy1tYW5hZ2VyIHRocmVhZHMgaW50byBldmVyeSBzcGF3bmVkIHBvZCksIHNvIHRoZSBub2RlJ3MKIyBjb250YWluZXJkIGludm9rZXMgdGhlIG52aWRpYSBjb250YWluZXIgcnVudGltZSAtLSB3aGljaCwgaW4gQ0RJIG1vZGUgKHNlZQojIGszZC1lbnRyeXBvaW50LXRyYWNlYmxvYy1jZGkuc2gpLCBpbmplY3RzIHRoZSBHUFUgaW50byB0aGUgcG9kIGZyb20gdGhlIFdTTCBDREkgc3BlYy4KIwojIE5PVEU6IHdlIGludGVudGlvbmFsbHkgZG8gTk9UIHNoaXAgdGhlIE5WTUwgZGV2aWNlLXBsdWdpbiBEYWVtb25TZXQgaGVyZS4gT24KIyBEb2NrZXIgRGVza3RvcC9XU0wyIGl0IGNhbid0IGluaXRpYWxpc2UgTlZNTCAoRVJST1JfTk9UX1NVUFBPUlRFRCksIHdvdWxkCiMgcmVnaXN0ZXIgMCBHUFVzLCBhbmQgLS0gb3duaW5nIHRoZSBudmlkaWEuY29tL2dwdSBleHRlbmRlZCByZXNvdXJjZSAtLSB3b3VsZAojIG92ZXJ3cml0ZSB0aGUgaW5zdGFsbGVyJ3Mgbm9kZS1yZXNvdXJjZSBwYXRjaCB3aXRoIDAsIHN0cmFuZGluZyBqb2JzLiBHUFUKIyBjYXBhY2l0eSBpcyBhZHZlcnRpc2VkIGJ5IHRoZSBpbnN0YWxsZXIgdmlhIGEgbm9kZS1zdGF0dXMgcGF0Y2ggaW5zdGVhZC4KLS0tCmFwaVZlcnNpb246IG5vZGUuazhzLmlvL3YxCmtpbmQ6IFJ1bnRpbWVDbGFzcwptZXRhZGF0YToKICBuYW1lOiBudmlkaWEKaGFuZGxlcjogbnZpZGlhCg=='
+
+$script:K3S_CUDA_BOOT_B64 = 'IyEvYmluL3NoCiMgPT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT0KIyAgdHJhY2VibG9jIEdQVS1vbi1XU0wyIG5vZGUgc2V0dXAg4oCUIGszZCBlbnRyeXBvaW50IERST1AtSU4gKCM2MTYpCiMgPT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT0KIyBXSFkgVEhFIEZJTEVOQU1FIE1BVFRFUlM6IGszZCBkb2VzIE5PVCB1c2UgdGhlIGltYWdlJ3MgRU5UUllQT0lOVC4gSXQgcmVwbGFjZXMgaXQKIyB3aXRoIGl0cyBvd24gL2Jpbi9rM2QtZW50cnlwb2ludC5zaCwgd2hpY2ggcnVucyBldmVyeSAvYmluL2szZC1lbnRyeXBvaW50LSouc2gKIyBkcm9wLWluIGFuZCB0aGVuIGV4ZWNzIGszcy4gQW4gaW1hZ2UgRU5UUllQT0lOVCB3cmFwcGVyIGlzIHRoZXJlZm9yZSBzaWxlbnRseQojIG5ldmVyIGV4ZWN1dGVkICh0aGF0J3MgZXhhY3RseSBob3cgdGhpcyBzaGlwcGVkIGJyb2tlbiB0aGUgZmlyc3QgdGltZTogdGhlIENESSBzcGVjCiMgd2FzIG5ldmVyIGdlbmVyYXRlZCwgYW5kIHRoZSBpbnN0YWxsZXIgY29ycmVjdGx5IGZlbGwgYmFjayB0byBDUFUpLiBTbyB0aGlzIHNoaXBzIGFzCiMgL2Jpbi9rM2QtZW50cnlwb2ludC10cmFjZWJsb2MtY2RpLnNoIGFuZCBtdXN0OgojICAgKiBSRVRVUk4gKG5ldmVyIGV4ZWMgazNzIOKAlCBrM2QncyBlbnRyeXBvaW50IGRvZXMgdGhhdCBhZnRlcndhcmRzKSwgYW5kCiMgICAqIGFsd2F5cyBgZXhpdCAwYCDigJQgazNkIHJ1bnMgZHJvcC1pbnMgd2l0aCBgfHwgZXhpdCAxYCwgc28gYSBub24temVybyBleGl0IGhlcmUKIyAgICAgd291bGQgYWJvcnQgdGhlIHdob2xlIG5vZGUuIEdQVSBpcyBvcHRpb25hbDsgaXQgbXVzdCBuZXZlciBicmVhayB0aGUgY2x1c3Rlci4KIwojIE9uIERvY2tlciBEZXNrdG9wIC8gV1NMMiB0aGUgTlZJRElBIGs4cyBkZXZpY2UgcGx1Z2luIGNhbid0IHdvcmsgKE5WTUwgcmV0dXJucwojIEVSUk9SX05PVF9TVVBQT1JURUQgdGhyb3VnaCB0aGUgcGFyYXZpcnR1YWxpemVkIEdQVSksIHNvIHdlIHdpcmUgdGhlIEdQVSBpbnRvCiMgcG9kcyB2aWEgQ0RJIGluc3RlYWQuIFRoaXMgTVVTVCBydW4gYXQgbm9kZSBzdGFydDogdGhlIFdTTCBkcml2ZXItc3RvcmUgcGF0aCBpcyBhCiMgZHluYW1pYyBwZXItbWFjaGluZSBoYXNoLCBzbyB0aGUgQ0RJIHNwZWMgaGFzIHRvIGJlIGdlbmVyYXRlZCBsaXZlIG9uIHRoaXMgbm9kZS4KIyBFbnRpcmVseSBuby1vcCBvbiBhIG5vbi1XU0wyIG5vZGUgKG5vIC9kZXYvZHhnKSAtPiBhIG5vcm1hbCAoTGludXgvQ1BVKSBub2RlIGlzCiMgdW5hZmZlY3RlZCBhbmQgazNzIHN0YXJ0cyBleGFjdGx5IGFzIGJlZm9yZS4KIwojIFByb3ZlbiByZWNpcGUgKHZhbGlkYXRlZCBsaXZlIG9uIGFuIFJUWCA0MDUwIGxhcHRvcCwgZHJpdmVyIDUzMi4xMCk6CiMgICAxLiBudmlkaWEtY29udGFpbmVyLXJ1bnRpbWUgaW4gQ0RJIG1vZGUgKGJha2VkIGF0IGltYWdlIGJ1aWxkKS4KIyAgIDIuIGBudmlkaWEtY3RrIGNkaSBnZW5lcmF0ZSAtLW1vZGU9d3NsYCAtPiAvZXRjL2NkaS9udmlkaWEueWFtbC4KIyAgIDMuIGluamVjdCBsaWJkeGNvcmUuc28sIHdoaWNoIHRoZSBXU0wgZ2VuZXJhdG9yIG9taXRzIChpdCBsaXZlcyBpbiB0aGUgc3RhbmRhcmQKIyAgICAgIGxpYiBwYXRoLCBub3QgdGhlIGRyaXZlciBzdG9yZSkgLS0gd2l0aG91dCBpdCBsaWJjdWRhIGxvYWRzIGJ1dCBjYW4ndCByZWFjaAojICAgICAgL2Rldi9keGcgYW5kIENVREEgZmFpbHMgd2l0aCBhIG1pc2xlYWRpbmcgImRyaXZlciBpbnN1ZmZpY2llbnQiIGVycm9yLgojIEdQVSBpcyBPUFRJT05BTDogZXZlcnkgc3RlcCBpcyBndWFyZGVkIHNvIGEgZmFpbHVyZSBuZXZlciBibG9ja3MgazNzIGZyb20gc3RhcnRpbmcuCgppZiBbIC1lIC9kZXYvZHhnIF07IHRoZW4KICBta2RpciAtcCAvZXRjL2NkaSAyPi9kZXYvbnVsbCB8fCB0cnVlCiAgbnZpZGlhLWN0ayBjZGkgZ2VuZXJhdGUgLS1tb2RlPXdzbCAtLW91dHB1dD0vZXRjL2NkaS9udmlkaWEueWFtbCAyPi9kZXYvbnVsbCB8fCB0cnVlCgogICMgQWRkIGxpYmR4Y29yZS5zbyB0byB0aGUgc3BlYydzIG1vdW50cyBsaXN0LiBgbnZpZGlhLWN0ayBjZGkgZ2VuZXJhdGUgLS1tb2RlPXdzbGAgT01JVFMgaXQKICAjIChpdCBzZWFyY2hlcyB0aGUgV1NMIGRyaXZlciBzdG9yZTsgbGliZHhjb3JlIGxpdmVzIGluIHRoZSBzdGFuZGFyZCBsaWIgcGF0aCksIGFuZCBXSVRIT1VUIGl0CiAgIyBsaWJjdWRhIGxvYWRzIGJ1dCBjYW4ndCByZWFjaCAvZGV2L2R4ZyAtLSBDVURBIHRoZW4gZmFpbHMgd2l0aCB0aGUgbWlzbGVhZGluZyAiQ1VEQSBkcml2ZXIKICAjIHZlcnNpb24gaXMgaW5zdWZmaWNpZW50IGZvciBDVURBIHJ1bnRpbWUgdmVyc2lvbiIuCiAgIwogICMgSW5kZW50YXRpb24gaXMgTUlSUk9SRUQgZnJvbSB0aGUgZ2VuZXJhdG9yJ3Mgb3duIGZpcnN0IG1vdW50IGl0ZW0sIG5ldmVyIGhhcmRjb2RlZDogWUFNTAogICMgZm9yYmlkcyBtaXhpbmcgaW5kZW50IGxldmVscyB3aXRoaW4gb25lIGxpc3QsIHNvIGEgZml4ZWQgNC1zcGFjZSBpdGVtIG5leHQgdG8gdGhlIGdlbmVyYXRvcidzCiAgIyAoZGlmZmVyZW50bHkgaW5kZW50ZWQpIGl0ZW1zIG1ha2VzIHRoZSBXSE9MRSBzcGVjIHVucGFyc2VhYmxlIC0tIENESSB0aGVuIHNpbGVudGx5IGluamVjdHMKICAjIG5vdGhpbmcgYW5kIENVREEgZmFpbHMgZXhhY3RseSBhcyBpZiB0aGUgbW91bnQgd2VyZSBtaXNzaW5nLiBBbmNob3IgaXMgYWxzbyBpbmRlbnQtYWdub3N0aWMuCiAgIyBsaWJkeGNvcmUncyBsb2NhdGlvbiBpcyBOT1QgZml4ZWQgYWNyb3NzIERvY2tlciBEZXNrdG9wIC8gV1NMMiB2ZXJzaW9ucyAoQnVnYm90KTogaXQgbWF5IHNpdAogICMgaW4gdGhlIHN0YW5kYXJkIGxpYiBwYXRoLCB1bmRlciAvdXNyL2xpYi93c2wvbGliLCBvciBpbnNpZGUgdGhlIFdTTCBkcml2ZXIgc3RvcmUuIEhhcmRjb2RpbmcKICAjIG9uZSBwYXRoIG1lYW50IGEgbWlzcyBzaWxlbnRseSBza2lwcGVkIHRoZSBpbmplY3Rpb24gd2hpbGUgdGhlIHNwZWMgc3RpbGwgbG9va2VkIGZpbmUsIHNvIEdQVQogICMgd2FzIGFkdmVydGlzZWQgYW5kIHBvZHMgdGhlbiBmYWlsZWQgQ1VEQSB3aXRoIHRoZSBtaXNsZWFkaW5nIGRyaXZlciBlcnJvci4gUHJvYmUgdGhlIGtub3duCiAgIyBsb2NhdGlvbnMsIHRoZW4gZmFsbCBiYWNrIHRvIHRoZSBsaW5rZXIgY2FjaGUuIE1vdW50ZWQgYXQgdGhlIHBhdGggd2hlcmUgaXQgd2FzIGZvdW5kLCBzbyB0aGUKICAjIGluLXBvZCBsb2FkZXIgcmVzb2x2ZXMgaXQgdGhlIHNhbWUgd2F5IHRoZSBub2RlIGRvZXMuCiAgRFhDT1JFPSIiCiAgZm9yIF9jIGluIC91c3IvbGliL3g4Nl82NC1saW51eC1nbnUvbGliZHhjb3JlLnNvIC91c3IvbGliL3dzbC9saWIvbGliZHhjb3JlLnNvIFwKICAgICAgICAgICAgL3Vzci9saWIvd3NsL2RyaXZlcnMvKi9saWJkeGNvcmUuc28gL3Vzci9saWIvbGliZHhjb3JlLnNvOyBkbwogICAgaWYgWyAtZiAiJF9jIiBdOyB0aGVuIERYQ09SRT0iJF9jIjsgYnJlYWs7IGZpCiAgZG9uZQogIGlmIFsgLXogIiREWENPUkUiIF07IHRoZW4KICAgIF9jPSIkKGxkY29uZmlnIC1wIDI+L2Rldi9udWxsIHwgYXdrICcvbGliZHhjb3JlXC5zby8geyBwcmludCAkTkY7IGV4aXQgfScpIgogICAgaWYgWyAtbiAiJF9jIiBdICYmIFsgLWYgIiRfYyIgXTsgdGhlbiBEWENPUkU9IiRfYyI7IGZpCiAgZmkKCiAgaWYgWyAtZiAvZXRjL2NkaS9udmlkaWEueWFtbCBdICYmIFsgLW4gIiREWENPUkUiIF0gXAogICAgICAgJiYgISBncmVwIC1xICdsaWJkeGNvcmVcLnNvJyAvZXRjL2NkaS9udmlkaWEueWFtbDsgdGhlbgogICAgYXdrIC12IGR4PSIkRFhDT1JFIiAnCiAgICAgICMgcmVtZW1iZXIgdGhlIGluZGVudCBvZiB0aGUgZmlyc3QgbGlzdCBpdGVtIHRoYXQgZm9sbG93cyBhIGBtb3VudHM6YCBrZXkKICAgICAgIWRvbmUgJiYgJDAgfiAvXltbOnNwYWNlOl1dKm1vdW50czpbWzpzcGFjZTpdXSokLyB7IGlubW91bnRzID0gMTsgcHJpbnQ7IG5leHQgfQogICAgICBpbm1vdW50cyAmJiAhZG9uZSAmJiBtYXRjaCgkMCwgL15bWzpzcGFjZTpdXSotW1s6c3BhY2U6XV0vKSB7CiAgICAgICAgaXRlbSA9IHN1YnN0cigkMCwgMSwgUkxFTkdUSCAtIDIpICAgICAgICAgICMgbGVhZGluZyB3aGl0ZXNwYWNlIGJlZm9yZSB0aGUgZGFzaAogICAgICAgIGtleXMgPSBpdGVtICIgICIgICAgICAgICAgICAgICAgICAgICAgICAgICAgIyBtYXBwaW5nIGtleXMgc2l0IG9uZSBsZXZlbCBkZWVwZXIKICAgICAgICBwcmludCBpdGVtICItIGhvc3RQYXRoOiAiIGR4CiAgICAgICAgcHJpbnQga2V5cyAiY29udGFpbmVyUGF0aDogIiBkeAogICAgICAgIHByaW50IGtleXMgIm9wdGlvbnM6IgogICAgICAgIHByaW50IGtleXMgIi0gcm8iCiAgICAgICAgcHJpbnQga2V5cyAiLSBub3N1aWQiCiAgICAgICAgcHJpbnQga2V5cyAiLSBub2RldiIKICAgICAgICBwcmludCBrZXlzICItIHJiaW5kIgogICAgICAgIGRvbmUgPSAxCiAgICAgICAgcHJpbnQgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAjIHRoZW4gdGhlIGdlbmVyYXRvciBpdGVtIHdlIG1hdGNoZWQKICAgICAgICBuZXh0CiAgICAgIH0KICAgICAgeyBwcmludCB9CiAgICAnIC9ldGMvY2RpL252aWRpYS55YW1sID4gL2V0Yy9jZGkvbnZpZGlhLnlhbWwubmV3IDI+L2Rldi9udWxsIHx8IHRydWUKICAgICMgT25seSBhZG9wdCB0aGUgZWRpdCBpZiB0aGUgcmVzdWx0IHN0aWxsIFBBUlNFUyBhcyBhIENESSBzcGVjIC0tIG90aGVyd2lzZSBrZWVwIHRoZSBvcmlnaW5hbAogICAgIyAoR1BVIHdpdGhvdXQgbGliZHhjb3JlIGJlYXRzIGEgYnJva2VuIHNwZWMgdGhhdCBkaXNhYmxlcyB0aGUgR1BVIGVudGlyZWx5IGFuZCBzaWxlbnRseSkuCiAgICAjCiAgICAjIFRoZSByZXZlcnQgaXMgZ2F0ZWQgb24gYGNkaSBsaXN0YCBFWElTVElORywgZXhhY3RseSBsaWtlIHRoZSBjZGlfb2sgY2hlY2sgYmVsb3cgKEJ1Z2JvdCk6CiAgICAjIHRoYXQgc3ViY29tbWFuZCBpcyB2ZXJzaW9uLWRlcGVuZGVudCwgc28gY2FsbGluZyBpdCB1bmNvbmRpdGlvbmFsbHkgbWVhbnQgYSB0b29sa2l0IHdpdGhvdXQKICAgICMgaXQgcmV2ZXJ0ZWQgYSBQRVJGRUNUTFkgR09PRCBpbmplY3Rpb24gLS0gYW5kIHRoZSBpbnN0YWxsZXIgdGhlbiByZXBvcnRlZCAic3BlYyBpcyBtaXNzaW5nCiAgICAjIGxpYmR4Y29yZSIsIHdoaWNoIGlzIGZhbHNlIGFuZCB1bmFjdGlvbmFibGUuIFJldmVydCBvbmx5IHdoZW4gdGhlIHBhcnNlciBpcyBhdmFpbGFibGUgQU5ECiAgICAjIGFjdGl2ZWx5IHJlamVjdHMgdGhlIHJlc3VsdC4KICAgIGlmIFsgLXMgL2V0Yy9jZGkvbnZpZGlhLnlhbWwubmV3IF0gJiYgZ3JlcCAtcSAnbGliZHhjb3JlXC5zbycgL2V0Yy9jZGkvbnZpZGlhLnlhbWwubmV3OyB0aGVuCiAgICAgIGNwIC9ldGMvY2RpL252aWRpYS55YW1sIC9ldGMvY2RpL252aWRpYS55YW1sLm9yaWcgMj4vZGV2L251bGwgfHwgdHJ1ZQogICAgICBtdiAvZXRjL2NkaS9udmlkaWEueWFtbC5uZXcgL2V0Yy9jZGkvbnZpZGlhLnlhbWwgMj4vZGV2L251bGwgfHwgdHJ1ZQogICAgICBpZiBudmlkaWEtY3RrIGNkaSBsaXN0IC0taGVscCA+L2Rldi9udWxsIDI+JjE7IHRoZW4KICAgICAgICBpZiAhIG52aWRpYS1jdGsgY2RpIGxpc3QgPi9kZXYvbnVsbCAyPiYxOyB0aGVuCiAgICAgICAgICBtdiAvZXRjL2NkaS9udmlkaWEueWFtbC5vcmlnIC9ldGMvY2RpL252aWRpYS55YW1sIDI+L2Rldi9udWxsIHx8IHRydWUKICAgICAgICBmaQogICAgICBmaQogICAgZmkKICAgIHJtIC1mIC9ldGMvY2RpL252aWRpYS55YW1sLm5ldyAvZXRjL2NkaS9udmlkaWEueWFtbC5vcmlnIDI+L2Rldi9udWxsIHx8IHRydWUKICBmaQoKICAjIElzIENESSBpbmplY3Rpb24gYWN0dWFsbHkgVVNBQkxFPyBBZHZlcnRpc2luZyBudmlkaWEuY29tL2dwdSB3aXRob3V0IGl0IGlzIHdvcnNlIHRoYW4gbm90CiAgIyBhZHZlcnRpc2luZyBhdCBhbGw6IHBvZHMgc2NoZWR1bGUgb250byBhIGRldmljZSB0aGV5IGNhbid0IHVzZSBhbmQgZmFpbCBDVURBIHdpdGggYQogICMgbWlzbGVhZGluZyBkcml2ZXIgZXJyb3IsIGFuZCBubyBjbHVzdGVyLWxldmVsIHNpZ25hbCBzYXlzIHdoeSAoQnVnYm90LCBISUdIKS4gVGhlIGluc3RhbGxlcgogICMgYWxyZWFkeSByZWZ1c2VzIGluIHRoYXQgY2FzZSwgYnV0IHRoaXMgcmVjb25jaWxlciBydW5zIGFnYWluIG9uIGV2ZXJ5IHJlc3RhcnQgLS0gc28gaXQgbXVzdAogICMgYXBwbHkgdGhlIFNBTUUgc3RhbmRhcmQgcmF0aGVyIHRoYW4gcmUtYXNzZXJ0aW5nIGNhcGFjaXR5IG9udG8gYSBicm9rZW4gbm9kZS4KICAjIFN0cnVjdHVyYWwgY2hlY2tzIGZpcnN0LCBhbmQgTk9UIGdhdGVkIG9uIGBudmlkaWEtY3RrIGNkaSBsaXN0YCBleGlzdGluZzogdGhhdCBzdWJjb21tYW5kIGlzCiAgIyB2ZXJzaW9uLWRlcGVuZGVudCwgc28ga2V5aW5nIHRoZSBkZWNpc2lvbiBvbiBpdCB3b3VsZCBkaXNhYmxlIGEgcGVyZmVjdGx5IHdvcmtpbmcgR1BVIG9uIGEKICAjIHRvb2xraXQgYnVpbGQgdGhhdCBsYWNrcyBpdCAoYSBmYWxzZSBuZWdhdGl2ZSBvbiBzb21lb25lIGVsc2UncyBtYWNoaW5lKS4gV2UgcmVxdWlyZSB0aGUgc3BlYwogICMgdG8gYmUgbm9uLWVtcHR5LCB0byBkZWNsYXJlIHRoZSBudmlkaWEuY29tL2dwdSBraW5kLCB0byBleHBvc2UgL2Rldi9keGcsIGFuZCB0byBjYXJyeSBvdXIKICAjIGxpYmR4Y29yZSBtb3VudCAtLSBhbGwgZm9ybWF0LXN0YWJsZSBmYWN0cy4gYGNkaSBsaXN0YCBpcyB0aGVuIHVzZWQgb25seSBhcyBhbiBFWFRSQSB2ZXRvIHdoZW4KICAjIGl0IGlzIGF2YWlsYWJsZSwgc28gYSBzcGVjIGl0IGFjdGl2ZWx5IHJlamVjdHMgc3RpbGwgY2FuJ3QgYWR2ZXJ0aXNlIGEgR1BVLgogIGNkaV9vaz0wCiAgaWYgWyAtcyAvZXRjL2NkaS9udmlkaWEueWFtbCBdIFwKICAgICAgICYmIGdyZXAgLXEgJ252aWRpYVwuY29tL2dwdScgL2V0Yy9jZGkvbnZpZGlhLnlhbWwgXAogICAgICAgJiYgZ3JlcCAtcSAnL2Rldi9keGcnIC9ldGMvY2RpL252aWRpYS55YW1sIFwKICAgICAgICYmIGdyZXAgLXEgJ2xpYmR4Y29yZVwuc28nIC9ldGMvY2RpL252aWRpYS55YW1sOyB0aGVuCiAgICBjZGlfb2s9MQogICAgaWYgbnZpZGlhLWN0ayBjZGkgbGlzdCAtLWhlbHAgPi9kZXYvbnVsbCAyPiYxOyB0aGVuCiAgICAgIG52aWRpYS1jdGsgY2RpIGxpc3QgPi9kZXYvbnVsbCAyPiYxIHx8IGNkaV9vaz0wCiAgICBmaQogIGZpCgogICMgS2VlcCBudmlkaWEuY29tL2dwdSBhZHZlcnRpc2VkIGFjcm9zcyByZXN0YXJ0cyAoQnVnYm90LCBISUdIKS4gQSBtYW51YWxseSBwYXRjaGVkCiAgIyBleHRlbmRlZCByZXNvdXJjZSBpcyBOT1QgZHVyYWJsZTogdGhlIGt1YmVsZXQgcmUtcmVwb3J0cyBub2RlIHN0YXR1cyBvbiBldmVyeQogICMgc3RhcnQsIHplcm9pbmcgaXQgLS0gc28gYWZ0ZXIgYSBEb2NrZXIgRGVza3RvcCBvciBXaW5kb3dzIHJlc3RhcnQgdGhlIGluc3RhbGxlcidzCiAgIyBvbmUtc2hvdCBwYXRjaCBpcyBnb25lLCB0aGUgY2hhcnQgc3RpbGwgcmVxdWVzdHMgYSBHUFUsIGFuZCBldmVyeSBqb2Igd291bGQgc2l0CiAgIyBQZW5kaW5nIHdpdGggIkluc3VmZmljaWVudCBudmlkaWEuY29tL2dwdSIgdW50aWwgc29tZW9uZSByZS1yYW4gdGhlIGluc3RhbGxlci4KICAjIFRoZXJlJ3Mgbm8gZGV2aWNlIHBsdWdpbiB0byBvd24gdGhlIHJlc291cmNlIGhlcmUsIHNvIHRoaXMgbm9kZSByZS1hc3NlcnRzIGl0CiAgIyBpdHNlbGY6IGEgYmFja2dyb3VuZCByZWNvbmNpbGVyIHdhaXRzIGZvciB0aGUgbG9jYWwgQVBJLCB0aGVuIHJlLXBhdGNoZXMgd2hlbmV2ZXIKICAjIHRoZSBjYXBhY2l0eSBpcyBtaXNzaW5nLiBSdW5zIG9uIEVWRVJZIG5vZGUgc3RhcnQgKGszZCBydW5zIHRoaXMgZHJvcC1pbiBlYWNoIHRpbWUpLAogICMgc28gYSByZWJvb3Qgc2VsZi1oZWFscyB3aXRoIG5vIHVzZXIgYWN0aW9uLiBGdWxseSBndWFyZGVkICsgYmFja2dyb3VuZGVkOiBpdCBjYW4KICAjIG5ldmVyIGRlbGF5IG9yIGJsb2NrIGszcy4gSW50ZXJ2YWwgb3ZlcnJpZGU6IFRSQUNFQkxPQ19HUFVfUkVDT05DSUxFX1NFQ1MuCiAgIyBHYXRlZCBvbiBjZGlfb2sgc28gYSBicm9rZW4vaW5jb21wbGV0ZSBDREkgc3BlYyBuZXZlciBnZXRzIGEgR1BVIGFkdmVydGlzZWQgb250byBpdC4KICAjCiAgIyBGdWxseSBERVRBQ0hFRCAoPC9kZXYvbnVsbCwgb3V0cHV0IHRvIC9kZXYvbnVsbCk6IHRoaXMgZHJvcC1pbiBleGl0cyBpbW1lZGlhdGVseSBhZnRlcgogICMgZm9ya2luZywgc28gdGhlIGxvb3AgaXMgb3JwaGFuZWQgYW5kIHJlcGFyZW50ZWQgdG8gUElEIDEgKGszcywgd2hpY2ggazNkJ3MgZW50cnlwb2ludAogICMgZXhlY3MpLiBIb2xkaW5nIHRoZSBpbmhlcml0ZWQgc3RkaW8gd291bGQgcmlzayBibG9ja2luZyBvbiBhIGNsb3NlZCBwaXBlLgogIGlmIFsgIiRjZGlfb2siID0gIjEiIF07IHRoZW4KICAoCiAgICBpbnRlcnZhbD0iJHtUUkFDRUJMT0NfR1BVX1JFQ09OQ0lMRV9TRUNTOi02MH0iCiAgICBrdWJlPSIvZXRjL3JhbmNoZXIvazNzL2szcy55YW1sIgogICAgd2hpbGUgOjsgZG8KICAgICAgaWYgWyAtcyAiJGt1YmUiIF07IHRoZW4KICAgICAgICBjdXJyZW50PSIkKC9iaW4vazNzIGt1YmVjdGwgLS1rdWJlY29uZmlnICIka3ViZSIgZ2V0IG5vZGUgIiQoaG9zdG5hbWUpIiBcCiAgICAgICAgICAtbyAianNvbnBhdGg9ey5zdGF0dXMuY2FwYWNpdHkubnZpZGlhXFwuY29tL2dwdX0iIFwKICAgICAgICAgIC0tcmVxdWVzdC10aW1lb3V0PTEwcyAyPi9kZXYvbnVsbCB8fCB0cnVlKSIKICAgICAgICBjYXNlICIkY3VycmVudCIgaW4KICAgICAgICAgICcnfDApCiAgICAgICAgICAgIC9iaW4vazNzIGt1YmVjdGwgLS1rdWJlY29uZmlnICIka3ViZSIgcGF0Y2ggbm9kZSAiJChob3N0bmFtZSkiIFwKICAgICAgICAgICAgICAtLXN1YnJlc291cmNlPXN0YXR1cyAtLXR5cGU9anNvbiAtLXJlcXVlc3QtdGltZW91dD0xNXMgXAogICAgICAgICAgICAgIC1wICdbeyJvcCI6ImFkZCIsInBhdGgiOiIvc3RhdHVzL2NhcGFjaXR5L252aWRpYS5jb21+MWdwdSIsInZhbHVlIjoiMSJ9XScgXAogICAgICAgICAgICAgID4vZGV2L251bGwgMj4mMSB8fCB0cnVlCiAgICAgICAgICAgIDs7CiAgICAgICAgZXNhYwogICAgICBmaQogICAgICBzbGVlcCAiJGludGVydmFsIgogICAgZG9uZQogICkgPC9kZXYvbnVsbCA+L2Rldi9udWxsIDI+JjEgJgogIGZpCmZpCgojIFJldHVybiBjb250cm9sIHRvIGszZCdzIGVudHJ5cG9pbnQsIHdoaWNoIHJ1bnMgdGhlIHJlbWFpbmluZyBkcm9wLWlucyBhbmQgdGhlbiBleGVjcwojIGszcy4gQUxXQVlTIDA6IGszZCBhYm9ydHMgdGhlIG5vZGUgb24gYSBub24temVybyBkcm9wLWluIGV4aXQsIGFuZCBHUFUgaXMgb3B0aW9uYWwuCmV4aXQgMAo='
+
+# Build the custom k3s-CUDA node image LOCALLY, from PUBLIC bases only (rancher/k3s on
+# Docker Hub + NVIDIA's public nvcr.io CUDA base + the public NVIDIA container toolkit).
+# This is why a GPU install needs no registry login and no private package: the one
+# installer command builds the node image on the user's own machine (#616). Idempotent
+# (reuses an already-built image), bounded with a visible progress bar (installer rule),
+# and any failure falls back to CPU with a clear reason rather than stranding the install.
+# Sanity-check that the GPU node image actually runs k3s (the ENTRYPOINT is /bin/k3s, so
+# `docker run --rm <img> --version` prints "k3s version ..."). Catches a broken rootfs -- e.g.
+# the COPY --exclude mis-parse that once shipped a non-working /bin/k3s. Bounded.
+function Test-GpuImageRunsK3s {
+  # Run WITH --gpus (no -e NVIDIA_DISABLE_REQUIRE) so this exercises the EXACT container-create path
+  # k3d cluster-create will take: a stale image lacking the baked NVIDIA_DISABLE_REQUIRE would fail
+  # the CUDA-requirement gate here on an older driver and drop us to CPU, instead of passing a
+  # no-gpus check and then aborting cluster-create (Bugbot). Our own images bake the bypass, so they
+  # pass on any driver. Callers only reach here after Confirm-DockerGpu, so --gpus is available.
+  $ver = Invoke-DockerCli -DockerArgs @("run", "--rm", "--gpus", "all", $K3S_CUDA_IMAGE, "--version") -TimeoutSec 60
+  return ($ver.Code -eq 0 -and $ver.Output -match 'k3s version')
+}
+
+# Short content hash of the build inputs (embedded Dockerfile + device-plugin manifest). Stamped
+# as a label on the built image and checked on reuse, so ANY change to the build inputs (e.g.
+# adding NVIDIA_DISABLE_REQUIRE) invalidates a cached image built from OLDER content -- the image
+# TAG alone doesn't change when the Dockerfile does, so a stale cached image would otherwise be
+# reused and then fail cluster-create on an older driver (Bugbot).
+function Get-GpuBuildContentHash {
+  $bytes = [System.Text.Encoding]::UTF8.GetBytes("$($script:K3S_CUDA_DOCKERFILE_B64)|$($script:K3S_CUDA_RUNTIMECLASS_B64)|$($script:K3S_CUDA_BOOT_B64)")
+  $sha = [System.Security.Cryptography.SHA256]::Create()
+  try { return (([System.BitConverter]::ToString($sha.ComputeHash($bytes))) -replace '-','').Substring(0,12).ToLower() }
+  finally { $sha.Dispose() }
+}
+
+# Turn a failed `docker build` of the GPU node image into a reason the operator can ACT on.
+# PURE (output + exit code in, string out) so every branch is unit-tested. Ordered most- to
+# least-specific; the fallback still names the log. These are exactly the cases that vary
+# between machines, which is why a bare "exit 1" was not good enough (#616).
+function Get-GpuBuildFailureReason {
+  param([string]$BuildOutput, [int]$ExitCode)
+  $o = "$BuildOutput"
+  if ($o -match 'dockerfile:1\.7-labs|unknown flag: --exclude|failed to solve with frontend|frontend dockerfile\.v0|unsupported frontend|Dockerfile syntax') {
+    return "your Docker Desktop is too old to build the GPU node image (it needs BuildKit with the dockerfile 1.7-labs frontend) -- update Docker Desktop and re-run, or point TRACEBLOC_K3S_CUDA_IMAGE at a prebuilt image; running CPU-only"
+  }
+  if ($o -match 'no space left on device|disk quota exceeded') {
+    return "the machine ran out of disk while building the GPU node image -- free up space and re-run; running CPU-only"
+  }
+  if ($o -match 'manifest unknown|manifest for .* not found|not found: manifest|unknown tag') {
+    return "the CUDA base image tag ($CUDA_BASE_TAG) no longer exists upstream -- set TRACEBLOC_CUDA_BASE_TAG to an available tag and re-run; running CPU-only"
+  }
+  if ($o -match 'TLS handshake|x509|certificate') {
+    return "the GPU node image build hit a TLS/certificate error reaching the base images (usually a TLS-inspecting proxy) -- set TRACEBLOC_CA_BUNDLE to your corporate CA and re-run; running CPU-only"
+  }
+  if ($o -match 'i/o timeout|connection refused|temporary failure in name resolution|dial tcp|could not resolve|failed to fetch|Could not connect') {
+    return "the GPU node image build couldn't download its base images (nvcr.io / Docker Hub blocked or offline) -- on a restricted network set TRACEBLOC_IMAGE_REGISTRY to your mirror and re-run; running CPU-only"
+  }
+  if ($o -match 'toomanyrequests|rate limit') {
+    return "the GPU node image build was rate-limited by the registry -- retry later, or set TRACEBLOC_IMAGE_REGISTRY to your mirror; running CPU-only"
+  }
+  return "the GPU node image build failed (docker build exit $ExitCode) -- see the install log for the build output; running CPU-only"
+}
+
+function Build-GpuNodeImage {
+  $contentHash = Get-GpuBuildContentHash
+  # Idempotent: a prior run already built it -> reuse WITHOUT rebuilding, but ONLY if (a) it was
+  # built from the CURRENT build inputs (its stamped content-hash label matches) AND (b) it still
+  # passes the k3s sanity check. A cached image built from OLDER content (e.g. before the
+  # NVIDIA_DISABLE_REQUIRE fix) has a different/absent label -> we rebuild instead of reusing a
+  # stale image that would fail cluster-create on an older driver (Bugbot). {{.Config.Labels}} is
+  # a single space-free arg; we regex the label out of the rendered map.
+  $have = Invoke-DockerCli -DockerArgs @("image","inspect",$K3S_CUDA_IMAGE,"--format","{{.Config.Labels}}") -TimeoutSec 30
+  if ($have.Code -eq 0) {
+    if (($have.Output -match "tracebloc\.k3s-cuda-content:$contentHash") -and (Test-GpuImageRunsK3s)) {
+      Log "GPU node image already built from current inputs + verified ($K3S_CUDA_IMAGE) -- reusing"
+      return $true
+    }
+    Log "An existing GPU node image ($K3S_CUDA_IMAGE) is stale (built from older inputs) or failed its sanity check -- rebuilding it."
+  }
+
+  # BuildKit is required for the Dockerfile's `# syntax=...:1.7-labs` + `COPY --exclude`.
+  # Docker Desktop defaults to BuildKit; set it explicitly so the child build inherits it
+  # (PS 5.1 Start-Process has no -Environment, so we set the process env, which children inherit).
+  $env:DOCKER_BUILDKIT = "1"
+
+  # Write the build context (embedded Dockerfile + device-plugin manifest) to a fresh temp dir.
+  # Everything that can throw -- the dir creation AND the writes -- lives INSIDE the try so a
+  # temp-dir permission / antivirus / disk error degrades to CPU instead of reaching the
+  # top-level fatal trap and aborting an otherwise-fine install (Bugbot).
+  $ctx = Join-Path $env:TEMP ("tracebloc-k3s-cuda-" + [guid]::NewGuid().ToString('N'))
+  $outLog = Join-Path $env:TEMP "k3s-cuda-build-$(Get-Random).log"
+  $errLog = Join-Path $env:TEMP "k3s-cuda-build-err-$(Get-Random).log"
+  try {
+    New-Item -ItemType Directory -Path $ctx -ErrorAction Stop | Out-Null
+    [System.IO.File]::WriteAllBytes((Join-Path $ctx "Dockerfile"), [System.Convert]::FromBase64String($script:K3S_CUDA_DOCKERFILE_B64))
+    [System.IO.File]::WriteAllBytes((Join-Path $ctx "nvidia-runtimeclass.yaml"), [System.Convert]::FromBase64String($script:K3S_CUDA_RUNTIMECLASS_B64))
+    [System.IO.File]::WriteAllBytes((Join-Path $ctx "k3d-entrypoint-tracebloc-cdi.sh"), [System.Convert]::FromBase64String($script:K3S_CUDA_BOOT_B64))
+
+    Log "Building the GPU node image locally from public bases (k3s=$K8S_VERSION cuda=$CUDA_BASE_TAG): $K3S_CUDA_IMAGE"
+    Info "Building GPU support -- one-time, ~2-4 min (downloads the public NVIDIA CUDA + k3s bases)."
+
+    $buildArgs = @(
+      "build",
+      "--build-arg", "K3S_TAG=$K8S_VERSION",
+      "--build-arg", "CUDA_TAG=$CUDA_BASE_TAG",
+      "--label", "tracebloc.k3s-cuda-content=$contentHash",   # stamps the content hash for reuse detection
+      "-t", $K3S_CUDA_IMAGE,
+      $ctx
+    )
+    $dExe = (Get-Command docker -ErrorAction SilentlyContinue).Source
+    if (-not $dExe) { $dExe = "docker" }
+    $argStr = ($buildArgs | ForEach-Object { if ($_ -match '[\s]') { "`"$_`"" } else { $_ } }) -join " "
+
+    $proc = $null
+    try {
+      $proc = Start-Process -FilePath $dExe -ArgumentList $argStr -NoNewWindow -PassThru -ErrorAction Stop `
+        -RedirectStandardOutput $outLog -RedirectStandardError $errLog
+    } catch {
+      Log "Couldn't start docker build: $($_.Exception.Message)"
+      $script:GPU_SKIP_REASON = "couldn't start 'docker build' to create the GPU node image -- is Docker running? (running CPU-only)"
+      return $false
+    }
+
+    # Bounded with a heartbeat (progress bar), same pattern as cluster-create. Generous
+    # deadline: the first build downloads a multi-hundred-MB CUDA base + installs packages.
+    $buildMin = 20
+    if ("$env:TB_GPU_BUILD_TIMEOUT_MIN" -match '^\d+$') { $buildMin = [int]$env:TB_GPU_BUILD_TIMEOUT_MIN }
+    if (-not (Wait-ProcessWithDeadline -Process $proc -Deadline (Get-Date).AddMinutes($buildMin) -Message "Building GPU support (one-time, a few minutes)...")) {
+      $tail = @()
+      if (Test-Path $errLog) { $tail = @(Get-Content $errLog -ErrorAction SilentlyContinue | Select-Object -Last 5) }
+      foreach ($line in $tail) { Log "docker build: $line" }
+      $script:GPU_SKIP_REASON = "building the GPU node image timed out -- slow or blocked network reaching the public CUDA/k3s bases (running CPU-only)"
+      return $false
+    }
+    $buildOut = (("$(Get-Content $errLog -Raw -ErrorAction SilentlyContinue)`n$(Get-Content $outLog -Raw -ErrorAction SilentlyContinue)")).Trim()
+    if ($buildOut) { Log "docker build output (tail): $(( $buildOut -split "`n" | Select-Object -Last 8) -join "`n")" }
+    # Defense-in-depth (#611 idiom / Bugbot): with redirected stdout/stderr, $proc.ExitCode can
+    # stay $null after the process exits even though Wait-ProcessWithDeadline called WaitForExit().
+    # `$null -ne 0` would then misclassify a SUCCESSFUL build as failed and silently drop GPU. So
+    # fail only on a CONFIRMED non-zero exit; a null code defers to the k3s sanity check below,
+    # which is the authoritative "did the build produce a working image" success marker.
+    $buildExit = $proc.ExitCode
+    if ($null -eq $buildExit) {
+      Log "docker build exit code unreadable after WaitForExit; relying on the image sanity check as the success marker."
+    } elseif ($buildExit -ne 0) {
+      # Classify the failure instead of emitting a bare exit code (the operator can't act on
+      # "exit 1"). These are the drift/environment cases that differ machine to machine:
+      # an older Docker Desktop without the BuildKit labs frontend, a blocked/offline base
+      # image, a retired CUDA tag, or a full disk. Each gets the concrete next step.
+      $script:GPU_SKIP_REASON = Get-GpuBuildFailureReason -BuildOutput $buildOut -ExitCode $buildExit
+      Warn ("GPU couldn't be enabled: " + $script:GPU_SKIP_REASON)
+      return $false
+    }
+
+    # Sanity-check the freshly built image actually runs k3s (same check reused on the
+    # idempotent-reuse path above, so a broken image is never trusted from either direction).
+    # This is ALSO the authoritative success marker when the exit code was unreadable.
+    if (-not (Test-GpuImageRunsK3s)) {
+      $script:GPU_SKIP_REASON = "the freshly built GPU node image didn't run k3s correctly -- running CPU-only (see the install log)"
+      Log "GPU node image sanity check failed after build"
+      return $false
+    }
+    Ok "GPU node image built locally -- no registry login required."
+    Log "GPU node image built + verified: $K3S_CUDA_IMAGE"
+    return $true
+  } catch {
+    # GPU is OPTIONAL: a temp-dir permission/AV/disk error while staging the build
+    # context (or any unexpected build error) must degrade to CPU, never reach the
+    # top-level fatal trap and abort the whole install (Bugbot). CPU fallback stays safe.
+    Log "GPU node image build errored: $($_.Exception.Message)"
+    $script:GPU_SKIP_REASON = "the GPU node image couldn't be built ($($_.Exception.Message)) -- running CPU-only"
+    return $false
+  } finally {
+    Remove-Item $ctx -Recurse -Force -ErrorAction SilentlyContinue
+    Remove-Item $outLog, $errLog -Force -ErrorAction SilentlyContinue
   }
 }
 
@@ -2502,17 +2917,131 @@ function Test-K3sVersionDrift {
     Log "docker inspect (k3s version) timed out; skipping the version-drift check."
   }
   Remove-Job $job -Force -ErrorAction SilentlyContinue
+  # Extract the running k3s pin from EITHER the stock image (rancher/k3s:<ver>) or the GPU
+  # node image (…/k3s-cuda:<ver>-cuda-<base>) — else a GPU cluster silently escapes the
+  # drift check and stays on an old, unvalidated k3s after a pin bump (Bugbot).
+  $runningK3s = ""
   if ($k3sImage -match 'rancher/k3s:([^@\s]+)') {
     $runningK3s = $Matches[1]
-    if ($runningK3s -ne $K8S_VERSION) {
-      Warn "The existing '$CLUSTER_NAME' cluster runs k3s '$runningK3s', not the validated pin '$K8S_VERSION'."
-      Hint "k3s version is fixed when the cluster is created -- it can't be changed on a running cluster."
-      Hint "This cluster was created by an older/unpinned installer or with K8S_VERSION=latest (#547). To move"
-      Hint "onto the validated version, recreate it:"
-      Hint "  k3d cluster delete $CLUSTER_NAME  (then re-run this installer)."
-      Hint "  (data under HOST_DATA_DIR is kept; recreate rebinds it.)"
-    }
+  } elseif ($k3sImage -match 'k3s-cuda:([^@\s]+)') {
+    $cudaTag = $Matches[1]
+    if ($cudaTag -match '^(.+?)-cuda-') { $runningK3s = $Matches[1] } else { $runningK3s = $cudaTag }
   }
+  if ($runningK3s -ne "" -and $runningK3s -ne $K8S_VERSION) {
+    Warn "The existing '$CLUSTER_NAME' cluster runs k3s '$runningK3s', not the validated pin '$K8S_VERSION'."
+    Hint "k3s version is fixed when the cluster is created -- it can't be changed on a running cluster."
+    Hint "This cluster was created by an older/unpinned installer or with K8S_VERSION=latest (#547). To move"
+    Hint "onto the validated version, recreate it:"
+    Hint "  k3d cluster delete $CLUSTER_NAME  (then re-run this installer)."
+    Hint "  (data under HOST_DATA_DIR is kept; recreate rebinds it.)"
+  }
+}
+
+# Reconcile the GPU decision against a REUSED cluster (Bugbot). The GPU gate in main
+# enables --gpus=all + GPU chart values BEFORE New-K3dCluster runs, but a re-install
+# reuses an existing cluster in place rather than recreating it. A cluster first built
+# in CPU mode has a stock rancher/k3s node (no NVIDIA runtime, advertises 0 GPUs, no
+# `nvidia` RuntimeClass) -- and the k3s node image is fixed at create time, so GPU
+# can't be bolted onto a running node. Writing GPU values against it would strand every
+# experiment Pending: exactly the #616 failure this PR removes. So when GPU was
+# requested but the reused node isn't the CUDA image, DISABLE GPU for this run (CPU
+# fallback stays safe) and tell the user to recreate the cluster to get GPU. Bounded
+# docker inspect (installer rule) mirrors Test-K3sVersionDrift's job+deadline pattern.
+# Pure: can a reused cluster's server-node image schedule GPU pods? The default GPU image
+# name carries `k3s-cuda:`, BUT an operator can override it (TRACEBLOC_K3S_CUDA_IMAGE) to a
+# renamed or digest-only mirror ref that doesn't -- so we ALSO accept an exact match against
+# the image this run is configured to use ($Configured). A stock rancher/k3s image -- or an
+# unreadable/empty one -- is not GPU-capable and must fail safe to CPU. Kept pure (strings in,
+# bool out) so the decision is unit-testable without a background job.
+function Test-NodeImageGpuCapable {
+  param([string]$Image, [string]$Configured)
+  if (-not $Image) { return $false }
+  if ($Image -match 'k3s-cuda:') { return $true }
+  if ($Configured -and ($Image -eq $Configured)) { return $true }
+  return $false
+}
+
+function Confirm-ReusedClusterGpuCapable {
+  # Read + write via $script: so the flag the top-level GPU gate set is the same one we
+  # clear here (and that Install-ClientHelm later reads) regardless of call depth.
+  if ($script:K3D_GPU_FLAG -eq "") { return }   # GPU not requested -> nothing to reconcile
+  $img = ""
+  $job = Start-Job -InitializationScript $JobInit -ScriptBlock {
+    param($n) (docker inspect "k3d-$n-server-0" --format '{{.Config.Image}}' 2>$null | Out-String)
+  } -ArgumentList $CLUSTER_NAME
+  if (Wait-JobWithProgress -Job $job -TimeoutSec 15 -Message "Checking the existing cluster's GPU capability") {
+    $img = (Receive-Job $job -ErrorAction SilentlyContinue | Out-String).Trim()
+  } else {
+    Log "docker inspect (GPU capability) timed out; treating the reused cluster as CPU-only to stay safe."
+  }
+  Remove-Job $job -Force -ErrorAction SilentlyContinue
+  # A CUDA node image (or the exact image this run is configured to use, for renamed/digest
+  # mirror overrides) can schedule GPU pods; a stock or unreadable one fails safe to CPU
+  # rather than stranding jobs Pending against a node that advertises 0 GPUs.
+  if (Test-NodeImageGpuCapable -Image $img -Configured $K3S_CUDA_IMAGE) { return }
+  $script:K3D_GPU_FLAG = ""
+  $script:GPU_SKIP_REASON = "the existing '$CLUSTER_NAME' cluster runs a CPU-only node (GPU capability is fixed when the cluster is created); delete it (k3d cluster delete $CLUSTER_NAME) and re-run to rebuild it with GPU support"
+  Warn "GPU detected, but the existing '$CLUSTER_NAME' cluster is CPU-only -- running CPU mode so jobs aren't stranded Pending."
+  Hint "k3s node image (and thus GPU capability) is fixed when the cluster is created; it can't be added to a running cluster."
+  Hint "To enable GPU on this machine, recreate the cluster:"
+  Hint "  k3d cluster delete $CLUSTER_NAME   (then re-run this installer)"
+  Hint "  (data under HOST_DATA_DIR is kept; recreate rebinds it.)"
+}
+
+# Fast-path GPU consistency (Bugbot): the completed+healthy fast path exits BEFORE the GPU
+# gate + cluster reconciliation, so a cluster whose values.yaml requests GPU while its node is
+# CPU-only (a half-finished GPU attempt, or the k3s-CUDA image was removed) would keep every
+# GPU experiment Pending while the control plane still looks healthy. Detect that mismatch and
+# WARN with the recreate remedy -- non-fatal (the client is up), shared with the fast path so a
+# healthy-but-inconsistent cluster is flagged, not silently exited. Bounded inspect.
+# Fast-path helper: is the GPU actually LIVE on the running cluster -- i.e. does the node ADVERTISE
+# nvidia.com/gpu? The node IMAGE being CUDA is NOT proof (the device plugin can fail, leaving a
+# CUDA node with 0 GPUs -- the real failure mode), so we check allocatable GPU directly, the same
+# authoritative signal Confirm-GpuNode uses (Bugbot). Lets the fast path fall through to retry GPU
+# when a GPU is present but not live. Bounded via --request-timeout; unreadable/0 -> not live.
+function Test-RunningClusterGpuCapable {
+  $alloc = kubectl get nodes -o jsonpath='{.items[*].status.allocatable.nvidia\.com/gpu}' --request-timeout=5s 2>$null
+  return ("$alloc" -match '[1-9]\d*')
+}
+
+# Does the LIVE Helm release request a GPU (non-empty env.GPU_REQUESTS)? Read from Helm, not local
+# values.yaml -- on the adopted-reuse path only clientId is healed locally (GPU is reconciled via
+# helm --set-string), so the local file goes stale (Bugbot). Bounded; unreadable -> $false.
+function Test-LiveReleaseRequestsGpu {
+  $requested = $false
+  $vjob = Start-Job -InitializationScript $JobInit -ScriptBlock {
+    try {
+      $releases = helm list -A -o json 2>$null | ConvertFrom-Json
+      foreach ($r in $releases) {
+        $v = helm get values $r.name -n $r.namespace -a -o json 2>$null | ConvertFrom-Json
+        if ($v.env.GPU_REQUESTS) { return $true }
+      }
+    } catch {}
+    return $false
+  }
+  if (Wait-JobWithProgress -Job $vjob -TimeoutSec 20 -Message "Checking the live GPU request") {
+    $requested = [bool](Receive-Job $vjob -ErrorAction SilentlyContinue)
+  }
+  Remove-Job $vjob -Force -ErrorAction SilentlyContinue
+  return $requested
+}
+
+function Test-HealthyClusterGpuConsistent {
+  if (-not (Test-LiveReleaseRequestsGpu)) { return }   # live release doesn't request GPU -> nothing to reconcile
+  $img = ""
+  $job = Start-Job -InitializationScript $JobInit -ScriptBlock {
+    param($n) (docker inspect "k3d-$n-server-0" --format '{{.Config.Image}}' 2>$null | Out-String)
+  } -ArgumentList $CLUSTER_NAME
+  if (Wait-JobWithProgress -Job $job -TimeoutSec 15 -Message "Checking GPU consistency") {
+    $img = (Receive-Job $job -ErrorAction SilentlyContinue | Out-String).Trim()
+  }
+  Remove-Job $job -Force -ErrorAction SilentlyContinue
+  if (-not $img) { return }                                                    # couldn't read -> don't false-warn
+  if (Test-NodeImageGpuCapable -Image $img -Configured $K3S_CUDA_IMAGE) { return }  # consistent (GPU node) -> fine
+  Warn "This cluster's values request GPU but it runs a CPU-only node -- GPU experiments will stay Pending."
+  Hint "GPU capability is fixed when the cluster is created; it can't be added to a running cluster."
+  Hint "Recreate the cluster to fix (data under HOST_DATA_DIR is kept):"
+  Hint "  k3d cluster delete $CLUSTER_NAME   (then re-run this installer)"
 }
 
 function New-K3dCluster {
@@ -2615,6 +3144,12 @@ function New-K3dCluster {
     # pinned re-runs (#547). Shared with the completed+healthy fast-path in main so
     # a healthy-but-drifted cluster is warned too (Bugbot #565).
     Test-K3sVersionDrift
+
+    # GPU capability is baked into the node image at create time. If GPU was enabled
+    # for this run but we're reusing a cluster whose node is stock CPU k3s, drop back
+    # to CPU here (before the chart values are written) so we never request GPUs the
+    # reused node can't provide -- which would strand every job Pending (Bugbot).
+    Confirm-ReusedClusterGpuCapable
   } else {
     # Creating a FRESH cluster — never silently adopt data an earlier install
     # left under HOST_DATA_DIR (RFC-0003 §4 / #376; parity with the bash guard).
@@ -2657,7 +3192,16 @@ function New-K3dCluster {
       Hint "The chart is validated against a specific k3s release; 'latest' is unsupported and has stranded installs (#547)."
       Hint "Unset K8S_VERSION (or pin it to a validated tag) to use the tested version."
     } elseif ($K8S_VERSION -ne "") {
-      $k3dArgs += @("--image", "rancher/k3s:$K8S_VERSION")
+      # #616: a GPU-enabled cluster needs the custom k3s-CUDA node image (NVIDIA runtime +
+      # nvidia runtime in CDI mode + the `nvidia` RuntimeClass baked in); a normal cluster uses
+      # the stock k3s. Both are the SAME pinned
+      # k3s ($K8S_VERSION) -- the CUDA image just rebuilds it on a GPU-capable base.
+      if ($K3D_GPU_FLAG -ne "") {
+        $k3dArgs += @("--image", $K3S_CUDA_IMAGE)
+        Log "GPU node image: $K3S_CUDA_IMAGE"
+      } else {
+        $k3dArgs += @("--image", "rancher/k3s:$K8S_VERSION")
+      }
     }
     if ($K3D_GPU_FLAG -ne "") {
       $k3dArgs += $K3D_GPU_FLAG
@@ -2810,6 +3354,54 @@ function New-K3dCluster {
 #  GPU DEVICE PLUGIN AND VERIFICATION
 # =============================================================================
 
+# Advertise GPU capacity on the node WITHOUT the NVML device plugin (#616). Proven live on
+# Docker Desktop/WSL2 (RTX 4050): the NVIDIA k8s device plugin CANNOT work there -- NVML returns
+# ERROR_NOT_SUPPORTED through WSL2's paravirtualized GPU, so it registers 0 GPUs and (owning the
+# nvidia.com/gpu extended resource) keeps the node at 0, stranding every job. But the GPU itself
+# reaches pods fine via CDI (the node image generates a WSL CDI spec at boot). So we advertise
+# nvidia.com/gpu as a node EXTENDED RESOURCE ourselves; pods then schedule against it and the
+# nvidia runtime (CDI mode) injects the real GPU. Idempotent: re-patching the same value is a
+# no-op, and a re-run re-asserts it (the value doesn't survive a node re-create). Bounded.
+# Returns $true when the capacity is advertised. GPU is optional -> failure returns $false and
+# the caller falls back to CPU.
+function Set-NodeGpuCapacity {
+  if ($GPU_VENDOR -ne "nvidia" -or -not $NVIDIA_DRIVER_OK -or $K3D_GPU_FLAG -eq "") { return $false }
+  # One GPU per node: k3d maps the SAME host GPU into every node container, and GPU mode already
+  # forces a single node (see the gate), so 1 is correct and never double-counts (Bugbot).
+  $nodeName = "k3d-$CLUSTER_NAME-server-0"
+  # Pass the JSON patch via --patch-file, NEVER as an inline -p argument. Windows PowerShell 5.1
+  # does not preserve embedded double quotes when it builds a native command line, so
+  # `-p '[{"op":...}]'` reaches kubectl as `[{op:...}]` -> "invalid character 'o'" and the patch
+  # always fails (the real cause of "Couldn't advertise GPU capacity" on a live box; the same
+  # command works by hand only when each quote is escaped as \"). A file sidesteps the shell
+  # entirely. UTF8 WITHOUT BOM: a BOM makes kubectl's JSON parse fail.
+  $patchFile = Join-Path $env:TEMP ("tb-gpu-capacity-" + [guid]::NewGuid().ToString('N') + ".json")
+  $patchJson = '[{"op":"add","path":"/status/capacity/nvidia.com~1gpu","value":"1"}]'
+  Log "Advertising nvidia.com/gpu=1 on $nodeName (node extended resource; the NVML device plugin can't work on WSL2)"
+  try {
+    [System.IO.File]::WriteAllText($patchFile, $patchJson, (New-Object System.Text.UTF8Encoding($false)))
+  } catch {
+    Log "Couldn't stage the GPU capacity patch file: $($_.Exception.Message)"
+    return $false
+  }
+  try {
+    # Retry: right after cluster-create the API server / node object can still be settling, and a
+    # 404 on the node here would drop an otherwise-working GPU to CPU for the whole run.
+    for ($i = 1; $i -le 6; $i++) {
+      $r = Invoke-BoundedProcess -FileName "kubectl" -Arguments @(
+        "patch", "node", $nodeName, "--subresource=status", "--type=json",
+        "--patch-file", "`"$patchFile`"", "--request-timeout=15s") -TimeoutSec 30
+      Log "kubectl patch node (gpu capacity, attempt ${i}): exit=$($r.Code) $($r.Output)"
+      if ($r.Code -eq 0) { return $true }
+      Start-Sleep -Seconds 5
+    }
+  } finally {
+    Remove-Item $patchFile -Force -ErrorAction SilentlyContinue
+  }
+  Log "Advertising GPU capacity failed after retries"
+  return $false
+}
+
 function Install-GpuDevicePlugin {
   # Returns $true when the GPU plugin is (believed) deployed, $false otherwise, so
   # the caller can skip Confirm-GpuNode's ~90s wait for a plugin never applied
@@ -2817,13 +3409,81 @@ function Install-GpuDevicePlugin {
   # the boolean below (the Invoke-WithRetry result is sunk to $null to be safe).
   if ($GPU_VENDOR -ne "nvidia" -or -not $NVIDIA_DRIVER_OK -or $K3D_GPU_FLAG -eq "") { return $false }
 
+  # On Docker Desktop/WSL2 the NVML device plugin is a dead end (see Set-NodeGpuCapacity), and the
+  # node image no longer ships it. Advertise the capacity ourselves instead; pods get the GPU via
+  # the CDI spec the node generated at boot. Detected by /dev/dxg inside the node (bounded).
+  $dxg = Invoke-DockerCli -DockerArgs @("exec", "k3d-$CLUSTER_NAME-server-0", "test", "-e", "/dev/dxg") -TimeoutSec 20
+  if ($dxg.Code -eq 0) {
+    Log "WSL2 GPU detected in the node (/dev/dxg) -- using CDI + node-advertised capacity instead of the NVML device plugin."
+    # Verify the node's boot script actually produced the CDI spec before claiming GPU is
+    # ready (Bugbot): the boot script guards every step with `|| true`, so a failed
+    # `nvidia-ctk cdi generate` would otherwise leave us advertising a GPU that pods can't
+    # use -- jobs would schedule and then fail CUDA with no cluster-level signal. -s also
+    # rejects a zero-byte spec from a half-written generate.
+    $spec = Invoke-DockerCli -DockerArgs @("exec", "k3d-$CLUSTER_NAME-server-0", "test", "-s", "/etc/cdi/nvidia.yaml") -TimeoutSec 20
+    if ($spec.Code -ne 0) {
+      $script:GPU_SKIP_REASON = "the node couldn't generate its WSL GPU (CDI) spec, so pods wouldn't be able to use the GPU -- running CPU-only (see the install log)"
+      Log "CDI spec /etc/cdi/nvidia.yaml missing or empty in the node (exit $($spec.Code)): $($spec.Output)"
+      Warn "GPU couldn't be wired into the cluster (CDI spec missing) - continuing in CPU mode."
+      return $false
+    }
+    # A spec that EXISTS is not enough: it must also carry libdxcore.so. `nvidia-ctk cdi generate
+    # --mode=wsl` omits that library, and without it libcuda loads but can't reach /dev/dxg, so
+    # every GPU pod dies with the misleading "CUDA driver version is insufficient for CUDA runtime
+    # version" -- while the node happily advertises a GPU. That exact silent miss happened on a
+    # live box (the injection's anchor didn't match the generator's indentation), so verify the
+    # OUTCOME here rather than trusting the node script.
+    $dxc = Invoke-DockerCli -DockerArgs @("exec", "k3d-$CLUSTER_NAME-server-0", "grep", "-q", "libdxcore", "/etc/cdi/nvidia.yaml") -TimeoutSec 20
+    if ($dxc.Code -ne 0) {
+      $script:GPU_SKIP_REASON = "the node's WSL GPU (CDI) spec is missing libdxcore, so CUDA would fail inside pods with a misleading 'driver insufficient' error -- running CPU-only (see the install log)"
+      Log "CDI spec is present but has no libdxcore mount (exit $($dxc.Code)): $($dxc.Output)"
+      Warn "GPU couldn't be fully wired into the cluster (CDI spec incomplete) - continuing in CPU mode."
+      return $false
+    }
+    # Remove a LEFTOVER NVML device plugin before advertising capacity ourselves (Bugbot, HIGH).
+    # A device plugin OWNS the nvidia.com/gpu extended resource: on WSL2 it registers 0 GPUs and
+    # re-reports that on every sync, overwriting our patch -- so a DaemonSet left behind by an
+    # older install (or by a run where the /dev/dxg probe transiently missed and we took the
+    # plugin path) would keep GPU permanently disabled, even across re-runs. Idempotent:
+    # --ignore-not-found makes the normal "nothing there" case a clean no-op.
+    $dpGone = Invoke-BoundedProcess -FileName "kubectl" -Arguments @(
+      "delete", "daemonset", "-n", "kube-system", "nvidia-device-plugin-daemonset",
+      "--ignore-not-found", "--request-timeout=20s") -TimeoutSec 30
+    if ($dpGone.Code -eq 0) {
+      if ($dpGone.Output -match 'deleted') { Log "Removed a leftover NVML device plugin (it would pin nvidia.com/gpu at 0 on WSL2): $($dpGone.Output)" }
+    } else {
+      # Not fatal on its own -- but say so, because it's the one thing that can silently
+      # re-zero the capacity we're about to set.
+      Log "Couldn't check/remove a leftover NVML device plugin (exit $($dpGone.Code)): $($dpGone.Output)"
+    }
+
+    if (Set-NodeGpuCapacity) {
+      # Tell the chart to thread the CDI selector into GPU training pods; without it a pod
+      # schedules but CUDA fails (client-runtime#291). Only set on this WSL2/CDI path.
+      $script:GPU_DEVICE_SELECTOR = "nvidia.com/gpu=all"
+      # Deliberately NOT an Ok/green line (Bugbot): the authoritative confirmation is
+      # Confirm-GpuNode's "GPU verified and available", which runs next and can still clear
+      # K3D_GPU_FLAG if the node never advertises the GPU. Claiming success here produced a
+      # green "GPU acceleration enabled" immediately followed by a CPU fallback.
+      Info "GPU wired up (WSL2/CDI) -- verifying the node advertises it..."
+      return $true
+    }
+    # Set the reason HERE: this path never uses the device plugin, so letting the caller's
+    # generic fallback fill in a device-plugin failure would name the wrong cause (Bugbot).
+    $script:GPU_SKIP_REASON = "the installer couldn't advertise nvidia.com/gpu on the cluster node (this machine uses the WSL2/CDI path, where the installer advertises the GPU itself) -- re-run to retry"
+    Warn "Couldn't advertise GPU capacity on the node - continuing in CPU mode. Re-run the installer later to retry."
+    return $false
+  }
+
   Log "Deploying NVIDIA k8s device plugin"
 
   # --request-timeout bounds the existence probe so a wedged API server can't hang
   # here before the bounded apply is reached (reviewer; parity with bash + verify).
   $dpExists = kubectl get daemonset -n kube-system nvidia-device-plugin-daemonset --request-timeout=5s 2>&1
   if ($LASTEXITCODE -eq 0) {
-    Ok "GPU acceleration enabled."
+    # Same rule as the CDI path: report what happened, don't claim GPU is enabled -- Confirm-GpuNode
+    # runs next and can still clear K3D_GPU_FLAG if the node advertises 0 GPUs (Bugbot).
+    Info "NVIDIA device plugin already present -- verifying the node advertises a GPU..."
     return $true
   } else {
     $dpUrl = "https://raw.githubusercontent.com/NVIDIA/k8s-device-plugin/v0.14.5/nvidia-device-plugin.yml"
@@ -2850,7 +3510,7 @@ function Install-GpuDevicePlugin {
         }
       }
       if ($gpuOk) {
-        Ok "GPU acceleration enabled."
+        Info "NVIDIA device plugin deployed -- verifying the node advertises a GPU..."
       } else {
         Warn "Couldn't enable GPU acceleration - continuing in CPU mode. Re-run the installer later to retry."
       }
@@ -2876,15 +3536,36 @@ function Confirm-GpuNode {
   $gpuCount = 0
   for ($i = 1; $i -le 18; $i++) {
     Start-Sleep -Seconds 5
-    $alloc = kubectl get node -o jsonpath='{.items[0].status.allocatable}' --request-timeout=5s 2>$null
-    if ($alloc -match '"nvidia\.com/gpu":"?(\d+)') { $gpuCount = [int]$Matches[1]; break }
+    # Target the GPU field DIRECTLY. `jsonpath='{...allocatable}'` on the whole map renders Go's
+    # `map[nvidia.com/gpu:1 ...]` (no JSON quotes), so a regex expecting "nvidia.com/gpu":"1" NEVER
+    # matched -> every healthy GPU read as 0 -> (with the 0-count fallback below) reverted ALL GPU
+    # installs to CPU (Bugbot). Selecting the scalar field returns just its value ("1" or empty),
+    # independent of map-vs-JSON rendering. The key's dot is escaped; the '/' is literal.
+    $alloc = kubectl get nodes -o jsonpath='{.items[*].status.allocatable.nvidia\.com/gpu}' --request-timeout=5s 2>$null
+    if ("$alloc" -match '([1-9]\d*)') { $gpuCount = [int]$Matches[1]; break }
   }
 
   if ($gpuCount -gt 0) {
     Ok "GPU verified and available."
     Log "Allocatable GPU count: $gpuCount"
   } else {
-    Warn "GPU may still be initializing. Check back shortly."
+    # The node advertises 0 nvidia.com/gpu after the wait. Leaving GPU requests active here would
+    # strand every job Pending against a 0-GPU node, so make the node the AUTHORITATIVE signal:
+    # disable GPU for this run (clear the flag BEFORE Install-ClientHelm writes values) -> CPU
+    # fallback (Bugbot). The cluster stays GPU-capable; only this run's chart values go CPU.
+    $script:K3D_GPU_FLAG = ""
+    # The CAUSE differs per path, and pointing at the wrong one sends operators down a dead end
+    # (Bugbot): on WSL2/CDI there IS no device plugin -- capacity comes from Set-NodeGpuCapacity --
+    # so blaming a blocked nvcr.io device-plugin image would be actively misleading.
+    if ($GPU_DEVICE_SELECTOR) {
+      $script:GPU_SKIP_REASON = "the cluster node never advertised a GPU (this machine uses the WSL2/CDI path, where the installer advertises the GPU itself -- the node may still have been starting, or the capacity patch didn't take)"
+      Warn "GPU didn't come up on the node -- running CPU-only so jobs aren't stranded Pending."
+      Hint "Re-run the installer to retry; the node also re-asserts GPU capacity itself shortly after it starts."
+    } else {
+      $script:GPU_SKIP_REASON = "the cluster node never advertised a GPU (the NVIDIA device plugin didn't become ready -- on a mirror/air-gap network its image nvcr.io/nvidia/k8s-device-plugin may be blocked)"
+      Warn "GPU didn't come up on the node -- running CPU-only so jobs aren't stranded Pending."
+      Hint "If this is a restricted network, ensure the NVIDIA device-plugin image is reachable (mirror it), then re-run."
+    }
   }
 }
 
@@ -3630,6 +4311,32 @@ function Install-ClientHelm {
     Err "Can't reconcile the existing client without its password."
   }
 
+  # #616: decide the GPU chart values for THIS run BEFORE the adopted/fresh split, so BOTH paths
+  # reconcile GPU the same way. Request a GPU for training jobs ONLY when the GPU was actually
+  # wired into the cluster ($K3D_GPU_FLAG). Requesting nvidia.com/gpu while the node advertises 0
+  # GPUs strands every job Pending -- so gate on the SAME condition that PROVISIONS the GPU, not
+  # merely on detection. Empty gpuVal = no GPU request = CPU (the safe fallback).
+  $gpuVal = ""
+  $runtimeClass = ""
+  if ($GPU_VENDOR -eq "nvidia" -and $NVIDIA_DRIVER_OK -and $K3D_GPU_FLAG -ne "") {
+    $gpuVal = "nvidia.com/gpu=1"
+    # spawned training pods must run under the `nvidia` RuntimeClass (baked into the k3s-CUDA
+    # image); jobs-manager threads RUNTIME_CLASS_NAME into every pod.
+    $runtimeClass = "nvidia"
+    Log "NVIDIA GPU enabled -- GPU_LIMITS/GPU_REQUESTS=nvidia.com/gpu=1, RUNTIME_CLASS_NAME=nvidia"
+  } elseif ($GPU_VENDOR -eq "nvidia" -and $NVIDIA_DRIVER_OK) {
+    Log "NVIDIA GPU detected but NOT enabled in the cluster -- GPU_LIMITS/GPU_REQUESTS left empty (CPU mode)"
+    if ($GPU_SKIP_REASON) { Warn ("GPU detected but not enabled -- running CPU-only: " + $GPU_SKIP_REASON) }
+    else { Warn "GPU detected but not enabled -- running CPU-only (see the install log for details)." }
+  } else {
+    Log "No NVIDIA GPU -- GPU_LIMITS and GPU_REQUESTS left empty"
+  }
+  # CDI device selector rides the SAME gate as gpuVal: only meaningful when a GPU is actually
+  # wired in, and only non-empty on the WSL2/CDI path ($GPU_DEVICE_SELECTOR). Empty everywhere
+  # else so a device-plugin (Linux) node keeps owning NVIDIA_VISIBLE_DEVICES itself (#616).
+  $gpuSelector = if ($gpuVal) { $GPU_DEVICE_SELECTOR } else { "" }
+  if ($gpuSelector) { Log "GPU device selector for training pods: GPU_VISIBLE_DEVICES=$gpuSelector" }
+
   if (-not $adoptedReuse) {
   $passwordEscaped = $TB_CLIENT_PASSWORD -replace "'", "''"
 
@@ -3653,14 +4360,7 @@ function Install-ClientHelm {
     Log "Mirror credentials provided -- minting an imagePullSecret for the mirror."
   }
 
-  $gpuVal = ""
-  if ($GPU_VENDOR -eq "nvidia" -and $NVIDIA_DRIVER_OK) {
-    $gpuVal = "nvidia.com/gpu=1"
-    Log "NVIDIA GPU -- setting GPU_LIMITS and GPU_REQUESTS to nvidia.com/gpu=1"
-  } else {
-    Log "No NVIDIA GPU -- GPU_LIMITS and GPU_REQUESTS left empty"
-  }
-
+  # ($gpuVal / $runtimeClass were decided before the adopted/fresh split above.)
   Log "Writing values to $valuesFile"
   $envBlock = "env:`n"
   if ($CLIENT_ENV) {
@@ -3676,7 +4376,8 @@ function Install-ClientHelm {
   RESOURCE_REQUESTS: "$trainingSize"
   GPU_LIMITS: "$gpuVal"
   GPU_REQUESTS: "$gpuVal"
-  RUNTIME_CLASS_NAME: ""
+  RUNTIME_CLASS_NAME: "$runtimeClass"
+  GPU_VISIBLE_DEVICES: "$gpuSelector"
 
 storageClass:
   create: true
@@ -3752,11 +4453,19 @@ $envBlock
     if ((helm upgrade --help 2>$null | Out-String) -match '--reset-then-reuse-values') {
       $reuseFlag = "--reset-then-reuse-values"
     }
-    Log "Reconciling release '$existingName' in namespace '$existingNs' (adopted; $reuseFlag; healing clientId)..."
+    # Reconcile the GPU request to THIS run's decision even under --reuse-values (Bugbot): an
+    # older release's GPU_REQUESTS/GPU_LIMITS would otherwise survive after cluster reconciliation
+    # cleared $K3D_GPU_FLAG, stranding every job Pending on a CPU-only node. --set-string wins over
+    # the reused values, so we force the three GPU keys to match $gpuVal/$runtimeClass (empty = CPU).
+    Log "Reconciling release '$existingName' in namespace '$existingNs' (adopted; $reuseFlag; healing clientId + GPU request)..."
     $helmOutput = (helm upgrade $existingName $chartRef `
       --namespace $existingNs `
       $reuseFlag `
-      --set-string "clientId=$TB_CLIENT_ID" 2>&1) | Out-String
+      --set-string "clientId=$TB_CLIENT_ID" `
+      --set-string "env.GPU_REQUESTS=$gpuVal" `
+      --set-string "env.GPU_LIMITS=$gpuVal" `
+      --set-string "env.RUNTIME_CLASS_NAME=$runtimeClass" `
+      --set-string "env.GPU_VISIBLE_DEVICES=$gpuSelector" 2>&1) | Out-String
     Log "Helm Output: $helmOutput"
     if ($LASTEXITCODE -ne 0) { Err "Client reconcile failed." $helmOutput }
     # Keep the LOCAL record in step for future default-reuse prompts: heal only
@@ -3884,8 +4593,12 @@ function Write-NotReadyDetail {
 # The "secure compute environment / your data never leaves" claim is printed
 # ONLY when the client is verifiably connected -- never on a partial/failed run.
 function Print-Summary {
+  # #616: only claim "NVIDIA GPU" when the GPU was actually wired into the cluster
+  # ($K3D_GPU_FLAG). A GPU detected but not enabled runs CPU-only, and the summary says so
+  # (with the reason) rather than implying acceleration that isn't there.
   $mode = "CPU"
-  if ($GPU_VENDOR -eq "nvidia" -and $NVIDIA_DRIVER_OK) { $mode = "NVIDIA GPU" }
+  if ($GPU_VENDOR -eq "nvidia" -and $NVIDIA_DRIVER_OK -and $K3D_GPU_FLAG -ne "") { $mode = "NVIDIA GPU" }
+  elseif ($GPU_VENDOR -eq "nvidia" -and $NVIDIA_DRIVER_OK) { $mode = "CPU (GPU detected but not enabled)" }
   elseif ($GPU_VENDOR -eq "nvidia" -and -not $NVIDIA_DRIVER_OK) { $mode = "CPU (NVIDIA driver update needed)" }
   $ns = $script:TB_NAMESPACE
   $line = [string]([char]0x2501) * 46
@@ -3906,6 +4619,21 @@ function Print-Summary {
       $cver = Get-ChartVersion -Namespace $ns; if (-not $cver) { $cver = "unknown" }
       Write-Host "  Version     : " -ForegroundColor DarkGray -NoNewline; Write-Host $cver
       Write-Host "  Mode        : " -ForegroundColor DarkGray -NoNewline; Write-Host $mode
+      # A GPU that was DETECTED but not enabled is the case operators most need to act on, and
+      # burying the cause inside the Mode line made it easy to miss and hard to read. Give it its
+      # own block: what happened, and the one thing to do about it (#616).
+      if ($GPU_VENDOR -eq "nvidia" -and $NVIDIA_DRIVER_OK -and $K3D_GPU_FLAG -eq "") {
+        Write-Host ""
+        Write-Host "  " -NoNewline
+        Write-Host "$([char]0x26A0)  GPU found but not enabled -- training will run on CPU." -ForegroundColor Yellow
+        if ($GPU_SKIP_REASON) {
+          Write-Host "     Why: $GPU_SKIP_REASON" -ForegroundColor Yellow
+        } else {
+          Write-Host "     Why: see the install log for details." -ForegroundColor Yellow
+        }
+        Write-Host "     Fix the item above, then re-run this installer to enable GPU." -ForegroundColor DarkGray
+        Write-Host "     Full detail: $script:LOG_FILE" -ForegroundColor DarkGray
+      }
       Write-Host ""
       Write-Host "  Your client is live. Confirm it shows as Online:"
       Write-Host "    https://ai.tracebloc.io/clients" -ForegroundColor Cyan
@@ -3979,10 +4707,52 @@ function Print-Summary {
   Log "  k3d cluster stop $CLUSTER_NAME"
   Log "  k3d cluster start $CLUSTER_NAME"
   Log "  k3d cluster delete $CLUSTER_NAME"
-  if ($GPU_VENDOR -eq "nvidia" -and $NVIDIA_DRIVER_OK) {
-    Log '  GPU test: kubectl run gpu-test --rm -it --image=nvidia/cuda:12.3.1-base-ubuntu22.04 --limits="nvidia.com/gpu=1" -- nvidia-smi'
+  if ($GPU_VENDOR -eq "nvidia" -and $NVIDIA_DRIVER_OK -and $K3D_GPU_FLAG -ne "") {
+    # The smoke test MUST match how this cluster actually delivers the GPU, or an operator
+    # testing a WORKING cluster sees a failure and concludes GPU is broken (Bugbot). Two
+    # differences that matter: (a) pods only get the GPU under the `nvidia` RuntimeClass, so
+    # --overrides is required; (b) on WSL2/CDI `nvidia-smi` inside a pod FAILS (NVML is not
+    # supported through the paravirtualized GPU) even when CUDA compute works perfectly --
+    # verified on real hardware -- so there we suggest a CUDA workload, not nvidia-smi.
+    # (c) EVERY double quote in an --overrides JSON must be printed ESCAPED as \" : Windows
+    # PowerShell strips unescaped quotes when building a native command line, so a copy-pasted
+    # command dies with "error: Invalid JSON Patch". (Same class of bug that broke the capacity
+    # patch itself -- verified on a live box.) A suggested command that can't be pasted is worse
+    # than none, so the escapes are part of the guidance.
+    Log ("  " + (Get-GpuSmokeTestCommand -Selector $GPU_DEVICE_SELECTOR))
   }
   Log "=== End Advanced Info ==="
+}
+
+# Build the GPU smoke-test command we print in the diagnostics bundle. PURE (selector in,
+# string out) so a test can render it and assert the --overrides payload is VALID JSON --
+# a scanner flagged a "stray brace" here (it was correct: the `}}}` closes limits, resources
+# and the container in turn), and a genuine brace slip would hand operators a command that
+# errors on a healthy cluster. Now it's machine-checked rather than eyeballed.
+#
+# Three properties the command must keep:
+#   (a) runtimeClassName: nvidia -- pods only receive the GPU under it, so --overrides is
+#       required (kubectl run has no flag for it);
+#   (b) on WSL2/CDI suggest a CUDA workload, NOT nvidia-smi: NVML is unsupported through the
+#       paravirtualized GPU, so nvidia-smi fails in a pod even when CUDA works (verified on
+#       real hardware) -- suggesting it would make a working cluster look broken;
+#   (c) every double quote ESCAPED as \" -- Windows PowerShell strips unescaped quotes when
+#       building a native command line, so a pasted command would die with "Invalid JSON
+#       Patch" (the same quoting class that broke the node capacity patch).
+function Get-GpuSmokeTestCommand {
+  param([string]$Selector)
+  $q = '\"'
+  if ($Selector) {
+    return ('GPU test (WSL2/CDI -- runs CUDA; note nvidia-smi does NOT work in a pod here): ' +
+      'kubectl run gpu-test --rm -it --restart=Never --image=nvidia/samples:vectoradd-cuda11.2.1 ' +
+      "--overrides='{${q}spec${q}:{${q}runtimeClassName${q}:${q}nvidia${q},${q}containers${q}:" +
+      "[{${q}name${q}:${q}gpu-test${q},${q}image${q}:${q}nvidia/samples:vectoradd-cuda11.2.1${q}," +
+      "${q}env${q}:[{${q}name${q}:${q}NVIDIA_VISIBLE_DEVICES${q},${q}value${q}:${q}$Selector${q}}]," +
+      "${q}resources${q}:{${q}limits${q}:{${q}nvidia.com/gpu${q}:${q}1${q}}}}]}}'")
+  }
+  return ('GPU test: kubectl run gpu-test --rm -it --restart=Never --image=nvidia/cuda:12.3.1-base-ubuntu22.04 ' +
+    "--overrides='{${q}spec${q}:{${q}runtimeClassName${q}:${q}nvidia${q}}}' " +
+    '--limits="nvidia.com/gpu=1" -- nvidia-smi')
 }
 
 # =============================================================================
@@ -4520,11 +5290,64 @@ function Test-Preflight {
     $criticals += @{ label = "k3d download (github.com)";                  url = "https://github.com/" }
     $criticals += @{ label = "k3d assets (objects.githubusercontent.com)"; url = "https://objects.githubusercontent.com/" }
   }
+  # GPU download chain (#616): whichever way we obtain the GPU node image, probe its hosts here
+  # so a restricted network is flagged BEFORE a green check, not after (Bugbot). All SOFT (warn,
+  # not $hardFail): GPU is optional and degrades to CPU, so a block here must not stop a
+  # CPU-capable install -- it just warns that GPU will fall back.
+  if ($GPU_VENDOR -eq "nvidia" -and $NVIDIA_DRIVER_OK) {
+    # nvcr.io is part of the GPU download chain on BOTH paths: the CUDA base the node image is
+    # built from comes from there, and on a device-plugin (Linux) node so does the plugin image.
+    # (This node image no longer BAKES the plugin -- WSL2 uses CDI -- but the host still needs
+    # nvcr.io to build/pull the node image, so probe it whenever GPU is enabled.) Bugbot.
+    # gpuBlocking marks the hosts this path ACTUALLY needs. Only those may skip GPU setup: on a
+    # mirror/air-gap install nvcr.io is blocked BY DESIGN (images come from the mirror), so
+    # treating every soft GPU probe as blocking disabled GPU for exactly the case the mirror
+    # exists to serve -- and told the operator to configure the mirror they had configured
+    # (Bugbot). nvcr.io stays probed on the mirror path, but warn-only.
+    $nvcrBlocking = -not ($env:TRACEBLOC_K3S_CUDA_IMAGE -or $env:TRACEBLOC_IMAGE_REGISTRY)
+    $criticals += @{ label = "NVIDIA device plugin / CUDA (nvcr.io)"; url = "https://nvcr.io/"; gpuSoft = $true; gpuBlocking = $nvcrBlocking }
+    if (-not ($env:TRACEBLOC_K3S_CUDA_IMAGE -or $env:TRACEBLOC_IMAGE_REGISTRY)) {
+      # DEFAULT: we BUILD locally, which also fetches the toolkit apt repo (nvidia.github.io); the
+      # probe's nvidia/cuda comes from Docker Hub, already probed above.
+      $criticals += @{ label = "NVIDIA toolkit repo (nvidia.github.io)"; url = "https://nvidia.github.io/"; gpuSoft = $true; gpuBlocking = $true }
+    } else {
+      # PREBUILT/MIRROR: we PULL the node image ($K3S_CUDA_IMAGE) AND the probe's CUDA image
+      # ($CUDA_PROBE_IMAGE) -- which can be on DIFFERENT hosts when both overrides are set. Probe
+      # EVERY distinct real registry host so an unreachable one is surfaced at preflight (Bugbot).
+      $gpuHosts = @((Get-RegistryHost $K3S_CUDA_IMAGE), (Get-RegistryHost $CUDA_PROBE_IMAGE)) | Select-Object -Unique
+      foreach ($gpuHost in $gpuHosts) {
+        # Skip bare Docker Hub (already covered by the registry-1.docker.io probe) and nvcr.io
+        # (added above). Only probe a real registry host.
+        if ($gpuHost -match '[.:]' -and $gpuHost -ne 'docker.io' -and $gpuHost -ne 'nvcr.io') {
+          # The mirror/custom registry IS required on this path, so a failure here does block.
+          $criticals += @{ label = "GPU image registry ($gpuHost)"; url = "https://$gpuHost/"; gpuSoft = $true; gpuBlocking = $true }
+        }
+      }
+    }
+  }
   $tlsSeen = $false; $cfail = 0; $regBlocked = $false
   foreach ($c in $criticals) {
     $status = Test-PfUrl $c.url -RequireSuccess:([bool]$c.strict)
     if ($status -ne "ok") { $status = Test-PfUrl $c.url -RequireSuccess:([bool]$c.strict) }   # one retry for transient blips
     if ($status -eq "ok") { Ok "$($c.label) reachable" }
+    elseif ($c.gpuSoft) {
+      # GPU build host blocked: warn only. GPU is optional and degrades to CPU, so this must
+      # not hard-fail an otherwise-fine CPU-capable install (#616).
+      # Remember it ONLY if this path actually needs the host: the GPU gate then skips the
+      # probe/build/pull instead of spending ~3-15 minutes timing out on hosts we already know
+      # are unreachable, which made a re-run (the very thing our CPU-fallback advice tells
+      # operators to do) look hung. A non-required host (e.g. nvcr.io on a mirror install) warns
+      # and nothing more -- otherwise we would disable GPU on air-gapped mirrors (Bugbot).
+      if ($c.gpuBlocking) { $script:GPU_HOSTS_UNREACHABLE = "$($c.label) is unreachable from this machine" }
+
+      # Wording must match the path actually in use (Bugbot): on the pull/mirror path nothing is
+      # built locally, so "can't be built" named the wrong failure.
+      if ($env:TRACEBLOC_K3S_CUDA_IMAGE -or $env:TRACEBLOC_IMAGE_REGISTRY) {
+        Warn "$($c.label) unreachable ($status) -- the GPU node image can't be pulled here, so the install will run CPU-only."
+      } else {
+        Warn "$($c.label) unreachable ($status) -- the GPU node image can't be built here, so the install will run CPU-only."
+      }
+    }
     else {
       Write-PfFail "$($c.label) unreachable ($status)"
       $hardFail++; $cfail++
@@ -4844,22 +5667,45 @@ Print-Banner
 if ($Resume) { Ok "Resuming the tracebloc install after a reboot..." }
 Print-Roadmap
 
+# Detect the GPU BEFORE the fast path so it can tell whether a "healthy" CPU-only install should
+# still be re-evaluated for GPU (and so preflight's nvcr.io probe is gated on GPU presence). Cheap
+# + pure detection (Get-CimInstance + driver check); sets $GPU_VENDOR / $NVIDIA_DRIVER_OK (#616).
+Find-Gpu
+
 # Fast path (#420): a prior run completed successfully AND the tools + a RUNNING
 # cluster + Ready client workloads are all still here -> nothing to do. Honest: it
 # verifies live health (not just the checkpoint), so a stopped cluster or a down
 # client falls through to the repairing walk. Skipped on -Resume (a resume must
 # finish the interrupted walk).
 if ((-not $Resume) -and $script:InstallState.completed -and (Test-ToolsPresent) -and (Test-ClusterRunning) -and (Test-ClientHealthy)) {
-  Ok "tracebloc is already installed and the client is healthy -- nothing to do."
-  # A healthy cluster can still be running a DRIFTED k3s (the #547 steady state);
-  # this fast-path exits before New-K3dCluster's reuse check, so warn here too
-  # (Bugbot #565). Non-fatal: the client is healthy, we just flag the version.
-  Test-K3sVersionDrift
-  Hint "Delete $(Get-InstallStatePath) (or set a fresh HOST_DATA_DIR) to force a full reinstall."
-  Unregister-ResumeAfterReboot
-  Log "Already installed and healthy - nothing to do."
-  $script:OutcomeReported = $true
-  exit 0
+  # GPU is "fully enabled" only when the node ACTUALLY advertises a GPU AND the live release
+  # requests one. If an NVIDIA GPU is present but EITHER is missing, do NOT shortcut -- the state is
+  # inconsistent in one of two ways (Bugbot), both of which a re-run should fix:
+  #   * node not advertising (device-plugin/driver just fixed) -> enable GPU, or
+  #   * node advertising but the release still requests CPU (a delayed GPU recovery) -> reconcile
+  #     GPU_REQUESTS so training stops silently running on CPU.
+  # The CPU-fallback guidance explicitly tells operators to re-run, so honour that by falling through.
+  $gpuPresent = ($GPU_VENDOR -eq "nvidia" -and $NVIDIA_DRIVER_OK)
+  $gpuFullyEnabled = $false
+  if ($gpuPresent) { $gpuFullyEnabled = ((Test-RunningClusterGpuCapable) -and (Test-LiveReleaseRequestsGpu)) }
+  if ($gpuPresent -and -not $gpuFullyEnabled) {
+    Info "An NVIDIA GPU is present but not fully enabled here -- re-checking to reconcile GPU (node advertisement + chart request)."
+    Log "Fast-path skipped: GPU present but not fully enabled; re-evaluating GPU."
+  } else {
+    Ok "tracebloc is already installed and the client is healthy -- nothing to do."
+    # A healthy cluster can still be running a DRIFTED k3s (the #547 steady state);
+    # this fast-path exits before New-K3dCluster's reuse check, so warn here too
+    # (Bugbot #565). Non-fatal: the client is healthy, we just flag the version.
+    Test-K3sVersionDrift
+    # Same reasoning for GPU: a healthy cluster whose values request GPU but whose node is
+    # CPU-only would strand GPU experiments; flag it here since the fast path skips the gate (Bugbot).
+    Test-HealthyClusterGpuConsistent
+    Hint "Delete $(Get-InstallStatePath) (or set a fresh HOST_DATA_DIR) to force a full reinstall."
+    Unregister-ResumeAfterReboot
+    Log "Already installed and healthy - nothing to do."
+    $script:OutcomeReported = $true
+    exit 0
+  }
 }
 
 # Trust an explicit corporate CA across every host tool (cosign/helm/git) BEFORE the
@@ -4870,8 +5716,8 @@ Set-ToolTrust
 
 # -- Step 1/6: Check system requirements (honest split from tool install, #422) --
 Step 1 $script:INSTALL_STEPS.Count "Checking system requirements"
+# ($GPU_VENDOR / driver were detected before the fast-path so it could decide whether to retry GPU.)
 Test-Preflight
-Find-Gpu
 Enable-VirtualisationFeatures
 
 # -- Step 2/6: Install system tools (~700 MB — Docker Desktop, kubectl, k3d, helm;
@@ -4880,6 +5726,91 @@ Step 2 $script:INSTALL_STEPS.Count "Installing system tools"
 Install-Winget
 Install-DockerDesktop
 Install-NvidiaContainerToolkit
+# #616: the docker-run probe is the AUTHORITATIVE GPU gate. Docker Desktop uses its own WSL
+# distro, so the toolkit-in-Ubuntu step above isn't a reliable signal; and with the custom
+# k3s-CUDA node image providing the in-cluster runtime, what actually matters is whether Docker
+# can expose the GPU to a container. Enable GPU iff the probe passes -- else CPU fallback
+# (Layer 1) with a clear reason, and never create a --gpus cluster that would fail.
+if ($GPU_VENDOR -eq "nvidia" -and $NVIDIA_DRIVER_OK -and ($K8S_VERSION -eq "latest" -or $K8S_VERSION -eq "")) {
+  # GPU needs the pinned k3s-CUDA node image, whose tag is derived from $K8S_VERSION. With
+  # K8S_VERSION=latest (the unsupported opt-out, #547) cluster-create adds NO --image, so k3d
+  # would make a STOCK node (no NVIDIA runtime) while the chart requests nvidia.com/gpu +
+  # runtimeClassName=nvidia -- stranding every job (Bugbot). GPU + 'latest' is incompatible, so
+  # fall back to CPU here (never build/enable) with a reason that points at the fix.
+  # Install-NvidiaContainerToolkit (above) may ALREADY have set K3D_GPU_FLAG=--gpus=all, so CLEAR
+  # it here -- otherwise a fresh 'latest' cluster gets --gpus=all with a stock (non-CUDA) node.
+  $K3D_GPU_FLAG = ""
+  $GPU_SKIP_REASON = "GPU requires the validated pinned k3s (K8S_VERSION), but K8S_VERSION=latest is set -- unset it (use the pinned default) to enable GPU"
+  Warn "GPU detected but not enabled: K8S_VERSION=latest is unsupported for GPU (the GPU node image is tied to the validated pin). Running CPU-only."
+} elseif ($GPU_VENDOR -eq "nvidia" -and $NVIDIA_DRIVER_OK) {
+  # How we obtain the GPU node image: by DEFAULT we BUILD it locally from public bases so a
+  # GPU install needs no registry login and no private package -- one command, like a CPU
+  # install (#616). If an explicit prebuilt image / mirror is configured (air-gap tenants),
+  # PULL that instead of building (a mirror implies no egress to the public CUDA base, and
+  # they ship a prebuilt image). Either way it's a single function that leaves a specific
+  # $GPU_SKIP_REASON on failure. Guarded by the docker-run probe first (-and short-circuits),
+  # so we never build/pull if the GPU can't be exposed anyway.
+  # Authenticate to the GPU image's registry FIRST when a mirror/private image is configured,
+  # so the GPU probe's mirror-hosted CUDA pull (and the node-image pull) are already logged in.
+  # No-op without creds / on the default public build path (Bugbot). Runs before the probe.
+  if ($env:TRACEBLOC_K3S_CUDA_IMAGE -or $env:TRACEBLOC_IMAGE_REGISTRY) { Connect-GpuRegistry }
+  $gpuImageReady = { if ($env:TRACEBLOC_K3S_CUDA_IMAGE -or $env:TRACEBLOC_IMAGE_REGISTRY) { Confirm-GpuImagePullable } else { Build-GpuNodeImage } }
+  if ($GPU_HOSTS_UNREACHABLE) {
+    # Preflight already established the GPU download chain is blocked, so the probe (180s) and the
+    # build/pull (up to 15/20 min) would only time out. Fail fast with the known reason (Bugbot).
+    # Remedy has to match the path: telling someone who already configured a mirror to configure
+    # a mirror is noise -- point at the mirror's reachability instead (Bugbot).
+    if ($env:TRACEBLOC_K3S_CUDA_IMAGE -or $env:TRACEBLOC_IMAGE_REGISTRY) {
+      $GPU_SKIP_REASON = "$GPU_HOSTS_UNREACHABLE, so the GPU node image can't be pulled -- check that your configured GPU image registry is reachable from this machine (and that it holds the k3s-CUDA image), then re-run; running CPU-only"
+    } else {
+      $GPU_SKIP_REASON = "$GPU_HOSTS_UNREACHABLE, so the GPU node image can't be built -- on a restricted network set TRACEBLOC_IMAGE_REGISTRY to your mirror (or TRACEBLOC_K3S_CUDA_IMAGE to a prebuilt image) and re-run; running CPU-only"
+    }
+    Warn "Skipping GPU setup -- $GPU_HOSTS_UNREACHABLE. Running CPU-only (no long timeouts)."
+  }
+  elseif ((Confirm-DockerGpu) -and (& $gpuImageReady)) {
+    $K3D_GPU_FLAG = "--gpus=all"
+    $GPU_SKIP_REASON = ""
+    # Single physical GPU vs multi-node cluster (Bugbot): k3d's --gpus=all exposes the
+    # SAME host GPU to EVERY node container, and whatever advertises the resource (a device
+    # plugin on Linux, the node reconciler on WSL2) does so once per node -- so a default
+    # server+agent cluster advertises
+    # nvidia.com/gpu=1 on BOTH nodes (2 allocatable for 1 physical card) and can schedule
+    # two jobs onto the same device. Extra k3d nodes live on the same Docker host and all
+    # see the same card, so multi-node can NEVER add real GPUs -- it only double-counts.
+    # Collapse to a single node whenever GPU is on: one node -> the card is advertised once.
+    if ($AGENTS -ne "0") {
+      if ($env:AGENTS) {
+        Warn ("GPU mode forces a single node (agents=0) so the one physical GPU isn't double-counted; overriding your AGENTS=$AGENTS. Extra k3d nodes share the same host GPU and only re-advertise it.")
+      } else {
+        Log "GPU mode: using a single node (agents=0) so the one physical GPU is advertised exactly once."
+      }
+      $AGENTS = "0"
+    }
+    # SERVERS needs the same collapse (Bugbot): agents=0 alone still leaves SERVERS>1 possible,
+    # and EVERY server node runs the boot reconciler and advertises nvidia.com/gpu=1 for the SAME
+    # physical card -- so a 3-server cluster would offer 3 GPUs and schedule 3 jobs onto one
+    # device. One server => the card is advertised exactly once.
+    if ($SERVERS -ne "1") {
+      if ($env:SERVERS) {
+        Warn ("GPU mode forces a single server (servers=1) so the one physical GPU isn't double-counted; overriding your SERVERS=$SERVERS. Every k3d node shares the same host GPU and would re-advertise it.")
+      } else {
+        Log "GPU mode: using a single server (servers=1) so the one physical GPU is advertised exactly once."
+      }
+      $SERVERS = "1"
+    }
+    # Intent, not accomplishment (Bugbot -- third instance of this class): cluster-create, the
+    # node's CDI wiring, and Confirm-GpuNode all still run after this and can each clear
+    # K3D_GPU_FLAG. Only Confirm-GpuNode's "GPU verified and available" may claim success, so a
+    # green line here would be followed by a CPU-only summary.
+    Info "GPU support prepared -- the cluster will be created with GPU; verified once the node is up."
+  } else {
+    $K3D_GPU_FLAG = ""
+    if (-not $GPU_SKIP_REASON) {
+      $GPU_SKIP_REASON = "Docker Desktop can't expose the GPU to containers (enable GPU support in Docker Desktop, and update the WSL2 NVIDIA driver)"
+    }
+    Warn ("GPU detected but not enabled -- running CPU-only: " + $GPU_SKIP_REASON)
+  }
+}
 Install-Kubectl
 Install-K3dAndHelm
 
@@ -4889,7 +5820,17 @@ New-K3dCluster
 # Only verify the GPU on the node when the plugin actually deployed; a failed/
 # CPU-mode deploy returns $false, so skipping verify avoids a ~90s wait and a
 # contradictory "still initializing" warning for a plugin never applied (Bugbot).
-if (Install-GpuDevicePlugin) { Confirm-GpuNode }
+if (Install-GpuDevicePlugin) {
+  Confirm-GpuNode
+} elseif ($K3D_GPU_FLAG -ne "") {
+  # GPU was requested (flag still set) but the device-plugin setup FAILED -- returning $false here
+  # is a real failure, not the "GPU not requested" early return. Leaving the flag set would make
+  # Install-ClientHelm request nvidia.com/gpu the node can't provide, stranding jobs. Fall back to
+  # CPU (Bugbot). (When GPU wasn't requested the flag is already empty, so this branch no-ops.)
+  $K3D_GPU_FLAG = ""
+  if (-not $GPU_SKIP_REASON) { $GPU_SKIP_REASON = "the NVIDIA device plugin couldn't be set up on the cluster -- running CPU-only" }
+  Warn "GPU device-plugin setup failed -- running CPU-only so jobs aren't stranded Pending."
+}
 
 # -- Step 4/6: install the tracebloc CLI FIRST (#388) — it mints the machine
 # credential in Step 5; a CLI-install hiccup degrades Step 5 to the legacy

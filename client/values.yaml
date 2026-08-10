@@ -35,6 +35,14 @@ env: {
   # GPU_LIMITS: "nvidia.com/gpu=1"
   # Optional: runtime class for GPU jobs (defaults to "" if not provided)
   # RUNTIME_CLASS_NAME: ""
+  # Optional: CDI device selector threaded into GPU training pods as
+  # NVIDIA_VISIBLE_DEVICES (client-runtime#291). Set this ONLY where the NVIDIA k8s
+  # device plugin can't run and the GPU is injected via CDI instead — notably Docker
+  # Desktop / WSL2, where NVML returns ERROR_NOT_SUPPORTED (tracebloc/client#616); the
+  # Windows installer sets it automatically on that path. Leave EMPTY on a normal
+  # device-plugin (Linux) node: there the plugin owns NVIDIA_VISIBLE_DEVICES and sets
+  # concrete GPU UUIDs, so forcing a CDI selector would break device resolution.
+  # GPU_VISIBLE_DEVICES: "nvidia.com/gpu=all"
   # Optional: single-node (fixed, non-elastic) cluster flag — gates
   # jobs-manager's GPU->CPU pending-job fallback (client-runtime#92).
   #   "true"  -> a GPU pod stuck Pending past the scheduling-overdue interval
