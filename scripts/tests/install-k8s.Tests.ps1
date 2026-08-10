@@ -4179,6 +4179,22 @@ Describe "Embedded GPU build inputs stay in sync with docker/k3s-cuda (#616 drif
     $df | Should -Match 'falling back to latest'
     $df | Should -Match 'nvidia-ctk --version'          # record what actually got installed
   }
+  It "EVERY `cdi list` use is availability-gated -- incl. the revert (#616 Bugbot)" {
+    # The revert originally called `cdi list` unconditionally, so a toolkit without that
+    # subcommand reverted a PERFECTLY GOOD libdxcore injection -- and the installer then reported
+    # "spec is missing libdxcore", which is false and unactionable. Verified with a dash harness:
+    # with `cdi list` absent the injection survives and the GPU is advertised.
+    $boot = [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String($script:K3S_CUDA_BOOT_B64))
+    # exactly two availability probes: one per call site (revert + cdi_ok)
+    ([regex]::Matches($boot, 'nvidia-ctk cdi list --help')).Count | Should -Be 2
+    # and every EXECUTABLE bare use (comments excluded) sits inside such a guard
+    $bare = @($boot -split "`n" | Where-Object { $_ -match 'nvidia-ctk cdi list' -and $_ -notmatch '--help' -and $_.TrimStart() -notmatch '^#' })
+    $bare.Count | Should -Be 2
+    # the revert shape: guard, then the vetoing call
+    $boot | Should -Match 'cdi list --help >/dev/null 2>&1; then\s*\n\s*if ! nvidia-ctk cdi list'
+    # the cdi_ok shape: guard, then veto by clearing the flag
+    $boot | Should -Match 'cdi list --help >/dev/null 2>&1; then\s*\n\s*nvidia-ctk cdi list >/dev/null 2>&1 \|\| cdi_ok=0'
+  }
   It "the CDI gate does NOT require `nvidia-ctk cdi list` to exist (#616: no false negative)" {
     # `cdi list` is version-dependent; keying the decision on it would disable a working GPU on a
     # toolkit build that lacks the subcommand. Structural, format-stable checks decide instead.

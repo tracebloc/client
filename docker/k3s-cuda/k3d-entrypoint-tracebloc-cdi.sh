@@ -79,11 +79,19 @@ if [ -e /dev/dxg ]; then
     ' /etc/cdi/nvidia.yaml > /etc/cdi/nvidia.yaml.new 2>/dev/null || true
     # Only adopt the edit if the result still PARSES as a CDI spec -- otherwise keep the original
     # (GPU without libdxcore beats a broken spec that disables the GPU entirely and silently).
+    #
+    # The revert is gated on `cdi list` EXISTING, exactly like the cdi_ok check below (Bugbot):
+    # that subcommand is version-dependent, so calling it unconditionally meant a toolkit without
+    # it reverted a PERFECTLY GOOD injection -- and the installer then reported "spec is missing
+    # libdxcore", which is false and unactionable. Revert only when the parser is available AND
+    # actively rejects the result.
     if [ -s /etc/cdi/nvidia.yaml.new ] && grep -q 'libdxcore\.so' /etc/cdi/nvidia.yaml.new; then
       cp /etc/cdi/nvidia.yaml /etc/cdi/nvidia.yaml.orig 2>/dev/null || true
       mv /etc/cdi/nvidia.yaml.new /etc/cdi/nvidia.yaml 2>/dev/null || true
-      if ! nvidia-ctk cdi list >/dev/null 2>&1; then
-        mv /etc/cdi/nvidia.yaml.orig /etc/cdi/nvidia.yaml 2>/dev/null || true
+      if nvidia-ctk cdi list --help >/dev/null 2>&1; then
+        if ! nvidia-ctk cdi list >/dev/null 2>&1; then
+          mv /etc/cdi/nvidia.yaml.orig /etc/cdi/nvidia.yaml 2>/dev/null || true
+        fi
       fi
     fi
     rm -f /etc/cdi/nvidia.yaml.new /etc/cdi/nvidia.yaml.orig 2>/dev/null || true
