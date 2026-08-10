@@ -3468,7 +3468,9 @@ function Install-GpuDevicePlugin {
   # here before the bounded apply is reached (reviewer; parity with bash + verify).
   $dpExists = kubectl get daemonset -n kube-system nvidia-device-plugin-daemonset --request-timeout=5s 2>&1
   if ($LASTEXITCODE -eq 0) {
-    Ok "GPU acceleration enabled."
+    # Same rule as the CDI path: report what happened, don't claim GPU is enabled -- Confirm-GpuNode
+    # runs next and can still clear K3D_GPU_FLAG if the node advertises 0 GPUs (Bugbot).
+    Info "NVIDIA device plugin already present -- verifying the node advertises a GPU..."
     return $true
   } else {
     $dpUrl = "https://raw.githubusercontent.com/NVIDIA/k8s-device-plugin/v0.14.5/nvidia-device-plugin.yml"
@@ -3495,7 +3497,7 @@ function Install-GpuDevicePlugin {
         }
       }
       if ($gpuOk) {
-        Ok "GPU acceleration enabled."
+        Info "NVIDIA device plugin deployed -- verifying the node advertises a GPU..."
       } else {
         Warn "Couldn't enable GPU acceleration - continuing in CPU mode. Re-run the installer later to retry."
       }
@@ -5757,7 +5759,11 @@ if ($GPU_VENDOR -eq "nvidia" -and $NVIDIA_DRIVER_OK -and ($K8S_VERSION -eq "late
       }
       $SERVERS = "1"
     }
-    Ok "GPU enabled -- cluster will use the custom k3s-CUDA image with --gpus=all"
+    # Intent, not accomplishment (Bugbot -- third instance of this class): cluster-create, the
+    # node's CDI wiring, and Confirm-GpuNode all still run after this and can each clear
+    # K3D_GPU_FLAG. Only Confirm-GpuNode's "GPU verified and available" may claim success, so a
+    # green line here would be followed by a CPU-only summary.
+    Info "GPU support prepared -- the cluster will be created with GPU; verified once the node is up."
   } else {
     $K3D_GPU_FLAG = ""
     if (-not $GPU_SKIP_REASON) {

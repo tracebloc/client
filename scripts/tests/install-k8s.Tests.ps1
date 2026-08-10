@@ -4261,6 +4261,32 @@ Describe "Get-GpuBuildFailureReason (#616: every GPU failure names an actionable
   }
 }
 
+Describe "No green line may claim GPU is enabled before verification (#616 Bugbot, x3 instances)" {
+  BeforeAll { $script:PSRC_OK = Get-Content "$PSScriptRoot/../install-k8s.ps1" -Raw }
+  It "only two Ok-level GPU lines exist, and both state a VERIFIED fact" {
+    # This defect recurred three times (WSL2/CDI branch, the top-level gate, the device-plugin
+    # branch): a green "GPU enabled" printed while cluster-create / CDI wiring / Confirm-GpuNode
+    # could still clear K3D_GPU_FLAG, so the operator saw success then a CPU-only summary.
+    # Ok is reserved for facts already established; intent uses Info.
+    $oks = [regex]::Matches($script:PSRC_OK, 'Ok "GPU[^"]*"') | ForEach-Object { $_.Value }
+    $oks.Count | Should -Be 2
+    # the image really was built AND passed the k3s sanity check before this line
+    ($oks -join ' | ') | Should -Match 'GPU node image built locally'
+    # the node really was observed advertising a GPU before this line
+    ($oks -join ' | ') | Should -Match 'GPU verified and available'
+  }
+  It "no Ok line claims 'acceleration enabled' or 'GPU enabled' anywhere" {
+    $script:PSRC_OK | Should -Not -Match 'Ok "GPU acceleration enabled'
+    $script:PSRC_OK | Should -Not -Match 'Ok "GPU enabled'
+  }
+  It "the pre-verification lines are Info and say verification is still pending" {
+    $script:PSRC_OK | Should -Match 'Info "GPU support prepared'
+    $script:PSRC_OK | Should -Match 'Info "GPU wired up \(WSL2/CDI\)'
+    $script:PSRC_OK | Should -Match 'Info "NVIDIA device plugin deployed -- verifying'
+    $script:PSRC_OK | Should -Match 'Info "NVIDIA device plugin already present -- verifying'
+  }
+}
+
 Describe "GPU-not-enabled is surfaced prominently with a fix (#616)" {
   BeforeAll { $script:SUMSRC = Get-Content "$PSScriptRoot/../install-k8s.ps1" -Raw }
   It "the summary gives it its own block, not a cramped Mode line" {
