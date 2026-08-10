@@ -447,6 +447,66 @@ _resolve_chart_ref() {
   fi
 }
 
+# _recover_pending_helm_release — auto-clear a wedged pending-* release before a
+# helm upgrade/install (#554). A helm process killed mid-operation (Ctrl-C, OOM,
+# host reboot, laptop sleep) leaves the release stuck in a transient state; every
+# subsequent `helm upgrade --install` then fails with "another operation is in
+# progress" — exit 1, NOT 124 — a permanent wedge that no re-run can clear on its
+# own. Detect that state and clear it so the caller's helm op can proceed.
+#
+#   $1 = release name   $2 = namespace
+#
+# Reads the STATUS: line of `helm status` (jq-free on purpose — parsed the same
+# way the auto-upgrade cronjob does, whose alpine/helm image ships without jq):
+#   deployed / failed / superseded / uninstalled / "" → healthy or absent; no-op
+#   pending-upgrade / pending-rollback → roll back to the last deployed revision
+#   pending-install                    → revision 1 never deployed; there is no
+#                                        good revision to roll back to, so remove
+#                                        the half-installed release (matches the
+#                                        first-install manual remedy we already
+#                                        print). Safe for data: the chart renders
+#                                        helm.sh/resource-policy: keep on every
+#                                        PVC/namespace, and helm reads that from
+#                                        the STORED rev-1 manifest, so uninstall
+#                                        leaves the PVCs in place (docs/MIGRATIONS).
+#   uninstalling                       → a killed `helm uninstall`; finish it.
+#
+# Returns 0 when the release is clear (or was already), non-zero when recovery was
+# attempted and FAILED — the caller must fail closed rather than march into the
+# same wedge.
+_recover_pending_helm_release() {
+  local _rel="$1" _ns="$2" _status
+  _status="$(helm status "$_rel" -n "$_ns" 2>/dev/null \
+    | awk '/^STATUS:/ {print $2; exit}')"
+  case "$_status" in
+    pending-upgrade|pending-rollback)
+      warn "A previous helm operation on '$_rel' was interrupted (status: $_status)."
+      info "Rolling back '$_rel' to the last working release before continuing…"
+      if ! helm rollback "$_rel" -n "$_ns" >> "${LOG_FILE:-/dev/null}" 2>&1; then
+        warn "Automatic rollback of '$_rel' failed."
+        return 1
+      fi
+      log "Recovered '$_rel' from $_status via helm rollback."
+      ;;
+    pending-install|uninstalling)
+      warn "A previous helm operation on '$_rel' was interrupted (status: $_status)."
+      info "Clearing the half-finished release '$_rel' before continuing…"
+      if ! helm uninstall "$_rel" -n "$_ns" --wait --timeout 5m >> "${LOG_FILE:-/dev/null}" 2>&1; then
+        warn "Automatic cleanup of '$_rel' failed."
+        return 1
+      fi
+      log "Recovered '$_rel' from $_status via helm uninstall."
+      ;;
+    ''|deployed|failed|superseded|uninstalled)
+      : # healthy or absent — nothing to recover
+      ;;
+    *)
+      log "helm status of '$_rel' is '$_status'; no pending-state recovery needed."
+      ;;
+  esac
+  return 0
+}
+
 # _reconcile_adopted_client — RFC-0001 §7.2 adopt path. provision_client (Step 3)
 # sets TRACEBLOC_CLIENT_ADOPTED=1 when `tracebloc client create` matched this cluster
 # to an EXISTING client on the account (get-or-create keyed on the cluster). Adopt
@@ -490,12 +550,21 @@ _reconcile_adopted_client() {
   # would preserve it (the reused password is still correct). With no id (rebuilt
   # host / R7 orphan) reconcile WITHOUT a heal rather than bail — the existing
   # credential stands. Built as an array so the optional --set is bash-3.2 safe.
-  local _args=(upgrade "$_rel" "$chart_ref" --namespace "$_ns" "$_reuse")
+  local _args=(upgrade "$_rel" "$chart_ref" --namespace "$_ns" "$_reuse" --cleanup-on-fail)
   local _uuid; _uuid="$(_sanitize_credential "${TRACEBLOC_CLIENT_ID:-}")"
   [[ -n "$_uuid" ]] && _args+=(--set "clientId=$_uuid")
 
   # node-local (RFC-0003 Option C) has no hostPath dirs to pre-create.
   [[ "${TB_STORAGE_MODE:-hostpath}" != "node-local" ]] && _ensure_release_dirs "$_ns"
+
+  # #554: clear any pending-* wedge left by a previously killed helm op before we
+  # upgrade — otherwise this reconcile just fails with "another operation is in
+  # progress". Fail closed if recovery itself couldn't clear it.
+  if ! _recover_pending_helm_release "$_rel" "$_ns"; then
+    hint "Couldn't automatically clear the interrupted release. Recover it by hand, then re-run:"
+    hint "  helm -n $_ns rollback $_rel    (returns to the previous, working release)"
+    error "Reconcile blocked by an interrupted previous helm operation. Check the log for details: ${LOG_FILE:-}"
+  fi
 
   # Reconcile blocks too — same spinner treatment (RFC-0002 §2), bounded so a
   # wedged kube-apiserver can't hang it forever (#426).
@@ -504,13 +573,12 @@ _reconcile_adopted_client() {
   local _helm_rc=0
   spin_cmd_bounded "$(( _helm_timeout_min * 60 ))" "Reconciling the existing client…" helm "${_args[@]}" || _helm_rc=$?
   if [[ "$_helm_rc" -ne 0 ]]; then
-    if [[ "$_helm_rc" -eq 124 ]]; then
-      # A SIGKILLed helm can leave the release wedged as pending-upgrade; the
-      # NEXT run then fails with "another operation is in progress" and no
-      # clue (Bugbot #442). Name the unwedge command now.
-      hint "If the next run reports 'another operation is in progress', unwedge the release first:"
-      hint "  helm -n $_ns rollback $_rel    (returns to the previous, working release)"
-    fi
+    # A helm op killed partway (timeout=124, or an in-progress wedge=exit 1) can
+    # leave the release pending-*. The next run auto-recovers
+    # (_recover_pending_helm_release), but name the manual unwedge too — on exit
+    # 1, not only the 124 timeout (#554, extends Bugbot #442).
+    hint "If a re-run reports 'another operation is in progress', unwedge the release first:"
+    hint "  helm -n $_ns rollback $_rel    (returns to the previous, working release)"
     error "Reconcile of the existing client failed. Check the log for details: ${LOG_FILE:-}"
   fi
 
@@ -1157,21 +1225,34 @@ EOF
   # kube-apiserver from hanging the install forever (#426).
   local _helm_timeout_min
   _helm_timeout_min="$(tb_minutes_or "${TB_HELM_TIMEOUT_MIN:-}" 10)"
+
+  # #554: clear any pending-* wedge left by a previously killed helm op (Ctrl-C,
+  # OOM, reboot) before we upgrade — otherwise this run just fails with "another
+  # operation is in progress" (exit 1) and the machine stays wedged across every
+  # re-run. The release name equals the namespace on the normal install path.
+  # Fail closed if recovery itself couldn't clear it.
+  if ! _recover_pending_helm_release "$TB_NAMESPACE" "$TB_NAMESPACE"; then
+    hint "Couldn't automatically clear the interrupted release. Recover it by hand, then re-run:"
+    hint "  first install:  helm -n $TB_NAMESPACE uninstall $TB_NAMESPACE    (removes only the half-installed release)"
+    hint "  upgrade:        helm -n $TB_NAMESPACE rollback $TB_NAMESPACE     (returns to the previous release)"
+    error "Client installation blocked by an interrupted previous helm operation. Check the log for details: ${LOG_FILE:-}"
+  fi
+
   local _helm_rc=0
   spin_cmd_bounded "$(( _helm_timeout_min * 60 ))" "Installing the tracebloc client…" \
     helm upgrade --install "$TB_NAMESPACE" "$chart_ref" \
     --namespace "$TB_NAMESPACE" \
     --create-namespace \
+    --cleanup-on-fail \
     --values "$values_file" || _helm_rc=$?
   if [[ "$_helm_rc" -ne 0 ]]; then
-    if [[ "$_helm_rc" -eq 124 ]]; then
-      # A SIGKILLed helm can leave the release wedged as pending-install /
-      # pending-upgrade; the NEXT run then fails with "another operation is
-      # in progress" and no clue (Bugbot #442). Name the unwedge command now.
-      hint "If the next run reports 'another operation is in progress', unwedge the release first:"
-      hint "  first install:  helm -n $TB_NAMESPACE uninstall $TB_NAMESPACE    (removes only the half-installed release)"
-      hint "  upgrade:        helm -n $TB_NAMESPACE rollback $TB_NAMESPACE     (returns to the previous release)"
-    fi
+    # A helm op killed partway (timeout=124, or an in-progress wedge=exit 1) can
+    # leave the release pending-*. The next run auto-recovers
+    # (_recover_pending_helm_release), but name the manual unwedge too — on exit
+    # 1, not only the 124 timeout (#554, extends Bugbot #442).
+    hint "If a re-run reports 'another operation is in progress', unwedge the release first:"
+    hint "  first install:  helm -n $TB_NAMESPACE uninstall $TB_NAMESPACE    (removes only the half-installed release)"
+    hint "  upgrade:        helm -n $TB_NAMESPACE rollback $TB_NAMESPACE     (returns to the previous release)"
     error "Client installation failed. Check the log for details: ${LOG_FILE:-}"
   fi
 

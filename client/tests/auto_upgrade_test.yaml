@@ -66,6 +66,33 @@ tests:
           path: data["auto-upgrade.sh"]
           pattern: "sort -V"
 
+  - it: script auto-recovers from an interrupted (pending-*) upgrade before retrying (#554)
+    template: templates/auto-upgrade-cronjob.yaml
+    documentIndex: 0
+    asserts:
+      # Must read the release status before it upgrades…
+      - matchRegex:
+          path: data["auto-upgrade.sh"]
+          pattern: "helm status \"\\$RELEASE_NAME\""
+      # …match the pending-upgrade/pending-rollback wedge left by a killed helm…
+      - matchRegex:
+          path: data["auto-upgrade.sh"]
+          pattern: "pending-upgrade\\|pending-rollback"
+      # …and roll back to the last deployed revision so the tick can proceed
+      # instead of failing forever with "another operation is in progress".
+      - matchRegex:
+          path: data["auto-upgrade.sh"]
+          pattern: "helm rollback \"\\$RELEASE_NAME\""
+      # The recovery MUST come before the upgrade attempt in the script.
+      - matchRegex:
+          path: data["auto-upgrade.sh"]
+          pattern: "(?s)helm rollback \"\\$RELEASE_NAME\".*helm upgrade \"\\$RELEASE_NAME\""
+      # --atomic so a graceful upgrade failure self-rolls-back instead of
+      # leaving the release broken/pending (belt-and-braces with the recovery).
+      - matchRegex:
+          path: data["auto-upgrade.sh"]
+          pattern: "--atomic"
+
   - it: CronJob has the right schedule, concurrency, and SA wiring
     template: templates/auto-upgrade-cronjob.yaml
     documentIndex: 1
