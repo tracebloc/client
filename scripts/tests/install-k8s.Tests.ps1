@@ -4158,6 +4158,17 @@ Describe "Embedded GPU build inputs stay in sync with docker/k3s-cuda (#616 drif
     $boot | Should -Match "case \`"\`$current\`" in"
     $boot | Should -Match '\) </dev/null >/dev/null 2>&1 &'
   }
+  It "the libdxcore injection MIRRORS the generator's indentation, never hardcodes it (#616 regression)" {
+    # nvidia-ctk (yaml.v3) indents with 4 spaces, so the original `^  mounts:$` anchor never
+    # matched and libdxcore was silently never injected -> pods died with a misleading
+    # "CUDA driver version is insufficient" error. Verified on a live box.
+    $boot = [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String($script:K3S_CUDA_BOOT_B64))
+    $boot | Should -Match '\[\[:space:\]\]\*mounts:'      # indent-agnostic anchor
+    $boot | Should -Not -Match "\^  mounts:\\\$"           # never the fixed 2-space anchor
+    $boot | Should -Match 'item = substr\(\$0, 1, RLENGTH - 2\)'   # mirror the item's indent
+    # and the edit is only adopted if the spec still parses
+    $boot | Should -Match 'nvidia-ctk cdi list'
+  }
   It "the drop-in wires CDI on WSL2 (mode=cdi baked, generate spec, inject libdxcore) (#616)" {
     $boot = [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String($script:K3S_CUDA_BOOT_B64))
     $boot | Should -Match 'nvidia-ctk cdi generate --mode=wsl'
@@ -4250,6 +4261,11 @@ Describe "WSL2 GPU: node-advertised capacity replaces the NVML device plugin (#6
     # is empty, so a Linux/device-plugin install writes GPU_VISIBLE_DEVICES: "".
     $script:CDISRC | Should -Match '(?m)^\$GPU_DEVICE_SELECTOR = ""'
     ([regex]::Matches($script:CDISRC, '\$script:GPU_DEVICE_SELECTOR = "')).Count | Should -Be 1
+  }
+  It "the installer verifies libdxcore is IN the spec, not just that a spec exists (#616 regression)" {
+    $fn = (($script:CDISRC -split 'function Install-GpuDevicePlugin')[1] -split '\nfunction ')[0]
+    $fn | Should -Match '"grep", "-q", "libdxcore"'
+    $fn | Should -Match 'missing libdxcore'
   }
   It "the CDI spec is VERIFIED before claiming GPU is ready (#616 Bugbot)" {
     # the boot script guards every step with `|| true`; without this check a failed

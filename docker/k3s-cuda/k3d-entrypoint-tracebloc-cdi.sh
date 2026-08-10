@@ -31,26 +31,46 @@ if [ -e /dev/dxg ]; then
   mkdir -p /etc/cdi 2>/dev/null || true
   nvidia-ctk cdi generate --mode=wsl --output=/etc/cdi/nvidia.yaml 2>/dev/null || true
 
-  # Add libdxcore.so to the spec's top-level mounts list if it's missing. Matches the
-  # `  mounts:` line (2-space, top-level containerEdits) and inserts one entry after it.
+  # Add libdxcore.so to the spec's mounts list. `nvidia-ctk cdi generate --mode=wsl` OMITS it
+  # (it searches the WSL driver store; libdxcore lives in the standard lib path), and WITHOUT it
+  # libcuda loads but can't reach /dev/dxg -- CUDA then fails with the misleading "CUDA driver
+  # version is insufficient for CUDA runtime version".
+  #
+  # Indentation is MIRRORED from the generator's own first mount item, never hardcoded: YAML
+  # forbids mixing indent levels within one list, so a fixed 4-space item next to the generator's
+  # (differently indented) items makes the WHOLE spec unparseable -- CDI then silently injects
+  # nothing and CUDA fails exactly as if the mount were missing. Anchor is also indent-agnostic.
   if [ -f /etc/cdi/nvidia.yaml ] && [ -f /usr/lib/x86_64-linux-gnu/libdxcore.so ] \
        && ! grep -q 'libdxcore\.so' /etc/cdi/nvidia.yaml; then
     awk '
-      /^  mounts:$/ && !done {
-        print
-        print "    - hostPath: /usr/lib/x86_64-linux-gnu/libdxcore.so"
-        print "      containerPath: /usr/lib/x86_64-linux-gnu/libdxcore.so"
-        print "      options:"
-        print "      - ro"
-        print "      - nosuid"
-        print "      - nodev"
-        print "      - rbind"
+      # remember the indent of the first list item that follows a `mounts:` key
+      !done && $0 ~ /^[[:space:]]*mounts:[[:space:]]*$/ { inmounts = 1; print; next }
+      inmounts && !done && match($0, /^[[:space:]]*-[[:space:]]/) {
+        item = substr($0, 1, RLENGTH - 2)          # leading whitespace before the dash
+        keys = item "  "                            # mapping keys sit one level deeper
+        print item "- hostPath: /usr/lib/x86_64-linux-gnu/libdxcore.so"
+        print keys "containerPath: /usr/lib/x86_64-linux-gnu/libdxcore.so"
+        print keys "options:"
+        print keys "- ro"
+        print keys "- nosuid"
+        print keys "- nodev"
+        print keys "- rbind"
         done = 1
+        print                                       # then the generator item we matched
         next
       }
       { print }
-    ' /etc/cdi/nvidia.yaml > /etc/cdi/nvidia.yaml.new 2>/dev/null \
-      && mv /etc/cdi/nvidia.yaml.new /etc/cdi/nvidia.yaml 2>/dev/null || true
+    ' /etc/cdi/nvidia.yaml > /etc/cdi/nvidia.yaml.new 2>/dev/null || true
+    # Only adopt the edit if the result still PARSES as a CDI spec -- otherwise keep the original
+    # (GPU without libdxcore beats a broken spec that disables the GPU entirely and silently).
+    if [ -s /etc/cdi/nvidia.yaml.new ] && grep -q 'libdxcore\.so' /etc/cdi/nvidia.yaml.new; then
+      cp /etc/cdi/nvidia.yaml /etc/cdi/nvidia.yaml.orig 2>/dev/null || true
+      mv /etc/cdi/nvidia.yaml.new /etc/cdi/nvidia.yaml 2>/dev/null || true
+      if ! nvidia-ctk cdi list >/dev/null 2>&1; then
+        mv /etc/cdi/nvidia.yaml.orig /etc/cdi/nvidia.yaml 2>/dev/null || true
+      fi
+    fi
+    rm -f /etc/cdi/nvidia.yaml.new /etc/cdi/nvidia.yaml.orig 2>/dev/null || true
   fi
 
   # Keep nvidia.com/gpu advertised across restarts (Bugbot, HIGH). A manually patched
