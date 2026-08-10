@@ -4169,6 +4169,24 @@ Describe "Embedded GPU build inputs stay in sync with docker/k3s-cuda (#616 drif
     # and the edit is only adopted if the spec still parses
     $boot | Should -Match 'nvidia-ctk cdi list'
   }
+  It "the reconciler only advertises GPU when CDI is USABLE (#616 Bugbot HIGH)" {
+    # re-asserting capacity onto a node whose CDI spec is broken is worse than not advertising:
+    # pods schedule then fail CUDA with no cluster-level signal.
+    $boot = [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String($script:K3S_CUDA_BOOT_B64))
+    $boot | Should -Match 'cdi_ok=0'
+    $boot | Should -Match "grep -q 'libdxcore"
+    $boot | Should -Match 'nvidia-ctk cdi list'
+    $boot | Should -Match 'if \[ "\$cdi_ok" = "1" \]'
+  }
+  It "libdxcore is DISCOVERED across known locations, not hardcoded to one path (#616 Bugbot)" {
+    # it lives in different places across Docker Desktop / WSL2 versions; a miss silently
+    # skipped the injection while the spec still looked fine.
+    $boot = [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String($script:K3S_CUDA_BOOT_B64))
+    $boot | Should -Match '/usr/lib/wsl/lib/libdxcore\.so'
+    $boot | Should -Match '/usr/lib/wsl/drivers/\*/libdxcore\.so'
+    $boot | Should -Match 'ldconfig -p'                       # last-resort discovery
+    $boot | Should -Match 'awk -v dx="\$DXCORE"'              # mounted at the path found
+  }
   It "the drop-in wires CDI on WSL2 (mode=cdi baked, generate spec, inject libdxcore) (#616)" {
     $boot = [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String($script:K3S_CUDA_BOOT_B64))
     $boot | Should -Match 'nvidia-ctk cdi generate --mode=wsl'
@@ -4215,7 +4233,7 @@ Describe "WSL2 GPU: node-advertised capacity replaces the NVML device plugin (#6
   It "Install-GpuDevicePlugin takes the CDI path when the node has /dev/dxg (WSL2)" {
     $fn = (($script:CDISRC -split 'function Install-GpuDevicePlugin')[1] -split '\nfunction ')[0]
     $fn | Should -Match 'Invoke-DockerCli -DockerArgs @\("exec", "k3d-\$CLUSTER_NAME-server-0", "test", "-e", "/dev/dxg"\)'
-    $fn | Should -Match 'if \(Set-NodeGpuCapacity\) \{[\s\S]{0,400}?Ok "GPU acceleration enabled \(WSL2/CDI\)\."[\s\S]{0,80}?return \$true'
+    $fn | Should -Match 'if \(Set-NodeGpuCapacity\) \{[\s\S]{0,700}?Info "GPU wired up \(WSL2/CDI\)[\s\S]{0,120}?return \$true'
   }
   It "the WSL2/CDI path sets the chart's GPU device selector for training pods (#616)" {
     # without GPU_VISIBLE_DEVICES a pod schedules but CUDA fails (client-runtime#291)
@@ -4266,6 +4284,19 @@ Describe "WSL2 GPU: node-advertised capacity replaces the NVML device plugin (#6
     $fn = (($script:CDISRC -split 'function Install-GpuDevicePlugin')[1] -split '\nfunction ')[0]
     $fn | Should -Match '"grep", "-q", "libdxcore"'
     $fn | Should -Match 'missing libdxcore'
+  }
+  It "no green GPU-success line before Confirm-GpuNode verifies the node (#616 Bugbot)" {
+    # claiming success at the capacity patch produced a green "enabled" immediately followed
+    # by a CPU fallback when verification cleared the flag.
+    $fn = (($script:CDISRC -split 'function Install-GpuDevicePlugin')[1] -split '\nfunction ')[0]
+    $cdiBranch = ($fn -split 'if \(\$dxg\.Code -eq 0\) \{')[1]
+    ($cdiBranch -split '\n  \}')[0] | Should -Not -Match 'Ok "GPU acceleration enabled \(WSL2/CDI\)'
+    ($cdiBranch -split '\n  \}')[0] | Should -Match 'Info "GPU wired up \(WSL2/CDI\)'
+  }
+  It "the soft GPU preflight warning names the path actually in use (#616 Bugbot)" {
+    # "can't be built" was wrong on the pull/mirror path, where nothing is built locally.
+    $script:CDISRC | Should -Match "can't be pulled here"
+    $script:CDISRC | Should -Match "can't be built here"
   }
   It "the CDI spec is VERIFIED before claiming GPU is ready (#616 Bugbot)" {
     # the boot script guards every step with `|| true`; without this check a failed

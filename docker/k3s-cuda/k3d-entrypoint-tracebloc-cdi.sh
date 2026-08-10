@@ -40,16 +40,32 @@ if [ -e /dev/dxg ]; then
   # forbids mixing indent levels within one list, so a fixed 4-space item next to the generator's
   # (differently indented) items makes the WHOLE spec unparseable -- CDI then silently injects
   # nothing and CUDA fails exactly as if the mount were missing. Anchor is also indent-agnostic.
-  if [ -f /etc/cdi/nvidia.yaml ] && [ -f /usr/lib/x86_64-linux-gnu/libdxcore.so ] \
+  # libdxcore's location is NOT fixed across Docker Desktop / WSL2 versions (Bugbot): it may sit
+  # in the standard lib path, under /usr/lib/wsl/lib, or inside the WSL driver store. Hardcoding
+  # one path meant a miss silently skipped the injection while the spec still looked fine, so GPU
+  # was advertised and pods then failed CUDA with the misleading driver error. Probe the known
+  # locations, then fall back to the linker cache. Mounted at the path where it was found, so the
+  # in-pod loader resolves it the same way the node does.
+  DXCORE=""
+  for _c in /usr/lib/x86_64-linux-gnu/libdxcore.so /usr/lib/wsl/lib/libdxcore.so \
+            /usr/lib/wsl/drivers/*/libdxcore.so /usr/lib/libdxcore.so; do
+    if [ -f "$_c" ]; then DXCORE="$_c"; break; fi
+  done
+  if [ -z "$DXCORE" ]; then
+    _c="$(ldconfig -p 2>/dev/null | awk '/libdxcore\.so/ { print $NF; exit }')"
+    if [ -n "$_c" ] && [ -f "$_c" ]; then DXCORE="$_c"; fi
+  fi
+
+  if [ -f /etc/cdi/nvidia.yaml ] && [ -n "$DXCORE" ] \
        && ! grep -q 'libdxcore\.so' /etc/cdi/nvidia.yaml; then
-    awk '
+    awk -v dx="$DXCORE" '
       # remember the indent of the first list item that follows a `mounts:` key
       !done && $0 ~ /^[[:space:]]*mounts:[[:space:]]*$/ { inmounts = 1; print; next }
       inmounts && !done && match($0, /^[[:space:]]*-[[:space:]]/) {
         item = substr($0, 1, RLENGTH - 2)          # leading whitespace before the dash
         keys = item "  "                            # mapping keys sit one level deeper
-        print item "- hostPath: /usr/lib/x86_64-linux-gnu/libdxcore.so"
-        print keys "containerPath: /usr/lib/x86_64-linux-gnu/libdxcore.so"
+        print item "- hostPath: " dx
+        print keys "containerPath: " dx
         print keys "options:"
         print keys "- ro"
         print keys "- nosuid"
@@ -73,6 +89,18 @@ if [ -e /dev/dxg ]; then
     rm -f /etc/cdi/nvidia.yaml.new /etc/cdi/nvidia.yaml.orig 2>/dev/null || true
   fi
 
+  # Is CDI injection actually USABLE? Advertising nvidia.com/gpu without it is worse than not
+  # advertising at all: pods schedule onto a device they can't use and fail CUDA with a
+  # misleading driver error, and no cluster-level signal says why (Bugbot, HIGH). The installer
+  # already refuses in that case, but this reconciler runs again on every restart -- so it must
+  # apply the SAME standard rather than re-asserting capacity onto a broken node.
+  cdi_ok=0
+  if [ -s /etc/cdi/nvidia.yaml ] \
+       && grep -q 'libdxcore\.so' /etc/cdi/nvidia.yaml \
+       && nvidia-ctk cdi list >/dev/null 2>&1; then
+    cdi_ok=1
+  fi
+
   # Keep nvidia.com/gpu advertised across restarts (Bugbot, HIGH). A manually patched
   # extended resource is NOT durable: the kubelet re-reports node status on every
   # start, zeroing it -- so after a Docker Desktop or Windows restart the installer's
@@ -83,10 +111,12 @@ if [ -e /dev/dxg ]; then
   # the capacity is missing. Runs on EVERY node start (k3d runs this drop-in each time),
   # so a reboot self-heals with no user action. Fully guarded + backgrounded: it can
   # never delay or block k3s. Interval override: TRACEBLOC_GPU_RECONCILE_SECS.
+  # Gated on cdi_ok so a broken/incomplete CDI spec never gets a GPU advertised onto it.
   #
   # Fully DETACHED (</dev/null, output to /dev/null): this drop-in exits immediately after
   # forking, so the loop is orphaned and reparented to PID 1 (k3s, which k3d's entrypoint
   # execs). Holding the inherited stdio would risk blocking on a closed pipe.
+  if [ "$cdi_ok" = "1" ]; then
   (
     interval="${TRACEBLOC_GPU_RECONCILE_SECS:-60}"
     kube="/etc/rancher/k3s/k3s.yaml"
@@ -107,6 +137,7 @@ if [ -e /dev/dxg ]; then
       sleep "$interval"
     done
   ) </dev/null >/dev/null 2>&1 &
+  fi
 fi
 
 # Return control to k3d's entrypoint, which runs the remaining drop-ins and then execs
