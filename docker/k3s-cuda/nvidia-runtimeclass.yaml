@@ -1,0 +1,21 @@
+# =============================================================================
+#  `nvidia` RuntimeClass  (tracebloc/client #616)
+# =============================================================================
+# Baked into the custom k3s-CUDA image at /var/lib/rancher/k3s/server/manifests/
+# so k3s auto-applies it on first server boot. Training pods reference it via
+# runtimeClassName: nvidia (the installer sets RUNTIME_CLASS_NAME=nvidia when GPU
+# is enabled, which jobs-manager threads into every spawned pod), so the node's
+# containerd invokes the nvidia container runtime -- which, in CDI mode (see
+# tracebloc-cdi-boot.sh), injects the GPU into the pod from the WSL CDI spec.
+#
+# NOTE: we intentionally do NOT ship the NVML device-plugin DaemonSet here. On
+# Docker Desktop/WSL2 it can't initialise NVML (ERROR_NOT_SUPPORTED), would
+# register 0 GPUs, and -- owning the nvidia.com/gpu extended resource -- would
+# overwrite the installer's node-resource patch with 0, stranding jobs. GPU
+# capacity is advertised by the installer via a node-status patch instead.
+---
+apiVersion: node.k8s.io/v1
+kind: RuntimeClass
+metadata:
+  name: nvidia
+handler: nvidia

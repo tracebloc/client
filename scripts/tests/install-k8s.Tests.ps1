@@ -4098,15 +4098,79 @@ Describe "Embedded GPU build inputs stay in sync with docker/k3s-cuda (#616 drif
     $file = & $norm ([System.IO.File]::ReadAllBytes((Resolve-Path "$PSScriptRoot/../../docker/k3s-cuda/Dockerfile").Path))
     $decoded | Should -Be $file
   }
-  It "the embedded device-plugin manifest decodes to docker/k3s-cuda/nvidia-device-plugin-daemonset.yaml" {
+  It "the embedded RuntimeClass manifest decodes to docker/k3s-cuda/nvidia-runtimeclass.yaml" {
     $norm = { param([byte[]]$b) (([System.Text.Encoding]::UTF8.GetString($b)) -replace "`r`n","`n").TrimEnd() }
-    $decoded = & $norm ([System.Convert]::FromBase64String($script:K3S_CUDA_DEVICEPLUGIN_B64))
-    $file = & $norm ([System.IO.File]::ReadAllBytes((Resolve-Path "$PSScriptRoot/../../docker/k3s-cuda/nvidia-device-plugin-daemonset.yaml").Path))
+    $decoded = & $norm ([System.Convert]::FromBase64String($script:K3S_CUDA_RUNTIMECLASS_B64))
+    $file = & $norm ([System.IO.File]::ReadAllBytes((Resolve-Path "$PSScriptRoot/../../docker/k3s-cuda/nvidia-runtimeclass.yaml").Path))
+    $decoded | Should -Be $file
+  }
+  It "the embedded CDI boot script decodes to docker/k3s-cuda/tracebloc-cdi-boot.sh" {
+    $norm = { param([byte[]]$b) (([System.Text.Encoding]::UTF8.GetString($b)) -replace "`r`n","`n").TrimEnd() }
+    $decoded = & $norm ([System.Convert]::FromBase64String($script:K3S_CUDA_BOOT_B64))
+    $file = & $norm ([System.IO.File]::ReadAllBytes((Resolve-Path "$PSScriptRoot/../../docker/k3s-cuda/tracebloc-cdi-boot.sh").Path))
     $decoded | Should -Be $file
   }
   It "the node image disables the CUDA requirement gate so it boots on an older-but-valid driver (#616)" {
     $decoded = [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String($script:K3S_CUDA_DOCKERFILE_B64))
     $decoded | Should -Match 'ENV NVIDIA_DISABLE_REQUIRE=1'
+  }
+  It "the node image ships ONLY the RuntimeClass, never the NVML device-plugin DaemonSet (#616 WSL2)" {
+    # the NVML plugin can't init on WSL2; shipping it would register 0 GPUs and overwrite the
+    # installer's node-capacity patch, stranding jobs.
+    $df = [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String($script:K3S_CUDA_DOCKERFILE_B64))
+    $df | Should -Match 'COPY nvidia-runtimeclass\.yaml /var/lib/rancher/k3s/server/manifests/'
+    $df | Should -Not -Match 'COPY nvidia-device-plugin-daemonset\.yaml'
+    $rc = [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String($script:K3S_CUDA_RUNTIMECLASS_B64))
+    $rc | Should -Match 'kind: RuntimeClass'
+    $rc | Should -Match 'handler: nvidia'
+    $rc | Should -Not -Match 'kind: DaemonSet'
+  }
+  It "the CDI boot script is a strict no-op without /dev/dxg (Linux/CPU nodes unaffected) (#616)" {
+    $boot = [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String($script:K3S_CUDA_BOOT_B64))
+    $boot | Should -Match 'if \[ -e /dev/dxg \]'
+    # k3s must start regardless of the GPU setup outcome
+    $boot | Should -Match 'exec /bin/k3s "\$@"'
+  }
+  It "the boot script wires CDI on WSL2 (mode=cdi baked, generate spec, inject libdxcore) (#616)" {
+    $boot = [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String($script:K3S_CUDA_BOOT_B64))
+    $boot | Should -Match 'nvidia-ctk cdi generate --mode=wsl'
+    $boot | Should -Match 'libdxcore\.so'
+    $boot | Should -Match 'exec /bin/k3s'
+    $df = [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String($script:K3S_CUDA_DOCKERFILE_B64))
+    $df | Should -Match 'nvidia-container-runtime\.mode=cdi'
+    $df | Should -Match 'tracebloc-cdi-boot\.sh'
+  }
+}
+
+Describe "WSL2 GPU: node-advertised capacity replaces the NVML device plugin (#616)" {
+  BeforeAll { $script:CDISRC = Get-Content "$PSScriptRoot/../install-k8s.ps1" -Raw }
+  BeforeEach {
+    $script:CLUSTER_NAME = "tracebloc"
+    $GPU_VENDOR = "nvidia"; $NVIDIA_DRIVER_OK = $true; $K3D_GPU_FLAG = "--gpus=all"
+  }
+  It "Set-NodeGpuCapacity patches nvidia.com/gpu=1 onto the node status (bounded)" {
+    $fn = (($script:CDISRC -split 'function Set-NodeGpuCapacity')[1] -split '\nfunction ')[0]
+    $fn | Should -Match '/status/capacity/nvidia\.com~1gpu'
+    $fn | Should -Match '--subresource=status'
+    $fn | Should -Match '--request-timeout=15s'
+    # single GPU per node -- GPU mode already forces one node, so 1 never double-counts
+    $fn | Should -Match '"value":"1"'
+  }
+  It "Set-NodeGpuCapacity no-ops when GPU isn't enabled" {
+    $K3D_GPU_FLAG = ""
+    Mock kubectl { throw "must not patch the node when GPU is not enabled" }
+    Set-NodeGpuCapacity | Should -BeFalse
+    Should -Not -Invoke kubectl
+  }
+  It "Install-GpuDevicePlugin takes the CDI path when the node has /dev/dxg (WSL2)" {
+    $fn = (($script:CDISRC -split 'function Install-GpuDevicePlugin')[1] -split '\nfunction ')[0]
+    $fn | Should -Match 'Invoke-DockerCli -DockerArgs @\("exec", "k3d-\$CLUSTER_NAME-server-0", "test", "-e", "/dev/dxg"\)'
+    $fn | Should -Match 'if \(Set-NodeGpuCapacity\) \{ Ok "GPU acceleration enabled \(WSL2/CDI\)\."; return \$true \}'
+  }
+  It "a failed capacity advertisement returns false so the caller falls back to CPU" {
+    $fn = (($script:CDISRC -split 'function Install-GpuDevicePlugin')[1] -split '\nfunction ')[0]
+    $dxgBranch = ($fn -split 'if \(\$dxg\.Code -eq 0\) \{')[1]
+    ($dxgBranch -split '\n  \}')[0] | Should -Match 'return \$false'
   }
 }
 

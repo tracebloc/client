@@ -46,6 +46,7 @@ RUN export DEBIAN_FRONTEND=noninteractive \
     && apt-get update \
     && apt-get install -y --no-install-recommends nvidia-container-toolkit \
     && nvidia-ctk runtime configure --runtime=containerd \
+    && nvidia-ctk config --in-place --set nvidia-container-runtime.mode=cdi \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
@@ -65,10 +66,18 @@ COPY --from=k3s \
      / /
 COPY --from=k3s /bin /bin
 
-# Auto-deploy the NVIDIA device plugin + `nvidia` RuntimeClass on first server
-# boot (k3s auto-applies manifests dropped here). This is what makes the node
-# advertise nvidia.com/gpu without a separate `kubectl apply`.
-COPY nvidia-device-plugin-daemonset.yaml /var/lib/rancher/k3s/server/manifests/nvidia-device-plugin-daemonset.yaml
+# Auto-deploy ONLY the `nvidia` RuntimeClass on first server boot (k3s auto-applies
+# manifests dropped here). We deliberately do NOT ship the NVML device-plugin DaemonSet:
+# on Docker Desktop/WSL2 it can't init NVML, would register 0 GPUs, and (owning the
+# nvidia.com/gpu extended resource) would overwrite the installer's node-resource patch
+# with 0 -- stranding jobs. GPU capacity is advertised by the installer via a node patch,
+# and pods get the real GPU through the CDI spec generated at boot (see tracebloc-cdi-boot.sh).
+COPY nvidia-runtimeclass.yaml /var/lib/rancher/k3s/server/manifests/nvidia-runtimeclass.yaml
+
+# Boot wrapper: generate the WSL CDI spec (+ libdxcore) before starting k3s, so pods can
+# use the GPU on Docker Desktop/WSL2. No-op on non-WSL2 nodes. (#616)
+COPY tracebloc-cdi-boot.sh /usr/local/bin/tracebloc-cdi-boot.sh
+RUN chmod +x /usr/local/bin/tracebloc-cdi-boot.sh
 
 VOLUME /var/lib/kubelet
 VOLUME /var/lib/rancher/k3s
@@ -77,5 +86,5 @@ VOLUME /var/log
 
 ENV PATH="$PATH:/bin/aux"
 
-ENTRYPOINT ["/bin/k3s"]
+ENTRYPOINT ["/usr/local/bin/tracebloc-cdi-boot.sh"]
 CMD ["agent"]
