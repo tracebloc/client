@@ -1545,6 +1545,31 @@ EOF
   grep -q 'clientPassword' "$HOST_DATA_DIR/.tb-adopt-recovery-values.yaml" || return 1
 }
 
+@test "install_client_helm: normal install, FAILED pending-* uninstall does NOT install (fail closed, Bugbot #619)" {
+  HOST_DATA_DIR="$BATS_TEST_TMPDIR/data"; mkdir -p "$HOST_DATA_DIR"
+  _ensure_tracebloc_dirs() { :; }
+  _ensure_release_dirs() { :; }
+  _ensure_helm_runnable() { :; }
+  kubectl() { record "kubectl $*"; return 0; }
+  # A prior install was killed mid-op and left THIS release wedged in pending-install;
+  # recovery's `helm uninstall --wait` then FAILS/times out. The adopt path already
+  # fails closed here (test above); the NORMAL install path must too — a
+  # `helm upgrade --install` now would race the still-present/terminating resources
+  # the --wait exists to drain. Recovery sets TB_PENDING_UNINSTALL_FAILED=1 and the
+  # normal caller must honor it: skip the install and abort so a re-run can retry.
+  helm() {
+    if [[ "$1" == status ]];    then printf 'info:\n  status: pending-install\n'; return 0; fi
+    if [[ "$1" == uninstall ]]; then record "helm $*"; return 1; fi   # uninstall fails / times out
+    record "helm $*"; return 0
+  }
+  verify_credentials() { printf valid; }
+  run install_client_helm <<< $'myid\nmypw'
+  [ "$status" -ne 0 ] || return 1                                       # aborted, did not silently proceed
+  mock_calls | grep -q "helm uninstall tracebloc"                      # it did attempt the recovery uninstall
+  run mock_calls
+  [[ "$output" != *"helm upgrade --install tracebloc"* ]] || return 1  # fail closed: NO install after a failed uninstall
+}
+
 @test "install_cleanup shreds a lingering preserved-values credential file (Bugbot #619)" {
   # A signal between capture and the normal rm must not leave the write-only
   # clientPassword on disk — install_cleanup is the EXIT/INT/TERM backstop.

@@ -1543,11 +1543,23 @@ EOF
   local _helm_timeout_min
   _helm_timeout_min="$(tb_minutes_or "${TB_HELM_TIMEOUT_MIN:-}" 10)"
   local _helm_rc=0
-  spin_cmd_bounded "$(( _helm_timeout_min * 60 ))" "Installing the tracebloc client…" \
-    helm upgrade --install "$TB_NAMESPACE" "$chart_ref" \
-    --namespace "$TB_NAMESPACE" \
-    --create-namespace \
-    --values "$values_file" || _helm_rc=$?
+  if [[ "${TB_PENDING_UNINSTALL_FAILED:-0}" == "1" ]]; then
+    # Fail closed, same contract the adopt path honors: the pending-install/
+    # uninstalling recovery above ran `helm uninstall --wait` and it failed or
+    # timed out, so the wedged release's resources may still be present or
+    # terminating. Running `helm upgrade --install` now would race exactly those
+    # objects (the bug --wait exists to prevent). Skip the install and drop into
+    # the failure path below, which surfaces the manual remedy and aborts so a
+    # re-run can retry once the resources have drained (Bugbot #619).
+    warn "Recovery uninstall of the wedged release '$TB_NAMESPACE' failed or timed out; not installing, to avoid racing still-terminating resources. Re-run the installer to retry."
+    _helm_rc=1
+  else
+    spin_cmd_bounded "$(( _helm_timeout_min * 60 ))" "Installing the tracebloc client…" \
+      helm upgrade --install "$TB_NAMESPACE" "$chart_ref" \
+      --namespace "$TB_NAMESPACE" \
+      --create-namespace \
+      --values "$values_file" || _helm_rc=$?
+  fi
   if [[ "$_helm_rc" -ne 0 ]]; then
     # A helm run killed mid-operation (our timeout=124, or an earlier
     # Ctrl-C/OOM/reboot) can leave the release wedged pending-*; we auto-recover
