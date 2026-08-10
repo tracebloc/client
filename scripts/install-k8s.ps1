@@ -5299,11 +5299,17 @@ function Test-Preflight {
     # built from comes from there, and on a device-plugin (Linux) node so does the plugin image.
     # (This node image no longer BAKES the plugin -- WSL2 uses CDI -- but the host still needs
     # nvcr.io to build/pull the node image, so probe it whenever GPU is enabled.) Bugbot.
-    $criticals += @{ label = "NVIDIA device plugin / CUDA (nvcr.io)"; url = "https://nvcr.io/"; gpuSoft = $true }
+    # gpuBlocking marks the hosts this path ACTUALLY needs. Only those may skip GPU setup: on a
+    # mirror/air-gap install nvcr.io is blocked BY DESIGN (images come from the mirror), so
+    # treating every soft GPU probe as blocking disabled GPU for exactly the case the mirror
+    # exists to serve -- and told the operator to configure the mirror they had configured
+    # (Bugbot). nvcr.io stays probed on the mirror path, but warn-only.
+    $nvcrBlocking = -not ($env:TRACEBLOC_K3S_CUDA_IMAGE -or $env:TRACEBLOC_IMAGE_REGISTRY)
+    $criticals += @{ label = "NVIDIA device plugin / CUDA (nvcr.io)"; url = "https://nvcr.io/"; gpuSoft = $true; gpuBlocking = $nvcrBlocking }
     if (-not ($env:TRACEBLOC_K3S_CUDA_IMAGE -or $env:TRACEBLOC_IMAGE_REGISTRY)) {
       # DEFAULT: we BUILD locally, which also fetches the toolkit apt repo (nvidia.github.io); the
       # probe's nvidia/cuda comes from Docker Hub, already probed above.
-      $criticals += @{ label = "NVIDIA toolkit repo (nvidia.github.io)"; url = "https://nvidia.github.io/"; gpuSoft = $true }
+      $criticals += @{ label = "NVIDIA toolkit repo (nvidia.github.io)"; url = "https://nvidia.github.io/"; gpuSoft = $true; gpuBlocking = $true }
     } else {
       # PREBUILT/MIRROR: we PULL the node image ($K3S_CUDA_IMAGE) AND the probe's CUDA image
       # ($CUDA_PROBE_IMAGE) -- which can be on DIFFERENT hosts when both overrides are set. Probe
@@ -5313,7 +5319,8 @@ function Test-Preflight {
         # Skip bare Docker Hub (already covered by the registry-1.docker.io probe) and nvcr.io
         # (added above). Only probe a real registry host.
         if ($gpuHost -match '[.:]' -and $gpuHost -ne 'docker.io' -and $gpuHost -ne 'nvcr.io') {
-          $criticals += @{ label = "GPU image registry ($gpuHost)"; url = "https://$gpuHost/"; gpuSoft = $true }
+          # The mirror/custom registry IS required on this path, so a failure here does block.
+          $criticals += @{ label = "GPU image registry ($gpuHost)"; url = "https://$gpuHost/"; gpuSoft = $true; gpuBlocking = $true }
         }
       }
     }
@@ -5326,10 +5333,12 @@ function Test-Preflight {
     elseif ($c.gpuSoft) {
       # GPU build host blocked: warn only. GPU is optional and degrades to CPU, so this must
       # not hard-fail an otherwise-fine CPU-capable install (#616).
-      # Remember it: the GPU gate then skips the probe/build/pull instead of spending ~3-15
-      # minutes timing out on hosts we already know are unreachable, which made a re-run (the
-      # very thing our CPU-fallback advice tells operators to do) look hung (Bugbot).
-      $script:GPU_HOSTS_UNREACHABLE = "$($c.label) is unreachable from this machine"
+      # Remember it ONLY if this path actually needs the host: the GPU gate then skips the
+      # probe/build/pull instead of spending ~3-15 minutes timing out on hosts we already know
+      # are unreachable, which made a re-run (the very thing our CPU-fallback advice tells
+      # operators to do) look hung. A non-required host (e.g. nvcr.io on a mirror install) warns
+      # and nothing more -- otherwise we would disable GPU on air-gapped mirrors (Bugbot).
+      if ($c.gpuBlocking) { $script:GPU_HOSTS_UNREACHABLE = "$($c.label) is unreachable from this machine" }
 
       # Wording must match the path actually in use (Bugbot): on the pull/mirror path nothing is
       # built locally, so "can't be built" named the wrong failure.
@@ -5749,7 +5758,13 @@ if ($GPU_VENDOR -eq "nvidia" -and $NVIDIA_DRIVER_OK -and ($K8S_VERSION -eq "late
   if ($GPU_HOSTS_UNREACHABLE) {
     # Preflight already established the GPU download chain is blocked, so the probe (180s) and the
     # build/pull (up to 15/20 min) would only time out. Fail fast with the known reason (Bugbot).
-    $GPU_SKIP_REASON = "$GPU_HOSTS_UNREACHABLE, so the GPU node image can't be obtained -- on a restricted network set TRACEBLOC_IMAGE_REGISTRY to your mirror (or TRACEBLOC_K3S_CUDA_IMAGE to a prebuilt image) and re-run; running CPU-only"
+    # Remedy has to match the path: telling someone who already configured a mirror to configure
+    # a mirror is noise -- point at the mirror's reachability instead (Bugbot).
+    if ($env:TRACEBLOC_K3S_CUDA_IMAGE -or $env:TRACEBLOC_IMAGE_REGISTRY) {
+      $GPU_SKIP_REASON = "$GPU_HOSTS_UNREACHABLE, so the GPU node image can't be pulled -- check that your configured GPU image registry is reachable from this machine (and that it holds the k3s-CUDA image), then re-run; running CPU-only"
+    } else {
+      $GPU_SKIP_REASON = "$GPU_HOSTS_UNREACHABLE, so the GPU node image can't be built -- on a restricted network set TRACEBLOC_IMAGE_REGISTRY to your mirror (or TRACEBLOC_K3S_CUDA_IMAGE to a prebuilt image) and re-run; running CPU-only"
+    }
     Warn "Skipping GPU setup -- $GPU_HOSTS_UNREACHABLE. Running CPU-only (no long timeouts)."
   }
   elseif ((Confirm-DockerGpu) -and (& $gpuImageReady)) {

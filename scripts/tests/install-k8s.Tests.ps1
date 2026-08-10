@@ -4310,12 +4310,27 @@ Describe "GPU setup fails fast when preflight already found the hosts unreachabl
   It "preflight records the unreachable GPU host" {
     $script:FFSRC | Should -Match '\$script:GPU_HOSTS_UNREACHABLE = "\$\(\$c\.label\) is unreachable'
   }
+  It "nvcr.io is NON-blocking on the mirror/prebuilt path -- air-gap keeps its GPU (#616 Bugbot HIGH)" {
+    # Regression I introduced: treating EVERY soft GPU probe as blocking disabled GPU on
+    # air-gapped mirror installs, where nvcr.io is blocked BY DESIGN and images come from the
+    # mirror -- and the remedy told them to configure the mirror they had configured.
+    $script:FFSRC | Should -Match '\$nvcrBlocking = -not \(\$env:TRACEBLOC_K3S_CUDA_IMAGE -or \$env:TRACEBLOC_IMAGE_REGISTRY\)'
+    $script:FFSRC | Should -Match 'url = "https://nvcr\.io/"; gpuSoft = \$true; gpuBlocking = \$nvcrBlocking'
+    # the hosts the path DOES need are blocking
+    $script:FFSRC | Should -Match 'nvidia\.github\.io/"; gpuSoft = \$true; gpuBlocking = \$true'
+    $script:FFSRC | Should -Match 'GPU image registry \(\$gpuHost\)"; url = "https://\$gpuHost/"; gpuSoft = \$true; gpuBlocking = \$true'
+    # and only a blocking probe arms the short-circuit
+    $script:FFSRC | Should -Match 'if \(\$c\.gpuBlocking\) \{ \$script:GPU_HOSTS_UNREACHABLE'
+  }
+  It "the skip remedy matches the path -- no 'set a mirror' to someone who set one (#616 Bugbot)" {
+    $script:FFSRC | Should -Match "can't be pulled -- check that your configured GPU image registry is reachable"
+    $script:FFSRC | Should -Match "can't be built -- on a restricted network set TRACEBLOC_IMAGE_REGISTRY"
+  }
   It "the gate short-circuits BEFORE the probe, with an actionable reason" {
     # otherwise a re-run (which our own CPU-fallback advice recommends) burns 3-15 minutes of
     # timeouts on hosts already known to be blocked, and looks hung.
-    $script:FFSRC | Should -Match 'if \(\$GPU_HOSTS_UNREACHABLE\) \{[\s\S]{0,700}?\}\s*\n\s*elseif \(\(Confirm-DockerGpu\)'
+    $script:FFSRC | Should -Match 'if \(\$GPU_HOSTS_UNREACHABLE\) \{[\s\S]{0,2000}?\}\s*\n\s*elseif \(\(Confirm-DockerGpu\)'
     $script:FFSRC | Should -Match 'Skipping GPU setup --'
-    $script:FFSRC | Should -Match 'set TRACEBLOC_IMAGE_REGISTRY to your mirror'
   }
   It "the global defaults empty so a reachable machine is unaffected" {
     $script:FFSRC | Should -Match '(?m)^\$GPU_HOSTS_UNREACHABLE = ""'
