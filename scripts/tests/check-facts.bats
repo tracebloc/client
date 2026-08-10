@@ -14,7 +14,7 @@ setup() {
   mkdir -p "$REPO/scripts/spec" "$REPO/scripts/lib"
   cp "$CF" "$REPO/scripts/check-facts.sh"
   cp "${SCRIPTS_DIR}/spec/facts.env" "$REPO/scripts/spec/facts.env"
-  # Consumers seeded to match the spec (v5.9.0 / v4.2.3 / v1.29.4-k3s1).
+  # Consumers seeded to match the spec (v5.9.0 / v4.2.3 / v1.29.4-k3s1 / READY_TIMEOUT 600 — #562).
   cat > "$REPO/scripts/lib/common.sh" <<'SH'
 K8S_VERSION="${K8S_VERSION:-v1.29.4-k3s1}"
 K3D_VERSION="${K3D_VERSION:-v5.9.0}"
@@ -24,11 +24,11 @@ SH
 $script:K3dVersion  = if ($env:K3D_VERSION)  { $env:K3D_VERSION }  else { "v5.9.0" }
 $script:HelmVersion = if ($env:HELM_VERSION) { $env:HELM_VERSION } else { "v4.2.3" }
 $K8S_VERSION   = if ($env:K8S_VERSION)   { $env:K8S_VERSION }   else { "v1.29.4-k3s1" }
-$ReadyTimeout     = if ($env:READY_TIMEOUT) { $env:READY_TIMEOUT } else { "300" }
+$ReadyTimeout     = if ($env:READY_TIMEOUT) { $env:READY_TIMEOUT } else { "600" }
 $k3dArgs += @("--image", "rancher/k3s:$K8S_VERSION")
 PS
   cat > "$REPO/scripts/lib/summary.sh" <<'SH'
-READY_TIMEOUT="${READY_TIMEOUT:-300}"
+READY_TIMEOUT="${READY_TIMEOUT:-600}"
 SH
   # cluster.sh carries the create-time k3s --image pin the #547 wiring guard checks.
   cat > "$REPO/scripts/lib/cluster.sh" <<'SH'
@@ -122,18 +122,23 @@ _set_spec() { local tmp; tmp="$(mktemp)"; sed "s|^$1=.*|$1=$2|" "$REPO/scripts/s
 }
 
 @test "check-facts --check: READY_TIMEOUT (a real timeout budget) drift in ps1 -> RED (#435)" {
+  # Consumers seed READY_TIMEOUT at the spec default (600, #562). Push ps1 to a WRONG
+  # value so the gate must report ReadyTimeout drift — bumping bash alone (or the spec)
+  # can't leave the Windows timeout budget stale.
   local tmp; tmp="$(mktemp)"
-  sed 's|"300"|"600"|' "$REPO/scripts/install-k8s.ps1" > "$tmp" && mv "$tmp" "$REPO/scripts/install-k8s.ps1"
+  sed 's|"600"|"900"|' "$REPO/scripts/install-k8s.ps1" > "$tmp" && mv "$tmp" "$REPO/scripts/install-k8s.ps1"
   run _facts --check
   [ "$status" -ne 0 ] || return 1
   [[ "$output" == *"install-k8s.ps1:ReadyTimeout"* ]] || return 1
 }
 
 @test "check-facts --write: bumping the READY_TIMEOUT budget stamps bash + PowerShell (#435)" {
-  _set_spec READY_TIMEOUT 600
+  # Consumers seed at the current default (600, #562); bump the spec to a fresh value so
+  # --write must actually restamp both the bash (summary.sh) and PowerShell budgets.
+  _set_spec READY_TIMEOUT 900
   _facts --write
-  grep -q 'READY_TIMEOUT="${READY_TIMEOUT:-600}"' "$REPO/scripts/lib/summary.sh"   # bash consumer
-  grep -q 'else { "600" }' "$REPO/scripts/install-k8s.ps1"                          # PowerShell consumer
+  grep -q 'READY_TIMEOUT="${READY_TIMEOUT:-900}"' "$REPO/scripts/lib/summary.sh"   # bash consumer
+  grep -q 'else { "900" }' "$REPO/scripts/install-k8s.ps1"                          # PowerShell consumer
   run _facts --check; [ "$status" -eq 0 ] || return 1
 }
 

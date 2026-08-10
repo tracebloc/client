@@ -132,6 +132,34 @@ tests:
       - matchRegex:
           path: data["image-refresh.sh"]
           pattern: "registry-1.docker.io"
+      # Regression guard (#634): kubectl in the alpine/k8s image does not
+      # reliably auto-detect in-cluster config in this pod, so the script MUST
+      # build an explicit in-cluster kubeconfig from the mounted ServiceAccount
+      # (API server from KUBERNETES_SERVICE_*, ca + token from the projected SA
+      # volume) before any API call. Without this every tick failed against
+      # http://localhost:8080 fleet-wide. Lock the preamble in place.
+      - matchRegex:
+          path: data["image-refresh.sh"]
+          pattern: "export KUBECONFIG="
+      - matchRegex:
+          path: data["image-refresh.sh"]
+          pattern: 'kubectl config set-cluster in-cluster'
+      # The server authority is built from the *bracketed* API host so an IPv6
+      # KUBERNETES_SERVICE_HOST yields a valid URL (client-go net.JoinHostPort).
+      - matchRegex:
+          path: data["image-refresh.sh"]
+          pattern: 'api_host="\[\$api_host\]"'
+      - matchRegex:
+          path: data["image-refresh.sh"]
+          pattern: 'server="https://\$\{api_host\}:\$\{KUBERNETES_SERVICE_PORT\}"'
+      # The bearer token goes in via tokenFile (a path) and MUST NOT be passed
+      # as --token=<value> on the kubectl argv (credential exposure via procfs).
+      - matchRegex:
+          path: data["image-refresh.sh"]
+          pattern: 'users\.in-cluster\.tokenFile'
+      - notMatchRegex:
+          path: data["image-refresh.sh"]
+          pattern: 'set-credentials in-cluster --token'
       # Regression guard (#546): the tick MUST skip when the deployment isn't settled,
       # so a stuck/unschedulable jobs-manager (e.g. the RWO-PVC deadlock #545) can't be
       # re-restarted every tick into a ReplicaSet storm. The guard runs `rollout status`

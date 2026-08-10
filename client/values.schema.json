@@ -295,6 +295,18 @@
       "type": "string",
       "description": "RFC-0003 D10 (backend#1181): optional operator pin for the tb_credmgr account password (3-tier resolution, mirrors podTokenSigningSecret). Empty = generate-and-persist. Set for DR / a pre-created MySQL account / forced rotation, or to keep it stable across a perExperimentDbCreds toggle. Must be alphanumeric."
     },
+    "serviceDbAccounts": {
+      "type": "boolean",
+      "description": "backend#1528 S1 (RFC-0003 D10 close-out): provision the dedicated MySQL service identities tb_meta (metadata DB) and tb_ingest (dataset DB) that replace the root-equivalent edgeuser. Additive — jobs-manager mints them at startup but nothing consumes them until S2, so a default install is byte-identical. Flip per environment, dev first."
+    },
+    "tbMetaPassword": {
+      "type": "string",
+      "description": "backend#1528 S1: optional operator pin for the tb_meta account password (3-tier resolution, mirrors credmgrPassword). Empty = generate-and-persist. Set for DR / a pre-created MySQL account / forced rotation. Must be alphanumeric."
+    },
+    "tbIngestPassword": {
+      "type": "string",
+      "description": "backend#1528 S1: optional operator pin for the tb_ingest account password (3-tier resolution, mirrors credmgrPassword). Empty = generate-and-persist. Set for DR / a pre-created MySQL account / forced rotation. Must be alphanumeric."
+    },
     "perIngestionTables": {
       "type": "boolean",
       "description": "RFC-0003 D16 (backend#1204/#1205): stamp PER_INGESTION_TABLES=1 into every ingestion Job. Flip per environment, dev first; file-bearing categories are refused under the flag until client-runtime#203 phase 2."
@@ -737,6 +749,10 @@
           "type": "integer",
           "minimum": 0
         },
+        "activeDeadlineSeconds": {
+          "type": "integer",
+          "minimum": 1
+        },
         "image": {
           "type": "object",
           "required": ["repository", "tag"],
@@ -793,6 +809,11 @@
           "type": "string",
           "pattern": "^[0-9]+(s|m|h)$",
           "description": "Passed to `kubectl rollout status --timeout`. Allow headroom for bare-metal image pull."
+        },
+        "maxRefreshAttempts": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Consecutive failed rollout attempts (same target digest) after which the refresh backs off instead of re-restarting a flapping deployment every tick (#563)."
         },
         "suspend": {
           "type": "boolean",

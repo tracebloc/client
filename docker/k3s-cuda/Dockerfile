@@ -42,10 +42,20 @@ RUN export DEBIAN_FRONTEND=noninteractive \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy the pinned k3s rootfs over the CUDA base. Exclude /bin on the first copy
-# so the Ubuntu userland (curl, apt, nvidia-ctk) survives, then bring in k3s's
-# own /bin (the k3s binary + /bin/aux) explicitly — the official recipe's split.
-COPY --from=k3s --exclude=/bin / /
+# Copy the pinned k3s rootfs over the CUDA base, then bring in k3s's own /bin explicitly.
+# --exclude MUST come BEFORE the src/dest: a TRAILING `--exclude` is parsed as the
+# destination, so the rootfs silently copies to /--exclude=... instead of / — the build
+# "passes" but the image is broken (Bugbot). Paths are RELATIVE to the source (`bin`, not
+# `/bin`). Ubuntu 22.04 is merged-/usr, so /bin /sbin /lib /lib64 are SYMLINKS to /usr/*,
+# while the Alpine k3s image ships them as real dirs — copying those over the symlinks errors
+# "cannot copy to non-directory". k3s is a STATIC binary (needs no shared libs), so we exclude
+# all four (keeping Ubuntu's glibc userland: curl/apt/nvidia-ctk) and overlay only k3s's own
+# /bin (the static k3s + /bin/aux) into /usr/bin via the kept /bin symlink. build.sh verifies
+# the overlay landed correctly after the build, so a mis-parse can never publish a broken image.
+COPY --from=k3s \
+     --exclude=bin --exclude=sbin --exclude=lib --exclude=lib32 --exclude=lib64 --exclude=libx32 \
+     --exclude=var/run --exclude=var/lock \
+     / /
 COPY --from=k3s /bin /bin
 
 # Auto-deploy the NVIDIA device plugin + `nvidia` RuntimeClass on first server
