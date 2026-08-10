@@ -3068,9 +3068,20 @@ function Test-HealthyClusterGpuConsistent {
 # same state as one on a current chart. Both the chown and the chmod are
 # best-effort: on a bind-mounted host path that cannot represent POSIX ownership,
 # the mkdir alone is often enough, and a failure to adjust must not abort anything.
+# DataBase is the in-node root the chart binds DATA under. It is NOT always /tracebloc:
+# with HOST_DATASET_DIR set, the installer writes hostPath.datasetPath: /tracebloc-data
+# and tracebloc.clientDataHostPath (_helpers.tpl) resolves data to
+# <datasetPath>/<release>/data on the dataset bind mount. Preparing /tracebloc/<release>/data
+# in that setup would touch a path nothing mounts, while kubelet still created the REAL
+# one root:root 0755 -- the bug would look fixed and not be. Logs always stay on the local
+# /tracebloc tree (logs-pvc.yaml hardcodes it), which is why only data is parameterised.
+# Bash splits the same way (lib/cluster.sh _ensure_release_dirs).
 function Get-ReleaseDirsPrepCommand {
-  param([Parameter(Mandatory)][string]$Release)
-  $dirs = @("/tracebloc/$Release/data", "/tracebloc/$Release/logs") -join " "
+  param(
+    [Parameter(Mandatory)][string]$Release,
+    [string]$DataBase = "/tracebloc"
+  )
+  $dirs = @("$DataBase/$Release/data", "/tracebloc/$Release/logs") -join " "
   # Reports OK/FAIL per dir so the caller can tell the user something true rather
   # than assuming success. Writable = other-writable, or already owned by uid 1000.
   #
@@ -3102,9 +3113,22 @@ function Initialize-ReleaseDataDirs {
   param([Parameter(Mandatory)][string]$Release)
   if (-not $Release) { return }
   $node = "k3d-$CLUSTER_NAME-server-0"
-  $cmd  = Get-ReleaseDirsPrepCommand -Release $Release
-  Log "Preparing hostPath dirs for release '$Release' in $node"
-  $res = Invoke-DockerCli -DockerArgs @("exec", $node, "sh", "-c", $cmd) -TimeoutSec 60
+  # Follow the chart: data moves to the dataset bind mount when HOST_DATASET_DIR is set.
+  $dataBase = if ($HOST_DATASET_DIR) { "/tracebloc-data" } else { "/tracebloc" }
+  $cmd = Get-ReleaseDirsPrepCommand -Release $Release -DataBase $dataBase
+  Log "Preparing hostPath dirs for release '$Release' in $node (data base $dataBase)"
+
+  # The script goes in on STDIN, never as an argv token. Invoke-BoundedProcess joins
+  # arguments into one command line and quotes any that contain whitespace WITHOUT
+  # escaping inner quotes -- its contract is "callers pass space-free tokens". This
+  # script has both spaces and embedded "$d", so as an argument Windows' command-line
+  # parser would end the quoted string at the first inner quote and hand `sh` a
+  # truncated script: the prep would silently do nothing and the Permission denied
+  # this function exists to prevent would survive. Same failure family as the kubectl
+  # patch that had to move to --patch-file. `sh` with no -c reads its program from
+  # stdin, and every argv token here is space-free. Trailing newline so the last
+  # command runs even on a shell that wants one.
+  $res = Invoke-DockerCli -DockerArgs @("exec", "-i", $node, "sh") -Stdin ($cmd + "`n") -TimeoutSec 60
   $out = "$($res.Output)".Trim()
   Log "Release dir prep: exit=$($res.Code) out=$out"
 
@@ -3113,7 +3137,7 @@ function Initialize-ReleaseDataDirs {
   if ($res.Code -ne 0 -or $out -match "FAIL ") {
     Warn "Couldn't confirm the data directories are writable for this release."
     Hint "Ingests can fail with 'Permission denied' on /data/shared until they are. Fix with:"
-    Hint "  docker exec $node sh -c `"chmod -R 3777 /tracebloc/$Release/data /tracebloc/$Release/logs`""
+    Hint "  docker exec $node sh -c `"chmod -R 3777 $dataBase/$Release/data /tracebloc/$Release/logs`""
     return
   }
   Log "Release dirs writable for '$Release'"

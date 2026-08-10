@@ -4814,3 +4814,59 @@ Describe "hostPath prep also runs on the nothing-to-do fast path (#653)" {
     $fast | Should -Match 'if \(\$fpRelease\) \{ Initialize-ReleaseDataDirs'
   }
 }
+
+Describe "hostPath prep survives Windows argv and follows the dataset mount (#654 Bugbot)" {
+
+  It "sends the script on STDIN, with every argv token space-free" {
+    # Invoke-BoundedProcess joins args into ONE command line and quotes any arg containing
+    # whitespace WITHOUT escaping inner quotes -- its documented contract is "callers pass
+    # space-free tokens". Passed as `sh -c <script>`, Windows' parser would end the quoted
+    # arg at the script's first inner " and hand sh a TRUNCATED program: prep silently does
+    # nothing and the Permission denied survives, with the install still reporting success.
+    # Same failure family as the kubectl patch that had to move to --patch-file.
+    $script:capArgs = $null; $script:capStdin = $null
+    Mock Invoke-DockerCli {
+      $script:capArgs = $DockerArgs; $script:capStdin = $Stdin
+      [pscustomobject]@{ Code = 0; Output = "OK /tracebloc/rel/data 1000 drwxrwsrwt" }
+    }
+    Mock Log {}; Mock Warn {}; Mock Hint {}
+    Initialize-ReleaseDataDirs -Release "rel"
+
+    @($script:capArgs | Where-Object { $_ -match '\s' }).Count | Should -Be 0
+    $script:capArgs | Should -Contain "-i"      # stdin must be attached
+    $script:capArgs | Should -Contain "sh"
+    $script:capArgs | Should -Not -Contain "-c" # not an argv-borne script
+    $script:capStdin | Should -Match 'mkdir -p'
+    $script:capStdin | Should -Match "`n$"      # trailing newline so the last line runs
+  }
+
+  It "prepares data on the dataset mount when HOST_DATASET_DIR is set" {
+    # tracebloc.clientDataHostPath resolves data to <hostPath.datasetPath>/<release>/data, and
+    # the installer writes datasetPath: /tracebloc-data whenever HOST_DATASET_DIR is set. Prep
+    # under /tracebloc there would touch a path nothing mounts while kubelet still created the
+    # real one root:root 0755 -- fixed-looking, still broken.
+    $cmd = Get-ReleaseDirsPrepCommand -Release "rel" -DataBase "/tracebloc-data"
+    $cmd | Should -Match '/tracebloc-data/rel/data'
+    $cmd | Should -Not -Match '/tracebloc/rel/data'
+  }
+
+  It "keeps logs on the local tree even when data moves to the dataset mount" {
+    # logs-pvc.yaml hardcodes /tracebloc/<release>/logs — only data follows datasetPath.
+    $cmd = Get-ReleaseDirsPrepCommand -Release "rel" -DataBase "/tracebloc-data"
+    $cmd | Should -Match '/tracebloc/rel/logs'
+  }
+
+  It "defaults to the local tree when no dataset mount is configured" {
+    $cmd = Get-ReleaseDirsPrepCommand -Release "rel"
+    $cmd | Should -Match '/tracebloc/rel/data'
+    $cmd | Should -Match '/tracebloc/rel/logs'
+  }
+
+  It "the repair hint names the SAME paths that were prepared" {
+    # A hint pointing at /tracebloc when data lives on /tracebloc-data is advice that
+    # silently fixes nothing.
+    $fn = ((Get-Content "$PSScriptRoot/../install-k8s.ps1" -Raw) -split 'function Initialize-ReleaseDataDirs')[1]
+    $fn = ($fn -split '\nfunction ')[0]
+    $fn | Should -Match 'chmod -R 3777 \$dataBase/\$Release/data /tracebloc/\$Release/logs'
+  }
+}

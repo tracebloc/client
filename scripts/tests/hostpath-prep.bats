@@ -25,6 +25,9 @@ teardown() {
 # Pull the prep command out of the PowerShell here-string and make it runnable:
 #  - strip the backticks PowerShell uses to escape shell $ (`$d -> $d)
 #  - swap the interpolated $dirs for the two dirs under $1
+# Note the installer parameterises the DATA base (it becomes /tracebloc-data when
+# HOST_DATASET_DIR is set) while logs stay on /tracebloc; both land in $dirs, so
+# substituting $dirs covers either layout.
 _prep_cmd() {
   local base="$1" line
   line="$(grep -E '^for d in \$dirs; do mkdir -p' "$PS1_FILE" | tr -d '`')"
@@ -39,6 +42,19 @@ _prep_cmd() {
   if command -v dash >/dev/null 2>&1; then
     dash -n "$TMP_BASE/prep.sh" || return 1
   fi
+}
+
+@test "the script runs the same way the installer delivers it: piped into sh on stdin" {
+  # install-k8s.ps1 runs `docker exec -i <node> sh` and writes this script to STDIN, NOT as an
+  # `sh -c <script>` argument: Invoke-BoundedProcess joins args into one command line and quotes
+  # whitespace-containing args without escaping inner quotes, so an argv-borne script would be
+  # truncated at its first embedded " on Windows and silently prepare nothing (#654 Bugbot).
+  # Exercise the delivery the installer actually uses.
+  run sh -c 'printf "%s\n" "$1" | sh' _ "$(_prep_cmd "$TMP_BASE")"
+  [ "$status" -eq 0 ] || return 1
+  [ -d "$TMP_BASE/data" ] || return 1
+  [[ "$output" == *"OK $TMP_BASE/data"* ]] || return 1
+  [[ "$output" != *FAIL* ]] || return 1
 }
 
 @test "fresh dirs are created and reported OK" {
