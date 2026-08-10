@@ -3044,6 +3044,81 @@ function Test-HealthyClusterGpuConsistent {
   Hint "  k3d cluster delete $CLUSTER_NAME   (then re-run this installer)"
 }
 
+# Build the sh -c body that pre-creates the chart's hostPath PV directories and
+# makes them writable by the container user. Pure (string in, string out) so the
+# quoting and the dir list are unit-testable without Docker or a cluster.
+#
+# Why this is needed at all. The chart's hostPath PVs bind /tracebloc/<release>/data
+# and /tracebloc/<release>/logs (mounted in the pod as /data/shared and /data/logs).
+# kubelet's DirectoryOrCreate creates a missing path as root:root 0755, and it
+# IGNORES fsGroup on hostPath volumes (kubernetes#138411) -- so the container user
+# (uid 1000) cannot create anything inside, and the very first `data ingest` dies
+# with "mkdir: can't create directory '/data/shared/.tracebloc-staging/': Permission
+# denied". The bash installer has always pre-created these (lib/cluster.sh
+# _ensure_release_dirs); this script never did, which is why the failure was
+# Windows-only.
+#
+# Scope: data + logs only -- the two the chart's own init-writable-data container
+# targets. mysql's PV is deliberately left alone: it gets its own init container in
+# the chart, its datadir permissions are the database's business, and installs
+# reaching a healthy cluster prove it is already fine.
+#
+# 3777 mirrors init-writable-data exactly (setgid + sticky + world-write), so a
+# cluster on a published chart that predates that init container ends up in the
+# same state as one on a current chart. Both the chown and the chmod are
+# best-effort: on a bind-mounted host path that cannot represent POSIX ownership,
+# the mkdir alone is often enough, and a failure to adjust must not abort anything.
+function Get-ReleaseDirsPrepCommand {
+  param([Parameter(Mandatory)][string]$Release)
+  $dirs = @("/tracebloc/$Release/data", "/tracebloc/$Release/logs") -join " "
+  # Reports OK/FAIL per dir so the caller can tell the user something true rather
+  # than assuming success. Writable = other-writable, or already owned by uid 1000.
+  #
+  # Reads the mode with `ls -ldn`, NOT `stat -c`: -c is a GNU/coreutils flag that
+  # BSD stat rejects, and the failure mode is silent -- stat writes nothing, the
+  # mode string comes back empty, and a correctly-chmodded directory gets reported
+  # FAIL. That would emit a scary "couldn't confirm" warning on a perfectly good
+  # install. `ls -ldn` is POSIX and behaves the same on busybox (rancher/k3s), on
+  # coreutils (the CUDA node image), and on BSD, so the same string parses
+  # everywhere -- including in the test suite on a developer's Mac.
+  #
+  # In `ls -ldn` output the mode is field 1 and the numeric owner is field 3;
+  # character 9 of the mode is the other-write bit ("drwxrwsrwt" -> 'w'), which the
+  # ????????w* glob tests without arithmetic. A trailing sticky/setgid character is
+  # absorbed by the *.
+  return @"
+for d in $dirs; do mkdir -p "`$d" 2>/dev/null; chown 1000:1000 "`$d" 2>/dev/null; chmod 3777 "`$d" 2>/dev/null; set -- `$(ls -ldn "`$d" 2>/dev/null); m=`$1; o=`$3; case "`$m" in ????????w*) w=1;; *) w=0;; esac; [ "`$o" = 1000 ] && w=1; if [ "`$w" = 1 ]; then echo "OK `$d `$o `$m"; else echo "FAIL `$d `$o `$m"; fi; done
+"@.Trim()
+}
+
+# Make this release's hostPath PV dirs writable before Helm runs, so the first
+# ingest can't fail on a permission the installer was in a position to fix.
+#
+# Never fatal. A cluster that isn't k3d-shaped, a docker exec that times out, or a
+# mount that refuses chown all end in a warning plus the exact command to run by
+# hand -- the install itself still completes, and on a current chart
+# init-writable-data fixes the same dirs at pod start anyway.
+function Initialize-ReleaseDataDirs {
+  param([Parameter(Mandatory)][string]$Release)
+  if (-not $Release) { return }
+  $node = "k3d-$CLUSTER_NAME-server-0"
+  $cmd  = Get-ReleaseDirsPrepCommand -Release $Release
+  Log "Preparing hostPath dirs for release '$Release' in $node"
+  $res = Invoke-DockerCli -DockerArgs @("exec", $node, "sh", "-c", $cmd) -TimeoutSec 60
+  $out = "$($res.Output)".Trim()
+  Log "Release dir prep: exit=$($res.Code) out=$out"
+
+  # Code 124 is Invoke-BoundedProcess's timeout; treat any non-zero the same way --
+  # report, hint, continue.
+  if ($res.Code -ne 0 -or $out -match "FAIL ") {
+    Warn "Couldn't confirm the data directories are writable for this release."
+    Hint "Ingests can fail with 'Permission denied' on /data/shared until they are. Fix with:"
+    Hint "  docker exec $node sh -c `"chmod -R 3777 /tracebloc/$Release/data /tracebloc/$Release/logs`""
+    return
+  }
+  Log "Release dirs writable for '$Release'"
+}
+
 function New-K3dCluster {
   Log "Creating k3d cluster: '$CLUSTER_NAME'"
 
@@ -4441,6 +4516,21 @@ $envBlock
     if ($LASTEXITCODE -ne 0) { Err "Couldn't add the tracebloc chart repo ($TRACEBLOC_HELM_REPO_URL)." $addOutput }
   }
 
+  # Pre-create this release's hostPath dirs BEFORE Helm, so kubelet never gets to
+  # create them root:root 0755 and strand the first ingest on "Permission denied".
+  # The release name is what the PV paths are keyed on (/tracebloc/<release>/...),
+  # so it must match whichever release Helm is about to touch: the adopted one when
+  # reconciling, otherwise the namespace-named release this script installs.
+  # Two statements, not a one-line inline branch on $adoptedReuse alone: an existing
+  # test locates the adopted helm-upgrade block by splitting this file on that exact
+  # opening-brace form, so a second occurrence up here silently steals the split and
+  # fails a test that has nothing to do with this change. Keep the compound
+  # condition. It is also stricter -- an adopt with no resolved release name falls
+  # back to the namespace instead of preparing /tracebloc//data.
+  $pvRelease = $TB_NAMESPACE
+  if ($adoptedReuse -and $existingName) { $pvRelease = $existingName }
+  Initialize-ReleaseDataDirs -Release $pvRelease
+
   Write-Host ""
   if ($adoptedReuse) {
     # Surgical reconcile of the LIVE release: preserve the deployed configuration +
@@ -5700,6 +5790,15 @@ if ((-not $Resume) -and $script:InstallState.completed -and (Test-ToolsPresent) 
     # Same reasoning for GPU: a healthy cluster whose values request GPU but whose node is
     # CPU-only would strand GPU experiments; flag it here since the fast path skips the gate (Bugbot).
     Test-HealthyClusterGpuConsistent
+    # This path exits before Helm, so a cluster installed BEFORE this fix would never
+    # get its PV dirs repaired -- the client is healthy, so every re-run shortcuts
+    # here and the first ingest keeps failing with "Permission denied". Repair it now:
+    # idempotent, bounded, and it makes "re-run the installer" a real remedy instead
+    # of advice that quietly does nothing. Get-InstalledClientInfo is the same bounded
+    # enumerator the health gate above already used; the release NAME (not the
+    # namespace) is what the PV paths embed.
+    $fpRelease = (Get-InstalledClientInfo).Name
+    if ($fpRelease) { Initialize-ReleaseDataDirs -Release $fpRelease }
     Hint "Delete $(Get-InstallStatePath) (or set a fresh HOST_DATA_DIR) to force a full reinstall."
     Unregister-ResumeAfterReboot
     Log "Already installed and healthy - nothing to do."

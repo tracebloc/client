@@ -4684,3 +4684,133 @@ Describe "Fast path retries GPU on a CPU-only cluster (#616 Bugbot: re-run can e
     $fn | Should -Not -Match 'Invoke-DockerCli[^\n]*NVIDIA_DISABLE_REQUIRE'
   }
 }
+
+Describe "hostPath PV dirs are made writable before Helm (#616 follow-up: first-ingest Permission denied)" {
+  BeforeAll { $script:HPSRC = Get-Content "$PSScriptRoot/../install-k8s.ps1" -Raw }
+
+  # The bug: the chart's hostPath PVs bind /tracebloc/<release>/{data,logs}. kubelet's
+  # DirectoryOrCreate makes a missing path root:root 0755 and ignores fsGroup on hostPath
+  # (kubernetes#138411), so uid 1000 can't write and the FIRST `data ingest` dies with
+  # "mkdir: can't create directory '/data/shared/.tracebloc-staging/': Permission denied".
+  # The bash installer has always pre-created these (lib/cluster.sh _ensure_release_dirs);
+  # this script didn't, which is exactly why the failure was Windows-only.
+
+  It "prepares both PV dirs for the release the PV paths are keyed on" {
+    $cmd = Get-ReleaseDirsPrepCommand -Release "windows-demo"
+    $cmd | Should -Match '/tracebloc/windows-demo/data'
+    $cmd | Should -Match '/tracebloc/windows-demo/logs'
+  }
+
+  It "pre-creates the dirs -- the mkdir is the part that beats kubelet to them" {
+    # Without mkdir -p, kubelet wins the race and creates them root:root 0755; a chmod
+    # afterwards would be repairing damage instead of preventing it.
+    Get-ReleaseDirsPrepCommand -Release "r" | Should -Match 'mkdir -p'
+  }
+
+  It "matches the chart's init-writable-data semantics (chown 1000:1000 + chmod 3777)" {
+    # Same end state as a current chart's init container, so a cluster on an older
+    # published chart is not a second, differently-broken configuration.
+    $cmd = Get-ReleaseDirsPrepCommand -Release "r"
+    $cmd | Should -Match 'chown 1000:1000'
+    $cmd | Should -Match 'chmod 3777'
+  }
+
+  It "leaves the mysql PV alone" {
+    # mysql gets its own init container in the chart and its datadir permissions are the
+    # database's business; installs that reach a healthy cluster prove it's already fine.
+    Get-ReleaseDirsPrepCommand -Release "r" | Should -Not -Match '/mysql'
+  }
+
+  It "reads the mode with POSIX ls -ldn, never GNU-only stat -c" {
+    # Regression guard on a bug this actually had: `stat -c` is a GNU/coreutils flag that
+    # BSD stat REJECTS, and it fails SILENTLY -- empty mode string, so a correctly-chmodded
+    # dir gets reported FAIL and the installer emits a scary warning on a healthy install.
+    # Same class as the sha256sum --check trap (#429). ls -ldn behaves identically on
+    # busybox, coreutils and BSD.
+    $cmd = Get-ReleaseDirsPrepCommand -Release "r"
+    $cmd | Should -Match 'ls -ldn'
+    $cmd | Should -Not -Match 'stat -c'
+  }
+
+  It "keeps the shell's own \$d/\$1/\$3 out of PowerShell's hands" {
+    # If the here-string interpolated these, the node would run `mkdir -p ""` and silently
+    # prepare nothing -- the exact silent-no-op this whole fix exists to remove.
+    $cmd = Get-ReleaseDirsPrepCommand -Release "r"
+    $cmd | Should -Match '\$d'
+    $cmd | Should -Match 'm=\$1'
+    $cmd | Should -Match 'o=\$3'
+  }
+
+  It "reports FAIL for a root-owned 0755 dir and OK for a 3777 one (the decision logic)" {
+    # Exercises the glob that decides writability, without needing a node: character 9 of
+    # the mode is the other-write bit.
+    $cmd = Get-ReleaseDirsPrepCommand -Release "r"
+    $cmd | Should -Match '\?{8}w\*\)'      # ????????w*) -> other-writable
+    $cmd | Should -Match '\[ "\$o" = 1000 \]'  # ...or already owned by the container user
+  }
+
+  Context "Initialize-ReleaseDataDirs" {
+    It "warns with a runnable command when the dirs still aren't writable" {
+      Mock Invoke-DockerCli { [pscustomobject]@{ Code = 0; Output = "FAIL /tracebloc/rel/data 0 drwxr-xr-x" } }
+      Mock Warn {}; Mock Hint {}; Mock Log {}
+      { Initialize-ReleaseDataDirs -Release "rel" } | Should -Not -Throw
+      Should -Invoke Warn -Times 1
+      # The hint must be copy-pasteable, not advice to go read something.
+      Should -Invoke Hint -ParameterFilter { $m -match 'docker exec' } -Times 1
+    }
+
+    It "a docker exec timeout degrades to a warning, never a failed install" {
+      # 124 is Invoke-BoundedProcess's timeout code. A cluster that isn't k3d-shaped lands
+      # here too. Neither is a reason to abort an install that is otherwise fine -- and on a
+      # current chart init-writable-data fixes the same dirs at pod start.
+      Mock Invoke-DockerCli { [pscustomobject]@{ Code = 124; Output = "docker exec timed out after 60s" } }
+      Mock Warn {}; Mock Hint {}; Mock Log {}
+      { Initialize-ReleaseDataDirs -Release "rel" } | Should -Not -Throw
+      Should -Invoke Warn -Times 1
+    }
+
+    It "stays quiet when every dir came back OK" {
+      Mock Invoke-DockerCli { [pscustomobject]@{ Code = 0; Output = "OK /tracebloc/rel/data 1000 drwxrwsrwt`nOK /tracebloc/rel/logs 1000 drwxrwsrwt" } }
+      Mock Warn {}; Mock Hint {}; Mock Log {}
+      Initialize-ReleaseDataDirs -Release "rel"
+      Should -Invoke Warn -Times 0
+    }
+  }
+
+  It "runs BEFORE helm, for whichever release helm is about to touch" {
+    # Order matters: after Helm, the pod may already have failed to mount. And the release
+    # name must follow the adopt/fresh branch, since the PV path embeds it -- preparing
+    # dirs for the wrong release would look successful and fix nothing.
+    # The release name follows the adopt/fresh branch.
+    $script:HPSRC | Should -Match '\$pvRelease = \$TB_NAMESPACE'
+    $script:HPSRC | Should -Match 'if \(\$adoptedReuse -and \$existingName\) \{ \$pvRelease = \$existingName \}'
+    # ...and the prep runs before the helm adopted/fresh split.
+    $idxPrep = $script:HPSRC.IndexOf('Initialize-ReleaseDataDirs -Release $pvRelease')
+    $idxHelm = $script:HPSRC.IndexOf('if ($adoptedReuse) {', $idxPrep)
+    $idxPrep | Should -BeGreaterThan 0
+    $idxHelm | Should -BeGreaterThan $idxPrep
+    # Guard the anchor collision that broke an existing test once: the inline form
+    # must not reappear before the helm block.
+    $script:HPSRC.IndexOf('-Release $(if ($adoptedReuse)') | Should -Be -1
+  }
+}
+
+Describe "hostPath prep also runs on the nothing-to-do fast path (#653)" {
+  BeforeAll { $script:FPHSRC = Get-Content "$PSScriptRoot/../install-k8s.ps1" -Raw }
+  It "repairs an already-installed cluster instead of shortcutting past the fix" {
+    # The fast path exits before Helm. A cluster installed before this fix is HEALTHY, so
+    # every re-run takes that shortcut -- without this, "re-run the installer" would be
+    # advice that quietly does nothing while the first ingest keeps failing.
+    $fast = ($script:FPHSRC -split 'already installed and the client is healthy')[1]
+    $fast = ($fast -split 'exit 0')[0]
+    $fast | Should -Match 'Initialize-ReleaseDataDirs -Release \$fpRelease'
+    # Keyed on the release NAME, since that is what the PV paths embed -- not the namespace.
+    $fast | Should -Match '\(Get-InstalledClientInfo\)\.Name'
+  }
+  It "skips silently when no release name could be resolved" {
+    # Never prepare /tracebloc//data: an unresolvable release must be a no-op, not a
+    # directory named after nothing.
+    $fast = (($script:FPHSRC -split 'already installed and the client is healthy')[1] -split 'exit 0')[0]
+    $fast | Should -Match 'if \(\$fpRelease\) \{ Initialize-ReleaseDataDirs'
+  }
+}
