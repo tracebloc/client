@@ -4256,23 +4256,44 @@ Describe "WSL2 GPU: node-advertised capacity replaces the NVML device plugin (#6
     # the non-CDI branch keeps the device-plugin guidance
     ($wsl -split '\} else \{')[1] | Should -Match 'k8s-device-plugin'
   }
+  It "the WSL2/CDI smoke-test --overrides payload is VALID JSON (#616 Bugbot: claimed stray brace)" {
+    # A scanner reported an "extra closing brace before the containers array close". It was a
+    # false positive -- the `}}}` closes limits, resources and the container in turn -- but the
+    # only durable answer is to PARSE it, so a genuine brace slip can never ship a command that
+    # errors on a healthy cluster.
+    $cmd = Get-GpuSmokeTestCommand -Selector "nvidia.com/gpu=all"
+    if ($cmd -notmatch "--overrides='(.*)'$") { throw "no --overrides payload in: $cmd" }
+    $json = $Matches[1] -replace '\\"', '"'          # undo the PowerShell-paste escaping
+    $obj = $json | ConvertFrom-Json                    # throws on malformed JSON
+    $obj.spec.runtimeClassName | Should -Be "nvidia"
+    $obj.spec.containers[0].resources.limits."nvidia.com/gpu" | Should -Be "1"
+    $obj.spec.containers[0].env[0].name | Should -Be "NVIDIA_VISIBLE_DEVICES"
+    $obj.spec.containers[0].env[0].value | Should -Be "nvidia.com/gpu=all"
+    $obj.spec.containers[0].image | Should -Match 'vectoradd'   # CUDA workload, not nvidia-smi
+  }
+  It "the device-plugin smoke-test --overrides payload is VALID JSON too (#616)" {
+    $cmd = Get-GpuSmokeTestCommand -Selector ""
+    if ($cmd -notmatch "--overrides='([^']*)'") { throw "no --overrides payload in: $cmd" }
+    $obj = ($Matches[1] -replace '\\"', '"') | ConvertFrom-Json
+    $obj.spec.runtimeClassName | Should -Be "nvidia"
+    $cmd | Should -Match 'nvidia-smi'                  # NVML works on a device-plugin node
+  }
   It "the doctor's GPU smoke test matches how the cluster delivers the GPU (#616 Bugbot)" {
     # pods only get the GPU under the nvidia RuntimeClass, and on WSL2 nvidia-smi FAILS in a pod
     # even when CUDA works -- so the suggested command must not make a working cluster look broken.
-    $doctor = (($script:CDISRC -split 'GPU test \(WSL2/CDI')[1] -split '\n  \}')[0]
-    $doctor | Should -Match 'runtimeClassName'
-    $doctor | Should -Match 'vectoradd'                     # CUDA workload, not nvidia-smi
-    $doctor | Should -Match 'NVIDIA_VISIBLE_DEVICES'
-    # every quote in the --overrides JSON is printed ESCAPED, else PowerShell strips them and the
-    # pasted command dies with "error: Invalid JSON Patch" (seen on a live box). The source builds
-    # the JSON from $q, which holds an escaped quote.
-    $doctor | Should -Match 'q\}spec\$\{q\}'
-    # $q must hold a BACKSLASH followed by a quote
-    ($script:CDISRC.Contains('$q = ' + [char]39 + [char]92 + [char]34 + [char]39)) | Should -BeTrue
-    # and the non-CDI (device-plugin) command also carries the RuntimeClass
-    $plugin = (($script:CDISRC -split '\} else \{\s*\n\s*Log \(''  GPU test: kubectl run')[1] -split '\n    \}')[0]
-    $plugin | Should -Match 'q\}runtimeClassName\$\{q\}'
+    $wsl = Get-GpuSmokeTestCommand -Selector "nvidia.com/gpu=all"
+    $wsl | Should -Match 'runtimeClassName'
+    $wsl | Should -Match 'vectoradd'                  # CUDA workload, not nvidia-smi
+    $wsl | Should -Match 'NVIDIA_VISIBLE_DEVICES'
+    # every quote in the payload is ESCAPED, else PowerShell strips them and the pasted
+    # command dies with "error: Invalid JSON Patch" (seen on a live box).
+    $wsl | Should -Match ([regex]::Escape('\"spec\"'))
+    # and the device-plugin variant also carries the RuntimeClass + keeps nvidia-smi
+    $plugin = Get-GpuSmokeTestCommand -Selector ""
+    $plugin | Should -Match 'runtimeClassName'
     $plugin | Should -Match 'nvidia-smi'
+    # the diagnostics bundle prints it through the builder (one source of truth)
+    $script:CDISRC | Should -Match 'Get-GpuSmokeTestCommand -Selector \$GPU_DEVICE_SELECTOR'
   }
   It "the selector is EMPTY on a normal device-plugin (Linux) node -- the plugin owns that var (#616)" {
     # $GPU_DEVICE_SELECTOR is only ever assigned inside the WSL2/CDI branch; the global default

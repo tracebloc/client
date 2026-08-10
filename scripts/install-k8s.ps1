@@ -4648,21 +4648,40 @@ function Print-Summary {
     # command dies with "error: Invalid JSON Patch". (Same class of bug that broke the capacity
     # patch itself -- verified on a live box.) A suggested command that can't be pasted is worse
     # than none, so the escapes are part of the guidance.
-    $q = '\"'
-    if ($GPU_DEVICE_SELECTOR) {
-      Log ('  GPU test (WSL2/CDI -- runs CUDA; note nvidia-smi does NOT work in a pod here): ' +
-        'kubectl run gpu-test --rm -it --restart=Never --image=nvidia/samples:vectoradd-cuda11.2.1 ' +
-        "--overrides='{${q}spec${q}:{${q}runtimeClassName${q}:${q}nvidia${q},${q}containers${q}:" +
-        "[{${q}name${q}:${q}gpu-test${q},${q}image${q}:${q}nvidia/samples:vectoradd-cuda11.2.1${q}," +
-        "${q}env${q}:[{${q}name${q}:${q}NVIDIA_VISIBLE_DEVICES${q},${q}value${q}:${q}$GPU_DEVICE_SELECTOR${q}}]," +
-        "${q}resources${q}:{${q}limits${q}:{${q}nvidia.com/gpu${q}:${q}1${q}}}}]}}'")
-    } else {
-      Log ('  GPU test: kubectl run gpu-test --rm -it --restart=Never --image=nvidia/cuda:12.3.1-base-ubuntu22.04 ' +
-        "--overrides='{${q}spec${q}:{${q}runtimeClassName${q}:${q}nvidia${q}}}' " +
-        '--limits="nvidia.com/gpu=1" -- nvidia-smi')
-    }
+    Log ("  " + (Get-GpuSmokeTestCommand -Selector $GPU_DEVICE_SELECTOR))
   }
   Log "=== End Advanced Info ==="
+}
+
+# Build the GPU smoke-test command we print in the diagnostics bundle. PURE (selector in,
+# string out) so a test can render it and assert the --overrides payload is VALID JSON --
+# a scanner flagged a "stray brace" here (it was correct: the `}}}` closes limits, resources
+# and the container in turn), and a genuine brace slip would hand operators a command that
+# errors on a healthy cluster. Now it's machine-checked rather than eyeballed.
+#
+# Three properties the command must keep:
+#   (a) runtimeClassName: nvidia -- pods only receive the GPU under it, so --overrides is
+#       required (kubectl run has no flag for it);
+#   (b) on WSL2/CDI suggest a CUDA workload, NOT nvidia-smi: NVML is unsupported through the
+#       paravirtualized GPU, so nvidia-smi fails in a pod even when CUDA works (verified on
+#       real hardware) -- suggesting it would make a working cluster look broken;
+#   (c) every double quote ESCAPED as \" -- Windows PowerShell strips unescaped quotes when
+#       building a native command line, so a pasted command would die with "Invalid JSON
+#       Patch" (the same quoting class that broke the node capacity patch).
+function Get-GpuSmokeTestCommand {
+  param([string]$Selector)
+  $q = '\"'
+  if ($Selector) {
+    return ('GPU test (WSL2/CDI -- runs CUDA; note nvidia-smi does NOT work in a pod here): ' +
+      'kubectl run gpu-test --rm -it --restart=Never --image=nvidia/samples:vectoradd-cuda11.2.1 ' +
+      "--overrides='{${q}spec${q}:{${q}runtimeClassName${q}:${q}nvidia${q},${q}containers${q}:" +
+      "[{${q}name${q}:${q}gpu-test${q},${q}image${q}:${q}nvidia/samples:vectoradd-cuda11.2.1${q}," +
+      "${q}env${q}:[{${q}name${q}:${q}NVIDIA_VISIBLE_DEVICES${q},${q}value${q}:${q}$Selector${q}}]," +
+      "${q}resources${q}:{${q}limits${q}:{${q}nvidia.com/gpu${q}:${q}1${q}}}}]}}'")
+  }
+  return ('GPU test: kubectl run gpu-test --rm -it --restart=Never --image=nvidia/cuda:12.3.1-base-ubuntu22.04 ' +
+    "--overrides='{${q}spec${q}:{${q}runtimeClassName${q}:${q}nvidia${q}}}' " +
+    '--limits="nvidia.com/gpu=1" -- nvidia-smi')
 }
 
 # =============================================================================
