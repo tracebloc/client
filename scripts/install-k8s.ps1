@@ -635,6 +635,10 @@ $GPU_DEVICE_SELECTOR = ""
 # Detected NVIDIA driver version, quoted back in a GPU-skip reason so the operator can tell at a
 # glance whether theirs is new enough for WSL2 CUDA (#616). Empty until Confirm-NvidiaDriver runs.
 $NVIDIA_DRIVER_VERSION = ""
+# Set by preflight when a GPU download host (nvcr.io / nvidia.github.io / the configured GPU
+# registry) is unreachable. The GPU gate short-circuits on it so we fail fast to CPU with that
+# reason instead of burning minutes on probes/pulls that cannot succeed (#616 Bugbot).
+$GPU_HOSTS_UNREACHABLE = ""
 # #616: the CUDA base + custom k3s-CUDA node image used when the GPU is enabled. The k3s-CUDA
 # tag encodes both the k3s pin ($K8S_VERSION) and the CUDA base, matching docker/k3s-cuda/build.sh.
 # The installer PULLS this image automatically at cluster-create — the user never builds or pulls
@@ -1746,7 +1750,16 @@ function Invoke-BoundedProcess {
   )
   $psi = New-Object System.Diagnostics.ProcessStartInfo
   $psi.FileName = $FileName
-  $psi.Arguments = ($Arguments -join ' ')
+  # Quote any argument containing whitespace (Bugbot): the args are joined into a single command
+  # line, so an unquoted value with a space -- a registry username, a temp path under a profile
+  # like "C:\Users\First Last\..." -- would be split into two arguments and silently corrupt the
+  # command. Already-quoted values are left alone so call sites that quote themselves don't get
+  # double-quoted. Empty strings are quoted too, so they survive as a present-but-empty argument.
+  $psi.Arguments = (($Arguments | ForEach-Object {
+    if ($_ -eq "") { '""' }
+    elseif ($_ -match '\s' -and $_ -notmatch '^".*"$') { '"' + $_ + '"' }
+    else { $_ }
+  }) -join ' ')
   $psi.UseShellExecute = $false
   $psi.CreateNoWindow = $true
   $psi.RedirectStandardOutput = $true
@@ -5313,6 +5326,11 @@ function Test-Preflight {
     elseif ($c.gpuSoft) {
       # GPU build host blocked: warn only. GPU is optional and degrades to CPU, so this must
       # not hard-fail an otherwise-fine CPU-capable install (#616).
+      # Remember it: the GPU gate then skips the probe/build/pull instead of spending ~3-15
+      # minutes timing out on hosts we already know are unreachable, which made a re-run (the
+      # very thing our CPU-fallback advice tells operators to do) look hung (Bugbot).
+      $script:GPU_HOSTS_UNREACHABLE = "$($c.label) is unreachable from this machine"
+
       # Wording must match the path actually in use (Bugbot): on the pull/mirror path nothing is
       # built locally, so "can't be built" named the wrong failure.
       if ($env:TRACEBLOC_K3S_CUDA_IMAGE -or $env:TRACEBLOC_IMAGE_REGISTRY) {
@@ -5728,7 +5746,13 @@ if ($GPU_VENDOR -eq "nvidia" -and $NVIDIA_DRIVER_OK -and ($K8S_VERSION -eq "late
   # No-op without creds / on the default public build path (Bugbot). Runs before the probe.
   if ($env:TRACEBLOC_K3S_CUDA_IMAGE -or $env:TRACEBLOC_IMAGE_REGISTRY) { Connect-GpuRegistry }
   $gpuImageReady = { if ($env:TRACEBLOC_K3S_CUDA_IMAGE -or $env:TRACEBLOC_IMAGE_REGISTRY) { Confirm-GpuImagePullable } else { Build-GpuNodeImage } }
-  if ((Confirm-DockerGpu) -and (& $gpuImageReady)) {
+  if ($GPU_HOSTS_UNREACHABLE) {
+    # Preflight already established the GPU download chain is blocked, so the probe (180s) and the
+    # build/pull (up to 15/20 min) would only time out. Fail fast with the known reason (Bugbot).
+    $GPU_SKIP_REASON = "$GPU_HOSTS_UNREACHABLE, so the GPU node image can't be obtained -- on a restricted network set TRACEBLOC_IMAGE_REGISTRY to your mirror (or TRACEBLOC_K3S_CUDA_IMAGE to a prebuilt image) and re-run; running CPU-only"
+    Warn "Skipping GPU setup -- $GPU_HOSTS_UNREACHABLE. Running CPU-only (no long timeouts)."
+  }
+  elseif ((Confirm-DockerGpu) -and (& $gpuImageReady)) {
     $K3D_GPU_FLAG = "--gpus=all"
     $GPU_SKIP_REASON = ""
     # Single physical GPU vs multi-node cluster (Bugbot): k3d's --gpus=all exposes the

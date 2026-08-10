@@ -3900,7 +3900,7 @@ Describe "GPU registry login happens BEFORE the probe (#616 Bugbot: authenticate
   BeforeAll { $script:LSRC2 = Get-Content "$PSScriptRoot/../install-k8s.ps1" -Raw }
   It "the gate calls Connect-GpuRegistry before the Confirm-DockerGpu probe for a mirror/custom image" {
     # Otherwise the mirror-homed CUDA probe pull is unauthenticated -> CPU fallback despite creds.
-    $script:LSRC2 | Should -Match 'if \(\$env:TRACEBLOC_K3S_CUDA_IMAGE -or \$env:TRACEBLOC_IMAGE_REGISTRY\) \{ Connect-GpuRegistry \}[\s\S]{0,400}?\(Confirm-DockerGpu\) -and'
+    $script:LSRC2 | Should -Match 'if \(\$env:TRACEBLOC_K3S_CUDA_IMAGE -or \$env:TRACEBLOC_IMAGE_REGISTRY\) \{ Connect-GpuRegistry \}[\s\S]{0,1600}?\(Confirm-DockerGpu\) -and'
   }
   It "Connect-GpuRegistry logs into the host from Get-RegistryHost and no-ops without creds" {
     $fn = ($script:LSRC2 -split 'function Connect-GpuRegistry')[1]
@@ -4274,6 +4274,51 @@ Describe "Get-GpuBuildFailureReason (#616: every GPU failure names an actionable
                      'x509: bad cert', 'i/o timeout', 'toomanyrequests', 'mystery')) {
       (Get-GpuBuildFailureReason -BuildOutput $o -ExitCode 1) | Should -Match 'running CPU-only'
     }
+  }
+}
+
+Describe "Bounded process quotes whitespace arguments (#616 Bugbot)" {
+  BeforeAll { $script:QSRC = Get-Content "$PSScriptRoot/../install-k8s.ps1" -Raw }
+  It "the joiner quotes-on-whitespace and skips already-quoted values (source guard)" {
+    # The args are joined into ONE command line, so an unquoted value with a space -- a registry
+    # username, or a temp path under a profile like C:\Users\First Last\... -- would silently
+    # become two arguments and corrupt the command.
+    $fn = (($script:QSRC -split 'function Invoke-BoundedProcess')[1] -split '\nfunction ')[0]
+    $fn | Should -Match 'ForEach-Object'
+    $fn | Should -Match 'notmatch'                 # the already-quoted escape hatch
+    $fn | Should -Match 'Quote any argument containing whitespace'
+  }
+  It "behavioural: a username with a space survives as ONE argument" {
+    # exercises the same expression the function uses
+    $parts = @("login", "ghcr.io", "-u", "First Last", "--password-stdin")
+    $joined = (($parts | ForEach-Object {
+      if ($_ -eq "") { '""' } elseif ($_ -match '\s' -and $_ -notmatch '^".*"$') { '"' + $_ + '"' } else { $_ }
+    }) -join ' ')
+    $joined | Should -Be 'login ghcr.io -u "First Last" --password-stdin'
+  }
+  It "behavioural: an already-quoted path is not double-quoted, and empty survives" {
+    $parts = @('"C:\Temp\a b\p.json"', "", "plain")
+    $joined = (($parts | ForEach-Object {
+      if ($_ -eq "") { '""' } elseif ($_ -match '\s' -and $_ -notmatch '^".*"$') { '"' + $_ + '"' } else { $_ }
+    }) -join ' ')
+    $joined | Should -Be '"C:\Temp\a b\p.json" "" plain'
+  }
+}
+
+Describe "GPU setup fails fast when preflight already found the hosts unreachable (#616 Bugbot)" {
+  BeforeAll { $script:FFSRC = Get-Content "$PSScriptRoot/../install-k8s.ps1" -Raw }
+  It "preflight records the unreachable GPU host" {
+    $script:FFSRC | Should -Match '\$script:GPU_HOSTS_UNREACHABLE = "\$\(\$c\.label\) is unreachable'
+  }
+  It "the gate short-circuits BEFORE the probe, with an actionable reason" {
+    # otherwise a re-run (which our own CPU-fallback advice recommends) burns 3-15 minutes of
+    # timeouts on hosts already known to be blocked, and looks hung.
+    $script:FFSRC | Should -Match 'if \(\$GPU_HOSTS_UNREACHABLE\) \{[\s\S]{0,700}?\}\s*\n\s*elseif \(\(Confirm-DockerGpu\)'
+    $script:FFSRC | Should -Match 'Skipping GPU setup --'
+    $script:FFSRC | Should -Match 'set TRACEBLOC_IMAGE_REGISTRY to your mirror'
+  }
+  It "the global defaults empty so a reachable machine is unaffected" {
+    $script:FFSRC | Should -Match '(?m)^\$GPU_HOSTS_UNREACHABLE = ""'
   }
 }
 
