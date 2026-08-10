@@ -632,6 +632,9 @@ $GPU_SKIP_REASON  = ""
 # (Linux) node: there the plugin owns NVIDIA_VISIBLE_DEVICES and sets concrete GPU UUIDs, so
 # forcing a CDI selector would break device resolution. Empty => the chart passes nothing.
 $GPU_DEVICE_SELECTOR = ""
+# Detected NVIDIA driver version, quoted back in a GPU-skip reason so the operator can tell at a
+# glance whether theirs is new enough for WSL2 CUDA (#616). Empty until Confirm-NvidiaDriver runs.
+$NVIDIA_DRIVER_VERSION = ""
 # #616: the CUDA base + custom k3s-CUDA node image used when the GPU is enabled. The k3s-CUDA
 # tag encodes both the k3s pin ($K8S_VERSION) and the CUDA base, matching docker/k3s-cuda/build.sh.
 # The installer PULLS this image automatically at cluster-create — the user never builds or pulls
@@ -1107,6 +1110,7 @@ function Confirm-NvidiaDriver {
     $majorVer  = [int]($driverVer -replace '\..*', '')
     if ($majorVer -ge 460) {
       $script:NVIDIA_DRIVER_OK = $true
+      $script:NVIDIA_DRIVER_VERSION = $driverVer   # quoted back in a GPU-skip reason (#616)
       Ok "NVIDIA GPU ready (driver $driverVer)"
       # Expectation-setting only, never a gate (#387): entry-level cards pass
       # every check but are too small for real training (field: a 2 GB GT 710
@@ -1792,7 +1796,11 @@ function Confirm-DockerGpu {
   if ($r.Code -eq 124) {
     $script:GPU_SKIP_REASON = "the Docker GPU probe (docker run --gpus all) timed out -- Docker Desktop may be busy, or the CUDA base image pull is blocked"
   } else {
-    $script:GPU_SKIP_REASON = "Docker Desktop can't expose the GPU to a container (enable GPU support in Docker Desktop, and update the WSL2 NVIDIA driver)"
+    # Name the DETECTED driver and a concrete minimum: our install gate accepts 460+, but CUDA
+    # on WSL2 realistically needs a much newer driver, so "update the driver" alone left people
+    # guessing whether theirs qualified (#616).
+    $drv = if ($script:NVIDIA_DRIVER_VERSION) { " (this machine reports driver $($script:NVIDIA_DRIVER_VERSION))" } else { "" }
+    $script:GPU_SKIP_REASON = "Docker Desktop can't expose the GPU to a container$drv -- enable GPU support in Docker Desktop, and update the NVIDIA Windows driver to 525 or newer (WSL2 CUDA needs a recent driver)"
   }
   return $false
 }
@@ -1904,6 +1912,34 @@ function Get-GpuBuildContentHash {
   finally { $sha.Dispose() }
 }
 
+# Turn a failed `docker build` of the GPU node image into a reason the operator can ACT on.
+# PURE (output + exit code in, string out) so every branch is unit-tested. Ordered most- to
+# least-specific; the fallback still names the log. These are exactly the cases that vary
+# between machines, which is why a bare "exit 1" was not good enough (#616).
+function Get-GpuBuildFailureReason {
+  param([string]$BuildOutput, [int]$ExitCode)
+  $o = "$BuildOutput"
+  if ($o -match 'dockerfile:1\.7-labs|unknown flag: --exclude|failed to solve with frontend|frontend dockerfile\.v0|unsupported frontend|Dockerfile syntax') {
+    return "your Docker Desktop is too old to build the GPU node image (it needs BuildKit with the dockerfile 1.7-labs frontend) -- update Docker Desktop and re-run, or point TRACEBLOC_K3S_CUDA_IMAGE at a prebuilt image; running CPU-only"
+  }
+  if ($o -match 'no space left on device|disk quota exceeded') {
+    return "the machine ran out of disk while building the GPU node image -- free up space and re-run; running CPU-only"
+  }
+  if ($o -match 'manifest unknown|manifest for .* not found|not found: manifest|unknown tag') {
+    return "the CUDA base image tag ($CUDA_BASE_TAG) no longer exists upstream -- set TRACEBLOC_CUDA_BASE_TAG to an available tag and re-run; running CPU-only"
+  }
+  if ($o -match 'TLS handshake|x509|certificate') {
+    return "the GPU node image build hit a TLS/certificate error reaching the base images (usually a TLS-inspecting proxy) -- set TRACEBLOC_CA_BUNDLE to your corporate CA and re-run; running CPU-only"
+  }
+  if ($o -match 'i/o timeout|connection refused|temporary failure in name resolution|dial tcp|could not resolve|failed to fetch|Could not connect') {
+    return "the GPU node image build couldn't download its base images (nvcr.io / Docker Hub blocked or offline) -- on a restricted network set TRACEBLOC_IMAGE_REGISTRY to your mirror and re-run; running CPU-only"
+  }
+  if ($o -match 'toomanyrequests|rate limit') {
+    return "the GPU node image build was rate-limited by the registry -- retry later, or set TRACEBLOC_IMAGE_REGISTRY to your mirror; running CPU-only"
+  }
+  return "the GPU node image build failed (docker build exit $ExitCode) -- see the install log for the build output; running CPU-only"
+}
+
 function Build-GpuNodeImage {
   $contentHash = Get-GpuBuildContentHash
   # Idempotent: a prior run already built it -> reuse WITHOUT rebuilding, but ONLY if (a) it was
@@ -1986,7 +2022,12 @@ function Build-GpuNodeImage {
     if ($null -eq $buildExit) {
       Log "docker build exit code unreadable after WaitForExit; relying on the image sanity check as the success marker."
     } elseif ($buildExit -ne 0) {
-      $script:GPU_SKIP_REASON = "the GPU node image build failed (docker build exit $buildExit) -- see the install log; running CPU-only"
+      # Classify the failure instead of emitting a bare exit code (the operator can't act on
+      # "exit 1"). These are the drift/environment cases that differ machine to machine:
+      # an older Docker Desktop without the BuildKit labs frontend, a blocked/offline base
+      # image, a retired CUDA tag, or a full disk. Each gets the concrete next step.
+      $script:GPU_SKIP_REASON = Get-GpuBuildFailureReason -BuildOutput $buildOut -ExitCode $buildExit
+      Warn ("GPU couldn't be enabled: " + $script:GPU_SKIP_REASON)
       return $false
     }
 
@@ -4542,7 +4583,7 @@ function Print-Summary {
   # (with the reason) rather than implying acceleration that isn't there.
   $mode = "CPU"
   if ($GPU_VENDOR -eq "nvidia" -and $NVIDIA_DRIVER_OK -and $K3D_GPU_FLAG -ne "") { $mode = "NVIDIA GPU" }
-  elseif ($GPU_VENDOR -eq "nvidia" -and $NVIDIA_DRIVER_OK) { $mode = if ($GPU_SKIP_REASON) { "CPU (GPU detected but not enabled: $GPU_SKIP_REASON)" } else { "CPU (GPU detected but not enabled)" } }
+  elseif ($GPU_VENDOR -eq "nvidia" -and $NVIDIA_DRIVER_OK) { $mode = "CPU (GPU detected but not enabled)" }
   elseif ($GPU_VENDOR -eq "nvidia" -and -not $NVIDIA_DRIVER_OK) { $mode = "CPU (NVIDIA driver update needed)" }
   $ns = $script:TB_NAMESPACE
   $line = [string]([char]0x2501) * 46
@@ -4563,6 +4604,21 @@ function Print-Summary {
       $cver = Get-ChartVersion -Namespace $ns; if (-not $cver) { $cver = "unknown" }
       Write-Host "  Version     : " -ForegroundColor DarkGray -NoNewline; Write-Host $cver
       Write-Host "  Mode        : " -ForegroundColor DarkGray -NoNewline; Write-Host $mode
+      # A GPU that was DETECTED but not enabled is the case operators most need to act on, and
+      # burying the cause inside the Mode line made it easy to miss and hard to read. Give it its
+      # own block: what happened, and the one thing to do about it (#616).
+      if ($GPU_VENDOR -eq "nvidia" -and $NVIDIA_DRIVER_OK -and $K3D_GPU_FLAG -eq "") {
+        Write-Host ""
+        Write-Host "  " -NoNewline
+        Write-Host "$([char]0x26A0)  GPU found but not enabled -- training will run on CPU." -ForegroundColor Yellow
+        if ($GPU_SKIP_REASON) {
+          Write-Host "     Why: $GPU_SKIP_REASON" -ForegroundColor Yellow
+        } else {
+          Write-Host "     Why: see the install log for details." -ForegroundColor Yellow
+        }
+        Write-Host "     Fix the item above, then re-run this installer to enable GPU." -ForegroundColor DarkGray
+        Write-Host "     Full detail: $script:LOG_FILE" -ForegroundColor DarkGray
+      }
       Write-Host ""
       Write-Host "  Your client is live. Confirm it shows as Online:"
       Write-Host "    https://ai.tracebloc.io/clients" -ForegroundColor Cyan

@@ -4218,6 +4218,68 @@ Describe "Embedded GPU build inputs stay in sync with docker/k3s-cuda (#616 drif
   }
 }
 
+Describe "Get-GpuBuildFailureReason (#616: every GPU failure names an actionable cause)" {
+  BeforeEach { $CUDA_BASE_TAG = "12.4.1-base-ubuntu22.04" }
+  It "old Docker Desktop / missing BuildKit labs frontend -> says update Docker Desktop" {
+    $r = Get-GpuBuildFailureReason -BuildOutput 'failed to solve with frontend dockerfile.v0' -ExitCode 1
+    $r | Should -Match 'Docker Desktop is too old'
+    $r | Should -Match 'TRACEBLOC_K3S_CUDA_IMAGE'      # the escape hatch
+  }
+  It "unknown --exclude flag (older frontend) is also recognised" {
+    (Get-GpuBuildFailureReason -BuildOutput 'unknown flag: --exclude' -ExitCode 1) | Should -Match 'too old'
+  }
+  It "full disk -> says free up space" {
+    (Get-GpuBuildFailureReason -BuildOutput 'write /tmp/x: no space left on device' -ExitCode 1) | Should -Match 'ran out of disk'
+  }
+  It "retired CUDA tag -> names the tag and the override" {
+    $r = Get-GpuBuildFailureReason -BuildOutput 'nvcr.io/nvidia/cuda:12.4.1: manifest unknown' -ExitCode 1
+    $r | Should -Match 'no longer exists upstream'
+    $r | Should -Match 'TRACEBLOC_CUDA_BASE_TAG'
+  }
+  It "TLS-inspecting proxy -> points at the CA bundle" {
+    $r = Get-GpuBuildFailureReason -BuildOutput 'x509: certificate signed by unknown authority' -ExitCode 1
+    $r | Should -Match 'TRACEBLOC_CA_BUNDLE'
+  }
+  It "blocked/offline registry -> points at the mirror override" {
+    $r = Get-GpuBuildFailureReason -BuildOutput 'dial tcp 1.2.3.4:443: i/o timeout' -ExitCode 1
+    $r | Should -Match "couldn't download its base images"
+    $r | Should -Match 'TRACEBLOC_IMAGE_REGISTRY'
+  }
+  It "registry rate limit is called out separately" {
+    (Get-GpuBuildFailureReason -BuildOutput 'toomanyrequests: rate limit exceeded' -ExitCode 1) | Should -Match 'rate-limited'
+  }
+  It "an unrecognised failure still names the exit code AND the log" {
+    $r = Get-GpuBuildFailureReason -BuildOutput 'something odd happened' -ExitCode 7
+    $r | Should -Match 'exit 7'
+    $r | Should -Match 'install log'
+  }
+  It "every branch ends by stating the outcome (running CPU-only)" {
+    foreach ($o in @('failed to solve with frontend', 'no space left on device', 'manifest unknown',
+                     'x509: bad cert', 'i/o timeout', 'toomanyrequests', 'mystery')) {
+      (Get-GpuBuildFailureReason -BuildOutput $o -ExitCode 1) | Should -Match 'running CPU-only'
+    }
+  }
+}
+
+Describe "GPU-not-enabled is surfaced prominently with a fix (#616)" {
+  BeforeAll { $script:SUMSRC = Get-Content "$PSScriptRoot/../install-k8s.ps1" -Raw }
+  It "the summary gives it its own block, not a cramped Mode line" {
+    $script:SUMSRC | Should -Match 'GPU found but not enabled -- training will run on CPU'
+    $script:SUMSRC | Should -Match 'Why: \$GPU_SKIP_REASON'
+    $script:SUMSRC | Should -Match 're-run this installer to enable GPU'
+    $script:SUMSRC | Should -Match 'Full detail: \$script:LOG_FILE'
+    # and the Mode line no longer carries the whole reason
+    $script:SUMSRC | Should -Not -Match 'CPU \(GPU detected but not enabled: \$GPU_SKIP_REASON\)'
+  }
+  It "the block is gated on GPU present but not enabled" {
+    $script:SUMSRC | Should -Match 'if \(\$GPU_VENDOR -eq "nvidia" -and \$NVIDIA_DRIVER_OK -and \$K3D_GPU_FLAG -eq ""\) \{'
+  }
+  It "the probe reason quotes the detected driver and a concrete minimum" {
+    $script:SUMSRC | Should -Match 'NVIDIA_DRIVER_VERSION'
+    $script:SUMSRC | Should -Match 'update the NVIDIA Windows driver to 525 or newer'
+  }
+}
+
 Describe "WSL2 GPU: node-advertised capacity replaces the NVML device plugin (#616)" {
   BeforeAll { $script:CDISRC = Get-Content "$PSScriptRoot/../install-k8s.ps1" -Raw }
   BeforeEach {
