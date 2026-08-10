@@ -4285,6 +4285,18 @@ Describe "WSL2 GPU: node-advertised capacity replaces the NVML device plugin (#6
     $fn | Should -Match '"grep", "-q", "libdxcore"'
     $fn | Should -Match 'missing libdxcore'
   }
+  It "K3D_GPU_FLAG is set in exactly ONE place -- the authoritative gate (#616 Bugbot)" {
+    # Install-NvidiaContainerToolkit used to set it (and clear GPU_SKIP_REASON) after the
+    # in-WSL toolkit check, before the Docker GPU probe that actually decides. That made a
+    # later CPU fallback look enabled and dropped the real skip reason.
+    ([regex]::Matches($script:CDISRC, '\$(script:)?K3D_GPU_FLAG = "--gpus=all"')).Count | Should -Be 1
+    $tk = (($script:CDISRC -split 'function Install-NvidiaContainerToolkit')[1] -split '\nfunction ')[0]
+    $tk | Should -Not -Match 'K3D_GPU_FLAG = "--gpus=all"'
+    $tk | Should -Not -Match 'GPU_SKIP_REASON = ""'
+    # it reports only what it established, and says GPU is still gated
+    $tk | Should -Match 'NVIDIA Container Toolkit present in'
+    $tk | Should -Match 'still gated on the Docker GPU probe'
+  }
   It "no green GPU-success line before Confirm-GpuNode verifies the node (#616 Bugbot)" {
     # claiming success at the capacity patch produced a green "enabled" immediately followed
     # by a CPU fallback when verification cleared the flag.

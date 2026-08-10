@@ -1694,10 +1694,14 @@ echo "NCT installed successfully."
     $nctVer = (Receive-Job $verJob | Out-String).Trim()
     Remove-Job $verJob -Force
     if ($nctVer -and $nctVer -notmatch 'error|not found') {
-      Ok "GPU acceleration ready -- NVIDIA Container Toolkit in ${wslDistro}: $nctVer"
-      Log "NVIDIA Container Toolkit in WSL2: $nctVer"
-      $script:K3D_GPU_FLAG = "--gpus=all"
-      $script:GPU_SKIP_REASON = ""   # GPU fully wired into the cluster -- nothing to warn about
+      # Report only what this step actually established -- the toolkit is present in the WSL
+      # distro. It is NOT "GPU acceleration ready" (Bugbot): Confirm-DockerGpu is the
+      # authoritative gate and runs later, so a green ready line here could be followed by a
+      # CPU fallback. For the same reason this must NOT set K3D_GPU_FLAG (the gate owns it,
+      # and setting it early made a skipped/failed gate look enabled) and must NOT clear
+      # GPU_SKIP_REASON (that would drop the real cause recorded by whatever failed).
+      Info "NVIDIA Container Toolkit present in ${wslDistro}: $nctVer"
+      Log "NVIDIA Container Toolkit in WSL2: $nctVer -- GPU still gated on the Docker GPU probe"
     } else {
       Warn "GPU toolkit installed but could not be verified."
       $script:GPU_SKIP_REASON = "NVIDIA Container Toolkit installed but could not be verified"
