@@ -45,6 +45,43 @@ spec:
             - "requests_proxy_server:create_app()"
           ports:
             - containerPort: 8888
+          # #1143: without probes the pod is "Ready" the instant the container
+          # process starts — before gunicorn has bound :8888 — so tb doctor's
+          # "Service Bus egress (requests-proxy) ready" (which reads
+          # ReadyReplicas) shows a false green even when the proxy can't relay.
+          # tcpSocket (not httpGet): the proxy app lives in client-runtime and
+          # exposes no chart-visible HTTP health path, and a probe against an
+          # unknown path would 404 and wedge the pod. A successful TCP accept on
+          # :8888 confirms the gunicorn MASTER has bound the listen socket. That
+          # is a strict improvement over no probes — it catches a container that
+          # never starts — but it does NOT fully close the false-green: the
+          # master binds the socket before the single worker finishes importing
+          # create_app(), and keeps it bound while a worker crash-loops on that
+          # import, so a proxy that can't actually relay can still read Ready.
+          # Fully closing it would need a real /healthz served from
+          # client-runtime. Mirrors mysql-deployment.yaml's
+          # startup/liveness/readiness structure.
+          startupProbe:
+            tcpSocket:
+              port: 8888
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 12
+          livenessProbe:
+            tcpSocket:
+              port: 8888
+            initialDelaySeconds: 0
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 5
+          readinessProbe:
+            tcpSocket:
+              port: 8888
+            initialDelaySeconds: 0
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 3
           securityContext:
             runAsNonRoot: true
             runAsUser: 1001

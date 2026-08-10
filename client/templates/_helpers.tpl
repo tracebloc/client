@@ -397,3 +397,59 @@ Usage inside a container's env: list:
   value: {{ $noProxy | quote }}
 {{- end }}
 {{- end -}}
+
+{{/*
+tracebloc.mysqlEngineMajor — the MySQL engine major the chart is about to run,
+for the mysql-format-guard init container (backend#723). Resolution mirrors
+tracebloc.image's digest-wins precedence:
+  digest set   -> the known 5.7-lineage pin maps to "5.7"; any other digest is
+                  "unknown" (custom pin — the guard stands down).
+  digest empty -> derive from the tag: ""/prod/5.7* -> 5.7, 8.4* -> 8.4,
+                  8.0* -> 8.0, anything else -> unknown.
+The sha256 literal below MUST equal the images.mysqlClient.digest default in
+values.yaml — mysql_test.yaml pins the default render to "5.7", so re-pinning
+the digest without updating this helper fails CI instead of silently
+disarming the guard.
+*/}}
+{{- define "tracebloc.mysqlEngineMajor" -}}
+{{- $digest := .Values.images.mysqlClient.digest | default "" -}}
+{{- $tag := .Values.images.mysqlClient.tag | default "prod" -}}
+{{- if $digest -}}
+{{- if eq $digest "sha256:f546e47fb339e0982c902cef063b081ccf2cbbaf35b475287d583b9bf3163354" -}}
+5.7
+{{- else -}}
+unknown
+{{- end -}}
+{{- else if or (eq $tag "prod") (hasPrefix "5.7" $tag) -}}
+5.7
+{{- else if hasPrefix "8.4" $tag -}}
+8.4
+{{- else if hasPrefix "8.0" $tag -}}
+8.0
+{{- else -}}
+unknown
+{{- end -}}
+{{- end -}}
+
+{{/*
+tracebloc.durationSeconds — parse a Go/Helm duration string (as accepted by
+`helm --timeout`, e.g. "10m", "30m", "1h", "600s", "1h30m") into a whole
+number of seconds. Sums every `<int><unit>` component so compound durations
+work; recognises s/m/h/d, ignores anything else. Empty/nil input -> 0.
+Used by auto-upgrade-cronjob.yaml (#555) so the Job's activeDeadlineSeconds
+can be kept above the configured helm timeout.
+*/}}
+{{- define "tracebloc.durationSeconds" -}}
+{{- $d := . | toString -}}
+{{- $total := 0 -}}
+{{- range regexFindAll "[0-9]+[smhd]" $d -1 -}}
+{{- $num := regexFind "[0-9]+" . | atoi -}}
+{{- $unit := regexFind "[smhd]" . -}}
+{{- if eq $unit "s" -}}{{- $total = add $total $num -}}
+{{- else if eq $unit "m" -}}{{- $total = add $total (mul $num 60) -}}
+{{- else if eq $unit "h" -}}{{- $total = add $total (mul $num 3600) -}}
+{{- else if eq $unit "d" -}}{{- $total = add $total (mul $num 86400) -}}
+{{- end -}}
+{{- end -}}
+{{- $total -}}
+{{- end -}}

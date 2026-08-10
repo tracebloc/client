@@ -10,7 +10,10 @@ install_homebrew() {
     brew_script="$(mktemp)"
     curl_secure -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh \
       -o "$brew_script"
-    spin_cmd "Installing Homebrew…" env NONINTERACTIVE=1 /bin/bash "$brew_script"
+    # #561: bounded so a wedged Homebrew install (network stall, a hung Command
+    # Line Tools fetch) can't hang the installer forever behind the spinner.
+    # Generous (30m) — a fresh Mac may pull the Xcode CLT here.
+    spin_cmd_bounded 1800 "Installing Homebrew…" env NONINTERACTIVE=1 /bin/bash "$brew_script"
     rm -f "$brew_script"
     if [[ "$ARCH" == "arm64" ]] && [[ -f /opt/homebrew/bin/brew ]]; then
       eval "$(/opt/homebrew/bin/brew shellenv)"
@@ -100,14 +103,16 @@ _install_docker_colima() {
   log "Headless environment detected (no GUI session) — using Colima as Docker runtime."
 
   if ! has docker; then
-    spin_cmd "Installing Docker…" brew install docker
+    # #561: bounded so a wedged brew (network stall) can't hang forever.
+    spin_cmd_bounded 900 "Installing Docker…" brew install docker
     success "Docker"
   else
     success "Docker"
   fi
 
   if ! has colima; then
-    spin_cmd "Installing container runtime…" brew install colima
+    # #561: bounded so a wedged brew (network stall) can't hang forever.
+    spin_cmd_bounded 900 "Installing container runtime…" brew install colima
   fi
 
   if docker info &>/dev/null 2>&1; then
@@ -139,7 +144,8 @@ _install_docker_colima() {
     _colima_args+=( --vm-type vz --vz-rosetta )
     log "Apple Silicon + macOS 13+ (fresh VM): starting Colima with VZ + Rosetta for amd64 acceleration."
   fi
-  spin_cmd "Starting Docker runtime…" colima "${_colima_args[@]}"
+  # #561: bounded so a hung colima start (stale VZ VM) can't hang forever.
+  spin_cmd_bounded 900 "Starting Docker runtime…" colima "${_colima_args[@]}"
 
   if ! docker info &>/dev/null 2>&1; then
     error "Docker did not start. Try running 'colima status' to investigate."
@@ -243,10 +249,41 @@ install_docker_desktop() {
     retry 3 5 download_with_progress "$dmg_url" "$dmg_path" \
       "Downloading Docker Desktop — large, a few minutes on a fresh Mac"
 
-    local checksum_url="${dmg_url}.sha256sum"
-    local expected_hash
-    expected_hash=$(curl_secure -fsSL "$checksum_url" 2>/dev/null | awk '{print $1}' || true)
+    # Docker does NOT publish a floating "Docker.dmg.sha256sum" sibling — that
+    # URL 403s, so the old fetch was ALWAYS empty on a clean network. The real,
+    # co-located checksum for this exact floating DMG lives in "checksums.txt"
+    # next to it (BSD format: "<sha256> *Docker.dmg"). Use that instead; it
+    # returns 200 on a clean network, so honest installs get genuinely verified.
+    local checksum_url="${dmg_url%/*}/checksums.txt"
+    local expected_hash="" _attempt
+    # Fetch the published checksum, retrying transient failures. Capture cleanly
+    # (not through the generic retry(), whose progress notes go to stdout and
+    # would pollute the captured hash). Pick the Docker.dmg line and take the
+    # hash field (field 1; field 2 is "*Docker.dmg").
+    for _attempt in 1 2 3; do
+      expected_hash=$(curl_secure -fsSL "$checksum_url" 2>/dev/null \
+        | awk '$1 ~ /^[0-9a-fA-F]{64}$/ && /Docker\.dmg/{print $1; exit}') || true
+      [[ -n "$expected_hash" ]] && break
+      [[ "$_attempt" -lt 3 ]] && sleep 5
+    done
+
+    # A TLS-inspecting proxy can return an HTML error body that merely mentions
+    # "Docker.dmg"; without a structure check awk would capture that non-hash
+    # text as a "checksum", the compare below would fail, and an otherwise-fine
+    # install would hard-abort as "tampered". Only a real 64-hex SHA-256 counts
+    # as a checksum — anything else is treated as "not fetched" and takes the
+    # warn path, never a fail-closed mismatch on garbage. (The awk above already
+    # requires field 1 to be 64-hex; this is the belt-and-suspenders guard the
+    # PowerShell tool downloads also apply.)
+    if [[ -n "$expected_hash" && ! "$expected_hash" =~ ^[0-9a-fA-F]{64}$ ]]; then
+      log "Ignoring non-SHA-256 checksum response from $checksum_url (likely an intercepting proxy)."
+      expected_hash=""
+    fi
+
     if [[ -n "$expected_hash" ]]; then
+      # Checksum available (the clean-network path): verify and FAIL CLOSED on a
+      # mismatch (#556). This DMG is about to be mounted and copied into
+      # /Applications under sudo, so a corrupted or tampered download must abort.
       local actual_hash
       actual_hash=$(shasum -a 256 "$dmg_path" | awk '{print $1}')
       if [[ "$actual_hash" != "$expected_hash" ]]; then
@@ -255,10 +292,23 @@ install_docker_desktop() {
       fi
       log "Docker Desktop checksum verified."
     else
-      log "Could not fetch Docker Desktop checksum — skipping verification."
+      # No checksum could be fetched. On a clean network checksums.txt is always
+      # present, so this only happens on an anomalous path — a TLS-inspecting
+      # proxy stripping it, a transient CDN error, or Docker changing its
+      # layout. Do NOT hard-abort (that would brick otherwise-fine installs for
+      # something outside the user's control); emit a LOUD, visible warning and
+      # proceed. Operators who want strict fail-closed behaviour can opt in with
+      # TRACEBLOC_REQUIRE_DOCKER_DMG_CHECKSUM=1. Note: a genuine tampered DMG is
+      # still caught above whenever the checksum IS reachable (the common case).
+      if [[ -n "${TRACEBLOC_REQUIRE_DOCKER_DMG_CHECKSUM:-}" ]]; then
+        rm -f "$dmg_path"
+        error "Could not fetch the Docker Desktop checksum from ${checksum_url} and TRACEBLOC_REQUIRE_DOCKER_DMG_CHECKSUM is set — refusing to install an unverified DMG. Check egress to desktop.docker.com (a TLS-inspecting proxy can strip it), then re-run."
+      fi
+      warn "Could not fetch the Docker Desktop checksum from ${checksum_url} — installing this DMG UNVERIFIED. This usually means a proxy/VPN is rewriting traffic to desktop.docker.com. Set TRACEBLOC_REQUIRE_DOCKER_DMG_CHECKSUM=1 to refuse unverified installs."
     fi
 
-    spin_cmd "Installing Docker Desktop…" bash -c \
+    # #561: bounded so hdiutil on a bad/corrupt DMG can't hang forever.
+    spin_cmd_bounded 900 "Installing Docker Desktop…" bash -c \
       "hdiutil attach '$dmg_path' -nobrowse -quiet && \
        cp -R '/Volumes/Docker/Docker.app' /Applications/ && \
        xattr -cr /Applications/Docker.app && \

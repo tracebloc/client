@@ -27,6 +27,13 @@ COMMON="scripts/lib/common.sh"
 SUMMARY="scripts/lib/summary.sh"
 PS1="scripts/install-k8s.ps1"
 CLUSTER="scripts/lib/cluster.sh"
+# #616: the GPU node image (docker/k3s-cuda) rebuilds the SAME pinned k3s, so its
+# K3S_TAG in the Dockerfile ARG, build.sh, and the workflow input default must all
+# equal facts.env's K8S_VERSION — else a K8S_VERSION bump derives a GPU image tag
+# that was never published and the installer pulls a missing image.
+CUDA_DOCKERFILE="docker/k3s-cuda/Dockerfile"
+CUDA_BUILD="docker/k3s-cuda/build.sh"
+CUDA_WORKFLOW=".github/workflows/build-k3s-cuda.yaml"
 
 MODE="write"
 case "${1:-}" in
@@ -63,9 +70,16 @@ FACT_NAMES=(
   "install-k8s.ps1:K8S_VERSION"
   "summary.sh:READY_TIMEOUT"
   "install-k8s.ps1:ReadyTimeout"
+  "k3s-cuda/Dockerfile:K3S_TAG"
+  "k3s-cuda/build.sh:K3S_TAG"
+  "build-k3s-cuda.yaml:k3s_tag"
+  "install-k8s.ps1:CUDA_BASE_TAG"
+  "k3s-cuda/Dockerfile:CUDA_TAG"
+  "k3s-cuda/build.sh:CUDA_TAG"
+  "build-k3s-cuda.yaml:cuda_tag"
 )
-FACT_FILES=( "$COMMON" "$COMMON" "$COMMON" "$PS1" "$PS1" "$PS1" "$SUMMARY" "$PS1" )
-FACT_KEYS=( K3D_VERSION HELM_VERSION K8S_VERSION K3D_VERSION HELM_VERSION K8S_VERSION READY_TIMEOUT READY_TIMEOUT )
+FACT_FILES=( "$COMMON" "$COMMON" "$COMMON" "$PS1" "$PS1" "$PS1" "$SUMMARY" "$PS1" "$CUDA_DOCKERFILE" "$CUDA_BUILD" "$CUDA_WORKFLOW" "$PS1" "$CUDA_DOCKERFILE" "$CUDA_BUILD" "$CUDA_WORKFLOW" )
+FACT_KEYS=( K3D_VERSION HELM_VERSION K8S_VERSION K3D_VERSION HELM_VERSION K8S_VERSION READY_TIMEOUT READY_TIMEOUT K8S_VERSION K8S_VERSION K8S_VERSION CUDA_TAG CUDA_TAG CUDA_TAG CUDA_TAG )
 FACT_EXTRACT=(
   's/^K3D_VERSION="\${K3D_VERSION:-\(.*\)}".*/\1/p'
   's/^HELM_VERSION="\${HELM_VERSION:-\(.*\)}".*/\1/p'
@@ -75,6 +89,13 @@ FACT_EXTRACT=(
   's/.*\$K8S_VERSION .*else { "\([^"]*\)" }.*/\1/p'
   's/^READY_TIMEOUT="\${READY_TIMEOUT:-\(.*\)}".*/\1/p'
   's/.*\$ReadyTimeout .*else { "\([^"]*\)" }.*/\1/p'
+  's/^ARG K3S_TAG="\(.*\)".*/\1/p'
+  's/^K3S_TAG="\${K3S_TAG:-\(.*\)}".*/\1/p'
+  's/^ *default: "\(v[0-9][^"]*\)".*/\1/p'
+  's/.*\$CUDA_BASE_TAG .*else { "\([^"]*\)" }.*/\1/p'
+  's/^ARG CUDA_TAG="\(.*\)".*/\1/p'
+  's/^CUDA_TAG="\${CUDA_TAG:-\(.*\)}".*/\1/p'
+  's/^ *default: "\([0-9][^"]*ubuntu[^"]*\)".*/\1/p'
 )
 # For --write: an sed program that substitutes the OLD value with @@VAL@@ (replaced with
 # the spec value below). Anchored the same way as the extractor so only the pinned token
@@ -88,6 +109,13 @@ FACT_REWRITE=(
   's|\(\$K8S_VERSION .*else { "\)[^"]*\(" }\)|\1@@VAL@@\2|'
   's|^\(READY_TIMEOUT="${READY_TIMEOUT:-\)[^}]*\(}"\)|\1@@VAL@@\2|'
   's|\(\$ReadyTimeout .*else { "\)[^"]*\(" }\)|\1@@VAL@@\2|'
+  's|^\(ARG K3S_TAG="\)[^"]*\("\)|\1@@VAL@@\2|'
+  's|^\(K3S_TAG="${K3S_TAG:-\)[^}]*\(}"\)|\1@@VAL@@\2|'
+  's|\(default: "\)v[0-9][^"]*\("\)|\1@@VAL@@\2|'
+  's|\(\$CUDA_BASE_TAG .*else { "\)[^"]*\(" }\)|\1@@VAL@@\2|'
+  's|^\(ARG CUDA_TAG="\)[^"]*\("\)|\1@@VAL@@\2|'
+  's|^\(CUDA_TAG="${CUDA_TAG:-\)[^}]*\(}"\)|\1@@VAL@@\2|'
+  's|\(default: "\)[0-9][^"]*ubuntu[^"]*\("\)|\1@@VAL@@\2|'
 )
 
 # Capture whole, then take the first line with `%%$'\n'*` — NOT `… | head -1`, which

@@ -107,6 +107,21 @@ spec:
   jobTemplate:
     spec:
       backoffLimit: 2
+      # #555: hard wall-clock cap on the Job. `timeout` bounds only
+      # `helm upgrade --wait`; the earlier `helm repo add`/`helm repo update`
+      # fetches can hang on a TCP black-hole with no timeout, and with
+      # concurrencyPolicy: Forbid a single hung Job skips every future tick.
+      # This backstop fails the Job so the next tick can run.
+      #
+      # The deadline must never undercut a longer configured autoUpgrade.timeout:
+      # that would kill a healthy `helm upgrade --wait` before its own timeout
+      # fires. So take the MAX of the configured floor (default 900s) and the
+      # parsed timeout plus 300s repo-fetch headroom (the same 900-600 headroom
+      # baked into the defaults). `| default 900` preserves the reuse-values
+      # nil-guard when the key is absent.
+      {{- $deadlineFloor := .Values.autoUpgrade.activeDeadlineSeconds | default 900 | int }}
+      {{- $timeoutSeconds := include "tracebloc.durationSeconds" .Values.autoUpgrade.timeout | int }}
+      activeDeadlineSeconds: {{ max $deadlineFloor (add $timeoutSeconds 300) }}
       template:
         metadata:
           labels:
