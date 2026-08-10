@@ -262,10 +262,23 @@ install_docker_desktop() {
     # hash field (field 1; field 2 is "*Docker.dmg").
     for _attempt in 1 2 3; do
       expected_hash=$(curl_secure -fsSL "$checksum_url" 2>/dev/null \
-        | awk '/Docker\.dmg/{print $1; exit}') || true
+        | awk '$1 ~ /^[0-9a-fA-F]{64}$/ && /Docker\.dmg/{print $1; exit}') || true
       [[ -n "$expected_hash" ]] && break
       [[ "$_attempt" -lt 3 ]] && sleep 5
     done
+
+    # A TLS-inspecting proxy can return an HTML error body that merely mentions
+    # "Docker.dmg"; without a structure check awk would capture that non-hash
+    # text as a "checksum", the compare below would fail, and an otherwise-fine
+    # install would hard-abort as "tampered". Only a real 64-hex SHA-256 counts
+    # as a checksum — anything else is treated as "not fetched" and takes the
+    # warn path, never a fail-closed mismatch on garbage. (The awk above already
+    # requires field 1 to be 64-hex; this is the belt-and-suspenders guard the
+    # PowerShell tool downloads also apply.)
+    if [[ -n "$expected_hash" && ! "$expected_hash" =~ ^[0-9a-fA-F]{64}$ ]]; then
+      log "Ignoring non-SHA-256 checksum response from $checksum_url (likely an intercepting proxy)."
+      expected_hash=""
+    fi
 
     if [[ -n "$expected_hash" ]]; then
       # Checksum available (the clean-network path): verify and FAIL CLOSED on a
