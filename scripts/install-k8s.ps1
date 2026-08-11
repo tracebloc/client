@@ -3063,6 +3063,232 @@ function Test-HealthyClusterGpuConsistent {
   Hint "  k3d cluster delete $CLUSTER_NAME   (then re-run this installer)"
 }
 
+# Build the sh -c body that pre-creates the chart's hostPath PV directories and
+# makes them writable by the container user. Pure (string in, string out) so the
+# quoting and the dir list are unit-testable without Docker or a cluster.
+#
+# Why this is needed at all. The chart's hostPath PVs bind /tracebloc/<release>/data
+# and /tracebloc/<release>/logs (mounted in the pod as /data/shared and /data/logs).
+# kubelet's DirectoryOrCreate creates a missing path as root:root 0755, and it
+# IGNORES fsGroup on hostPath volumes (kubernetes#138411) -- so the container user
+# (uid 1000) cannot create anything inside, and the very first `data ingest` dies
+# with "mkdir: can't create directory '/data/shared/.tracebloc-staging/': Permission
+# denied". The bash installer has always pre-created these (lib/cluster.sh
+# _ensure_release_dirs); this script never did, which is why the failure was
+# Windows-only.
+#
+# Scope: data + logs only -- the two the chart's own init-writable-data container
+# targets. mysql's PV is deliberately left alone: it gets its own init container in
+# the chart, its datadir permissions are the database's business, and installs
+# reaching a healthy cluster prove it is already fine.
+#
+# The two dirs get DIFFERENT modes, mirroring the chart's init-writable-data (#667):
+#
+#   /data/shared -> 2777  setgid + world-write, NO sticky. Sticky permits an unlink only by
+#                   the entry's owner, the dir's owner, or root; `data delete` removes a tree
+#                   the INGEST wrote (uid 65534) from a pod running as 65532, so sticky here
+#                   makes the delete impossible -- table dropped, files stranded. Setting 3777
+#                   from the installer would re-create exactly the bug #667 removes, and on the
+#                   currently-published chart (no init-writable-data) or the fast path that
+#                   returns before Helm, nothing runs afterwards to correct it.
+#   /data/logs   -> 3777  setgid + sticky. Nothing has to delete another writer's logs, so the
+#                   /tmp-style protection costs nothing there.
+#
+# Keeping these in step with the chart is the point: the installer prepares the same dirs the
+# chart's init container would, so the two must not disagree about the mode. Both the chown and the chmod are
+# best-effort: on a bind-mounted host path that cannot represent POSIX ownership,
+# the mkdir alone is often enough, and a failure to adjust must not abort anything.
+# DataBase is the in-node root the chart binds DATA under. It is NOT always /tracebloc:
+# with HOST_DATASET_DIR set, the installer writes hostPath.datasetPath: /tracebloc-data
+# and tracebloc.clientDataHostPath (_helpers.tpl) resolves data to
+# <datasetPath>/<release>/data on the dataset bind mount. Preparing /tracebloc/<release>/data
+# in that setup would touch a path nothing mounts, while kubelet still created the REAL
+# one root:root 0755 -- the bug would look fixed and not be. Logs always stay on the local
+# /tracebloc tree (logs-pvc.yaml hardcodes it), which is why only data is parameterised.
+# Bash splits the same way (lib/cluster.sh _ensure_release_dirs).
+# The dirs this release needs prepared. Shared by the command builder and the caller that
+# verifies the result, so "what we prepared" and "what we demand proof for" cannot drift.
+# Modes the shared hostPath dirs must end up with. Kept as named constants so the installer
+# and the chart's init-writable-data can be diffed against each other by eye (#667).
+$TB_SHARED_DIR_MODE = "2777"   # setgid + world-write, NO sticky: `data delete` runs as another uid
+$TB_LOGS_DIR_MODE   = "3777"   # setgid + sticky: nothing deletes another writer's logs
+
+function Get-ReleaseDirsSpec {
+  param(
+    [Parameter(Mandatory)][string]$Release,
+    [string]$DataBase = "/tracebloc"
+  )
+  return @(
+    [pscustomobject]@{ Path = "$DataBase/$Release/data"; Mode = $TB_SHARED_DIR_MODE }
+    [pscustomobject]@{ Path = "/tracebloc/$Release/logs"; Mode = $TB_LOGS_DIR_MODE }
+  )
+}
+
+function Get-ReleaseDirsList {
+  param(
+    [Parameter(Mandatory)][string]$Release,
+    [string]$DataBase = "/tracebloc"
+  )
+  return @((Get-ReleaseDirsSpec -Release $Release -DataBase $DataBase).Path)
+}
+
+# The copy-pasteable repair for a dir the installer could not fix itself. Built from the SAME
+# spec as the prep, because a hint that names the wrong MODE is worse than no hint: `chmod -R
+# 3777` on both dirs -- what this printed before -- puts the sticky bit back on /data/shared and
+# breaks `data delete` across uids, so following the installer's own advice would leave delete
+# broken while ingest looked fixed (Bugbot). No -R: the dir's own mode is what governs unlink,
+# and recursing would stamp setgid/sticky onto every data FILE.
+function Get-ReleaseDirsRepairHint {
+  param(
+    [Parameter(Mandatory)][string]$Release,
+    [Parameter(Mandatory)][string]$Node,
+    [string]$DataBase = "/tracebloc"
+  )
+  $parts = (Get-ReleaseDirsSpec -Release $Release -DataBase $DataBase | ForEach-Object {
+    "chmod $($_.Mode) $($_.Path)"
+  }) -join "; "
+  return "  docker exec $Node sh -c `"$parts`""
+}
+
+function Get-ReleaseDirsPrepCommand {
+  param(
+    [Parameter(Mandatory)][string]$Release,
+    [string]$DataBase = "/tracebloc"
+  )
+  # path:mode pairs, the same shape the chart's init-writable-data uses (#667), so the installer
+  # and the chart cannot disagree about a dir's mode. Release names can't contain a colon (they
+  # are k8s names), so ${e%:*} / ${e#*:} split cleanly.
+  $dirs = ((Get-ReleaseDirsSpec -Release $Release -DataBase $DataBase | ForEach-Object {
+    "$($_.Path):$($_.Mode)"
+  }) -join " ")
+  # Reports OK/FAIL per dir so the caller can tell the user something true rather
+  # than assuming success. Writable = OTHER-writable, full stop.
+  #
+  # Ownership is deliberately not a pass condition. An earlier version also passed a
+  # dir owned by uid 1000, which contradicts the whole reason this function exists:
+  # the processes that must write here are the ingestion Job (uid 65534, or HOST_UID)
+  # and the CLI staging pod (uid 65532), and they share no group with 1000. So a
+  # chown that succeeds while the chmod fails leaves a 0755 dir that none of them can
+  # write -- and the owner check would have called that OK, skipped the warning, and
+  # left the first ingest to die on Permission denied. The uid is still printed, for
+  # diagnosis only.
+  #
+  # Reads the mode with `ls -ldn`, NOT `stat -c`: -c is a GNU/coreutils flag that
+  # BSD stat rejects, and the failure mode is silent -- stat writes nothing, the
+  # mode string comes back empty, and a correctly-chmodded directory gets reported
+  # FAIL. That would emit a scary "couldn't confirm" warning on a perfectly good
+  # install. `ls -ldn` is POSIX and behaves the same on busybox (rancher/k3s), on
+  # coreutils (the CUDA node image), and on BSD, so the same string parses
+  # everywhere -- including in the test suite on a developer's Mac.
+  #
+  # In `ls -ldn` output the mode is field 1 and the numeric owner is field 3;
+  # character 9 of the mode is the other-write bit ("drwxrwsrwt" -> 'w'), which the
+  # ????????w* glob tests without arithmetic. A trailing sticky/setgid character is
+  # absorbed by the *.
+  return @"
+for e in $dirs; do d=`${e%:*}; want=`${e#*:}; mkdir -p "`$d" 2>/dev/null; chown 1000:1000 "`$d" 2>/dev/null; chmod "`$want" "`$d" 2>/dev/null; set -- `$(ls -ldn "`$d" 2>/dev/null); m=`$1; o=`$3; case "`$m" in ????????w*) w=1;; *) w=0;; esac; if [ "`$w" = 1 ]; then echo "OK `$d `$o `$m"; else echo "FAIL `$d `$o `$m"; fi; done
+"@.Trim()
+}
+
+# Which in-node root does the chart bind DATA under, for the cluster that exists right now?
+#
+# Ground truth is the node's mount table, not $HOST_DATASET_DIR: k3d bakes bind mounts in at
+# cluster-create and cannot add or drop one on a running cluster, whereas the env var is not
+# persisted in install state and is absent on any re-run that didn't re-export it. Deciding from
+# the env var would prepare /tracebloc/<release>/data on such a re-run while the live release
+# still mounts /tracebloc-data/<release>/data -- the silent-success shape this whole function is
+# meant to remove.
+#
+# Degrades in order: node mount table -> the env var -> the local tree. A docker that can't be
+# reached tells us nothing about the mounts, so it must not be read as "no dataset mount".
+function Get-NodeDataBase {
+  # DatasetDirHint defaults to the resolved $HOST_DATASET_DIR and exists so the fallback
+  # branch is reachable from a test without reaching into script scope.
+  param(
+    [Parameter(Mandatory)][string]$Node,
+    [string]$DatasetDirHint = $HOST_DATASET_DIR
+  )
+  $res = Invoke-DockerCli -DockerArgs @("inspect", $Node, "--format", "{{range .Mounts}}{{println .Destination}}{{end}}") -TimeoutSec 20
+  if ($res.Code -eq 0 -and "$($res.Output)" -match '(?m)^/tracebloc-data\s*$') {
+    return "/tracebloc-data"
+  }
+  if ($res.Code -ne 0) {
+    # Couldn't read the mounts: fall back to the env var rather than assuming either layout.
+    Log "Get-NodeDataBase: docker inspect failed (exit $($res.Code)); falling back to HOST_DATASET_DIR"
+    if ($DatasetDirHint) { return "/tracebloc-data" }
+  }
+  return "/tracebloc"
+}
+
+# Make this release's hostPath PV dirs writable before Helm runs, so the first
+# ingest can't fail on a permission the installer was in a position to fix.
+#
+# Complements Ensure-ReleaseDirs (#659), it does not duplicate it -- keep both.
+# Ensure-ReleaseDirs creates the dirs from the WINDOWS side (New-Item), which is the
+# only place that can create them before the bind mount exists but cannot set POSIX
+# ownership or mode: Windows has no concept of either. This function fixes the half
+# that matters once a container looks at them -- kubelet ignores fsGroup on hostPath
+# (kubernetes#138411), so unless data/logs are world-writable IN-NODE, the ingestion
+# Job (uid 65534) and the CLI's staging pod (uid 65532) cannot write to a tree the
+# chart chowns to 1000. Creation without mode is not enough; mode without creation
+# would race kubelet's DirectoryOrCreate. Deleting either one re-opens #653.
+#
+# Never fatal. A cluster that isn't k3d-shaped, a docker exec that times out, or a
+# mount that refuses chown all end in a warning plus the exact command to run by
+# hand -- the install itself still completes, and on a current chart
+# init-writable-data fixes the same dirs at pod start anyway.
+function Initialize-ReleaseDataDirs {
+  param([Parameter(Mandatory)][string]$Release)
+  if (-not $Release) { return }
+  $node = "k3d-$CLUSTER_NAME-server-0"
+  # Follow the chart: data moves to the dataset bind mount when one exists. Ask the NODE,
+  # not $HOST_DATASET_DIR -- that env var is not persisted in install state, so a re-run or
+  # a fast-path repair started without it would prepare /tracebloc/<rel>/data while the live
+  # release still mounts /tracebloc-data/<rel>/data: successful-looking, fixing nothing
+  # (Bugbot). The bind mount is baked in at cluster-create and cannot change on a running
+  # cluster, so the node's own mount table is ground truth and survives a missing env var.
+  # Falls back to the env var, then to the local tree, if docker can't be asked.
+  $dataBase = Get-NodeDataBase -Node $node
+  $cmd = Get-ReleaseDirsPrepCommand -Release $Release -DataBase $dataBase
+  Log "Preparing hostPath dirs for release '$Release' in $node (data base $dataBase)"
+
+  # The script goes in on STDIN, never as an argv token. Invoke-BoundedProcess joins
+  # arguments into one command line and quotes any that contain whitespace WITHOUT
+  # escaping inner quotes -- its contract is "callers pass space-free tokens". This
+  # script has both spaces and embedded "$d", so as an argument Windows' command-line
+  # parser would end the quoted string at the first inner quote and hand `sh` a
+  # truncated script: the prep would silently do nothing and the Permission denied
+  # this function exists to prevent would survive. Same failure family as the kubectl
+  # patch that had to move to --patch-file. `sh` with no -c reads its program from
+  # stdin, and every argv token here is space-free. Trailing newline so the last
+  # command runs even on a shell that wants one.
+  $res = Invoke-DockerCli -DockerArgs @("exec", "-i", $node, "sh") -Stdin ($cmd + "`n") -TimeoutSec 60
+  $out = "$($res.Output)".Trim()
+  Log "Release dir prep: exit=$($res.Code) out=$out"
+
+  # Demand POSITIVE proof for every dir. Exit 0 with no "FAIL " line is not evidence the
+  # script did anything: if the program never reaches `sh` -- stdin not attached, an empty
+  # here-doc, a docker exec that starts and immediately ends -- sh exits 0 having printed
+  # nothing, and treating that as success would skip the warning and leave the first ingest on
+  # Permission denied while the install reports fine (Bugbot). That is the same fail-open shape
+  # as the argv-quoting bug earlier in this PR, which is exactly why absence of failure cannot
+  # stand in for success here.
+  $expected = Get-ReleaseDirsList -Release $Release -DataBase $dataBase
+  $unconfirmed = @($expected | Where-Object { $out -notmatch ("(?m)^OK " + [regex]::Escape($_) + "(\s|$)") })
+  if ($unconfirmed.Count -gt 0) {
+    Log "Release dir prep: no OK line for $($unconfirmed -join ', ')"
+  }
+  # Code 124 is Invoke-BoundedProcess's timeout; treat any non-zero the same way --
+  # report, hint, continue.
+  if ($res.Code -ne 0 -or $out -match "FAIL " -or $unconfirmed.Count -gt 0) {
+    Warn "Couldn't confirm the data directories are writable for this release."
+    Hint "Ingests can fail with 'Permission denied' on /data/shared until they are. Fix with:"
+    Hint (Get-ReleaseDirsRepairHint -Release $Release -Node $node -DataBase $dataBase)
+    return
+  }
+  Log "Release dirs writable for '$Release'"
+}
+
 function New-K3dCluster {
   Log "Creating k3d cluster: '$CLUSTER_NAME'"
 
@@ -4460,6 +4686,21 @@ $envBlock
     if ($LASTEXITCODE -ne 0) { Err "Couldn't add the tracebloc chart repo ($TRACEBLOC_HELM_REPO_URL)." $addOutput }
   }
 
+  # Pre-create this release's hostPath dirs BEFORE Helm, so kubelet never gets to
+  # create them root:root 0755 and strand the first ingest on "Permission denied".
+  # The release name is what the PV paths are keyed on (/tracebloc/<release>/...),
+  # so it must match whichever release Helm is about to touch: the adopted one when
+  # reconciling, otherwise the namespace-named release this script installs.
+  # Two statements, not a one-line inline branch on $adoptedReuse alone: an existing
+  # test locates the adopted helm-upgrade block by splitting this file on that exact
+  # opening-brace form, so a second occurrence up here silently steals the split and
+  # fails a test that has nothing to do with this change. Keep the compound
+  # condition. It is also stricter -- an adopt with no resolved release name falls
+  # back to the namespace instead of preparing /tracebloc//data.
+  $pvRelease = $TB_NAMESPACE
+  if ($adoptedReuse -and $existingName) { $pvRelease = $existingName }
+  Initialize-ReleaseDataDirs -Release $pvRelease
+
   Write-Host ""
   if ($adoptedReuse) {
     # Surgical reconcile of the LIVE release: preserve the deployed configuration +
@@ -5721,6 +5962,15 @@ if ((-not $Resume) -and $script:InstallState.completed -and (Test-ToolsPresent) 
     # Same reasoning for GPU: a healthy cluster whose values request GPU but whose node is
     # CPU-only would strand GPU experiments; flag it here since the fast path skips the gate (Bugbot).
     Test-HealthyClusterGpuConsistent
+    # This path exits before Helm, so a cluster installed BEFORE this fix would never
+    # get its PV dirs repaired -- the client is healthy, so every re-run shortcuts
+    # here and the first ingest keeps failing with "Permission denied". Repair it now:
+    # idempotent, bounded, and it makes "re-run the installer" a real remedy instead
+    # of advice that quietly does nothing. Get-InstalledClientInfo is the same bounded
+    # enumerator the health gate above already used; the release NAME (not the
+    # namespace) is what the PV paths embed.
+    $fpRelease = (Get-InstalledClientInfo).Name
+    if ($fpRelease) { Initialize-ReleaseDataDirs -Release $fpRelease }
     Hint "Delete $(Get-InstallStatePath) (or set a fresh HOST_DATA_DIR) to force a full reinstall."
     Unregister-ResumeAfterReboot
     Log "Already installed and healthy - nothing to do."

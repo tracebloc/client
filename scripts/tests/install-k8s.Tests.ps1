@@ -4684,3 +4684,328 @@ Describe "Fast path retries GPU on a CPU-only cluster (#616 Bugbot: re-run can e
     $fn | Should -Not -Match 'Invoke-DockerCli[^\n]*NVIDIA_DISABLE_REQUIRE'
   }
 }
+
+Describe "hostPath PV dirs are made writable before Helm (#616 follow-up: first-ingest Permission denied)" {
+  BeforeAll { $script:HPSRC = Get-Content "$PSScriptRoot/../install-k8s.ps1" -Raw }
+
+  # The bug: the chart's hostPath PVs bind /tracebloc/<release>/{data,logs}. kubelet's
+  # DirectoryOrCreate makes a missing path root:root 0755 and ignores fsGroup on hostPath
+  # (kubernetes#138411), so uid 1000 can't write and the FIRST `data ingest` dies with
+  # "mkdir: can't create directory '/data/shared/.tracebloc-staging/': Permission denied".
+  # The bash installer has always pre-created these (lib/cluster.sh _ensure_release_dirs);
+  # this script didn't, which is exactly why the failure was Windows-only.
+
+  It "prepares both PV dirs for the release the PV paths are keyed on" {
+    $cmd = Get-ReleaseDirsPrepCommand -Release "windows-demo"
+    $cmd | Should -Match '/tracebloc/windows-demo/data'
+    $cmd | Should -Match '/tracebloc/windows-demo/logs'
+  }
+
+  It "pre-creates the dirs -- the mkdir is the part that beats kubelet to them" {
+    # Without mkdir -p, kubelet wins the race and creates them root:root 0755; a chmod
+    # afterwards would be repairing damage instead of preventing it.
+    Get-ReleaseDirsPrepCommand -Release "r" | Should -Match 'mkdir -p'
+  }
+
+  It "matches the chart's init-writable-data semantics, INCLUDING its per-dir sticky split" {
+    # Same end state as a current chart's init container, so a cluster on an older published
+    # chart is not a second, differently-broken configuration. The modes deliberately differ
+    # per dir (#667): /data/shared must NOT be sticky or `data delete` -- which runs as a
+    # different uid than the ingest -- cannot remove the tree, and on the currently-published
+    # chart (no init-writable-data) or the fast path that returns before Helm, nothing runs
+    # afterwards to correct a sticky bit the installer set.
+    $cmd = Get-ReleaseDirsPrepCommand -Release "r"
+    $cmd | Should -Match 'chown 1000:1000'
+    $cmd | Should -Match '/tracebloc/r/data:2777'
+    $cmd | Should -Match '/tracebloc/r/logs:3777'
+    $cmd | Should -Not -Match '/data:3777'      # never sticky on the shared/data dir
+    $cmd | Should -Match 'chmod "\$want"'       # per-dir mode, not one mode for both
+  }
+
+  It "the desired mode does not collide with the observed mode in the shell" {
+    # Both were briefly called $m, so the ls-derived value overwrote the wanted one. Harmless
+    # only because chmod ran first -- exactly the kind of ordering dependency that breaks on
+    # the next edit.
+    $cmd = Get-ReleaseDirsPrepCommand -Release "r"
+    $cmd | Should -Match 'want=\$\{e#\*:\}'
+    $cmd | Should -Match 'm=\$1'
+  }
+
+  It "leaves the mysql PV alone" {
+    # mysql gets its own init container in the chart and its datadir permissions are the
+    # database's business; installs that reach a healthy cluster prove it's already fine.
+    Get-ReleaseDirsPrepCommand -Release "r" | Should -Not -Match '/mysql'
+  }
+
+  It "reads the mode with POSIX ls -ldn, never GNU-only stat -c" {
+    # Regression guard on a bug this actually had: `stat -c` is a GNU/coreutils flag that
+    # BSD stat REJECTS, and it fails SILENTLY -- empty mode string, so a correctly-chmodded
+    # dir gets reported FAIL and the installer emits a scary warning on a healthy install.
+    # Same class as the sha256sum --check trap (#429). ls -ldn behaves identically on
+    # busybox, coreutils and BSD.
+    $cmd = Get-ReleaseDirsPrepCommand -Release "r"
+    $cmd | Should -Match 'ls -ldn'
+    $cmd | Should -Not -Match 'stat -c'
+  }
+
+  It "keeps the shell's own \$d/\$1/\$3 out of PowerShell's hands" {
+    # If the here-string interpolated these, the node would run `mkdir -p ""` and silently
+    # prepare nothing -- the exact silent-no-op this whole fix exists to remove.
+    $cmd = Get-ReleaseDirsPrepCommand -Release "r"
+    $cmd | Should -Match '\$d'
+    $cmd | Should -Match 'm=\$1'
+    $cmd | Should -Match 'o=\$3'
+  }
+
+  It "reports FAIL for a root-owned 0755 dir and OK for a 3777 one (the decision logic)" {
+    # Exercises the glob that decides writability, without needing a node: character 9 of
+    # the mode is the other-write bit.
+    $cmd = Get-ReleaseDirsPrepCommand -Release "r"
+    $cmd | Should -Match '\?{8}w\*\)'      # ????????w*) -> other-writable
+    # Ownership must NOT be a pass condition: the writers are 65534 / 65532, and an
+    # owner-is-1000 shortcut reported OK on a 0755 dir whose chmod had failed (Bugbot).
+    $cmd | Should -Not -Match '= 1000 \]' 
+  }
+
+  Context "Initialize-ReleaseDataDirs" {
+    It "warns with a runnable command when the dirs still aren't writable" {
+      Mock Invoke-DockerCli { [pscustomobject]@{ Code = 0; Output = "FAIL /tracebloc/rel/data 0 drwxr-xr-x" } }
+      Mock Warn {}; Mock Hint {}; Mock Log {}
+      { Initialize-ReleaseDataDirs -Release "rel" } | Should -Not -Throw
+      Should -Invoke Warn -Times 1
+      # The hint must be copy-pasteable, not advice to go read something.
+      Should -Invoke Hint -ParameterFilter { $m -match 'docker exec' } -Times 1
+    }
+
+    It "a docker exec timeout degrades to a warning, never a failed install" {
+      # 124 is Invoke-BoundedProcess's timeout code. A cluster that isn't k3d-shaped lands
+      # here too. Neither is a reason to abort an install that is otherwise fine -- and on a
+      # current chart init-writable-data fixes the same dirs at pod start.
+      Mock Invoke-DockerCli { [pscustomobject]@{ Code = 124; Output = "docker exec timed out after 60s" } }
+      Mock Warn {}; Mock Hint {}; Mock Log {}
+      { Initialize-ReleaseDataDirs -Release "rel" } | Should -Not -Throw
+      Should -Invoke Warn -Times 1
+    }
+
+    It "stays quiet when every dir came back OK" {
+      Mock Invoke-DockerCli { [pscustomobject]@{ Code = 0; Output = "OK /tracebloc/rel/data 1000 drwxrwsrwt`nOK /tracebloc/rel/logs 1000 drwxrwsrwt" } }
+      Mock Warn {}; Mock Hint {}; Mock Log {}
+      Initialize-ReleaseDataDirs -Release "rel"
+      Should -Invoke Warn -Times 0
+    }
+  }
+
+  It "runs BEFORE helm, for whichever release helm is about to touch" {
+    # Order matters: after Helm, the pod may already have failed to mount. And the release
+    # name must follow the adopt/fresh branch, since the PV path embeds it -- preparing
+    # dirs for the wrong release would look successful and fix nothing.
+    # The release name follows the adopt/fresh branch.
+    $script:HPSRC | Should -Match '\$pvRelease = \$TB_NAMESPACE'
+    $script:HPSRC | Should -Match 'if \(\$adoptedReuse -and \$existingName\) \{ \$pvRelease = \$existingName \}'
+    # ...and the prep runs before the helm adopted/fresh split.
+    $idxPrep = $script:HPSRC.IndexOf('Initialize-ReleaseDataDirs -Release $pvRelease')
+    $idxHelm = $script:HPSRC.IndexOf('if ($adoptedReuse) {', $idxPrep)
+    $idxPrep | Should -BeGreaterThan 0
+    $idxHelm | Should -BeGreaterThan $idxPrep
+    # Guard the anchor collision that broke an existing test once: the inline form
+    # must not reappear before the helm block.
+    $script:HPSRC.IndexOf('-Release $(if ($adoptedReuse)') | Should -Be -1
+  }
+}
+
+Describe "hostPath prep also runs on the nothing-to-do fast path (#653)" {
+  BeforeAll { $script:FPHSRC = Get-Content "$PSScriptRoot/../install-k8s.ps1" -Raw }
+  It "repairs an already-installed cluster instead of shortcutting past the fix" {
+    # The fast path exits before Helm. A cluster installed before this fix is HEALTHY, so
+    # every re-run takes that shortcut -- without this, "re-run the installer" would be
+    # advice that quietly does nothing while the first ingest keeps failing.
+    $fast = ($script:FPHSRC -split 'already installed and the client is healthy')[1]
+    $fast = ($fast -split 'exit 0')[0]
+    $fast | Should -Match 'Initialize-ReleaseDataDirs -Release \$fpRelease'
+    # Keyed on the release NAME, since that is what the PV paths embed -- not the namespace.
+    $fast | Should -Match '\(Get-InstalledClientInfo\)\.Name'
+  }
+  It "skips silently when no release name could be resolved" {
+    # Never prepare /tracebloc//data: an unresolvable release must be a no-op, not a
+    # directory named after nothing.
+    $fast = (($script:FPHSRC -split 'already installed and the client is healthy')[1] -split 'exit 0')[0]
+    $fast | Should -Match 'if \(\$fpRelease\) \{ Initialize-ReleaseDataDirs'
+  }
+}
+
+Describe "hostPath prep survives Windows argv and follows the dataset mount (#654 Bugbot)" {
+
+  It "sends the script on STDIN, with every argv token space-free" {
+    # Invoke-BoundedProcess joins args into ONE command line and quotes any arg containing
+    # whitespace WITHOUT escaping inner quotes -- its documented contract is "callers pass
+    # space-free tokens". Passed as `sh -c <script>`, Windows' parser would end the quoted
+    # arg at the script's first inner " and hand sh a TRUNCATED program: prep silently does
+    # nothing and the Permission denied survives, with the install still reporting success.
+    # Same failure family as the kubectl patch that had to move to --patch-file.
+    $script:capArgs = $null; $script:capStdin = $null
+    Mock Invoke-DockerCli {
+      $script:capArgs = $DockerArgs; $script:capStdin = $Stdin
+      [pscustomobject]@{ Code = 0; Output = "OK /tracebloc/rel/data 1000 drwxrwsrwt" }
+    }
+    Mock Log {}; Mock Warn {}; Mock Hint {}
+    Initialize-ReleaseDataDirs -Release "rel"
+
+    @($script:capArgs | Where-Object { $_ -match '\s' }).Count | Should -Be 0
+    $script:capArgs | Should -Contain "-i"      # stdin must be attached
+    $script:capArgs | Should -Contain "sh"
+    $script:capArgs | Should -Not -Contain "-c" # not an argv-borne script
+    $script:capStdin | Should -Match 'mkdir -p'
+    $script:capStdin | Should -Match "`n$"      # trailing newline so the last line runs
+  }
+
+  It "prepares data on the dataset mount when HOST_DATASET_DIR is set" {
+    # tracebloc.clientDataHostPath resolves data to <hostPath.datasetPath>/<release>/data, and
+    # the installer writes datasetPath: /tracebloc-data whenever HOST_DATASET_DIR is set. Prep
+    # under /tracebloc there would touch a path nothing mounts while kubelet still created the
+    # real one root:root 0755 -- fixed-looking, still broken.
+    $cmd = Get-ReleaseDirsPrepCommand -Release "rel" -DataBase "/tracebloc-data"
+    $cmd | Should -Match '/tracebloc-data/rel/data'
+    $cmd | Should -Not -Match '/tracebloc/rel/data'
+  }
+
+  It "keeps logs on the local tree even when data moves to the dataset mount" {
+    # logs-pvc.yaml hardcodes /tracebloc/<release>/logs — only data follows datasetPath.
+    $cmd = Get-ReleaseDirsPrepCommand -Release "rel" -DataBase "/tracebloc-data"
+    $cmd | Should -Match '/tracebloc/rel/logs'
+  }
+
+  It "defaults to the local tree when no dataset mount is configured" {
+    $cmd = Get-ReleaseDirsPrepCommand -Release "rel"
+    $cmd | Should -Match '/tracebloc/rel/data'
+    $cmd | Should -Match '/tracebloc/rel/logs'
+  }
+
+  It "the repair hint names the same paths AND the same modes that were prepared" {
+    # This test used to assert paths only, which is exactly how a hint saying
+    # `chmod -R 3777` on BOTH dirs survived the switch to per-dir modes: following the
+    # installer's own copy-paste would put the sticky bit back on /data/shared and break
+    # `data delete`, while ingest looked fixed (Bugbot). Assert the modes too, per dir.
+    $hint = Get-ReleaseDirsRepairHint -Release "rel" -Node "k3d-x-server-0" -DataBase "/tracebloc-data"
+    $hint | Should -Match 'chmod 2777 /tracebloc-data/rel/data'
+    $hint | Should -Match 'chmod 3777 /tracebloc/rel/logs'
+    $hint | Should -Not -Match '3777 [^ ]*/data'   # never sticky on the shared/data dir
+    $hint | Should -Not -Match '-R'                # dir mode governs unlink; no setgid on files
+  }
+
+  It "the hint and the prep are generated from ONE spec, so they cannot drift" {
+    # The drift is invisible until someone runs the hint, so remove the possibility rather
+    # than test for its absence in two places.
+    $spec = Get-ReleaseDirsSpec -Release "rel" -DataBase "/tracebloc-data"
+    $cmd  = Get-ReleaseDirsPrepCommand -Release "rel" -DataBase "/tracebloc-data"
+    $hint = Get-ReleaseDirsRepairHint -Release "rel" -Node "n" -DataBase "/tracebloc-data"
+    foreach ($e in $spec) {
+      $cmd  | Should -Match ([regex]::Escape("$($e.Path):$($e.Mode)"))
+      $hint | Should -Match ([regex]::Escape("chmod $($e.Mode) $($e.Path)"))
+    }
+    $spec.Count | Should -Be 2
+  }
+}
+
+Describe "hostPath prep: no false OK, and the data base comes from the live cluster (#654 Bugbot r2)" {
+
+  It "a chowned-but-not-chmodded dir reports FAIL, not OK" {
+    # chown succeeding while chmod fails leaves 0755 owned by 1000. None of the writers is
+    # 1000 (ingestion Job 65534/HOST_UID, CLI staging pod 65532) and they share no group, so
+    # that dir is unusable -- and an owner-based pass would have called it OK, skipped the
+    # warning, and left the first ingest to die on Permission denied.
+    $cmd = Get-ReleaseDirsPrepCommand -Release "rel"
+    $cmd | Should -Not -Match '= 1000 \]'
+    $cmd | Should -Match 'w=0'
+  }
+
+  It "asks the node's mount table for the data base, not the env var" {
+    # HOST_DATASET_DIR is not persisted in install state, so a re-run without it would prepare
+    # /tracebloc/<rel>/data while the live release still mounts /tracebloc-data/<rel>/data.
+    # k3d bakes bind mounts at cluster-create and can't change them on a running cluster, so
+    # the node is ground truth.
+    Mock Invoke-DockerCli { [pscustomobject]@{ Code = 0; Output = "/tracebloc`n/tracebloc-data`n/var/lib/rancher" } }
+    Mock Log {}
+    Get-NodeDataBase -Node "k3d-x-server-0" | Should -Be "/tracebloc-data"
+  }
+
+  It "uses the local tree when the node has no dataset mount" {
+    Mock Invoke-DockerCli { [pscustomobject]@{ Code = 0; Output = "/tracebloc`n/var/lib/rancher" } }
+    Mock Log {}
+    Get-NodeDataBase -Node "k3d-x-server-0" | Should -Be "/tracebloc"
+  }
+
+  It "does not read an unreachable docker as 'no dataset mount'" {
+    # Exit 124 is the bounded-process timeout. Failing to ASK tells us nothing about the
+    # layout, so it must fall back to the env var rather than silently assuming the local tree
+    # and preparing the wrong path.
+    Mock Invoke-DockerCli { [pscustomobject]@{ Code = 124; Output = "timed out" } }
+    Mock Log {}
+    Get-NodeDataBase -Node "k3d-x-server-0" -DatasetDirHint "D:\datasets" | Should -Be "/tracebloc-data"
+    Get-NodeDataBase -Node "k3d-x-server-0" -DatasetDirHint "" | Should -Be "/tracebloc"
+  }
+
+  It "a mount named like the dataset path but different does not match" {
+    # Anchored match: /tracebloc-data-old must not be read as the dataset mount.
+    Mock Invoke-DockerCli { [pscustomobject]@{ Code = 0; Output = "/tracebloc`n/tracebloc-data-old" } }
+    Mock Log {}
+    Get-NodeDataBase -Node "k3d-x-server-0" | Should -Be "/tracebloc"
+  }
+}
+
+Describe "hostPath prep call site asks the node, not the env var (#654 Bugbot r2)" {
+  BeforeAll { $script:CSRC = Get-Content "$PSScriptRoot/../install-k8s.ps1" -Raw }
+
+  It "Initialize-ReleaseDataDirs resolves the data base via Get-NodeDataBase" {
+    # A correct Get-NodeDataBase is worthless if the caller still decides from
+    # $HOST_DATASET_DIR: that var is not persisted in install state, so a re-run without it
+    # prepares /tracebloc/<rel>/data while the live release mounts /tracebloc-data/<rel>/data.
+    # Guarding the FUNCTION alone left this reachable, so guard the call site too.
+    $fn = (($script:CSRC -split 'function Initialize-ReleaseDataDirs')[1] -split '\nfunction ')[0]
+    $fn | Should -Match 'Get-NodeDataBase -Node \$node'
+    $fn | Should -Not -Match 'if \(\$HOST_DATASET_DIR\) \{ "/tracebloc-data" \}'
+  }
+}
+
+Describe "hostPath prep needs positive proof, not just absence of failure (#654 Bugbot r3)" {
+  BeforeEach { Mock Log {}; Mock Warn {}; Mock Hint {} }
+
+  It "empty output with exit 0 warns instead of reporting success" {
+    # If the program never reaches `sh` -- stdin not attached, empty here-doc, an exec that
+    # starts and ends -- sh exits 0 having printed nothing. Reading that as success skips the
+    # warning and leaves the first ingest on Permission denied while the install looks fine.
+    # Same fail-open shape as the argv-quoting bug this PR already fixed.
+    Mock Invoke-DockerCli { [pscustomobject]@{ Code = 0; Output = "" } }
+    Initialize-ReleaseDataDirs -Release "rel"
+    Should -Invoke Warn -Times 1
+  }
+
+  It "a partial result (one dir confirmed, one missing) still warns" {
+    Mock Invoke-DockerCli { [pscustomobject]@{ Code = 0; Output = "OK /tracebloc/rel/data 65534 drwxrwsrwx" } }
+    Initialize-ReleaseDataDirs -Release "rel"
+    Should -Invoke Warn -Times 1
+  }
+
+  It "output about some OTHER release does not count as proof for this one" {
+    # A stale or misrouted exec must not satisfy the check.
+    Mock Invoke-DockerCli {
+      [pscustomobject]@{ Code = 0; Output = "OK /tracebloc/other/data 65534 drwxrwsrwx`nOK /tracebloc/other/logs 65534 drwxrwsrwt" }
+    }
+    Initialize-ReleaseDataDirs -Release "rel"
+    Should -Invoke Warn -Times 1
+  }
+
+  It "stays quiet only when EVERY expected dir reports OK" {
+    Mock Invoke-DockerCli {
+      [pscustomobject]@{ Code = 0; Output = "OK /tracebloc/rel/data 65534 drwxrwsrwx`nOK /tracebloc/rel/logs 65534 drwxrwsrwt" }
+    }
+    Initialize-ReleaseDataDirs -Release "rel"
+    Should -Invoke Warn -Times 0
+  }
+
+  It "the dir list is shared, so what we prepare and what we verify cannot drift" {
+    $list = Get-ReleaseDirsList -Release "rel" -DataBase "/tracebloc-data"
+    $cmd  = Get-ReleaseDirsPrepCommand -Release "rel" -DataBase "/tracebloc-data"
+    foreach ($d in $list) { $cmd | Should -Match ([regex]::Escape($d)) }
+    $list.Count | Should -Be 2
+  }
+}

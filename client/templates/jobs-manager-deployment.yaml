@@ -55,8 +55,21 @@ spec:
       # Unlike mysql-data (one writer, UID 999), these have MULTIPLE non-root writers —
       # jobs-manager, the training/ingestor pods it spawns, and the CLI's ingest-staging pod,
       # whose UID this chart does not control — so they must be world-writable, not chowned to
-      # a single UID. Mode 3777 = setgid (2) so new files inherit GID 1000 + sticky (1) so one
-      # writer can't unlink or rename another writer's files (/tmp semantics); runs as root only
+      # a single UID. Both get setgid (2) so new entries inherit GID 1000. They differ in the
+      # sticky bit, deliberately:
+      #   /data/logs  = 3777 (setgid + sticky) — /tmp semantics: one writer can't unlink or
+      #                 rename another writer's files, and nothing has to.
+      #   /data/shared = 2777 (setgid, NO sticky) — because here something DOES have to.
+      #                 `data delete` removes a dataset the INGEST created: the ingestion Job
+      #                 writes as uid 65534 (or HOST_UID), while the CLI's teardown pod runs as
+      #                 uid 65532. Sticky permits an unlink only by the entry's owner, the
+      #                 directory's owner, or root — and the teardown pod is none of the three,
+      #                 so sticky made a documented product operation impossible: the table was
+      #                 dropped and the files stayed, leaving a half-deleted dataset. fsGroup
+      #                 cannot align those identities either, since kubelet ignores it on
+      #                 hostPath (kubernetes/kubernetes#138411). Keeping sticky on /data/shared
+      #                 protects writers from each other at the cost of never being able to
+      #                 clean up after them; runs as root only
       # long enough to fix the mounts. Caps: CHOWN for the chown; FOWNER so the chmod is idempotent
       # on re-install; FSETID so the setgid bit survives the chmod — after the chown to GID 1000 the
       # dir's group no longer matches the process (fsgid 0), and a root process without FSETID has
@@ -78,7 +91,7 @@ spec:
             add: ["CHOWN", "FOWNER", "FSETID"]
           seccompProfile:
             type: RuntimeDefault
-        command: ['sh', '-c', 'for d in /data/shared /data/logs; do chown 1000:1000 "$d" && chmod 3777 "$d" || echo "init-writable-data: could not adjust $d (pre-provisioned or root_squash mount?); leaving as-is"; done']
+        command: ['sh', '-c', 'for e in /data/shared:2777 /data/logs:3777; do d=${e%:*}; m=${e#*:}; chown 1000:1000 "$d" && chmod "$m" "$d" || echo "init-writable-data: could not adjust $d (pre-provisioned or root_squash mount?); leaving as-is"; done']
         volumeMounts:
         - name: shared-volume
           mountPath: /data/shared
@@ -87,7 +100,7 @@ spec:
       {{- end }}
       containers:
       - name: api
-        image: {{ include "tracebloc.image" (dict "repository" "tracebloc/jobs-manager" "tag" .Values.env.CLIENT_ENV "digest" .Values.images.jobsManager.digest "registry" (dig "imageRegistry" "docker.io" (.Values.global | default dict))) | quote }}
+        image: {{ include "tracebloc.image" (dict "repository" "tracebloc/jobs-manager" "tag" (include "tracebloc.clientEnv" .) "digest" .Values.images.jobsManager.digest "registry" (dig "imageRegistry" "docker.io" (.Values.global | default dict))) | quote }}
         imagePullPolicy: {{ if .Values.images.jobsManager.digest }}IfNotPresent{{ else }}Always{{ end }}
         securityContext:
           allowPrivilegeEscalation: false
@@ -285,7 +298,7 @@ spec:
         - name: JOB_IMAGE_HOST
           value: {{ printf "%s/" (dig "imageRegistry" "docker.io" (.Values.global | default dict) | default "docker.io") | quote }}
         - name: CLIENT_ENV
-          value: {{ .Values.env.CLIENT_ENV | default "prod" | quote }}
+          value: {{ include "tracebloc.clientEnv" . | quote }}
         - name: RESOURCE_REQUESTS
           value: {{ if hasKey .Values.env "RESOURCE_REQUESTS" }}{{ .Values.env.RESOURCE_REQUESTS | quote }}{{ else }}"cpu=2,memory=8Gi"{{ end }}
         - name: RESOURCE_LIMITS
@@ -325,7 +338,7 @@ spec:
         {{- end }}
         {{- end }}
       - name: pods-monitor-container
-        image: {{ include "tracebloc.image" (dict "repository" "tracebloc/pods-monitor" "tag" .Values.env.CLIENT_ENV "digest" .Values.images.podsMonitor.digest "registry" (dig "imageRegistry" "docker.io" (.Values.global | default dict))) | quote }}
+        image: {{ include "tracebloc.image" (dict "repository" "tracebloc/pods-monitor" "tag" (include "tracebloc.clientEnv" .) "digest" .Values.images.podsMonitor.digest "registry" (dig "imageRegistry" "docker.io" (.Values.global | default dict))) | quote }}
         imagePullPolicy: {{ if .Values.images.podsMonitor.digest }}IfNotPresent{{ else }}Always{{ end }}
         securityContext:
           allowPrivilegeEscalation: false
@@ -366,7 +379,7 @@ spec:
         - name: JOB_IMAGE_HOST
           value: {{ printf "%s/" (dig "imageRegistry" "docker.io" (.Values.global | default dict) | default "docker.io") | quote }}
         - name: CLIENT_ENV
-          value: {{ .Values.env.CLIENT_ENV | default "prod" | quote }}
+          value: {{ include "tracebloc.clientEnv" . | quote }}
         - name: RESOURCE_REQUESTS
           value: {{ if hasKey .Values.env "RESOURCE_REQUESTS" }}{{ .Values.env.RESOURCE_REQUESTS | quote }}{{ else }}"cpu=2,memory=8Gi"{{ end }}
         - name: RESOURCE_LIMITS

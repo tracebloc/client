@@ -77,7 +77,7 @@ tracebloc.io/seal-check-name: {{ .name | quote }}
   on the same cluster share the tracebloc-node-agents namespace; before
   this naming, two releases collided on the literal `tracebloc-resource-monitor`
   name and Helm refused the second install with "exists, not owned".
-  See the v1.2.0 release notes / hasan-prod migration case study.
+  See the v1.2.0 release notes / tenant-d-prod migration case study.
 */}}
 {{- define "tracebloc.resourceMonitorName" -}}
 {{ .Release.Name }}-resource-monitor
@@ -235,7 +235,10 @@ Image reference — defaults to docker.io when no registry is provided.
 When `digest` (sha256:...) is set, renders registry/repo@digest (immutable pin,
 preferred for security). Otherwise falls back to registry/repo:tag, where tag
 defaults to "prod" when CLIENT_ENV is omitted or empty.
-Usage: {{ include "tracebloc.image" (dict "repository" "tracebloc/jobs-manager" "tag" .Values.env.CLIENT_ENV "digest" .Values.images.jobsManager.digest "registry" "docker.io") }}
+Usage: {{ include "tracebloc.image" (dict "repository" "tracebloc/jobs-manager" "tag" (include "tracebloc.clientEnv" .) "digest" .Values.images.jobsManager.digest "registry" "docker.io") }}
+NOTE the resolved tag. This example previously read `.Values.env.CLIENT_ENV`
+and all four image call sites were copied from it, so a documented alias
+became an image tag nothing publishes (backend#1723).
 */}}
 {{- define "tracebloc.image" -}}
 {{- $registry := .registry | default "docker.io" -}}

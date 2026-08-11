@@ -1,0 +1,140 @@
+suite: CLIENT_ENV aliases resolve everywhere, not just where someone remembered (backend#1723)
+# WHY THIS SUITE EXISTS
+#
+# values.schema.json promises: "the documented aliases development/staging/
+# production are accepted and normalized", and calls CLIENT_ENV the "Docker
+# image tag". Both halves were true only for the ingestor channel tag and the
+# prod digest pin. Four control-plane image tags, the auto-upgrade CronJob's
+# IMAGE_TAG and the egress reachability check all read the RAW value.
+#
+# `CLIENT_ENV: staging` therefore pulled tracebloc/*:staging -- a tag the
+# publish pipeline never writes (it publishes :stg), last pushed 2026-06-22 --
+# so the client ran a 50-day-old jobs-manager that predated the alias fix,
+# authenticated against the wrong backend and crash-looped.
+#
+# THE EXISTING SUITES COULD NOT HAVE CAUGHT IT. They are thorough about dev,
+# stg, prod, unset and unknown -- and not one of them ever set `staging`. A
+# test written in the same vocabulary as the code cannot detect a vocabulary
+# mismatch with the docs. So this suite tests the ALIASES specifically.
+templates:
+  - templates/jobs-manager-deployment.yaml
+  - templates/requests-proxy-deployment.yaml
+  - templates/resource-monitor-daemonset.yaml
+  - templates/image-refresh-cronjob.yaml
+  - templates/egress-reachability-check.yaml
+release:
+  name: alias
+  namespace: tracebloc
+set:
+  clientId: "test-id"
+  clientPassword: "test"
+  storageClass.create: false
+  # Unpinned so the image-refresh CronJob renders; a digest-pinned pair
+  # disables it (tracebloc.imageRefreshEnabled).
+  images.jobsManager.digest: ""
+  images.podsMonitor.digest: ""
+
+tests:
+  # ---- the image tags -------------------------------------------------
+  - it: "staging resolves to :stg for the jobs-manager image"
+    template: templates/jobs-manager-deployment.yaml
+    set:
+      env.CLIENT_ENV: staging
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].image
+          value: docker.io/tracebloc/jobs-manager:stg
+
+  - it: "staging resolves to :stg for the pods-monitor sidecar"
+    template: templates/jobs-manager-deployment.yaml
+    set:
+      env.CLIENT_ENV: staging
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[1].image
+          value: docker.io/tracebloc/pods-monitor:stg
+
+  - it: "staging resolves to :stg for requests-proxy (which runs the jobs-manager image)"
+    template: templates/requests-proxy-deployment.yaml
+    set:
+      env.CLIENT_ENV: staging
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].image
+          value: docker.io/tracebloc/jobs-manager:stg
+
+  - it: "staging resolves to :stg for the resource-monitor daemonset"
+    template: templates/resource-monitor-daemonset.yaml
+    set:
+      env.CLIENT_ENV: staging
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].image
+          value: docker.io/tracebloc/resource-monitor:stg
+
+  - it: "production and development resolve too, not just staging"
+    template: templates/jobs-manager-deployment.yaml
+    set:
+      env.CLIENT_ENV: production
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].image
+          value: docker.io/tracebloc/jobs-manager:prod
+
+  - it: "a canonical value is unchanged by resolution"
+    template: templates/jobs-manager-deployment.yaml
+    set:
+      env.CLIENT_ENV: stg
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].image
+          value: docker.io/tracebloc/jobs-manager:stg
+
+  # ---- the auto-upgrade CronJob ---------------------------------------
+  # The most consequential site: this is what keeps an installed edge
+  # current, so an unpublished tag here freezes it on whatever that tag
+  # last held -- silently, forever.
+  - it: "the image-refresh CronJob refreshes against the RESOLVED tag"
+    template: templates/image-refresh-cronjob.yaml
+    # documentIndex 1: the file renders the auto-upgrade CronJob first and the
+    # image-refresh one second, same as image_refresh_test.yaml.
+    documentIndex: 1
+    set:
+      env.CLIENT_ENV: staging
+    asserts:
+      - contains:
+          path: spec.jobTemplate.spec.template.spec.containers[0].env
+          content:
+            name: IMAGE_TAG
+            value: "stg"
+
+  # ---- the egress reachability CHECK ----------------------------------
+  # Its case statement keys on dev|stg|prod with a catch-all of PROD, so an
+  # alias made it probe api.tracebloc.io and PASS for an environment the
+  # cluster never contacts. A check that verifies the wrong thing is worse
+  # than no check.
+  - it: "the egress check probes the environment the client actually uses"
+    template: templates/egress-reachability-check.yaml
+    set:
+      env.CLIENT_ENV: staging
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: CLIENT_ENV
+            value: "stg"
+
+  # ---- the value handed to the services -------------------------------
+  # client-runtime normalizes this itself, so these passed before. Pinned
+  # anyway: relying on the consumer to fix the producer's value is how the
+  # image tags -- which have no consumer to fix them -- got missed.
+  - it: "the CLIENT_ENV handed to jobs-manager is already canonical"
+    template: templates/jobs-manager-deployment.yaml
+    set:
+      env.CLIENT_ENV: staging
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: CLIENT_ENV
+            value: "stg"
