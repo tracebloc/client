@@ -166,21 +166,16 @@ _verify_docker_dmg() {
   local expected_hash="" _attempt
   # Fetch the published checksum, retrying transient failures. Capture cleanly
   # (not through the generic retry(), whose progress notes go to stdout and would
-  # pollute the captured hash). Pick the Docker.dmg line; field 1 is the hash.
+  # pollute the captured hash). Pick the Docker.dmg line; field 1 is the hash. The
+  # ``$1 ~ /^[0-9a-fA-F]{64}$/`` guard also rejects a TLS-inspecting proxy's HTML
+  # error body that merely mentions "Docker.dmg": a non-hash field 1 leaves
+  # ``expected_hash`` empty, so it takes the fail-closed path below.
   for _attempt in 1 2 3; do
     expected_hash=$(curl_secure -fsSL "$checksum_url" 2>/dev/null \
       | awk '$1 ~ /^[0-9a-fA-F]{64}$/ && /Docker\.dmg/{print $1; exit}') || true
     [[ -n "$expected_hash" ]] && break
     [[ "$_attempt" -lt 3 ]] && sleep 5
   done
-
-  # A TLS-inspecting proxy can return an HTML error body that merely mentions
-  # "Docker.dmg"; only a real 64-hex SHA-256 counts as a checksum. Anything else
-  # is treated as "not fetched" and takes the fail-closed path below.
-  if [[ -n "$expected_hash" && ! "$expected_hash" =~ ^[0-9a-fA-F]{64}$ ]]; then
-    log "Ignoring non-SHA-256 checksum response from $checksum_url (likely an intercepting proxy)."
-    expected_hash=""
-  fi
 
   if [[ -n "$expected_hash" ]]; then
     # Checksum available (the clean-network path): verify and FAIL CLOSED on a
