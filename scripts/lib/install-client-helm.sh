@@ -501,8 +501,15 @@ _recover_pending_helm_release() {
   # clearing. rollback is a fast metadata write (and only runs once this read has
   # proven the API responsive); uninstall is bounded gracefully by helm's own
   # --wait --timeout.
-  _status="$(_bounded 30 helm status "$_rel" -n "$_ns" 2>/dev/null \
-    | awk '/^STATUS:/ {print $2; exit}')" || _status=""
+  # Capture the whole `helm status`, then parse it from a here-string — NEVER
+  # through an early-exit awk pipeline. Under `set -o pipefail` awk's `exit`
+  # SIGPIPEs helm (rc 141) as it writes the rest of the status body, and the
+  # `|| _status=""` guard would then WIPE a perfectly good parse, silently
+  # skipping recovery (#554 Bugbot; same SIGPIPE-under-pipefail lesson as
+  # _extract_yaml_value). Here-string parsing can't signal anything.
+  local _status_out
+  _status_out="$(_bounded 30 helm status "$_rel" -n "$_ns" 2>/dev/null)" || _status_out=""
+  _status="$(awk '/^STATUS:/ {print $2; exit}' <<<"$_status_out")"
   case "$_status" in
     pending-upgrade|pending-rollback)
       warn "A previous helm operation on '$_rel' was interrupted (status: $_status)."

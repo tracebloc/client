@@ -1476,3 +1476,31 @@ _engine_fixture() {
   [ "$status" -eq 0 ] || return 1
   [ "$output" = "REACHED_END" ] || return 1
 }
+
+# #554 Bugbot: a WEDGED status with a long body must not be wiped under pipefail.
+# awk's early `exit` SIGPIPEs helm (141); the old `... | awk exit || _status=""`
+# then wiped the parsed "pending-upgrade" and recovery silently no-op'd. The
+# here-string parse must keep the value so rollback actually runs.
+@test "_recover_pending_helm_release: long wedged status is NOT wiped under set -o pipefail" {
+  local log="$BATS_TEST_TMPDIR/reclog"; : > "$log"
+  run bash -c '
+    source "'"${LIB_DIR}"'/common.sh"
+    source "'"${LIB_DIR}"'/install-client-helm.sh"
+    LOG_FILE="'"$log"'"
+    _bounded() { shift; "$@"; }
+    helm() {
+      if [ "$1" = status ]; then
+        printf "NAME: rel\nSTATUS: pending-upgrade\nREVISION: 5\n"
+        i=0; while [ "$i" -lt 4000 ]; do printf "NOTES body line %d\n" "$i"; i=$((i+1)); done
+        return 0
+      fi
+      if [ "$1" = rollback ]; then echo "ROLLED_BACK_MARKER"; return 0; fi
+      return 0
+    }
+    warn() { :; }; info() { :; }; log() { :; }
+    set -euo pipefail
+    _recover_pending_helm_release rel ns    # bare call, under pipefail
+  '
+  [ "$status" -eq 0 ] || return 1
+  grep -q ROLLED_BACK_MARKER "$log" || return 1   # status parsed -> rollback ran (not wiped)
+}
