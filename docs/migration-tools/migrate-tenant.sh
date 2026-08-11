@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # =============================================================================
 #  migrate-tenant.sh — parameterized chart-family migration runbook
-#  generalising the protocol validated on stg (2026-04-27) and hasan-prod
+#  generalising the protocol validated on stg (2026-04-27) and tenant-d-prod
 #  (2026-04-27). Reads tenant config + secrets from tenant-config.env (same
 #  file generate.sh consumes).
 #

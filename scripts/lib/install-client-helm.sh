@@ -337,7 +337,7 @@ verify_credentials() {
 # renders it, and the chart's tracebloc.proxyEnv helper is driven by the SPLIT
 # keys (HTTP_PROXY_HOST/_PORT/_USERNAME/_PASSWORD), not a raw HTTP_PROXY URL.
 # Without them every backend-dialing pod CrashLoopBackOffs on api-token-auth/
-# behind a corporate proxy (Charité, 2026-06-09). This fills the workload half
+# behind a corporate proxy (observed on a hospital / proxy-only tenant, 2026-06-09). This fills the workload half
 # of #166 that node-level propagation alone missed.
 #
 # We deliberately emit the SPLIT form, not a raw env.HTTP_PROXY: on the released

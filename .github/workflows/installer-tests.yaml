@@ -241,7 +241,7 @@ jobs:
 
   e2e-proxy:
     timeout-minutes: 30
-    # Authenticated corporate-proxy E2E (the Charité/hospital archetype): stands
+    # Authenticated corporate-proxy E2E (the Tenant-a/hospital archetype): stands
     # up a squid that REQUIRES basic auth, brings the cluster up with the
     # installer's proxy config pointed at it as user:pass@host, and proves the
     # nodes pull a workload image THROUGH the authed proxy (the squid log shows an

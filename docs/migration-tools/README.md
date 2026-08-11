@@ -1,6 +1,6 @@
 # Tenant migration tools — `eks-1.0.x` → `client-1.x`
 
-Operational tooling captured during the 2026-04-27 / 2026-04-28 chart-family migrations on `eu-central-1/tracebloc-clients-prod`. Validated end-to-end on the `stg` and `hasan-prod` releases. Designed to be re-run for the remaining tenants (`bmw`, `cisco`, `charite`) and any future tenant on the same legacy chart.
+Operational tooling captured during the 2026-04-27 / 2026-04-28 chart-family migrations on `eu-central-1/tracebloc-clients-prod`. Validated end-to-end on the `stg` and `tenant-d-prod` releases. Designed to be re-run for the remaining tenants (`tenant-b`, `tenant-c`, `tenant-a`) and any future tenant on the same legacy chart.
 
 Read [`../MIGRATIONS.md`](../MIGRATIONS.md) first for the *why* — this directory is the *how*.
 
@@ -27,17 +27,17 @@ cp tenant-config.example.env tenant-config.env
 
 # 3. For each tenant — Phase 1 first. Eyeball outputs. Confirm AWS Backup
 #    job COMPLETED, dump file size > 0 + gzip OK, helm template clean.
-./migrate-tenant.sh phase1 charite
+./migrate-tenant.sh phase1 tenant-a
 # … review …
-./migrate-tenant.sh phase2 charite
-# … 24h soak watching `kubectl describe pod mysql-client -n charite` …
+./migrate-tenant.sh phase2 tenant-a
+# … 24h soak watching `kubectl describe pod mysql-client -n tenant-a` …
 
-./migrate-tenant.sh phase1 cisco
-./migrate-tenant.sh phase2 cisco
+./migrate-tenant.sh phase1 tenant-c
+./migrate-tenant.sh phase2 tenant-c
 # … 24h soak …
 
-./migrate-tenant.sh phase1 bmw
-./migrate-tenant.sh phase2 bmw
+./migrate-tenant.sh phase1 tenant-b
+./migrate-tenant.sh phase2 tenant-b
 ```
 
 The scripts always pass `--context` explicitly on every `kubectl` / `helm` call to avoid the context-drift bug that hit us mid-migration on prod.
@@ -46,9 +46,9 @@ The scripts always pass `--context` explicitly on every `kubectl` / `helm` call 
 
 For the current pending set:
 
-1. **`charite` first** — quietest tenant (no kill-loop activity). A buggy migration here is least disruptive. Confirms the protocol is mechanical.
-2. **`cisco`** — kill-loop active, no in-flight jobs as of last survey.
-3. **`bmw`** — same as cisco, plus older `eks-1.0.2` chart (vs 1.0.3). Save it for last in case there's a 1.0.2 quirk.
+1. **`tenant-a` first** — quietest tenant (no kill-loop activity). A buggy migration here is least disruptive. Confirms the protocol is mechanical.
+2. **`tenant-c`** — kill-loop active, no in-flight jobs as of last survey.
+3. **`tenant-b`** — same as tenant-c, plus older `eks-1.0.2` chart (vs 1.0.3). Save it for last in case there's a 1.0.2 quirk.
 
 24h soak between each. Post-migration watch:
 

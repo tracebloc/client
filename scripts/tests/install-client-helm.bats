@@ -700,9 +700,9 @@ setup() {
 }
 
 @test "_chart_proxy_env_yaml: host:port -> HTTP_PROXY_HOST + HTTP_PROXY_PORT" {
-  HTTP_PROXY="http://proxy.charite.de:8080"
+  HTTP_PROXY="http://proxy.tenant-a.example:8080"
   run _chart_proxy_env_yaml
-  [[ "$output" == *'HTTP_PROXY_HOST: "proxy.charite.de"'* ]] || return 1
+  [[ "$output" == *'HTTP_PROXY_HOST: "proxy.tenant-a.example"'* ]] || return 1
   [[ "$output" == *'HTTP_PROXY_PORT: "8080"'* ]] || return 1
   [[ "$output" != *"HTTP_PROXY_USERNAME"* ]] || return 1
 }
@@ -751,14 +751,14 @@ setup() {
   _ensure_helm_runnable() { :; }
   helm() { record "helm $*"; return 0; }
   verify_credentials() { printf valid; }
-  HTTP_PROXY="http://proxy.charite.de:8080"; NO_PROXY=".charite.de"
+  HTTP_PROXY="http://proxy.tenant-a.example:8080"; NO_PROXY=".tenant-a.example"
   run install_client_helm <<< $'myid\nmypw'
   [ "$status" -eq 0 ] || return 1
   # NB: the "Corporate proxy detected" notice goes through log(), which the test
   # harness routes to /dev/null — so assert on the generated file, not $output.
-  grep -q 'HTTP_PROXY_HOST: "proxy.charite.de"' "$HOST_DATA_DIR/values.yaml"
+  grep -q 'HTTP_PROXY_HOST: "proxy.tenant-a.example"' "$HOST_DATA_DIR/values.yaml"
   grep -q 'HTTP_PROXY_PORT: "8080"' "$HOST_DATA_DIR/values.yaml"
-  grep -q 'NO_PROXY: ".charite.de"' "$HOST_DATA_DIR/values.yaml"
+  grep -q 'NO_PROXY: ".tenant-a.example"' "$HOST_DATA_DIR/values.yaml"
   # injection must not corrupt the rest of the env: block / file
   grep -q "clientId: 'myid'" "$HOST_DATA_DIR/values.yaml"
   grep -q 'SINGLE_NODE: "true"' "$HOST_DATA_DIR/values.yaml"

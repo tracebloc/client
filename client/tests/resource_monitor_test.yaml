@@ -91,26 +91,26 @@ tests:
   - it: a different release renders a non-colliding DaemonSet name
     template: templates/resource-monitor-daemonset.yaml
     release:
-      name: hasan-prod
+      name: tenant-d-prod
     asserts:
       - equal:
           path: metadata.name
-          value: hasan-prod-resource-monitor
+          value: tenant-d-prod-resource-monitor
       - equal:
           path: spec.selector.matchLabels.app
-          value: hasan-prod-resource-monitor
+          value: tenant-d-prod-resource-monitor
       - equal:
           path: spec.template.spec.serviceAccountName
-          value: hasan-prod-resource-monitor
+          value: tenant-d-prod-resource-monitor
 
   - it: a different release renders a non-colliding ServiceAccount name
     template: templates/resource-monitor-rbac.yaml
     release:
-      name: hasan-prod
+      name: tenant-d-prod
     documentIndex: 0
     asserts:
       - isKind:
           of: ServiceAccount
       - equal:
           path: metadata.name
-          value: hasan-prod-resource-monitor
+          value: tenant-d-prod-resource-monitor
