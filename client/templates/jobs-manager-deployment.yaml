@@ -216,7 +216,7 @@ spec:
               name: {{ include "tracebloc.secretName" . }}
               key: TB_CREDMGR_PASSWORD
         {{- end }}
-        {{- if .Values.serviceDbAccounts }}
+        {{- if (include "tracebloc.serviceDbAccounts" .) }}
         # backend#1528 S1 (RFC-0003 D10 close-out): dedicated MySQL service
         # identities that replace the root-equivalent edgeuser. jobs-manager
         # mints tb_meta (owns the metadata DB) and tb_ingest (writes the dataset

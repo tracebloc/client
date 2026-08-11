@@ -128,7 +128,7 @@ spec:
                 secretKeyRef:
                   name: {{ include "tracebloc.secretName" . }}
                   key: POD_TOKEN_SIGNING_SECRET
-            {{- if .Values.serviceDbAccounts }}
+            {{- if (include "tracebloc.serviceDbAccounts" .) }}
             # backend#1528 S2 (RFC-0003 D10 close-out): authenticate the proxy's
             # metadata-DB access as the dedicated tb_meta identity instead of
             # the root-equivalent edgeuser. Only the metadata identity is wired
