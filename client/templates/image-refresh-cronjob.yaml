@@ -408,7 +408,10 @@ spec:
                 - name: DEPLOYMENT_NAME
                   value: {{ printf "%s-jobs-manager" .Release.Name | quote }}
                 - name: IMAGE_TAG
-                  value: {{ .Values.env.CLIENT_ENV | default "prod" | quote }}
+                  # RESOLVED, not raw. This is the tag the refresh pulls, so a
+                  # documented alias here freezes the edge on a tag the publish
+                  # pipeline never writes (backend#1723).
+                  value: {{ include "tracebloc.clientEnv" . | quote }}
                 - name: ROLLOUT_TIMEOUT
                   value: {{ .Values.imageRefresh.rolloutTimeout | quote }}
                 # #563: consecutive failed-rollout threshold; stop + flag after this.
