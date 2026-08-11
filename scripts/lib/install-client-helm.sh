@@ -220,13 +220,13 @@ detect_installed_client() {
   # a re-install silently overwrite an existing client. `helm list` returns 0 with
   # empty output when there are genuinely no releases, so only a non-zero exit is
   # "unknown".
-  # --deployed --pending --failed is mandatory (#554): Helm 3's `helm list` shows
-  # only deployed releases unless states are named explicitly, so a client wedged
-  # in pending-install/pending-upgrade (a helm op killed mid-flight) would be
-  # INVISIBLE here — the one-client guard would then wave through a re-install with
-  # a DIFFERENT clientId and silently overwrite it. Naming the states keeps a
-  # wedged (or failed) client visible so the guard still fails closed.
-  if ! _list="$(helm list -A --deployed --pending --failed 2>/dev/null)"; then
+  # Name the states explicitly (#554): Helm 3 lists only deployed by default while
+  # Helm 4 (the pinned v4.2.3) lists all — so relying on the default hides a wedged
+  # client on one version or the other. We enumerate the full "a client is present"
+  # set — deployed, failed, and every wedge state (pending-*, uninstalling) that
+  # _recover_pending_helm_release knows how to clear — so a killed-mid-flight client
+  # stays visible and the one-client guard can't wave through an overwrite.
+  if ! _list="$(helm list -A --deployed --failed --pending --uninstalling 2>/dev/null)"; then
     INSTALLED_CLIENT_UNKNOWN=1; rm -f "$_gvf"; return 0
   fi
   while read -r _rel _ns; do
@@ -552,14 +552,13 @@ _reconcile_adopted_client() {
   # provision_client (Step 3) hands over the adopted client id (UUID) + the marker on
   # adopt (no password — the existing credential stands). Find the live client release
   # and reconcile it in place. Enumerate it the same jq-free way the one-per-machine
-  # guard does — including pending/failed states (#554): Helm 3's `helm list` hides
-  # pending-* by default, so a release wedged by a killed helm op would go undiscovered
-  # here and adopt would fall through to a password prompt it can't satisfy. One client
-  # per machine, so take the first.
+  # guard does — the full deployed/failed/pending-*/uninstalling set (#554), so a
+  # release wedged by a killed helm op is discovered instead of adopt falling through
+  # to a password prompt it can't satisfy. One client per machine, so take the first.
   local _rel="" _ns="" _r _n
   while read -r _r _n; do
     [[ -n "$_r" ]] && { _rel="$_r"; _ns="$_n"; break; }
-  done < <(helm list -A --deployed --pending --failed 2>/dev/null | awk '/[[:space:]]client-[0-9]/ { print $1, $2 }')
+  done < <(helm list -A --deployed --failed --pending --uninstalling 2>/dev/null | awk '/[[:space:]]client-[0-9]/ { print $1, $2 }')
   if [[ -z "$_rel" ]]; then
     warn "This client is already registered, but no live tracebloc release was found here to reconcile — continuing with a normal connect."
     return 1

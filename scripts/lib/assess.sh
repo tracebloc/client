@@ -93,13 +93,14 @@ _assess_cli_present() {
   [[ -x "${HOME}/.local/bin/tracebloc" ]]
 }
 
-# _assess_release_pending NS — true when a release in NS is wedged in pending-*
-# (a killed helm op, #554). `helm list --pending -q` is jq-free; bounded per the
+# _assess_release_pending NS — true when a release in NS is wedged (pending-* or
+# uninstalling: a killed helm op, #554). Names both states so it doesn't depend on
+# the pinned helm's default listing. `helm list -q` is jq-free; bounded per the
 # installer's never-hang contract.
 _assess_release_pending() {
   local _ns="$1"
   [[ -n "$_ns" ]] || return 1
-  [[ -n "$(_bounded 15 helm list -n "$_ns" --pending -q 2>/dev/null)" ]]
+  [[ -n "$(_bounded 15 helm list -n "$_ns" --pending --uninstalling -q 2>/dev/null)" ]]
 }
 
 # _assess_classify — set INSTALL_STATE (+ INSTALL_STATE_REASON). Pure read-only
