@@ -6,7 +6,8 @@
 #
 #   make check      lint + fast tests.   Budget: under 60 s.
 #   make check-all  everything CI runs (bar the CI-only heavy suites).
-#   make setup      install what those targets need.
+#   make setup      install what those targets need, and a git pre-push hook
+#                   that runs `make check` (skip once with --no-verify).
 #
 # This file is a THIN WRAPPER. Every command below is copied from the
 # workflow that already runs it — standard-checks.yml, installer-tests.yaml
@@ -42,7 +43,8 @@ help:
 	@echo
 	@echo "  check       lint + fast checks (~4 s) — run this before every push"
 	@echo "  check-all   everything CI runs locally, including the 868-test bats suite"
-	@echo "  setup       check for / point at the tools these targets need"
+	@echo "  setup       check for / point at the tools these targets need; installs the pre-push hook"
+	@echo "  install-hooks  (re)install the git pre-push hook that runs 'make check'"
 	@echo
 	@echo "  individual: lint bats helm-lint helm-template helm-unittest drift"
 	@echo
@@ -70,8 +72,9 @@ check: lint drift helm-lint
 check-all: lint drift helm-lint bats helm-template helm-unittest
 	@echo "==> check-all: green"
 
-# setup: no dependency is installed and no hook is added (hooks are a
-# later step of backend#1606). This only tells you what is missing.
+# setup: no dependency is installed — this only tells you what is missing —
+# but it does install a git pre-push hook that runs `make check` (backend#1606
+# step 4), via the install-hooks target below.
 .PHONY: setup
 setup:
 	@missing=""; \
@@ -85,6 +88,49 @@ setup:
 	  exit 1; \
 	fi; \
 	echo "==> setup: shellcheck, bats and helm are all present; run 'make check'"
+	@$(MAKE) --no-print-directory install-hooks
+
+# install-hooks: put a pre-push hook in place that runs `make check`, so the
+# canon's "run the tests before you push" is carried by the tooling rather than
+# by memory. Factored out of `setup` so it is independently runnable and
+# testable, and so a contributor who only wants the hook need not rerun the
+# full `make setup`.
+#
+# Honest by design: the hook catches FORGETTING, not defiance — `git push
+# --no-verify` skips it and always will. And it refuses to clobber a pre-push
+# hook that is already there and not ours (e.g. one the pre-commit framework
+# manages), rather than silently stomping a contributor's setup.
+#
+# `git rev-parse --git-path hooks` (not a hard-coded `.git/hooks`) so it lands
+# in the right place inside a linked worktree or a submodule, where the git dir
+# is not `.git`.
+.PHONY: install-hooks
+install-hooks:
+	@if ! git rev-parse --git-dir >/dev/null 2>&1; then \
+	  echo "note: not a git checkout — skipping pre-push hook install"; \
+	else \
+	  hook="$$(git rev-parse --git-path hooks)/pre-push"; \
+	  if [ -e "$$hook" ] && ! grep -q 'tracebloc pre-push hook' "$$hook" 2>/dev/null; then \
+	    echo "note: $$hook already exists and is not ours — leaving it untouched."; \
+	    echo "      add 'make check' to it, or remove it and re-run 'make install-hooks'."; \
+	  else \
+	    mkdir -p "$$(dirname "$$hook")" && \
+	    printf '%s\n' \
+	      '#!/bin/sh' \
+	      '# tracebloc pre-push hook installed by make setup (backend#1606).' \
+	      '# Runs make check so a push that would be red in CI is caught locally first.' \
+	      '# It catches forgetting, not defiance: git push --no-verify skips it.' \
+	      '#' \
+	      '# Git exports GIT_DIR/GIT_WORK_TREE/etc into hook processes; a nested git' \
+	      '# (e.g. Go buildvcs under go test) then fails in a linked worktree with' \
+	      '# exit status 128. Clear them so make check runs as if from the shell.' \
+	      'unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_PREFIX GIT_COMMON_DIR GIT_OBJECT_DIRECTORY' \
+	      'exec make check' > "$$hook" && \
+	    chmod +x "$$hook" && \
+	    echo "==> pre-push hook installed at $$hook" && \
+	    echo "    'make check' now runs before each push (skip once with: git push --no-verify)"; \
+	  fi; \
+	fi
 
 # ---- individual targets ------------------------------------------
 
