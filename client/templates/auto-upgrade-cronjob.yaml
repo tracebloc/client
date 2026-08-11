@@ -52,6 +52,14 @@ data:
         helm rollback "$RELEASE_NAME" -n "$RELEASE_NAMESPACE"
         log "rollback complete; continuing"
         ;;
+      uninstalling)
+        # A killed `helm uninstall` leaves this state. We can't clear it here — the
+        # CronJob is part of the release, so completing the uninstall would delete
+        # itself — but skip cleanly rather than fall through to a `helm upgrade`
+        # that fails every tick with an opaque "another operation is in progress".
+        log "release is mid-uninstall ('uninstalling'); skipping this tick until it settles (run 'helm uninstall $RELEASE_NAME -n $RELEASE_NAMESPACE' to finish it)"
+        exit 0
+        ;;
     esac
 
     # Latest published version. Helm orders search results newest-first,

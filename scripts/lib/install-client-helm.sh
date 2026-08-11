@@ -502,7 +502,7 @@ _recover_pending_helm_release() {
   # proven the API responsive); uninstall is bounded gracefully by helm's own
   # --wait --timeout.
   _status="$(_bounded 30 helm status "$_rel" -n "$_ns" 2>/dev/null \
-    | awk '/^STATUS:/ {print $2; exit}')"
+    | awk '/^STATUS:/ {print $2; exit}')" || _status=""
   case "$_status" in
     pending-upgrade|pending-rollback)
       warn "A previous helm operation on '$_rel' was interrupted (status: $_status)."
@@ -519,7 +519,12 @@ _recover_pending_helm_release() {
         # Clearing pending-install/uninstalling can only be done by uninstalling
         # (a never-deployed revision can't be rolled back), which would drop this
         # client's stored credential — refuse on the reconcile path (#554 Bugbot).
-        warn "Clearing '$_rel' would require an uninstall that could drop the client's stored credential — refusing to auto-recover it here."
+        # rollback is NOT a remedy for these states, so print the credential-safe
+        # manual path instead.
+        warn "Clearing '$_rel' (status: $_status) needs an uninstall, which would drop this client's write-only stored credential — refusing to auto-recover it here."
+        hint "Recover by hand without losing the credential:"
+        hint "  helm -n $_ns get values $_rel   # save clientPassword first — it can't be re-fetched"
+        hint "  helm -n $_ns uninstall $_rel    # then re-run the installer"
         return 1
       fi
       info "Clearing the half-finished release '$_rel' before continuing…"
@@ -599,9 +604,9 @@ _reconcile_adopted_client() {
   # refused rather than auto-uninstalled, which would drop that sole copy (#554
   # Bugbot). Fail closed with a manual remedy if recovery couldn't clear it.
   if ! _recover_pending_helm_release "$_rel" "$_ns" no-destroy; then
-    hint "Couldn't safely clear the interrupted release without risking its stored credential. Recover it by hand, then re-run:"
-    hint "  helm -n $_ns status $_rel     (see what state it's in)"
-    hint "  helm -n $_ns rollback $_rel   (if pending-upgrade: returns to the previous, working release)"
+    # For a refused pending-install/uninstalling wedge the helper already printed
+    # the credential-safe manual path; add a generic pointer for the other cases.
+    hint "Confirm the release state, then re-run:  helm -n $_ns status $_rel"
     error "Reconcile blocked by an interrupted previous helm operation. Check the log for details: ${LOG_FILE:-}"
   fi
 

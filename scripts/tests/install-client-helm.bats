@@ -1425,6 +1425,10 @@ _engine_fixture() {
   }
   run _recover_pending_helm_release rel ns no-destroy
   [ "$status" -eq 1 ] || return 1                 # caller fails closed
+  # remedy must be actionable + credential-preserving, NOT a useless rollback
+  [[ "$output" == *"get values rel"* ]] || return 1
+  [[ "$output" == *"clientPassword"* ]] || return 1
+  [[ "$output" != *"rollback"* ]] || return 1
   run mock_calls
   [[ "$output" != *"helm uninstall"* ]] || return 1   # credential preserved
 }
@@ -1450,4 +1454,25 @@ _engine_fixture() {
   run _recover_pending_helm_release rel ns no-destroy
   [ "$status" -eq 0 ] || return 1
   mock_calls | grep -q "helm rollback rel -n ns"
+}
+
+# #554 Bugbot/audit: the status READ is a plain command-substitution assignment.
+# Under `set -euo pipefail`, `helm status` on an ABSENT release (fresh install)
+# exits non-zero -> the pipeline is non-zero -> a bare `var=$(...)` assignment
+# would abort. Both call sites use `if !` (which suppresses errexit), but a bare
+# call must not abort either — the `|| _status=""` guard proves it.
+@test "_recover_pending_helm_release: bare call under set -e with a failing helm status does NOT abort" {
+  run bash -c '
+    source "'"${LIB_DIR}"'/common.sh"
+    source "'"${LIB_DIR}"'/install-client-helm.sh"
+    LOG_FILE=/dev/null
+    _bounded() { shift; "$@"; }
+    helm() { return 1; }              # status (and everything) fails: absent release
+    warn() { :; }; info() { :; }; log() { :; }
+    set -euo pipefail                 # enable AFTER sourcing, like the real installer
+    _recover_pending_helm_release rel ns    # BARE call, not in an if-condition
+    echo "REACHED_END"
+  '
+  [ "$status" -eq 0 ] || return 1
+  [ "$output" = "REACHED_END" ] || return 1
 }

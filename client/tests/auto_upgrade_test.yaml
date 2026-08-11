@@ -92,6 +92,11 @@ tests:
       - matchRegex:
           path: data["auto-upgrade.sh"]
           pattern: "--atomic"
+      # A killed uninstall (status 'uninstalling') must skip the tick cleanly
+      # rather than fall through to a helm upgrade that fails every tick (#554).
+      - matchRegex:
+          path: data["auto-upgrade.sh"]
+          pattern: "uninstalling\\)"
 
   - it: CronJob has the right schedule, concurrency, and SA wiring
     template: templates/auto-upgrade-cronjob.yaml

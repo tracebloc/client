@@ -272,6 +272,14 @@ _depname() {
   ! _assess_release_pending "" || return 1                             # empty ns -> false, no helm call
 }
 
+# #554 Bugbot: the probe must NOT fail open. A helm error/timeout is uncertainty,
+# and this module degrades on uncertainty (never fast-paths to a false healthy).
+@test "_assess_release_pending: helm list ERROR -> treated as wedged (fail closed), not 'no wedge'" {
+  _bounded() { shift; "$@"; }
+  helm() { [ "$1" = list ] && return 1; return 0; }                    # probe errors / times out
+  _assess_release_pending tracebloc || return 1                        # returns 0 (wedged) -> degrade
+}
+
 # ── _assess_handoff (hand-off + exit 0, no exec) ────────────────────────────
 # main() has already run setup_log_file (`exec > >(tee …) 2>&1`), so the hand-off
 # must give the interactive home screen a REAL terminal on ALL THREE streams, not

@@ -98,9 +98,13 @@ _assess_cli_present() {
 # the pinned helm's default listing. `helm list -q` is jq-free; bounded per the
 # installer's never-hang contract.
 _assess_release_pending() {
-  local _ns="$1"
+  local _ns="$1" _out _rc=0
   [[ -n "$_ns" ]] || return 1
-  [[ -n "$(_bounded 15 helm list -n "$_ns" --pending --uninstalling -q 2>/dev/null)" ]]
+  _out="$(_bounded 15 helm list -n "$_ns" --pending --uninstalling -q 2>/dev/null)" || _rc=$?
+  # A failed/timed-out probe is uncertainty, not "no wedge" — degrade rather than
+  # let the caller fast-path to healthy (this module never fails open to healthy).
+  [[ "$_rc" -ne 0 ]] && return 0
+  [[ -n "$_out" ]]
 }
 
 # _assess_classify — set INSTALL_STATE (+ INSTALL_STATE_REASON). Pure read-only
