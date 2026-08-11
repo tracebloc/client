@@ -3113,12 +3113,41 @@ function Test-HealthyClusterGpuConsistent {
 $TB_SHARED_DIR_MODE = "2777"   # setgid + world-write, NO sticky: `data delete` runs as another uid
 $TB_LOGS_DIR_MODE   = "3777"   # setgid + sticky: nothing deletes another writer's logs
 
+function Get-ReleaseDirsSpec {
+  param(
+    [Parameter(Mandatory)][string]$Release,
+    [string]$DataBase = "/tracebloc"
+  )
+  return @(
+    [pscustomobject]@{ Path = "$DataBase/$Release/data"; Mode = $TB_SHARED_DIR_MODE }
+    [pscustomobject]@{ Path = "/tracebloc/$Release/logs"; Mode = $TB_LOGS_DIR_MODE }
+  )
+}
+
 function Get-ReleaseDirsList {
   param(
     [Parameter(Mandatory)][string]$Release,
     [string]$DataBase = "/tracebloc"
   )
-  return @("$DataBase/$Release/data", "/tracebloc/$Release/logs")
+  return @((Get-ReleaseDirsSpec -Release $Release -DataBase $DataBase).Path)
+}
+
+# The copy-pasteable repair for a dir the installer could not fix itself. Built from the SAME
+# spec as the prep, because a hint that names the wrong MODE is worse than no hint: `chmod -R
+# 3777` on both dirs -- what this printed before -- puts the sticky bit back on /data/shared and
+# breaks `data delete` across uids, so following the installer's own advice would leave delete
+# broken while ingest looked fixed (Bugbot). No -R: the dir's own mode is what governs unlink,
+# and recursing would stamp setgid/sticky onto every data FILE.
+function Get-ReleaseDirsRepairHint {
+  param(
+    [Parameter(Mandatory)][string]$Release,
+    [Parameter(Mandatory)][string]$Node,
+    [string]$DataBase = "/tracebloc"
+  )
+  $parts = (Get-ReleaseDirsSpec -Release $Release -DataBase $DataBase | ForEach-Object {
+    "chmod $($_.Mode) $($_.Path)"
+  }) -join "; "
+  return "  docker exec $Node sh -c `"$parts`""
 }
 
 function Get-ReleaseDirsPrepCommand {
@@ -3129,10 +3158,9 @@ function Get-ReleaseDirsPrepCommand {
   # path:mode pairs, the same shape the chart's init-writable-data uses (#667), so the installer
   # and the chart cannot disagree about a dir's mode. Release names can't contain a colon (they
   # are k8s names), so ${e%:*} / ${e#*:} split cleanly.
-  $dirs = (@(
-    "$DataBase/$Release/data:$TB_SHARED_DIR_MODE",
-    "/tracebloc/$Release/logs:$TB_LOGS_DIR_MODE"
-  )) -join " "
+  $dirs = ((Get-ReleaseDirsSpec -Release $Release -DataBase $DataBase | ForEach-Object {
+    "$($_.Path):$($_.Mode)"
+  }) -join " ")
   # Reports OK/FAIL per dir so the caller can tell the user something true rather
   # than assuming success. Writable = OTHER-writable, full stop.
   #
@@ -3255,7 +3283,7 @@ function Initialize-ReleaseDataDirs {
   if ($res.Code -ne 0 -or $out -match "FAIL " -or $unconfirmed.Count -gt 0) {
     Warn "Couldn't confirm the data directories are writable for this release."
     Hint "Ingests can fail with 'Permission denied' on /data/shared until they are. Fix with:"
-    Hint "  docker exec $node sh -c `"chmod -R 3777 $dataBase/$Release/data /tracebloc/$Release/logs`""
+    Hint (Get-ReleaseDirsRepairHint -Release $Release -Node $node -DataBase $dataBase)
     return
   }
   Log "Release dirs writable for '$Release'"

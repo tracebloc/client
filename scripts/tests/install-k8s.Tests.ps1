@@ -4880,12 +4880,29 @@ Describe "hostPath prep survives Windows argv and follows the dataset mount (#65
     $cmd | Should -Match '/tracebloc/rel/logs'
   }
 
-  It "the repair hint names the SAME paths that were prepared" {
-    # A hint pointing at /tracebloc when data lives on /tracebloc-data is advice that
-    # silently fixes nothing.
-    $fn = ((Get-Content "$PSScriptRoot/../install-k8s.ps1" -Raw) -split 'function Initialize-ReleaseDataDirs')[1]
-    $fn = ($fn -split '\nfunction ')[0]
-    $fn | Should -Match 'chmod -R 3777 \$dataBase/\$Release/data /tracebloc/\$Release/logs'
+  It "the repair hint names the same paths AND the same modes that were prepared" {
+    # This test used to assert paths only, which is exactly how a hint saying
+    # `chmod -R 3777` on BOTH dirs survived the switch to per-dir modes: following the
+    # installer's own copy-paste would put the sticky bit back on /data/shared and break
+    # `data delete`, while ingest looked fixed (Bugbot). Assert the modes too, per dir.
+    $hint = Get-ReleaseDirsRepairHint -Release "rel" -Node "k3d-x-server-0" -DataBase "/tracebloc-data"
+    $hint | Should -Match 'chmod 2777 /tracebloc-data/rel/data'
+    $hint | Should -Match 'chmod 3777 /tracebloc/rel/logs'
+    $hint | Should -Not -Match '3777 [^ ]*/data'   # never sticky on the shared/data dir
+    $hint | Should -Not -Match '-R'                # dir mode governs unlink; no setgid on files
+  }
+
+  It "the hint and the prep are generated from ONE spec, so they cannot drift" {
+    # The drift is invisible until someone runs the hint, so remove the possibility rather
+    # than test for its absence in two places.
+    $spec = Get-ReleaseDirsSpec -Release "rel" -DataBase "/tracebloc-data"
+    $cmd  = Get-ReleaseDirsPrepCommand -Release "rel" -DataBase "/tracebloc-data"
+    $hint = Get-ReleaseDirsRepairHint -Release "rel" -Node "n" -DataBase "/tracebloc-data"
+    foreach ($e in $spec) {
+      $cmd  | Should -Match ([regex]::Escape("$($e.Path):$($e.Mode)"))
+      $hint | Should -Match ([regex]::Escape("chmod $($e.Mode) $($e.Path)"))
+    }
+    $spec.Count | Should -Be 2
   }
 }
 
