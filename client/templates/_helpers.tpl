@@ -77,7 +77,7 @@ tracebloc.io/seal-check-name: {{ .name | quote }}
   on the same cluster share the tracebloc-node-agents namespace; before
   this naming, two releases collided on the literal `tracebloc-resource-monitor`
   name and Helm refused the second install with "exists, not owned".
-  See the v1.2.0 release notes / hasan-prod migration case study.
+  See the v1.2.0 release notes / tenant-d-prod migration case study.
 */}}
 {{- define "tracebloc.resourceMonitorName" -}}
 {{ .Release.Name }}-resource-monitor
