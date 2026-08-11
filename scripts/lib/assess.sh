@@ -93,6 +93,20 @@ _assess_cli_present() {
   [[ -x "${HOME}/.local/bin/tracebloc" ]]
 }
 
+# _assess_release_pending NS — true when a release in NS is wedged (pending-* or
+# uninstalling: a killed helm op, #554). Names both states so it doesn't depend on
+# the pinned helm's default listing. `helm list -q` is jq-free; bounded per the
+# installer's never-hang contract.
+_assess_release_pending() {
+  local _ns="$1" _out _rc=0
+  [[ -n "$_ns" ]] || return 1
+  _out="$(_bounded 15 helm list -n "$_ns" --pending --uninstalling -q 2>/dev/null)" || _rc=$?
+  # A failed/timed-out probe is uncertainty, not "no wedge" — degrade rather than
+  # let the caller fast-path to healthy (this module never fails open to healthy).
+  [[ "$_rc" -ne 0 ]] && return 0
+  [[ -n "$_out" ]]
+}
+
 # _assess_classify — set INSTALL_STATE (+ INSTALL_STATE_REASON). Pure read-only
 # detection; no mutation, never fatal.
 _assess_classify() {
@@ -131,6 +145,14 @@ _assess_classify() {
   fi
   if [[ -z "$ns" ]]; then
     INSTALL_STATE="fresh"; INSTALL_STATE_REASON="cluster-no-release"
+    return 0
+  fi
+
+  # A pending-* wedge (killed helm op, #554) usually keeps its prior revision Ready,
+  # so it would fast-path to healthy and skip recovery. Degrade so the normal flow
+  # runs and _recover_pending_helm_release clears it.
+  if _assess_release_pending "$ns"; then
+    INSTALL_STATE="degraded"; INSTALL_STATE_REASON="pending-wedge"
     return 0
   fi
 
@@ -221,6 +243,7 @@ assess_existing_install() {
         cluster-stopped)    info "Your secure environment is stopped — starting it and finishing setup." ;;
         workload-not-ready) info "Your secure environment is still starting up — finishing setup." ;;
         cli-missing)        info "The tracebloc CLI isn't installed yet — setting it up." ;;
+        pending-wedge)      info "A previous update was interrupted — recovering it and finishing setup." ;;
         *)                  info "Your secure environment is only partly set up — finishing setup." ;;
       esac
       echo ""
