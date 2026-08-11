@@ -164,7 +164,7 @@ tests:
   - it: two releases produce non-colliding SCC SA references
     template: templates/resource-monitor-scc.yaml
     release:
-      name: cisco
+      name: tenant-c
     set:
       platform: openshift
       resourceMonitor: true
@@ -181,7 +181,7 @@ tests:
       # any pair on the same cluster.
       - equal:
           path: users[0]
-          value: system:serviceaccount:tracebloc-node-agents:cisco-resource-monitor
+          value: system:serviceaccount:tracebloc-node-agents:tenant-c-resource-monitor
 
   - it: should not create SCC when platform is aks
     template: templates/resource-monitor-scc.yaml
