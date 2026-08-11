@@ -1224,3 +1224,283 @@ _engine_fixture() {
   [ "$status" -eq 0 ] || return 1
   ! grep -q 'mysqlClient:' "$HOST_DATA_DIR/values.yaml" || return 1
 }
+
+# ── _recover_pending_helm_release (#554) ─────────────────────────────────────
+# A helm process killed mid-operation leaves the release in a pending-* state;
+# the next `helm upgrade --install` then fails forever with "another operation
+# is in progress". These cover the auto-recovery that clears the wedge.
+
+@test "_recover_pending_helm_release: fresh/absent release -> no-op, rc 0" {
+  _bounded() { shift; "$@"; }               # bypass timeout(1) so the helm mock is used
+  helm() { record "helm $*"; return 1; }   # `helm status` errors when absent
+  run _recover_pending_helm_release rel ns
+  [ "$status" -eq 0 ] || return 1
+  run mock_calls
+  [[ "$output" != *"helm rollback"* ]] || return 1
+  [[ "$output" != *"helm uninstall"* ]] || return 1
+}
+
+@test "_recover_pending_helm_release: deployed release -> no-op, rc 0" {
+  _bounded() { shift; "$@"; }
+  helm() {
+    if [[ "$1" == status ]]; then printf 'NAME: rel\nSTATUS: deployed\nREVISION: 4\n'; return 0; fi
+    record "helm $*"; return 0
+  }
+  run _recover_pending_helm_release rel ns
+  [ "$status" -eq 0 ] || return 1
+  run mock_calls
+  [[ "$output" != *"helm rollback"* ]] || return 1
+  [[ "$output" != *"helm uninstall"* ]] || return 1
+}
+
+@test "_recover_pending_helm_release: pending-upgrade -> rolls back, rc 0" {
+  _bounded() { shift; "$@"; }
+  helm() {
+    if [[ "$1" == status ]]; then printf 'NAME: rel\nSTATUS: pending-upgrade\nREVISION: 5\n'; return 0; fi
+    record "helm $*"; return 0
+  }
+  run _recover_pending_helm_release rel ns
+  [ "$status" -eq 0 ] || return 1
+  mock_calls | grep -q "helm rollback rel -n ns"
+  run mock_calls
+  [[ "$output" != *"helm uninstall"* ]] || return 1
+}
+
+@test "_recover_pending_helm_release: pending-install -> uninstalls the half-install, rc 0" {
+  _bounded() { shift; "$@"; }
+  helm() {
+    if [[ "$1" == status ]]; then printf 'NAME: rel\nSTATUS: pending-install\nREVISION: 1\n'; return 0; fi
+    record "helm $*"; return 0
+  }
+  run _recover_pending_helm_release rel ns
+  [ "$status" -eq 0 ] || return 1
+  mock_calls | grep -q "helm uninstall rel -n ns"
+  run mock_calls
+  [[ "$output" != *"helm rollback"* ]] || return 1
+}
+
+@test "_recover_pending_helm_release: uninstalling -> finishes the uninstall, rc 0" {
+  _bounded() { shift; "$@"; }
+  helm() {
+    if [[ "$1" == status ]]; then printf 'NAME: rel\nSTATUS: uninstalling\nREVISION: 3\n'; return 0; fi
+    record "helm $*"; return 0
+  }
+  run _recover_pending_helm_release rel ns
+  [ "$status" -eq 0 ] || return 1
+  mock_calls | grep -q "helm uninstall rel -n ns"
+}
+
+@test "_recover_pending_helm_release: failed rollback -> rc 1 (caller fails closed)" {
+  _bounded() { shift; "$@"; }
+  helm() {
+    if [[ "$1" == status ]]; then printf 'NAME: rel\nSTATUS: pending-upgrade\nREVISION: 5\n'; return 0; fi
+    if [[ "$1" == rollback ]]; then return 1; fi
+    record "helm $*"; return 0
+  }
+  run _recover_pending_helm_release rel ns
+  [ "$status" -eq 1 ] || return 1
+}
+
+@test "_recover_pending_helm_release: failed uninstall -> rc 1 (caller fails closed)" {
+  _bounded() { shift; "$@"; }
+  helm() {
+    if [[ "$1" == status ]]; then printf 'NAME: rel\nSTATUS: pending-install\nREVISION: 1\n'; return 0; fi
+    if [[ "$1" == uninstall ]]; then return 1; fi
+    record "helm $*"; return 0
+  }
+  run _recover_pending_helm_release rel ns
+  [ "$status" -eq 1 ] || return 1
+}
+
+# ── install_client_helm: normal path clears a pending-* wedge first (#554) ───
+# `helm list` hides pending releases by default, so the one-client guard never
+# sees the wedge — but the next `helm upgrade --install` fails with "another
+# operation is in progress". install_client_helm must recover before upgrading.
+
+@test "install_client_helm: pending-upgrade wedge is rolled back BEFORE the install upgrade" {
+  HOST_DATA_DIR="$BATS_TEST_TMPDIR/data"; mkdir -p "$HOST_DATA_DIR"
+  _ensure_tracebloc_dirs() { :; }
+  _ensure_release_dirs() { :; }
+  _ensure_helm_runnable() { :; }
+  _bounded() { shift; "$@"; }
+  # list: empty (pending releases are hidden from the guard). status: wedged.
+  helm() {
+    if [[ "$1" == list ]]; then return 0; fi
+    if [[ "$1" == status ]]; then printf 'NAME: n\nSTATUS: pending-upgrade\nREVISION: 5\n'; return 0; fi
+    record "helm $*"; return 0
+  }
+  verify_credentials() { printf valid; }
+  run install_client_helm <<< $'myid\nmypw'
+  [ "$status" -eq 0 ] || return 1
+  # rollback recorded, and it comes before the install upgrade in call order.
+  mock_calls | grep -q "helm rollback"
+  mock_calls | grep -q "helm upgrade --install"
+  local rb up
+  rb="$(mock_calls | grep -n 'helm rollback' | head -1 | cut -d: -f1)"
+  up="$(mock_calls | grep -n 'helm upgrade --install' | head -1 | cut -d: -f1)"
+  [ "$rb" -lt "$up" ] || return 1
+}
+
+@test "install_client_helm: fails closed when the wedge cannot be auto-cleared" {
+  HOST_DATA_DIR="$BATS_TEST_TMPDIR/data"; mkdir -p "$HOST_DATA_DIR"
+  _ensure_tracebloc_dirs() { :; }
+  _ensure_release_dirs() { :; }
+  _ensure_helm_runnable() { :; }
+  _bounded() { shift; "$@"; }
+  helm() {
+    if [[ "$1" == list ]]; then return 0; fi
+    if [[ "$1" == status ]]; then printf 'NAME: n\nSTATUS: pending-upgrade\nREVISION: 5\n'; return 0; fi
+    if [[ "$1" == rollback ]]; then return 1; fi   # recovery itself fails
+    record "helm $*"; return 0
+  }
+  verify_credentials() { printf valid; }
+  run install_client_helm <<< $'myid\nmypw'
+  [ "$status" -ne 0 ] || return 1
+  [[ "$output" == *"interrupted previous helm operation"* ]] || return 1
+  # MUST NOT march into the wedged upgrade after recovery failed.
+  run mock_calls
+  [[ "$output" != *"helm upgrade --install"* ]] || return 1
+}
+
+@test "install_client_helm: a generic (exit 1) upgrade failure still names the unwedge remedy (#554)" {
+  HOST_DATA_DIR="$BATS_TEST_TMPDIR/data"; mkdir -p "$HOST_DATA_DIR"
+  _ensure_tracebloc_dirs() { :; }
+  _ensure_release_dirs() { :; }
+  _ensure_helm_runnable() { :; }
+  # Clean status (no wedge to recover), but the install upgrade itself fails 1 —
+  # NOT the 124 timeout. The remedy must still be surfaced (issue #554).
+  _bounded() { shift; "$@"; }
+  helm() {
+    if [[ "$1" == list ]]; then return 0; fi
+    if [[ "$1" == status ]]; then return 0; fi
+    if [[ "$1" == upgrade ]]; then return 1; fi
+    record "helm $*"; return 0
+  }
+  verify_credentials() { printf valid; }
+  run install_client_helm <<< $'myid\nmypw'
+  [ "$status" -ne 0 ] || return 1
+  [[ "$output" == *"another operation is in progress"* ]] || return 1
+}
+
+@test "install_client_helm: a DIFFERENT client WEDGED in pending-* is still seen and blocked (#554)" {
+  HOST_DATA_DIR="$BATS_TEST_TMPDIR/data"; mkdir -p "$HOST_DATA_DIR"
+  _ensure_tracebloc_dirs() { :; }
+  _ensure_release_dirs() { :; }
+  _ensure_helm_runnable() { :; }
+  _bounded() { shift; "$@"; }
+  # Helm 3 hides pending-* from a bare `helm list`, so the one-client guard must
+  # enumerate those states explicitly — otherwise a foreign client wedged by a
+  # killed helm op is invisible and a re-run with a different id would overwrite
+  # it once recovery clears the wedge. The mock returns a pending-upgrade row.
+  helm() {
+    if [ "$1" = list ]; then
+      record "helm $*"
+      printf '%s\n' 'NAME NAMESPACE REVISION UPDATED STATUS CHART APP VERSION' \
+                    'oldrel default 3 2026-01-01 pending-upgrade client-1.4.3 1.4.3'
+      return 0
+    fi
+    if [ "$1" = get ] && [ "$2" = values ]; then echo 'clientId: "otherclient"'; return 0; fi
+    record "helm $*"; return 0
+  }
+  verify_credentials() { printf valid; }
+  run install_client_helm <<< $'newclient\nmypw'
+  [ "$status" -ne 0 ] || return 1
+  [[ "$output" == *"already runs the tracebloc client 'otherclient'"* ]] || return 1
+  # the enumeration must name pending explicitly, or the wedge would be invisible
+  mock_calls | grep -q -- '--pending'
+  run mock_calls
+  [[ "$output" != *"helm upgrade"* ]] || return 1
+}
+
+# ── _recover_pending_helm_release no-destroy mode (adopt path, #554 Bugbot) ──
+# The reconcile/adopt path reuses the release's STORED credential, so recovery
+# there must never uninstall a pending-install (that would drop the sole copy of
+# the write-only credential). Rollback (non-destructive) is still allowed.
+
+@test "_recover_pending_helm_release no-destroy: pending-install is REFUSED, never uninstalled" {
+  _bounded() { shift; "$@"; }
+  helm() {
+    if [[ "$1" == status ]]; then printf 'NAME: rel\nSTATUS: pending-install\nREVISION: 1\n'; return 0; fi
+    record "helm $*"; return 0
+  }
+  run _recover_pending_helm_release rel ns no-destroy
+  [ "$status" -eq 1 ] || return 1                 # caller fails closed
+  # remedy must be actionable + credential-preserving, NOT a useless rollback
+  [[ "$output" == *"get values rel"* ]] || return 1
+  [[ "$output" == *"clientPassword"* ]] || return 1
+  [[ "$output" != *"rollback"* ]] || return 1
+  run mock_calls
+  [[ "$output" != *"helm uninstall"* ]] || return 1   # credential preserved
+}
+
+@test "_recover_pending_helm_release no-destroy: uninstalling is REFUSED, never uninstalled" {
+  _bounded() { shift; "$@"; }
+  helm() {
+    if [[ "$1" == status ]]; then printf 'NAME: rel\nSTATUS: uninstalling\nREVISION: 3\n'; return 0; fi
+    record "helm $*"; return 0
+  }
+  run _recover_pending_helm_release rel ns no-destroy
+  [ "$status" -eq 1 ] || return 1
+  run mock_calls
+  [[ "$output" != *"helm uninstall"* ]] || return 1
+}
+
+@test "_recover_pending_helm_release no-destroy: pending-upgrade STILL rolls back (non-destructive)" {
+  _bounded() { shift; "$@"; }
+  helm() {
+    if [[ "$1" == status ]]; then printf 'NAME: rel\nSTATUS: pending-upgrade\nREVISION: 5\n'; return 0; fi
+    record "helm $*"; return 0
+  }
+  run _recover_pending_helm_release rel ns no-destroy
+  [ "$status" -eq 0 ] || return 1
+  mock_calls | grep -q "helm rollback rel -n ns"
+}
+
+# #554 Bugbot/audit: the status READ is a plain command-substitution assignment.
+# Under `set -euo pipefail`, `helm status` on an ABSENT release (fresh install)
+# exits non-zero -> the pipeline is non-zero -> a bare `var=$(...)` assignment
+# would abort. Both call sites use `if !` (which suppresses errexit), but a bare
+# call must not abort either — the `|| _status=""` guard proves it.
+@test "_recover_pending_helm_release: bare call under set -e with a failing helm status does NOT abort" {
+  run bash -c '
+    source "'"${LIB_DIR}"'/common.sh"
+    source "'"${LIB_DIR}"'/install-client-helm.sh"
+    LOG_FILE=/dev/null
+    _bounded() { shift; "$@"; }
+    helm() { return 1; }              # status (and everything) fails: absent release
+    warn() { :; }; info() { :; }; log() { :; }
+    set -euo pipefail                 # enable AFTER sourcing, like the real installer
+    _recover_pending_helm_release rel ns    # BARE call, not in an if-condition
+    echo "REACHED_END"
+  '
+  [ "$status" -eq 0 ] || return 1
+  [ "$output" = "REACHED_END" ] || return 1
+}
+
+# #554 Bugbot: a WEDGED status with a long body must not be wiped under pipefail.
+# awk's early `exit` SIGPIPEs helm (141); the old `... | awk exit || _status=""`
+# then wiped the parsed "pending-upgrade" and recovery silently no-op'd. The
+# here-string parse must keep the value so rollback actually runs.
+@test "_recover_pending_helm_release: long wedged status is NOT wiped under set -o pipefail" {
+  local log="$BATS_TEST_TMPDIR/reclog"; : > "$log"
+  run bash -c '
+    source "'"${LIB_DIR}"'/common.sh"
+    source "'"${LIB_DIR}"'/install-client-helm.sh"
+    LOG_FILE="'"$log"'"
+    _bounded() { shift; "$@"; }
+    helm() {
+      if [ "$1" = status ]; then
+        printf "NAME: rel\nSTATUS: pending-upgrade\nREVISION: 5\n"
+        i=0; while [ "$i" -lt 4000 ]; do printf "NOTES body line %d\n" "$i"; i=$((i+1)); done
+        return 0
+      fi
+      if [ "$1" = rollback ]; then echo "ROLLED_BACK_MARKER"; return 0; fi
+      return 0
+    }
+    warn() { :; }; info() { :; }; log() { :; }
+    set -euo pipefail
+    _recover_pending_helm_release rel ns    # bare call, under pipefail
+  '
+  [ "$status" -eq 0 ] || return 1
+  grep -q ROLLED_BACK_MARKER "$log" || return 1   # status parsed -> rollback ran (not wiped)
+}
