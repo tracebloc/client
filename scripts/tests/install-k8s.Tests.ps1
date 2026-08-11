@@ -4746,7 +4746,9 @@ Describe "hostPath PV dirs are made writable before Helm (#616 follow-up: first-
     # the mode is the other-write bit.
     $cmd = Get-ReleaseDirsPrepCommand -Release "r"
     $cmd | Should -Match '\?{8}w\*\)'      # ????????w*) -> other-writable
-    $cmd | Should -Match '\[ "\$o" = 1000 \]'  # ...or already owned by the container user
+    # Ownership must NOT be a pass condition: the writers are 65534 / 65532, and an
+    # owner-is-1000 shortcut reported OK on a 0755 dir whose chmod had failed (Bugbot).
+    $cmd | Should -Not -Match '= 1000 \]' 
   }
 
   Context "Initialize-ReleaseDataDirs" {
@@ -4868,5 +4870,65 @@ Describe "hostPath prep survives Windows argv and follows the dataset mount (#65
     $fn = ((Get-Content "$PSScriptRoot/../install-k8s.ps1" -Raw) -split 'function Initialize-ReleaseDataDirs')[1]
     $fn = ($fn -split '\nfunction ')[0]
     $fn | Should -Match 'chmod -R 3777 \$dataBase/\$Release/data /tracebloc/\$Release/logs'
+  }
+}
+
+Describe "hostPath prep: no false OK, and the data base comes from the live cluster (#654 Bugbot r2)" {
+
+  It "a chowned-but-not-chmodded dir reports FAIL, not OK" {
+    # chown succeeding while chmod fails leaves 0755 owned by 1000. None of the writers is
+    # 1000 (ingestion Job 65534/HOST_UID, CLI staging pod 65532) and they share no group, so
+    # that dir is unusable -- and an owner-based pass would have called it OK, skipped the
+    # warning, and left the first ingest to die on Permission denied.
+    $cmd = Get-ReleaseDirsPrepCommand -Release "rel"
+    $cmd | Should -Not -Match '= 1000 \]'
+    $cmd | Should -Match 'w=0'
+  }
+
+  It "asks the node's mount table for the data base, not the env var" {
+    # HOST_DATASET_DIR is not persisted in install state, so a re-run without it would prepare
+    # /tracebloc/<rel>/data while the live release still mounts /tracebloc-data/<rel>/data.
+    # k3d bakes bind mounts at cluster-create and can't change them on a running cluster, so
+    # the node is ground truth.
+    Mock Invoke-DockerCli { [pscustomobject]@{ Code = 0; Output = "/tracebloc`n/tracebloc-data`n/var/lib/rancher" } }
+    Mock Log {}
+    Get-NodeDataBase -Node "k3d-x-server-0" | Should -Be "/tracebloc-data"
+  }
+
+  It "uses the local tree when the node has no dataset mount" {
+    Mock Invoke-DockerCli { [pscustomobject]@{ Code = 0; Output = "/tracebloc`n/var/lib/rancher" } }
+    Mock Log {}
+    Get-NodeDataBase -Node "k3d-x-server-0" | Should -Be "/tracebloc"
+  }
+
+  It "does not read an unreachable docker as 'no dataset mount'" {
+    # Exit 124 is the bounded-process timeout. Failing to ASK tells us nothing about the
+    # layout, so it must fall back to the env var rather than silently assuming the local tree
+    # and preparing the wrong path.
+    Mock Invoke-DockerCli { [pscustomobject]@{ Code = 124; Output = "timed out" } }
+    Mock Log {}
+    Get-NodeDataBase -Node "k3d-x-server-0" -DatasetDirHint "D:\datasets" | Should -Be "/tracebloc-data"
+    Get-NodeDataBase -Node "k3d-x-server-0" -DatasetDirHint "" | Should -Be "/tracebloc"
+  }
+
+  It "a mount named like the dataset path but different does not match" {
+    # Anchored match: /tracebloc-data-old must not be read as the dataset mount.
+    Mock Invoke-DockerCli { [pscustomobject]@{ Code = 0; Output = "/tracebloc`n/tracebloc-data-old" } }
+    Mock Log {}
+    Get-NodeDataBase -Node "k3d-x-server-0" | Should -Be "/tracebloc"
+  }
+}
+
+Describe "hostPath prep call site asks the node, not the env var (#654 Bugbot r2)" {
+  BeforeAll { $script:CSRC = Get-Content "$PSScriptRoot/../install-k8s.ps1" -Raw }
+
+  It "Initialize-ReleaseDataDirs resolves the data base via Get-NodeDataBase" {
+    # A correct Get-NodeDataBase is worthless if the caller still decides from
+    # $HOST_DATASET_DIR: that var is not persisted in install state, so a re-run without it
+    # prepares /tracebloc/<rel>/data while the live release mounts /tracebloc-data/<rel>/data.
+    # Guarding the FUNCTION alone left this reachable, so guard the call site too.
+    $fn = (($script:CSRC -split 'function Initialize-ReleaseDataDirs')[1] -split '\nfunction ')[0]
+    $fn | Should -Match 'Get-NodeDataBase -Node \$node'
+    $fn | Should -Not -Match 'if \(\$HOST_DATASET_DIR\) \{ "/tracebloc-data" \}'
   }
 }

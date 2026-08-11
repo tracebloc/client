@@ -3102,7 +3102,16 @@ function Get-ReleaseDirsPrepCommand {
   )
   $dirs = @("$DataBase/$Release/data", "/tracebloc/$Release/logs") -join " "
   # Reports OK/FAIL per dir so the caller can tell the user something true rather
-  # than assuming success. Writable = other-writable, or already owned by uid 1000.
+  # than assuming success. Writable = OTHER-writable, full stop.
+  #
+  # Ownership is deliberately not a pass condition. An earlier version also passed a
+  # dir owned by uid 1000, which contradicts the whole reason this function exists:
+  # the processes that must write here are the ingestion Job (uid 65534, or HOST_UID)
+  # and the CLI staging pod (uid 65532), and they share no group with 1000. So a
+  # chown that succeeds while the chmod fails leaves a 0755 dir that none of them can
+  # write -- and the owner check would have called that OK, skipped the warning, and
+  # left the first ingest to die on Permission denied. The uid is still printed, for
+  # diagnosis only.
   #
   # Reads the mode with `ls -ldn`, NOT `stat -c`: -c is a GNU/coreutils flag that
   # BSD stat rejects, and the failure mode is silent -- stat writes nothing, the
@@ -3117,8 +3126,38 @@ function Get-ReleaseDirsPrepCommand {
   # ????????w* glob tests without arithmetic. A trailing sticky/setgid character is
   # absorbed by the *.
   return @"
-for d in $dirs; do mkdir -p "`$d" 2>/dev/null; chown 1000:1000 "`$d" 2>/dev/null; chmod 3777 "`$d" 2>/dev/null; set -- `$(ls -ldn "`$d" 2>/dev/null); m=`$1; o=`$3; case "`$m" in ????????w*) w=1;; *) w=0;; esac; [ "`$o" = 1000 ] && w=1; if [ "`$w" = 1 ]; then echo "OK `$d `$o `$m"; else echo "FAIL `$d `$o `$m"; fi; done
+for d in $dirs; do mkdir -p "`$d" 2>/dev/null; chown 1000:1000 "`$d" 2>/dev/null; chmod 3777 "`$d" 2>/dev/null; set -- `$(ls -ldn "`$d" 2>/dev/null); m=`$1; o=`$3; case "`$m" in ????????w*) w=1;; *) w=0;; esac; if [ "`$w" = 1 ]; then echo "OK `$d `$o `$m"; else echo "FAIL `$d `$o `$m"; fi; done
 "@.Trim()
+}
+
+# Which in-node root does the chart bind DATA under, for the cluster that exists right now?
+#
+# Ground truth is the node's mount table, not $HOST_DATASET_DIR: k3d bakes bind mounts in at
+# cluster-create and cannot add or drop one on a running cluster, whereas the env var is not
+# persisted in install state and is absent on any re-run that didn't re-export it. Deciding from
+# the env var would prepare /tracebloc/<release>/data on such a re-run while the live release
+# still mounts /tracebloc-data/<release>/data -- the silent-success shape this whole function is
+# meant to remove.
+#
+# Degrades in order: node mount table -> the env var -> the local tree. A docker that can't be
+# reached tells us nothing about the mounts, so it must not be read as "no dataset mount".
+function Get-NodeDataBase {
+  # DatasetDirHint defaults to the resolved $HOST_DATASET_DIR and exists so the fallback
+  # branch is reachable from a test without reaching into script scope.
+  param(
+    [Parameter(Mandatory)][string]$Node,
+    [string]$DatasetDirHint = $HOST_DATASET_DIR
+  )
+  $res = Invoke-DockerCli -DockerArgs @("inspect", $Node, "--format", "{{range .Mounts}}{{println .Destination}}{{end}}") -TimeoutSec 20
+  if ($res.Code -eq 0 -and "$($res.Output)" -match '(?m)^/tracebloc-data\s*$') {
+    return "/tracebloc-data"
+  }
+  if ($res.Code -ne 0) {
+    # Couldn't read the mounts: fall back to the env var rather than assuming either layout.
+    Log "Get-NodeDataBase: docker inspect failed (exit $($res.Code)); falling back to HOST_DATASET_DIR"
+    if ($DatasetDirHint) { return "/tracebloc-data" }
+  }
+  return "/tracebloc"
 }
 
 # Make this release's hostPath PV dirs writable before Helm runs, so the first
@@ -3142,8 +3181,14 @@ function Initialize-ReleaseDataDirs {
   param([Parameter(Mandatory)][string]$Release)
   if (-not $Release) { return }
   $node = "k3d-$CLUSTER_NAME-server-0"
-  # Follow the chart: data moves to the dataset bind mount when HOST_DATASET_DIR is set.
-  $dataBase = if ($HOST_DATASET_DIR) { "/tracebloc-data" } else { "/tracebloc" }
+  # Follow the chart: data moves to the dataset bind mount when one exists. Ask the NODE,
+  # not $HOST_DATASET_DIR -- that env var is not persisted in install state, so a re-run or
+  # a fast-path repair started without it would prepare /tracebloc/<rel>/data while the live
+  # release still mounts /tracebloc-data/<rel>/data: successful-looking, fixing nothing
+  # (Bugbot). The bind mount is baked in at cluster-create and cannot change on a running
+  # cluster, so the node's own mount table is ground truth and survives a missing env var.
+  # Falls back to the env var, then to the local tree, if docker can't be asked.
+  $dataBase = Get-NodeDataBase -Node $node
   $cmd = Get-ReleaseDirsPrepCommand -Release $Release -DataBase $dataBase
   Log "Preparing hostPath dirs for release '$Release' in $node (data base $dataBase)"
 
