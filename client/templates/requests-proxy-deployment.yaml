@@ -128,6 +128,24 @@ spec:
                 secretKeyRef:
                   name: {{ include "tracebloc.secretName" . }}
                   key: POD_TOKEN_SIGNING_SECRET
+            {{- if .Values.serviceDbAccounts }}
+            # backend#1528 S2 (RFC-0003 D10 close-out): authenticate the proxy's
+            # metadata-DB access as the dedicated tb_meta identity instead of
+            # the root-equivalent edgeuser. Only the metadata identity is wired
+            # here — the proxy never touches the dataset DB. jobs-manager mints
+            # tb_meta at its startup; the proxy's bootstrap retries until it
+            # lands. Rendered only when enabled, so a default install stays
+            # byte-identical (mirrors the jobs-manager block).
+            - name: SERVICE_DB_ACCOUNTS
+              value: "1"
+            - name: TB_META_USER
+              value: "tb_meta"
+            - name: TB_META_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "tracebloc.secretName" . }}
+                  key: TB_META_PASSWORD
+            {{- end }}
       {{- if include "tracebloc.useImagePullSecrets" . }}
       imagePullSecrets:
         - name: {{ include "tracebloc.registrySecretName" . }}
