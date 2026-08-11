@@ -33,7 +33,7 @@ metadata:
 spec:
   storageClassName: {{ include "tracebloc.storageClassName" . }}
   accessModes:
-    - {{ .Values.pvcAccessMode | default "ReadWriteMany" }}
+    - {{ .Values.pvcAccessMode | default (ternary "ReadWriteOnce" "ReadWriteMany" .Values.hostPath.enabled) }}
   resources:
     requests:
       storage: {{ $storage }}
