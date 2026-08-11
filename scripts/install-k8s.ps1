@@ -3095,12 +3095,22 @@ function Test-HealthyClusterGpuConsistent {
 # one root:root 0755 -- the bug would look fixed and not be. Logs always stay on the local
 # /tracebloc tree (logs-pvc.yaml hardcodes it), which is why only data is parameterised.
 # Bash splits the same way (lib/cluster.sh _ensure_release_dirs).
+# The dirs this release needs prepared. Shared by the command builder and the caller that
+# verifies the result, so "what we prepared" and "what we demand proof for" cannot drift.
+function Get-ReleaseDirsList {
+  param(
+    [Parameter(Mandatory)][string]$Release,
+    [string]$DataBase = "/tracebloc"
+  )
+  return @("$DataBase/$Release/data", "/tracebloc/$Release/logs")
+}
+
 function Get-ReleaseDirsPrepCommand {
   param(
     [Parameter(Mandatory)][string]$Release,
     [string]$DataBase = "/tracebloc"
   )
-  $dirs = @("$DataBase/$Release/data", "/tracebloc/$Release/logs") -join " "
+  $dirs = (Get-ReleaseDirsList -Release $Release -DataBase $DataBase) -join " "
   # Reports OK/FAIL per dir so the caller can tell the user something true rather
   # than assuming success. Writable = OTHER-writable, full stop.
   #
@@ -3206,9 +3216,21 @@ function Initialize-ReleaseDataDirs {
   $out = "$($res.Output)".Trim()
   Log "Release dir prep: exit=$($res.Code) out=$out"
 
+  # Demand POSITIVE proof for every dir. Exit 0 with no "FAIL " line is not evidence the
+  # script did anything: if the program never reaches `sh` -- stdin not attached, an empty
+  # here-doc, a docker exec that starts and immediately ends -- sh exits 0 having printed
+  # nothing, and treating that as success would skip the warning and leave the first ingest on
+  # Permission denied while the install reports fine (Bugbot). That is the same fail-open shape
+  # as the argv-quoting bug earlier in this PR, which is exactly why absence of failure cannot
+  # stand in for success here.
+  $expected = Get-ReleaseDirsList -Release $Release -DataBase $dataBase
+  $unconfirmed = @($expected | Where-Object { $out -notmatch ("(?m)^OK " + [regex]::Escape($_) + "(\s|$)") })
+  if ($unconfirmed.Count -gt 0) {
+    Log "Release dir prep: no OK line for $($unconfirmed -join ', ')"
+  }
   # Code 124 is Invoke-BoundedProcess's timeout; treat any non-zero the same way --
   # report, hint, continue.
-  if ($res.Code -ne 0 -or $out -match "FAIL ") {
+  if ($res.Code -ne 0 -or $out -match "FAIL " -or $unconfirmed.Count -gt 0) {
     Warn "Couldn't confirm the data directories are writable for this release."
     Hint "Ingests can fail with 'Permission denied' on /data/shared until they are. Fix with:"
     Hint "  docker exec $node sh -c `"chmod -R 3777 $dataBase/$Release/data /tracebloc/$Release/logs`""

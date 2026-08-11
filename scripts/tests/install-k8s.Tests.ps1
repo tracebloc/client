@@ -4932,3 +4932,47 @@ Describe "hostPath prep call site asks the node, not the env var (#654 Bugbot r2
     $fn | Should -Not -Match 'if \(\$HOST_DATASET_DIR\) \{ "/tracebloc-data" \}'
   }
 }
+
+Describe "hostPath prep needs positive proof, not just absence of failure (#654 Bugbot r3)" {
+  BeforeEach { Mock Log {}; Mock Warn {}; Mock Hint {} }
+
+  It "empty output with exit 0 warns instead of reporting success" {
+    # If the program never reaches `sh` -- stdin not attached, empty here-doc, an exec that
+    # starts and ends -- sh exits 0 having printed nothing. Reading that as success skips the
+    # warning and leaves the first ingest on Permission denied while the install looks fine.
+    # Same fail-open shape as the argv-quoting bug this PR already fixed.
+    Mock Invoke-DockerCli { [pscustomobject]@{ Code = 0; Output = "" } }
+    Initialize-ReleaseDataDirs -Release "rel"
+    Should -Invoke Warn -Times 1
+  }
+
+  It "a partial result (one dir confirmed, one missing) still warns" {
+    Mock Invoke-DockerCli { [pscustomobject]@{ Code = 0; Output = "OK /tracebloc/rel/data 65534 drwxrwsrwx" } }
+    Initialize-ReleaseDataDirs -Release "rel"
+    Should -Invoke Warn -Times 1
+  }
+
+  It "output about some OTHER release does not count as proof for this one" {
+    # A stale or misrouted exec must not satisfy the check.
+    Mock Invoke-DockerCli {
+      [pscustomobject]@{ Code = 0; Output = "OK /tracebloc/other/data 65534 drwxrwsrwx`nOK /tracebloc/other/logs 65534 drwxrwsrwt" }
+    }
+    Initialize-ReleaseDataDirs -Release "rel"
+    Should -Invoke Warn -Times 1
+  }
+
+  It "stays quiet only when EVERY expected dir reports OK" {
+    Mock Invoke-DockerCli {
+      [pscustomobject]@{ Code = 0; Output = "OK /tracebloc/rel/data 65534 drwxrwsrwx`nOK /tracebloc/rel/logs 65534 drwxrwsrwt" }
+    }
+    Initialize-ReleaseDataDirs -Release "rel"
+    Should -Invoke Warn -Times 0
+  }
+
+  It "the dir list is shared, so what we prepare and what we verify cannot drift" {
+    $list = Get-ReleaseDirsList -Release "rel" -DataBase "/tracebloc-data"
+    $cmd  = Get-ReleaseDirsPrepCommand -Release "rel" -DataBase "/tracebloc-data"
+    foreach ($d in $list) { $cmd | Should -Match ([regex]::Escape($d)) }
+    $list.Count | Should -Be 2
+  }
+}
