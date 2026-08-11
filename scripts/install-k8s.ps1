@@ -616,6 +616,25 @@ $HOST_DATA_DIR = if ($env:HOST_DATA_DIR) { $env:HOST_DATA_DIR } else { "$env:USE
 # local). The host-uid ingestion mechanism for root_squash NFS is Linux-only; on
 # Windows k3d runs in a Linux VM where Docker Desktop handles mount ownership.
 $HOST_DATASET_DIR = if ($env:HOST_DATASET_DIR) { $env:HOST_DATASET_DIR } else { "" }
+
+# Pre-create the per-release hostPath dirs the chart's PVs bind to (logs, mysql,
+# data), mirroring bash _ensure_release_dirs (scripts/lib/cluster.sh). Without
+# these the mount target does not exist yet and the first dataset ingest fails
+# with "Permission denied" on Windows (#653). Datasets go under HOST_DATASET_DIR
+# when set, else stay on HOST_DATA_DIR (backend#743). Idempotent.
+function Ensure-ReleaseDirs($release) {
+  if (-not $release) { return }
+  $base = Join-Path $script:HOST_DATA_DIR $release
+  $dataBase = if ($script:HOST_DATASET_DIR) { Join-Path $script:HOST_DATASET_DIR $release } else { $base }
+  foreach ($d in @((Join-Path $base 'logs'), (Join-Path $base 'mysql'), (Join-Path $dataBase 'data'))) {
+    # Fail closed: -Force already makes this idempotent, so the only thing
+    # SilentlyContinue bought was swallowing a real create failure (ACL, AV lock,
+    # path conflict) — which then surfaces as the very Windows "Permission denied"
+    # this pre-create is meant to prevent, after the installer already printed
+    # "connected". Stop matches bash's `mkdir -p` under `set -e` (Bugbot, #653).
+    New-Item -ItemType Directory -Force -Path $d -ErrorAction Stop | Out-Null
+  }
+}
 $CLIENT_ENV    = $env:CLIENT_ENV
 
 $GPU_VENDOR       = "none"
@@ -4458,6 +4477,7 @@ $envBlock
     # cleared $K3D_GPU_FLAG, stranding every job Pending on a CPU-only node. --set-string wins over
     # the reused values, so we force the three GPU keys to match $gpuVal/$runtimeClass (empty = CPU).
     Log "Reconciling release '$existingName' in namespace '$existingNs' (adopted; $reuseFlag; healing clientId + GPU request)..."
+    Ensure-ReleaseDirs $existingName
     $helmOutput = (helm upgrade $existingName $chartRef `
       --namespace $existingNs `
       $reuseFlag `
@@ -4477,6 +4497,7 @@ $envBlock
     }
   } else {
     Log "Installing $TB_NAMESPACE from $chartRef in namespace '$TB_NAMESPACE'..."
+    Ensure-ReleaseDirs $TB_NAMESPACE
     $helmOutput = (helm upgrade --install $TB_NAMESPACE $chartRef `
       --namespace $TB_NAMESPACE `
       --create-namespace `

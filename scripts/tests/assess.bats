@@ -214,6 +214,7 @@ _depname() {
   _cluster_exists() { return 0; }
   detect_installed_client() { INSTALLED_CLIENT_ID=uuid; INSTALLED_CLIENT_NS=tracebloc; }
   _assess_cluster_servers_running() { echo 1; }
+  _assess_release_pending() { return 1; }        # not wedged
   _assess_cli_present() { return 0; }
   kubectl() { case "$(_depname "$@")" in *-requests-proxy) echo "";; *) echo 1;; esac; }
   _assess_classify
@@ -226,6 +227,7 @@ _depname() {
   _cluster_exists() { return 0; }
   detect_installed_client() { INSTALLED_CLIENT_ID=uuid; INSTALLED_CLIENT_NS=tracebloc; }
   _assess_cluster_servers_running() { echo 1; }
+  _assess_release_pending() { return 1; }        # not wedged
   kubectl() { echo 1; }                          # all workloads Ready
   HOME="$BATS_TEST_TMPDIR/nocli"; mkdir -p "$HOME"   # and no ~/.local/bin/tracebloc
   _assess_classify
@@ -238,10 +240,44 @@ _depname() {
   _cluster_exists() { return 0; }
   detect_installed_client() { INSTALLED_CLIENT_ID=uuid; INSTALLED_CLIENT_NS=munich; }
   _assess_cluster_servers_running() { echo 1; }
+  _assess_release_pending() { return 1; }        # not wedged
   kubectl() { echo 1; }                          # every workload Ready
   _assess_classify
   [ "$INSTALL_STATE" = healthy ] || return 1
   assert_has "munich" "$INSTALL_STATE_REASON"
+}
+
+# #554 Bugbot: a release wedged in pending-* usually still has its prior revision
+# Ready, so it must NOT fast-path to healthy (which would skip recovery). It must
+# degrade to the normal flow that clears the wedge.
+@test "_assess_classify: release present but WEDGED in pending-* -> degraded (pending-wedge), never healthy" {
+  has() { return 0; }
+  _cluster_exists() { return 0; }
+  detect_installed_client() { INSTALLED_CLIENT_ID=uuid; INSTALLED_CLIENT_NS=munich; }
+  _assess_cluster_servers_running() { echo 1; }
+  _assess_release_pending() { return 0; }        # a pending wedge is present
+  _assess_cli_present() { return 0; }
+  kubectl() { echo 1; }                          # prior revision's pods still Ready
+  _assess_classify
+  [ "$INSTALL_STATE" = degraded ] || return 1
+  [ "$INSTALL_STATE_REASON" = pending-wedge ] || return 1
+}
+
+@test "_assess_release_pending: a pending release in the namespace -> true; none -> false" {
+  _bounded() { shift; "$@"; }
+  helm() { [ "$1" = list ] && { echo "stg"; return 0; }; return 0; }   # --pending -q lists a name
+  _assess_release_pending tracebloc
+  helm() { [ "$1" = list ] && return 0; return 0; }                    # no pending releases -> empty
+  ! _assess_release_pending tracebloc || return 1
+  ! _assess_release_pending "" || return 1                             # empty ns -> false, no helm call
+}
+
+# #554 Bugbot: the probe must NOT fail open. A helm error/timeout is uncertainty,
+# and this module degrades on uncertainty (never fast-paths to a false healthy).
+@test "_assess_release_pending: helm list ERROR -> treated as wedged (fail closed), not 'no wedge'" {
+  _bounded() { shift; "$@"; }
+  helm() { [ "$1" = list ] && return 1; return 0; }                    # probe errors / times out
+  _assess_release_pending tracebloc || return 1                        # returns 0 (wedged) -> degrade
 }
 
 # ── _assess_handoff (hand-off + exit 0, no exec) ────────────────────────────
