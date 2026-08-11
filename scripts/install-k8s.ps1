@@ -627,7 +627,12 @@ function Ensure-ReleaseDirs($release) {
   $base = Join-Path $script:HOST_DATA_DIR $release
   $dataBase = if ($script:HOST_DATASET_DIR) { Join-Path $script:HOST_DATASET_DIR $release } else { $base }
   foreach ($d in @((Join-Path $base 'logs'), (Join-Path $base 'mysql'), (Join-Path $dataBase 'data'))) {
-    New-Item -ItemType Directory -Force -Path $d -ErrorAction SilentlyContinue | Out-Null
+    # Fail closed: -Force already makes this idempotent, so the only thing
+    # SilentlyContinue bought was swallowing a real create failure (ACL, AV lock,
+    # path conflict) — which then surfaces as the very Windows "Permission denied"
+    # this pre-create is meant to prevent, after the installer already printed
+    # "connected". Stop matches bash's `mkdir -p` under `set -e` (Bugbot, #653).
+    New-Item -ItemType Directory -Force -Path $d -ErrorAction Stop | Out-Null
   }
 }
 $CLIENT_ENV    = $env:CLIENT_ENV
