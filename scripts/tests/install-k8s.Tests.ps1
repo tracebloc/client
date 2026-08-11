@@ -4707,12 +4707,28 @@ Describe "hostPath PV dirs are made writable before Helm (#616 follow-up: first-
     Get-ReleaseDirsPrepCommand -Release "r" | Should -Match 'mkdir -p'
   }
 
-  It "matches the chart's init-writable-data semantics (chown 1000:1000 + chmod 3777)" {
-    # Same end state as a current chart's init container, so a cluster on an older
-    # published chart is not a second, differently-broken configuration.
+  It "matches the chart's init-writable-data semantics, INCLUDING its per-dir sticky split" {
+    # Same end state as a current chart's init container, so a cluster on an older published
+    # chart is not a second, differently-broken configuration. The modes deliberately differ
+    # per dir (#667): /data/shared must NOT be sticky or `data delete` -- which runs as a
+    # different uid than the ingest -- cannot remove the tree, and on the currently-published
+    # chart (no init-writable-data) or the fast path that returns before Helm, nothing runs
+    # afterwards to correct a sticky bit the installer set.
     $cmd = Get-ReleaseDirsPrepCommand -Release "r"
     $cmd | Should -Match 'chown 1000:1000'
-    $cmd | Should -Match 'chmod 3777'
+    $cmd | Should -Match '/tracebloc/r/data:2777'
+    $cmd | Should -Match '/tracebloc/r/logs:3777'
+    $cmd | Should -Not -Match '/data:3777'      # never sticky on the shared/data dir
+    $cmd | Should -Match 'chmod "\$want"'       # per-dir mode, not one mode for both
+  }
+
+  It "the desired mode does not collide with the observed mode in the shell" {
+    # Both were briefly called $m, so the ls-derived value overwrote the wanted one. Harmless
+    # only because chmod ran first -- exactly the kind of ordering dependency that breaks on
+    # the next edit.
+    $cmd = Get-ReleaseDirsPrepCommand -Release "r"
+    $cmd | Should -Match 'want=\$\{e#\*:\}'
+    $cmd | Should -Match 'm=\$1'
   }
 
   It "leaves the mysql PV alone" {

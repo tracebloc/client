@@ -3082,9 +3082,20 @@ function Test-HealthyClusterGpuConsistent {
 # the chart, its datadir permissions are the database's business, and installs
 # reaching a healthy cluster prove it is already fine.
 #
-# 3777 mirrors init-writable-data exactly (setgid + sticky + world-write), so a
-# cluster on a published chart that predates that init container ends up in the
-# same state as one on a current chart. Both the chown and the chmod are
+# The two dirs get DIFFERENT modes, mirroring the chart's init-writable-data (#667):
+#
+#   /data/shared -> 2777  setgid + world-write, NO sticky. Sticky permits an unlink only by
+#                   the entry's owner, the dir's owner, or root; `data delete` removes a tree
+#                   the INGEST wrote (uid 65534) from a pod running as 65532, so sticky here
+#                   makes the delete impossible -- table dropped, files stranded. Setting 3777
+#                   from the installer would re-create exactly the bug #667 removes, and on the
+#                   currently-published chart (no init-writable-data) or the fast path that
+#                   returns before Helm, nothing runs afterwards to correct it.
+#   /data/logs   -> 3777  setgid + sticky. Nothing has to delete another writer's logs, so the
+#                   /tmp-style protection costs nothing there.
+#
+# Keeping these in step with the chart is the point: the installer prepares the same dirs the
+# chart's init container would, so the two must not disagree about the mode. Both the chown and the chmod are
 # best-effort: on a bind-mounted host path that cannot represent POSIX ownership,
 # the mkdir alone is often enough, and a failure to adjust must not abort anything.
 # DataBase is the in-node root the chart binds DATA under. It is NOT always /tracebloc:
@@ -3097,6 +3108,11 @@ function Test-HealthyClusterGpuConsistent {
 # Bash splits the same way (lib/cluster.sh _ensure_release_dirs).
 # The dirs this release needs prepared. Shared by the command builder and the caller that
 # verifies the result, so "what we prepared" and "what we demand proof for" cannot drift.
+# Modes the shared hostPath dirs must end up with. Kept as named constants so the installer
+# and the chart's init-writable-data can be diffed against each other by eye (#667).
+$TB_SHARED_DIR_MODE = "2777"   # setgid + world-write, NO sticky: `data delete` runs as another uid
+$TB_LOGS_DIR_MODE   = "3777"   # setgid + sticky: nothing deletes another writer's logs
+
 function Get-ReleaseDirsList {
   param(
     [Parameter(Mandatory)][string]$Release,
@@ -3110,7 +3126,13 @@ function Get-ReleaseDirsPrepCommand {
     [Parameter(Mandatory)][string]$Release,
     [string]$DataBase = "/tracebloc"
   )
-  $dirs = (Get-ReleaseDirsList -Release $Release -DataBase $DataBase) -join " "
+  # path:mode pairs, the same shape the chart's init-writable-data uses (#667), so the installer
+  # and the chart cannot disagree about a dir's mode. Release names can't contain a colon (they
+  # are k8s names), so ${e%:*} / ${e#*:} split cleanly.
+  $dirs = (@(
+    "$DataBase/$Release/data:$TB_SHARED_DIR_MODE",
+    "/tracebloc/$Release/logs:$TB_LOGS_DIR_MODE"
+  )) -join " "
   # Reports OK/FAIL per dir so the caller can tell the user something true rather
   # than assuming success. Writable = OTHER-writable, full stop.
   #
@@ -3136,7 +3158,7 @@ function Get-ReleaseDirsPrepCommand {
   # ????????w* glob tests without arithmetic. A trailing sticky/setgid character is
   # absorbed by the *.
   return @"
-for d in $dirs; do mkdir -p "`$d" 2>/dev/null; chown 1000:1000 "`$d" 2>/dev/null; chmod 3777 "`$d" 2>/dev/null; set -- `$(ls -ldn "`$d" 2>/dev/null); m=`$1; o=`$3; case "`$m" in ????????w*) w=1;; *) w=0;; esac; if [ "`$w" = 1 ]; then echo "OK `$d `$o `$m"; else echo "FAIL `$d `$o `$m"; fi; done
+for e in $dirs; do d=`${e%:*}; want=`${e#*:}; mkdir -p "`$d" 2>/dev/null; chown 1000:1000 "`$d" 2>/dev/null; chmod "`$want" "`$d" 2>/dev/null; set -- `$(ls -ldn "`$d" 2>/dev/null); m=`$1; o=`$3; case "`$m" in ????????w*) w=1;; *) w=0;; esac; if [ "`$w" = 1 ]; then echo "OK `$d `$o `$m"; else echo "FAIL `$d `$o `$m"; fi; done
 "@.Trim()
 }
 

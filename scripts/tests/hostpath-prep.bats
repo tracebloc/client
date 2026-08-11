@@ -30,9 +30,10 @@ teardown() {
 # substituting $dirs covers either layout.
 _prep_cmd() {
   local base="$1" line
-  line="$(grep -E '^for d in \$dirs; do mkdir -p' "$PS1_FILE" | tr -d '`')"
+  line="$(grep -E '^for e in \$dirs; do d=' "$PS1_FILE" | tr -d '`')"
   [ -n "$line" ] || { echo "could not find the prep command in $PS1_FILE" >&2; return 1; }
-  printf '%s\n' "${line/\$dirs/$base/data $base/logs}"
+  # $dirs carries path:mode pairs now (#667's per-dir split), so supply both.
+  printf '%s\n' "${line/\$dirs/$base/data:2777 $base/logs:3777}"
 }
 
 @test "the extracted prep command is valid POSIX sh" {
@@ -88,7 +89,10 @@ _prep_cmd() {
   cmd="$(_prep_cmd "$TMP_BASE")"
   cmd="${cmd//mkdir -p/: }"
   cmd="${cmd//chown 1000:1000/: }"
-  cmd="${cmd//chmod 3777/: }"
+  # \$want must stay LITERAL: unescaped, bash expands it to the empty string here and the
+  # substitution silently matches nothing, leaving the chmod in place so the "non-writable"
+  # setup is quietly writable and the test proves nothing.
+  cmd="${cmd//chmod \"\$want\"/: }"
   run sh -c "$cmd"
   [[ "$output" == *"FAIL $TMP_BASE/data"* ]] || return 1
   [[ "$output" == *"FAIL $TMP_BASE/logs"* ]] || return 1
@@ -99,7 +103,7 @@ _prep_cmd() {
   # Regression guard on the real bug: stat -c fails silently on BSD, so a 3777 dir got
   # reported FAIL. Same family as the sha256sum --check trap (#429).
   local line
-  line="$(grep -E '^for d in \$dirs; do mkdir -p' "$PS1_FILE" | tr -d '`')"
+  line="$(grep -E '^for e in \$dirs; do d=' "$PS1_FILE" | tr -d '`')"
   [[ "$line" == *"ls -ldn"* ]] || return 1
   [[ "$line" != *"stat -c"* ]] || return 1
 }
