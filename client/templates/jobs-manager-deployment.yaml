@@ -100,7 +100,7 @@ spec:
       {{- end }}
       containers:
       - name: api
-        image: {{ include "tracebloc.image" (dict "repository" "tracebloc/jobs-manager" "tag" .Values.env.CLIENT_ENV "digest" .Values.images.jobsManager.digest "registry" (dig "imageRegistry" "docker.io" (.Values.global | default dict))) | quote }}
+        image: {{ include "tracebloc.image" (dict "repository" "tracebloc/jobs-manager" "tag" (include "tracebloc.clientEnv" .) "digest" .Values.images.jobsManager.digest "registry" (dig "imageRegistry" "docker.io" (.Values.global | default dict))) | quote }}
         imagePullPolicy: {{ if .Values.images.jobsManager.digest }}IfNotPresent{{ else }}Always{{ end }}
         securityContext:
           allowPrivilegeEscalation: false
@@ -298,7 +298,7 @@ spec:
         - name: JOB_IMAGE_HOST
           value: {{ printf "%s/" (dig "imageRegistry" "docker.io" (.Values.global | default dict) | default "docker.io") | quote }}
         - name: CLIENT_ENV
-          value: {{ .Values.env.CLIENT_ENV | default "prod" | quote }}
+          value: {{ include "tracebloc.clientEnv" . | quote }}
         - name: RESOURCE_REQUESTS
           value: {{ if hasKey .Values.env "RESOURCE_REQUESTS" }}{{ .Values.env.RESOURCE_REQUESTS | quote }}{{ else }}"cpu=2,memory=8Gi"{{ end }}
         - name: RESOURCE_LIMITS
@@ -338,7 +338,7 @@ spec:
         {{- end }}
         {{- end }}
       - name: pods-monitor-container
-        image: {{ include "tracebloc.image" (dict "repository" "tracebloc/pods-monitor" "tag" .Values.env.CLIENT_ENV "digest" .Values.images.podsMonitor.digest "registry" (dig "imageRegistry" "docker.io" (.Values.global | default dict))) | quote }}
+        image: {{ include "tracebloc.image" (dict "repository" "tracebloc/pods-monitor" "tag" (include "tracebloc.clientEnv" .) "digest" .Values.images.podsMonitor.digest "registry" (dig "imageRegistry" "docker.io" (.Values.global | default dict))) | quote }}
         imagePullPolicy: {{ if .Values.images.podsMonitor.digest }}IfNotPresent{{ else }}Always{{ end }}
         securityContext:
           allowPrivilegeEscalation: false
@@ -379,7 +379,7 @@ spec:
         - name: JOB_IMAGE_HOST
           value: {{ printf "%s/" (dig "imageRegistry" "docker.io" (.Values.global | default dict) | default "docker.io") | quote }}
         - name: CLIENT_ENV
-          value: {{ .Values.env.CLIENT_ENV | default "prod" | quote }}
+          value: {{ include "tracebloc.clientEnv" . | quote }}
         - name: RESOURCE_REQUESTS
           value: {{ if hasKey .Values.env "RESOURCE_REQUESTS" }}{{ .Values.env.RESOURCE_REQUESTS | quote }}{{ else }}"cpu=2,memory=8Gi"{{ end }}
         - name: RESOURCE_LIMITS
