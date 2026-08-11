@@ -17,6 +17,31 @@ umask 077
 # into one argv element that curl rejects.
 readonly CURL_SECURE="--tlsv1.2"
 
+# tb_client_env — CLIENT_ENV reduced to the canonical dev|stg|prod.
+#
+# The chart, client-runtime and this installer all key on dev|stg|prod, while
+# values.schema.json documents development|staging|production as accepted
+# aliases. Every consumer must reduce through here rather than matching the raw
+# value, for the reason backend#1723 and backend#1745 both record: a `case`
+# that knows only dev|stg with a `*)` catch-all sends a documented alias to the
+# PROD branch silently.
+#
+# That is not hypothetical here. `_backend_url` feeds verify_credentials(),
+# so a `CLIENT_ENV=staging` install validated the customer's STAGING client
+# credentials against the PRODUCTION backend and told them their correct
+# credentials were wrong.
+#
+# Unknown values pass through unchanged: this normalises spellings, it does not
+# validate. Each caller keeps its own fallback for genuinely unrecognised input.
+tb_client_env() {
+  case "${1-${CLIENT_ENV:-}}" in
+    development) printf 'dev'  ;;
+    staging)     printf 'stg'  ;;
+    production)  printf 'prod' ;;
+    *)           printf '%s' "${1-${CLIENT_ENV:-}}" ;;
+  esac
+}
+
 # curl_secure — the one way this installer fetches anything.
 #
 # The TLS floor used to be opt-in: every call site had to remember to splice
