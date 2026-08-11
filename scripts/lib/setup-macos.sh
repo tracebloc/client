@@ -154,6 +154,58 @@ _install_docker_colima() {
   success "Docker running."
 }
 
+# Verify a downloaded Docker.dmg against Docker's published checksums.txt.
+# FAIL CLOSED (#629): aborts on a checksum mismatch AND on an unfetchable
+# checksum — matching kubectl / k3d / helm, which also fetch their checksum over
+# the network and abort on an empty hash (setup-linux.sh, via `_verify_sha256`).
+# The DMG is about to be mounted and copied into /Applications under sudo, so an
+# unverifiable download must not be installed. A user knowingly behind a
+# checksum-stripping proxy can opt out with TRACEBLOC_ALLOW_UNVERIFIED_DOCKER_DMG=1.
+_verify_docker_dmg() {
+  local dmg_path="$1" checksum_url="$2"
+  local expected_hash="" _attempt
+  # Fetch the published checksum, retrying transient failures. Capture cleanly
+  # (not through the generic retry(), whose progress notes go to stdout and would
+  # pollute the captured hash). Pick the Docker.dmg line; field 1 is the hash.
+  for _attempt in 1 2 3; do
+    expected_hash=$(curl_secure -fsSL "$checksum_url" 2>/dev/null \
+      | awk '$1 ~ /^[0-9a-fA-F]{64}$/ && /Docker\.dmg/{print $1; exit}') || true
+    [[ -n "$expected_hash" ]] && break
+    [[ "$_attempt" -lt 3 ]] && sleep 5
+  done
+
+  # A TLS-inspecting proxy can return an HTML error body that merely mentions
+  # "Docker.dmg"; only a real 64-hex SHA-256 counts as a checksum. Anything else
+  # is treated as "not fetched" and takes the fail-closed path below.
+  if [[ -n "$expected_hash" && ! "$expected_hash" =~ ^[0-9a-fA-F]{64}$ ]]; then
+    log "Ignoring non-SHA-256 checksum response from $checksum_url (likely an intercepting proxy)."
+    expected_hash=""
+  fi
+
+  if [[ -n "$expected_hash" ]]; then
+    # Checksum available (the clean-network path): verify and FAIL CLOSED on a
+    # mismatch (#556).
+    local actual_hash
+    actual_hash=$(shasum -a 256 "$dmg_path" | awk '{print $1}')
+    if [[ "$actual_hash" != "$expected_hash" ]]; then
+      rm -f "$dmg_path"
+      error "Docker Desktop DMG checksum mismatch — download may be corrupted or tampered with"
+    fi
+    log "Docker Desktop checksum verified."
+    return 0
+  fi
+
+  # No checksum could be fetched. On a clean network checksums.txt is always
+  # present, so this is an anomalous path — a TLS-inspecting proxy stripping it,
+  # a transient CDN error, or Docker changing its layout. FAIL CLOSED by default
+  # (#629), consistent with the other pinned tools; opt out only if you know why.
+  if [[ -z "${TRACEBLOC_ALLOW_UNVERIFIED_DOCKER_DMG:-}" ]]; then
+    rm -f "$dmg_path"
+    error "Could not fetch the Docker Desktop checksum from ${checksum_url} — refusing to install an unverified DMG. A proxy/VPN may be rewriting traffic to desktop.docker.com; fix egress and re-run, or set TRACEBLOC_ALLOW_UNVERIFIED_DOCKER_DMG=1 to install unverified at your own risk."
+  fi
+  warn "Installing Docker Desktop UNVERIFIED — could not fetch its checksum from ${checksum_url} and TRACEBLOC_ALLOW_UNVERIFIED_DOCKER_DMG is set."
+}
+
 install_docker_desktop() {
 
   # On headless Macs (EC2, CI runners), Docker Desktop can't launch.
@@ -249,63 +301,12 @@ install_docker_desktop() {
     retry 3 5 download_with_progress "$dmg_url" "$dmg_path" \
       "Downloading Docker Desktop — large, a few minutes on a fresh Mac"
 
-    # Docker does NOT publish a floating "Docker.dmg.sha256sum" sibling — that
-    # URL 403s, so the old fetch was ALWAYS empty on a clean network. The real,
-    # co-located checksum for this exact floating DMG lives in "checksums.txt"
-    # next to it (BSD format: "<sha256> *Docker.dmg"). Use that instead; it
-    # returns 200 on a clean network, so honest installs get genuinely verified.
-    local checksum_url="${dmg_url%/*}/checksums.txt"
-    local expected_hash="" _attempt
-    # Fetch the published checksum, retrying transient failures. Capture cleanly
-    # (not through the generic retry(), whose progress notes go to stdout and
-    # would pollute the captured hash). Pick the Docker.dmg line and take the
-    # hash field (field 1; field 2 is "*Docker.dmg").
-    for _attempt in 1 2 3; do
-      expected_hash=$(curl_secure -fsSL "$checksum_url" 2>/dev/null \
-        | awk '$1 ~ /^[0-9a-fA-F]{64}$/ && /Docker\.dmg/{print $1; exit}') || true
-      [[ -n "$expected_hash" ]] && break
-      [[ "$_attempt" -lt 3 ]] && sleep 5
-    done
-
-    # A TLS-inspecting proxy can return an HTML error body that merely mentions
-    # "Docker.dmg"; without a structure check awk would capture that non-hash
-    # text as a "checksum", the compare below would fail, and an otherwise-fine
-    # install would hard-abort as "tampered". Only a real 64-hex SHA-256 counts
-    # as a checksum — anything else is treated as "not fetched" and takes the
-    # warn path, never a fail-closed mismatch on garbage. (The awk above already
-    # requires field 1 to be 64-hex; this is the belt-and-suspenders guard the
-    # PowerShell tool downloads also apply.)
-    if [[ -n "$expected_hash" && ! "$expected_hash" =~ ^[0-9a-fA-F]{64}$ ]]; then
-      log "Ignoring non-SHA-256 checksum response from $checksum_url (likely an intercepting proxy)."
-      expected_hash=""
-    fi
-
-    if [[ -n "$expected_hash" ]]; then
-      # Checksum available (the clean-network path): verify and FAIL CLOSED on a
-      # mismatch (#556). This DMG is about to be mounted and copied into
-      # /Applications under sudo, so a corrupted or tampered download must abort.
-      local actual_hash
-      actual_hash=$(shasum -a 256 "$dmg_path" | awk '{print $1}')
-      if [[ "$actual_hash" != "$expected_hash" ]]; then
-        rm -f "$dmg_path"
-        error "Docker Desktop DMG checksum mismatch — download may be corrupted or tampered with"
-      fi
-      log "Docker Desktop checksum verified."
-    else
-      # No checksum could be fetched. On a clean network checksums.txt is always
-      # present, so this only happens on an anomalous path — a TLS-inspecting
-      # proxy stripping it, a transient CDN error, or Docker changing its
-      # layout. Do NOT hard-abort (that would brick otherwise-fine installs for
-      # something outside the user's control); emit a LOUD, visible warning and
-      # proceed. Operators who want strict fail-closed behaviour can opt in with
-      # TRACEBLOC_REQUIRE_DOCKER_DMG_CHECKSUM=1. Note: a genuine tampered DMG is
-      # still caught above whenever the checksum IS reachable (the common case).
-      if [[ -n "${TRACEBLOC_REQUIRE_DOCKER_DMG_CHECKSUM:-}" ]]; then
-        rm -f "$dmg_path"
-        error "Could not fetch the Docker Desktop checksum from ${checksum_url} and TRACEBLOC_REQUIRE_DOCKER_DMG_CHECKSUM is set — refusing to install an unverified DMG. Check egress to desktop.docker.com (a TLS-inspecting proxy can strip it), then re-run."
-      fi
-      warn "Could not fetch the Docker Desktop checksum from ${checksum_url} — installing this DMG UNVERIFIED. This usually means a proxy/VPN is rewriting traffic to desktop.docker.com. Set TRACEBLOC_REQUIRE_DOCKER_DMG_CHECKSUM=1 to refuse unverified installs."
-    fi
+    # Docker publishes the checksum for this floating DMG in a co-located
+    # "checksums.txt" (BSD format: "<sha256> *Docker.dmg"). Verify against it,
+    # failing closed on a mismatch OR an unfetchable checksum (see
+    # _verify_docker_dmg) — the DMG is about to be mounted and copied into
+    # /Applications under sudo.
+    _verify_docker_dmg "$dmg_path" "${dmg_url%/*}/checksums.txt"
 
     # #561: bounded so hdiutil on a bad/corrupt DMG can't hang forever.
     spin_cmd_bounded 900 "Installing Docker Desktop…" bash -c \
