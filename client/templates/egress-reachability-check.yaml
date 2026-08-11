@@ -22,7 +22,12 @@
   block them or the hourly auto-upgrade. Set egressReachabilityCheck.enabled=false
   to disable (e.g. a truly air-gapped cluster with no route to the backend).
 */ -}}
-{{- $env := .Values.env.CLIENT_ENV | default "prod" -}}
+{{- /* RESOLVED: the case statement below keys on dev|stg|prod and its
+     catch-all is PROD, so a documented alias like `staging` silently
+     probed api.tracebloc.io and passed for the wrong environment --
+     a reachability check that verifies a path the cluster never takes
+     (backend#1723). */ -}}
+{{- $env := include "tracebloc.clientEnv" . -}}
 apiVersion: batch/v1
 kind: Job
 metadata:
