@@ -140,7 +140,7 @@ tests:
   - it: SCC ClusterRoleBinding subject points at the release-scoped SA
     template: templates/resource-monitor-scc.yaml
     release:
-      name: hasan-prod
+      name: tenant-d-prod
     set:
       platform: openshift
       resourceMonitor: true
@@ -156,7 +156,7 @@ tests:
           of: ClusterRoleBinding
       - equal:
           path: subjects[0].name
-          value: hasan-prod-resource-monitor
+          value: tenant-d-prod-resource-monitor
       - equal:
           path: subjects[0].namespace
           value: tracebloc-node-agents
@@ -177,7 +177,7 @@ tests:
     documentIndex: 0
     asserts:
       # Different release => different SA in users[]; combined with the
-      # two cases above (stg + hasan-prod) this proves uniqueness across
+      # two cases above (stg + tenant-d-prod) this proves uniqueness across
       # any pair on the same cluster.
       - equal:
           path: users[0]

@@ -23,10 +23,10 @@ tests:
 
   - it: a different release renders a different resource-monitor name
     release:
-      name: hasan-prod
+      name: tenant-d-prod
     asserts:
       - matchRegexRaw:
-          pattern: "hasan-prod-resource-monitor"
+          pattern: "tenant-d-prod-resource-monitor"
       - notMatchRegexRaw:
           pattern: 'tracebloc-resource-monitor[^-A-Za-z0-9]'
 

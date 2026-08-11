@@ -1,6 +1,6 @@
 # Tenant migration tools — `eks-1.0.x` → `client-1.x`
 
-Operational tooling captured during the 2026-04-27 / 2026-04-28 chart-family migrations on `eu-central-1/tracebloc-clients-prod`. Validated end-to-end on the `stg` and `hasan-prod` releases. Designed to be re-run for the remaining tenants (`tenant-b`, `tenant-c`, `tenant-a`) and any future tenant on the same legacy chart.
+Operational tooling captured during the 2026-04-27 / 2026-04-28 chart-family migrations on `eu-central-1/tracebloc-clients-prod`. Validated end-to-end on the `stg` and `tenant-d-prod` releases. Designed to be re-run for the remaining tenants (`tenant-b`, `tenant-c`, `tenant-a`) and any future tenant on the same legacy chart.
 
 Read [`../MIGRATIONS.md`](../MIGRATIONS.md) first for the *why* — this directory is the *how*.
 
