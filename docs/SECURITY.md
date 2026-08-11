@@ -117,6 +117,24 @@ Training pods do **not** carry long-lived tracebloc backend credentials. The job
 
 The work to remove legacy `CLIENT_ID` / `CLIENT_PASSWORD` injection from training pods is in progress as a separate effort; see §8 for the residual risk until it lands.
 
+#### 4.1.1 MySQL database identity model
+
+The in-cluster MySQL (`mysql-client`, §3) holds two databases — `metadata` (pod tokens, Service Bus connection lookups, ingestion-run bookkeeping, per-experiment credential records) and `training_test_datasets` (the ingested dataset tables). Historically every component reached both through a single account, **`edgeuser`**, provisioned root-equivalent (`ALL PRIVILEGES ON *.* WITH GRANT OPTION`). A compromised component — or a training pod that reached MySQL — authenticating as `edgeuser` would hold the whole instance.
+
+The target model is least-privilege, one identity per job, with `edgeuser` retired. The identities:
+
+| Identity | Scope | Used by | Status |
+|---|---|---|---|
+| **per-experiment user** | `SELECT` on one experiment's physical table(s) only | training pods (injected via per-job Secret as `MYSQL_USER`/`MYSQL_PASSWORD`) | Shipped, opt-in `perExperimentDbCreds` (RFC-0003 D10, backend#1181) |
+| **`tb_credmgr`** | `CREATE USER` + `SELECT … WITH GRANT OPTION` on `training_test_datasets.*` — mints the per-experiment users, nothing else | jobs-manager | Shipped with `perExperimentDbCreds` |
+| **`tb_meta`** | `ALL PRIVILEGES` on `metadata.*` only (no `*.*`, no `GRANT OPTION`) | *(S2)* jobs-manager + requests-proxy metadata work | Minted under `serviceDbAccounts` (backend#1528 S1); not yet consumed |
+| **`tb_ingest`** | `ALL PRIVILEGES` on `training_test_datasets.*` only (no `*.*`, no `GRANT OPTION`) | *(S2)* jobs-manager dataset work + spawned ingestion Jobs | Minted under `serviceDbAccounts` (backend#1528 S1); not yet consumed |
+| **`edgeuser`** | `ALL PRIVILEGES ON *.*` — root-equivalent | jobs-manager, requests-proxy, ingestion pods (default) — **today** | Legacy; retirement in progress (§8.10) |
+
+The dedicated accounts are minted by jobs-manager at startup via runtime DDL (mirroring `ensure_tb_credmgr_account`), created `IDENTIFIED WITH mysql_native_password` so they survive the 5.7→8.4 datadir migration (backend#723), each reset to exactly its one-database grant on every startup. Minting is gated on `serviceDbAccounts` (default off) and is purely additive: until the consumers are switched over (S2), a default install authenticates exactly as it did before.
+
+**Staged retirement (backend#1528, RFC-0003 D10 close-out):** **S1** mint `tb_meta` + `tb_ingest` (done) → **S2** switch jobs-manager, requests-proxy, and spawned ingestion Jobs off the hardcoded `edgeuser` constants onto the injected identities, and re-parent the `tb_credmgr` bootstrap → **S3** `REVOKE` `edgeuser` to nothing and `DROP USER`, fleet-staged. `edgeuser` must retain `CREATE USER` + `GRANT OPTION` until the bootstrap is re-parented, so the revoke is deliberately last.
+
 ### 4.2 Network egress control (G2)
 
 **Mechanism:** Kubernetes `NetworkPolicy` selected on the `tracebloc.io/workload: training` label, which the jobs-manager attaches to every spawned training pod.
@@ -515,6 +533,19 @@ from the OS package manager (or an internal mirror) before running the
 installer, so the bootstrap uses a cosign you already trust. Documented in
 [docs/SUPPLY_CHAIN.md §6](SUPPLY_CHAIN.md#6-operator-guidance--verifying-a-release-by-hand).
 
+### 8.10 `edgeuser` MySQL root-equivalence (G1) — **security / platform, rollout in progress**
+
+The in-cluster MySQL identity `edgeuser` is provisioned root-equivalent (`ALL PRIVILEGES ON *.* WITH GRANT OPTION`) and is still, by default, the account jobs-manager, requests-proxy, and the ingestion pods authenticate as (§4.1.1). Any of those components compromised while holding `edgeuser` holds the whole MySQL instance — both the metadata DB and every customer's dataset tables.
+
+**Mechanism (backend#1528, RFC-0003 D10 close-out):** dedicated least-privilege identities — `tb_meta` (metadata DB) and `tb_ingest` (dataset DB) — that each own exactly one database, plus the already-shipped `tb_credmgr` (mints per-experiment users) and per-experiment training-pod users. See §4.1.1 for the full model.
+
+**Rollout (per fleet, staged, each step reversible until S3):**
+1. **S1 — mint (done, `serviceDbAccounts`, default off).** jobs-manager mints `tb_meta` + `tb_ingest` at startup. Additive: nothing consumes them yet, so a default install is byte-identical.
+2. **S2 — switch consumers.** Move jobs-manager and requests-proxy off the hardcoded `edgeuser` constants onto `tb_meta`/`tb_ingest`; stamp `tb_ingest` onto spawned ingestion Jobs (`DB_USER`/`DB_PASSWORD`); re-parent the `tb_credmgr` bootstrap. Verify heartbeat `information_schema` dataset visibility, not just "no exceptions" — over-revoking degrades silently.
+3. **S3 — retire.** With `perExperimentDbCreds` + `serviceDbAccounts` universally on and S2 shipped, `REVOKE` `edgeuser` to nothing and `DROP USER`. Prod-irreversible; gated on a `SHOW GRANTS FOR 'edgeuser'@'%'` snapshot as the rollback reference.
+
+**Residual until S3 completes fleet-wide:** the root-equivalent account still exists and is still the default authentication identity. `edgeuser` intentionally retains `CREATE USER` + `GRANT OPTION` until the `tb_credmgr` bootstrap is re-parented (S2), so the revoke is deliberately the last step.
+
 ---
 
 ## 9. If you suspect compromise
@@ -555,12 +586,15 @@ Cross-reference for reviewers and contributors.
 | Namespace PSA labels | [`client:templates/namespace.yaml`](../client/templates/namespace.yaml) (opt-in) |
 | Experiment scratch-path env | [`tracebloc-client:core/utils/general.py`](https://github.com/tracebloc/tracebloc-client/blob/develop/core/utils/general.py) |
 | Stripped Dockerfile CMD credentials | [`tracebloc-client:*.cpu.Dockerfile`, `*.gpu.Dockerfile`](https://github.com/tracebloc/tracebloc-client) |
+| MySQL identity minting (`tb_credmgr` / `tb_meta` / `tb_ingest`, per-experiment users) | [`client-runtime:sql_utils.ensure_*_account`](https://github.com/tracebloc/client-runtime/blob/develop/sql_utils.py) |
+| Service-account minting gate (`serviceDbAccounts`) | [`client:templates/jobs-manager-deployment.yaml`, `templates/secrets.yaml`](../client/templates/jobs-manager-deployment.yaml) |
 
 ---
 
 ## 11. Document history
 
 - **2026-04** — Initial version. Documents the training-pod sandbox as shipped in client chart ≥ 1.0.4 and client-runtime images built from `develop` at that date. Reflects the narrow threat model (trusted platform, untrusted external data scientist submissions).
+- **2026-08** — Documented the MySQL database identity model (§4.1.1) and the `edgeuser` root-equivalence retirement (§8.10) — RFC-0003 D10 close-out, backend#1528.
 
 ---
 
