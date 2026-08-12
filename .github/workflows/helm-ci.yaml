@@ -65,6 +65,21 @@ jobs:
         # now packages both charts).
         run: helm lint --strict ./ingestor
 
+      - name: CLIENT_ENV + channelTags vocabularies are closed
+        # `helm lint` does not exercise the values.schema.json `enum` /
+        # `additionalProperties` against out-of-vocabulary inputs, and
+        # helm-unittest structurally cannot: it reports a schema violation as a
+        # plugin-level error rather than a template failure, and exposes no flag
+        # to skip validation and reach the `fail` in tracebloc.clientEnv. So
+        # both gates are asserted from outside the plugin, every rejection
+        # paired with an accept control on the same command line. ~2 s.
+        #
+        # The helper-backstop cases self-skip when helm predates
+        # --skip-schema-validation (3.16); the pin above is v3.15.4, so they are
+        # skipped here today and run for anyone local on 3.16+. Bumping the pin
+        # turns them on with no change to this file.
+        run: bash scripts/tests/chart-env-vocabulary.sh
+
   template:
     timeout-minutes: 10
     name: Template render
