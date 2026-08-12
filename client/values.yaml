@@ -434,8 +434,10 @@ images:
       dev: "dev"
       stg: "stg"
       # 0.8 line: carries the ds_<hex> per-ingestion write path (D16,
-      # data-ingestors#408, first released as v0.8.0 on 2026-07-30; line currently
-      # at v0.8.2, 2026-08-04). A prod edge left on 0.7 spawns a pre-D16 ingestor
+      # data-ingestors#408, first released as v0.8.0 on 2026-07-30; line at
+      # v0.8.4 as of 2026-08-12, but `prodDigest` below deliberately pins v0.8.2
+      # — see the ordering constraint noted there). A prod edge left on 0.7
+      # spawns a pre-D16 ingestor
       # and silently falls back to the legacy tables even with
       # `perIngestionTables` on (found on staging). Verified multi-arch against
       # ghcr.io 2026-08-04 (linux/amd64 + linux/arm64 OCI image index).
@@ -462,11 +464,25 @@ images:
     # unbumped refresh reaches nobody — and commit. CI's `ingestor-multiarch`
     # job validates this value on every PR.
     #
-    # ghcr.io/tracebloc/ingestor multi-arch index for the 0.8 line (v0.8.2), ==
-    # the `channelTags.prod` float above — VERIFIED against ghcr.io 2026-08-04
-    # (linux/amd64 + linux/arm64 OCI image index; matches the v0.8.2 GitHub
-    # Release digest). The `VERIFIED` note is the audit trail.
-    prodDigest: "sha256:02da1ebd8fac519a9e8158c1da799241d5c226ed75b821a75ffa04becda08f37"
+    # ghcr.io/tracebloc/ingestor multi-arch index for the 0.8 line, **v0.8.2** —
+    # VERIFIED against ghcr.io 2026-08-12 (linux/amd64 + linux/arm64 OCI image
+    # index; matches the v0.8.2 GitHub Release digest). The `VERIFIED` note is
+    # the audit trail: re-resolve it, do not trust a previous note's date.
+    #
+    # DELIBERATELY BEHIND the `channelTags.prod: "0.8"` float, which now resolves
+    # to v0.8.4 (sha256:02da1ebd…). Do not "refresh" this to the float without
+    # reading the ordering constraint in docs/SECURITY.md: prod's
+    # `serviceDbAccountsByEnv.prod` is still `false`, and the ceiling recorded
+    # there is 0.8.2. `prodPin: true` means this digest — not the float — is what
+    # prod spawns, which is exactly the protection being relied on.
+    #
+    # (Checked 2026-08-12: v0.8.4's config.py still defaults DB_USER to
+    # "edgeuser", so data-ingestors#468 — which removes that fallback, merged
+    # 2026-08-11, after v0.8.4 was cut on 08-10 — is NOT yet in any 0.8 release.
+    # The next 0.8 release is therefore the dangerous one, not v0.8.4. Recorded
+    # so the ceiling is respected for the right reason, and so whoever raises it
+    # re-derives this instead of inheriting a stale number.)
+    prodDigest: "sha256:05e124945a2ef61868661a9137abb5e75dac96a090cb41a7b4e8be520c4b5873"
 
     # -- Whether `prodDigest` applies on this edge. Default true, which means
     # "pin on prod only": it takes effect when the resolved CLIENT_ENV is "prod"

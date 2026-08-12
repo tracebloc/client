@@ -135,7 +135,7 @@ tests:
           path: spec.template.spec.containers[0].env
           content:
             name: INGESTOR_IMAGE_DIGEST
-            value: "sha256:02da1ebd8fac519a9e8158c1da799241d5c226ed75b821a75ffa04becda08f37"
+            value: "sha256:05e124945a2ef61868661a9137abb5e75dac96a090cb41a7b4e8be520c4b5873"
 
   - it: keeps the ingestor floating on dev (CLIENT_ENV=dev => no digest, :dev channel)
     # Since backend#1360 the dev float is the per-environment INTERNAL
@@ -180,7 +180,7 @@ tests:
           path: spec.template.spec.containers[0].env
           content:
             name: INGESTOR_IMAGE_DIGEST
-            value: "sha256:02da1ebd8fac519a9e8158c1da799241d5c226ed75b821a75ffa04becda08f37"
+            value: "sha256:05e124945a2ef61868661a9137abb5e75dac96a090cb41a7b4e8be520c4b5873"
 
   - it: prodPin=false floats a canary prod edge while the fleet stays pinned
     set:
