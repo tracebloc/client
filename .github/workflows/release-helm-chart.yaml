@@ -353,11 +353,9 @@ jobs:
           # release until the next step), so we assert only that it got past the
           # guard. `timeout` bounds the network fetch so this can't hang the job.
           out="$(timeout 120 bash scripts/install.sh </dev/null 2>&1 || true)"
-          if grep -q "wasn't stamped" <<<"$out"; then
+          if printf '%s\n' "$out" | grep -q "wasn't stamped"; then
             echo "::error::stamped installer rejected its own pinned tag '${TAG}' — the unstamped-guard was clobbered"
-            # here-strings, not pipes: `grep -q`/`head` close early and a
-            # SIGPIPE'd producer returns 141 under pipefail (backend#1778)
-            head -25 <<<"$out"
+            printf '%s\n' "$out" | head -25
             exit 1
           fi
           echo "stamped installer accepts its pinned tag '${TAG}' (cleared the guard)"
