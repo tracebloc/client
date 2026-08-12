@@ -79,7 +79,7 @@ _detect_location_zone() {
 # the error. Special-cases the commonest tripwire — an unrecognized carbon zone
 # (e.g. a city like "berlin" typed instead of a zone code).
 _report_create_failure() {
-  local out="$1" loc="$2" src="${3:-auto}" errline l
+  local out="$1" loc="$2" src="${3:-auto}" errmatches errline l
   echo ""
   if grep -qiE 'location.*not a valid choice' "$out" 2>/dev/null; then
     warn "\"${loc:-that location}\" isn't a recognized carbon zone — the client wasn't created."
