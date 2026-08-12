@@ -119,11 +119,17 @@ spec:
               # can accept a chmod and ignore it). ls -ldn is POSIX: field 1 mode, field 3 uid.
               # Mode char 9 is the other-write bit, which ????????w* tests without arithmetic;
               # a trailing setgid/sticky/ACL char is absorbed by the *.
+              # The pass condition is other-writability ALONE, because that is what decides
+              # whether the writers above can work. It deliberately does not assert setgid/sticky:
+              # a mount that grants other-write but drops S_ISGID is degraded (new entries stop
+              # inheriting GID 1000), not unusable, and failing it would cry wolf on a working
+              # install. So the label names the ONE thing verified and always prints want vs got,
+              # rather than saying a bare "OK" that could be read as "the whole mode landed".
               set -- $(ls -ldn "$d" 2>/dev/null)
               got=$1; owner=$3
               case "$got" in
                 ????????w*)
-                  echo "init-writable-data: OK $d want $want got $got uid $owner${failed:+ ($failed failed; mode applied anyway)}" ;;
+                  echo "init-writable-data: OK $d other-writable, want $want got $got uid $owner${failed:+ ($failed failed; other-writable regardless)}" ;;
                 *)
                   echo "init-writable-data: FAIL $d want $want got ${got:-unreadable} uid ${owner:-unknown}${failed:+ ($failed failed)}"
                   echo "init-writable-data: $d is not other-writable -- the ingestion Job (uid 65534, or HOST_UID) and the CLI staging/teardown pod (uid 65532) cannot write there. Pre-provisioned or root_squash mount? Continuing so the OTHER dir is still fixed and jobs-manager still starts." ;;

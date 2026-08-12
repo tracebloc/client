@@ -538,10 +538,18 @@ tests:
       - notMatchRegex:
           path: spec.template.spec.initContainers[0].command[2]
           pattern: 'stat -c'
-      # a partial result must be reported as such, not implied
+      # a partial result must be reported as such, not implied — and the note must not claim the
+      # chmod achieved the mode. A dir that was ALREADY other-writable when both calls failed is
+      # still OK, but nothing this container did made it so: an earlier draft said "mode applied
+      # anyway" there, which was false (verified by running that exact case: pre-set 1777, both
+      # calls refused -> "want 2777 got drwxrwxrwt ... mode applied anyway"). Claim only the
+      # observation: the dir is other-writable, whatever refused us.
       - matchRegex:
           path: spec.template.spec.initContainers[0].command[2]
-          pattern: '\$failed failed; mode applied anyway'
+          pattern: '\$failed failed; other-writable regardless'
+      - notMatchRegex:
+          path: spec.template.spec.initContainers[0].command[2]
+          pattern: 'mode applied anyway'
       # still non-fatal: jobs-manager must start even when a mount refuses everything
       - matchRegex:
           path: spec.template.spec.initContainers[0].command[2]
