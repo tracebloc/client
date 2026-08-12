@@ -59,7 +59,16 @@ _has_gui_session() {
 _macos_user_is_admin() {
   [ "$(id -u)" -eq 0 ] && return 0
   local groups="${TB_MACOS_ADMIN_GROUPS:-$(id -Gn 2>/dev/null)}"
-  printf '%s\n' $groups | grep -qx admin
+  # Capture-then-match, NOT `printf … | grep -qx` (#680's transform; its fleet
+  # sweep of this hazard did not reach setup-macos.sh). `grep -q` closes the pipe
+  # on its FIRST match and `admin` sits near the FRONT of a macOS group list, so
+  # printf can take SIGPIPE while still writing — and `set -o pipefail` then
+  # makes the pipeline 141, which the caller reads as "not an administrator" and
+  # answers with the managed-Mac remedy on a machine that is perfectly fine.
+  # Match position, not producer size, is the trigger; a directory-bound Mac with
+  # a long group list makes it a real race. This is the FIRST thing step b runs.
+  local _glist; _glist="$(printf '%s\n' $groups)"
+  grep -qx admin <<<"$_glist"
 }
 
 # Fail FAST on a no-admin Mac with a named, IT-facing remedy — the macOS analog of
@@ -211,8 +220,12 @@ install_docker_desktop() {
   fi
 
   # Detect real hardware — sysctl is immune to Rosetta translation
-  local real_arch
-  if sysctl -n hw.optional.arm64 2>/dev/null | grep -q '1'; then
+  # Capture-then-match (#680): inside an `if`, a SIGPIPE'd producer under
+  # pipefail reads as "no match" and takes the WRONG branch — here that would
+  # call an Apple Silicon Mac amd64 and fetch the Intel Docker Desktop DMG.
+  local real_arch _arm64_flag
+  _arm64_flag="$(sysctl -n hw.optional.arm64 2>/dev/null || true)"
+  if [[ "$_arm64_flag" == "1" ]]; then
     real_arch="arm64"
   else
     real_arch="amd64"
@@ -230,8 +243,11 @@ install_docker_desktop() {
     docker_bin_arch="$(file "$docker_bin_path" 2>/dev/null || true)"
     local docker_is_arm=false
     local docker_is_intel=false
-    echo "$docker_bin_arch" | grep -q 'arm64' && docker_is_arm=true
-    echo "$docker_bin_arch" | grep -q 'x86_64' && docker_is_intel=true
+    # `case`, not `echo … | grep -q && var=true` (#680): drops both pipes and the
+    # `A && B` form, whose non-zero status when the arch does NOT match is a
+    # set -e subtlety this file should not depend on.
+    case "$docker_bin_arch" in *arm64*)  docker_is_arm=true   ;; esac
+    case "$docker_bin_arch" in *x86_64*) docker_is_intel=true ;; esac
 
     local wrong_arch=false
     if [[ "$real_arch" == "arm64" ]] && [[ "$docker_is_intel" == true ]] && [[ "$docker_is_arm" != true ]]; then
@@ -547,12 +563,22 @@ assert_amd64_emulation() {
 }
 
 install_macos() {
+  # Breadcrumbs (client#681). Step b was the one step that could fail before ANY
+  # of its stages printed, leaving a log whose last line was the step header — so
+  # even the ERR trap's location had nothing to corroborate it. These cost one
+  # log line each and make the log say how far it got, trap or no trap.
+  log "step b: install_macos starting (OS=$OS ARCH=$ARCH tier=${INSTALL_TIER:-?})"
   _macos_require_admin        # #430: no-admin Macs get a named IT remedy, not a generic sudo error
+  log "step b: admin check passed"
   preflight_sudo
+  log "step b: sudo ready"
   install_homebrew
+  log "step b: homebrew ready"
   install_docker_desktop
+  log "step b: docker ready"
   assert_amd64_emulation      # Docker is up now — prove amd64 runs before the cluster needs it (#433)
   install_macos_cli_tools
+  log "step b: cli tools ready"
   # Best-effort: autostart returns 1 on a mkdir/write failure, and this runs under
   # `set -e` after Docker + tools are already installed — so `|| true` keeps a failed
   # login-item from aborting an otherwise-complete install (#430 Bugbot). The summary

@@ -30,6 +30,11 @@ setup() {
   # A clean slate: no force flag, and INSTALL_STATE unset so a test can't pass on
   # a value left by an earlier one.
   unset TB_FORCE_REINSTALL TRACEBLOC_FORCE_REINSTALL INSTALL_STATE INSTALL_STATE_REASON
+  # Leaf probe added in client#682, forced here for the same reason as the other
+  # leaf probes: the classify tests below exercise cluster/release/workload
+  # decision logic and must not depend on whether a real docker answers on the
+  # machine running bats. The runtime-down tests override it explicitly.
+  _assess_runtime_down() { return 1; }
 }
 
 # fail-loud assertions (see the blindspot note above)
@@ -165,7 +170,117 @@ _depname() {
   [ "$status" -ne 0 ] || return 1
 }
 
+# ── _assess_runtime_down (client#682) ───────────────────────────────────────
+# setup() forces this leaf probe so the classify tests stay about classification.
+# The tests in THIS block are about the probe itself, so they restore the real
+# implementation first. Re-sourcing assess.sh is safe: the mocks these tests use
+# (has / _bounded / docker) all live in common.sh, which is not re-sourced.
+_use_real_runtime_probe() {
+  unset -f _assess_runtime_down
+  # shellcheck source=/dev/null
+  source "${LIB_DIR}/assess.sh"
+}
+
+# The gate must separate "Docker isn't installed" (a genuinely fresh machine)
+# from "Docker is installed but not answering" (one sentence fixes it). Before
+# this both collapsed into _cluster_exists returning 1 -> fresh/no-cluster, so a
+# laptop that had only to start Docker was told it had nothing installed.
+@test "_assess_runtime_down: no docker binary -> NOT down (genuinely fresh)" {
+  _use_real_runtime_probe
+  has() { [ "$1" != docker ]; }
+  run _assess_runtime_down
+  [ "$status" -ne 0 ] || return 1
+}
+
+@test "_assess_runtime_down: docker answers -> NOT down" {
+  _use_real_runtime_probe
+  has() { return 0; }
+  _bounded() { shift; "$@"; }
+  docker() { return 0; }
+  run _assess_runtime_down
+  [ "$status" -ne 0 ] || return 1
+}
+
+@test "_assess_runtime_down: daemon unreachable (Linux socket) -> down" {
+  _use_real_runtime_probe
+  has() { return 0; }
+  _bounded() { shift; "$@"; }
+  docker() { echo "Cannot connect to the Docker daemon at unix:///var/run/docker.sock. Is the docker daemon running?" >&2; return 1; }
+  run _assess_runtime_down
+  [ "$status" -eq 0 ] || return 1
+}
+
+# The exact shape a stopped Docker Desktop produces on macOS.
+@test "_assess_runtime_down: Docker Desktop stopped (macOS socket path) -> down" {
+  _use_real_runtime_probe
+  has() { return 0; }
+  _bounded() { shift; "$@"; }
+  docker() { echo "dial unix /Users/u/.docker/run/docker.sock: connect: no such file or directory" >&2; return 1; }
+  run _assess_runtime_down
+  [ "$status" -eq 0 ] || return 1
+}
+
+# A Linux user outside the docker group is a DIFFERENT problem with a different
+# remedy — it must not be answered with "start Docker".
+#
+# The fixture is the REAL, FULL message, which contains a `dial unix …` clause as
+# well as the permission wording (Bugbot: a shortened fixture passed vacuously
+# against a version that matched the connection phrases first). Mutation-real —
+# reorder the two greps in _assess_runtime_down and this fails.
+@test "_assess_runtime_down: permission denied -> NOT down (different remedy)" {
+  _use_real_runtime_probe
+  has() { return 0; }
+  _bounded() { shift; "$@"; }
+  docker() { echo 'permission denied while trying to connect to the Docker daemon socket at unix:///var/run/docker.sock: Get "http://%2Fvar%2Frun%2Fdocker.sock/v1.47/info": dial unix /var/run/docker.sock: connect: permission denied' >&2; return 1; }
+  run _assess_runtime_down
+  [ "$status" -ne 0 ] || return 1
+}
+
+# The Docker Desktop / rootless variant of the same collision: "Got permission
+# denied" plus a socket path. Also must NOT read as a down daemon.
+@test "_assess_runtime_down: 'Got permission denied' variant -> NOT down" {
+  _use_real_runtime_probe
+  has() { return 0; }
+  _bounded() { shift; "$@"; }
+  docker() { echo 'Got permission denied while trying to connect to the Docker daemon socket at unix:///var/run/docker.sock: dial unix /var/run/docker.sock: connect: permission denied' >&2; return 1; }
+  run _assess_runtime_down
+  [ "$status" -ne 0 ] || return 1
+}
+
+# A daemon that will not answer inside the bound is not usable either.
+@test "_assess_runtime_down: probe times out (124) -> down (wedged daemon)" {
+  _use_real_runtime_probe
+  has() { return 0; }
+  _bounded() { return 124; }
+  run _assess_runtime_down
+  [ "$status" -eq 0 ] || return 1
+}
+
 # ── _assess_classify (decision logic; leaf probes forced) ───────────────────
+# A down runtime makes every signal below it unknowable, so it is classified
+# FIRST and the cluster probe must never run. The machine is DEGRADED, never
+# fresh — "fresh" is the claim that caused client#682.
+@test "_assess_classify: runtime down -> degraded (runtime-down), never fresh" {
+  has() { return 0; }
+  _assess_runtime_down() { return 0; }
+  _cluster_exists() { touch "$BATS_TEST_TMPDIR/cluster-probed"; return 1; }
+  _assess_classify
+  [ "$INSTALL_STATE" = degraded ] || return 1
+  [ "$INSTALL_STATE_REASON" = runtime-down ] || return 1
+  [ ! -f "$BATS_TEST_TMPDIR/cluster-probed" ] || return 1
+}
+
+# The regression guard for client#682: a machine with an environment it cannot
+# see must never be told it has nothing. Mutation-real — reverting the classify
+# order makes this fail.
+@test "_assess_classify: runtime down is NOT reported as a first-time machine" {
+  has() { return 0; }
+  _assess_runtime_down() { return 0; }
+  _cluster_exists() { return 1; }        # exactly what a down daemon looks like
+  _assess_classify
+  [ "$INSTALL_STATE_REASON" != no-cluster ] || return 1
+}
+
 @test "_assess_classify: no k3d / no cluster -> fresh (no-cluster)" {
   has() { return 1; }                          # no k3d
   _cluster_exists() { return 1; }
@@ -347,6 +462,26 @@ _depname() {
   run assess_existing_install
   [ "$status" -eq 0 ] || return 1
   assert_has "HANDED_OFF" "$output"
+}
+
+# client#682: a down runtime is named honestly and the run CONTINUES — the normal
+# flow starts Docker and reconciles. What it must never do is announce a
+# first-time setup over a machine whose environment it simply could not see.
+@test "assess_existing_install: runtime down -> honest line, continues, no first-time claim" {
+  _assess_classify() { INSTALL_STATE=degraded; INSTALL_STATE_REASON=runtime-down; }
+  run assess_existing_install
+  [ "$status" -eq 0 ] || return 1
+  assert_has "Docker isn't running" "$output"
+  refute_has "for the first time" "$output"
+}
+
+# …and it must not short-circuit to the healthy hand-off either.
+@test "assess_existing_install: runtime down does not hand off to the home screen" {
+  _assess_classify() { INSTALL_STATE=degraded; INSTALL_STATE_REASON=runtime-down; }
+  tracebloc() { echo "HOME_SCREEN"; }
+  run assess_existing_install
+  [ "$status" -eq 0 ] || return 1
+  refute_has "HOME_SCREEN" "$output"
 }
 
 @test "assess_existing_install: --force / TB_FORCE_REINSTALL bypasses the gate (no classify, no hand-off)" {
