@@ -292,6 +292,37 @@ setup() {
   [[ "$output" == *"HOST Docker daemon"* ]] || return 1
 }
 
+# ── _cluster_exists under pipefail (client#682 / #680 hazard) ───────────────
+# The consumers here stop at the FIRST matching line, and our own cluster is
+# usually that line — so a piped k3d took SIGPIPE, pipefail made the pipeline
+# 141, and inside the `if`s that read as "no such cluster". The stop-and-check
+# gate then called a machine with a live cluster FRESH and offered a first-time
+# install: a second, independent route to client#682.
+#
+# Mutation-real, but only against the WHOLE pre-fix function: reverting probe 2
+# alone still passes, because probe 3's grep fallback then finds the cluster
+# anyway. Verify this test by restoring all three probes to their piped form.
+@test "_cluster_exists: long k3d listing with our cluster FIRST is still found (#680 hazard)" {
+  set -o pipefail
+  # Match on line 1, then far more than the 64KB pipe buffer behind it, so the
+  # consumer closes the pipe while k3d is still writing. Position is the trigger.
+  k3d() {
+    printf '%s 1/1 0/0\n' "$CLUSTER_NAME"
+    printf 'other-%s 1/1 0/0\n' $(seq 1 8000)
+  }
+  command() { [ "$1" = "-v" ] && [ "$2" = "jq" ] && return 1; builtin command "$@"; }
+  run _cluster_exists
+  [ "$status" -eq 0 ] || return 1
+}
+
+@test "_cluster_exists: a genuinely absent cluster is still absent" {
+  set -o pipefail
+  k3d() { printf 'somethingelse 1/1 0/0\n'; }
+  command() { [ "$1" = "-v" ] && [ "$2" = "jq" ] && return 1; builtin command "$@"; }
+  run _cluster_exists
+  [ "$status" -ne 0 ] || return 1
+}
+
 # ── _check_existing_cluster_dataset_mount (backend#743) ─────────────────────
 @test "_check_existing_cluster_dataset_mount: HOST_DATASET_DIR unset -> no-op" {
   unset HOST_DATASET_DIR

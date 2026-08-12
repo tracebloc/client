@@ -24,6 +24,9 @@
 #    healthy  — all four signals above true. The ONLY short-circuit.
 #    degraded — a partial state (cluster stopped, workload not Ready, CLI
 #               missing, or any other partial state).
+#               A down container runtime is degraded/runtime-down: nothing below
+#               it can be determined, so the machine must NOT be called fresh
+#               (client#682).
 # =============================================================================
 
 # --force / --reinstall (or TRACEBLOC_FORCE_REINSTALL=1) bypasses the gate and
@@ -34,6 +37,10 @@
 # Bound on the readiness probe's API call — short so a stopped/unreachable API
 # can never make the gate hang. Overridable for tests.
 : "${TB_ASSESS_KUBECTL_TIMEOUT:=5s}"
+
+# Bound on the container-runtime reachability probe (seconds). `docker info`
+# against a WEDGED daemon hangs forever, and this runs on every re-run.
+: "${TB_ASSESS_DOCKER_TIMEOUT:=10}"
 
 # Where the healthy-machine hand-off points the interactive home screen (see
 # _assess_handoff). Mirrors provision.sh's TB_TTY so tests can redirect it to a
@@ -84,6 +91,46 @@ _assess_workload_ready() {
   return 0
 }
 
+# _assess_runtime_down — is the container runtime installed but UNREACHABLE right
+# now? (client#682) True only for the case with a one-sentence remedy: Docker is
+# there, the daemon is not answering. Deliberately narrow —
+#   • no docker binary at all  -> NOT down. That is a genuinely fresh machine and
+#     the normal first-time flow is the right answer.
+#   • docker answers           -> NOT down.
+#   • docker present, refuses  -> down ONLY when the refusal is a connection
+#     failure. "permission denied" (a Linux user outside the docker group) is a
+#     different problem with a different fix, and belongs to the normal flow.
+#   • docker present, wedged   -> down. A daemon that will not answer inside the
+#     bound is not usable, and "start Docker" is still the right first move.
+# Read-only and bounded, per the gate's never-hang contract.
+_assess_runtime_down() {
+  has docker || return 1
+  local _out _rc=0
+  # stderr only: the reason lives there, and dropping stdout keeps a healthy
+  # `docker info` (hundreds of lines) out of memory. The assignment is the left
+  # side of `&&`, so a non-zero docker cannot trip `set -e` here.
+  _out="$(_bounded "$TB_ASSESS_DOCKER_TIMEOUT" docker info 2>&1 >/dev/null)" && return 1
+  _rc=$?
+  # 124 = the bound fired (timeout/gtimeout): a wedged daemon, treated as down.
+  [[ "$_rc" -eq 124 ]] && return 0
+  # Permission denied is checked FIRST and wins (Bugbot). The real Linux message
+  # carries BOTH the permission wording AND a `dial unix …` clause:
+  #   permission denied while trying to connect to the Docker daemon socket at
+  #   unix:///var/run/docker.sock: Get "http://…/info": dial unix
+  #   /var/run/docker.sock: connect: permission denied
+  # so matching the connection phrases alone would classify a docker-group
+  # problem as a down daemon — the exact confusion this function exists to
+  # prevent. A negative match before the positive one is the only ordering that
+  # survives an error string containing both.
+  if grep -qiE 'permission denied' <<<"$_out"; then
+    return 1
+  fi
+  # Herestring, not a pipe: `grep -q` exits on first match and a pipe's writer
+  # would then take SIGPIPE, which `set -o pipefail` turns into a 141 the caller
+  # never asked for (the same hazard _assess_cluster_servers_running guards).
+  grep -qiE 'cannot connect to the docker daemon|is the docker daemon running|docker daemon is not running|dial unix|the system cannot find the file specified|open //./pipe/docker_engine' <<<"$_out"
+}
+
 # _assess_cli_present — is the tracebloc CLI available? Counts a binary in
 # ~/.local/bin (where the CLI installer drops it when /usr/local/bin isn't
 # writable) even if THIS shell's PATH predates that dir — the same place
@@ -112,6 +159,24 @@ _assess_release_pending() {
 _assess_classify() {
   INSTALL_STATE="fresh"
   INSTALL_STATE_REASON="no-cluster"
+
+  # Is the container runtime even reachable? This MUST come before the cluster
+  # probe (client#682). `_cluster_exists` is a boolean whose three probes all
+  # swallow stderr and return 1, so a down daemon is indistinguishable from an
+  # empty machine — and a laptop that merely needs Docker started was told it had
+  # nothing installed and offered a full first-time install. install-k8s.ps1 has
+  # carried the tri-state version of this contract since #557; bash never did.
+  # DEGRADED, not blocked: the normal flow already knows how to start a stopped
+  # runtime (install_docker_desktop launches Docker Desktop and waits;
+  # install_docker_engine brings up the Linux service), and create_cluster then
+  # reconciles the existing cluster. Stopping here would trade one bad outcome
+  # for another — it would take away a step that works today. The bug is the
+  # CLAIM, not the flow: "first time on this machine" over a machine whose
+  # environment we simply could not see.
+  if _assess_runtime_down; then
+    INSTALL_STATE="degraded"; INSTALL_STATE_REASON="runtime-down"
+    return 0
+  fi
 
   # No engine or no cluster => first-time setup. (has k3d short-circuits before
   # _cluster_exists so a machine without k3d doesn't shell out at all.)
@@ -240,6 +305,7 @@ assess_existing_install() {
     degraded)
       echo ""
       case "$INSTALL_STATE_REASON" in
+        runtime-down)       info "Docker isn't running yet — starting it, then checking your environment." ;;
         cluster-stopped)    info "Your secure environment is stopped — starting it and finishing setup." ;;
         workload-not-ready) info "Your secure environment is still starting up — finishing setup." ;;
         cli-missing)        info "The tracebloc CLI isn't installed yet — setting it up." ;;
