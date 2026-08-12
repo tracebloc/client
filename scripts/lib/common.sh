@@ -259,7 +259,11 @@ assert_tool_runs() {
   local name="$1"; shift
   local out
   if out="$("$name" "$@" 2>&1)"; then
-    log "$name OK: $(printf '%s\n' "$out" | head -1)"
+    # First line via pure-bash slicing, not `printf … | head -1` (backend#1778).
+    # This one sits in ARGUMENT position, where a 141 does NOT trip errexit, so it
+    # was never an abort — but the pipeline bought nothing and the shape is the
+    # one being retired fleet-wide.
+    log "$name OK: ${out%%$'\n'*}"
     return 0
   fi
   # Remove only the file we placed AND only if it's the binary that just failed.
