@@ -466,7 +466,7 @@ images:
     # the `channelTags.prod` float above — VERIFIED against ghcr.io 2026-08-04
     # (linux/amd64 + linux/arm64 OCI image index; matches the v0.8.2 GitHub
     # Release digest). The `VERIFIED` note is the audit trail.
-    prodDigest: "sha256:05e124945a2ef61868661a9137abb5e75dac96a090cb41a7b4e8be520c4b5873"
+    prodDigest: "sha256:02da1ebd8fac519a9e8158c1da799241d5c226ed75b821a75ffa04becda08f37"
 
     # -- Whether `prodDigest` applies on this edge. Default true, which means
     # "pin on prod only": it takes effect when the resolved CLIENT_ENV is "prod"
