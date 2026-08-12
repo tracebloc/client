@@ -97,9 +97,13 @@ echo "== env.CLIENT_ENV: everything else is refused at install time =="
 # capitalisation, and an alias that is one letter off `development`. Each used
 # to render `tracebloc/*:<the raw value>`, miss channelTags AND
 # serviceDbAccountsByEnv, and drop the prod digest pin.
-for bad in prd qa Prod PROD produktion develop stage test ""$'\t'; do
-  [[ -n "${bad// /}" ]] || continue
-  expect_reject "CLIENT_ENV=$bad" "$SCHEMA_ERR" --set env.CLIENT_ENV="$bad"
+BAD_ENVS=(prd qa Prod PROD produktion develop stage test)
+# Whitespace-only is its own case: it is NOT the empty string (which is legal and
+# means "unset"), and a hand-edited values.yaml is where it comes from. Kept out
+# of the array above so the tab survives being read back as a word.
+BAD_ENVS+=($'\t')
+for bad in "${BAD_ENVS[@]}"; do
+  expect_reject "CLIENT_ENV=${bad//$'\t'/<tab>}" "$SCHEMA_ERR" --set env.CLIENT_ENV="$bad"
 done
 
 echo "== the template fail is a real backstop, not decoration =="
