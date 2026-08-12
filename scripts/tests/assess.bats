@@ -222,11 +222,27 @@ _use_real_runtime_probe() {
 
 # A Linux user outside the docker group is a DIFFERENT problem with a different
 # remedy — it must not be answered with "start Docker".
+#
+# The fixture is the REAL, FULL message, which contains a `dial unix …` clause as
+# well as the permission wording (Bugbot: a shortened fixture passed vacuously
+# against a version that matched the connection phrases first). Mutation-real —
+# reorder the two greps in _assess_runtime_down and this fails.
 @test "_assess_runtime_down: permission denied -> NOT down (different remedy)" {
   _use_real_runtime_probe
   has() { return 0; }
   _bounded() { shift; "$@"; }
-  docker() { echo "permission denied while trying to connect to the Docker daemon socket" >&2; return 1; }
+  docker() { echo 'permission denied while trying to connect to the Docker daemon socket at unix:///var/run/docker.sock: Get "http://%2Fvar%2Frun%2Fdocker.sock/v1.47/info": dial unix /var/run/docker.sock: connect: permission denied' >&2; return 1; }
+  run _assess_runtime_down
+  [ "$status" -ne 0 ] || return 1
+}
+
+# The Docker Desktop / rootless variant of the same collision: "Got permission
+# denied" plus a socket path. Also must NOT read as a down daemon.
+@test "_assess_runtime_down: 'Got permission denied' variant -> NOT down" {
+  _use_real_runtime_probe
+  has() { return 0; }
+  _bounded() { shift; "$@"; }
+  docker() { echo 'Got permission denied while trying to connect to the Docker daemon socket at unix:///var/run/docker.sock: dial unix /var/run/docker.sock: connect: permission denied' >&2; return 1; }
   run _assess_runtime_down
   [ "$status" -ne 0 ] || return 1
 }

@@ -113,6 +113,18 @@ _assess_runtime_down() {
   _rc=$?
   # 124 = the bound fired (timeout/gtimeout): a wedged daemon, treated as down.
   [[ "$_rc" -eq 124 ]] && return 0
+  # Permission denied is checked FIRST and wins (Bugbot). The real Linux message
+  # carries BOTH the permission wording AND a `dial unix …` clause:
+  #   permission denied while trying to connect to the Docker daemon socket at
+  #   unix:///var/run/docker.sock: Get "http://…/info": dial unix
+  #   /var/run/docker.sock: connect: permission denied
+  # so matching the connection phrases alone would classify a docker-group
+  # problem as a down daemon — the exact confusion this function exists to
+  # prevent. A negative match before the positive one is the only ordering that
+  # survives an error string containing both.
+  if grep -qiE 'permission denied' <<<"$_out"; then
+    return 1
+  fi
   # Herestring, not a pipe: `grep -q` exits on first match and a pipe's writer
   # would then take SIGPIPE, which `set -o pipefail` turns into a 141 the caller
   # never asked for (the same hazard _assess_cluster_servers_running guards).
