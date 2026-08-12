@@ -292,7 +292,10 @@ _sanitize_workspace_name() {
 # Resolve the backend base URL the same way jobs-manager does
 # (client-runtime/controller.py: CLIENT_ENV → backend), defaulting to prod.
 _backend_url() {
-  case "${CLIENT_ENV:-prod}" in
+  # Reduce aliases FIRST (backend#1745): a raw `staging` fell through to the
+  # prod branch, so verify_credentials() checked staging credentials against
+  # the production backend and reported them invalid.
+  case "$(tb_client_env "${CLIENT_ENV:-prod}")" in
     dev) printf 'https://dev-api.tracebloc.io/' ;;
     stg) printf 'https://stg-api.tracebloc.io/' ;;
     *)   printf 'https://api.tracebloc.io/' ;;
@@ -443,7 +446,15 @@ _resolve_chart_ref() {
     info "Dev mode: using local chart at $chart_ref"
     log "Using local chart: $chart_ref"
   else
-    if ! helm repo list 2>/dev/null | grep -q "^${TRACEBLOC_HELM_REPO_NAME}[[:space:]]"; then
+    # Capture-then-match (backend#1778): `helm repo list | grep -q` lets grep
+    # close the pipe on its first hit, helm takes SIGPIPE and pipefail makes it
+    # 141 — which the `if !` reads as "repo absent" and re-runs `helm repo add`
+    # on the next line. That line is unguarded, and `helm repo add` fails when
+    # the name already exists with a different URL, so the misbranch escalates
+    # into an aborted install under `set -e`.
+    local _helm_repos
+    _helm_repos="$(helm repo list 2>/dev/null || true)"
+    if ! grep -q "^${TRACEBLOC_HELM_REPO_NAME}[[:space:]]" <<<"$_helm_repos"; then
       log "Adding Helm repo: $TRACEBLOC_HELM_REPO_URL"
       helm repo add "$TRACEBLOC_HELM_REPO_NAME" "$TRACEBLOC_HELM_REPO_URL" >> "${LOG_FILE:-/dev/null}" 2>&1
     fi
@@ -587,8 +598,18 @@ _reconcile_adopted_client() {
   # install-time config). Prefer --reset-then-reuse-values (Helm >= 3.14: reset to
   # chart defaults, then re-apply the stored user values, picking up new chart
   # defaults); fall back to --reuse-values on older Helm.
-  local _reuse="--reuse-values"
-  helm upgrade --help 2>/dev/null | grep -q -- '--reset-then-reuse-values' && _reuse="--reset-then-reuse-values"
+  local _reuse="--reuse-values" _upgrade_help
+  # Capture-then-match (backend#1778): `helm upgrade --help | grep -q` lets grep
+  # close the pipe on its first hit, helm takes SIGPIPE and pipefail makes the
+  # pipeline 141 — the `&&` then reads that as "flag unsupported" and the
+  # reconcile silently keeps --reuse-values, so new chart defaults are never
+  # picked up. helm's help is several KB written in chunks, and the flag sorts
+  # early in the list, so this is the losing shape. `case` also drops the
+  # `A && B` set -e subtlety this line used to carry.
+  _upgrade_help="$(helm upgrade --help 2>/dev/null || true)"
+  case "$_upgrade_help" in
+    *'--reset-then-reuse-values'*) _reuse="--reset-then-reuse-values" ;;
+  esac
 
   # Heal the stored clientId to the adopted UUID when provision_client handed one
   # over (export TRACEBLOC_CLIENT_ID on the adopt path): a cli#125-era install stored
@@ -828,12 +849,20 @@ _resolve_mysql_engine() {
       error "TB_MYSQL_ENGINE must be 'auto', '5.7' or '8.4' (got '${requested}')" ;;
   esac
   # Sticky: an edge that opted into 8.4 stays there on every later re-run.
-  if [[ -f "${values_file:-}" ]] \
-    && grep -A 3 'mysqlClient:' "${values_file}" 2>/dev/null | grep -q 'tag: "8.4"'; then
-    TB_MYSQL_ENGINE_RESOLVED="8.4"
-    log "MySQL engine: 8.4 (kept from this machine's existing values.yaml)"
-    return 0
+  # Capture-then-match (backend#1778): `grep -A 3 … | grep -q` lets the second
+  # grep close the pipe on its first hit, SIGPIPE'ing the first, and pipefail
+  # turns that into 141 — which the `if` reads as "not 8.4". A machine that opted
+  # into 8.4 would then resolve to 5.7 and point MySQL 5.7 at an 8.4 datadir.
+  local _mysql_block=""
+  if [[ -f "${values_file:-}" ]]; then
+    _mysql_block="$(grep -A 3 'mysqlClient:' "${values_file}" 2>/dev/null || true)"
   fi
+  case "$_mysql_block" in
+    *'tag: "8.4"'*)
+      TB_MYSQL_ENGINE_RESOLVED="8.4"
+      log "MySQL engine: 8.4 (kept from this machine's existing values.yaml)"
+      return 0 ;;
+  esac
   # Never auto-flip existing state: a found release or real datadir content
   # means a 5.7-format datadir may exist, and 8.4 refuses to open it. The
   # empty dirs _ensure_tracebloc_dirs just created don't count — only files —
@@ -1162,7 +1191,7 @@ install_client_helm() {
 # ============================================================
 
 env:
-$([ -n "${CLIENT_ENV:-}" ] && printf '  CLIENT_ENV: "%s"\n' "$CLIENT_ENV")${proxy_env_yaml}
+$([ -n "${CLIENT_ENV:-}" ] && printf '  CLIENT_ENV: "%s"\n' "$(tb_client_env "$CLIENT_ENV")")${proxy_env_yaml}
   # Training size: how much CPU/RAM each training run gets. One knob sets
   # requests == limits (Guaranteed QoS; client-runtime keeps them in lockstep).
   # Sized to this machine at install — largest node minus ~1 CPU / 3 GiB

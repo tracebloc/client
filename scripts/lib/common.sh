@@ -17,6 +17,31 @@ umask 077
 # into one argv element that curl rejects.
 readonly CURL_SECURE="--tlsv1.2"
 
+# tb_client_env — CLIENT_ENV reduced to the canonical dev|stg|prod.
+#
+# The chart, client-runtime and this installer all key on dev|stg|prod, while
+# values.schema.json documents development|staging|production as accepted
+# aliases. Every consumer must reduce through here rather than matching the raw
+# value, for the reason backend#1723 and backend#1745 both record: a `case`
+# that knows only dev|stg with a `*)` catch-all sends a documented alias to the
+# PROD branch silently.
+#
+# That is not hypothetical here. `_backend_url` feeds verify_credentials(),
+# so a `CLIENT_ENV=staging` install validated the customer's STAGING client
+# credentials against the PRODUCTION backend and told them their correct
+# credentials were wrong.
+#
+# Unknown values pass through unchanged: this normalises spellings, it does not
+# validate. Each caller keeps its own fallback for genuinely unrecognised input.
+tb_client_env() {
+  case "${1-${CLIENT_ENV:-}}" in
+    development) printf 'dev'  ;;
+    staging)     printf 'stg'  ;;
+    production)  printf 'prod' ;;
+    *)           printf '%s' "${1-${CLIENT_ENV:-}}" ;;
+  esac
+}
+
 # curl_secure — the one way this installer fetches anything.
 #
 # The TLS floor used to be opt-in: every call site had to remember to splice
@@ -234,7 +259,11 @@ assert_tool_runs() {
   local name="$1"; shift
   local out
   if out="$("$name" "$@" 2>&1)"; then
-    log "$name OK: $(printf '%s\n' "$out" | head -1)"
+    # First line via pure-bash slicing, not `printf … | head -1` (backend#1778).
+    # This one sits in ARGUMENT position, where a 141 does NOT trip errexit, so it
+    # was never an abort — but the pipeline bought nothing and the shape is the
+    # one being retired fleet-wide.
+    log "$name OK: ${out%%$'\n'*}"
     return 0
   fi
   # Remove only the file we placed AND only if it's the binary that just failed.
@@ -819,8 +848,13 @@ validate_config() {
 OS="$(uname -s)"
 ARCH="$(uname -m)"
 # On macOS, override ARCH with real hardware to avoid Rosetta misdetection
-if [[ "$OS" == "Darwin" ]] && sysctl -n hw.optional.arm64 2>/dev/null | grep -q '1'; then
-  ARCH="arm64"
+# Capture-then-match (#680): a SIGPIPE'd producer under pipefail reads as "no
+# match" here, which would leave an Apple Silicon Mac detected as x86_64 and pick
+# the wrong download for every pinned tool.
+if [[ "$OS" == "Darwin" ]]; then
+  _tb_arm64_flag="$(sysctl -n hw.optional.arm64 2>/dev/null || true)"
+  [[ "$_tb_arm64_flag" == "1" ]] && ARCH="arm64"
+  unset _tb_arm64_flag
 fi
 [[ "$ARCH" == "x86_64" ]] && ARCH_DL="amd64" || ARCH_DL="arm64"
 
@@ -830,6 +864,51 @@ K3D_GPU_FLAGS=()           # extra flags appended to k3d cluster create
 PM_INSTALL=""
 PM_UPDATE=""
 
+# ── Failure diagnostics (client#681) ─────────────────────────────────────────
+#  Under `set -euo pipefail` a command that fails outside an if/&&/|| context
+#  kills the installer with NO output at all: the user got a generic "did not
+#  complete", and the install log — which is the WHOLE session tee'd — recorded
+#  nothing about why. A single ERR trap records where it died so both the log
+#  and the closer can name it. This is the bash counterpart of install-k8s.ps1's
+#  Show-FatalError (#577).
+#
+#  install-k8s.sh arms this with `set -E` (errtrace) so the trap is inherited by
+#  functions and subshells — without it an ERR trap fires only at top level, and
+#  every failure inside install_macos/install_linux (i.e. nearly all of them)
+#  would still be invisible.
+TB_ERR_LOC=""    # "file:line" of the first failing command
+TB_ERR_CMD=""    # the command text, UNEXPANDED — BASH_COMMAND yields `cmd "$VAR"`,
+                 # never the value, so this cannot leak a credential into the log
+TB_ERR_CODE=""   # its exit status (137/141/… included: a signal death is a failure)
+
+# _record_err LOCATION COMMAND — ERR-trap body. Everything it needs about the
+# failure is passed IN, because none of it survives being read from in here:
+#   • `$?` must still be the FAILING command's status, so the trap calls this as
+#     its very first command (parameter expansions cannot disturb `$?`);
+#   • BASH_SOURCE/LINENO inside this function describe common.sh, not the site
+#     that failed;
+#   • BASH_COMMAND tracks the CURRENTLY executing command, so by the time this
+#     function runs its own first test it already reads as that test, not as the
+#     command that failed.
+# Always returns 0 — a recorder that failed would re-enter the trap.
+_record_err() {
+  local _code=$?
+  # First failure wins. `set -e` unwinds through callers and errtrace re-fires the
+  # trap on the way out, which would otherwise overwrite the real cause with the
+  # enclosing function call.
+  #
+  # Every test here MUST sit inside an `if` block. `set -E` makes this function
+  # inherit the ERR trap too, and a bare `[[ -n "$TB_ERR_CODE" ]] && return 0`
+  # FAILS on the very first call (the variable is empty) — which re-enters this
+  # function and records the guard itself as the failing command. A condition
+  # inside `if` never triggers the trap.
+  if [[ -n "$TB_ERR_CODE" ]]; then return 0; fi
+  TB_ERR_CODE="$_code"
+  TB_ERR_LOC="${1:-?}"
+  TB_ERR_CMD="${2:-}"
+  return 0
+}
+
 # ── Cleanup on exit ──────────────────────────────────────────────────────────
 install_cleanup() {
   local exit_code=$?
@@ -838,6 +917,13 @@ install_cleanup() {
   # _PROVISION_CRED_FILE before minting and removes it after sourcing — this is the
   # backstop for an error/signal between mint and that cleanup.
   [[ -n "${_PROVISION_CRED_FILE:-}" ]] && rm -f "$_PROVISION_CRED_FILE" 2>/dev/null || true
+  # Record WHERE it died, always and first (client#681). The log is the artifact
+  # users send to support, and until now a `set -e` death left it with no trace of
+  # the failure at all. Logged even on the exit-2 / interrupted paths, so a
+  # re-run-required stop that was actually caused by an error is still traceable.
+  if [[ -n "${TB_ERR_CODE:-}" ]]; then
+    log "FAILED at ${TB_ERR_LOC} — exit ${TB_ERR_CODE} — command: ${TB_ERR_CMD}"
+  fi
   if [[ $exit_code -eq 2 ]]; then
     echo ""
     if [[ -n "${TRACEBLOC_DOCKER_FIRST_RUN_EXIT:-}" ]]; then
@@ -846,14 +932,31 @@ install_cleanup() {
       hint "Re-run required. Complete the step above, then run the script again."
     fi
     [[ -n "${LOG_FILE:-}" ]] && hint "Logs: $LOG_FILE"
+  elif [[ $exit_code -eq 130 || $exit_code -eq 143 ]]; then
+    # Interrupted, not broken (client#681). install-k8s.sh routes SIGINT/SIGTERM
+    # through `exit 130`/`exit 143` so this trap still shreds the transient
+    # credential — but funnelling those into "did not complete" told users their
+    # own Ctrl-C was an installer failure, and made an interrupted run
+    # indistinguishable from a real one in the log. Mirrors Show-Interrupted (#577).
+    echo ""
+    warn "Installation was interrupted before it finished."
+    [[ -n "${LOG_FILE:-}" ]] && hint "Log: $LOG_FILE"
+    hint "Nothing is broken — this installer is safe to re-run."
   elif [[ $exit_code -ne 0 ]]; then
     # If print_summary already reported a specific outcome (CLIENT_STATE set),
     # don't tack on a second, generic "did not complete" message.
     if [[ -z "${CLIENT_STATE:-}" ]]; then
       echo ""
       warn "Installation did not complete."
+      # Name the failing site on screen too. The command text stays in the log
+      # only: it is unexpanded, but it is still installer internals, and the
+      # PowerShell side deliberately shows a reason without a stack trace (#577).
+      if [[ -n "${TB_ERR_CODE:-}" ]]; then
+        hint "Stopped at ${TB_ERR_LOC} (exit ${TB_ERR_CODE})."
+      fi
       [[ -n "${LOG_FILE:-}" ]] && hint "Check the install log: $LOG_FILE"
       hint "This installer is safe to re-run — just try again."
+      hint "If it keeps failing, re-run with --diagnose and send the bundle to tracebloc support."
     fi
   fi
 }

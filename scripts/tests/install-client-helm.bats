@@ -40,6 +40,40 @@ setup() {
   [ "$output" = "https://stg-api.tracebloc.io/" ] || return 1
 }
 
+# THE ALIASES. values.schema.json documents development|staging|production as
+# accepted, and the old case knew only dev|stg — so `staging` fell to the `*)`
+# branch and verify_credentials() checked STAGING credentials against the
+# PRODUCTION backend, telling the customer their correct credentials were wrong
+# (backend#1745). The suite covered dev, stg, unset and "whatever"; it never
+# covered the spellings the docs tell people to use.
+@test "_backend_url: staging alias -> stg backend, NOT prod" {
+  CLIENT_ENV=staging
+  run _backend_url
+  [ "$output" = "https://stg-api.tracebloc.io/" ] || return 1
+}
+
+@test "_backend_url: development alias -> dev backend" {
+  CLIENT_ENV=development
+  run _backend_url
+  [ "$output" = "https://dev-api.tracebloc.io/" ] || return 1
+}
+
+@test "_backend_url: production alias -> prod backend" {
+  CLIENT_ENV=production
+  run _backend_url
+  [ "$output" = "https://api.tracebloc.io/" ] || return 1
+}
+
+@test "tb_client_env: reduces aliases and passes anything else through" {
+  # Pass-through matters: this normalises spellings, it does not validate, and
+  # each caller keeps its own fallback for genuinely unrecognised input.
+  [ "$(tb_client_env staging)" = "stg" ] || return 1
+  [ "$(tb_client_env development)" = "dev" ] || return 1
+  [ "$(tb_client_env production)" = "prod" ] || return 1
+  [ "$(tb_client_env stg)" = "stg" ] || return 1
+  [ "$(tb_client_env whatever)" = "whatever" ] || return 1
+}
+
 @test "_backend_url: unknown -> prod" {
   CLIENT_ENV=whatever
   run _backend_url
@@ -1503,4 +1537,111 @@ _engine_fixture() {
   '
   [ "$status" -eq 0 ] || return 1
   grep -q ROLLED_BACK_MARKER "$log" || return 1   # status parsed -> rollback ran (not wiped)
+}
+
+# ── backend#1778 / client#686: early-exit pipe consumers ────────────────────
+# Two probes in this lib let a consumer close the pipe on its first match, which
+# SIGPIPEs the producer; pipefail turns that into 141 and the `if` reads it as
+# "no match". In every fixture below the MATCH LEADS and the filler comes from an
+# EXTERNAL command (seq) — with the match appended last, grep has to read the
+# whole stream and never closes early, so the test would pass unfixed.
+
+@test "_resolve_chart_ref: an existing repo in a large repo list is NOT re-added (backend#1778)" {
+  # Misbranch consequence: the `if !` reads 141 as "repo absent" and re-runs
+  # `helm repo add` on the next line — which is unguarded, and fails when the
+  # name already exists with a different URL, aborting the install under set -e.
+  TRACEBLOC_CHART_PATH=""
+  TRACEBLOC_HELM_REPO_NAME="tracebloc"
+  TRACEBLOC_HELM_REPO_URL="https://tracebloc.github.io/client"
+  TRACEBLOC_CHART_NAME="client"
+  # NOTE: no trailing `return 0` in this mock. The producer's exit status IS the
+  # signal under test — an explicit `return 0` would mask seq's SIGPIPE death and
+  # make the test vacuous.
+  helm() {
+    record "helm $*"
+    if [ "${1:-}" = repo ] && [ "${2:-}" = list ]; then
+      printf 'tracebloc\thttps://tracebloc.github.io/client\n'   # match LEADS
+      seq 1 200000                                               # then past the buffer
+    fi
+  }
+  set -o pipefail
+  chart_ref=""
+  run _resolve_chart_ref
+  [ "$status" -eq 0 ] || return 1
+  calls="$(mock_calls)"
+  [[ "$calls" != *"repo add"* ]] || return 1     # the whole point
+  [[ "$calls" == *"repo update"* ]] || return 1  # normal flow still ran
+}
+
+@test "_resolve_chart_ref: a genuinely absent repo IS still added (the fix did not invert it)" {
+  TRACEBLOC_CHART_PATH=""
+  TRACEBLOC_HELM_REPO_NAME="tracebloc"
+  TRACEBLOC_HELM_REPO_URL="https://tracebloc.github.io/client"
+  TRACEBLOC_CHART_NAME="client"
+  helm() {
+    record "helm $*"
+    if [ "${1:-}" = repo ] && [ "${2:-}" = list ]; then printf 'someone-else\thttps://example.invalid/\n'; fi
+    return 0
+  }
+  set -o pipefail
+  chart_ref=""
+  run _resolve_chart_ref
+  [ "$status" -eq 0 ] || return 1
+  [[ "$(mock_calls)" == *"repo add"* ]] || return 1
+}
+
+@test "_resolve_mysql_engine: a sticky 8.4 in a large values.yaml is honoured (backend#1778)" {
+  # Misbranch consequence: the second grep closes the pipe on its first hit and
+  # SIGPIPEs the first, so a machine that opted into 8.4 resolves to 5.7 — and
+  # MySQL 5.7 will not open an 8.4 datadir.
+  values_file="$BATS_TEST_TMPDIR/values.yaml"
+  {
+    printf 'mysqlClient:\n  image:\n    repo: mysql\n    tag: "8.4"\n'   # match LEADS
+    # More mysqlClient: blocks so `grep -A 3` keeps producing long after the
+    # second grep has already matched and closed the pipe.
+    seq 1 60000 | sed 's/^/mysqlClient:\
+  filler: /'
+  } > "$values_file"
+  TB_MYSQL_ENGINE=auto
+  existing_id=""
+  HOST_DATA_DIR="$BATS_TEST_TMPDIR/nonexistent-data"
+  set -o pipefail
+  run bash -c '
+    source "'"${LIB_DIR}"'/common.sh"
+    source "'"${LIB_DIR}"'/install-client-helm.sh"
+    LOG_FILE=/dev/null
+    set -o pipefail
+    values_file="'"$values_file"'"; TB_MYSQL_ENGINE=auto; existing_id=""
+    HOST_DATA_DIR="'"$BATS_TEST_TMPDIR"'/nonexistent-data"
+    # ARCH must be amd64: on arm64 a FRESH auto-resolve also lands on 8.4, so the
+    # misbranch would be invisible and the test vacuous. On amd64 the fallthrough
+    # is 5.7, so "8.4" can only come from the sticky check actually matching.
+    ARCH=x86_64
+    _resolve_mysql_engine >/dev/null 2>&1
+    printf "%s\n" "${TB_MYSQL_ENGINE_RESOLVED:-unset}"
+  '
+  [ "$status" -eq 0 ] || return 1
+  [ "$output" = "8.4" ] || return 1
+}
+
+@test "_resolve_mysql_engine: a large values.yaml with NO 8.4 pin does not become sticky" {
+  values_file="$BATS_TEST_TMPDIR/values-no84.yaml"
+  {
+    printf 'mysqlClient:\n  image:\n    repo: mysql\n    tag: "5.7"\n'
+    seq 1 60000 | sed 's/^/mysqlClient:\
+  filler: /'
+  } > "$values_file"
+  run bash -c '
+    source "'"${LIB_DIR}"'/common.sh"
+    source "'"${LIB_DIR}"'/install-client-helm.sh"
+    LOG_FILE=/dev/null
+    set -o pipefail
+    values_file="'"$values_file"'"; TB_MYSQL_ENGINE=auto; existing_id=""
+    HOST_DATA_DIR="'"$BATS_TEST_TMPDIR"'/nonexistent-data"
+    ARCH=x86_64
+    _resolve_mysql_engine >/dev/null 2>&1
+    printf "%s\n" "${TB_MYSQL_ENGINE_RESOLVED:-unset}"
+  '
+  [ "$status" -eq 0 ] || return 1
+  [ "$output" != "8.4" ] || return 1
 }

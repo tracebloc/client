@@ -1,0 +1,137 @@
+suite: serviceDbAccounts resolves per environment (backend#1752)
+# WHY THIS SUITE EXISTS
+#
+# #1151 records the rollout as "flip per environment, dev first". Until now
+# there was no mechanism for that: one global boolean meant "per environment"
+# was hand-editing every edge and remembering which fleet was where.
+#
+# The gap had teeth. data-ingestors#468 removed the ingestor's edgeuser
+# fallback on the stated precondition that this flag was "on fleet-wide" — it
+# was on nowhere. dev and staging edges float on the :dev/:stg ingestor
+# channels, took the change the same day, and every ingestion Job now fails at
+# Config() before reading a byte. Verified by running the published images:
+# :dev and :stg are 0.8.5 and raise; the prod-pinned digest is 0.7.7 and works.
+#
+# So these assert the two things that actually matter: dev/stg get the
+# credentials the ingestor now demands, prod does not change, and a documented
+# ALIAS resolves rather than silently missing its entry — backend#1723 was
+# exactly that failure, one env-name spelling away.
+templates:
+  - templates/jobs-manager-deployment.yaml
+  - templates/secrets.yaml
+release:
+  name: sda
+  namespace: tracebloc
+set:
+  clientId: "test-id"
+  clientPassword: "test"
+
+tests:
+  # ---- the fix ---------------------------------------------------------
+  - it: "dev edges get the tb_ingest identity"
+    template: templates/jobs-manager-deployment.yaml
+    set:
+      env.CLIENT_ENV: dev
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: TB_INGEST_USER
+            value: tb_ingest
+
+  - it: "stg edges get it too"
+    template: templates/jobs-manager-deployment.yaml
+    set:
+      env.CLIENT_ENV: stg
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: TB_INGEST_USER
+            value: tb_ingest
+
+  - it: "the documented alias `staging` resolves — it must not miss its entry"
+    # The whole bug class in one case: `staging` is what values.schema.json
+    # tells users to write, and a lookup on the RAW value would find nothing
+    # and silently leave the fleet off (backend#1723).
+    template: templates/jobs-manager-deployment.yaml
+    set:
+      env.CLIENT_ENV: staging
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: TB_INGEST_USER
+            value: tb_ingest
+
+  # ---- prod is deliberately unchanged ----------------------------------
+  - it: "prod stays OFF — flipping it is a separate windowed decision"
+    template: templates/jobs-manager-deployment.yaml
+    set:
+      env.CLIENT_ENV: prod
+    asserts:
+      - notContains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: TB_INGEST_USER
+            value: tb_ingest
+
+  - it: "the alias `production` stays off as well"
+    template: templates/jobs-manager-deployment.yaml
+    set:
+      env.CLIENT_ENV: production
+    asserts:
+      - notContains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: TB_INGEST_USER
+            value: tb_ingest
+
+  # ---- the operator override still wins, both ways ---------------------
+  - it: "an explicit false holds a dev fleet back"
+    template: templates/jobs-manager-deployment.yaml
+    set:
+      env.CLIENT_ENV: dev
+      serviceDbAccounts: false
+    asserts:
+      - notContains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: TB_INGEST_USER
+            value: tb_ingest
+
+  - it: "an explicit true turns a prod fleet on"
+    # The path a windowed prod flip takes, so it is exercised before someone
+    # needs it under time pressure.
+    template: templates/jobs-manager-deployment.yaml
+    set:
+      env.CLIENT_ENV: prod
+      serviceDbAccounts: true
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: TB_INGEST_USER
+            value: tb_ingest
+
+  # ---- the Secret must move in lockstep with the env -------------------
+  - it: "dev renders the tb_ingest Secret the env references"
+    # jobs-manager fail-fasts when the flag is on and the Secret is unwired
+    # (_require_service_db_env), so a half-flip would crash-loop the pod. The
+    # two are gated on the same resolver; this proves they agree.
+    template: templates/secrets.yaml
+    documentIndex: 0
+    set:
+      env.CLIENT_ENV: dev
+    asserts:
+      - exists:
+          path: data.TB_INGEST_PASSWORD
+
+  - it: "prod renders no such Secret"
+    template: templates/secrets.yaml
+    documentIndex: 0
+    set:
+      env.CLIENT_ENV: prod
+    asserts:
+      - notExists:
+          path: data.TB_INGEST_PASSWORD

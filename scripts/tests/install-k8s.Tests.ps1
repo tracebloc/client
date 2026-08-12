@@ -26,6 +26,41 @@ Describe "Get-BackendUrl" {
   It "dev" { $env:CLIENT_ENV = "dev"; Get-BackendUrl | Should -Be "https://dev-api.tracebloc.io/" }
   It "stg" { $env:CLIENT_ENV = "stg"; Get-BackendUrl | Should -Be "https://stg-api.tracebloc.io/" }
   It "unknown -> prod" { $env:CLIENT_ENV = "whatever"; Get-BackendUrl | Should -Be "https://api.tracebloc.io/" }
+
+  # THE ALIASES (backend#1745). values.schema.json documents
+  # development|staging|production as accepted, and the switch knew only
+  # dev|stg -- so every alias hit the `default` (prod) branch. Since
+  # Get-BackendUrl feeds Test-Credentials, a Windows install with
+  # CLIENT_ENV=staging validated STAGING credentials against PRODUCTION and
+  # told the customer their correct credentials were wrong.
+  #
+  # The suite covered dev, stg, unset and "whatever" -- never the spellings
+  # the docs tell people to use, which is why the alias branch went untested
+  # on both installers.
+  It "staging alias -> stg backend, NOT prod" {
+    $env:CLIENT_ENV = "staging"; Get-BackendUrl | Should -Be "https://stg-api.tracebloc.io/"
+  }
+  It "development alias -> dev backend" {
+    $env:CLIENT_ENV = "development"; Get-BackendUrl | Should -Be "https://dev-api.tracebloc.io/"
+  }
+  It "production alias -> prod backend" {
+    $env:CLIENT_ENV = "production"; Get-BackendUrl | Should -Be "https://api.tracebloc.io/"
+  }
+}
+
+Describe "Get-TraceblocClientEnv" {
+  AfterEach { $env:CLIENT_ENV = $null }
+  It "reduces the documented aliases" {
+    Get-TraceblocClientEnv "staging"     | Should -Be "stg"
+    Get-TraceblocClientEnv "development" | Should -Be "dev"
+    Get-TraceblocClientEnv "production"  | Should -Be "prod"
+  }
+  It "passes canonical and unknown values through unchanged" {
+    # It normalises spellings; it does not validate. Callers keep their own
+    # fallback for genuine garbage.
+    Get-TraceblocClientEnv "stg"      | Should -Be "stg"
+    Get-TraceblocClientEnv "whatever" | Should -Be "whatever"
+  }
 }
 
 Describe "Daily-user provisioning (#418)" {

@@ -302,6 +302,44 @@ Usage: {{ include "tracebloc.ingestorDigest" . }}
   consumer of CLIENT_ENV must go through here rather than re-deriving it, the
   same reason ENV_ALIASES lives once in client-runtime proxy_config.
 */}}
+{{/*
+  Whether the dedicated tb_meta / tb_ingest DB identities are on for THIS edge
+  (backend#1528, backend#1752).
+
+  Resolution, highest first:
+    1. `serviceDbAccounts` — an explicit operator override, true or false.
+    2. `serviceDbAccountsByEnv[<resolved CLIENT_ENV>]` — the fleet default.
+
+  WHY THIS IS KEYED ON THE ENVIRONMENT AT ALL. #1151 records the rollout as
+  "flip per environment, dev first", but there was no mechanism for that: the
+  value was one global boolean, so "per environment" meant editing every edge's
+  values by hand and remembering which fleet was where. Nobody could see the
+  fleet's posture in one place, and nothing tested it.
+
+  That gap had teeth. data-ingestors#468 removed the ingestor's edgeuser
+  fallback, making DB_USER/DB_PASSWORD required, on the stated precondition
+  that this flag was "on fleet-wide". It was on nowhere. dev and staging edges
+  float on the :dev/:stg ingestor channels, picked the change up the same day,
+  and every ingestion Job now fails at Config() before reading a byte
+  (backend#1752). Prod escaped only because its ingestor is digest-pinned to
+  the 0.7 line -- a caution engineered for D16, not for this, and one that
+  client#490 is about to spend.
+
+  Resolving through `tracebloc.clientEnv` (not the raw value) so a documented
+  alias like `staging` maps to `stg` and cannot silently miss its entry --
+  backend#1723 was exactly that failure.
+*/}}
+{{- define "tracebloc.serviceDbAccounts" -}}
+{{- $override := (default dict .Values).serviceDbAccounts -}}
+{{- if not (kindIs "invalid" $override) -}}
+{{- if $override }}true{{ end -}}
+{{- else -}}
+{{- $env := include "tracebloc.clientEnv" . -}}
+{{- $byEnv := default dict .Values.serviceDbAccountsByEnv -}}
+{{- if get $byEnv $env }}true{{ end -}}
+{{- end -}}
+{{- end }}
+
 {{- define "tracebloc.clientEnv" -}}
 {{- $raw := (default dict .Values.env).CLIENT_ENV | default "prod" -}}
 {{- $aliases := dict "development" "dev" "staging" "stg" "production" "prod" -}}
@@ -318,9 +356,11 @@ Usage: {{ include "tracebloc.ingestorDigest" . }}
   Precedence, mirroring tracebloc.ingestorDigest:
     1. `images.ingestor.tag`          explicit override, any environment
     2. `images.ingestor.channelTags[CLIENT_ENV]`   per-environment channel
-    3. "0.7"                          last-resort literal, so a release that
+    3. "0.8"                          last-resort literal, so a release that
                                       predates these keys still renders under
-                                      `--reuse-values`
+                                      `--reuse-values`. Track the current prod
+                                      line: an older literal here would spawn a
+                                      pre-D16 ingestor on such a release.
 
   Only consulted when no digest applies: jobs-manager builds `repo@digest`
   when tracebloc.ingestorDigest is non-empty, and `repo:tag` otherwise
@@ -341,7 +381,7 @@ Usage: {{ include "tracebloc.ingestorDigest" . }}
 {{- if $channel -}}
 {{- $channel -}}
 {{- else -}}
-{{- "0.7" -}}
+{{- "0.8" -}}
 {{- end -}}
 {{- end -}}
 {{- end }}

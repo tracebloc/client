@@ -2,7 +2,10 @@
   "$schema": "https://json-schema.org/draft-07/schema#",
   "title": "Tracebloc Helm Chart Values",
   "type": "object",
-  "required": ["clientId", "clientPassword"],
+  "required": [
+    "clientId",
+    "clientPassword"
+  ],
   "properties": {
     "env": {
       "type": "object",
@@ -13,10 +16,18 @@
           "default": "prod",
           "description": "Environment identifier and Docker image tag. Canonical values are `dev`, `stg`, `prod`; the documented aliases `development`/`staging`/`production` are accepted and normalized (matching client-runtime proxy_config.ENV_ALIASES). Load-bearing: it selects images.ingestor.channelTags and the prod digest pin. Defaults to 'prod' if not set or empty."
         },
-        "HTTP_PROXY_HOST": { "type": "string" },
-        "HTTP_PROXY_PORT": { "type": "string" },
-        "HTTP_PROXY_USERNAME": { "type": "string" },
-        "HTTP_PROXY_PASSWORD": { "type": "string" },
+        "HTTP_PROXY_HOST": {
+          "type": "string"
+        },
+        "HTTP_PROXY_PORT": {
+          "type": "string"
+        },
+        "HTTP_PROXY_USERNAME": {
+          "type": "string"
+        },
+        "HTTP_PROXY_PASSWORD": {
+          "type": "string"
+        },
         "RESOURCE_REQUESTS": {
           "type": "string",
           "default": "cpu=2,memory=8Gi",
@@ -39,10 +50,12 @@
           "default": "nvidia.com/gpu=1",
           "description": "Optional GPU limits for spawned jobs (defaults to 'nvidia.com/gpu=1' if not set)"
         },
-        "RUNTIME_CLASS_NAME": { "type": "string" },
+        "RUNTIME_CLASS_NAME": {
+          "type": "string"
+        },
         "GPU_VISIBLE_DEVICES": {
           "type": "string",
-          "description": "Optional CDI device selector threaded into GPU training pods as NVIDIA_VISIBLE_DEVICES (client-runtime#291). Set only where the NVIDIA device plugin can't run and the GPU is injected via CDI instead (Docker Desktop / WSL2, where NVML returns ERROR_NOT_SUPPORTED — tracebloc/client#616; the Windows installer sets it automatically there). Leave empty on a normal device-plugin node, which owns NVIDIA_VISIBLE_DEVICES itself."
+          "description": "Optional CDI device selector threaded into GPU training pods as NVIDIA_VISIBLE_DEVICES (client-runtime#291). Set only where the NVIDIA device plugin can't run and the GPU is injected via CDI instead (Docker Desktop / WSL2, where NVML returns ERROR_NOT_SUPPORTED \u2014 tracebloc/client#616; the Windows installer sets it automatically there). Leave empty on a normal device-plugin node, which owns NVIDIA_VISIBLE_DEVICES itself."
         },
         "SINGLE_NODE": {
           "type": "string",
@@ -55,7 +68,10 @@
     },
     "storageClass": {
       "type": "object",
-      "required": ["create", "name"],
+      "required": [
+        "create",
+        "name"
+      ],
       "properties": {
         "create": {
           "type": "boolean",
@@ -75,15 +91,25 @@
         },
         "volumeBindingMode": {
           "type": "string",
-          "enum": ["", "Immediate", "WaitForFirstConsumer"]
+          "enum": [
+            "",
+            "Immediate",
+            "WaitForFirstConsumer"
+          ]
         },
         "reclaimPolicy": {
           "type": "string",
-          "enum": ["", "Delete", "Retain"]
+          "enum": [
+            "",
+            "Delete",
+            "Retain"
+          ]
         },
         "mountOptions": {
           "type": "array",
-          "items": { "type": "string" }
+          "items": {
+            "type": "string"
+          }
         },
         "parameters": {
           "type": "object",
@@ -131,7 +157,11 @@
     },
     "pvcAccessMode": {
       "type": "string",
-      "enum": ["ReadWriteOnce", "ReadWriteMany", "ReadOnlyMany"],
+      "enum": [
+        "ReadWriteOnce",
+        "ReadWriteMany",
+        "ReadOnlyMany"
+      ],
       "description": "Access mode for PVCs"
     },
     "clusterScope": {
@@ -150,7 +180,9 @@
       "properties": {
         "namespace": {
           "type": "object",
-          "required": ["name"],
+          "required": [
+            "name"
+          ],
           "properties": {
             "create": {
               "type": "boolean",
@@ -195,21 +227,36 @@
           "properties": {
             "warn": {
               "type": "string",
-              "enum": ["", "privileged", "baseline", "restricted"]
+              "enum": [
+                "",
+                "privileged",
+                "baseline",
+                "restricted"
+              ]
             },
             "warnVersion": {
               "type": "string"
             },
             "audit": {
               "type": "string",
-              "enum": ["", "privileged", "baseline", "restricted"]
+              "enum": [
+                "",
+                "privileged",
+                "baseline",
+                "restricted"
+              ]
             },
             "auditVersion": {
               "type": "string"
             },
             "enforce": {
               "type": "string",
-              "enum": ["", "privileged", "baseline", "restricted"]
+              "enum": [
+                "",
+                "privileged",
+                "baseline",
+                "restricted"
+              ]
             },
             "enforceVersion": {
               "type": "string"
@@ -233,11 +280,11 @@
             "allowExternalHttps": {
               "type": "boolean",
               "default": true,
-              "description": "When false, drop the 0.0.0.0/0:443 egress rule so training pods reach only DNS, MySQL, requests-proxy and the egress gateway (SECURITY §8.2 / client-runtime#102). Default true keeps existing behaviour; flip per-fleet after verifying the egress gateway works (G2)."
+              "description": "When false, drop the 0.0.0.0/0:443 egress rule so training pods reach only DNS, MySQL, requests-proxy and the egress gateway (SECURITY \u00a78.2 / client-runtime#102). Default true keeps existing behaviour; flip per-fleet after verifying the egress gateway works (G2)."
             },
             "enforcementProbeHost": {
               "type": "string",
-              "description": "Host the `helm test` enforcement check curls directly (when allowExternalHttps=false) to verify the CNI blocks egress; non-enforcement fails the test (a test hook never affects install/upgrade) — client-runtime#104. Empty string disables it (e.g. air-gapped clusters)."
+              "description": "Host the `helm test` enforcement check curls directly (when allowExternalHttps=false) to verify the CNI blocks egress; non-enforcement fails the test (a test hook never affects install/upgrade) \u2014 client-runtime#104. Empty string disables it (e.g. air-gapped clusters)."
             },
             "enforcementProbeTimeoutSeconds": {
               "type": "integer",
@@ -259,7 +306,7 @@
             },
             "clusterCidrs": {
               "type": "array",
-              "description": "In-cluster pod+service CIDRs to block pod-to-pod egress on port 443. Override to match your cluster CIDRs. Must be non-empty when networkPolicy.training.enabled is true — an empty list renders `except: null` and Kubernetes treats that as no exceptions, silently allowing unrestricted in-cluster egress.",
+              "description": "In-cluster pod+service CIDRs to block pod-to-pod egress on port 443. Override to match your cluster CIDRs. Must be non-empty when networkPolicy.training.enabled is true \u2014 an empty list renders `except: null` and Kubernetes treats that as no exceptions, silently allowing unrestricted in-cluster egress.",
               "items": {
                 "type": "string",
                 "pattern": "^[0-9.]+/[0-9]+$"
@@ -268,13 +315,19 @@
           },
           "if": {
             "properties": {
-              "enabled": { "const": true }
+              "enabled": {
+                "const": true
+              }
             },
-            "required": ["enabled"]
+            "required": [
+              "enabled"
+            ]
           },
           "then": {
             "properties": {
-              "clusterCidrs": { "minItems": 1 }
+              "clusterCidrs": {
+                "minItems": 1
+              }
             }
           }
         }
@@ -300,8 +353,11 @@
       "description": "RFC-0003 D10 (backend#1181): optional operator pin for the tb_credmgr account password (3-tier resolution, mirrors podTokenSigningSecret). Empty = generate-and-persist. Set for DR / a pre-created MySQL account / forced rotation, or to keep it stable across a perExperimentDbCreds toggle. Must be alphanumeric."
     },
     "serviceDbAccounts": {
-      "type": "boolean",
-      "description": "backend#1528 S1 (RFC-0003 D10 close-out): provision the dedicated MySQL service identities tb_meta (metadata DB) and tb_ingest (dataset DB) that replace the root-equivalent edgeuser. Additive — jobs-manager mints them at startup but nothing consumes them until S2, so a default install is byte-identical. Flip per environment, dev first."
+      "type": [
+        "boolean",
+        "null"
+      ],
+      "description": "OPERATOR OVERRIDE, normally unset. When null the effective value comes from serviceDbAccountsByEnv keyed on the resolved CLIENT_ENV (backend#1752). Set true/false to force one answer on this edge regardless of environment. backend#1528 S1 (RFC-0003 D10 close-out): provision the dedicated MySQL service identities tb_meta (metadata DB) and tb_ingest (dataset DB) that replace the root-equivalent edgeuser. Additive \u2014 jobs-manager mints them at startup but nothing consumes them until S2, so a default install is byte-identical. Flip per environment, dev first."
     },
     "tbMetaPassword": {
       "type": "string",
@@ -317,7 +373,7 @@
     },
     "perDatasetPvcs": {
       "type": "boolean",
-      "description": "RFC-0003 D9 Track B (client-runtime#203/#261): stamp PER_DATASET_PVCS=1 into jobs-manager — training pods get one read-only hostPath PV/PVC per dataset handle instead of a subPath view of the shared PVC. Single-node/hostPath clusters only; requires clusterScope (PVs are cluster-scoped)."
+      "description": "RFC-0003 D9 Track B (client-runtime#203/#261): stamp PER_DATASET_PVCS=1 into jobs-manager \u2014 training pods get one read-only hostPath PV/PVC per dataset handle instead of a subPath view of the shared PVC. Single-node/hostPath clusters only; requires clusterScope (PVs are cluster-scoped)."
     },
     "ingestionAuthz": {
       "type": "object",
@@ -345,7 +401,9 @@
               },
               "table_prefixes": {
                 "type": "array",
-                "items": { "type": "string" },
+                "items": {
+                  "type": "string"
+                },
                 "description": "Table-name prefixes this SA may ingest into. [\"*\"] = any table."
               }
             }
@@ -366,11 +424,11 @@
     },
     "sealCheck": {
       "type": "object",
-      "description": "Seal check — the chart's conformance suite (RFC-0003 §8.2 / backend#1184). Every check is a `helm test` hook Job labelled tracebloc.io/seal-check=true + tracebloc.io/seal-check-name=<check> (the enumeration contract the tracebloc CLI consumes, cli#393). See docs/SEAL-CHECK.md.",
+      "description": "Seal check \u2014 the chart's conformance suite (RFC-0003 \u00a78.2 / backend#1184). Every check is a `helm test` hook Job labelled tracebloc.io/seal-check=true + tracebloc.io/seal-check-name=<check> (the enumeration contract the tracebloc CLI consumes, cli#393). See docs/SEAL-CHECK.md.",
       "properties": {
         "storageAssertions": {
           "type": "object",
-          "description": "In-cluster storage assertions: release PVCs Bound on the expected StorageClass; in dynamic-PVC mode (hostPath.enabled=false) no release PVC backed by a hostPath PV on an unmanaged host tree (leftover chart hostPath PVs capture claims via claimRef — RFC-0003 D3/D4).",
+          "description": "In-cluster storage assertions: release PVCs Bound on the expected StorageClass; in dynamic-PVC mode (hostPath.enabled=false) no release PVC backed by a hostPath PV on an unmanaged host tree (leftover chart hostPath PVs capture claims via claimRef \u2014 RFC-0003 D3/D4).",
           "properties": {
             "enabled": {
               "type": "boolean",
@@ -385,16 +443,35 @@
             },
             "nodeLocalPathPrefixes": {
               "type": "array",
-              "items": { "type": "string" },
-              "description": "hostPath prefixes accepted as provisioner-managed node-local storage in dynamic mode (k3s local-path: /var/lib/rancher/…; upstream local-path-provisioner: /opt/local-path-provisioner/). Entries match whole path segments (trailing slash optional) — a prefix admits itself and paths under it, never sibling paths. Any other hostPath backing fails the check."
+              "items": {
+                "type": "string"
+              },
+              "description": "hostPath prefixes accepted as provisioner-managed node-local storage in dynamic mode (k3s local-path: /var/lib/rancher/\u2026; upstream local-path-provisioner: /opt/local-path-provisioner/). Entries match whole path segments (trailing slash optional) \u2014 a prefix admits itself and paths under it, never sibling paths. Any other hostPath backing fails the check."
             },
             "image": {
               "type": "object",
               "description": "kubectl-capable image for the assertion pod (same image the image-refresh CronJob uses).",
               "properties": {
-                "repository": { "type": "string", "default": "alpine/k8s" },
-                "tag": { "type": "string", "not": { "const": "latest" }, "default": "1.30.5" },
-                "pullPolicy": { "type": "string", "enum": ["Always", "IfNotPresent", "Never"], "default": "IfNotPresent" }
+                "repository": {
+                  "type": "string",
+                  "default": "alpine/k8s"
+                },
+                "tag": {
+                  "type": "string",
+                  "not": {
+                    "const": "latest"
+                  },
+                  "default": "1.30.5"
+                },
+                "pullPolicy": {
+                  "type": "string",
+                  "enum": [
+                    "Always",
+                    "IfNotPresent",
+                    "Never"
+                  ],
+                  "default": "IfNotPresent"
+                }
               }
             }
           }
@@ -403,25 +480,56 @@
     },
     "egressProxy": {
       "type": "object",
-      "description": "In-cluster squid egress gateway (SECURITY §8.2 / client-runtime#102). Forward proxy that permits HTTPS CONNECT only to the allowlist, so a locked-down training pod can reach the backend + App Insights and nothing else.",
+      "description": "In-cluster squid egress gateway (SECURITY \u00a78.2 / client-runtime#102). Forward proxy that permits HTTPS CONNECT only to the allowlist, so a locked-down training pod can reach the backend + App Insights and nothing else.",
       "properties": {
-        "enabled": { "type": "boolean", "default": true },
-        "routeWorkloads": { "type": "boolean", "default": false, "description": "Route training-pod outbound HTTPS through the gateway (jobs-manager injects HTTPS_PROXY). Default false — enable per-fleet, verify a run, then drop the direct egress rule (networkPolicy.training.allowExternalHttps=false)." },
-        "port": { "type": "integer", "minimum": 1, "maximum": 65535, "default": 3128 },
-        "runAsUser": { "type": "integer", "minimum": 1 },
+        "enabled": {
+          "type": "boolean",
+          "default": true
+        },
+        "routeWorkloads": {
+          "type": "boolean",
+          "default": false,
+          "description": "Route training-pod outbound HTTPS through the gateway (jobs-manager injects HTTPS_PROXY). Default false \u2014 enable per-fleet, verify a run, then drop the direct egress rule (networkPolicy.training.allowExternalHttps=false)."
+        },
+        "port": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65535,
+          "default": 3128
+        },
+        "runAsUser": {
+          "type": "integer",
+          "minimum": 1
+        },
         "image": {
           "type": "object",
           "properties": {
-            "registry": { "type": "string" },
-            "repository": { "type": "string", "minLength": 1 },
-            "tag": { "type": "string", "not": { "const": "latest" } },
-            "digest": { "type": "string", "pattern": "^(sha256:[a-f0-9]{64})?$" }
+            "registry": {
+              "type": "string"
+            },
+            "repository": {
+              "type": "string",
+              "minLength": 1
+            },
+            "tag": {
+              "type": "string",
+              "not": {
+                "const": "latest"
+              }
+            },
+            "digest": {
+              "type": "string",
+              "pattern": "^(sha256:[a-f0-9]{64})?$"
+            }
           }
         },
         "allowlist": {
           "type": "array",
           "description": "FQDNs the gateway permits HTTPS CONNECT to (squid dstdomain syntax: leading dot = subdomain match, bare host = exact).",
-          "items": { "type": "string", "minLength": 1 }
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
         },
         "resources": {
           "type": "object",
@@ -429,15 +537,27 @@
             "requests": {
               "type": "object",
               "properties": {
-                "cpu":    { "type": "string", "pattern": "^[0-9]+m?$" },
-                "memory": { "type": "string", "pattern": "^[0-9]+(Ki|Mi|Gi|Ti)$" }
+                "cpu": {
+                  "type": "string",
+                  "pattern": "^[0-9]+m?$"
+                },
+                "memory": {
+                  "type": "string",
+                  "pattern": "^[0-9]+(Ki|Mi|Gi|Ti)$"
+                }
               }
             },
             "limits": {
               "type": "object",
               "properties": {
-                "cpu":    { "type": "string", "pattern": "^[0-9]+m?$" },
-                "memory": { "type": "string", "pattern": "^[0-9]+(Ki|Mi|Gi|Ti)$" }
+                "cpu": {
+                  "type": "string",
+                  "pattern": "^[0-9]+m?$"
+                },
+                "memory": {
+                  "type": "string",
+                  "pattern": "^[0-9]+(Ki|Mi|Gi|Ti)$"
+                }
               }
             }
           }
@@ -487,7 +607,7 @@
         },
         "ingestor": {
           "type": "object",
-          "description": "Image used for spawned ingestion Jobs. jobs-manager resolves one effective digest from these keys (see the tracebloc.ingestorDigest helper) and builds the reference from it (client-runtime submit_ingestion_run): digest set -> repo@digest + IfNotPresent, digest empty -> repo:tag + Always. Prod pins `prodDigest` (a chart default, so a republished pin propagates through the fleet auto-upgrade — backend#1245); dev/staging float on `tag`, resolving the current published digest at every spawn.",
+          "description": "Image used for spawned ingestion Jobs. jobs-manager resolves one effective digest from these keys (see the tracebloc.ingestorDigest helper) and builds the reference from it (client-runtime submit_ingestion_run): digest set -> repo@digest + IfNotPresent, digest empty -> repo:tag + Always. Prod pins `prodDigest` (a chart default, so a republished pin propagates through the fleet auto-upgrade \u2014 backend#1245); dev/staging float on `tag`, resolving the current published digest at every spawn.",
           "properties": {
             "repository": {
               "type": "string",
@@ -496,8 +616,10 @@
             },
             "tag": {
               "type": "string",
-              "not": { "const": "latest" },
-              "description": "Explicit floating-tag override for the spawned ingestor. EMPTY by default: the effective tag then comes from channelTags[CLIENT_ENV] (backend#1360). `latest` is rejected — spawn behaviour must not drift. To pin an exact image prefer `digest`, which wins over any tag. Surfaces as INGESTOR_IMAGE_TAG."
+              "not": {
+                "const": "latest"
+              },
+              "description": "Explicit floating-tag override for the spawned ingestor. EMPTY by default: the effective tag then comes from channelTags[CLIENT_ENV] (backend#1360). `latest` is rejected \u2014 spawn behaviour must not drift. To pin an exact image prefer `digest`, which wins over any tag. Surfaces as INGESTOR_IMAGE_TAG."
             },
             "channelTags": {
               "type": "object",
@@ -506,19 +628,25 @@
                 "dev": {
                   "type": "string",
                   "minLength": 1,
-                  "not": { "const": "latest" },
+                  "not": {
+                    "const": "latest"
+                  },
                   "description": "Tag spawned when CLIENT_ENV resolves to dev."
                 },
                 "stg": {
                   "type": "string",
                   "minLength": 1,
-                  "not": { "const": "latest" },
+                  "not": {
+                    "const": "latest"
+                  },
                   "description": "Tag spawned when CLIENT_ENV resolves to stg."
                 },
                 "prod": {
                   "type": "string",
                   "minLength": 1,
-                  "not": { "const": "latest" },
+                  "not": {
+                    "const": "latest"
+                  },
                   "description": "Tag spawned when CLIENT_ENV resolves to prod and no digest applies."
                 }
               }
@@ -544,7 +672,9 @@
           "properties": {
             "tag": {
               "type": "string",
-              "not": { "const": "latest" },
+              "not": {
+                "const": "latest"
+              },
               "description": "Image tag for mysql-client. Empty falls back to env.CLIENT_ENV. Must not be \"latest\"."
             },
             "digest": {
@@ -558,7 +688,9 @@
           "properties": {
             "tag": {
               "type": "string",
-              "not": { "const": "latest" }
+              "not": {
+                "const": "latest"
+              }
             },
             "digest": {
               "type": "string",
@@ -578,16 +710,28 @@
             "requests": {
               "type": "object",
               "properties": {
-                "cpu":    { "type": "string", "pattern": "^[0-9]+m?$" },
-                "memory": { "type": "string", "pattern": "^[0-9]+(Ki|Mi|Gi|Ti)$" }
+                "cpu": {
+                  "type": "string",
+                  "pattern": "^[0-9]+m?$"
+                },
+                "memory": {
+                  "type": "string",
+                  "pattern": "^[0-9]+(Ki|Mi|Gi|Ti)$"
+                }
               }
             },
             "limits": {
               "type": "object",
-              "description": "CPU limit deliberately omitted in defaults — throttling causes InnoDB lock-wait timeouts.",
+              "description": "CPU limit deliberately omitted in defaults \u2014 throttling causes InnoDB lock-wait timeouts.",
               "properties": {
-                "cpu":    { "type": "string", "pattern": "^[0-9]+m?$" },
-                "memory": { "type": "string", "pattern": "^[0-9]+(Ki|Mi|Gi|Ti)$" }
+                "cpu": {
+                  "type": "string",
+                  "pattern": "^[0-9]+m?$"
+                },
+                "memory": {
+                  "type": "string",
+                  "pattern": "^[0-9]+(Ki|Mi|Gi|Ti)$"
+                }
               }
             }
           }
@@ -598,15 +742,27 @@
             "requests": {
               "type": "object",
               "properties": {
-                "cpu":    { "type": "string", "pattern": "^[0-9]+m?$" },
-                "memory": { "type": "string", "pattern": "^[0-9]+(Ki|Mi|Gi|Ti)$" }
+                "cpu": {
+                  "type": "string",
+                  "pattern": "^[0-9]+m?$"
+                },
+                "memory": {
+                  "type": "string",
+                  "pattern": "^[0-9]+(Ki|Mi|Gi|Ti)$"
+                }
               }
             },
             "limits": {
               "type": "object",
               "properties": {
-                "cpu":    { "type": "string", "pattern": "^[0-9]+m?$" },
-                "memory": { "type": "string", "pattern": "^[0-9]+(Ki|Mi|Gi|Ti)$" }
+                "cpu": {
+                  "type": "string",
+                  "pattern": "^[0-9]+m?$"
+                },
+                "memory": {
+                  "type": "string",
+                  "pattern": "^[0-9]+(Ki|Mi|Gi|Ti)$"
+                }
               }
             }
           }
@@ -617,15 +773,27 @@
             "requests": {
               "type": "object",
               "properties": {
-                "cpu":    { "type": "string", "pattern": "^[0-9]+m?$" },
-                "memory": { "type": "string", "pattern": "^[0-9]+(Ki|Mi|Gi|Ti)$" }
+                "cpu": {
+                  "type": "string",
+                  "pattern": "^[0-9]+m?$"
+                },
+                "memory": {
+                  "type": "string",
+                  "pattern": "^[0-9]+(Ki|Mi|Gi|Ti)$"
+                }
               }
             },
             "limits": {
               "type": "object",
               "properties": {
-                "cpu":    { "type": "string", "pattern": "^[0-9]+m?$" },
-                "memory": { "type": "string", "pattern": "^[0-9]+(Ki|Mi|Gi|Ti)$" }
+                "cpu": {
+                  "type": "string",
+                  "pattern": "^[0-9]+m?$"
+                },
+                "memory": {
+                  "type": "string",
+                  "pattern": "^[0-9]+(Ki|Mi|Gi|Ti)$"
+                }
               }
             }
           }
@@ -636,15 +804,27 @@
             "requests": {
               "type": "object",
               "properties": {
-                "cpu":    { "type": "string", "pattern": "^[0-9]+m?$" },
-                "memory": { "type": "string", "pattern": "^[0-9]+(Ki|Mi|Gi|Ti)$" }
+                "cpu": {
+                  "type": "string",
+                  "pattern": "^[0-9]+m?$"
+                },
+                "memory": {
+                  "type": "string",
+                  "pattern": "^[0-9]+(Ki|Mi|Gi|Ti)$"
+                }
               }
             },
             "limits": {
               "type": "object",
               "properties": {
-                "cpu":    { "type": "string", "pattern": "^[0-9]+m?$" },
-                "memory": { "type": "string", "pattern": "^[0-9]+(Ki|Mi|Gi|Ti)$" }
+                "cpu": {
+                  "type": "string",
+                  "pattern": "^[0-9]+m?$"
+                },
+                "memory": {
+                  "type": "string",
+                  "pattern": "^[0-9]+(Ki|Mi|Gi|Ti)$"
+                }
               }
             }
           }
@@ -653,21 +833,42 @@
     },
     "priorityClass": {
       "type": "object",
-      "description": "Cluster-scoped PriorityClass for tracebloc data-plane workloads (mysql). An empty `name` disables the priorityClassName reference on the mysql pod entirely (mysql falls back to default priority 0 — only set this if you explicitly want no OOM protection from the scheduler).",
+      "description": "Cluster-scoped PriorityClass for tracebloc data-plane workloads (mysql). An empty `name` disables the priorityClassName reference on the mysql pod entirely (mysql falls back to default priority 0 \u2014 only set this if you explicitly want no OOM protection from the scheduler).",
       "properties": {
-        "create": { "type": "boolean", "default": true },
-        "name":   { "type": "string", "default": "tracebloc-data-plane" },
-        "value":  { "type": "integer", "minimum": 0, "maximum": 1000000000, "default": 1000000 }
+        "create": {
+          "type": "boolean",
+          "default": true
+        },
+        "name": {
+          "type": "string",
+          "default": "tracebloc-data-plane"
+        },
+        "value": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 1000000000,
+          "default": 1000000
+        }
       },
       "allOf": [
         {
-          "$comment": "If we are templating the PriorityClass resource, name must not be empty. `required: [create]` is needed because draft-07 `properties` only validates keys that are present — without it, omitting `create` passes the `if` vacuously and unconditionally enforces `then`. Same pattern as dockerRegistry below.",
+          "$comment": "If we are templating the PriorityClass resource, name must not be empty. `required: [create]` is needed because draft-07 `properties` only validates keys that are present \u2014 without it, omitting `create` passes the `if` vacuously and unconditionally enforces `then`. Same pattern as dockerRegistry below.",
           "if": {
-            "properties": { "create": { "const": true } },
-            "required": ["create"]
+            "properties": {
+              "create": {
+                "const": true
+              }
+            },
+            "required": [
+              "create"
+            ]
           },
           "then": {
-            "properties": { "name": { "minLength": 1 } }
+            "properties": {
+              "name": {
+                "minLength": 1
+              }
+            }
           }
         }
       ]
@@ -679,13 +880,19 @@
         "mysql": {
           "type": "object",
           "properties": {
-            "create": { "type": "boolean", "default": true }
+            "create": {
+              "type": "boolean",
+              "default": true
+            }
           }
         },
         "jobsManager": {
           "type": "object",
           "properties": {
-            "create": { "type": "boolean", "default": true }
+            "create": {
+              "type": "boolean",
+              "default": true
+            }
           }
         }
       }
@@ -693,13 +900,17 @@
     "clientId": {
       "type": "string",
       "minLength": 1,
-      "not": { "pattern": "^<.*>$" },
+      "not": {
+        "pattern": "^<.*>$"
+      },
       "description": "Client ID for authentication. Must be a real value, not a placeholder like <CLIENT_ID>."
     },
     "clientPassword": {
       "type": "string",
       "minLength": 1,
-      "not": { "pattern": "^<.*>$" },
+      "not": {
+        "pattern": "^<.*>$"
+      },
       "description": "Client authentication password. Must be a real value, not a placeholder like <CLIENT_PASSWORD>."
     },
     "autoUpgrade": {
@@ -759,18 +970,30 @@
         },
         "image": {
           "type": "object",
-          "required": ["repository", "tag"],
+          "required": [
+            "repository",
+            "tag"
+          ],
           "properties": {
-            "repository": { "type": "string", "minLength": 1 },
+            "repository": {
+              "type": "string",
+              "minLength": 1
+            },
             "tag": {
               "type": "string",
               "minLength": 1,
-              "not": { "const": "latest" },
-              "description": "Pin the helm version. `latest` is rejected — auto-upgrade behaviour must not drift."
+              "not": {
+                "const": "latest"
+              },
+              "description": "Pin the helm version. `latest` is rejected \u2014 auto-upgrade behaviour must not drift."
             },
             "pullPolicy": {
               "type": "string",
-              "enum": ["Always", "IfNotPresent", "Never"]
+              "enum": [
+                "Always",
+                "IfNotPresent",
+                "Never"
+              ]
             }
           }
         },
@@ -780,15 +1003,27 @@
             "requests": {
               "type": "object",
               "properties": {
-                "cpu":    { "type": "string", "pattern": "^[0-9]+m?$" },
-                "memory": { "type": "string", "pattern": "^[0-9]+(Ki|Mi|Gi|Ti)$" }
+                "cpu": {
+                  "type": "string",
+                  "pattern": "^[0-9]+m?$"
+                },
+                "memory": {
+                  "type": "string",
+                  "pattern": "^[0-9]+(Ki|Mi|Gi|Ti)$"
+                }
               }
             },
             "limits": {
               "type": "object",
               "properties": {
-                "cpu":    { "type": "string", "pattern": "^[0-9]+m?$" },
-                "memory": { "type": "string", "pattern": "^[0-9]+(Ki|Mi|Gi|Ti)$" }
+                "cpu": {
+                  "type": "string",
+                  "pattern": "^[0-9]+m?$"
+                },
+                "memory": {
+                  "type": "string",
+                  "pattern": "^[0-9]+(Ki|Mi|Gi|Ti)$"
+                }
               }
             }
           }
@@ -838,18 +1073,30 @@
         },
         "image": {
           "type": "object",
-          "required": ["repository", "tag"],
+          "required": [
+            "repository",
+            "tag"
+          ],
           "properties": {
-            "repository": { "type": "string", "minLength": 1 },
+            "repository": {
+              "type": "string",
+              "minLength": 1
+            },
             "tag": {
               "type": "string",
               "minLength": 1,
-              "not": { "const": "latest" },
-              "description": "Pin the alpine/k8s version. `latest` is rejected — image-refresh behaviour must not drift."
+              "not": {
+                "const": "latest"
+              },
+              "description": "Pin the alpine/k8s version. `latest` is rejected \u2014 image-refresh behaviour must not drift."
             },
             "pullPolicy": {
               "type": "string",
-              "enum": ["Always", "IfNotPresent", "Never"]
+              "enum": [
+                "Always",
+                "IfNotPresent",
+                "Never"
+              ]
             }
           }
         },
@@ -859,15 +1106,27 @@
             "requests": {
               "type": "object",
               "properties": {
-                "cpu":    { "type": "string", "pattern": "^[0-9]+m?$" },
-                "memory": { "type": "string", "pattern": "^[0-9]+(Ki|Mi|Gi|Ti)$" }
+                "cpu": {
+                  "type": "string",
+                  "pattern": "^[0-9]+m?$"
+                },
+                "memory": {
+                  "type": "string",
+                  "pattern": "^[0-9]+(Ki|Mi|Gi|Ti)$"
+                }
               }
             },
             "limits": {
               "type": "object",
               "properties": {
-                "cpu":    { "type": "string", "pattern": "^[0-9]+m?$" },
-                "memory": { "type": "string", "pattern": "^[0-9]+(Ki|Mi|Gi|Ti)$" }
+                "cpu": {
+                  "type": "string",
+                  "pattern": "^[0-9]+m?$"
+                },
+                "memory": {
+                  "type": "string",
+                  "pattern": "^[0-9]+(Ki|Mi|Gi|Ti)$"
+                }
               }
             }
           }
@@ -875,7 +1134,10 @@
       }
     },
     "dockerRegistry": {
-      "type": ["object", "null"],
+      "type": [
+        "object",
+        "null"
+      ],
       "description": "Optional. Omit entirely or set null for public images (no secret or imagePullSecrets). Only create when set and create is true.",
       "properties": {
         "create": {
@@ -901,15 +1163,31 @@
         {
           "if": {
             "properties": {
-              "create": { "const": true }
+              "create": {
+                "const": true
+              }
             },
-            "required": ["create"]
+            "required": [
+              "create"
+            ]
           },
           "then": {
-            "required": ["server", "username", "password", "email"]
+            "required": [
+              "server",
+              "username",
+              "password",
+              "email"
+            ]
           }
         }
       ]
+    },
+    "serviceDbAccountsByEnv": {
+      "type": "object",
+      "description": "Per-environment default for the dedicated tb_meta/tb_ingest identities, keyed on the RESOLVED CLIENT_ENV (dev|stg|prod \u2014 documented aliases are normalized first). This is the mechanism behind #1151's 'flip per environment, dev first'; before it, that plan had no implementation and the fleet's posture could not be read in one place. backend#1752.",
+      "additionalProperties": {
+        "type": "boolean"
+      }
     }
   }
 }

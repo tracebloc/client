@@ -534,8 +534,20 @@ ensure_cosign() {
   curl -fsSL --tlsv1.2 --connect-timeout 30 --max-time 300 "$base/$asset"               -o "$bin"  2>/dev/null || return 1
   curl -fsSL --tlsv1.2 --connect-timeout 30 --max-time 300 "$base/cosign_checksums.txt" -o "$sums" 2>/dev/null || return 1
 
-  local want got
-  want="$(grep " ${asset}\$" "$sums" | awk '{print $1}' | head -1)"
+  local want got sums_line
+  # Pure-bash slicing, NOT `grep | awk | head -1`. head closes the pipe after the
+  # first line; on a checksums file that lists the asset more than once (a mirror,
+  # a proxy-mangled fetch) awk takes SIGPIPE and pipefail makes the pipeline 141.
+  # That does NOT abort today — the sole caller is `if ! ensure_cosign`, and a
+  # condition context suppresses errexit for the whole function — so this is
+  # hardening, not a live bug fix. It is worth doing anyway: the safety of a
+  # function sitting in the signature-verification path should not rest on how
+  # its caller happens to be written, and one bare call would turn this into an
+  # abort of the bootstrap with no message. Slicing keeps "first match, first
+  # field" exactly (backend#1778).
+  sums_line="$(grep " ${asset}\$" "$sums" || true)"   # every matching line
+  sums_line="${sums_line%%$'\n'*}"                    # …the first one
+  want="${sums_line%% *}"                             # …its digest field
   [[ -n "$want" ]] || return 1
   got="$(_sha256_of "$bin")" || return 1
   if [[ "$want" != "$got" ]]; then

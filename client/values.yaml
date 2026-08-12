@@ -433,7 +433,15 @@ images:
     channelTags:
       dev: "dev"
       stg: "stg"
-      prod: "0.7"
+      # 0.8 line: carries the ds_<hex> per-ingestion write path (D16,
+      # data-ingestors#408, first released as v0.8.0 on 2026-07-30; line at
+      # v0.8.4 as of 2026-08-12, but `prodDigest` below deliberately pins v0.8.2
+      # — see the ordering constraint noted there). A prod edge left on 0.7
+      # spawns a pre-D16 ingestor
+      # and silently falls back to the legacy tables even with
+      # `perIngestionTables` on (found on staging). Verified multi-arch against
+      # ghcr.io 2026-08-04 (linux/amd64 + linux/arm64 OCI image index).
+      prod: "0.8"
 
     # -- PROD REPRODUCIBILITY PIN — the digest prod edges run.
     #
@@ -456,10 +464,26 @@ images:
     # unbumped refresh reaches nobody — and commit. CI's `ingestor-multiarch`
     # job validates this value on every PR.
     #
-    # ghcr.io/tracebloc/ingestor multi-arch index for the 0.7 line, == the
-    # published `tag` above — VERIFIED against ghcr.io 2026-07-25 (linux/amd64 +
-    # linux/arm64 OCI image index). The `VERIFIED` note is the audit trail.
-    prodDigest: "sha256:9098b3c9b83951f825e262d6ff1e9c47c46c5b5cafbfc8fef1ed82ccbadebb24"
+    # ghcr.io/tracebloc/ingestor multi-arch index for the 0.8 line, **v0.8.2** —
+    # VERIFIED against ghcr.io 2026-08-12 (linux/amd64 + linux/arm64 OCI image
+    # index; matches the v0.8.2 GitHub Release digest). The `VERIFIED` note is
+    # the audit trail: re-resolve it, do not trust a previous note's date.
+    #
+    # DELIBERATELY BEHIND the `channelTags.prod: "0.8"` float, which now resolves
+    # to v0.8.4 (sha256:02da1ebd…). Do not "refresh" this to the float without
+    # reading the ordering constraint in docs/SECURITY.md §4.1.1: prod's
+    # `serviceDbAccountsByEnv.prod` is still `false`, and the boundary is not a
+    # version number — it is whether the release you move to was cut before
+    # data-ingestors#468. `prodPin: true` means this digest, not the float, is
+    # what prod spawns, which is exactly the protection being relied on.
+    #
+    # (Checked 2026-08-12: v0.8.4's config.py still defaults DB_USER to
+    # "edgeuser", so data-ingestors#468 — which removes that fallback, merged
+    # 2026-08-11, after v0.8.4 was cut on 08-10 — is NOT yet in any 0.8 release.
+    # The next 0.8 release is therefore the dangerous one, not v0.8.4. Recorded
+    # so the ceiling is respected for the right reason, and so whoever raises it
+    # re-derives this instead of inheriting a stale number.)
+    prodDigest: "sha256:05e124945a2ef61868661a9137abb5e75dac96a090cb41a7b4e8be520c4b5873"
 
     # -- Whether `prodDigest` applies on this edge. Default true, which means
     # "pin on prod only": it takes effect when the resolved CLIENT_ENV is "prod"
@@ -908,7 +932,38 @@ credmgrPassword: ""
 # Flip per environment, dev first. Default false: today's shared-edgeuser
 # behavior, byte-for-byte. Needs no per-edge action — the passwords are
 # generated, upgrade-stable Secret values.
-serviceDbAccounts: false
+# UNSET by default: the effective value comes from `serviceDbAccountsByEnv`
+# below, keyed on the resolved CLIENT_ENV. Set this to force one answer on an
+# edge regardless of environment (an operator override — DR, a fleet held back
+# deliberately, or a customer opt-out). backend#1752.
+serviceDbAccounts:
+
+# -- PER-ENVIRONMENT ROLLOUT (backend#1528 · backend#1752)
+#
+# #1151 records the plan as "flip per environment, dev first". Until now there
+# was no mechanism for that — one global boolean meant "per environment" was
+# hand-editing every edge's values and remembering which fleet was where.
+#
+# That gap had teeth. data-ingestors#468 removed the ingestor's edgeuser
+# fallback on the stated precondition that this flag was "on fleet-wide"; it
+# was on nowhere. dev and staging edges float on the :dev/:stg ingestor
+# channels, took the change the same day, and every ingestion Job now fails at
+# Config() before reading a byte. Prod escaped only because its ingestor is
+# digest-pinned to the 0.7 line — a caution engineered for D16, not for this,
+# and one client#490 is about to spend.
+#
+# dev/stg: TRUE. Both are already running the ingestor that requires the
+# per-Job credentials, so this is what makes them work again — and it exercises
+# #1528's S2 path where it is supposed to be exercised, before prod.
+#
+# prod: FALSE, deliberately and explicitly. Prod runs the 0.7-line ingestor,
+# which still has the fallback. Flipping prod is a separate windowed decision
+# (#1528 S0 drill), and it must happen BEFORE prod's ingestor is repinned past
+# 0.8.2 — see the note on `prodDigest`.
+serviceDbAccountsByEnv:
+  dev: true
+  stg: true
+  prod: false
 
 # Optional operator pins for the tb_meta / tb_ingest account passwords (each
 # mirrors credmgrPassword's 3-tier resolution). Leave "" to generate-and-persist

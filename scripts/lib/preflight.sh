@@ -89,7 +89,7 @@ _pf_free_kb() { df -Pk "$1" 2>/dev/null | awk 'NR==2 {print $4}'; }
 # bind-mount aware), then GNU `stat -f` (Linux only — BSD/macOS `stat -f` means
 # "format string", not filesystem), then df+mount (portable, incl. macOS).
 _pf_fstype() {
-  local p="$1" parent t="" mp
+  local p="$1" parent t="" mp fstype_out
   while [[ -n "$p" && ! -e "$p" ]]; do
     parent="$(dirname "$p")"
     [[ "$parent" == "$p" ]] && break
@@ -97,14 +97,27 @@ _pf_fstype() {
   done
   [[ -z "$p" || ! -e "$p" ]] && return 0
   if has findmnt; then
-    t="$(findmnt -nro FSTYPE --target "$p" 2>/dev/null | head -1)"
+    # Capture-then-slice, not `| head -1`: head closes the pipe after line 1 and
+    # findmnt takes SIGPIPE, which pipefail turns into 141 — and in an ASSIGNMENT
+    # under `set -e` that aborts the installer inside preflight with no message.
+    # findmnt prints one line per mount over the target, so a bind-mounted or
+    # stacked path is enough (backend#1778; same shape as the mount pipeline below).
+    fstype_out="$(findmnt -nro FSTYPE --target "$p" 2>/dev/null || true)"
+    t="${fstype_out%%$'\n'*}"
   fi
   if [[ -z "$t" && "$OS" != "Darwin" ]]; then
     t="$(stat -f -c '%T' "$p" 2>/dev/null)"
   fi
   if [[ -z "$t" ]] && has df; then
     mp="$(df "$p" 2>/dev/null | awk 'NR>1 && $NF ~ /^\// {print $NF}' | tail -1)"
-    [[ -n "$mp" ]] && t="$(mount 2>/dev/null | awk -v m="$mp" 'index($0," on "m" (")>0 {sub(/.* \(/,""); sub(/[,)].*/,""); print; exit}')"
+    # `awk ... exit` stops reading at the match; `mount` on a container-heavy
+    # host prints well past 64 KB, so the pipeline can return 141 and abort the
+    # installer inside preflight with no message at all (backend#1778).
+    if [[ -n "$mp" ]]; then
+      local mount_out
+      mount_out="$(mount 2>/dev/null || true)"
+      t="$(awk -v m="$mp" 'index($0," on "m" (")>0 {sub(/.* \(/,""); sub(/[,)].*/,""); print; exit}' <<<"$mount_out")"
+    fi
   fi
   printf '%s' "$t" | tr '[:upper:]' '[:lower:]'
 }
@@ -332,7 +345,9 @@ _pf_docker_root() {
 # Backend host per CLIENT_ENV (mirrors install-client-helm.sh::_backend_url;
 # inlined so preflight is self-contained + unit-testable in isolation).
 _pf_backend_host() {
-  case "${CLIENT_ENV:-prod}" in
+  # Same alias reduction as _backend_url (backend#1745) — an egress preflight
+  # that probes the wrong backend passes while the real path is unreachable.
+  case "$(tb_client_env "${CLIENT_ENV:-prod}")" in
     dev) echo "dev-api.tracebloc.io" ;;
     stg) echo "stg-api.tracebloc.io" ;;
     *)   echo "api.tracebloc.io" ;;

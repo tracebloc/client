@@ -239,7 +239,14 @@ phase2() {
   echo "$cur"
 
   banner "keep annotation now in stored manifest? (expected: 3 PVC blocks)"
-  hctx get manifest "$RELEASE" -n "$NS" | grep -B2 -A1 'resource-policy' | head -25
+  # `head -25` closes the pipe; the manifest is well over 64 KB, so once the
+  # release gains a few more PVCs grep outruns head, the pipeline returns 141
+  # and pipefail+errexit kill the migration mid-verification (backend#1778).
+  manifest_out="$(hctx get manifest "$RELEASE" -n "$NS" || true)"
+  policy_ctx="$(grep -B2 -A1 'resource-policy' <<<"$manifest_out" || true)"
+  if [[ -n "$policy_ctx" ]]; then
+    head -25 <<<"$policy_ctx"
+  fi
 
   banner "mysql data — top tables"
   MYSQL_POD=$(kctx -n "$NS" get pod -l app=mysql-client -o jsonpath='{.items[0].metadata.name}')
