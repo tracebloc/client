@@ -89,10 +89,17 @@ _ensure_kernel_modules() {
 
   # Still unloadable, but the module file exists for a DIFFERENT (installed but
   # not-yet-booted) kernel → a reboot will bring it in via modules-load.d.
-  if [[ -n "$missing" ]] \
-     && ! find "/lib/modules/$(uname -r)" -name 'xt_addrtype.ko*' 2>/dev/null | grep -q . \
-     &&   find /lib/modules                -name 'xt_addrtype.ko*' 2>/dev/null | grep -q .; then
-    KMODS_REBOOT_REQUIRED=1
+  # `grep -q .` closes the pipe on the first line, so a SIGPIPE'd find makes
+  # the pipeline 141 -- which reads here as "no module found" and drops the
+  # reboot hint. Capture instead, and keep the short-circuit: neither find runs
+  # unless $missing is non-empty (backend#1778).
+  if [[ -n "$missing" ]]; then
+    local mod_this_kernel mod_any_kernel
+    mod_this_kernel="$(find "/lib/modules/$(uname -r)" -name 'xt_addrtype.ko*' 2>/dev/null || true)"
+    mod_any_kernel="$(find /lib/modules -name 'xt_addrtype.ko*' 2>/dev/null || true)"
+    if [[ -z "$mod_this_kernel" && -n "$mod_any_kernel" ]]; then
+      KMODS_REBOOT_REQUIRED=1
+    fi
   fi
 }
 

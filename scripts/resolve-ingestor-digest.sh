@@ -149,8 +149,12 @@ ref="${repo}:${tag}"
 # manifest-list/index digest directly); fall back to `docker manifest inspect`.
 digest=""
 if docker buildx imagetools inspect "$ref" >/dev/null 2>&1; then
-  digest="$(docker buildx imagetools inspect "$ref" 2>/dev/null \
-    | awk '/^Digest:/ {print $2; exit}')"
+  # Capture, then slice with a here-string. `awk ... exit` closes the pipe
+  # after ~3 lines, so under `set -o pipefail` (line 30) a SIGPIPE'd inspect
+  # makes the substitution 141 and errexit kills the script before the
+  # "could not resolve a digest" diagnostic below can run (backend#1778).
+  imagetools_out="$(docker buildx imagetools inspect "$ref" 2>/dev/null || true)"
+  digest="$(awk '/^Digest:/ {print $2; exit}' <<<"$imagetools_out")"
 fi
 if [[ -z "$digest" ]]; then
   digest="$(docker manifest inspect --verbose "$ref" 2>/dev/null \

@@ -61,16 +61,21 @@ wait_for_client_ready() {
 }
 
 # Classify why the client isn't Ready, for an accurate message. Echoes a state.
+# Every match below reads a captured variable through a here-string, never a
+# pipe: `grep -q` closes the pipe at its first hit, and under pipefail a
+# SIGPIPE'd producer returns 141, which every `if` here would read as "no
+# match" -- silently downgrading a real bad_creds/image_pull/crash diagnosis
+# to "starting" and handing the user the wrong remedy (backend#1778).
 _diagnose_not_ready() {
   local ns="$1" pods jm_logs
   # Wrong credentials: jobs-manager authenticates to the backend on startup and
   # crash-loops when rejected — surfaced as an auth error in its logs.
   jm_logs="$(kubectl logs -n "$ns" "deployment/${ns}-jobs-manager" --all-containers --tail=50 --request-timeout=5s 2>/dev/null || true)"
-  if printf '%s' "$jm_logs" | grep -qiE 'authentication failed|unable to log in'; then
+  if grep -qiE 'authentication failed|unable to log in' <<<"$jm_logs"; then
     printf 'bad_creds'; return
   fi
   pods="$(kubectl get pods -n "$ns" --request-timeout=5s 2>/dev/null || true)"
-  if printf '%s' "$pods" | grep -qiE 'ImagePullBackOff|ErrImagePull|InvalidImageName'; then
+  if grep -qiE 'ImagePullBackOff|ErrImagePull|InvalidImageName' <<<"$pods"; then
     # On a TLS-inspecting network the pull fails x509 because the nodes don't trust
     # the corporate CA (#424). Distinguish it from a generic pull error so the
     # remedy can name the CA + the env var, not a vague "retry".
@@ -81,12 +86,12 @@ _diagnose_not_ready() {
     local events pull_fail
     events="$(kubectl get events -n "$ns" --request-timeout=5s 2>/dev/null || true)"
     pull_fail="$(printf '%s\n' "$events" | grep -iE 'failed to pull|ErrImagePull' || true)"
-    if printf '%s' "$pull_fail" | grep -qiE 'x509|certificate signed by unknown authority|tls: failed to verify'; then
+    if grep -qiE 'x509|certificate signed by unknown authority|tls: failed to verify' <<<"$pull_fail"; then
       printf 'image_pull_ca'; return
     fi
     printf 'image_pull'; return
   fi
-  if printf '%s' "$pods" | grep -qiE 'CrashLoopBackOff'; then
+  if grep -qiE 'CrashLoopBackOff' <<<"$pods"; then
     printf 'crash'; return
   fi
   printf 'starting'
