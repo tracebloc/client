@@ -908,7 +908,38 @@ credmgrPassword: ""
 # Flip per environment, dev first. Default false: today's shared-edgeuser
 # behavior, byte-for-byte. Needs no per-edge action — the passwords are
 # generated, upgrade-stable Secret values.
-serviceDbAccounts: false
+# UNSET by default: the effective value comes from `serviceDbAccountsByEnv`
+# below, keyed on the resolved CLIENT_ENV. Set this to force one answer on an
+# edge regardless of environment (an operator override — DR, a fleet held back
+# deliberately, or a customer opt-out). backend#1752.
+serviceDbAccounts:
+
+# -- PER-ENVIRONMENT ROLLOUT (backend#1528 · backend#1752)
+#
+# #1151 records the plan as "flip per environment, dev first". Until now there
+# was no mechanism for that — one global boolean meant "per environment" was
+# hand-editing every edge's values and remembering which fleet was where.
+#
+# That gap had teeth. data-ingestors#468 removed the ingestor's edgeuser
+# fallback on the stated precondition that this flag was "on fleet-wide"; it
+# was on nowhere. dev and staging edges float on the :dev/:stg ingestor
+# channels, took the change the same day, and every ingestion Job now fails at
+# Config() before reading a byte. Prod escaped only because its ingestor is
+# digest-pinned to the 0.7 line — a caution engineered for D16, not for this,
+# and one client#490 is about to spend.
+#
+# dev/stg: TRUE. Both are already running the ingestor that requires the
+# per-Job credentials, so this is what makes them work again — and it exercises
+# #1528's S2 path where it is supposed to be exercised, before prod.
+#
+# prod: FALSE, deliberately and explicitly. Prod runs the 0.7-line ingestor,
+# which still has the fallback. Flipping prod is a separate windowed decision
+# (#1528 S0 drill), and it must happen BEFORE prod's ingestor is repinned past
+# 0.8.2 — see the note on `prodDigest`.
+serviceDbAccountsByEnv:
+  dev: true
+  stg: true
+  prod: false
 
 # Optional operator pins for the tb_meta / tb_ingest account passwords (each
 # mirrors credmgrPassword's 3-tier resolution). Leave "" to generate-and-persist

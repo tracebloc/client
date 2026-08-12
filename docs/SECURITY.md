@@ -127,11 +127,15 @@ The target model is least-privilege, one identity per job, with `edgeuser` retir
 |---|---|---|---|
 | **per-experiment user** | `SELECT` on one experiment's physical table(s) only | training pods (injected via per-job Secret as `MYSQL_USER`/`MYSQL_PASSWORD`) | Shipped, opt-in `perExperimentDbCreds` (RFC-0003 D10, backend#1181) |
 | **`tb_credmgr`** | `CREATE USER` + `SELECT … WITH GRANT OPTION` on `training_test_datasets.*` — mints the per-experiment users, nothing else | jobs-manager | Shipped with `perExperimentDbCreds` |
-| **`tb_meta`** | `ALL PRIVILEGES` on `metadata.*` only (no `*.*`, no `GRANT OPTION`) | *(S2)* jobs-manager + requests-proxy metadata work | Minted under `serviceDbAccounts` (backend#1528 S1); not yet consumed |
-| **`tb_ingest`** | `ALL PRIVILEGES` on `training_test_datasets.*` only (no `*.*`, no `GRANT OPTION`) | *(S2)* jobs-manager dataset work + spawned ingestion Jobs | Minted under `serviceDbAccounts` (backend#1528 S1); not yet consumed |
-| **`edgeuser`** | `ALL PRIVILEGES ON *.*` — root-equivalent | jobs-manager, requests-proxy, ingestion pods (default) — **today** | Legacy; retirement in progress (§8.10) |
+| **`tb_meta`** | `ALL PRIVILEGES` on `metadata.*` only (no `*.*`, no `GRANT OPTION`) | jobs-manager + requests-proxy metadata work | **Consumed** since S2 (client-runtime#305/#308, client#664). On for `dev`/`stg` via `serviceDbAccountsByEnv`, off for `prod` (backend#1752) |
+| **`tb_ingest`** | `ALL PRIVILEGES` on `training_test_datasets.*` only (no `*.*`, no `GRANT OPTION`) | jobs-manager dataset work + spawned ingestion Jobs | **Consumed** since S2 (client-runtime#305/#308, client#664). On for `dev`/`stg` via `serviceDbAccountsByEnv`, off for `prod` (backend#1752) |
+| **`edgeuser`** | `ALL PRIVILEGES ON *.*` — root-equivalent | **`prod` fleets only** — dev/stg now authenticate as `tb_meta`/`tb_ingest` | Legacy; retirement in progress (§8.10) |
 
-The dedicated accounts are minted by jobs-manager at startup via runtime DDL (mirroring `ensure_tb_credmgr_account`), created `IDENTIFIED WITH mysql_native_password` so they survive the 5.7→8.4 datadir migration (backend#723), each reset to exactly its one-database grant on every startup. Minting is gated on `serviceDbAccounts` (default off) and is purely additive: until the consumers are switched over (S2), a default install authenticates exactly as it did before.
+The dedicated accounts are minted by jobs-manager at startup via runtime DDL (mirroring `ensure_tb_credmgr_account`), created `IDENTIFIED WITH mysql_native_password` so they survive the 5.7→8.4 datadir migration (backend#723), each reset to exactly its one-database grant on every startup. Minting is gated on `serviceDbAccounts`, which resolves **per environment** via `serviceDbAccountsByEnv` (`dev`/`stg` on, `prod` off) unless an operator sets the flag explicitly. It is **no longer purely additive**: S2 shipped, so wherever the flag is on the consumers authenticate as the dedicated identities.
+
+> **Ordering constraint — read before flipping a fleet or repinning an ingestor.** The ingestor **requires** `DB_USER`/`DB_PASSWORD` from version **0.8.0** (data-ingestors#468 removed the `edgeuser` fallback), and jobs-manager injects them only when this flag is **on**. So a fleet running an ingestor >= 0.8.0 with the flag **off** fails every ingestion Job at `Config()` before reading a byte. That is exactly what happened to dev and staging on 2026-08-11 (backend#1752): both float on the `:dev`/`:stg` ingestor channels and took the change within hours, while prod was spared only because it is digest-pinned to the 0.7 line.
+>
+> **Therefore: turn this flag on for a fleet BEFORE its ingestor moves to 0.8.x, never after.** For prod specifically, that means before `images.ingestor.prodDigest` moves past `0.8.2` (client#490). The invariant is checked in CI by `client-runtime/tests/test_ingestor_env_contract.py` against the contract `data-ingestors` publishes as `runtime_env.v1.json` (backend#1754).
 
 **Staged retirement (backend#1528, RFC-0003 D10 close-out):** **S1** mint `tb_meta` + `tb_ingest` (done) → **S2** switch jobs-manager, requests-proxy, and spawned ingestion Jobs off the hardcoded `edgeuser` constants onto the injected identities, and re-parent the `tb_credmgr` bootstrap → **S3** `REVOKE` `edgeuser` to nothing and `DROP USER`, fleet-staged. `edgeuser` must retain `CREATE USER` + `GRANT OPTION` until the bootstrap is re-parented, so the revoke is deliberately last.
 
@@ -540,11 +544,11 @@ The in-cluster MySQL identity `edgeuser` is provisioned root-equivalent (`ALL PR
 **Mechanism (backend#1528, RFC-0003 D10 close-out):** dedicated least-privilege identities — `tb_meta` (metadata DB) and `tb_ingest` (dataset DB) — that each own exactly one database, plus the already-shipped `tb_credmgr` (mints per-experiment users) and per-experiment training-pod users. See §4.1.1 for the full model.
 
 **Rollout (per fleet, staged, each step reversible until S3):**
-1. **S1 — mint (done, `serviceDbAccounts`, default off).** jobs-manager mints `tb_meta` + `tb_ingest` at startup. Additive: nothing consumes them yet, so a default install is byte-identical.
-2. **S2 — switch consumers.** Move jobs-manager and requests-proxy off the hardcoded `edgeuser` constants onto `tb_meta`/`tb_ingest`; stamp `tb_ingest` onto spawned ingestion Jobs (`DB_USER`/`DB_PASSWORD`); re-parent the `tb_credmgr` bootstrap. Verify heartbeat `information_schema` dataset visibility, not just "no exceptions" — over-revoking degrades silently.
+1. **S1 — mint (done).** jobs-manager mints `tb_meta` + `tb_ingest` at startup under `serviceDbAccounts`.
+2. **S2 — switch consumers (done; on for `dev`/`stg`, off for `prod`).** Move jobs-manager and requests-proxy off the hardcoded `edgeuser` constants onto `tb_meta`/`tb_ingest`; stamp `tb_ingest` onto spawned ingestion Jobs (`DB_USER`/`DB_PASSWORD`); re-parent the `tb_credmgr` bootstrap. Verify heartbeat `information_schema` dataset visibility, not just "no exceptions" — over-revoking degrades silently.
 3. **S3 — retire.** With `perExperimentDbCreds` + `serviceDbAccounts` universally on and S2 shipped, `REVOKE` `edgeuser` to nothing and `DROP USER`. Prod-irreversible; gated on a `SHOW GRANTS FOR 'edgeuser'@'%'` snapshot as the rollback reference.
 
-**Residual until S3 completes fleet-wide:** the root-equivalent account still exists and is still the default authentication identity. `edgeuser` intentionally retains `CREATE USER` + `GRANT OPTION` until the `tb_credmgr` bootstrap is re-parented (S2), so the revoke is deliberately the last step.
+**Residual until S3 completes fleet-wide:** the root-equivalent account still exists, and on `prod` fleets it is still the authentication identity. `edgeuser` intentionally retains `CREATE USER` + `GRANT OPTION` until the `tb_credmgr` bootstrap is re-parented (S2), so the revoke is deliberately the last step.
 
 ---
 
