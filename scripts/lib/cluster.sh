@@ -6,17 +6,20 @@
 # Exact cluster name match (avoids "tracebloc" matching "tracebloc2").
 # Uses multiple detection methods so re-runs work on all distros (e.g. SUSE where
 # jq may be missing or k3d list output format differs).
-# Every probe below CAPTURES the k3d listing first and matches the captured value
+# Every probe below CAPTURES its own k3d listing and matches the captured value
 # (#680's transform). Piping k3d straight into `awk … {exit}` / `grep -q` makes
 # the consumer close the pipe on the FIRST matching line — which for our own
 # cluster is usually line one — so k3d takes SIGPIPE, `set -o pipefail` turns the
 # pipeline into 141, and inside these `if`s that reads as "no such cluster".
 # That is a SECOND, independent route to the client#682 misclassification: the
 # gate calls the machine fresh and offers a first-time install over a cluster
-# that is present and running. One capture also spares two extra k3d calls.
+# that is present and running.
+#
+# Each capture sits INSIDE the probe that reads it, so a probe that never runs
+# never shells out — the k3d call count is exactly what it was before this fix,
+# and the common re-run (jq present, cluster found by probe 1) still costs one
+# call. (Asad: an eager capture at the top made that path cost two.)
 _cluster_exists() {
-  local _list
-  _list="$(k3d cluster list --no-headers 2>/dev/null || true)"
   # 1) JSON output (exact name match) when jq is available
   if command -v jq &>/dev/null; then
     local _json
@@ -26,6 +29,8 @@ _cluster_exists() {
     fi
   fi
   # 2) Table format: first column is cluster name (--no-headers)
+  local _list
+  _list="$(k3d cluster list --no-headers 2>/dev/null || true)"
   if awk -v n="$CLUSTER_NAME" '$1 == n { exit 0 } END { exit 1 }' <<<"$_list"; then
     return 0
   fi
