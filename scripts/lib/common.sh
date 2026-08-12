@@ -844,8 +844,13 @@ validate_config() {
 OS="$(uname -s)"
 ARCH="$(uname -m)"
 # On macOS, override ARCH with real hardware to avoid Rosetta misdetection
-if [[ "$OS" == "Darwin" ]] && sysctl -n hw.optional.arm64 2>/dev/null | grep -q '1'; then
-  ARCH="arm64"
+# Capture-then-match (#680): a SIGPIPE'd producer under pipefail reads as "no
+# match" here, which would leave an Apple Silicon Mac detected as x86_64 and pick
+# the wrong download for every pinned tool.
+if [[ "$OS" == "Darwin" ]]; then
+  _tb_arm64_flag="$(sysctl -n hw.optional.arm64 2>/dev/null || true)"
+  [[ "$_tb_arm64_flag" == "1" ]] && ARCH="arm64"
+  unset _tb_arm64_flag
 fi
 [[ "$ARCH" == "x86_64" ]] && ARCH_DL="amd64" || ARCH_DL="arm64"
 

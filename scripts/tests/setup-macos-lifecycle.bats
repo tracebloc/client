@@ -25,6 +25,27 @@ setup() {
   TB_MACOS_ADMIN_GROUPS="staff everyone";       run _macos_user_is_admin; [ "$status" -ne 0 ] || return 1
 }
 
+# The early-exit pipe hazard (#680), in the FIRST thing step b runs (client#681).
+# `grep -q` stops at its first match, so with `admin` at the FRONT of a long group
+# list the producer is still writing when the pipe closes: it takes SIGPIPE, and
+# `set -o pipefail` turns the pipeline into 141 — which the caller reads as "not
+# an administrator" and answers with the managed-Mac remedy on a fine machine.
+# Match POSITION is the trigger, not producer size, so `admin` must lead.
+# Driven through a real script so `set -euo pipefail` is genuinely in force —
+# mutation-real: this fails against the `printf … | grep -qx` version.
+@test "_macos_user_is_admin: long group list with 'admin' FIRST is still admin (#680 hazard)" {
+  [ "$(id -u)" -eq 0 ] && skip "root short-circuits before the group check"
+  cat > "$BATS_TEST_TMPDIR/p.sh" <<EOF
+set -euo pipefail
+source '${LIB_DIR}/common.sh' >/dev/null 2>&1
+source '${LIB_DIR}/setup-macos.sh' >/dev/null 2>&1
+TB_MACOS_ADMIN_GROUPS="admin \$(seq 1 20000 | tr '\n' ' ')"
+_macos_user_is_admin
+EOF
+  run bash "$BATS_TEST_TMPDIR/p.sh"
+  [ "$status" -eq 0 ] || return 1
+}
+
 @test "_macos_user_is_admin: root -> yes (#430)" {
   id() { [ "$1" = "-u" ] && echo 0 || echo "root wheel"; }
   run _macos_user_is_admin
