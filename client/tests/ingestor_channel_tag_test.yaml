@@ -36,7 +36,7 @@ tests:
           path: spec.template.spec.containers[0].env
           content:
             name: INGESTOR_IMAGE_TAG
-            value: "0.7"
+            value: "0.8"
 
   - it: defaults to the prod float when CLIENT_ENV is unset
     asserts:
@@ -44,7 +44,7 @@ tests:
           path: spec.template.spec.containers[0].env
           content:
             name: INGESTOR_IMAGE_TAG
-            value: "0.7"
+            value: "0.8"
 
   - it: an explicit tag override wins over the channel for every environment
     set:
@@ -65,7 +65,7 @@ tests:
           path: spec.template.spec.containers[0].env
           content:
             name: INGESTOR_IMAGE_TAG
-            value: "0.7"
+            value: "0.8"
 
   - it: renders for a release predating channelTags (--reuse-values replay)
     set:
@@ -76,7 +76,7 @@ tests:
           path: spec.template.spec.containers[0].env
           content:
             name: INGESTOR_IMAGE_TAG
-            value: "0.7"
+            value: "0.8"
 
   - it: prod still pins by digest, so the tag is not the spawn target there
     set:
@@ -86,7 +86,7 @@ tests:
           path: spec.template.spec.containers[0].env
           content:
             name: INGESTOR_IMAGE_DIGEST
-            value: "sha256:9098b3c9b83951f825e262d6ff1e9c47c46c5b5cafbfc8fef1ed82ccbadebb24"
+            value: "sha256:05e124945a2ef61868661a9137abb5e75dac96a090cb41a7b4e8be520c4b5873"
 
   - it: dev gets no digest, so it spawns by the floating channel tag
     set:
@@ -130,7 +130,7 @@ tests:
           path: spec.template.spec.containers[0].env
           content:
             name: INGESTOR_IMAGE_TAG
-            value: "0.7"
+            value: "0.8"
 
   - it: the "production" alias keeps the prod reproducibility pin
     # Bugbot catch (#494): the first alias fix normalized inside
@@ -146,4 +146,4 @@ tests:
           path: spec.template.spec.containers[0].env
           content:
             name: INGESTOR_IMAGE_DIGEST
-            value: "sha256:9098b3c9b83951f825e262d6ff1e9c47c46c5b5cafbfc8fef1ed82ccbadebb24"
+            value: "sha256:05e124945a2ef61868661a9137abb5e75dac96a090cb41a7b4e8be520c4b5873"
