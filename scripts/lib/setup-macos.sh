@@ -547,12 +547,22 @@ assert_amd64_emulation() {
 }
 
 install_macos() {
+  # Breadcrumbs (client#681). Step b was the one step that could fail before ANY
+  # of its stages printed, leaving a log whose last line was the step header — so
+  # even the ERR trap's location had nothing to corroborate it. These cost one
+  # log line each and make the log say how far it got, trap or no trap.
+  log "step b: install_macos starting (OS=$OS ARCH=$ARCH tier=${INSTALL_TIER:-?})"
   _macos_require_admin        # #430: no-admin Macs get a named IT remedy, not a generic sudo error
+  log "step b: admin check passed"
   preflight_sudo
+  log "step b: sudo ready"
   install_homebrew
+  log "step b: homebrew ready"
   install_docker_desktop
+  log "step b: docker ready"
   assert_amd64_emulation      # Docker is up now — prove amd64 runs before the cluster needs it (#433)
   install_macos_cli_tools
+  log "step b: cli tools ready"
   # Best-effort: autostart returns 1 on a mkdir/write failure, and this runs under
   # `set -e` after Docker + tools are already installed — so `|| true` keeps a failed
   # login-item from aborting an otherwise-complete install (#430 Bugbot). The summary

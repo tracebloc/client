@@ -98,6 +98,15 @@ source "${LIB_DIR}/summary.sh"
 source "${LIB_DIR}/diagnose.sh"
 
 trap install_cleanup EXIT
+# Record the site of the first failing command (client#681). `set -E` (errtrace)
+# is what makes this useful: without it an ERR trap fires only at top level, so
+# every failure inside install_macos / install_linux — i.e. nearly all of them —
+# stayed invisible, and the user got a generic closer over an empty log.
+# _record_err is the trap's FIRST command so `$?` is still the failure's status;
+# the location is passed in because BASH_SOURCE/LINENO inside the recorder would
+# describe common.sh. Recording only — it never alters control flow.
+set -E
+trap '_record_err "${BASH_SOURCE[0]:-?}:${LINENO}" "$BASH_COMMAND"' ERR
 # Route SIGINT/SIGTERM through a normal exit so the EXIT trap (install_cleanup)
 # always runs — it shreds the transient machine credential (#838). Without these,
 # a Ctrl-C in the brief mint→source window could leave the 0600 secret on disk.
