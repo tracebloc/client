@@ -1242,12 +1242,20 @@ install_linux() {
   fi
 
   # ── Tier 1/2 (or unknown / stale bootstrap) — the full privileged flow.
+  # Breadcrumbs (client#681): step b is the step that can die before any of its
+  # stages prints, and the log then ends at the step header. One line per stage
+  # makes the log say how far it got, independent of the ERR trap.
+  log "step b: install_linux privileged flow starting (tier=${INSTALL_TIER:-?})"
   preflight_sudo
+  log "step b: sudo ready"
   setup_pm
   apt_wait_for_lock          # don't fight apt-daily/unattended-upgrades for the lock
+  log "step b: package manager ready"
   install_docker_engine
+  log "step b: docker engine ready"
   install_system_deps
   _install_userspace_tools
+  log "step b: system + userspace tools ready"
   dispatch_gpu_setup
 }
 

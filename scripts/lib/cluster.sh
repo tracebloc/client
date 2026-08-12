@@ -6,19 +6,36 @@
 # Exact cluster name match (avoids "tracebloc" matching "tracebloc2").
 # Uses multiple detection methods so re-runs work on all distros (e.g. SUSE where
 # jq may be missing or k3d list output format differs).
+# Every probe below CAPTURES its own k3d listing and matches the captured value
+# (#680's transform). Piping k3d straight into `awk … {exit}` / `grep -q` makes
+# the consumer close the pipe on the FIRST matching line — which for our own
+# cluster is usually line one — so k3d takes SIGPIPE, `set -o pipefail` turns the
+# pipeline into 141, and inside these `if`s that reads as "no such cluster".
+# That is a SECOND, independent route to the client#682 misclassification: the
+# gate calls the machine fresh and offers a first-time install over a cluster
+# that is present and running.
+#
+# Each capture sits INSIDE the probe that reads it, so a probe that never runs
+# never shells out — the k3d call count is exactly what it was before this fix,
+# and the common re-run (jq present, cluster found by probe 1) still costs one
+# call. (Asad: an eager capture at the top made that path cost two.)
 _cluster_exists() {
   # 1) JSON output (exact name match) when jq is available
   if command -v jq &>/dev/null; then
-    if k3d cluster list -o json 2>/dev/null | jq -e --arg n "$CLUSTER_NAME" '(.[] | select(.name == $n)) != null' >/dev/null 2>&1; then
+    local _json
+    _json="$(k3d cluster list -o json 2>/dev/null || true)"
+    if jq -e --arg n "$CLUSTER_NAME" '(.[] | select(.name == $n)) != null' >/dev/null 2>&1 <<<"$_json"; then
       return 0
     fi
   fi
   # 2) Table format: first column is cluster name (--no-headers)
-  if k3d cluster list --no-headers 2>/dev/null | awk -v n="$CLUSTER_NAME" '$1 == n { exit 0 } END { exit 1 }'; then
+  local _list
+  _list="$(k3d cluster list --no-headers 2>/dev/null || true)"
+  if awk -v n="$CLUSTER_NAME" '$1 == n { exit 0 } END { exit 1 }' <<<"$_list"; then
     return 0
   fi
   # 3) Fallback: any line whose first column equals CLUSTER_NAME (handles varying table layout)
-  if k3d cluster list 2>/dev/null | grep -qE "^[[:space:]]*${CLUSTER_NAME}[[:space:]]"; then
+  if grep -qE "^[[:space:]]*${CLUSTER_NAME}[[:space:]]" <<<"$(k3d cluster list 2>/dev/null || true)"; then
     return 0
   fi
   return 1
@@ -612,8 +629,12 @@ _handle_existing_cluster() {
   if command -v jq &>/dev/null; then
     CLUSTER_STATUS=$(k3d cluster list -o json 2>/dev/null | jq -r --arg n "$CLUSTER_NAME" '.[] | select(.name == $n) | .serversRunning // 0' 2>/dev/null || echo "0")
   else
-    local line
-    line=$(k3d cluster list --no-headers 2>/dev/null | awk -v n="$CLUSTER_NAME" '$1 == n { print $2; exit }')
+    # Capture-then-match (#680): awk's `exit` closes the pipe on our cluster's
+    # row, so k3d can take SIGPIPE and pipefail would abort the installer here —
+    # mid-reconcile, with no message. Mirrors _assess_cluster_servers_running.
+    local line _tbl
+    _tbl="$(k3d cluster list --no-headers 2>/dev/null || true)"
+    line=$(awk -v n="$CLUSTER_NAME" '$1 == n { print $2; exit }' <<<"$_tbl")
     if [[ -n "$line" ]]; then
       CLUSTER_STATUS="${line%%/*}"
     fi
@@ -702,7 +723,10 @@ _check_existing_cluster_proxy() {
 
   local missing=()
   for var in "${candidates[@]}"; do
-    echo "$cluster_env" | grep -Eq "^${var}=" || missing+=("$var")
+    # Here-string (#680): `grep -Eq` stops at the first match, so echo can take
+    # SIGPIPE and pipefail would report a variable as MISSING when it is present,
+    # producing a spurious "cluster is missing proxy env" warning.
+    grep -Eq "^${var}=" <<<"$cluster_env" || missing+=("$var")
   done
 
   if [[ ${#missing[@]} -gt 0 ]]; then

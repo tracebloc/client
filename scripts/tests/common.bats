@@ -179,6 +179,116 @@ setup() {
   [[ "$out" == *"Re-run required"* || "$out" == *"Complete the step"* ]] || return 1
 }
 
+# ── Failure diagnostics (client#681) ───────────────────────────────────────
+# A step that died under `set -e` used to leave the user a generic closer AND a
+# log with nothing in it. The ERR trap records the site; install_cleanup must
+# surface it on screen and (with the command) in the log.
+# Driven through a real script under the SAME options and traps install-k8s.sh
+# arms, so this exercises the wiring (set -E + the trap line), not just the
+# function. The body is left to DIE — an ERR trap does not fire for a command in
+# a `&&`/`||` list, so `body || true` would test nothing. An EXIT trap reports
+# what was captured, exactly as install_cleanup does in the real run.
+_write_err_probe() {   # $1 = path, $2 = body that must fail
+  cat > "$1" <<EOF
+set -Eeuo pipefail
+source '${LIB_DIR}/common.sh' >/dev/null 2>&1
+trap '_record_err "\${BASH_SOURCE[0]:-?}:\${LINENO}" "\$BASH_COMMAND"' ERR
+trap 'printf "LOC=%s CODE=%s CMD=%s\n" "\$TB_ERR_LOC" "\$TB_ERR_CODE" "\$TB_ERR_CMD"' EXIT
+$2
+EOF
+}
+
+@test "_record_err: captures location, command and exit code" {
+  _write_err_probe "$BATS_TEST_TMPDIR/p.sh" 'boom() { grep -q nope <<<"hay"; }
+boom'
+  run bash "$BATS_TEST_TMPDIR/p.sh"
+  [ "$status" -ne 0 ] || return 1
+  [[ "$output" == *"CODE=1"* ]] || return 1            # the failing status
+  [[ "$output" == *"grep -q nope"* ]] || return 1      # the failing command
+  [[ "$output" == *"p.sh:5"* ]] || return 1            # the failing LINE, not the call site
+}
+
+# errtrace is what makes the trap fire INSIDE functions; without `set -E` an ERR
+# trap only fires at top level and every failure in install_macos/install_linux
+# stays invisible — the exact hole behind client#681.
+@test "_record_err: fires inside a nested function (requires set -E)" {
+  _write_err_probe "$BATS_TEST_TMPDIR/p.sh" 'inner() { false; }
+outer() { inner; }
+outer'
+  run bash "$BATS_TEST_TMPDIR/p.sh"
+  [[ "$output" == *"CODE=1"* ]] || return 1
+}
+
+# A pipeline whose reader exits early kills the writer under `set -o pipefail` —
+# the class of death that produced NO output at all before this. The exact status
+# is not portable (bash's printf builtin reports EPIPE as a write error and
+# returns 1; an external writer dies on SIGPIPE and yields 141), so assert the
+# property that matters: it is recorded, with a location, instead of vanishing.
+@test "_record_err: captures a pipefail death from an early-exiting reader" {
+  _write_err_probe "$BATS_TEST_TMPDIR/p.sh" 'h() { printf "%s\n" $(seq 1 20000) | grep -qx 5; }
+h'
+  run bash "$BATS_TEST_TMPDIR/p.sh"
+  [ "$status" -ne 0 ] || return 1
+  [[ "$output" == *"CODE="* ]] || return 1
+  [[ "$output" != *"CODE= "* ]] || return 1        # a status was actually captured
+  [[ "$output" == *"p.sh:5"* ]] || return 1        # and the line that died
+}
+
+# The FIRST failure is the cause; `set -e` unwinding must not overwrite it.
+# `cmd || _record_err …` keeps the failing status in `$?` where the recorder
+# reads it (a bare `( exit 7 ); …` would abort the test under bats' own set -e).
+@test "_record_err: first failure wins" {
+  unset TB_ERR_CODE TB_ERR_LOC TB_ERR_CMD
+  ( exit 7 ) || _record_err "first.sh:1"
+  ( exit 9 ) || _record_err "second.sh:2"
+  [ "$TB_ERR_CODE" = 7 ] || return 1
+  [ "$TB_ERR_LOC" = "first.sh:1" ] || return 1
+}
+
+@test "install_cleanup: a recorded failure names the site on screen" {
+  unset CLIENT_STATE
+  TB_ERR_CODE=141; TB_ERR_LOC="setup-macos.sh:62"; TB_ERR_CMD="grep -qx admin"
+  out="$( ( exit 1 ); install_cleanup 2>&1 )"
+  [[ "$out" == *"setup-macos.sh:62"* ]] || return 1
+  [[ "$out" == *"141"* ]] || return 1
+}
+
+# The command text is installer internals: log it, never print it (parity with
+# install-k8s.ps1's Show-FatalError, which shows a reason but no stack trace).
+@test "install_cleanup: the failing command goes to the log, not the screen" {
+  unset CLIENT_STATE
+  LOG_FILE="$BATS_TEST_TMPDIR/install.log"; : > "$LOG_FILE"
+  TB_ERR_CODE=1; TB_ERR_LOC="lib/x.sh:9"; TB_ERR_CMD="curl_secure -fsSL \$SECRET_URL"
+  out="$( ( exit 1 ); install_cleanup 2>&1 )"
+  [[ "$out" != *"curl_secure"* ]] || return 1
+  grep -q "curl_secure" "$LOG_FILE" || return 1
+  grep -q "FAILED at lib/x.sh:9" "$LOG_FILE" || return 1
+}
+
+# Ctrl-C is not a broken installer. 130/143 are the codes install-k8s.sh's
+# INT/TERM traps exit with; they must read as an interruption, not a failure.
+@test "install_cleanup: exit 130 (Ctrl-C) -> interrupted, not 'did not complete'" {
+  unset CLIENT_STATE TB_ERR_CODE
+  out="$( ( exit 130 ); install_cleanup 2>&1 )"
+  [[ "$out" == *"interrupted"* ]] || return 1
+  [[ "$out" != *"did not complete"* ]] || return 1
+}
+
+@test "install_cleanup: exit 143 (SIGTERM) -> interrupted, not 'did not complete'" {
+  unset CLIENT_STATE TB_ERR_CODE
+  out="$( ( exit 143 ); install_cleanup 2>&1 )"
+  [[ "$out" == *"interrupted"* ]] || return 1
+  [[ "$out" != *"did not complete"* ]] || return 1
+}
+
+# A genuine failure must still say so — the interrupted branch must not swallow it.
+@test "install_cleanup: exit 1 still reports a failure (interrupted branch is narrow)" {
+  unset CLIENT_STATE TB_ERR_CODE
+  out="$( ( exit 1 ); install_cleanup 2>&1 )"
+  [[ "$out" == *"did not complete"* ]] || return 1
+  [[ "$out" != *"interrupted"* ]] || return 1
+}
+
 # ── retry ──────────────────────────────────────────────────────────────────
 @test "retry: succeeds on first attempt" {
   run retry 3 1 true
