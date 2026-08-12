@@ -88,9 +88,20 @@ spec:
       # exit code is not evidence. Per-dir OK/FAIL is logged and nothing is fatal: the OTHER dir is
       # still repaired and jobs-manager still starts, so a genuinely unwritable mount surfaces as a
       # clear error at the writer pod rather than wedging the whole edge in Init. CSI skips this.
+      # The pass condition is other-writability ALONE, because that is what decides whether the
+      # writers above can work. It deliberately does not assert setgid/sticky: a mount that grants
+      # other-write while dropping S_ISGID is degraded (new entries stop inheriting GID 1000), not
+      # unusable, and failing it would cry wolf on an install that works. So the verdict label
+      # names the one property it verified ("OK <dir> other-writable") and always prints want vs
+      # got, instead of a bare "OK" that could be read as "the whole mode landed" — and when a call
+      # failed on a dir that was ALREADY other-writable it says "other-writable regardless", never
+      # "mode applied anyway", which would credit this container for something it did not do.
       # Kept deliberately diffable by eye against the installer's Get-ReleaseDirsPrepCommand
       # (scripts/install-k8s.ps1), which prepares the same dirs with the same path:mode spec and the
-      # same `ls -ldn` verification; the chart additionally names which call failed.
+      # same `ls -ldn` verification; the chart additionally names which call failed. One intentional
+      # divergence: the chart does NOT send chown/chmod stderr to /dev/null, so the real errno
+      # (Operation not permitted vs Read-only file system) lands in `kubectl logs` beside the
+      # verdict; the installer suppresses it because its output is a user-facing progress line.
       initContainers:
       - name: init-writable-data
         image: {{ include "tracebloc.image" (dict "repository" "library/busybox" "tag" .Values.images.busybox.tag "digest" .Values.images.busybox.digest "registry" (dig "imageRegistry" "docker.io" (.Values.global | default dict))) | quote }}
@@ -118,13 +129,8 @@ spec:
               # Verdict comes from the mode OBSERVED here, not from an exit status (a bind mount
               # can accept a chmod and ignore it). ls -ldn is POSIX: field 1 mode, field 3 uid.
               # Mode char 9 is the other-write bit, which ????????w* tests without arithmetic;
-              # a trailing setgid/sticky/ACL char is absorbed by the *.
-              # The pass condition is other-writability ALONE, because that is what decides
-              # whether the writers above can work. It deliberately does not assert setgid/sticky:
-              # a mount that grants other-write but drops S_ISGID is degraded (new entries stop
-              # inheriting GID 1000), not unusable, and failing it would cry wolf on a working
-              # install. So the label names the ONE thing verified and always prints want vs got,
-              # rather than saying a bare "OK" that could be read as "the whole mode landed".
+              # a trailing setgid/sticky/ACL char is absorbed by the *. Pass = other-writable
+              # ALONE; the label says so and prints want vs got (rationale in the YAML above).
               set -- $(ls -ldn "$d" 2>/dev/null)
               got=$1; owner=$3
               case "$got" in
