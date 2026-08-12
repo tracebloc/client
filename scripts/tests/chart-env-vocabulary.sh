@@ -110,7 +110,8 @@ echo "== the template fail is a real backstop, not decoration =="
 # The enum is only enforced where the packaged schema is read. Prove the helper
 # refuses independently, by rendering with schema validation switched off.
 # Gated on flag support: CI pins helm v3.15.4 and the flag landed in 3.16.
-if helm template --help 2>&1 | grep -q -- '--skip-schema-validation'; then
+_helm_help="$(helm template --help 2>&1 || true)"
+if grep -q -- '--skip-schema-validation' <<<"$_helm_help"; then
   expect_reject "CLIENT_ENV=prd with the schema skipped" \
     "is not a recognized environment" \
     --set env.CLIENT_ENV=prd --skip-schema-validation

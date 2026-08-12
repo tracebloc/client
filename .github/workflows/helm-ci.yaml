@@ -10,6 +10,7 @@ on:
       - 'scripts/tests/e2e-seal-check.sh'
       - 'scripts/tests/e2e-full-seal.sh'
       - 'scripts/tests/lib/e2e-common.sh'
+      - 'scripts/tests/chart-env-vocabulary.sh'
       - 'scripts/lib/**'
       - '.github/workflows/helm-ci.yaml'
   pull_request:
@@ -21,6 +22,7 @@ on:
       - 'scripts/tests/e2e-seal-check.sh'
       - 'scripts/tests/e2e-full-seal.sh'
       - 'scripts/tests/lib/e2e-common.sh'
+      - 'scripts/tests/chart-env-vocabulary.sh'
       - 'scripts/lib/**'
       - '.github/workflows/helm-ci.yaml'
   # Manual runs — mainly to fire full-seal-e2e on demand (e.g. right after the
