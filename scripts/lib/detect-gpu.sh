@@ -25,15 +25,23 @@ detect_gpu() {
   fi
 
   if has lspci; then
-    if lspci 2>/dev/null | grep -qi "NVIDIA"; then
+    # Capture ONCE, then match the captured value. `lspci | grep -qi` lets grep
+    # close the pipe on its first hit; lspci takes SIGPIPE and pipefail makes the
+    # pipeline 141, which the `if` reads as "no such GPU" — a CPU-mode cluster on
+    # a GPU host. lspci streams device-per-line, so an NVIDIA/AMD card early in
+    # the enumeration is exactly the case that loses the race (backend#1778).
+    local lspci_out amd_line
+    lspci_out="$(lspci 2>/dev/null || true)"
+    if grep -qi "NVIDIA" <<<"$lspci_out"; then
       GPU_VENDOR="nvidia"
       NVIDIA_DRIVER_OK=false
       warn "NVIDIA GPU detected — drivers not yet installed."
       return
     fi
-    if lspci 2>/dev/null | grep -qi "AMD.*VGA\|Advanced Micro Devices.*VGA\|Radeon"; then
+    if grep -qi "AMD.*VGA\|Advanced Micro Devices.*VGA\|Radeon" <<<"$lspci_out"; then
       GPU_VENDOR="amd"
-      success "AMD GPU detected: $(lspci 2>/dev/null | grep -i 'Radeon\|AMD.*VGA' | head -1)"
+      amd_line="$(grep -i 'Radeon\|AMD.*VGA' <<<"$lspci_out" || true)"
+      success "AMD GPU detected: ${amd_line%%$'\n'*}"
       return
     fi
   fi

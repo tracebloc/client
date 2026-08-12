@@ -1182,3 +1182,39 @@ setup() {
   run _pf_connectivity
   [[ "$output" != *"container registries"* ]] || return 1
 }
+
+# ── backend#1778 / client#686: early-exit pipe consumers ────────────────────
+# _pf_fstype's findmnt probe was `t="$(findmnt … | head -1)"`. head closes the
+# pipe after line 1, findmnt takes SIGPIPE, and pipefail makes the pipeline 141;
+# in an ASSIGNMENT under `set -e` that aborts the installer INSIDE preflight
+# with no message at all (the #680 sibling two lines below was already fixed).
+# findmnt prints one line per mount over the target, so a bind-mounted or
+# stacked path is all it takes — and findmnt is util-linux, so this is a Linux
+# path by construction.
+#
+# Two things make this test non-vacuous:
+#   1. The match LEADS — the real fstype first, ~1.2MB of filler after. The
+#      filler comes from an EXTERNAL command (seq), because a producer built
+#      only from bash builtins does not reproduce a real command's SIGPIPE.
+#   2. _pf_fstype is called BARE, not as `t="$(_pf_fstype …)"`. Production uses
+#      the command-substitution form, but errexit only propagates OUT of a
+#      command substitution on bash >= 4.4 — on the macOS system bash (3.2) it
+#      does not, so the cmdsub form would pass against the unfixed code here
+#      while still aborting on a Linux install. The bare call asserts the real
+#      contract ("this probe must never fail the shell") on every bash.
+@test "_pf_fstype: a multi-line findmnt does not abort under set -euo pipefail (backend#1778)" {
+  run bash -c '
+    set -euo pipefail
+    source "'"${LIB_DIR}"'/common.sh"
+    source "'"${LIB_DIR}"'/preflight.sh"
+    LOG_FILE=/dev/null; OS=Linux
+    # Answer first, then far past the pipe buffer — one line per stacked mount.
+    findmnt() { printf "ext4\n"; seq 1 200000; }
+    has() { [ "$1" = findmnt ]; }   # findmnt yes; stat/df fallbacks off
+    _pf_fstype /tmp
+    printf "\nREACHED_END\n"
+  '
+  [ "$status" -eq 0 ] || return 1
+  [[ "$output" == "ext4"* ]] || return 1
+  [[ "$output" == *REACHED_END* ]] || return 1
+}

@@ -1575,9 +1575,16 @@ _stub_install_steps() {
 @test "install_docker_engine: sg-docker re-exec guard keys off _grant_user, not bare \$USER (#427 reviewer)" {
   # The grant target and the in-session re-exec guard must agree, or the USER-unset
   # edge grants but never re-execs -> the dead-end loop returns.
+  # Both probes (the group grant and the in-session re-exec guard) are now
+  # capture-then-match — a `case` over a captured `id -nG`, not `… | grep -qw
+  # docker` (backend#1778 / client#686). What this test pins is the IDENTITY they
+  # key off, which is unchanged; the membership match itself is covered by the
+  # behavioural tests above.
   f="$BATS_TEST_DIRNAME/../lib/setup-linux.sh"
-  grep -qE 'id -nG "\$_grant_user"[^|]*\| grep -qw docker' "$f"
-  ! grep -qE 'id -nG "\$USER"[^|]*\| grep -qw docker' "$f" || return 1
+  [ "$(grep -cE 'id -nG "\$_grant_user"' "$f")" -eq 2 ] || return 1
+  ! grep -qE 'id -nG "\$USER"' "$f" || return 1
+  # …and the captured value is word-matched, not substring-matched.
+  [ "$(grep -cE '^\s*\*" docker "\*\)' "$f")" -ge 1 ] || return 1
 }
 
 # ── #496: cgroup delegation is VERIFIED, not assumed ────────────────────────
@@ -1693,4 +1700,49 @@ _stub_install_steps() {
   [[ "$output" == *"researcher's next login"* ]] || return 1      # mode-aware wording, not judged on the admin
   [[ "$output" != *"k3d cluster delete"* ]] || return 1           # prepare-host creates no cluster to recreate
   [[ "$output" != *"NOT active in this session"* ]] || return 1
+}
+
+# ── backend#1778 / client#686: early-exit pipe consumers ────────────────────
+# `docker info --format '{{json .Runtimes}}' | grep -q '"nvidia"'` let grep close
+# the pipe on its first hit; docker took SIGPIPE and pipefail turned the pipeline
+# into 141, which the `if` read as "no nvidia runtime" — handing a Tier-0 GPU host
+# a CPU-only cluster even though the toolkit was already configured.
+#
+# The match must LEAD: "nvidia" first, then filler past the pipe buffer. With
+# "nvidia" appended last, grep must read the whole stream and never closes early,
+# so the test would pass against the UNFIXED code. The filler is produced by an
+# EXTERNAL command (seq) because a producer built only from bash builtins does
+# not reproduce a real command's SIGPIPE death.
+_tier0_flags() { _tier0_gpu_flags >/dev/null 2>&1; printf '%s\n' "${K3D_GPU_FLAGS[*]:-none}"; }
+
+@test "_tier0_gpu_flags: nvidia runtime in a large docker info is still seen (backend#1778)" {
+  GPU_VENDOR=nvidia
+  K3D_GPU_FLAGS=()
+  docker() { printf '{"nvidia":{"path":"nvidia-container-runtime"},"filler":"'; seq 1 200000; printf '"}\n'; }
+  set -o pipefail
+  run _tier0_flags
+  [ "$status" -eq 0 ] || return 1
+  [ "$output" = "--gpus=all" ] || return 1
+}
+
+@test "_tier0_gpu_flags: a large docker info WITHOUT nvidia still stays CPU-only" {
+  # The fix must not simply invert the verdict.
+  GPU_VENDOR=nvidia
+  K3D_GPU_FLAGS=()
+  docker() { printf '{"runc":{"path":"runc"},"filler":"'; seq 1 200000; printf '"}\n'; }
+  set -o pipefail
+  run _tier0_flags
+  [ "$status" -eq 0 ] || return 1
+  [ "$output" = "none" ] || return 1
+}
+
+@test "_tier0_gpu_flags: a large docker info WITH nvidia announces GPU access" {
+  GPU_VENDOR=nvidia
+  K3D_GPU_FLAGS=()
+  docker() { printf '{"nvidia":{"path":"nvidia-container-runtime"},"filler":"'; seq 1 200000; printf '"}\n'; }
+  set -o pipefail
+  run _tier0_gpu_flags
+  [ "$status" -eq 0 ] || return 1
+  [[ "$output" == *"GPU access"* ]] || return 1
+  [[ "$output" != *"CPU-only"* ]] || return 1
 }
