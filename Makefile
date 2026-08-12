@@ -37,12 +37,23 @@ SHELLCHECK_FILES := \
 	scripts/tests/lib/e2e-common.sh \
 	scripts/tests/path-persist.sh
 
+# The bats total, DERIVED — never written down. It moves on most PRs that add a
+# test, nothing enforces it, and the help text had drifted from its hardcoded
+# 868 to a real 946 with nobody noticing. A number that is wrong is worse than
+# no number, and re-hardcoding today's value only resets the drift clock.
+#
+# `=`, not `:=`: recursively expanded, so the grep runs only when `help` actually
+# prints it. `make check` is the pre-push path with a sub-60 s budget and never
+# pays for it. bats declares one test per `@test` at line start, so this matches
+# `bats`'s own count exactly (verified: 946 = 946).
+BATS_TEST_COUNT = $(shell grep -h '^@test' scripts/tests/*.bats 2>/dev/null | wc -l | tr -d ' ')
+
 .PHONY: help
 help:
 	@echo "tracebloc/client — make targets"
 	@echo
 	@echo "  check       lint + fast checks (~4 s) — run this before every push"
-	@echo "  check-all   everything CI runs locally, including the 868-test bats suite"
+	@echo "  check-all   everything CI runs locally, including the $(BATS_TEST_COUNT)-test bats suite"
 	@echo "  setup       check for / point at the tools these targets need; installs the pre-push hook"
 	@echo "  install-hooks  (re)install the git pre-push hook that runs 'make check'"
 	@echo
@@ -58,12 +69,12 @@ help:
 # drift guards 0.2 s, helm lint 0.7 s.
 #
 # The bats suite is deliberately NOT here. It is the repo's real unit
-# suite (868 tests) and it takes ~2 min serially on macOS — three times
-# over the budget — and it does not parallelise without GNU parallel,
-# which is not a thing every dev machine has. Splitting it into a fast
-# tier is real work, not a Makefile line, so it lives in `check-all`
-# until someone does it. A `check` that quietly took two minutes would
-# be a `check` nobody runs.
+# suite and it takes ~2 min serially on macOS — three times over the
+# budget — and it does not parallelise without GNU parallel, which is
+# not a thing every dev machine has. Splitting it into a fast tier is
+# real work, not a Makefile line, so it lives in `check-all` until
+# someone does it. A `check` that quietly took two minutes would be a
+# `check` nobody runs.
 .PHONY: check
 check: lint drift helm-lint
 	@echo "==> check: green (bats + helm unit tests are in 'make check-all')"
