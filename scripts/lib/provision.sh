@@ -98,7 +98,11 @@ _report_create_failure() {
     fi
     return 0
   fi
-  errline="$(grep -aE 'Error:|HTTP [0-9][0-9][0-9]|refused|timed? ?out|unauthorized|forbidden|denied' "$out" 2>/dev/null | head -4)"
+  # `head -4` closes the pipe once grep has produced 4 matches; under pipefail
+  # the substitution then yields 141 and errexit aborts _report_create_failure
+  # before warn/hint print why provisioning failed -- its entire purpose.
+  errmatches="$(grep -aE 'Error:|HTTP [0-9][0-9][0-9]|refused|timed? ?out|unauthorized|forbidden|denied' "$out" 2>/dev/null || true)"
+  errline="$(head -4 <<<"$errmatches")"
   if [[ -n "$errline" ]]; then
     warn "The client couldn't be provisioned:"
     while IFS= read -r l; do [[ -n "$l" ]] && hint "$l"; done <<<"$errline"
