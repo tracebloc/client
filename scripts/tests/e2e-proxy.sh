@@ -7,7 +7,7 @@
 #  as http://user:pass@host — and proves the cluster's nodes pull a workload
 #  image THROUGH the authenticated proxy.
 #
-#  This exercises the corporate-proxy hardening end-to-end (the Charité/hospital
+#  This exercises the corporate-proxy hardening end-to-end (the Tenant-a/hospital
 #  archetype): _write_k3d_proxy_config (passes proxy env via a k3d CONFIG FILE so
 #  the '@' in user:pass@host survives — k3d splits --env on '@') + _augment_no_proxy
 #  (so in-cluster traffic bypasses the proxy and `--wait` doesn't hang).
@@ -149,7 +149,7 @@ fi
 #   * WITH the proxy env it reaches the backend THROUGH the squid (the fixed
 #     ingestion Job);
 #   * with that env unset the same call bypasses the squid / dials direct (the
-#     pre-fix Job — in a real proxy-only network like Charité that direct dial is
+#     pre-fix Job — in a real proxy-only network like Tenant-a that direct dial is
 #     refused with [Errno 111]; here the env-unset call simply reaches the backend
 #     stand-in directly, and we assert the *absence* of a proxied CONNECT).
 #

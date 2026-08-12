@@ -16,6 +16,11 @@ on:
     paths:
       - 'scripts/**'
       - '.github/workflows/installer-tests.yaml'
+      # #616: the check-facts drift gate enforces the GPU node image's k3s pin against
+      # facts.env — run it when those files change too, else a K3S_TAG edit could drift
+      # and merge green (Bugbot).
+      - 'docker/k3s-cuda/**'
+      - '.github/workflows/build-k3s-cuda.yaml'
   pull_request:
     # `labeled` is required so adding the `e2e` label to an open PR starts the
     # e2e-journey job immediately — with the default types it would only fire on
@@ -25,6 +30,11 @@ on:
     paths:
       - 'scripts/**'
       - '.github/workflows/installer-tests.yaml'
+      # #616: the check-facts drift gate enforces the GPU node image's k3s pin against
+      # facts.env — run it when those files change too, else a K3S_TAG edit could drift
+      # and merge green (Bugbot).
+      - 'docker/k3s-cuda/**'
+      - '.github/workflows/build-k3s-cuda.yaml'
   schedule:
     - cron: '0 3 * * 1'   # Mondays 03:00 UTC — catch drift as distro base images move
   workflow_dispatch:
@@ -45,7 +55,7 @@ jobs:
     name: Static analysis
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: bash -n (syntax) on every shell script
         run: |
@@ -122,7 +132,7 @@ jobs:
     name: bats (bash unit, mocked)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - name: Install bats
         run: sudo apt-get update -qq && sudo apt-get install -y -qq bats
       - name: Run bats
@@ -139,7 +149,7 @@ jobs:
         os: [ubuntu-latest, windows-latest]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - name: Run Pester
         shell: pwsh
         env:
@@ -183,7 +193,7 @@ jobs:
           - 'fedora:latest'       # dnf, falls through to get.docker.com
           - 'opensuse/leap:15.6'  # zypper
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       # Pull the distro image FIRST, bounded and retried. `docker run` pulls
       # implicitly with no timeout, so Docker Hub connectivity trouble either
       # fails the job in seconds (registry-1.docker.io timeout, exit 125) or
@@ -225,13 +235,13 @@ jobs:
         os: [ubuntu-22.04, ubuntu-24.04, ubuntu-24.04-arm]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - name: Bring up a real k3d cluster + run a workload
         run: bash scripts/tests/e2e-cluster.sh
 
   e2e-proxy:
     timeout-minutes: 30
-    # Authenticated corporate-proxy E2E (the Charité/hospital archetype): stands
+    # Authenticated corporate-proxy E2E (the Tenant-a/hospital archetype): stands
     # up a squid that REQUIRES basic auth, brings the cluster up with the
     # installer's proxy config pointed at it as user:pass@host, and proves the
     # nodes pull a workload image THROUGH the authed proxy (the squid log shows an
@@ -240,7 +250,7 @@ jobs:
     name: E2E auth-proxy (squid)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - name: Cluster up through an authenticated proxy
         run: bash scripts/tests/e2e-proxy.sh
 
@@ -272,7 +282,7 @@ jobs:
           - 'opensuse/leap:15.6'  # zypper
           - 'alpine:3'            # busybox sh + apk (optional, minimal)
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       # Pull the distro image FIRST, bounded and retried. `docker run` pulls
       # implicitly with no timeout, so Docker Hub connectivity trouble either
       # fails the job in seconds (registry-1.docker.io timeout, exit 125) or
@@ -328,7 +338,7 @@ jobs:
       github.event_name != 'pull_request' ||
       contains(github.event.pull_request.labels.*.name, 'e2e')
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - name: Install → CLI → cluster info (fresh shell) → dataset push --dry-run
         env:
           TRACEBLOC_CLI_REF: ${{ vars.TRACEBLOC_CLI_REF }}

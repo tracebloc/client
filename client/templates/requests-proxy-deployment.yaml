@@ -23,7 +23,7 @@ spec:
       containers:
         - name: proxy
           {{- $rpDigest := (dig "requestsProxy" "digest" "" .Values.images) }}
-          image: {{ include "tracebloc.image" (dict "repository" "tracebloc/jobs-manager" "tag" .Values.env.CLIENT_ENV "digest" $rpDigest "registry" (dig "imageRegistry" "docker.io" (.Values.global | default dict))) | quote }}
+          image: {{ include "tracebloc.image" (dict "repository" "tracebloc/jobs-manager" "tag" (include "tracebloc.clientEnv" .) "digest" $rpDigest "registry" (dig "imageRegistry" "docker.io" (.Values.global | default dict))) | quote }}
           # digest set -> repo@digest + IfNotPresent (restart-safe offline); empty ->
           # repo:tag + Always. Was hardcoded Always, which ignored a pinned digest and
           # re-pulled on every restart even when the image was already cached (#552).
@@ -45,6 +45,43 @@ spec:
             - "requests_proxy_server:create_app()"
           ports:
             - containerPort: 8888
+          # #1143: without probes the pod is "Ready" the instant the container
+          # process starts — before gunicorn has bound :8888 — so tb doctor's
+          # "Service Bus egress (requests-proxy) ready" (which reads
+          # ReadyReplicas) shows a false green even when the proxy can't relay.
+          # tcpSocket (not httpGet): the proxy app lives in client-runtime and
+          # exposes no chart-visible HTTP health path, and a probe against an
+          # unknown path would 404 and wedge the pod. A successful TCP accept on
+          # :8888 confirms the gunicorn MASTER has bound the listen socket. That
+          # is a strict improvement over no probes — it catches a container that
+          # never starts — but it does NOT fully close the false-green: the
+          # master binds the socket before the single worker finishes importing
+          # create_app(), and keeps it bound while a worker crash-loops on that
+          # import, so a proxy that can't actually relay can still read Ready.
+          # Fully closing it would need a real /healthz served from
+          # client-runtime. Mirrors mysql-deployment.yaml's
+          # startup/liveness/readiness structure.
+          startupProbe:
+            tcpSocket:
+              port: 8888
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 12
+          livenessProbe:
+            tcpSocket:
+              port: 8888
+            initialDelaySeconds: 0
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 5
+          readinessProbe:
+            tcpSocket:
+              port: 8888
+            initialDelaySeconds: 0
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 3
           securityContext:
             runAsNonRoot: true
             runAsUser: 1001
@@ -91,6 +128,24 @@ spec:
                 secretKeyRef:
                   name: {{ include "tracebloc.secretName" . }}
                   key: POD_TOKEN_SIGNING_SECRET
+            {{- if (include "tracebloc.serviceDbAccounts" .) }}
+            # backend#1528 S2 (RFC-0003 D10 close-out): authenticate the proxy's
+            # metadata-DB access as the dedicated tb_meta identity instead of
+            # the root-equivalent edgeuser. Only the metadata identity is wired
+            # here — the proxy never touches the dataset DB. jobs-manager mints
+            # tb_meta at its startup; the proxy's bootstrap retries until it
+            # lands. Rendered only when enabled, so a default install stays
+            # byte-identical (mirrors the jobs-manager block).
+            - name: SERVICE_DB_ACCOUNTS
+              value: "1"
+            - name: TB_META_USER
+              value: "tb_meta"
+            - name: TB_META_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "tracebloc.secretName" . }}
+                  key: TB_META_PASSWORD
+            {{- end }}
       {{- if include "tracebloc.useImagePullSecrets" . }}
       imagePullSecrets:
         - name: {{ include "tracebloc.registrySecretName" . }}

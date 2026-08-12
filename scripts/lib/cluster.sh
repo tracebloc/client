@@ -179,12 +179,19 @@ wire_ca_trust() {
   # still lack the corporate CA (Bugbot). curl "downloads" trust the user's own
   # CURL_CA_BUNDLE, which we deliberately don't touch, so it is never claimed here.
   local wired="" kept=""
-  if [[ -z "${SSL_CERT_FILE:-}" ]]; then
+  # A var already pointing at OUR CA ($ca) -- whether the installer set it from
+  # TRACEBLOC_CA_BUNDLE (the curl|bash path exports SSL_CERT_FILE before launching
+  # install-k8s.sh) or the operator set it to the same file -- is WIRED, not a
+  # foreign pre-set to keep-and-verify. Reporting it as "keeping your pre-set, verify
+  # it" was misleading for a value the installer itself set, and hid the cosign/helm
+  # wiring (Bugbot client#631). Only a DIFFERENT pre-set bundle takes the kept branch.
+  # `-ef` compares by file identity, robust to relative/absolute/symlink differences.
+  if [[ -z "${SSL_CERT_FILE:-}" || "${SSL_CERT_FILE}" -ef "$ca" ]]; then
     export SSL_CERT_FILE="$ca";  wired="cosign, helm"
   else
     kept="SSL_CERT_FILE (cosign/helm)"
   fi
-  if [[ -z "${GIT_SSL_CAINFO:-}" ]]; then
+  if [[ -z "${GIT_SSL_CAINFO:-}" || "${GIT_SSL_CAINFO}" -ef "$ca" ]]; then
     export GIT_SSL_CAINFO="$ca"; wired="${wired:+$wired and }git"
   else
     kept="${kept:+$kept and }GIT_SSL_CAINFO (git)"
@@ -1054,14 +1061,21 @@ _merge_kubeconfig() {
 
 _wait_for_api() {
   local logfile="${LOG_FILE:-/tmp/tracebloc-spin.log}"
-  local attempt max=30
-  log "Waiting for API server to become ready..."
+  # #562: how long to wait for the API to answer, in seconds. The old hard 60s
+  # cap (max=30 × sleep 2) false-failed a slow/proxied laptop that was still
+  # loading images on its first kubectl even though `k3d --wait` had returned.
+  # Default raised to 180s and made env-tunable (TB_API_WAIT_S); re-running the
+  # installer is always safe, so a timeout here is a retryable state in practice.
+  local _budget_s
+  case "${TB_API_WAIT_S:-}" in ''|*[!0-9]*) _budget_s=180 ;; *) _budget_s=$((10#${TB_API_WAIT_S})) ;; esac
+  log "Waiting for API server to become ready (up to ${_budget_s}s)..."
 
   tput civis 2>/dev/null || true
   local frames=('⠋' '⠙' '⠹' '⠸' '⠼' '⠴' '⠦' '⠧' '⠇' '⠏')
   local f=0
-  for attempt in $(seq 1 $max); do
-    # --request-timeout bounds the call itself: the 60s cap here is only re-checked
+  local _deadline=$(( $(date +%s) + _budget_s ))
+  while [[ $(date +%s) -lt $_deadline ]]; do
+    # --request-timeout bounds the call itself: the budget here is only re-checked
     # BETWEEN iterations, so an unbounded cluster-info against an API that accepts
     # the TCP connection but never responds (corporate-proxy intercept of
     # localhost, half-booted apiserver) would hang this gate forever.
@@ -1083,7 +1097,7 @@ _wait_for_api() {
   # multi-file layouts can adapt the sed command themselves.
   local kc="${KUBECONFIG:-${HOME}/.kube/config}"
   kc="${kc%%:*}"
-  error "kubectl cluster-info failed for 60s. Cluster reports running, but the API is unreachable. Possible causes:
+  error "kubectl cluster-info failed for ${_budget_s}s. Cluster reports running, but the API is unreachable. It's safe to re-run this installer; on a slow or proxied machine, extend the wait with TB_API_WAIT_S=<seconds>. Possible causes:
    (a) Docker daemon stopped (run 'docker ps' to verify);
    (b) corporate HTTP/HTTPS proxy intercepting localhost — this installer auto-adds 127.0.0.1/localhost + private ranges to NO_PROXY; a custom proxy wrapper may still override it;
    (c) kubeconfig has 0.0.0.0 — try: sed -i.bak 's|0.0.0.0|127.0.0.1|g' ${kc} && rm ${kc}.bak"

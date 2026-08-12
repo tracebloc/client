@@ -70,16 +70,17 @@ tests:
           path: spec.template.spec.containers[0].resources.requests
       - isNotEmpty:
           path: spec.template.spec.containers[0].resources.limits
-      # v1.1.0 floor: 512Mi/1Gi for api, after the prod OOM investigation.
+      # #1144: requests.memory pinned == limits.memory (1Gi api / 512Mi
+      # pods-monitor) to lower oom_score_adj during a mass restart.
       - equal:
           path: spec.template.spec.containers[0].resources.requests.memory
-          value: 512Mi
+          value: 1Gi
       - equal:
           path: spec.template.spec.containers[0].resources.limits.memory
           value: 1Gi
       - equal:
           path: spec.template.spec.containers[1].resources.requests.memory
-          value: 256Mi
+          value: 512Mi
       - equal:
           path: spec.template.spec.containers[1].resources.limits.memory
           value: 512Mi
@@ -297,7 +298,7 @@ tests:
   # own default when they are absent. Pin the rendered value here so the two
   # cannot silently diverge again, on BOTH containers that receive it
   # (api + pods-monitor).
-  - it: defaults spawned-job RESOURCE_REQUESTS/LIMITS to cpu=2,memory=8Gi (req==limit => Guaranteed QoS)
+  - it: defaults spawned-job RESOURCE_REQUESTS/LIMITS to cpu=2,memory=8Gi (req==limit)
     asserts:
       - contains:
           path: spec.template.spec.containers[0].env
@@ -414,3 +415,128 @@ tests:
               secretKeyRef:
                 name: RELEASE-NAME-secrets
                 key: TB_CREDMGR_PASSWORD
+
+  # #611: /data/shared (client-pvc) AND /data/logs (client-logs-pvc) must be writable by
+  # the non-root pods that mount them — the ingest-staging pod writes to /data/shared, the
+  # spawned training pods write to /data/logs. hostPath ignores fsGroup (k8s#138411), so a
+  # privileged init makes both volumes world-writable. No fsGroup is set: it's a no-op on
+  # hostPath and on CSI would strip the spawned pods' group-0 access; CSI skips the init.
+  - it: "hostPath install adds init-writable-data to make /data/shared and /data/logs writable (#611)"
+    set:
+      hostPath:
+        enabled: true
+    asserts:
+      # no fsGroup — no-op on hostPath, and a regression risk on CSI (see template comment)
+      - notExists:
+          path: spec.template.spec.securityContext.fsGroup
+      - equal:
+          path: spec.template.spec.initContainers[0].name
+          value: init-writable-data
+      - equal:
+          path: spec.template.spec.initContainers[0].securityContext.runAsUser
+          value: 0
+      - contains:
+          path: spec.template.spec.initContainers[0].securityContext.capabilities.add
+          content: CHOWN
+      - contains:
+          path: spec.template.spec.initContainers[0].securityContext.capabilities.add
+          content: FOWNER
+      # FSETID is required or the kernel strips the setgid bit when chmod runs after
+      # the chown to GID 1000 (root without FSETID can't set setgid on a non-owned-group dir)
+      - contains:
+          path: spec.template.spec.initContainers[0].securityContext.capabilities.add
+          content: FSETID
+      # each dir is fixed INDEPENDENTLY (a for-loop): chown 1000:1000 then chmod its OWN mode
+      - matchRegex:
+          path: spec.template.spec.initContainers[0].command[2]
+          pattern: 'for e in /data/shared:2777 /data/logs:3777.*chown 1000:1000.*chmod'
+      # /data/shared must NOT be sticky. `data delete` removes a tree the INGEST wrote: the
+      # ingestion Job runs as uid 65534 (or HOST_UID), the CLI teardown pod as 65532. Sticky
+      # allows an unlink only by the entry's owner, the dir's owner, or root — none of which the
+      # teardown is — so sticky here made a documented operation impossible: table dropped, files
+      # stranded. fsGroup can't align them either (kubelet ignores it on hostPath, k8s#138411).
+      - matchRegex:
+          path: spec.template.spec.initContainers[0].command[2]
+          pattern: "/data/shared:2777"
+      # ...while /data/logs KEEPS sticky: nothing has to delete another writer's logs, so the
+      # /tmp-style protection costs nothing there. Both keep setgid (2) for GID inheritance.
+      - matchRegex:
+          path: spec.template.spec.initContainers[0].command[2]
+          pattern: "/data/logs:3777"
+      # best-effort: a failing chown/chmod is logged, not fatal, so the other dir is still fixed
+      # and jobs-manager still starts (e.g. /data/shared on an NFS root_squash export)
+      - matchRegex:
+          path: spec.template.spec.initContainers[0].command[2]
+          pattern: "\\|\\| echo"
+      # the init must mount BOTH hostPath volumes it chowns, or the chown is a no-op
+      - contains:
+          path: spec.template.spec.initContainers[0].volumeMounts
+          content:
+            name: shared-volume
+            mountPath: /data/shared
+      - contains:
+          path: spec.template.spec.initContainers[0].volumeMounts
+          content:
+            name: logs-volume
+            mountPath: /data/logs
+
+  - it: "CSI install (hostPath disabled) skips the privileged init and sets no fsGroup (#611)"
+    set:
+      hostPath:
+        enabled: false
+    asserts:
+      - notExists:
+          path: spec.template.spec.securityContext.fsGroup
+      - notExists:
+          path: spec.template.spec.initContainers
+
+  # backend#1528 S1: the tb_meta / tb_ingest env is flag-gated on
+  # serviceDbAccounts so a default install is byte-identical.
+  - it: service DB account env absent by default (byte-for-byte off)
+    asserts:
+      - notContains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: SERVICE_DB_ACCOUNTS
+            value: "1"
+      - notContains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: TB_META_USER
+            value: "tb_meta"
+
+  - it: service DB account env wired when serviceDbAccounts is on
+    set:
+      serviceDbAccounts: true
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: SERVICE_DB_ACCOUNTS
+            value: "1"
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: TB_META_USER
+            value: "tb_meta"
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: TB_INGEST_USER
+            value: "tb_ingest"
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: TB_META_PASSWORD
+            valueFrom:
+              secretKeyRef:
+                name: RELEASE-NAME-secrets
+                key: TB_META_PASSWORD
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: TB_INGEST_PASSWORD
+            valueFrom:
+              secretKeyRef:
+                name: RELEASE-NAME-secrets
+                key: TB_INGEST_PASSWORD

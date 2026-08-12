@@ -35,11 +35,72 @@ spec:
       serviceAccountName: {{ include "tracebloc.serviceAccountName" . }}
       securityContext:
         runAsNonRoot: true
+        # No fsGroup here (deliberately). On hostPath kubelet ignores it
+        # (kubernetes/kubernetes#138411) — the init below does the work. On CSI an fsGroup
+        # relabel would only add GID 1000 to jobs-manager's OWN processes, yet it would flip
+        # the shared/logs volumes' group to 1000 (OnRootMismatch, first restart) — stripping
+        # the group-0 access the spawned training pods (UID 1001 / OpenShift arbitrary-UID,
+        # GID 0) and the host-UID ingestion pods actually rely on (see docs/SECURITY.md §5.3).
+        # It never reaches those spawned writers, so it's all risk and no gain.
         seccompProfile:
           type: RuntimeDefault
+      {{- if .Values.hostPath.enabled }}
+      # kubelet does NOT apply fsGroup to hostPath volumes (kubernetes/kubernetes#138411),
+      # so /data/shared AND /data/logs are created root-owned and non-root pods can't write
+      # to them. Two failures this causes: (1) dataset ingest — `tb data ingest` streams files
+      # into a staging pod that does `mkdir /data/shared/.tracebloc-staging/` (#611); and
+      # (2) training — a spawned training pod does `os.makedirs('/data/logs/<run>')` and hits
+      # "Permission denied". Both are the SAME hostPath dirs those spawned pods mount
+      # (client-pvc / client-logs-pvc), so fixing them once here reaches those pods too.
+      # Unlike mysql-data (one writer, UID 999), these have MULTIPLE non-root writers —
+      # jobs-manager, the training/ingestor pods it spawns, and the CLI's ingest-staging pod,
+      # whose UID this chart does not control — so they must be world-writable, not chowned to
+      # a single UID. Both get setgid (2) so new entries inherit GID 1000. They differ in the
+      # sticky bit, deliberately:
+      #   /data/logs  = 3777 (setgid + sticky) — /tmp semantics: one writer can't unlink or
+      #                 rename another writer's files, and nothing has to.
+      #   /data/shared = 2777 (setgid, NO sticky) — because here something DOES have to.
+      #                 `data delete` removes a dataset the INGEST created: the ingestion Job
+      #                 writes as uid 65534 (or HOST_UID), while the CLI's teardown pod runs as
+      #                 uid 65532. Sticky permits an unlink only by the entry's owner, the
+      #                 directory's owner, or root — and the teardown pod is none of the three,
+      #                 so sticky made a documented product operation impossible: the table was
+      #                 dropped and the files stayed, leaving a half-deleted dataset. fsGroup
+      #                 cannot align those identities either, since kubelet ignores it on
+      #                 hostPath (kubernetes/kubernetes#138411). Keeping sticky on /data/shared
+      #                 protects writers from each other at the cost of never being able to
+      #                 clean up after them; runs as root only
+      # long enough to fix the mounts. Caps: CHOWN for the chown; FOWNER so the chmod is idempotent
+      # on re-install; FSETID so the setgid bit survives the chmod — after the chown to GID 1000 the
+      # dir's group no longer matches the process (fsgid 0), and a root process without FSETID has
+      # the kernel silently strip S_ISGID, landing the mount at 1777 (setgid lost). Each dir is
+      # fixed INDEPENDENTLY and best-effort: a chown/chmod that can't complete (e.g. /data/shared on
+      # an NFS root_squash export via HOST_DATASET_DIR) is logged and skipped so the OTHER dir is
+      # still repaired and jobs-manager still starts — a genuinely unwritable mount then surfaces as
+      # a clear error at the writer pod rather than wedging the whole edge in Init. CSI skips this.
+      initContainers:
+      - name: init-writable-data
+        image: {{ include "tracebloc.image" (dict "repository" "library/busybox" "tag" .Values.images.busybox.tag "digest" .Values.images.busybox.digest "registry" (dig "imageRegistry" "docker.io" (.Values.global | default dict))) | quote }}
+        securityContext:
+          runAsUser: 0
+          runAsNonRoot: false
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop: ["ALL"]
+            add: ["CHOWN", "FOWNER", "FSETID"]
+          seccompProfile:
+            type: RuntimeDefault
+        command: ['sh', '-c', 'for e in /data/shared:2777 /data/logs:3777; do d=${e%:*}; m=${e#*:}; chown 1000:1000 "$d" && chmod "$m" "$d" || echo "init-writable-data: could not adjust $d (pre-provisioned or root_squash mount?); leaving as-is"; done']
+        volumeMounts:
+        - name: shared-volume
+          mountPath: /data/shared
+        - name: logs-volume
+          mountPath: /data/logs
+      {{- end }}
       containers:
       - name: api
-        image: {{ include "tracebloc.image" (dict "repository" "tracebloc/jobs-manager" "tag" .Values.env.CLIENT_ENV "digest" .Values.images.jobsManager.digest "registry" (dig "imageRegistry" "docker.io" (.Values.global | default dict))) | quote }}
+        image: {{ include "tracebloc.image" (dict "repository" "tracebloc/jobs-manager" "tag" (include "tracebloc.clientEnv" .) "digest" .Values.images.jobsManager.digest "registry" (dig "imageRegistry" "docker.io" (.Values.global | default dict))) | quote }}
         imagePullPolicy: {{ if .Values.images.jobsManager.digest }}IfNotPresent{{ else }}Always{{ end }}
         securityContext:
           allowPrivilegeEscalation: false
@@ -50,10 +111,23 @@ spec:
         # pod becomes the OOM-killer's preferred target on the node, and
         # mysqld dies as collateral. 512Mi/1Gi covers steady state with
         # headroom; revisit if heap profiling shows the working set growing.
+        #
+        # #1144: requests.memory now == limits.memory (1Gi). On a single-node
+        # cluster-recovery mass restart every pod restarts at once and contends
+        # for node memory + CPU; with requests (512Mi) below the limit (1Gi)
+        # jobs-manager ran Burstable and was the kernel OOM-killer's preferred
+        # victim once its working set exceeded the request — the observed
+        # exit-137 kill of both containers. Pinning requests.memory==limits.memory
+        # lowers the container's oom_score_adj so it is a less-preferred victim
+        # when the node runs out of memory — the pod stays Burstable (cpu request
+        # != limit), exactly as mysql-deployment.yaml already does (mysql has no
+        # cpu limit either). requests.cpu is
+        # also raised (100m -> 250m) so a mass restart doesn't throttle its
+        # startup to a crawl (the ~9m recovery seen on lukas-test).
         resources:
           requests:
-            cpu: {{ .Values.resources.jobsManager.requests.cpu | default "100m" | quote }}
-            memory: {{ .Values.resources.jobsManager.requests.memory | default "512Mi" | quote }}
+            cpu: {{ .Values.resources.jobsManager.requests.cpu | default "250m" | quote }}
+            memory: {{ .Values.resources.jobsManager.requests.memory | default "1Gi" | quote }}
           limits:
             cpu: {{ .Values.resources.jobsManager.limits.cpu | default "1000m" | quote }}
             memory: {{ .Values.resources.jobsManager.limits.memory | default "1Gi" | quote }}
@@ -142,6 +216,30 @@ spec:
               name: {{ include "tracebloc.secretName" . }}
               key: TB_CREDMGR_PASSWORD
         {{- end }}
+        {{- if (include "tracebloc.serviceDbAccounts" .) }}
+        # backend#1528 S1 (RFC-0003 D10 close-out): dedicated MySQL service
+        # identities that replace the root-equivalent edgeuser. jobs-manager
+        # mints tb_meta (owns the metadata DB) and tb_ingest (writes the dataset
+        # DB) at startup from these generated Secrets. Additive — nothing
+        # consumes the accounts until S2 — so this is rendered only when enabled
+        # and a default install stays byte-identical.
+        - name: SERVICE_DB_ACCOUNTS
+          value: "1"
+        - name: TB_META_USER
+          value: "tb_meta"
+        - name: TB_META_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: {{ include "tracebloc.secretName" . }}
+              key: TB_META_PASSWORD
+        - name: TB_INGEST_USER
+          value: "tb_ingest"
+        - name: TB_INGEST_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: {{ include "tracebloc.secretName" . }}
+              key: TB_INGEST_PASSWORD
+        {{- end }}
         # Ingestor image wiring for the POST /internal/submit-ingestion-run
         # endpoint. jobs-manager spawns each ingestion Job from these values
         # (see client-runtime submit_ingestion_run._build_image_reference):
@@ -200,15 +298,25 @@ spec:
         - name: JOB_IMAGE_HOST
           value: {{ printf "%s/" (dig "imageRegistry" "docker.io" (.Values.global | default dict) | default "docker.io") | quote }}
         - name: CLIENT_ENV
-          value: {{ .Values.env.CLIENT_ENV | default "prod" | quote }}
+          value: {{ include "tracebloc.clientEnv" . | quote }}
         - name: RESOURCE_REQUESTS
           value: {{ if hasKey .Values.env "RESOURCE_REQUESTS" }}{{ .Values.env.RESOURCE_REQUESTS | quote }}{{ else }}"cpu=2,memory=8Gi"{{ end }}
         - name: RESOURCE_LIMITS
           value: {{ if hasKey .Values.env "RESOURCE_LIMITS" }}{{ .Values.env.RESOURCE_LIMITS | quote }}{{ else }}"cpu=2,memory=8Gi"{{ end }}
+        # #343: only stamp the GPU vars when a GPU is actually configured. A
+        # CPU-only install writes GPU_LIMITS: "" (empty), and a chart-direct
+        # install may omit the key entirely — in both cases emitting the var
+        # (or its "nvidia.com/gpu=1" default) surfaces a phantom GPU in the
+        # CLI resources view. GPU_REQUESTS is gated on the SAME condition so a
+        # CPU-only install emits NEITHER var, and a GPU install emits BOTH
+        # (a lone GPU request with no matching limit is rejected by the API
+        # server). Render only for a non-empty GPU_LIMITS value.
+        {{- if (default "" .Values.env.GPU_LIMITS) }}
         - name: GPU_REQUESTS
           value: {{ if hasKey .Values.env "GPU_REQUESTS" }}{{ .Values.env.GPU_REQUESTS | quote }}{{ else }}"nvidia.com/gpu=1"{{ end }}
         - name: GPU_LIMITS
-          value: {{ if hasKey .Values.env "GPU_LIMITS" }}{{ .Values.env.GPU_LIMITS | quote }}{{ else }}"nvidia.com/gpu=1"{{ end }}
+          value: {{ .Values.env.GPU_LIMITS | quote }}
+        {{- end }}
         - name: RUNTIME_CLASS_NAME
           value: {{ if hasKey .Values.env "RUNTIME_CLASS_NAME" }}{{ .Values.env.RUNTIME_CLASS_NAME | quote }}{{ else }}""{{ end }}
         # client-runtime#92: gates jobs-manager's GPU->CPU pending-job fallback.
@@ -230,16 +338,22 @@ spec:
         {{- end }}
         {{- end }}
       - name: pods-monitor-container
-        image: {{ include "tracebloc.image" (dict "repository" "tracebloc/pods-monitor" "tag" .Values.env.CLIENT_ENV "digest" .Values.images.podsMonitor.digest "registry" (dig "imageRegistry" "docker.io" (.Values.global | default dict))) | quote }}
+        image: {{ include "tracebloc.image" (dict "repository" "tracebloc/pods-monitor" "tag" (include "tracebloc.clientEnv" .) "digest" .Values.images.podsMonitor.digest "registry" (dig "imageRegistry" "docker.io" (.Values.global | default dict))) | quote }}
         imagePullPolicy: {{ if .Values.images.podsMonitor.digest }}IfNotPresent{{ else }}Always{{ end }}
         securityContext:
           allowPrivilegeEscalation: false
           capabilities:
             drop: ["ALL"]
+        # #1144: same cluster-recovery treatment as the api container above —
+        # pods-monitor was also exit-137 killed in the mass restart. Pin
+        # requests.memory == limits.memory (512Mi) to lower its oom_score_adj
+        # (a less-preferred node OOM victim; the pod stays Burstable), and raise
+        # requests.cpu (50m -> 100m) so its startup is not starved under
+        # contention.
         resources:
           requests:
-            cpu: {{ .Values.resources.podsMonitor.requests.cpu | default "50m" | quote }}
-            memory: {{ .Values.resources.podsMonitor.requests.memory | default "256Mi" | quote }}
+            cpu: {{ .Values.resources.podsMonitor.requests.cpu | default "100m" | quote }}
+            memory: {{ .Values.resources.podsMonitor.requests.memory | default "512Mi" | quote }}
           limits:
             cpu: {{ .Values.resources.podsMonitor.limits.cpu | default "500m" | quote }}
             memory: {{ .Values.resources.podsMonitor.limits.memory | default "512Mi" | quote }}
@@ -265,15 +379,21 @@ spec:
         - name: JOB_IMAGE_HOST
           value: {{ printf "%s/" (dig "imageRegistry" "docker.io" (.Values.global | default dict) | default "docker.io") | quote }}
         - name: CLIENT_ENV
-          value: {{ .Values.env.CLIENT_ENV | default "prod" | quote }}
+          value: {{ include "tracebloc.clientEnv" . | quote }}
         - name: RESOURCE_REQUESTS
           value: {{ if hasKey .Values.env "RESOURCE_REQUESTS" }}{{ .Values.env.RESOURCE_REQUESTS | quote }}{{ else }}"cpu=2,memory=8Gi"{{ end }}
         - name: RESOURCE_LIMITS
           value: {{ if hasKey .Values.env "RESOURCE_LIMITS" }}{{ .Values.env.RESOURCE_LIMITS | quote }}{{ else }}"cpu=2,memory=8Gi"{{ end }}
+        # #343: only stamp the GPU vars when a GPU is actually configured (see
+        # the api container above) — GPU_REQUESTS and GPU_LIMITS share one gate
+        # so a CPU-only install emits neither (no phantom GPU in the CLI view)
+        # and a GPU install emits both (request == limit).
+        {{- if (default "" .Values.env.GPU_LIMITS) }}
         - name: GPU_REQUESTS
           value: {{ if hasKey .Values.env "GPU_REQUESTS" }}{{ .Values.env.GPU_REQUESTS | quote }}{{ else }}"nvidia.com/gpu=1"{{ end }}
         - name: GPU_LIMITS
-          value: {{ if hasKey .Values.env "GPU_LIMITS" }}{{ .Values.env.GPU_LIMITS | quote }}{{ else }}"nvidia.com/gpu=1"{{ end }}
+          value: {{ .Values.env.GPU_LIMITS | quote }}
+        {{- end }}
         - name: RUNTIME_CLASS_NAME
           value: {{ if hasKey .Values.env "RUNTIME_CLASS_NAME" }}{{ .Values.env.RUNTIME_CLASS_NAME | quote }}{{ else }}""{{ end }}
         # Kept in sync with the api container (client-runtime#92). pods-monitor

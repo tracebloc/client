@@ -77,7 +77,7 @@ tracebloc.io/seal-check-name: {{ .name | quote }}
   on the same cluster share the tracebloc-node-agents namespace; before
   this naming, two releases collided on the literal `tracebloc-resource-monitor`
   name and Helm refused the second install with "exists, not owned".
-  See the v1.2.0 release notes / hasan-prod migration case study.
+  See the v1.2.0 release notes / tenant-d-prod migration case study.
 */}}
 {{- define "tracebloc.resourceMonitorName" -}}
 {{ .Release.Name }}-resource-monitor
@@ -235,7 +235,10 @@ Image reference — defaults to docker.io when no registry is provided.
 When `digest` (sha256:...) is set, renders registry/repo@digest (immutable pin,
 preferred for security). Otherwise falls back to registry/repo:tag, where tag
 defaults to "prod" when CLIENT_ENV is omitted or empty.
-Usage: {{ include "tracebloc.image" (dict "repository" "tracebloc/jobs-manager" "tag" .Values.env.CLIENT_ENV "digest" .Values.images.jobsManager.digest "registry" "docker.io") }}
+Usage: {{ include "tracebloc.image" (dict "repository" "tracebloc/jobs-manager" "tag" (include "tracebloc.clientEnv" .) "digest" .Values.images.jobsManager.digest "registry" "docker.io") }}
+NOTE the resolved tag. This example previously read `.Values.env.CLIENT_ENV`
+and all four image call sites were copied from it, so a documented alias
+became an image tag nothing publishes (backend#1723).
 */}}
 {{- define "tracebloc.image" -}}
 {{- $registry := .registry | default "docker.io" -}}
@@ -299,6 +302,44 @@ Usage: {{ include "tracebloc.ingestorDigest" . }}
   consumer of CLIENT_ENV must go through here rather than re-deriving it, the
   same reason ENV_ALIASES lives once in client-runtime proxy_config.
 */}}
+{{/*
+  Whether the dedicated tb_meta / tb_ingest DB identities are on for THIS edge
+  (backend#1528, backend#1752).
+
+  Resolution, highest first:
+    1. `serviceDbAccounts` — an explicit operator override, true or false.
+    2. `serviceDbAccountsByEnv[<resolved CLIENT_ENV>]` — the fleet default.
+
+  WHY THIS IS KEYED ON THE ENVIRONMENT AT ALL. #1151 records the rollout as
+  "flip per environment, dev first", but there was no mechanism for that: the
+  value was one global boolean, so "per environment" meant editing every edge's
+  values by hand and remembering which fleet was where. Nobody could see the
+  fleet's posture in one place, and nothing tested it.
+
+  That gap had teeth. data-ingestors#468 removed the ingestor's edgeuser
+  fallback, making DB_USER/DB_PASSWORD required, on the stated precondition
+  that this flag was "on fleet-wide". It was on nowhere. dev and staging edges
+  float on the :dev/:stg ingestor channels, picked the change up the same day,
+  and every ingestion Job now fails at Config() before reading a byte
+  (backend#1752). Prod escaped only because its ingestor is digest-pinned to
+  the 0.7 line -- a caution engineered for D16, not for this, and one that
+  client#490 is about to spend.
+
+  Resolving through `tracebloc.clientEnv` (not the raw value) so a documented
+  alias like `staging` maps to `stg` and cannot silently miss its entry --
+  backend#1723 was exactly that failure.
+*/}}
+{{- define "tracebloc.serviceDbAccounts" -}}
+{{- $override := (default dict .Values).serviceDbAccounts -}}
+{{- if not (kindIs "invalid" $override) -}}
+{{- if $override }}true{{ end -}}
+{{- else -}}
+{{- $env := include "tracebloc.clientEnv" . -}}
+{{- $byEnv := default dict .Values.serviceDbAccountsByEnv -}}
+{{- if get $byEnv $env }}true{{ end -}}
+{{- end -}}
+{{- end }}
+
 {{- define "tracebloc.clientEnv" -}}
 {{- $raw := (default dict .Values.env).CLIENT_ENV | default "prod" -}}
 {{- $aliases := dict "development" "dev" "staging" "stg" "production" "prod" -}}
@@ -398,4 +439,60 @@ Usage inside a container's env: list:
 - name: no_proxy
   value: {{ $noProxy | quote }}
 {{- end }}
+{{- end -}}
+
+{{/*
+tracebloc.mysqlEngineMajor — the MySQL engine major the chart is about to run,
+for the mysql-format-guard init container (backend#723). Resolution mirrors
+tracebloc.image's digest-wins precedence:
+  digest set   -> the known 5.7-lineage pin maps to "5.7"; any other digest is
+                  "unknown" (custom pin — the guard stands down).
+  digest empty -> derive from the tag: ""/prod/5.7* -> 5.7, 8.4* -> 8.4,
+                  8.0* -> 8.0, anything else -> unknown.
+The sha256 literal below MUST equal the images.mysqlClient.digest default in
+values.yaml — mysql_test.yaml pins the default render to "5.7", so re-pinning
+the digest without updating this helper fails CI instead of silently
+disarming the guard.
+*/}}
+{{- define "tracebloc.mysqlEngineMajor" -}}
+{{- $digest := .Values.images.mysqlClient.digest | default "" -}}
+{{- $tag := .Values.images.mysqlClient.tag | default "prod" -}}
+{{- if $digest -}}
+{{- if eq $digest "sha256:f546e47fb339e0982c902cef063b081ccf2cbbaf35b475287d583b9bf3163354" -}}
+5.7
+{{- else -}}
+unknown
+{{- end -}}
+{{- else if or (eq $tag "prod") (hasPrefix "5.7" $tag) -}}
+5.7
+{{- else if hasPrefix "8.4" $tag -}}
+8.4
+{{- else if hasPrefix "8.0" $tag -}}
+8.0
+{{- else -}}
+unknown
+{{- end -}}
+{{- end -}}
+
+{{/*
+tracebloc.durationSeconds — parse a Go/Helm duration string (as accepted by
+`helm --timeout`, e.g. "10m", "30m", "1h", "600s", "1h30m") into a whole
+number of seconds. Sums every `<int><unit>` component so compound durations
+work; recognises s/m/h/d, ignores anything else. Empty/nil input -> 0.
+Used by auto-upgrade-cronjob.yaml (#555) so the Job's activeDeadlineSeconds
+can be kept above the configured helm timeout.
+*/}}
+{{- define "tracebloc.durationSeconds" -}}
+{{- $d := . | toString -}}
+{{- $total := 0 -}}
+{{- range regexFindAll "[0-9]+[smhd]" $d -1 -}}
+{{- $num := regexFind "[0-9]+" . | atoi -}}
+{{- $unit := regexFind "[smhd]" . -}}
+{{- if eq $unit "s" -}}{{- $total = add $total $num -}}
+{{- else if eq $unit "m" -}}{{- $total = add $total (mul $num 60) -}}
+{{- else if eq $unit "h" -}}{{- $total = add $total (mul $num 3600) -}}
+{{- else if eq $unit "d" -}}{{- $total = add $total (mul $num 86400) -}}
+{{- end -}}
+{{- end -}}
+{{- $total -}}
 {{- end -}}

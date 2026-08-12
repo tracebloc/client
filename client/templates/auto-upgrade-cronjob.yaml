@@ -33,6 +33,35 @@ data:
     helm repo add "$REPO_NAME" "$REPO_URL" >/dev/null
     helm repo update "$REPO_NAME" >/dev/null
 
+    # #554: auto-recover from an interrupted upgrade BEFORE attempting another
+    # one. If a previous tick's `helm upgrade` was killed mid-operation — OOM at
+    # the 256Mi memory limit, node reboot, or a cluster restart inside the
+    # upgrade window — the release is left in a pending-upgrade state, and every
+    # subsequent hourly tick then fails with "another operation is in progress"
+    # forever: auto-upgrade (the security-fix delivery path) is silently dead
+    # until a human runs `helm rollback`. Detect that wedge and roll back to the
+    # last deployed revision so this tick can proceed. Parsed from the STATUS:
+    # line jq-free — the alpine/helm image ships without jq. (pending-install
+    # can't occur here: this CronJob is part of the release it upgrades, so the
+    # release must have deployed at least once for this script to run.)
+    STATUS="$(helm status "$RELEASE_NAME" -n "$RELEASE_NAMESPACE" 2>/dev/null \
+      | awk '/^STATUS:/ {print $2; exit}')"
+    case "$STATUS" in
+      pending-upgrade|pending-rollback)
+        log "release wedged in '$STATUS' (a previous upgrade was killed mid-operation); rolling back to the last deployed revision before retrying"
+        helm rollback "$RELEASE_NAME" -n "$RELEASE_NAMESPACE"
+        log "rollback complete; continuing"
+        ;;
+      uninstalling)
+        # A killed `helm uninstall` leaves this state. We can't clear it here — the
+        # CronJob is part of the release, so completing the uninstall would delete
+        # itself — but skip cleanly rather than fall through to a `helm upgrade`
+        # that fails every tick with an opaque "another operation is in progress".
+        log "release is mid-uninstall ('uninstalling'); skipping this tick until it settles (run 'helm uninstall $RELEASE_NAME -n $RELEASE_NAMESPACE' to finish it)"
+        exit 0
+        ;;
+    esac
+
     # Latest published version. Helm orders search results newest-first,
     # so the first `version:` line in the YAML output is the latest.
     LATEST="$(helm search repo "${REPO_NAME}/${CHART_NAME}" -o yaml \
@@ -78,11 +107,19 @@ data:
     # layers the customer's user-supplied values on top, so operator overrides
     # (clientId, dockerRegistry creds, autoUpgrade.enabled=false, etc.) are
     # preserved while new defaults flow through.
+    # --atomic (implies --wait): if the upgrade fails gracefully — bad manifest,
+    # a pod that never goes ready within --timeout — helm rolls the release back
+    # to the prior working revision instead of leaving it broken or pending. It
+    # cannot undo an abrupt SIGKILL (the helm process is gone before it can roll
+    # back); that residual pending-upgrade is caught by the recovery step above
+    # on the next tick. --cleanup-on-fail removes any new resources the failed
+    # attempt created so the rollback is clean.
     helm upgrade "$RELEASE_NAME" "${REPO_NAME}/${CHART_NAME}" \
       --namespace "$RELEASE_NAMESPACE" \
       --version "$LATEST" \
       --reset-then-reuse-values \
-      --wait \
+      --atomic \
+      --cleanup-on-fail \
       --timeout "$UPGRADE_TIMEOUT"
     log "upgrade complete: $CURRENT -> $LATEST"
 ---
@@ -107,6 +144,21 @@ spec:
   jobTemplate:
     spec:
       backoffLimit: 2
+      # #555: hard wall-clock cap on the Job. `timeout` bounds only
+      # `helm upgrade --wait`; the earlier `helm repo add`/`helm repo update`
+      # fetches can hang on a TCP black-hole with no timeout, and with
+      # concurrencyPolicy: Forbid a single hung Job skips every future tick.
+      # This backstop fails the Job so the next tick can run.
+      #
+      # The deadline must never undercut a longer configured autoUpgrade.timeout:
+      # that would kill a healthy `helm upgrade --wait` before its own timeout
+      # fires. So take the MAX of the configured floor (default 900s) and the
+      # parsed timeout plus 300s repo-fetch headroom (the same 900-600 headroom
+      # baked into the defaults). `| default 900` preserves the reuse-values
+      # nil-guard when the key is absent.
+      {{- $deadlineFloor := .Values.autoUpgrade.activeDeadlineSeconds | default 900 | int }}
+      {{- $timeoutSeconds := include "tracebloc.durationSeconds" .Values.autoUpgrade.timeout | int }}
+      activeDeadlineSeconds: {{ max $deadlineFloor (add $timeoutSeconds 300) }}
       template:
         metadata:
           labels:

@@ -42,7 +42,7 @@ jobs:
       # else — and $USERPROFILE isn't available in the ${{ env }} context, only at runtime).
       CLUSTER_NAME: tbe2ewin
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Resolve isolated data dir + tool PATH
         shell: pwsh
@@ -65,7 +65,7 @@ jobs:
         # that's exactly when the log matters most. !success() covers failed + cancelled/timed
         # out; this runs before the teardown below so the log survives the data-dir cleanup.
         if: ${{ !success() }}
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: windows-e2e-install-log
           path: ${{ env.HOST_DATA_DIR }}\install-*.log

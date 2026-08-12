@@ -5,6 +5,18 @@ name: Drift checks
 # readiness-wait and --diagnose bundle grep for). Mocked unit tests can't see
 # these — a rename ships green and breaks in the field. This guards both sides.
 # Triggers on scripts/ OR client/ because either side moving is the drift.
+#
+# NO `paths:` ON pull_request, deliberately. `Source-of-truth drift` is a
+# REQUIRED status check on develop and on main, and a required check that is
+# path-filtered can never report on a PR outside those paths -- GitHub leaves it
+# at "Expected - waiting for status to be reported" and the PR is unmergeable
+# forever. Not hypothetical: on 2026-08-11 it was blocking client#651, #657 and
+# #660, none of which touch scripts/ or client/. standard-checks.yml's own
+# header spells out the same hazard. The job is ~10s, so running it on every PR
+# costs nothing next to a permanently stuck PR.
+#
+# `push` keeps its paths filter: pushes are not gated by required checks, so
+# path-scoping there is free and correct.
 on:
   push:
     branches: [main, develop, openshift]
@@ -14,10 +26,6 @@ on:
       - '.github/workflows/drift-checks.yaml'
   pull_request:
     branches: [main, develop, openshift]
-    paths:
-      - 'scripts/**'
-      - 'client/**'
-      - '.github/workflows/drift-checks.yaml'
   workflow_dispatch:
 
 permissions:
@@ -28,7 +36,7 @@ jobs:
     name: Source-of-truth drift
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - name: Set up Helm
         uses: azure/setup-helm@1a275c3b69536ee54be43f2070a358922e12c8d4 # v4.3.1
         with:

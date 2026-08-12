@@ -40,6 +40,40 @@ setup() {
   [ "$output" = "https://stg-api.tracebloc.io/" ] || return 1
 }
 
+# THE ALIASES. values.schema.json documents development|staging|production as
+# accepted, and the old case knew only dev|stg — so `staging` fell to the `*)`
+# branch and verify_credentials() checked STAGING credentials against the
+# PRODUCTION backend, telling the customer their correct credentials were wrong
+# (backend#1745). The suite covered dev, stg, unset and "whatever"; it never
+# covered the spellings the docs tell people to use.
+@test "_backend_url: staging alias -> stg backend, NOT prod" {
+  CLIENT_ENV=staging
+  run _backend_url
+  [ "$output" = "https://stg-api.tracebloc.io/" ] || return 1
+}
+
+@test "_backend_url: development alias -> dev backend" {
+  CLIENT_ENV=development
+  run _backend_url
+  [ "$output" = "https://dev-api.tracebloc.io/" ] || return 1
+}
+
+@test "_backend_url: production alias -> prod backend" {
+  CLIENT_ENV=production
+  run _backend_url
+  [ "$output" = "https://api.tracebloc.io/" ] || return 1
+}
+
+@test "tb_client_env: reduces aliases and passes anything else through" {
+  # Pass-through matters: this normalises spellings, it does not validate, and
+  # each caller keeps its own fallback for genuinely unrecognised input.
+  [ "$(tb_client_env staging)" = "stg" ] || return 1
+  [ "$(tb_client_env development)" = "dev" ] || return 1
+  [ "$(tb_client_env production)" = "prod" ] || return 1
+  [ "$(tb_client_env stg)" = "stg" ] || return 1
+  [ "$(tb_client_env whatever)" = "whatever" ] || return 1
+}
+
 @test "_backend_url: unknown -> prod" {
   CLIENT_ENV=whatever
   run _backend_url
@@ -700,9 +734,9 @@ setup() {
 }
 
 @test "_chart_proxy_env_yaml: host:port -> HTTP_PROXY_HOST + HTTP_PROXY_PORT" {
-  HTTP_PROXY="http://proxy.charite.de:8080"
+  HTTP_PROXY="http://proxy.tenant-a.example:8080"
   run _chart_proxy_env_yaml
-  [[ "$output" == *'HTTP_PROXY_HOST: "proxy.charite.de"'* ]] || return 1
+  [[ "$output" == *'HTTP_PROXY_HOST: "proxy.tenant-a.example"'* ]] || return 1
   [[ "$output" == *'HTTP_PROXY_PORT: "8080"'* ]] || return 1
   [[ "$output" != *"HTTP_PROXY_USERNAME"* ]] || return 1
 }
@@ -751,14 +785,14 @@ setup() {
   _ensure_helm_runnable() { :; }
   helm() { record "helm $*"; return 0; }
   verify_credentials() { printf valid; }
-  HTTP_PROXY="http://proxy.charite.de:8080"; NO_PROXY=".charite.de"
+  HTTP_PROXY="http://proxy.tenant-a.example:8080"; NO_PROXY=".tenant-a.example"
   run install_client_helm <<< $'myid\nmypw'
   [ "$status" -eq 0 ] || return 1
   # NB: the "Corporate proxy detected" notice goes through log(), which the test
   # harness routes to /dev/null — so assert on the generated file, not $output.
-  grep -q 'HTTP_PROXY_HOST: "proxy.charite.de"' "$HOST_DATA_DIR/values.yaml"
+  grep -q 'HTTP_PROXY_HOST: "proxy.tenant-a.example"' "$HOST_DATA_DIR/values.yaml"
   grep -q 'HTTP_PROXY_PORT: "8080"' "$HOST_DATA_DIR/values.yaml"
-  grep -q 'NO_PROXY: ".charite.de"' "$HOST_DATA_DIR/values.yaml"
+  grep -q 'NO_PROXY: ".tenant-a.example"' "$HOST_DATA_DIR/values.yaml"
   # injection must not corrupt the rest of the env: block / file
   grep -q "clientId: 'myid'" "$HOST_DATA_DIR/values.yaml"
   grep -q 'SINGLE_NODE: "true"' "$HOST_DATA_DIR/values.yaml"
@@ -1085,4 +1119,422 @@ setup() {
   export TRACEBLOC_REGISTRY_PASSWORD=secret
   run _image_mirror_yaml
   echo "$output" | grep -q "server: 'https://index.docker.io/v1/'" || return 1
+}
+
+# ── _resolve_mysql_engine (backend#723, decision A2) ────────────────────────
+# Unit tests: the function reads values_file/existing_id/HOST_DATA_DIR/
+# TB_NAMESPACE/ARCH from the caller's scope and sets TB_MYSQL_ENGINE_RESOLVED.
+
+_engine_fixture() {
+  HOST_DATA_DIR="$BATS_TEST_TMPDIR/data"; mkdir -p "$HOST_DATA_DIR/mysql"
+  values_file="$HOST_DATA_DIR/values.yaml"
+  existing_id=""
+  TB_NAMESPACE="tracebloc"
+  unset TB_MYSQL_ENGINE TB_MYSQL_ENGINE_RESOLVED
+}
+
+@test "_resolve_mysql_engine: explicit TB_MYSQL_ENGINE=8.4 wins on any arch" {
+  _engine_fixture; ARCH=x86_64; TB_MYSQL_ENGINE=8.4
+  _resolve_mysql_engine
+  [ "$TB_MYSQL_ENGINE_RESOLVED" = "8.4" ] || return 1
+}
+
+@test "_resolve_mysql_engine: explicit TB_MYSQL_ENGINE=5.7 wins on arm64" {
+  _engine_fixture; ARCH=arm64; TB_MYSQL_ENGINE=5.7
+  _resolve_mysql_engine
+  [ "$TB_MYSQL_ENGINE_RESOLVED" = "5.7" ] || return 1
+}
+
+@test "_resolve_mysql_engine: invalid value fails closed with the allowed set" {
+  _engine_fixture; ARCH=arm64; TB_MYSQL_ENGINE=9.0
+  run _resolve_mysql_engine
+  [ "$status" -ne 0 ] || return 1
+  [[ "$output" == *"'auto', '5.7' or '8.4'"* ]] || return 1
+}
+
+@test "_resolve_mysql_engine: auto on a fresh arm64 install picks 8.4" {
+  _engine_fixture; ARCH=arm64
+  _resolve_mysql_engine
+  [ "$TB_MYSQL_ENGINE_RESOLVED" = "8.4" ] || return 1
+}
+
+@test "_resolve_mysql_engine: auto on a fresh amd64 install stays 5.7" {
+  _engine_fixture; ARCH=x86_64
+  _resolve_mysql_engine
+  [ "$TB_MYSQL_ENGINE_RESOLVED" = "5.7" ] || return 1
+}
+
+@test "_resolve_mysql_engine: an existing release pins 5.7 even on arm64" {
+  _engine_fixture; ARCH=arm64; existing_id="someclient"
+  _resolve_mysql_engine
+  [ "$TB_MYSQL_ENGINE_RESOLVED" = "5.7" ] || return 1
+}
+
+@test "_resolve_mysql_engine: legacy datadir content pins 5.7 even on arm64" {
+  _engine_fixture; ARCH=arm64
+  touch "$HOST_DATA_DIR/mysql/ibdata1"
+  _resolve_mysql_engine
+  [ "$TB_MYSQL_ENGINE_RESOLVED" = "5.7" ] || return 1
+}
+
+@test "_resolve_mysql_engine: per-release datadir content pins 5.7 even on arm64" {
+  _engine_fixture; ARCH=arm64
+  mkdir -p "$HOST_DATA_DIR/$TB_NAMESPACE/mysql"; touch "$HOST_DATA_DIR/$TB_NAMESPACE/mysql/ibdata1"
+  _resolve_mysql_engine
+  [ "$TB_MYSQL_ENGINE_RESOLVED" = "5.7" ] || return 1
+}
+
+@test "_resolve_mysql_engine: an UNLISTABLE mysql dir pins 5.7 even on arm64 (fail closed)" {
+  # The uid-999 ownership case (Bugbot): --reuse-data leaves a mysql dir the
+  # host user cannot list; that must read as "content", never "empty" — an
+  # 8.4 opt-in here would wedge the reuse behind the format guard.
+  _engine_fixture; ARCH=arm64
+  chmod 000 "$HOST_DATA_DIR/mysql"
+  _resolve_mysql_engine
+  status_engine="$TB_MYSQL_ENGINE_RESOLVED"
+  chmod 700 "$HOST_DATA_DIR/mysql"
+  [ "$status_engine" = "5.7" ] || return 1
+}
+
+@test "_resolve_mysql_engine: a previous 8.4 opt-in is sticky across re-runs (amd64)" {
+  _engine_fixture; ARCH=x86_64
+  printf 'images:\n  mysqlClient:\n    tag: "8.4"\n    digest: ""\n' > "$values_file"
+  _resolve_mysql_engine
+  [ "$TB_MYSQL_ENGINE_RESOLVED" = "8.4" ] || return 1
+}
+
+# ── install_client_helm flow: the generated values carry the engine choice ──
+
+@test "install_client_helm: TB_MYSQL_ENGINE=8.4 -> values carry the 8.4 mysqlClient block" {
+  HOST_DATA_DIR="$BATS_TEST_TMPDIR/data"; mkdir -p "$HOST_DATA_DIR"
+  ARCH=x86_64; TB_MYSQL_ENGINE=8.4
+  _ensure_tracebloc_dirs() { :; }
+  _ensure_release_dirs() { :; }
+  _ensure_helm_runnable() { :; }
+  helm() { record "helm $*"; return 0; }
+  verify_credentials() { printf valid; }
+  run install_client_helm <<< $'myid\nmypw'
+  [ "$status" -eq 0 ] || return 1
+  grep -q 'tag: "8.4"' "$HOST_DATA_DIR/values.yaml"
+  grep -A3 'mysqlClient:' "$HOST_DATA_DIR/values.yaml" | grep -q 'digest: ""'
+}
+
+@test "install_client_helm: amd64 auto -> values carry no mysqlClient block (byte-identical default)" {
+  HOST_DATA_DIR="$BATS_TEST_TMPDIR/data"; mkdir -p "$HOST_DATA_DIR"
+  ARCH=x86_64; unset TB_MYSQL_ENGINE
+  _ensure_tracebloc_dirs() { :; }
+  _ensure_release_dirs() { :; }
+  _ensure_helm_runnable() { :; }
+  helm() { record "helm $*"; return 0; }
+  verify_credentials() { printf valid; }
+  run install_client_helm <<< $'myid\nmypw'
+  [ "$status" -eq 0 ] || return 1
+  ! grep -q 'mysqlClient:' "$HOST_DATA_DIR/values.yaml" || return 1
+}
+
+@test "install_client_helm: fresh arm64 auto -> values carry the 8.4 mysqlClient block" {
+  HOST_DATA_DIR="$BATS_TEST_TMPDIR/data"; mkdir -p "$HOST_DATA_DIR"
+  ARCH=arm64; unset TB_MYSQL_ENGINE
+  _ensure_tracebloc_dirs() { :; }
+  _ensure_release_dirs() { :; }
+  _ensure_helm_runnable() { :; }
+  helm() { record "helm $*"; return 0; }
+  verify_credentials() { printf valid; }
+  run install_client_helm <<< $'myid\nmypw'
+  [ "$status" -eq 0 ] || return 1
+  grep -q 'tag: "8.4"' "$HOST_DATA_DIR/values.yaml"
+}
+
+@test "install_client_helm: arm64 auto with existing mysql data -> stays 5.7 (no engine flip)" {
+  HOST_DATA_DIR="$BATS_TEST_TMPDIR/data"; mkdir -p "$HOST_DATA_DIR/mysql"
+  touch "$HOST_DATA_DIR/mysql/ibdata1"
+  ARCH=arm64; unset TB_MYSQL_ENGINE
+  _ensure_tracebloc_dirs() { :; }
+  _ensure_release_dirs() { :; }
+  _ensure_helm_runnable() { :; }
+  helm() { record "helm $*"; return 0; }
+  verify_credentials() { printf valid; }
+  run install_client_helm <<< $'myid\nmypw'
+  [ "$status" -eq 0 ] || return 1
+  ! grep -q 'mysqlClient:' "$HOST_DATA_DIR/values.yaml" || return 1
+}
+
+# ── _recover_pending_helm_release (#554) ─────────────────────────────────────
+# A helm process killed mid-operation leaves the release in a pending-* state;
+# the next `helm upgrade --install` then fails forever with "another operation
+# is in progress". These cover the auto-recovery that clears the wedge.
+
+@test "_recover_pending_helm_release: fresh/absent release -> no-op, rc 0" {
+  _bounded() { shift; "$@"; }               # bypass timeout(1) so the helm mock is used
+  helm() { record "helm $*"; return 1; }   # `helm status` errors when absent
+  run _recover_pending_helm_release rel ns
+  [ "$status" -eq 0 ] || return 1
+  run mock_calls
+  [[ "$output" != *"helm rollback"* ]] || return 1
+  [[ "$output" != *"helm uninstall"* ]] || return 1
+}
+
+@test "_recover_pending_helm_release: deployed release -> no-op, rc 0" {
+  _bounded() { shift; "$@"; }
+  helm() {
+    if [[ "$1" == status ]]; then printf 'NAME: rel\nSTATUS: deployed\nREVISION: 4\n'; return 0; fi
+    record "helm $*"; return 0
+  }
+  run _recover_pending_helm_release rel ns
+  [ "$status" -eq 0 ] || return 1
+  run mock_calls
+  [[ "$output" != *"helm rollback"* ]] || return 1
+  [[ "$output" != *"helm uninstall"* ]] || return 1
+}
+
+@test "_recover_pending_helm_release: pending-upgrade -> rolls back, rc 0" {
+  _bounded() { shift; "$@"; }
+  helm() {
+    if [[ "$1" == status ]]; then printf 'NAME: rel\nSTATUS: pending-upgrade\nREVISION: 5\n'; return 0; fi
+    record "helm $*"; return 0
+  }
+  run _recover_pending_helm_release rel ns
+  [ "$status" -eq 0 ] || return 1
+  mock_calls | grep -q "helm rollback rel -n ns"
+  run mock_calls
+  [[ "$output" != *"helm uninstall"* ]] || return 1
+}
+
+@test "_recover_pending_helm_release: pending-install -> uninstalls the half-install, rc 0" {
+  _bounded() { shift; "$@"; }
+  helm() {
+    if [[ "$1" == status ]]; then printf 'NAME: rel\nSTATUS: pending-install\nREVISION: 1\n'; return 0; fi
+    record "helm $*"; return 0
+  }
+  run _recover_pending_helm_release rel ns
+  [ "$status" -eq 0 ] || return 1
+  mock_calls | grep -q "helm uninstall rel -n ns"
+  run mock_calls
+  [[ "$output" != *"helm rollback"* ]] || return 1
+}
+
+@test "_recover_pending_helm_release: uninstalling -> finishes the uninstall, rc 0" {
+  _bounded() { shift; "$@"; }
+  helm() {
+    if [[ "$1" == status ]]; then printf 'NAME: rel\nSTATUS: uninstalling\nREVISION: 3\n'; return 0; fi
+    record "helm $*"; return 0
+  }
+  run _recover_pending_helm_release rel ns
+  [ "$status" -eq 0 ] || return 1
+  mock_calls | grep -q "helm uninstall rel -n ns"
+}
+
+@test "_recover_pending_helm_release: failed rollback -> rc 1 (caller fails closed)" {
+  _bounded() { shift; "$@"; }
+  helm() {
+    if [[ "$1" == status ]]; then printf 'NAME: rel\nSTATUS: pending-upgrade\nREVISION: 5\n'; return 0; fi
+    if [[ "$1" == rollback ]]; then return 1; fi
+    record "helm $*"; return 0
+  }
+  run _recover_pending_helm_release rel ns
+  [ "$status" -eq 1 ] || return 1
+}
+
+@test "_recover_pending_helm_release: failed uninstall -> rc 1 (caller fails closed)" {
+  _bounded() { shift; "$@"; }
+  helm() {
+    if [[ "$1" == status ]]; then printf 'NAME: rel\nSTATUS: pending-install\nREVISION: 1\n'; return 0; fi
+    if [[ "$1" == uninstall ]]; then return 1; fi
+    record "helm $*"; return 0
+  }
+  run _recover_pending_helm_release rel ns
+  [ "$status" -eq 1 ] || return 1
+}
+
+# ── install_client_helm: normal path clears a pending-* wedge first (#554) ───
+# `helm list` hides pending releases by default, so the one-client guard never
+# sees the wedge — but the next `helm upgrade --install` fails with "another
+# operation is in progress". install_client_helm must recover before upgrading.
+
+@test "install_client_helm: pending-upgrade wedge is rolled back BEFORE the install upgrade" {
+  HOST_DATA_DIR="$BATS_TEST_TMPDIR/data"; mkdir -p "$HOST_DATA_DIR"
+  _ensure_tracebloc_dirs() { :; }
+  _ensure_release_dirs() { :; }
+  _ensure_helm_runnable() { :; }
+  _bounded() { shift; "$@"; }
+  # list: empty (pending releases are hidden from the guard). status: wedged.
+  helm() {
+    if [[ "$1" == list ]]; then return 0; fi
+    if [[ "$1" == status ]]; then printf 'NAME: n\nSTATUS: pending-upgrade\nREVISION: 5\n'; return 0; fi
+    record "helm $*"; return 0
+  }
+  verify_credentials() { printf valid; }
+  run install_client_helm <<< $'myid\nmypw'
+  [ "$status" -eq 0 ] || return 1
+  # rollback recorded, and it comes before the install upgrade in call order.
+  mock_calls | grep -q "helm rollback"
+  mock_calls | grep -q "helm upgrade --install"
+  local rb up
+  rb="$(mock_calls | grep -n 'helm rollback' | head -1 | cut -d: -f1)"
+  up="$(mock_calls | grep -n 'helm upgrade --install' | head -1 | cut -d: -f1)"
+  [ "$rb" -lt "$up" ] || return 1
+}
+
+@test "install_client_helm: fails closed when the wedge cannot be auto-cleared" {
+  HOST_DATA_DIR="$BATS_TEST_TMPDIR/data"; mkdir -p "$HOST_DATA_DIR"
+  _ensure_tracebloc_dirs() { :; }
+  _ensure_release_dirs() { :; }
+  _ensure_helm_runnable() { :; }
+  _bounded() { shift; "$@"; }
+  helm() {
+    if [[ "$1" == list ]]; then return 0; fi
+    if [[ "$1" == status ]]; then printf 'NAME: n\nSTATUS: pending-upgrade\nREVISION: 5\n'; return 0; fi
+    if [[ "$1" == rollback ]]; then return 1; fi   # recovery itself fails
+    record "helm $*"; return 0
+  }
+  verify_credentials() { printf valid; }
+  run install_client_helm <<< $'myid\nmypw'
+  [ "$status" -ne 0 ] || return 1
+  [[ "$output" == *"interrupted previous helm operation"* ]] || return 1
+  # MUST NOT march into the wedged upgrade after recovery failed.
+  run mock_calls
+  [[ "$output" != *"helm upgrade --install"* ]] || return 1
+}
+
+@test "install_client_helm: a generic (exit 1) upgrade failure still names the unwedge remedy (#554)" {
+  HOST_DATA_DIR="$BATS_TEST_TMPDIR/data"; mkdir -p "$HOST_DATA_DIR"
+  _ensure_tracebloc_dirs() { :; }
+  _ensure_release_dirs() { :; }
+  _ensure_helm_runnable() { :; }
+  # Clean status (no wedge to recover), but the install upgrade itself fails 1 —
+  # NOT the 124 timeout. The remedy must still be surfaced (issue #554).
+  _bounded() { shift; "$@"; }
+  helm() {
+    if [[ "$1" == list ]]; then return 0; fi
+    if [[ "$1" == status ]]; then return 0; fi
+    if [[ "$1" == upgrade ]]; then return 1; fi
+    record "helm $*"; return 0
+  }
+  verify_credentials() { printf valid; }
+  run install_client_helm <<< $'myid\nmypw'
+  [ "$status" -ne 0 ] || return 1
+  [[ "$output" == *"another operation is in progress"* ]] || return 1
+}
+
+@test "install_client_helm: a DIFFERENT client WEDGED in pending-* is still seen and blocked (#554)" {
+  HOST_DATA_DIR="$BATS_TEST_TMPDIR/data"; mkdir -p "$HOST_DATA_DIR"
+  _ensure_tracebloc_dirs() { :; }
+  _ensure_release_dirs() { :; }
+  _ensure_helm_runnable() { :; }
+  _bounded() { shift; "$@"; }
+  # Helm 3 hides pending-* from a bare `helm list`, so the one-client guard must
+  # enumerate those states explicitly — otherwise a foreign client wedged by a
+  # killed helm op is invisible and a re-run with a different id would overwrite
+  # it once recovery clears the wedge. The mock returns a pending-upgrade row.
+  helm() {
+    if [ "$1" = list ]; then
+      record "helm $*"
+      printf '%s\n' 'NAME NAMESPACE REVISION UPDATED STATUS CHART APP VERSION' \
+                    'oldrel default 3 2026-01-01 pending-upgrade client-1.4.3 1.4.3'
+      return 0
+    fi
+    if [ "$1" = get ] && [ "$2" = values ]; then echo 'clientId: "otherclient"'; return 0; fi
+    record "helm $*"; return 0
+  }
+  verify_credentials() { printf valid; }
+  run install_client_helm <<< $'newclient\nmypw'
+  [ "$status" -ne 0 ] || return 1
+  [[ "$output" == *"already runs the tracebloc client 'otherclient'"* ]] || return 1
+  # the enumeration must name pending explicitly, or the wedge would be invisible
+  mock_calls | grep -q -- '--pending'
+  run mock_calls
+  [[ "$output" != *"helm upgrade"* ]] || return 1
+}
+
+# ── _recover_pending_helm_release no-destroy mode (adopt path, #554 Bugbot) ──
+# The reconcile/adopt path reuses the release's STORED credential, so recovery
+# there must never uninstall a pending-install (that would drop the sole copy of
+# the write-only credential). Rollback (non-destructive) is still allowed.
+
+@test "_recover_pending_helm_release no-destroy: pending-install is REFUSED, never uninstalled" {
+  _bounded() { shift; "$@"; }
+  helm() {
+    if [[ "$1" == status ]]; then printf 'NAME: rel\nSTATUS: pending-install\nREVISION: 1\n'; return 0; fi
+    record "helm $*"; return 0
+  }
+  run _recover_pending_helm_release rel ns no-destroy
+  [ "$status" -eq 1 ] || return 1                 # caller fails closed
+  # remedy must be actionable + credential-preserving, NOT a useless rollback
+  [[ "$output" == *"get values rel"* ]] || return 1
+  [[ "$output" == *"clientPassword"* ]] || return 1
+  [[ "$output" != *"rollback"* ]] || return 1
+  run mock_calls
+  [[ "$output" != *"helm uninstall"* ]] || return 1   # credential preserved
+}
+
+@test "_recover_pending_helm_release no-destroy: uninstalling is REFUSED, never uninstalled" {
+  _bounded() { shift; "$@"; }
+  helm() {
+    if [[ "$1" == status ]]; then printf 'NAME: rel\nSTATUS: uninstalling\nREVISION: 3\n'; return 0; fi
+    record "helm $*"; return 0
+  }
+  run _recover_pending_helm_release rel ns no-destroy
+  [ "$status" -eq 1 ] || return 1
+  run mock_calls
+  [[ "$output" != *"helm uninstall"* ]] || return 1
+}
+
+@test "_recover_pending_helm_release no-destroy: pending-upgrade STILL rolls back (non-destructive)" {
+  _bounded() { shift; "$@"; }
+  helm() {
+    if [[ "$1" == status ]]; then printf 'NAME: rel\nSTATUS: pending-upgrade\nREVISION: 5\n'; return 0; fi
+    record "helm $*"; return 0
+  }
+  run _recover_pending_helm_release rel ns no-destroy
+  [ "$status" -eq 0 ] || return 1
+  mock_calls | grep -q "helm rollback rel -n ns"
+}
+
+# #554 Bugbot/audit: the status READ is a plain command-substitution assignment.
+# Under `set -euo pipefail`, `helm status` on an ABSENT release (fresh install)
+# exits non-zero -> the pipeline is non-zero -> a bare `var=$(...)` assignment
+# would abort. Both call sites use `if !` (which suppresses errexit), but a bare
+# call must not abort either — the `|| _status=""` guard proves it.
+@test "_recover_pending_helm_release: bare call under set -e with a failing helm status does NOT abort" {
+  run bash -c '
+    source "'"${LIB_DIR}"'/common.sh"
+    source "'"${LIB_DIR}"'/install-client-helm.sh"
+    LOG_FILE=/dev/null
+    _bounded() { shift; "$@"; }
+    helm() { return 1; }              # status (and everything) fails: absent release
+    warn() { :; }; info() { :; }; log() { :; }
+    set -euo pipefail                 # enable AFTER sourcing, like the real installer
+    _recover_pending_helm_release rel ns    # BARE call, not in an if-condition
+    echo "REACHED_END"
+  '
+  [ "$status" -eq 0 ] || return 1
+  [ "$output" = "REACHED_END" ] || return 1
+}
+
+# #554 Bugbot: a WEDGED status with a long body must not be wiped under pipefail.
+# awk's early `exit` SIGPIPEs helm (141); the old `... | awk exit || _status=""`
+# then wiped the parsed "pending-upgrade" and recovery silently no-op'd. The
+# here-string parse must keep the value so rollback actually runs.
+@test "_recover_pending_helm_release: long wedged status is NOT wiped under set -o pipefail" {
+  local log="$BATS_TEST_TMPDIR/reclog"; : > "$log"
+  run bash -c '
+    source "'"${LIB_DIR}"'/common.sh"
+    source "'"${LIB_DIR}"'/install-client-helm.sh"
+    LOG_FILE="'"$log"'"
+    _bounded() { shift; "$@"; }
+    helm() {
+      if [ "$1" = status ]; then
+        printf "NAME: rel\nSTATUS: pending-upgrade\nREVISION: 5\n"
+        i=0; while [ "$i" -lt 4000 ]; do printf "NOTES body line %d\n" "$i"; i=$((i+1)); done
+        return 0
+      fi
+      if [ "$1" = rollback ]; then echo "ROLLED_BACK_MARKER"; return 0; fi
+      return 0
+    }
+    warn() { :; }; info() { :; }; log() { :; }
+    set -euo pipefail
+    _recover_pending_helm_release rel ns    # bare call, under pipefail
+  '
+  [ "$status" -eq 0 ] || return 1
+  grep -q ROLLED_BACK_MARKER "$log" || return 1   # status parsed -> rollback ran (not wiped)
 }

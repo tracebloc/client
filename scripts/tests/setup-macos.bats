@@ -18,6 +18,9 @@ setup() {
   # shellcheck source=/dev/null
   source "${LIB_DIR}/setup-macos.sh"
   LOG_FILE=/dev/null
+  # Fetch-test curl mocks write tiny fixture files; relax the #607 size floor so
+  # _assert_download_size does not reject them (the real floor applies in prod).
+  export TB_MIN_DOWNLOAD_BYTES=0
   MOCK_CALLS="$(mktemp)"
   PRESENT_CMDS="curl tar gzip"
   ARCH_DL="amd64"
@@ -35,6 +38,64 @@ setup() {
   run _verify_sha256 "$empty_sha" "$f"; [ "$status" -eq 0 ] || return 1        # matches (real sha256sum/shasum)
   run _verify_sha256 deadbeefdeadbeef "$f"; [ "$status" -ne 0 ] || return 1    # mismatch
   run _verify_sha256 "" "$f"; [ "$status" -ne 0 ] || return 1                  # empty expected → fail closed
+}
+
+# ── _verify_docker_dmg: fail-closed DMG checksum (#629) ──────────────────────
+_HEX64=e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
+_HEX64_OTHER=1111111111111111111111111111111111111111111111111111111111111111
+
+@test "_verify_docker_dmg: matching checksum verifies and keeps the DMG (#629)" {
+  local dmg="$BATS_TEST_TMPDIR/Docker.dmg"; printf 'dmg' > "$dmg"
+  curl_secure() { printf '%s *Docker.dmg\n' "$_HEX64"; }
+  shasum()      { printf '%s  file\n' "$_HEX64"; }
+  sleep()       { :; }
+  run _verify_docker_dmg "$dmg" "https://desktop.docker.com/mac/main/amd64/checksums.txt"
+  [ "$status" -eq 0 ] || return 1
+  [ -f "$dmg" ] || return 1
+  [[ "$output" != *UNVERIFIED* ]] || return 1
+}
+
+@test "_verify_docker_dmg: checksum mismatch fails closed and removes the DMG (#629)" {
+  local dmg="$BATS_TEST_TMPDIR/Docker.dmg"; printf 'dmg' > "$dmg"
+  curl_secure() { printf '%s *Docker.dmg\n' "$_HEX64"; }
+  shasum()      { printf '%s  file\n' "$_HEX64_OTHER"; }
+  sleep()       { :; }
+  run _verify_docker_dmg "$dmg" "https://x/checksums.txt"
+  [ "$status" -ne 0 ] || return 1
+  [[ "$output" == *"checksum mismatch"* ]] || return 1
+  [ ! -f "$dmg" ] || return 1
+}
+
+@test "_verify_docker_dmg: unfetchable checksum FAILS CLOSED by default and removes the DMG (#629)" {
+  local dmg="$BATS_TEST_TMPDIR/Docker.dmg"; printf 'dmg' > "$dmg"
+  curl_secure() { return 0; }   # empty body -> no hash
+  shasum()      { printf '%s  file\n' "$_HEX64"; }
+  sleep()       { :; }
+  run _verify_docker_dmg "$dmg" "https://x/checksums.txt"
+  [ "$status" -ne 0 ] || return 1
+  [[ "$output" == *"refusing to install an unverified"* ]] || return 1
+  [ ! -f "$dmg" ] || return 1
+}
+
+@test "_verify_docker_dmg: non-SHA proxy garbage is treated as unfetchable, fails closed (#629)" {
+  local dmg="$BATS_TEST_TMPDIR/Docker.dmg"; printf 'dmg' > "$dmg"
+  curl_secure() { printf '<html>error for Docker.dmg</html>\n'; }
+  shasum()      { printf '%s  file\n' "$_HEX64"; }
+  sleep()       { :; }
+  run _verify_docker_dmg "$dmg" "https://x/checksums.txt"
+  [ "$status" -ne 0 ] || return 1
+  [[ "$output" == *"refusing to install an unverified"* ]] || return 1
+}
+
+@test "_verify_docker_dmg: TRACEBLOC_ALLOW_UNVERIFIED_DOCKER_DMG=1 opts out (warn, proceed) (#629)" {
+  local dmg="$BATS_TEST_TMPDIR/Docker.dmg"; printf 'dmg' > "$dmg"
+  curl_secure() { return 0; }   # empty -> no hash
+  shasum()      { printf '%s  file\n' "$_HEX64"; }
+  sleep()       { :; }
+  TRACEBLOC_ALLOW_UNVERIFIED_DOCKER_DMG=1 run _verify_docker_dmg "$dmg" "https://x/checksums.txt"
+  [ "$status" -eq 0 ] || return 1
+  [[ "$output" == *UNVERIFIED* ]] || return 1
+  [ -f "$dmg" ] || return 1
 }
 
 @test "_verify_sha256: falls back to shasum when sha256sum is unavailable (macOS ships no sha256sum) (#429)" {
