@@ -40,6 +40,40 @@ setup() {
   [ "$output" = "https://stg-api.tracebloc.io/" ] || return 1
 }
 
+# THE ALIASES. values.schema.json documents development|staging|production as
+# accepted, and the old case knew only dev|stg — so `staging` fell to the `*)`
+# branch and verify_credentials() checked STAGING credentials against the
+# PRODUCTION backend, telling the customer their correct credentials were wrong
+# (backend#1745). The suite covered dev, stg, unset and "whatever"; it never
+# covered the spellings the docs tell people to use.
+@test "_backend_url: staging alias -> stg backend, NOT prod" {
+  CLIENT_ENV=staging
+  run _backend_url
+  [ "$output" = "https://stg-api.tracebloc.io/" ] || return 1
+}
+
+@test "_backend_url: development alias -> dev backend" {
+  CLIENT_ENV=development
+  run _backend_url
+  [ "$output" = "https://dev-api.tracebloc.io/" ] || return 1
+}
+
+@test "_backend_url: production alias -> prod backend" {
+  CLIENT_ENV=production
+  run _backend_url
+  [ "$output" = "https://api.tracebloc.io/" ] || return 1
+}
+
+@test "tb_client_env: reduces aliases and passes anything else through" {
+  # Pass-through matters: this normalises spellings, it does not validate, and
+  # each caller keeps its own fallback for genuinely unrecognised input.
+  [ "$(tb_client_env staging)" = "stg" ] || return 1
+  [ "$(tb_client_env development)" = "dev" ] || return 1
+  [ "$(tb_client_env production)" = "prod" ] || return 1
+  [ "$(tb_client_env stg)" = "stg" ] || return 1
+  [ "$(tb_client_env whatever)" = "whatever" ] || return 1
+}
+
 @test "_backend_url: unknown -> prod" {
   CLIENT_ENV=whatever
   run _backend_url

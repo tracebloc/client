@@ -292,7 +292,10 @@ _sanitize_workspace_name() {
 # Resolve the backend base URL the same way jobs-manager does
 # (client-runtime/controller.py: CLIENT_ENV → backend), defaulting to prod.
 _backend_url() {
-  case "${CLIENT_ENV:-prod}" in
+  # Reduce aliases FIRST (backend#1745): a raw `staging` fell through to the
+  # prod branch, so verify_credentials() checked staging credentials against
+  # the production backend and reported them invalid.
+  case "$(tb_client_env "${CLIENT_ENV:-prod}")" in
     dev) printf 'https://dev-api.tracebloc.io/' ;;
     stg) printf 'https://stg-api.tracebloc.io/' ;;
     *)   printf 'https://api.tracebloc.io/' ;;
@@ -1162,7 +1165,7 @@ install_client_helm() {
 # ============================================================
 
 env:
-$([ -n "${CLIENT_ENV:-}" ] && printf '  CLIENT_ENV: "%s"\n' "$CLIENT_ENV")${proxy_env_yaml}
+$([ -n "${CLIENT_ENV:-}" ] && printf '  CLIENT_ENV: "%s"\n' "$(tb_client_env "$CLIENT_ENV")")${proxy_env_yaml}
   # Training size: how much CPU/RAM each training run gets. One knob sets
   # requests == limits (Guaranteed QoS; client-runtime keeps them in lockstep).
   # Sized to this machine at install — largest node minus ~1 CPU / 3 GiB

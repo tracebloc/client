@@ -3953,12 +3953,34 @@ function Get-TraceblocYamlValue {
   return $val
 }
 
+# CLIENT_ENV reduced to the canonical dev|stg|prod (backend#1745).
+#
+# The PowerShell twin of common.sh::tb_client_env. values.schema.json documents
+# development|staging|production as accepted aliases, and a switch that knows
+# only dev|stg sends every one of them to the `default` (prod) branch.
+#
+# Not hypothetical: Get-BackendUrl feeds Test-Credentials, so a Windows install
+# with CLIENT_ENV=staging validated the customer's STAGING credentials against
+# PRODUCTION and told them their correct credentials were wrong.
+#
+# Unknown values pass through unchanged -- this normalises spellings, it does
+# not validate -- so the default branch below still catches genuine garbage.
+function Get-TraceblocClientEnv {
+  param([string]$Value = "$env:CLIENT_ENV")
+  switch ($Value) {
+    "development" { return "dev"  }
+    "staging"     { return "stg"  }
+    "production"  { return "prod" }
+    default       { return $Value }
+  }
+}
+
 # Resolve the backend base URL the same way jobs-manager does
 # (client-runtime/controller.py: CLIENT_ENV -> backend), defaulting to prod.
 function Get-BackendUrl {
   # Quote the value so a truly-unset CLIENT_ENV ($null) coerces to "" and the
   # default (prod) branch reliably fires across PowerShell versions.
-  switch ("$env:CLIENT_ENV") {
+  switch ("$(Get-TraceblocClientEnv)") {
     "dev"   { return "https://dev-api.tracebloc.io/" }
     "stg"   { return "https://stg-api.tracebloc.io/" }
     default { return "https://api.tracebloc.io/" }
@@ -4609,7 +4631,9 @@ function Install-ClientHelm {
   Log "Writing values to $valuesFile"
   $envBlock = "env:`n"
   if ($CLIENT_ENV) {
-    $envBlock += "  CLIENT_ENV: $CLIENT_ENV`n"
+    # Write the RESOLVED value, matching the bash installer: the chart
+    # normalises too, but the two must not disagree about what was installed.
+    $envBlock += "  CLIENT_ENV: $(Get-TraceblocClientEnv $CLIENT_ENV)`n"
   }
   # backend#743: relocate the dataset PV onto the network mount when HOST_DATASET_DIR is set.
   $datasetPathLine = if ($HOST_DATASET_DIR) { "`n  datasetPath: /tracebloc-data" } else { "" }
