@@ -332,7 +332,9 @@ _pf_docker_root() {
 # Backend host per CLIENT_ENV (mirrors install-client-helm.sh::_backend_url;
 # inlined so preflight is self-contained + unit-testable in isolation).
 _pf_backend_host() {
-  case "${CLIENT_ENV:-prod}" in
+  # Same alias reduction as _backend_url (backend#1745) — an egress preflight
+  # that probes the wrong backend passes while the real path is unreachable.
+  case "$(tb_client_env "${CLIENT_ENV:-prod}")" in
     dev) echo "dev-api.tracebloc.io" ;;
     stg) echo "stg-api.tracebloc.io" ;;
     *)   echo "api.tracebloc.io" ;;
