@@ -278,10 +278,17 @@ install_docker_engine() {
     # already refused, so $USER is the real daily user. TB_PREPARE_USER is the
     # admin-for-someone-else mechanism and is granted only on the prepare-host path
     # (#427 Bugbot; matches the rest of the tree's identity).
-    if ! id -nG "$_grant_user" 2>/dev/null | grep -qw docker; then
-      sudo usermod -aG docker "$_grant_user" 2>/dev/null \
-        || warn "Couldn't add ${_grant_user} to the docker group; add it manually:  sudo usermod -aG docker ${_grant_user}"
-    fi
+    # Capture-then-match: `id -nG | grep -qw` lets grep close the pipe on its
+    # first hit, id takes SIGPIPE and pipefail makes the pipeline 141 — which the
+    # `if !` reads as "not a member" (backend#1778). The space padding in the
+    # `case` pattern is exactly `grep -w`'s word boundary.
+    local _grant_groups
+    _grant_groups="$(id -nG "$_grant_user" 2>/dev/null || true)"
+    case " $_grant_groups " in
+      *" docker "*) ;;
+      *) sudo usermod -aG docker "$_grant_user" 2>/dev/null \
+           || warn "Couldn't add ${_grant_user} to the docker group; add it manually:  sudo usermod -aG docker ${_grant_user}" ;;
+    esac
   fi
 
   # Load the kernel modules dockerd's bridge driver + k3s need BEFORE starting,
@@ -345,10 +352,19 @@ install_docker_engine() {
     # (a) Group not active in THIS shell yet → re-exec under the docker group. Key
     # off $_grant_user (not bare $USER) so the USER-unset edge the grant handled
     # still triggers the in-session re-exec instead of dead-ending (#427 reviewer).
-    if [[ -z "${TB_PREPARE_HOST_MODE:-}" && -z "${_K3S_INSTALL_REEXEC:-}" ]] && id -nG "$_grant_user" 2>/dev/null | grep -qw docker; then
-      SELF="$(readlink -f "$0" 2>/dev/null || echo "$0")"
-      log "Docker group not yet active in this session — re-executing script..."
-      exec sg docker -c "_K3S_INSTALL_REEXEC=1 bash '$SELF'"
+    # Capture-then-match (backend#1778), and NESTED so the two mode guards still
+    # short-circuit ahead of the probe — `id` must not run in prepare-host or
+    # re-exec mode, where the old `&&` never reached it.
+    if [[ -z "${TB_PREPARE_HOST_MODE:-}" && -z "${_K3S_INSTALL_REEXEC:-}" ]]; then
+      local _reexec_groups
+      _reexec_groups="$(id -nG "$_grant_user" 2>/dev/null || true)"
+      case " $_reexec_groups " in
+        *" docker "*)
+          SELF="$(readlink -f "$0" 2>/dev/null || echo "$0")"
+          log "Docker group not yet active in this session — re-executing script..."
+          exec sg docker -c "_K3S_INSTALL_REEXEC=1 bash '$SELF'"
+          ;;
+      esac
     fi
     # (b) The daemon itself isn't running → a Docker/host problem, not a group
     # one. Surface Docker's OWN error (a 'log out and back in' hint would just
@@ -895,13 +911,20 @@ _install_userspace_tools() {
 # only — no k3d flag — so it needs nothing here.)
 _tier0_gpu_flags() {
   [ "${GPU_VENDOR:-none}" = "nvidia" ] || return 0
-  if docker info --format '{{json .Runtimes}}' 2>/dev/null | grep -q '"nvidia"'; then
-    K3D_GPU_FLAGS=("--gpus=all")
-    success "Reusing the NVIDIA container runtime already configured — your environment will have GPU access."
-  else
-    warn "NVIDIA GPU detected, but Docker's NVIDIA runtime isn't configured (installing the toolkit needs admin) — your environment will be CPU-only."
-    hint "To enable GPU, have an admin install and configure nvidia-container-toolkit on this host, then re-run."
-  fi
+  # Capture-then-match (backend#1778): `docker info … | grep -q` lets grep close
+  # the pipe on its first hit, docker takes SIGPIPE and pipefail makes it 141 —
+  # which the `if` reads as "no nvidia runtime", handing a Tier-0 GPU host a
+  # CPU-only cluster even though the toolkit is already configured.
+  local _runtimes
+  _runtimes="$(docker info --format '{{json .Runtimes}}' 2>/dev/null || true)"
+  case "$_runtimes" in
+    *'"nvidia"'*)
+      K3D_GPU_FLAGS=("--gpus=all")
+      success "Reusing the NVIDIA container runtime already configured — your environment will have GPU access." ;;
+    *)
+      warn "NVIDIA GPU detected, but Docker's NVIDIA runtime isn't configured (installing the toolkit needs admin) — your environment will be CPU-only."
+      hint "To enable GPU, have an admin install and configure nvidia-container-toolkit on this host, then re-run." ;;
+  esac
 }
 
 # install_rootless_docker — RFC 0001 #1219 (Tier 1). Stand up a per-user, ROOTLESS
@@ -1148,15 +1171,21 @@ _provision_subid_ranges() {
   # `if !`), so an unguarded failure would fall through to `success`/return 0 and let
   # the installer proceed with no range — dying later in setuptool (Bugbot #458).
   local _um_help; _um_help="$(usermod --help 2>&1 || true)"
-  if printf '%s' "$_um_help" | grep -q -- '--add-subuids'; then
-    sudo usermod --add-subuids "${start}-${end}" --add-subgids "${start}-${end}" "$user" \
-      || { warn "Couldn't add the subuid/subgid range for ${user} via usermod."; return 1; }
-  else
-    printf '%s:%s:%s\n' "$user" "$start" "$count" | sudo tee -a "$subuid" >/dev/null \
-      || { warn "Couldn't append the subuid range for ${user} to ${subuid}."; return 1; }
-    printf '%s:%s:%s\n' "$user" "$start" "$count" | sudo tee -a "$subgid" >/dev/null \
-      || { warn "Couldn't append the subgid range for ${user} to ${subgid}."; return 1; }
-  fi
+  # Match the captured value with `case` rather than re-piping it into `grep -q`:
+  # the capture above already removed the SIGPIPE hazard, and this drops the last
+  # pipeline (and two forks) from the probe (backend#1778).
+  case "$_um_help" in
+    *'--add-subuids'*)
+      sudo usermod --add-subuids "${start}-${end}" --add-subgids "${start}-${end}" "$user" \
+        || { warn "Couldn't add the subuid/subgid range for ${user} via usermod."; return 1; }
+      ;;
+    *)
+      printf '%s:%s:%s\n' "$user" "$start" "$count" | sudo tee -a "$subuid" >/dev/null \
+        || { warn "Couldn't append the subuid range for ${user} to ${subuid}."; return 1; }
+      printf '%s:%s:%s\n' "$user" "$start" "$count" | sudo tee -a "$subgid" >/dev/null \
+        || { warn "Couldn't append the subgid range for ${user} to ${subgid}."; return 1; }
+      ;;
+  esac
   success "Added subordinate UID/GID range ${start}-${end} for ${user}."
 }
 
