@@ -48,7 +48,18 @@ docker export "${cid}" | tar -tf - > "${rootfs}"
 docker rm -f "${cid}" >/dev/null
 if grep -qE '(^|/)--exclude' "${rootfs}"; then
   echo "ERROR: image contains a '--exclude' path — COPY --exclude was mis-parsed as a destination:" >&2
-  grep -E '(^|/)--exclude' "${rootfs}" | head >&2
+  # Here-string, NOT `grep … | head >&2`: under this script's `set -euo pipefail`
+  # head closes the pipe after its 10th line, so a rootfs with enough matching
+  # paths to push grep's output past the ~64KB pipe buffer makes grep take
+  # SIGPIPE → the pipeline exits 141 → errexit aborts HERE, skipping the
+  # `rm -f` below and the intended `exit 1`: the diagnostic killed the error
+  # path it exists to explain, leaking the extracted rootfs and reporting 141
+  # instead of 1. Measured: 50 matching lines exit 1 (fits the buffer, no
+  # signal), 20k exit 141. Same idiom and reasoning as
+  # scripts/lib/install-client-helm.sh (see its herestring note) and the rc=141
+  # case in .github's conformance-gate.
+  matches="$(grep -E '(^|/)--exclude' "${rootfs}" || true)"
+  head -n 10 <<< "${matches}" >&2
   rm -f "${rootfs}"; exit 1
 fi
 # k3s lands at usr/bin/k3s (copied into /usr/bin via the kept /bin symlink) or bin/k3s.
