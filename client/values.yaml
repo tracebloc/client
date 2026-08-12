@@ -471,10 +471,11 @@ images:
     #
     # DELIBERATELY BEHIND the `channelTags.prod: "0.8"` float, which now resolves
     # to v0.8.4 (sha256:02da1ebd…). Do not "refresh" this to the float without
-    # reading the ordering constraint in docs/SECURITY.md: prod's
-    # `serviceDbAccountsByEnv.prod` is still `false`, and the ceiling recorded
-    # there is 0.8.2. `prodPin: true` means this digest — not the float — is what
-    # prod spawns, which is exactly the protection being relied on.
+    # reading the ordering constraint in docs/SECURITY.md §4.1.1: prod's
+    # `serviceDbAccountsByEnv.prod` is still `false`, and the boundary is not a
+    # version number — it is whether the release you move to was cut before
+    # data-ingestors#468. `prodPin: true` means this digest, not the float, is
+    # what prod spawns, which is exactly the protection being relied on.
     #
     # (Checked 2026-08-12: v0.8.4's config.py still defaults DB_USER to
     # "edgeuser", so data-ingestors#468 — which removes that fallback, merged
