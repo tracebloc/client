@@ -27,6 +27,31 @@ setup() {
   [ "$output" = "crash" ] || return 1
 }
 
+@test "_diagnose_not_ready: large (>64KB) pod list under pipefail still classifies (backend#1778)" {
+  # The matcher used to be `printf '%s' "$pods" | grep -qiE ...`. Past the ~64KB
+  # pipe buffer, grep -q closes the pipe, printf takes SIGPIPE and pipefail makes
+  # the pipeline 141 — which the `if` reads as "no match", silently downgrading a
+  # real crash diagnosis to "starting" and handing the user the wrong remedy.
+  set -o pipefail
+  # The match must come FIRST: grep -q exits on its first hit, so the SIGPIPE
+  # only happens while the producer still has output left to write. A match at
+  # the END forces grep to read everything, and the test passes vacuously.
+  local big; big=$'testns-jobs-manager-abc 0/1 CrashLoopBackOff 7 3m\n'
+  big+="$(printf 'testns-noise-%s 1/1 Running 0 5m\n' $(seq 1 8000))"   # >64KB after the match
+  kubectl() { case "$*" in *logs*) echo "booting";; *) printf '%s\n' "$big";; esac; }
+  run _diagnose_not_ready testns
+  [ "$output" = "crash" ] || return 1
+}
+
+@test "_diagnose_not_ready: large (>64KB) jobs-manager log under pipefail still finds auth error (backend#1778)" {
+  set -o pipefail
+  local big; big=$'Exception: Authentication failed: Unable to log in with provided credentials\n'
+  big+="$(printf 'noise line %s\n' $(seq 1 8000))"   # >64KB after the match
+  kubectl() { case "$*" in *logs*) printf '%s\n' "$big";; *) echo "x 1/1 Running";; esac; }
+  run _diagnose_not_ready testns
+  [ "$output" = "bad_creds" ] || return 1
+}
+
 @test "_diagnose_not_ready: still creating -> starting" {
   kubectl() { case "$*" in *logs*) echo "booting";; *) echo "x 0/1 ContainerCreating";; esac; }
   run _diagnose_not_ready testns

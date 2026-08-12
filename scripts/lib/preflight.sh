@@ -104,7 +104,14 @@ _pf_fstype() {
   fi
   if [[ -z "$t" ]] && has df; then
     mp="$(df "$p" 2>/dev/null | awk 'NR>1 && $NF ~ /^\// {print $NF}' | tail -1)"
-    [[ -n "$mp" ]] && t="$(mount 2>/dev/null | awk -v m="$mp" 'index($0," on "m" (")>0 {sub(/.* \(/,""); sub(/[,)].*/,""); print; exit}')"
+    # `awk ... exit` stops reading at the match; `mount` on a container-heavy
+    # host prints well past 64 KB, so the pipeline can return 141 and abort the
+    # installer inside preflight with no message at all (backend#1778).
+    if [[ -n "$mp" ]]; then
+      local mount_out
+      mount_out="$(mount 2>/dev/null || true)"
+      t="$(awk -v m="$mp" 'index($0," on "m" (")>0 {sub(/.* \(/,""); sub(/[,)].*/,""); print; exit}' <<<"$mount_out")"
+    fi
   fi
   printf '%s' "$t" | tr '[:upper:]' '[:lower:]'
 }
