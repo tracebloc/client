@@ -105,6 +105,24 @@ read_ingestor_prod_channel() {
   ' "$file"
 }
 
+# Portable, yq-free reader for `serviceDbAccountsByEnv.prod` (true/false).
+# Same shape as the readers above: scoped to the top-level block so a
+# sibling `prod:` leaf (channelTags.prod, imageTags.prod, ...) can never be
+# mistaken for it. Prints nothing when the key is absent.
+read_prod_service_db_accounts() {
+  local file="$1"
+  [[ -f "$file" ]] || return 1
+  awk '
+    /^serviceDbAccountsByEnv:[[:space:]]*$/ { in_block = 1; next }
+    /^[^[:space:]#]/                        { in_block = 0 }
+    in_block && $0 ~ /^[[:space:]]+prod:[[:space:]]*(true|false)[[:space:]]*$/ {
+      sub(/^[[:space:]]+prod:[[:space:]]*/, "")
+      sub(/[[:space:]]*$/, "")
+      print; exit
+    }
+  ' "$file"
+}
+
 if [[ -z "$tag" ]]; then
   # No explicit TAG arg → default to the chart's images.ingestor.tag so this
   # helper always resolves the SAME line the chart ships. NEVER hardcode a
@@ -144,6 +162,49 @@ if [[ -z "$tag" ]]; then
 fi
 
 ref="${repo}:${tag}"
+
+# Fail fast, BEFORE any registry work: refusing after resolution wastes the
+# round-trip and hides the reason behind network output.
+if [[ "$write" == 1 ]]; then
+  # THE ORDERING CEILING (backend#1528). While prod still runs the shared
+  # `edgeuser`, the ingestor it runs must be a release that still HAS the
+  # edgeuser fallback. data-ingestors#468 removed that fallback, so a prod pin
+  # refreshed past it authenticates as an account prod has not minted yet and
+  # ingestion fails on every prod edge.
+  #
+  # This helper resolves a CHANNEL FLOAT and knows nothing about that ceiling,
+  # so following values.yaml's own "use the helper, never pin by hand" advice
+  # silently produces the wrong answer while prod is pre-flag. That nearly
+  # shipped in client#490. Fail closed instead.
+  #
+  # Read the flag from values.yaml rather than hardcoding a version, so the
+  # guard tracks the real state: once prod flips to `true` the ceiling is gone
+  # and this stops firing on its own. Anything that is not a definite `true`
+  # fails CLOSED — an absent or unparseable flag is not evidence the ceiling
+  # lifted, and treating it as permission would let a chart edit silently
+  # disarm the guard.
+  prod_flag="$(read_prod_service_db_accounts "$chart_values" || true)"
+  if [[ "$prod_flag" != "true" && "${INGESTOR_PIN_ALLOW_PRE_FLAG:-0}" != "1" ]]; then
+    if [[ -n "$prod_flag" ]]; then
+      echo "ERROR: refusing to refresh the prod pin while serviceDbAccountsByEnv.prod is $prod_flag." >&2
+    else
+      echo "ERROR: refusing to refresh the prod pin: could not read serviceDbAccountsByEnv.prod" >&2
+      echo "       from $chart_values, so the ordering ceiling below cannot be ruled out." >&2
+    fi
+    echo "       Prod authenticates as the shared edgeuser, so its ingestor must be a release" >&2
+    echo "       that still carries the edgeuser fallback (data-ingestors#468 removed it)." >&2
+    echo "       Resolving the channel float here can pin past that ceiling and break ingestion" >&2
+    echo "       on every prod edge — client#490 nearly shipped exactly this." >&2
+    echo "" >&2
+    echo "       Do ONE of:" >&2
+    echo "         1. Flip serviceDbAccountsByEnv.prod to true first (the #1528 S0 windowed" >&2
+    echo "            drill), confirm jobs-manager mints tb_ingest and stamps the creds onto" >&2
+    echo "            spawned Jobs, then re-run — this guard disappears on its own." >&2
+    echo "         2. If you have VERIFIED the target release still has the fallback, re-run" >&2
+    echo "            with INGESTOR_PIN_ALLOW_PRE_FLAG=1 and say so in the PR." >&2
+    exit 1
+  fi
+fi
 
 # Resolve the top-level (index) digest. Prefer buildx imagetools (prints the
 # manifest-list/index digest directly); fall back to `docker manifest inspect`.
