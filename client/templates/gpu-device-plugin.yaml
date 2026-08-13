@@ -31,8 +31,16 @@ the plugin imperatively because it must verify the node advertises a GPU before
 it writes the GPU request — an ordering this Helm-managed resource can't satisfy
 in a single install. See the issue thread.
 */ -}}
-{{- if .Values.gpu.devicePlugin.enabled }}
-{{- $dp := .Values.gpu.devicePlugin }}
+{{- /*
+Nil-safe access: a `helm upgrade --reuse-values` from a release predating this
+chart (no `gpu` block) does NOT merge the chart's values.yaml defaults, so
+.Values.gpu — and .Values.gpu.devicePlugin — can be absent. Parenthesised
+indexing yields nil (falsy) instead of panicking with "nil pointer evaluating
+interface {}.devicePlugin". Same for the per-vendor image/namespace sub-keys,
+which fall back to the documented defaults.
+*/ -}}
+{{- $dp := (.Values.gpu).devicePlugin }}
+{{- if and $dp $dp.enabled }}
 {{- $vendor := $dp.vendor | default "" }}
 {{- if not (or (eq $vendor "nvidia") (eq $vendor "amd")) }}
 {{- fail (printf "gpu.devicePlugin.enabled is true but gpu.devicePlugin.vendor is %q; set it to \"nvidia\" or \"amd\"" $vendor) }}
@@ -68,7 +76,7 @@ spec:
       priorityClassName: "system-node-critical"
       containers:
         - name: nvidia-device-plugin-ctr
-          image: {{ $dp.nvidia.image | quote }}
+          image: {{ ($dp.nvidia).image | default "nvcr.io/nvidia/k8s-device-plugin:v0.14.5" | quote }}
           env:
             # Optional GPU: a node without a working NVIDIA runtime must not
             # crash-loop the plugin — it registers 0 GPUs and the install stays
@@ -114,7 +122,7 @@ spec:
           operator: Exists
       containers:
         - name: amdgpu-dp-cntr
-          image: {{ $dp.amd.image | quote }}
+          image: {{ ($dp.amd).image | default "rocm/k8s-device-plugin:latest" | quote }}
           securityContext:
             privileged: true
             capabilities:
