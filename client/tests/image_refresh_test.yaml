@@ -527,6 +527,13 @@ tests:
     asserts:
       - isKind:
           of: Role
+      # DISTINCT name from the release-namespace Role. Reusing it collided when
+      # nodeAgents.namespace.name points back at the release namespace — a
+      # supported layout — and the loser was the deployments Role, silently
+      # costing image-refresh its patch on jobs-manager and requests-proxy.
+      - equal:
+          path: metadata.name
+          value: stg-image-refresh-node-agents
       - equal:
           path: metadata.namespace
           value: tracebloc-node-agents
@@ -557,11 +564,20 @@ tests:
           path: subjects[0].namespace
           value: tracebloc
       - equal:
+          path: metadata.name
+          value: stg-image-refresh-node-agents
+      # The SUBJECT keeps the un-suffixed name: there is only ONE
+      # ServiceAccount and it lives in the release namespace. Only the Role and
+      # RoleBinding are renamed.
+      - equal:
           path: subjects[0].name
           value: stg-image-refresh
       - equal:
           path: roleRef.kind
           value: Role
+      - equal:
+          path: roleRef.name
+          value: stg-image-refresh-node-agents
 
   - it: cronjob wires the workload names the set-image reconcile targets
     template: templates/image-refresh-cronjob.yaml
@@ -743,3 +759,44 @@ tests:
           content:
             name: RESOURCE_MONITOR_PINNED
             value: "1"
+
+  - it: RBAC names do not collide when node-agents shares the release namespace (#569, Bugbot High)
+    # `nodeAgents.namespace.name` pointing back at the release namespace is a
+    # supported layout — node-agents-namespace.yaml documents it and skips
+    # creating the Namespace in that case. Both Role/RoleBinding pairs then land
+    # in ONE namespace, so they must have distinct names or Helm refuses the
+    # release (or the DaemonSet-only Role overwrites the deployments Role, which
+    # silently strips image-refresh's patch on jobs-manager and requests-proxy —
+    # and with IfNotPresent those pods would have no update path left).
+    template: templates/image-refresh-rbac.yaml
+    set:
+      nodeAgents:
+        namespace:
+          name: tracebloc
+    asserts:
+      - hasDocuments:
+          count: 5
+      - equal:
+          path: metadata.name
+          value: stg-image-refresh
+        documentIndex: 1
+      - equal:
+          path: metadata.namespace
+          value: tracebloc
+        documentIndex: 1
+      - equal:
+          path: metadata.name
+          value: stg-image-refresh-node-agents
+        documentIndex: 3
+      - equal:
+          path: metadata.namespace
+          value: tracebloc
+        documentIndex: 3
+      - equal:
+          path: metadata.name
+          value: stg-image-refresh
+        documentIndex: 2
+      - equal:
+          path: metadata.name
+          value: stg-image-refresh-node-agents
+        documentIndex: 4

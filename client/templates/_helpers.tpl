@@ -164,6 +164,29 @@ mysql-pvc
 {{- end }}
 
 {{/*
+  Name for the image-refresh Role + RoleBinding in the NODE-AGENTS namespace
+  (#569). DISTINCT from tracebloc.imageRefreshName on purpose.
+
+  `nodeAgents.namespace.name` pointing back at the release namespace is a
+  supported layout — node-agents-namespace.yaml documents it and explicitly
+  skips creating the Namespace in that case. Reusing the release-namespace name
+  here collided with it: two Roles and two RoleBindings with the SAME name in
+  the SAME namespace. Helm either refuses the release or the later
+  DaemonSet-only Role overwrites the deployments Role, at which point
+  image-refresh silently loses patch on jobs-manager and requests-proxy — and
+  since those pods now render IfNotPresent, they would have no update path left
+  at all (Bugbot, High).
+
+  A separate name is correct in BOTH layouts: split namespaces get one Role
+  each, and the collapsed layout gets two complementary Roles (deployments,
+  daemonsets) bound to the same ServiceAccount, which is exactly the intended
+  grant.
+*/}}
+{{- define "tracebloc.imageRefreshNodeAgentsName" -}}
+{{ .Release.Name }}-image-refresh-node-agents
+{{- end }}
+
+{{/*
   Whether the image-refresh CronJob has anything to do. When ALL THREE
   managed images (jobs-manager, pods-monitor, resource-monitor) are
   digest-pinned, the operator has explicitly opted into reproducible

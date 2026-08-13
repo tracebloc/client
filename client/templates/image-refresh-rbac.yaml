@@ -82,7 +82,7 @@ roleRef:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
-  name: {{ include "tracebloc.imageRefreshName" . }}
+  name: {{ include "tracebloc.imageRefreshNodeAgentsName" . }}
   namespace: {{ .Values.nodeAgents.namespace.name }}
   labels:
     {{- include "tracebloc.labels" . | nindent 4 }}
@@ -101,18 +101,22 @@ rules:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
-  name: {{ include "tracebloc.imageRefreshName" . }}
+  name: {{ include "tracebloc.imageRefreshNodeAgentsName" . }}
   namespace: {{ .Values.nodeAgents.namespace.name }}
   labels:
     {{- include "tracebloc.labels" . | nindent 4 }}
     app.kubernetes.io/component: image-refresh
 subjects:
+  # The SUBJECT keeps tracebloc.imageRefreshName: there is only ONE
+  # ServiceAccount, and it lives in the release namespace. Only the Role and
+  # RoleBinding are renamed, to avoid colliding with the release-namespace pair
+  # when nodeAgents.namespace.name points back at the release namespace.
   - kind: ServiceAccount
     name: {{ include "tracebloc.imageRefreshName" . }}
     namespace: {{ .Release.Namespace }}
 roleRef:
   kind: Role
-  name: {{ include "tracebloc.imageRefreshName" . }}
+  name: {{ include "tracebloc.imageRefreshNodeAgentsName" . }}
   apiGroup: rbac.authorization.k8s.io
 {{- end }}
 {{- end }}
