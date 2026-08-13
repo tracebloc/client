@@ -924,6 +924,34 @@ function Test-ToolsPresent {
   return $true
 }
 
+# The CLI floor the installer actively repairs (client#707). 0.10.0 is the release
+# where the CLI gained its own update nudge: at or above it a user can keep
+# themselves current, below it NOTHING on the machine can tell them they are
+# behind. A floor, not a "must be latest" — so this needs no network call and
+# never needs raising.
+$script:TB_CLI_MIN_VERSION = "0.10.0"
+
+# Is the tracebloc CLI present AND new enough to maintain itself?
+#
+# The fast path must not shortcut past Install-TraceblocCli when it isn't, for
+# TWO reasons on Windows:
+#   * Test-ToolsPresent covers docker/kubectl/k3d/helm — the CLI is not in it at
+#     all, so a stale CLI was invisible; and
+#   * `completed` is set purely from ClientState -eq "connected", which says
+#     nothing about the CLI, while Install-TraceblocCli is deliberately
+#     non-fatal. A machine whose CLI install FAILED was therefore marked complete
+#     and never retried — permanently CLI-less, not merely stale.
+#
+# Fails OPEN on an unreadable version: that is not evidence of staleness, and
+# re-running the CLI install on every invocation would be worse than the problem.
+function Test-TraceblocCliCurrent {
+  if (-not (Has "tracebloc")) { return $false }
+  $ver = ""
+  try { $ver = (& tracebloc version 2>$null | Select-Object -First 1) } catch { $ver = "" }
+  if ($ver -notmatch '(\d+(?:\.\d+)+)') { return $true }
+  try { return ([version]$Matches[1] -ge [version]$script:TB_CLI_MIN_VERSION) } catch { return $true }
+}
+
 # Pure TRI-STATE classifier from a FULL `k3d cluster list -o json` (no name filter)
 # output. Distinguishes "confidently not ours" from "can't tell" so callers never
 # conflate an indeterminate read with a definitive answer (#557 Bugbot 3728340365,
@@ -5963,7 +5991,7 @@ Find-Gpu
 # verifies live health (not just the checkpoint), so a stopped cluster or a down
 # client falls through to the repairing walk. Skipped on -Resume (a resume must
 # finish the interrupted walk).
-if ((-not $Resume) -and $script:InstallState.completed -and (Test-ToolsPresent) -and (Test-ClusterRunning) -and (Test-ClientHealthy)) {
+if ((-not $Resume) -and $script:InstallState.completed -and (Test-ToolsPresent) -and (Test-TraceblocCliCurrent) -and (Test-ClusterRunning) -and (Test-ClientHealthy)) {
   # GPU is "fully enabled" only when the node ACTUALLY advertises a GPU AND the live release
   # requests one. If an NVIDIA GPU is present but EITHER is missing, do NOT shortcut -- the state is
   # inconsistent in one of two ways (Bugbot), both of which a re-run should fix:

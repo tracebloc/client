@@ -163,6 +163,105 @@ _depname() {
   [ "$status" -eq 0 ] || return 1
 }
 
+# ── CLI version floor (client#707) ──────────────────────────────────────────
+# The healthy fast-path used to pin a user to whatever CLI they first installed,
+# forever: presence was checked, version never was. The cluster auto-upgrades
+# hourly around a host binary nothing touches — a field machine sat on v0.5.1
+# for five weeks that way.
+@test "_version_lt: orders dotted versions, including the 2-vs-10 trap" {
+  _version_lt 0.5.1 0.10.0  || return 1     # the field case
+  _version_lt 0.9.9 0.10.0  || return 1     # 9 < 10, not a string compare
+  _version_lt 0.10.0 0.10.1 || return 1
+  _version_lt 0.10 0.10.1   || return 1     # missing component reads as 0
+  ! _version_lt 0.10.0 0.10.0 || return 1   # equal is not less
+  ! _version_lt 0.10.5 0.10.0 || return 1
+  ! _version_lt 1.0.0 0.10.0 || return 1
+  _version_lt 0.10.0-rc.1 0.10.0 && return 1  # pre-release compares as its base
+  return 0
+}
+
+@test "_assess_cli_outdated: a CLI below the floor is outdated" {
+  has() { [ "$1" = tracebloc ]; }
+  tracebloc() { echo "tracebloc 0.5.1 (darwin/arm64)"; }
+  run _assess_cli_outdated
+  [ "$status" -eq 0 ] || return 1
+}
+
+@test "_assess_cli_outdated: a CLI at the floor is NOT outdated" {
+  has() { [ "$1" = tracebloc ]; }
+  tracebloc() { echo "tracebloc 0.10.0 (darwin/arm64)"; }
+  run _assess_cli_outdated
+  [ "$status" -ne 0 ] || return 1
+}
+
+@test "_assess_cli_outdated: a CLI above the floor is NOT outdated" {
+  has() { [ "$1" = tracebloc ]; }
+  tracebloc() { echo "tracebloc 0.10.6 (darwin/arm64)"; }
+  run _assess_cli_outdated
+  [ "$status" -ne 0 ] || return 1
+}
+
+# Fail OPEN: an unreadable version is not evidence of staleness, and treating it
+# as outdated would reinstall the CLI on EVERY run.
+@test "_assess_cli_outdated: unreadable version -> treated as current (no churn)" {
+  has() { [ "$1" = tracebloc ]; }
+  tracebloc() { echo "tracebloc (unknown build)"; }
+  run _assess_cli_outdated
+  [ "$status" -ne 0 ] || return 1
+}
+
+@test "_assess_cli_outdated: a CLI that errors on 'version' -> treated as current" {
+  has() { [ "$1" = tracebloc ]; }
+  tracebloc() { return 1; }
+  run _assess_cli_outdated
+  [ "$status" -ne 0 ] || return 1
+}
+
+@test "_assess_cli_outdated: no CLI at all -> not 'outdated' (cli-missing owns that)" {
+  has() { return 1; }
+  HOME="$BATS_TEST_TMPDIR/empty"; mkdir -p "$HOME"
+  run _assess_cli_outdated
+  [ "$status" -ne 0 ] || return 1
+}
+
+# The regression guard: mutation-real against the pre-fix classify, which went
+# straight to healthy on any CLI that merely existed.
+@test "_assess_classify: a stale CLI is degraded/cli-outdated, NEVER healthy" {
+  has() { return 0; }
+  _cluster_exists() { return 0; }
+  _assess_cluster_servers_running() { echo 1; }
+  detect_installed_client() { INSTALLED_CLIENT_ID=uuid; INSTALLED_CLIENT_NS=tracebloc; }
+  _assess_release_pending() { return 1; }
+  _assess_workload_ready() { return 0; }
+  _assess_cli_present() { return 0; }
+  _assess_cli_outdated() { return 0; }
+  _assess_classify
+  [ "$INSTALL_STATE" = degraded ] || return 1
+  [ "$INSTALL_STATE_REASON" = cli-outdated ] || return 1
+}
+
+@test "_assess_classify: a current CLI still reaches healthy (floor doesn't over-fire)" {
+  has() { return 0; }
+  _cluster_exists() { return 0; }
+  _assess_cluster_servers_running() { echo 1; }
+  detect_installed_client() { INSTALLED_CLIENT_ID=uuid; INSTALLED_CLIENT_NS=tracebloc; }
+  _assess_release_pending() { return 1; }
+  _assess_workload_ready() { return 0; }
+  _assess_cli_present() { return 0; }
+  _assess_cli_outdated() { return 1; }
+  _assess_classify
+  [ "$INSTALL_STATE" = healthy ] || return 1
+}
+
+@test "assess_existing_install: cli-outdated says so, continues, and does NOT hand off" {
+  _assess_classify() { INSTALL_STATE=degraded; INSTALL_STATE_REASON=cli-outdated; }
+  tracebloc() { echo "HOME_SCREEN"; }
+  run assess_existing_install
+  [ "$status" -eq 0 ] || return 1
+  assert_has "out of date" "$output"
+  refute_has "HOME_SCREEN" "$output"
+}
+
 @test "_assess_cli_present: absent everywhere -> not present (1)" {
   has() { return 1; }
   HOME="$BATS_TEST_TMPDIR/empty"; mkdir -p "$HOME"
