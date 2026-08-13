@@ -15,11 +15,11 @@ tests:
       - hasDocuments:
           count: 2
 
-  - it: rbac template renders ServiceAccount + ClusterRoleBinding by default
+  - it: rbac template renders SA + namespaced Role/RoleBinding + scoped ClusterRole/ClusterRoleBinding by default
     template: templates/auto-upgrade-rbac.yaml
     asserts:
       - hasDocuments:
-          count: 2
+          count: 5
 
   - it: cronjob template renders nothing when autoUpgrade.enabled=false
     template: templates/auto-upgrade-cronjob.yaml
@@ -160,29 +160,93 @@ tests:
           path: spec.jobTemplate.spec.template.spec.containers[0].securityContext.capabilities.drop[0]
           value: ALL
 
-  - it: ServiceAccount and ClusterRoleBinding bind to cluster-admin
+  - it: RBAC is least-privilege — namespaced Role plus a scoped ClusterRole, NOT cluster-admin (backend#953)
     template: templates/auto-upgrade-rbac.yaml
     asserts:
-      - hasDocuments:
-          count: 2
-      - isKind:
-          of: ServiceAccount
-        documentIndex: 0
+      # The ServiceAccount the CronJob runs as.
       - equal:
           path: metadata.name
           value: stg-auto-upgrade
-        documentIndex: 0
-      - isKind:
-          of: ClusterRoleBinding
-        documentIndex: 1
+        documentSelector:
+          path: kind
+          value: ServiceAccount
+      # Namespaced Role: full control, but confined to the release namespace.
+      - equal:
+          path: rules[0].apiGroups
+          value: ["*"]
+        documentSelector:
+          path: kind
+          value: Role
+      - equal:
+          path: rules[0].resources
+          value: ["*"]
+        documentSelector:
+          path: kind
+          value: Role
+      - equal:
+          path: rules[0].verbs
+          value: ["*"]
+        documentSelector:
+          path: kind
+          value: Role
+      # RoleBinding targets the chart's own namespaced Role, not a built-in.
+      - equal:
+          path: roleRef.kind
+          value: Role
+        documentSelector:
+          path: kind
+          value: RoleBinding
       - equal:
           path: roleRef.name
-          value: cluster-admin
-        documentIndex: 1
+          value: stg-auto-upgrade
+        documentSelector:
+          path: kind
+          value: RoleBinding
+      # The regression that #953 fixes: the ClusterRoleBinding must bind the
+      # chart's OWN scoped ClusterRole (stg-auto-upgrade), never cluster-admin.
+      - equal:
+          path: roleRef.name
+          value: stg-auto-upgrade
+        documentSelector:
+          path: kind
+          value: ClusterRoleBinding
+      # The binding is deliberately RENAMED (`-scoped`): the pre-#953 binding of
+      # this name bound cluster-admin and roleRef is immutable, so a same-name
+      # binding would make the first upgrade fail. A distinct name lets helm
+      # create-new + delete-old. Locking the name in guards that fix.
+      - equal:
+          path: metadata.name
+          value: stg-auto-upgrade-scoped
+        documentSelector:
+          path: kind
+          value: ClusterRoleBinding
       - equal:
           path: subjects[0].name
           value: stg-auto-upgrade
-        documentIndex: 1
+        documentSelector:
+          path: kind
+          value: ClusterRoleBinding
+      # The scoped ClusterRole carries escalate + bind on the RBAC kinds
+      # (required to re-apply the chart's other ClusterRoles during upgrade)…
+      - contains:
+          path: rules
+          content:
+            apiGroups: ["rbac.authorization.k8s.io"]
+            resources: ["clusterroles", "clusterrolebindings"]
+            verbs: ["get", "list", "watch", "create", "update", "patch", "delete", "escalate", "bind"]
+        documentSelector:
+          path: kind
+          value: ClusterRole
+      # …but must NOT grant blanket cluster-wide wildcard power.
+      - notContains:
+          path: rules
+          content:
+            apiGroups: ["*"]
+            resources: ["*"]
+            verbs: ["*"]
+        documentSelector:
+          path: kind
+          value: ClusterRole
 
   - it: should accept operator overrides for schedule, image, and timeout
     template: templates/auto-upgrade-cronjob.yaml
