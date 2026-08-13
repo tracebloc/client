@@ -68,6 +68,17 @@ fi
 # (ok / DRIFT / UNRESOLVED / UNWATCHABLE) without a network, and the parsing is
 # where this script's two real bugs were. A stubbed run prints STUBBED on every
 # line and in the summary, so a log cannot look like evidence it is not.
+# _tmout <seconds> <cmd...> — bound a registry/daemon call so a wedged docker or
+# stuck registry fails closed (non-zero exit -> UNRESOLVED) rather than hanging the
+# daily job (Bugbot). timeout on Linux, gtimeout on macOS; unbounded only if
+# neither exists (the CI runner where the daily job runs has timeout).
+_tmout() {
+  local secs="$1"; shift
+  if command -v timeout >/dev/null 2>&1; then timeout "$secs" "$@"
+  elif command -v gtimeout >/dev/null 2>&1; then gtimeout "$secs" "$@"
+  else "$@"; fi
+}
+
 resolve_index_digest() {
   local ref="$1" out="" d=""
   if [[ -n "${DRIFT_RESOLVE_STUB:-}" ]]; then
@@ -77,12 +88,12 @@ resolve_index_digest() {
     printf '%s\n' "$d"
     return 0
   fi
-  if docker buildx imagetools inspect "$ref" >/dev/null 2>&1; then
-    out="$(docker buildx imagetools inspect "$ref" 2>/dev/null || true)"
+  if _tmout 30 docker buildx imagetools inspect "$ref" >/dev/null 2>&1; then
+    out="$(_tmout 30 docker buildx imagetools inspect "$ref" 2>/dev/null || true)"
     d="$(awk '/^Digest:/ {print $2; exit}' <<<"$out")"
   fi
   if [[ -z "$d" ]]; then
-    out="$(docker manifest inspect --verbose "$ref" 2>/dev/null || true)"
+    out="$(_tmout 30 docker manifest inspect --verbose "$ref" 2>/dev/null || true)"
     d="$(grep -m1 '"Ref"' <<<"$out" | sed -E 's/.*@(sha256:[a-f0-9]{64}).*/\1/')"
   fi
   [[ "$d" =~ ^sha256:[a-f0-9]{64}$ ]] || return 1
