@@ -239,85 +239,71 @@ _gpu_mocks() {
   [[ "$output" == *"DONE:cr=2"* ]] || return 1
 }
 
-# ── bounded GPU apply (Bugbot) ───────────────────────────────────────────────
-@test "the GPU manifest apply is bounded: --request-timeout, so a wedged API can't hang it (Bugbot)" {
-  # _apply_remote_manifest redirects apply output to the log; without a request
-  # timeout a wedged API server would hang silently instead of failing into the
-  # caller's recoverable CPU-mode warn.
-  grep -Eq 'kubectl apply -f "\$tmp_yml" --request-timeout=' \
-    "$BATS_TEST_DIRNAME/../lib/gpu-plugins.sh"
+# ── device plugin is Helm-managed, not applied imperatively (client#564) ─────
+# Before #564 the plugin was fetched from raw.githubusercontent.com and applied
+# with `kubectl apply` outside any Helm release (lingered through uninstall,
+# re-created on re-run). It is now a chart template gated on
+# gpu.devicePlugin.enabled, so these guard the "no imperative apply survived the
+# migration" invariant plus the installer gate that flips it on.
+
+@test "gpu-plugins.sh no longer applies the device plugin imperatively (client#564)" {
+  # The Helm chart owns deployment now; the lib must not `kubectl apply` a
+  # manifest, must not fetch one over the network, and must not keep the old
+  # fetch-and-apply helpers. (Matches code constructs, not prose — the header
+  # comment may still describe the old raw.githubusercontent.com behaviour.)
+  ! grep -q 'kubectl apply' "$BATS_TEST_DIRNAME/../lib/gpu-plugins.sh" || return 1
+  ! grep -qE 'curl_secure|curl .*-o|Invoke-WebRequest' \
+    "$BATS_TEST_DIRNAME/../lib/gpu-plugins.sh" || return 1
+  ! grep -qE '^(deploy_gpu_device_plugin|_apply_remote_manifest|_gpu_rollout_gate|_deploy_nvidia_plugin|_deploy_amd_plugin)\(\)' \
+    "$BATS_TEST_DIRNAME/../lib/gpu-plugins.sh" || return 1
 }
 
-@test "GPU success is gated on the rollout exit code — no false 'enabled' after a failed rollout (Bugbot)" {
-  # A timed-out/failed rollout means the plugin isn't confirmed ready. Gating now
-  # lives in the shared _gpu_rollout_gate (the nvidia path delegates to it); the gate
-  # puts success in the rollout then-branch with a CPU-mode warn on failure.
-  grep -q '_gpu_rollout_gate nvidia-device-plugin-daemonset' \
-    "$BATS_TEST_DIRNAME/../lib/gpu-plugins.sh"
-  grep -q 'rollout status "daemonset/' \
-    "$BATS_TEST_DIRNAME/../lib/gpu-plugins.sh"
-  grep -q "Couldn't confirm GPU acceleration is ready" \
-    "$BATS_TEST_DIRNAME/../lib/gpu-plugins.sh"
+@test "install-k8s.sh no longer deploys the GPU plugin imperatively before Helm (client#564)" {
+  ! grep -q 'deploy_gpu_device_plugin' "$BATS_TEST_DIRNAME/../install-k8s.sh" || return 1
+  # Node verification now runs after the Helm install (the plugin rolls out with
+  # the release), so verify_gpu must appear after install_client_helm.
+  local helm_line verify_line
+  helm_line=$(grep -n '^\s*install_client_helm$' "$BATS_TEST_DIRNAME/../install-k8s.sh" | head -1 | cut -d: -f1)
+  verify_line=$(grep -n '^\s*verify_gpu$' "$BATS_TEST_DIRNAME/../install-k8s.sh" | head -1 | cut -d: -f1)
+  [ -n "$helm_line" ] || return 1
+  [ -n "$verify_line" ] || return 1
+  [ "$verify_line" -gt "$helm_line" ] || return 1
 }
 
-@test "GPU verify is gated on a successful deploy so CPU-mode skips the ~90s wait (Bugbot)" {
-  grep -Eq 'if deploy_gpu_device_plugin; then' "$BATS_TEST_DIRNAME/../install-k8s.sh"
+@test "the device-plugin chart template exists and is gated on gpu.devicePlugin.enabled (client#564)" {
+  local tmpl="$BATS_TEST_DIRNAME/../../client/templates/gpu-device-plugin.yaml"
+  [ -f "$tmpl" ] || return 1
+  grep -q 'Values.gpu.devicePlugin.enabled' "$tmpl" || return 1
+  grep -q 'kind: DaemonSet' "$tmpl" || return 1
 }
 
-@test "_deploy_nvidia_plugin returns non-zero on a CPU-mode (apply-failure) path (Bugbot)" {
-  # A failed deploy must signal non-zero so the caller skips verify_gpu.
+@test "the installer enables the Helm-managed device plugin in lockstep with GPU detection (client#564)" {
+  # install-client-helm.sh must emit gpu.devicePlugin.enabled=true + vendor when a
+  # GPU vendor is detected, so the chart deploys the plugin the imperative path used to.
+  local lib="$BATS_TEST_DIRNAME/../lib/install-client-helm.sh"
+  grep -q 'gpu:' "$lib" || return 1
+  grep -q 'devicePlugin' "$lib" || return 1
+  grep -q 'enabled: true' "$lib" || return 1
+}
+
+@test "verify_gpu no-ops for a CPU-only host (GPU_VENDOR neither nvidia nor amd)" {
   run bash -c '
     set -euo pipefail
-    GPU_VENDOR=nvidia; NVIDIA_DEVICE_PLUGIN_URL=http://example/x.yml; LOG_FILE=/dev/null
-    log(){ :; }; success(){ :; }; warn(){ :; }
+    GPU_VENDOR=none; LOG_FILE=/dev/null
+    log(){ echo "LOG:$*"; }; success(){ :; }; warn(){ :; }
+    kubectl(){ echo "KUBECTL_CALLED"; }   # must NOT be reached on a CPU-only host
     source "'"$BATS_TEST_DIRNAME"'/../lib/gpu-plugins.sh"
-    _apply_remote_manifest(){ return 1; }   # override AFTER source: simulate apply failure
-    kubectl(){ return 1; }                    # get daemonset -> not present
-    _deploy_nvidia_plugin && echo RC0 || echo "RC$?"
+    verify_gpu
+    echo DONE
   '
   [ "$status" -eq 0 ] || { echo "$output"; return 1; }
-  [[ "$output" == *"RC1"* ]] || { echo "expected non-zero return; got: $output"; return 1; }
+  [[ "$output" == *"DONE"* ]] || return 1
+  [[ "$output" != *"KUBECTL_CALLED"* ]] || return 1
+  [[ "$output" != *"LOG:Verifying GPU on node"* ]] || return 1
 }
 
-@test "_gpu_rollout_gate: rollout failure -> warn CPU-mode + non-zero, no success (reviewer)" {
-  run bash -c '
-    set -euo pipefail
-    LOG_FILE=/dev/null
-    log(){ :; }; success(){ echo "SUCCESS:$*"; }; warn(){ echo "WARN:$*"; }
-    source "'"$BATS_TEST_DIRNAME"'/../lib/gpu-plugins.sh"
-    kubectl(){ return 1; }   # rollout status fails
-    _gpu_rollout_gate amdgpu-device-plugin && echo RC0 || echo "RC$?"
-  '
-  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
-  [[ "$output" == *"WARN:"* ]] || return 1
-  [[ "$output" == *"RC1"* ]] || return 1
-  [[ "$output" != *"SUCCESS:"* ]] || return 1
-}
-
-@test "_gpu_rollout_gate: rollout success -> success + return 0" {
-  run bash -c '
-    set -euo pipefail
-    LOG_FILE=/dev/null
-    log(){ :; }; success(){ echo "SUCCESS:$*"; }; warn(){ echo "WARN:$*"; }
-    source "'"$BATS_TEST_DIRNAME"'/../lib/gpu-plugins.sh"
-    kubectl(){ return 0; }   # rollout status ok
-    _gpu_rollout_gate nvidia-device-plugin-daemonset && echo RC0 || echo "RC$?"
-  '
-  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
-  [[ "$output" == *"SUCCESS:"* ]] || return 1
-  [[ "$output" == *"RC0"* ]] || return 1
-}
-
-@test "GPU existence probes are bounded with --request-timeout (reviewer parity)" {
-  # Both the nvidia and amd 'already installed?' checks must carry a request timeout
-  # so a wedged API can't hang before the bounded apply is ever reached.
-  run grep -cE 'kubectl get daemonset .*--request-timeout=' "$BATS_TEST_DIRNAME/../lib/gpu-plugins.sh"
-  [ "$output" -ge 2 ] || return 1
-}
-
-@test "amd primary AND master fallback both gate on rollout (reviewer)" {
-  # A master apply that never rolls out must warn CPU-mode via the shared gate, not
-  # return a false success that makes the caller's verify poll ~90s.
-  run grep -c '_gpu_rollout_gate amdgpu-device-plugin' "$BATS_TEST_DIRNAME/../lib/gpu-plugins.sh"
-  [ "$output" -eq 2 ] || return 1
+@test "verify_gpu's node probe is bounded with --request-timeout (reviewer parity)" {
+  # The 18×5s cap is only re-checked between iterations, so the get-nodes call
+  # itself must be bounded or a wedged API would hang the loop.
+  grep -Eq 'kubectl get nodes .*--request-timeout=' "$BATS_TEST_DIRNAME/../lib/gpu-plugins.sh" || return 1
 }

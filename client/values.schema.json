@@ -75,6 +75,49 @@
         "type": "string"
       }
     },
+    "gpu": {
+      "type": "object",
+      "description": "GPU device-plugin settings (client#564).",
+      "properties": {
+        "devicePlugin": {
+          "type": "object",
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "description": "Render a Helm-managed GPU device-plugin DaemonSet."
+            },
+            "vendor": {
+              "type": "string",
+              "enum": ["", "nvidia", "amd"],
+              "description": "Which vendor plugin to render when enabled; required non-empty when enabled is true."
+            },
+            "namespace": {
+              "type": "string",
+              "minLength": 1,
+              "description": "Namespace for the DaemonSet (kube-system by default)."
+            },
+            "nvidia": {
+              "type": "object",
+              "properties": {
+                "image": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              }
+            },
+            "amd": {
+              "type": "object",
+              "properties": {
+                "image": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "storageClass": {
       "type": "object",
       "required": [

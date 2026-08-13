@@ -922,6 +922,32 @@ _wait_for_metrics_apiservice() {
   return 0
 }
 
+# client#564: label + annotate a pre-existing, Helm-unowned GPU device-plugin
+# DaemonSet (left by the old imperative `kubectl apply`) so `helm upgrade
+# --install` adopts it in place instead of failing with "exists and cannot be
+# imported into the current release". Best-effort, bounded, idempotent, and
+# gated on the GPU path — GPU is optional, so nothing here may abort the install.
+_adopt_orphaned_gpu_device_plugin() {
+  [[ "${GPU_VENDOR:-}" == "nvidia" || "${GPU_VENDOR:-}" == "amd" ]] || return 0
+  local ns="kube-system" ds
+  case "${GPU_VENDOR}" in
+    nvidia) ds="nvidia-device-plugin-daemonset" ;;
+    amd)    ds="amdgpu-device-plugin-daemonset" ;;
+  esac
+  # Only act on an existing DS; skip silently otherwise (fresh host — the chart
+  # just creates it). --request-timeout bounds the probe against a wedged API.
+  kubectl get daemonset "$ds" -n "$ns" --request-timeout=5s >/dev/null 2>&1 || return 0
+  log "Adopting pre-existing GPU device plugin ${ds} into the Helm release (client#564 migration)"
+  kubectl label daemonset "$ds" -n "$ns" \
+    app.kubernetes.io/managed-by=Helm --overwrite --request-timeout=10s \
+    >> "${LOG_FILE:-/dev/null}" 2>&1 || true
+  kubectl annotate daemonset "$ds" -n "$ns" \
+    "meta.helm.sh/release-name=${TB_NAMESPACE}" \
+    "meta.helm.sh/release-namespace=${TB_NAMESPACE}" \
+    --overwrite --request-timeout=10s \
+    >> "${LOG_FILE:-/dev/null}" 2>&1 || true
+}
+
 install_client_helm() {
   # Step e (Install tracebloc) — main() prints the "e) Installing tracebloc"
   # header. The credential + namespace were provisioned in step d
@@ -1157,6 +1183,19 @@ install_client_helm() {
     log "No NVIDIA GPU — GPU_LIMITS and GPU_REQUESTS left empty"
   fi
 
+  # ── GPU device plugin (client#564) ────────────────────────────────────────
+  # Enable the Helm-managed device-plugin DaemonSet whenever a GPU vendor is
+  # detected — the same condition under which deploy_gpu_device_plugin used to
+  # apply the upstream manifest imperatively (bash: gpu-plugins.sh). The chart
+  # now owns it, so it's reconciled on upgrade and removed on `helm uninstall`
+  # instead of lingering. CPU-only installs emit nothing → the chart default
+  # (disabled) stands. The GPU *request* (gpu_val) remains NVIDIA-only, as before.
+  local gpu_block=""
+  if [[ "${GPU_VENDOR:-}" == "nvidia" || "${GPU_VENDOR:-}" == "amd" ]]; then
+    gpu_block="$(printf 'gpu:\n  devicePlugin:\n    enabled: true\n    vendor: %s\n' "$GPU_VENDOR")"
+    log "Helm-managed GPU device plugin enabled (vendor=${GPU_VENDOR})"
+  fi
+
   # backend#723 A2: pick the MySQL engine for this install (before the heredoc
   # below is rendered; see _resolve_mysql_engine for the full decision rules).
   _resolve_mysql_engine
@@ -1249,7 +1288,8 @@ images:
     digest: ""
 MYSQL84
 fi)
-pvc:
+${gpu_block:+$gpu_block
+}pvc:
   mysql: 2Gi
   logs: 10Gi
   data: 50Gi
@@ -1317,6 +1357,16 @@ EOF
     hint "  upgrade:        helm -n $TB_NAMESPACE rollback $TB_NAMESPACE     (returns to the previous release)"
     error "Client installation blocked by an interrupted previous helm operation. Check the log for details: ${LOG_FILE:-}"
   fi
+
+  # client#564 migration: an earlier install applied the GPU device plugin with
+  # an imperative `kubectl apply` (unowned by Helm). If that DaemonSet survived a
+  # `helm uninstall` — the exact litter #564 is about — this fresh install would
+  # now fail with "exists and cannot be imported into the current release". Label
+  # + annotate any such orphan for Helm adoption so the chart takes it over IN
+  # PLACE (no GPU blip), instead of colliding. Best-effort + bounded + idempotent:
+  # a missing DS or a kubectl hiccup must never block the install (GPU is
+  # optional). Only runs on the GPU path; a no-op everywhere else.
+  _adopt_orphaned_gpu_device_plugin
 
   local _helm_rc=0
   spin_cmd_bounded "$(( _helm_timeout_min * 60 ))" "Installing the tracebloc client…" \

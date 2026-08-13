@@ -1645,3 +1645,38 @@ _engine_fixture() {
   [ "$status" -eq 0 ] || return 1
   [ "$output" != "8.4" ] || return 1
 }
+
+# ── _adopt_orphaned_gpu_device_plugin (client#564) ───────────────────────────
+# On the GPU path, adopt a Helm-unowned device-plugin DaemonSet left by the old
+# imperative apply so `helm upgrade --install` takes it over instead of colliding.
+@test "_adopt_orphaned_gpu_device_plugin: CPU-only host is a no-op (kubectl untouched)" {
+  GPU_VENDOR=none
+  kubectl() { echo "kubectl $*" >>"$MOCK_CALLS"; }
+  run _adopt_orphaned_gpu_device_plugin
+  [ "$status" -eq 0 ] || return 1
+  [ ! -s "$MOCK_CALLS" ] || { cat "$MOCK_CALLS"; return 1; }
+}
+
+@test "_adopt_orphaned_gpu_device_plugin: an existing nvidia orphan is labelled+annotated for Helm adoption" {
+  GPU_VENDOR=nvidia; TB_NAMESPACE=tb; LOG_FILE=/dev/null
+  kubectl() {
+    echo "kubectl $*" >>"$MOCK_CALLS"
+    case "$1" in get) return 0 ;; esac   # DS present
+  }
+  run _adopt_orphaned_gpu_device_plugin
+  [ "$status" -eq 0 ] || { cat "$MOCK_CALLS"; return 1; }
+  grep -q 'label daemonset nvidia-device-plugin-daemonset .*app.kubernetes.io/managed-by=Helm' "$MOCK_CALLS" || { cat "$MOCK_CALLS"; return 1; }
+  grep -q 'annotate daemonset nvidia-device-plugin-daemonset .*meta.helm.sh/release-name=tb' "$MOCK_CALLS" || { cat "$MOCK_CALLS"; return 1; }
+}
+
+@test "_adopt_orphaned_gpu_device_plugin: no orphan present -> no label/annotate (fresh host)" {
+  GPU_VENDOR=nvidia; TB_NAMESPACE=tb; LOG_FILE=/dev/null
+  kubectl() {
+    echo "kubectl $*" >>"$MOCK_CALLS"
+    case "$1" in get) return 1 ;; esac   # DS absent
+  }
+  run _adopt_orphaned_gpu_device_plugin
+  [ "$status" -eq 0 ] || return 1
+  ! grep -q 'label daemonset' "$MOCK_CALLS" || { cat "$MOCK_CALLS"; return 1; }
+  ! grep -q 'annotate daemonset' "$MOCK_CALLS" || { cat "$MOCK_CALLS"; return 1; }
+}

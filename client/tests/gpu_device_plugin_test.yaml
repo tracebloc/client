@@ -1,0 +1,111 @@
+suite: GPU device plugin (client#564)
+# The GPU device plugin is a Helm-managed DaemonSet gated on
+# gpu.devicePlugin.enabled, so it is reconciled on upgrade and removed on
+# `helm uninstall` — replacing the imperative `kubectl apply` of an upstream
+# manifest the installer used to run outside any release.
+templates:
+  - templates/gpu-device-plugin.yaml
+set:
+  clientId: "test-id"
+  clientPassword: "test"
+tests:
+  - it: renders nothing by default (CPU-only install — gpu.devicePlugin.enabled false)
+    asserts:
+      - hasDocuments:
+          count: 0
+
+  - it: renders nothing when disabled even if a vendor is set
+    set:
+      gpu:
+        devicePlugin:
+          enabled: false
+          vendor: nvidia
+    asserts:
+      - hasDocuments:
+          count: 0
+
+  - it: renders the NVIDIA DaemonSet in kube-system when enabled
+    set:
+      gpu:
+        devicePlugin:
+          enabled: true
+          vendor: nvidia
+    asserts:
+      - hasDocuments:
+          count: 1
+      - isKind:
+          of: DaemonSet
+      - equal:
+          path: metadata.name
+          value: nvidia-device-plugin-daemonset
+      - equal:
+          path: metadata.namespace
+          value: kube-system
+      - equal:
+          path: spec.template.spec.containers[0].image
+          value: nvcr.io/nvidia/k8s-device-plugin:v0.14.5
+      - equal:
+          path: spec.template.spec.containers[0].env[0].name
+          value: FAIL_ON_INIT_ERROR
+      - equal:
+          path: spec.template.spec.containers[0].env[0].value
+          value: "false"
+
+  - it: honours an overridden namespace and image
+    set:
+      gpu:
+        devicePlugin:
+          enabled: true
+          vendor: nvidia
+          namespace: gpu-operator
+          nvidia:
+            image: mirror.example/k8s-device-plugin:v0.14.5
+    asserts:
+      - equal:
+          path: metadata.namespace
+          value: gpu-operator
+      - equal:
+          path: spec.template.spec.containers[0].image
+          value: mirror.example/k8s-device-plugin:v0.14.5
+
+  - it: renders the AMD DaemonSet when vendor is amd
+    set:
+      gpu:
+        devicePlugin:
+          enabled: true
+          vendor: amd
+    asserts:
+      - hasDocuments:
+          count: 1
+      - isKind:
+          of: DaemonSet
+      - equal:
+          path: metadata.name
+          value: amdgpu-device-plugin-daemonset
+      - equal:
+          path: spec.template.spec.nodeSelector['kubernetes.io/arch']
+          value: amd64
+      - equal:
+          path: spec.template.spec.containers[0].securityContext.privileged
+          value: true
+
+  - it: carries the standard tracebloc labels so Helm owns and can remove it
+    set:
+      gpu:
+        devicePlugin:
+          enabled: true
+          vendor: nvidia
+    asserts:
+      - equal:
+          path: metadata.labels['app.kubernetes.io/managed-by']
+          value: Helm
+
+  - it: fails the render when enabled but no vendor is set
+    set:
+      gpu:
+        devicePlugin:
+          enabled: true
+          vendor: ""
+    asserts:
+      - failedTemplate:
+          errorMessage: 'gpu.devicePlugin.enabled is true but gpu.devicePlugin.vendor is ""; set it to "nvidia" or "amd"'

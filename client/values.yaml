@@ -59,6 +59,36 @@ env: {
   # cluster that wants the fallback). Must be a quoted string.
   # SINGLE_NODE: "true"
 }
+
+# -- GPU device plugin (client#564)
+# Renders a vendor GPU device-plugin DaemonSet as a Helm-managed resource, so it
+# is reconciled on upgrade and removed on `helm uninstall` — instead of the
+# installer applying an upstream manifest imperatively (outside any release) and
+# leaving it behind. The manifest is baked into the chart, so no install-time
+# download is needed. See templates/gpu-device-plugin.yaml.
+gpu:
+  devicePlugin:
+    # Master gate. The Linux installer sets this true on the native-GPU path, in
+    # lockstep with the GPU request it writes for training jobs (env.GPU_REQUESTS
+    # / env.GPU_LIMITS). Left false for CPU-only installs and for the Windows
+    # WSL2/CDI path (which advertises the GPU itself via a node-status patch and
+    # must NOT run the NVML plugin). Default false: nothing renders.
+    enabled: false
+    # Which vendor plugin to render when enabled: "nvidia" or "amd".
+    # Rendering with enabled: true and an unset/other vendor is a template error.
+    vendor: ""
+    # Namespace for the DaemonSet. kube-system by default — the kubelet only
+    # discovers a device plugin that mounts its own device-plugins socket dir,
+    # and this matches the upstream manifests. Helm still tracks/removes it even
+    # though it lives outside the release namespace.
+    namespace: kube-system
+    nvidia:
+      # Pinned to the version the installer used to apply (NVIDIA k8s-device-plugin).
+      image: nvcr.io/nvidia/k8s-device-plugin:v0.14.5
+    amd:
+      # ROCm k8s device plugin. Pin to a digest for air-gapped / reproducible installs.
+      image: rocm/k8s-device-plugin:latest
+
 # -- StorageClass configuration
 # When create: true, the StorageClass name is release-unique (e.g. "<release-name>-storage-class")
 # so each release gets its own class and Helm ownership conflicts are avoided.
