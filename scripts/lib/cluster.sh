@@ -53,6 +53,37 @@ _ensure_tracebloc_dirs() {
   chmod -R 777 "$data_base/data" 2>/dev/null || true
 }
 
+# Modes the two SHARED hostPath dirs must end up with. Named constants because the
+# same pair is spelled out in two other places — the Windows installer's
+# $TB_SHARED_DIR_MODE/$TB_LOGS_DIR_MODE (scripts/install-k8s.ps1) and the chart's
+# init-writable-data (client/templates/jobs-manager-deployment.yaml) — and the three
+# have to be diffable by eye rather than drifting (#667, #673).
+#
+# Both get setgid (2) so new entries inherit the group. They differ in the sticky bit,
+# deliberately:
+#   data -> 2777  setgid + world-write, NO sticky. Sticky permits an unlink only by the
+#                 entry's owner, the dir's owner, or root; `data delete` removes a tree
+#                 the INGEST wrote (uid 65534) from a pod running as 65532, so sticky
+#                 here makes the delete impossible — table dropped, files stranded (#667).
+#   logs -> 3777  setgid + sticky. Nothing has to delete another writer's logs, so the
+#                 /tmp-style protection costs nothing there.
+TB_SHARED_DIR_MODE="2777"
+TB_LOGS_DIR_MODE="3777"
+
+# Echo the path:mode pairs this release needs, one per line — the same shape the Windows
+# installer's Get-ReleaseDirsSpec and the chart's init-writable-data use, so the parity
+# test can diff all three without re-deriving the layout (#673).
+#
+# backend#743: the dataset dir goes under HOST_DATASET_DIR (network mount) when set, else
+# stays local. logs (and mysql, below) always stay on the local HOST_DATA_DIR.
+_release_dirs_spec() {
+  local release="$1"
+  local base="$HOST_DATA_DIR/$release"
+  local data_base="${HOST_DATASET_DIR:+$HOST_DATASET_DIR/$release}"
+  data_base="${data_base:-$base}"
+  printf '%s\n' "$data_base/data:$TB_SHARED_DIR_MODE" "$base/logs:$TB_LOGS_DIR_MODE"
+}
+
 # Pre-create the per-release host dirs the chart's hostPath PVs bind to.
 # The PVs use /tracebloc/<release>/{data,logs,mysql}, which maps back to
 # $HOST_DATA_DIR/<release>/{data,logs,mysql} on the host via the k3d -v mount.
@@ -63,14 +94,25 @@ _ensure_release_dirs() {
   local release="$1"
   [[ -z "$release" ]] && return 0
   local base="$HOST_DATA_DIR/$release"
-  mkdir -p "$base/logs" "$base/mysql"
-  chmod -R 777 "$base/logs" "$base/mysql" 2>/dev/null || true
-  # backend#743: dataset dir goes under HOST_DATASET_DIR (network mount) when set,
-  # else stays local. mysql + logs always stay on the local HOST_DATA_DIR.
-  local data_base="${HOST_DATASET_DIR:+$HOST_DATASET_DIR/$release}"
-  data_base="${data_base:-$base}"
-  mkdir -p "$data_base/data"
-  chmod -R 777 "$data_base/data" 2>/dev/null || true
+  # mysql is deliberately left on the flat recursive 777 this function has always used:
+  # it has ONE writer (uid 999) and its own init container in the chart, and its datadir
+  # permissions are the database's business — the same reason it is out of scope for the
+  # Windows prep and for init-writable-data (#654, #673).
+  mkdir -p "$base/mysql"
+  chmod -R 777 "$base/mysql" 2>/dev/null || true
+  local entry dir mode
+  while IFS= read -r entry; do
+    # Split on the LAST colon at both ends (%:* / ##*:), never the first: HOST_DATA_DIR is
+    # a host path the operator chose and may legally contain a colon, while the mode never can.
+    dir="${entry%:*}"; mode="${entry##*:}"
+    mkdir -p "$dir"
+    # No -R. The directory's own mode is what governs creation and unlink inside it;
+    # recursing would stamp setgid/sticky onto every data FILE below, and on a dataset
+    # tree it is a full walk for nothing. Best-effort, as before: a bind mount that
+    # cannot represent POSIX modes must not abort the install (on Linux the chart's
+    # init-writable-data fixes the same dirs again at pod start).
+    chmod "$mode" "$dir" 2>/dev/null || true
+  done < <(_release_dirs_spec "$release")
 }
 
 # --- Corporate-proxy support (authenticated proxies + NO_PROXY hardening) ----

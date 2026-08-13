@@ -69,15 +69,39 @@ spec:
       #                 cannot align those identities either, since kubelet ignores it on
       #                 hostPath (kubernetes/kubernetes#138411). Keeping sticky on /data/shared
       #                 protects writers from each other at the cost of never being able to
-      #                 clean up after them; runs as root only
-      # long enough to fix the mounts. Caps: CHOWN for the chown; FOWNER so the chmod is idempotent
-      # on re-install; FSETID so the setgid bit survives the chmod — after the chown to GID 1000 the
-      # dir's group no longer matches the process (fsgid 0), and a root process without FSETID has
-      # the kernel silently strip S_ISGID, landing the mount at 1777 (setgid lost). Each dir is
-      # fixed INDEPENDENTLY and best-effort: a chown/chmod that can't complete (e.g. /data/shared on
-      # an NFS root_squash export via HOST_DATASET_DIR) is logged and skipped so the OTHER dir is
-      # still repaired and jobs-manager still starts — a genuinely unwritable mount then surfaces as
-      # a clear error at the writer pod rather than wedging the whole edge in Init. CSI skips this.
+      #                 clean up after them.
+      # The init container runs as root only long enough to fix the mounts. Caps: CHOWN for the
+      # chown; FOWNER so the chmod is idempotent on re-install; FSETID so the setgid bit survives
+      # the chmod — after the chown to GID 1000 the dir's group no longer matches the process
+      # (fsgid 0), and a root process without FSETID has the kernel silently strip S_ISGID, landing
+      # the mount at 1777 (setgid lost).
+      #
+      # Each dir is fixed INDEPENDENTLY and best-effort, and so is each OPERATION (#672). The chown
+      # and the chmod used to be chained with a logical AND, which meant that on any mount that
+      # refused the chown — a pre-provisioned volume, an NFS root_squash export via HOST_DATASET_DIR,
+      # a Windows/Docker-Desktop bind mount — the chmod was never attempted, while the log still
+      # said "leaving as-is". That is backwards: the MODE is the load-bearing half (these dirs must
+      # be other-writable for writers this chart does not own, see above), the chown to 1000 is
+      # cosmetic next to it, and the chown is the call far more likely to be refused. So the two run
+      # as separate statements, and the outcome is graded on the mode actually OBSERVED afterwards
+      # rather than on either exit status — a bind mount can accept a chmod and ignore it, so an
+      # exit code is not evidence. Per-dir OK/FAIL is logged and nothing is fatal: the OTHER dir is
+      # still repaired and jobs-manager still starts, so a genuinely unwritable mount surfaces as a
+      # clear error at the writer pod rather than wedging the whole edge in Init. CSI skips this.
+      # The pass condition is other-writability ALONE, because that is what decides whether the
+      # writers above can work. It deliberately does not assert setgid/sticky: a mount that grants
+      # other-write while dropping S_ISGID is degraded (new entries stop inheriting GID 1000), not
+      # unusable, and failing it would cry wolf on an install that works. So the verdict label
+      # names the one property it verified ("OK <dir> other-writable") and always prints want vs
+      # got, instead of a bare "OK" that could be read as "the whole mode landed" — and when a call
+      # failed on a dir that was ALREADY other-writable it says "other-writable regardless", never
+      # "mode applied anyway", which would credit this container for something it did not do.
+      # Kept deliberately diffable by eye against the installer's Get-ReleaseDirsPrepCommand
+      # (scripts/install-k8s.ps1), which prepares the same dirs with the same path:mode spec and the
+      # same `ls -ldn` verification; the chart additionally names which call failed. One intentional
+      # divergence: the chart does NOT send chown/chmod stderr to /dev/null, so the real errno
+      # (Operation not permitted vs Read-only file system) lands in `kubectl logs` beside the
+      # verdict; the installer suppresses it because its output is a user-facing progress line.
       initContainers:
       - name: init-writable-data
         image: {{ include "tracebloc.image" (dict "repository" "library/busybox" "tag" .Values.images.busybox.tag "digest" .Values.images.busybox.digest "registry" (dig "imageRegistry" "docker.io" (.Values.global | default dict))) | quote }}
@@ -91,7 +115,33 @@ spec:
             add: ["CHOWN", "FOWNER", "FSETID"]
           seccompProfile:
             type: RuntimeDefault
-        command: ['sh', '-c', 'for e in /data/shared:2777 /data/logs:3777; do d=${e%:*}; m=${e#*:}; chown 1000:1000 "$d" && chmod "$m" "$d" || echo "init-writable-data: could not adjust $d (pre-provisioned or root_squash mount?); leaving as-is"; done']
+        command:
+          - 'sh'
+          - '-c'
+          - |
+            for e in /data/shared:2777 /data/logs:3777; do
+              d=${e%:*}; want=${e#*:}
+              # Two statements, never chained (#672): the chmod is attempted even when the chown
+              # is refused. Each records which call failed; neither is fatal.
+              failed=
+              chown 1000:1000 "$d" || failed="chown"
+              chmod "$want" "$d" || failed="${failed:+$failed+}chmod"
+              # Verdict comes from the mode OBSERVED here, not from an exit status (a bind mount
+              # can accept a chmod and ignore it). ls -ldn is POSIX: field 1 mode, field 3 uid.
+              # Mode char 9 is the other-write bit, which ????????w* tests without arithmetic;
+              # a trailing setgid/sticky/ACL char is absorbed by the *. Pass = other-writable
+              # ALONE; the label says so and prints want vs got (rationale in the YAML above).
+              set -- $(ls -ldn "$d" 2>/dev/null)
+              got=$1; owner=$3
+              case "$got" in
+                ????????w*)
+                  echo "init-writable-data: OK $d other-writable, want $want got $got uid $owner${failed:+ ($failed failed; other-writable regardless)}" ;;
+                *)
+                  echo "init-writable-data: FAIL $d want $want got ${got:-unreadable} uid ${owner:-unknown}${failed:+ ($failed failed)}"
+                  echo "init-writable-data: $d is not other-writable -- the ingestion Job (uid 65534, or HOST_UID) and the CLI staging/teardown pod (uid 65532) cannot write there. Pre-provisioned or root_squash mount? Continuing so the OTHER dir is still fixed and jobs-manager still starts." ;;
+              esac
+            done
+            exit 0
         volumeMounts:
         - name: shared-volume
           mountPath: /data/shared
@@ -138,6 +188,66 @@ spec:
           - name: http
             containerPort: 8080
             protocol: TCP
+        {{- if not (default dict .Values.env).INGESTION_HTTP_DISABLED }}
+        # backend#1779. jobs-manager had no probes at all, so the kubelet
+        # reported the container Ready the moment it was *running* — and
+        # `kubectl rollout status` printed "successfully rolled out" while the
+        # pod was crash-looping (4 restarts in 72s, 2026-08-11 / backend#1723).
+        #
+        # Why a PORT probe is the right signal here, and not GET /healthz:
+        # jobs-manager opens 8080 only at the END of a successful start — it
+        # authenticates against the backend first and exits(1) on failure
+        # (jobs_manager.py: auth at main() then run_server_in_thread ~140 lines
+        # later), and create_app() runs the ingestion_runs migration against
+        # MySQL on the way up. So "8080 accepts a connection" already implies
+        # backend auth succeeded and MySQL was reachable. `/healthz` is an
+        # unconditional `200 {"status":"ok"}` and would add no information over
+        # the TCP connect — the evidence is in reaching the port at all.
+        #
+        # Gated on INGESTION_HTTP_DISABLED because the runtime gates the server
+        # on it, with the same truthiness: `not os.getenv(...)` treats ANY
+        # non-empty value as "disabled", and a non-empty string is likewise
+        # truthy to Helm. Without this gate, an operator setting that env var
+        # would get a pod that never becomes Ready.
+        readinessProbe:
+          tcpSocket:
+            port: 8080
+          # The probe that fixes the false-green: the jobs-manager Service must
+          # not route POST /internal/submit-ingestion-run at a pod whose server
+          # is not listening ("connection refused to that pod's 8080, x16
+          # tasks" in the 2026-08-11 run), and `kubectl rollout status` must not
+          # call the Deployment available until it is.
+          #
+          # initialDelaySeconds covers the slow start without any consequence
+          # if it is not enough: this container retries backend auth and then
+          # runs a MySQL migration before it listens, and while readiness fails
+          # the pod is merely NotReady. Nothing kills it. That is the whole
+          # point — see the note below.
+          initialDelaySeconds: 10
+          periodSeconds: 10
+          timeoutSeconds: 3
+          failureThreshold: 3
+        # READINESS ONLY — no livenessProbe AND no startupProbe, deliberately.
+        # backend#1779 asks for this to be a recorded decision, so here it is.
+        #
+        # Both of those probe types KILL the container when they fail: liveness
+        # on every failure threshold, and a startupProbe likewise ("if the
+        # startup probe fails, the kubelet kills the container"). jobs_manager.py
+        # catches a failed run_server_in_thread on purpose: "Startup failure
+        # here is fatal for the ingestion flow but must not take down the rest
+        # of jobs-manager — SB polling can still operate independently and
+        # training submissions keep working."
+        #
+        # So either probe would reverse that decision from the chart, and turn a
+        # degraded-but-useful pod into a CrashLoopBackOff that also stops the
+        # Service Bus polling and the training it was still doing. Readiness
+        # removes the pod from the Service, which is the part that needs to
+        # happen. Restarting a process that is still training models is not.
+        #
+        # (An earlier revision of this PR did add a startupProbe with a 150s
+        # budget, which had exactly that bug — it was caught in review. Do not
+        # reintroduce one without also changing jobs_manager.py's decision.)
+        {{- end }}
         volumeMounts:
           - name: shared-volume
             mountPath: "/data/shared"
