@@ -55,6 +55,20 @@ for *what the operator sees and can act on*, not code elegance.
   that prints ✓ / "healthy" / "ready" on a path where the underlying assertion was
   skipped, degraded, or errored, and any summary that counts a skipped check as passed.
 
+- **`A && B` where B is the operation that actually matters.** Chaining makes B conditional
+  on A, so the *more likely to fail* call silently cancels the load-bearing one — and the
+  `|| echo` tail then reports a graceful degrade that never happened. `init-writable-data`
+  shipped `chown … && chmod …` in chart 1.9.20 (#611/#612) and kept it through 1.9.33: on
+  any mount that refused the chown (bind mount, NFS root_squash, pre-provisioned volume)
+  the chmod never ran, the dir kept root:root 0755, and the log said "leaving as-is" (#672,
+  fixed in `client/templates/jobs-manager-deployment.yaml`). #667 rewrote the modes on that
+  exact line and left the chain in place — a reviewer reading the line for its modes did not
+  re-read its control flow, which is why this one is worth flagging mechanically. Flag independent best-effort repairs
+  joined by `&&`; each should be its own statement, and the verdict should come from the
+  end state (`ls -ldn`) rather than an exit status — a bind mount can accept a chmod and
+  ignore it. Related: the same PR family also produced an owner check that passed
+  unusable dirs, because ownership was treated as evidence of writability (#654).
+
 - **A read of a *new* `values.yaml` key with no nil-guard.** `helm upgrade --reuse-values`
   keeps the OLD stored values, so a template reading a key that didn't exist at install
   time nil-pointers before any resource lands. Require `default` / `with` / `hasKey`;

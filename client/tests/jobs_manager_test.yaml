@@ -446,10 +446,11 @@ tests:
       - contains:
           path: spec.template.spec.initContainers[0].securityContext.capabilities.add
           content: FSETID
-      # each dir is fixed INDEPENDENTLY (a for-loop): chown 1000:1000 then chmod its OWN mode
+      # each dir is fixed INDEPENDENTLY (a for-loop): chown 1000:1000 then chmod its OWN mode.
+      # (?s) so . spans the newlines of the multi-line script (#672).
       - matchRegex:
           path: spec.template.spec.initContainers[0].command[2]
-          pattern: 'for e in /data/shared:2777 /data/logs:3777.*chown 1000:1000.*chmod'
+          pattern: '(?s)for e in /data/shared:2777 /data/logs:3777.*chown 1000:1000.*chmod'
       # /data/shared must NOT be sticky. `data delete` removes a tree the INGEST wrote: the
       # ingestion Job runs as uid 65534 (or HOST_UID), the CLI teardown pod as 65532. Sticky
       # allows an unlink only by the entry's owner, the dir's owner, or root — none of which the
@@ -464,10 +465,18 @@ tests:
           path: spec.template.spec.initContainers[0].command[2]
           pattern: "/data/logs:3777"
       # best-effort: a failing chown/chmod is logged, not fatal, so the other dir is still fixed
-      # and jobs-manager still starts (e.g. /data/shared on an NFS root_squash export)
+      # and jobs-manager still starts (e.g. /data/shared on an NFS root_squash export). The
+      # per-dir report is an echo per outcome, and the script always exits 0 (#672 replaced the
+      # single `|| echo` tail — which was also what swallowed the chmod — with per-dir OK/FAIL).
       - matchRegex:
           path: spec.template.spec.initContainers[0].command[2]
-          pattern: "\\|\\| echo"
+          pattern: 'echo "init-writable-data: OK '
+      - matchRegex:
+          path: spec.template.spec.initContainers[0].command[2]
+          pattern: 'echo "init-writable-data: FAIL '
+      - matchRegex:
+          path: spec.template.spec.initContainers[0].command[2]
+          pattern: '(?m)^exit 0$'
       # the init must mount BOTH hostPath volumes it chowns, or the chown is a no-op
       - contains:
           path: spec.template.spec.initContainers[0].volumeMounts
@@ -479,6 +488,72 @@ tests:
           content:
             name: logs-volume
             mountPath: /data/logs
+
+  # #672: the chmod must NOT be gated behind the chown's success. They were chained
+  # (`chown 1000:1000 "$d" && chmod "$m" "$d" || echo ...`), so on any mount that refuses the
+  # chown — pre-provisioned volume, NFS root_squash export, Windows/Docker-Desktop bind mount —
+  # the chmod was never attempted and the dir kept kubelet's root:root 0755, while the log said
+  # "leaving as-is". The mode is the load-bearing half: hostPath ignores fsGroup (k8s#138411),
+  # so /data/shared must be OTHER-writable for the ingestion Job (uid 65534 / HOST_UID) and the
+  # CLI staging+teardown pod (uid 65532), neither of which is 1000 or shares a group with it.
+  # Losing the chmod is strictly worse than losing the chown, so the chown must never guard it.
+  - it: "init-writable-data never gates the chmod behind the chown (#672)"
+    set:
+      hostPath:
+        enabled: true
+    asserts:
+      # THE REGRESSION GUARD: no `&&` may ever join the two calls on one line, in either order.
+      # Deliberately NOT scoped to executable lines. The obvious way to exclude comments —
+      # `^[^#\n]*chown...` — is silently vacuous here, because the loop body legitimately contains
+      # a '#' (`${e#*:}`) BEFORE the chown, so `[^#\n]*` can never reach it and the guard passes
+      # against the very one-liner it is meant to reject. Verified by running this assertion
+      # against the old command: comment-scoped it passed, unscoped it fails. So the rendered
+      # command must not contain that shape ANYWHERE, prose included — hence the template
+      # describes the old behaviour in words ("chained with a logical AND") rather than in code.
+      - notMatchRegex:
+          path: spec.template.spec.initContainers[0].command[2]
+          pattern: 'chown[^\n]*&&[^\n]*chmod'
+      - notMatchRegex:
+          path: spec.template.spec.initContainers[0].command[2]
+          pattern: 'chmod[^\n]*&&[^\n]*chown'
+      # each call is its OWN statement, and each records which one failed rather than sharing a tail
+      - matchRegex:
+          path: spec.template.spec.initContainers[0].command[2]
+          pattern: '(?m)^\s*chown 1000:1000 "\$d" \|\| failed='
+      - matchRegex:
+          path: spec.template.spec.initContainers[0].command[2]
+          pattern: '(?m)^\s*chmod "\$want" "\$d" \|\| failed='
+      # the verdict is read back from the OBSERVED mode, not from an exit status: a bind mount can
+      # accept a chmod and ignore it, so "the command returned 0" is not evidence the mode landed
+      - matchRegex:
+          path: spec.template.spec.initContainers[0].command[2]
+          pattern: 'ls -ldn "\$d"'
+      # other-write bit (mode char 9) is what decides OK/FAIL — ownership is NOT a pass condition,
+      # since a successful chown with a failed chmod leaves a 0755 dir no writer can use
+      - matchRegex:
+          path: spec.template.spec.initContainers[0].command[2]
+          pattern: '\?{8}w\*\)'
+      # `stat -c` is GNU-only and fails SILENTLY on busybox/BSD (empty mode -> spurious FAIL on a
+      # perfectly good install), which is why the check is ls -ldn. Keep it that way.
+      - notMatchRegex:
+          path: spec.template.spec.initContainers[0].command[2]
+          pattern: 'stat -c'
+      # a partial result must be reported as such, not implied — and the note must not claim the
+      # chmod achieved the mode. A dir that was ALREADY other-writable when both calls failed is
+      # still OK, but nothing this container did made it so: an earlier draft said "mode applied
+      # anyway" there, which was false (verified by running that exact case: pre-set 1777, both
+      # calls refused -> "want 2777 got drwxrwxrwt ... mode applied anyway"). Claim only the
+      # observation: the dir is other-writable, whatever refused us.
+      - matchRegex:
+          path: spec.template.spec.initContainers[0].command[2]
+          pattern: '\$failed failed; other-writable regardless'
+      - notMatchRegex:
+          path: spec.template.spec.initContainers[0].command[2]
+          pattern: 'mode applied anyway'
+      # still non-fatal: jobs-manager must start even when a mount refuses everything
+      - matchRegex:
+          path: spec.template.spec.initContainers[0].command[2]
+          pattern: '(?m)^exit 0$'
 
   - it: "CSI install (hostPath disabled) skips the privileged init and sets no fsGroup (#611)"
     set:

@@ -35,7 +35,8 @@ SHELLCHECK_FILES := \
 	scripts/tests/e2e-journey.sh \
 	scripts/tests/e2e-proxy.sh \
 	scripts/tests/lib/e2e-common.sh \
-	scripts/tests/path-persist.sh
+	scripts/tests/path-persist.sh \
+	scripts/tests/chart-env-vocabulary.sh
 
 # The bats total, DERIVED — never written down. It moves on most PRs that add a
 # test, nothing enforces it, and the help text had drifted from its hardcoded
@@ -57,7 +58,7 @@ help:
 	@echo "  setup       check for / point at the tools these targets need; installs the pre-push hook"
 	@echo "  install-hooks  (re)install the git pre-push hook that runs 'make check'"
 	@echo
-	@echo "  individual: lint bats helm-lint helm-template helm-unittest drift"
+	@echo "  individual: lint bats helm-lint helm-vocab helm-template helm-unittest drift"
 	@echo
 	@echo "  NOT here (CI-only, by name): the 9-distro prereq matrix, e2e-cluster"
 	@echo "  (k3d), e2e-proxy (squid), path-persist, Pester, windows-e2e,"
@@ -76,11 +77,11 @@ help:
 # someone does it. A `check` that quietly took two minutes would be a
 # `check` nobody runs.
 .PHONY: check
-check: lint drift helm-lint
+check: lint drift helm-lint helm-vocab
 	@echo "==> check: green (bats + helm unit tests are in 'make check-all')"
 
 .PHONY: check-all
-check-all: lint drift helm-lint bats helm-template helm-unittest
+check-all: lint drift helm-lint helm-vocab bats helm-template helm-unittest
 	@echo "==> check-all: green"
 
 # setup: no dependency is installed — this only tells you what is missing —
@@ -185,6 +186,16 @@ helm-lint:
 	  helm lint --strict ./client -f "$$f" || exit 1; \
 	done
 	helm lint --strict ./ingestor
+
+# helm-vocab: helm-ci.yaml `lint` job's vocabulary step. The CLIENT_ENV and
+# channelTags vocabularies are closed by a values.schema.json `enum` /
+# `additionalProperties` plus a `fail` in tracebloc.clientEnv, and helm-unittest
+# can assert NEITHER: it treats a schema violation as a plugin-level error
+# rather than a template failure, and offers no way to skip validation and reach
+# the helper. So the gates are exercised from outside the plugin. ~2 s.
+.PHONY: helm-vocab
+helm-vocab:
+	bash scripts/tests/chart-env-vocabulary.sh
 
 # helm-template: helm-ci.yaml `template`. kubeconform is pinned by
 # version AND digest in CI; rather than re-implement that download here,
