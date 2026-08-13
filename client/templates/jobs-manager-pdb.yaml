@@ -1,4 +1,27 @@
-{{- if .Values.podDisruptionBudget.jobsManager.create }}
+{{- /*
+  PodDisruptionBudget for the single-replica jobs-manager Deployment.
+
+  `podDisruptionBudget.jobsManager.create` is tri-state:
+    null (default) -> AUTO, tracking the storage/topology mode:
+                        * multi-node CSI clusters (hostPath.enabled=false,
+                          i.e. AKS/EKS/OpenShift): RENDER. A surprise
+                          autoscaler scale-down or node upgrade could evict
+                          the only pod; minAvailable:1 forces the operator to
+                          drain deliberately.
+                        * single-node / bare-metal installs
+                          (hostPath.enabled=true): SKIP. With one replica on
+                          one node, minAvailable:1 leaves zero allowed voluntary
+                          disruptions, so `kubectl drain`/cordon (node
+                          maintenance, manual k3s upgrade) blocks forever and
+                          the pod has nowhere to reschedule anyway
+                          (tracebloc/client#560).
+    true  -> force render regardless of topology.
+    false -> never render.
+*/}}
+{{- $pdb := default dict .Values.podDisruptionBudget.jobsManager -}}
+{{- $hostPathMode := (default dict .Values.hostPath).enabled | default false -}}
+{{- $create := ternary $pdb.create (not $hostPathMode) (kindIs "bool" $pdb.create) -}}
+{{- if $create }}
 apiVersion: policy/v1
 kind: PodDisruptionBudget
 metadata:
@@ -7,10 +30,11 @@ metadata:
   labels:
     {{- include "tracebloc.labels" . | nindent 4 }}
 spec:
-  # Single-replica deployment: maxUnavailable: 1 is a no-op (the only pod
-  # can always go away). Use minAvailable: 1 to actually block voluntary
-  # disruptions while replicas == 1. Disable when running multi-replica
-  # jobs-manager managed externally.
+  # Single-replica deployment: maxUnavailable: 1 would be a no-op (the only pod
+  # can always go away), so minAvailable: 1 is used to actually block voluntary
+  # disruptions while replicas == 1. This only renders where a drain has
+  # somewhere to move the pod (multi-node CSI) or is force-enabled — on
+  # single-node installs the whole object is skipped (see header above).
   minAvailable: 1
   selector:
     matchLabels:

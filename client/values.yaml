@@ -681,15 +681,26 @@ priorityClass:
   name: ""
   value: 1000000
 
-# -- PodDisruptionBudgets.
-# mysql is single-replica; minAvailable: 1 blocks voluntary disruptions
-# (drains, surge upgrades, autoscaler scale-down) while only one mysql
-# pod exists. Disable if you run a multi-replica mysql managed externally.
+# -- PodDisruptionBudgets for the single-replica mysql and jobs-manager
+# Deployments. `create` is tri-state and defaults to AUTO (null), tracking the
+# storage/topology mode:
+#   null (default) -> multi-node CSI clusters (hostPath.enabled=false:
+#                     AKS/EKS/OpenShift) RENDER a minAvailable:1 PDB, so a
+#                     surprise autoscaler scale-down / node upgrade can't evict
+#                     the only pod without a deliberate operator drain.
+#                     Single-node / bare-metal installs (hostPath.enabled=true)
+#                     SKIP it: with one replica on one node, minAvailable:1
+#                     allows zero voluntary disruptions, so `kubectl drain`
+#                     (node maintenance, manual k3s upgrade) would block forever
+#                     while the pod has nowhere to reschedule (client#560).
+#   true  -> force render regardless of topology (e.g. a fixed multi-node
+#            bare-metal cluster that still wants drain protection).
+#   false -> never render (e.g. a multi-replica workload managed externally).
 podDisruptionBudget:
   mysql:
-    create: true
+    create: null
   jobsManager:
-    create: true
+    create: null
 
 # -- Secrets
 # These MUST be set via --set, a values file, or an external secret manager.

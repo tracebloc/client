@@ -106,3 +106,96 @@ tests:
           value: 1
       - notExists:
           path: spec.maxUnavailable
+
+  # tracebloc/client#560: on a single-node / bare-metal install
+  # (hostPath.enabled=true) a minAvailable:1 PDB over a 1-replica pod makes the
+  # sole node undrainable. In AUTO mode (create=null, the default) the PDBs must
+  # be skipped there so `kubectl drain` can proceed.
+  - it: should NOT render mysql PDB on single-node/bare-metal (hostPath.enabled=true) in auto mode
+    template: templates/mysql-pdb.yaml
+    set:
+      hostPath:
+        enabled: true
+    asserts:
+      - hasDocuments:
+          count: 0
+
+  - it: should NOT render jobs-manager PDB on single-node/bare-metal (hostPath.enabled=true) in auto mode
+    template: templates/jobs-manager-pdb.yaml
+    set:
+      hostPath:
+        enabled: true
+    asserts:
+      - hasDocuments:
+          count: 0
+
+  # AUTO mode on multi-node CSI (hostPath.enabled=false) must still render the
+  # protective PDBs — this is the default topology and preserves prior behavior.
+  - it: should render mysql PDB on multi-node CSI (hostPath.enabled=false) in auto mode
+    template: templates/mysql-pdb.yaml
+    set:
+      hostPath:
+        enabled: false
+    asserts:
+      - isKind:
+          of: PodDisruptionBudget
+      - equal:
+          path: spec.minAvailable
+          value: 1
+
+  - it: should render jobs-manager PDB on multi-node CSI (hostPath.enabled=false) in auto mode
+    template: templates/jobs-manager-pdb.yaml
+    set:
+      hostPath:
+        enabled: false
+    asserts:
+      - isKind:
+          of: PodDisruptionBudget
+      - equal:
+          path: spec.minAvailable
+          value: 1
+
+  # Explicit override: create=true forces the PDB even on single-node/bare-metal
+  # (for a fixed multi-node bare-metal cluster that still wants drain protection).
+  - it: create=true should force the mysql PDB even on hostPath (override)
+    template: templates/mysql-pdb.yaml
+    set:
+      hostPath:
+        enabled: true
+      podDisruptionBudget:
+        mysql:
+          create: true
+    asserts:
+      - isKind:
+          of: PodDisruptionBudget
+      - equal:
+          path: spec.minAvailable
+          value: 1
+
+  - it: create=true should force the jobs-manager PDB even on hostPath (override)
+    template: templates/jobs-manager-pdb.yaml
+    set:
+      hostPath:
+        enabled: true
+      podDisruptionBudget:
+        jobsManager:
+          create: true
+    asserts:
+      - isKind:
+          of: PodDisruptionBudget
+      - equal:
+          path: spec.minAvailable
+          value: 1
+
+  # Explicit override: create=false disables even on multi-node CSI.
+  - it: create=false should disable the jobs-manager PDB even on CSI (override)
+    template: templates/jobs-manager-pdb.yaml
+    set:
+      hostPath:
+        enabled: false
+      podDisruptionBudget:
+        jobsManager:
+          create: false
+    asserts:
+      - hasDocuments:
+          count: 0

@@ -894,8 +894,9 @@
           "type": "object",
           "properties": {
             "create": {
-              "type": "boolean",
-              "default": true
+              "type": ["boolean", "null"],
+              "default": null,
+              "description": "null (default) = auto: render on multi-node CSI (hostPath.enabled=false), skip on single-node/bare-metal (hostPath.enabled=true). true = force render, false = never render. See tracebloc/client#560."
             }
           }
         },
@@ -903,8 +904,9 @@
           "type": "object",
           "properties": {
             "create": {
-              "type": "boolean",
-              "default": true
+              "type": ["boolean", "null"],
+              "default": null,
+              "description": "null (default) = auto: render on multi-node CSI (hostPath.enabled=false), skip on single-node/bare-metal (hostPath.enabled=true). true = force render, false = never render. See tracebloc/client#560."
             }
           }
         }
