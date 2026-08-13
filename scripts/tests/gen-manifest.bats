@@ -145,16 +145,41 @@ run_check() { ( cd "$WORK" && scripts/gen-manifest.sh --check ) }
 @test "the committed manifest lists every file both bootstraps fetch" {
   # Guards the premise rather than the mechanism: if the manifest were somehow
   # current AND short, every test above could pass while a fetched script had
-  # no digest.
+  # no digest. Scrapes BOTH bootstraps — install.sh's bash FILES array and
+  # install.ps1's PowerShell $Files array — with the same extractions
+  # gen-manifest.sh uses, so a Windows-only fetch missing from the manifest is
+  # caught here too, not just the bash surface.
   local manifest="$REPO/scripts/manifest.sha256"
   [ -r "$manifest" ] || return 1
+
+  # The bash bootstrap's FILES=( ... ) entries. The trailing `|| true` keeps a
+  # broken scrape (grep matching nothing) from aborting the assignment, so the
+  # explicit emptiness guard below — not an incidental exit code — is what
+  # decides the outcome.
+  local bash_fetches
+  bash_fetches="$(
+    awk '/^FILES=\(/{f=1;next} /^\)/{f=0} f' "$REPO/scripts/install.sh" \
+      | sed -e 's/^[[:space:]]*"//' -e 's/"[[:space:]]*$//' | grep -v '^$' || true
+  )"
+  # The Windows bootstrap's $Files = @( ... ) entries.
+  local win_fetches
+  win_fetches="$(
+    awk '/^\$Files = @\($/{f=1;next} /^\)$/{f=0} f' "$REPO/scripts/install.ps1" \
+      | sed -nE 's/^[[:space:]]*"([^"]+)".*/\1/p' | grep -v '^$' || true
+  )"
+
+  # A non-empty extract is the premise of this check, not an afterthought: an
+  # empty list means the scrape broke (a bootstrap was reformatted so the awk
+  # pattern stopped matching), NOT that coverage is complete. Both arrays are
+  # non-empty in reality, so zero entries from EITHER is always a broken parser
+  # — fail loudly rather than let missing=0 sail through having verified nothing.
+  [ -n "$bash_fetches" ] || { echo "no fetch paths scraped from install.sh"; return 1; }
+  [ -n "$win_fetches" ]  || { echo "no fetch paths scraped from install.ps1"; return 1; }
+
   local missing=0
   while IFS= read -r f; do
     [ -n "$f" ] || continue
     grep -qF -- "$f" "$manifest" || { echo "not in manifest: $f"; missing=1; }
-  done < <(
-    awk '/^FILES=\(/{f=1;next} /^\)/{f=0} f' "$REPO/scripts/install.sh" \
-      | tr -d '"' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | grep -v '^$'
-  )
+  done < <(printf '%s\n%s\n' "$bash_fetches" "$win_fetches")
   [ "$missing" -eq 0 ] || return 1
 }
