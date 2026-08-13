@@ -1,0 +1,160 @@
+#!/usr/bin/env bats
+# gen-manifest.sh — the installer's integrity surface (backend#1729, sweep 6).
+#
+# WHY THIS SUITE EXISTS
+# ---------------------
+# `scripts/install.sh` verifies every sub-script it fetches against
+# `scripts/manifest.sha256` BEFORE running the privileged steps. gen-manifest.sh
+# produces that manifest. It was one of only two scripts under scripts/ that no
+# bats suite referenced — measured, 2 of 24 — and it is the one that matters
+# most: nothing proved its guards fire.
+#
+# It carries three claims in its own comments, and this suite tests each of them
+# rather than trusting them:
+#
+#   1. "Keep in lockstep with the FILES array in scripts/install.sh — the --check
+#      mode below fails CI if a file the bootstrap fetches is missing from this
+#      list (or vice versa)."
+#   2. the same for install.ps1's $Files array.
+#   3. --check is a CI gate that is non-zero on drift.
+#
+# All three turned out to be TRUE — worth saying, because this epic is mostly a
+# record of such claims being false. What was missing was any test that would
+# notice if they stopped being true. The cross-checks are awk extractions of
+# another file's array literal, which is exactly the kind of parser that goes
+# quietly stale when the file it parses is reformatted.
+#
+# One real gap was found and fixed alongside this suite: emptying FILES made the
+# manifest cover nothing, and the script died on `set -u`'s "FILES[@]: unbound
+# variable" — a failure by accident, with a message that says nothing about the
+# integrity surface just lost. It now refuses explicitly.
+
+setup() {
+  REPO="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
+  # A copy, always: these tests deliberately corrupt install.sh / gen-manifest.sh
+  # and must never touch the working tree.
+  WORK="$(mktemp -d "${BATS_TMPDIR:-/tmp}/genman.XXXXXX")"
+  cp -R "$REPO/scripts" "$WORK/scripts"
+  GM="$WORK/scripts/gen-manifest.sh"
+}
+
+teardown() {
+  [ -n "${WORK:-}" ] && [ -d "$WORK" ] && rm -rf "$WORK"
+  return 0
+}
+
+run_check() { ( cd "$WORK" && scripts/gen-manifest.sh --check ) }
+
+@test "a clean tree passes --check" {
+  run run_check
+  [ "$status" -eq 0 ] || return 1
+}
+
+# --- claim 1: the bash bootstrap's array must match -----------------------
+
+@test "an entry in install.sh that gen-manifest lacks fails --check" {
+  # A script the bootstrap fetches with NO digest in the manifest is
+  # unverified code running privileged steps. This is the case the comment
+  # promises to catch.
+  perl -0pi -e 's/^FILES=\(\n/FILES=(\n  "scripts\/lib\/newthing.sh"\n/m' "$WORK/scripts/install.sh"
+  run run_check
+  [ "$status" -ne 0 ] || return 1
+  [[ "$output" == *"install.sh FILES array and gen-manifest.sh FILES differ"* ]] || return 1
+}
+
+@test "an entry in gen-manifest that install.sh lacks fails --check (the 'vice versa')" {
+  perl -0pi -e 's/^FILES=\(\n/FILES=(\n  "scripts\/lib\/newthing.sh"\n/m' "$GM"
+  run run_check
+  [ "$status" -ne 0 ] || return 1
+  [[ "$output" == *"differ"* ]] || return 1
+}
+
+@test "an install.sh whose FILES array cannot be parsed fails closed" {
+  # The cross-check is an awk extraction of another file's array literal. If
+  # install.sh is reformatted so the pattern stops matching, the extraction
+  # yields NOTHING — and a guard that compares nothing to nothing would pass.
+  # It must refuse instead.
+  perl -0pi -e 's/^FILES=\(/FILE_LIST=(/m' "$WORK/scripts/install.sh"
+  run run_check
+  [ "$status" -ne 0 ] || return 1
+  [[ "$output" == *"differ"* ]] || return 1
+}
+
+# --- claim 2: the Windows bootstrap's array must match --------------------
+
+@test "an install.ps1 \$Files divergence fails --check" {
+  perl -0pi -e 's/^\$Files = @\(\n/\$Files = @(\n  "scripts\/other.ps1"\n/m' "$WORK/scripts/install.ps1"
+  run run_check
+  [ "$status" -ne 0 ] || return 1
+  [[ "$output" == *"install.ps1"* ]] || return 1
+}
+
+@test "an install.ps1 whose \$Files array cannot be parsed fails closed" {
+  perl -0pi -e 's/^\$Files = @\(/\$FileList = @(/m' "$WORK/scripts/install.ps1"
+  run run_check
+  [ "$status" -ne 0 ] || return 1
+}
+
+# --- claim 3: --check is non-zero on drift -------------------------------
+
+@test "changing a covered file without regenerating fails --check" {
+  # The whole point of the manifest: content drift must be visible.
+  printf '\n# drift\n' >> "$WORK/scripts/lib/common.sh"
+  run run_check
+  [ "$status" -ne 0 ] || return 1
+}
+
+@test "regenerating after a change makes --check pass again" {
+  printf '\n# drift\n' >> "$WORK/scripts/lib/common.sh"
+  ( cd "$WORK" && scripts/gen-manifest.sh ) >/dev/null 2>&1
+  run run_check
+  [ "$status" -eq 0 ] || return 1
+}
+
+@test "a listed file missing from disk fails --check" {
+  rm -f "$WORK/scripts/lib/probe.sh"
+  run run_check
+  [ "$status" -ne 0 ] || return 1
+  [[ "$output" == *"missing file"* ]] || return 1
+}
+
+# --- the empty-surface guard added with this suite ------------------------
+
+@test "an empty FILES surface is refused with a diagnostic, not an unbound variable" {
+  # Before the explicit guard this died on `set -u` with "FILES[@]: unbound
+  # variable" — it failed, but by accident, and the message told an operator
+  # nothing about what had just stopped being verified.
+  perl -0pi -e 's/^FILES=\((?:.|\n)*?^\)/FILES=(\n)/m' "$GM"
+  run run_check
+  [ "$status" -ne 0 ] || return 1
+  [[ "$output" == *"file surface is empty"* ]] || return 1
+  [[ "$output" != *"unbound variable"* ]] || return 1
+  # The message must say what was lost, not merely that something is empty.
+  [[ "$output" == *"an empty manifest verifies nothing"* ]] || return 1
+}
+
+@test "an empty WINDOWS_FILES surface is refused too" {
+  perl -0pi -e 's/^WINDOWS_FILES=\((?:.|\n)*?^\)/WINDOWS_FILES=(\n)/m' "$GM"
+  run run_check
+  [ "$status" -ne 0 ] || return 1
+  [[ "$output" == *"file surface is empty"* ]] || return 1
+}
+
+# --- the manifest must actually cover both bootstraps --------------------
+
+@test "the committed manifest lists every file both bootstraps fetch" {
+  # Guards the premise rather than the mechanism: if the manifest were somehow
+  # current AND short, every test above could pass while a fetched script had
+  # no digest.
+  local manifest="$REPO/scripts/manifest.sha256"
+  [ -r "$manifest" ] || return 1
+  local missing=0
+  while IFS= read -r f; do
+    [ -n "$f" ] || continue
+    grep -qF -- "$f" "$manifest" || { echo "not in manifest: $f"; missing=1; }
+  done < <(
+    awk '/^FILES=\(/{f=1;next} /^\)/{f=0} f' "$REPO/scripts/install.sh" \
+      | tr -d '"' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | grep -v '^$'
+  )
+  [ "$missing" -eq 0 ] || return 1
+}
