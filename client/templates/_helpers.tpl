@@ -386,11 +386,9 @@ Usage: {{ include "tracebloc.ingestorDigest" . }}
   Precedence, mirroring tracebloc.ingestorDigest:
     1. `images.ingestor.tag`          explicit override, any environment
     2. `images.ingestor.channelTags[CLIENT_ENV]`   per-environment channel
-    3. "0.8"                          last-resort literal, so a release that
+    3. `$fallbacks[CLIENT_ENV]`       last-resort literals, so a release that
                                       predates these keys still renders under
-                                      `--reuse-values`. Track the current prod
-                                      line: an older literal here would spawn a
-                                      pre-D16 ingestor on such a release.
+                                      `--reuse-values`
 
   Only consulted when no digest applies: jobs-manager builds `repo@digest`
   when tracebloc.ingestorDigest is non-empty, and `repo:tag` otherwise
@@ -398,6 +396,32 @@ Usage: {{ include "tracebloc.ingestorDigest" . }}
 
   dev/stg resolve to the UNSIGNED internal channels. Prod is a semver float,
   not a `:prod` tag — none is published.
+
+  WHY THE FALLBACK IS KEYED ON THE ENVIRONMENT, not a single literal.
+
+  This used to be a bare `"0.8"` for every environment, which made a dev or
+  staging edge whose `channelTags` are absent — the `--reuse-values` replay
+  this branch exists for — spawn the PROD line. That inverts the entire point
+  of backend#1360: dev/stg channels exist so an ingestor change can be
+  validated on a real edge without a prod release, and an edge silently
+  validating prod's image reports on the wrong artifact. It also crosses the
+  signing boundary in the safe direction only by accident.
+
+  It is worse than a wrong tag today. The prod float has moved past the
+  ordering ceiling documented at values.yaml `prodDigest` (backend#1853): the
+  0.8 line no longer carries the ingestor's `edgeuser` DB_USER default that
+  data-ingestors#468 removed. `serviceDbAccountsByEnv` supplies DB_USER on
+  dev/stg, so those two survive it — but the coupling is accidental, and the
+  same literal is what an out-of-vocabulary CLIENT_ENV lands on, where
+  `serviceDbAccountsByEnv` misses too and nothing supplies DB_USER. That is
+  backend#1752 reconstructed from a typo.
+
+  KEEP THE `prod` ENTRY IN SYNC with values.yaml `channelTags.prod`. It is a
+  second copy of the same float and there is no way to read the first from
+  here: `--reuse-values` (unlike `--reset-then-reuse-values`) does not adopt
+  new chart defaults, so a values lookup would be nil on exactly the releases
+  this branch serves. ingestor_channel_tag_test.yaml pins both, so a bump that
+  touches only one fails CI rather than drifting.
 */}}
 {{- define "tracebloc.ingestorTag" -}}
 {{- $ing := default dict .Values.images.ingestor -}}
@@ -411,7 +435,8 @@ Usage: {{ include "tracebloc.ingestorDigest" . }}
 {{- if $channel -}}
 {{- $channel -}}
 {{- else -}}
-{{- "0.8" -}}
+{{- $fallbacks := dict "dev" "dev" "stg" "stg" "prod" "0.8" -}}
+{{- get $fallbacks $clientEnv | default "0.8" -}}
 {{- end -}}
 {{- end -}}
 {{- end }}

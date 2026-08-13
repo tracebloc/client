@@ -184,6 +184,99 @@ setup() {
   [ -d "$HOST_DATA_DIR/tracebloc/mysql" ] || return 1
 }
 
+# Mode string of a path, read with POSIX `ls -ldn` (field 1) rather than GNU-only
+# `stat -c`, which BSD rejects silently — the trap hostpath-prep.bats guards the
+# installer against, and the same one on a developer's Mac here.
+# Trimmed to the 10 mode characters: macOS appends '@' for extended attributes and
+# Linux '+' for an ACL, so anything comparing the whole field fails by platform.
+# Indices below are into that string: 0 type, 1-3 owner, 4-6 group (6 = setgid),
+# 7-9 other (8 = other-write, 9 = sticky).
+_mode_of() {
+  local out
+  out="$(ls -ldn "$1" 2>/dev/null)" || return 1
+  out="${out%% *}"
+  printf '%s\n' "${out:0:10}"
+}
+
+# setgid/sticky are not settable everywhere (macOS refuses S_ISGID on a directory
+# whose group the caller isn't in; some CI filesystems drop both). The chmod in
+# _ensure_release_dirs is best-effort by design, so a runner that can't hold the
+# bits must skip these rather than fail an install path that is actually fine.
+_require_setgid_sticky() {
+  local probe="$BATS_TEST_TMPDIR/.modeprobe"
+  mkdir -p "$probe"
+  chmod 3777 "$probe" 2>/dev/null || skip "filesystem/user cannot set setgid+sticky here"
+  local m; m="$(_mode_of "$probe")"
+  [ "${m:6:1}" = "s" ] && [ "${m:9:1}" = "t" ] || skip "filesystem does not retain setgid+sticky"
+}
+
+@test "_ensure_release_dirs: data gets 2777 (setgid, NO sticky) and logs 3777 (setgid + sticky)" {
+  # #673: the same path:mode split the Windows installer and the chart's
+  # init-writable-data use. Sticky on data would make `data delete` impossible —
+  # the ingest writes as one uid, the teardown pod removes as another (#667).
+  _require_setgid_sticky
+  _ensure_release_dirs tracebloc
+  local data logs
+  data="$(_mode_of "$HOST_DATA_DIR/tracebloc/data")"
+  logs="$(_mode_of "$HOST_DATA_DIR/tracebloc/logs")"
+  [ "${data:6:1}" = "s" ] || return 1     # setgid: new entries inherit the group
+  [ "${data:8:1}" = "w" ] || return 1     # other-writable: the writers share no group
+  [ "${data:9:1}" = "x" ] || return 1     # NOT sticky ('t' here would break `data delete`)
+  [ "${logs:6:1}" = "s" ] || return 1     # setgid
+  [ "${logs:8:1}" = "w" ] || return 1     # other-writable
+  [ "${logs:9:1}" = "t" ] || return 1     # sticky: /tmp semantics, nothing needs to unlink
+}
+
+@test "_ensure_release_dirs: the chmod is not recursive — files under data/logs keep their mode" {
+  # The dropped -R (#673). The dir's own mode governs creation and unlink inside it;
+  # recursing stamped setgid/sticky onto every data FILE and walked the whole dataset
+  # tree to do it. A pre-existing file proves the recursion is gone.
+  mkdir -p "$HOST_DATA_DIR/tracebloc/data" "$HOST_DATA_DIR/tracebloc/logs"
+  : >"$HOST_DATA_DIR/tracebloc/data/sample.bin"
+  : >"$HOST_DATA_DIR/tracebloc/logs/run.log"
+  chmod 600 "$HOST_DATA_DIR/tracebloc/data/sample.bin" "$HOST_DATA_DIR/tracebloc/logs/run.log"
+  _ensure_release_dirs tracebloc
+  [ "$(_mode_of "$HOST_DATA_DIR/tracebloc/data/sample.bin")" = "-rw-------" ] || return 1
+  [ "$(_mode_of "$HOST_DATA_DIR/tracebloc/logs/run.log")" = "-rw-------" ] || return 1
+}
+
+@test "_ensure_release_dirs: mysql is left on the flat recursive 777 (#673 keeps it out of scope)" {
+  # One writer (uid 999), its own init container in the chart, datadir permissions are
+  # the database's business — deliberately NOT part of the shared-dir spec.
+  mkdir -p "$HOST_DATA_DIR/tracebloc/mysql"
+  : >"$HOST_DATA_DIR/tracebloc/mysql/ibdata1"
+  chmod 600 "$HOST_DATA_DIR/tracebloc/mysql/ibdata1"
+  _ensure_release_dirs tracebloc
+  local d; d="$(_mode_of "$HOST_DATA_DIR/tracebloc/mysql")"
+  [ "${d:8:1}" = "w" ] || return 1                                             # world-writable
+  [ "${d:6:1}" != "s" ] || return 1                                            # no setgid
+  [ "$(_mode_of "$HOST_DATA_DIR/tracebloc/mysql/ibdata1")" = "-rwxrwxrwx" ] || return 1  # still -R
+}
+
+@test "_ensure_release_dirs: a HOST_DATA_DIR containing a colon still splits path from mode" {
+  # The pairs are split on the LAST colon. Splitting on the first would take "2777" off a
+  # path like /mnt/a:b/<rel>/data and chmod a directory that isn't there — silently, since
+  # both the mkdir and the chmod are best-effort.
+  _require_setgid_sticky
+  HOST_DATA_DIR="$BATS_TEST_TMPDIR/od:d"
+  _ensure_release_dirs tracebloc
+  [ -d "$HOST_DATA_DIR/tracebloc/data" ] || return 1
+  local m; m="$(_mode_of "$HOST_DATA_DIR/tracebloc/data")"
+  [ "${m:6:1}" = "s" ] || return 1
+  [ "${m:8:1}" = "w" ] || return 1
+}
+
+@test "_release_dirs_spec: emits path:mode pairs, data following HOST_DATASET_DIR" {
+  run _release_dirs_spec tracebloc
+  [ "$status" -eq 0 ] || return 1
+  [ "${lines[0]}" = "$HOST_DATA_DIR/tracebloc/data:2777" ] || return 1
+  [ "${lines[1]}" = "$HOST_DATA_DIR/tracebloc/logs:3777" ] || return 1
+  HOST_DATASET_DIR="$BATS_TEST_TMPDIR/ds"
+  run _release_dirs_spec tracebloc
+  [ "${lines[0]}" = "$BATS_TEST_TMPDIR/ds/tracebloc/data:2777" ] || return 1
+  [ "${lines[1]}" = "$HOST_DATA_DIR/tracebloc/logs:3777" ] || return 1   # logs stay local
+}
+
 # ── _check_existing_cluster_bind (Gap C) ────────────────────────────────────
 @test "_check_existing_cluster_bind: 0.0.0.0 bind -> warns (created outside installer)" {
   docker() { echo "0.0.0.0 0.0.0.0 "; }

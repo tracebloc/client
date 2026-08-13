@@ -87,10 +87,71 @@ tests:
             name: INGESTOR_IMAGE_TAG
             value: "0.8"
 
-  - it: renders for a release predating channelTags (--reuse-values replay)
+  # ---- the last-resort fallback is per-environment ---------------------
+  #
+  # These four replace a single case that asserted `0.8` for a DEV edge with
+  # `channelTags` absent. That was the bug, written down as an expectation: the
+  # `--reuse-values` replay this branch exists for made a dev/stg edge spawn the
+  # PROD line, which is the opposite of what dev/stg channels are for
+  # (backend#1360 — validate an ingestor change on a real edge without a prod
+  # release). See the fallback rationale in _helpers.tpl.
+  - it: a dev edge predating channelTags falls back to its OWN channel, not prod's
     set:
       env.CLIENT_ENV: dev
       images.ingestor.channelTags: null
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: INGESTOR_IMAGE_TAG
+            value: "dev"
+
+  - it: a stg edge predating channelTags falls back to its OWN channel
+    set:
+      env.CLIENT_ENV: stg
+      images.ingestor.channelTags: null
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: INGESTOR_IMAGE_TAG
+            value: "stg"
+
+  # The control for the two above: the same missing-channelTags input on a PROD
+  # edge must still yield the prod float. Without this, "dev falls back to dev"
+  # would also pass if the fallback simply echoed the resolved environment.
+  - it: a prod edge predating channelTags still falls back to the prod float
+    set:
+      env.CLIENT_ENV: prod
+      images.ingestor.channelTags: null
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: INGESTOR_IMAGE_TAG
+            value: "0.8"
+
+  # The alias must reach the fallback too — the fallback dict is keyed on the
+  # RESOLVED env, so this passes only because it reads tracebloc.clientEnv and
+  # not .Values.env.CLIENT_ENV. backend#1723 was that exact class of miss.
+  - it: an alias resolves before the fallback is keyed
+    set:
+      env.CLIENT_ENV: development
+      images.ingestor.channelTags: null
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: INGESTOR_IMAGE_TAG
+            value: "dev"
+
+  # The prod fallback literal is a SECOND copy of values.yaml channelTags.prod
+  # and cannot read the first (see _helpers.tpl). Pinning both in one suite is
+  # what makes a half-done bump fail CI instead of drifting: the case above
+  # pins the literal, this one pins the values.yaml default they must match.
+  - it: the values.yaml prod channel and the prod fallback literal agree
+    set:
+      env.CLIENT_ENV: prod
     asserts:
       - contains:
           path: spec.template.spec.containers[0].env
