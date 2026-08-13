@@ -800,3 +800,60 @@ tests:
           path: metadata.name
           value: stg-image-refresh-node-agents
         documentIndex: 4
+
+  # =====================================================================
+  # Two-sided-contract guards. Three of #569's review findings were one
+  # side of a contract moving without the other. These pin the sides that
+  # are still spelled out in two places.
+  # =====================================================================
+
+  - it: reconcile targets match the workload names the chart actually renders
+    # DEPLOYMENT_NAME re-derives `<release>-jobs-manager` with its own printf,
+    # and five other call sites spell it out too (NOTES.txt, the PDB,
+    # tracebloc.serviceAccountName, ...). Unifying that is a mechanical refactor
+    # across templates this change does not touch, so it is left for its own PR
+    # — this test is the interim binding. A `set image` against a name that no
+    # longer exists fails the tick, freezes the digest record, and eventually
+    # trips the shared flap lockout for every control-plane image.
+    # requests-proxy IS unified now (tracebloc.requestsProxyName); resource-monitor
+    # already was (tracebloc.resourceMonitorName). Cross-check these literals
+    # against jobs_manager_test / requests_proxy_test / resource_monitor_test,
+    # which pin the same strings from the workload side.
+    template: templates/image-refresh-cronjob.yaml
+    documentIndex: 1
+    asserts:
+      - contains:
+          path: spec.jobTemplate.spec.template.spec.containers[0].env
+          content:
+            name: DEPLOYMENT_NAME
+            value: "stg-jobs-manager"
+      - contains:
+          path: spec.jobTemplate.spec.template.spec.containers[0].env
+          content:
+            name: REQUESTS_PROXY_DEPLOYMENT
+            value: "stg-requests-proxy"
+      - contains:
+          path: spec.jobTemplate.spec.template.spec.containers[0].env
+          content:
+            name: RESOURCE_MONITOR_DAEMONSET
+            value: "stg-resource-monitor"
+
+  - it: set-image container names match the containers the chart renders
+    # `kubectl set image <workload> <container>=<ref>` fails outright if the
+    # container name is wrong, so these four strings are a hard contract with
+    # the workload templates. Pinned from the workload side too.
+    template: templates/image-refresh-cronjob.yaml
+    documentIndex: 0
+    asserts:
+      - matchRegex:
+          path: data["image-refresh.sh"]
+          pattern: 'jm_set_args api='
+      - matchRegex:
+          path: data["image-refresh.sh"]
+          pattern: 'jm_set_args pods-monitor-container='
+      - matchRegex:
+          path: data["image-refresh.sh"]
+          pattern: 'rp_set_args proxy='
+      - matchRegex:
+          path: data["image-refresh.sh"]
+          pattern: 'rm_set_args tracebloc-resource-monitor='

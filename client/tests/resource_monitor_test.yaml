@@ -151,3 +151,11 @@ tests:
       - equal:
           path: spec.template.spec.containers[0].imagePullPolicy
           value: Always
+
+  - it: container name is the one image-refresh set-images by name (#569)
+    # Contract with image-refresh-cronjob.yaml's `set image` args.
+    template: templates/resource-monitor-daemonset.yaml
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].name
+          value: tracebloc-resource-monitor

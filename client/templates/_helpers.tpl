@@ -187,6 +187,29 @@ mysql-pvc
 {{- end }}
 
 {{/*
+  Name of the requests-proxy Deployment. ONE definition, because #569 gave it a
+  second consumer: image-refresh reconciles it by name with `kubectl set image`,
+  so a rename that reached only the Deployment would leave the CronJob patching
+  a workload that does not exist — failing the tick, freezing the digest record,
+  and eventually tripping the shared flap lockout for every control-plane image.
+
+  This is the third instance on #569 of one side of a two-sided contract moving
+  without the other (the requests-proxy digest pin and the resource-monitor pin
+  signal were the first two, both found in review). Same remedy: collapse to a
+  single definition rather than keep two literals in sync by hand.
+
+  The jobs-manager Deployment has the same shape — image-refresh's
+  DEPLOYMENT_NAME re-derives `<release>-jobs-manager` with its own printf, and
+  five other call sites spell it out too (NOTES.txt, the PDB,
+  tracebloc.serviceAccountName, ...). Unifying THAT is a mechanical refactor
+  across templates this change does not otherwise touch, so it is deliberately
+  left for its own PR; a contract test pins the two sides here in the meantime.
+*/}}
+{{- define "tracebloc.requestsProxyName" -}}
+{{ .Release.Name }}-requests-proxy
+{{- end }}
+
+{{/*
   Whether the image-refresh CronJob has anything to do. When ALL THREE
   managed images (jobs-manager, pods-monitor, resource-monitor) are
   digest-pinned, the operator has explicitly opted into reproducible

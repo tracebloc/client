@@ -590,7 +590,7 @@ spec:
                   value: {{ printf "%s-jobs-manager" .Release.Name | quote }}
                 # #569: the two additional workloads reconciled by `set image`.
                 - name: REQUESTS_PROXY_DEPLOYMENT
-                  value: {{ printf "%s-requests-proxy" .Release.Name | quote }}
+                  value: {{ include "tracebloc.requestsProxyName" . | quote }}
                 - name: RESOURCE_MONITOR_DAEMONSET
                   value: {{ include "tracebloc.resourceMonitorName" . | quote }}
                 - name: NODE_AGENTS_NAMESPACE
