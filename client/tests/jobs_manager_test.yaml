@@ -615,3 +615,92 @@ tests:
               secretKeyRef:
                 name: RELEASE-NAME-secrets
                 key: TB_INGEST_PASSWORD
+
+  # -------------------------------------------------------------------------
+  # Readiness / startup probes — backend#1779
+  #
+  # Before this, jobs-manager had no probes, so the kubelet called the
+  # container Ready as soon as it was running and `kubectl rollout status`
+  # reported success over a crash-loop (backend#1723, 2026-08-11).
+  # -------------------------------------------------------------------------
+
+  - it: should give the api container a readiness probe on the ingestion port
+    template: templates/jobs-manager-deployment.yaml
+    asserts:
+      - isNotEmpty:
+          path: spec.template.spec.containers[0].readinessProbe
+      # The port is the assertion that matters: a probe pointed anywhere else
+      # would pass `isNotEmpty` while proving nothing about the server that
+      # serves POST /internal/submit-ingestion-run.
+      - equal:
+          path: spec.template.spec.containers[0].readinessProbe.tcpSocket.port
+          value: 8080
+      - equal:
+          path: spec.template.spec.containers[0].readinessProbe.failureThreshold
+          value: 3
+
+  - it: should give the api container a startup probe with room for auth + migration
+    template: templates/jobs-manager-deployment.yaml
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].startupProbe.tcpSocket.port
+          value: 8080
+      # 30 x 5s = 150s. jobs-manager retries backend auth and runs a MySQL
+      # migration before it listens, so it needs more headroom than
+      # requests-proxy's 60s. Pinned so a later "tidy-up" cannot quietly
+      # shrink it back and start killing slow-but-healthy starts.
+      - equal:
+          path: spec.template.spec.containers[0].startupProbe.failureThreshold
+          value: 30
+      - equal:
+          path: spec.template.spec.containers[0].startupProbe.periodSeconds
+          value: 5
+
+  - it: should NOT give the api container a liveness probe (deliberate)
+    template: templates/jobs-manager-deployment.yaml
+    asserts:
+      # jobs_manager.py catches a failed ingestion-server start on purpose so
+      # that Service Bus polling and training submissions keep working. A
+      # liveness probe on 8080 would restart the pod in exactly that case and
+      # reverse the decision from the chart. Readiness (remove from Service)
+      # is the correct response; restarting a process that is still training
+      # models is not.
+      - notExists:
+          path: spec.template.spec.containers[0].livenessProbe
+
+  - it: should drop the port probes when the ingestion server is disabled
+    template: templates/jobs-manager-deployment.yaml
+    set:
+      # The runtime treats ANY non-empty value as "disabled"
+      # (`not os.getenv("INGESTION_HTTP_DISABLED")`), so the chart must too —
+      # otherwise the probe would wait forever on a port nothing opens and the
+      # pod would never become Ready.
+      env.INGESTION_HTTP_DISABLED: "1"
+    asserts:
+      - notExists:
+          path: spec.template.spec.containers[0].readinessProbe
+      - notExists:
+          path: spec.template.spec.containers[0].startupProbe
+
+  - it: should still probe when INGESTION_HTTP_DISABLED is present but empty
+    template: templates/jobs-manager-deployment.yaml
+    set:
+      # Empty string is falsey to both Python's os.getenv guard and Helm, so
+      # ingestion IS enabled and the probes must stay.
+      env.INGESTION_HTTP_DISABLED: ""
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].readinessProbe.tcpSocket.port
+          value: 8080
+
+  - it: should not probe the pods-monitor sidecar (no HTTP surface)
+    template: templates/jobs-manager-deployment.yaml
+    asserts:
+      # Recorded, not overlooked: pods-monitor listens on nothing, so there is
+      # no port to probe. backend#1779 leaves it open; giving it a probe needs
+      # a health surface first, which is a separate change.
+      - equal:
+          path: spec.template.spec.containers[1].name
+          value: pods-monitor-container
+      - notExists:
+          path: spec.template.spec.containers[1].readinessProbe
