@@ -188,6 +188,66 @@ spec:
           - name: http
             containerPort: 8080
             protocol: TCP
+        {{- if not (default dict .Values.env).INGESTION_HTTP_DISABLED }}
+        # backend#1779. jobs-manager had no probes at all, so the kubelet
+        # reported the container Ready the moment it was *running* — and
+        # `kubectl rollout status` printed "successfully rolled out" while the
+        # pod was crash-looping (4 restarts in 72s, 2026-08-11 / backend#1723).
+        #
+        # Why a PORT probe is the right signal here, and not GET /healthz:
+        # jobs-manager opens 8080 only at the END of a successful start — it
+        # authenticates against the backend first and exits(1) on failure
+        # (jobs_manager.py: auth at main() then run_server_in_thread ~140 lines
+        # later), and create_app() runs the ingestion_runs migration against
+        # MySQL on the way up. So "8080 accepts a connection" already implies
+        # backend auth succeeded and MySQL was reachable. `/healthz` is an
+        # unconditional `200 {"status":"ok"}` and would add no information over
+        # the TCP connect — the evidence is in reaching the port at all.
+        #
+        # Gated on INGESTION_HTTP_DISABLED because the runtime gates the server
+        # on it, with the same truthiness: `not os.getenv(...)` treats ANY
+        # non-empty value as "disabled", and a non-empty string is likewise
+        # truthy to Helm. Without this gate, an operator setting that env var
+        # would get a pod that never becomes Ready.
+        readinessProbe:
+          tcpSocket:
+            port: 8080
+          # The probe that fixes the false-green: the jobs-manager Service must
+          # not route POST /internal/submit-ingestion-run at a pod whose server
+          # is not listening ("connection refused to that pod's 8080, x16
+          # tasks" in the 2026-08-11 run), and `kubectl rollout status` must not
+          # call the Deployment available until it is.
+          #
+          # initialDelaySeconds covers the slow start without any consequence
+          # if it is not enough: this container retries backend auth and then
+          # runs a MySQL migration before it listens, and while readiness fails
+          # the pod is merely NotReady. Nothing kills it. That is the whole
+          # point — see the note below.
+          initialDelaySeconds: 10
+          periodSeconds: 10
+          timeoutSeconds: 3
+          failureThreshold: 3
+        # READINESS ONLY — no livenessProbe AND no startupProbe, deliberately.
+        # backend#1779 asks for this to be a recorded decision, so here it is.
+        #
+        # Both of those probe types KILL the container when they fail: liveness
+        # on every failure threshold, and a startupProbe likewise ("if the
+        # startup probe fails, the kubelet kills the container"). jobs_manager.py
+        # catches a failed run_server_in_thread on purpose: "Startup failure
+        # here is fatal for the ingestion flow but must not take down the rest
+        # of jobs-manager — SB polling can still operate independently and
+        # training submissions keep working."
+        #
+        # So either probe would reverse that decision from the chart, and turn a
+        # degraded-but-useful pod into a CrashLoopBackOff that also stops the
+        # Service Bus polling and the training it was still doing. Readiness
+        # removes the pod from the Service, which is the part that needs to
+        # happen. Restarting a process that is still training models is not.
+        #
+        # (An earlier revision of this PR did add a startupProbe with a 150s
+        # budget, which had exactly that bug — it was caught in review. Do not
+        # reintroduce one without also changing jobs_manager.py's decision.)
+        {{- end }}
         volumeMounts:
           - name: shared-volume
             mountPath: "/data/shared"
