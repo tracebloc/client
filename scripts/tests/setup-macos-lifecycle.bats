@@ -164,6 +164,104 @@ EOF
   [ "${TB_MACOS_AUTOSTART:-0}" = "0" ] || return 1
 }
 
+# ── Tier 0 on macOS (client#703) ─────────────────────────────────────────────
+# A Mac with Docker Desktop already installed AND running has nothing privileged
+# left to do, but install_macos ran the admin gate and primed sudo anyway — and
+# died there, demanding a password to install a runtime that was already up.
+# install_linux has had this branch since RFC 0001 #1175; macOS never got it.
+_tier0_mocks() {
+  _macos_require_admin()     { record "_macos_require_admin"; }
+  preflight_sudo()           { record "preflight_sudo"; }
+  install_homebrew()         { record "install_homebrew"; }
+  install_docker_desktop()   { record "install_docker_desktop"; }
+  assert_amd64_emulation()   { record "assert_amd64_emulation"; }
+  install_macos_cli_tools()  { record "install_macos_cli_tools"; }
+  _install_macos_autostart() { record "_install_macos_autostart"; }
+  info() { :; }
+}
+
+@test "install_macos: tier 0 skips the admin gate AND sudo priming (client#703)" {
+  INSTALL_TIER=0
+  _tier0_mocks
+  run install_macos
+  [ "$status" -eq 0 ] || return 1
+  run mock_calls
+  ! grep -q "_macos_require_admin" <<<"$output" || return 1
+  ! grep -q "preflight_sudo"       <<<"$output" || return 1
+}
+
+# The privileged work is the point of the skip: Docker and Homebrew are already
+# there, so re-running them is at best wasted and at worst a password prompt.
+@test "install_macos: tier 0 skips Homebrew and the Docker Desktop install" {
+  INSTALL_TIER=0
+  _tier0_mocks
+  run install_macos
+  run mock_calls
+  ! grep -q "install_homebrew"       <<<"$output" || return 1
+  ! grep -q "install_docker_desktop" <<<"$output" || return 1
+}
+
+# ...but the tools and the login item are still genuinely needed.
+@test "install_macos: tier 0 still installs the CLI tools, verifies amd64 and sets autostart" {
+  INSTALL_TIER=0
+  _tier0_mocks
+  run install_macos
+  [ "$status" -eq 0 ] || return 1
+  run mock_calls
+  grep -q "install_macos_cli_tools" <<<"$output" || return 1
+  grep -q "assert_amd64_emulation"  <<<"$output" || return 1
+  grep -q "_install_macos_autostart" <<<"$output" || return 1
+}
+
+# Every other tier is untouched — the privileged path must still run in full.
+@test "install_macos: tier 2 still runs the admin gate, sudo, Homebrew and Docker" {
+  INSTALL_TIER=2
+  _tier0_mocks
+  run install_macos
+  [ "$status" -eq 0 ] || return 1
+  run mock_calls
+  grep -q "_macos_require_admin"     <<<"$output" || return 1
+  grep -q "preflight_sudo"           <<<"$output" || return 1
+  grep -q "install_homebrew"         <<<"$output" || return 1
+  grep -q "install_docker_desktop"   <<<"$output" || return 1
+}
+
+# A stale bootstrap never fetched probe.sh, so INSTALL_TIER is unset. That must
+# behave exactly as before this change — privileged path, not a silent skip.
+@test "install_macos: unset INSTALL_TIER (stale bootstrap) keeps the privileged path" {
+  unset INSTALL_TIER
+  _tier0_mocks
+  run install_macos
+  [ "$status" -eq 0 ] || return 1
+  run mock_calls
+  grep -q "_macos_require_admin" <<<"$output" || return 1
+  grep -q "preflight_sudo"       <<<"$output" || return 1
+}
+
+# Tier 0 holds no sudo credential, so the tools must not be written to a
+# root-owned dir — that would prompt for exactly the password Tier 0 avoids.
+@test "install_macos_cli_tools: tier 0 targets ~/.local/bin with no sudo (client#703)" {
+  INSTALL_TIER=0
+  HOME="$BATS_TEST_TMPDIR/h"; mkdir -p "$HOME"
+  install_kubectl() { :; }; install_k3d() { :; }; install_helm() { :; }
+  _persist_tools_on_path() { :; }
+  install_macos_cli_tools
+  [ "$TB_TOOLS_DIR" = "$HOME/.local/bin" ] || return 1
+  [ -z "$TB_TOOLS_SUDO" ] || return 1
+  [ -d "$HOME/.local/bin" ] || return 1
+  case ":$PATH:" in *":$HOME/.local/bin:"*) ;; *) return 1 ;; esac
+}
+
+@test "install_macos_cli_tools: other tiers keep /usr/local/bin + sudo (unchanged)" {
+  INSTALL_TIER=2
+  install_kubectl() { :; }; install_k3d() { :; }; install_helm() { :; }
+  _persist_tools_on_path() { :; }
+  sudo() { record "sudo $*"; }
+  install_macos_cli_tools
+  [ "$TB_TOOLS_DIR" = "/usr/local/bin" ] || return 1
+  [ "$TB_TOOLS_SUDO" = "sudo" ] || return 1
+}
+
 # ── _reboot_note reflects the configured autostart ───────────────────────────
 @test "install_macos: a failing autostart does NOT abort an otherwise-complete install (best-effort) (#430 Bugbot)" {
   # All prior steps succeed; autostart fails (mkdir/write). Under set -e the bare call

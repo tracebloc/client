@@ -393,14 +393,26 @@ install_macos_cli_tools() {
   # ends in the execute-gate (#411, assert_tool_runs), so a broken/wrong-arch binary
   # fails the "System tools" step loudly rather than printing a false success.
   OS_DL="darwin"
-  # macOS has no Tier/rootless model, so it does NOT use _set_tools_target (the Linux
-  # selector): land the pinned binaries in /usr/local/bin, which is on the default
-  # login PATH (/etc/paths) on BOTH Intel and Apple Silicon — no PATH-persistence
-  # dance needed. It needs sudo to write and may not exist yet on Apple Silicon
+  # Tier 0 (client#703): a usable runtime already exists and this run holds NO
+  # sudo credential — writing to /usr/local/bin would prompt for a password to do
+  # the one thing Tier 0 exists to avoid. Land the pinned binaries in
+  # ~/.local/bin instead, the same no-sudo target install_linux's
+  # _set_tools_target picks, and put it on this shell's PATH.
+  #
+  # Every other tier keeps /usr/local/bin, which is on the default login PATH
+  # (/etc/paths) on BOTH Intel and Apple Silicon — no PATH-persistence dance
+  # needed. It needs sudo to write and may not exist yet on Apple Silicon
   # (Homebrew uses /opt/homebrew), so create it best-effort.
-  TB_TOOLS_DIR="/usr/local/bin"
-  TB_TOOLS_SUDO="sudo"
-  sudo mkdir -p "$TB_TOOLS_DIR" 2>/dev/null || true
+  if [ "${INSTALL_TIER:-}" = "0" ]; then
+    TB_TOOLS_DIR="${HOME}/.local/bin"
+    TB_TOOLS_SUDO=""
+    mkdir -p "$TB_TOOLS_DIR"
+    case ":$PATH:" in *":$TB_TOOLS_DIR:"*) ;; *) export PATH="$TB_TOOLS_DIR:$PATH" ;; esac
+  else
+    TB_TOOLS_DIR="/usr/local/bin"
+    TB_TOOLS_SUDO="sudo"
+    sudo mkdir -p "$TB_TOOLS_DIR" 2>/dev/null || true
+  fi
   local _saved_umask
   _saved_umask=$(umask)
   umask 022                # binaries must be world-executable, not owner-only (umask 077)
@@ -408,6 +420,10 @@ install_macos_cli_tools() {
   install_k3d
   install_helm             # ends with success "System tools"
   umask "$_saved_umask"
+  # Self-gates on TB_TOOLS_DIR being ~/.local/bin, so this is a no-op on every
+  # other tier. It is already macOS-aware (_tools_rc_for_shell → ~/.zshrc for
+  # zsh, the default shell on modern macOS).
+  _persist_tools_on_path
 }
 
 # Configure login autostart so a rebooted Mac brings the container runtime — and thus
@@ -568,6 +584,34 @@ install_macos() {
   # even the ERR trap's location had nothing to corroborate it. These cost one
   # log line each and make the log say how far it got, trap or no trap.
   log "step b: install_macos starting (OS=$OS ARCH=$ARCH tier=${INSTALL_TIER:-?})"
+
+  # ── Tier 0 — a container runtime is already usable as this user, so there is
+  # nothing privileged left to do (RFC 0001 #1175). This is the macOS
+  # counterpart of install_linux's Tier 0 branch, which macOS never got.
+  #
+  # It is the defect behind client#703: a Mac with Docker Desktop installed AND
+  # running was still sent through _macos_require_admin + preflight_sudo and
+  # died there — demanding an administrator password to install a runtime that
+  # was already installed and answering. Docker Desktop, Homebrew and the admin
+  # gate are all pointless here; only the pinned CLI tools are still missing,
+  # and those install with no sudo at all.
+  #
+  # Skipping the admin gate is deliberate, not incidental: Tier 0 is exactly the
+  # case RFC 0001 opened up — a user with no administrator rights on a machine
+  # where someone else already provisioned the runtime.
+  if [ "${INSTALL_TIER:-}" = "0" ]; then
+    info "Using the container runtime already on this machine — no administrator rights needed."
+    log "step b: tier 0 — skipping admin, sudo, Homebrew and Docker Desktop"
+    assert_amd64_emulation    # Docker is up by definition here (#433)
+    install_macos_cli_tools
+    log "step b: cli tools ready (tier 0)"
+    # Same best-effort contract as the privileged path below (#430): a per-user
+    # LaunchAgent needs no admin, and a failed login item must not fail an
+    # otherwise-complete install.
+    _install_macos_autostart || true
+    return 0
+  fi
+
   _macos_require_admin        # #430: no-admin Macs get a named IT remedy, not a generic sudo error
   log "step b: admin check passed"
   preflight_sudo
