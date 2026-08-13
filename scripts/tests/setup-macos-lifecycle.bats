@@ -360,3 +360,49 @@ _tier0_mocks() {
   run _reboot_note
   [[ "$output" == *"open Docker Desktop to bring tracebloc back"* ]] || return 1
 }
+
+# Headless Tier 0 skips the boot LaunchDaemon rather than prompt for a password,
+# so TB_MACOS_AUTOSTART stays unset — but the not-configured branch is the GUI
+# fallback. Without a headless marker the LAST line of a successful install told
+# the operator to open Docker Desktop: a runtime that is not what runs here, an
+# action there is no desktop to perform, and a direct contradiction of the
+# `colima start` hint the skip prints (Bugbot, client#704).
+@test "_reboot_note: headless Tier 0 -> names colima, not Docker Desktop (Bugbot #704)" {
+  OS=Darwin; TB_MACOS_AUTOSTART=0; TB_MACOS_HEADLESS_NO_AUTOSTART=1
+  run _reboot_note
+  [[ "$output" == *"colima start"* ]] || return 1
+  [[ "$output" != *"open Docker Desktop"* ]] || return 1
+  [[ "$output" != *"restarts automatically"* ]] || return 1   # nothing was configured
+}
+
+@test "_reboot_note: a configured autostart still wins over the headless marker (#704)" {
+  # Ordering guard: TB_MACOS_AUTOSTART=1 means the daemon really was installed,
+  # so a stale marker must not downgrade the promise to manual recovery.
+  OS=Darwin; TB_MACOS_AUTOSTART=1; TB_MACOS_HEADLESS_NO_AUTOSTART=1
+  run _reboot_note
+  [[ "$output" == *"restarts automatically"* ]] || return 1
+  [[ "$output" != *"colima start"* ]] || return 1
+}
+
+# The marker must actually be SET by the skip path, or the summary branch above
+# is unreachable in production and both tests are theatre.
+@test "_install_macos_autostart no-sudo: headless skip sets the summary marker (#704)" {
+  TRACEBLOC_NO_AUTOSTART=""
+  _has_gui_session() { return 1; }          # headless
+  unset TB_MACOS_HEADLESS_NO_AUTOSTART
+  run_out="$(_install_macos_autostart no-sudo 2>&1)" || true
+  [[ "$run_out" == *"colima start"* ]] || return 1
+  # Re-run in THIS shell so the global assignment is observable.
+  _install_macos_autostart no-sudo >/dev/null 2>&1 || true
+  [ "${TB_MACOS_HEADLESS_NO_AUTOSTART:-0}" = "1" ] || return 1
+}
+
+@test "_install_macos_autostart no-sudo: a GUI session does not set the headless marker (#704)" {
+  TRACEBLOC_NO_AUTOSTART=""
+  _has_gui_session() { return 0; }          # GUI present -> LaunchAgent path, no sudo
+  unset TB_MACOS_HEADLESS_NO_AUTOSTART
+  TB_LAUNCHAGENTS_DIR="$BATS_TEST_TMPDIR/LaunchAgents"
+  launchctl() { return 0; }
+  _install_macos_autostart no-sudo >/dev/null 2>&1 || true
+  [ "${TB_MACOS_HEADLESS_NO_AUTOSTART:-0}" = "0" ] || return 1
+}

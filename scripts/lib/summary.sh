@@ -114,6 +114,14 @@ _reboot_note() {
       # installs a system LaunchDaemon (not a login item), so "login item" would mislead IT
       # on a headless box (#430 Bugbot).
       echo -e "  ${DIM}After a reboot, tracebloc restarts automatically.${RESET}"
+    elif [[ "${TB_MACOS_HEADLESS_NO_AUTOSTART:-0}" == "1" ]]; then
+      # Headless Tier 0 skipped the boot LaunchDaemon rather than prompt for a
+      # password (setup-macos.sh, client#704). The generic branch below is the
+      # GUI fallback and would say "open Docker Desktop" — a runtime that is not
+      # what runs here and an action there is no desktop to perform, directly
+      # contradicting the `colima start` hint the skip already printed. Name the
+      # recovery that actually works on this box.
+      echo -e "  ${DIM}After a reboot, run 'colima start' to bring tracebloc back.${RESET}"
     else
       # macOS/Windows fallback: Docker Desktop owns boot autostart and must be launched.
       echo -e "  ${DIM}After a reboot, open Docker Desktop to bring tracebloc back.${RESET}"
