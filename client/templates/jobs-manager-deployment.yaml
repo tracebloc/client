@@ -151,7 +151,15 @@ spec:
       containers:
       - name: api
         image: {{ include "tracebloc.image" (dict "repository" "tracebloc/jobs-manager" "tag" (include "tracebloc.clientEnv" .) "digest" .Values.images.jobsManager.digest "registry" (dig "imageRegistry" "docker.io" (.Values.global | default dict))) | quote }}
-        imagePullPolicy: {{ if .Values.images.jobsManager.digest }}IfNotPresent{{ else }}Always{{ end }}
+        # #569: unconditionally IfNotPresent. `Always` forced a registry
+        # round-trip on every (re)start, so an offline Docker Desktop / WSL2
+        # restart landed in ImagePullBackOff even though containerd already had
+        # the image cached. Updates no longer depend on the pull policy: the
+        # image-refresh CronJob pins each new digest onto this container with
+        # `kubectl set image` (see image-refresh-cronjob.yaml), so the image
+        # REFERENCE changes and the kubelet pulls because it has never seen that
+        # digest -- not because the policy told it to re-pull an unchanged tag.
+        imagePullPolicy: IfNotPresent
         securityContext:
           allowPrivilegeEscalation: false
           capabilities:
@@ -449,7 +457,9 @@ spec:
         {{- end }}
       - name: pods-monitor-container
         image: {{ include "tracebloc.image" (dict "repository" "tracebloc/pods-monitor" "tag" (include "tracebloc.clientEnv" .) "digest" .Values.images.podsMonitor.digest "registry" (dig "imageRegistry" "docker.io" (.Values.global | default dict))) | quote }}
-        imagePullPolicy: {{ if .Values.images.podsMonitor.digest }}IfNotPresent{{ else }}Always{{ end }}
+        # #569: unconditionally IfNotPresent -- same reasoning as the api
+        # container above; image-refresh pins the digest with `kubectl set image`.
+        imagePullPolicy: IfNotPresent
         securityContext:
           allowPrivilegeEscalation: false
           capabilities:

@@ -51,7 +51,15 @@ spec:
           */}}
           {{- $rmDigest := (default (dict) (default (dict) .Values.images).resourceMonitor).digest | default "" }}
           image: {{ include "tracebloc.image" (dict "repository" "tracebloc/resource-monitor" "tag" (include "tracebloc.clientEnv" .) "digest" $rmDigest "registry" (dig "imageRegistry" "docker.io" (.Values.global | default dict))) | quote }}
-          imagePullPolicy: {{ if $rmDigest }}IfNotPresent{{ else }}Always{{ end }}
+          # #569: unconditionally IfNotPresent. `Always` made every node's pod
+          # re-pull on restart, so an offline restart wedged the DaemonSet in
+          # ImagePullBackOff fleet-wide. This DaemonSet previously had NO
+          # deliberate update path at all (image-refresh did not touch it, and a
+          # chart release does not change its image ref) -- it only moved when a
+          # pod happened to restart. image-refresh now reconciles it explicitly
+          # with `kubectl set image`, so IfNotPresent costs nothing and the
+          # update path is intentional for the first time.
+          imagePullPolicy: IfNotPresent
           securityContext:
             allowPrivilegeEscalation: false
             capabilities:

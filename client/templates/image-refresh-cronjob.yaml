@@ -11,15 +11,72 @@ metadata:
 data:
   image-refresh.sh: |
     #!/bin/sh
-    # Polls the registry for a new manifest digest and reconciles it onto
-    # the long-lived jobs-manager Deployment (the jobs-manager + pods-monitor
-    # containers, on docker.io under the floating CLIENT_ENV tag, #154).
-    # Action on change: `kubectl rollout restart` the deployment.
-    # Source of truth: an annotation on the deployment metadata
+    # Polls the registry for a new manifest digest and reconciles it onto the
+    # long-lived control-plane workloads, on docker.io under the floating
+    # CLIENT_ENV tag (#154, extended by #569).
+    #
+    # Action on change: `kubectl set image <workload> <container>=repo@digest`.
+    # It used to be `kubectl rollout restart`. #569 changed the mechanism so
+    # the always-running pods can drop `imagePullPolicy: Always`: `Always`
+    # forced a registry round-trip on every (re)start, so an offline Docker
+    # Desktop / WSL2 restart landed in ImagePullBackOff even with the image
+    # already cached in containerd. `restart` only works as an update path
+    # BECAUSE of `Always` — the two are mutually exclusive unless the image
+    # REFERENCE itself changes, which is exactly what `set image` does. The
+    # pods now render `IfNotPresent` and the kubelet pulls because it has
+    # never seen that digest, not because a policy told it to re-check a tag.
+    #
+    # Workloads reconciled (all in RELEASE_NAMESPACE unless noted):
+    #   deployment/<release>-jobs-manager      api                       (tracebloc/jobs-manager)
+    #                                          pods-monitor-container    (tracebloc/pods-monitor)
+    #   deployment/<release>-requests-proxy    proxy                     (tracebloc/jobs-manager)
+    #   daemonset/<release>-resource-monitor   tracebloc-resource-monitor
+    #                                          in NODE_AGENTS_NAMESPACE  (tracebloc/resource-monitor)
+    #
+    # requests-proxy runs the SAME tracebloc/jobs-manager image, so it follows
+    # the jobs-manager digest resolved in this tick — no second registry HEAD.
+    # Before #569 it was not reconciled at all: it stayed on its old build
+    # until some unrelated restart, then jumped to whatever the floating tag
+    # pointed at, so the two pods routinely ran different builds of one image.
+    # resource-monitor was likewise untouched (and a chart release does not
+    # change its image ref either), so it only ever moved by accident.
+    #
+    # TWO KNOWN, BOUNDED LIMITATIONS of keeping the annotation (rather than the
+    # live pod spec) as the source of truth. Both are self-healing at the next
+    # upstream image change, which at the control plane's release cadence is
+    # days, and neither can break a running edge — the pods stay offline-safe
+    # throughout because IfNotPresent does not depend on any of this.
+    #
+    #   1. HELM RE-RENDER. `helm upgrade --reset-then-reuse-values` (the fleet
+    #      auto-upgrade path) re-renders the templates, which write `repo:tag`
+    #      and so revert an earlier `set image` pin. This tick will NOT re-pin:
+    #      the annotation still records that digest, so `recorded == latest`
+    #      and the loop no-ops. The edge floats on the tag until the next
+    #      upstream release re-pins it. Note this only happens on a chart
+    #      VERSION bump — auto-upgrade compares versions and skips otherwise —
+    #      so it is not an hourly revert.
+    #
+    #   2. PRE-EXISTING SKEW. requests-proxy and jobs-manager may already be
+    #      running different builds of the same image on an edge upgrading INTO
+    #      this version, because nothing reconciled requests-proxy before now.
+    #      This script converges them on the next digest change (both are set
+    #      in the same tick); it does not detect and repair skew that predates
+    #      it, because it compares registry-vs-annotation, never pod-vs-pod.
+    #
+    # Fixing either properly means reconciling against each workload's LIVE
+    # container image instead of a shared annotation — a declarative reconcile,
+    # which `set image` makes possible for the first time (`rollout restart`
+    # was a blind action, which is why the annotation existed at all). That is
+    # a deliberate follow-up, not an oversight.
+    #
+    # Source of truth: annotations on the JOBS-MANAGER deployment metadata
     # (`tracebloc.io/last-refreshed-<image>-digest`) — comparing the registry
     # digest to an annotation we wrote ourselves sidesteps imageID format
     # variation across container runtimes (kubernetes/kubernetes#108689 +
     # #115199) and multi-arch manifest-list vs platform-manifest divergence.
+    # All records live on that one Deployment even for resource-monitor: they
+    # are this script's private bookkeeping, not a property of the workload,
+    # and keeping them in one object keeps get_annotation a single read.
     #
     # The ingestor image is intentionally NOT handled here. jobs-manager
     # spawns each ingestion Job by the floating tag `images.ingestor.tag`
@@ -33,8 +90,15 @@ data:
     # regression a customer hit). Spawning by floating tag is revert-proof.
     #
     # First-tick contract: annotation missing → record the current registry
-    # digest WITHOUT restarting (no evidence of drift, no reason to churn
-    # pods).
+    # digest WITHOUT touching the workload (no evidence of drift, no reason to
+    # churn pods). #569 keeps this deliberately. Pinning on the first tick
+    # would rewrite `repo:tag` to `repo@digest` on every fresh install — a spec
+    # change, therefore a rollout, for byte-identical content, and for the
+    # resource-monitor DaemonSet that is a rollout across every node. The cost
+    # is that a freshly installed edge runs `repo:tag` until the first real
+    # digest change: still restart-safe offline (IfNotPresent), just not yet
+    # reproducible. Offline-safety is what #569 is fixing; reproducibility
+    # follows on the next upstream release.
     #
     # Parsing: awk/sed/grep + jq. jq used only where JSON-with-dotted-keys
     # or container/env-array filtering motivates it; the rest stays in pure
@@ -59,7 +123,31 @@ data:
     FLAP_KEY="tracebloc.io/refresh-flap-detected"
 
     log "release=$RELEASE_NAME namespace=$RELEASE_NAMESPACE deployment=$DEPLOYMENT_NAME"
-    log "  client images: tracebloc/{jobs-manager,pods-monitor} on docker.io under tag=$IMAGE_TAG"
+    log "  client images: tracebloc/{jobs-manager,pods-monitor,resource-monitor} on docker.io under tag=$IMAGE_TAG"
+    log "  also reconciling: deployment/${REQUESTS_PROXY_DEPLOYMENT} (jobs-manager image), daemonset/${RESOURCE_MONITOR_DAEMONSET} in ${NODE_AGENTS_NAMESPACE}"
+
+    # #569: a private-mirror install (global.imageRegistry) renders every pod
+    # image as <mirror>/tracebloc/... , but the digests resolved below come from
+    # docker.io. Writing a docker.io digest onto a mirror reference is not just
+    # wrong, it is BREAKING: the mirror may not hold that digest at all, so
+    # `set image` would pin the control plane to an unpullable ref. Under the
+    # old `rollout restart` this mismatch was merely useless (it restarted pods
+    # to re-pull the mirror's own tag); with `set image` it must fail closed.
+    #
+    # Exit 0, not 1: a mirror install has deliberately taken over image
+    # distribution, so "nothing to reconcile" is the correct steady state, not
+    # an error to page on. It is logged loudly rather than silently skipped —
+    # a green-forever CronJob that never does its job is the #571 failure mode.
+    # The CronJob is still RENDERED under a mirror (the alpine/k8s runner image
+    # is re-homed onto it, per global_image_registry_test.yaml); only the
+    # reconcile is inert.
+    if [ "$IMAGE_REGISTRY" != "docker.io" ]; then
+      log "NOTE: images are served from private mirror '${IMAGE_REGISTRY}' (global.imageRegistry), but this script resolves digests from docker.io."
+      log "      Pinning a docker.io digest onto a mirrored reference could pin an image the mirror does not hold, so auto-refresh is INERT on this edge."
+      log "      Update the control-plane images by syncing your mirror and restarting the workloads, or pin images.<image>.digest explicitly."
+      log "tick complete"
+      exit 0
+    fi
 
     # kubectl in the alpine/k8s image does NOT reliably auto-detect in-cluster
     # config in this Job's pod: with no kubeconfig on disk it falls back to
@@ -201,18 +289,26 @@ data:
     fi
 
     # =================================================================
-    # Pass 1 — class-1 images: jobs-manager + pods-monitor.
-    # docker.io, floating CLIENT_ENV tag, annotation-based source of
-    # truth, action = kubectl rollout restart.
+    # Pass 1 — the control-plane images: jobs-manager, pods-monitor,
+    # resource-monitor. docker.io, floating CLIENT_ENV tag,
+    # annotation-based source of truth, action = kubectl set image.
     # =================================================================
 
     restart_needed=0
     annotate_args=""
+    # `kubectl set image` argument lists, accumulated per WORKLOAD (a single
+    # `set image` call can carry several container=ref pairs, so the
+    # two-container jobs-manager Deployment is re-imaged in one patch and
+    # therefore one rollout, not two).
+    jm_set_args=""
+    rp_set_args=""
+    rm_set_args=""
 
     # Each entry: "<docker-hub-repo>|<annotation-key>|<pin-flag>".
     set -- \
       "tracebloc/jobs-manager|tracebloc.io/last-refreshed-jobs-manager-digest|${JOBS_MANAGER_PINNED}" \
-      "tracebloc/pods-monitor|tracebloc.io/last-refreshed-pods-monitor-digest|${PODS_MONITOR_PINNED}"
+      "tracebloc/pods-monitor|tracebloc.io/last-refreshed-pods-monitor-digest|${PODS_MONITOR_PINNED}" \
+      "tracebloc/resource-monitor|tracebloc.io/last-refreshed-resource-monitor-digest|${RESOURCE_MONITOR_PINNED}"
 
     for entry in "$@"; do
       repo="${entry%%|*}"
@@ -239,18 +335,52 @@ data:
       log "  recorded=${recorded:-<unset>}"
 
       if [ -z "$recorded" ]; then
-        # First-observation path: record without restarting. No evidence
-        # the running pod is on an older digest; a spurious restart on
-        # install would surprise operators.
-        log "  first observation; recording without restart"
+        # First-observation path: record without re-imaging. No evidence
+        # the running pod is on an older digest, and rewriting repo:tag to
+        # repo@digest for identical content would roll every pod on install
+        # (see the first-tick contract in the header).
+        log "  first observation; recording without re-imaging"
         annotate_args="$annotate_args ${key}=${latest}"
-      elif [ "$recorded" = "$latest" ]; then
-        log "  digest unchanged since last refresh; no-op"
-      else
-        log "  digest changed (${recorded} -> ${latest}); restart needed"
-        annotate_args="$annotate_args ${key}=${latest}"
-        restart_needed=1
+        continue
       fi
+
+      if [ "$recorded" = "$latest" ]; then
+        log "  digest unchanged since last refresh; no-op"
+        continue
+      fi
+
+      log "  digest changed (${recorded} -> ${latest}); re-image needed"
+      annotate_args="$annotate_args ${key}=${latest}"
+      restart_needed=1
+
+      # The reference we pin. IMAGE_REGISTRY is docker.io here — a mirror
+      # exits the tick far above — but render it from the variable so this
+      # stays honest if that guard is ever relaxed.
+      ref="${IMAGE_REGISTRY}/${repo}@${latest}"
+
+      # Map the image onto the workload+container(s) that run it. Container
+      # names are contractual with the templates; keep them in sync with
+      # jobs-manager-deployment.yaml, requests-proxy-deployment.yaml and
+      # resource-monitor-daemonset.yaml.
+      case "$repo" in
+        tracebloc/jobs-manager)
+          jm_set_args="$jm_set_args api=${ref}"
+          # requests-proxy runs this SAME image. It follows the jobs-manager
+          # digest unless the operator pinned it separately via
+          # images.requestsProxy.digest, which is a per-workload override.
+          if [ "$REQUESTS_PROXY_PINNED" = "1" ]; then
+            log "  requests-proxy is pinned by images.requestsProxy.digest; not following this digest"
+          else
+            rp_set_args="$rp_set_args proxy=${ref}"
+          fi
+          ;;
+        tracebloc/pods-monitor)
+          jm_set_args="$jm_set_args pods-monitor-container=${ref}"
+          ;;
+        tracebloc/resource-monitor)
+          rm_set_args="$rm_set_args tracebloc-resource-monitor=${ref}"
+          ;;
+      esac
     done
 
     # Order matters: rollout FIRST, annotate AFTER `rollout status`
@@ -277,7 +407,7 @@ data:
       # absent, so we can tell the two apart. On a read error we cannot confirm
       # we are clear to restart, so take the SAFE branch: skip this tick.
       if ! attempt="$(get_annotation "$ATTEMPT_KEY")"; then
-        log "  WARN: could not read ${ATTEMPT_KEY} annotation (kubectl/jq error); cannot confirm the rollout attempt count -- skipping the restart this tick rather than risk churning a flapping deployment. Will retry next tick."
+        log "  WARN: could not read ${ATTEMPT_KEY} annotation (kubectl/jq error); cannot confirm the rollout attempt count -- skipping the re-image this tick rather than risk churning a flapping workload. Will retry next tick."
         log "tick complete"
         exit 0
       fi
@@ -294,7 +424,7 @@ data:
         # monitoring via FLAP_KEY (value = the failure count) and leave the count
         # in place; refresh re-arms once someone clears the ${ATTEMPT_KEY}
         # annotation (or fixes the image so the next rollout settles).
-        log "  WARN: rollout for the current image digest(s) failed ${attempt} time(s) in a row (>= MAX_REFRESH_ATTEMPTS=${MAX_REFRESH_ATTEMPTS}) -- FLAP DETECTED. NOT restarting deployment/${DEPLOYMENT_NAME} (it becomes Ready then crashes; further restarts only churn ReplicaSets). MANUAL ATTENTION NEEDED: investigate the deployment, then clear its ${ATTEMPT_KEY} annotation to re-arm refresh."
+        log "  WARN: rollout for the current image digest(s) failed ${attempt} time(s) in a row (>= MAX_REFRESH_ATTEMPTS=${MAX_REFRESH_ATTEMPTS}) -- FLAP DETECTED. NOT re-imaging the control-plane workloads (a workload becomes Ready then crashes; retrying only churns ReplicaSets). MANUAL ATTENTION NEEDED: investigate deployment/${DEPLOYMENT_NAME}, deployment/${REQUESTS_PROXY_DEPLOYMENT} and daemonset/${RESOURCE_MONITOR_DAEMONSET}, then clear the ${ATTEMPT_KEY} annotation on deployment/${DEPLOYMENT_NAME} to re-arm refresh."
         kubectl annotate deployment -n "$RELEASE_NAMESPACE" "$DEPLOYMENT_NAME" \
           "${FLAP_KEY}=${attempt}" --overwrite --request-timeout=15s
         log "tick complete"
@@ -308,12 +438,51 @@ data:
       kubectl annotate deployment -n "$RELEASE_NAMESPACE" "$DEPLOYMENT_NAME" \
         "${ATTEMPT_KEY}=${new_count}" --overwrite --request-timeout=15s
 
-      log "rolling restart of deployment/${DEPLOYMENT_NAME} (attempt ${new_count}/${MAX_REFRESH_ATTEMPTS})"
-      kubectl rollout restart -n "$RELEASE_NAMESPACE" "deployment/${DEPLOYMENT_NAME}" \
-        --request-timeout=15s
-      kubectl rollout status  -n "$RELEASE_NAMESPACE" "deployment/${DEPLOYMENT_NAME}" \
-        --timeout="$ROLLOUT_TIMEOUT"
-      log "rollout complete"
+      log "re-imaging control-plane workloads (attempt ${new_count}/${MAX_REFRESH_ATTEMPTS})"
+
+      # `kubectl set image` per workload, each followed by its own
+      # `rollout status`. Under `set -e` a rollout that does not settle exits
+      # the tick here, leaving the incremented counter above in place — the
+      # #563 flap semantics are unchanged by the mechanism swap.
+      #
+      # `set image` is IDEMPOTENT in a way `rollout restart` never was: it
+      # writes a desired reference, so re-running it with the same digest is a
+      # no-op patch that triggers no rollout. A tick that dies partway (say
+      # resource-monitor fails after jobs-manager succeeded) can therefore be
+      # retried wholesale on the next tick without re-rolling the workloads
+      # that already landed.
+      #
+      # shellcheck disable=SC2086  # word-splitting the arg lists is intentional
+      if [ -n "$jm_set_args" ]; then
+        log "  set image deployment/${DEPLOYMENT_NAME}:${jm_set_args}"
+        kubectl set image -n "$RELEASE_NAMESPACE" "deployment/${DEPLOYMENT_NAME}" \
+          $jm_set_args --request-timeout=15s
+        kubectl rollout status -n "$RELEASE_NAMESPACE" "deployment/${DEPLOYMENT_NAME}" \
+          --timeout="$ROLLOUT_TIMEOUT"
+        log "  deployment/${DEPLOYMENT_NAME} rollout complete"
+      fi
+
+      if [ -n "$rp_set_args" ]; then
+        log "  set image deployment/${REQUESTS_PROXY_DEPLOYMENT}:${rp_set_args}"
+        kubectl set image -n "$RELEASE_NAMESPACE" "deployment/${REQUESTS_PROXY_DEPLOYMENT}" \
+          $rp_set_args --request-timeout=15s
+        kubectl rollout status -n "$RELEASE_NAMESPACE" "deployment/${REQUESTS_PROXY_DEPLOYMENT}" \
+          --timeout="$ROLLOUT_TIMEOUT"
+        log "  deployment/${REQUESTS_PROXY_DEPLOYMENT} rollout complete"
+      fi
+
+      if [ -n "$rm_set_args" ]; then
+        # Cross-namespace: the DaemonSet lives in the node-agents namespace,
+        # reachable via the second, narrower Role (see image-refresh-rbac.yaml).
+        log "  set image daemonset/${RESOURCE_MONITOR_DAEMONSET} in ${NODE_AGENTS_NAMESPACE}:${rm_set_args}"
+        kubectl set image -n "$NODE_AGENTS_NAMESPACE" "daemonset/${RESOURCE_MONITOR_DAEMONSET}" \
+          $rm_set_args --request-timeout=15s
+        kubectl rollout status -n "$NODE_AGENTS_NAMESPACE" "daemonset/${RESOURCE_MONITOR_DAEMONSET}" \
+          --timeout="$ROLLOUT_TIMEOUT"
+        log "  daemonset/${RESOURCE_MONITOR_DAEMONSET} rollout complete"
+      fi
+
+      log "re-image complete"
       # Success (settled rollout): reset the failure counter and clear any flap
       # marker so a future change starts fresh. #626 (CID 3729110045): do this in
       # its OWN bounded annotate BEFORE the digest record below -- do NOT batch it
@@ -352,8 +521,8 @@ spec:
   schedule: {{ .Values.imageRefresh.schedule | quote }}
   suspend: {{ .Values.imageRefresh.suspend }}
   # Forbid: never run two checks at once. A long rollout that crosses the
-  # next scheduled tick must not stack a second `rollout restart` on top
-  # of itself — that would orphan the in-flight rollout's new ReplicaSet.
+  # next scheduled tick must not stack a second re-image on top of itself —
+  # that would orphan the in-flight rollout's new ReplicaSet.
   concurrencyPolicy: Forbid
   successfulJobsHistoryLimit: {{ .Values.imageRefresh.successfulJobsHistoryLimit }}
   failedJobsHistoryLimit: {{ .Values.imageRefresh.failedJobsHistoryLimit }}
@@ -362,9 +531,10 @@ spec:
     spec:
       backoffLimit: 2
       # MUST exceed imageRefresh.rolloutTimeout (default 10m): a legitimate tick does
-      # `rollout restart` and then waits on `rollout status` for up to that long, so a
-      # deadline below it would kill the wait mid-flight and the post-success digest
-      # annotation would never land, causing later ticks to re-restart forever (#572).
+      # `set image` and then waits on `rollout status` for up to that long — and since
+      # #569 it may do so for up to THREE workloads in sequence — so a deadline below
+      # it would kill the wait mid-flight and the post-success digest annotation would
+      # never land, causing later ticks to re-issue the same re-image forever (#572).
       # This is only a backstop -- every API call is already --request-timeout-bounded;
       # it just caps the total wall-clock well above any sane rollout wait.
       activeDeadlineSeconds: 1800
@@ -407,6 +577,28 @@ spec:
                   value: {{ .Release.Namespace | quote }}
                 - name: DEPLOYMENT_NAME
                   value: {{ printf "%s-jobs-manager" .Release.Name | quote }}
+                # #569: the two additional workloads reconciled by `set image`.
+                - name: REQUESTS_PROXY_DEPLOYMENT
+                  value: {{ printf "%s-requests-proxy" .Release.Name | quote }}
+                - name: RESOURCE_MONITOR_DAEMONSET
+                  value: {{ include "tracebloc.resourceMonitorName" . | quote }}
+                - name: NODE_AGENTS_NAMESPACE
+                  value: {{ .Values.nodeAgents.namespace.name | quote }}
+                # The registry the chart renders into every pod image. The
+                # script resolves digests from docker.io only, so it goes inert
+                # when this is a private mirror rather than pinning a digest the
+                # mirror may not hold (see the guard at the top of the script).
+                #
+                # `| default "docker.io"` is NOT redundant with dig's default:
+                # values.yaml ships `global.imageRegistry: ""`, so the key EXISTS
+                # and dig returns the empty string rather than its fallback.
+                # Without the trailing default this renders "", the mirror guard
+                # below sees "" != "docker.io" and goes inert on every DEFAULT
+                # install — silently disabling refresh fleet-wide. The
+                # `tracebloc.image` helper handles the same trap with its own
+                # `| default "docker.io"`.
+                - name: IMAGE_REGISTRY
+                  value: {{ dig "imageRegistry" "docker.io" (.Values.global | default dict) | default "docker.io" | quote }}
                 - name: IMAGE_TAG
                   # RESOLVED, not raw. This is the tag the refresh pulls, so a
                   # documented alias here freezes the edge on a tag the publish
@@ -427,6 +619,17 @@ spec:
                   value: {{ ternary "1" "0" (not (empty (default dict (default dict .Values.images).jobsManager).digest)) | quote }}
                 - name: PODS_MONITOR_PINNED
                   value: {{ ternary "1" "0" (not (empty (default dict (default dict .Values.images).podsMonitor).digest)) | quote }}
+                # #569: resource-monitor is refreshed too. It counts as "pinned"
+                # (i.e. skip it) either when an operator set an explicit digest
+                # OR when `resourceMonitor: false` disables the DaemonSet
+                # entirely — with no workload to reconcile, attempting a
+                # cross-namespace `set image` would just fail the tick.
+                - name: RESOURCE_MONITOR_PINNED
+                  value: {{ ternary "1" "0" (or (eq .Values.resourceMonitor false) (not (empty (default dict (default dict .Values.images).resourceMonitor).digest))) | quote }}
+                # requests-proxy follows the jobs-manager digest by default;
+                # this flag is the per-workload override that opts it out.
+                - name: REQUESTS_PROXY_PINNED
+                  value: {{ ternary "1" "0" (not (empty (default dict (default dict .Values.images).requestsProxy).digest)) | quote }}
               securityContext:
                 allowPrivilegeEscalation: false
                 readOnlyRootFilesystem: true

@@ -24,10 +24,19 @@ spec:
         - name: proxy
           {{- $rpDigest := (dig "requestsProxy" "digest" "" .Values.images) }}
           image: {{ include "tracebloc.image" (dict "repository" "tracebloc/jobs-manager" "tag" (include "tracebloc.clientEnv" .) "digest" $rpDigest "registry" (dig "imageRegistry" "docker.io" (.Values.global | default dict))) | quote }}
-          # digest set -> repo@digest + IfNotPresent (restart-safe offline); empty ->
-          # repo:tag + Always. Was hardcoded Always, which ignored a pinned digest and
-          # re-pulled on every restart even when the image was already cached (#552).
-          imagePullPolicy: {{ if $rpDigest }}IfNotPresent{{ else }}Always{{ end }}
+          # #569: unconditionally IfNotPresent (was `Always` when no digest was
+          # pinned, and hardcoded `Always` before #552). `Always` re-pulled on every
+          # restart even when the image was already cached, so an offline
+          # Docker/WSL restart landed in ImagePullBackOff. Updates come from
+          # image-refresh pinning the digest with `kubectl set image`.
+          #
+          # This Deployment runs the SAME docker.io/tracebloc/jobs-manager image as
+          # the jobs-manager Deployment, and image-refresh now reconciles both to
+          # the same digest in one tick. Before #569 it reconciled only
+          # `<release>-jobs-manager`, so requests-proxy silently skewed: it stayed
+          # on the old build until some unrelated restart, then jumped to whatever
+          # the floating tag pointed at.
+          imagePullPolicy: IfNotPresent
           workingDir: /app
           command: ["python", "-m", "gunicorn"]
           args:

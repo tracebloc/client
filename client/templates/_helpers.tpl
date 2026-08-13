@@ -165,16 +165,18 @@ mysql-pvc
 
 {{/*
   Whether the image-refresh CronJob has anything to do. When ALL THREE
-  managed images (jobs-manager, pods-monitor, ingestor) are
+  managed images (jobs-manager, pods-monitor, resource-monitor) are
   digest-pinned, the operator has explicitly opted into reproducible
   pinning for every image this CronJob would refresh, so we render
   nothing — no CronJob, no RBAC, no ConfigMap. When at least one is
   unpinned, the CronJob is rendered and the script skips the pinned
   images at runtime via env flags.
 
-  Three pins because #158 added ingestor refresh on top of #154's
-  jobs-manager + pods-monitor. Keep this list in sync if more images
-  come under auto-refresh in future.
+  The three have changed over time: #154 started with jobs-manager +
+  pods-monitor, #158 added the ingestor, the floating-tag migration
+  retired the ingestor pass, and #569 brought resource-monitor under
+  refresh (it had no deliberate update path before). Keep this list in
+  sync if more images come under auto-refresh in future.
 
   Nil-guarded with `default dict` on every dereference: these are
   newer top-level keys, and a customer who runs
@@ -203,8 +205,18 @@ mysql-pvc
 */}}
 {{- $jmPinned := $jm.digest -}}
 {{- $pmPinned := $pm.digest -}}
+{{/*
+  #569: resource-monitor came under refresh too, so it joins the "nothing left
+  to do" test. requests-proxy deliberately does NOT: it runs the SAME
+  tracebloc/jobs-manager image and follows the jobs-manager digest, so
+  `$jmPinned` already covers it. (`images.requestsProxy.digest` remains an
+  operator override that pins requests-proxy alone; it is checked at runtime,
+  not here, because pinning only requests-proxy still leaves jobs-manager
+  itself to refresh.)
+*/}}
+{{- $rmPinned := (default dict $imgs.resourceMonitor).digest -}}
 {{- if not $ir.enabled -}}
-{{- else if and $jmPinned $pmPinned -}}
+{{- else if and $jmPinned $pmPinned $rmPinned -}}
 {{- else -}}
 true
 {{- end -}}

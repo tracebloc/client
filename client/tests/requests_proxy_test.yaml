@@ -79,14 +79,20 @@ tests:
           path: spec.template.spec.containers[0].image
           pattern: "^docker\\.io/tracebloc/jobs-manager[:@]"
 
-  - it: floats on the tag with imagePullPolicy Always when no digest is pinned (default)
+  # #569: still floats on the tag by default, but the pull policy is now
+  # IfNotPresent REGARDLESS of pinning. `Always` forced a registry round-trip on
+  # every restart, so an offline Docker/WSL restart landed in ImagePullBackOff
+  # with the image already cached. The update path moved to the image-refresh
+  # CronJob, which reconciles this Deployment to `repo@digest` with
+  # `kubectl set image` — a reference change the kubelet pulls on its own.
+  - it: floats on the tag with imagePullPolicy IfNotPresent when no digest is pinned (default)
     asserts:
       - matchRegex:
           path: spec.template.spec.containers[0].image
           pattern: "^docker\\.io/tracebloc/jobs-manager:"
       - equal:
           path: spec.template.spec.containers[0].imagePullPolicy
-          value: Always
+          value: IfNotPresent
 
   - it: pins repo@digest with imagePullPolicy IfNotPresent when a digest is set (#552)
     # Was hardcoded Always — a pinned digest was ignored for the pull policy, so a
