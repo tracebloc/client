@@ -505,16 +505,36 @@ _install_macos_autostart() {
     # honestly and say how to enable it later. Best-effort: the caller's `|| true` and
     # TB_MACOS_AUTOSTART staying unset keep the summary's reboot line truthful.
     if [[ -n "$_no_sudo" ]]; then
+      # ALREADY HANDLED? Tier 0 means someone else provisioned this box, so a
+      # previous ADMIN install may have left the boot daemon in place. Skipping
+      # the write is still correct (we hold no sudo), but reporting "start it
+      # yourself" would be false — autostart is configured, just not by us.
+      # Checked before the warn so a solved machine says nothing alarming.
+      local _dir="${TB_LAUNCHDAEMONS_DIR:-/Library/LaunchDaemons}"
+      if [[ -f "$_dir/${label}.plist" ]]; then
+        log "Headless Tier 0: boot LaunchDaemon ${label} is already installed; autostart needs nothing from us."
+        TB_MACOS_AUTOSTART=1
+        return 0
+      fi
       warn "Headless reboot autostart needs a system LaunchDaemon (admin/root); this no-admin (Tier 0) install won't prompt for a password, so it's skipped."
-      hint "To get auto-restart after a reboot: run 'colima start' yourself after boot, or re-run this installer from an administrator account to install the boot LaunchDaemon."
+      # NAME A COMMAND ONLY IF IT IS ACTUALLY HERE. The privileged path below
+      # resolves colima the same way and softens to a generic message when it is
+      # absent (#430 Bugbot); this path named `colima start` unconditionally,
+      # which on a non-colima headless runtime is a command that does not exist.
+      local _colima; _colima="$(command -v colima 2>/dev/null || true)"
+      if [[ -n "$_colima" ]]; then
+        hint "To get auto-restart after a reboot: run 'colima start' yourself after boot, or re-run this installer from an administrator account to install the boot LaunchDaemon."
+        TB_MACOS_MANUAL_RUNTIME_CMD="colima start"
+      else
+        hint "To get auto-restart after a reboot: start your Docker runtime manually after boot, or re-run this installer from an administrator account to install the boot LaunchDaemon."
+      fi
       # Tell the summary WHICH manual recovery applies (Bugbot, client#704).
       # Leaving only TB_MACOS_AUTOSTART unset is not enough: _reboot_note's
       # not-configured branch is the macOS/Windows GUI fallback and says "open
       # Docker Desktop", which on a headless Mac names a runtime that is not
-      # here and an action there is no GUI to perform — and contradicts the
-      # `colima start` hint printed three lines above. Since that footer is the
-      # LAST line of a successful install, it is the advice the operator
-      # actually leaves with.
+      # here and an action there is no GUI to perform — and contradicts the hint
+      # printed just above. That footer is the LAST line of a successful
+      # install, so it is the advice the operator actually leaves with.
       TB_MACOS_HEADLESS_NO_AUTOSTART=1
       return 1
     fi

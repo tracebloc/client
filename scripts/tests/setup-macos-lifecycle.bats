@@ -367,12 +367,25 @@ _tier0_mocks() {
 # the operator to open Docker Desktop: a runtime that is not what runs here, an
 # action there is no desktop to perform, and a direct contradiction of the
 # `colima start` hint the skip prints (Bugbot, client#704).
-@test "_reboot_note: headless Tier 0 -> names colima, not Docker Desktop (Bugbot #704)" {
+@test "_reboot_note: headless Tier 0 -> names the resolved runtime, not Docker Desktop (Bugbot #704)" {
   OS=Darwin; TB_MACOS_AUTOSTART=0; TB_MACOS_HEADLESS_NO_AUTOSTART=1
+  TB_MACOS_MANUAL_RUNTIME_CMD="colima start"
   run _reboot_note
   [[ "$output" == *"colima start"* ]] || return 1
   [[ "$output" != *"open Docker Desktop"* ]] || return 1
   [[ "$output" != *"restarts automatically"* ]] || return 1   # nothing was configured
+}
+
+# The command is NOT hardcoded in the summary: naming a binary that isn't on the
+# host is the same defect as naming Docker Desktop, just in the other direction
+# (Bugbot, client#704). With no runtime resolved the footer stays generic.
+@test "_reboot_note: headless Tier 0 with no resolved runtime -> generic, names nothing (Bugbot #704)" {
+  OS=Darwin; TB_MACOS_AUTOSTART=0; TB_MACOS_HEADLESS_NO_AUTOSTART=1
+  unset TB_MACOS_MANUAL_RUNTIME_CMD
+  run _reboot_note
+  [[ "$output" == *"start your Docker runtime"* ]] || return 1
+  [[ "$output" != *"colima"* ]] || return 1
+  [[ "$output" != *"open Docker Desktop"* ]] || return 1
 }
 
 @test "_reboot_note: a configured autostart still wins over the headless marker (#704)" {
@@ -388,13 +401,57 @@ _tier0_mocks() {
 # is unreachable in production and both tests are theatre.
 @test "_install_macos_autostart no-sudo: headless skip sets the summary marker (#704)" {
   TRACEBLOC_NO_AUTOSTART=""
+  TB_LAUNCHDAEMONS_DIR="$BATS_TEST_TMPDIR/LaunchDaemons"   # no pre-existing daemon
+  mkdir -p "$BATS_TEST_TMPDIR/bin"; printf '#!/bin/sh\n' > "$BATS_TEST_TMPDIR/bin/colima"
+  chmod +x "$BATS_TEST_TMPDIR/bin/colima"; PATH="$BATS_TEST_TMPDIR/bin:$PATH"   # colima present
   _has_gui_session() { return 1; }          # headless
-  unset TB_MACOS_HEADLESS_NO_AUTOSTART
+  unset TB_MACOS_HEADLESS_NO_AUTOSTART TB_MACOS_MANUAL_RUNTIME_CMD
   run_out="$(_install_macos_autostart no-sudo 2>&1)" || true
   [[ "$run_out" == *"colima start"* ]] || return 1
   # Re-run in THIS shell so the global assignment is observable.
   _install_macos_autostart no-sudo >/dev/null 2>&1 || true
   [ "${TB_MACOS_HEADLESS_NO_AUTOSTART:-0}" = "1" ] || return 1
+  [ "${TB_MACOS_MANUAL_RUNTIME_CMD:-}" = "colima start" ] || return 1
+}
+
+# colima is the usual headless runtime but not a given. The privileged path just
+# below already softens to a generic message when it is absent; this path used to
+# name `colima start` unconditionally (Bugbot + @saadqbal, client#704).
+@test "_install_macos_autostart no-sudo: headless without colima names no command (#704)" {
+  TRACEBLOC_NO_AUTOSTART=""
+  TB_LAUNCHDAEMONS_DIR="$BATS_TEST_TMPDIR/LaunchDaemons"
+  # Make ONLY colima unresolvable. Emptying PATH would also take out `date` (via
+  # log) and turn this into a test of the harness rather than of the branch.
+  command() {
+    if [ "$1" = "-v" ] && [ "$2" = "colima" ]; then return 1; fi
+    builtin command "$@"
+  }
+  _has_gui_session() { return 1; }
+  unset TB_MACOS_HEADLESS_NO_AUTOSTART TB_MACOS_MANUAL_RUNTIME_CMD
+  run_out="$(_install_macos_autostart no-sudo 2>&1)" || true
+  [[ "$run_out" != *"colima start"* ]] || return 1
+  [[ "$run_out" == *"start your Docker runtime manually"* ]] || return 1
+  _install_macos_autostart no-sudo >/dev/null 2>&1 || true
+  [ "${TB_MACOS_HEADLESS_NO_AUTOSTART:-0}" = "1" ] || return 1
+  [ -z "${TB_MACOS_MANUAL_RUNTIME_CMD:-}" ] || return 1
+}
+
+# Tier 0 means someone else provisioned the box, so a previous ADMIN install may
+# already have left the boot daemon. Telling that operator to start the runtime
+# by hand is false — autostart is configured, just not by us (Bugbot, client#704).
+@test "_install_macos_autostart no-sudo: an existing boot daemon is reported, not re-skipped (#704)" {
+  TRACEBLOC_NO_AUTOSTART=""
+  TB_LAUNCHDAEMONS_DIR="$BATS_TEST_TMPDIR/LaunchDaemons"; mkdir -p "$TB_LAUNCHDAEMONS_DIR"
+  : > "$TB_LAUNCHDAEMONS_DIR/io.tracebloc.runtime.plist"   # a prior admin install
+  _has_gui_session() { return 1; }
+  sudo() { record "sudo $*"; "$@"; }
+  unset TB_MACOS_HEADLESS_NO_AUTOSTART; TB_MACOS_AUTOSTART=0
+  _install_macos_autostart no-sudo >/dev/null 2>&1
+  [ "$?" -eq 0 ] || return 1                                  # nothing to do, not a failure
+  [ "${TB_MACOS_AUTOSTART:-0}" = "1" ] || return 1            # summary may promise auto-restart
+  [ "${TB_MACOS_HEADLESS_NO_AUTOSTART:-0}" = "0" ] || return 1
+  run mock_calls
+  [[ "$output" != *"sudo"* ]] || return 1                     # still zero sudo
 }
 
 @test "_install_macos_autostart no-sudo: a GUI session does not set the headless marker (#704)" {

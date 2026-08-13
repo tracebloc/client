@@ -119,9 +119,17 @@ _reboot_note() {
       # password (setup-macos.sh, client#704). The generic branch below is the
       # GUI fallback and would say "open Docker Desktop" — a runtime that is not
       # what runs here and an action there is no desktop to perform, directly
-      # contradicting the `colima start` hint the skip already printed. Name the
-      # recovery that actually works on this box.
-      echo -e "  ${DIM}After a reboot, run 'colima start' to bring tracebloc back.${RESET}"
+      # contradicting the hint the skip already printed.
+      #
+      # The COMMAND comes from the skip site, which resolved it against this
+      # host, rather than being hardcoded here: on a headless Mac the runtime is
+      # usually colima but not always, and naming a binary that is not installed
+      # is the same defect in the opposite direction (Bugbot, client#704).
+      if [[ -n "${TB_MACOS_MANUAL_RUNTIME_CMD:-}" ]]; then
+        echo -e "  ${DIM}After a reboot, run '${TB_MACOS_MANUAL_RUNTIME_CMD}' to bring tracebloc back.${RESET}"
+      else
+        echo -e "  ${DIM}After a reboot, start your Docker runtime to bring tracebloc back.${RESET}"
+      fi
     else
       # macOS/Windows fallback: Docker Desktop owns boot autostart and must be launched.
       echo -e "  ${DIM}After a reboot, open Docker Desktop to bring tracebloc back.${RESET}"
