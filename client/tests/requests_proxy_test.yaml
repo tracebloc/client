@@ -194,3 +194,46 @@ tests:
           content:
             name: TB_INGEST_USER
             value: "tb_ingest"
+
+  # #569 (Bugbot): requests-proxy runs the jobs-manager image, so pinning
+  # jobs-manager must pin the proxy too. Before this fallback, pinning
+  # jobs-manager alone left the proxy on the floating tag AND made image-refresh
+  # skip it (pinned images are skipped), so it froze on the tag forever while
+  # jobs-manager ran the pin — a different build of the same image, which is the
+  # exact skew #569 exists to close.
+  - it: follows images.jobsManager.digest when requestsProxy.digest is unset (#569)
+    set:
+      images:
+        jobsManager:
+          digest: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].image
+          value: docker.io/tracebloc/jobs-manager@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+      - equal:
+          path: spec.template.spec.containers[0].imagePullPolicy
+          value: IfNotPresent
+
+  - it: requestsProxy.digest overrides the jobsManager digest (per-workload pin)
+    set:
+      images:
+        jobsManager:
+          digest: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        requestsProxy:
+          digest: "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].image
+          value: docker.io/tracebloc/jobs-manager@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+
+  - it: still renders (no nil-pointer) when the images block is entirely absent
+    # --reuse-values replay from a release predating these keys.
+    set:
+      images: null
+    asserts:
+      - matchRegex:
+          path: spec.template.spec.containers[0].image
+          pattern: "^docker\\.io/tracebloc/jobs-manager:"
+      - equal:
+          path: spec.template.spec.containers[0].imagePullPolicy
+          value: IfNotPresent

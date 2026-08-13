@@ -213,6 +213,14 @@ mysql-pvc
   operator override that pins requests-proxy alone; it is checked at runtime,
   not here, because pinning only requests-proxy still leaves jobs-manager
   itself to refresh.)
+
+  "Follows the jobs-manager digest" is only true because
+  requests-proxy-deployment.yaml FALLS BACK to `images.jobsManager.digest` when
+  its own key is empty. Without that fallback this test is a silent trap
+  (Bugbot): retiring the CronJob here on a jobs-manager pin would leave the
+  proxy rendering the floating tag with nothing left to reconcile it, running a
+  different build of the same image forever. If that fallback is ever removed,
+  requests-proxy must get its own entry in this test.
 */}}
 {{- $rmPinned := (default dict $imgs.resourceMonitor).digest -}}
 {{- if not $ir.enabled -}}

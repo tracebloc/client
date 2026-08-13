@@ -22,7 +22,25 @@ spec:
           type: RuntimeDefault
       containers:
         - name: proxy
-          {{- $rpDigest := (dig "requestsProxy" "digest" "" .Values.images) }}
+          {{- $rpImages := (.Values.images | default dict) }}
+          {{- /*
+            #569 (Bugbot): requests-proxy runs the jobs-manager IMAGE, so it must
+            follow the jobs-manager pin. `images.requestsProxy.digest` stays an
+            explicit per-workload override; when it is empty we fall back to
+            `images.jobsManager.digest`.
+
+            Without this fallback, pinning jobs-manager ALONE was a silent trap:
+            this Deployment kept rendering the floating `repo:tag` while
+            jobs-manager ran the pinned digest, AND image-refresh skips pinned
+            images — so it never wrote a `set image` for the proxy either. The
+            proxy froze on the tag indefinitely, running a different build of the
+            same image than jobs-manager. That is precisely the skew this change
+            set out to close, re-introduced through the pinning path.
+
+            Nil-guarded on `.Values.images` for --reuse-values replays predating
+            these keys.
+          */}}
+          {{- $rpDigest := (dig "requestsProxy" "digest" "" $rpImages) | default (dig "jobsManager" "digest" "" $rpImages) }}
           image: {{ include "tracebloc.image" (dict "repository" "tracebloc/jobs-manager" "tag" (include "tracebloc.clientEnv" .) "digest" $rpDigest "registry" (dig "imageRegistry" "docker.io" (.Values.global | default dict))) | quote }}
           # #569: unconditionally IfNotPresent (was `Always` when no digest was
           # pinned, and hardcoded `Always` before #552). `Always` re-pulled on every

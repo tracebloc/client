@@ -530,14 +530,24 @@ spec:
   jobTemplate:
     spec:
       backoffLimit: 2
-      # MUST exceed imageRefresh.rolloutTimeout (default 10m): a legitimate tick does
-      # `set image` and then waits on `rollout status` for up to that long — and since
-      # #569 it may do so for up to THREE workloads in sequence — so a deadline below
-      # it would kill the wait mid-flight and the post-success digest annotation would
-      # never land, causing later ticks to re-issue the same re-image forever (#572).
-      # This is only a backstop -- every API call is already --request-timeout-bounded;
-      # it just caps the total wall-clock well above any sane rollout wait.
-      activeDeadlineSeconds: 1800
+      # MUST exceed (number of reconciled workloads) x imageRefresh.rolloutTimeout.
+      # A legitimate tick does `set image` and then waits on `rollout status` for up
+      # to rolloutTimeout — and since #569 it may do so for up to THREE workloads IN
+      # SEQUENCE (jobs-manager, requests-proxy, resource-monitor).
+      #
+      # This was a hardcoded 1800 (30m), which with the default 10m rolloutTimeout is
+      # EXACTLY 3 x 10m — zero headroom (Bugbot). Blowing the deadline is not a benign
+      # timeout: the Job is killed mid-wait, so under `set -e` the post-success
+      # annotate never runs, the digest record never advances, and the
+      # `refresh-attempt` counter stays incremented. Three such ticks trip the #563
+      # flap lockout on the SHARED counter, which stops refresh for ALL control-plane
+      # images at once — while the CronJob looks healthy from outside.
+      #
+      # Now a value, defaulting to 3600 (60m) = 3 x the default rolloutTimeout plus
+      # 100% slack. An operator who raises rolloutTimeout must raise this too; the
+      # schema and values.yaml say so. Still only a backstop — every API call is
+      # already --request-timeout-bounded.
+      activeDeadlineSeconds: {{ .Values.imageRefresh.activeDeadlineSeconds | default 3600 }}
       template:
         metadata:
           labels:

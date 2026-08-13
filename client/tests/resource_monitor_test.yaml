@@ -120,3 +120,20 @@ tests:
       - equal:
           path: metadata.name
           value: tenant-d-prod-resource-monitor
+
+  - it: rolls wider than one node at a time so refresh can wait on it (#569, Bugbot)
+    # #569 made this DaemonSet a `set image` target and the refresh tick blocks on
+    # `rollout status` for up to rolloutTimeout (10m). Kubernetes' default
+    # maxUnavailable: 1 converges in (nodes x pull+start), which blows that wait on
+    # a multi-node cluster long before the image is bad — failing the tick, freezing
+    # the digest record, and tripping the shared flap lockout. Safe to widen: this is
+    # a read-only node metrics reader, so a briefly absent pod degrades scheduling
+    # telemetry and nothing else.
+    template: templates/resource-monitor-daemonset.yaml
+    asserts:
+      - equal:
+          path: spec.updateStrategy.type
+          value: RollingUpdate
+      - equal:
+          path: spec.updateStrategy.rollingUpdate.maxUnavailable
+          value: "10%"

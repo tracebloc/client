@@ -670,3 +670,29 @@ tests:
       - matchRegex:
           path: data["image-refresh.sh"]
           pattern: "pods-monitor-container="
+
+  - it: the Job budget covers three sequential rollouts (#569, Bugbot)
+    # activeDeadlineSeconds MUST exceed 3 x rolloutTimeout: a tick re-images
+    # jobs-manager, requests-proxy and the resource-monitor DaemonSet in sequence
+    # and blocks on each. It was a hardcoded 1800, which with the default 10m
+    # rolloutTimeout is EXACTLY 3 x 10m — no headroom. Blowing it kills the Job
+    # mid-wait, so the annotate never lands, the recorded digest never advances,
+    # and three such ticks trip the shared flap lockout for every control-plane
+    # image at once while the CronJob still looks healthy.
+    template: templates/image-refresh-cronjob.yaml
+    documentIndex: 1
+    asserts:
+      - equal:
+          path: spec.jobTemplate.spec.activeDeadlineSeconds
+          value: 3600
+
+  - it: activeDeadlineSeconds is operator-overridable
+    template: templates/image-refresh-cronjob.yaml
+    documentIndex: 1
+    set:
+      imageRefresh:
+        activeDeadlineSeconds: 5400
+    asserts:
+      - equal:
+          path: spec.jobTemplate.spec.activeDeadlineSeconds
+          value: 5400

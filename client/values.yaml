@@ -887,10 +887,27 @@ imageRefresh:
   # against the 100/6h anonymous pull-rate limit (2 images × 4/hr = 8/hr,
   # well under the cap even shared with other workloads on the same IP).
   schedule: "7,22,37,52 * * * *"
-  # `kubectl rollout status --timeout`. Generous; jobs-manager image pulls
-  # on bare-metal first-boot can take minutes, and the CronJob slot
-  # shouldn't hold all night if a rollout genuinely wedges.
+  # `kubectl rollout status --timeout`, applied PER WORKLOAD. Generous;
+  # jobs-manager image pulls on bare-metal first-boot can take minutes, and
+  # the CronJob slot shouldn't hold all night if a rollout genuinely wedges.
+  #
+  # RAISING THIS MEANS RAISING activeDeadlineSeconds BELOW — since #569 a tick
+  # can wait on up to THREE workloads in sequence, so the Job's total budget
+  # must stay above 3 x this value.
   rolloutTimeout: "10m"
+  # Job-level wall-clock backstop (CronJob jobTemplate.spec.activeDeadlineSeconds).
+  # MUST exceed 3 x rolloutTimeout: a tick re-images jobs-manager, requests-proxy
+  # and the resource-monitor DaemonSet in sequence, waiting on each.
+  #
+  # This was a hardcoded 1800 (30m). With the default 10m rolloutTimeout that is
+  # EXACTLY 3 x 10m, i.e. no headroom at all. Blowing the deadline is not a benign
+  # timeout: the Job is killed mid-wait, so the post-success annotate never runs,
+  # the recorded digest never advances, and the shared `refresh-attempt` counter
+  # stays incremented. Three such ticks trip the flap lockout for EVERY
+  # control-plane image at once, while the CronJob still looks healthy.
+  #
+  # 3600 (60m) = 3 x the default rolloutTimeout plus 100% slack.
+  activeDeadlineSeconds: 3600
   # #563: consecutive failed rollout attempts after which the refresh STOPS
   # re-restarting and flags the deployment for a human. A deployment whose
   # readiness FLAPS (becomes Ready, then crashes after warmup near the

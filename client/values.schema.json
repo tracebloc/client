@@ -1059,6 +1059,12 @@
           "pattern": "^[0-9]+(s|m|h)$",
           "description": "Passed to `kubectl rollout status --timeout`. Allow headroom for bare-metal image pull."
         },
+        "activeDeadlineSeconds": {
+          "type": "integer",
+          "minimum": 60,
+          "default": 3600,
+          "description": "CronJob jobTemplate.spec.activeDeadlineSeconds. MUST exceed 3 x rolloutTimeout: since #569 a tick re-images jobs-manager, requests-proxy and the resource-monitor DaemonSet in sequence, waiting on each. Blowing the deadline kills the Job mid-wait, so the digest annotation never advances and the shared refresh-attempt counter trips the flap lockout for every control-plane image at once."
+        },
         "maxRefreshAttempts": {
           "type": "integer",
           "minimum": 1,

@@ -28,6 +28,25 @@ spec:
   selector:
     matchLabels:
       app: {{ include "tracebloc.resourceMonitorName" . }}
+  # #569 (Bugbot): #569 made this DaemonSet a `kubectl set image` target, and the
+  # refresh tick then BLOCKS on `rollout status` for up to imageRefresh.rolloutTimeout
+  # (10m). The Kubernetes default is maxUnavailable: 1 — strictly one node at a time —
+  # so on a multi-node cluster a single digest change takes (nodes x pull+start time)
+  # to converge and blows that wait long before the image is bad. The tick then fails,
+  # the digest annotation never advances, and three of those trip the #563 flap lockout
+  # for every control-plane image, not just this one.
+  #
+  # 10% widens the wave enough that rollout time scales with the cluster instead of
+  # with node COUNT, while never taking out more than a tenth of the fleet's metrics
+  # collection at once. Safe here specifically because resource-monitor is a read-only
+  # node metrics reader: a node without it briefly reports no utilisation, which
+  # degrades scheduling telemetry and nothing else — no training pod, ingestion Job, or
+  # control-plane request depends on it being present. Kubernetes rounds 10% DOWN and
+  # floors it at 1, so small clusters keep exactly today's one-at-a-time behaviour.
+  updateStrategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: "10%"
   template:
     metadata:
       labels:
