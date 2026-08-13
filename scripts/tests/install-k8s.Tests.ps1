@@ -426,8 +426,12 @@ Describe "Resume-after-reboot wiring (#420 source guards)" {
     $script:PSRC | Should -Not -Match "Set-StageComplete"
     $script:PSRC | Should -Not -Match "function Add-CompletedStage"
   }
-  It "gates the fast nothing-to-do path on tools + running cluster + HEALTHY client" {
-    $script:PSRC | Should -Match '\$script:InstallState\.completed -and \(Test-ToolsPresent\) -and \(Test-ClusterRunning\) -and \(Test-ClientHealthy\)'
+  It "gates the fast nothing-to-do path on tools + a CURRENT CLI + running cluster + HEALTHY client" {
+    # Test-TraceblocCliCurrent is load-bearing here (client#707): Test-ToolsPresent
+    # covers docker/kubectl/k3d/helm only, so without it the fast path shortcuts
+    # past Install-TraceblocCli and the CLI is never updated — nor even retried on
+    # a machine where its (non-fatal) install had failed.
+    $script:PSRC | Should -Match '\$script:InstallState\.completed -and \(Test-ToolsPresent\) -and \(Test-TraceblocCliCurrent\) -and \(Test-ClusterRunning\) -and \(Test-ClientHealthy\)'
     $script:PSRC | Should -Match 'already installed and the client is healthy -- nothing to do'
   }
   It "names the ACTUAL state-file path in the force-reinstall hint (honours HOST_DATA_DIR)" {
@@ -938,6 +942,59 @@ Describe "Install-TraceblocCli" {
     Mock Has { $true }    # a CLI is already present, but the installer failed…
     $out = Install-TraceblocCli 6>&1 | Out-String
     $out | Should -Match "Couldn't install the tracebloc CLI"   # …so it must still warn
+  }
+}
+
+Describe "Test-TraceblocCliCurrent" {
+  # client#707. The fast path gates on Test-ToolsPresent, which covers
+  # docker/kubectl/k3d/helm and NOT the CLI — so a stale CLI was invisible and a
+  # machine whose CLI install failed (it is non-fatal) was marked completed and
+  # never retried. This predicate is what puts the CLI back in that gate, both
+  # for presence and for version.
+
+  It "a CLI below the floor is not current -> fast path must fall through" {
+    Mock Has { $true }
+    Mock tracebloc { "tracebloc 0.5.1 (windows/amd64)" }   # the field version
+    Test-TraceblocCliCurrent | Should -BeFalse
+  }
+
+  It "a CLI at the floor is current" {
+    Mock Has { $true }
+    Mock tracebloc { "tracebloc 0.10.0 (windows/amd64)" }
+    Test-TraceblocCliCurrent | Should -BeTrue
+  }
+
+  It "a CLI above the floor is current" {
+    Mock Has { $true }
+    Mock tracebloc { "tracebloc 0.10.6 (windows/amd64)" }
+    Test-TraceblocCliCurrent | Should -BeTrue
+  }
+
+  # 9 vs 10: a string comparison would call 0.9.9 newer than 0.10.0.
+  It "orders 0.9.9 below 0.10.0 numerically, not lexically" {
+    Mock Has { $true }
+    Mock tracebloc { "tracebloc 0.9.9 (windows/amd64)" }
+    Test-TraceblocCliCurrent | Should -BeFalse
+  }
+
+  # The Windows-only hole: absent entirely, yet `completed` can still be true.
+  It "a MISSING CLI is not current -> no longer fast-paths past the install" {
+    Mock Has { $false }
+    Test-TraceblocCliCurrent | Should -BeFalse
+  }
+
+  # Fail OPEN — an unreadable version is not evidence of staleness, and churning
+  # a reinstall on every run would be worse than the staleness.
+  It "an unreadable version is treated as current (no reinstall churn)" {
+    Mock Has { $true }
+    Mock tracebloc { "tracebloc (unknown build)" }
+    Test-TraceblocCliCurrent | Should -BeTrue
+  }
+
+  It "a CLI that errors on 'version' is treated as current" {
+    Mock Has { $true }
+    Mock tracebloc { throw "boom" }
+    Test-TraceblocCliCurrent | Should -BeTrue
   }
 }
 

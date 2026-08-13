@@ -116,7 +116,7 @@ spec:
           mountPath: /var/lib/mysql/
           readOnly: true
       containers:
-      - image: {{ include "tracebloc.image" (dict "repository" "tracebloc/mysql-client" "tag" (.Values.images.mysqlClient.tag | default "prod") "digest" .Values.images.mysqlClient.digest "registry" (dig "imageRegistry" "docker.io" (.Values.global | default dict))) | quote }}
+      - image: {{ include "tracebloc.image" (dict "repository" (.Values.images.mysqlClient.repository | default "tracebloc/mysql-client") "tag" (.Values.images.mysqlClient.tag | default "prod") "digest" .Values.images.mysqlClient.digest "registry" (dig "imageRegistry" "docker.io" (.Values.global | default dict))) | quote }}
         imagePullPolicy: IfNotPresent
         name: mysql-client
         securityContext:

@@ -77,6 +77,33 @@ tests:
             resources: ["pods", "pods/log", "events"]
             verbs: ["get", "list", "watch"]
 
+  # backend#1876: the GPU->CPU pending fallback needs list nodes. `nodes` is
+  # cluster-scoped, so it must be in the ClusterRole and CANNOT be in the
+  # namespaced Role — assert both.
+  - it: ClusterRole grants list on nodes for the GPU->CPU fallback (backend#1876)
+    set:
+      clusterScope: true
+    documentIndex: 1
+    asserts:
+      - contains:
+          path: rules
+          content:
+            apiGroups: [""]
+            resources: ["nodes"]
+            verbs: ["list"]
+
+  - it: namespaced Role does not (cannot) grant nodes (backend#1876)
+    set:
+      clusterScope: false
+    documentIndex: 1
+    asserts:
+      - notContains:
+          path: rules
+          content:
+            apiGroups: [""]
+            resources: ["nodes"]
+            verbs: ["list"]
+
   # RFC-0003 D10 (backend#1181): the Secret-delete verb the jobs-manager
   # revoke/sweep path needs must be flag-gated + secrets-only (Saqlain review).
   - it: default-off grants no delete on configmaps/secrets (byte-for-byte)

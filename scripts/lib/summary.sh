@@ -114,6 +114,22 @@ _reboot_note() {
       # installs a system LaunchDaemon (not a login item), so "login item" would mislead IT
       # on a headless box (#430 Bugbot).
       echo -e "  ${DIM}After a reboot, tracebloc restarts automatically.${RESET}"
+    elif [[ "${TB_MACOS_HEADLESS_NO_AUTOSTART:-0}" == "1" ]]; then
+      # Headless Tier 0 skipped the boot LaunchDaemon rather than prompt for a
+      # password (setup-macos.sh, client#704). The generic branch below is the
+      # GUI fallback and would say "open Docker Desktop" — a runtime that is not
+      # what runs here and an action there is no desktop to perform, directly
+      # contradicting the hint the skip already printed.
+      #
+      # The COMMAND comes from the skip site, which resolved it against this
+      # host, rather than being hardcoded here: on a headless Mac the runtime is
+      # usually colima but not always, and naming a binary that is not installed
+      # is the same defect in the opposite direction (Bugbot, client#704).
+      if [[ -n "${TB_MACOS_MANUAL_RUNTIME_CMD:-}" ]]; then
+        echo -e "  ${DIM}After a reboot, run '${TB_MACOS_MANUAL_RUNTIME_CMD}' to bring tracebloc back.${RESET}"
+      else
+        echo -e "  ${DIM}After a reboot, start your Docker runtime to bring tracebloc back.${RESET}"
+      fi
     else
       # macOS/Windows fallback: Docker Desktop owns boot autostart and must be launched.
       echo -e "  ${DIM}After a reboot, open Docker Desktop to bring tracebloc back.${RESET}"

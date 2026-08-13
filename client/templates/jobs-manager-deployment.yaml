@@ -151,7 +151,15 @@ spec:
       containers:
       - name: api
         image: {{ include "tracebloc.image" (dict "repository" "tracebloc/jobs-manager" "tag" (include "tracebloc.clientEnv" .) "digest" .Values.images.jobsManager.digest "registry" (dig "imageRegistry" "docker.io" (.Values.global | default dict))) | quote }}
-        imagePullPolicy: {{ if .Values.images.jobsManager.digest }}IfNotPresent{{ else }}Always{{ end }}
+        # #569: IfNotPresent wherever an update path exists without `Always` --
+        # a pinned digest, or the image-refresh reconcile. `Always` forced a
+        # registry round-trip on every (re)start, so an offline Docker Desktop /
+        # WSL2 restart landed in ImagePullBackOff even though containerd already
+        # had the image cached. See tracebloc.controlPlanePullPolicy for why this
+        # is NOT unconditional: on an edge the reconcile cannot reach (private
+        # mirror, or imageRefresh disabled) a floating tag plus a restart is the
+        # only update path there is, so it stays Always.
+        imagePullPolicy: {{ include "tracebloc.controlPlanePullPolicy" (dict "digest" .Values.images.jobsManager.digest "root" $) }}
         securityContext:
           allowPrivilegeEscalation: false
           capabilities:
@@ -449,7 +457,9 @@ spec:
         {{- end }}
       - name: pods-monitor-container
         image: {{ include "tracebloc.image" (dict "repository" "tracebloc/pods-monitor" "tag" (include "tracebloc.clientEnv" .) "digest" .Values.images.podsMonitor.digest "registry" (dig "imageRegistry" "docker.io" (.Values.global | default dict))) | quote }}
-        imagePullPolicy: {{ if .Values.images.podsMonitor.digest }}IfNotPresent{{ else }}Always{{ end }}
+        # #569: same policy as the api container above -- see
+        # tracebloc.controlPlanePullPolicy.
+        imagePullPolicy: {{ include "tracebloc.controlPlanePullPolicy" (dict "digest" .Values.images.podsMonitor.digest "root" $) }}
         securityContext:
           allowPrivilegeEscalation: false
           capabilities:

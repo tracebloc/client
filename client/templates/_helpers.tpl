@@ -164,17 +164,65 @@ mysql-pvc
 {{- end }}
 
 {{/*
+  Name for the image-refresh Role + RoleBinding in the NODE-AGENTS namespace
+  (#569). DISTINCT from tracebloc.imageRefreshName on purpose.
+
+  `nodeAgents.namespace.name` pointing back at the release namespace is a
+  supported layout — node-agents-namespace.yaml documents it and explicitly
+  skips creating the Namespace in that case. Reusing the release-namespace name
+  here collided with it: two Roles and two RoleBindings with the SAME name in
+  the SAME namespace. Helm either refuses the release or the later
+  DaemonSet-only Role overwrites the deployments Role, at which point
+  image-refresh silently loses patch on jobs-manager and requests-proxy — and
+  since those pods now render IfNotPresent, they would have no update path left
+  at all (Bugbot, High).
+
+  A separate name is correct in BOTH layouts: split namespaces get one Role
+  each, and the collapsed layout gets two complementary Roles (deployments,
+  daemonsets) bound to the same ServiceAccount, which is exactly the intended
+  grant.
+*/}}
+{{- define "tracebloc.imageRefreshNodeAgentsName" -}}
+{{ .Release.Name }}-image-refresh-node-agents
+{{- end }}
+
+{{/*
+  Name of the requests-proxy Deployment. ONE definition, because #569 gave it a
+  second consumer: image-refresh reconciles it by name with `kubectl set image`,
+  so a rename that reached only the Deployment would leave the CronJob patching
+  a workload that does not exist — failing the tick, freezing the digest record,
+  and eventually tripping the shared flap lockout for every control-plane image.
+
+  This is the third instance on #569 of one side of a two-sided contract moving
+  without the other (the requests-proxy digest pin and the resource-monitor pin
+  signal were the first two, both found in review). Same remedy: collapse to a
+  single definition rather than keep two literals in sync by hand.
+
+  The jobs-manager Deployment has the same shape — image-refresh's
+  DEPLOYMENT_NAME re-derives `<release>-jobs-manager` with its own printf, and
+  five other call sites spell it out too (NOTES.txt, the PDB,
+  tracebloc.serviceAccountName, ...). Unifying THAT is a mechanical refactor
+  across templates this change does not otherwise touch, so it is deliberately
+  left for its own PR; a contract test pins the two sides here in the meantime.
+*/}}
+{{- define "tracebloc.requestsProxyName" -}}
+{{ .Release.Name }}-requests-proxy
+{{- end }}
+
+{{/*
   Whether the image-refresh CronJob has anything to do. When ALL THREE
-  managed images (jobs-manager, pods-monitor, ingestor) are
+  managed images (jobs-manager, pods-monitor, resource-monitor) are
   digest-pinned, the operator has explicitly opted into reproducible
   pinning for every image this CronJob would refresh, so we render
   nothing — no CronJob, no RBAC, no ConfigMap. When at least one is
   unpinned, the CronJob is rendered and the script skips the pinned
   images at runtime via env flags.
 
-  Three pins because #158 added ingestor refresh on top of #154's
-  jobs-manager + pods-monitor. Keep this list in sync if more images
-  come under auto-refresh in future.
+  The three have changed over time: #154 started with jobs-manager +
+  pods-monitor, #158 added the ingestor, the floating-tag migration
+  retired the ingestor pass, and #569 brought resource-monitor under
+  refresh (it had no deliberate update path before). Keep this list in
+  sync if more images come under auto-refresh in future.
 
   Nil-guarded with `default dict` on every dereference: these are
   newer top-level keys, and a customer who runs
@@ -186,6 +234,36 @@ mysql-pvc
   ever absent. Belt-and-suspenders — see the "nil-guard every new
   top-level value key" rule in CLAUDE.md.
 */}}
+{{/*
+  tracebloc.resourceMonitorRefreshPinned — whether image-refresh has nothing to
+  do for resource-monitor. Renders "true" when so, nothing when not.
+
+  ONE definition, because there are TWO consumers that must agree:
+  `tracebloc.imageRefreshEnabled` (does the CronJob render at all?) and the
+  CronJob's own RESOURCE_MONITOR_PINNED env (does the script skip this image?).
+  The first cut of #569 wrote the rule twice and they disagreed: the helper
+  checked only the digest while the env also treated `resourceMonitor: false` as
+  pinned. With the DaemonSet disabled and both class-1 images pinned, the CronJob
+  therefore kept rendering a job that skipped every image and exited green every
+  tick, forever — where before #569 that combination retired it (Bugbot).
+
+  Two ways to have nothing to do:
+    * an explicit `images.resourceMonitor.digest` pin, same signal as the other
+      images, or
+    * `resourceMonitor: false` — there is no DaemonSet at all, so there is
+      nothing to reconcile and a cross-namespace `set image` would just fail.
+
+  Nil-safe: `.Values.resourceMonitor` absent reads as enabled, matching the
+  `ne .Values.resourceMonitor false` gate on the DaemonSet itself.
+*/}}
+{{- define "tracebloc.resourceMonitorRefreshPinned" -}}
+{{- if eq .Values.resourceMonitor false -}}
+true
+{{- else if (default dict (default dict .Values.images).resourceMonitor).digest -}}
+true
+{{- end -}}
+{{- end }}
+
 {{- define "tracebloc.imageRefreshEnabled" -}}
 {{- $ir := default dict .Values.imageRefresh -}}
 {{- $imgs := default dict .Values.images -}}
@@ -203,10 +281,84 @@ mysql-pvc
 */}}
 {{- $jmPinned := $jm.digest -}}
 {{- $pmPinned := $pm.digest -}}
+{{/*
+  #569: resource-monitor came under refresh too, so it joins the "nothing left
+  to do" test. requests-proxy deliberately does NOT: it runs the SAME
+  tracebloc/jobs-manager image and follows the jobs-manager digest, so
+  `$jmPinned` already covers it. (`images.requestsProxy.digest` remains an
+  operator override that pins requests-proxy alone; it is checked at runtime,
+  not here, because pinning only requests-proxy still leaves jobs-manager
+  itself to refresh.)
+
+  "Follows the jobs-manager digest" is only true because
+  requests-proxy-deployment.yaml FALLS BACK to `images.jobsManager.digest` when
+  its own key is empty. Without that fallback this test is a silent trap
+  (Bugbot): retiring the CronJob here on a jobs-manager pin would leave the
+  proxy rendering the floating tag with nothing left to reconcile it, running a
+  different build of the same image forever. If that fallback is ever removed,
+  requests-proxy must get its own entry in this test.
+*/}}
+{{- $rmPinned := include "tracebloc.resourceMonitorRefreshPinned" . -}}
 {{- if not $ir.enabled -}}
-{{- else if and $jmPinned $pmPinned -}}
+{{- else if and $jmPinned $pmPinned $rmPinned -}}
 {{- else -}}
 true
+{{- end -}}
+{{- end }}
+
+{{/*
+  tracebloc.controlPlanePullPolicy — the pull policy for the four always-running
+  control-plane images (jobs-manager, pods-monitor, requests-proxy,
+  resource-monitor). ONE definition so the four call sites cannot disagree.
+
+  #569 set out to make these pods survive an offline Docker/WSL restart:
+  `Always` forces a registry round-trip on every (re)start, so a restart without
+  the registry lands in ImagePullBackOff even with the image cached in
+  containerd. The fix is IfNotPresent.
+
+  But `Always` is not just fragility — on a floating tag it IS an update path:
+  restart the pod and the kubelet re-resolves the tag. The first cut of #569
+  made IfNotPresent UNCONDITIONAL, which silently removed that path from every
+  edge where the replacement (image-refresh's `kubectl set image repo@digest`)
+  cannot run — those edges would have frozen on their cached image forever, with
+  a green CronJob and no signal (Bugbot, High). So the policy tracks whether an
+  update path actually exists:
+
+    1. An explicit `digest` pin -> IfNotPresent. The reference is immutable, so
+       re-checking the registry can only ever return the same image. Updates
+       come from changing the pin.
+    2. Otherwise, if the image-refresh reconcile can actually drive updates on
+       this edge -> IfNotPresent, because `set image` changes the REFERENCE and
+       the kubelet pulls a digest it has never seen. Two conditions:
+         * the CronJob renders at all (`imageRefresh.enabled`, and not every
+           refreshed image already pinned), and
+         * images come from docker.io. Under a `global.imageRegistry` mirror the
+           script goes inert by design — it resolves digests from docker.io, and
+           pinning one onto a mirrored reference could pin an image the mirror
+           does not hold.
+    3. Otherwise -> Always. No reconcile, no pin, so a floating tag plus a
+       restart is the ONLY way that edge can ever move. This is exactly the
+       pre-#569 behaviour, kept for exactly the edges that still depend on it:
+       mirror installs (sync the mirror, restart) and `imageRefresh.enabled:
+       false` (restart manually), which is what values.schema.json has always
+       promised those operators.
+
+  The trade is deliberate and worth stating plainly: offline-restart safety is
+  delivered precisely where the digest reconcile can deliver updates. An edge
+  that opts out of the mechanism keeps the old semantics rather than silently
+  freezing — a frozen control plane with no signal is worse than a restart that
+  needs the network.
+
+  Usage: {{ include "tracebloc.controlPlanePullPolicy" (dict "digest" $d "root" $) }}
+*/}}
+{{- define "tracebloc.controlPlanePullPolicy" -}}
+{{- $mirror := (dig "imageRegistry" "docker.io" (.root.Values.global | default dict)) | default "docker.io" -}}
+{{- if .digest -}}
+IfNotPresent
+{{- else if and (include "tracebloc.imageRefreshEnabled" .root) (eq $mirror "docker.io") -}}
+IfNotPresent
+{{- else -}}
+Always
 {{- end -}}
 {{- end }}
 
