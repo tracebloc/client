@@ -32,20 +32,26 @@ it writes the GPU request — an ordering this Helm-managed resource can't satis
 in a single install. See the issue thread.
 */ -}}
 {{- /*
-Nil-safe access: a `helm upgrade --reuse-values` from a release predating this
-chart (no `gpu` block) does NOT merge the chart's values.yaml defaults, so
-.Values.gpu — and .Values.gpu.devicePlugin — can be absent. Parenthesised
-indexing yields nil (falsy) instead of panicking with "nil pointer evaluating
-interface {}.devicePlugin". Same for the per-vendor image/namespace sub-keys,
-which fall back to the documented defaults.
+Nil-safe access via the chart's `default dict` pattern (mirrors resource-monitor
+reading .Values.images defensively). A `helm upgrade --reuse-values` from a
+release predating this chart carries no `gpu` key and does NOT merge values.yaml
+defaults, so .Values.gpu / .devicePlugin can be entirely absent. Coalescing each
+level to an empty dict BEFORE any field access means `$dp.enabled` can never be
+called on nil — Go template `and` is not short-circuit, so `and $dp $dp.enabled`
+would still evaluate `.enabled` on a nil $dp and panic. `default dict` removes
+the nil, so no evaluation order matters.
 */ -}}
-{{- $dp := (.Values.gpu).devicePlugin }}
-{{- if and $dp $dp.enabled }}
+{{- $gpu := .Values.gpu | default dict }}
+{{- $dp := $gpu.devicePlugin | default dict }}
+{{- if $dp.enabled }}
 {{- $vendor := $dp.vendor | default "" }}
 {{- if not (or (eq $vendor "nvidia") (eq $vendor "amd")) }}
 {{- fail (printf "gpu.devicePlugin.enabled is true but gpu.devicePlugin.vendor is %q; set it to \"nvidia\" or \"amd\"" $vendor) }}
 {{- end }}
 {{- $ns := $dp.namespace | default "kube-system" }}
+{{- /* global.imageRegistry (#585 mirror / air-gap) re-homes the plugin image
+     exactly like every other chart image; nil-safe for reuse-values. */ -}}
+{{- $g := .Values.global | default dict }}
 {{- if eq $vendor "nvidia" }}
 apiVersion: apps/v1
 kind: DaemonSet
@@ -74,9 +80,17 @@ spec:
           operator: Exists
           effect: NoSchedule
       priorityClassName: "system-node-critical"
+      {{- if include "tracebloc.useImagePullSecrets" . }}
+      # Mirror/private-registry pull secret, copied into this namespace by
+      # docker-registry-secret.yaml so the plugin can pull when global.imageRegistry
+      # points at an authenticated mirror (resource-monitor pattern).
+      imagePullSecrets:
+        - name: {{ include "tracebloc.registrySecretName" . }}
+      {{- end }}
       containers:
+        {{- $nv := $dp.nvidia | default dict }}
         - name: nvidia-device-plugin-ctr
-          image: {{ ($dp.nvidia).image | default "nvcr.io/nvidia/k8s-device-plugin:v0.14.5" | quote }}
+          image: {{ include "tracebloc.image" (dict "repository" ($nv.repository | default "nvidia/k8s-device-plugin") "tag" ($nv.tag | default "v0.14.5") "digest" ($nv.digest | default "") "registry" ((dig "imageRegistry" "" $g) | default ($nv.registry | default "nvcr.io"))) | quote }}
           env:
             # Optional GPU: a node without a working NVIDIA runtime must not
             # crash-loop the plugin — it registers 0 GPUs and the install stays
@@ -120,9 +134,14 @@ spec:
       tolerations:
         - key: CriticalAddonsOnly
           operator: Exists
+      {{- if include "tracebloc.useImagePullSecrets" . }}
+      imagePullSecrets:
+        - name: {{ include "tracebloc.registrySecretName" . }}
+      {{- end }}
       containers:
+        {{- $am := $dp.amd | default dict }}
         - name: amdgpu-dp-cntr
-          image: {{ ($dp.amd).image | default "rocm/k8s-device-plugin:latest" | quote }}
+          image: {{ include "tracebloc.image" (dict "repository" ($am.repository | default "rocm/k8s-device-plugin") "tag" ($am.tag | default "latest") "digest" ($am.digest | default "") "registry" ((dig "imageRegistry" "" $g) | default ($am.registry | default "docker.io"))) | quote }}
           securityContext:
             privileged: true
             capabilities:

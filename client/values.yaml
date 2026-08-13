@@ -82,12 +82,22 @@ gpu:
     # and this matches the upstream manifests. Helm still tracks/removes it even
     # though it lives outside the release namespace.
     namespace: kube-system
+    # Images are split registry/repository/tag[/digest] so global.imageRegistry
+    # (#585 mirror / air-gap) re-homes them exactly like every other chart image
+    # — the mirror must host the same repository path. Set a digest to pin.
     nvidia:
       # Pinned to the version the installer used to apply (NVIDIA k8s-device-plugin).
-      image: nvcr.io/nvidia/k8s-device-plugin:v0.14.5
+      registry: nvcr.io
+      repository: nvidia/k8s-device-plugin
+      tag: v0.14.5
+      digest: ""
     amd:
-      # ROCm k8s device plugin. Pin to a digest for air-gapped / reproducible installs.
-      image: rocm/k8s-device-plugin:latest
+      # ROCm k8s device plugin (docker.io/rocm/k8s-device-plugin). Set a digest
+      # for air-gapped / reproducible installs.
+      registry: docker.io
+      repository: rocm/k8s-device-plugin
+      tag: latest
+      digest: ""
 
 # -- StorageClass configuration
 # When create: true, the StorageClass name is release-unique (e.g. "<release-name>-storage-class")

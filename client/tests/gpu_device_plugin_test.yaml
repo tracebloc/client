@@ -14,10 +14,12 @@ tests:
       - hasDocuments:
           count: 0
 
-  - it: nil-guards when the whole gpu block is absent (helm upgrade --reuse-values from a pre-1.9.40 release)
-    # A --reuse-values upgrade from a release predating this chart carries no gpu
-    # key and does NOT merge values.yaml defaults, so the template must not panic
-    # with "nil pointer evaluating interface {}.devicePlugin".
+  - it: is null-safe when gpu is explicitly null (does not panic)
+    # helm-unittest still coalesces this to the chart's values.yaml defaults, so
+    # it does NOT reproduce the true --reuse-values omission — that is proven by
+    # `helm template` against a chart whose values.yaml has no gpu key (see the
+    # PR's verification). The `| default dict` guard makes both paths safe by
+    # construction; this case pins that an explicit null never panics.
     set:
       gpu: null
     asserts:
@@ -61,7 +63,7 @@ tests:
           path: spec.template.spec.containers[0].env[0].value
           value: "false"
 
-  - it: honours an overridden namespace and image
+  - it: honours an overridden namespace and image registry/repository/tag/digest
     set:
       gpu:
         devicePlugin:
@@ -69,14 +71,69 @@ tests:
           vendor: nvidia
           namespace: gpu-operator
           nvidia:
-            image: mirror.example/k8s-device-plugin:v0.14.5
+            registry: private.example
+            repository: nv/device-plugin
+            tag: v0.15.0
     asserts:
       - equal:
           path: metadata.namespace
           value: gpu-operator
       - equal:
           path: spec.template.spec.containers[0].image
-          value: mirror.example/k8s-device-plugin:v0.14.5
+          value: private.example/nv/device-plugin:v0.15.0
+
+  - it: a nvidia digest pins the image by @sha256 rather than a tag
+    set:
+      gpu:
+        devicePlugin:
+          enabled: true
+          vendor: nvidia
+          nvidia:
+            digest: "sha256:deadbeef"
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].image
+          value: nvcr.io/nvidia/k8s-device-plugin@sha256:deadbeef
+
+  - it: global.imageRegistry re-homes the plugin image onto the mirror (air-gap / #585)
+    set:
+      global:
+        imageRegistry: mirror.corp.example
+      gpu:
+        devicePlugin:
+          enabled: true
+          vendor: nvidia
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].image
+          value: mirror.corp.example/nvidia/k8s-device-plugin:v0.14.5
+
+  - it: sets imagePullSecrets when a private registry credential is configured
+    set:
+      dockerRegistry:
+        create: true
+        server: https://mirror.corp.example
+        username: u
+        password: p
+        email: e@x.io
+      gpu:
+        devicePlugin:
+          enabled: true
+          vendor: nvidia
+    asserts:
+      - equal:
+          path: spec.template.spec.imagePullSecrets[0].name
+          value: RELEASE-NAME-regcred
+
+  - it: sets no imagePullSecrets when no private registry is configured (public pull)
+    set:
+      gpu:
+        devicePlugin:
+          enabled: true
+          vendor: nvidia
+    asserts:
+      - notExists:
+          path: spec.template.spec.imagePullSecrets
 
   - it: renders the AMD DaemonSet when vendor is amd
     set:

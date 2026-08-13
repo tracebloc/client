@@ -99,19 +99,19 @@
             "nvidia": {
               "type": "object",
               "properties": {
-                "image": {
-                  "type": "string",
-                  "minLength": 1
-                }
+                "registry": { "type": "string" },
+                "repository": { "type": "string", "minLength": 1 },
+                "tag": { "type": "string" },
+                "digest": { "type": "string" }
               }
             },
             "amd": {
               "type": "object",
               "properties": {
-                "image": {
-                  "type": "string",
-                  "minLength": 1
-                }
+                "registry": { "type": "string" },
+                "repository": { "type": "string", "minLength": 1 },
+                "tag": { "type": "string" },
+                "digest": { "type": "string" }
               }
             }
           }
