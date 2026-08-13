@@ -11,6 +11,9 @@ on:
       - 'scripts/tests/e2e-full-seal.sh'
       - 'scripts/tests/lib/e2e-common.sh'
       - 'scripts/tests/chart-env-vocabulary.sh'
+      - 'scripts/tests/env-vocabulary-agreement.sh'
+      - 'scripts/lib/common.sh'
+      - 'scripts/install-k8s.ps1'
       - 'scripts/lib/**'
       - '.github/workflows/helm-ci.yaml'
   pull_request:
@@ -23,6 +26,9 @@ on:
       - 'scripts/tests/e2e-full-seal.sh'
       - 'scripts/tests/lib/e2e-common.sh'
       - 'scripts/tests/chart-env-vocabulary.sh'
+      - 'scripts/tests/env-vocabulary-agreement.sh'
+      - 'scripts/lib/common.sh'
+      - 'scripts/install-k8s.ps1'
       - 'scripts/lib/**'
       - '.github/workflows/helm-ci.yaml'
   # Manual runs — mainly to fire full-seal-e2e on demand (e.g. right after the
@@ -81,6 +87,11 @@ jobs:
         # skipped here today and run for anyone local on 3.16+. Bumping the pin
         # turns them on with no change to this file.
         run: bash scripts/tests/chart-env-vocabulary.sh
+
+      # One vocabulary, four languages (backend#1729 sweep 5). Runs on a change
+      # to ANY of the four declarations, including the two installers.
+      - name: CLIENT_ENV vocabulary agreement (backend#1729)
+        run: bash scripts/tests/env-vocabulary-agreement.sh
 
   template:
     timeout-minutes: 10
