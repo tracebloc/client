@@ -131,13 +131,71 @@ _assess_runtime_down() {
   grep -qiE 'cannot connect to the docker daemon|is the docker daemon running|docker daemon is not running|dial unix|the system cannot find the file specified|open //./pipe/docker_engine' <<<"$_out"
 }
 
-# _assess_cli_present — is the tracebloc CLI available? Counts a binary in
-# ~/.local/bin (where the CLI installer drops it when /usr/local/bin isn't
-# writable) even if THIS shell's PATH predates that dir — the same place
-# provision.sh / install-cli.sh resolve it.
+# _assess_cli_bin — the tracebloc CLI to interrogate, or non-zero when there is
+# none. Counts a binary in ~/.local/bin (where the CLI installer drops it when
+# /usr/local/bin isn't writable) even if THIS shell's PATH predates that dir —
+# the same place provision.sh / install-cli.sh resolve it.
+_assess_cli_bin() {
+  has tracebloc && { printf 'tracebloc'; return 0; }
+  if [[ -x "${HOME}/.local/bin/tracebloc" ]]; then
+    printf '%s' "${HOME}/.local/bin/tracebloc"
+    return 0
+  fi
+  return 1
+}
+
+# _assess_cli_present — is the tracebloc CLI available at all?
 _assess_cli_present() {
-  has tracebloc && return 0
-  [[ -x "${HOME}/.local/bin/tracebloc" ]]
+  _assess_cli_bin >/dev/null
+}
+
+# _version_lt A B — true when dotted-numeric A < B. Pure and self-contained: no
+# `sort -V` (BSD sort predates it, and this must behave the same on macOS) and no
+# jq. Missing or non-numeric components read as 0, so "0.10" < "0.10.1" and a
+# pre-release suffix ("0.10.0-rc.1") compares as its base version.
+_version_lt() {
+  local a="${1%%-*}" b="${2%%-*}" i av bv
+  local -a _A _B
+  IFS=. read -r -a _A <<<"$a"
+  IFS=. read -r -a _B <<<"$b"
+  for ((i = 0; i < 3; i++)); do
+    av="${_A[i]:-0}"; bv="${_B[i]:-0}"
+    [[ "$av" =~ ^[0-9]+$ ]] || av=0
+    [[ "$bv" =~ ^[0-9]+$ ]] || bv=0
+    (( av < bv )) && return 0
+    (( av > bv )) && return 1
+  done
+  return 1
+}
+
+# _assess_cli_outdated — is the installed CLI below the floor the installer will
+# actively repair? (client#707)
+#
+# The floor is 0.10.0 because that is the release where the CLI gained its own
+# update nudge. At or above it a user can keep themselves current; below it
+# NOTHING on the machine can tell them they are behind — the cluster auto-
+# upgrades hourly around a host binary that never moves. A field machine sat on
+# v0.5.1 for five weeks that way.
+#
+# It is a FLOOR, not a "must be latest": the installer repairs users up to the
+# point where the CLI maintains itself, and then stops caring. That keeps this
+# free (no network call on every run) and means the constant never needs raising.
+: "${TB_CLI_MIN_VERSION:=0.10.0}"
+
+_assess_cli_outdated() {
+  local bin ver
+  bin="$(_assess_cli_bin)" || return 1     # absent — cli-missing already covers it
+  # No pipe: `tracebloc version | head -1` would let head close the pipe first,
+  # and pipefail turns that into a 141 the caller never asked for (backend#1778).
+  ver="$("$bin" version 2>/dev/null || true)"
+  ver="${ver%%$'\n'*}"                     # first line
+  ver="${ver#* }"; ver="${ver%% *}"        # "tracebloc 0.10.5 (darwin/arm64)" -> "0.10.5"
+  ver="${ver#v}"
+  # FAIL OPEN on anything unparseable. A version we cannot read is not evidence
+  # of staleness, and treating it as outdated would reinstall the CLI on every
+  # single run — worse than the staleness this exists to fix.
+  [[ "$ver" =~ ^[0-9]+(\.[0-9]+)*$ ]] || return 1
+  _version_lt "$ver" "$TB_CLI_MIN_VERSION"
 }
 
 # _assess_release_pending NS — true when a release in NS is wedged (pending-* or
@@ -238,6 +296,14 @@ _assess_classify() {
     return 0
   fi
 
+  # Present, but too old to keep itself current (client#707). Without this the
+  # healthy fast-path pins a user to whatever CLI they first installed, forever
+  # and silently — the ONE thing on the machine that no auto-upgrade reaches.
+  if _assess_cli_outdated; then
+    INSTALL_STATE="degraded"; INSTALL_STATE_REASON="cli-outdated"
+    return 0
+  fi
+
   INSTALL_STATE="healthy"; INSTALL_STATE_REASON="ns:${ns}"
   return 0
 }
@@ -309,6 +375,7 @@ assess_existing_install() {
         cluster-stopped)    info "Your secure environment is stopped — starting it and finishing setup." ;;
         workload-not-ready) info "Your secure environment is still starting up — finishing setup." ;;
         cli-missing)        info "The tracebloc CLI isn't installed yet — setting it up." ;;
+        cli-outdated)       info "Your tracebloc CLI is out of date — updating it." ;;
         pending-wedge)      info "A previous update was interrupted — recovering it and finishing setup." ;;
         *)                  info "Your secure environment is only partly set up — finishing setup." ;;
       esac
