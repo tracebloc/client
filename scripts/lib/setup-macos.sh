@@ -471,6 +471,12 @@ _emit_launch_plist() {
 # the Windows peer (#430 Bugbot). Best-effort; TB_MACOS_AUTOSTART is set ONLY on success,
 # so the summary's reboot promise stays honest.
 _install_macos_autostart() {
+  # $1 (optional) "no-sudo": forbid any privileged (sudo) write. Tier 0 promised
+  # "no administrator rights needed" and holds no sudo credential (client#704), so
+  # it passes this. The GUI LaunchAgent path never needs sudo and is unchanged;
+  # only the headless LaunchDaemon path — which does — is gated below.
+  local _no_sudo=""
+  if [[ "${1:-}" == "no-sudo" ]]; then _no_sudo=1; fi
   if [[ -n "${TRACEBLOC_NO_AUTOSTART:-}" ]]; then
     log "Autostart skipped (TRACEBLOC_NO_AUTOSTART set)."
     return 0
@@ -492,6 +498,17 @@ _install_macos_autostart() {
     launchctl bootstrap "gui/$(id -u)" "$plist" 2>/dev/null \
       || launchctl load -w "$plist" 2>/dev/null || true
   else
+    # Tier 0 (no-sudo): a headless Mac's only reboot-recovery mechanism is a system
+    # LaunchDaemon (a user LaunchAgent never loads without a GUI/Aqua session; #430),
+    # and writing it needs root. Tier 0 must NOT prompt for a password — that is the
+    # exact step-b failure it exists to remove (client#704) — so skip the boot daemon
+    # honestly and say how to enable it later. Best-effort: the caller's `|| true` and
+    # TB_MACOS_AUTOSTART staying unset keep the summary's reboot line truthful.
+    if [[ -n "$_no_sudo" ]]; then
+      warn "Headless reboot autostart needs a system LaunchDaemon (admin/root); this no-admin (Tier 0) install won't prompt for a password, so it's skipped."
+      hint "To get auto-restart after a reboot: run 'colima start' yourself after boot, or re-run this installer from an administrator account to install the boot LaunchDaemon."
+      return 1
+    fi
     # The headless daemon runs colima — but only if colima is ACTUALLY the runtime here.
     # install_docker_desktop installs colima ONLY when Docker was down; if Docker was
     # already up by other means colima may be absent, so a colima daemon would be bogus and
@@ -605,10 +622,11 @@ install_macos() {
     assert_amd64_emulation    # Docker is up by definition here (#433)
     install_macos_cli_tools
     log "step b: cli tools ready (tier 0)"
-    # Same best-effort contract as the privileged path below (#430): a per-user
-    # LaunchAgent needs no admin, and a failed login item must not fail an
-    # otherwise-complete install.
-    _install_macos_autostart || true
+    # Autostart stays best-effort here AND must make NO sudo call (client#704):
+    # the GUI LaunchAgent needs no admin, while the headless LaunchDaemon (which
+    # does) is skipped with instructions rather than prompting for the very
+    # password Tier 0 exists to avoid. A failed login item never fails the install.
+    _install_macos_autostart no-sudo || true
     return 0
   fi
 

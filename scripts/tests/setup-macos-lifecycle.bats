@@ -164,6 +164,47 @@ EOF
   [ "${TB_MACOS_AUTOSTART:-0}" = "0" ] || return 1
 }
 
+# ── no-sudo mode (Tier 0, client#704) ────────────────────────────────────────
+# Tier 0 prints "no administrator rights needed" and holds no sudo credential.
+# On a HEADLESS Mac the only reboot-recovery is a root LaunchDaemon (a user
+# LaunchAgent never loads without a GUI/Aqua session; #430) — so in no-sudo mode
+# it is skipped with instructions, never written via sudo. colima is present here
+# so a regression removing the guard would actually take the sudo daemon path,
+# making this mutation-real: it fails against the pre-fix code.
+@test "_install_macos_autostart no-sudo: headless -> NO sudo, no daemon, says how to enable later (client#704)" {
+  TB_LAUNCHDAEMONS_DIR="$BATS_TEST_TMPDIR/LaunchDaemons"
+  HOME="$BATS_TEST_TMPDIR/home"
+  mkdir -p "$BATS_TEST_TMPDIR/bin"; printf '#!/bin/sh\n' > "$BATS_TEST_TMPDIR/bin/colima"
+  chmod +x "$BATS_TEST_TMPDIR/bin/colima"; PATH="$BATS_TEST_TMPDIR/bin:$PATH"   # colima present
+  _has_gui_session() { return 1; }
+  sudo() { record "sudo $*"; "$@"; }        # records (and executes) ANY sudo the daemon path makes
+  run _install_macos_autostart no-sudo
+  [ "$status" -ne 0 ] || return 1                                   # best-effort skip (caller's || true)
+  [[ "$output" == *"won't prompt for a password"* ]] || return 1   # honest skip message
+  [[ "$output" == *"colima start"* ]] || return 1                  # how to enable it later
+  [ ! -e "$TB_LAUNCHDAEMONS_DIR/io.tracebloc.runtime.plist" ] || return 1   # NO daemon written
+  run mock_calls
+  [[ "$output" != *"sudo"* ]] || return 1                          # zero sudo on Tier 0 — the whole point
+  # flag stays unset -> the summary makes no false reboot promise
+  _has_gui_session() { return 1; }; sudo() { record "sudo $*"; "$@"; }; TB_MACOS_AUTOSTART=0
+  _install_macos_autostart no-sudo || true
+  [ "${TB_MACOS_AUTOSTART:-0}" = "0" ] || return 1
+}
+
+# The GUI LaunchAgent never needed sudo, so no-sudo mode keeps it: a non-admin user
+# on a shared GUI Mac with Docker already running still gets login autostart.
+@test "_install_macos_autostart no-sudo: GUI -> still installs the user LaunchAgent, no sudo (client#704)" {
+  TB_LAUNCHAGENTS_DIR="$BATS_TEST_TMPDIR/LaunchAgents"
+  _has_gui_session() { return 0; }
+  sudo() { record "sudo $*"; "$@"; }
+  TB_MACOS_AUTOSTART=0
+  _install_macos_autostart no-sudo
+  [ "$TB_MACOS_AUTOSTART" = "1" ] || return 1
+  [ -f "$TB_LAUNCHAGENTS_DIR/io.tracebloc.runtime.plist" ] || return 1
+  run mock_calls
+  [[ "$output" != *"sudo"* ]] || return 1                          # LaunchAgent path is sudo-free
+}
+
 # ── Tier 0 on macOS (client#703) ─────────────────────────────────────────────
 # A Mac with Docker Desktop already installed AND running has nothing privileged
 # left to do, but install_macos ran the admin gate and primed sudo anyway — and
@@ -211,6 +252,31 @@ _tier0_mocks() {
   grep -q "install_macos_cli_tools" <<<"$output" || return 1
   grep -q "assert_amd64_emulation"  <<<"$output" || return 1
   grep -q "_install_macos_autostart" <<<"$output" || return 1
+}
+
+# The point of client#704: Tier 0 calls autostart in no-sudo mode, so the headless
+# LaunchDaemon path can never prompt for the password Tier 0 exists to avoid.
+@test "install_macos: tier 0 calls autostart in no-sudo mode (client#704)" {
+  INSTALL_TIER=0
+  _tier0_mocks
+  _install_macos_autostart() { record "_install_macos_autostart $*"; }   # capture the arg
+  run install_macos
+  [ "$status" -eq 0 ] || return 1
+  run mock_calls
+  grep -q "_install_macos_autostart no-sudo" <<<"$output" || return 1
+}
+
+# The privileged path is unchanged: it must NOT pass no-sudo, or a headless admin
+# install would silently lose its boot LaunchDaemon (reboot recovery).
+@test "install_macos: privileged path calls autostart WITHOUT no-sudo (client#704)" {
+  INSTALL_TIER=2
+  _tier0_mocks
+  _install_macos_autostart() { record "_install_macos_autostart $*"; }   # capture the arg
+  run install_macos
+  [ "$status" -eq 0 ] || return 1
+  run mock_calls
+  grep -q "_install_macos_autostart" <<<"$output" || return 1
+  ! grep -q "no-sudo" <<<"$output" || return 1
 }
 
 # Every other tier is untouched — the privileged path must still run in full.
