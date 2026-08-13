@@ -47,11 +47,34 @@ jobs:
       # CONDITION MUST STAY IN SYNC with the publish steps below (the GHCR
       # login and build.sh's PUSH): if anything here ever pushes
       # unconditionally, this gate stops covering it.
-      - name: Authorize dispatcher (backend#1422)
+      # SECOND control, and the one that actually bounds the blast radius: the
+      # ref. `install-k8s.ps1` defaults $K3S_CUDA_IMAGE to
+      # ghcr.io/tracebloc/k3s-cuda:$K8S_VERSION-cuda-$CUDA_BASE_TAG and, in its
+      # own words, "PULLS this image automatically at cluster-create -- the user
+      # never builds or pulls anything by hand". So this tag is fetched by
+      # customers, by tag, and it is mutable. Without a ref check an allowlisted
+      # dispatcher could publish it from ANY branch, putting unreviewed content
+      # behind the tag a GPU install pulls.
+      #
+      # staging AND main, not develop:
+      #   * both are train-owned and protected; develop is the least-reviewed
+      #     integration branch and has no business behind a customer-pulled tag.
+      #   * staging is included deliberately to avoid an ordering trap. The tag
+      #     encodes K8S_VERSION + CUDA_TAG, and check-facts.sh pins those across
+      #     install-k8s.ps1, the Dockerfile, build.sh and this workflow -- so a
+      #     bump arrives everywhere at once. Publishing from staging lets the
+      #     image for a new tag exist BEFORE main's installer starts asking for
+      #     it; main-only would leave a window where prod installs pull a tag
+      #     nobody has pushed yet.
+      #
+      # This is NOT the whole fix. The tag stays mutable and the installer pins
+      # it by tag, not digest -- see backend#1867.
+      - name: Authorize publish — dispatcher and ref (backend#1422, backend#1857)
         if: ${{ inputs.push }}
         env:
           ACTOR: ${{ github.actor }}
           TRIGGERING_ACTOR: ${{ github.triggering_actor }}
+          REF: ${{ github.ref }}
         run: |
           set -euo pipefail
           for who in "$ACTOR" "$TRIGGERING_ACTOR"; do
@@ -63,7 +86,14 @@ jobs:
                 ;;
             esac
           done
-          echo "Dispatcher $ACTOR (triggering: $TRIGGERING_ACTOR) is on the allowlist."
+          case "$REF" in
+            refs/heads/main|refs/heads/staging) ;;
+            *)
+              echo "::error::refusing to publish from $REF. This tag is pulled by customers at cluster-create, so it may only be published from a train-owned branch (staging or main). Re-run with push=false to build-validate from any branch."
+              exit 1
+              ;;
+          esac
+          echo "Publish authorized: $ACTOR (triggering: $TRIGGERING_ACTOR) from $REF."
 
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
