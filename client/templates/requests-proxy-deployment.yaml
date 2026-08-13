@@ -1,7 +1,7 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: {{ .Release.Name }}-requests-proxy
+  name: {{ include "tracebloc.requestsProxyName" . }}
   namespace: {{ .Release.Namespace }}
   labels:
     {{- include "tracebloc.labels" . | nindent 4 }}
@@ -22,12 +22,40 @@ spec:
           type: RuntimeDefault
       containers:
         - name: proxy
-          {{- $rpDigest := (dig "requestsProxy" "digest" "" .Values.images) }}
+          {{- $rpImages := (.Values.images | default dict) }}
+          {{- /*
+            #569 (Bugbot): requests-proxy runs the jobs-manager IMAGE, so it must
+            follow the jobs-manager pin. `images.requestsProxy.digest` stays an
+            explicit per-workload override; when it is empty we fall back to
+            `images.jobsManager.digest`.
+
+            Without this fallback, pinning jobs-manager ALONE was a silent trap:
+            this Deployment kept rendering the floating `repo:tag` while
+            jobs-manager ran the pinned digest, AND image-refresh skips pinned
+            images — so it never wrote a `set image` for the proxy either. The
+            proxy froze on the tag indefinitely, running a different build of the
+            same image than jobs-manager. That is precisely the skew this change
+            set out to close, re-introduced through the pinning path.
+
+            Nil-guarded on `.Values.images` for --reuse-values replays predating
+            these keys.
+          */}}
+          {{- $rpDigest := (dig "requestsProxy" "digest" "" $rpImages) | default (dig "jobsManager" "digest" "" $rpImages) }}
           image: {{ include "tracebloc.image" (dict "repository" "tracebloc/jobs-manager" "tag" (include "tracebloc.clientEnv" .) "digest" $rpDigest "registry" (dig "imageRegistry" "docker.io" (.Values.global | default dict))) | quote }}
-          # digest set -> repo@digest + IfNotPresent (restart-safe offline); empty ->
-          # repo:tag + Always. Was hardcoded Always, which ignored a pinned digest and
-          # re-pulled on every restart even when the image was already cached (#552).
-          imagePullPolicy: {{ if $rpDigest }}IfNotPresent{{ else }}Always{{ end }}
+          # #569: IfNotPresent wherever an update path exists without `Always` --
+          # a pinned digest, or the image-refresh reconcile (see
+          # tracebloc.controlPlanePullPolicy; it stays Always on an edge the
+          # reconcile cannot reach, or that edge could never update at all).
+          # `Always` re-pulled on every restart even when the image was already
+          # cached, so an offline Docker/WSL restart landed in ImagePullBackOff.
+          #
+          # This Deployment runs the SAME docker.io/tracebloc/jobs-manager image as
+          # the jobs-manager Deployment, and image-refresh now reconciles both to
+          # the same digest in one tick. Before #569 it reconciled only
+          # `<release>-jobs-manager`, so requests-proxy silently skewed: it stayed
+          # on the old build until some unrelated restart, then jumped to whatever
+          # the floating tag pointed at.
+          imagePullPolicy: {{ include "tracebloc.controlPlanePullPolicy" (dict "digest" $rpDigest "root" $) }}
           workingDir: /app
           command: ["python", "-m", "gunicorn"]
           args:

@@ -340,9 +340,42 @@ egressProxy:
 # For each image, set `digest` to a sha256 (e.g. "sha256:abc123...") to pin
 # the image by content hash. Digest pinning is strongly preferred: tags are
 # mutable, so registry swaps can silently change what you run. When `digest`
-# is set the tag field is ignored and imagePullPolicy drops to IfNotPresent.
-# Leave `digest` empty to fall back to tag-based pulls (CLIENT_ENV for
-# tracebloc images, `tag` for busybox/mysql-client).
+# is set the tag field is ignored. Leave `digest` empty to fall back to
+# tag-based pulls (CLIENT_ENV for tracebloc images, `tag` for
+# busybox/mysql-client).
+#
+# PULL POLICY (#569). The four always-running control-plane images —
+# jobsManager, podsMonitor, requestsProxy, resourceMonitor — render
+# `imagePullPolicy: IfNotPresent` wherever an update path exists that does not
+# depend on `Always`. `Always` forced a registry round-trip on every (re)start,
+# so an offline Docker Desktop / WSL2 restart landed in ImagePullBackOff even
+# with the image already cached in containerd — the pods came back only once
+# docker.io was reachable again (up to ~6h behind Docker Hub's anonymous
+# pull-rate limit).
+#
+# That is safe only where the UPDATE path no longer depends on the pull policy.
+# `Always` + a floating tag IS an update mechanism: it is what made the
+# image-refresh CronJob's `kubectl rollout restart` pick up a new build.
+# Offline-safety and restart-driven updates are mutually exclusive unless the
+# image REFERENCE itself changes, so image-refresh now pins the resolved digest
+# with `kubectl set image repo@digest` instead (see the imageRefresh block).
+#
+# So the policy is NOT unconditional — it is resolved per image by the
+# `tracebloc.controlPlanePullPolicy` helper, which is the authoritative
+# description:
+#   * explicit `digest` pin      -> IfNotPresent (immutable reference)
+#   * refresh can reconcile here -> IfNotPresent (`set image` drives updates)
+#   * neither                    -> Always       (floating tag + restart is the
+#                                                 only update path there is)
+#
+# The third case is real, not theoretical: a `global.imageRegistry` mirror makes
+# the reconcile inert (it resolves digests from docker.io, which the mirror may
+# not hold), and `imageRefresh.enabled: false` disables it outright. Those edges
+# keep the pre-#569 behaviour deliberately — a frozen control plane with a green
+# CronJob and no signal is worse than a restart that needs the network.
+#
+# Setting `digest` here is still meaningful: it is an explicit operator pin
+# that also opts the image OUT of auto-refresh.
 images:
   jobsManager:
     digest: ""
@@ -707,9 +740,13 @@ podTokenTtlSeconds: 604800
 #     `sort -V`, so 1.10 > 1.9 — not a string compare).
 #   - --reuse-values is passed, so secrets (clientId, clientPassword,
 #     dockerRegistry creds) and any operator overrides are preserved.
-#   - imagePullPolicy on tracebloc images is `Always` when no digest is
-#     pinned, so the chart upgrade also picks up new image content for the
-#     floating prod/dev tags as pods restart.
+#   - NOTE (#569): a chart upgrade no longer picks up new IMAGE content as a
+#     side effect. That used to work because the control-plane pods ran
+#     `imagePullPolicy: Always`, so any restart re-resolved the floating tag;
+#     they now run IfNotPresent so an offline restart cannot fail. New image
+#     content arrives via the image-refresh CronJob's `kubectl set image`
+#     instead. This CronJob still delivers everything else a chart release
+#     carries — template, RBAC, values-default and schema changes.
 #
 # Trust boundary: the CronJob's ServiceAccount is bound to the built-in
 # `cluster-admin` ClusterRole, so it can apply any resource the chart
@@ -771,51 +808,90 @@ autoUpgrade:
       cpu: "500m"
       memory: "256Mi"
 
-# -- Image-refresh CronJob (closes tracebloc/client#154).
-# Auto-restarts the jobs-manager Deployment when a new image digest is
-# published to Docker Hub under the floating CLIENT_ENV tag. Without
-# this, `imagePullPolicy: Always` only pulls on pod creation — running
-# pods stay on the old image until someone manually
-# `kubectl rollout restart`s them, which is exactly the
-# customer-runs-no-commands UX we want to avoid.
+# -- Image-refresh CronJob (closes tracebloc/client#154; reworked by #569).
+# Re-images the always-running control-plane workloads when a new image
+# digest is published to Docker Hub under the floating CLIENT_ENV tag.
+# Without this, running pods stay on the old image until someone manually
+# restarts them, which is exactly the customer-runs-no-commands UX we want
+# to avoid.
+#
+# #569 changed the ACTION from `kubectl rollout restart` to `kubectl set
+# image repo@digest`, and widened the set of workloads it covers. A restart
+# only picks up a new build when the pods run `imagePullPolicy: Always` —
+# and `Always` is precisely what made an offline Docker/WSL restart fail
+# with ImagePullBackOff on a cached image. The two properties are mutually
+# exclusive unless the image REFERENCE changes on update, so the reference
+# is now what changes; the pods run IfNotPresent (see the images block).
 #
 # How it works:
 #   - A CronJob in this namespace polls Docker Hub for the current
-#     manifest digest of tracebloc/jobs-manager:<CLIENT_ENV> and
-#     tracebloc/pods-monitor:<CLIENT_ENV> (both containers live in one
-#     deployment).
+#     manifest digest of tracebloc/jobs-manager:<CLIENT_ENV>,
+#     tracebloc/pods-monitor:<CLIENT_ENV> and
+#     tracebloc/resource-monitor:<CLIENT_ENV>.
 #   - The script compares each fetched digest to an annotation on the
-#     deployment (`tracebloc.io/last-refreshed-<image>-digest`) that
-#     records the digest the LAST successful refresh restarted to. Not
+#     jobs-manager deployment (`tracebloc.io/last-refreshed-<image>-digest`)
+#     that records the digest the LAST successful refresh moved to. Not
 #     to the running pod's imageID — that value's format varies across
 #     container runtimes (kubernetes/kubernetes#108689 + #115199) and
 #     diverges from the registry's index digest on multi-arch tags.
 #     The annotation makes the comparison entirely server-vs-our-record
 #     with no client-side runtime variation in the loop.
-#   - On a real change: `kubectl rollout restart` + `kubectl rollout
-#     status` to wait for completion, then patch the annotation to the
-#     new digest. (Order matters — annotating first would let a failed
-#     rollout silently freeze the deployment.)
+#   - On a real change: `kubectl set image` + `kubectl rollout status` to
+#     wait for completion, then patch the annotation to the new digest.
+#     (Order matters — annotating first would let a failed rollout
+#     silently freeze the workload.)
+#   - Workloads covered (#569). jobs-manager was always covered; the other
+#     two were NOT, and both were quietly broken as a result:
+#       * deployment/<release>-jobs-manager — containers `api` and
+#         `pods-monitor-container`, re-imaged in ONE patch, one rollout.
+#       * deployment/<release>-requests-proxy — runs the SAME
+#         tracebloc/jobs-manager image, so it follows the jobs-manager
+#         digest with no extra registry call. Before #569 it was never
+#         refreshed: it stayed on its old build until some unrelated
+#         restart, then jumped to whatever the tag pointed at, so the two
+#         pods routinely ran different builds of one image.
+#       * daemonset/<release>-resource-monitor — in the node-agents
+#         namespace, reached via a second, narrower Role. Before #569 it
+#         had no deliberate update path at all (a chart release does not
+#         change its image ref either); it moved only when a pod happened
+#         to restart.
 #   - First observation (annotation absent on a fresh install): record
-#     the current digest without restarting. No evidence of drift, no
-#     reason to churn the pod.
+#     the current digest without re-imaging. Rewriting repo:tag to
+#     repo@digest for byte-identical content would roll every workload —
+#     including the DaemonSet on every node — for nothing. The cost is
+#     that a fresh edge runs repo:tag until the first real digest change:
+#     still restart-safe offline, just not yet reproducible.
 #   - Idle-cheap: when the recorded digest matches today's digest, the
-#     script exits without touching the deployment. Steady state is one
-#     HEAD per image per tick, well under Docker Hub's 100/6h anonymous
+#     script exits without touching anything. Steady state is one HEAD
+#     per image per tick, well under Docker Hub's 100/6h anonymous
 #     pull-rate limit.
+#   - Private mirrors (global.imageRegistry): the script resolves digests
+#     from docker.io, so pinning one onto a mirrored reference could pin
+#     an image the mirror does not hold. It logs and goes INERT instead.
+#     Under the old `rollout restart` the mismatch was merely useless; with
+#     `set image` it has to fail closed.
 #
-# Pinned-digest interaction: if BOTH images.jobsManager.digest and
-# images.podsMonitor.digest are set, the chart skips rendering this
-# CronJob entirely — digest pinning is an explicit opt-out from drift,
-# and auto-restart would defeat the purpose. If only one is pinned the
-# CronJob still runs but the script skips the pinned image at runtime.
+# Pinned-digest interaction: if images.jobsManager.digest,
+# images.podsMonitor.digest AND images.resourceMonitor.digest are all set,
+# the chart skips rendering this CronJob entirely — digest pinning is an
+# explicit opt-out from drift, and auto-refresh would defeat the purpose.
+# If only some are pinned the CronJob still runs and the script skips the
+# pinned images at runtime. requests-proxy needs no entry in that test: it
+# follows the jobs-manager pin. Setting images.requestsProxy.digest opts
+# requests-proxy alone out of following jobs-manager.
 #
 # Trust boundary: this CronJob's ServiceAccount is bound to a
 # namespace-scoped Role with get/list/patch/watch on the deployment
-# resource ONLY (no pods, no other resources, no cluster scope). Much
-# narrower than autoUpgrade — a compromise of this Pod can only kick
-# and annotate the jobs-manager Deployment in this one namespace. The
-# script reaches out only to docker.io's public registry endpoints; if
+# resource ONLY (no pods, no other resources, no cluster scope) — a
+# compromise can only re-image and annotate the jobs-manager and
+# requests-proxy Deployments in this one namespace. #569 adds a SECOND
+# Role in the node-agents namespace for the resource-monitor DaemonSet:
+# get/patch are resourceNames-scoped to that one DaemonSet, while
+# list/watch (which RBAC cannot scope by name, and `rollout status`
+# requires) are namespace-wide and read-only. Still far narrower than
+# autoUpgrade, which holds cluster-admin.
+#
+# The script reaches out only to docker.io's public registry endpoints; if
 # your cluster requires egress through a proxy, set HTTPS_PROXY via env
 # or disable this CronJob.
 #
@@ -832,19 +908,48 @@ imageRefresh:
   enabled: true
   # Every 15 minutes at minute :07. The off-hour minute spreads load
   # across Docker Hub's registry-1 origin; 15m balances drift latency
-  # against the 100/6h anonymous pull-rate limit (2 images × 4/hr = 8/hr,
-  # well under the cap even shared with other workloads on the same IP).
+  # against the 100/6h anonymous pull-rate limit.
+  #
+  # #569 raised the per-tick cost from 2 manifest HEADs to 3 (resource-monitor
+  # joined jobs-manager and pods-monitor; requests-proxy adds none, it reuses
+  # the jobs-manager digest). At this schedule that is 3 x 4/hr = 12/hr, so
+  # 72 per 6h against the cap of 100 — up from 48. Still under, but the
+  # headroom for OTHER workloads sharing the egress IP dropped from ~52 to ~28.
+  #
+  # That matters more than the raw number: exhausting this cap behind a shared
+  # corporate NAT is one of the failure modes in the incident #569 exists to fix
+  # (a rate-limited edge cannot pull for up to ~6h). If an edge shares its
+  # egress IP with other Docker Hub consumers, widen this — "7,27,47 * * * *"
+  # (3/hr) puts the cost back to 9/hr, at the price of slower drift pickup.
+  # A digest pin on any image removes its HEAD from every tick entirely.
   schedule: "7,22,37,52 * * * *"
-  # `kubectl rollout status --timeout`. Generous; jobs-manager image pulls
-  # on bare-metal first-boot can take minutes, and the CronJob slot
-  # shouldn't hold all night if a rollout genuinely wedges.
+  # `kubectl rollout status --timeout`, applied PER WORKLOAD. Generous;
+  # jobs-manager image pulls on bare-metal first-boot can take minutes, and
+  # the CronJob slot shouldn't hold all night if a rollout genuinely wedges.
+  #
+  # RAISING THIS MEANS RAISING activeDeadlineSeconds BELOW — since #569 a tick
+  # can wait on up to THREE workloads in sequence, so the Job's total budget
+  # must stay above 3 x this value.
   rolloutTimeout: "10m"
+  # Job-level wall-clock backstop (CronJob jobTemplate.spec.activeDeadlineSeconds).
+  # MUST exceed 3 x rolloutTimeout: a tick re-images jobs-manager, requests-proxy
+  # and the resource-monitor DaemonSet in sequence, waiting on each.
+  #
+  # This was a hardcoded 1800 (30m). With the default 10m rolloutTimeout that is
+  # EXACTLY 3 x 10m, i.e. no headroom at all. Blowing the deadline is not a benign
+  # timeout: the Job is killed mid-wait, so the post-success annotate never runs,
+  # the recorded digest never advances, and the shared `refresh-attempt` counter
+  # stays incremented. Three such ticks trip the flap lockout for EVERY
+  # control-plane image at once, while the CronJob still looks healthy.
+  #
+  # 3600 (60m) = 3 x the default rolloutTimeout plus 100% slack.
+  activeDeadlineSeconds: 3600
   # #563: consecutive failed rollout attempts after which the refresh STOPS
   # re-restarting and flags the deployment for a human. A deployment whose
   # readiness FLAPS (becomes Ready, then crashes after warmup near the
   # rollout-status timeout) fails the rollout, so `recorded` never advances and
-  # every later settled tick re-issues the same restart. After this many in-a-row
-  # failures the job stops restarting and annotates a "flap detected" marker
+  # every later settled tick re-issues the same re-image. After this many in-a-row
+  # failures the job stops re-imaging and annotates a "flap detected" marker
   # (tracebloc.io/refresh-flap-detected) so monitoring can surface it. There is
   # no auto-resume: a human investigates and clears the
   # tracebloc.io/refresh-attempt annotation to re-arm (or a rollout that finally

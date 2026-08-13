@@ -583,7 +583,7 @@
             "digest": {
               "type": "string",
               "pattern": "^(sha256:[a-f0-9]{64})?$",
-              "description": "Optional image digest (sha256:...). When set, overrides the tag."
+              "description": "Optional image digest (sha256:...). When set, overrides the tag, opts this image out of image-refresh, and is ALSO inherited by the requests-proxy Deployment, which runs the same image (see images.requestsProxy.digest)."
             }
           }
         },
@@ -592,7 +592,8 @@
           "properties": {
             "digest": {
               "type": "string",
-              "pattern": "^(sha256:[a-f0-9]{64})?$"
+              "pattern": "^(sha256:[a-f0-9]{64})?$",
+              "description": "Optional image digest (sha256:...). When set, overrides the tag and opts this image out of image-refresh."
             }
           }
         },
@@ -601,7 +602,8 @@
           "properties": {
             "digest": {
               "type": "string",
-              "pattern": "^(sha256:[a-f0-9]{64})?$"
+              "pattern": "^(sha256:[a-f0-9]{64})?$",
+              "description": "Optional image digest (sha256:...). When set, overrides the tag and opts the resource-monitor DaemonSet out of image-refresh (#569 brought it under refresh; before that it had no deliberate update path at all)."
             }
           }
         },
@@ -610,7 +612,8 @@
           "properties": {
             "digest": {
               "type": "string",
-              "pattern": "^(sha256:[a-f0-9]{64})?$"
+              "pattern": "^(sha256:[a-f0-9]{64})?$",
+              "description": "Optional image digest (sha256:...) for the requests-proxy Deployment, which runs the tracebloc/jobs-manager image. Leave EMPTY (default) and it follows images.jobsManager.digest, so the two pods cannot run different builds of the same image. Set it only to pin requests-proxy independently of jobs-manager."
             }
           }
         },
@@ -1042,27 +1045,33 @@
     },
     "imageRefresh": {
       "type": "object",
-      "description": "Image-refresh CronJob (issue tracebloc/client#154). Polls Docker Hub for jobs-manager and pods-monitor digests under the floating CLIENT_ENV tag and rolls the deployment when a new image is published. Disable to keep the running image in place until manual restart.",
+      "description": "Image-refresh CronJob (issue tracebloc/client#154; reworked by #569). Polls Docker Hub for the jobs-manager, pods-monitor and resource-monitor digests under the floating CLIENT_ENV tag and, on a change, pins the new digest onto the running workloads with `kubectl set image` (jobs-manager + requests-proxy Deployments and the resource-monitor DaemonSet). It used to `kubectl rollout restart` a single Deployment; the reference change is what lets those pods run imagePullPolicy=IfNotPresent and survive an offline restart. Disable to keep the running image in place until manual restart \u2014 the chart then renders imagePullPolicy=Always on the unpinned control-plane images, because a floating tag plus a restart is the only update path left.",
       "properties": {
         "enabled": {
           "type": "boolean",
           "default": true,
-          "description": "When false, no CronJob, ServiceAccount, Role, or RoleBinding is rendered. The deployment will not auto-refresh on new image pushes."
+          "description": "When false, no CronJob, ServiceAccount, Role, or RoleBinding is rendered. The control-plane workloads will not auto-refresh on new image pushes, and the unpinned ones fall back to imagePullPolicy=Always so a manual restart still picks up a new build (see tracebloc.controlPlanePullPolicy)."
         },
         "schedule": {
           "type": "string",
           "minLength": 1,
-          "description": "Cron expression. Keep the tick rate compatible with Docker Hub's 100/6h anonymous pull-rate limit (each tick HEADs two manifests)."
+          "description": "Cron expression. Keep the tick rate compatible with Docker Hub's 100/6h anonymous pull-rate limit. Since #569 each tick HEADs THREE manifests (jobs-manager, pods-monitor, resource-monitor), not two \u2014 at the default 15m that is 12/hr, i.e. 72 per 6h. Widen the schedule on edges that share an egress IP with other Docker Hub consumers; a digest pin removes that image's HEAD from every tick."
         },
         "rolloutTimeout": {
           "type": "string",
           "pattern": "^[0-9]+(s|m|h)$",
           "description": "Passed to `kubectl rollout status --timeout`. Allow headroom for bare-metal image pull."
         },
+        "activeDeadlineSeconds": {
+          "type": "integer",
+          "minimum": 60,
+          "default": 3600,
+          "description": "CronJob jobTemplate.spec.activeDeadlineSeconds. MUST exceed 3 x rolloutTimeout: since #569 a tick re-images jobs-manager, requests-proxy and the resource-monitor DaemonSet in sequence, waiting on each. Blowing the deadline kills the Job mid-wait, so the digest annotation never advances and the shared refresh-attempt counter trips the flap lockout for every control-plane image at once."
+        },
         "maxRefreshAttempts": {
           "type": "integer",
           "minimum": 1,
-          "description": "Consecutive failed rollout attempts (same target digest) after which the refresh backs off instead of re-restarting a flapping deployment every tick (#563)."
+          "description": "Consecutive failed rollout attempts (same target digest) after which the refresh backs off instead of re-imaging a flapping workload every tick (#563). The counter is shared across all reconciled workloads."
         },
         "suspend": {
           "type": "boolean",
