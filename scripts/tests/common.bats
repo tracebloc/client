@@ -272,14 +272,35 @@ EOF
 }
 
 # The recorder inherits its own ERR trap under set -E, so a failing command
-# inside it must not recurse. `log` with no LOG_FILE is exactly such a command.
-@test "_record_err: does not recurse when its own log write fails" {
+# inside it must not damage the record it just took. `log` writing to a path it
+# cannot open is exactly such a command.
+#
+# THE PREVIOUS VERSION OF THIS TEST ASSERTED NOTHING (Bugbot, #702). It drove the
+# trap with `command false || true`, and a command in a `||` list does not fire
+# ERR — bash manual, "the ERR trap is not executed if the failed command is part
+# of a command executed in a && or || list except the command following the final
+# && or ||". Measured on bash 5.3: that form fires the trap ZERO times, so
+# `_record_err` never ran and SURVIVED printed whether the guard existed or not.
+# (bash 3.2 does fire it, which is why this passed unnoticed on macOS; Linux CI
+# is the authority and Linux is where it was vacuous.)
+#
+# `unset LOG_FILE` was the second half of the same problem: `log` is
+# `[[ -n "${LOG_FILE:-}" ]] && echo … ; return 0`, so with no log open the write
+# never even attempts and nothing inside the recorder fails. The failure has to
+# come from the redirection itself.
+@test "_record_err: survives its own log write failing" {
   cat > "$BATS_TEST_TMPDIR/r.sh" <<EOF
 set -Eeuo pipefail
 source '${LIB_DIR}/common.sh' >/dev/null 2>&1
-unset LOG_FILE
+# A path whose PARENT DIRECTORY does not exist, rather than a chmod 000 file:
+# the append redirection then fails for every user including root, so this stays
+# honest wherever CI runs it.
+LOG_FILE='$BATS_TEST_TMPDIR/nodir/r.log'
 trap '_record_err "\${BASH_SOURCE[0]:-?}:\${LINENO}" "\$BASH_COMMAND"' ERR
-command false || true
+# A bare failing command inside a function, with errexit relaxed around the call
+# so the script reaches the assertion. This DOES fire ERR (verified on 5.3).
+boom() { command false; }
+set +e; boom; set -e
 echo SURVIVED
 EOF
   # Bound it where a bound exists: without the guard this recurses forever, and a
@@ -296,6 +317,29 @@ EOF
     run bash "$BATS_TEST_TMPDIR/r.sh"
   fi
   [[ "$output" == *"SURVIVED"* ]] || return 1
+}
+
+# The guard's ACTUAL effect, asserted directly — because recursion cannot be
+# driven from the outside here. bash re-enters an ERR trap at most once (measured
+# on 5.3: a handler that fails re-enters to depth 2 and stops), so removing
+# `_TB_IN_RECORD_ERR` does not hang anything, and a test that waits for a hang
+# would pass with the guard deleted.
+#
+# What removing it DOES do is let the nested entry overwrite TB_ERR_* with the
+# recorder's own log failure — turning "the install died at helm upgrade" into
+# "the install died writing its log", which is the wrong answer stated
+# confidently. Verified both ways against this file: with the guard the first
+# record stands, without it every field is clobbered.
+@test "_record_err: a re-entrant call keeps the first record, not the log failure" {
+  unset TB_ERR_CODE TB_ERR_LOC TB_ERR_CMD
+  LOG_FILE="$BATS_TEST_TMPDIR/g.log"; : > "$LOG_FILE"
+  TB_ERR_CODE=7; TB_ERR_LOC="real.sh:42"; TB_ERR_CMD="helm upgrade"
+  _TB_IN_RECORD_ERR=1                      # as if we were already inside the trap
+  _record_err "common.sh:214" "echo >> \$LOG_FILE" || return 1
+  [ "$TB_ERR_LOC"  = "real.sh:42" ]  || return 1
+  [ "$TB_ERR_CMD"  = "helm upgrade" ] || return 1
+  [ "$TB_ERR_CODE" = "7" ]            || return 1
+  _TB_IN_RECORD_ERR=""
 }
 
 # The trail is the artifact support reads: every ERR in order, benign ones too.
