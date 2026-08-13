@@ -234,15 +234,146 @@ h'
   [[ "$output" == *"p.sh:5"* ]] || return 1        # and the line that died
 }
 
-# The FIRST failure is the cause; `set -e` unwinding must not overwrite it.
+# LAST failure wins. The trap fires for benign failures too — a probe whose
+# non-zero exit IS its answer — so an earlier record must never block a later one.
 # `cmd || _record_err …` keeps the failing status in `$?` where the recorder
 # reads it (a bare `( exit 7 ); …` would abort the test under bats' own set -e).
-@test "_record_err: first failure wins" {
+@test "_record_err: last failure wins" {
+  unset TB_ERR_CODE TB_ERR_LOC TB_ERR_CMD; _TB_IN_RECORD_ERR=""
+  ( exit 7 ) || _record_err "benign.sh:1" "sudo -n true"
+  ( exit 9 ) || _record_err "fatal.sh:2"  "the real one"
+  [ "$TB_ERR_CODE" = 9 ] || return 1
+  [ "$TB_ERR_LOC" = "fatal.sh:2" ] || return 1
+  [ "$TB_ERR_CMD" = "the real one" ] || return 1
+}
+
+# The regression this replaces, end to end and in the real shape it took: a probe
+# that fails INSIDE an `if` (its failure is the expected answer), a step that
+# then succeeds, and a fatal command afterwards. Under first-wins the report
+# named the probe; it must now name the fatal command.
+# Mutation-real — restore the first-wins guard and this fails.
+@test "_record_err: a benign probe does not mask the fatal command" {
+  cat > "$BATS_TEST_TMPDIR/p.sh" <<EOF
+set -Eeuo pipefail
+source '${LIB_DIR}/common.sh' >/dev/null 2>&1
+LOG_FILE=""
+trap '_record_err "\${BASH_SOURCE[0]:-?}:\${LINENO}" "\$BASH_COMMAND"' ERR
+trap 'printf "LOC=%s CMD=%s\n" "\$TB_ERR_LOC" "\$TB_ERR_CMD"' EXIT
+probe() { command false; }          # benign: its failure is the answer
+if probe; then :; fi                # ...and it is consumed by an \`if\`
+boom()  { command grep -q nope <<<"hay"; }
+boom                                # fatal
+EOF
+  run bash "$BATS_TEST_TMPDIR/p.sh"
+  [ "$status" -ne 0 ] || return 1
+  [[ "$output" == *"grep -q nope"* ]] || return 1     # the fatal command...
+  [[ "$output" != *"CMD=false"* ]] || return 1        # ...not the benign probe
+  [[ "$output" == *"p.sh:8"* ]] || return 1           # and the line it died on
+}
+
+# The recorder inherits its own ERR trap under set -E, so a failing command
+# inside it must not damage the record it just took. `log` writing to a path it
+# cannot open is exactly such a command.
+#
+# THE PREVIOUS VERSION OF THIS TEST ASSERTED NOTHING (Bugbot, #702). It drove the
+# trap with `command false || true`, and a command in a `||` list does not fire
+# ERR — bash manual, "the ERR trap is not executed if the failed command is part
+# of a command executed in a && or || list except the command following the final
+# && or ||". Measured on bash 5.3: that form fires the trap ZERO times, so
+# `_record_err` never ran and SURVIVED printed whether the guard existed or not.
+# (bash 3.2 does fire it, which is why this passed unnoticed on macOS; Linux CI
+# is the authority and Linux is where it was vacuous.)
+#
+# `unset LOG_FILE` was the second half of the same problem: `log` is
+# `[[ -n "${LOG_FILE:-}" ]] && echo … ; return 0`, so with no log open the write
+# never even attempts and nothing inside the recorder fails. The failure has to
+# come from the redirection itself.
+@test "_record_err: survives its own log write failing" {
+  cat > "$BATS_TEST_TMPDIR/r.sh" <<EOF
+set -Eeuo pipefail
+source '${LIB_DIR}/common.sh' >/dev/null 2>&1
+# A path whose PARENT DIRECTORY does not exist, rather than a chmod 000 file:
+# the append redirection then fails for every user including root, so this stays
+# honest wherever CI runs it.
+LOG_FILE='$BATS_TEST_TMPDIR/nodir/r.log'
+trap '_record_err "\${BASH_SOURCE[0]:-?}:\${LINENO}" "\$BASH_COMMAND"' ERR
+# A bare failing command inside a function, with errexit relaxed around the call
+# so the script reaches the assertion. This DOES fire ERR (verified on 5.3).
+boom() { command false; }
+set +e; boom; set -e
+echo SURVIVED
+EOF
+  # Bound it where a bound exists: without the guard this recurses forever, and a
+  # hang would stall the whole suite rather than fail it. macOS ships no
+  # timeout(1) (gtimeout only with coreutils), so locally this runs unbounded —
+  # Linux CI, which has timeout, is the authority. Same fallback shape as
+  # common.sh's own _bounded.
+  local _to=""
+  command -v timeout  >/dev/null 2>&1 && _to=timeout
+  command -v gtimeout >/dev/null 2>&1 && _to=gtimeout
+  if [ -n "$_to" ]; then
+    run "$_to" 10 bash "$BATS_TEST_TMPDIR/r.sh"
+  else
+    run bash "$BATS_TEST_TMPDIR/r.sh"
+  fi
+  [[ "$output" == *"SURVIVED"* ]] || return 1
+}
+
+# The guard's ACTUAL effect, asserted directly — because recursion cannot be
+# driven from the outside here. bash re-enters an ERR trap at most once (measured
+# on 5.3: a handler that fails re-enters to depth 2 and stops), so removing
+# `_TB_IN_RECORD_ERR` does not hang anything, and a test that waits for a hang
+# would pass with the guard deleted.
+#
+# What removing it DOES do is let the nested entry overwrite TB_ERR_* with the
+# recorder's own log failure — turning "the install died at helm upgrade" into
+# "the install died writing its log", which is the wrong answer stated
+# confidently. Verified both ways against this file: with the guard the first
+# record stands, without it every field is clobbered.
+@test "_record_err: a re-entrant call keeps the first record, not the log failure" {
   unset TB_ERR_CODE TB_ERR_LOC TB_ERR_CMD
-  ( exit 7 ) || _record_err "first.sh:1"
-  ( exit 9 ) || _record_err "second.sh:2"
-  [ "$TB_ERR_CODE" = 7 ] || return 1
-  [ "$TB_ERR_LOC" = "first.sh:1" ] || return 1
+  LOG_FILE="$BATS_TEST_TMPDIR/g.log"; : > "$LOG_FILE"
+  TB_ERR_CODE=7; TB_ERR_LOC="real.sh:42"; TB_ERR_CMD="helm upgrade"
+  _TB_IN_RECORD_ERR=1                      # as if we were already inside the trap
+  _record_err "common.sh:214" "echo >> \$LOG_FILE" || return 1
+  [ "$TB_ERR_LOC"  = "real.sh:42" ]  || return 1
+  [ "$TB_ERR_CMD"  = "helm upgrade" ] || return 1
+  [ "$TB_ERR_CODE" = "7" ]            || return 1
+  _TB_IN_RECORD_ERR=""
+}
+
+# The trail is the artifact support reads: every ERR in order, benign ones too.
+@test "_record_err: logs the whole trail, not just the last one" {
+  unset TB_ERR_CODE TB_ERR_LOC TB_ERR_CMD; _TB_IN_RECORD_ERR=""
+  LOG_FILE="$BATS_TEST_TMPDIR/trail.log"; : > "$LOG_FILE"
+  ( exit 1 ) || _record_err "a.sh:1" "sudo -n true"
+  ( exit 2 ) || _record_err "b.sh:2" "helm upgrade"
+  grep -q "err: a.sh:1 exit=1 cmd=sudo -n true" "$LOG_FILE" || return 1
+  grep -q "err: b.sh:2 exit=2 cmd=helm upgrade" "$LOG_FILE" || return 1
+}
+
+# install_cleanup's own lines fail routinely (a kill on a dead pid, a false
+# `[[ … ]]`). Under last-wins those would overwrite the fatal record before it is
+# read, so the handler disarms the trap first.
+@test "install_cleanup: its own cleanup cannot overwrite the recorded failure" {
+  cat > "$BATS_TEST_TMPDIR/c.sh" <<EOF
+set -Eeuo pipefail
+source '${LIB_DIR}/common.sh' >/dev/null 2>&1
+LOG_FILE="$BATS_TEST_TMPDIR/c.log"
+trap '_record_err "\${BASH_SOURCE[0]:-?}:\${LINENO}" "\$BASH_COMMAND"' ERR
+trap install_cleanup EXIT
+SUDO_KEEPALIVE_PID=999999          # long dead -> the kill in install_cleanup fails
+boom() { command grep -q nope <<<"hay"; }
+boom
+EOF
+  run bash "$BATS_TEST_TMPDIR/c.sh"
+  # Line 7 — the function BODY, where the command actually failed, not line 8
+  # where it was called. That distinction is the point of passing LINENO in.
+  grep -q "grep -q nope" "$BATS_TEST_TMPDIR/c.log" || return 1
+  grep -q "FAILED at .*c.sh:7" "$BATS_TEST_TMPDIR/c.log" || return 1
+  # ...and not the dead-pid kill that install_cleanup runs on its way out.
+  grep -q "FAILED at .*kill" "$BATS_TEST_TMPDIR/c.log" && return 1
+  return 0
 }
 
 @test "install_cleanup: a recorded failure names the site on screen" {
