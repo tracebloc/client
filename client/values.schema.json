@@ -14,7 +14,16 @@
         "CLIENT_ENV": {
           "type": "string",
           "default": "prod",
-          "description": "Environment identifier and Docker image tag. Canonical values are `dev`, `stg`, `prod`; the documented aliases `development`/`staging`/`production` are accepted and normalized (matching client-runtime proxy_config.ENV_ALIASES). Load-bearing: it selects images.ingestor.channelTags and the prod digest pin. Defaults to 'prod' if not set or empty."
+          "enum": [
+            "",
+            "dev",
+            "stg",
+            "prod",
+            "development",
+            "staging",
+            "production"
+          ],
+          "description": "Environment identifier and Docker image tag. Canonical values are `dev`, `stg`, `prod`; the documented aliases `development`/`staging`/`production` are accepted and normalized (matching client-runtime proxy_config.ENV_ALIASES). Empty means 'unset' and resolves to prod. THE LIST IS CLOSED (enum above): anything else is rejected at install/upgrade time rather than passed through as a literal image tag. It was open until backend#1723's follow-up, and an out-of-vocabulary value did not degrade -- it silently reconfigured the edge: it became the tag for three control-plane images (no `:prd`/`:qa` tag is published), it missed `images.ingestor.channelTags` so the ingestor fell to the last-resort literal, it missed `serviceDbAccountsByEnv` so no service DB account was provisioned, AND it dropped the prod digest pin, which applies only where the env resolves to exactly `prod`. Load-bearing in four places, validated in none."
         },
         "HTTP_PROXY_HOST": {
           "type": "string"
@@ -623,7 +632,8 @@
             },
             "channelTags": {
               "type": "object",
-              "description": "Per-environment floating tags, keyed on the resolved CLIENT_ENV, used when `tag` is empty. `dev`/`stg` track the UNSIGNED internal channels published from the matching data-ingestors branch; `prod` stays a semver float because no :prod tag is published. backend#1360.",
+              "description": "Per-environment floating tags, keyed on the resolved CLIENT_ENV, used when `tag` is empty. `dev`/`stg` track the UNSIGNED internal channels published from the matching data-ingestors branch; `prod` stays a semver float because no :prod tag is published. backend#1360. KEYS ARE CLOSED (`additionalProperties: false`): the lookup is on the RESOLVED env, so only `dev`/`stg`/`prod` can ever match. Before this, `channelTags.staging: \"0.8.2\"` on a staging edge validated fine and was then ignored -- CLIENT_ENV=staging normalizes to `stg` and read `channelTags.stg` -- so the same word was normalized one key over and meaningless here. Write the canonical key even when you wrote the alias in CLIENT_ENV.",
+              "additionalProperties": false,
               "properties": {
                 "dev": {
                   "type": "string",
@@ -675,7 +685,7 @@
               "not": {
                 "const": "latest"
               },
-              "description": "Image tag for mysql-client. Empty falls back to env.CLIENT_ENV. Must not be \"latest\"."
+              "description": "Image tag for mysql-client. Empty falls back to the literal `prod` in EVERY environment -- NOT to env.CLIENT_ENV, which is what this said until backend#1723's follow-up. The template is `.Values.images.mysqlClient.tag | default \"prod\"`, and dev/stg/prod edges all render `mysql-client:prod`. The doc was not merely imprecise, it was an instruction to break the edge: tracebloc/mysql-client publishes 8.0, 8.4, four 8.4-<sha> builds, latest and prod -- there is no `dev` or `stg` tag -- so a reader who believed it and set an env-derived tag would pull a nonexistent image AND disarm the mysql-format-guard, since tracebloc.mysqlEngineMajor maps an unrecognized tag to \"unknown\" and the guard stands down. Must not be \"latest\"."
             },
             "digest": {
               "type": "string",

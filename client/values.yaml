@@ -430,6 +430,12 @@ images:
     # the current release line for the same submit-vs-run reasons noted above.
     #
     # These are unsigned internal images. Do not point a prod edge at them.
+    #
+    # THESE THREE VALUES ARE MIRRORED as last-resort literals in the
+    # `tracebloc.ingestorTag` helper, for the `--reuse-values` replay where
+    # this key is absent and no chart default is adopted. Bump `prod` here and
+    # you must bump it there; ingestor_channel_tag_test.yaml pins both so a
+    # half-done bump fails CI. Read that helper's comment before touching prod.
     channelTags:
       dev: "dev"
       stg: "stg"
