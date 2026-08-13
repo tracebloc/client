@@ -171,6 +171,18 @@ drift:
 	scripts/check-facts.sh --check
 	bash scripts/check-style.sh
 
+# digest-drift: the watcher on every mutable label that points at a pinned
+# digest (backend#1853). NOT in `check`: it needs the network and a docker
+# daemon, and it is knowingly RED today -- the ingestor's 0.8 float has moved
+# off the pinned v0.8.2 digest, which is the whole finding. A red target in the
+# pre-push tier trains people to skip the tier.
+#
+# It runs on the schedule in .github/workflows/digest-drift.yml. Its bats suite
+# IS in `make bats`, because that part needs no network.
+.PHONY: digest-drift
+digest-drift:
+	scripts/check-digest-drift.sh
+
 # bats: standard-checks.yml `Unit tests` / installer-tests.yaml
 # `unit-bash`. ~2 min serially.
 .PHONY: bats

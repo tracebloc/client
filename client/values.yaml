@@ -434,9 +434,17 @@ images:
       dev: "dev"
       stg: "stg"
       # 0.8 line: carries the ds_<hex> per-ingestion write path (D16,
-      # data-ingestors#408, first released as v0.8.0 on 2026-07-30; line at
-      # v0.8.4 as of 2026-08-12, but `prodDigest` below deliberately pins v0.8.2
-      # — see the ordering constraint noted there). A prod edge left on 0.7
+      # data-ingestors#408, first released as v0.8.0 on 2026-07-30). THIS FLOAT
+      # MOVES WITHOUT US: it was at v0.8.4 on 2026-08-12 and is at **v0.8.8**
+      # (sha256:4beb85da…) later the same day. `prodDigest` below deliberately
+      # pins v0.8.2 — see the ordering constraint noted there.
+      #
+      # Do not restate the float's current version here. Any version written
+      # into this comment is stale the moment the next release ships, and a
+      # stale one reads as reassurance ("only two patches behind") for a gap
+      # that may be much larger. scripts/check-digest-drift.sh is what tracks
+      # it; it compares the float against the pin on a schedule and says so
+      # when they part company (backend#1853). A prod edge left on 0.7
       # spawns a pre-D16 ingestor
       # and silently falls back to the legacy tables even with
       # `perIngestionTables` on (found on staging). Verified multi-arch against
@@ -469,8 +477,10 @@ images:
     # index; matches the v0.8.2 GitHub Release digest). The `VERIFIED` note is
     # the audit trail: re-resolve it, do not trust a previous note's date.
     #
-    # DELIBERATELY BEHIND the `channelTags.prod: "0.8"` float, which now resolves
-    # to v0.8.4 (sha256:02da1ebd…). Do not "refresh" this to the float without
+    # DELIBERATELY BEHIND the `channelTags.prod: "0.8"` float. The float has
+    # since moved to v0.8.8 (sha256:4beb85da…), which REMOVED the edgeuser
+    # fallback — i.e. it crossed the boundary described below, and the gap is no
+    # longer "two patches". Do not "refresh" this to the float without
     # reading the ordering constraint in docs/SECURITY.md §4.1.1: prod's
     # `serviceDbAccountsByEnv.prod` is still `false`, and the boundary is not a
     # version number — it is whether the release you move to was cut before

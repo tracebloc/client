@@ -1,0 +1,42 @@
+# Watch every mutable label that points at a pinned digest (backend#1853).
+#
+# On 2026-08-12 the ingestor's `channelTags.prod: "0.8"` float moved to 0.8.8 and
+# crossed a compatibility boundary. Nothing noticed; a manual sweep found it.
+# The pre-existing guard (`resolve-ingestor-digest.sh --write`) enforces a ceiling
+# against the HUMAN advancing the pin -- but the thing that moves is the
+# REGISTRY, on someone else's schedule, so that guard cannot fire on this event.
+#
+# Deliberately property-agnostic. It does not assert anything about a build's
+# contents (no DB_USER check): the alarm is "the float no longer resolves to the
+# digest we trust", so it fires on whatever moves next rather than on the one
+# thing that moved first.
+#
+# No event payload is read anywhere here (schedule + dispatch only), so there is
+# no untrusted input to interpolate into a run: block.
+name: Digest drift watch
+
+on:
+  schedule:
+    # Daily. A float can move any day, and the cost of asking is two registry
+    # lookups; a weekly cadence would leave up to six days of unnoticed drift.
+    - cron: "30 6 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: digest-drift
+  cancel-in-progress: false
+
+jobs:
+  watch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v5.0.0
+
+      # Public read of a public index needs no credential. Left unauthenticated
+      # on purpose: a watcher that requires a secret is a watcher that silently
+      # stops when the secret rotates.
+      - name: Check for digest drift
+        run: scripts/check-digest-drift.sh

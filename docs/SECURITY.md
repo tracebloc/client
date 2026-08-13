@@ -137,9 +137,20 @@ The dedicated accounts are minted by jobs-manager at startup via runtime DDL (mi
 >
 > **The requirement attaches to a BUILD, not to a version number.** #468 merged **2026-08-11**, one day *after* **v0.8.4** was cut on 08-10, so **no tagged `0.8.x` release carries it** — verified 2026-08-12 by reading `tracebloc_ingestor/config.py` at both v0.8.2 and v0.8.4, which still read `os.environ.get("DB_USER", "edgeuser")`. An earlier revision of this note said the requirement began "from version 0.8.0"; that was wrong, and taken literally it made the client#490 repin to v0.8.2 look like a prod-breaker while also contradicting the `0.8.2` ceiling stated in the next paragraph.
 >
-> So, as of 2026-08-12: `v0.8.0`–`v0.8.4` are all **safe** with the flag off; the **first `0.8.x` release cut after 2026-08-11** is the one that is not. Do not re-derive that boundary from a version number in this file — check whether the release you are moving to predates #468.
+> **The ceiling, and the fact that it has already been crossed.** This is a bounded range, not an open one:
 >
-> **Therefore: turn this flag on for a fleet BEFORE its ingestor moves to a build containing #468, never after.** For prod that means before `images.ingestor.prodDigest` moves to such a build. client#490 pins **v0.8.2**, which is deliberately conservative rather than the boundary — the newest safe release today is v0.8.4. The invariant is checked in CI by `client-runtime/tests/test_ingestor_env_contract.py` against the contract `data-ingestors` publishes as `runtime_env.v1.json` (backend#1754).
+> | release | `DB_USER` resolution (read from `tracebloc_ingestor/config.py` at the tag) | safe with the flag OFF |
+> |---|---|---|
+> | `v0.8.0` – `v0.8.4` | `os.environ.get("DB_USER", "edgeuser")` | **yes** — `v0.8.4` is the ceiling |
+> | `v0.8.8` and later | `self._require_env("DB_USER")` — raises | **NO** |
+>
+> **`v0.8.8` exists and is past the ceiling** (released 2026-08-12 16:13 UTC, `sha256:4beb85da…`), and the `channelTags.prod: "0.8"` **float now resolves to it** — verified live against ghcr, not inferred. So this is no longer a hypothetical future release: the unsafe build is what the float points at today. Prod is unaffected only because `prodDigest` pins `v0.8.2` and `prodPin` defaults to `true` (backend#1853).
+>
+> Read the ceiling as "safe **up to** v0.8.4", never as "recent releases are fine". And do not re-derive the boundary from a version number in this file — check whether the release you are moving to predates #468, and do not assume the newest tag is inside the range.
+>
+> **This table is not the watcher.** A hand-maintained version list goes stale silently and then reads as reassurance. `scripts/check-digest-drift.sh` runs on a schedule and reports whenever the float stops resolving to the pinned digest — deliberately without asserting anything about `DB_USER`, because the next thing to move will not be `DB_USER` (backend#1853).
+>
+> **Therefore: turn this flag on for a fleet BEFORE its ingestor moves to a build containing #468, never after.** For prod that means before `images.ingestor.prodDigest` moves to such a build. client#490 pins **v0.8.2**, which is deliberately conservative rather than the boundary: the newest safe release is **v0.8.4**, and the newest release *of any kind* is v0.8.8, which is **not** safe. The invariant is checked in CI by `client-runtime/tests/test_ingestor_env_contract.py` against the contract `data-ingestors` publishes as `runtime_env.v1.json` (backend#1754).
 
 **Staged retirement (backend#1528, RFC-0003 D10 close-out):** **S1** mint `tb_meta` + `tb_ingest` (done) → **S2** switch jobs-manager, requests-proxy, and spawned ingestion Jobs off the hardcoded `edgeuser` constants onto the injected identities, and re-parent the `tb_credmgr` bootstrap → **S3** `REVOKE` `edgeuser` to nothing and `DROP USER`, fleet-staged. `edgeuser` must retain `CREATE USER` + `GRANT OPTION` until the bootstrap is re-parented, so the revoke is deliberately last.
 
