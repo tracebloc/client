@@ -33,6 +33,17 @@ rules:
   - apiGroups: ["metrics.k8s.io"]
     resources: ["pods"]
     verbs: ["get", "list"]
+  # backend#1876: jobs-manager's check_pending_jobs GPU->CPU fallback
+  # (client-runtime#217) calls list_node() to decide whether an overdue
+  # Pending GPU pod is waiting for a GPU node to autoscale in (leave it) or
+  # genuinely has no GPU node (downgrade to CPU). `nodes` is cluster-scoped,
+  # so — like tokenreviews below — it can only be granted here, in the
+  # clusterScope: true branch. Without it list_node() 403s and the runtime's
+  # fail-safe assumes a GPU node is present, silently disabling the fallback:
+  # the pod wedges Pending forever while the backend shows RUNNING.
+  - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["list"]
   # client-runtime#21: jobs-manager's POST /internal/submit-ingestion-run
   # endpoint authenticates callers (the ingestor subchart's post-install
   # hook) via TokenReview, then creates a per-run ConfigMap (ingest.yaml)
