@@ -696,3 +696,50 @@ tests:
       - equal:
           path: spec.jobTemplate.spec.activeDeadlineSeconds
           value: 5400
+
+  - it: retires the CronJob when the DaemonSet is disabled and both class-1 images are pinned (#569, Bugbot)
+    # The helper-vs-runtime disagreement: `imageRefreshEnabled` checked only
+    # `images.resourceMonitor.digest`, while RESOURCE_MONITOR_PINNED also treated
+    # `resourceMonitor: false` as pinned. So this combination kept rendering a
+    # CronJob that skipped every image and exited green every tick forever —
+    # where before #569 it retired cleanly. Both now read one helper.
+    template: templates/image-refresh-cronjob.yaml
+    set:
+      resourceMonitor: false
+      images:
+        jobsManager:
+          digest: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        podsMonitor:
+          digest: "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    asserts:
+      - hasDocuments:
+          count: 0
+
+  - it: rbac renders nothing for that same combination
+    template: templates/image-refresh-rbac.yaml
+    set:
+      resourceMonitor: false
+      images:
+        jobsManager:
+          digest: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        podsMonitor:
+          digest: "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    asserts:
+      - hasDocuments:
+          count: 0
+
+  - it: still renders when the DaemonSet is disabled but a class-1 image can drift
+    # Guard the other direction: disabling resource-monitor must NOT retire the
+    # CronJob while jobs-manager or pods-monitor is still floating.
+    template: templates/image-refresh-cronjob.yaml
+    documentIndex: 1
+    set:
+      resourceMonitor: false
+    asserts:
+      - isKind:
+          of: CronJob
+      - contains:
+          path: spec.jobTemplate.spec.template.spec.containers[0].env
+          content:
+            name: RESOURCE_MONITOR_PINNED
+            value: "1"

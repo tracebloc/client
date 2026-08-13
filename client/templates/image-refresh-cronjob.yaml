@@ -635,8 +635,11 @@ spec:
                 # OR when `resourceMonitor: false` disables the DaemonSet
                 # entirely — with no workload to reconcile, attempting a
                 # cross-namespace `set image` would just fail the tick.
+                # Shares ONE definition with tracebloc.imageRefreshEnabled --
+                # see tracebloc.resourceMonitorRefreshPinned. Writing the rule
+                # twice is what let the render-time and runtime views disagree.
                 - name: RESOURCE_MONITOR_PINNED
-                  value: {{ ternary "1" "0" (or (eq .Values.resourceMonitor false) (not (empty (default dict (default dict .Values.images).resourceMonitor).digest))) | quote }}
+                  value: {{ ternary "1" "0" (not (empty (include "tracebloc.resourceMonitorRefreshPinned" .))) | quote }}
                 # requests-proxy follows the jobs-manager digest by default;
                 # this flag is the per-workload override that opts it out.
                 - name: REQUESTS_PROXY_PINNED

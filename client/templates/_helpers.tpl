@@ -188,6 +188,36 @@ mysql-pvc
   ever absent. Belt-and-suspenders — see the "nil-guard every new
   top-level value key" rule in CLAUDE.md.
 */}}
+{{/*
+  tracebloc.resourceMonitorRefreshPinned — whether image-refresh has nothing to
+  do for resource-monitor. Renders "true" when so, nothing when not.
+
+  ONE definition, because there are TWO consumers that must agree:
+  `tracebloc.imageRefreshEnabled` (does the CronJob render at all?) and the
+  CronJob's own RESOURCE_MONITOR_PINNED env (does the script skip this image?).
+  The first cut of #569 wrote the rule twice and they disagreed: the helper
+  checked only the digest while the env also treated `resourceMonitor: false` as
+  pinned. With the DaemonSet disabled and both class-1 images pinned, the CronJob
+  therefore kept rendering a job that skipped every image and exited green every
+  tick, forever — where before #569 that combination retired it (Bugbot).
+
+  Two ways to have nothing to do:
+    * an explicit `images.resourceMonitor.digest` pin, same signal as the other
+      images, or
+    * `resourceMonitor: false` — there is no DaemonSet at all, so there is
+      nothing to reconcile and a cross-namespace `set image` would just fail.
+
+  Nil-safe: `.Values.resourceMonitor` absent reads as enabled, matching the
+  `ne .Values.resourceMonitor false` gate on the DaemonSet itself.
+*/}}
+{{- define "tracebloc.resourceMonitorRefreshPinned" -}}
+{{- if eq .Values.resourceMonitor false -}}
+true
+{{- else if (default dict (default dict .Values.images).resourceMonitor).digest -}}
+true
+{{- end -}}
+{{- end }}
+
 {{- define "tracebloc.imageRefreshEnabled" -}}
 {{- $ir := default dict .Values.imageRefresh -}}
 {{- $imgs := default dict .Values.images -}}
@@ -222,7 +252,7 @@ mysql-pvc
   different build of the same image forever. If that fallback is ever removed,
   requests-proxy must get its own entry in this test.
 */}}
-{{- $rmPinned := (default dict $imgs.resourceMonitor).digest -}}
+{{- $rmPinned := include "tracebloc.resourceMonitorRefreshPinned" . -}}
 {{- if not $ir.enabled -}}
 {{- else if and $jmPinned $pmPinned $rmPinned -}}
 {{- else -}}
