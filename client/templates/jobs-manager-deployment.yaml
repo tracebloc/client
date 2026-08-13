@@ -209,37 +209,44 @@ spec:
         # non-empty value as "disabled", and a non-empty string is likewise
         # truthy to Helm. Without this gate, an operator setting that env var
         # would get a pod that never becomes Ready.
-        startupProbe:
-          tcpSocket:
-            port: 8080
-          # 30 x 5s = 150s of headroom. More generous than requests-proxy's
-          # 60s (#1143) on purpose: this container retries backend auth and
-          # then runs a MySQL migration before it ever listens.
-          initialDelaySeconds: 5
-          periodSeconds: 5
-          timeoutSeconds: 3
-          failureThreshold: 30
         readinessProbe:
           tcpSocket:
             port: 8080
-          # The one that fixes the false-green: the jobs-manager Service must
+          # The probe that fixes the false-green: the jobs-manager Service must
           # not route POST /internal/submit-ingestion-run at a pod whose server
           # is not listening ("connection refused to that pod's 8080, x16
-          # tasks" in the 2026-08-11 run).
+          # tasks" in the 2026-08-11 run), and `kubectl rollout status` must not
+          # call the Deployment available until it is.
+          #
+          # initialDelaySeconds covers the slow start without any consequence
+          # if it is not enough: this container retries backend auth and then
+          # runs a MySQL migration before it listens, and while readiness fails
+          # the pod is merely NotReady. Nothing kills it. That is the whole
+          # point — see the note below.
+          initialDelaySeconds: 10
           periodSeconds: 10
           timeoutSeconds: 3
           failureThreshold: 3
-        # NO livenessProbe, deliberately — recording the decision rather than
-        # leaving it an omission (backend#1779 asks for exactly that).
-        # A liveness probe on 8080 would RESTART the pod whenever the ingestion
-        # server is down, and jobs_manager.py catches a failed
-        # run_server_in_thread on purpose: "Startup failure here is fatal for
-        # the ingestion flow but must not take down the rest of jobs-manager —
-        # SB polling can still operate independently and training submissions
-        # keep working." Adding liveness here would silently reverse that
-        # decision from the chart. Readiness already removes the pod from the
-        # Service, which is the part that needs to happen. Restarting a process
-        # that is still training models is not.
+        # READINESS ONLY — no livenessProbe AND no startupProbe, deliberately.
+        # backend#1779 asks for this to be a recorded decision, so here it is.
+        #
+        # Both of those probe types KILL the container when they fail: liveness
+        # on every failure threshold, and a startupProbe likewise ("if the
+        # startup probe fails, the kubelet kills the container"). jobs_manager.py
+        # catches a failed run_server_in_thread on purpose: "Startup failure
+        # here is fatal for the ingestion flow but must not take down the rest
+        # of jobs-manager — SB polling can still operate independently and
+        # training submissions keep working."
+        #
+        # So either probe would reverse that decision from the chart, and turn a
+        # degraded-but-useful pod into a CrashLoopBackOff that also stops the
+        # Service Bus polling and the training it was still doing. Readiness
+        # removes the pod from the Service, which is the part that needs to
+        # happen. Restarting a process that is still training models is not.
+        #
+        # (An earlier revision of this PR did add a startupProbe with a 150s
+        # budget, which had exactly that bug — it was caught in review. Do not
+        # reintroduce one without also changing jobs_manager.py's decision.)
         {{- end }}
         volumeMounts:
           - name: shared-volume

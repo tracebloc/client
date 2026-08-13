@@ -617,11 +617,16 @@ tests:
                 key: TB_INGEST_PASSWORD
 
   # -------------------------------------------------------------------------
-  # Readiness / startup probes — backend#1779
+  # Readiness probe — backend#1779
   #
   # Before this, jobs-manager had no probes, so the kubelet called the
   # container Ready as soon as it was running and `kubectl rollout status`
   # reported success over a crash-loop (backend#1723, 2026-08-11).
+  #
+  # READINESS ONLY, on purpose. Both livenessProbe and startupProbe kill the
+  # container when they fail, and jobs_manager.py deliberately survives a
+  # failed ingestion-server start so Service Bus polling and training keep
+  # working. The two "must not exist" tests below are the guard on that.
   # -------------------------------------------------------------------------
 
   - it: should give the api container a readiness probe on the ingestion port
@@ -639,36 +644,40 @@ tests:
           path: spec.template.spec.containers[0].readinessProbe.failureThreshold
           value: 3
 
-  - it: should give the api container a startup probe with room for auth + migration
+  - it: should give the readiness probe room for a slow auth + migration start
     template: templates/jobs-manager-deployment.yaml
     asserts:
+      # jobs-manager retries backend auth and runs a MySQL migration before it
+      # listens. Failing readiness during that costs nothing (the pod is just
+      # NotReady, nothing kills it), but the delay keeps the event log honest.
       - equal:
-          path: spec.template.spec.containers[0].startupProbe.tcpSocket.port
-          value: 8080
-      # 30 x 5s = 150s. jobs-manager retries backend auth and runs a MySQL
-      # migration before it listens, so it needs more headroom than
-      # requests-proxy's 60s. Pinned so a later "tidy-up" cannot quietly
-      # shrink it back and start killing slow-but-healthy starts.
+          path: spec.template.spec.containers[0].readinessProbe.initialDelaySeconds
+          value: 10
       - equal:
-          path: spec.template.spec.containers[0].startupProbe.failureThreshold
-          value: 30
-      - equal:
-          path: spec.template.spec.containers[0].startupProbe.periodSeconds
-          value: 5
+          path: spec.template.spec.containers[0].readinessProbe.periodSeconds
+          value: 10
 
-  - it: should NOT give the api container a liveness probe (deliberate)
+  - it: should NOT give the api container any probe that restarts it (deliberate)
     template: templates/jobs-manager-deployment.yaml
     asserts:
-      # jobs_manager.py catches a failed ingestion-server start on purpose so
-      # that Service Bus polling and training submissions keep working. A
-      # liveness probe on 8080 would restart the pod in exactly that case and
-      # reverse the decision from the chart. Readiness (remove from Service)
-      # is the correct response; restarting a process that is still training
-      # models is not.
+      # BOTH of these kill the container on failure — liveness on every
+      # threshold breach, and a startupProbe likewise ("if the startup probe
+      # fails, the kubelet kills the container"). jobs_manager.py catches a
+      # failed run_server_in_thread on purpose so that Service Bus polling and
+      # training submissions keep working, so either probe would reverse that
+      # decision from the chart and turn a degraded-but-useful pod into a
+      # CrashLoopBackOff. Readiness (remove from Service) is the correct
+      # response; restarting a process that is still training models is not.
+      #
+      # An earlier revision of this PR shipped a startupProbe with a 150s
+      # budget and had exactly that bug. This test is why it cannot come back
+      # silently.
       - notExists:
           path: spec.template.spec.containers[0].livenessProbe
+      - notExists:
+          path: spec.template.spec.containers[0].startupProbe
 
-  - it: should drop the port probes when the ingestion server is disabled
+  - it: should drop the port probe when the ingestion server is disabled
     template: templates/jobs-manager-deployment.yaml
     set:
       # The runtime treats ANY non-empty value as "disabled"
@@ -679,8 +688,6 @@ tests:
     asserts:
       - notExists:
           path: spec.template.spec.containers[0].readinessProbe
-      - notExists:
-          path: spec.template.spec.containers[0].startupProbe
 
   - it: should still probe when INGESTION_HTTP_DISABLED is present but empty
     template: templates/jobs-manager-deployment.yaml
