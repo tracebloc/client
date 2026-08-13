@@ -36,7 +36,8 @@ SHELLCHECK_FILES := \
 	scripts/tests/e2e-proxy.sh \
 	scripts/tests/lib/e2e-common.sh \
 	scripts/tests/path-persist.sh \
-	scripts/tests/chart-env-vocabulary.sh
+	scripts/tests/chart-env-vocabulary.sh \
+	scripts/tests/env-vocabulary-agreement.sh
 
 # The bats total, DERIVED — never written down. It moves on most PRs that add a
 # test, nothing enforces it, and the help text had drifted from its hardcoded
@@ -196,6 +197,7 @@ helm-lint:
 .PHONY: helm-vocab
 helm-vocab:
 	bash scripts/tests/chart-env-vocabulary.sh
+	bash scripts/tests/env-vocabulary-agreement.sh
 
 # helm-template: helm-ci.yaml `template`. kubeconform is pinned by
 # version AND digest in CI; rather than re-implement that download here,
