@@ -137,12 +137,29 @@ discover_pins() {
     /^    tag:[[:space:]]*/        { if (blk_tag  == "") { v = $0; sub(/^    tag:[[:space:]]*/, "", v);        blk_tag  = trim(v) } }
     /^      prod:[[:space:]]*/     { if (ch_prod  == "") { v = $0; sub(/^      prod:[[:space:]]*/, "", v);     ch_prod  = trim(v) } }
     # A pin. prodDigest pairs with channelTags.prod; digest pairs with tag.
-    /^    (digest|prodDigest):[[:space:]]*"sha256:/ {
-      kind = $0; sub(/^    /, "", kind); sub(/:.*$/, "", kind)
-      v = $0; sub(/^    (digest|prodDigest):[[:space:]]*/, "", v); pin = trim(v)
-      flt = (kind == "prodDigest") ? ch_prod : blk_tag
-      name = (mid == "") ? top : top "." mid
-      printf "%s%s%s%s%s%s%s\n", name, SEP, blk_repo, SEP, flt, SEP, pin
+    #
+    # Quote- and indent-agnostic on purpose (Bugbot, client#697). The old pattern
+    # demanded a DOUBLE quote at EXACTLY four-space indent, so a single-quoted or
+    # more-deeply-nested pin was dropped in total silence -- and the PINS==0 guard
+    # below cannot catch that while any one conforming pin remains, so a `no drift`
+    # pass would print with a pin unwatched. Detect the pin however it is written.
+    # A canonical four-space pin pairs with the block repo/float as before; a pin
+    # at any other depth is emitted with no repo/float, so the loop REPORTS it
+    # UNWATCHABLE rather than skipping it -- watched or reported, never skipped.
+    # (No apostrophes in these comments: the awk program is single-quoted.)
+    /^[[:space:]]*(digest|prodDigest):[[:space:]]*["\047]?sha256:[a-f0-9]/ {
+      kind = $0; sub(/^[[:space:]]*/, "", kind); sub(/:.*$/, "", kind)
+      v = $0; sub(/^[[:space:]]*(digest|prodDigest):[[:space:]]*/, "", v); pin = trim(v)
+      if ($0 ~ /^    (digest|prodDigest):/) {
+        flt = (kind == "prodDigest") ? ch_prod : blk_tag
+        name = (mid == "") ? top : top "." mid
+        printf "%s%s%s%s%s%s%s\n", name, SEP, blk_repo, SEP, flt, SEP, pin
+      } else {
+        # Off the canonical structure: name it as best we can, emit empty
+        # repo+float so the main loop reports UNWATCHABLE instead of dropping.
+        name = (mid != "") ? top "." mid : (top != "" ? top : "?")
+        printf "%s%s%s%s%s%s%s\n", name, SEP, "", SEP, "", SEP, pin
+      }
     }
   ' "$1"
 }

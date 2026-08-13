@@ -115,6 +115,64 @@ EOF
   [[ "$output" == *"2 of 2"* ]] || return 1
 }
 
+# --- discovery: bug 3 (quote/indent narrowness, client#697) ----------------
+
+@test "a SINGLE-quoted pin is discovered and classified, not skipped" {
+  cat > "$TMP/values.yaml" <<EOF
+images:
+  widget:
+    repository: example/widget
+    tag: "1.0"
+    digest: '$D_TRUST'
+EOF
+  stub "example/widget:1.0" "$D_MOVED"
+  run_check
+  # Old discovery required a double quote, so this pin was invisible -> PINS==0
+  # -> ERROR (exit 2). It must instead be watched and its drift reported.
+  [ "$status" -eq 1 ] || return 1
+  [[ "$output" == *"DRIFT"* ]] || return 1
+}
+
+@test "a conforming pin does not mask a single-quoted one that drifts" {
+  cat > "$TMP/values.yaml" <<EOF
+images:
+  good:
+    repository: example/good
+    tag: "1.0"
+    digest: "$D_TRUST"
+  sneaky:
+    repository: example/sneaky
+    tag: "2.0"
+    digest: '$D_TRUST'
+EOF
+  printf 'example/good:1.0%s%s\nexample/sneaky:2.0%s%s\n' \
+    "$SEP" "$D_TRUST" "$SEP" "$D_MOVED" > "$TMP/stub"
+  run_check
+  # Asad's repro: one conforming (double-quoted) pin agrees, so the old reader
+  # printed `no drift` and exited 0 while the single-quoted one drifted unseen.
+  [ "$status" -eq 1 ] || return 1
+  [[ "$output" == *"DRIFT"* ]] || return 1
+  [[ "$output" == *"sneaky"* ]] || return 1
+  [[ "$output" == *"2 pin(s) found"* ]] || return 1
+}
+
+@test "a pin nested off the canonical 4-space structure is UNWATCHABLE, not skipped" {
+  cat > "$TMP/values.yaml" <<EOF
+images:
+  widget:
+    variants:
+      extra:
+        digest: "$D_TRUST"
+    repository: example/widget
+    tag: "1.0"
+EOF
+  : > "$TMP/stub"
+  run_check
+  # The pin sits two levels deeper than the reader can pair a repo/float to. It
+  # is reported, not dropped -- the contract is watched-or-reported-never-skipped.
+  [[ "$output" == *"UNWATCHABLE"* ]] || return 1
+}
+
 @test "an UNPINNED image is not a finding — it made no trust decision" {
   cat > "$TMP/values.yaml" <<EOF
 images:

@@ -33,7 +33,7 @@ jobs:
   watch:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v5.0.0
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       # Public read of a public index needs no credential. Left unauthenticated
       # on purpose: a watcher that requires a secret is a watcher that silently
