@@ -89,7 +89,7 @@ _pf_free_kb() { df -Pk "$1" 2>/dev/null | awk 'NR==2 {print $4}'; }
 # bind-mount aware), then GNU `stat -f` (Linux only — BSD/macOS `stat -f` means
 # "format string", not filesystem), then df+mount (portable, incl. macOS).
 _pf_fstype() {
-  local p="$1" parent t="" mp
+  local p="$1" parent t="" mp fstype_out
   while [[ -n "$p" && ! -e "$p" ]]; do
     parent="$(dirname "$p")"
     [[ "$parent" == "$p" ]] && break
@@ -97,7 +97,13 @@ _pf_fstype() {
   done
   [[ -z "$p" || ! -e "$p" ]] && return 0
   if has findmnt; then
-    t="$(findmnt -nro FSTYPE --target "$p" 2>/dev/null | head -1)"
+    # Capture-then-slice, not `| head -1`: head closes the pipe after line 1 and
+    # findmnt takes SIGPIPE, which pipefail turns into 141 — and in an ASSIGNMENT
+    # under `set -e` that aborts the installer inside preflight with no message.
+    # findmnt prints one line per mount over the target, so a bind-mounted or
+    # stacked path is enough (backend#1778; same shape as the mount pipeline below).
+    fstype_out="$(findmnt -nro FSTYPE --target "$p" 2>/dev/null || true)"
+    t="${fstype_out%%$'\n'*}"
   fi
   if [[ -z "$t" && "$OS" != "Darwin" ]]; then
     t="$(stat -f -c '%T' "$p" 2>/dev/null)"

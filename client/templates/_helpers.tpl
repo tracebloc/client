@@ -301,6 +301,33 @@ Usage: {{ include "tracebloc.ingestorDigest" . }}
   (backend#1028/#1245) on an edge that looked correctly configured. Any future
   consumer of CLIENT_ENV must go through here rather than re-deriving it, the
   same reason ENV_ALIASES lives once in client-runtime proxy_config.
+
+  THE VOCABULARY IS CLOSED, and this is the second of two guards.
+
+  values.schema.json carries the `enum` -- that is the primary gate and it
+  gives the better error. This `fail` is the backstop: the enum is only checked
+  where the packaged schema is read, and `helm template/install/upgrade
+  --skip-schema-validation` skips it, as does a chart repackaged without the
+  schema. This helper is the single chokepoint every consumer already goes
+  through (see the paragraph above), so an unrecognized value that gets past
+  the enum still cannot reach an image tag. Verified both ways in
+  scripts/tests/chart-env-vocabulary.sh -- and it has to live there rather than
+  in client/tests/: helm-unittest validates values against the packaged schema
+  and reports a violation as a plugin-level ERROR, so `failedTemplate` cannot
+  assert the enum, and it offers no flag to skip validation and reach this
+  `fail`.
+
+  WHY FAIL AT ALL, rather than pass the value through. Passing through was not
+  a graceful degradation, it was a silent reconfiguration of the edge in four
+  places at once -- three control-plane image tags pointing at tags no producer
+  publishes, a missed `channelTags` lookup, a missed `serviceDbAccountsByEnv`
+  lookup, and a dropped prod digest pin (the pin applies only where the env
+  resolves to exactly "prod"). The only validator that existed was
+  client-runtime jobs_manager.py's `sys.exit(1)` on "Unknown CLIENT_ENV", which
+  lives INSIDE the container that cannot start, so it cannot help. Failing at
+  `helm upgrade` is consistent with the chart's own conventions: it already
+  fails on placeholder clientId, empty training CIDRs, non-alphanumeric service
+  passwords, perDatasetPvcs without clusterScope, and a missing metrics API.
 */}}
 {{/*
   Whether the dedicated tb_meta / tb_ingest DB identities are on for THIS edge
@@ -343,11 +370,14 @@ Usage: {{ include "tracebloc.ingestorDigest" . }}
 {{- define "tracebloc.clientEnv" -}}
 {{- $raw := (default dict .Values.env).CLIENT_ENV | default "prod" -}}
 {{- $aliases := dict "development" "dev" "staging" "stg" "production" "prod" -}}
+{{- $resolved := $raw -}}
 {{- if hasKey $aliases $raw -}}
-{{- get $aliases $raw -}}
-{{- else -}}
-{{- $raw -}}
+{{- $resolved = get $aliases $raw -}}
 {{- end -}}
+{{- if not (has $resolved (list "dev" "stg" "prod")) -}}
+{{- fail (printf "env.CLIENT_ENV: %q is not a recognized environment. Accepted: dev, stg, prod (canonical) or development, staging, production (aliases); empty/unset means prod. This value is the tag for the jobs-manager, pods-monitor and resource-monitor images, and it keys images.ingestor.channelTags, serviceDbAccountsByEnv and the prod digest pin -- an unrecognized value would pull unpublished tags, miss every one of those lookups and silently drop the pin. Note dev/stg are abbreviated: `develop` and `production` differ, and only the six listed spellings resolve." $raw) -}}
+{{- end -}}
+{{- $resolved -}}
 {{- end }}
 
 {{/*
@@ -356,9 +386,11 @@ Usage: {{ include "tracebloc.ingestorDigest" . }}
   Precedence, mirroring tracebloc.ingestorDigest:
     1. `images.ingestor.tag`          explicit override, any environment
     2. `images.ingestor.channelTags[CLIENT_ENV]`   per-environment channel
-    3. "0.7"                          last-resort literal, so a release that
+    3. "0.8"                          last-resort literal, so a release that
                                       predates these keys still renders under
-                                      `--reuse-values`
+                                      `--reuse-values`. Track the current prod
+                                      line: an older literal here would spawn a
+                                      pre-D16 ingestor on such a release.
 
   Only consulted when no digest applies: jobs-manager builds `repo@digest`
   when tracebloc.ingestorDigest is non-empty, and `repo:tag` otherwise
@@ -379,7 +411,7 @@ Usage: {{ include "tracebloc.ingestorDigest" . }}
 {{- if $channel -}}
 {{- $channel -}}
 {{- else -}}
-{{- "0.7" -}}
+{{- "0.8" -}}
 {{- end -}}
 {{- end -}}
 {{- end }}

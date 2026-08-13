@@ -36,7 +36,7 @@ tests:
           path: spec.template.spec.containers[0].env
           content:
             name: INGESTOR_IMAGE_TAG
-            value: "0.7"
+            value: "0.8"
 
   - it: defaults to the prod float when CLIENT_ENV is unset
     asserts:
@@ -44,7 +44,7 @@ tests:
           path: spec.template.spec.containers[0].env
           content:
             name: INGESTOR_IMAGE_TAG
-            value: "0.7"
+            value: "0.8"
 
   - it: an explicit tag override wins over the channel for every environment
     set:
@@ -57,15 +57,35 @@ tests:
             name: INGESTOR_IMAGE_TAG
             value: "0.8.0"
 
-  - it: an unknown CLIENT_ENV falls back to the literal rather than rendering empty
+  # An "unknown CLIENT_ENV falls back to the literal" case lived here, setting
+  # `produktion`. It is gone because the input is gone: the CLIENT_ENV
+  # vocabulary is now closed by a values.schema.json `enum` plus a `fail` in
+  # tracebloc.clientEnv, so `produktion` is refused at install time instead of
+  # becoming a literal image tag.
+  #
+  # It could not simply be re-pointed at the new behaviour: helm-unittest
+  # validates values against the packaged schema and reports a violation as a
+  # plugin-level ERROR, so `failedTemplate` cannot assert it and there is no
+  # flag to skip validation and reach the helper's `fail`. Both gates are
+  # covered from outside the plugin, in scripts/tests/chart-env-vocabulary.sh,
+  # which pairs every rejection with an accept control on the same command line.
+  #
+  # What remains testable here is that the fallback is still reached by a legal
+  # route — an env whose channelTags ENTRY is absent, rather than an env that is
+  # itself illegal. Deliberately asserted on prod, whose fallback is the same
+  # `0.8` on this branch and on the sibling PR that makes the fallback
+  # per-environment, so this case does not depend on their merge order.
+  - it: an env with no channelTags entry still falls back rather than rendering empty
     set:
-      env.CLIENT_ENV: produktion
+      env.CLIENT_ENV: prod
+      images.ingestor.channelTags:
+        dev: "dev"
     asserts:
       - contains:
           path: spec.template.spec.containers[0].env
           content:
             name: INGESTOR_IMAGE_TAG
-            value: "0.7"
+            value: "0.8"
 
   - it: renders for a release predating channelTags (--reuse-values replay)
     set:
@@ -76,7 +96,7 @@ tests:
           path: spec.template.spec.containers[0].env
           content:
             name: INGESTOR_IMAGE_TAG
-            value: "0.7"
+            value: "0.8"
 
   - it: prod still pins by digest, so the tag is not the spawn target there
     set:
@@ -86,7 +106,7 @@ tests:
           path: spec.template.spec.containers[0].env
           content:
             name: INGESTOR_IMAGE_DIGEST
-            value: "sha256:9098b3c9b83951f825e262d6ff1e9c47c46c5b5cafbfc8fef1ed82ccbadebb24"
+            value: "sha256:05e124945a2ef61868661a9137abb5e75dac96a090cb41a7b4e8be520c4b5873"
 
   - it: dev gets no digest, so it spawns by the floating channel tag
     set:
@@ -130,7 +150,7 @@ tests:
           path: spec.template.spec.containers[0].env
           content:
             name: INGESTOR_IMAGE_TAG
-            value: "0.7"
+            value: "0.8"
 
   - it: the "production" alias keeps the prod reproducibility pin
     # Bugbot catch (#494): the first alias fix normalized inside
@@ -146,4 +166,4 @@ tests:
           path: spec.template.spec.containers[0].env
           content:
             name: INGESTOR_IMAGE_DIGEST
-            value: "sha256:9098b3c9b83951f825e262d6ff1e9c47c46c5b5cafbfc8fef1ed82ccbadebb24"
+            value: "sha256:05e124945a2ef61868661a9137abb5e75dac96a090cb41a7b4e8be520c4b5873"
