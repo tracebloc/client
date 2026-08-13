@@ -28,6 +28,43 @@ jobs:
     # instead of spinning to the 6h default (parity with helm-ci / installer-tests).
     timeout-minutes: 60
     steps:
+      # No un-gated workflow_dispatch may publish (backend#1422, decided
+      # 2026-08-05; enforced by release-train's publish-inventory-check.sh,
+      # backend#1857). This workflow is dispatch-ONLY and pushes to
+      # ghcr.io/tracebloc/k3s-cuda, so before this step any writer could
+      # publish it.
+      #
+      # A failing STEP is red and auditable; a skipped job would report green
+      # and hide the denial (the promote.yml lesson, backend#1424).
+      #
+      # BOTH identities must pass: github.actor stays the ORIGINAL dispatcher
+      # on a re-run, while triggering_actor is whoever clicked re-run --
+      # checking only one lets a non-allowlisted user replay an allowlisted
+      # dispatch (Bugbot, backend#1536).
+      #
+      # Gated on `inputs.push` rather than on the event, so build-only
+      # validation stays open to everyone -- the rule is about publishing. THAT
+      # CONDITION MUST STAY IN SYNC with the publish steps below (the GHCR
+      # login and build.sh's PUSH): if anything here ever pushes
+      # unconditionally, this gate stops covering it.
+      - name: Authorize dispatcher (backend#1422)
+        if: ${{ inputs.push }}
+        env:
+          ACTOR: ${{ github.actor }}
+          TRIGGERING_ACTOR: ${{ github.triggering_actor }}
+        run: |
+          set -euo pipefail
+          for who in "$ACTOR" "$TRIGGERING_ACTOR"; do
+            case "$who" in
+              LukasWodka|saadqbal) ;;
+              *)
+                echo "::error::$who is not permitted to (re-)dispatch this publish workflow (backend#1422)."
+                exit 1
+                ;;
+            esac
+          done
+          echo "Dispatcher $ACTOR (triggering: $TRIGGERING_ACTOR) is on the allowlist."
+
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
       # Plain docker CLI (no unpinned marketplace actions -> passes action-pins).
