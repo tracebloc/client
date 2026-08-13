@@ -91,16 +91,16 @@ check-all: lint drift helm-lint helm-vocab bats helm-template helm-unittest
 .PHONY: setup
 setup:
 	@missing=""; \
-	for t in bash shellcheck bats helm; do \
+	for t in bash shellcheck bats helm python3; do \
 	  command -v $$t >/dev/null 2>&1 || missing="$$missing $$t"; \
 	done; \
 	if [ -n "$$missing" ]; then \
 	  echo "missing:$$missing"; \
-	  echo "  macOS: brew install shellcheck bats-core helm"; \
-	  echo "  Debian/Ubuntu: apt-get install shellcheck bats  (helm: https://helm.sh/docs/intro/install/)"; \
+	  echo "  macOS: brew install shellcheck bats-core helm python"; \
+	  echo "  Debian/Ubuntu: apt-get install shellcheck bats python3  (helm: https://helm.sh/docs/intro/install/)"; \
 	  exit 1; \
 	fi; \
-	echo "==> setup: shellcheck, bats and helm are all present; run 'make check'"
+	echo "==> setup: shellcheck, bats, helm and python3 are all present; run 'make check'"
 	@$(MAKE) --no-print-directory install-hooks
 
 # install-hooks: put a pre-push hook in place that runs `make check`, so the

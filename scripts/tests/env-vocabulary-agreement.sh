@@ -56,6 +56,14 @@ for f in "$TPL" "$SCHEMA" "$BASH_LIB" "$PS1_FILE"; do
 done
 [ -d "$TESTS_DIR" ] || fail_closed "cannot read ${TESTS_DIR#"$root"/}"
 
+# Reading the JSON Schema enum needs a JSON parser; per the repo's "no jq in
+# installer scripts" rule that parser is python3 (see schema_accepted below).
+# `make setup` does not install python3, so on the pre-push `make check` path a
+# missing interpreter would otherwise surface below as "the schema has no enum" --
+# a false schema-gap diagnosis. A missing tool is not a vocabulary change: fail
+# here, loud and distinct, before any empty result can be read as a gap.
+command -v python3 >/dev/null 2>&1 || fail_closed "python3 is required for this check -- it reads the CLIENT_ENV enum out of values.schema.json (which is JSON) and was not found on PATH. Install python3 or add it to 'make setup'; this is a missing tool, not a schema change."
+
 # --- 1. the Go template's alias dict -------------------------------------
 # `$aliases := dict "development" "dev" "staging" "stg" "production" "prod"`
 tpl_pairs() {
@@ -115,7 +123,18 @@ note() { findings=$((findings + 1)); printf '\nFINDING %d: %s\n' "$findings" "$1
 tpl="$(tpl_pairs)"
 bsh="$(bash_pairs)"
 ps1="$(ps1_pairs)"
-sch="$(schema_accepted)" || fail_closed "values.schema.json has no CLIENT_ENV enum -- the vocabulary is no longer closed there, which is a bigger finding than a disagreement"
+# schema_accepted's python helper exits 3 only for a genuinely-absent enum, and 0
+# with output when it is present. Any OTHER non-zero (a python3 that passed the
+# preflight but then failed to run, malformed JSON, a mid-run read error) is a
+# tooling/parse failure, NOT evidence the schema changed -- so keep the two
+# diagnoses apart: a real missing enum is still reported as the closed-vocabulary
+# finding, and a tooling gap is never misreported as one.
+sch="$(schema_accepted)"; schema_rc=$?
+if [ "$schema_rc" -eq 3 ]; then
+  fail_closed "values.schema.json has no CLIENT_ENV enum -- the vocabulary is no longer closed there, which is a bigger finding than a disagreement"
+elif [ "$schema_rc" -ne 0 ]; then
+  fail_closed "could not read the CLIENT_ENV enum from values.schema.json (python3 exited $schema_rc) -- a tooling or parse failure, not evidence the schema changed; refusing to guess"
+fi
 
 # An empty parse must never read as "they agree". Every declaration that stopped
 # matching is reported, because zero pairs compares equal to zero pairs.
