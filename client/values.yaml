@@ -898,8 +898,20 @@ imageRefresh:
   enabled: true
   # Every 15 minutes at minute :07. The off-hour minute spreads load
   # across Docker Hub's registry-1 origin; 15m balances drift latency
-  # against the 100/6h anonymous pull-rate limit (2 images × 4/hr = 8/hr,
-  # well under the cap even shared with other workloads on the same IP).
+  # against the 100/6h anonymous pull-rate limit.
+  #
+  # #569 raised the per-tick cost from 2 manifest HEADs to 3 (resource-monitor
+  # joined jobs-manager and pods-monitor; requests-proxy adds none, it reuses
+  # the jobs-manager digest). At this schedule that is 3 x 4/hr = 12/hr, so
+  # 72 per 6h against the cap of 100 — up from 48. Still under, but the
+  # headroom for OTHER workloads sharing the egress IP dropped from ~52 to ~28.
+  #
+  # That matters more than the raw number: exhausting this cap behind a shared
+  # corporate NAT is one of the failure modes in the incident #569 exists to fix
+  # (a rate-limited edge cannot pull for up to ~6h). If an edge shares its
+  # egress IP with other Docker Hub consumers, widen this — "7,27,47 * * * *"
+  # (3/hr) puts the cost back to 9/hr, at the price of slower drift pickup.
+  # A digest pin on any image removes its HEAD from every tick entirely.
   schedule: "7,22,37,52 * * * *"
   # `kubectl rollout status --timeout`, applied PER WORKLOAD. Generous;
   # jobs-manager image pulls on bare-metal first-boot can take minutes, and
