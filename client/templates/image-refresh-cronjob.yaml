@@ -145,6 +145,7 @@ data:
       log "NOTE: images are served from private mirror '${IMAGE_REGISTRY}' (global.imageRegistry), but this script resolves digests from docker.io."
       log "      Pinning a docker.io digest onto a mirrored reference could pin an image the mirror does not hold, so auto-refresh is INERT on this edge."
       log "      Update the control-plane images by syncing your mirror and restarting the workloads, or pin images.<image>.digest explicitly."
+      log "      (That restart DOES re-pull: because this reconcile is inert here, the chart renders imagePullPolicy=Always on the unpinned control-plane images rather than IfNotPresent -- see the tracebloc.controlPlanePullPolicy helper. Offline-restart safety is traded away on this edge precisely so it is not left with no update path at all.)"
       log "tick complete"
       exit 0
     fi

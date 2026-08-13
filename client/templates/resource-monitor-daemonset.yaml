@@ -70,15 +70,17 @@ spec:
           */}}
           {{- $rmDigest := (default (dict) (default (dict) .Values.images).resourceMonitor).digest | default "" }}
           image: {{ include "tracebloc.image" (dict "repository" "tracebloc/resource-monitor" "tag" (include "tracebloc.clientEnv" .) "digest" $rmDigest "registry" (dig "imageRegistry" "docker.io" (.Values.global | default dict))) | quote }}
-          # #569: unconditionally IfNotPresent. `Always` made every node's pod
+          # #569: IfNotPresent wherever an update path exists without `Always` --
+          # see tracebloc.controlPlanePullPolicy. `Always` made every node's pod
           # re-pull on restart, so an offline restart wedged the DaemonSet in
           # ImagePullBackOff fleet-wide. This DaemonSet previously had NO
           # deliberate update path at all (image-refresh did not touch it, and a
           # chart release does not change its image ref) -- it only moved when a
           # pod happened to restart. image-refresh now reconciles it explicitly
-          # with `kubectl set image`, so IfNotPresent costs nothing and the
-          # update path is intentional for the first time.
-          imagePullPolicy: IfNotPresent
+          # with `kubectl set image`, so the update path is intentional for the
+          # first time -- but only where that reconcile can run, which is exactly
+          # what the helper gates on.
+          imagePullPolicy: {{ include "tracebloc.controlPlanePullPolicy" (dict "digest" $rmDigest "root" $) }}
           securityContext:
             allowPrivilegeEscalation: false
             capabilities:

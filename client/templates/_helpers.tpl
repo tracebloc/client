@@ -231,6 +231,62 @@ true
 {{- end }}
 
 {{/*
+  tracebloc.controlPlanePullPolicy — the pull policy for the four always-running
+  control-plane images (jobs-manager, pods-monitor, requests-proxy,
+  resource-monitor). ONE definition so the four call sites cannot disagree.
+
+  #569 set out to make these pods survive an offline Docker/WSL restart:
+  `Always` forces a registry round-trip on every (re)start, so a restart without
+  the registry lands in ImagePullBackOff even with the image cached in
+  containerd. The fix is IfNotPresent.
+
+  But `Always` is not just fragility — on a floating tag it IS an update path:
+  restart the pod and the kubelet re-resolves the tag. The first cut of #569
+  made IfNotPresent UNCONDITIONAL, which silently removed that path from every
+  edge where the replacement (image-refresh's `kubectl set image repo@digest`)
+  cannot run — those edges would have frozen on their cached image forever, with
+  a green CronJob and no signal (Bugbot, High). So the policy tracks whether an
+  update path actually exists:
+
+    1. An explicit `digest` pin -> IfNotPresent. The reference is immutable, so
+       re-checking the registry can only ever return the same image. Updates
+       come from changing the pin.
+    2. Otherwise, if the image-refresh reconcile can actually drive updates on
+       this edge -> IfNotPresent, because `set image` changes the REFERENCE and
+       the kubelet pulls a digest it has never seen. Two conditions:
+         * the CronJob renders at all (`imageRefresh.enabled`, and not every
+           refreshed image already pinned), and
+         * images come from docker.io. Under a `global.imageRegistry` mirror the
+           script goes inert by design — it resolves digests from docker.io, and
+           pinning one onto a mirrored reference could pin an image the mirror
+           does not hold.
+    3. Otherwise -> Always. No reconcile, no pin, so a floating tag plus a
+       restart is the ONLY way that edge can ever move. This is exactly the
+       pre-#569 behaviour, kept for exactly the edges that still depend on it:
+       mirror installs (sync the mirror, restart) and `imageRefresh.enabled:
+       false` (restart manually), which is what values.schema.json has always
+       promised those operators.
+
+  The trade is deliberate and worth stating plainly: offline-restart safety is
+  delivered precisely where the digest reconcile can deliver updates. An edge
+  that opts out of the mechanism keeps the old semantics rather than silently
+  freezing — a frozen control plane with no signal is worse than a restart that
+  needs the network.
+
+  Usage: {{ include "tracebloc.controlPlanePullPolicy" (dict "digest" $d "root" $) }}
+*/}}
+{{- define "tracebloc.controlPlanePullPolicy" -}}
+{{- $mirror := (dig "imageRegistry" "docker.io" (.root.Values.global | default dict)) | default "docker.io" -}}
+{{- if .digest -}}
+IfNotPresent
+{{- else if and (include "tracebloc.imageRefreshEnabled" .root) (eq $mirror "docker.io") -}}
+IfNotPresent
+{{- else -}}
+Always
+{{- end -}}
+{{- end }}
+
+{{/*
   StorageClass name: when storageClass.create is true, use a release-unique name
   so each release gets its own StorageClass (avoids Helm ownership conflicts).
   When create is false, use the user-provided storageClass.name for an existing class.

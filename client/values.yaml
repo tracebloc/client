@@ -345,20 +345,34 @@ egressProxy:
 # busybox/mysql-client).
 #
 # PULL POLICY (#569). The four always-running control-plane images —
-# jobsManager, podsMonitor, requestsProxy, resourceMonitor — now render
-# `imagePullPolicy: IfNotPresent` UNCONDITIONALLY, pinned or not. `Always`
-# forced a registry round-trip on every (re)start, so an offline Docker
-# Desktop / WSL2 restart landed in ImagePullBackOff even with the image
-# already cached in containerd — the pods came back only once docker.io was
-# reachable again (up to ~6h behind Docker Hub's anonymous pull-rate limit).
+# jobsManager, podsMonitor, requestsProxy, resourceMonitor — render
+# `imagePullPolicy: IfNotPresent` wherever an update path exists that does not
+# depend on `Always`. `Always` forced a registry round-trip on every (re)start,
+# so an offline Docker Desktop / WSL2 restart landed in ImagePullBackOff even
+# with the image already cached in containerd — the pods came back only once
+# docker.io was reachable again (up to ~6h behind Docker Hub's anonymous
+# pull-rate limit).
 #
-# That was safe to change only because the UPDATE path no longer depends on
-# the pull policy. `Always` + a floating tag is an update mechanism: it is
-# what made the image-refresh CronJob's `kubectl rollout restart` pick up a
-# new build. Offline-safety and restart-driven updates are mutually exclusive
-# unless the image REFERENCE itself changes, so image-refresh now pins the
-# resolved digest with `kubectl set image repo@digest` instead. See the
-# imageRefresh block below.
+# That is safe only where the UPDATE path no longer depends on the pull policy.
+# `Always` + a floating tag IS an update mechanism: it is what made the
+# image-refresh CronJob's `kubectl rollout restart` pick up a new build.
+# Offline-safety and restart-driven updates are mutually exclusive unless the
+# image REFERENCE itself changes, so image-refresh now pins the resolved digest
+# with `kubectl set image repo@digest` instead (see the imageRefresh block).
+#
+# So the policy is NOT unconditional — it is resolved per image by the
+# `tracebloc.controlPlanePullPolicy` helper, which is the authoritative
+# description:
+#   * explicit `digest` pin      -> IfNotPresent (immutable reference)
+#   * refresh can reconcile here -> IfNotPresent (`set image` drives updates)
+#   * neither                    -> Always       (floating tag + restart is the
+#                                                 only update path there is)
+#
+# The third case is real, not theoretical: a `global.imageRegistry` mirror makes
+# the reconcile inert (it resolves digests from docker.io, which the mirror may
+# not hold), and `imageRefresh.enabled: false` disables it outright. Those edges
+# keep the pre-#569 behaviour deliberately — a frozen control plane with a green
+# CronJob and no signal is worse than a restart that needs the network.
 #
 # Setting `digest` here is still meaningful: it is an explicit operator pin
 # that also opts the image OUT of auto-refresh.

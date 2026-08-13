@@ -711,3 +711,72 @@ tests:
           value: pods-monitor-container
       - notExists:
           path: spec.template.spec.containers[1].readinessProbe
+
+  # =====================================================================
+  # #569 pull policy. NOT unconditional — it tracks whether an update path
+  # exists that does not depend on `Always`. See the
+  # tracebloc.controlPlanePullPolicy helper.
+  # =====================================================================
+
+  - it: both containers are IfNotPresent by default (refresh on, docker.io)
+    # The offline-restart fix: `Always` forced a registry round-trip on every
+    # (re)start, so a Docker/WSL restart without the registry landed in
+    # ImagePullBackOff on a cached image. Safe here because image-refresh drives
+    # updates by changing the image REFERENCE (`kubectl set image repo@digest`).
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].imagePullPolicy
+          value: IfNotPresent
+      - equal:
+          path: spec.template.spec.containers[1].imagePullPolicy
+          value: IfNotPresent
+
+  - it: falls back to Always behind a private mirror (#569, Bugbot High)
+    # The reconcile resolves digests from docker.io, so it goes inert under a
+    # mirror rather than pinning a digest the mirror may not hold. If the pods
+    # were IfNotPresent anyway, that edge would have NO update path at all:
+    # syncing the mirror and restarting would keep serving the cached tag, and
+    # the CronJob would stay green while the control plane froze. Keep the
+    # pre-#569 semantics exactly where they are still the only thing that works.
+    set:
+      global:
+        imageRegistry: "mirror.example.com"
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].imagePullPolicy
+          value: Always
+      - equal:
+          path: spec.template.spec.containers[1].imagePullPolicy
+          value: Always
+
+  - it: falls back to Always when imageRefresh is disabled (#569, Bugbot High)
+    # values.schema.json has always told these operators that the images stay
+    # put "until manual restart" — which is only true with Always.
+    set:
+      imageRefresh:
+        enabled: false
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].imagePullPolicy
+          value: Always
+      - equal:
+          path: spec.template.spec.containers[1].imagePullPolicy
+          value: Always
+
+  - it: an explicit digest pin is IfNotPresent even with refresh disabled
+    # A digest is immutable, so re-checking the registry can only return the
+    # same image. Updates come from changing the pin, not from the policy.
+    set:
+      imageRefresh:
+        enabled: false
+      images:
+        jobsManager:
+          digest: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].imagePullPolicy
+          value: IfNotPresent
+      # pods-monitor is NOT pinned and refresh is off -> still Always.
+      - equal:
+          path: spec.template.spec.containers[1].imagePullPolicy
+          value: Always

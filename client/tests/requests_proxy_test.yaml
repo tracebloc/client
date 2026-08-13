@@ -237,3 +237,12 @@ tests:
       - equal:
           path: spec.template.spec.containers[0].imagePullPolicy
           value: IfNotPresent
+
+  - it: falls back to Always where the reconcile cannot run (#569, Bugbot High)
+    set:
+      imageRefresh:
+        enabled: false
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].imagePullPolicy
+          value: Always

@@ -137,3 +137,17 @@ tests:
       - equal:
           path: spec.updateStrategy.rollingUpdate.maxUnavailable
           value: "10%"
+
+  - it: falls back to Always behind a private mirror (#569, Bugbot High)
+    # Without this the DaemonSet would freeze on every node's cached image:
+    # the reconcile is inert under a mirror, and IfNotPresent means a restart
+    # never re-pulls. A frozen node agent with a green CronJob is worse than a
+    # restart that needs the network.
+    template: templates/resource-monitor-daemonset.yaml
+    set:
+      global:
+        imageRegistry: "mirror.example.com"
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].imagePullPolicy
+          value: Always
