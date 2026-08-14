@@ -571,11 +571,19 @@ images:
   requestsProxy:
     digest: ""
   mysqlClient:
+    # Repository and tag are stated rather than left to template defaults so the
+    # digest below is WATCHABLE: check-digest-drift.sh pairs a pin with the
+    # repo/float in its own block, and this block had neither — so the daily
+    # watch classified it UNWATCHABLE and exited non-zero, staying red forever
+    # while the pin it was meant to compare was never checked at all
+    # (Bugbot, client#713). Both values are what the templates already default
+    # to, so the rendered image is byte-identical.
+    repository: "tracebloc/mysql-client"
     # mysql-client is only published under the "prod" tag — it has no dev/
     # staging variants, so we decouple it from env.CLIENT_ENV. Override only
     # if you are publishing your own fork with a different tag. Never use
     # "latest"; pin via digest instead.
-    tag: ""
+    tag: "prod"
     # Pinned (2026-07-28) to the current MySQL 5.7-lineage :prod image
     # (pushed 2026-04-24). Workspace datadirs are 5.7-format and MySQL
     # supports only staged upgrades (5.7 -> 8.0 -> 8.4), while this repo's
