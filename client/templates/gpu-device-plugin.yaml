@@ -58,8 +58,11 @@ kind: DaemonSet
 metadata:
   # Name/namespace match the upstream NVIDIA manifest (v0.14.5) the installer
   # used to apply, so an installer re-run adopts an existing DaemonSet in place
-  # rather than orphaning it.
-  name: nvidia-device-plugin-daemonset
+  # rather than orphaning it. The name comes from a shared helper because
+  # auto-upgrade-rbac.yaml restricts the auto-upgrade SA's write verbs in this
+  # namespace to exactly this resourceName (backend#1992) — one declaration, so
+  # the two cannot drift into a 403.
+  name: {{ include "tracebloc.gpuDevicePluginName" $vendor }}
   namespace: {{ $ns }}
   labels:
     {{- include "tracebloc.labels" . | nindent 4 }}
@@ -118,7 +121,8 @@ spec:
 apiVersion: apps/v1
 kind: DaemonSet
 metadata:
-  name: amdgpu-device-plugin-daemonset
+  # Shared helper — see the NVIDIA DaemonSet above (backend#1992).
+  name: {{ include "tracebloc.gpuDevicePluginName" $vendor }}
   namespace: {{ $ns }}
   labels:
     {{- include "tracebloc.labels" . | nindent 4 }}
