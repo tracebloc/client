@@ -17,8 +17,14 @@
     false -> never render.
 */}}
 {{- $pdb := default dict .Values.podDisruptionBudget.mysql -}}
+{{- /* Single-node detection mirrors jobs-manager-deployment's SINGLE_NODE
+     resolution (explicit env.SINGLE_NODE wins, else hostPath.enabled) so a
+     node-local single-node install (SINGLE_NODE=true, hostPath.enabled=false)
+     also skips the undrainable minAvailable:1 PDB (client#560 / Bugbot). */ -}}
+{{- $env := default dict .Values.env -}}
 {{- $hostPathMode := (default dict .Values.hostPath).enabled | default false -}}
-{{- $create := ternary $pdb.create (not $hostPathMode) (kindIs "bool" $pdb.create) -}}
+{{- $isSingleNode := ternary (eq (toString (index $env "SINGLE_NODE")) "true") $hostPathMode (hasKey $env "SINGLE_NODE") -}}
+{{- $create := ternary $pdb.create (not $isSingleNode) (kindIs "bool" $pdb.create) -}}
 {{- if $create }}
 apiVersion: policy/v1
 kind: PodDisruptionBudget

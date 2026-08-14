@@ -155,6 +155,42 @@ tests:
           path: spec.minAvailable
           value: 1
 
+  # backend#953-adjacent / client#560 Bugbot: a node-local single-node install
+  # (env.SINGLE_NODE="true" with hostPath.enabled=false — local-path CSI k3d)
+  # is still single-node, so AUTO mode must SKIP the undrainable minAvailable:1
+  # PDB even though hostPath is off. Gate mirrors the deployment's SINGLE_NODE
+  # resolution (explicit env.SINGLE_NODE wins over the hostPath default).
+  - it: should NOT render mysql PDB on a node-local single-node install (SINGLE_NODE=true, hostPath.enabled=false)
+    template: templates/mysql-pdb.yaml
+    set:
+      hostPath:
+        enabled: false
+      env:
+        SINGLE_NODE: "true"
+    asserts:
+      - hasDocuments:
+          count: 0
+  - it: should NOT render jobs-manager PDB on a node-local single-node install (SINGLE_NODE=true, hostPath.enabled=false)
+    template: templates/jobs-manager-pdb.yaml
+    set:
+      hostPath:
+        enabled: false
+      env:
+        SINGLE_NODE: "true"
+    asserts:
+      - hasDocuments:
+          count: 0
+  - it: should render jobs-manager PDB when SINGLE_NODE=false overrides on multi-node CSI
+    template: templates/jobs-manager-pdb.yaml
+    set:
+      hostPath:
+        enabled: false
+      env:
+        SINGLE_NODE: "false"
+    asserts:
+      - isKind:
+          of: PodDisruptionBudget
+
   # Explicit override: create=true forces the PDB even on single-node/bare-metal
   # (for a fixed multi-node bare-metal cluster that still wants drain protection).
   - it: create=true should force the mysql PDB even on hostPath (override)
