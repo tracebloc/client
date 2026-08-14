@@ -50,48 +50,19 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
-      - name: Set up Helm
-        uses: azure/setup-helm@1a275c3b69536ee54be43f2070a358922e12c8d4 # v4.3.1
-        with:
-          version: v3.15.4
-
-      - name: Helm lint (strict) — parent client chart, all platforms
-        run: |
-          for f in client/ci/*-values.yaml; do
-            echo "=== Linting client with $f ==="
-            helm lint --strict ./client -f "$f"
-          done
-
-      - name: Helm lint (strict) — ingestor subchart
-        # The ingestor subchart has no per-platform CI values files because
-        # its templates don't branch on platform — they only render a
-        # ConfigMap + Job + SA. The chart's one required value
-        # (`ingestConfig`) is supplied by customers at install time via
-        # `--set-file`; missing it during lint emits an INFO, not a FAIL,
-        # so plain `helm lint --strict ./ingestor` exercises the templates
-        # cleanly. See #135 for why we lint it here at all (publish workflow
-        # now packages both charts).
-        run: helm lint --strict ./ingestor
-
-      - name: CLIENT_ENV + channelTags vocabularies are closed
-        # `helm lint` does not exercise the values.schema.json `enum` /
-        # `additionalProperties` against out-of-vocabulary inputs, and
-        # helm-unittest structurally cannot: it reports a schema violation as a
-        # plugin-level error rather than a template failure, and exposes no flag
-        # to skip validation and reach the `fail` in tracebloc.clientEnv. So
-        # both gates are asserted from outside the plugin, every rejection
-        # paired with an accept control on the same command line. ~2 s.
+      - name: make helm-lint helm-vocab
+        # Both targets, from the Makefile that already declares them
+        # (backend#1606). This job restated the `client/ci/*-values.yaml` loop,
+        # the `helm lint --strict ./ingestor` call, and both vocabulary scripts
+        # verbatim.
         #
-        # The helper-backstop cases self-skip when helm predates
-        # --skip-schema-validation (3.16); the pin above is v3.15.4, so they are
-        # skipped here today and run for anyone local on 3.16+. Bumping the pin
-        # turns them on with no change to this file.
-        run: bash scripts/tests/chart-env-vocabulary.sh
-
-      # One vocabulary, four languages (backend#1729 sweep 5). Runs on a change
-      # to ANY of the four declarations, including the two installers.
-      - name: CLIENT_ENV vocabulary agreement (backend#1729)
-        run: bash scripts/tests/env-vocabulary-agreement.sh
+        # The vocabulary pair is the reason it matters rather than being tidy:
+        # `env-vocabulary-agreement.sh` exists to prove the four CLIENT_ENV
+        # declarations agree with each other (backend#1729 sweep 5). A check
+        # about "these declarations must not drift" being itself declared twice
+        # is the joke version, and adding a third vocabulary script to the
+        # Makefile alone would leave this gate silently not running it.
+        run: make helm-lint helm-vocab
 
   template:
     timeout-minutes: 10
