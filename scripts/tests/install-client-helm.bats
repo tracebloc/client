@@ -1680,3 +1680,33 @@ _engine_fixture() {
   ! grep -q 'label daemonset' "$MOCK_CALLS" || { cat "$MOCK_CALLS"; return 1; }
   ! grep -q 'annotate daemonset' "$MOCK_CALLS" || { cat "$MOCK_CALLS"; return 1; }
 }
+
+@test "_adopt_orphaned_gpu_device_plugin: a live API error does not fake-adopt (no label/annotate), still returns 0 (client#564 Bugbot)" {
+  # A wedged/slow API must not be read as 'absent' and silently skipped as if
+  # adopted; but it must also not abort (GPU is optional) — warn and return 0.
+  GPU_VENDOR=nvidia; TB_NAMESPACE=tb; LOG_FILE=/dev/null
+  kubectl() {
+    echo "kubectl $*" >>"$MOCK_CALLS"
+    case "$1" in get) echo "Unable to connect to the server: dial tcp timeout" >&2; return 1 ;; esac
+  }
+  run _adopt_orphaned_gpu_device_plugin
+  [ "$status" -eq 0 ] || { cat "$MOCK_CALLS"; return 1; }
+  ! grep -q 'label daemonset' "$MOCK_CALLS" || { cat "$MOCK_CALLS"; return 1; }
+}
+
+@test "_adopt_orphaned_gpu_device_plugin: a failed adoption removes the orphan so the install isn't bricked (client#564 Bugbot)" {
+  # If label/annotate fail, the orphan stays unowned and helm would die
+  # 'exists and cannot be imported'; delete it so the chart recreates a clean copy.
+  GPU_VENDOR=nvidia; TB_NAMESPACE=tb; LOG_FILE=/dev/null
+  kubectl() {
+    echo "kubectl $*" >>"$MOCK_CALLS"
+    case "$1" in
+      get)    return 0 ;;    # orphan present
+      label)  return 1 ;;    # adoption fails
+      delete) return 0 ;;
+    esac
+  }
+  run _adopt_orphaned_gpu_device_plugin
+  [ "$status" -eq 0 ] || { cat "$MOCK_CALLS"; return 1; }
+  grep -q 'delete daemonset nvidia-device-plugin-daemonset' "$MOCK_CALLS" || { cat "$MOCK_CALLS"; return 1; }
+}

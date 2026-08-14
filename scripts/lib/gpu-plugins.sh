@@ -32,8 +32,11 @@ verify_gpu() {
   [[ "$GPU_VENDOR" == "nvidia" ]] && _gpu_ds="nvidia-device-plugin-daemonset"
   [[ "$GPU_VENDOR" == "amd" ]] && _gpu_ds="amdgpu-device-plugin-daemonset"
   if [[ -n "$_gpu_ds" ]]; then
+    # --timeout is the explicit bound for the whole wait; do NOT add
+    # --request-timeout — on a watch it caps the underlying request and would
+    # cut this wait to a few seconds, defeating the 120s (client#564 / Bugbot).
     kubectl rollout status "daemonset/$_gpu_ds" -n "$_gpu_ns" \
-      --timeout=120s --request-timeout=10s >/dev/null 2>&1 || true
+      --timeout=120s >/dev/null 2>&1 || true
   fi
 
   for i in {1..18}; do

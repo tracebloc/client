@@ -934,18 +934,40 @@ _adopt_orphaned_gpu_device_plugin() {
     nvidia) ds="nvidia-device-plugin-daemonset" ;;
     amd)    ds="amdgpu-device-plugin-daemonset" ;;
   esac
-  # Only act on an existing DS; skip silently otherwise (fresh host — the chart
-  # just creates it). --request-timeout bounds the probe against a wedged API.
-  kubectl get daemonset "$ds" -n "$ns" --request-timeout=5s >/dev/null 2>&1 || return 0
+  # Probe for a pre-#564 imperative leftover. Distinguish "absent" (fresh host —
+  # the chart just creates it) from a live API error: a wedged/slow API must NOT
+  # be read as "absent", because a leftover-but-unadopted DaemonSet then makes
+  # `helm upgrade --install` die with "exists and cannot be imported" and abort
+  # the whole (otherwise GPU-optional) install. --request-timeout bounds the probe.
+  local probe rc
+  probe=$(kubectl get daemonset "$ds" -n "$ns" -o name --request-timeout=5s 2>&1); rc=$?
+  if [[ $rc -ne 0 ]]; then
+    case "$probe" in
+      ""|*NotFound*|*"not found"*) return 0 ;;  # absent — nothing to adopt
+      *) warn "Could not check for a pre-existing GPU device plugin ${ds} (API error); skipping adoption. If a non-Helm ${ds} exists in ${ns}, remove it before install: kubectl delete daemonset ${ds} -n ${ns}"
+         return 0 ;;
+    esac
+  fi
   log "Adopting pre-existing GPU device plugin ${ds} into the Helm release (client#564 migration)"
-  kubectl label daemonset "$ds" -n "$ns" \
-    app.kubernetes.io/managed-by=Helm --overwrite --request-timeout=10s \
-    >> "${LOG_FILE:-/dev/null}" 2>&1 || true
-  kubectl annotate daemonset "$ds" -n "$ns" \
-    "meta.helm.sh/release-name=${TB_NAMESPACE}" \
-    "meta.helm.sh/release-namespace=${TB_NAMESPACE}" \
-    --overwrite --request-timeout=10s \
-    >> "${LOG_FILE:-/dev/null}" 2>&1 || true
+  # Adoption must actually succeed — a swallowed label/annotate failure leaves an
+  # unowned DS that collides with the release. If it fails, remove the orphan so
+  # the chart recreates a clean Helm-owned copy (the plugin is stateless; a brief
+  # re-roll is fine and keeps GPU optional) rather than bricking the install.
+  if kubectl label daemonset "$ds" -n "$ns" \
+       app.kubernetes.io/managed-by=Helm --overwrite --request-timeout=10s \
+       >> "${LOG_FILE:-/dev/null}" 2>&1 \
+     && kubectl annotate daemonset "$ds" -n "$ns" \
+       "meta.helm.sh/release-name=${TB_NAMESPACE}" \
+       "meta.helm.sh/release-namespace=${TB_NAMESPACE}" \
+       --overwrite --request-timeout=10s \
+       >> "${LOG_FILE:-/dev/null}" 2>&1; then
+    return 0
+  fi
+  warn "Could not adopt ${ds} into the Helm release; removing the orphan so the chart can recreate it."
+  kubectl delete daemonset "$ds" -n "$ns" --timeout=30s --ignore-not-found \
+    >> "${LOG_FILE:-/dev/null}" 2>&1 \
+    || warn "Failed to remove orphaned ${ds}; if the install aborts with 'exists and cannot be imported', delete it manually: kubectl delete daemonset ${ds} -n ${ns}"
+  return 0
 }
 
 install_client_helm() {
