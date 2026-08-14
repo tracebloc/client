@@ -1,0 +1,169 @@
+{{- /*
+GPU device-plugin DaemonSet — Helm-managed (client#564).
+
+Historically the installer applied the vendor GPU device plugin with an
+imperative `kubectl apply` of an upstream manifest fetched at install time
+(bash: scripts/lib/gpu-plugins.sh). That object was NOT part of any Helm
+release, so it lingered through `helm uninstall` and was re-created on every
+installer re-run, and it added a raw.githubusercontent.com network dependency
+to the install path.
+
+Rendering it here makes it a tracked release resource — reconciled on upgrade,
+removed on `helm uninstall` — and bakes the manifest into the chart, so no
+install-time download is needed. Gated on `gpu.devicePlugin.enabled`, so a
+CPU-only install renders nothing.
+
+The DaemonSet lives in `gpu.devicePlugin.namespace` (kube-system by default):
+the kubelet only discovers a device plugin that mounts its own
+/var/lib/kubelet/device-plugins socket dir, and kube-system is where the
+upstream manifests place it. Helm still tracks and removes a resource in a
+namespace other than the release namespace.
+
+NOTE: deliberately NO `helm.sh/resource-policy: keep` here — the whole point of
+#564 is that this object shares the release lifecycle and IS removed on
+uninstall (contrast the PVCs in docs/MIGRATIONS.md, which are kept on purpose).
+
+Windows: the installer's WSL2/CDI path advertises nvidia.com/gpu itself via a
+node-status patch and must NOT run the NVML device plugin (it would register 0
+GPUs and pin the resource at 0 — see docker/k3s-cuda/nvidia-runtimeclass.yaml),
+so that path leaves this disabled. The Windows non-WSL2 fallback still applies
+the plugin imperatively because it must verify the node advertises a GPU before
+it writes the GPU request — an ordering this Helm-managed resource can't satisfy
+in a single install. See the issue thread.
+*/ -}}
+{{- /*
+Nil-safe access via the chart's `default dict` pattern (mirrors resource-monitor
+reading .Values.images defensively). A `helm upgrade --reuse-values` from a
+release predating this chart carries no `gpu` key and does NOT merge values.yaml
+defaults, so .Values.gpu / .devicePlugin can be entirely absent. Coalescing each
+level to an empty dict BEFORE any field access means `$dp.enabled` can never be
+called on nil — Go template `and` is not short-circuit, so `and $dp $dp.enabled`
+would still evaluate `.enabled` on a nil $dp and panic. `default dict` removes
+the nil, so no evaluation order matters.
+*/ -}}
+{{- $gpu := .Values.gpu | default dict }}
+{{- $dp := $gpu.devicePlugin | default dict }}
+{{- if $dp.enabled }}
+{{- $vendor := $dp.vendor | default "" }}
+{{- if not (or (eq $vendor "nvidia") (eq $vendor "amd")) }}
+{{- fail (printf "gpu.devicePlugin.enabled is true but gpu.devicePlugin.vendor is %q; set it to \"nvidia\" or \"amd\"" $vendor) }}
+{{- end }}
+{{- $ns := $dp.namespace | default "kube-system" }}
+{{- /* global.imageRegistry (#585 mirror / air-gap) re-homes the plugin image
+     exactly like every other chart image; nil-safe for reuse-values. */ -}}
+{{- $g := .Values.global | default dict }}
+{{- if eq $vendor "nvidia" }}
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  # Name/namespace match the upstream NVIDIA manifest (v0.14.5) the installer
+  # used to apply, so an installer re-run adopts an existing DaemonSet in place
+  # rather than orphaning it.
+  name: nvidia-device-plugin-daemonset
+  namespace: {{ $ns }}
+  labels:
+    {{- include "tracebloc.labels" . | nindent 4 }}
+spec:
+  selector:
+    matchLabels:
+      name: nvidia-device-plugin-ds
+  updateStrategy:
+    type: RollingUpdate
+  template:
+    metadata:
+      labels:
+        name: nvidia-device-plugin-ds
+        {{- /* Pod template carries only version-free identity labels: tracebloc.labels
+             embeds helm.sh/chart + app.kubernetes.io/version, so a chart bump would
+             change the pod template and needlessly rolling-restart the plugin
+             (resource-monitor keeps versioned labels off its pod template for the
+             same reason — client#564 / Bugbot). */ -}}
+        {{- include "tracebloc.selectorLabels" . | nindent 8 }}
+    spec:
+      tolerations:
+        - key: nvidia.com/gpu
+          operator: Exists
+          effect: NoSchedule
+      priorityClassName: "system-node-critical"
+      {{- if include "tracebloc.useImagePullSecrets" . }}
+      # Mirror/private-registry pull secret, copied into this namespace by
+      # docker-registry-secret.yaml so the plugin can pull when global.imageRegistry
+      # points at an authenticated mirror (resource-monitor pattern).
+      imagePullSecrets:
+        - name: {{ include "tracebloc.registrySecretName" . }}
+      {{- end }}
+      containers:
+        {{- $nv := $dp.nvidia | default dict }}
+        - name: nvidia-device-plugin-ctr
+          image: {{ include "tracebloc.image" (dict "repository" ($nv.repository | default "nvidia/k8s-device-plugin") "tag" ($nv.tag | default "v0.14.5") "digest" ($nv.digest | default "") "registry" ((dig "imageRegistry" "" $g) | default ($nv.registry | default "nvcr.io"))) | quote }}
+          env:
+            # Optional GPU: a node without a working NVIDIA runtime must not
+            # crash-loop the plugin — it registers 0 GPUs and the install stays
+            # CPU-only, matching the upstream default the installer relied on.
+            - name: FAIL_ON_INIT_ERROR
+              value: "false"
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: device-plugin
+              mountPath: /var/lib/kubelet/device-plugins
+      volumes:
+        - name: device-plugin
+          hostPath:
+            path: /var/lib/kubelet/device-plugins
+{{- end }}
+{{- if eq $vendor "amd" }}
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: amdgpu-device-plugin-daemonset
+  namespace: {{ $ns }}
+  labels:
+    {{- include "tracebloc.labels" . | nindent 4 }}
+spec:
+  selector:
+    matchLabels:
+      name: amdgpu-dp-ds
+  template:
+    metadata:
+      labels:
+        name: amdgpu-dp-ds
+        {{- /* version-free identity labels only — see the nvidia pod template above
+             (client#564 / Bugbot). */ -}}
+        {{- include "tracebloc.selectorLabels" . | nindent 8 }}
+    spec:
+      restartPolicy: Always
+      nodeSelector:
+        kubernetes.io/arch: amd64
+      priorityClassName: system-node-critical
+      tolerations:
+        - key: CriticalAddonsOnly
+          operator: Exists
+      {{- if include "tracebloc.useImagePullSecrets" . }}
+      imagePullSecrets:
+        - name: {{ include "tracebloc.registrySecretName" . }}
+      {{- end }}
+      containers:
+        {{- $am := $dp.amd | default dict }}
+        - name: amdgpu-dp-cntr
+          image: {{ include "tracebloc.image" (dict "repository" ($am.repository | default "rocm/k8s-device-plugin") "tag" ($am.tag | default "latest") "digest" ($am.digest | default "") "registry" ((dig "imageRegistry" "" $g) | default ($am.registry | default "docker.io"))) | quote }}
+          securityContext:
+            privileged: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: dp
+              mountPath: /var/lib/kubelet/device-plugins
+            - name: sys
+              mountPath: /sys
+      volumes:
+        - name: dp
+          hostPath:
+            path: /var/lib/kubelet/device-plugins
+        - name: sys
+          hostPath:
+            path: /sys
+{{- end }}
+{{- end }}
