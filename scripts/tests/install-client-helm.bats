@@ -1710,3 +1710,15 @@ _engine_fixture() {
   [ "$status" -eq 0 ] || { cat "$MOCK_CALLS"; return 1; }
   grep -q 'delete daemonset nvidia-device-plugin-daemonset' "$MOCK_CALLS" || { cat "$MOCK_CALLS"; return 1; }
 }
+
+@test "_adopt_orphaned_gpu_device_plugin: a fresh-host NotFound under set -e does not abort the caller (client#564 Bugbot)" {
+  # `run` disables errexit, so exercise the real set -e path in a subshell: a
+  # bare `probe=$(...); rc=$?` would abort here on the non-zero NotFound lookup
+  # (killing installer step e on a fresh GPU host) before the absent branch runs.
+  GPU_VENDOR=nvidia; TB_NAMESPACE=tb; LOG_FILE=/dev/null
+  kubectl() { echo "Error from server (NotFound): daemonsets.apps not found" >&2; return 1; }
+  local out st
+  out=$( set -e; _adopt_orphaned_gpu_device_plugin && echo REACHED ) 2>/dev/null; st=$?
+  [ "$st" -eq 0 ] || { echo "aborted under set -e (st=$st)"; return 1; }
+  [[ "$out" == *REACHED* ]] || { echo "did not reach end: '$out'"; return 1; }
+}

@@ -939,8 +939,11 @@ _adopt_orphaned_gpu_device_plugin() {
   # be read as "absent", because a leftover-but-unadopted DaemonSet then makes
   # `helm upgrade --install` die with "exists and cannot be imported" and abort
   # the whole (otherwise GPU-optional) install. --request-timeout bounds the probe.
-  local probe rc
-  probe=$(kubectl get daemonset "$ds" -n "$ns" -o name --request-timeout=5s 2>&1); rc=$?
+  # `|| rc=$?` (not `; rc=$?`): under set -e a bare assignment from a non-zero
+  # command substitution aborts the script before the branch below runs — a
+  # NotFound on a fresh GPU host would kill step e (client#564 / Bugbot).
+  local probe rc=0
+  probe=$(kubectl get daemonset "$ds" -n "$ns" -o name --request-timeout=5s 2>&1) || rc=$?
   if [[ $rc -ne 0 ]]; then
     case "$probe" in
       ""|*NotFound*|*"not found"*) return 0 ;;  # absent — nothing to adopt
