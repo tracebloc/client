@@ -230,6 +230,43 @@ _unsettled_with_streak() {
   grep -q 'refresh-skip-streak-' "$ANNOTATIONS" || return 1
 }
 
+# --- backend#2007: the CLEAR must not be able to abort the tick ---------------
+#
+# #1964 made a permanently-unsettled deployment a loud finding. Its RECOVERY path
+# then had its own way to freeze: the settled branch clears the bookkeeping
+# annotation under `set -e`, so a transient API error on that one write aborted
+# the tick BEFORE Pass 1 -- requests-proxy and resource-monitor stayed frozen on
+# the very tick that proved jobs-manager had recovered.
+#
+# "Reached Pass 1" is the assertion, not the exit status: Pass 1 logs a `checking
+# <repo>` line per image, and under the hermetic curl stub it then takes the
+# documented "could not resolve latest digest" no-op. Asserting the log line
+# pins the SPECIFIC thing the bug destroyed (work after the clear), where an
+# exit-status assertion would also pass if the script died somewhere later.
+
+@test "a failed streak clear does NOT abort the tick before Pass 1 (backend#2007)" {
+  export STUB_ROLLOUT_RC=0 STUB_GET_RC=0
+  export STUB_JSON='{"metadata":{"annotations":{"tracebloc.io/refresh-skip-streak":"5"}}}'
+  # Every annotate fails -- the clear is the first one the settled path reaches.
+  export STUB_ANNOTATE_RC=1
+  run sh "$RENDERED"
+  # It genuinely attempted the clear (otherwise this case proves nothing).
+  grep -q 'settled again after 5 skipped tick' <<<"$output" || return 1
+  # ...and carried on into Pass 1 instead of dying at the failed write.
+  grep -q 'checking tracebloc/jobs-manager' <<<"$output" || return 1
+  grep -q 'checking tracebloc/resource-monitor' <<<"$output" || return 1
+}
+
+@test "a failed streak clear is reported as a WARNING, not swallowed (backend#2007)" {
+  # The shared lesson of #1964 and #2007: "images did not update" must never be
+  # inferable only from the Job's colour. Non-fatal must still mean visible.
+  export STUB_ROLLOUT_RC=0 STUB_GET_RC=0
+  export STUB_JSON='{"metadata":{"annotations":{"tracebloc.io/refresh-skip-streak":"5"}}}'
+  export STUB_ANNOTATE_RC=1
+  run sh "$RENDERED"
+  grep -q 'WARNING: could not clear tracebloc.io/refresh-skip-streak' <<<"$output" || return 1
+}
+
 @test "a healthy edge with no streak is not patched every tick" {
   export STUB_ROLLOUT_RC=0 STUB_GET_RC=0
   export STUB_JSON='{"metadata":{"annotations":{}}}'
