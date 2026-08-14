@@ -252,6 +252,17 @@ tests:
         documentSelector:
           path: kind
           value: ClusterRole
+      # …and read-only apiservices so the resource-monitor metrics-server
+      # pre-flight `lookup` resolves under the scoped SA (backend#953 Bugbot).
+      - contains:
+          path: rules
+          content:
+            apiGroups: ["apiregistration.k8s.io"]
+            resources: ["apiservices"]
+            verbs: ["get", "list", "watch"]
+        documentSelector:
+          path: kind
+          value: ClusterRole
       # …but must NOT grant blanket cluster-wide wildcard power.
       - notContains:
           path: rules
