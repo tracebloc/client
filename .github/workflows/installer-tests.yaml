@@ -55,7 +55,7 @@ jobs:
     name: Static analysis
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: bash -n (syntax) on every shell script
         run: |
@@ -132,7 +132,7 @@ jobs:
     name: bats (bash unit, mocked)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Install bats
         run: sudo apt-get update -qq && sudo apt-get install -y -qq bats
       - name: Run bats
@@ -149,7 +149,7 @@ jobs:
         os: [ubuntu-latest, windows-latest]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Run Pester
         shell: pwsh
         env:
@@ -193,7 +193,7 @@ jobs:
           - 'fedora:latest'       # dnf, falls through to get.docker.com
           - 'opensuse/leap:15.6'  # zypper
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       # Pull the distro image FIRST, bounded and retried. `docker run` pulls
       # implicitly with no timeout, so Docker Hub connectivity trouble either
       # fails the job in seconds (registry-1.docker.io timeout, exit 125) or
@@ -235,7 +235,7 @@ jobs:
         os: [ubuntu-22.04, ubuntu-24.04, ubuntu-24.04-arm]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Bring up a real k3d cluster + run a workload
         run: bash scripts/tests/e2e-cluster.sh
 
@@ -250,7 +250,7 @@ jobs:
     name: E2E auth-proxy (squid)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Cluster up through an authenticated proxy
         run: bash scripts/tests/e2e-proxy.sh
 
@@ -282,7 +282,7 @@ jobs:
           - 'opensuse/leap:15.6'  # zypper
           - 'alpine:3'            # busybox sh + apk (optional, minimal)
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       # Pull the distro image FIRST, bounded and retried. `docker run` pulls
       # implicitly with no timeout, so Docker Hub connectivity trouble either
       # fails the job in seconds (registry-1.docker.io timeout, exit 125) or
@@ -338,7 +338,7 @@ jobs:
       github.event_name != 'pull_request' ||
       contains(github.event.pull_request.labels.*.name, 'e2e')
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Install → CLI → cluster info (fresh shell) → dataset push --dry-run
         env:
           TRACEBLOC_CLI_REF: ${{ vars.TRACEBLOC_CLI_REF }}
