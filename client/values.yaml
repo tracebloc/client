@@ -427,13 +427,21 @@ images:
     repository: "ghcr.io/tracebloc/ingestor"
     # Floating tag spawned by default (imagePullPolicy=Always). The team's
     # ghcr.io publishing convention uses semver-style float tags — `0` tracks
-    # the latest 0.x, `0.7` tracks the latest 0.7.x patch. `0.7` (patch-only
-    # auto-track) is the default: a future 0.8 release will NOT be picked up
-    # until this is moved to `0.8` (or set to `0` for minor auto-track too).
+    # the latest 0.x, `0.8` tracks the latest 0.8.x patch. Moving a line float
+    # (`0.8` -> `0.9`) is deliberate: a future 0.9 release is NOT picked up
+    # until someone changes it (or sets `0` for minor auto-track too).
     # `latest` is rejected by the schema.
     #
-    # Pinned to the 0.7 line so the spawned ingestor carries the current
-    # ingestion correctness fixes and task catalogue — case/whitespace
+    # THIS FIELD IS EMPTY BY DEFAULT — see `tag: ""` below. The per-environment
+    # floats in `channelTags` are what actually select a tag, and prod's is
+    # `"0.8"`. An earlier revision of this comment said `0.7` was the default
+    # and that the chart was "pinned to the 0.7 line"; both stopped being true
+    # when backend#1360 moved tag selection into `channelTags`, and the stale
+    # text survived long enough to disagree with the `prodDigest` note 90 lines
+    # down (backend#1528).
+    #
+    # The line the fleet tracks carries the ingestion correctness fixes and task
+    # catalogue accumulated to date — case/whitespace
     # label-column resolution (data-ingestors#340) and UTF-8 BOM header
     # handling (#338) from the 0.6 line, plus 0.7's tabular schema-inference
     # rules (#349), the semantic-segmentation mask_id contract (#358), and the
@@ -516,22 +524,27 @@ images:
     # index; matches the v0.8.2 GitHub Release digest). The `VERIFIED` note is
     # the audit trail: re-resolve it, do not trust a previous note's date.
     #
-    # DELIBERATELY BEHIND the `channelTags.prod: "0.8"` float. The float has
-    # since moved to v0.8.8 (sha256:4beb85da…), which REMOVED the edgeuser
-    # fallback — i.e. it crossed the boundary described below, and the gap is no
-    # longer "two patches". Do not "refresh" this to the float without
-    # reading the ordering constraint in docs/SECURITY.md §4.1.1: prod's
+    # DELIBERATELY BEHIND the `channelTags.prod: "0.8"` float, and the float has
+    # CROSSED THE BOUNDARY. Do not "refresh" this to the float without reading
+    # the ordering constraint in docs/SECURITY.md §4.1.1: prod's
     # `serviceDbAccountsByEnv.prod` is still `false`, and the boundary is not a
     # version number — it is whether the release you move to was cut before
     # data-ingestors#468. `prodPin: true` means this digest, not the float, is
     # what prod spawns, which is exactly the protection being relied on.
     #
-    # (Checked 2026-08-12: v0.8.4's config.py still defaults DB_USER to
-    # "edgeuser", so data-ingestors#468 — which removes that fallback, merged
-    # 2026-08-11, after v0.8.4 was cut on 08-10 — is NOT yet in any 0.8 release.
-    # The next 0.8 release is therefore the dangerous one, not v0.8.4. Recorded
-    # so the ceiling is respected for the right reason, and so whoever raises it
-    # re-derives this instead of inheriting a stale number.)
+    # WHERE THE BOUNDARY IS, stated so it cannot go stale with the next release:
+    # data-ingestors#468 (drops the edgeuser fallback) merged 2026-08-11 10:48.
+    # v0.8.4 was cut 08-10 and does NOT contain it; **v0.8.8 (2026-08-12) is the
+    # FIRST release that does**, and every 0.8.x after it therefore does too.
+    # Verified by ancestry against the tags, not by reading a changelog.
+    #
+    # So the safe set is exactly {v0.8.0 … v0.8.4}, and this pin (v0.8.2) is in
+    # it. Naming the first UNSAFE release rather than "the current float" is the
+    # point: an earlier revision of this note said #468 was "NOT yet in any 0.8
+    # release" and that "the next 0.8 release is the dangerous one" — true when
+    # written on 2026-08-12, false hours later when v0.8.8 shipped, and by then
+    # it contradicted the paragraph directly above it in this same comment.
+    # A boundary is a fact; "the latest release" is a moving target.
     prodDigest: "sha256:05e124945a2ef61868661a9137abb5e75dac96a090cb41a7b4e8be520c4b5873"
 
     # -- Whether `prodDigest` applies on this edge. Default true, which means
@@ -1086,15 +1099,23 @@ serviceDbAccounts:
 # was on nowhere. dev and staging edges float on the :dev/:stg ingestor
 # channels, took the change the same day, and every ingestion Job now fails at
 # Config() before reading a byte. Prod escaped only because its ingestor is
-# digest-pinned to the 0.7 line — a caution engineered for D16, not for this,
-# and one client#490 is about to spend.
+# digest-pinned — `prodDigest` is v0.8.2, cut 2026-08-04, a week before #468
+# merged — a caution engineered for D16 and spent on this instead.
+#
+# (That pin was v0.8.2 as of client#490, which merged. An earlier revision of
+# this paragraph said "the 0.7 line" and "one client#490 is about to spend";
+# the first was already wrong and the second described the future. Line 1091
+# below said "past 0.8.2" the whole time, so the file disagreed with itself
+# about which release prod actually runs.)
 #
 # dev/stg: TRUE. Both are already running the ingestor that requires the
 # per-Job credentials, so this is what makes them work again — and it exercises
 # #1528's S2 path where it is supposed to be exercised, before prod.
 #
-# prod: FALSE, deliberately and explicitly. Prod runs the 0.7-line ingestor,
-# which still has the fallback. Flipping prod is a separate windowed decision
+# prod: FALSE, deliberately and explicitly. Prod runs v0.8.2 (pinned via
+# `prodDigest`), which still has the fallback — the safe set is v0.8.0…v0.8.4,
+# and v0.8.8 is the first release that dropped it. Flipping prod is a separate
+# windowed decision
 # (#1528 S0 drill), and it must happen BEFORE prod's ingestor is repinned past
 # 0.8.2 — see the note on `prodDigest`.
 serviceDbAccountsByEnv:
