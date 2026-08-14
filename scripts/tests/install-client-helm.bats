@@ -1722,3 +1722,14 @@ _engine_fixture() {
   [ "$st" -eq 0 ] || { echo "aborted under set -e (st=$st)"; return 1; }
   [[ "$out" == *REACHED* ]] || { echo "did not reach end: '$out'"; return 1; }
 }
+
+@test "install-client-helm declares singleNode: true in the node-local storage branch (client#560)" {
+  local lib="$BATS_TEST_DIRNAME/../lib/install-client-helm.sh"
+  # node-local (RFC-0003 Option C, local-path StorageClass) is a single
+  # schedulable node (AGENTS=0/SERVERS=1), so the values it emits must declare
+  # singleNode: true — otherwise hostPath.enabled=false misclassifies it as
+  # multi-node and the chart renders an undrainable minAvailable:1 PDB (#560).
+  grep -q 'singleNode: true' "$lib" || return 1
+  # ...and it must live in the node-local (local-path) values block.
+  awk '/name: local-path/{f=1} f && /singleNode: true/{found=1} END{exit !found}' "$lib" || return 1
+}
