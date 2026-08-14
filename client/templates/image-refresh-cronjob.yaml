@@ -355,10 +355,24 @@ data:
     # Deliberately NOT auto-clearing FLAP_KEY/ATTEMPT_KEY: those two mean "a
     # rollout kept failing" and #563 requires a human to clear them. This one
     # means "the deployment was busy", which resolving it genuinely resolves.
+    # The CLEAR is non-fatal too (backend#2007). The read above was already
+    # deliberately non-fatal; leaving the WRITE fatal under `set -e` was an
+    # asymmetry, not a decision -- and it aborted the tick BEFORE Pass 1, so a
+    # transient API error on a bookkeeping annotation froze the refresh of
+    # requests-proxy and resource-monitor on the very tick that proved the
+    # deployment had recovered. That is #1964's own recovery path failing the
+    # same way #1964 did, only red instead of green. Nothing below reads
+    # SKIP_KEY, so a stale value costs exactly one thing: the NEXT unsettled
+    # tick resumes counting from the old number instead of from zero, which
+    # trips the ceiling EARLIER -- fail-safe in the direction #1964 wants.
+    # Reported as a WARNING line rather than swallowed: "images did not update"
+    # must never be inferable only from the Job's colour (backend#1964).
     if skips="$(get_annotation "$SKIP_KEY")" && [ -n "$skips" ]; then
       log "deployment/${DEPLOYMENT_NAME} is settled again after ${skips} skipped tick(s) -- clearing ${SKIP_KEY}"
-      kubectl annotate deployment -n "$RELEASE_NAMESPACE" "$DEPLOYMENT_NAME" \
-        "${SKIP_KEY}-" --request-timeout=15s >/dev/null
+      if ! clear_err="$(kubectl annotate deployment -n "$RELEASE_NAMESPACE" "$DEPLOYMENT_NAME" \
+        "${SKIP_KEY}-" --request-timeout=15s 2>&1 >/dev/null)"; then
+        log "  WARNING: could not clear ${SKIP_KEY} on deployment/${DEPLOYMENT_NAME}: ${clear_err:-unknown error}. Continuing with this tick anyway -- the annotation is bookkeeping and a stale value only makes the next skip streak trip its ceiling sooner. Clear it by hand if that is unwanted: kubectl annotate deployment -n ${RELEASE_NAMESPACE} ${DEPLOYMENT_NAME} ${SKIP_KEY}-"
+      fi
     fi
 
     # =================================================================
