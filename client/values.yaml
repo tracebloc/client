@@ -59,6 +59,46 @@ env: {
   # cluster that wants the fallback). Must be a quoted string.
   # SINGLE_NODE: "true"
 }
+
+# -- GPU device plugin (client#564)
+# Renders a vendor GPU device-plugin DaemonSet as a Helm-managed resource, so it
+# is reconciled on upgrade and removed on `helm uninstall` — instead of the
+# installer applying an upstream manifest imperatively (outside any release) and
+# leaving it behind. The manifest is baked into the chart, so no install-time
+# download is needed. See templates/gpu-device-plugin.yaml.
+gpu:
+  devicePlugin:
+    # Master gate. The Linux installer sets this true on the native-GPU path, in
+    # lockstep with the GPU request it writes for training jobs (env.GPU_REQUESTS
+    # / env.GPU_LIMITS). Left false for CPU-only installs and for the Windows
+    # WSL2/CDI path (which advertises the GPU itself via a node-status patch and
+    # must NOT run the NVML plugin). Default false: nothing renders.
+    enabled: false
+    # Which vendor plugin to render when enabled: "nvidia" or "amd".
+    # Rendering with enabled: true and an unset/other vendor is a template error.
+    vendor: ""
+    # Namespace for the DaemonSet. kube-system by default — the kubelet only
+    # discovers a device plugin that mounts its own device-plugins socket dir,
+    # and this matches the upstream manifests. Helm still tracks/removes it even
+    # though it lives outside the release namespace.
+    namespace: kube-system
+    # Images are split registry/repository/tag[/digest] so global.imageRegistry
+    # (#585 mirror / air-gap) re-homes them exactly like every other chart image
+    # — the mirror must host the same repository path. Set a digest to pin.
+    nvidia:
+      # Pinned to the version the installer used to apply (NVIDIA k8s-device-plugin).
+      registry: nvcr.io
+      repository: nvidia/k8s-device-plugin
+      tag: v0.14.5
+      digest: ""
+    amd:
+      # ROCm k8s device plugin (docker.io/rocm/k8s-device-plugin). Set a digest
+      # for air-gapped / reproducible installs.
+      registry: docker.io
+      repository: rocm/k8s-device-plugin
+      tag: latest
+      digest: ""
+
 # -- StorageClass configuration
 # When create: true, the StorageClass name is release-unique (e.g. "<release-name>-storage-class")
 # so each release gets its own class and Helm ownership conflicts are avoided.
@@ -87,6 +127,21 @@ hostPath:
   # stay on the local /tracebloc tree (InnoDB over NFS is unsafe). The chart
   # appends /<release>/data. mysql/logs PV paths are not affected by this key.
   datasetPath: /tracebloc
+
+# -- Cluster topology: does this cluster have a single schedulable node?
+# Gates the AUTO-mode single-replica PodDisruptionBudgets (podDisruptionBudget
+# below): a minAvailable:1 PDB on a one-node cluster is undrainable (the pod
+# cannot reschedule), so it is skipped when singleNode is effectively true.
+#   null (default) -> DEFAULT to hostPath.enabled: bare-metal installer clusters
+#                     (hostPath.enabled=true) are single-node; managed dynamic
+#                     clusters (AKS/EKS/OC) are multi-node.
+#   true / false   -> explicit override.
+# This is DELIBERATELY separate from env.SINGLE_NODE (which gates the
+# jobs-manager GPU->CPU pending-job fallback and may be true on a FIXED
+# MULTI-NODE cluster). The installer sets singleNode=true for the node-local
+# single-node k3d path (hostPath.enabled=false, local-path CSI, AGENTS=0), where
+# hostPath alone would misclassify it as multi-node.
+singleNode: null
 
 # -- PVC storage sizes (override per-environment if needed)
 pvc:
@@ -427,13 +482,21 @@ images:
     repository: "ghcr.io/tracebloc/ingestor"
     # Floating tag spawned by default (imagePullPolicy=Always). The team's
     # ghcr.io publishing convention uses semver-style float tags — `0` tracks
-    # the latest 0.x, `0.7` tracks the latest 0.7.x patch. `0.7` (patch-only
-    # auto-track) is the default: a future 0.8 release will NOT be picked up
-    # until this is moved to `0.8` (or set to `0` for minor auto-track too).
+    # the latest 0.x, `0.8` tracks the latest 0.8.x patch. Moving a line float
+    # (`0.8` -> `0.9`) is deliberate: a future 0.9 release is NOT picked up
+    # until someone changes it (or sets `0` for minor auto-track too).
     # `latest` is rejected by the schema.
     #
-    # Pinned to the 0.7 line so the spawned ingestor carries the current
-    # ingestion correctness fixes and task catalogue — case/whitespace
+    # THIS FIELD IS EMPTY BY DEFAULT — see `tag: ""` below. The per-environment
+    # floats in `channelTags` are what actually select a tag, and prod's is
+    # `"0.8"`. An earlier revision of this comment said `0.7` was the default
+    # and that the chart was "pinned to the 0.7 line"; both stopped being true
+    # when backend#1360 moved tag selection into `channelTags`, and the stale
+    # text survived long enough to disagree with the `prodDigest` note 90 lines
+    # down (backend#1528).
+    #
+    # The line the fleet tracks carries the ingestion correctness fixes and task
+    # catalogue accumulated to date — case/whitespace
     # label-column resolution (data-ingestors#340) and UTF-8 BOM header
     # handling (#338) from the 0.6 line, plus 0.7's tabular schema-inference
     # rules (#349), the semantic-segmentation mask_id contract (#358), and the
@@ -516,22 +579,27 @@ images:
     # index; matches the v0.8.2 GitHub Release digest). The `VERIFIED` note is
     # the audit trail: re-resolve it, do not trust a previous note's date.
     #
-    # DELIBERATELY BEHIND the `channelTags.prod: "0.8"` float. The float has
-    # since moved to v0.8.8 (sha256:4beb85da…), which REMOVED the edgeuser
-    # fallback — i.e. it crossed the boundary described below, and the gap is no
-    # longer "two patches". Do not "refresh" this to the float without
-    # reading the ordering constraint in docs/SECURITY.md §4.1.1: prod's
+    # DELIBERATELY BEHIND the `channelTags.prod: "0.8"` float, and the float has
+    # CROSSED THE BOUNDARY. Do not "refresh" this to the float without reading
+    # the ordering constraint in docs/SECURITY.md §4.1.1: prod's
     # `serviceDbAccountsByEnv.prod` is still `false`, and the boundary is not a
     # version number — it is whether the release you move to was cut before
     # data-ingestors#468. `prodPin: true` means this digest, not the float, is
     # what prod spawns, which is exactly the protection being relied on.
     #
-    # (Checked 2026-08-12: v0.8.4's config.py still defaults DB_USER to
-    # "edgeuser", so data-ingestors#468 — which removes that fallback, merged
-    # 2026-08-11, after v0.8.4 was cut on 08-10 — is NOT yet in any 0.8 release.
-    # The next 0.8 release is therefore the dangerous one, not v0.8.4. Recorded
-    # so the ceiling is respected for the right reason, and so whoever raises it
-    # re-derives this instead of inheriting a stale number.)
+    # WHERE THE BOUNDARY IS, stated so it cannot go stale with the next release:
+    # data-ingestors#468 (drops the edgeuser fallback) merged 2026-08-11 10:48.
+    # v0.8.4 was cut 08-10 and does NOT contain it; **v0.8.8 (2026-08-12) is the
+    # FIRST release that does**, and every 0.8.x after it therefore does too.
+    # Verified by ancestry against the tags, not by reading a changelog.
+    #
+    # So the safe set is exactly {v0.8.0 … v0.8.4}, and this pin (v0.8.2) is in
+    # it. Naming the first UNSAFE release rather than "the current float" is the
+    # point: an earlier revision of this note said #468 was "NOT yet in any 0.8
+    # release" and that "the next 0.8 release is the dangerous one" — true when
+    # written on 2026-08-12, false hours later when v0.8.8 shipped, and by then
+    # it contradicted the paragraph directly above it in this same comment.
+    # A boundary is a fact; "the latest release" is a moving target.
     prodDigest: "sha256:05e124945a2ef61868661a9137abb5e75dac96a090cb41a7b4e8be520c4b5873"
 
     # -- Whether `prodDigest` applies on this edge. Default true, which means
@@ -689,15 +757,26 @@ priorityClass:
   name: ""
   value: 1000000
 
-# -- PodDisruptionBudgets.
-# mysql is single-replica; minAvailable: 1 blocks voluntary disruptions
-# (drains, surge upgrades, autoscaler scale-down) while only one mysql
-# pod exists. Disable if you run a multi-replica mysql managed externally.
+# -- PodDisruptionBudgets for the single-replica mysql and jobs-manager
+# Deployments. `create` is tri-state and defaults to AUTO (null), tracking the
+# storage/topology mode:
+#   null (default) -> multi-node CSI clusters (hostPath.enabled=false:
+#                     AKS/EKS/OpenShift) RENDER a minAvailable:1 PDB, so a
+#                     surprise autoscaler scale-down / node upgrade can't evict
+#                     the only pod without a deliberate operator drain.
+#                     Single-node / bare-metal installs (hostPath.enabled=true)
+#                     SKIP it: with one replica on one node, minAvailable:1
+#                     allows zero voluntary disruptions, so `kubectl drain`
+#                     (node maintenance, manual k3s upgrade) would block forever
+#                     while the pod has nowhere to reschedule (client#560).
+#   true  -> force render regardless of topology (e.g. a fixed multi-node
+#            bare-metal cluster that still wants drain protection).
+#   false -> never render (e.g. a multi-replica workload managed externally).
 podDisruptionBudget:
   mysql:
-    create: true
+    create: null
   jobsManager:
-    create: true
+    create: null
 
 # -- Secrets
 # These MUST be set via --set, a values file, or an external secret manager.
@@ -756,11 +835,19 @@ podTokenTtlSeconds: 604800
 #     instead. This CronJob still delivers everything else a chart release
 #     carries — template, RBAC, values-default and schema changes.
 #
-# Trust boundary: the CronJob's ServiceAccount is bound to the built-in
-# `cluster-admin` ClusterRole, so it can apply any resource the chart
-# templates (PriorityClass / StorageClass / ClusterRoleBinding / Namespace
-# are all cluster-scoped). Anything that compromises this Pod or the chart
-# repo at repoUrl effectively gets cluster-admin. Mitigations:
+# Trust boundary (backend#953, Sec-II): the CronJob's ServiceAccount is NO
+# LONGER cluster-admin. It gets a namespaced Role granting full control inside
+# THIS release's namespace, plus a narrow ClusterRole enumerating only the
+# cluster-scoped kinds the chart templates (Namespace / PersistentVolume /
+# StorageClass / PriorityClass / ClusterRole / ClusterRoleBinding / OpenShift
+# SecurityContextConstraints). So a compromise of this Pod or the chart repo at
+# repoUrl no longer yields a standing cluster-admin: cross-namespace secret
+# reads, pod exec, and node access are gone; widening the grant requires an
+# active, auditable use of the `escalate`/`bind` verbs the ClusterRole needs to
+# manage the chart's own RBAC. See the comment in
+# templates/auto-upgrade-rbac.yaml for the full rationale and the one residual
+# (adding a NEW cluster-scoped kind means extending that ClusterRole in the same
+# release). Mitigations that still apply:
 #   - repoUrl defaults to GitHub Pages over HTTPS (publish controlled by
 #     the tracebloc team via the gh-pages branch).
 #   - Set autoUpgrade.enabled: false to opt out and run upgrades manually
@@ -963,6 +1050,20 @@ imageRefresh:
   # tracebloc.io/refresh-attempt annotation to re-arm (or a rollout that finally
   # settles resets the counter on its own).
   maxRefreshAttempts: 3
+  # backend#1964. The OTHER way refresh stops: the job skips a tick whenever the
+  # jobs-manager Deployment is not settled, which is right for a rollout in
+  # flight and wrong forever if the pod never becomes Ready. Because the skip
+  # happens BEFORE anything is reconciled, requests-proxy and resource-monitor
+  # stop updating too — and every tick exits 0, so the CronJob stays green.
+  #
+  # After this many consecutive skips the job FAILS instead, annotating
+  # tracebloc.io/refresh-skip-streak so monitoring can surface it. It auto-resumes
+  # the moment the deployment settles (unlike maxRefreshAttempts, which needs a
+  # human): a skip streak means "it was busy", and settling really does resolve it.
+  #
+  # 8 ticks is ~2h at the default 15m schedule — longer than any legitimate
+  # rollout, including a resource-monitor DaemonSet roll across every node.
+  maxSkipTicks: 8
   # CronJob spec knobs. Override per-cluster if needed.
   suspend: false
   # Lower history limits than autoUpgrade — this Job runs ~96x/day, the
@@ -1078,15 +1179,23 @@ serviceDbAccounts:
 # was on nowhere. dev and staging edges float on the :dev/:stg ingestor
 # channels, took the change the same day, and every ingestion Job now fails at
 # Config() before reading a byte. Prod escaped only because its ingestor is
-# digest-pinned to the 0.7 line — a caution engineered for D16, not for this,
-# and one client#490 is about to spend.
+# digest-pinned — `prodDigest` is v0.8.2, cut 2026-08-04, a week before #468
+# merged — a caution engineered for D16 and spent on this instead.
+#
+# (That pin was v0.8.2 as of client#490, which merged. An earlier revision of
+# this paragraph said "the 0.7 line" and "one client#490 is about to spend";
+# the first was already wrong and the second described the future. Line 1091
+# below said "past 0.8.2" the whole time, so the file disagreed with itself
+# about which release prod actually runs.)
 #
 # dev/stg: TRUE. Both are already running the ingestor that requires the
 # per-Job credentials, so this is what makes them work again — and it exercises
 # #1528's S2 path where it is supposed to be exercised, before prod.
 #
-# prod: FALSE, deliberately and explicitly. Prod runs the 0.7-line ingestor,
-# which still has the fallback. Flipping prod is a separate windowed decision
+# prod: FALSE, deliberately and explicitly. Prod runs v0.8.2 (pinned via
+# `prodDigest`), which still has the fallback — the safe set is v0.8.0…v0.8.4,
+# and v0.8.8 is the first release that dropped it. Flipping prod is a separate
+# windowed decision
 # (#1528 S0 drill), and it must happen BEFORE prod's ingestor is repinned past
 # 0.8.2 — see the note on `prodDigest`.
 serviceDbAccountsByEnv:
