@@ -273,7 +273,12 @@ _gpu_mocks() {
 @test "the device-plugin chart template exists and is gated on gpu.devicePlugin.enabled (client#564)" {
   local tmpl="$BATS_TEST_DIRNAME/../../client/templates/gpu-device-plugin.yaml"
   [ -f "$tmpl" ] || return 1
-  grep -q 'Values.gpu.devicePlugin.enabled' "$tmpl" || return 1
+  # Gating derives from gpu.devicePlugin.enabled via a nil-safe `default dict`
+  # chain (.Values.gpu -> devicePlugin -> $dp.enabled), so assert the chain and
+  # the enable-gate rather than the pre-refactor literal (client#564 / Bugbot).
+  grep -q 'Values.gpu' "$tmpl" || return 1
+  grep -q 'devicePlugin' "$tmpl" || return 1
+  grep -q '\$dp.enabled' "$tmpl" || return 1
   grep -q 'kind: DaemonSet' "$tmpl" || return 1
 }
 
