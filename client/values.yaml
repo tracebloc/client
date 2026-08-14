@@ -976,6 +976,20 @@ imageRefresh:
   # tracebloc.io/refresh-attempt annotation to re-arm (or a rollout that finally
   # settles resets the counter on its own).
   maxRefreshAttempts: 3
+  # backend#1964. The OTHER way refresh stops: the job skips a tick whenever the
+  # jobs-manager Deployment is not settled, which is right for a rollout in
+  # flight and wrong forever if the pod never becomes Ready. Because the skip
+  # happens BEFORE anything is reconciled, requests-proxy and resource-monitor
+  # stop updating too — and every tick exits 0, so the CronJob stays green.
+  #
+  # After this many consecutive skips the job FAILS instead, annotating
+  # tracebloc.io/refresh-skip-streak so monitoring can surface it. It auto-resumes
+  # the moment the deployment settles (unlike maxRefreshAttempts, which needs a
+  # human): a skip streak means "it was busy", and settling really does resolve it.
+  #
+  # 8 ticks is ~2h at the default 15m schedule — longer than any legitimate
+  # rollout, including a resource-monitor DaemonSet roll across every node.
+  maxSkipTicks: 8
   # CronJob spec knobs. Override per-cluster if needed.
   suspend: false
   # Lower history limits than autoUpgrade — this Job runs ~96x/day, the
