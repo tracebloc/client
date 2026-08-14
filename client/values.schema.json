@@ -75,6 +75,49 @@
         "type": "string"
       }
     },
+    "gpu": {
+      "type": "object",
+      "description": "GPU device-plugin settings (client#564).",
+      "properties": {
+        "devicePlugin": {
+          "type": "object",
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "description": "Render a Helm-managed GPU device-plugin DaemonSet."
+            },
+            "vendor": {
+              "type": "string",
+              "enum": ["", "nvidia", "amd"],
+              "description": "Which vendor plugin to render when enabled; required non-empty when enabled is true."
+            },
+            "namespace": {
+              "type": "string",
+              "minLength": 1,
+              "description": "Namespace for the DaemonSet (kube-system by default)."
+            },
+            "nvidia": {
+              "type": "object",
+              "properties": {
+                "registry": { "type": "string" },
+                "repository": { "type": "string", "minLength": 1 },
+                "tag": { "type": "string" },
+                "digest": { "type": "string" }
+              }
+            },
+            "amd": {
+              "type": "object",
+              "properties": {
+                "registry": { "type": "string" },
+                "repository": { "type": "string", "minLength": 1 },
+                "tag": { "type": "string" },
+                "digest": { "type": "string" }
+              }
+            }
+          }
+        }
+      }
+    },
     "storageClass": {
       "type": "object",
       "required": [
@@ -139,6 +182,11 @@
           "description": "Base host path for the DATASET (shared-images) PV ONLY. Default /tracebloc keeps datasets local alongside mysql/logs; the installer sets /tracebloc-data when a customer network (NFS) dataset mount is provided via HOST_DATASET_DIR (backend#743). mysql + logs PV paths always stay on /tracebloc. The chart appends /<release>/data."
         }
       }
+    },
+    "singleNode": {
+      "type": ["boolean", "null"],
+      "default": null,
+      "description": "Cluster topology: does this cluster have a single schedulable node? Gates the AUTO-mode single-replica PodDisruptionBudgets (a minAvailable:1 PDB is undrainable on one node). null => default to hostPath.enabled; true/false => explicit. Deliberately separate from env.SINGLE_NODE (GPU->CPU fallback, which may be true on a fixed multi-node cluster). The installer sets true for node-local single-node k3d (client#560)."
     },
     "pvc": {
       "type": "object",
@@ -894,8 +942,9 @@
           "type": "object",
           "properties": {
             "create": {
-              "type": "boolean",
-              "default": true
+              "type": ["boolean", "null"],
+              "default": null,
+              "description": "null (default) = auto: render on multi-node CSI (hostPath.enabled=false), skip on single-node/bare-metal (hostPath.enabled=true). true = force render, false = never render. See tracebloc/client#560."
             }
           }
         },
@@ -903,8 +952,9 @@
           "type": "object",
           "properties": {
             "create": {
-              "type": "boolean",
-              "default": true
+              "type": ["boolean", "null"],
+              "default": null,
+              "description": "null (default) = auto: render on multi-node CSI (hostPath.enabled=false), skip on single-node/bare-metal (hostPath.enabled=true). true = force render, false = never render. See tracebloc/client#560."
             }
           }
         }

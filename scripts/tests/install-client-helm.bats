@@ -1645,3 +1645,91 @@ _engine_fixture() {
   [ "$status" -eq 0 ] || return 1
   [ "$output" != "8.4" ] || return 1
 }
+
+# ── _adopt_orphaned_gpu_device_plugin (client#564) ───────────────────────────
+# On the GPU path, adopt a Helm-unowned device-plugin DaemonSet left by the old
+# imperative apply so `helm upgrade --install` takes it over instead of colliding.
+@test "_adopt_orphaned_gpu_device_plugin: CPU-only host is a no-op (kubectl untouched)" {
+  GPU_VENDOR=none
+  kubectl() { echo "kubectl $*" >>"$MOCK_CALLS"; }
+  run _adopt_orphaned_gpu_device_plugin
+  [ "$status" -eq 0 ] || return 1
+  [ ! -s "$MOCK_CALLS" ] || { cat "$MOCK_CALLS"; return 1; }
+}
+
+@test "_adopt_orphaned_gpu_device_plugin: an existing nvidia orphan is labelled+annotated for Helm adoption" {
+  GPU_VENDOR=nvidia; TB_NAMESPACE=tb; LOG_FILE=/dev/null
+  kubectl() {
+    echo "kubectl $*" >>"$MOCK_CALLS"
+    case "$1" in get) return 0 ;; esac   # DS present
+  }
+  run _adopt_orphaned_gpu_device_plugin
+  [ "$status" -eq 0 ] || { cat "$MOCK_CALLS"; return 1; }
+  grep -q 'label daemonset nvidia-device-plugin-daemonset .*app.kubernetes.io/managed-by=Helm' "$MOCK_CALLS" || { cat "$MOCK_CALLS"; return 1; }
+  grep -q 'annotate daemonset nvidia-device-plugin-daemonset .*meta.helm.sh/release-name=tb' "$MOCK_CALLS" || { cat "$MOCK_CALLS"; return 1; }
+}
+
+@test "_adopt_orphaned_gpu_device_plugin: no orphan present -> no label/annotate (fresh host)" {
+  GPU_VENDOR=nvidia; TB_NAMESPACE=tb; LOG_FILE=/dev/null
+  kubectl() {
+    echo "kubectl $*" >>"$MOCK_CALLS"
+    case "$1" in get) return 1 ;; esac   # DS absent
+  }
+  run _adopt_orphaned_gpu_device_plugin
+  [ "$status" -eq 0 ] || return 1
+  ! grep -q 'label daemonset' "$MOCK_CALLS" || { cat "$MOCK_CALLS"; return 1; }
+  ! grep -q 'annotate daemonset' "$MOCK_CALLS" || { cat "$MOCK_CALLS"; return 1; }
+}
+
+@test "_adopt_orphaned_gpu_device_plugin: a live API error does not fake-adopt (no label/annotate), still returns 0 (client#564 Bugbot)" {
+  # A wedged/slow API must not be read as 'absent' and silently skipped as if
+  # adopted; but it must also not abort (GPU is optional) — warn and return 0.
+  GPU_VENDOR=nvidia; TB_NAMESPACE=tb; LOG_FILE=/dev/null
+  kubectl() {
+    echo "kubectl $*" >>"$MOCK_CALLS"
+    case "$1" in get) echo "Unable to connect to the server: dial tcp timeout" >&2; return 1 ;; esac
+  }
+  run _adopt_orphaned_gpu_device_plugin
+  [ "$status" -eq 0 ] || { cat "$MOCK_CALLS"; return 1; }
+  ! grep -q 'label daemonset' "$MOCK_CALLS" || { cat "$MOCK_CALLS"; return 1; }
+}
+
+@test "_adopt_orphaned_gpu_device_plugin: a failed adoption removes the orphan so the install isn't bricked (client#564 Bugbot)" {
+  # If label/annotate fail, the orphan stays unowned and helm would die
+  # 'exists and cannot be imported'; delete it so the chart recreates a clean copy.
+  GPU_VENDOR=nvidia; TB_NAMESPACE=tb; LOG_FILE=/dev/null
+  kubectl() {
+    echo "kubectl $*" >>"$MOCK_CALLS"
+    case "$1" in
+      get)    return 0 ;;    # orphan present
+      label)  return 1 ;;    # adoption fails
+      delete) return 0 ;;
+    esac
+  }
+  run _adopt_orphaned_gpu_device_plugin
+  [ "$status" -eq 0 ] || { cat "$MOCK_CALLS"; return 1; }
+  grep -q 'delete daemonset nvidia-device-plugin-daemonset' "$MOCK_CALLS" || { cat "$MOCK_CALLS"; return 1; }
+}
+
+@test "_adopt_orphaned_gpu_device_plugin: a fresh-host NotFound under set -e does not abort the caller (client#564 Bugbot)" {
+  # `run` disables errexit, so exercise the real set -e path in a subshell: a
+  # bare `probe=$(...); rc=$?` would abort here on the non-zero NotFound lookup
+  # (killing installer step e on a fresh GPU host) before the absent branch runs.
+  GPU_VENDOR=nvidia; TB_NAMESPACE=tb; LOG_FILE=/dev/null
+  kubectl() { echo "Error from server (NotFound): daemonsets.apps not found" >&2; return 1; }
+  local out st
+  out=$( set -e; _adopt_orphaned_gpu_device_plugin && echo REACHED ) 2>/dev/null; st=$?
+  [ "$st" -eq 0 ] || { echo "aborted under set -e (st=$st)"; return 1; }
+  [[ "$out" == *REACHED* ]] || { echo "did not reach end: '$out'"; return 1; }
+}
+
+@test "install-client-helm declares singleNode: true in the node-local storage branch (client#560)" {
+  local lib="$BATS_TEST_DIRNAME/../lib/install-client-helm.sh"
+  # node-local (RFC-0003 Option C, local-path StorageClass) is a single
+  # schedulable node (AGENTS=0/SERVERS=1), so the values it emits must declare
+  # singleNode: true — otherwise hostPath.enabled=false misclassifies it as
+  # multi-node and the chart renders an undrainable minAvailable:1 PDB (#560).
+  grep -q 'singleNode: true' "$lib" || return 1
+  # ...and it must live in the node-local (local-path) values block.
+  awk '/name: local-path/{f=1} f && /singleNode: true/{found=1} END{exit !found}' "$lib" || return 1
+}

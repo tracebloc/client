@@ -122,6 +122,32 @@ data:
     ATTEMPT_KEY="tracebloc.io/refresh-attempt"
     FLAP_KEY="tracebloc.io/refresh-flap-detected"
 
+    # backend#1964: guard a SKIP THAT NEVER ENDS. The settled guard below is
+    # correct to skip a tick while a rollout is in flight, but it cannot tell
+    # "in flight" from "will never settle" -- and the second case freezes image
+    # refresh for ALL FOUR workloads while every tick exits 0 and the CronJob
+    # stays green. Nobody looks at a green CronJob.
+    #
+    # This is reachable without anything crashing. jobs-manager's readiness
+    # probe (jobs-manager-deployment.yaml) is a TCP connect to 8080, and
+    # jobs_manager.py CATCHES a failed run_server_in_thread on purpose so
+    # Service Bus polling and training survive. The pod then runs forever,
+    # useful, and never Ready -- so `rollout status` never settles. Measured
+    # triggers, all operator-reachable: a malformed ingestion-authz.yaml
+    # (load_authz_policy raises), edgeuser losing CREATE/ALTER on the
+    # ingestion_runs table (ensure_ingestion_runs_table raises), or 8080
+    # already bound (make_server binds in _ServerThread.__init__).
+    #
+    # The flap counter above CANNOT cover this: it counts failed ROLLOUTS, and
+    # everything after the settled guard is unreachable when the deployment
+    # never settles. Hence a second counter with the same shape.
+    #
+    # Default 8 ticks = ~2h at the default 15m schedule: comfortably longer than
+    # any legitimate rollout (including a resource-monitor DaemonSet roll across
+    # every node) and far shorter than the days this went unnoticed.
+    MAX_SKIP_TICKS="${MAX_SKIP_TICKS:-8}"
+    SKIP_KEY="tracebloc.io/refresh-skip-streak"
+
     log "release=$RELEASE_NAME namespace=$RELEASE_NAMESPACE deployment=$DEPLOYMENT_NAME"
     log "  client images: tracebloc/{jobs-manager,pods-monitor,resource-monitor} on docker.io under tag=$IMAGE_TAG"
     log "  also reconciling: deployment/${REQUESTS_PROXY_DEPLOYMENT} (jobs-manager image), daemonset/${RESOURCE_MONITOR_DAEMONSET} in ${NODE_AGENTS_NAMESPACE}"
@@ -277,7 +303,38 @@ data:
     # concurrencyPolicy: Forbid blocks every later tick.
     if ! kubectl rollout status -n "$RELEASE_NAMESPACE" "deployment/${DEPLOYMENT_NAME}" --request-timeout=15s --timeout=10s >/dev/null 2>&1; then
       if kubectl get deployment -n "$RELEASE_NAMESPACE" "$DEPLOYMENT_NAME" --request-timeout=15s >/dev/null 2>&1; then
-        log "deployment/${DEPLOYMENT_NAME} not settled (rollout in progress or pod not Ready) -- skipping this refresh tick; will retry when settled"
+        # COUNT the skip before taking it (backend#1964). A single skip is
+        # normal; an unbroken run of them means refresh has stopped for all four
+        # workloads and no rollout will ever happen to say so.
+        #
+        # Read FAIL-CLOSED, same reasoning as the ATTEMPT_KEY read below: we just
+        # proved this deployment is readable, so an annotation read that fails
+        # here is anomalous. Collapsing it to "0 skips" would restart the streak
+        # every tick and the ceiling would never be reached -- the freeze would
+        # be permanent AND unreported, which is strictly worse than today.
+        if ! skips="$(get_annotation "$SKIP_KEY")"; then
+          log "ERROR: deployment/${DEPLOYMENT_NAME} is not settled AND the ${SKIP_KEY} annotation could not be read (kubectl/jq error), so the skip streak cannot be counted. Failing the tick rather than skipping silently: an uncounted skip is how this freezes forever."
+          exit 1
+        fi
+        case "$skips" in ''|*[!0-9]*) skips=0 ;; esac
+        skips=$(( skips + 1 ))
+        kubectl annotate deployment -n "$RELEASE_NAMESPACE" "$DEPLOYMENT_NAME" \
+          "${SKIP_KEY}=${skips}" --overwrite --request-timeout=15s
+
+        if [ "$skips" -ge "$MAX_SKIP_TICKS" ]; then
+          # The freeze is now a FINDING, not an exit 0. Every image the CronJob
+          # owns has been frozen for MAX_SKIP_TICKS ticks; a rollout in progress
+          # does not last that long, so this deployment is not going to settle
+          # on its own.
+          log "ERROR: deployment/${DEPLOYMENT_NAME} has been unsettled for ${skips} consecutive ticks (>= MAX_SKIP_TICKS=${MAX_SKIP_TICKS}). IMAGE REFRESH IS FROZEN, and not only for jobs-manager: deployment/${REQUESTS_PROXY_DEPLOYMENT} and daemonset/${RESOURCE_MONITOR_DAEMONSET} are reconciled after this guard, so they have received NO image updates either."
+          log "  MANUAL ATTENTION NEEDED. Most likely the jobs-manager pod is Running but never Ready, which the readiness probe reports and nothing kills:"
+          log "    kubectl -n ${RELEASE_NAMESPACE} get pods -l app.kubernetes.io/component=jobs-manager"
+          log "    kubectl -n ${RELEASE_NAMESPACE} logs deployment/${DEPLOYMENT_NAME} -c api | grep -i 'ingestion HTTP server'"
+          log "  A 'Failed to start ingestion HTTP server' line means 8080 never opened: check ingestion-authz.yaml parses, that the DB user may create the ingestion_runs table, and that 8080 is free. Refresh resumes by itself once the pod goes Ready."
+          exit 1
+        fi
+
+        log "deployment/${DEPLOYMENT_NAME} not settled (rollout in progress or pod not Ready) -- skipping this refresh tick ${skips}/${MAX_SKIP_TICKS}; will retry when settled"
         exit 0
       fi
       # Surface the REAL API error instead of swallowing it: the generic
@@ -287,6 +344,35 @@ data:
       err="$(kubectl get deployment -n "$RELEASE_NAMESPACE" "$DEPLOYMENT_NAME" --request-timeout=15s 2>&1 >/dev/null || true)"
       log "ERROR: cannot read deployment/${DEPLOYMENT_NAME} (NotFound, RBAC denial, or API error): ${err:-unknown error} -- not a benign skip; failing the tick so it is visible"
       exit 1
+    fi
+
+    # Settled: the streak is over, so clear it (backend#1964). Only written when
+    # there is something to clear, so a healthy edge is not patched every 15
+    # minutes for nothing. A read error is NOT fatal here -- unlike the skip path
+    # above, being unable to confirm a streak we are about to reset cannot hide a
+    # freeze: we have just proved the deployment settled. Say so and carry on.
+    #
+    # Deliberately NOT auto-clearing FLAP_KEY/ATTEMPT_KEY: those two mean "a
+    # rollout kept failing" and #563 requires a human to clear them. This one
+    # means "the deployment was busy", which resolving it genuinely resolves.
+    # The CLEAR is non-fatal too (backend#2007). The read above was already
+    # deliberately non-fatal; leaving the WRITE fatal under `set -e` was an
+    # asymmetry, not a decision -- and it aborted the tick BEFORE Pass 1, so a
+    # transient API error on a bookkeeping annotation froze the refresh of
+    # requests-proxy and resource-monitor on the very tick that proved the
+    # deployment had recovered. That is #1964's own recovery path failing the
+    # same way #1964 did, only red instead of green. Nothing below reads
+    # SKIP_KEY, so a stale value costs exactly one thing: the NEXT unsettled
+    # tick resumes counting from the old number instead of from zero, which
+    # trips the ceiling EARLIER -- fail-safe in the direction #1964 wants.
+    # Reported as a WARNING line rather than swallowed: "images did not update"
+    # must never be inferable only from the Job's colour (backend#1964).
+    if skips="$(get_annotation "$SKIP_KEY")" && [ -n "$skips" ]; then
+      log "deployment/${DEPLOYMENT_NAME} is settled again after ${skips} skipped tick(s) -- clearing ${SKIP_KEY}"
+      if ! clear_err="$(kubectl annotate deployment -n "$RELEASE_NAMESPACE" "$DEPLOYMENT_NAME" \
+        "${SKIP_KEY}-" --request-timeout=15s 2>&1 >/dev/null)"; then
+        log "  WARNING: could not clear ${SKIP_KEY} on deployment/${DEPLOYMENT_NAME}: ${clear_err:-unknown error}. Continuing with this tick anyway -- the annotation is bookkeeping and a stale value only makes the next skip streak trip its ceiling sooner. Clear it by hand if that is unwanted: kubectl annotate deployment -n ${RELEASE_NAMESPACE} ${DEPLOYMENT_NAME} ${SKIP_KEY}-"
+      fi
     fi
 
     # =================================================================
@@ -620,6 +706,11 @@ spec:
                 # #563: consecutive failed-rollout threshold; stop + flag after this.
                 - name: MAX_REFRESH_ATTEMPTS
                   value: {{ .Values.imageRefresh.maxRefreshAttempts | default 3 | quote }}
+                # backend#1964: consecutive UNSETTLED-skip threshold. The failed-
+                # rollout counter above cannot cover this — it lives after the
+                # settled guard, which a never-Ready pod never gets past.
+                - name: MAX_SKIP_TICKS
+                  value: {{ .Values.imageRefresh.maxSkipTicks | default 8 | quote }}
                 # Per-image opt-out flags. Pinning a class-1 image is
                 # signalled by setting `images.<image>.digest` to a non-empty
                 # value — the same signal the deployment uses to switch

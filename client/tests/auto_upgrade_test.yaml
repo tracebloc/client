@@ -15,11 +15,15 @@ tests:
       - hasDocuments:
           count: 2
 
-  - it: rbac template renders ServiceAccount + ClusterRoleBinding by default
+  - it: rbac template renders SA + release-ns Role/RoleBinding + scoped ClusterRole/ClusterRoleBinding + node-agents-ns Role/RoleBinding by default
     template: templates/auto-upgrade-rbac.yaml
     asserts:
+      # 7 = SA, release-ns Role+RoleBinding, ClusterRole+ClusterRoleBinding, and
+      # the node-agents-ns Role+RoleBinding (backend#953 Bugbot: the SA must
+      # reconcile resource-monitor/image-refresh objects in the separate
+      # tracebloc-node-agents namespace, else --atomic upgrades 403 there).
       - hasDocuments:
-          count: 2
+          count: 7
 
   - it: cronjob template renders nothing when autoUpgrade.enabled=false
     template: templates/auto-upgrade-cronjob.yaml
@@ -38,6 +42,27 @@ tests:
     asserts:
       - hasDocuments:
           count: 0
+
+  - it: rbac grants the auto-upgrade SA a Role in the node-agents namespace by default (backend#953 Bugbot)
+    template: templates/auto-upgrade-rbac.yaml
+    documentIndex: 5
+    asserts:
+      - isKind:
+          of: Role
+      - equal:
+          path: metadata.namespace
+          value: tracebloc-node-agents
+      - equal:
+          path: metadata.name
+          value: stg-auto-upgrade-node-agents
+
+  - it: rbac omits the node-agents Role/RoleBinding when resource-monitor is disabled (nothing to reconcile there)
+    template: templates/auto-upgrade-rbac.yaml
+    set:
+      resourceMonitor: false
+    asserts:
+      - hasDocuments:
+          count: 5
 
   - it: ConfigMap holds the upgrade script
     template: templates/auto-upgrade-cronjob.yaml
@@ -160,29 +185,300 @@ tests:
           path: spec.jobTemplate.spec.template.spec.containers[0].securityContext.capabilities.drop[0]
           value: ALL
 
-  - it: ServiceAccount and ClusterRoleBinding bind to cluster-admin
+  - it: RBAC is least-privilege — namespaced Role plus a scoped ClusterRole, NOT cluster-admin (backend#953)
     template: templates/auto-upgrade-rbac.yaml
     asserts:
-      - hasDocuments:
-          count: 2
-      - isKind:
-          of: ServiceAccount
-        documentIndex: 0
+      # The ServiceAccount the CronJob runs as.
       - equal:
           path: metadata.name
           value: stg-auto-upgrade
-        documentIndex: 0
-      - isKind:
-          of: ClusterRoleBinding
+        documentSelector:
+          path: kind
+          value: ServiceAccount
+      # Namespaced Role: full control, but confined to the release namespace.
+      - equal:
+          path: rules[0].apiGroups
+          value: ["*"]
         documentIndex: 1
       - equal:
-          path: roleRef.name
-          value: cluster-admin
+          path: rules[0].resources
+          value: ["*"]
         documentIndex: 1
+      - equal:
+          path: rules[0].verbs
+          value: ["*"]
+        documentIndex: 1
+      # RoleBinding targets the chart's own namespaced Role, not a built-in.
+      - equal:
+          path: roleRef.kind
+          value: Role
+        documentIndex: 2
+      - equal:
+          path: roleRef.name
+          value: stg-auto-upgrade
+        documentIndex: 2
+      # The regression that #953 fixes: the ClusterRoleBinding must bind the
+      # chart's OWN scoped ClusterRole (stg-auto-upgrade), never cluster-admin.
+      - equal:
+          path: roleRef.name
+          value: stg-auto-upgrade
+        documentSelector:
+          path: kind
+          value: ClusterRoleBinding
+      # The binding is deliberately RENAMED (`-scoped`): the pre-#953 binding of
+      # this name bound cluster-admin and roleRef is immutable, so a same-name
+      # binding would make the first upgrade fail. A distinct name lets helm
+      # create-new + delete-old. Locking the name in guards that fix.
+      - equal:
+          path: metadata.name
+          value: stg-auto-upgrade-scoped
+        documentSelector:
+          path: kind
+          value: ClusterRoleBinding
       - equal:
           path: subjects[0].name
           value: stg-auto-upgrade
-        documentIndex: 1
+        documentSelector:
+          path: kind
+          value: ClusterRoleBinding
+      # The scoped ClusterRole carries escalate + bind on the RBAC kinds
+      # (required to re-apply the chart's other ClusterRoles during upgrade)…
+      - contains:
+          path: rules
+          content:
+            apiGroups: ["rbac.authorization.k8s.io"]
+            resources: ["clusterroles", "clusterrolebindings"]
+            verbs: ["get", "list", "watch", "create", "update", "patch", "delete", "escalate", "bind"]
+        documentSelector:
+          path: kind
+          value: ClusterRole
+      # …and read-only apiservices so the resource-monitor metrics-server
+      # pre-flight `lookup` resolves under the scoped SA (backend#953 Bugbot).
+      - contains:
+          path: rules
+          content:
+            apiGroups: ["apiregistration.k8s.io"]
+            resources: ["apiservices"]
+            verbs: ["get", "list", "watch"]
+        documentSelector:
+          path: kind
+          value: ClusterRole
+      # …but must NOT grant blanket cluster-wide wildcard power.
+      - notContains:
+          path: rules
+          content:
+            apiGroups: ["*"]
+            resources: ["*"]
+            verbs: ["*"]
+        documentSelector:
+          path: kind
+          value: ClusterRole
+
+  # ---------------------------------------------------------------------------
+  # backend#1992 — RBAC in the GPU device-plugin namespace.
+  #
+  # A Linux GPU install templates namespaced objects into
+  # gpu.devicePlugin.namespace (kube-system by default): the vendor DaemonSet
+  # and, on an authenticated mirror, the mirrored pull Secret. Neither the
+  # release-namespace Role nor the cluster-scoped-only ClusterRole reaches them,
+  # so before this fix a `helm upgrade --atomic --wait` tick 403'd there and
+  # auto-upgrade stayed permanently failed on every GPU edge.
+  # ---------------------------------------------------------------------------
+
+  - it: does NOT render the GPU Role/RoleBinding on a default CPU-only install (backend#1992)
+    template: templates/auto-upgrade-rbac.yaml
+    asserts:
+      # Still 7 — the two GPU documents must not appear when the device plugin
+      # is off, which is the default. Counting is what proves absence here.
+      - hasDocuments:
+          count: 7
+
+  - it: does NOT render the GPU Role/RoleBinding when gpu is explicitly null (nil-safe, no panic)
+    template: templates/auto-upgrade-rbac.yaml
+    set:
+      gpu: null
+    asserts:
+      - hasDocuments:
+          count: 7
+
+  - it: renders a Role + RoleBinding in the GPU namespace when the device plugin is enabled (backend#1992)
+    template: templates/auto-upgrade-rbac.yaml
+    set:
+      gpu:
+        devicePlugin:
+          enabled: true
+          vendor: nvidia
+    asserts:
+      # 7 + the GPU Role and RoleBinding.
+      - hasDocuments:
+          count: 9
+      # documentIndex follows template order. isKind/name/namespace are asserted
+      # alongside it deliberately: if a future edit shifts the index, these fail
+      # loudly instead of silently asserting against the wrong document.
+      - isKind:
+          of: Role
+        documentIndex: 7
+      - equal:
+          path: metadata.name
+          value: stg-auto-upgrade-gpu-device-plugin
+        documentIndex: 7
+      - equal:
+          path: metadata.namespace
+          value: kube-system
+        documentIndex: 7
+      - isKind:
+          of: RoleBinding
+        documentIndex: 8
+      - equal:
+          path: metadata.namespace
+          value: kube-system
+        documentIndex: 8
+      # The binding must reach back to the auto-upgrade SA, which lives in the
+      # RELEASE namespace — a RoleBinding may name a subject from any namespace.
+      - equal:
+          path: subjects[0].kind
+          value: ServiceAccount
+        documentIndex: 8
+      - equal:
+          path: subjects[0].name
+          value: stg-auto-upgrade
+        documentIndex: 8
+      - equal:
+          path: subjects[0].namespace
+          value: tracebloc
+        documentIndex: 8
+      # …and bind the chart's own narrow Role, never a ClusterRole or a built-in.
+      - equal:
+          path: roleRef.kind
+          value: Role
+        documentIndex: 8
+      - equal:
+          path: roleRef.name
+          value: stg-auto-upgrade-gpu-device-plugin
+        documentIndex: 8
+
+  - it: GPU Role grants EXACTLY the derived set — nothing wider (backend#1992 security property)
+    template: templates/auto-upgrade-rbac.yaml
+    set:
+      gpu:
+        devicePlugin:
+          enabled: true
+          vendor: nvidia
+    documentIndex: 7
+    asserts:
+      # The whole point of this ticket is that the grant is NARROW. This
+      # namespace defaults to kube-system, which holds the service-account
+      # tokens of kube-controller-manager and friends, so a namespace-wide
+      # `secrets` read here — never mind `*` on `*` — is cluster-admin by
+      # another route and would undo backend#953.
+      #
+      # Asserting the ENTIRE rules array (not a `contains` subset) is what makes
+      # this a real gate: any added resource, added verb, widened apiGroup, or
+      # dropped resourceNames restriction fails this test. In particular there
+      # is no `escalate` and no `bind` — the grant is self-reproducing because it
+      # already covers every permission it writes, so Kubernetes' escalation
+      # check passes without them.
+      #
+      # The two DaemonSet names come from tracebloc.gpuDevicePluginName, the same
+      # helper gpu-device-plugin.yaml uses for metadata.name — see
+      # gpu_device_plugin_test.yaml, which pins the rendered DaemonSet to the
+      # same strings. A drift between the two would redden both suites.
+      - equal:
+          path: rules
+          value:
+            - apiGroups: ["apps"]
+              resources: ["daemonsets"]
+              verbs: ["get", "list", "watch", "create"]
+            - apiGroups: ["apps"]
+              resources: ["daemonsets"]
+              resourceNames:
+                - "nvidia-device-plugin-daemonset"
+                - "amdgpu-device-plugin-daemonset"
+              verbs: ["update", "patch", "delete"]
+            - apiGroups: [""]
+              resources: ["secrets"]
+              verbs: ["create"]
+            - apiGroups: [""]
+              resources: ["secrets"]
+              resourceNames: ["stg-regcred"]
+              verbs: ["get", "update", "patch", "delete"]
+            - apiGroups: ["rbac.authorization.k8s.io"]
+              resources: ["roles", "rolebindings"]
+              verbs: ["create"]
+            - apiGroups: ["rbac.authorization.k8s.io"]
+              resources: ["roles", "rolebindings"]
+              resourceNames: ["stg-auto-upgrade-gpu-device-plugin"]
+              verbs: ["get", "update", "patch", "delete"]
+      # Redundant with the exact match above, but stated separately so the intent
+      # survives: a future "simplify it like the node-agents block" edit that
+      # copies `*`/`*`/`*` in here must fail the suite by name, not just by diff.
+      - notContains:
+          path: rules
+          content:
+            apiGroups: ["*"]
+            resources: ["*"]
+            verbs: ["*"]
+      # No namespace-wide secret READ. `create` cannot be name-restricted by
+      # RBAC; every other secret verb is pinned to the one mirrored pull Secret.
+      - notContains:
+          path: rules
+          content:
+            apiGroups: [""]
+            resources: ["secrets"]
+            verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+
+  - it: GPU Role covers BOTH vendor DaemonSet names so a vendor flip cannot 403 on the delete (backend#1992)
+    template: templates/auto-upgrade-rbac.yaml
+    set:
+      gpu:
+        devicePlugin:
+          enabled: true
+          vendor: amd
+    documentIndex: 7
+    asserts:
+      # Switching gpu.devicePlugin.vendor makes ONE upgrade delete the outgoing
+      # vendor's DaemonSet and create the incoming one, so the name-restricted
+      # write rule must list both regardless of which vendor is selected.
+      - equal:
+          path: rules[1].resourceNames
+          value:
+            - "nvidia-device-plugin-daemonset"
+            - "amdgpu-device-plugin-daemonset"
+
+  - it: omits the GPU Role/RoleBinding when the device-plugin namespace IS the release namespace (backend#1992)
+    template: templates/auto-upgrade-rbac.yaml
+    set:
+      gpu:
+        devicePlugin:
+          enabled: true
+          vendor: nvidia
+          namespace: tracebloc
+    asserts:
+      # The release-namespace Role (`*` on `*`, confined to that namespace)
+      # already covers everything the plugin renders, so a second Role would be
+      # dead weight.
+      - hasDocuments:
+          count: 7
+
+  - it: places the GPU Role/RoleBinding in a custom device-plugin namespace (backend#1992)
+    template: templates/auto-upgrade-rbac.yaml
+    set:
+      gpu:
+        devicePlugin:
+          enabled: true
+          vendor: nvidia
+          namespace: gpu-operator
+    asserts:
+      - hasDocuments:
+          count: 9
+      - equal:
+          path: metadata.namespace
+          value: gpu-operator
+        documentIndex: 7
+      - equal:
+          path: metadata.namespace
+          value: gpu-operator
+        documentIndex: 8
 
   - it: should accept operator overrides for schedule, image, and timeout
     template: templates/auto-upgrade-cronjob.yaml
