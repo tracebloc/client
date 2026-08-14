@@ -156,8 +156,9 @@ mysql-pvc
   Role, RoleBinding, and ConfigMap. Same lockstep reasoning as
   tracebloc.autoUpgradeName above. Distinct from auto-upgrade because the
   two CronJobs have different cadences, different RBAC scopes (image-refresh
-  is namespace-scoped, auto-upgrade is cluster-admin), and customers may
-  reasonably disable one but not the other.
+  is namespace-scoped; auto-upgrade is namespace-scoped plus a narrow
+  ClusterRole for the chart's cluster kinds — backend#953, no longer
+  cluster-admin), and customers may reasonably disable one but not the other.
 */}}
 {{- define "tracebloc.imageRefreshName" -}}
 {{ .Release.Name }}-image-refresh
