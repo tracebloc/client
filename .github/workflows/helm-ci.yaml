@@ -82,6 +82,17 @@ jobs:
         # turns them on with no change to this file.
         run: bash scripts/tests/chart-env-vocabulary.sh
 
+      # The CLIENT_ENV vocabulary-agreement guard (backend#1729 sweep 5) used to
+      # run here. It now runs in drift-checks.yaml's `Source-of-truth drift` job,
+      # which is a REQUIRED check on develop and main -- `Helm lint` is not, so
+      # here the guard could only advise. `scripts/install-k8s.ps1` came into
+      # this workflow's `paths:` with it and left with it: this is the repo's
+      # heaviest workflow (a real k3d cluster plus two 4-platform matrices) and
+      # a PowerShell installer edit has no other reason to start it. The
+      # explicit `scripts/lib/common.sh` entry went too, but that one was always
+      # redundant -- the pre-existing `scripts/lib/**` glob still matches it, so
+      # helm-ci's triggering on a common.sh change is unchanged.
+
   template:
     timeout-minutes: 10
     name: Template render

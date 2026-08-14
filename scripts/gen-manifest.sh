@@ -58,6 +58,20 @@ WINDOWS_FILES=(
 # looks up its own bash entries and install.ps1 only its .ps1 entry, so the extra
 # cross-platform lines are harmless to each; a single manifest lets one cosign
 # signature anchor both entrypoints.
+# An EMPTY surface must be refused explicitly. Emptying FILES makes the manifest
+# cover nothing, and `--check` would then compare an empty manifest against an
+# empty regeneration and agree. Today that happens to die on `set -u`'s
+# "FILES[@]: unbound variable" -- a failure by accident, whose message says
+# nothing about the integrity surface it just lost. backend#1729: a guard that
+# passes (or fails unintelligibly) because it was disconnected from what it
+# claims to check.
+if [[ -z "${FILES[*]-}" || -z "${WINDOWS_FILES[*]-}" ]]; then
+  echo "[ERROR] the manifest's file surface is empty." >&2
+  echo "        install.sh verifies every sub-script it fetches against this manifest" >&2
+  echo "        before running privileged steps; an empty manifest verifies nothing." >&2
+  exit 1
+fi
+
 ALL_FILES=("${FILES[@]}" "${WINDOWS_FILES[@]}")
 
 MANIFEST="scripts/manifest.sha256"
