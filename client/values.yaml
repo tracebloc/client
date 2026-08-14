@@ -128,6 +128,21 @@ hostPath:
   # appends /<release>/data. mysql/logs PV paths are not affected by this key.
   datasetPath: /tracebloc
 
+# -- Cluster topology: does this cluster have a single schedulable node?
+# Gates the AUTO-mode single-replica PodDisruptionBudgets (podDisruptionBudget
+# below): a minAvailable:1 PDB on a one-node cluster is undrainable (the pod
+# cannot reschedule), so it is skipped when singleNode is effectively true.
+#   null (default) -> DEFAULT to hostPath.enabled: bare-metal installer clusters
+#                     (hostPath.enabled=true) are single-node; managed dynamic
+#                     clusters (AKS/EKS/OC) are multi-node.
+#   true / false   -> explicit override.
+# This is DELIBERATELY separate from env.SINGLE_NODE (which gates the
+# jobs-manager GPU->CPU pending-job fallback and may be true on a FIXED
+# MULTI-NODE cluster). The installer sets singleNode=true for the node-local
+# single-node k3d path (hostPath.enabled=false, local-path CSI, AGENTS=0), where
+# hostPath alone would misclassify it as multi-node.
+singleNode: null
+
 # -- PVC storage sizes (override per-environment if needed)
 pvc:
   mysql: 2Gi

@@ -19,15 +19,19 @@
     false -> never render.
 */}}
 {{- $pdb := default dict .Values.podDisruptionBudget.jobsManager -}}
-{{- /* Single-node detection mirrors jobs-manager-deployment's SINGLE_NODE
-     resolution: an explicit env.SINGLE_NODE wins, else default to
-     hostPath.enabled. A node-local single-node install (SINGLE_NODE=true with
-     hostPath.enabled=false — local-path CSI k3d, AGENTS=0) must count as
-     single-node here too, otherwise it renders an undrainable minAvailable:1
-     PDB and blocks drain / k3s upgrade (client#560 / Bugbot). */ -}}
-{{- $env := default dict .Values.env -}}
+{{- /* Single-node topology gate. `.Values.singleNode` is the dedicated,
+     unambiguous "this cluster has one schedulable node" signal (tri-state:
+     null => default to hostPath.enabled; true/false => explicit). It is
+     deliberately SEPARATE from env.SINGLE_NODE, which only gates the
+     jobs-manager GPU->CPU fallback and may legitimately be true on a FIXED
+     MULTI-NODE cluster — using that here would drop eviction protection where
+     pods can reschedule (client#560 / Bugbot). The installer sets
+     singleNode=true for node-local single-node k3d (hostPath.enabled=false,
+     local-path CSI, AGENTS=0); bare-metal single-node keeps the
+     hostPath.enabled default. */ -}}
 {{- $hostPathMode := (default dict .Values.hostPath).enabled | default false -}}
-{{- $isSingleNode := ternary (eq (toString (index $env "SINGLE_NODE")) "true") $hostPathMode (hasKey $env "SINGLE_NODE") -}}
+{{- $singleNode := .Values.singleNode -}}
+{{- $isSingleNode := ternary $singleNode $hostPathMode (kindIs "bool" $singleNode) -}}
 {{- $create := ternary $pdb.create (not $isSingleNode) (kindIs "bool" $pdb.create) -}}
 {{- if $create }}
 apiVersion: policy/v1
