@@ -393,14 +393,26 @@ install_macos_cli_tools() {
   # ends in the execute-gate (#411, assert_tool_runs), so a broken/wrong-arch binary
   # fails the "System tools" step loudly rather than printing a false success.
   OS_DL="darwin"
-  # macOS has no Tier/rootless model, so it does NOT use _set_tools_target (the Linux
-  # selector): land the pinned binaries in /usr/local/bin, which is on the default
-  # login PATH (/etc/paths) on BOTH Intel and Apple Silicon — no PATH-persistence
-  # dance needed. It needs sudo to write and may not exist yet on Apple Silicon
+  # Tier 0 (client#703): a usable runtime already exists and this run holds NO
+  # sudo credential — writing to /usr/local/bin would prompt for a password to do
+  # the one thing Tier 0 exists to avoid. Land the pinned binaries in
+  # ~/.local/bin instead, the same no-sudo target install_linux's
+  # _set_tools_target picks, and put it on this shell's PATH.
+  #
+  # Every other tier keeps /usr/local/bin, which is on the default login PATH
+  # (/etc/paths) on BOTH Intel and Apple Silicon — no PATH-persistence dance
+  # needed. It needs sudo to write and may not exist yet on Apple Silicon
   # (Homebrew uses /opt/homebrew), so create it best-effort.
-  TB_TOOLS_DIR="/usr/local/bin"
-  TB_TOOLS_SUDO="sudo"
-  sudo mkdir -p "$TB_TOOLS_DIR" 2>/dev/null || true
+  if [ "${INSTALL_TIER:-}" = "0" ]; then
+    TB_TOOLS_DIR="${HOME}/.local/bin"
+    TB_TOOLS_SUDO=""
+    mkdir -p "$TB_TOOLS_DIR"
+    case ":$PATH:" in *":$TB_TOOLS_DIR:"*) ;; *) export PATH="$TB_TOOLS_DIR:$PATH" ;; esac
+  else
+    TB_TOOLS_DIR="/usr/local/bin"
+    TB_TOOLS_SUDO="sudo"
+    sudo mkdir -p "$TB_TOOLS_DIR" 2>/dev/null || true
+  fi
   local _saved_umask
   _saved_umask=$(umask)
   umask 022                # binaries must be world-executable, not owner-only (umask 077)
@@ -408,6 +420,10 @@ install_macos_cli_tools() {
   install_k3d
   install_helm             # ends with success "System tools"
   umask "$_saved_umask"
+  # Self-gates on TB_TOOLS_DIR being ~/.local/bin, so this is a no-op on every
+  # other tier. It is already macOS-aware (_tools_rc_for_shell → ~/.zshrc for
+  # zsh, the default shell on modern macOS).
+  _persist_tools_on_path
 }
 
 # Configure login autostart so a rebooted Mac brings the container runtime — and thus
@@ -455,6 +471,12 @@ _emit_launch_plist() {
 # the Windows peer (#430 Bugbot). Best-effort; TB_MACOS_AUTOSTART is set ONLY on success,
 # so the summary's reboot promise stays honest.
 _install_macos_autostart() {
+  # $1 (optional) "no-sudo": forbid any privileged (sudo) write. Tier 0 promised
+  # "no administrator rights needed" and holds no sudo credential (client#704), so
+  # it passes this. The GUI LaunchAgent path never needs sudo and is unchanged;
+  # only the headless LaunchDaemon path — which does — is gated below.
+  local _no_sudo=""
+  if [[ "${1:-}" == "no-sudo" ]]; then _no_sudo=1; fi
   if [[ -n "${TRACEBLOC_NO_AUTOSTART:-}" ]]; then
     log "Autostart skipped (TRACEBLOC_NO_AUTOSTART set)."
     return 0
@@ -476,6 +498,46 @@ _install_macos_autostart() {
     launchctl bootstrap "gui/$(id -u)" "$plist" 2>/dev/null \
       || launchctl load -w "$plist" 2>/dev/null || true
   else
+    # Tier 0 (no-sudo): a headless Mac's only reboot-recovery mechanism is a system
+    # LaunchDaemon (a user LaunchAgent never loads without a GUI/Aqua session; #430),
+    # and writing it needs root. Tier 0 must NOT prompt for a password — that is the
+    # exact step-b failure it exists to remove (client#704) — so skip the boot daemon
+    # honestly and say how to enable it later. Best-effort: the caller's `|| true` and
+    # TB_MACOS_AUTOSTART staying unset keep the summary's reboot line truthful.
+    if [[ -n "$_no_sudo" ]]; then
+      # ALREADY HANDLED? Tier 0 means someone else provisioned this box, so a
+      # previous ADMIN install may have left the boot daemon in place. Skipping
+      # the write is still correct (we hold no sudo), but reporting "start it
+      # yourself" would be false — autostart is configured, just not by us.
+      # Checked before the warn so a solved machine says nothing alarming.
+      local _dir="${TB_LAUNCHDAEMONS_DIR:-/Library/LaunchDaemons}"
+      if [[ -f "$_dir/${label}.plist" ]]; then
+        log "Headless Tier 0: boot LaunchDaemon ${label} is already installed; autostart needs nothing from us."
+        TB_MACOS_AUTOSTART=1
+        return 0
+      fi
+      warn "Headless reboot autostart needs a system LaunchDaemon (admin/root); this no-admin (Tier 0) install won't prompt for a password, so it's skipped."
+      # NAME A COMMAND ONLY IF IT IS ACTUALLY HERE. The privileged path below
+      # resolves colima the same way and softens to a generic message when it is
+      # absent (#430 Bugbot); this path named `colima start` unconditionally,
+      # which on a non-colima headless runtime is a command that does not exist.
+      local _colima; _colima="$(command -v colima 2>/dev/null || true)"
+      if [[ -n "$_colima" ]]; then
+        hint "To get auto-restart after a reboot: run 'colima start' yourself after boot, or re-run this installer from an administrator account to install the boot LaunchDaemon."
+        TB_MACOS_MANUAL_RUNTIME_CMD="colima start"
+      else
+        hint "To get auto-restart after a reboot: start your Docker runtime manually after boot, or re-run this installer from an administrator account to install the boot LaunchDaemon."
+      fi
+      # Tell the summary WHICH manual recovery applies (Bugbot, client#704).
+      # Leaving only TB_MACOS_AUTOSTART unset is not enough: _reboot_note's
+      # not-configured branch is the macOS/Windows GUI fallback and says "open
+      # Docker Desktop", which on a headless Mac names a runtime that is not
+      # here and an action there is no GUI to perform — and contradicts the hint
+      # printed just above. That footer is the LAST line of a successful
+      # install, so it is the advice the operator actually leaves with.
+      TB_MACOS_HEADLESS_NO_AUTOSTART=1
+      return 1
+    fi
     # The headless daemon runs colima — but only if colima is ACTUALLY the runtime here.
     # install_docker_desktop installs colima ONLY when Docker was down; if Docker was
     # already up by other means colima may be absent, so a colima daemon would be bogus and
@@ -568,6 +630,35 @@ install_macos() {
   # even the ERR trap's location had nothing to corroborate it. These cost one
   # log line each and make the log say how far it got, trap or no trap.
   log "step b: install_macos starting (OS=$OS ARCH=$ARCH tier=${INSTALL_TIER:-?})"
+
+  # ── Tier 0 — a container runtime is already usable as this user, so there is
+  # nothing privileged left to do (RFC 0001 #1175). This is the macOS
+  # counterpart of install_linux's Tier 0 branch, which macOS never got.
+  #
+  # It is the defect behind client#703: a Mac with Docker Desktop installed AND
+  # running was still sent through _macos_require_admin + preflight_sudo and
+  # died there — demanding an administrator password to install a runtime that
+  # was already installed and answering. Docker Desktop, Homebrew and the admin
+  # gate are all pointless here; only the pinned CLI tools are still missing,
+  # and those install with no sudo at all.
+  #
+  # Skipping the admin gate is deliberate, not incidental: Tier 0 is exactly the
+  # case RFC 0001 opened up — a user with no administrator rights on a machine
+  # where someone else already provisioned the runtime.
+  if [ "${INSTALL_TIER:-}" = "0" ]; then
+    info "Using the container runtime already on this machine — no administrator rights needed."
+    log "step b: tier 0 — skipping admin, sudo, Homebrew and Docker Desktop"
+    assert_amd64_emulation    # Docker is up by definition here (#433)
+    install_macos_cli_tools
+    log "step b: cli tools ready (tier 0)"
+    # Autostart stays best-effort here AND must make NO sudo call (client#704):
+    # the GUI LaunchAgent needs no admin, while the headless LaunchDaemon (which
+    # does) is skipped with instructions rather than prompting for the very
+    # password Tier 0 exists to avoid. A failed login item never fails the install.
+    _install_macos_autostart no-sudo || true
+    return 0
+  fi
+
   _macos_require_admin        # #430: no-admin Macs get a named IT remedy, not a generic sudo error
   log "step b: admin check passed"
   preflight_sudo

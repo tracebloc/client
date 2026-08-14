@@ -287,15 +287,33 @@ tests:
       - matchRegex:
           path: data["image-refresh.sh"]
           pattern: "first observation; recording without re-imaging"
-      # Order-of-operations contract: `rollout restart` + `rollout
-      # status` MUST run before `kubectl annotate`. If we annotated
-      # first and the rollout then failed, the next tick would see
-      # recorded == latest and skip — leaving the deployment frozen
-      # on the old image with no signal. The test asserts that the
-      # rollout block appears in the script BEFORE the annotate block.
+      # Order-of-operations contract: the re-image (`kubectl set image` +
+      # `kubectl rollout status`) MUST run before the `kubectl annotate` that
+      # records the digest. If we annotated first and the rollout then failed,
+      # the next tick would see recorded == latest and skip — leaving the
+      # deployment frozen on the old image with no signal.
+      #
+      # ANCHORED TO COMMAND LINES (`(?m)^\s+kubectl`). This assertion used to
+      # name `kubectl rollout restart`, which #569 REMOVED — and the sibling
+      # notMatchRegex above forbids it on a command line. So the only thing it
+      # could still match was the header comments that explain the old
+      # mechanism, and it passed no matter what order the real commands ran in.
+      # A regress that annotated before re-imaging would have frozen workloads
+      # on the old image with a green suite (Bugbot, client#713).
+      #
+      # PINNED TO THE DIGEST ANNOTATE (`$annotate_args`), not just any annotate.
+      # A bare `kubectl annotate deployment` also matches the flap-counter-reset
+      # annotate (`${ATTEMPT_KEY}- ${FLAP_KEY}-`), which sits after the rollout BY
+      # DESIGN. So moving ONLY the digest-recording annotate above the re-image
+      # left that reset still satisfying the old pattern — the suite stayed green
+      # while the digest was recorded BEFORE the image was applied, which is the
+      # exact freeze the guard exists to catch. Requiring the `$annotate_args`
+      # continuation line ties the ordering to the digest write itself; the flap
+      # reset carries different arguments and can no longer stand in for it
+      # (Bugbot, client#714).
       - matchRegex:
           path: data["image-refresh.sh"]
-          pattern: '(?s)kubectl rollout restart.*kubectl annotate deployment'
+          pattern: '(?ms)^\s+kubectl set image.*^\s+kubectl rollout status.*^\s+kubectl annotate deployment[^\n]*\n\s*\$annotate_args'
       # The ingestor is spawned by jobs-manager from a floating tag and is
       # no longer reconciled by this script — the entire class-2 pass was
       # removed (no `kubectl set env` on INGESTOR_IMAGE_DIGEST, no ghcr.io

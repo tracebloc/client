@@ -1,10 +1,17 @@
 name: Drift checks
 
-# Source-of-truth drift: values duplicated across files (the backend API hosts)
-# or coupled across artifacts (the chart's workload names <-> the names the
-# readiness-wait and --diagnose bundle grep for). Mocked unit tests can't see
-# these — a rename ships green and breaks in the field. This guards both sides.
+# Source-of-truth drift: values duplicated across files (the backend API hosts,
+# the CLIENT_ENV alias vocabulary) or coupled across artifacts (the chart's
+# workload names <-> the names the readiness-wait and --diagnose bundle grep
+# for). Mocked unit tests can't see these — a rename ships green and breaks in
+# the field. This guards both sides.
 # Triggers on scripts/ OR client/ because either side moving is the drift.
+#
+# This job is the home for every duplicated-declaration guard in this repo,
+# because it is the one that GATES: `Source-of-truth drift` is required on
+# develop and on main, so a disagreement blocks the merge rather than merely
+# printing red on a workflow nobody has to wait for. A guard that cannot block
+# is advice (backend#1729).
 #
 # NO `paths:` ON pull_request, deliberately. `Source-of-truth drift` is a
 # REQUIRED status check on develop and on main, and a required check that is
@@ -43,3 +50,12 @@ jobs:
           version: v3.15.4
       - name: check-drift
         run: bash scripts/tests/check-drift.sh
+      # One CLIENT_ENV vocabulary, four declarations (Go template, JSON Schema,
+      # bash, PowerShell), backend#1729 sweep 5. Lives here rather than in
+      # helm-ci because helm-ci's `Helm lint` is NOT a required check, so the
+      # guard could only advise: a PR that made the four disagree was mergeable
+      # with it red. It needs bash + python3 only (~2s), and drift-checks runs
+      # unfiltered on every PR, so it reports on the installer-only PRs that
+      # helm-ci's `paths:` filter would have skipped entirely.
+      - name: CLIENT_ENV vocabulary agreement (backend#1729)
+        run: bash scripts/tests/env-vocabulary-agreement.sh
