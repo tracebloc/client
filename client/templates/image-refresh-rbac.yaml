@@ -11,11 +11,15 @@ metadata:
 ---
 {{/*
   Namespace-scoped Role — narrower than autoUpgrade's cluster-admin
-  binding on purpose. This CronJob only touches the jobs-manager
-  Deployment in {{ .Release.Namespace }}: read it to compare the recorded
-  refresh digest, and patch it for `rollout restart` + annotation
-  update. No pods, no other resources, no cluster scope. A compromise
-  of this Pod is bounded to kicking and annotating one Deployment.
+  binding on purpose. This CronJob only touches Deployments in
+  {{ .Release.Namespace }}: read the jobs-manager Deployment to compare the
+  recorded refresh digest, and patch the jobs-manager + requests-proxy
+  Deployments for `kubectl set image` + annotation update. No pods, no other
+  resources, no cluster scope. A compromise of this Pod is bounded to
+  re-imaging and annotating those two Deployments.
+
+  #569 added requests-proxy as a patch target. No rule change was needed: it
+  is a Deployment in the SAME namespace, already covered below.
 */}}
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
@@ -26,12 +30,12 @@ metadata:
     {{- include "tracebloc.labels" . | nindent 4 }}
     app.kubernetes.io/component: image-refresh
 rules:
-  # `kubectl rollout restart` + `kubectl annotate` are both patches on
-  # the deployment. `rollout status` uses a ListWatch on the deployment
+  # `kubectl set image` + `kubectl annotate` are both patches on the
+  # deployment. `rollout status` uses a ListWatch on the deployment
   # to wait for completion; a ListWatch reflector needs BOTH `list`
   # (initial sync) and `watch` (incremental updates). Missing either
   # one drops the call into a 403 retry loop until --timeout fires
-  # (kubectl#580), marking every successful restart as a failed Job.
+  # (kubectl#580), marking every successful refresh as a failed Job.
   # Both caught in PR #155 review.
   - apiGroups: ["apps"]
     resources: ["deployments"]
@@ -53,4 +57,66 @@ roleRef:
   kind: Role
   name: {{ include "tracebloc.imageRefreshName" . }}
   apiGroup: rbac.authorization.k8s.io
+{{- if ne .Values.resourceMonitor false }}
+---
+{{/*
+  #569: the resource-monitor DaemonSet lives in the node-agents namespace, not
+  the release namespace, so reconciling its image needs a SECOND, separate Role
+  over there. This is the one genuinely new piece of trust surface in #569 —
+  everything else reuses the deployments rule above — so keep it as narrow as
+  the RBAC model allows:
+
+    * `get` + `patch` are resourceNames-scoped to the single DaemonSet this
+      chart owns. The CronJob cannot read or modify any OTHER DaemonSet in the
+      node-agents namespace, which matters because that namespace runs under
+      the `privileged` PSA profile (see nodeAgents in values.yaml).
+    * `list` + `watch` CANNOT be resourceNames-scoped — the RBAC authorizer
+      ignores resourceNames for collection verbs — and `kubectl rollout status`
+      needs both for its ListWatch reflector (same #155 reasoning as above).
+      So those two stay namespace-wide and read-only. That is the residual
+      widening: this SA can enumerate DaemonSets in tracebloc-node-agents.
+
+  Rendered only when resourceMonitor is enabled: with no DaemonSet to
+  reconcile, the grant would be pure unused surface.
+*/}}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "tracebloc.imageRefreshNodeAgentsName" . }}
+  namespace: {{ .Values.nodeAgents.namespace.name }}
+  labels:
+    {{- include "tracebloc.labels" . | nindent 4 }}
+    app.kubernetes.io/component: image-refresh
+rules:
+  - apiGroups: ["apps"]
+    resources: ["daemonsets"]
+    resourceNames: [{{ include "tracebloc.resourceMonitorName" . | quote }}]
+    verbs: ["get", "patch"]
+  # Collection verbs: resourceNames is not honoured for list/watch, so these
+  # are namespace-scoped and read-only. Required by `rollout status`.
+  - apiGroups: ["apps"]
+    resources: ["daemonsets"]
+    verbs: ["list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "tracebloc.imageRefreshNodeAgentsName" . }}
+  namespace: {{ .Values.nodeAgents.namespace.name }}
+  labels:
+    {{- include "tracebloc.labels" . | nindent 4 }}
+    app.kubernetes.io/component: image-refresh
+subjects:
+  # The SUBJECT keeps tracebloc.imageRefreshName: there is only ONE
+  # ServiceAccount, and it lives in the release namespace. Only the Role and
+  # RoleBinding are renamed, to avoid colliding with the release-namespace pair
+  # when nodeAgents.namespace.name points back at the release namespace.
+  - kind: ServiceAccount
+    name: {{ include "tracebloc.imageRefreshName" . }}
+    namespace: {{ .Release.Namespace }}
+roleRef:
+  kind: Role
+  name: {{ include "tracebloc.imageRefreshNodeAgentsName" . }}
+  apiGroup: rbac.authorization.k8s.io
+{{- end }}
 {{- end }}

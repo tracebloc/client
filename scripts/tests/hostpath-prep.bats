@@ -15,6 +15,7 @@ load test_helper
 
 setup() {
   PS1_FILE="${SCRIPTS_DIR}/install-k8s.ps1"
+  CHART_FILE="${SCRIPTS_DIR}/../client/templates/jobs-manager-deployment.yaml"
   TMP_BASE="$(mktemp -d)"
 }
 
@@ -97,6 +98,84 @@ _prep_cmd() {
   [[ "$output" == *"FAIL $TMP_BASE/data"* ]] || return 1
   [[ "$output" == *"FAIL $TMP_BASE/logs"* ]] || return 1
   [[ "$output" != *OK* ]] || return 1
+}
+
+# ── three-way mode parity: bash installer vs Windows installer vs chart (#673) ──
+#
+# The same intent is written out in three places, and it has already drifted once: #654
+# gave the Windows prep a per-dir 2777/3777 split, #667 gave the chart the same one, and
+# bash kept a flat recursive `chmod -R 777` through both PRs. Nothing was user-visibly
+# broken by that (777 is other-writable and un-sticky, so `data delete` still worked), which
+# is exactly why it survived — a divergence with no symptom needs a test, not a reviewer.
+#
+# Each extractor reads its OWN source of truth and reduces it to `<dir>:<mode>` pairs, so
+# the comparison is on the shared meaning (which dir, what mode) rather than on paths, which
+# legitimately differ: host paths on the bash side, in-node paths in the Windows prep, mount
+# points in the chart. mysql is in none of them, by the same decision in all three (#654).
+
+# bash: $HOST_DATA_DIR/<release>/{data,logs} -> data:2777 logs:3777
+_bash_pairs() {
+  (
+    load_lib cluster.sh
+    HOST_DATA_DIR="/tracebloc"
+    unset HOST_DATASET_DIR
+    _release_dirs_spec r | while IFS= read -r e; do
+      p="${e%:*}"; printf '%s:%s\n' "${p##*/}" "${e##*:}"
+    done
+  ) | sort
+}
+
+# PowerShell: Get-ReleaseDirsSpec's Path/Mode rows, with the $TB_*_DIR_MODE constants
+# resolved from their assignments. Parsed rather than executed so this stays runnable with
+# no pwsh installed (same motive as the rest of this file).
+_ps1_const() {
+  grep -oE "^\\\$$1[[:space:]]*=[[:space:]]*\"[0-7]{3,4}\"" "$PS1_FILE" \
+    | grep -oE '[0-7]{3,4}' | head -1
+}
+_ps1_pairs() {
+  grep -oE 'Path = "[^"]+"; Mode = \$TB_[A-Z_]+' "$PS1_FILE" | while IFS= read -r line; do
+    p="${line%%\"; Mode*}"; p="${p#Path = \"}"
+    printf '%s:%s\n' "${p##*/}" "$(_ps1_const "${line##*Mode = \$}")"
+  done | sort
+}
+
+# Chart: init-writable-data's `for e in /data/shared:2777 /data/logs:3777` loop. The mount
+# point for the dataset dir is /data/shared, which is the same dir the other two call "data".
+_chart_pairs() {
+  grep -oE '/data/(shared|logs):[0-7]{3,4}' "$CHART_FILE" \
+    | sed 's|^/data/shared:|data:|; s|^/data/logs:|logs:|' | sort -u
+}
+
+@test "bash _ensure_release_dirs and the Windows prep agree on every path:mode pair" {
+  local bash_pairs ps1_pairs
+  bash_pairs="$(_bash_pairs)"
+  ps1_pairs="$(_ps1_pairs)"
+  # Guard the extractors themselves: an empty match would make any comparison below pass.
+  [ "$bash_pairs" = "$(printf 'data:2777\nlogs:3777')" ] || return 1
+  [ "$ps1_pairs" = "$bash_pairs" ] || return 1
+}
+
+@test "the chart's init-writable-data agrees with both installers" {
+  # #667's stated goal — installer and chart diffable by eye rather than drifting.
+  local chart_pairs
+  chart_pairs="$(_chart_pairs)"
+  [ "$chart_pairs" = "$(printf 'data:2777\nlogs:3777')" ] || return 1
+  [ "$chart_pairs" = "$(_bash_pairs)" ] || return 1
+  [ "$chart_pairs" = "$(_ps1_pairs)" ] || return 1
+}
+
+@test "bash prepares the shared dirs WITHOUT -R" {
+  # Recursing stamps setgid/sticky onto every data FILE and walks the whole dataset tree;
+  # the Windows side argues the same in its own comment. The dir's own mode is what governs
+  # creation and unlink inside it. mysql keeps its recursive chmod and is not asserted here.
+  local body recursive
+  body="$(awk '/^_ensure_release_dirs\(\)/,/^}/' "${SCRIPTS_DIR}/lib/cluster.sh")"
+  [ -n "$body" ] || return 1
+  [[ "$body" == *'chmod "$mode" "$dir"'* ]] || return 1
+  # Exactly one recursive chmod is left in the function, and it is mysql's.
+  recursive="$(printf '%s\n' "$body" | grep -c 'chmod -R')"
+  [ "$recursive" -eq 1 ] || return 1
+  printf '%s\n' "$body" | grep 'chmod -R' | grep -q 'mysql' || return 1
 }
 
 @test "the mode is read with POSIX ls -ldn, never GNU-only stat -c" {

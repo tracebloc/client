@@ -236,6 +236,92 @@ tests:
             name: TB_EXPECTED_ENGINE
             value: "8.0"
 
+  # ---- the empty-tag fallback is `prod`, NOT env.CLIENT_ENV ------------
+  #
+  # values.schema.json claimed "Empty falls back to env.CLIENT_ENV" until
+  # backend#1723's follow-up. The template is `... | default "prod"`, so every
+  # environment gets `:prod`. The doc was not merely imprecise, it was an
+  # instruction to break the edge: tracebloc/mysql-client publishes 8.0, 8.4,
+  # four 8.4-<sha> builds, latest and prod — there is no `dev` or `stg` tag
+  # (checked against Docker Hub 2026-08-12). These cases pin the behaviour the
+  # corrected description now describes, so the two cannot drift apart again.
+  - it: an empty tag renders :prod on a dev edge, not :dev
+    template: templates/mysql-deployment.yaml
+    set:
+      env:
+        CLIENT_ENV: dev
+      images:
+        mysqlClient:
+          tag: ""
+          digest: ""
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].image
+          value: docker.io/tracebloc/mysql-client:prod
+
+  - it: an empty tag renders :prod on a stg edge, not :stg
+    template: templates/mysql-deployment.yaml
+    set:
+      env:
+        CLIENT_ENV: stg
+      images:
+        mysqlClient:
+          tag: ""
+          digest: ""
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].image
+          value: docker.io/tracebloc/mysql-client:prod
+
+  # The control for the two above: prod renders the same thing, which is what
+  # makes "CLIENT_ENV is not consulted" the only explanation for them.
+  - it: an empty tag renders :prod on a prod edge too
+    template: templates/mysql-deployment.yaml
+    set:
+      env:
+        CLIENT_ENV: prod
+      images:
+        mysqlClient:
+          tag: ""
+          digest: ""
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].image
+          value: docker.io/tracebloc/mysql-client:prod
+
+  # Why the false doc had teeth beyond a failed pull: an env-derived tag is
+  # unrecognized by tracebloc.mysqlEngineMajor, so the mysql-format-guard
+  # stands down silently. `prod` (the real fallback) keeps it armed at 5.7.
+  - it: believing the old doc would also disarm the mysql-format-guard
+    template: templates/mysql-deployment.yaml
+    set:
+      env:
+        CLIENT_ENV: dev
+      images:
+        mysqlClient:
+          tag: "dev"
+          digest: ""
+    asserts:
+      - contains:
+          path: spec.template.spec.initContainers[0].env
+          content:
+            name: TB_EXPECTED_ENGINE
+            value: "unknown"
+
+  - it: the real fallback keeps the guard armed at 5.7
+    template: templates/mysql-deployment.yaml
+    set:
+      images:
+        mysqlClient:
+          tag: ""
+          digest: ""
+    asserts:
+      - contains:
+          path: spec.template.spec.initContainers[0].env
+          content:
+            name: TB_EXPECTED_ENGINE
+            value: "5.7"
+
   - it: a custom digest pin disarms the guard (engine unknown)
     template: templates/mysql-deployment.yaml
     set:

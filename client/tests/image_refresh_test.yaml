@@ -15,8 +15,21 @@ tests:
       - hasDocuments:
           count: 2
 
-  - it: rbac template renders ServiceAccount + Role + RoleBinding by default
+  # #569 added a SECOND Role + RoleBinding, in the node-agents namespace, so the
+  # CronJob can `kubectl set image` the resource-monitor DaemonSet that lives
+  # there. 3 documents -> 5.
+  - it: rbac template renders ServiceAccount + both Roles + both RoleBindings by default
     template: templates/image-refresh-rbac.yaml
+    asserts:
+      - hasDocuments:
+          count: 5
+
+  # The node-agents grant is pure unused surface when there is no DaemonSet to
+  # reconcile, so it is not rendered at all in that case — back to 3 documents.
+  - it: rbac template omits the node-agents Role when resourceMonitor is disabled
+    template: templates/image-refresh-rbac.yaml
+    set:
+      resourceMonitor: false
     asserts:
       - hasDocuments:
           count: 3
@@ -39,13 +52,31 @@ tests:
       - hasDocuments:
           count: 0
 
-  - it: cronjob template renders nothing when both class-1 images are pinned
-    # jobs-manager + pods-monitor are the only images this CronJob
-    # refreshes — the ingestor is spawned by jobs-manager from a floating
-    # tag, not refreshed here. When both class-1 images are digest-pinned
+  - it: cronjob template renders nothing when all three refreshed images are pinned
+    # jobs-manager + pods-monitor + resource-monitor are the images this CronJob
+    # refreshes. The ingestor is spawned by jobs-manager from a floating tag, not
+    # refreshed here; requests-proxy runs the jobs-manager IMAGE and follows its
+    # digest, so it needs no entry of its own. When all three are digest-pinned
     # there is nothing left to reconcile, so the CronJob renders nothing.
-    # A pinned image is signalled by a non-empty `digest` — the same
-    # signal the deployment uses to switch imagePullPolicy to IfNotPresent.
+    # A pinned image is signalled by a non-empty `digest`.
+    template: templates/image-refresh-cronjob.yaml
+    set:
+      images:
+        jobsManager:
+          digest: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        podsMonitor:
+          digest: "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        resourceMonitor:
+          digest: "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+    asserts:
+      - hasDocuments:
+          count: 0
+
+  # #569 regression guard: pinning only the two class-1 images is no longer
+  # enough to retire the CronJob, because resource-monitor can still drift.
+  # Before #569 this combination rendered nothing, which would have left the
+  # DaemonSet with no update path at all.
+  - it: cronjob STILL renders when resource-monitor is unpinned but both class-1 images are
     template: templates/image-refresh-cronjob.yaml
     set:
       images:
@@ -55,9 +86,9 @@ tests:
           digest: "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
     asserts:
       - hasDocuments:
-          count: 0
+          count: 2
 
-  - it: rbac template renders nothing when both class-1 images are pinned
+  - it: rbac template renders nothing when all three refreshed images are pinned
     template: templates/image-refresh-rbac.yaml
     set:
       images:
@@ -65,6 +96,8 @@ tests:
           digest: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
         podsMonitor:
           digest: "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        resourceMonitor:
+          digest: "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
     asserts:
       - hasDocuments:
           count: 0
@@ -126,9 +159,20 @@ tests:
       - equal:
           path: metadata.name
           value: stg-image-refresh
+      # #569: the action is `kubectl set image`, NOT `kubectl rollout restart`.
+      # A restart only picks up a new build because of imagePullPolicy=Always,
+      # and Always is exactly what makes an offline restart fail. Changing the
+      # image REFERENCE is what lets the pods run IfNotPresent, so assert the
+      # new verb is present AND the old one is gone — a silent revert to
+      # `rollout restart` would leave the pull policy fix updating nothing.
       - matchRegex:
           path: data["image-refresh.sh"]
-          pattern: "kubectl rollout restart"
+          pattern: "kubectl set image"
+      # Anchored to a COMMAND line (leading whitespace, no `#`) so the header
+      # comments that explain why the mechanism changed don't trip it.
+      - notMatchRegex:
+          path: data["image-refresh.sh"]
+          pattern: '(?m)^\s*kubectl rollout restart'
       - matchRegex:
           path: data["image-refresh.sh"]
           pattern: "registry-1.docker.io"
@@ -235,20 +279,41 @@ tests:
           pattern: "kubectl get pod"
       # First-observation contract: when an annotation is absent
       # (recorded is empty), the script must record the current digest
-      # WITHOUT triggering a restart. A spurious first-tick restart
-      # would churn the deployment on every fresh install.
+      # WITHOUT touching the workload. #569 keeps this deliberately —
+      # re-imaging on the first tick would rewrite repo:tag to repo@digest
+      # for byte-identical content on every fresh install, rolling the
+      # jobs-manager Deployment and the resource-monitor DaemonSet across
+      # every node for nothing.
       - matchRegex:
           path: data["image-refresh.sh"]
-          pattern: "first observation; recording without restart"
-      # Order-of-operations contract: `rollout restart` + `rollout
-      # status` MUST run before `kubectl annotate`. If we annotated
-      # first and the rollout then failed, the next tick would see
-      # recorded == latest and skip — leaving the deployment frozen
-      # on the old image with no signal. The test asserts that the
-      # rollout block appears in the script BEFORE the annotate block.
+          pattern: "first observation; recording without re-imaging"
+      # Order-of-operations contract: the re-image (`kubectl set image` +
+      # `kubectl rollout status`) MUST run before the `kubectl annotate` that
+      # records the digest. If we annotated first and the rollout then failed,
+      # the next tick would see recorded == latest and skip — leaving the
+      # deployment frozen on the old image with no signal.
+      #
+      # ANCHORED TO COMMAND LINES (`(?m)^\s+kubectl`). This assertion used to
+      # name `kubectl rollout restart`, which #569 REMOVED — and the sibling
+      # notMatchRegex above forbids it on a command line. So the only thing it
+      # could still match was the header comments that explain the old
+      # mechanism, and it passed no matter what order the real commands ran in.
+      # A regress that annotated before re-imaging would have frozen workloads
+      # on the old image with a green suite (Bugbot, client#713).
+      #
+      # PINNED TO THE DIGEST ANNOTATE (`$annotate_args`), not just any annotate.
+      # A bare `kubectl annotate deployment` also matches the flap-counter-reset
+      # annotate (`${ATTEMPT_KEY}- ${FLAP_KEY}-`), which sits after the rollout BY
+      # DESIGN. So moving ONLY the digest-recording annotate above the re-image
+      # left that reset still satisfying the old pattern — the suite stayed green
+      # while the digest was recorded BEFORE the image was applied, which is the
+      # exact freeze the guard exists to catch. Requiring the `$annotate_args`
+      # continuation line ties the ordering to the digest write itself; the flap
+      # reset carries different arguments and can no longer stand in for it
+      # (Bugbot, client#714).
       - matchRegex:
           path: data["image-refresh.sh"]
-          pattern: '(?s)kubectl rollout restart.*kubectl annotate deployment'
+          pattern: '(?ms)^\s+kubectl set image.*^\s+kubectl rollout status.*^\s+kubectl annotate deployment[^\n]*\n\s*\$annotate_args'
       # The ingestor is spawned by jobs-manager from a floating tag and is
       # no longer reconciled by this script — the entire class-2 pass was
       # removed (no `kubectl set env` on INGESTOR_IMAGE_DIGEST, no ghcr.io
@@ -361,10 +426,14 @@ tests:
     # Pod to one resource type in one namespace. Lock the rule list
     # with `equal` so a regression that adds back a pods rule (or worse,
     # a cluster role) fails loudly.
+    #
+    # #569 added requests-proxy as a `set image` target WITHOUT touching this
+    # rule list: it is a Deployment in the same namespace, already covered.
+    # The resource-monitor DaemonSet needed a separate Role — asserted below.
     template: templates/image-refresh-rbac.yaml
     asserts:
       - hasDocuments:
-          count: 3
+          count: 5
       - isKind:
           of: ServiceAccount
         documentIndex: 0
@@ -381,6 +450,10 @@ tests:
             - apiGroups: ["apps"]
               resources: ["deployments"]
               verbs: ["get", "list", "patch", "watch"]
+        documentIndex: 1
+      - equal:
+          path: metadata.namespace
+          value: tracebloc
         documentIndex: 1
       - equal:
           path: roleRef.kind
@@ -451,3 +524,354 @@ tests:
     asserts:
       - hasDocuments:
           count: 0
+
+  # =====================================================================
+  # #569 — digest-on-update: offline-restart-safe control-plane pods.
+  # =====================================================================
+
+  - it: node-agents Role is scoped to the one resource-monitor DaemonSet
+    # The single genuinely new piece of trust surface in #569. The CronJob's
+    # namespace-scoped Role cannot reach the resource-monitor DaemonSet, which
+    # lives in the node-agents namespace, so a SECOND Role goes there. That
+    # namespace runs under the `privileged` PSA profile, so keep the grant as
+    # narrow as RBAC allows and lock it with `equal`:
+    #   * get + patch are resourceNames-scoped to this chart's own DaemonSet.
+    #   * list + watch CANNOT be resourceNames-scoped (the authorizer ignores
+    #     resourceNames for collection verbs) and `rollout status` needs both,
+    #     so they stay namespace-wide and read-only. That is the residual
+    #     widening and it is deliberate — assert it so it cannot grow silently.
+    template: templates/image-refresh-rbac.yaml
+    documentIndex: 3
+    asserts:
+      - isKind:
+          of: Role
+      # DISTINCT name from the release-namespace Role. Reusing it collided when
+      # nodeAgents.namespace.name points back at the release namespace — a
+      # supported layout — and the loser was the deployments Role, silently
+      # costing image-refresh its patch on jobs-manager and requests-proxy.
+      - equal:
+          path: metadata.name
+          value: stg-image-refresh-node-agents
+      - equal:
+          path: metadata.namespace
+          value: tracebloc-node-agents
+      - equal:
+          path: rules
+          value:
+            - apiGroups: ["apps"]
+              resources: ["daemonsets"]
+              resourceNames: ["stg-resource-monitor"]
+              verbs: ["get", "patch"]
+            - apiGroups: ["apps"]
+              resources: ["daemonsets"]
+              verbs: ["list", "watch"]
+
+  - it: node-agents RoleBinding binds the release-namespace ServiceAccount
+    # Cross-namespace binding: the Role and RoleBinding live in the node-agents
+    # namespace, but the subject SA lives in the release namespace. Getting the
+    # subject namespace wrong yields a silent 403 at `set image` time.
+    template: templates/image-refresh-rbac.yaml
+    documentIndex: 4
+    asserts:
+      - isKind:
+          of: RoleBinding
+      - equal:
+          path: metadata.namespace
+          value: tracebloc-node-agents
+      - equal:
+          path: subjects[0].namespace
+          value: tracebloc
+      - equal:
+          path: metadata.name
+          value: stg-image-refresh-node-agents
+      # The SUBJECT keeps the un-suffixed name: there is only ONE
+      # ServiceAccount and it lives in the release namespace. Only the Role and
+      # RoleBinding are renamed.
+      - equal:
+          path: subjects[0].name
+          value: stg-image-refresh
+      - equal:
+          path: roleRef.kind
+          value: Role
+      - equal:
+          path: roleRef.name
+          value: stg-image-refresh-node-agents
+
+  - it: cronjob wires the workload names the set-image reconcile targets
+    template: templates/image-refresh-cronjob.yaml
+    documentIndex: 1
+    asserts:
+      - contains:
+          path: spec.jobTemplate.spec.template.spec.containers[0].env
+          content:
+            name: REQUESTS_PROXY_DEPLOYMENT
+            value: "stg-requests-proxy"
+      - contains:
+          path: spec.jobTemplate.spec.template.spec.containers[0].env
+          content:
+            name: RESOURCE_MONITOR_DAEMONSET
+            value: "stg-resource-monitor"
+      - contains:
+          path: spec.jobTemplate.spec.template.spec.containers[0].env
+          content:
+            name: NODE_AGENTS_NAMESPACE
+            value: "tracebloc-node-agents"
+
+  - it: IMAGE_REGISTRY defaults to docker.io, not the empty string
+    # Regression guard with teeth. values.yaml ships `global.imageRegistry: ""`,
+    # so `dig "imageRegistry" "docker.io" .Values.global` returns "" — the key
+    # EXISTS, so dig's own default never applies. Rendering "" here would make
+    # the script's mirror guard see "" != "docker.io" and go INERT on every
+    # default install, silently disabling auto-refresh fleet-wide. The template
+    # needs a trailing `| default "docker.io"`; this test is what catches its
+    # removal.
+    template: templates/image-refresh-cronjob.yaml
+    documentIndex: 1
+    asserts:
+      - contains:
+          path: spec.jobTemplate.spec.template.spec.containers[0].env
+          content:
+            name: IMAGE_REGISTRY
+            value: "docker.io"
+
+  - it: IMAGE_REGISTRY follows a configured private mirror
+    template: templates/image-refresh-cronjob.yaml
+    documentIndex: 1
+    set:
+      global:
+        imageRegistry: "mirror.example.com"
+    asserts:
+      - contains:
+          path: spec.jobTemplate.spec.template.spec.containers[0].env
+          content:
+            name: IMAGE_REGISTRY
+            value: "mirror.example.com"
+
+  - it: resource-monitor counts as pinned when the DaemonSet is disabled
+    # With `resourceMonitor: false` there is no DaemonSet to reconcile, so the
+    # script must skip it rather than fail the tick on a cross-namespace
+    # `set image` against a workload that does not exist.
+    template: templates/image-refresh-cronjob.yaml
+    documentIndex: 1
+    set:
+      resourceMonitor: false
+    asserts:
+      - contains:
+          path: spec.jobTemplate.spec.template.spec.containers[0].env
+          content:
+            name: RESOURCE_MONITOR_PINNED
+            value: "1"
+
+  - it: requests-proxy follows the jobs-manager digest unless explicitly pinned
+    template: templates/image-refresh-cronjob.yaml
+    documentIndex: 1
+    set:
+      images:
+        requestsProxy:
+          digest: "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+    asserts:
+      - contains:
+          path: spec.jobTemplate.spec.template.spec.containers[0].env
+          content:
+            name: REQUESTS_PROXY_PINNED
+            value: "1"
+
+  - it: script reconciles all three workloads and goes inert behind a mirror
+    template: templates/image-refresh-cronjob.yaml
+    documentIndex: 0
+    asserts:
+      # jobs-manager (both containers), requests-proxy, resource-monitor.
+      - matchRegex:
+          path: data["image-refresh.sh"]
+          pattern: '\$jm_set_args --request-timeout'
+      - matchRegex:
+          path: data["image-refresh.sh"]
+          pattern: 'deployment/\$\{REQUESTS_PROXY_DEPLOYMENT\}"'
+      - matchRegex:
+          path: data["image-refresh.sh"]
+          pattern: 'daemonset/\$\{RESOURCE_MONITOR_DAEMONSET\}"'
+      # The resource-monitor patch must target the node-agents namespace, not
+      # the release namespace.
+      - matchRegex:
+          path: data["image-refresh.sh"]
+          pattern: 'kubectl set image -n "\$NODE_AGENTS_NAMESPACE"'
+      # Mirror guard: a docker.io digest must never be pinned onto a mirrored
+      # reference the mirror may not hold.
+      - matchRegex:
+          path: data["image-refresh.sh"]
+          pattern: 'if \[ "\$IMAGE_REGISTRY" != "docker.io" \]; then'
+      # The pods-monitor container name is contractual with the deployment.
+      - matchRegex:
+          path: data["image-refresh.sh"]
+          pattern: "pods-monitor-container="
+
+  - it: the Job budget covers three sequential rollouts (#569, Bugbot)
+    # activeDeadlineSeconds MUST exceed 3 x rolloutTimeout: a tick re-images
+    # jobs-manager, requests-proxy and the resource-monitor DaemonSet in sequence
+    # and blocks on each. It was a hardcoded 1800, which with the default 10m
+    # rolloutTimeout is EXACTLY 3 x 10m — no headroom. Blowing it kills the Job
+    # mid-wait, so the annotate never lands, the recorded digest never advances,
+    # and three such ticks trip the shared flap lockout for every control-plane
+    # image at once while the CronJob still looks healthy.
+    template: templates/image-refresh-cronjob.yaml
+    documentIndex: 1
+    asserts:
+      - equal:
+          path: spec.jobTemplate.spec.activeDeadlineSeconds
+          value: 3600
+
+  - it: activeDeadlineSeconds is operator-overridable
+    template: templates/image-refresh-cronjob.yaml
+    documentIndex: 1
+    set:
+      imageRefresh:
+        activeDeadlineSeconds: 5400
+    asserts:
+      - equal:
+          path: spec.jobTemplate.spec.activeDeadlineSeconds
+          value: 5400
+
+  - it: retires the CronJob when the DaemonSet is disabled and both class-1 images are pinned (#569, Bugbot)
+    # The helper-vs-runtime disagreement: `imageRefreshEnabled` checked only
+    # `images.resourceMonitor.digest`, while RESOURCE_MONITOR_PINNED also treated
+    # `resourceMonitor: false` as pinned. So this combination kept rendering a
+    # CronJob that skipped every image and exited green every tick forever —
+    # where before #569 it retired cleanly. Both now read one helper.
+    template: templates/image-refresh-cronjob.yaml
+    set:
+      resourceMonitor: false
+      images:
+        jobsManager:
+          digest: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        podsMonitor:
+          digest: "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    asserts:
+      - hasDocuments:
+          count: 0
+
+  - it: rbac renders nothing for that same combination
+    template: templates/image-refresh-rbac.yaml
+    set:
+      resourceMonitor: false
+      images:
+        jobsManager:
+          digest: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        podsMonitor:
+          digest: "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    asserts:
+      - hasDocuments:
+          count: 0
+
+  - it: still renders when the DaemonSet is disabled but a class-1 image can drift
+    # Guard the other direction: disabling resource-monitor must NOT retire the
+    # CronJob while jobs-manager or pods-monitor is still floating.
+    template: templates/image-refresh-cronjob.yaml
+    documentIndex: 1
+    set:
+      resourceMonitor: false
+    asserts:
+      - isKind:
+          of: CronJob
+      - contains:
+          path: spec.jobTemplate.spec.template.spec.containers[0].env
+          content:
+            name: RESOURCE_MONITOR_PINNED
+            value: "1"
+
+  - it: RBAC names do not collide when node-agents shares the release namespace (#569, Bugbot High)
+    # `nodeAgents.namespace.name` pointing back at the release namespace is a
+    # supported layout — node-agents-namespace.yaml documents it and skips
+    # creating the Namespace in that case. Both Role/RoleBinding pairs then land
+    # in ONE namespace, so they must have distinct names or Helm refuses the
+    # release (or the DaemonSet-only Role overwrites the deployments Role, which
+    # silently strips image-refresh's patch on jobs-manager and requests-proxy —
+    # and with IfNotPresent those pods would have no update path left).
+    template: templates/image-refresh-rbac.yaml
+    set:
+      nodeAgents:
+        namespace:
+          name: tracebloc
+    asserts:
+      - hasDocuments:
+          count: 5
+      - equal:
+          path: metadata.name
+          value: stg-image-refresh
+        documentIndex: 1
+      - equal:
+          path: metadata.namespace
+          value: tracebloc
+        documentIndex: 1
+      - equal:
+          path: metadata.name
+          value: stg-image-refresh-node-agents
+        documentIndex: 3
+      - equal:
+          path: metadata.namespace
+          value: tracebloc
+        documentIndex: 3
+      - equal:
+          path: metadata.name
+          value: stg-image-refresh
+        documentIndex: 2
+      - equal:
+          path: metadata.name
+          value: stg-image-refresh-node-agents
+        documentIndex: 4
+
+  # =====================================================================
+  # Two-sided-contract guards. Three of #569's review findings were one
+  # side of a contract moving without the other. These pin the sides that
+  # are still spelled out in two places.
+  # =====================================================================
+
+  - it: reconcile targets match the workload names the chart actually renders
+    # DEPLOYMENT_NAME re-derives `<release>-jobs-manager` with its own printf,
+    # and five other call sites spell it out too (NOTES.txt, the PDB,
+    # tracebloc.serviceAccountName, ...). Unifying that is a mechanical refactor
+    # across templates this change does not touch, so it is left for its own PR
+    # — this test is the interim binding. A `set image` against a name that no
+    # longer exists fails the tick, freezes the digest record, and eventually
+    # trips the shared flap lockout for every control-plane image.
+    # requests-proxy IS unified now (tracebloc.requestsProxyName); resource-monitor
+    # already was (tracebloc.resourceMonitorName). Cross-check these literals
+    # against jobs_manager_test / requests_proxy_test / resource_monitor_test,
+    # which pin the same strings from the workload side.
+    template: templates/image-refresh-cronjob.yaml
+    documentIndex: 1
+    asserts:
+      - contains:
+          path: spec.jobTemplate.spec.template.spec.containers[0].env
+          content:
+            name: DEPLOYMENT_NAME
+            value: "stg-jobs-manager"
+      - contains:
+          path: spec.jobTemplate.spec.template.spec.containers[0].env
+          content:
+            name: REQUESTS_PROXY_DEPLOYMENT
+            value: "stg-requests-proxy"
+      - contains:
+          path: spec.jobTemplate.spec.template.spec.containers[0].env
+          content:
+            name: RESOURCE_MONITOR_DAEMONSET
+            value: "stg-resource-monitor"
+
+  - it: set-image container names match the containers the chart renders
+    # `kubectl set image <workload> <container>=<ref>` fails outright if the
+    # container name is wrong, so these four strings are a hard contract with
+    # the workload templates. Pinned from the workload side too.
+    template: templates/image-refresh-cronjob.yaml
+    documentIndex: 0
+    asserts:
+      - matchRegex:
+          path: data["image-refresh.sh"]
+          pattern: 'jm_set_args api='
+      - matchRegex:
+          path: data["image-refresh.sh"]
+          pattern: 'jm_set_args pods-monitor-container='
+      - matchRegex:
+          path: data["image-refresh.sh"]
+          pattern: 'rp_set_args proxy='
+      - matchRegex:
+          path: data["image-refresh.sh"]
+          pattern: 'rm_set_args tracebloc-resource-monitor='

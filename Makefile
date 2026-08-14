@@ -35,18 +35,31 @@ SHELLCHECK_FILES := \
 	scripts/tests/e2e-journey.sh \
 	scripts/tests/e2e-proxy.sh \
 	scripts/tests/lib/e2e-common.sh \
-	scripts/tests/path-persist.sh
+	scripts/tests/path-persist.sh \
+	scripts/tests/chart-env-vocabulary.sh \
+	scripts/tests/env-vocabulary-agreement.sh
+
+# The bats total, DERIVED — never written down. It moves on most PRs that add a
+# test, nothing enforces it, and the help text had drifted from its hardcoded
+# 868 to a real 946 with nobody noticing. A number that is wrong is worse than
+# no number, and re-hardcoding today's value only resets the drift clock.
+#
+# `=`, not `:=`: recursively expanded, so the grep runs only when `help` actually
+# prints it. `make check` is the pre-push path with a sub-60 s budget and never
+# pays for it. bats declares one test per `@test` at line start, so this matches
+# `bats`'s own count exactly (verified: 946 = 946).
+BATS_TEST_COUNT = $(shell grep -h '^@test' scripts/tests/*.bats 2>/dev/null | wc -l | tr -d ' ')
 
 .PHONY: help
 help:
 	@echo "tracebloc/client — make targets"
 	@echo
 	@echo "  check       lint + fast checks (~4 s) — run this before every push"
-	@echo "  check-all   everything CI runs locally, including the 868-test bats suite"
+	@echo "  check-all   everything CI runs locally, including the $(BATS_TEST_COUNT)-test bats suite"
 	@echo "  setup       check for / point at the tools these targets need; installs the pre-push hook"
 	@echo "  install-hooks  (re)install the git pre-push hook that runs 'make check'"
 	@echo
-	@echo "  individual: lint bats helm-lint helm-template helm-unittest drift"
+	@echo "  individual: lint bats helm-lint helm-vocab helm-template helm-unittest drift"
 	@echo
 	@echo "  NOT here (CI-only, by name): the 9-distro prereq matrix, e2e-cluster"
 	@echo "  (k3d), e2e-proxy (squid), path-persist, Pester, windows-e2e,"
@@ -58,18 +71,18 @@ help:
 # drift guards 0.2 s, helm lint 0.7 s.
 #
 # The bats suite is deliberately NOT here. It is the repo's real unit
-# suite (868 tests) and it takes ~2 min serially on macOS — three times
-# over the budget — and it does not parallelise without GNU parallel,
-# which is not a thing every dev machine has. Splitting it into a fast
-# tier is real work, not a Makefile line, so it lives in `check-all`
-# until someone does it. A `check` that quietly took two minutes would
-# be a `check` nobody runs.
+# suite and it takes ~2 min serially on macOS — three times over the
+# budget — and it does not parallelise without GNU parallel, which is
+# not a thing every dev machine has. Splitting it into a fast tier is
+# real work, not a Makefile line, so it lives in `check-all` until
+# someone does it. A `check` that quietly took two minutes would be a
+# `check` nobody runs.
 .PHONY: check
-check: lint drift helm-lint
+check: lint drift helm-lint helm-vocab
 	@echo "==> check: green (bats + helm unit tests are in 'make check-all')"
 
 .PHONY: check-all
-check-all: lint drift helm-lint bats helm-template helm-unittest
+check-all: lint drift helm-lint helm-vocab bats helm-template helm-unittest
 	@echo "==> check-all: green"
 
 # setup: no dependency is installed — this only tells you what is missing —
@@ -78,16 +91,16 @@ check-all: lint drift helm-lint bats helm-template helm-unittest
 .PHONY: setup
 setup:
 	@missing=""; \
-	for t in bash shellcheck bats helm; do \
+	for t in bash shellcheck bats helm python3; do \
 	  command -v $$t >/dev/null 2>&1 || missing="$$missing $$t"; \
 	done; \
 	if [ -n "$$missing" ]; then \
 	  echo "missing:$$missing"; \
-	  echo "  macOS: brew install shellcheck bats-core helm"; \
-	  echo "  Debian/Ubuntu: apt-get install shellcheck bats  (helm: https://helm.sh/docs/intro/install/)"; \
+	  echo "  macOS: brew install shellcheck bats-core helm python"; \
+	  echo "  Debian/Ubuntu: apt-get install shellcheck bats python3  (helm: https://helm.sh/docs/intro/install/)"; \
 	  exit 1; \
 	fi; \
-	echo "==> setup: shellcheck, bats and helm are all present; run 'make check'"
+	echo "==> setup: shellcheck, bats, helm and python3 are all present; run 'make check'"
 	@$(MAKE) --no-print-directory install-hooks
 
 # install-hooks: put a pre-push hook in place that runs `make check`, so the
@@ -160,6 +173,18 @@ drift:
 	scripts/check-facts.sh --check
 	bash scripts/check-style.sh
 
+# digest-drift: the watcher on every mutable label that points at a pinned
+# digest (backend#1853). NOT in `check`: it needs the network and a docker
+# daemon, and it is knowingly RED today -- the ingestor's 0.8 float has moved
+# off the pinned v0.8.2 digest, which is the whole finding. A red target in the
+# pre-push tier trains people to skip the tier.
+#
+# It runs on the schedule in .github/workflows/digest-drift.yml. Its bats suite
+# IS in `make bats`, because that part needs no network.
+.PHONY: digest-drift
+digest-drift:
+	scripts/check-digest-drift.sh
+
 # bats: standard-checks.yml `Unit tests` / installer-tests.yaml
 # `unit-bash`. ~2 min serially.
 .PHONY: bats
@@ -174,6 +199,17 @@ helm-lint:
 	  helm lint --strict ./client -f "$$f" || exit 1; \
 	done
 	helm lint --strict ./ingestor
+
+# helm-vocab: helm-ci.yaml `lint` job's vocabulary step. The CLIENT_ENV and
+# channelTags vocabularies are closed by a values.schema.json `enum` /
+# `additionalProperties` plus a `fail` in tracebloc.clientEnv, and helm-unittest
+# can assert NEITHER: it treats a schema violation as a plugin-level error
+# rather than a template failure, and offers no way to skip validation and reach
+# the helper. So the gates are exercised from outside the plugin. ~2 s.
+.PHONY: helm-vocab
+helm-vocab:
+	bash scripts/tests/chart-env-vocabulary.sh
+	bash scripts/tests/env-vocabulary-agreement.sh
 
 # helm-template: helm-ci.yaml `template`. kubeconform is pinned by
 # version AND digest in CI; rather than re-implement that download here,

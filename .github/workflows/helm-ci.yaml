@@ -10,6 +10,10 @@ on:
       - 'scripts/tests/e2e-seal-check.sh'
       - 'scripts/tests/e2e-full-seal.sh'
       - 'scripts/tests/lib/e2e-common.sh'
+      - 'scripts/tests/chart-env-vocabulary.sh'
+      - 'scripts/tests/env-vocabulary-agreement.sh'
+      - 'scripts/lib/common.sh'
+      - 'scripts/install-k8s.ps1'
       - 'scripts/lib/**'
       - '.github/workflows/helm-ci.yaml'
   pull_request:
@@ -21,6 +25,10 @@ on:
       - 'scripts/tests/e2e-seal-check.sh'
       - 'scripts/tests/e2e-full-seal.sh'
       - 'scripts/tests/lib/e2e-common.sh'
+      - 'scripts/tests/chart-env-vocabulary.sh'
+      - 'scripts/tests/env-vocabulary-agreement.sh'
+      - 'scripts/lib/common.sh'
+      - 'scripts/install-k8s.ps1'
       - 'scripts/lib/**'
       - '.github/workflows/helm-ci.yaml'
   # Manual runs — mainly to fire full-seal-e2e on demand (e.g. right after the
@@ -64,6 +72,26 @@ jobs:
         # cleanly. See #135 for why we lint it here at all (publish workflow
         # now packages both charts).
         run: helm lint --strict ./ingestor
+
+      - name: CLIENT_ENV + channelTags vocabularies are closed
+        # `helm lint` does not exercise the values.schema.json `enum` /
+        # `additionalProperties` against out-of-vocabulary inputs, and
+        # helm-unittest structurally cannot: it reports a schema violation as a
+        # plugin-level error rather than a template failure, and exposes no flag
+        # to skip validation and reach the `fail` in tracebloc.clientEnv. So
+        # both gates are asserted from outside the plugin, every rejection
+        # paired with an accept control on the same command line. ~2 s.
+        #
+        # The helper-backstop cases self-skip when helm predates
+        # --skip-schema-validation (3.16); the pin above is v3.15.4, so they are
+        # skipped here today and run for anyone local on 3.16+. Bumping the pin
+        # turns them on with no change to this file.
+        run: bash scripts/tests/chart-env-vocabulary.sh
+
+      # One vocabulary, four languages (backend#1729 sweep 5). Runs on a change
+      # to ANY of the four declarations, including the two installers.
+      - name: CLIENT_ENV vocabulary agreement (backend#1729)
+        run: bash scripts/tests/env-vocabulary-agreement.sh
 
   template:
     timeout-minutes: 10

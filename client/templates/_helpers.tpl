@@ -164,17 +164,65 @@ mysql-pvc
 {{- end }}
 
 {{/*
+  Name for the image-refresh Role + RoleBinding in the NODE-AGENTS namespace
+  (#569). DISTINCT from tracebloc.imageRefreshName on purpose.
+
+  `nodeAgents.namespace.name` pointing back at the release namespace is a
+  supported layout — node-agents-namespace.yaml documents it and explicitly
+  skips creating the Namespace in that case. Reusing the release-namespace name
+  here collided with it: two Roles and two RoleBindings with the SAME name in
+  the SAME namespace. Helm either refuses the release or the later
+  DaemonSet-only Role overwrites the deployments Role, at which point
+  image-refresh silently loses patch on jobs-manager and requests-proxy — and
+  since those pods now render IfNotPresent, they would have no update path left
+  at all (Bugbot, High).
+
+  A separate name is correct in BOTH layouts: split namespaces get one Role
+  each, and the collapsed layout gets two complementary Roles (deployments,
+  daemonsets) bound to the same ServiceAccount, which is exactly the intended
+  grant.
+*/}}
+{{- define "tracebloc.imageRefreshNodeAgentsName" -}}
+{{ .Release.Name }}-image-refresh-node-agents
+{{- end }}
+
+{{/*
+  Name of the requests-proxy Deployment. ONE definition, because #569 gave it a
+  second consumer: image-refresh reconciles it by name with `kubectl set image`,
+  so a rename that reached only the Deployment would leave the CronJob patching
+  a workload that does not exist — failing the tick, freezing the digest record,
+  and eventually tripping the shared flap lockout for every control-plane image.
+
+  This is the third instance on #569 of one side of a two-sided contract moving
+  without the other (the requests-proxy digest pin and the resource-monitor pin
+  signal were the first two, both found in review). Same remedy: collapse to a
+  single definition rather than keep two literals in sync by hand.
+
+  The jobs-manager Deployment has the same shape — image-refresh's
+  DEPLOYMENT_NAME re-derives `<release>-jobs-manager` with its own printf, and
+  five other call sites spell it out too (NOTES.txt, the PDB,
+  tracebloc.serviceAccountName, ...). Unifying THAT is a mechanical refactor
+  across templates this change does not otherwise touch, so it is deliberately
+  left for its own PR; a contract test pins the two sides here in the meantime.
+*/}}
+{{- define "tracebloc.requestsProxyName" -}}
+{{ .Release.Name }}-requests-proxy
+{{- end }}
+
+{{/*
   Whether the image-refresh CronJob has anything to do. When ALL THREE
-  managed images (jobs-manager, pods-monitor, ingestor) are
+  managed images (jobs-manager, pods-monitor, resource-monitor) are
   digest-pinned, the operator has explicitly opted into reproducible
   pinning for every image this CronJob would refresh, so we render
   nothing — no CronJob, no RBAC, no ConfigMap. When at least one is
   unpinned, the CronJob is rendered and the script skips the pinned
   images at runtime via env flags.
 
-  Three pins because #158 added ingestor refresh on top of #154's
-  jobs-manager + pods-monitor. Keep this list in sync if more images
-  come under auto-refresh in future.
+  The three have changed over time: #154 started with jobs-manager +
+  pods-monitor, #158 added the ingestor, the floating-tag migration
+  retired the ingestor pass, and #569 brought resource-monitor under
+  refresh (it had no deliberate update path before). Keep this list in
+  sync if more images come under auto-refresh in future.
 
   Nil-guarded with `default dict` on every dereference: these are
   newer top-level keys, and a customer who runs
@@ -186,6 +234,36 @@ mysql-pvc
   ever absent. Belt-and-suspenders — see the "nil-guard every new
   top-level value key" rule in CLAUDE.md.
 */}}
+{{/*
+  tracebloc.resourceMonitorRefreshPinned — whether image-refresh has nothing to
+  do for resource-monitor. Renders "true" when so, nothing when not.
+
+  ONE definition, because there are TWO consumers that must agree:
+  `tracebloc.imageRefreshEnabled` (does the CronJob render at all?) and the
+  CronJob's own RESOURCE_MONITOR_PINNED env (does the script skip this image?).
+  The first cut of #569 wrote the rule twice and they disagreed: the helper
+  checked only the digest while the env also treated `resourceMonitor: false` as
+  pinned. With the DaemonSet disabled and both class-1 images pinned, the CronJob
+  therefore kept rendering a job that skipped every image and exited green every
+  tick, forever — where before #569 that combination retired it (Bugbot).
+
+  Two ways to have nothing to do:
+    * an explicit `images.resourceMonitor.digest` pin, same signal as the other
+      images, or
+    * `resourceMonitor: false` — there is no DaemonSet at all, so there is
+      nothing to reconcile and a cross-namespace `set image` would just fail.
+
+  Nil-safe: `.Values.resourceMonitor` absent reads as enabled, matching the
+  `ne .Values.resourceMonitor false` gate on the DaemonSet itself.
+*/}}
+{{- define "tracebloc.resourceMonitorRefreshPinned" -}}
+{{- if eq .Values.resourceMonitor false -}}
+true
+{{- else if (default dict (default dict .Values.images).resourceMonitor).digest -}}
+true
+{{- end -}}
+{{- end }}
+
 {{- define "tracebloc.imageRefreshEnabled" -}}
 {{- $ir := default dict .Values.imageRefresh -}}
 {{- $imgs := default dict .Values.images -}}
@@ -203,10 +281,84 @@ mysql-pvc
 */}}
 {{- $jmPinned := $jm.digest -}}
 {{- $pmPinned := $pm.digest -}}
+{{/*
+  #569: resource-monitor came under refresh too, so it joins the "nothing left
+  to do" test. requests-proxy deliberately does NOT: it runs the SAME
+  tracebloc/jobs-manager image and follows the jobs-manager digest, so
+  `$jmPinned` already covers it. (`images.requestsProxy.digest` remains an
+  operator override that pins requests-proxy alone; it is checked at runtime,
+  not here, because pinning only requests-proxy still leaves jobs-manager
+  itself to refresh.)
+
+  "Follows the jobs-manager digest" is only true because
+  requests-proxy-deployment.yaml FALLS BACK to `images.jobsManager.digest` when
+  its own key is empty. Without that fallback this test is a silent trap
+  (Bugbot): retiring the CronJob here on a jobs-manager pin would leave the
+  proxy rendering the floating tag with nothing left to reconcile it, running a
+  different build of the same image forever. If that fallback is ever removed,
+  requests-proxy must get its own entry in this test.
+*/}}
+{{- $rmPinned := include "tracebloc.resourceMonitorRefreshPinned" . -}}
 {{- if not $ir.enabled -}}
-{{- else if and $jmPinned $pmPinned -}}
+{{- else if and $jmPinned $pmPinned $rmPinned -}}
 {{- else -}}
 true
+{{- end -}}
+{{- end }}
+
+{{/*
+  tracebloc.controlPlanePullPolicy — the pull policy for the four always-running
+  control-plane images (jobs-manager, pods-monitor, requests-proxy,
+  resource-monitor). ONE definition so the four call sites cannot disagree.
+
+  #569 set out to make these pods survive an offline Docker/WSL restart:
+  `Always` forces a registry round-trip on every (re)start, so a restart without
+  the registry lands in ImagePullBackOff even with the image cached in
+  containerd. The fix is IfNotPresent.
+
+  But `Always` is not just fragility — on a floating tag it IS an update path:
+  restart the pod and the kubelet re-resolves the tag. The first cut of #569
+  made IfNotPresent UNCONDITIONAL, which silently removed that path from every
+  edge where the replacement (image-refresh's `kubectl set image repo@digest`)
+  cannot run — those edges would have frozen on their cached image forever, with
+  a green CronJob and no signal (Bugbot, High). So the policy tracks whether an
+  update path actually exists:
+
+    1. An explicit `digest` pin -> IfNotPresent. The reference is immutable, so
+       re-checking the registry can only ever return the same image. Updates
+       come from changing the pin.
+    2. Otherwise, if the image-refresh reconcile can actually drive updates on
+       this edge -> IfNotPresent, because `set image` changes the REFERENCE and
+       the kubelet pulls a digest it has never seen. Two conditions:
+         * the CronJob renders at all (`imageRefresh.enabled`, and not every
+           refreshed image already pinned), and
+         * images come from docker.io. Under a `global.imageRegistry` mirror the
+           script goes inert by design — it resolves digests from docker.io, and
+           pinning one onto a mirrored reference could pin an image the mirror
+           does not hold.
+    3. Otherwise -> Always. No reconcile, no pin, so a floating tag plus a
+       restart is the ONLY way that edge can ever move. This is exactly the
+       pre-#569 behaviour, kept for exactly the edges that still depend on it:
+       mirror installs (sync the mirror, restart) and `imageRefresh.enabled:
+       false` (restart manually), which is what values.schema.json has always
+       promised those operators.
+
+  The trade is deliberate and worth stating plainly: offline-restart safety is
+  delivered precisely where the digest reconcile can deliver updates. An edge
+  that opts out of the mechanism keeps the old semantics rather than silently
+  freezing — a frozen control plane with no signal is worse than a restart that
+  needs the network.
+
+  Usage: {{ include "tracebloc.controlPlanePullPolicy" (dict "digest" $d "root" $) }}
+*/}}
+{{- define "tracebloc.controlPlanePullPolicy" -}}
+{{- $mirror := (dig "imageRegistry" "docker.io" (.root.Values.global | default dict)) | default "docker.io" -}}
+{{- if .digest -}}
+IfNotPresent
+{{- else if and (include "tracebloc.imageRefreshEnabled" .root) (eq $mirror "docker.io") -}}
+IfNotPresent
+{{- else -}}
+Always
 {{- end -}}
 {{- end }}
 
@@ -301,6 +453,33 @@ Usage: {{ include "tracebloc.ingestorDigest" . }}
   (backend#1028/#1245) on an edge that looked correctly configured. Any future
   consumer of CLIENT_ENV must go through here rather than re-deriving it, the
   same reason ENV_ALIASES lives once in client-runtime proxy_config.
+
+  THE VOCABULARY IS CLOSED, and this is the second of two guards.
+
+  values.schema.json carries the `enum` -- that is the primary gate and it
+  gives the better error. This `fail` is the backstop: the enum is only checked
+  where the packaged schema is read, and `helm template/install/upgrade
+  --skip-schema-validation` skips it, as does a chart repackaged without the
+  schema. This helper is the single chokepoint every consumer already goes
+  through (see the paragraph above), so an unrecognized value that gets past
+  the enum still cannot reach an image tag. Verified both ways in
+  scripts/tests/chart-env-vocabulary.sh -- and it has to live there rather than
+  in client/tests/: helm-unittest validates values against the packaged schema
+  and reports a violation as a plugin-level ERROR, so `failedTemplate` cannot
+  assert the enum, and it offers no flag to skip validation and reach this
+  `fail`.
+
+  WHY FAIL AT ALL, rather than pass the value through. Passing through was not
+  a graceful degradation, it was a silent reconfiguration of the edge in four
+  places at once -- three control-plane image tags pointing at tags no producer
+  publishes, a missed `channelTags` lookup, a missed `serviceDbAccountsByEnv`
+  lookup, and a dropped prod digest pin (the pin applies only where the env
+  resolves to exactly "prod"). The only validator that existed was
+  client-runtime jobs_manager.py's `sys.exit(1)` on "Unknown CLIENT_ENV", which
+  lives INSIDE the container that cannot start, so it cannot help. Failing at
+  `helm upgrade` is consistent with the chart's own conventions: it already
+  fails on placeholder clientId, empty training CIDRs, non-alphanumeric service
+  passwords, perDatasetPvcs without clusterScope, and a missing metrics API.
 */}}
 {{/*
   Whether the dedicated tb_meta / tb_ingest DB identities are on for THIS edge
@@ -343,11 +522,14 @@ Usage: {{ include "tracebloc.ingestorDigest" . }}
 {{- define "tracebloc.clientEnv" -}}
 {{- $raw := (default dict .Values.env).CLIENT_ENV | default "prod" -}}
 {{- $aliases := dict "development" "dev" "staging" "stg" "production" "prod" -}}
+{{- $resolved := $raw -}}
 {{- if hasKey $aliases $raw -}}
-{{- get $aliases $raw -}}
-{{- else -}}
-{{- $raw -}}
+{{- $resolved = get $aliases $raw -}}
 {{- end -}}
+{{- if not (has $resolved (list "dev" "stg" "prod")) -}}
+{{- fail (printf "env.CLIENT_ENV: %q is not a recognized environment. Accepted: dev, stg, prod (canonical) or development, staging, production (aliases); empty/unset means prod. This value is the tag for the jobs-manager, pods-monitor and resource-monitor images, and it keys images.ingestor.channelTags, serviceDbAccountsByEnv and the prod digest pin -- an unrecognized value would pull unpublished tags, miss every one of those lookups and silently drop the pin. Note dev/stg are abbreviated: `develop` and `production` differ, and only the six listed spellings resolve." $raw) -}}
+{{- end -}}
+{{- $resolved -}}
 {{- end }}
 
 {{/*
@@ -356,11 +538,9 @@ Usage: {{ include "tracebloc.ingestorDigest" . }}
   Precedence, mirroring tracebloc.ingestorDigest:
     1. `images.ingestor.tag`          explicit override, any environment
     2. `images.ingestor.channelTags[CLIENT_ENV]`   per-environment channel
-    3. "0.8"                          last-resort literal, so a release that
+    3. `$fallbacks[CLIENT_ENV]`       last-resort literals, so a release that
                                       predates these keys still renders under
-                                      `--reuse-values`. Track the current prod
-                                      line: an older literal here would spawn a
-                                      pre-D16 ingestor on such a release.
+                                      `--reuse-values`
 
   Only consulted when no digest applies: jobs-manager builds `repo@digest`
   when tracebloc.ingestorDigest is non-empty, and `repo:tag` otherwise
@@ -368,6 +548,32 @@ Usage: {{ include "tracebloc.ingestorDigest" . }}
 
   dev/stg resolve to the UNSIGNED internal channels. Prod is a semver float,
   not a `:prod` tag — none is published.
+
+  WHY THE FALLBACK IS KEYED ON THE ENVIRONMENT, not a single literal.
+
+  This used to be a bare `"0.8"` for every environment, which made a dev or
+  staging edge whose `channelTags` are absent — the `--reuse-values` replay
+  this branch exists for — spawn the PROD line. That inverts the entire point
+  of backend#1360: dev/stg channels exist so an ingestor change can be
+  validated on a real edge without a prod release, and an edge silently
+  validating prod's image reports on the wrong artifact. It also crosses the
+  signing boundary in the safe direction only by accident.
+
+  It is worse than a wrong tag today. The prod float has moved past the
+  ordering ceiling documented at values.yaml `prodDigest` (backend#1853): the
+  0.8 line no longer carries the ingestor's `edgeuser` DB_USER default that
+  data-ingestors#468 removed. `serviceDbAccountsByEnv` supplies DB_USER on
+  dev/stg, so those two survive it — but the coupling is accidental, and the
+  same literal is what an out-of-vocabulary CLIENT_ENV lands on, where
+  `serviceDbAccountsByEnv` misses too and nothing supplies DB_USER. That is
+  backend#1752 reconstructed from a typo.
+
+  KEEP THE `prod` ENTRY IN SYNC with values.yaml `channelTags.prod`. It is a
+  second copy of the same float and there is no way to read the first from
+  here: `--reuse-values` (unlike `--reset-then-reuse-values`) does not adopt
+  new chart defaults, so a values lookup would be nil on exactly the releases
+  this branch serves. ingestor_channel_tag_test.yaml pins both, so a bump that
+  touches only one fails CI rather than drifting.
 */}}
 {{- define "tracebloc.ingestorTag" -}}
 {{- $ing := default dict .Values.images.ingestor -}}
@@ -381,7 +587,8 @@ Usage: {{ include "tracebloc.ingestorDigest" . }}
 {{- if $channel -}}
 {{- $channel -}}
 {{- else -}}
-{{- "0.8" -}}
+{{- $fallbacks := dict "dev" "dev" "stg" "stg" "prod" "0.8" -}}
+{{- get $fallbacks $clientEnv | default "0.8" -}}
 {{- end -}}
 {{- end -}}
 {{- end }}

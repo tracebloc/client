@@ -876,7 +876,8 @@ PM_UPDATE=""
 #  functions and subshells — without it an ERR trap fires only at top level, and
 #  every failure inside install_macos/install_linux (i.e. nearly all of them)
 #  would still be invisible.
-TB_ERR_LOC=""    # "file:line" of the first failing command
+TB_ERR_LOC=""    # "file:line" of the LAST failing command — see _record_err
+_TB_IN_RECORD_ERR=""   # re-entrancy guard; the recorder inherits its own trap
 TB_ERR_CMD=""    # the command text, UNEXPANDED — BASH_COMMAND yields `cmd "$VAR"`,
                  # never the value, so this cannot leak a credential into the log
 TB_ERR_CODE=""   # its exit status (137/141/… included: a signal death is a failure)
@@ -893,25 +894,49 @@ TB_ERR_CODE=""   # its exit status (137/141/… included: a signal death is a fa
 # Always returns 0 — a recorder that failed would re-enter the trap.
 _record_err() {
   local _code=$?
-  # First failure wins. `set -e` unwinds through callers and errtrace re-fires the
-  # trap on the way out, which would otherwise overwrite the real cause with the
-  # enclosing function call.
+  # Re-entrancy guard. `set -E` makes this function inherit the ERR trap, so any
+  # command in here that fails would re-enter it — including `log` below, whose
+  # `[[ -n "${LOG_FILE:-}" ]] && …` form returns non-zero when no log is open.
+  # Every test also sits inside an `if` block for the same reason: a bare
+  # `[[ … ]] && return 0` FAILS when the condition is false, which re-enters the
+  # trap and records the guard itself as the failing command.
+  if [[ -n "$_TB_IN_RECORD_ERR" ]]; then return 0; fi
+  _TB_IN_RECORD_ERR=1
+
+  # LAST failure wins — deliberately, and this is the whole point of the record.
   #
-  # Every test here MUST sit inside an `if` block. `set -E` makes this function
-  # inherit the ERR trap too, and a bare `[[ -n "$TB_ERR_CODE" ]] && return 0`
-  # FAILS on the very first call (the variable is empty) — which re-enters this
-  # function and records the guard itself as the failing command. A condition
-  # inside `if` never triggers the trap.
-  if [[ -n "$TB_ERR_CODE" ]]; then return 0; fi
+  # The ERR trap fires for EVERY failing command, including ones whose failure is
+  # the expected answer: `_probe_privilege` runs `sudo -n true` and reads its
+  # non-zero exit as "a password is needed", then prints that as a normal row in
+  # the host check. First-wins latched onto exactly that probe and refused every
+  # later record, so a run that died two steps afterwards reported the location of
+  # a routine probe inside a step that SUCCEEDED — a wrong answer stated
+  # confidently, which is worse than the blank screen it replaced.
+  #
+  # Last-wins is precise here because errexit stops the script AT the fatal
+  # command and the trap fires once per failing command, with no per-frame
+  # re-firing as the error unwinds — verified on bash 3.2 (macOS) and 5.x.
   TB_ERR_CODE="$_code"
   TB_ERR_LOC="${1:-?}"
   TB_ERR_CMD="${2:-}"
+
+  # The full trail, log only. The benign entries are not noise: they are how you
+  # tell a probe that always fails from the command that actually ended the run,
+  # and reading them in order is what identified this bug.
+  log "err: ${TB_ERR_LOC} exit=${TB_ERR_CODE} cmd=${TB_ERR_CMD}"
+
+  _TB_IN_RECORD_ERR=""
   return 0
 }
 
 # ── Cleanup on exit ──────────────────────────────────────────────────────────
 install_cleanup() {
   local exit_code=$?
+  # Stop recording before doing anything else. This handler's own lines can fail
+  # (a `kill` on a dead pid, an `[[ … ]]` that is simply false), and with `set -E`
+  # each of those fires the ERR trap — which under last-wins would overwrite the
+  # fatal command with a cleanup detail before the report below ever reads it.
+  trap - ERR
   [[ -n "${SUDO_KEEPALIVE_PID:-}" ]] && kill "$SUDO_KEEPALIVE_PID" 2>/dev/null || true
   # Never leave the transient machine credential on disk (#838): provision.sh sets
   # _PROVISION_CRED_FILE before minting and removes it after sourcing — this is the
