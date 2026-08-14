@@ -15,11 +15,15 @@ tests:
       - hasDocuments:
           count: 2
 
-  - it: rbac template renders SA + namespaced Role/RoleBinding + scoped ClusterRole/ClusterRoleBinding by default
+  - it: rbac template renders SA + release-ns Role/RoleBinding + scoped ClusterRole/ClusterRoleBinding + node-agents-ns Role/RoleBinding by default
     template: templates/auto-upgrade-rbac.yaml
     asserts:
+      # 7 = SA, release-ns Role+RoleBinding, ClusterRole+ClusterRoleBinding, and
+      # the node-agents-ns Role+RoleBinding (backend#953 Bugbot: the SA must
+      # reconcile resource-monitor/image-refresh objects in the separate
+      # tracebloc-node-agents namespace, else --atomic upgrades 403 there).
       - hasDocuments:
-          count: 5
+          count: 7
 
   - it: cronjob template renders nothing when autoUpgrade.enabled=false
     template: templates/auto-upgrade-cronjob.yaml
@@ -38,6 +42,27 @@ tests:
     asserts:
       - hasDocuments:
           count: 0
+
+  - it: rbac grants the auto-upgrade SA a Role in the node-agents namespace by default (backend#953 Bugbot)
+    template: templates/auto-upgrade-rbac.yaml
+    documentIndex: 5
+    asserts:
+      - isKind:
+          of: Role
+      - equal:
+          path: metadata.namespace
+          value: tracebloc-node-agents
+      - equal:
+          path: metadata.name
+          value: stg-auto-upgrade-node-agents
+
+  - it: rbac omits the node-agents Role/RoleBinding when resource-monitor is disabled (nothing to reconcile there)
+    template: templates/auto-upgrade-rbac.yaml
+    set:
+      resourceMonitor: false
+    asserts:
+      - hasDocuments:
+          count: 5
 
   - it: ConfigMap holds the upgrade script
     template: templates/auto-upgrade-cronjob.yaml
@@ -174,34 +199,24 @@ tests:
       - equal:
           path: rules[0].apiGroups
           value: ["*"]
-        documentSelector:
-          path: kind
-          value: Role
+        documentIndex: 1
       - equal:
           path: rules[0].resources
           value: ["*"]
-        documentSelector:
-          path: kind
-          value: Role
+        documentIndex: 1
       - equal:
           path: rules[0].verbs
           value: ["*"]
-        documentSelector:
-          path: kind
-          value: Role
+        documentIndex: 1
       # RoleBinding targets the chart's own namespaced Role, not a built-in.
       - equal:
           path: roleRef.kind
           value: Role
-        documentSelector:
-          path: kind
-          value: RoleBinding
+        documentIndex: 2
       - equal:
           path: roleRef.name
           value: stg-auto-upgrade
-        documentSelector:
-          path: kind
-          value: RoleBinding
+        documentIndex: 2
       # The regression that #953 fixes: the ClusterRoleBinding must bind the
       # chart's OWN scoped ClusterRole (stg-auto-upgrade), never cluster-admin.
       - equal:

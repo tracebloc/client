@@ -161,4 +161,55 @@ roleRef:
   kind: ClusterRole
   name: {{ include "tracebloc.autoUpgradeName" . }}
   apiGroup: rbac.authorization.k8s.io
+{{- if and (ne .Values.resourceMonitor false) (ne .Values.nodeAgents.namespace.name .Release.Namespace) }}
+{{/*
+  backend#953 (Bugbot): when node-agents run in their OWN namespace (the
+  default `tracebloc-node-agents`), the chart also templates namespaced objects
+  there — resource-monitor DaemonSet + ServiceAccount (+ SCC on OpenShift), the
+  optional registry Secret, and the image-refresh Role/RoleBinding — all gated
+  on `resourceMonitor != false`. The release-namespace Role above does NOT reach
+  that namespace, so after the cluster-admin cutover a `helm upgrade --atomic
+  --wait` tick would 403 on those objects and auto-upgrade could not land. Grant
+  the same confined full control in the node-agents namespace, rendered only
+  when it is a SEPARATE namespace and resource-monitor is enabled (i.e. exactly
+  when those objects exist). `*` verbs include escalate/bind, so the
+  image-refresh Role/RoleBinding in that namespace can be re-applied on upgrade.
+*/}}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "tracebloc.autoUpgradeName" . }}-node-agents
+  namespace: {{ .Values.nodeAgents.namespace.name }}
+  annotations:
+    meta.helm.sh/release-name: {{ .Release.Name }}
+    meta.helm.sh/release-namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "tracebloc.labels" . | nindent 4 }}
+    app.kubernetes.io/component: auto-upgrade
+rules:
+  - apiGroups: ["*"]
+    resources: ["*"]
+    verbs: ["*"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "tracebloc.autoUpgradeName" . }}-node-agents
+  namespace: {{ .Values.nodeAgents.namespace.name }}
+  annotations:
+    meta.helm.sh/release-name: {{ .Release.Name }}
+    meta.helm.sh/release-namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "tracebloc.labels" . | nindent 4 }}
+    app.kubernetes.io/component: auto-upgrade
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "tracebloc.autoUpgradeName" . }}
+    namespace: {{ .Release.Namespace }}
+roleRef:
+  kind: Role
+  name: {{ include "tracebloc.autoUpgradeName" . }}-node-agents
+  apiGroup: rbac.authorization.k8s.io
+{{- end }}
 {{- end }}
