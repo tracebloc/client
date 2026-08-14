@@ -1283,6 +1283,12 @@ storageClass:
 
 hostPath:
   enabled: false
+
+# node-local is a single schedulable node (common.sh forces AGENTS=0, SERVERS=1),
+# so the single-replica PDBs would be undrainable here. hostPath.enabled=false
+# would otherwise misclassify this as multi-node, so declare the topology
+# explicitly to skip those PDBs and keep the node drainable (client#560).
+singleNode: true
 STORAGE
 else
 cat <<'STORAGE'

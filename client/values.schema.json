@@ -183,6 +183,11 @@
         }
       }
     },
+    "singleNode": {
+      "type": ["boolean", "null"],
+      "default": null,
+      "description": "Cluster topology: does this cluster have a single schedulable node? Gates the AUTO-mode single-replica PodDisruptionBudgets (a minAvailable:1 PDB is undrainable on one node). null => default to hostPath.enabled; true/false => explicit. Deliberately separate from env.SINGLE_NODE (GPU->CPU fallback, which may be true on a fixed multi-node cluster). The installer sets true for node-local single-node k3d (client#560)."
+    },
     "pvc": {
       "type": "object",
       "description": "PVC storage sizes",
@@ -937,8 +942,9 @@
           "type": "object",
           "properties": {
             "create": {
-              "type": "boolean",
-              "default": true
+              "type": ["boolean", "null"],
+              "default": null,
+              "description": "null (default) = auto: render on multi-node CSI (hostPath.enabled=false), skip on single-node/bare-metal (hostPath.enabled=true). true = force render, false = never render. See tracebloc/client#560."
             }
           }
         },
@@ -946,8 +952,9 @@
           "type": "object",
           "properties": {
             "create": {
-              "type": "boolean",
-              "default": true
+              "type": ["boolean", "null"],
+              "default": null,
+              "description": "null (default) = auto: render on multi-node CSI (hostPath.enabled=false), skip on single-node/bare-metal (hostPath.enabled=true). true = force render, false = never render. See tracebloc/client#560."
             }
           }
         }

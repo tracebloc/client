@@ -128,6 +128,21 @@ hostPath:
   # appends /<release>/data. mysql/logs PV paths are not affected by this key.
   datasetPath: /tracebloc
 
+# -- Cluster topology: does this cluster have a single schedulable node?
+# Gates the AUTO-mode single-replica PodDisruptionBudgets (podDisruptionBudget
+# below): a minAvailable:1 PDB on a one-node cluster is undrainable (the pod
+# cannot reschedule), so it is skipped when singleNode is effectively true.
+#   null (default) -> DEFAULT to hostPath.enabled: bare-metal installer clusters
+#                     (hostPath.enabled=true) are single-node; managed dynamic
+#                     clusters (AKS/EKS/OC) are multi-node.
+#   true / false   -> explicit override.
+# This is DELIBERATELY separate from env.SINGLE_NODE (which gates the
+# jobs-manager GPU->CPU pending-job fallback and may be true on a FIXED
+# MULTI-NODE cluster). The installer sets singleNode=true for the node-local
+# single-node k3d path (hostPath.enabled=false, local-path CSI, AGENTS=0), where
+# hostPath alone would misclassify it as multi-node.
+singleNode: null
+
 # -- PVC storage sizes (override per-environment if needed)
 pvc:
   mysql: 2Gi
@@ -742,15 +757,26 @@ priorityClass:
   name: ""
   value: 1000000
 
-# -- PodDisruptionBudgets.
-# mysql is single-replica; minAvailable: 1 blocks voluntary disruptions
-# (drains, surge upgrades, autoscaler scale-down) while only one mysql
-# pod exists. Disable if you run a multi-replica mysql managed externally.
+# -- PodDisruptionBudgets for the single-replica mysql and jobs-manager
+# Deployments. `create` is tri-state and defaults to AUTO (null), tracking the
+# storage/topology mode:
+#   null (default) -> multi-node CSI clusters (hostPath.enabled=false:
+#                     AKS/EKS/OpenShift) RENDER a minAvailable:1 PDB, so a
+#                     surprise autoscaler scale-down / node upgrade can't evict
+#                     the only pod without a deliberate operator drain.
+#                     Single-node / bare-metal installs (hostPath.enabled=true)
+#                     SKIP it: with one replica on one node, minAvailable:1
+#                     allows zero voluntary disruptions, so `kubectl drain`
+#                     (node maintenance, manual k3s upgrade) would block forever
+#                     while the pod has nowhere to reschedule (client#560).
+#   true  -> force render regardless of topology (e.g. a fixed multi-node
+#            bare-metal cluster that still wants drain protection).
+#   false -> never render (e.g. a multi-replica workload managed externally).
 podDisruptionBudget:
   mysql:
-    create: true
+    create: null
   jobsManager:
-    create: true
+    create: null
 
 # -- Secrets
 # These MUST be set via --set, a values file, or an external secret manager.
