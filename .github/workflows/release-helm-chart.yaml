@@ -29,7 +29,7 @@ jobs:
       prerelease: ${{ steps.guard.outputs.prerelease }}
     steps:
       - name: Checkout the released tag
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.event.release.tag_name }}
 
@@ -86,7 +86,7 @@ jobs:
         # runs (actions/runner#2788, still open). An empty default would cause
         # checkout to fall back to the repo default branch and package the
         # chart from the wrong commit.
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.event.release.tag_name }}
           fetch-depth: 0
@@ -242,7 +242,7 @@ jobs:
       - name: Checkout the released tag
         # Same actions/runner#2788 guard as above — pin to the release tag so the
         # manifest covers exactly the bytes published at this immutable ref.
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.event.release.tag_name }}
           fetch-depth: 0
@@ -469,7 +469,7 @@ jobs:
       # one that shipped. A post-publish check reading a different script than the
       # release is worse than no check, because it still reports.
       - name: Check out the released tag (for scripts/index-invariants.sh)
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.event.release.tag_name }}
       - name: Assert the public index holds only stable versions
