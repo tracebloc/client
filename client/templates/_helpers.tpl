@@ -142,6 +142,34 @@ mysql-pvc
 {{- end }}
 
 {{/*
+  Name of the GPU device-plugin DaemonSet, by vendor. Takes the resolved vendor
+  string as its context, NOT the root scope:
+    {{ include "tracebloc.gpuDevicePluginName" "nvidia" }}
+
+  These names are NOT release-scoped on purpose — they match the upstream
+  manifests the installer used to `kubectl apply`, so an installer re-run adopts
+  an existing DaemonSet in place instead of orphaning it (client#564).
+
+  Kept in ONE helper because two templates must agree on them: gpu-device-plugin
+  .yaml renders the DaemonSet, and auto-upgrade-rbac.yaml grants the auto-upgrade
+  ServiceAccount update/patch/delete restricted to exactly these resourceNames
+  (backend#1992). If those two ever disagreed, an `helm upgrade --atomic` tick
+  would 403 in the GPU namespace, roll back, and silently kill auto-upgrade on
+  every GPU edge — the failure this narrow Role exists to prevent. Deriving both
+  from here makes that drift impossible rather than merely unlikely.
+
+  Any vendor other than "amd" resolves to the NVIDIA name; gpu-device-plugin.yaml
+  `fail`s the render for a vendor outside {nvidia, amd} before that can matter.
+*/}}
+{{- define "tracebloc.gpuDevicePluginName" -}}
+{{- if eq . "amd" -}}
+amdgpu-device-plugin-daemonset
+{{- else -}}
+nvidia-device-plugin-daemonset
+{{- end -}}
+{{- end }}
+
+{{/*
   Release-scoped name shared by the auto-upgrade CronJob, ServiceAccount,
   ClusterRoleBinding, and the ConfigMap holding the upgrade script. Kept
   in one helper so the four resources stay in lockstep — the CRB references
@@ -156,8 +184,9 @@ mysql-pvc
   Role, RoleBinding, and ConfigMap. Same lockstep reasoning as
   tracebloc.autoUpgradeName above. Distinct from auto-upgrade because the
   two CronJobs have different cadences, different RBAC scopes (image-refresh
-  is namespace-scoped, auto-upgrade is cluster-admin), and customers may
-  reasonably disable one but not the other.
+  is namespace-scoped; auto-upgrade is namespace-scoped plus a narrow
+  ClusterRole for the chart's cluster kinds — backend#953, no longer
+  cluster-admin), and customers may reasonably disable one but not the other.
 */}}
 {{- define "tracebloc.imageRefreshName" -}}
 {{ .Release.Name }}-image-refresh

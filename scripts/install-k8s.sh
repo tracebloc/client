@@ -246,13 +246,11 @@ main() {
   # ── c) Create your secure environment ────────────────────────────────────
   step_header c "Creating your secure environment"
   create_cluster
-  # Only verify the GPU on the node when the device plugin actually deployed; a
-  # failed/CPU-mode deploy returns non-zero, so skipping verify avoids a ~90s wait
-  # and a contradictory "still initializing" warning for a plugin never applied
-  # (Bugbot). The `if` also keeps a non-zero deploy from tripping set -e.
-  if deploy_gpu_device_plugin; then
-    verify_gpu
-  fi
+  # The GPU device plugin is no longer applied imperatively here (client#564):
+  # the chart now renders it as a Helm-managed DaemonSet, gated on
+  # gpu.devicePlugin.enabled, which install_client_helm sets in step (e) from
+  # GPU_VENDOR. So it comes up WITH the release (tracked, and removed on
+  # uninstall) and node verification moves to after Helm install below.
   echo ""; echo ""
 
   # ── d) Register this machine ─────────────────────────────────────────────
@@ -270,6 +268,11 @@ main() {
   # ── e) Install tracebloc ─────────────────────────────────────────────────
   step_header e "Installing tracebloc"
   install_client_helm
+  # Node-level GPU verification (informational): the chart-managed device plugin
+  # (client#564) rolls out as part of the Helm release above, so confirm the node
+  # now advertises the GPU here rather than before Helm. verify_gpu no-ops for a
+  # CPU-only host (GPU_VENDOR neither nvidia nor amd).
+  verify_gpu
   echo ""; echo ""
 
   # ── f) Connect to the tracebloc network ──────────────────────────────────

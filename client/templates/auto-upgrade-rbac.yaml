@@ -8,20 +8,154 @@ metadata:
   labels:
     {{- include "tracebloc.labels" . | nindent 4 }}
     app.kubernetes.io/component: auto-upgrade
----
 {{/*
-  Bound to the built-in cluster-admin ClusterRole rather than a chart-defined
-  narrow role. The chart already creates cluster-scoped resources (PriorityClass,
-  StorageClass, ClusterRole/Binding, optionally Namespace), so a curated role
-  would have to enumerate every resource the chart ever templates — adding a
-  new resource kind in a future version would silently break upgrades on
-  already-deployed clients with no signal.
-  See autoUpgrade comment in values.yaml for the trust-boundary discussion.
+  backend#953 (Sec-II): the auto-upgrade CronJob used to bind its
+  ServiceAccount to the built-in `cluster-admin` ClusterRole. Anything that
+  compromised this Pod, its token, or the chart repo at repoUrl then held a
+  STANDING grant to read every Secret in every namespace, exec into any pod,
+  and mutate any workload cluster-wide — a large blast radius for a component
+  whose only job is `helm upgrade` of THIS release.
+
+  Least-privilege split (the CronJob runs `helm upgrade` on the whole chart, so
+  it must be able to CRUD every kind the chart templates, and watch workloads
+  for `--atomic --wait`):
+
+    * a namespaced Role granting full control, but ONLY inside the release
+      namespace. This covers every namespaced kind the chart owns today
+      (Deployment, DaemonSet, Service, Secret, ConfigMap, Job, CronJob, PVC,
+      PDB, NetworkPolicy, ServiceAccount, Role/RoleBinding) plus helm's
+      release-state Secrets and readiness watches — and, because it is `*` on
+      `*`, it does NOT break when a future chart version adds a new *namespaced*
+      kind. The cross-namespace reach that made cluster-admin dangerous is gone.
+
+    * a ClusterRole enumerating ONLY the cluster-scoped kinds this chart
+      actually templates (Namespace, PersistentVolume, StorageClass,
+      PriorityClass, ClusterRole, ClusterRoleBinding, and the OpenShift
+      SecurityContextConstraints). `escalate`/`bind` on the RBAC kinds are
+      required: without them Kubernetes' privilege-escalation prevention would
+      refuse to let this SA re-apply the chart's OTHER ClusterRoles/bindings
+      (rbac.yaml, resource-monitor-rbac.yaml, ...) during an upgrade.
+
+  Residual, documented: `escalate` on clusterroles is powerful, but it is an
+  ACTIVE, auditable step rather than a standing broad grant, and the worst
+  cluster-admin primitives (cluster-wide secret read, pod exec, node access)
+  are simply absent. Adding a NEW cluster-scoped kind in a future chart version
+  requires extending the ClusterRole below in the SAME release (helm applies
+  ClusterRole before most cluster kinds, so an in-release add is picked up on
+  the next tick); a genuinely new cluster kind that sorts BEFORE ClusterRole in
+  helm's install order (e.g. StorageClass) needs a one-time cluster-admin-
+  assisted upgrade. This is the intentional trade for dropping the standing
+  cluster-admin binding — see the autoUpgrade trust-boundary note in values.yaml.
+
+  Cutover is safe with no flag-day: the upgrade that first ships this change is
+  performed by the CURRENTLY deployed auto-upgrade SA, which is still
+  cluster-admin, so it can create the scoped roles and remove the old
+  cluster-admin binding in one pass. Every subsequent tick runs scoped.
 */}}
+---
 apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRoleBinding
+kind: Role
 metadata:
   name: {{ include "tracebloc.autoUpgradeName" . }}
+  namespace: {{ .Release.Namespace }}
+  annotations:
+    meta.helm.sh/release-name: {{ .Release.Name }}
+    meta.helm.sh/release-namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "tracebloc.labels" . | nindent 4 }}
+    app.kubernetes.io/component: auto-upgrade
+rules:
+  # Full control, confined to the release namespace: `helm upgrade` may create,
+  # update, delete, and (for --atomic --wait) watch any namespaced kind the
+  # chart renders, and it reads/writes its own release-state Secrets here.
+  - apiGroups: ["*"]
+    resources: ["*"]
+    verbs: ["*"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "tracebloc.autoUpgradeName" . }}
+  namespace: {{ .Release.Namespace }}
+  annotations:
+    meta.helm.sh/release-name: {{ .Release.Name }}
+    meta.helm.sh/release-namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "tracebloc.labels" . | nindent 4 }}
+    app.kubernetes.io/component: auto-upgrade
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "tracebloc.autoUpgradeName" . }}
+    namespace: {{ .Release.Namespace }}
+roleRef:
+  kind: Role
+  name: {{ include "tracebloc.autoUpgradeName" . }}
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "tracebloc.autoUpgradeName" . }}
+  annotations:
+    meta.helm.sh/release-name: {{ .Release.Name }}
+    meta.helm.sh/release-namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "tracebloc.labels" . | nindent 4 }}
+    app.kubernetes.io/component: auto-upgrade
+rules:
+  # Cluster-scoped kinds the chart templates (namespace.yaml,
+  # node-agents-namespace.yaml, storage-class.yaml, priority-class.yaml, the
+  # hostPath PersistentVolumes, and the ClusterRoles/Bindings in rbac.yaml /
+  # resource-monitor-rbac.yaml / storage-assertions-check.yaml). CRUD + watch so
+  # `helm upgrade --atomic` can create, reconcile, and (on failure) roll them
+  # back.
+  - apiGroups: [""]
+    resources: ["namespaces", "persistentvolumes"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["storage.k8s.io"]
+    resources: ["storageclasses"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["scheduling.k8s.io"]
+    resources: ["priorityclasses"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  # OpenShift only (resource-monitor-scc.yaml). The API group is absent on
+  # vanilla Kubernetes; an RBAC rule naming a non-existent group is harmless.
+  - apiGroups: ["security.openshift.io"]
+    resources: ["securitycontextconstraints"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  # The chart's own ClusterRoles/ClusterRoleBindings. `escalate` and `bind` are
+  # mandatory: Kubernetes forbids an actor that is not itself cluster-admin from
+  # creating/updating a ClusterRole with permissions it lacks (escalate) or
+  # binding one (bind), so without these an upgrade that re-applies rbac.yaml
+  # would 403.
+  - apiGroups: ["rbac.authorization.k8s.io"]
+    resources: ["clusterroles", "clusterrolebindings"]
+    verbs:
+      ["get", "list", "watch", "create", "update", "patch", "delete", "escalate", "bind"]
+  # resource-monitor-daemonset.yaml pre-flights metrics-server with a helm
+  # `lookup` of the v1beta1.metrics.k8s.io APIService. After the cluster-admin
+  # cutover the scoped SA runs that lookup during `helm upgrade`; a 403 makes
+  # `lookup` return empty, which the template's `fail` misreads as
+  # "metrics-server missing" and aborts every subsequent auto-upgrade tick.
+  # Read-only access to apiservices lets the lookup resolve (backend#953 Bugbot).
+  - apiGroups: ["apiregistration.k8s.io"]
+    resources: ["apiservices"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+# NOTE the `-scoped` suffix: releases before backend#953 already have a
+# ClusterRoleBinding named exactly `{{ include "tracebloc.autoUpgradeName" . }}`
+# whose roleRef is the built-in `cluster-admin`. A ClusterRoleBinding's roleRef
+# is IMMUTABLE, so reusing that name here would make the first `helm upgrade`
+# onto this version fail with "cannot change roleRef" on every already-deployed
+# client. Giving the new binding a distinct name instead lets helm CREATE this
+# scoped binding and DELETE the old cluster-admin one in the same upgrade (the
+# old name is no longer in the rendered manifest set). The upgrade that performs
+# this cutover still runs as the previous cluster-admin-bound SA, so it has the
+# rights to do both; every later tick runs under this scoped binding.
+metadata:
+  name: {{ include "tracebloc.autoUpgradeName" . }}-scoped
   annotations:
     meta.helm.sh/release-name: {{ .Release.Name }}
     meta.helm.sh/release-namespace: {{ .Release.Namespace }}
@@ -34,6 +168,191 @@ subjects:
     namespace: {{ .Release.Namespace }}
 roleRef:
   kind: ClusterRole
-  name: cluster-admin
+  name: {{ include "tracebloc.autoUpgradeName" . }}
   apiGroup: rbac.authorization.k8s.io
+{{- if and (ne .Values.resourceMonitor false) (ne .Values.nodeAgents.namespace.name .Release.Namespace) }}
+{{/*
+  backend#953 (Bugbot): when node-agents run in their OWN namespace (the
+  default `tracebloc-node-agents`), the chart also templates namespaced objects
+  there — resource-monitor DaemonSet + ServiceAccount (+ SCC on OpenShift), the
+  optional registry Secret, and the image-refresh Role/RoleBinding — all gated
+  on `resourceMonitor != false`. The release-namespace Role above does NOT reach
+  that namespace, so after the cluster-admin cutover a `helm upgrade --atomic
+  --wait` tick would 403 on those objects and auto-upgrade could not land. Grant
+  the same confined full control in the node-agents namespace, rendered only
+  when it is a SEPARATE namespace and resource-monitor is enabled (i.e. exactly
+  when those objects exist). `*` verbs include escalate/bind, so the
+  image-refresh Role/RoleBinding in that namespace can be re-applied on upgrade.
+*/}}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "tracebloc.autoUpgradeName" . }}-node-agents
+  namespace: {{ .Values.nodeAgents.namespace.name }}
+  annotations:
+    meta.helm.sh/release-name: {{ .Release.Name }}
+    meta.helm.sh/release-namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "tracebloc.labels" . | nindent 4 }}
+    app.kubernetes.io/component: auto-upgrade
+rules:
+  - apiGroups: ["*"]
+    resources: ["*"]
+    verbs: ["*"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "tracebloc.autoUpgradeName" . }}-node-agents
+  namespace: {{ .Values.nodeAgents.namespace.name }}
+  annotations:
+    meta.helm.sh/release-name: {{ .Release.Name }}
+    meta.helm.sh/release-namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "tracebloc.labels" . | nindent 4 }}
+    app.kubernetes.io/component: auto-upgrade
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "tracebloc.autoUpgradeName" . }}
+    namespace: {{ .Release.Namespace }}
+roleRef:
+  kind: Role
+  name: {{ include "tracebloc.autoUpgradeName" . }}-node-agents
+  apiGroup: rbac.authorization.k8s.io
+{{- end }}
+{{- /*
+  Nil-safe read of the GPU device-plugin namespace, mirroring
+  docker-registry-secret.yaml exactly: a `--reset-then-reuse-values` upgrade from
+  a release predating client#564 carries no `gpu` key, and Go template `and` is
+  not short-circuit, so `and .Values.gpu .Values.gpu.devicePlugin.enabled` would
+  still evaluate `.enabled` on a nil and panic. Coalescing each level to an empty
+  dict BEFORE any field access removes the nil entirely.
+*/ -}}
+{{- $dp := (.Values.gpu | default dict).devicePlugin | default dict }}
+{{- $gpuNs := $dp.namespace | default "kube-system" }}
+{{- if and $dp.enabled (ne $gpuNs .Release.Namespace) }}
+{{- $gpuRoleName := printf "%s-gpu-device-plugin" (include "tracebloc.autoUpgradeName" .) }}
+{{/*
+  backend#1992 (Bugbot, staging hop 2026-08-14): a Linux GPU install templates
+  NAMESPACED objects into `gpu.devicePlugin.namespace` (kube-system by default) —
+  the vendor DaemonSet (gpu-device-plugin.yaml) and, on an authenticated
+  mirror, the mirrored dockerconfigjson pull Secret (docker-registry-secret.yaml).
+  The release-namespace Role above does not reach that namespace and the
+  ClusterRole enumerates only CLUSTER-scoped kinds, so after the #953
+  cluster-admin cutover a `helm upgrade --atomic --wait` tick would 403 there,
+  roll back, and leave the auto-upgrade CronJob permanently failed — on a
+  customer GPU edge, not in CI, and disabling the very channel that would deliver
+  the fix. Rendered only when the device plugin is enabled AND its namespace is a
+  SEPARATE namespace (otherwise the release-namespace Role already covers it).
+
+  DELIBERATELY NOT `*` on `*` like the node-agents block above. That block's
+  namespace is a namespace THIS chart creates and owns; this one defaults to
+  kube-system, which holds the service-account tokens of kube-controller-manager
+  and friends. `*` on `*` there — or even a plain namespace-wide `secrets: list` —
+  would let anything that compromised this Pod read those tokens and become
+  cluster-admin, which is precisely the blast radius backend#953 set out to
+  remove. So the grant below is derived from what the chart actually renders here
+  and nothing else, and the write verbs are pinned to those objects by name:
+
+    * daemonsets — name-free `get, list, watch` because helm's readiness check
+      and three-way-merge diff must be able to read the kind (a `resourceNames`
+      rule cannot authorize `list`/`watch`, and a 403 on that path is this exact
+      outage). Mutating verbs are restricted to the plugin DaemonSet itself, so
+      this cannot be used to patch a privileged container into kube-proxy.
+      BOTH vendor names are listed: flipping `gpu.devicePlugin.vendor` makes one
+      upgrade delete the old vendor's DaemonSet and create the new one, and a
+      single-name grant would 403 on that delete.
+
+    * secrets — no namespace-wide read at all. `create` cannot be name-restricted
+      by RBAC, but every other verb is pinned to the one mirrored pull Secret, so
+      the token-read path above stays closed. Granted unconditionally inside this
+      block rather than behind `tracebloc.useImagePullSecrets`: turning
+      `dockerRegistry` off must still let the upgrade DELETE the Secret it
+      previously mirrored here, which a gated rule would forbid.
+
+    * roles/rolebindings — the two objects rendered just below. Helm re-applies
+      every object in the manifest on upgrade, and their `helm.sh/chart` label
+      changes on every chart bump, so without this the SA could not reconcile its
+      own grant and auto-upgrade would 403 on the tick after this one. NOTE the
+      absence of `escalate`/`bind`: they are not needed here and are not safe
+      here. Kubernetes' privilege-escalation check passes when the actor already
+      holds every permission in the Role it writes — and this Role grants exactly
+      what the binding gives the SA, so it is self-reproducing by construction.
+      `escalate` on roles in kube-system, by contrast, would allow authoring a
+      Role that reads every Secret there: cluster-admin by another route.
+
+  `create` is not name-restrictable for any kind, but it grants nothing new: the
+  release-namespace Role is already `*` on `*`, so the SA can create these kinds
+  somewhere regardless. What matters is that it cannot read or mutate objects it
+  does not own in kube-system.
+
+  No flag-day: the upgrade that first ships this rides the same release as the
+  #953 cutover, so it is still performed by the previous cluster-admin-bound SA,
+  which can create these objects; every later tick runs under this scoped grant.
+  Adding a new object to this namespace in a future chart version REQUIRES
+  extending the rules below in the same release.
+*/}}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ $gpuRoleName }}
+  namespace: {{ $gpuNs }}
+  annotations:
+    meta.helm.sh/release-name: {{ .Release.Name }}
+    meta.helm.sh/release-namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "tracebloc.labels" . | nindent 4 }}
+    app.kubernetes.io/component: auto-upgrade
+rules:
+  # gpu-device-plugin.yaml — the vendor device-plugin DaemonSet.
+  - apiGroups: ["apps"]
+    resources: ["daemonsets"]
+    verbs: ["get", "list", "watch", "create"]
+  - apiGroups: ["apps"]
+    resources: ["daemonsets"]
+    resourceNames:
+      - {{ include "tracebloc.gpuDevicePluginName" "nvidia" | quote }}
+      - {{ include "tracebloc.gpuDevicePluginName" "amd" | quote }}
+    verbs: ["update", "patch", "delete"]
+  # docker-registry-secret.yaml — the mirrored dockerconfigjson pull Secret.
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["create"]
+  - apiGroups: [""]
+    resources: ["secrets"]
+    resourceNames: [{{ include "tracebloc.registrySecretName" . | quote }}]
+    verbs: ["get", "update", "patch", "delete"]
+  # This Role and its RoleBinding, so the SA can reconcile its own grant.
+  - apiGroups: ["rbac.authorization.k8s.io"]
+    resources: ["roles", "rolebindings"]
+    verbs: ["create"]
+  - apiGroups: ["rbac.authorization.k8s.io"]
+    resources: ["roles", "rolebindings"]
+    resourceNames: [{{ $gpuRoleName | quote }}]
+    verbs: ["get", "update", "patch", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ $gpuRoleName }}
+  namespace: {{ $gpuNs }}
+  annotations:
+    meta.helm.sh/release-name: {{ .Release.Name }}
+    meta.helm.sh/release-namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "tracebloc.labels" . | nindent 4 }}
+    app.kubernetes.io/component: auto-upgrade
+subjects:
+  # The SA lives in the release namespace; the binding lives in the GPU
+  # namespace. A RoleBinding may name a subject from any namespace.
+  - kind: ServiceAccount
+    name: {{ include "tracebloc.autoUpgradeName" . }}
+    namespace: {{ .Release.Namespace }}
+roleRef:
+  kind: Role
+  name: {{ $gpuRoleName }}
+  apiGroup: rbac.authorization.k8s.io
+{{- end }}
 {{- end }}
