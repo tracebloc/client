@@ -12,6 +12,10 @@ on:
       - 'scripts/tests/lib/e2e-common.sh'
       - 'scripts/tests/chart-env-vocabulary.sh'
       - 'scripts/lib/**'
+      # This workflow's `lint` job runs `make helm-lint helm-vocab`, so the
+      # Makefile is part of what the gate executes: an edit to those targets
+      # has to be able to start it.
+      - 'Makefile'
       - '.github/workflows/helm-ci.yaml'
   pull_request:
     branches: [main, develop, openshift]
@@ -24,6 +28,10 @@ on:
       - 'scripts/tests/lib/e2e-common.sh'
       - 'scripts/tests/chart-env-vocabulary.sh'
       - 'scripts/lib/**'
+      # This workflow's `lint` job runs `make helm-lint helm-vocab`, so the
+      # Makefile is part of what the gate executes: an edit to those targets
+      # has to be able to start it.
+      - 'Makefile'
       - '.github/workflows/helm-ci.yaml'
   # Manual runs — mainly to fire full-seal-e2e on demand (e.g. right after the
   # e2e-test-agent secrets are provisioned, or to re-record a seal run).
@@ -42,56 +50,42 @@ jobs:
     name: Helm lint
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
+      # helm is not on the runner image at a version we choose, so it is
+      # installed here at the pin this repo standardises on. That is
+      # environment bootstrapping, not a duplicated command -- the same
+      # distinction that keeps the shellcheck apt install in
+      # standard-checks.yml. Both `helm-lint` and `helm-vocab` shell out to
+      # `helm`, and chart-env-vocabulary.sh's helper-backstop cases branch on
+      # the helm VERSION (they self-skip below 3.16), so an unpinned runner
+      # helm would silently change which assertions run. drift-checks.yaml
+      # pins the identical action + version for the same reason.
       - name: Set up Helm
         uses: azure/setup-helm@1a275c3b69536ee54be43f2070a358922e12c8d4 # v4.3.1
         with:
           version: v3.15.4
 
-      - name: Helm lint (strict) — parent client chart, all platforms
-        run: |
-          for f in client/ci/*-values.yaml; do
-            echo "=== Linting client with $f ==="
-            helm lint --strict ./client -f "$f"
-          done
-
-      - name: Helm lint (strict) — ingestor subchart
-        # The ingestor subchart has no per-platform CI values files because
-        # its templates don't branch on platform — they only render a
-        # ConfigMap + Job + SA. The chart's one required value
-        # (`ingestConfig`) is supplied by customers at install time via
-        # `--set-file`; missing it during lint emits an INFO, not a FAIL,
-        # so plain `helm lint --strict ./ingestor` exercises the templates
-        # cleanly. See #135 for why we lint it here at all (publish workflow
-        # now packages both charts).
-        run: helm lint --strict ./ingestor
-
-      - name: CLIENT_ENV + channelTags vocabularies are closed
-        # `helm lint` does not exercise the values.schema.json `enum` /
-        # `additionalProperties` against out-of-vocabulary inputs, and
-        # helm-unittest structurally cannot: it reports a schema violation as a
-        # plugin-level error rather than a template failure, and exposes no flag
-        # to skip validation and reach the `fail` in tracebloc.clientEnv. So
-        # both gates are asserted from outside the plugin, every rejection
-        # paired with an accept control on the same command line. ~2 s.
+      - name: make helm-lint helm-vocab
+        # Both targets, from the Makefile that already declares them
+        # (backend#1606). This job restated the `client/ci/*-values.yaml` loop,
+        # the `helm lint --strict ./ingestor` call, and the chart-vocabulary
+        # script verbatim.
         #
-        # The helper-backstop cases self-skip when helm predates
-        # --skip-schema-validation (3.16); the pin above is v3.15.4, so they are
-        # skipped here today and run for anyone local on 3.16+. Bumping the pin
-        # turns them on with no change to this file.
-        run: bash scripts/tests/chart-env-vocabulary.sh
-
-      # The CLIENT_ENV vocabulary-agreement guard (backend#1729 sweep 5) used to
-      # run here. It now runs in drift-checks.yaml's `Source-of-truth drift` job,
-      # which is a REQUIRED check on develop and main -- `Helm lint` is not, so
-      # here the guard could only advise. `scripts/install-k8s.ps1` came into
-      # this workflow's `paths:` with it and left with it: this is the repo's
-      # heaviest workflow (a real k3d cluster plus two 4-platform matrices) and
-      # a PowerShell installer edit has no other reason to start it. The
-      # explicit `scripts/lib/common.sh` entry went too, but that one was always
-      # redundant -- the pre-existing `scripts/lib/**` glob still matches it, so
-      # helm-ci's triggering on a common.sh change is unchanged.
+        # `helm-vocab` is the chart vocabulary only. The CLIENT_ENV
+        # vocabulary-agreement guard (backend#1729 sweep 5) used to run in this
+        # job too; #715 moved it to drift-checks.yaml's `Source-of-truth drift`
+        # job, which is a REQUIRED check on develop and main -- `Helm lint` is
+        # not, so here the guard could only advise. Calling the Makefile must
+        # not quietly undo that, so the guard sits in `make drift` (the target
+        # that mirrors the drift gate) and not in `helm-vocab`; `make check`
+        # runs both, so the local tier is unchanged.
+        #
+        # The helper-backstop cases inside chart-env-vocabulary.sh self-skip
+        # when helm predates --skip-schema-validation (3.16); the pin above is
+        # v3.15.4, so they are skipped here today and run for anyone local on
+        # 3.16+. Bumping the pin turns them on with no change to this file.
+        run: make helm-lint helm-vocab
 
   template:
     timeout-minutes: 10
@@ -107,7 +101,7 @@ jobs:
       KUBECONFORM_VERSION: "0.8.0"
       KUBECONFORM_SHA256: "9bc2bffbf71f261128533edaf912153948b7ff238f9a531ae6d34466ec287883"
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Set up Helm
         uses: azure/setup-helm@1a275c3b69536ee54be43f2070a358922e12c8d4 # v4.3.1
@@ -168,7 +162,7 @@ jobs:
     name: Helm unit tests
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Set up Helm
         uses: azure/setup-helm@1a275c3b69536ee54be43f2070a358922e12c8d4 # v4.3.1
@@ -197,7 +191,7 @@ jobs:
     name: Spawned ingestor image is multi-arch
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Assert the ingestor tag and pinned digests are multi-arch
         run: |
           repo=$(yq '.images.ingestor.repository' client/values.yaml)
@@ -270,7 +264,7 @@ jobs:
     name: Fleet auto-upgrade E2E (k3d)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Upgrade from last published release through both flag paths
         run: bash scripts/tests/e2e-auto-upgrade.sh
 
@@ -289,7 +283,7 @@ jobs:
     name: Seal-check egress-enforcement (k3d)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Run the live egress-enforcement seal-check
         run: bash scripts/tests/e2e-seal-check.sh
 
@@ -320,7 +314,7 @@ jobs:
       TB_E2E_CLIENT_ID: ${{ secrets.TB_E2E_CLIENT_ID }}
       TB_E2E_CLIENT_PASSWORD: ${{ secrets.TB_E2E_CLIENT_PASSWORD }}
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Run the full seal suite (skips until the e2e-test-agent is provisioned)
         run: |
           if [ -z "$TB_E2E_CLIENT_ID" ] || [ -z "$TB_E2E_CLIENT_PASSWORD" ]; then

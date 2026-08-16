@@ -30,27 +30,41 @@ jobs:
     name: Lint
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - name: bash -n (syntax) on every shell script
-        run: |
-          find scripts -type f -name '*.sh' -print0 \
-            | while IFS= read -r -d '' f; do bash -n "$f" || exit 1; done
-          echo "all shell scripts parse"
-
-      - name: ShellCheck (libs + entrypoints), error severity
+      # shellcheck itself is not on the runner image, so it is installed here.
+      # That is environment bootstrapping, not a duplicated command.
+      - name: Install shellcheck
         run: |
           sudo apt-get update -qq && sudo apt-get install -y -qq shellcheck
           shellcheck --version | grep version
-          shellcheck --severity=error --shell=bash \
-            scripts/install.sh scripts/install-k8s.sh scripts/resolve-ingestor-digest.sh scripts/lib/*.sh \
-            scripts/tests/distro-prereqs.sh scripts/tests/e2e-cluster.sh scripts/tests/e2e-proxy.sh scripts/tests/e2e-auto-upgrade.sh scripts/tests/e2e-seal-check.sh scripts/tests/lib/e2e-common.sh
+
+      - name: make lint
+        # `make lint` (backend#1606). This job used to restate the parse loop AND
+        # spell out the shellcheck file list inline, while the Makefile kept the
+        # same list in SHELLCHECK_FILES. The two had ALREADY drifted, and in the
+        # direction nobody notices: the Makefile carried 19 entries and this file
+        # 9, so ten scripts were shellchecked on a contributor's machine and NOT
+        # at the merge gate --
+        #
+        #   scripts/gen-manifest.sh          scripts/check-facts.sh
+        #   scripts/check-style.sh           scripts/lib/*.sh
+        #   scripts/tests/check-drift.sh     scripts/tests/e2e-full-seal.sh
+        #   scripts/tests/e2e-journey.sh     scripts/tests/path-persist.sh
+        #   scripts/tests/chart-env-vocabulary.sh
+        #   scripts/tests/env-vocabulary-agreement.sh
+        #
+        # gen-manifest.sh is the installer's integrity manifest generator, so a
+        # shell defect there was invisible to this gate. Measured green across
+        # all 19 before this landed, so it arms a green check rather than
+        # importing a backlog.
+        run: make lint
 
   unit-tests:
     name: Unit tests
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Install bats
         run: sudo apt-get update -qq && sudo apt-get install -y -qq bats

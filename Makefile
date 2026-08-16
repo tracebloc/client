@@ -164,14 +164,24 @@ lint:
 	@echo "all shell scripts parse"
 	shellcheck --severity=error --shell=bash $(SHELLCHECK_FILES)
 
-# drift: the three single-source guards from installer-tests.yaml's
-# `static` job. All three are pure local file comparisons (~0.2 s) and
-# all three have a --write / regenerate mode named in their own output.
+# drift: the repo's duplicated-declaration guards. The first three come from
+# installer-tests.yaml's `static` job; all three are pure local file
+# comparisons (~0.2 s) and all three have a --write / regenerate mode named in
+# their own output.
+#
+# The fourth is the CLIENT_ENV vocabulary-agreement guard (backend#1729
+# sweep 5). It lives here, not in `helm-vocab`, because #715 moved it out of
+# helm-ci's `Helm lint` into drift-checks.yaml's `Source-of-truth drift` job --
+# the one that is a REQUIRED check, so the guard can block rather than advise.
+# helm-ci's lint job calls `make helm-lint helm-vocab`, so keeping the guard in
+# `helm-vocab` would silently put it back where #715 took it from. ~2 s, bash
+# and python3 only.
 .PHONY: drift
 drift:
 	scripts/gen-manifest.sh --check
 	scripts/check-facts.sh --check
 	bash scripts/check-style.sh
+	bash scripts/tests/env-vocabulary-agreement.sh
 
 # digest-drift: the watcher on every mutable label that points at a pinned
 # digest (backend#1853). NOT in `check`: it needs the network and a docker
@@ -206,10 +216,13 @@ helm-lint:
 # can assert NEITHER: it treats a schema violation as a plugin-level error
 # rather than a template failure, and offers no way to skip validation and reach
 # the helper. So the gates are exercised from outside the plugin. ~2 s.
+#
+# CHART vocabulary only. env-vocabulary-agreement.sh is in `drift`, not here --
+# see that target for why (#715 moved it to the required drift gate, and
+# helm-ci's lint job runs this target).
 .PHONY: helm-vocab
 helm-vocab:
 	bash scripts/tests/chart-env-vocabulary.sh
-	bash scripts/tests/env-vocabulary-agreement.sh
 
 # helm-template: helm-ci.yaml `template`. kubeconform is pinned by
 # version AND digest in CI; rather than re-implement that download here,
