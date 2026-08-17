@@ -1605,6 +1605,31 @@ Describe "Get-EffectiveNoProxy" {
   }
 }
 
+# Invoke-BoundedProcess hands back stdout+stderr concatenated, so the anchor check has to
+# pick the context out of it. A whole-blob compare hard-stops a correctly switched install
+# the moment kubectl warns on stderr (Bugbot) — bash gets this for free with `2>/dev/null`.
+Describe "Get-CurrentContextFromOutput (client#732 Bugbot: stderr must not fail a good install)" {
+  It "returns the context when kubectl is quiet" {
+    Get-CurrentContextFromOutput -Output "k3d-tracebloc`n" | Should -Be "k3d-tracebloc"
+  }
+  It "ignores stderr noise that FOLLOWS the context (the concatenation order)" {
+    $out = "k3d-tracebloc`nW0817 10:00:00 warning: plugin ... is deprecated`n"
+    Get-CurrentContextFromOutput -Output $out | Should -Be "k3d-tracebloc"
+  }
+  It "survives CRLF and leading blank lines" {
+    Get-CurrentContextFromOutput -Output "`r`n  k3d-tracebloc  `r`nnoise`r`n" | Should -Be "k3d-tracebloc"
+  }
+  It "returns empty for empty/whitespace-only output -- 'couldn't tell' is not a pass" {
+    Get-CurrentContextFromOutput -Output ""        | Should -Be ""
+    Get-CurrentContextFromOutput -Output "  `r`n "  | Should -Be ""
+  }
+  It "does NOT invent a match from a warning that merely mentions the context" {
+    # stderr-only output (kubectl printed nothing on stdout) must not read as anchored
+    $out = "error: no current context; run 'kubectl config use-context k3d-tracebloc'"
+    Get-CurrentContextFromOutput -Output $out | Should -Not -Be "k3d-tracebloc"
+  }
+}
+
 # --- Releasing the dashboard record before deleting the cluster (backend#2077) ---
 #
 # This machine's backend record is anchored to the CLUSTER's identity (the
@@ -1703,6 +1728,10 @@ Describe "Kubeconfig merge is checked, and the anchor verified (client#732 sourc
   }
   It "treats an unreadable current-context as a failure, not as agreement" {
     $script:PSRC3 | Should -Match "can't tell us which context is current"
+  }
+  It "reads the context through the stderr-tolerant parser, never the raw merged blob (Bugbot)" {
+    $fn = (($script:PSRC3 -split 'function New-K3dCluster')[1] -split '\nfunction ')[0]
+    $fn | Should -Match '\$haveCtx = Get-CurrentContextFromOutput -Output "\$\(\$ctx\.Output\)"'
   }
   It "normalizes the kubeconfig k3d actually wrote, not a hardcoded profile path" {
     # --kubeconfig-merge-default honours $KUBECONFIG; the rewrite has to follow it or

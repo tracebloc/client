@@ -2979,6 +2979,25 @@ function Write-HostCaCreateHint {
 # CLUSTER_NAME still needs it (and on the default name it is a harmless no-op).
 #
 # -RerunPrefix: env assignments to prefix the re-run with, for the call sites that need one.
+# Pure: the current kubectl context out of a BOUNDED kubectl's merged output.
+#
+# Invoke-BoundedProcess returns stdout and stderr concatenated in that order, and
+# `kubectl config current-context` prints exactly one line on stdout — so the first
+# non-empty line is the context and everything after it is noise. Comparing the whole
+# blob would hard-stop a correctly switched install the moment kubectl emitted a
+# deprecation or plugin warning on stderr; the bash peer sidesteps it with `2>/dev/null`,
+# which this helper is the Windows equivalent of (Bugbot).
+#
+# Empty in, empty out — "we couldn't tell" stays a failure at the call site, never a pass.
+function Get-CurrentContextFromOutput {
+  param([string]$Output)
+  foreach ($line in ($Output -split "`r?`n")) {
+    $trimmed = $line.Trim()
+    if ($trimmed -ne "") { return $trimmed }
+  }
+  return ""
+}
+
 function Write-RecreateClusterHint {
   param([string]$RerunPrefix = "")
   Hint "Release this machine's secure environment BEFORE deleting the cluster - it is anchored to the"
@@ -3699,7 +3718,7 @@ function New-K3dCluster {
   # kubectl call in this installer.
   $wantCtx = "k3d-$CLUSTER_NAME"
   $ctx = Invoke-BoundedProcess -FileName "kubectl" -Arguments @("config", "current-context") -TimeoutSec 10
-  $haveCtx = ("$($ctx.Output)").Trim()
+  $haveCtx = Get-CurrentContextFromOutput -Output "$($ctx.Output)"
   if ($ctx.Code -ne 0 -or $haveCtx -ne $wantCtx) {
     if ($ctx.Code -ne 0) {
       Warn "k3d merged the '$CLUSTER_NAME' kubeconfig, but kubectl can't tell us which context is current."
