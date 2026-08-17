@@ -273,13 +273,28 @@ function Resolve-Cosign {
   $onPath = Get-Command cosign -ErrorAction SilentlyContinue
   if ($onPath) { return $onPath.Source }
 
+  # BOTH architectures fetch the amd64 build, deliberately.
+  #
+  # Sigstore has never published a Windows arm64 cosign — not at $CosignVersion,
+  # not at any release. `cosign-windows-amd64.exe` is the only Windows asset there
+  # is. Asking for `cosign-windows-arm64.exe` (as this did) 404s, Resolve-Cosign
+  # returns $null, and a Windows-on-ARM install fails closed reading like a network
+  # blip — permanently, since retrying cannot conjure the asset.
+  #
+  # Running it under Windows-on-ARM's x64 emulation costs nothing that matters:
+  # cosign verifies a signature over BYTES, so the instruction set it was compiled
+  # for cannot change the verdict, and the binary we hand it is still the native
+  # arm64 one. The bootstrapped cosign is checksum-verified below exactly as on
+  # amd64, so the trust chain is identical.
+  #
+  # Do not "fix" this back to $arch. There is nothing on the other end.
   switch ($env:PROCESSOR_ARCHITECTURE) {
-    "AMD64" { $arch = "amd64" }
-    "ARM64" { $arch = "arm64" }
+    "AMD64" { }
+    "ARM64" { }
     default { return $null }
   }
   $base  = "https://github.com/sigstore/cosign/releases/download/$CosignVersion"
-  $asset = "cosign-windows-$arch.exe"
+  $asset = "cosign-windows-amd64.exe"
   $bin   = Join-Path $TmpDir "cosign.exe"
   $sums  = Join-Path $TmpDir "cosign_checksums.txt"
 
@@ -317,6 +332,34 @@ function Resolve-Cosign {
 #  - stderr is merged to stdout and discarded: a native tool writing to stderr would
 #    otherwise surface as a NativeCommandError dumping this script's source line +
 #    internal identifiers into the console/transcript (#576).
+# Can this cosign actually EXECUTE here? A trivial `cosign version`.
+#
+# Invoke-CosignVerifyBlob fails closed on a binary that won't start (the 255
+# sentinel is never overwritten, or the call throws) — correct, but it reports it
+# identically to a signature that did not verify. Those are different events with
+# different remedies, and only one of them means "this artifact may be tampered
+# with". Windows-on-ARM makes the distinction real: the amd64 cosign we fetch runs
+# under x64 emulation, and where that emulation is absent the binary cannot start
+# at all. Telling that user their download failed verification would be alarming
+# and wrong.
+#
+# Same shape as Invoke-CosignVerifyBlob deliberately: the 255 preset means a
+# binary that never runs cannot leave a stale 0 behind.
+function Test-CosignRuns {
+  param([Parameter(Mandatory)][string]$Cosign)
+  $global:LASTEXITCODE = 255
+  $prevEAP = $ErrorActionPreference
+  try {
+    $ErrorActionPreference = 'Continue'
+    & $Cosign version 2>&1 | Out-Null
+  } catch {
+    return $false
+  } finally {
+    $ErrorActionPreference = $prevEAP
+  }
+  return ($LASTEXITCODE -eq 0)
+}
+
 function Invoke-CosignVerifyBlob {
   param([Parameter(Mandatory)][string]$Cosign, [Parameter(Mandatory)][string[]]$VerifyArgs)
   $global:LASTEXITCODE = 255
@@ -368,6 +411,20 @@ function Confirm-ManifestSignature {
       return
     }
     throw "cosign is required to verify the installer's signature and couldn't be found or bootstrapped. Refusing to fall back to an unauthenticated, same-channel checksum. Fix: install cosign (https://docs.sigstore.dev/cosign/installation/) and re-run, or for local development only set `$env:TRACEBLOC_ALLOW_UNVERIFIED = '1'`."
+  }
+
+  # We have a cosign; prove it can run before any failure it reports is read as a
+  # bad signature. On Windows-on-ARM the amd64 build (the only one sigstore ships)
+  # needs x64 emulation; without it the binary never starts. Still fail closed —
+  # but say the true reason, because "your download may be tampered with" and "the
+  # verifier won't start on this machine" call for opposite reactions.
+  if (-not (Test-CosignRuns $cosign)) {
+    if ($AllowUnverified) {
+      Warn "cosign can't run on this machine -- the installer's signature NOT verified (TRACEBLOC_ALLOW_UNVERIFIED=1)."
+      Warn "Proceeding on checksum-only integrity. Not for production."
+      return
+    }
+    throw "cosign was obtained but won't run on this machine, so the installer's signature can't be checked. This is NOT a failed verification -- nothing suggests the download is bad. On Windows-on-ARM it usually means x64 emulation is unavailable (sigstore publishes no native arm64 cosign for Windows). Fix: install a cosign that runs here -- 'winget install sigstore.cosign' -- and re-run, or for local development only set `$env:TRACEBLOC_ALLOW_UNVERIFIED = '1'`."
   }
 
   # The keyless signing identity: the release workflow's OIDC cert. SAME pins as
