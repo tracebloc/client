@@ -266,10 +266,27 @@ Describe "A cosign that won't execute is not a failed signature (client#734)" {
       Should -Throw -ExpectedMessage "*NOT a failed verification*"
   }
 
-  It "names the real cause and a remedy that works on Windows-on-ARM" {
+  It "names both real causes -- quarantine and missing x64 emulation" {
     Mock Test-CosignRuns { $false }
     { Confirm-ManifestSignature -Manifest 'm' -RepoRel 'r' -TmpDir $TestDrive -AllowUnverified $false } |
-      Should -Throw -ExpectedMessage "*winget install sigstore.cosign*"
+      Should -Throw -ExpectedMessage "*quarantined*"
+    { Confirm-ManifestSignature -Manifest 'm' -RepoRel 'r' -TmpDir $TestDrive -AllowUnverified $false } |
+      Should -Throw -ExpectedMessage "*x64 emulation*"
+  }
+
+  # Bugbot: winget's cosign is amd64-only, the same build that just failed to
+  # start -- and we already HAVE a cosign in this branch. Suggesting it sends the
+  # user to reproduce the error. A remedy that cannot clear the failure must not
+  # appear in the failure it claims to remedy.
+  It "does NOT send the user to winget, which ships the same amd64 build" {
+    Mock Test-CosignRuns { $false }
+    # Capture the message and assert on it: `Should -Not -Throw -ExpectedMessage`
+    # asserts it does not throw AT ALL, which would pass for the wrong reason here.
+    $msg = $null
+    try { Confirm-ManifestSignature -Manifest 'm' -RepoRel 'r' -TmpDir $TestDrive -AllowUnverified $false }
+    catch { $msg = $_.Exception.Message }
+    $msg | Should -Not -BeNullOrEmpty      # it must still fail closed
+    $msg | Should -Not -Match 'winget'
   }
 
   It "never reaches the verify when cosign can't run" {

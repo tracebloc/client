@@ -424,7 +424,13 @@ function Confirm-ManifestSignature {
       Warn "Proceeding on checksum-only integrity. Not for production."
       return
     }
-    throw "cosign was obtained but won't run on this machine, so the installer's signature can't be checked. This is NOT a failed verification -- nothing suggests the download is bad. On Windows-on-ARM it usually means x64 emulation is unavailable (sigstore publishes no native arm64 cosign for Windows). Fix: install a cosign that runs here -- 'winget install sigstore.cosign' -- and re-run, or for local development only set `$env:TRACEBLOC_ALLOW_UNVERIFIED = '1'`."
+    # Deliberately does NOT suggest `winget install sigstore.cosign` (Bugbot).
+    # We already HAVE a cosign here -- it will not start. Installing another copy
+    # of the same amd64 build, which is the only one winget and sigstore publish,
+    # reproduces the failure exactly. A remedy that cannot clear the error is
+    # worse than none: it costs the user a round trip and teaches them the
+    # message is noise.
+    throw "cosign was obtained but won't run on this machine, so the installer's signature can't be checked. This is NOT a failed verification -- nothing suggests the download is bad. Two things cause it: security software may have quarantined or blocked the downloaded cosign.exe (check your antivirus / SmartScreen and allow it); or, on Windows-on-ARM, x64 emulation is unavailable -- Windows 11 on ARM includes it, Windows 10 on ARM may not, and sigstore publishes no native arm64 cosign to fall back on, so one would have to be built from source and put on PATH. For local development only you can set `$env:TRACEBLOC_ALLOW_UNVERIFIED = '1'`."
   }
 
   # The keyless signing identity: the release workflow's OIDC cert. SAME pins as
