@@ -4245,16 +4245,45 @@ function Print-CreateFailure {
   }
 }
 
-# Strip ANSI CSI sequences (arrow keys, cursor moves), bracketed-paste markers,
-# and C0 control characters from interactive input — they otherwise corrupt the
-# name passed to `client create` into a garbage slug (mirrors common.sh's
-# _strip_paste_garbage; customer-reported 2026-07-20 on the bash flow). UTF-8
-# letters survive (only < 0x20 and DEL are dropped).
+# Strip ANSI escape sequences (arrow keys, cursor moves, function keys),
+# bracketed-paste markers, and C0 control characters from interactive input —
+# they otherwise corrupt the name passed to `client create` into a garbage slug
+# (mirrors common.sh's _strip_paste_garbage and cli/internal/cli/sanitize.go;
+# customer-reported 2026-07-20 on the bash flow). Two shapes carry all of it:
+#   CSI  ESC '[' <params in [0-9;]> <final in [A-Za-z~]>
+#   SS3  ESC 'O' <final in [A-Za-z~]>   — ESC OA/OB/OC/OD, ESC OH/OF, ESC OP..OS
+# SS3 is what the SAME keys emit in DECCKM application-cursor mode, the state
+# vim/less/tmux leave behind on an unclean exit (cli#516) — the hole left by the
+# CSI-only fix of 2026-07-21 (client#362 / cli#364). ESC is dropped as a control
+# byte but 'O' and the final byte are printable, so ESC OD ESC OA survived as
+# the plausible name "ODOA" and minted a permanent namespace, where CSI residue
+# cleans to empty and re-prompts. UTF-8 letters survive (only < 0x20 and DEL are
+# dropped). Change this, common.sh and sanitize.go together.
 function ConvertTo-SanitizedInput {
   param([string]$Value)
   if (-not $Value) { return "" }
-  $s = $Value -replace "$([char]27)\[[0-9;]*[A-Za-z~]", ""
+  $esc = [char]27
+  $s = $Value -replace "$esc(\[[0-9;]*|O)[A-Za-z~]", ""
   $s = $s.Replace("[200~", "").Replace("[201~", "")
+  # The floor. The strip above knows CSI, SS3 and the paste markers; it cannot
+  # know the escape family nobody has reported yet — and that is exactly how SS3
+  # got here, one rule hand-copied into three languages with only CSI ever
+  # tested. So if an ESC SURVIVED the strip, this value carries a shape we do not
+  # recognise and its printable bytes are not trustworthy content. Require one
+  # alphanumeric that did not come from an escape final byte, probing with ESC +
+  # intermediates + AT MOST TWO final-class bytes. Two, not one and not
+  # unbounded: one leaves the 'D' of an unrecognised SS3-shaped pair behind and
+  # the floor stops firing on the very shape this is about, while unbounded
+  # swallows a whole ASCII name (ESC N C h e l l o) yet spares a non-Latin one,
+  # making keep-vs-reject depend on the script the name is written in (Bugbot,
+  # #736). An escape final is one byte, an intro plus a final is two, and every
+  # keyboard-input escape family fits in that. The probe is a yes/no only — it is
+  # never returned. Nothing but residue => return empty, which callers already
+  # treat as "no answer" (re-prompt, or auto-name).
+  if ($s.Contains($esc)) {
+    $probe = $s -replace "$esc[^A-Za-z0-9~]*[A-Za-z~]{1,2}", ""
+    if ($probe -notmatch '[\p{L}\p{Nd}]') { return "" }
+  }
   return (($s.ToCharArray() | Where-Object { [int]$_ -ge 32 -and [int]$_ -ne 127 }) -join "")
 }
 
