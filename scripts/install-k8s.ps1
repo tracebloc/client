@@ -1814,7 +1814,25 @@ function Invoke-BoundedProcess {
   if ($Stdin) { $psi.RedirectStandardInput = $true }
   try { $proc = [System.Diagnostics.Process]::Start($psi) }
   catch { return [pscustomobject]@{ Code = 1; Output = "could not start ${FileName}: $($_.Exception.Message)" } }
-  if ($Stdin) { $proc.StandardInput.Write($Stdin); $proc.StandardInput.Close() }
+  # THE WRITE CAN LOSE A RACE WITH THE CHILD, and losing it must not throw. If the
+  # process exits before or during the write -- `docker login` refusing instantly
+  # because the daemon is down, a binary that rejects its args and returns, a stub in
+  # the suite -- the pipe is already closed and .Write() raises "Broken pipe". That
+  # escaped this function as a raw MethodInvocationException, which breaks the
+  # contract three lines below it: every other arm RETURNS @{Code; Output}, and
+  # Start() and Kill() are both guarded for exactly this reason. Only the stdin write
+  # was bare.
+  #
+  # Swallowing is right here, and it is not a fail-open: a child that closed stdin has
+  # already decided something, and its exit code and output are read below and
+  # returned unchanged. The error we would raise is about OUR pipe, not about the
+  # command -- reporting it would replace the child's real verdict with plumbing.
+  #
+  # Found on 2026-08-16: it took down `Pester (ubuntu-latest)` on client's `main` tip
+  # right after a prod promotion, on a test whose assertion never ran.
+  if ($Stdin) {
+    try { $proc.StandardInput.Write($Stdin); $proc.StandardInput.Close() } catch { }
+  }
   $outTask = $proc.StandardOutput.ReadToEndAsync()
   $errTask = $proc.StandardError.ReadToEndAsync()
   if ($proc.WaitForExit($TimeoutSec * 1000)) {

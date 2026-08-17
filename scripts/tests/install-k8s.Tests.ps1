@@ -4397,6 +4397,48 @@ Describe "Bounded process quotes whitespace arguments (#616 Bugbot)" {
   }
 }
 
+Describe "Bounded process survives a child that closes stdin first (broken pipe)" {
+  BeforeAll {
+    $script:BPSRC = Get-Content "$PSScriptRoot/../install-k8s.ps1" -Raw
+    # Load the REAL function rather than a copy of it, so this cannot pass while the
+    # shipped one throws -- the whole failure mode being tested is an unguarded call.
+    $fn = (($script:BPSRC -split 'function Invoke-BoundedProcess')[1] -split '\nfunction ')[0]
+    Invoke-Expression "function Invoke-BoundedProcess $fn"
+  }
+
+  It "returns the child's verdict instead of throwing when the pipe is already closed" {
+    # THE RACE, REPRODUCED. `true` ignores stdin and exits immediately, so the write
+    # below lands on a closed pipe -- the exact SocketException/IOException that took
+    # down Pester (ubuntu-latest) on client's main tip after the 2026-08-16 prod hop.
+    #
+    # Big enough to outlive the child: a short string fits the OS pipe buffer and is
+    # accepted even after exit, so a small payload would pass with the bug present.
+    $payload = "x" * 200000
+    # `Arguments` is a mandatory [string[]], so an EMPTY array binds as null and the
+    # call fails before the race is reached -- a test that never tested. `true`
+    # ignores whatever it is given and exits 0 regardless.
+    $exe = if ($IsWindows) { "cmd.exe" } else { "/usr/bin/true" }
+    $argv = if ($IsWindows) { @("/c", "exit", "0") } else { @("ignored") }
+
+    # `$script:` because a plain assignment inside the Should -Not -Throw scriptblock
+    # stays in that block's scope and reads back as $null out here -- which asserts
+    # nothing while looking like it asserts something.
+    $script:bpResult = $null
+    { $script:bpResult = Invoke-BoundedProcess -FileName $exe -Arguments $argv -Stdin $payload -TimeoutSec 30 } |
+      Should -Not -Throw
+    # And it still reports the CHILD, not our plumbing: the guard swallows the pipe
+    # error, it does not invent a result.
+    $script:bpResult.Code | Should -Be 0
+  }
+
+  It "the stdin write is guarded, like Start and Kill already were (source guard)" {
+    # Belt and braces to the behavioural case above: if someone unwraps the try/catch,
+    # this fails even on a machine where the race happens not to fire.
+    $fn = (($script:BPSRC -split 'function Invoke-BoundedProcess')[1] -split '\nfunction ')[0]
+    $fn | Should -Match 'try \{ \$proc\.StandardInput\.Write\(\$Stdin\); \$proc\.StandardInput\.Close\(\) \} catch'
+  }
+}
+
 Describe "GPU setup fails fast when preflight already found the hosts unreachable (#616 Bugbot)" {
   BeforeAll { $script:FFSRC = Get-Content "$PSScriptRoot/../install-k8s.ps1" -Raw }
   It "preflight records the unreachable GPU host" {
