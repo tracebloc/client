@@ -181,6 +181,29 @@ setup() {
   [ "$output" = "" ] || return 1
 }
 
+# ESC [ ; ] A is the shape that made the floor's first draft HANG, and it is why
+# the floor uses one sed pass rather than the `while [[ =~ ]]; do
+# s="${s/${BASH_REMATCH[0]}/}"; done` loop the strip above uses. Pattern
+# substitution treats BASH_REMATCH as a GLOB: the residue regex matches
+# ESC [ ; ] A whole, but the glob `<ESC>[;]A` means ESC ';' 'A' — not in the
+# string — so the substitution removed nothing and the loop spun forever, at the
+# installer's name prompt. (The CSI loop is safe by construction: its match can
+# never contain a `]`, so it can never form a complete bracket expression.)
+# Bounded like common.bats bounds its recursion guard — macOS ships no
+# timeout(1), so Linux CI is the authority on the hang half.
+@test "_strip_paste_garbage: ESC [ ; ] A terminates and is refused (glob-substitution hang)" {
+  local _to=""
+  command -v timeout  >/dev/null 2>&1 && _to=timeout
+  command -v gtimeout >/dev/null 2>&1 && _to=gtimeout
+  if [ -n "$_to" ]; then
+    run "$_to" 10 bash -c 'source "$1/common.sh"; _strip_paste_garbage "$(printf "\e[;]A")"' _ "$LIB_DIR"
+  else
+    run bash -c 'source "$1/common.sh"; _strip_paste_garbage "$(printf "\e[;]A")"' _ "$LIB_DIR"
+  fi
+  [ "$status" -eq 0 ] || return 1
+  [ "$output" = "" ] || return 1
+}
+
 @test "_sanitize_workspace_name: lowercases + dashes" {
   run _sanitize_workspace_name "My Team_1"
   [ "$output" = "my-team-1" ] || return 1

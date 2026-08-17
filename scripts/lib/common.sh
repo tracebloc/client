@@ -401,18 +401,24 @@ _strip_paste_garbage() {
   # yes/no — it is never returned. Nothing but residue ⇒ emit empty, which every
   # caller already treats as "no answer" (re-prompt, or auto-name in the CLI).
   if [[ "$s" == *"$esc"* ]]; then
-    local probe="$s"
-    local residue_pattern="${esc}[^A-Za-z0-9~]*[A-Za-z~]+"
-    while [[ "$probe" =~ $residue_pattern ]]; do
-      probe="${probe/${BASH_REMATCH[0]}/}"
-    done
-    # "Alphanumeric" via tr, not `=~ [[:alnum:]]`: bash's regex engine is
+    # `sed`, NOT the `while [[ =~ ]]; do s="${s/$BASH_REMATCH/}"` loop the strip
+    # above uses. Pattern substitution treats BASH_REMATCH as a GLOB, and this
+    # pattern — unlike the CSI one, whose match can never contain `]` — can match
+    # a complete bracket expression: on ESC [ ; ] A the regex matches the whole
+    # thing, the glob `<ESC>[;]A` then means ESC ';' 'A', which is NOT in the
+    # string, the substitution removes nothing, and the loop never terminates.
+    # That is a hang at the installer's name prompt. One sed pass has no glob
+    # semantics and no loop.
+    #
+    # And "alphanumeric" via tr, not `=~ [[:alnum:]]`: bash's regex engine is
     # locale-dependent, and under the C locale the installer often runs in,
     # [[:alnum:]] does not match a UTF-8 letter — which would auto-name a
     # perfectly good "日本" the moment an unknown escape sat next to it. Keeping
     # every byte >= 0x80 makes "is there real content here" locale-independent
     # and matches what the strip itself already preserves.
-    if [[ -z "$(printf '%s' "$probe" | LC_ALL=C tr -dc '0-9A-Za-z\200-\377')" ]]; then
+    local probe
+    probe="$(printf '%s' "$s" | LC_ALL=C sed -E "s/${esc}[^A-Za-z0-9~]*[A-Za-z~]+//g" | LC_ALL=C tr -dc '0-9A-Za-z\200-\377')"
+    if [[ -z "$probe" ]]; then
       printf ''
       return 0
     fi
