@@ -39,15 +39,13 @@
         },
         "RESOURCE_REQUESTS": {
           "type": "string",
-          "default": "cpu=2,memory=8Gi",
           "pattern": "^(cpu=\\S+,memory=\\S+)?$",
-          "description": "Optional resource requests for spawned jobs (defaults to 'cpu=2,memory=8Gi' if not set)"
+          "description": "Optional explicit resource requests for spawned training jobs. Unset: jobs-manager derives the envelope from node allocatable (75% with cpu=2/memory=8Gi floors, backend#664); older images fall back to 'cpu=2,memory=8Gi'."
         },
         "RESOURCE_LIMITS": {
           "type": "string",
-          "default": "cpu=2,memory=8Gi",
           "pattern": "^(cpu=\\S+,memory=\\S+)?$",
-          "description": "Optional resource limits for spawned jobs (defaults to 'cpu=2,memory=8Gi' if not set)"
+          "description": "Optional explicit resource limits for spawned training jobs. Unset: jobs-manager derives the envelope from node allocatable (75% with cpu=2/memory=8Gi floors, backend#664); older images fall back to 'cpu=2,memory=8Gi'."
         },
         "GPU_REQUESTS": {
           "type": "string",
