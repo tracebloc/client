@@ -22,7 +22,7 @@ setup() {
   _pf_runtime_mem_kb() { echo ""; }   # daemon "down" in tests → selectors/src use host
   _pf_runtime_ncpu() { echo ""; }
   _pf_avail_mem_kb() { echo $((50 * 1024 * 1024)); }   # 50 GB available (Linux warn off)
-  _pf_amd64_emulation_available() { return 0; }
+  amd64_emulation_available() { return 0; }
   docker() { return 1; }   # keep _pf_docker_root off the real daemon
   has() { return 0; }      # pretend tools present (conds empty) unless overridden
   OS="Linux"; ARCH="x86_64"
@@ -36,18 +36,103 @@ setup() {
   [[ "$output" == *"amd64"* ]] || return 1
 }
 
-@test "_pf_arch: arm64 Linux without emulation -> hard fail + binfmt remedy" {
+# ── The arch gate keys off the MySQL engine rule (backend#2047) ──────────────
+# The refusal used to be unconditional on Linux/non-amd64/no-emulation, which
+# contradicted install-client-helm.sh: on a FRESH install that lib selects the
+# multi-arch 8.4 engine, so the host runs natively and there is nothing to
+# emulate. These tests load the real engine rule — not a local stand-in — so the
+# two can't drift apart again. _engine_ctx builds the host state the rule reads.
+_load_engine_rule() {
+  # shellcheck source=/dev/null
+  source "${BATS_TEST_DIRNAME}/../lib/install-client-helm.sh"
+}
+
+# $1 = fresh|existing-data. HOST_DATA_DIR is what the rule inspects; point it at
+# a tmp dir so the result never depends on whether the machine running the suite
+# happens to have a real ~/.tracebloc.
+_engine_ctx() {
+  HOST_DATA_DIR="$BATS_TEST_TMPDIR/data"
+  mkdir -p "$HOST_DATA_DIR/mysql"
+  unset TB_MYSQL_ENGINE TB_NAMESPACE TRACEBLOC_VALUES_FILE
+  if [[ "${1:-fresh}" == "existing-data" ]]; then
+    touch "$HOST_DATA_DIR/mysql/ibdata1"    # 5.7-format datadir content
+  fi
+}
+
+@test "_pf_arch: FRESH arm64 Linux without emulation -> native 8.4, no hard fail (backend#2047)" {
   ARCH=aarch64; OS=Linux
-  _pf_amd64_emulation_available() { return 1; }
+  amd64_emulation_available() { return 1; }
+  _load_engine_rule; _engine_ctx fresh
+  run _pf_arch
+  [ "$status" -eq 0 ] || return 1
+  [[ "$output" == *"natively"* ]] || return 1
+  # The whole point: no amd64-VM / emulation advice on a host that needs neither.
+  [[ "$output" != *"tonistiigi/binfmt"* ]] || return 1
+  [[ "$output" != *"provision an amd64"* ]] || return 1
+  [[ "$output" != *"emulation and re-run"* ]] || return 1
+  PF_HARD_FAIL=0; _pf_arch >/dev/null 2>&1; [ "$PF_HARD_FAIL" -eq 0 ] || return 1
+}
+
+@test "_pf_arch: arm64 Linux + EXISTING 5.7 datadir, no emulation -> hard fail naming the datadir, not the arch (backend#2047)" {
+  ARCH=aarch64; OS=Linux
+  amd64_emulation_available() { return 1; }
+  _load_engine_rule; _engine_ctx existing-data
   run _pf_arch
   [[ "$output" == *"amd64-only"* ]] || return 1
-  [[ "$output" == *"tonistiigi/binfmt"* ]] || return 1
+  [[ "$output" == *"tonistiigi/binfmt"* ]] || return 1          # emulation IS the fix here
+  [[ "$output" == *"Existing MySQL 5.7 data"* ]] || return 1    # the real cause
+  [[ "$output" == *"data-format constraint, not an architecture one"* ]] || return 1
+  PF_HARD_FAIL=0; _pf_arch >/dev/null 2>&1; [ "$PF_HARD_FAIL" -eq 1 ] || return 1
+}
+
+@test "_pf_arch: a previous 8.4 opt-in on arm64 is not refused on re-run (backend#2047)" {
+  # An arm64 edge already running 8.4 has datadir content, so only the sticky
+  # values.yaml branch distinguishes it from a reused 5.7 datadir. preflight must
+  # see it — which means resolving values_file the way install_client_helm does.
+  ARCH=aarch64; OS=Linux
+  amd64_emulation_available() { return 1; }
+  _load_engine_rule; _engine_ctx existing-data
+  printf 'images:\n  mysqlClient:\n    tag: "8.4"\n    digest: ""\n' > "$HOST_DATA_DIR/values.yaml"
+  PF_HARD_FAIL=0; _pf_arch >/dev/null 2>&1; [ "$PF_HARD_FAIL" -eq 0 ] || return 1
+}
+
+@test "_pf_arch: TB_MYSQL_ENGINE=5.7 on arm64 without emulation -> hard fail naming the request (backend#2047)" {
+  ARCH=aarch64; OS=Linux
+  amd64_emulation_available() { return 1; }
+  _load_engine_rule; _engine_ctx fresh; TB_MYSQL_ENGINE=5.7
+  run _pf_arch
+  [[ "$output" == *"TB_MYSQL_ENGINE=5.7 was requested"* ]] || return 1
+  PF_HARD_FAIL=0; _pf_arch >/dev/null 2>&1; [ "$PF_HARD_FAIL" -eq 1 ] || return 1
+}
+
+@test "_pf_arch: unusable TB_MYSQL_ENGINE on arm64 -> hard fail, and no escape-hatch advice" {
+  # "Cannot tell" is a finding: the engine is undecidable, so the arch verdict is
+  # too. TRACEBLOC_ALLOW_ARM64 would only defer the failure, so it isn't offered.
+  ARCH=aarch64; OS=Linux
+  amd64_emulation_available() { return 1; }
+  _load_engine_rule; _engine_ctx fresh; TB_MYSQL_ENGINE=9.0
+  run _pf_arch
+  [[ "$output" == *"9.0"* ]] || return 1
+  [[ "$output" != *"TRACEBLOC_ALLOW_ARM64=1 to proceed"* ]] || return 1
+  PF_HARD_FAIL=0; _pf_arch >/dev/null 2>&1; [ "$PF_HARD_FAIL" -eq 1 ] || return 1
+}
+
+@test "_pf_arch: engine rule absent -> fails closed (refuses), never a silent native claim" {
+  # preflight.sh sourced without install-client-helm.sh: the 8.4 opt-in lives in
+  # the missing lib, so "no native path" is the honest answer, not a guess.
+  ARCH=aarch64; OS=Linux
+  amd64_emulation_available() { return 1; }
+  # Precondition, as an `if` — a bare `A && return 1` whose test is false trips
+  # bats' own set -e and reports a pass-shaped failure.
+  if declare -F _mysql_engine_decision >/dev/null 2>&1; then return 1; fi
+  run _pf_arch
+  [[ "$output" == *"amd64-only"* ]] || return 1
   PF_HARD_FAIL=0; _pf_arch >/dev/null 2>&1; [ "$PF_HARD_FAIL" -eq 1 ] || return 1
 }
 
 @test "_pf_arch: arm64 Linux WITH emulation -> info, no hard fail" {
   ARCH=aarch64; OS=Linux
-  _pf_amd64_emulation_available() { return 0; }
+  amd64_emulation_available() { return 0; }
   PF_HARD_FAIL=0; _pf_arch >/dev/null; [ "$PF_HARD_FAIL" -eq 0 ] || return 1
 }
 
@@ -66,7 +151,7 @@ setup() {
 
 @test "_pf_arch: arm64 + TRACEBLOC_ALLOW_ARM64 -> warn, no hard fail" {
   ARCH=aarch64; OS=Linux; export TRACEBLOC_ALLOW_ARM64=1
-  _pf_amd64_emulation_available() { return 1; }
+  amd64_emulation_available() { return 1; }
   run _pf_arch
   [[ "$output" == *"proceeding"* ]] || return 1
   PF_HARD_FAIL=0; _pf_arch >/dev/null; [ "$PF_HARD_FAIL" -eq 0 ] || return 1
