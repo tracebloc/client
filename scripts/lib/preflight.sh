@@ -592,7 +592,19 @@ _pf_is_network_fstype() {
   t="$(printf '%s' "${1:-}" | tr '[:upper:]' '[:lower:]')"
   t="${t#fuse.}"                       # fuse.sshfs -> sshfs; nfs4 -> nfs4
   case "$t" in
-    nfs|nfs3|nfs4|nfsd|cifs|smb|smbfs|smb2|smb3|afpfs|9p|ncpfs|gfs|gfs2|ocfs2|lustre|glusterfs|ceph|beegfs|sshfs|s3fs|davfs|webdav|rclone) return 0 ;;
+    nfs|nfs3|nfs4|nfsd|cifs|smb|smbfs|smb2|smb3|afpfs|9p|ncpfs|gfs|gfs2|ocfs2|lustre|glusterfs|ceph|beegfs|sshfs|s3fs|gcsfuse|blobfuse|blobfuse2|davfs|webdav|rclone) return 0 ;;
+    # AN UNRECOGNISED FUSE SUBTYPE IS NOT EVIDENCE OF LOCAL STORAGE (saadqbal,
+    # #726). `fuse.gcsfuse` and `fuse.blobfuse2` are named above now, but the
+    # list can only ever hold the drivers someone thought of -- and the next
+    # cloud FUSE ships without asking us. Before this, `fuse.<anything else>`
+    # stripped to a name nobody matched and fell through to a confident
+    # "Local storage", which is the failure mode this predicate exists to
+    # prevent, one subtype at a time.
+    #
+    # Returning 1 ("not network") is still right -- we have no evidence it IS
+    # network, and a hard fail on a local ntfs-3g would be worse. The caller
+    # asks `_pf_is_opaque_fuse_fstype` next, which now claims this shape and
+    # warns, so an unknown FUSE reads as unknown rather than as local.
     *) return 1 ;;
   esac
 }
@@ -618,6 +630,19 @@ _pf_is_opaque_fuse_fstype() {
   t="$(printf '%s' "${1:-}" | tr '[:upper:]' '[:lower:]')"
   case "$t" in
     fuse|fuseblk|macfuse|osxfuse|osxfusefs) return 0 ;;
+    # A NAMED SUBTYPE WE DO NOT KNOW (saadqbal, #726). `fuse.gcsfuse` used to
+    # be neither network (not on the list) nor opaque (not bare `fuse`), so it
+    # reached the `else` and was announced as "Local storage" -- a confident
+    # answer about a mount we could not identify.
+    #
+    # THE TWO PREDICATES STAY MUTUALLY EXCLUSIVE, which the bats suite asserts
+    # and which is worth more than it looks: without the negation below,
+    # `fuse.sshfs` would satisfy BOTH, and the only thing keeping it a hard
+    # fail rather than a warning would be the order the caller happens to ask
+    # in. A future caller asking "opaque?" first would silently downgrade a
+    # database-corrupting mount to a notice. Excluding the names the network
+    # classifier claims makes the correct answer independent of call order.
+    fuse.*) _pf_is_network_fstype "$t" && return 1; return 0 ;;
     *) return 1 ;;
   esac
 }
@@ -625,7 +650,15 @@ _pf_is_opaque_fuse_fstype() {
 # The shared advisory for an opaque FUSE mount (see above): say what we can and
 # cannot tell, and let the install continue. $1 = path, $2 = fstype as read.
 _pf_opaque_fuse_warn() {
-  warn "Storage: ${1} is on a FUSE filesystem (${2}) — the mount table doesn't say which one."
+  # TWO DIFFERENT UNKNOWNS, AND SAYING THE WRONG ONE IS A FALSE STATEMENT
+  # (saadqbal, #726). The original line — "the mount table doesn't say which
+  # one" — is true for `fuse`/`fuseblk`, where the subtype really is erased. It
+  # would be a lie for `fuse.gocryptfs`, where the table says exactly which one
+  # and the gap is that WE have no opinion on it. Same advice, honest premise.
+  case "$(printf '%s' "${2:-}" | tr '[:upper:]' '[:lower:]')" in
+    fuse.*) warn "Storage: ${1} is on a FUSE filesystem (${2}) — a driver this check does not recognise." ;;
+    *)      warn "Storage: ${1} is on a FUSE filesystem (${2}) — the mount table doesn't say which one." ;;
+  esac
   hint "If it is network-backed (sshfs, s3fs, rclone, a cloud-sync mount), the client database (MySQL/InnoDB) can corrupt or crash-loop — move HOST_DATA_DIR to a local disk under your \$HOME."
   hint "If it is a local FUSE mount (ntfs-3g, gocryptfs, bindfs), this is only a notice — the install continues."
 }

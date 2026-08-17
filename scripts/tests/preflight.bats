@@ -829,6 +829,55 @@ setup() {
   done
 }
 
+@test "_pf_is_network_fstype: the cloud FUSE twins of s3fs are network too (saadqbal, #726)" {
+  # GCS and Azure Blob are the cloud siblings of the s3fs already covered, and a
+  # hospital mounting object storage at HOST_DATA_DIR corrupts the database the
+  # same way. They were absent, so they reached the `else` and were announced as
+  # "Local storage".
+  local fs
+  for fs in fuse.gcsfuse gcsfuse fuse.blobfuse blobfuse fuse.blobfuse2 blobfuse2; do
+    _pf_is_network_fstype "$fs" || return 1
+  done
+}
+
+@test "_pf_is_opaque_fuse_fstype: an unrecognised FUSE driver is unknown, never local (#726)" {
+  # The list can only hold the drivers someone thought of; the next cloud FUSE
+  # ships without asking us. An unrecognised subtype must read as unknown rather
+  # than as a confident "Local storage".
+  local fs
+  for fs in fuse.gocryptfs fuse.ntfs-3g fuse.somethingnobodyhasinvented; do
+    _pf_is_opaque_fuse_fstype "$fs" || return 1
+  done
+}
+
+@test "_pf_is_network_fstype and _pf_is_opaque_fuse_fstype stay mutually exclusive (#726)" {
+  # THE INVARIANT THE SUITE ALREADY PROTECTED, and the reason the fuse.* arm
+  # negates the network classifier instead of returning 0 outright. Without it
+  # `fuse.sshfs` satisfies BOTH, and only the order the caller happens to ask in
+  # keeps it a hard fail rather than a notice -- so a future caller asking
+  # "opaque?" first would silently downgrade a database-corrupting mount.
+  local fs
+  for fs in fuse.sshfs fuse.s3fs fuse.gcsfuse fuse.blobfuse2 fuse.rclone \
+            fuse.gocryptfs fuseblk fuse nfs4 cifs ext4 apfs ""; do
+    if _pf_is_network_fstype "$fs" && _pf_is_opaque_fuse_fstype "$fs"; then
+      echo "both predicates claim '$fs'" >&2
+      return 1
+    fi
+  done
+}
+
+@test "_pf_opaque_fuse_warn: the wording matches WHICH unknown it is (#726)" {
+  # "the mount table doesn't say which one" is true for fuseblk and false for
+  # fuse.gocryptfs, where the table says precisely which one and the gap is that
+  # we have no opinion on it. A guard that ships a false sentence is the shape
+  # this repo keeps finding.
+  run _pf_opaque_fuse_warn /data fuseblk
+  [[ "$output" == *"doesn't say which one"* ]] || return 1
+  run _pf_opaque_fuse_warn /data fuse.gocryptfs
+  [[ "$output" == *"does not recognise"* ]] || return 1
+  [[ "$output" != *"doesn't say which one"* ]] || return 1
+}
+
 @test "_pf_storage_type: every measured network-FUSE reading hard fails, prefixed or bare" {
   local fstype
   PF_FSTYPE_STUB=""; _pf_fstype() { echo "$PF_FSTYPE_STUB"; }
