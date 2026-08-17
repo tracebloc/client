@@ -867,9 +867,20 @@ EOF
 
 @test "error(): the recorded location is the CALLER's line, not common.sh's" {
   LOG_FILE="$BATS_TEST_TMPDIR/loc.log"; : > "$LOG_FILE"
+  # Derive the expected path from the same mechanism under test, rather than
+  # writing "common.bats" down. bats executes a PREPROCESSED copy of this file
+  # whose name varies by bats version — and it rewrites those paths back to
+  # `scripts/tests/common.bats` in its own output, so `cat` prints a string the
+  # file does not contain and a hardcoded needle fails against a log that looks
+  # correct. It passed on macOS bats 1.13 and failed on CI for exactly that.
+  #
+  # Whatever bash calls THIS file is what error() must record when called from
+  # a function defined here, on every platform.
+  local self="${BASH_SOURCE[0]}"
+  [ -n "$self" ] || return 1
   # The refuser is defined HERE, so a correct record names this file. Using
-  # BASH_SOURCE[0] instead would name common.sh for every error() ever raised —
-  # which is exactly how a real log came to blame a passwordless-sudo probe.
+  # BASH_SOURCE[0] inside error() would name common.sh for every refusal in the
+  # tree — which is exactly how a real log came to blame a healthy sudo probe.
   _tb_test_refuser() { error "refused here"; }
   run _tb_test_refuser
   [ "$status" -eq 1 ] || return 1
@@ -884,14 +895,8 @@ EOF
   [ "$(grep -cF 'cmd=error: refused here' "$LOG_FILE")" -eq 1 ] || {
     echo "expected exactly one refusal record; log was:"; cat "$LOG_FILE"; return 1
   }
-  # The needle is 'common.bats' WITHOUT a trailing colon, deliberately. bats
-  # preprocesses this file into `<tmp>/N-common.bats.src` and runs THAT, so
-  # BASH_SOURCE records `…-common.bats.src:873`. bats then rewrites those paths
-  # back to `scripts/tests/common.bats` in its own output — so `cat` here prints
-  # a string the file does not contain, and an assertion written against what
-  # you see on screen fails against a log that looks correct.
-  [ "$(grep -cF 'common.bats' "$LOG_FILE")" -ge 1 ] || {
-    echo "expected the caller's file; log was:"; cat "$LOG_FILE"; return 1
+  [ "$(grep -cF "$self:" "$LOG_FILE")" -ge 1 ] || {
+    echo "expected the caller's file ($self); log was:"; cat "$LOG_FILE"; return 1
   }
   # …and never common.sh, where error() itself lives. BASH_SOURCE[0] would have
   # reported common.sh for every refusal in the tree — the bug this replaces.
