@@ -1605,6 +1605,94 @@ Describe "Get-EffectiveNoProxy" {
   }
 }
 
+# --- Releasing the dashboard record before deleting the cluster (backend#2077) ---
+#
+# This machine's backend record is anchored to the CLUSTER's identity (the
+# kube-system namespace UID), which dies with the k3d cluster. So a bare
+# `k3d cluster delete` strands the secure environment on the dashboard for good --
+# and the installer used to print exactly that at every recreate remedy.
+Describe "Write-RecreateClusterHint (backend#2077)" {
+  BeforeEach { $script:CLUSTER_NAME = "tracebloc"; $script:LOG_FILE = $null }
+  It "names 'tracebloc delete' BEFORE the k3d delete (the order is the fix)" {
+    $out = (Write-RecreateClusterHint 6>&1 | Out-String)
+    $out | Should -Match 'tracebloc delete --keep-data'
+    $out | Should -Match 'k3d cluster delete tracebloc'
+    ($out -split 'k3d cluster delete')[0] | Should -Match 'tracebloc delete --keep-data'
+  }
+  It "never recommends a BARE 'tracebloc delete' -- the plain form wipes the data these sites keep" {
+    $out = (Write-RecreateClusterHint 6>&1 | Out-String)
+    ([regex]::Matches($out, 'tracebloc delete')).Count |
+      Should -Be ([regex]::Matches($out, 'tracebloc delete --keep-data')).Count
+  }
+  It "tells a machine with nothing installed that it can skip the release" {
+    $out = (Write-RecreateClusterHint 6>&1 | Out-String)
+    $out | Should -Match 'nothing installed on this machine yet'
+  }
+  It "puts the re-run prefix on the k3d line, not a line of its own" {
+    $out = (Write-RecreateClusterHint -RerunPrefix "TB_STORAGE_MODE=node-local  " 6>&1 | Out-String)
+    $out | Should -Match 'k3d cluster delete tracebloc  \(then TB_STORAGE_MODE=node-local  re-run this installer\)\.'
+  }
+}
+
+# Derived from the source, not from a hand-kept list: a recreate hint added later
+# with its own `Hint "  k3d cluster delete ..."` line strands a record exactly like
+# the ones this replaced. Scoped to the recreate sites this PR owns -- the peers of
+# cluster.sh's seven -- so it names offenders rather than counting them.
+Describe "Recreate hints route through Write-RecreateClusterHint (backend#2077 source guards)" {
+  BeforeAll { $script:PSRC2 = Get-Content "$PSScriptRoot/../install-k8s.ps1" -Raw }
+  It "the k3s-version drift remedy releases the record first" {
+    $script:PSRC2 | Should -Match "not the validated pin[\s\S]{0,600}?Write-RecreateClusterHint"
+  }
+  It "the 0.0.0.0-bind rebuild remedy releases the record first" {
+    $script:PSRC2 | Should -Match "binds its API to 0\.0\.0\.0[\s\S]{0,900}?Write-RecreateClusterHint"
+  }
+  It "the CA-drift remedy releases the record first" {
+    $script:PSRC2 | Should -Match "was created without it[\s\S]{0,600}?Write-RecreateClusterHint"
+  }
+  It "the dataset-mount remedy releases the record first" {
+    $script:PSRC2 | Should -Match "no /tracebloc-data bind mount[\s\S]{0,600}?Write-RecreateClusterHint"
+  }
+  It "the GPU-capability remedies release the record first" {
+    $script:PSRC2 | Should -Match "is CPU-only[\s\S]{0,600}?Write-RecreateClusterHint"
+    $script:PSRC2 | Should -Match "GPU experiments will stay Pending[\s\S]{0,600}?Write-RecreateClusterHint"
+  }
+  It "the helper's own line is the ONLY recreate command hint left, and it follows CLUSTER_NAME" {
+    # Derived: any site that grows its own `Hint "  k3d cluster delete ... (then ...`
+    # is named here rather than counted. The helper's line is the one carrying
+    # $RerunPrefix, which is how it excludes itself without an allowlist of names.
+    $offenders = @(Select-String -Path "$PSScriptRoot/../install-k8s.ps1" `
+                     -Pattern 'Hint\s+"\s+k3d cluster delete \$CLUSTER_NAME\s+\(then' |
+                   Where-Object { $_.Line -notmatch 'RerunPrefix' } |
+                   ForEach-Object { "$($_.LineNumber): $($_.Line.Trim())" })
+    $offenders -join "`n" | Should -BeNullOrEmpty
+  }
+}
+
+# --- The kubeconfig merge is load-bearing, not cosmetic (client#732) ---
+#
+# The installer passes no --kubeconfig/--context to `tracebloc client create`, so
+# the secure environment is registered against kubectl's CURRENT context. The merge
+# used to be piped to Out-Null with $LASTEXITCODE never read, so a failure left the
+# previous context selected and the install anchored this machine to it.
+Describe "Kubeconfig merge is checked, and the anchor verified (client#732 source guards)" {
+  BeforeAll { $script:PSRC3 = Get-Content "$PSScriptRoot/../install-k8s.ps1" -Raw }
+  It "no longer discards the merge result into Out-Null" {
+    $script:PSRC3 | Should -Not -Match 'k3d kubeconfig merge \$CLUSTER_NAME --kubeconfig-switch-context \| Out-Null'
+  }
+  It "reads the merge's exit code and stops the install on failure" {
+    $script:PSRC3 | Should -Match 'k3d kubeconfig merge \$CLUSTER_NAME --kubeconfig-switch-context 2>&1[\s\S]{0,400}?\$LASTEXITCODE -ne 0'
+    $script:PSRC3 | Should -Match 'refusing to continue against an unknown cluster'
+  }
+  It "verifies the current context IS this cluster, and says how to select it" {
+    $script:PSRC3 | Should -Match '\$wantCtx\s*=\s*"k3d-\$CLUSTER_NAME"'
+    $script:PSRC3 | Should -Match 'kubectl config current-context'
+    $script:PSRC3 | Should -Match 'kubectl config use-context \$wantCtx'
+  }
+  It "treats an unreadable current-context as a failure, not as agreement" {
+    $script:PSRC3 | Should -Match "can't tell us which context is current"
+  }
+}
+
 Describe "Write-K3dProxyConfig" {
   AfterEach {
     $env:HTTP_PROXY = $null; $env:HTTPS_PROXY = $null
@@ -4777,7 +4865,10 @@ Describe "Test-HealthyClusterGpuConsistent (#616 Bugbot: healthy reinstall flags
   It "warns with the recreate remedy when the live release wants GPU but the node is CPU-only" {
     $fn = (($script:HCSRC -split 'function Test-HealthyClusterGpuConsistent')[1] -split '\nfunction ')[0]
     $fn | Should -Match 'Test-NodeImageGpuCapable -Image \$img -Configured \$K3S_CUDA_IMAGE'
-    $fn | Should -Match 'k3d cluster delete \$CLUSTER_NAME'
+    # The remedy now comes from the one helper that prints it (backend#2077) — the
+    # `k3d cluster delete` line moved there, together with the `tracebloc delete`
+    # that has to precede it. Its wording is asserted in the helper's own Describe.
+    $fn | Should -Match 'Write-RecreateClusterHint'
   }
   It "the fast path calls it so a healthy-but-inconsistent cluster is flagged (source guard)" {
     $script:HCSRC | Should -Match 'client is healthy -- nothing to do[\s\S]{0,800}?Test-HealthyClusterGpuConsistent'
