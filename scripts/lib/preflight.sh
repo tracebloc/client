@@ -387,7 +387,15 @@ _pf_mysql_engine_decision() {
   if declare -F _client_values_file >/dev/null 2>&1; then
     values_file="$(_client_values_file)"
   fi
-  if [[ -z "$TB_NAMESPACE" ]] && declare -F _client_default_namespace >/dev/null 2>&1; then
+  # UNCONDITIONALLY, exactly as install_client_helm does — not "only when unset".
+  # That helper also SANITISES (DNS-1123), so an operator-supplied
+  # TB_NAMESPACE="My Edge" becomes "my-edge" there. Gating this on emptiness left
+  # the raw value here, and the two gates then probed different per-release
+  # datadirs ("…/My Edge/mysql" vs "…/my-edge/mysql"): preflight would report a
+  # native 8.4 pass and the late gate would refuse after cluster setup and
+  # credential entry. Same rule, same inputs, or it is not the same question
+  # (Bugbot, this PR).
+  if declare -F _client_default_namespace >/dev/null 2>&1; then
     TB_NAMESPACE="$(_client_default_namespace)"
   fi
   _mysql_engine_decision

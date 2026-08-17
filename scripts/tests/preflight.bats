@@ -96,6 +96,24 @@ _engine_ctx() {
   PF_HARD_FAIL=0; _pf_arch >/dev/null 2>&1; [ "$PF_HARD_FAIL" -eq 0 ] || return 1
 }
 
+@test "_pf_arch: an operator-set TB_NAMESPACE is SANITISED before the datadir probe (Bugbot)" {
+  # install_client_helm resolves the namespace through _client_default_namespace
+  # unconditionally, and that helper sanitises to DNS-1123 — so "My Edge" becomes
+  # "my-edge" and the per-release datadir is HOST_DATA_DIR/my-edge/mysql. If
+  # preflight probed the RAW value it would miss that data, report a native 8.4
+  # pass, and let the late gate refuse only after cluster setup + credentials.
+  ARCH=aarch64; OS=Linux
+  amd64_emulation_available() { return 1; }
+  _load_engine_rule; _engine_ctx fresh
+  TB_NAMESPACE="My Edge"
+  local sanitised; sanitised="$(_sanitize_workspace_name "My Edge")"
+  [ "$sanitised" != "My Edge" ] || return 1          # the premise: it really does change
+  mkdir -p "$HOST_DATA_DIR/$sanitised/mysql"
+  touch "$HOST_DATA_DIR/$sanitised/mysql/ibdata1"
+  PF_HARD_FAIL=0; _pf_arch >/dev/null 2>&1
+  [ "$PF_HARD_FAIL" -eq 1 ] || return 1
+}
+
 @test "_pf_arch: TB_MYSQL_ENGINE=5.7 on arm64 without emulation -> hard fail naming the request (backend#2047)" {
   ARCH=aarch64; OS=Linux
   amd64_emulation_available() { return 1; }
