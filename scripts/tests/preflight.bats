@@ -764,6 +764,174 @@ setup() {
   ! _pf_is_network_fstype "" || return 1
 }
 
+# ── FUSE spellings: the guard must not depend on the `fuse.` prefix ──────────
+#
+#  The names fed in below are written down from what _pf_fstype's READERS
+#  actually produce on real mounts. They are deliberately NOT read out of the
+#  case list in preflight.sh: a list checked against itself agrees with itself
+#  and can only ever be green.
+#
+#  Measured 2026-08-14 by mounting each filesystem for real:
+#
+#    Ubuntu 24.04 (libfuse 3.14.0, util-linux 2.39.3, coreutils 9.4)
+#    Ubuntu 20.04 (libfuse 2.9.9)  — same answers on both
+#      sshfs   findmnt / /proc/mounts: fuse.sshfs    stat -f -c %T: fuseblk
+#      rclone  findmnt / /proc/mounts: fuse.rclone   stat -f -c %T: fuseblk
+#      bindfs  findmnt / /proc/mounts: fuse          stat -f -c %T: fuseblk
+#    macOS — no findmnt, and the stat reader is skipped (BSD `stat -f` is a
+#    format string), so the df+mount path answers:
+#      sshfs   mount(8): "sshfs#user@host:/d on /mp (macfuse, nodev, nosuid, …)"
+#
+#  So the `fuse.` prefix is only ever present on ONE of the three readers, and
+#  the prefixed entries were unreachable on the other two.
+@test "_pf_is_network_fstype: a network FUSE filesystem classifies the same bare or fuse.-prefixed" {
+  local fs
+  for fs in sshfs s3fs rclone glusterfs ceph davfs; do
+    _pf_is_network_fstype "fuse.$fs" || return 1
+    _pf_is_network_fstype "$fs" || return 1
+    _pf_is_network_fstype "FUSE.$fs" || return 1   # readers lower-case, the predicate doesn't rely on it
+  done
+}
+
+@test "_pf_is_network_fstype: local filesystems stay local, and a LOCAL fuse.* is not swept up" {
+  local fs
+  for fs in ext4 xfs btrfs zfs apfs hfs overlay tmpfs vfat exfat; do
+    ! _pf_is_network_fstype "$fs" || return 1
+  done
+  # Stripping the prefix must not turn every FUSE mount into a network one.
+  for fs in fuse.gocryptfs fuse.mergerfs fuse.encfs fuse.portal; do
+    ! _pf_is_network_fstype "$fs" || return 1
+  done
+}
+
+@test "_pf_is_network_fstype: the case list carries no fuse.-prefixed entry (normalised, not enumerated)" {
+  # The prefix is stripped before matching, so a `fuse.x` back in the list means
+  # someone is hand-extending it again — the exact shape that produced this gap
+  # (a fuse.sshfs entry with no bare sshfs twin, unreachable on two readers).
+  local body pattern
+  body="$(sed -n '/^_pf_is_network_fstype()/,/^}/p' "$BATS_TEST_DIRNAME/../lib/preflight.sh")"
+  [ -n "$body" ] || return 1                       # unreadable is a finding, not a pass
+  pattern="$(printf '%s\n' "$body" | grep ') return 0 ;;' || true)"
+  [ -n "$pattern" ] || return 1
+  [[ "$pattern" != *"fuse."* ]] || return 1
+}
+
+@test "_pf_is_opaque_fuse_fstype: the subtype-erased readings are opaque; named ones are not" {
+  local fs
+  # what `stat -f -c %T` and macOS actually hand back (measured, see the block above)
+  for fs in fuseblk fuse macfuse osxfuse; do
+    _pf_is_opaque_fuse_fstype "$fs" || return 1
+  done
+  # a named filesystem — network or local — is never "opaque"; it routes to the
+  # network classifier instead, so these two predicates can't both claim a name.
+  for fs in ext4 apfs overlay nfs4 cifs fuse.sshfs sshfs ""; do
+    ! _pf_is_opaque_fuse_fstype "$fs" || return 1
+  done
+}
+
+@test "_pf_is_network_fstype: the cloud FUSE twins of s3fs are network too (saadqbal, #726)" {
+  # GCS and Azure Blob are the cloud siblings of the s3fs already covered, and a
+  # hospital mounting object storage at HOST_DATA_DIR corrupts the database the
+  # same way. They were absent, so they reached the `else` and were announced as
+  # "Local storage".
+  local fs
+  for fs in fuse.gcsfuse gcsfuse fuse.blobfuse blobfuse fuse.blobfuse2 blobfuse2; do
+    _pf_is_network_fstype "$fs" || return 1
+  done
+}
+
+@test "_pf_is_opaque_fuse_fstype: an unrecognised FUSE driver is unknown, never local (#726)" {
+  # The list can only hold the drivers someone thought of; the next cloud FUSE
+  # ships without asking us. An unrecognised subtype must read as unknown rather
+  # than as a confident "Local storage".
+  local fs
+  for fs in fuse.gocryptfs fuse.ntfs-3g fuse.somethingnobodyhasinvented; do
+    _pf_is_opaque_fuse_fstype "$fs" || return 1
+  done
+}
+
+@test "_pf_is_network_fstype and _pf_is_opaque_fuse_fstype stay mutually exclusive (#726)" {
+  # THE INVARIANT THE SUITE ALREADY PROTECTED, and the reason the fuse.* arm
+  # negates the network classifier instead of returning 0 outright. Without it
+  # `fuse.sshfs` satisfies BOTH, and only the order the caller happens to ask in
+  # keeps it a hard fail rather than a notice -- so a future caller asking
+  # "opaque?" first would silently downgrade a database-corrupting mount.
+  local fs
+  for fs in fuse.sshfs fuse.s3fs fuse.gcsfuse fuse.blobfuse2 fuse.rclone \
+            fuse.gocryptfs fuseblk fuse nfs4 cifs ext4 apfs ""; do
+    if _pf_is_network_fstype "$fs" && _pf_is_opaque_fuse_fstype "$fs"; then
+      echo "both predicates claim '$fs'" >&2
+      return 1
+    fi
+  done
+}
+
+@test "_pf_opaque_fuse_warn: the wording matches WHICH unknown it is (#726)" {
+  # "the mount table doesn't say which one" is true for fuseblk and false for
+  # fuse.gocryptfs, where the table says precisely which one and the gap is that
+  # we have no opinion on it. A guard that ships a false sentence is the shape
+  # this repo keeps finding.
+  run _pf_opaque_fuse_warn /data fuseblk
+  [[ "$output" == *"doesn't say which one"* ]] || return 1
+  run _pf_opaque_fuse_warn /data fuse.gocryptfs
+  [[ "$output" == *"does not recognise"* ]] || return 1
+  [[ "$output" != *"doesn't say which one"* ]] || return 1
+}
+
+@test "_pf_storage_type: every measured network-FUSE reading hard fails, prefixed or bare" {
+  local fstype
+  PF_FSTYPE_STUB=""; _pf_fstype() { echo "$PF_FSTYPE_STUB"; }
+  for fstype in fuse.sshfs sshfs fuse.rclone rclone fuse.s3fs s3fs fuse.glusterfs glusterfs; do
+    PF_FSTYPE_STUB="$fstype"
+    PF_HARD_FAIL=0; _pf_storage_type >/dev/null 2>&1
+    [ "$PF_HARD_FAIL" -eq 1 ] || return 1
+  done
+}
+
+@test "_pf_storage_type: a subtype-erased FUSE reading warns instead of passing as local storage" {
+  local fstype
+  PF_FSTYPE_STUB=""; _pf_fstype() { echo "$PF_FSTYPE_STUB"; }
+  for fstype in fuseblk macfuse fuse; do
+    PF_FSTYPE_STUB="$fstype"
+    run _pf_storage_type
+    [ "$status" -eq 0 ] || return 1
+    [[ "$output" == *"FUSE filesystem (${fstype})"* ]] || return 1
+    [[ "$output" == *"sshfs"* ]] || return 1              # names what it might be
+    [[ "$output" != *"Local storage"* ]] || return 1      # must NOT claim local
+    PF_HARD_FAIL=0; _pf_storage_type >/dev/null 2>&1
+    [ "$PF_HARD_FAIL" -eq 0 ] || return 1                 # advisory, never a block
+  done
+}
+
+@test "_pf_storage_type and early_data_dir_guard agree on every measured reading (#432 shares one classifier)" {
+  local fstype
+  PF_FSTYPE_STUB=""; _pf_fstype() { echo "$PF_FSTYPE_STUB"; }
+  for fstype in fuse.sshfs sshfs fuse.rclone rclone fuse.s3fs s3fs nfs4 cifs; do
+    PF_FSTYPE_STUB="$fstype"
+    PF_HARD_FAIL=0; _pf_storage_type >/dev/null 2>&1
+    [ "$PF_HARD_FAIL" -eq 1 ] || return 1
+    HOST_DATA_DIR="$BATS_TEST_TMPDIR/agree-$fstype/.tracebloc" run early_data_dir_guard
+    [ "$status" -eq 1 ] || return 1
+  done
+}
+
+@test "early_data_dir_guard: a bare sshfs reading refuses exactly as fuse.sshfs does" {
+  _pf_fstype() { echo sshfs; }
+  HOST_DATA_DIR="$BATS_TEST_TMPDIR/bare/.tracebloc" run early_data_dir_guard
+  [ "$status" -eq 1 ] || return 1
+  [[ "$output" == *"network filesystem (sshfs)"* ]] || return 1
+  [[ "$output" == *"Refusing to create the data directory"* ]] || return 1
+  [ ! -d "$BATS_TEST_TMPDIR/bare/.tracebloc" ] || return 1   # refused BEFORE any mkdir
+}
+
+@test "early_data_dir_guard: an opaque FUSE reading warns but does not refuse" {
+  _pf_fstype() { echo macfuse; }
+  HOST_DATA_DIR="$BATS_TEST_TMPDIR/opaque/.tracebloc" run early_data_dir_guard
+  [ "$status" -eq 0 ] || return 1
+  [[ "$output" == *"FUSE filesystem (macfuse)"* ]] || return 1
+  [[ "$output" != *"Refusing"* ]] || return 1
+}
+
 @test "early_data_dir_guard: local filesystem -> silent pass" {
   _pf_fstype() { echo ext4; }
   run early_data_dir_guard

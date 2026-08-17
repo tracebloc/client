@@ -707,6 +707,45 @@ _handle_existing_cluster() {
   _check_existing_cluster_k8s_version
 }
 
+# The recreate remedy, printed from ONE place (backend#2077).
+#
+# Why it can't just be `k3d cluster delete`: the backend record for this machine
+# is anchored to the identity of the CLUSTER — the kube-system namespace UID —
+# which is born with the k3d cluster and dies with it. `k3d cluster delete` never
+# calls the API, so the record keeps a cluster_id that will never exist again:
+# the next run correctly mints a NEW secure environment and the old one is
+# stranded on the dashboard for good. Nothing reaps it, and an orphan can later
+# be picked as another machine's active pointer.
+#
+# `tracebloc delete` is the offboard that releases it: it revokes this machine's
+# credential server-side (the record is kept as history, never hard-destroyed),
+# uninstalls the Helm release, and tears down its own local cluster. The revoke
+# is an API call, so it still works when the cluster itself is broken — which is
+# the state at most of these call sites.
+#
+# --keep-data is not optional here. The plain form wipes ~/.tracebloc, which is
+# HOST_DATA_DIR by default — the very data these call sites promise a recreate
+# keeps. It also spares the stored login, so the re-run doesn't sign in again.
+#
+# The k3d line stays: `tracebloc delete` only tears down a cluster literally
+# named `tracebloc` (the CLI's built-in name), so a custom CLUSTER_NAME still
+# needs it — and on the default name it is simply a no-op.
+#
+# Advice, never run for the user: these sites are diagnosing a cluster, not
+# offboarding one, and a machine that never finished provisioning has nothing to
+# release (`tracebloc delete` says exactly that and exits) — hence the last line.
+#
+# $1 (optional): env assignments to prefix the re-run with, e.g.
+#                "TB_STORAGE_MODE=node-local  ".
+_recreate_cluster_hint() {
+  local rerun_prefix="${1:-}"
+  hint "Release this machine's secure environment BEFORE deleting the cluster — it is anchored to the"
+  hint "cluster's identity, so deleting the cluster first strands it on your dashboard for good:"
+  hint "  tracebloc delete --keep-data      (releases this secure environment; keeps your local data)"
+  hint "  k3d cluster delete $CLUSTER_NAME  &&  ${rerun_prefix}re-run this installer."
+  hint "  (nothing installed on this machine yet? then just the k3d line.)"
+}
+
 # k3s version is fixed when the cluster is created (baked into the node image);
 # it can't be changed on a running cluster. A cluster created by an older/unpinned
 # installer or with K8S_VERSION=latest keeps whatever k3s it was born with, EVEN
@@ -739,7 +778,7 @@ _check_existing_cluster_k8s_version() {
     hint "k3s version is fixed when the cluster is created — it can't be changed on a running cluster."
     hint "This cluster was created by an older/unpinned installer or with K8S_VERSION=latest (#547). To move"
     hint "onto the validated version, recreate it:"
-    hint "  k3d cluster delete $CLUSTER_NAME  &&  re-run this installer."
+    _recreate_cluster_hint
     hint "  (hostpath mode keeps your data under ${HOST_DATA_DIR:-your data dir}; node-local mode loses in-cluster data on recreate.)"
     echo ""
   fi
@@ -776,7 +815,7 @@ _check_existing_cluster_proxy() {
     warn "Host has proxy env set, but the existing '$CLUSTER_NAME' cluster is missing: ${missing[*]}."
     hint "k3d bakes proxy settings into containers at create time — they can't be added to a running cluster."
     hint "If image pulls fail or in-cluster traffic misroutes, recreate the cluster:"
-    hint "  k3d cluster delete $CLUSTER_NAME  &&  re-run this installer."
+    _recreate_cluster_hint
     echo ""
   fi
 }
@@ -800,7 +839,7 @@ _check_existing_cluster_ca() {
     warn "A CA bundle is set (TRACEBLOC_CA_BUNDLE/CURL_CA_BUNDLE), but the existing '$CLUSTER_NAME' cluster was created without it."
     hint "k3d bakes CA trust into the nodes at create time — it can't be added to a running cluster."
     hint "If in-cluster image pulls fail x509, recreate the cluster so the CA is applied:"
-    hint "  k3d cluster delete $CLUSTER_NAME  &&  re-run this installer."
+    _recreate_cluster_hint
     echo ""
   fi
 }
@@ -859,7 +898,7 @@ _check_existing_cluster_bind() {
     warn "The existing '$CLUSTER_NAME' cluster binds its API to 0.0.0.0 (created outside this installer)."
     hint "This installer binds clusters to 127.0.0.1; behind a corporate proxy a 0.0.0.0 bind can be intercepted."
     hint "Your kubeconfig is normalized to 127.0.0.1 so reuse works. If kubectl is still intercepted, rebuild it:"
-    hint "  k3d cluster delete $CLUSTER_NAME  &&  re-run this installer."
+    _recreate_cluster_hint
     echo ""
   fi
 }
@@ -884,7 +923,7 @@ _check_existing_cluster_dataset_mount() {
     hint "k3d bakes bind mounts in at create time — they can't be added to a running cluster. Re-using this"
     hint "cluster would put datasets on ephemeral in-node storage (lost on a restart), not your network export."
     hint "Recreate the cluster so the dataset volume is bound (data under HOST_DATASET_DIR is untouched):"
-    hint "  k3d cluster delete $CLUSTER_NAME   &&   re-run this installer."
+    _recreate_cluster_hint
     echo ""
     error "Existing cluster is missing the dataset bind mount — refusing to install datasets onto ephemeral storage."
   fi
@@ -916,7 +955,7 @@ _check_existing_cluster_storage_mode() {
     warn "TB_STORAGE_MODE=node-local, but the existing '$CLUSTER_NAME' cluster was built for hostpath storage."
     hint "That cluster disabled k3s local-storage, so the requested 'local-path' StorageClass does not exist —"
     hint "PVCs would stay Pending. Storage topology is fixed at create time; recreate the cluster for node-local:"
-    hint "  k3d cluster delete $CLUSTER_NAME   &&   TB_STORAGE_MODE=node-local  re-run this installer."
+    _recreate_cluster_hint "TB_STORAGE_MODE=node-local  "
     echo ""
     error "Existing cluster's storage topology (hostpath) does not match TB_STORAGE_MODE=node-local — refusing to install onto a cluster with no matching StorageClass."
   elif [[ "$want" == "hostpath" && "$cluster_is_hostpath" == false ]]; then
@@ -924,7 +963,7 @@ _check_existing_cluster_storage_mode() {
     warn "TB_STORAGE_MODE=hostpath (default), but the existing '$CLUSTER_NAME' cluster was built for node-local storage."
     hint "That cluster has no /tracebloc bind mount, so hostPath volumes would land on ephemeral in-node storage"
     hint "(lost on 'cluster delete'), not ~/.tracebloc. Storage topology is fixed at create time; recreate to switch:"
-    hint "  k3d cluster delete $CLUSTER_NAME   &&   re-run this installer."
+    _recreate_cluster_hint
     echo ""
     error "Existing cluster's storage topology (node-local) does not match TB_STORAGE_MODE=hostpath — refusing to install datasets onto ephemeral storage."
   fi
@@ -1099,10 +1138,47 @@ _create_new_cluster() {
 _merge_kubeconfig() {
   mkdir -p "${HOME}/.kube"
   export KUBECONFIG="${KUBECONFIG:-${HOME}/.kube/config}"
-  k3d kubeconfig merge "$CLUSTER_NAME" \
-    --kubeconfig-merge-default \
-    --kubeconfig-switch-context \
-    >/dev/null 2>&1
+
+  # This merge is load-bearing, not cosmetic (client#732). The installer passes no
+  # --kubeconfig/--context to `tracebloc client create`, and the CLI follows plain
+  # kubectl precedence — so the secure environment is anchored to whatever context
+  # is CURRENT when it is provisioned. This used to run with `>/dev/null 2>&1` and
+  # no `||`: a failed merge left the previous current-context in place and the
+  # install carried on, silently anchoring this machine to some other cluster (a
+  # corporate EKS, a colleague's kind cluster). Capture the status, keep k3d's own
+  # words for the message, and stop.
+  #
+  # Bounded: k3d reads the kubeconfig out of the server node through the Docker
+  # daemon, so a wedged daemon would otherwise hang the install here with no
+  # output at all (installer rule: every docker probe carries a deadline).
+  local merge_out merge_rc=0
+  merge_out="$(_bounded "${TB_KUBECONFIG_MERGE_TIMEOUT:-60}" \
+    k3d kubeconfig merge "$CLUSTER_NAME" \
+      --kubeconfig-merge-default \
+      --kubeconfig-switch-context 2>&1)" || merge_rc=$?
+  if [[ $merge_rc -ne 0 ]]; then
+    echo ""
+    if [[ $merge_rc -eq 124 ]]; then
+      warn "Pointing kubectl at '$CLUSTER_NAME' timed out after ${TB_KUBECONFIG_MERGE_TIMEOUT:-60}s (k3d couldn't read the cluster's kubeconfig)."
+      hint "That usually means the Docker daemon is wedged — check 'docker ps' answers, then re-run."
+    else
+      warn "Couldn't point kubectl at the '$CLUSTER_NAME' cluster (k3d kubeconfig merge exited $merge_rc)."
+    fi
+    # if-form, not `[[ … ]] && hint`: under `set -e` an empty merge_out would make
+    # the compound return 1 and abort HERE — swallowing the guidance below, which
+    # is the whole point of this branch.
+    # The timeout path in particular produces NO output; the guidance below must
+    # print either way, which is what the "fails with no output" test pins.
+    if [[ -n "$merge_out" ]]; then hint "k3d said: ${merge_out}"; fi
+    hint "Stopping here on purpose: this machine's secure environment is registered against whichever"
+    hint "cluster kubectl currently points at, so continuing would connect it to the wrong cluster."
+    hint "Common causes: ${KUBECONFIG%%:*} isn't writable, the disk is full, or KUBECONFIG points somewhere unexpected."
+    hint "  KUBECONFIG=${KUBECONFIG}"
+    hint "Fix that (or merge it yourself with the command below), then re-run this installer:"
+    hint "  k3d kubeconfig merge $CLUSTER_NAME --kubeconfig-merge-default --kubeconfig-switch-context"
+    echo ""
+    error "kubectl was not pointed at '$CLUSTER_NAME' — refusing to continue against an unknown cluster."
+  fi
 
   # Defensive normalization: k3d may still emit 0.0.0.0 server URLs into the
   # kubeconfig (older k3d versions, or pre-existing entries from previous
@@ -1122,7 +1198,35 @@ _merge_kubeconfig() {
     log "Normalized kubeconfig server URL: 0.0.0.0 → 127.0.0.1 in $kc_target (corporate-proxy safety)."
   fi
 
-  log "kubeconfig updated — kubectl now points to '$CLUSTER_NAME'."
+  # Confirm the ANCHOR, don't infer it from an exit code (client#732). What the
+  # next steps actually depend on is that kubectl's current-context is this
+  # cluster; a zero exit is evidence for that, not proof of it. k3d v5 (the pinned
+  # K3D_VERSION) names the context it writes `k3d-<cluster>`, so the check compares
+  # against the same thing --kubeconfig-switch-context sets — and if a future k3d
+  # ever renamed it, this stops with the use-context command rather than silently
+  # provisioning against whatever was current. Fail closed: a context we cannot READ
+  # is not a context we can vouch for — "couldn't tell" and "wrong cluster" are the
+  # same answer here, because both would provision against an unknown cluster.
+  local want_ctx="k3d-${CLUSTER_NAME}" have_ctx ctx_rc=0
+  have_ctx="$(_bounded 10 kubectl config current-context 2>/dev/null)" || ctx_rc=$?
+  have_ctx="${have_ctx//[$'\r\n']/}"
+  if [[ $ctx_rc -ne 0 || "$have_ctx" != "$want_ctx" ]]; then
+    echo ""
+    if [[ $ctx_rc -ne 0 ]]; then
+      warn "k3d merged the '$CLUSTER_NAME' kubeconfig, but kubectl can't tell us which context is current."
+    else
+      warn "k3d merged the '$CLUSTER_NAME' kubeconfig, but kubectl's current context is '${have_ctx:-<none>}', not '$want_ctx'."
+    fi
+    hint "This machine's secure environment is registered against the CURRENT context, so continuing"
+    hint "would connect it to that other cluster instead of the one this installer just prepared."
+    hint "Select this cluster, then re-run this installer:"
+    hint "  kubectl config use-context $want_ctx"
+    hint "  KUBECONFIG=${KUBECONFIG}"
+    echo ""
+    error "kubectl is not pointed at '$CLUSTER_NAME' — refusing to continue against an unknown cluster."
+  fi
+
+  log "kubeconfig updated — kubectl now points to '$CLUSTER_NAME' (context $want_ctx)."
 }
 
 _wait_for_api() {
