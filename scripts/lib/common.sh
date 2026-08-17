@@ -209,7 +209,25 @@ CYAN="$TB_ACCENT"; GREEN="$TB_GO"; YELLOW="$TB_WARN"; RED="$TB_ERRSOFT"
 info()           { echo -e "  ${DIM}·${RESET} $*"; }
 success()        { echo -e "  ${TB_GO}✔${RESET} $*"; }
 warn()           { echo -e "  ${TB_WARN}⚠${RESET}  $*"; }
-error()          { echo -e "  ${TB_ERR}✖ $*${RESET}" >&2; exit 1; }
+# error MESSAGE — print and exit 1.
+#
+# It records itself first, and that is not decoration. `exit` fires NO ERR trap,
+# so a deliberate refusal left TB_ERR_* holding whatever benign probe failed
+# last — and install_cleanup then reported that probe as the cause. A real log
+# read "Stopped at common.sh:527 — sudo -n true" for an install that died of a
+# missing administrator password: line 527 is the passwordless-sudo probe, which
+# is SUPPOSED to fail on a normal Mac. The report named a healthy check and sent
+# the reader to the wrong place, which is worse than naming nothing.
+#
+# BASH_SOURCE[1]/BASH_LINENO[0] are the CALLER's file and line — where the
+# refusal was decided. BASH_SOURCE[0] would name common.sh every time.
+error() {
+  if declare -F _record_err >/dev/null 2>&1; then
+    _record_err "${BASH_SOURCE[1]:-?}:${BASH_LINENO[0]:-?}" "error: $*" 1
+  fi
+  echo -e "  ${TB_ERR}✖ $*${RESET}" >&2
+  exit 1
+}
 step()           { echo -e "\n${TB_HEADING}Step $1/$2${RESET}  ${BOLD}$3${RESET}"; }
 log()            { [[ -n "${LOG_FILE:-}" ]] && echo "[$(date +%H:%M:%S)] $*" >> "$LOG_FILE" 2>/dev/null; return 0; }
 prompt_header()  { echo -e "\n  ${BOLD}${WHITE}$*${RESET}"; }
@@ -894,6 +912,11 @@ TB_ERR_CODE=""   # its exit status (137/141/… included: a signal death is a fa
 # Always returns 0 — a recorder that failed would re-enter the trap.
 _record_err() {
   local _code=$?
+  # $3 overrides the implicit $?. The ERR trap has a meaningful $? and passes
+  # nothing; error() does not (its $? is whatever preceded the call) and passes
+  # the 1 it is about to exit with. Read before any other statement, or $? is
+  # already clobbered.
+  _code="${3:-$_code}"
   # Re-entrancy guard. `set -E` makes this function inherit the ERR trap, so any
   # command in here that fails would re-enter it — including `log` below, whose
   # `[[ -n "${LOG_FILE:-}" ]] && …` form returns non-zero when no log is open.

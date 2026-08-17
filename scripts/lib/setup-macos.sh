@@ -352,18 +352,7 @@ install_docker_desktop() {
 
     local max_wait=80
     if [[ "$fresh_install" == true ]]; then max_wait=120; fi
-    tput civis 2>/dev/null || true
-    local frames=('⠋' '⠙' '⠹' '⠸' '⠼' '⠴' '⠦' '⠧' '⠇' '⠏')
-    local f=0
-    for i in $(seq 1 $max_wait); do
-      if docker info &>/dev/null 2>&1; then break; fi
-      local elapsed=$(( i * 3 ))
-      printf "\r  ${CYAN}%s${RESET} Waiting for Docker Desktop… (%ds)" "${frames[f]}" "$elapsed"
-      f=$(( (f + 1) % ${#frames[@]} ))
-      sleep 3
-    done
-    printf "\r\033[K"
-    tput cnorm 2>/dev/null || true
+    _wait_for_docker "$max_wait"
   fi
 
   if ! docker info &>/dev/null 2>&1; then
@@ -381,6 +370,76 @@ install_docker_desktop() {
   fi
 
   success "Docker ready"
+}
+
+# _wait_for_docker POLLS — spin until `docker info` answers, or POLLS*3s elapse.
+# Returns 0 as soon as the daemon answers, 1 on timeout.
+#
+# Extracted so the assess-time nudge (_try_start_docker_desktop) and the
+# install-time start share ONE loop. Two copies of a "wait for Docker" loop
+# drift, and the one nobody reads is the one that stops matching the daemon's
+# actual readiness.
+_wait_for_docker() {
+  local polls="$1" i f=0 elapsed
+  local frames=('⠋' '⠙' '⠹' '⠸' '⠼' '⠴' '⠦' '⠧' '⠇' '⠏')
+  tput civis 2>/dev/null || true
+  for i in $(seq 1 "$polls"); do
+    if docker info &>/dev/null 2>&1; then
+      printf "\r\033[K"
+      tput cnorm 2>/dev/null || true
+      return 0
+    fi
+    elapsed=$(( i * 3 ))
+    printf "\r  ${CYAN}%s${RESET} Waiting for Docker Desktop… (%ds)" "${frames[f]}" "$elapsed"
+    f=$(( (f + 1) % ${#frames[@]} ))
+    sleep 3
+  done
+  printf "\r\033[K"
+  tput cnorm 2>/dev/null || true
+  docker info &>/dev/null 2>&1
+}
+
+# _docker_app_installed — is Docker Desktop present as an app bundle?
+#
+# Its own function purely so the branch above is testable on any host: inlined,
+# the "not installed" case could only be exercised on a machine WITHOUT Docker,
+# which is never the machine of the person changing this code.
+_docker_app_installed() {
+  [[ -d /Applications/Docker.app || -d "$HOME/Applications/Docker.app" ]]
+}
+
+# _try_start_docker_desktop — best-effort nudge for a Docker Desktop that is
+# INSTALLED but not running. Returns 0 if a runtime is usable afterwards.
+#
+# This exists because of the trap in client#703's neighbourhood: a stopped
+# Docker means PROBE_RUNTIME_USABLE=0, which on macOS means Tier 2, which runs
+# the admin gate and preflight_sudo — and the ONLY `open -a Docker` in the tree
+# lived inside install_docker_desktop, behind that password prompt. So the
+# installer could only start Docker after taking an administrator password that
+# it needed solely because Docker wasn't started. A user who can't give that
+# password had no path at all, on a Mac where Docker was already installed.
+#
+# `open -a Docker` needs no privileges whatsoever — it is a GUI app launch as
+# the current user. Doing it here, before classification, lets the probe find a
+# live runtime and hand the machine to Tier 0, where none of the privileged
+# path runs.
+#
+# Best-effort by construction: every failure returns non-zero and the caller
+# says so honestly. It must never become a hard gate — a Mac with no Docker
+# installed still has to reach install_docker_desktop.
+_try_start_docker_desktop() {
+  [[ "${OS:-}" == "Darwin" ]] || return 1
+  has docker || return 1
+  # Already up — nothing to nudge (and the caller shouldn't claim it started it).
+  docker info &>/dev/null 2>&1 && return 0
+  # Only nudge an app that is actually installed; otherwise this is a job for
+  # install_docker_desktop, which downloads it.
+  _docker_app_installed || return 1
+  log "runtime-down: nudging Docker Desktop (open -a Docker, no privileges needed)"
+  open -a Docker 2>/dev/null || { log "runtime-down: open -a Docker failed"; return 1; }
+  # 20 polls x 3s = 60s. An already-installed Docker Desktop that has been run
+  # before is warm; this is a nudge, not the 120s first-run licence dance.
+  _wait_for_docker 20
 }
 
 install_macos_cli_tools() {

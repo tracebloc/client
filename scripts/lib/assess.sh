@@ -347,6 +347,45 @@ _assess_handoff() {
 # short-circuits (hand-off + exit 0). On fresh / degraded it prints a warm
 # one-liner and RETURNS 0 so main() runs the normal flow to set up (fresh) or
 # reconcile (degraded).
+# _assess_handle_runtime_down — the runtime is installed but not answering.
+#
+# This used to be one info() line: "Docker isn't running yet — starting it, then
+# checking your environment." Nothing in that path started anything. The branch
+# printed the sentence and fell through to `return 0`, the probe then found no
+# usable runtime, and macOS classified Tier 2 — the admin-password path — for a
+# machine whose Docker only needed launching. The only `open -a Docker` in the
+# tree sat behind that password prompt, so the installer could not start Docker
+# without first taking a password it needed solely because Docker was stopped.
+#
+# A message that names an action the code does not take is worse than no
+# message: it is what the user quotes back when the install fails, and it sends
+# the reader looking for a bug in the start logic rather than at its absence.
+# So this either DOES the thing or does not claim it.
+_assess_handle_runtime_down() {
+  # macOS: a GUI app launch, no privileges. If it comes up, the probe that runs
+  # next sees a live runtime and hands this machine to Tier 0.
+  if [[ "${OS:-}" == "Darwin" ]] && declare -F _try_start_docker_desktop >/dev/null 2>&1; then
+    info "Docker isn't running yet — starting it, then checking your environment."
+    if _try_start_docker_desktop; then
+      success "Docker is running"
+      log "runtime-down: Docker came up; the probe will classify from a live runtime"
+      return 0
+    fi
+    # Honest about the failure, and specific about what it costs: without a
+    # running Docker this machine takes the privileged path.
+    warn "Couldn't start Docker automatically."
+    hint "Open Docker Desktop, wait until it reports \"running\", then re-run this installer."
+    hint "Continuing — but setting up a container runtime from here needs an administrator password."
+    log "runtime-down: could not start Docker; falling through to the privileged path"
+    return 0
+  fi
+  # Anywhere else, starting the daemon needs privileges we do not have and will
+  # not ask for here, so do not claim to be starting it.
+  info "Docker isn't running — start it, then re-run this installer."
+  log "runtime-down: OS=${OS:-?}, no unprivileged way to start the runtime"
+  return 0
+}
+
 assess_existing_install() {
   # --force / --reinstall (or the env override): skip the gate entirely.
   if [[ "${TB_FORCE_REINSTALL:-0}" == 1 ]]; then
@@ -371,7 +410,7 @@ assess_existing_install() {
     degraded)
       echo ""
       case "$INSTALL_STATE_REASON" in
-        runtime-down)       info "Docker isn't running yet — starting it, then checking your environment." ;;
+        runtime-down)       _assess_handle_runtime_down ;;
         cluster-stopped)    info "Your secure environment is stopped — starting it and finishing setup." ;;
         workload-not-ready) info "Your secure environment is still starting up — finishing setup." ;;
         cli-missing)        info "The tracebloc CLI isn't installed yet — setting it up." ;;

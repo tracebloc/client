@@ -16,12 +16,15 @@
 # explicit `return 1` are honored on every bash), and status checks use single-
 # bracket `[ … ]`. Linux CI is the authority; these helpers make local runs
 # fail loudly instead of vacuously.
+bats_require_minimum_version 1.7.0   # `run -<code>` flags
 load test_helper
 
 setup() {
   load_lib cluster.sh                          # common.sh + cluster.sh (_cluster_exists)
   # shellcheck source=/dev/null
   source "${LIB_DIR}/install-client-helm.sh"   # detect_installed_client
+  # shellcheck source=/dev/null
+  source "${LIB_DIR}/setup-macos.sh"           # _try_start_docker_desktop (sourced before assess.sh in install-k8s.sh)
   # shellcheck source=/dev/null
   source "${LIB_DIR}/assess.sh"                # the unit under test
   MOCK_CALLS="$(mktemp)"
@@ -656,4 +659,84 @@ _use_real_runtime_probe() {
   run assess_existing_install
   [ "$status" -eq 0 ] || return 1
   refute_has "DRIFT_CHECK_RAN" "$output"
+}
+
+# ── runtime-down: the message must not promise what the code doesn't do ──────
+# This branch used to be one line:
+#   info "Docker isn't running yet — starting it, then checking your environment."
+# followed by `return 0`. Nothing started anything. The probe then found no
+# usable runtime, macOS classified Tier 2 — the admin-password path — and the
+# only `open -a Docker` in the tree sat behind that very password prompt. So a
+# Mac with Docker installed but stopped could not be set up by a user who
+# couldn't give an admin password, and the installer had told them it was
+# starting Docker. A real customer log ended exactly there.
+
+@test "runtime-down on macOS: actually starts Docker, and says so only when it did" {
+  OS=Darwin
+  _try_start_docker_desktop() { return 0; }        # Docker came up
+  run _assess_handle_runtime_down
+  [ "$status" -eq 0 ] || return 1
+  grep -qF "starting it" <<<"$output" || return 1
+  grep -qF "Docker is running" <<<"$output"
+}
+
+@test "runtime-down on macOS: when the start FAILS, it says so and names the cost" {
+  OS=Darwin
+  _try_start_docker_desktop() { return 1; }        # Docker did not come up
+  run _assess_handle_runtime_down
+  [ "$status" -eq 0 ] || return 1                  # never a hard gate
+  # It must NOT claim success…
+  ! grep -qF "Docker is running" <<<"$output" || return 1
+  # …and must be explicit that the fallback path costs a password, which is the
+  # thing the old copy hid.
+  grep -qF "Couldn't start Docker automatically" <<<"$output" || return 1
+  grep -qF "administrator password" <<<"$output"
+}
+
+@test "runtime-down off macOS: never claims to be starting a daemon it can't start" {
+  OS=Linux
+  run _assess_handle_runtime_down
+  [ "$status" -eq 0 ] || return 1
+  # Starting dockerd needs root. Saying "starting it" here would be the same
+  # false promise, one platform over.
+  ! grep -qF "starting it" <<<"$output" || return 1
+  grep -qF "start it, then re-run" <<<"$output"
+}
+
+@test "_try_start_docker_desktop: no-ops off macOS and when docker is absent" {
+  # `run -1` asserts the ONE refusal code. A bare `-ne 0` also accepts 127
+  # (command not found) — and did, while this file wasn't sourcing
+  # setup-macos.sh at all, so the test passed having run nothing.
+  OS=Linux
+  run -1 _try_start_docker_desktop
+  OS=Darwin
+  has() { return 1; }                              # no docker binary at all
+  run -1 _try_start_docker_desktop
+}
+
+@test "_try_start_docker_desktop: a live runtime returns 0 without launching anything" {
+  OS=Darwin
+  has() { return 0; }
+  docker() { return 0; }                           # `docker info` answers
+  open() { echo "LAUNCHED"; }
+  run _try_start_docker_desktop
+  [ "$status" -eq 0 ] || return 1
+  # Nothing to nudge — and the caller must not be able to claim it started it.
+  ! grep -qF "LAUNCHED" <<<"$output"
+}
+
+@test "_try_start_docker_desktop: won't launch an app that isn't installed" {
+  OS=Darwin
+  has() { return 0; }
+  docker() { return 1; }                           # runtime down
+  open() { echo "LAUNCHED"; }
+  HOME="$BATS_TEST_TMPDIR/nohome"; mkdir -p "$HOME"
+  # /Applications/Docker.app is absent on the CI runner; assert on the outcome
+  # rather than on the host's filesystem only if that holds.
+  # Stub the installed-probe rather than depending on the host: on a machine
+  # WITH Docker (every macOS dev box) this branch is otherwise unreachable, and
+  # skipping there means only CI ever runs it.
+  _docker_app_installed() { return 1; }
+  run -1 _try_start_docker_desktop
+  ! grep -qF "LAUNCHED" <<<"$output"
 }
