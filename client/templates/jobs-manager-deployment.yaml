@@ -417,23 +417,23 @@ spec:
           value: {{ printf "%s/" (dig "imageRegistry" "docker.io" (.Values.global | default dict) | default "docker.io") | quote }}
         - name: CLIENT_ENV
           value: {{ include "tracebloc.clientEnv" . | quote }}
-        # backend#664 (Utilization Ladder L0): RESOURCE_REQUESTS/RESOURCE_LIMITS
-        # are rendered only when the operator sets them — an explicit envelope
-        # override, honored exactly as before. When UNSET the vars are omitted
-        # and jobs-manager sizes the envelope from node allocatable (75% with
-        # cpu=2/memory=8Gi floors, requests == limits / Guaranteed QoS). Older
-        # client-runtime images fall back to their built-in cpu=2,memory=8Gi
-        # literal — the same value this template used to inject — so chart and
-        # image can upgrade in either order without a behavior flip. The
-        # standalone installer writes explicit values (backend#1236), so the
-        # derivation path applies to chart-direct installs only.
-        {{- if hasKey .Values.env "RESOURCE_REQUESTS" }}
+        # backend#664 (Utilization Ladder L0): with NEITHER env.RESOURCE_REQUESTS
+        # nor env.RESOURCE_LIMITS set, BOTH vars are omitted and jobs-manager
+        # sizes the envelope from node allocatable (75% with cpu=2/memory=8Gi
+        # floors, requests == limits / Guaranteed QoS). Older client-runtime
+        # images fall back to their built-in cpu=2,memory=8Gi literal — the same
+        # value this template used to inject — so chart and image can upgrade in
+        # either order without a behavior flip. When EITHER key is set the pair
+        # renders exactly as before (the missing one gets the literal): the two
+        # vars share one gate, like the GPU block below, so a half-set config
+        # never emits a lone var. The standalone installer writes explicit
+        # values (backend#1236), so the derivation path applies to chart-direct
+        # installs only.
+        {{- if or (hasKey .Values.env "RESOURCE_REQUESTS") (hasKey .Values.env "RESOURCE_LIMITS") }}
         - name: RESOURCE_REQUESTS
-          value: {{ .Values.env.RESOURCE_REQUESTS | quote }}
-        {{- end }}
-        {{- if hasKey .Values.env "RESOURCE_LIMITS" }}
+          value: {{ if hasKey .Values.env "RESOURCE_REQUESTS" }}{{ .Values.env.RESOURCE_REQUESTS | quote }}{{ else }}"cpu=2,memory=8Gi"{{ end }}
         - name: RESOURCE_LIMITS
-          value: {{ .Values.env.RESOURCE_LIMITS | quote }}
+          value: {{ if hasKey .Values.env "RESOURCE_LIMITS" }}{{ .Values.env.RESOURCE_LIMITS | quote }}{{ else }}"cpu=2,memory=8Gi"{{ end }}
         {{- end }}
         # #343: only stamp the GPU vars when a GPU is actually configured. A
         # CPU-only install writes GPU_LIMITS: "" (empty), and a chart-direct
@@ -514,16 +514,15 @@ spec:
           value: {{ printf "%s/" (dig "imageRegistry" "docker.io" (.Values.global | default dict) | default "docker.io") | quote }}
         - name: CLIENT_ENV
           value: {{ include "tracebloc.clientEnv" . | quote }}
-        # Rendered only when set — see the api container's RESOURCE_REQUESTS
-        # note (backend#664): unset lets jobs-manager derive the envelope from
-        # node allocatable; older images keep their built-in literal.
-        {{- if hasKey .Values.env "RESOURCE_REQUESTS" }}
+        # See the api container's RESOURCE_REQUESTS note (backend#664): both
+        # omitted when neither is set (jobs-manager derives from node
+        # allocatable; older images keep their built-in literal), both rendered
+        # as before when either is set.
+        {{- if or (hasKey .Values.env "RESOURCE_REQUESTS") (hasKey .Values.env "RESOURCE_LIMITS") }}
         - name: RESOURCE_REQUESTS
-          value: {{ .Values.env.RESOURCE_REQUESTS | quote }}
-        {{- end }}
-        {{- if hasKey .Values.env "RESOURCE_LIMITS" }}
+          value: {{ if hasKey .Values.env "RESOURCE_REQUESTS" }}{{ .Values.env.RESOURCE_REQUESTS | quote }}{{ else }}"cpu=2,memory=8Gi"{{ end }}
         - name: RESOURCE_LIMITS
-          value: {{ .Values.env.RESOURCE_LIMITS | quote }}
+          value: {{ if hasKey .Values.env "RESOURCE_LIMITS" }}{{ .Values.env.RESOURCE_LIMITS | quote }}{{ else }}"cpu=2,memory=8Gi"{{ end }}
         {{- end }}
         # #343: only stamp the GPU vars when a GPU is actually configured (see
         # the api container above) — GPU_REQUESTS and GPU_LIMITS share one gate

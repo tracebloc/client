@@ -349,6 +349,40 @@ tests:
             value: "cpu=4,memory=16Gi"
           count: 1
 
+  # Bugbot on the #664 PR: the two vars share ONE gate, so a values file that
+  # sets only one still renders the PAIR (the missing one gets the historic
+  # literal, exactly as the always-inject template did) — a lone
+  # RESOURCE_REQUESTS/RESOURCE_LIMITS env var must never be emitted.
+  - it: pairs the literal when only one of RESOURCE_REQUESTS/LIMITS is set
+    set:
+      env:
+        RESOURCE_LIMITS: "cpu=4,memory=16Gi"
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: RESOURCE_REQUESTS
+            value: "cpu=2,memory=8Gi"
+          count: 1
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: RESOURCE_LIMITS
+            value: "cpu=4,memory=16Gi"
+          count: 1
+      - contains:
+          path: spec.template.spec.containers[1].env
+          content:
+            name: RESOURCE_REQUESTS
+            value: "cpu=2,memory=8Gi"
+          count: 1
+      - contains:
+          path: spec.template.spec.containers[1].env
+          content:
+            name: RESOURCE_LIMITS
+            value: "cpu=4,memory=16Gi"
+          count: 1
+
   - it: does not render PER_INGESTION_TABLES by default (RFC-0003 D16 knob off)
     asserts:
       - notContains:
