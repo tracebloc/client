@@ -25,9 +25,14 @@ env: {
   # HTTP_PROXY_PORT: ""
   # HTTP_PROXY_USERNAME: ""
   # HTTP_PROXY_PASSWORD: ""
-  # Optional: resource requests for spawned jobs (defaults to "cpu=2,memory=8Gi" if not provided)
+  # Optional: explicit resource requests/limits for spawned training jobs.
+  # UNSET (the default): jobs-manager sizes the envelope from node allocatable
+  # capacity — cpu = max(2, floor(allocatable*0.75)), memory = max(8Gi,
+  # floor(allocatable*0.75)), requests == limits (Guaranteed QoS) — instead of
+  # the historic fixed "cpu=2,memory=8Gi" (backend#664, Utilization Ladder L0).
+  # Older client-runtime images fall back to that same literal, so leaving
+  # these unset is safe on any image. SET: pins the envelope exactly as before.
   # RESOURCE_REQUESTS: "cpu=2,memory=8Gi"
-  # Optional: resource limits for spawned jobs (defaults to "cpu=2,memory=8Gi" if not provided)
   # RESOURCE_LIMITS: "cpu=2,memory=8Gi"
   # Optional: GPU requests for spawned jobs (defaults to "nvidia.com/gpu=1" if not provided)
   # GPU_REQUESTS: "nvidia.com/gpu=1"
