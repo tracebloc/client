@@ -1677,19 +1677,37 @@ Describe "Recreate hints route through Write-RecreateClusterHint (backend#2077 s
 Describe "Kubeconfig merge is checked, and the anchor verified (client#732 source guards)" {
   BeforeAll { $script:PSRC3 = Get-Content "$PSScriptRoot/../install-k8s.ps1" -Raw }
   It "no longer discards the merge result into Out-Null" {
-    $script:PSRC3 | Should -Not -Match 'k3d kubeconfig merge \$CLUSTER_NAME --kubeconfig-switch-context \| Out-Null'
+    $script:PSRC3 | Should -Not -Match 'k3d kubeconfig merge \$CLUSTER_NAME[^\r\n]*\| Out-Null'
+  }
+  It "merges into the DEFAULT kubeconfig -- without it the gate below proves nothing (Bugbot)" {
+    # k3d writes a standalone ~/.k3d/kubeconfig-<cluster>.yaml unless told otherwise,
+    # so a merge lacking this flag never touches the file kubectl reads.
+    $fn = (($script:PSRC3 -split 'function New-K3dCluster')[1] -split '\nfunction ')[0]
+    $fn | Should -Match '"kubeconfig",\s*"merge",\s*\$CLUSTER_NAME,\s*"--kubeconfig-merge-default",\s*"--kubeconfig-switch-context"'
+    # ...and the remedy it prints has to be the same command, or it can't repair it
+    $fn | Should -Match '\$mergeCmd\s*=\s*"k3d kubeconfig merge \$CLUSTER_NAME --kubeconfig-merge-default --kubeconfig-switch-context"'
   }
   It "reads the merge's exit code and stops the install on failure" {
-    $script:PSRC3 | Should -Match 'k3d kubeconfig merge \$CLUSTER_NAME --kubeconfig-switch-context 2>&1[\s\S]{0,400}?\$LASTEXITCODE -ne 0'
+    $script:PSRC3 | Should -Match '\$merge\s*=\s*Invoke-BoundedProcess[\s\S]{0,400}?\$merge\.Code -ne 0'
     $script:PSRC3 | Should -Match 'refusing to continue against an unknown cluster'
+  }
+  It "bounds BOTH external calls, like the bash peer (installer rule)" {
+    $fn = (($script:PSRC3 -split 'function New-K3dCluster')[1] -split '\nfunction ')[0]
+    $fn | Should -Match 'Invoke-BoundedProcess -FileName "k3d" -TimeoutSec 60'
+    $fn | Should -Match 'Invoke-BoundedProcess -FileName "kubectl" -Arguments @\("config", "current-context"\) -TimeoutSec 10'
+    $fn | Should -Not -Match '\n\s*kubectl config current-context'   # never the unbounded native call
   }
   It "verifies the current context IS this cluster, and says how to select it" {
     $script:PSRC3 | Should -Match '\$wantCtx\s*=\s*"k3d-\$CLUSTER_NAME"'
-    $script:PSRC3 | Should -Match 'kubectl config current-context'
     $script:PSRC3 | Should -Match 'kubectl config use-context \$wantCtx'
   }
   It "treats an unreadable current-context as a failure, not as agreement" {
     $script:PSRC3 | Should -Match "can't tell us which context is current"
+  }
+  It "normalizes the kubeconfig k3d actually wrote, not a hardcoded profile path" {
+    # --kubeconfig-merge-default honours $KUBECONFIG; the rewrite has to follow it or
+    # it silently edits a file k3d never touched (peer of bash's ${KUBECONFIG%%:*}).
+    $script:PSRC3 | Should -Match '\$kubeConfigPath = if \(\$env:KUBECONFIG\) \{ \(\$env:KUBECONFIG -split .;.\)\[0\] \}'
   }
 }
 

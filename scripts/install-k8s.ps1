@@ -3655,18 +3655,37 @@ function New-K3dCluster {
   # old form piped the output to Out-Null and never looked at $LASTEXITCODE, so a
   # failed merge left the previous current-context selected and the install carried
   # on -- anchoring this machine to some other cluster (a corporate EKS, say).
-  $mergeOut = (k3d kubeconfig merge $CLUSTER_NAME --kubeconfig-switch-context 2>&1 | Out-String).Trim()
-  if ($LASTEXITCODE -ne 0) {
-    Warn "Couldn't point kubectl at the '$CLUSTER_NAME' cluster (k3d kubeconfig merge exited $LASTEXITCODE)."
+  #
+  # --kubeconfig-merge-default is required and was MISSING (Bugbot): without it k3d
+  # writes a standalone ~/.k3d/kubeconfig-<cluster>.yaml and never touches the file
+  # kubectl actually reads -- so a zero exit here proved nothing about the anchor,
+  # and the remedy printed below couldn't have repaired it either.
+  #
+  # Bounded like the bash peer: k3d reads the kubeconfig out of the node through the
+  # Docker daemon, so a wedged daemon would otherwise stall a headless install here
+  # with no output at all.
+  $mergeCmd = "k3d kubeconfig merge $CLUSTER_NAME --kubeconfig-merge-default --kubeconfig-switch-context"
+  $merge = Invoke-BoundedProcess -FileName "k3d" -TimeoutSec 60 `
+    -Arguments @("kubeconfig", "merge", $CLUSTER_NAME, "--kubeconfig-merge-default", "--kubeconfig-switch-context")
+  if ($merge.Code -ne 0) {
+    if ($merge.Code -eq 124) {
+      Warn "Pointing kubectl at the '$CLUSTER_NAME' cluster timed out after 60s (k3d couldn't read the cluster's kubeconfig)."
+      Hint "That usually means the Docker daemon is wedged -- check 'docker ps' answers, then re-run."
+    } else {
+      Warn "Couldn't point kubectl at the '$CLUSTER_NAME' cluster (k3d kubeconfig merge exited $($merge.Code))."
+    }
     Hint "Stopping here on purpose: this machine's secure environment is registered against whichever"
     Hint "cluster kubectl currently points at, so continuing would connect it to the wrong cluster."
     Hint "Fix that (or merge it yourself with the command below), then re-run this installer:"
-    Hint "  k3d kubeconfig merge $CLUSTER_NAME --kubeconfig-switch-context"
-    Err "kubectl was not pointed at '$CLUSTER_NAME' - refusing to continue against an unknown cluster." $mergeOut
+    Hint "  $mergeCmd"
+    Err "kubectl was not pointed at '$CLUSTER_NAME' - refusing to continue against an unknown cluster." $merge.Output
   }
-  if ($mergeOut) { Log "k3d kubeconfig merge: $mergeOut" }
+  if ($merge.Output) { Log "k3d kubeconfig merge: $($merge.Output)" }
 
-  $kubeConfigPath = "$env:USERPROFILE\.kube\config"
+  # Normalize the file k3d just wrote, not a guess at it: with --kubeconfig-merge-default
+  # k3d honours $KUBECONFIG (first entry of the ';'-separated list) and only falls back to
+  # %USERPROFILE%\.kube\config. Mirrors the bash peer's `${KUBECONFIG%%:*}`.
+  $kubeConfigPath = if ($env:KUBECONFIG) { ($env:KUBECONFIG -split ';')[0] } else { "$env:USERPROFILE\.kube\config" }
   if (Test-Path $kubeConfigPath) {
     (Get-Content $kubeConfigPath) `
       -replace 'host\.docker\.internal', '127.0.0.1' `
@@ -3676,11 +3695,13 @@ function New-K3dCluster {
   # Confirm the ANCHOR rather than infer it from an exit code (peer of the bash
   # check). What everything downstream depends on is that kubectl's current context
   # IS this cluster; k3d v5 names the context it writes `k3d-<cluster>`. Fail closed:
-  # a context we cannot read is not one we can vouch for.
+  # a context we cannot read is not one we can vouch for. Bounded, like every other
+  # kubectl call in this installer.
   $wantCtx = "k3d-$CLUSTER_NAME"
-  $haveCtx = (kubectl config current-context 2>$null | Out-String).Trim()
-  if ($LASTEXITCODE -ne 0 -or $haveCtx -ne $wantCtx) {
-    if ($LASTEXITCODE -ne 0) {
+  $ctx = Invoke-BoundedProcess -FileName "kubectl" -Arguments @("config", "current-context") -TimeoutSec 10
+  $haveCtx = ("$($ctx.Output)").Trim()
+  if ($ctx.Code -ne 0 -or $haveCtx -ne $wantCtx) {
+    if ($ctx.Code -ne 0) {
       Warn "k3d merged the '$CLUSTER_NAME' kubeconfig, but kubectl can't tell us which context is current."
     } else {
       Warn "k3d merged the '$CLUSTER_NAME' kubeconfig, but kubectl's current context is '$haveCtx', not '$wantCtx'."
