@@ -4167,13 +4167,18 @@ function ConvertTo-SanitizedInput {
   # got here, one rule hand-copied into three languages with only CSI ever
   # tested. So if an ESC SURVIVED the strip, this value carries a shape we do not
   # recognise and its printable bytes are not trustworthy content. Require one
-  # alphanumeric that did not come from an escape final byte, probing with a
-  # deliberately greedier pattern (`+` on the final class, so it swallows both
-  # bytes of an unrecognised SS3-shaped pair). The probe is a yes/no only — it is
+  # alphanumeric that did not come from an escape final byte, probing with ESC +
+  # intermediates + AT MOST TWO final-class bytes. Two, not one and not
+  # unbounded: one leaves the 'D' of an unrecognised SS3-shaped pair behind and
+  # the floor stops firing on the very shape this is about, while unbounded
+  # swallows a whole ASCII name (ESC N C h e l l o) yet spares a non-Latin one,
+  # making keep-vs-reject depend on the script the name is written in (Bugbot,
+  # #736). An escape final is one byte, an intro plus a final is two, and every
+  # keyboard-input escape family fits in that. The probe is a yes/no only — it is
   # never returned. Nothing but residue => return empty, which callers already
   # treat as "no answer" (re-prompt, or auto-name).
   if ($s.Contains($esc)) {
-    $probe = $s -replace "$esc[^A-Za-z0-9~]*[A-Za-z~]+", ""
+    $probe = $s -replace "$esc[^A-Za-z0-9~]*[A-Za-z~]{1,2}", ""
     if ($probe -notmatch '[\p{L}\p{Nd}]') { return "" }
   }
   return (($s.ToCharArray() | Where-Object { [int]$_ -ge 32 -and [int]$_ -ne 127 }) -join "")

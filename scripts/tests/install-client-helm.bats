@@ -176,6 +176,15 @@ setup() {
   [ "$output" = "NC日本" ] || return 1
 }
 
+# The probe's final-byte run is bounded at two, so an ASCII name after an unknown
+# escape is kept just like a non-Latin one. Keep-vs-reject must not depend on the
+# script the name is written in — with an unbounded `+` the whole word was
+# swallowed and this input was refused while the 日本 case above was not (Bugbot).
+@test "_strip_paste_garbage: the floor keeps an ASCII name after an unknown escape" {
+  run _strip_paste_garbage "$(printf '\eNChello')"
+  [ "$output" = "NChello" ] || return 1
+}
+
 @test "_strip_paste_garbage: truncated SS3 (ESC O, no final) -> empty" {
   run _strip_paste_garbage "$(printf '\eO')"
   [ "$output" = "" ] || return 1
