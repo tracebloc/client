@@ -722,7 +722,7 @@ _use_real_runtime_probe() {
   run _try_start_docker_desktop
   [ "$status" -eq 0 ] || return 1
   # Nothing to nudge — and the caller must not be able to claim it started it.
-  ! grep -qF "LAUNCHED" <<<"$output"
+  ! grep -qF "LAUNCHED" <<<"$output" || return 1
 }
 
 @test "_try_start_docker_desktop: won't launch an app that isn't installed" {
@@ -738,5 +738,5 @@ _use_real_runtime_probe() {
   # skipping there means only CI ever runs it.
   _docker_app_installed() { return 1; }
   run -1 _try_start_docker_desktop
-  ! grep -qF "LAUNCHED" <<<"$output"
+  ! grep -qF "LAUNCHED" <<<"$output" || return 1
 }
