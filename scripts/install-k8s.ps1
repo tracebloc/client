@@ -2959,6 +2959,54 @@ function Write-HostCaCreateHint {
   Write-Host ""
 }
 
+# The recreate remedy, printed from ONE place -- peer of cluster.sh::_recreate_cluster_hint
+# (backend#2077).
+#
+# Why it can't just be `k3d cluster delete`: this machine's backend record is anchored to
+# the identity of the CLUSTER (the kube-system namespace UID), which is born with the k3d
+# cluster and dies with it. `k3d cluster delete` never calls the API, so the record keeps a
+# cluster_id that will never exist again -- the next run correctly registers a NEW secure
+# environment and the old one is stranded on the dashboard for good.
+#
+# `tracebloc delete` is the offboard that releases it: it revokes this machine's credential
+# server-side (the record is kept as history, never hard-destroyed), uninstalls the Helm
+# release and tears down its own local cluster. The revoke is an API call, so it still works
+# when the cluster itself is broken -- the state at most of these call sites.
+#
+# --keep-data is not optional: the plain form wipes the local data + config directory, which
+# is exactly what these call sites promise a recreate keeps. The k3d line stays because
+# `tracebloc delete` only tears down a cluster literally named `tracebloc`, so a custom
+# CLUSTER_NAME still needs it (and on the default name it is a harmless no-op).
+#
+# -RerunPrefix: env assignments to prefix the re-run with, for the call sites that need one.
+# Pure: the current kubectl context out of a BOUNDED kubectl's merged output.
+#
+# Invoke-BoundedProcess returns stdout and stderr concatenated in that order, and
+# `kubectl config current-context` prints exactly one line on stdout — so the first
+# non-empty line is the context and everything after it is noise. Comparing the whole
+# blob would hard-stop a correctly switched install the moment kubectl emitted a
+# deprecation or plugin warning on stderr; the bash peer sidesteps it with `2>/dev/null`,
+# which this helper is the Windows equivalent of (Bugbot).
+#
+# Empty in, empty out — "we couldn't tell" stays a failure at the call site, never a pass.
+function Get-CurrentContextFromOutput {
+  param([string]$Output)
+  foreach ($line in ($Output -split "`r?`n")) {
+    $trimmed = $line.Trim()
+    if ($trimmed -ne "") { return $trimmed }
+  }
+  return ""
+}
+
+function Write-RecreateClusterHint {
+  param([string]$RerunPrefix = "")
+  Hint "Release this machine's secure environment BEFORE deleting the cluster - it is anchored to the"
+  Hint "cluster's identity, so deleting the cluster first strands it on your dashboard for good:"
+  Hint "  tracebloc delete --keep-data      (releases this secure environment; keeps your local data)"
+  Hint "  k3d cluster delete $CLUSTER_NAME  (then ${RerunPrefix}re-run this installer)."
+  Hint "  (nothing installed on this machine yet? then just the k3d line.)"
+}
+
 # Warn (never fatal) when the RUNNING cluster's k3s differs from the validated pin.
 # k3s is baked in at create time; a cluster born unpinned, on an older installer, or
 # with K8S_VERSION=latest keeps its version across later pinned re-runs -- the #547
@@ -2997,7 +3045,7 @@ function Test-K3sVersionDrift {
     Hint "k3s version is fixed when the cluster is created -- it can't be changed on a running cluster."
     Hint "This cluster was created by an older/unpinned installer or with K8S_VERSION=latest (#547). To move"
     Hint "onto the validated version, recreate it:"
-    Hint "  k3d cluster delete $CLUSTER_NAME  (then re-run this installer)."
+    Write-RecreateClusterHint
     Hint "  (data under HOST_DATA_DIR is kept; recreate rebinds it.)"
   }
 }
@@ -3045,11 +3093,11 @@ function Confirm-ReusedClusterGpuCapable {
   # rather than stranding jobs Pending against a node that advertises 0 GPUs.
   if (Test-NodeImageGpuCapable -Image $img -Configured $K3S_CUDA_IMAGE) { return }
   $script:K3D_GPU_FLAG = ""
-  $script:GPU_SKIP_REASON = "the existing '$CLUSTER_NAME' cluster runs a CPU-only node (GPU capability is fixed when the cluster is created); delete it (k3d cluster delete $CLUSTER_NAME) and re-run to rebuild it with GPU support"
+  $script:GPU_SKIP_REASON = "the existing '$CLUSTER_NAME' cluster runs a CPU-only node (GPU capability is fixed when the cluster is created); release it with 'tracebloc delete --keep-data', delete it (k3d cluster delete $CLUSTER_NAME) and re-run to rebuild it with GPU support"
   Warn "GPU detected, but the existing '$CLUSTER_NAME' cluster is CPU-only -- running CPU mode so jobs aren't stranded Pending."
   Hint "k3s node image (and thus GPU capability) is fixed when the cluster is created; it can't be added to a running cluster."
   Hint "To enable GPU on this machine, recreate the cluster:"
-  Hint "  k3d cluster delete $CLUSTER_NAME   (then re-run this installer)"
+  Write-RecreateClusterHint
   Hint "  (data under HOST_DATA_DIR is kept; recreate rebinds it.)"
 }
 
@@ -3106,7 +3154,7 @@ function Test-HealthyClusterGpuConsistent {
   Warn "This cluster's values request GPU but it runs a CPU-only node -- GPU experiments will stay Pending."
   Hint "GPU capability is fixed when the cluster is created; it can't be added to a running cluster."
   Hint "Recreate the cluster to fix (data under HOST_DATA_DIR is kept):"
-  Hint "  k3d cluster delete $CLUSTER_NAME   (then re-run this installer)"
+  Write-RecreateClusterHint
 }
 
 # Build the sh -c body that pre-creates the chart's hostPath PV directories and
@@ -3393,7 +3441,7 @@ function New-K3dCluster {
         Warn "The existing '$CLUSTER_NAME' cluster binds its API to 0.0.0.0 (created outside this installer)."
         Hint "This installer binds clusters to 127.0.0.1; behind a corporate proxy a 0.0.0.0 bind can be intercepted."
         Hint "Your kubeconfig is normalized to 127.0.0.1 so reuse works. If kubectl is still intercepted, rebuild it:"
-        Hint "  k3d cluster delete $CLUSTER_NAME  (then re-run this installer)."
+        Write-RecreateClusterHint
       }
     } catch {}
 
@@ -3409,7 +3457,7 @@ function New-K3dCluster {
         Warn "A CA bundle is set, but the existing '$CLUSTER_NAME' cluster was created without it."
         Hint "k3d bakes CA trust into the nodes at create time -- it can't be added to a running cluster."
         Hint "If in-cluster image pulls fail x509, recreate the cluster so the CA is applied:"
-        Hint "  k3d cluster delete $CLUSTER_NAME  (then re-run this installer)."
+        Write-RecreateClusterHint
       }
     }
 
@@ -3426,7 +3474,7 @@ function New-K3dCluster {
         Hint "k3d bakes bind mounts in at create time - they can't be added to a running cluster. Re-using this"
         Hint "cluster would put datasets on ephemeral in-node storage (lost on a restart), not your network export."
         Hint "Recreate the cluster so the dataset volume is bound (data under HOST_DATASET_DIR is untouched):"
-        Hint "  k3d cluster delete $CLUSTER_NAME   (then re-run this installer)."
+        Write-RecreateClusterHint
         Err "Existing cluster is missing the dataset bind mount - refusing to install datasets onto ephemeral storage."
       }
     }
@@ -3620,13 +3668,68 @@ function New-K3dCluster {
     Ok "Compute environment ready."
   }
 
-  k3d kubeconfig merge $CLUSTER_NAME --kubeconfig-switch-context | Out-Null
+  # Peer of cluster.sh::_merge_kubeconfig (client#732). This merge is load-bearing:
+  # the installer passes no --kubeconfig/--context to `tracebloc client create`, so
+  # the secure environment is registered against whatever context is CURRENT. The
+  # old form piped the output to Out-Null and never looked at $LASTEXITCODE, so a
+  # failed merge left the previous current-context selected and the install carried
+  # on -- anchoring this machine to some other cluster (a corporate EKS, say).
+  #
+  # --kubeconfig-merge-default is required and was MISSING (Bugbot): without it k3d
+  # writes a standalone ~/.k3d/kubeconfig-<cluster>.yaml and never touches the file
+  # kubectl actually reads -- so a zero exit here proved nothing about the anchor,
+  # and the remedy printed below couldn't have repaired it either.
+  #
+  # Bounded like the bash peer: k3d reads the kubeconfig out of the node through the
+  # Docker daemon, so a wedged daemon would otherwise stall a headless install here
+  # with no output at all.
+  $mergeCmd = "k3d kubeconfig merge $CLUSTER_NAME --kubeconfig-merge-default --kubeconfig-switch-context"
+  $merge = Invoke-BoundedProcess -FileName "k3d" -TimeoutSec 60 `
+    -Arguments @("kubeconfig", "merge", $CLUSTER_NAME, "--kubeconfig-merge-default", "--kubeconfig-switch-context")
+  if ($merge.Code -ne 0) {
+    if ($merge.Code -eq 124) {
+      Warn "Pointing kubectl at the '$CLUSTER_NAME' cluster timed out after 60s (k3d couldn't read the cluster's kubeconfig)."
+      Hint "That usually means the Docker daemon is wedged -- check 'docker ps' answers, then re-run."
+    } else {
+      Warn "Couldn't point kubectl at the '$CLUSTER_NAME' cluster (k3d kubeconfig merge exited $($merge.Code))."
+    }
+    Hint "Stopping here on purpose: this machine's secure environment is registered against whichever"
+    Hint "cluster kubectl currently points at, so continuing would connect it to the wrong cluster."
+    Hint "Fix that (or merge it yourself with the command below), then re-run this installer:"
+    Hint "  $mergeCmd"
+    Err "kubectl was not pointed at '$CLUSTER_NAME' - refusing to continue against an unknown cluster." $merge.Output
+  }
+  if ($merge.Output) { Log "k3d kubeconfig merge: $($merge.Output)" }
 
-  $kubeConfigPath = "$env:USERPROFILE\.kube\config"
+  # Normalize the file k3d just wrote, not a guess at it: with --kubeconfig-merge-default
+  # k3d honours $KUBECONFIG (first entry of the ';'-separated list) and only falls back to
+  # %USERPROFILE%\.kube\config. Mirrors the bash peer's `${KUBECONFIG%%:*}`.
+  $kubeConfigPath = if ($env:KUBECONFIG) { ($env:KUBECONFIG -split ';')[0] } else { "$env:USERPROFILE\.kube\config" }
   if (Test-Path $kubeConfigPath) {
     (Get-Content $kubeConfigPath) `
       -replace 'host\.docker\.internal', '127.0.0.1' `
       -replace 'https://0\.0\.0\.0:', 'https://127.0.0.1:' | Set-Content $kubeConfigPath -Encoding UTF8
+  }
+
+  # Confirm the ANCHOR rather than infer it from an exit code (peer of the bash
+  # check). What everything downstream depends on is that kubectl's current context
+  # IS this cluster; k3d v5 names the context it writes `k3d-<cluster>`. Fail closed:
+  # a context we cannot read is not one we can vouch for. Bounded, like every other
+  # kubectl call in this installer.
+  $wantCtx = "k3d-$CLUSTER_NAME"
+  $ctx = Invoke-BoundedProcess -FileName "kubectl" -Arguments @("config", "current-context") -TimeoutSec 10
+  $haveCtx = Get-CurrentContextFromOutput -Output "$($ctx.Output)"
+  if ($ctx.Code -ne 0 -or $haveCtx -ne $wantCtx) {
+    if ($ctx.Code -ne 0) {
+      Warn "k3d merged the '$CLUSTER_NAME' kubeconfig, but kubectl can't tell us which context is current."
+    } else {
+      Warn "k3d merged the '$CLUSTER_NAME' kubeconfig, but kubectl's current context is '$haveCtx', not '$wantCtx'."
+    }
+    Hint "This machine's secure environment is registered against the CURRENT context, so continuing"
+    Hint "would connect it to that other cluster instead of the one this installer just prepared."
+    Hint "Select this cluster, then re-run this installer:"
+    Hint "  kubectl config use-context $wantCtx"
+    Err "kubectl is not pointed at '$CLUSTER_NAME' - refusing to continue against an unknown cluster."
   }
 
   # Ensure THIS installer's own kubectl bypasses the proxy for the cluster API
