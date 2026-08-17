@@ -122,6 +122,65 @@ setup() {
   [ "$output" = "abcd" ] || return 1
 }
 
+# ── SS3 (cli#516) ──────────────────────────────────────────────────────────
+# The CSI-only strip landed 2026-07-21 (client#362 / cli#364) and is not in
+# question here. SS3 — ESC 'O' <final> — is what the SAME keys emit once the
+# terminal is in DECCKM application-cursor mode, the state vim/less/tmux leave
+# behind on an unclean exit. It was worse than the CSI case it was missed
+# alongside: CSI residue cleans to empty and re-prompts, while ESC OD ESC OA
+# left the non-empty, plausible "ODOA" and minted a permanent namespace.
+@test "_strip_paste_garbage: strips SS3 escapes around real content" {
+  run _strip_paste_garbage "$(printf 'na\eODme')"
+  [ "$output" = "name" ] || return 1
+}
+
+@test "_strip_paste_garbage: SS3 arrows only -> empty (caller re-prompts)" {
+  run _strip_paste_garbage "$(printf '\eOD\eOD\eOD\eOA\eOA\eOA')"
+  [ "$output" = "" ] || return 1
+}
+
+@test "_strip_paste_garbage: SS3 Home/End and F1/F2 -> empty" {
+  run _strip_paste_garbage "$(printf '\eOH\eOF')"
+  [ "$output" = "" ] || return 1
+  run _strip_paste_garbage "$(printf '\eOP\eOQ')"
+  [ "$output" = "" ] || return 1
+}
+
+@test "_strip_paste_garbage: SS3 and CSI mixed in one value" {
+  run _strip_paste_garbage "$(printf 'a\eODb\e[Dc')"
+  [ "$output" = "abc" ] || return 1
+}
+
+@test "_strip_paste_garbage: a bare O is not an escape" {
+  run _strip_paste_garbage "OPTIMUS-01"
+  [ "$output" = "OPTIMUS-01" ] || return 1
+}
+
+# ── the post-sanitise floor ────────────────────────────────────────────────
+# An ESC that SURVIVES the strip means an escape family this helper does not
+# know — which is exactly how SS3 got here. SS2 (ESC 'N' <final>) stands in for
+# "the next family": it is not stripped above, so these exercise the floor and
+# nothing else.
+@test "_strip_paste_garbage: unknown escape family, residue only -> empty" {
+  run _strip_paste_garbage "$(printf '\eNB\eNC')"
+  [ "$output" = "" ] || return 1
+}
+
+@test "_strip_paste_garbage: unknown escape family beside real content is kept" {
+  run _strip_paste_garbage "$(printf 'box\eNC')"
+  [ "$output" = "boxNC" ] || return 1
+}
+
+@test "_strip_paste_garbage: the floor counts non-Latin letters as real content" {
+  run _strip_paste_garbage "$(printf '\eNC日本')"
+  [ "$output" = "NC日本" ] || return 1
+}
+
+@test "_strip_paste_garbage: truncated SS3 (ESC O, no final) -> empty" {
+  run _strip_paste_garbage "$(printf '\eO')"
+  [ "$output" = "" ] || return 1
+}
+
 @test "_sanitize_workspace_name: lowercases + dashes" {
   run _sanitize_workspace_name "My Team_1"
   [ "$output" = "my-team-1" ] || return 1
