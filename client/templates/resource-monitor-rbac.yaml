@@ -40,9 +40,24 @@ metadata:
   labels:
     {{- include "tracebloc.labels" . | nindent 4 }}
     app: {{ include "tracebloc.resourceMonitorName" . }}
+{{/*
+  Keep this rule matched to what the DaemonSet image actually calls. The image
+  (Node-deploy/Dockerfile) ships exactly resource_monitor.py, resource_utils.py,
+  constants.py and proxy_config.py, whose entire Kubernetes surface is:
+    read_namespaced_pod            -> pods            get
+    list_pod_for_all_namespaces    -> pods            list
+    read_node / read_node_status   -> nodes, nodes/status  get
+    list_namespaced_custom_object  -> metrics.k8s.io/pods  list
+    get_cluster_custom_object      -> metrics.k8s.io/nodes get
+  `pods/log` and `namespaces` were granted but never called; `pods/log` is
+  removed because cluster-wide it lets this ServiceAccount read the LOG CONTENTS
+  of every pod in the cluster -- including other tenants' training pods, which
+  run customer code and print customer data. That is a real exfiltration path
+  for a node-telemetry agent that never reads a log. backend#950.
+*/}}
 rules:
   - apiGroups: [""]
-    resources: ["pods", "pods/log", "nodes", "nodes/status", "namespaces"]
+    resources: ["pods", "nodes", "nodes/status"]
     verbs: ["get", "list", "watch"]
   - apiGroups: ["metrics.k8s.io"]
     resources: ["pods", "nodes"]
