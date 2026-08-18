@@ -63,13 +63,14 @@ attr() {
   [[ "$output" == *'"event.name":"install.run.cancelled"'* ]] || return 1
 }
 
-@test "the exit-2 re-run handoff is not a failure (saadqbal, client#747)" {
-  # gpu-nvidia.sh:55 exits 2 after install_nvidia_drivers SUCCEEDED, to ask for a
+@test "the DECLARED exit-2 re-run handoff is not a failure (saadqbal, client#747)" {
+  # gpu-nvidia.sh exits 2 after install_nvidia_drivers SUCCEEDED, to ask for a
   # reboot. That call sits under step_header b, so folding 2 into `failed` booked
   # a fabricated `prerequisites_failed` on every unattended GPU host's first
   # install — in the very rate this ticket exists to produce. install_cleanup has
   # treated 2 as its own outcome ("Re-run required") since client#681.
   TB_TELEMETRY_PHASE=prerequisites
+  telemetry_rerun_handoff          # what the `exit 2` site does before exiting
   run telemetry_render_event 2
   [ "$status" -eq 0 ] || return 1
   [ "$(attr "$output" 'event.name')" = "install.run.cancelled" ] || return 1
@@ -83,6 +84,63 @@ attr() {
   run telemetry_render_event 1
   [ "$(attr "$output" 'event.name')" = "install.run.failed" ] || return 1
   [ "$(attr "$output" 'error.type')" = "prerequisites_failed" ] || return 1
+}
+
+@test "an UNDECLARED exit 2 is a failure with its own error.type (saadqbal, client#747)" {
+  # 2 is a sentinel the installer chose AND a status ordinary tools produce: grep
+  # exits 2 on a file error, curl on a failed init, tar on a fatal, and
+  # cluster.sh:1129 re-raises whatever k3d returned. Keyed on the NUMBER, every one
+  # of those rendered `cancelled` with no error.type — a hard failure removed from
+  # the NUMERATOR of the rate this ticket exists to produce rather than misfiled
+  # inside it, which is the direction nobody notices.
+  #
+  # So: no marker, no handoff. Fail closed toward counting it.
+  TB_TELEMETRY_PHASE=prerequisites
+  [ -z "$_TB_TELEMETRY_RERUN_HANDOFF" ] || return 1   # nothing has declared one
+  run telemetry_render_event 2
+  [ "$status" -eq 0 ] || return 1
+  [ "$(attr "$output" 'event.name')" = "install.run.failed" ] || return 1
+  # And it is DISTINGUISHABLE — not folded into the phase's own bucket, where a
+  # stray 2 would be indistinguishable from a real prerequisite failure, and not
+  # `unclassified`, which already means "we cannot name the phase".
+  [ "$(attr "$output" 'error.type')" = "unexpected_exit_2" ] || return 1
+  [ "$(attr "$output" 'tracebloc.install.exit_code')" = "2" ] || return 1
+  # The phase is not lost by flattening the class: it is its own attribute.
+  [ "$(attr "$output" 'tracebloc.install.phase')" = "prerequisites" ] || return 1
+
+  # It wins over a readiness diagnosis too: an exit status that was not ours to
+  # read is a less trustworthy input than saying so, and client_state stays on the
+  # record either way.
+  TB_TELEMETRY_PHASE=connect
+  CLIENT_STATE=image_pull_ca
+  run telemetry_render_event 2
+  [ "$(attr "$output" 'error.type')" = "unexpected_exit_2" ] || return 1
+  [ "$(attr "$output" 'tracebloc.install.client_state')" = "image_pull_ca" ] || return 1
+  # The anchor: the same state on an ordinary failure still yields the diagnosis,
+  # or this test would pass against a classifier that only ever says one thing.
+  run telemetry_render_event 1
+  [ "$(attr "$output" 'error.type')" = "image_pull_untrusted_ca" ] || return 1
+}
+
+@test "the marker cannot be inherited from the environment (fail closed)" {
+  # The marker is a process-internal handshake, not an input. Read off the
+  # environment, `_TB_TELEMETRY_RERUN_HANDOFF=1` in a user's shell would turn every
+  # real failure into a cancel — the same fail-open hole one level down. telemetry.sh
+  # clears it at source time, before main() runs.
+  run env _TB_TELEMETRY_RERUN_HANDOFF=1 CLIENT_ENV=prod OS=Linux ARCH=x86_64 \
+    bash -c 'source "'"$LIB_DIR"'/common.sh"; source "'"$LIB_DIR"'/telemetry.sh"
+             LOG_FILE=/dev/null; telemetry_render_event 2'
+  [ "$status" -eq 0 ] || return 1
+  [ "$(attr "$output" 'event.name')" = "install.run.failed" ] || return 1
+  [ "$(attr "$output" 'error.type')" = "unexpected_exit_2" ] || return 1
+
+  # The anchor: the same harness DOES honour a handoff declared in-process, so the
+  # assertion above is about where the value came from and not about the harness
+  # being unable to produce a cancel at all.
+  run env CLIENT_ENV=prod OS=Linux ARCH=x86_64 \
+    bash -c 'source "'"$LIB_DIR"'/common.sh"; source "'"$LIB_DIR"'/telemetry.sh"
+             LOG_FILE=/dev/null; telemetry_rerun_handoff; telemetry_render_event 2'
+  [ "$(attr "$output" 'event.name')" = "install.run.cancelled" ] || return 1
 }
 
 @test "every event name the renderer produces is one it declares" {
@@ -631,6 +689,76 @@ attr() {
   '
   [ "$status" -eq 130 ] || return 1
   grep -q '"event.name":"install.run.cancelled"' "$spool" || return 1
+}
+
+@test "an ordinary tool's status 2 lands in the numerator, under the real trap" {
+  # THE REPRODUCTION, as a test. A bare `grep` on an unreadable file exits 2 — its
+  # own file-error status, nothing to do with the installer's sentinel — and under
+  # `set -e` that becomes install-k8s.sh's exit status. Keyed on the number, this
+  # spooled install.run.cancelled with no error.type: a hard failure REMOVED from
+  # the rate rather than misfiled in it. (saadqbal on client#747.)
+  #
+  # Driven through install_cleanup with install-k8s.sh's own trap wiring, not
+  # through telemetry_render_event, because the whole point is what an unmodified
+  # command failing somewhere in the middle of a real run produces.
+  local spool="$HOST_DATA_DIR/telemetry/pending.jsonl"
+  run bash -c '
+    set -euo pipefail
+    source "'"$LIB_DIR"'/common.sh"
+    source "'"$LIB_DIR"'/telemetry.sh"
+    LOG_FILE=/dev/null
+    HOST_DATA_DIR="'"$HOST_DATA_DIR"'"
+    CLIENT_ENV=prod
+    telemetry_run_started
+    trap install_cleanup EXIT
+    set -E
+    trap '"'"'_record_err "${BASH_SOURCE[0]:-?}:${LINENO}" "$BASH_COMMAND"'"'"' ERR
+    telemetry_phase_begin b
+    grep -q anything /nonexistent/definitely/not/here
+  ' 3>&-
+  # The anchor: grep really did supply the 2, so the assertions below are about a
+  # tool's own status and not about a number this test picked.
+  [ "$status" -eq 2 ] || { printf 'expected exit 2 from grep, got %s\n' "$status" >&2; return 1; }
+  grep -q '"event.name":"install.run.failed"' "$spool" || {
+    printf 'the record was: %s\n' "$(cat "$spool")" >&2; return 1
+  }
+  grep -q '"error.type":"unexpected_exit_2"' "$spool" || return 1
+  # …and NOT the phase's ordinary bucket, which would hide it among real ones.
+  ! grep -q '"error.type":"prerequisites_failed"' "$spool" || return 1
+}
+
+@test "gpu-nvidia's reboot handoff still renders a cancel, through its real exit" {
+  # The other direction, and the one that must not regress: the marker has to be
+  # SET at the site, so this drives install_nvidia_drivers itself rather than
+  # re-implementing its exit. A mutation that drops the setter call from
+  # gpu-nvidia.sh has to redden here (workspace CLAUDE.md rule 9); asserting on a
+  # hand-written `telemetry_rerun_handoff; exit 2` could not see it.
+  local spool="$HOST_DATA_DIR/telemetry/pending.jsonl"
+  run bash -c '
+    set -euo pipefail
+    source "'"$LIB_DIR"'/common.sh"
+    source "'"$LIB_DIR"'/telemetry.sh"
+    source "'"$LIB_DIR"'/gpu-nvidia.sh"
+    LOG_FILE=/dev/null
+    HOST_DATA_DIR="'"$HOST_DATA_DIR"'"
+    CLIENT_ENV=prod
+    telemetry_run_started
+    trap install_cleanup EXIT
+    telemetry_phase_begin b
+    NVIDIA_DRIVER_OK=false
+    PM_UPDATE=true
+    PM_INSTALL=true
+    has() { return 0; }
+    sudo() { return 0; }
+    ubuntu-drivers() { return 0; }
+    TRACEBLOC_SKIP_REBOOT_PROMPT=1
+    install_nvidia_drivers
+  ' 3>&-
+  [ "$status" -eq 2 ] || { printf 'expected the exit-2 handoff, got %s\n' "$status" >&2; return 1; }
+  grep -q '"event.name":"install.run.cancelled"' "$spool" || {
+    printf 'the record was: %s\n' "$(cat "$spool")" >&2; return 1
+  }
+  ! grep -q '"error.type"' "$spool" || return 1
 }
 
 @test "a --help run installs nothing and must emit nothing (Bugbot, client#747)" {

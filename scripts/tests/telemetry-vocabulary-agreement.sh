@@ -120,21 +120,29 @@ compare "source basenames" "$TB_TELEMETRY_SOURCES" "$derived_sources" \
 
 # --- 4. error classes ← telemetry_error_class's actual behaviour ------------
 # No second declaration exists to parse, so this exercises the classifier over
-# the full cross-product of its two closed input sets. Both directions matter:
+# the full cross-product of its closed input sets. Both directions matter:
 # an unregistered answer is a namespace opening on its own, and a registered
 # class nothing can produce is a dashboard row that will never populate.
+#
+# The re-run marker is the classifier's fourth input and it is a BOOLEAN, so the
+# full input domain over it is both values — enumerated here rather than left at
+# the default, because a vocabulary gap is exactly what mutation coverage cannot
+# see (workspace CLAUDE.md rule 6). Leaving it out would make `unexpected_exit_2`
+# unreachable and this section would say so; that reading is the check working.
 phase_names="bootstrap unknown"
 for pair in $TB_TELEMETRY_PHASES; do phase_names="$phase_names ${pair#*:}"; done
 produced=""
 for phase in $phase_names; do
   for state in "" $TB_TELEMETRY_CLIENT_STATES; do
     for code in 1 2 42 130; do
-      cls="$(telemetry_error_class "$code" "$phase" "$state")"
-      produced="$produced $cls"
-      case " $TB_TELEMETRY_ERROR_CLASSES " in
-        *" $cls "*) ;;
-        *) disagree "telemetry_error_class($code, $phase, '$state') returned '$cls', which is not in TB_TELEMETRY_ERROR_CLASSES" ;;
-      esac
+      for handoff in "" 1; do
+        cls="$(telemetry_error_class "$code" "$phase" "$state" "$handoff")"
+        produced="$produced $cls"
+        case " $TB_TELEMETRY_ERROR_CLASSES " in
+          *" $cls "*) ;;
+          *) disagree "telemetry_error_class($code, $phase, '$state', '$handoff') returned '$cls', which is not in TB_TELEMETRY_ERROR_CLASSES" ;;
+        esac
+      done
     done
   done
 done
@@ -248,7 +256,9 @@ compare "event names" "$declared_names" "$parsed_names" \
   "the literals in telemetry_render_event's case statement"
 
 # (b) what the function actually renders, over the exit codes the installer
-# produces: 0, the re-run handoff (2), an ordinary failure, and both signals.
+# produces: 0, a bare 2, an ordinary failure, and both signals. 2 is swept here
+# with the re-run marker UNSET, which is the ordinary-tool case — the marker's own
+# effect on the render is (d5)'s job, because it is a behaviour and not a name.
 # Read by the sourced telemetry.sh, not by this file — telemetry_render_event
 # needs a recognised environment or it renders nothing at all (§3.2), which would
 # make the comparison below inert.
@@ -279,25 +289,115 @@ for ev in $declared_names; do
   [[ $ev =~ $name_re ]] || disagree "'$ev' is not a legal contract event name (§6.1: three segments, ^[a-z][a-z0-9_]*)"
 done
 
-# (d) the re-run handoff must not be a failure. gpu-nvidia.sh:55 exits 2 after a
-# SUCCESSFUL driver install to ask for a reboot, and install_cleanup has treated
-# 2 as its own outcome since client#681 — so an exit 2 that renders `failed`
-# fabricates a prerequisite failure on every unattended GPU host's first install.
-# Derived from install_cleanup's own branch rather than restated: if common.sh
-# stops treating 2 specially, this check retires itself loudly rather than
+# (d) THE RE-RUN HANDOFF IS A MARKER, NOT THE NUMBER 2.
+#
+# gpu-nvidia.sh exits 2 after a SUCCESSFUL driver install to ask for a reboot, and
+# install_cleanup has treated 2 as its own outcome since client#681 — so an exit 2
+# that renders `failed` fabricates a prerequisite failure on every unattended GPU
+# host's first install. That much this check always proved.
+#
+# What it did not: `2` is also a status ORDINARY TOOLS produce (grep on a file
+# error, curl on a failed init, tar on a fatal, and cluster.sh's `exit "$create_rc"`
+# re-raising whatever k3d returned). Keying on the number filed those as
+# `cancelled` with no error.type — removed from the numerator, not misfiled in it.
+# So the checked property is now agreement between the marker's PRODUCERS, the
+# emitter's BRANCH, and the RENDER, in that order. (saadqbal on client#747.)
+#
+# Still derived from install_cleanup's own branch as the premise: if common.sh
+# stops treating 2 specially, this whole section retires itself loudly rather than
 # guarding a rule that no longer exists.
 COMMON="$root/scripts/lib/common.sh"
 [ -r "$COMMON" ] || fail_closed "cannot read scripts/lib/common.sh"
-if grep -qE '^\s*if \[\[ \$exit_code -eq 2 \]\]; then' "$COMMON"; then
-  ev2="$(telemetry_render_event 2 | sed -nE 's/.*"event\.name":"([^"]*)".*/\1/p')"
-  case "$ev2" in
-    *.failed) disagree "install_cleanup treats exit 2 as its own outcome (\"Re-run required\") but telemetry renders it as '$ev2' — gpu-nvidia.sh:55 exits 2 after a driver install SUCCEEDED" ;;
-    '')       disagree "exit 2 rendered no event at all" ;;
-    *)        printf '  ok: the exit-2 re-run handoff renders %s, not a failure\n' "$ev2" ;;
-  esac
-else
-  fail_closed "could not find install_cleanup's exit-2 branch in common.sh — this check's premise is gone, so it proves nothing"
+grep -qE '^\s*if \[\[ \$exit_code -eq 2 \]\]; then' "$COMMON" \
+  || fail_closed "could not find install_cleanup's exit-2 branch in common.sh — this check's premise is gone, so it proves nothing"
+
+# (d1) the variable the emitter's exit-2 branch actually tests, read out of the
+# branch itself. Not written down here: a second spelling of the name is how this
+# check would go on passing after a rename that broke the handoff.
+handoff_var="$(awk '/^  case "\$code" in/{c=1} c&&/^    2\)/{b=1} b&&match($0,/_TB_[A-Z_]+/){print substr($0,RSTART,RLENGTH); exit}' "$TELEMETRY")"
+[ -n "$handoff_var" ] || fail_closed "could not find the variable telemetry_render_event's exit-2 branch tests — the parse is inert, so this check proves nothing"
+
+# (d2) the SETTER: the one-line function in telemetry.sh whose body assigns that
+# variable — the same shape as its two sibling latches (telemetry_run_started,
+# telemetry_run_skipped). Derived, so a rename moves both sides at once or reddens
+# here. Deliberately NOT "the nearest preceding function header": the top-level
+# `<var>=""` init line would then be attributed to whichever latch was defined
+# above it, and this check would go on green while pointing at the wrong function.
+# Reformatting the setter across several lines makes this parse inert, and inert
+# fails closed below rather than passing.
+handoff_fn="$(sed -nE "s/^([a-z_]+)\(\) \{[^}]*${handoff_var}=.*/\1/p" "$TELEMETRY" | head -1)"
+[ -n "$handoff_fn" ] || fail_closed "no function in telemetry.sh assigns $handoff_var — the marker has no setter, so nothing can declare a handoff"
+declare -F "$handoff_fn" >/dev/null 2>&1 \
+  || fail_closed "$handoff_fn was parsed out of telemetry.sh but is not defined after sourcing it"
+
+# (d3) the marker must be CLEARED at source time. This is the fail-open hole one
+# level down: read as an inherited environment value, `<var>=1` in a user's shell
+# would turn every real failure into a cancel.
+grep -qE "^${handoff_var}=(\"\"|'')?\$" "$TELEMETRY" \
+  || disagree "$handoff_var is not cleared at telemetry.sh's top level — an inherited environment value could pose as a declared handoff"
+
+# (d4) EVERY deliberate `exit 2` in the installer runtime declares the handoff.
+# The runtime is install-k8s.sh plus the libs it sources: those are the files that
+# run under install_cleanup's EXIT trap, and therefore the only ones whose exit
+# status telemetry ever sees. A NEW handoff site added without the setter books
+# itself as a failure — the safe direction, but still wrong, and this is what
+# says so.
+#
+# Fails closed on ZERO sites, because that is the shape this whole change exists
+# to prevent: install_cleanup still reads TRACEBLOC_DOCKER_FIRST_RUN_EXIT, whose
+# only producer was deleted in 8c3a3d4 (March) — a live branch keyed on a marker
+# nothing sets, passing forever. Zero producers here means the marker has quietly
+# become that, and "no sites to check" must never read as agreement.
+handoff_sites=0 undeclared=""
+while IFS= read -r hit; do
+  f="${hit%%:*}"; rest="${hit#*:}"; n="${rest%%:*}"
+  handoff_sites=$(( handoff_sites + 1 ))
+  # The declaration must be in the same block, immediately before the exit. Three
+  # lines is the window: the guarded call is one line, and a `log` line before it
+  # is the existing shape at gpu-nvidia.sh's site.
+  if ! awk -v s="$(( n > 3 ? n - 3 : 1 ))" -v e="$n" -v fn="$handoff_fn" \
+        'NR>=s && NR<e && index($0, fn) { found=1 } END { exit !found }' "$f"; then
+    undeclared="$undeclared ${f#"$root"/}:$n"
+  fi
+done < <(grep -nE '^[[:space:]]*exit 2[[:space:]]*(#.*)?$' \
+           "$INSTALL_K8S" "$root"/scripts/lib/*.sh 2>/dev/null || true)
+if [ "$handoff_sites" -eq 0 ]; then
+  fail_closed "no \`exit 2\` site exists in the installer runtime, so nothing calls $handoff_fn — the marker is dead and the emitter's cancelled branch is unreachable (the TRACEBLOC_DOCKER_FIRST_RUN_EXIT shape)"
 fi
+if [ -n "$undeclared" ]; then
+  disagree "these \`exit 2\` sites do not call $handoff_fn, so telemetry will book them as failures:$undeclared"
+else
+  printf '  ok: all %s deliberate `exit 2` site(s) declare the handoff via %s\n' "$handoff_sites" "$handoff_fn"
+fi
+
+# (d5) and the render agrees with the marker, in BOTH directions — through the
+# real functions, on the real variable, so a mutation of either has to redden this
+# (workspace CLAUDE.md rule 9). The undeclared direction is the one the number-
+# keyed version got wrong, and it is asserted first.
+eval "$handoff_var=''"
+ev2_bare="$(telemetry_render_event 2)"
+case "$(printf '%s' "$ev2_bare" | sed -nE 's/.*"event\.name":"([^"]*)".*/\1/p')" in
+  '')       disagree "an undeclared exit 2 rendered no event at all" ;;
+  *.failed) case "$ev2_bare" in
+              *'"error.type"'*) printf '  ok: an undeclared exit 2 is a failure and carries error.type (§8.4)\n' ;;
+              *) disagree "an undeclared exit 2 renders failed but carries no error.type — §8.4 requires one, and a failure that cannot be grouped is the reason this contract exists" ;;
+            esac ;;
+  *)        disagree "an undeclared exit 2 renders '$(printf '%s' "$ev2_bare" | sed -nE 's/.*"event\.name":"([^"]*)".*/\1/p')' — an ordinary tool's status 2 escaping under \`set -e\` must land in the numerator, not be silently cancelled" ;;
+esac
+
+"$handoff_fn"
+ev2_marked="$(telemetry_render_event 2)"
+case "$(printf '%s' "$ev2_marked" | sed -nE 's/.*"event\.name":"([^"]*)".*/\1/p')" in
+  *.failed) disagree "a DECLARED exit 2 renders failed — install_cleanup treats it as its own outcome (\"Re-run required\") and gpu-nvidia.sh exits 2 after a driver install SUCCEEDED" ;;
+  '')       disagree "a declared exit 2 rendered no event at all" ;;
+  *)        case "$ev2_marked" in
+              *'"error.type"'*) disagree "a declared exit 2 carries error.type — it is not a failure, and §8.4 attaches error.type to failures" ;;
+              *) printf '  ok: a declared exit 2 renders %s, not a failure\n' "$(printf '%s' "$ev2_marked" | sed -nE 's/.*"event\.name":"([^"]*)".*/\1/p')" ;;
+            esac ;;
+esac
+# The marker is process state and the sections below render more events: leave it
+# the way telemetry.sh sourced it, or (b)'s name sweep silently runs half-marked.
+eval "$handoff_var=''"
 
 # --- 7. the documented opt-out ← telemetry.sh's real variables --------------
 # A stale doc here is worse than none: a user who exports the variable

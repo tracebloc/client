@@ -88,11 +88,24 @@ TB_TELEMETRY_EVENT_NAMES="install.run.succeeded install.run.failed install.run.c
 TB_TELEMETRY_CLIENT_STATES="connected starting bad_creds image_pull image_pull_ca crash"
 
 # ── error.type vocabulary for the `install` domain (§8.4) ────────────────────
-# The spec's open question 1 says each emitter ticket proposes its own. This one
-# is a function of (phase reached, client state) — both closed sets — so it is
-# incapable of carrying anything else. Ordered most-specific first: a readiness
-# diagnosis names the actual fault, where a phase only names where it stopped.
-TB_TELEMETRY_ERROR_CLASSES="bad_credentials image_pull_failed image_pull_untrusted_ca crash_loop not_ready bootstrap_failed preflight_failed prerequisites_failed cluster_create_failed registration_failed helm_install_failed unclassified"
+# The spec's open question 1 says each emitter ticket proposes its own — so a
+# value added here is a decision this file gets to take, unlike an outcome verb
+# (§6.4), which is a closed registry and a PR against the contract.
+#
+# This one is a function of (re-run handoff declared?, client state, phase
+# reached) — all closed — so it is incapable of carrying anything else. Ordered
+# most-specific first: an undeclared exit 2 says the STATUS itself was not ours
+# to read, a readiness diagnosis names the actual fault, and a phase only names
+# where the run stopped.
+#
+# `unexpected_exit_2` is its own row rather than `unclassified` or the phase's
+# own bucket, because both of those hide it: `unclassified` already means "we
+# cannot name the phase", and `prerequisites_failed` would make an ordinary
+# tool's stray 2 indistinguishable from a real prerequisite failure. The phase
+# is not lost by flattening it — tracebloc.install.phase is its own attribute on
+# the same record — and flattening is what makes the class countable as one
+# thing, which is the whole point of surfacing it.
+TB_TELEMETRY_ERROR_CLASSES="unexpected_exit_2 bad_credentials image_pull_failed image_pull_untrusted_ca crash_loop not_ready bootstrap_failed preflight_failed prerequisites_failed cluster_create_failed registration_failed helm_install_failed unclassified"
 
 # ── Source-file vocabulary ───────────────────────────────────────────────────
 # The installer already records WHERE it died (common.sh's _record_err), and
@@ -200,6 +213,43 @@ telemetry_run_started() { _TB_TELEMETRY_RUN_STARTED=1; return 0; }
 _TB_TELEMETRY_SKIPPED=""
 telemetry_run_skipped() { _TB_TELEMETRY_SKIPPED=1; return 0; }
 
+# ── "complete this step and re-run" marker ───────────────────────────────────
+# THE SENTINEL IS A MARKER, NOT THE NUMBER 2.
+#
+# `2` is a status the installer chose to mean "complete this step and re-run",
+# and it is also a status ORDINARY TOOLS PRODUCE: grep exits 2 on a file error,
+# curl on a failed init, tar on a fatal. Any bare one of those failing under
+# `set -e` exits install-k8s.sh with 2 — and keying on the number rendered that
+# as `cancelled` with NO error.type, i.e. a hard failure REMOVED FROM THE
+# NUMERATOR of the rate this ticket exists to produce rather than misfiled
+# inside it. Silence is worse than a wrong label, and this is the direction
+# nobody notices. (saadqbal on client#747; reproduced end-to-end — a bare
+# `grep -q x /nonexistent` in step b spooled install.run.cancelled, no
+# error.type, under the installer's own trap wiring.)
+#
+# So the handoff is declared at the `exit 2` SITE and the emitter keys on that.
+# An exit 2 nobody declared is a failure with its own error.type, which is the
+# fail-closed direction: it lands in the numerator, and it is visible as
+# "exited 2 for a reason we did not choose" instead of being folded into the
+# phase bucket an ordinary failure would use.
+#
+# CLEARED AT SOURCE TIME, and that line is the point of it: this is a
+# process-internal handshake, not an input. Were it read as `${VAR:-}` off the
+# environment, `VAR=1` in a user's shell would turn every real failure into a
+# cancel — the same fail-open hole one level up. telemetry.sh is sourced in
+# install-k8s.sh's preamble, before main() runs, so an inherited value cannot
+# survive to be read. A function rather than a documented variable name for the
+# same reason: the producers call code, so there is one spelling of it.
+#
+# There is precedent for the drift this shape prevents: install_cleanup still
+# reads TRACEBLOC_DOCKER_FIRST_RUN_EXIT, whose only producer (an
+# `export` in setup-macos.sh) was deleted in 8c3a3d4 back in March — a marker
+# read by a live branch that nothing has set since. telemetry-vocabulary-
+# agreement.sh therefore fails closed when this marker has ZERO producers,
+# rather than passing forever on a handoff that can no longer happen.
+_TB_TELEMETRY_RERUN_HANDOFF=""
+telemetry_rerun_handoff() { _TB_TELEMETRY_RERUN_HANDOFF=1; return 0; }
+
 # ── Opt-out ──────────────────────────────────────────────────────────────────
 # Opt-OUT by design: telemetry only the already-convinced enable measures the
 # wrong population, and the population this exists for is people whose install
@@ -300,19 +350,30 @@ _telemetry_phase_ms() {
 
 # ── Classification ───────────────────────────────────────────────────────────
 
-# telemetry_error_class EXIT_CODE PHASE CLIENT_STATE — the closed error.type.
+# telemetry_error_class EXIT_CODE PHASE CLIENT_STATE HANDOFF — the closed error.type.
 #
-# Both inputs are closed sets, so this cannot see — and therefore cannot
-# forward — an error message, a path or an argument. A readiness diagnosis wins
-# over the phase because it names the actual fault rather than the place the run
-# stopped.
-# The exit code is accepted but deliberately unread: the installer's status is
-# already its own attribute, and folding it in here would give two attributes
-# one meaning. It stays in the signature so a future classification that DOES
-# need it is a body change, not a call-site change.
-# shellcheck disable=SC2034
+# Every input is a closed set (HANDOFF is a boolean), so this cannot see — and
+# therefore cannot forward — an error message, a path or an argument. A readiness
+# diagnosis wins over the phase because it names the actual fault rather than the
+# place the run stopped.
+#
+# The exit code was accepted but deliberately unread, on the grounds that the
+# installer's status is already its own attribute and folding it in here would
+# give two attributes one meaning — with the note that a classification which DOES
+# need it would be a body change, not a call-site change. This is that change: 2
+# WITHOUT the re-run marker is the one case where the status carries something the
+# phase does not, namely that the status was not the installer's to mean anything
+# by. It is read only in combination with the marker, never alone, so the "two
+# attributes one meaning" objection still holds for every other code.
 telemetry_error_class() {
-  local code="$1" phase="$2" state="$3"
+  local code="$1" phase="$2" state="$3" handoff="${4:-}"
+  # An exit 2 that no `exit 2` site declared: grep's file error, curl's failed
+  # init, tar's fatal, escaping under `set -e`. Most specific of all, because it
+  # says the exit STATUS is not a value we chose — so no other reading of it (the
+  # phase's bucket, a readiness diagnosis) is more trustworthy than saying so.
+  if [ "$code" = "2" ] && [ -z "$handoff" ]; then
+    printf 'unexpected_exit_2'; return 0
+  fi
   case "$state" in
     bad_creds)     printf 'bad_credentials';        return 0 ;;
     image_pull)    printf 'image_pull_failed';      return 0 ;;
@@ -444,15 +505,31 @@ telemetry_render_event() {
   # §6.1 — three segments, a registered domain, a registered outcome verb. The
   # name is assembled from literals only; no runtime value appears in it.
   #
-  # EXIT 2 IS NOT A FAILURE. It is the installer's "complete this step and re-run"
-  # handoff — install_cleanup has treated it as its own outcome ("Re-run
-  # required") since client#681, and its one live producer is gpu-nvidia.sh:55,
-  # which exits 2 after install_nvidia_drivers SUCCEEDED, to ask for a reboot.
-  # That call sits under step b, so folding it into failed booked every
-  # unattended GPU host's first install as `prerequisites_failed` — a fabricated
-  # prerequisite failure in the exact rate this ticket exists to produce. Same
-  # shape as the `--help` bug, opposite direction. (saadqbal on client#747;
-  # reproduced.)
+  # A DECLARED EXIT 2 IS NOT A FAILURE. It is the installer's "complete this step
+  # and re-run" handoff — install_cleanup has treated it as its own outcome
+  # ("Re-run required") since client#681, and its one live producer is
+  # gpu-nvidia.sh:55, which exits 2 after install_nvidia_drivers SUCCEEDED, to ask
+  # for a reboot. That call sits under step b, so folding it into failed booked
+  # every unattended GPU host's first install as `prerequisites_failed` — a
+  # fabricated prerequisite failure in the exact rate this ticket exists to
+  # produce. Same shape as the `--help` bug, opposite direction. (saadqbal on
+  # client#747; reproduced.)
+  #
+  # AN UNDECLARED ONE IS. The first version of this keyed on the number, and 2 is
+  # not only ours: grep exits 2 on a file error, curl on a failed init, tar on a
+  # fatal, and cluster.sh:1129 re-raises whatever k3d returned. Every one of those
+  # rendered `cancelled` with no error.type — a hard failure removed from the
+  # NUMERATOR rather than misfiled in it, which is the direction nobody notices.
+  # So the branch keys on _TB_TELEMETRY_RERUN_HANDOFF, set at the `exit 2` site
+  # itself, and an exit 2 nobody claimed falls through to failed with its own
+  # error.type (`unexpected_exit_2`). Fail closed toward counting it. (saadqbal on
+  # client#747; reproduced end-to-end before the change — see the marker's own
+  # comment above.)
+  #
+  # 130/143 stay unconditional: install-k8s.sh's `trap 'exit 130' INT` IS their
+  # declaration site, and there is no ordinary command whose 130 could reach here
+  # under `set -e` — bash reserves 128+n for signals, and a child killed by SIGINT
+  # takes this shell's own trap first.
   #
   # It rides `cancelled` rather than a verb of its own because §6.4's outcome
   # verbs are a CLOSED list — started, succeeded, failed, skipped, rejected,
@@ -469,7 +546,12 @@ telemetry_render_event() {
              else
                event="install.run.succeeded"
              fi ;;
-    2|130|143) event="install.run.cancelled" ;;
+    2)       if [ -n "$_TB_TELEMETRY_RERUN_HANDOFF" ]; then
+               event="install.run.cancelled"
+             else
+               event="install.run.failed"
+             fi ;;
+    130|143) event="install.run.cancelled" ;;
     *)       event="install.run.failed" ;;
   esac
   # The name is checked against the declared set before it is written, and an
@@ -536,7 +618,7 @@ telemetry_render_event() {
     # as a countable `unclassified` rather than opening a namespace of its own.
     # (The declaration is not proved correct by this check — the agreement test
     # calls telemetry_error_class over every phase x state pair and compares.)
-    class="$(telemetry_error_class "$code" "$phase" "$state")"
+    class="$(telemetry_error_class "$code" "$phase" "$state" "$_TB_TELEMETRY_RERUN_HANDOFF")"
     _telemetry_in_set "$class" "$TB_TELEMETRY_ERROR_CLASSES" || class="unclassified"
     _telemetry_attr "error.type" "$class"
     # Where the shell died, to the file and line — never the path that reached

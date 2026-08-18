@@ -52,6 +52,15 @@ install_nvidia_drivers() {
   hint "After rebooting, re-run the installer. Driver steps will be skipped."
   if [[ -n "${TRACEBLOC_SKIP_REBOOT_PROMPT:-}" ]]; then
     log "TRACEBLOC_SKIP_REBOOT_PROMPT set — skipping reboot prompt."
+    # DECLARE THE HANDOFF, then exit. This is the installer's "complete this step
+    # and re-run" stop — the drivers went in fine and the machine needs a reboot —
+    # and telemetry keys `install.run.cancelled` on this marker rather than on the
+    # number 2, because grep/curl/tar all exit 2 too and one of those escaping
+    # under `set -e` must be counted as the failure it is. Without this line the
+    # run books itself as `unexpected_exit_2`, which is the safe direction to be
+    # wrong in but still wrong. Guarded for a stale bootstrap that did not fetch
+    # telemetry.sh (same shape as install_cleanup's emit call).
+    if declare -F telemetry_rerun_handoff >/dev/null 2>&1; then telemetry_rerun_handoff; fi
     exit 2
   fi
   # Read the terminal directly: the main install path is `curl … | bash`, where
