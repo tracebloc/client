@@ -527,7 +527,28 @@ _telemetry_spool_path() {
 # Everything before this function is finished. This function is the change.
 _telemetry_deliver() {
   local json="$1" spool dir
+  # The install log always gets it. It is placed by _choose_log_file, which has
+  # already decided where it is safe to write (and falls back to $TMPDIR), so
+  # this line creates nothing of its own.
   log "telemetry: $json"
+
+  # TELEMETRY MUST NOT CREATE HOST_DATA_DIR. An observer that changes the
+  # install's own preconditions is not an observer.
+  #
+  # This ran from the EXIT trap and did `mkdir -p "$HOST_DATA_DIR/telemetry"`
+  # unconditionally — including on the path where early_data_dir_guard had just
+  # REFUSED that directory for being on a network filesystem and called `error`.
+  # The guard skips an existing dir on purpose ("an EXISTING data dir has no
+  # at-risk mkdir here", client#441), so the next run saw the directory this
+  # trap had created, returned 0, and installed MySQL onto NFS — the exact
+  # corruption client#432 exists to prevent, reintroduced by the telemetry that
+  # was only supposed to watch. Found by Bugbot on client#747; reproduced.
+  #
+  # So: spool only INTO a data dir that already exists. A run that dies before
+  # then still reports through the install log above, which is what a support
+  # bundle collects, and the forwarder (#1906) picks up every later run.
+  [ -n "${HOST_DATA_DIR:-}" ] || return 0
+  [ -d "$HOST_DATA_DIR" ] || return 0
 
   spool="$(_telemetry_spool_path)"
   dir="${spool%/*}"

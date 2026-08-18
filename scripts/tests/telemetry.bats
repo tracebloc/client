@@ -26,6 +26,10 @@ setup() {
   CLIENT_STATE=""
   TB_ERR_LOC=""
   HOST_DATA_DIR="$BATS_TEST_TMPDIR/data"
+  # The data dir must already exist for the spool to be written: telemetry never
+  # creates it (see the NFS-guard test below). A real install reaches
+  # _telemetry_deliver only after setup_log_file has made it.
+  mkdir -p "$HOST_DATA_DIR"
   # main() sets this once the terminal commands (--help, --diagnose,
   # prepare-host) have had their chance to dispatch. The tests that exercise
   # delivery are standing in for a committed install run, so they set it too;
@@ -640,6 +644,61 @@ attr() {
   [[ "$output" == *'"error.type"'* ]] || return 1
   [[ "$output" != *'"tracebloc.install.source"'* ]] || return 1
   [[ "$output" != *"not-ours.sh"* ]] || return 1
+}
+
+@test "telemetry never creates HOST_DATA_DIR on a volume the installer refused" {
+  # early_data_dir_guard refuses a network filesystem BEFORE logging starts,
+  # because MySQL/InnoDB corrupts on NFS (client#432). It deliberately skips an
+  # existing directory ("an EXISTING data dir has no at-risk mkdir here",
+  # client#441) — so anything that creates that directory behind its back
+  # disarms it for every subsequent run.
+  #
+  # _telemetry_deliver did exactly that: it ran from the EXIT trap and mkdir -p'd
+  # $HOST_DATA_DIR/telemetry unconditionally, including on the path where the
+  # guard had just called `error`. Run 1 refused and created the dir; run 2 saw
+  # the dir, returned 0, and installed onto NFS. Found by Bugbot (client#747).
+  local vol="$BATS_TEST_TMPDIR/nfs-volume"
+  local target="$vol/.tracebloc"
+  run bash -c '
+    source "'"$LIB_DIR"'/common.sh"
+    source "'"$LIB_DIR"'/telemetry.sh"
+    source "'"$LIB_DIR"'/preflight.sh"
+    LOG_FILE=/dev/null
+    CLIENT_ENV=prod
+    HOST_DATA_DIR="'"$target"'"
+    _pf_fstype() { echo nfs; }     # the target reads as a network filesystem
+    telemetry_run_started
+    trap install_cleanup EXIT
+    early_data_dir_guard
+  '
+  # The anchor: prove the guard actually refused, so "no directory" cannot mean
+  # "the guard never ran".
+  [ "$status" -ne 0 ] || { printf 'the guard did not refuse; fixture is inert\n' >&2; return 1; }
+  [[ "$output" == *"network filesystem"* ]] || return 1
+
+  [ ! -d "$target" ] || {
+    printf 'telemetry created %s on the rejected volume — the guard is disarmed for the next run\n' "$target" >&2
+    return 1
+  }
+
+  # …and the other half: where the data dir legitimately exists, the spool is
+  # still written, or the fix has simply disabled the feature.
+  mkdir -p "$target"
+  run bash -c '
+    set -uo pipefail
+    source "'"$LIB_DIR"'/common.sh"
+    source "'"$LIB_DIR"'/telemetry.sh"
+    LOG_FILE=/dev/null
+    CLIENT_ENV=prod
+    HOST_DATA_DIR="'"$target"'"
+    telemetry_run_started
+    telemetry_emit_outcome 1
+  '
+  [ "$status" -eq 0 ] || return 1
+  [ -s "$target/telemetry/pending.jsonl" ] || {
+    printf 'the spool is no longer written even into an existing data dir\n' >&2
+    return 1
+  }
 }
 
 @test "nothing here can kill the installer under set -euo pipefail" {
