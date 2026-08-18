@@ -47,6 +47,73 @@ _prompt_tty() { [[ -r /dev/tty && -w /dev/tty ]]; }
 # terminal. Overridable so tests can feed canned input on stdin (TB_TTY=/dev/stdin).
 : "${TB_TTY:=/dev/tty}"
 
+# _login_tty_ok: is /dev/tty openable for the sign-in's redirection? Split out
+# as its own function (rather than reusing _prompt_tty) purely so tests can force
+# either branch: _prompt_tty gates the PROMPTS below, and several tests force it
+# on while having no real /dev/tty to redirect a child process onto.
+_login_tty_ok() { { : </dev/tty; } 2>/dev/null; }
+
+# _run_device_login: one `tracebloc login`, given the user's REAL terminal.
+#
+# This runs after setup_log_file (`exec > >(tee …) 2>&1`), so the shell's
+# stdout/stderr are a pipe and — under `curl … | bash` — stdin is the install
+# pipe; a bare `tracebloc login` would then have no tty on any stream and can
+# misrender or fail (same class assess.sh's hand-off handles). Redirect all three
+# to /dev/tty when openable, else </dev/null (unattended reaches the dual-mode
+# credential path, not here).
+#
+# TRACEBLOC_INSTALLER tells the CLI it is not being run by hand, so it suppresses
+# its own "run `tracebloc login`" recovery line: correct for someone who typed
+# the command, wrong here, where a bare login would leave the client mint and the
+# Helm install undone. _device_sign_in below owns the recovery advice (cli#517).
+# It is a command prefix, not an export — no later CLI call should inherit it.
+_run_device_login() {
+  if _login_tty_ok; then
+    TRACEBLOC_INSTALLER=1 tracebloc login </dev/tty >/dev/tty 2>/dev/tty
+  else
+    TRACEBLOC_INSTALLER=1 tracebloc login </dev/null
+  fi
+}
+
+# SIGN_IN_ATTEMPTS: how many times the device sign-in may run — the initial
+# attempt plus ONE in-place retry. Declared once and used as the loop bound AND
+# the "is there a next attempt?" test below, so the two can't drift into
+# disagreeing about how many tries there are.
+: "${SIGN_IN_ATTEMPTS:=2}"
+
+# _device_sign_in: sign in, with ONE in-place retry for a fresh code.
+#
+# The device code has a hard ten-minute deadline and the human approving it is
+# reading a phone — a lapsed code is an ordinary outcome, not an exceptional one.
+# Before cli#517 it cost a full installer re-run: everything already done (the
+# prerequisites, the cluster) was thrown away over a missed prompt. This mirrors
+# the name prompt's retry loop further down, for the same reason — an interactive
+# step that can fail for a benign reason must not abort a long install.
+#
+# Exactly one retry, and only with a live terminal:
+#   • a second failure is evidence of something other than a missed code, and a
+#     retry loop there would just hide it behind a prompt nobody can satisfy;
+#   • without a terminal there is nobody to hand a fresh code to, and a FAILED
+#     read (rc != 0 = EOF / no live input) can't be fixed by re-prompting either.
+# Both fall through to the same fatal error, whose advice is the ONLY next step
+# printed — the CLI's own is suppressed above.
+_device_sign_in() {
+  local attempt
+  for (( attempt = 1; attempt <= SIGN_IN_ATTEMPTS; attempt++ )); do
+    _run_device_login && return 0
+    if [[ "$attempt" -ge "$SIGN_IN_ATTEMPTS" ]] || ! _prompt_tty; then break; fi
+    echo ""
+    warn "Sign-in didn't complete — the code lapsed or wasn't approved."
+    hint "Nothing is lost: the install is paused right here, not restarted."
+    # The prompt WRITE is guarded (|| true) so a test without a real /dev/tty
+    # doesn't abort; the read comes from TB_TTY, like every other prompt here.
+    printf '\n  Press Enter for a fresh code (or Ctrl-C to stop): ' >/dev/tty 2>/dev/null || true
+    IFS= read -r _ <"$TB_TTY" || break
+    echo ""
+  done
+  error "Sign-in didn't complete — re-run the installer to try again."
+}
+
 # _detect_location_zone: best-effort ISO country code for where this machine
 # physically runs, derived from the system timezone via the OS's OWN zone.tab —
 # no network call (privacy-preserving for on-prem installs) and no embedded zone
@@ -164,18 +231,7 @@ provision_client() {
   echo -e "  Sign in to approve this machine — open the link in your browser"
   echo -e "  (on this or any device) and enter the code:"
   echo ""
-  # Give the interactive device-flow sign-in the user's REAL terminal. This runs
-  # after setup_log_file (`exec > >(tee …) 2>&1`), so the shell's stdout/stderr are
-  # a pipe and — under `curl … | bash` — stdin is the install pipe; a bare
-  # `tracebloc login` would then have no tty on any stream and can misrender or
-  # fail (same class assess.sh's hand-off handles). Redirect all three to /dev/tty
-  # when openable, else </dev/null (unattended reaches the dual-mode credential
-  # path above, not here).
-  if { : </dev/tty; } 2>/dev/null; then
-    tracebloc login </dev/tty >/dev/tty 2>/dev/tty || error "Sign-in didn't complete — re-run the installer to try again."
-  else
-    tracebloc login </dev/null || error "Sign-in didn't complete — re-run the installer to try again."
-  fi
+  _device_sign_in
 
   # ── One-client-per-machine pre-flight (#303) ─────────────────────────────
   # `client create` below mints a fresh client whenever the backend can't match
