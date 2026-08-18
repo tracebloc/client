@@ -259,7 +259,10 @@ helm get values "$RELEASE" -n "$NS" | grep -A2 egressProxy   # routeWorkloads: t
 
 # 2. DRAIN: wait for in-flight training to finish. The policy change applies to
 #    RUNNING pods, so a mid-run pod still egressing directly fails at the flip.
-kubectl -n "$NS" get jobs -l tracebloc.io/workload=training    # expect: none active
+#    PODS, not Jobs: tracebloc.io/workload=training is set on the pod template
+#    only (never on the Job object), so `get jobs -l ...` returns nothing even
+#    mid-run — a false all-clear.
+kubectl -n "$NS" get pods -l tracebloc.io/workload=training    # expect: none running
 
 # 3. FLIP.
 helm upgrade "$RELEASE" tracebloc/client -n "$NS" --reset-then-reuse-values \

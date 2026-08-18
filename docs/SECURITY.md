@@ -551,7 +551,7 @@ By default the NetworkPolicy still allows outbound HTTPS/443 so training pods ca
 
 1. Upgrade to ≥ 1.7.0 — the gateway deploys, inert (`egressProxy.routeWorkloads: false`).
 2. Set `egressProxy.routeWorkloads: true`; verify a training run completes via the gateway.
-3. **Drain first.** Wait for in-flight experiments to finish (`kubectl -n <ns> get jobs -l tracebloc.io/workload=training`). Step 4 changes the policy for *running* pods too, so a training pod mid-run that still reaches the internet directly — one whose image or user code has not picked up `HTTPS_PROXY` — fails at the moment of the flip rather than at submit time.
+3. **Drain first.** Wait for in-flight experiments to finish (`kubectl -n <ns> get pods -l tracebloc.io/workload=training`). Step 4 changes the policy for *running* pods too, so a training pod mid-run that still reaches the internet directly — one whose image or user code has not picked up `HTTPS_PROXY` — fails at the moment of the flip rather than at submit time. Select **pods, not Jobs**: jobs-manager sets `tracebloc.io/workload: training` on the pod template only (`job.yaml`, `jobs_manager._prepare_job_config`), never on the Job object — which is all the NetworkPolicy needs, since its `podSelector` matches the pod. `get jobs -l …` therefore returns nothing even mid-run, which reads as a false all-clear.
 4. Set `networkPolicy.training.allowExternalHttps: false` to drop the external-443 rule.
 5. **Verify, do not assume.** The `egress-enforcement` seal check renders exactly when the lockdown is on:
 
