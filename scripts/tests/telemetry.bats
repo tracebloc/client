@@ -274,6 +274,102 @@ attr() {
   [ "$ms" -ge 1320000 ] || { printf 'preflight recorded %s ms, expected >= 1320000\n' "$ms" >&2; return 1; }
 }
 
+@test "the STILL-RUNNING phase has a duration (Bugbot, client#747)" {
+  # The test above only ever measured a phase that a LATER step_header had
+  # closed. telemetry_phase_begin is the only writer, so the phase still running
+  # when the event fires had nothing recorded against it — and that is the one
+  # that matters:
+  #   * the dpkg-lock case in its likeliest real form is stuck twenty minutes in
+  #     `prerequisites` and then killed or given up on, never reaching step c;
+  #   * every SUCCESSFUL install ends in `connect`, the readiness wait, up to
+  #     READY_TIMEOUT (600s) — the single longest phase, and it had no key at all.
+  step_header a "x" >/dev/null
+  step_header b "x" >/dev/null
+  _TB_TELEMETRY_PHASE_STARTED_MS=$(( $(_telemetry_now_ms) - 1320000 ))
+
+  # Cancelled while stuck in prerequisites.
+  run telemetry_render_event 130
+  [ "$status" -eq 0 ] || return 1
+  [ "$(attr "$output" 'tracebloc.install.phase')" = "prerequisites" ] || return 1
+  local ms
+  ms="$(attr "$output" 'tracebloc.install.phase_prerequisites_ms')"
+  [ -n "$ms" ] || { printf 'the active phase had no duration\n' >&2; return 1; }
+  [ "$ms" -ge 1320000 ] || { printf 'active phase recorded %s ms\n' "$ms" >&2; return 1; }
+
+  # And the success case: connect is always the active phase at emit time.
+  step_header f "x" >/dev/null
+  _TB_TELEMETRY_PHASE_STARTED_MS=$(( $(_telemetry_now_ms) - 400000 ))
+  run telemetry_render_event 0
+  ms="$(attr "$output" 'tracebloc.install.phase_connect_ms')"
+  [ -n "$ms" ] || { printf 'a successful install had no connect duration\n' >&2; return 1; }
+  [ "$ms" -ge 400000 ] || return 1
+}
+
+@test "bootstrap time is attributed, not left as an unnamed remainder" {
+  # `bootstrap` has no step letter, so iterating the letter map skipped it and the
+  # download + verify + leftover-guard + assess time became a remainder nobody
+  # could name — which is also why subtracting the other keys from duration_ms
+  # could not recover the missing active phase.
+  TB_TELEMETRY_STARTED_MS=$(( $(_telemetry_now_ms) - 60000 ))
+  _TB_TELEMETRY_PHASE_STARTED_MS="$TB_TELEMETRY_STARTED_MS"
+  run telemetry_render_event 1
+  local ms
+  ms="$(attr "$output" 'tracebloc.install.phase_bootstrap_ms')"
+  [ -n "$ms" ] || { printf 'bootstrap time is unattributed\n' >&2; return 1; }
+  [ "$ms" -ge 60000 ] || { printf 'bootstrap recorded %s ms\n' "$ms" >&2; return 1; }
+}
+
+@test "the phase durations sum EXACTLY to duration_ms" {
+  # The invariant that makes the numbers trustworthy rather than merely present:
+  # every millisecond of the run is attributed to exactly one phase. A phase whose
+  # time vanishes — the Bugbot bug above — breaks it, and so does double-counting.
+  #
+  # Driven by a FAKE CLOCK, because the obvious fixture is wrong: winding
+  # _TB_TELEMETRY_PHASE_STARTED_MS backwards after the step_headers have already
+  # attributed that time invents milliseconds that never elapsed, and the first
+  # version of this test failed for exactly that reason (sum 1200000 vs total
+  # 900000). Overriding the clock is the only way to build a fixture the
+  # accounting can actually be true of.
+  local T=1000000
+  _telemetry_now_ms() { echo "$T"; }
+  TB_TELEMETRY_STARTED_MS="$T"
+  _TB_TELEMETRY_PHASE_STARTED_MS="$T"
+
+  T=$(( T + 5000 ));    step_header a "x" >/dev/null   # bootstrap      5 s
+  T=$(( T + 20000 ));   step_header b "x" >/dev/null   # preflight     20 s
+  T=$(( T + 1320000 )); step_header e "x" >/dev/null   # prerequisites 22 min
+  T=$(( T + 300000 ))                                  # helm still running, 5 min
+  # c and d were never entered, so they must carry no key at all.
+
+  run telemetry_render_event 1
+  [ "$status" -eq 0 ] || return 1
+
+  local total sum=0 name ms counted=0
+  total="$(attr "$output" 'tracebloc.install.duration_ms')"
+  [ "$total" = "1645000" ] || { printf 'duration_ms=%s, want 1645000\n' "$total" >&2; return 1; }
+  # DERIVED: iterate the production phase-name list, not a list written here.
+  for name in $(_telemetry_phase_names); do
+    ms="$(attr "$output" "tracebloc.install.phase_${name}_ms")"
+    [ -n "$ms" ] || continue
+    sum=$(( sum + ms ))
+    counted=$(( counted + 1 ))
+  done
+  # Anchor: an inert loop finding no keys would sum to 0 and could still agree
+  # with a 0-length run's total.
+  [ "$counted" = "4" ] || { printf 'found %s phase keys, want 4\n' "$counted" >&2; return 1; }
+  [ "$sum" = "$total" ] || {
+    printf 'phases sum to %s but duration_ms is %s\n' "$sum" "$total" >&2; return 1
+  }
+  # The individual attributions, so a compensating pair of errors cannot pass.
+  [ "$(attr "$output" 'tracebloc.install.phase_bootstrap_ms')" = "5000" ] || return 1
+  [ "$(attr "$output" 'tracebloc.install.phase_preflight_ms')" = "20000" ] || return 1
+  [ "$(attr "$output" 'tracebloc.install.phase_prerequisites_ms')" = "1320000" ] || return 1
+  [ "$(attr "$output" 'tracebloc.install.phase_helm_ms')" = "300000" ] || return 1
+  # A phase never entered carries no key (§1.2 omits an absent value).
+  [[ "$output" != *'"tracebloc.install.phase_cluster_ms"'* ]] || return 1
+  [[ "$output" != *'"tracebloc.install.phase_register_ms"'* ]] || return 1
+}
+
 @test "step_header is what drives the phase clock, so no step can be forgotten" {
   [ "$TB_TELEMETRY_PHASE" = "bootstrap" ] || return 1
   step_header c "Creating your secure environment" >/dev/null

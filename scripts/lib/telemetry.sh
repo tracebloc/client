@@ -202,10 +202,33 @@ telemetry_phase_begin() {
   return 0
 }
 
-# _telemetry_phase_ms NAME — milliseconds recorded against a completed phase.
+# _telemetry_phase_ms NAME ACTIVE NOW — milliseconds against a phase.
+#
+# telemetry_phase_begin only closes a phase when the NEXT one starts, so the
+# phase that is still running when the event is emitted has nothing recorded
+# against it. That lost the most important number in the file:
+#
+#   * on every SUCCESSFUL install, phase_connect_ms — the readiness wait, up to
+#     READY_TIMEOUT (600s), the single longest phase;
+#   * on every failure and every cancel, the duration of the phase named by
+#     tracebloc.install.phase — i.e. exactly the dpkg-lock shape this feature
+#     exists to surface, in its most likely real form: stuck twenty minutes in
+#     `prerequisites` and then killed or given up on.
+#
+# The remainder trick cannot recover it either, because bootstrap had no key at
+# all. Found by Bugbot on client#747; reproduced before fixing.
+#
+# The live delta is ADDED here rather than written by a "close the phase" call in
+# the emit path, so render stays idempotent — the tests call it repeatedly, and a
+# render that mutated the accumulators would report different numbers each time.
 _telemetry_phase_ms() {
-  local v
-  eval "v=\${_TB_TELEMETRY_MS_${1}:-}"
+  local name="$1" active="${2:-}" now="${3:-0}" v live
+  eval "v=\${_TB_TELEMETRY_MS_${name}:-}"
+  if [ "$name" = "$active" ]; then
+    live=$(( now - _TB_TELEMETRY_PHASE_STARTED_MS ))
+    if [ "$live" -lt 0 ]; then live=0; fi
+    v=$(( ${v:-0} + live ))
+  fi
   printf '%s' "$v"
 }
 
@@ -341,7 +364,7 @@ _telemetry_source_line() {
 # what lets the tests assert on the real payload instead of on a re-implementation
 # of it. Returns 1 without printing when the environment is unrecognised (§3.2).
 telemetry_render_event() {
-  local code="${1:-0}" env event state phase phase_ms pair name total class
+  local code="${1:-0}" env event state phase phase_ms name now total class
   env="$(telemetry_environment)" || return 1
 
   # §6.1 — three segments, a registered domain, a registered outcome verb. The
@@ -373,7 +396,10 @@ telemetry_render_event() {
   _telemetry_attr "event.name" "$event"
   _telemetry_attr "tracebloc.install.phase" "$phase"
   _telemetry_attr "tracebloc.install.exit_code" "$code" int
-  total=$(( $(_telemetry_now_ms) - TB_TELEMETRY_STARTED_MS ))
+  # ONE clock read for the whole event: the per-phase numbers and the total are
+  # then exactly consistent, which is an invariant a test can assert (and does).
+  now="$(_telemetry_now_ms)"
+  total=$(( now - TB_TELEMETRY_STARTED_MS ))
   if [ "$total" -lt 0 ]; then total=0; fi
   _telemetry_attr "tracebloc.install.duration_ms" "$total" int
   _telemetry_attr "tracebloc.install.client_state" "$state"
@@ -385,13 +411,18 @@ telemetry_render_event() {
     0|1) _telemetry_attr "tracebloc.install.cli_on_path" "${TB_CLI_ON_FRESH_PATH}" int ;;
   esac
 
-  # Per-phase durations: a fixed, finite set of keys, one per registered phase.
+  # Per-phase durations: a fixed, finite set of keys, one per phase name.
   # This is what makes a step that took twenty minutes visible on a run that
   # otherwise succeeded — the shape of the dpkg-lock failure, which never
   # produces a non-zero exit at all.
-  for pair in $TB_TELEMETRY_PHASES; do
-    name="${pair#*:}"
-    phase_ms="$(_telemetry_phase_ms "$name")"
+  #
+  # Iterating _telemetry_phase_names, NOT the letter map: `bootstrap` has no step
+  # letter, so the letter map skipped it and the download + verify + leftover
+  # guard + assess time was unattributable — it silently became the remainder
+  # nobody could name. A phase never entered still has no key (§1.2 omits an
+  # absent value); a phase that ran always has one, including 0.
+  for name in $(_telemetry_phase_names); do
+    phase_ms="$(_telemetry_phase_ms "$name" "$phase" "$now")"
     _telemetry_attr "tracebloc.install.phase_${name}_ms" "$phase_ms" int
   done
 
