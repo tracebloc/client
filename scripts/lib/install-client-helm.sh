@@ -824,6 +824,10 @@ _download_services_progress() {
 # Reads (bash dynamic scope, set by install_client_helm before the call):
 # values_file, existing_id, HOST_DATA_DIR, TB_NAMESPACE, ARCH.
 # Sets: TB_MYSQL_ENGINE_RESOLVED.
+#
+# Two of those inputs are `local`s of install_client_helm, which has NOT run at
+# preflight time — so the helpers below derive them, and preflight's arch gate
+# (backend#2047) calls the same helpers rather than restating the paths.
 # Content test for a host mysql datadir, FAIL-CLOSED on unlistable dirs
 # (mirrors _leftover_data_dirs, and the same Bugbot ownership case): a
 # uid-999/root-owned dir the host user can't read/enter cannot be proven
@@ -837,16 +841,36 @@ _mysql_dir_has_content() {
   [[ -n "$(ls -A "$d" 2>/dev/null)" ]]
 }
 
-_resolve_mysql_engine() {
+# The generated values file install_client_helm reads (for the sticky 8.4
+# check) and writes. Factored out of the `local values_file=…` it used to be so
+# a caller running BEFORE install_client_helm — preflight's arch gate — resolves
+# the same file instead of restating the path. A restated path would silently
+# stop seeing an existing 8.4 opt-in the day this one moves.
+_client_values_file() { echo "${TRACEBLOC_VALUES_FILE:-${HOST_DATA_DIR}/values.yaml}"; }
+
+# The namespace this install will use when nothing else has determined one yet
+# (an existing release can override it later — see install_client_helm). Same
+# reason as above: preflight needs the per-release datadir path, which is
+# HOST_DATA_DIR/<namespace>/mysql.
+_client_default_namespace() { _sanitize_workspace_name "${TB_NAMESPACE:-tracebloc}"; }
+
+# The engine decision itself, with NO logging and NO globals set, so a second
+# caller can ask this rule a question instead of restating it (backend#2047:
+# preflight's arch gate refused a fresh arm64 install that this rule was about
+# to serve natively). Echoes "<engine> <reason>" — always exit 0, the reason
+# carries the verdict:
+#   5.7|8.4 explicit      an explicit TB_MYSQL_ENGINE=<value>
+#   invalid <value>        TB_MYSQL_ENGINE is not auto|5.7|8.4
+#   8.4 sticky             this machine already opted into 8.4
+#   5.7 existing-datadir   an existing release, or real mysql datadir content
+#   5.7 amd64              fresh install on amd64 — keep the pinned 5.7 image
+#   8.4 fresh              fresh install on non-amd64 — native multi-arch engine
+_mysql_engine_decision() {
   local requested="${TB_MYSQL_ENGINE:-auto}"
   case "$requested" in
-    5.7|8.4)
-      TB_MYSQL_ENGINE_RESOLVED="$requested"
-      log "MySQL engine: ${requested} (explicit TB_MYSQL_ENGINE)"
-      return 0 ;;
+    5.7|8.4) echo "${requested} explicit"; return 0 ;;
     auto) ;;
-    *)
-      error "TB_MYSQL_ENGINE must be 'auto', '5.7' or '8.4' (got '${requested}')" ;;
+    *) echo "invalid ${requested}"; return 0 ;;
   esac
   # Sticky: an edge that opted into 8.4 stays there on every later re-run.
   # Capture-then-match (backend#1778): `grep -A 3 … | grep -q` lets the second
@@ -858,10 +882,7 @@ _resolve_mysql_engine() {
     _mysql_block="$(grep -A 3 'mysqlClient:' "${values_file}" 2>/dev/null || true)"
   fi
   case "$_mysql_block" in
-    *'tag: "8.4"'*)
-      TB_MYSQL_ENGINE_RESOLVED="8.4"
-      log "MySQL engine: 8.4 (kept from this machine's existing values.yaml)"
-      return 0 ;;
+    *'tag: "8.4"'*) echo "8.4 sticky"; return 0 ;;
   esac
   # Never auto-flip existing state: a found release or real datadir content
   # means a 5.7-format datadir may exist, and 8.4 refuses to open it. The
@@ -870,15 +891,75 @@ _resolve_mysql_engine() {
   if [[ -n "${existing_id:-}" ]] \
     || _mysql_dir_has_content "${HOST_DATA_DIR:-/nonexistent}/mysql" \
     || _mysql_dir_has_content "${HOST_DATA_DIR:-/nonexistent}/${TB_NAMESPACE:-}/mysql"; then
-    TB_MYSQL_ENGINE_RESOLVED="5.7"
+    echo "5.7 existing-datadir"
     return 0
   fi
   case "${ARCH:-$(uname -m)}" in
-    x86_64|amd64)
-      TB_MYSQL_ENGINE_RESOLVED="5.7" ;;
+    x86_64|amd64) echo "5.7 amd64" ;;
+    *)            echo "8.4 fresh" ;;
+  esac
+}
+
+# The logging wrapper around the rule above: sets TB_MYSQL_ENGINE_RESOLVED and
+# narrates the choice. Kept separate so the rule can be consulted without
+# emitting an install-time log line (preflight would otherwise log the engine
+# choice minutes before the engine is chosen).
+_resolve_mysql_engine() {
+  local decision engine reason
+  decision="$(_mysql_engine_decision)"
+  engine="${decision%% *}"; reason="${decision#* }"
+  if [[ "$engine" == "invalid" ]]; then
+    error "TB_MYSQL_ENGINE must be 'auto', '5.7' or '8.4' (got '${reason}')"
+  fi
+  TB_MYSQL_ENGINE_RESOLVED="$engine"
+  # WHY, not just what: the arch gate below needs to name the real cause, and
+  # "existing datadir" vs "you asked for 5.7" are different fixes.
+  TB_MYSQL_ENGINE_REASON="$reason"
+  case "$reason" in
+    explicit) log "MySQL engine: ${engine} (explicit TB_MYSQL_ENGINE)" ;;
+    sticky)   log "MySQL engine: 8.4 (kept from this machine's existing values.yaml)" ;;
+    fresh)    log "MySQL engine: 8.4 (fresh install on ${ARCH:-$(uname -m)} — native multi-arch engine, backend#723)" ;;
+  esac
+}
+
+# ── The arch gate, asked where the engine is actually known (backend#2047) ────
+# preflight's _pf_arch asks the same question early (that is the fast-fail), but
+# it runs before the Helm release and the per-release namespace are known — so an
+# existing edge can still look fresh there and only resolve to the amd64-only 5.7
+# image here. Without this second ask, letting the fresh case through preflight
+# would let that edge proceed to an exec-format CrashLoop with no earlier signal.
+# Same conditions as _pf_arch, same probe: Linux, non-amd64, no binfmt, no escape
+# hatch. macOS is excluded because assert_amd64_emulation (#433) owns it there.
+_assert_engine_runs_on_this_arch() {
+  [[ "${TB_MYSQL_ENGINE_RESOLVED:-}" == "5.7" ]] || return 0
+  [[ -z "${TRACEBLOC_ALLOW_ARM64:-}" ]] || return 0
+  [[ "${OS:-}" == "Linux" ]] || return 0
+  case "${ARCH:-$(uname -m)}" in x86_64|amd64) return 0 ;; esac
+  if amd64_emulation_available; then return 0; fi
+  # Name the actual cause. Only `explicit` and `existing-datadir` can reach here
+  # (`sticky`/`fresh` resolve to 8.4, `amd64` was returned above), but the reason
+  # is matched rather than assumed: a future reason must not inherit a claim about
+  # this host's data that may be false.
+  case "${TB_MYSQL_ENGINE_REASON:-}" in
+    explicit)
+      warn "TB_MYSQL_ENGINE=5.7 was requested, and the MySQL 5.7 image is amd64-only — it cannot run on ${ARCH}."
+      hint "Drop TB_MYSQL_ENGINE (or set TB_MYSQL_ENGINE=8.4) to use the native multi-arch 8.4 engine — fresh data directories only."
+      hint "To keep 5.7, enable amd64 emulation and re-run:"
+      hint "  docker run --privileged --rm tonistiigi/binfmt --install amd64"
+      error "MySQL 5.7 was requested explicitly and cannot run on ${ARCH} without amd64 emulation." ;;
+    existing-datadir)
+      warn "This host holds existing MySQL 5.7 data, so the install must keep the MySQL 5.7 engine — and that image is amd64-only."
+      hint "This is a data-format constraint, not an architecture one: MySQL 8.4 runs natively on ${ARCH}, but it cannot open a 5.7-format datadir (MySQL upgrades only in stages, 5.7 → 8.0 → 8.4)."
+      hint "Keep this data — enable amd64 emulation, then re-run:"
+      hint "  docker run --privileged --rm tonistiigi/binfmt --install amd64"
+      hint "Or start fresh on the native engine — install into an empty data directory:"
+      hint "  --data-dir=/path/to/new/empty/dir"
+      error "MySQL 5.7 is required by the existing data on this host and cannot run on ${ARCH} without amd64 emulation." ;;
     *)
-      TB_MYSQL_ENGINE_RESOLVED="8.4"
-      log "MySQL engine: 8.4 (fresh install on ${ARCH:-$(uname -m)} — native multi-arch engine, backend#723)" ;;
+      warn "This install resolved to the MySQL 5.7 engine (${TB_MYSQL_ENGINE_REASON:-unknown reason}), and that image is amd64-only — it cannot run on ${ARCH}."
+      hint "Enable amd64 emulation and re-run:"
+      hint "  docker run --privileged --rm tonistiigi/binfmt --install amd64"
+      error "MySQL 5.7 cannot run on ${ARCH} without amd64 emulation." ;;
   esac
 }
 
@@ -987,7 +1068,7 @@ install_client_helm() {
   else
     _ensure_tracebloc_dirs
   fi
-  local values_file="${HOST_DATA_DIR}/values.yaml"
+  local values_file; values_file="$(_client_values_file)"
 
   # ── Dev-mode override: caller-supplied values file ───────────────────────
   # When TRACEBLOC_VALUES_FILE is set, skip prompts and values.yaml generation
@@ -1034,7 +1115,7 @@ install_client_helm() {
   # its credentials (clientId), not by this name — so we don't ask the user to
   # invent one. It's just the local k8s namespace / Helm release name.
   # Advanced / GitOps setups can override with TB_NAMESPACE=<name>.
-  TB_NAMESPACE=$(_sanitize_workspace_name "${TB_NAMESPACE:-tracebloc}")
+  TB_NAMESPACE=$(_client_default_namespace)
 
   # RFC-0001 §7.2 — a re-run on an already-connected client must reconcile in place,
   # not re-provision. Step 3 marks that case with TRACEBLOC_CLIENT_ADOPTED=1 (+ the
@@ -1224,6 +1305,10 @@ install_client_helm() {
   # backend#723 A2: pick the MySQL engine for this install (before the heredoc
   # below is rendered; see _resolve_mysql_engine for the full decision rules).
   _resolve_mysql_engine
+  # backend#2047: and only now is it knowable whether this host can run the
+  # engine that rule picked. Ordering, not duplication — the arch question is
+  # asked against the resolved engine, never ahead of it.
+  _assert_engine_runs_on_this_arch
 
   # ── Write generated values.yaml ─────────────────────────────────────────
   log "Writing values to $values_file"

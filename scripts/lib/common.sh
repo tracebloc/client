@@ -905,6 +905,13 @@ if [[ "$OS" == "Darwin" ]]; then
 fi
 [[ "$ARCH" == "x86_64" ]] && ARCH_DL="amd64" || ARCH_DL="arm64"
 
+# True if this host can run amd64 binaries via QEMU binfmt. Lives here (not in
+# preflight.sh) because TWO gates now ask it — preflight's early arch check and
+# install-client-helm.sh's engine gate (backend#2047) — and both must read the
+# same probe: an arch verdict that disagreed with the engine verdict is the bug
+# that ticket describes. Wrapped in a function so bats can override it.
+amd64_emulation_available() { [[ -e /proc/sys/fs/binfmt_misc/qemu-x86_64 ]]; }
+
 GPU_VENDOR="none"          # nvidia | amd | apple_silicon | none
 NVIDIA_DRIVER_OK=false
 K3D_GPU_FLAGS=()           # extra flags appended to k3d cluster create
