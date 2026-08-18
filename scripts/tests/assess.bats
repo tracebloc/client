@@ -717,12 +717,74 @@ _use_real_runtime_probe() {
 @test "_try_start_docker_desktop: a live runtime returns 0 without launching anything" {
   OS=Darwin
   has() { return 0; }
-  docker() { return 0; }                           # `docker info` answers
+  # Stub the PROBE, not `docker`. Since the probe became bounded it runs through
+  # timeout(1), i.e. as an external process — which a shell function cannot
+  # intercept. Worse, _bounded falls back to running the command bare when
+  # neither timeout nor gtimeout is installed, so a `docker()` stub would work
+  # on some hosts and not others and this test's meaning would depend on the
+  # machine. _docker_answers is the seam that exists on every host.
+  _docker_answers() { return 0; }                  # the daemon answers
   open() { echo "LAUNCHED"; }
   run _try_start_docker_desktop
   [ "$status" -eq 0 ] || return 1
   # Nothing to nudge — and the caller must not be able to claim it started it.
   ! grep -qF "LAUNCHED" <<<"$output" || return 1
+}
+
+# ── every probe on the nudge path is bounded (Bugbot, #741) ─────────────────
+# A bare `docker info` does not return against a WEDGED daemon — and wedged is
+# exactly the state that reaches here, because _assess_runtime_down classifies
+# runtime-down on _bounded's 124. So the unbounded probe hung on the one input
+# that routes to it: "starting it" on screen, then nothing, forever.
+#
+# These assert the ROUTING (every probe goes through _bounded) rather than
+# timing. A wall-clock test would need a real hang to be meaningful, and one
+# that sleeps long enough to prove anything is a test nobody runs.
+
+@test "_try_start_docker_desktop: the liveness probe is bounded, never bare" {
+  OS=Darwin
+  MARK="$BATS_TEST_TMPDIR/probes"; : > "$MARK"
+  has() { return 0; }
+  _docker_app_installed() { return 0; }
+  open() { :; }
+  # Record to a FILE, not stdout: _docker_answers redirects its whole call to
+  # /dev/null (it is a yes/no probe), so a stub that echoes is invisible — and a
+  # test asserting on that invisible output passes or fails for reasons
+  # unrelated to what it claims to check.
+  docker()   { echo "UNBOUNDED" >> "$MARK"; return 1; }
+  _bounded() { echo "BOUNDED:$1" >> "$MARK"; return 1; }
+  _wait_for_docker() { return 1; }
+  run _try_start_docker_desktop
+  grep -q "BOUNDED" "$MARK" || { echo "no bounded probe ran; saw: $(cat "$MARK")"; return 1; }
+  ! grep -q "UNBOUNDED" "$MARK" || {
+    echo "a bare docker call escaped the bound: $(cat "$MARK")"; return 1
+  }
+}
+
+@test "_wait_for_docker: probes through _bounded, and the deadline ends it" {
+  MARK="$BATS_TEST_TMPDIR/probes"; : > "$MARK"
+  docker()   { echo "UNBOUNDED" >> "$MARK"; return 1; }
+  _bounded() { echo "BOUNDED" >> "$MARK"; return 1; }
+  # polls=0 -> the deadline has already passed, so the loop body never runs and
+  # it falls straight to the final verdict without sleeping. That keeps the test
+  # instant while still exercising a real probe.
+  run _wait_for_docker 0
+  [ "$status" -ne 0 ] || return 1
+  grep -q "BOUNDED" "$MARK" || { echo "no bounded probe ran; saw: $(cat "$MARK")"; return 1; }
+  ! grep -q "UNBOUNDED" "$MARK" || {
+    echo "a bare docker call escaped the bound: $(cat "$MARK")"; return 1
+  }
+}
+
+@test "_docker_answers: routes through _bounded with a positive timeout" {
+  MARK="$BATS_TEST_TMPDIR/probes"; : > "$MARK"
+  _bounded() { echo "$1" >> "$MARK"; return 0; }
+  docker()   { echo "UNBOUNDED" >> "$MARK"; return 1; }
+  _docker_answers
+  local seen; seen="$(cat "$MARK")"
+  # A positive integer, not merely non-empty: "0" would disable the bound while
+  # still routing through _bounded — covered-looking and not covered.
+  [[ "$seen" =~ ^[1-9][0-9]*$ ]] || { echo "bad timeout: '$seen'"; return 1; }
 }
 
 @test "_try_start_docker_desktop: won't launch an app that isn't installed" {

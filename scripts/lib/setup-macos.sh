@@ -333,7 +333,7 @@ install_docker_desktop() {
   _kill_lingering_docker
 
   # ── Make sure Docker Desktop is running ──────────────────────────────────
-  if ! docker info &>/dev/null 2>&1; then
+  if ! _docker_answers; then
     open -a Docker
 
     if [[ "$fresh_install" == true ]]; then
@@ -355,7 +355,7 @@ install_docker_desktop() {
     _wait_for_docker "$max_wait"
   fi
 
-  if ! docker info &>/dev/null 2>&1; then
+  if ! _docker_answers; then
     echo ""
     echo -e "  ${BOLD}Docker Desktop isn't responding yet.${RESET}"
     echo -e "  This usually means it's still starting up. Here's what to check:"
@@ -372,7 +372,7 @@ install_docker_desktop() {
   success "Docker ready"
 }
 
-# _wait_for_docker POLLS — spin until `docker info` answers, or POLLS*3s elapse.
+# _wait_for_docker POLLS — spin until the daemon answers, or POLLS*3s elapse.
 # Returns 0 as soon as the daemon answers, 1 on timeout.
 #
 # Extracted so the assess-time nudge (_try_start_docker_desktop) and the
@@ -380,23 +380,30 @@ install_docker_desktop() {
 # drift, and the one nobody reads is the one that stops matching the daemon's
 # actual readiness.
 _wait_for_docker() {
-  local polls="$1" i f=0 elapsed
+  local polls="$1" f=0 elapsed
   local frames=('⠋' '⠙' '⠹' '⠸' '⠼' '⠴' '⠦' '⠧' '⠇' '⠏')
+  # A WALL-CLOCK deadline, not a poll count. Each probe is itself bounded, so a
+  # wedged daemon burns TB_DOCKER_PROBE_TIMEOUT per attempt; counting iterations
+  # would let "20 polls" mean 60s against a live daemon and 260s against the
+  # wedged one this exists to survive. $SECONDS keeps the caller's budget —
+  # polls*3s — true either way.
+  local start=$SECONDS
+  local deadline=$(( SECONDS + polls * 3 ))
   tput civis 2>/dev/null || true
-  for i in $(seq 1 "$polls"); do
-    if docker info &>/dev/null 2>&1; then
+  while [ "$SECONDS" -lt "$deadline" ]; do
+    if _docker_answers; then
       printf "\r\033[K"
       tput cnorm 2>/dev/null || true
       return 0
     fi
-    elapsed=$(( i * 3 ))
+    elapsed=$(( SECONDS - start ))
     printf "\r  ${CYAN}%s${RESET} Waiting for Docker Desktop… (%ds)" "${frames[f]}" "$elapsed"
     f=$(( (f + 1) % ${#frames[@]} ))
     sleep 3
   done
   printf "\r\033[K"
   tput cnorm 2>/dev/null || true
-  docker info &>/dev/null 2>&1
+  _docker_answers
 }
 
 # _docker_app_installed — is Docker Desktop present as an app bundle?
@@ -431,7 +438,7 @@ _try_start_docker_desktop() {
   [[ "${OS:-}" == "Darwin" ]] || return 1
   has docker || return 1
   # Already up — nothing to nudge (and the caller shouldn't claim it started it).
-  docker info &>/dev/null 2>&1 && return 0
+  _docker_answers && return 0
   # Only nudge an app that is actually installed; otherwise this is a job for
   # install_docker_desktop, which downloads it.
   _docker_app_installed || return 1

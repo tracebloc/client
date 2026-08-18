@@ -303,6 +303,22 @@ _bounded() {
   else "$@"; fi
 }
 
+# _docker_answers — `docker info`, bounded and silent. The single probe every
+# "is the runtime up?" check should route through.
+#
+# A bare `docker info` does not return when the daemon is WEDGED, as opposed to
+# stopped — and wedged is precisely the state that lands a machine in
+# assess's runtime-down branch, since _assess_runtime_down classifies on
+# _bounded's 124. So the unbounded probe hangs exactly on the input that
+# reaches it: the operator is told Docker is being started and the installer
+# freezes with no further output (Bugbot, #741).
+#
+# TB_DOCKER_PROBE_TIMEOUT defaults to the same 10s as TB_ASSESS_DOCKER_TIMEOUT;
+# they answer the same question about the same daemon and should not disagree.
+_docker_answers() {
+  _bounded "${TB_DOCKER_PROBE_TIMEOUT:-10}" docker info >/dev/null 2>&1
+}
+
 # ── Subordinate ID helpers (rootless Docker, RFC 0001 #1220) ──────────────────
 # Pure parsers shared by probe.sh (detection) and setup-linux.sh (remediation), so
 # both read /etc/subuid + /etc/subgid the same way. Lines are `key:start:count`,
