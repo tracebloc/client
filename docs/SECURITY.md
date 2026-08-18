@@ -195,6 +195,8 @@ spec:
 - In-cluster egress to MySQL (3306), the requests-proxy (8888), and the egress gateway (3128)
 - Outbound HTTPS/443 to the public internet — **only while `networkPolicy.training.allowExternalHttps: true` (the current default).** Set it to `false` and this rule is dropped, so training pods reach external services only through the in-cluster egress gateway (see §8.2).
 
+**Enforcement prerequisite:** every bullet above is a *request* to the CNI, not a guarantee. It holds only on a CNI that enforces **egress** NetworkPolicy — Calico, Cilium, OpenShift OVN-Kubernetes, Azure CNI created with a network policy, or the **EKS VPC CNI managed add-on with `enableNetworkPolicy=true`**. See [§5.1](#enforcing-cnis) for the full list and the EKS caveat, and §6.2 for how to verify it on a given cluster. On a non-enforcing CNI the policy object exists and blocks nothing.
+
 **Configuration:** `networkPolicy.training.enabled: true` (the default). Egress lockdown: `networkPolicy.training.allowExternalHttps` + `egressProxy.*` (see §8.2).
 
 ### 4.3 Kubernetes API access (G3)
@@ -312,7 +314,7 @@ NetworkPolicy and Pod Security Admission behave differently depending on the cus
 | Platform | Default CNI | Enforces NetworkPolicy? | Operator action |
 |---|---|---|---|
 | **AKS** | Azure CNI | Only with `--network-policy azure` or Calico add-on **enabled at cluster-create time** | Create the cluster with one of these options |
-| **EKS** | AWS VPC CNI | **No** — VPC CNI alone does not enforce NetworkPolicy | Install Calico add-on or Cilium; or leave `networkPolicy.training.enabled: false` and accept the residual risk |
+| **EKS** | AWS VPC CNI | **Not by default.** VPC CNI enforces only as the **managed add-on with `enableNetworkPolicy=true`** (v1.14+). A self-managed VPC CNI DaemonSet does **not** — the flag alone is insufficient without the control-plane PolicyEndpoint controller the managed add-on installs | Set `enableNetworkPolicy=true` on the `vpc-cni` managed add-on, or install Calico / Cilium; or leave `networkPolicy.training.enabled: false` and accept the residual risk |
 | **Bare-metal** | depends on install | Calico / Cilium / kube-router: yes. Flannel alone: no | If Flannel-only, install a NetworkPolicy engine or disable the toggle |
 | **OpenShift** | OVN-Kubernetes | Yes (default) | No action — selector defaults differ, see below |
 
@@ -329,7 +331,20 @@ networkPolicy:
       - "172.30.0.0/16"   # OpenShift default service CIDR
 ```
 
+<a id="enforcing-cnis"></a>**Which CNIs enforce *egress* NetworkPolicy** — the concrete list the §4.2 and §8.2 layers require:
+
+- **Calico** (any distribution, including the EKS add-on)
+- **Cilium**
+- **OpenShift OVN-Kubernetes** (default on OCP)
+- **Azure CNI** with `--network-policy azure` or `calico`, set **at cluster-create time**
+- **AWS VPC CNI** — **only** as the **managed EKS add-on with `enableNetworkPolicy=true`** (v1.14+). The bare DaemonSet env flag on a self-managed VPC CNI install is **not** enough: enforcement needs the control-plane PolicyEndpoint controller that the managed add-on brings. In the add-on's default `standard` mode a brand-new pod is allowed all traffic until its per-pod policy is programmed (a few-second reconcile) — real training pods start far slower than that window, and the `egress-enforcement` seal check retries across it.
+- **k3s / kube-router, Antrea, Weave** — enforce, but verify per §6.2 rather than assuming.
+
+Anything else — notably **Flannel alone** and a **self-managed AWS VPC CNI** — does not enforce.
+
 **Silent-no-enforcement risk:** If `networkPolicy.training.enabled: true` on a cluster whose CNI does not enforce, the policy is created but ignored. Customers must verify their CNI enforces NetworkPolicy before relying on this layer. We default the EKS `ci/eks-values.yaml` to `enabled: false` for this reason.
+
+> Verified 2026-06 on `tb-client-dev-templates` (EKS, **self-managed** VPC CNI, NetworkPolicy disabled): a DNS-only egress NetworkPolicy did **not** block `https://example.com` — the probe returned `200`. On such a fleet, flipping `allowExternalHttps=false` is **cosmetic**: the rule renders and nothing enforces it.
 
 ### 5.2 Pod Security Admission
 
@@ -380,6 +395,39 @@ timeout 5 bash -c 'cat < /dev/tcp/8.8.8.8/80'        && echo FAIL || echo OK   #
 ```
 
 If any assertion reads the wrong way, the CNI is not enforcing — investigate before relying on §4.2.
+
+<a id="egress-preflight-probe"></a>**Egress pre-flight probe (required gate before the §8.2 lockdown).** The check above proves the *allowed* rules behave; it does **not** prove the CNI can **block** egress, which is the whole point of the lockdown. Run this in a throwaway namespace on **every fleet** before flipping `allowExternalHttps=false`:
+
+```bash
+NS=np-preflight
+kubectl create namespace "$NS"
+
+# A DNS-only egress policy over everything in the namespace.
+kubectl -n "$NS" apply -f - <<'EOF'
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: dns-only-egress
+spec:
+  podSelector: {}
+  policyTypes: [Egress]
+  egress:
+    - ports:
+        - {port: 53, protocol: UDP}
+        - {port: 53, protocol: TCP}
+EOF
+
+# Give the CNI a moment to program the per-pod policy (AWS VPC CNI in its
+# default "standard" mode allows a new pod all traffic until it reconciles),
+# then probe. -k so a cert error is not misread as a block.
+kubectl -n "$NS" run probe --rm -i --restart=Never   --image=curlimages/curl:8.20.0 --   sh -c 'sleep 15; curl --noproxy "*" -k -sS -m 5 -o /dev/null -w "%{http_code}\n" https://1.1.1.1; echo "exit=$?"'
+
+kubectl delete namespace "$NS"
+```
+
+**It MUST fail to connect** (`exit=7` connection refused or `exit=28` timeout). If it prints an HTTP code — `200`, or any TLS-layer error meaning the TCP connect succeeded — **the CNI is not enforcing egress**: fix the CNI first (§5.1), because flipping the lockdown on this fleet would be cosmetic.
+
+Note the failure modes this probe shares with the `egress-enforcement` seal check: `exit=6` is a DNS failure (**inconclusive**, not a pass), and a connection refused against a host that simply *has nothing listening on :443* is a **false pass** — see §8.2.
 
 ### 6.3 Apply PSA labels on existing namespaces
 
@@ -498,9 +546,25 @@ By default the NetworkPolicy still allows outbound HTTPS/443 so training pods ca
 **Mechanism (chart 1.7.0, client-runtime#102):** an in-cluster **egress gateway** (`egressProxy` — a squid forward proxy) permits HTTPS CONNECT only to an FQDN allowlist (backend + App Insights) and chains to a corporate proxy via `cache_peer`. With routing on, jobs-manager injects `HTTPS_PROXY=egress-proxy-service:3128` into each training pod (and drops the raw `HTTP_PROXY_HOST`), so backend + App-Insights traffic flows through the gateway; Service Bus already goes via the requests-proxy. The pod then needs no direct internet, and the external-443 rule can be dropped.
 
 **Rollout (per fleet, progressive — each step reversible):**
+
+**Gate 0 — CNI enforcement pre-flight (required, before anything else).** Run the [§6.2 egress pre-flight probe](#egress-preflight-probe) on this fleet. It must fail to connect. If it returns `200`, this fleet's CNI does **not** enforce egress and steps 1–3 buy nothing: the rule renders, nothing blocks, and the fleet reads as locked down when it is not. Fix the CNI first (§5.1 — on EKS, that usually means moving to the `vpc-cni` managed add-on with `enableNetworkPolicy=true`). Do not proceed on a fleet that fails this gate.
+
 1. Upgrade to ≥ 1.7.0 — the gateway deploys, inert (`egressProxy.routeWorkloads: false`).
 2. Set `egressProxy.routeWorkloads: true`; verify a training run completes via the gateway.
-3. Set `networkPolicy.training.allowExternalHttps: false` to drop the external-443 rule, and verify **G2** (a training pod cannot reach an arbitrary external host). Requires a NetworkPolicy-enforcing CNI (§4.2).
+3. **Drain first.** Wait for in-flight experiments to finish (`kubectl -n <ns> get jobs -l tracebloc.io/workload=training`). Step 4 changes the policy for *running* pods too, so a training pod mid-run that still reaches the internet directly — one whose image or user code has not picked up `HTTPS_PROXY` — fails at the moment of the flip rather than at submit time.
+4. Set `networkPolicy.training.allowExternalHttps: false` to drop the external-443 rule.
+5. **Verify, do not assume.** The `egress-enforcement` seal check renders exactly when the lockdown is on:
+
+   ```bash
+   helm test <release> -n <ns> --logs --filter name=<release>-egress-enforcement-check
+   ```
+
+   `OK  egress lockdown verified …` → **G2** holds on this fleet. `WARNING  EGRESS LOCKDOWN NOT ENFORCED` or `INCONCLUSIVE` → treat the fleet as **unsealed** and roll back (below). See [SEAL-CHECK.md](SEAL-CHECK.md) for the contract.
+6. Run one real training experiment end to end through the gateway before declaring the fleet done.
+
+**Rollback (any step, at any time):** set `networkPolicy.training.allowExternalHttps: true` and upgrade — the external-443 rule returns within a CNI reconcile and training pods reach the internet directly again. Nothing persists, no data migrates, and the gateway can stay deployed and routing. Use `--reset-then-reuse-values` (Helm ≥ 3.14) rather than `--reuse-values`, which would re-apply the stored `false`.
+
+**Probe-host caveat (false pass).** Both the pre-flight probe and the `egress-enforcement` check read a refused TCP connect (curl exit 7) as "egress is blocked". A probe host that has **nothing listening on :443** refuses the same way, so it **passes without testing anything**. `enforcementProbeHost` must be a host that genuinely *accepts* TCP :443 when egress is open — the `1.1.1.1` default does. Before trusting a custom value, confirm it is reachable with the lockdown OFF; if that probe *also* fails to connect, the host is wrong, not the CNI. A DNS failure (exit 6) is reported INCONCLUSIVE and fails the check rather than passing it.
 
 **Residual:** the pod still holds `BACKEND_TOKEN` (it authenticates to the backend through the gateway). Scoping / short-TTL of that token is tracked under §8.1.
 
@@ -614,6 +678,7 @@ Cross-reference for reviewers and contributors.
 
 - **2026-04** — Initial version. Documents the training-pod sandbox as shipped in client chart ≥ 1.0.4 and client-runtime images built from `develop` at that date. Reflects the narrow threat model (trusted platform, untrusted external data scientist submissions).
 - **2026-08** — Documented the MySQL database identity model (§4.1.1) and the `edgeuser` root-equivalence retirement (§8.10) — RFC-0003 D10 close-out, backend#1528.
+- **2026-08** — Sharpened the §8.2 egress-lockdown guidance (tracebloc/client#248): named the enforcing CNIs concretely in §5.1 (including the EKS `vpc-cni` managed add-on `enableNetworkPolicy=true` prerequisite), added the §6.2 egress pre-flight probe as a required gate before the flip, and gave §8.2 a drain → flip → verify → rollback rollout with the probe-host false-pass caveat. Fleet runbook in [SEAL-CHECK.md](SEAL-CHECK.md).
 
 ---
 
