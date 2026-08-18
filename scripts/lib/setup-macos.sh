@@ -352,7 +352,14 @@ install_docker_desktop() {
 
     local max_wait=80
     if [[ "$fresh_install" == true ]]; then max_wait=120; fi
-    _wait_for_docker "$max_wait"
+    # `|| true` is load-bearing. _wait_for_docker returns non-zero on timeout,
+    # and this is a bare statement under `set -e`, so the script would exit HERE
+    # — before the whale-icon guidance and the deliberate error() below, which
+    # is the whole point of not coming up in time. The old inline loop ended on
+    # printf/tput and so always fell through; extracting it moved the timeout's
+    # exit status into a position where errexit could see it (Bugbot, #741).
+    # The verdict is the `if ! _docker_answers` immediately below, not this.
+    _wait_for_docker "$max_wait" || true
   fi
 
   if ! _docker_answers; then

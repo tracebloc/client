@@ -362,9 +362,19 @@ _assess_handoff() {
 # the reader looking for a bug in the start logic rather than at its absence.
 # So this either DOES the thing or does not claim it.
 _assess_handle_runtime_down() {
-  # macOS: a GUI app launch, no privileges. If it comes up, the probe that runs
-  # next sees a live runtime and hands this machine to Tier 0.
-  if [[ "${OS:-}" == "Darwin" ]] && declare -F _try_start_docker_desktop >/dev/null 2>&1; then
+  # macOS with Docker Desktop actually installed: a GUI app launch, no
+  # privileges. If it comes up, the probe that runs next sees a live runtime and
+  # hands this machine to Tier 0.
+  #
+  # The _docker_app_installed test is part of the CONDITION, not just of the
+  # nudge. Announcing "starting it" and then discovering there is no app to
+  # start reproduces this function's own bug one level down — and the failure
+  # copy would go on to say "Open Docker Desktop" to someone who does not have
+  # it, e.g. a Colima-only headless Mac (Bugbot, #741).
+  if [[ "${OS:-}" == "Darwin" ]] \
+     && declare -F _try_start_docker_desktop >/dev/null 2>&1 \
+     && declare -F _docker_app_installed >/dev/null 2>&1 \
+     && _docker_app_installed; then
     info "Docker isn't running yet — starting it, then checking your environment."
     if _try_start_docker_desktop; then
       success "Docker is running"
@@ -379,10 +389,19 @@ _assess_handle_runtime_down() {
     log "runtime-down: could not start Docker; falling through to the privileged path"
     return 0
   fi
-  # Anywhere else, starting the daemon needs privileges we do not have and will
-  # not ask for here, so do not claim to be starting it.
-  info "Docker isn't running — start it, then re-run this installer."
-  log "runtime-down: OS=${OS:-?}, no unprivileged way to start the runtime"
+
+  # Everywhere else — a Mac with no Docker Desktop to launch, or a platform
+  # where starting the daemon needs privileges we will not ask for here. Do not
+  # claim to be starting anything.
+  #
+  # And say what happens NEXT. "Start it, then re-run" on its own reads as "this
+  # run is over", while the installer is in fact about to carry on into the
+  # privileged flow — guidance contradicting the very next thing on screen. The
+  # macOS failure branch above names its continue; so does this one.
+  info "Docker isn't running, and this installer can't start it for you."
+  hint "Start your container runtime, then re-run this installer for the shortest path."
+  hint "Continuing — but setting one up from here needs an administrator password."
+  log "runtime-down: OS=${OS:-?}, no unprivileged way to start the runtime; continuing"
   return 0
 }
 

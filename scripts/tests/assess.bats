@@ -673,6 +673,7 @@ _use_real_runtime_probe() {
 
 @test "runtime-down on macOS: actually starts Docker, and says so only when it did" {
   OS=Darwin
+  _docker_app_installed() { return 0; }            # there IS an app to launch
   _try_start_docker_desktop() { return 0; }        # Docker came up
   run _assess_handle_runtime_down
   [ "$status" -eq 0 ] || return 1
@@ -682,6 +683,7 @@ _use_real_runtime_probe() {
 
 @test "runtime-down on macOS: when the start FAILS, it says so and names the cost" {
   OS=Darwin
+  _docker_app_installed() { return 0; }            # there IS an app to launch
   _try_start_docker_desktop() { return 1; }        # Docker did not come up
   run _assess_handle_runtime_down
   [ "$status" -eq 0 ] || return 1                  # never a hard gate
@@ -700,7 +702,31 @@ _use_real_runtime_probe() {
   # Starting dockerd needs root. Saying "starting it" here would be the same
   # false promise, one platform over.
   ! grep -qF "starting it" <<<"$output" || return 1
-  grep -qF "start it, then re-run" <<<"$output"
+  grep -qF "can't start it for you" <<<"$output" || return 1
+  # …and it must say what happens NEXT. "Start it, then re-run" alone reads as
+  # "this run is over" while the installer carries straight on into the
+  # privileged flow — guidance contradicting the next thing on screen
+  # (Bugbot, #741).
+  grep -qF "Continuing" <<<"$output" || return 1
+  grep -qF "administrator password" <<<"$output"
+}
+
+@test "runtime-down on a Mac with NO Docker Desktop: never claims to start it" {
+  # Colima-only / headless Macs. Announcing "starting it" and then finding
+  # nothing to start reproduces this function's own bug one level down, and the
+  # failure copy would tell someone without Docker Desktop to open Docker
+  # Desktop (Bugbot, #741).
+  OS=Darwin
+  _docker_app_installed() { return 1; }            # nothing to launch
+  _try_start_docker_desktop() { echo "NUDGED"; return 1; }
+  run _assess_handle_runtime_down
+  [ "$status" -eq 0 ] || return 1
+  ! grep -qF "starting it" <<<"$output" || return 1
+  ! grep -qF "NUDGED" <<<"$output" || { echo "nudged with no app installed"; return 1; }
+  ! grep -qF "Open Docker Desktop" <<<"$output" || {
+    echo "told a machine without Docker Desktop to open Docker Desktop"; return 1
+  }
+  grep -qF "can't start it for you" <<<"$output"
 }
 
 @test "_try_start_docker_desktop: no-ops off macOS and when docker is absent" {
@@ -787,17 +813,43 @@ _use_real_runtime_probe() {
   [[ "$seen" =~ ^[1-9][0-9]*$ ]] || { echo "bad timeout: '$seen'"; return 1; }
 }
 
+@test "_wait_for_docker's timeout can't kill install_docker_desktop under set -e" {
+  # The regression the extraction introduced: _wait_for_docker returns non-zero
+  # on timeout and was called as a BARE statement under `set -e`, so the script
+  # exited there — before the whale-icon guidance and the deliberate error()
+  # that exist precisely for "Docker didn't come up". A silent death replacing
+  # a helpful message, in a PR about messages that lie.
+  #
+  # Asserted on the source rather than by driving install_docker_desktop, which
+  # would need brew, hdiutil and a DMG. The call must be guarded — `|| true`,
+  # `|| :` or an `if` — never bare.
+  local line
+  line="$(grep -nE '^[[:space:]]*_wait_for_docker "\$max_wait"' "${LIB_DIR}/setup-macos.sh")" || {
+    echo "the install-time call to _wait_for_docker moved; update this guard"; return 1
+  }
+  grep -qE '\|\||^[[:space:]]*if ' <<<"$line" || {
+    echo "unguarded under set -e: $line"; return 1
+  }
+}
+
 @test "_try_start_docker_desktop: won't launch an app that isn't installed" {
   OS=Darwin
   has() { return 0; }
+  # `_bounded() { shift; "$@"; }` is this file's convention for probe tests, and
+  # it is load-bearing rather than decorative: without it _bounded runs the
+  # command through timeout(1) as an EXTERNAL process, where a `docker()` shell
+  # function cannot intercept. This test shipped with only the docker() stub and
+  # passed locally — on a laptop with no running daemon — then failed on CI,
+  # where the ubuntu runner HAS a live Docker, so the real probe answered and
+  # _try_start_docker_desktop returned 0 at "already up" without ever reaching
+  # the branch under test.
+  _bounded() { shift; "$@"; }
   docker() { return 1; }                           # runtime down
   open() { echo "LAUNCHED"; }
   HOME="$BATS_TEST_TMPDIR/nohome"; mkdir -p "$HOME"
-  # /Applications/Docker.app is absent on the CI runner; assert on the outcome
-  # rather than on the host's filesystem only if that holds.
   # Stub the installed-probe rather than depending on the host: on a machine
-  # WITH Docker (every macOS dev box) this branch is otherwise unreachable, and
-  # skipping there means only CI ever runs it.
+  # WITH Docker Desktop (every macOS dev box) this branch is otherwise
+  # unreachable, and skipping there means only CI ever runs it.
   _docker_app_installed() { return 1; }
   run -1 _try_start_docker_desktop
   ! grep -qF "LAUNCHED" <<<"$output" || return 1
