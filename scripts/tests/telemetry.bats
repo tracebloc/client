@@ -659,11 +659,17 @@ attr() {
   # the dir, returned 0, and installed onto NFS. Found by Bugbot (client#747).
   local vol="$BATS_TEST_TMPDIR/nfs-volume"
   local target="$vol/.tracebloc"
-  run bash -c '
+  local tmp="$BATS_TEST_TMPDIR/nfs-tmp"
+  mkdir -p "$tmp"
+  # LOG_FILE is deliberately NOT set. early_data_dir_guard runs BEFORE
+  # setup_log_file (#432 refuses a network data dir before logging starts), so on
+  # the real path there is no log yet — and an earlier version of this test set
+  # LOG_FILE=/dev/null, which masked the follow-on bug that the event went
+  # nowhere at all (Bugbot, client#747, round 4).
+  run env TMPDIR="$tmp" bash -c '
     source "'"$LIB_DIR"'/common.sh"
     source "'"$LIB_DIR"'/telemetry.sh"
     source "'"$LIB_DIR"'/preflight.sh"
-    LOG_FILE=/dev/null
     CLIENT_ENV=prod
     HOST_DATA_DIR="'"$target"'"
     _pf_fstype() { echo nfs; }     # the target reads as a network filesystem
@@ -680,6 +686,16 @@ attr() {
     printf 'telemetry created %s on the rejected volume — the guard is disarmed for the next run\n' "$target" >&2
     return 1
   }
+
+  # …and the refusal is still REPORTED. It is a real, actionable field failure,
+  # and it was the one case that produced no record anywhere — invisible to the
+  # failure rate this feature exists to produce.
+  local fallback
+  fallback="$(ls "$tmp"/tracebloc-telemetry-* 2>/dev/null | head -1)"
+  [ -n "$fallback" ] || { printf 'the NFS refusal produced no record at all\n' >&2; return 1; }
+  grep -q '"event.name":"install.run.failed"' "$fallback" || return 1
+  grep -q '"error.type":"bootstrap_failed"' "$fallback" || return 1
+  [ "$(_perm_of "$fallback")" = "600" ] || return 1
 
   # …and the other half: where the data dir legitimately exists, the spool is
   # still written, or the fix has simply disabled the feature.
@@ -698,6 +714,43 @@ attr() {
   [ -s "$target/telemetry/pending.jsonl" ] || {
     printf 'the spool is no longer written even into an existing data dir\n' >&2
     return 1
+  }
+}
+
+@test "a pre-log failure is still reported (no log, no data dir)" {
+  # validate_config and early_data_dir_guard both run BEFORE setup_log_file, so
+  # on those paths `log` is a no-op AND (correctly) no data dir exists. Together
+  # those two facts silently discarded the event. This is the general case; the
+  # NFS test above is the specific one that made it matter.
+  local tmp="$BATS_TEST_TMPDIR/prelog"
+  mkdir -p "$tmp"
+  run env TMPDIR="$tmp" bash -c '
+    set -uo pipefail
+    source "'"$LIB_DIR"'/common.sh"
+    source "'"$LIB_DIR"'/telemetry.sh"
+    CLIENT_ENV=prod
+    HOST_DATA_DIR="'"$BATS_TEST_TMPDIR"'/never-created"
+    unset LOG_FILE
+    telemetry_run_started
+    telemetry_emit_outcome 1
+  '
+  [ "$status" -eq 0 ] || return 1
+  [ ! -d "$BATS_TEST_TMPDIR/never-created" ] || return 1
+  local fallback
+  fallback="$(ls "$tmp"/tracebloc-telemetry-* 2>/dev/null | head -1)"
+  [ -n "$fallback" ] || { printf 'a pre-log failure produced no record\n' >&2; return 1; }
+  grep -q '"event.name":"install.run.failed"' "$fallback" || return 1
+
+  # The fallback must be a FRESH file per run, not a predictable shared path:
+  # /tmp is world-writable on Linux and the installer runs privileged steps, so a
+  # fixed name is a symlink target. mktemp creates with O_EXCL.
+  run env TMPDIR="$tmp" bash -c '
+    source "'"$LIB_DIR"'/common.sh"; source "'"$LIB_DIR"'/telemetry.sh"
+    CLIENT_ENV=prod; HOST_DATA_DIR="'"$BATS_TEST_TMPDIR"'/never-created"; unset LOG_FILE
+    telemetry_run_started; telemetry_emit_outcome 1
+  '
+  [ "$(ls "$tmp"/tracebloc-telemetry-* | wc -l | tr -d " ")" = "2" ] || {
+    printf 'the fallback reuses a predictable path\n' >&2; return 1
   }
 }
 

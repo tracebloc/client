@@ -525,11 +525,30 @@ _telemetry_spool_path() {
 # how you ship two of them.
 #
 # Everything before this function is finished. This function is the change.
+# _telemetry_fallback_spool — where an event goes when there is no data dir yet.
+#
+# mktemp, never a fixed name: /tmp is world-writable on Linux, so a predictable
+# path is a symlink target for an append that may be running under sudo. mktemp
+# creates with O_EXCL. This mirrors _choose_log_file's own fallback exactly, so an
+# early-failure run leaves one small file beside the install log it already
+# leaves there — not a new class of litter.
+_telemetry_fallback_spool() {
+  mktemp "${TMPDIR:-/tmp}/tracebloc-telemetry-XXXXXX" 2>/dev/null || return 1
+}
+
 _telemetry_deliver() {
   local json="$1" spool dir
-  # The install log always gets it. It is placed by _choose_log_file, which has
-  # already decided where it is safe to write (and falls back to $TMPDIR), so
-  # this line creates nothing of its own.
+  # The install log gets it WHERE THERE IS ONE. `log` is a no-op until
+  # setup_log_file sets LOG_FILE, and setup_log_file runs AFTER validate_config
+  # and early_data_dir_guard — deliberately, because #432 refuses a network data
+  # dir *before* logging starts.
+  #
+  # An earlier version of this function claimed the log "always" got the event.
+  # It did not, and the consequence was the worst possible one: a run refused for
+  # being on NFS is a real, actionable field failure, and it was the single case
+  # that produced no record anywhere — invisible to the very failure rate this
+  # feature exists to produce. (Found by Bugbot on client#747, which also spotted
+  # that this file's own NFS test masked it by setting LOG_FILE=/dev/null.)
   log "telemetry: $json"
 
   # TELEMETRY MUST NOT CREATE HOST_DATA_DIR. An observer that changes the
@@ -544,25 +563,31 @@ _telemetry_deliver() {
   # corruption client#432 exists to prevent, reintroduced by the telemetry that
   # was only supposed to watch. Found by Bugbot on client#747; reproduced.
   #
-  # So: spool only INTO a data dir that already exists. A run that dies before
-  # then still reports through the install log above, which is what a support
-  # bundle collects, and the forwarder (#1906) picks up every later run.
-  [ -n "${HOST_DATA_DIR:-}" ] || return 0
-  [ -d "$HOST_DATA_DIR" ] || return 0
+  # So: spool INTO the data dir only when it already exists — and when it does
+  # not, into a temp file rather than nowhere. #1906's forwarder reads both.
+  if [ -n "${HOST_DATA_DIR:-}" ] && [ -d "$HOST_DATA_DIR" ]; then
+    spool="$(_telemetry_spool_path)"
+    dir="${spool%/*}"
+    mkdir -p "$dir" 2>/dev/null || return 0
+    chmod 700 "$dir" 2>/dev/null || true
+    printf '%s\n' "$json" >> "$spool" 2>/dev/null || return 0
+    chmod 600 "$spool" 2>/dev/null || true
+    # Bounded: nothing drains this until #1906, and an unbounded append on a
+    # customer's disk is a defect we would be shipping on purpose.
+    if [ -s "$spool" ]; then
+      tail -n "$TB_TELEMETRY_SPOOL_MAX" "$spool" > "${spool}.tmp" 2>/dev/null &&
+        mv "${spool}.tmp" "$spool" 2>/dev/null || rm -f "${spool}.tmp" 2>/dev/null
+    fi
+    return 0
+  fi
 
-  spool="$(_telemetry_spool_path)"
-  dir="${spool%/*}"
-  mkdir -p "$dir" 2>/dev/null || return 0
-  chmod 700 "$dir" 2>/dev/null || true
+  # No data dir: the pre-log failures — validate_config, early_data_dir_guard —
+  # which are exactly the ones the run-started latch was built to preserve. One
+  # file per run, which is the same footprint _choose_log_file already leaves on
+  # this path; no trimming, because there is only ever one line in it.
+  spool="$(_telemetry_fallback_spool)" || return 0
   printf '%s\n' "$json" >> "$spool" 2>/dev/null || return 0
   chmod 600 "$spool" 2>/dev/null || true
-
-  # Bounded: nothing drains this until #1906, and an unbounded append on a
-  # customer's disk is a defect we would be shipping on purpose.
-  if [ -s "$spool" ]; then
-    tail -n "$TB_TELEMETRY_SPOOL_MAX" "$spool" > "${spool}.tmp" 2>/dev/null &&
-      mv "${spool}.tmp" "$spool" 2>/dev/null || rm -f "${spool}.tmp" 2>/dev/null
-  fi
   return 0
 }
 
