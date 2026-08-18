@@ -360,9 +360,16 @@ tb_minutes_or() {
 #   • bracketed-paste wrappers:  ESC[200~ ... ESC[201~
 #   • arrow keys / cursor moves: ESC[A/B/C/D, ESC[1;5C, ESC[3~ (Delete), …
 #   • function keys, modifier combos, mode-switch sequences
-# All follow the ANSI CSI shape:  ESC '[' <params> <final-byte>
-# where params ∈ [0-9;] and final ∈ [A-Za-z~]. Strip them iteratively to
-# handle consecutive sequences (e.g. paste-wrappers).
+# Two shapes carry all of those:
+#   CSI  ESC '[' <params ∈ [0-9;]> <final ∈ [A-Za-z~]>
+#   SS3  ESC 'O' <final ∈ [A-Za-z~]>   — ESC OA/OB/OC/OD, ESC OH/OF, ESC OP…OS
+# SS3 is what the SAME keys emit once the terminal is in DECCKM
+# application-cursor mode, the state vim/less/tmux leave behind on an unclean
+# exit (cli#516). It was the hole left by the CSI-only fix of 2026-07-21
+# (client#362 / cli#364): ESC is dropped as a C0 byte but 'O' and the final byte
+# are printable, so ESC OD ESC OA survived as the plausible name "ODOA" and
+# minted a permanent namespace — where CSI residue cleans to empty and re-prompts.
+# Strip iteratively to handle consecutive sequences (e.g. paste-wrappers).
 #
 # Also handles the post-corruption case where ESC was stripped by an earlier
 # (buggy) sanitizer but the literal `[200~`/`[201~` markers survived. Only
@@ -372,15 +379,55 @@ tb_minutes_or() {
 # UTF-8 bytes (0x80+) preserved so international characters survive. Lives here
 # (shared) so BOTH the credential path (install-client-helm.sh) and the client-
 # name prompt (provision.sh) sanitize identically (customer-reported 2026-07-20).
+# Mirrored by cli/internal/cli/sanitize.go and install-k8s.ps1's
+# ConvertTo-SanitizedInput — change all three together.
 _strip_paste_garbage() {
   local s="$1"
   local esc=$'\e'
-  local csi_pattern="${esc}\\[[0-9;]*[A-Za-z~]"
-  while [[ "$s" =~ $csi_pattern ]]; do
+  local esc_pattern="${esc}(\\[[0-9;]*|O)[A-Za-z~]"
+  while [[ "$s" =~ $esc_pattern ]]; do
     s="${s/${BASH_REMATCH[0]}/}"
   done
   s="${s//\[200\~/}"
   s="${s//\[201\~/}"
+  # The floor. The loop above knows CSI, SS3 and the paste markers; it cannot
+  # know the escape family nobody has reported yet — and that is exactly how SS3
+  # got here, one rule hand-copied into three languages with only CSI ever
+  # tested. So if an ESC SURVIVED the loop, this value carries a shape we do not
+  # recognise and its printable bytes are not trustworthy content. Require one
+  # alphanumeric that did not come from an escape final byte, probing with ESC +
+  # intermediates + AT MOST TWO final-class bytes. Two, not one and not
+  # unbounded: one leaves the 'D' of an unrecognised SS3-shaped pair behind and
+  # the floor stops firing on the very shape this is about, while unbounded
+  # swallows a whole ASCII name (ESC N C h e l l o) yet spares a non-Latin one,
+  # making keep-vs-reject depend on the script the name is written in (Bugbot,
+  # #736). An escape final is one byte, an intro plus a final is two, and every
+  # keyboard-input escape family fits in that. The probe's output is only a
+  # yes/no — it is never returned. Nothing but residue ⇒ emit empty, which every
+  # caller already treats as "no answer" (re-prompt, or auto-name in the CLI).
+  if [[ "$s" == *"$esc"* ]]; then
+    # `sed`, NOT the `while [[ =~ ]]; do s="${s/$BASH_REMATCH/}"` loop the strip
+    # above uses. Pattern substitution treats BASH_REMATCH as a GLOB, and this
+    # pattern — unlike the CSI one, whose match can never contain `]` — can match
+    # a complete bracket expression: on ESC [ ; ] A the regex matches the whole
+    # thing, the glob `<ESC>[;]A` then means ESC ';' 'A', which is NOT in the
+    # string, the substitution removes nothing, and the loop never terminates.
+    # That is a hang at the installer's name prompt. One sed pass has no glob
+    # semantics and no loop.
+    #
+    # And "alphanumeric" via tr, not `=~ [[:alnum:]]`: bash's regex engine is
+    # locale-dependent, and under the C locale the installer often runs in,
+    # [[:alnum:]] does not match a UTF-8 letter — which would auto-name a
+    # perfectly good "日本" the moment an unknown escape sat next to it. Keeping
+    # every byte >= 0x80 makes "is there real content here" locale-independent
+    # and matches what the strip itself already preserves.
+    local probe
+    probe="$(printf '%s' "$s" | LC_ALL=C sed -E "s/${esc}[^A-Za-z0-9~]*[A-Za-z~]{1,2}//g" | LC_ALL=C tr -dc '0-9A-Za-z\200-\377')"
+    if [[ -z "$probe" ]]; then
+      printf ''
+      return 0
+    fi
+  fi
   printf '%s' "$s" | tr -d '\000-\037\177'
 }
 

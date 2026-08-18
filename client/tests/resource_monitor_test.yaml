@@ -84,6 +84,34 @@ tests:
           path: metadata.name
           value: stg-resource-monitor
 
+  # backend#950: the ClusterRole granted cluster-wide `pods/log`, which lets the
+  # resource-monitor SA read the log CONTENTS of every pod in the cluster —
+  # other tenants' training pods included — while the image never reads a log.
+  # `namespaces` was likewise never called. Pin the rule to what the image
+  # actually calls so neither can be re-added without a deliberate edit here.
+  - it: ClusterRole grants no pod-log or namespace read
+    template: templates/resource-monitor-rbac.yaml
+    documentIndex: 1
+    asserts:
+      - isKind:
+          of: ClusterRole
+      - equal:
+          path: rules[0].resources
+          value: ["pods", "nodes", "nodes/status"]
+      - notContains:
+          path: rules[0].resources
+          content: pods/log
+      - notContains:
+          path: rules[0].resources
+          content: namespaces
+      # The telemetry reads the image DOES make must survive the trim.
+      - equal:
+          path: rules[1].apiGroups
+          value: ["metrics.k8s.io"]
+      - equal:
+          path: rules[1].resources
+          value: ["pods", "nodes"]
+
   - it: ClusterRoleBinding subject points at the release-scoped SA
     template: templates/resource-monitor-rbac.yaml
     documentIndex: 2
