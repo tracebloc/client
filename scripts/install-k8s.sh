@@ -58,6 +58,15 @@ LIB_DIR="${SCRIPT_DIR}/lib"
 
 # ── Source modules ───────────────────────────────────────────────────────────
 source "${LIB_DIR}/common.sh"
+# telemetry.sh (backend#1907) is sourced right after common.sh so the install
+# clock starts before any work does, and so common.sh's step_header /
+# install_cleanup hooks find their functions. Guarded like the other late
+# additions: an older bootstrap (e.g. a not-yet-updated tracebloc.io/i.sh, whose
+# FILES list is hand-maintained) may not have fetched it, and an installer that
+# aborted because it could not report on itself would be a poor trade.
+if [[ -f "${LIB_DIR}/telemetry.sh" ]]; then
+  source "${LIB_DIR}/telemetry.sh"
+fi
 source "${LIB_DIR}/preflight.sh"
 source "${LIB_DIR}/detect-gpu.sh"
 source "${LIB_DIR}/gpu-nvidia.sh"

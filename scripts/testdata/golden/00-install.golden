@@ -91,6 +91,16 @@ Advanced configuration (environment variables):
                  Must be on a LOCAL disk — NFS/CIFS/SMB is rejected (the database
                  corrupts on network storage). TRACEBLOC_ALLOW_NETWORK_FS=1 overrides.
 
+Usage reporting:
+  This installer records ONE outcome event per run so we can see failures without
+  waiting for someone to report them: which step it reached, how long each step
+  took, the exit code, an error class, your OS and architecture, and the version.
+  It cannot record your arguments, any path, any file name, your username, your
+  hostname or your credentials — every field is a number or a value from a fixed
+  list, so there is nowhere for those to go.
+  TRACEBLOC_NO_TELEMETRY=1  Turn it off.
+  DO_NOT_TRACK=1            Also turns it off.
+
 Windows:
   irm https://raw.githubusercontent.com/tracebloc/client/main/scripts/install.ps1 | iex
 

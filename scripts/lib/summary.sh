@@ -19,7 +19,10 @@ _log_cluster_status() {
 # returns we wait for the client's workloads to actually become Ready and set
 # CLIENT_STATE so the summary reports the truth instead of an unconditional
 # "installed successfully":
-#   connected | starting | bad_creds | image_pull | crash
+#   connected | starting | bad_creds | image_pull | image_pull_ca | crash
+# (image_pull_ca is the TLS-inspecting-network case, #424. It was added to
+# _diagnose_not_ready and not to this list; backend#1907's vocabulary-agreement
+# guard derives the set from the function and caught the omission.)
 # Empty until wait_for_client_ready runs — so install_cleanup can distinguish an
 # early failure (before the readiness gate, CLIENT_STATE still empty) from a
 # reported outcome, and still print the "check the log / safe to re-run" hint.

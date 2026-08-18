@@ -37,7 +37,8 @@ SHELLCHECK_FILES := \
 	scripts/tests/lib/e2e-common.sh \
 	scripts/tests/path-persist.sh \
 	scripts/tests/chart-env-vocabulary.sh \
-	scripts/tests/env-vocabulary-agreement.sh
+	scripts/tests/env-vocabulary-agreement.sh \
+	scripts/tests/telemetry-vocabulary-agreement.sh
 
 # The bats total, DERIVED — never written down. It moves on most PRs that add a
 # test, nothing enforces it, and the help text had drifted from its hardcoded
@@ -182,6 +183,7 @@ drift:
 	scripts/check-facts.sh --check
 	bash scripts/check-style.sh
 	bash scripts/tests/env-vocabulary-agreement.sh
+	bash scripts/tests/telemetry-vocabulary-agreement.sh
 
 # digest-drift: the watcher on every mutable label that points at a pinned
 # digest (backend#1853). NOT in `check`: it needs the network and a docker
