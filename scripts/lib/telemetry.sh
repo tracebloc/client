@@ -107,6 +107,33 @@ TB_TELEMETRY_STARTED_MS="$(_telemetry_now_ms)"
 _TB_TELEMETRY_PHASE_STARTED_MS="$TB_TELEMETRY_STARTED_MS"
 _TB_TELEMETRY_EMITTED=""
 
+# ── "an install actually ran" latch ──────────────────────────────────────────
+# install_cleanup is the EXIT trap, so it fires for EVERY exit of install-k8s.sh
+# — including the terminal, non-install commands. `--help` exits 0 without
+# touching the machine, and it was emitting a full install.run.succeeded: a free
+# success in the denominator of the exact failure RATE this whole ticket exists
+# to produce, and the one people run most while a real install is broken.
+# (Bugbot on client#747; reproduced — `install-k8s.sh --help` spooled an
+# install.run.succeeded with phase `bootstrap`.)
+#
+# A latch rather than a phase test, because a genuine failure in the bootstrap
+# phase — the leftover-data guard, validate_config — IS an install attempt and
+# must still be reported. main() sets this once the terminal commands have had
+# their chance to dispatch and the run is committed to installing.
+_TB_TELEMETRY_RUN_STARTED=""
+telemetry_run_started() { _TB_TELEMETRY_RUN_STARTED=1; return 0; }
+
+# ── "ran, but did nothing" ───────────────────────────────────────────────────
+# The stop-and-check gate hands a verifiably healthy machine to the home screen
+# and exits 0 without running a single step. That is a real invocation and worth
+# counting, but it is not a successful INSTALL: folding it into succeeded would
+# make the success count grow with re-runs on machines nothing happened to.
+# `skipped` is a registered outcome verb (contract §6.4), so it needs no new
+# vocabulary — and "how often do people re-run an installer that was already
+# done" is a question worth being able to ask.
+_TB_TELEMETRY_SKIPPED=""
+telemetry_run_skipped() { _TB_TELEMETRY_SKIPPED=1; return 0; }
+
 # ── Opt-out ──────────────────────────────────────────────────────────────────
 # Opt-OUT by design: telemetry only the already-convinced enable measures the
 # wrong population, and the population this exists for is people whose install
@@ -320,7 +347,11 @@ telemetry_render_event() {
   # §6.1 — three segments, a registered domain, a registered outcome verb. The
   # name is assembled from literals only; no runtime value appears in it.
   case "$code" in
-    0)       event="install.run.succeeded" ;;
+    0)       if [ -n "$_TB_TELEMETRY_SKIPPED" ]; then
+               event="install.run.skipped"
+             else
+               event="install.run.succeeded"
+             fi ;;
     130|143) event="install.run.cancelled" ;;
     *)       event="install.run.failed" ;;
   esac
@@ -496,6 +527,10 @@ telemetry_emit_outcome() {
   local json
   [ -z "$_TB_TELEMETRY_EMITTED" ] || return 0
   _TB_TELEMETRY_EMITTED=1
+  # No latch, no event: this trap also fires for `--help`, which installs
+  # nothing. See _TB_TELEMETRY_RUN_STARTED above for why a false success is
+  # worse here than a missing one.
+  [ -n "$_TB_TELEMETRY_RUN_STARTED" ] || return 0
   telemetry_enabled || return 0
   json="$(telemetry_render_event "${1:-0}")" || return 0
   [ -n "$json" ] || return 0

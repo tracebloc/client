@@ -26,6 +26,11 @@ setup() {
   CLIENT_STATE=""
   TB_ERR_LOC=""
   HOST_DATA_DIR="$BATS_TEST_TMPDIR/data"
+  # main() sets this once the terminal commands (--help, --diagnose,
+  # prepare-host) have had their chance to dispatch. The tests that exercise
+  # delivery are standing in for a committed install run, so they set it too;
+  # the tests BELOW that assert on the latch clear it deliberately.
+  telemetry_run_started
   unset TRACEBLOC_NO_TELEMETRY DO_NOT_TRACK 2>/dev/null || true
 }
 
@@ -395,11 +400,150 @@ attr() {
     LOG_FILE=/dev/null
     HOST_DATA_DIR="'"$HOST_DATA_DIR"'"
     CLIENT_ENV=prod
+    telemetry_run_started    # main() does this once the run is committed
     trap install_cleanup EXIT
     exit 130
   '
   [ "$status" -eq 130 ] || return 1
   grep -q '"event.name":"install.run.cancelled"' "$spool" || return 1
+}
+
+@test "a --help run installs nothing and must emit nothing (Bugbot, client#747)" {
+  # install_cleanup is the EXIT trap, so it fires for every exit of
+  # install-k8s.sh — including the terminal commands that touch no machine.
+  # `--help` was emitting a full install.run.succeeded: a free success in the
+  # denominator of the exact failure RATE this feature exists to produce, and
+  # the command people run most while a real install is broken.
+  #
+  # Driven through the REAL entrypoint, not the helper, because the bug was in
+  # which exits reach the trap — a unit test of telemetry_emit_outcome cannot
+  # see it, and none of the twenty tests above did.
+  local spool
+  for flag in --help -h; do
+    local dir="$BATS_TEST_TMPDIR/help-${flag#--}"
+    spool="$dir/telemetry/pending.jsonl"
+    run env HOST_DATA_DIR="$dir" CLIENT_ENV=prod \
+      bash "$SCRIPTS_DIR/install-k8s.sh" "$flag"
+    [ "$status" -eq 0 ] || return 1
+    # The anchor: prove --help actually ran, so an empty spool means "emitted
+    # nothing" and not "the command never started".
+    [[ "$output" == *"tracebloc"* ]] || return 1
+    [ ! -s "$spool" ] || {
+      printf '%s emitted an event: %s\n' "$flag" "$(cat "$spool")" >&2
+      return 1
+    }
+  done
+}
+
+@test "the already-set-up handoff is skipped, not succeeded" {
+  # The stop-and-check gate exits 0 having run no step. Counting that as a
+  # successful install makes the success count grow with re-runs on machines
+  # nothing happened to, and the failure rate fall for an unrelated reason.
+  # `skipped` is a registered outcome verb (§6.4), so this needs no new vocabulary.
+  telemetry_run_skipped
+  run telemetry_render_event 0
+  [ "$status" -eq 0 ] || return 1
+  [[ "$output" == *'"event.name":"install.run.skipped"'* ]] || return 1
+
+  # …and a run that did NOT skip still reports success, or the branch above is
+  # simply relabelling every success.
+  _TB_TELEMETRY_SKIPPED=""
+  run telemetry_render_event 0
+  [[ "$output" == *'"event.name":"install.run.succeeded"'* ]] || return 1
+}
+
+@test "a committed run still emits once the latch is set" {
+  # The anchor for the --help test: if the latch were never set, the whole
+  # feature would be dead and "--help emits nothing" would pass trivially.
+  local spool="$HOST_DATA_DIR/telemetry/pending.jsonl"
+  _TB_TELEMETRY_EMITTED=""; _TB_TELEMETRY_RUN_STARTED=""
+  telemetry_emit_outcome 0
+  [ ! -s "$spool" ] || { printf 'emitted with no latch\n' >&2; return 1; }
+
+  _TB_TELEMETRY_EMITTED=""
+  telemetry_run_started
+  telemetry_emit_outcome 0
+  [ -s "$spool" ] || { printf 'the latch did not enable emission\n' >&2; return 1; }
+}
+
+@test "a real run past the terminal commands DOES emit (the latch is wired)" {
+  # The anchor for the --help test, and it must go through the REAL entrypoint:
+  # deleting main()'s telemetry_run_started call kills the whole feature, and a
+  # unit test that sets the latch itself cannot notice. Nothing did, until this.
+  #
+  # HOST_DATA_DIR == $HOME is rejected by validate_config, which is AFTER the
+  # latch and BEFORE step a — so this also pins the case the latch had to
+  # preserve: a genuine failure in the bootstrap phase is still an install
+  # attempt and must still be reported.
+  local dir="$BATS_TEST_TMPDIR/real"
+  mkdir -p "$dir"
+  local spool="$dir/telemetry/pending.jsonl"
+  run env HOME="$dir" HOST_DATA_DIR="$dir" CLIENT_ENV=prod \
+    TRACEBLOC_SKIP_LEFTOVER_GUARD=1 \
+    bash "$SCRIPTS_DIR/install-k8s.sh"
+  [ "$status" -ne 0 ] || return 1
+  [ -s "$spool" ] || { printf 'a committed run emitted nothing\n' >&2; return 1; }
+  [ "$(grep -c . "$spool")" = "1" ] || return 1
+  grep -q '"event.name":"install.run.failed"' "$spool" || {
+    printf 'wrong event: %s\n' "$(cat "$spool")" >&2; return 1
+  }
+  grep -q '"tracebloc.install.phase":"bootstrap"' "$spool" || return 1
+  grep -q '"error.type":"bootstrap_failed"' "$spool" || return 1
+}
+
+@test "_assess_handoff itself marks the run skipped (the wiring, not the flag)" {
+  # Setting _TB_TELEMETRY_SKIPPED by hand proves the render branch and says
+  # nothing about whether anything calls it — deleting assess.sh's call reddened
+  # no test. Drive the real handoff, with `tracebloc` mocked so it exits instead
+  # of rendering a home screen.
+  local dir="$BATS_TEST_TMPDIR/handoff"
+  mkdir -p "$dir/bin"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$dir/bin/tracebloc"
+  chmod +x "$dir/bin/tracebloc"
+  local spool="$dir/telemetry/pending.jsonl"
+
+  run bash -c '
+    set -uo pipefail
+    source "'"$LIB_DIR"'/common.sh"
+    source "'"$LIB_DIR"'/telemetry.sh"
+    source "'"$LIB_DIR"'/assess.sh"
+    LOG_FILE=/dev/null
+    HOME="'"$dir"'"; HOST_DATA_DIR="'"$dir"'"; CLIENT_ENV=prod
+    PATH="'"$dir"'/bin:$PATH"; TB_TTY=/dev/null
+    telemetry_run_started          # main() has committed to the run
+    trap install_cleanup EXIT
+    _assess_handoff
+  '
+  [ "$status" -eq 0 ] || { printf 'handoff exited %s: %s\n' "$status" "$output" >&2; return 1; }
+  [ -s "$spool" ] || { printf 'the handoff emitted nothing\n' >&2; return 1; }
+  grep -q '"event.name":"install.run.skipped"' "$spool" || {
+    printf 'wrong event: %s\n' "$(cat "$spool")" >&2; return 1
+  }
+}
+
+@test "an unrecognised source location drops the field, never the event" {
+  # Bugbot (client#747) predicted the opposite: that the unprotected command
+  # substitutions feeding tracebloc.install.source would abort telemetry_render_event
+  # under `set -e` and take the whole outcome with them. That mechanism does not
+  # exist — a command substitution in an ARGUMENT position does not propagate its
+  # status to the enclosing command, verified on bash 3.2 (the system bash on
+  # macOS) and 5.x. The INVARIANT is worth pinning anyway: nothing about a
+  # location we cannot classify should cost us the event.
+  run bash -c '
+    set -euo pipefail
+    source "'"$LIB_DIR"'/common.sh"
+    source "'"$LIB_DIR"'/telemetry.sh"
+    LOG_FILE=/dev/null
+    HOST_DATA_DIR="'"$BATS_TEST_TMPDIR"'/src"
+    CLIENT_ENV=prod
+    TB_ERR_LOC="/home/someone/not-ours.sh:9"
+    telemetry_render_event 1
+  '
+  [ "$status" -eq 0 ] || { printf 'render died: %s\n' "$output" >&2; return 1; }
+  [[ "$output" == *'"event.name":"install.run.failed"'* ]] || return 1
+  [[ "$output" == *'"error.type"'* ]] || return 1
+  [[ "$output" != *'"tracebloc.install.source"'* ]] || return 1
+  [[ "$output" != *"not-ours.sh"* ]] || return 1
 }
 
 @test "nothing here can kill the installer under set -euo pipefail" {
@@ -419,6 +563,7 @@ attr() {
     LOG_FILE=/dev/null
     HOST_DATA_DIR="'"$BATS_TEST_TMPDIR"'/euo"
     CLIENT_ENV=prod; OS=Darwin; ARCH=arm64; TB_VERSION=v1.9.3
+    telemetry_run_started
     step_header a "x" >/dev/null
     step_header f "x" >/dev/null
     TB_CLI_ON_FRESH_PATH=0

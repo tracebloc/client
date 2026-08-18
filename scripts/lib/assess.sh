@@ -315,6 +315,13 @@ _assess_classify() {
 # `tracebloc` is somehow still unresolvable, fall back to a short status line so
 # a healthy re-run always ends cleanly at exit 0.
 _assess_handoff() {
+  # This exits 0 having run no install step, so the outcome event must say
+  # `skipped`, not `succeeded` (backend#1907) — otherwise the success count
+  # grows with every re-run on a machine nothing happened to, and the failure
+  # rate quietly falls for a reason that has nothing to do with installs.
+  if declare -F telemetry_run_skipped >/dev/null 2>&1; then
+    telemetry_run_skipped
+  fi
   success "Already set up on this machine — no need to run the installer again."
   export PATH="${HOME}/.local/bin:${PATH}"
   if has tracebloc; then
