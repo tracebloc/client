@@ -152,21 +152,154 @@ done
 # generic token shape is not enough on its own: `v1.9.3-<64 arbitrary chars>`
 # satisfies it, which would make the version column a 64-byte free-text channel.
 # The bootstrap already decides what a release tag looks like — it refuses to
-# fetch from anything else — so telemetry.sh reuses that exact regex, and this
-# proves the two are byte-identical rather than merely similar.
+# fetch from anything else — so telemetry.sh reuses that exact regex.
+#
+# THIS CHECK USED TO COMPARE BYTES, AND BYTES WERE THE WRONG PROPERTY. It read
+# the two regexes and asserted they were the same string, then reported "the
+# service.version shape is install.sh's own release-tag gate" — a claim about
+# BEHAVIOUR that byte-identity does not support, because the two sides did not
+# match with the same operator. install.sh used `[[ =~ ]]` (whole string);
+# telemetry.sh used `grep -qE` (whole LINE), so `v1.9.3\n<anything>` was refused
+# by the bootstrap and admitted by the emitter — from identical regexes, with
+# this check green throughout. Exactly backend#1729's class: a guard passing on a
+# property it does not actually check. (saadqbal on client#747.)
+#
+# So it now checks both, in this order:
+#   (a) the two declarations are still byte-identical — cheap, and it localises
+#       the failure to "somebody edited one of them";
+#   (b) they AGREE ON VERDICTS over a corpus of inputs, each side evaluated by
+#       the operator the file that owns it actually uses. (b) is the check the
+#       header sentence promises; (a) alone never was.
+#
+# The corpus is written down here rather than derived, and that is deliberate:
+# it is the input domain, not a copy of either rule (workspace CLAUDE.md rule 6 —
+# a vocabulary gap is invisible to mutation coverage, so the inputs have to be
+# enumerated independently of the matcher). It must contain at least one input
+# that separates line-matching from string-matching, or (b) degenerates into (a).
 BOOTSTRAP="$root/scripts/install.sh"
 [ -r "$BOOTSTRAP" ] || fail_closed "cannot read scripts/install.sh"
 boot_re="$(sed -nE 's/.*! "\$REF" =~ (\^v.*\$)\ ?\]\].*/\1/p' "$BOOTSTRAP" | head -1)"
 [ -n "$boot_re" ] || fail_closed "could not find install.sh's release-tag regex — the parse is inert, so this check proves nothing"
 if [ "$boot_re" != "$TB_TELEMETRY_VERSION_RE" ]; then
-  disagree "TB_TELEMETRY_VERSION_RE and install.sh's release-tag gate disagree:"
+  disagree "TB_TELEMETRY_VERSION_RE and install.sh's release-tag gate are not the same regex:"
   printf '      telemetry.sh: %s\n      install.sh:   %s\n' \
     "$TB_TELEMETRY_VERSION_RE" "$boot_re" >&2
 else
-  printf '  ok: the service.version shape is install.sh'"'"'s own release-tag regex\n'
+  printf '  ok: the service.version regex is byte-identical to install.sh'"'"'s\n'
 fi
 
-# --- 6. the documented opt-out ← telemetry.sh's real variables --------------
+# The bootstrap's verdict, reached the way install.sh reaches it (:203).
+_boot_admits() { [[ $1 =~ $boot_re ]]; }
+# The emitter's verdict, reached the way telemetry.sh reaches it: through the
+# real function, on the real variable. Not a re-implementation of the rule —
+# a mutation of _telemetry_version has to redden this (workspace CLAUDE.md
+# rule 9), which it cannot if this line spells the match out again.
+_emitter_admits() {
+  local rendered
+  rendered="$( TB_VERSION="$1"; _telemetry_version )"
+  [ "$rendered" != "0.0.0-unknown" ]
+}
+
+version_corpus=(
+  'v1.9.3'                       # a plain release tag: both must admit
+  'v1.9.3-rc.1'                  # the pre-release suffix the regex allows
+  'v1.9.3.post1'                 # the dotted suffix it allows
+  'main'                         # a branch name: both must refuse
+  'v1.9'                         # two segments: both must refuse
+  'v1.9.3-'"$(printf '%064d' 0)"  # 64 trailing chars: both must refuse
+  'v1.9.3 ; rm -rf /'            # a space: both must refuse
+  $'v1.9.3\nmain'                # THE SEPARATOR — a first line that matches and
+                                 # a second that does not. grep says yes, [[ =~ ]]
+                                 # says no. Without this input the behavioural
+                                 # check is just the byte check again.
+  $'main\nv1.9.3'                # …and the other way round
+  $'v1.9.3\n","injected":"yes'   # the actual forgery from the review
+)
+separator_seen=0
+for candidate in "${version_corpus[@]}"; do
+  case "$candidate" in *$'\n'*) separator_seen=1 ;; esac
+  if _boot_admits "$candidate"; then b=admit; else b=refuse; fi
+  if _emitter_admits "$candidate"; then e=admit; else e=refuse; fi
+  if [ "$b" != "$e" ]; then
+    disagree "the two version gates DISAGREE on $(printf '%q' "$candidate"): install.sh would $b, telemetry.sh does $e"
+  fi
+done
+# Fail closed on an inert corpus: without an embedded-newline input the
+# behavioural check proves nothing the byte check did not already prove, and it
+# would report clean forever.
+[ "$separator_seen" -eq 1 ] || fail_closed "the version corpus contains no embedded-newline input — the behavioural check cannot separate line-matching from string-matching, so it proves nothing"
+[ "$status" -eq 0 ] && printf '  ok: the two version gates agree on every input in the corpus (%s inputs), not just byte-for-byte\n' "${#version_corpus[@]}"
+
+# --- 6. event names ← telemetry_render_event's own case statement ------------
+# §6.2 requires the set of event names a service can emit to be finite and
+# enumerable by grep. TB_TELEMETRY_EVENT_NAMES is that enumeration; this proves
+# it is the set the renderer actually produces, from two independent directions.
+#
+# It cannot check the other half — that each third segment is a §6.4 registered
+# outcome verb — because the verb registry lives in the rfcs repo, which is not
+# checked out here. Copying the verbs into this file would be a fifth declaration
+# of somebody else's vocabulary, i.e. the defect this script exists to prevent.
+# The §6.1 GRAMMAR is checkable from here, so it is checked.
+declared_names="$TB_TELEMETRY_EVENT_NAMES"
+
+# (a) the literals in the case statement.
+parsed_names="$(sed -nE 's/.*[^A-Za-z_]event="(install\.[a-z0-9_.]+)".*/\1/p' "$TELEMETRY")"
+compare "event names" "$declared_names" "$parsed_names" \
+  "the literals in telemetry_render_event's case statement"
+
+# (b) what the function actually renders, over the exit codes the installer
+# produces: 0, the re-run handoff (2), an ordinary failure, and both signals.
+# Read by the sourced telemetry.sh, not by this file — telemetry_render_event
+# needs a recognised environment or it renders nothing at all (§3.2), which would
+# make the comparison below inert.
+# shellcheck disable=SC2034
+CLIENT_ENV=prod
+# shellcheck disable=SC2034
+OS=Linux
+# shellcheck disable=SC2034
+ARCH=x86_64
+# shellcheck disable=SC2034
+TB_VERSION=v1.9.3
+rendered_names=""
+for code in 0 1 2 42 130 143; do
+  for skipped in "" 1; do
+    _TB_TELEMETRY_SKIPPED="$skipped"
+    ev="$(telemetry_render_event "$code" | sed -nE 's/.*"event\.name":"([^"]*)".*/\1/p')"
+    [ -n "$ev" ] || disagree "telemetry_render_event $code rendered no event.name"
+    rendered_names="$rendered_names $ev"
+  done
+done
+_TB_TELEMETRY_SKIPPED=""
+compare "event names rendered" "$declared_names" "$rendered_names" \
+  "telemetry_render_event exercised over the installer's exit codes"
+
+# (c) §6.1's grammar: exactly three segments, lowercase, no runtime value.
+name_re='^[a-z][a-z0-9_]*(\.[a-z][a-z0-9_]*){2}$'
+for ev in $declared_names; do
+  [[ $ev =~ $name_re ]] || disagree "'$ev' is not a legal contract event name (§6.1: three segments, ^[a-z][a-z0-9_]*)"
+done
+
+# (d) the re-run handoff must not be a failure. gpu-nvidia.sh:55 exits 2 after a
+# SUCCESSFUL driver install to ask for a reboot, and install_cleanup has treated
+# 2 as its own outcome since client#681 — so an exit 2 that renders `failed`
+# fabricates a prerequisite failure on every unattended GPU host's first install.
+# Derived from install_cleanup's own branch rather than restated: if common.sh
+# stops treating 2 specially, this check retires itself loudly rather than
+# guarding a rule that no longer exists.
+COMMON="$root/scripts/lib/common.sh"
+[ -r "$COMMON" ] || fail_closed "cannot read scripts/lib/common.sh"
+if grep -qE '^\s*if \[\[ \$exit_code -eq 2 \]\]; then' "$COMMON"; then
+  ev2="$(telemetry_render_event 2 | sed -nE 's/.*"event\.name":"([^"]*)".*/\1/p')"
+  case "$ev2" in
+    *.failed) disagree "install_cleanup treats exit 2 as its own outcome (\"Re-run required\") but telemetry renders it as '$ev2' — gpu-nvidia.sh:55 exits 2 after a driver install SUCCEEDED" ;;
+    '')       disagree "exit 2 rendered no event at all" ;;
+    *)        printf '  ok: the exit-2 re-run handoff renders %s, not a failure\n' "$ev2" ;;
+  esac
+else
+  fail_closed "could not find install_cleanup's exit-2 branch in common.sh — this check's premise is gone, so it proves nothing"
+fi
+
+# --- 7. the documented opt-out ← telemetry.sh's real variables --------------
 # A stale doc here is worse than none: a user who exports the variable
 # `--help` names believes they have opted out, and nothing else would ever tell
 # them otherwise. The declaration is in telemetry.sh and the promise is in

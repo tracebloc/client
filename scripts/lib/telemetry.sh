@@ -45,11 +45,39 @@ TB_TELEMETRY_COMPONENT="install"
 # scripts/tests/telemetry-vocabulary-agreement.sh parses install-k8s.sh to prove
 # the two sets are identical.
 #
-# `bootstrap` is the phase before step a: download + verify + the leftover-data
-# guard. It has no letter because nothing in the a–f run-through covers it, and
-# a run that dies there must not be filed under `preflight`.
+# `bootstrap` is the phase before step a — and only the part of it that runs in
+# THIS process: install-k8s.sh's preamble, validate_config, the leftover-data
+# guard, the assess gate. Download and verify are NOT in it. They happen in
+# install.sh, which never sources this file and whose EXIT trap is
+# `rm -rf "$TMPDIR"`, not install_cleanup — so a fetch, manifest or cosign
+# failure emits nothing at all, and `bootstrap` means "install-k8s.sh before
+# step a", not "everything before step a". (saadqbal on client#747; verified —
+# install.sh's only mention of telemetry.sh is the FILES list it downloads.)
+# Extending coverage over the fetch is separate work, not this ticket.
+#
+# It has no letter because nothing in the a–f run-through covers it, and a run
+# that dies there must not be filed under `preflight`.
 TB_TELEMETRY_PHASES="a:preflight b:prerequisites c:cluster d:register e:helm f:connect"
 TB_TELEMETRY_PHASE="bootstrap"
+
+# ── event.name vocabulary (contract §6.1, §6.4) ──────────────────────────────
+# Every name this installer can emit. Three segments; `install` is a registered
+# domain (§6.3); the third segment of each is a registered outcome verb (§6.4:
+# started succeeded failed skipped rejected retried timed_out expired cancelled
+# completed). §6.2 requires the set to be finite and enumerable by grep — this
+# is that enumeration, and telemetry_render_event checks its answer against it.
+#
+# telemetry-vocabulary-agreement.sh derives the emitted names from
+# telemetry_render_event's own case statement and from exercising the function
+# over the exit codes the installer produces, then compares. It does NOT read
+# this list twice: a list checked against itself is self-consistent and blind.
+#
+# What it cannot check from this repo is the §6.4 half — the verb registry lives
+# in rfcs/specs/backend-1872-telemetry-contract.md, which is not checked out
+# here, and a hand-copied second list of verbs would be the defect rather than
+# the fix. Adding a name here is therefore a review question: is its third
+# segment in §6.4?
+TB_TELEMETRY_EVENT_NAMES="install.run.succeeded install.run.failed install.run.cancelled install.run.skipped"
 
 # ── Client-state vocabulary ──────────────────────────────────────────────────
 # summary.sh's wait_for_client_ready + _diagnose_not_ready are the only writers
@@ -74,11 +102,37 @@ TB_TELEMETRY_ERROR_CLASSES="bad_credentials image_pull_failed image_pull_untrust
 # /var/folders/<hash> — so only the basename is emitted, and only if it is one
 # of the installer's own scripts. That set is gen-manifest.sh's FILES array plus
 # the bootstrap; the agreement test derives it from there.
+#
+# `install.sh` is in the set for derivation symmetry and is UNREACHABLE today:
+# TB_ERR_LOC has exactly one writer, common.sh's _record_err (common.sh:988), and
+# common.sh is only ever sourced inside install-k8s.sh's process. Nothing in the
+# bootstrap can name itself here. Kept rather than special-cased out, because the
+# day the bootstrap does get an emitter the name must already be admissible —
+# but do not read its presence as coverage. (saadqbal on client#747.)
 TB_TELEMETRY_SOURCES="install.sh install-k8s.sh common.sh preflight.sh detect-gpu.sh gpu-nvidia.sh gpu-amd.sh setup-macos.sh setup-linux.sh cluster.sh gpu-plugins.sh install-client-helm.sh install-cli.sh provision.sh assess.sh probe.sh summary.sh diagnose.sh telemetry.sh"
 
 # ── The value shapes ─────────────────────────────────────────────────────────
 # This is the privacy boundary. Nothing else in this file is allowed to write to
 # the record.
+#
+# MATCHED WITH `[[ =~ ]]`, NEVER `grep`. The anchors say whole string; grep says
+# whole LINE, and the difference is a hole exactly one input shape wide. A value
+# carrying an embedded newline gave grep a first line that matched and the record
+# everything after it:
+#
+#   TB_VERSION=$'v1.9.3\n","tracebloc.install.injected":"yes'
+#   → "service.version":"v1.9.3
+#     ","tracebloc.install.injected":"yes",…
+#
+# — a forged attribute AND one record split across two lines of a `.jsonl` spool,
+# so #1906's forwarder reads two malformed events. It is the one shape the
+# "nowhere for a path to go" argument does not cover, because the value that
+# lands is not a path. `[[ $v =~ $RE ]]` anchors at end of STRING (POSIX
+# regexec, no REG_NEWLINE), so the same regex now refuses it. Reproduced on all
+# four shape checks before fixing; found by saadqbal on client#747.
+#
+# The RHS must stay UNQUOTED — a quoted RHS is a literal string on bash 3.2+,
+# which is the system bash on macOS.
 TB_TELEMETRY_TOKEN_RE='^[A-Za-z0-9._-]{1,64}$'
 TB_TELEMETRY_INT_RE='^-?[0-9]{1,15}$'
 TB_TELEMETRY_KEY_RE='^[a-z][a-z0-9_]*(\.[a-z][a-z0-9_]*)*$'
@@ -88,8 +142,11 @@ TB_TELEMETRY_KEY_RE='^[a-z][a-z0-9_]*(\.[a-z][a-z0-9_]*)*$'
 # immutable vX.Y.Z release tag, so a TB_VERSION that does not match that never
 # came from a release. The generic token shape was not enough on its own —
 # `v1.9.3-<64 arbitrary chars>` satisfies it, which makes the version column a
-# 64-byte free-text channel. telemetry-vocabulary-agreement.sh compares this
-# regex to install.sh's, so the two cannot drift apart.
+# 64-byte free-text channel. telemetry-vocabulary-agreement.sh checks this
+# against install.sh's — byte-for-byte AND, since client#747, verdict-for-verdict
+# over a corpus, each side evaluated by the operator its own file uses. The byte
+# check alone was not enough and said it was: the two regexes were identical
+# while install.sh's `[[ =~ ]]` refused an input this file's `grep -qE` admitted.
 TB_TELEMETRY_VERSION_RE='^v[0-9]+\.[0-9]+\.[0-9]+([.-][A-Za-z0-9.]+)?$'
 
 # How many events the local spool keeps. Bounded because it is a file on a
@@ -131,6 +188,15 @@ telemetry_run_started() { _TB_TELEMETRY_RUN_STARTED=1; return 0; }
 # `skipped` is a registered outcome verb (contract §6.4), so it needs no new
 # vocabulary — and "how often do people re-run an installer that was already
 # done" is a question worth being able to ask.
+#
+# READ THE COUNT NARROWLY. It is NOT "re-runs on a healthy machine": on the
+# `curl | bash` path install.sh:132 reaches a healthy machine first and
+# `exec tracebloc`s at :144 — before install-k8s.sh has even been fetched — so
+# assess.sh's gate never runs and this event is never emitted. What it counts is
+# re-runs of `./install-k8s.sh` directly, plus curl|bash runs that reached the
+# gate because the bootstrap's own health check did not bail (--force,
+# TRACEBLOC_FORCE_REINSTALL, a pinned REF/BRANCH, or no `tracebloc` on PATH).
+# (saadqbal on client#747; verified against install.sh's line order.)
 _TB_TELEMETRY_SKIPPED=""
 telemetry_run_skipped() { _TB_TELEMETRY_SKIPPED=1; return 0; }
 
@@ -299,13 +365,21 @@ _telemetry_reset() { _TB_TELEMETRY_BUF=""; }
 # _telemetry_attr KEY VALUE KIND — the single writer, and the whole privacy
 # boundary. KIND is `str` or `int`.
 #
-# Every shape test reads its subject through a HERE-STRING, never a pipe.
-# `grep -q` closes the pipe at its first hit, so a `printf ... | grep -q` under
-# the installer's `set -o pipefail` returns 141 (SIGPIPE) on a MATCH — turning a
-# successful validation into a fatal error that killed the whole run from inside
-# the EXIT trap. Same defect, same fix as summary.sh's _diagnose_not_ready
-# (backend#1778). The bats test that drives install_cleanup for real is what
-# caught it; every unit-level test of these functions passed throughout.
+# Every shape test is a `[[ =~ ]]`, not a grep. Two reasons, and the second one
+# is a bug this file already had:
+#
+#  * `[[ =~ ]]` matches the whole STRING; grep matches a LINE. See the shape
+#    declarations above for the newline bypass that cost.
+#  * grep is an external process invoked from an EXIT trap. The spelling that
+#    was here read its subject through a HERE-STRING rather than a pipe,
+#    because `grep -q` closes the pipe at its first hit and a
+#    `printf ... | grep -q` under the installer's `set -o pipefail` returns 141
+#    (SIGPIPE) on a MATCH — a successful validation turned into a fatal that
+#    killed the whole run from inside the trap. Same defect, same fix as
+#    summary.sh's _diagnose_not_ready (backend#1778). `[[ =~ ]]` is a shell
+#    builtin with no pipe and no child, so that class cannot recur here at all.
+#    The bats test that drives install_cleanup for real is what caught it; every
+#    unit-level test of these functions passed throughout.
 #
 # Refuses and DROPS, in this order: a malformed key, an empty value, a value
 # that is not the shape KIND promises. It never trims, escapes or truncates —
@@ -313,15 +387,15 @@ _telemetry_reset() { _TB_TELEMETRY_BUF=""; }
 # and shipping our guess about it is how a redactor leaks.
 _telemetry_attr() {
   local key="$1" value="$2" kind="${3:-str}"
-  grep -qE "$TB_TELEMETRY_KEY_RE" <<<"$key" || return 0
+  [[ $key =~ $TB_TELEMETRY_KEY_RE ]] || return 0
   [ -n "$value" ] || return 0
   case "$kind" in
     int)
-      grep -qE "$TB_TELEMETRY_INT_RE" <<<"$value" || return 0
+      [[ $value =~ $TB_TELEMETRY_INT_RE ]] || return 0
       _TB_TELEMETRY_BUF="${_TB_TELEMETRY_BUF:+${_TB_TELEMETRY_BUF},}\"${key}\":${value}"
       ;;
     *)
-      grep -qE "$TB_TELEMETRY_TOKEN_RE" <<<"$value" || return 0
+      [[ $value =~ $TB_TELEMETRY_TOKEN_RE ]] || return 0
       _TB_TELEMETRY_BUF="${_TB_TELEMETRY_BUF:+${_TB_TELEMETRY_BUF},}\"${key}\":\"${value}\""
       ;;
   esac
@@ -353,8 +427,8 @@ _telemetry_source_basename() {
 
 # _telemetry_source_line LOC — the line number, if the location has one.
 _telemetry_source_line() {
-  local line="${1##*:}"
-  grep -qE '^[0-9]{1,7}$' <<<"$line" || return 1
+  local line="${1##*:}" re='^[0-9]{1,7}$'
+  [[ $line =~ $re ]] || return 1
   printf '%s' "$line"
 }
 
@@ -369,15 +443,44 @@ telemetry_render_event() {
 
   # §6.1 — three segments, a registered domain, a registered outcome verb. The
   # name is assembled from literals only; no runtime value appears in it.
+  #
+  # EXIT 2 IS NOT A FAILURE. It is the installer's "complete this step and re-run"
+  # handoff — install_cleanup has treated it as its own outcome ("Re-run
+  # required") since client#681, and its one live producer is gpu-nvidia.sh:55,
+  # which exits 2 after install_nvidia_drivers SUCCEEDED, to ask for a reboot.
+  # That call sits under step b, so folding it into failed booked every
+  # unattended GPU host's first install as `prerequisites_failed` — a fabricated
+  # prerequisite failure in the exact rate this ticket exists to produce. Same
+  # shape as the `--help` bug, opposite direction. (saadqbal on client#747;
+  # reproduced.)
+  #
+  # It rides `cancelled` rather than a verb of its own because §6.4's outcome
+  # verbs are a CLOSED list — started, succeeded, failed, skipped, rejected,
+  # retried, timed_out, expired, cancelled, completed — and adding one is a PR
+  # against the contract, not a decision an emitter takes unilaterally. Of those,
+  # `cancelled` is the only terminal verb that is true here: the run stopped
+  # before completing, deliberately, without an error. The two causes stay
+  # separable because tracebloc.install.exit_code is already an attribute —
+  # exit_code=2 is the re-run handoff, 130/143 the user's own Ctrl-C — which is
+  # why the exit code is an attribute rather than something the name carries.
   case "$code" in
     0)       if [ -n "$_TB_TELEMETRY_SKIPPED" ]; then
                event="install.run.skipped"
              else
                event="install.run.succeeded"
              fi ;;
-    130|143) event="install.run.cancelled" ;;
+    2|130|143) event="install.run.cancelled" ;;
     *)       event="install.run.failed" ;;
   esac
+  # The name is checked against the declared set before it is written, and an
+  # unregistered one DROPS the record rather than filing it — same rule as §3.2's
+  # unrecognised environment, for the same reason: a record under a name no alert
+  # is written against is worse than no record, and it is how a closed namespace
+  # fills with rows nobody queries. This cannot fire on today's literals-only
+  # case; it is here for the edit that adds a branch, and
+  # telemetry-vocabulary-agreement.sh proves declaration and case agree by
+  # parsing this function rather than by reading the declaration twice.
+  _telemetry_in_set "$event" "$TB_TELEMETRY_EVENT_NAMES" || return 1
 
   state="${CLIENT_STATE:-}"
   _telemetry_in_set "$state" "$TB_TELEMETRY_CLIENT_STATES" || state=""
@@ -462,7 +565,7 @@ telemetry_render_event() {
 # TB_VERSION somebody set to a sentence must not become the version column.
 _telemetry_version() {
   local v="${TB_VERSION:-}"
-  grep -qE "$TB_TELEMETRY_VERSION_RE" <<<"$v" || v=""
+  [[ $v =~ $TB_TELEMETRY_VERSION_RE ]] || v=""
   printf '%s' "${v:-0.0.0-unknown}"
 }
 
@@ -525,15 +628,66 @@ _telemetry_spool_path() {
 # how you ship two of them.
 #
 # Everything before this function is finished. This function is the change.
+# _telemetry_fallback_dir — a directory whose contents survive this install.
+#
+# `${TMPDIR:-/tmp}` on its own is NOT that directory on the primary macOS path,
+# and getting this wrong silently undid the whole pre-log fix. install.sh:238
+# does `TMPDIR="$(mktemp -d)"` and :239 traps `rm -rf "$TMPDIR"` on EXIT. A plain
+# assignment to a name that is ALREADY EXPORTED keeps the export attribute — and
+# TMPDIR is always exported on macOS (launchd sets a per-user one) and on plenty
+# of Linux sessions — so `bash "$TMPDIR/install-k8s.sh"` at :571 inherits the
+# bootstrap's scratch dir, this file writes the record into it, and the bootstrap
+# deletes it the moment install-k8s.sh returns. The NFS refusal and every other
+# pre-setup_log_file failure then produced no record anywhere, which is the exact
+# hole the fallback was added to close. (saadqbal on client#747; reproduced
+# end-to-end — the spooled file was gone after the bootstrap exited.)
+#
+# DERIVED, not agreed. The test is "is the running installer inside this
+# directory?", which is true precisely when TMPDIR is the bootstrap's own scratch
+# dir, because install.sh unpacks install-k8s.sh + lib/ into it and runs it from
+# there. Asking install.sh to export its original TMPDIR under another name would
+# work too and would be wrong here: install.sh is served from a URL the user may
+# have curl'd months ago, so a fix that only works when the bootstrap is new is a
+# fix that does not work on the machines this feature exists for.
+#
+# When TMPDIR is disqualified the record goes to $HOME — outside anything the
+# bootstrap's trap owns, and NOT into $HOME/.tracebloc, which is HOST_DATA_DIR
+# and which telemetry must never create (client#432, and the comment on
+# _telemetry_deliver). /tmp is the last resort for a run with no usable HOME.
+_TB_TELEMETRY_SRC_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-.}")" 2>/dev/null && pwd -P)" || _TB_TELEMETRY_SRC_DIR=""
+_telemetry_fallback_dir() {
+  local tmp="${TMPDIR:-/tmp}" real
+  tmp="${tmp%/}"
+  [ -n "$tmp" ] || tmp="/tmp"
+  # BOTH SIDES PHYSICAL, or the comparison misses the only platform that has the
+  # bug. macOS's /var is a symlink to /private/var, so `pwd -P` above resolves the
+  # installer's own directory to /private/var/folders/… while $TMPDIR keeps the
+  # /var/folders/… spelling it was exported with — compared as written, the
+  # prefix test never fires on a Mac. (Caught by re-running the reproduction
+  # against the fix rather than by reading it.)
+  real="$(cd "$tmp" 2>/dev/null && pwd -P)" || real=""
+  # A `case`, not a `[[ == ]]`: the pattern side must be the glob and the subject
+  # side must not be re-globbed.
+  if [ -n "$_TB_TELEMETRY_SRC_DIR" ] && [ -n "$real" ]; then
+    case "${_TB_TELEMETRY_SRC_DIR}/" in
+      "${real}"/*) tmp="" ;;
+    esac
+  fi
+  if [ -n "$tmp" ] && [ -d "$tmp" ] && [ -w "$tmp" ]; then printf '%s' "$tmp"; return 0; fi
+  if [ -n "${HOME:-}" ] && [ -d "$HOME" ] && [ -w "$HOME" ]; then printf '%s' "$HOME"; return 0; fi
+  printf '/tmp'
+  return 0
+}
+
 # _telemetry_fallback_spool — where an event goes when there is no data dir yet.
 #
 # mktemp, never a fixed name: /tmp is world-writable on Linux, so a predictable
 # path is a symlink target for an append that may be running under sudo. mktemp
-# creates with O_EXCL. This mirrors _choose_log_file's own fallback exactly, so an
-# early-failure run leaves one small file beside the install log it already
-# leaves there — not a new class of litter.
+# creates with O_EXCL. Trailing X's with no suffix after them: BSD mktemp (macOS)
+# requires the X's at the END of the template, exactly as _choose_log_file's own
+# fallback does.
 _telemetry_fallback_spool() {
-  mktemp "${TMPDIR:-/tmp}/tracebloc-telemetry-XXXXXX" 2>/dev/null || return 1
+  mktemp "$(_telemetry_fallback_dir)/tracebloc-telemetry-XXXXXX" 2>/dev/null || return 1
 }
 
 _telemetry_deliver() {
@@ -575,8 +729,28 @@ _telemetry_deliver() {
     # Bounded: nothing drains this until #1906, and an unbounded append on a
     # customer's disk is a defect we would be shipping on purpose.
     if [ -s "$spool" ]; then
-      tail -n "$TB_TELEMETRY_SPOOL_MAX" "$spool" > "${spool}.tmp" 2>/dev/null &&
-        mv "${spool}.tmp" "$spool" 2>/dev/null || rm -f "${spool}.tmp" 2>/dev/null
+      if tail -n "$TB_TELEMETRY_SPOOL_MAX" "$spool" > "${spool}.tmp" 2>/dev/null; then
+        # The trim REPLACES the file, so the mode has to be put on the thing that
+        # survives. `> "${spool}.tmp"` creates under the process umask and `mv`
+        # keeps the tmp file's mode, so a chmod that ran only before this landed
+        # a 0644 spool: common.sh's `umask 077` normally covers it, but
+        # _install_userspace_tools (setup-linux.sh:893) and its macOS twin
+        # (setup-macos.sh:418) set `umask 022` around install_{kubectl,k3d,helm}
+        # and restore it only afterwards — so an install that dies in one of
+        # those emits from the EXIT trap under 022. Nothing sensitive is in the
+        # record by construction, so this is defence in depth; it is here because
+        # a file this installer creates should not depend on which line it died
+        # on for its mode. (saadqbal on client#747; reproduced — spool 644.)
+        # BEFORE the mv, not after it: a chmod on the spool afterwards would
+        # leave a window in which the file is world-readable, and — the thing
+        # that matters more — a second chmod on the spool is unreachable belt and
+        # braces that no test can redden, which is how a guard nobody has watched
+        # fail gets shipped. One chmod, on the inode that survives.
+        chmod 600 "${spool}.tmp" 2>/dev/null || true
+        mv "${spool}.tmp" "$spool" 2>/dev/null || rm -f "${spool}.tmp" 2>/dev/null || true
+      else
+        rm -f "${spool}.tmp" 2>/dev/null || true
+      fi
     fi
     return 0
   fi

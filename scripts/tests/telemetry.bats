@@ -63,6 +63,48 @@ attr() {
   [[ "$output" == *'"event.name":"install.run.cancelled"'* ]] || return 1
 }
 
+@test "the exit-2 re-run handoff is not a failure (saadqbal, client#747)" {
+  # gpu-nvidia.sh:55 exits 2 after install_nvidia_drivers SUCCEEDED, to ask for a
+  # reboot. That call sits under step_header b, so folding 2 into `failed` booked
+  # a fabricated `prerequisites_failed` on every unattended GPU host's first
+  # install — in the very rate this ticket exists to produce. install_cleanup has
+  # treated 2 as its own outcome ("Re-run required") since client#681.
+  TB_TELEMETRY_PHASE=prerequisites
+  run telemetry_render_event 2
+  [ "$status" -eq 0 ] || return 1
+  [ "$(attr "$output" 'event.name')" = "install.run.cancelled" ] || return 1
+  [[ "$output" != *'"error.type"'* ]] || return 1
+  # The exit code is what separates the handoff from the user's own Ctrl-C, so it
+  # has to be on the record — the name deliberately does not carry it.
+  [ "$(attr "$output" 'tracebloc.install.exit_code')" = "2" ] || return 1
+
+  # The anchor: an ordinary failure in the same phase must STILL be a failure, or
+  # every assertion above is satisfied by a function that never says `failed`.
+  run telemetry_render_event 1
+  [ "$(attr "$output" 'event.name')" = "install.run.failed" ] || return 1
+  [ "$(attr "$output" 'error.type')" = "prerequisites_failed" ] || return 1
+}
+
+@test "every event name the renderer produces is one it declares" {
+  # §6.2: the set of names a service can emit must be finite and enumerable. The
+  # renderer's answer is checked against TB_TELEMETRY_EVENT_NAMES before it is
+  # written, and an unregistered one DROPS the record rather than opening a
+  # namespace of its own — the same rule §3.2 applies to the environment.
+  local code ev
+  for code in 0 1 2 42 130 143; do
+    ev="$(attr "$(telemetry_render_event "$code")" 'event.name')"
+    [ -n "$ev" ] || { printf 'exit %s rendered no event.name\n' "$code" >&2; return 1; }
+    _telemetry_in_set "$ev" "$TB_TELEMETRY_EVENT_NAMES" || {
+      printf 'exit %s rendered undeclared name %s\n' "$code" "$ev" >&2; return 1
+    }
+  done
+  # And the guard is not vacuous: an undeclared name must be refused, not filed.
+  TB_TELEMETRY_EVENT_NAMES="install.run.succeeded"
+  run telemetry_render_event 1
+  [ "$status" -ne 0 ] || { printf 'an undeclared event name was rendered anyway\n' >&2; return 1; }
+  [ -z "$output" ] || return 1
+}
+
 @test "a cancel carries no error.type; a failure must (contract §8.4)" {
   run telemetry_render_event 130
   [[ "$output" != *'"error.type"'* ]] || return 1
@@ -151,6 +193,54 @@ attr() {
   [[ "$output" != *"hunter2"* ]] || return 1
   [[ "$output" != *"hospital.internal"* ]] || return 1
   [[ "$output" != *"/var/folders"* ]] || return 1
+}
+
+@test "a value with an embedded newline is refused, not split across two records" {
+  # The one input shape the "nowhere for a path to go" argument does not cover:
+  # what lands is not a path, it is a SECOND LINE. `grep -qE` matched line by
+  # line, so the shape checks read the first line, said yes, and wrote the whole
+  # thing — forging an attribute and splitting one record across two lines of a
+  # `.jsonl` spool, which #1906's forwarder would read as two malformed events.
+  # (saadqbal on client#747; reproduced on all four checks before fixing.)
+  local nl=$'\n'
+
+  # 1. the resource layer, through TB_VERSION and _telemetry_version.
+  TB_VERSION="v1.9.3${nl}\",\"tracebloc.install.injected\":\"yes"
+  run telemetry_render_event 0
+  [ "$status" -eq 0 ] || return 1
+  [[ "$output" != *"injected"* ]] || return 1
+  [ "$(printf '%s' "$output" | grep -c .)" = "1" ] || {
+    printf 'the record was split across %s lines\n' "$(printf '%s' "$output" | grep -c .)" >&2
+    return 1
+  }
+  [ "$(attr "$output" 'service.version')" = "0.0.0-unknown" ] || return 1
+  TB_VERSION=v1.9.3
+
+  # 2. the attribute writer — the str, int and key shapes, each on its own.
+  _telemetry_reset
+  _telemetry_attr "tracebloc.install.phase" "helm${nl}/etc/passwd"
+  [ -z "$_TB_TELEMETRY_BUF" ] || { printf 'str: %s\n' "$_TB_TELEMETRY_BUF" >&2; return 1; }
+  _telemetry_reset
+  _telemetry_attr "tracebloc.install.duration_ms" "12${nl},\"x\":\"y" int
+  [ -z "$_TB_TELEMETRY_BUF" ] || { printf 'int: %s\n' "$_TB_TELEMETRY_BUF" >&2; return 1; }
+  _telemetry_reset
+  _telemetry_attr "event.name${nl}bad key" "ok"
+  [ -z "$_TB_TELEMETRY_BUF" ] || { printf 'key: %s\n' "$_TB_TELEMETRY_BUF" >&2; return 1; }
+
+  # 3. the source line number.
+  run _telemetry_source_line "cluster.sh:88${nl}/etc/shadow"
+  [ "$status" -ne 0 ] || { printf 'source_line admitted: %s\n' "$output" >&2; return 1; }
+
+  # The anchor for all four: the legal spellings must still be ADMITTED, or a
+  # function that refuses everything passes this test.
+  _telemetry_reset
+  _telemetry_attr "tracebloc.install.phase" "helm"
+  [[ "$_TB_TELEMETRY_BUF" == *'"tracebloc.install.phase":"helm"'* ]] || return 1
+  _telemetry_attr "tracebloc.install.duration_ms" "12" int
+  [[ "$_TB_TELEMETRY_BUF" == *'"tracebloc.install.duration_ms":12'* ]] || return 1
+  [ "$(_telemetry_source_line "cluster.sh:88")" = "88" ] || return 1
+  run telemetry_render_event 0
+  [ "$(attr "$output" 'service.version')" = "v1.9.3" ] || return 1
 }
 
 @test "every rendered value is an int or a safe token — the derived guard" {
@@ -488,6 +578,41 @@ attr() {
   [ "$(_perm_of "$(dirname "$spool")")" = "700" ] || return 1
 }
 
+@test "the spool is 0600 under the umask the installer can actually be holding" {
+  # The test above could not see the defect it was written to pin, and the reason
+  # is in this file: load_lib sources common.sh, which sets `umask 077`, so every
+  # test ran under a umask that made the mode right by accident. The trim
+  # (`tail > "${spool}.tmp"` then `mv`) creates under the PROCESS umask and mv
+  # keeps the tmp file's mode, so a chmod that ran only before it left a 0644
+  # spool the moment the umask was anything else — and _install_userspace_tools
+  # (setup-linux.sh:893) and its macOS twin (setup-macos.sh:418) set `umask 022`
+  # around install_{kubectl,k3d,helm} and restore it only afterwards, so an
+  # install that dies in one of those emits from the EXIT trap under 022.
+  # (saadqbal on client#747; reproduced — spool 644.)
+  local spool="$HOST_DATA_DIR/telemetry/pending.jsonl" saved
+  saved="$(umask)"
+  umask 022
+  # Assert the mutation anchor applied: if common.sh has been re-sourced or the
+  # umask did not take, this test is measuring 077 again and proves nothing.
+  [ "$(umask)" = "0022" ] || { umask "$saved"; printf 'umask did not take\n' >&2; return 1; }
+  TB_TELEMETRY_SPOOL_MAX=2
+  local i
+  for i in 1 2 3; do
+    _TB_TELEMETRY_EMITTED=""
+    telemetry_emit_outcome "$i"
+  done
+  local mode dir_mode lines
+  mode="$(_perm_of "$spool")"
+  dir_mode="$(_perm_of "$(dirname "$spool")")"
+  lines="$(grep -c . "$spool")"
+  umask "$saved"
+  [ "$mode" = "600" ] || { printf 'spool is %s under umask 022, not 600\n' "$mode" >&2; return 1; }
+  [ "$dir_mode" = "700" ] || return 1
+  # The trim must still have run — a spool that was never rewritten would keep
+  # its 600 for the wrong reason and this test would pass vacuously.
+  [ "$lines" = "2" ] || { printf 'the trim did not run (%s lines)\n' "$lines" >&2; return 1; }
+}
+
 @test "install_cleanup emits the outcome on every path, including a cancel" {
   # The EXIT trap is where "a terminal event on every path" (§6.5) is actually
   # honoured — a failure that exits under errexit never reaches any other line.
@@ -717,11 +842,60 @@ attr() {
   }
 }
 
+@test "the pre-log record survives the BOOTSTRAP, not just the process" {
+  # The test below hands the fallback a TMPDIR of its own, and that is exactly
+  # the shape that hid this: on the real `curl | bash` path TMPDIR is the
+  # bootstrap's own scratch dir, and the bootstrap deletes it. install.sh:238
+  # does `TMPDIR="$(mktemp -d)"` — a plain assignment to a name that is ALREADY
+  # EXPORTED (always on macOS) keeps the export attribute — :239 traps
+  # `rm -rf "$TMPDIR"`, and :571 runs the installer out of it. So every pre-log
+  # record landed inside the doomed directory and was gone before anyone could
+  # read it, on the primary macOS path. (saadqbal on client#747; reproduced.)
+  #
+  # This test reproduces the bootstrap rather than describing it: it unpacks the
+  # libs into the scratch dir and sources them from THERE, because "where is the
+  # installer running from" is what the fix derives its answer from.
+  local boot="$BATS_TEST_TMPDIR/boot" home="$BATS_TEST_TMPDIR/home"
+  mkdir -p "$boot" "$home"
+  run env HOME="$home" TB_BOOT="$boot" bash -c '
+    TMPDIR="$(mktemp -d "$TB_BOOT/tb-XXXXXX")"
+    export TMPDIR
+    trap '\''rm -rf "$TMPDIR"'\'' EXIT
+    mkdir -p "$TMPDIR/lib"
+    cp "'"$LIB_DIR"'"/*.sh "$TMPDIR/lib/"
+    bash -c '\''
+      set -uo pipefail
+      source "$TMPDIR/lib/common.sh"
+      source "$TMPDIR/lib/telemetry.sh"
+      CLIENT_ENV=prod
+      HOST_DATA_DIR="$TB_BOOT/never-created"
+      unset LOG_FILE
+      telemetry_run_started
+      telemetry_emit_outcome 1
+    '\''
+  '
+  [ "$status" -eq 0 ] || { printf 'the bootstrap stand-in died: %s\n' "$output" >&2; return 1; }
+  # The scratch dir is gone, as it is on a real run.
+  [ -z "$(ls "$boot" 2>/dev/null)" ] || {
+    printf 'the bootstrap stand-in did not clean up, so this proves nothing: %s\n' "$(ls "$boot")" >&2
+    return 1
+  }
+  local record
+  record="$(ls "$home"/tracebloc-telemetry-* 2>/dev/null | head -1)"
+  [ -n "$record" ] || { printf 'the record did not survive the bootstrap\n' >&2; return 1; }
+  grep -q '"event.name":"install.run.failed"' "$record" || return 1
+  # Still never the data dir the installer refused.
+  [ ! -d "$boot/never-created" ] || return 1
+}
+
 @test "a pre-log failure is still reported (no log, no data dir)" {
   # validate_config and early_data_dir_guard both run BEFORE setup_log_file, so
   # on those paths `log` is a no-op AND (correctly) no data dir exists. Together
   # those two facts silently discarded the event. This is the general case; the
   # NFS test above is the specific one that made it matter.
+  #
+  # NOTE this test gives the fallback a TMPDIR that nothing deletes, so it says
+  # nothing about the curl|bash path — the test above is the one that does.
   local tmp="$BATS_TEST_TMPDIR/prelog"
   mkdir -p "$tmp"
   run env TMPDIR="$tmp" bash -c '
