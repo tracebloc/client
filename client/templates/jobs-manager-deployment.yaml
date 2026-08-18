@@ -421,8 +421,17 @@ spec:
         # the heartbeat version inventory. It is the one chart workload outside
         # the release namespace, so without this the inventory searches the
         # wrong namespace and reports resource-monitor as "not deployed".
+        #
+        # EMPTY when resourceMonitor is off, and that empty value is load-
+        # bearing rather than a no-op: the runtime reads unset as "older chart,
+        # use the built-in default" and set-but-empty as "there is no
+        # node-agents namespace". With resourceMonitor off the namespace and its
+        # RBAC are not rendered at all, so leaving this populated would have
+        # jobs-manager list a namespace that does not exist, with no Role to
+        # authorize it — a 403 every heartbeat, forever, about a workload the
+        # operator deliberately turned off (review, PR #750).
         - name: NODE_AGENTS_NAMESPACE
-          value: {{ .Values.nodeAgents.namespace.name | quote }}
+          value: {{ if ne .Values.resourceMonitor false }}{{ dig "namespace" "name" "" (.Values.nodeAgents | default dict) | quote }}{{ else }}""{{ end }}
         # backend#664 (Utilization Ladder L0): with NEITHER env.RESOURCE_REQUESTS
         # nor env.RESOURCE_LIMITS set, BOTH vars are omitted and jobs-manager
         # sizes the envelope from node allocatable (75% with cpu=2/memory=8Gi

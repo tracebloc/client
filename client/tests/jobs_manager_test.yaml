@@ -831,3 +831,34 @@ tests:
       - equal:
           path: spec.template.spec.containers[1].name
           value: pods-monitor-container
+
+  # client-runtime#152: the heartbeat version inventory needs to know where the
+  # resource-monitor DaemonSet lives — the one chart workload outside the
+  # release namespace.
+  - it: passes the node-agents namespace to the api container (client-runtime#152)
+    set:
+      nodeAgents:
+        namespace:
+          name: tracebloc-node-agents
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: NODE_AGENTS_NAMESPACE
+            value: "tracebloc-node-agents"
+
+  # The empty value is load-bearing, not a no-op: the runtime reads UNSET as
+  # "older chart, use the built-in default" and SET-BUT-EMPTY as "there is no
+  # node-agents namespace". With resourceMonitor off the namespace and its RBAC
+  # are not rendered, so a populated value would have jobs-manager list a
+  # namespace that does not exist with no Role to authorize it — a 403 every
+  # heartbeat, forever, for a workload the operator turned off (review PR #750).
+  - it: empties the node-agents namespace when resourceMonitor is off (client-runtime#152)
+    set:
+      resourceMonitor: false
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: NODE_AGENTS_NAMESPACE
+            value: ""
