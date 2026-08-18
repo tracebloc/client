@@ -417,6 +417,12 @@ spec:
           value: {{ printf "%s/" (dig "imageRegistry" "docker.io" (.Values.global | default dict) | default "docker.io") | quote }}
         - name: CLIENT_ENV
           value: {{ include "tracebloc.clientEnv" . | quote }}
+        # client-runtime#152: where the resource-monitor DaemonSet lives, for
+        # the heartbeat version inventory. It is the one chart workload outside
+        # the release namespace, so without this the inventory searches the
+        # wrong namespace and reports resource-monitor as "not deployed".
+        - name: NODE_AGENTS_NAMESPACE
+          value: {{ .Values.nodeAgents.namespace.name | quote }}
         # backend#664 (Utilization Ladder L0): with NEITHER env.RESOURCE_REQUESTS
         # nor env.RESOURCE_LIMITS set, BOTH vars are omitted and jobs-manager
         # sizes the envelope from node allocatable (75% with cpu=2/memory=8Gi

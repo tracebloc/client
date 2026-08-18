@@ -192,3 +192,59 @@ roleRef:
   name: {{ include "tracebloc.rbacName" . }}
   apiGroup: rbac.authorization.k8s.io
 {{- end }}
+
+{{- $nodeAgentsNs := dig "namespace" "name" "" (.Values.nodeAgents | default dict) }}
+{{- if and (ne .Values.resourceMonitor false) $nodeAgentsNs (ne $nodeAgentsNs .Release.Namespace) }}
+---
+{{/*
+  jobs-manager in the NODE-AGENTS namespace (client-runtime#152).
+
+  The heartbeat version inventory reads the configured image off each of the
+  chart's workloads. Five of them are Deployments in the release namespace and
+  are covered by the Role/ClusterRole above — but resource-monitor is a
+  DaemonSet in `nodeAgents.namespace.name`, deliberately split out so it can run
+  under PSA `privileged` without widening the release namespace.
+
+  A grant in the release namespace therefore does not reach it: the list call
+  succeeds with zero items and the inventory reports resource-monitor as null,
+  which reads as "not deployed". The ClusterRole branch already covers it
+  cluster-wide, so this pair exists for `clusterScope: false` edges (including
+  OpenShift). Same second-Role split image-refresh already uses for this exact
+  namespace boundary (image-refresh-rbac.yaml).
+
+  Read-only, and rendered only when there IS a DaemonSet to read: with
+  resourceMonitor off, or with the node-agents namespace pointing back at the
+  release namespace (already granted above), this is pure unused surface.
+*/}}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "tracebloc.rbacNodeAgentsName" . }}
+  namespace: {{ $nodeAgentsNs }}
+  labels:
+    {{- include "tracebloc.labels" . | nindent 4 }}
+rules:
+  - apiGroups: ["apps"]
+    resources: ["daemonsets"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "tracebloc.rbacNodeAgentsName" . }}
+  namespace: {{ $nodeAgentsNs }}
+  labels:
+    {{- include "tracebloc.labels" . | nindent 4 }}
+subjects:
+  # The SUBJECT keeps tracebloc.serviceAccountName: there is only ONE
+  # jobs-manager ServiceAccount and it lives in the release namespace. Only the
+  # Role and RoleBinding are renamed, to avoid colliding with the
+  # release-namespace pair.
+  - kind: ServiceAccount
+    name: {{ include "tracebloc.serviceAccountName" . }}
+    namespace: {{ .Release.Namespace }}
+roleRef:
+  kind: Role
+  name: {{ include "tracebloc.rbacNodeAgentsName" . }}
+  apiGroup: rbac.authorization.k8s.io
+{{- end }}

@@ -106,6 +106,59 @@ tests:
             resources: ["deployments", "daemonsets"]
             verbs: ["get", "list", "watch"]
 
+  # client-runtime#152 / review PR #750: resource-monitor is a DaemonSet in
+  # nodeAgents.namespace, NOT the release namespace. A release-namespace grant
+  # does not reach it — the list succeeds with zero items and the inventory
+  # reports "not deployed". clusterScope: false edges need a second Role there.
+  - it: a clusterScope=false edge gets a node-agents Role for the DaemonSet (client-runtime#152)
+    set:
+      clusterScope: false
+      nodeAgents:
+        namespace:
+          name: tracebloc-node-agents
+    documentIndex: 3
+    asserts:
+      - isKind:
+          of: Role
+      - equal:
+          path: metadata.namespace
+          value: tracebloc-node-agents
+      - contains:
+          path: rules
+          content:
+            apiGroups: ["apps"]
+            resources: ["daemonsets"]
+            verbs: ["get", "list", "watch"]
+
+  - it: the node-agents RoleBinding binds the release-namespace ServiceAccount (client-runtime#152)
+    set:
+      clusterScope: false
+      nodeAgents:
+        namespace:
+          name: tracebloc-node-agents
+    documentIndex: 4
+    asserts:
+      - isKind:
+          of: RoleBinding
+      - equal:
+          path: metadata.namespace
+          value: tracebloc-node-agents
+      - equal:
+          path: subjects[0].namespace
+          value: NAMESPACE
+
+  - it: no node-agents pair when that namespace IS the release namespace (client-runtime#152)
+    set:
+      clusterScope: false
+      nodeAgents:
+        namespace:
+          name: NAMESPACE
+    asserts:
+      # The release-namespace Role already grants daemonsets there, so a second
+      # pair would be unused surface — and would collide on name.
+      - hasDocuments:
+          count: 3
+
   # backend#1876: the GPU->CPU pending fallback needs list nodes. `nodes` is
   # cluster-scoped, so it must be in the ClusterRole and CANNOT be in the
   # namespaced Role — assert both.
