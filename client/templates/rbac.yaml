@@ -27,8 +27,17 @@ rules:
   - apiGroups: [""]
     resources: ["pods", "pods/log", "events"]
     verbs: ["get", "list", "watch"]
+  # client-runtime#152: jobs-manager reports a version inventory on the
+  # heartbeat, assembled from the configured images on the chart's own
+  # workloads. `deployments` covers jobs-manager, pods-monitor,
+  # requests-proxy, mysql-client and egress-proxy; `daemonsets` is needed
+  # for resource-monitor, the one workload that is not a Deployment.
+  # Read-only, and scoped to the release namespace in the Role branch.
+  # Without daemonsets the list 403s and resource-monitor is reported as
+  # null forever — the runtime degrades rather than failing, so the symptom
+  # is a permanently blank field, not an error anyone would chase.
   - apiGroups: ["apps"]
-    resources: ["deployments"]
+    resources: ["deployments", "daemonsets"]
     verbs: ["get", "list", "watch"]
   - apiGroups: ["metrics.k8s.io"]
     resources: ["pods"]
@@ -126,8 +135,17 @@ rules:
   - apiGroups: [""]
     resources: ["pods", "pods/log", "events"]
     verbs: ["get", "list", "watch"]
+  # client-runtime#152: jobs-manager reports a version inventory on the
+  # heartbeat, assembled from the configured images on the chart's own
+  # workloads. `deployments` covers jobs-manager, pods-monitor,
+  # requests-proxy, mysql-client and egress-proxy; `daemonsets` is needed
+  # for resource-monitor, the one workload that is not a Deployment.
+  # Read-only, and scoped to the release namespace in the Role branch.
+  # Without daemonsets the list 403s and resource-monitor is reported as
+  # null forever — the runtime degrades rather than failing, so the symptom
+  # is a permanently blank field, not an error anyone would chase.
   - apiGroups: ["apps"]
-    resources: ["deployments"]
+    resources: ["deployments", "daemonsets"]
     verbs: ["get", "list", "watch"]
   - apiGroups: ["metrics.k8s.io"]
     resources: ["pods"]

@@ -77,6 +77,35 @@ tests:
             resources: ["pods", "pods/log", "events"]
             verbs: ["get", "list", "watch"]
 
+  # client-runtime#152: the heartbeat version inventory reads the chart's own
+  # workloads. resource-monitor is a DaemonSet, so a deployments-only grant
+  # reports it as null forever — and because the runtime degrades rather than
+  # failing, the symptom is a blank field nobody would chase. Assert BOTH
+  # branches: an edge on clusterScope: false must get it too.
+  - it: ClusterRole grants read on deployments and daemonsets for the version inventory (client-runtime#152)
+    set:
+      clusterScope: true
+    documentIndex: 1
+    asserts:
+      - contains:
+          path: rules
+          content:
+            apiGroups: ["apps"]
+            resources: ["deployments", "daemonsets"]
+            verbs: ["get", "list", "watch"]
+
+  - it: namespaced Role grants read on deployments and daemonsets too (client-runtime#152)
+    set:
+      clusterScope: false
+    documentIndex: 1
+    asserts:
+      - contains:
+          path: rules
+          content:
+            apiGroups: ["apps"]
+            resources: ["deployments", "daemonsets"]
+            verbs: ["get", "list", "watch"]
+
   # backend#1876: the GPU->CPU pending fallback needs list nodes. `nodes` is
   # cluster-scoped, so it must be in the ClusterRole and CANNOT be in the
   # namespaced Role — assert both.
