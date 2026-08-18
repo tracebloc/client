@@ -122,7 +122,13 @@ attr() {
   NO_PROXY="$CANARY.internal"
   TB_VERSION="v1.9.3-$CANARY"
   TB_ERR_LOC="/var/folders/qx/$CANARY/T/tmp.9k/scripts/lib/setup-linux.sh:412"
-  TB_ERR_CMD="curl -u $CANARY:hunter2 https://api.tracebloc.io/"
+  # TB_ERR_CMD is what common.sh's ERR trap records: the failing command,
+  # UNEXPANDED. It is still free text and still carries a path, which is why it
+  # is never emitted. (Deliberately not written as `curl -u user:pass` here —
+  # that spelling is a real credential pattern and gitleaks is right to flag it
+  # in a source file, canary or not. The credential half of this test is carried
+  # by HTTPS_PROXY above.)
+  TB_ERR_CMD="install_client_helm --values /Users/$CANARY/values.yaml"
   CLIENT_STATE="$CANARY"
   TB_TELEMETRY_PHASE="$CANARY"
   USER="$CANARY"
