@@ -107,9 +107,24 @@ on `develop` and on `main` — which is the whole reason the check lives there.
 > branch, so the R8 step could only annotate a PR, never block it — and on five
 > runs of client#752 it did not even annotate: it shared a `timeout-minutes: 10`
 > budget with an `apt-get`, which consumed the lot, and R8 reported `skipped`
-> while every required check went green. If you move this check again, move it to
-> a job whose context is in `branches/{develop,main}/protection`, and re-word
-> this paragraph to name that job.
+> while every required check went green.
+>
+> If you move this check again, move it to a job whose check-run name is in the
+> required-contexts list, and re-word this paragraph to name that job. Read the
+> list with:
+>
+> ```bash
+> gh api repos/tracebloc/client/branches/develop --jq '.protection.required_status_checks.contexts'
+> ```
+>
+> **Not** `branches/develop/protection` — an earlier version of this note said to
+> use that, and it is admin-only. Without admin it returns
+> `{"message":"Not Found","status":"404"}`, which is **indistinguishable from
+> "this branch is not protected"**, so a non-admin following the old instruction
+> concluded the opposite of the truth and the note defeated its own purpose
+> (Arturo, #755 review). The same 404 hides ruleset-only protection from that
+> endpoint even for admins. `branches/develop` → `.protection` is readable at
+> plain-member level and returns the same list.
 
 ## 5. Human follow-ups required to make this fully real
 

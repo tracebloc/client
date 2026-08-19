@@ -39,33 +39,73 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
-  # The `static` job lived here until 2026-08-19. It is gone, not moved wholesale:
-  # its shellcheck sweep and bash -n parse loop were a verbatim restatement of
-  # standard-checks.yml's `Lint` (same 19 files from the Makefile's
-  # SHELLCHECK_FILES, same error severity), and its four guards -- R8 installer
-  # manifest, cross-OS facts, style/terminology, PSScriptAnalyzer -- gated
-  # nothing, because `Static analysis` is a required status check on no branch.
+  # The `static` job lived here until 2026-08-19. It is gone, and every part of it
+  # now sits behind a check that can actually block.
+  #
+  # #753/#754 had already deleted its shellcheck step (three copies of shellcheck,
+  # only this one non-gating and enumerated) and said the R8-step-as-a-gate
+  # question was backend#2182/#2183's to answer. This is that answer: `Static
+  # analysis` is a required status check on NO branch — verified against develop,
+  # staging, main and both rulesets — so R8, the cross-OS facts check, the style
+  # guard and PSScriptAnalyzer could annotate a PR and never stop one. Worse, they
+  # shared this job's `timeout-minutes: 10` with an apt-get that ate the whole
+  # budget five times on client#752; all four reported `skipped` while every
+  # required check went green.
   #
   # Where each part went:
-  #   bash -n + shellcheck  -> standard-checks.yml `Lint` (required) via make lint
+  #   bash -n               -> standard-checks.yml `Lint` (required), via `make parse`
   #   PSScriptAnalyzer      -> standard-checks.yml `Lint` (required)
   #   gen-manifest --check  -> drift-checks.yaml `Source-of-truth drift` (required)
   #   check-facts --check   -> drift-checks.yaml `Source-of-truth drift` (required)
   #   check-style.sh        -> drift-checks.yaml `Source-of-truth drift` (required)
   #
-  # The three guard moves are via the Makefile's `drift` target, so the gate and
-  # the pre-push hook now read one list instead of two that had already diverged.
-  # This job keeps only what nothing else can do: the real bats suite, Pester on
-  # real Windows, the 9-distro prereq matrix, PATH persistence and the e2e runs.
+  # The three guard moves go through the Makefile's `drift` target, so the gate and
+  # the pre-push hook read one list instead of two that had already diverged. This
+  # job keeps only what nothing else can do: the real bats suite, Pester on real
+  # Windows, the 9-distro prereq matrix, PATH persistence and the e2e runs.
 
   unit-bash:
-    timeout-minutes: 10
+    # 10 -> 15. At 10 the bounded install (390 s worst case) plus ~155 s of bats
+    # could still reach the cap and report `cancelled`, which is the #753 bug the
+    # bound exists to remove. Matches standard-checks.yml's `Unit tests`.
+    timeout-minutes: 15
     name: bats (bash unit, mocked)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: Install bats
-        run: sudo apt-get update -qq && sudo apt-get install -y -qq bats
+
+      # Bounded and retried, same shape as "Pull <distro> (bounded, retried)"
+      # below. This is not speculative hardening: this exact step stalled on
+      # 2026-08-19 at 11:58 and burned the whole `timeout-minutes: 10` budget,
+      # reporting `cancelled` with an empty log and `Run bats` skipped -- the
+      # #753 signature, on bats rather than shellcheck. shellcheck could be
+      # fixed by deleting the install (it is preinstalled); bats genuinely has
+      # to be installed, so it gets a bound instead.
+      #
+      # `sudo timeout`, not `timeout sudo`: timeout must run as root so it
+      # signals apt-get directly rather than signalling sudo and hoping the TERM
+      # is forwarded. `-qq` is dropped on the install so a slow mirror leaves
+      # something in the log, and `bats --version` is the proof-of-install
+      # marker whose absence identified the stall in the first place.
+      - name: Install bats (bounded, retried)
+        # Bounds sized against the job budget (see the twin step in
+        # standard-checks.yml for the arithmetic): worst case 3 x (60 + 60) +
+        # 30 s backoff = 390 s, plus ~155 s of bats, inside the 15 minutes this
+        # job now allows. `if`/`fi` not `[ ... ] &&` because the default shell is
+        # `bash -e` and a false test on the last iteration would abort before the
+        # ::error:: line printed.
+        run: |
+          for i in 1 2 3; do
+            if sudo timeout 60 apt-get update -qq \
+               && sudo timeout 60 apt-get install -y bats; then
+              bats --version && exit 0
+            fi
+            echo "::warning::bats install stalled or failed (attempt $i/3)"
+            if [ "$i" -lt 3 ]; then sleep $((i*10)); fi
+          done
+          echo "::error::could not install bats in 3 bounded attempts - runner-to-mirror connectivity, not this PR. Re-run this job."
+          exit 1
+
       - name: Run bats
         run: bats scripts/tests/*.bats
 

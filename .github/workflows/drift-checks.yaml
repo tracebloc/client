@@ -55,45 +55,40 @@ jobs:
   drift:
     name: Source-of-truth drift
     runs-on: ubuntu-latest
+    # 20 minutes against guards that measure ~2 s. The previous revision of this
+    # file argued for NO timeout, on the grounds that a killed job reports its
+    # guards as `skipped`. That reasoning does not survive this PR's own change
+    # (Arturo, #755 review): `skipped` guards were harmless only while `Static
+    # analysis` was required nowhere. Now that `Source-of-truth drift` IS a
+    # required check, a timeout-kill sets it `cancelled`, which branch protection
+    # treats as not-success -- red and blocked, which is exactly what we want.
+    # So a bound is now free, and it is worth having: the hang risk here is not
+    # `make drift`, it is `azure/setup-helm` below fetching a binary before any
+    # guard runs.
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Set up Helm
         uses: azure/setup-helm@1a275c3b69536ee54be43f2070a358922e12c8d4 # v4.3.1
         with:
           version: v3.15.4
-      # ONE step, and it does not spell the guard list out: `make drift` is the
-      # single declaration of "the duplicated-declaration guards", and the
-      # pre-push hook (`make check` -> `drift`) runs the identical set. Listing
-      # them here again would be a second copy to drift from -- which is exactly
-      # what this job exists to catch, and exactly what had happened: the
-      # Makefile's `drift` target carried gen-manifest/check-facts/check-style
-      # while this job carried check-drift, so each side gated what the other
-      # did not. Add a guard in the Makefile and it gates here automatically.
+      # ONE step, and it names no guard. `make drift` is the single declaration of
+      # "the duplicated-declaration guards", and the pre-push hook (`make check`
+      # -> `drift`) runs the identical set. Add a guard in the Makefile and it
+      # gates here automatically.
       #
-      # The guards this covers, and why each is a merge gate rather than advice:
-      #   gen-manifest.sh --check   R8 supply chain. The bootstrap verifies every
-      #                             sub-script against scripts/manifest.sha256
-      #                             before the privileged steps; a script changed
-      #                             without regenerating the manifest publishes a
-      #                             manifest that rejects the scripts it ships.
-      #   check-facts.sh --check    Cross-OS tool pins single-sourced from
-      #                             scripts/spec/facts.env (#435, #616).
-      #   check-style.sh            Terminal style + terminology (STYLE.md).
-      #   check-drift.sh            Chart <-> script name/host coupling.
-      #   env-vocabulary-agreement  One CLIENT_ENV vocabulary, four declarations
-      #                             (backend#1729 sweep 5).
+      # There is deliberately NO enumeration of the guards in this file. An
+      # earlier version of this comment listed five of them "for orientation",
+      # and within two hours it was wrong -- `telemetry-vocabulary-agreement.sh`
+      # arrived on develop and no prose copy followed it, while the header eight
+      # lines above claimed this job "holds no list of its own" (Asad + Arturo,
+      # #755 review). A second copy of a list is the defect this job exists to
+      # catch; it does not get an exemption for being a comment. `make drift`
+      # prints the live set and its count on every run.
       #
-      # The first three moved here from installer-tests.yaml's `static` job on
-      # 2026-08-19. `Static analysis` is required on no branch, so all three were
-      # advice: a PR could change an installer script, leave manifest.sha256
-      # stale, and merge on its required checks. Worse, they shared that job's
-      # `timeout-minutes: 10` with an apt-get, and on 2026-08-19 that apt-get ate
-      # the whole budget five times on client#752 -- all four guards reported
-      # `skipped` while the required checks went green. A guard that shares a
-      # budget with an unrelated download can be silenced by it.
-      #
-      # No `timeout-minutes` here, deliberately. A required job with no timeout
-      # that hangs blocks the merge; a required job that is killed mid-way can
-      # report guards as `skipped`. Fail closed: prefer the slow red.
+      # These guards moved here from installer-tests.yaml's `static` job on
+      # 2026-08-19, because `Static analysis` is required on no branch: a PR could
+      # change an installer script, leave manifest.sha256 stale, and merge on its
+      # required checks.
       - name: Duplicated-declaration guards (make drift)
         run: make drift

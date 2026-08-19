@@ -41,48 +41,41 @@ jobs:
   lint:
     name: Lint
     runs-on: ubuntu-latest
+    # #753: this job had no timeout at all, so when `Install shellcheck` stalled
+    # on 2026-08-19 it drifted toward GitHub's 360-minute default instead of
+    # failing fast. Every job in this file now has a bound.
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      # shellcheck IS on the ubuntu-latest runner image -- the comment that used
-      # to sit here said it wasn't, and the unconditional `apt-get update &&
-      # apt-get install` it justified is not harmless bootstrapping. On
-      # 2026-08-19 that same apt-get pair, in installer-tests.yaml's `static`
-      # job, hung for the job's full `timeout-minutes: 10` on five consecutive
-      # runs of client#752 and took four guards down with it (they reported
-      # `skipped`). Measured: the org's `quality / shellcheck` job runs
-      # shellcheck 3 s after checkout having installed nothing.
-      #
-      # So: use what the image ships, and install only if a future image drops
-      # it. Fail closed -- if neither path yields shellcheck, `make lint` below
-      # fails and this REQUIRED check goes red rather than skipping the sweep.
-      - name: Ensure shellcheck
-        run: |
-          if ! command -v shellcheck >/dev/null 2>&1; then
-            echo "shellcheck not on the runner image — installing"
-            sudo apt-get update -qq && sudo apt-get install -y -qq shellcheck
-          fi
-          shellcheck --version | grep version
+      # The `Install shellcheck` step that used to sit here is gone, and the
+      # premise it was written on ("shellcheck itself is not on the runner
+      # image") is simply false — it IS preinstalled on ubuntu-latest (0.9.0,
+      # measured in run 32232682350), which is how `quality / shellcheck` runs
+      # without installing anything. The apt call bought nothing and cost this
+      # job 35+ minutes on 2026-08-19 (#753).
 
       - name: make lint
-        # `make lint` (backend#1606). This job used to restate the parse loop AND
-        # spell out the shellcheck file list inline, while the Makefile kept the
-        # same list in SHELLCHECK_FILES. The two had ALREADY drifted, and in the
-        # direction nobody notices: the Makefile carried 19 entries and this file
-        # 9, so ten scripts were shellchecked on a contributor's machine and NOT
-        # at the merge gate --
+        # Calls the Makefile rather than restating the commands (backend#1606).
+        # That ticket's concern was a hand-written FILE LIST drifting between
+        # the Makefile and this workflow; it fixed the drift by re-copying the
+        # list, which only reset the clock — measured 2026-08-19, the list had
+        # drifted again, past eight scripts, and #747 then had to hand-edit it
+        # in three places to add one new script. `make lint` enumerates nothing:
+        # `parse` is a find, `shellcheck` derives from `git ls-files`.
         #
-        #   scripts/gen-manifest.sh          scripts/check-facts.sh
-        #   scripts/check-style.sh           scripts/lib/*.sh
-        #   scripts/tests/check-drift.sh     scripts/tests/e2e-full-seal.sh
-        #   scripts/tests/e2e-journey.sh     scripts/tests/path-persist.sh
-        #   scripts/tests/chart-env-vocabulary.sh
-        #   scripts/tests/env-vocabulary-agreement.sh
+        # WHOLE TREE, and that is the point of running it here (Arturo, #754
+        # review). `quality / shellcheck` is required and derives the same way,
+        # but on a PR it scans only the DIFF and exits 0 on an empty one. If
+        # this job dropped shellcheck, no CI job would run a whole-tree
+        # error-severity sweep at all — the caller has no `schedule:` and passes
+        # `all-files: false` — so the superset claim behind #753 would have been
+        # true set-wise and false scope-wise. The two are complementary, not
+        # duplicates: diff-scoped gate + whole-tree gate, neither installing
+        # anything, neither holding a file list.
         #
-        # gen-manifest.sh is the installer's integrity manifest generator, so a
-        # shell defect there was invisible to this gate. Measured green across
-        # all 19 before this landed, so it arms a green check rather than
-        # importing a backlog.
+        # Verified green on the 44-file derived set under the runner's 0.9.0
+        # (not just a newer local build) before arming it.
         run: make lint
 
       # Advisory only, and it carries no file list of its own -- `make
@@ -90,7 +83,12 @@ jobs:
       # `static` job so the SC2034 visibility survives the move. `|| true` lives
       # in the target; this step cannot fail the check.
       - name: shellcheck warnings (advisory, non-blocking)
-        if: always()
+        # `!cancelled()` not `always()`: run even when `make lint` above failed
+        # (both halves are mechanical and independent, so reporting one and hiding
+        # the other costs a round trip), but do NOT run after a cancel or a
+        # timeout-kill — `always()` would burn what is left of this job's
+        # `timeout-minutes: 10` on a job that is already lost.
+        if: ${{ !cancelled() }}
         run: make lint-warnings
 
       # PSScriptAnalyzer moved here from installer-tests.yaml's `static` job on
@@ -106,15 +104,26 @@ jobs:
       # precisely because this job cannot skip it -- `shell: pwsh` fails the
       # REQUIRED check outright if pwsh is ever absent.
       #
-      # `if: always()` so a red `make lint` above still reports the PowerShell
+      # `if: !cancelled()` so a red `make lint` above still reports the PowerShell
       # verdict in the same run. Both are mechanical and independent; making the
       # author fix one to discover the other is two round trips for no reason.
       - name: PSScriptAnalyzer (PowerShell installer)
-        if: always()
+        if: ${{ !cancelled() }}
         shell: pwsh
         run: |
-          Set-PSRepository PSGallery -InstallationPolicy Trusted
-          Install-Module PSScriptAnalyzer -Force -SkipPublisherCheck -Scope CurrentUser
+          # Use the module the image already ships; only fetch if a future image
+          # drops it. PSScriptAnalyzer 1.25.0 is preinstalled on ubuntu-latest and
+          # was already loaded ("currently in use") while this step spent 38 s of
+          # the job's 59 s re-fetching it from PSGallery (Arturo, #755 review) --
+          # a network dependency inside a REQUIRED check, buying nothing. Same
+          # reasoning that removed `apt-get install shellcheck` in #753.
+          if (-not (Get-Module -ListAvailable -Name PSScriptAnalyzer)) {
+            Write-Host "PSScriptAnalyzer not on the image - installing from PSGallery"
+            Set-PSRepository PSGallery -InstallationPolicy Trusted
+            Install-Module PSScriptAnalyzer -Force -SkipPublisherCheck -Scope CurrentUser
+          }
+          Import-Module PSScriptAnalyzer
+          Write-Host "PSScriptAnalyzer $((Get-Module PSScriptAnalyzer).Version)"
           # Both PowerShell entrypoints (the bootstrap install.ps1, R8 trust root, and the
           # main installer install-k8s.ps1) plus the Windows e2e driver (#436) — the driver
           # only RUNS on the self-hosted nested-virt runner, but lint it here on every push
@@ -131,11 +140,50 @@ jobs:
   unit-tests:
     name: Unit tests
     runs-on: ubuntu-latest
+    # See the lint job: no job in this file had a timeout before #753.
+    # bats itself runs in ~2 min; the headroom is for the apt install.
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - name: Install bats
-        run: sudo apt-get update -qq && sudo apt-get install -y -qq bats
+      # bats genuinely has to be installed -- unlike shellcheck there is no
+      # preinstalled or reusable equivalent -- so it gets a bound rather than a
+      # deletion. Bounded and retried in the same shape as installer-tests.yaml's
+      # "Pull <distro> (bounded, retried)".
+      #
+      # This was left as plain apt in the first draft of #753, on the grounds
+      # that hardening installs was that ticket's own scope. Then the identical
+      # step in installer-tests.yaml's `unit-bash` stalled at 11:58 on
+      # 2026-08-19 and burned its whole 10-minute budget, reporting `cancelled`
+      # with an empty log. A required check is the wrong place to leave a known
+      # unbounded external call.
+      #
+      # `sudo timeout`, not `timeout sudo`: timeout must run as root to signal
+      # apt-get directly instead of signalling sudo and hoping TERM is
+      # forwarded. `-qq` dropped on the install so a stall is not silent, and
+      # `bats --version` is the proof-of-install marker.
+      - name: Install bats (bounded, retried)
+        # Bounds SIZED against the job budget, the way the distro-pull step
+        # sizes its own. Measured healthy: install 9 s, bats run 155 s. Worst
+        # case here is 3 x (60 + 60) + 10 + 20 = 390 s, plus ~155 s of bats =
+        # ~9 min, inside this job's 15. At the 120 s bound this first had, worst
+        # case was 780 s -- which would have blown a 10-minute budget and
+        # reported `cancelled` again, i.e. reintroduced the very bug.
+        #
+        # `if`/`fi` rather than `[ ... ] && sleep`: the default shell is
+        # `bash -e`, so a bare test returning false on the last iteration would
+        # abort the script before the ::error:: line ever printed.
+        run: |
+          for i in 1 2 3; do
+            if sudo timeout 60 apt-get update -qq \
+               && sudo timeout 60 apt-get install -y bats; then
+              bats --version && exit 0
+            fi
+            echo "::warning::bats install stalled or failed (attempt $i/3)"
+            if [ "$i" -lt 3 ]; then sleep $((i*10)); fi
+          done
+          echo "::error::could not install bats in 3 bounded attempts - runner-to-mirror connectivity, not this PR. Re-run this job."
+          exit 1
 
       - name: Run bats (bash unit suite, mocked)
         run: bats scripts/tests/*.bats
