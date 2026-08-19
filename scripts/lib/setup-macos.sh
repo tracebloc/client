@@ -674,6 +674,28 @@ _install_macos_autostart() {
 # NOW (Docker is up by this point) and fail here, naming the exact setting, instead of
 # in a pod. Intel Macs run amd64 natively — nothing to check. TRACEBLOC_ALLOW_ARM64
 # skips it (same escape hatch as the preflight arch gate). Image overridable for tests.
+# The macOS amd64-emulation refusal — the Rosetta remedy. Shared by the early gate
+# (assert_amd64_emulation) and the late _assert_engine_runs_on_this_arch backstop, so
+# a refusal from either gives the same macOS-correct fix, never the Linux binfmt one.
+_macos_amd64_refusal() {
+  warn "amd64 emulation isn't working on this Apple Silicon Mac, and this install resolved to the amd64-only MySQL 5.7 engine — it would crash-loop, not fail here."
+  hint "  Docker Desktop: Settings → General → enable \"Use Rosetta for x86_64/amd64 emulation\", then restart Docker and re-run."
+  hint "  Colima: recreate the VM with VZ + Rosetta →  colima delete && colima start --vm-type vz --vz-rosetta"
+  hint "  (or set TRACEBLOC_ALLOW_ARM64=1 to proceed anyway — the images may crash.)"
+  error "amd64 emulation unavailable — fix the above and re-run (this install needs the amd64-only MySQL 5.7 engine; a fresh install would use the native 8.4 engine instead)."
+}
+
+# Boolean: does amd64 emulation actually run on this Mac? The Rosetta/Docker smoke,
+# time-bounded (installer rule — every docker call is bounded; #433). spin_cmd_bounded
+# returns 124 on the deadline -> false, same as a real emulation failure. Shared by
+# the EARLY gate (assert_amd64_emulation) and the LATE _assert_engine_runs_on_this_arch
+# backstop (client#756), so "can this arm64 Mac run amd64?" has one answer in one place.
+_macos_amd64_emulation_ok() {
+  local _img="${TB_AMD64_SMOKE_IMAGE:-busybox:1.36}"
+  spin_cmd_bounded "${TB_AMD64_SMOKE_TIMEOUT:-120}" "Verifying amd64 emulation…" \
+    docker run --rm --platform linux/amd64 "$_img" true
+}
+
 assert_amd64_emulation() {
   [[ "$ARCH" == "arm64" ]] || return 0
   if [[ -n "${TRACEBLOC_ALLOW_ARM64:-}" ]]; then
@@ -684,33 +706,25 @@ assert_amd64_emulation() {
   # runs natively on Apple Silicon. Ask through _pf_mysql_engine_decision, NOT the
   # raw _mysql_engine_decision: the wrapper sets values_file AND the SANITISED
   # TB_NAMESPACE (DNS-1123), so the per-release datadir HOST_DATA_DIR/<ns>/mysql is
-  # probed, not just the legacy HOST_DATA_DIR/mysql. Calling the raw rule left
-  # TB_NAMESPACE unset, missed a re-run's per-release 5.7 data, and skipped the
-  # smoke on a host that then stays on 5.7 and crash-loops (Bugbot High, this PR).
-  # The wrapper also FAILS CLOSED to 5.7 if the engine lib is unavailable, so an
-  # uncertain host is gated, not waved through. A FRESH Mac resolves to 8.4 and is
-  # not refused for emulation it does not need (client#748).
-  local _engine
-  _engine="$(_pf_mysql_engine_decision 2>/dev/null | awk '{print $1}')"
+  # probed, not just the legacy HOST_DATA_DIR/mysql. The wrapper also FAILS CLOSED to
+  # 5.7 if the engine lib is unavailable. This is the EARLY gate (before helm), so
+  # existing_id is invisible and the 8.4 answer is a GUESS; _assert_engine_runs_on_this_arch
+  # re-asks on macOS once the engine is real and refuses there if the guess was wrong
+  # (client#756). A FRESH Mac resolves to 8.4 and is not refused for emulation it does
+  # not need (client#748). ${_decision%% *} keeps the reason attached, as _pf_arch does;
+  # no 2>/dev/null — the wrapper always exits 0, so a real stderr diagnostic should show.
+  local _decision _engine
+  _decision="$(_pf_mysql_engine_decision)"
+  _engine="${_decision%% *}"
   if [[ "$_engine" == "8.4" ]]; then
     success "MySQL engine resolves to 8.4 (multi-arch) — this Apple Silicon Mac runs the client images natively, no amd64 emulation needed."
     return 0
   fi
-  local _img="${TB_AMD64_SMOKE_IMAGE:-busybox:1.36}"
-  # Time-bounded: a wedged daemon or stuck pull must not hang a headless install
-  # forever behind a spinner (installer rule — every docker call is bounded; #433
-  # Bugbot). spin_cmd_bounded returns 124 on the deadline, which falls through to the
-  # same remediation as a real emulation failure.
-  if spin_cmd_bounded "${TB_AMD64_SMOKE_TIMEOUT:-120}" "Verifying amd64 emulation…" \
-       docker run --rm --platform linux/amd64 "$_img" true; then
+  if _macos_amd64_emulation_ok; then
     success "amd64 emulation verified (x86_64 client images will run)."
     return 0
   fi
-  warn "amd64 emulation isn't working on this Apple Silicon Mac, and this install resolved to the amd64-only MySQL 5.7 engine — it would crash-loop, not fail here."
-  hint "  Docker Desktop: Settings → General → enable \"Use Rosetta for x86_64/amd64 emulation\", then restart Docker and re-run."
-  hint "  Colima: recreate the VM with VZ + Rosetta →  colima delete && colima start --vm-type vz --vz-rosetta"
-  hint "  (or set TRACEBLOC_ALLOW_ARM64=1 to proceed anyway — the images may crash.)"
-  error "amd64 emulation unavailable — fix the above and re-run (this install needs the amd64-only MySQL 5.7 engine; a fresh install would use the native 8.4 engine instead)."
+  _macos_amd64_refusal
 }
 
 install_macos() {
