@@ -953,13 +953,19 @@ _resolve_mysql_engine() {
 # existing edge can still look fresh there and only resolve to the amd64-only 5.7
 # image here. Without this second ask, letting the fresh case through preflight
 # would let that edge proceed to an exec-format CrashLoop with no earlier signal.
-# Same conditions as _pf_arch, same probe: Linux, non-amd64, no binfmt, no escape
-# hatch. macOS is NOT covered here: this gate is Linux-only, and on macOS
-# assert_amd64_emulation (#433) runs earlier — but it refuses whenever Rosetta
-# amd64 is off, WITHOUT consulting _mysql_engine_decision, so a fresh arm64 Mac
-# that would resolve to the native 8.4 engine is still turned away for emulation
-# it does not need. That macOS engine-aware gate is a separate fix (backend#2047
-# follow-up), deliberately out of scope here rather than silently implied covered.
+# Same conditions as _pf_arch: non-amd64, no emulation, no escape hatch — with a
+# PER-OS emulation probe (binfmt on Linux, the Rosetta/Docker smoke on macOS).
+#
+# macOS IS covered here (client#756). This comment used to say the opposite —
+# "this gate is Linux-only … deliberately out of scope" — and stayed behind when
+# the Darwin arm landed below, which reads as "macOS is ungated" to anyone who
+# trusts the prose over the code (backend#2208). On macOS this is the ONLY late
+# gate: the early assert_amd64_emulation runs before helm, so it can only GUESS
+# the engine and optimistically skips on an 8.4 guess; here the engine is
+# resolved for real, and this is the fail-closed backstop that skip depends on.
+#
+# It probes the real host, so anything calling install_client_helm under test
+# must declare OS/ARCH rather than inherit the machine — see install-client-helm.bats::setup.
 _assert_engine_runs_on_this_arch() {
   [[ "${TB_MYSQL_ENGINE_RESOLVED:-}" == "5.7" ]] || return 0
   [[ -z "${TRACEBLOC_ALLOW_ARM64:-}" ]] || return 0
