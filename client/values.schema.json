@@ -1205,7 +1205,7 @@
         "object",
         "null"
       ],
-      "description": "Optional. Omit entirely or set null for public images (no secret or imagePullSecrets). Only create when set and create is true.",
+      "description": "Optional. Omit entirely or set null for public images (no secret or imagePullSecrets). Either create: true with the credentials below, or existingSecret naming a Secret you made yourself -- never both.",
       "properties": {
         "create": {
           "type": "boolean",
@@ -1224,9 +1224,24 @@
         },
         "email": {
           "type": "string"
+        },
+        "existingSecret": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Name of a kubernetes.io/dockerconfigjson Secret you created yourself. Mutually exclusive with create: the chart references this Secret and never writes it, because it has no credentials to write it with. You must create it in every namespace that pulls -- the release namespace, plus nodeAgents.namespace.name while resourceMonitor is true, plus gpu.devicePlugin.namespace while that is enabled -- since the chart cannot mirror a Secret whose contents it does not have."
         }
       },
       "allOf": [
+        {
+          "if": {
+            "required": ["existingSecret"]
+          },
+          "then": {
+            "properties": {
+              "create": { "const": false }
+            }
+          }
+        },
         {
           "if": {
             "properties": {

@@ -486,7 +486,24 @@ spec:
         - name: SINGLE_NODE
           value: {{ if hasKey .Values.env "SINGLE_NODE" }}{{ .Values.env.SINGLE_NODE | quote }}{{ else }}{{ (default dict .Values.hostPath).enabled | default false | quote }}{{ end }}
         {{- range $key, $value := .Values.env }}
-        {{- if and (ne $key "CLIENT_ENV") (ne $key "RESOURCE_REQUESTS") (ne $key "RESOURCE_LIMITS") (ne $key "GPU_REQUESTS") (ne $key "GPU_LIMITS") (ne $key "RUNTIME_CLASS_NAME") (ne $key "SINGLE_NODE") (ne $key "CLIENT_ID") (not (has $key $proxyKeys)) $value }}
+        {{- /* IMAGE_PULL_SECRET_NAME is excluded so `env.IMAGE_PULL_SECRET_NAME`
+             cannot render it twice with the passthrough copy winning (Asad on
+             client#751). The consequence is sharper than JOB_IMAGE_HOST's, which
+             has the same shape and is deliberately left alone: a slow pull is
+             recoverable, whereas client-runtime treats a pull-secret name that
+             does not resolve as PERMANENT and dead-letters the experiment. The
+             supported way to name your own Secret is `dockerRegistry.existingSecret`,
+             which every consumer reads through one helper; an env override would
+             be a second reader of the same rule.
+
+             Excluded from pods-monitor's list below too, so a stray value is
+             inert everywhere rather than only where it would have done harm.
+             pods-monitor never renders this var and never reads it -- job.yaml
+             is read by jobs_manager.py, which runs in THIS container -- so
+             passing it through there put an ignored value in an unrelated
+             process's environment and nothing more. Nobody can depend on that:
+             the variable does not exist before this change. */}}
+        {{- if and (ne $key "CLIENT_ENV") (ne $key "RESOURCE_REQUESTS") (ne $key "RESOURCE_LIMITS") (ne $key "GPU_REQUESTS") (ne $key "GPU_LIMITS") (ne $key "RUNTIME_CLASS_NAME") (ne $key "SINGLE_NODE") (ne $key "CLIENT_ID") (ne $key "IMAGE_PULL_SECRET_NAME") (not (has $key $proxyKeys)) $value }}
         - name: {{ $key }}
           value: {{ $value | quote }}
         {{- end }}
@@ -565,7 +582,7 @@ spec:
         - name: SINGLE_NODE
           value: {{ if hasKey .Values.env "SINGLE_NODE" }}{{ .Values.env.SINGLE_NODE | quote }}{{ else }}{{ (default dict .Values.hostPath).enabled | default false | quote }}{{ end }}
         {{- range $key, $value := .Values.env }}
-        {{- if and (ne $key "CLIENT_ENV") (ne $key "RESOURCE_REQUESTS") (ne $key "RESOURCE_LIMITS") (ne $key "GPU_REQUESTS") (ne $key "GPU_LIMITS") (ne $key "RUNTIME_CLASS_NAME") (ne $key "SINGLE_NODE") (ne $key "CLIENT_ID") (not (has $key $proxyKeys)) $value }}
+        {{- if and (ne $key "CLIENT_ENV") (ne $key "RESOURCE_REQUESTS") (ne $key "RESOURCE_LIMITS") (ne $key "GPU_REQUESTS") (ne $key "GPU_LIMITS") (ne $key "RUNTIME_CLASS_NAME") (ne $key "SINGLE_NODE") (ne $key "CLIENT_ID") (ne $key "IMAGE_PULL_SECRET_NAME") (not (has $key $proxyKeys)) $value }}
         - name: {{ $key }}
           value: {{ $value | quote }}
         {{- end }}
