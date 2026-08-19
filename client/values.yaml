@@ -164,10 +164,13 @@ clusterScope: true
 
 # -- Resource monitor DaemonSet (node-level metrics collection).
 # REQUIRES metrics-server (https://github.com/kubernetes-sigs/metrics-server):
-# the DaemonSet polls /apis/metrics.k8s.io/v1beta1 for node CPU/memory and
-# crash-loops with 404s when metrics-server is missing. The chart's
-# resource-monitor-daemonset.yaml has a pre-install `lookup` that fails the
-# release up front so misconfiguration surfaces loudly. Platform notes:
+# the DaemonSet polls /apis/metrics.k8s.io/v1beta1 for node CPU/memory. The
+# chart's resource-monitor-daemonset.yaml has a pre-install `lookup` that fails
+# the release up front so misconfiguration surfaces loudly — which is the only
+# place it does surface. If metrics-server goes away later, the pod does NOT
+# crash-loop (as this comment claimed): it keeps running and stops sending
+# heartbeats, because the poll loop rebuilds its metrics client every tick and
+# swallows the error. There are no probes to catch it. Platform notes:
 #   k3d / k3s: metrics-server bundled by default (installer keeps it enabled).
 #   AKS:       metrics-server enabled by default.
 #   EKS:       NOT installed by default — `kubectl apply -f \

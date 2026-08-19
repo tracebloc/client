@@ -3501,9 +3501,35 @@ function New-K3dCluster {
     }
 
     # The tracebloc client is outbound-only: jobs-manager + pods-monitor dial
-    # out to the platform, and the only in-cluster Service (mysql-client) is
-    # ClusterIP. Disable k3s components that exist solely to handle inbound
-    # traffic or duplicate chart-provided resources.
+    # out to the platform, and every in-cluster Service is ClusterIP --
+    # mysql-client, jobs-manager, requests-proxy-service and egress-proxy-service.
+    # (This claimed "the only in-cluster Service (mysql-client)" until the chart
+    # was counted: there are four, three explicitly `type: ClusterIP` and
+    # mysql-client's by omission. The conclusion still holds -- not one is a
+    # LoadBalancer and the chart renders no Ingress -- but the premise was wrong.)
+    # Disable k3s components that exist solely to handle inbound traffic or
+    # duplicate chart-provided resources.
+    #
+    # metrics-server is KEPT, and deliberately so -- do not add it here as a
+    # footprint saving. client/templates/resource-monitor-daemonset.yaml `lookup`s
+    # the v1beta1.metrics.k8s.io APIService and `fail`s the release without it,
+    # which aborts the install and every later auto-upgrade tick. And if the API
+    # disappears after install the failure is SILENT: resource_monitor.py builds
+    # NodeUtilisation as the first statement of its poll loop, the loop handler
+    # logs and sleeps 5 s, and the DaemonSet declares no probes -- so the pod
+    # stays Running while node telemetry quietly stops. See the fuller note in
+    # scripts/lib/cluster.sh's _create_new_cluster.
+    #
+    # local-storage is disabled UNCONDITIONALLY here, where cluster.sh gates it on
+    # TB_STORAGE_MODE. That is correct only because Windows is hostpath-only:
+    # node-local (RFC-0003 Option C) is a Linux/k3s prototype with no Windows
+    # path, the same reason Invoke-LeftoverDataGuard above is hostpath-scoped. If
+    # you add a Windows node-local path, this flag has to become conditional too
+    # or every dataset PVC stays Pending against a StorageClass that does not
+    # exist. scripts/tests/k3s-components-agreement.sh trips the moment this file
+    # USES that variable in code -- it reads the installer with comment lines
+    # stripped, so naming it here to explain the rule does not fire it -- which
+    # means the Windows node-local change cannot land quietly.
     $k3dArgs = @(
       "cluster", "create", $CLUSTER_NAME,
       "--servers", $SERVERS,

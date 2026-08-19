@@ -78,7 +78,11 @@
 # `=`, not `:=`: recursively expanded, so the grep runs only when `help` actually
 # prints it. `make check` is the pre-push path with a sub-60 s budget and never
 # pays for it. bats declares one test per `@test` at line start, so this matches
-# `bats`'s own count exactly (verified: 946 = 946).
+# `bats`'s own count exactly — re-verify by comparing this against the highest
+# test number a full `make bats` prints, not against a number recorded here. The
+# "verified: 946 = 946" that used to close this sentence had itself drifted (the
+# real total was past 1180 by the time anyone looked), which is the paragraph
+# above happening to the paragraph above.
 BATS_TEST_COUNT = $(shell grep -h '^@test' scripts/tests/*.bats 2>/dev/null | wc -l | tr -d ' ')
 
 .PHONY: help
@@ -283,18 +287,20 @@ shellcheck:
 	tr "\n" "\0" < "$$files" | xargs -0 -r shellcheck --severity=error --exclude=SC1091; \
 	rc=$$?; rm -f "$$files"; exit $$rc
 
-# drift: the repo's duplicated-declaration guards. The first three come from
-# installer-tests.yaml's `static` job; all three are pure local file
-# comparisons (~0.2 s) and all three have a --write / regenerate mode named in
-# their own output.
+# drift: the repo's duplicated-declaration guards, in two groups. No ordinals
+# below -- the list grows, and "the fourth is…" was already wrong here (it
+# predated the telemetry guard and skipped it) before another line was added.
 #
-# The fourth is the CLIENT_ENV vocabulary-agreement guard (backend#1729
-# sweep 5). It lives here, not in `helm-vocab`, because #715 moved it out of
-# helm-ci's `Helm lint` into drift-checks.yaml's `Source-of-truth drift` job --
-# the one that is a REQUIRED check, so the guard can block rather than advise.
-# helm-ci's lint job calls `make helm-lint helm-vocab`, so keeping the guard in
-# `helm-vocab` would silently put it back where #715 took it from. ~2 s, bash
-# and python3 only.
+# gen-manifest / check-facts / check-style come from installer-tests.yaml's
+# `static` job: pure local file comparisons (~0.2 s), each with a --write /
+# regenerate mode named in its own output.
+#
+# The *-agreement.sh scripts come from drift-checks.yaml's `Source-of-truth
+# drift` job -- the REQUIRED check, so those guards block rather than advise.
+# They live here rather than in `helm-vocab` because helm-ci's lint job calls
+# `make helm-lint helm-vocab`, and helm-ci's `Helm lint` is not required: putting
+# one there would silently move it back to advisory, which is what #715 took the
+# CLIENT_ENV guard out of. ~3 s, bash and python3 only.
 .PHONY: drift
 drift:
 	scripts/gen-manifest.sh --check
@@ -302,6 +308,7 @@ drift:
 	bash scripts/check-style.sh
 	bash scripts/tests/env-vocabulary-agreement.sh
 	bash scripts/tests/telemetry-vocabulary-agreement.sh
+	bash scripts/tests/k3s-components-agreement.sh
 
 # digest-drift: the watcher on every mutable label that points at a pinned
 # digest (backend#1853). NOT in `check`: it needs the network and a docker

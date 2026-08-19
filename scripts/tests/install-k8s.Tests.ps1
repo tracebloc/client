@@ -4110,6 +4110,120 @@ Describe "GPU cluster wiring (#616 source guards)" {
   }
 }
 
+Describe 'k3s component disablement (New-K3dCluster $k3dArgs)' {
+  # Three properties, none of them covered before this block. `traefik` and
+  # `servicelb` appeared nowhere in scripts/tests/ at all -- neither suite, either
+  # installer -- and losing one is silent: the install still succeeds, the cluster
+  # just runs an inbound component the chart never uses (it renders no Ingress and
+  # no LoadBalancer Service). Nothing goes red.
+  #
+  # The third runs the other way and is load-bearing: metrics-server must NEVER be
+  # disabled. client/templates/resource-monitor-daemonset.yaml looks up the
+  # v1beta1.metrics.k8s.io APIService and `fail`s the release when it is absent, so
+  # adding `--disable=metrics-server` as a footprint optimisation -- a plausible
+  # edit, sitting right next to the three legitimate ones -- would abort the
+  # install and every later auto-upgrade tick, each of which re-renders that
+  # template.
+  #
+  # DERIVED from the real assignment via the AST, not restated: the list is read
+  # out of `$k3dArgs` itself, so this file keeps no second copy to drift from it.
+  # The assertion is on the EXACT set rather than "contains", which is what makes
+  # the metrics-server property hold for components nobody has proposed yet -- a
+  # `contains` test can only catch a REMOVED flag, never an added one.
+  #
+  # Note on gating: `Pester (windows-latest)` is NOT a required status check on
+  # develop, so on its own this Describe advises rather than blocks. The blocking
+  # copy of the same two properties lives in scripts/tests/k3s-components-agreement.sh,
+  # which runs in the required `Source-of-truth drift` job and compares this
+  # installer's set against the bash one. These tests are the local-feedback and
+  # per-argument-position half; that script is the gate.
+  BeforeAll {
+    $script:KRaw = Get-Content "$PSScriptRoot/../install-k8s.ps1" -Raw
+    $ast = [System.Management.Automation.Language.Parser]::ParseFile(
+      "$PSScriptRoot/../install-k8s.ps1", [ref]$null, [ref]$null)
+
+    # The `$k3dArgs = @(…)` literal, found by AST rather than regex so the
+    # arguments come from the declaration the installer actually runs.
+    $script:KAssign = @($ast.FindAll({
+      param($node)
+      $node -is [System.Management.Automation.Language.AssignmentStatementAst] -and
+      $node.Left.Extent.Text -eq '$k3dArgs' -and
+      $node.Operator -eq 'Equals'
+    }, $true))
+
+    $script:KArgs = @()
+    if ($script:KAssign.Count -eq 1) {
+      $script:KArgs = @($script:KAssign[0].Right.FindAll({
+        param($node)
+        $node -is [System.Management.Automation.Language.StringConstantExpressionAst]
+      }, $true) | ForEach-Object { $_.Value })
+    }
+
+    # Components disabled by that literal: node filter (`@server:*`) stripped.
+    $script:KDisables = @($script:KArgs |
+      Where-Object { $_ -like '--disable=*' } |
+      ForEach-Object { ($_ -replace '^--disable=', '') -replace '@.*$', '' } |
+      Sort-Object -Unique)
+
+    # The installer with comment lines removed. Every whole-file scan below reads
+    # this rather than $script:KRaw, because this file documents both the flag it
+    # must never pass and the variable the tripwire watches for -- a scan over
+    # prose fires on its own explanation, which says nothing about the code.
+    $script:KCode = ($script:KRaw -split "`n" | Where-Object { $_ -notmatch '^\s*#' }) -join "`n"
+
+    # Every `--disable=` in the whole file. The AST read above sees only the initial
+    # literal; a later `$k3dArgs += @("--k3s-arg", …)` in the same function, or a
+    # disable added in some other function, would be invisible to it. This is the
+    # backstop that is not.
+    $script:KAllDisables = @([regex]::Matches($script:KCode, '--disable=([A-Za-z0-9_-]+)') |
+      ForEach-Object { $_.Groups[1].Value } | Sort-Object -Unique)
+  }
+
+  It 'finds exactly one $k3dArgs literal to derive from (else every assertion below is vacuous)' {
+    # Fail closed. Zero parsed arguments would satisfy "does not contain
+    # metrics-server" perfectly, and a renamed variable or a split assignment must
+    # surface as a finding here rather than as silent green below.
+    $script:KAssign.Count | Should -Be 1 -Because 'the tests below read the k3d argv out of this one assignment'
+    $script:KDisables.Count | Should -BeGreaterThan 0 -Because 'a stale parser reports an empty set, which passes every negative assertion'
+  }
+
+  It "disables EXACTLY traefik, servicelb and local-storage" {
+    ($script:KDisables -join ' ') | Should -Be 'local-storage servicelb traefik'
+  }
+
+  It 'NEVER disables metrics-server -- not in $k3dArgs, not anywhere in the installer' {
+    $script:KDisables    | Should -Not -Contain 'metrics-server'
+    $script:KAllDisables | Should -Not -Contain 'metrics-server'
+  }
+
+  It "passes each disablement as a --k3s-arg value, not as a bare k3d flag" {
+    # k3d has no --disable of its own; the flag belongs to k3s and only reaches it
+    # through --k3s-arg. A disable passed bare makes `k3d cluster create` fail with
+    # "unknown flag", so this pins the pairing the flags depend on.
+    for ($i = 0; $i -lt $script:KArgs.Count; $i++) {
+      if ($script:KArgs[$i] -like '--disable=*') {
+        $i | Should -BeGreaterThan 0 -Because "a --disable cannot be the first argument"
+        $script:KArgs[$i - 1] | Should -Be '--k3s-arg' -Because "$($script:KArgs[$i]) must be the value of a --k3s-arg"
+      }
+    }
+  }
+
+  It "is hostpath-only, which is the sole reason local-storage may be unconditional here" {
+    # cluster.sh gates the local-storage disable on TB_STORAGE_MODE; this installer
+    # does not, and that is correct only while node-local (RFC-0003 Option C) has
+    # no Windows path -- the reason the leftover-data guard gives for being
+    # hostpath-only. A divergence held in place by an absence, previously watched
+    # by nothing.
+    #
+    # A tripwire, not a defect report: the day this installer learns
+    # TB_STORAGE_MODE, it reddens, and the fix is to make the local-storage disable
+    # conditional the way cluster.sh does. k3s-components-agreement.sh carries the
+    # blocking copy of this check.
+    $script:KCode | Should -Not -Match 'TB_STORAGE_MODE' -Because 'adding Windows node-local support means the local-storage disable must become conditional first'
+    $script:KArgs | Should -Contain '--disable=local-storage@server:*'
+  }
+}
+
 Describe "Confirm-GpuImagePullable (#616 private GPU image, no public package)" {
   BeforeAll { $script:GSRC2 = Get-Content "$PSScriptRoot/../install-k8s.ps1" -Raw }
   BeforeEach {

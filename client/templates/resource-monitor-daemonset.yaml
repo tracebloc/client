@@ -1,10 +1,23 @@
 {{- if ne .Values.resourceMonitor false }}
 {{/*
-  Pre-flight: resource-monitor polls the metrics.k8s.io API. Without
-  metrics-server registered, the DaemonSet crash-loops with 404s. We probe
-  kube-system via `lookup` first — that returns empty during `helm template`
-  (no cluster access), so offline rendering isn't blocked. On a real install
-  where lookup can see the cluster, we require metrics-server up front.
+  Pre-flight: resource-monitor polls the metrics.k8s.io API, so metrics-server
+  must be registered. We probe kube-system via `lookup` first — that returns
+  empty during `helm template` (no cluster access), so offline rendering isn't
+  blocked. On a real install where lookup can see the cluster, we require
+  metrics-server up front.
+
+  WHY UP FRONT, rather than letting the pod report it: because the pod does not
+  report it. This comment used to say the DaemonSet "crash-loops with 404s",
+  which would at least be visible in a restart count. What actually happens is
+  quieter — client-runtime's Node-deploy/resource_monitor.py constructs
+  NodeUtilisation as the first statement inside its `while True:` body and that
+  constructor reads metrics.k8s.io outside any try; the loop's handler catches
+  Exception, logs, and sleeps 5 s. With no liveness or readiness probe on this
+  DaemonSet, the pod stays Running and healthy-looking forever while
+  send_heartbeat is never reached. Node telemetry stops and nothing says so.
+
+  That is the whole argument for the `fail` below: this is the last point where
+  the problem is loud.
 */}}
 {{- $probe := lookup "v1" "Namespace" "" "kube-system" -}}
 {{- if $probe -}}

@@ -70,3 +70,13 @@ jobs:
       # advise. bash only, ~1s.
       - name: Telemetry vocabulary agreement (backend#1907)
         run: bash scripts/tests/telemetry-vocabulary-agreement.sh
+      # The k3s components both installers switch off at cluster-create time: one
+      # list, written twice (cluster.sh's --k3s-arg block, install-k8s.ps1's
+      # $k3dArgs). `traefik` and `servicelb` were in NEITHER test suite, and the
+      # inverse property -- metrics-server must never be disabled, because the
+      # chart's resource-monitor template `fail`s the release without it -- was
+      # unguarded on both installers. Here rather than in `Pester
+      # (windows-latest)`, which is not a required context, so the PowerShell half
+      # would only ever advise. bash only, ~1s.
+      - name: k3s component agreement (both installers + the chart coupling)
+        run: bash scripts/tests/k3s-components-agreement.sh
