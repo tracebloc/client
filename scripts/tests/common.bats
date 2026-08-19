@@ -840,3 +840,107 @@ EOF
   [ -d "$tmp" ] || return 1
   rm -rf "$tmp"
 }
+
+# ── error() records its own cause (the Anna log, client#2078-adjacent) ───────
+# `exit` fires no ERR trap, so before this every error() left TB_ERR_* holding
+# whatever benign probe failed last. A real macOS log reported
+#   Stopped at common.sh:527 — sudo -n true
+# for an install that died of a missing administrator password. Line 527 is the
+# passwordless-sudo probe: it is SUPPOSED to fail on a normal Mac. The report
+# named a healthy check and sent the reader to the wrong place.
+
+@test "error(): records its own message as the last cause, over a stale probe" {
+  LOG_FILE="$BATS_TEST_TMPDIR/e.log"; : > "$LOG_FILE"
+  # Seed TB_ERR_* the way a benign probe does, then refuse. Last-wins must put
+  # the refusal on top; before this fix the probe stayed and got reported.
+  _record_err "lib/probe.sh:99" "sudo -n true"
+  [ "$TB_ERR_CMD" = "sudo -n true" ] || return 1
+  run error "Could not obtain administrator privileges"
+  [ "$status" -eq 1 ] || return 1
+  grep -q "cmd=error: Could not obtain administrator privileges" "$LOG_FILE" || {
+    echo "log was:"; cat "$LOG_FILE"; return 1
+  }
+  # …and the benign probe is no longer the last word.
+  [ "$(grep -c 'cmd=sudo -n true' "$LOG_FILE")" -eq 1 ] || return 1
+  tail -1 "$LOG_FILE" | grep -q "cmd=error: "
+}
+
+@test "error(): the recorded location is the CALLER's line, not common.sh's" {
+  LOG_FILE="$BATS_TEST_TMPDIR/loc.log"; : > "$LOG_FILE"
+  # Derive the expected path from the same mechanism under test, rather than
+  # writing "common.bats" down. bats executes a PREPROCESSED copy of this file
+  # whose name varies by bats version — and it rewrites those paths back to
+  # `scripts/tests/common.bats` in its own output, so `cat` prints a string the
+  # file does not contain and a hardcoded needle fails against a log that looks
+  # correct. It passed on macOS bats 1.13 and failed on CI for exactly that.
+  #
+  # Whatever bash calls THIS file is what error() must record when called from
+  # a function defined here, on every platform.
+  local self="${BASH_SOURCE[0]}"
+  [ -n "$self" ] || return 1
+  # The refuser is defined HERE, so a correct record names this file. Using
+  # BASH_SOURCE[0] inside error() would name common.sh for every refusal in the
+  # tree — which is exactly how a real log came to blame a healthy sudo probe.
+  _tb_test_refuser() { error "refused here"; }
+  run _tb_test_refuser
+  [ "$status" -eq 1 ] || return 1
+  grep -q 'cmd=error: refused here' "$LOG_FILE" || {
+    echo "no record written; log was:"; cat "$LOG_FILE"; return 1
+  }
+  # Asserted against the whole file with grep -c, not a captured variable: the
+  # log is fresh and this test raises exactly ONE refusal, so the file holds one
+  # `cmd=error:` record and counting is precise. (Both a captured-variable
+  # `case` and a `grep | grep -q` pipe misbehaved here — the pipe for the
+  # SIGPIPE/pipefail reason _assess_runtime_down documents.)
+  [ "$(grep -cF 'cmd=error: refused here' "$LOG_FILE")" -eq 1 ] || {
+    echo "expected exactly one refusal record; log was:"; cat "$LOG_FILE"; return 1
+  }
+  [ "$(grep -cF "$self:" "$LOG_FILE")" -ge 1 ] || {
+    echo "expected the caller's file ($self); log was:"; cat "$LOG_FILE"; return 1
+  }
+  # …and never common.sh, where error() itself lives. BASH_SOURCE[0] would have
+  # reported common.sh for every refusal in the tree — the bug this replaces.
+  [ "$(grep -cF 'common.sh:' "$LOG_FILE")" -eq 0 ] || {
+    echo "recorded common.sh, the bug this replaces:"; cat "$LOG_FILE"; return 1
+  }
+}
+
+@test "error(): records exit 1, not whatever \$? happened to be" {
+  LOG_FILE="$BATS_TEST_TMPDIR/code.log"; : > "$LOG_FILE"
+  # Leave a 7 in $? immediately before the refusal. Without the explicit code
+  # argument _record_err latches that 7 and the report names an exit status the
+  # script never exits with.
+  _tb_test_refuser() { ( exit 7 ) || error "boom"; }
+  run _tb_test_refuser
+  [ "$status" -eq 1 ] || return 1
+  grep -q "exit=1 cmd=error: boom" "$LOG_FILE" || {
+    echo "log was:"; cat "$LOG_FILE"; return 1
+  }
+}
+
+# ── preflight_sudo: the branch that had no test (Anna's machine) ─────────────
+# The tier-2 lifecycle tests stub preflight_sudo out entirely, and the three
+# tests above cover root / no-sudo / passwordless. The ordinary Mac — an admin
+# user whose sudo wants a password — was exercised by nothing, which is how the
+# path Anna hit shipped uncovered.
+
+@test "preflight_sudo: password needed and the prompt succeeds => primes, returns 0" {
+  id() { echo 1000; }
+  _have_sudo_bin() { return 0; }
+  _real_sudo() { case "$*" in "-n true") return 1 ;; "-v") return 0 ;; *) return 0 ;; esac; }
+  run preflight_sudo
+  [ "$status" -eq 0 ] || return 1
+  # The user is told WHY they are being asked, before the system's own prompt.
+  printf '%s\n' "$output" | grep -qF "needs your password once"
+}
+
+@test "preflight_sudo: password needed and the prompt fails => names the refusal" {
+  id() { echo 1000; }
+  _have_sudo_bin() { return 0; }
+  _real_sudo() { return 1; }         # -n fails AND -v fails (no tty to prompt on)
+  run preflight_sudo
+  [ "$status" -ne 0 ] || return 1
+  # The specific refusal, not a bare non-zero: a test that accepts any failure
+  # cannot tell this apart from the no-sudo-installed branch above.
+  printf '%s\n' "$output" | grep -qF "Could not obtain administrator privileges"
+}
