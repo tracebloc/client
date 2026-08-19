@@ -29,6 +29,7 @@ cd "$REPO_ROOT"
 FILES=(
   "scripts/install-k8s.sh"
   "scripts/lib/common.sh"
+  "scripts/lib/telemetry.sh"
   "scripts/lib/preflight.sh"
   "scripts/lib/detect-gpu.sh"
   "scripts/lib/gpu-nvidia.sh"

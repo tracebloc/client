@@ -238,7 +238,21 @@ hint()           { echo -e "  ${DIM}$*${RESET}"; }
 # → "  a) Checking your machine". Prints the header + a single trailing blank; the
 # blank-line gap BETWEEN steps comes from each step body ending with a blank line
 # (main() adds it), matching the run-through's spacing.
-step_header()    { echo -e "  ${TB_HEADING}$1) $2${RESET}"; echo ""; }
+#
+# It is also where the install's phase clock turns over (backend#1907). Hooking
+# THIS rather than adding a telemetry_phase_begin call to each of the six steps
+# is the difference between phase timings that are correct by construction and
+# phase timings that are correct for the steps somebody remembered — and the
+# letters it is keyed on are the ones actually being printed, so nothing can
+# drift. Guarded because telemetry.sh may be absent under an older bootstrap
+# whose FILES list did not fetch it, and the `|| true` because printing a step
+# header must never be able to end an install.
+step_header()    {
+  if declare -F telemetry_phase_begin >/dev/null 2>&1; then
+    telemetry_phase_begin "$1" || true
+  fi
+  echo -e "  ${TB_HEADING}$1) $2${RESET}"; echo "";
+}
 
 # ── Utility ──────────────────────────────────────────────────────────────────
 has() { command -v "$1" &>/dev/null; }
@@ -1095,6 +1109,16 @@ install_cleanup() {
       hint "If it keeps failing, re-run with --diagnose and send the bundle to tracebloc support."
     fi
   fi
+
+  # One structured outcome event per install (backend#1907). Emitted LAST, from
+  # the EXIT trap, so it runs on every path — success, the re-run-required stop,
+  # Ctrl-C, and the fatal one — which is what §6.5 of the telemetry contract
+  # requires and what makes a failure RATE computable rather than just a count.
+  # Everything it reads (CLIENT_STATE, TB_ERR_*, the phase clock) is final by
+  # this point. Guarded for an older bootstrap that did not fetch telemetry.sh.
+  if declare -F telemetry_emit_outcome >/dev/null 2>&1; then
+    telemetry_emit_outcome "$exit_code" || true
+  fi
 }
 
 # Installer version shown in the banner's title (" · <version>"). The curl|bash
@@ -1184,6 +1208,16 @@ Advanced configuration (environment variables):
   HOST_DATA_DIR  Persistent data directory       (default: ~/.tracebloc)
                  Must be on a LOCAL disk — NFS/CIFS/SMB is rejected (the database
                  corrupts on network storage). TRACEBLOC_ALLOW_NETWORK_FS=1 overrides.
+
+Usage reporting:
+  This installer records ONE outcome event per run so we can see failures without
+  waiting for someone to report them: which step it reached, how long each step
+  took, the exit code, an error class, your OS and architecture, and the version.
+  It cannot record your arguments, any path, any file name, your username, your
+  hostname or your credentials — every field is a number or a value from a fixed
+  list, so there is nowhere for those to go.
+  TRACEBLOC_NO_TELEMETRY=1  Turn it off.
+  DO_NOT_TRACK=1            Also turns it off.
 
 Windows:
   irm https://raw.githubusercontent.com/tracebloc/client/main/scripts/install.ps1 | iex
