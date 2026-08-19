@@ -22,6 +22,13 @@ setup() {
   spin_cmd()        { local _m="$1"; shift; record "spin_cmd $*"; "$@"; }
   spin_cmd_bounded(){ local _s="$1" _m="$2"; shift 2; record "spin_cmd_bounded $_s $*"; "$@"; }
   _macos_vm_mem_gb(){ echo 6; }
+  # assert_amd64_emulation now asks the engine rule (client#748): only the 5.7
+  # image needs emulation. install-client-helm.sh is NOT sourced here, so mock the
+  # two functions it would provide — default to 5.7 so the smoke-path tests below
+  # are deterministic rather than passing because the function is undefined; the
+  # 8.4 test overrides it.
+  _mysql_engine_decision(){ echo "5.7 explicit"; }
+  _client_values_file(){ echo ""; }
 }
 
 # ── _macos_supports_vz ───────────────────────────────────────────────────────
@@ -93,6 +100,27 @@ _colima_env() {
 }
 
 # ── assert_amd64_emulation (post-Docker smoke) ───────────────────────────────
+@test "assert_amd64_emulation: Apple Silicon + engine resolves to 8.4 -> skips the smoke, no docker run (client#748)" {
+  ARCH=arm64
+  _mysql_engine_decision(){ echo "8.4 fresh"; }   # a fresh Mac serves 8.4 natively
+  docker() { record "docker $*"; return 1; }       # would FAIL the smoke if it ran
+  run assert_amd64_emulation
+  [ "$status" -eq 0 ] || return 1                   # not refused
+  [[ "$output" == *"runs the client images natively"* ]] || return 1
+  run mock_calls
+  [[ "$output" != *"docker run"* ]] || return 1     # emulation it does not need is never probed
+}
+
+@test "assert_amd64_emulation: Apple Silicon + engine 5.7 + broken emulation -> fails naming the 5.7 engine (client#748)" {
+  ARCH=arm64
+  _mysql_engine_decision(){ echo "5.7 existing-datadir"; }
+  docker() { record "docker $*"; return 1; }
+  run assert_amd64_emulation
+  [ "$status" -ne 0 ] || return 1
+  [[ "$output" == *"MySQL 5.7 engine"* ]] || return 1   # accurate: it is the 5.7 image, not "all client images"
+  [[ "$output" == *"Use Rosetta"* ]] || return 1
+}
+
 @test "assert_amd64_emulation: Intel Mac -> no-op, no docker run (#433)" {
   ARCH=x86_64
   docker() { record "docker $*"; return 0; }

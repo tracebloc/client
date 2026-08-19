@@ -680,6 +680,22 @@ assert_amd64_emulation() {
     warn "Skipping the amd64 emulation smoke test (TRACEBLOC_ALLOW_ARM64 set) — amd64 images may crash."
     return 0
   fi
+  # Only the amd64-only MySQL 5.7 image needs emulation; the multi-arch 8.4 engine
+  # runs natively on Apple Silicon. Ask the SAME rule the Linux gate uses
+  # (_assert_engine_runs_on_this_arch keys off _mysql_engine_decision) so a FRESH
+  # Mac that resolves to 8.4 is not refused for emulation it does not need
+  # (client#748). This is safe before the cluster exists: the sticky check reads
+  # values_file and the datadir check reads HOST_DATA_DIR (default ~/.tracebloc) —
+  # both known here — and on macOS the data lives on that host path, so an existing
+  # 5.7 install is seen without a running cluster (helm-list `existing_id`, the one
+  # signal unavailable this early, is not how macOS surfaces prior data).
+  local values_file _engine
+  values_file="$(_client_values_file 2>/dev/null || true)"
+  _engine="$(_mysql_engine_decision 2>/dev/null | awk '{print $1}')"
+  if [[ "$_engine" == "8.4" ]]; then
+    success "MySQL engine resolves to 8.4 (multi-arch) — this Apple Silicon Mac runs the client images natively, no amd64 emulation needed."
+    return 0
+  fi
   local _img="${TB_AMD64_SMOKE_IMAGE:-busybox:1.36}"
   # Time-bounded: a wedged daemon or stuck pull must not hang a headless install
   # forever behind a spinner (installer rule — every docker call is bounded; #433
@@ -690,11 +706,11 @@ assert_amd64_emulation() {
     success "amd64 emulation verified (x86_64 client images will run)."
     return 0
   fi
-  warn "amd64 emulation isn't working on this Apple Silicon Mac — the amd64-only tracebloc images would crash-loop, not fail here."
+  warn "amd64 emulation isn't working on this Apple Silicon Mac, and this install resolved to the amd64-only MySQL 5.7 engine — it would crash-loop, not fail here."
   hint "  Docker Desktop: Settings → General → enable \"Use Rosetta for x86_64/amd64 emulation\", then restart Docker and re-run."
   hint "  Colima: recreate the VM with VZ + Rosetta →  colima delete && colima start --vm-type vz --vz-rosetta"
   hint "  (or set TRACEBLOC_ALLOW_ARM64=1 to proceed anyway — the images may crash.)"
-  error "amd64 emulation unavailable — fix the above and re-run (the client images are amd64-only)."
+  error "amd64 emulation unavailable — fix the above and re-run (this install needs the amd64-only MySQL 5.7 engine; a fresh install would use the native 8.4 engine instead)."
 }
 
 install_macos() {
