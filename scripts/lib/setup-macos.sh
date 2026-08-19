@@ -681,17 +681,17 @@ assert_amd64_emulation() {
     return 0
   fi
   # Only the amd64-only MySQL 5.7 image needs emulation; the multi-arch 8.4 engine
-  # runs natively on Apple Silicon. Ask the SAME rule the Linux gate uses
-  # (_assert_engine_runs_on_this_arch keys off _mysql_engine_decision) so a FRESH
-  # Mac that resolves to 8.4 is not refused for emulation it does not need
-  # (client#748). This is safe before the cluster exists: the sticky check reads
-  # values_file and the datadir check reads HOST_DATA_DIR (default ~/.tracebloc) —
-  # both known here — and on macOS the data lives on that host path, so an existing
-  # 5.7 install is seen without a running cluster (helm-list `existing_id`, the one
-  # signal unavailable this early, is not how macOS surfaces prior data).
-  local values_file _engine
-  values_file="$(_client_values_file 2>/dev/null || true)"
-  _engine="$(_mysql_engine_decision 2>/dev/null | awk '{print $1}')"
+  # runs natively on Apple Silicon. Ask through _pf_mysql_engine_decision, NOT the
+  # raw _mysql_engine_decision: the wrapper sets values_file AND the SANITISED
+  # TB_NAMESPACE (DNS-1123), so the per-release datadir HOST_DATA_DIR/<ns>/mysql is
+  # probed, not just the legacy HOST_DATA_DIR/mysql. Calling the raw rule left
+  # TB_NAMESPACE unset, missed a re-run's per-release 5.7 data, and skipped the
+  # smoke on a host that then stays on 5.7 and crash-loops (Bugbot High, this PR).
+  # The wrapper also FAILS CLOSED to 5.7 if the engine lib is unavailable, so an
+  # uncertain host is gated, not waved through. A FRESH Mac resolves to 8.4 and is
+  # not refused for emulation it does not need (client#748).
+  local _engine
+  _engine="$(_pf_mysql_engine_decision 2>/dev/null | awk '{print $1}')"
   if [[ "$_engine" == "8.4" ]]; then
     success "MySQL engine resolves to 8.4 (multi-arch) — this Apple Silicon Mac runs the client images natively, no amd64 emulation needed."
     return 0
