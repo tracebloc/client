@@ -75,12 +75,44 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      # NOT hardened here. bats has no preinstalled-or-reusable equivalent, so
-      # unlike shellcheck it genuinely has to be installed, and bounding and
-      # retrying package installs is #753's own scope rather than this change's.
-      # The timeout above at least turns a stall into a bounded failure.
-      - name: Install bats
-        run: sudo apt-get update -qq && sudo apt-get install -y -qq bats
+      # bats genuinely has to be installed -- unlike shellcheck there is no
+      # preinstalled or reusable equivalent -- so it gets a bound rather than a
+      # deletion. Bounded and retried in the same shape as installer-tests.yaml's
+      # "Pull <distro> (bounded, retried)".
+      #
+      # This was left as plain apt in the first draft of #753, on the grounds
+      # that hardening installs was that ticket's own scope. Then the identical
+      # step in installer-tests.yaml's `unit-bash` stalled at 11:58 on
+      # 2026-08-19 and burned its whole 10-minute budget, reporting `cancelled`
+      # with an empty log. A required check is the wrong place to leave a known
+      # unbounded external call.
+      #
+      # `sudo timeout`, not `timeout sudo`: timeout must run as root to signal
+      # apt-get directly instead of signalling sudo and hoping TERM is
+      # forwarded. `-qq` dropped on the install so a stall is not silent, and
+      # `bats --version` is the proof-of-install marker.
+      - name: Install bats (bounded, retried)
+        # Bounds SIZED against the job budget, the way the distro-pull step
+        # sizes its own. Measured healthy: install 9 s, bats run 155 s. Worst
+        # case here is 3 x (60 + 60) + 10 + 20 = 390 s, plus ~155 s of bats =
+        # ~9 min, inside this job's 15. At the 120 s bound this first had, worst
+        # case was 780 s -- which would have blown a 10-minute budget and
+        # reported `cancelled` again, i.e. reintroduced the very bug.
+        #
+        # `if`/`fi` rather than `[ ... ] && sleep`: the default shell is
+        # `bash -e`, so a bare test returning false on the last iteration would
+        # abort the script before the ::error:: line ever printed.
+        run: |
+          for i in 1 2 3; do
+            if sudo timeout 60 apt-get update -qq \
+               && sudo timeout 60 apt-get install -y bats; then
+              bats --version && exit 0
+            fi
+            echo "::warning::bats install stalled or failed (attempt $i/3)"
+            if [ "$i" -lt 3 ]; then sleep $((i*10)); fi
+          done
+          echo "::error::could not install bats in 3 bounded attempts - runner-to-mirror connectivity, not this PR. Re-run this job."
+          exit 1
 
       - name: Run bats (bash unit suite, mocked)
         run: bats scripts/tests/*.bats

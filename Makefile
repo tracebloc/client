@@ -26,9 +26,10 @@
 # The shellcheck file set is DERIVED from the tree, never written down.
 #
 # It used to be a 19-entry SHELLCHECK_FILES list copied out of
-# installer-tests.yaml. Measured on develop 2026-08-19: that list expanded to
-# 34 files, while the same classification applied to the tree yields 42. It had
-# drifted past eight real scripts --
+# installer-tests.yaml. Measured on develop at 8de5d64: that list expanded to 34
+# files where the same classification applied to the tree found 42 (the live
+# number is higher now and is printed by the target -- see `check` above on why
+# it is not restated here). It had drifted past eight real scripts --
 #
 #   docker/k3s-cuda/build.sh          docker/k3s-cuda/k3d-entrypoint-tracebloc-cdi.sh
 #   docs/migration-tools/generate.sh  docs/migration-tools/migrate-tenant.sh
@@ -101,10 +102,15 @@ help:
 # Re-measured 2026-08-19 (macOS, shellcheck 0.11.0), ~10 s total: parse 0.1 s,
 # shellcheck 5.2 s, drift 0.4 s, helm-lint 0.7 s, helm-vocab 3.1 s. The old
 # note here said 4 s and listed only four of the five targets -- it predated
-# helm-vocab and never counted it. shellcheck went 3.2 -> 5.2 s when #753
-# replaced the enumerated 34-file list with the 42 the derivation actually
-# finds; that is the eight scripts nothing was checking, not a slowdown.
+# helm-vocab and never counted it. shellcheck got slower (3.2 -> 5.2 s) because
+# #753 replaced the enumerated 34-file list with everything the derivation
+# finds; that is the scripts nothing was checking, not a slowdown.
 # Still six times inside the 60 s budget.
+#
+# No file count is written down here on purpose. It moves -- it was 42 when #753
+# was measured and 44 once #747 landed -- and a stale number in a comment is the
+# defect this PR exists to remove. Both targets print their live count when they
+# run, the same reasoning as BATS_TEST_COUNT above.
 #
 # The bats suite is deliberately NOT here. It is the repo's real unit
 # suite and it takes ~2 min serially on macOS — three times over the
@@ -183,9 +189,10 @@ install-hooks:
 
 # ---- individual targets ------------------------------------------
 
-# lint: both halves, so `make check` and the pre-push hook are unchanged by
-# #753 splitting them. In CI the halves now live in different places: `parse`
-# is `Standard checks / Lint`, `shellcheck` is `quality / shellcheck`.
+# lint: both halves, and `Standard checks / Lint` runs exactly this target, so
+# the pre-push tier and the merge gate cannot disagree about what linting means
+# (backend#1850). Neither half installs anything: bash is bash, and shellcheck is
+# preinstalled on ubuntu-latest.
 # .bats files are bats DSL, not valid bash — they are exercised by
 # actually running them in the `bats` target.
 #
@@ -200,8 +207,10 @@ install-hooks:
 .PHONY: lint
 lint: parse shellcheck
 
-# parse: the half CI still runs, as `Standard checks / Lint` -> `make parse`.
-# Needs nothing but bash, which is why it survived the install purge in #753.
+# parse: bash -n over every shell script under scripts/. Reached in CI through
+# `make lint`, which is what `Standard checks / Lint` runs -- not as a target of
+# its own. Needs nothing but bash, which is why it survived #753's install purge.
+#
 # Materialises the list and counts it, for the same reason the `shellcheck`
 # target does (Arturo, #754 review). The previous one-liner was
 #

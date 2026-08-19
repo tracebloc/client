@@ -139,13 +139,47 @@ jobs:
           Write-Host "no PSScriptAnalyzer errors"
 
   unit-bash:
-    timeout-minutes: 10
+    # 10 -> 15. At 10 the bounded install (390 s worst case) plus ~155 s of bats
+    # could still reach the cap and report `cancelled`, which is the #753 bug the
+    # bound exists to remove. Matches standard-checks.yml's `Unit tests`.
+    timeout-minutes: 15
     name: bats (bash unit, mocked)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: Install bats
-        run: sudo apt-get update -qq && sudo apt-get install -y -qq bats
+
+      # Bounded and retried, same shape as "Pull <distro> (bounded, retried)"
+      # below. This is not speculative hardening: this exact step stalled on
+      # 2026-08-19 at 11:58 and burned the whole `timeout-minutes: 10` budget,
+      # reporting `cancelled` with an empty log and `Run bats` skipped -- the
+      # #753 signature, on bats rather than shellcheck. shellcheck could be
+      # fixed by deleting the install (it is preinstalled); bats genuinely has
+      # to be installed, so it gets a bound instead.
+      #
+      # `sudo timeout`, not `timeout sudo`: timeout must run as root so it
+      # signals apt-get directly rather than signalling sudo and hoping the TERM
+      # is forwarded. `-qq` is dropped on the install so a slow mirror leaves
+      # something in the log, and `bats --version` is the proof-of-install
+      # marker whose absence identified the stall in the first place.
+      - name: Install bats (bounded, retried)
+        # Bounds sized against the job budget (see the twin step in
+        # standard-checks.yml for the arithmetic): worst case 3 x (60 + 60) +
+        # 30 s backoff = 390 s, plus ~155 s of bats, inside the 15 minutes this
+        # job now allows. `if`/`fi` not `[ ... ] &&` because the default shell is
+        # `bash -e` and a false test on the last iteration would abort before the
+        # ::error:: line printed.
+        run: |
+          for i in 1 2 3; do
+            if sudo timeout 60 apt-get update -qq \
+               && sudo timeout 60 apt-get install -y bats; then
+              bats --version && exit 0
+            fi
+            echo "::warning::bats install stalled or failed (attempt $i/3)"
+            if [ "$i" -lt 3 ]; then sleep $((i*10)); fi
+          done
+          echo "::error::could not install bats in 3 bounded attempts - runner-to-mirror connectivity, not this PR. Re-run this job."
+          exit 1
+
       - name: Run bats
         run: bats scripts/tests/*.bats
 
