@@ -3,7 +3,10 @@
 #  check-style.sh — enforce the tracebloc terminal style system + terminology
 #                   on the installer scripts. See STYLE.md.
 #
-#  Runs in CI (the "Static analysis" job) and locally:  bash scripts/check-style.sh
+#  Runs in CI as part of the REQUIRED "Source-of-truth drift" check (via
+#  `make drift`), and locally:  bash scripts/check-style.sh
+#  It used to run in the "Static analysis" job, which is required on no branch —
+#  so until 2026-08-19 a violation here printed red and merged anyway.
 #  Exit 0 = clean, 1 = violations found, 2 = the guard itself errored (fail-closed).
 #
 #  Three mechanical checks (semantic calls — role misuse, judgement-y wording —

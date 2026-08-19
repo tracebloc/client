@@ -10,10 +10,22 @@ name: Standard checks
 # forever at "Expected — waiting for status to be reported", blocking the merge.
 #
 # These jobs reuse the same proven steps as `installer-tests.yaml`'s deeper
-# suite (which keeps the broader coverage: PSScriptAnalyzer, Pester on Windows,
-# distro-prereqs, e2e). If the two ever feel redundant, fold the deep suite's
-# names into these and drop the duplicates — but keep SOMETHING reporting
-# `Lint` + `Unit tests` unconditionally.
+# suite (which keeps the broader coverage: Pester on Windows, distro-prereqs,
+# e2e). Keep SOMETHING reporting `Lint` + `Unit tests` unconditionally.
+#
+# That "if the two ever feel redundant, fold the deep suite's names into these
+# and drop the duplicates" invitation was taken on 2026-08-19: installer-tests'
+# `static` job restated this job's parse loop and its exact 19-file shellcheck
+# sweep, and carried four guards that gated nothing because `Static analysis` is
+# a required check on no branch. The job is gone. Its shellcheck and bash -n are
+# `make lint` here, its PSScriptAnalyzer is a step below, and its three
+# duplicated-declaration guards are in drift-checks.yaml's required job.
+#
+# STILL NOT GATED, and deliberately out of scope of that change: Pester. The
+# PowerShell installer's unit suite reports as `Pester (windows-latest)` /
+# `Pester (ubuntu-latest)`, neither of which is a required context, so `Unit
+# tests` below gates bats only. Adding it means a required check on a
+# windows-latest runner -- a cost and flake question, not a cleanup.
 
 on:
   push:
@@ -65,6 +77,65 @@ jobs:
         # Verified green on the 44-file derived set under the runner's 0.9.0
         # (not just a newer local build) before arming it.
         run: make lint
+
+      # Advisory only, and it carries no file list of its own -- `make
+      # lint-warnings` reuses SHELLCHECK_FILES. Inherited from the deleted
+      # `static` job so the SC2034 visibility survives the move. `|| true` lives
+      # in the target; this step cannot fail the check.
+      - name: shellcheck warnings (advisory, non-blocking)
+        # `!cancelled()` not `always()`: run even when `make lint` above failed
+        # (both halves are mechanical and independent, so reporting one and hiding
+        # the other costs a round trip), but do NOT run after a cancel or a
+        # timeout-kill — `always()` would burn what is left of this job's
+        # `timeout-minutes: 10` on a job that is already lost.
+        if: ${{ !cancelled() }}
+        run: make lint-warnings
+
+      # PSScriptAnalyzer moved here from installer-tests.yaml's `static` job on
+      # 2026-08-19, for the same reason R8 moved to the drift job: `Static
+      # analysis` is a required check on no branch, so the PowerShell lint could
+      # only advise. `Lint` IS required on develop and on main, and a lint of
+      # scripts/install.ps1 -- the R8 trust root on Windows -- belongs behind a
+      # gate rather than beside one.
+      #
+      # NOT in `make lint`: it needs pwsh and a PSGallery fetch, which most dev
+      # machines have neither of, and a `make check` that fails on a missing pwsh
+      # is a `make check` people stop running. Skipping it locally is fine
+      # precisely because this job cannot skip it -- `shell: pwsh` fails the
+      # REQUIRED check outright if pwsh is ever absent.
+      #
+      # `if: !cancelled()` so a red `make lint` above still reports the PowerShell
+      # verdict in the same run. Both are mechanical and independent; making the
+      # author fix one to discover the other is two round trips for no reason.
+      - name: PSScriptAnalyzer (PowerShell installer)
+        if: ${{ !cancelled() }}
+        shell: pwsh
+        run: |
+          # Use the module the image already ships; only fetch if a future image
+          # drops it. PSScriptAnalyzer 1.25.0 is preinstalled on ubuntu-latest and
+          # was already loaded ("currently in use") while this step spent 38 s of
+          # the job's 59 s re-fetching it from PSGallery (Arturo, #755 review) --
+          # a network dependency inside a REQUIRED check, buying nothing. Same
+          # reasoning that removed `apt-get install shellcheck` in #753.
+          if (-not (Get-Module -ListAvailable -Name PSScriptAnalyzer)) {
+            Write-Host "PSScriptAnalyzer not on the image - installing from PSGallery"
+            Set-PSRepository PSGallery -InstallationPolicy Trusted
+            Install-Module PSScriptAnalyzer -Force -SkipPublisherCheck -Scope CurrentUser
+          }
+          Import-Module PSScriptAnalyzer
+          Write-Host "PSScriptAnalyzer $((Get-Module PSScriptAnalyzer).Version)"
+          # Both PowerShell entrypoints (the bootstrap install.ps1, R8 trust root, and the
+          # main installer install-k8s.ps1) plus the Windows e2e driver (#436) — the driver
+          # only RUNS on the self-hosted nested-virt runner, but lint it here on every push
+          # so a syntax/verb regression fails fast instead of at the nightly run.
+          $issues = @()
+          foreach ($p in 'scripts/install.ps1', 'scripts/install-k8s.ps1', 'scripts/tests/e2e-windows.ps1') {
+            $issues += Invoke-ScriptAnalyzer -Path $p -Severity Error,Warning
+          }
+          if ($issues) { $issues | Format-Table -AutoSize }
+          $errs = @($issues | Where-Object { $_.Severity -eq 'Error' })
+          if ($errs.Count -gt 0) { Write-Error "PSScriptAnalyzer: $($errs.Count) error(s)"; exit 1 }
+          Write-Host "no PSScriptAnalyzer errors"
 
   unit-tests:
     name: Unit tests
