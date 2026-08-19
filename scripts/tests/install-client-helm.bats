@@ -1432,7 +1432,10 @@ _arch_gate_ctx() {
   [[ "$output" != *"This host holds existing MySQL 5.7 data"* ]] || return 1
   # ...and never offers the remedy that cannot clear a helm-list trigger.
   [[ "$output" != *"--data-dir"* ]] || return 1
-  [[ "$output" == *"uninstall the existing release first"* ]] || return 1
+  # the fresh-start remedy is COMPLETE: 'helm uninstall' leaves the kept MySQL
+  # PVC, so it must say to remove the retained data too (Bugbot, client#752).
+  [[ "$output" == *"retained MySQL PVC"* ]] || return 1
+  [[ "$output" == *"resource-policy: keep"* ]] || return 1
 }
 
 @test "_assert_engine_runs_on_this_arch: explicit 5.7 request gets the request-shaped remedy" {

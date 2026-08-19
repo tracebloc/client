@@ -976,7 +976,7 @@ _assert_engine_runs_on_this_arch() {
       hint "Whether this release's data is actually 5.7-format cannot be told from here: the release is detected via 'helm list', not the data directory. 5.7 is kept because 8.4 cannot open a 5.7-format datadir if one exists."
       hint "Keep the existing release — enable amd64 emulation, then re-run:"
       hint "  docker run --privileged --rm tonistiigi/binfmt --install amd64"
-      hint "Or start fresh on the native 8.4 engine — uninstall the existing release first (pointing at a new data directory does not remove the release 'helm list' reports, so the next run would resolve to 5.7 again)."
+      hint "Or start fresh on the native 8.4 engine — this needs BOTH the release AND its retained data removed. 'helm uninstall' alone is not enough: the MySQL volume is annotated 'helm.sh/resource-policy: keep', so it survives the uninstall, and 8.4 cannot open that 5.7-format data (the next run resolves to 8.4 and fails the format guard after cluster setup). Delete the retained MySQL PVC (and any host data directory) as well before re-running."
       error "MySQL 5.7 (kept for the existing release) cannot run on ${ARCH} without amd64 emulation." ;;
     existing-datadir)
       warn "This host holds existing MySQL 5.7 data, so the install must keep the MySQL 5.7 engine — and that image is amd64-only."
