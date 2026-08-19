@@ -193,7 +193,28 @@ created() {
     --set dockerRegistry.email=e@x.io \
     --set dockerRegistry.existingSecret=regcred
   [ "$status" -ne 0 ] || return 1
-  [[ "$output" == *"must be false"* ]] || return 1
+  # Anchored on text that is IDENTICAL across helm generations, because the
+  # per-rule wording is not. Measured on both, for the same values:
+  #
+  #   3.15.4 (the CI pin)
+  #     - dockerRegistry.create: dockerRegistry.create does not match: false
+  #   4.1.1 (a current local build)
+  #     - at '/dockerRegistry/create': value must be false
+  #
+  # The first version of this asserted `*"must be false"*` and went red in the
+  # required Unit tests job the moment helm was installed there — a
+  # version-specific string in an assertion, which is the same defect class as
+  # a hand-copied constant (Bugbot on client#751, whose conclusion was right;
+  # its stated cause, case-sensitivity on "Must be false", is not what 3.15.4
+  # actually prints).
+  #
+  # The header line proves the SCHEMA layer refused rather than the template,
+  # which is the distinction this test exists to make; `create` and `false`
+  # together pin WHICH rule fired, so an unrelated schema failure — a missing
+  # required value, say — cannot satisfy it.
+  [[ "$output" == *"meet the specifications of the schema"* ]] || return 1
+  printf '%s\n' "$output" | grep -qi "create" || return 1
+  printf '%s\n' "$output" | grep -qi "false" || return 1
 }
 
 @test "create plus existingSecret is refused by the template when the schema is skipped" {
