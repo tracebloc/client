@@ -38,24 +38,33 @@ jobs:
 
       # The `Install shellcheck` step that used to sit here is gone, and the
       # premise it was written on ("shellcheck itself is not on the runner
-      # image") is simply false — it IS preinstalled on ubuntu-latest, which is
-      # how `quality / shellcheck` runs without installing anything. The apt
-      # call bought nothing and cost this job 35+ minutes on 2026-08-19 (#753).
-      #
-      # shellcheck now runs in exactly one place: `quality / shellcheck`, also
-      # a required check on develop, which derives its file set from the tree
-      # rather than enumerating it. See installer-tests.yaml's `static` job for
-      # the measurement. This job keeps the parse half, which needs no install.
+      # image") is simply false — it IS preinstalled on ubuntu-latest (0.9.0,
+      # measured in run 32232682350), which is how `quality / shellcheck` runs
+      # without installing anything. The apt call bought nothing and cost this
+      # job 35+ minutes on 2026-08-19 (#753).
 
-      - name: make parse
-        # Calls the Makefile rather than restating the loop (backend#1606). That
-        # ticket's concern was a hand-written FILE LIST drifting between the
-        # Makefile and this workflow; it fixed the drift by re-copying the list,
-        # which only reset the clock — measured 2026-08-19, the list had drifted
-        # again, past eight scripts. `make parse` enumerates nothing (it is a
-        # `find`), and shellcheck's file set is now derived by the org gate, so
-        # there is no longer a list here for anything to drift from.
-        run: make parse
+      - name: make lint
+        # Calls the Makefile rather than restating the commands (backend#1606).
+        # That ticket's concern was a hand-written FILE LIST drifting between
+        # the Makefile and this workflow; it fixed the drift by re-copying the
+        # list, which only reset the clock — measured 2026-08-19, the list had
+        # drifted again, past eight scripts, and #747 then had to hand-edit it
+        # in three places to add one new script. `make lint` enumerates nothing:
+        # `parse` is a find, `shellcheck` derives from `git ls-files`.
+        #
+        # WHOLE TREE, and that is the point of running it here (Arturo, #754
+        # review). `quality / shellcheck` is required and derives the same way,
+        # but on a PR it scans only the DIFF and exits 0 on an empty one. If
+        # this job dropped shellcheck, no CI job would run a whole-tree
+        # error-severity sweep at all — the caller has no `schedule:` and passes
+        # `all-files: false` — so the superset claim behind #753 would have been
+        # true set-wise and false scope-wise. The two are complementary, not
+        # duplicates: diff-scoped gate + whole-tree gate, neither installing
+        # anything, neither holding a file list.
+        #
+        # Verified green on the 44-file derived set under the runner's 0.9.0
+        # (not just a newer local build) before arming it.
+        run: make lint
 
   unit-tests:
     name: Unit tests

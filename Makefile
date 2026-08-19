@@ -14,10 +14,12 @@
 # and helm-ci.yaml. It introduces no new tool, no new config, and no new
 # rule. When a workflow changes, change the matching line here.
 #
-# ONE target is no longer a copy of a workflow step: `shellcheck`. Since #753
-# the only shellcheck in CI is the org reusable job `quality / shellcheck`
-# (tracebloc/.github), which this repo cannot copy a line out of. That target
-# reproduces its rule and flags instead, and says so in its own comment.
+# `shellcheck` is the one target not copied from a workflow LINE, but it is
+# still exactly what a workflow runs: since #753, `Standard checks / Lint` runs
+# `make lint`, so this file IS the definition rather than a copy of one. The org
+# reusable job `quality / shellcheck` (tracebloc/.github) applies the same rule
+# to the PR diff; that one cannot be copied from, so this target reproduces its
+# classification and flags, and says so in its own comment.
 
 .DEFAULT_GOAL := help
 
@@ -44,13 +46,19 @@
 # a library sourced through a variable path can never be followed. Same rule,
 # same flags.
 #
-# NOT the same shellcheck, though, so this predicts the gate rather than
-# reproducing it: the runner ships 0.9.0 (measured in run 32232682350) and a
-# dev box is typically newer -- 0.11.0 via brew today. A finding either side
-# sees alone is a version difference, not a drift in this file. And in CI the
-# gate reads only the PR DIFF, where this target reads the whole tree, so
-# locally it is the stricter of the two. That is the right direction for a
-# pre-push check.
+# SCOPE, precisely, because #753's first draft got this wrong (Arturo review):
+#   * this target, run by `Standard checks / Lint` and by `make check` -- the
+#     WHOLE TREE, on every PR and every push.
+#   * `quality / shellcheck` -- the PR DIFF only. Its caller passes
+#     `all-files: false` and declares no `schedule:`, so on a PR touching no
+#     shell file it legitimately reports "Shell files to check: 0" and exits 0.
+# Both are required checks and both derive. Dropping the whole-tree half would
+# leave no CI job sweeping the full tree at error severity, which is what the
+# old enumerated jobs did on every run.
+#
+# Versions differ, and that is not drift: the runner ships 0.9.0 (measured in
+# run 32232682350), a dev box is typically newer -- 0.11.0 via brew today. The
+# 44-file set was verified green under BOTH before this was armed.
 #
 # Honest limit, because a comment claiming "cannot drift" would be the thing
 # this change is deleting: this MIRRORS the org job's rule across a repo
@@ -194,16 +202,48 @@ lint: parse shellcheck
 
 # parse: the half CI still runs, as `Standard checks / Lint` -> `make parse`.
 # Needs nothing but bash, which is why it survived the install purge in #753.
+# Materialises the list and counts it, for the same reason the `shellcheck`
+# target does (Arturo, #754 review). The previous one-liner was
+#
+#     @find scripts -type f -name '*.sh' -print0 | xargs -0 -n1 bash -n
+#     @echo "all shell scripts parse"
+#
+# and it FAILED OPEN in two ways at once. `find`'s exit status is lost across
+# the pipe -- recipes run under dash, which has no `pipefail` -- and `xargs`
+# with no input runs nothing and exits 0. So in a tree where `scripts/` is
+# missing or renamed it printed
+#
+#     find: scripts: No such file or directory
+#     all shell scripts parse
+#
+# and exited 0, under both dash and bash. That was survivable while an
+# enumerated shellcheck line ran straight after it and would have failed on the
+# same breakage; #753 made `parse` a load-bearing half of the required `Lint`
+# check, which is exactly when a fail-open stops being tolerable.
+#
+# The count is derived and printed, so "parsed nothing" can no longer read
+# identically to "parsed everything" -- the #630 hazard, one target over.
 .PHONY: parse
 parse:
-	@find scripts -type f -name '*.sh' -print0 | xargs -0 -n1 bash -n
-	@echo "all shell scripts parse"
+	@files=$$(mktemp); \
+	if ! find scripts -type f -name '*.sh' -print > "$$files" 2>/dev/null; then \
+	  echo "parse: could not enumerate scripts/ -- refusing to report green"; \
+	  rm -f "$$files"; exit 1; \
+	fi; \
+	n=$$(wc -l < "$$files" | tr -d " "); \
+	if [ "$$n" -eq 0 ]; then \
+	  echo "parse: found ZERO shell scripts under scripts/ -- refusing to report green"; \
+	  rm -f "$$files"; exit 1; \
+	fi; \
+	tr "\n" "\0" < "$$files" | xargs -0 -r -n1 bash -n; \
+	rc=$$?; rm -f "$$files"; \
+	if [ "$$rc" -eq 0 ]; then echo "all $$n shell scripts parse"; fi; \
+	exit $$rc
 
-# shellcheck: LOCAL pre-push convenience only -- in CI this is the required
-# `quality / shellcheck` job, which needs no install because shellcheck is
-# preinstalled on ubuntu-latest. Kept here because the point of `make check` is
-# to predict CI before you push, and a dev with shellcheck installed should get
-# the gate's answer without opening a PR (backend#1850).
+# shellcheck: run BOTH by the pre-push tier and by CI -- `Standard checks /
+# Lint` calls `make lint`, which is this plus `parse`. No install anywhere:
+# shellcheck is preinstalled on ubuntu-latest. One definition, so `make check`
+# genuinely predicts the gate instead of merely resembling it (backend#1850).
 #
 # Two fail-closed properties, both of which the old one-liner lacked:
 #   * classifying ZERO files is a FAILURE, not a green run. A silent no-op is

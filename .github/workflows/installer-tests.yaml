@@ -71,24 +71,28 @@ jobs:
       # There is no shellcheck step here any more, and adding one back is a
       # regression. shellcheck ran in THREE places in this repo (#753): here,
       # `Standard checks / Lint`, and `quality / shellcheck` from
-      # tracebloc/.github's code-quality.yml. Only the third is worth keeping:
+      # tracebloc/.github's code-quality.yml. This copy is the one with no
+      # reason to exist:
       #
-      #   • It is a REQUIRED check on develop; this job is not (so the copy that
-      #     lived here could never block anything — it was advice, not a gate).
-      #   • It DERIVES its file set from the tree (extension, else shebang)
-      #     instead of enumerating it. Measured on develop 2026-08-19: the list
-      #     that used to sit here expanded to 34 files where the derivation
-      #     yields 42 — it had drifted past eight real scripts, including
+      #   • It is not a REQUIRED check on develop (this whole job isn't), so it
+      #     could never block anything — it was advice, not a gate. Making the
+      #     R8 step below a gate is backend#2182 / #2183, a separate concern.
+      #   • It ENUMERATED its file set. Measured on develop 2026-08-19: the list
+      #     that used to sit here expanded to 34 files where deriving from the
+      #     tree yields 44 — it had drifted past eight real scripts, including
       #     scripts/chart-version-guard.sh, scripts/check-digest-drift.sh and
-      #     scripts/index-invariants.sh. A parse error planted in the last of
-      #     those was invisible to this step and caught by the org job.
+      #     scripts/index-invariants.sh, and #747 then had to hand-edit the list
+      #     in three places to add one new script. A parse error planted in
+      #     index-invariants.sh was invisible to this step.
       #   • shellcheck is preinstalled on ubuntu-latest, so it needs no
       #     `apt-get install` — the very step that hung this job to its
       #     10-minute timeout twice on 2026-08-19 and reported as `cancelled`.
       #
-      # Same severity (error) and same SC1091 exclusion, so no verdict changes.
-      # For a whole-tree sweep rather than a PR diff, run the Code quality
-      # workflow via workflow_dispatch with all-files: true.
+      # The two survivors are complementary rather than duplicated, and both
+      # derive their file set: `Standard checks / Lint` runs `make lint` over
+      # the WHOLE TREE, and `quality / shellcheck` scans the PR DIFF. Same
+      # severity (error) and same SC1091 exclusion as the step deleted here, so
+      # no verdict changes.
 
       - name: Installer manifest is current (supply-chain, R8)
         # The bootstrap verifies each sub-script against scripts/manifest.sha256
