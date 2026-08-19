@@ -2,7 +2,9 @@ name: Installer tests
 
 # Validates the curl/PowerShell installer (scripts/) across the breadth of
 # environments a customer might actually have:
-#   • static    — shellcheck + bash -n + PSScriptAnalyzer
+#   • static    — bash -n + PSScriptAnalyzer + the repo's drift guards
+#                  (shellcheck is NOT here: it is the `quality / shellcheck`
+#                  required check — see the `static` job for why)
 #   • unit-bash  — bats (mocked) for the bash installer
 #   • unit-pester— Pester for the PowerShell installer, on Linux AND real Windows
 #   • distro-prereqs — runs the REAL Linux prerequisite-install path (package
@@ -66,22 +68,31 @@ jobs:
             | while IFS= read -r -d '' f; do bash -n "$f" || exit 1; done
           echo "all shell scripts parse"
 
-      - name: ShellCheck (libs + entrypoints)
-        run: |
-          sudo apt-get update -qq && sudo apt-get install -y -qq shellcheck
-          shellcheck --version | grep version
-          # Gate at error severity. The libs are sourced together as one program,
-          # so single-file shellcheck reports SC2034 "unused" false positives for
-          # shared vars (CURL_SECURE, ARCH_DL, colours…) that are defined in
-          # common.sh and consumed in other sourced files. Warnings are printed
-          # below for visibility but don't fail the gate.
-          shellcheck --severity=error --shell=bash \
-            scripts/install.sh scripts/install-k8s.sh scripts/gen-manifest.sh scripts/check-facts.sh scripts/check-style.sh scripts/resolve-ingestor-digest.sh scripts/lib/*.sh \
-            scripts/tests/check-drift.sh scripts/tests/distro-prereqs.sh scripts/tests/e2e-auto-upgrade.sh scripts/tests/e2e-seal-check.sh scripts/tests/e2e-full-seal.sh scripts/tests/e2e-cluster.sh scripts/tests/e2e-journey.sh scripts/tests/e2e-proxy.sh scripts/tests/lib/e2e-common.sh scripts/tests/path-persist.sh scripts/tests/chart-env-vocabulary.sh scripts/tests/env-vocabulary-agreement.sh scripts/tests/telemetry-vocabulary-agreement.sh
-          echo "── shellcheck warnings (advisory, non-blocking) ──"
-          shellcheck --severity=warning --shell=bash \
-            scripts/install.sh scripts/install-k8s.sh scripts/gen-manifest.sh scripts/check-facts.sh scripts/check-style.sh scripts/resolve-ingestor-digest.sh scripts/lib/*.sh \
-            scripts/tests/check-drift.sh scripts/tests/distro-prereqs.sh scripts/tests/e2e-auto-upgrade.sh scripts/tests/e2e-seal-check.sh scripts/tests/e2e-full-seal.sh scripts/tests/e2e-cluster.sh scripts/tests/e2e-journey.sh scripts/tests/e2e-proxy.sh scripts/tests/lib/e2e-common.sh scripts/tests/path-persist.sh scripts/tests/chart-env-vocabulary.sh scripts/tests/env-vocabulary-agreement.sh scripts/tests/telemetry-vocabulary-agreement.sh || true
+      # There is no shellcheck step here any more, and adding one back is a
+      # regression. shellcheck ran in THREE places in this repo (#753): here,
+      # `Standard checks / Lint`, and `quality / shellcheck` from
+      # tracebloc/.github's code-quality.yml. This copy is the one with no
+      # reason to exist:
+      #
+      #   • It is not a REQUIRED check on develop (this whole job isn't), so it
+      #     could never block anything — it was advice, not a gate. Making the
+      #     R8 step below a gate is backend#2182 / #2183, a separate concern.
+      #   • It ENUMERATED its file set. Measured on develop 2026-08-19: the list
+      #     that used to sit here expanded to 34 files where deriving from the
+      #     tree yields 44 — it had drifted past eight real scripts, including
+      #     scripts/chart-version-guard.sh, scripts/check-digest-drift.sh and
+      #     scripts/index-invariants.sh, and #747 then had to hand-edit the list
+      #     in three places to add one new script. A parse error planted in
+      #     index-invariants.sh was invisible to this step.
+      #   • shellcheck is preinstalled on ubuntu-latest, so it needs no
+      #     `apt-get install` — the very step that hung this job to its
+      #     10-minute timeout twice on 2026-08-19 and reported as `cancelled`.
+      #
+      # The two survivors are complementary rather than duplicated, and both
+      # derive their file set: `Standard checks / Lint` runs `make lint` over
+      # the WHOLE TREE, and `quality / shellcheck` scans the PR DIFF. Same
+      # severity (error) and same SC1091 exclusion as the step deleted here, so
+      # no verdict changes.
 
       - name: Installer manifest is current (supply-chain, R8)
         # The bootstrap verifies each sub-script against scripts/manifest.sha256
@@ -128,13 +139,47 @@ jobs:
           Write-Host "no PSScriptAnalyzer errors"
 
   unit-bash:
-    timeout-minutes: 10
+    # 10 -> 15. At 10 the bounded install (390 s worst case) plus ~155 s of bats
+    # could still reach the cap and report `cancelled`, which is the #753 bug the
+    # bound exists to remove. Matches standard-checks.yml's `Unit tests`.
+    timeout-minutes: 15
     name: bats (bash unit, mocked)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: Install bats
-        run: sudo apt-get update -qq && sudo apt-get install -y -qq bats
+
+      # Bounded and retried, same shape as "Pull <distro> (bounded, retried)"
+      # below. This is not speculative hardening: this exact step stalled on
+      # 2026-08-19 at 11:58 and burned the whole `timeout-minutes: 10` budget,
+      # reporting `cancelled` with an empty log and `Run bats` skipped -- the
+      # #753 signature, on bats rather than shellcheck. shellcheck could be
+      # fixed by deleting the install (it is preinstalled); bats genuinely has
+      # to be installed, so it gets a bound instead.
+      #
+      # `sudo timeout`, not `timeout sudo`: timeout must run as root so it
+      # signals apt-get directly rather than signalling sudo and hoping the TERM
+      # is forwarded. `-qq` is dropped on the install so a slow mirror leaves
+      # something in the log, and `bats --version` is the proof-of-install
+      # marker whose absence identified the stall in the first place.
+      - name: Install bats (bounded, retried)
+        # Bounds sized against the job budget (see the twin step in
+        # standard-checks.yml for the arithmetic): worst case 3 x (60 + 60) +
+        # 30 s backoff = 390 s, plus ~155 s of bats, inside the 15 minutes this
+        # job now allows. `if`/`fi` not `[ ... ] &&` because the default shell is
+        # `bash -e` and a false test on the last iteration would abort before the
+        # ::error:: line printed.
+        run: |
+          for i in 1 2 3; do
+            if sudo timeout 60 apt-get update -qq \
+               && sudo timeout 60 apt-get install -y bats; then
+              bats --version && exit 0
+            fi
+            echo "::warning::bats install stalled or failed (attempt $i/3)"
+            if [ "$i" -lt 3 ]; then sleep $((i*10)); fi
+          done
+          echo "::error::could not install bats in 3 bounded attempts - runner-to-mirror connectivity, not this PR. Re-run this job."
+          exit 1
+
       - name: Run bats
         run: bats scripts/tests/*.bats
 
