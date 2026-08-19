@@ -252,6 +252,7 @@ drift:
 	scripts/check-facts.sh --check
 	bash scripts/check-style.sh
 	bash scripts/tests/env-vocabulary-agreement.sh
+	bash scripts/tests/telemetry-vocabulary-agreement.sh
 
 # digest-drift: the watcher on every mutable label that points at a pinned
 # digest (backend#1853). NOT in `check`: it needs the network and a docker

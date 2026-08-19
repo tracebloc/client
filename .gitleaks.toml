@@ -1,0 +1,14 @@
+# Deliberate false positives for gitleaks live here. This file is auto-loaded from
+# the repo root by tracebloc/.github's code-quality workflow and, unlike the
+# baseline, is commit-INDEPENDENT — the right home for a canary fixture the scanner
+# keeps re-finding across branch history. (The baseline is only for genuine
+# historical exposure tracked for rotation.)
+[extend]
+useDefault = true
+
+[allowlist]
+description = "The telemetry canary tests feed fabricated credentials (hunter2, the joke password) through curl -u / proxy URLs to prove the redaction guards strip them. These are never real secrets, so curl-auth-user hits on `$CANARY:hunter2` across this branch's history are false positives (backend#1907)."
+regexTarget = "match"
+regexes = [
+  '''curl -u \$CANARY:hunter2''',
+]
