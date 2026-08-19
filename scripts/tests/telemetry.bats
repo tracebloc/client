@@ -879,6 +879,58 @@ attr() {
   [[ "$output" == *'"event.name":"install.run.succeeded"'* ]] || return 1
 }
 
+@test "Ctrl-C on the already-set-up screen is skipped, not cancelled (Bugbot, client#747)" {
+  # _assess_handoff marks the run skipped and THEN hands the user the interactive
+  # `tracebloc` home screen before `exit 0`, with install-k8s.sh's
+  # `trap 'exit 130' INT` live. Ctrl-C there — the most ordinary thing a user does
+  # on that screen — took the signal branch and booked `cancelled` for a run that
+  # installed nothing. `cancelled` asserts an install was cancelled; there was no
+  # install to cancel. It would inflate the "installs that did not complete"
+  # denominator with runs that never attempted anything.
+  local sig
+  for sig in 130 143; do
+    _TB_TELEMETRY_SKIPPED=""
+    telemetry_run_skipped
+    run telemetry_render_event "$sig"
+    [ "$status" -eq 0 ] || { printf 'render died on %s\n' "$sig" >&2; return 1; }
+    [[ "$output" == *'"event.name":"install.run.skipped"'* ]] || {
+      printf 'exit %s on a skipped run booked: %s\n' "$sig" \
+        "$(attr "$output" 'event.name')" >&2
+      return 1
+    }
+    # The exit code still rides along, so the two remain separable downstream.
+    [ "$(attr "$output" 'tracebloc.install.exit_code')" = "$sig" ] || return 1
+  done
+
+  # THE POSITIVE CONTROL, and it is the half that makes the above mean anything: a
+  # genuine mid-install Ctrl-C — nothing skipped — must STILL book cancelled.
+  # Without this, "renders skipped" is satisfied by a change that never renders
+  # cancelled at all, which would delete the interrupted-install signal entirely.
+  for sig in 130 143; do
+    _TB_TELEMETRY_SKIPPED=""
+    run telemetry_render_event "$sig"
+    [ "$status" -eq 0 ] || return 1
+    [[ "$output" == *'"event.name":"install.run.cancelled"'* ]] || {
+      printf 'a real interrupted install at %s no longer books cancelled: %s\n' \
+        "$sig" "$(attr "$output" 'event.name')" >&2
+      return 1
+    }
+  done
+
+  # …and the asymmetry is deliberate: skipped must NOT swallow a real failure. A
+  # skipped run that then dies with an ordinary non-zero is still a failure, so
+  # the flag is consulted on 0/130/143 and nowhere else.
+  _TB_TELEMETRY_SKIPPED=""
+  telemetry_run_skipped
+  run telemetry_render_event 1
+  [[ "$output" == *'"event.name":"install.run.failed"'* ]] || {
+    printf 'a genuine failure on a skipped run was hidden as: %s\n' \
+      "$(attr "$output" 'event.name')" >&2
+    return 1
+  }
+  [[ "$output" == *'"error.type"'* ]] || return 1
+}
+
 @test "a committed run still emits once the latch is set" {
   # The anchor for the --help test: if the latch were never set, the whole
   # feature would be dead and "--help emits nothing" would pass trivially.

@@ -526,20 +526,43 @@ telemetry_render_event() {
   # client#747; reproduced end-to-end before the change — see the marker's own
   # comment above.)
   #
-  # 130/143 stay unconditional: install-k8s.sh's `trap 'exit 130' INT` IS their
+  # 130/143 are the signal exits: install-k8s.sh's `trap 'exit 130' INT` IS their
   # declaration site, and there is no ordinary command whose 130 could reach here
   # under `set -e` — bash reserves 128+n for signals, and a child killed by SIGINT
   # takes this shell's own trap first.
   #
-  # It rides `cancelled` rather than a verb of its own because §6.4's outcome
+  # They ride `cancelled` rather than a verb of their own because §6.4's outcome
   # verbs are a CLOSED list — started, succeeded, failed, skipped, rejected,
   # retried, timed_out, expired, cancelled, completed — and adding one is a PR
   # against the contract, not a decision an emitter takes unilaterally. Of those,
-  # `cancelled` is the only terminal verb that is true here: the run stopped
-  # before completing, deliberately, without an error. The two causes stay
-  # separable because tracebloc.install.exit_code is already an attribute —
-  # exit_code=2 is the re-run handoff, 130/143 the user's own Ctrl-C — which is
-  # why the exit code is an attribute rather than something the name carries.
+  # `cancelled` is the only terminal verb that is true for a real interrupted
+  # install: the run stopped before completing, deliberately, without an error.
+  # The two causes stay separable because tracebloc.install.exit_code is already
+  # an attribute — exit_code=2 is the re-run handoff, 130/143 the user's own
+  # Ctrl-C — which is why the exit code is an attribute rather than something the
+  # name carries.
+  #
+  # BUT A SIGNAL ON A SKIPPED RUN IS STILL SKIPPED. An earlier version of this
+  # said 130/143 were "unconditional", and that was wrong in the direction that
+  # costs the most. _assess_handoff marks the run skipped and then hands the user
+  # the interactive `tracebloc` home screen before `exit 0` — so Ctrl-C on that
+  # screen, which is the most ordinary thing a user does there, took the INT trap
+  # and booked `cancelled` for a run that installed nothing. `cancelled` asserts
+  # an install was cancelled; on this path there was no install to cancel. It
+  # would land in the denominator of "how often do installs not complete",
+  # inflating it with runs that never attempted anything — the same distortion as
+  # the `--help` bug above and in the same direction: it makes the product look
+  # worse while telling nobody anything actionable. (Bugbot on client#747;
+  # reproduced — same skipped state, `exit 0` rendered skipped and Ctrl-C
+  # rendered cancelled.)
+  #
+  # SKIPPED DOES NOT WIN OVER A FAILURE, and that asymmetry is the point rather
+  # than an oversight. The flag is consulted only on the exits that mean nothing
+  # was installed — 0 and the two signals. A skipped run that then dies with a
+  # real non-zero (anything between telemetry_run_skipped and `exit 0` failing
+  # under errexit) is a genuine failure and must stay countable as one, so the
+  # `*)` branch deliberately does not look at the flag. Hoisting a blanket
+  # "skipped wins" ahead of this case would be shorter and would hide a failure.
   case "$code" in
     0)       if [ -n "$_TB_TELEMETRY_SKIPPED" ]; then
                event="install.run.skipped"
@@ -551,7 +574,11 @@ telemetry_render_event() {
              else
                event="install.run.failed"
              fi ;;
-    130|143) event="install.run.cancelled" ;;
+    130|143) if [ -n "$_TB_TELEMETRY_SKIPPED" ]; then
+               event="install.run.skipped"
+             else
+               event="install.run.cancelled"
+             fi ;;
     *)       event="install.run.failed" ;;
   esac
   # The name is checked against the declared set before it is written, and an
