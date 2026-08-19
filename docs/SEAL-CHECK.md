@@ -92,7 +92,7 @@ these):
 
 | `seal-check-name` | Template | Verifies | Renders when | Explicit off-switch |
 |---|---|---|---|---|
-| `egress-enforcement` | `egress-enforcement-check.yaml` | The CNI actually blocks a training-labelled pod's direct egress to `enforcementProbeHost:443` — i.e. the §8.2 lockdown is *enforced*, not just declared | `networkPolicy.training.enabled` and `allowExternalHttps=false` and `enforcementProbeHost` non-empty | `networkPolicy.training.enforcementProbeHost: ""` |
+| `egress-enforcement` | `egress-enforcement-check.yaml` | The CNI actually blocks a training-labelled pod's direct egress to `enforcementProbeHost:443` — i.e. the §8.2 lockdown is *enforced*, not just declared. **Probe host must accept TCP :443** — see [Probe-host false pass](#probe-host-false-pass) | `networkPolicy.training.enabled` and `allowExternalHttps=false` and `enforcementProbeHost` non-empty | `networkPolicy.training.enforcementProbeHost: ""` |
 | `backend-reachability` | `egress-reachability-check.yaml` | A normal (non-training) pod completes an HTTPS round trip to the tracebloc backend API — the required-egress complement (no backend egress ⇒ experiments sit Pending) | `egressReachabilityCheck.enabled` (default on) | `egressReachabilityCheck.enabled: false` |
 | `storage-assertions` | `storage-assertions-check.yaml` | Release storage matches the declared storage model (below) | `sealCheck.storageAssertions.enabled` (default on) | `sealCheck.storageAssertions.enabled: false` |
 
@@ -236,6 +236,75 @@ still to be recorded here (pass/fail, k3s/k3d versions, date) and folded into
 the RFC-0003 §8.3 matrix. The **substrate** enforcement it builds on is already
 verified — see the Status note at the top of this section (the single record
 of that run).
+
+## Runbook: flip the §8.2 egress lockdown on a real fleet
+
+The runbook above verifies the *substrate* locally. This is the production
+procedure for turning the lockdown on for a customer fleet. Every step is
+reversible and none of it migrates data.
+
+**Gate 0 — pre-flight, before touching the release.** A DNS-only egress
+NetworkPolicy in a throwaway namespace must block `https://1.1.1.1`. The exact
+commands are in [SECURITY.md §6.2](SECURITY.md#egress-preflight-probe). If the
+probe connects, this fleet's CNI does not enforce egress and the rest of this
+runbook is theatre — the policy will render and block nothing. Fix the CNI
+first (SECURITY.md §5.1; on EKS that usually means the `vpc-cni` **managed
+add-on** with `enableNetworkPolicy=true`, not a self-managed DaemonSet).
+
+```bash
+RELEASE=<release> NS=<namespace>
+
+# 1. Gateway deployed and routing (prerequisite — SECURITY.md §8.2 steps 1-2).
+helm get values "$RELEASE" -n "$NS" | grep -A2 egressProxy   # routeWorkloads: true
+
+# 2. DRAIN: wait for in-flight training to finish. The policy change applies to
+#    RUNNING pods, so a mid-run pod still egressing directly fails at the flip.
+#    PODS, not Jobs: tracebloc.io/workload=training is set on the pod template
+#    only (never on the Job object), so `get jobs -l ...` returns nothing even
+#    mid-run — a false all-clear.
+kubectl -n "$NS" get pods -l tracebloc.io/workload=training    # expect: none running
+
+# 3. FLIP.
+helm upgrade "$RELEASE" tracebloc/client -n "$NS" --reset-then-reuse-values \
+  --set networkPolicy.training.allowExternalHttps=false
+
+# 4. VERIFY — the egress-enforcement check renders only now.
+helm test "$RELEASE" -n "$NS" --logs \
+  --filter name="$RELEASE"-egress-enforcement-check
+
+# 5. Run one real training experiment end to end through the gateway.
+```
+
+**Interpreting step 4** — same three outcomes as the local runbook:
+`OK  egress lockdown verified …` → sealed for **G2** on this fleet (record the
+run). `WARNING  EGRESS LOCKDOWN NOT ENFORCED` → the CNI is not enforcing;
+**roll back**. `WARNING  … INCONCLUSIVE` → the probe host did not resolve;
+unverified is never reported sealed, so this fails too.
+
+**Rollback** (from any step, including a failed step 4 or a bad experiment in
+step 5):
+
+```bash
+helm upgrade "$RELEASE" tracebloc/client -n "$NS" --reset-then-reuse-values \
+  --set networkPolicy.training.allowExternalHttps=true
+```
+
+The external-443 rule returns within a CNI reconcile. Leave the gateway
+deployed and routing — it is inert with respect to the policy, and keeping it
+means the next attempt starts at step 2. Use `--reset-then-reuse-values`
+(Helm ≥ 3.14): a plain `--reuse-values` re-applies the stored `false` from the
+previous upgrade and silently defeats the rollback.
+
+### Probe-host false pass
+
+`enforcementProbeHost` must be a host that genuinely **accepts** TCP `:443`
+when egress is open. The check reads a refused connect (curl exit 7) as
+"blocked" — and a host with nothing listening on `:443` refuses identically,
+so a wrong probe host **passes without testing anything**. The `1.1.1.1`
+default accepts. Before trusting a custom value, confirm it is reachable with
+the lockdown OFF; if that probe also fails to connect, the host is wrong, not
+the CNI. A DNS failure (exit 6) is reported INCONCLUSIVE and fails — it is
+never treated as a pass.
 
 ## CI coverage — what runs where
 
