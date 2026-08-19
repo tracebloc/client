@@ -387,6 +387,80 @@ attr() {
   run telemetry_render_event 1
   [[ "$output" != *'"tracebloc.install.source"'* ]] || return 1
   [[ "$output" != *"evil.sh"* ]] || return 1
+  # …and the LINE goes with it. This assertion was the gap: the two halves were
+  # gated independently, so this same input emitted `"…source_line":9` on its own.
+  [[ "$output" != *'"tracebloc.install.source_line"'* ]] || return 1
+}
+
+@test "a line number is never emitted without the file it belongs to (Bugbot, client#747)" {
+  # `tracebloc.install.source` and `tracebloc.install.source_line` were two
+  # independent gates over ONE fact. A location whose basename is not one of ours
+  # dropped the file and kept the number, and a line number with no file is worse
+  # than no field at all: it looks like information, groups like information, and
+  # points at line 118 of nothing.
+  #
+  # The inputs are written down HERE, independently of the matcher, and the
+  # expectation for each is derived by asking TB_TELEMETRY_SOURCES — the closed
+  # vocabulary that is the declaration — rather than by restating which of these
+  # is ours. Get the pairing wrong in either direction and this reddens.
+  local loc base expect_source
+  for loc in \
+    "/var/folders/qx/T/scripts/lib/cluster.sh:88" \
+    "/opt/tracebloc/lib/install-cli.sh:7" \
+    "/home/someone/evil.sh:9" \
+    "/usr/lib/node_modules/npm/bin/npm-cli.js:60" \
+    "?:118" \
+    "install-k8s.sh:1"
+  do
+    TB_ERR_LOC="$loc"
+    base="${loc%%:*}"; base="${base##*/}"
+    if _telemetry_in_set "$base" "$TB_TELEMETRY_SOURCES"; then
+      expect_source="$base"
+    else
+      expect_source=""
+    fi
+
+    run telemetry_render_event 1
+    [ "$status" -eq 0 ] || { printf 'render died on %s: %s\n' "$loc" "$output" >&2; return 1; }
+
+    # The anchor: whatever we conclude about the pair, this is still a failure
+    # event carrying an error.type. "No source keys" must not be reachable by
+    # having quietly lost the whole event.
+    [[ "$output" == *'"event.name":"install.run.failed"'* ]] || {
+      printf 'not a failure event for %s: %s\n' "$loc" "$output" >&2; return 1
+    }
+    [[ "$output" == *'"error.type"'* ]] || {
+      printf 'no error.type for %s\n' "$loc" >&2; return 1
+    }
+
+    if [ -n "$expect_source" ]; then
+      [ "$(attr "$output" 'tracebloc.install.source')" = "$expect_source" ] || {
+        printf 'declared source %s not reported for %s: %s\n' "$expect_source" "$loc" "$output" >&2
+        return 1
+      }
+      [ "$(attr "$output" 'tracebloc.install.source_line')" = "${loc##*:}" ] || {
+        printf 'source without its line for %s: %s\n' "$loc" "$output" >&2; return 1
+      }
+    else
+      [[ "$output" != *'"tracebloc.install.source"'* ]] || {
+        printf 'undeclared source %s reached the record: %s\n' "$base" "$output" >&2; return 1
+      }
+      [[ "$output" != *'"tracebloc.install.source_line"'* ]] || {
+        printf 'ORPHAN LINE: %s has no source but its line was emitted: %s\n' "$loc" "$output" >&2
+        return 1
+      }
+    fi
+  done
+
+  # The loop above is only worth anything if at least one input took each branch —
+  # six undeclared paths and no declared one would pass every assertion while
+  # proving only half the rule.
+  TB_ERR_LOC="/x/cluster.sh:88"
+  run telemetry_render_event 1
+  [[ "$output" == *'"tracebloc.install.source_line":88'* ]] || {
+    printf 'ANCHOR: the positive case does not emit a line at all, so the negative cases prove nothing\n' >&2
+    return 1
+  }
 }
 
 # ── the three field failures this ticket names ───────────────────────────────
@@ -1053,6 +1127,199 @@ attr() {
   '
   [ "$(ls "$tmp"/tracebloc-telemetry-* | wc -l | tr -d " ")" = "2" ] || {
     printf 'the fallback reuses a predictable path\n' >&2; return 1
+  }
+}
+
+@test "a data dir that will not take the write falls through to the fallback (Bugbot, client#747)" {
+  # The data-dir spool's mkdir and append were both `|| return 0`, so a data dir
+  # that EXISTS but refuses the write ended the function with the record nowhere.
+  # That is not an exotic path: HOST_DATA_DIR present but unwritable is precisely
+  # when _choose_log_file has already fallen back to a mktemp log — and on
+  # curl|bash that log is inside the bootstrap's own doomed TMPDIR — so the `log`
+  # line kept nothing either. The fallback existed and was unreachable in exactly
+  # the case it was built for.
+  [[ "$(id -u)" -eq 0 ]] && skip "root bypasses filesystem permission bits"
+  local dd="$BATS_TEST_TMPDIR/ro/.tracebloc" tmp="$BATS_TEST_TMPDIR/ro/tmp"
+  mkdir -p "$dd" "$tmp"
+  chmod 500 "$dd"                       # exists; telemetry/ cannot be created in it
+
+  # ANCHOR 1 — this fixture IS the _choose_log_file fallback case, checked by
+  # calling _choose_log_file rather than by asserting that it is.
+  local logf
+  logf="$(env TMPDIR="$tmp" bash -c '
+    source "'"$LIB_DIR"'/common.sh"; HOST_DATA_DIR="'"$dd"'"; _choose_log_file
+  ' 2>/dev/null)"
+  case "$logf" in
+    "$dd"/*) printf 'ANCHOR: the log went into the data dir, so this is not the fallback case\n' >&2
+             chmod 700 "$dd"; return 1 ;;
+  esac
+
+  run env TMPDIR="$tmp" bash -c '
+    set -uo pipefail
+    source "'"$LIB_DIR"'/common.sh"
+    source "'"$LIB_DIR"'/telemetry.sh"
+    CLIENT_ENV=prod
+    HOST_DATA_DIR="'"$dd"'"
+    LOG_FILE="'"$logf"'"
+    telemetry_run_started
+    telemetry_emit_outcome 1
+  '
+  [ "$status" -eq 0 ] || { chmod 700 "$dd"; printf 'emit died: %s\n' "$output" >&2; return 1; }
+
+  # ANCHOR 2 — the mkdir really did fail. Without this, a fix that quietly made
+  # the directory writable would read identically to a fix that fell through.
+  [ ! -d "$dd/telemetry" ] || {
+    chmod 700 "$dd"
+    printf 'ANCHOR: telemetry/ was created after all, so nothing was diverted\n' >&2
+    return 1
+  }
+
+  local fb
+  fb="$(ls "$tmp"/tracebloc-telemetry-* 2>/dev/null | head -1)"
+  [ -n "$fb" ] || { chmod 700 "$dd"; printf 'the record went nowhere\n' >&2; return 1; }
+  grep -q '"event.name":"install.run.failed"' "$fb" || { chmod 700 "$dd"; return 1; }
+  [ "$(_perm_of "$fb")" = "600" ] || { chmod 700 "$dd"; return 1; }
+  chmod 700 "$dd"
+
+  # The other half of the same hole, and this one is not about permissions at all —
+  # it holds for root too: telemetry/ exists, but the spool path cannot be appended
+  # to. The old code returned 0 here as well.
+  local dd2="$BATS_TEST_TMPDIR/blocked/.tracebloc" tmp2="$BATS_TEST_TMPDIR/blocked/tmp"
+  mkdir -p "$dd2/telemetry/pending.jsonl" "$tmp2"   # a DIRECTORY where the file goes
+  run env TMPDIR="$tmp2" bash -c '
+    set -uo pipefail
+    source "'"$LIB_DIR"'/common.sh"
+    source "'"$LIB_DIR"'/telemetry.sh"
+    CLIENT_ENV=prod
+    HOST_DATA_DIR="'"$dd2"'"
+    LOG_FILE=/dev/null
+    telemetry_run_started
+    telemetry_emit_outcome 1
+  '
+  [ "$status" -eq 0 ] || { printf 'emit died on the blocked spool: %s\n' "$output" >&2; return 1; }
+  # ANCHOR — the append could not have succeeded, and the shell's own diagnostic
+  # about it must not have been printed at the user out of the EXIT trap.
+  [ -d "$dd2/telemetry/pending.jsonl" ] || {
+    printf 'ANCHOR: the spool path is no longer a directory, so the append was not blocked\n' >&2
+    return 1
+  }
+  [[ "$output" != *"Is a directory"* ]] || {
+    printf 'the shell leaked the spool path to the user from the trap: %s\n' "$output" >&2; return 1
+  }
+  local fb2
+  fb2="$(ls "$tmp2"/tracebloc-telemetry-* 2>/dev/null | head -1)"
+  [ -n "$fb2" ] || { printf 'a blocked append produced no record\n' >&2; return 1; }
+  grep -q '"event.name":"install.run.failed"' "$fb2" || return 1
+}
+
+@test "a spool that DID take the write is not filed twice (Bugbot, client#747)" {
+  # The other direction of the same fix, and the one that would be invisible: if
+  # the data-dir branch stopped returning on success, every ordinary install would
+  # write its outcome to the spool AND to a fallback file, doubling the denominator
+  # of the failure rate this feature exists to produce and littering TMPDIR on
+  # every run.
+  local dd="$BATS_TEST_TMPDIR/ok/.tracebloc" tmp="$BATS_TEST_TMPDIR/ok/tmp"
+  mkdir -p "$dd" "$tmp"
+  run env TMPDIR="$tmp" bash -c '
+    set -uo pipefail
+    source "'"$LIB_DIR"'/common.sh"
+    source "'"$LIB_DIR"'/telemetry.sh"
+    CLIENT_ENV=prod
+    HOST_DATA_DIR="'"$dd"'"
+    LOG_FILE=/dev/null
+    telemetry_run_started
+    telemetry_emit_outcome 0
+  '
+  [ "$status" -eq 0 ] || { printf 'emit died: %s\n' "$output" >&2; return 1; }
+  # ANCHOR — the spool really was written, so "no fallback" cannot mean "nothing
+  # happened at all".
+  [ "$(wc -l < "$dd/telemetry/pending.jsonl" | tr -d ' ')" = "1" ] || {
+    printf 'the data-dir spool does not hold exactly one line: %s\n' \
+      "$(cat "$dd/telemetry/pending.jsonl" 2>/dev/null)" >&2
+    return 1
+  }
+  [ "$(ls "$tmp"/tracebloc-telemetry-* 2>/dev/null | wc -l | tr -d ' ')" = "0" ] || {
+    printf 'the event was filed twice — once in the spool and once in the fallback\n' >&2
+    return 1
+  }
+
+  # A failure AFTER the append must not divert either: the line is already on disk,
+  # so a broken trim is a bounding problem, never a second row.
+  #
+  # `tail` is broken with a shell FUNCTION, not with a PATH shim. The first version
+  # of this used a shim directory and proved nothing: common.sh:8 does
+  # `export PATH="/usr/local/sbin:…:/bin:${PATH}"`, which PREPENDS the system
+  # directories, so a shim prepended by the caller ends up behind /usr/bin and the
+  # real `tail` ran. Both assertions below passed against a trim that had worked
+  # perfectly. A function wins over PATH lookup outright and cannot be reordered.
+  # (Caught by mutating the trim's own cleanup and watching this test stay green.)
+  local spool="$dd/telemetry/pending.jsonl"
+  local i
+  for i in 3 4 5 6 7; do printf 'filler-%s\n' "$i" >> "$spool"; done
+  run env TMPDIR="$tmp" bash -c '
+    set -uo pipefail
+    source "'"$LIB_DIR"'/common.sh"
+    source "'"$LIB_DIR"'/telemetry.sh"
+    tail() { return 1; }                 # beats PATH, whatever common.sh did to it
+    command -v tail >/dev/null && [ "$(type -t tail)" = "function" ] || {
+      echo "ANCHOR-TAIL-NOT-OVERRIDDEN"; exit 3; }
+    CLIENT_ENV=prod
+    TB_TELEMETRY_SPOOL_MAX=3
+    HOST_DATA_DIR="'"$dd"'"
+    LOG_FILE=/dev/null
+    telemetry_run_started
+    telemetry_emit_outcome 1
+  '
+  [ "$status" -eq 0 ] || { printf 'a failing trim killed the emit: %s\n' "$output" >&2; return 1; }
+  [[ "$output" != *"ANCHOR-TAIL-NOT-OVERRIDDEN"* ]] || {
+    printf 'the trim was never actually broken, so this proves nothing\n' >&2; return 1
+  }
+  # ANCHOR — the trim really did fail: with SPOOL_MAX=3 and 7 lines in the spool, a
+  # working trim leaves 3. Anything else and the fixture is inert.
+  [ "$(grep -c . "$spool")" = "7" ] || {
+    printf 'ANCHOR: the spool holds %s lines, so the trim ran after all\n' "$(grep -c . "$spool")" >&2
+    return 1
+  }
+  [ "$(ls "$tmp"/tracebloc-telemetry-* 2>/dev/null | wc -l | tr -d ' ')" = "0" ] || {
+    printf 'a failing trim diverted an already-written record into the fallback\n' >&2; return 1
+  }
+  [ ! -e "${spool}.tmp" ] || {
+    printf 'the failed trim left its scratch file behind\n' >&2; return 1
+  }
+
+  # The trim's OTHER failure exit: tail succeeds, the mv does not. Its `|| rm -f`
+  # was the one line in this function no mutation could redden, because a fixture
+  # that breaks the directory cannot let tail write the .tmp in the first place.
+  # Overriding `mv` is the only way to construct it, so it is constructed rather
+  # than assumed harmless.
+  run env TMPDIR="$tmp" bash -c '
+    set -uo pipefail
+    source "'"$LIB_DIR"'/common.sh"
+    source "'"$LIB_DIR"'/telemetry.sh"
+    mv() { return 1; }
+    [ "$(type -t mv)" = "function" ] || { echo "ANCHOR-MV-NOT-OVERRIDDEN"; exit 3; }
+    CLIENT_ENV=prod
+    TB_TELEMETRY_SPOOL_MAX=3
+    HOST_DATA_DIR="'"$dd"'"
+    LOG_FILE=/dev/null
+    telemetry_run_started
+    telemetry_emit_outcome 1
+  '
+  [ "$status" -eq 0 ] || { printf 'a failing mv killed the emit: %s\n' "$output" >&2; return 1; }
+  [[ "$output" != *"ANCHOR-MV-NOT-OVERRIDDEN"* ]] || {
+    printf 'mv was never overridden, so this proves nothing\n' >&2; return 1
+  }
+  # ANCHOR — the mv really did fail: a working one would have left SPOOL_MAX=3
+  # lines. 8 means the trimmed copy never replaced the spool.
+  [ "$(grep -c . "$spool")" = "8" ] || {
+    printf 'ANCHOR: the spool holds %s lines, so the mv landed after all\n' "$(grep -c . "$spool")" >&2
+    return 1
+  }
+  [ ! -e "${spool}.tmp" ] || {
+    printf 'a failed mv left the trimmed copy behind\n' >&2; return 1
+  }
+  [ "$(ls "$tmp"/tracebloc-telemetry-* 2>/dev/null | wc -l | tr -d ' ')" = "0" ] || {
+    printf 'a failing mv diverted an already-written record into the fallback\n' >&2; return 1
   }
 }
 

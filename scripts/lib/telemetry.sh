@@ -499,7 +499,7 @@ _telemetry_source_line() {
 # what lets the tests assert on the real payload instead of on a re-implementation
 # of it. Returns 1 without printing when the environment is unrecognised (§3.2).
 telemetry_render_event() {
-  local code="${1:-0}" env event state phase phase_ms name now total class
+  local code="${1:-0}" env event state phase phase_ms name now total class src
   env="$(telemetry_environment)" || return 1
 
   # §6.1 — three segments, a registered domain, a registered outcome verb. The
@@ -624,8 +624,31 @@ telemetry_render_event() {
     # Where the shell died, to the file and line — never the path that reached
     # them. There is deliberately no exception.* set: bash has no stack trace,
     # and TB_ERR_CMD is unexpanded command text, which is free text.
-    if [ -n "${TB_ERR_LOC:-}" ]; then
-      _telemetry_attr "tracebloc.install.source" "$(_telemetry_source_basename "$TB_ERR_LOC")"
+    #
+    # ONE GATE FOR BOTH HALVES, and it is the source vocabulary's own answer.
+    # These were gated independently, so a location whose basename is not one of
+    # ours — but whose line is a number, which it always is (see below) — emitted
+    # `source_line` alone. A line number with no file is not a partial answer, it
+    # is a confident wrong one: it reads as information, sorts and groups like
+    # information, and points at line 9 of nothing. `?:118`, which the ERR trap
+    # produces whenever BASH_SOURCE is empty, rendered exactly that.
+    # (Bugbot on client#747; reproduced — `"tracebloc.install.source_line":9`
+    # with no source key beside it.)
+    #
+    # DERIVED, not restated: the condition is _telemetry_source_basename's own
+    # exit status, so TB_TELEMETRY_SOURCES stays the single declaration of what
+    # counts as one of our files. A second copy of that list here — or a
+    # hand-written "is it ours" test — would agree with itself and drift from the
+    # set the renderer actually uses.
+    #
+    # Deliberately NOT gated the other way (source kept, line missing): that
+    # cannot happen, and a branch for it would be belt and braces no test could
+    # redden. TB_ERR_LOC has exactly one writer in the whole tree, the ERR trap at
+    # install-k8s.sh:118, which always appends `:${LINENO}` — so the line half is
+    # always a number. And a file with no line is honest information anyway; a
+    # line with no file is the only one of the two that lies.
+    if [ -n "${TB_ERR_LOC:-}" ] && src="$(_telemetry_source_basename "$TB_ERR_LOC")"; then
+      _telemetry_attr "tracebloc.install.source" "$src"
       _telemetry_attr "tracebloc.install.source_line" "$(_telemetry_source_line "$TB_ERR_LOC")" int
     fi
   fi
@@ -801,49 +824,89 @@ _telemetry_deliver() {
   #
   # So: spool INTO the data dir only when it already exists — and when it does
   # not, into a temp file rather than nowhere. #1906's forwarder reads both.
+  #
+  # AND A FAILED WRITE FALLS THROUGH, it does not return. Both of these steps
+  # used to be `|| return 0`, which put the fallback out of reach in the one case
+  # it exists for: HOST_DATA_DIR present but not writable is precisely when
+  # _choose_log_file has already fallen back to a mktemp log — and on curl|bash
+  # that log is inside the bootstrap's own doomed TMPDIR — so `log` above kept
+  # nothing either and the event was gone. The fallback existed and was
+  # unreachable exactly when it was needed. (Bugbot on client#747; reproduced both
+  # halves — a 0500 data dir with no telemetry/ yet, and a spool path that cannot
+  # be appended to. Neither produced a record anywhere.)
+  #
+  # WRITTEN AT MOST ONCE. The `return 0` below sits after a SUCCESSFUL append and
+  # nowhere else, so the fallback is reached only on a path that wrote nothing —
+  # there is no flag to keep in step and no ordering to get wrong. Everything
+  # after the append (chmod, trim, mv) can fail freely: the line is already on
+  # disk, and re-filing it in the fallback would turn one install into two rows.
   if [ -n "${HOST_DATA_DIR:-}" ] && [ -d "$HOST_DATA_DIR" ]; then
     spool="$(_telemetry_spool_path)"
     dir="${spool%/*}"
-    mkdir -p "$dir" 2>/dev/null || return 0
-    chmod 700 "$dir" 2>/dev/null || true
-    printf '%s\n' "$json" >> "$spool" 2>/dev/null || return 0
-    chmod 600 "$spool" 2>/dev/null || true
-    # Bounded: nothing drains this until #1906, and an unbounded append on a
-    # customer's disk is a defect we would be shipping on purpose.
-    if [ -s "$spool" ]; then
-      if tail -n "$TB_TELEMETRY_SPOOL_MAX" "$spool" > "${spool}.tmp" 2>/dev/null; then
-        # The trim REPLACES the file, so the mode has to be put on the thing that
-        # survives. `> "${spool}.tmp"` creates under the process umask and `mv`
-        # keeps the tmp file's mode, so a chmod that ran only before this landed
-        # a 0644 spool: common.sh's `umask 077` normally covers it, but
-        # _install_userspace_tools (setup-linux.sh:893) and its macOS twin
-        # (setup-macos.sh:418) set `umask 022` around install_{kubectl,k3d,helm}
-        # and restore it only afterwards — so an install that dies in one of
-        # those emits from the EXIT trap under 022. Nothing sensitive is in the
-        # record by construction, so this is defence in depth; it is here because
-        # a file this installer creates should not depend on which line it died
-        # on for its mode. (saadqbal on client#747; reproduced — spool 644.)
-        # BEFORE the mv, not after it: a chmod on the spool afterwards would
-        # leave a window in which the file is world-readable, and — the thing
-        # that matters more — a second chmod on the spool is unreachable belt and
-        # braces that no test can redden, which is how a guard nobody has watched
-        # fail gets shipped. One chmod, on the inode that survives.
-        chmod 600 "${spool}.tmp" 2>/dev/null || true
-        mv "${spool}.tmp" "$spool" 2>/dev/null || rm -f "${spool}.tmp" 2>/dev/null || true
-      else
-        rm -f "${spool}.tmp" 2>/dev/null || true
+    if mkdir -p "$dir" 2>/dev/null; then
+      chmod 700 "$dir" 2>/dev/null || true
+      # `2>/dev/null` BEFORE the `>>`, not after it. Redirections are applied left
+      # to right, and a failing `>>` is reported by the SHELL, not by printf — so
+      # the old order printed `…/pending.jsonl: Is a directory`, complete with the
+      # customer's path, out of an EXIT trap. Ordered this way the diagnostic
+      # lands in /dev/null with the rest.
+      if printf '%s\n' "$json" 2>/dev/null >>"$spool"; then
+        chmod 600 "$spool" 2>/dev/null || true
+        _telemetry_trim_spool "$spool"
+        return 0
       fi
     fi
-    return 0
+    # mkdir or append failed — say nothing here and let the fallback below have
+    # it. `chmod 700` failing is not a write failure and deliberately does not
+    # divert: the record is still about to go into a directory we own.
   fi
 
-  # No data dir: the pre-log failures — validate_config, early_data_dir_guard —
-  # which are exactly the ones the run-started latch was built to preserve. One
-  # file per run, which is the same footprint _choose_log_file already leaves on
-  # this path; no trimming, because there is only ever one line in it.
+  # No data dir, or a data dir that would not take the write: the pre-log
+  # failures — validate_config, early_data_dir_guard — which are exactly the ones
+  # the run-started latch was built to preserve. One file per run, which is the
+  # same footprint _choose_log_file already leaves on this path; no trimming,
+  # because there is only ever one line in it.
   spool="$(_telemetry_fallback_spool)" || return 0
-  printf '%s\n' "$json" >> "$spool" 2>/dev/null || return 0
+  printf '%s\n' "$json" 2>/dev/null >>"$spool" || return 0
   chmod 600 "$spool" 2>/dev/null || true
+  return 0
+}
+
+# _telemetry_trim_spool SPOOL — keep the data-dir spool bounded.
+#
+# Bounded because nothing drains it until #1906, and an unbounded append on a
+# customer's disk is a defect we would be shipping on purpose. Split out of
+# _telemetry_deliver so the append's success is the last thing in that branch:
+# inline, the trim sat between the append and the `return 0`, which is what made
+# it easy to write a `|| return` in here that silently skipped the fallback
+# decision. Nothing in this function can lose the record — it is already
+# appended — so every failure path is `|| true`.
+_telemetry_trim_spool() {
+  local spool="$1"
+  if [ -s "$spool" ]; then
+    if tail -n "$TB_TELEMETRY_SPOOL_MAX" "$spool" > "${spool}.tmp" 2>/dev/null; then
+      # The trim REPLACES the file, so the mode has to be put on the thing that
+      # survives. `> "${spool}.tmp"` creates under the process umask and `mv`
+      # keeps the tmp file's mode, so a chmod that ran only before this landed
+      # a 0644 spool: common.sh's `umask 077` normally covers it, but
+      # _install_userspace_tools (setup-linux.sh:893) and its macOS twin
+      # (setup-macos.sh:418) set `umask 022` around install_{kubectl,k3d,helm}
+      # and restore it only afterwards — so an install that dies in one of
+      # those emits from the EXIT trap under 022. Nothing sensitive is in the
+      # record by construction, so this is defence in depth; it is here because
+      # a file this installer creates should not depend on which line it died
+      # on for its mode. (saadqbal on client#747; reproduced — spool 644.)
+      # BEFORE the mv, not after it: a chmod on the spool afterwards would
+      # leave a window in which the file is world-readable, and — the thing
+      # that matters more — a second chmod on the spool is unreachable belt and
+      # braces that no test can redden, which is how a guard nobody has watched
+      # fail gets shipped. One chmod, on the inode that survives.
+      chmod 600 "${spool}.tmp" 2>/dev/null || true
+      mv "${spool}.tmp" "$spool" 2>/dev/null || rm -f "${spool}.tmp" 2>/dev/null || true
+    else
+      rm -f "${spool}.tmp" 2>/dev/null || true
+    fi
+  fi
   return 0
 }
 
