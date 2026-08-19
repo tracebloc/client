@@ -863,7 +863,7 @@ _client_default_namespace() { _sanitize_workspace_name "${TB_NAMESPACE:-traceblo
 #   invalid <value>        TB_MYSQL_ENGINE is not auto|5.7|8.4
 #   8.4 sticky             this machine already opted into 8.4
 #   5.7 existing-release   a live Helm release (helm list), data format unknown
-#   5.7 existing-datadir   real 5.7-format mysql datadir content on this host
+#   5.7 existing-datadir   real mysql datadir content on this host (non-empty)
 #   5.7 amd64              fresh install on amd64 — keep the pinned 5.7 image
 #   8.4 fresh              fresh install on non-amd64 — native multi-arch engine
 _mysql_engine_decision() {
@@ -889,12 +889,13 @@ _mysql_engine_decision() {
   # means a 5.7-format datadir may exist, and 8.4 refuses to open it. Two
   # DISTINCT triggers, ordered MOST-SPECIFIC FIRST because their remedy differs:
   #
-  #   datadir content — real 5.7-format files on this host. Checked first: when
-  #     files exist the reason is 'existing-datadir' whether or not a release is
-  #     also present, because the "host holds 5.7 data" claim is then TRUE and a
-  #     clean start means clearing the data dir (a release-only "uninstall"
-  #     remedy would leave those files to re-pin 5.7 on the next run). An
-  #     UNLISTABLE dir counts as content (fail closed; see the helper).
+  #   datadir content — a non-empty mysql data directory on this host (the probe
+  #     tests for content, NOT format). Checked first: when files exist the reason
+  #     is 'existing-datadir' whether or not a release is also present, because
+  #     there IS data here and a clean start means clearing the data dir (a
+  #     release-only "uninstall" remedy would leave those files to re-pin 5.7 on
+  #     the next run). An UNLISTABLE dir counts as content (fail closed; see the
+  #     helper).
   #
   #   existing_id — a live Helm release from detect_installed_client (helm list
   #     -A + clientId) with NO host datadir files, e.g. TB_STORAGE_MODE=node-local
@@ -976,7 +977,7 @@ _assert_engine_runs_on_this_arch() {
       hint "Whether this release's data is actually 5.7-format cannot be told from here: the release is detected via 'helm list', not the data directory. 5.7 is kept because 8.4 cannot open a 5.7-format datadir if one exists."
       hint "Keep the existing release — enable amd64 emulation, then re-run:"
       hint "  docker run --privileged --rm tonistiigi/binfmt --install amd64"
-      hint "Or start fresh on the native 8.4 engine — this needs BOTH the release AND its retained data removed. 'helm uninstall' alone is not enough: the MySQL volume is annotated 'helm.sh/resource-policy: keep', so it survives the uninstall, and 8.4 cannot open that 5.7-format data (the next run resolves to 8.4 and fails the format guard after cluster setup). Delete the retained MySQL PVC (and any host data directory) as well before re-running."
+      hint "Or start fresh on the native 8.4 engine — this needs BOTH the release AND its retained data removed. 'helm uninstall' alone is not enough: the MySQL volume is annotated 'helm.sh/resource-policy: keep', so it survives the uninstall, and 8.4 cannot open a 5.7-format datadir, which that retained volume may be (the next run resolves to 8.4 and fails the format guard after cluster setup). Delete the retained MySQL PVC (and any host data directory) as well before re-running."
       error "MySQL 5.7 (kept for the existing release) cannot run on ${ARCH} without amd64 emulation." ;;
     existing-datadir)
       warn "This host holds existing MySQL 5.7 data, so the install must keep the MySQL 5.7 engine — and that image is amd64-only."
