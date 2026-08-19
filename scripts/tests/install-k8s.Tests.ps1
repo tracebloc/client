@@ -5370,7 +5370,8 @@ Describe "Wait-MetricsApiService (client#553 -- the Windows installer had no wai
     # agree with itself while the two installers waited different lengths.
     BeforeAll {
       $spec = Get-Content "$PSScriptRoot/../spec/facts.env" -Raw
-      $m = [regex]::Match($spec, '(?m)^METRICS_WAIT_TIMEOUT=(?<v>\d+)\s*$')
+      # \r?$ for the same CRLF reason as below -- facts.env is checked out CRLF on Windows.
+      $m = [regex]::Match($spec, '(?m)^METRICS_WAIT_TIMEOUT=(?<v>\d+)\r?$')
       $m.Success | Should -BeTrue -Because "facts.env must declare the shared wait budget"
       $script:SpecWait = [int]$m.Groups['v'].Value
     }
@@ -5600,7 +5601,12 @@ Describe "Wait-MetricsApiService (client#553 -- the Windows installer had no wai
       # Bugbot on #757: one advertised knob whose default could differ per OS. The
       # budget now lives in scripts/spec/facts.env and is stamped by check-facts.sh,
       # so this asserts the INDIRECTION, not the number.
-      $script:BashSrc | Should -Match '(?m)^METRICS_WAIT_TIMEOUT=\d+$'
+      # \r?$ , not a bare $ : the Windows runner checks these files out CRLF, and
+      # .NET's multiline $ matches before \n but NOT before \r\n -- so a bare anchor
+      # fails on a line that is plainly there. Cost one red Pester (windows-latest)
+      # while Pester (ubuntu-latest) stayed green, which is exactly the shape of bug
+      # that job exists to catch.
+      $script:BashSrc | Should -Match '(?m)^METRICS_WAIT_TIMEOUT=\d+\r?$'
       $script:PsSrc   | Should -Match '\$script:MetricsWaitTimeout = \d+'
       # No literal fallback left in either poll path.
       $fn = [regex]::Match($script:BashSrc, '(?s)_wait_for_metrics_apiservice\(\)\s*\{.*?\n\}').Value
