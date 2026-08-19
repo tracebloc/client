@@ -22,13 +22,15 @@ setup() {
   spin_cmd()        { local _m="$1"; shift; record "spin_cmd $*"; "$@"; }
   spin_cmd_bounded(){ local _s="$1" _m="$2"; shift 2; record "spin_cmd_bounded $_s $*"; "$@"; }
   _macos_vm_mem_gb(){ echo 6; }
-  # assert_amd64_emulation now asks the engine rule (client#748): only the 5.7
-  # image needs emulation. install-client-helm.sh is NOT sourced here, so mock the
-  # two functions it would provide — default to 5.7 so the smoke-path tests below
-  # are deterministic rather than passing because the function is undefined; the
-  # 8.4 test overrides it.
-  _mysql_engine_decision(){ echo "5.7 explicit"; }
-  _client_values_file(){ echo ""; }
+  # assert_amd64_emulation asks the engine rule (client#748) through the
+  # TB_NAMESPACE-sanitising wrapper (client#756). Source the REAL rule, not a mock
+  # (Arturo, client#756): mocking _mysql_engine_decision made the wrapper and the
+  # raw rule indistinguishable, so reverting the fix stayed green. HOST_DATA_DIR
+  # fixtures drive the verdict, exactly as preflight.bats does.
+  # shellcheck source=/dev/null
+  source "${LIB_DIR}/install-client-helm.sh"
+  HOST_DATA_DIR="$BATS_TEST_TMPDIR/data"; mkdir -p "$HOST_DATA_DIR/mysql"
+  unset TB_MYSQL_ENGINE TB_NAMESPACE TRACEBLOC_VALUES_FILE existing_id
 }
 
 # ── _macos_supports_vz ───────────────────────────────────────────────────────
@@ -100,25 +102,32 @@ _colima_env() {
 }
 
 # ── assert_amd64_emulation (post-Docker smoke) ───────────────────────────────
-@test "assert_amd64_emulation: Apple Silicon + engine resolves to 8.4 -> skips the smoke, no docker run (client#748)" {
-  ARCH=arm64
-  _mysql_engine_decision(){ echo "8.4 fresh"; }   # a fresh Mac serves 8.4 natively
-  docker() { record "docker $*"; return 1; }       # would FAIL the smoke if it ran
+@test "assert_amd64_emulation: Apple Silicon + FRESH host -> engine 8.4, skips the smoke (client#748)" {
+  ARCH=arm64                                          # no datadir content anywhere
+  docker() { record "docker $*"; return 1; }          # would FAIL the smoke if it ran
   run assert_amd64_emulation
-  [ "$status" -eq 0 ] || return 1                   # not refused
+  [ "$status" -eq 0 ] || return 1                      # not refused
   [[ "$output" == *"runs the client images natively"* ]] || return 1
   run mock_calls
-  [[ "$output" != *"docker run"* ]] || return 1     # emulation it does not need is never probed
+  [[ "$output" != *"docker run"* ]] || return 1        # emulation it does not need is never probed
 }
 
-@test "assert_amd64_emulation: Apple Silicon + engine 5.7 + broken emulation -> fails naming the 5.7 engine (client#748)" {
+# THE MUTATION THIS PINS (Arturo, client#756): TB_NAMESPACE is unset, so the RAW
+# rule probes only HOST_DATA_DIR/mysql (empty) and wrongly resolves 8.4. The wrapper
+# sanitises the namespace via _client_default_namespace and probes the per-release
+# HOST_DATA_DIR/<ns>/mysql, finds the 5.7 data, and refuses. Reverting
+# assert_amd64_emulation to the raw rule reddens THIS test.
+@test "assert_amd64_emulation: Apple Silicon + PER-RELEASE 5.7 datadir -> engine 5.7, runs the smoke (client#756)" {
   ARCH=arm64
-  _mysql_engine_decision(){ echo "5.7 existing-datadir"; }
-  docker() { record "docker $*"; return 1; }
+  local ns; ns="$(_client_default_namespace)"          # "tracebloc" by default
+  mkdir -p "$HOST_DATA_DIR/$ns/mysql"; touch "$HOST_DATA_DIR/$ns/mysql/ibdata1"
+  docker() { record "docker $*"; return 1; }           # emulation broken
   run assert_amd64_emulation
-  [ "$status" -ne 0 ] || return 1
-  [[ "$output" == *"MySQL 5.7 engine"* ]] || return 1   # accurate: it is the 5.7 image, not "all client images"
+  [ "$status" -ne 0 ] || return 1                       # refuses, does NOT skip
+  [[ "$output" == *"MySQL 5.7 engine"* ]] || return 1   # accurate: the 5.7 image, not "all client images"
   [[ "$output" == *"Use Rosetta"* ]] || return 1
+  run mock_calls
+  [[ "$output" == *"docker run"* ]] || return 1         # the smoke actually ran
 }
 
 @test "assert_amd64_emulation: Intel Mac -> no-op, no docker run (#433)" {
@@ -131,7 +140,7 @@ _colima_env() {
 }
 
 @test "assert_amd64_emulation: Apple Silicon + working emulation -> forces linux/amd64, time-bounded, succeeds (#433)" {
-  ARCH=arm64
+  ARCH=arm64; TB_MYSQL_ENGINE=5.7        # force the 5.7 engine so the smoke runs
   docker() { record "docker $*"; return 0; }
   run assert_amd64_emulation
   [ "$status" -eq 0 ] || return 1
@@ -143,7 +152,7 @@ _colima_env() {
 }
 
 @test "assert_amd64_emulation: Apple Silicon + broken emulation -> hard fail naming the Rosetta setting (#433)" {
-  ARCH=arm64
+  ARCH=arm64; TB_MYSQL_ENGINE=5.7        # force the 5.7 engine so the smoke runs
   docker() { record "docker $*"; return 1; }   # exec-format error / no emulation
   run assert_amd64_emulation
   [ "$status" -ne 0 ] || return 1                           # error() exits — caught in the field before a crash-looping pod
@@ -164,7 +173,7 @@ _colima_env() {
 }
 
 @test "assert_amd64_emulation: smoke image is overridable via TB_AMD64_SMOKE_IMAGE (#433)" {
-  ARCH=arm64; TB_AMD64_SMOKE_IMAGE="alpine:3.20"
+  ARCH=arm64; TB_MYSQL_ENGINE=5.7; TB_AMD64_SMOKE_IMAGE="alpine:3.20"
   docker() { record "docker $*"; return 0; }
   run assert_amd64_emulation
   [ "$status" -eq 0 ] || return 1
