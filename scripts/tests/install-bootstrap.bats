@@ -25,14 +25,31 @@ setup() {
   mkdir -p "$BIN" "$SERVE/scripts/lib" "$SERVE_REL"
 
   # ---- Populate the "repo" with stand-in sub-scripts the bootstrap fetches ----
-  # Each is trivial but real bash; install-k8s.sh is the privileged entrypoint —
-  # it writes a sentinel so a test can prove it was (or was NOT) reached.
-  for rel in install-k8s.sh \
-             lib/common.sh lib/preflight.sh lib/detect-gpu.sh lib/gpu-nvidia.sh \
-             lib/gpu-amd.sh lib/setup-macos.sh lib/setup-linux.sh lib/cluster.sh \
-             lib/gpu-plugins.sh lib/install-client-helm.sh lib/install-cli.sh \
-             lib/provision.sh lib/assess.sh lib/probe.sh lib/summary.sh lib/diagnose.sh; do
-    printf '#!/usr/bin/env bash\n# stub %s\n' "$rel" > "$SERVE/scripts/$rel"
+  # The list is DERIVED from install.sh's own FILES array, not restated here.
+  # It used to be written out twice in this setup, and both copies had to be
+  # edited by hand whenever the installer gained a lib — so adding
+  # scripts/lib/telemetry.sh (backend#1907) turned ten unrelated supply-chain
+  # tests red for a reason that had nothing to do with them. gen-manifest.sh
+  # already reads the array this way, and cross-checks it against its own; this
+  # is the third reader of the same declaration and the first that used to
+  # disagree with it silently.
+  BOOT_FILES=()
+  while IFS= read -r _bf; do
+    [ -n "$_bf" ] && BOOT_FILES+=("$_bf")
+  done < <(awk '/^FILES=\(/{f=1;next} /^\)/{f=0} f' "$SCRIPTS_DIR/install.sh" \
+             | sed -e 's/^[[:space:]]*"//' -e 's/"[[:space:]]*$//')
+  # Fail closed: an empty list would build an empty served tree AND an empty
+  # manifest, which verify against each other perfectly while testing nothing.
+  [ "${#BOOT_FILES[@]}" -ge 2 ] || {
+    echo "install-bootstrap: parsed ${#BOOT_FILES[@]} entries out of install.sh's FILES array — the parse is inert" >&2
+    return 1
+  }
+  # Each stub is trivial but real bash; install-k8s.sh is the privileged
+  # entrypoint — it writes a sentinel so a test can prove it was (or was NOT)
+  # reached.
+  for rel in "${BOOT_FILES[@]}"; do
+    mkdir -p "$SERVE/$(dirname "$rel")"
+    printf '#!/usr/bin/env bash\n# stub %s\n' "$rel" > "$SERVE/$rel"
   done
   cat > "$SERVE/scripts/install-k8s.sh" <<EOF
 #!/usr/bin/env bash
@@ -40,13 +57,7 @@ echo "INSTALL_K8S_RAN" > "$SBX/k8s-ran"
 EOF
 
   # ---- Build a manifest.sha256 over exactly those files (real digests) -------
-  ( cd "$SERVE" && for f in \
-      scripts/install-k8s.sh scripts/lib/common.sh scripts/lib/preflight.sh \
-      scripts/lib/detect-gpu.sh scripts/lib/gpu-nvidia.sh scripts/lib/gpu-amd.sh \
-      scripts/lib/setup-macos.sh scripts/lib/setup-linux.sh scripts/lib/cluster.sh \
-      scripts/lib/gpu-plugins.sh scripts/lib/install-client-helm.sh \
-      scripts/lib/install-cli.sh scripts/lib/provision.sh scripts/lib/assess.sh \
-      scripts/lib/probe.sh scripts/lib/summary.sh scripts/lib/diagnose.sh; do
+  ( cd "$SERVE" && for f in "${BOOT_FILES[@]}"; do
         printf '%s  %s\n' "$(_real_sha "$SERVE/$f")" "$f"
       done ) > "$SERVE_REL/manifest.sha256"
   printf 'FAKE-SIG\n'  > "$SERVE_REL/manifest.sha256.sig"

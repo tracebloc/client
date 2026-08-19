@@ -37,7 +37,8 @@ SHELLCHECK_FILES := \
 	scripts/tests/lib/e2e-common.sh \
 	scripts/tests/path-persist.sh \
 	scripts/tests/chart-env-vocabulary.sh \
-	scripts/tests/env-vocabulary-agreement.sh
+	scripts/tests/env-vocabulary-agreement.sh \
+	scripts/tests/telemetry-vocabulary-agreement.sh
 
 # The bats total, DERIVED — never written down. It moves on most PRs that add a
 # test, nothing enforces it, and the help text had drifted from its hardcoded
@@ -199,7 +200,7 @@ lint-warnings:
 # back where #715 took it from.
 # `|`-separated because each guard is a multi-word command; the recipe splits on
 # it. One entry per guard, and this is the only place they are written down.
-DRIFT_GUARDS := scripts/gen-manifest.sh --check|scripts/check-facts.sh --check|bash scripts/check-style.sh|bash scripts/tests/check-drift.sh|bash scripts/tests/env-vocabulary-agreement.sh
+DRIFT_GUARDS := scripts/gen-manifest.sh --check|scripts/check-facts.sh --check|bash scripts/check-style.sh|bash scripts/tests/check-drift.sh|bash scripts/tests/env-vocabulary-agreement.sh|bash scripts/tests/telemetry-vocabulary-agreement.sh
 
 # Every guard RUNS even when an earlier one fails, and the target fails at the
 # end if any did. Sequential `cmd1<newline>cmd2` recipe lines stop at the first

@@ -2546,6 +2546,72 @@ Describe "ConvertTo-SanitizedInput" {
   It "empty in, empty out" {
     ConvertTo-SanitizedInput -Value "" | Should -Be ""
   }
+
+  # ── SS3 (ESC O <final>) and the floor ───────────────────────────────────
+  # These shipped in #736 with NO committed PowerShell test: the four cases
+  # above are all CSI, so the whole SS3 half and the entire floor were
+  # unverified here while the bash and Go copies had cases. That asymmetry is
+  # how SS3 came to be missing from all three implementations at once
+  # (tracebloc/cli#516) — the rule is hand-copied into three languages and only
+  # one shape was ever tested.
+  #
+  # The cases mirror the bats corpus in install-client-helm.bats one-for-one, on
+  # purpose: until backend#2084 lands a shared fixture, matching case lists are
+  # the only thing making the three implementations comparable by reading.
+
+  It "strips SS3 escapes around real content" {
+    $esc = [char]27
+    ConvertTo-SanitizedInput -Value "na${esc}ODme" | Should -Be "name"
+  }
+
+  It "SS3-only input yields empty, so the caller re-prompts" {
+    $esc = [char]27
+    # Arrow keys pressed at the prompt. Empty is the contract: callers treat it
+    # as "no answer" and re-prompt or auto-name, rather than naming a machine
+    # after escape residue.
+    ConvertTo-SanitizedInput -Value "${esc}OD${esc}OD${esc}OA" | Should -Be ""
+    ConvertTo-SanitizedInput -Value "${esc}OH${esc}OF"         | Should -Be ""   # Home/End
+    ConvertTo-SanitizedInput -Value "${esc}OP${esc}OQ"         | Should -Be ""   # F1/F2
+  }
+
+  It "handles SS3 and CSI mixed in one value" {
+    $esc = [char]27
+    ConvertTo-SanitizedInput -Value "a${esc}ODb${esc}[Dc" | Should -Be "abc"
+  }
+
+  It "a bare O is not an escape" {
+    # The regression guard for the obvious wrong fix: matching "O<letter>"
+    # without requiring the ESC would eat two characters out of any name
+    # starting with O.
+    ConvertTo-SanitizedInput -Value "OPTIMUS-01" | Should -Be "OPTIMUS-01"
+  }
+
+  It "truncated SS3 (ESC with no final byte) yields empty" {
+    $esc = [char]27
+    ConvertTo-SanitizedInput -Value "${esc}O" | Should -Be ""
+  }
+
+  It "an unknown escape family with nothing else is refused" {
+    # ESC N is SS2 — deliberately NOT in the strip list. This is the floor
+    # doing its job on the family nobody has reported yet, which is the only
+    # part of this that generalises past the escapes we happen to know.
+    $esc = [char]27
+    ConvertTo-SanitizedInput -Value "${esc}NB${esc}NC" | Should -Be ""
+  }
+
+  It "an unknown escape family beside real content keeps the content" {
+    $esc = [char]27
+    ConvertTo-SanitizedInput -Value "box${esc}NC" | Should -Be "boxNC"
+  }
+
+  It "the floor counts non-Latin letters as real content" {
+    # \p{L} not [A-Za-z]: keep-vs-reject must not depend on the script a name
+    # is written in. An ASCII name and a Japanese one behave the same here
+    # (Bugbot, #736) — the pair is the assertion, either alone proves nothing.
+    $esc = [char]27
+    ConvertTo-SanitizedInput -Value "${esc}NC日本"  | Should -Be "NC日本"
+    ConvertTo-SanitizedInput -Value "${esc}NChello" | Should -Be "NChello"
+  }
 }
 
 Describe "Get-ProvisioningPreset" {
