@@ -966,8 +966,26 @@ PM_UPDATE=""
 #  would still be invisible.
 TB_ERR_LOC=""    # "file:line" of the LAST failing command — see _record_err
 _TB_IN_RECORD_ERR=""   # re-entrancy guard; the recorder inherits its own trap
-TB_ERR_CMD=""    # the command text, UNEXPANDED — BASH_COMMAND yields `cmd "$VAR"`,
-                 # never the value, so this cannot leak a credential into the log
+TB_ERR_CMD=""    # what failed. TWO producers, and they differ — read on before
+                 # writing a message that ends up here.
+                 #
+                 #   ERR trap  → BASH_COMMAND, i.e. the command text UNEXPANDED:
+                 #               `cmd "$VAR"`, never the value.
+                 #   error()   → "error: $*", i.e. the message AS INTERPOLATED,
+                 #               because a deliberate refusal fires no ERR trap
+                 #               and would otherwise leave a benign probe here
+                 #               (#741).
+                 #
+                 # So the old blanket "this cannot leak a credential into the
+                 # log" no longer holds for the error() path, and TB_ERR_CMD
+                 # reaches LOG_FILE twice — via _record_err and via
+                 # install_cleanup's `FAILED at … command:` line.
+                 #
+                 # Every error() call today interpolates only paths, sizes,
+                 # versions and arch names (audited on #741). Keep it that way:
+                 # NEVER interpolate a credential, token or password into an
+                 # error() message. If you need one in the text, say
+                 # "the credential file at $path", not the value.
 TB_ERR_CODE=""   # its exit status (137/141/… included: a signal death is a failure)
 
 # _record_err LOCATION COMMAND — ERR-trap body. Everything it needs about the

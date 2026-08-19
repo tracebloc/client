@@ -8,10 +8,32 @@
 #  straight to the `tracebloc` home screen (exit 0) instead of re-running every
 #  step — while a fresh or half-set-up machine still runs the normal flow.
 #
-#  STRICTLY NON-MUTATING. It must never start the cluster, run helm, mint a
-#  credential, or write anything. Every probe is read-only (`k3d cluster list`,
-#  `helm list`/`get values`, `kubectl get`) and BOUNDED (short timeouts) so it
-#  can't hang, and it is NEVER fatal. On ANY probe failure or uncertainty it
+#  NON-MUTATING, with exactly ONE narrow exception named below. It must never
+#  start the cluster, run helm, mint a credential, or write anything. Every
+#  probe is read-only (`k3d cluster list`, `helm list`/`get values`,
+#  `kubectl get`) and BOUNDED (short timeouts) so it can't hang, and it is
+#  NEVER fatal.
+#
+#  THE EXCEPTION — one unprivileged, idempotent runtime nudge (#741). On macOS,
+#  `runtime-down` may `open -a Docker` and wait up to 60s for the daemon. It is
+#  carved out this narrowly on purpose, and the boundary is the point:
+#
+#    * unprivileged — a GUI app launch as the current user, no sudo, nothing a
+#      reader could mistake for the privileged install path;
+#    * idempotent — launching a running Docker Desktop is a no-op, so a re-run
+#      cannot compound;
+#    * bounded — a wall-clock deadline, and every liveness probe on that path
+#      goes through `_docker_answers`, so a wedged daemon cannot hang assess;
+#    * load-bearing — without it a stopped-but-installed Docker classifies
+#      Tier 2 and demands an administrator password to start a runtime that is
+#      already installed. Tier 0 was unreachable for exactly the machines it
+#      was written for.
+#
+#  It does NOT lift the ban. `cluster-stopped` still only PRINTS — starting a
+#  stopped k3d cluster is the mutation this header exists to forbid, and
+#  `_assess_cluster_servers_running` explains why `_handle_existing_cluster` is
+#  off-limits here. If you are adding a second exception, that is the moment to
+#  question whether this file is still the right place for it. On ANY probe failure or uncertainty it
 #  degrades toward "run the normal flow" — never toward a false "healthy". A
 #  false healthy that skips a needed install is the worst possible outcome, so
 #  "healthy" must be CERTAIN: cluster running AND a tracebloc release present AND
