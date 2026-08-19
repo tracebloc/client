@@ -4320,6 +4320,12 @@ function Test-ApiReachable {
 # rename can't leave this installer politely waiting on a name nobody uses.
 $script:MetricsApiServiceName = "v1beta1.metrics.k8s.io"
 
+# Stamped from scripts/spec/facts.env by scripts/check-facts.sh -- do not hand-edit.
+# bash waits for the same APIService behind the same TB_METRICS_WAIT_S knob (#553), so
+# the two defaults are ONE fact: a value raised here and not there would make one
+# documented knob mean two different things. CI gates the pair (#435).
+$script:MetricsWaitTimeout = 120
+
 # Get-MetricsWaitSeconds -- the metrics-wait budget, parsed in exactly one place
 # so the poll loop and anything else that bounds it cannot disagree.
 #
@@ -4328,14 +4334,15 @@ $script:MetricsApiServiceName = "v1beta1.metrics.k8s.io"
 # instruction -- "set TB_METRICS_WAIT_S=300 and re-run" -- has to work on either
 # host. It keeps the local knob shape (a TB_-prefixed, unit-suffixed integer
 # validated with the same `-match '^\d+$'` idiom as TB_CREATE_TIMEOUT_MIN) but in
-# seconds, because the budget is 120s and minutes cannot express it.
+# seconds, because the budget is 120s and minutes cannot express it. The default
+# is the facts.env fact above, not a second copy of the number.
 #
 # Anything that is not a plain non-negative integer -- empty, "abc", "-5", "12.5"
 # -- falls back to the default rather than silently becoming 0 and disabling the
 # wait. The digit cap is not cosmetic: `[int]` on a 20-digit string THROWS, and a
 # typo'd knob must not take the install down.
 function Get-MetricsWaitSeconds {
-  param([string]$Value = $env:TB_METRICS_WAIT_S, [int]$Default = 120)
+  param([string]$Value = $env:TB_METRICS_WAIT_S, [int]$Default = $script:MetricsWaitTimeout)
   if ("$Value" -match '^\d{1,6}$') { return [int]$Value }
   return $Default
 }

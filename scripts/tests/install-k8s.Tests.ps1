@@ -5363,9 +5363,23 @@ Describe "Wait-MetricsApiService (client#553 -- the Windows installer had no wai
     # interesting values are the ones a human types by mistake, and every one of
     # them must land on the default rather than on 0 (which would silently
     # disable the wait) or on an exception.
-    It "an unset/empty knob is the 120s default" {
-      Get-MetricsWaitSeconds -Value ""    | Should -Be 120
-      Get-MetricsWaitSeconds -Value $null | Should -Be 120
+    #
+    # Rule 1: the expected default is PARSED from scripts/spec/facts.env, never
+    # restated here. Both installers advertise the same TB_METRICS_WAIT_S knob, so
+    # the budget is one cross-OS fact; a test carrying its own copy of 120 would
+    # agree with itself while the two installers waited different lengths.
+    BeforeAll {
+      $spec = Get-Content "$PSScriptRoot/../spec/facts.env" -Raw
+      $m = [regex]::Match($spec, '(?m)^METRICS_WAIT_TIMEOUT=(?<v>\d+)\s*$')
+      $m.Success | Should -BeTrue -Because "facts.env must declare the shared wait budget"
+      $script:SpecWait = [int]$m.Groups['v'].Value
+    }
+    It "the stamped PowerShell default IS the facts.env fact" {
+      $script:MetricsWaitTimeout | Should -Be $script:SpecWait
+    }
+    It "an unset/empty knob is the declared default" {
+      Get-MetricsWaitSeconds -Value ""    | Should -Be $script:SpecWait
+      Get-MetricsWaitSeconds -Value $null | Should -Be $script:SpecWait
     }
     It "a plain integer is honoured, including 0 (= disable) and a leading-zero form" {
       Get-MetricsWaitSeconds -Value "45"  | Should -Be 45
@@ -5375,14 +5389,14 @@ Describe "Wait-MetricsApiService (client#553 -- the Windows installer had no wai
     It "garbage falls back to the default instead of becoming 0" {
       foreach ($v in "abc", "-5", "12.5", "12s", " 30", "30 ", "1e3", "0x10") {
         Get-MetricsWaitSeconds -Value $v |
-          Should -Be 120 -Because "'$v' is not a wait budget, and reading it as 0 would silently switch the wait off"
+          Should -Be $script:SpecWait -Because "'$v' is not a wait budget, and reading it as 0 would silently switch the wait off"
       }
     }
     It "an absurdly long digit string falls back instead of throwing on the [int] cast" {
       # `[int]"99999999999999999999"` is an OverflowException. A typo'd knob must
       # not be able to take the install down before helm even runs.
       { Get-MetricsWaitSeconds -Value ("9" * 20) } | Should -Not -Throw
-      Get-MetricsWaitSeconds -Value ("9" * 20)     | Should -Be 120
+      Get-MetricsWaitSeconds -Value ("9" * 20)     | Should -Be $script:SpecWait
     }
     It "reads TB_METRICS_WAIT_S -- the same knob name the bash installer reads" {
       $env:TB_METRICS_WAIT_S = "77"
@@ -5581,6 +5595,19 @@ Describe "Wait-MetricsApiService (client#553 -- the Windows installer had no wai
     It "both installers read the same knob name, so one support instruction fits both" {
       $script:BashSrc | Should -Match 'TB_METRICS_WAIT_S'
       $script:PsSrc   | Should -Match 'TB_METRICS_WAIT_S'
+    }
+    It "and neither installer keeps its own copy of the default -- both take the facts.env fact" {
+      # Bugbot on #757: one advertised knob whose default could differ per OS. The
+      # budget now lives in scripts/spec/facts.env and is stamped by check-facts.sh,
+      # so this asserts the INDIRECTION, not the number.
+      $script:BashSrc | Should -Match '(?m)^METRICS_WAIT_TIMEOUT=\d+$'
+      $script:PsSrc   | Should -Match '\$script:MetricsWaitTimeout = \d+'
+      # No literal fallback left in either poll path.
+      $fn = [regex]::Match($script:BashSrc, '(?s)_wait_for_metrics_apiservice\(\)\s*\{.*?\n\}').Value
+      $fn | Should -Match '\$METRICS_WAIT_TIMEOUT'
+      $psFn = [regex]::Match($script:PsSrc, '(?s)function Get-MetricsWaitSeconds\s*\{.*?\n\}').Value
+      $psFn | Should -Match '\$script:MetricsWaitTimeout'
+      $psFn | Should -Not -Match '\$Default = \d'
     }
   }
 }
