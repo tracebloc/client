@@ -20,14 +20,35 @@ CHART=""
 VALUES=""
 NS="tracebloc"
 
+# A missing tool is a SKIP on a laptop and a FAILURE in CI.
+#
+# The first version of this file skipped unconditionally, and the only job that
+# runs `scripts/tests/*.bats` — the required `Unit tests` job — had no helm. So
+# all fourteen cases were silent skips: a wrong IMAGE_PULL_SECRET_NAME or Secret
+# name would have shipped green past tests written to catch exactly that (Bugbot
+# on client#751). In a required gate a skip is indistinguishable from a pass,
+# which is the whole inert-verification class this repo keeps finding.
+#
+# `CI` is set to `true` by GitHub Actions on every runner.
+require_tool() {
+  command -v "$1" >/dev/null && return 0
+  if [ "${CI:-}" = "true" ]; then
+    echo "::error::$1 is missing in CI, so these chart-render assertions would" >&2
+    echo "::error::be skipped rather than run. Install it in the job (see" >&2
+    echo "::error::standard-checks.yml 'Set up Helm') instead of accepting a green skip." >&2
+    return 1
+  fi
+  skip "$1 not installed (local run)"
+}
+
 setup() {
   # Set here rather than in setup_file: exports from setup_file do not reach the
   # test body in every bats version, and an empty $CHART makes helm fail with
   # "non-absolute URLs" — eleven confusing reds instead of one clear skip.
   CHART="${BATS_TEST_DIRNAME}/../../client"
   VALUES="${CHART}/ci/bm-values.yaml"
-  command -v helm >/dev/null || skip "helm not installed"
-  command -v python3 >/dev/null || skip "python3 not installed"
+  require_tool helm || return 1
+  require_tool python3 || return 1
   [ -d "$CHART" ] || {
     echo "chart directory not found at $CHART" >&2
     return 1
@@ -179,6 +200,16 @@ created() {
   # --skip-schema-validation exists, so the schema is a declaration and not a
   # gate. The template refusal is the gate, and it says which two values
   # collide rather than failing somewhere downstream on a name.
+  #
+  # The flag landed in helm 3.16 and CI pins v3.15.4, so this case self-skips
+  # there — the same treatment and the same reason as the helper-backstop cases
+  # in chart-env-vocabulary.sh. It runs for anyone local on 3.16+, and bumping
+  # the CI pin turns it on with no change here. The SCHEMA half of this pair
+  # (the test above) runs on every version, so the contradiction is never
+  # unguarded; this case only proves the second layer.
+  helm template --help 2>&1 | grep -q -- "--skip-schema-validation" || {
+    skip "helm $(helm version --short 2>/dev/null) predates --skip-schema-validation (3.16)"
+  }
   run helm template myrel "$CHART" -f "$VALUES" --namespace "$NS" \
     --skip-schema-validation \
     --set dockerRegistry.create=true \
