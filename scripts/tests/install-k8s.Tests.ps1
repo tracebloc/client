@@ -5347,3 +5347,240 @@ Describe "hostPath prep needs positive proof, not just absence of failure (#654 
     $list.Count | Should -Be 2
   }
 }
+
+Describe "Wait-MetricsApiService (client#553 -- the Windows installer had no wait)" {
+  # k3s applies its bundled metrics-server AFTER the API server is ready, and
+  # `k3d cluster create --wait` does not gate on it. The resource-monitor template
+  # `fail`s at RENDER time when v1beta1.metrics.k8s.io is missing, which aborts the
+  # whole release -- so helm must not render inside that window. bash has waited
+  # since #553; this file's installer went straight from create to helm install,
+  # on the slowest host we support.
+  BeforeEach { Mock Log {} }
+  AfterEach  { $env:TB_METRICS_WAIT_S = $null }
+
+  Context "Get-MetricsWaitSeconds -- the whole input domain, not a sample" {
+    # Rule 6: derive the domain from what an env var can actually hold. The
+    # interesting values are the ones a human types by mistake, and every one of
+    # them must land on the default rather than on 0 (which would silently
+    # disable the wait) or on an exception.
+    It "an unset/empty knob is the 120s default" {
+      Get-MetricsWaitSeconds -Value ""    | Should -Be 120
+      Get-MetricsWaitSeconds -Value $null | Should -Be 120
+    }
+    It "a plain integer is honoured, including 0 (= disable) and a leading-zero form" {
+      Get-MetricsWaitSeconds -Value "45"  | Should -Be 45
+      Get-MetricsWaitSeconds -Value "0"   | Should -Be 0
+      Get-MetricsWaitSeconds -Value "007" | Should -Be 7
+    }
+    It "garbage falls back to the default instead of becoming 0" {
+      foreach ($v in "abc", "-5", "12.5", "12s", " 30", "30 ", "1e3", "0x10") {
+        Get-MetricsWaitSeconds -Value $v |
+          Should -Be 120 -Because "'$v' is not a wait budget, and reading it as 0 would silently switch the wait off"
+      }
+    }
+    It "an absurdly long digit string falls back instead of throwing on the [int] cast" {
+      # `[int]"99999999999999999999"` is an OverflowException. A typo'd knob must
+      # not be able to take the install down before helm even runs.
+      { Get-MetricsWaitSeconds -Value ("9" * 20) } | Should -Not -Throw
+      Get-MetricsWaitSeconds -Value ("9" * 20)     | Should -Be 120
+    }
+    It "reads TB_METRICS_WAIT_S -- the same knob name the bash installer reads" {
+      $env:TB_METRICS_WAIT_S = "77"
+      Get-MetricsWaitSeconds | Should -Be 77
+    }
+  }
+
+  Context "the poll loop" {
+    It "returns as soon as the APIService is registered, and asks for the right one" {
+      Mock kubectl { $global:LASTEXITCODE = 0 }
+      Wait-MetricsApiService -TimeoutSec 30 -IntervalSec 0 | Should -BeTrue
+      Should -Invoke kubectl -ParameterFilter {
+        ($args -contains "apiservice") -and ($args -contains "v1beta1.metrics.k8s.io")
+      }
+    }
+
+    It "keeps polling across the registration window instead of giving up on the first miss" {
+      # THE BUG THIS PORTS AWAY: one probe at t=0 is exactly what `--wait` already
+      # gave us, and it is what loses the race on a slow WSL2 box.
+      $script:probes = 0
+      Mock kubectl {
+        if ($args -contains "apiservice") {
+          $script:probes++
+          $global:LASTEXITCODE = $(if ($script:probes -ge 3) { 0 } else { 1 })
+          return
+        }
+        $global:LASTEXITCODE = 0
+      }
+      Wait-MetricsApiService -TimeoutSec 30 -IntervalSec 0 | Should -BeTrue
+      $script:probes | Should -Be 3
+    }
+
+    It "the post-registration Available wait is best-effort -- failing it changes nothing" {
+      # The template needs the APIService to EXIST at render time; Available is a
+      # nicety. A non-zero `kubectl wait` must not turn a won race into a lost one.
+      Mock kubectl {
+        if ($args -contains "wait") { $global:LASTEXITCODE = 1; return }
+        $global:LASTEXITCODE = 0
+      }
+      Wait-MetricsApiService -TimeoutSec 30 -IntervalSec 0 | Should -BeTrue
+      Should -Invoke kubectl -ParameterFilter { $args -contains "wait" }
+    }
+
+    It "says nothing on the fast path -- an already-registered API must not add a line" {
+      Mock kubectl { $global:LASTEXITCODE = 0 }
+      Mock Info {}
+      Wait-MetricsApiService -TimeoutSec 30 -IntervalSec 0 | Should -BeTrue
+      Should -Invoke Info -Times 0
+    }
+
+    It "announces the wait ONCE when it actually has to wait (RFC-0002 §2, not once per poll)" {
+      # bash runs the equivalent loop behind spin_cmd_bounded. Silence here would
+      # be a two-minute frozen terminal on exactly the host this exists for; a
+      # line per poll would be 40 of them.
+      $script:n = 0
+      Mock kubectl {
+        if ($args -contains "apiservice") {
+          $script:n++
+          $global:LASTEXITCODE = $(if ($script:n -ge 4) { 0 } else { 1 })
+          return
+        }
+        $global:LASTEXITCODE = 0
+      }
+      Mock Info {}
+      Wait-MetricsApiService -TimeoutSec 30 -IntervalSec 0 | Should -BeTrue
+      $script:n | Should -BeGreaterThan 1 -Because "the announcement only means anything if we really polled"
+      Should -Invoke Info -Times 1 -Exactly
+    }
+
+    It "falls through NON-FATALLY when it never registers, so the chart's guard still speaks" {
+      # The issue's preferred option (a): a genuinely absent metrics-server must
+      # reach `{{ fail }}` and get its actionable message, not die here.
+      Mock kubectl { $global:LASTEXITCODE = 1 }
+      Mock Err { throw "the metrics wait must never abort the install" }
+      $result = $null
+      { $result = Wait-MetricsApiService -TimeoutSec 1 -IntervalSec 1 } | Should -Not -Throw
+      $result | Should -BeFalse
+      Should -Invoke Err -Times 0
+    }
+
+    It "is actually bounded -- a never-registering APIService returns near the deadline" {
+      # Guards the bound itself: an unbounded loop passes every assertion above.
+      Mock kubectl { $global:LASTEXITCODE = 1 }
+      $sw = [System.Diagnostics.Stopwatch]::StartNew()
+      Wait-MetricsApiService -TimeoutSec 2 -IntervalSec 1 | Should -BeFalse
+      $sw.Stop()
+      $sw.Elapsed.TotalSeconds | Should -BeLessThan 20
+    }
+
+    It "a 0 budget disables the wait outright -- no probe, no stall" {
+      Mock kubectl { $global:LASTEXITCODE = 0 }
+      $env:TB_METRICS_WAIT_S = "0"
+      Wait-MetricsApiService | Should -BeFalse
+      Should -Invoke kubectl -Times 0
+    }
+
+    It "no kubectl on PATH -> says so and returns, rather than polling an exception to the deadline" {
+      # A missing native command THROWS; it does not set $LASTEXITCODE.
+      Mock Has { $false } -ParameterFilter { $cmd -eq "kubectl" }
+      Mock kubectl { throw "must not be called when kubectl is absent" }
+      Wait-MetricsApiService -TimeoutSec 30 -IntervalSec 0 | Should -BeFalse
+      Should -Invoke kubectl -Times 0
+    }
+  }
+
+  Context "wired into Install-ClientHelm, on both helm paths" {
+    BeforeEach {
+      $GPU_VENDOR = "none"; $NVIDIA_DRIVER_OK = $false; $env:CLIENT_ENV = $null
+      Mock helm { $global:LASTEXITCODE = 0 }
+      Mock Test-Credentials { "valid" }
+      Mock Read-Host { throw "no prompts on the minted path" }
+      # Ensure-ReleaseDirs reads $script:HOST_DATA_DIR explicitly, so set the
+      # script-scoped one rather than inheriting whatever an earlier Describe
+      # happened to leave behind -- these tests must pass when run alone too.
+      $script:PrevHostDataDir = $script:HOST_DATA_DIR
+    }
+    AfterEach {
+      $script:TB_PROV_MODE = $null; $script:TB_PROV_ID = $null
+      $script:TB_PROV_NS = $null; $script:TB_PROV_PASSWORD = $null
+      $script:HOST_DATA_DIR = $script:PrevHostDataDir
+    }
+
+    It "waits BEFORE helm renders the chart, not after" {
+      $script:seq = @()
+      Mock Wait-MetricsApiService { $script:seq += "wait"; $true }
+      Mock helm {
+        if ($args -contains "upgrade") { $script:seq += "helm-upgrade" }
+        $global:LASTEXITCODE = 0
+      }
+      $HOST_DATA_DIR = "$TestDrive/d-metrics-order"; $script:HOST_DATA_DIR = $HOST_DATA_DIR
+      $script:TB_PROV_MODE = "minted"; $script:TB_PROV_ID = "uuid-m1"
+      $script:TB_PROV_PASSWORD = "pw"; $script:TB_PROV_NS = "ns-m1"
+      Install-ClientHelm
+      $script:seq | Should -Contain "helm-upgrade"
+      $script:seq.IndexOf("wait") | Should -BeGreaterOrEqual 0
+      $script:seq.IndexOf("wait") |
+        Should -BeLessThan $script:seq.IndexOf("helm-upgrade") -Because "rendering first is the whole failure mode (#553)"
+    }
+
+    It "waits on the adopted-reuse path too -- that reconcile re-renders the chart" {
+      Mock Wait-MetricsApiService { $true }
+      Mock Get-InstalledClientInfo {
+        [pscustomobject]@{ Id = "uuid-a1"; Ns = "ns-a1"; Name = "rel-a1"; UnreadableNs = ""; ListUnknown = $false }
+      }
+      $HOST_DATA_DIR = "$TestDrive/d-metrics-adopt"; $script:HOST_DATA_DIR = $HOST_DATA_DIR
+      $script:TB_PROV_MODE = "adopted"; $script:TB_PROV_ID = "uuid-a1"
+      $script:TB_PROV_NS = "ns-a1"
+      Install-ClientHelm
+      Should -Invoke Wait-MetricsApiService -Times 1
+      Should -Invoke helm -ParameterFilter { $args -contains "upgrade" }
+    }
+
+    It "a wait that runs out does NOT abort the install -- helm still runs" {
+      Mock Wait-MetricsApiService { $false }
+      $HOST_DATA_DIR = "$TestDrive/d-metrics-timeout"; $script:HOST_DATA_DIR = $HOST_DATA_DIR
+      $script:TB_PROV_MODE = "minted"; $script:TB_PROV_ID = "uuid-m2"
+      $script:TB_PROV_PASSWORD = "pw"; $script:TB_PROV_NS = "ns-m2"
+      { Install-ClientHelm } | Should -Not -Throw
+      Should -Invoke helm -ParameterFilter { $args -contains "upgrade" }
+    }
+  }
+
+  Context "the APIService name is derived from the chart, not restated here" {
+    # Rule 1: the template is the authority for what has to be registered. If the
+    # chart ever looks up a different APIService, an installer still waiting on the
+    # old name is a wait that cannot succeed -- and it would look identical to a
+    # slow cluster. Parse the real `lookup`, compare against both installers.
+    BeforeAll {
+      $script:TplPath  = "$PSScriptRoot/../../client/templates/resource-monitor-daemonset.yaml"
+      $script:PsSrc    = Get-Content "$PSScriptRoot/../install-k8s.ps1" -Raw
+      $script:BashSrc  = Get-Content "$PSScriptRoot/../lib/install-client-helm.sh" -Raw
+    }
+    It "the template really does lookup + fail on an APIService (else this whole wait is pointless)" {
+      # Fail closed: an unreadable/renamed template is a finding, not a pass.
+      Test-Path $script:TplPath | Should -BeTrue
+      $tpl = Get-Content $script:TplPath -Raw
+      $m = [regex]::Match($tpl, 'lookup\s+"apiregistration\.k8s\.io/v1"\s+"APIService"\s+""\s+"(?<n>[^"]+)"')
+      $m.Success | Should -BeTrue -Because "the render-time guard is the reason the installers wait at all"
+      $tpl | Should -Match '\{\{-?\s*fail '
+      $script:ApiSvc = $m.Groups['n'].Value
+      $script:ApiSvc | Should -Not -BeNullOrEmpty
+    }
+    It "the Windows installer waits on exactly that name" {
+      $tpl = Get-Content $script:TplPath -Raw
+      $name = [regex]::Match($tpl, 'lookup\s+"apiregistration\.k8s\.io/v1"\s+"APIService"\s+""\s+"(?<n>[^"]+)"').Groups['n'].Value
+      $script:MetricsApiServiceName | Should -Be $name
+      $script:PsSrc | Should -Match ([regex]::Escape($name))
+    }
+    It "bash still waits too, and still best-effort -- if it stops, revisit this port" {
+      $fn = [regex]::Match($script:BashSrc, '(?s)_wait_for_metrics_apiservice\(\)\s*\{.*?\n\}').Value
+      $fn | Should -Not -BeNullOrEmpty
+      $fn | Should -Match 'v1beta1\.metrics\.k8s\.io'
+      $fn | Should -Match 'TB_METRICS_WAIT_S'
+      $fn | Should -Not -Match '(?m)^\s*error '
+    }
+    It "both installers read the same knob name, so one support instruction fits both" {
+      $script:BashSrc | Should -Match 'TB_METRICS_WAIT_S'
+      $script:PsSrc   | Should -Match 'TB_METRICS_WAIT_S'
+    }
+  }
+}
