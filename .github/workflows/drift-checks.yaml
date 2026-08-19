@@ -59,3 +59,14 @@ jobs:
       # helm-ci's `paths:` filter would have skipped entirely.
       - name: CLIENT_ENV vocabulary agreement (backend#1729)
         run: bash scripts/tests/env-vocabulary-agreement.sh
+      # The installer's telemetry vocabularies (backend#1907): four closed sets
+      # whose values are produced elsewhere -- the phases by install-k8s.sh's
+      # step_header calls, the client states by summary.sh, the script names by
+      # gen-manifest.sh's FILES array, the error classes by telemetry.sh's own
+      # classifier. A closed set that has drifted from its producer does not fail
+      # loudly; it reports `unknown` forever, on exactly the runs somebody added
+      # the new value for. It lives HERE for the same reason the CLIENT_ENV guard
+      # does: `Source-of-truth drift` is required, so this can block rather than
+      # advise. bash only, ~1s.
+      - name: Telemetry vocabulary agreement (backend#1907)
+        run: bash scripts/tests/telemetry-vocabulary-agreement.sh

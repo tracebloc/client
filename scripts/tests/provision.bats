@@ -126,6 +126,109 @@ _stub_tracebloc() {
   [[ "$output" == *"Sign-in didn't complete"* ]] || return 1
 }
 
+# ── cli#517: a missed code costs one prompt, not a whole installer run ────────
+#
+# The retry loop is driven through _run_device_login (the seam that owns the
+# /dev/tty redirection): stubbing it lets these tests decide success or failure
+# per attempt without needing a real controlling terminal, which CI has not got.
+# The seam's OWN behaviour — which env it hands the CLI — is pinned separately
+# below, on the non-tty branch, so it behaves the same in CI and on a laptop.
+
+# _stub_sign_in_failing: a _run_device_login stub that records every attempt in
+# ATTEMPTS_FILE and fails the first $1 of them (0 = succeed immediately). The
+# count lives in a GLOBAL, not a local of this function: the stub runs long after
+# this returns, so a local would be out of scope by then and read as empty.
+_stub_sign_in_failing() {
+  SIGN_IN_FAIL_FIRST="$1"
+  ATTEMPTS_FILE="$(mktemp)"
+  _run_device_login() {
+    printf 'x\n' >>"$ATTEMPTS_FILE"
+    [[ "$(grep -c . "$ATTEMPTS_FILE")" -le "$SIGN_IN_FAIL_FIRST" ]] && return 1
+    return 0
+  }
+}
+
+_attempts() { grep -c . "$ATTEMPTS_FILE" 2>/dev/null || echo 0; }
+
+@test "_device_sign_in: a lapsed code is retried in place, not fatal" {
+  # THE cli#517 fix: before it, one missed ten-minute code threw away every step
+  # the installer had already completed. It must cost a single Enter instead.
+  _prompt_tty() { return 0; }              # a live terminal is available
+  TB_TTY="$(mktemp)"; printf '\n' >"$TB_TTY"   # the human presses Enter
+  _stub_sign_in_failing 1
+  run _device_sign_in
+  [ "$status" -eq 0 ] || return 1
+  [ "$(_attempts)" -eq 2 ] || return 1
+  # The "Press Enter" line goes to /dev/tty (like every prompt here), so it is
+  # not in $output; the warn/hint that explain the pause do go through the log.
+  [[ "$output" == *"the code lapsed or wasn't approved"* ]] || return 1
+  [[ "$output" == *"Nothing is lost"* ]] || return 1
+}
+
+@test "_device_sign_in: a second failure is fatal, and names the installer" {
+  # The retry is ONE retry. A second failure is evidence of something other than
+  # a missed code, and the advice must be the installer — not `tracebloc login`,
+  # which would leave the client mint and the Helm install undone.
+  _prompt_tty() { return 0; }
+  TB_TTY="$(mktemp)"; printf '\n\n\n' >"$TB_TTY"
+  _stub_sign_in_failing 99
+  run _device_sign_in
+  [ "$status" -ne 0 ] || return 1
+  [ "$(_attempts)" -eq 2 ] || return 1
+  [[ "$output" == *"re-run the installer"* ]] || return 1
+  [[ "$output" != *"tracebloc login"* ]] || return 1
+  # Offered ONCE. The attempt count alone can't see a guard that lets the loop
+  # prompt after its final try — the user would be asked to press Enter for a
+  # code that is never fetched — so count the offer, not just the attempts.
+  [ "$(printf '%s\n' "$output" | grep -c 'Nothing is lost')" -eq 1 ] || return 1
+}
+
+@test "_device_sign_in: with no terminal there is no retry to offer" {
+  # Nobody to hand a fresh code to — re-prompting would just hang or spin.
+  # TB_TTY is deliberately READABLE here: with a dead one, dropping the
+  # _prompt_tty gate would stop on the failed read instead and the assertion
+  # below could not tell the gate from the EOF (the mutation ran green that way).
+  _prompt_tty() { return 1; }
+  TB_TTY="$(mktemp)"; printf '\n\n\n' >"$TB_TTY"
+  _stub_sign_in_failing 99
+  run _device_sign_in
+  [ "$status" -ne 0 ] || return 1
+  [ "$(_attempts)" -eq 1 ] || return 1
+  [[ "$output" != *"Nothing is lost"* ]] || return 1
+}
+
+@test "_device_sign_in: an EOF on the retry prompt stops, it does not spin" {
+  # A failed read (rc != 0 — EOF, a non-PTY ssh session, a closed pipe) can't be
+  # fixed by asking again; the loop must fall straight through to the error.
+  _prompt_tty() { return 0; }
+  TB_TTY=/dev/null                          # read returns EOF immediately
+  _stub_sign_in_failing 99
+  run _device_sign_in
+  [ "$status" -ne 0 ] || return 1
+  [ "$(_attempts)" -eq 1 ] || return 1
+  [[ "$output" == *"re-run the installer"* ]] || return 1
+}
+
+@test "_run_device_login: the CLI is told the installer is driving it" {
+  # TRACEBLOC_INSTALLER is what stops the CLI printing "run \`tracebloc login\`"
+  # — advice that is right for a hand-typed login and wrong under the installer.
+  # Pinned on the no-tty branch so it reads the same in CI and on a laptop.
+  _login_tty_ok() { return 1; }
+  local seen="$BATS_TEST_TMPDIR/env"
+  tracebloc() { printf '%s|%s\n' "${TRACEBLOC_INSTALLER:-unset}" "$*" >"$seen"; return 0; }
+  _run_device_login
+  [[ "$(cat "$seen")" == "1|login" ]] || return 1
+}
+
+@test "_run_device_login: TRACEBLOC_INSTALLER does not leak past the sign-in" {
+  # Set as a command prefix, not exported for the rest of the install: `client
+  # create` and every later CLI call must see the environment they always did.
+  _login_tty_ok() { return 1; }
+  tracebloc() { return 0; }
+  _run_device_login
+  [ -z "${TRACEBLOC_INSTALLER:-}" ] || return 1
+}
+
 @test "provision_client: client create writing no credential file is fatal" {
   tracebloc() { return 0; }              # login OK, create "succeeds" but writes nothing
   run provision_client

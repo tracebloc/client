@@ -9,7 +9,8 @@
 #
 #  Escape hatches:
 #    TRACEBLOC_SKIP_PREFLIGHT=1   skip all checks
-#    TRACEBLOC_ALLOW_ARM64=1      proceed on arm64 despite amd64-only images
+#    TRACEBLOC_ALLOW_ARM64=1      proceed on arm64 without checking whether the
+#                                 engine this install gets is the amd64-only one
 #    TRACEBLOC_ALLOW_NETWORK_FS=1 proceed when HOST_DATA_DIR is on NFS/CIFS/SMB (DB may corrupt)
 #    PF_MIN_MEM_GB / PF_MIN_CPU / PF_MIN_DISK_GB   lower the hard floors (CI / odd sites)
 #
@@ -356,17 +357,59 @@ _pf_backend_host() {
 
 # ── Checks (each ALWAYS returns 0; hard failures go into PF_HARD_FAILS) ───────
 
-# True if the host can run amd64 binaries via QEMU binfmt (wrapped for testing).
-_pf_amd64_emulation_available() { [[ -e /proc/sys/fs/binfmt_misc/qemu-x86_64 ]]; }
+# Ask install-client-helm.sh's engine rule which MySQL engine THIS host will get,
+# echoing its "<engine> <reason>" verdict (backend#2047). The one amd64-only image
+# left is mysql-client 5.7, so "will this host need emulation at all?" is a
+# question only that rule can answer — and the arch gate below used to answer it
+# itself, refusing fresh arm64 hosts the installer was about to serve natively on
+# the multi-arch 8.4 engine.
+#
+# Two of the rule's inputs are `local`s of install_client_helm, which has not run
+# yet: values_file (the sticky 8.4 opt-in) and TB_NAMESPACE (the per-release
+# datadir path). Both are derived from that lib's own helpers, never restated
+# here. `existing_id` genuinely cannot be known this early — helm hasn't been
+# consulted — so an existing release can still read as fresh here; that residual
+# case is caught by _assert_engine_runs_on_this_arch, which re-asks the same
+# question once the engine is resolved for real.
+#
+# Fails CLOSED: if the engine rule isn't loaded we report 5.7, i.e. "no native
+# path", and the refusal below stands. That is the honest answer rather than a
+# guess — the 8.4 opt-in lives in the very lib that is missing, so a host without
+# it cannot get the native engine either.
+_pf_mysql_engine_decision() {
+  if ! declare -F _mysql_engine_decision >/dev/null 2>&1; then
+    echo "5.7 no-engine-rule"; return 0
+  fi
+  # Both are read by _mysql_engine_decision through bash dynamic scope, which is
+  # what SC2034 can't see (the documented false positive for scripts/lib/*.sh).
+  # shellcheck disable=SC2034
+  local values_file="" TB_NAMESPACE="${TB_NAMESPACE:-}"
+  if declare -F _client_values_file >/dev/null 2>&1; then
+    values_file="$(_client_values_file)"
+  fi
+  # UNCONDITIONALLY, exactly as install_client_helm does — not "only when unset".
+  # That helper also SANITISES (DNS-1123), so an operator-supplied
+  # TB_NAMESPACE="My Edge" becomes "my-edge" there. Gating this on emptiness left
+  # the raw value here, and the two gates then probed different per-release
+  # datadirs ("…/My Edge/mysql" vs "…/my-edge/mysql"): preflight would report a
+  # native 8.4 pass and the late gate would refuse after cluster setup and
+  # credential entry. Same rule, same inputs, or it is not the same question
+  # (Bugbot, this PR).
+  if declare -F _client_default_namespace >/dev/null 2>&1; then
+    TB_NAMESPACE="$(_client_default_namespace)"
+  fi
+  _mysql_engine_decision
+}
 
 _pf_arch() {
   case "$ARCH" in
     x86_64|amd64) _pf_ok "Architecture: ${ARCH} (amd64)"; return 0 ;;
   esac
-  # Non-amd64 (arm64/aarch64): the tracebloc client images (e.g. mysql-client)
-  # are amd64-only, so they need emulation to run.
+  # Non-amd64 (arm64/aarch64): the one remaining amd64-only image is the MySQL
+  # 5.7 client, so whether this host needs emulation depends entirely on which
+  # engine it gets — see _pf_mysql_engine_decision.
   if [[ -n "${TRACEBLOC_ALLOW_ARM64:-}" ]]; then
-    warn "Architecture: ${ARCH} — proceeding (TRACEBLOC_ALLOW_ARM64 set); amd64-only images may crash if emulation is unavailable."
+    warn "Architecture: ${ARCH} — proceeding (TRACEBLOC_ALLOW_ARM64 set); if this install keeps the amd64-only MySQL 5.7 engine it may crash without emulation."
     return 0
   fi
   if [[ "$OS" != "Linux" ]]; then
@@ -376,14 +419,57 @@ _pf_arch() {
     _pf_note "Architecture: ${ARCH} — the amd64 client images run under emulation; Docker's \"Use Rosetta for x86_64/amd64 emulation\" must be enabled (verified once Docker is running)."
     return 0
   fi
-  if _pf_amd64_emulation_available; then
+  if amd64_emulation_available; then
     _pf_note "Architecture: ${ARCH} — amd64 emulation (QEMU binfmt) available; client images run emulated (slower)."
     return 0
   fi
-  _pf_fail_line "Architecture: ${ARCH} — the tracebloc client images (e.g. mysql-client) are amd64-only and can't run here."
+  # No emulation. Before refusing, ask the engine rule whether emulation is even
+  # needed here: on a fresh install this host gets the multi-arch 8.4 engine and
+  # runs NATIVELY, which is why the old unconditional refusal was sending people
+  # to provision amd64 VMs they didn't need (backend#2047).
+  local _decision _engine _reason
+  _decision="$(_pf_mysql_engine_decision)"
+  _engine="${_decision%% *}"; _reason="${_decision#* }"
+  if [[ "$_engine" == "8.4" ]]; then
+    _pf_note "Architecture: ${ARCH} — running natively on the multi-arch MySQL 8.4 engine (no amd64 emulation needed)."
+    return 0
+  fi
   PF_HARD_FAIL=$(( ${PF_HARD_FAIL:-0} + 1 ))
-  hint "Fix: provision an amd64 (x86_64) VM, or enable emulation and re-run:"
-  hint "  docker run --privileged --rm tonistiigi/binfmt --install amd64"
+  # An unusable TB_MYSQL_ENGINE arrives as engine="invalid", reason=<the value> —
+  # so it is checked on the ENGINE field, not inside the reason case below.
+  # "Cannot tell" is a finding, not a pass: the engine, and therefore whether this
+  # host can run it, is undecidable.
+  if [[ "$_engine" == "invalid" ]]; then
+    _pf_fail_line "TB_MYSQL_ENGINE='${_reason}' is not 'auto', '5.7' or '8.4', so the MySQL engine for this ${ARCH} host can't be determined."
+    hint "Fix: set TB_MYSQL_ENGINE=auto (or 8.4 for the native multi-arch engine) and re-run."
+    # No TRACEBLOC_ALLOW_ARM64 hint here: it would only defer this failure to
+    # _resolve_mysql_engine, which refuses the value outright.
+    return 0
+  fi
+  case "$_reason" in
+    existing-datadir)
+      # Say WHY: the blocker is the datadir format, not this machine's CPU. An
+      # amd64 VM would not help — the data is here.
+      _pf_fail_line "Existing MySQL 5.7 data on this host pins the install to the MySQL 5.7 engine, and that image is amd64-only — it can't run on ${ARCH}."
+      hint "This is a data-format constraint, not an architecture one: MySQL 8.4 runs natively on ${ARCH}, but it cannot open a 5.7-format datadir (MySQL upgrades only in stages, 5.7 → 8.0 → 8.4)."
+      hint "Keep this data — enable amd64 emulation, then re-run:"
+      hint "  docker run --privileged --rm tonistiigi/binfmt --install amd64"
+      hint "Or start fresh on the native engine — install into an empty data directory:"
+      hint "  --data-dir=/path/to/new/empty/dir" ;;
+    explicit)
+      _pf_fail_line "TB_MYSQL_ENGINE=5.7 was requested, and the MySQL 5.7 image is amd64-only — it can't run on ${ARCH}."
+      hint "Drop TB_MYSQL_ENGINE (or set TB_MYSQL_ENGINE=8.4) to use the native multi-arch 8.4 engine — fresh data directories only."
+      hint "To keep 5.7, enable amd64 emulation and re-run:"
+      hint "  docker run --privileged --rm tonistiigi/binfmt --install amd64" ;;
+    *)
+      # Includes `amd64` (unreachable — this host is not amd64) and
+      # `no-engine-rule` (the fail-closed answer when the lib holding the rule
+      # isn't loaded). Generic, and still emulation-shaped: without the rule
+      # there is no 8.4 opt-in to reach.
+      _pf_fail_line "Architecture: ${ARCH} — this install needs the amd64-only MySQL 5.7 image and can't run here."
+      hint "Fix: enable amd64 emulation and re-run:"
+      hint "  docker run --privileged --rm tonistiigi/binfmt --install amd64" ;;
+  esac
   hint "  (or set TRACEBLOC_ALLOW_ARM64=1 to proceed anyway)"
   return 0
 }

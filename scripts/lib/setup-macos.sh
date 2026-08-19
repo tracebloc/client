@@ -333,7 +333,7 @@ install_docker_desktop() {
   _kill_lingering_docker
 
   # ── Make sure Docker Desktop is running ──────────────────────────────────
-  if ! docker info &>/dev/null 2>&1; then
+  if ! _docker_answers; then
     open -a Docker
 
     if [[ "$fresh_install" == true ]]; then
@@ -352,21 +352,17 @@ install_docker_desktop() {
 
     local max_wait=80
     if [[ "$fresh_install" == true ]]; then max_wait=120; fi
-    tput civis 2>/dev/null || true
-    local frames=('⠋' '⠙' '⠹' '⠸' '⠼' '⠴' '⠦' '⠧' '⠇' '⠏')
-    local f=0
-    for i in $(seq 1 $max_wait); do
-      if docker info &>/dev/null 2>&1; then break; fi
-      local elapsed=$(( i * 3 ))
-      printf "\r  ${CYAN}%s${RESET} Waiting for Docker Desktop… (%ds)" "${frames[f]}" "$elapsed"
-      f=$(( (f + 1) % ${#frames[@]} ))
-      sleep 3
-    done
-    printf "\r\033[K"
-    tput cnorm 2>/dev/null || true
+    # `|| true` is load-bearing. _wait_for_docker returns non-zero on timeout,
+    # and this is a bare statement under `set -e`, so the script would exit HERE
+    # — before the whale-icon guidance and the deliberate error() below, which
+    # is the whole point of not coming up in time. The old inline loop ended on
+    # printf/tput and so always fell through; extracting it moved the timeout's
+    # exit status into a position where errexit could see it (Bugbot, #741).
+    # The verdict is the `if ! _docker_answers` immediately below, not this.
+    _wait_for_docker "$max_wait" || true
   fi
 
-  if ! docker info &>/dev/null 2>&1; then
+  if ! _docker_answers; then
     echo ""
     echo -e "  ${BOLD}Docker Desktop isn't responding yet.${RESET}"
     echo -e "  This usually means it's still starting up. Here's what to check:"
@@ -381,6 +377,83 @@ install_docker_desktop() {
   fi
 
   success "Docker ready"
+}
+
+# _wait_for_docker POLLS — spin until the daemon answers, or POLLS*3s elapse.
+# Returns 0 as soon as the daemon answers, 1 on timeout.
+#
+# Extracted so the assess-time nudge (_try_start_docker_desktop) and the
+# install-time start share ONE loop. Two copies of a "wait for Docker" loop
+# drift, and the one nobody reads is the one that stops matching the daemon's
+# actual readiness.
+_wait_for_docker() {
+  local polls="$1" f=0 elapsed
+  local frames=('⠋' '⠙' '⠹' '⠸' '⠼' '⠴' '⠦' '⠧' '⠇' '⠏')
+  # A WALL-CLOCK deadline, not a poll count. Each probe is itself bounded, so a
+  # wedged daemon burns TB_DOCKER_PROBE_TIMEOUT per attempt; counting iterations
+  # would let "20 polls" mean 60s against a live daemon and 260s against the
+  # wedged one this exists to survive. $SECONDS keeps the caller's budget —
+  # polls*3s — true either way.
+  local start=$SECONDS
+  local deadline=$(( SECONDS + polls * 3 ))
+  tput civis 2>/dev/null || true
+  while [ "$SECONDS" -lt "$deadline" ]; do
+    if _docker_answers; then
+      printf "\r\033[K"
+      tput cnorm 2>/dev/null || true
+      return 0
+    fi
+    elapsed=$(( SECONDS - start ))
+    printf "\r  ${CYAN}%s${RESET} Waiting for Docker Desktop… (%ds)" "${frames[f]}" "$elapsed"
+    f=$(( (f + 1) % ${#frames[@]} ))
+    sleep 3
+  done
+  printf "\r\033[K"
+  tput cnorm 2>/dev/null || true
+  _docker_answers
+}
+
+# _docker_app_installed — is Docker Desktop present as an app bundle?
+#
+# Its own function purely so the branch above is testable on any host: inlined,
+# the "not installed" case could only be exercised on a machine WITHOUT Docker,
+# which is never the machine of the person changing this code.
+_docker_app_installed() {
+  [[ -d /Applications/Docker.app || -d "$HOME/Applications/Docker.app" ]]
+}
+
+# _try_start_docker_desktop — best-effort nudge for a Docker Desktop that is
+# INSTALLED but not running. Returns 0 if a runtime is usable afterwards.
+#
+# This exists because of the trap in client#703's neighbourhood: a stopped
+# Docker means PROBE_RUNTIME_USABLE=0, which on macOS means Tier 2, which runs
+# the admin gate and preflight_sudo — and the ONLY `open -a Docker` in the tree
+# lived inside install_docker_desktop, behind that password prompt. So the
+# installer could only start Docker after taking an administrator password that
+# it needed solely because Docker wasn't started. A user who can't give that
+# password had no path at all, on a Mac where Docker was already installed.
+#
+# `open -a Docker` needs no privileges whatsoever — it is a GUI app launch as
+# the current user. Doing it here, before classification, lets the probe find a
+# live runtime and hand the machine to Tier 0, where none of the privileged
+# path runs.
+#
+# Best-effort by construction: every failure returns non-zero and the caller
+# says so honestly. It must never become a hard gate — a Mac with no Docker
+# installed still has to reach install_docker_desktop.
+_try_start_docker_desktop() {
+  [[ "${OS:-}" == "Darwin" ]] || return 1
+  has docker || return 1
+  # Already up — nothing to nudge (and the caller shouldn't claim it started it).
+  _docker_answers && return 0
+  # Only nudge an app that is actually installed; otherwise this is a job for
+  # install_docker_desktop, which downloads it.
+  _docker_app_installed || return 1
+  log "runtime-down: nudging Docker Desktop (open -a Docker, no privileges needed)"
+  open -a Docker 2>/dev/null || { log "runtime-down: open -a Docker failed"; return 1; }
+  # 20 polls x 3s = 60s. An already-installed Docker Desktop that has been run
+  # before is warm; this is a nudge, not the 120s first-run licence dance.
+  _wait_for_docker 20
 }
 
 install_macos_cli_tools() {
@@ -601,27 +674,57 @@ _install_macos_autostart() {
 # NOW (Docker is up by this point) and fail here, naming the exact setting, instead of
 # in a pod. Intel Macs run amd64 natively — nothing to check. TRACEBLOC_ALLOW_ARM64
 # skips it (same escape hatch as the preflight arch gate). Image overridable for tests.
+# The macOS amd64-emulation refusal — the Rosetta remedy. Shared by the early gate
+# (assert_amd64_emulation) and the late _assert_engine_runs_on_this_arch backstop, so
+# a refusal from either gives the same macOS-correct fix, never the Linux binfmt one.
+_macos_amd64_refusal() {
+  warn "amd64 emulation isn't working on this Apple Silicon Mac, and this install resolved to the amd64-only MySQL 5.7 engine — it would crash-loop, not fail here."
+  hint "  Docker Desktop: Settings → General → enable \"Use Rosetta for x86_64/amd64 emulation\", then restart Docker and re-run."
+  hint "  Colima: recreate the VM with VZ + Rosetta →  colima delete && colima start --vm-type vz --vz-rosetta"
+  hint "  (or set TRACEBLOC_ALLOW_ARM64=1 to proceed anyway — the images may crash.)"
+  error "amd64 emulation unavailable — fix the above and re-run (this install needs the amd64-only MySQL 5.7 engine; a fresh install would use the native 8.4 engine instead)."
+}
+
+# Boolean: does amd64 emulation actually run on this Mac? The Rosetta/Docker smoke,
+# time-bounded (installer rule — every docker call is bounded; #433). spin_cmd_bounded
+# returns 124 on the deadline -> false, same as a real emulation failure. Shared by
+# the EARLY gate (assert_amd64_emulation) and the LATE _assert_engine_runs_on_this_arch
+# backstop (client#756), so "can this arm64 Mac run amd64?" has one answer in one place.
+_macos_amd64_emulation_ok() {
+  local _img="${TB_AMD64_SMOKE_IMAGE:-busybox:1.36}"
+  spin_cmd_bounded "${TB_AMD64_SMOKE_TIMEOUT:-120}" "Verifying amd64 emulation…" \
+    docker run --rm --platform linux/amd64 "$_img" true
+}
+
 assert_amd64_emulation() {
   [[ "$ARCH" == "arm64" ]] || return 0
   if [[ -n "${TRACEBLOC_ALLOW_ARM64:-}" ]]; then
     warn "Skipping the amd64 emulation smoke test (TRACEBLOC_ALLOW_ARM64 set) — amd64 images may crash."
     return 0
   fi
-  local _img="${TB_AMD64_SMOKE_IMAGE:-busybox:1.36}"
-  # Time-bounded: a wedged daemon or stuck pull must not hang a headless install
-  # forever behind a spinner (installer rule — every docker call is bounded; #433
-  # Bugbot). spin_cmd_bounded returns 124 on the deadline, which falls through to the
-  # same remediation as a real emulation failure.
-  if spin_cmd_bounded "${TB_AMD64_SMOKE_TIMEOUT:-120}" "Verifying amd64 emulation…" \
-       docker run --rm --platform linux/amd64 "$_img" true; then
+  # Only the amd64-only MySQL 5.7 image needs emulation; the multi-arch 8.4 engine
+  # runs natively on Apple Silicon. Ask through _pf_mysql_engine_decision, NOT the
+  # raw _mysql_engine_decision: the wrapper sets values_file AND the SANITISED
+  # TB_NAMESPACE (DNS-1123), so the per-release datadir HOST_DATA_DIR/<ns>/mysql is
+  # probed, not just the legacy HOST_DATA_DIR/mysql. The wrapper also FAILS CLOSED to
+  # 5.7 if the engine lib is unavailable. This is the EARLY gate (before helm), so
+  # existing_id is invisible and the 8.4 answer is a GUESS; _assert_engine_runs_on_this_arch
+  # re-asks on macOS once the engine is real and refuses there if the guess was wrong
+  # (client#756). A FRESH Mac resolves to 8.4 and is not refused for emulation it does
+  # not need (client#748). ${_decision%% *} keeps the reason attached, as _pf_arch does;
+  # no 2>/dev/null — the wrapper always exits 0, so a real stderr diagnostic should show.
+  local _decision _engine
+  _decision="$(_pf_mysql_engine_decision)"
+  _engine="${_decision%% *}"
+  if [[ "$_engine" == "8.4" ]]; then
+    success "MySQL engine resolves to 8.4 (multi-arch) — this Apple Silicon Mac runs the client images natively, no amd64 emulation needed."
+    return 0
+  fi
+  if _macos_amd64_emulation_ok; then
     success "amd64 emulation verified (x86_64 client images will run)."
     return 0
   fi
-  warn "amd64 emulation isn't working on this Apple Silicon Mac — the amd64-only tracebloc images would crash-loop, not fail here."
-  hint "  Docker Desktop: Settings → General → enable \"Use Rosetta for x86_64/amd64 emulation\", then restart Docker and re-run."
-  hint "  Colima: recreate the VM with VZ + Rosetta →  colima delete && colima start --vm-type vz --vz-rosetta"
-  hint "  (or set TRACEBLOC_ALLOW_ARM64=1 to proceed anyway — the images may crash.)"
-  error "amd64 emulation unavailable — fix the above and re-run (the client images are amd64-only)."
+  _macos_amd64_refusal
 }
 
 install_macos() {
