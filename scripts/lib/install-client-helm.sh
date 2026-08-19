@@ -887,28 +887,30 @@ _mysql_engine_decision() {
   esac
   # Never auto-flip existing state: a found release or real datadir content
   # means a 5.7-format datadir may exist, and 8.4 refuses to open it. Two
-  # DISTINCT triggers, kept apart because their remedy differs:
+  # DISTINCT triggers, ordered MOST-SPECIFIC FIRST because their remedy differs:
   #
-  #   existing_id  is a live Helm release seen by `detect_installed_client`
-  #     (helm list -A + the release's clientId) — it says NOTHING about the host
-  #     data directory, and on TB_STORAGE_MODE=node-local there may be no host
-  #     datadir at all. Whether its data is 5.7-format cannot be told from here,
-  #     so 5.7 is the safe default — but the arch gate must not then claim this
-  #     host holds 5.7 data, nor offer --data-dir (which cannot clear a release
-  #     that `helm list` reports; the next run would refuse identically).
+  #   datadir content — real 5.7-format files on this host. Checked first: when
+  #     files exist the reason is 'existing-datadir' whether or not a release is
+  #     also present, because the "host holds 5.7 data" claim is then TRUE and a
+  #     clean start means clearing the data dir (a release-only "uninstall"
+  #     remedy would leave those files to re-pin 5.7 on the next run). An
+  #     UNLISTABLE dir counts as content (fail closed; see the helper).
   #
-  #   datadir content is real 5.7-format files on this host — there --data-dir to
-  #     a fresh directory IS the correct fresh-start remedy.
+  #   existing_id — a live Helm release from detect_installed_client (helm list
+  #     -A + clientId) with NO host datadir files, e.g. TB_STORAGE_MODE=node-local
+  #     where both probes are empty. Reason 'existing-release': 5.7 stays the safe
+  #     default, but the gate must not claim host 5.7 data — and "uninstall the
+  #     release" is a COMPLETE fresh-start remedy here precisely because no files
+  #     remain to re-trigger the gate.
   #
-  # The empty dirs _ensure_tracebloc_dirs just created don't count — only files —
-  # but an UNLISTABLE dir counts as content (fail closed; see the helper).
-  if [[ -n "${existing_id:-}" ]]; then
-    echo "5.7 existing-release"
-    return 0
-  fi
+  # The empty dirs _ensure_tracebloc_dirs just created don't count — only files.
   if _mysql_dir_has_content "${HOST_DATA_DIR:-/nonexistent}/mysql" \
     || _mysql_dir_has_content "${HOST_DATA_DIR:-/nonexistent}/${TB_NAMESPACE:-}/mysql"; then
     echo "5.7 existing-datadir"
+    return 0
+  fi
+  if [[ -n "${existing_id:-}" ]]; then
+    echo "5.7 existing-release"
     return 0
   fi
   case "${ARCH:-$(uname -m)}" in
@@ -981,7 +983,7 @@ _assert_engine_runs_on_this_arch() {
       hint "This is a data-format constraint, not an architecture one: MySQL 8.4 runs natively on ${ARCH}, but it cannot open a 5.7-format datadir (MySQL upgrades only in stages, 5.7 → 8.0 → 8.4)."
       hint "Keep this data — enable amd64 emulation, then re-run:"
       hint "  docker run --privileged --rm tonistiigi/binfmt --install amd64"
-      hint "Or start fresh on the native engine — install into an empty data directory:"
+      hint "Or start fresh on the native 8.4 engine — uninstall any existing release, then install into an empty data directory (the existing files keep the install on 5.7):"
       hint "  --data-dir=/path/to/new/empty/dir"
       error "MySQL 5.7 is required by the existing data on this host and cannot run on ${ARCH} without amd64 emulation." ;;
     *)

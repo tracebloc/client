@@ -1312,6 +1312,12 @@ _engine_fixture() {
   # engine, different remedy (helm list, not the data dir).
   existing_id="someclient"
   [ "$(_mysql_engine_decision)" = "5.7 existing-release" ] || return 1
+  # When BOTH a release and real datadir files exist, datadir wins: the host
+  # DOES hold 5.7 data, and a release-only "uninstall" remedy would leave those
+  # files to re-pin 5.7 next run (Bugbot, client#752). existing_id still set here.
+  touch "$HOST_DATA_DIR/mysql/ibdata1"
+  [ "$(_mysql_engine_decision)" = "5.7 existing-datadir" ] || return 1
+  rm -f "$HOST_DATA_DIR/mysql/ibdata1"
   existing_id=""
   TB_MYSQL_ENGINE=5.7
   [ "$(_mysql_engine_decision)" = "5.7 explicit" ] || return 1
