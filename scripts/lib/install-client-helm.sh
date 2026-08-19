@@ -5,6 +5,11 @@
 #  and GPU detection. Values file is written to HOST_DATA_DIR/values.yaml.
 # =============================================================================
 
+# Stamped from scripts/spec/facts.env by scripts/check-facts.sh — do not hand-edit.
+# The Windows installer waits for the same APIService with the same TB_METRICS_WAIT_S
+# knob (#553), so the two defaults are one fact, gated in CI (#435).
+METRICS_WAIT_TIMEOUT=120
+
 TRACEBLOC_HELM_REPO_URL="https://tracebloc.github.io/client"
 TRACEBLOC_HELM_REPO_NAME="tracebloc"
 TRACEBLOC_CHART_NAME="client"
@@ -1036,7 +1041,7 @@ _wait_for_metrics_apiservice() {
   [[ -n "${TB_NO_SERVICE_PROGRESS:-}" ]] && return 0
   has kubectl || return 0
   local _timeout_s="${TB_METRICS_WAIT_S:-}"
-  case "$_timeout_s" in ''|*[!0-9]*) _timeout_s=120 ;; *) _timeout_s=$((10#$_timeout_s)) ;; esac
+  case "$_timeout_s" in ''|*[!0-9]*) _timeout_s="$METRICS_WAIT_TIMEOUT" ;; *) _timeout_s=$((10#$_timeout_s)) ;; esac
   local _deadline=$(( SECONDS + _timeout_s ))
   while (( SECONDS < _deadline )); do
     if kubectl get apiservice v1beta1.metrics.k8s.io --request-timeout=10s >/dev/null 2>&1; then
@@ -1501,7 +1506,7 @@ EOF
   # TB_METRICS_WAIT_S (same parse as _wait_for_metrics_apiservice) plus slack for
   # the post-registration `kubectl wait --for=Available` (30s) and jitter.
   local _metrics_wait_s="${TB_METRICS_WAIT_S:-}"
-  case "$_metrics_wait_s" in ''|*[!0-9]*) _metrics_wait_s=120 ;; *) _metrics_wait_s=$((10#$_metrics_wait_s)) ;; esac
+  case "$_metrics_wait_s" in ''|*[!0-9]*) _metrics_wait_s="$METRICS_WAIT_TIMEOUT" ;; *) _metrics_wait_s=$((10#$_metrics_wait_s)) ;; esac
   spin_cmd_bounded "$(( _metrics_wait_s + 60 ))" "Waiting for the metrics API to register…" \
     _wait_for_metrics_apiservice || true
 

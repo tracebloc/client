@@ -4314,6 +4314,94 @@ function Test-ApiReachable {
   return ($LASTEXITCODE -eq 0)
 }
 
+# The APIService the resource-monitor DaemonSet template `lookup`s at render time
+# (client/templates/resource-monitor-daemonset.yaml). One constant, read by the
+# wait below and asserted against the template by the suite, so a chart-side
+# rename can't leave this installer politely waiting on a name nobody uses.
+$script:MetricsApiServiceName = "v1beta1.metrics.k8s.io"
+
+# Stamped from scripts/spec/facts.env by scripts/check-facts.sh -- do not hand-edit.
+# bash waits for the same APIService behind the same TB_METRICS_WAIT_S knob (#553), so
+# the two defaults are ONE fact: a value raised here and not there would make one
+# documented knob mean two different things. CI gates the pair (#435).
+$script:MetricsWaitTimeout = 120
+
+# Get-MetricsWaitSeconds -- the metrics-wait budget, parsed in exactly one place
+# so the poll loop and anything else that bounds it cannot disagree.
+#
+# TB_METRICS_WAIT_S is deliberately the SAME knob name the bash installer reads
+# (lib/install-client-helm.sh::_wait_for_metrics_apiservice): one support
+# instruction -- "set TB_METRICS_WAIT_S=300 and re-run" -- has to work on either
+# host. It keeps the local knob shape (a TB_-prefixed, unit-suffixed integer
+# validated with the same `-match '^\d+$'` idiom as TB_CREATE_TIMEOUT_MIN) but in
+# seconds, because the budget is 120s and minutes cannot express it. The default
+# is the facts.env fact above, not a second copy of the number.
+#
+# Anything that is not a plain non-negative integer -- empty, "abc", "-5", "12.5"
+# -- falls back to the default rather than silently becoming 0 and disabling the
+# wait. The digit cap is not cosmetic: `[int]` on a 20-digit string THROWS, and a
+# typo'd knob must not take the install down.
+function Get-MetricsWaitSeconds {
+  param([string]$Value = $env:TB_METRICS_WAIT_S, [int]$Default = $script:MetricsWaitTimeout)
+  if ("$Value" -match '^\d{1,6}$') { return [int]$Value }
+  return $Default
+}
+
+# client#553, ported from lib/install-client-helm.sh::_wait_for_metrics_apiservice.
+#
+# On a freshly created k3d cluster, k3s applies its bundled metrics-server -- and
+# the metrics.k8s.io APIService with it -- shortly AFTER the API server reports
+# ready; `k3d cluster create --wait` gates on node/serverlb readiness, not on
+# bundled addons. The resource-monitor DaemonSet template `lookup`s that
+# APIService at RENDER time and calls `fail` when it is absent, which aborts the
+# ENTIRE helm release, not just the DaemonSet. So helm must not render inside
+# that window. Windows/WSL2 is the slowest host this installer supports and so
+# the likeliest to land in it -- and it had no wait at all.
+#
+# Best-effort by construction: when the APIService never registers this returns
+# $false and the caller carries on, so a genuinely missing metrics-server still
+# reaches the chart's render-time guard and gets ITS actionable error (install
+# metrics-server, or set resourceMonitor: false) instead of a vague stall here.
+function Wait-MetricsApiService {
+  param(
+    # -1 = "not specified" -> take the budget from TB_METRICS_WAIT_S/the default.
+    [int]$TimeoutSec = -1,
+    [int]$IntervalSec = 3
+  )
+  if ($TimeoutSec -lt 0) { $TimeoutSec = Get-MetricsWaitSeconds }
+  # A native command that isn't on PATH throws instead of setting $LASTEXITCODE,
+  # so probe for it rather than polling an exception to the deadline. Not a
+  # failure of the install: we simply cannot tell, and the chart still guards.
+  if (-not (Has kubectl)) {
+    Log "kubectl is not on PATH -- skipping the metrics API wait; the chart still guards at render time."
+    return $false
+  }
+  $deadline = (Get-Date).AddSeconds($TimeoutSec)
+  $announced = $false
+  while ((Get-Date) -lt $deadline) {
+    $null = (kubectl get apiservice $script:MetricsApiServiceName --request-timeout=10s 2>$null) | Out-String
+    if ($LASTEXITCODE -eq 0) {
+      # Registered. Give it a moment to also report Available -- but never fail on
+      # merely-slow: the template only needs the APIService to EXIST at render
+      # time, so a non-zero here changes nothing about what happens next.
+      $null = (kubectl wait --for=condition=Available "apiservice/$script:MetricsApiServiceName" --timeout=30s 2>$null) | Out-String
+      Log "metrics.k8s.io APIService registered -- proceeding with helm install."
+      return $true
+    }
+    # RFC-0002 §2, progress on every wait: bash runs this whole loop behind
+    # spin_cmd_bounded. Announce ONCE, and only after a probe has actually missed,
+    # so the common fast path (already registered) stays silent while the slow
+    # WSL2 box this exists for is told why it is sitting here for two minutes.
+    if (-not $announced) {
+      Info "Waiting for the cluster metrics API to register..."
+      $announced = $true
+    }
+    if ($IntervalSec -gt 0) { Start-Sleep -Seconds $IntervalSec }
+  }
+  Log "metrics.k8s.io APIService not registered after ${TimeoutSec}s -- proceeding; the chart guards if metrics-server is genuinely absent."
+  return $false
+}
+
 # Enumerate what client (if any) is already installed on this cluster — the
 # shared source for the provisioning pre-flight AND the Helm-step guard, so the
 # two can never drift. Values are read with `-o json`, not YAML: helm
@@ -4902,6 +4990,14 @@ $envBlock
   $pvRelease = $TB_NAMESPACE
   if ($adoptedReuse -and $existingName) { $pvRelease = $existingName }
   Initialize-ReleaseDataDirs -Release $pvRelease
+
+  # client#553: wait out the metrics-server APIService registration race before
+  # helm renders. Above BOTH helm paths on purpose -- the adopted reconcile
+  # re-renders the chart too, so it hits the same render-time `fail`. The return
+  # value is discarded deliberately: a wait that runs out must NOT stop the
+  # install, because the chart's own guard is the thing that produces the
+  # actionable error when metrics-server is genuinely absent.
+  $null = Wait-MetricsApiService
 
   Write-Host ""
   if ($adoptedReuse) {
