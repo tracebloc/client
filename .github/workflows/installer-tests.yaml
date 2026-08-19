@@ -2,7 +2,9 @@ name: Installer tests
 
 # Validates the curl/PowerShell installer (scripts/) across the breadth of
 # environments a customer might actually have:
-#   • static    — shellcheck + bash -n + PSScriptAnalyzer
+#   • static    — bash -n + PSScriptAnalyzer + the repo's drift guards
+#                  (shellcheck is NOT here: it is the `quality / shellcheck`
+#                  required check — see the `static` job for why)
 #   • unit-bash  — bats (mocked) for the bash installer
 #   • unit-pester— Pester for the PowerShell installer, on Linux AND real Windows
 #   • distro-prereqs — runs the REAL Linux prerequisite-install path (package
@@ -66,22 +68,27 @@ jobs:
             | while IFS= read -r -d '' f; do bash -n "$f" || exit 1; done
           echo "all shell scripts parse"
 
-      - name: ShellCheck (libs + entrypoints)
-        run: |
-          sudo apt-get update -qq && sudo apt-get install -y -qq shellcheck
-          shellcheck --version | grep version
-          # Gate at error severity. The libs are sourced together as one program,
-          # so single-file shellcheck reports SC2034 "unused" false positives for
-          # shared vars (CURL_SECURE, ARCH_DL, colours…) that are defined in
-          # common.sh and consumed in other sourced files. Warnings are printed
-          # below for visibility but don't fail the gate.
-          shellcheck --severity=error --shell=bash \
-            scripts/install.sh scripts/install-k8s.sh scripts/gen-manifest.sh scripts/check-facts.sh scripts/check-style.sh scripts/resolve-ingestor-digest.sh scripts/lib/*.sh \
-            scripts/tests/check-drift.sh scripts/tests/distro-prereqs.sh scripts/tests/e2e-auto-upgrade.sh scripts/tests/e2e-seal-check.sh scripts/tests/e2e-full-seal.sh scripts/tests/e2e-cluster.sh scripts/tests/e2e-journey.sh scripts/tests/e2e-proxy.sh scripts/tests/lib/e2e-common.sh scripts/tests/path-persist.sh scripts/tests/chart-env-vocabulary.sh scripts/tests/env-vocabulary-agreement.sh
-          echo "── shellcheck warnings (advisory, non-blocking) ──"
-          shellcheck --severity=warning --shell=bash \
-            scripts/install.sh scripts/install-k8s.sh scripts/gen-manifest.sh scripts/check-facts.sh scripts/check-style.sh scripts/resolve-ingestor-digest.sh scripts/lib/*.sh \
-            scripts/tests/check-drift.sh scripts/tests/distro-prereqs.sh scripts/tests/e2e-auto-upgrade.sh scripts/tests/e2e-seal-check.sh scripts/tests/e2e-full-seal.sh scripts/tests/e2e-cluster.sh scripts/tests/e2e-journey.sh scripts/tests/e2e-proxy.sh scripts/tests/lib/e2e-common.sh scripts/tests/path-persist.sh scripts/tests/chart-env-vocabulary.sh scripts/tests/env-vocabulary-agreement.sh || true
+      # There is no shellcheck step here any more, and adding one back is a
+      # regression. shellcheck ran in THREE places in this repo (#753): here,
+      # `Standard checks / Lint`, and `quality / shellcheck` from
+      # tracebloc/.github's code-quality.yml. Only the third is worth keeping:
+      #
+      #   • It is a REQUIRED check on develop; this job is not (so the copy that
+      #     lived here could never block anything — it was advice, not a gate).
+      #   • It DERIVES its file set from the tree (extension, else shebang)
+      #     instead of enumerating it. Measured on develop 2026-08-19: the list
+      #     that used to sit here expanded to 34 files where the derivation
+      #     yields 42 — it had drifted past eight real scripts, including
+      #     scripts/chart-version-guard.sh, scripts/check-digest-drift.sh and
+      #     scripts/index-invariants.sh. A parse error planted in the last of
+      #     those was invisible to this step and caught by the org job.
+      #   • shellcheck is preinstalled on ubuntu-latest, so it needs no
+      #     `apt-get install` — the very step that hung this job to its
+      #     10-minute timeout twice on 2026-08-19 and reported as `cancelled`.
+      #
+      # Same severity (error) and same SC1091 exclusion, so no verdict changes.
+      # For a whole-tree sweep rather than a PR diff, run the Code quality
+      # workflow via workflow_dispatch with all-files: true.
 
       - name: Installer manifest is current (supply-chain, R8)
         # The bootstrap verifies each sub-script against scripts/manifest.sha256

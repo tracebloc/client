@@ -29,43 +29,47 @@ jobs:
   lint:
     name: Lint
     runs-on: ubuntu-latest
+    # #753: this job had no timeout at all, so when `Install shellcheck` stalled
+    # on 2026-08-19 it drifted toward GitHub's 360-minute default instead of
+    # failing fast. Every job in this file now has a bound.
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      # shellcheck itself is not on the runner image, so it is installed here.
-      # That is environment bootstrapping, not a duplicated command.
-      - name: Install shellcheck
-        run: |
-          sudo apt-get update -qq && sudo apt-get install -y -qq shellcheck
-          shellcheck --version | grep version
+      # The `Install shellcheck` step that used to sit here is gone, and the
+      # premise it was written on ("shellcheck itself is not on the runner
+      # image") is simply false — it IS preinstalled on ubuntu-latest, which is
+      # how `quality / shellcheck` runs without installing anything. The apt
+      # call bought nothing and cost this job 35+ minutes on 2026-08-19 (#753).
+      #
+      # shellcheck now runs in exactly one place: `quality / shellcheck`, also
+      # a required check on develop, which derives its file set from the tree
+      # rather than enumerating it. See installer-tests.yaml's `static` job for
+      # the measurement. This job keeps the parse half, which needs no install.
 
-      - name: make lint
-        # `make lint` (backend#1606). This job used to restate the parse loop AND
-        # spell out the shellcheck file list inline, while the Makefile kept the
-        # same list in SHELLCHECK_FILES. The two had ALREADY drifted, and in the
-        # direction nobody notices: the Makefile carried 19 entries and this file
-        # 9, so ten scripts were shellchecked on a contributor's machine and NOT
-        # at the merge gate --
-        #
-        #   scripts/gen-manifest.sh          scripts/check-facts.sh
-        #   scripts/check-style.sh           scripts/lib/*.sh
-        #   scripts/tests/check-drift.sh     scripts/tests/e2e-full-seal.sh
-        #   scripts/tests/e2e-journey.sh     scripts/tests/path-persist.sh
-        #   scripts/tests/chart-env-vocabulary.sh
-        #   scripts/tests/env-vocabulary-agreement.sh
-        #
-        # gen-manifest.sh is the installer's integrity manifest generator, so a
-        # shell defect there was invisible to this gate. Measured green across
-        # all 19 before this landed, so it arms a green check rather than
-        # importing a backlog.
-        run: make lint
+      - name: make parse
+        # Calls the Makefile rather than restating the loop (backend#1606). That
+        # ticket's concern was a hand-written FILE LIST drifting between the
+        # Makefile and this workflow; it fixed the drift by re-copying the list,
+        # which only reset the clock — measured 2026-08-19, the list had drifted
+        # again, past eight scripts. `make parse` enumerates nothing (it is a
+        # `find`), and shellcheck's file set is now derived by the org gate, so
+        # there is no longer a list here for anything to drift from.
+        run: make parse
 
   unit-tests:
     name: Unit tests
     runs-on: ubuntu-latest
+    # See the lint job: no job in this file had a timeout before #753.
+    # bats itself runs in ~2 min; the headroom is for the apt install.
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
+      # NOT hardened here. bats has no preinstalled-or-reusable equivalent, so
+      # unlike shellcheck it genuinely has to be installed, and bounding and
+      # retrying package installs is #753's own scope rather than this change's.
+      # The timeout above at least turns a stall into a bounded failure.
       - name: Install bats
         run: sudo apt-get update -qq && sudo apt-get install -y -qq bats
 
