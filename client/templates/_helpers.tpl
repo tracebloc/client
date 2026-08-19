@@ -146,6 +146,28 @@ mysql-pvc
   jobs-manager stamps onto training pods both read THIS, so the name cannot
   disagree between the pod that creates the Secret and the pod that uses it.
 */}}
+{{/*
+  The name the CHART creates, whatever `existingSecret` says. Not the same
+  question as `registrySecretName`, and RBAC is where the difference bites
+  (Bugbot on client#751).
+
+  The auto-upgrade Role in the GPU device-plugin namespace -- `kube-system` by
+  default -- pins `get`/`update`/`patch`/`delete` to a `resourceNames` list so
+  Helm can reconcile the mirrored pull Secret. Resolving that list through
+  `registrySecretName` would hand the auto-upgrade ServiceAccount read AND
+  delete on the OPERATOR's own dockerconfigjson in kube-system -- a privilege
+  over a Secret this chart does not own and was never asked to touch.
+
+  It also keeps the migration honest in the other direction: switching a release
+  from `create: true` to `existingSecret` leaves the previously mirrored
+  `<release>-regcred` behind, and Helm has to be able to delete it. A list that
+  followed `existingSecret` would stop naming the orphan, so the delete would
+  403 and stall auto-upgrade on every later tick.
+*/}}
+{{- define "tracebloc.createdRegistrySecretName" -}}
+{{ .Release.Name }}-regcred
+{{- end }}
+
 {{- define "tracebloc.registrySecretName" -}}
 {{- $reg := .Values.dockerRegistry | default dict -}}
 {{- if $reg.existingSecret -}}

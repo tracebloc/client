@@ -256,3 +256,68 @@ print("\n".join(sorted(bad)))
     return 1
   }
 }
+
+# ---- RBAC must never name the operator's Secret -----------------------------
+
+rbac_secret_names() {
+  # resourceNames on every secrets rule, with the Role's namespace.
+  python3 -c '
+import sys, yaml
+for doc in yaml.safe_load_all(sys.stdin.read()):
+    if not doc or doc.get("kind") not in ("Role", "ClusterRole"):
+        continue
+    ns = (doc.get("metadata") or {}).get("namespace", "-")
+    for rule in (doc.get("rules") or []):
+        if "secrets" not in (rule.get("resources") or []):
+            continue
+        for name in (rule.get("resourceNames") or []):
+            print(ns, name, ",".join(sorted(rule.get("verbs") or [])))
+'
+}
+
+@test "existingSecret: no Role grants rights on the operator's own Secret" {
+  # The auto-upgrade Role in the GPU device-plugin namespace (kube-system by
+  # default) pins get/update/patch/DELETE to a resourceNames list. Resolving it
+  # through the release-wide name helper handed that ServiceAccount delete on a
+  # bring-your-own dockerconfigjson the chart does not own (Bugbot, client#751).
+  out="$(render --set dockerRegistry.existingSecret=regcred \
+                --set gpu.devicePlugin.enabled=true \
+                --set gpu.devicePlugin.vendor=nvidia)" || return 1
+  names="$(printf '%s\n' "$out" | rbac_secret_names)" || return 1
+  [ -n "$names" ] || {
+    echo "no secrets resourceNames found at all — the parser is not reaching" >&2
+    echo "the Roles, so this test would pass on any chart" >&2
+    return 1
+  }
+  if printf '%s\n' "$names" | awk '{print $2}' | grep -qx "regcred"; then
+    echo "a Role names the operator's Secret:" >&2
+    printf '%s\n' "$names" >&2
+    return 1
+  fi
+}
+
+@test "existingSecret: the chart's own former mirror stays deletable" {
+  # The other direction of the same rule. Switching a release from create: true
+  # to existingSecret orphans the mirrored <release>-regcred, and Helm must be
+  # able to delete it; a resourceNames list that followed existingSecret would
+  # 403 on the orphan and stall every later auto-upgrade tick.
+  out="$(render --set dockerRegistry.existingSecret=regcred \
+                --set gpu.devicePlugin.enabled=true \
+                --set gpu.devicePlugin.vendor=nvidia)" || return 1
+  printf '%s\n' "$out" | rbac_secret_names \
+    | grep -E "^\S+ myrel-regcred " | grep -q "delete" || {
+      echo "no rule can delete myrel-regcred, so a create->existingSecret" >&2
+      echo "migration leaves an orphan nothing is allowed to remove:" >&2
+      printf '%s\n' "$out" | rbac_secret_names >&2
+      return 1
+    }
+}
+
+@test "create: the RBAC name still matches the Secret that is rendered" {
+  # Splitting the two names must not desynchronise the ordinary path: the name
+  # RBAC pins and the name the Secret carries have to be the same string.
+  out="$(created --set gpu.devicePlugin.enabled=true \
+                 --set gpu.devicePlugin.vendor=nvidia)" || return 1
+  printf '%s\n' "$out" | dockerconfig_secrets | grep -q "^myrel-regcred " || return 1
+  printf '%s\n' "$out" | rbac_secret_names | grep -qE "^\S+ myrel-regcred " || return 1
+}
