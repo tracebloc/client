@@ -273,6 +273,13 @@ networkPolicy:
     # enforcing egress). The retry tolerates standard-mode CNIs that enforce only after a
     # brief per-pod reconcile. A test hook never affects install/upgrade. Set "" to
     # disable (e.g. air-gapped clusters).
+    #
+    # FALSE-PASS CAVEAT (SECURITY §8.2): the check reads a refused TCP connect
+    # (curl exit 7) as "egress is blocked" — and a host with NOTHING LISTENING on
+    # :443 refuses identically, so it passes without testing anything. This host
+    # MUST genuinely accept TCP :443 when egress is open. 1.1.1.1 does. Before
+    # trusting a custom value, confirm it is reachable with the lockdown OFF; if
+    # that probe also fails to connect, the host is wrong, not the CNI.
     enforcementProbeHost: "1.1.1.1"
     # Max seconds the enforcement check waits for egress to become blocked before it
     # gives up and FAILS. Covers the standard-mode CNI reconciliation window (AWS VPC CNI

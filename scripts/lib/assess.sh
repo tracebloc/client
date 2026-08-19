@@ -8,10 +8,32 @@
 #  straight to the `tracebloc` home screen (exit 0) instead of re-running every
 #  step — while a fresh or half-set-up machine still runs the normal flow.
 #
-#  STRICTLY NON-MUTATING. It must never start the cluster, run helm, mint a
-#  credential, or write anything. Every probe is read-only (`k3d cluster list`,
-#  `helm list`/`get values`, `kubectl get`) and BOUNDED (short timeouts) so it
-#  can't hang, and it is NEVER fatal. On ANY probe failure or uncertainty it
+#  NON-MUTATING, with exactly ONE narrow exception named below. It must never
+#  start the cluster, run helm, mint a credential, or write anything. Every
+#  probe is read-only (`k3d cluster list`, `helm list`/`get values`,
+#  `kubectl get`) and BOUNDED (short timeouts) so it can't hang, and it is
+#  NEVER fatal.
+#
+#  THE EXCEPTION — one unprivileged, idempotent runtime nudge (#741). On macOS,
+#  `runtime-down` may `open -a Docker` and wait up to 60s for the daemon. It is
+#  carved out this narrowly on purpose, and the boundary is the point:
+#
+#    * unprivileged — a GUI app launch as the current user, no sudo, nothing a
+#      reader could mistake for the privileged install path;
+#    * idempotent — launching a running Docker Desktop is a no-op, so a re-run
+#      cannot compound;
+#    * bounded — a wall-clock deadline, and every liveness probe on that path
+#      goes through `_docker_answers`, so a wedged daemon cannot hang assess;
+#    * load-bearing — without it a stopped-but-installed Docker classifies
+#      Tier 2 and demands an administrator password to start a runtime that is
+#      already installed. Tier 0 was unreachable for exactly the machines it
+#      was written for.
+#
+#  It does NOT lift the ban. `cluster-stopped` still only PRINTS — starting a
+#  stopped k3d cluster is the mutation this header exists to forbid, and
+#  `_assess_cluster_servers_running` explains why `_handle_existing_cluster` is
+#  off-limits here. If you are adding a second exception, that is the moment to
+#  question whether this file is still the right place for it. On ANY probe failure or uncertainty it
 #  degrades toward "run the normal flow" — never toward a false "healthy". A
 #  false healthy that skips a needed install is the worst possible outcome, so
 #  "healthy" must be CERTAIN: cluster running AND a tracebloc release present AND
@@ -354,6 +376,64 @@ _assess_handoff() {
 # short-circuits (hand-off + exit 0). On fresh / degraded it prints a warm
 # one-liner and RETURNS 0 so main() runs the normal flow to set up (fresh) or
 # reconcile (degraded).
+# _assess_handle_runtime_down — the runtime is installed but not answering.
+#
+# This used to be one info() line: "Docker isn't running yet — starting it, then
+# checking your environment." Nothing in that path started anything. The branch
+# printed the sentence and fell through to `return 0`, the probe then found no
+# usable runtime, and macOS classified Tier 2 — the admin-password path — for a
+# machine whose Docker only needed launching. The only `open -a Docker` in the
+# tree sat behind that password prompt, so the installer could not start Docker
+# without first taking a password it needed solely because Docker was stopped.
+#
+# A message that names an action the code does not take is worse than no
+# message: it is what the user quotes back when the install fails, and it sends
+# the reader looking for a bug in the start logic rather than at its absence.
+# So this either DOES the thing or does not claim it.
+_assess_handle_runtime_down() {
+  # macOS with Docker Desktop actually installed: a GUI app launch, no
+  # privileges. If it comes up, the probe that runs next sees a live runtime and
+  # hands this machine to Tier 0.
+  #
+  # The _docker_app_installed test is part of the CONDITION, not just of the
+  # nudge. Announcing "starting it" and then discovering there is no app to
+  # start reproduces this function's own bug one level down — and the failure
+  # copy would go on to say "Open Docker Desktop" to someone who does not have
+  # it, e.g. a Colima-only headless Mac (Bugbot, #741).
+  if [[ "${OS:-}" == "Darwin" ]] \
+     && declare -F _try_start_docker_desktop >/dev/null 2>&1 \
+     && declare -F _docker_app_installed >/dev/null 2>&1 \
+     && _docker_app_installed; then
+    info "Docker isn't running yet — starting it, then checking your environment."
+    if _try_start_docker_desktop; then
+      success "Docker is running"
+      log "runtime-down: Docker came up; the probe will classify from a live runtime"
+      return 0
+    fi
+    # Honest about the failure, and specific about what it costs: without a
+    # running Docker this machine takes the privileged path.
+    warn "Couldn't start Docker automatically."
+    hint "Open Docker Desktop, wait until it reports \"running\", then re-run this installer."
+    hint "Continuing — but setting up a container runtime from here needs an administrator password."
+    log "runtime-down: could not start Docker; falling through to the privileged path"
+    return 0
+  fi
+
+  # Everywhere else — a Mac with no Docker Desktop to launch, or a platform
+  # where starting the daemon needs privileges we will not ask for here. Do not
+  # claim to be starting anything.
+  #
+  # And say what happens NEXT. "Start it, then re-run" on its own reads as "this
+  # run is over", while the installer is in fact about to carry on into the
+  # privileged flow — guidance contradicting the very next thing on screen. The
+  # macOS failure branch above names its continue; so does this one.
+  info "Docker isn't running, and this installer can't start it for you."
+  hint "Start your container runtime, then re-run this installer for the shortest path."
+  hint "Continuing — but setting one up from here needs an administrator password."
+  log "runtime-down: OS=${OS:-?}, no unprivileged way to start the runtime; continuing"
+  return 0
+}
+
 assess_existing_install() {
   # --force / --reinstall (or the env override): skip the gate entirely.
   if [[ "${TB_FORCE_REINSTALL:-0}" == 1 ]]; then
@@ -378,7 +458,7 @@ assess_existing_install() {
     degraded)
       echo ""
       case "$INSTALL_STATE_REASON" in
-        runtime-down)       info "Docker isn't running yet — starting it, then checking your environment." ;;
+        runtime-down)       _assess_handle_runtime_down ;;
         cluster-stopped)    info "Your secure environment is stopped — starting it and finishing setup." ;;
         workload-not-ready) info "Your secure environment is still starting up — finishing setup." ;;
         cli-missing)        info "The tracebloc CLI isn't installed yet — setting it up." ;;

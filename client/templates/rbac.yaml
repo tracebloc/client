@@ -27,8 +27,10 @@ rules:
   - apiGroups: [""]
     resources: ["pods", "pods/log", "events"]
     verbs: ["get", "list", "watch"]
+  # Read-only, for the heartbeat version inventory: `deployments` covers every
+  # chart workload except resource-monitor, which needs `daemonsets`.
   - apiGroups: ["apps"]
-    resources: ["deployments"]
+    resources: ["deployments", "daemonsets"]
     verbs: ["get", "list", "watch"]
   - apiGroups: ["metrics.k8s.io"]
     resources: ["pods"]
@@ -126,8 +128,10 @@ rules:
   - apiGroups: [""]
     resources: ["pods", "pods/log", "events"]
     verbs: ["get", "list", "watch"]
+  # Read-only, for the heartbeat version inventory: `deployments` covers every
+  # chart workload except resource-monitor, which needs `daemonsets`.
   - apiGroups: ["apps"]
-    resources: ["deployments"]
+    resources: ["deployments", "daemonsets"]
     verbs: ["get", "list", "watch"]
   - apiGroups: ["metrics.k8s.io"]
     resources: ["pods"]
@@ -172,5 +176,45 @@ subjects:
 roleRef:
   kind: Role
   name: {{ include "tracebloc.rbacName" . }}
+  apiGroup: rbac.authorization.k8s.io
+{{- end }}
+
+{{- $nodeAgentsNs := dig "namespace" "name" "" (.Values.nodeAgents | default dict) }}
+{{- if and (ne .Values.resourceMonitor false) $nodeAgentsNs (ne $nodeAgentsNs .Release.Namespace) }}
+---
+{{/*
+  jobs-manager reads the resource-monitor DaemonSet for the heartbeat version
+  inventory, and that DaemonSet lives in nodeAgents.namespace, not the release
+  namespace — so the Role above cannot reach it. The ClusterRole branch already
+  covers it; this pair is for clusterScope: false. Mirrors image-refresh-rbac.
+*/}}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "tracebloc.rbacNodeAgentsName" . }}
+  namespace: {{ $nodeAgentsNs }}
+  labels:
+    {{- include "tracebloc.labels" . | nindent 4 }}
+rules:
+  - apiGroups: ["apps"]
+    resources: ["daemonsets"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "tracebloc.rbacNodeAgentsName" . }}
+  namespace: {{ $nodeAgentsNs }}
+  labels:
+    {{- include "tracebloc.labels" . | nindent 4 }}
+subjects:
+  # One ServiceAccount, in the release namespace; only the Role/RoleBinding
+  # names differ, so the two pairs cannot collide.
+  - kind: ServiceAccount
+    name: {{ include "tracebloc.serviceAccountName" . }}
+    namespace: {{ .Release.Namespace }}
+roleRef:
+  kind: Role
+  name: {{ include "tracebloc.rbacNodeAgentsName" . }}
   apiGroup: rbac.authorization.k8s.io
 {{- end }}
