@@ -54,9 +54,17 @@ jobs:
 
       # helm is not on the runner image at a version we choose, so it is
       # installed here at the pin this repo standardises on. That is
-      # environment bootstrapping, not a duplicated command -- the same
-      # distinction that keeps the shellcheck apt install in
-      # standard-checks.yml. Both `helm-lint` and `helm-vocab` shell out to
+      # environment bootstrapping, not a duplicated command.
+      #
+      # This comment used to cite the shellcheck apt install in
+      # standard-checks.yml as the parallel case. That install is gone (#753):
+      # its premise was wrong -- shellcheck IS on the runner image -- so it was
+      # never the same distinction, and it hung CI for 35 minutes. helm is the
+      # genuine case: pinned, absent from the image, and installed by a
+      # sha-pinned action rather than a package manager, which is what a
+      # bootstrap step should look like.
+      #
+      # Both `helm-lint` and `helm-vocab` shell out to
       # `helm`, and chart-env-vocabulary.sh's helper-backstop cases branch on
       # the helm VERSION (they self-skip below 3.16), so an unpinned runner
       # helm would silently change which assertions run. drift-checks.yaml

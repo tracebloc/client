@@ -439,6 +439,14 @@ spec:
         {{- end }}
         - name: CLIENT_ENV
           value: {{ include "tracebloc.clientEnv" . | quote }}
+        # Where the resource-monitor DaemonSet lives, for the heartbeat version
+        # inventory. EMPTY when resourceMonitor is off, and that empty value is
+        # load-bearing: the runtime reads unset as "use the built-in default"
+        # and set-but-empty as "no node-agents namespace", so leaving it
+        # populated would list a namespace that isn't rendered — a 403 every
+        # heartbeat for a workload the operator turned off.
+        - name: NODE_AGENTS_NAMESPACE
+          value: {{ if ne .Values.resourceMonitor false }}{{ dig "namespace" "name" "" (.Values.nodeAgents | default dict) | quote }}{{ else }}""{{ end }}
         # backend#664 (Utilization Ladder L0): with NEITHER env.RESOURCE_REQUESTS
         # nor env.RESOURCE_LIMITS set, BOTH vars are omitted and jobs-manager
         # sizes the envelope from node allocatable (75% with cpu=2/memory=8Gi

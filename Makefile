@@ -9,35 +9,66 @@
 #   make setup      install what those targets need, and a git pre-push hook
 #                   that runs `make check` (skip once with --no-verify).
 #
-# This file is a THIN WRAPPER. Every command below is copied from the
+# This file is a THIN WRAPPER. Almost every command below is copied from the
 # workflow that already runs it — standard-checks.yml, installer-tests.yaml
 # and helm-ci.yaml. It introduces no new tool, no new config, and no new
 # rule. When a workflow changes, change the matching line here.
+#
+# `shellcheck` is the one target not copied from a workflow LINE, but it is
+# still exactly what a workflow runs: since #753, `Standard checks / Lint` runs
+# `make lint`, so this file IS the definition rather than a copy of one. The org
+# reusable job `quality / shellcheck` (tracebloc/.github) applies the same rule
+# to the PR diff; that one cannot be copied from, so this target reproduces its
+# classification and flags, and says so in its own comment.
 
 .DEFAULT_GOAL := help
 
-# The shellcheck file set from installer-tests.yaml's `static` job (a
-# superset of standard-checks.yml's list), at the same `error` severity.
-SHELLCHECK_FILES := \
-	scripts/install.sh \
-	scripts/install-k8s.sh \
-	scripts/gen-manifest.sh \
-	scripts/check-facts.sh \
-	scripts/check-style.sh \
-	scripts/resolve-ingestor-digest.sh \
-	scripts/lib/*.sh \
-	scripts/tests/check-drift.sh \
-	scripts/tests/distro-prereqs.sh \
-	scripts/tests/e2e-auto-upgrade.sh \
-	scripts/tests/e2e-seal-check.sh \
-	scripts/tests/e2e-full-seal.sh \
-	scripts/tests/e2e-cluster.sh \
-	scripts/tests/e2e-journey.sh \
-	scripts/tests/e2e-proxy.sh \
-	scripts/tests/lib/e2e-common.sh \
-	scripts/tests/path-persist.sh \
-	scripts/tests/chart-env-vocabulary.sh \
-	scripts/tests/env-vocabulary-agreement.sh
+# The shellcheck file set is DERIVED from the tree, never written down.
+#
+# It used to be a 19-entry SHELLCHECK_FILES list copied out of
+# installer-tests.yaml. Measured on develop at 8de5d64: that list expanded to 34
+# files where the same classification applied to the tree found 42 (the live
+# number is higher now and is printed by the target -- see `check` above on why
+# it is not restated here). It had drifted past eight real scripts --
+#
+#   docker/k3s-cuda/build.sh          docker/k3s-cuda/k3d-entrypoint-tracebloc-cdi.sh
+#   docs/migration-tools/generate.sh  docs/migration-tools/migrate-tenant.sh
+#   scripts/chart-version-guard.sh    scripts/check-digest-drift.sh
+#   scripts/index-invariants.sh       scripts/tests/test_helper.bash
+#
+# -- and a parse error planted in index-invariants.sh was invisible to the list
+# and caught by the derivation. This is the SECOND drift of this list;
+# backend#1606 found the first and fixed it by re-copying, which reset the
+# clock rather than stopping it. Enumerating a file set is the defect.
+#
+# The rule below is the one `quality / shellcheck` applies (the required check,
+# in tracebloc/.github's code-quality.yml): classify by extension, else by
+# shebang; skip .bats/.ps1/.psm1/.zsh; error severity; SC1091 excluded because
+# a library sourced through a variable path can never be followed. Same rule,
+# same flags.
+#
+# SCOPE, precisely, because #753's first draft got this wrong (Arturo review):
+#   * this target, run by `Standard checks / Lint` and by `make check` -- the
+#     WHOLE TREE, on every PR and every push.
+#   * `quality / shellcheck` -- the PR DIFF only. Its caller passes
+#     `all-files: false` and declares no `schedule:`, so on a PR touching no
+#     shell file it legitimately reports "Shell files to check: 0" and exits 0.
+# Both are required checks and both derive. Dropping the whole-tree half would
+# leave no CI job sweeping the full tree at error severity, which is what the
+# old enumerated jobs did on every run.
+#
+# Versions differ, and that is not drift: the runner ships 0.9.0 (measured in
+# run 32232682350), a dev box is typically newer -- 0.11.0 via brew today. The
+# 44-file set was verified green under BOTH before this was armed.
+#
+# Honest limit, because a comment claiming "cannot drift" would be the thing
+# this change is deleting: this MIRRORS the org job's rule across a repo
+# boundary, it does not read it. If that classification changes, this needs the
+# same edit. What is gone is the enumeration -- the part that actually drifted.
+#
+# Note `--shell=bash` is deliberately NOT passed (the old inline copies did).
+# The gate infers the dialect from each file's shebang; forcing bash would make
+# a local run disagree with it on the repo's `#!/bin/sh` scripts.
 
 # The bats total, DERIVED — never written down. It moves on most PRs that add a
 # test, nothing enforces it, and the help text had drifted from its hardcoded
@@ -54,12 +85,13 @@ BATS_TEST_COUNT = $(shell grep -h '^@test' scripts/tests/*.bats 2>/dev/null | wc
 help:
 	@echo "tracebloc/client — make targets"
 	@echo
-	@echo "  check       lint + fast checks (~4 s) — run this before every push"
+	@echo "  check       lint + fast checks (~10 s) — run this before every push"
 	@echo "  check-all   everything CI runs locally, including the $(BATS_TEST_COUNT)-test bats suite"
 	@echo "  setup       check for / point at the tools these targets need; installs the pre-push hook"
 	@echo "  install-hooks  (re)install the git pre-push hook that runs 'make check'"
 	@echo
-	@echo "  individual: lint bats helm-lint helm-vocab helm-template helm-unittest drift"
+	@echo "  individual: lint (= parse + shellcheck) bats helm-lint helm-vocab"
+	@echo "              helm-template helm-unittest drift"
 	@echo
 	@echo "  NOT here (CI-only, by name): the 9-distro prereq matrix, e2e-cluster"
 	@echo "  (k3d), e2e-proxy (squid), path-persist, Pester, windows-e2e,"
@@ -67,8 +99,18 @@ help:
 
 # ---- check: the pre-push tier ------------------------------------
 #
-# Measured at ~4 s (macOS): bash -n 0.1 s, shellcheck 3.2 s, the three
-# drift guards 0.2 s, helm lint 0.7 s.
+# Re-measured 2026-08-19 (macOS, shellcheck 0.11.0), ~10 s total: parse 0.1 s,
+# shellcheck 5.2 s, drift 0.4 s, helm-lint 0.7 s, helm-vocab 3.1 s. The old
+# note here said 4 s and listed only four of the five targets -- it predated
+# helm-vocab and never counted it. shellcheck got slower (3.2 -> 5.2 s) because
+# #753 replaced the enumerated 34-file list with everything the derivation
+# finds; that is the scripts nothing was checking, not a slowdown.
+# Still six times inside the 60 s budget.
+#
+# No file count is written down here on purpose. It moves -- it was 42 when #753
+# was measured and 44 once #747 landed -- and a stale number in a comment is the
+# defect this PR exists to remove. Both targets print their live count when they
+# run, the same reasoning as BATS_TEST_COUNT above.
 #
 # The bats suite is deliberately NOT here. It is the repo's real unit
 # suite and it takes ~2 min serially on macOS — three times over the
@@ -147,7 +189,10 @@ install-hooks:
 
 # ---- individual targets ------------------------------------------
 
-# lint: standard-checks.yml `Lint` + installer-tests.yaml `static`.
+# lint: both halves, and `Standard checks / Lint` runs exactly this target, so
+# the pre-push tier and the merge gate cannot disagree about what linting means
+# (backend#1850). Neither half installs anything: bash is bash, and shellcheck is
+# preinstalled on ubuntu-latest.
 # .bats files are bats DSL, not valid bash — they are exercised by
 # actually running them in the `bats` target.
 #
@@ -157,12 +202,86 @@ install-hooks:
 # pipeline would still exit 0, so `make check` would cheerfully print
 # "all shell scripts parse" having parsed nothing. GitHub Actions uses
 # bash, so CI never showed it. xargs is POSIX, NUL-safe, and propagates
-# a child failure as a non-zero exit. (Bugbot, #630.)
+# a child failure as a non-zero exit. (Bugbot, #630.) The same hazard is why
+# the `shellcheck` target materialises its file list instead of piping it.
 .PHONY: lint
-lint:
-	@find scripts -type f -name '*.sh' -print0 | xargs -0 -n1 bash -n
-	@echo "all shell scripts parse"
-	shellcheck --severity=error --shell=bash $(SHELLCHECK_FILES)
+lint: parse shellcheck
+
+# parse: bash -n over every shell script under scripts/. Reached in CI through
+# `make lint`, which is what `Standard checks / Lint` runs -- not as a target of
+# its own. Needs nothing but bash, which is why it survived #753's install purge.
+#
+# Materialises the list and counts it, for the same reason the `shellcheck`
+# target does (Arturo, #754 review). The previous one-liner was
+#
+#     @find scripts -type f -name '*.sh' -print0 | xargs -0 -n1 bash -n
+#     @echo "all shell scripts parse"
+#
+# and it FAILED OPEN in two ways at once. `find`'s exit status is lost across
+# the pipe -- recipes run under dash, which has no `pipefail` -- and `xargs`
+# with no input runs nothing and exits 0. So in a tree where `scripts/` is
+# missing or renamed it printed
+#
+#     find: scripts: No such file or directory
+#     all shell scripts parse
+#
+# and exited 0, under both dash and bash. That was survivable while an
+# enumerated shellcheck line ran straight after it and would have failed on the
+# same breakage; #753 made `parse` a load-bearing half of the required `Lint`
+# check, which is exactly when a fail-open stops being tolerable.
+#
+# The count is derived and printed, so "parsed nothing" can no longer read
+# identically to "parsed everything" -- the #630 hazard, one target over.
+.PHONY: parse
+parse:
+	@files=$$(mktemp); \
+	if ! find scripts -type f -name '*.sh' -print > "$$files" 2>/dev/null; then \
+	  echo "parse: could not enumerate scripts/ -- refusing to report green"; \
+	  rm -f "$$files"; exit 1; \
+	fi; \
+	n=$$(wc -l < "$$files" | tr -d " "); \
+	if [ "$$n" -eq 0 ]; then \
+	  echo "parse: found ZERO shell scripts under scripts/ -- refusing to report green"; \
+	  rm -f "$$files"; exit 1; \
+	fi; \
+	tr "\n" "\0" < "$$files" | xargs -0 -r -n1 bash -n; \
+	rc=$$?; rm -f "$$files"; \
+	if [ "$$rc" -eq 0 ]; then echo "all $$n shell scripts parse"; fi; \
+	exit $$rc
+
+# shellcheck: run BOTH by the pre-push tier and by CI -- `Standard checks /
+# Lint` calls `make lint`, which is this plus `parse`. No install anywhere:
+# shellcheck is preinstalled on ubuntu-latest. One definition, so `make check`
+# genuinely predicts the gate instead of merely resembling it (backend#1850).
+#
+# Two fail-closed properties, both of which the old one-liner lacked:
+#   * classifying ZERO files is a FAILURE, not a green run. A silent no-op is
+#     exactly how a broken derivation would look (backend#1729 rule 3).
+#   * the classifier's exit code is not swallowed by the pipe. Recipes run
+#     under /bin/sh -- dash on Debian, no pipefail -- so the file list is
+#     materialised first and shellcheck's own status is what propagates.
+# The `; :` inside the classifier is load-bearing: `grep -q ... && printf`
+# exits 1 on every non-shell file, which would otherwise make xargs return 123.
+.PHONY: shellcheck
+shellcheck:
+	@files=$$(mktemp); \
+	git ls-files -z \
+	  | xargs -0 -r -n1 sh -c 'case "$$1" in \
+	      *.sh|*.bash|*.ksh) printf "%s\n" "$$1" ;; \
+	      *.bats|*.ps1|*.psm1|*.zsh) ;; \
+	      *) head -n 1 "$$1" 2>/dev/null \
+	           | grep -Eq "^#![[:space:]]*[^[:space:]]*(/|[[:space:]])(ba|da|k)?sh([[:space:]]|$$)" \
+	           && printf "%s\n" "$$1" ;; \
+	    esac; :' sh > "$$files"; \
+	n=$$(wc -l < "$$files" | tr -d " "); \
+	if [ "$$n" -eq 0 ]; then \
+	  echo "shellcheck: classified ZERO shell files -- the derivation above is broken."; \
+	  echo "            Refusing to report green on an empty file set."; \
+	  rm -f "$$files"; exit 1; \
+	fi; \
+	echo "shellcheck: $$n file(s), severity=error"; \
+	tr "\n" "\0" < "$$files" | xargs -0 -r shellcheck --severity=error --exclude=SC1091; \
+	rc=$$?; rm -f "$$files"; exit $$rc
 
 # drift: the repo's duplicated-declaration guards. The first three come from
 # installer-tests.yaml's `static` job; all three are pure local file
@@ -182,6 +301,7 @@ drift:
 	scripts/check-facts.sh --check
 	bash scripts/check-style.sh
 	bash scripts/tests/env-vocabulary-agreement.sh
+	bash scripts/tests/telemetry-vocabulary-agreement.sh
 
 # digest-drift: the watcher on every mutable label that points at a pinned
 # digest (backend#1853). NOT in `check`: it needs the network and a docker

@@ -252,6 +252,15 @@ nvidia-device-plugin-daemonset
 {{- end }}
 
 {{/*
+  jobs-manager Role/RoleBinding pair in the node-agents namespace. Distinct from
+  tracebloc.rbacName so the pairs cannot collide when that namespace IS the
+  release namespace.
+*/}}
+{{- define "tracebloc.rbacNodeAgentsName" -}}
+{{ .Release.Name }}-jobs-manager-node-agents
+{{- end }}
+
+{{/*
   Name of the requests-proxy Deployment. ONE definition, because #569 gave it a
   second consumer: image-refresh reconciles it by name with `kubectl set image`,
   so a rename that reached only the Deployment would leave the CronJob patching
