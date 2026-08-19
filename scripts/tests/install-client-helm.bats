@@ -1308,6 +1308,11 @@ _engine_fixture() {
   ARCH=arm64; touch "$HOST_DATA_DIR/mysql/ibdata1"
   [ "$(_mysql_engine_decision)" = "5.7 existing-datadir" ] || return 1
   rm -f "$HOST_DATA_DIR/mysql/ibdata1"
+  # A live Helm release is a DISTINCT reason from real datadir content: same 5.7
+  # engine, different remedy (helm list, not the data dir).
+  existing_id="someclient"
+  [ "$(_mysql_engine_decision)" = "5.7 existing-release" ] || return 1
+  existing_id=""
   TB_MYSQL_ENGINE=5.7
   [ "$(_mysql_engine_decision)" = "5.7 explicit" ] || return 1
   TB_MYSQL_ENGINE=8.4
@@ -1327,10 +1332,11 @@ _engine_fixture() {
   # mutating the sticky branch — it stayed green until this loop existed).
   log() { echo "LOGGED: $*"; }
   local case_name
-  for case_name in fresh amd64 existing-datadir explicit invalid sticky; do
+  for case_name in fresh amd64 existing-release existing-datadir explicit invalid sticky; do
     _engine_fixture; ARCH=arm64
     case "$case_name" in
       amd64)            ARCH=x86_64 ;;
+      existing-release) existing_id="someclient" ;;
       existing-datadir) touch "$HOST_DATA_DIR/mysql/ibdata1" ;;
       explicit)         TB_MYSQL_ENGINE=5.7 ;;
       invalid)          TB_MYSQL_ENGINE=9.0 ;;
@@ -1405,6 +1411,22 @@ _arch_gate_ctx() {
   [[ "$output" == *"existing MySQL 5.7 data"* ]] || return 1
   [[ "$output" == *"data-format constraint, not an architecture one"* ]] || return 1
   [[ "$output" != *"provision an amd64"* ]] || return 1
+}
+
+# The existing-release reason (a live Helm release, not host files) must NOT
+# claim this host holds 5.7 data, and must NOT offer --data-dir — that remedy
+# cannot clear a release `helm list` reports, so the next run would refuse
+# identically (Asad, client#748).
+@test "_assert_engine_runs_on_this_arch: existing-release refuses without a false data claim or a --data-dir remedy" {
+  _arch_gate_ctx; TB_MYSQL_ENGINE_REASON=existing-release
+  run _assert_engine_runs_on_this_arch
+  [ "$status" -ne 0 ] || return 1
+  [[ "$output" == *"existing tracebloc release is installed"* ]] || return 1
+  # never asserts the host data is 5.7-format as fact...
+  [[ "$output" != *"This host holds existing MySQL 5.7 data"* ]] || return 1
+  # ...and never offers the remedy that cannot clear a helm-list trigger.
+  [[ "$output" != *"--data-dir"* ]] || return 1
+  [[ "$output" == *"uninstall the existing release first"* ]] || return 1
 }
 
 @test "_assert_engine_runs_on_this_arch: explicit 5.7 request gets the request-shaped remedy" {
