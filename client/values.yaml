@@ -817,15 +817,50 @@ podTokenSigningSecret: ""
 # expires. Default 7 days.
 podTokenTtlSeconds: 604800
 
-# -- Docker registry credentials (optional; only used when dockerRegistry is set and create is true)
-# Omit dockerRegistry entirely, or set create: false, for public images (no imagePullSecrets).
-# When create is true, secret name is {{ .Release.Name }}-regcred.
+# -- Docker registry credentials (optional). Two supported shapes, and they are
+# mutually exclusive -- setting both fails the render rather than picking one.
+#
+# 1. LET THE CHART BUILD IT: `create: true` plus the credentials below. The
+#    Secret is named `{{ .Release.Name }}-regcred` (release-scoped, so two
+#    releases in one namespace cannot share it) and is mirrored automatically
+#    into the node-agents and GPU device-plugin namespaces when those are
+#    enabled and differ from the release namespace.
+#
+# 2. BRING YOUR OWN: `existingSecret: <name>` naming a `kubernetes.io/
+#    dockerconfigjson` Secret you created yourself. Use this when registry
+#    credentials must not live in values. The chart references it and never
+#    writes it -- it has no credentials to write it with.
+#
+#    YOU must create that Secret in every namespace that pulls: the release
+#    namespace, plus `nodeAgents.namespace.name` (default
+#    "tracebloc-node-agents") while `resourceMonitor` is true, plus
+#    `gpu.devicePlugin.namespace` (default "kube-system") while the device
+#    plugin is enabled. The chart cannot mirror a Secret whose contents it does
+#    not have. If one is missing, those pods report ImagePullBackOff -- loud and
+#    diagnosable, unlike the failure this option exists to prevent.
+#
+# Omit `dockerRegistry` entirely, or set `create: false` with no
+# `existingSecret`, for public images: no imagePullSecrets are rendered
+# anywhere, and jobs-manager stamps none onto training pods either. That is the
+# honest declaration of an anonymous pull.
+#
+# `existingSecret` was added for a config that used to half-work by accident
+# (client#751): `create: false` plus a hand-made Secret literally named
+# `regcred`. Chart-rendered pods pulled anonymously while TRAINING pods
+# authenticated, because client-runtime's job.yaml carried `regcred` as a
+# hardcoded literal. backend#2119 replaces that literal with the name below, so
+# those installs need to say what they are using. Set `existingSecret: regcred`
+# to keep working, and note that it now covers your control-plane pods too.
+#
 # dockerRegistry:
 #   create: true
 #   server: https://index.docker.io/v1/
 #   username: "<DOCKER_USERNAME>"
 #   password: "<DOCKER_REGISTRY_TOKEN>"
 #   email: "<DOCKER_EMAIL>"
+#
+# dockerRegistry:
+#   existingSecret: regcred
 
 # -- Self-upgrade CronJob (closes tracebloc/client#69).
 # Runs `helm upgrade --reuse-values` against this release on a schedule, so

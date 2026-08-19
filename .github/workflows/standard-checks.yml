@@ -71,6 +71,11 @@ jobs:
     runs-on: ubuntu-latest
     # See the lint job: no job in this file had a timeout before #753.
     # bats itself runs in ~2 min; the headroom is for the apt install.
+    #
+    # The helm install added for #751 does not move this: setup-helm downloads a
+    # single ~15 MB binary from get.helm.sh and is measured in seconds, and the
+    # worst case documented on the bats step below (390 s of bounded apt retries
+    # + ~155 s of bats = ~9 min) leaves ~6 min of headroom inside the 15.
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -114,5 +119,24 @@ jobs:
           echo "::error::could not install bats in 3 bounded attempts - runner-to-mirror connectivity, not this PR. Re-run this job."
           exit 1
 
+      # scripts/tests/chart-pull-secret.bats renders the REAL chart, so this
+      # required job needs helm or those cases self-skip and a wrong
+      # IMAGE_PULL_SECRET_NAME or Secret name ships green (Bugbot on #751 -- the
+      # tests were written, added to the suite, and silently skipped by the only
+      # job that runs the suite).
+      #
+      # Same sha-pinned action and same v3.15.4 pin as helm-ci.yaml and
+      # drift-checks.yaml, for the reason helm-ci states: helm is absent from the
+      # runner image, and an unpinned one silently changes which assertions run.
+      # The bats file's own version gate keys off this pin.
+      - name: Set up Helm
+        uses: azure/setup-helm@1a275c3b69536ee54be43f2070a358922e12c8d4 # v4.3.1
+        with:
+          version: v3.15.4
+
       - name: Run bats (bash unit suite, mocked)
+        # CI=true is already set by GitHub; chart-pull-secret.bats reads it to
+        # turn "helm is missing" from a skip into a FAILURE. A skip is the right
+        # answer on a laptop without helm and the wrong one in a required gate,
+        # where it is indistinguishable from a pass.
         run: bats scripts/tests/*.bats
