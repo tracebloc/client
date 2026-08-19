@@ -963,11 +963,30 @@ _resolve_mysql_engine() {
 _assert_engine_runs_on_this_arch() {
   [[ "${TB_MYSQL_ENGINE_RESOLVED:-}" == "5.7" ]] || return 0
   [[ -z "${TRACEBLOC_ALLOW_ARM64:-}" ]] || return 0
-  [[ "${OS:-}" == "Linux" ]] || return 0
   case "${ARCH:-$(uname -m)}" in x86_64|amd64) return 0 ;; esac
-  if amd64_emulation_available; then return 0; fi
-  # Name the actual cause. Only `explicit`, `existing-release` and
-  # `existing-datadir` can reach here (`sticky`/`fresh` resolve to 8.4, `amd64`
+  # arm64 + 5.7 needs amd64 emulation. Check it PER OS — binfmt on Linux, the
+  # Rosetta/Docker smoke on macOS (binfmt does not exist there). This gate runs on
+  # macOS too now (client#756): assert_amd64_emulation runs BEFORE helm and can
+  # only GUESS the engine (existing_id needs a live release), so it optimistically
+  # skips on an 8.4 guess. Here the engine is resolved for real — so on an arm64
+  # Mac that actually resolved to 5.7 (an existing release the early gate could not
+  # see) we re-verify emulation and refuse if it is missing. This is the fail-closed
+  # backstop the early skip depends on.
+  case "${OS:-}" in
+    Linux)
+      amd64_emulation_available && return 0
+      ;;  # fall through to the Linux (binfmt) reason-messages below
+    Darwin)
+      declare -F _macos_amd64_emulation_ok >/dev/null 2>&1 && _macos_amd64_emulation_ok && return 0
+      # Emulation missing (or the smoke helper somehow absent): the macOS Rosetta
+      # remedy, then exit. Do NOT fall through to the binfmt messages below.
+      declare -F _macos_amd64_refusal >/dev/null 2>&1 && _macos_amd64_refusal
+      error "MySQL 5.7 is required here, but amd64 emulation could not be verified on this Apple Silicon Mac — enable Rosetta and re-run (or set TRACEBLOC_ALLOW_ARM64=1 to override)." ;;
+    *)
+      return 0 ;;  # unknown OS: no emulation model — do not gate
+  esac
+  # LINUX ONLY past here. Name the actual cause. Only `explicit`, `existing-release`
+  # and `existing-datadir` can reach here (`sticky`/`fresh` resolve to 8.4, `amd64`
   # was returned above), but the reason is matched rather than assumed: a future
   # reason must not inherit a claim about this host's data that may be false.
   case "${TB_MYSQL_ENGINE_REASON:-}" in
