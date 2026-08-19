@@ -67,8 +67,8 @@ help:
 
 # ---- check: the pre-push tier ------------------------------------
 #
-# Measured at ~4 s (macOS): bash -n 0.1 s, shellcheck 3.2 s, the three
-# drift guards 0.2 s, helm lint 0.7 s.
+# Measured at ~5 s (macOS): bash -n 0.1 s, shellcheck 3.2 s, the five
+# drift guards 1.0 s, helm lint 0.7 s.
 #
 # The bats suite is deliberately NOT here. It is the repo's real unit
 # suite and it takes ~2 min serially on macOS — three times over the
@@ -164,24 +164,69 @@ lint:
 	@echo "all shell scripts parse"
 	shellcheck --severity=error --shell=bash $(SHELLCHECK_FILES)
 
-# drift: the repo's duplicated-declaration guards. The first three come from
-# installer-tests.yaml's `static` job; all three are pure local file
-# comparisons (~0.2 s) and all three have a --write / regenerate mode named in
-# their own output.
+# lint-warnings: the advisory `--severity=warning` sweep, over the SAME file set
+# (hence no second list). NOT part of `lint` and NOT a gate: the libs are sourced
+# together as one program, so single-file shellcheck reports SC2034 "unused" for
+# shared vars (CURL_SECURE, ARCH_DL, the colours) that common.sh defines and
+# other libs consume. It is printed for visibility only.
 #
-# The fourth is the CLIENT_ENV vocabulary-agreement guard (backend#1729
-# sweep 5). It lives here, not in `helm-vocab`, because #715 moved it out of
-# helm-ci's `Helm lint` into drift-checks.yaml's `Source-of-truth drift` job --
-# the one that is a REQUIRED check, so the guard can block rather than advise.
-# helm-ci's lint job calls `make helm-lint helm-vocab`, so keeping the guard in
-# `helm-vocab` would silently put it back where #715 took it from. ~2 s, bash
-# and python3 only.
+# It exists as a target because installer-tests.yaml's `static` job used to run
+# this sweep inline, and that job is gone; standard-checks.yml's `Lint` calls
+# this so the visibility survives the move rather than being quietly dropped.
+.PHONY: lint-warnings
+lint-warnings:
+	@shellcheck --severity=warning --shell=bash $(SHELLCHECK_FILES) || true
+
+# drift: the repo's duplicated-declaration guards, and the ONLY declaration of
+# that set. drift-checks.yaml's `Source-of-truth drift` job -- the one that is a
+# REQUIRED check on develop and on main -- runs `make drift` and lists nothing
+# itself, so a guard added here gates automatically and the pre-push hook and
+# the merge gate cannot disagree about what "the drift guards" are.
+#
+# They could, and did. Until 2026-08-19 this target held gen-manifest /
+# check-facts / check-style while the required job held check-drift, so each
+# side gated exactly what the other did not: a stale manifest.sha256 was caught
+# by the pre-push hook and NOT at the merge gate, because the job that ran R8
+# (`Static analysis`) is required on no branch. Hence one list, here.
+#
+# All five are pure local file comparisons and all have a --write / regenerate
+# mode named in their own output. ~2 s total; check-drift adds `helm template`
+# (~1 s) and is the only one that wants a tool beyond bash + python3.
+#
+# env-vocabulary-agreement lives here, not in `helm-vocab`, because #715 moved
+# it out of helm-ci's `Helm lint` into the required drift job; helm-ci's lint job
+# calls `make helm-lint helm-vocab`, so keeping it there would silently put it
+# back where #715 took it from.
+# `|`-separated because each guard is a multi-word command; the recipe splits on
+# it. One entry per guard, and this is the only place they are written down.
+DRIFT_GUARDS := scripts/gen-manifest.sh --check|scripts/check-facts.sh --check|bash scripts/check-style.sh|bash scripts/tests/check-drift.sh|bash scripts/tests/env-vocabulary-agreement.sh
+
+# Every guard RUNS even when an earlier one fails, and the target fails at the
+# end if any did. Sequential `cmd1<newline>cmd2` recipe lines stop at the first
+# failure, which means a stale manifest hides a terminology violation until you
+# fix the manifest, push, and wait for CI again -- three round trips to learn two
+# independent mechanical facts that took one second each to compute.
+#
+# This is NOT the fail-open shape. A failure here still fails the target and so
+# reddens the REQUIRED `Source-of-truth drift` check; the guards are independent
+# in their REPORTING, not in whether they block. (Contrast the bug this replaced:
+# guards sharing one job's `timeout-minutes` reported `skipped` and blocked
+# nothing.) `if [ "$$fail" -ne 0 ]` at the end is what keeps it closed -- a guard
+# that cannot be reached still counts as a failure, because sh -c returns
+# non-zero for a missing or non-executable script.
 .PHONY: drift
 drift:
-	scripts/gen-manifest.sh --check
-	scripts/check-facts.sh --check
-	bash scripts/check-style.sh
-	bash scripts/tests/env-vocabulary-agreement.sh
+	@guards='$(DRIFT_GUARDS)'; \
+	fail=0; IFS='|'; for g in $$guards; do \
+	  printf '\n==> %s\n' "$$g"; \
+	  sh -c "$$g" || { fail=1; printf '!! FAILED: %s\n' "$$g"; }; \
+	done; \
+	unset IFS; \
+	if [ "$$fail" -ne 0 ]; then \
+	  printf '\ndrift: one or more guards FAILED (all were run — see !! lines above)\n'; \
+	  exit 1; \
+	fi; \
+	printf '\ndrift: all guards green\n'
 
 # digest-drift: the watcher on every mutable label that points at a pinned
 # digest (backend#1853). NOT in `check`: it needs the network and a docker

@@ -13,6 +13,12 @@ name: Drift checks
 # printing red on a workflow nobody has to wait for. A guard that cannot block
 # is advice (backend#1729).
 #
+# It is therefore also the home for the R8 installer-manifest check and the
+# cross-OS facts check, which moved here from installer-tests.yaml's `static`
+# job (`Static analysis`, required on NO branch) on 2026-08-19. If you add a
+# guard, add it to the Makefile's `drift` target -- this job runs that target
+# and holds no list of its own.
+#
 # NO `paths:` ON pull_request, deliberately. `Source-of-truth drift` is a
 # REQUIRED status check on develop and on main, and a required check that is
 # path-filtered can never report on a PR outside those paths -- GitHub leaves it
@@ -31,6 +37,13 @@ on:
       - 'scripts/**'
       - 'client/**'
       - '.github/workflows/drift-checks.yaml'
+      # #616: check-facts pins the GPU node image's k3s tag against
+      # scripts/spec/facts.env, so a K3S_TAG edit under docker/k3s-cuda must run
+      # this job too. These moved here with the guard itself, out of
+      # installer-tests.yaml's `paths`.
+      - 'docker/k3s-cuda/**'
+      - '.github/workflows/build-k3s-cuda.yaml'
+      - 'Makefile'
   pull_request:
     branches: [main, develop, openshift]
   workflow_dispatch:
@@ -48,14 +61,39 @@ jobs:
         uses: azure/setup-helm@1a275c3b69536ee54be43f2070a358922e12c8d4 # v4.3.1
         with:
           version: v3.15.4
-      - name: check-drift
-        run: bash scripts/tests/check-drift.sh
-      # One CLIENT_ENV vocabulary, four declarations (Go template, JSON Schema,
-      # bash, PowerShell), backend#1729 sweep 5. Lives here rather than in
-      # helm-ci because helm-ci's `Helm lint` is NOT a required check, so the
-      # guard could only advise: a PR that made the four disagree was mergeable
-      # with it red. It needs bash + python3 only (~2s), and drift-checks runs
-      # unfiltered on every PR, so it reports on the installer-only PRs that
-      # helm-ci's `paths:` filter would have skipped entirely.
-      - name: CLIENT_ENV vocabulary agreement (backend#1729)
-        run: bash scripts/tests/env-vocabulary-agreement.sh
+      # ONE step, and it does not spell the guard list out: `make drift` is the
+      # single declaration of "the duplicated-declaration guards", and the
+      # pre-push hook (`make check` -> `drift`) runs the identical set. Listing
+      # them here again would be a second copy to drift from -- which is exactly
+      # what this job exists to catch, and exactly what had happened: the
+      # Makefile's `drift` target carried gen-manifest/check-facts/check-style
+      # while this job carried check-drift, so each side gated what the other
+      # did not. Add a guard in the Makefile and it gates here automatically.
+      #
+      # The guards this covers, and why each is a merge gate rather than advice:
+      #   gen-manifest.sh --check   R8 supply chain. The bootstrap verifies every
+      #                             sub-script against scripts/manifest.sha256
+      #                             before the privileged steps; a script changed
+      #                             without regenerating the manifest publishes a
+      #                             manifest that rejects the scripts it ships.
+      #   check-facts.sh --check    Cross-OS tool pins single-sourced from
+      #                             scripts/spec/facts.env (#435, #616).
+      #   check-style.sh            Terminal style + terminology (STYLE.md).
+      #   check-drift.sh            Chart <-> script name/host coupling.
+      #   env-vocabulary-agreement  One CLIENT_ENV vocabulary, four declarations
+      #                             (backend#1729 sweep 5).
+      #
+      # The first three moved here from installer-tests.yaml's `static` job on
+      # 2026-08-19. `Static analysis` is required on no branch, so all three were
+      # advice: a PR could change an installer script, leave manifest.sha256
+      # stale, and merge on its required checks. Worse, they shared that job's
+      # `timeout-minutes: 10` with an apt-get, and on 2026-08-19 that apt-get ate
+      # the whole budget five times on client#752 -- all four guards reported
+      # `skipped` while the required checks went green. A guard that shares a
+      # budget with an unrelated download can be silenced by it.
+      #
+      # No `timeout-minutes` here, deliberately. A required job with no timeout
+      # that hangs blocks the merge; a required job that is killed mid-way can
+      # report guards as `skipped`. Fail closed: prefer the slow red.
+      - name: Duplicated-declaration guards (make drift)
+        run: make drift
