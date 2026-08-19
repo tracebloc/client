@@ -27,15 +27,8 @@ rules:
   - apiGroups: [""]
     resources: ["pods", "pods/log", "events"]
     verbs: ["get", "list", "watch"]
-  # client-runtime#152: jobs-manager reports a version inventory on the
-  # heartbeat, assembled from the configured images on the chart's own
-  # workloads. `deployments` covers jobs-manager, pods-monitor,
-  # requests-proxy, mysql-client and egress-proxy; `daemonsets` is needed
-  # for resource-monitor, the one workload that is not a Deployment.
-  # Read-only, and scoped to the release namespace in the Role branch.
-  # Without daemonsets the list 403s and resource-monitor is reported as
-  # null forever — the runtime degrades rather than failing, so the symptom
-  # is a permanently blank field, not an error anyone would chase.
+  # Read-only, for the heartbeat version inventory: `deployments` covers every
+  # chart workload except resource-monitor, which needs `daemonsets`.
   - apiGroups: ["apps"]
     resources: ["deployments", "daemonsets"]
     verbs: ["get", "list", "watch"]
@@ -135,15 +128,8 @@ rules:
   - apiGroups: [""]
     resources: ["pods", "pods/log", "events"]
     verbs: ["get", "list", "watch"]
-  # client-runtime#152: jobs-manager reports a version inventory on the
-  # heartbeat, assembled from the configured images on the chart's own
-  # workloads. `deployments` covers jobs-manager, pods-monitor,
-  # requests-proxy, mysql-client and egress-proxy; `daemonsets` is needed
-  # for resource-monitor, the one workload that is not a Deployment.
-  # Read-only, and scoped to the release namespace in the Role branch.
-  # Without daemonsets the list 403s and resource-monitor is reported as
-  # null forever — the runtime degrades rather than failing, so the symptom
-  # is a permanently blank field, not an error anyone would chase.
+  # Read-only, for the heartbeat version inventory: `deployments` covers every
+  # chart workload except resource-monitor, which needs `daemonsets`.
   - apiGroups: ["apps"]
     resources: ["deployments", "daemonsets"]
     verbs: ["get", "list", "watch"]
@@ -197,24 +183,10 @@ roleRef:
 {{- if and (ne .Values.resourceMonitor false) $nodeAgentsNs (ne $nodeAgentsNs .Release.Namespace) }}
 ---
 {{/*
-  jobs-manager in the NODE-AGENTS namespace (client-runtime#152).
-
-  The heartbeat version inventory reads the configured image off each of the
-  chart's workloads. Five of them are Deployments in the release namespace and
-  are covered by the Role/ClusterRole above — but resource-monitor is a
-  DaemonSet in `nodeAgents.namespace.name`, deliberately split out so it can run
-  under PSA `privileged` without widening the release namespace.
-
-  A grant in the release namespace therefore does not reach it: the list call
-  succeeds with zero items and the inventory reports resource-monitor as null,
-  which reads as "not deployed". The ClusterRole branch already covers it
-  cluster-wide, so this pair exists for `clusterScope: false` edges (including
-  OpenShift). Same second-Role split image-refresh already uses for this exact
-  namespace boundary (image-refresh-rbac.yaml).
-
-  Read-only, and rendered only when there IS a DaemonSet to read: with
-  resourceMonitor off, or with the node-agents namespace pointing back at the
-  release namespace (already granted above), this is pure unused surface.
+  jobs-manager reads the resource-monitor DaemonSet for the heartbeat version
+  inventory, and that DaemonSet lives in nodeAgents.namespace, not the release
+  namespace — so the Role above cannot reach it. The ClusterRole branch already
+  covers it; this pair is for clusterScope: false. Mirrors image-refresh-rbac.
 */}}
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
@@ -236,10 +208,8 @@ metadata:
   labels:
     {{- include "tracebloc.labels" . | nindent 4 }}
 subjects:
-  # The SUBJECT keeps tracebloc.serviceAccountName: there is only ONE
-  # jobs-manager ServiceAccount and it lives in the release namespace. Only the
-  # Role and RoleBinding are renamed, to avoid colliding with the
-  # release-namespace pair.
+  # One ServiceAccount, in the release namespace; only the Role/RoleBinding
+  # names differ, so the two pairs cannot collide.
   - kind: ServiceAccount
     name: {{ include "tracebloc.serviceAccountName" . }}
     namespace: {{ .Release.Namespace }}

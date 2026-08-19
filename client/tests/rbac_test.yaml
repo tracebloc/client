@@ -77,12 +77,8 @@ tests:
             resources: ["pods", "pods/log", "events"]
             verbs: ["get", "list", "watch"]
 
-  # client-runtime#152: the heartbeat version inventory reads the chart's own
-  # workloads. resource-monitor is a DaemonSet, so a deployments-only grant
-  # reports it as null forever — and because the runtime degrades rather than
-  # failing, the symptom is a blank field nobody would chase. Assert BOTH
-  # branches: an edge on clusterScope: false must get it too.
-  - it: ClusterRole grants read on deployments and daemonsets for the version inventory (client-runtime#152)
+  # Assert both branches — a clusterScope: false edge needs the grant too.
+  - it: ClusterRole grants read on deployments and daemonsets for the version inventory
     set:
       clusterScope: true
     documentIndex: 1
@@ -94,7 +90,7 @@ tests:
             resources: ["deployments", "daemonsets"]
             verbs: ["get", "list", "watch"]
 
-  - it: namespaced Role grants read on deployments and daemonsets too (client-runtime#152)
+  - it: namespaced Role grants read on deployments and daemonsets too
     set:
       clusterScope: false
     documentIndex: 1
@@ -106,11 +102,9 @@ tests:
             resources: ["deployments", "daemonsets"]
             verbs: ["get", "list", "watch"]
 
-  # client-runtime#152 / review PR #750: resource-monitor is a DaemonSet in
-  # nodeAgents.namespace, NOT the release namespace. A release-namespace grant
-  # does not reach it — the list succeeds with zero items and the inventory
-  # reports "not deployed". clusterScope: false edges need a second Role there.
-  - it: a clusterScope=false edge gets a node-agents Role for the DaemonSet (client-runtime#152)
+  # resource-monitor is a DaemonSet in nodeAgents.namespace, not the release
+  # namespace, so a release-namespace grant does not reach it.
+  - it: a clusterScope=false edge gets a node-agents Role for the DaemonSet
     set:
       clusterScope: false
       nodeAgents:
@@ -130,7 +124,7 @@ tests:
             resources: ["daemonsets"]
             verbs: ["get", "list", "watch"]
 
-  - it: the node-agents RoleBinding binds the release-namespace ServiceAccount (client-runtime#152)
+  - it: the node-agents RoleBinding binds the release-namespace ServiceAccount
     set:
       clusterScope: false
       nodeAgents:
@@ -147,15 +141,14 @@ tests:
           path: subjects[0].namespace
           value: NAMESPACE
 
-  - it: no node-agents pair when that namespace IS the release namespace (client-runtime#152)
+  - it: no node-agents pair when that namespace IS the release namespace
     set:
       clusterScope: false
       nodeAgents:
         namespace:
           name: NAMESPACE
     asserts:
-      # The release-namespace Role already grants daemonsets there, so a second
-      # pair would be unused surface — and would collide on name.
+      # Already granted by the Role above, and a second pair would collide on name.
       - hasDocuments:
           count: 3
 

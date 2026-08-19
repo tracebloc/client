@@ -216,10 +216,9 @@ nvidia-device-plugin-daemonset
 {{- end }}
 
 {{/*
-  Name of the jobs-manager Role/RoleBinding pair in the NODE-AGENTS namespace.
-  Distinct from tracebloc.rbacName so the two pairs cannot collide when
-  `nodeAgents.namespace.name` points back at the release namespace — the same
-  reasoning as tracebloc.imageRefreshNodeAgentsName above.
+  jobs-manager Role/RoleBinding pair in the node-agents namespace. Distinct from
+  tracebloc.rbacName so the pairs cannot collide when that namespace IS the
+  release namespace.
 */}}
 {{- define "tracebloc.rbacNodeAgentsName" -}}
 {{ .Release.Name }}-jobs-manager-node-agents

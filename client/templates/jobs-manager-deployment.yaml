@@ -417,19 +417,12 @@ spec:
           value: {{ printf "%s/" (dig "imageRegistry" "docker.io" (.Values.global | default dict) | default "docker.io") | quote }}
         - name: CLIENT_ENV
           value: {{ include "tracebloc.clientEnv" . | quote }}
-        # client-runtime#152: where the resource-monitor DaemonSet lives, for
-        # the heartbeat version inventory. It is the one chart workload outside
-        # the release namespace, so without this the inventory searches the
-        # wrong namespace and reports resource-monitor as "not deployed".
-        #
-        # EMPTY when resourceMonitor is off, and that empty value is load-
-        # bearing rather than a no-op: the runtime reads unset as "older chart,
-        # use the built-in default" and set-but-empty as "there is no
-        # node-agents namespace". With resourceMonitor off the namespace and its
-        # RBAC are not rendered at all, so leaving this populated would have
-        # jobs-manager list a namespace that does not exist, with no Role to
-        # authorize it — a 403 every heartbeat, forever, about a workload the
-        # operator deliberately turned off (review, PR #750).
+        # Where the resource-monitor DaemonSet lives, for the heartbeat version
+        # inventory. EMPTY when resourceMonitor is off, and that empty value is
+        # load-bearing: the runtime reads unset as "use the built-in default"
+        # and set-but-empty as "no node-agents namespace", so leaving it
+        # populated would list a namespace that isn't rendered — a 403 every
+        # heartbeat for a workload the operator turned off.
         - name: NODE_AGENTS_NAMESPACE
           value: {{ if ne .Values.resourceMonitor false }}{{ dig "namespace" "name" "" (.Values.nodeAgents | default dict) | quote }}{{ else }}""{{ end }}
         # backend#664 (Utilization Ladder L0): with NEITHER env.RESOURCE_REQUESTS
