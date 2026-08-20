@@ -52,9 +52,16 @@ function apply_set(line,   n, a, i, tok, sign, flags) {
     if (tok !~ /^[-+]/) continue
     sign = substr(tok, 1, 1)
     flags = substr(tok, 2)
-    # `-o pipefail` / `+o pipefail` — the option name is the NEXT token.
-    if (flags ~ /o$/ && (i + 1) <= n && a[i + 1] == "pipefail") {
-      p_on = (sign == "-") ? 1 : 0
+    # `-o <name>` / `+o <name>` — the option name is the NEXT token. BOTH long
+    # forms are handled: errexit used to fall through entirely, because only
+    # `pipefail` was matched here and `-o` carries no `e` for the short-flag
+    # branch below. A file doing `set -o pipefail; set -o errexit` therefore had
+    # p_on=1, e_on=0 and every hazard in it was skipped — the matcher was
+    # spelling-sensitive, and asymmetric with the pipefail handling right beside
+    # it (Saqlain on #763).
+    if (flags ~ /o$/ && (i + 1) <= n) {
+      if (a[i + 1] == "pipefail")     p_on = (sign == "-") ? 1 : 0
+      else if (a[i + 1] == "errexit") e_on = (sign == "-") ? 1 : 0
     }
     # `e` anywhere in a combined short flag (-e, -eu, -euo, +e …).
     if (flags ~ /e/) e_on = (sign == "-") ? 1 : 0

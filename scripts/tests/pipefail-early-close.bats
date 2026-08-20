@@ -240,6 +240,37 @@ hazardous() {
   [[ "$output" != *":5:"* ]] || return 1
 }
 
+@test "the LONG forms count too — the matcher must not be spelling-sensitive" {
+  # `apply_set` handled `-o pipefail` and the short `-e`/`-eu`/`-euo`, but
+  # `set -o errexit` fell through entirely: `-o` carries no `e` for the
+  # short-flag branch, and only `pipefail` was matched in the long-form branch.
+  # A file doing `set -o pipefail; set -o errexit` had p_on=1, e_on=0 and every
+  # hazard in it was skipped (Saqlain on #763). Asserted per spelling, since
+  # the point is that they all mean the same thing.
+  local f
+  f="$WORK/long.sh"
+  printf '#!/usr/bin/env bash\nset -o pipefail\nset -o errexit\nls /tmp | head -1\n' > "$f"
+  run scan "$f"
+  [ -n "$output" ] || return 1
+
+  f="$WORK/longmixed.sh"
+  printf '#!/usr/bin/env bash\nset -o errexit\nset -o pipefail\nls /tmp | head -1\n' > "$f"
+  run scan "$f"
+  [ -n "$output" ] || return 1
+
+  f="$WORK/shortcombined.sh"
+  printf '#!/usr/bin/env bash\nset -euo pipefail\nls /tmp | head -1\n' > "$f"
+  run scan "$f"
+  [ -n "$output" ] || return 1
+}
+
+@test "and the long form DISABLES too: set +o errexit spares the rest" {
+  local f="$WORK/longoff.sh"
+  printf '#!/usr/bin/env bash\nset -o errexit\nset -o pipefail\nset +o errexit\nls /tmp | head -1\n' > "$f"
+  run scan "$f"
+  [ -z "$output" ] || return 1
+}
+
 @test "set +o pipefail disables the other half too" {
   local f; f="$(hazardous plusPipefail.sh \
     '  set +o pipefail' \
