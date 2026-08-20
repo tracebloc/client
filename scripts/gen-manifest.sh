@@ -121,6 +121,80 @@ _check_windows_bootstrap_in_sync() {
   fi
 }
 
+# Cross-check 3: the DECLARATIONS above must match what install-k8s.sh actually
+# SOURCES. The two checks above compare two declarations to each other; both can
+# agree and both be wrong. A new scripts/lib/foo.sh that install-k8s.sh sources
+# but that reaches neither array is then NEITHER fetched by the bootstrap NOR
+# covered by the manifest — so at install time it is either absent (the installer
+# breaks on a customer machine, after CI was green) or fetched by some other path
+# and executed UNVERIFIED. That is a hole in the exact property R8 exists to
+# provide. Found by @saadqbal reviewing client#755; backend#2205.
+#
+# DERIVED from the installer, never listed here — a fourth list would just be one
+# more thing to drift. Only `${LIB_DIR}/…` sources count as repo libs: a naive
+# `grep source` also matches `. /etc/os-release` (gpu-amd.sh, gpu-nvidia.sh) and
+# `source "$cred_file"` (provision.sh), neither of which is in this repo.
+#
+# Non-transitive on purpose, and that purpose is asserted rather than assumed: no
+# lib sources another lib today, so walking install-k8s.sh alone is complete. If
+# that ever changes the derivation silently becomes partial, so the assumption is
+# a machine check too (_check_no_lib_sources_lib below) rather than a comment
+# claiming it cannot happen.
+_check_sourced_libs_are_covered() {
+  local sourced declared rc=0
+  # `|| rc=$?` and NOT a bare command substitution. This file runs under
+  # `set -euo pipefail`, so a no-match `grep` (exit 1) aborts the whole script
+  # HERE — before the emptiness guard below can say why. That made the guard
+  # unreachable: the script still failed, but by accident and silently, and a
+  # guard that cannot be reached reads as coverage without being it. Caught by
+  # mutating the pattern and asserting WHICH message came out, not just that the
+  # exit was non-zero (backend#1729 rule 10).
+  #
+  # grep distinguishes the two cases and so does this: 1 is "matched nothing" and
+  # belongs to the guard below; >1 is operational (unreadable file) and is its own
+  # error, never "no libs are sourced".
+  sourced="$(grep -oE '(source|\.)[[:space:]]+"\$\{LIB_DIR\}/[A-Za-z0-9_-]+\.sh"' scripts/install-k8s.sh \
+               | grep -oE '/[A-Za-z0-9_-]+\.sh"' | tr -d '/"' | sed 's|^|scripts/lib/|' | sort -u)" || rc=$?
+  if [[ "$rc" -gt 1 ]]; then
+    echo "[ERROR] could not read scripts/install-k8s.sh to derive its sourced libs (grep exited $rc)." >&2
+    echo "        That is 'did not check', never 'nothing is sourced'." >&2
+    exit 1
+  fi
+
+  # Fail closed: a derivation that finds nothing is broken, not permission to
+  # pass. install-k8s.sh sources 17 libs; zero means the pattern stopped matching.
+  if [[ -z "$sourced" ]]; then
+    echo "[ERROR] derived ZERO sourced libs from scripts/install-k8s.sh — the derivation is broken." >&2
+    echo "        Refusing to report the manifest covered on an empty derivation." >&2
+    exit 1
+  fi
+
+  declared="$(printf '%s\n' "${FILES[@]}" | grep '^scripts/lib/' | sort -u)"
+
+  if [[ "$sourced" != "$declared" ]]; then
+    echo "[ERROR] scripts/install-k8s.sh sources a different set of libs than the manifest covers." >&2
+    echo "        < declared in FILES only (over-fetched, or a removed lib left listed)" >&2
+    echo "        > SOURCED BUT NOT COVERED — unverified at install time, and not fetched at all" >&2
+    diff <(printf '%s\n' "$declared") <(printf '%s\n' "$sourced") >&2 || true
+    exit 1
+  fi
+}
+
+# The assumption cross-check 3 rests on: no lib sources another repo lib, so
+# deriving from install-k8s.sh alone sees every lib. Asserted, because if it ever
+# stops holding the derivation above goes quietly partial — the same
+# "claim that should be a machine check" this whole family of guards exists for.
+_check_no_lib_sources_lib() {
+  local offenders
+  offenders="$(grep -lE '(source|\.)[[:space:]]+"?\$\{?LIB_DIR' scripts/lib/*.sh 2>/dev/null || true)"
+  if [[ -n "$offenders" ]]; then
+    echo "[ERROR] a lib sources another lib, so deriving from install-k8s.sh alone is no longer complete:" >&2
+    printf '          %s\n' $offenders >&2
+    echo "        Make _check_sourced_libs_are_covered transitive before landing that." >&2
+    exit 1
+  fi
+}
+
 generate() {
   local f
   {
@@ -134,6 +208,8 @@ generate() {
 
 _check_bootstrap_in_sync
 _check_windows_bootstrap_in_sync
+_check_no_lib_sources_lib
+_check_sourced_libs_are_covered
 
 if [[ "${1:-}" == "--check" ]]; then
   generate_to="$(mktemp)"
