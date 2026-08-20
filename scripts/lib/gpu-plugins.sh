@@ -42,10 +42,14 @@ verify_gpu() {
   for i in {1..18}; do
     # --request-timeout bounds the call: the 18×5s cap is only re-checked between
     # iterations, so an unbounded get-nodes against a wedged API would hang here.
-    RAW=$(kubectl get nodes -o json --request-timeout=5s 2>/dev/null \
-      | grep -o '"[^"]*gpu[^"]*"\s*:\s*"[^"]*"' \
-      | sed 's/"//g; s/\s*:\s*/=/g' | head -5 \
-      2>/dev/null || echo "")
+    # `| head -5` retired (backend#1778): on a large cluster `-o json` outruns the
+    # pipe buffer, sed takes SIGPIPE, and the `|| echo ""` that stops the abort
+    # also turns the truncation into an EMPTY result — i.e. "no GPU" on a GPU
+    # cluster. Capture first, then slice.
+    _gpu_json=$(kubectl get nodes -o json --request-timeout=5s 2>/dev/null || echo "")
+    _gpu_pairs=$(grep -o '"[^"]*gpu[^"]*"\s*:\s*"[^"]*"' <<<"$_gpu_json" \
+      | sed 's/"//g; s/\s*:\s*/=/g' || echo "")
+    RAW=$(head -5 <<<"$_gpu_pairs")
     if [[ -n "$RAW" ]]; then
       success "GPU verified and available."
       log "GPU resource on node: $RAW"
