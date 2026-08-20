@@ -106,6 +106,22 @@ jobs:
           echo "::error::could not install bats in 3 bounded attempts - runner-to-mirror connectivity, not this PR. Re-run this job."
           exit 1
 
+      # scripts/tests/chart-pull-secret.bats renders the REAL chart, so this job
+      # needs helm too. Without it `require_tool helm` fail-closes under CI=true
+      # and every `scripts/**` PR reds here instead of skipping -- the mirror
+      # image of the client#751 finding, where the suite ran with no helm and
+      # self-skipped green. standard-checks.yml already sets helm up; this job
+      # runs the same suite and was missed (Bugbot on the develop -> staging
+      # promotion, client#760).
+      #
+      # Same sha-pinned action and same v3.15.4 pin as standard-checks.yml,
+      # helm-ci.yaml and drift-checks.yaml: the bats file's own version gate keys
+      # off this pin, and an unpinned helm silently changes which assertions run.
+      - name: Set up Helm
+        uses: azure/setup-helm@1a275c3b69536ee54be43f2070a358922e12c8d4 # v4.3.1
+        with:
+          version: v3.15.4
+
       - name: Run bats
         run: bats scripts/tests/*.bats
 
