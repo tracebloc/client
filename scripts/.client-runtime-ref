@@ -1,0 +1,10 @@
+# Pinned tracebloc/client-runtime commit that scripts/tests/fixtures/
+# envelope_contract.json is vendored from (backend#2220).
+#
+# Pin, don't float: an unrelated client-runtime commit must not redden every
+# open client PR. Same rule as cli/scripts/.client-ref. The weekly run is what
+# catches a pin gone stale enough to matter.
+#
+# Bump this ref (and re-vendor the fixture) whenever the envelope contract
+# changes upstream. The drift gate below will tell you when that has happened.
+6293d15f7025d06bc85886df93456e62767a8d45

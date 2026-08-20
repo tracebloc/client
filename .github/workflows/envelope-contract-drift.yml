@@ -1,0 +1,136 @@
+name: Envelope contract drift (cross-repo)
+
+# The training-envelope arithmetic has ONE definition —
+# client-runtime/node_sizing.py::envelope_from_allocatable, with its constants
+# and golden vectors in client-runtime/envelope_contract.json (backend#2220,
+# RFC-BACKEND-664 §P0).
+#
+# Neither installer can call it: bash has no guaranteed JSON parser (jq is not a
+# prerequisite) and this bootstrap is signed, so it must not fetch anything
+# unsigned at install time. So the constants are EMBEDDED in
+# scripts/lib/install-client-helm.sh and scripts/install-k8s.ps1, and the
+# contract is vendored as a test fixture. Three ways that can rot, one gate
+# each:
+#
+#   1. the embed stops matching the vendored fixture
+#        -> scripts/gen-envelope-embed.sh --check (also mirrored in bats/Pester)
+#   2. the vendored fixture stops matching upstream
+#        -> the diff below, against the ref pinned in scripts/.client-runtime-ref
+#   3. the installers stop reproducing the contract's vectors
+#        -> the bats + Pester replays, which run in the normal test jobs
+#
+# Pin, don't float (the rule cli/.github/workflows/chart-drift.yml states): an
+# unrelated client-runtime commit must not redden every open client PR. The
+# weekly run is what catches a pin gone stale enough to matter.
+#
+# tracebloc/client-runtime is PRIVATE, so unlike cli's chart-drift (which reads
+# the public tracebloc/client with no token) this needs an App installation
+# token, scoped to that one repo with contents:read.
+
+on:
+  schedule:
+    - cron: "0 6 * * 1" # weekly Monday, offset from the other cross-repo gates
+  workflow_dispatch:
+  pull_request:
+    branches: [develop, main]
+    paths:
+      - "scripts/lib/install-client-helm.sh"
+      - "scripts/install-k8s.ps1"
+      - "scripts/gen-envelope-embed.sh"
+      - "scripts/.client-runtime-ref"
+      - "scripts/tests/fixtures/envelope_contract.json"
+      - "scripts/tests/fixtures/envelope_vectors.bash"
+      - ".github/workflows/envelope-contract-drift.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  envelope-contract:
+    timeout-minutes: 10
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Resolve the pinned client-runtime ref
+        id: pin
+        run: |
+          ref="$(grep -vE '^[[:space:]]*(#|$)' scripts/.client-runtime-ref | head -1 | tr -d '[:space:]')"
+          if [ -z "$ref" ]; then
+            echo "::error file=scripts/.client-runtime-ref::no ref found — the first non-comment line must be a commit SHA"
+            exit 1
+          fi
+          # Same shape guard cli's chart-drift applies: no path traversal, no
+          # option-looking refs reaching the checkout action.
+          if ! printf '%s' "$ref" | grep -qE '^[A-Za-z0-9][A-Za-z0-9._/-]*$' || printf '%s' "$ref" | grep -q '\.\.'; then
+            echo "::error file=scripts/.client-runtime-ref::invalid ref shape: $ref"
+            exit 1
+          fi
+          echo "ref=$ref" >> "$GITHUB_OUTPUT"
+
+      - name: The embed matches the vendored contract
+        # Runs FIRST and without the network: an in-repo inconsistency should
+        # not be reported as a cross-repo drift.
+        run: scripts/gen-envelope-embed.sh --check
+
+      - name: Mint a read-only installation token for client-runtime
+        id: token
+        # GITHUB_TOKEN is scoped to THIS repo and cannot read another private
+        # one, so mint an App installation token. Least privilege per the
+        # backend#2157 sweep: named `repositories`, not owner-wide, and
+        # contents:read only -- this job reads one JSON file and one .py.
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: ${{ secrets.RELEASE_TRAIN_APP_ID }}
+          private-key: ${{ secrets.RELEASE_TRAIN_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: client-runtime
+          permission-contents: read
+
+      - name: Checkout tracebloc/client-runtime @ pinned ref
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: tracebloc/client-runtime
+          ref: ${{ steps.pin.outputs.ref }}
+          token: ${{ steps.token.outputs.token }}
+          path: client-runtime
+          persist-credentials: false
+
+      - name: The vendored contract matches upstream
+        env:
+          PINNED_REF: ${{ steps.pin.outputs.ref }}
+        run: |
+          upstream="client-runtime/envelope_contract.json"
+          vendored="scripts/tests/fixtures/envelope_contract.json"
+          if [ ! -f "$upstream" ]; then
+            echo "::error::$upstream is missing at $PINNED_REF — has the contract moved or been renamed?"
+            exit 1
+          fi
+          if ! diff -u "$vendored" "$upstream"; then
+            echo "::error file=scripts/tests/fixtures/envelope_contract.json::the vendored envelope contract has drifted from tracebloc/client-runtime@$PINNED_REF"
+            echo ""
+            echo "To adopt the upstream change:"
+            echo "  1. cp <client-runtime>/envelope_contract.json scripts/tests/fixtures/"
+            echo "  2. update the SHA in scripts/.client-runtime-ref"
+            echo "  3. scripts/gen-envelope-embed.sh"
+            echo "  4. scripts/gen-manifest.sh          # the installers' digests changed"
+            echo "  5. run the bats + Pester replays — the goldens WILL have moved"
+            exit 1
+          fi
+          echo "vendored contract is identical to client-runtime@$PINNED_REF"
+
+      - name: The upstream arithmetic still produces these vectors
+        # Belt and braces: the vendored file could match upstream byte-for-byte
+        # while upstream's own vectors have gone stale against its own code. That
+        # is client-runtime's test suite's job, but a stale contract reaching us
+        # is OUR problem, so re-derive here rather than trust the file.
+        run: |
+          cd client-runtime
+          python3 scripts/gen_envelope_vectors.py
+          if ! git diff --quiet -- envelope_contract.json; then
+            echo "::error::client-runtime@$(git rev-parse --short HEAD) ships golden vectors that its own arithmetic no longer produces"
+            git --no-pager diff -- envelope_contract.json | head -40
+            exit 1
+          fi
+          echo "upstream vectors reproduce from upstream code"

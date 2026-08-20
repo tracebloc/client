@@ -23,9 +23,16 @@ detect_gpu() {
     # under install.sh's `set -euo pipefail` by inheritance, and head closes the
     # pipe after line 1 — one line per GPU is small today, but the shape is the
     # one being retired fleet-wide and the slice costs nothing.
+    #
+    # `|| _x=""` is NOT decoration (Bugbot). These were argument-position
+    # substitutions, where a failing nvidia-smi could not trip errexit; moving
+    # them into assignments puts them where it can, so a driver that answers
+    # `nvidia-smi` but fails --query-gpu would abort the install with 2>/dev/null
+    # hiding the reason. Same neutralisation gpu-nvidia.sh:126 already uses for
+    # this exact query, and the lspci capture below.
     local _gpu_name _gpu_drv
-    _gpu_name="$(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null)"
-    _gpu_drv="$(nvidia-smi --query-gpu=driver_version --format=csv,noheader 2>/dev/null)"
+    _gpu_name="$(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null)" || _gpu_name=""
+    _gpu_drv="$(nvidia-smi --query-gpu=driver_version --format=csv,noheader 2>/dev/null)" || _gpu_drv=""
     success "NVIDIA GPU detected: ${_gpu_name%%$'\n'*}"
     log "Driver: ${_gpu_drv%%$'\n'*}"
     return
