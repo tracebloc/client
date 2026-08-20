@@ -9,7 +9,8 @@
 #
 #  Escape hatches:
 #    TRACEBLOC_SKIP_PREFLIGHT=1   skip all checks
-#    TRACEBLOC_ALLOW_ARM64=1      proceed on arm64 despite amd64-only images
+#    TRACEBLOC_ALLOW_ARM64=1      proceed on arm64 without checking whether the
+#                                 engine this install gets is the amd64-only one
 #    TRACEBLOC_ALLOW_NETWORK_FS=1 proceed when HOST_DATA_DIR is on NFS/CIFS/SMB (DB may corrupt)
 #    PF_MIN_MEM_GB / PF_MIN_CPU / PF_MIN_DISK_GB   lower the hard floors (CI / odd sites)
 #
@@ -356,17 +357,59 @@ _pf_backend_host() {
 
 # ── Checks (each ALWAYS returns 0; hard failures go into PF_HARD_FAILS) ───────
 
-# True if the host can run amd64 binaries via QEMU binfmt (wrapped for testing).
-_pf_amd64_emulation_available() { [[ -e /proc/sys/fs/binfmt_misc/qemu-x86_64 ]]; }
+# Ask install-client-helm.sh's engine rule which MySQL engine THIS host will get,
+# echoing its "<engine> <reason>" verdict (backend#2047). The one amd64-only image
+# left is mysql-client 5.7, so "will this host need emulation at all?" is a
+# question only that rule can answer — and the arch gate below used to answer it
+# itself, refusing fresh arm64 hosts the installer was about to serve natively on
+# the multi-arch 8.4 engine.
+#
+# Two of the rule's inputs are `local`s of install_client_helm, which has not run
+# yet: values_file (the sticky 8.4 opt-in) and TB_NAMESPACE (the per-release
+# datadir path). Both are derived from that lib's own helpers, never restated
+# here. `existing_id` genuinely cannot be known this early — helm hasn't been
+# consulted — so an existing release can still read as fresh here; that residual
+# case is caught by _assert_engine_runs_on_this_arch, which re-asks the same
+# question once the engine is resolved for real.
+#
+# Fails CLOSED: if the engine rule isn't loaded we report 5.7, i.e. "no native
+# path", and the refusal below stands. That is the honest answer rather than a
+# guess — the 8.4 opt-in lives in the very lib that is missing, so a host without
+# it cannot get the native engine either.
+_pf_mysql_engine_decision() {
+  if ! declare -F _mysql_engine_decision >/dev/null 2>&1; then
+    echo "5.7 no-engine-rule"; return 0
+  fi
+  # Both are read by _mysql_engine_decision through bash dynamic scope, which is
+  # what SC2034 can't see (the documented false positive for scripts/lib/*.sh).
+  # shellcheck disable=SC2034
+  local values_file="" TB_NAMESPACE="${TB_NAMESPACE:-}"
+  if declare -F _client_values_file >/dev/null 2>&1; then
+    values_file="$(_client_values_file)"
+  fi
+  # UNCONDITIONALLY, exactly as install_client_helm does — not "only when unset".
+  # That helper also SANITISES (DNS-1123), so an operator-supplied
+  # TB_NAMESPACE="My Edge" becomes "my-edge" there. Gating this on emptiness left
+  # the raw value here, and the two gates then probed different per-release
+  # datadirs ("…/My Edge/mysql" vs "…/my-edge/mysql"): preflight would report a
+  # native 8.4 pass and the late gate would refuse after cluster setup and
+  # credential entry. Same rule, same inputs, or it is not the same question
+  # (Bugbot, this PR).
+  if declare -F _client_default_namespace >/dev/null 2>&1; then
+    TB_NAMESPACE="$(_client_default_namespace)"
+  fi
+  _mysql_engine_decision
+}
 
 _pf_arch() {
   case "$ARCH" in
     x86_64|amd64) _pf_ok "Architecture: ${ARCH} (amd64)"; return 0 ;;
   esac
-  # Non-amd64 (arm64/aarch64): the tracebloc client images (e.g. mysql-client)
-  # are amd64-only, so they need emulation to run.
+  # Non-amd64 (arm64/aarch64): the one remaining amd64-only image is the MySQL
+  # 5.7 client, so whether this host needs emulation depends entirely on which
+  # engine it gets — see _pf_mysql_engine_decision.
   if [[ -n "${TRACEBLOC_ALLOW_ARM64:-}" ]]; then
-    warn "Architecture: ${ARCH} — proceeding (TRACEBLOC_ALLOW_ARM64 set); amd64-only images may crash if emulation is unavailable."
+    warn "Architecture: ${ARCH} — proceeding (TRACEBLOC_ALLOW_ARM64 set); if this install keeps the amd64-only MySQL 5.7 engine it may crash without emulation."
     return 0
   fi
   if [[ "$OS" != "Linux" ]]; then
@@ -376,14 +419,57 @@ _pf_arch() {
     _pf_note "Architecture: ${ARCH} — the amd64 client images run under emulation; Docker's \"Use Rosetta for x86_64/amd64 emulation\" must be enabled (verified once Docker is running)."
     return 0
   fi
-  if _pf_amd64_emulation_available; then
+  if amd64_emulation_available; then
     _pf_note "Architecture: ${ARCH} — amd64 emulation (QEMU binfmt) available; client images run emulated (slower)."
     return 0
   fi
-  _pf_fail_line "Architecture: ${ARCH} — the tracebloc client images (e.g. mysql-client) are amd64-only and can't run here."
+  # No emulation. Before refusing, ask the engine rule whether emulation is even
+  # needed here: on a fresh install this host gets the multi-arch 8.4 engine and
+  # runs NATIVELY, which is why the old unconditional refusal was sending people
+  # to provision amd64 VMs they didn't need (backend#2047).
+  local _decision _engine _reason
+  _decision="$(_pf_mysql_engine_decision)"
+  _engine="${_decision%% *}"; _reason="${_decision#* }"
+  if [[ "$_engine" == "8.4" ]]; then
+    _pf_note "Architecture: ${ARCH} — running natively on the multi-arch MySQL 8.4 engine (no amd64 emulation needed)."
+    return 0
+  fi
   PF_HARD_FAIL=$(( ${PF_HARD_FAIL:-0} + 1 ))
-  hint "Fix: provision an amd64 (x86_64) VM, or enable emulation and re-run:"
-  hint "  docker run --privileged --rm tonistiigi/binfmt --install amd64"
+  # An unusable TB_MYSQL_ENGINE arrives as engine="invalid", reason=<the value> —
+  # so it is checked on the ENGINE field, not inside the reason case below.
+  # "Cannot tell" is a finding, not a pass: the engine, and therefore whether this
+  # host can run it, is undecidable.
+  if [[ "$_engine" == "invalid" ]]; then
+    _pf_fail_line "TB_MYSQL_ENGINE='${_reason}' is not 'auto', '5.7' or '8.4', so the MySQL engine for this ${ARCH} host can't be determined."
+    hint "Fix: set TB_MYSQL_ENGINE=auto (or 8.4 for the native multi-arch engine) and re-run."
+    # No TRACEBLOC_ALLOW_ARM64 hint here: it would only defer this failure to
+    # _resolve_mysql_engine, which refuses the value outright.
+    return 0
+  fi
+  case "$_reason" in
+    existing-datadir)
+      # Say WHY: the blocker is the datadir format, not this machine's CPU. An
+      # amd64 VM would not help — the data is here.
+      _pf_fail_line "Existing MySQL 5.7 data on this host pins the install to the MySQL 5.7 engine, and that image is amd64-only — it can't run on ${ARCH}."
+      hint "This is a data-format constraint, not an architecture one: MySQL 8.4 runs natively on ${ARCH}, but it cannot open a 5.7-format datadir (MySQL upgrades only in stages, 5.7 → 8.0 → 8.4)."
+      hint "Keep this data — enable amd64 emulation, then re-run:"
+      hint "  docker run --privileged --rm tonistiigi/binfmt --install amd64"
+      hint "Or start fresh on the native engine — install into an empty data directory:"
+      hint "  --data-dir=/path/to/new/empty/dir" ;;
+    explicit)
+      _pf_fail_line "TB_MYSQL_ENGINE=5.7 was requested, and the MySQL 5.7 image is amd64-only — it can't run on ${ARCH}."
+      hint "Drop TB_MYSQL_ENGINE (or set TB_MYSQL_ENGINE=8.4) to use the native multi-arch 8.4 engine — fresh data directories only."
+      hint "To keep 5.7, enable amd64 emulation and re-run:"
+      hint "  docker run --privileged --rm tonistiigi/binfmt --install amd64" ;;
+    *)
+      # Includes `amd64` (unreachable — this host is not amd64) and
+      # `no-engine-rule` (the fail-closed answer when the lib holding the rule
+      # isn't loaded). Generic, and still emulation-shaped: without the rule
+      # there is no 8.4 opt-in to reach.
+      _pf_fail_line "Architecture: ${ARCH} — this install needs the amd64-only MySQL 5.7 image and can't run here."
+      hint "Fix: enable amd64 emulation and re-run:"
+      hint "  docker run --privileged --rm tonistiigi/binfmt --install amd64" ;;
+  esac
   hint "  (or set TRACEBLOC_ALLOW_ARM64=1 to proceed anyway)"
   return 0
 }
@@ -578,11 +664,89 @@ _pf_disk() {
 # The network-filesystem classification shared by the full storage check and
 # the pre-log early_data_dir_guard (#432). Everything listed corrupts or
 # crash-loops MySQL/InnoDB (broken POSIX locking, unsafe O_DIRECT/fsync).
+#
+# The name is NORMALISED before matching, so the list carries BARE names only and
+# a FUSE filesystem can never fall through it for want of a spelling. A FUSE mount
+# reaches us spelled either way, depending on which reader in _pf_fstype answered:
+# findmnt and mount(8) report the libfuse SUBTYPE (`fuse.sshfs`), so the list used
+# to carry `fuse.`-prefixed entries — but half of them had no bare twin, which is
+# the shape that regrows this bug. Strip the prefix once instead of extending the
+# list twice. (Measured on Ubuntu 24.04 / libfuse 3.14 / util-linux 2.39 and
+# Ubuntu 20.04 / libfuse 2.9: sshfs and rclone both mount as `fuse.<subtype>`.)
 _pf_is_network_fstype() {
-  case "$1" in
-    nfs|nfs3|nfs4|nfsd|cifs|smb|smbfs|smb2|smb3|afpfs|9p|ncpfs|gfs|gfs2|ocfs2|lustre|glusterfs|fuse.glusterfs|ceph|fuse.ceph|beegfs|fuse.sshfs|fuse.s3fs|davfs|fuse.davfs|webdav|fuse.rclone) return 0 ;;
+  local t
+  t="$(printf '%s' "${1:-}" | tr '[:upper:]' '[:lower:]')"
+  t="${t#fuse.}"                       # fuse.sshfs -> sshfs; nfs4 -> nfs4
+  case "$t" in
+    nfs|nfs3|nfs4|nfsd|cifs|smb|smbfs|smb2|smb3|afpfs|9p|ncpfs|gfs|gfs2|ocfs2|lustre|glusterfs|ceph|beegfs|sshfs|s3fs|gcsfuse|blobfuse|blobfuse2|davfs|webdav|rclone) return 0 ;;
+    # AN UNRECOGNISED FUSE SUBTYPE IS NOT EVIDENCE OF LOCAL STORAGE (saadqbal,
+    # #726). `fuse.gcsfuse` and `fuse.blobfuse2` are named above now, but the
+    # list can only ever hold the drivers someone thought of -- and the next
+    # cloud FUSE ships without asking us. Before this, `fuse.<anything else>`
+    # stripped to a name nobody matched and fell through to a confident
+    # "Local storage", which is the failure mode this predicate exists to
+    # prevent, one subtype at a time.
+    #
+    # Returning 1 ("not network") is still right -- we have no evidence it IS
+    # network, and a hard fail on a local ntfs-3g would be worse. The caller
+    # asks `_pf_is_opaque_fuse_fstype` next, which now claims this shape and
+    # warns, so an unknown FUSE reads as unknown rather than as local.
     *) return 1 ;;
   esac
+}
+
+# FUSE with the subtype ERASED: the mount table says "this is FUSE" without saying
+# WHICH FUSE, so sshfs/s3fs/rclone (fatal for the database) is indistinguishable
+# from a local ntfs-3g/gocryptfs/bindfs (fine). This is not an edge case — two of
+# _pf_fstype's three readers produce ONLY this shape, so _pf_is_network_fstype above
+# never sees a name it can classify:
+#   * `stat -f -c %T` — the Linux fallback when findmnt is missing — answers
+#     `fuseblk` for EVERY fuse mount (the fuse and fuseblk kernel filesystems share
+#     one magic number). Measured: sshfs, rclone AND bindfs all read back `fuseblk`.
+#   * macOS has no findmnt and skips the stat reader (BSD `stat -f` is a format
+#     string), so the df+mount path answers with the macFUSE vfs name — `macfuse`,
+#     or `osxfuse` before 4.x — never a `fuse.*` subtype.
+#   * A FUSE program that sets no subtype mounts as bare `fuse` even under findmnt
+#     (measured with bindfs; libfuse only defaults the subtype to the program name).
+# Callers WARN rather than refuse: refusing every unnamed FUSE mount would block a
+# legitimate local one, and TRACEBLOC_ALLOW_NETWORK_FS reads as nonsense advice to
+# someone who is not on a network filesystem.
+_pf_is_opaque_fuse_fstype() {
+  local t
+  t="$(printf '%s' "${1:-}" | tr '[:upper:]' '[:lower:]')"
+  case "$t" in
+    fuse|fuseblk|macfuse|osxfuse|osxfusefs) return 0 ;;
+    # A NAMED SUBTYPE WE DO NOT KNOW (saadqbal, #726). `fuse.gcsfuse` used to
+    # be neither network (not on the list) nor opaque (not bare `fuse`), so it
+    # reached the `else` and was announced as "Local storage" -- a confident
+    # answer about a mount we could not identify.
+    #
+    # THE TWO PREDICATES STAY MUTUALLY EXCLUSIVE, which the bats suite asserts
+    # and which is worth more than it looks: without the negation below,
+    # `fuse.sshfs` would satisfy BOTH, and the only thing keeping it a hard
+    # fail rather than a warning would be the order the caller happens to ask
+    # in. A future caller asking "opaque?" first would silently downgrade a
+    # database-corrupting mount to a notice. Excluding the names the network
+    # classifier claims makes the correct answer independent of call order.
+    fuse.*) _pf_is_network_fstype "$t" && return 1; return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# The shared advisory for an opaque FUSE mount (see above): say what we can and
+# cannot tell, and let the install continue. $1 = path, $2 = fstype as read.
+_pf_opaque_fuse_warn() {
+  # TWO DIFFERENT UNKNOWNS, AND SAYING THE WRONG ONE IS A FALSE STATEMENT
+  # (saadqbal, #726). The original line — "the mount table doesn't say which
+  # one" — is true for `fuse`/`fuseblk`, where the subtype really is erased. It
+  # would be a lie for `fuse.gocryptfs`, where the table says exactly which one
+  # and the gap is that WE have no opinion on it. Same advice, honest premise.
+  case "$(printf '%s' "${2:-}" | tr '[:upper:]' '[:lower:]')" in
+    fuse.*) warn "Storage: ${1} is on a FUSE filesystem (${2}) — a driver this check does not recognise." ;;
+    *)      warn "Storage: ${1} is on a FUSE filesystem (${2}) — the mount table doesn't say which one." ;;
+  esac
+  hint "If it is network-backed (sshfs, s3fs, rclone, a cloud-sync mount), the client database (MySQL/InnoDB) can corrupt or crash-loop — move HOST_DATA_DIR to a local disk under your \$HOME."
+  hint "If it is a local FUSE mount (ntfs-3g, gocryptfs, bindfs), this is only a notice — the install continues."
 }
 
 # The FOLLOWABLE remedy for a network-filesystem HOST_DATA_DIR (#479). validate_config
@@ -614,7 +778,15 @@ early_data_dir_guard() {
   [[ -d "$target" ]] && return 0
   fstype="$(_pf_fstype "$target")"
   [[ -z "$fstype" ]] && return 0                 # undetermined — assume local
-  _pf_is_network_fstype "$fstype" || return 0
+  if ! _pf_is_network_fstype "$fstype"; then
+    # Opaque FUSE (`fuseblk`, `macfuse`): we cannot name it, so we must not refuse
+    # — but staying silent is what let an sshfs data dir through on every reader
+    # that erases the subtype. Say so and continue; the full check repeats it once
+    # logging is up. (Explicit `if`, not `a && b`: under set -e a false `&&` chain
+    # here would decide the function's exit status.)
+    if _pf_is_opaque_fuse_fstype "$fstype"; then _pf_opaque_fuse_warn "$target" "$fstype"; fi
+    return 0
+  fi
   warn "Storage: ${target} is on a network filesystem (${fstype})."
   hint "The client database (MySQL/InnoDB) corrupts or crash-loops on network storage, and NFS root_squash blocks data-dir setup."
   _pf_network_fs_remedy   # shared followable remedy (#479)
@@ -647,6 +819,10 @@ _pf_storage_type() {
       # that's still NFS, and validate_config rejects paths OUTSIDE $HOME, so it could
       # never work. Use the shared followable remedy (#479).
       _pf_network_fs_remedy
+  elif _pf_is_opaque_fuse_fstype "$fstype"; then
+      # FUSE, subtype unknown — advisory, never a hard fail (see the predicate).
+      log "Storage: ${target} (${fstype})"
+      _pf_opaque_fuse_warn "$target" "$fstype"
   else
       log "Storage: ${target} (${fstype})"
       success "Local storage (${disp})"

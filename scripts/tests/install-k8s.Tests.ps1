@@ -1605,6 +1605,141 @@ Describe "Get-EffectiveNoProxy" {
   }
 }
 
+# Invoke-BoundedProcess hands back stdout+stderr concatenated, so the anchor check has to
+# pick the context out of it. A whole-blob compare hard-stops a correctly switched install
+# the moment kubectl warns on stderr (Bugbot) — bash gets this for free with `2>/dev/null`.
+Describe "Get-CurrentContextFromOutput (client#732 Bugbot: stderr must not fail a good install)" {
+  It "returns the context when kubectl is quiet" {
+    Get-CurrentContextFromOutput -Output "k3d-tracebloc`n" | Should -Be "k3d-tracebloc"
+  }
+  It "ignores stderr noise that FOLLOWS the context (the concatenation order)" {
+    $out = "k3d-tracebloc`nW0817 10:00:00 warning: plugin ... is deprecated`n"
+    Get-CurrentContextFromOutput -Output $out | Should -Be "k3d-tracebloc"
+  }
+  It "survives CRLF and leading blank lines" {
+    Get-CurrentContextFromOutput -Output "`r`n  k3d-tracebloc  `r`nnoise`r`n" | Should -Be "k3d-tracebloc"
+  }
+  It "returns empty for empty/whitespace-only output -- 'couldn't tell' is not a pass" {
+    Get-CurrentContextFromOutput -Output ""        | Should -Be ""
+    Get-CurrentContextFromOutput -Output "  `r`n "  | Should -Be ""
+  }
+  It "does NOT invent a match from a warning that merely mentions the context" {
+    # stderr-only output (kubectl printed nothing on stdout) must not read as anchored
+    $out = "error: no current context; run 'kubectl config use-context k3d-tracebloc'"
+    Get-CurrentContextFromOutput -Output $out | Should -Not -Be "k3d-tracebloc"
+  }
+}
+
+# --- Releasing the dashboard record before deleting the cluster (backend#2077) ---
+#
+# This machine's backend record is anchored to the CLUSTER's identity (the
+# kube-system namespace UID), which dies with the k3d cluster. So a bare
+# `k3d cluster delete` strands the secure environment on the dashboard for good --
+# and the installer used to print exactly that at every recreate remedy.
+Describe "Write-RecreateClusterHint (backend#2077)" {
+  BeforeEach { $script:CLUSTER_NAME = "tracebloc"; $script:LOG_FILE = $null }
+  It "names 'tracebloc delete' BEFORE the k3d delete (the order is the fix)" {
+    $out = (Write-RecreateClusterHint 6>&1 | Out-String)
+    $out | Should -Match 'tracebloc delete --keep-data'
+    $out | Should -Match 'k3d cluster delete tracebloc'
+    ($out -split 'k3d cluster delete')[0] | Should -Match 'tracebloc delete --keep-data'
+  }
+  It "never recommends a BARE 'tracebloc delete' -- the plain form wipes the data these sites keep" {
+    $out = (Write-RecreateClusterHint 6>&1 | Out-String)
+    ([regex]::Matches($out, 'tracebloc delete')).Count |
+      Should -Be ([regex]::Matches($out, 'tracebloc delete --keep-data')).Count
+  }
+  It "tells a machine with nothing installed that it can skip the release" {
+    $out = (Write-RecreateClusterHint 6>&1 | Out-String)
+    $out | Should -Match 'nothing installed on this machine yet'
+  }
+  It "puts the re-run prefix on the k3d line, not a line of its own" {
+    $out = (Write-RecreateClusterHint -RerunPrefix "TB_STORAGE_MODE=node-local  " 6>&1 | Out-String)
+    $out | Should -Match 'k3d cluster delete tracebloc  \(then TB_STORAGE_MODE=node-local  re-run this installer\)\.'
+  }
+}
+
+# Derived from the source, not from a hand-kept list: a recreate hint added later
+# with its own `Hint "  k3d cluster delete ..."` line strands a record exactly like
+# the ones this replaced. Scoped to the recreate sites this PR owns -- the peers of
+# cluster.sh's seven -- so it names offenders rather than counting them.
+Describe "Recreate hints route through Write-RecreateClusterHint (backend#2077 source guards)" {
+  BeforeAll { $script:PSRC2 = Get-Content "$PSScriptRoot/../install-k8s.ps1" -Raw }
+  It "the k3s-version drift remedy releases the record first" {
+    $script:PSRC2 | Should -Match "not the validated pin[\s\S]{0,600}?Write-RecreateClusterHint"
+  }
+  It "the 0.0.0.0-bind rebuild remedy releases the record first" {
+    $script:PSRC2 | Should -Match "binds its API to 0\.0\.0\.0[\s\S]{0,900}?Write-RecreateClusterHint"
+  }
+  It "the CA-drift remedy releases the record first" {
+    $script:PSRC2 | Should -Match "was created without it[\s\S]{0,600}?Write-RecreateClusterHint"
+  }
+  It "the dataset-mount remedy releases the record first" {
+    $script:PSRC2 | Should -Match "no /tracebloc-data bind mount[\s\S]{0,600}?Write-RecreateClusterHint"
+  }
+  It "the GPU-capability remedies release the record first" {
+    $script:PSRC2 | Should -Match "is CPU-only[\s\S]{0,600}?Write-RecreateClusterHint"
+    $script:PSRC2 | Should -Match "GPU experiments will stay Pending[\s\S]{0,600}?Write-RecreateClusterHint"
+  }
+  It "the helper's own line is the ONLY recreate command hint left, and it follows CLUSTER_NAME" {
+    # Derived: any site that grows its own `Hint "  k3d cluster delete ... (then ...`
+    # is named here rather than counted. The helper's line is the one carrying
+    # $RerunPrefix, which is how it excludes itself without an allowlist of names.
+    $offenders = @(Select-String -Path "$PSScriptRoot/../install-k8s.ps1" `
+                     -Pattern 'Hint\s+"\s+k3d cluster delete \$CLUSTER_NAME\s+\(then' |
+                   Where-Object { $_.Line -notmatch 'RerunPrefix' } |
+                   ForEach-Object { "$($_.LineNumber): $($_.Line.Trim())" })
+    $offenders -join "`n" | Should -BeNullOrEmpty
+  }
+}
+
+# --- The kubeconfig merge is load-bearing, not cosmetic (client#732) ---
+#
+# The installer passes no --kubeconfig/--context to `tracebloc client create`, so
+# the secure environment is registered against kubectl's CURRENT context. The merge
+# used to be piped to Out-Null with $LASTEXITCODE never read, so a failure left the
+# previous context selected and the install anchored this machine to it.
+Describe "Kubeconfig merge is checked, and the anchor verified (client#732 source guards)" {
+  BeforeAll { $script:PSRC3 = Get-Content "$PSScriptRoot/../install-k8s.ps1" -Raw }
+  It "no longer discards the merge result into Out-Null" {
+    $script:PSRC3 | Should -Not -Match 'k3d kubeconfig merge \$CLUSTER_NAME[^\r\n]*\| Out-Null'
+  }
+  It "merges into the DEFAULT kubeconfig -- without it the gate below proves nothing (Bugbot)" {
+    # k3d writes a standalone ~/.k3d/kubeconfig-<cluster>.yaml unless told otherwise,
+    # so a merge lacking this flag never touches the file kubectl reads.
+    $fn = (($script:PSRC3 -split 'function New-K3dCluster')[1] -split '\nfunction ')[0]
+    $fn | Should -Match '"kubeconfig",\s*"merge",\s*\$CLUSTER_NAME,\s*"--kubeconfig-merge-default",\s*"--kubeconfig-switch-context"'
+    # ...and the remedy it prints has to be the same command, or it can't repair it
+    $fn | Should -Match '\$mergeCmd\s*=\s*"k3d kubeconfig merge \$CLUSTER_NAME --kubeconfig-merge-default --kubeconfig-switch-context"'
+  }
+  It "reads the merge's exit code and stops the install on failure" {
+    $script:PSRC3 | Should -Match '\$merge\s*=\s*Invoke-BoundedProcess[\s\S]{0,400}?\$merge\.Code -ne 0'
+    $script:PSRC3 | Should -Match 'refusing to continue against an unknown cluster'
+  }
+  It "bounds BOTH external calls, like the bash peer (installer rule)" {
+    $fn = (($script:PSRC3 -split 'function New-K3dCluster')[1] -split '\nfunction ')[0]
+    $fn | Should -Match 'Invoke-BoundedProcess -FileName "k3d" -TimeoutSec 60'
+    $fn | Should -Match 'Invoke-BoundedProcess -FileName "kubectl" -Arguments @\("config", "current-context"\) -TimeoutSec 10'
+    $fn | Should -Not -Match '\n\s*kubectl config current-context'   # never the unbounded native call
+  }
+  It "verifies the current context IS this cluster, and says how to select it" {
+    $script:PSRC3 | Should -Match '\$wantCtx\s*=\s*"k3d-\$CLUSTER_NAME"'
+    $script:PSRC3 | Should -Match 'kubectl config use-context \$wantCtx'
+  }
+  It "treats an unreadable current-context as a failure, not as agreement" {
+    $script:PSRC3 | Should -Match "can't tell us which context is current"
+  }
+  It "reads the context through the stderr-tolerant parser, never the raw merged blob (Bugbot)" {
+    $fn = (($script:PSRC3 -split 'function New-K3dCluster')[1] -split '\nfunction ')[0]
+    $fn | Should -Match '\$haveCtx = Get-CurrentContextFromOutput -Output "\$\(\$ctx\.Output\)"'
+  }
+  It "normalizes the kubeconfig k3d actually wrote, not a hardcoded profile path" {
+    # --kubeconfig-merge-default honours $KUBECONFIG; the rewrite has to follow it or
+    # it silently edits a file k3d never touched (peer of bash's ${KUBECONFIG%%:*}).
+    $script:PSRC3 | Should -Match '\$kubeConfigPath = if \(\$env:KUBECONFIG\) \{ \(\$env:KUBECONFIG -split .;.\)\[0\] \}'
+  }
+}
+
 Describe "Write-K3dProxyConfig" {
   AfterEach {
     $env:HTTP_PROXY = $null; $env:HTTPS_PROXY = $null
@@ -2410,6 +2545,72 @@ Describe "ConvertTo-SanitizedInput" {
   }
   It "empty in, empty out" {
     ConvertTo-SanitizedInput -Value "" | Should -Be ""
+  }
+
+  # ── SS3 (ESC O <final>) and the floor ───────────────────────────────────
+  # These shipped in #736 with NO committed PowerShell test: the four cases
+  # above are all CSI, so the whole SS3 half and the entire floor were
+  # unverified here while the bash and Go copies had cases. That asymmetry is
+  # how SS3 came to be missing from all three implementations at once
+  # (tracebloc/cli#516) — the rule is hand-copied into three languages and only
+  # one shape was ever tested.
+  #
+  # The cases mirror the bats corpus in install-client-helm.bats one-for-one, on
+  # purpose: until backend#2084 lands a shared fixture, matching case lists are
+  # the only thing making the three implementations comparable by reading.
+
+  It "strips SS3 escapes around real content" {
+    $esc = [char]27
+    ConvertTo-SanitizedInput -Value "na${esc}ODme" | Should -Be "name"
+  }
+
+  It "SS3-only input yields empty, so the caller re-prompts" {
+    $esc = [char]27
+    # Arrow keys pressed at the prompt. Empty is the contract: callers treat it
+    # as "no answer" and re-prompt or auto-name, rather than naming a machine
+    # after escape residue.
+    ConvertTo-SanitizedInput -Value "${esc}OD${esc}OD${esc}OA" | Should -Be ""
+    ConvertTo-SanitizedInput -Value "${esc}OH${esc}OF"         | Should -Be ""   # Home/End
+    ConvertTo-SanitizedInput -Value "${esc}OP${esc}OQ"         | Should -Be ""   # F1/F2
+  }
+
+  It "handles SS3 and CSI mixed in one value" {
+    $esc = [char]27
+    ConvertTo-SanitizedInput -Value "a${esc}ODb${esc}[Dc" | Should -Be "abc"
+  }
+
+  It "a bare O is not an escape" {
+    # The regression guard for the obvious wrong fix: matching "O<letter>"
+    # without requiring the ESC would eat two characters out of any name
+    # starting with O.
+    ConvertTo-SanitizedInput -Value "OPTIMUS-01" | Should -Be "OPTIMUS-01"
+  }
+
+  It "truncated SS3 (ESC with no final byte) yields empty" {
+    $esc = [char]27
+    ConvertTo-SanitizedInput -Value "${esc}O" | Should -Be ""
+  }
+
+  It "an unknown escape family with nothing else is refused" {
+    # ESC N is SS2 — deliberately NOT in the strip list. This is the floor
+    # doing its job on the family nobody has reported yet, which is the only
+    # part of this that generalises past the escapes we happen to know.
+    $esc = [char]27
+    ConvertTo-SanitizedInput -Value "${esc}NB${esc}NC" | Should -Be ""
+  }
+
+  It "an unknown escape family beside real content keeps the content" {
+    $esc = [char]27
+    ConvertTo-SanitizedInput -Value "box${esc}NC" | Should -Be "boxNC"
+  }
+
+  It "the floor counts non-Latin letters as real content" {
+    # \p{L} not [A-Za-z]: keep-vs-reject must not depend on the script a name
+    # is written in. An ASCII name and a Japanese one behave the same here
+    # (Bugbot, #736) — the pair is the assertion, either alone proves nothing.
+    $esc = [char]27
+    ConvertTo-SanitizedInput -Value "${esc}NC日本"  | Should -Be "NC日本"
+    ConvertTo-SanitizedInput -Value "${esc}NChello" | Should -Be "NChello"
   }
 }
 
@@ -4397,6 +4598,48 @@ Describe "Bounded process quotes whitespace arguments (#616 Bugbot)" {
   }
 }
 
+Describe "Bounded process survives a child that closes stdin first (broken pipe)" {
+  BeforeAll {
+    $script:BPSRC = Get-Content "$PSScriptRoot/../install-k8s.ps1" -Raw
+    # Load the REAL function rather than a copy of it, so this cannot pass while the
+    # shipped one throws -- the whole failure mode being tested is an unguarded call.
+    $fn = (($script:BPSRC -split 'function Invoke-BoundedProcess')[1] -split '\nfunction ')[0]
+    Invoke-Expression "function Invoke-BoundedProcess $fn"
+  }
+
+  It "returns the child's verdict instead of throwing when the pipe is already closed" {
+    # THE RACE, REPRODUCED. `true` ignores stdin and exits immediately, so the write
+    # below lands on a closed pipe -- the exact SocketException/IOException that took
+    # down Pester (ubuntu-latest) on client's main tip after the 2026-08-16 prod hop.
+    #
+    # Big enough to outlive the child: a short string fits the OS pipe buffer and is
+    # accepted even after exit, so a small payload would pass with the bug present.
+    $payload = "x" * 200000
+    # `Arguments` is a mandatory [string[]], so an EMPTY array binds as null and the
+    # call fails before the race is reached -- a test that never tested. `true`
+    # ignores whatever it is given and exits 0 regardless.
+    $exe = if ($IsWindows) { "cmd.exe" } else { "/usr/bin/true" }
+    $argv = if ($IsWindows) { @("/c", "exit", "0") } else { @("ignored") }
+
+    # `$script:` because a plain assignment inside the Should -Not -Throw scriptblock
+    # stays in that block's scope and reads back as $null out here -- which asserts
+    # nothing while looking like it asserts something.
+    $script:bpResult = $null
+    { $script:bpResult = Invoke-BoundedProcess -FileName $exe -Arguments $argv -Stdin $payload -TimeoutSec 30 } |
+      Should -Not -Throw
+    # And it still reports the CHILD, not our plumbing: the guard swallows the pipe
+    # error, it does not invent a result.
+    $script:bpResult.Code | Should -Be 0
+  }
+
+  It "the stdin write is guarded, like Start and Kill already were (source guard)" {
+    # Belt and braces to the behavioural case above: if someone unwraps the try/catch,
+    # this fails even on a machine where the race happens not to fire.
+    $fn = (($script:BPSRC -split 'function Invoke-BoundedProcess')[1] -split '\nfunction ')[0]
+    $fn | Should -Match 'try \{ \$proc\.StandardInput\.Write\(\$Stdin\); \$proc\.StandardInput\.Close\(\) \} catch'
+  }
+}
+
 Describe "GPU setup fails fast when preflight already found the hosts unreachable (#616 Bugbot)" {
   BeforeAll { $script:FFSRC = Get-Content "$PSScriptRoot/../install-k8s.ps1" -Raw }
   It "preflight records the unreachable GPU host" {
@@ -4735,7 +4978,10 @@ Describe "Test-HealthyClusterGpuConsistent (#616 Bugbot: healthy reinstall flags
   It "warns with the recreate remedy when the live release wants GPU but the node is CPU-only" {
     $fn = (($script:HCSRC -split 'function Test-HealthyClusterGpuConsistent')[1] -split '\nfunction ')[0]
     $fn | Should -Match 'Test-NodeImageGpuCapable -Image \$img -Configured \$K3S_CUDA_IMAGE'
-    $fn | Should -Match 'k3d cluster delete \$CLUSTER_NAME'
+    # The remedy now comes from the one helper that prints it (backend#2077) — the
+    # `k3d cluster delete` line moved there, together with the `tracebloc delete`
+    # that has to precede it. Its wording is asserted in the helper's own Describe.
+    $fn | Should -Match 'Write-RecreateClusterHint'
   }
   It "the fast path calls it so a healthy-but-inconsistent cluster is flagged (source guard)" {
     $script:HCSRC | Should -Match 'client is healthy -- nothing to do[\s\S]{0,800}?Test-HealthyClusterGpuConsistent'

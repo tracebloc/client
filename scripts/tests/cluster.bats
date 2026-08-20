@@ -973,3 +973,178 @@ _stub_create_cluster_deps() {
   [ "$status" -ne 0 ] || return 1
   [[ "$output" == *"can't be read"* ]] || return 1
 }
+
+# ── _merge_kubeconfig: the anchor is verified, never assumed (client#732) ─────
+#
+# The installer passes no --kubeconfig/--context to `tracebloc client create`, so
+# the secure environment is registered against kubectl's CURRENT context. The
+# merge used to run under `>/dev/null 2>&1` with no `||`, so a failure left the
+# previous context selected and the install carried on and anchored to it.
+merge_setup() {                       # isolate HOME/KUBECONFIG from the real machine
+  HOME="$BATS_TEST_TMPDIR/home"
+  mkdir -p "$HOME/.kube"
+  KUBECONFIG="$HOME/.kube/config"
+  : >"$KUBECONFIG"
+}
+
+@test "_merge_kubeconfig: k3d merge FAILS -> hard stop, with k3d's own reason (client#732)" {
+  merge_setup
+  k3d() { record "k3d $*"; echo "FATA[0000] open /home/u/.kube/config: permission denied" >&2; return 1; }
+  kubectl() { echo "k3d-tracebloc"; }   # a context check would PASS — the failed merge must still stop us
+  run _merge_kubeconfig
+  [ "$status" -ne 0 ] || return 1
+  [[ "$output" == *"Couldn't point kubectl at the 'tracebloc' cluster"* ]] || return 1
+  [[ "$output" == *"permission denied"* ]] || return 1
+  [[ "$output" == *"refusing to continue against an unknown cluster"* ]] || return 1
+}
+
+@test "_merge_kubeconfig: merge timeout (rc 124) names the deadline, not a bare exit code" {
+  merge_setup
+  k3d() { return 124; }
+  kubectl() { echo "k3d-tracebloc"; }
+  run _merge_kubeconfig
+  [ "$status" -ne 0 ] || return 1
+  [[ "$output" == *"timed out"* ]] || return 1
+  [[ "$output" == *"docker ps"* ]] || return 1
+}
+
+@test "_merge_kubeconfig: a merge that fails with NO output still prints the full guidance and stops" {
+  # k3d says nothing on the timeout path, and the earlier version of this branch
+  # only had k3d's own words to offer — so a silent failure must still produce the
+  # remedy, not just a bare symptom. Run in the real shape (`set -euo pipefail`,
+  # both libs sourced) so nothing in the branch can trip errexit before the end.
+  run bash -euo pipefail -c '
+    source "'"$LIB_DIR"'/common.sh"
+    source "'"$LIB_DIR"'/cluster.sh"
+    LOG_FILE=/dev/null; CLUSTER_NAME=tracebloc
+    HOME="'"$BATS_TEST_TMPDIR"'/errexit-home"; mkdir -p "$HOME/.kube"
+    KUBECONFIG="$HOME/.kube/config"; : >"$KUBECONFIG"
+    _bounded() { shift; "$@"; }
+    k3d()     { return 1; }             # fails, prints nothing
+    kubectl() { echo k3d-tracebloc; }
+    _merge_kubeconfig'
+  [ "$status" -ne 0 ] || return 1
+  [[ "$output" == *"Stopping here on purpose"* ]] || return 1
+  [[ "$output" == *"k3d kubeconfig merge tracebloc --kubeconfig-merge-default"* ]] || return 1
+  [[ "$output" == *"refusing to continue against an unknown cluster"* ]] || return 1
+}
+
+@test "_merge_kubeconfig: merge exits 0 but current-context is another cluster -> hard stop (client#732)" {
+  merge_setup
+  k3d() { return 0; }
+  # the exact scenario in the ticket: a corporate EKS stayed selected
+  kubectl() { echo "arn:aws:eks:eu-central-1:111122223333:cluster/corp-prod"; }
+  run _merge_kubeconfig
+  [ "$status" -ne 0 ] || return 1
+  [[ "$output" == *"arn:aws:eks:eu-central-1:111122223333:cluster/corp-prod"* ]] || return 1
+  [[ "$output" == *"kubectl config use-context k3d-tracebloc"* ]] || return 1
+  [[ "$output" == *"refusing to continue against an unknown cluster"* ]] || return 1
+}
+
+@test "_merge_kubeconfig: current-context UNREADABLE -> hard stop (can't tell is not agreement)" {
+  merge_setup
+  k3d() { return 0; }
+  kubectl() { return 1; }
+  run _merge_kubeconfig
+  [ "$status" -ne 0 ] || return 1
+  [[ "$output" == *"can't tell us which context is current"* ]] || return 1
+}
+
+@test "_merge_kubeconfig: merge OK and context is ours -> proceeds, still normalizes 0.0.0.0" {
+  merge_setup
+  printf 'server: https://0.0.0.0:6550\n' >"$KUBECONFIG"
+  k3d() { return 0; }
+  kubectl() { echo "k3d-tracebloc"; }
+  run _merge_kubeconfig
+  [ "$status" -eq 0 ] || return 1
+  [[ "$output" != *"refusing to continue"* ]] || return 1
+  grep -q 'https://127\.0\.0\.1:6550' "$KUBECONFIG"
+}
+
+@test "_merge_kubeconfig: still merges into the DEFAULT kubeconfig and switches context" {
+  merge_setup
+  k3d() { record "k3d $*"; return 0; }
+  kubectl() { echo "k3d-tracebloc"; }
+  _merge_kubeconfig >/dev/null
+  run mock_calls
+  [[ "$output" == *"k3d kubeconfig merge tracebloc"* ]] || return 1
+  [[ "$output" == *"--kubeconfig-merge-default"* ]] || return 1
+  [[ "$output" == *"--kubeconfig-switch-context"* ]] || return 1
+}
+
+# ── _recreate_cluster_hint: release the record, then the cluster (backend#2077) ──
+#
+# The backend record is anchored to the CLUSTER's identity (the kube-system
+# namespace UID), which dies with the k3d cluster. A bare `k3d cluster delete`
+# therefore strands this machine's secure environment on the dashboard for good —
+# and the installer used to print exactly that, in seven places.
+@test "_recreate_cluster_hint: names 'tracebloc delete' BEFORE the k3d delete (the order is the fix)" {
+  run _recreate_cluster_hint
+  [ "$status" -eq 0 ] || return 1
+  [[ "$output" == *"tracebloc delete --keep-data"* ]] || return 1
+  [[ "$output" == *"k3d cluster delete tracebloc"* ]] || return 1
+  # everything printed before the k3d line already carries the release step
+  [[ "${output%%k3d cluster delete*}" == *"tracebloc delete --keep-data"* ]] || return 1
+}
+
+@test "_recreate_cluster_hint: never a BARE 'tracebloc delete' — the plain form wipes the data these sites keep" {
+  run _recreate_cluster_hint
+  [[ "$output" == *"keeps your local data"* ]] || return 1
+  [ "$(grep -c 'tracebloc delete' <<<"$output")" -eq "$(grep -c 'tracebloc delete --keep-data' <<<"$output")" ] || return 1
+}
+
+@test "_recreate_cluster_hint: a machine with nothing installed is told it can skip the release" {
+  run _recreate_cluster_hint
+  [[ "$output" == *"nothing installed on this machine yet"* ]] || return 1
+}
+
+@test "_recreate_cluster_hint: the re-run prefix lands on the k3d line, not a line of its own" {
+  run _recreate_cluster_hint "TB_STORAGE_MODE=node-local  "
+  [[ "$output" == *"k3d cluster delete tracebloc  &&  TB_STORAGE_MODE=node-local  re-run this installer."* ]] || return 1
+}
+
+@test "_recreate_cluster_hint: follows CLUSTER_NAME, so a custom cluster gets a runnable command" {
+  CLUSTER_NAME=myapp
+  run _recreate_cluster_hint
+  [[ "$output" == *"k3d cluster delete myapp"* ]] || return 1
+}
+
+# Derived from the source, not from a list kept by hand: ANY recreate hint added
+# later with its own `hint "… k3d cluster delete …"` line strands a dashboard
+# record exactly like the seven this replaced, and this reddens on it.
+#
+# Scoped to `hint` lines on purpose. The create-timeout path (a `warn` telling the
+# user to remove a PARTIAL cluster) is deliberately out of scope: `k3d cluster
+# create` only runs when the cluster is absent, so a cluster that never finished
+# creating never had a secure environment registered against it — there is nothing
+# to release, and `tracebloc delete` would refuse with "no active client".
+@test "every recreate hint in cluster.sh goes through _recreate_cluster_hint (backend#2077)" {
+  local offenders
+  offenders="$(awk '
+    /^_recreate_cluster_hint\(\)[[:space:]]*\{/ { inhelper = 1; next }
+    inhelper && /^\}/                          { inhelper = 0; next }
+    inhelper                                   { next }
+    /^[[:space:]]*hint[[:space:]].*k3d cluster delete/ { printf "%d: %s\n", NR, $0 }
+  ' "${LIB_DIR}/cluster.sh")"
+  [ -z "$offenders" ] || { echo "bare recreate hints (must call _recreate_cluster_hint):"; echo "$offenders"; return 1; }
+}
+
+# Two real call sites, end to end — the helper being right buys nothing if a site
+# prints something else.
+@test "_check_existing_cluster_storage_mode: node-local drift keeps its TB_STORAGE_MODE re-run AND releases first" {
+  TB_STORAGE_MODE=node-local
+  docker() { printf '%s\n' /tracebloc; }
+  run _check_existing_cluster_storage_mode
+  [ "$status" -ne 0 ] || return 1
+  [[ "$output" == *"tracebloc delete --keep-data"* ]] || return 1
+  [[ "$output" == *"TB_STORAGE_MODE=node-local  re-run this installer."* ]] || return 1
+}
+
+@test "_check_existing_cluster_dataset_mount: still fails fast, and now releases the record first" {
+  HOST_DATASET_DIR=/mnt/nfs/datasets
+  docker() { printf '%s\n' /tracebloc; }
+  run _check_existing_cluster_dataset_mount
+  [ "$status" -ne 0 ] || return 1
+  [[ "$output" == *"no /tracebloc-data bind mount"* ]] || return 1
+  [[ "${output%%k3d cluster delete*}" == *"tracebloc delete --keep-data"* ]] || return 1
+}

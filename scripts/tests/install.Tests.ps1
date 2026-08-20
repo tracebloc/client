@@ -200,6 +200,10 @@ Describe "Confirm-ManifestSignature: offline-bundle -> sig/cert fallback behavio
   BeforeEach {
     $env:TRACEBLOC_CA_BUNDLE = $null; $env:CURL_CA_BUNDLE = $null   # skip the CA fast-fail
     Mock Resolve-Cosign { "cosign" }
+    # The resolved cosign is now probed for executability before any verify
+    # failure is read as a bad signature; these tests are about the verify
+    # branches, so hold the probe true.
+    Mock Test-CosignRuns { $true }
     Mock Get-Optional   { $true }        # bundle + sig + cert all "published/fetched"
     Mock Ok {}; Mock Warn {}
   }
@@ -215,5 +219,88 @@ Describe "Confirm-ManifestSignature: offline-bundle -> sig/cert fallback behavio
     Mock Invoke-CosignVerifyBlob { $false }
     { Confirm-ManifestSignature -Manifest 'm' -RepoRel 'r' -TmpDir $TestDrive -AllowUnverified $false } |
       Should -Throw -ExpectedMessage "*Couldn't confirm the installer download is authentic*"
+  }
+}
+
+Describe "cosign bootstrap on Windows-on-ARM (client#734)" {
+  # Sigstore has never published a Windows arm64 cosign — `cosign-windows-amd64.exe`
+  # is the only Windows asset at any release. Asking for the arm64 name 404s, so a
+  # Windows-on-ARM install failed closed reading like a network blip, permanently.
+  BeforeAll { $script:BOOTSRC2 = Get-Content -Raw "$PSScriptRoot/../install.ps1" }
+
+  It "requests the amd64 cosign asset unconditionally — never a per-arch name" {
+    $fn = (($script:BOOTSRC2 -split "function Resolve-Cosign")[1] -split "`nfunction ")[0]
+    $fn | Should -Match 'cosign-windows-amd64\.exe'
+    # The interpolated form is the bug: it builds a URL for an asset that does not exist.
+    $fn | Should -Not -Match 'cosign-windows-\$arch\.exe'
+  }
+
+  It "still refuses an architecture it does not recognise" {
+    $fn = (($script:BOOTSRC2 -split "function Resolve-Cosign")[1] -split "`nfunction ")[0]
+    $fn | Should -Match 'default\s*\{\s*return \$null\s*\}'
+  }
+
+  It "keeps checksum-verifying the bootstrapped cosign (the trust chain is unchanged)" {
+    $fn = (($script:BOOTSRC2 -split "function Resolve-Cosign")[1] -split "`nfunction ")[0]
+    $fn | Should -Match 'Bootstrapped cosign failed its own checksum'
+  }
+
+  It "Test-CosignRuns presets a nonzero sentinel so a binary that never starts can't read as success" {
+    $fn = (($script:BOOTSRC2 -split "function Test-CosignRuns")[1] -split "`nfunction ")[0]
+    $fn | Should -Match '\$global:LASTEXITCODE = 255'
+    $fn | Should -Match 'return \(\$LASTEXITCODE -eq 0\)'
+  }
+}
+
+Describe "A cosign that won't execute is not a failed signature (client#734)" {
+  BeforeEach {
+    $env:TRACEBLOC_CA_BUNDLE = $null; $env:CURL_CA_BUNDLE = $null
+    Mock Resolve-Cosign { "cosign" }
+    Mock Get-Optional   { $true }
+    Mock Ok {}; Mock Warn {}
+  }
+
+  It "fails closed, and says the download is NOT implicated" {
+    Mock Test-CosignRuns { $false }
+    { Confirm-ManifestSignature -Manifest 'm' -RepoRel 'r' -TmpDir $TestDrive -AllowUnverified $false } |
+      Should -Throw -ExpectedMessage "*NOT a failed verification*"
+  }
+
+  It "names both real causes -- quarantine and missing x64 emulation" {
+    Mock Test-CosignRuns { $false }
+    { Confirm-ManifestSignature -Manifest 'm' -RepoRel 'r' -TmpDir $TestDrive -AllowUnverified $false } |
+      Should -Throw -ExpectedMessage "*quarantined*"
+    { Confirm-ManifestSignature -Manifest 'm' -RepoRel 'r' -TmpDir $TestDrive -AllowUnverified $false } |
+      Should -Throw -ExpectedMessage "*x64 emulation*"
+  }
+
+  # Bugbot: winget's cosign is amd64-only, the same build that just failed to
+  # start -- and we already HAVE a cosign in this branch. Suggesting it sends the
+  # user to reproduce the error. A remedy that cannot clear the failure must not
+  # appear in the failure it claims to remedy.
+  It "does NOT send the user to winget, which ships the same amd64 build" {
+    Mock Test-CosignRuns { $false }
+    # Capture the message and assert on it: `Should -Not -Throw -ExpectedMessage`
+    # asserts it does not throw AT ALL, which would pass for the wrong reason here.
+    $msg = $null
+    try { Confirm-ManifestSignature -Manifest 'm' -RepoRel 'r' -TmpDir $TestDrive -AllowUnverified $false }
+    catch { $msg = $_.Exception.Message }
+    $msg | Should -Not -BeNullOrEmpty      # it must still fail closed
+    $msg | Should -Not -Match 'winget'
+  }
+
+  It "never reaches the verify when cosign can't run" {
+    Mock Test-CosignRuns { $false }
+    Mock Invoke-CosignVerifyBlob { $true }
+    { Confirm-ManifestSignature -Manifest 'm' -RepoRel 'r' -TmpDir $TestDrive -AllowUnverified $false } |
+      Should -Throw
+    Should -Invoke Invoke-CosignVerifyBlob -Times 0 -Exactly
+  }
+
+  It "honours TRACEBLOC_ALLOW_UNVERIFIED, loudly, like the other unverified path" {
+    Mock Test-CosignRuns { $false }
+    { Confirm-ManifestSignature -Manifest 'm' -RepoRel 'r' -TmpDir $TestDrive -AllowUnverified $true } |
+      Should -Not -Throw
+    Should -Invoke Warn -Times 2 -Exactly
   }
 }

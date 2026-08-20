@@ -58,6 +58,15 @@ LIB_DIR="${SCRIPT_DIR}/lib"
 
 # ── Source modules ───────────────────────────────────────────────────────────
 source "${LIB_DIR}/common.sh"
+# telemetry.sh (backend#1907) is sourced right after common.sh so the install
+# clock starts before any work does, and so common.sh's step_header /
+# install_cleanup hooks find their functions. Guarded like the other late
+# additions: an older bootstrap (e.g. a not-yet-updated tracebloc.io/i.sh, whose
+# FILES list is hand-maintained) may not have fetched it, and an installer that
+# aborted because it could not report on itself would be a poor trade.
+if [[ -f "${LIB_DIR}/telemetry.sh" ]]; then
+  source "${LIB_DIR}/telemetry.sh"
+fi
 source "${LIB_DIR}/preflight.sh"
 source "${LIB_DIR}/detect-gpu.sh"
 source "${LIB_DIR}/gpu-nvidia.sh"
@@ -148,6 +157,21 @@ main() {
     fi
     error "This installer build doesn't include prepare-host (stale bootstrap). Re-run: curl -fsSL https://tracebloc.io/i.sh | bash -s -- prepare-host"
   done
+
+  # Past this line the run is committed to installing, so it is the one that
+  # produces an outcome event (backend#1907). Everything above is terminal and
+  # touches nothing: --help exits 0, --diagnose clears the EXIT trap, and
+  # prepare-host swaps it for a lightweight reaper. Without this latch, a
+  # `--help` emitted install.run.succeeded and inflated the denominator of the
+  # failure rate the ticket exists to produce (Bugbot, client#747).
+  #
+  # NOT covered, deliberately: prepare-host. It is a different command with its
+  # own registry component (§10.1 gives `installer` the components install /
+  # preflight / upgrade), and reporting it as tracebloc.component=install would
+  # be mislabelling it rather than measuring it.
+  if declare -F telemetry_run_started >/dev/null 2>&1; then
+    telemetry_run_started
+  fi
 
   # Run-modifying flags (unlike --help/--diagnose, which are terminal). --force /
   # --reinstall skips the stop-and-check gate below and re-runs every step. Also

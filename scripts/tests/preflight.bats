@@ -22,7 +22,7 @@ setup() {
   _pf_runtime_mem_kb() { echo ""; }   # daemon "down" in tests → selectors/src use host
   _pf_runtime_ncpu() { echo ""; }
   _pf_avail_mem_kb() { echo $((50 * 1024 * 1024)); }   # 50 GB available (Linux warn off)
-  _pf_amd64_emulation_available() { return 0; }
+  amd64_emulation_available() { return 0; }
   docker() { return 1; }   # keep _pf_docker_root off the real daemon
   has() { return 0; }      # pretend tools present (conds empty) unless overridden
   OS="Linux"; ARCH="x86_64"
@@ -36,18 +36,121 @@ setup() {
   [[ "$output" == *"amd64"* ]] || return 1
 }
 
-@test "_pf_arch: arm64 Linux without emulation -> hard fail + binfmt remedy" {
+# ── The arch gate keys off the MySQL engine rule (backend#2047) ──────────────
+# The refusal used to be unconditional on Linux/non-amd64/no-emulation, which
+# contradicted install-client-helm.sh: on a FRESH install that lib selects the
+# multi-arch 8.4 engine, so the host runs natively and there is nothing to
+# emulate. These tests load the real engine rule — not a local stand-in — so the
+# two can't drift apart again. _engine_ctx builds the host state the rule reads.
+_load_engine_rule() {
+  # shellcheck source=/dev/null
+  source "${BATS_TEST_DIRNAME}/../lib/install-client-helm.sh"
+}
+
+# $1 = fresh|existing-data. HOST_DATA_DIR is what the rule inspects; point it at
+# a tmp dir so the result never depends on whether the machine running the suite
+# happens to have a real ~/.tracebloc.
+_engine_ctx() {
+  HOST_DATA_DIR="$BATS_TEST_TMPDIR/data"
+  mkdir -p "$HOST_DATA_DIR/mysql"
+  unset TB_MYSQL_ENGINE TB_NAMESPACE TRACEBLOC_VALUES_FILE
+  if [[ "${1:-fresh}" == "existing-data" ]]; then
+    touch "$HOST_DATA_DIR/mysql/ibdata1"    # 5.7-format datadir content
+  fi
+}
+
+@test "_pf_arch: FRESH arm64 Linux without emulation -> native 8.4, no hard fail (backend#2047)" {
   ARCH=aarch64; OS=Linux
-  _pf_amd64_emulation_available() { return 1; }
+  amd64_emulation_available() { return 1; }
+  _load_engine_rule; _engine_ctx fresh
+  run _pf_arch
+  [ "$status" -eq 0 ] || return 1
+  [[ "$output" == *"natively"* ]] || return 1
+  # The whole point: no amd64-VM / emulation advice on a host that needs neither.
+  [[ "$output" != *"tonistiigi/binfmt"* ]] || return 1
+  [[ "$output" != *"provision an amd64"* ]] || return 1
+  [[ "$output" != *"emulation and re-run"* ]] || return 1
+  PF_HARD_FAIL=0; _pf_arch >/dev/null 2>&1; [ "$PF_HARD_FAIL" -eq 0 ] || return 1
+}
+
+@test "_pf_arch: arm64 Linux + EXISTING 5.7 datadir, no emulation -> hard fail naming the datadir, not the arch (backend#2047)" {
+  ARCH=aarch64; OS=Linux
+  amd64_emulation_available() { return 1; }
+  _load_engine_rule; _engine_ctx existing-data
   run _pf_arch
   [[ "$output" == *"amd64-only"* ]] || return 1
-  [[ "$output" == *"tonistiigi/binfmt"* ]] || return 1
+  [[ "$output" == *"tonistiigi/binfmt"* ]] || return 1          # emulation IS the fix here
+  [[ "$output" == *"Existing MySQL 5.7 data"* ]] || return 1    # the real cause
+  [[ "$output" == *"data-format constraint, not an architecture one"* ]] || return 1
+  PF_HARD_FAIL=0; _pf_arch >/dev/null 2>&1; [ "$PF_HARD_FAIL" -eq 1 ] || return 1
+}
+
+@test "_pf_arch: a previous 8.4 opt-in on arm64 is not refused on re-run (backend#2047)" {
+  # An arm64 edge already running 8.4 has datadir content, so only the sticky
+  # values.yaml branch distinguishes it from a reused 5.7 datadir. preflight must
+  # see it — which means resolving values_file the way install_client_helm does.
+  ARCH=aarch64; OS=Linux
+  amd64_emulation_available() { return 1; }
+  _load_engine_rule; _engine_ctx existing-data
+  printf 'images:\n  mysqlClient:\n    tag: "8.4"\n    digest: ""\n' > "$HOST_DATA_DIR/values.yaml"
+  PF_HARD_FAIL=0; _pf_arch >/dev/null 2>&1; [ "$PF_HARD_FAIL" -eq 0 ] || return 1
+}
+
+@test "_pf_arch: an operator-set TB_NAMESPACE is SANITISED before the datadir probe (Bugbot)" {
+  # install_client_helm resolves the namespace through _client_default_namespace
+  # unconditionally, and that helper sanitises to DNS-1123 — so "My Edge" becomes
+  # "my-edge" and the per-release datadir is HOST_DATA_DIR/my-edge/mysql. If
+  # preflight probed the RAW value it would miss that data, report a native 8.4
+  # pass, and let the late gate refuse only after cluster setup + credentials.
+  ARCH=aarch64; OS=Linux
+  amd64_emulation_available() { return 1; }
+  _load_engine_rule; _engine_ctx fresh
+  TB_NAMESPACE="My Edge"
+  local sanitised; sanitised="$(_sanitize_workspace_name "My Edge")"
+  [ "$sanitised" != "My Edge" ] || return 1          # the premise: it really does change
+  mkdir -p "$HOST_DATA_DIR/$sanitised/mysql"
+  touch "$HOST_DATA_DIR/$sanitised/mysql/ibdata1"
+  PF_HARD_FAIL=0; _pf_arch >/dev/null 2>&1
+  [ "$PF_HARD_FAIL" -eq 1 ] || return 1
+}
+
+@test "_pf_arch: TB_MYSQL_ENGINE=5.7 on arm64 without emulation -> hard fail naming the request (backend#2047)" {
+  ARCH=aarch64; OS=Linux
+  amd64_emulation_available() { return 1; }
+  _load_engine_rule; _engine_ctx fresh; TB_MYSQL_ENGINE=5.7
+  run _pf_arch
+  [[ "$output" == *"TB_MYSQL_ENGINE=5.7 was requested"* ]] || return 1
+  PF_HARD_FAIL=0; _pf_arch >/dev/null 2>&1; [ "$PF_HARD_FAIL" -eq 1 ] || return 1
+}
+
+@test "_pf_arch: unusable TB_MYSQL_ENGINE on arm64 -> hard fail, and no escape-hatch advice" {
+  # "Cannot tell" is a finding: the engine is undecidable, so the arch verdict is
+  # too. TRACEBLOC_ALLOW_ARM64 would only defer the failure, so it isn't offered.
+  ARCH=aarch64; OS=Linux
+  amd64_emulation_available() { return 1; }
+  _load_engine_rule; _engine_ctx fresh; TB_MYSQL_ENGINE=9.0
+  run _pf_arch
+  [[ "$output" == *"9.0"* ]] || return 1
+  [[ "$output" != *"TRACEBLOC_ALLOW_ARM64=1 to proceed"* ]] || return 1
+  PF_HARD_FAIL=0; _pf_arch >/dev/null 2>&1; [ "$PF_HARD_FAIL" -eq 1 ] || return 1
+}
+
+@test "_pf_arch: engine rule absent -> fails closed (refuses), never a silent native claim" {
+  # preflight.sh sourced without install-client-helm.sh: the 8.4 opt-in lives in
+  # the missing lib, so "no native path" is the honest answer, not a guess.
+  ARCH=aarch64; OS=Linux
+  amd64_emulation_available() { return 1; }
+  # Precondition, as an `if` — a bare `A && return 1` whose test is false trips
+  # bats' own set -e and reports a pass-shaped failure.
+  if declare -F _mysql_engine_decision >/dev/null 2>&1; then return 1; fi
+  run _pf_arch
+  [[ "$output" == *"amd64-only"* ]] || return 1
   PF_HARD_FAIL=0; _pf_arch >/dev/null 2>&1; [ "$PF_HARD_FAIL" -eq 1 ] || return 1
 }
 
 @test "_pf_arch: arm64 Linux WITH emulation -> info, no hard fail" {
   ARCH=aarch64; OS=Linux
-  _pf_amd64_emulation_available() { return 0; }
+  amd64_emulation_available() { return 0; }
   PF_HARD_FAIL=0; _pf_arch >/dev/null; [ "$PF_HARD_FAIL" -eq 0 ] || return 1
 }
 
@@ -66,7 +169,7 @@ setup() {
 
 @test "_pf_arch: arm64 + TRACEBLOC_ALLOW_ARM64 -> warn, no hard fail" {
   ARCH=aarch64; OS=Linux; export TRACEBLOC_ALLOW_ARM64=1
-  _pf_amd64_emulation_available() { return 1; }
+  amd64_emulation_available() { return 1; }
   run _pf_arch
   [[ "$output" == *"proceeding"* ]] || return 1
   PF_HARD_FAIL=0; _pf_arch >/dev/null; [ "$PF_HARD_FAIL" -eq 0 ] || return 1
@@ -762,6 +865,174 @@ setup() {
   ! _pf_is_network_fstype ext4 || return 1
   ! _pf_is_network_fstype apfs || return 1
   ! _pf_is_network_fstype "" || return 1
+}
+
+# ── FUSE spellings: the guard must not depend on the `fuse.` prefix ──────────
+#
+#  The names fed in below are written down from what _pf_fstype's READERS
+#  actually produce on real mounts. They are deliberately NOT read out of the
+#  case list in preflight.sh: a list checked against itself agrees with itself
+#  and can only ever be green.
+#
+#  Measured 2026-08-14 by mounting each filesystem for real:
+#
+#    Ubuntu 24.04 (libfuse 3.14.0, util-linux 2.39.3, coreutils 9.4)
+#    Ubuntu 20.04 (libfuse 2.9.9)  — same answers on both
+#      sshfs   findmnt / /proc/mounts: fuse.sshfs    stat -f -c %T: fuseblk
+#      rclone  findmnt / /proc/mounts: fuse.rclone   stat -f -c %T: fuseblk
+#      bindfs  findmnt / /proc/mounts: fuse          stat -f -c %T: fuseblk
+#    macOS — no findmnt, and the stat reader is skipped (BSD `stat -f` is a
+#    format string), so the df+mount path answers:
+#      sshfs   mount(8): "sshfs#user@host:/d on /mp (macfuse, nodev, nosuid, …)"
+#
+#  So the `fuse.` prefix is only ever present on ONE of the three readers, and
+#  the prefixed entries were unreachable on the other two.
+@test "_pf_is_network_fstype: a network FUSE filesystem classifies the same bare or fuse.-prefixed" {
+  local fs
+  for fs in sshfs s3fs rclone glusterfs ceph davfs; do
+    _pf_is_network_fstype "fuse.$fs" || return 1
+    _pf_is_network_fstype "$fs" || return 1
+    _pf_is_network_fstype "FUSE.$fs" || return 1   # readers lower-case, the predicate doesn't rely on it
+  done
+}
+
+@test "_pf_is_network_fstype: local filesystems stay local, and a LOCAL fuse.* is not swept up" {
+  local fs
+  for fs in ext4 xfs btrfs zfs apfs hfs overlay tmpfs vfat exfat; do
+    ! _pf_is_network_fstype "$fs" || return 1
+  done
+  # Stripping the prefix must not turn every FUSE mount into a network one.
+  for fs in fuse.gocryptfs fuse.mergerfs fuse.encfs fuse.portal; do
+    ! _pf_is_network_fstype "$fs" || return 1
+  done
+}
+
+@test "_pf_is_network_fstype: the case list carries no fuse.-prefixed entry (normalised, not enumerated)" {
+  # The prefix is stripped before matching, so a `fuse.x` back in the list means
+  # someone is hand-extending it again — the exact shape that produced this gap
+  # (a fuse.sshfs entry with no bare sshfs twin, unreachable on two readers).
+  local body pattern
+  body="$(sed -n '/^_pf_is_network_fstype()/,/^}/p' "$BATS_TEST_DIRNAME/../lib/preflight.sh")"
+  [ -n "$body" ] || return 1                       # unreadable is a finding, not a pass
+  pattern="$(printf '%s\n' "$body" | grep ') return 0 ;;' || true)"
+  [ -n "$pattern" ] || return 1
+  [[ "$pattern" != *"fuse."* ]] || return 1
+}
+
+@test "_pf_is_opaque_fuse_fstype: the subtype-erased readings are opaque; named ones are not" {
+  local fs
+  # what `stat -f -c %T` and macOS actually hand back (measured, see the block above)
+  for fs in fuseblk fuse macfuse osxfuse; do
+    _pf_is_opaque_fuse_fstype "$fs" || return 1
+  done
+  # a named filesystem — network or local — is never "opaque"; it routes to the
+  # network classifier instead, so these two predicates can't both claim a name.
+  for fs in ext4 apfs overlay nfs4 cifs fuse.sshfs sshfs ""; do
+    ! _pf_is_opaque_fuse_fstype "$fs" || return 1
+  done
+}
+
+@test "_pf_is_network_fstype: the cloud FUSE twins of s3fs are network too (saadqbal, #726)" {
+  # GCS and Azure Blob are the cloud siblings of the s3fs already covered, and a
+  # hospital mounting object storage at HOST_DATA_DIR corrupts the database the
+  # same way. They were absent, so they reached the `else` and were announced as
+  # "Local storage".
+  local fs
+  for fs in fuse.gcsfuse gcsfuse fuse.blobfuse blobfuse fuse.blobfuse2 blobfuse2; do
+    _pf_is_network_fstype "$fs" || return 1
+  done
+}
+
+@test "_pf_is_opaque_fuse_fstype: an unrecognised FUSE driver is unknown, never local (#726)" {
+  # The list can only hold the drivers someone thought of; the next cloud FUSE
+  # ships without asking us. An unrecognised subtype must read as unknown rather
+  # than as a confident "Local storage".
+  local fs
+  for fs in fuse.gocryptfs fuse.ntfs-3g fuse.somethingnobodyhasinvented; do
+    _pf_is_opaque_fuse_fstype "$fs" || return 1
+  done
+}
+
+@test "_pf_is_network_fstype and _pf_is_opaque_fuse_fstype stay mutually exclusive (#726)" {
+  # THE INVARIANT THE SUITE ALREADY PROTECTED, and the reason the fuse.* arm
+  # negates the network classifier instead of returning 0 outright. Without it
+  # `fuse.sshfs` satisfies BOTH, and only the order the caller happens to ask in
+  # keeps it a hard fail rather than a notice -- so a future caller asking
+  # "opaque?" first would silently downgrade a database-corrupting mount.
+  local fs
+  for fs in fuse.sshfs fuse.s3fs fuse.gcsfuse fuse.blobfuse2 fuse.rclone \
+            fuse.gocryptfs fuseblk fuse nfs4 cifs ext4 apfs ""; do
+    if _pf_is_network_fstype "$fs" && _pf_is_opaque_fuse_fstype "$fs"; then
+      echo "both predicates claim '$fs'" >&2
+      return 1
+    fi
+  done
+}
+
+@test "_pf_opaque_fuse_warn: the wording matches WHICH unknown it is (#726)" {
+  # "the mount table doesn't say which one" is true for fuseblk and false for
+  # fuse.gocryptfs, where the table says precisely which one and the gap is that
+  # we have no opinion on it. A guard that ships a false sentence is the shape
+  # this repo keeps finding.
+  run _pf_opaque_fuse_warn /data fuseblk
+  [[ "$output" == *"doesn't say which one"* ]] || return 1
+  run _pf_opaque_fuse_warn /data fuse.gocryptfs
+  [[ "$output" == *"does not recognise"* ]] || return 1
+  [[ "$output" != *"doesn't say which one"* ]] || return 1
+}
+
+@test "_pf_storage_type: every measured network-FUSE reading hard fails, prefixed or bare" {
+  local fstype
+  PF_FSTYPE_STUB=""; _pf_fstype() { echo "$PF_FSTYPE_STUB"; }
+  for fstype in fuse.sshfs sshfs fuse.rclone rclone fuse.s3fs s3fs fuse.glusterfs glusterfs; do
+    PF_FSTYPE_STUB="$fstype"
+    PF_HARD_FAIL=0; _pf_storage_type >/dev/null 2>&1
+    [ "$PF_HARD_FAIL" -eq 1 ] || return 1
+  done
+}
+
+@test "_pf_storage_type: a subtype-erased FUSE reading warns instead of passing as local storage" {
+  local fstype
+  PF_FSTYPE_STUB=""; _pf_fstype() { echo "$PF_FSTYPE_STUB"; }
+  for fstype in fuseblk macfuse fuse; do
+    PF_FSTYPE_STUB="$fstype"
+    run _pf_storage_type
+    [ "$status" -eq 0 ] || return 1
+    [[ "$output" == *"FUSE filesystem (${fstype})"* ]] || return 1
+    [[ "$output" == *"sshfs"* ]] || return 1              # names what it might be
+    [[ "$output" != *"Local storage"* ]] || return 1      # must NOT claim local
+    PF_HARD_FAIL=0; _pf_storage_type >/dev/null 2>&1
+    [ "$PF_HARD_FAIL" -eq 0 ] || return 1                 # advisory, never a block
+  done
+}
+
+@test "_pf_storage_type and early_data_dir_guard agree on every measured reading (#432 shares one classifier)" {
+  local fstype
+  PF_FSTYPE_STUB=""; _pf_fstype() { echo "$PF_FSTYPE_STUB"; }
+  for fstype in fuse.sshfs sshfs fuse.rclone rclone fuse.s3fs s3fs nfs4 cifs; do
+    PF_FSTYPE_STUB="$fstype"
+    PF_HARD_FAIL=0; _pf_storage_type >/dev/null 2>&1
+    [ "$PF_HARD_FAIL" -eq 1 ] || return 1
+    HOST_DATA_DIR="$BATS_TEST_TMPDIR/agree-$fstype/.tracebloc" run early_data_dir_guard
+    [ "$status" -eq 1 ] || return 1
+  done
+}
+
+@test "early_data_dir_guard: a bare sshfs reading refuses exactly as fuse.sshfs does" {
+  _pf_fstype() { echo sshfs; }
+  HOST_DATA_DIR="$BATS_TEST_TMPDIR/bare/.tracebloc" run early_data_dir_guard
+  [ "$status" -eq 1 ] || return 1
+  [[ "$output" == *"network filesystem (sshfs)"* ]] || return 1
+  [[ "$output" == *"Refusing to create the data directory"* ]] || return 1
+  [ ! -d "$BATS_TEST_TMPDIR/bare/.tracebloc" ] || return 1   # refused BEFORE any mkdir
+}
+
+@test "early_data_dir_guard: an opaque FUSE reading warns but does not refuse" {
+  _pf_fstype() { echo macfuse; }
+  HOST_DATA_DIR="$BATS_TEST_TMPDIR/opaque/.tracebloc" run early_data_dir_guard
+  [ "$status" -eq 0 ] || return 1
+  [[ "$output" == *"FUSE filesystem (macfuse)"* ]] || return 1
+  [[ "$output" != *"Refusing"* ]] || return 1
 }
 
 @test "early_data_dir_guard: local filesystem -> silent pass" {

@@ -209,7 +209,25 @@ CYAN="$TB_ACCENT"; GREEN="$TB_GO"; YELLOW="$TB_WARN"; RED="$TB_ERRSOFT"
 info()           { echo -e "  ${DIM}·${RESET} $*"; }
 success()        { echo -e "  ${TB_GO}✔${RESET} $*"; }
 warn()           { echo -e "  ${TB_WARN}⚠${RESET}  $*"; }
-error()          { echo -e "  ${TB_ERR}✖ $*${RESET}" >&2; exit 1; }
+# error MESSAGE — print and exit 1.
+#
+# It records itself first, and that is not decoration. `exit` fires NO ERR trap,
+# so a deliberate refusal left TB_ERR_* holding whatever benign probe failed
+# last — and install_cleanup then reported that probe as the cause. A real log
+# read "Stopped at common.sh:527 — sudo -n true" for an install that died of a
+# missing administrator password: line 527 is the passwordless-sudo probe, which
+# is SUPPOSED to fail on a normal Mac. The report named a healthy check and sent
+# the reader to the wrong place, which is worse than naming nothing.
+#
+# BASH_SOURCE[1]/BASH_LINENO[0] are the CALLER's file and line — where the
+# refusal was decided. BASH_SOURCE[0] would name common.sh every time.
+error() {
+  if declare -F _record_err >/dev/null 2>&1; then
+    _record_err "${BASH_SOURCE[1]:-?}:${BASH_LINENO[0]:-?}" "error: $*" 1
+  fi
+  echo -e "  ${TB_ERR}✖ $*${RESET}" >&2
+  exit 1
+}
 step()           { echo -e "\n${TB_HEADING}Step $1/$2${RESET}  ${BOLD}$3${RESET}"; }
 log()            { [[ -n "${LOG_FILE:-}" ]] && echo "[$(date +%H:%M:%S)] $*" >> "$LOG_FILE" 2>/dev/null; return 0; }
 prompt_header()  { echo -e "\n  ${BOLD}${WHITE}$*${RESET}"; }
@@ -220,7 +238,21 @@ hint()           { echo -e "  ${DIM}$*${RESET}"; }
 # → "  a) Checking your machine". Prints the header + a single trailing blank; the
 # blank-line gap BETWEEN steps comes from each step body ending with a blank line
 # (main() adds it), matching the run-through's spacing.
-step_header()    { echo -e "  ${TB_HEADING}$1) $2${RESET}"; echo ""; }
+#
+# It is also where the install's phase clock turns over (backend#1907). Hooking
+# THIS rather than adding a telemetry_phase_begin call to each of the six steps
+# is the difference between phase timings that are correct by construction and
+# phase timings that are correct for the steps somebody remembered — and the
+# letters it is keyed on are the ones actually being printed, so nothing can
+# drift. Guarded because telemetry.sh may be absent under an older bootstrap
+# whose FILES list did not fetch it, and the `|| true` because printing a step
+# header must never be able to end an install.
+step_header()    {
+  if declare -F telemetry_phase_begin >/dev/null 2>&1; then
+    telemetry_phase_begin "$1" || true
+  fi
+  echo -e "  ${TB_HEADING}$1) $2${RESET}"; echo "";
+}
 
 # ── Utility ──────────────────────────────────────────────────────────────────
 has() { command -v "$1" &>/dev/null; }
@@ -283,6 +315,22 @@ _bounded() {
   if   has timeout;  then timeout  "$t" "$@"
   elif has gtimeout; then gtimeout "$t" "$@"
   else "$@"; fi
+}
+
+# _docker_answers — `docker info`, bounded and silent. The single probe every
+# "is the runtime up?" check should route through.
+#
+# A bare `docker info` does not return when the daemon is WEDGED, as opposed to
+# stopped — and wedged is precisely the state that lands a machine in
+# assess's runtime-down branch, since _assess_runtime_down classifies on
+# _bounded's 124. So the unbounded probe hangs exactly on the input that
+# reaches it: the operator is told Docker is being started and the installer
+# freezes with no further output (Bugbot, #741).
+#
+# TB_DOCKER_PROBE_TIMEOUT defaults to the same 10s as TB_ASSESS_DOCKER_TIMEOUT;
+# they answer the same question about the same daemon and should not disagree.
+_docker_answers() {
+  _bounded "${TB_DOCKER_PROBE_TIMEOUT:-10}" docker info >/dev/null 2>&1
 }
 
 # ── Subordinate ID helpers (rootless Docker, RFC 0001 #1220) ──────────────────
@@ -360,9 +408,16 @@ tb_minutes_or() {
 #   • bracketed-paste wrappers:  ESC[200~ ... ESC[201~
 #   • arrow keys / cursor moves: ESC[A/B/C/D, ESC[1;5C, ESC[3~ (Delete), …
 #   • function keys, modifier combos, mode-switch sequences
-# All follow the ANSI CSI shape:  ESC '[' <params> <final-byte>
-# where params ∈ [0-9;] and final ∈ [A-Za-z~]. Strip them iteratively to
-# handle consecutive sequences (e.g. paste-wrappers).
+# Two shapes carry all of those:
+#   CSI  ESC '[' <params ∈ [0-9;]> <final ∈ [A-Za-z~]>
+#   SS3  ESC 'O' <final ∈ [A-Za-z~]>   — ESC OA/OB/OC/OD, ESC OH/OF, ESC OP…OS
+# SS3 is what the SAME keys emit once the terminal is in DECCKM
+# application-cursor mode, the state vim/less/tmux leave behind on an unclean
+# exit (cli#516). It was the hole left by the CSI-only fix of 2026-07-21
+# (client#362 / cli#364): ESC is dropped as a C0 byte but 'O' and the final byte
+# are printable, so ESC OD ESC OA survived as the plausible name "ODOA" and
+# minted a permanent namespace — where CSI residue cleans to empty and re-prompts.
+# Strip iteratively to handle consecutive sequences (e.g. paste-wrappers).
 #
 # Also handles the post-corruption case where ESC was stripped by an earlier
 # (buggy) sanitizer but the literal `[200~`/`[201~` markers survived. Only
@@ -372,15 +427,55 @@ tb_minutes_or() {
 # UTF-8 bytes (0x80+) preserved so international characters survive. Lives here
 # (shared) so BOTH the credential path (install-client-helm.sh) and the client-
 # name prompt (provision.sh) sanitize identically (customer-reported 2026-07-20).
+# Mirrored by cli/internal/cli/sanitize.go and install-k8s.ps1's
+# ConvertTo-SanitizedInput — change all three together.
 _strip_paste_garbage() {
   local s="$1"
   local esc=$'\e'
-  local csi_pattern="${esc}\\[[0-9;]*[A-Za-z~]"
-  while [[ "$s" =~ $csi_pattern ]]; do
+  local esc_pattern="${esc}(\\[[0-9;]*|O)[A-Za-z~]"
+  while [[ "$s" =~ $esc_pattern ]]; do
     s="${s/${BASH_REMATCH[0]}/}"
   done
   s="${s//\[200\~/}"
   s="${s//\[201\~/}"
+  # The floor. The loop above knows CSI, SS3 and the paste markers; it cannot
+  # know the escape family nobody has reported yet — and that is exactly how SS3
+  # got here, one rule hand-copied into three languages with only CSI ever
+  # tested. So if an ESC SURVIVED the loop, this value carries a shape we do not
+  # recognise and its printable bytes are not trustworthy content. Require one
+  # alphanumeric that did not come from an escape final byte, probing with ESC +
+  # intermediates + AT MOST TWO final-class bytes. Two, not one and not
+  # unbounded: one leaves the 'D' of an unrecognised SS3-shaped pair behind and
+  # the floor stops firing on the very shape this is about, while unbounded
+  # swallows a whole ASCII name (ESC N C h e l l o) yet spares a non-Latin one,
+  # making keep-vs-reject depend on the script the name is written in (Bugbot,
+  # #736). An escape final is one byte, an intro plus a final is two, and every
+  # keyboard-input escape family fits in that. The probe's output is only a
+  # yes/no — it is never returned. Nothing but residue ⇒ emit empty, which every
+  # caller already treats as "no answer" (re-prompt, or auto-name in the CLI).
+  if [[ "$s" == *"$esc"* ]]; then
+    # `sed`, NOT the `while [[ =~ ]]; do s="${s/$BASH_REMATCH/}"` loop the strip
+    # above uses. Pattern substitution treats BASH_REMATCH as a GLOB, and this
+    # pattern — unlike the CSI one, whose match can never contain `]` — can match
+    # a complete bracket expression: on ESC [ ; ] A the regex matches the whole
+    # thing, the glob `<ESC>[;]A` then means ESC ';' 'A', which is NOT in the
+    # string, the substitution removes nothing, and the loop never terminates.
+    # That is a hang at the installer's name prompt. One sed pass has no glob
+    # semantics and no loop.
+    #
+    # And "alphanumeric" via tr, not `=~ [[:alnum:]]`: bash's regex engine is
+    # locale-dependent, and under the C locale the installer often runs in,
+    # [[:alnum:]] does not match a UTF-8 letter — which would auto-name a
+    # perfectly good "日本" the moment an unknown escape sat next to it. Keeping
+    # every byte >= 0x80 makes "is there real content here" locale-independent
+    # and matches what the strip itself already preserves.
+    local probe
+    probe="$(printf '%s' "$s" | LC_ALL=C sed -E "s/${esc}[^A-Za-z0-9~]*[A-Za-z~]{1,2}//g" | LC_ALL=C tr -dc '0-9A-Za-z\200-\377')"
+    if [[ -z "$probe" ]]; then
+      printf ''
+      return 0
+    fi
+  fi
   printf '%s' "$s" | tr -d '\000-\037\177'
 }
 
@@ -858,6 +953,13 @@ if [[ "$OS" == "Darwin" ]]; then
 fi
 [[ "$ARCH" == "x86_64" ]] && ARCH_DL="amd64" || ARCH_DL="arm64"
 
+# True if this host can run amd64 binaries via QEMU binfmt. Lives here (not in
+# preflight.sh) because TWO gates now ask it — preflight's early arch check and
+# install-client-helm.sh's engine gate (backend#2047) — and both must read the
+# same probe: an arch verdict that disagreed with the engine verdict is the bug
+# that ticket describes. Wrapped in a function so bats can override it.
+amd64_emulation_available() { [[ -e /proc/sys/fs/binfmt_misc/qemu-x86_64 ]]; }
+
 GPU_VENDOR="none"          # nvidia | amd | apple_silicon | none
 NVIDIA_DRIVER_OK=false
 K3D_GPU_FLAGS=()           # extra flags appended to k3d cluster create
@@ -878,8 +980,26 @@ PM_UPDATE=""
 #  would still be invisible.
 TB_ERR_LOC=""    # "file:line" of the LAST failing command — see _record_err
 _TB_IN_RECORD_ERR=""   # re-entrancy guard; the recorder inherits its own trap
-TB_ERR_CMD=""    # the command text, UNEXPANDED — BASH_COMMAND yields `cmd "$VAR"`,
-                 # never the value, so this cannot leak a credential into the log
+TB_ERR_CMD=""    # what failed. TWO producers, and they differ — read on before
+                 # writing a message that ends up here.
+                 #
+                 #   ERR trap  → BASH_COMMAND, i.e. the command text UNEXPANDED:
+                 #               `cmd "$VAR"`, never the value.
+                 #   error()   → "error: $*", i.e. the message AS INTERPOLATED,
+                 #               because a deliberate refusal fires no ERR trap
+                 #               and would otherwise leave a benign probe here
+                 #               (#741).
+                 #
+                 # So the old blanket "this cannot leak a credential into the
+                 # log" no longer holds for the error() path, and TB_ERR_CMD
+                 # reaches LOG_FILE twice — via _record_err and via
+                 # install_cleanup's `FAILED at … command:` line.
+                 #
+                 # Every error() call today interpolates only paths, sizes,
+                 # versions and arch names (audited on #741). Keep it that way:
+                 # NEVER interpolate a credential, token or password into an
+                 # error() message. If you need one in the text, say
+                 # "the credential file at $path", not the value.
 TB_ERR_CODE=""   # its exit status (137/141/… included: a signal death is a failure)
 
 # _record_err LOCATION COMMAND — ERR-trap body. Everything it needs about the
@@ -894,6 +1014,11 @@ TB_ERR_CODE=""   # its exit status (137/141/… included: a signal death is a fa
 # Always returns 0 — a recorder that failed would re-enter the trap.
 _record_err() {
   local _code=$?
+  # $3 overrides the implicit $?. The ERR trap has a meaningful $? and passes
+  # nothing; error() does not (its $? is whatever preceded the call) and passes
+  # the 1 it is about to exit with. Read before any other statement, or $? is
+  # already clobbered.
+  _code="${3:-$_code}"
   # Re-entrancy guard. `set -E` makes this function inherit the ERR trap, so any
   # command in here that fails would re-enter it — including `log` below, whose
   # `[[ -n "${LOG_FILE:-}" ]] && …` form returns non-zero when no log is open.
@@ -984,6 +1109,16 @@ install_cleanup() {
       hint "If it keeps failing, re-run with --diagnose and send the bundle to tracebloc support."
     fi
   fi
+
+  # One structured outcome event per install (backend#1907). Emitted LAST, from
+  # the EXIT trap, so it runs on every path — success, the re-run-required stop,
+  # Ctrl-C, and the fatal one — which is what §6.5 of the telemetry contract
+  # requires and what makes a failure RATE computable rather than just a count.
+  # Everything it reads (CLIENT_STATE, TB_ERR_*, the phase clock) is final by
+  # this point. Guarded for an older bootstrap that did not fetch telemetry.sh.
+  if declare -F telemetry_emit_outcome >/dev/null 2>&1; then
+    telemetry_emit_outcome "$exit_code" || true
+  fi
 }
 
 # Installer version shown in the banner's title (" · <version>"). The curl|bash
@@ -1073,6 +1208,16 @@ Advanced configuration (environment variables):
   HOST_DATA_DIR  Persistent data directory       (default: ~/.tracebloc)
                  Must be on a LOCAL disk — NFS/CIFS/SMB is rejected (the database
                  corrupts on network storage). TRACEBLOC_ALLOW_NETWORK_FS=1 overrides.
+
+Usage reporting:
+  This installer records ONE outcome event per run so we can see failures without
+  waiting for someone to report them: which step it reached, how long each step
+  took, the exit code, an error class, your OS and architecture, and the version.
+  It cannot record your arguments, any path, any file name, your username, your
+  hostname or your credentials — every field is a number or a value from a fixed
+  list, so there is nowhere for those to go.
+  TRACEBLOC_NO_TELEMETRY=1  Turn it off.
+  DO_NOT_TRACK=1            Also turns it off.
 
 Windows:
   irm https://raw.githubusercontent.com/tracebloc/client/main/scripts/install.ps1 | iex

@@ -77,6 +77,81 @@ tests:
             resources: ["pods", "pods/log", "events"]
             verbs: ["get", "list", "watch"]
 
+  # Assert both branches — a clusterScope: false edge needs the grant too.
+  - it: ClusterRole grants read on deployments and daemonsets for the version inventory
+    set:
+      clusterScope: true
+    documentIndex: 1
+    asserts:
+      - contains:
+          path: rules
+          content:
+            apiGroups: ["apps"]
+            resources: ["deployments", "daemonsets"]
+            verbs: ["get", "list", "watch"]
+
+  - it: namespaced Role grants read on deployments and daemonsets too
+    set:
+      clusterScope: false
+    documentIndex: 1
+    asserts:
+      - contains:
+          path: rules
+          content:
+            apiGroups: ["apps"]
+            resources: ["deployments", "daemonsets"]
+            verbs: ["get", "list", "watch"]
+
+  # resource-monitor is a DaemonSet in nodeAgents.namespace, not the release
+  # namespace, so a release-namespace grant does not reach it.
+  - it: a clusterScope=false edge gets a node-agents Role for the DaemonSet
+    set:
+      clusterScope: false
+      nodeAgents:
+        namespace:
+          name: tracebloc-node-agents
+    documentIndex: 3
+    asserts:
+      - isKind:
+          of: Role
+      - equal:
+          path: metadata.namespace
+          value: tracebloc-node-agents
+      - contains:
+          path: rules
+          content:
+            apiGroups: ["apps"]
+            resources: ["daemonsets"]
+            verbs: ["get", "list", "watch"]
+
+  - it: the node-agents RoleBinding binds the release-namespace ServiceAccount
+    set:
+      clusterScope: false
+      nodeAgents:
+        namespace:
+          name: tracebloc-node-agents
+    documentIndex: 4
+    asserts:
+      - isKind:
+          of: RoleBinding
+      - equal:
+          path: metadata.namespace
+          value: tracebloc-node-agents
+      - equal:
+          path: subjects[0].namespace
+          value: NAMESPACE
+
+  - it: no node-agents pair when that namespace IS the release namespace
+    set:
+      clusterScope: false
+      nodeAgents:
+        namespace:
+          name: NAMESPACE
+    asserts:
+      # Already granted by the Role above, and a second pair would collide on name.
+      - hasDocuments:
+          count: 3
+
   # backend#1876: the GPU->CPU pending fallback needs list nodes. `nodes` is
   # cluster-scoped, so it must be in the ClusterRole and CANNOT be in the
   # namespaced Role — assert both.

@@ -122,6 +122,97 @@ setup() {
   [ "$output" = "abcd" ] || return 1
 }
 
+# ── SS3 (cli#516) ──────────────────────────────────────────────────────────
+# The CSI-only strip landed 2026-07-21 (client#362 / cli#364) and is not in
+# question here. SS3 — ESC 'O' <final> — is what the SAME keys emit once the
+# terminal is in DECCKM application-cursor mode, the state vim/less/tmux leave
+# behind on an unclean exit. It was worse than the CSI case it was missed
+# alongside: CSI residue cleans to empty and re-prompts, while ESC OD ESC OA
+# left the non-empty, plausible "ODOA" and minted a permanent namespace.
+@test "_strip_paste_garbage: strips SS3 escapes around real content" {
+  run _strip_paste_garbage "$(printf 'na\eODme')"
+  [ "$output" = "name" ] || return 1
+}
+
+@test "_strip_paste_garbage: SS3 arrows only -> empty (caller re-prompts)" {
+  run _strip_paste_garbage "$(printf '\eOD\eOD\eOD\eOA\eOA\eOA')"
+  [ "$output" = "" ] || return 1
+}
+
+@test "_strip_paste_garbage: SS3 Home/End and F1/F2 -> empty" {
+  run _strip_paste_garbage "$(printf '\eOH\eOF')"
+  [ "$output" = "" ] || return 1
+  run _strip_paste_garbage "$(printf '\eOP\eOQ')"
+  [ "$output" = "" ] || return 1
+}
+
+@test "_strip_paste_garbage: SS3 and CSI mixed in one value" {
+  run _strip_paste_garbage "$(printf 'a\eODb\e[Dc')"
+  [ "$output" = "abc" ] || return 1
+}
+
+@test "_strip_paste_garbage: a bare O is not an escape" {
+  run _strip_paste_garbage "OPTIMUS-01"
+  [ "$output" = "OPTIMUS-01" ] || return 1
+}
+
+# ── the post-sanitise floor ────────────────────────────────────────────────
+# An ESC that SURVIVES the strip means an escape family this helper does not
+# know — which is exactly how SS3 got here. SS2 (ESC 'N' <final>) stands in for
+# "the next family": it is not stripped above, so these exercise the floor and
+# nothing else.
+@test "_strip_paste_garbage: unknown escape family, residue only -> empty" {
+  run _strip_paste_garbage "$(printf '\eNB\eNC')"
+  [ "$output" = "" ] || return 1
+}
+
+@test "_strip_paste_garbage: unknown escape family beside real content is kept" {
+  run _strip_paste_garbage "$(printf 'box\eNC')"
+  [ "$output" = "boxNC" ] || return 1
+}
+
+@test "_strip_paste_garbage: the floor counts non-Latin letters as real content" {
+  run _strip_paste_garbage "$(printf '\eNC日本')"
+  [ "$output" = "NC日本" ] || return 1
+}
+
+# The probe's final-byte run is bounded at two, so an ASCII name after an unknown
+# escape is kept just like a non-Latin one. Keep-vs-reject must not depend on the
+# script the name is written in — with an unbounded `+` the whole word was
+# swallowed and this input was refused while the 日本 case above was not (Bugbot).
+@test "_strip_paste_garbage: the floor keeps an ASCII name after an unknown escape" {
+  run _strip_paste_garbage "$(printf '\eNChello')"
+  [ "$output" = "NChello" ] || return 1
+}
+
+@test "_strip_paste_garbage: truncated SS3 (ESC O, no final) -> empty" {
+  run _strip_paste_garbage "$(printf '\eO')"
+  [ "$output" = "" ] || return 1
+}
+
+# ESC [ ; ] A is the shape that made the floor's first draft HANG, and it is why
+# the floor uses one sed pass rather than the `while [[ =~ ]]; do
+# s="${s/${BASH_REMATCH[0]}/}"; done` loop the strip above uses. Pattern
+# substitution treats BASH_REMATCH as a GLOB: the residue regex matches
+# ESC [ ; ] A whole, but the glob `<ESC>[;]A` means ESC ';' 'A' — not in the
+# string — so the substitution removed nothing and the loop spun forever, at the
+# installer's name prompt. (The CSI loop is safe by construction: its match can
+# never contain a `]`, so it can never form a complete bracket expression.)
+# Bounded like common.bats bounds its recursion guard — macOS ships no
+# timeout(1), so Linux CI is the authority on the hang half.
+@test "_strip_paste_garbage: ESC [ ; ] A terminates and is refused (glob-substitution hang)" {
+  local _to=""
+  command -v timeout  >/dev/null 2>&1 && _to=timeout
+  command -v gtimeout >/dev/null 2>&1 && _to=gtimeout
+  if [ -n "$_to" ]; then
+    run "$_to" 10 bash -c 'source "$1/common.sh"; _strip_paste_garbage "$(printf "\e[;]A")"' _ "$LIB_DIR"
+  else
+    run bash -c 'source "$1/common.sh"; _strip_paste_garbage "$(printf "\e[;]A")"' _ "$LIB_DIR"
+  fi
+  [ "$status" -eq 0 ] || return 1
+  [ "$output" = "" ] || return 1
+}
+
 @test "_sanitize_workspace_name: lowercases + dashes" {
   run _sanitize_workspace_name "My Team_1"
   [ "$output" = "my-team-1" ] || return 1
@@ -1203,6 +1294,191 @@ _engine_fixture() {
   [ "$TB_MYSQL_ENGINE_RESOLVED" = "8.4" ] || return 1
 }
 
+# ── _mysql_engine_decision: the rule, asked without side effects (backend#2047)
+# preflight's arch gate consults this instead of restating the fresh-vs-existing
+# test, so each verdict needs a REASON that is distinguishable — "5.7 because
+# your data is 5.7-format" and "5.7 because you asked for it" print different
+# remedies, and only "8.4" means this host needs no amd64 emulation.
+
+@test "_mysql_engine_decision: reasons are distinguishable per input" {
+  _engine_fixture; ARCH=arm64
+  [ "$(_mysql_engine_decision)" = "8.4 fresh" ] || return 1
+  ARCH=x86_64
+  [ "$(_mysql_engine_decision)" = "5.7 amd64" ] || return 1
+  ARCH=arm64; touch "$HOST_DATA_DIR/mysql/ibdata1"
+  [ "$(_mysql_engine_decision)" = "5.7 existing-datadir" ] || return 1
+  rm -f "$HOST_DATA_DIR/mysql/ibdata1"
+  # A live Helm release is a DISTINCT reason from real datadir content: same 5.7
+  # engine, different remedy (helm list, not the data dir).
+  existing_id="someclient"
+  [ "$(_mysql_engine_decision)" = "5.7 existing-release" ] || return 1
+  # When BOTH a release and real datadir files exist, datadir wins: the host
+  # DOES hold 5.7 data, and a release-only "uninstall" remedy would leave those
+  # files to re-pin 5.7 next run (Bugbot, client#752). existing_id still set here.
+  touch "$HOST_DATA_DIR/mysql/ibdata1"
+  [ "$(_mysql_engine_decision)" = "5.7 existing-datadir" ] || return 1
+  rm -f "$HOST_DATA_DIR/mysql/ibdata1"
+  existing_id=""
+  TB_MYSQL_ENGINE=5.7
+  [ "$(_mysql_engine_decision)" = "5.7 explicit" ] || return 1
+  TB_MYSQL_ENGINE=8.4
+  [ "$(_mysql_engine_decision)" = "8.4 explicit" ] || return 1
+  TB_MYSQL_ENGINE=9.0
+  [ "$(_mysql_engine_decision)" = "invalid 9.0" ] || return 1
+  unset TB_MYSQL_ENGINE
+  printf 'images:\n  mysqlClient:\n    tag: "8.4"\n    digest: ""\n' > "$values_file"
+  [ "$(_mysql_engine_decision)" = "8.4 sticky" ] || return 1
+}
+
+@test "_mysql_engine_decision: pure on EVERY branch — never logs, never sets the resolved global" {
+  # preflight consults it minutes before the engine is chosen; a log line or a
+  # half-set global there would be an install-time side effect at check time.
+  # Every branch is exercised, not just the one the happy path takes: a purity
+  # test covering a single branch passes while any other branch leaks (found by
+  # mutating the sticky branch — it stayed green until this loop existed).
+  log() { echo "LOGGED: $*"; }
+  local case_name
+  for case_name in fresh amd64 existing-release existing-datadir explicit invalid sticky; do
+    _engine_fixture; ARCH=arm64
+    case "$case_name" in
+      amd64)            ARCH=x86_64 ;;
+      existing-release) existing_id="someclient" ;;
+      existing-datadir) touch "$HOST_DATA_DIR/mysql/ibdata1" ;;
+      explicit)         TB_MYSQL_ENGINE=5.7 ;;
+      invalid)          TB_MYSQL_ENGINE=9.0 ;;
+      sticky)           printf 'images:\n  mysqlClient:\n    tag: "8.4"\n' > "$values_file" ;;
+    esac
+    # `run` would swallow the global anyway (subshell), so assert on both: the
+    # captured output must carry no log line, and the global must stay unset in
+    # THIS shell after a direct call.
+    run _mysql_engine_decision
+    [ "$status" -eq 0 ] || return 1
+    [[ "$output" != *LOGGED:* ]] || return 1
+    unset TB_MYSQL_ENGINE_RESOLVED
+    _mysql_engine_decision >/dev/null
+    if [[ -n "${TB_MYSQL_ENGINE_RESOLVED:-}" ]]; then
+      echo "branch '$case_name' set TB_MYSQL_ENGINE_RESOLVED=$TB_MYSQL_ENGINE_RESOLVED"
+      return 1
+    fi
+  done
+}
+
+@test "_resolve_mysql_engine: records the reason alongside the engine" {
+  _engine_fixture; ARCH=arm64; touch "$HOST_DATA_DIR/mysql/ibdata1"
+  _resolve_mysql_engine
+  [ "$TB_MYSQL_ENGINE_RESOLVED" = "5.7" ] || return 1
+  [ "$TB_MYSQL_ENGINE_REASON" = "existing-datadir" ] || return 1
+}
+
+# ── _client_values_file / _client_default_namespace ──────────────────────────
+# Both exist so preflight can reach the rule's inputs without restating them.
+
+@test "_client_values_file: HOST_DATA_DIR default, TRACEBLOC_VALUES_FILE override" {
+  HOST_DATA_DIR="$BATS_TEST_TMPDIR/data"
+  unset TRACEBLOC_VALUES_FILE
+  [ "$(_client_values_file)" = "$HOST_DATA_DIR/values.yaml" ] || return 1
+  TRACEBLOC_VALUES_FILE=/tmp/custom.yaml
+  [ "$(_client_values_file)" = "/tmp/custom.yaml" ] || return 1
+  unset TRACEBLOC_VALUES_FILE
+}
+
+@test "_client_default_namespace: default + sanitised override" {
+  unset TB_NAMESPACE
+  [ "$(_client_default_namespace)" = "tracebloc" ] || return 1
+  TB_NAMESPACE="My Edge"
+  [ "$(_client_default_namespace)" = "$(_sanitize_workspace_name "My Edge")" ] || return 1
+  unset TB_NAMESPACE
+}
+
+# ── _assert_engine_runs_on_this_arch (backend#2047) ──────────────────────────
+# The same arch question, re-asked once the engine is resolved for real. It has
+# to exist because preflight cannot see an existing Helm release: that edge can
+# read as fresh there and only pin 5.7 here.
+
+_arch_gate_ctx() {
+  OS=Linux; ARCH=aarch64
+  unset TRACEBLOC_ALLOW_ARM64
+  amd64_emulation_available() { return 1; }
+  TB_MYSQL_ENGINE_RESOLVED=5.7
+  TB_MYSQL_ENGINE_REASON=existing-datadir
+}
+
+@test "_assert_engine_runs_on_this_arch: 8.4 on arm64 without emulation -> proceeds" {
+  _arch_gate_ctx; TB_MYSQL_ENGINE_RESOLVED=8.4; TB_MYSQL_ENGINE_REASON=fresh
+  run _assert_engine_runs_on_this_arch
+  [ "$status" -eq 0 ] || return 1
+  [ -z "$output" ] || return 1
+}
+
+@test "_assert_engine_runs_on_this_arch: 5.7 on arm64 without emulation -> refuses, datadir reason" {
+  _arch_gate_ctx
+  run _assert_engine_runs_on_this_arch
+  [ "$status" -ne 0 ] || return 1
+  [[ "$output" == *"existing MySQL 5.7 data"* ]] || return 1
+  [[ "$output" == *"data-format constraint, not an architecture one"* ]] || return 1
+  [[ "$output" != *"provision an amd64"* ]] || return 1
+}
+
+# The existing-release reason (a live Helm release, not host files) must NOT
+# claim this host holds 5.7 data, and must NOT offer --data-dir — that remedy
+# cannot clear a release `helm list` reports, so the next run would refuse
+# identically (Asad, client#748).
+@test "_assert_engine_runs_on_this_arch: existing-release refuses without a false data claim or a --data-dir remedy" {
+  _arch_gate_ctx; TB_MYSQL_ENGINE_REASON=existing-release
+  run _assert_engine_runs_on_this_arch
+  [ "$status" -ne 0 ] || return 1
+  [[ "$output" == *"existing tracebloc release is installed"* ]] || return 1
+  # never asserts the host data is 5.7-format as fact...
+  [[ "$output" != *"This host holds existing MySQL 5.7 data"* ]] || return 1
+  # ...and never offers the remedy that cannot clear a helm-list trigger.
+  [[ "$output" != *"--data-dir"* ]] || return 1
+  # the fresh-start remedy is COMPLETE: 'helm uninstall' leaves the kept MySQL
+  # PVC, so it must say to remove the retained data too (Bugbot, client#752).
+  [[ "$output" == *"retained MySQL PVC"* ]] || return 1
+  [[ "$output" == *"resource-policy: keep"* ]] || return 1
+}
+
+@test "_assert_engine_runs_on_this_arch: explicit 5.7 request gets the request-shaped remedy" {
+  _arch_gate_ctx; TB_MYSQL_ENGINE_REASON=explicit
+  run _assert_engine_runs_on_this_arch
+  [ "$status" -ne 0 ] || return 1
+  [[ "$output" == *"TB_MYSQL_ENGINE=5.7 was requested"* ]] || return 1
+  [[ "$output" != *"existing MySQL 5.7 data"* ]] || return 1
+}
+
+@test "_assert_engine_runs_on_this_arch: emulation / amd64 / macOS-ok / escape hatch all proceed" {
+  _arch_gate_ctx; amd64_emulation_available() { return 0; }
+  run _assert_engine_runs_on_this_arch; [ "$status" -eq 0 ] || return 1
+  _arch_gate_ctx; ARCH=x86_64
+  run _assert_engine_runs_on_this_arch; [ "$status" -eq 0 ] || return 1
+  # macOS is a real gate now (client#756), not an auto-proceed: it verifies the
+  # Rosetta/Docker smoke. Emulation working -> proceed.
+  _arch_gate_ctx; OS=Darwin; _macos_amd64_emulation_ok() { return 0; }
+  run _assert_engine_runs_on_this_arch; [ "$status" -eq 0 ] || return 1
+  _arch_gate_ctx; export TRACEBLOC_ALLOW_ARM64=1
+  run _assert_engine_runs_on_this_arch; [ "$status" -eq 0 ] || return 1
+  unset TRACEBLOC_ALLOW_ARM64
+}
+
+# THE FAIL-CLOSED BACKSTOP (Arturo, client#756). The early assert_amd64_emulation
+# guesses 8.4 and skips when it can't see a live release (existing_id needs helm).
+# On macOS this late gate is the only thing that catches the resolved-5.7 case.
+@test "_assert_engine_runs_on_this_arch: macOS + 5.7 + emulation MISSING -> refuses (backstop)" {
+  _arch_gate_ctx; OS=Darwin
+  _macos_amd64_emulation_ok() { return 1; }   # Rosetta off
+  run _assert_engine_runs_on_this_arch
+  [ "$status" -ne 0 ] || return 1                            # not waved through
+  [[ "$output" == *"Rosetta"* ]] || return 1                 # macOS remedy, not the Linux binfmt one
+  [[ "$output" != *"tonistiigi/binfmt"* ]] || return 1
+}
+
+@test "_assert_engine_runs_on_this_arch: macOS + 5.7 + emulation helper ABSENT -> refuses (fail closed)" {
+  _arch_gate_ctx; OS=Darwin
+  # helper not defined at all: declare -F is false, so the gate must still refuse.
+  run _assert_engine_runs_on_this_arch
+  [ "$status" -ne 0 ] || return 1
+}
+
 # ── install_client_helm flow: the generated values carry the engine choice ──
 
 @test "install_client_helm: TB_MYSQL_ENGINE=8.4 -> values carry the 8.4 mysqlClient block" {
@@ -1249,6 +1525,10 @@ _engine_fixture() {
   HOST_DATA_DIR="$BATS_TEST_TMPDIR/data"; mkdir -p "$HOST_DATA_DIR/mysql"
   touch "$HOST_DATA_DIR/mysql/ibdata1"
   ARCH=arm64; unset TB_MYSQL_ENGINE
+  # Emulation present, stated rather than inherited from the runner: since
+  # backend#2047 a 5.7 verdict on arm64 with NO emulation is refused outright
+  # (next test), and OS/binfmt would otherwise decide this test's outcome.
+  OS=Linux; amd64_emulation_available() { return 0; }
   _ensure_tracebloc_dirs() { :; }
   _ensure_release_dirs() { :; }
   _ensure_helm_runnable() { :; }
@@ -1257,6 +1537,42 @@ _engine_fixture() {
   run install_client_helm <<< $'myid\nmypw'
   [ "$status" -eq 0 ] || return 1
   ! grep -q 'mysqlClient:' "$HOST_DATA_DIR/values.yaml" || return 1
+}
+
+@test "install_client_helm: arm64 + existing mysql data + no emulation -> refuses before helm (backend#2047)" {
+  # The ordering, end to end: the engine resolves to 5.7 because of the datadir,
+  # and only then does the arch question get asked — so the run stops with the
+  # data-format reason and never reaches helm.
+  HOST_DATA_DIR="$BATS_TEST_TMPDIR/data"; mkdir -p "$HOST_DATA_DIR/mysql"
+  touch "$HOST_DATA_DIR/mysql/ibdata1"
+  ARCH=arm64; unset TB_MYSQL_ENGINE TRACEBLOC_ALLOW_ARM64
+  OS=Linux; amd64_emulation_available() { return 1; }
+  _ensure_tracebloc_dirs() { :; }
+  _ensure_release_dirs() { :; }
+  _ensure_helm_runnable() { :; }
+  helm() { record "helm $*"; return 0; }
+  verify_credentials() { printf valid; }
+  run install_client_helm <<< $'myid\nmypw'
+  [ "$status" -ne 0 ] || return 1
+  [[ "$output" == *"existing MySQL 5.7 data"* ]] || return 1
+  run mock_calls
+  [[ "$output" != *"helm upgrade"* ]] || return 1
+}
+
+@test "install_client_helm: FRESH arm64 + no emulation -> installs on the native 8.4 engine (backend#2047)" {
+  # The bug this ticket is about, at the flow level: nothing on this host needs
+  # emulation, so the run must complete and pick 8.4.
+  HOST_DATA_DIR="$BATS_TEST_TMPDIR/data"; mkdir -p "$HOST_DATA_DIR"
+  ARCH=arm64; unset TB_MYSQL_ENGINE TRACEBLOC_ALLOW_ARM64
+  OS=Linux; amd64_emulation_available() { return 1; }
+  _ensure_tracebloc_dirs() { :; }
+  _ensure_release_dirs() { :; }
+  _ensure_helm_runnable() { :; }
+  helm() { record "helm $*"; return 0; }
+  verify_credentials() { printf valid; }
+  run install_client_helm <<< $'myid\nmypw'
+  [ "$status" -eq 0 ] || return 1
+  grep -q 'tag: "8.4"' "$HOST_DATA_DIR/values.yaml"
 }
 
 # ── _recover_pending_helm_release (#554) ─────────────────────────────────────

@@ -291,39 +291,32 @@ tests:
             value: "false"
           count: 1
 
-  # tracebloc/backend#745: the per-spawned-training-job resource request/limit
-  # the jobs-manager hands to each Job it creates. The chart is the single
-  # effective source of truth — it ALWAYS injects RESOURCE_REQUESTS /
-  # RESOURCE_LIMITS, so client-runtime's jobs_manager.py only falls back to its
-  # own default when they are absent. Pin the rendered value here so the two
-  # cannot silently diverge again, on BOTH containers that receive it
+  # backend#664 (Utilization Ladder L0, supersedes the backend#745 pin): with
+  # no operator value the chart must NOT inject RESOURCE_REQUESTS /
+  # RESOURCE_LIMITS — an omitted var is what lets jobs-manager size the
+  # training-job envelope from node allocatable. Older client-runtime images
+  # fall back to their built-in cpu=2,memory=8Gi (the exact literal the chart
+  # used to inject), so omission is behavior-identical on any pre-#664 image.
+  # Assert absence on BOTH containers that used to receive it
   # (api + pods-monitor).
-  - it: defaults spawned-job RESOURCE_REQUESTS/LIMITS to cpu=2,memory=8Gi (req==limit)
+  - it: omits spawned-job RESOURCE_REQUESTS/LIMITS by default (jobs-manager derives from node)
     asserts:
-      - contains:
+      - notContains:
           path: spec.template.spec.containers[0].env
-          content:
-            name: RESOURCE_REQUESTS
-            value: "cpu=2,memory=8Gi"
-          count: 1
-      - contains:
+          content: {name: RESOURCE_REQUESTS}
+          any: true
+      - notContains:
           path: spec.template.spec.containers[0].env
-          content:
-            name: RESOURCE_LIMITS
-            value: "cpu=2,memory=8Gi"
-          count: 1
-      - contains:
+          content: {name: RESOURCE_LIMITS}
+          any: true
+      - notContains:
           path: spec.template.spec.containers[1].env
-          content:
-            name: RESOURCE_REQUESTS
-            value: "cpu=2,memory=8Gi"
-          count: 1
-      - contains:
+          content: {name: RESOURCE_REQUESTS}
+          any: true
+      - notContains:
           path: spec.template.spec.containers[1].env
-          content:
-            name: RESOURCE_LIMITS
-            value: "cpu=2,memory=8Gi"
-          count: 1
+          content: {name: RESOURCE_LIMITS}
+          any: true
 
   - it: lets operators override spawned-job resources via env.RESOURCE_REQUESTS/LIMITS
     set:
@@ -339,6 +332,52 @@ tests:
           count: 1
       - contains:
           path: spec.template.spec.containers[0].env
+          content:
+            name: RESOURCE_LIMITS
+            value: "cpu=4,memory=16Gi"
+          count: 1
+      - contains:
+          path: spec.template.spec.containers[1].env
+          content:
+            name: RESOURCE_REQUESTS
+            value: "cpu=4,memory=16Gi"
+          count: 1
+      - contains:
+          path: spec.template.spec.containers[1].env
+          content:
+            name: RESOURCE_LIMITS
+            value: "cpu=4,memory=16Gi"
+          count: 1
+
+  # Bugbot on the #664 PR: the two vars share ONE gate, so a values file that
+  # sets only one still renders the PAIR (the missing one gets the historic
+  # literal, exactly as the always-inject template did) — a lone
+  # RESOURCE_REQUESTS/RESOURCE_LIMITS env var must never be emitted.
+  - it: pairs the literal when only one of RESOURCE_REQUESTS/LIMITS is set
+    set:
+      env:
+        RESOURCE_LIMITS: "cpu=4,memory=16Gi"
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: RESOURCE_REQUESTS
+            value: "cpu=2,memory=8Gi"
+          count: 1
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: RESOURCE_LIMITS
+            value: "cpu=4,memory=16Gi"
+          count: 1
+      - contains:
+          path: spec.template.spec.containers[1].env
+          content:
+            name: RESOURCE_REQUESTS
+            value: "cpu=2,memory=8Gi"
+          count: 1
+      - contains:
+          path: spec.template.spec.containers[1].env
           content:
             name: RESOURCE_LIMITS
             value: "cpu=4,memory=16Gi"
@@ -792,3 +831,29 @@ tests:
       - equal:
           path: spec.template.spec.containers[1].name
           value: pods-monitor-container
+
+  # The heartbeat version inventory needs to know where the resource-monitor
+  # DaemonSet lives — the one chart workload outside the release namespace.
+  - it: passes the node-agents namespace to the api container
+    set:
+      nodeAgents:
+        namespace:
+          name: tracebloc-node-agents
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: NODE_AGENTS_NAMESPACE
+            value: "tracebloc-node-agents"
+
+  # The empty value is load-bearing: the runtime reads unset as "use the
+  # built-in default" and set-but-empty as "no node-agents namespace".
+  - it: empties the node-agents namespace when resourceMonitor is off
+    set:
+      resourceMonitor: false
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: NODE_AGENTS_NAMESPACE
+            value: ""
