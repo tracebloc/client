@@ -4066,50 +4066,78 @@ $script:TbEnvelopeFloorMemBytes    = 2147483648
 # these two answers come from the same branch decision, and the PowerShell
 # bootstrap has no cheap way to return a pair. The Pester suite pins that the two
 # functions agree on every branch, which is what keeps the mirror honest.
+# ONE lookup of the installed release's carried training values, shared by
+# Get-TrainingResources and Get-TrainingProvenance (backend#2220, review on #768).
+#
+# Returns @{ Size; Provenance } when the release carries a real operator choice,
+# or $null when it does not -- including when the read FAILS. That $null is the
+# whole point. The two resolvers used to perform their own separate
+# `helm get values`, each wrapped in its own bare `catch {}`, so if the size read
+# succeeded and carried a live RESOURCE_LIMITS while the provenance read then
+# threw -- a wedged API, a ConvertFrom-Json hiccup, anything the catch eats --
+# the generated values pinned that carried envelope as `installer`. A future
+# ladder trusting that label would re-derive and overrule what may well have been
+# a deliberate human choice.
+#
+# Sharing the lookup makes that structurally impossible: either it succeeds and
+# both resolvers read the same carried pair, or it fails and NEITHER takes the
+# carry path, so the size is machine-derived and `installer` is then the correct
+# answer. Size and provenance can no longer disagree.
+#
+# This is also the shape the bash twin already had -- _training_provenance calls
+# _resolve_training_size and reads $_TB_TRAINING_PROVENANCE -- so the two
+# installers stop diverging by construction, which is the class client#766
+# exists to remove. And it drops a redundant `helm get values` per install.
+function Get-CarriedTrainingValues {
+  if (-not $TB_NAMESPACE) { return $null }
+  try {
+    # helm get has no request timeout -- gate it behind a bounded probe so a
+    # wedged API degrades instead of hanging values generation (Bugbot). A
+    # missing namespace also means there is no release to carry.
+    $null = (kubectl get namespace $TB_NAMESPACE --request-timeout=5s 2>$null) | Out-String
+    if ($LASTEXITCODE -ne 0) { return $null }
+    $valsJson = (helm get values $TB_NAMESPACE -n $TB_NAMESPACE -o json 2>$null) | Out-String
+    if ($LASTEXITCODE -ne 0 -or -not $valsJson.Trim()) { return $null }
+    $vals = $valsJson | ConvertFrom-Json
+    $prev = $vals.env.RESOURCE_LIMITS
+    # The historic static default was the ABSENCE of a choice -- carrying it
+    # would keep the unschedulable 8Gi on exactly the machines this sizing
+    # exists to fix (Bugbot). Only a differing value survives re-install.
+    if (-not $prev -or $prev -eq "cpu=2,memory=8Gi") { return $null }
+    # A marker already on the release is authoritative -- preserve it, or a
+    # re-install would quietly downgrade a `user` choice to `unknown`. Anything
+    # unrecognised, including absent, is `unknown`: we genuinely cannot tell who
+    # set it, and consumers treat `unknown` as `user`.
+    $prevProv = $vals.env.RESOURCE_PROVENANCE
+    $prov = if ($prevProv -eq "installer" -or $prevProv -eq "user") { $prevProv } else { "unknown" }
+    return @{ Size = $prev; Provenance = $prov }
+  } catch { return $null }
+}
+
+# Who chose the training size Get-TrainingResources reports: installer | user |
+# unknown. Bash twin: _resolve_training_size / _training_provenance.
+#
+# Pass -Carried/-CarriedResolved to reuse a lookup the caller already did; with
+# no arguments it does its own, so existing callers and tests are unaffected.
 function Get-TrainingProvenance {
+  param([hashtable]$Carried, [switch]$CarriedResolved)
   # 1. An explicit install-time override IS a human choice, same as the CLI's.
   if ($env:TRACEBLOC_TRAINING_RESOURCES) { return "user" }
-  try {
-    $null = (kubectl get namespace $TB_NAMESPACE --request-timeout=5s 2>$null) | Out-String
-    if ($LASTEXITCODE -eq 0) {
-      $valsJson = (helm get values $TB_NAMESPACE -n $TB_NAMESPACE -o json 2>$null) | Out-String
-      if ($LASTEXITCODE -eq 0 -and $valsJson.Trim()) {
-        $vals = $valsJson | ConvertFrom-Json
-        $prev = $vals.env.RESOURCE_LIMITS
-        if ($prev -and $prev -ne "cpu=2,memory=8Gi") {
-          # A marker already on the release is authoritative -- preserve it, or a
-          # re-install would quietly downgrade a `user` choice to `unknown`.
-          $prevProv = $vals.env.RESOURCE_PROVENANCE
-          if ($prevProv -eq "installer" -or $prevProv -eq "user") { return $prevProv }
-          # Carried forward from before this key existed. We genuinely cannot
-          # tell who set it; consumers treat `unknown` as `user`.
-          return "unknown"
-        }
-      }
-    }
-  } catch {}
+  $c = if ($CarriedResolved) { $Carried } else { Get-CarriedTrainingValues }
+  if ($c) { return $c.Provenance }
   # 2. Sized to this machine, or 3. the static default -- both are OUR choice.
   return "installer"
 }
 
 function Get-TrainingResources {
+  param([hashtable]$Carried, [switch]$CarriedResolved)
   if ($env:TRACEBLOC_TRAINING_RESOURCES) { return $env:TRACEBLOC_TRAINING_RESOURCES }
-  try {
-    # helm get has no request timeout — gate it behind a bounded probe so a
-    # wedged API degrades instead of hanging values generation (Bugbot). A
-    # missing namespace also means there is no release to carry.
-    $null = (kubectl get namespace $TB_NAMESPACE --request-timeout=5s 2>$null) | Out-String
-    if ($LASTEXITCODE -eq 0) {
-      $valsJson = (helm get values $TB_NAMESPACE -n $TB_NAMESPACE -o json 2>$null) | Out-String
-      if ($LASTEXITCODE -eq 0 -and $valsJson.Trim()) {
-        $prev = ($valsJson | ConvertFrom-Json).env.RESOURCE_LIMITS
-        # The historic static default was the ABSENCE of a choice — carrying it
-        # would keep the unschedulable 8Gi on exactly the machines this sizing
-        # exists to fix (Bugbot). Only a differing value survives re-install.
-        if ($prev -and $prev -ne "cpu=2,memory=8Gi") { return $prev }
-      }
-    }
-  } catch {}
+  # The carry branch, via the ONE shared lookup (see Get-CarriedTrainingValues):
+  # a failed read yields $null here, so we fall through to machine sizing and
+  # Get-TrainingProvenance independently answers `installer` -- consistent by
+  # construction rather than by two functions happening to agree.
+  $c = if ($CarriedResolved) { $Carried } else { Get-CarriedTrainingValues }
+  if ($c) { return $c.Size }
   try {
     # Bounded: a wedged API server must degrade to the static default, never
     # hang values generation (Bugbot). jsonpath extracts ONLY cpu/memory — no
@@ -4992,8 +5020,11 @@ function Install-ClientHelm {
   # backend#743: relocate the dataset PV onto the network mount when HOST_DATASET_DIR is set.
   $datasetPathLine = if ($HOST_DATASET_DIR) { "`n  datasetPath: /tracebloc-data" } else { "" }
   # backend#1236 (option A): size the default training budget to this machine.
-  $trainingSize = Get-TrainingResources
-  $trainingProvenance = Get-TrainingProvenance
+  # One lookup, both answers -- mirrors the bash twin's single _resolve_training_size
+  # pass and removes the second `helm get values` per install (review on #768).
+  $carried = Get-CarriedTrainingValues
+  $trainingSize = Get-TrainingResources -Carried $carried -CarriedResolved
+  $trainingProvenance = Get-TrainingProvenance -Carried $carried -CarriedResolved
   Log "Training size: $trainingSize"
   $envBlock += @"
   RESOURCE_LIMITS: "$trainingSize"

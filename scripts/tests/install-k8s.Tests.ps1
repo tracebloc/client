@@ -1670,6 +1670,55 @@ Describe "Envelope contract golden vectors (backend#2220)" {
   # wrong verdict here either strands an edge forever or silently overrules a
   # human, which is the defect scope bullet 4 is about.
 
+  # The fail-unsafe case Bugbot found and @saadqbal confirmed on #768: the two
+  # resolvers each did their own `helm get values` behind their own bare
+  # `catch {}`, so a size read that succeeded and carried a live RESOURCE_LIMITS
+  # while the provenance read then threw pinned that carried envelope as
+  # `installer` -- inviting a future ladder to overrule a human choice. One
+  # shared lookup makes it structurally impossible; these pin that.
+  It "provenance: a failing values read can never report 'installer' for a CARRIED size" {
+    Mock kubectl { $global:LASTEXITCODE = 0; "" }
+    # helm succeeds for the size probe but returns junk the parse chokes on.
+    Mock helm { $global:LASTEXITCODE = 0; "{ this is : not json" }
+    # Both must agree on NOT having carried anything: the read failed, so the
+    # size is machine-derived (or the literal) and `installer` is then correct.
+    $carried = Get-CarriedTrainingValues
+    $carried | Should -BeNullOrEmpty
+    Get-TrainingProvenance | Should -Be "installer"
+  }
+
+  It "provenance: size and provenance come from ONE lookup and cannot disagree" {
+    Mock kubectl { $global:LASTEXITCODE = 0; "" }
+    Mock helm {
+      $global:LASTEXITCODE = 0
+      '{"env":{"RESOURCE_LIMITS":"cpu=4,memory=12Gi","RESOURCE_PROVENANCE":"user"}}'
+    }
+    $carried = Get-CarriedTrainingValues
+    $carried.Size       | Should -Be "cpu=4,memory=12Gi"
+    $carried.Provenance | Should -Be "user"
+    # Handed the SAME lookup, as the values generation does.
+    Get-TrainingResources  -Carried $carried -CarriedResolved | Should -Be "cpu=4,memory=12Gi"
+    Get-TrainingProvenance -Carried $carried -CarriedResolved | Should -Be "user"
+  }
+
+  It "provenance: the shared lookup ignores the historic literal as a non-choice" {
+    Mock kubectl { $global:LASTEXITCODE = 0; "" }
+    Mock helm {
+      $global:LASTEXITCODE = 0
+      '{"env":{"RESOURCE_LIMITS":"cpu=2,memory=8Gi","RESOURCE_PROVENANCE":"user"}}'
+    }
+    # The literal was the ABSENCE of a choice, so there is nothing to carry --
+    # even with a marker sitting next to it.
+    Get-CarriedTrainingValues | Should -BeNullOrEmpty
+  }
+
+  It "provenance: an unreadable namespace carries nothing (and does not throw)" {
+    Mock kubectl { $global:LASTEXITCODE = 1; "" }
+    Mock helm { $global:LASTEXITCODE = 1; "" }
+    Get-CarriedTrainingValues | Should -BeNullOrEmpty
+    Get-TrainingProvenance | Should -Be "installer"
+  }
+
   It "provenance: a fresh machine-sized install is the installer's choice" {
     Mock helm { $global:LASTEXITCODE = 1; "" }
     Mock kubectl {
