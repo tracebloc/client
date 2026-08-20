@@ -201,6 +201,15 @@ hazardous() {
   [ -n "$output" ] || return 1
 }
 
+@test "a one-liner with a TRAILING COMMENT is still a one-liner (Bugbot #763)" {
+  # Requiring `}` to be the last character read `f() { … }   # why` as a
+  # multi-line opener and skipped the body — the exact shape the previous commit
+  # taught the gate to catch, defeated by a comment.
+  local f; f="$(hazardous onelinecomment.sh 'first() { producer | head -1; }   # compact helper')"
+  run scan "$f"
+  [ -n "$output" ] || return 1
+}
+
 @test "head followed by a CLOSING delimiter still counts (Bugbot #763)" {
   # `x="$(cmd | head)"` ends at `)` then `"`, so requiring space-or-EOL after
   # `head` missed the command-substitution form entirely.

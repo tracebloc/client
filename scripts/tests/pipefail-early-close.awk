@@ -91,7 +91,14 @@ FNR == 1 {
   # the same line, so the surrounding state is unchanged — fall through and let
   # the hazard check read the body.
   if (line ~ /^[a-zA-Z_][a-zA-Z0-9_:.-]*[[:space:]]*\(\)[[:space:]]*\{/) {
-    if (line !~ /\}[[:space:]]*$/) {
+    # Test self-closing against the line WITHOUT a trailing comment: a compact
+    # helper written `f() { cmd | head -1; }   # why` is still a one-liner, and
+    # requiring `}` to be the last character read it as a multi-line opener,
+    # `next`ed, and skipped the body — the shape the gate was just taught to
+    # catch (Bugbot #763).
+    bare = line
+    sub(/[[:space:]]*#.*$/, "", bare)
+    if (bare !~ /\}[[:space:]]*$/) {
       save_e = e_on; save_p = p_on; in_fn = 1; next
     }
   }
