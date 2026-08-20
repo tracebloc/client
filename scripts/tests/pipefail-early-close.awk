@@ -39,6 +39,24 @@
 # `hazardous` (from pipefail-early-close.sh) seeds files that inherit both
 # options from a sourcing script; those start with the state already on.
 #
+# KNOWN LIMITATION -- a `set` line inside a MULTI-LINE QUOTED STRING is read as
+# this file's options rather than as fixture data. tracebloc/.github's
+# house-rules-selftest.sh passes whole scripts as quoted arguments:
+#
+#     expect "a bare curl fires both rules" \
+#     '#!/bin/bash
+#     set -euo pipefail
+#     curl -fsSL "$url" -o out' curl-timeout,curl-tls
+#
+# so the scanner sees errexit enabled in a file whose real options are
+# `set -uo pipefail`, and reports a line that carries no hazard. Counting quotes
+# to find such regions was tried and REJECTED: apostrophes in prose ("the file's
+# options") desynchronise the count within a few lines of the top of that very
+# file, and a desynchronised count HIDES real offenders -- strictly worse than
+# reporting a false one. Use `# pipefail-guard: allow` on the affected line until
+# the scanner can lex shell properly (backend#2264). The behaviour is PINNED by a
+# test, so changing it is deliberate rather than silent.
+#
 # Usage:  awk -v hazardous="<paths>" -f pipefail-early-close.awk FILE...
 # Output: one `path:line: code` per offender.
 

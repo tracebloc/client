@@ -377,3 +377,31 @@ hazardous() {
   run scan "$f"
   [ -n "$output" ] || return 1
 }
+
+# ── a pinned KNOWN LIMITATION, not an endorsement ────────────────────────────
+# A `set` line inside a multi-line quoted string is fixture data, but the
+# scanner reads it as the file's own options. This test asserts the CURRENT
+# behaviour so that a future fix reddens it deliberately rather than changing
+# the gate's verdicts silently. Counting quotes to detect such regions was
+# tried and rejected: apostrophes in prose desynchronise the count, and a
+# desynchronised count HIDES real offenders (backend#2264).
+@test "KNOWN LIMITATION: a 'set -e' inside a quoted fixture is read as the file's own" {
+  local f="$WORK/fixture.sh"
+  { printf '#!/usr/bin/env bash\nset -uo pipefail\n'          # the REAL options: no errexit
+    printf "expect 'a fixture script' \\\\\n"
+    printf "'#!/bin/bash\nset -euo pipefail\ncurl x' rulename\n"
+    printf '  n=$(producer | head -1)\n'; } > "$f"
+  run scan "$f"
+  # Documented wrong answer: flagged, though the file never enables errexit.
+  [ -n "$output" ] || return 1
+}
+
+@test "and the allow marker is the documented workaround for exactly that case" {
+  local f="$WORK/fixture-allowed.sh"
+  { printf '#!/usr/bin/env bash\nset -uo pipefail\n'
+    printf "expect 'a fixture script' \\\\\n"
+    printf "'#!/bin/bash\nset -euo pipefail\ncurl x' rulename\n"
+    printf '  n=$(producer | head -1)   # pipefail-guard: allow\n'; } > "$f"
+  run scan "$f"
+  [ -z "$output" ] || return 1
+}
