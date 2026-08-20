@@ -245,14 +245,25 @@ _machine_training_ceiling() {
     return 0
   fi
 
-  # Below the contract floor. Report the honest remainder only when it is a
-  # REQUESTABLE shape -- at least one whole core and one whole GiB. Below that
-  # there is no honest number to write (cpu=0 is not a training request), so say
-  # nothing and let the caller keep the literal and warn hard. Reachable only on
-  # macOS/Windows, where the memory preflight warns instead of failing.
+  # Below the contract floor. Report the honest remainder when it is a
+  # REQUESTABLE shape -- at least one whole core and one whole GiB. Reachable
+  # only on macOS/Windows, where the memory preflight warns instead of failing.
   if (( cores >= 1 && gib >= 1 )); then
     printf 'cpu=%d,memory=%dGi|undersized' "$cores" "$gib"
+    return 0
   fi
+
+  # A node WAS parsed and the remainder is not even a requestable shape (cpu=0 is
+  # not a training request). Reported as its own verdict rather than as silence,
+  # because silence here is indistinguishable from "I could not read the
+  # cluster" -- and those must not be treated alike. Warning that a machine is
+  # too small when we never managed to measure it is a fabrication, and the
+  # caller used to do exactly that by re-probing `kubectl get nodes -o name`:
+  # any listable node, including one whose allocatable would not parse or which
+  # is not Ready yet, tripped the hard warning. The PowerShell twin only flagged
+  # it after a PARSED node, so the two disagreed on the same cluster -- the
+  # divergence class client#766 exists to remove (Bugbot on #768).
+  printf '|unschedulable'
   return 0
 }
 
@@ -345,14 +356,17 @@ _resolve_training_size() {
       _TB_TRAINING_SIZE="${ceiling%|undersized}"
       _TB_TRAINING_UNDERSIZED=1
       ;;
-    *)
-      # Either the cluster is unreadable (we cannot do better than the historical
-      # default) or the remainder is not even a requestable shape. Keep the
-      # literal, and let the caller warn in the second case.
+    '|unschedulable')
+      # Measured, and the machine cannot host even a 1-core/1-GiB run. Keep the
+      # literal -- there is no honest number to write -- and let the caller warn.
       _TB_TRAINING_SIZE="$_TRAINING_DEFAULT"
-      if has kubectl && [[ -n "$(kubectl get nodes --request-timeout=10s -o name 2>/dev/null)" ]]; then
-        _TB_TRAINING_UNSCHEDULABLE=1
-      fi
+      _TB_TRAINING_UNSCHEDULABLE=1
+      ;;
+    *)
+      # We could not read the cluster (no kubectl, a wedged API, or nothing
+      # parseable). Keep the historical default and stay SILENT about machine
+      # size: we never measured it, so any claim about it would be invented.
+      _TB_TRAINING_SIZE="$_TRAINING_DEFAULT"
       ;;
   esac
   _TB_TRAINING_PROVENANCE="installer"

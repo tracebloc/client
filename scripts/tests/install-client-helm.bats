@@ -1059,6 +1059,50 @@ setup() {
   [ "$captured" = "cpu=1,memory=1Gi" ] || return 1
 }
 
+# Bugbot on #768: the unschedulable warning used to be INFERRED by re-probing
+# `kubectl get nodes -o name`, so any listable node -- including one whose
+# allocatable would not parse, or one not Ready yet -- tripped a hard "this
+# machine is too small" warning we had never actually measured. The PowerShell
+# twin only flagged it after a parsed node, so the twins disagreed on the same
+# cluster. It is now a verdict the ceiling helper RETURNS.
+@test "training size: readable-but-unparseable nodes must NOT be called too small" {
+  TB_NAMESPACE=tracebloc
+  unset TRACEBLOC_TRAINING_RESOURCES
+  helm() { return 1; }
+  has() { return 0; }
+  # Nodes list fine, but no allocatable parses. We never measured the machine,
+  # so claiming it is too small would be a fabrication.
+  kubectl() {
+    case "$*" in
+      *--request-timeout=10s*) printf 'sixteen 64GB\neight lots\n' ;;
+      *) printf 'node/one\n' ;;
+    esac
+  }
+  _resolve_training_size
+  [ "$_TB_TRAINING_SIZE" = "cpu=2,memory=8Gi" ] || return 1
+  [ "$_TB_TRAINING_UNSCHEDULABLE" = "0" ] || return 1
+  [ "$_TB_TRAINING_UNDERSIZED" = "0" ] || return 1
+}
+
+@test "training size: the ceiling helper reports '|unschedulable' only after measuring" {
+  TB_NAMESPACE=tracebloc
+  has() { return 0; }
+  # A parsed node whose remainder is not a requestable shape.
+  kubectl() { printf '500m 512Mi\n'; }
+  run _machine_training_ceiling
+  [ "$output" = "|unschedulable" ] || return 1
+}
+
+@test "training size: the ceiling helper stays SILENT when nothing parses" {
+  TB_NAMESPACE=tracebloc
+  has() { return 0; }
+  kubectl() { printf 'sixteen 64GB\n'; }
+  run _machine_training_ceiling
+  # Silence means "I could not measure", which the caller must not turn into a
+  # claim about machine size.
+  [ -z "$output" ] || return 1
+}
+
 @test "training size: an unreadable cluster still keeps the static default" {
   TB_NAMESPACE=tracebloc
   unset TRACEBLOC_TRAINING_RESOURCES
