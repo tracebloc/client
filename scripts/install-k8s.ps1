@@ -4030,6 +4030,29 @@ function Get-ImageMirrorYaml {
   return $block
 }
 
+# ── envelope contract (GENERATED — do not hand-edit) ─────────────────────────
+#
+# backend#2220 / RFC-BACKEND-664 §P0. The bash twin
+# (lib/install-client-helm.sh::_machine_training_resources) carries the same
+# five values, and cli's set.go used to carry them a third time. One source of
+# truth now: client-runtime/envelope_contract.json, arithmetic in
+# node_sizing.envelope_from_allocatable.
+#
+# Embedded rather than read: this bootstrap is SIGNED and must not fetch
+# anything unsigned at install time, the same reason the GPU node-image build
+# inputs are embedded as base64 here (#616/#633). The embed is kept honest by
+# the drift guard, not by this comment — install-k8s.Tests.ps1 replays the
+# contract's golden vectors through Get-TrainingResources, and
+# scripts/gen-envelope-embed.sh --check verifies the constants in CI.
+#
+# Regenerate with: scripts/gen-envelope-embed.sh
+$script:TbEnvelopeContractVersion  = 1
+$script:TbEnvelopeOverheadCpuMilli = 1000
+$script:TbEnvelopeOverheadMemBytes = 3221225472
+$script:TbEnvelopeFloorCpuMilli    = 1000
+$script:TbEnvelopeFloorMemBytes    = 2147483648
+# ── end generated ───────────────────────────────────────────────────────────
+
 function Get-TrainingResources {
   if ($env:TRACEBLOC_TRAINING_RESOURCES) { return $env:TRACEBLOC_TRAINING_RESOURCES }
   try {
@@ -4056,7 +4079,7 @@ function Get-TrainingResources {
     # (Bugbot r5).
     $lines = kubectl get nodes --request-timeout=10s -o jsonpath='{range .items[*]}{.status.allocatable.cpu}{" "}{.status.allocatable.memory}{"\n"}{end}' 2>$null
     if ($LASTEXITCODE -eq 0 -and $lines) {
-      $bestMemB = [long]0; $bestCpuM = [long]0
+      $bestMemB = [long]0; $bestCpuM = [long]0; $seen = $false
       foreach ($ln in @($lines)) {
         $parts = "$ln".Trim() -split '\s+'
         if ($parts.Count -lt 2) { continue }
@@ -4070,13 +4093,29 @@ function Get-TrainingResources {
                 elseif ($memRaw -match '^(\d+)Gi$') { [long]$Matches[1] * 1GB }
                 elseif ($memRaw -match '^\d+$') { [long]$memRaw }
                 else { [long]0 }
-        if ($memB -gt $bestMemB -or ($memB -eq $bestMemB -and $cpuM -gt $bestCpuM)) {
+        # Contract ANCHOR_LARGEST, tie-break (cpu, memory). This used to rank
+        # (memory, cpu) while cli's nodeLarger ranked (cpu, memory), so the two
+        # anchored on DIFFERENT nodes on a heterogeneous cluster. One order now.
+        # Installer clusters are single-node k3d, so this is a field no-op.
+        if (-not $seen -or $cpuM -gt $bestCpuM -or ($cpuM -eq $bestCpuM -and $memB -gt $bestMemB)) {
           $bestMemB = $memB; $bestCpuM = $cpuM
         }
+        $seen = $true
       }
-      $runCpuM = $bestCpuM - 1000
-      $runMemB = $bestMemB - 3GB
-      if ($runCpuM -ge 1000 -and $runMemB -ge 2GB) {
+      # No usable node: bestCpuM stays 0, so the floor check below fails and we
+      # fall through to the single literal return at the end of the function --
+      # deliberately NOT an early return with its own copy of that literal.
+      # [long]0, not 0: a bare 0 binds [math]::Max's (Int32, Int32) overload and
+      # then fails to convert a byte count over 2^31 ("Value was either too large
+      # or too small for an Int32"). The enclosing `catch {}` swallows that into
+      # a silent fall-through to the literal, so the machine sizing would just
+      # quietly stop working on every box with more than ~2 GiB of headroom.
+      $runCpuM = [long][math]::Max([long]0, $bestCpuM - $script:TbEnvelopeOverheadCpuMilli)
+      $runMemB = [long][math]::Max([long]0, $bestMemB - $script:TbEnvelopeOverheadMemBytes)
+      # Below the contract floor the machine is NOT VIABLE — fall through to the
+      # literal, which is itself a known bug on such machines (backend#2220,
+      # fixed separately so it stays revertable).
+      if ($runCpuM -ge $script:TbEnvelopeFloorCpuMilli -and $runMemB -ge $script:TbEnvelopeFloorMemBytes) {
         return "cpu=$([math]::Floor($runCpuM / 1000)),memory=$([math]::Floor($runMemB / 1GB))Gi"
       }
     }
