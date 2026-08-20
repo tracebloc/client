@@ -183,3 +183,88 @@ run_check() { ( cd "$WORK" && scripts/gen-manifest.sh --check ) }
   done < <(printf '%s\n%s\n' "$bash_fetches" "$win_fetches")
   [ "$missing" -eq 0 ] || return 1
 }
+
+# --- claim 4: the manifest covers what install-k8s.sh actually SOURCES -------
+#
+# backend#2205. The two cross-checks above compare two DECLARATIONS to each
+# other; both can agree and both be wrong, because neither was ever compared to
+# what the installer sources. Every case here asserts the SPECIFIC message, not
+# merely a non-zero exit — the practice the function's own comment invokes and
+# which the first version of this PR described without implementing (Asad, #770).
+# Two of these six failed on that version.
+
+@test "a lib sourced by install-k8s.sh but absent from FILES fails --check" {
+  # The #2205 hole itself: neither fetched by the bootstrap nor covered by the
+  # manifest, so at install time it is missing or runs UNVERIFIED.
+  printf '#!/usr/bin/env bash\n_probe(){ :; }\n' > "$WORK/scripts/lib/probe-2205.sh"
+  perl -0pi -e 's{(source "\$\{LIB_DIR\}/diagnose\.sh")}{$1\nsource "\$\{LIB_DIR\}/probe-2205.sh"}' \
+    "$WORK/scripts/install-k8s.sh"
+  run run_check
+  [ "$status" -ne 0 ] || return 1
+  [[ "$output" == *"SOURCED BUT NOT COVERED"* ]] || return 1
+}
+
+@test "a lib in FILES that nothing sources fails --check (the over-fetched arm)" {
+  # The other direction: a removed lib left listed. Harmless at install time but
+  # it means the declaration and the installer have parted company.
+  # DELETE the line, do not comment it. The derivation is line-anchored now, but a
+  # commented source used to still count -- `grep -oE` ignores what precedes the
+  # match -- so commenting was an INERT mutation and this case passed for the
+  # wrong reason (it tripped the manifest-stale check instead). Deleting is the
+  # input the over-fetched arm actually responds to.
+  perl -0pi -e 's{^source "\$\{LIB_DIR\}/diagnose\.sh"\n}{}m' "$WORK/scripts/install-k8s.sh"
+  run run_check
+  [ "$status" -ne 0 ] || return 1
+  [[ "$output" == *"sources a different set of libs than the manifest covers"* ]] || return 1
+}
+
+@test "a derivation pattern that matches nothing fails closed, not green" {
+  # A silent no-op is exactly what a broken derivation looks like from outside.
+  perl -pi -e 's/LIB_DIR\\\}\/\[A-Za-z0-9_-\]\+/LIB_DIR\\}\/[Z]+/' "$GM"
+  run run_check
+  [ "$status" -ne 0 ] || return 1
+  [[ "$output" == *"ZERO sourced libs"* ]] || return 1
+}
+
+@test "an unreadable install-k8s.sh says 'could not read', not 'derivation is broken'" {
+  # This FAILED before #770's review. Under pipefail the status is the rightmost
+  # non-zero and the second grep's 1 masked the first's 2, so a missing installer
+  # was reported as a broken pattern — sending the reader to the wrong place.
+  rm -f "$WORK/scripts/install-k8s.sh"
+  run run_check
+  [ "$status" -ne 0 ] || return 1
+  [[ "$output" == *"could not read scripts/install-k8s.sh"* ]] || return 1
+  [[ "$output" != *"ZERO sourced libs"* ]] || return 1
+}
+
+@test "a lib that sources another lib is refused (the transitivity assumption)" {
+  # The derivation walks install-k8s.sh only. That is complete exactly while no
+  # lib sources a lib, so the assumption is a check rather than a comment.
+  printf '\nsource "${LIB_DIR}/common.sh"\n' >> "$WORK/scripts/lib/summary.sh"
+  run run_check
+  [ "$status" -ne 0 ] || return 1
+  [[ "$output" == *"no longer complete"* ]] || return 1
+}
+
+@test "an unreadable lib glob is refused, not assumed clean" {
+  # This FAILED before #770's review: `|| true` swallowed the error, so the
+  # transitivity check passed on a failed read — and it is the assumption that
+  # makes the non-transitive derivation valid, so failing open here lets the
+  # derivation go quietly partial.
+  rm -rf "$WORK/scripts/lib"
+  run run_check
+  [ "$status" -ne 0 ] || return 1
+  [[ "$output" == *"Refusing to assume none"* || "$output" == *"could not scan"* ]] || return 1
+}
+
+@test "a COMMENTED-OUT source does not count as sourced" {
+  # The derivation's own regression test. `grep -oE` ignores what precedes the
+  # match, so before the select was line-anchored `#source "${LIB_DIR}/x.sh"`
+  # still counted as sourced: the sets stayed equal, this check passed, and the
+  # run failed later on the manifest digest instead — a different code path than
+  # the one under test. Asserting the SPECIFIC message is what separates them.
+  perl -0pi -e 's{^(source "\$\{LIB_DIR\}/diagnose\.sh")}{#$1}m' "$WORK/scripts/install-k8s.sh"
+  run run_check
+  [ "$status" -ne 0 ] || return 1
+  [[ "$output" == *"sources a different set of libs than the manifest covers"* ]] || return 1
+}
