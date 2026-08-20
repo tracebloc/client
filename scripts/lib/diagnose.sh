@@ -93,14 +93,12 @@ run_diagnose() {
     else
       echo "nproc=$(nproc 2>/dev/null)"; grep -i MemTotal /proc/meminfo 2>/dev/null
     fi
-    # DELIBERATELY a pipe, not the here-string this ticket converts elsewhere
-    # (backend#1778). run_diagnose sets `set +e` at its top precisely so no step
-    # can abort the bundle, so the 141 that motivates the conversion cannot fire
-    # here. Capturing df in full first is strictly WORSE: `head -20` streams and
-    # lets collection continue, whereas waiting for every mount blocks the whole
-    # bundle when df stalls on an unresponsive NFS/overlay mount — the machine
-    # this tool exists for. Judged safe on purpose; not an oversight.
-    df -h 2>/dev/null | head -20   # pipefail-guard: allow
+    # A pipe on purpose (backend#1778). run_diagnose sets `set +e` at its top so
+    # no step can abort the bundle, so the 141 the conversion guards against
+    # cannot fire here — and `head -20` STREAMS, where capturing df in full would
+    # block the whole bundle on an unresponsive NFS/overlay mount. No marker
+    # needed: the guard reads `set +e` and does not flag this region.
+    df -h 2>/dev/null | head -20
     if has docker; then
       echo; echo "## docker info"
       docker info 2>/dev/null | grep -iE 'Server Version|Storage Driver|Docker Root|Operating System|Total Memory|CPUs|Cgroup'

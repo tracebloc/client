@@ -189,6 +189,62 @@ hazardous() {
   [ -n "$output" ] || return 1
 }
 
+@test "a set +e region is NOT flagged — the guard models disabling, not just enabling" {
+  # run_diagnose() opens with `set +e` precisely so no step can abort the bundle.
+  # A model that only knows about ENABLING flags every line in every best-effort
+  # region, and then each one needs a hand-placed marker — the opposite of
+  # encoding the rule (Asad on #763).
+  local f; f="$(hazardous plusE.sh \
+    'run_diagnose() {' \
+    '  set +e' \
+    '  df -h | head -20' \
+    '}')"
+  run scan "$f"
+  [ -z "$output" ] || return 1
+}
+
+@test "and the options come BACK after that function — later code is still asked" {
+  # The other direction: if `set +e` silently swallowed the rest of the file the
+  # guard would go quiet after the first best-effort helper.
+  local f; f="$(hazardous plusEthenBack.sh \
+    'best_effort() {' \
+    '  set +e' \
+    '  df -h | head -20' \
+    '}' \
+    'ls /tmp | head -1')"
+  # Line numbers include the two prelude lines `hazardous` writes: the `df` is
+  # line 5 (inside set +e, spared) and the trailing `ls` is line 7 (flagged).
+  run scan "$f"
+  [[ "$output" == *":7:"* ]] || return 1
+  [[ "$output" != *":5:"* ]] || return 1
+}
+
+@test "set +o pipefail disables the other half too" {
+  local f; f="$(hazardous plusPipefail.sh \
+    '  set +o pipefail' \
+    '  ls /tmp | head -1')"
+  run scan "$f"
+  [ -z "$output" ] || return 1
+}
+
+@test "the seed checks the SIGN: a pipefail-OFF sourcer does not make its libs hazardous" {
+  # `^set .*pipefail` also matches `set +o pipefail`, so the seed counted a file
+  # that explicitly DISABLES it as enabling it (Asad on #763).
+  #
+  # It has to be tested through INHERITANCE. Handing the pipefail-off file
+  # straight to the scanner proves nothing, because the awk's own positional
+  # model reads `set +o pipefail` and spares it either way — the seed's verdict
+  # is masked (found by mutation; the first version of this test was vacuous).
+  # The seed's answer is only observable in what it PROPAGATES to a sourced lib.
+  mkdir -p "$WORK/seed/scripts/lib" "$WORK/seed/scripts/tests"
+  cp "$SCANNER" "$GATE" "$WORK/seed/scripts/tests/"
+  printf '#!/usr/bin/env bash\nset -eu\nset +o pipefail\nsource "${LIB_DIR}/worker.sh"\n' > "$WORK/seed/scripts/caller.sh"
+  printf 'work() {\n  producer | head -1\n}\n' > "$WORK/seed/scripts/lib/worker.sh"
+  run bash "$WORK/seed/scripts/tests/pipefail-early-close.sh" \
+      "$WORK/seed/scripts/caller.sh" "$WORK/seed/scripts/lib/worker.sh"
+  [ -z "$output" ] || return 1
+}
+
 @test "the '# pipefail-guard: allow' marker opts a line out" {
   local f; f="$(hazardous allow.sh '  x="$(ls /tmp | head -1)"   # pipefail-guard: allow')"
   run scan "$f"

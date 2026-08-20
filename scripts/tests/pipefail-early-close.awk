@@ -11,91 +11,96 @@
 #
 # It is SIZE-DEPENDENT, which is why instances survive review. Measured on the
 # client#656 case: 50 matching lines exit 1 (fits the buffer, no signal), 20k
-# exit 141. "Benign because the output is small today" is exactly how that one
-# lasted, and it has now cost two separate incidents.
+# exit 141.
 #
 # The house idiom is a here-string (or capture-then-slice), never a pipe into an
 # early-closing reader:
 #     head -25 <<<"$captured"          # no pipe, nothing to SIGPIPE
 #     first="${out%%$'\n'*}"           # pure-bash slicing
 #
-# WHAT IS FLAGGED
-# ---------------
-# A line piping into an early-closing reader (`head`, `grep -q`), in a file that
-# enables BOTH errexit and pipefail. Both are required: pipefail alone makes the
-# pipeline return 141 but nothing acts on it, and errexit alone never sees a
-# non-zero because the last command (head) succeeded.
+# OPTIONS ARE POSITIONAL, AND THEY GET TURNED OFF TOO (Asad on #763)
+# ------------------------------------------------------------------
+# An earlier version asked only "does this file ENABLE both options" and so had
+# no idea that `set +e` exists. `run_diagnose()` opens with `set +e` precisely so
+# no step can abort the bundle, and every line in it was flagged. Best-effort
+# regions are a normal idiom here, so that model would need a hand-placed marker
+# on each one — which is the opposite of encoding the rule.
 #
-# NOT flagged, because the status is already neutralised or the risk is absent:
-#   - a line ending in `|| true` (or `|| :`)
-#   - comments
-#   - files that do not enable both options
-#   - a line carrying a trailing `# pipefail-guard: allow` marker
+# So the state is tracked LINE BY LINE: `set -e` / `set +e` / `set -o pipefail` /
+# `set +o pipefail` / the combined `set -euo pipefail` all move it, and a line is
+# an offender only if BOTH options are live where it sits.
 #
-# Usage:  awk -f pipefail-early-close.awk FILE...
-# Output: one `path:line: code` per offender. Exit status is always 0; the
-#         caller decides (the bats gate treats any output as failure).
+# Function scoping is an approximation, deliberately. bash does NOT scope shell
+# options to functions — a `set +e` inside one leaks to the caller — but treating
+# it as restored at the function's closing brace is the conservative direction
+# for a linter: it keeps asking about later code instead of going quiet after the
+# first best-effort helper.
+#
+# `hazardous` (from pipefail-early-close.sh) seeds files that inherit both
+# options from a sourcing script; those start with the state already on.
+#
+# Usage:  awk -v hazardous="<paths>" -f pipefail-early-close.awk FILE...
+# Output: one `path:line: code` per offender.
 
-# A file runs under errexit+pipefail either because it sets both itself, or
-# because a file that does SOURCES it — `scripts/lib/*.sh` are the whole
-# installer and set neither (Bugbot on #763). The inherited set is resolved by
-# pipefail-early-close.sh and passed in as `hazardous`; asking only the file's
-# own `set` lines read the entire lib tree as safe.
-function inherits(f) {
-  return (hazardous != "" && index(hazardous, " " f " ") > 0) \
-      || (hazardous != "" && index(" " hazardous, " " f " ") > 0)
+function apply_set(line,   n, a, i, tok, sign, flags) {
+  n = split(line, a, /[[:space:]]+/)
+  for (i = 1; i <= n; i++) {
+    if (a[i] == "set") break
+  }
+  for (i = i + 1; i <= n; i++) {
+    tok = a[i]
+    if (tok !~ /^[-+]/) continue
+    sign = substr(tok, 1, 1)
+    flags = substr(tok, 2)
+    # `-o pipefail` / `+o pipefail` — the option name is the NEXT token.
+    if (flags ~ /o$/ && (i + 1) <= n && a[i + 1] == "pipefail") {
+      p_on = (sign == "-") ? 1 : 0
+    }
+    # `e` anywhere in a combined short flag (-e, -eu, -euo, +e …).
+    if (flags ~ /e/) e_on = (sign == "-") ? 1 : 0
+  }
 }
 
-function flush(  i) {
-  if (nlines > 0 && ((has_errexit && has_pipefail) || inherits(curfile))) {
-    for (i = 1; i <= nlines; i++) {
-      print curfile ":" lineno[i] ": " text[i]
-    }
-  }
-  nlines = 0
-  has_errexit = 0
-  has_pipefail = 0
+function inherits(f) {
+  return hazardous != "" && index(" " hazardous " ", " " f " ") > 0
 }
 
 FNR == 1 {
-  if (curfile != "") flush()
   curfile = FILENAME
+  # A file that inherits both options from its sourcer starts with them live.
+  e_on = inherits(curfile) ? 1 : 0
+  p_on = inherits(curfile) ? 1 : 0
+  in_fn = 0; save_e = 0; save_p = 0
 }
 
 {
   line = $0
 
-  # Shell options. Accept the combined short forms (-euo, -eo) and the long
-  # forms, set anywhere in the file — including inside a function, which is
-  # where check-drift.sh puts them.
-  if (line ~ /^[[:space:]]*set[[:space:]]+-[a-zA-Z]*e[a-zA-Z]*([[:space:]]|$)/) has_errexit = 1
-  if (line ~ /^[[:space:]]*set[[:space:]]+-o[[:space:]]+errexit([[:space:]]|$)/) has_errexit = 1
-  if (line ~ /pipefail/ && line ~ /^[[:space:]]*set[[:space:]]/) has_pipefail = 1
+  # Function boundaries, so a best-effort region ends with its function.
+  if (line ~ /^[a-zA-Z_][a-zA-Z0-9_:.-]*[[:space:]]*\(\)[[:space:]]*\{/) {
+    save_e = e_on; save_p = p_on; in_fn = 1; next
+  }
+  if (line ~ /^\}/ && in_fn) { e_on = save_e; p_on = save_p; in_fn = 0; next }
 
-  # Strip a trailing comment only for the purpose of spotting the marker; the
-  # code test below runs on the raw line so a `#` inside a string cannot hide it.
+  if (line ~ /^[[:space:]]*set[[:space:]]/) { apply_set(line); next }
+
   if (line ~ /#[[:space:]]*pipefail-guard:[[:space:]]*allow/) next
-
-  # Comment lines are prose about the hazard, not the hazard.
   if (line ~ /^[[:space:]]*#/) next
 
   # Already neutralised: the pipeline's status is discarded, so errexit cannot
   # act on the 141.
   if (line ~ /\|\|[[:space:]]*(true|:)([[:space:]]|$|\))/) next
 
+  if (!(e_on && p_on)) next
+
   # The hazard: a pipe into a reader that closes early.
   #   `| head`        — closes after N lines
   #   `| grep -q`     — closes on the first match
-  #   `| grep -m N`   — closes after N matches (same mechanism; found in
-  #                     e2e-auto-upgrade.sh two lines below a -q instance)
+  #   `| grep -m N`   — closes after N matches
   if (line ~ /\|[[:space:]]*head([[:space:]]|$)/ \
       || line ~ /\|[[:space:]]*grep[^|]*[[:space:]]-[a-zA-Z]*q/ \
       || line ~ /\|[[:space:]]*grep[^|]*[[:space:]]-[a-zA-Z]*m[[:space:]]*[0-9]/) {
-    nlines++
-    lineno[nlines] = FNR
     sub(/^[[:space:]]+/, "", line)
-    text[nlines] = line
+    print curfile ":" FNR ": " line
   }
 }
-
-END { if (curfile != "") flush() }

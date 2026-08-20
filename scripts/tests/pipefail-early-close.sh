@@ -58,7 +58,12 @@ haz=""
 for f in "${files[@]}"; do
   [ -f "$f" ] || continue
   grep -qE '^[[:space:]]*set[[:space:]]+(-[a-zA-Z]*e[a-zA-Z]*([[:space:]]|$)|-o[[:space:]]+errexit)' "$f" 2>/dev/null || continue
-  grep -qE '^[[:space:]]*set[[:space:]].*pipefail' "$f" 2>/dev/null || continue
+  # The SIGN matters (Asad on #763): `^set .*pipefail` also matches
+  # `set +o pipefail`, so a file that explicitly turns pipefail OFF was seeded
+  # into the hazardous set. Mirror the sign check the errexit seed above does.
+  grep -qE '^[[:space:]]*set[[:space:]]+-[a-zA-Z]*o?[[:space:]]+pipefail|^[[:space:]]*set[[:space:]]+-[a-zA-Z]*o[[:space:]]*$' "$f" 2>/dev/null \
+    || grep -qE '^[[:space:]]*set[[:space:]]+-[a-zA-Z]*o[[:space:]]+pipefail' "$f" 2>/dev/null \
+    || continue
   haz="$haz $f"
 done
 
