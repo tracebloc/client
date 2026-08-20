@@ -1104,6 +1104,84 @@ setup() {
   [ "$status" -eq 0 ] || return 1
 }
 
+# The mutating path — the one --check cannot reach.
+#
+# Bugbot#766 found a regen that rewrote the bash installer and then died on the
+# first PowerShell constant, leaving the two embeds disagreeing. Every test
+# above passed throughout, because they only ever ran `--check` (a read) or a
+# regen against an ALREADY-CORRECT contract, where every constant short-circuits
+# before the rewrite. So: adopt a genuinely changed contract in a scratch copy
+# of the tree and assert BOTH installers moved.
+@test "envelope contract: adopting a changed contract rewrites BOTH installers" {
+  if ! command -v python3 >/dev/null 2>&1; then
+    skip "python3 not available"
+  fi
+  local root="${BATS_TEST_DIRNAME}/../.."
+  local work="${BATS_TEST_TMPDIR}/adopt"
+  mkdir -p "$work"
+  # Copy only what the generator touches, so the test cannot mutate the repo.
+  mkdir -p "$work/scripts/lib" "$work/scripts/tests/fixtures"
+  cp "$root/scripts/gen-envelope-embed.sh"                  "$work/scripts/"
+  cp "$root/scripts/install-k8s.ps1"                        "$work/scripts/"
+  cp "$root/scripts/lib/install-client-helm.sh"             "$work/scripts/lib/"
+  cp "$root/scripts/tests/fixtures/envelope_contract.json"  "$work/scripts/tests/fixtures/"
+  cp "$root/scripts/tests/fixtures/envelope_vectors.bash"   "$work/scripts/tests/fixtures/"
+
+  # A different overhead, so every derived value moves.
+  python3 - "$work/scripts/tests/fixtures/envelope_contract.json" <<'PY'
+import json, sys
+path = sys.argv[1]
+with open(path) as handle:
+    contract = json.load(handle)
+contract["overhead"]["memory_bytes"] = 4 * 1024 ** 3
+with open(path, "w") as handle:
+    json.dump(contract, handle, indent=2)
+    handle.write("\n")
+PY
+
+  # --check must notice.
+  run "$work/scripts/gen-envelope-embed.sh" --check
+  [ "$status" -ne 0 ] || return 1
+
+  # ...and the real regen must succeed and update BOTH files.
+  run "$work/scripts/gen-envelope-embed.sh"
+  [ "$status" -eq 0 ] || return 1
+
+  grep -qE '^_TB_ENVELOPE_OVERHEAD_MEM_BYTES[[:space:]]*=[[:space:]]*4294967296$' \
+    "$work/scripts/lib/install-client-helm.sh" || return 1
+  grep -qE '^\$script:TbEnvelopeOverheadMemBytes[[:space:]]*=[[:space:]]*4294967296$' \
+    "$work/scripts/install-k8s.ps1" || return 1
+
+  # And the regenerated tree must now be self-consistent.
+  run "$work/scripts/gen-envelope-embed.sh" --check
+  [ "$status" -eq 0 ] || return 1
+}
+
+@test "envelope contract: a missing assignment is reported, not silently skipped" {
+  if ! command -v python3 >/dev/null 2>&1; then
+    skip "python3 not available"
+  fi
+  local root="${BATS_TEST_DIRNAME}/../.."
+  local work="${BATS_TEST_TMPDIR}/missing"
+  mkdir -p "$work/scripts/lib" "$work/scripts/tests/fixtures"
+  cp "$root/scripts/gen-envelope-embed.sh"                  "$work/scripts/"
+  cp "$root/scripts/install-k8s.ps1"                        "$work/scripts/"
+  cp "$root/scripts/lib/install-client-helm.sh"             "$work/scripts/lib/"
+  cp "$root/scripts/tests/fixtures/envelope_contract.json"  "$work/scripts/tests/fixtures/"
+  cp "$root/scripts/tests/fixtures/envelope_vectors.bash"   "$work/scripts/tests/fixtures/"
+
+  # Delete the PowerShell constant entirely: the generator must fail loudly
+  # rather than fall through and report a healthy embed (the fail-open shape
+  # gen-manifest.sh warns about in its own empty-surface guard).
+  grep -v '^\$script:TbEnvelopeFloorMemBytes' "$work/scripts/install-k8s.ps1" \
+    > "$work/scripts/install-k8s.ps1.tmp"
+  mv "$work/scripts/install-k8s.ps1.tmp" "$work/scripts/install-k8s.ps1"
+
+  run "$work/scripts/gen-envelope-embed.sh" --check
+  [ "$status" -ne 0 ] || return 1
+  [[ "$output" == *"no \$script:TbEnvelopeFloorMemBytes assignment"* ]] || return 1
+}
+
 @test "training size: kubectl absent falls back to the static default" {
   TB_NAMESPACE=tracebloc
   unset TRACEBLOC_TRAINING_RESOURCES

@@ -58,36 +58,77 @@ PY
 
 _fail=0
 
-# Replace `<prefix><NAME>=<digits>` in place, or report the mismatch under --check.
+# Read, compare and (unless --check) rewrite ONE `<prefix><NAME> = <digits>`
+# assignment. The whole job is done in python3 against a LITERAL key, on purpose.
+#
+# It used to grep here and rewrite there, which meant one string had to be both
+# an ERE pattern and a Python literal: the PowerShell prefix was passed with a
+# leading backslash so grep would read the dollar as literal, and that same
+# backslash then reached re.escape(), which searched for a backslash-dollar that
+# is nowhere in install-k8s.ps1. --check still passed (grep was fine), so the
+# gate looked healthy while the documented adopt path was broken: a real regen
+# rewrote the bash installer, then died on the first PowerShell constant and
+# left the two embeds disagreeing. Found by Bugbot on #766.
+#
+# One escaping domain now, and the mutating path is covered by a bats test that
+# actually adopts a changed contract — the check-only tests could not have
+# caught this, which is the real lesson.
+#
+# Exit codes: 0 = already correct or rewritten, 2 = no such assignment,
+# 3 = present but wrong (only under --check).
 _set() {
-  local file="$1" prefix="$2" name="$3" want="$4" line got
-  # Tolerate the aligned `=` the PowerShell block uses for readability.
-  line="$(grep -nE "^${prefix}${name}[[:space:]]*=" "$file" | head -1)" || {
-    echo "[ERROR] $file has no ${prefix}${name}= line to embed into" >&2
-    _fail=1
-    return 0
-  }
-  got="$(printf '%s' "$line" | sed -E 's/^[0-9]+:[^=]*=//' | tr -d "[:space:]'\"")"
-  if [[ "$got" == "$want" ]]; then
-    return 0
-  fi
-  if (( CHECK )); then
-    echo "EMBED DRIFT: $file ${prefix}${name} = $got, contract says $want" >&2
-    _fail=1
-    return 0
-  fi
-  # Anchor on the whole line so a value appearing elsewhere is untouched.
-  python3 - "$file" "${prefix}${name}" "$want" <<'PY'
-import re, sys
+  local file="$1" prefix="$2" name="$3" want="$4" rc=0 out
+  out="$(CHECK="$CHECK" python3 - "$file" "${prefix}${name}" "$want" <<'PY'
+import os
+import re
+import sys
+
 path, key, want = sys.argv[1], sys.argv[2], sys.argv[3]
-src = open(path, encoding="utf-8").read()
-pattern = re.compile(rf"^({re.escape(key)}\s*=\s*)\S+$", re.MULTILINE)
+check = os.environ.get("CHECK") == "1"
+
+with open(path, encoding="utf-8") as handle:
+    src = handle.read()
+
+# Anchored on the whole line so a value appearing elsewhere is untouched, and
+# tolerant of the aligned `=` the PowerShell block uses for readability.
+pattern = re.compile(rf"^({re.escape(key)}[ \t]*=[ \t]*)(\S+)$", re.MULTILINE)
+match = pattern.search(src)
+if match is None:
+    sys.exit(2)
+if match.group(2) == want:
+    sys.exit(0)
+if check:
+    print(match.group(2))
+    sys.exit(3)
+
 new, n = pattern.subn(rf"\g<1>{want}", src, count=1)
 if n != 1:
-    raise SystemExit(f"expected exactly one {key} assignment in {path}, replaced {n}")
-open(path, "w", encoding="utf-8").write(new)
+    print(f"expected exactly one {key} assignment, replaced {n}", file=sys.stderr)
+    sys.exit(1)
+with open(path, "w", encoding="utf-8") as handle:
+    handle.write(new)
 PY
-  echo "  re-embedded ${prefix}${name} -> $want  ($file)"
+  )" || rc=$?
+
+  case "$rc" in
+    0)
+      # Already correct, or rewritten in place. The run's closing line reports
+      # which of the two happened; a per-constant echo just adds noise.
+      return 0
+      ;;
+    2)
+      echo "[ERROR] $file has no ${prefix}${name} assignment to embed into" >&2
+      _fail=1
+      ;;
+    3)
+      echo "EMBED DRIFT: $file ${prefix}${name} = ${out}, contract says $want" >&2
+      _fail=1
+      ;;
+    *)
+      echo "[ERROR] failed to embed ${prefix}${name} into $file" >&2
+      _fail=1
+      ;;
+  esac
 }
 
 _set "$BASH_FILE" "_TB_ENVELOPE_" "CONTRACT_VERSION"    "$VERSION"
@@ -96,11 +137,11 @@ _set "$BASH_FILE" "_TB_ENVELOPE_" "OVERHEAD_MEM_BYTES"  "$OVER_MEM"
 _set "$BASH_FILE" "_TB_ENVELOPE_" "FLOOR_CPU_MILLI"     "$FLOOR_CPU"
 _set "$BASH_FILE" "_TB_ENVELOPE_" "FLOOR_MEM_BYTES"     "$FLOOR_MEM"
 
-_set "$PS1_FILE" '\$script:TbEnvelope' "ContractVersion"   "$VERSION"
-_set "$PS1_FILE" '\$script:TbEnvelope' "OverheadCpuMilli"  "$OVER_CPU"
-_set "$PS1_FILE" '\$script:TbEnvelope' "OverheadMemBytes"  "$OVER_MEM"
-_set "$PS1_FILE" '\$script:TbEnvelope' "FloorCpuMilli"     "$FLOOR_CPU"
-_set "$PS1_FILE" '\$script:TbEnvelope' "FloorMemBytes"     "$FLOOR_MEM"
+_set "$PS1_FILE" '$script:TbEnvelope' "ContractVersion"   "$VERSION"
+_set "$PS1_FILE" '$script:TbEnvelope' "OverheadCpuMilli"  "$OVER_CPU"
+_set "$PS1_FILE" '$script:TbEnvelope' "OverheadMemBytes"  "$OVER_MEM"
+_set "$PS1_FILE" '$script:TbEnvelope' "FloorCpuMilli"     "$FLOOR_CPU"
+_set "$PS1_FILE" '$script:TbEnvelope' "FloorMemBytes"     "$FLOOR_MEM"
 
 # ── the golden-vector table for the bats suite ───────────────────────────────
 #
