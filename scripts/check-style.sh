@@ -9,7 +9,7 @@
 #  so until 2026-08-19 a violation here printed red and merged anyway.
 #  Exit 0 = clean, 1 = violations found, 2 = the guard itself errored (fail-closed).
 #
-#  Three mechanical checks (semantic calls — role misuse, judgement-y wording —
+#  Four mechanical checks (semantic calls — role misuse, judgement-y wording —
 #  stay with CODEOWNERS review + STYLE.md; a grep can't police those). Emoji are
 #  intentionally NOT policed — they're welcome (see STYLE.md):
 #    1. No hardcoded brand colour outside the colour engine (scripts/lib/common.sh).
@@ -17,6 +17,12 @@
 #       Internal identifiers (the DNS-1123 sanitisers) and comments are exempt.
 #    3. No bare 'curl' — every fetch carries the minimum TLS version. INTERIM,
 #       see the note on the check itself.
+#    4. No capital-T 'Tracebloc' in user-facing text — the product name is
+#       lowercase. Comments and PascalCase identifiers are exempt.
+#
+#  This count is asserted by scripts/tests/check-style.bats: it said "Three" while
+#  four rules were live (backend#1924). A gate whose own description undercounts
+#  it is how a rule gets dropped without anyone noticing.
 #
 #  A line may opt out of ANY check with a trailing  # style-guard: allow  marker.
 # =============================================================================
