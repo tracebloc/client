@@ -1382,6 +1382,73 @@ PY
   [ "$output" = "unknown" ] || return 1
 }
 
+# The fail-unsafe path Bugbot found on #768. Provenance used to be read by a
+# SECOND `helm get values`; a failed or empty second read looked like "no marker"
+# and was written as `unknown` — which consumers treat as a human pin, so an
+# installer-sized edge was PERMANENTLY STRANDED as a deliberate choice. That is
+# the exact outcome scope bullet 4 exists to prevent, and it is the bash mirror
+# of the `installer`-on-failure bug the PowerShell twin had.
+@test "provenance: a failed values read carries NOTHING (never a stranding 'unknown')" {
+  TB_NAMESPACE=tracebloc
+  unset TRACEBLOC_TRAINING_RESOURCES
+  has() { return 0; }
+  kubectl() { return 0; }     # namespace probe fine
+  helm() { return 1; }        # the values read FAILS
+  run _existing_training_values
+  [ -z "$output" ] || return 1
+}
+
+@test "provenance: an empty values read carries NOTHING" {
+  TB_NAMESPACE=tracebloc
+  unset TRACEBLOC_TRAINING_RESOURCES
+  has() { return 0; }
+  kubectl() { return 0; }
+  helm() { printf ''; }       # succeeds, says nothing
+  run _existing_training_values
+  [ -z "$output" ] || return 1
+}
+
+@test "provenance: a failed read leaves the verdict at 'installer', not 'unknown'" {
+  TB_NAMESPACE=tracebloc
+  unset TRACEBLOC_TRAINING_RESOURCES
+  has() { return 0; }
+  helm() { return 1; }        # read fails -> nothing carried
+  kubectl() {
+    case "$*" in
+      *--request-timeout=10s*) printf '8 32Gi\n' ;;
+      *) return 0 ;;
+    esac
+  }
+  # Nothing carried means WE sized this machine, so `installer` is correct and
+  # the edge stays eligible for a future ladder.
+  run _training_provenance
+  [ "$output" = "installer" ] || return 1
+}
+
+@test "provenance: one lookup returns size and marker together" {
+  TB_NAMESPACE=tracebloc
+  unset TRACEBLOC_TRAINING_RESOURCES
+  has() { return 0; }
+  kubectl() { return 0; }
+  helm() {
+    printf 'env:\n  RESOURCE_LIMITS: cpu=4,memory=12Gi\n  RESOURCE_PROVENANCE: user\n'
+  }
+  run _existing_training_values
+  [ "$output" = "cpu=4,memory=12Gi|user" ] || return 1
+}
+
+@test "provenance: a carried size with no marker pairs with 'unknown' from the SAME read" {
+  TB_NAMESPACE=tracebloc
+  unset TRACEBLOC_TRAINING_RESOURCES
+  has() { return 0; }
+  kubectl() { return 0; }
+  helm() { printf 'env:\n  RESOURCE_LIMITS: cpu=4,memory=12Gi\n'; }
+  run _existing_training_values
+  # `unknown` is correct HERE: the read succeeded and there genuinely is no
+  # marker. The bug was reporting it when the read FAILED.
+  [ "$output" = "cpu=4,memory=12Gi|unknown" ] || return 1
+}
+
 @test "provenance: size and marker come from ONE pass and always agree" {
   TB_NAMESPACE=tracebloc
   unset TRACEBLOC_TRAINING_RESOURCES

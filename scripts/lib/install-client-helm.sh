@@ -68,11 +68,27 @@ _mem_to_bytes() {
   esac
 }
 
-# The installed release's RESOURCE_LIMITS (nested under env:), or nothing.
+# ONE lookup of the installed release's carried training values, echoing
+# "<size>|<provenance>" or NOTHING (backend#2220, Bugbot on #768).
+#
+# The two used to be read by two independent `helm get values` calls. That is
+# fail-unsafe in BOTH directions, and each installer found a different half of
+# it: on PowerShell a failed provenance read reported `installer` for a carried
+# size, inviting a ladder to overrule a human; on bash a failed provenance read
+# reported `unknown`, which consumers treat as a human pin — so an
+# installer-sized edge was PERMANENTLY STRANDED as a deliberate choice, the very
+# outcome scope bullet 4 exists to prevent.
+#
+# One lookup removes both: either it succeeds and the size and the marker come
+# from the same read, or it fails and NOTHING is carried, so the caller machine-
+# sizes and `installer` is then the correct verdict. They cannot disagree.
+#
 # Handles both the quoted form our values file writes and the unquoted form
 # helm re-serializes (`helm get values` strips quotes — the #200 lesson).
-_existing_training_resources() {
-  local ns="${TB_NAMESPACE:-}" out
+# Provenance is normalised here: anything unrecognised, including absent, is
+# `unknown`, never a guess.
+_existing_training_values() {
+  local ns="${TB_NAMESPACE:-}" out size prov
   [[ -n "$ns" ]] || return 0
   # helm get has no request timeout, so gate it behind a BOUNDED probe: a
   # wedged API degrades to machine sizing / the static default instead of
@@ -80,10 +96,31 @@ _existing_training_resources() {
   # is no release to carry — skip the helm call entirely.
   kubectl get namespace "$ns" --request-timeout=5s >/dev/null 2>&1 || return 0
   out="$(helm get values "$ns" -n "$ns" 2>/dev/null)" || return 0
-  printf '%s\n' "$out" | awk '
+  [[ -n "$out" ]] || return 0
+  size="$(printf '%s\n' "$out" | awk '
     /^[[:space:]]*RESOURCE_LIMITS:/ {
       sub(/^[^:]*:[[:space:]]*/, ""); gsub(/"/, ""); print; exit
-    }'
+    }')"
+  # No carried size means nothing to attribute; the caller sizes the machine.
+  [[ -n "$size" ]] || return 0
+  prov="$(printf '%s\n' "$out" | awk '
+    /^[[:space:]]*RESOURCE_PROVENANCE:/ {
+      sub(/^[^:]*:[[:space:]]*/, ""); gsub(/"/, ""); print; exit
+    }')"
+  case "$prov" in
+    installer|user) ;;
+    *) prov="unknown" ;;
+  esac
+  printf '%s|%s' "$size" "$prov"
+}
+
+# The installed release's RESOURCE_LIMITS, or nothing. Thin reader over the one
+# shared lookup, kept because it is the tested, readable entry point.
+_existing_training_resources() {
+  local v
+  v="$(_existing_training_values)"
+  [[ -n "$v" ]] || return 0
+  printf '%s' "${v%%|*}"
 }
 
 # ── envelope contract (GENERATED — do not hand-edit) ─────────────────────────
@@ -222,15 +259,13 @@ _machine_training_ceiling() {
 # The installed release's RESOURCE_PROVENANCE (nested under env:), or nothing.
 # Same awk shape as _existing_training_resources — `helm get values` strips the
 # quotes our values file writes (the #200 lesson).
+# The installed release's RESOURCE_PROVENANCE, or nothing. Thin reader over the
+# same shared lookup, so it can never disagree with the size beside it.
 _existing_training_provenance() {
-  local ns="${TB_NAMESPACE:-}" out
-  [[ -n "$ns" ]] || return 0
-  kubectl get namespace "$ns" --request-timeout=5s >/dev/null 2>&1 || return 0
-  out="$(helm get values "$ns" -n "$ns" 2>/dev/null)" || return 0
-  printf '%s\n' "$out" | awk '
-    /^[[:space:]]*RESOURCE_PROVENANCE:/ {
-      sub(/^[^:]*:[[:space:]]*/, ""); gsub(/"/, ""); print; exit
-    }'
+  local v
+  v="$(_existing_training_values)"
+  [[ -n "$v" ]] || return 0
+  printf '%s' "${v##*|}"
 }
 
 # Resolve the per-run training size AND who chose it, in one pass.
@@ -268,14 +303,18 @@ _resolve_training_size() {
     return 0
   fi
 
-  local prev prev_prov
-  prev="$(_existing_training_resources)"
+  # ONE lookup, both fields — see _existing_training_values. Calling the two
+  # readers separately here would reintroduce exactly the split this fixes.
+  local carried prev prev_prov
+  carried="$(_existing_training_values)"
+  prev="${carried%%|*}"
+  [[ -n "$carried" ]] || prev=""
   # The historic static default was the ABSENCE of a choice, not a choice —
   # carrying it would keep the unschedulable 8Gi on exactly the machines this
   # sizing exists to fix (Bugbot). Only a value that differs from it survives.
   if [[ -n "$prev" && "$prev" != "$_TRAINING_DEFAULT" ]]; then
     _TB_TRAINING_SIZE="$prev"
-    prev_prov="$(_existing_training_provenance)"
+    prev_prov="${carried##*|}"
     case "$prev_prov" in
       installer|user)
         # A marker already on the release is authoritative — preserve it, or a
