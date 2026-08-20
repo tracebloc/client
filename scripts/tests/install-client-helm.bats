@@ -1446,16 +1446,37 @@ _arch_gate_ctx() {
   [[ "$output" != *"existing MySQL 5.7 data"* ]] || return 1
 }
 
-@test "_assert_engine_runs_on_this_arch: emulation / amd64 / macOS / escape hatch all proceed" {
+@test "_assert_engine_runs_on_this_arch: emulation / amd64 / macOS-ok / escape hatch all proceed" {
   _arch_gate_ctx; amd64_emulation_available() { return 0; }
   run _assert_engine_runs_on_this_arch; [ "$status" -eq 0 ] || return 1
   _arch_gate_ctx; ARCH=x86_64
   run _assert_engine_runs_on_this_arch; [ "$status" -eq 0 ] || return 1
-  _arch_gate_ctx; OS=Darwin          # assert_amd64_emulation (#433) owns macOS
+  # macOS is a real gate now (client#756), not an auto-proceed: it verifies the
+  # Rosetta/Docker smoke. Emulation working -> proceed.
+  _arch_gate_ctx; OS=Darwin; _macos_amd64_emulation_ok() { return 0; }
   run _assert_engine_runs_on_this_arch; [ "$status" -eq 0 ] || return 1
   _arch_gate_ctx; export TRACEBLOC_ALLOW_ARM64=1
   run _assert_engine_runs_on_this_arch; [ "$status" -eq 0 ] || return 1
   unset TRACEBLOC_ALLOW_ARM64
+}
+
+# THE FAIL-CLOSED BACKSTOP (Arturo, client#756). The early assert_amd64_emulation
+# guesses 8.4 and skips when it can't see a live release (existing_id needs helm).
+# On macOS this late gate is the only thing that catches the resolved-5.7 case.
+@test "_assert_engine_runs_on_this_arch: macOS + 5.7 + emulation MISSING -> refuses (backstop)" {
+  _arch_gate_ctx; OS=Darwin
+  _macos_amd64_emulation_ok() { return 1; }   # Rosetta off
+  run _assert_engine_runs_on_this_arch
+  [ "$status" -ne 0 ] || return 1                            # not waved through
+  [[ "$output" == *"Rosetta"* ]] || return 1                 # macOS remedy, not the Linux binfmt one
+  [[ "$output" != *"tonistiigi/binfmt"* ]] || return 1
+}
+
+@test "_assert_engine_runs_on_this_arch: macOS + 5.7 + emulation helper ABSENT -> refuses (fail closed)" {
+  _arch_gate_ctx; OS=Darwin
+  # helper not defined at all: declare -F is false, so the gate must still refuse.
+  run _assert_engine_runs_on_this_arch
+  [ "$status" -ne 0 ] || return 1
 }
 
 # ── install_client_helm flow: the generated values carry the engine choice ──

@@ -102,8 +102,8 @@ for *what the operator sees and can act on*, not code elegance.
   files should be mode 0600.
 
 - **A changed bootstrap-fetched script without a regenerated `scripts/manifest.sha256`**
-  (`scripts/gen-manifest.sh`). The "Installer manifest is current (supply-chain, R8)" step
-  in `installer-tests.yaml` fails, and a stale manifest breaks `install.sh`'s verified fetch.
+  (`scripts/gen-manifest.sh`). `make drift` fails in the required `Source-of-truth drift`
+  check, and a stale manifest breaks `install.sh`'s verified fetch.
 
 - **A `Chart.yaml` `version` bump without the matching `appVersion`** — the
   `app.kubernetes.io/version` label depends on it.
@@ -117,7 +117,8 @@ for *what the operator sees and can act on*, not code elegance.
   so they can inspect a failing check's exit code instead of aborting.
 - **SC2034 "unused variable" in `scripts/lib/*.sh` is a known false positive** — those vars
   are consumed cross-file once the libs are sourced together. CI blocks at
-  `--severity=error` and runs `--severity=warning` advisory-only (`installer-tests.yaml:63-67`).
+  `--severity=error` via `make lint` in the required `Lint` check, and prints the
+  `--severity=warning` sweep advisory-only via `make lint-warnings`.
 - `scripts/manifest.sha256` and `scripts/testdata/golden/*.golden` are **generated**. The
   golden copy catalog is regenerated with
   `TB_UPDATE_GOLDEN=1 bats scripts/tests/copy-catalog.bats`, never hand-edited — review the

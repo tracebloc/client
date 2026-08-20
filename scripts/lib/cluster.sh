@@ -1003,6 +1003,16 @@ _create_new_cluster() {
   # 404s". It does not, and that mattered: a crash-loop is the failure you would
   # have noticed. Nobody watching pod restarts would ever see this one.)
   #
+  # Note the flag and the RACE are two different problems, both about this same
+  # APIService. #553/#757 added a bounded wait to each installer
+  # (_wait_for_metrics_apiservice here, Wait-MetricsApiService on Windows, budget
+  # stamped in scripts/spec/facts.env as METRICS_WAIT_TIMEOUT) because k3s applies
+  # its bundled metrics-server slightly AFTER the API server reports ready, so a
+  # fast host could render the chart inside that window. That wait falls through
+  # non-fatally, by design — so disabling the component here is not something it
+  # rescues: the wait would simply burn its whole budget and hand the install to
+  # the chart's `fail`.
+  #
   # Guarded by scripts/tests/cluster.bats (the exact disable set per storage
   # mode) and scripts/tests/k3s-components-agreement.sh (both installers agree,
   # and the chart coupling above still exists).

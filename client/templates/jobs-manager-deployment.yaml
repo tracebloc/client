@@ -415,6 +415,28 @@ spec:
         # --reset-then-reuse-values upgrades.
         - name: JOB_IMAGE_HOST
           value: {{ printf "%s/" (dig "imageRegistry" "docker.io" (.Values.global | default dict) | default "docker.io") | quote }}
+        {{- if include "tracebloc.useImagePullSecrets" . }}
+        # IMAGE_PULL_SECRET_NAME is the pull Secret jobs-manager puts on the
+        # TRAINING pods it spawns (backend#2119). It has to be injected rather
+        # than written into client-runtime's job.yaml, because the name is
+        # release-dependent: a literal in that repo cannot be right for every
+        # release, and the one it carried ("regcred", unqualified) was right for
+        # none. Every training pod named a Secret the kubelet could not retrieve
+        # and fell back to an ANONYMOUS pull of the ~2.7 GB training image — so
+        # on a mirrored install (JOB_IMAGE_HOST above) the training pod was the
+        # one pod in the release NOT using the credential the operator supplied.
+        #
+        # Rendered from the same helper as every imagePullSecrets block in this
+        # chart, and gated on the same condition that creates the Secret, so the
+        # three cannot disagree. Absent when no registry is configured: the
+        # runtime reads that as "pull publicly" and sets no imagePullSecrets at
+        # all, which is the honest declaration of a public pull.
+        #
+        # Skew-safe both ways: a client-runtime older than backend#2119 ignores
+        # this var, and a newer one treats its absence as "public".
+        - name: IMAGE_PULL_SECRET_NAME
+          value: {{ include "tracebloc.registrySecretName" . | quote }}
+        {{- end }}
         - name: CLIENT_ENV
           value: {{ include "tracebloc.clientEnv" . | quote }}
         # Where the resource-monitor DaemonSet lives, for the heartbeat version
@@ -472,7 +494,24 @@ spec:
         - name: SINGLE_NODE
           value: {{ if hasKey .Values.env "SINGLE_NODE" }}{{ .Values.env.SINGLE_NODE | quote }}{{ else }}{{ (default dict .Values.hostPath).enabled | default false | quote }}{{ end }}
         {{- range $key, $value := .Values.env }}
-        {{- if and (ne $key "CLIENT_ENV") (ne $key "RESOURCE_REQUESTS") (ne $key "RESOURCE_LIMITS") (ne $key "GPU_REQUESTS") (ne $key "GPU_LIMITS") (ne $key "RUNTIME_CLASS_NAME") (ne $key "SINGLE_NODE") (ne $key "CLIENT_ID") (not (has $key $proxyKeys)) $value }}
+        {{- /* IMAGE_PULL_SECRET_NAME is excluded so `env.IMAGE_PULL_SECRET_NAME`
+             cannot render it twice with the passthrough copy winning (Asad on
+             client#751). The consequence is sharper than JOB_IMAGE_HOST's, which
+             has the same shape and is deliberately left alone: a slow pull is
+             recoverable, whereas client-runtime treats a pull-secret name that
+             does not resolve as PERMANENT and dead-letters the experiment. The
+             supported way to name your own Secret is `dockerRegistry.existingSecret`,
+             which every consumer reads through one helper; an env override would
+             be a second reader of the same rule.
+
+             Excluded from pods-monitor's list below too, so a stray value is
+             inert everywhere rather than only where it would have done harm.
+             pods-monitor never renders this var and never reads it -- job.yaml
+             is read by jobs_manager.py, which runs in THIS container -- so
+             passing it through there put an ignored value in an unrelated
+             process's environment and nothing more. Nobody can depend on that:
+             the variable does not exist before this change. */}}
+        {{- if and (ne $key "CLIENT_ENV") (ne $key "RESOURCE_REQUESTS") (ne $key "RESOURCE_LIMITS") (ne $key "GPU_REQUESTS") (ne $key "GPU_LIMITS") (ne $key "RUNTIME_CLASS_NAME") (ne $key "SINGLE_NODE") (ne $key "CLIENT_ID") (ne $key "IMAGE_PULL_SECRET_NAME") (not (has $key $proxyKeys)) $value }}
         - name: {{ $key }}
           value: {{ $value | quote }}
         {{- end }}
@@ -551,7 +590,7 @@ spec:
         - name: SINGLE_NODE
           value: {{ if hasKey .Values.env "SINGLE_NODE" }}{{ .Values.env.SINGLE_NODE | quote }}{{ else }}{{ (default dict .Values.hostPath).enabled | default false | quote }}{{ end }}
         {{- range $key, $value := .Values.env }}
-        {{- if and (ne $key "CLIENT_ENV") (ne $key "RESOURCE_REQUESTS") (ne $key "RESOURCE_LIMITS") (ne $key "GPU_REQUESTS") (ne $key "GPU_LIMITS") (ne $key "RUNTIME_CLASS_NAME") (ne $key "SINGLE_NODE") (ne $key "CLIENT_ID") (not (has $key $proxyKeys)) $value }}
+        {{- if and (ne $key "CLIENT_ENV") (ne $key "RESOURCE_REQUESTS") (ne $key "RESOURCE_LIMITS") (ne $key "GPU_REQUESTS") (ne $key "GPU_LIMITS") (ne $key "RUNTIME_CLASS_NAME") (ne $key "SINGLE_NODE") (ne $key "CLIENT_ID") (ne $key "IMAGE_PULL_SECRET_NAME") (not (has $key $proxyKeys)) $value }}
         - name: {{ $key }}
           value: {{ $value | quote }}
         {{- end }}

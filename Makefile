@@ -10,13 +10,16 @@
 #                   that runs `make check` (skip once with --no-verify).
 #
 # This file is a THIN WRAPPER. Almost every command below is copied from the
-# workflow that already runs it — standard-checks.yml, installer-tests.yaml
-# and helm-ci.yaml. It introduces no new tool, no new config, and no new
-# rule. When a workflow changes, change the matching line here.
+# workflow that already runs it — standard-checks.yml, installer-tests.yaml,
+# drift-checks.yaml and helm-ci.yaml. It introduces no new tool, no new config,
+# and no new rule. When a workflow changes, change the matching line here.
 #
-# `shellcheck` is the one target not copied from a workflow LINE, but it is
-# still exactly what a workflow runs: since #753, `Standard checks / Lint` runs
-# `make lint`, so this file IS the definition rather than a copy of one. The org
+# `shellcheck` and `drift` are the two targets not copied from a workflow LINE,
+# but both are still exactly what a workflow runs: since #753, `Standard checks
+# / Lint` runs `make lint`, and since #755 the REQUIRED `Source-of-truth drift`
+# runs `make drift`. For those two this file IS the definition rather than a copy
+# of one — which is the point: the pre-push tier and the merge gate cannot
+# disagree about what linting, or drift, means. The org
 # reusable job `quality / shellcheck` (tracebloc/.github) applies the same rule
 # to the PR diff; that one cannot be copied from, so this target reproduces its
 # classification and flags, and says so in its own comment.
@@ -78,11 +81,11 @@
 # `=`, not `:=`: recursively expanded, so the grep runs only when `help` actually
 # prints it. `make check` is the pre-push path with a sub-60 s budget and never
 # pays for it. bats declares one test per `@test` at line start, so this matches
-# `bats`'s own count exactly — re-verify by comparing this against the highest
-# test number a full `make bats` prints, not against a number recorded here. The
-# "verified: 946 = 946" that used to close this sentence had itself drifted (the
-# real total was past 1180 by the time anyone looked), which is the paragraph
-# above happening to the paragraph above.
+# `bats`'s own count exactly — re-verify by comparing it against the highest test
+# number a full `make bats` prints, never against a number recorded here. The
+# "verified: 946 = 946" that used to close this sentence had itself drifted past
+# 1180 by the time anyone re-counted: the paragraph above, happening to the
+# paragraph above.
 BATS_TEST_COUNT = $(shell grep -h '^@test' scripts/tests/*.bats 2>/dev/null | wc -l | tr -d ' ')
 
 .PHONY: help
@@ -266,49 +269,129 @@ parse:
 #     materialised first and shellcheck's own status is what propagates.
 # The `; :` inside the classifier is load-bearing: `grep -q ... && printf`
 # exits 1 on every non-shell file, which would otherwise make xargs return 123.
+# Both shellcheck sweeps read ONE definition of "which files are shell":
+# $(SH_FILES). Overridable ONLY so the fail-closed path can be exercised without
+# editing the real classifier -- `make shellcheck SH_FILES=/path/to/stub`. See that file's header for why it is a script and not a
+# list -- in short, #753 replaced a 19-entry SHELLCHECK_FILES enumeration with a
+# derivation after the list drifted past eight real scripts, and this PR's
+# advisory sweep then kept referencing the deleted variable and went permanently
+# green with no operands behind `|| true` (Arturo, #755 review). The script exits
+# non-zero on a zero-file classification, so a broken derivation is loud in both
+# sweeps instead of looking like a clean run in either.
+SH_FILES ?= scripts/sh-files.sh
+
 .PHONY: shellcheck
 shellcheck:
 	@files=$$(mktemp); \
-	git ls-files -z \
-	  | xargs -0 -r -n1 sh -c 'case "$$1" in \
-	      *.sh|*.bash|*.ksh) printf "%s\n" "$$1" ;; \
-	      *.bats|*.ps1|*.psm1|*.zsh) ;; \
-	      *) head -n 1 "$$1" 2>/dev/null \
-	           | grep -Eq "^#![[:space:]]*[^[:space:]]*(/|[[:space:]])(ba|da|k)?sh([[:space:]]|$$)" \
-	           && printf "%s\n" "$$1" ;; \
-	    esac; :' sh > "$$files"; \
+	if ! $(SH_FILES) > "$$files"; then rm -f "$$files"; exit 1; fi; \
 	n=$$(wc -l < "$$files" | tr -d " "); \
-	if [ "$$n" -eq 0 ]; then \
-	  echo "shellcheck: classified ZERO shell files -- the derivation above is broken."; \
-	  echo "            Refusing to report green on an empty file set."; \
-	  rm -f "$$files"; exit 1; \
-	fi; \
 	echo "shellcheck: $$n file(s), severity=error"; \
 	tr "\n" "\0" < "$$files" | xargs -0 -r shellcheck --severity=error --exclude=SC1091; \
 	rc=$$?; rm -f "$$files"; exit $$rc
 
-# drift: the repo's duplicated-declaration guards, in two groups. No ordinals
-# below -- the list grows, and "the fourth is…" was already wrong here (it
-# predated the telemetry guard and skipped it) before another line was added.
+# lint-warnings: the advisory `--severity=warning` sweep, over the SAME derived
+# set as `shellcheck` -- same script, so the two cannot diverge again.
 #
-# gen-manifest / check-facts / check-style come from installer-tests.yaml's
-# `static` job: pure local file comparisons (~0.2 s), each with a --write /
-# regenerate mode named in its own output.
+# NOT part of `lint` and NOT a gate: the libs are sourced together as one
+# program, so single-file shellcheck reports SC2034 "unused" for shared vars
+# (CURL_SECURE, ARCH_DL, the colours) that common.sh defines and other libs
+# consume. Printed for visibility only.
 #
-# The *-agreement.sh scripts come from drift-checks.yaml's `Source-of-truth
-# drift` job -- the REQUIRED check, so those guards block rather than advise.
-# They live here rather than in `helm-vocab` because helm-ci's lint job calls
-# `make helm-lint helm-vocab`, and helm-ci's `Helm lint` is not required: putting
-# one there would silently move it back to advisory, which is what #715 took the
-# CLIENT_ENV guard out of. ~3 s, bash and python3 only.
+# `|| true` sits on the shellcheck INVOCATION only, never around the derivation
+# -- that is the distinction the old one-liner lost. A broken classifier exits 1
+# through sh-files.sh; only genuine warnings are tolerated.
+#
+# It exists as a target because installer-tests.yaml's `static` job used to run
+# this sweep inline, and that job is gone; standard-checks.yml's `Lint` calls
+# this so the visibility survives the move rather than being quietly dropped.
+.PHONY: lint-warnings
+lint-warnings:
+	@files=$$(mktemp); \
+	if ! $(SH_FILES) > "$$files"; then rm -f "$$files"; exit 1; fi; \
+	n=$$(wc -l < "$$files" | tr -d " "); \
+	echo "lint-warnings: $$n file(s), severity=warning (advisory)"; \
+	tr "\n" "\0" < "$$files" | xargs -0 -r shellcheck --severity=warning --exclude=SC1091 || true; \
+	rm -f "$$files"
+
+# drift: the repo's duplicated-declaration guards, and the ONLY declaration of
+# that set. drift-checks.yaml's `Source-of-truth drift` job -- the one that is a
+# REQUIRED check on develop and on main -- runs `make drift` and lists nothing
+# itself, so a guard added here gates automatically and the pre-push hook and
+# the merge gate cannot disagree about what "the drift guards" are.
+#
+# They could, and did. Until 2026-08-19 this target held gen-manifest /
+# check-facts / check-style while the required job held check-drift, so each
+# side gated exactly what the other did not: a stale manifest.sha256 was caught
+# by the pre-push hook and NOT at the merge gate, because the job that ran R8
+# (`Static analysis`) is required on no branch. Hence one list, here.
+#
+# No count is written down. It was "five" for about two hours and was already
+# six -- `telemetry-vocabulary-agreement.sh` arrived with a develop merge and
+# neither prose copy followed it (Asad + Arturo, #755 review), which is the exact
+# divergence this target exists to stop. The recipe prints the live number.
+#
+# Most are pure local file comparisons with a --write / regenerate mode named in
+# their own output. `check-drift.sh` is the exception and wants `helm template`;
+# an earlier version of this comment claimed all of them regenerate, one sentence
+# before admitting that one shells out to helm.
+#
+# env-vocabulary-agreement lives here, not in `helm-vocab`, because #715 moved
+# it out of helm-ci's `Helm lint` into the required drift job; helm-ci's lint job
+# calls `make helm-lint helm-vocab`, so keeping it there would silently put it
+# back where #715 took it from.
+#
+# `|`-separated because each guard is a multi-word command. One entry per guard,
+# and this is the only place they are written down.
+DRIFT_GUARDS := scripts/gen-manifest.sh --check|scripts/check-facts.sh --check|bash scripts/check-style.sh|bash scripts/tests/check-drift.sh|bash scripts/tests/env-vocabulary-agreement.sh|bash scripts/tests/telemetry-vocabulary-agreement.sh|bash scripts/tests/k3s-components-agreement.sh
+
+# EXPORTED, not interpolated. The recipe reads $$DRIFT_GUARDS from the
+# environment; it used to do `guards='$(DRIFT_GUARDS)'`, which Make expands
+# INSIDE single quotes, so the first guard containing a `'` -- `bash -c '...'`,
+# `python3 -c '...'` -- would terminate the assignment, collapse the list, and
+# run zero guards while printing "all guards green" and exiting 0. In the check
+# this PR makes REQUIRED. Found by Asad, reproduced independently by Arturo and
+# again here (#755 review):
+#
+#   $ make drift DRIFT_GUARDS=                                  -> green, exit 0
+#   $ make drift "DRIFT_GUARDS=bash -c 'exit 1'|scripts/..."    -> green, exit 0
+#
+# The irony was the point: this PR's whole argument is that a guard which cannot
+# fail is not a gate, and its own comment here claimed "this is NOT the fail-open
+# shape" -- a claim that should have been a machine check (backend#1729 rule 7).
+# Now it is one, three ways:
+#   * an empty list is a FAILURE, not a clean sweep;
+#   * the environment carries the value, so no quote in a guard can collapse it;
+#   * the loop COUNTS its iterations and refuses to report green unless it ran
+#     exactly the number of `|`-separated entries the list declares.
+export DRIFT_GUARDS
+
+# Every guard RUNS even when an earlier one fails, and the target fails at the
+# end if any did -- so a stale manifest no longer hides a terminology violation
+# until you fix the manifest, push, and wait for CI again. The guards are
+# independent in their REPORTING, never in whether they block.
 .PHONY: drift
 drift:
-	scripts/gen-manifest.sh --check
-	scripts/check-facts.sh --check
-	bash scripts/check-style.sh
-	bash scripts/tests/env-vocabulary-agreement.sh
-	bash scripts/tests/telemetry-vocabulary-agreement.sh
-	bash scripts/tests/k3s-components-agreement.sh
+	@if [ -z "$${DRIFT_GUARDS:-}" ]; then \
+	  echo "drift: the guard list is EMPTY -- refusing to report green on zero guards."; \
+	  exit 1; \
+	fi; \
+	exp=$$(printf '%s' "$$DRIFT_GUARDS" | awk -F'|' '{print NF}'); \
+	fail=0; ran=0; oifs=$$IFS; IFS='|'; \
+	for g in $$DRIFT_GUARDS; do \
+	  IFS=$$oifs; ran=$$((ran+1)); \
+	  printf '\n==> %s\n' "$$g"; \
+	  sh -c "$$g" || { fail=1; printf '!! FAILED: %s\n' "$$g"; }; \
+	  IFS='|'; \
+	done; IFS=$$oifs; \
+	if [ "$$ran" -ne "$$exp" ]; then \
+	  printf '\ndrift: ran %s guard(s) but the list declares %s -- refusing to report green.\n' "$$ran" "$$exp"; \
+	  exit 1; \
+	fi; \
+	if [ "$$fail" -ne 0 ]; then \
+	  printf '\ndrift: one or more guards FAILED (all %s were run -- see !! lines above)\n' "$$ran"; \
+	  exit 1; \
+	fi; \
+	printf '\ndrift: all %s guards green\n' "$$ran"
 
 # digest-drift: the watcher on every mutable label that points at a pinned
 # digest (backend#1853). NOT in `check`: it needs the network and a docker
