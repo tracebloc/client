@@ -177,7 +177,16 @@ _check_sourced_libs_are_covered() {
     exit 1
   fi
 
-  declared="$(printf '%s\n' "${FILES[@]}" | grep '^scripts/lib/' | sort -u)"
+  # `|| true` for the same reason the sourced arm has it, and it was missing here:
+  # a no-match `grep` exits 1, which under `set -euo pipefail` killed the script
+  # before the diff below could say anything. So a FILES array with no
+  # scripts/lib/ entries died silently -- fail-closed by accident, with no message
+  # naming the integrity surface just lost, which is the shape this suite already
+  # refuses for an empty FILES (Bugbot, #770). Safe here: the input is a shell
+  # array, so grep's 1 for "matched nothing" is the only non-zero possible, and an
+  # empty `declared` against a non-empty `sourced` is exactly what the diff
+  # reports.
+  declared="$(printf '%s\n' "${FILES[@]}" | grep '^scripts/lib/' | sort -u)" || true
 
   if [[ "$sourced" != "$declared" ]]; then
     echo "[ERROR] scripts/install-k8s.sh sources a different set of libs than the manifest covers." >&2

@@ -268,3 +268,17 @@ run_check() { ( cd "$WORK" && scripts/gen-manifest.sh --check ) }
   [ "$status" -ne 0 ] || return 1
   [[ "$output" == *"sources a different set of libs than the manifest covers"* ]] || return 1
 }
+
+@test "a FILES array with no scripts/lib entries reports, not dies silently" {
+  # The mirror of case 16, and it was missing: the `declared` arm had no
+  # `|| true`, so a no-match grep killed the script under `set -euo pipefail`
+  # before the diff could name what was lost — fail-closed by accident, with no
+  # message. Strip the lib entries from BOTH arrays so the bootstrap cross-check
+  # still agrees and THIS check is the one that speaks; otherwise the case would
+  # pass on "FILES arrays differ", a different code path than its name claims.
+  perl -0pi -e 's{^  "scripts/lib/[a-z0-9-]+\.sh"\n}{}gm' "$WORK/scripts/install.sh"
+  perl -0pi -e 's{^  "scripts/lib/[a-z0-9-]+\.sh"\n}{}gm' "$GM"
+  run run_check
+  [ "$status" -ne 0 ] || return 1
+  [[ "$output" == *"SOURCED BUT NOT COVERED"* ]] || return 1
+}
