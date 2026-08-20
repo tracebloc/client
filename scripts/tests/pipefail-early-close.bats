@@ -189,6 +189,27 @@ hazardous() {
   [ -n "$output" ] || return 1
 }
 
+@test "a ONE-LINE function body is checked, not skipped (Bugbot #763)" {
+  # The function-entry rule used to `next` unconditionally, so `f() { … }` on a
+  # single line was never read at all. This repo writes helpers that way, so the
+  # tree gate could stay green while that exact shape landed.
+  # At column 0 — the function-opener rule is anchored there, so an INDENTED
+  # one-liner never takes that path and the fixture would prove nothing
+  # (found by mutation; the first version of this test was vacuous).
+  local f; f="$(hazardous oneline.sh 'first() { producer | head -1; }')"
+  run scan "$f"
+  [ -n "$output" ] || return 1
+}
+
+@test "head followed by a CLOSING delimiter still counts (Bugbot #763)" {
+  # `x="$(cmd | head)"` ends at `)` then `"`, so requiring space-or-EOL after
+  # `head` missed the command-substitution form entirely.
+  local f; f="$(hazardous closer.sh '  x="$(cmd | head)"' '  y="$(cmd | head -3)"')"
+  run scan "$f"
+  [[ "$output" == *":3:"* ]] || return 1
+  [[ "$output" == *":4:"* ]] || return 1
+}
+
 @test "a set +e region is NOT flagged — the guard models disabling, not just enabling" {
   # run_diagnose() opens with `set +e` precisely so no step can abort the bundle.
   # A model that only knows about ENABLING flags every line in every best-effort

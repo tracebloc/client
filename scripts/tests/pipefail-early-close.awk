@@ -77,8 +77,16 @@ FNR == 1 {
   line = $0
 
   # Function boundaries, so a best-effort region ends with its function.
+  #
+  # A ONE-LINE function (`first() { cmd | head -1; }`) must NOT be skipped: an
+  # unconditional `next` here meant its body was never checked at all, and this
+  # repo writes helpers that way (Bugbot #763). The one-liner opens and closes on
+  # the same line, so the surrounding state is unchanged — fall through and let
+  # the hazard check read the body.
   if (line ~ /^[a-zA-Z_][a-zA-Z0-9_:.-]*[[:space:]]*\(\)[[:space:]]*\{/) {
-    save_e = e_on; save_p = p_on; in_fn = 1; next
+    if (line !~ /\}[[:space:]]*$/) {
+      save_e = e_on; save_p = p_on; in_fn = 1; next
+    }
   }
   if (line ~ /^\}/ && in_fn) { e_on = save_e; p_on = save_p; in_fn = 0; next }
 
@@ -97,7 +105,10 @@ FNR == 1 {
   #   `| head`        — closes after N lines
   #   `| grep -q`     — closes on the first match
   #   `| grep -m N`   — closes after N matches
-  if (line ~ /\|[[:space:]]*head([[:space:]]|$)/ \
+  # The terminator class matters: `head` can be followed by a CLOSING delimiter,
+  # not just whitespace or end-of-line. `x="$(cmd | head)"` ends at `)` and then
+  # `"`, and requiring space-or-EOL missed exactly that shape (Bugbot #763).
+  if (line ~ /\|[[:space:]]*head([[:space:]]|$|[)"'\''`;|&])/ \
       || line ~ /\|[[:space:]]*grep[^|]*[[:space:]]-[a-zA-Z]*q/ \
       || line ~ /\|[[:space:]]*grep[^|]*[[:space:]]-[a-zA-Z]*m[[:space:]]*[0-9]/) {
     sub(/^[[:space:]]+/, "", line)
