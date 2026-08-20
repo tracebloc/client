@@ -60,9 +60,21 @@ fixture() { printf '%s\n' "$@" > "$FIXTURE"; }
 # ── rule 1: hardcoded brand colour ───────────────────────────────────────────
 
 # Pull the tone vocabulary out of the script instead of restating it.
+# BOTH extractors FAIL CLOSED on a missing marker, and both callers assert the
+# token SHAPE (Bugbot + Asad on #762). `${re##*38;2;(}` is a no-op when the
+# marker is absent, so deleting rule 1's entire RGB arm made _brand_rgbs fall
+# through and return the HEX vocabulary instead. Those hexes were then planted as
+# `printf '\033[38;2;#?(01a5cc m'` — which still contains a brand hex, so the
+# surviving hex rule fired, the count floor was met, and the test asserting "the
+# RGB half is caught" passed with the RGB half GONE. Reproduced before fixing.
+#
+# Non-emptiness was never the contract. The contract is "this is the RGB
+# vocabulary", so the marker must be present and every token must look like a
+# triple. A guard on the extractor alone would still let a stray hex through.
 _brand_hexes() {
   local line re
   line="$(grep -m1 '^brand=' "$CS")"
+  case "$line" in *'#?('*) ;; *) return 1 ;; esac
   re="${line#brand=\'}"; re="${re%\'}"
   re="${re#*\#?(}"
   printf '%s' "${re%%)*}" | tr '|' ' '
@@ -70,6 +82,7 @@ _brand_hexes() {
 _brand_rgbs() {
   local line re
   line="$(grep -m1 '^brand=' "$CS")"
+  case "$line" in *'38;2;('*) ;; *) return 1 ;; esac
   re="${line#brand=\'}"; re="${re%\'}"
   re="${re##*38;2;(}"
   printf '%s' "${re%%)*}" | tr '|' ' '
@@ -77,9 +90,12 @@ _brand_rgbs() {
 
 @test "rule 1: EVERY brand hex the script declares is caught (vocabulary derived, not restated)" {
   local hexes count=0
-  hexes="$(_brand_hexes)"
-  [ -n "$hexes" ] || return 1          # fail closed: an unparsed vocabulary is a finding
+  hexes="$(_brand_hexes)" || return 1  # fail closed: no `#?(` marker is a finding
+  [ -n "$hexes" ] || return 1
   for h in $hexes; do
+    # Shape first: only a 6-digit hex may stand in for a hex token. Without this
+    # a leaked RGB fragment would satisfy the loop just as well.
+    [[ "$h" =~ ^[0-9a-fA-F]{6}$ ]] || return 1
     fixture "  local c=\"#${h}\""
     run run_style
     [ "$status" -eq 1 ] || return 1
@@ -91,9 +107,14 @@ _brand_rgbs() {
 
 @test "rule 1: EVERY brand RGB triple the script declares is caught" {
   local rgbs count=0
-  rgbs="$(_brand_rgbs)"
+  rgbs="$(_brand_rgbs)" || return 1    # fail closed: no `38;2;(` marker is a finding
   [ -n "$rgbs" ] || return 1
   for t in $rgbs; do
+    # THE ASSERTION THAT MAKES THIS REAL: a token must actually be a triple.
+    # Deleting the RGB arm used to leak the hex vocabulary in here, and a planted
+    # `38;2;#?(01a5cc` still tripped the surviving HEX rule — so the test passed
+    # while proving nothing about RGB.
+    [[ "$t" =~ ^[0-9]{1,3}\;[0-9]{1,3}\;[0-9]{1,3}$ ]] || return 1
     fixture "  printf '\\033[38;2;${t}m'"
     run run_style
     [ "$status" -eq 1 ] || return 1
