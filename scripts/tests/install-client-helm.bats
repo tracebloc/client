@@ -19,6 +19,23 @@ setup() {
   # would otherwise spin against fake output. The bar is cosmetic + covered by
   # its own reasoning; the readiness gate (summary.bats) is the real contract.
   export TB_NO_SERVICE_PROGRESS=1
+  # THE HOST IS AN INPUT, SO DECLARE IT (backend#2208). install_client_helm calls
+  # _assert_engine_runs_on_this_arch, which since client#756 probes the real
+  # machine: `uname -m`, and on Darwin a live Rosetta/Docker smoke. Nothing here
+  # set OS or ARCH, so any flow test whose helm mock reports an EXISTING release
+  # — the one path that resolves the engine to 5.7 and therefore engages the gate
+  # — inherited the developer's CPU and refused on an Apple Silicon Mac, while CI
+  # (Linux/amd64) returned early at the arch check and stayed green. Three
+  # reconcile tests failed that way for every Mac developer and CI could not see
+  # it, because the platform the gate exists for is the one CI never runs.
+  #
+  # Pin to what CI is, so a local run reproduces CI. This does NOT disarm the
+  # gate — TRACEBLOC_ALLOW_ARM64 would, which is exactly why it is not used here:
+  # it would switch off the behaviour client#756 added. Every arch-sensitive test
+  # in this file sets OS/ARCH for itself (see _arch_gate_ctx and the engine
+  # tests), so they override this and keep testing the real rule.
+  OS=Linux
+  ARCH=x86_64
 }
 
 # ── _backend_url ───────────────────────────────────────────────────────────
