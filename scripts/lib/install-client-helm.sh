@@ -86,11 +86,51 @@ _existing_training_resources() {
     }'
 }
 
+# ── envelope contract (GENERATED — do not hand-edit) ─────────────────────────
+#
+# backend#2220 / RFC-BACKEND-664 §P0. These four numbers used to be typed out
+# here, again in install-k8s.ps1, and a third time in cli's set.go, with a
+# fourth policy in client-runtime's node_sizing.py. Four copies, none derived
+# from the others.
+#
+# They now come from ONE place — client-runtime/envelope_contract.json, whose
+# arithmetic lives in node_sizing.envelope_from_allocatable. bash cannot parse
+# JSON (jq is not a guaranteed prerequisite — see the helm-namespace note
+# below) and the bootstrap is signed and must not fetch anything unsigned, so
+# the constants are EMBEDDED here, exactly as the GPU node-image build inputs
+# are embedded into install-k8s.ps1 (#616/#633).
+#
+# What keeps an embed honest is the drift guard, not the comment:
+#   * scripts/tests/install-client-helm.bats replays the contract's golden
+#     vectors through _machine_training_resources, so a constant edited here
+#     and nowhere else reddens immediately;
+#   * .github/workflows/envelope-contract-drift.yml re-checks the vendored
+#     fixture against client-runtime at scripts/.client-runtime-ref.
+#
+# Regenerate after an upstream contract change:
+#   scripts/gen-envelope-embed.sh
+_TB_ENVELOPE_CONTRACT_VERSION=1
+_TB_ENVELOPE_OVERHEAD_CPU_MILLI=1000
+_TB_ENVELOPE_OVERHEAD_MEM_BYTES=3221225472
+_TB_ENVELOPE_FLOOR_CPU_MILLI=1000
+_TB_ENVELOPE_FLOOR_MEM_BYTES=2147483648
+# ── end generated ───────────────────────────────────────────────────────────
+
 # Echo "cpu=N,memory=MGi" sized to the largest node, or nothing when the
-# cluster is unreadable / the machine cannot give a run the 1-CPU/2-GiB floor.
+# cluster is unreadable / the machine cannot give a run the contract floor.
+#
+# The anchor is the contract's ANCHOR_LARGEST: a training pod takes all its
+# resources from ONE node, so this question is single-node by nature and must
+# never sum across the cluster. The tie-break is (cpu, memory) — the contract's
+# order, and a fix: this function used to rank nodes (memory, cpu) while cli's
+# nodeLarger ranked them (cpu, memory), so on a cluster of 8c/16Gi + 4c/32Gi
+# the installer and `tracebloc resources set` anchored on DIFFERENT nodes and
+# disagreed about the same machine. Nobody chose that; it fell out of two
+# independent implementations. Installer-provisioned clusters are single-node
+# k3d, where the orders cannot differ, so this is a no-op in the field.
 _machine_training_resources() {
   has kubectl || return 0
-  local lines cpu mem cpu_m mem_b best_cpu=0 best_mem=0
+  local lines cpu mem cpu_m mem_b best_cpu=0 best_mem=0 seen=0
   # Bounded: a wedged API server must degrade to the static default, never
   # hang values generation (Bugbot).
   lines="$(kubectl get nodes --request-timeout=10s -o jsonpath='{range .items[*]}{.status.allocatable.cpu}{" "}{.status.allocatable.memory}{"\n"}{end}' 2>/dev/null)" || return 0
@@ -100,15 +140,23 @@ _machine_training_resources() {
     cpu_m="$(_cpu_to_milli "$cpu")"
     mem_b="$(_mem_to_bytes "$mem")"
     [[ -n "$cpu_m" && -n "$mem_b" ]] || continue
-    if (( mem_b > best_mem )) || { (( mem_b == best_mem )) && (( cpu_m > best_cpu )); }; then
-      best_mem=$mem_b
+    if (( seen == 0 )) || (( cpu_m > best_cpu )) \
+       || { (( cpu_m == best_cpu )) && (( mem_b > best_mem )); }; then
       best_cpu=$cpu_m
+      best_mem=$mem_b
     fi
+    seen=1
   done <<< "$lines"
-  (( best_mem > 0 )) || return 0
-  local run_cpu_m=$(( best_cpu - 1000 ))            # − ~1 CPU platform overhead
-  local run_mem_b=$(( best_mem - 3 * 1024 * 1024 * 1024 ))  # − ~3 GiB overhead
-  { (( run_cpu_m >= 1000 )) && (( run_mem_b >= 2 * 1024 * 1024 * 1024 )); } || return 0
+  (( seen == 1 )) || return 0
+  local run_cpu_m=$(( best_cpu - _TB_ENVELOPE_OVERHEAD_CPU_MILLI ))
+  local run_mem_b=$(( best_mem - _TB_ENVELOPE_OVERHEAD_MEM_BYTES ))
+  (( run_cpu_m < 0 )) && run_cpu_m=0
+  (( run_mem_b < 0 )) && run_mem_b=0
+  # Below the contract floor the machine is NOT VIABLE. Emit nothing and let
+  # the caller fall back — see _training_resources for why that fallback is
+  # itself a known bug (backend#2220, fixed separately so it stays revertable).
+  { (( run_cpu_m >= _TB_ENVELOPE_FLOOR_CPU_MILLI )) \
+    && (( run_mem_b >= _TB_ENVELOPE_FLOOR_MEM_BYTES )); } || return 0
   printf 'cpu=%d,memory=%dGi' "$(( run_cpu_m / 1000 ))" "$(( run_mem_b / 1024 / 1024 / 1024 ))"
 }
 
