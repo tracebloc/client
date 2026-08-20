@@ -138,7 +138,7 @@ TB_TELEMETRY_SOURCES="install.sh install-k8s.sh common.sh preflight.sh detect-gp
 #     ","tracebloc.install.injected":"yes",…
 #
 # — a forged attribute AND one record split across two lines of a `.jsonl` spool,
-# so #1906's forwarder reads two malformed events. It is the one shape the
+# so the transport (backend#2217) reads two malformed events. It is the one shape the
 # "nowhere for a path to go" argument does not cover, because the value that
 # lands is not a path. `[[ $v =~ $RE ]]` anchors at end of STRING (POSIX
 # regexec, no REG_NEWLINE), so the same regex now refuses it. Reproduced on all
@@ -753,11 +753,24 @@ _telemetry_spool_path() {
 
 # _telemetry_deliver JSON — THE TRANSPORT SEAM (tracebloc/backend#1905).
 #
-# Today: the install log, plus a bounded local spool the forwarder (#1906) can
-# drain once the ingest endpoint exists. Nothing is posted anywhere, because the
-# endpoint the 17 Aug decision (rfcs#28) put this on does not exist yet — and
-# building a client against an endpoint whose contract is still being written is
-# how you ship two of them.
+# Today: the install log, plus a bounded local spool. Nothing is posted anywhere
+# yet; the delivery half is backend#2217.
+#
+# NOT #1906, AND THAT CORRECTION MATTERS MORE THAN THE TICKET NUMBER. Four
+# comments in this file used to say #1906's forwarder would read or drain these
+# files.
+# It cannot. #1906 is an OpenTelemetry Collector running as a pod INSIDE the
+# customer's Kubernetes cluster, reading container stdout through a `filelog`
+# receiver. Neither spool this function writes is container stdout and neither is
+# reachable from a pod: `$HOST_DATA_DIR/telemetry/pending.jsonl` and the
+# `$TMPDIR` fallback are both files on the operator's own machine, written before
+# — and often instead of — any cluster existing at all. The pre-log failures this
+# fallback exists for (`validate_config`, `early_data_dir_guard`) happen when
+# there is no cluster to run a Collector in.
+#
+# So the host transport is its own piece of work, owned by backend#2217, and the
+# reason it was unowned for a while is precisely that these comments pointed at a
+# ticket that could never deliver it.
 #
 # Everything before this function is finished. This function is the change.
 # _telemetry_fallback_dir — a directory whose contents survive this install.
@@ -850,7 +863,9 @@ _telemetry_deliver() {
   # was only supposed to watch. Found by Bugbot on client#747; reproduced.
   #
   # So: spool INTO the data dir only when it already exists — and when it does
-  # not, into a temp file rather than nowhere. #1906's forwarder reads both.
+  # not, into a temp file rather than nowhere. backend#2217's transport reads
+  # both — NOT #1906's Collector, which is a pod and can reach neither file. See
+  # the note on this function.
   #
   # AND A FAILED WRITE FALLS THROUGH, it does not return. Both of these steps
   # used to be `|| return 0`, which put the fallback out of reach in the one case
@@ -901,8 +916,14 @@ _telemetry_deliver() {
 
 # _telemetry_trim_spool SPOOL — keep the data-dir spool bounded.
 #
-# Bounded because nothing drains it until #1906, and an unbounded append on a
-# customer's disk is a defect we would be shipping on purpose. Split out of
+# Bounded because nothing drains it until backend#2217, and an unbounded append
+# on a customer's disk is a defect we would be shipping on purpose. The trim is
+# `tail -n`, i.e. DROP-OLDEST — and that is deliberately NOT what RFC-BACKEND-1872
+# D7's overflow row now says. D7 was amended to drop-newest because
+# `exporterhelper` sheds at the entrance and offers nothing else, which is a
+# constraint on the edge Collector's queue, not a preference. This spool is our
+# own code and can do what D7 originally wanted, so it does: the newest records
+# describe the failure in progress. Split out of
 # _telemetry_deliver so the append's success is the last thing in that branch:
 # inline, the trim sat between the append and the `return 0`, which is what made
 # it easy to write a `|| return` in here that silently skipped the fallback
