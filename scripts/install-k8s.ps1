@@ -4053,6 +4053,12 @@ $script:TbEnvelopeFloorCpuMilli    = 1000
 $script:TbEnvelopeFloorMemBytes    = 2147483648
 # ── end generated ───────────────────────────────────────────────────────────
 
+# Set by Get-TrainingResources when the machine is readable but below the
+# training floor. The WARNING lives in the caller, so Get-TrainingResources keeps
+# returning nothing but the size -- its Pester suite compares the whole return.
+$script:TbTrainingUndersized    = $false
+$script:TbTrainingUnschedulable = $false
+
 # Who chose the training size Get-TrainingResources reports: installer | user |
 # unknown (backend#2220). Bash twin: _resolve_training_size / _training_provenance.
 #
@@ -4194,6 +4200,29 @@ function Get-TrainingResources {
       # fixed separately so it stays revertable).
       if ($runCpuM -ge $script:TbEnvelopeFloorCpuMilli -and $runMemB -ge $script:TbEnvelopeFloorMemBytes) {
         return "cpu=$([math]::Floor($runCpuM / 1000)),memory=$([math]::Floor($runMemB / 1GB))Gi"
+      }
+      # Below the contract floor. This used to fall straight through to the
+      # cpu=2,memory=8Gi literal, which on a ~4 GiB machine is LARGER THAN THE
+      # MACHINE — so every training pod stayed Pending forever. And this
+      # installer reaches exactly those machines: the memory preflight only WARNS
+      # on Windows (it hard-fails on Linux), while its own note says a job's
+      # limit is ~8 GiB+. So write the honest remainder when it is a requestable
+      # shape: it FITS, so a run can be scheduled and fail for a reason instead
+      # of hanging (backend#2220).
+      #
+      # $seen guards this: with no parseable node, bestCpuM is 0 and the
+      # remainder is meaningless — that is the unreadable case, which keeps the
+      # literal because we genuinely cannot do better.
+      if ($seen) {
+        $cores = [long][math]::Floor($runCpuM / 1000)
+        $gib   = [long][math]::Floor($runMemB / 1GB)
+        if ($cores -ge 1 -and $gib -ge 1) {
+          $script:TbTrainingUndersized = $true
+          return "cpu=$cores,memory=${gib}Gi"
+        }
+        # Not even a requestable shape (cpu=0 is not a training request), so
+        # there is no honest number to write. Keep the literal; the caller warns.
+        $script:TbTrainingUnschedulable = $true
       }
     }
   } catch {}
@@ -5025,6 +5054,15 @@ function Install-ClientHelm {
   $carried = Get-CarriedTrainingValues
   $trainingSize = Get-TrainingResources -Carried $carried -CarriedResolved
   $trainingProvenance = Get-TrainingProvenance -Carried $carried -CarriedResolved
+  # Mirrors the bash twin's warning, and lives HERE for the same reason: the
+  # sizing functions' returns are compared whole by their tests.
+  if ($script:TbTrainingUndersized) {
+    Warn "This machine is below the size a training run wants: $trainingSize is all that is left after the platform's reservation."
+    Hint "The client will install and run, but training jobs may be killed for memory. ~16 GB of RAM is the recommendation for training locally."
+  } elseif ($script:TbTrainingUnschedulable) {
+    Warn "This machine is too small to host a training run at all; keeping the default $trainingSize."
+    Hint "Training jobs will stay Pending until this edge has more memory -- the client itself will still run, ingest and report."
+  }
   Log "Training size: $trainingSize"
   $envBlock += @"
   RESOURCE_LIMITS: "$trainingSize"

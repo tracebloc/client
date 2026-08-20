@@ -1561,10 +1561,19 @@ Describe "Get-TrainingResources" {
     }
     Get-TrainingResources | Should -Be "cpu=11,memory=3Gi"
   }
-  It "below-floor machine falls back to the static default" {
+  # CHANGED BEHAVIOR (backend#2220). This asserted that a 2c/4Gi machine gets
+  # "cpu=2,memory=8Gi" -- an envelope LARGER than the machine, on which no
+  # training pod can ever schedule. That was the bug, pinned as if it were the
+  # contract. It now gets the honest remainder, which fits.
+  #
+  # The old expectation is not lost: "unreadable cluster falls back to the static
+  # default" just below still covers the case where the literal IS right, because
+  # we genuinely cannot see the machine. Cannot-see vs too-small is the whole
+  # distinction this change introduces; they used to be the same answer.
+  It "below-floor machine gets the honest remainder, not an unschedulable literal" {
     Mock helm { $global:LASTEXITCODE = 1; "" }
     Mock kubectl { $global:LASTEXITCODE = 0; @("2 4Gi") }
-    Get-TrainingResources | Should -Be "cpu=2,memory=8Gi"
+    Get-TrainingResources | Should -Be "cpu=1,memory=1Gi"
   }
   It "unreadable cluster falls back to the static default" {
     Mock helm { $global:LASTEXITCODE = 1; "" }
@@ -1588,7 +1597,16 @@ Describe "Envelope contract golden vectors (backend#2220)" {
     $script:ContractPath = Join-Path $PSScriptRoot "fixtures/envelope_contract.json"
     $script:Contract = Get-Content $script:ContractPath -Raw | ConvertFrom-Json
   }
-  BeforeEach { $script:TB_NAMESPACE = "tracebloc"; $env:TRACEBLOC_TRAINING_RESOURCES = $null }
+  BeforeEach {
+    $script:TB_NAMESPACE = "tracebloc"
+    $env:TRACEBLOC_TRAINING_RESOURCES = $null
+    # backend#2220: Get-TrainingResources SETS these, so they must be cleared
+    # between tests or a previous undersized case would leak a $true into the
+    # next assertion. Folded into this Describe's ONE BeforeEach -- Pester 6
+    # allows only one per block.
+    $script:TbTrainingUndersized    = $false
+    $script:TbTrainingUnschedulable = $false
+  }
   AfterEach  { $env:TRACEBLOC_TRAINING_RESOURCES = $null }
 
   It "the vendored contract is readable and carries vectors" {
@@ -1611,12 +1629,32 @@ Describe "Envelope contract golden vectors (backend#2220)" {
     Mock helm { $global:LASTEXITCODE = 1; "" }
     $failures = @()
     foreach ($v in $script:Contract.vectors.single_node) {
-      # A machine below the contract floor, or with unparseable allocatable,
-      # makes the installer emit nothing and fall through to the literal.
-      $want = if ($null -eq $v.expected -or -not $v.expected.viable) {
-        "cpu=2,memory=8Gi"
-      } else {
+      # What the installer must PRINT for this vector (backend#2220):
+      #
+      #   unparseable        -> the literal. We cannot read the machine, so the
+      #                         historical default is the best available answer.
+      #   viable             -> the contract's rendering.
+      #   below the floor    -> the contract's rendering ANYWAY, as long as it is
+      #                         a requestable shape (>= 1 core and >= 1 GiB).
+      #                         It fits; the literal would not.
+      #   below even that    -> the literal, because cpu=0 is not a request.
+      #
+      # This used to collapse every non-viable vector onto the literal, which is
+      # what let the sub-8GiB bug live inside a passing replay. Now the
+      # non-viable vectors are checked against the contract's own numbers, so
+      # the installer and the accessor agree on the small machines too.
+      $rendered = if ($null -ne $v.expected) {
         "cpu=$($v.expected.render_gi.cpu),memory=$($v.expected.render_gi.memory)"
+      } else { $null }
+      $want = if ($null -eq $v.expected) {
+        "cpu=2,memory=8Gi"
+      } elseif ($v.expected.viable) {
+        $rendered
+      } elseif ([int]$v.expected.render_gi.cpu -ge 1 -and
+                [int]($v.expected.render_gi.memory -replace 'Gi$','') -ge 1) {
+        $rendered
+      } else {
+        "cpu=2,memory=8Gi"
       }
       $line = "$($v.allocatable_cpu) $($v.allocatable_memory)"
       Mock kubectl {
@@ -1779,6 +1817,57 @@ Describe "Envelope contract golden vectors (backend#2220)" {
     Mock kubectl { $global:LASTEXITCODE = 1; "" }
     Get-TrainingResources  | Should -Be "cpu=2,memory=8Gi"
     Get-TrainingProvenance | Should -Be "installer"
+  }
+
+  # ── undersized machines (backend#2220) ─────────────────────────────────────
+  # This used to return cpu=2,memory=8Gi for a machine with ~4 GiB allocatable —
+  # an envelope larger than the machine, on which no pod can ever schedule. The
+  # Windows memory preflight only WARNS (Linux hard-fails), so this installer
+  # reaches exactly those machines.
+
+  It "undersized: a below-floor machine gets the honest remainder, not the literal" {
+    Mock helm { $global:LASTEXITCODE = 1; "" }
+    Mock kubectl {
+      if ($args -contains "--request-timeout=10s") { $global:LASTEXITCODE = 0; @("2 4Gi") }
+      else { $global:LASTEXITCODE = 1; "" }
+    }
+    # 4 GiB - 3 GiB = 1 GiB, below the 2 GiB floor but still a requestable shape.
+    Get-TrainingResources | Should -Be "cpu=1,memory=1Gi"
+    $script:TbTrainingUndersized | Should -BeTrue
+    $script:TbTrainingUnschedulable | Should -BeFalse
+  }
+
+  It "undersized: a machine too small for even 1c/1Gi keeps the literal and flags it" {
+    Mock helm { $global:LASTEXITCODE = 1; "" }
+    Mock kubectl {
+      if ($args -contains "--request-timeout=10s") { $global:LASTEXITCODE = 0; @("500m 512Mi") }
+      else { $global:LASTEXITCODE = 1; "" }
+    }
+    Get-TrainingResources | Should -Be "cpu=2,memory=8Gi"
+    $script:TbTrainingUnschedulable | Should -BeTrue
+    $script:TbTrainingUndersized | Should -BeFalse
+  }
+
+  It "undersized: an UNREADABLE cluster keeps the literal and flags NOTHING" {
+    # The distinction that makes this change safe: cannot-see is not too-small.
+    # With no readable node the literal is still the best available answer, and
+    # warning about machine size would be a fabrication.
+    Mock helm { $global:LASTEXITCODE = 1; "" }
+    Mock kubectl { $global:LASTEXITCODE = 1; "" }
+    Get-TrainingResources | Should -Be "cpu=2,memory=8Gi"
+    $script:TbTrainingUndersized | Should -BeFalse
+    $script:TbTrainingUnschedulable | Should -BeFalse
+  }
+
+  It "undersized: a viable machine flags nothing" {
+    Mock helm { $global:LASTEXITCODE = 1; "" }
+    Mock kubectl {
+      if ($args -contains "--request-timeout=10s") { $global:LASTEXITCODE = 0; @("8 32Gi") }
+      else { $global:LASTEXITCODE = 1; "" }
+    }
+    Get-TrainingResources | Should -Be "cpu=7,memory=29Gi"
+    $script:TbTrainingUndersized | Should -BeFalse
+    $script:TbTrainingUnschedulable | Should -BeFalse
   }
 
   It "a node with unparseable memory does not beat a valid one" {

@@ -1016,14 +1016,72 @@ setup() {
   [ "$output" = "cpu=11,memory=3Gi" ] || return 1   # 12−1 CPU; 6.76−3 GiB floored
 }
 
-@test "training size: below-floor machine falls back to the static default" {
+# CHANGED BEHAVIOR (backend#2220). This test used to assert that a 2c/4Gi machine
+# gets "cpu=2,memory=8Gi" — i.e. an envelope LARGER than the machine, on which no
+# training pod can ever schedule. That was the bug, pinned as if it were the
+# contract. It now gets the honest remainder, which fits.
+#
+# The old expectation is not lost, it moved: "unreadable cluster keeps the static
+# default" below covers the case where the literal IS still right, because we
+# genuinely cannot see the machine. That distinction — cannot-see vs too-small —
+# is the whole change; the two used to collapse into the same empty answer.
+@test "training size: below-floor machine gets the honest remainder, not an unschedulable literal" {
   TB_NAMESPACE=tracebloc
   unset TRACEBLOC_TRAINING_RESOURCES
   helm() { return 1; }
   has() { return 0; }
   kubectl() { printf '2 4Gi\n'; }        # 4−3 GiB = 1 GiB < the 2 GiB floor
   run _training_resources
+  [ "$output" = "cpu=1,memory=1Gi" ] || return 1
+}
+
+@test "training size: a below-floor machine is flagged undersized for the caller to warn" {
+  TB_NAMESPACE=tracebloc
+  unset TRACEBLOC_TRAINING_RESOURCES
+  helm() { return 1; }
+  has() { return 0; }
+  kubectl() { printf '2 4Gi\n'; }
+  _resolve_training_size
+  [ "$_TB_TRAINING_UNDERSIZED" = "1" ] || return 1
+  [ "$_TB_TRAINING_UNSCHEDULABLE" = "0" ] || return 1
+}
+
+@test "training size: the resolver itself never emits a warning (it would corrupt the value)" {
+  TB_NAMESPACE=tracebloc
+  unset TRACEBLOC_TRAINING_RESOURCES
+  helm() { return 1; }
+  has() { return 0; }
+  kubectl() { printf '2 4Gi\n'; }
+  # $(...) capture is exactly how the values generation reads this, so any warn
+  # text emitted by the resolver would land inside RESOURCE_LIMITS.
+  local captured
+  captured="$(_training_resources)"
+  [ "$captured" = "cpu=1,memory=1Gi" ] || return 1
+}
+
+@test "training size: an unreadable cluster still keeps the static default" {
+  TB_NAMESPACE=tracebloc
+  unset TRACEBLOC_TRAINING_RESOURCES
+  helm() { return 1; }
+  has() { return 0; }
+  kubectl() { return 1; }   # nodes unreadable — we cannot do better than history
+  run _training_resources
   [ "$output" = "cpu=2,memory=8Gi" ] || return 1
+}
+
+@test "training size: a machine too small for even a 1c/1Gi run keeps the literal and flags it" {
+  TB_NAMESPACE=tracebloc
+  unset TRACEBLOC_TRAINING_RESOURCES
+  helm() { return 1; }
+  has() { return 0; }
+  # 512Mi allocatable: the remainder is not a requestable shape (cpu=0), so
+  # there is no honest number to write. Reachable only where the memory
+  # preflight warns instead of failing (macOS/Windows).
+  kubectl() { printf '500m 512Mi\n'; }
+  _resolve_training_size
+  [ "$_TB_TRAINING_SIZE" = "cpu=2,memory=8Gi" ] || return 1
+  [ "$_TB_TRAINING_UNSCHEDULABLE" = "1" ] || return 1
+  [ "$_TB_TRAINING_UNDERSIZED" = "0" ] || return 1
 }
 
 # ── envelope contract: the golden-vector replay (backend#2220) ────────────────

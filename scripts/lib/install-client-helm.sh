@@ -160,6 +160,65 @@ _machine_training_resources() {
   printf 'cpu=%d,memory=%dGi' "$(( run_cpu_m / 1000 ))" "$(( run_mem_b / 1024 / 1024 / 1024 ))"
 }
 
+# Echo "<size>|viable" or "<size>|undersized" for the largest node, or NOTHING
+# when the cluster is unreadable (backend#2220).
+#
+# The distinction this adds is the whole point: "I cannot see the machine" and
+# "I can see it and it is too small" used to collapse into the same empty
+# answer, so both fell through to the cpu=2,memory=8Gi literal. On a machine
+# with ~4 GiB allocatable that literal is LARGER THAN THE MACHINE, so every
+# training pod stays Pending forever -- and preflight lets exactly those
+# machines install: it hard-fails below 5 GB on Linux and only WARNS on
+# macOS/Windows (PF_MIN_MEM_GB=5), while its own comment notes a job's limit is
+# ~8 GiB+. So the permitted band and the unschedulable band overlap.
+#
+# Unreadable is still unreadable and still gets the literal -- we genuinely
+# cannot do better than the historical default there. Only the "read it, it is
+# small" case changes, and it changes to a number that FITS.
+_machine_training_ceiling() {
+  has kubectl || return 0
+  local lines cpu mem cpu_m mem_b best_cpu=0 best_mem=0 seen=0
+  lines="$(kubectl get nodes --request-timeout=10s -o jsonpath='{range .items[*]}{.status.allocatable.cpu}{" "}{.status.allocatable.memory}{"\n"}{end}' 2>/dev/null)" || return 0
+  [[ -n "$lines" ]] || return 0
+  while read -r cpu mem; do
+    [[ -n "$cpu" && -n "$mem" ]] || continue
+    cpu_m="$(_cpu_to_milli "$cpu")"
+    mem_b="$(_mem_to_bytes "$mem")"
+    [[ -n "$cpu_m" && -n "$mem_b" ]] || continue
+    if (( seen == 0 )) || (( cpu_m > best_cpu )) \
+       || { (( cpu_m == best_cpu )) && (( mem_b > best_mem )); }; then
+      best_cpu=$cpu_m
+      best_mem=$mem_b
+    fi
+    seen=1
+  done <<< "$lines"
+  (( seen == 1 )) || return 0
+
+  local run_cpu_m=$(( best_cpu - _TB_ENVELOPE_OVERHEAD_CPU_MILLI ))
+  local run_mem_b=$(( best_mem - _TB_ENVELOPE_OVERHEAD_MEM_BYTES ))
+  (( run_cpu_m < 0 )) && run_cpu_m=0
+  (( run_mem_b < 0 )) && run_mem_b=0
+
+  local cores=$(( run_cpu_m / 1000 ))
+  local gib=$(( run_mem_b / 1024 / 1024 / 1024 ))
+
+  if (( run_cpu_m >= _TB_ENVELOPE_FLOOR_CPU_MILLI )) \
+     && (( run_mem_b >= _TB_ENVELOPE_FLOOR_MEM_BYTES )); then
+    printf 'cpu=%d,memory=%dGi|viable' "$cores" "$gib"
+    return 0
+  fi
+
+  # Below the contract floor. Report the honest remainder only when it is a
+  # REQUESTABLE shape -- at least one whole core and one whole GiB. Below that
+  # there is no honest number to write (cpu=0 is not a training request), so say
+  # nothing and let the caller keep the literal and warn hard. Reachable only on
+  # macOS/Windows, where the memory preflight warns instead of failing.
+  if (( cores >= 1 && gib >= 1 )); then
+    printf 'cpu=%d,memory=%dGi|undersized' "$cores" "$gib"
+  fi
+  return 0
+}
+
 # The installed release's RESOURCE_PROVENANCE (nested under env:), or nothing.
 # Same awk shape as _existing_training_resources — `helm get values` strips the
 # quotes our values file writes (the #200 lesson).
@@ -195,6 +254,12 @@ _existing_training_provenance() {
 _resolve_training_size() {
   _TB_TRAINING_SIZE=""
   _TB_TRAINING_PROVENANCE=""
+  # Set when the machine is readable but below the training floor. The WARNING
+  # lives in the caller, never here: _training_resources / _training_provenance
+  # are captured with $(...) and their tests compare the whole output, so a warn
+  # emitted from this function would corrupt every one of them.
+  _TB_TRAINING_UNDERSIZED=0
+  _TB_TRAINING_UNSCHEDULABLE=0
 
   # 1. An explicit install-time override IS a human choice, same as the CLI's.
   if [[ -n "${TRACEBLOC_TRAINING_RESOURCES:-}" ]]; then
@@ -228,13 +293,29 @@ _resolve_training_size() {
   fi
 
   # 2. Sized to this machine, or 3. the static default — both are OUR choice.
-  local sized
-  sized="$(_machine_training_resources)"
-  if [[ -n "$sized" ]]; then
-    _TB_TRAINING_SIZE="$sized"
-  else
-    _TB_TRAINING_SIZE="$_TRAINING_DEFAULT"
-  fi
+  local ceiling
+  ceiling="$(_machine_training_ceiling)"
+  case "$ceiling" in
+    *'|viable')
+      _TB_TRAINING_SIZE="${ceiling%|viable}"
+      ;;
+    *'|undersized')
+      # The machine is real and readable but below the training floor. Write the
+      # honest remainder: it FITS, which the 8 GiB literal does not, so a run can
+      # at least be scheduled and fail for a reason instead of sitting Pending.
+      _TB_TRAINING_SIZE="${ceiling%|undersized}"
+      _TB_TRAINING_UNDERSIZED=1
+      ;;
+    *)
+      # Either the cluster is unreadable (we cannot do better than the historical
+      # default) or the remainder is not even a requestable shape. Keep the
+      # literal, and let the caller warn in the second case.
+      _TB_TRAINING_SIZE="$_TRAINING_DEFAULT"
+      if has kubectl && [[ -n "$(kubectl get nodes --request-timeout=10s -o name 2>/dev/null)" ]]; then
+        _TB_TRAINING_UNSCHEDULABLE=1
+      fi
+      ;;
+  esac
   _TB_TRAINING_PROVENANCE="installer"
   return 0
 }
@@ -1517,6 +1598,16 @@ install_client_helm() {
   training_size="$_TB_TRAINING_SIZE"
   training_provenance="$_TB_TRAINING_PROVENANCE"
   log "Training size: ${training_size} (adjust any time with 'tracebloc resources set')"
+  # The warning belongs HERE, not in the resolver: the resolver's output is
+  # captured with $(...) by _training_resources / _training_provenance, so a warn
+  # emitted there would end up inside the value.
+  if (( ${_TB_TRAINING_UNDERSIZED:-0} == 1 )); then
+    warn "This machine is below the size a training run wants: ${training_size} is all that is left after the platform's reservation."
+    hint "The client will install and run, but training jobs may be killed for memory. ~16 GB of RAM is the recommendation for training locally."
+  elif (( ${_TB_TRAINING_UNSCHEDULABLE:-0} == 1 )); then
+    warn "This machine is too small to host a training run at all; keeping the default ${training_size}."
+    hint "Training jobs will stay Pending until this edge has more memory — the client itself will still run, ingest and report."
+  fi
 
   cat <<EOF > "$values_file"
 # ============================================================
