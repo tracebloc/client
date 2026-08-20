@@ -68,11 +68,27 @@ _mem_to_bytes() {
   esac
 }
 
-# The installed release's RESOURCE_LIMITS (nested under env:), or nothing.
+# ONE lookup of the installed release's carried training values, echoing
+# "<size>|<provenance>" or NOTHING (backend#2220, Bugbot on #768).
+#
+# The two used to be read by two independent `helm get values` calls. That is
+# fail-unsafe in BOTH directions, and each installer found a different half of
+# it: on PowerShell a failed provenance read reported `installer` for a carried
+# size, inviting a ladder to overrule a human; on bash a failed provenance read
+# reported `unknown`, which consumers treat as a human pin — so an
+# installer-sized edge was PERMANENTLY STRANDED as a deliberate choice, the very
+# outcome scope bullet 4 exists to prevent.
+#
+# One lookup removes both: either it succeeds and the size and the marker come
+# from the same read, or it fails and NOTHING is carried, so the caller machine-
+# sizes and `installer` is then the correct verdict. They cannot disagree.
+#
 # Handles both the quoted form our values file writes and the unquoted form
 # helm re-serializes (`helm get values` strips quotes — the #200 lesson).
-_existing_training_resources() {
-  local ns="${TB_NAMESPACE:-}" out
+# Provenance is normalised here: anything unrecognised, including absent, is
+# `unknown`, never a guess.
+_existing_training_values() {
+  local ns="${TB_NAMESPACE:-}" out size prov
   [[ -n "$ns" ]] || return 0
   # helm get has no request timeout, so gate it behind a BOUNDED probe: a
   # wedged API degrades to machine sizing / the static default instead of
@@ -80,10 +96,31 @@ _existing_training_resources() {
   # is no release to carry — skip the helm call entirely.
   kubectl get namespace "$ns" --request-timeout=5s >/dev/null 2>&1 || return 0
   out="$(helm get values "$ns" -n "$ns" 2>/dev/null)" || return 0
-  printf '%s\n' "$out" | awk '
+  [[ -n "$out" ]] || return 0
+  size="$(printf '%s\n' "$out" | awk '
     /^[[:space:]]*RESOURCE_LIMITS:/ {
       sub(/^[^:]*:[[:space:]]*/, ""); gsub(/"/, ""); print; exit
-    }'
+    }')"
+  # No carried size means nothing to attribute; the caller sizes the machine.
+  [[ -n "$size" ]] || return 0
+  prov="$(printf '%s\n' "$out" | awk '
+    /^[[:space:]]*RESOURCE_PROVENANCE:/ {
+      sub(/^[^:]*:[[:space:]]*/, ""); gsub(/"/, ""); print; exit
+    }')"
+  case "$prov" in
+    installer|user) ;;
+    *) prov="unknown" ;;
+  esac
+  printf '%s|%s' "$size" "$prov"
+}
+
+# The installed release's RESOURCE_LIMITS, or nothing. Thin reader over the one
+# shared lookup, kept because it is the tested, readable entry point.
+_existing_training_resources() {
+  local v
+  v="$(_existing_training_values)"
+  [[ -n "$v" ]] || return 0
+  printf '%s' "${v%%|*}"
 }
 
 # ── envelope contract (GENERATED — do not hand-edit) ─────────────────────────
@@ -160,28 +197,195 @@ _machine_training_resources() {
   printf 'cpu=%d,memory=%dGi' "$(( run_cpu_m / 1000 ))" "$(( run_mem_b / 1024 / 1024 / 1024 ))"
 }
 
-# The per-run training size for the generated values ("cpu=N,memory=MGi").
-_training_resources() {
-  if [[ -n "${TRACEBLOC_TRAINING_RESOURCES:-}" ]]; then
-    printf '%s' "$TRACEBLOC_TRAINING_RESOURCES"
+# Echo "<size>|viable" or "<size>|undersized" for the largest node, or NOTHING
+# when the cluster is unreadable (backend#2220).
+#
+# The distinction this adds is the whole point: "I cannot see the machine" and
+# "I can see it and it is too small" used to collapse into the same empty
+# answer, so both fell through to the cpu=2,memory=8Gi literal. On a machine
+# with ~4 GiB allocatable that literal is LARGER THAN THE MACHINE, so every
+# training pod stays Pending forever -- and preflight lets exactly those
+# machines install: it hard-fails below 5 GB on Linux and only WARNS on
+# macOS/Windows (PF_MIN_MEM_GB=5), while its own comment notes a job's limit is
+# ~8 GiB+. So the permitted band and the unschedulable band overlap.
+#
+# Unreadable is still unreadable and still gets the literal -- we genuinely
+# cannot do better than the historical default there. Only the "read it, it is
+# small" case changes, and it changes to a number that FITS.
+_machine_training_ceiling() {
+  has kubectl || return 0
+  local lines cpu mem cpu_m mem_b best_cpu=0 best_mem=0 seen=0
+  lines="$(kubectl get nodes --request-timeout=10s -o jsonpath='{range .items[*]}{.status.allocatable.cpu}{" "}{.status.allocatable.memory}{"\n"}{end}' 2>/dev/null)" || return 0
+  [[ -n "$lines" ]] || return 0
+  while read -r cpu mem; do
+    [[ -n "$cpu" && -n "$mem" ]] || continue
+    cpu_m="$(_cpu_to_milli "$cpu")"
+    mem_b="$(_mem_to_bytes "$mem")"
+    [[ -n "$cpu_m" && -n "$mem_b" ]] || continue
+    if (( seen == 0 )) || (( cpu_m > best_cpu )) \
+       || { (( cpu_m == best_cpu )) && (( mem_b > best_mem )); }; then
+      best_cpu=$cpu_m
+      best_mem=$mem_b
+    fi
+    seen=1
+  done <<< "$lines"
+  (( seen == 1 )) || return 0
+
+  local run_cpu_m=$(( best_cpu - _TB_ENVELOPE_OVERHEAD_CPU_MILLI ))
+  local run_mem_b=$(( best_mem - _TB_ENVELOPE_OVERHEAD_MEM_BYTES ))
+  (( run_cpu_m < 0 )) && run_cpu_m=0
+  (( run_mem_b < 0 )) && run_mem_b=0
+
+  local cores=$(( run_cpu_m / 1000 ))
+  local gib=$(( run_mem_b / 1024 / 1024 / 1024 ))
+
+  if (( run_cpu_m >= _TB_ENVELOPE_FLOOR_CPU_MILLI )) \
+     && (( run_mem_b >= _TB_ENVELOPE_FLOOR_MEM_BYTES )); then
+    printf 'cpu=%d,memory=%dGi|viable' "$cores" "$gib"
     return 0
   fi
-  local prev
-  prev="$(_existing_training_resources)"
+
+  # Below the contract floor. Report the honest remainder when it is a
+  # REQUESTABLE shape -- at least one whole core and one whole GiB. Reachable
+  # only on macOS/Windows, where the memory preflight warns instead of failing.
+  if (( cores >= 1 && gib >= 1 )); then
+    printf 'cpu=%d,memory=%dGi|undersized' "$cores" "$gib"
+    return 0
+  fi
+
+  # A node WAS parsed and the remainder is not even a requestable shape (cpu=0 is
+  # not a training request). Reported as its own verdict rather than as silence,
+  # because silence here is indistinguishable from "I could not read the
+  # cluster" -- and those must not be treated alike. Warning that a machine is
+  # too small when we never managed to measure it is a fabrication, and the
+  # caller used to do exactly that by re-probing `kubectl get nodes -o name`:
+  # any listable node, including one whose allocatable would not parse or which
+  # is not Ready yet, tripped the hard warning. The PowerShell twin only flagged
+  # it after a PARSED node, so the two disagreed on the same cluster -- the
+  # divergence class client#766 exists to remove (Bugbot on #768).
+  printf '|unschedulable'
+  return 0
+}
+
+# The installed release's RESOURCE_PROVENANCE (nested under env:), or nothing.
+# Same awk shape as _existing_training_resources — `helm get values` strips the
+# quotes our values file writes (the #200 lesson).
+# The installed release's RESOURCE_PROVENANCE, or nothing. Thin reader over the
+# same shared lookup, so it can never disagree with the size beside it.
+_existing_training_provenance() {
+  local v
+  v="$(_existing_training_values)"
+  [[ -n "$v" ]] || return 0
+  printf '%s' "${v##*|}"
+}
+
+# Resolve the per-run training size AND who chose it, in one pass.
+#
+# Split out of _training_resources (which is now a thin wrapper over it) because
+# the two answers come from the same branch decision and the caller needs both.
+# Deriving them separately would mean either running the cluster probes twice or
+# re-implementing the branch logic beside itself — the exact duplication
+# backend#2220 exists to delete.
+#
+# Sets, in the CALLER's scope (so a subshell cannot swallow them):
+#   _TB_TRAINING_SIZE       "cpu=N,memory=MGi"
+#   _TB_TRAINING_PROVENANCE installer | user | unknown
+#
+# Why provenance is needed at all: RESOURCE_* has no unset state once helm's
+# --reset-then-reuse-values has seen it, so an installer-written value and a
+# deliberate `tracebloc resources set` are indistinguishable once the value
+# differs from the historic literal. Without a marker, any future ladder that
+# re-derives sizes would silently overrule human choices. With one, it can
+# re-derive `installer` values and leave the rest alone.
+_resolve_training_size() {
+  _TB_TRAINING_SIZE=""
+  _TB_TRAINING_PROVENANCE=""
+  # Set when the machine is readable but below the training floor. The WARNING
+  # lives in the caller, never here: _training_resources / _training_provenance
+  # are captured with $(...) and their tests compare the whole output, so a warn
+  # emitted from this function would corrupt every one of them.
+  _TB_TRAINING_UNDERSIZED=0
+  _TB_TRAINING_UNSCHEDULABLE=0
+
+  # 1. An explicit install-time override IS a human choice, same as the CLI's.
+  if [[ -n "${TRACEBLOC_TRAINING_RESOURCES:-}" ]]; then
+    _TB_TRAINING_SIZE="$TRACEBLOC_TRAINING_RESOURCES"
+    _TB_TRAINING_PROVENANCE="user"
+    return 0
+  fi
+
+  # ONE lookup, both fields — see _existing_training_values. Calling the two
+  # readers separately here would reintroduce exactly the split this fixes.
+  local carried prev prev_prov
+  carried="$(_existing_training_values)"
+  prev="${carried%%|*}"
+  [[ -n "$carried" ]] || prev=""
   # The historic static default was the ABSENCE of a choice, not a choice —
   # carrying it would keep the unschedulable 8Gi on exactly the machines this
   # sizing exists to fix (Bugbot). Only a value that differs from it survives.
   if [[ -n "$prev" && "$prev" != "$_TRAINING_DEFAULT" ]]; then
-    printf '%s' "$prev"
+    _TB_TRAINING_SIZE="$prev"
+    prev_prov="${carried##*|}"
+    case "$prev_prov" in
+      installer|user)
+        # A marker already on the release is authoritative — preserve it, or a
+        # re-install would quietly downgrade a `user` choice to `unknown`.
+        _TB_TRAINING_PROVENANCE="$prev_prov"
+        ;;
+      *)
+        # Carried forward from before this key existed. We genuinely cannot tell
+        # who set it, and saying so is better than guessing: consumers treat
+        # `unknown` as `user` and leave it alone.
+        _TB_TRAINING_PROVENANCE="unknown"
+        ;;
+    esac
     return 0
   fi
-  local sized
-  sized="$(_machine_training_resources)"
-  if [[ -n "$sized" ]]; then
-    printf '%s' "$sized"
-    return 0
-  fi
-  printf '%s' "$_TRAINING_DEFAULT"
+
+  # 2. Sized to this machine, or 3. the static default — both are OUR choice.
+  local ceiling
+  ceiling="$(_machine_training_ceiling)"
+  case "$ceiling" in
+    *'|viable')
+      _TB_TRAINING_SIZE="${ceiling%|viable}"
+      ;;
+    *'|undersized')
+      # The machine is real and readable but below the training floor. Write the
+      # honest remainder: it FITS, which the 8 GiB literal does not, so a run can
+      # at least be scheduled and fail for a reason instead of sitting Pending.
+      _TB_TRAINING_SIZE="${ceiling%|undersized}"
+      _TB_TRAINING_UNDERSIZED=1
+      ;;
+    '|unschedulable')
+      # Measured, and the machine cannot host even a 1-core/1-GiB run. Keep the
+      # literal -- there is no honest number to write -- and let the caller warn.
+      _TB_TRAINING_SIZE="$_TRAINING_DEFAULT"
+      _TB_TRAINING_UNSCHEDULABLE=1
+      ;;
+    *)
+      # We could not read the cluster (no kubectl, a wedged API, or nothing
+      # parseable). Keep the historical default and stay SILENT about machine
+      # size: we never measured it, so any claim about it would be invented.
+      _TB_TRAINING_SIZE="$_TRAINING_DEFAULT"
+      ;;
+  esac
+  _TB_TRAINING_PROVENANCE="installer"
+  return 0
+}
+
+# The per-run training size for the generated values ("cpu=N,memory=MGi").
+# Thin wrapper kept because it is the tested, readable entry point; the values
+# generation calls _resolve_training_size directly so it gets both answers from
+# a single pass of the cluster probes.
+_training_resources() {
+  _resolve_training_size
+  printf '%s' "$_TB_TRAINING_SIZE"
+}
+
+# Who chose the size _training_resources reports (installer | user | unknown).
+_training_provenance() {
+  _resolve_training_size
+  printf '%s' "$_TB_TRAINING_PROVENANCE"
 }
 
 # YAML single-quoted-scalar escaping, in one place (Saqlain review, #443).
@@ -1440,9 +1644,23 @@ install_client_helm() {
   fi
 
   # backend#1236 (option A): size the default training budget to this machine.
-  local training_size
-  training_size="$(_training_resources)"
+  # One pass, both answers (backend#2220) — the probes are bounded but not free,
+  # and calling the two wrappers separately would run them twice.
+  local training_size training_provenance
+  _resolve_training_size
+  training_size="$_TB_TRAINING_SIZE"
+  training_provenance="$_TB_TRAINING_PROVENANCE"
   log "Training size: ${training_size} (adjust any time with 'tracebloc resources set')"
+  # The warning belongs HERE, not in the resolver: the resolver's output is
+  # captured with $(...) by _training_resources / _training_provenance, so a warn
+  # emitted there would end up inside the value.
+  if (( ${_TB_TRAINING_UNDERSIZED:-0} == 1 )); then
+    warn "This machine is below the size a training run wants: ${training_size} is all that is left after the platform's reservation."
+    hint "The client will install and run, but training jobs may be killed for memory. ~16 GB of RAM is the recommendation for training locally."
+  elif (( ${_TB_TRAINING_UNSCHEDULABLE:-0} == 1 )); then
+    warn "This machine is too small to host a training run at all; keeping the default ${training_size}."
+    hint "Training jobs will stay Pending until this edge has more memory — the client itself will still run, ingest and report."
+  fi
 
   cat <<EOF > "$values_file"
 # ============================================================
@@ -1458,6 +1676,10 @@ $([ -n "${CLIENT_ENV:-}" ] && printf '  CLIENT_ENV: "%s"\n' "$(tb_client_env "$C
   # installed release already carries a choice (backend#1236, option A).
   RESOURCE_LIMITS: "${training_size}"
   RESOURCE_REQUESTS: "${training_size}"
+  # Who chose the pair above (backend#2220). Bookkeeping only — it never changes
+  # the envelope. "unknown" means the value was carried forward from before this
+  # key existed and is genuinely unattributable, so consumers treat it as "user".
+  RESOURCE_PROVENANCE: "${training_provenance}"
   GPU_LIMITS: "$gpu_val"
   GPU_REQUESTS: "$gpu_val"
   RUNTIME_CLASS_NAME: ""

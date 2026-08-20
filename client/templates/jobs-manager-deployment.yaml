@@ -464,6 +464,18 @@ spec:
           value: {{ if hasKey .Values.env "RESOURCE_REQUESTS" }}{{ .Values.env.RESOURCE_REQUESTS | quote }}{{ else }}"cpu=2,memory=8Gi"{{ end }}
         - name: RESOURCE_LIMITS
           value: {{ if hasKey .Values.env "RESOURCE_LIMITS" }}{{ .Values.env.RESOURCE_LIMITS | quote }}{{ else }}"cpu=2,memory=8Gi"{{ end }}
+        # backend#2220: WHO chose the pair above. Bookkeeping only -- it never
+        # changes the envelope. It rides inside the same gate on purpose: a
+        # provenance marker with no envelope to describe is noise, and pinning
+        # them together means the unset recipe below clears all three at once.
+        #
+        # `unknown` is the honest default when the installer carries a value
+        # forward from before this key existed: an installer-written value and a
+        # deliberate `tracebloc resources set` are indistinguishable once the
+        # value differs from the old cpu=2,memory=8Gi literal, so guessing would
+        # risk overruling a human. Consumers MUST treat `unknown` as `user`.
+        - name: RESOURCE_PROVENANCE
+          value: {{ if hasKey .Values.env "RESOURCE_PROVENANCE" }}{{ .Values.env.RESOURCE_PROVENANCE | quote }}{{ else }}"unknown"{{ end }}
         {{- end }}
         # #343: never stamp a PHANTOM GPU. Emitting the "nvidia.com/gpu=1"
         # default on a CPU-only install surfaced a GPU that was not there in
@@ -529,7 +541,7 @@ spec:
              passing it through there put an ignored value in an unrelated
              process's environment and nothing more. Nobody can depend on that:
              the variable does not exist before this change. */}}
-        {{- if and (ne $key "CLIENT_ENV") (ne $key "RESOURCE_REQUESTS") (ne $key "RESOURCE_LIMITS") (ne $key "GPU_REQUESTS") (ne $key "GPU_LIMITS") (ne $key "RUNTIME_CLASS_NAME") (ne $key "SINGLE_NODE") (ne $key "CLIENT_ID") (ne $key "IMAGE_PULL_SECRET_NAME") (not (has $key $proxyKeys)) $value }}
+        {{- if and (ne $key "CLIENT_ENV") (ne $key "RESOURCE_REQUESTS") (ne $key "RESOURCE_LIMITS") (ne $key "RESOURCE_PROVENANCE") (ne $key "GPU_REQUESTS") (ne $key "GPU_LIMITS") (ne $key "RUNTIME_CLASS_NAME") (ne $key "SINGLE_NODE") (ne $key "CLIENT_ID") (ne $key "IMAGE_PULL_SECRET_NAME") (not (has $key $proxyKeys)) $value }}
         - name: {{ $key }}
           value: {{ $value | quote }}
         {{- end }}
@@ -588,6 +600,18 @@ spec:
           value: {{ if hasKey .Values.env "RESOURCE_REQUESTS" }}{{ .Values.env.RESOURCE_REQUESTS | quote }}{{ else }}"cpu=2,memory=8Gi"{{ end }}
         - name: RESOURCE_LIMITS
           value: {{ if hasKey .Values.env "RESOURCE_LIMITS" }}{{ .Values.env.RESOURCE_LIMITS | quote }}{{ else }}"cpu=2,memory=8Gi"{{ end }}
+        # backend#2220: WHO chose the pair above. Bookkeeping only -- it never
+        # changes the envelope. It rides inside the same gate on purpose: a
+        # provenance marker with no envelope to describe is noise, and pinning
+        # them together means the unset recipe below clears all three at once.
+        #
+        # `unknown` is the honest default when the installer carries a value
+        # forward from before this key existed: an installer-written value and a
+        # deliberate `tracebloc resources set` are indistinguishable once the
+        # value differs from the old cpu=2,memory=8Gi literal, so guessing would
+        # risk overruling a human. Consumers MUST treat `unknown` as `user`.
+        - name: RESOURCE_PROVENANCE
+          value: {{ if hasKey .Values.env "RESOURCE_PROVENANCE" }}{{ .Values.env.RESOURCE_PROVENANCE | quote }}{{ else }}"unknown"{{ end }}
         {{- end }}
         # #343: only stamp the GPU vars when a GPU is actually configured (see
         # the api container above) — GPU_REQUESTS and GPU_LIMITS share one gate,
@@ -609,7 +633,7 @@ spec:
         - name: SINGLE_NODE
           value: {{ if hasKey .Values.env "SINGLE_NODE" }}{{ .Values.env.SINGLE_NODE | quote }}{{ else }}{{ (default dict .Values.hostPath).enabled | default false | quote }}{{ end }}
         {{- range $key, $value := .Values.env }}
-        {{- if and (ne $key "CLIENT_ENV") (ne $key "RESOURCE_REQUESTS") (ne $key "RESOURCE_LIMITS") (ne $key "GPU_REQUESTS") (ne $key "GPU_LIMITS") (ne $key "RUNTIME_CLASS_NAME") (ne $key "SINGLE_NODE") (ne $key "CLIENT_ID") (ne $key "IMAGE_PULL_SECRET_NAME") (not (has $key $proxyKeys)) $value }}
+        {{- if and (ne $key "CLIENT_ENV") (ne $key "RESOURCE_REQUESTS") (ne $key "RESOURCE_LIMITS") (ne $key "RESOURCE_PROVENANCE") (ne $key "GPU_REQUESTS") (ne $key "GPU_LIMITS") (ne $key "RUNTIME_CLASS_NAME") (ne $key "SINGLE_NODE") (ne $key "CLIENT_ID") (ne $key "IMAGE_PULL_SECRET_NAME") (not (has $key $proxyKeys)) $value }}
         - name: {{ $key }}
           value: {{ $value | quote }}
         {{- end }}

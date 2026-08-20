@@ -318,6 +318,65 @@ tests:
           content: {name: RESOURCE_LIMITS}
           any: true
 
+  # backend#2220: RESOURCE_PROVENANCE records WHO chose the envelope. It never
+  # changes the envelope; it exists because RESOURCE_* has no unset state once
+  # helm's --reset-then-reuse-values has seen it, so an installer-written value
+  # and a deliberate `tracebloc resources set` are otherwise indistinguishable.
+  # It rides inside the same gate as the pair it describes: a marker with no
+  # envelope to describe is noise, and gating them together means one explicit
+  # unset clears all three.
+  - it: omits RESOURCE_PROVENANCE when the envelope itself is unset
+    asserts:
+      - notContains:
+          path: spec.template.spec.containers[0].env
+          content: {name: RESOURCE_PROVENANCE}
+          any: true
+      - notContains:
+          path: spec.template.spec.containers[1].env
+          content: {name: RESOURCE_PROVENANCE}
+          any: true
+
+  - it: defaults RESOURCE_PROVENANCE to unknown when the envelope is set without it
+    # The pre-#2220 release shape. "unknown" is the honest answer, and consumers
+    # must treat it as "user" — guessing "installer" here would let a future
+    # ladder overrule a human choice.
+    set:
+      env:
+        RESOURCE_LIMITS: "cpu=4,memory=16Gi"
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: RESOURCE_PROVENANCE
+            value: "unknown"
+          count: 1
+      - contains:
+          path: spec.template.spec.containers[1].env
+          content:
+            name: RESOURCE_PROVENANCE
+            value: "unknown"
+          count: 1
+
+  - it: carries an explicit RESOURCE_PROVENANCE through to both containers
+    set:
+      env:
+        RESOURCE_REQUESTS: "cpu=4,memory=16Gi"
+        RESOURCE_LIMITS: "cpu=4,memory=16Gi"
+        RESOURCE_PROVENANCE: "user"
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: RESOURCE_PROVENANCE
+            value: "user"
+          count: 1
+      - contains:
+          path: spec.template.spec.containers[1].env
+          content:
+            name: RESOURCE_PROVENANCE
+            value: "user"
+          count: 1
+
   - it: lets operators override spawned-job resources via env.RESOURCE_REQUESTS/LIMITS
     set:
       env:
