@@ -4085,14 +4085,24 @@ function Get-TrainingResources {
         if ($parts.Count -lt 2) { continue }
         $cpuRaw = $parts[0]
         $memRaw = $parts[1]
+        # $null, NOT 0, for a quantity we cannot parse. The contract's
+        # skipped_nodes says unparseable allocatable is SKIPPED, and the bash
+        # twin does exactly that with an explicit `|| continue`. Coercing to 0
+        # and ranking the node anyway was a real bug the old memory-first order
+        # happened to hide -- a memB of 0 could never win. Ranking cpu-first
+        # exposes it: a node with a good core count and a memory unit we do not
+        # speak would take the anchor, fail the memory floor, and drop the whole
+        # machine to the literal while a sibling node was perfectly sizeable
+        # (Bugbot #766).
         $cpuM = if ($cpuRaw -match '^(\d+)m$') { [long]$Matches[1] }
                 elseif ($cpuRaw -match '^\d+$') { [long]$cpuRaw * 1000 }
-                else { [long]0 }
+                else { $null }
         $memB = if ($memRaw -match '^(\d+)Ki$') { [long]$Matches[1] * 1KB }
                 elseif ($memRaw -match '^(\d+)Mi$') { [long]$Matches[1] * 1MB }
                 elseif ($memRaw -match '^(\d+)Gi$') { [long]$Matches[1] * 1GB }
                 elseif ($memRaw -match '^\d+$') { [long]$memRaw }
-                else { [long]0 }
+                else { $null }
+        if ($null -eq $cpuM -or $null -eq $memB) { continue }
         # Contract ANCHOR_LARGEST, tie-break (cpu, memory). This used to rank
         # (memory, cpu) while cli's nodeLarger ranked (cpu, memory), so the two
         # anchored on DIFFERENT nodes on a heterogeneous cluster. One order now.

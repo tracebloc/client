@@ -1655,6 +1655,46 @@ Describe "Envelope contract golden vectors (backend#2220)" {
     }
     Get-TrainingResources | Should -Be "cpu=7,memory=13Gi"
   }
+
+  # Bugbot #766, second pass. The contract's skipped_nodes says allocatable that
+  # will not parse is SKIPPED; the bash twin does that with an explicit
+  # `|| continue`. This function used to coerce an unparseable quantity to 0 and
+  # then RANK the node, which the old memory-first order hid — a memB of 0 could
+  # never win. Ranking on cpu first exposes it: a node with a good CPU count and
+  # a memory unit we do not speak wins the anchor, fails the memory floor, and
+  # drops the whole machine to the literal even though a sibling node was
+  # perfectly sizeable. BYO/heterogeneous clusters only; k3d never hits it.
+  It "a node with unparseable memory does not beat a valid one" {
+    Mock helm { $global:LASTEXITCODE = 1; "" }
+    Mock kubectl {
+      if ($args -contains "--request-timeout=10s") {
+        # 16 cores but a memory unit neither installer parses, alongside a
+        # perfectly good 8c/32Gi node. The valid node must win.
+        $global:LASTEXITCODE = 0; @("16 64GB", "8 32Gi")
+      } else { $global:LASTEXITCODE = 1; "" }
+    }
+    Get-TrainingResources | Should -Be "cpu=7,memory=29Gi"
+  }
+
+  It "a node with unparseable cpu does not beat a valid one" {
+    Mock helm { $global:LASTEXITCODE = 1; "" }
+    Mock kubectl {
+      if ($args -contains "--request-timeout=10s") {
+        $global:LASTEXITCODE = 0; @("sixteen 64Gi", "8 32Gi")
+      } else { $global:LASTEXITCODE = 1; "" }
+    }
+    Get-TrainingResources | Should -Be "cpu=7,memory=29Gi"
+  }
+
+  It "every node unparseable falls through to the literal" {
+    Mock helm { $global:LASTEXITCODE = 1; "" }
+    Mock kubectl {
+      if ($args -contains "--request-timeout=10s") {
+        $global:LASTEXITCODE = 0; @("sixteen 64GB", "eight lots")
+      } else { $global:LASTEXITCODE = 1; "" }
+    }
+    Get-TrainingResources | Should -Be "cpu=2,memory=8Gi"
+  }
 }
 
 Describe "Confirm-Cluster" {

@@ -1076,6 +1076,40 @@ setup() {
   fi
 }
 
+# Parity with the Pester suite for Bugbot #766: the ps1 twin coerced an
+# unparseable quantity to 0 and ranked the node anyway. bash has always skipped
+# it via `|| continue`; this pins that so the twins cannot drift apart again.
+@test "envelope contract: an unparseable node never beats a valid one" {
+  TB_NAMESPACE=tracebloc
+  unset TRACEBLOC_TRAINING_RESOURCES
+  helm() { return 1; }
+  has() { return 0; }
+  # 16 cores but a memory unit neither installer speaks, next to a good 8c/32Gi.
+  kubectl() {
+    case "$*" in
+      *--request-timeout=10s*) printf '16 64GB\n8 32Gi\n' ;;
+      *) return 1 ;;
+    esac
+  }
+  run _machine_training_resources
+  [ "$output" = "cpu=7,memory=29Gi" ] || return 1
+}
+
+@test "envelope contract: every node unparseable emits nothing (caller falls back)" {
+  TB_NAMESPACE=tracebloc
+  unset TRACEBLOC_TRAINING_RESOURCES
+  helm() { return 1; }
+  has() { return 0; }
+  kubectl() {
+    case "$*" in
+      *--request-timeout=10s*) printf 'sixteen 64GB\neight lots\n' ;;
+      *) return 1 ;;
+    esac
+  }
+  run _machine_training_resources
+  [ -z "$output" ] || return 1
+}
+
 @test "envelope contract: the tie-break is (cpu, memory), not (memory, cpu)" {
   # The regression this consolidation fixes. Before backend#2220 this function
   # ranked nodes (memory, cpu) and would have anchored on the 4c/32Gi node here,
