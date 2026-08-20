@@ -1,0 +1,176 @@
+{
+  "schema_version": 1,
+  "issue": "tracebloc/client#772",
+  "purpose": [
+    "One table of CLUSTER STATES, driven through BOTH installers, asserting identical",
+    "verdicts. client#766 gave the two twins a shared contract (envelope_contract.json)",
+    "and that fixed arithmetic agreement. It did not give them shared control flow, and",
+    "every divergence since has landed in that gap -- five of them across backend#2220:",
+    "",
+    "  1. node ordering (memory,cpu) in bash vs (cpu,memory) in the CLI/ps1",
+    "  2. [math]::Max(0,..) binding Int32 on ps1, swallowed by a bare catch{} -- machine",
+    "     sizing was silently DEAD on Windows and no test noticed",
+    "  3. ps1 coerced unparseable allocatable to 0 and RANKED the node; bash skipped it",
+    "  4. split provenance lookup: on a failed read ps1 said `installer` (invites a ladder",
+    "     to overrule a human) while bash said `unknown` (permanently strands an",
+    "     installer-sized edge). Opposite directions -- neither twin told you the other.",
+    "  5. bash INFERRED 'too small' from a second `kubectl get nodes -o name` probe, so",
+    "     unparseable or not-yet-Ready nodes tripped a warning about a machine never",
+    "     measured; ps1 gated on a parsed node.",
+    "",
+    "The golden vectors in envelope_contract.json cover the arithmetic. What they cannot",
+    "cover is behaviour on everything that is NOT a clean measurement -- a node that will",
+    "not parse, a values read that fails, a remainder too small to request. Those are",
+    "exactly the states the five findings lived in, and each twin decided them alone.",
+    "",
+    "A row added here forces BOTH languages to answer it. That is the property that was",
+    "missing.",
+    "",
+    "Regenerate the bash companion after editing: scripts/gen-installer-parity.sh"
+  ],
+  "verdict_fields": {
+    "size": "what the installer writes to RESOURCE_LIMITS / RESOURCE_REQUESTS",
+    "provenance": "installer | user | unknown -- who chose that size",
+    "undersized": "machine measured, below the training floor, honest remainder written",
+    "unschedulable": "machine measured, cannot host even a 1-core/1-GiB run"
+  },
+  "excluded_from_parity": [
+    {
+      "case": "kubectl binary absent from PATH",
+      "why": "bash gates on its own `has kubectl` helper; the ps1 twin has no equivalent and infers absence from $LASTEXITCODE. Not the same input, so comparing verdicts would compare two different questions. Covered per-twin instead (bats: 'kubectl absent falls back to the static default')."
+    }
+  ],
+  "rows": [
+    {
+      "label": "viable-single-node",
+      "why": "the ordinary field case -- an 8c/32Gi box",
+      "nodes": "8 32Gi",
+      "carried": "none",
+      "expect": { "size": "cpu=7,memory=29Gi", "provenance": "installer", "undersized": false, "unschedulable": false }
+    },
+    {
+      "label": "viable-large-node",
+      "why": "guards the ps1 Int32 overload (divergence 2): 61 GiB in bytes exceeds 2^31",
+      "nodes": "16 64Gi",
+      "carried": "none",
+      "expect": { "size": "cpu=15,memory=61Gi", "provenance": "installer", "undersized": false, "unschedulable": false }
+    },
+    {
+      "label": "heterogeneous-incomparable",
+      "why": "the anchor tie-break (divergence 1). bash ranked (memory,cpu) and would pick 4c/32Gi; the contract's order is (cpu,memory) so 8c/16Gi wins.",
+      "nodes": "8 16Gi;4 32Gi",
+      "carried": "none",
+      "expect": { "size": "cpu=7,memory=13Gi", "provenance": "installer", "undersized": false, "unschedulable": false }
+    },
+    {
+      "label": "node-order-reversed",
+      "why": "the anchor must not depend on the order the API returned nodes in",
+      "nodes": "4 32Gi;8 16Gi",
+      "carried": "none",
+      "expect": { "size": "cpu=7,memory=13Gi", "provenance": "installer", "undersized": false, "unschedulable": false }
+    },
+    {
+      "label": "one-unparseable-one-valid",
+      "why": "divergence 3. ps1 coerced the bad node to 0 and ranked it, so 16 cores with a memory unit we do not speak took the anchor and dropped the whole machine to the literal.",
+      "nodes": "16 64GB;8 32Gi",
+      "carried": "none",
+      "expect": { "size": "cpu=7,memory=29Gi", "provenance": "installer", "undersized": false, "unschedulable": false }
+    },
+    {
+      "label": "unparseable-cpu-one-valid",
+      "why": "same as above on the CPU dimension",
+      "nodes": "sixteen 64Gi;8 32Gi",
+      "carried": "none",
+      "expect": { "size": "cpu=7,memory=29Gi", "provenance": "installer", "undersized": false, "unschedulable": false }
+    },
+    {
+      "label": "all-nodes-unparseable",
+      "why": "divergence 5. Nothing was measured, so the literal is right and any claim about machine SIZE is a fabrication -- unschedulable must stay false.",
+      "nodes": "sixteen 64GB;eight lots",
+      "carried": "none",
+      "expect": { "size": "cpu=2,memory=8Gi", "provenance": "installer", "undersized": false, "unschedulable": false }
+    },
+    {
+      "label": "below-floor-but-requestable",
+      "why": "4 GiB - 3 GiB = 1 GiB, under the 2 GiB floor but still a requestable shape. The honest remainder FITS; the 8 GiB literal would not.",
+      "nodes": "2 4Gi",
+      "carried": "none",
+      "expect": { "size": "cpu=1,memory=1Gi", "provenance": "installer", "undersized": true, "unschedulable": false }
+    },
+    {
+      "label": "too-small-to-request",
+      "why": "cpu=0 is not a training request, so there is no honest number -- keep the literal and say so. Measured, unlike all-nodes-unparseable.",
+      "nodes": "500m 512Mi",
+      "carried": "none",
+      "expect": { "size": "cpu=2,memory=8Gi", "provenance": "installer", "undersized": false, "unschedulable": true }
+    },
+    {
+      "label": "exact-floor",
+      "why": "5 GiB - 3 GiB = exactly the 2 GiB floor: viable, not undersized. The off-by-one that decides whether an edge can train.",
+      "nodes": "2 5Gi",
+      "carried": "none",
+      "expect": { "size": "cpu=1,memory=2Gi", "provenance": "installer", "undersized": false, "unschedulable": false }
+    },
+    {
+      "label": "carried-read-fails",
+      "why": "divergence 4, the fail-unsafe one. Nothing is carried, so the machine is sized and `installer` is the TRUE answer. ps1 used to say installer for a CARRIED size; bash used to say unknown.",
+      "nodes": "8 32Gi",
+      "carried": "read-fails",
+      "expect": { "size": "cpu=7,memory=29Gi", "provenance": "installer", "undersized": false, "unschedulable": false }
+    },
+    {
+      "label": "carried-read-empty",
+      "why": "the read succeeded but said nothing -- same verdict as a failure, and not `unknown`",
+      "nodes": "8 32Gi",
+      "carried": "read-empty",
+      "expect": { "size": "cpu=7,memory=29Gi", "provenance": "installer", "undersized": false, "unschedulable": false }
+    },
+    {
+      "label": "carried-size-no-marker",
+      "why": "a pre-#768 release. `unknown` is correct HERE because the read SUCCEEDED and there is genuinely no marker -- and consumers must treat it as a human choice.",
+      "nodes": "8 32Gi",
+      "carried": "cpu=4,memory=12Gi",
+      "expect": { "size": "cpu=4,memory=12Gi", "provenance": "unknown", "undersized": false, "unschedulable": false }
+    },
+    {
+      "label": "carried-size-user-marker",
+      "why": "a deliberate `resources set` must survive re-install without decaying",
+      "nodes": "8 32Gi",
+      "carried": "cpu=4,memory=12Gi",
+      "carried_provenance": "user",
+      "expect": { "size": "cpu=4,memory=12Gi", "provenance": "user", "undersized": false, "unschedulable": false }
+    },
+    {
+      "label": "carried-size-installer-marker",
+      "why": "an installer-written size stays attributable, so a future ladder may re-derive it",
+      "nodes": "8 32Gi",
+      "carried": "cpu=4,memory=12Gi",
+      "carried_provenance": "installer",
+      "expect": { "size": "cpu=4,memory=12Gi", "provenance": "installer", "undersized": false, "unschedulable": false }
+    },
+    {
+      "label": "carried-size-junk-marker",
+      "why": "anything unrecognised degrades to unknown, never to a guess",
+      "nodes": "8 32Gi",
+      "carried": "cpu=4,memory=12Gi",
+      "carried_provenance": "banana",
+      "expect": { "size": "cpu=4,memory=12Gi", "provenance": "unknown", "undersized": false, "unschedulable": false }
+    },
+    {
+      "label": "carried-historic-literal",
+      "why": "the old cpu=2,memory=8Gi was the ABSENCE of a choice, so it must not be carried -- the machine gets sized instead. A marker beside it does not change that.",
+      "nodes": "8 32Gi",
+      "carried": "cpu=2,memory=8Gi",
+      "carried_provenance": "user",
+      "expect": { "size": "cpu=7,memory=29Gi", "provenance": "installer", "undersized": false, "unschedulable": false }
+    },
+    {
+      "label": "install-time-override",
+      "why": "TRACEBLOC_TRAINING_RESOURCES is a human choice, and it wins without probing anything",
+      "nodes": "8 32Gi",
+      "carried": "none",
+      "override": "cpu=4,memory=16Gi",
+      "expect": { "size": "cpu=4,memory=16Gi", "provenance": "user", "undersized": false, "unschedulable": false }
+    }
+  ]
+}
