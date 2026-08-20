@@ -128,7 +128,13 @@ echo "$plog" | grep -E 'CONNECT' | grep "$PROXY_USER" | grep -E 'docker' | tail 
 # token) — never by the readiness probe to /v2/, which stops at the 401. So an
 # authenticated CONNECT to it proves the NODE pulled through the proxy (not just
 # the host's readiness check), closing the "proxy silently ignored" false-positive.
-if ! echo "$plog" | grep -E 'CONNECT .*auth\.docker\.io' | grep -q "$PROXY_USER"; then
+# Capture-then-match, NOT `… | grep -q` (backend#1778). grep -q closes the pipe
+# on the first match, so on a busy proxy log the upstream grep takes SIGPIPE and
+# pipefail makes the whole pipeline 141 — non-zero — which `if !` reads as "no
+# match" and fires this error BECAUSE the CONNECT was there. A size-dependent
+# false failure, and $plog is exactly the value that grows.
+connect_lines="$(grep -E 'CONNECT .*auth\.docker\.io' <<<"$plog" || true)"
+if ! grep -q "$PROXY_USER" <<<"$connect_lines"; then
   error "No authenticated auth.docker.io CONNECT in the proxy log — the node's image pull did not traverse the proxy."
 fi
 
@@ -298,7 +304,9 @@ b_section="$(printf '%s\n' "$applog" | awk '/SECTION_B_PROXY_ENV_UNSET/{f=1;next
 printf '%s\n' "$a_section" | grep -iE 'Establish HTTP proxy tunnel|CONNECT tunnel established|< HTTP/' | sed 's/^/    A WITH proxy env:  /' || true
 printf '%s\n' "$b_section" | grep -iE 'Trying|Connected to|< HTTP/|Could not resolve'                 | sed 's/^/    B env unset:       /' || true
 # (A) WITH the ingestion proxy env, the backend call MUST traverse the squid.
-if ! printf '%s' "$a_section" | grep -qiE 'Establish HTTP proxy tunnel to backend\.tracebloc-e2e\.test|CONNECT tunnel established'; then
+# Here-string, not a pipe into grep -q (backend#1778): a 141 from SIGPIPE would
+# read as "no tunnel" and fail the run on a long section that DID tunnel.
+if ! grep -qiE 'Establish HTTP proxy tunnel to backend\.tracebloc-e2e\.test|CONNECT tunnel established' <<<"$a_section"; then
   # The filtered diagnostics above matched nothing on a novel failure (run
   # 29255451968 showed only the B line). Dump the RAW pod log + squid/endpoint
   # state so the cause is visible next time instead of a bare "did NOT tunnel."
@@ -310,7 +318,9 @@ if ! printf '%s' "$a_section" | grep -qiE 'Establish HTTP proxy tunnel to backen
   error "App pod WITH the ingestion proxy env did NOT tunnel through the squid — ingestion-style backend egress is not proxied (the #119 bug)."
 fi
 # (B) With the env unset, the SAME call MUST NOT use a proxy (it dials direct).
-if printf '%s' "$b_section" | grep -qiE 'proxy tunnel|CONNECT tunnel established'; then
+# Here-string (backend#1778). Here the 141 would read as "no proxy used" and
+# SKIP the assertion entirely — a false pass, the quieter half of the same bug.
+if grep -qiE 'proxy tunnel|CONNECT tunnel established' <<<"$b_section"; then
   error "App pod with the proxy env unset still used a proxy — unexpected; that path should dial direct."
 fi
 success "App-pod egress verified: WITH the ingestion proxy env the backend call tunnelled through the in-cluster squid; with it unset the same call dialled direct."
