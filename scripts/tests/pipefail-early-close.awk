@@ -143,6 +143,18 @@ FNR == 1 {
   # output of its own remediation, which is how a gate teaches people to
   # disable it. \001 cannot occur in a shell source line, so it is a safe
   # stand-in; the ORIGINAL line is still what gets printed.
+  #
+  # THE STAND-IN IS ALSO A BOUNDARY, and the `[^|\001]*` class below is what
+  # makes it one. The `|` characters of a `||` are not just noise -- they are
+  # what STOPS `grep[^|]*` from spanning further down the line. Replacing them
+  # with a character the class permitted let a plain `| grep` reach the `-q` of
+  # a LATER `|| grep -q`:
+  #     producer | grep needle && cmd || grep -q x <<<"$y"
+  # flagged again -- the same false positive, one level deeper (Bugbot,
+  # client#777). Neutralising the pipe is only half the job; the boundary has to
+  # survive. Adding \001 to the class is the fix, and it is the ONLY fix here:
+  # shrinking the stand-in to one character was tried, and its mutation survived,
+  # so it changed nothing and was reverted.
   probe = line
   gsub(/\|\|/, "\001\001", probe)
 
@@ -157,8 +169,8 @@ FNR == 1 {
   # not just whitespace or end-of-line. `x="$(cmd | head)"` ends at `)` and then
   # `"`, and requiring space-or-EOL missed exactly that shape (Bugbot #763).
   if (probe ~ /\|&?[[:space:]]*head([[:space:]]|$|[)"'\''`;|&])/ \
-      || probe ~ /\|&?[[:space:]]*grep[^|]*[[:space:]]-[a-zA-Z]*q/ \
-      || probe ~ /\|&?[[:space:]]*grep[^|]*[[:space:]]-[a-zA-Z]*m[[:space:]]*[0-9]/) {
+      || probe ~ /\|&?[[:space:]]*grep[^|\001]*[[:space:]]-[a-zA-Z]*q/ \
+      || probe ~ /\|&?[[:space:]]*grep[^|\001]*[[:space:]]-[a-zA-Z]*m[[:space:]]*[0-9]/) {
     sub(/^[[:space:]]+/, "", line)
     print curfile ":" FNR ": " line
   }

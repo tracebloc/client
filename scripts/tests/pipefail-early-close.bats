@@ -405,3 +405,28 @@ hazardous() {
   run scan "$f"
   [ -z "$output" ] || return 1
 }
+
+# Bugbot, client#777: neutralising `||` must not remove the BOUNDARY the grep
+# arms rely on. `grep[^|]*` used the `|` of a `||` as its stop; replacing those
+# bars with something the class permits let a plain `| grep` span the whole line
+# and reach the `-q` of a later `|| grep -q`.
+@test "a plain '| grep' does NOT borrow the -q of a later '|| grep -q'" {
+  local f; f="$(hazardous span.sh '  producer | grep needle && cmd || grep -q x <<<"$y"')"
+  run scan "$f"
+  [ -z "$output" ] || return 1
+}
+
+@test "nor the -m of a later '|| grep -m1'" {
+  local f; f="$(hazardous spanm.sh '  producer | grep needle && cmd || grep -m1 x <<<"$y"')"
+  run scan "$f"
+  [ -z "$output" ] || return 1
+}
+
+# The discrimination: on a line of that exact shape, a REAL early-close is still
+# caught. Without this, widening the stand-in until everything is spared would
+# pass the two above.
+@test "but a real '| grep -q' on such a line IS still flagged" {
+  local f; f="$(hazardous spanreal.sh '  producer | grep -q needle && cmd || fallback')"
+  run scan "$f"
+  [ -n "$output" ] || return 1
+}
