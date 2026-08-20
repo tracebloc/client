@@ -1573,6 +1573,130 @@ Describe "Get-TrainingResources" {
   }
 }
 
+Describe "Envelope contract golden vectors (backend#2220)" {
+  # The PowerShell side of the ticket's definition of done, mirroring the bats
+  # suite's replay. The arithmetic has ONE definition — client-runtime's
+  # node_sizing.envelope_from_allocatable — and this file cannot call it, so it
+  # proves it still AGREES with it by replaying the contract's golden vectors
+  # through the real Get-TrainingResources.
+  #
+  # Unlike bats, PowerShell HAS a JSON parser, so this reads the vendored
+  # contract directly rather than the flattened bash table. Same source, two
+  # readers: if the two disagree, one of them has drifted.
+
+  BeforeAll {
+    $script:ContractPath = Join-Path $PSScriptRoot "fixtures/envelope_contract.json"
+    $script:Contract = Get-Content $script:ContractPath -Raw | ConvertFrom-Json
+  }
+  BeforeEach { $script:TB_NAMESPACE = "tracebloc"; $env:TRACEBLOC_TRAINING_RESOURCES = $null }
+  AfterEach  { $env:TRACEBLOC_TRAINING_RESOURCES = $null }
+
+  It "the vendored contract is readable and carries vectors" {
+    $script:Contract.contract_version | Should -BeGreaterOrEqual 1
+    @($script:Contract.vectors.single_node).Count | Should -BeGreaterThan 0
+  }
+
+  It "the embedded constants match the vendored contract" {
+    # The one that catches a hand-edit to the generated block above
+    # Get-TrainingResources. scripts/gen-envelope-embed.sh is the authority;
+    # this is the in-suite mirror so a PowerShell-only reviewer sees it too.
+    $script:TbEnvelopeContractVersion  | Should -Be $script:Contract.contract_version
+    $script:TbEnvelopeOverheadCpuMilli | Should -Be $script:Contract.overhead.cpu_millicores
+    $script:TbEnvelopeOverheadMemBytes | Should -Be $script:Contract.overhead.memory_bytes
+    $script:TbEnvelopeFloorCpuMilli    | Should -Be $script:Contract.floor.cpu_millicores
+    $script:TbEnvelopeFloorMemBytes    | Should -Be $script:Contract.floor.memory_bytes
+  }
+
+  It "every single-node golden vector replays" {
+    Mock helm { $global:LASTEXITCODE = 1; "" }
+    $failures = @()
+    foreach ($v in $script:Contract.vectors.single_node) {
+      # A machine below the contract floor, or with unparseable allocatable,
+      # makes the installer emit nothing and fall through to the literal.
+      $want = if ($null -eq $v.expected -or -not $v.expected.viable) {
+        "cpu=2,memory=8Gi"
+      } else {
+        "cpu=$($v.expected.render_gi.cpu),memory=$($v.expected.render_gi.memory)"
+      }
+      $line = "$($v.allocatable_cpu) $($v.allocatable_memory)"
+      Mock kubectl {
+        if ($args -contains "--request-timeout=10s") {
+          $global:LASTEXITCODE = 0; @($line)
+        } else { $global:LASTEXITCODE = 1; "" }
+      }.GetNewClosure()
+      $got = Get-TrainingResources
+      if ($got -ne $want) {
+        $failures += "$($v.label) ($line): want '$want' got '$got'"
+      }
+    }
+    $failures -join "`n" | Should -BeNullOrEmpty
+  }
+
+  It "ANCHOR_LARGEST ties break on cpu, not memory — and the bash twin agrees" {
+    # The divergence backend#2220 closes: this function ranked nodes
+    # (memory, cpu) and would have anchored on 4c/32Gi here, while cli's
+    # nodeLarger ranked (cpu, memory) and anchored on 8c/16Gi. Same cluster,
+    # two answers, neither chosen. One order now, matching bash and cli.
+    Mock helm { $global:LASTEXITCODE = 1; "" }
+    Mock kubectl {
+      if ($args -contains "--request-timeout=10s") {
+        $global:LASTEXITCODE = 0; @("8 16Gi", "4 32Gi")
+      } else { $global:LASTEXITCODE = 1; "" }
+    }
+    Get-TrainingResources | Should -Be "cpu=7,memory=13Gi"
+  }
+
+  It "the answer does not depend on the order the API listed nodes in" {
+    Mock helm { $global:LASTEXITCODE = 1; "" }
+    Mock kubectl {
+      if ($args -contains "--request-timeout=10s") {
+        $global:LASTEXITCODE = 0; @("4 32Gi", "8 16Gi")
+      } else { $global:LASTEXITCODE = 1; "" }
+    }
+    Get-TrainingResources | Should -Be "cpu=7,memory=13Gi"
+  }
+
+  # Bugbot #766, second pass. The contract's skipped_nodes says allocatable that
+  # will not parse is SKIPPED; the bash twin does that with an explicit
+  # `|| continue`. This function used to coerce an unparseable quantity to 0 and
+  # then RANK the node, which the old memory-first order hid — a memB of 0 could
+  # never win. Ranking on cpu first exposes it: a node with a good CPU count and
+  # a memory unit we do not speak wins the anchor, fails the memory floor, and
+  # drops the whole machine to the literal even though a sibling node was
+  # perfectly sizeable. BYO/heterogeneous clusters only; k3d never hits it.
+  It "a node with unparseable memory does not beat a valid one" {
+    Mock helm { $global:LASTEXITCODE = 1; "" }
+    Mock kubectl {
+      if ($args -contains "--request-timeout=10s") {
+        # 16 cores but a memory unit neither installer parses, alongside a
+        # perfectly good 8c/32Gi node. The valid node must win.
+        $global:LASTEXITCODE = 0; @("16 64GB", "8 32Gi")
+      } else { $global:LASTEXITCODE = 1; "" }
+    }
+    Get-TrainingResources | Should -Be "cpu=7,memory=29Gi"
+  }
+
+  It "a node with unparseable cpu does not beat a valid one" {
+    Mock helm { $global:LASTEXITCODE = 1; "" }
+    Mock kubectl {
+      if ($args -contains "--request-timeout=10s") {
+        $global:LASTEXITCODE = 0; @("sixteen 64Gi", "8 32Gi")
+      } else { $global:LASTEXITCODE = 1; "" }
+    }
+    Get-TrainingResources | Should -Be "cpu=7,memory=29Gi"
+  }
+
+  It "every node unparseable falls through to the literal" {
+    Mock helm { $global:LASTEXITCODE = 1; "" }
+    Mock kubectl {
+      if ($args -contains "--request-timeout=10s") {
+        $global:LASTEXITCODE = 0; @("sixteen 64GB", "eight lots")
+      } else { $global:LASTEXITCODE = 1; "" }
+    }
+    Get-TrainingResources | Should -Be "cpu=2,memory=8Gi"
+  }
+}
+
 Describe "Confirm-Cluster" {
   It "dumps cluster status without error" {
     $script:TB_NAMESPACE = "ns"; $script:LOG_FILE = "$TestDrive/log.txt"
