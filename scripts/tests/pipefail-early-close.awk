@@ -115,16 +115,32 @@ FNR == 1 {
 
   if (!(e_on && p_on)) next
 
+  # `||` IS NOT A PIPE, and must be neutralised before the hazard test below.
+  # Otherwise the SECOND bar of a `||` reads as a pipeline, and the scanner
+  # flags the very form this file recommends:
+  #     out=$(producer) || true
+  #     grep -q needle <<<"$out"        # fine
+  #     cmd || grep -q needle <<<"$out" # was reported as an offender
+  # Found while converting the fleet for backend#2264 -- the gate rejected the
+  # output of its own remediation, which is how a gate teaches people to
+  # disable it. \001 cannot occur in a shell source line, so it is a safe
+  # stand-in; the ORIGINAL line is still what gets printed.
+  probe = line
+  gsub(/\|\|/, "\001\001", probe)
+
   # The hazard: a pipe into a reader that closes early.
   #   `| head`        — closes after N lines
   #   `| grep -q`     — closes on the first match
   #   `| grep -m N`   — closes after N matches
+  # `|&` is bash's pipe-both-streams and is a pipe like any other, so the bar is
+  # allowed one optional `&`. It is NOT the `|&` of the terminator class below,
+  # which is about what may FOLLOW `head`.
   # The terminator class matters: `head` can be followed by a CLOSING delimiter,
   # not just whitespace or end-of-line. `x="$(cmd | head)"` ends at `)` and then
   # `"`, and requiring space-or-EOL missed exactly that shape (Bugbot #763).
-  if (line ~ /\|[[:space:]]*head([[:space:]]|$|[)"'\''`;|&])/ \
-      || line ~ /\|[[:space:]]*grep[^|]*[[:space:]]-[a-zA-Z]*q/ \
-      || line ~ /\|[[:space:]]*grep[^|]*[[:space:]]-[a-zA-Z]*m[[:space:]]*[0-9]/) {
+  if (probe ~ /\|&?[[:space:]]*head([[:space:]]|$|[)"'\''`;|&])/ \
+      || probe ~ /\|&?[[:space:]]*grep[^|]*[[:space:]]-[a-zA-Z]*q/ \
+      || probe ~ /\|&?[[:space:]]*grep[^|]*[[:space:]]-[a-zA-Z]*m[[:space:]]*[0-9]/) {
     sub(/^[[:space:]]+/, "", line)
     print curfile ":" FNR ": " line
   }

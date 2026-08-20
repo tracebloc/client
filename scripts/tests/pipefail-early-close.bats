@@ -323,3 +323,57 @@ hazardous() {
   [[ "$output" == *"a-bad.sh"* ]] || return 1
   [[ "$output" != *"b-good.sh"* ]] || return 1
 }
+
+# ── `||` is not a pipe ───────────────────────────────────────────────────────
+# The gate flagged the output of its own remediation: converting the fleet for
+# backend#2264 produced `cmd || grep -q x <<<"$y"`, and the SECOND bar of the
+# `||` was read as a pipeline. A gate that rejects the form it recommends is
+# how a gate teaches people to switch it off.
+
+@test "it does NOT flag '|| grep -q' — the second bar of || is not a pipe" {
+  local f; f="$(hazardous orgrep.sh '  helm template . >/dev/null || grep -q needle <<<"$out"')"
+  run scan "$f"
+  [ -z "$output" ] || return 1
+}
+
+@test "it does NOT flag '|| head' either" {
+  local f; f="$(hazardous orhead.sh '  check_it || head -5 <<<"$captured" >&2')"
+  run scan "$f"
+  [ -z "$output" ] || return 1
+}
+
+@test "it does NOT flag '|| grep -m1'" {
+  local f; f="$(hazardous orgrepm.sh '  probe || grep -m1 needle <<<"$out"')"
+  run scan "$f"
+  [ -z "$output" ] || return 1
+}
+
+# The discrimination that makes the three above meaningful: a REAL pipe on a
+# line that ALSO contains `||` must still be caught. Without this, deleting the
+# hazard test entirely would pass all three.
+@test "a real pipe is still flagged on a line that also contains '||'" {
+  local f; f="$(hazardous mixed.sh '  x=$(producer | head -1) || warn "no first line"')"
+  run scan "$f"
+  [ -n "$output" ] || return 1
+  [[ "$output" == *"mixed.sh:3"* ]] || return 1
+}
+
+@test "and '|| true' still spares a real pipe (the pre-existing rule is intact)" {
+  local f; f="$(hazardous ortrue2.sh '  x=$(producer | head -1) || true')"
+  run scan "$f"
+  [ -z "$output" ] || return 1
+}
+
+# `|&` is bash's pipe-both-streams. It is a pipe, so the hazard applies; the
+# scanner used to miss it because the bar had to be followed by space-or-name.
+@test "it FLAGS '|& head' — pipe-both-streams is still a pipe" {
+  local f; f="$(hazardous amppipe.sh '  noisy_producer |& head -1')"
+  run scan "$f"
+  [ -n "$output" ] || return 1
+}
+
+@test "it FLAGS '|& grep -q' too" {
+  local f; f="$(hazardous amppipeq.sh '  noisy_producer |& grep -q needle')"
+  run scan "$f"
+  [ -n "$output" ] || return 1
+}
