@@ -1664,6 +1664,74 @@ Describe "Envelope contract golden vectors (backend#2220)" {
   # a memory unit we do not speak wins the anchor, fails the memory floor, and
   # drops the whole machine to the literal even though a sibling node was
   # perfectly sizeable. BYO/heterogeneous clusters only; k3d never hits it.
+  # ── provenance (backend#2220) ──────────────────────────────────────────────
+  # Get-TrainingProvenance mirrors Get-TrainingResources' precedence rather than
+  # calling it, so these pin that the mirror stays honest on EVERY branch. A
+  # wrong verdict here either strands an edge forever or silently overrules a
+  # human, which is the defect scope bullet 4 is about.
+
+  It "provenance: a fresh machine-sized install is the installer's choice" {
+    Mock helm { $global:LASTEXITCODE = 1; "" }
+    Mock kubectl {
+      if ($args -contains "--request-timeout=10s") { $global:LASTEXITCODE = 0; @("8 32Gi") }
+      else { $global:LASTEXITCODE = 1; "" }
+    }
+    Get-TrainingResources  | Should -Be "cpu=7,memory=29Gi"
+    Get-TrainingProvenance | Should -Be "installer"
+  }
+
+  It "provenance: an install-time override is a human choice" {
+    $env:TRACEBLOC_TRAINING_RESOURCES = "cpu=4,memory=16Gi"
+    try {
+      Get-TrainingResources  | Should -Be "cpu=4,memory=16Gi"
+      Get-TrainingProvenance | Should -Be "user"
+    } finally { $env:TRACEBLOC_TRAINING_RESOURCES = $null }
+  }
+
+  It "provenance: a carried-forward value with no marker is 'unknown'" {
+    Mock kubectl { $global:LASTEXITCODE = 0; "" }
+    Mock helm {
+      $global:LASTEXITCODE = 0
+      '{"env":{"RESOURCE_LIMITS":"cpu=4,memory=12Gi"}}'
+    }
+    Get-TrainingResources  | Should -Be "cpu=4,memory=12Gi"
+    Get-TrainingProvenance | Should -Be "unknown"
+  }
+
+  It "provenance: an existing 'user' marker SURVIVES re-install" {
+    Mock kubectl { $global:LASTEXITCODE = 0; "" }
+    Mock helm {
+      $global:LASTEXITCODE = 0
+      '{"env":{"RESOURCE_LIMITS":"cpu=4,memory=12Gi","RESOURCE_PROVENANCE":"user"}}'
+    }
+    Get-TrainingProvenance | Should -Be "user"
+  }
+
+  It "provenance: an existing 'installer' marker survives re-install" {
+    Mock kubectl { $global:LASTEXITCODE = 0; "" }
+    Mock helm {
+      $global:LASTEXITCODE = 0
+      '{"env":{"RESOURCE_LIMITS":"cpu=4,memory=12Gi","RESOURCE_PROVENANCE":"installer"}}'
+    }
+    Get-TrainingProvenance | Should -Be "installer"
+  }
+
+  It "provenance: a junk marker degrades to 'unknown', never to a guess" {
+    Mock kubectl { $global:LASTEXITCODE = 0; "" }
+    Mock helm {
+      $global:LASTEXITCODE = 0
+      '{"env":{"RESOURCE_LIMITS":"cpu=4,memory=12Gi","RESOURCE_PROVENANCE":"banana"}}'
+    }
+    Get-TrainingProvenance | Should -Be "unknown"
+  }
+
+  It "provenance: the static-default fallback is still the installer's choice" {
+    Mock helm { $global:LASTEXITCODE = 1; "" }
+    Mock kubectl { $global:LASTEXITCODE = 1; "" }
+    Get-TrainingResources  | Should -Be "cpu=2,memory=8Gi"
+    Get-TrainingProvenance | Should -Be "installer"
+  }
+
   It "a node with unparseable memory does not beat a valid one" {
     Mock helm { $global:LASTEXITCODE = 1; "" }
     Mock kubectl {

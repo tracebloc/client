@@ -1233,6 +1233,113 @@ PY
   [[ "$output" == *"no \$script:TbEnvelopeFloorMemBytes assignment"* ]] || return 1
 }
 
+# ── provenance (backend#2220) ────────────────────────────────────────────────
+#
+# The marker exists because RESOURCE_* has no unset state once helm's
+# --reset-then-reuse-values has seen it, so an installer-written value and a
+# deliberate `tracebloc resources set` are indistinguishable once the value
+# differs from the historic literal. These pin each branch's verdict, because
+# getting one wrong means a future ladder either strands an edge forever or
+# silently overrules a human.
+
+@test "provenance: a fresh machine-sized install is attributed to the installer" {
+  TB_NAMESPACE=tracebloc
+  unset TRACEBLOC_TRAINING_RESOURCES
+  helm() { return 1; }
+  has() { return 0; }
+  kubectl() {
+    case "$*" in
+      *--request-timeout=10s*) printf '8 32Gi\n' ;;
+      *) return 1 ;;
+    esac
+  }
+  run _training_provenance
+  [ "$output" = "installer" ] || return 1
+}
+
+@test "provenance: the static-default fallback is still the installer's choice" {
+  TB_NAMESPACE=tracebloc
+  unset TRACEBLOC_TRAINING_RESOURCES
+  helm() { return 1; }
+  kubectl() { return 1; }
+  has() { case "$1" in kubectl) return 1 ;; *) return 0 ;; esac; }
+  run _training_provenance
+  [ "$output" = "installer" ] || return 1
+}
+
+@test "provenance: TRACEBLOC_TRAINING_RESOURCES is a human choice, not ours" {
+  TB_NAMESPACE=tracebloc
+  export TRACEBLOC_TRAINING_RESOURCES="cpu=4,memory=16Gi"
+  run _training_provenance
+  [ "$output" = "user" ] || return 1
+  unset TRACEBLOC_TRAINING_RESOURCES
+}
+
+@test "provenance: a value carried forward with no marker is 'unknown', not a guess" {
+  TB_NAMESPACE=tracebloc
+  unset TRACEBLOC_TRAINING_RESOURCES
+  # A pre-#2220 release: an envelope, no provenance key.
+  helm() { printf 'env:\n  RESOURCE_LIMITS: cpu=4,memory=12Gi\n'; }
+  kubectl() { return 0; }
+  has() { return 0; }
+  run _training_provenance
+  [ "$output" = "unknown" ] || return 1
+}
+
+@test "provenance: an existing 'user' marker SURVIVES re-install (never downgraded)" {
+  TB_NAMESPACE=tracebloc
+  unset TRACEBLOC_TRAINING_RESOURCES
+  helm() {
+    printf 'env:\n  RESOURCE_LIMITS: cpu=4,memory=12Gi\n  RESOURCE_PROVENANCE: user\n'
+  }
+  kubectl() { return 0; }
+  has() { return 0; }
+  run _training_provenance
+  # The whole point of scope bullet 4: a deliberate choice must not decay to
+  # "unknown" (or worse, to "installer") just because the installer ran again.
+  [ "$output" = "user" ] || return 1
+}
+
+@test "provenance: an existing 'installer' marker survives re-install too" {
+  TB_NAMESPACE=tracebloc
+  unset TRACEBLOC_TRAINING_RESOURCES
+  helm() {
+    printf 'env:\n  RESOURCE_LIMITS: cpu=4,memory=12Gi\n  RESOURCE_PROVENANCE: installer\n'
+  }
+  kubectl() { return 0; }
+  has() { return 0; }
+  run _training_provenance
+  [ "$output" = "installer" ] || return 1
+}
+
+@test "provenance: a junk marker degrades to 'unknown', never to a guess" {
+  TB_NAMESPACE=tracebloc
+  unset TRACEBLOC_TRAINING_RESOURCES
+  helm() {
+    printf 'env:\n  RESOURCE_LIMITS: cpu=4,memory=12Gi\n  RESOURCE_PROVENANCE: banana\n'
+  }
+  kubectl() { return 0; }
+  has() { return 0; }
+  run _training_provenance
+  [ "$output" = "unknown" ] || return 1
+}
+
+@test "provenance: size and marker come from ONE pass and always agree" {
+  TB_NAMESPACE=tracebloc
+  unset TRACEBLOC_TRAINING_RESOURCES
+  helm() { return 1; }
+  has() { return 0; }
+  kubectl() {
+    case "$*" in
+      *--request-timeout=10s*) printf '8 32Gi\n' ;;
+      *) return 1 ;;
+    esac
+  }
+  _resolve_training_size
+  [ "$_TB_TRAINING_SIZE" = "cpu=7,memory=29Gi" ] || return 1
+  [ "$_TB_TRAINING_PROVENANCE" = "installer" ] || return 1
+}
+
 @test "training size: kubectl absent falls back to the static default" {
   TB_NAMESPACE=tracebloc
   unset TRACEBLOC_TRAINING_RESOURCES

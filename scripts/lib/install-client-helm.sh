@@ -160,28 +160,98 @@ _machine_training_resources() {
   printf 'cpu=%d,memory=%dGi' "$(( run_cpu_m / 1000 ))" "$(( run_mem_b / 1024 / 1024 / 1024 ))"
 }
 
-# The per-run training size for the generated values ("cpu=N,memory=MGi").
-_training_resources() {
+# The installed release's RESOURCE_PROVENANCE (nested under env:), or nothing.
+# Same awk shape as _existing_training_resources — `helm get values` strips the
+# quotes our values file writes (the #200 lesson).
+_existing_training_provenance() {
+  local ns="${TB_NAMESPACE:-}" out
+  [[ -n "$ns" ]] || return 0
+  kubectl get namespace "$ns" --request-timeout=5s >/dev/null 2>&1 || return 0
+  out="$(helm get values "$ns" -n "$ns" 2>/dev/null)" || return 0
+  printf '%s\n' "$out" | awk '
+    /^[[:space:]]*RESOURCE_PROVENANCE:/ {
+      sub(/^[^:]*:[[:space:]]*/, ""); gsub(/"/, ""); print; exit
+    }'
+}
+
+# Resolve the per-run training size AND who chose it, in one pass.
+#
+# Split out of _training_resources (which is now a thin wrapper over it) because
+# the two answers come from the same branch decision and the caller needs both.
+# Deriving them separately would mean either running the cluster probes twice or
+# re-implementing the branch logic beside itself — the exact duplication
+# backend#2220 exists to delete.
+#
+# Sets, in the CALLER's scope (so a subshell cannot swallow them):
+#   _TB_TRAINING_SIZE       "cpu=N,memory=MGi"
+#   _TB_TRAINING_PROVENANCE installer | user | unknown
+#
+# Why provenance is needed at all: RESOURCE_* has no unset state once helm's
+# --reset-then-reuse-values has seen it, so an installer-written value and a
+# deliberate `tracebloc resources set` are indistinguishable once the value
+# differs from the historic literal. Without a marker, any future ladder that
+# re-derives sizes would silently overrule human choices. With one, it can
+# re-derive `installer` values and leave the rest alone.
+_resolve_training_size() {
+  _TB_TRAINING_SIZE=""
+  _TB_TRAINING_PROVENANCE=""
+
+  # 1. An explicit install-time override IS a human choice, same as the CLI's.
   if [[ -n "${TRACEBLOC_TRAINING_RESOURCES:-}" ]]; then
-    printf '%s' "$TRACEBLOC_TRAINING_RESOURCES"
+    _TB_TRAINING_SIZE="$TRACEBLOC_TRAINING_RESOURCES"
+    _TB_TRAINING_PROVENANCE="user"
     return 0
   fi
-  local prev
+
+  local prev prev_prov
   prev="$(_existing_training_resources)"
   # The historic static default was the ABSENCE of a choice, not a choice —
   # carrying it would keep the unschedulable 8Gi on exactly the machines this
   # sizing exists to fix (Bugbot). Only a value that differs from it survives.
   if [[ -n "$prev" && "$prev" != "$_TRAINING_DEFAULT" ]]; then
-    printf '%s' "$prev"
+    _TB_TRAINING_SIZE="$prev"
+    prev_prov="$(_existing_training_provenance)"
+    case "$prev_prov" in
+      installer|user)
+        # A marker already on the release is authoritative — preserve it, or a
+        # re-install would quietly downgrade a `user` choice to `unknown`.
+        _TB_TRAINING_PROVENANCE="$prev_prov"
+        ;;
+      *)
+        # Carried forward from before this key existed. We genuinely cannot tell
+        # who set it, and saying so is better than guessing: consumers treat
+        # `unknown` as `user` and leave it alone.
+        _TB_TRAINING_PROVENANCE="unknown"
+        ;;
+    esac
     return 0
   fi
+
+  # 2. Sized to this machine, or 3. the static default — both are OUR choice.
   local sized
   sized="$(_machine_training_resources)"
   if [[ -n "$sized" ]]; then
-    printf '%s' "$sized"
-    return 0
+    _TB_TRAINING_SIZE="$sized"
+  else
+    _TB_TRAINING_SIZE="$_TRAINING_DEFAULT"
   fi
-  printf '%s' "$_TRAINING_DEFAULT"
+  _TB_TRAINING_PROVENANCE="installer"
+  return 0
+}
+
+# The per-run training size for the generated values ("cpu=N,memory=MGi").
+# Thin wrapper kept because it is the tested, readable entry point; the values
+# generation calls _resolve_training_size directly so it gets both answers from
+# a single pass of the cluster probes.
+_training_resources() {
+  _resolve_training_size
+  printf '%s' "$_TB_TRAINING_SIZE"
+}
+
+# Who chose the size _training_resources reports (installer | user | unknown).
+_training_provenance() {
+  _resolve_training_size
+  printf '%s' "$_TB_TRAINING_PROVENANCE"
 }
 
 # YAML single-quoted-scalar escaping, in one place (Saqlain review, #443).
@@ -1440,8 +1510,12 @@ install_client_helm() {
   fi
 
   # backend#1236 (option A): size the default training budget to this machine.
-  local training_size
-  training_size="$(_training_resources)"
+  # One pass, both answers (backend#2220) — the probes are bounded but not free,
+  # and calling the two wrappers separately would run them twice.
+  local training_size training_provenance
+  _resolve_training_size
+  training_size="$_TB_TRAINING_SIZE"
+  training_provenance="$_TB_TRAINING_PROVENANCE"
   log "Training size: ${training_size} (adjust any time with 'tracebloc resources set')"
 
   cat <<EOF > "$values_file"
@@ -1458,6 +1532,10 @@ $([ -n "${CLIENT_ENV:-}" ] && printf '  CLIENT_ENV: "%s"\n' "$(tb_client_env "$C
   # installed release already carries a choice (backend#1236, option A).
   RESOURCE_LIMITS: "${training_size}"
   RESOURCE_REQUESTS: "${training_size}"
+  # Who chose the pair above (backend#2220). Bookkeeping only — it never changes
+  # the envelope. "unknown" means the value was carried forward from before this
+  # key existed and is genuinely unattributable, so consumers treat it as "user".
+  RESOURCE_PROVENANCE: "${training_provenance}"
   GPU_LIMITS: "$gpu_val"
   GPU_REQUESTS: "$gpu_val"
   RUNTIME_CLASS_NAME: ""

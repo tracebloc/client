@@ -4053,6 +4053,45 @@ $script:TbEnvelopeFloorCpuMilli    = 1000
 $script:TbEnvelopeFloorMemBytes    = 2147483648
 # ── end generated ───────────────────────────────────────────────────────────
 
+# Who chose the training size Get-TrainingResources reports: installer | user |
+# unknown (backend#2220). Bash twin: _resolve_training_size / _training_provenance.
+#
+# The marker exists because RESOURCE_* has no unset state once helm's
+# --reset-then-reuse-values has seen it, so an installer-written value and a
+# deliberate `tracebloc resources set` are indistinguishable once the value
+# differs from the historic literal. Without it, a future ladder re-deriving
+# sizes would silently overrule human choices.
+#
+# Deliberately mirrors Get-TrainingResources' precedence rather than calling it:
+# these two answers come from the same branch decision, and the PowerShell
+# bootstrap has no cheap way to return a pair. The Pester suite pins that the two
+# functions agree on every branch, which is what keeps the mirror honest.
+function Get-TrainingProvenance {
+  # 1. An explicit install-time override IS a human choice, same as the CLI's.
+  if ($env:TRACEBLOC_TRAINING_RESOURCES) { return "user" }
+  try {
+    $null = (kubectl get namespace $TB_NAMESPACE --request-timeout=5s 2>$null) | Out-String
+    if ($LASTEXITCODE -eq 0) {
+      $valsJson = (helm get values $TB_NAMESPACE -n $TB_NAMESPACE -o json 2>$null) | Out-String
+      if ($LASTEXITCODE -eq 0 -and $valsJson.Trim()) {
+        $vals = $valsJson | ConvertFrom-Json
+        $prev = $vals.env.RESOURCE_LIMITS
+        if ($prev -and $prev -ne "cpu=2,memory=8Gi") {
+          # A marker already on the release is authoritative -- preserve it, or a
+          # re-install would quietly downgrade a `user` choice to `unknown`.
+          $prevProv = $vals.env.RESOURCE_PROVENANCE
+          if ($prevProv -eq "installer" -or $prevProv -eq "user") { return $prevProv }
+          # Carried forward from before this key existed. We genuinely cannot
+          # tell who set it; consumers treat `unknown` as `user`.
+          return "unknown"
+        }
+      }
+    }
+  } catch {}
+  # 2. Sized to this machine, or 3. the static default -- both are OUR choice.
+  return "installer"
+}
+
 function Get-TrainingResources {
   if ($env:TRACEBLOC_TRAINING_RESOURCES) { return $env:TRACEBLOC_TRAINING_RESOURCES }
   try {
@@ -4954,10 +4993,15 @@ function Install-ClientHelm {
   $datasetPathLine = if ($HOST_DATASET_DIR) { "`n  datasetPath: /tracebloc-data" } else { "" }
   # backend#1236 (option A): size the default training budget to this machine.
   $trainingSize = Get-TrainingResources
+  $trainingProvenance = Get-TrainingProvenance
   Log "Training size: $trainingSize"
   $envBlock += @"
   RESOURCE_LIMITS: "$trainingSize"
   RESOURCE_REQUESTS: "$trainingSize"
+  # Who chose the pair above (backend#2220). Bookkeeping only -- it never changes
+  # the envelope. "unknown" means the value was carried forward from before this
+  # key existed and is genuinely unattributable, so consumers treat it as "user".
+  RESOURCE_PROVENANCE: "$trainingProvenance"
   GPU_LIMITS: "$gpuVal"
   GPU_REQUESTS: "$gpuVal"
   RUNTIME_CLASS_NAME: "$runtimeClass"

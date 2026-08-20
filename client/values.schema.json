@@ -47,6 +47,11 @@
           "pattern": "^(cpu=\\S+,memory=\\S+)?$",
           "description": "Optional explicit resource limits for spawned training jobs. Unset: jobs-manager derives the envelope from node allocatable (75% with cpu=2/memory=8Gi floors, backend#664); older images fall back to 'cpu=2,memory=8Gi'."
         },
+        "RESOURCE_PROVENANCE": {
+          "type": "string",
+          "enum": ["installer", "user", "unknown", ""],
+          "description": "Who chose RESOURCE_REQUESTS/RESOURCE_LIMITS: 'installer' (sized to this machine at install), 'user' (an explicit 'tracebloc resources set'), or 'unknown' (a value carried forward from before this key existed, so provenance is genuinely unknowable). Read-only bookkeeping for backend#2220 - it never changes the envelope, it records who picked it, so a future ladder can re-derive an installer-written value without ever overriding a deliberate human choice."
+        },
         "GPU_REQUESTS": {
           "type": "string",
           "default": "nvidia.com/gpu=1",
