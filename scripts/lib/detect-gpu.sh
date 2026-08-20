@@ -19,8 +19,15 @@ detect_gpu() {
   if has nvidia-smi && nvidia-smi &>/dev/null 2>&1; then
     GPU_VENDOR="nvidia"
     NVIDIA_DRIVER_OK=true
-    success "NVIDIA GPU detected: $(nvidia-smi --query-gpu=name --format=csv,noheader | head -1)"
-    log "Driver: $(nvidia-smi --query-gpu=driver_version --format=csv,noheader | head -1)"
+    # Capture-then-slice, not `nvidia-smi … | head -1` (backend#1778). These run
+    # under install.sh's `set -euo pipefail` by inheritance, and head closes the
+    # pipe after line 1 — one line per GPU is small today, but the shape is the
+    # one being retired fleet-wide and the slice costs nothing.
+    local _gpu_name _gpu_drv
+    _gpu_name="$(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null)"
+    _gpu_drv="$(nvidia-smi --query-gpu=driver_version --format=csv,noheader 2>/dev/null)"
+    success "NVIDIA GPU detected: ${_gpu_name%%$'\n'*}"
+    log "Driver: ${_gpu_drv%%$'\n'*}"
     return
   fi
 

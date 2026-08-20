@@ -21,6 +21,7 @@
 
 setup() {
   SCANNER="${BATS_TEST_DIRNAME}/pipefail-early-close.awk"
+  GATE="${BATS_TEST_DIRNAME}/pipefail-early-close.sh"
   REPO="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
   WORK="$(mktemp -d "${BATS_TMPDIR:-/tmp}/pfhead.XXXXXX")"
 }
@@ -42,13 +43,61 @@ hazardous() {
 # ── the gate ─────────────────────────────────────────────────────────────────
 
 @test "no shell script in the tree pipes into an early-closing reader under errexit+pipefail" {
+  # Through the GATE, not a private find: scripts/sh-files.sh is the repo's one
+  # definition of "which files are shell" (extension, else shebang), and a
+  # hand-rolled `find scripts docs -name '*.sh'` silently skipped
+  # docker/k3s-cuda/build.sh -- which sets `set -euo pipefail` and converted a
+  # `grep | head` for this very ticket -- plus every `.bash` file (Bugbot #763).
   local offenders
-  offenders="$(cd "$REPO" && find scripts docs -name '*.sh' -type f -print0 \
-                 | xargs -0 awk -f "$SCANNER")"
+  offenders="$(bash "$GATE")"
   if [ -n "$offenders" ]; then
     printf 'offenders:\n%s\n' "$offenders" >&2
   fi
   [ -z "$offenders" ] || return 1
+}
+
+@test "the gate reads the repo's own sh-files derivation, so docker/ and .bash are in scope" {
+  # This must exercise the GATE's scope, not sh-files.sh's output: asserting what
+  # sh-files.sh prints passes just as well when the gate ignores it and rolls its
+  # own find (found by mutation -- the first version of this test was vacuous).
+  # So: plant an offender OUTSIDE `scripts/` and `docs/` and require the gate to
+  # find it. sh-files.sh reads `git ls-files`, hence the real git fixture.
+  mkdir -p "$WORK/repo/scripts/tests" "$WORK/repo/docker/img"
+  cp "$SCANNER" "$GATE" "$WORK/repo/scripts/tests/"
+  cp "$REPO/scripts/sh-files.sh" "$WORK/repo/scripts/"
+  printf '#!/usr/bin/env bash\nset -euo pipefail\nls /tmp | head -1\n' > "$WORK/repo/docker/img/build.sh"
+  printf '#!/usr/bin/env bash\nset -euo pipefail\nls /tmp | head -1\n' > "$WORK/repo/scripts/helper.bash"
+  git -C "$WORK/repo" init -q
+  git -C "$WORK/repo" add -A
+  run bash "$WORK/repo/scripts/tests/pipefail-early-close.sh"
+  [[ "$output" == *"docker/img/build.sh"* ]] || return 1
+  [[ "$output" == *"helper.bash"* ]] || return 1
+}
+
+@test "a lib that INHERITS errexit+pipefail from its sourcer is in scope (Bugbot #763)" {
+  # scripts/lib/*.sh set neither option -- install.sh does, and sources them. An
+  # own-`set`-lines-only rule reads the entire installer as safe, so a reverted
+  # `helm repo list | grep -q` stays green while the `if` misbranches. This is
+  # the finding that made the wrapper necessary.
+  mkdir -p "$WORK/scripts/lib" "$WORK/scripts/tests"
+  cp "$SCANNER" "$WORK/scripts/tests/"
+  cp "$GATE" "$WORK/scripts/tests/"
+  printf '#!/usr/bin/env bash\nset -euo pipefail\nsource "${LIB_DIR}/thing.sh"\n' > "$WORK/scripts/main.sh"
+  printf 'thing() {\n  helm repo list | grep -q tracebloc\n}\n' > "$WORK/scripts/lib/thing.sh"
+  run bash "$WORK/scripts/tests/pipefail-early-close.sh" \
+      "$WORK/scripts/main.sh" "$WORK/scripts/lib/thing.sh"
+  [[ "$output" == *"thing.sh"* ]] || return 1
+}
+
+@test "a lib nobody hazardous sources is NOT dragged in (inheritance is not 'everything')" {
+  mkdir -p "$WORK/scripts/lib" "$WORK/scripts/tests"
+  cp "$SCANNER" "$WORK/scripts/tests/"
+  cp "$GATE" "$WORK/scripts/tests/"
+  printf '#!/usr/bin/env bash\nset -uo pipefail\nsource "${LIB_DIR}/lonely.sh"\n' > "$WORK/scripts/caller.sh"
+  printf 'lonely() {\n  producer | grep -q needle\n}\n' > "$WORK/scripts/lib/lonely.sh"
+  run bash "$WORK/scripts/tests/pipefail-early-close.sh" \
+      "$WORK/scripts/caller.sh" "$WORK/scripts/lib/lonely.sh"
+  [ -z "$output" ] || return 1
 }
 
 # ── the scanner is not vacuous ───────────────────────────────────────────────

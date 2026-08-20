@@ -906,7 +906,10 @@ _pf_env_ca_bundle() {
 # Return 0 if an X.509 issuer string names a well-known PUBLIC CA (a normal direct
 # chain); 1 otherwise (a corporate re-signer — i.e. TLS inspection). Pure/testable.
 _pf_issuer_is_public() {
-  printf '%s' "${1:-}" | grep -qiE "DigiCert|Sectigo|Comodo|Let'?s Encrypt|ISRG|Google Trust|GTS |GlobalSign|Amazon|Entrust|GeoTrust|Baltimore|USERTrust|Actalis|Buypass|SSL\.com|Certum|IdenTrust|Microsoft (Azure|RSA|ECC)"
+  # Here-string, not a pipe into grep -q (backend#1778): -q closes on the first
+  # match, and under inherited pipefail that makes the pipeline 141 even on a
+  # MATCH -- inverting this predicate's answer for a long issuer string.
+  grep -qiE "DigiCert|Sectigo|Comodo|Let'?s Encrypt|ISRG|Google Trust|GTS |GlobalSign|Amazon|Entrust|GeoTrust|Baltimore|USERTrust|Actalis|Buypass|SSL\.com|Certum|IdenTrust|Microsoft (Azure|RSA|ECC)" <<<"${1:-}"
 }
 
 # Best-effort affirmative TLS-inspection probe. Echo yes|no|unknown. Reads the

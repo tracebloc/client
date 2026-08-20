@@ -36,8 +36,18 @@
 # Output: one `path:line: code` per offender. Exit status is always 0; the
 #         caller decides (the bats gate treats any output as failure).
 
+# A file runs under errexit+pipefail either because it sets both itself, or
+# because a file that does SOURCES it — `scripts/lib/*.sh` are the whole
+# installer and set neither (Bugbot on #763). The inherited set is resolved by
+# pipefail-early-close.sh and passed in as `hazardous`; asking only the file's
+# own `set` lines read the entire lib tree as safe.
+function inherits(f) {
+  return (hazardous != "" && index(hazardous, " " f " ") > 0) \
+      || (hazardous != "" && index(" " hazardous, " " f " ") > 0)
+}
+
 function flush(  i) {
-  if (nlines > 0 && has_errexit && has_pipefail) {
+  if (nlines > 0 && ((has_errexit && has_pipefail) || inherits(curfile))) {
     for (i = 1; i <= nlines; i++) {
       print curfile ":" lineno[i] ": " text[i]
     }

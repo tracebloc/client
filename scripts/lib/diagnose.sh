@@ -93,7 +93,12 @@ run_diagnose() {
     else
       echo "nproc=$(nproc 2>/dev/null)"; grep -i MemTotal /proc/meminfo 2>/dev/null
     fi
-    df -h 2>/dev/null | head -20
+    # Here-string, not `df -h | head -20` (backend#1778). diagnose.sh runs under
+    # inherited errexit+pipefail, and a k8s host carries hundreds of overlay
+    # mounts: head closes after 20 lines, df takes SIGPIPE, the pipeline is 141
+    # and the whole diagnostic report dies here — on exactly the broken machine
+    # this tool exists for.
+    head -20 <<<"$(df -h 2>/dev/null)"
     if has docker; then
       echo; echo "## docker info"
       docker info 2>/dev/null | grep -iE 'Server Version|Storage Driver|Docker Root|Operating System|Total Memory|CPUs|Cgroup'
