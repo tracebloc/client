@@ -221,7 +221,7 @@ function Test-TelemetryEnabled {
     $raw = [Environment]::GetEnvironmentVariable($name)
     if ($null -eq $raw) { continue }
     $v = ($raw -replace '\s', '').ToLowerInvariant()
-    if ($v -eq '' -or $v -eq '0' -or $v -eq 'false') { continue }
+    if ($v -ceq '' -or $v -ceq '0' -or $v -ceq 'false') { continue }
     return $false
   }
   return $true
@@ -386,8 +386,8 @@ function Add-TelemetryAttr {
     if ($null -eq $Key -or $Key -cnotmatch $script:TbTelemetryKeyRe) { return }
     if ($null -eq $Value) { return }
     $v = [string]$Value
-    if ($v -eq '') { return }
-    if ($Kind -eq 'int') {
+    if ($v -ceq '') { return }
+    if ($Kind -ceq 'int') {
       if ($v -cnotmatch $script:TbTelemetryIntRe) { return }
       $script:TbTelemetryBuf.Add('"' + $Key + '":' + $v)
     } else {
@@ -476,12 +476,36 @@ function Get-TelemetryEvent {
   # $script:ClientState is what Wait-ForClientReady sets; CLIENT_STATE is the
   # bash spelling and is never set on Windows. Still checked against the closed
   # vocabulary afterwards, so a state the installer invents does not reach the record.
-  $state = Get-InstallerValue -ScriptVar 'ClientState' -EnvVar 'CLIENT_STATE'
-  $state = Get-CanonicalMember -Value $state -Set $script:TbTelemetryClientStates
-
+  # Phase first, because the state's validity depends on it (below).
   $phase = $script:TbTelemetryPhase
   $phase = Get-CanonicalMember -Value $phase -Set (Get-TelemetryPhaseNames)
   if (-not $phase) { $phase = 'unknown' }
+
+  # ONLY ONCE THE READINESS GATE HAS RUN. install-k8s.ps1 SEEDS
+  # `$script:ClientState = "starting"` at load (:772), long before anything has
+  # diagnosed the client — where the bash twin leaves `CLIENT_STATE=""`
+  # (summary.sh:29) and fills it only at the gate (:59/:61), for exactly this
+  # reason.
+  #
+  # Get-TelemetryErrorClass prefers state over phase, so reading the seeded value
+  # made EVERY failure in preflight, tools, cluster, register or helm emit
+  # `error.type: not_ready` with `client_state: starting` instead of the
+  # phase-based class. That is a FABRICATED failure category on the paths this
+  # feature exists to measure — and it was a regression introduced by the previous
+  # commit's fix, which traded "the state never works" for "the state always says
+  # starting". The second is worse: the first omitted an attribute, this one
+  # asserts a wrong one. (Bugbot on #782.)
+  #
+  # DERIVED rather than a new marker variable: both real writers of ClientState
+  # live inside Wait-ForClientReady (:5387/:5388), which is also where phase `f`
+  # opens — so "we are in the connect phase" IS "the gate has run", and no second
+  # thing has to be kept in step. A failure during connect with the value still
+  # `starting` is honestly `not_ready`: we waited, and it did not become ready.
+  $state = ''
+  if ($phase -ceq 'connect') {
+    $state = Get-InstallerValue -ScriptVar 'ClientState' -EnvVar 'CLIENT_STATE'
+    $state = Get-CanonicalMember -Value $state -Set $script:TbTelemetryClientStates
+  }
 
   Reset-TelemetryBuffer
   Add-TelemetryAttr 'event.name' $event
@@ -510,7 +534,7 @@ function Get-TelemetryEvent {
     }
   }
 
-  if ($event -eq 'install.run.failed') {
+  if ($event -ceq 'install.run.failed') {
     # §8.4 — a failure MUST carry error.type or it cannot be grouped.
     $class = Get-TelemetryErrorClass -Code $Code -Phase $phase -State $state `
       -RerunHandoff $script:TbTelemetryRerunHandoff

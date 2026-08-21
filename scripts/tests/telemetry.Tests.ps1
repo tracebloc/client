@@ -189,10 +189,12 @@ Describe "Get-TelemetryEvent — the record's shape" {
     (Get-TelemetryEvent -Code 0) | Should -Match '"service\.version":"v1\.9\.55"'
   }
   It "drops an unregistered CLIENT_STATE instead of passing it through" {
+    Start-TelemetryPhase -Letter 'f'   # the readiness gate; state is only read there
     $env:CLIENT_STATE = 'inventing_a_state'
     (Get-TelemetryEvent -Code 0) | Should -Not -Match 'client_state'
   }
   It "keeps a registered CLIENT_STATE" {
+    Start-TelemetryPhase -Letter 'f'   # the readiness gate; state is only read there
     $env:CLIENT_STATE = 'bad_creds'
     (Get-TelemetryEvent -Code 0) | Should -Match '"tracebloc\.install\.client_state":"bad_creds"'
   }
@@ -463,6 +465,7 @@ Describe "closed sets are closed, and canonical" {
   }
 
   It "canonicalises an odd-cased client state rather than passing it through" {
+    Start-TelemetryPhase -Letter 'f'   # the readiness gate; state is only read there
     $env:CLIENT_STATE = 'BAD_CREDS'
     $obj = Get-TelemetryEvent -Code 1 | ConvertFrom-Json
     $obj.attributes.'tracebloc.install.client_state' | Should -BeExactly 'bad_creds'
@@ -471,6 +474,7 @@ Describe "closed sets are closed, and canonical" {
   }
 
   It "still drops a client state that is not in the vocabulary at all" {
+    Start-TelemetryPhase -Letter 'f'   # the readiness gate; state is only read there
     $env:CLIENT_STATE = 'bad_credentials_probably'
     (Get-TelemetryEvent -Code 0) | Should -Not -Match 'client_state'
   }
@@ -486,16 +490,22 @@ Describe "closed sets are closed, and canonical" {
     } finally { Remove-Variable -Name TbErrLoc -Scope Script -ErrorAction SilentlyContinue }
   }
 
-  It "leaves no bare case-insensitive membership operator in the emitter" {
-    # The grep IS the test: this class was introduced twice (`-match`, then `-in`),
-    # so the next one should fail here rather than in review.
+  It "leaves no bare case-insensitive comparison against a string literal" {
+    # The grep IS the test, and its FIRST version had the same hole as the code it
+    # guards: it listed `-in`/`-match` and not `-eq`/`-ne`, so a mutation swapping
+    # `-ceq` for `-eq` survived it. A guard against a class that only knows two
+    # members of the class is the shape this epic keeps finding.
+    #
+    # Scoped to comparisons against a STRING LITERAL on purpose: `-eq 0`,
+    # `-eq $null` and numeric comparisons have no case and must not be flagged, so
+    # a blanket ban would be noise and would get switched off.
     $lib = Get-Content "$PSScriptRoot/../lib/telemetry.ps1" -Raw
-    # Strip comments first — the explanation above deliberately quotes the operator.
+    # Comments stripped: the explanations deliberately quote the bare operators.
     $code = ($lib -split "`n" | Where-Object { $_ -notmatch '^\s*#' }) -join "`n"
-    $code | Should -Not -Match '\s-in\s'
-    $code | Should -Not -Match '\s-notin\s'
-    $code | Should -Not -Match '\s-match\s'
-    $code | Should -Not -Match '\s-notmatch\s'
+    $ops = 'eq|ne|in|notin|match|notmatch|contains|notcontains|like|notlike'
+    $offenders = [regex]::Matches($code, "-($ops)\s+['`"]") |
+      ForEach-Object { $_.Value }
+    $offenders | Should -BeNullOrEmpty -Because "PowerShell's -$ops are case-INSENSITIVE; use the -c variant when comparing against a string literal"
   }
 }
 
@@ -516,6 +526,8 @@ Describe "reading the installer's state, not bash's environment" {
   It "reads the client state the installer actually sets" {
     $script:ClientState = 'bad_creds'
     $env:CLIENT_ENV = 'stg'
+    Start-TelemetryPhase -Letter 'f'   # the readiness gate; state is only read there
+
     try {
       (Get-TelemetryEvent -Code 1) |
         Should -Match '"tracebloc\.install\.client_state":"bad_creds"'
@@ -528,6 +540,8 @@ Describe "reading the installer's state, not bash's environment" {
     # connect-phase failure looked like `not_ready`.
     $script:ClientState = 'image_pull_ca'
     $env:CLIENT_ENV = 'stg'
+    Start-TelemetryPhase -Letter 'f'   # the readiness gate; state is only read there
+
     try {
       (Get-TelemetryEvent -Code 1) | Should -Match '"error\.type":"image_pull_untrusted_ca"'
     } finally { Remove-Variable -Name ClientState -Scope Script -ErrorAction SilentlyContinue }
@@ -552,12 +566,52 @@ Describe "reading the installer's state, not bash's environment" {
     }
   }
 
+  It "ignores the SEEDED client state until the readiness gate has run" -ForEach @(
+    @{ Phase = 'a'; Expect = 'preflight_failed' }
+    @{ Phase = 'b'; Expect = 'prerequisites_failed' }
+    @{ Phase = 'c'; Expect = 'cluster_create_failed' }
+    @{ Phase = 'd'; Expect = 'registration_failed' }
+    @{ Phase = 'e'; Expect = 'helm_install_failed' }
+  ) {
+    # install-k8s.ps1 SEEDS `$script:ClientState = "starting"` at load, long before
+    # anything has diagnosed the client — where the bash twin leaves CLIENT_STATE
+    # empty until the gate. Get-TelemetryErrorClass prefers state over phase, so
+    # reading the seed made EVERY failure before the gate report
+    # `error.type: not_ready`, fabricating a category on the paths this feature
+    # exists to measure. A regression from the previous fix, caught by Bugbot.
+    $script:ClientState = 'starting'
+    $env:CLIENT_ENV = 'stg'
+    try {
+      Start-TelemetryPhase -Letter $Phase
+      $obj = Get-TelemetryEvent -Code 1 | ConvertFrom-Json
+      $obj.attributes.'error.type' | Should -BeExactly $Expect
+      # ...and the seeded value must not be reported as an observation either.
+      $obj.attributes.'tracebloc.install.client_state' | Should -BeNullOrEmpty
+    } finally { Remove-Variable -Name ClientState -Scope Script -ErrorAction SilentlyContinue }
+  }
+
+  It "uses the state once the gate HAS run, including a still-starting client" {
+    # A failure during connect with the value still `starting` is honestly
+    # `not_ready`: we waited, and it did not become ready. The gate is what makes
+    # that an observation rather than a default.
+    $script:ClientState = 'starting'
+    $env:CLIENT_ENV = 'stg'
+    try {
+      Start-TelemetryPhase -Letter 'f'
+      $obj = Get-TelemetryEvent -Code 1 | ConvertFrom-Json
+      $obj.attributes.'error.type' | Should -BeExactly 'not_ready'
+      $obj.attributes.'tracebloc.install.client_state' | Should -BeExactly 'starting'
+    } finally { Remove-Variable -Name ClientState -Scope Script -ErrorAction SilentlyContinue }
+  }
+
   It "prefers the installer's resolved value over the environment" {
     # Precedence, asserted rather than assumed: the installer's value is the one
     # that reflects what this run actually did.
     $script:ClientState = 'connected'
     $env:CLIENT_STATE = 'crash'
     $env:CLIENT_ENV = 'stg'
+    Start-TelemetryPhase -Letter 'f'   # the readiness gate; state is only read there
+
     try {
       (Get-TelemetryEvent -Code 0) | Should -Match '"tracebloc\.install\.client_state":"connected"'
     } finally { Remove-Variable -Name ClientState -Scope Script -ErrorAction SilentlyContinue }
@@ -566,6 +620,7 @@ Describe "reading the installer's state, not bash's environment" {
   It "still falls back to the environment when the installer set nothing" {
     $env:CLIENT_STATE = 'starting'
     $env:CLIENT_ENV = 'stg'
+    Start-TelemetryPhase -Letter 'f'   # the readiness gate; state is only read there
     (Get-TelemetryEvent -Code 0) | Should -Match '"tracebloc\.install\.client_state":"starting"'
   }
 
