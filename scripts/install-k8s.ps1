@@ -158,11 +158,53 @@ function Err($m, $Detail)  {
   $script:OutcomeReported = $true   # Err IS a reported outcome (guards the finally)
   exit 1
 }
-function Step($n, $t, $l)  { Write-Host ""; Write-Host "Step $n/$t" -ForegroundColor Cyan -NoNewline; Write-Host "  $l" -ForegroundColor White; Log "== Step $n/$t : $l ==" }
+# The phase letter mirrors install-k8s.sh's `step_header a|b|c|d|e|f` so both
+# twins report the SAME closed phase vocabulary. It is a letter rather than the
+# step number because the numbers differ between the platforms while the phases
+# do not — Windows has six numbered steps, bash six lettered ones, and they are
+# not a 1:1 sequence (see the call sites).
+function Step($n, $t, $l, $phase)  {
+  Write-Host ""; Write-Host "Step $n/$t" -ForegroundColor Cyan -NoNewline
+  Write-Host "  $l" -ForegroundColor White
+  Log "== Step $n/$t : $l =="
+  if ($phase -and (Get-Command -Name 'Start-TelemetryPhase' -CommandType Function -ErrorAction SilentlyContinue)) {
+    Start-TelemetryPhase -Letter $phase
+  }
+}
 function Log($m)           { if ($script:LOG_FILE) { Add-Content -Path $script:LOG_FILE -Value "[$(Get-Date -Format 'HH:mm:ss')] $m" -Encoding UTF8 -ErrorAction SilentlyContinue } }
 function PromptHeader($m)  { Write-Host ""; Write-Host "  $m" -ForegroundColor White; Log $m }
 function Hint($m)          { Write-Host "  $m" -ForegroundColor DarkGray; Log $m }
 function Has($cmd)         { [bool](Get-Command $cmd -ErrorAction SilentlyContinue) }
+
+# ── Telemetry (backend#2268) ─────────────────────────────────────────────────
+# Sourced right after the logging helpers, mirroring install-k8s.sh:67, so the
+# emitter is available to every step below and can hand its record to `Log`.
+#
+# OPTIONAL BY CONSTRUCTION. A local run from a checkout that predates the lib, or
+# a bootstrap that could not fetch it, must still install: the guard below is why
+# every call site tests for the function before using it. An installer that
+# refused to run because its telemetry was missing would be a strictly worse
+# installer, and that is the whole posture of this feature.
+$script:TbTelemetryLib = Join-Path $PSScriptRoot 'lib/telemetry.ps1'
+if (Test-Path -LiteralPath $script:TbTelemetryLib) {
+  try { . $script:TbTelemetryLib } catch { }
+}
+
+# The exit status this run will end with, as the telemetry emitter sees it.
+# PowerShell gives `finally` no access to the code an `exit` is carrying, so the
+# classifying sites record it here. 0 unless something says otherwise — and the
+# interrupted case is derived in the `finally` from $script:OutcomeReported,
+# which the installer already maintains for exactly that purpose.
+$script:TbExitCode = 0
+
+# Declare the "complete this step and re-run" handoff AND the status it exits
+# with, in one call, so the two can never disagree.
+function Set-TbRerunHandoff {
+  $script:TbExitCode = 2
+  if (Get-Command -Name 'Set-TelemetryRerunHandoff' -CommandType Function -ErrorAction SilentlyContinue) {
+    Set-TelemetryRerunHandoff
+  }
+}
 
 # Top-level fatal handler (#577): convert ANY unhandled terminating error into a
 # clean, branded message — never PowerShell's raw source line + stack trace — then
@@ -1403,11 +1445,17 @@ function Enable-VirtualisationFeatures {
     if ($NoReboot) {
       if ($resumeArmed) { Hint "Reboot when ready; the install resumes at your next sign-in." }
       else              { Hint "Reboot manually, then re-run this installer to continue." }
+      # A DECLARED exit 2: "complete this step and re-run", not a failure. The
+      # handoff is announced at the exit SITE so an exit 2 nobody claimed — grep
+      # on a missing file, curl on a failed init — still books as a failure with
+      # its own error.type instead of being filed as a cancel with none.
+      Set-TbRerunHandoff
       exit 2
     }
     $choice = Read-Host "  Reboot now? [y/N]"
     if ($choice -match "^[Yy]$") { Restart-Computer -Force }
     if (-not $resumeArmed) { Hint "After the reboot, re-run this installer to continue." }
+    Set-TbRerunHandoff   # declared: reboot then re-run (see above)
     exit 2
   }
 
@@ -4643,7 +4691,7 @@ function Get-InstalledClientInfo {
 #   adopted  - cluster already registered: TB_PROV_ID/TB_PROV_NS, no password
 #   fallback - CLI missing/too old -> the legacy manual prompts in the Helm step
 function Invoke-ProvisionClient {
-  Step 5 $script:INSTALL_STEPS.Count "Registering this machine"
+  Step 5 $script:INSTALL_STEPS.Count "Registering this machine" "d"
   $script:TB_PROV_MODE = "fallback"
 
   if (Get-ProvisioningPreset) {
@@ -4791,7 +4839,7 @@ function Invoke-ProvisionClient {
 
 function Install-ClientHelm {
   # -- Step 5/5: Install tracebloc client --
-  Step 6 $script:INSTALL_STEPS.Count "Installing tracebloc client"
+  Step 6 $script:INSTALL_STEPS.Count "Installing tracebloc client" "e"
 
   if (-not (Test-Path $HOST_DATA_DIR)) {
     New-Item -ItemType Directory -Path $HOST_DATA_DIR -Force | Out-Null
@@ -6345,7 +6393,7 @@ function Install-TraceblocCli {
   # credential in Step 4 (browser sign-in + `client create`). A failed CLI
   # install is still non-fatal: Step 4 falls back to the legacy manual-
   # credential flow, so the machine can always be connected.
-  Step 4 $script:INSTALL_STEPS.Count "Install the tracebloc CLI"
+  Step 4 $script:INSTALL_STEPS.Count "Install the tracebloc CLI" "b"
 
   Info "Installing the tracebloc CLI..."
 
@@ -6407,6 +6455,18 @@ if (-not $env:TB_PESTER) {
 $script:OutcomeReported = $false
 trap { Show-FatalError $_; exit 1 }
 try {
+
+# THE RUN-STARTED LATCH (backend#2268), set after the terminal flags have had
+# their chance to dispatch and before Confirm-Config. Placed exactly where
+# install-k8s.sh:172 places it, and for the same two reasons:
+#   * -Help and -Diagnose install nothing, and a `finally` that emitted for them
+#     would book a success for a run that never touched the machine. The bash
+#     twin shipped that bug and it was caught in review of client#747.
+#   * a genuine failure in Confirm-Config IS an install attempt and must still be
+#     reported, which is why the latch goes BEFORE it rather than after.
+if (Get-Command -Name 'Set-TelemetryRunStarted' -CommandType Function -ErrorAction SilentlyContinue) {
+  Set-TelemetryRunStarted
+}
 
 if ($Help) { $script:OutcomeReported = $true; Print-Help }
 if ($Diagnose) { Invoke-DiagnoseBundle; $script:OutcomeReported = $true; exit 0 }  # flag AFTER the long collection: an interrupt mid-diagnose must still hit Show-Interrupted (Bugbot)
@@ -6478,14 +6538,14 @@ if ((-not $Resume) -and $script:InstallState.completed -and (Test-ToolsPresent) 
 Set-ToolTrust
 
 # -- Step 1/6: Check system requirements (honest split from tool install, #422) --
-Step 1 $script:INSTALL_STEPS.Count "Checking system requirements"
+Step 1 $script:INSTALL_STEPS.Count "Checking system requirements" "a"
 # ($GPU_VENDOR / driver were detected before the fast-path so it could decide whether to retry GPU.)
 Test-Preflight
 Enable-VirtualisationFeatures
 
 # -- Step 2/6: Install system tools (~700 MB — Docker Desktop, kubectl, k3d, helm;
 # each names its wait + shows a heartbeat + prints a summary line, #422) --
-Step 2 $script:INSTALL_STEPS.Count "Installing system tools"
+Step 2 $script:INSTALL_STEPS.Count "Installing system tools" "b"
 Install-Winget
 Install-DockerDesktop
 Install-NvidiaContainerToolkit
@@ -6578,7 +6638,7 @@ Install-Kubectl
 Install-K3dAndHelm
 
 # -- Step 3/6: Set up secure compute environment --
-Step 3 $script:INSTALL_STEPS.Count "Setting up secure compute environment"
+Step 3 $script:INSTALL_STEPS.Count "Setting up secure compute environment" "c"
 New-K3dCluster
 # Only verify the GPU on the node when the plugin actually deployed; a failed/
 # CPU-mode deploy returns $false, so skipping verify avoids a ~90s wait and a
@@ -6628,19 +6688,43 @@ $script:OutcomeReported = $true   # Print-Summary reported the outcome (guards t
 Log "Install finished."
 
 # Exit code reflects reality: connected/starting are OK; failures are non-zero.
-if (-not (Test-InstallSucceeded)) { exit 1 }
+if (-not (Test-InstallSucceeded)) { $script:TbExitCode = 1; exit 1 }
 
 } catch {
   # Any crash the run didn't handle itself lands here as a clean message, not a
   # raw stack (#577). Show-FatalError sets $script:OutcomeReported.
   Show-FatalError $_
+  $script:TbExitCode = 1
   exit 1
 } finally {
   # Guaranteed closer: this runs on EVERY exit above. Every reported path (normal
   # finish, Err, caught crash, fast-path, help/diagnose) set OutcomeReported; if it
   # is still false we were interrupted (Ctrl-C / abnormal), so surface a clean line
   # rather than letting the window vanish silently (#577).
-  if (-not $script:OutcomeReported) { Show-Interrupted }
+  if (-not $script:OutcomeReported) {
+    Show-Interrupted
+    # DERIVED, not detected separately. OutcomeReported being false at this point
+    # is already the installer's own definition of "interrupted", so the
+    # telemetry status comes from it rather than from a second Ctrl-C mechanism
+    # that could disagree. 130 is SIGINT's conventional status and is what the
+    # bash twin's `trap 'exit 130' INT` reports, so both twins render the same
+    # `install.run.cancelled`.
+    if ($script:TbExitCode -eq 0) { $script:TbExitCode = 130 }
+  }
+
+  # THE ONE EVENT THIS INSTALL PRODUCES (backend#2268). This `finally` is the
+  # Windows analogue of install_cleanup — the comment above already says it
+  # "mirrors bash's install_cleanup" — so it is the right and only place for it:
+  # it runs on the normal finish, the caught crash, the fast path, the declared
+  # re-run handoff and the interrupt.
+  #
+  # LAST, and it cannot throw: Send-TelemetryOutcome swallows everything
+  # internally, and this guard means a missing lib is not an error either. An
+  # installer that failed at the finish line because telemetry was unhappy would
+  # be a strictly worse installer.
+  if (Get-Command -Name 'Send-TelemetryOutcome' -CommandType Function -ErrorAction SilentlyContinue) {
+    Send-TelemetryOutcome -Code $script:TbExitCode
+  }
 }
 
 }  # end TB_PESTER guard (skipped when the test suite dot-sources this file)

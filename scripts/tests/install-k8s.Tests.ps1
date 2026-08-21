@@ -420,7 +420,11 @@ Describe "Resume-after-reboot wiring (#420 source guards)" {
   It "completes ONLY when connected, and CLEARS a stale completed on any other outcome" {
     $script:PSRC | Should -Match 'if \(Test-InstallConnected\) \{ Set-InstallComplete \} else \{ Clear-InstallCompleted \}'
     # the exit code is deliberately more lenient (starting is OK) but a failure exits 1
-    $script:PSRC | Should -Match 'if \(-not \(Test-InstallSucceeded\)\) \{ exit 1 \}'
+    # — and since backend#2268 the same line records that status for the telemetry
+    # emitter, because PowerShell gives `finally` no access to an exit's code. Both
+    # halves asserted: dropping the assignment would leave the outcome event
+    # reporting 0 for a failed install, which is the one wrong answer that looks fine.
+    $script:PSRC | Should -Match 'if \(-not \(Test-InstallSucceeded\)\) \{ \$script:TbExitCode = 1; exit 1 \}'
   }
   It "does not leave dead per-step stage checkpoints behind (reviewer: stages dropped)" {
     $script:PSRC | Should -Not -Match "Set-StageComplete"
@@ -3978,7 +3982,18 @@ Describe "Graceful failure: guaranteed finally + trap, guarded closer (#577)" {
   It "wraps the main run in try/catch/finally with a last-resort trap" {
     $script:PSRC577b | Should -Match 'trap \{ Show-FatalError \$_; exit 1 \}'
     $script:PSRC577b | Should -Match '\} finally \{'
-    $script:PSRC577b | Should -Match 'if \(-not \$script:OutcomeReported\) \{ Show-Interrupted \}'
+    # The interrupted closer grew a body under backend#2268 (it now also derives the
+    # telemetry status from the same signal), so this matches the CONDITION and the
+    # call rather than a one-line spelling of both. `[\s\S]*?` is bounded by
+    # Show-Interrupted on the next line, so it cannot drift across the whole file.
+    $script:PSRC577b | Should -Match 'if \(-not \$script:OutcomeReported\) \{[\s\S]*?Show-Interrupted'
+    # The telemetry status is DERIVED from OutcomeReported rather than detected
+    # again: two Ctrl-C mechanisms could disagree, and the installer already has one.
+    $script:PSRC577b | Should -Match '\$script:TbExitCode = 130'
+    # And the outcome event is emitted from this finally — the Windows analogue of
+    # install_cleanup. Without this line the emitter exists and is never called,
+    # which is exactly how install-k8s.ps1 came to have no telemetry at all.
+    $script:PSRC577b | Should -Match 'Send-TelemetryOutcome -Code \$script:TbExitCode'
   }
 
   It "marks the outcome reported on every terminal path (guards against a spurious interrupted line)" {

@@ -412,6 +412,77 @@ documented="$(awk '/^print_help\(\)/{f=1} f&&/^HELP$/{f=0} f' "$HELP_SRC" \
 compare "opt-out variables" "$TB_TELEMETRY_OPT_OUT_VARS" "$documented" \
   "the environment variables print_help tells users to set"
 
+# --- 8. THE WINDOWS TWIN ← telemetry.ps1's own arrays -----------------------
+# backend#2268. install-k8s.ps1 had no emitter at all, and the parity harness
+# built after a Windows capability died silently (client#772) could not see it:
+# that harness compares VERDICTS for cases both twins implement, so it cannot
+# express "this twin does not implement the capability".
+#
+# The ps1 emitter therefore holds a SECOND COPY of these closed sets, because a
+# PowerShell script cannot read bash declarations at runtime. That duplication is
+# the restated-not-derived shape this whole file exists to catch, so it is checked
+# here rather than trusted: both sides are parsed, neither is written down, and a
+# value added to one twin alone is a disagreement.
+#
+# NOT the source vocabulary. TB_TELEMETRY_SOURCES lists the eighteen bash files
+# and the ps1 lists its own three — they SHOULD differ, and comparing them would
+# be a check that has to fail. `tracebloc.install.source` is still closed on both
+# sides; it is closed over a different set on each, which is the correct answer
+# for "is this location one of MY scripts".
+TELEMETRY_PS1="$root/scripts/lib/telemetry.ps1"
+[ -r "$TELEMETRY_PS1" ] || fail_closed "cannot read scripts/lib/telemetry.ps1 — the Windows emitter is part of this contract since backend#2268; refusing to report agreement having read one twin"
+
+# ps1_array NAME — the single-quoted members of a `$script:NAME = @( ... )`
+# literal, space-separated.
+#
+# HANDLES BOTH SHAPES, and the one-line one is why this is not a two-line awk.
+# The first version did `next` after matching the opening line, which is correct
+# for a multi-line array and silently wrong for `= @('A', 'B')`: it skipped the
+# only line with the values, never saw a closing paren at line start, and went on
+# to swallow every quoted string in the rest of the file — regexes, log messages,
+# JSON fragments. The emptiness guard below could not catch it because the parse
+# returned MORE than it should, not less. A non-empty wrong answer is the third
+# failure mode, so this prints the opening line too and stops at the paren that
+# closes it, and the caller checks the shape of what came back.
+ps1_array() {
+  awk -v want="$1" '
+    !inside && $0 ~ ("\\$script:" want "[[:space:]]*=[[:space:]]*@\\(") {
+      inside = 1
+      print
+      # A same-line close means the whole array was on this line.
+      if ($0 ~ /\)[[:space:]]*$/) exit
+      next
+    }
+    inside && /^[[:space:]]*\)/ { exit }
+    inside                       { print }
+  ' "$TELEMETRY_PS1" \
+    | grep -oE "'[^']+'" | tr -d "'" | tr '\n' ' '
+}
+
+for pair in \
+  "TbTelemetryPhases|$TB_TELEMETRY_PHASES|install phases" \
+  "TbTelemetryEventNames|$TB_TELEMETRY_EVENT_NAMES|event names" \
+  "TbTelemetryClientStates|$TB_TELEMETRY_CLIENT_STATES|client states" \
+  "TbTelemetryErrorClasses|$TB_TELEMETRY_ERROR_CLASSES|error classes" \
+  "TbTelemetryOptOutVars|$TB_TELEMETRY_OPT_OUT_VARS|opt-out variables"
+do
+  ps1_name="${pair%%|*}"
+  rest="${pair#*|}"
+  bash_val="${rest%%|*}"
+  label="${rest#*|}"
+  ps1_val="$(ps1_array "$ps1_name")"
+  # A parse that found nothing is a finding, not agreement: the awk above depends
+  # on the ps1 keeping `$script:Name = @(` on one line, and a reformat that broke
+  # that would otherwise silently compare two empty sets and report clean.
+  [ -n "$ps1_val" ] || fail_closed "parsed zero values for \$script:$ps1_name out of telemetry.ps1 — the parse is inert, so the twins are not actually being compared"
+  # A runaway parse is as wrong as an empty one and looks nothing like it: bound
+  # the answer, so a reformat that breaks the range scan is a finding rather than
+  # a 400-line diff. No vocabulary here is anywhere near this size.
+  ps1_count="$(printf '%s\n' $ps1_val | grep -c .)"
+  [ "$ps1_count" -le 40 ] || fail_closed "parsed $ps1_count values for \$script:$ps1_name out of telemetry.ps1 — the range scan has run away past the array, so this comparison is meaningless"
+  compare "$label (bash twin)" "$bash_val" "$ps1_val" "telemetry.ps1's \$script:$ps1_name"
+done
+
 if [ "$status" -eq 0 ]; then
   echo "  ok: telemetry vocabularies agree with their producers"
 fi
