@@ -43,7 +43,21 @@ command -v python3 >/dev/null 2>&1 || { echo "[ERROR] python3 required" >&2; exi
 
 echo "== node-agents namespace safety =="
 
-BASE=(--set clientId=x --set clientPassword=y --set storageClass.create=false
+# THE RELEASE NAMESPACE IS PINNED, NOT INFERRED — and this is the bug that got
+# this guard on its first CI run. `helm template` with no `--namespace` takes the
+# namespace from the CALLER'S KUBECONFIG CONTEXT: `tracebloc` on the laptop this
+# was written on, `default` on a runner with no kubeconfig. The comparator then
+# excluded the literal "tracebloc" to find "the other namespace", so in CI it
+# decided the RELEASE namespace was the node-agents one and reported all 35
+# release-namespace resources as orphaned.
+#
+# A guard whose verdict depends on the developer's kube context is worse than no
+# guard: it is green where it is written and red where it runs. Pinned here, and
+# pinned to a value that is deliberately NOT any real namespace, so a literal
+# creeping back in cannot silently match.
+RELEASE_NS="ship-guard-release-ns"
+BASE=(--namespace "$RELEASE_NS"
+      --set clientId=x --set clientPassword=y --set storageClass.create=false
       --set nodeAgents.namespace.create=true)
 
 CMP="$(mktemp -t na-safety.XXXXXX)"
@@ -51,7 +65,7 @@ trap 'rm -f "$CMP"' EXIT
 cat >"$CMP" <<'PY'
 import sys, yaml
 
-label = sys.argv[1]
+label, release_ns = sys.argv[1], sys.argv[2]
 docs = [d for d in yaml.safe_load_all(sys.stdin) if d]
 if not docs:
     sys.exit(f"[ERROR] {label}: rendered nothing")
@@ -62,7 +76,7 @@ if not docs:
 target = None
 for d in docs:
     ns = d.get("metadata", {}).get("namespace")
-    if ns and ns != "tracebloc":
+    if ns and ns != release_ns:
         target = ns
         break
 if target is None:
@@ -93,7 +107,7 @@ for combo in "true true" "true false" "false true" "false false"; do
     --set "resourceMonitor=$rm_val" \
     --set "telemetryCollector.enabled=$tc_val" 2>/dev/null)" || {
       echo "[ERROR] $label: the chart failed to render" >&2; exit 1; }
-  printed="$(printf '%s' "$out" | python3 "$CMP" "$label")"
+  printed="$(printf '%s' "$out" | python3 "$CMP" "$label" "$RELEASE_NS")"
   echo "$printed"
   case "$printed" in *"resources="[1-9]*) populated=$((populated + 1)) ;; esac
 done
