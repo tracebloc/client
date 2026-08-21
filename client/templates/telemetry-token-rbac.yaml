@@ -11,11 +11,27 @@
   GATED ON THE COLLECTOR ALONE, deliberately not on `nodeAgents.namespace`
   differing from the release namespace. The sibling node-agents Roles carry that
   second condition because the release-namespace grant already covers them when
-  the two coincide. This one is not covered either way: jobs-manager's cluster-wide
-  rule in rbac.yaml grants `secrets: [create, get]` and NOT `patch`, in ANY
-  namespace — so without this Role the create succeeds and every refresh 403s
-  wherever the Collector runs. The Role name is release-scoped, so it cannot
-  collide with anything when the namespaces do coincide.
+  the two coincide. This one is not covered either way (see the verb note below).
+  The Role name is release-scoped, so it cannot collide when they do coincide.
+
+  AND NOT ON `tracebloc.nodeAgentsInUse` EITHER, which is worth saying because four
+  siblings — docker-registry-secret.yaml, image-refresh-rbac.yaml,
+  node-agents-namespace.yaml and secrets.yaml — all do gate on it, so its absence
+  here reads as an oversight. It is not: that helper is
+  `or (ne .Values.resourceMonitor false) $tc.enabled`, so `telemetryCollector.enabled`
+  IMPLIES it and the extra condition would be dead. This gates exactly as its own
+  consumer does — telemetry-collector-daemonset.yaml is `{{- if $tc.enabled }}` —
+  rather than more loosely than its siblings. (@saadqbal, review of #784.)
+
+  THE MISSING VERB IS IN BOTH OF jobs-manager's SECRETS RULES, not just the
+  cluster-wide one. `rbac.yaml:62` (the ClusterRole, `clusterScope: true`) and
+  `rbac.yaml:145` (the namespaced Role, the `clusterScope: false` branch) each grant
+  `secrets: ["create", "get"]` with no `patch`. So the create succeeds and every
+  REFRESH 403s on either install shape — an earlier version of this comment said
+  "cluster-wide rule" in the singular and would have sent someone reading the
+  `clusterScope: false` path looking for a difference that is not there. A Role in
+  the node-agents namespace grants `patch` there regardless of which branch renders,
+  which is why the fix is the same for both. (@saadqbal, review of #784.)
 
   WHY `patch` MATTERS ENOUGH TO ADD A ROLE FOR. `bearertokenauth` watches the
   projected file, so a rotated token is picked up with no Collector restart — but
