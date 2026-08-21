@@ -1,0 +1,127 @@
+{{- if .Values.telemetryCollector.enabled }}
+{{- /*
+  The edge Collector — RFC-BACKEND-1872 D6/D7, backend#1906.
+
+  A DaemonSet because container stdout is written per NODE by the kubelet
+  (/var/log/pods), so reading it is a per-node job. A Deployment would see only
+  the node it happened to land on and would report healthy while collecting a
+  fraction of the fleet — the shape of silence this epic exists to remove.
+
+  CLASS A ONLY (D12). The receiver's include globs name the control-plane
+  containers this chart owns. Training and ingestion pods are Class B and stay out
+  until backend#1908 lands content redaction; the bounding that exists today is
+  SECRET redaction, not CONTENT redaction, and raw customer cell values have
+  already reached central telemetry once (backend#1879).
+*/}}
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: {{ include "tracebloc.telemetryCollectorName" . }}
+  namespace: {{ .Values.nodeAgents.namespace.name }}
+  annotations:
+    meta.helm.sh/release-name: {{ .Release.Name }}
+    meta.helm.sh/release-namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "tracebloc.labels" . | nindent 4 }}
+    app: {{ include "tracebloc.telemetryCollectorName" . }}
+spec:
+  selector:
+    matchLabels:
+      app: {{ include "tracebloc.telemetryCollectorName" . }}
+  updateStrategy:
+    type: RollingUpdate
+    rollingUpdate:
+      # Same 10% as resource-monitor and for the same reason: rollout time should
+      # scale with the cluster rather than with node COUNT. Safe here because a
+      # node briefly without a Collector buffers nothing and loses nothing that
+      # kubelet rotation would not have taken anyway — no training pod, ingest Job
+      # or control-plane request depends on it being present.
+      maxUnavailable: "10%"
+  template:
+    metadata:
+      labels:
+        app: {{ include "tracebloc.telemetryCollectorName" . }}
+      annotations:
+        # Roll the pods when the pipeline changes. Without this a `helm upgrade`
+        # that edits the config leaves every node running the old one, and the
+        # Collector reports healthy the whole time.
+        checksum/config: {{ include (print $.Template.BasePath "/telemetry-collector-configmap.yaml") . | sha256sum }}
+    spec:
+      serviceAccountName: {{ include "tracebloc.telemetryCollectorName" . }}
+      securityContext:
+        runAsNonRoot: false
+        seccompProfile:
+          type: RuntimeDefault
+      tolerations:
+        - operator: "Exists"
+      containers:
+        - name: otel-collector
+          {{- $tcDigest := .Values.telemetryCollector.image.digest | default "" }}
+          image: {{ include "tracebloc.image" (dict "repository" .Values.telemetryCollector.image.repository "tag" .Values.telemetryCollector.image.tag "digest" $tcDigest "registry" .Values.telemetryCollector.image.registry) | quote }}
+          imagePullPolicy: IfNotPresent
+          args: ["--config=/conf/config.yaml"]
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+            # READ-ONLY ROOT, with the two writable paths mounted explicitly: the
+            # file_storage queue and /tmp. A Collector that can write anywhere on a
+            # customer's node is a larger footprint than this job needs.
+            readOnlyRootFilesystem: true
+          env:
+            # Corporate egress proxy (client-runtime#154). The exporter is Go and
+            # honours HTTPS_PROXY/NO_PROXY ambiently, so the CONNECT tunnel the
+            # egress proxy already permits to the backend is the path this takes.
+            # Renders nothing when HTTP_PROXY_HOST is unset.
+            {{- include "tracebloc.proxyEnv" . | nindent 12 }}
+          volumeMounts:
+            - name: config
+              mountPath: /conf
+              readOnly: true
+            - name: token
+              mountPath: /etc/tracebloc/telemetry
+              readOnly: true
+            # The node's container stdout. READ-ONLY — the Collector must never be
+            # able to modify or truncate the logs it reads.
+            - name: host-logs
+              mountPath: {{ .Values.telemetryCollector.hostLogsPath }}
+              readOnly: true
+            - name: queue
+              mountPath: /var/lib/tracebloc/telemetry
+            - name: tmp
+              mountPath: /tmp
+          resources:
+            {{- toYaml .Values.telemetryCollector.resources | nindent 12 }}
+      volumes:
+        - name: config
+          configMap:
+            name: {{ include "tracebloc.telemetryCollectorName" . }}
+        - name: token
+          secret:
+            secretName: {{ .Values.telemetryCollector.tokenSecret.name }}
+            # OPTIONAL, and this is the difference between "buffers until the token
+            # arrives" and "CrashLoopBackOff on every node". jobs-manager writes
+            # this Secret; a Collector deployed before it exists must wait, not
+            # fail — telemetry may never be the reason a node looks unhealthy.
+            optional: true
+        - name: host-logs
+          hostPath:
+            path: {{ .Values.telemetryCollector.hostLogsPath }}
+            type: DirectoryOrCreate
+        - name: queue
+          # hostPath, per D7: the queue must survive the pod restart that is the
+          # common case during a backend outage, and an emptyDir does not. D7 also
+          # decides the bound is a DISK ALARM rather than a volume limit, because
+          # PV `capacity` enforces nothing on hostPath — so the byte cap in the
+          # exporter config is the thing doing the bounding.
+          hostPath:
+            path: /var/lib/tracebloc/{{ .Release.Name }}/telemetry
+            type: DirectoryOrCreate
+        - name: tmp
+          emptyDir: {}
+      terminationGracePeriodSeconds: 30
+      {{- if include "tracebloc.useImagePullSecrets" . }}
+      imagePullSecrets:
+        - name: {{ include "tracebloc.registrySecretName" . }}
+      {{- end }}
+{{- end }}

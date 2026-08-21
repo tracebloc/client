@@ -815,3 +815,39 @@ can be kept above the configured helm timeout.
 {{- end -}}
 {{- $total -}}
 {{- end -}}
+
+{{/*
+  tracebloc.telemetryCollectorName — the edge Collector's resource name
+  (backend#1906). Same shape as tracebloc.resourceMonitorName: release-scoped, so
+  two releases on one cluster do not collide in the shared node-agents namespace.
+*/}}
+{{- define "tracebloc.telemetryCollectorName" -}}
+{{- printf "%s-telemetry-collector" .Release.Name | trunc 63 | trimSuffix "-" -}}
+{{- end -}}
+
+{{/*
+  tracebloc.backendUrl — the tracebloc API base URL for this CLIENT_ENV, with a
+  trailing slash.
+
+  Resolved through `tracebloc.clientEnv` rather than the raw value, so a
+  documented alias (`staging`) lands on the same host as its canonical form and
+  cannot silently route an install at the wrong backend — the backend#1745 defect.
+
+  A FOURTH COPY OF THIS MAPPING, and saying so is the point. It also lives in
+  `scripts/lib/install-client-helm.sh::_backend_url`,
+  `scripts/lib/preflight.sh::_pf_backend_host`, and inline in
+  `templates/egress-reachability-check.yaml`. Helm cannot read the shell ones and
+  they cannot read this, so there is no single source available here; this is the
+  single source for TEMPLATES, and pointing the reachability check at it is a
+  refactor that belongs in its own PR rather than riding on a feature.
+*/}}
+{{- define "tracebloc.backendUrl" -}}
+{{- $env := include "tracebloc.clientEnv" . -}}
+{{- if eq $env "dev" -}}
+https://dev-api.tracebloc.io/
+{{- else if eq $env "stg" -}}
+https://stg-api.tracebloc.io/
+{{- else -}}
+https://api.tracebloc.io/
+{{- end -}}
+{{- end -}}

@@ -1,0 +1,22 @@
+{{- if .Values.telemetryCollector.enabled }}
+{{- /*
+  The Collector's identity — backend#1906.
+
+  NO ClusterRole AND NO Role, deliberately. It reads container stdout off the
+  node's filesystem through `filelog`; it never calls the Kubernetes API, so it
+  needs no API permissions at all. resource-monitor has RBAC because it polls
+  metrics.k8s.io — a different job. Granting "the usual" read verbs here would be
+  privilege this workload has no use for, on a DaemonSet that runs on every node
+  of a customer's cluster.
+
+  It does need the token Secret, and that is mounted rather than fetched, so the
+  ServiceAccount is only an identity for the pod.
+*/}}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ include "tracebloc.telemetryCollectorName" . }}
+  namespace: {{ .Values.nodeAgents.namespace.name }}
+  labels:
+    {{- include "tracebloc.labels" . | nindent 4 }}
+{{- end }}
