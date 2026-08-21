@@ -24,7 +24,15 @@
   prevents race conditions where a DaemonSet from a concurrent install
   lands in the not-yet-relabelled namespace.
 */}}
-{{- if and (ne .Values.resourceMonitor false) .Values.nodeAgents.namespace.create (ne .Values.nodeAgents.namespace.name .Release.Namespace) }}
+{{- /*
+  THE TELEMETRY COLLECTOR IS A SECOND TENANT OF THIS NAMESPACE (backend#1906), so
+  the gate can no longer be resource-monitor alone. With `resourceMonitor: false`
+  and `telemetryCollector.enabled: true` the Collector's DaemonSet targeted a
+  namespace this chart never created — and the mirrored pull Secret with it. Every
+  dependent resource must share the feature's gate. (Bugbot on #779.)
+*/}}
+{{- $tcNs := default (dict) .Values.telemetryCollector -}}
+{{- if and (or (ne .Values.resourceMonitor false) $tcNs.enabled) .Values.nodeAgents.namespace.create (ne .Values.nodeAgents.namespace.name .Release.Namespace) }}
 apiVersion: v1
 kind: Namespace
 metadata:
