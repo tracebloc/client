@@ -342,7 +342,7 @@ lint-warnings:
 #
 # `|`-separated because each guard is a multi-word command. One entry per guard,
 # and this is the only place they are written down.
-DRIFT_GUARDS := scripts/gen-manifest.sh --check|scripts/check-facts.sh --check|bash scripts/check-style.sh|bash scripts/tests/check-drift.sh|bash scripts/tests/env-vocabulary-agreement.sh|bash scripts/tests/telemetry-vocabulary-agreement.sh|bash scripts/tests/k3s-components-agreement.sh|bash scripts/tests/collector-class-a-agreement.sh|bash scripts/tests/openshift-scc-coverage.sh
+DRIFT_GUARDS := scripts/gen-manifest.sh --check|scripts/check-facts.sh --check|bash scripts/check-style.sh|bash scripts/tests/check-drift.sh|bash scripts/tests/env-vocabulary-agreement.sh|bash scripts/tests/telemetry-vocabulary-agreement.sh|bash scripts/tests/k3s-components-agreement.sh|bash scripts/tests/collector-class-a-agreement.sh|bash scripts/tests/openshift-scc-coverage.sh|bash scripts/tests/collector-offsets-persisted.sh
 
 # EXPORTED, not interpolated. The recipe reads $$DRIFT_GUARDS from the
 # environment; it used to do `guards='$(DRIFT_GUARDS)'`, which Make expands
