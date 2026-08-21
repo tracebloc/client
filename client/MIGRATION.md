@@ -2,6 +2,74 @@
 
 This guide explains how to migrate from the legacy per-platform charts (`aks/`, `bm/`, `eks/`, `oc/`) to the unified `client/` chart.
 
+## Upgrading to 1.9.49 — `RESOURCE_PROVENANCE`: who chose the training envelope
+
+**Nothing to do.** This adds a bookkeeping key. It never changes the training
+envelope, and an upgrade cannot move any edge's training size.
+
+### What it is
+
+`env.RESOURCE_PROVENANCE` records **who** chose `RESOURCE_REQUESTS` /
+`RESOURCE_LIMITS`:
+
+| Value | Meaning |
+|---|---|
+| `installer` | sized to this machine at install time |
+| `user` | an explicit `tracebloc resources set`, or a `TRACEBLOC_TRAINING_RESOURCES` install-time override |
+| `unknown` | carried forward from before this key existed — genuinely unattributable |
+
+It renders only when the envelope itself is set, and defaults to `unknown` on
+any release that predates it.
+
+### Why it has to exist
+
+`RESOURCE_*` has **no unset state** once Helm has seen it. The fleet auto-upgrade
+CronJob runs `helm upgrade --reset-then-reuse-values`, which re-applies the
+release's *user-supplied* values forever, and the installer reconcile path does
+the same. So a value written once at install time is re-applied indefinitely.
+
+That means an installer-written envelope and a deliberate human choice are
+**indistinguishable** once the value differs from the historic
+`cpu=2,memory=8Gi` literal — the installer carries any differing value forward
+precisely because it cannot tell them apart. Without a marker, any future
+automatic-sizing work would have to either strand every already-pinned edge or
+silently overrule operators who had deliberately set a size. Neither is
+acceptable, so the marker records the difference from now on (backend#2220).
+
+**`unknown` must be treated as `user`.** It means we do not know, and guessing
+`installer` would risk overruling a human. Existing edges will therefore report
+`unknown` and keep their current size until someone opts in explicitly.
+
+### If you want an edge to size itself from the node again
+
+Clearing the envelope is an **explicit, deliberate** act — a chart change cannot
+do it for you, because `--reset-then-reuse-values` re-applies the stored
+user-supplied value on every upgrade. Setting the keys to `null` removes them
+(Helm deletes null-valued keys during value coalescing), which drops all three
+env vars and lets `jobs-manager` derive the envelope from node allocatable:
+
+```bash
+helm upgrade "$NAMESPACE" tracebloc/tracebloc -n "$NAMESPACE" \
+  --reset-then-reuse-values \
+  --set env.RESOURCE_LIMITS=null \
+  --set env.RESOURCE_REQUESTS=null \
+  --set env.RESOURCE_PROVENANCE=null
+```
+
+Verify the three vars are gone before relying on it:
+
+```bash
+kubectl -n "$NAMESPACE" get deploy -l app.kubernetes.io/component=jobs-manager -o yaml | grep RESOURCE_
+```
+
+> **Read this before you run it.** Node-derived sizing is currently gated OFF by
+> default (`DERIVE_JOB_ENVELOPE`, backend#2167): an envelope sized to ~75% of a
+> node fits only **one** training job per node, so a second concurrent
+> experiment cannot schedule. With the gate off, clearing the keys returns the
+> edge to the fixed `cpu=2,memory=8Gi` literal — which on a machine with less
+> than ~8 GiB allocatable **cannot schedule at all**. Do not clear the keys on a
+> small machine.
+
 ## Upgrading to 1.9.6 — the prod ingestor pin moved into chart defaults; `values-prod.yaml` removed
 
 The digest that pins the spawned ingestion image on prod now lives in the

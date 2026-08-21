@@ -4030,24 +4030,120 @@ function Get-ImageMirrorYaml {
   return $block
 }
 
-function Get-TrainingResources {
-  if ($env:TRACEBLOC_TRAINING_RESOURCES) { return $env:TRACEBLOC_TRAINING_RESOURCES }
+# ── envelope contract (GENERATED — do not hand-edit) ─────────────────────────
+#
+# backend#2220 / RFC-BACKEND-664 §P0. The bash twin
+# (lib/install-client-helm.sh::_machine_training_resources) carries the same
+# five values, and cli's set.go used to carry them a third time. One source of
+# truth now: client-runtime/envelope_contract.json, arithmetic in
+# node_sizing.envelope_from_allocatable.
+#
+# Embedded rather than read: this bootstrap is SIGNED and must not fetch
+# anything unsigned at install time, the same reason the GPU node-image build
+# inputs are embedded as base64 here (#616/#633). The embed is kept honest by
+# the drift guard, not by this comment — install-k8s.Tests.ps1 replays the
+# contract's golden vectors through Get-TrainingResources, and
+# scripts/gen-envelope-embed.sh --check verifies the constants in CI.
+#
+# Regenerate with: scripts/gen-envelope-embed.sh
+$script:TbEnvelopeContractVersion  = 1
+$script:TbEnvelopeOverheadCpuMilli = 1000
+$script:TbEnvelopeOverheadMemBytes = 3221225472
+$script:TbEnvelopeFloorCpuMilli    = 1000
+$script:TbEnvelopeFloorMemBytes    = 2147483648
+# ── end generated ───────────────────────────────────────────────────────────
+
+# Set by Get-TrainingResources when the machine is readable but below the
+# training floor. The WARNING lives in the caller, so Get-TrainingResources keeps
+# returning nothing but the size -- its Pester suite compares the whole return.
+$script:TbTrainingUndersized    = $false
+$script:TbTrainingUnschedulable = $false
+
+# Who chose the training size Get-TrainingResources reports: installer | user |
+# unknown (backend#2220). Bash twin: _resolve_training_size / _training_provenance.
+#
+# The marker exists because RESOURCE_* has no unset state once helm's
+# --reset-then-reuse-values has seen it, so an installer-written value and a
+# deliberate `tracebloc resources set` are indistinguishable once the value
+# differs from the historic literal. Without it, a future ladder re-deriving
+# sizes would silently overrule human choices.
+#
+# Deliberately mirrors Get-TrainingResources' precedence rather than calling it:
+# these two answers come from the same branch decision, and the PowerShell
+# bootstrap has no cheap way to return a pair. The Pester suite pins that the two
+# functions agree on every branch, which is what keeps the mirror honest.
+# ONE lookup of the installed release's carried training values, shared by
+# Get-TrainingResources and Get-TrainingProvenance (backend#2220, review on #768).
+#
+# Returns @{ Size; Provenance } when the release carries a real operator choice,
+# or $null when it does not -- including when the read FAILS. That $null is the
+# whole point. The two resolvers used to perform their own separate
+# `helm get values`, each wrapped in its own bare `catch {}`, so if the size read
+# succeeded and carried a live RESOURCE_LIMITS while the provenance read then
+# threw -- a wedged API, a ConvertFrom-Json hiccup, anything the catch eats --
+# the generated values pinned that carried envelope as `installer`. A future
+# ladder trusting that label would re-derive and overrule what may well have been
+# a deliberate human choice.
+#
+# Sharing the lookup makes that structurally impossible: either it succeeds and
+# both resolvers read the same carried pair, or it fails and NEITHER takes the
+# carry path, so the size is machine-derived and `installer` is then the correct
+# answer. Size and provenance can no longer disagree.
+#
+# This is also the shape the bash twin already had -- _training_provenance calls
+# _resolve_training_size and reads $_TB_TRAINING_PROVENANCE -- so the two
+# installers stop diverging by construction, which is the class client#766
+# exists to remove. And it drops a redundant `helm get values` per install.
+function Get-CarriedTrainingValues {
+  if (-not $TB_NAMESPACE) { return $null }
   try {
-    # helm get has no request timeout — gate it behind a bounded probe so a
+    # helm get has no request timeout -- gate it behind a bounded probe so a
     # wedged API degrades instead of hanging values generation (Bugbot). A
     # missing namespace also means there is no release to carry.
     $null = (kubectl get namespace $TB_NAMESPACE --request-timeout=5s 2>$null) | Out-String
-    if ($LASTEXITCODE -eq 0) {
-      $valsJson = (helm get values $TB_NAMESPACE -n $TB_NAMESPACE -o json 2>$null) | Out-String
-      if ($LASTEXITCODE -eq 0 -and $valsJson.Trim()) {
-        $prev = ($valsJson | ConvertFrom-Json).env.RESOURCE_LIMITS
-        # The historic static default was the ABSENCE of a choice — carrying it
-        # would keep the unschedulable 8Gi on exactly the machines this sizing
-        # exists to fix (Bugbot). Only a differing value survives re-install.
-        if ($prev -and $prev -ne "cpu=2,memory=8Gi") { return $prev }
-      }
-    }
-  } catch {}
+    if ($LASTEXITCODE -ne 0) { return $null }
+    $valsJson = (helm get values $TB_NAMESPACE -n $TB_NAMESPACE -o json 2>$null) | Out-String
+    if ($LASTEXITCODE -ne 0 -or -not $valsJson.Trim()) { return $null }
+    $vals = $valsJson | ConvertFrom-Json
+    $prev = $vals.env.RESOURCE_LIMITS
+    # The historic static default was the ABSENCE of a choice -- carrying it
+    # would keep the unschedulable 8Gi on exactly the machines this sizing
+    # exists to fix (Bugbot). Only a differing value survives re-install.
+    if (-not $prev -or $prev -eq "cpu=2,memory=8Gi") { return $null }
+    # A marker already on the release is authoritative -- preserve it, or a
+    # re-install would quietly downgrade a `user` choice to `unknown`. Anything
+    # unrecognised, including absent, is `unknown`: we genuinely cannot tell who
+    # set it, and consumers treat `unknown` as `user`.
+    $prevProv = $vals.env.RESOURCE_PROVENANCE
+    $prov = if ($prevProv -eq "installer" -or $prevProv -eq "user") { $prevProv } else { "unknown" }
+    return @{ Size = $prev; Provenance = $prov }
+  } catch { return $null }
+}
+
+# Who chose the training size Get-TrainingResources reports: installer | user |
+# unknown. Bash twin: _resolve_training_size / _training_provenance.
+#
+# Pass -Carried/-CarriedResolved to reuse a lookup the caller already did; with
+# no arguments it does its own, so existing callers and tests are unaffected.
+function Get-TrainingProvenance {
+  param([hashtable]$Carried, [switch]$CarriedResolved)
+  # 1. An explicit install-time override IS a human choice, same as the CLI's.
+  if ($env:TRACEBLOC_TRAINING_RESOURCES) { return "user" }
+  $c = if ($CarriedResolved) { $Carried } else { Get-CarriedTrainingValues }
+  if ($c) { return $c.Provenance }
+  # 2. Sized to this machine, or 3. the static default -- both are OUR choice.
+  return "installer"
+}
+
+function Get-TrainingResources {
+  param([hashtable]$Carried, [switch]$CarriedResolved)
+  if ($env:TRACEBLOC_TRAINING_RESOURCES) { return $env:TRACEBLOC_TRAINING_RESOURCES }
+  # The carry branch, via the ONE shared lookup (see Get-CarriedTrainingValues):
+  # a failed read yields $null here, so we fall through to machine sizing and
+  # Get-TrainingProvenance independently answers `installer` -- consistent by
+  # construction rather than by two functions happening to agree.
+  $c = if ($CarriedResolved) { $Carried } else { Get-CarriedTrainingValues }
+  if ($c) { return $c.Size }
   try {
     # Bounded: a wedged API server must degrade to the static default, never
     # hang values generation (Bugbot). jsonpath extracts ONLY cpu/memory — no
@@ -4056,28 +4152,77 @@ function Get-TrainingResources {
     # (Bugbot r5).
     $lines = kubectl get nodes --request-timeout=10s -o jsonpath='{range .items[*]}{.status.allocatable.cpu}{" "}{.status.allocatable.memory}{"\n"}{end}' 2>$null
     if ($LASTEXITCODE -eq 0 -and $lines) {
-      $bestMemB = [long]0; $bestCpuM = [long]0
+      $bestMemB = [long]0; $bestCpuM = [long]0; $seen = $false
       foreach ($ln in @($lines)) {
         $parts = "$ln".Trim() -split '\s+'
         if ($parts.Count -lt 2) { continue }
         $cpuRaw = $parts[0]
         $memRaw = $parts[1]
+        # $null, NOT 0, for a quantity we cannot parse. The contract's
+        # skipped_nodes says unparseable allocatable is SKIPPED, and the bash
+        # twin does exactly that with an explicit `|| continue`. Coercing to 0
+        # and ranking the node anyway was a real bug the old memory-first order
+        # happened to hide -- a memB of 0 could never win. Ranking cpu-first
+        # exposes it: a node with a good core count and a memory unit we do not
+        # speak would take the anchor, fail the memory floor, and drop the whole
+        # machine to the literal while a sibling node was perfectly sizeable
+        # (Bugbot #766).
         $cpuM = if ($cpuRaw -match '^(\d+)m$') { [long]$Matches[1] }
                 elseif ($cpuRaw -match '^\d+$') { [long]$cpuRaw * 1000 }
-                else { [long]0 }
+                else { $null }
         $memB = if ($memRaw -match '^(\d+)Ki$') { [long]$Matches[1] * 1KB }
                 elseif ($memRaw -match '^(\d+)Mi$') { [long]$Matches[1] * 1MB }
                 elseif ($memRaw -match '^(\d+)Gi$') { [long]$Matches[1] * 1GB }
                 elseif ($memRaw -match '^\d+$') { [long]$memRaw }
-                else { [long]0 }
-        if ($memB -gt $bestMemB -or ($memB -eq $bestMemB -and $cpuM -gt $bestCpuM)) {
+                else { $null }
+        if ($null -eq $cpuM -or $null -eq $memB) { continue }
+        # Contract ANCHOR_LARGEST, tie-break (cpu, memory). This used to rank
+        # (memory, cpu) while cli's nodeLarger ranked (cpu, memory), so the two
+        # anchored on DIFFERENT nodes on a heterogeneous cluster. One order now.
+        # Installer clusters are single-node k3d, so this is a field no-op.
+        if (-not $seen -or $cpuM -gt $bestCpuM -or ($cpuM -eq $bestCpuM -and $memB -gt $bestMemB)) {
           $bestMemB = $memB; $bestCpuM = $cpuM
         }
+        $seen = $true
       }
-      $runCpuM = $bestCpuM - 1000
-      $runMemB = $bestMemB - 3GB
-      if ($runCpuM -ge 1000 -and $runMemB -ge 2GB) {
+      # No usable node: bestCpuM stays 0, so the floor check below fails and we
+      # fall through to the single literal return at the end of the function --
+      # deliberately NOT an early return with its own copy of that literal.
+      # [long]0, not 0: a bare 0 binds [math]::Max's (Int32, Int32) overload and
+      # then fails to convert a byte count over 2^31 ("Value was either too large
+      # or too small for an Int32"). The enclosing `catch {}` swallows that into
+      # a silent fall-through to the literal, so the machine sizing would just
+      # quietly stop working on every box with more than ~2 GiB of headroom.
+      $runCpuM = [long][math]::Max([long]0, $bestCpuM - $script:TbEnvelopeOverheadCpuMilli)
+      $runMemB = [long][math]::Max([long]0, $bestMemB - $script:TbEnvelopeOverheadMemBytes)
+      # Below the contract floor the machine is NOT VIABLE — fall through to the
+      # literal, which is itself a known bug on such machines (backend#2220,
+      # fixed separately so it stays revertable).
+      if ($runCpuM -ge $script:TbEnvelopeFloorCpuMilli -and $runMemB -ge $script:TbEnvelopeFloorMemBytes) {
         return "cpu=$([math]::Floor($runCpuM / 1000)),memory=$([math]::Floor($runMemB / 1GB))Gi"
+      }
+      # Below the contract floor. This used to fall straight through to the
+      # cpu=2,memory=8Gi literal, which on a ~4 GiB machine is LARGER THAN THE
+      # MACHINE — so every training pod stayed Pending forever. And this
+      # installer reaches exactly those machines: the memory preflight only WARNS
+      # on Windows (it hard-fails on Linux), while its own note says a job's
+      # limit is ~8 GiB+. So write the honest remainder when it is a requestable
+      # shape: it FITS, so a run can be scheduled and fail for a reason instead
+      # of hanging (backend#2220).
+      #
+      # $seen guards this: with no parseable node, bestCpuM is 0 and the
+      # remainder is meaningless — that is the unreadable case, which keeps the
+      # literal because we genuinely cannot do better.
+      if ($seen) {
+        $cores = [long][math]::Floor($runCpuM / 1000)
+        $gib   = [long][math]::Floor($runMemB / 1GB)
+        if ($cores -ge 1 -and $gib -ge 1) {
+          $script:TbTrainingUndersized = $true
+          return "cpu=$cores,memory=${gib}Gi"
+        }
+        # Not even a requestable shape (cpu=0 is not a training request), so
+        # there is no honest number to write. Keep the literal; the caller warns.
+        $script:TbTrainingUnschedulable = $true
       }
     }
   } catch {}
@@ -4312,6 +4457,94 @@ function Test-ApiReachable {
   param([int]$TimeoutSeconds = 5)
   $null = (kubectl get --raw='/readyz' --request-timeout="${TimeoutSeconds}s" 2>$null) | Out-String
   return ($LASTEXITCODE -eq 0)
+}
+
+# The APIService the resource-monitor DaemonSet template `lookup`s at render time
+# (client/templates/resource-monitor-daemonset.yaml). One constant, read by the
+# wait below and asserted against the template by the suite, so a chart-side
+# rename can't leave this installer politely waiting on a name nobody uses.
+$script:MetricsApiServiceName = "v1beta1.metrics.k8s.io"
+
+# Stamped from scripts/spec/facts.env by scripts/check-facts.sh -- do not hand-edit.
+# bash waits for the same APIService behind the same TB_METRICS_WAIT_S knob (#553), so
+# the two defaults are ONE fact: a value raised here and not there would make one
+# documented knob mean two different things. CI gates the pair (#435).
+$script:MetricsWaitTimeout = 120
+
+# Get-MetricsWaitSeconds -- the metrics-wait budget, parsed in exactly one place
+# so the poll loop and anything else that bounds it cannot disagree.
+#
+# TB_METRICS_WAIT_S is deliberately the SAME knob name the bash installer reads
+# (lib/install-client-helm.sh::_wait_for_metrics_apiservice): one support
+# instruction -- "set TB_METRICS_WAIT_S=300 and re-run" -- has to work on either
+# host. It keeps the local knob shape (a TB_-prefixed, unit-suffixed integer
+# validated with the same `-match '^\d+$'` idiom as TB_CREATE_TIMEOUT_MIN) but in
+# seconds, because the budget is 120s and minutes cannot express it. The default
+# is the facts.env fact above, not a second copy of the number.
+#
+# Anything that is not a plain non-negative integer -- empty, "abc", "-5", "12.5"
+# -- falls back to the default rather than silently becoming 0 and disabling the
+# wait. The digit cap is not cosmetic: `[int]` on a 20-digit string THROWS, and a
+# typo'd knob must not take the install down.
+function Get-MetricsWaitSeconds {
+  param([string]$Value = $env:TB_METRICS_WAIT_S, [int]$Default = $script:MetricsWaitTimeout)
+  if ("$Value" -match '^\d{1,6}$') { return [int]$Value }
+  return $Default
+}
+
+# client#553, ported from lib/install-client-helm.sh::_wait_for_metrics_apiservice.
+#
+# On a freshly created k3d cluster, k3s applies its bundled metrics-server -- and
+# the metrics.k8s.io APIService with it -- shortly AFTER the API server reports
+# ready; `k3d cluster create --wait` gates on node/serverlb readiness, not on
+# bundled addons. The resource-monitor DaemonSet template `lookup`s that
+# APIService at RENDER time and calls `fail` when it is absent, which aborts the
+# ENTIRE helm release, not just the DaemonSet. So helm must not render inside
+# that window. Windows/WSL2 is the slowest host this installer supports and so
+# the likeliest to land in it -- and it had no wait at all.
+#
+# Best-effort by construction: when the APIService never registers this returns
+# $false and the caller carries on, so a genuinely missing metrics-server still
+# reaches the chart's render-time guard and gets ITS actionable error (install
+# metrics-server, or set resourceMonitor: false) instead of a vague stall here.
+function Wait-MetricsApiService {
+  param(
+    # -1 = "not specified" -> take the budget from TB_METRICS_WAIT_S/the default.
+    [int]$TimeoutSec = -1,
+    [int]$IntervalSec = 3
+  )
+  if ($TimeoutSec -lt 0) { $TimeoutSec = Get-MetricsWaitSeconds }
+  # A native command that isn't on PATH throws instead of setting $LASTEXITCODE,
+  # so probe for it rather than polling an exception to the deadline. Not a
+  # failure of the install: we simply cannot tell, and the chart still guards.
+  if (-not (Has kubectl)) {
+    Log "kubectl is not on PATH -- skipping the metrics API wait; the chart still guards at render time."
+    return $false
+  }
+  $deadline = (Get-Date).AddSeconds($TimeoutSec)
+  $announced = $false
+  while ((Get-Date) -lt $deadline) {
+    $null = (kubectl get apiservice $script:MetricsApiServiceName --request-timeout=10s 2>$null) | Out-String
+    if ($LASTEXITCODE -eq 0) {
+      # Registered. Give it a moment to also report Available -- but never fail on
+      # merely-slow: the template only needs the APIService to EXIST at render
+      # time, so a non-zero here changes nothing about what happens next.
+      $null = (kubectl wait --for=condition=Available "apiservice/$script:MetricsApiServiceName" --timeout=30s 2>$null) | Out-String
+      Log "metrics.k8s.io APIService registered -- proceeding with helm install."
+      return $true
+    }
+    # RFC-0002 §2, progress on every wait: bash runs this whole loop behind
+    # spin_cmd_bounded. Announce ONCE, and only after a probe has actually missed,
+    # so the common fast path (already registered) stays silent while the slow
+    # WSL2 box this exists for is told why it is sitting here for two minutes.
+    if (-not $announced) {
+      Info "Waiting for the cluster metrics API to register..."
+      $announced = $true
+    }
+    if ($IntervalSec -gt 0) { Start-Sleep -Seconds $IntervalSec }
+  }
+  Log "metrics.k8s.io APIService not registered after ${TimeoutSec}s -- proceeding; the chart guards if metrics-server is genuinely absent."
+  return $false
 }
 
 # Enumerate what client (if any) is already installed on this cluster — the
@@ -4816,11 +5049,28 @@ function Install-ClientHelm {
   # backend#743: relocate the dataset PV onto the network mount when HOST_DATASET_DIR is set.
   $datasetPathLine = if ($HOST_DATASET_DIR) { "`n  datasetPath: /tracebloc-data" } else { "" }
   # backend#1236 (option A): size the default training budget to this machine.
-  $trainingSize = Get-TrainingResources
+  # One lookup, both answers -- mirrors the bash twin's single _resolve_training_size
+  # pass and removes the second `helm get values` per install (review on #768).
+  $carried = Get-CarriedTrainingValues
+  $trainingSize = Get-TrainingResources -Carried $carried -CarriedResolved
+  $trainingProvenance = Get-TrainingProvenance -Carried $carried -CarriedResolved
+  # Mirrors the bash twin's warning, and lives HERE for the same reason: the
+  # sizing functions' returns are compared whole by their tests.
+  if ($script:TbTrainingUndersized) {
+    Warn "This machine is below the size a training run wants: $trainingSize is all that is left after the platform's reservation."
+    Hint "The client will install and run, but training jobs may be killed for memory. ~16 GB of RAM is the recommendation for training locally."
+  } elseif ($script:TbTrainingUnschedulable) {
+    Warn "This machine is too small to host a training run at all; keeping the default $trainingSize."
+    Hint "Training jobs will stay Pending until this edge has more memory -- the client itself will still run, ingest and report."
+  }
   Log "Training size: $trainingSize"
   $envBlock += @"
   RESOURCE_LIMITS: "$trainingSize"
   RESOURCE_REQUESTS: "$trainingSize"
+  # Who chose the pair above (backend#2220). Bookkeeping only -- it never changes
+  # the envelope. "unknown" means the value was carried forward from before this
+  # key existed and is genuinely unattributable, so consumers treat it as "user".
+  RESOURCE_PROVENANCE: "$trainingProvenance"
   GPU_LIMITS: "$gpuVal"
   GPU_REQUESTS: "$gpuVal"
   RUNTIME_CLASS_NAME: "$runtimeClass"
@@ -4902,6 +5152,14 @@ $envBlock
   $pvRelease = $TB_NAMESPACE
   if ($adoptedReuse -and $existingName) { $pvRelease = $existingName }
   Initialize-ReleaseDataDirs -Release $pvRelease
+
+  # client#553: wait out the metrics-server APIService registration race before
+  # helm renders. Above BOTH helm paths on purpose -- the adopted reconcile
+  # re-renders the chart too, so it hits the same render-time `fail`. The return
+  # value is discarded deliberately: a wait that runs out must NOT stop the
+  # install, because the chart's own guard is the thing that produces the
+  # actionable error when metrics-server is genuinely absent.
+  $null = Wait-MetricsApiService
 
   Write-Host ""
   if ($adoptedReuse) {

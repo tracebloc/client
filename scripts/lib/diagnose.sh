@@ -93,6 +93,11 @@ run_diagnose() {
     else
       echo "nproc=$(nproc 2>/dev/null)"; grep -i MemTotal /proc/meminfo 2>/dev/null
     fi
+    # A pipe on purpose (backend#1778). run_diagnose sets `set +e` at its top so
+    # no step can abort the bundle, so the 141 the conversion guards against
+    # cannot fire here — and `head -20` STREAMS, where capturing df in full would
+    # block the whole bundle on an unresponsive NFS/overlay mount. No marker
+    # needed: the guard reads `set +e` and does not flag this region.
     df -h 2>/dev/null | head -20
     if has docker; then
       echo; echo "## docker info"

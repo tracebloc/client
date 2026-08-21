@@ -47,6 +47,11 @@
           "pattern": "^(cpu=\\S+,memory=\\S+)?$",
           "description": "Optional explicit resource limits for spawned training jobs. Unset: jobs-manager derives the envelope from node allocatable (75% with cpu=2/memory=8Gi floors, backend#664); older images fall back to 'cpu=2,memory=8Gi'."
         },
+        "RESOURCE_PROVENANCE": {
+          "type": "string",
+          "enum": ["installer", "user", "unknown", ""],
+          "description": "Who chose RESOURCE_REQUESTS/RESOURCE_LIMITS: 'installer' (sized to this machine at install), 'user' (an explicit 'tracebloc resources set'), or 'unknown' (a value carried forward from before this key existed, so provenance is genuinely unknowable). Read-only bookkeeping for backend#2220 - it never changes the envelope, it records who picked it, so a future ladder can re-derive an installer-written value without ever overriding a deliberate human choice."
+        },
         "GPU_REQUESTS": {
           "type": "string",
           "default": "nvidia.com/gpu=1",
@@ -1205,7 +1210,7 @@
         "object",
         "null"
       ],
-      "description": "Optional. Omit entirely or set null for public images (no secret or imagePullSecrets). Only create when set and create is true.",
+      "description": "Optional. Omit entirely or set null for public images (no secret or imagePullSecrets). Either create: true with the credentials below, or existingSecret naming a Secret you made yourself -- never both.",
       "properties": {
         "create": {
           "type": "boolean",
@@ -1224,9 +1229,24 @@
         },
         "email": {
           "type": "string"
+        },
+        "existingSecret": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Name of a kubernetes.io/dockerconfigjson Secret you created yourself. Mutually exclusive with create: the chart references this Secret and never writes it, because it has no credentials to write it with. You must create it in every namespace that pulls -- the release namespace, plus nodeAgents.namespace.name while resourceMonitor is true, plus gpu.devicePlugin.namespace while that is enabled -- since the chart cannot mirror a Secret whose contents it does not have."
         }
       },
       "allOf": [
+        {
+          "if": {
+            "required": ["existingSecret"]
+          },
+          "then": {
+            "properties": {
+              "create": { "const": false }
+            }
+          }
+        },
         {
           "if": {
             "properties": {

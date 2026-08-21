@@ -1,0 +1,115 @@
+suite: GPU env declaration reaches jobs-manager (backend#2216)
+# THREE SITUATIONS, NOT TWO. jobs-manager's `_gpu_available_from_env`
+# (client-runtime#80) distinguishes an EXPLICIT EMPTY GPU_LIMITS ("no GPU on
+# this cluster") from an ABSENT one ("nobody said; assume a GPU, the legacy
+# default"). client#343 gated both vars on a NON-EMPTY GPU_LIMITS, which
+# collapsed the first case into the second: a declared CPU-only edge emitted
+# nothing and therefore looked exactly like a GPU install.
+#
+# The cost of that collapse, measured on client-runtime#355: every job on such
+# an edge requested `nvidia.com/gpu`, wedged Pending, and waited out the 600s
+# scale-from-zero grace before being respun on CPU -- once per experiment.
+#
+# The gate this file pins existed unguarded from #343 until now: no chart test
+# asserted the GPU env vars at all, in either direction.
+templates:
+  - templates/jobs-manager-deployment.yaml
+set:
+  clientId: "test-id"
+  clientPassword: "test"
+tests:
+  - it: a GPU install emits both vars with the configured value
+    set:
+      env:
+        GPU_LIMITS: "nvidia.com/gpu=2"
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: GPU_LIMITS
+            value: "nvidia.com/gpu=2"
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: GPU_REQUESTS
+            value: "nvidia.com/gpu=1"
+
+  - it: a DECLARED CPU-only install emits an explicit empty, not silence
+    # THE FIX. `GPU_LIMITS: ""` is the operator saying "no GPU here". Emitting
+    # nothing threw that declaration away and jobs-manager fell back to
+    # assuming a GPU.
+    set:
+      env:
+        GPU_LIMITS: ""
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: GPU_LIMITS
+            value: ""
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: GPU_REQUESTS
+            value: ""
+
+  - it: a declared CPU-only install never emits the phantom GPU default
+    # WHY #343 EXISTED, still pinned. The phantom GPU in the CLI resources view
+    # came from the "nvidia.com/gpu=1" DEFAULT, not from the var being present,
+    # so an explicit empty does not bring it back.
+    set:
+      env:
+        GPU_LIMITS: ""
+    asserts:
+      - notContains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: GPU_REQUESTS
+            value: "nvidia.com/gpu=1"
+
+  - it: an absent key still emits NEITHER var — "can't tell" is not "no GPU"
+    # The other half of the distinction, and the reason the gate is `hasKey`
+    # rather than unconditional. A chart-direct install that never mentions GPU
+    # must keep the legacy assume-a-GPU default, which absence is what encodes.
+    asserts:
+      - notContains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: GPU_LIMITS
+            value: ""
+      - notContains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: GPU_REQUESTS
+            value: ""
+
+  - it: both vars travel together on the pods-monitor container too
+    # A lone GPU request with no matching limit is rejected by the API server,
+    # and the second container carries its own copy of the gate — so the two
+    # sites are asserted separately rather than assumed to agree.
+    set:
+      env:
+        GPU_LIMITS: ""
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[1].env
+          content:
+            name: GPU_LIMITS
+            value: ""
+      - contains:
+          path: spec.template.spec.containers[1].env
+          content:
+            name: GPU_REQUESTS
+            value: ""
+
+  - it: an explicit GPU_REQUESTS still wins over both defaults
+    set:
+      env:
+        GPU_LIMITS: "nvidia.com/gpu=4"
+        GPU_REQUESTS: "nvidia.com/gpu=4"
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: GPU_REQUESTS
+            value: "nvidia.com/gpu=4"

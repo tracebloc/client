@@ -415,6 +415,28 @@ spec:
         # --reset-then-reuse-values upgrades.
         - name: JOB_IMAGE_HOST
           value: {{ printf "%s/" (dig "imageRegistry" "docker.io" (.Values.global | default dict) | default "docker.io") | quote }}
+        {{- if include "tracebloc.useImagePullSecrets" . }}
+        # IMAGE_PULL_SECRET_NAME is the pull Secret jobs-manager puts on the
+        # TRAINING pods it spawns (backend#2119). It has to be injected rather
+        # than written into client-runtime's job.yaml, because the name is
+        # release-dependent: a literal in that repo cannot be right for every
+        # release, and the one it carried ("regcred", unqualified) was right for
+        # none. Every training pod named a Secret the kubelet could not retrieve
+        # and fell back to an ANONYMOUS pull of the ~2.7 GB training image — so
+        # on a mirrored install (JOB_IMAGE_HOST above) the training pod was the
+        # one pod in the release NOT using the credential the operator supplied.
+        #
+        # Rendered from the same helper as every imagePullSecrets block in this
+        # chart, and gated on the same condition that creates the Secret, so the
+        # three cannot disagree. Absent when no registry is configured: the
+        # runtime reads that as "pull publicly" and sets no imagePullSecrets at
+        # all, which is the honest declaration of a public pull.
+        #
+        # Skew-safe both ways: a client-runtime older than backend#2119 ignores
+        # this var, and a newer one treats its absence as "public".
+        - name: IMAGE_PULL_SECRET_NAME
+          value: {{ include "tracebloc.registrySecretName" . | quote }}
+        {{- end }}
         - name: CLIENT_ENV
           value: {{ include "tracebloc.clientEnv" . | quote }}
         # Where the resource-monitor DaemonSet lives, for the heartbeat version
@@ -442,20 +464,50 @@ spec:
           value: {{ if hasKey .Values.env "RESOURCE_REQUESTS" }}{{ .Values.env.RESOURCE_REQUESTS | quote }}{{ else }}"cpu=2,memory=8Gi"{{ end }}
         - name: RESOURCE_LIMITS
           value: {{ if hasKey .Values.env "RESOURCE_LIMITS" }}{{ .Values.env.RESOURCE_LIMITS | quote }}{{ else }}"cpu=2,memory=8Gi"{{ end }}
+        # backend#2220: WHO chose the pair above. Bookkeeping only -- it never
+        # changes the envelope. It rides inside the same gate on purpose: a
+        # provenance marker with no envelope to describe is noise, and pinning
+        # them together means the unset recipe below clears all three at once.
+        #
+        # `unknown` is the honest default when the installer carries a value
+        # forward from before this key existed: an installer-written value and a
+        # deliberate `tracebloc resources set` are indistinguishable once the
+        # value differs from the old cpu=2,memory=8Gi literal, so guessing would
+        # risk overruling a human. Consumers MUST treat `unknown` as `user`.
+        - name: RESOURCE_PROVENANCE
+          value: {{ if hasKey .Values.env "RESOURCE_PROVENANCE" }}{{ .Values.env.RESOURCE_PROVENANCE | quote }}{{ else }}"unknown"{{ end }}
         {{- end }}
-        # #343: only stamp the GPU vars when a GPU is actually configured. A
-        # CPU-only install writes GPU_LIMITS: "" (empty), and a chart-direct
-        # install may omit the key entirely — in both cases emitting the var
-        # (or its "nvidia.com/gpu=1" default) surfaces a phantom GPU in the
-        # CLI resources view. GPU_REQUESTS is gated on the SAME condition so a
-        # CPU-only install emits NEITHER var, and a GPU install emits BOTH
-        # (a lone GPU request with no matching limit is rejected by the API
-        # server). Render only for a non-empty GPU_LIMITS value.
-        {{- if (default "" .Values.env.GPU_LIMITS) }}
+        # #343: never stamp a PHANTOM GPU. Emitting the "nvidia.com/gpu=1"
+        # default on a CPU-only install surfaced a GPU that was not there in
+        # the CLI resources view. GPU_REQUESTS and GPU_LIMITS share one gate so
+        # an install emits BOTH or NEITHER (a lone GPU request with no matching
+        # limit is rejected by the API server).
+        #
+        # THE GATE IS `hasKey`, NOT NON-EMPTINESS (backend#2216). #343 keyed on
+        # a non-empty GPU_LIMITS, which collapsed two different situations into
+        # one silence:
+        #
+        #   * the operator DECLARED CPU-only     -> `GPU_LIMITS: ""` is present
+        #   * nobody said anything (chart-direct) -> the key is absent
+        #
+        # jobs-manager reads those differently by design: an explicit empty
+        # means "no GPU on this cluster" (`_gpu_available_from_env`,
+        # client-runtime#80) while absence preserves the legacy assume-a-GPU
+        # default. Omitting the var in BOTH cases threw the declaration away, so
+        # a declared CPU-only edge looked identical to a GPU one — every job
+        # requested `nvidia.com/gpu`, wedged Pending, and waited out the 600s
+        # scale-from-zero grace before being respun on CPU, once per experiment
+        # (the cost recorded on client-runtime#355).
+        #
+        # So: key present -> emit it, empty value included. Key absent -> emit
+        # neither, which is still "can't tell" and still the legacy default.
+        # The phantom GPU stays fixed either way, because what caused it was
+        # the "nvidia.com/gpu=1" DEFAULT, and an explicit empty is not that.
+        {{- if hasKey .Values.env "GPU_LIMITS" }}
         - name: GPU_REQUESTS
-          value: {{ if hasKey .Values.env "GPU_REQUESTS" }}{{ .Values.env.GPU_REQUESTS | quote }}{{ else }}"nvidia.com/gpu=1"{{ end }}
+          value: {{ if hasKey .Values.env "GPU_REQUESTS" }}{{ .Values.env.GPU_REQUESTS | quote }}{{ else if (default "" .Values.env.GPU_LIMITS) }}"nvidia.com/gpu=1"{{ else }}""{{ end }}
         - name: GPU_LIMITS
-          value: {{ .Values.env.GPU_LIMITS | quote }}
+          value: {{ .Values.env.GPU_LIMITS | default "" | quote }}
         {{- end }}
         - name: RUNTIME_CLASS_NAME
           value: {{ if hasKey .Values.env "RUNTIME_CLASS_NAME" }}{{ .Values.env.RUNTIME_CLASS_NAME | quote }}{{ else }}""{{ end }}
@@ -472,7 +524,24 @@ spec:
         - name: SINGLE_NODE
           value: {{ if hasKey .Values.env "SINGLE_NODE" }}{{ .Values.env.SINGLE_NODE | quote }}{{ else }}{{ (default dict .Values.hostPath).enabled | default false | quote }}{{ end }}
         {{- range $key, $value := .Values.env }}
-        {{- if and (ne $key "CLIENT_ENV") (ne $key "RESOURCE_REQUESTS") (ne $key "RESOURCE_LIMITS") (ne $key "GPU_REQUESTS") (ne $key "GPU_LIMITS") (ne $key "RUNTIME_CLASS_NAME") (ne $key "SINGLE_NODE") (ne $key "CLIENT_ID") (not (has $key $proxyKeys)) $value }}
+        {{- /* IMAGE_PULL_SECRET_NAME is excluded so `env.IMAGE_PULL_SECRET_NAME`
+             cannot render it twice with the passthrough copy winning (Asad on
+             client#751). The consequence is sharper than JOB_IMAGE_HOST's, which
+             has the same shape and is deliberately left alone: a slow pull is
+             recoverable, whereas client-runtime treats a pull-secret name that
+             does not resolve as PERMANENT and dead-letters the experiment. The
+             supported way to name your own Secret is `dockerRegistry.existingSecret`,
+             which every consumer reads through one helper; an env override would
+             be a second reader of the same rule.
+
+             Excluded from pods-monitor's list below too, so a stray value is
+             inert everywhere rather than only where it would have done harm.
+             pods-monitor never renders this var and never reads it -- job.yaml
+             is read by jobs_manager.py, which runs in THIS container -- so
+             passing it through there put an ignored value in an unrelated
+             process's environment and nothing more. Nobody can depend on that:
+             the variable does not exist before this change. */}}
+        {{- if and (ne $key "CLIENT_ENV") (ne $key "RESOURCE_REQUESTS") (ne $key "RESOURCE_LIMITS") (ne $key "RESOURCE_PROVENANCE") (ne $key "GPU_REQUESTS") (ne $key "GPU_LIMITS") (ne $key "RUNTIME_CLASS_NAME") (ne $key "SINGLE_NODE") (ne $key "CLIENT_ID") (ne $key "IMAGE_PULL_SECRET_NAME") (not (has $key $proxyKeys)) $value }}
         - name: {{ $key }}
           value: {{ $value | quote }}
         {{- end }}
@@ -531,16 +600,29 @@ spec:
           value: {{ if hasKey .Values.env "RESOURCE_REQUESTS" }}{{ .Values.env.RESOURCE_REQUESTS | quote }}{{ else }}"cpu=2,memory=8Gi"{{ end }}
         - name: RESOURCE_LIMITS
           value: {{ if hasKey .Values.env "RESOURCE_LIMITS" }}{{ .Values.env.RESOURCE_LIMITS | quote }}{{ else }}"cpu=2,memory=8Gi"{{ end }}
+        # backend#2220: WHO chose the pair above. Bookkeeping only -- it never
+        # changes the envelope. It rides inside the same gate on purpose: a
+        # provenance marker with no envelope to describe is noise, and pinning
+        # them together means the unset recipe below clears all three at once.
+        #
+        # `unknown` is the honest default when the installer carries a value
+        # forward from before this key existed: an installer-written value and a
+        # deliberate `tracebloc resources set` are indistinguishable once the
+        # value differs from the old cpu=2,memory=8Gi literal, so guessing would
+        # risk overruling a human. Consumers MUST treat `unknown` as `user`.
+        - name: RESOURCE_PROVENANCE
+          value: {{ if hasKey .Values.env "RESOURCE_PROVENANCE" }}{{ .Values.env.RESOURCE_PROVENANCE | quote }}{{ else }}"unknown"{{ end }}
         {{- end }}
         # #343: only stamp the GPU vars when a GPU is actually configured (see
-        # the api container above) — GPU_REQUESTS and GPU_LIMITS share one gate
+        # the api container above) — GPU_REQUESTS and GPU_LIMITS share one gate,
+        # `hasKey` since backend#2216 (see the api container for why)
         # so a CPU-only install emits neither (no phantom GPU in the CLI view)
         # and a GPU install emits both (request == limit).
-        {{- if (default "" .Values.env.GPU_LIMITS) }}
+        {{- if hasKey .Values.env "GPU_LIMITS" }}
         - name: GPU_REQUESTS
-          value: {{ if hasKey .Values.env "GPU_REQUESTS" }}{{ .Values.env.GPU_REQUESTS | quote }}{{ else }}"nvidia.com/gpu=1"{{ end }}
+          value: {{ if hasKey .Values.env "GPU_REQUESTS" }}{{ .Values.env.GPU_REQUESTS | quote }}{{ else if (default "" .Values.env.GPU_LIMITS) }}"nvidia.com/gpu=1"{{ else }}""{{ end }}
         - name: GPU_LIMITS
-          value: {{ .Values.env.GPU_LIMITS | quote }}
+          value: {{ .Values.env.GPU_LIMITS | default "" | quote }}
         {{- end }}
         - name: RUNTIME_CLASS_NAME
           value: {{ if hasKey .Values.env "RUNTIME_CLASS_NAME" }}{{ .Values.env.RUNTIME_CLASS_NAME | quote }}{{ else }}""{{ end }}
@@ -551,7 +633,7 @@ spec:
         - name: SINGLE_NODE
           value: {{ if hasKey .Values.env "SINGLE_NODE" }}{{ .Values.env.SINGLE_NODE | quote }}{{ else }}{{ (default dict .Values.hostPath).enabled | default false | quote }}{{ end }}
         {{- range $key, $value := .Values.env }}
-        {{- if and (ne $key "CLIENT_ENV") (ne $key "RESOURCE_REQUESTS") (ne $key "RESOURCE_LIMITS") (ne $key "GPU_REQUESTS") (ne $key "GPU_LIMITS") (ne $key "RUNTIME_CLASS_NAME") (ne $key "SINGLE_NODE") (ne $key "CLIENT_ID") (not (has $key $proxyKeys)) $value }}
+        {{- if and (ne $key "CLIENT_ENV") (ne $key "RESOURCE_REQUESTS") (ne $key "RESOURCE_LIMITS") (ne $key "RESOURCE_PROVENANCE") (ne $key "GPU_REQUESTS") (ne $key "GPU_LIMITS") (ne $key "RUNTIME_CLASS_NAME") (ne $key "SINGLE_NODE") (ne $key "CLIENT_ID") (ne $key "IMAGE_PULL_SECRET_NAME") (not (has $key $proxyKeys)) $value }}
         - name: {{ $key }}
           value: {{ $value | quote }}
         {{- end }}

@@ -1561,14 +1561,344 @@ Describe "Get-TrainingResources" {
     }
     Get-TrainingResources | Should -Be "cpu=11,memory=3Gi"
   }
-  It "below-floor machine falls back to the static default" {
+  # CHANGED BEHAVIOR (backend#2220). This asserted that a 2c/4Gi machine gets
+  # "cpu=2,memory=8Gi" -- an envelope LARGER than the machine, on which no
+  # training pod can ever schedule. That was the bug, pinned as if it were the
+  # contract. It now gets the honest remainder, which fits.
+  #
+  # The old expectation is not lost: "unreadable cluster falls back to the static
+  # default" just below still covers the case where the literal IS right, because
+  # we genuinely cannot see the machine. Cannot-see vs too-small is the whole
+  # distinction this change introduces; they used to be the same answer.
+  It "below-floor machine gets the honest remainder, not an unschedulable literal" {
     Mock helm { $global:LASTEXITCODE = 1; "" }
     Mock kubectl { $global:LASTEXITCODE = 0; @("2 4Gi") }
-    Get-TrainingResources | Should -Be "cpu=2,memory=8Gi"
+    Get-TrainingResources | Should -Be "cpu=1,memory=1Gi"
   }
   It "unreadable cluster falls back to the static default" {
     Mock helm { $global:LASTEXITCODE = 1; "" }
     Mock kubectl { $global:LASTEXITCODE = 1; "" }
+    Get-TrainingResources | Should -Be "cpu=2,memory=8Gi"
+  }
+}
+
+Describe "Envelope contract golden vectors (backend#2220)" {
+  # The PowerShell side of the ticket's definition of done, mirroring the bats
+  # suite's replay. The arithmetic has ONE definition — client-runtime's
+  # node_sizing.envelope_from_allocatable — and this file cannot call it, so it
+  # proves it still AGREES with it by replaying the contract's golden vectors
+  # through the real Get-TrainingResources.
+  #
+  # Unlike bats, PowerShell HAS a JSON parser, so this reads the vendored
+  # contract directly rather than the flattened bash table. Same source, two
+  # readers: if the two disagree, one of them has drifted.
+
+  BeforeAll {
+    $script:ContractPath = Join-Path $PSScriptRoot "fixtures/envelope_contract.json"
+    $script:Contract = Get-Content $script:ContractPath -Raw | ConvertFrom-Json
+  }
+  BeforeEach {
+    $script:TB_NAMESPACE = "tracebloc"
+    $env:TRACEBLOC_TRAINING_RESOURCES = $null
+    # backend#2220: Get-TrainingResources SETS these, so they must be cleared
+    # between tests or a previous undersized case would leak a $true into the
+    # next assertion. Folded into this Describe's ONE BeforeEach -- Pester 6
+    # allows only one per block.
+    $script:TbTrainingUndersized    = $false
+    $script:TbTrainingUnschedulable = $false
+  }
+  AfterEach  { $env:TRACEBLOC_TRAINING_RESOURCES = $null }
+
+  It "the vendored contract is readable and carries vectors" {
+    $script:Contract.contract_version | Should -BeGreaterOrEqual 1
+    @($script:Contract.vectors.single_node).Count | Should -BeGreaterThan 0
+  }
+
+  It "the embedded constants match the vendored contract" {
+    # The one that catches a hand-edit to the generated block above
+    # Get-TrainingResources. scripts/gen-envelope-embed.sh is the authority;
+    # this is the in-suite mirror so a PowerShell-only reviewer sees it too.
+    $script:TbEnvelopeContractVersion  | Should -Be $script:Contract.contract_version
+    $script:TbEnvelopeOverheadCpuMilli | Should -Be $script:Contract.overhead.cpu_millicores
+    $script:TbEnvelopeOverheadMemBytes | Should -Be $script:Contract.overhead.memory_bytes
+    $script:TbEnvelopeFloorCpuMilli    | Should -Be $script:Contract.floor.cpu_millicores
+    $script:TbEnvelopeFloorMemBytes    | Should -Be $script:Contract.floor.memory_bytes
+  }
+
+  It "every single-node golden vector replays" {
+    Mock helm { $global:LASTEXITCODE = 1; "" }
+    $failures = @()
+    foreach ($v in $script:Contract.vectors.single_node) {
+      # What the installer must PRINT for this vector (backend#2220):
+      #
+      #   unparseable        -> the literal. We cannot read the machine, so the
+      #                         historical default is the best available answer.
+      #   viable             -> the contract's rendering.
+      #   below the floor    -> the contract's rendering ANYWAY, as long as it is
+      #                         a requestable shape (>= 1 core and >= 1 GiB).
+      #                         It fits; the literal would not.
+      #   below even that    -> the literal, because cpu=0 is not a request.
+      #
+      # This used to collapse every non-viable vector onto the literal, which is
+      # what let the sub-8GiB bug live inside a passing replay. Now the
+      # non-viable vectors are checked against the contract's own numbers, so
+      # the installer and the accessor agree on the small machines too.
+      $rendered = if ($null -ne $v.expected) {
+        "cpu=$($v.expected.render_gi.cpu),memory=$($v.expected.render_gi.memory)"
+      } else { $null }
+      $want = if ($null -eq $v.expected) {
+        "cpu=2,memory=8Gi"
+      } elseif ($v.expected.viable) {
+        $rendered
+      } elseif ([int]$v.expected.render_gi.cpu -ge 1 -and
+                [int]($v.expected.render_gi.memory -replace 'Gi$','') -ge 1) {
+        $rendered
+      } else {
+        "cpu=2,memory=8Gi"
+      }
+      $line = "$($v.allocatable_cpu) $($v.allocatable_memory)"
+      Mock kubectl {
+        if ($args -contains "--request-timeout=10s") {
+          $global:LASTEXITCODE = 0; @($line)
+        } else { $global:LASTEXITCODE = 1; "" }
+      }.GetNewClosure()
+      $got = Get-TrainingResources
+      if ($got -ne $want) {
+        $failures += "$($v.label) ($line): want '$want' got '$got'"
+      }
+    }
+    $failures -join "`n" | Should -BeNullOrEmpty
+  }
+
+  It "ANCHOR_LARGEST ties break on cpu, not memory — and the bash twin agrees" {
+    # The divergence backend#2220 closes: this function ranked nodes
+    # (memory, cpu) and would have anchored on 4c/32Gi here, while cli's
+    # nodeLarger ranked (cpu, memory) and anchored on 8c/16Gi. Same cluster,
+    # two answers, neither chosen. One order now, matching bash and cli.
+    Mock helm { $global:LASTEXITCODE = 1; "" }
+    Mock kubectl {
+      if ($args -contains "--request-timeout=10s") {
+        $global:LASTEXITCODE = 0; @("8 16Gi", "4 32Gi")
+      } else { $global:LASTEXITCODE = 1; "" }
+    }
+    Get-TrainingResources | Should -Be "cpu=7,memory=13Gi"
+  }
+
+  It "the answer does not depend on the order the API listed nodes in" {
+    Mock helm { $global:LASTEXITCODE = 1; "" }
+    Mock kubectl {
+      if ($args -contains "--request-timeout=10s") {
+        $global:LASTEXITCODE = 0; @("4 32Gi", "8 16Gi")
+      } else { $global:LASTEXITCODE = 1; "" }
+    }
+    Get-TrainingResources | Should -Be "cpu=7,memory=13Gi"
+  }
+
+  # Bugbot #766, second pass. The contract's skipped_nodes says allocatable that
+  # will not parse is SKIPPED; the bash twin does that with an explicit
+  # `|| continue`. This function used to coerce an unparseable quantity to 0 and
+  # then RANK the node, which the old memory-first order hid — a memB of 0 could
+  # never win. Ranking on cpu first exposes it: a node with a good CPU count and
+  # a memory unit we do not speak wins the anchor, fails the memory floor, and
+  # drops the whole machine to the literal even though a sibling node was
+  # perfectly sizeable. BYO/heterogeneous clusters only; k3d never hits it.
+  # ── provenance (backend#2220) ──────────────────────────────────────────────
+  # Get-TrainingProvenance mirrors Get-TrainingResources' precedence rather than
+  # calling it, so these pin that the mirror stays honest on EVERY branch. A
+  # wrong verdict here either strands an edge forever or silently overrules a
+  # human, which is the defect scope bullet 4 is about.
+
+  # The fail-unsafe case Bugbot found and @saadqbal confirmed on #768: the two
+  # resolvers each did their own `helm get values` behind their own bare
+  # `catch {}`, so a size read that succeeded and carried a live RESOURCE_LIMITS
+  # while the provenance read then threw pinned that carried envelope as
+  # `installer` -- inviting a future ladder to overrule a human choice. One
+  # shared lookup makes it structurally impossible; these pin that.
+  It "provenance: a failing values read can never report 'installer' for a CARRIED size" {
+    Mock kubectl { $global:LASTEXITCODE = 0; "" }
+    # helm succeeds for the size probe but returns junk the parse chokes on.
+    Mock helm { $global:LASTEXITCODE = 0; "{ this is : not json" }
+    # Both must agree on NOT having carried anything: the read failed, so the
+    # size is machine-derived (or the literal) and `installer` is then correct.
+    $carried = Get-CarriedTrainingValues
+    $carried | Should -BeNullOrEmpty
+    Get-TrainingProvenance | Should -Be "installer"
+  }
+
+  It "provenance: size and provenance come from ONE lookup and cannot disagree" {
+    Mock kubectl { $global:LASTEXITCODE = 0; "" }
+    Mock helm {
+      $global:LASTEXITCODE = 0
+      '{"env":{"RESOURCE_LIMITS":"cpu=4,memory=12Gi","RESOURCE_PROVENANCE":"user"}}'
+    }
+    $carried = Get-CarriedTrainingValues
+    $carried.Size       | Should -Be "cpu=4,memory=12Gi"
+    $carried.Provenance | Should -Be "user"
+    # Handed the SAME lookup, as the values generation does.
+    Get-TrainingResources  -Carried $carried -CarriedResolved | Should -Be "cpu=4,memory=12Gi"
+    Get-TrainingProvenance -Carried $carried -CarriedResolved | Should -Be "user"
+  }
+
+  It "provenance: the shared lookup ignores the historic literal as a non-choice" {
+    Mock kubectl { $global:LASTEXITCODE = 0; "" }
+    Mock helm {
+      $global:LASTEXITCODE = 0
+      '{"env":{"RESOURCE_LIMITS":"cpu=2,memory=8Gi","RESOURCE_PROVENANCE":"user"}}'
+    }
+    # The literal was the ABSENCE of a choice, so there is nothing to carry --
+    # even with a marker sitting next to it.
+    Get-CarriedTrainingValues | Should -BeNullOrEmpty
+  }
+
+  It "provenance: an unreadable namespace carries nothing (and does not throw)" {
+    Mock kubectl { $global:LASTEXITCODE = 1; "" }
+    Mock helm { $global:LASTEXITCODE = 1; "" }
+    Get-CarriedTrainingValues | Should -BeNullOrEmpty
+    Get-TrainingProvenance | Should -Be "installer"
+  }
+
+  It "provenance: a fresh machine-sized install is the installer's choice" {
+    Mock helm { $global:LASTEXITCODE = 1; "" }
+    Mock kubectl {
+      if ($args -contains "--request-timeout=10s") { $global:LASTEXITCODE = 0; @("8 32Gi") }
+      else { $global:LASTEXITCODE = 1; "" }
+    }
+    Get-TrainingResources  | Should -Be "cpu=7,memory=29Gi"
+    Get-TrainingProvenance | Should -Be "installer"
+  }
+
+  It "provenance: an install-time override is a human choice" {
+    $env:TRACEBLOC_TRAINING_RESOURCES = "cpu=4,memory=16Gi"
+    try {
+      Get-TrainingResources  | Should -Be "cpu=4,memory=16Gi"
+      Get-TrainingProvenance | Should -Be "user"
+    } finally { $env:TRACEBLOC_TRAINING_RESOURCES = $null }
+  }
+
+  It "provenance: a carried-forward value with no marker is 'unknown'" {
+    Mock kubectl { $global:LASTEXITCODE = 0; "" }
+    Mock helm {
+      $global:LASTEXITCODE = 0
+      '{"env":{"RESOURCE_LIMITS":"cpu=4,memory=12Gi"}}'
+    }
+    Get-TrainingResources  | Should -Be "cpu=4,memory=12Gi"
+    Get-TrainingProvenance | Should -Be "unknown"
+  }
+
+  It "provenance: an existing 'user' marker SURVIVES re-install" {
+    Mock kubectl { $global:LASTEXITCODE = 0; "" }
+    Mock helm {
+      $global:LASTEXITCODE = 0
+      '{"env":{"RESOURCE_LIMITS":"cpu=4,memory=12Gi","RESOURCE_PROVENANCE":"user"}}'
+    }
+    Get-TrainingProvenance | Should -Be "user"
+  }
+
+  It "provenance: an existing 'installer' marker survives re-install" {
+    Mock kubectl { $global:LASTEXITCODE = 0; "" }
+    Mock helm {
+      $global:LASTEXITCODE = 0
+      '{"env":{"RESOURCE_LIMITS":"cpu=4,memory=12Gi","RESOURCE_PROVENANCE":"installer"}}'
+    }
+    Get-TrainingProvenance | Should -Be "installer"
+  }
+
+  It "provenance: a junk marker degrades to 'unknown', never to a guess" {
+    Mock kubectl { $global:LASTEXITCODE = 0; "" }
+    Mock helm {
+      $global:LASTEXITCODE = 0
+      '{"env":{"RESOURCE_LIMITS":"cpu=4,memory=12Gi","RESOURCE_PROVENANCE":"banana"}}'
+    }
+    Get-TrainingProvenance | Should -Be "unknown"
+  }
+
+  It "provenance: the static-default fallback is still the installer's choice" {
+    Mock helm { $global:LASTEXITCODE = 1; "" }
+    Mock kubectl { $global:LASTEXITCODE = 1; "" }
+    Get-TrainingResources  | Should -Be "cpu=2,memory=8Gi"
+    Get-TrainingProvenance | Should -Be "installer"
+  }
+
+  # ── undersized machines (backend#2220) ─────────────────────────────────────
+  # This used to return cpu=2,memory=8Gi for a machine with ~4 GiB allocatable —
+  # an envelope larger than the machine, on which no pod can ever schedule. The
+  # Windows memory preflight only WARNS (Linux hard-fails), so this installer
+  # reaches exactly those machines.
+
+  It "undersized: a below-floor machine gets the honest remainder, not the literal" {
+    Mock helm { $global:LASTEXITCODE = 1; "" }
+    Mock kubectl {
+      if ($args -contains "--request-timeout=10s") { $global:LASTEXITCODE = 0; @("2 4Gi") }
+      else { $global:LASTEXITCODE = 1; "" }
+    }
+    # 4 GiB - 3 GiB = 1 GiB, below the 2 GiB floor but still a requestable shape.
+    Get-TrainingResources | Should -Be "cpu=1,memory=1Gi"
+    $script:TbTrainingUndersized | Should -BeTrue
+    $script:TbTrainingUnschedulable | Should -BeFalse
+  }
+
+  It "undersized: a machine too small for even 1c/1Gi keeps the literal and flags it" {
+    Mock helm { $global:LASTEXITCODE = 1; "" }
+    Mock kubectl {
+      if ($args -contains "--request-timeout=10s") { $global:LASTEXITCODE = 0; @("500m 512Mi") }
+      else { $global:LASTEXITCODE = 1; "" }
+    }
+    Get-TrainingResources | Should -Be "cpu=2,memory=8Gi"
+    $script:TbTrainingUnschedulable | Should -BeTrue
+    $script:TbTrainingUndersized | Should -BeFalse
+  }
+
+  It "undersized: an UNREADABLE cluster keeps the literal and flags NOTHING" {
+    # The distinction that makes this change safe: cannot-see is not too-small.
+    # With no readable node the literal is still the best available answer, and
+    # warning about machine size would be a fabrication.
+    Mock helm { $global:LASTEXITCODE = 1; "" }
+    Mock kubectl { $global:LASTEXITCODE = 1; "" }
+    Get-TrainingResources | Should -Be "cpu=2,memory=8Gi"
+    $script:TbTrainingUndersized | Should -BeFalse
+    $script:TbTrainingUnschedulable | Should -BeFalse
+  }
+
+  It "undersized: a viable machine flags nothing" {
+    Mock helm { $global:LASTEXITCODE = 1; "" }
+    Mock kubectl {
+      if ($args -contains "--request-timeout=10s") { $global:LASTEXITCODE = 0; @("8 32Gi") }
+      else { $global:LASTEXITCODE = 1; "" }
+    }
+    Get-TrainingResources | Should -Be "cpu=7,memory=29Gi"
+    $script:TbTrainingUndersized | Should -BeFalse
+    $script:TbTrainingUnschedulable | Should -BeFalse
+  }
+
+  It "a node with unparseable memory does not beat a valid one" {
+    Mock helm { $global:LASTEXITCODE = 1; "" }
+    Mock kubectl {
+      if ($args -contains "--request-timeout=10s") {
+        # 16 cores but a memory unit neither installer parses, alongside a
+        # perfectly good 8c/32Gi node. The valid node must win.
+        $global:LASTEXITCODE = 0; @("16 64GB", "8 32Gi")
+      } else { $global:LASTEXITCODE = 1; "" }
+    }
+    Get-TrainingResources | Should -Be "cpu=7,memory=29Gi"
+  }
+
+  It "a node with unparseable cpu does not beat a valid one" {
+    Mock helm { $global:LASTEXITCODE = 1; "" }
+    Mock kubectl {
+      if ($args -contains "--request-timeout=10s") {
+        $global:LASTEXITCODE = 0; @("sixteen 64Gi", "8 32Gi")
+      } else { $global:LASTEXITCODE = 1; "" }
+    }
+    Get-TrainingResources | Should -Be "cpu=7,memory=29Gi"
+  }
+
+  It "every node unparseable falls through to the literal" {
+    Mock helm { $global:LASTEXITCODE = 1; "" }
+    Mock kubectl {
+      if ($args -contains "--request-timeout=10s") {
+        $global:LASTEXITCODE = 0; @("sixteen 64GB", "eight lots")
+      } else { $global:LASTEXITCODE = 1; "" }
+    }
     Get-TrainingResources | Should -Be "cpu=2,memory=8Gi"
   }
 }
@@ -5345,5 +5675,275 @@ Describe "hostPath prep needs positive proof, not just absence of failure (#654 
     $cmd  = Get-ReleaseDirsPrepCommand -Release "rel" -DataBase "/tracebloc-data"
     foreach ($d in $list) { $cmd | Should -Match ([regex]::Escape($d)) }
     $list.Count | Should -Be 2
+  }
+}
+
+Describe "Wait-MetricsApiService (client#553 -- the Windows installer had no wait)" {
+  # k3s applies its bundled metrics-server AFTER the API server is ready, and
+  # `k3d cluster create --wait` does not gate on it. The resource-monitor template
+  # `fail`s at RENDER time when v1beta1.metrics.k8s.io is missing, which aborts the
+  # whole release -- so helm must not render inside that window. bash has waited
+  # since #553; this file's installer went straight from create to helm install,
+  # on the slowest host we support.
+  BeforeEach { Mock Log {} }
+  AfterEach  { $env:TB_METRICS_WAIT_S = $null }
+
+  Context "Get-MetricsWaitSeconds -- the whole input domain, not a sample" {
+    # Rule 6: derive the domain from what an env var can actually hold. The
+    # interesting values are the ones a human types by mistake, and every one of
+    # them must land on the default rather than on 0 (which would silently
+    # disable the wait) or on an exception.
+    #
+    # Rule 1: the expected default is PARSED from scripts/spec/facts.env, never
+    # restated here. Both installers advertise the same TB_METRICS_WAIT_S knob, so
+    # the budget is one cross-OS fact; a test carrying its own copy of 120 would
+    # agree with itself while the two installers waited different lengths.
+    BeforeAll {
+      $spec = Get-Content "$PSScriptRoot/../spec/facts.env" -Raw
+      # \r?$ for the same CRLF reason as below -- facts.env is checked out CRLF on Windows.
+      $m = [regex]::Match($spec, '(?m)^METRICS_WAIT_TIMEOUT=(?<v>\d+)\r?$')
+      $m.Success | Should -BeTrue -Because "facts.env must declare the shared wait budget"
+      $script:SpecWait = [int]$m.Groups['v'].Value
+    }
+    It "the stamped PowerShell default IS the facts.env fact" {
+      $script:MetricsWaitTimeout | Should -Be $script:SpecWait
+    }
+    It "an unset/empty knob is the declared default" {
+      Get-MetricsWaitSeconds -Value ""    | Should -Be $script:SpecWait
+      Get-MetricsWaitSeconds -Value $null | Should -Be $script:SpecWait
+    }
+    It "a plain integer is honoured, including 0 (= disable) and a leading-zero form" {
+      Get-MetricsWaitSeconds -Value "45"  | Should -Be 45
+      Get-MetricsWaitSeconds -Value "0"   | Should -Be 0
+      Get-MetricsWaitSeconds -Value "007" | Should -Be 7
+    }
+    It "garbage falls back to the default instead of becoming 0" {
+      foreach ($v in "abc", "-5", "12.5", "12s", " 30", "30 ", "1e3", "0x10") {
+        Get-MetricsWaitSeconds -Value $v |
+          Should -Be $script:SpecWait -Because "'$v' is not a wait budget, and reading it as 0 would silently switch the wait off"
+      }
+    }
+    It "an absurdly long digit string falls back instead of throwing on the [int] cast" {
+      # `[int]"99999999999999999999"` is an OverflowException. A typo'd knob must
+      # not be able to take the install down before helm even runs.
+      { Get-MetricsWaitSeconds -Value ("9" * 20) } | Should -Not -Throw
+      Get-MetricsWaitSeconds -Value ("9" * 20)     | Should -Be $script:SpecWait
+    }
+    It "reads TB_METRICS_WAIT_S -- the same knob name the bash installer reads" {
+      $env:TB_METRICS_WAIT_S = "77"
+      Get-MetricsWaitSeconds | Should -Be 77
+    }
+  }
+
+  Context "the poll loop" {
+    It "returns as soon as the APIService is registered, and asks for the right one" {
+      Mock kubectl { $global:LASTEXITCODE = 0 }
+      Wait-MetricsApiService -TimeoutSec 30 -IntervalSec 0 | Should -BeTrue
+      Should -Invoke kubectl -ParameterFilter {
+        ($args -contains "apiservice") -and ($args -contains "v1beta1.metrics.k8s.io")
+      }
+    }
+
+    It "keeps polling across the registration window instead of giving up on the first miss" {
+      # THE BUG THIS PORTS AWAY: one probe at t=0 is exactly what `--wait` already
+      # gave us, and it is what loses the race on a slow WSL2 box.
+      $script:probes = 0
+      Mock kubectl {
+        if ($args -contains "apiservice") {
+          $script:probes++
+          $global:LASTEXITCODE = $(if ($script:probes -ge 3) { 0 } else { 1 })
+          return
+        }
+        $global:LASTEXITCODE = 0
+      }
+      Wait-MetricsApiService -TimeoutSec 30 -IntervalSec 0 | Should -BeTrue
+      $script:probes | Should -Be 3
+    }
+
+    It "the post-registration Available wait is best-effort -- failing it changes nothing" {
+      # The template needs the APIService to EXIST at render time; Available is a
+      # nicety. A non-zero `kubectl wait` must not turn a won race into a lost one.
+      Mock kubectl {
+        if ($args -contains "wait") { $global:LASTEXITCODE = 1; return }
+        $global:LASTEXITCODE = 0
+      }
+      Wait-MetricsApiService -TimeoutSec 30 -IntervalSec 0 | Should -BeTrue
+      Should -Invoke kubectl -ParameterFilter { $args -contains "wait" }
+    }
+
+    It "says nothing on the fast path -- an already-registered API must not add a line" {
+      Mock kubectl { $global:LASTEXITCODE = 0 }
+      Mock Info {}
+      Wait-MetricsApiService -TimeoutSec 30 -IntervalSec 0 | Should -BeTrue
+      Should -Invoke Info -Times 0
+    }
+
+    It "announces the wait ONCE when it actually has to wait (RFC-0002 §2, not once per poll)" {
+      # bash runs the equivalent loop behind spin_cmd_bounded. Silence here would
+      # be a two-minute frozen terminal on exactly the host this exists for; a
+      # line per poll would be 40 of them.
+      $script:n = 0
+      Mock kubectl {
+        if ($args -contains "apiservice") {
+          $script:n++
+          $global:LASTEXITCODE = $(if ($script:n -ge 4) { 0 } else { 1 })
+          return
+        }
+        $global:LASTEXITCODE = 0
+      }
+      Mock Info {}
+      Wait-MetricsApiService -TimeoutSec 30 -IntervalSec 0 | Should -BeTrue
+      $script:n | Should -BeGreaterThan 1 -Because "the announcement only means anything if we really polled"
+      Should -Invoke Info -Times 1 -Exactly
+    }
+
+    It "falls through NON-FATALLY when it never registers, so the chart's guard still speaks" {
+      # The issue's preferred option (a): a genuinely absent metrics-server must
+      # reach `{{ fail }}` and get its actionable message, not die here.
+      Mock kubectl { $global:LASTEXITCODE = 1 }
+      Mock Err { throw "the metrics wait must never abort the install" }
+      $result = $null
+      { $result = Wait-MetricsApiService -TimeoutSec 1 -IntervalSec 1 } | Should -Not -Throw
+      $result | Should -BeFalse
+      Should -Invoke Err -Times 0
+    }
+
+    It "is actually bounded -- a never-registering APIService returns near the deadline" {
+      # Guards the bound itself: an unbounded loop passes every assertion above.
+      Mock kubectl { $global:LASTEXITCODE = 1 }
+      $sw = [System.Diagnostics.Stopwatch]::StartNew()
+      Wait-MetricsApiService -TimeoutSec 2 -IntervalSec 1 | Should -BeFalse
+      $sw.Stop()
+      $sw.Elapsed.TotalSeconds | Should -BeLessThan 20
+    }
+
+    It "a 0 budget disables the wait outright -- no probe, no stall" {
+      Mock kubectl { $global:LASTEXITCODE = 0 }
+      $env:TB_METRICS_WAIT_S = "0"
+      Wait-MetricsApiService | Should -BeFalse
+      Should -Invoke kubectl -Times 0
+    }
+
+    It "no kubectl on PATH -> says so and returns, rather than polling an exception to the deadline" {
+      # A missing native command THROWS; it does not set $LASTEXITCODE.
+      Mock Has { $false } -ParameterFilter { $cmd -eq "kubectl" }
+      Mock kubectl { throw "must not be called when kubectl is absent" }
+      Wait-MetricsApiService -TimeoutSec 30 -IntervalSec 0 | Should -BeFalse
+      Should -Invoke kubectl -Times 0
+    }
+  }
+
+  Context "wired into Install-ClientHelm, on both helm paths" {
+    BeforeEach {
+      $GPU_VENDOR = "none"; $NVIDIA_DRIVER_OK = $false; $env:CLIENT_ENV = $null
+      Mock helm { $global:LASTEXITCODE = 0 }
+      Mock Test-Credentials { "valid" }
+      Mock Read-Host { throw "no prompts on the minted path" }
+      # Ensure-ReleaseDirs reads $script:HOST_DATA_DIR explicitly, so set the
+      # script-scoped one rather than inheriting whatever an earlier Describe
+      # happened to leave behind -- these tests must pass when run alone too.
+      $script:PrevHostDataDir = $script:HOST_DATA_DIR
+    }
+    AfterEach {
+      $script:TB_PROV_MODE = $null; $script:TB_PROV_ID = $null
+      $script:TB_PROV_NS = $null; $script:TB_PROV_PASSWORD = $null
+      $script:HOST_DATA_DIR = $script:PrevHostDataDir
+    }
+
+    It "waits BEFORE helm renders the chart, not after" {
+      $script:seq = @()
+      Mock Wait-MetricsApiService { $script:seq += "wait"; $true }
+      Mock helm {
+        if ($args -contains "upgrade") { $script:seq += "helm-upgrade" }
+        $global:LASTEXITCODE = 0
+      }
+      $HOST_DATA_DIR = "$TestDrive/d-metrics-order"; $script:HOST_DATA_DIR = $HOST_DATA_DIR
+      $script:TB_PROV_MODE = "minted"; $script:TB_PROV_ID = "uuid-m1"
+      $script:TB_PROV_PASSWORD = "pw"; $script:TB_PROV_NS = "ns-m1"
+      Install-ClientHelm
+      $script:seq | Should -Contain "helm-upgrade"
+      $script:seq.IndexOf("wait") | Should -BeGreaterOrEqual 0
+      $script:seq.IndexOf("wait") |
+        Should -BeLessThan $script:seq.IndexOf("helm-upgrade") -Because "rendering first is the whole failure mode (#553)"
+    }
+
+    It "waits on the adopted-reuse path too -- that reconcile re-renders the chart" {
+      Mock Wait-MetricsApiService { $true }
+      Mock Get-InstalledClientInfo {
+        [pscustomobject]@{ Id = "uuid-a1"; Ns = "ns-a1"; Name = "rel-a1"; UnreadableNs = ""; ListUnknown = $false }
+      }
+      $HOST_DATA_DIR = "$TestDrive/d-metrics-adopt"; $script:HOST_DATA_DIR = $HOST_DATA_DIR
+      $script:TB_PROV_MODE = "adopted"; $script:TB_PROV_ID = "uuid-a1"
+      $script:TB_PROV_NS = "ns-a1"
+      Install-ClientHelm
+      Should -Invoke Wait-MetricsApiService -Times 1
+      Should -Invoke helm -ParameterFilter { $args -contains "upgrade" }
+    }
+
+    It "a wait that runs out does NOT abort the install -- helm still runs" {
+      Mock Wait-MetricsApiService { $false }
+      $HOST_DATA_DIR = "$TestDrive/d-metrics-timeout"; $script:HOST_DATA_DIR = $HOST_DATA_DIR
+      $script:TB_PROV_MODE = "minted"; $script:TB_PROV_ID = "uuid-m2"
+      $script:TB_PROV_PASSWORD = "pw"; $script:TB_PROV_NS = "ns-m2"
+      { Install-ClientHelm } | Should -Not -Throw
+      Should -Invoke helm -ParameterFilter { $args -contains "upgrade" }
+    }
+  }
+
+  Context "the APIService name is derived from the chart, not restated here" {
+    # Rule 1: the template is the authority for what has to be registered. If the
+    # chart ever looks up a different APIService, an installer still waiting on the
+    # old name is a wait that cannot succeed -- and it would look identical to a
+    # slow cluster. Parse the real `lookup`, compare against both installers.
+    BeforeAll {
+      $script:TplPath  = "$PSScriptRoot/../../client/templates/resource-monitor-daemonset.yaml"
+      $script:PsSrc    = Get-Content "$PSScriptRoot/../install-k8s.ps1" -Raw
+      $script:BashSrc  = Get-Content "$PSScriptRoot/../lib/install-client-helm.sh" -Raw
+    }
+    It "the template really does lookup + fail on an APIService (else this whole wait is pointless)" {
+      # Fail closed: an unreadable/renamed template is a finding, not a pass.
+      Test-Path $script:TplPath | Should -BeTrue
+      $tpl = Get-Content $script:TplPath -Raw
+      $m = [regex]::Match($tpl, 'lookup\s+"apiregistration\.k8s\.io/v1"\s+"APIService"\s+""\s+"(?<n>[^"]+)"')
+      $m.Success | Should -BeTrue -Because "the render-time guard is the reason the installers wait at all"
+      $tpl | Should -Match '\{\{-?\s*fail '
+      $script:ApiSvc = $m.Groups['n'].Value
+      $script:ApiSvc | Should -Not -BeNullOrEmpty
+    }
+    It "the Windows installer waits on exactly that name" {
+      $tpl = Get-Content $script:TplPath -Raw
+      $name = [regex]::Match($tpl, 'lookup\s+"apiregistration\.k8s\.io/v1"\s+"APIService"\s+""\s+"(?<n>[^"]+)"').Groups['n'].Value
+      $script:MetricsApiServiceName | Should -Be $name
+      $script:PsSrc | Should -Match ([regex]::Escape($name))
+    }
+    It "bash still waits too, and still best-effort -- if it stops, revisit this port" {
+      $fn = [regex]::Match($script:BashSrc, '(?s)_wait_for_metrics_apiservice\(\)\s*\{.*?\n\}').Value
+      $fn | Should -Not -BeNullOrEmpty
+      $fn | Should -Match 'v1beta1\.metrics\.k8s\.io'
+      $fn | Should -Match 'TB_METRICS_WAIT_S'
+      $fn | Should -Not -Match '(?m)^\s*error '
+    }
+    It "both installers read the same knob name, so one support instruction fits both" {
+      $script:BashSrc | Should -Match 'TB_METRICS_WAIT_S'
+      $script:PsSrc   | Should -Match 'TB_METRICS_WAIT_S'
+    }
+    It "and neither installer keeps its own copy of the default -- both take the facts.env fact" {
+      # Bugbot on #757: one advertised knob whose default could differ per OS. The
+      # budget now lives in scripts/spec/facts.env and is stamped by check-facts.sh,
+      # so this asserts the INDIRECTION, not the number.
+      # \r?$ , not a bare $ : the Windows runner checks these files out CRLF, and
+      # .NET's multiline $ matches before \n but NOT before \r\n -- so a bare anchor
+      # fails on a line that is plainly there. Cost one red Pester (windows-latest)
+      # while Pester (ubuntu-latest) stayed green, which is exactly the shape of bug
+      # that job exists to catch.
+      $script:BashSrc | Should -Match '(?m)^METRICS_WAIT_TIMEOUT=\d+\r?$'
+      $script:PsSrc   | Should -Match '\$script:MetricsWaitTimeout = \d+'
+      # No literal fallback left in either poll path.
+      $fn = [regex]::Match($script:BashSrc, '(?s)_wait_for_metrics_apiservice\(\)\s*\{.*?\n\}').Value
+      $fn | Should -Match '\$METRICS_WAIT_TIMEOUT'
+      $psFn = [regex]::Match($script:PsSrc, '(?s)function Get-MetricsWaitSeconds\s*\{.*?\n\}').Value
+      $psFn | Should -Match '\$script:MetricsWaitTimeout'
+      $psFn | Should -Not -Match '\$Default = \d'
+    }
   }
 }

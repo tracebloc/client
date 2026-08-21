@@ -121,6 +121,111 @@ _check_windows_bootstrap_in_sync() {
   fi
 }
 
+# Cross-check 3: the DECLARATIONS above must match what install-k8s.sh actually
+# SOURCES. The two checks above compare two declarations to each other; both can
+# agree and both be wrong. A new scripts/lib/foo.sh that install-k8s.sh sources
+# but that reaches neither array is then NEITHER fetched by the bootstrap NOR
+# covered by the manifest — so at install time it is either absent (the installer
+# breaks on a customer machine, after CI was green) or fetched by some other path
+# and executed UNVERIFIED. That is a hole in the exact property R8 exists to
+# provide. Found by @saadqbal reviewing client#755; backend#2205.
+#
+# DERIVED from the installer, never listed here — a fourth list would just be one
+# more thing to drift. Only `${LIB_DIR}/…` sources count as repo libs: a naive
+# `grep source` also matches `. /etc/os-release` (gpu-amd.sh, gpu-nvidia.sh) and
+# `source "$cred_file"` (provision.sh), neither of which is in this repo.
+#
+# Non-transitive on purpose, and that purpose is asserted rather than assumed: no
+# lib sources another lib today, so walking install-k8s.sh alone is complete. If
+# that ever changes the derivation silently becomes partial, so the assumption is
+# a machine check too (_check_no_lib_sources_lib below) rather than a comment
+# claiming it cannot happen.
+_check_sourced_libs_are_covered() {
+  local sourced declared src
+  # Read the file ONCE, then match the variable. The previous shape asked a
+  # PIPELINE for the distinction and could not get it: under `pipefail` the status
+  # is the RIGHTMOST non-zero, and the second `grep` exits 1 on empty stdin, which
+  # masks the first's 2. So an unreadable installer reported "the derivation is
+  # broken" and sent the reader to debug the pattern instead of the missing file.
+  # The comment here used to claim that distinction worked. It did not (Asad, #770)
+  # -- a comment asserting a property the code lacks is the defect this whole
+  # family of guards exists to remove, so the split is now structural rather than
+  # exit-code archaeology.
+  src="$(cat scripts/install-k8s.sh)" || {
+    echo "[ERROR] could not read scripts/install-k8s.sh to derive its sourced libs." >&2
+    echo "        That is 'did not check', never 'nothing is sourced'." >&2
+    exit 1
+  }
+
+  # `|| true` is safe HERE and was not safe on the old pipeline: the input is a
+  # shell variable, so the only non-zero this can produce is grep's 1 for "matched
+  # nothing" -- which is exactly what the guard below is for. No I/O can fail.
+  # Line-ANCHORED select, then extract. `grep -oE` alone ignores what precedes the
+  # match, so `#source "${LIB_DIR}/diagnose.sh"` counted as SOURCED -- a commented
+  # source is not a source, and the over-fetched arm could therefore not be reached
+  # by commenting one out. Anchoring also stops a mention inside a string or
+  # heredoc reading as a real source.
+  sourced="$(printf '%s\n' "$src" \
+               | grep -E '^[[:space:]]*(source|\.)[[:space:]]+"\$\{LIB_DIR\}/[A-Za-z0-9_-]+\.sh"' \
+               | grep -oE '/[A-Za-z0-9_-]+\.sh"' | tr -d '/"' | sed 's|^|scripts/lib/|' | sort -u)" || true
+
+  # Fail closed: a derivation that finds nothing is broken, not permission to
+  # pass. install-k8s.sh sources 17 libs; zero means the pattern stopped matching.
+  if [[ -z "$sourced" ]]; then
+    echo "[ERROR] derived ZERO sourced libs from scripts/install-k8s.sh — the derivation is broken." >&2
+    echo "        Refusing to report the manifest covered on an empty derivation." >&2
+    exit 1
+  fi
+
+  # `|| true` for the same reason the sourced arm has it, and it was missing here:
+  # a no-match `grep` exits 1, which under `set -euo pipefail` killed the script
+  # before the diff below could say anything. So a FILES array with no
+  # scripts/lib/ entries died silently -- fail-closed by accident, with no message
+  # naming the integrity surface just lost, which is the shape this suite already
+  # refuses for an empty FILES (Bugbot, #770). Safe here: the input is a shell
+  # array, so grep's 1 for "matched nothing" is the only non-zero possible, and an
+  # empty `declared` against a non-empty `sourced` is exactly what the diff
+  # reports.
+  declared="$(printf '%s\n' "${FILES[@]}" | grep '^scripts/lib/' | sort -u)" || true
+
+  if [[ "$sourced" != "$declared" ]]; then
+    echo "[ERROR] scripts/install-k8s.sh sources a different set of libs than the manifest covers." >&2
+    echo "        < declared in FILES only (over-fetched, or a removed lib left listed)" >&2
+    echo "        > SOURCED BUT NOT COVERED — unverified at install time, and not fetched at all" >&2
+    diff <(printf '%s\n' "$declared") <(printf '%s\n' "$sourced") >&2 || true
+    exit 1
+  fi
+}
+
+# The assumption cross-check 3 rests on: no lib sources another repo lib, so
+# deriving from install-k8s.sh alone sees every lib. Asserted, because if it ever
+# stops holding the derivation above goes quietly partial — the same
+# "claim that should be a machine check" this whole family of guards exists for.
+_check_no_lib_sources_lib() {
+  local offenders rc=0 err
+  err="$(mktemp)"
+  # NOT `|| true`. That swallowed every failure, so the check PASSED on an
+  # unreadable glob -- and this check is the assumption that makes the
+  # non-transitive derivation above valid, so failing open here lets that
+  # derivation go quietly partial (Asad, #770). grep -l: 1 is "no match" and is
+  # the clean answer; >1 is operational and must never read as "no lib does this".
+  offenders="$(grep -lE '(source|\.)[[:space:]]+"?\$\{?LIB_DIR' scripts/lib/*.sh 2>"$err")" || rc=$?
+  if [[ "$rc" -gt 1 ]]; then
+    echo "[ERROR] could not scan scripts/lib/*.sh for lib-to-lib sources (grep exited $rc)." >&2
+    echo "        $(tr '\n' ' ' <"$err")" >&2
+    echo "        Refusing to assume none: this check is what makes the non-transitive" >&2
+    echo "        derivation in _check_sourced_libs_are_covered valid." >&2
+    rm -f "$err"; exit 1
+  fi
+  rm -f "$err"
+  if [[ -n "$offenders" ]]; then
+    echo "[ERROR] a lib sources another lib, so deriving from install-k8s.sh alone is no longer complete:" >&2
+    printf '          %s\n' $offenders >&2
+    echo "        Make _check_sourced_libs_are_covered transitive before landing that." >&2
+    exit 1
+  fi
+}
+
 generate() {
   local f
   {
@@ -134,6 +239,8 @@ generate() {
 
 _check_bootstrap_in_sync
 _check_windows_bootstrap_in_sync
+_check_no_lib_sources_lib
+_check_sourced_libs_are_covered
 
 if [[ "${1:-}" == "--check" ]]; then
   generate_to="$(mktemp)"
