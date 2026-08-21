@@ -438,10 +438,21 @@ telemetryCollector:
   # otel/opentelemetry-collector-contrib — `contrib`, not `core`, and the
   # distinction is load-bearing: `filelog`, `bearertokenauth` and `file_storage`
   # are all contrib components and none of them exist in the core distribution.
+  # THE TAG HAS A FEATURE FLOOR, and 0.109.0 was below it — the first version of
+  # this block pinned that and would not have started at all.
+  #
+  # `block_on_overflow` replaced the older `blocking` option upstream in
+  # 2025-03 (deprecated) / 2025-06 (removed), i.e. around 0.122-0.128, and
+  # `sizer: bytes` on a PERSISTENT queue is later still (~0.130). The Collector
+  # rejects unknown configuration keys, so an older image does not silently
+  # ignore them — it fails to start, on every node.
+  #
+  # `tests/telemetry_collector_test.yaml` asserts the pinned minor is at or above
+  # that floor, so the pin cannot drift back below the config it has to run.
   image:
     registry: docker.io
     repository: otel/opentelemetry-collector-contrib
-    tag: "0.109.0"
+    tag: "0.159.0"
     digest: ""
 
   # 500m/512Mi per D7's table. The existing node agent runs 200m/256Mi, which a
@@ -454,15 +465,34 @@ telemetryCollector:
       cpu: "500m"
       memory: "512Mi"
 
-  # The containers whose stdout is collected. Class A per D12: the long-lived
-  # control-plane processes this chart deploys. Names, not namespaces, because a
-  # namespace holds training pods too and `filelog`'s include globs match on the
-  # kubelet's on-disk path, which carries the container name.
+  # The containers whose stdout is collected — CONTAINER names, taken from the
+  # rendered chart, not workload or image names. The first version of this list
+  # invented `tracebloc-jobs-manager`, `egress-proxy` and `requests-proxy`, none
+  # of which exist: `filelog`'s include globs match the kubelet's on-disk path,
+  # which carries the CONTAINER name, so the Collector would have run, reported
+  # healthy, and shipped nothing. (Bugbot on #779.)
+  #
+  # Mapped from D6's Class A list, which is the authority on membership:
+  #   controller.py     -> pods-monitor-container  (Dockerfile.controller)
+  #   jobs-manager      -> api                     (Dockerfile.jobs_manager)
+  #   the egress proxy  -> squid
+  #   resource-monitor  -> tracebloc-resource-monitor, and it lives in a
+  #                        DIFFERENT namespace — hence the second list below.
+  #
+  # `proxy` (requests-proxy) is deliberately absent: it runs the jobs-manager
+  # image but is not in D6's Class A list, and adding a container because it
+  # happens to share an image is how a class boundary stops meaning anything.
   classAContainers:
-    - tracebloc-jobs-manager
+    - api
+    - pods-monitor-container
+    - squid
+
+  # Class A containers that run in the node-agents namespace rather than the
+  # release namespace. Separate list rather than a magic value inside the one
+  # above: the namespace is part of the path, and a single `.Release.Namespace`
+  # scope silently missed resource-monitor entirely.
+  classANodeAgentContainers:
     - tracebloc-resource-monitor
-    - egress-proxy
-    - requests-proxy
 
   # Where the kubelet writes container stdout. Overridable because it is not
   # universal — k3s and some distributions differ — and a wrong path yields a

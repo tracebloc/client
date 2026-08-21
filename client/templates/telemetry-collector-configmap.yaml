@@ -61,8 +61,19 @@ data:
     receivers:
       filelog:
         include:
+          {{- $logs := trimSuffix "/" ($tc.hostLogsPath | default "/var/log/pods") }}
+          {{- /* Release-namespace Class A containers. */}}
           {{- range $tc.classAContainers }}
-          - {{ printf "%s/%s_*/%s/*.log" (trimSuffix "/" ($tc.hostLogsPath | default "/var/log/pods")) $.Release.Namespace . | quote }}
+          - {{ printf "%s/%s_*/%s/*.log" $logs $.Release.Namespace . | quote }}
+          {{- end }}
+          {{- /*
+            NODE-AGENTS namespace, separately. resource-monitor is a DaemonSet in
+            `nodeAgents.namespace`, not the release namespace, so scoping every
+            path to `.Release.Namespace` missed it entirely — a Collector healthy
+            and blind to a whole Class A component. (Bugbot on #779.)
+          */}}
+          {{- range $tc.classANodeAgentContainers }}
+          - {{ printf "%s/%s_*/%s/*.log" $logs $.Values.nodeAgents.namespace.name . | quote }}
           {{- end }}
         # A path we have already read must not be re-read from the top after a
         # restart; without this every Collector restart re-sends the whole file.
