@@ -33,6 +33,15 @@
 #
 #  FAILS CLOSED. If no configuration puts anything in that namespace, the check
 #  proved nothing and says so.
+#
+#  AND IT NO LONGER PRESCRIBES A FIX. The first version's message said "gate them
+#  on `tracebloc.nodeAgentsInUse`", which — while it was mis-firing on the release
+#  namespace — advised making the ENTIRE CHART conditional on node agents being in
+#  use. A false positive that arrives with confident, specific, harmful advice is
+#  worse than one that merely fails, because someone in a hurry can act on it. It
+#  now states the property that was violated and names the namespace, and leaves
+#  the choice of gate to the reader — there is more than one correct spelling
+#  anyway. (@saadqbal, review of #787.)
 set -euo pipefail
 
 cd "$(dirname "${BASH_SOURCE[0]}")/../.."
@@ -70,32 +79,49 @@ docs = [d for d in yaml.safe_load_all(sys.stdin) if d]
 if not docs:
     sys.exit(f"[ERROR] {label}: rendered nothing")
 
-# The namespace NAME comes out of the render, not from this file: it is
-# chart-configurable, and hardcoding it here would be the very thing this guard
-# exists to avoid.
-target = None
-for d in docs:
-    ns = d.get("metadata", {}).get("namespace")
-    if ns and ns != release_ns:
-        target = ns
-        break
-if target is None:
+# EVERY non-release namespace, as a SET rather than the first match. Two reasons,
+# both @saadqbal's: `break` on the first hit lets DOCUMENT ORDER decide which
+# namespace gets checked, and a set is honest about there being possibly more than
+# one — today there is exactly one, and if a third ever appears it should be
+# checked rather than shadowed.
+#
+# The names come out of the render; only the RELEASE namespace is supplied, and it
+# is supplied because it was PINNED on the helm command line rather than inferred.
+# The previous version derived the namespace it was thinking about and restated the
+# one it was not, which is how it came to demand a `Namespace/default` object.
+targets = {d.get("metadata", {}).get("namespace") for d in docs} - {None, release_ns}
+if not targets:
     print(f"   {label:<34} nothing outside the release namespace")
+    # Still emit the marker: every exit path must, or the caller cannot
+    # distinguish "checked nothing" from "the comparator died before printing".
+    print("POPULATED=0")
     sys.exit(0)
 
-created = any(d.get("kind") == "Namespace" and d["metadata"]["name"] == target
-              for d in docs)
-inside = [f"{d['kind']}/{d['metadata']['name']}" for d in docs
-          if d.get("metadata", {}).get("namespace") == target]
+created = {d["metadata"]["name"] for d in docs if d.get("kind") == "Namespace"}
 
-if inside and not created:
-    sys.exit(f"[ERROR] {label}: these render into {target!r} but the chart does "
-             f"not create it: {sorted(inside)} — their pods and bindings target a "
-             "namespace that will not exist. Gate them on "
-             "`tracebloc.nodeAgentsInUse` (or on a condition that implies it).")
+problems = []
+summary = []
+for ns in sorted(targets):
+    inside = sorted(f"{d['kind']}/{d['metadata']['name']}" for d in docs
+                    if d.get("metadata", {}).get("namespace") == ns)
+    if inside and ns not in created:
+        problems.append(
+            f"{len(inside)} resource(s) render into {ns!r} but the chart does not "
+            f"create it: {inside} — their pods and bindings target a namespace that "
+            "will not exist. Whatever renders them must be gated so it cannot "
+            f"render unless {ns!r} does.")
+    summary.append(f"{ns}={'created' if ns in created else 'ABSENT'}({len(inside)})")
 
-print(f"   {label:<34} ns={'created' if created else 'absent  '}  "
-      f"resources={len(inside)}")
+print(f"   {label:<34} " + "  ".join(summary))
+# A MACHINE-READABLE COUNT, not a number scraped back out of the display line. The
+# first version's vacuity check grepped `resources=N` from the formatted summary
+# and broke the moment the summary was reformatted — a check coupled to a display
+# string, which is the same class as everything else this file has caught.
+total_inside = sum(1 for d in docs
+                   if d.get("metadata", {}).get("namespace") in targets)
+print(f"POPULATED={total_inside}")
+if problems:
+    sys.exit(f"[ERROR] {label}: " + "; ".join(problems))
 PY
 
 populated=0
@@ -108,8 +134,13 @@ for combo in "true true" "true false" "false true" "false false"; do
     --set "telemetryCollector.enabled=$tc_val" 2>/dev/null)" || {
       echo "[ERROR] $label: the chart failed to render" >&2; exit 1; }
   printed="$(printf '%s' "$out" | python3 "$CMP" "$label" "$RELEASE_NS")"
-  echo "$printed"
-  case "$printed" in *"resources="[1-9]*) populated=$((populated + 1)) ;; esac
+  # The POPULATED= line is the contract between the two halves; everything else is
+  # for humans. Printed separately so reformatting the human part cannot break the
+  # vacuity check again.
+  printf '%s\n' "$printed" | grep -v '^POPULATED='
+  count="$(printf '%s\n' "$printed" | sed -n 's/^POPULATED=//p')"
+  [ -n "$count" ] || { echo "[ERROR] $label: the comparator emitted no POPULATED= line; cannot tell whether anything was checked" >&2; exit 2; }
+  [ "$count" -gt 0 ] && populated=$((populated + 1))
 done
 
 # An inert chart in every combination would satisfy the implication vacuously.
