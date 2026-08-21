@@ -81,7 +81,11 @@
 # `=`, not `:=`: recursively expanded, so the grep runs only when `help` actually
 # prints it. `make check` is the pre-push path with a sub-60 s budget and never
 # pays for it. bats declares one test per `@test` at line start, so this matches
-# `bats`'s own count exactly (verified: 946 = 946).
+# `bats`'s own count exactly — re-verify by comparing it against the highest test
+# number a full `make bats` prints, never against a number recorded here. The
+# "verified: 946 = 946" that used to close this sentence had itself drifted past
+# 1180 by the time anyone re-counted: the paragraph above, happening to the
+# paragraph above.
 BATS_TEST_COUNT = $(shell grep -h '^@test' scripts/tests/*.bats 2>/dev/null | wc -l | tr -d ' ')
 
 .PHONY: help
@@ -338,7 +342,7 @@ lint-warnings:
 #
 # `|`-separated because each guard is a multi-word command. One entry per guard,
 # and this is the only place they are written down.
-DRIFT_GUARDS := scripts/gen-manifest.sh --check|scripts/check-facts.sh --check|bash scripts/check-style.sh|bash scripts/tests/check-drift.sh|bash scripts/tests/env-vocabulary-agreement.sh|bash scripts/tests/telemetry-vocabulary-agreement.sh
+DRIFT_GUARDS := scripts/gen-manifest.sh --check|scripts/check-facts.sh --check|bash scripts/check-style.sh|bash scripts/tests/check-drift.sh|bash scripts/tests/env-vocabulary-agreement.sh|bash scripts/tests/telemetry-vocabulary-agreement.sh|bash scripts/tests/k3s-components-agreement.sh
 
 # EXPORTED, not interpolated. The recipe reads $$DRIFT_GUARDS from the
 # environment; it used to do `guards='$(DRIFT_GUARDS)'`, which Make expands

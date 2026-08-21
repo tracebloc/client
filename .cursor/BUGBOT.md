@@ -105,6 +105,76 @@ for *what the operator sees and can act on*, not code elegance.
   (`scripts/gen-manifest.sh`). `make drift` fails in the required `Source-of-truth drift`
   check, and a stale manifest breaks `install.sh`'s verified fetch.
 
+- **A test whose fixture cannot reach the code it names.** Ask which line of production
+  code changes the assertion's outcome; if none does, the test is decoration however well
+  it reads. Three PRs on 2026-08-20 (#762, #763, `tracebloc/release-train#94`) shipped
+  **eleven** of these, every one reviewed and green, so treat it as the default suspicion
+  on a new guard test. Three shapes, ascending in subtlety:
+  - **Unreachable fixture** — the input never takes the path. A one-liner test that
+    *indents* the function when the opener rule is anchored at column 0; an attribution
+    test whose dispatch-only fixture returns before attribution runs.
+  - **Redundant mechanisms** — two code paths give the same observable for that input, so
+    removing either changes nothing. A fixture with ONE Dockerfile cannot distinguish "the
+    fallback demanded everything" from "the comment attributed that one file": both count 1.
+    Add the second element.
+  - **Inert mutation** — the *mutation* fails to express the defect. For a root Dockerfile
+    `rel` and the basename are the same string, so mutating one of two redundant match arms
+    leaves the other matching. An anchor-resolution check **cannot** catch this — the
+    anchor resolves perfectly and the log is indistinguishable from real coverage. Only a
+    surviving mutation reveals it.
+
+- **A surviving mutation treated as a nuisance.** It is a defect in the test, or in the
+  mutation — never something to annotate and move past. The converse matters too: a green
+  mutation log is evidence only if the run also asserts the mutation *applied*
+  (backend#1729 rule 5), because an unresolvable anchor and real coverage look the same.
+
+- **A derived vocabulary that cannot fail closed.** Deriving beats restating (backend#1729
+  rule 1), but a derivation that silently falls through returns the *wrong* vocabulary and
+  then agrees with itself. `_brand_rgbs` in `scripts/tests/check-style.bats` fell back to
+  the hex list when rule 1's RGB arm was deleted, so the test asserting "every RGB triple
+  is caught" passed with the RGB half **gone**. Require both halves: fail closed on a
+  missing marker, and assert the token shape.
+
+- **A pipe into an early-closing reader under errexit + pipefail.** `producer | head -n N`,
+  `| grep -q`, `| grep -m N`: the reader closes, the producer takes SIGPIPE, pipefail makes
+  the pipeline 141 and errexit kills the script. Size-dependent, which is why it survives
+  review — measured, 50 lines exit 0 and 20k exit 141 (client#656, client#678). The house
+  idiom is a here-string or capture-then-slice.
+  `scripts/tests/pipefail-early-close.sh` enforces this in CI, **including inside
+  `scripts/lib/*.sh`** (see the corollary below). Converting an instance is not always the
+  fix: `scripts/lib/diagnose.sh:95-101` keeps its `df -h | head -20` on purpose, because
+  `run_diagnose` opens with `set +e` so the 141 cannot fire, *and* `head` streams — capturing
+  df in full would block the whole bundle on an unresponsive NFS mount. The guard reads
+  `set +e` and does not flag it, so no marker is needed there; `# pipefail-guard: allow`
+  exists for a case the guard cannot reason about, and is currently unused in the tree.
+  Flag a new marker that does not state why.
+
+- **Half of a paired construct changed.** Openers and closers, arms of one `if`, a
+  neutralisation and the boundary it destroys, a writer and its reader — when a rule lives
+  in two places that must move together, changing one is not a partial fix, it is a *new*
+  bug, and often in the opposite direction from the one being fixed. Three in one day on
+  2026-08-20/21, all on constructs whose halves sat within twenty lines of each other:
+    - client#777: `||` neutralised to `\001` for the `grep` arms via `grep[^|\001]*`, but
+      `\001` was not added to the `head` terminator class — so `producer | head||die`, which
+      `develop` flagged, was silently dropped. Fail-open.
+    - client#764: the Helm comment stripper taught the chomping opener `{{- /*` but not the
+      matching closer `*/ -}}`, so a block that used both never terminated and the stripper
+      ate 23 lines of the file. Fail-**closed**, in a required drift gate.
+    - client#777 again: the fix for the first one shipped a second change (a one-character
+      stand-in) whose mutation survived — inert, and reverted.
+  Two habits close it, and both are cheap. **Grep for the sibling** before committing: if
+  you edited a terminator class, an opener, or one arm of a matcher, find the other. And for
+  a scanner or matcher, **diff the whole-tree output against the base** — if the base flags
+  something you no longer do, that is a regression the unit tests will not show you, because
+  they only cover the case you were already thinking about.
+
+- **A fixture set that only exercises the form the author had in mind.** The corollary to
+  the above, and the reason it kept getting through: the `k3s-components-agreement` suite
+  added in client#764 had nine cases and none used the `*/ -}}` closer, so the suite shipped
+  in the *same commit* as the bug it could not see. When the thing under test accepts
+  several spellings of one construct, enumerate the spellings from the real input — here,
+  from the template the guard actually reads — not from the example in your head.
+
 - **A `Chart.yaml` `version` bump without the matching `appVersion`** — the
   `app.kubernetes.io/version` label depends on it.
 
@@ -112,6 +182,10 @@ for *what the operator sees and can act on*, not code elegance.
 
 - **`scripts/lib/*.sh` have no `set -euo pipefail` by design.** They are only ever
   `source`d by `scripts/install-k8s.sh`, which sets it at line 44 *before* sourcing.
+  Corollary, and the reason this is a non-issue rather than a free pass: those libs still
+  **run** under both options, so every errexit/pipefail rule — including the early-close
+  gate above — applies to them in full. A guard that only asks "does this file set the
+  options" reads the entire lib tree as safe; that was the bug #763 fixed.
 - `scripts/check-style.sh`, `scripts/tests/check-drift.sh`, `scripts/tests/distro-prereqs.sh`
   and `scripts/tests/path-persist.sh` deliberately use `set -uo pipefail` **without `-e`**
   so they can inspect a failing check's exit code instead of aborting.
@@ -146,5 +220,10 @@ ticket detail in a finding. A bare `tracebloc/backend#NNNN` reference is fine.
 Every Bugbot review thread gets a reply, then gets resolved:
 - **Fixed**: say what changed and in which commit.
 - **False positive**: say why, with evidence (file/line, measured behavior).
+- **Never resolve on "the reported case now passes."** Re-test the surrounding shape space
+  first — a fix for one spelling routinely leaves its sibling broken (flow vs block form
+  recurred four times in `tracebloc/release-train#94` alone). A resolved thread reads as
+  "handled" to the next person, so closing one over a still-broken shape is worse than
+  leaving it open.
 Unresolved cursor threads HOLD release-train promotions (soft gate) — an
 unaddressed finding blocks the fleet, not just this PR.
