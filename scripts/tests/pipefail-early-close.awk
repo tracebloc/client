@@ -39,6 +39,24 @@
 # `hazardous` (from pipefail-early-close.sh) seeds files that inherit both
 # options from a sourcing script; those start with the state already on.
 #
+# KNOWN LIMITATION -- a `set` line inside a MULTI-LINE QUOTED STRING is read as
+# this file's options rather than as fixture data. tracebloc/.github's
+# house-rules-selftest.sh passes whole scripts as quoted arguments:
+#
+#     expect "a bare curl fires both rules" \
+#     '#!/bin/bash
+#     set -euo pipefail
+#     curl -fsSL "$url" -o out' curl-timeout,curl-tls
+#
+# so the scanner sees errexit enabled in a file whose real options are
+# `set -uo pipefail`, and reports a line that carries no hazard. Counting quotes
+# to find such regions was tried and REJECTED: apostrophes in prose ("the file's
+# options") desynchronise the count within a few lines of the top of that very
+# file, and a desynchronised count HIDES real offenders -- strictly worse than
+# reporting a false one. Use `# pipefail-guard: allow` on the affected line until
+# the scanner can lex shell properly (backend#2264). The behaviour is PINNED by a
+# test, so changing it is deliberate rather than silent.
+#
 # Usage:  awk -v hazardous="<paths>" -f pipefail-early-close.awk FILE...
 # Output: one `path:line: code` per offender.
 
@@ -115,16 +133,52 @@ FNR == 1 {
 
   if (!(e_on && p_on)) next
 
+  # `||` IS NOT A PIPE, and must be neutralised before the hazard test below.
+  # Otherwise the SECOND bar of a `||` reads as a pipeline, and the scanner
+  # flags the very form this file recommends:
+  #     out=$(producer) || true
+  #     grep -q needle <<<"$out"        # fine
+  #     cmd || grep -q needle <<<"$out" # was reported as an offender
+  # Found while converting the fleet for backend#2264 -- the gate rejected the
+  # output of its own remediation, which is how a gate teaches people to
+  # disable it. \001 cannot occur in a shell source line, so it is a safe
+  # stand-in; the ORIGINAL line is still what gets printed.
+  #
+  # THE STAND-IN IS ALSO A BOUNDARY, and the `[^|\001]*` class below is what
+  # makes it one. The `|` characters of a `||` are not just noise -- they are
+  # what STOPS `grep[^|]*` from spanning further down the line. Replacing them
+  # with a character the class permitted let a plain `| grep` reach the `-q` of
+  # a LATER `|| grep -q`:
+  #     producer | grep needle && cmd || grep -q x <<<"$y"
+  # flagged again -- the same false positive, one level deeper (Bugbot,
+  # client#777). Neutralising the pipe is only half the job; the boundary has to
+  # survive. Adding \001 to the class is the fix, and it is the ONLY fix here:
+  # shrinking the stand-in to one character was tried, and its mutation survived,
+  # so it changed nothing and was reverted.
+  probe = line
+  gsub(/\|\|/, "\001\001", probe)
+
   # The hazard: a pipe into a reader that closes early.
   #   `| head`        — closes after N lines
   #   `| grep -q`     — closes on the first match
   #   `| grep -m N`   — closes after N matches
+  # `|&` is bash's pipe-both-streams and is a pipe like any other, so the bar is
+  # allowed one optional `&`. It is NOT the `|&` of the terminator class below,
+  # which is about what may FOLLOW `head`.
+  #
+  # \001 IS IN THE HEAD TERMINATOR CLASS for the same reason it is in the grep
+  # arms' `[^|\001]*`: the stand-in has to read as a BOUNDARY, not as ordinary
+  # text. `producer | head||die` leaves `head` followed by \001, and without it
+  # in the class the pipe is missed -- a FALSE NEGATIVE this fix introduced and
+  # `develop` did not have (Arturo, client#777). The neutralisation and the
+  # boundary are one change; doing half of it moves the bug rather than fixing
+  # it, which is exactly what happened here twice.
   # The terminator class matters: `head` can be followed by a CLOSING delimiter,
   # not just whitespace or end-of-line. `x="$(cmd | head)"` ends at `)` and then
   # `"`, and requiring space-or-EOL missed exactly that shape (Bugbot #763).
-  if (line ~ /\|[[:space:]]*head([[:space:]]|$|[)"'\''`;|&])/ \
-      || line ~ /\|[[:space:]]*grep[^|]*[[:space:]]-[a-zA-Z]*q/ \
-      || line ~ /\|[[:space:]]*grep[^|]*[[:space:]]-[a-zA-Z]*m[[:space:]]*[0-9]/) {
+  if (probe ~ /\|&?[[:space:]]*head([[:space:]]|$|[)"'\''`;|&\001])/ \
+      || probe ~ /\|&?[[:space:]]*grep[^|\001]*[[:space:]]-[a-zA-Z]*q/ \
+      || probe ~ /\|&?[[:space:]]*grep[^|\001]*[[:space:]]-[a-zA-Z]*m[[:space:]]*[0-9]/) {
     sub(/^[[:space:]]+/, "", line)
     print curfile ":" FNR ": " line
   }
