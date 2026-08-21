@@ -6,6 +6,7 @@ templates:
   # Not a Collector template, but the Collector is now a second tenant of the
   # node-agents namespace, so its gate is part of this feature's surface.
   - templates/node-agents-namespace.yaml
+  - templates/docker-registry-secret.yaml
 set:
   clientId: "test-id"
   clientPassword: "test"
@@ -379,3 +380,71 @@ tests:
       # the test above would still pass — which is the vacuity this bar rejects.
       - hasDocuments:
           count: 0
+
+  # ── the mirrored pull Secret shares the gate too ─────────────────────────
+  # @aptracebloc on #779: the namespace gate was mutation-pinned and this one was
+  # not. It was verified by hand at the time (render diff: 4 node-agents resources
+  # with the fix, 3 without) — but a by-hand check leaves nothing behind, which is
+  # the gap worth closing rather than the fix.
+  #
+  # Needs real registry values: `dockerRegistry.server` is `format: uri` in
+  # values.schema.json and `email` is required by its `allOf`, so a partial set is
+  # rejected by the schema before any template renders — and helm-unittest reports
+  # that as a plugin ERROR, not a template failure, which is easy to misread as a
+  # code defect. (It cost me three confused renders before I stopped suppressing
+  # stderr.)
+  - it: mirrors the pull Secret into node-agents when only the Collector is on
+    set:
+      telemetryCollector.enabled: true
+      resourceMonitor: false
+      dockerRegistry:
+        create: true
+        server: https://registry.example.com
+        username: u
+        password: p
+        email: ops@example.com
+    template: templates/docker-registry-secret.yaml
+    documentIndex: 1
+    asserts:
+      # Index 1 is the MIRRORED copy; index 0 is the release-namespace one. Without
+      # the widened gate this document does not exist at all, so the assertion is
+      # on its namespace rather than merely on the document count.
+      - equal:
+          path: metadata.namespace
+          value: tracebloc-node-agents
+      - equal:
+          path: kind
+          value: Secret
+
+  - it: does not mirror the pull Secret when neither tenant is enabled
+    set:
+      resourceMonitor: false
+      dockerRegistry:
+        create: true
+        server: https://registry.example.com
+        username: u
+        password: p
+        email: ops@example.com
+    template: templates/docker-registry-secret.yaml
+    asserts:
+      # The negative half, so widening the gate to `true` cannot make the test
+      # above pass for free — the same vacuity the namespace pair guards against.
+      - hasDocuments:
+          count: 1
+
+  # ── the pre-flight must not break offline rendering ──────────────────────
+  # @aptracebloc: the `lookup`-based `fail` is inherently un-pinnable here, because
+  # `lookup` returns empty under `helm template` so the guard never fires. Agreed —
+  # but the INVERSE is both testable and the thing that would actually hurt: a
+  # pre-flight that fired offline would break every `helm template`, every CI
+  # render and every `--dry-run` in the fleet.
+  - it: renders offline despite the token pre-flight, because lookup is empty
+    set:
+      telemetryCollector.enabled: true
+    template: templates/telemetry-collector-daemonset.yaml
+    asserts:
+      - hasDocuments:
+          count: 1
+      - equal:
+          path: kind
+          value: DaemonSet
