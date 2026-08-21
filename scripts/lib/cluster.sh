@@ -971,16 +971,51 @@ _check_existing_cluster_storage_mode() {
 
 _create_new_cluster() {
   # The tracebloc client is outbound-only: jobs-manager + pods-monitor dial out
-  # to the platform, and the only in-cluster Service (mysql-client) is ClusterIP.
+  # to the platform, and every in-cluster Service is ClusterIP — mysql-client,
+  # jobs-manager, requests-proxy-service and egress-proxy-service. (This comment
+  # claimed "the only in-cluster Service (mysql-client)" until the chart was
+  # counted: there are four, three of them explicitly `type: ClusterIP` and
+  # mysql-client's by omission. The conclusion still holds — not one is a
+  # LoadBalancer and the chart renders no Ingress — but the premise was wrong.)
+  #
   # So we disable k3s components that exist solely to handle inbound traffic
   # or duplicate chart-provided resources:
   #   traefik        — no Ingress resources in the chart
   #   servicelb      — no LoadBalancer Services
-  #   local-storage  — chart creates its own StorageClass (client-storage-class)
+  #   local-storage  — chart ships its own per-release StorageClass
   #
-  # metrics-server is kept: the tracebloc-resource-monitor DaemonSet queries
-  # the metrics.k8s.io API for node CPU/memory; without it the DaemonSet
-  # crash-loops with 404s against /apis/metrics.k8s.io/v1beta1.
+  # metrics-server is KEPT, and this is load-bearing rather than tidiness. Do not
+  # add it to the list above as a footprint saving:
+  #
+  #   * At install time, client/templates/resource-monitor-daemonset.yaml
+  #     `lookup`s the v1beta1.metrics.k8s.io APIService and `fail`s the release
+  #     when it is absent. That aborts this install AND every subsequent
+  #     auto-upgrade tick, since each one re-renders the same template.
+  #   * If the API goes away AFTER install, the failure is silent, not loud.
+  #     client-runtime's Node-deploy/resource_monitor.py builds NodeUtilisation
+  #     as the first statement inside its `while True:` body, and that
+  #     constructor reads metrics.k8s.io outside any try. The loop's handler
+  #     catches Exception, logs and sleeps 5 s, and the DaemonSet declares no
+  #     liveness or readiness probe — so the pod stays Running and looks healthy
+  #     while send_heartbeat is never reached. Node telemetry just stops.
+  #
+  # (An earlier version of this comment said the DaemonSet "crash-loops with
+  # 404s". It does not, and that mattered: a crash-loop is the failure you would
+  # have noticed. Nobody watching pod restarts would ever see this one.)
+  #
+  # Note the flag and the RACE are two different problems, both about this same
+  # APIService. #553/#757 added a bounded wait to each installer
+  # (_wait_for_metrics_apiservice here, Wait-MetricsApiService on Windows, budget
+  # stamped in scripts/spec/facts.env as METRICS_WAIT_TIMEOUT) because k3s applies
+  # its bundled metrics-server slightly AFTER the API server reports ready, so a
+  # fast host could render the chart inside that window. That wait falls through
+  # non-fatally, by design — so disabling the component here is not something it
+  # rescues: the wait would simply burn its whole budget and hand the install to
+  # the chart's `fail`.
+  #
+  # Guarded by scripts/tests/cluster.bats (the exact disable set per storage
+  # mode) and scripts/tests/k3s-components-agreement.sh (both installers agree,
+  # and the chart coupling above still exists).
   K3D_ARGS=(
     cluster create "$CLUSTER_NAME"
     --servers "$SERVERS"
