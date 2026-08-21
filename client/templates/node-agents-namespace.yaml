@@ -31,8 +31,7 @@
   namespace this chart never created — and the mirrored pull Secret with it. Every
   dependent resource must share the feature's gate. (Bugbot on #779.)
 */}}
-{{- $tcNs := default (dict) .Values.telemetryCollector -}}
-{{- if and (or (ne .Values.resourceMonitor false) $tcNs.enabled) .Values.nodeAgents.namespace.create (ne .Values.nodeAgents.namespace.name .Release.Namespace) }}
+{{- if and (include "tracebloc.nodeAgentsInUse" .) .Values.nodeAgents.namespace.create (ne .Values.nodeAgents.namespace.name .Release.Namespace) }}
 apiVersion: v1
 kind: Namespace
 metadata:

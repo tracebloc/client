@@ -851,3 +851,28 @@ https://stg-api.tracebloc.io/
 https://api.tracebloc.io/
 {{- end -}}
 {{- end -}}
+
+{{/*
+  tracebloc.nodeAgentsInUse — true when anything the chart owns runs in
+  nodeAgents.namespace (backend#1906, @saadqbal's review of #779).
+
+  ONE PREDICATE, not N readers. Five templates put something in that namespace
+  and each carried its own copy of "is resource-monitor on"; when the Collector
+  became a second tenant, two of them were widened and the rest were not, so the
+  configuration this feature exists to enable — resourceMonitor off, Collector on
+  — created the namespace, landed the DaemonSet, and left the RBAC that manages it
+  behind. Adding a third tenant should be one line here, not an audit.
+
+  THE NIL-GUARD IS LOAD-BEARING, which is the other reason this is central. A bare
+  `.Values.telemetryCollector.enabled` throws "nil pointer evaluating
+  interface {}.enabled" for anyone running `helm upgrade --reuse-values` from a
+  chart that predates the key — a very common operator habit, and it fails before
+  a single resource lands. Guarded once here instead of five times.
+
+  Emits the string "true" or nothing, so callers use it as
+  `(include "tracebloc.nodeAgentsInUse" .)` inside an `and`.
+*/}}
+{{- define "tracebloc.nodeAgentsInUse" -}}
+{{- $tc := default (dict) .Values.telemetryCollector -}}
+{{- if or (ne .Values.resourceMonitor false) $tc.enabled }}true{{ end -}}
+{{- end -}}

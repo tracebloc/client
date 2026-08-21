@@ -4,6 +4,8 @@ templates:
   - templates/telemetry-collector-daemonset.yaml
   - templates/telemetry-collector-rbac.yaml
   - templates/telemetry-collector-scc.yaml
+  - templates/auto-upgrade-rbac.yaml
+  - templates/image-refresh-rbac.yaml
   # Not a Collector template, but the Collector is now a second tenant of the
   # node-agents namespace, so its gate is part of this feature's surface.
   - templates/node-agents-namespace.yaml
@@ -566,3 +568,70 @@ tests:
     asserts:
       - hasDocuments:
           count: 0
+
+  # ── one predicate for the node-agents namespace ────────────────────────────
+  # @saadqbal's review of #779. Five templates put something in that namespace and
+  # each held its own copy of "is resource-monitor on"; two were widened for the
+  # Collector and the rest were not, so `resourceMonitor: false` +
+  # `telemetryCollector.enabled: true` — the configuration this feature exists to
+  # enable — created the namespace, landed the DaemonSet, and left the RBAC that
+  # manages it behind. `tracebloc.nodeAgentsInUse` is now the single predicate.
+  #
+  # The cross-document invariant (a DaemonSet-mutating Role must exist whenever a
+  # DaemonSet does) is asserted in scripts/tests/node-agents-tenancy.sh, which
+  # helm-unittest cannot express. These pin the per-template half.
+  - it: grants auto-upgrade its node-agents Role with ONLY the Collector enabled
+    set:
+      resourceMonitor: false
+      telemetryCollector.enabled: true
+    template: templates/auto-upgrade-rbac.yaml
+    asserts:
+      # 7 vs the 5 below: the node-agents Role/RoleBinding PAIR is the delta, and
+      # the pair is what `helm upgrade --atomic --wait` needs — without it that
+      # tick 403s and ROLLS BACK, the expensive form of backend#953's failure mode.
+      - hasDocuments:
+          count: 7
+
+  - it: grants image-refresh its node-agents Role with ONLY the Collector enabled
+    set:
+      resourceMonitor: false
+      telemetryCollector.enabled: true
+    template: templates/image-refresh-rbac.yaml
+    asserts:
+      - hasDocuments:
+          count: 5
+
+  # The negative half, so widening the predicate to a constant `true` cannot make
+  # the two above pass for free — which is exactly what a mutation showed it does.
+  - it: grants neither Role when the namespace has no tenant at all
+    set:
+      resourceMonitor: false
+    template: templates/auto-upgrade-rbac.yaml
+    asserts:
+      # 5, i.e. 7 minus the node-agents pair. Paired with the positive above so
+      # widening the predicate to a constant `true` reddens THIS one — a mutation
+      # confirmed it does.
+      - hasDocuments:
+          count: 5
+
+  # THE `--reuse-values` NIL TRAP, on the predicate itself rather than five times
+  # over. A bare `.Values.telemetryCollector.enabled` throws "nil pointer
+  # evaluating interface {}.enabled" for an operator upgrading from a chart that
+  # predates the key, and fails before a single resource lands.
+  #
+  # `resourceMonitor: false` IS THE WHOLE TEST. Go's `or` short-circuits, so with
+  # resource-monitor on, the second operand is never evaluated and a null
+  # telemetryCollector cannot deref — the first version of this test set
+  # `resourceMonitor: true` and passed happily with the nil-guard DELETED. It took
+  # a mutation to show it was asserting nothing.
+  - it: survives an explicit null telemetryCollector through the shared predicate
+    set:
+      telemetryCollector: null
+      resourceMonitor: false
+    template: templates/auto-upgrade-rbac.yaml
+    asserts:
+      # 5 = the render minus the node-agents pair: no tenant, so no Role there.
+      # Reaching this number at all means the predicate evaluated without
+      # throwing, which is the property.
+      - hasDocuments:
+          count: 5
