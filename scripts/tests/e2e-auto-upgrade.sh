@@ -69,13 +69,22 @@ trap cleanup EXIT
 fail() { echo "FAIL: $*" >&2; exit 1; }
 
 # --- assertion helpers (read live cluster state, not helm output) -----------
+# Capture-then-match, NOT `kubectl … | grep -q` (backend#1778). grep -q closes
+# the pipe on the FIRST match, so once the policy yaml outgrows the ~64KB pipe
+# buffer kubectl takes SIGPIPE, pipefail makes the pipeline 141, and this helper
+# reports "no external 443" for a policy that HAS it — a silent wrong answer in
+# an assertion, which is worse than the abort the same shape causes elsewhere.
 netpol_has_external_443() {
-  kubectl get networkpolicy "${NS}-training-egress" -n "$NS" -o yaml \
-    | grep -q 'cidr: 0.0.0.0/0'
+  local yaml
+  yaml="$(kubectl get networkpolicy "${NS}-training-egress" -n "$NS" -o yaml)" || return 1
+  grep -q 'cidr: 0.0.0.0/0' <<<"$yaml"
 }
 
+# Same class: `grep -m1` closes after the first match exactly as -q does.
 jm_deploy() {
-  kubectl get deploy -n "$NS" -o name | grep -m1 'jobs-manager'
+  local names
+  names="$(kubectl get deploy -n "$NS" -o name)" || return 1
+  grep -m1 'jobs-manager' <<<"$names"
 }
 
 jm_egress_proxy_url() {

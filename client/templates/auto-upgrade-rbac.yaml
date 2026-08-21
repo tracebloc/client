@@ -317,12 +317,21 @@ rules:
       - {{ include "tracebloc.gpuDevicePluginName" "amd" | quote }}
     verbs: ["update", "patch", "delete"]
   # docker-registry-secret.yaml — the mirrored dockerconfigjson pull Secret.
+  #
+  # resourceNames names the secret the CHART creates, never the operator's own
+  # (`dockerRegistry.existingSecret`). Resolving it through
+  # `tracebloc.registrySecretName` would grant this ServiceAccount get + DELETE
+  # on a bring-your-own dockerconfigjson living in kube-system — rights over a
+  # Secret the chart does not own (Bugbot on client#751). Naming the chart's own
+  # secret also keeps `create: true` -> `existingSecret` migrations working: the
+  # orphaned mirror is still deletable, where a list that followed
+  # `existingSecret` would 403 on it and stall every later upgrade tick.
   - apiGroups: [""]
     resources: ["secrets"]
     verbs: ["create"]
   - apiGroups: [""]
     resources: ["secrets"]
-    resourceNames: [{{ include "tracebloc.registrySecretName" . | quote }}]
+    resourceNames: [{{ include "tracebloc.createdRegistrySecretName" . | quote }}]
     verbs: ["get", "update", "patch", "delete"]
   # This Role and its RoleBinding, so the SA can reconcile its own grant.
   - apiGroups: ["rbac.authorization.k8s.io"]

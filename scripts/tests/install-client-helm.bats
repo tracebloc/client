@@ -19,6 +19,23 @@ setup() {
   # would otherwise spin against fake output. The bar is cosmetic + covered by
   # its own reasoning; the readiness gate (summary.bats) is the real contract.
   export TB_NO_SERVICE_PROGRESS=1
+  # THE HOST IS AN INPUT, SO DECLARE IT (backend#2208). install_client_helm calls
+  # _assert_engine_runs_on_this_arch, which since client#756 probes the real
+  # machine: `uname -m`, and on Darwin a live Rosetta/Docker smoke. Nothing here
+  # set OS or ARCH, so any flow test whose helm mock reports an EXISTING release
+  # — the one path that resolves the engine to 5.7 and therefore engages the gate
+  # — inherited the developer's CPU and refused on an Apple Silicon Mac, while CI
+  # (Linux/amd64) returned early at the arch check and stayed green. Three
+  # reconcile tests failed that way for every Mac developer and CI could not see
+  # it, because the platform the gate exists for is the one CI never runs.
+  #
+  # Pin to what CI is, so a local run reproduces CI. This does NOT disarm the
+  # gate — TRACEBLOC_ALLOW_ARM64 would, which is exactly why it is not used here:
+  # it would switch off the behaviour client#756 added. Every arch-sensitive test
+  # in this file sets OS/ARCH for itself (see _arch_gate_ctx and the engine
+  # tests), so they override this and keep testing the real rule.
+  OS=Linux
+  ARCH=x86_64
 }
 
 # ── _backend_url ───────────────────────────────────────────────────────────
@@ -999,14 +1016,497 @@ setup() {
   [ "$output" = "cpu=11,memory=3Gi" ] || return 1   # 12−1 CPU; 6.76−3 GiB floored
 }
 
-@test "training size: below-floor machine falls back to the static default" {
+# CHANGED BEHAVIOR (backend#2220). This test used to assert that a 2c/4Gi machine
+# gets "cpu=2,memory=8Gi" — i.e. an envelope LARGER than the machine, on which no
+# training pod can ever schedule. That was the bug, pinned as if it were the
+# contract. It now gets the honest remainder, which fits.
+#
+# The old expectation is not lost, it moved: "unreadable cluster keeps the static
+# default" below covers the case where the literal IS still right, because we
+# genuinely cannot see the machine. That distinction — cannot-see vs too-small —
+# is the whole change; the two used to collapse into the same empty answer.
+@test "training size: below-floor machine gets the honest remainder, not an unschedulable literal" {
   TB_NAMESPACE=tracebloc
   unset TRACEBLOC_TRAINING_RESOURCES
   helm() { return 1; }
   has() { return 0; }
   kubectl() { printf '2 4Gi\n'; }        # 4−3 GiB = 1 GiB < the 2 GiB floor
   run _training_resources
+  [ "$output" = "cpu=1,memory=1Gi" ] || return 1
+}
+
+@test "training size: a below-floor machine is flagged undersized for the caller to warn" {
+  TB_NAMESPACE=tracebloc
+  unset TRACEBLOC_TRAINING_RESOURCES
+  helm() { return 1; }
+  has() { return 0; }
+  kubectl() { printf '2 4Gi\n'; }
+  _resolve_training_size
+  [ "$_TB_TRAINING_UNDERSIZED" = "1" ] || return 1
+  [ "$_TB_TRAINING_UNSCHEDULABLE" = "0" ] || return 1
+}
+
+@test "training size: the resolver itself never emits a warning (it would corrupt the value)" {
+  TB_NAMESPACE=tracebloc
+  unset TRACEBLOC_TRAINING_RESOURCES
+  helm() { return 1; }
+  has() { return 0; }
+  kubectl() { printf '2 4Gi\n'; }
+  # $(...) capture is exactly how the values generation reads this, so any warn
+  # text emitted by the resolver would land inside RESOURCE_LIMITS.
+  local captured
+  captured="$(_training_resources)"
+  [ "$captured" = "cpu=1,memory=1Gi" ] || return 1
+}
+
+# Bugbot on #768: the unschedulable warning used to be INFERRED by re-probing
+# `kubectl get nodes -o name`, so any listable node -- including one whose
+# allocatable would not parse, or one not Ready yet -- tripped a hard "this
+# machine is too small" warning we had never actually measured. The PowerShell
+# twin only flagged it after a parsed node, so the twins disagreed on the same
+# cluster. It is now a verdict the ceiling helper RETURNS.
+@test "training size: readable-but-unparseable nodes must NOT be called too small" {
+  TB_NAMESPACE=tracebloc
+  unset TRACEBLOC_TRAINING_RESOURCES
+  helm() { return 1; }
+  has() { return 0; }
+  # Nodes list fine, but no allocatable parses. We never measured the machine,
+  # so claiming it is too small would be a fabrication.
+  kubectl() {
+    case "$*" in
+      *--request-timeout=10s*) printf 'sixteen 64GB\neight lots\n' ;;
+      *) printf 'node/one\n' ;;
+    esac
+  }
+  _resolve_training_size
+  [ "$_TB_TRAINING_SIZE" = "cpu=2,memory=8Gi" ] || return 1
+  [ "$_TB_TRAINING_UNSCHEDULABLE" = "0" ] || return 1
+  [ "$_TB_TRAINING_UNDERSIZED" = "0" ] || return 1
+}
+
+@test "training size: the ceiling helper reports '|unschedulable' only after measuring" {
+  TB_NAMESPACE=tracebloc
+  has() { return 0; }
+  # A parsed node whose remainder is not a requestable shape.
+  kubectl() { printf '500m 512Mi\n'; }
+  run _machine_training_ceiling
+  [ "$output" = "|unschedulable" ] || return 1
+}
+
+@test "training size: the ceiling helper stays SILENT when nothing parses" {
+  TB_NAMESPACE=tracebloc
+  has() { return 0; }
+  kubectl() { printf 'sixteen 64GB\n'; }
+  run _machine_training_ceiling
+  # Silence means "I could not measure", which the caller must not turn into a
+  # claim about machine size.
+  [ -z "$output" ] || return 1
+}
+
+@test "training size: an unreadable cluster still keeps the static default" {
+  TB_NAMESPACE=tracebloc
+  unset TRACEBLOC_TRAINING_RESOURCES
+  helm() { return 1; }
+  has() { return 0; }
+  kubectl() { return 1; }   # nodes unreadable — we cannot do better than history
+  run _training_resources
   [ "$output" = "cpu=2,memory=8Gi" ] || return 1
+}
+
+@test "training size: a machine too small for even a 1c/1Gi run keeps the literal and flags it" {
+  TB_NAMESPACE=tracebloc
+  unset TRACEBLOC_TRAINING_RESOURCES
+  helm() { return 1; }
+  has() { return 0; }
+  # 512Mi allocatable: the remainder is not a requestable shape (cpu=0), so
+  # there is no honest number to write. Reachable only where the memory
+  # preflight warns instead of failing (macOS/Windows).
+  kubectl() { printf '500m 512Mi\n'; }
+  _resolve_training_size
+  [ "$_TB_TRAINING_SIZE" = "cpu=2,memory=8Gi" ] || return 1
+  [ "$_TB_TRAINING_UNSCHEDULABLE" = "1" ] || return 1
+  [ "$_TB_TRAINING_UNDERSIZED" = "0" ] || return 1
+}
+
+# ── envelope contract: the golden-vector replay (backend#2220) ────────────────
+#
+# This is the client side of the ticket's definition of done. The arithmetic has
+# ONE definition — client-runtime's node_sizing.envelope_from_allocatable — and
+# bash cannot call it, so instead bash proves it still AGREES with it by
+# replaying the contract's golden vectors through the real function.
+#
+# Mutate the arithmetic upstream, regenerate, bump scripts/.client-runtime-ref,
+# and these rows change. Mutate the embedded constants here and nowhere else,
+# and these rows redden. Either way the disagreement surfaces in CI rather than
+# on a customer's machine.
+#
+# The rows come from scripts/tests/fixtures/envelope_vectors.bash, generated by
+# scripts/gen-envelope-embed.sh, whose --check mode is a CI gate. Deliberately
+# NOT hand-maintained: a golden anyone can quietly edit is not a golden.
+
+@test "envelope contract: every single-node golden vector replays" {
+  TB_NAMESPACE=tracebloc
+  unset TRACEBLOC_TRAINING_RESOURCES
+  # shellcheck source=/dev/null
+  source "${BATS_TEST_DIRNAME}/fixtures/envelope_vectors.bash"
+  [ "${#TB_ENVELOPE_VECTORS[@]}" -gt 0 ] || return 1
+
+  has() { return 0; }
+  # NB: vcpu/vmem, not cpu/mem — _machine_training_resources declares `local cpu
+  # mem`, which shadows the caller's and would feed the stub empty strings. A
+  # stub that silently receives nothing is the "guards nothing" failure mode.
+  local row label vcpu vmem want got failures=""
+  for row in "${TB_ENVELOPE_VECTORS[@]}"; do
+    IFS='|' read -r label vcpu vmem want <<< "$row"
+    kubectl() { printf '%s %s\n' "$vcpu" "$vmem"; }
+    got="$(_machine_training_resources)"
+    if [ "$got" != "$want" ]; then
+      failures+="  ${label} (${vcpu} / ${vmem}): want '${want}' got '${got}'"$'\n'
+    fi
+  done
+  if [ -n "$failures" ]; then
+    printf 'envelope contract drift:\n%s' "$failures" >&2
+    printf 'The embedded constants disagree with the contract. Run\n' >&2
+    printf '  scripts/gen-envelope-embed.sh\n' >&2
+    return 1
+  fi
+}
+
+@test "envelope contract: ANCHOR_LARGEST picks the same node the contract says" {
+  TB_NAMESPACE=tracebloc
+  unset TRACEBLOC_TRAINING_RESOURCES
+  # shellcheck source=/dev/null
+  source "${BATS_TEST_DIRNAME}/fixtures/envelope_vectors.bash"
+  [ "${#TB_ENVELOPE_ANCHOR_VECTORS[@]}" -gt 0 ] || return 1
+
+  has() { return 0; }
+  local row label nodes want got failures=""
+  for row in "${TB_ENVELOPE_ANCHOR_VECTORS[@]}"; do
+    IFS='|' read -r label nodes want <<< "$row"
+    kubectl() { printf '%b\n' "$nodes"; }
+    got="$(_machine_training_resources)"
+    if [ "$got" != "$want" ]; then
+      failures+="  ${label}: want '${want}' got '${got}'"$'\n'
+    fi
+  done
+  if [ -n "$failures" ]; then
+    printf 'anchor-rule drift:\n%s' "$failures" >&2
+    return 1
+  fi
+}
+
+# Parity with the Pester suite for Bugbot #766: the ps1 twin coerced an
+# unparseable quantity to 0 and ranked the node anyway. bash has always skipped
+# it via `|| continue`; this pins that so the twins cannot drift apart again.
+@test "envelope contract: an unparseable node never beats a valid one" {
+  TB_NAMESPACE=tracebloc
+  unset TRACEBLOC_TRAINING_RESOURCES
+  helm() { return 1; }
+  has() { return 0; }
+  # 16 cores but a memory unit neither installer speaks, next to a good 8c/32Gi.
+  kubectl() {
+    case "$*" in
+      *--request-timeout=10s*) printf '16 64GB\n8 32Gi\n' ;;
+      *) return 1 ;;
+    esac
+  }
+  run _machine_training_resources
+  [ "$output" = "cpu=7,memory=29Gi" ] || return 1
+}
+
+@test "envelope contract: every node unparseable emits nothing (caller falls back)" {
+  TB_NAMESPACE=tracebloc
+  unset TRACEBLOC_TRAINING_RESOURCES
+  helm() { return 1; }
+  has() { return 0; }
+  kubectl() {
+    case "$*" in
+      *--request-timeout=10s*) printf 'sixteen 64GB\neight lots\n' ;;
+      *) return 1 ;;
+    esac
+  }
+  run _machine_training_resources
+  [ -z "$output" ] || return 1
+}
+
+@test "envelope contract: the tie-break is (cpu, memory), not (memory, cpu)" {
+  # The regression this consolidation fixes. Before backend#2220 this function
+  # ranked nodes (memory, cpu) and would have anchored on the 4c/32Gi node here,
+  # answering cpu=3,memory=29Gi — while `tracebloc resources set`, ranking
+  # (cpu, memory), anchored on 8c/16Gi and answered cpu=7,memory=13Gi. Two
+  # producers, same cluster, different answers, and nobody had chosen either.
+  TB_NAMESPACE=tracebloc
+  unset TRACEBLOC_TRAINING_RESOURCES
+  has() { return 0; }
+  kubectl() { printf '8 16Gi\n4 32Gi\n'; }
+  run _machine_training_resources
+  [ "$output" = "cpu=7,memory=13Gi" ] || return 1
+  # ...and the answer must not depend on the order the API listed the nodes in.
+  kubectl() { printf '4 32Gi\n8 16Gi\n'; }
+  run _machine_training_resources
+  [ "$output" = "cpu=7,memory=13Gi" ] || return 1
+}
+
+@test "envelope contract: the embedded constants match the vendored contract" {
+  # Cheap in-repo mirror of the CI gate, so a reviewer with no python3 handy
+  # still sees the failure locally. The generator is the authority.
+  if ! command -v python3 >/dev/null 2>&1; then
+    skip "python3 not available"
+  fi
+  run "${BATS_TEST_DIRNAME}/../gen-envelope-embed.sh" --check
+  [ "$status" -eq 0 ] || return 1
+}
+
+# The mutating path — the one --check cannot reach.
+#
+# Bugbot#766 found a regen that rewrote the bash installer and then died on the
+# first PowerShell constant, leaving the two embeds disagreeing. Every test
+# above passed throughout, because they only ever ran `--check` (a read) or a
+# regen against an ALREADY-CORRECT contract, where every constant short-circuits
+# before the rewrite. So: adopt a genuinely changed contract in a scratch copy
+# of the tree and assert BOTH installers moved.
+@test "envelope contract: adopting a changed contract rewrites BOTH installers" {
+  if ! command -v python3 >/dev/null 2>&1; then
+    skip "python3 not available"
+  fi
+  local root="${BATS_TEST_DIRNAME}/../.."
+  local work="${BATS_TEST_TMPDIR}/adopt"
+  mkdir -p "$work"
+  # Copy only what the generator touches, so the test cannot mutate the repo.
+  mkdir -p "$work/scripts/lib" "$work/scripts/tests/fixtures"
+  cp "$root/scripts/gen-envelope-embed.sh"                  "$work/scripts/"
+  cp "$root/scripts/install-k8s.ps1"                        "$work/scripts/"
+  cp "$root/scripts/lib/install-client-helm.sh"             "$work/scripts/lib/"
+  cp "$root/scripts/tests/fixtures/envelope_contract.json"  "$work/scripts/tests/fixtures/"
+  cp "$root/scripts/tests/fixtures/envelope_vectors.bash"   "$work/scripts/tests/fixtures/"
+
+  # A different overhead, so every derived value moves.
+  python3 - "$work/scripts/tests/fixtures/envelope_contract.json" <<'PY'
+import json, sys
+path = sys.argv[1]
+with open(path) as handle:
+    contract = json.load(handle)
+contract["overhead"]["memory_bytes"] = 4 * 1024 ** 3
+with open(path, "w") as handle:
+    json.dump(contract, handle, indent=2)
+    handle.write("\n")
+PY
+
+  # --check must notice.
+  run "$work/scripts/gen-envelope-embed.sh" --check
+  [ "$status" -ne 0 ] || return 1
+
+  # ...and the real regen must succeed and update BOTH files.
+  run "$work/scripts/gen-envelope-embed.sh"
+  [ "$status" -eq 0 ] || return 1
+
+  grep -qE '^_TB_ENVELOPE_OVERHEAD_MEM_BYTES[[:space:]]*=[[:space:]]*4294967296$' \
+    "$work/scripts/lib/install-client-helm.sh" || return 1
+  grep -qE '^\$script:TbEnvelopeOverheadMemBytes[[:space:]]*=[[:space:]]*4294967296$' \
+    "$work/scripts/install-k8s.ps1" || return 1
+
+  # And the regenerated tree must now be self-consistent.
+  run "$work/scripts/gen-envelope-embed.sh" --check
+  [ "$status" -eq 0 ] || return 1
+}
+
+@test "envelope contract: a missing assignment is reported, not silently skipped" {
+  if ! command -v python3 >/dev/null 2>&1; then
+    skip "python3 not available"
+  fi
+  local root="${BATS_TEST_DIRNAME}/../.."
+  local work="${BATS_TEST_TMPDIR}/missing"
+  mkdir -p "$work/scripts/lib" "$work/scripts/tests/fixtures"
+  cp "$root/scripts/gen-envelope-embed.sh"                  "$work/scripts/"
+  cp "$root/scripts/install-k8s.ps1"                        "$work/scripts/"
+  cp "$root/scripts/lib/install-client-helm.sh"             "$work/scripts/lib/"
+  cp "$root/scripts/tests/fixtures/envelope_contract.json"  "$work/scripts/tests/fixtures/"
+  cp "$root/scripts/tests/fixtures/envelope_vectors.bash"   "$work/scripts/tests/fixtures/"
+
+  # Delete the PowerShell constant entirely: the generator must fail loudly
+  # rather than fall through and report a healthy embed (the fail-open shape
+  # gen-manifest.sh warns about in its own empty-surface guard).
+  grep -v '^\$script:TbEnvelopeFloorMemBytes' "$work/scripts/install-k8s.ps1" \
+    > "$work/scripts/install-k8s.ps1.tmp"
+  mv "$work/scripts/install-k8s.ps1.tmp" "$work/scripts/install-k8s.ps1"
+
+  run "$work/scripts/gen-envelope-embed.sh" --check
+  [ "$status" -ne 0 ] || return 1
+  [[ "$output" == *"no \$script:TbEnvelopeFloorMemBytes assignment"* ]] || return 1
+}
+
+# ── provenance (backend#2220) ────────────────────────────────────────────────
+#
+# The marker exists because RESOURCE_* has no unset state once helm's
+# --reset-then-reuse-values has seen it, so an installer-written value and a
+# deliberate `tracebloc resources set` are indistinguishable once the value
+# differs from the historic literal. These pin each branch's verdict, because
+# getting one wrong means a future ladder either strands an edge forever or
+# silently overrules a human.
+
+@test "provenance: a fresh machine-sized install is attributed to the installer" {
+  TB_NAMESPACE=tracebloc
+  unset TRACEBLOC_TRAINING_RESOURCES
+  helm() { return 1; }
+  has() { return 0; }
+  kubectl() {
+    case "$*" in
+      *--request-timeout=10s*) printf '8 32Gi\n' ;;
+      *) return 1 ;;
+    esac
+  }
+  run _training_provenance
+  [ "$output" = "installer" ] || return 1
+}
+
+@test "provenance: the static-default fallback is still the installer's choice" {
+  TB_NAMESPACE=tracebloc
+  unset TRACEBLOC_TRAINING_RESOURCES
+  helm() { return 1; }
+  kubectl() { return 1; }
+  has() { case "$1" in kubectl) return 1 ;; *) return 0 ;; esac; }
+  run _training_provenance
+  [ "$output" = "installer" ] || return 1
+}
+
+@test "provenance: TRACEBLOC_TRAINING_RESOURCES is a human choice, not ours" {
+  TB_NAMESPACE=tracebloc
+  export TRACEBLOC_TRAINING_RESOURCES="cpu=4,memory=16Gi"
+  run _training_provenance
+  [ "$output" = "user" ] || return 1
+  unset TRACEBLOC_TRAINING_RESOURCES
+}
+
+@test "provenance: a value carried forward with no marker is 'unknown', not a guess" {
+  TB_NAMESPACE=tracebloc
+  unset TRACEBLOC_TRAINING_RESOURCES
+  # A pre-#2220 release: an envelope, no provenance key.
+  helm() { printf 'env:\n  RESOURCE_LIMITS: cpu=4,memory=12Gi\n'; }
+  kubectl() { return 0; }
+  has() { return 0; }
+  run _training_provenance
+  [ "$output" = "unknown" ] || return 1
+}
+
+@test "provenance: an existing 'user' marker SURVIVES re-install (never downgraded)" {
+  TB_NAMESPACE=tracebloc
+  unset TRACEBLOC_TRAINING_RESOURCES
+  helm() {
+    printf 'env:\n  RESOURCE_LIMITS: cpu=4,memory=12Gi\n  RESOURCE_PROVENANCE: user\n'
+  }
+  kubectl() { return 0; }
+  has() { return 0; }
+  run _training_provenance
+  # The whole point of scope bullet 4: a deliberate choice must not decay to
+  # "unknown" (or worse, to "installer") just because the installer ran again.
+  [ "$output" = "user" ] || return 1
+}
+
+@test "provenance: an existing 'installer' marker survives re-install too" {
+  TB_NAMESPACE=tracebloc
+  unset TRACEBLOC_TRAINING_RESOURCES
+  helm() {
+    printf 'env:\n  RESOURCE_LIMITS: cpu=4,memory=12Gi\n  RESOURCE_PROVENANCE: installer\n'
+  }
+  kubectl() { return 0; }
+  has() { return 0; }
+  run _training_provenance
+  [ "$output" = "installer" ] || return 1
+}
+
+@test "provenance: a junk marker degrades to 'unknown', never to a guess" {
+  TB_NAMESPACE=tracebloc
+  unset TRACEBLOC_TRAINING_RESOURCES
+  helm() {
+    printf 'env:\n  RESOURCE_LIMITS: cpu=4,memory=12Gi\n  RESOURCE_PROVENANCE: banana\n'
+  }
+  kubectl() { return 0; }
+  has() { return 0; }
+  run _training_provenance
+  [ "$output" = "unknown" ] || return 1
+}
+
+# The fail-unsafe path Bugbot found on #768. Provenance used to be read by a
+# SECOND `helm get values`; a failed or empty second read looked like "no marker"
+# and was written as `unknown` — which consumers treat as a human pin, so an
+# installer-sized edge was PERMANENTLY STRANDED as a deliberate choice. That is
+# the exact outcome scope bullet 4 exists to prevent, and it is the bash mirror
+# of the `installer`-on-failure bug the PowerShell twin had.
+@test "provenance: a failed values read carries NOTHING (never a stranding 'unknown')" {
+  TB_NAMESPACE=tracebloc
+  unset TRACEBLOC_TRAINING_RESOURCES
+  has() { return 0; }
+  kubectl() { return 0; }     # namespace probe fine
+  helm() { return 1; }        # the values read FAILS
+  run _existing_training_values
+  [ -z "$output" ] || return 1
+}
+
+@test "provenance: an empty values read carries NOTHING" {
+  TB_NAMESPACE=tracebloc
+  unset TRACEBLOC_TRAINING_RESOURCES
+  has() { return 0; }
+  kubectl() { return 0; }
+  helm() { printf ''; }       # succeeds, says nothing
+  run _existing_training_values
+  [ -z "$output" ] || return 1
+}
+
+@test "provenance: a failed read leaves the verdict at 'installer', not 'unknown'" {
+  TB_NAMESPACE=tracebloc
+  unset TRACEBLOC_TRAINING_RESOURCES
+  has() { return 0; }
+  helm() { return 1; }        # read fails -> nothing carried
+  kubectl() {
+    case "$*" in
+      *--request-timeout=10s*) printf '8 32Gi\n' ;;
+      *) return 0 ;;
+    esac
+  }
+  # Nothing carried means WE sized this machine, so `installer` is correct and
+  # the edge stays eligible for a future ladder.
+  run _training_provenance
+  [ "$output" = "installer" ] || return 1
+}
+
+@test "provenance: one lookup returns size and marker together" {
+  TB_NAMESPACE=tracebloc
+  unset TRACEBLOC_TRAINING_RESOURCES
+  has() { return 0; }
+  kubectl() { return 0; }
+  helm() {
+    printf 'env:\n  RESOURCE_LIMITS: cpu=4,memory=12Gi\n  RESOURCE_PROVENANCE: user\n'
+  }
+  run _existing_training_values
+  [ "$output" = "cpu=4,memory=12Gi|user" ] || return 1
+}
+
+@test "provenance: a carried size with no marker pairs with 'unknown' from the SAME read" {
+  TB_NAMESPACE=tracebloc
+  unset TRACEBLOC_TRAINING_RESOURCES
+  has() { return 0; }
+  kubectl() { return 0; }
+  helm() { printf 'env:\n  RESOURCE_LIMITS: cpu=4,memory=12Gi\n'; }
+  run _existing_training_values
+  # `unknown` is correct HERE: the read succeeded and there genuinely is no
+  # marker. The bug was reporting it when the read FAILED.
+  [ "$output" = "cpu=4,memory=12Gi|unknown" ] || return 1
+}
+
+@test "provenance: size and marker come from ONE pass and always agree" {
+  TB_NAMESPACE=tracebloc
+  unset TRACEBLOC_TRAINING_RESOURCES
+  helm() { return 1; }
+  has() { return 0; }
+  kubectl() {
+    case "$*" in
+      *--request-timeout=10s*) printf '8 32Gi\n' ;;
+      *) return 1 ;;
+    esac
+  }
+  _resolve_training_size
+  [ "$_TB_TRAINING_SIZE" = "cpu=7,memory=29Gi" ] || return 1
+  [ "$_TB_TRAINING_PROVENANCE" = "installer" ] || return 1
 }
 
 @test "training size: kubectl absent falls back to the static default" {

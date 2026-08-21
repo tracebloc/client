@@ -137,8 +137,44 @@ mysql-pvc
 {{ .Values.pvc.mysql | default "2Gi" }}
 {{- end }}
 
-{{- define "tracebloc.registrySecretName" -}}
+{{/*
+  The pull Secret's name. `<release>-regcred` when the chart makes it -- release
+  scoped, because two releases in one namespace must not share a Secret -- or
+  the operator's own name when they brought their own.
+
+  Every imagePullSecrets block in the chart and the IMAGE_PULL_SECRET_NAME that
+  jobs-manager stamps onto training pods both read THIS, so the name cannot
+  disagree between the pod that creates the Secret and the pod that uses it.
+*/}}
+{{/*
+  The name the CHART creates, whatever `existingSecret` says. Not the same
+  question as `registrySecretName`, and RBAC is where the difference bites
+  (Bugbot on client#751).
+
+  The auto-upgrade Role in the GPU device-plugin namespace -- `kube-system` by
+  default -- pins `get`/`update`/`patch`/`delete` to a `resourceNames` list so
+  Helm can reconcile the mirrored pull Secret. Resolving that list through
+  `registrySecretName` would hand the auto-upgrade ServiceAccount read AND
+  delete on the OPERATOR's own dockerconfigjson in kube-system -- a privilege
+  over a Secret this chart does not own and was never asked to touch.
+
+  It also keeps the migration honest in the other direction: switching a release
+  from `create: true` to `existingSecret` leaves the previously mirrored
+  `<release>-regcred` behind, and Helm has to be able to delete it. A list that
+  followed `existingSecret` would stop naming the orphan, so the delete would
+  403 and stall auto-upgrade on every later tick.
+*/}}
+{{- define "tracebloc.createdRegistrySecretName" -}}
 {{ .Release.Name }}-regcred
+{{- end }}
+
+{{- define "tracebloc.registrySecretName" -}}
+{{- $reg := .Values.dockerRegistry | default dict -}}
+{{- if $reg.existingSecret -}}
+{{ $reg.existingSecret }}
+{{- else -}}
+{{ .Release.Name }}-regcred
+{{- end -}}
 {{- end }}
 
 {{/*
@@ -413,9 +449,47 @@ Always
 {{- end -}}
 {{- end -}}
 
-{{/* Whether to create registry secret and add imagePullSecrets. Only when dockerRegistry is present and create is true; omit dockerRegistry or set create: false for public images. */}}
+{{/*
+  Whether this release HAS a registry pull Secret -- whoever made it. True when
+  the chart creates one (`dockerRegistry.create: true`) or when the operator
+  points at one they made themselves (`dockerRegistry.existingSecret`). Omit
+  `dockerRegistry` entirely, or set `create: false` with no `existingSecret`,
+  for public images: nothing renders and every pull is anonymous by declaration.
+
+  `existingSecret` exists because of a config this chart never supported and
+  never noticed (Asad on client#751): `create: false` plus a Secret hand-made in
+  the namespace and literally named `regcred`. That worked for exactly one pod
+  -- the training pod -- because client-runtime's `job.yaml` carried `regcred`
+  as a hardcoded literal, while every chart-rendered pod got no imagePullSecrets
+  at all. So those installs were half-authenticated by accident, and the moment
+  backend#2119 replaces that literal with the injected name they would fall to
+  an anonymous pull with nothing louder than an INFO log -- the same silent
+  downgrade this PR exists to remove, moved rather than fixed.
+
+  This is the ONE helper every consumer consults, which is why the
+  contradiction check lives here: it cannot be bypassed by adding a template.
+*/}}
 {{- define "tracebloc.useImagePullSecrets" -}}
-{{- if and .Values.dockerRegistry (default false .Values.dockerRegistry.create) -}}
+{{- $reg := .Values.dockerRegistry | default dict -}}
+{{- if and (default false $reg.create) $reg.existingSecret -}}
+{{- fail (printf "dockerRegistry.create is true AND dockerRegistry.existingSecret is %q. Those contradict: one asks the chart to build the Secret from the credentials in values, the other says one already exists. Pick one -- drop `create` to use your own Secret, or drop `existingSecret` to let the chart build it." $reg.existingSecret) -}}
+{{- end -}}
+{{- if or (default false $reg.create) $reg.existingSecret -}}
+true
+{{- end -}}
+{{- end }}
+
+{{/*
+  Whether the CHART renders the Secret, as opposed to merely referencing one.
+  Split out from `useImagePullSecrets` because those two questions had the same
+  answer until `existingSecret` existed and now do not: gating the Secret
+  template on "a Secret exists" would make the chart overwrite the operator's
+  hand-made one with credentials from values it does not have -- turning a
+  supported config into a broken pull on the first upgrade.
+*/}}
+{{- define "tracebloc.createRegistrySecret" -}}
+{{- $reg := .Values.dockerRegistry | default dict -}}
+{{- if default false $reg.create -}}
 true
 {{- end -}}
 {{- end }}
