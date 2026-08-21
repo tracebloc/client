@@ -149,6 +149,32 @@ for *what the operator sees and can act on*, not code elegance.
   exists for a case the guard cannot reason about, and is currently unused in the tree.
   Flag a new marker that does not state why.
 
+- **Half of a paired construct changed.** Openers and closers, arms of one `if`, a
+  neutralisation and the boundary it destroys, a writer and its reader — when a rule lives
+  in two places that must move together, changing one is not a partial fix, it is a *new*
+  bug, and often in the opposite direction from the one being fixed. Three in one day on
+  2026-08-20/21, all on constructs whose halves sat within twenty lines of each other:
+    - client#777: `||` neutralised to `\001` for the `grep` arms via `grep[^|\001]*`, but
+      `\001` was not added to the `head` terminator class — so `producer | head||die`, which
+      `develop` flagged, was silently dropped. Fail-open.
+    - client#764: the Helm comment stripper taught the chomping opener `{{- /*` but not the
+      matching closer `*/ -}}`, so a block that used both never terminated and the stripper
+      ate 23 lines of the file. Fail-**closed**, in a required drift gate.
+    - client#777 again: the fix for the first one shipped a second change (a one-character
+      stand-in) whose mutation survived — inert, and reverted.
+  Two habits close it, and both are cheap. **Grep for the sibling** before committing: if
+  you edited a terminator class, an opener, or one arm of a matcher, find the other. And for
+  a scanner or matcher, **diff the whole-tree output against the base** — if the base flags
+  something you no longer do, that is a regression the unit tests will not show you, because
+  they only cover the case you were already thinking about.
+
+- **A fixture set that only exercises the form the author had in mind.** The corollary to
+  the above, and the reason it kept getting through: the `k3s-components-agreement` suite
+  added in client#764 had nine cases and none used the `*/ -}}` closer, so the suite shipped
+  in the *same commit* as the bug it could not see. When the thing under test accepts
+  several spellings of one construct, enumerate the spellings from the real input — here,
+  from the template the guard actually reads — not from the example in your head.
+
 - **A `Chart.yaml` `version` bump without the matching `appVersion`** — the
   `app.kubernetes.io/version` label depends on it.
 
