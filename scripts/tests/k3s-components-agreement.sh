@@ -46,7 +46,11 @@
 set -uo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-root="$(cd "$here/../.." && pwd)"
+# TB_K3S_AGREEMENT_ROOT exists so the guard's OWN test suite can point it at a
+# fixture tree and drive the real script, rather than re-implementing the rule in
+# the test -- an inline copy drifts from production and then proves that a regex
+# nobody runs would have caught the bug. Unset in every real invocation.
+root="${TB_K3S_AGREEMENT_ROOT:-$(cd "$here/../.." && pwd)}"
 
 BASH_LIB="$root/scripts/lib/cluster.sh"
 PS1_FILE="$root/scripts/install-k8s.ps1"
@@ -139,8 +143,16 @@ done
 # strip matters: that template's header comment explains the metrics.k8s.io
 # requirement in prose, so scanning it would let the comment satisfy the check on
 # behalf of the code it describes -- a check passing on its own documentation.
+#
+# The opener tolerates Helm's WHITESPACE-CHOMPING form, `{{- /*`. Matching only
+# `{{/*` left every `{{- /*` block in ds_body, and this template already writes
+# two of them -- so the strip was one legal, invisible edit away from letting
+# prose stand in for the code (Bugbot, client#764). It was not reachable as
+# written, because the surviving prose says `metrics.k8s.io` while check 1 greps
+# the fully-qualified `v1beta1.metrics.k8s.io`; that is protection by wording,
+# not by construction, which is not protection.
 ds_body="$(awk '
-  /\{\{\/\*/          { inc = 1 }
+  /\{\{-?[[:space:]]*\/\*/  { inc = 1 }
   inc                 { if (/\*\/-?\}\}/) inc = 0; next }
   /^[[:space:]]*#/    { next }
                       { print }
