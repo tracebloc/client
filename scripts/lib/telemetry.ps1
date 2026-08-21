@@ -474,7 +474,10 @@ function Get-TelemetryEvent {
     # A line number with no file is not a partial answer, it is a confident wrong
     # one — it reads, sorts and groups like information while pointing at line 9
     # of nothing (Bugbot on client#747).
-    $loc = $env:TB_ERR_LOC
+    # $script:TbErrLoc is what Err and Show-FatalError set; TB_ERR_LOC is the bash
+    # spelling, kept as a fallback so the value can be injected in a test or by a
+    # future caller.
+    $loc = Get-InstallerValue -ScriptVar 'TbErrLoc' -EnvVar 'TB_ERR_LOC'
     if (-not [string]::IsNullOrEmpty($loc)) {
       $src = Get-TelemetrySourceBasename -Loc $loc
       if ($src) {

@@ -412,6 +412,8 @@ Describe "Vocabularies are closed" {
 #  invoked from a unit test — the same technique the file's sibling suites already
 #  use for install-k8s.ps1's structural guarantees.
 Describe "reading the installer's state, not bash's environment" {
+  BeforeAll { $script:SRC = Get-Content "$PSScriptRoot/../install-k8s.ps1" -Raw }
+
   # THE PORT WAS WRONG AS A CLASS HERE. In bash a sourced lib shares one variable
   # namespace with its caller, so telemetry.sh reads $CLIENT_STATE and
   # $HOST_DATA_DIR straight out of the environment. install-k8s.ps1 RESOLVES those
@@ -477,6 +479,37 @@ Describe "reading the installer's state, not bash's environment" {
     $env:CLIENT_STATE = 'starting'
     $env:CLIENT_ENV = 'stg'
     (Get-TelemetryEvent -Code 0) | Should -Match '"tracebloc\.install\.client_state":"starting"'
+  }
+
+  It "attributes a failure to a file and line the installer supplied" {
+    # The emitter shipped a location parser — colon-splitting careful enough for
+    # Windows drive letters, with tests for it — and NOTHING ever set the value, so
+    # every real Windows failure omitted source attribution while the parser sat
+    # there looking finished. Dead code that reads as a feature. (Bugbot on #782.)
+    # No env var set here: this asserts the script-variable path Err and
+    # Show-FatalError actually use.
+    $script:TbErrLoc = 'C:\Users\someone\install-k8s.ps1:4211'
+    $env:CLIENT_ENV = 'stg'
+    try {
+      $json = Get-TelemetryEvent -Code 1
+      $json | Should -Match '"tracebloc\.install\.source":"install-k8s\.ps1"'
+      $json | Should -Match '"tracebloc\.install\.source_line":4211'
+      # The path that reached it is discarded, drive letter and username included.
+      $json | Should -Not -Match 'someone'
+    } finally { Remove-Variable -Name TbErrLoc -Scope Script -ErrorAction SilentlyContinue }
+  }
+
+  It "sets that location at BOTH failure sites, from the right invocation" {
+    # Err is a hand-raised failure, so $MyInvocation (the CALL to Err) is the line
+    # that failed; Show-FatalError has an ErrorRecord, whose InvocationInfo knows
+    # exactly where it came from. Either one missing leaves a whole class of
+    # failure unattributed.
+    $err = $script:SRC.IndexOf('function Err($m, $Detail)')
+    $err | Should -BeGreaterThan 0
+    $script:SRC.Substring($err, 1400) | Should -Match '\$script:TbErrLoc = "\$\(\$MyInvocation\.ScriptName\)'
+    $fatal = $script:SRC.IndexOf('function Show-FatalError')
+    $fatal | Should -BeGreaterThan 0
+    $script:SRC.Substring($fatal, 1200) | Should -Match '\$script:TbErrLoc = "\$\(\$inv\.ScriptName\)'
   }
 
   It "carries the version the bootstrap pinned, not a permanent unknown" {

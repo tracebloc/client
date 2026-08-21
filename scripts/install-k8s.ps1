@@ -155,6 +155,13 @@ function Err($m, $Detail)  {
   # Mirror to the curated log too (#576) — Get-ErrDetailLines already strips the
   # `At <file>:<line> char:` / `+ …` source-dump lines, so nothing internal leaks.
   Log "ERROR: $m"; foreach ($l in $det) { Log $l }
+  # Same, for a hand-raised failure: $MyInvocation describes the CALL to Err, so
+  # ScriptLineNumber is the line that failed rather than a line inside Err.
+  try {
+    if ($MyInvocation.ScriptName) {
+      $script:TbErrLoc = "$($MyInvocation.ScriptName):$($MyInvocation.ScriptLineNumber)"
+    }
+  } catch { }
   $script:OutcomeReported = $true   # Err IS a reported outcome (guards the finally)
   # AND the status it exits with, for the same reason (backend#2268). `finally`
   # cannot read an exit's code, so without this line the installer's PRIMARY
@@ -213,6 +220,10 @@ if (Test-Path -LiteralPath $script:TbTelemetryLib) {
 # which the installer already maintains for exactly that purpose.
 $script:TbExitCode = 0
 
+# `<file>:<line>` of the failure, set by Err and Show-FatalError. Empty on a
+# successful run, and the emitter only reads it for `install.run.failed`.
+$script:TbErrLoc = ''
+
 # Declare the "complete this step and re-run" handoff AND the status it exits
 # with, in one call, so the two can never disagree.
 function Set-TbRerunHandoff {
@@ -229,6 +240,19 @@ function Set-TbRerunHandoff {
 # no tracebloc internals leak. The user always sees what happened + what to do.
 function Show-FatalError($err) {
   $script:OutcomeReported = $true   # this IS the reported outcome (guards the finally)
+  # WHERE the run died, for telemetry (backend#2268). The emitter carried a
+  # location parser — colon-splitting careful enough for Windows drive letters —
+  # and nothing ever set the value, so every real Windows failure omitted source
+  # attribution while the parser and its tests sat there looking finished.
+  # (Bugbot on #782.) The ErrorRecord knows precisely where it came from; only the
+  # file NAME survives, never the path that reached it, and the emitter closes the
+  # basename against its own source vocabulary besides.
+  try {
+    $inv = $err.InvocationInfo
+    if ($inv -and $inv.ScriptName) {
+      $script:TbErrLoc = "$($inv.ScriptName):$($inv.ScriptLineNumber)"
+    }
+  } catch { }
   $reason = ""
   try { $reason = [string]$err.Exception.Message } catch {}
   if (-not $reason) { $reason = [string]$err }
