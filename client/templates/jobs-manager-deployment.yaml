@@ -270,6 +270,34 @@ spec:
             readOnly: true
         env:
         {{- include "tracebloc.proxyEnv" . | nindent 8 }}
+        {{- /*
+          The edge Collector's token Secret (backend#2274). jobs-manager holds NO
+          default for these: the chart declares the name, namespace and key and
+          passes them here, so the two sides cannot disagree. The Collector mounts
+          that Secret `optional: true` on purpose — a missing token must buffer,
+          not CrashLoopBackOff on every node — which means a wrong name, namespace
+          or key all look exactly like "not deployed yet". A default on the reader
+          side that drifted from this block would manufacture that silence.
+
+          THIS CONTAINER ONLY. `pods-monitor-container` below has a
+          byte-identical `env:` opening, and it does not run jobs_manager.py — the
+          Secret writer lives in the jobs-manager image. Wired to the wrong one,
+          every variable would be set on a process that never reads them and the
+          Collector would still get no token.
+
+          Absent when the Collector is off, and the reader treats that as "nothing
+          to do" without making a single API call.
+        */}}
+        {{- $tcEnv := default (dict) .Values.telemetryCollector }}
+        {{- if $tcEnv.enabled }}
+        {{- $tokEnv := default (dict) $tcEnv.tokenSecret }}
+        - name: TELEMETRY_TOKEN_SECRET_NAMESPACE
+          value: {{ .Values.nodeAgents.namespace.name | quote }}
+        - name: TELEMETRY_TOKEN_SECRET_NAME
+          value: {{ $tokEnv.name | default "tracebloc-telemetry-token" | quote }}
+        - name: TELEMETRY_TOKEN_SECRET_KEY
+          value: {{ $tokEnv.key | default "token" | quote }}
+        {{- end }}
         - name: CLIENT_ID
           valueFrom:
             secretKeyRef:
