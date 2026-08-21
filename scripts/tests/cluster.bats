@@ -168,6 +168,93 @@ setup() {
   [[ "$output" == *"--disable=local-storage"* ]] || return 1
 }
 
+# ── k3s component disablement: the EXACT set, derived ───────────────────────
+#
+# The two tests above are the whole of what covered `--disable=` before this
+# block, and they cover one component of three. `traefik` and `servicelb` appeared
+# nowhere in scripts/tests/ at all — losing either silently re-adds an inbound
+# component the chart has no use for (no Ingress resources, no LoadBalancer
+# Services), so nothing would ever go red.
+#
+# The third property runs the OTHER WAY and is load-bearing: metrics-server must
+# never be disabled. client/templates/resource-monitor-daemonset.yaml `lookup`s
+# the v1beta1.metrics.k8s.io APIService and `fail`s the release when it is absent,
+# so a plausible-looking "footprint" optimisation that added
+# `--disable=metrics-server` here would abort the install AND every subsequent
+# auto-upgrade tick, which re-renders the same template.
+#
+# So these assert the EXACT set, not "contains". A `contains` test can only ever
+# catch a REMOVED flag; the exact set also catches an ADDED one — whatever it
+# names, including components nobody has proposed yet. That is what makes the
+# metrics-server property hold without this suite having to enumerate every
+# k3s component someone might think to switch off.
+#
+# The set is parsed out of the argv `_create_new_cluster` actually built, and this
+# file holds no second copy of it: a hand-maintained list would agree with itself
+# while disagreeing with the installer.
+#
+# Scope: these see one function under this file's mocks. The union across BOTH
+# installers, and the chart coupling that makes metrics-server load-bearing, are
+# checked by scripts/tests/k3s-components-agreement.sh in the required
+# `Source-of-truth drift` job.
+
+# The k3s components the recorded k3d argv disables: space-separated, sorted,
+# deduped, node filter (`@server:*`) stripped. Derives; holds no list.
+_recorded_disables() {
+  local set
+  set="$(mock_calls | tr ' ' '\n' \
+    | sed -n 's/^--disable=\([A-Za-z0-9_-]\{1,\}\).*$/\1/p' \
+    | sort -u | tr '\n' ' ')"
+  printf '%s\n' "${set% }"
+}
+
+@test "_create_new_cluster: hostpath disables EXACTLY traefik + servicelb + local-storage" {
+  run _create_new_cluster
+  [ "$status" -eq 0 ] || return 1
+  run _recorded_disables
+  # Sorted, so: local-storage servicelb traefik. A non-empty exact match is also
+  # the parser's liveness proof — a stale parser would report the empty string.
+  [ "$output" = "local-storage servicelb traefik" ] || return 1
+}
+
+@test "_create_new_cluster: node-local's disable set is hostpath's MINUS local-storage" {
+  # Derived relationship, not a second literal: whatever hostpath disables,
+  # node-local must disable exactly that with local-storage taken out and nothing
+  # else moved. Keeps the two branches from drifting apart on a component neither
+  # test names.
+  local hostpath nodelocal expected
+  _create_new_cluster
+  hostpath="$(_recorded_disables)"
+  # Guard the subtraction below: if hostpath ever stopped disabling local-storage,
+  # `expected` would equal `hostpath` and this test would pass while comparing
+  # nothing (backend#1729 — a check disconnected from what it claims to check).
+  [[ " $hostpath " == *" local-storage "* ]] || return 1
+
+  : >"$MOCK_CALLS"
+  TB_STORAGE_MODE="node-local"
+  _create_new_cluster
+  nodelocal="$(_recorded_disables)"
+
+  expected="$(printf '%s\n' "$hostpath" | tr ' ' '\n' | grep -vx 'local-storage' | tr '\n' ' ')"
+  [ "$nodelocal" = "${expected% }" ] || return 1
+}
+
+@test "_create_new_cluster: NEVER disables metrics-server, in either storage mode" {
+  local mode
+  for mode in hostpath node-local; do
+    : >"$MOCK_CALLS"
+    TB_STORAGE_MODE="$mode"
+    _create_new_cluster
+    # Two independent reads. The parsed set is the primary assertion; the raw
+    # substring scan does not depend on the parser recognising the flag spelling,
+    # so a `--disable metrics-server` written with a space instead of '=' — which
+    # the parser above would miss — still fails here instead of passing vacuously.
+    [ -n "$(_recorded_disables)" ] || return 1
+    [[ " $(_recorded_disables) " != *" metrics-server "* ]] || return 1
+    [[ "$(mock_calls)" != *"metrics-server"* ]] || return 1
+  done
+}
+
 @test "_ensure_release_dirs: HOST_DATASET_DIR set -> data on dataset dir, mysql+logs local" {
   HOST_DATASET_DIR="$BATS_TEST_TMPDIR/ds"; mkdir -p "$HOST_DATASET_DIR"
   _ensure_release_dirs tracebloc

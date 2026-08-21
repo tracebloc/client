@@ -323,3 +323,142 @@ hazardous() {
   [[ "$output" == *"a-bad.sh"* ]] || return 1
   [[ "$output" != *"b-good.sh"* ]] || return 1
 }
+
+# ── `||` is not a pipe ───────────────────────────────────────────────────────
+# The gate flagged the output of its own remediation: converting the fleet for
+# backend#2264 produced `cmd || grep -q x <<<"$y"`, and the SECOND bar of the
+# `||` was read as a pipeline. A gate that rejects the form it recommends is
+# how a gate teaches people to switch it off.
+
+@test "it does NOT flag '|| grep -q' — the second bar of || is not a pipe" {
+  local f; f="$(hazardous orgrep.sh '  helm template . >/dev/null || grep -q needle <<<"$out"')"
+  run scan "$f"
+  [ -z "$output" ] || return 1
+}
+
+@test "it does NOT flag '|| head' either" {
+  local f; f="$(hazardous orhead.sh '  check_it || head -5 <<<"$captured" >&2')"
+  run scan "$f"
+  [ -z "$output" ] || return 1
+}
+
+@test "it does NOT flag '|| grep -m1'" {
+  local f; f="$(hazardous orgrepm.sh '  probe || grep -m1 needle <<<"$out"')"
+  run scan "$f"
+  [ -z "$output" ] || return 1
+}
+
+# The discrimination that makes the three above meaningful: a REAL pipe on a
+# line that ALSO contains `||` must still be caught. Without this, deleting the
+# hazard test entirely would pass all three.
+@test "a real pipe is still flagged on a line that also contains '||'" {
+  local f; f="$(hazardous mixed.sh '  x=$(producer | head -1) || warn "no first line"')"
+  run scan "$f"
+  [ -n "$output" ] || return 1
+  [[ "$output" == *"mixed.sh:3"* ]] || return 1
+}
+
+@test "and '|| true' still spares a real pipe (the pre-existing rule is intact)" {
+  local f; f="$(hazardous ortrue2.sh '  x=$(producer | head -1) || true')"
+  run scan "$f"
+  [ -z "$output" ] || return 1
+}
+
+# `|&` is bash's pipe-both-streams. It is a pipe, so the hazard applies; the
+# scanner used to miss it because the bar had to be followed by space-or-name.
+@test "it FLAGS '|& head' — pipe-both-streams is still a pipe" {
+  local f; f="$(hazardous amppipe.sh '  noisy_producer |& head -1')"
+  run scan "$f"
+  [ -n "$output" ] || return 1
+}
+
+@test "it FLAGS '|& grep -q' too" {
+  local f; f="$(hazardous amppipeq.sh '  noisy_producer |& grep -q needle')"
+  run scan "$f"
+  [ -n "$output" ] || return 1
+}
+
+# ── a pinned KNOWN LIMITATION, not an endorsement ────────────────────────────
+# A `set` line inside a multi-line quoted string is fixture data, but the
+# scanner reads it as the file's own options. This test asserts the CURRENT
+# behaviour so that a future fix reddens it deliberately rather than changing
+# the gate's verdicts silently. Counting quotes to detect such regions was
+# tried and rejected: apostrophes in prose desynchronise the count, and a
+# desynchronised count HIDES real offenders (backend#2264).
+@test "KNOWN LIMITATION: a 'set -e' inside a quoted fixture is read as the file's own" {
+  local f="$WORK/fixture.sh"
+  { printf '#!/usr/bin/env bash\nset -uo pipefail\n'          # the REAL options: no errexit
+    printf "expect 'a fixture script' \\\\\n"
+    printf "'#!/bin/bash\nset -euo pipefail\ncurl x' rulename\n"
+    printf '  n=$(producer | head -1)\n'; } > "$f"
+  run scan "$f"
+  # Documented wrong answer: flagged, though the file never enables errexit.
+  [ -n "$output" ] || return 1
+}
+
+@test "and the allow marker is the documented workaround for exactly that case" {
+  local f="$WORK/fixture-allowed.sh"
+  { printf '#!/usr/bin/env bash\nset -uo pipefail\n'
+    printf "expect 'a fixture script' \\\\\n"
+    printf "'#!/bin/bash\nset -euo pipefail\ncurl x' rulename\n"
+    printf '  n=$(producer | head -1)   # pipefail-guard: allow\n'; } > "$f"
+  run scan "$f"
+  [ -z "$output" ] || return 1
+}
+
+# Bugbot, client#777: neutralising `||` must not remove the BOUNDARY the grep
+# arms rely on. `grep[^|]*` used the `|` of a `||` as its stop; replacing those
+# bars with something the class permits let a plain `| grep` span the whole line
+# and reach the `-q` of a later `|| grep -q`.
+@test "a plain '| grep' does NOT borrow the -q of a later '|| grep -q'" {
+  local f; f="$(hazardous span.sh '  producer | grep needle && cmd || grep -q x <<<"$y"')"
+  run scan "$f"
+  [ -z "$output" ] || return 1
+}
+
+@test "nor the -m of a later '|| grep -m1'" {
+  local f; f="$(hazardous spanm.sh '  producer | grep needle && cmd || grep -m1 x <<<"$y"')"
+  run scan "$f"
+  [ -z "$output" ] || return 1
+}
+
+# The discrimination: on a line of that exact shape, a REAL early-close is still
+# caught. Without this, widening the stand-in until everything is spared would
+# pass the two above.
+@test "but a real '| grep -q' on such a line IS still flagged" {
+  local f; f="$(hazardous spanreal.sh '  producer | grep -q needle && cmd || fallback')"
+  run scan "$f"
+  [ -n "$output" ] || return 1
+}
+
+# Arturo, client#777: the head arm needed the SAME boundary treatment as the
+# grep arms. Neutralising `||` left `head` followed by \001, which the
+# terminator class did not list — so `producer | head||die` was silently
+# dropped. develop caught it; the first version of this fix did not. Doing half
+# the boundary work moves the bug rather than fixing it.
+@test "a pipe into head glued to '||' is still flagged (no space before the bars)" {
+  local f; f="$(hazardous glued.sh '  producer | head||die')"
+  run scan "$f"
+  [ -n "$output" ] || return 1
+  [[ "$output" == *"glued.sh:3"* ]] || return 1
+}
+
+@test "the same for '|&' glued to '||'" {
+  local f; f="$(hazardous gluedamp.sh '  noisy |& head||die')"
+  run scan "$f"
+  [ -n "$output" ] || return 1
+}
+
+# The discrimination: `|| true` must STILL spare the glued form, or the fix
+# above would just be "flag everything with head in it".
+@test "but 'head||true' stays spared — the status is still discarded" {
+  local f; f="$(hazardous gluedtrue.sh '  producer | head||true')"
+  run scan "$f"
+  [ -z "$output" ] || return 1
+}
+
+@test "and 'head|| :' likewise" {
+  local f; f="$(hazardous gluedcolon.sh '  producer | head|| :')"
+  run scan "$f"
+  [ -z "$output" ] || return 1
+}

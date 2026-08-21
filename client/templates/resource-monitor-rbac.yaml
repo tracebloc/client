@@ -54,14 +54,27 @@ metadata:
   of every pod in the cluster -- including other tenants' training pods, which
   run customer code and print customer data. That is a real exfiltration path
   for a node-telemetry agent that never reads a log. backend#950.
+
+  `watch` is removed for the same reason, on both rules: every call above is a
+  point read or a one-shot list. The image never opens a watch -- no `Watch()`,
+  no `watch.stream`, no `watch=True`, and it shells out to nothing (its CMD is
+  `python /app/resource_monitor.py`; there is no kubectl in the image). A
+  cluster-wide `watch` on pods is a live streaming feed of every pod object in
+  the cluster, so an agent that only samples its own node's metrics should not
+  hold one. backend#950 follow-up.
+
+  VERBS ARE PINNED BY TEST, not just resources. `watch` survived the #950 trim
+  because resource_monitor_test.yaml asserted only `resources` -- the rule was
+  narrowed on one axis while the other kept an unused grant. Both axes are
+  asserted now.
 */}}
 rules:
   - apiGroups: [""]
     resources: ["pods", "nodes", "nodes/status"]
-    verbs: ["get", "list", "watch"]
+    verbs: ["get", "list"]
   - apiGroups: ["metrics.k8s.io"]
     resources: ["pods", "nodes"]
-    verbs: ["get", "list", "watch"]
+    verbs: ["get", "list"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
