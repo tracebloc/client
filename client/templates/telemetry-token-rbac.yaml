@@ -11,11 +11,40 @@
   GATED ON THE COLLECTOR ALONE, deliberately not on `nodeAgents.namespace`
   differing from the release namespace. The sibling node-agents Roles carry that
   second condition because the release-namespace grant already covers them when
-  the two coincide. This one is not covered either way: jobs-manager's cluster-wide
-  rule in rbac.yaml grants `secrets: [create, get]` and NOT `patch`, in ANY
-  namespace — so without this Role the create succeeds and every refresh 403s
-  wherever the Collector runs. The Role name is release-scoped, so it cannot
-  collide with anything when the namespaces do coincide.
+  the two coincide. This one is not covered either way (see the verb note below).
+  The Role name is release-scoped, so it cannot collide when they do coincide.
+
+  AND NOT ON `tracebloc.nodeAgentsInUse` EITHER, which is worth saying because
+  EVERY OTHER CONSUMER of that helper gates on it, so its absence here reads as an
+  oversight. It is not: the helper is
+  `or (ne .Values.resourceMonitor false) $tc.enabled`, so `telemetryCollector.enabled`
+  IMPLIES it and the extra condition would be dead. This gates exactly as its own
+  consumer does — telemetry-collector-daemonset.yaml is `{{- if $tc.enabled }}` —
+  rather than more loosely than its siblings.
+
+  NOT ENUMERATING THOSE CONSUMERS, deliberately. A previous version of this comment
+  named four files: it included secrets.yaml, which does not gate on the helper at
+  all, and omitted auto-upgrade-rbac.yaml, which does. "Four" was right only by
+  coincidence, one in and one out — the same nearly-right-comment failure this file
+  was edited to fix, one round later. A list a reader can reproduce with
+  `git grep -l nodeAgentsInUse client/templates` does not need to be written down,
+  and written down it can only rot. (@saadqbal, reviews of #784 and #787.)
+
+  THE MISSING VERB IS IN BOTH OF jobs-manager's SECRETS RULES, not just the
+  cluster-wide one. In rbac.yaml, both the ClusterRole (`clusterScope: true`) and
+  the namespaced Role (the `clusterScope: false` branch) carry a
+  `resources: ["configmaps", "secrets"]` rule whose verbs are `["create", "get"]`
+  with no `patch`. So the create succeeds and every REFRESH 403s on either install
+  shape — an earlier version of this comment said "cluster-wide rule" in the
+  singular and would have sent someone reading the `clusterScope: false` path
+  looking for a difference that is not there. A Role in the node-agents namespace
+  grants `patch` there regardless of which branch renders, which is why the fix is
+  the same for both.
+
+  Identified by branch and rule rather than by line number on purpose: cross-file
+  line numbers in a comment drift the first time rbac.yaml gains a rule, and the
+  first version of this pointed at the `resources:` lines while making a claim
+  about verbs.
 
   WHY `patch` MATTERS ENOUGH TO ADD A ROLE FOR. `bearertokenauth` watches the
   projected file, so a rotated token is picked up with no Collector restart — but

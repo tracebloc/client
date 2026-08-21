@@ -56,7 +56,15 @@ command -v python3 >/dev/null 2>&1 || { echo "[ERROR] python3 required" >&2; exi
 
 echo "== node-agents tenancy =="
 
-BASE=(--set clientId=x --set clientPassword=y --set storageClass.create=false)
+# Release namespace PINNED for the same reason as
+# node-agents-namespace-safety.sh: with no `--namespace`, helm takes it from the
+# caller's kubeconfig, so the "which namespace is the node-agents one" test below
+# would depend on the developer's kube context. This guard passed in CI only
+# because the chart happens to put no DaemonSet in the release namespace — luck,
+# not design.
+RELEASE_NS="ship-guard-release-ns"
+BASE=(--namespace "$RELEASE_NS"
+      --set clientId=x --set clientPassword=y --set storageClass.create=false)
 
 # Two configurations, each of which puts at least one DaemonSet in the namespace.
 # The SECOND is the one the Collector exists to enable and the one that was broken.
@@ -74,6 +82,9 @@ import sys, yaml
 
 MUTATING = {"create", "update", "patch", "delete", "deletecollection"}
 
+release_ns = sys.argv[3]
+
+
 def read(path):
     with open(path) as fh:
         docs = [d for d in yaml.safe_load_all(fh) if d]
@@ -86,7 +97,7 @@ def read(path):
     for d in docs:
         if d.get("kind") == "DaemonSet":
             n = d["metadata"].get("namespace", "")
-            if n and n != "tracebloc":
+            if n and n != release_ns:
                 ns = n
     if ns is None:
         sys.exit(f"[ERROR] {path} places no DaemonSet outside the release namespace — "
@@ -140,6 +151,6 @@ print(f"  ok: all {len(mut_a)} DaemonSet-mutating Role(s) survive with "
       "resource-monitor off")
 PY
 
-python3 "$CMP" "$A" "$B"
+python3 "$CMP" "$A" "$B" "$RELEASE_NS"
 
 echo "node-agents tenancy: green"
