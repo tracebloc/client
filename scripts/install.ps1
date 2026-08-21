@@ -576,6 +576,13 @@ function Invoke-Bootstrap {
     }
 
     # ── Run the verified main installer ──
+    # Hand the resolved ref down, exactly as install.sh:247 exports
+    # TRACEBLOC_INSTALL_REF. install-k8s.ps1 runs as a CHILD process, so an
+    # environment variable set here is inherited. Without it `service.version` on
+    # every Windows telemetry record was permanently "0.0.0-unknown" — the field
+    # that says WHICH installer failed, on the platform this feature was added for.
+    # (backend#2268; found by the derived ScriptVar test, not by review.)
+    $env:TRACEBLOC_INSTALL_REF = $ref
     $k8s = Join-Path $tmpDir "install-k8s.ps1"
     Info "Running tracebloc environment setup..."
     if ($ChildArgs -and $ChildArgs.Count -gt 0) {

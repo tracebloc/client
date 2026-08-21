@@ -192,6 +192,15 @@ function Has($cmd)         { [bool](Get-Command $cmd -ErrorAction SilentlyContin
 # every call site tests for the function before using it. An installer that
 # refused to run because its telemetry was missing would be a strictly worse
 # installer, and that is the whole posture of this feature.
+# The version the bootstrap pinned, mirroring common.sh:1128
+# (`TB_VERSION="${TB_VERSION:-${TRACEBLOC_INSTALL_REF:-}}"`). An explicit
+# TB_VERSION wins; otherwise it comes from the ref install.ps1 exported. A local
+# run from a checkout has neither, and `0.0.0-unknown` is the right answer there —
+# §4 makes unknown a VALUE rather than an omission, because it is queryable.
+if (-not $env:TB_VERSION -and $env:TRACEBLOC_INSTALL_REF) {
+  $env:TB_VERSION = $env:TRACEBLOC_INSTALL_REF
+}
+
 $script:TbTelemetryLib = Join-Path $PSScriptRoot 'lib/telemetry.ps1'
 if (Test-Path -LiteralPath $script:TbTelemetryLib) {
   try { . $script:TbTelemetryLib } catch { }

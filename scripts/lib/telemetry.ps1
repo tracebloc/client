@@ -132,6 +132,46 @@ function Write-TelemetryDebug {
   } catch { }
 }
 
+# ── Reading the installer's state ────────────────────────────────────────────
+#  THE INSTALLER'S SCRIPT VARIABLE WINS, THEN THE ENVIRONMENT.
+#
+#  This is the one place the port was wrong as a CLASS rather than a line. The bash
+#  twin reads `$CLIENT_STATE`, `$HOST_DATA_DIR`, `$TB_VERSION` out of the
+#  environment because in bash a sourced lib and its caller share one variable
+#  namespace. install-k8s.ps1 does not work that way: it RESOLVES these into script
+#  variables — `$script:ClientState` (set by Wait-ForClientReady) and
+#  `$script:HOST_DATA_DIR` (line 661, defaulting to `$env:USERPROFILE\.tracebloc`
+#  when the env var is unset, which is the normal case) — and never exports them.
+#
+#  Ported literally, the emitter read env vars that are empty on every ordinary
+#  Windows install: `client_state` was always absent, so connect failures could
+#  never classify as bad_credentials / image_pull_failed / crash_loop and collapsed
+#  to phase-based types; and the data-dir spool was never used, so every record went
+#  to the one-off fallback file the future host transport does not look for.
+#  (Bugbot on #782, two findings, one cause.)
+#
+#  Both are silent: an absent value is omitted by §1.2, so the record still looks
+#  well-formed. Hence a helper with an explicit precedence rather than two
+#  one-line fixes, and a test that asserts the emitter reads the names the
+#  installer actually sets.
+function Get-InstallerValue {
+  param([string]$ScriptVar, [string]$EnvVar)
+  try {
+    if ($ScriptVar) {
+      # -Scope Script resolves to the DOT-SOURCING script's scope, which is
+      # install-k8s.ps1 in production and this lib alone under Pester — hence the
+      # SilentlyContinue rather than an existence assumption.
+      $v = Get-Variable -Name $ScriptVar -Scope Script -ValueOnly -ErrorAction SilentlyContinue
+      if (-not [string]::IsNullOrWhiteSpace([string]$v)) { return [string]$v }
+    }
+  } catch { }
+  if ($EnvVar) {
+    $e = [Environment]::GetEnvironmentVariable($EnvVar)
+    if (-not [string]::IsNullOrWhiteSpace($e)) { return $e }
+  }
+  return ''
+}
+
 # ── Latches (telemetry.sh:193, :213, :250) ───────────────────────────────────
 function Set-TelemetryRunStarted   { $script:TbTelemetryRunStarted   = $true }
 function Set-TelemetryRunSkipped   { $script:TbTelemetrySkipped      = $true }
@@ -235,7 +275,12 @@ function Get-TelemetryEnvironment {
 
 # ── Resource fields ──────────────────────────────────────────────────────────
 function Get-TelemetryVersion {
-  $v = $env:TB_VERSION
+  # ENV ONLY. Unlike ClientState and HOST_DATA_DIR, the installer holds no
+  # script variable for this — install-k8s.ps1 derives $env:TB_VERSION from the
+  # ref the bootstrap exports, mirroring common.sh:1128. Claiming a ScriptVar here
+  # was my own over-application of the precedence helper, caught by the derived
+  # test that every ScriptVar name must be one install-k8s.ps1 actually sets.
+  $v = Get-InstallerValue -ScriptVar '' -EnvVar 'TB_VERSION'
   if ([string]::IsNullOrEmpty($v) -or ($v -cnotmatch $script:TbTelemetryVersionRe)) {
     # §4: unknown is a VALUE, not an omission — 0.0.0-unknown is queryable.
     return '0.0.0-unknown'
@@ -385,7 +430,10 @@ function Get-TelemetryEvent {
   }
   if ($event -notin $script:TbTelemetryEventNames) { return $null }
 
-  $state = $env:CLIENT_STATE
+  # $script:ClientState is what Wait-ForClientReady sets; CLIENT_STATE is the
+  # bash spelling and is never set on Windows. Still checked against the closed
+  # vocabulary afterwards, so a state the installer invents does not reach the record.
+  $state = Get-InstallerValue -ScriptVar 'ClientState' -EnvVar 'CLIENT_STATE'
   if ($state -notin $script:TbTelemetryClientStates) { $state = '' }
 
   $phase = $script:TbTelemetryPhase
@@ -475,7 +523,7 @@ function Get-TelemetryEvent {
 
 # ── Delivery ─────────────────────────────────────────────────────────────────
 function Get-TelemetrySpoolDir {
-  $root = $env:HOST_DATA_DIR
+  $root = Get-InstallerValue -ScriptVar 'HOST_DATA_DIR' -EnvVar 'HOST_DATA_DIR'
   if ([string]::IsNullOrWhiteSpace($root)) {
     $home_ = $env:USERPROFILE
     if ([string]::IsNullOrWhiteSpace($home_)) { $home_ = $HOME }
@@ -562,7 +610,10 @@ function Send-TelemetryRecord {
     }
   } catch { Write-TelemetryDebug "log write failed: $_" }
 
-  $root = $env:HOST_DATA_DIR
+  # Same precedence as Get-TelemetrySpoolDir, and it MUST match it: reading a
+  # different name here than the path is built from is how the gate and the write
+  # end up disagreeing.
+  $root = Get-InstallerValue -ScriptVar 'HOST_DATA_DIR' -EnvVar 'HOST_DATA_DIR'
   if (-not [string]::IsNullOrWhiteSpace($root) -and (Test-Path -LiteralPath $root -PathType Container)) {
     try {
       $spool = Get-TelemetrySpoolPath

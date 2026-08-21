@@ -411,6 +411,110 @@ Describe "Vocabularies are closed" {
 #  because the call sites sit in a 6,600-line script whose main body cannot be
 #  invoked from a unit test — the same technique the file's sibling suites already
 #  use for install-k8s.ps1's structural guarantees.
+Describe "reading the installer's state, not bash's environment" {
+  # THE PORT WAS WRONG AS A CLASS HERE. In bash a sourced lib shares one variable
+  # namespace with its caller, so telemetry.sh reads $CLIENT_STATE and
+  # $HOST_DATA_DIR straight out of the environment. install-k8s.ps1 RESOLVES those
+  # into script variables and never exports them — so ported literally, the emitter
+  # read names that are empty on every ordinary Windows install. Both failures are
+  # silent, because an absent value is simply omitted from the record.
+  # (Bugbot on #782, two findings, one cause.)
+  #
+  # These tests set NO environment variable, which is the point: with env fallback
+  # alone they fail.
+
+  It "reads the client state the installer actually sets" {
+    $script:ClientState = 'bad_creds'
+    $env:CLIENT_ENV = 'stg'
+    try {
+      (Get-TelemetryEvent -Code 1) |
+        Should -Match '"tracebloc\.install\.client_state":"bad_creds"'
+    } finally { Remove-Variable -Name ClientState -Scope Script -ErrorAction SilentlyContinue }
+  }
+
+  It "classifies a connect failure from that state instead of collapsing to the phase" {
+    # The consequence, not just the plumbing: without the state, bad_creds /
+    # image_pull / crash could never produce their own error.type and every
+    # connect-phase failure looked like `not_ready`.
+    $script:ClientState = 'image_pull_ca'
+    $env:CLIENT_ENV = 'stg'
+    try {
+      (Get-TelemetryEvent -Code 1) | Should -Match '"error\.type":"image_pull_untrusted_ca"'
+    } finally { Remove-Variable -Name ClientState -Scope Script -ErrorAction SilentlyContinue }
+  }
+
+  It "spools into the data dir the installer resolved, with no env var set" {
+    $dir = Join-Path ([IO.Path]::GetTempPath()) ("tbhdd-" + [guid]::NewGuid())
+    New-Item -ItemType Directory -Path $dir -Force | Out-Null
+    $script:HOST_DATA_DIR = $dir
+    $env:CLIENT_ENV = 'stg'
+    try {
+      Set-TelemetryRunStarted
+      Send-TelemetryOutcome -Code 0
+      $spool = Join-Path (Join-Path $dir 'telemetry') 'pending.jsonl'
+      # Without this fix the record went to the one-off fallback file instead —
+      # which the future host transport (backend#2217) does not look for.
+      Test-Path -LiteralPath $spool | Should -BeTrue
+      @(Get-Content -LiteralPath $spool).Count | Should -Be 1
+    } finally {
+      Remove-Variable -Name HOST_DATA_DIR -Scope Script -ErrorAction SilentlyContinue
+      Remove-Item -LiteralPath $dir -Recurse -Force -ErrorAction SilentlyContinue
+    }
+  }
+
+  It "prefers the installer's resolved value over the environment" {
+    # Precedence, asserted rather than assumed: the installer's value is the one
+    # that reflects what this run actually did.
+    $script:ClientState = 'connected'
+    $env:CLIENT_STATE = 'crash'
+    $env:CLIENT_ENV = 'stg'
+    try {
+      (Get-TelemetryEvent -Code 0) | Should -Match '"tracebloc\.install\.client_state":"connected"'
+    } finally { Remove-Variable -Name ClientState -Scope Script -ErrorAction SilentlyContinue }
+  }
+
+  It "still falls back to the environment when the installer set nothing" {
+    $env:CLIENT_STATE = 'starting'
+    $env:CLIENT_ENV = 'stg'
+    (Get-TelemetryEvent -Code 0) | Should -Match '"tracebloc\.install\.client_state":"starting"'
+  }
+
+  It "carries the version the bootstrap pinned, not a permanent unknown" {
+    # `service.version` says WHICH installer failed, and on Windows it was always
+    # `0.0.0-unknown`: nothing set TB_VERSION anywhere in the ps1 pair. install.ps1
+    # now exports the resolved ref as install.sh:247 does, and install-k8s.ps1
+    # derives TB_VERSION from it, mirroring common.sh:1128. Asserted as a CHAIN,
+    # because either half alone leaves the field unknown.
+    $boot = Get-Content "$PSScriptRoot/../install.ps1" -Raw
+    $boot | Should -Match '\$env:TRACEBLOC_INSTALL_REF = \$ref'
+    $src = Get-Content "$PSScriptRoot/../install-k8s.ps1" -Raw
+    $src | Should -Match '\$env:TB_VERSION = \$env:TRACEBLOC_INSTALL_REF'
+    # And the ref must be exported BEFORE the child process is launched, or it is
+    # not inherited.
+    $export = $boot.IndexOf('$env:TRACEBLOC_INSTALL_REF = $ref')
+    $launch = $boot.IndexOf('powershell.exe -ExecutionPolicy Bypass -File $k8s')
+    $export | Should -BeGreaterThan 0
+    $launch | Should -BeGreaterThan 0
+    $export | Should -BeLessThan $launch
+  }
+
+  # DERIVED, and this is the check that would have caught the original bug: every
+  # name the emitter reads as a script variable must be a name install-k8s.ps1
+  # actually assigns. No list lives here — the names are parsed out of the
+  # emitter's own Get-InstallerValue calls.
+  It "every script variable it reads is one the installer sets" {
+    $lib = Get-Content "$PSScriptRoot/../lib/telemetry.ps1" -Raw
+    $src = Get-Content "$PSScriptRoot/../install-k8s.ps1" -Raw
+    $names = [regex]::Matches($lib, "Get-InstallerValue -ScriptVar '([A-Za-z_][A-Za-z0-9_]*)'") |
+      ForEach-Object { $_.Groups[1].Value } | Sort-Object -Unique
+    # Fail closed: zero parsed names would compare equal to zero and prove nothing.
+    $names.Count | Should -BeGreaterThan 0
+    foreach ($n in $names) {
+      $src | Should -Match "\`$(script:)?$n\s*=" -Because "the emitter reads `$script:$n, so install-k8s.ps1 must set it — otherwise the attribute is silently always absent"
+    }
+  }
+}
+
 Describe "the installer actually calls the emitter" {
   BeforeAll { $script:SRC = Get-Content "$PSScriptRoot/../install-k8s.ps1" -Raw }
 
