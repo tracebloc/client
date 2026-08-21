@@ -31,6 +31,31 @@ tests:
       - hasDocuments:
           count: 0
 
+  # THE UPGRADE GUARD, and the most important test in this file after the
+  # ships-inert one. `helm upgrade --reuse-values` replays the values STORED WITH
+  # THE PREVIOUS RELEASE and does not merge values.yaml defaults — so every
+  # release made before this block existed has NO `telemetryCollector` key. A bare
+  # `.Values.telemetryCollector.enabled` is then a nil-pointer dereference and the
+  # UPGRADE FAILS: not the feature, the whole release, on every existing customer.
+  #
+  # Caught by the Fleet auto-upgrade E2E rather than by review, which is why this
+  # exists — that job upgrades from the last published chart exactly this way, and
+  # no amount of reading the template would have shown it.
+  - it: survives an upgrade whose stored values predate this block entirely
+    set:
+      # `null`, not `false`: absent is the case that broke. Setting it false would
+      # test a key that exists, which is a different and already-covered thing.
+      telemetryCollector: null
+    templates:
+      - templates/telemetry-collector-configmap.yaml
+      - templates/telemetry-collector-daemonset.yaml
+      - templates/telemetry-collector-rbac.yaml
+    asserts:
+      # Renders nothing AND, crucially, does not error. A template that failed here
+      # would surface as a suite error rather than a clean zero-document render.
+      - hasDocuments:
+          count: 0
+
   - it: renders all three documents when explicitly enabled
     set:
       telemetryCollector.enabled: true

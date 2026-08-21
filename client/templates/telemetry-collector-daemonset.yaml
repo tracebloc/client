@@ -1,4 +1,24 @@
-{{- if .Values.telemetryCollector.enabled }}
+{{- /*
+  THE GATE IS READ DEFENSIVELY, and that is not style — it is the difference
+  between this chart upgrading and refusing to.
+
+  `helm upgrade --reuse-values` replays the values STORED WITH THE PREVIOUS
+  RELEASE and does NOT merge values.yaml defaults. Every release made before this
+  block existed has no `telemetryCollector` key at all, so a bare
+  `.Values.telemetryCollector.enabled` is a nil-pointer dereference and the
+  UPGRADE FAILS — not the feature, the whole release. Caught by the Fleet
+  auto-upgrade E2E, which upgrades from the last published chart exactly this way.
+
+  Same idiom and same reason as `images.resourceMonitor` in
+  resource-monitor-daemonset.yaml: a nested `default dict` tolerates the map being
+  absent. `dig` is not usable here — it rejects chartutil.Values.
+
+  An old release upgrading this way therefore gets NO Collector, which is the
+  right answer twice over: it matches `enabled: false`, and a feature must never
+  arrive on a cluster by way of a values map the operator never saw.
+*/}}
+{{- $tc := default (dict) .Values.telemetryCollector -}}
+{{- if $tc.enabled }}
 {{- /*
   The edge Collector — RFC-BACKEND-1872 D6/D7, backend#1906.
 
@@ -56,8 +76,9 @@ spec:
         - operator: "Exists"
       containers:
         - name: otel-collector
-          {{- $tcDigest := .Values.telemetryCollector.image.digest | default "" }}
-          image: {{ include "tracebloc.image" (dict "repository" .Values.telemetryCollector.image.repository "tag" .Values.telemetryCollector.image.tag "digest" $tcDigest "registry" .Values.telemetryCollector.image.registry) | quote }}
+          {{- $tcImage := default (dict) $tc.image }}
+          {{- $tcDigest := $tcImage.digest | default "" }}
+          image: {{ include "tracebloc.image" (dict "repository" $tcImage.repository "tag" $tcImage.tag "digest" $tcDigest "registry" $tcImage.registry) | quote }}
           imagePullPolicy: IfNotPresent
           args: ["--config=/conf/config.yaml"]
           securityContext:
@@ -84,21 +105,21 @@ spec:
             # The node's container stdout. READ-ONLY — the Collector must never be
             # able to modify or truncate the logs it reads.
             - name: host-logs
-              mountPath: {{ .Values.telemetryCollector.hostLogsPath }}
+              mountPath: {{ $tc.hostLogsPath | default "/var/log/pods" }}
               readOnly: true
             - name: queue
               mountPath: /var/lib/tracebloc/telemetry
             - name: tmp
               mountPath: /tmp
           resources:
-            {{- toYaml .Values.telemetryCollector.resources | nindent 12 }}
+            {{- toYaml $tc.resources | nindent 12 }}
       volumes:
         - name: config
           configMap:
             name: {{ include "tracebloc.telemetryCollectorName" . }}
         - name: token
           secret:
-            secretName: {{ .Values.telemetryCollector.tokenSecret.name }}
+            secretName: {{ (default (dict) $tc.tokenSecret).name | default "tracebloc-telemetry-token" }}
             # OPTIONAL, and this is the difference between "buffers until the token
             # arrives" and "CrashLoopBackOff on every node". jobs-manager writes
             # this Secret; a Collector deployed before it exists must wait, not
@@ -106,7 +127,7 @@ spec:
             optional: true
         - name: host-logs
           hostPath:
-            path: {{ .Values.telemetryCollector.hostLogsPath }}
+            path: {{ $tc.hostLogsPath | default "/var/log/pods" }}
             type: DirectoryOrCreate
         - name: queue
           # hostPath, per D7: the queue must survive the pod restart that is the

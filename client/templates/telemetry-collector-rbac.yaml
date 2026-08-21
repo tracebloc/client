@@ -1,4 +1,24 @@
-{{- if .Values.telemetryCollector.enabled }}
+{{- /*
+  THE GATE IS READ DEFENSIVELY, and that is not style — it is the difference
+  between this chart upgrading and refusing to.
+
+  `helm upgrade --reuse-values` replays the values STORED WITH THE PREVIOUS
+  RELEASE and does NOT merge values.yaml defaults. Every release made before this
+  block existed has no `telemetryCollector` key at all, so a bare
+  `.Values.telemetryCollector.enabled` is a nil-pointer dereference and the
+  UPGRADE FAILS — not the feature, the whole release. Caught by the Fleet
+  auto-upgrade E2E, which upgrades from the last published chart exactly this way.
+
+  Same idiom and same reason as `images.resourceMonitor` in
+  resource-monitor-daemonset.yaml: a nested `default dict` tolerates the map being
+  absent. `dig` is not usable here — it rejects chartutil.Values.
+
+  An old release upgrading this way therefore gets NO Collector, which is the
+  right answer twice over: it matches `enabled: false`, and a feature must never
+  arrive on a cluster by way of a values map the operator never saw.
+*/}}
+{{- $tc := default (dict) .Values.telemetryCollector -}}
+{{- if $tc.enabled }}
 {{- /*
   The Collector's identity — backend#1906.
 
