@@ -72,8 +72,36 @@ data:
             path to `.Release.Namespace` missed it entirely — a Collector healthy
             and blind to a whole Class A component. (Bugbot on #779.)
           */}}
+          {{- /*
+            SCOPED TO THIS RELEASE'S PODS. The kubelet's directory is
+            `<ns>_<podName>_<uid>`, and a bare wildcard for the pod name is fine in
+            the release namespace — that namespace belongs to one release — but
+            `nodeAgents.namespace` is SHARED ON PURPOSE, which is why the workloads
+            in it are release-scoped. Container names are not: resource-monitor's
+            container is `tracebloc-resource-monitor` in every release. So a
+            pod-name wildcard under that shared namespace matched EVERY release's
+            resource-monitor, and one edge's Collector would have ingested another
+            edge's Class A logs and shipped them under its own ingest token — a
+            cross-tenant leak, not a noisy metric. (Bugbot on #779.)
+
+            DaemonSet pods are named `<daemonsetName>-<hash>` and the DaemonSet name
+            is release-scoped, so the release prefix is what distinguishes them.
+
+            RESIDUAL, stated rather than papered over: the wildcard crosses `-`, so
+            a release named `edge` and one named `edge-2` sharing this namespace
+            would still cross-match. Closing that needs the workload name rather
+            than the release name, which this list cannot give us — it is a list of
+            CONTAINER names, and container-to-workload is not 1:1 in general. Two
+            releases whose names are prefixes of one another, in one shared
+            namespace, is the remaining case; the common one is now closed.
+
+            (Written without the literal glob characters on purpose: a Go template
+            comment ends at the first `star slash`, so spelling the pattern out
+            inline truncates the comment and breaks the render. It cost one debug
+            cycle here.)
+          */}}
           {{- range $tc.classANodeAgentContainers }}
-          - {{ printf "%s/%s_*/%s/*.log" $logs $.Values.nodeAgents.namespace.name . | quote }}
+          - {{ printf "%s/%s_%s-*/%s/*.log" $logs $.Values.nodeAgents.namespace.name $.Release.Name . | quote }}
           {{- end }}
         # PERSIST THE READ OFFSETS. Without this the receiver keeps them in
         # memory only, and `start_at` governs where a NEWLY DISCOVERED file is

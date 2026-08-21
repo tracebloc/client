@@ -72,7 +72,11 @@ if len(cms) != 1:
              "— cannot compare what cannot be located")
 cfg = yaml.safe_load(cms[0]["data"]["config.yaml"])
 includes = cfg["receivers"]["filelog"]["include"]
-globs = [re.match(r"^.*/pods/([^_]+)_\*/([^/]+)/\*\.log$", g) for g in includes]
+# The pod portion is `*` in the release namespace and `<release>-*` in the shared
+# node-agents namespace — see the ConfigMap's comment for why the second must be
+# scoped. Captured so the scoping itself can be checked below.
+GLOB = re.compile(r"^.*/pods/([^_]+)_([^/]*)/([^/]+)/\*\.log$")
+globs = [GLOB.match(g) for g in includes]
 
 if not includes:
     sys.exit("[ERROR] filelog has no include globs — a Collector that collects "
@@ -85,7 +89,28 @@ if any(m is None for m in globs):
     sys.exit(f"[ERROR] include globs not in the expected "
              f"<logs>/pods/<ns>_*/<container>/*.log shape: {bad}")
 
-targets = {(m.group(1), m.group(2)) for m in globs}
+targets = {(m.group(1), m.group(3)) for m in globs}
+
+# THE SHARED NAMESPACE MUST BE RELEASE-SCOPED. Container names are identical
+# across releases by design (resource-monitor's is `tracebloc-resource-monitor`
+# everywhere), and `nodeAgents.namespace` is deliberately shareable — so a bare
+# pod wildcard there matches every release's containers, and one edge's Collector
+# ingests another edge's logs and ships them under its own token. A cross-tenant
+# leak, and invisible: both Collectors look healthy. (Bugbot on #779.)
+#
+# DERIVED: the namespaces come out of the render, and "shared" means "not the
+# release namespace", which is read off the workloads rather than written down.
+release_ns = {d["metadata"].get("namespace", "") for d in docs
+              if d.get("kind") in ("Deployment", "StatefulSet")
+              and d["metadata"].get("namespace")}
+unscoped = sorted({m.group(1) for m in globs
+                   if m.group(2) == "*" and m.group(1) not in release_ns})
+if unscoped:
+    sys.exit("[ERROR] these globs use a bare pod wildcard in a namespace that is "
+             f"NOT the release namespace: {unscoped}. That namespace is shareable "
+             "and container names are identical across releases, so this Collector "
+             "would ingest another release's logs and ship them under its own "
+             "ingest token. Scope the pod portion to the release.")
 missing = sorted(t for t in targets if t not in real)
 
 for ns, c in sorted(targets):

@@ -100,7 +100,13 @@ tests:
       # missed a whole Class A component while the Collector reported healthy.
       - matchRegex:
           path: data["config.yaml"]
-          pattern: '/var/log/pods/tracebloc-node-agents_[*]/tracebloc-resource-monitor/[*][.]log'
+          # RELEASE-SCOPED (`edge-` here, the suite's release name). A bare pod
+          # wildcard in the SHARED node-agents namespace matched every release's
+          # `tracebloc-resource-monitor` — container names are identical across
+          # releases by design — so one edge's Collector would ingest another
+          # edge's Class A logs and ship them under its own ingest token.
+          # (Bugbot on #779.) The pattern pins the prefix, so dropping it reddens.
+          pattern: '/var/log/pods/tracebloc-node-agents_edge-[*]/tracebloc-resource-monitor/[*][.]log'
 
   # THE CLASS B GUARD. Class B is training and ingestion output, gated on
   # backend#1908's content redaction — the bounding that exists today is SECRET
