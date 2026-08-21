@@ -1,0 +1,227 @@
+{{- /*
+  THE GATE IS READ DEFENSIVELY, and that is not style — it is the difference
+  between this chart upgrading and refusing to.
+
+  `helm upgrade --reuse-values` replays the values STORED WITH THE PREVIOUS
+  RELEASE and does NOT merge values.yaml defaults. Every release made before this
+  block existed has no `telemetryCollector` key at all, so a bare
+  `.Values.telemetryCollector.enabled` is a nil-pointer dereference and the
+  UPGRADE FAILS — not the feature, the whole release. Caught by the Fleet
+  auto-upgrade E2E, which upgrades from the last published chart exactly this way.
+
+  Same idiom and same reason as `images.resourceMonitor` in
+  resource-monitor-daemonset.yaml: a nested `default dict` tolerates the map being
+  absent. `dig` is not usable here — it rejects chartutil.Values.
+
+  An old release upgrading this way therefore gets NO Collector, which is the
+  right answer twice over: it matches `enabled: false`, and a feature must never
+  arrive on a cluster by way of a values map the operator never saw.
+*/}}
+{{- $tc := default (dict) .Values.telemetryCollector -}}
+{{- if $tc.enabled }}
+{{- /*
+  The edge Collector's pipeline — RFC-BACKEND-1872 D6/D7, backend#1906.
+
+  filelog -> transform (redaction floor) -> batch -> otlphttp
+
+  D6's own words: "the redaction processor carries controller.py:158-184's secret
+  patterns as a FLOOR — the same _LOG_REDACTIONS set, moved from the app to the
+  Collector — so the credential scrubbing that exists today is relocated with the
+  pipeline, not lost in the move." Reading stdout through `filelog` bypasses the
+  app-side handler that used to do it, so without this the move would silently
+  REMOVE a protection.
+*/}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "tracebloc.telemetryCollectorName" . }}
+  namespace: {{ .Values.nodeAgents.namespace.name }}
+  labels:
+    {{- include "tracebloc.labels" . | nindent 4 }}
+data:
+  config.yaml: |
+    extensions:
+      # Watches the projected Secret file, so a token rotated by jobs-manager is
+      # picked up without restarting the Collector (upstream: the extension builds
+      # a credentialsfile.ValueResolver with WithOnChange).
+      bearertokenauth:
+        scheme: {{ $tc.authScheme | default "Token" | quote }}
+        filename: /etc/tracebloc/telemetry/{{ (default (dict) $tc.tokenSecret).key | default "token" }}
+
+      # D7: the queue is backed by DISK, not memory, so it survives the pod
+      # restart that is the common case during a backend outage.
+      file_storage:
+        directory: /var/lib/tracebloc/telemetry
+        # Compaction on rebound, so a drained queue returns its disk rather than
+        # holding the high-water mark until the pod restarts.
+        compaction:
+          on_rebound: true
+          directory: /var/lib/tracebloc/telemetry
+
+    receivers:
+      filelog:
+        include:
+          {{- $logs := trimSuffix "/" ($tc.hostLogsPath | default "/var/log/pods") }}
+          {{- /* Release-namespace Class A containers. */}}
+          {{- range $tc.classAContainers }}
+          - {{ printf "%s/%s_*/%s/*.log" $logs $.Release.Namespace . | quote }}
+          {{- end }}
+          {{- /*
+            NODE-AGENTS namespace, separately. resource-monitor is a DaemonSet in
+            `nodeAgents.namespace`, not the release namespace, so scoping every
+            path to `.Release.Namespace` missed it entirely — a Collector healthy
+            and blind to a whole Class A component. (Bugbot on #779.)
+          */}}
+          {{- /*
+            SCOPED TO THIS RELEASE'S PODS. The kubelet's directory is
+            `<ns>_<podName>_<uid>`, and a bare wildcard for the pod name is fine in
+            the release namespace — that namespace belongs to one release — but
+            `nodeAgents.namespace` is SHARED ON PURPOSE, which is why the workloads
+            in it are release-scoped. Container names are not: resource-monitor's
+            container is `tracebloc-resource-monitor` in every release. So a
+            pod-name wildcard under that shared namespace matched EVERY release's
+            resource-monitor, and one edge's Collector would have ingested another
+            edge's Class A logs and shipped them under its own ingest token — a
+            cross-tenant leak, not a noisy metric. (Bugbot on #779.)
+
+            DaemonSet pods are named `<daemonsetName>-<hash>` and the DaemonSet name
+            is release-scoped, so the release prefix is what distinguishes them.
+
+            RESIDUAL, stated rather than papered over: the wildcard crosses `-`, so
+            a release named `edge` and one named `edge-2` sharing this namespace
+            would still cross-match. Closing that needs the workload name rather
+            than the release name, which this list cannot give us — it is a list of
+            CONTAINER names, and container-to-workload is not 1:1 in general. Two
+            releases whose names are prefixes of one another, in one shared
+            namespace, is the remaining case; the common one is now closed.
+
+            (Written without the literal glob characters on purpose: a Go template
+            comment ends at the first `star slash`, so spelling the pattern out
+            inline truncates the comment and breaks the render. It cost one debug
+            cycle here.)
+          */}}
+          {{- range $tc.classANodeAgentContainers }}
+          - {{ printf "%s/%s_%s-*/%s/*.log" $logs $.Values.nodeAgents.namespace.name $.Release.Name . | quote }}
+          {{- end }}
+        # PERSIST THE READ OFFSETS. Without this the receiver keeps them in
+        # memory only, and `start_at` governs where a NEWLY DISCOVERED file is
+        # read from — so after a restart every file looks new, `end` wins, and
+        # everything written while the Collector was down is skipped. D7's disk
+        # queue covers records already ingested; this covers the read side, and
+        # the restart-during-a-backend-outage path needs both. (Bugbot on #779 —
+        # and the comment that used to sit here asserted the opposite, which is
+        # worse than no comment: it described a persistence this config did not
+        # have.)
+        #
+        # Same extension as the exporter queue. `file_storage` keys entries by
+        # component, so the two do not collide, and offsets cost kilobytes
+        # against the queue's cap. It writes to the same hostPath — which is
+        # only writable because the DaemonSet now pins `runAsUser: 0`.
+        storage: file_storage
+        # With offsets persisted, `end` applies to files that have no stored
+        # position: a fresh install does not ingest the whole existing backlog,
+        # while a known file resumes exactly where it stopped.
+        start_at: end
+        include_file_path: true
+        operators:
+          # The kubelet writes CRI-format lines. Parsed so `body` is the log text
+          # rather than the CRI envelope, because every redaction below operates
+          # on `body` and would otherwise scrub the wrapper and miss the payload.
+          - type: container
+            id: container-parser
+
+    processors:
+      # THE REDACTION FLOOR, relocated from client-runtime controller.py's
+      # _LOG_REDACTIONS (read at client-runtime@45006ec, six patterns).
+      #
+      # THIS IS A CROSS-REPO SECOND COPY AND IT CANNOT BE MACHINE-CHECKED FROM
+      # HERE. The producer is Python in another repository; Helm cannot import it,
+      # so there is no derive-from-the-producer option and no test in this repo can
+      # detect drift. Stated plainly rather than dressed up: if controller.py's set
+      # grows, this does not, and nothing will say so. That is a real residual risk
+      # and it is why each pattern names what it is for.
+      #
+      # Translated Python -> RE2 deliberately, not copied blind:
+      #   * `\1` in a replacement becomes `$1` (Go's syntax).
+      #   * `(?i)` and `(?m)` are supported by RE2 and kept.
+      #   * no pattern here uses lookaround or backreferences INSIDE the pattern,
+      #     which RE2 does not support — checked, because a silently-invalid regex
+      #     in OTTL is a processor that starts and scrubs nothing.
+      transform/redaction:
+        error_mode: ignore
+        log_statements:
+          - context: log
+            statements:
+              # scheme://user:pass@host — corporate-proxy creds, DB/broker URLs.
+              - replace_pattern(body, "://[^:/@\\s]+:[^@/\\s]+@", "://***REDACTED***@")
+              # Azure / ServiceBus / Storage keys. The trailing "Name=" form
+              # (SharedAccessKeyName) is not a secret and is left intact.
+              - replace_pattern(body, "(?i)(SharedAccessKey|AccountKey)=[^;\\s\"']+", "$1=***REDACTED***")
+              # Auth headers — the whole value, to end of line.
+              - replace_pattern(body, "(?im)^(.*\\b(?:authorization|x-api-key)\\b[^:=\\n]*[:=]).*$", "$1 ***REDACTED***")
+              # Bearer / DRF Token credentials wherever they appear.
+              - replace_pattern(body, "(?i)\\b(bearer|token)\\b([\\s:=]+)[A-Za-z0-9._\\-]{12,}", "$1$2***REDACTED***")
+              # Generic secret-bearing assignments.
+              - replace_pattern(body, "(?i)\\b(password|passwd|pwd|secret|api[_-]?key|access[_-]?key|client[_-]?secret)\\b(\\s*[:=]\\s*)[^\\s\"',;]+", "$1$2***REDACTED***")
+              # AWS access key IDs.
+              - replace_pattern(body, "\\bAKIA[0-9A-Z]{16}\\b", "***REDACTED***")
+
+      batch:
+        # Modest, because the destination is a Django request path rather than a
+        # collector: a large batch is a large request against the service that also
+        # serves the product.
+        send_batch_size: 200
+        send_batch_max_size: 500
+        timeout: 10s
+
+    exporters:
+      otlphttp/backend:
+        # logs_endpoint, NOT endpoint: otlphttp appends /v1/logs to `endpoint`,
+        # and the ingest boundary is a versioned path of our own.
+        logs_endpoint: {{ printf "%stelemetry/v1/records/" (include "tracebloc.backendUrl" .) | quote }}
+        encoding: json
+        auth:
+          authenticator: bearertokenauth
+        # https/443 by construction (the backend URL is https), so the CONNECT
+        # tunnel the egress proxy allows is the same one this uses.
+        sending_queue:
+          enabled: true
+          storage: file_storage
+          # BYTES, not requests or items — D7's cap is a byte figure and `sizer`
+          # is what makes it expressible as one.
+          sizer: bytes
+          # `int64`, NOT the bare value. Helm parses 1073741824 out of values.yaml
+          # as a float64 and renders it as `1.073741824e+09` — which is a YAML
+          # FLOAT, not the integer the Collector's config expects. The Collector
+          # would start and the cap would not be the number written here, which is
+          # the silent-misconfiguration shape this epic keeps finding.
+          queue_size: {{ (default (dict) $tc.buffer).maxSizeBytes | default 1073741824 | int64 }}
+          block_on_overflow: {{ (default (dict) $tc.buffer).blockOnOverflow | default false }}
+        retry_on_failure:
+          enabled: true
+          # 0 = never stop retrying. D7: one bound, and it is the byte cap.
+          max_elapsed_time: {{ $tc.retryMaxElapsedTime | default 0 | int64 }}
+
+    service:
+      extensions: [bearertokenauth, file_storage]
+      pipelines:
+        logs:
+          receivers: [filelog]
+          processors: [transform/redaction, batch]
+          exporters: [otlphttp/backend]
+      telemetry:
+        logs:
+          level: warn
+        metrics:
+          # The Collector's OWN metrics, which is where the drop count lives:
+          # `otelcol_exporter_enqueue_failed_log_records`. D7's amendment promotes
+          # that from bookkeeping to load-bearing — under drop-newest it is the
+          # only signal separating a quiet edge from a shedding one.
+          level: basic
+          readers:
+            - pull:
+                exporter:
+                  prometheus:
+                    host: 0.0.0.0
+                    port: 8888
+{{- end }}
