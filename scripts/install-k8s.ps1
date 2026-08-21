@@ -4062,24 +4062,120 @@ function Get-ImageMirrorYaml {
   return $block
 }
 
-function Get-TrainingResources {
-  if ($env:TRACEBLOC_TRAINING_RESOURCES) { return $env:TRACEBLOC_TRAINING_RESOURCES }
+# ── envelope contract (GENERATED — do not hand-edit) ─────────────────────────
+#
+# backend#2220 / RFC-BACKEND-664 §P0. The bash twin
+# (lib/install-client-helm.sh::_machine_training_resources) carries the same
+# five values, and cli's set.go used to carry them a third time. One source of
+# truth now: client-runtime/envelope_contract.json, arithmetic in
+# node_sizing.envelope_from_allocatable.
+#
+# Embedded rather than read: this bootstrap is SIGNED and must not fetch
+# anything unsigned at install time, the same reason the GPU node-image build
+# inputs are embedded as base64 here (#616/#633). The embed is kept honest by
+# the drift guard, not by this comment — install-k8s.Tests.ps1 replays the
+# contract's golden vectors through Get-TrainingResources, and
+# scripts/gen-envelope-embed.sh --check verifies the constants in CI.
+#
+# Regenerate with: scripts/gen-envelope-embed.sh
+$script:TbEnvelopeContractVersion  = 1
+$script:TbEnvelopeOverheadCpuMilli = 1000
+$script:TbEnvelopeOverheadMemBytes = 3221225472
+$script:TbEnvelopeFloorCpuMilli    = 1000
+$script:TbEnvelopeFloorMemBytes    = 2147483648
+# ── end generated ───────────────────────────────────────────────────────────
+
+# Set by Get-TrainingResources when the machine is readable but below the
+# training floor. The WARNING lives in the caller, so Get-TrainingResources keeps
+# returning nothing but the size -- its Pester suite compares the whole return.
+$script:TbTrainingUndersized    = $false
+$script:TbTrainingUnschedulable = $false
+
+# Who chose the training size Get-TrainingResources reports: installer | user |
+# unknown (backend#2220). Bash twin: _resolve_training_size / _training_provenance.
+#
+# The marker exists because RESOURCE_* has no unset state once helm's
+# --reset-then-reuse-values has seen it, so an installer-written value and a
+# deliberate `tracebloc resources set` are indistinguishable once the value
+# differs from the historic literal. Without it, a future ladder re-deriving
+# sizes would silently overrule human choices.
+#
+# Deliberately mirrors Get-TrainingResources' precedence rather than calling it:
+# these two answers come from the same branch decision, and the PowerShell
+# bootstrap has no cheap way to return a pair. The Pester suite pins that the two
+# functions agree on every branch, which is what keeps the mirror honest.
+# ONE lookup of the installed release's carried training values, shared by
+# Get-TrainingResources and Get-TrainingProvenance (backend#2220, review on #768).
+#
+# Returns @{ Size; Provenance } when the release carries a real operator choice,
+# or $null when it does not -- including when the read FAILS. That $null is the
+# whole point. The two resolvers used to perform their own separate
+# `helm get values`, each wrapped in its own bare `catch {}`, so if the size read
+# succeeded and carried a live RESOURCE_LIMITS while the provenance read then
+# threw -- a wedged API, a ConvertFrom-Json hiccup, anything the catch eats --
+# the generated values pinned that carried envelope as `installer`. A future
+# ladder trusting that label would re-derive and overrule what may well have been
+# a deliberate human choice.
+#
+# Sharing the lookup makes that structurally impossible: either it succeeds and
+# both resolvers read the same carried pair, or it fails and NEITHER takes the
+# carry path, so the size is machine-derived and `installer` is then the correct
+# answer. Size and provenance can no longer disagree.
+#
+# This is also the shape the bash twin already had -- _training_provenance calls
+# _resolve_training_size and reads $_TB_TRAINING_PROVENANCE -- so the two
+# installers stop diverging by construction, which is the class client#766
+# exists to remove. And it drops a redundant `helm get values` per install.
+function Get-CarriedTrainingValues {
+  if (-not $TB_NAMESPACE) { return $null }
   try {
-    # helm get has no request timeout — gate it behind a bounded probe so a
+    # helm get has no request timeout -- gate it behind a bounded probe so a
     # wedged API degrades instead of hanging values generation (Bugbot). A
     # missing namespace also means there is no release to carry.
     $null = (kubectl get namespace $TB_NAMESPACE --request-timeout=5s 2>$null) | Out-String
-    if ($LASTEXITCODE -eq 0) {
-      $valsJson = (helm get values $TB_NAMESPACE -n $TB_NAMESPACE -o json 2>$null) | Out-String
-      if ($LASTEXITCODE -eq 0 -and $valsJson.Trim()) {
-        $prev = ($valsJson | ConvertFrom-Json).env.RESOURCE_LIMITS
-        # The historic static default was the ABSENCE of a choice — carrying it
-        # would keep the unschedulable 8Gi on exactly the machines this sizing
-        # exists to fix (Bugbot). Only a differing value survives re-install.
-        if ($prev -and $prev -ne "cpu=2,memory=8Gi") { return $prev }
-      }
-    }
-  } catch {}
+    if ($LASTEXITCODE -ne 0) { return $null }
+    $valsJson = (helm get values $TB_NAMESPACE -n $TB_NAMESPACE -o json 2>$null) | Out-String
+    if ($LASTEXITCODE -ne 0 -or -not $valsJson.Trim()) { return $null }
+    $vals = $valsJson | ConvertFrom-Json
+    $prev = $vals.env.RESOURCE_LIMITS
+    # The historic static default was the ABSENCE of a choice -- carrying it
+    # would keep the unschedulable 8Gi on exactly the machines this sizing
+    # exists to fix (Bugbot). Only a differing value survives re-install.
+    if (-not $prev -or $prev -eq "cpu=2,memory=8Gi") { return $null }
+    # A marker already on the release is authoritative -- preserve it, or a
+    # re-install would quietly downgrade a `user` choice to `unknown`. Anything
+    # unrecognised, including absent, is `unknown`: we genuinely cannot tell who
+    # set it, and consumers treat `unknown` as `user`.
+    $prevProv = $vals.env.RESOURCE_PROVENANCE
+    $prov = if ($prevProv -eq "installer" -or $prevProv -eq "user") { $prevProv } else { "unknown" }
+    return @{ Size = $prev; Provenance = $prov }
+  } catch { return $null }
+}
+
+# Who chose the training size Get-TrainingResources reports: installer | user |
+# unknown. Bash twin: _resolve_training_size / _training_provenance.
+#
+# Pass -Carried/-CarriedResolved to reuse a lookup the caller already did; with
+# no arguments it does its own, so existing callers and tests are unaffected.
+function Get-TrainingProvenance {
+  param([hashtable]$Carried, [switch]$CarriedResolved)
+  # 1. An explicit install-time override IS a human choice, same as the CLI's.
+  if ($env:TRACEBLOC_TRAINING_RESOURCES) { return "user" }
+  $c = if ($CarriedResolved) { $Carried } else { Get-CarriedTrainingValues }
+  if ($c) { return $c.Provenance }
+  # 2. Sized to this machine, or 3. the static default -- both are OUR choice.
+  return "installer"
+}
+
+function Get-TrainingResources {
+  param([hashtable]$Carried, [switch]$CarriedResolved)
+  if ($env:TRACEBLOC_TRAINING_RESOURCES) { return $env:TRACEBLOC_TRAINING_RESOURCES }
+  # The carry branch, via the ONE shared lookup (see Get-CarriedTrainingValues):
+  # a failed read yields $null here, so we fall through to machine sizing and
+  # Get-TrainingProvenance independently answers `installer` -- consistent by
+  # construction rather than by two functions happening to agree.
+  $c = if ($CarriedResolved) { $Carried } else { Get-CarriedTrainingValues }
+  if ($c) { return $c.Size }
   try {
     # Bounded: a wedged API server must degrade to the static default, never
     # hang values generation (Bugbot). jsonpath extracts ONLY cpu/memory — no
@@ -4088,28 +4184,77 @@ function Get-TrainingResources {
     # (Bugbot r5).
     $lines = kubectl get nodes --request-timeout=10s -o jsonpath='{range .items[*]}{.status.allocatable.cpu}{" "}{.status.allocatable.memory}{"\n"}{end}' 2>$null
     if ($LASTEXITCODE -eq 0 -and $lines) {
-      $bestMemB = [long]0; $bestCpuM = [long]0
+      $bestMemB = [long]0; $bestCpuM = [long]0; $seen = $false
       foreach ($ln in @($lines)) {
         $parts = "$ln".Trim() -split '\s+'
         if ($parts.Count -lt 2) { continue }
         $cpuRaw = $parts[0]
         $memRaw = $parts[1]
+        # $null, NOT 0, for a quantity we cannot parse. The contract's
+        # skipped_nodes says unparseable allocatable is SKIPPED, and the bash
+        # twin does exactly that with an explicit `|| continue`. Coercing to 0
+        # and ranking the node anyway was a real bug the old memory-first order
+        # happened to hide -- a memB of 0 could never win. Ranking cpu-first
+        # exposes it: a node with a good core count and a memory unit we do not
+        # speak would take the anchor, fail the memory floor, and drop the whole
+        # machine to the literal while a sibling node was perfectly sizeable
+        # (Bugbot #766).
         $cpuM = if ($cpuRaw -match '^(\d+)m$') { [long]$Matches[1] }
                 elseif ($cpuRaw -match '^\d+$') { [long]$cpuRaw * 1000 }
-                else { [long]0 }
+                else { $null }
         $memB = if ($memRaw -match '^(\d+)Ki$') { [long]$Matches[1] * 1KB }
                 elseif ($memRaw -match '^(\d+)Mi$') { [long]$Matches[1] * 1MB }
                 elseif ($memRaw -match '^(\d+)Gi$') { [long]$Matches[1] * 1GB }
                 elseif ($memRaw -match '^\d+$') { [long]$memRaw }
-                else { [long]0 }
-        if ($memB -gt $bestMemB -or ($memB -eq $bestMemB -and $cpuM -gt $bestCpuM)) {
+                else { $null }
+        if ($null -eq $cpuM -or $null -eq $memB) { continue }
+        # Contract ANCHOR_LARGEST, tie-break (cpu, memory). This used to rank
+        # (memory, cpu) while cli's nodeLarger ranked (cpu, memory), so the two
+        # anchored on DIFFERENT nodes on a heterogeneous cluster. One order now.
+        # Installer clusters are single-node k3d, so this is a field no-op.
+        if (-not $seen -or $cpuM -gt $bestCpuM -or ($cpuM -eq $bestCpuM -and $memB -gt $bestMemB)) {
           $bestMemB = $memB; $bestCpuM = $cpuM
         }
+        $seen = $true
       }
-      $runCpuM = $bestCpuM - 1000
-      $runMemB = $bestMemB - 3GB
-      if ($runCpuM -ge 1000 -and $runMemB -ge 2GB) {
+      # No usable node: bestCpuM stays 0, so the floor check below fails and we
+      # fall through to the single literal return at the end of the function --
+      # deliberately NOT an early return with its own copy of that literal.
+      # [long]0, not 0: a bare 0 binds [math]::Max's (Int32, Int32) overload and
+      # then fails to convert a byte count over 2^31 ("Value was either too large
+      # or too small for an Int32"). The enclosing `catch {}` swallows that into
+      # a silent fall-through to the literal, so the machine sizing would just
+      # quietly stop working on every box with more than ~2 GiB of headroom.
+      $runCpuM = [long][math]::Max([long]0, $bestCpuM - $script:TbEnvelopeOverheadCpuMilli)
+      $runMemB = [long][math]::Max([long]0, $bestMemB - $script:TbEnvelopeOverheadMemBytes)
+      # Below the contract floor the machine is NOT VIABLE — fall through to the
+      # literal, which is itself a known bug on such machines (backend#2220,
+      # fixed separately so it stays revertable).
+      if ($runCpuM -ge $script:TbEnvelopeFloorCpuMilli -and $runMemB -ge $script:TbEnvelopeFloorMemBytes) {
         return "cpu=$([math]::Floor($runCpuM / 1000)),memory=$([math]::Floor($runMemB / 1GB))Gi"
+      }
+      # Below the contract floor. This used to fall straight through to the
+      # cpu=2,memory=8Gi literal, which on a ~4 GiB machine is LARGER THAN THE
+      # MACHINE — so every training pod stayed Pending forever. And this
+      # installer reaches exactly those machines: the memory preflight only WARNS
+      # on Windows (it hard-fails on Linux), while its own note says a job's
+      # limit is ~8 GiB+. So write the honest remainder when it is a requestable
+      # shape: it FITS, so a run can be scheduled and fail for a reason instead
+      # of hanging (backend#2220).
+      #
+      # $seen guards this: with no parseable node, bestCpuM is 0 and the
+      # remainder is meaningless — that is the unreadable case, which keeps the
+      # literal because we genuinely cannot do better.
+      if ($seen) {
+        $cores = [long][math]::Floor($runCpuM / 1000)
+        $gib   = [long][math]::Floor($runMemB / 1GB)
+        if ($cores -ge 1 -and $gib -ge 1) {
+          $script:TbTrainingUndersized = $true
+          return "cpu=$cores,memory=${gib}Gi"
+        }
+        # Not even a requestable shape (cpu=0 is not a training request), so
+        # there is no honest number to write. Keep the literal; the caller warns.
+        $script:TbTrainingUnschedulable = $true
       }
     }
   } catch {}
@@ -4936,11 +5081,28 @@ function Install-ClientHelm {
   # backend#743: relocate the dataset PV onto the network mount when HOST_DATASET_DIR is set.
   $datasetPathLine = if ($HOST_DATASET_DIR) { "`n  datasetPath: /tracebloc-data" } else { "" }
   # backend#1236 (option A): size the default training budget to this machine.
-  $trainingSize = Get-TrainingResources
+  # One lookup, both answers -- mirrors the bash twin's single _resolve_training_size
+  # pass and removes the second `helm get values` per install (review on #768).
+  $carried = Get-CarriedTrainingValues
+  $trainingSize = Get-TrainingResources -Carried $carried -CarriedResolved
+  $trainingProvenance = Get-TrainingProvenance -Carried $carried -CarriedResolved
+  # Mirrors the bash twin's warning, and lives HERE for the same reason: the
+  # sizing functions' returns are compared whole by their tests.
+  if ($script:TbTrainingUndersized) {
+    Warn "This machine is below the size a training run wants: $trainingSize is all that is left after the platform's reservation."
+    Hint "The client will install and run, but training jobs may be killed for memory. ~16 GB of RAM is the recommendation for training locally."
+  } elseif ($script:TbTrainingUnschedulable) {
+    Warn "This machine is too small to host a training run at all; keeping the default $trainingSize."
+    Hint "Training jobs will stay Pending until this edge has more memory -- the client itself will still run, ingest and report."
+  }
   Log "Training size: $trainingSize"
   $envBlock += @"
   RESOURCE_LIMITS: "$trainingSize"
   RESOURCE_REQUESTS: "$trainingSize"
+  # Who chose the pair above (backend#2220). Bookkeeping only -- it never changes
+  # the envelope. "unknown" means the value was carried forward from before this
+  # key existed and is genuinely unattributable, so consumers treat it as "user".
+  RESOURCE_PROVENANCE: "$trainingProvenance"
   GPU_LIMITS: "$gpuVal"
   GPU_REQUESTS: "$gpuVal"
   RUNTIME_CLASS_NAME: "$runtimeClass"

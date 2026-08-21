@@ -34,6 +34,17 @@ env: {
   # these unset is safe on any image. SET: pins the envelope exactly as before.
   # RESOURCE_REQUESTS: "cpu=2,memory=8Gi"
   # RESOURCE_LIMITS: "cpu=2,memory=8Gi"
+  # Bookkeeping only (backend#2220): WHO chose the two values above.
+  #   installer - sized to this machine at install time
+  #   user      - an explicit `tracebloc resources set`
+  #   unknown   - carried forward from before this key existed; genuinely
+  #               unknowable, and therefore treated as `user` (never touched)
+  # It never changes the envelope. It exists because RESOURCE_* has no unset
+  # state once helm's --reset-then-reuse-values has seen it, so without a
+  # marker an installer-written value and a deliberate human choice are
+  # indistinguishable — and a future ladder must not silently overrule the
+  # human. Leave it alone; the installer and the CLI maintain it.
+  # RESOURCE_PROVENANCE: "installer"
   # Optional: GPU requests for spawned jobs (defaults to "nvidia.com/gpu=1" if not provided)
   # GPU_REQUESTS: "nvidia.com/gpu=1"
   # Optional: GPU limits for spawned jobs (defaults to "nvidia.com/gpu=1" if not provided)
