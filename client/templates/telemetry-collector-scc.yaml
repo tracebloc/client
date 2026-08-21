@@ -1,0 +1,103 @@
+{{- $tcScc := default (dict) .Values.telemetryCollector -}}
+{{- if and $tcScc.enabled .Values.openshift.scc.enabled }}
+{{- /*
+  OpenShift SCC for the edge Collector — backend#1906.
+
+  A SEPARATE SCC, not a widening of resource-monitor's. That one declares
+  `runAsUser: MustRunAsNonRoot`, which is correct for it: its hostPath mounts are
+  read-only and it needs no write anywhere. The Collector writes its
+  `file_storage` queue to a root-owned hostPath and reads container logs, so it
+  needs `RunAsAny` — and loosening resource-monitor's policy to grant that would
+  hand a broader run-as rule to a workload that does not need one.
+
+  Chart-managed SCCs previously gated on `resourceMonitor` alone and bound only its
+  ServiceAccount, so on OpenShift with `openshift.scc.enabled` the Collector's pods
+  had no SCC admitting their hostPath mounts at all. (Bugbot on #779.)
+*/}}
+---
+apiVersion: security.openshift.io/v1
+kind: SecurityContextConstraints
+metadata:
+  name: {{ include "tracebloc.telemetryCollectorName" . }}
+  annotations:
+    meta.helm.sh/release-name: {{ .Release.Name }}
+    meta.helm.sh/release-namespace: {{ .Release.Namespace }}
+    kubernetes.io/description: >-
+      Minimal SCC for the tracebloc edge telemetry Collector DaemonSet.
+      Allows a read-only hostPath mount of the node log directory and a writable
+      hostPath for the disk-backed export queue. Runs as root because the queue
+      directory is created root-owned by the kubelet and container log files are
+      not world-readable on every runtime; all capabilities are dropped and the
+      root filesystem is read-only.
+  labels:
+    {{- include "tracebloc.labels" . | nindent 4 }}
+    app: {{ include "tracebloc.telemetryCollectorName" . }}
+allowPrivilegedContainer: false
+allowPrivilegeEscalation: false
+allowedCapabilities: []
+defaultAddCapabilities: []
+requiredDropCapabilities:
+  - ALL
+allowHostNetwork: false
+allowHostPorts: false
+allowHostPID: false
+allowHostIPC: false
+allowHostDirVolumePlugin: true
+volumes:
+  - hostPath
+  - configMap
+  - emptyDir
+  - projected
+  - secret
+runAsUser:
+  # RunAsAny, and only because the pod pins `runAsUser: 0` itself — the SCC widens
+  # what is permitted, the pod decides what is used.
+  type: RunAsAny
+seLinuxContext:
+  type: MustRunAs
+fsGroup:
+  type: RunAsAny
+supplementalGroups:
+  type: RunAsAny
+seccompProfiles:
+  - runtime/default
+readOnlyRootFilesystem: false
+users:
+  - system:serviceaccount:{{ .Values.nodeAgents.namespace.name }}:{{ include "tracebloc.telemetryCollectorName" . }}
+groups: []
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "tracebloc.telemetryCollectorName" . }}-scc
+  annotations:
+    meta.helm.sh/release-name: {{ .Release.Name }}
+    meta.helm.sh/release-namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "tracebloc.labels" . | nindent 4 }}
+    app: {{ include "tracebloc.telemetryCollectorName" . }}
+rules:
+  - apiGroups: ["security.openshift.io"]
+    resources: ["securitycontextconstraints"]
+    resourceNames: ["{{ include "tracebloc.telemetryCollectorName" . }}"]
+    verbs: ["use"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "tracebloc.telemetryCollectorName" . }}-scc
+  annotations:
+    meta.helm.sh/release-name: {{ .Release.Name }}
+    meta.helm.sh/release-namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "tracebloc.labels" . | nindent 4 }}
+    app: {{ include "tracebloc.telemetryCollectorName" . }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "tracebloc.telemetryCollectorName" . }}-scc
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "tracebloc.telemetryCollectorName" . }}
+    namespace: {{ .Values.nodeAgents.namespace.name }}
+{{- end }}

@@ -3,6 +3,7 @@ templates:
   - templates/telemetry-collector-configmap.yaml
   - templates/telemetry-collector-daemonset.yaml
   - templates/telemetry-collector-rbac.yaml
+  - templates/telemetry-collector-scc.yaml
   # Not a Collector template, but the Collector is now a second tenant of the
   # node-agents namespace, so its gate is part of this feature's surface.
   - templates/node-agents-namespace.yaml
@@ -448,3 +449,120 @@ tests:
       - equal:
           path: kind
           value: DaemonSet
+
+  # ── the queue must be writable by the user the pod actually runs as ─────────
+  # `runAsNonRoot: false` PERMITS root; it does not SELECT it. The pinned image
+  # declares `USER 10001`, and the kubelet creates a DirectoryOrCreate hostPath
+  # root-owned 0755 — so under the previous securityContext the Collector ran as
+  # 10001 and could not write its own file_storage queue. D7's disk-backed queue
+  # would have failed the moment the Collector was enabled. (Bugbot on #779.)
+  #
+  # This asserts the SELECTION, not the permission: deleting `runAsUser: 0` and
+  # leaving `runAsNonRoot: false` behind reddens this test, which is precisely the
+  # regression that shipped.
+  - it: selects root explicitly, so the disk-backed queue is writable
+    set:
+      telemetryCollector.enabled: true
+    template: templates/telemetry-collector-daemonset.yaml
+    asserts:
+      - equal:
+          path: spec.template.spec.securityContext.runAsUser
+          value: 0
+      # Both halves pinned: root permitted AND root chosen. Either alone is the bug.
+      - equal:
+          path: spec.template.spec.securityContext.runAsNonRoot
+          value: false
+      # The narrowing that makes root defensible, so it cannot quietly be dropped
+      # while the root stays.
+      - equal:
+          path: spec.template.spec.containers[0].securityContext.readOnlyRootFilesystem
+          value: true
+      - equal:
+          path: spec.template.spec.containers[0].securityContext.allowPrivilegeEscalation
+          value: false
+      - contains:
+          path: spec.template.spec.containers[0].securityContext.capabilities.drop
+          content: ALL
+
+  # ── OpenShift: the Collector needs its own SCC ──────────────────────────────
+  # Chart-managed SCCs gated on `resourceMonitor` alone and bound only that
+  # ServiceAccount, so on a cluster with openshift.scc.enabled the Collector's
+  # pods had nothing admitting their hostPath mounts. (Bugbot on #779.)
+  #
+  # A SEPARATE SCC, not a widening: resource-monitor's declares
+  # MustRunAsNonRoot, which is right for it — read-only mounts, no write anywhere
+  # — and granting RunAsAny there to serve the Collector would hand a broader
+  # run-as rule to a workload that does not need one.
+  - it: gives the Collector its own SCC on OpenShift, permitting hostPath and root
+    set:
+      telemetryCollector.enabled: true
+      openshift.scc.enabled: true
+    template: templates/telemetry-collector-scc.yaml
+    documentIndex: 0
+    asserts:
+      - equal:
+          path: kind
+          value: SecurityContextConstraints
+      - equal:
+          path: allowHostDirVolumePlugin
+          value: true
+      # RunAsAny, because the pod pins runAsUser: 0. MustRunAsNonRoot here would
+      # leave the Collector covered on paper and refused at admission — the exact
+      # half-fix scripts/tests/openshift-scc-coverage.sh exists to catch.
+      - equal:
+          path: runAsUser.type
+          value: RunAsAny
+      - contains:
+          path: requiredDropCapabilities
+          content: ALL
+      - equal:
+          path: allowPrivilegedContainer
+          value: false
+      - equal:
+          path: allowPrivilegeEscalation
+          value: false
+
+  - it: binds the SCC to the Collector's own ServiceAccount, not another
+    set:
+      telemetryCollector.enabled: true
+      openshift.scc.enabled: true
+    template: templates/telemetry-collector-scc.yaml
+    documentIndex: 0
+    asserts:
+      # The name is derived from the same helper the DaemonSet's
+      # serviceAccountName uses; the cross-document agreement between the two is
+      # asserted in scripts/tests/openshift-scc-coverage.sh, which helm-unittest
+      # cannot express.
+      - contains:
+          path: users
+          content: system:serviceaccount:tracebloc-node-agents:edge-telemetry-collector
+
+  # Both negatives, so widening either half of the `and` cannot make the positive
+  # test above pass for free.
+  - it: renders no Collector SCC when the Collector is off
+    set:
+      openshift.scc.enabled: true
+    template: templates/telemetry-collector-scc.yaml
+    asserts:
+      - hasDocuments:
+          count: 0
+
+  - it: renders no Collector SCC when the cluster is not OpenShift
+    set:
+      telemetryCollector.enabled: true
+    template: templates/telemetry-collector-scc.yaml
+    asserts:
+      - hasDocuments:
+          count: 0
+
+  # The `helm upgrade --reuse-values` nil-deref trap, on the new template too:
+  # an explicit null must not blow up the `and`. The chart documents this on
+  # resource-monitor and it broke every existing customer's upgrade once already.
+  - it: survives an explicit null telemetryCollector on OpenShift
+    set:
+      telemetryCollector: null
+      openshift.scc.enabled: true
+    template: templates/telemetry-collector-scc.yaml
+    asserts:
+      - hasDocuments:
+          count: 0

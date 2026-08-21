@@ -99,6 +99,26 @@ spec:
     spec:
       serviceAccountName: {{ include "tracebloc.telemetryCollectorName" . }}
       securityContext:
+        # ROOT, SELECTED EXPLICITLY — `runAsNonRoot: false` only PERMITS root, it
+        # does not choose it, and that distinction was a live defect (Bugbot on
+        # #779). The pinned image declares `USER 10001` (upstream
+        # otelcol-contrib Dockerfile: `ARG USER_UID=10001`), while the kubelet
+        # creates a `DirectoryOrCreate` hostPath root-owned 0755. UID 10001 could
+        # not write `/var/lib/tracebloc/<release>/telemetry`, so D7's disk-backed
+        # queue — the whole point of `file_storage` — would have failed the moment
+        # the Collector was enabled.
+        #
+        # Root rather than an init-container chown, for a reason beyond one fewer
+        # container: the READ side needs it too. Container log files under
+        # /var/log/pods are root-owned and not world-readable on every runtime, so
+        # a non-root collector may not be able to read the logs it exists to read.
+        # Every node-level collector already on these clusters — fluent-bit and the
+        # cloudwatch-agent — runs as root for the same reason.
+        #
+        # It is a NARROW root, and that is the trade being made rather than
+        # glossed: all capabilities dropped, no privilege escalation, read-only
+        # root filesystem, and the only writable paths are the queue and /tmp.
+        runAsUser: 0
         runAsNonRoot: false
         seccompProfile:
           type: RuntimeDefault
