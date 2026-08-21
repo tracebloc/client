@@ -51,6 +51,18 @@ write_ds() {
 }
 run_guard() { TB_K3S_AGREEMENT_ROOT="$ROOT" run bash "$GUARD"; }
 
+# A daemonset whose coupling sits BELOW a chomped comment block that closes with
+# `*/ -}}` — the form the real template uses and the fixtures above do not.
+# A stripper that opens on `{{- /*` but cannot close on `*/ -}}` swallows the
+# rest of the file, so the code below is invisible and the guard false-FAILS.
+write_ds_code_below_chomped_block() {
+  { echo '{{- /* leading prose, chomped both ends, closing with a space before the hyphen'
+    echo '     and saying nothing the checks grep for. */ -}}'
+    echo '{{- $metrics := lookup "apiregistration.k8s.io/v1" "APIService" "" "v1beta1.metrics.k8s.io" -}}'
+    echo '{{- fail "resourceMonitor is enabled but metrics.k8s.io is absent." -}}'
+    echo 'apiVersion: apps/v1'; } > "$ROOT/client/templates/resource-monitor-daemonset.yaml"
+}
+
 # ── the happy path, so every "catches X" below means something ───────────────
 
 @test "agreeing installers with the coupling intact exit 0" {
@@ -120,4 +132,27 @@ run_guard() { TB_K3S_AGREEMENT_ROOT="$ROOT" run bash "$GUARD"; }
   rm -f "$ROOT/client/templates/resource-monitor-daemonset.yaml"
   run_guard
   [ "$status" -eq 2 ] || return 1
+}
+
+# Bugbot, client#764: opener and closer are ONE change. Teaching the opener
+# `{{- /*` without teaching the closer `*/ -}}` meant a block that used both
+# never terminated, and the stripper ate the rest of the file — measured on the
+# real template, 80 of 165 lines survived instead of 103. It passed only because
+# the coupling happens to sit ABOVE that block. This fixture puts it below,
+# which is the arrangement that exposes it.
+@test "code below a chomped block closing '*/ -}}' is still seen (not eaten)" {
+  write_bash; write_ps1; write_ds_code_below_chomped_block
+  run_guard
+  [ "$status" -eq 0 ] || { echo "FALSE FAIL: the stripper ate the coupling"; echo "$output"; return 1; }
+}
+
+# ...and the mirror, so the case above cannot pass by the guard going blind:
+# with the code genuinely absent below such a block, it must STILL be caught.
+@test "and its absence below that same block is still caught" {
+  write_bash; write_ps1
+  { echo '{{- /* leading prose, chomped both ends, closing with a space before the hyphen'
+    echo '     and saying nothing the checks grep for. */ -}}'
+    echo 'apiVersion: apps/v1'; } > "$ROOT/client/templates/resource-monitor-daemonset.yaml"
+  run_guard
+  [ "$status" -eq 1 ] || return 1
 }

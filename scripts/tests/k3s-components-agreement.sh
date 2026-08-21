@@ -151,9 +151,17 @@ done
 # written, because the surviving prose says `metrics.k8s.io` while check 1 greps
 # the fully-qualified `v1beta1.metrics.k8s.io`; that is protection by wording,
 # not by construction, which is not protection.
+#
+# The CLOSER tolerates `*/ -}}` (space before the hyphen) for the mirror reason,
+# and this one bites the other way: once the opener started matching `{{- /*`,
+# a block ending `*/ -}}` never closed, so the stripper ate the REST OF THE FILE
+# -- 80 of 165 lines survived instead of 103. Check 3 still passed only because
+# the lookup and fail sit ABOVE that block; moving them, or adding a coupling
+# below it, would false-FAIL the required drift gate. Opener and closer are one
+# change (Bugbot, client#764).
 ds_body="$(awk '
   /\{\{-?[[:space:]]*\/\*/  { inc = 1 }
-  inc                 { if (/\*\/-?\}\}/) inc = 0; next }
+  inc                 { if (/\*\/[[:space:]]*-?\}\}/) inc = 0; next }
   /^[[:space:]]*#/    { next }
                       { print }
 ' "$DAEMONSET")"
