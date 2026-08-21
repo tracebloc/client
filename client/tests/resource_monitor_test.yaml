@@ -112,6 +112,32 @@ tests:
           path: rules[1].resources
           value: ["pods", "nodes"]
 
+  # VERBS, not just resources. `watch` survived the #950 trim precisely because
+  # this suite pinned one axis and left the other open: the rule was narrowed to
+  # the right resources while keeping a verb the image never uses. Every call the
+  # image makes is a point read or a one-shot list (read_namespaced_pod,
+  # read_node, read_node_status, list_pod_for_all_namespaces,
+  # get_cluster_custom_object, list_namespaced_custom_object) — no Watch(), no
+  # watch.stream, no kubectl. A cluster-wide watch on pods is a live feed of
+  # every pod object in the cluster, which a per-node telemetry agent has no use
+  # for. Assert both rules so it cannot come back silently.
+  - it: ClusterRole grants get and list only — never watch
+    template: templates/resource-monitor-rbac.yaml
+    documentIndex: 1
+    asserts:
+      - equal:
+          path: rules[0].verbs
+          value: ["get", "list"]
+      - equal:
+          path: rules[1].verbs
+          value: ["get", "list"]
+      - notContains:
+          path: rules[0].verbs
+          content: watch
+      - notContains:
+          path: rules[1].verbs
+          content: watch
+
   - it: ClusterRoleBinding subject points at the release-scoped SA
     template: templates/resource-monitor-rbac.yaml
     documentIndex: 2
