@@ -1273,6 +1273,46 @@ tbMetaPassword: ""
 tbIngestPassword: ""
 
 # ============================================================
+# S3 bootstrap re-parent (backend#1528 D10 close-out — final stage)
+# ============================================================
+# The account-minting DDL (CREATE USER / GRANT for tb_credmgr, tb_meta and
+# tb_ingest) still authenticates AS the root-equivalent edgeuser. While it does,
+# edgeuser cannot be REVOKEd / DROPped. This gate re-parents that mint onto MySQL
+# root — client-runtime#310's _bootstrap_db_config reads DB_BOOTSTRAP_USER /
+# DB_BOOTSTRAP_PASSWORD (both-or-neither) — which is the prerequisite for
+# retiring edgeuser. Additive to the data plane: it changes only which identity
+# runs the mint, never which the scoped accounts hold.
+#
+# This is the LAST, prod-irreversible-adjacent step of the rollout, so it is OFF
+# everywhere by default. Flip per environment, dev first, only once
+# serviceDbAccounts + perExperimentDbCreds are verified on that fleet and the S0
+# `SHOW GRANTS FOR 'edgeuser'@'%'` snapshot is captured (the rollback reference).
+#
+# UNSET by default: the effective value comes from bootstrapDbReparentByEnv
+# below, keyed on the resolved CLIENT_ENV. Set this to force one answer on an
+# edge regardless of environment (an operator override — DR, a fleet held back
+# deliberately, or a customer opt-out). Mirrors serviceDbAccounts (backend#1752).
+bootstrapDbReparent:
+
+bootstrapDbReparentByEnv:
+  dev: false
+  stg: false
+  prod: false
+
+# REQUIRED when the gate above is on: the password jobs-manager authenticates
+# with, as MySQL root, to run the mint DDL. There is NO generated default —
+# jobs-manager AUTHENTICATES as root (it never runs `ALTER USER root`), so a
+# random value the server was never told to expect would lock the minter out of
+# MySQL and CrashLoop it. Set this to the real root password: `Edg9@Tr@ce` on an
+# unrotated mysql-client image (Dockerfile.mysql_client bakes MYSQL_ROOT_PASSWORD
+# to that literal), or the rotated value once root is rotated off it (backend#947).
+# Helm fails the render if the gate is on and this is unset (with an existing
+# Secret value preserved across upgrades in between). NOT constrained to
+# alphanumeric — unlike the credmgr / tb_* passwords it is never interpolated
+# into DDL, only passed as a mysql-connector connection parameter.
+bootstrapDbPassword: ""
+
+# ============================================================
 # Ingestion endpoint authorization (client-runtime#21)
 # ============================================================
 # jobs-manager's POST /internal/submit-ingestion-run authenticates callers

@@ -714,6 +714,44 @@ tests:
                 name: RELEASE-NAME-secrets
                 key: TB_INGEST_PASSWORD
 
+  # backend#1528 S3: the bootstrap re-parent env (edgeuser -> root for the mint
+  # DDL) is flag-gated on bootstrapDbReparent so a default install is
+  # byte-identical. DB_BOOTSTRAP_USER/PASSWORD render together (both-or-neither),
+  # only on jobs-manager (the sole minter).
+  - it: bootstrap re-parent env absent by default (byte-for-byte off)
+    asserts:
+      - notContains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: DB_BOOTSTRAP_USER
+            value: "root"
+      - notContains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: DB_BOOTSTRAP_PASSWORD
+            valueFrom:
+              secretKeyRef:
+                name: RELEASE-NAME-secrets
+                key: DB_BOOTSTRAP_PASSWORD
+
+  - it: bootstrap re-parent env wired when bootstrapDbReparent is on
+    set:
+      bootstrapDbReparent: true
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: DB_BOOTSTRAP_USER
+            value: "root"
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: DB_BOOTSTRAP_PASSWORD
+            valueFrom:
+              secretKeyRef:
+                name: RELEASE-NAME-secrets
+                key: DB_BOOTSTRAP_PASSWORD
+
   # -------------------------------------------------------------------------
   # Readiness probe — backend#1779
   #

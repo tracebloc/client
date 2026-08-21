@@ -358,6 +358,24 @@ spec:
               name: {{ include "tracebloc.secretName" . }}
               key: TB_INGEST_PASSWORD
         {{- end }}
+        {{- if (include "tracebloc.bootstrapDbReparent" .) }}
+        # backend#1528 S3 (RFC-0003 D10 close-out): re-parent the account-minting
+        # bootstrap DDL OFF the root-equivalent edgeuser onto MySQL root, so
+        # edgeuser can be REVOKEd / DROPped. jobs-manager authenticates as this
+        # identity ONLY to CREATE USER / GRANT the scoped accounts (tb_credmgr /
+        # tb_meta / tb_ingest) — privileges those accounts deliberately lack.
+        # client-runtime#310's _bootstrap_db_config reads DB_BOOTSTRAP_USER and
+        # DB_BOOTSTRAP_PASSWORD together (both-or-neither), so both render here or
+        # neither. Rendered only when the S3 gate is on; a default install stays
+        # byte-identical (the mint keeps running as edgeuser).
+        - name: DB_BOOTSTRAP_USER
+          value: "root"
+        - name: DB_BOOTSTRAP_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: {{ include "tracebloc.secretName" . }}
+              key: DB_BOOTSTRAP_PASSWORD
+        {{- end }}
         # Ingestor image wiring for the POST /internal/submit-ingestion-run
         # endpoint. jobs-manager spawns each ingestion Job from these values
         # (see client-runtime submit_ingestion_run._build_image_reference):
