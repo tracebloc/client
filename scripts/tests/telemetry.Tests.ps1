@@ -411,6 +411,94 @@ Describe "Vocabularies are closed" {
 #  because the call sites sit in a 6,600-line script whose main body cannot be
 #  invoked from a unit test — the same technique the file's sibling suites already
 #  use for install-k8s.ps1's structural guarantees.
+Describe "closed sets are closed, and canonical" {
+  # `-in`/`-notin` are CASE-INSENSITIVE in PowerShell — the same default that made
+  # `-match` accept `A.b` earlier in this PR, one operator down. So `STG` satisfied
+  # the environment vocabulary and reached the record verbatim, and a query keyed
+  # on `stg` misses that row: a wrong label, worse than no record.
+  # (Bugbot on #782.)
+  BeforeEach { $env:CLIENT_ENV = 'stg' }
+
+  # CASE variants only. `Staging` -> `stg` is an ALIAS fold, which the emitter
+  # delegates to install-k8s.ps1's Get-TraceblocClientEnv — absent when this lib is
+  # loaded on its own, so it belongs in the delegation test below, not here.
+  It "emits the CANONICAL environment for an odd-cased but valid value" -ForEach @(
+    @{ Given = 'STG' }, @{ Given = 'Stg' }, @{ Given = 'sTg' }, @{ Given = 'PROD' }
+  ) {
+    # NOT dropped, and this is a deliberate divergence from the bash twin. That
+    # twin drops an unrecognised environment because bash's `case` is
+    # case-sensitive throughout, so `STG` really is invalid there. On Windows
+    # PowerShell's `switch` is case-insensitive, so install-k8s.ps1's own
+    # Get-BackendUrl sends `CLIENT_ENV=STG` to the STAGING backend — that run is a
+    # correctly configured staging install, and discarding its record to match the
+    # twin would lose telemetry for an install that worked.
+    $env:CLIENT_ENV = $Given
+    # PARSED AND -BeExactly, not a regex. Pester's `Should -Match` is ALSO
+    # case-insensitive — the third spelling of this trap in one file — so
+    # `-Not -Match 'STG'` was satisfied by the correct output `stg` and the first
+    # draft of this test failed on a passing emitter.
+    $got = (Get-TelemetryEvent -Code 0 | ConvertFrom-Json).resource.'deployment.environment'
+    $got | Should -BeExactly $Given.ToLowerInvariant()
+  }
+
+  It "delegates ALIAS folding to the installer's own resolver" {
+    # `Staging` -> `stg` is not a case fold, and the emitter must not hold a second
+    # copy of that mapping: install-k8s.ps1's Get-TraceblocClientEnv owns it
+    # (backend#1745). Stubbed here because this lib is loaded standalone.
+    function Get-TraceblocClientEnv { param([string]$Value)
+      switch ($Value) { 'staging' { 'stg' } 'development' { 'dev' } 'production' { 'prod' } default { $Value } } }
+    try {
+      $env:CLIENT_ENV = 'Staging'
+      $got = (Get-TelemetryEvent -Code 0 | ConvertFrom-Json).resource.'deployment.environment'
+      $got | Should -BeExactly 'stg'
+    } finally { Remove-Item -Path Function:Get-TraceblocClientEnv -ErrorAction SilentlyContinue }
+  }
+
+  It "still drops a genuinely unrecognised environment" -ForEach @(
+    @{ Given = 'staging-2' }, @{ Given = 'stg2' }, @{ Given = 'preprod' }
+  ) {
+    # Folding must not become "accept anything shaped like it".
+    $env:CLIENT_ENV = $Given
+    Get-TelemetryEvent -Code 0 | Should -BeNullOrEmpty
+  }
+
+  It "canonicalises an odd-cased client state rather than passing it through" {
+    $env:CLIENT_STATE = 'BAD_CREDS'
+    $obj = Get-TelemetryEvent -Code 1 | ConvertFrom-Json
+    $obj.attributes.'tracebloc.install.client_state' | Should -BeExactly 'bad_creds'
+    # And the classifier keys off the canonical value, so the error type follows.
+    $obj.attributes.'error.type' | Should -BeExactly 'bad_credentials'
+  }
+
+  It "still drops a client state that is not in the vocabulary at all" {
+    $env:CLIENT_STATE = 'bad_credentials_probably'
+    (Get-TelemetryEvent -Code 0) | Should -Not -Match 'client_state'
+  }
+
+  It "attributes a source file whatever case the path arrived in" {
+    # THE ONE EXCEPTION, asserted rather than inherited from an operator default: a
+    # file's case is a filesystem artifact on Windows, not a contract value.
+    $script:TbErrLoc = 'C:\Users\x\Install-K8s.PS1:99'
+    try {
+      $obj = Get-TelemetryEvent -Code 1 | ConvertFrom-Json
+      $obj.attributes.'tracebloc.install.source' | Should -BeExactly 'install-k8s.ps1'
+      $obj.attributes.'tracebloc.install.source_line' | Should -Be 99
+    } finally { Remove-Variable -Name TbErrLoc -Scope Script -ErrorAction SilentlyContinue }
+  }
+
+  It "leaves no bare case-insensitive membership operator in the emitter" {
+    # The grep IS the test: this class was introduced twice (`-match`, then `-in`),
+    # so the next one should fail here rather than in review.
+    $lib = Get-Content "$PSScriptRoot/../lib/telemetry.ps1" -Raw
+    # Strip comments first — the explanation above deliberately quotes the operator.
+    $code = ($lib -split "`n" | Where-Object { $_ -notmatch '^\s*#' }) -join "`n"
+    $code | Should -Not -Match '\s-in\s'
+    $code | Should -Not -Match '\s-notin\s'
+    $code | Should -Not -Match '\s-match\s'
+    $code | Should -Not -Match '\s-notmatch\s'
+  }
+}
+
 Describe "reading the installer's state, not bash's environment" {
   BeforeAll { $script:SRC = Get-Content "$PSScriptRoot/../install-k8s.ps1" -Raw }
 

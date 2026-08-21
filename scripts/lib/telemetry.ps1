@@ -89,6 +89,41 @@ $script:TbTelemetryKeyRe     = '\A[a-z][a-z0-9_]*(\.[a-z][a-z0-9_]*)*\z'
 $script:TbTelemetryVersionRe = '\Av[0-9]+\.[0-9]+\.[0-9]+([.-][A-Za-z0-9.]+)?\z'
 $script:TbTelemetryLineRe    = '\A[0-9]{1,7}\z'
 
+# ── Closed-set membership ────────────────────────────────────────────────────
+#  NORMALISE, THEN MATCH CASE-SENSITIVELY. Two halves, and both are needed.
+#
+#  `-in` and `-notin` are CASE-INSENSITIVE in PowerShell — the same default that
+#  made `-match` accept `A.b` earlier in this PR, one operator down. So
+#  `'STG' -in @('dev','stg','prod')` was True and `STG` reached the record verbatim
+#  as `deployment.environment`. A query keyed on `stg` misses that row: a wrong
+#  label, which is worse than no record. (Bugbot on #782.)
+#
+#  BUT NOT BY DROPPING IT, WHICH IS WHERE THIS DIVERGES FROM THE BASH TWIN — and
+#  deliberately. telemetry.sh drops an unrecognised environment under §3.2, and
+#  that is right there because bash's `case` is case-sensitive throughout, so `STG`
+#  is genuinely not a valid environment on that platform. On Windows it IS one:
+#  PowerShell's `switch` is case-insensitive, so install-k8s.ps1's own
+#  Get-TraceblocClientEnv/Get-BackendUrl resolve `CLIENT_ENV=STG` to the STAGING
+#  backend. That run is a correctly configured staging install. Dropping its record
+#  to match the twin would discard telemetry for an install that worked.
+#
+#  So: fold to the canonical spelling first — which is what the installer
+#  effectively did — then require an exact match. `STG` becomes `stg` and is
+#  emitted canonically; a genuine non-member like `staging-2` still fails.
+function Test-InClosedSet {
+  param([string]$Value, [string[]]$Set)
+  if ([string]::IsNullOrEmpty($Value)) { return $false }
+  return ($Value.ToLowerInvariant() -cin $Set)
+}
+
+function Get-CanonicalMember {
+  param([string]$Value, [string[]]$Set)
+  if ([string]::IsNullOrEmpty($Value)) { return '' }
+  $lower = $Value.ToLowerInvariant()
+  if ($lower -cin $Set) { return $lower }
+  return ''
+}
+
 $script:TbTelemetrySpoolMax = 50
 
 # ── Clock ────────────────────────────────────────────────────────────────────
@@ -269,7 +304,10 @@ function Get-TelemetryEnvironment {
   if (Get-Command -Name 'Get-TraceblocClientEnv' -CommandType Function -ErrorAction SilentlyContinue) {
     try { $env_ = Get-TraceblocClientEnv $env_ } catch { Write-TelemetryDebug "env resolve failed: $_" }
   }
-  if ($env_ -in @('dev', 'stg', 'prod')) { return $env_ }
+  # Canonical spelling or nothing: the value that reaches the record is the folded
+  # one, so `STG` and `stg` produce the same queryable row.
+  $canon = Get-CanonicalMember -Value $env_ -Set @('dev', 'stg', 'prod')
+  if ($canon) { return $canon }
   return $null
 }
 
@@ -377,7 +415,12 @@ function Get-TelemetrySourceBasename {
   if ($parts.Length -lt 2) { return $null }
   $base = ($parts[0..($parts.Length - 2)] -join ':')
   $base = $base -replace '.*[\\/]', ''
-  if ($base -in $script:TbTelemetrySources) { return $base }
+  # FILENAMES ARE THE ONE EXCEPTION, and it is stated rather than inherited from
+  # an operator default: a file's case is a filesystem artifact on Windows, not a
+  # contract value, so `Install-K8s.ps1` must still be attributed. Folded through
+  # the same helper so the intent is explicit and the returned value canonical.
+  $canon = Get-CanonicalMember -Value $base -Set $script:TbTelemetrySources
+  if ($canon) { return $canon }
   return $null
 }
 
@@ -428,16 +471,17 @@ function Get-TelemetryEvent {
     143 { if ($script:TbTelemetrySkipped)      { 'install.run.skipped' }   else { 'install.run.cancelled' } }
     default { 'install.run.failed' }
   }
-  if ($event -notin $script:TbTelemetryEventNames) { return $null }
+  if (-not (Test-InClosedSet -Value $event -Set $script:TbTelemetryEventNames)) { return $null }
 
   # $script:ClientState is what Wait-ForClientReady sets; CLIENT_STATE is the
   # bash spelling and is never set on Windows. Still checked against the closed
   # vocabulary afterwards, so a state the installer invents does not reach the record.
   $state = Get-InstallerValue -ScriptVar 'ClientState' -EnvVar 'CLIENT_STATE'
-  if ($state -notin $script:TbTelemetryClientStates) { $state = '' }
+  $state = Get-CanonicalMember -Value $state -Set $script:TbTelemetryClientStates
 
   $phase = $script:TbTelemetryPhase
-  if ($phase -notin (Get-TelemetryPhaseNames)) { $phase = 'unknown' }
+  $phase = Get-CanonicalMember -Value $phase -Set (Get-TelemetryPhaseNames)
+  if (-not $phase) { $phase = 'unknown' }
 
   Reset-TelemetryBuffer
   Add-TelemetryAttr 'event.name' $event
@@ -452,7 +496,10 @@ function Get-TelemetryEvent {
   Add-TelemetryAttr 'tracebloc.install.duration_ms' $total 'int'
   Add-TelemetryAttr 'tracebloc.install.client_state' $state
 
-  if ($env:TB_CLI_ON_FRESH_PATH -in @('0', '1')) {
+  # -cin, though digits have no case: one rule for closed-set membership in this
+  # file, so a reviewer scanning for a bare `-in` finds none and does not have to
+  # decide which ones were deliberate.
+  if ($env:TB_CLI_ON_FRESH_PATH -cin @('0', '1')) {
     Add-TelemetryAttr 'tracebloc.install.cli_on_path' $env:TB_CLI_ON_FRESH_PATH 'int'
   }
 
@@ -467,7 +514,9 @@ function Get-TelemetryEvent {
     # §8.4 — a failure MUST carry error.type or it cannot be grouped.
     $class = Get-TelemetryErrorClass -Code $Code -Phase $phase -State $state `
       -RerunHandoff $script:TbTelemetryRerunHandoff
-    if ($class -notin $script:TbTelemetryErrorClasses) { $class = 'unclassified' }
+    if (-not (Test-InClosedSet -Value $class -Set $script:TbTelemetryErrorClasses)) {
+      $class = 'unclassified'
+    }
     Add-TelemetryAttr 'error.type' $class
 
     # ONE GATE FOR BOTH HALVES, derived from the source vocabulary's own answer.
