@@ -165,10 +165,18 @@ FNR == 1 {
   # `|&` is bash's pipe-both-streams and is a pipe like any other, so the bar is
   # allowed one optional `&`. It is NOT the `|&` of the terminator class below,
   # which is about what may FOLLOW `head`.
+  #
+  # \001 IS IN THE HEAD TERMINATOR CLASS for the same reason it is in the grep
+  # arms' `[^|\001]*`: the stand-in has to read as a BOUNDARY, not as ordinary
+  # text. `producer | head||die` leaves `head` followed by \001, and without it
+  # in the class the pipe is missed -- a FALSE NEGATIVE this fix introduced and
+  # `develop` did not have (Arturo, client#777). The neutralisation and the
+  # boundary are one change; doing half of it moves the bug rather than fixing
+  # it, which is exactly what happened here twice.
   # The terminator class matters: `head` can be followed by a CLOSING delimiter,
   # not just whitespace or end-of-line. `x="$(cmd | head)"` ends at `)` and then
   # `"`, and requiring space-or-EOL missed exactly that shape (Bugbot #763).
-  if (probe ~ /\|&?[[:space:]]*head([[:space:]]|$|[)"'\''`;|&])/ \
+  if (probe ~ /\|&?[[:space:]]*head([[:space:]]|$|[)"'\''`;|&\001])/ \
       || probe ~ /\|&?[[:space:]]*grep[^|\001]*[[:space:]]-[a-zA-Z]*q/ \
       || probe ~ /\|&?[[:space:]]*grep[^|\001]*[[:space:]]-[a-zA-Z]*m[[:space:]]*[0-9]/) {
     sub(/^[[:space:]]+/, "", line)

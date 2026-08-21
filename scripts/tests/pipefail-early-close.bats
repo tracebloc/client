@@ -430,3 +430,35 @@ hazardous() {
   run scan "$f"
   [ -n "$output" ] || return 1
 }
+
+# Arturo, client#777: the head arm needed the SAME boundary treatment as the
+# grep arms. Neutralising `||` left `head` followed by \001, which the
+# terminator class did not list — so `producer | head||die` was silently
+# dropped. develop caught it; the first version of this fix did not. Doing half
+# the boundary work moves the bug rather than fixing it.
+@test "a pipe into head glued to '||' is still flagged (no space before the bars)" {
+  local f; f="$(hazardous glued.sh '  producer | head||die')"
+  run scan "$f"
+  [ -n "$output" ] || return 1
+  [[ "$output" == *"glued.sh:3"* ]] || return 1
+}
+
+@test "the same for '|&' glued to '||'" {
+  local f; f="$(hazardous gluedamp.sh '  noisy |& head||die')"
+  run scan "$f"
+  [ -n "$output" ] || return 1
+}
+
+# The discrimination: `|| true` must STILL spare the glued form, or the fix
+# above would just be "flag everything with head in it".
+@test "but 'head||true' stays spared — the status is still discarded" {
+  local f; f="$(hazardous gluedtrue.sh '  producer | head||true')"
+  run scan "$f"
+  [ -z "$output" ] || return 1
+}
+
+@test "and 'head|| :' likewise" {
+  local f; f="$(hazardous gluedcolon.sh '  producer | head|| :')"
+  run scan "$f"
+  [ -z "$output" ] || return 1
+}
