@@ -264,6 +264,28 @@ function Get-TelemetryInstanceId { return $script:TbTelemetryInstanceId }
 # ── The record ───────────────────────────────────────────────────────────────
 $script:TbTelemetryBuf = [System.Collections.Generic.List[string]]::new()
 
+# BOM-LESS UTF-8, and it has to be said once rather than at three call sites.
+# `Add-Content`/`Set-Content -Encoding utf8` writes a UTF-8 BOM on PowerShell 5.1
+# — which is the PowerShell a stock Windows install has — so the FIRST record in
+# the spool began EF BB BF and was not valid JSON to any byte consumer. The
+# install log already avoids this with `New-Object System.Text.UTF8Encoding($false)`
+# (install-k8s.ps1's Start-InstallLog); the spool now uses the same idiom.
+# (@saqlainsyed007 on #782.)
+#
+# .NET's File APIs rather than the cmdlets, because the cmdlets take an encoding
+# NAME and 5.1's "utf8" means with-BOM; there is no spelling of it that does not.
+function Add-TelemetryLine {
+  param([string]$Path, [string]$Line)
+  $enc = New-Object System.Text.UTF8Encoding($false)
+  [System.IO.File]::AppendAllText($Path, $Line + [Environment]::NewLine, $enc)
+}
+
+function Write-TelemetryLines {
+  param([string]$Path, [string[]]$Lines)
+  $enc = New-Object System.Text.UTF8Encoding($false)
+  [System.IO.File]::WriteAllLines($Path, $Lines, $enc)
+}
+
 function Reset-TelemetryBuffer { $script:TbTelemetryBuf.Clear() }
 
 # Read the pending buffer. Exists for the tests: `$script:` state belongs to THIS
@@ -503,7 +525,7 @@ function Limit-TelemetrySpool {
     if ($lines.Count -le $script:TbTelemetrySpoolMax) { return }
     $keep = $lines[-$script:TbTelemetrySpoolMax..-1]
     $tmp = "$Spool.tmp"
-    Set-Content -LiteralPath $tmp -Value $keep -Encoding utf8 -ErrorAction Stop
+    Write-TelemetryLines -Path $tmp -Lines $keep
     Move-Item -LiteralPath $tmp -Destination $Spool -Force -ErrorAction Stop
   } catch {
     Write-TelemetryDebug "spool trim failed: $_"
@@ -549,7 +571,7 @@ function Send-TelemetryRecord {
         if (-not (Test-Path -LiteralPath $dir)) {
           New-Item -ItemType Directory -Path $dir -Force -ErrorAction Stop | Out-Null
         }
-        Add-Content -LiteralPath $spool -Value $Json -Encoding utf8 -ErrorAction Stop
+        Add-TelemetryLine -Path $spool -Line $Json
         Limit-TelemetrySpool -Spool $spool
         return
       }
@@ -561,7 +583,7 @@ function Send-TelemetryRecord {
   try {
     $fallback = Get-TelemetryFallbackSpool
     if ($fallback) {
-      Add-Content -LiteralPath $fallback -Value $Json -Encoding utf8 -ErrorAction Stop
+      Add-TelemetryLine -Path $fallback -Line $Json
     }
   } catch {
     Write-TelemetryDebug "fallback spool failed: $_"

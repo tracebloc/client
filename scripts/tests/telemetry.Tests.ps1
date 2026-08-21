@@ -355,6 +355,24 @@ Describe "Limit-TelemetrySpool — bounded, dropping the OLDEST" {
     $lines[-1] | Should -Be 'line80'
     $lines[0]  | Should -Be 'line31'
   }
+  It "writes UTF-8 with NO BOM, so the first record is valid JSON to a byte reader" {
+    # `Add-Content -Encoding utf8` writes a BOM on PowerShell 5.1 — the PowerShell
+    # a stock Windows install has — so the first line of the spool began EF BB BF
+    # and no byte consumer could parse it. Asserted on the BYTES, because every
+    # string-level read strips the BOM invisibly and would pass either way.
+    # (@saqlainsyed007 on #782.)
+    Add-TelemetryLine -Path $script:S -Line '{"a":1}'
+    $bytes = [System.IO.File]::ReadAllBytes($script:S)
+    $bytes[0] | Should -Be 0x7B   # '{' — not 0xEF
+    ($bytes[0] -eq 0xEF -and $bytes[1] -eq 0xBB -and $bytes[2] -eq 0xBF) | Should -BeFalse
+  }
+
+  It "keeps the trimmed spool BOM-less too" {
+    Write-TelemetryLines -Path $script:S -Lines @('{"a":1}', '{"b":2}')
+    $bytes = [System.IO.File]::ReadAllBytes($script:S)
+    $bytes[0] | Should -Be 0x7B
+  }
+
   It "does not throw on a spool that is not there" {
     { Limit-TelemetrySpool -Spool (Join-Path ([IO.Path]::GetTempPath()) 'nope.jsonl') } |
       Should -Not -Throw
@@ -403,19 +421,59 @@ Describe "the installer actually calls the emitter" {
     $script:SRC | Should -Match 'Test-Path -LiteralPath \$script:TbTelemetryLib'
   }
 
-  It "sets the run-started latch BEFORE Confirm-Config, and after the terminal flags" {
+  It "sets the run-started latch AFTER the terminal flags and BEFORE Confirm-Config" {
     $script:SRC | Should -Match 'Set-TelemetryRunStarted'
-    # Order is the property, not mere presence. Before Confirm-Config, because a
-    # genuine config failure IS an install attempt and must be reported; after the
-    # -Help/-Diagnose dispatch, because those install nothing and a `finally` that
-    # emitted for them would book a success for a run that never touched the machine.
+    # ORDER IS THE PROPERTY, and this test had it INVERTED — it asserted
+    # `$latch -lt $help`, which pinned the bug instead of catching it: -Help
+    # latched as started, reached the `finally` with code 0, and emitted
+    # `install.run.succeeded` for a run that never touched the machine. The comment
+    # beside the latch claimed the opposite of what the code did, and this test
+    # agreed with the code. (@saqlainsyed007 on #782.)
+    #
+    # AFTER the -Help/-Diagnose dispatch, because those install nothing.
+    # BEFORE Confirm-Config, because a genuine config failure IS an install attempt
+    # and must still be reported. Both bounds asserted, so neither can drift.
     $latch = $script:SRC.IndexOf('Set-TelemetryRunStarted')
     $confirm = $script:SRC.IndexOf("`nConfirm-Config")
     $help = $script:SRC.IndexOf('if ($Help) { $script:OutcomeReported')
+    $diagnose = $script:SRC.IndexOf('if ($Diagnose) { Invoke-DiagnoseBundle')
     $latch | Should -BeGreaterThan 0
     $confirm | Should -BeGreaterThan 0
+    $help | Should -BeGreaterThan 0
+    $latch | Should -BeGreaterThan $help
+    $latch | Should -BeGreaterThan $diagnose
     $latch | Should -BeLessThan $confirm
-    $latch | Should -BeLessThan $help
+  }
+
+  It "records a non-zero status on EVERY failure path, not just two of them" {
+    # `finally` cannot read an exit's code, so each exiting site records it. Err is
+    # the installer's primary failure helper and the trap is the last-resort net
+    # for a terminating error outside the try; neither set it, so both reported
+    # `install.run.succeeded` for a failed install — the single worst answer this
+    # feature can give. (@saqlainsyed007 on #782.)
+    $script:SRC | Should -Match 'Err IS a reported outcome[\s\S]{0,600}?\$script:TbExitCode = 1'
+    $script:SRC | Should -Match 'trap \{ Show-FatalError \$_; \$script:TbExitCode = 1; exit 1 \}'
+  }
+
+  It "marks the nothing-to-do fast path as skipped, not succeeded" {
+    # A real invocation, but not a successful install: folding it into succeeded
+    # makes the success count grow with re-runs on machines nothing happened to.
+    # The bash twin already reports `skipped` here, so without this the two
+    # platforms answered the same question differently.
+    $fast = $script:SRC.IndexOf('Already installed and healthy - nothing to do.')
+    $fast | Should -BeGreaterThan 0
+    $after = $script:SRC.Substring($fast, 700)
+    $after | Should -Match 'Set-TelemetryRunSkipped'
+  }
+
+  It "opens the connect phase at the readiness gate" {
+    # Without it the readiness wait is timed inside `helm`, so a client that never
+    # becomes Ready classifies as `helm_install_failed` when helm actually
+    # succeeded — a fabricated helm failure, and the whole `connect` phase
+    # invisible.
+    $wait = $script:SRC.IndexOf('function Wait-ForClientReady')
+    $wait | Should -BeGreaterThan 0
+    $script:SRC.Substring($wait, 800) | Should -Match "Start-TelemetryPhase -Letter 'f'"
   }
 
   It "declares the re-run handoff at BOTH exit-2 sites" {
@@ -438,6 +496,9 @@ Describe "the installer actually calls the emitter" {
     $letters.Count | Should -Be 6
     ($letters | ForEach-Object { $_.Groups[1].Value } | Sort-Object -Unique) |
       Should -Be @('a', 'b', 'c', 'd', 'e')
+    # `f` (connect) deliberately does NOT come from a Step: the readiness gate is
+    # not a numbered step on this platform. Asserted separately above, so this
+    # a..e list is not read as "the vocabulary is fully wired".
   }
 
   It "records a non-zero status for a failed install" {

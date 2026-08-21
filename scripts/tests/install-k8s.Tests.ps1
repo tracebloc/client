@@ -3980,7 +3980,11 @@ Describe "Graceful failure: guaranteed finally + trap, guarded closer (#577)" {
   BeforeAll { $script:PSRC577b = Get-Content "$PSScriptRoot/../install-k8s.ps1" -Raw }
 
   It "wraps the main run in try/catch/finally with a last-resort trap" {
-    $script:PSRC577b | Should -Match 'trap \{ Show-FatalError \$_; exit 1 \}'
+    # The trap also records the exit status for the telemetry emitter since
+    # backend#2268 — without it a terminating error OUTSIDE the try reported
+    # `install.run.succeeded`. Asserted as the full line so neither half can be
+    # dropped: Show-FatalError, the status, and the exit 1.
+    $script:PSRC577b | Should -Match 'trap \{ Show-FatalError \$_; \$script:TbExitCode = 1; exit 1 \}'
     $script:PSRC577b | Should -Match '\} finally \{'
     # The interrupted closer grew a body under backend#2268 (it now also derives the
     # telemetry status from the same signal), so this matches the CONDITION and the

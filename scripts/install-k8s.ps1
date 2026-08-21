@@ -156,6 +156,13 @@ function Err($m, $Detail)  {
   # `At <file>:<line> char:` / `+ …` source-dump lines, so nothing internal leaks.
   Log "ERROR: $m"; foreach ($l in $det) { Log $l }
   $script:OutcomeReported = $true   # Err IS a reported outcome (guards the finally)
+  # AND the status it exits with, for the same reason (backend#2268). `finally`
+  # cannot read an exit's code, so without this line the installer's PRIMARY
+  # failure helper reached the emitter as 0 and recorded `install.run.succeeded`
+  # for a failed install. A feature whose whole job is to report the truth of a
+  # run, reporting the opposite, on the most common failure path there is.
+  # (@saqlainsyed007 on #782.)
+  $script:TbExitCode = 1
   exit 1
 }
 # The phase letter mirrors install-k8s.sh's `step_header a|b|c|d|e|f` so both
@@ -5315,6 +5322,15 @@ function Confirm-Cluster {
 # client's workloads to actually become Ready and set $script:ClientState so the
 # summary reports the truth: connected | starting | bad_creds | image_pull | crash
 function Wait-ForClientReady {
+  # PHASE `f` — connect (backend#2268). Without this the readiness wait was timed
+  # inside `helm`, so a client that never became Ready classified as
+  # `helm_install_failed` when helm had in fact succeeded — a fabricated helm
+  # failure in exactly the rate this feature exists to produce, and the whole
+  # `connect` phase invisible. The bash twin gets it from step_header f.
+  # (@saqlainsyed007 on #782.)
+  if (Get-Command -Name 'Start-TelemetryPhase' -CommandType Function -ErrorAction SilentlyContinue) {
+    Start-TelemetryPhase -Letter 'f'
+  }
   $ns = $script:TB_NAMESPACE
   $deploys = Get-ClientDeploymentNames -Namespace $ns
   $deadline = (Get-Date).AddSeconds([int]$ReadyTimeout)
@@ -6453,23 +6469,28 @@ if (-not $env:TB_PESTER) {
 # that terminates OUTSIDE the try below (defined inside the guard so it never fires
 # under the test dot-source).
 $script:OutcomeReported = $false
-trap { Show-FatalError $_; exit 1 }
+# Sets TbExitCode for the same reason Err does: this is the last-resort net for a
+# terminating error OUTSIDE the try, and without it those crashes reported
+# `succeeded` too (@saqlainsyed007 on #782).
+trap { Show-FatalError $_; $script:TbExitCode = 1; exit 1 }
 try {
-
-# THE RUN-STARTED LATCH (backend#2268), set after the terminal flags have had
-# their chance to dispatch and before Confirm-Config. Placed exactly where
-# install-k8s.sh:172 places it, and for the same two reasons:
-#   * -Help and -Diagnose install nothing, and a `finally` that emitted for them
-#     would book a success for a run that never touched the machine. The bash
-#     twin shipped that bug and it was caught in review of client#747.
-#   * a genuine failure in Confirm-Config IS an install attempt and must still be
-#     reported, which is why the latch goes BEFORE it rather than after.
-if (Get-Command -Name 'Set-TelemetryRunStarted' -CommandType Function -ErrorAction SilentlyContinue) {
-  Set-TelemetryRunStarted
-}
 
 if ($Help) { $script:OutcomeReported = $true; Print-Help }
 if ($Diagnose) { Invoke-DiagnoseBundle; $script:OutcomeReported = $true; exit 0 }  # flag AFTER the long collection: an interrupt mid-diagnose must still hit Show-Interrupted (Bugbot)
+
+# THE RUN-STARTED LATCH (backend#2268). AFTER the terminal flags have dispatched
+# and BEFORE Confirm-Config — both halves matter, and the first one was wrong:
+#   * -Help and -Diagnose install nothing. Latched before them, this emitted
+#     `install.run.succeeded` for a run that never touched the machine — the exact
+#     client#747 bug the comment here claimed to prevent while the code did the
+#     opposite, with the wiring test asserting the inverted order and so pinning
+#     it. (@saqlainsyed007 on #782.) Print-Help and the -Diagnose branch both exit
+#     inside those lines, so nothing below can be reached by them.
+#   * a genuine failure in Confirm-Config IS an install attempt and must still be
+#     reported, which is why the latch is not pushed further down.
+if (Get-Command -Name 'Set-TelemetryRunStarted' -CommandType Function -ErrorAction SilentlyContinue) {
+  Set-TelemetryRunStarted
+}
 
 Confirm-Config
 Initialize-ToolDir
@@ -6527,6 +6548,14 @@ if ((-not $Resume) -and $script:InstallState.completed -and (Test-ToolsPresent) 
     Unregister-ResumeAfterReboot
     Log "Already installed and healthy - nothing to do."
     $script:OutcomeReported = $true
+    # A real invocation, but NOT a successful install: folding it into succeeded
+    # makes the success count grow with re-runs on machines nothing happened to.
+    # `skipped` is a registered outcome verb, so this needs no new vocabulary —
+    # and the bash twin already reports it from assess.sh's gate, so without this
+    # the two platforms answered "how often is there nothing to do" differently.
+    if (Get-Command -Name 'Set-TelemetryRunSkipped' -CommandType Function -ErrorAction SilentlyContinue) {
+      Set-TelemetryRunSkipped
+    }
     exit 0
   }
 }
