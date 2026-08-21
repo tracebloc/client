@@ -4,6 +4,8 @@ templates:
   - templates/telemetry-collector-daemonset.yaml
   - templates/telemetry-collector-rbac.yaml
   - templates/telemetry-collector-scc.yaml
+  - templates/telemetry-token-rbac.yaml
+  - templates/jobs-manager-deployment.yaml
   - templates/auto-upgrade-rbac.yaml
   - templates/image-refresh-rbac.yaml
   # Not a Collector template, but the Collector is now a second tenant of the
@@ -680,3 +682,96 @@ tests:
       - equal:
           path: seLinuxContext.type
           value: RunAsAny
+
+  # ── the token Secret's RBAC and the writer's env (backend#2274) ─────────────
+  - it: grants jobs-manager create AND patch on the token Secret
+    set:
+      telemetryCollector.enabled: true
+    template: templates/telemetry-token-rbac.yaml
+    documentIndex: 0
+    asserts:
+      - equal:
+          path: kind
+          value: Role
+      # TWO rules, and the split is forced by Kubernetes: `resourceNames` is not
+      # honoured for `create` (the API server cannot match a name that does not
+      # exist yet), so `create` is namespace-scoped while `get`/`patch` are pinned
+      # to the one Secret. Collapsing them either way is wrong in one direction —
+      # too broad, or a create that 403s.
+      - lengthEqual:
+          path: rules
+          count: 2
+      - contains:
+          path: rules[0].verbs
+          content: create
+      - contains:
+          path: rules[1].verbs
+          content: patch
+      # `patch` is the whole reason this Role exists: the cluster-wide rule in
+      # rbac.yaml grants create+get and NOT patch, so without it the Collector
+      # works until the first token rotation and then 401s on every export.
+      - contains:
+          path: rules[1].resourceNames
+          content: tracebloc-telemetry-token
+
+  - it: renders no token RBAC when the Collector is off
+    template: templates/telemetry-token-rbac.yaml
+    asserts:
+      # The negative half, so the positive above cannot pass for free.
+      - hasDocuments:
+          count: 0
+
+  - it: survives an explicit null telemetryCollector
+    set:
+      telemetryCollector: null
+    template: templates/telemetry-token-rbac.yaml
+    asserts:
+      # The `helm upgrade --reuse-values` trap, on the new template too.
+      - hasDocuments:
+          count: 0
+
+  - it: passes the Secret coordinates to the container that actually writes it
+    set:
+      telemetryCollector.enabled: true
+    template: templates/jobs-manager-deployment.yaml
+    asserts:
+      # containers[0] is `api`, which runs the tracebloc/jobs-manager image.
+      # containers[1] is `pods-monitor-container`, whose `env:` opening is
+      # BYTE-IDENTICAL — so a patch anchored on that text alone lands on the wrong
+      # container, sets three variables on a process that never reads them, and
+      # the Collector still gets no token. Asserted on both containers for that
+      # reason, not just the right one.
+      - equal:
+          path: spec.template.spec.containers[0].name
+          value: api
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: TELEMETRY_TOKEN_SECRET_NAMESPACE
+            value: tracebloc-node-agents
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: TELEMETRY_TOKEN_SECRET_NAME
+            value: tracebloc-telemetry-token
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: TELEMETRY_TOKEN_SECRET_KEY
+            value: token
+      - notContains:
+          path: spec.template.spec.containers[1].env
+          content:
+            name: TELEMETRY_TOKEN_SECRET_NAME
+            value: tracebloc-telemetry-token
+
+  - it: passes no Secret coordinates when the Collector is off
+    template: templates/jobs-manager-deployment.yaml
+    asserts:
+      # The reader treats an absent namespace as "not deployed" and makes no API
+      # call at all, so this is the switch that keeps a default install inert.
+      - notContains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: TELEMETRY_TOKEN_SECRET_NAMESPACE
+            value: tracebloc-node-agents
