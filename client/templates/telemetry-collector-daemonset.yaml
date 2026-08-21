@@ -187,7 +187,17 @@ spec:
         - name: host-logs
           hostPath:
             path: {{ $tc.hostLogsPath | default "/var/log/pods" }}
-            type: DirectoryOrCreate
+            # `Directory`, NOT `DirectoryOrCreate`, and the asymmetry with the queue
+            # below is the point. This path is the KUBELET'S — we read it, we do not
+            # own it. With `DirectoryOrCreate` a wrong or missing `hostLogsPath` made
+            # the kubelet helpfully create an empty directory, and the Collector then
+            # started, reported healthy, and matched no files forever: the same
+            # silent blindness the Class A glob guard exists to prevent, arriving by
+            # a different route. `Directory` fails the pod instead, which is the
+            # correct direction for a path we expect to already exist —
+            # resource-monitor's /proc and /sys mounts have always used it.
+            # (Bugbot on #779.)
+            type: Directory
         - name: queue
           # hostPath, per D7: the queue must survive the pod restart that is the
           # common case during a backend outage, and an emptyDir does not. D7 also
@@ -196,6 +206,9 @@ spec:
           # exporter config is the thing doing the bounding.
           hostPath:
             path: /var/lib/tracebloc/{{ .Release.Name }}/telemetry
+            # `DirectoryOrCreate` here, deliberately unlike host-logs above: this
+            # path is OURS and will not exist on a node's first install, so
+            # `Directory` would refuse to start the Collector on every fresh node.
             type: DirectoryOrCreate
         - name: tmp
           emptyDir: {}

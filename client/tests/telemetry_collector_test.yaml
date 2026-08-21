@@ -641,3 +641,42 @@ tests:
       # throwing, which is the property.
       - hasDocuments:
           count: 5
+
+  # ── the two host paths are asymmetric on purpose ────────────────────────────
+  - it: fails the pod when the kubelet log path is absent, but self-creates the queue
+    set:
+      telemetryCollector.enabled: true
+    template: templates/telemetry-collector-daemonset.yaml
+    asserts:
+      # `Directory`: the log path is the KUBELET'S and we only read it. With
+      # `DirectoryOrCreate` a wrong `hostLogsPath` made the kubelet create an empty
+      # directory and the Collector ran healthy matching nothing — forever.
+      # (Bugbot on #779.) resource-monitor's /proc and /sys have always used
+      # `Directory` for the same reason.
+      - equal:
+          path: spec.template.spec.volumes[?(@.name=="host-logs")].hostPath.type
+          value: Directory
+      # `DirectoryOrCreate`: this path is OURS and does not exist on a node's first
+      # install, so `Directory` would refuse to start on every fresh node. Both
+      # asserted together, because the asymmetry IS the design and a well-meaning
+      # "make them consistent" edit breaks one of the two.
+      - equal:
+          path: spec.template.spec.volumes[?(@.name=="queue")].hostPath.type
+          value: DirectoryOrCreate
+
+  - it: lets the Collector read MCS-labelled container logs on OpenShift
+    set:
+      telemetryCollector.enabled: true
+      openshift.scc.enabled: true
+    template: templates/telemetry-collector-scc.yaml
+    documentIndex: 0
+    asserts:
+      # Container logs under /var/log/pods are `container_log_t` with per-container
+      # MCS categories; a namespace MCS context from `MustRunAs` cannot read them,
+      # so the pods would be admitted, run as root, and take a permission error on
+      # every include glob — a healthy DaemonSet shipping zero records.
+      # (Bugbot on #779.) resource-monitor keeps MustRunAs, which is right for
+      # /proc and /sys, and is not relaxed here.
+      - equal:
+          path: seLinuxContext.type
+          value: RunAsAny

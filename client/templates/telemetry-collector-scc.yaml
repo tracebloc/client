@@ -54,7 +54,18 @@ runAsUser:
   # what is permitted, the pod decides what is used.
   type: RunAsAny
 seLinuxContext:
-  type: MustRunAs
+  # RunAsAny, unlike resource-monitor's SCC — which is where I copied MustRunAs
+  # from, and where it is correct. That workload reads /proc and /sys; this one
+  # reads container logs under /var/log/pods, which on OpenShift are labelled
+  # `container_log_t` with per-container MCS categories. A namespace MCS context
+  # from `MustRunAs` cannot read them, so the pods would be admitted, run as root,
+  # and take a permission error on every include glob: a healthy DaemonSet
+  # shipping zero records. (Bugbot on #779.)
+  #
+  # Same shape as the runAsUser widening on this SCC, and the same trade: the
+  # narrowing that makes it defensible is elsewhere — all capabilities dropped, no
+  # privilege escalation, a read-only root filesystem, and only two host paths.
+  type: RunAsAny
 fsGroup:
   type: RunAsAny
 supplementalGroups:
