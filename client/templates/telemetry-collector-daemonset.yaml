@@ -98,6 +98,18 @@ spec:
         checksum/config: {{ include (print $.Template.BasePath "/telemetry-collector-configmap.yaml") . | sha256sum }}
     spec:
       serviceAccountName: {{ include "tracebloc.telemetryCollectorName" . }}
+      # The ServiceAccount above is pod IDENTITY ONLY — it is the SCC binding
+      # subject on OpenShift, and telemetry-collector-rbac.yaml deliberately
+      # gives it no Role and no ClusterRole. The Collector reads container
+      # stdout off the node filesystem and ships it over HTTP; it never calls
+      # the Kubernetes API. The ingest token it DOES need is the projected
+      # Secret at /etc/tracebloc/telemetry, not this one.
+      #
+      # Stated rather than left to the default, because this is a DaemonSet:
+      # the default mounts a credential nothing reads onto every node of a
+      # customer's cluster, and a reader of the template cannot tell whether
+      # that was chosen or inherited.
+      automountServiceAccountToken: false
       securityContext:
         # ROOT, SELECTED EXPLICITLY — `runAsNonRoot: false` only PERMITS root, it
         # does not choose it, and that distinction was a live defect (Bugbot on
