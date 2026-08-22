@@ -49,7 +49,12 @@
         },
         "RESOURCE_PROVENANCE": {
           "type": "string",
-          "enum": ["installer", "user", "unknown", ""],
+          "enum": [
+            "installer",
+            "user",
+            "unknown",
+            ""
+          ],
           "description": "Who chose RESOURCE_REQUESTS/RESOURCE_LIMITS: 'installer' (sized to this machine at install), 'user' (an explicit 'tracebloc resources set'), or 'unknown' (a value carried forward from before this key existed, so provenance is genuinely unknowable). Read-only bookkeeping for backend#2220 - it never changes the envelope, it records who picked it, so a future ladder can re-derive an installer-written value without ever overriding a deliberate human choice."
         },
         "GPU_REQUESTS": {
@@ -91,7 +96,11 @@
             },
             "vendor": {
               "type": "string",
-              "enum": ["", "nvidia", "amd"],
+              "enum": [
+                "",
+                "nvidia",
+                "amd"
+              ],
               "description": "Which vendor plugin to render when enabled; required non-empty when enabled is true."
             },
             "namespace": {
@@ -102,19 +111,37 @@
             "nvidia": {
               "type": "object",
               "properties": {
-                "registry": { "type": "string" },
-                "repository": { "type": "string", "minLength": 1 },
-                "tag": { "type": "string" },
-                "digest": { "type": "string" }
+                "registry": {
+                  "type": "string"
+                },
+                "repository": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "tag": {
+                  "type": "string"
+                },
+                "digest": {
+                  "type": "string"
+                }
               }
             },
             "amd": {
               "type": "object",
               "properties": {
-                "registry": { "type": "string" },
-                "repository": { "type": "string", "minLength": 1 },
-                "tag": { "type": "string" },
-                "digest": { "type": "string" }
+                "registry": {
+                  "type": "string"
+                },
+                "repository": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "tag": {
+                  "type": "string"
+                },
+                "digest": {
+                  "type": "string"
+                }
               }
             }
           }
@@ -187,7 +214,10 @@
       }
     },
     "singleNode": {
-      "type": ["boolean", "null"],
+      "type": [
+        "boolean",
+        "null"
+      ],
       "default": null,
       "description": "Cluster topology: does this cluster have a single schedulable node? Gates the AUTO-mode single-replica PodDisruptionBudgets (a minAvailable:1 PDB is undrainable on one node). null => default to hostPath.enabled; true/false => explicit. Deliberately separate from env.SINGLE_NODE (GPU->CPU fallback, which may be true on a fixed multi-node cluster). The installer sets true for node-local single-node k3d (client#560)."
     },
@@ -945,7 +975,10 @@
           "type": "object",
           "properties": {
             "create": {
-              "type": ["boolean", "null"],
+              "type": [
+                "boolean",
+                "null"
+              ],
               "default": null,
               "description": "null (default) = auto: render on multi-node CSI (hostPath.enabled=false), skip on single-node/bare-metal (hostPath.enabled=true). true = force render, false = never render. See tracebloc/client#560."
             }
@@ -955,7 +988,10 @@
           "type": "object",
           "properties": {
             "create": {
-              "type": ["boolean", "null"],
+              "type": [
+                "boolean",
+                "null"
+              ],
               "default": null,
               "description": "null (default) = auto: render on multi-node CSI (hostPath.enabled=false), skip on single-node/bare-metal (hostPath.enabled=true). true = force render, false = never render. See tracebloc/client#560."
             }
@@ -1239,11 +1275,15 @@
       "allOf": [
         {
           "if": {
-            "required": ["existingSecret"]
+            "required": [
+              "existingSecret"
+            ]
           },
           "then": {
             "properties": {
-              "create": { "const": false }
+              "create": {
+                "const": false
+              }
             }
           }
         },
@@ -1274,6 +1314,105 @@
       "description": "Per-environment default for the dedicated tb_meta/tb_ingest identities, keyed on the RESOLVED CLIENT_ENV (dev|stg|prod \u2014 documented aliases are normalized first). This is the mechanism behind #1151's 'flip per environment, dev first'; before it, that plan had no implementation and the fleet's posture could not be read in one place. backend#1752.",
       "additionalProperties": {
         "type": "boolean"
+      }
+    },
+    "telemetryCollector": {
+      "type": [
+        "object",
+        "null"
+      ],
+      "required": [
+        "classAContainers",
+        "classANodeAgentContainers"
+      ],
+      "description": "Edge telemetry Collector (RFC-BACKEND-1872 D6/D7, backend#1906). An OpenTelemetry Collector DaemonSet reading Class A container stdout and forwarding to the backend's ingest endpoint. Ships DISABLED: its exporter authenticates with a Secret jobs-manager writes (backend#2274), and enabling it first spools to every node's disk with nothing to deliver. `type` allows null so `--reuse-values` from a release predating this block validates.",
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "default": false
+        },
+        "image": {
+          "type": "object",
+          "properties": {
+            "registry": {
+              "type": "string"
+            },
+            "repository": {
+              "type": "string"
+            },
+            "tag": {
+              "type": "string",
+              "description": "Must be >= 0.130: `block_on_overflow` and `sizer: bytes` on a persistent queue do not exist below it, and the Collector rejects unknown config keys rather than ignoring them."
+            },
+            "digest": {
+              "type": "string"
+            }
+          }
+        },
+        "resources": {
+          "type": "object"
+        },
+        "classAContainers": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "string"
+          },
+          "description": "CONTAINER names (not workload names) in the RELEASE namespace whose stdout is collected. Class A per D12. Verified against the rendered chart by scripts/tests/collector-class-a-agreement.sh."
+        },
+        "classANodeAgentContainers": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "string"
+          },
+          "description": "Class A containers in nodeAgents.namespace rather than the release namespace \u2014 the namespace is part of the filelog path."
+        },
+        "hostLogsPath": {
+          "type": "string",
+          "minLength": 1
+        },
+        "tokenSecret": {
+          "type": "object",
+          "properties": {
+            "name": {
+              "type": "string",
+              "minLength": 1
+            },
+            "key": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        },
+        "authScheme": {
+          "type": "string",
+          "enum": [
+            "Token",
+            "Bearer"
+          ],
+          "description": "`Token` for the edge's DRF user token, which the ingest endpoint accepts via TokenAuthentication. `Bearer` is the ClientAccessToken type and 401s silently \u2014 a CLOSED set so a typo cannot pick a third."
+        },
+        "buffer": {
+          "type": "object",
+          "properties": {
+            "maxSizeBytes": {
+              "type": "integer",
+              "minimum": 1,
+              "description": "D7's byte cap. 1 GiB default."
+            },
+            "blockOnOverflow": {
+              "type": "boolean",
+              "default": false,
+              "description": "false = drop-newest, per D7's 2026-08-20 amendment. true stalls the pipeline and relocates loss to kubelet rotation, uncounted."
+            }
+          }
+        },
+        "retryMaxElapsedTime": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "0 = retry forever, so the byte cap is the ONLY bound. Any positive value silently overrides it."
+        }
       }
     }
   }

@@ -1,0 +1,802 @@
+suite: Edge telemetry Collector (backend#1906)
+templates:
+  - templates/telemetry-collector-configmap.yaml
+  - templates/telemetry-collector-daemonset.yaml
+  - templates/telemetry-collector-rbac.yaml
+  - templates/telemetry-collector-scc.yaml
+  - templates/telemetry-token-rbac.yaml
+  - templates/jobs-manager-deployment.yaml
+  - templates/auto-upgrade-rbac.yaml
+  - templates/image-refresh-rbac.yaml
+  # Not a Collector template, but the Collector is now a second tenant of the
+  # node-agents namespace, so its gate is part of this feature's surface.
+  - templates/node-agents-namespace.yaml
+  - templates/docker-registry-secret.yaml
+set:
+  clientId: "test-id"
+  clientPassword: "test"
+  storageClass:
+    create: false
+release:
+  name: edge
+  # SET EXPLICITLY. helm-unittest renders `.Release.Namespace` as the literal
+  # placeholder `NAMESPACE` when it is not given, so the Class A path assertions
+  # below would compare against a placeholder rather than a namespace — passing or
+  # failing for a reason unrelated to the scoping they exist to check.
+  namespace: tracebloc
+tests:
+  # ── it ships inert ────────────────────────────────────────────────────────
+  # The single most important assertion in this file. The exporter authenticates
+  # with a token jobs-manager does not write yet, so an enabled-by-default
+  # Collector would put a DaemonSet on every customer node spooling to disk with
+  # nothing it can deliver — the "telemetry must never be the reason a node fills"
+  # risk D7 exists to bound.
+  - it: renders nothing at all by default
+    templates:
+      - templates/telemetry-collector-configmap.yaml
+      - templates/telemetry-collector-daemonset.yaml
+      - templates/telemetry-collector-rbac.yaml
+    asserts:
+      - hasDocuments:
+          count: 0
+
+  # THE UPGRADE GUARD, and the most important test in this file after the
+  # ships-inert one. `helm upgrade --reuse-values` replays the values STORED WITH
+  # THE PREVIOUS RELEASE and does not merge values.yaml defaults — so every
+  # release made before this block existed has NO `telemetryCollector` key. A bare
+  # `.Values.telemetryCollector.enabled` is then a nil-pointer dereference and the
+  # UPGRADE FAILS: not the feature, the whole release, on every existing customer.
+  #
+  # Caught by the Fleet auto-upgrade E2E rather than by review, which is why this
+  # exists — that job upgrades from the last published chart exactly this way, and
+  # no amount of reading the template would have shown it.
+  - it: survives an upgrade whose stored values predate this block entirely
+    set:
+      # `null`, not `false`: absent is the case that broke. Setting it false would
+      # test a key that exists, which is a different and already-covered thing.
+      telemetryCollector: null
+    templates:
+      - templates/telemetry-collector-configmap.yaml
+      - templates/telemetry-collector-daemonset.yaml
+      - templates/telemetry-collector-rbac.yaml
+    asserts:
+      # Renders nothing AND, crucially, does not error. A template that failed here
+      # would surface as a suite error rather than a clean zero-document render.
+      - hasDocuments:
+          count: 0
+
+  - it: renders all three documents when explicitly enabled
+    set:
+      telemetryCollector.enabled: true
+    templates:
+      - templates/telemetry-collector-configmap.yaml
+      - templates/telemetry-collector-daemonset.yaml
+      - templates/telemetry-collector-rbac.yaml
+    asserts:
+      - hasDocuments:
+          count: 1
+
+  # ── Class A scoping (D12) ────────────────────────────────────────────────
+  - it: scopes filelog to the Class A containers and nothing else
+    set:
+      telemetryCollector.enabled: true
+    template: templates/telemetry-collector-configmap.yaml
+    asserts:
+      # CONTAINER names, from the rendered chart — `api` is jobs-manager,
+      # `pods-monitor-container` runs controller.py, `squid` is the egress proxy.
+      # The first version of this test asserted WORKLOAD names, which match no
+      # path, so it agreed with a values list that collected nothing.
+      # `scripts/tests/collector-class-a-agreement.sh` is the derived check that
+      # would have caught that; these are the specific-path assertions beside it.
+      - matchRegex:
+          path: data["config.yaml"]
+          pattern: '/var/log/pods/tracebloc_[*]/api/[*][.]log'
+      - matchRegex:
+          path: data["config.yaml"]
+          pattern: '/var/log/pods/tracebloc_[*]/pods-monitor-container/[*][.]log'
+      - matchRegex:
+          path: data["config.yaml"]
+          pattern: '/var/log/pods/tracebloc_[*]/squid/[*][.]log'
+      # A DIFFERENT NAMESPACE. resource-monitor is a DaemonSet in
+      # `nodeAgents.namespace`, so scoping every path to the release namespace
+      # missed a whole Class A component while the Collector reported healthy.
+      - matchRegex:
+          path: data["config.yaml"]
+          # RELEASE-SCOPED (`edge-` here, the suite's release name). A bare pod
+          # wildcard in the SHARED node-agents namespace matched every release's
+          # `tracebloc-resource-monitor` — container names are identical across
+          # releases by design — so one edge's Collector would ingest another
+          # edge's Class A logs and ship them under its own ingest token.
+          # (Bugbot on #779.) The pattern pins the prefix, so dropping it reddens.
+          pattern: '/var/log/pods/tracebloc-node-agents_edge-[*]/tracebloc-resource-monitor/[*][.]log'
+
+  # THE CLASS B GUARD. Class B is training and ingestion output, gated on
+  # backend#1908's content redaction — the bounding that exists today is SECRET
+  # redaction, and raw customer cell values have already reached central telemetry
+  # once (backend#1879). A wildcard include would collect them silently.
+  - it: never collects with a bare wildcard, which would sweep in Class B pods
+    set:
+      telemetryCollector.enabled: true
+    template: templates/telemetry-collector-configmap.yaml
+    asserts:
+      - notMatchRegex:
+          path: data["config.yaml"]
+          pattern: '/var/log/pods/[*]'
+      - notMatchRegex:
+          path: data["config.yaml"]
+          pattern: '/var/log/pods/[*][*]'
+
+  # ── the redaction floor (D6 precondition 2) ──────────────────────────────
+  # Reading stdout through filelog BYPASSES controller.py's app-side handler, so
+  # without these the move would silently REMOVE a protection that exists today.
+  - it: carries all six of controller.py's secret patterns
+    set:
+      telemetryCollector.enabled: true
+    template: templates/telemetry-collector-configmap.yaml
+    asserts:
+      - matchRegex:   # scheme://user:pass@host
+          path: data["config.yaml"]
+          pattern: '\[\^:/@'
+      - matchRegex:   # Azure / ServiceBus keys
+          path: data["config.yaml"]
+          pattern: 'SharedAccessKey\|AccountKey'
+      - matchRegex:   # auth headers
+          path: data["config.yaml"]
+          pattern: 'authorization\|x-api-key'
+      - matchRegex:   # bearer / DRF token
+          path: data["config.yaml"]
+          pattern: 'bearer\|token'
+      - matchRegex:   # generic secret assignments
+          path: data["config.yaml"]
+          pattern: 'client\[_-\]\?secret'
+      - matchRegex:   # AWS access key ids
+          path: data["config.yaml"]
+          pattern: 'AKIA\[0-9A-Z\]'
+
+  - it: puts redaction BEFORE the exporter in the pipeline
+    set:
+      telemetryCollector.enabled: true
+    template: templates/telemetry-collector-configmap.yaml
+    asserts:
+      # Order is the whole protection: a redaction processor listed after the
+      # exporter, or absent from the pipeline, scrubs nothing while still existing
+      # in the config — which reads exactly like a configured floor.
+      - matchRegex:
+          path: data["config.yaml"]
+          pattern: 'processors: \[transform/redaction, batch\]'
+
+  # ── D7's bounds ──────────────────────────────────────────────────────────
+  - it: bounds the queue in BYTES at 1 GiB, as an integer
+    set:
+      telemetryCollector.enabled: true
+    template: templates/telemetry-collector-configmap.yaml
+    asserts:
+      - matchRegex:
+          path: data["config.yaml"]
+          pattern: 'sizer: bytes'
+      # An INTEGER, not 1.073741824e\+09. Helm parses the value as float64 and
+      # renders scientific notation without `int64` — the Collector would start
+      # and the cap would not be the number in values.yaml.
+      - matchRegex:
+          path: data["config.yaml"]
+          pattern: 'queue_size: 1073741824'
+      - notMatchRegex:
+          path: data["config.yaml"]
+          pattern: 'queue_size: [0-9.]+e\+'
+
+  - it: retries forever, so the byte cap is the only bound
+    set:
+      telemetryCollector.enabled: true
+    template: templates/telemetry-collector-configmap.yaml
+    asserts:
+      # D7: a second, time-based bound silently overrides the byte cap, because a
+      # batch past max_elapsed_time is DROPPED rather than requeued.
+      - matchRegex:
+          path: data["config.yaml"]
+          pattern: 'max_elapsed_time: 0'
+
+  - it: backs the queue with disk, not memory
+    set:
+      telemetryCollector.enabled: true
+    template: templates/telemetry-collector-configmap.yaml
+    asserts:
+      - matchRegex:
+          path: data["config.yaml"]
+          pattern: 'storage: file_storage'
+
+  # ── the credential ───────────────────────────────────────────────────────
+  - it: sends the Token scheme, not the default Bearer
+    set:
+      telemetryCollector.enabled: true
+    template: templates/telemetry-collector-configmap.yaml
+    asserts:
+      # The edge holds a DRF user token (`Authorization: Token <key>`), which the
+      # ingest endpoint accepts via TokenAuthentication. `Bearer` is the OTHER
+      # credential type (ClientAccessToken) and 401s silently.
+      - matchRegex:
+          path: data["config.yaml"]
+          pattern: 'scheme: "Token"'
+
+  - it: posts to the versioned ingest path, not otlphttp default /v1/logs
+    set:
+      telemetryCollector.enabled: true
+    template: templates/telemetry-collector-configmap.yaml
+    asserts:
+      - matchRegex:
+          path: data["config.yaml"]
+          pattern: 'logs_endpoint: "https://api\.tracebloc\.io/telemetry/v1/records/"'
+
+  - it: follows CLIENT_ENV to the matching backend
+    set:
+      telemetryCollector.enabled: true
+      env.CLIENT_ENV: stg
+    template: templates/telemetry-collector-configmap.yaml
+    asserts:
+      - matchRegex:
+          path: data["config.yaml"]
+          pattern: 'logs_endpoint: "https://stg-api\.tracebloc\.io/'
+
+  # backend#1745: a documented alias must not route an install at the wrong
+  # backend. `staging` reduces to `stg` through tracebloc.clientEnv.
+  - it: resolves the staging alias rather than falling through to prod
+    set:
+      telemetryCollector.enabled: true
+      env.CLIENT_ENV: staging
+    template: templates/telemetry-collector-configmap.yaml
+    asserts:
+      - matchRegex:
+          path: data["config.yaml"]
+          pattern: 'logs_endpoint: "https://stg-api\.tracebloc\.io/'
+
+  # ── the DaemonSet ────────────────────────────────────────────────────────
+  - it: mounts the node log directory READ-ONLY
+    set:
+      telemetryCollector.enabled: true
+    template: templates/telemetry-collector-daemonset.yaml
+    asserts:
+      # The Collector must never be able to modify or truncate the logs it reads.
+      - equal:
+          path: spec.template.spec.containers[0].volumeMounts[2].name
+          value: host-logs
+      - equal:
+          path: spec.template.spec.containers[0].volumeMounts[2].readOnly
+          value: true
+
+  - it: treats the token Secret as OPTIONAL so a missing token does not crashloop
+    set:
+      telemetryCollector.enabled: true
+    template: templates/telemetry-collector-daemonset.yaml
+    asserts:
+      # jobs-manager writes this Secret. A Collector deployed before it exists must
+      # BUFFER, not fail — telemetry may never be the reason a node looks unhealthy.
+      - equal:
+          path: spec.template.spec.volumes[1].secret.optional
+          value: true
+
+  - it: keeps the queue on a hostPath so it survives a pod restart
+    set:
+      telemetryCollector.enabled: true
+    template: templates/telemetry-collector-daemonset.yaml
+    asserts:
+      # D7: the queue must outlive the restart that is the common case during an
+      # outage. An emptyDir would silently make the buffer pod-lifetime only.
+      - equal:
+          path: spec.template.spec.volumes[3].hostPath.path
+          value: /var/lib/tracebloc/edge/telemetry
+
+  - it: rolls the pods when the pipeline config changes
+    set:
+      telemetryCollector.enabled: true
+    template: templates/telemetry-collector-daemonset.yaml
+    asserts:
+      # Without this a helm upgrade that edits the pipeline leaves every node
+      # running the old one, reporting healthy throughout.
+      - exists:
+          path: spec.template.metadata.annotations["checksum/config"]
+
+  - it: applies D7's resource ceiling
+    set:
+      telemetryCollector.enabled: true
+    template: templates/telemetry-collector-daemonset.yaml
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].resources.limits.cpu
+          value: "500m"
+      - equal:
+          path: spec.template.spec.containers[0].resources.limits.memory
+          value: "512Mi"
+
+  - it: grants no Kubernetes API permissions at all
+    set:
+      telemetryCollector.enabled: true
+    template: templates/telemetry-collector-rbac.yaml
+    asserts:
+      # It reads files off the node; it never calls the API. A Role or ClusterRole
+      # here would be privilege this workload has no use for, on a DaemonSet
+      # running on every node of a customer's cluster.
+      - hasDocuments:
+          count: 1
+      - equal:
+          path: kind
+          value: ServiceAccount
+
+  # ── the image has a feature floor ────────────────────────────────────────
+  # The first version pinned 0.109.0, which predates `block_on_overflow`
+  # (upstream 2025-03, ~0.122+) and `sizer: bytes` on a persistent queue (~0.130).
+  # The Collector REJECTS unknown configuration keys, so an old image does not
+  # silently ignore them — it fails to start, on every node. (Bugbot on #779.)
+  #
+  # Asserts the FLOOR, not the exact tag: pinning an exact version here would
+  # make this a second place to update on every bump, and it would pass by
+  # agreeing with itself.
+  - it: pins a Collector image new enough for the queue options it configures
+    set:
+      telemetryCollector.enabled: true
+    template: templates/telemetry-collector-daemonset.yaml
+    asserts:
+      - matchRegex:
+          path: spec.template.spec.containers[0].image
+          # 0.13x-0.99x, or any 1.x+. Anything below 0.130 cannot run this config.
+          pattern: 'opentelemetry-collector-contrib:(0\.(1[3-9][0-9]|[2-9][0-9][0-9])|[1-9][0-9]*)\.'
+
+  # ── the global image mirror ──────────────────────────────────────────────
+  # #585 precedence: global mirror, then per-image registry, then docker.io.
+  # Passing `image.registry` alone ignored `global.imageRegistry`, so on a
+  # mirrored or air-gapped fleet the Collector ImagePullBackOffs while every
+  # other image pulls from the mirror. (Bugbot on #779.)
+  - it: honours the global image mirror
+    set:
+      telemetryCollector.enabled: true
+      global.imageRegistry: mirror.example.com
+    template: templates/telemetry-collector-daemonset.yaml
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].image
+          value: "mirror.example.com/otel/opentelemetry-collector-contrib:0.159.0"
+
+  - it: falls back to the per-image registry when no mirror is set
+    set:
+      telemetryCollector.enabled: true
+    template: templates/telemetry-collector-daemonset.yaml
+    asserts:
+      # Asserted as well as the mirror case: a precedence chain that only ever
+      # gets exercised at one end is half-tested, and the fallback is what every
+      # unmirrored fleet uses.
+      - equal:
+          path: spec.template.spec.containers[0].image
+          value: "docker.io/otel/opentelemetry-collector-contrib:0.159.0"
+
+  # ── the Collector is a second tenant of the node-agents namespace ─────────
+  # With resource-monitor off, the namespace this DaemonSet targets was never
+  # created — every dependent resource must share the feature's gate.
+  # (Bugbot on #779.)
+  - it: creates the node-agents namespace even when resource-monitor is off
+    set:
+      telemetryCollector.enabled: true
+      resourceMonitor: false
+    template: templates/node-agents-namespace.yaml
+    asserts:
+      - hasDocuments:
+          count: 1
+      - equal:
+          path: metadata.name
+          value: tracebloc-node-agents
+
+  - it: still skips the namespace when neither tenant is enabled
+    set:
+      resourceMonitor: false
+    template: templates/node-agents-namespace.yaml
+    asserts:
+      # The negative half. Without it the gate could be widened to "always" and
+      # the test above would still pass — which is the vacuity this bar rejects.
+      - hasDocuments:
+          count: 0
+
+  # ── the mirrored pull Secret shares the gate too ─────────────────────────
+  # @aptracebloc on #779: the namespace gate was mutation-pinned and this one was
+  # not. It was verified by hand at the time (render diff: 4 node-agents resources
+  # with the fix, 3 without) — but a by-hand check leaves nothing behind, which is
+  # the gap worth closing rather than the fix.
+  #
+  # Needs real registry values: `dockerRegistry.server` is `format: uri` in
+  # values.schema.json and `email` is required by its `allOf`, so a partial set is
+  # rejected by the schema before any template renders — and helm-unittest reports
+  # that as a plugin ERROR, not a template failure, which is easy to misread as a
+  # code defect. (It cost me three confused renders before I stopped suppressing
+  # stderr.)
+  - it: mirrors the pull Secret into node-agents when only the Collector is on
+    set:
+      telemetryCollector.enabled: true
+      resourceMonitor: false
+      dockerRegistry:
+        create: true
+        server: https://registry.example.com
+        username: u
+        password: p
+        email: ops@example.com
+    template: templates/docker-registry-secret.yaml
+    documentIndex: 1
+    asserts:
+      # Index 1 is the MIRRORED copy; index 0 is the release-namespace one. Without
+      # the widened gate this document does not exist at all, so the assertion is
+      # on its namespace rather than merely on the document count.
+      - equal:
+          path: metadata.namespace
+          value: tracebloc-node-agents
+      - equal:
+          path: kind
+          value: Secret
+
+  - it: does not mirror the pull Secret when neither tenant is enabled
+    set:
+      resourceMonitor: false
+      dockerRegistry:
+        create: true
+        server: https://registry.example.com
+        username: u
+        password: p
+        email: ops@example.com
+    template: templates/docker-registry-secret.yaml
+    asserts:
+      # The negative half, so widening the gate to `true` cannot make the test
+      # above pass for free — the same vacuity the namespace pair guards against.
+      - hasDocuments:
+          count: 1
+
+  # ── the pre-flight must not break offline rendering ──────────────────────
+  # @aptracebloc: the `lookup`-based `fail` is inherently un-pinnable here, because
+  # `lookup` returns empty under `helm template` so the guard never fires. Agreed —
+  # but the INVERSE is both testable and the thing that would actually hurt: a
+  # pre-flight that fired offline would break every `helm template`, every CI
+  # render and every `--dry-run` in the fleet.
+  - it: renders offline despite the token pre-flight, because lookup is empty
+    set:
+      telemetryCollector.enabled: true
+    template: templates/telemetry-collector-daemonset.yaml
+    asserts:
+      - hasDocuments:
+          count: 1
+      - equal:
+          path: kind
+          value: DaemonSet
+
+  # ── the queue must be writable by the user the pod actually runs as ─────────
+  # `runAsNonRoot: false` PERMITS root; it does not SELECT it. The pinned image
+  # declares `USER 10001`, and the kubelet creates a DirectoryOrCreate hostPath
+  # root-owned 0755 — so under the previous securityContext the Collector ran as
+  # 10001 and could not write its own file_storage queue. D7's disk-backed queue
+  # would have failed the moment the Collector was enabled. (Bugbot on #779.)
+  #
+  # This asserts the SELECTION, not the permission: deleting `runAsUser: 0` and
+  # leaving `runAsNonRoot: false` behind reddens this test, which is precisely the
+  # regression that shipped.
+  - it: selects root explicitly, so the disk-backed queue is writable
+    set:
+      telemetryCollector.enabled: true
+    template: templates/telemetry-collector-daemonset.yaml
+    asserts:
+      - equal:
+          path: spec.template.spec.securityContext.runAsUser
+          value: 0
+      # Both halves pinned: root permitted AND root chosen. Either alone is the bug.
+      - equal:
+          path: spec.template.spec.securityContext.runAsNonRoot
+          value: false
+      # The narrowing that makes root defensible, so it cannot quietly be dropped
+      # while the root stays.
+      - equal:
+          path: spec.template.spec.containers[0].securityContext.readOnlyRootFilesystem
+          value: true
+      - equal:
+          path: spec.template.spec.containers[0].securityContext.allowPrivilegeEscalation
+          value: false
+      - contains:
+          path: spec.template.spec.containers[0].securityContext.capabilities.drop
+          content: ALL
+
+  # ── OpenShift: the Collector needs its own SCC ──────────────────────────────
+  # Chart-managed SCCs gated on `resourceMonitor` alone and bound only that
+  # ServiceAccount, so on a cluster with openshift.scc.enabled the Collector's
+  # pods had nothing admitting their hostPath mounts. (Bugbot on #779.)
+  #
+  # A SEPARATE SCC, not a widening: resource-monitor's declares
+  # MustRunAsNonRoot, which is right for it — read-only mounts, no write anywhere
+  # — and granting RunAsAny there to serve the Collector would hand a broader
+  # run-as rule to a workload that does not need one.
+  - it: gives the Collector its own SCC on OpenShift, permitting hostPath and root
+    set:
+      telemetryCollector.enabled: true
+      openshift.scc.enabled: true
+    template: templates/telemetry-collector-scc.yaml
+    documentIndex: 0
+    asserts:
+      - equal:
+          path: kind
+          value: SecurityContextConstraints
+      - equal:
+          path: allowHostDirVolumePlugin
+          value: true
+      # RunAsAny, because the pod pins runAsUser: 0. MustRunAsNonRoot here would
+      # leave the Collector covered on paper and refused at admission — the exact
+      # half-fix scripts/tests/openshift-scc-coverage.sh exists to catch.
+      - equal:
+          path: runAsUser.type
+          value: RunAsAny
+      - contains:
+          path: requiredDropCapabilities
+          content: ALL
+      - equal:
+          path: allowPrivilegedContainer
+          value: false
+      - equal:
+          path: allowPrivilegeEscalation
+          value: false
+
+  - it: binds the SCC to the Collector's own ServiceAccount, not another
+    set:
+      telemetryCollector.enabled: true
+      openshift.scc.enabled: true
+    template: templates/telemetry-collector-scc.yaml
+    documentIndex: 0
+    asserts:
+      # The name is derived from the same helper the DaemonSet's
+      # serviceAccountName uses; the cross-document agreement between the two is
+      # asserted in scripts/tests/openshift-scc-coverage.sh, which helm-unittest
+      # cannot express.
+      - contains:
+          path: users
+          content: system:serviceaccount:tracebloc-node-agents:edge-telemetry-collector
+
+  # Both negatives, so widening either half of the `and` cannot make the positive
+  # test above pass for free.
+  - it: renders no Collector SCC when the Collector is off
+    set:
+      openshift.scc.enabled: true
+    template: templates/telemetry-collector-scc.yaml
+    asserts:
+      - hasDocuments:
+          count: 0
+
+  - it: renders no Collector SCC when the cluster is not OpenShift
+    set:
+      telemetryCollector.enabled: true
+    template: templates/telemetry-collector-scc.yaml
+    asserts:
+      - hasDocuments:
+          count: 0
+
+  # The `helm upgrade --reuse-values` nil-deref trap, on the new template too:
+  # an explicit null must not blow up the `and`. The chart documents this on
+  # resource-monitor and it broke every existing customer's upgrade once already.
+  - it: survives an explicit null telemetryCollector on OpenShift
+    set:
+      telemetryCollector: null
+      openshift.scc.enabled: true
+    template: templates/telemetry-collector-scc.yaml
+    asserts:
+      - hasDocuments:
+          count: 0
+
+  # ── one predicate for the node-agents namespace ────────────────────────────
+  # @saadqbal's review of #779. Five templates put something in that namespace and
+  # each held its own copy of "is resource-monitor on"; two were widened for the
+  # Collector and the rest were not, so `resourceMonitor: false` +
+  # `telemetryCollector.enabled: true` — the configuration this feature exists to
+  # enable — created the namespace, landed the DaemonSet, and left the RBAC that
+  # manages it behind. `tracebloc.nodeAgentsInUse` is now the single predicate.
+  #
+  # The cross-document invariant (a DaemonSet-mutating Role must exist whenever a
+  # DaemonSet does) is asserted in scripts/tests/node-agents-tenancy.sh, which
+  # helm-unittest cannot express. These pin the per-template half.
+  - it: grants auto-upgrade its node-agents Role with ONLY the Collector enabled
+    set:
+      resourceMonitor: false
+      telemetryCollector.enabled: true
+    template: templates/auto-upgrade-rbac.yaml
+    asserts:
+      # 7 vs the 5 below: the node-agents Role/RoleBinding PAIR is the delta, and
+      # the pair is what `helm upgrade --atomic --wait` needs — without it that
+      # tick 403s and ROLLS BACK, the expensive form of backend#953's failure mode.
+      - hasDocuments:
+          count: 7
+
+  - it: grants image-refresh its node-agents Role with ONLY the Collector enabled
+    set:
+      resourceMonitor: false
+      telemetryCollector.enabled: true
+    template: templates/image-refresh-rbac.yaml
+    asserts:
+      - hasDocuments:
+          count: 5
+
+  # The negative half, so widening the predicate to a constant `true` cannot make
+  # the two above pass for free — which is exactly what a mutation showed it does.
+  - it: grants neither Role when the namespace has no tenant at all
+    set:
+      resourceMonitor: false
+    template: templates/auto-upgrade-rbac.yaml
+    asserts:
+      # 5, i.e. 7 minus the node-agents pair. Paired with the positive above so
+      # widening the predicate to a constant `true` reddens THIS one — a mutation
+      # confirmed it does.
+      - hasDocuments:
+          count: 5
+
+  # THE `--reuse-values` NIL TRAP, on the predicate itself rather than five times
+  # over. A bare `.Values.telemetryCollector.enabled` throws "nil pointer
+  # evaluating interface {}.enabled" for an operator upgrading from a chart that
+  # predates the key, and fails before a single resource lands.
+  #
+  # `resourceMonitor: false` IS THE WHOLE TEST. Go's `or` short-circuits, so with
+  # resource-monitor on, the second operand is never evaluated and a null
+  # telemetryCollector cannot deref — the first version of this test set
+  # `resourceMonitor: true` and passed happily with the nil-guard DELETED. It took
+  # a mutation to show it was asserting nothing.
+  - it: survives an explicit null telemetryCollector through the shared predicate
+    set:
+      telemetryCollector: null
+      resourceMonitor: false
+    template: templates/auto-upgrade-rbac.yaml
+    asserts:
+      # 5 = the render minus the node-agents pair: no tenant, so no Role there.
+      # Reaching this number at all means the predicate evaluated without
+      # throwing, which is the property.
+      - hasDocuments:
+          count: 5
+
+  # ── the two host paths are asymmetric on purpose ────────────────────────────
+  - it: fails the pod when the kubelet log path is absent, but self-creates the queue
+    set:
+      telemetryCollector.enabled: true
+    template: templates/telemetry-collector-daemonset.yaml
+    asserts:
+      # `Directory`: the log path is the KUBELET'S and we only read it. With
+      # `DirectoryOrCreate` a wrong `hostLogsPath` made the kubelet create an empty
+      # directory and the Collector ran healthy matching nothing — forever.
+      # (Bugbot on #779.) resource-monitor's /proc and /sys have always used
+      # `Directory` for the same reason.
+      - equal:
+          path: spec.template.spec.volumes[?(@.name=="host-logs")].hostPath.type
+          value: Directory
+      # `DirectoryOrCreate`: this path is OURS and does not exist on a node's first
+      # install, so `Directory` would refuse to start on every fresh node. Both
+      # asserted together, because the asymmetry IS the design and a well-meaning
+      # "make them consistent" edit breaks one of the two.
+      - equal:
+          path: spec.template.spec.volumes[?(@.name=="queue")].hostPath.type
+          value: DirectoryOrCreate
+
+  - it: lets the Collector read MCS-labelled container logs on OpenShift
+    set:
+      telemetryCollector.enabled: true
+      openshift.scc.enabled: true
+    template: templates/telemetry-collector-scc.yaml
+    documentIndex: 0
+    asserts:
+      # Container logs under /var/log/pods are `container_log_t` with per-container
+      # MCS categories; a namespace MCS context from `MustRunAs` cannot read them,
+      # so the pods would be admitted, run as root, and take a permission error on
+      # every include glob — a healthy DaemonSet shipping zero records.
+      # (Bugbot on #779.) resource-monitor keeps MustRunAs, which is right for
+      # /proc and /sys, and is not relaxed here.
+      - equal:
+          path: seLinuxContext.type
+          value: RunAsAny
+
+  # ── the token Secret's RBAC and the writer's env (backend#2274) ─────────────
+  - it: grants jobs-manager create AND patch on the token Secret
+    set:
+      telemetryCollector.enabled: true
+    template: templates/telemetry-token-rbac.yaml
+    documentIndex: 0
+    asserts:
+      - equal:
+          path: kind
+          value: Role
+      # TWO rules, and the split is forced by Kubernetes: `resourceNames` is not
+      # honoured for `create` (the API server cannot match a name that does not
+      # exist yet), so `create` is namespace-scoped while `get`/`patch` are pinned
+      # to the one Secret. Collapsing them either way is wrong in one direction —
+      # too broad, or a create that 403s.
+      - lengthEqual:
+          path: rules
+          count: 2
+      - contains:
+          path: rules[0].verbs
+          content: create
+      - contains:
+          path: rules[1].verbs
+          content: patch
+      # `patch` is the whole reason this Role exists: the cluster-wide rule in
+      # rbac.yaml grants create+get and NOT patch, so without it the Collector
+      # works until the first token rotation and then 401s on every export.
+      - contains:
+          path: rules[1].resourceNames
+          content: tracebloc-telemetry-token
+
+  - it: renders no token RBAC when the Collector is off
+    template: templates/telemetry-token-rbac.yaml
+    asserts:
+      # The negative half, so the positive above cannot pass for free.
+      - hasDocuments:
+          count: 0
+
+  - it: survives an explicit null telemetryCollector
+    set:
+      telemetryCollector: null
+    template: templates/telemetry-token-rbac.yaml
+    asserts:
+      # The `helm upgrade --reuse-values` trap, on the new template too.
+      - hasDocuments:
+          count: 0
+
+  - it: passes the Secret coordinates to the container that actually writes it
+    set:
+      telemetryCollector.enabled: true
+    template: templates/jobs-manager-deployment.yaml
+    asserts:
+      # containers[0] is `api`, which runs the tracebloc/jobs-manager image.
+      # containers[1] is `pods-monitor-container`, whose `env:` opening is
+      # BYTE-IDENTICAL — so a patch anchored on that text alone lands on the wrong
+      # container, sets three variables on a process that never reads them, and
+      # the Collector still gets no token. Asserted on both containers for that
+      # reason, not just the right one.
+      - equal:
+          path: spec.template.spec.containers[0].name
+          value: api
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: TELEMETRY_TOKEN_SECRET_NAMESPACE
+            value: tracebloc-node-agents
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: TELEMETRY_TOKEN_SECRET_NAME
+            value: tracebloc-telemetry-token
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: TELEMETRY_TOKEN_SECRET_KEY
+            value: token
+      - notContains:
+          path: spec.template.spec.containers[1].env
+          content:
+            name: TELEMETRY_TOKEN_SECRET_NAME
+            value: tracebloc-telemetry-token
+
+  - it: passes no Secret coordinates when the Collector is off
+    template: templates/jobs-manager-deployment.yaml
+    asserts:
+      # The reader treats an absent namespace as "not deployed" and makes no API
+      # call at all, so this is the switch that keeps a default install inert.
+      - notContains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: TELEMETRY_TOKEN_SECRET_NAMESPACE
+            value: tracebloc-node-agents
+
+  # ── the Class A lists cannot silently shrink (backend#2341) ────────────────
+  # Bugbot High on the client#789 promotion. Its stated mechanism — a partial
+  # `telemetryCollector` map under `--reuse-values` — does NOT reproduce: helm
+  # coalesces chart defaults at render time, so an ABSENT key comes back. This
+  # test pins that, because it is the behaviour the finding assumed was broken
+  # and a change that really did break coalescing would be serious.
+  - it: fills the Class A lists from chart defaults when the map is partial
+    set:
+      telemetryCollector:
+        enabled: true
+    template: templates/telemetry-collector-configmap.yaml
+    asserts:
+      - matchRegex:
+          path: data["config.yaml"]
+          pattern: '/var/log/pods/tracebloc_[*]/api/[*][.]log'
+      - matchRegex:
+          path: data["config.yaml"]
+          pattern: '/var/log/pods/tracebloc_[*]/pods-monitor-container/[*][.]log'
+      - matchRegex:
+          path: data["config.yaml"]
+          pattern: '/var/log/pods/tracebloc_[*]/squid/[*][.]log'
+      - matchRegex:
+          path: data["config.yaml"]
+          pattern: '/var/log/pods/tracebloc-node-agents_edge-[*]/tracebloc-resource-monitor/[*][.]log'

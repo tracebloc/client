@@ -43,6 +43,12 @@ $DefaultRef = "__TRACEBLOC_RELEASE_REF__"
 # if this array and that one drift. Keep them in lockstep.
 $Files = @(
   "scripts/install-k8s.ps1"
+  # The outcome emitter (backend#2268). A separate file rather than 500 more
+  # lines inside install-k8s.ps1, for the same reason the bash side keeps
+  # lib/telemetry.sh separate: it is the one part of the installer with its own
+  # unit suite (scripts/tests/telemetry.Tests.ps1), and it is verified against
+  # the signed manifest exactly like every other fetched script.
+  "scripts/lib/telemetry.ps1"
 )
 
 # Keep in lockstep with install.sh COSIGN_VERSION and cli release.yml's
@@ -537,6 +543,17 @@ function Invoke-Bootstrap {
     # ── Fetch the sub-scripts from the immutable tag tree ──
     foreach ($f in $Files) {
       $dest = Join-Path $tmpDir ($f -replace '^scripts/', '')
+      # CREATE THE PARENT FIRST. `$Files` gained its first `scripts/lib/` entry
+      # under backend#2268, and Invoke-WebRequest -OutFile does not create
+      # directories: without this the very first fetch of a lib file throws
+      # DirectoryNotFound and the Windows bootstrap dies before it verifies
+      # anything. install.sh has always done the equivalent `mkdir -p`. This
+      # weakens no integrity property — every fetched file is still checked
+      # against the signed manifest below.
+      $destDir = Split-Path -Parent $dest
+      if ($destDir -and -not (Test-Path -LiteralPath $destDir)) {
+        New-Item -ItemType Directory -Path $destDir -Force | Out-Null
+      }
       Get-WithRetry -Url "$repoRaw/$f" -Dest $dest
     }
 
@@ -559,6 +576,13 @@ function Invoke-Bootstrap {
     }
 
     # ── Run the verified main installer ──
+    # Hand the resolved ref down, exactly as install.sh:247 exports
+    # TRACEBLOC_INSTALL_REF. install-k8s.ps1 runs as a CHILD process, so an
+    # environment variable set here is inherited. Without it `service.version` on
+    # every Windows telemetry record was permanently "0.0.0-unknown" — the field
+    # that says WHICH installer failed, on the platform this feature was added for.
+    # (backend#2268; found by the derived ScriptVar test, not by review.)
+    $env:TRACEBLOC_INSTALL_REF = $ref
     $k8s = Join-Path $tmpDir "install-k8s.ps1"
     Info "Running tracebloc environment setup..."
     if ($ChildArgs -and $ChildArgs.Count -gt 0) {

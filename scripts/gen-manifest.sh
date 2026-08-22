@@ -48,11 +48,19 @@ FILES=(
 )
 
 # The Windows bootstrap (scripts/install.ps1) is a separate entrypoint with its
-# own integrity surface: a single self-contained sub-script. It verifies against
-# the SAME signed manifest, so its file(s) must be hashed here too. Kept in
-# lockstep with the $Files array in scripts/install.ps1 (checked below).
+# own integrity surface. It verifies against the SAME signed manifest, so its
+# files must be hashed here too. Kept in lockstep with the $Files array in
+# scripts/install.ps1 (checked below).
+#
+# It stopped being "a single self-contained sub-script" under backend#2268, which
+# split the outcome emitter into scripts/lib/telemetry.ps1 — the same shape the
+# bash surface has always had. Anything added here must also be added to
+# install.ps1's $Files, and install.ps1 must be able to CREATE the parent
+# directory of a nested entry: Invoke-WebRequest -OutFile does not, and the first
+# scripts/lib/ entry is what proved it.
 WINDOWS_FILES=(
   "scripts/install-k8s.ps1"
+  "scripts/lib/telemetry.ps1"
 )
 
 # The full set the manifest covers = both bootstraps' surfaces. install.sh only
