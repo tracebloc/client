@@ -759,11 +759,16 @@ tests:
   - it: should NOT fall back to a bare TCP connect on 8080
     template: templates/jobs-manager-deployment.yaml
     asserts:
-      # The specific regression this ticket exists to prevent, kept as its own
-      # assertion rather than folded into the httpGet test: a chart that grew
-      # BOTH keys renders as tcpSocket-wins-or-error, and the httpGet
-      # assertions above would still be green. "A probe exists" was never the
-      # requirement — "the probe can observe what /healthz observes" is.
+      # The specific regression this ticket exists to prevent, named as its own
+      # case rather than folded into the httpGet test. The httpGet assertions
+      # above already redden on a straight revert, so this is not there to
+      # catch a case they miss — it is there so that WHEN they redden, one of
+      # the failures says `tcpSocket expected to NOT exists` instead of three
+      # `unknown path …httpGet.*` lines that read like a typo. A revert to the
+      # weaker signal should not have to be diagnosed.
+      #
+      # It is also the one assertion that is independent of what replaced the
+      # httpGet block, so it keeps holding if the probe is ever restructured.
       - notExists:
           path: spec.template.spec.containers[0].readinessProbe.tcpSocket
 
