@@ -160,23 +160,53 @@ refuses() { # DESCRIPTION  EXPECT_IN_STDERR  EXTRA_ARGS...
     *"$expect"*) printf '   ok    %s\n' "$desc" ;;
     *) echo "[ERROR] $desc: refused, but not for the expected reason." >&2
        echo "        wanted to see: $expect" >&2
-       echo "        got: $(printf '%s' "$out" | head -2)" >&2
+       # HERE-STRING, not `printf | head`: under `set -euo pipefail` head closes
+       # the pipe, the producer takes SIGPIPE, and the pipeline returns 141 —
+       # aborting this script from inside its own error path. The house idiom,
+       # and scripts/tests/pipefail-early-close.sh enforces it (backend#1778).
+       echo "        got: $(head -2 <<<"$out")" >&2
        return 1 ;;
   esac
 }
 
 na_status=0
-# Schema layer: a null deletes the key, and `required` is what notices.
-refuses "schema rejects a null classAContainers" "missing property 'classAContainers'" \
+# Schema layer. MATCHED ON THE PREAMBLE, NOT THE PER-PROPERTY WORDING: helm 3 says
+# "<prop> is required" and helm 4 "missing property '<prop>'", and CI pins v3.15.4
+# while this was written against v4 — the first version of this guard asserted the
+# v4 phrasing and failed on CI for a reason that had nothing to do with the chart.
+# The preamble is identical in both, and pairing it with the property name still
+# tells the schema refusal apart from the template one below.
+SCHEMA_REFUSAL="don't meet the specifications"
+refuses "schema rejects a null classAContainers" "$SCHEMA_REFUSAL" \
   --set-json 'telemetryCollector={"enabled":true,"classAContainers":null}' || na_status=1
-refuses "schema rejects a null classANodeAgentContainers" "missing property 'classANodeAgentContainers'" \
+refuses "schema rejects a null classANodeAgentContainers" "$SCHEMA_REFUSAL" \
   --set-json 'telemetryCollector={"enabled":true,"classANodeAgentContainers":null}' || na_status=1
 
 # Template layer: the same inputs with validation skipped must still refuse.
-refuses "template refuses a null classAContainers (schema skipped)" "classAContainers resolved to nothing" \
-  --skip-schema-validation --set-json 'telemetryCollector={"enabled":true,"classAContainers":null}' || na_status=1
-refuses "template refuses a null classANodeAgentContainers (schema skipped)" "classANodeAgentContainers resolved to nothing" \
-  --skip-schema-validation --set-json 'telemetryCollector={"enabled":true,"classANodeAgentContainers":null}' || na_status=1
+#
+# NEEDS helm >= 3.16 for --skip-schema-validation, and CI pins 3.15.4 — so this
+# half is SKIPPED there, loudly, rather than silently passing. The guard still
+# earns its place: the flag is what a real operator would reach for, and on any
+# helm that has it these two cases run. Detected rather than assumed from the
+# version string, because the flag's introduction is what matters, not the number.
+# Captured then matched with `case`, NOT `helm ... | grep -q`: grep -q closes the
+# pipe on its first hit, helm takes SIGPIPE, and the pipeline returns 141 under
+# `set -euo pipefail`. Same class as the `head` above, and this guard's own
+# enforcement (scripts/tests/pipefail-early-close.sh) catches it — it caught this
+# very line.
+helm_help="$(helm template --help 2>&1 || true)"
+case "$helm_help" in
+  *--skip-schema-validation*)
+    refuses "template refuses a null classAContainers (schema skipped)" "classAContainers resolved to nothing" \
+      --skip-schema-validation --set-json 'telemetryCollector={"enabled":true,"classAContainers":null}' || na_status=1
+    refuses "template refuses a null classANodeAgentContainers (schema skipped)" "classANodeAgentContainers resolved to nothing" \
+      --skip-schema-validation --set-json 'telemetryCollector={"enabled":true,"classANodeAgentContainers":null}' || na_status=1
+    ;;
+  *)
+    printf '   SKIP  template fail-closed: this helm (%s) has no --skip-schema-validation;\n' "$(helm version --short 2>/dev/null)"
+    printf '         the schema layer above is what is exercised here.\n'
+    ;;
+esac
 
 # And the control: the ordinary partial-map shape must still render everything,
 # because chart defaults coalesce. This is the mechanism the finding assumed was
