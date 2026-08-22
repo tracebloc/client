@@ -62,9 +62,29 @@ data:
       filelog:
         include:
           {{- $logs := trimSuffix "/" ($tc.hostLogsPath | default "/var/log/pods") }}
+          {{- /*
+            BUILT AS A LIST, THEN CHECKED — a Collector with no includes must not
+            render (backend#2341). The reachable route is an explicit null:
+            `--set telemetryCollector.classAContainers=null` DELETES the key, and a
+            deleted key does not coalesce back from values.yaml, so the list
+            silently shrinks. `minItems: 1` in values.schema.json rejects an EMPTY
+            list but says nothing about an absent one, which is why the schema now
+            marks both lists `required` as well.
+
+            THE DANGEROUS CASE IS PARTIAL, NOT TOTAL. Nulling ONE list leaves a
+            valid config with a shorter include list: the Collector starts, reports
+            Ready, and silently omits three of the four Class A containers. Nulling
+            both empties it, which filelog refuses outright — loud, and therefore
+            the safer of the two. This guard exists for the quiet one.
+
+            The schema catches this first. This is not belt-and-braces: helm has
+            `--skip-schema-validation`, so the template is the layer that cannot be
+            bypassed, and the test drives exactly that flag.
+          */}}
+          {{- $includes := list }}
           {{- /* Release-namespace Class A containers. */}}
           {{- range $tc.classAContainers }}
-          - {{ printf "%s/%s_*/%s/*.log" $logs $.Release.Namespace . | quote }}
+          {{- $includes = append $includes (printf "%s/%s_*/%s/*.log" $logs $.Release.Namespace .) }}
           {{- end }}
           {{- /*
             NODE-AGENTS namespace, separately. resource-monitor is a DaemonSet in
@@ -101,7 +121,28 @@ data:
             cycle here.)
           */}}
           {{- range $tc.classANodeAgentContainers }}
-          - {{ printf "%s/%s_%s-*/%s/*.log" $logs $.Values.nodeAgents.namespace.name $.Release.Name . | quote }}
+          {{- $includes = append $includes (printf "%s/%s_%s-*/%s/*.log" $logs $.Values.nodeAgents.namespace.name $.Release.Name .) }}
+          {{- end }}
+          {{- /*
+            EACH LIST, NOT THE COMBINED ONE. The first version of this guard checked
+            only that `$includes` was non-empty, and so passed the case that actually
+            matters: nulling ONE list leaves a non-empty include (one glob instead of
+            four), which renders a perfectly valid config that starts, reports Ready,
+            and silently omits three Class A containers. The combined check fires only
+            on total blindness — which filelog refuses on its own anyway. Checking the
+            lists separately is what makes this guard about the quiet failure.
+          */}}
+          {{- if not $tc.classAContainers }}
+          {{- fail "telemetryCollector.classAContainers resolved to nothing, so the Collector would silently skip every Class A container in the release namespace while still reporting Ready. helm DELETES a key set to null and the chart default does not coalesce back — pass the list explicitly, or upgrade with --reset-then-reuse-values rather than --reuse-values." }}
+          {{- end }}
+          {{- if not $tc.classANodeAgentContainers }}
+          {{- fail "telemetryCollector.classANodeAgentContainers resolved to nothing, so the Collector would silently skip resource-monitor while still reporting Ready. helm DELETES a key set to null and the chart default does not coalesce back — pass the list explicitly, or upgrade with --reset-then-reuse-values rather than --reuse-values." }}
+          {{- end }}
+          {{- if not $includes }}
+          {{- fail "telemetryCollector: the Class A include list resolved to nothing, so this Collector would collect nothing." }}
+          {{- end }}
+          {{- range $includes }}
+          - {{ . | quote }}
           {{- end }}
         # PERSIST THE READ OFFSETS. Without this the receiver keeps them in
         # memory only, and `start_at` governs where a NEWLY DISCOVERED file is
