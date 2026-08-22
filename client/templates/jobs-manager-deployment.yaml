@@ -33,6 +33,10 @@ spec:
     spec:
       terminationGracePeriodSeconds: 60
       serviceAccountName: {{ include "tracebloc.serviceAccountName" . }}
+      # NEEDED. rbac.yaml binds this SA to a ClusterRole that creates and deletes
+      # training Jobs, reads pod logs and issues TokenReviews. Submitting work to
+      # the cluster is what this Deployment is for.
+      automountServiceAccountToken: true
       securityContext:
         runAsNonRoot: true
         # No fsGroup here (deliberately). On hostPath kubelet ignores it
