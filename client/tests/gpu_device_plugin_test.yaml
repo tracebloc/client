@@ -176,3 +176,34 @@ tests:
     asserts:
       - failedTemplate:
           errorMessage: 'gpu.devicePlugin.enabled is true but gpu.devicePlugin.vendor is ""; set it to "nvidia" or "amd"'
+
+  # Both vendors' DaemonSets name no ServiceAccount, so before backend#2345 they
+  # mounted kube-system's `default` token onto every GPU node. The upstream
+  # plugins talk to the kubelet over the device-plugin socket, never to the API
+  # server. Asserted per vendor because they are two separate pod specs in one
+  # file — a fix applied to one and not the other would otherwise pass.
+  - it: the NVIDIA DaemonSet refuses the default ServiceAccount token
+    set:
+      gpu:
+        devicePlugin:
+          enabled: true
+          vendor: nvidia
+    asserts:
+      - equal:
+          path: spec.template.spec.automountServiceAccountToken
+          value: false
+      - notExists:
+          path: spec.template.spec.serviceAccountName
+
+  - it: the AMD DaemonSet refuses the default ServiceAccount token
+    set:
+      gpu:
+        devicePlugin:
+          enabled: true
+          vendor: amd
+    asserts:
+      - equal:
+          path: spec.template.spec.automountServiceAccountToken
+          value: false
+      - notExists:
+          path: spec.template.spec.serviceAccountName

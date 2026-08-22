@@ -66,6 +66,12 @@ spec:
         app: {{ include "tracebloc.resourceMonitorName" . }}
     spec:
       serviceAccountName: {{ include "tracebloc.resourceMonitorName" . }}
+      # NEEDED. resource-monitor-rbac.yaml binds this SA to a ClusterRole over
+      # pods, nodes, nodes/status and metrics.k8s.io — polling those IS the job.
+      # Contrast telemetry-collector-daemonset.yaml, the other node-agents
+      # DaemonSet: it reads container stdout off the node filesystem, holds no
+      # Role at all, and therefore sets false.
+      automountServiceAccountToken: true
       securityContext:
         runAsNonRoot: true
         seccompProfile:
