@@ -171,6 +171,34 @@
       "carried": "none",
       "override": "cpu=4,memory=16Gi",
       "expect": { "size": "cpu=4,memory=16Gi", "provenance": "user", "undersized": false, "unschedulable": false }
+    },
+    {
+      "label": "cordoned-large-node-skipped",
+      "why": "backend#2237, the defect itself. The contract's skipped_nodes has always said `spec.unschedulable (cordoned)` is skipped, but NEITHER installer asked the API for the field, so neither could honour it -- and the golden generator pre-filtered cordoned nodes, so the contract's own one-cordoned-out vector never handed a cordoned node to the code under test. A cordoned 16c/64Gi node beside a live 4c/16Gi one took the anchor, and the installer wrote an envelope that cannot schedule: training pods sit Pending with no obvious cause. The live node must win.",
+      "nodes": "16 64Gi true;4 16Gi",
+      "carried": "none",
+      "expect": { "size": "cpu=3,memory=13Gi", "provenance": "installer", "undersized": false, "unschedulable": false }
+    },
+    {
+      "label": "cordoned-small-node-ignored",
+      "why": "the mirror of the row above, and the reason it is not enough on its own: a filter that always dropped the LARGEST node would satisfy cordoned-large-node-skipped while being completely wrong. Here the cordoned node is the small one, so the 16c/64Gi anchor must survive.",
+      "nodes": "16 64Gi;4 16Gi true",
+      "carried": "none",
+      "expect": { "size": "cpu=15,memory=61Gi", "provenance": "installer", "undersized": false, "unschedulable": false }
+    },
+    {
+      "label": "all-nodes-cordoned",
+      "why": "every node cordoned means the machine was never MEASURED, which is not the same as measured-and-too-small. It takes the unreadable-cluster branch and keeps the literal, exactly as all-nodes-unparseable does -- and critically it must NOT set the undersized/unschedulable warnings, which would tell an operator their hardware is too small when the real cause is a cordon they can undo.",
+      "nodes": "16 64Gi true;8 32Gi true",
+      "carried": "none",
+      "expect": { "size": "cpu=2,memory=8Gi", "provenance": "installer", "undersized": false, "unschedulable": false }
+    },
+    {
+      "label": "explicit-unschedulable-false-is-schedulable",
+      "why": "the third field's value domain, tested rather than assumed (backend#1729 rule 6). Kubernetes declares Unschedulable with `omitempty`, so in practice the field is either ABSENT or the literal `true` -- but both readers must key on `true`, never on non-emptiness, or an API server that ever serialises `false` would read as cordoned and the node would vanish from sizing. Cheap to pin, silent and total if wrong.",
+      "nodes": "8 32Gi false",
+      "carried": "none",
+      "expect": { "size": "cpu=7,memory=29Gi", "provenance": "installer", "undersized": false, "unschedulable": false }
     }
   ]
 }

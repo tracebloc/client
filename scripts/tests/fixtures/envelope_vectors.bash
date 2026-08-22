@@ -22,9 +22,23 @@ TB_ENVELOPE_VECTORS=(
 # Multi-node cases pin the ANCHOR_LARGEST selection rule — the part that
 # was never written down. Rows are:
 #   <label>|<node lines, newline-escaped as \n>|<expected output>
+#
+# A node line is the THREE whitespace-separated fields kubectl's jsonpath
+# emits: '<cpu> <memory> <spec.unschedulable>'. Unschedulable is omitempty,
+# so a schedulable node leaves the third field blank and its line carries a
+# TRAILING SPACE — that is faithful to the wire format, not an accident.
+#
+# Cordoned nodes are emitted, NOT pre-filtered (backend#2237). This
+# generator used to drop them here, which made the contract's whole
+# 'skipped_nodes: spec.unschedulable' rule untestable: the one-cordoned-out
+# row replayed as a single 4c/16Gi node, so the installer was never handed
+# a cordoned node and could not be caught ignoring one. It was ignoring one.
+# The golden must reproduce the CLUSTER, and let the code under test apply
+# the skip — a fixture that pre-applies the rule it means to check tests the
+# generator instead of the installer.
 TB_ENVELOPE_ANCHOR_VECTORS=(
-  "heterogeneous-incomparable|8 16Gi\n4 32Gi|cpu=7,memory=13Gi"
-  "server-plus-small-agent|16 64Gi\n2 8Gi|cpu=15,memory=61Gi"
-  "identical-pair|8 32Gi\n8 32Gi|cpu=7,memory=29Gi"
-  "one-cordoned-out|4 16Gi|cpu=3,memory=13Gi"
+  "heterogeneous-incomparable|8 16Gi \n4 32Gi |cpu=7,memory=13Gi"
+  "server-plus-small-agent|16 64Gi \n2 8Gi |cpu=15,memory=61Gi"
+  "identical-pair|8 32Gi \n8 32Gi |cpu=7,memory=29Gi"
+  "one-cordoned-out|16 64Gi true\n4 16Gi |cpu=3,memory=13Gi"
 )
