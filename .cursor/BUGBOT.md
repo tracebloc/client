@@ -140,8 +140,12 @@ for *what the operator sees and can act on*, not code elegance.
   the pipeline 141 and errexit kills the script. Size-dependent, which is why it survives
   review — measured, 50 lines exit 0 and 20k exit 141 (client#656, client#678). The house
   idiom is a here-string or capture-then-slice.
-  `scripts/tests/pipefail-early-close.sh` enforces this in CI, **including inside
-  `scripts/lib/*.sh`** (see the corollary below). Converting an instance is not always the
+  Enforced in CI by the **shared** gate — the `early-close` job in
+  `tracebloc/.github`'s `code-quality.yml`, on by default for every repo — **including
+  inside `scripts/lib/*.sh`** (see the corollary below). This repo carried the only copy
+  for a month; it was retired once the shared one reached `.github`'s `main`, because two
+  copies of a scanner is the drift this rule exists to prevent (backend#2264). Report a
+  false positive there, not here. Converting an instance is not always the
   fix: `scripts/lib/diagnose.sh:95-101` keeps its `df -h | head -20` on purpose, because
   `run_diagnose` opens with `set +e` so the 141 cannot fire, *and* `head` streams — capturing
   df in full would block the whole bundle on an unresponsive NFS mount. The guard reads
