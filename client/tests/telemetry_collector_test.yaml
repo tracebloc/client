@@ -775,3 +775,28 @@ tests:
           content:
             name: TELEMETRY_TOKEN_SECRET_NAMESPACE
             value: tracebloc-node-agents
+
+  # ── the Class A lists cannot silently shrink (backend#2341) ────────────────
+  # Bugbot High on the client#789 promotion. Its stated mechanism — a partial
+  # `telemetryCollector` map under `--reuse-values` — does NOT reproduce: helm
+  # coalesces chart defaults at render time, so an ABSENT key comes back. This
+  # test pins that, because it is the behaviour the finding assumed was broken
+  # and a change that really did break coalescing would be serious.
+  - it: fills the Class A lists from chart defaults when the map is partial
+    set:
+      telemetryCollector:
+        enabled: true
+    template: templates/telemetry-collector-configmap.yaml
+    asserts:
+      - matchRegex:
+          path: data["config.yaml"]
+          pattern: '/var/log/pods/tracebloc_[*]/api/[*][.]log'
+      - matchRegex:
+          path: data["config.yaml"]
+          pattern: '/var/log/pods/tracebloc_[*]/pods-monitor-container/[*][.]log'
+      - matchRegex:
+          path: data["config.yaml"]
+          pattern: '/var/log/pods/tracebloc_[*]/squid/[*][.]log'
+      - matchRegex:
+          path: data["config.yaml"]
+          pattern: '/var/log/pods/tracebloc-node-agents_edge-[*]/tracebloc-resource-monitor/[*][.]log'

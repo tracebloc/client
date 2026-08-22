@@ -127,4 +127,72 @@ PY
 
 render | python3 "$CMP"
 
+# ── the lists cannot silently shrink ─────────────────────────────────────────
+#
+#  backend#2341, Bugbot High on the client#789 promotion. A list set to null is
+#  DELETED by helm, and a deleted key does not coalesce back from values.yaml —
+#  so the include list shrinks with no error. `minItems: 1` in values.schema.json
+#  rejects an EMPTY list and says nothing about an absent one.
+#
+#  THE QUIET CASE IS ONE LIST, NOT BOTH. Nulling both empties the include, which
+#  filelog refuses on its own — loud. Nulling ONE leaves a valid config with a
+#  shorter list: the Collector starts, reports Ready, and silently omits three of
+#  the four Class A containers. Both are checked, but that is the one this exists
+#  for.
+#
+#  TWO LAYERS, BOTH EXERCISED. The schema rejects it first; the template `fail`
+#  is what survives `--skip-schema-validation`, so each is driven through the path
+#  that reaches it rather than assumed.
+echo
+echo "== Class A lists cannot silently shrink =="
+
+refuses() { # DESCRIPTION  EXPECT_IN_STDERR  EXTRA_ARGS...
+  local desc="$1" expect="$2"; shift 2
+  local out
+  if out="$(helm template t "$CHART" \
+      --set clientId=x --set clientPassword=y --set storageClass.create=false \
+      "$@" 2>&1 >/dev/null)"; then
+    echo "[ERROR] $desc: the render SUCCEEDED — a Collector that collects less than" >&2
+    echo "        it should must not render. This is the healthy-but-blind shape." >&2
+    return 1
+  fi
+  case "$out" in
+    *"$expect"*) printf '   ok    %s\n' "$desc" ;;
+    *) echo "[ERROR] $desc: refused, but not for the expected reason." >&2
+       echo "        wanted to see: $expect" >&2
+       echo "        got: $(printf '%s' "$out" | head -2)" >&2
+       return 1 ;;
+  esac
+}
+
+na_status=0
+# Schema layer: a null deletes the key, and `required` is what notices.
+refuses "schema rejects a null classAContainers" "missing property 'classAContainers'" \
+  --set-json 'telemetryCollector={"enabled":true,"classAContainers":null}' || na_status=1
+refuses "schema rejects a null classANodeAgentContainers" "missing property 'classANodeAgentContainers'" \
+  --set-json 'telemetryCollector={"enabled":true,"classANodeAgentContainers":null}' || na_status=1
+
+# Template layer: the same inputs with validation skipped must still refuse.
+refuses "template refuses a null classAContainers (schema skipped)" "classAContainers resolved to nothing" \
+  --skip-schema-validation --set-json 'telemetryCollector={"enabled":true,"classAContainers":null}' || na_status=1
+refuses "template refuses a null classANodeAgentContainers (schema skipped)" "classANodeAgentContainers resolved to nothing" \
+  --skip-schema-validation --set-json 'telemetryCollector={"enabled":true,"classANodeAgentContainers":null}' || na_status=1
+
+# And the control: the ordinary partial-map shape must still render everything,
+# because chart defaults coalesce. This is the mechanism the finding assumed was
+# broken; pinning it means a change that really did break coalescing is caught.
+partial="$(helm template t "$CHART" \
+  --set clientId=x --set clientPassword=y --set storageClass.create=false \
+  --set telemetryCollector.enabled=true 2>/dev/null | grep -c '  - "/var/log/pods/')"
+if [ "$partial" -ne 4 ]; then
+  echo "[ERROR] a partial telemetryCollector map rendered $partial include globs, want 4 —" >&2
+  echo "        chart defaults are no longer coalescing, which is the failure the" >&2
+  echo "        original finding described." >&2
+  na_status=1
+else
+  printf '   ok    a partial map still coalesces all 4 Class A globs\n'
+fi
+
+[ "$na_status" -eq 0 ] || exit 1
+
 echo "collector Class A agreement: green"

@@ -1321,6 +1321,10 @@
         "object",
         "null"
       ],
+      "required": [
+        "classAContainers",
+        "classANodeAgentContainers"
+      ],
       "description": "Edge telemetry Collector (RFC-BACKEND-1872 D6/D7, backend#1906). An OpenTelemetry Collector DaemonSet reading Class A container stdout and forwarding to the backend's ingest endpoint. Ships DISABLED: its exporter authenticates with a Secret jobs-manager writes (backend#2274), and enabling it first spools to every node's disk with nothing to deliver. `type` allows null so `--reuse-values` from a release predating this block validates.",
       "properties": {
         "enabled": {
