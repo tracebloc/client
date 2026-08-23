@@ -48,11 +48,10 @@
 #  Closing that needs one declaration both repos consume — filed separately. This
 #  guard shrinks the gap from "three copies, no checks" to "one cross-repo copy,
 #  with the behavioural floor pinned on this side".
-#  EVERY SECRET IN THIS FILE IS SYNTHETIC and carries a `gitleaks:allow`
-#  marker. That is not a scanner being silenced: a guard that proves redaction
-#  works has to contain secret-SHAPED strings, and gitleaks cannot tell a
-#  specimen from a leak. The markers are per-line and scoped to this file, so
-#  nothing is weakened anywhere else. None of these values exists anywhere.
+#  EVERY SECRET IN THIS FILE IS SYNTHETIC. A guard that proves redaction works
+#  has to contain secret-SHAPED strings, and gitleaks cannot tell a specimen
+#  from a leak — this path is allowlisted in `.gitleaks.toml`, which states the
+#  cost of that. None of these values exists anywhere.
 #
 set -euo pipefail
 
@@ -82,26 +81,26 @@ import yaml
 # intended way to discover that the Collector's patterns lag controller.py's.
 SPECIMENS = [
     ("proxy credentials in a URL",
-     "ERROR connecting to https://svc-account:hunter2@proxy.corp.example:3128/",  # gitleaks:allow — synthetic specimen, see header
-     "hunter2"),  # gitleaks:allow — synthetic specimen, see header
+     "ERROR connecting to https://svc-account:hunter2@proxy.corp.example:3128/",
+     "hunter2"),
     ("Azure ServiceBus shared access key",
-     "Endpoint=sb://x.servicebus.windows.net/;SharedAccessKeyName=send;SharedAccessKey=aB3xQ9vZ0kLmNp2R=;EntityPath=q",  # gitleaks:allow — synthetic specimen, see header
-     "aB3xQ9vZ0kLmNp2R="),  # gitleaks:allow — synthetic specimen, see header
+     "Endpoint=sb://x.servicebus.windows.net/;SharedAccessKeyName=send;SharedAccessKey=aB3xQ9vZ0kLmNp2R=;EntityPath=q",
+     "aB3xQ9vZ0kLmNp2R="),
     ("storage account key",
-     "DefaultEndpointsProtocol=https;AccountName=x;AccountKey=Zm9vYmFyYmF6cXV4MTIzNDU2Nzg5;EndpointSuffix=core",  # gitleaks:allow — synthetic specimen, see header
-     "Zm9vYmFyYmF6cXV4MTIzNDU2Nzg5"),  # gitleaks:allow — synthetic specimen, see header
+     "DefaultEndpointsProtocol=https;AccountName=x;AccountKey=Zm9vYmFyYmF6cXV4MTIzNDU2Nzg5;EndpointSuffix=core",
+     "Zm9vYmFyYmF6cXV4MTIzNDU2Nzg5"),
     ("authorization header",
-     "authorization: Basic dXNlcjpwYXNzd29yZA==",  # gitleaks:allow — synthetic specimen, see header
-     "dXNlcjpwYXNzd29yZA=="),  # gitleaks:allow — synthetic specimen, see header
+     "authorization: Basic dXNlcjpwYXNzd29yZA==",
+     "dXNlcjpwYXNzd29yZA=="),
     ("api-key header",
-     "x-api-key: 8f14e45fceea167a5a36dedd4bea2543",  # gitleaks:allow — synthetic specimen, see header
-     "8f14e45fceea167a5a36dedd4bea2543"),  # gitleaks:allow — synthetic specimen, see header
+     "x-api-key: 8f14e45fceea167a5a36dedd4bea2543",
+     "8f14e45fceea167a5a36dedd4bea2543"),
     ("bearer credential",
-     "Retrying with Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9",  # gitleaks:allow — synthetic specimen, see header
-     "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9"),  # gitleaks:allow — synthetic specimen, see header
+     "Retrying with Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9",
+     "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9"),
     ("DRF token",
      'headers={"X-Auth": "Token 9c8b7a6d5e4f3a2b1c0d9e8f"}',
-     "9c8b7a6d5e4f3a2b1c0d9e8f"),  # gitleaks:allow — synthetic specimen, see header
+     "9c8b7a6d5e4f3a2b1c0d9e8f"),
     # THE ENVIRONMENT-VARIABLE SHAPES. Every one of these leaked before this
     # guard existed: the generic pattern anchored its keyword with `\\b` on both
     # sides, and `_` is a word character, so a prefix or suffix removed the
@@ -109,26 +108,26 @@ SPECIMENS = [
     # spellings — backend#2069 deliberately logs WHICH `AZURE_*` variable is
     # unset when edge-device provisioning fails.
     ("client_secret as an env var",
-     "AZURE_CLIENT_SECRET=Qz~8Kd0-vN9pLr2sTuVw",  # gitleaks:allow — synthetic specimen, see header
-     "Qz~8Kd0-vN9pLr2sTuVw"),  # gitleaks:allow — synthetic specimen, see header
+     "AZURE_CLIENT_SECRET=Qz~8Kd0-vN9pLr2sTuVw",
+     "Qz~8Kd0-vN9pLr2sTuVw"),
     ("password as an env var",
-     "MYSQL_PASSWORD=hunter2-not-real",  # gitleaks:allow — synthetic specimen, see header
-     "hunter2-not-real"),  # gitleaks:allow — synthetic specimen, see header
+     "MYSQL_PASSWORD=hunter2-not-real",
+     "hunter2-not-real"),
     ("secret with a suffix",
-     "DJANGO_SECRET_KEY=abc123def456",  # gitleaks:allow — synthetic specimen, see header
-     "abc123def456"),  # gitleaks:allow — synthetic specimen, see header
+     "DJANGO_SECRET_KEY=abc123def456",
+     "abc123def456"),
     ("aws secret access key",
-     "AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMIK7MDENGbPxRfiCYEXAMPLEKEY",  # gitleaks:allow — synthetic specimen, see header
-     "wJalrXUtnFEMIK7MDENGbPxRfiCYEXAMPLEKEY"),  # gitleaks:allow — synthetic specimen, see header
+     "AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMIK7MDENGbPxRfiCYEXAMPLEKEY",
+     "wJalrXUtnFEMIK7MDENGbPxRfiCYEXAMPLEKEY"),
     ("quoted secret value",
-     "SECRET_KEY='x9y8z7w6v5'",  # gitleaks:allow — synthetic specimen, see header
-     "x9y8z7w6v5"),  # gitleaks:allow — synthetic specimen, see header
+     "SECRET_KEY='x9y8z7w6v5'",
+     "x9y8z7w6v5"),
     ("password assignment",
-     "psql: FATAL password=s3cr3t-p4ss for user tracebloc",  # gitleaks:allow — synthetic specimen, see header
-     "s3cr3t-p4ss"),  # gitleaks:allow — synthetic specimen, see header
+     "psql: FATAL password=s3cr3t-p4ss for user tracebloc",
+     "s3cr3t-p4ss"),
     ("aws access key id",
-     "botocore.exceptions: credential AKIAIOSFODNN7EXAMPLE rejected",  # gitleaks:allow — synthetic specimen, see header
-     "AKIAIOSFODNN7EXAMPLE"),  # gitleaks:allow — synthetic specimen, see header
+     "botocore.exceptions: credential AKIAIOSFODNN7EXAMPLE rejected",
+     "AKIAIOSFODNN7EXAMPLE"),
 ]
 
 # The count floor. Raise it deliberately when a pattern is added; a DROP is what
@@ -201,18 +200,18 @@ for p in patterns:
 # widened to catch more secrets can quietly start swallowing the diagnosis, and
 # nothing here would have noticed. These lines must come through untouched.
 DIAGNOSIS = [
-    "experiment=e0qaz0zi cycle=3 epoch=7",  # gitleaks:allow — synthetic specimen, see header
-    "status: COMPLETED",  # gitleaks:allow — synthetic specimen, see header
-    "Traceback (most recent call last):",  # gitleaks:allow — synthetic specimen, see header
-    "connection refused to 10.0.0.5:5432",  # gitleaks:allow — synthetic specimen, see header
-    "level=ERROR msg=training failed",  # gitleaks:allow — synthetic specimen, see header
-    "epoch=3 loss=0.412 accuracy=0.88",  # gitleaks:allow — synthetic specimen, see header
+    "experiment=e0qaz0zi cycle=3 epoch=7",
+    "status: COMPLETED",
+    "Traceback (most recent call last):",
+    "connection refused to 10.0.0.5:5432",
+    "level=ERROR msg=training failed",
+    "epoch=3 loss=0.412 accuracy=0.88",
     # The key NAME is not a secret and controller.py keeps it on purpose — its
     # own comment says so, and `test_scrubs_servicebus_key_but_keeps_key_name`
     # pins it. Added here because an earlier draft of the widened pattern DID
     # eat it and this guard said green: the specimen list was the gap, not the
     # mechanism. The secret half of the same line is covered above.
-    "Endpoint=sb://x/;SharedAccessKeyName=RootManageSharedAccessKey;EntityPath=q",  # gitleaks:allow — synthetic specimen, see header
+    "Endpoint=sb://x/;SharedAccessKeyName=RootManageSharedAccessKey;EntityPath=q",
 ]
 
 uncovered = []
