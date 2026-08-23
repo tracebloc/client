@@ -129,7 +129,20 @@ tests:
   # ── the redaction floor (D6 precondition 2) ──────────────────────────────
   # Reading stdout through filelog BYPASSES controller.py's app-side handler, so
   # without these the move would silently REMOVE a protection that exists today.
-  - it: carries all six of controller.py's secret patterns
+  # RENAMED, because the old title — "carries all six of controller.py's secret
+  # patterns" — asserted something this mechanism cannot see. It greps the
+  # rendered config for six substrings it holds ITSELF; controller.py is in
+  # another repository and is never read. So it agreed with itself and reported
+  # that as agreement with a file it has no access to, and a seventh redaction
+  # added over there would leave every assertion below green (backend#1729
+  # rules 1 and 9).
+  #
+  # What it does check is still worth keeping: each pattern is present in the
+  # rendered config at all. The FLOOR — that these patterns actually scrub real
+  # secrets, and do not scrub the diagnosis — is proven behaviourally in
+  # scripts/tests/collector-redaction-floor.sh, which derives the regexes from
+  # the render and feeds them specimens.
+  - it: names all six redaction families in the rendered config
     set:
       telemetryCollector.enabled: true
     template: templates/telemetry-collector-configmap.yaml
