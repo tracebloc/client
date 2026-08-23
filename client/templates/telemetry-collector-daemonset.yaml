@@ -1,0 +1,232 @@
+{{- /*
+  THE GATE IS READ DEFENSIVELY, and that is not style — it is the difference
+  between this chart upgrading and refusing to.
+
+  `helm upgrade --reuse-values` replays the values STORED WITH THE PREVIOUS
+  RELEASE and does NOT merge values.yaml defaults. Every release made before this
+  block existed has no `telemetryCollector` key at all, so a bare
+  `.Values.telemetryCollector.enabled` is a nil-pointer dereference and the
+  UPGRADE FAILS — not the feature, the whole release. Caught by the Fleet
+  auto-upgrade E2E, which upgrades from the last published chart exactly this way.
+
+  Same idiom and same reason as `images.resourceMonitor` in
+  resource-monitor-daemonset.yaml: a nested `default dict` tolerates the map being
+  absent. `dig` is not usable here — it rejects chartutil.Values.
+
+  An old release upgrading this way therefore gets NO Collector, which is the
+  right answer twice over: it matches `enabled: false`, and a feature must never
+  arrive on a cluster by way of a values map the operator never saw.
+*/}}
+{{- $tc := default (dict) .Values.telemetryCollector -}}
+{{- if $tc.enabled }}
+{{- /*
+  The edge Collector — RFC-BACKEND-1872 D6/D7, backend#1906.
+
+  A DaemonSet because container stdout is written per NODE by the kubelet
+  (/var/log/pods), so reading it is a per-node job. A Deployment would see only
+  the node it happened to land on and would report healthy while collecting a
+  fraction of the fleet — the shape of silence this epic exists to remove.
+
+  CLASS A ONLY (D12). The receiver's include globs name the control-plane
+  containers this chart owns. Training and ingestion pods are Class B and stay out
+  until backend#1908 lands content redaction; the bounding that exists today is
+  SECRET redaction, not CONTENT redaction, and raw customer cell values have
+  already reached central telemetry once (backend#1879).
+*/}}
+{{/*
+  Pre-flight: the token Secret must exist before this DaemonSet does.
+
+  `optional: true` on the volume stops the kubelet failing the MOUNT — it does not
+  make the file appear, and `bearertokenauth` needs `filename` to resolve. Whether
+  a missing file aborts the extension's Start is version-dependent and lives in
+  core's `credentialsfile.ValueResolver`, not in the extension: I could not
+  establish it for 0.159.0 from either that tag or `main`. (Bugbot on #779 asserts
+  it aborts.)
+
+  So this does not BET on the answer. Same `lookup` idiom as resource-monitor's
+  metrics-server probe: empty during `helm template` (no cluster access), so
+  offline rendering is unblocked; on a real install where lookup can see the
+  cluster, a missing Secret refuses the release with a message naming it. Either
+  upstream behaviour is then acceptable, because the case cannot be reached —
+  which is a better answer than reading the source correctly and depending on it.
+
+  Refusing the RELEASE rather than crashlooping every node is also the right
+  direction for a fail-soft component: telemetry may never be the reason a node
+  looks unhealthy, and "the install said no, here is the Secret it wants" is
+  actionable in a way that CrashLoopBackOff on 200 nodes is not.
+*/}}
+{{- $probe := lookup "v1" "Namespace" "" "kube-system" -}}
+{{- if $probe -}}
+{{- $tokenNs := .Values.nodeAgents.namespace.name -}}
+{{- $tokenName := (default (dict) $tc.tokenSecret).name | default "tracebloc-telemetry-token" -}}
+{{- if not (lookup "v1" "Secret" $tokenNs $tokenName) -}}
+{{- fail (printf "telemetryCollector.enabled is true but Secret %q does not exist in namespace %q. The Collector's exporter authenticates with it, and jobs-manager writes it (backend#2274). Create it, or set telemetryCollector.enabled: false — enabling without it buys a DaemonSet that spools to every node's disk and delivers nothing." $tokenName $tokenNs) -}}
+{{- end -}}
+{{- end }}
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: {{ include "tracebloc.telemetryCollectorName" . }}
+  namespace: {{ .Values.nodeAgents.namespace.name }}
+  annotations:
+    meta.helm.sh/release-name: {{ .Release.Name }}
+    meta.helm.sh/release-namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "tracebloc.labels" . | nindent 4 }}
+    app: {{ include "tracebloc.telemetryCollectorName" . }}
+spec:
+  selector:
+    matchLabels:
+      app: {{ include "tracebloc.telemetryCollectorName" . }}
+  updateStrategy:
+    type: RollingUpdate
+    rollingUpdate:
+      # Same 10% as resource-monitor and for the same reason: rollout time should
+      # scale with the cluster rather than with node COUNT. Safe here because a
+      # node briefly without a Collector buffers nothing and loses nothing that
+      # kubelet rotation would not have taken anyway — no training pod, ingest Job
+      # or control-plane request depends on it being present.
+      maxUnavailable: "10%"
+  template:
+    metadata:
+      labels:
+        app: {{ include "tracebloc.telemetryCollectorName" . }}
+      annotations:
+        # Roll the pods when the pipeline changes. Without this a `helm upgrade`
+        # that edits the config leaves every node running the old one, and the
+        # Collector reports healthy the whole time.
+        checksum/config: {{ include (print $.Template.BasePath "/telemetry-collector-configmap.yaml") . | sha256sum }}
+    spec:
+      serviceAccountName: {{ include "tracebloc.telemetryCollectorName" . }}
+      # The ServiceAccount above is pod IDENTITY ONLY — it is the SCC binding
+      # subject on OpenShift, and telemetry-collector-rbac.yaml deliberately
+      # gives it no Role and no ClusterRole. The Collector reads container
+      # stdout off the node filesystem and ships it over HTTP; it never calls
+      # the Kubernetes API. The ingest token it DOES need is the projected
+      # Secret at /etc/tracebloc/telemetry, not this one.
+      #
+      # Stated rather than left to the default, because this is a DaemonSet:
+      # the default mounts a credential nothing reads onto every node of a
+      # customer's cluster, and a reader of the template cannot tell whether
+      # that was chosen or inherited.
+      automountServiceAccountToken: false
+      securityContext:
+        # ROOT, SELECTED EXPLICITLY — `runAsNonRoot: false` only PERMITS root, it
+        # does not choose it, and that distinction was a live defect (Bugbot on
+        # #779). The pinned image declares `USER 10001` (upstream
+        # otelcol-contrib Dockerfile: `ARG USER_UID=10001`), while the kubelet
+        # creates a `DirectoryOrCreate` hostPath root-owned 0755. UID 10001 could
+        # not write `/var/lib/tracebloc/<release>/telemetry`, so D7's disk-backed
+        # queue — the whole point of `file_storage` — would have failed the moment
+        # the Collector was enabled.
+        #
+        # Root rather than an init-container chown, for a reason beyond one fewer
+        # container: the READ side needs it too. Container log files under
+        # /var/log/pods are root-owned and not world-readable on every runtime, so
+        # a non-root collector may not be able to read the logs it exists to read.
+        # Every node-level collector already on these clusters — fluent-bit and the
+        # cloudwatch-agent — runs as root for the same reason.
+        #
+        # It is a NARROW root, and that is the trade being made rather than
+        # glossed: all capabilities dropped, no privilege escalation, read-only
+        # root filesystem, and the only writable paths are the queue and /tmp.
+        runAsUser: 0
+        runAsNonRoot: false
+        seccompProfile:
+          type: RuntimeDefault
+      tolerations:
+        - operator: "Exists"
+      containers:
+        - name: otel-collector
+          {{- $tcImage := default (dict) $tc.image }}
+          {{- $tcDigest := $tcImage.digest | default "" }}
+          {{- /*
+            REGISTRY PRECEDENCE, matching squid and #585: the global mirror wins,
+            then the per-image registry, then docker.io. Passing
+            `$tcImage.registry` alone ignored `global.imageRegistry` entirely, so
+            on a mirrored or air-gapped fleet enabling the Collector would
+            ImagePullBackOff while every other image pulled from the mirror.
+            `| default` on the dig because the chart default for global.imageRegistry
+            is an empty string, which is not absent. (Bugbot on #779.)
+          */}}
+          image: {{ include "tracebloc.image" (dict "repository" $tcImage.repository "tag" $tcImage.tag "digest" $tcDigest "registry" ((dig "imageRegistry" "" (.Values.global | default dict)) | default ($tcImage.registry | default "docker.io"))) | quote }}
+          imagePullPolicy: IfNotPresent
+          args: ["--config=/conf/config.yaml"]
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+            # READ-ONLY ROOT, with the two writable paths mounted explicitly: the
+            # file_storage queue and /tmp. A Collector that can write anywhere on a
+            # customer's node is a larger footprint than this job needs.
+            readOnlyRootFilesystem: true
+          env:
+            # Corporate egress proxy (client-runtime#154). The exporter is Go and
+            # honours HTTPS_PROXY/NO_PROXY ambiently, so the CONNECT tunnel the
+            # egress proxy already permits to the backend is the path this takes.
+            # Renders nothing when HTTP_PROXY_HOST is unset.
+            {{- include "tracebloc.proxyEnv" . | nindent 12 }}
+          volumeMounts:
+            - name: config
+              mountPath: /conf
+              readOnly: true
+            - name: token
+              mountPath: /etc/tracebloc/telemetry
+              readOnly: true
+            # The node's container stdout. READ-ONLY — the Collector must never be
+            # able to modify or truncate the logs it reads.
+            - name: host-logs
+              mountPath: {{ $tc.hostLogsPath | default "/var/log/pods" }}
+              readOnly: true
+            - name: queue
+              mountPath: /var/lib/tracebloc/telemetry
+            - name: tmp
+              mountPath: /tmp
+          resources:
+            {{- toYaml $tc.resources | nindent 12 }}
+      volumes:
+        - name: config
+          configMap:
+            name: {{ include "tracebloc.telemetryCollectorName" . }}
+        - name: token
+          secret:
+            secretName: {{ (default (dict) $tc.tokenSecret).name | default "tracebloc-telemetry-token" }}
+            # OPTIONAL, and this is the difference between "buffers until the token
+            # arrives" and "CrashLoopBackOff on every node". jobs-manager writes
+            # this Secret; a Collector deployed before it exists must wait, not
+            # fail — telemetry may never be the reason a node looks unhealthy.
+            optional: true
+        - name: host-logs
+          hostPath:
+            path: {{ $tc.hostLogsPath | default "/var/log/pods" }}
+            # `Directory`, NOT `DirectoryOrCreate`, and the asymmetry with the queue
+            # below is the point. This path is the KUBELET'S — we read it, we do not
+            # own it. With `DirectoryOrCreate` a wrong or missing `hostLogsPath` made
+            # the kubelet helpfully create an empty directory, and the Collector then
+            # started, reported healthy, and matched no files forever: the same
+            # silent blindness the Class A glob guard exists to prevent, arriving by
+            # a different route. `Directory` fails the pod instead, which is the
+            # correct direction for a path we expect to already exist —
+            # resource-monitor's /proc and /sys mounts have always used it.
+            # (Bugbot on #779.)
+            type: Directory
+        - name: queue
+          # hostPath, per D7: the queue must survive the pod restart that is the
+          # common case during a backend outage, and an emptyDir does not. D7 also
+          # decides the bound is a DISK ALARM rather than a volume limit, because
+          # PV `capacity` enforces nothing on hostPath — so the byte cap in the
+          # exporter config is the thing doing the bounding.
+          hostPath:
+            path: /var/lib/tracebloc/{{ .Release.Name }}/telemetry
+            # `DirectoryOrCreate` here, deliberately unlike host-logs above: this
+            # path is OURS and will not exist on a node's first install, so
+            # `Directory` would refuse to start the Collector on every fresh node.
+            type: DirectoryOrCreate
+        - name: tmp
+          emptyDir: {}
+      terminationGracePeriodSeconds: 30
+      {{- if include "tracebloc.useImagePullSecrets" . }}
+      imagePullSecrets:
+        - name: {{ include "tracebloc.registrySecretName" . }}
+      {{- end }}
+{{- end }}

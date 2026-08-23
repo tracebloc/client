@@ -170,7 +170,7 @@ roleRef:
   kind: ClusterRole
   name: {{ include "tracebloc.autoUpgradeName" . }}
   apiGroup: rbac.authorization.k8s.io
-{{- if and (ne .Values.resourceMonitor false) (ne .Values.nodeAgents.namespace.name .Release.Namespace) }}
+{{- if and (include "tracebloc.nodeAgentsInUse" .) (ne .Values.nodeAgents.namespace.name .Release.Namespace) }}
 {{/*
   backend#953 (Bugbot): when node-agents run in their OWN namespace (the
   default `tracebloc-node-agents`), the chart also templates namespaced objects

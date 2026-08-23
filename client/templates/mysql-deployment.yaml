@@ -18,6 +18,10 @@ spec:
       labels:
         app: mysql-client
     spec:
+      # NOT NEEDED, and no ServiceAccount is named — so without this the pod would
+      # mount the namespace's `default` SA token. A database and two busybox init
+      # containers make no Kubernetes API calls.
+      automountServiceAccountToken: false
       terminationGracePeriodSeconds: 60
       {{- /*
         Reference the PriorityClass whenever a name is set, regardless of
