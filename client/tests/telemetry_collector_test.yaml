@@ -320,6 +320,22 @@ tests:
           path: kind
           value: ServiceAccount
 
+  # The same claim, asserted from the POD side. The Role/ClusterRole assertion
+  # above says the SA may not call the API; this one says the token is not handed
+  # to the container in the first place. Without it the DaemonSet can drop back to
+  # the Kubernetes default of `true` — mounting an unused credential on every node
+  # of a customer's cluster — and nothing in the suite would notice, because a
+  # value that is absent renders as no key rather than as a failure. (Bugbot
+  # Medium on #789, backend#2344.)
+  - it: does not automount the service account token
+    set:
+      telemetryCollector.enabled: true
+    template: templates/telemetry-collector-daemonset.yaml
+    asserts:
+      - equal:
+          path: spec.template.spec.automountServiceAccountToken
+          value: false
+
   # ── the image has a feature floor ────────────────────────────────────────
   # The first version pinned 0.109.0, which predates `block_on_overflow`
   # (upstream 2025-03, ~0.122+) and `sizer: bytes` on a persistent queue (~0.130).

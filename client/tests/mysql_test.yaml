@@ -357,3 +357,17 @@ tests:
       - equal:
           path: spec.template.spec.initContainers[0].image
           value: mirror.corp.example/library/busybox:1.35
+
+  # Names no ServiceAccount, so before backend#2345 it mounted the NAMESPACE'S
+  # `default` SA token — a credential a database and two busybox init containers
+  # never call the API with. The drift guard proves the key is STATED; only this
+  # pins which way, because nothing in the chart's RBAC would contradict a flip
+  # back to `true` on a pod spec that has no ServiceAccount to bind.
+  - it: refuses the default ServiceAccount token
+    template: templates/mysql-deployment.yaml
+    asserts:
+      - equal:
+          path: spec.template.spec.automountServiceAccountToken
+          value: false
+      - notExists:
+          path: spec.template.spec.serviceAccountName

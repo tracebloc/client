@@ -642,6 +642,9 @@ spec:
             app.kubernetes.io/component: image-refresh
         spec:
           serviceAccountName: {{ include "tracebloc.imageRefreshName" . }}
+          # NEEDED. image-refresh-rbac.yaml binds this SA to Roles that patch
+          # Deployments and DaemonSets — the rollout it exists to trigger.
+          automountServiceAccountToken: true
           restartPolicy: OnFailure
           {{- if include "tracebloc.useImagePullSecrets" . }}
           imagePullSecrets:

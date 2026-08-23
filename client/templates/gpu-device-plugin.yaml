@@ -83,6 +83,11 @@ spec:
              same reason — client#564 / Bugbot). */ -}}
         {{- include "tracebloc.selectorLabels" . | nindent 8 }}
     spec:
+      # NOT NEEDED, and no ServiceAccount is named — so without this the pod
+      # would mount the namespace's `default` SA token. The upstream device
+      # plugin talks to the kubelet over the device-plugin socket mounted
+      # below, never to the API server.
+      automountServiceAccountToken: false
       tolerations:
         - key: nvidia.com/gpu
           operator: Exists
@@ -138,6 +143,11 @@ spec:
              (client#564 / Bugbot). */ -}}
         {{- include "tracebloc.selectorLabels" . | nindent 8 }}
     spec:
+      # NOT NEEDED, and no ServiceAccount is named — so without this the pod
+      # would mount the namespace's `default` SA token. The upstream device
+      # plugin talks to the kubelet over the device-plugin socket mounted
+      # below, never to the API server.
+      automountServiceAccountToken: false
       restartPolicy: Always
       nodeSelector:
         kubernetes.io/arch: amd64
