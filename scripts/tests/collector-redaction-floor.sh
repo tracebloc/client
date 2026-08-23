@@ -201,6 +201,12 @@ DIAGNOSIS = [
     "connection refused to 10.0.0.5:5432",
     "level=ERROR msg=training failed",
     "epoch=3 loss=0.412 accuracy=0.88",
+    # The key NAME is not a secret and controller.py keeps it on purpose — its
+    # own comment says so, and `test_scrubs_servicebus_key_but_keeps_key_name`
+    # pins it. Added here because an earlier draft of the widened pattern DID
+    # eat it and this guard said green: the specimen list was the gap, not the
+    # mechanism. The secret half of the same line is covered above.
+    "Endpoint=sb://x/;SharedAccessKeyName=RootManageSharedAccessKey;EntityPath=q",
 ]
 
 uncovered = []
