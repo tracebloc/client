@@ -56,10 +56,35 @@ tests:
           path: metadata.name
           value: stg-auto-upgrade-node-agents
 
-  - it: rbac omits the node-agents Role/RoleBinding when resource-monitor is disabled (nothing to reconcile there)
+  # WAS "omits the node-agents Role/RoleBinding when resource-monitor is disabled
+  # (nothing to reconcile there)" (backend#2400, Bugbot on #801). The parenthetical
+  # was the whole justification and it stopped being true: the Collector's token
+  # Role and RoleBinding render into that namespace with no flag, so there IS
+  # something to reconcile with every tenant off — and without the pair the next
+  # `helm upgrade --atomic --wait` tick 403s and rolls back, permanently, on any
+  # edge running `resourceMonitor: false`.
+  #
+  # auto-upgrade re-applies the WHOLE chart, so its reach follows "does the chart
+  # put anything there", not "does a pod run there".
+  - it: rbac keeps the node-agents Role/RoleBinding when resource-monitor is disabled
     template: templates/auto-upgrade-rbac.yaml
     set:
       resourceMonitor: false
+      telemetryCollector:
+        enabled: false
+    asserts:
+      - hasDocuments:
+          count: 7
+
+  # The condition that does still bite: coinciding namespaces, where the
+  # release-namespace Role above already covers everything.
+  - it: rbac omits the node-agents Role/RoleBinding when node-agents IS the release namespace
+    template: templates/auto-upgrade-rbac.yaml
+    set:
+      resourceMonitor: false
+      nodeAgents:
+        namespace:
+          name: tracebloc
     asserts:
       - hasDocuments:
           count: 5
