@@ -203,7 +203,26 @@ data:
               # Bearer / DRF Token credentials wherever they appear.
               - replace_pattern(body, "(?i)\\b(bearer|token)\\b([\\s:=]+)[A-Za-z0-9._\\-]{12,}", "$1$2***REDACTED***")
               # Generic secret-bearing assignments.
-              - replace_pattern(body, "(?i)\\b(password|passwd|pwd|secret|api[_-]?key|access[_-]?key|client[_-]?secret)\\b(\\s*[:=]\\s*)[^\\s\"',;]+", "$1$2***REDACTED***")
+              #
+              # THE NAME MAY CARRY A PREFIX AND A SUFFIX, and that is what the
+              # [\\w.-]* on both sides is for. The earlier form anchored the
+              # keyword with \\b on each side, so it caught a BARE password= and
+              # missed every environment-variable spelling -- AZURE_CLIENT_SECRET=,
+              # MYSQL_PASSWORD=, DJANGO_SECRET_KEY=, AWS_SECRET_ACCESS_KEY= --
+              # because _ is a word character, so there is no boundary between the
+              # prefix and the keyword. Those are the shapes our logs actually
+              # print: backend#2069 deliberately names which AZURE_* variable is
+              # unset when provisioning fails.
+              #
+              # The optional opening quote matters for the same reason: without it
+              # SECRET_KEY='x9y8z7' fell out entirely, because the value class
+              # excludes quotes and so matched nothing after the =.
+              #
+              # Over-redaction is acceptable and is the stated trade in
+              # controller.py's own comment. Bounded by diagnosis specimens in
+              # scripts/tests/collector-redaction-floor.sh, so the widening does
+              # not start eating epoch=, status: or a traceback.
+              - replace_pattern(body, "(?i)\\b([\\w.-]*(?:password|passwd|pwd|secret|api[_-]?key|access[_-]?key|client[_-]?secret)[\\w.-]*)(\\s*[:=]\\s*)[\"']?[^\\s\"',;]+", "$1$2***REDACTED***")
               # AWS access key IDs.
               - replace_pattern(body, "\\bAKIA[0-9A-Z]{16}\\b", "***REDACTED***")
 
