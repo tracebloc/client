@@ -481,7 +481,7 @@
     },
     "bootstrapDbPassword": {
       "type": "string",
-      "description": "backend#1528 S3: REQUIRED when bootstrapDbReparent resolves on — the password jobs-manager authenticates with as MySQL root to run the mint DDL. NO generated default (2-tier: operator pin -> existing Secret value -> Helm fails): jobs-manager authenticates as root and never runs ALTER USER root, so a random value would lock the minter out and CrashLoop it. Set to the real root password (Edg9@Tr@ce on an unrotated mysql-client image, or the rotated value per backend#947). NOT constrained to alphanumeric — never interpolated into DDL, only a connection parameter."
+      "description": "backend#1528 S3: REQUIRED when bootstrapDbReparent resolves on — the password jobs-manager authenticates with as MySQL root to run the mint DDL. NO generated default (2-tier: operator pin -> existing Secret value -> Helm fails): jobs-manager authenticates as root and never runs ALTER USER root, so a random value would lock the minter out and CrashLoop it. Set to the mysql-client image's baked root password (see backend#947 for the value and its rotated replacement). NOT constrained to alphanumeric — never interpolated into DDL, only a connection parameter."
     },
     "perIngestionTables": {
       "type": "boolean",
