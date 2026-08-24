@@ -144,6 +144,24 @@ seed_release_data() { mkdir -p "$HOST_DATA_DIR/tracebloc/data/ds1"; : >"$HOST_DA
   [[ "$output" != *"can't adopt"* ]] || return 1
 }
 
+# client#456 Bugbot (Medium): the leading warning must not contradict itself.
+# Under node-local (the default) a fresh install does NOT adopt host data, so the
+# hostpath "would silently adopt it" lead must not appear; hostpath still gets it.
+@test "guard: node-local does NOT lead with the hostpath 'silently adopt' claim" {
+  seed_flat_mysql
+  TB_STORAGE_MODE=node-local TB_LEFTOVER_ACTION=reuse run guard_leftover_data
+  [ "$status" -eq 0 ] || return 1
+  [[ "$output" != *"silently adopt"* ]] || return 1          # no false adopt claim
+  [[ "$output" == *"does NOT adopt"* ]] || return 1          # accurate for node-local
+}
+
+@test "guard: hostpath DOES lead with the 'silently adopt' warning (unchanged)" {
+  seed_flat_mysql
+  TB_STORAGE_MODE=hostpath TB_LEFTOVER_ACTION=reuse run guard_leftover_data
+  [ "$status" -eq 0 ] || return 1
+  [[ "$output" == *"silently adopt"* ]] || return 1
+}
+
 # The node-local prompt shows "[r] keep …" — the parser must accept the shown
 # word (keep/k) as well as r/reuse (any case), or the user aborts unexpectedly
 # instead of keeping-and-continuing (Bugbot r3655253296).

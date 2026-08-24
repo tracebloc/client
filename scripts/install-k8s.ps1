@@ -3047,8 +3047,9 @@ function Set-DailyUserProvisioning {
 #  guard_leftover_data (scripts/lib/cluster.sh). A NEW install must never
 #  silently adopt data an earlier install left under HOST_DATA_DIR. Windows is
 #  hostpath-only (New-K3dCluster always bind-mounts HOST_DATA_DIR -> /tracebloc);
-#  node-local (RFC-0003 Option C) is a Linux/k3s prototype with no Windows path,
-#  so this is intentionally scoped to hostpath. Non-interactive knobs mirror the
+#  node-local (RFC-0003 Option C) is the Linux/k3s default since the D15 flip
+#  (client#456) but still has no Windows path, so this is intentionally scoped to
+#  hostpath. Non-interactive knobs mirror the
 #  bash env contract: $env:TB_LEFTOVER_ACTION (reuse|wipe), $env:HOST_DATA_DIR
 #  (a different dir), $env:TRACEBLOC_SKIP_LEFTOVER_GUARD (bypass).
 # =============================================================================
@@ -3824,12 +3825,12 @@ function New-K3dCluster {
     #
     # local-storage is disabled UNCONDITIONALLY here, where cluster.sh gates it on
     # TB_STORAGE_MODE. That is correct only because Windows is hostpath-only:
-    # node-local (RFC-0003 Option C) is a Linux/k3s prototype with no Windows
-    # path, the same reason Invoke-LeftoverDataGuard above is hostpath-scoped --
-    # and the same reason Assert-NodesSeeHostData runs unconditionally at the end
-    # of New-K3dCluster, where the bash twin gates it on TB_STORAGE_MODE (a
-    # node-local cluster has NO host mount, so probing one there would refuse
-    # every install). If
+    # node-local (RFC-0003 Option C) is the Linux/k3s default since the D15 flip
+    # (client#456) but has no Windows path, the same reason Invoke-LeftoverDataGuard
+    # above is hostpath-scoped -- and the same reason Assert-NodesSeeHostData runs
+    # unconditionally at the end of New-K3dCluster, where the bash twin gates it on
+    # TB_STORAGE_MODE (a node-local cluster has NO host mount, so probing one there
+    # would refuse every install). If
     # you add a Windows node-local path, this flag has to become conditional too
     # or every dataset PVC stays Pending against a StorageClass that does not
     # exist. scripts/tests/k3s-components-agreement.sh trips the moment this file

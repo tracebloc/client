@@ -210,7 +210,7 @@ print_summary() {
       # Data location depends on the storage model: hostpath binds /tracebloc on
       # the host; node-local (RFC-0003 Option C) keeps datasets inside the node on
       # k3s local-path, so there is no host /tracebloc to point the user at.
-      if [[ "${TB_STORAGE_MODE:-hostpath}" == "node-local" ]]; then
+      if [[ "${TB_STORAGE_MODE:-node-local}" == "node-local" ]]; then
         echo -e "  ${DIM}Logs ${logdisp}  ·  Data in-node (k3s local-path)${RESET}"
       else
         echo -e "  ${DIM}Logs ${logdisp}  ·  Data /tracebloc/${ns}${RESET}"

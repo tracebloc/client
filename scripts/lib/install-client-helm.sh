@@ -1066,7 +1066,7 @@ _reconcile_adopted_client() {
   [[ -n "$_uuid" ]] && _args+=(--set "clientId=$_uuid")
 
   # node-local (RFC-0003 Option C) has no hostPath dirs to pre-create.
-  [[ "${TB_STORAGE_MODE:-hostpath}" != "node-local" ]] && _ensure_release_dirs "$_ns"
+  [[ "${TB_STORAGE_MODE:-node-local}" != "node-local" ]] && _ensure_release_dirs "$_ns"
 
   # #554: clear any pending-* wedge left by a previously killed helm op before we
   # upgrade — otherwise this reconcile just fails with "another operation is in
@@ -1564,7 +1564,7 @@ install_client_helm() {
   # node-local (RFC-0003 Option C): data lives inside the node, so skip the
   # world-writable ~/.tracebloc/{data,logs,mysql} dirs; just ensure the base dir
   # exists for values.yaml + the install log.
-  if [[ "${TB_STORAGE_MODE:-hostpath}" == "node-local" ]]; then
+  if [[ "${TB_STORAGE_MODE:-node-local}" == "node-local" ]]; then
     mkdir -p "$HOST_DATA_DIR"
   else
     _ensure_tracebloc_dirs
@@ -1882,7 +1882,7 @@ $([ -n "${CLIENT_ENV:-}" ] && printf '  CLIENT_ENV: "%s"\n' "$(tb_client_env "$C
   # that will never arrive.
   SINGLE_NODE: "true"
 $([ -n "${HOST_DATASET_DIR:-}" ] && printf '  HOST_UID: "%s"\n  HOST_GID: "%s"\n' "$(id -u)" "$(id -g)")
-$(if [[ "${TB_STORAGE_MODE:-hostpath}" == "node-local" ]]; then
+$(if [[ "${TB_STORAGE_MODE:-node-local}" == "node-local" ]]; then
 cat <<'STORAGE'
 # RFC-0003 Option C — node-local: use k3s's built-in local-path StorageClass.
 # No hostPath PVs, so dataset volumes are provisioned inside the k3d node and
@@ -1966,7 +1966,7 @@ EOF
   # Pre-create per-release hostPath dirs so they're owned by the host user, not
   # root:root from kubelet's DirectoryOrCreate. See _ensure_release_dirs.
   # node-local (RFC-0003 Option C) has no hostPath dirs to pre-create.
-  [[ "${TB_STORAGE_MODE:-hostpath}" != "node-local" ]] && _ensure_release_dirs "$TB_NAMESPACE"
+  [[ "${TB_STORAGE_MODE:-node-local}" != "node-local" ]] && _ensure_release_dirs "$TB_NAMESPACE"
 
   # #553: wait out the metrics-server APIService registration race before helm
   # renders the resource-monitor DaemonSet (whose template hard-fails if the

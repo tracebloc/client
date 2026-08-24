@@ -133,6 +133,7 @@ setup() {
 
 # ── HOST_DATASET_DIR: second bind-mount + dataset dir split (backend#743) ────
 @test "_create_new_cluster: HOST_DATASET_DIR unset -> single /tracebloc mount" {
+  TB_STORAGE_MODE=hostpath   # bind-mounts are a hostpath feature; node-local is the default (client#456)
   run _create_new_cluster
   [ "$status" -eq 0 ] || return 1
   run mock_calls
@@ -141,6 +142,7 @@ setup() {
 }
 
 @test "_create_new_cluster: HOST_DATASET_DIR set -> adds a distinct /tracebloc-data mount" {
+  TB_STORAGE_MODE=hostpath   # HOST_DATASET_DIR is hostpath-only; node-local is the default (client#456)
   HOST_DATASET_DIR="$BATS_TEST_TMPDIR/ds"; mkdir -p "$HOST_DATASET_DIR"
   run _create_new_cluster
   [ "$status" -eq 0 ] || return 1
@@ -160,12 +162,27 @@ setup() {
   [[ "$output" != *"--disable=local-storage"* ]] || return 1        # keep local-path provisioner
 }
 
-@test "_create_new_cluster: hostpath (default) -> bind-mount + disables local-storage" {
+@test "_create_new_cluster: hostpath (explicit opt-out) -> bind-mount + disables local-storage" {
+  TB_STORAGE_MODE=hostpath
   run _create_new_cluster
   [ "$status" -eq 0 ] || return 1
   run mock_calls
   [[ "$output" == *"${HOST_DATA_DIR}:/tracebloc@all"* ]] || return 1
   [[ "$output" == *"--disable=local-storage"* ]] || return 1
+}
+
+# D15 flip (client#456): with TB_STORAGE_MODE unset, the default is now node-local,
+# so a bare _create_new_cluster must take the node-local branch — no host
+# bind-mount and k3s local-storage kept. This is the assertion that would go red
+# if the default were ever flipped back to hostpath.
+@test "_create_new_cluster: DEFAULT (TB_STORAGE_MODE unset) -> node-local (no bind-mount, keeps local-storage)" {
+  unset TB_STORAGE_MODE
+  run _create_new_cluster
+  [ "$status" -eq 0 ] || return 1
+  run mock_calls
+  [[ "$output" == *"k3d cluster create"* ]] || return 1
+  [[ "$output" != *"/tracebloc@all"* ]] || return 1                 # no ~/.tracebloc bind-mount
+  [[ "$output" != *"--disable=local-storage"* ]] || return 1        # keep local-path provisioner
 }
 
 # ── k3s component disablement: the EXACT set, derived ───────────────────────
@@ -209,6 +226,7 @@ _recorded_disables() {
 }
 
 @test "_create_new_cluster: hostpath disables EXACTLY traefik + servicelb + local-storage" {
+  TB_STORAGE_MODE=hostpath
   run _create_new_cluster
   [ "$status" -eq 0 ] || return 1
   run _recorded_disables
@@ -223,6 +241,7 @@ _recorded_disables() {
   # else moved. Keeps the two branches from drifting apart on a component neither
   # test names.
   local hostpath nodelocal expected
+  TB_STORAGE_MODE=hostpath
   _create_new_cluster
   hostpath="$(_recorded_disables)"
   # Guard the subtraction below: if hostpath ever stopped disabling local-storage,
@@ -556,13 +575,29 @@ _require_setgid_sticky() {
 }
 
 @test "_check_existing_cluster_storage_mode: node-local onto hostpath cluster -> fail fast (no local-path SC)" {
-  TB_STORAGE_MODE=node-local
+  TB_STORAGE_MODE=node-local; TB_STORAGE_MODE_SOURCE=explicit
   docker() { printf '%s\n' /tracebloc; }                    # hostpath cluster
   run _check_existing_cluster_storage_mode
   [ "$status" -ne 0 ] || return 1
   [[ "$output" == *"built for hostpath storage"* ]] || return 1
   [[ "$output" == *"Pending"* ]] || return 1
   [[ "$output" == *"k3d cluster delete"* ]] || return 1
+  [[ "$output" == *"TB_STORAGE_MODE=node-local"* ]] || return 1   # explicit set is named as the operator's choice
+  [[ "$output" == *"TB_STORAGE_MODE=hostpath"* ]] || return 1     # keep-your-cluster opt-out offered (client#456 Bugbot High)
+}
+
+# client#456 Bugbot High: after the flip this branch fires on an unmodified re-run
+# of every existing hostpath install (mode came from the default, not the
+# operator). The message must say so AND offer the hostpath opt-out, not only a
+# recreate the operator never asked for.
+@test "_check_existing_cluster_storage_mode: DEFAULT node-local onto hostpath cluster -> names the default + offers hostpath opt-out" {
+  TB_STORAGE_MODE=node-local; TB_STORAGE_MODE_SOURCE=default
+  docker() { printf '%s\n' /tracebloc; }                    # hostpath cluster
+  run _check_existing_cluster_storage_mode
+  [ "$status" -ne 0 ] || return 1
+  [[ "$output" == *"default now"* ]] || return 1                  # phrased as the new default, not "you set node-local"
+  [[ "$output" != *"TB_STORAGE_MODE=node-local, but"* ]] || return 1  # NOT the "you set it" opener
+  [[ "$output" == *"TB_STORAGE_MODE=hostpath"* ]] || return 1     # keep the existing hostpath cluster, no recreate
 }
 
 @test "_check_existing_cluster_storage_mode: hostpath onto node-local cluster -> fail fast (ephemeral)" {
@@ -1436,6 +1471,7 @@ _mock_docker() {
 
 @test "_verify_nodes_see_host_data passes when every node sees the host tree" {
   mkdir -p "$HOST_DATA_DIR"
+  TB_STORAGE_MODE=hostpath   # host-data probe is hostpath-only; node-local skips it (client#456)
   _mock_docker "k3d-tracebloc-server-0 server
 k3d-tracebloc-agent-0 agent" passthrough
   run _verify_nodes_see_host_data
@@ -1446,6 +1482,7 @@ k3d-tracebloc-agent-0 agent" passthrough
 
 @test "_verify_nodes_see_host_data REFUSES when the node cannot see the host tree" {
   mkdir -p "$HOST_DATA_DIR"
+  TB_STORAGE_MODE=hostpath   # host-data probe is hostpath-only; node-local skips it (client#456)
   _mock_docker "k3d-tracebloc-server-0 server" empty
   run _verify_nodes_see_host_data
   [ "$status" -ne 0 ] || { echo "accepted an invisible data dir"; return 1; }
@@ -1458,6 +1495,7 @@ k3d-tracebloc-agent-0 agent" passthrough
 
 @test "_verify_nodes_see_host_data compares the token, not just the file's presence" {
   mkdir -p "$HOST_DATA_DIR"
+  TB_STORAGE_MODE=hostpath   # host-data probe is hostpath-only; node-local skips it (client#456)
   # A mount pointed at the WRONG host directory can still surface a file of the
   # same name from an earlier run. Presence alone would pass this; content fails.
   _mock_docker "k3d-tracebloc-server-0 server" stale
@@ -1470,6 +1508,7 @@ k3d-tracebloc-agent-0 agent" passthrough
 
 @test "_verify_nodes_see_host_data fails closed when a node cannot be exec'd" {
   mkdir -p "$HOST_DATA_DIR"
+  TB_STORAGE_MODE=hostpath   # host-data probe is hostpath-only; node-local skips it (client#456)
   _mock_docker "k3d-tracebloc-server-0 server" fail
   run _verify_nodes_see_host_data
   [ "$status" -ne 0 ] || { echo "an unverifiable node was treated as a pass"; return 1; }
@@ -1478,6 +1517,7 @@ k3d-tracebloc-agent-0 agent" passthrough
 
 @test "_verify_nodes_see_host_data fails closed when no nodes can be listed" {
   mkdir -p "$HOST_DATA_DIR"
+  TB_STORAGE_MODE=hostpath   # host-data probe is hostpath-only; node-local skips it (client#456)
   _mock_docker "" fail
   run _verify_nodes_see_host_data
   [ "$status" -ne 0 ] || { echo "an empty node list was treated as a pass"; return 1; }
@@ -1486,6 +1526,7 @@ k3d-tracebloc-agent-0 agent" passthrough
 
 @test "_verify_nodes_see_host_data fails closed when ONE role's query errors (#817)" {
   mkdir -p "$HOST_DATA_DIR"
+  TB_STORAGE_MODE=hostpath   # host-data probe is hostpath-only; node-local skips it (client#456)
   # The probe now runs one query per role, so a per-role FAILURE is its own case and
   # its own fail-closed decision. Here `server` answers fine and `agent` errors: we
   # cannot tell whether there are agents we should be probing, so refusing is the
@@ -1521,6 +1562,7 @@ k3d-tracebloc-agent-0 agent" passthrough
 
 @test "_verify_nodes_see_host_data refuses under set -e too — the PRODUCTION call shape (#817)" {
   mkdir -p "$HOST_DATA_DIR"
+  TB_STORAGE_MODE=hostpath   # host-data probe is hostpath-only; node-local skips it (client#456)
   # `run` CANNOT SEE THIS CLASS OF BUG, which is why it needs its own test.
   #
   # install-k8s.sh runs under `set -euo pipefail`, and shell options are global to
@@ -1562,6 +1604,7 @@ k3d-tracebloc-agent-0 agent" passthrough
 
 @test "_verify_nodes_see_host_data completes the SUCCESS path under set -e too (#817)" {
   mkdir -p "$HOST_DATA_DIR"
+  TB_STORAGE_MODE=hostpath   # host-data probe is hostpath-only; node-local skips it (client#456)
   # The companion to the refusal case: a `set -e` abort on the HAPPY path would fail
   # every install rather than just skipping a guard, so the absence of that class is
   # worth pinning and not only the one instance that was found. Checked at the time:
@@ -1587,6 +1630,7 @@ k3d-tracebloc-agent-0 agent" passthrough
 
 @test "_verify_nodes_see_host_data node-local skip is safe under set -e (#817)" {
   mkdir -p "$HOST_DATA_DIR"
+  TB_STORAGE_MODE=hostpath   # host-data probe is hostpath-only; node-local skips it (client#456)
   # The early return is `[[ … ]] && return 0`, whose AND-list failure in hostpath
   # mode must not trip set -e either — an abort here would break every hostpath
   # install before the probe even started.
@@ -1598,6 +1642,7 @@ k3d-tracebloc-agent-0 agent" passthrough
 
 @test "_verify_nodes_see_host_data accepts an EMPTY agent list (AGENTS=0 is legitimate) (#817)" {
   mkdir -p "$HOST_DATA_DIR"
+  TB_STORAGE_MODE=hostpath   # host-data probe is hostpath-only; node-local skips it (client#456)
   # The other side of the same coin: a single-node cluster genuinely has no agent,
   # and that must not be mistaken for a failure. Pins the branch to exit status
   # rather than emptiness, from the opposite direction.
@@ -1615,6 +1660,7 @@ k3d-tracebloc-agent-0 agent" passthrough
 
 @test "_verify_nodes_see_host_data checks EVERY node, not just the server" {
   mkdir -p "$HOST_DATA_DIR"
+  TB_STORAGE_MODE=hostpath   # host-data probe is hostpath-only; node-local skips it (client#456)
   # AGENTS defaults to 1 and agents run kubelets, so a training pod can land on
   # an agent. A server-only probe would pass while the pod's node is blind —
   # the same @all-vs-@server trap as the cgroup v1 flag (client#806).
@@ -1637,6 +1683,7 @@ k3d-tracebloc-agent-0 agent" passthrough
 
 @test "_verify_nodes_see_host_data ignores the k3d load balancer" {
   mkdir -p "$HOST_DATA_DIR"
+  TB_STORAGE_MODE=hostpath   # host-data probe is hostpath-only; node-local skips it (client#456)
   # k3d-<cluster>-serverlb is a proxy container, not a kubelet — no bind mount is
   # requested for it and none is needed. Including it would make every hostpath
   # install fail on a container that never touches the data.
@@ -1660,6 +1707,7 @@ k3d-tracebloc-agent-0 agent" passthrough
 
 @test "_verify_nodes_see_host_data is skipped in node-local mode (no bind mount by design)" {
   mkdir -p "$HOST_DATA_DIR"
+  TB_STORAGE_MODE=hostpath   # host-data probe is hostpath-only; node-local skips it (client#456)
   TB_STORAGE_MODE=node-local
   # node-local (RFC-0003 Option C) deliberately has NO host mount — data lives on
   # k3s local-path inside the node. Probing there would fail every install.
@@ -1670,6 +1718,7 @@ k3d-tracebloc-agent-0 agent" passthrough
 
 @test "_verify_nodes_see_host_data selects nodes by k3d LABEL, never by name substring (#817 review)" {
   mkdir -p "$HOST_DATA_DIR"
+  TB_STORAGE_MODE=hostpath   # host-data probe is hostpath-only; node-local skips it (client#456)
   # `name=k3d-<cluster>-` is an unanchored SUBSTRING match, so it also lists a
   # same-prefixed sibling cluster's nodes (k3d-tracebloc-dev-server-0). If that
   # sibling was created against a different HOST_DATA_DIR it cannot see this
@@ -1716,6 +1765,7 @@ k3d-tracebloc-agent-0 agent" passthrough
 
 @test "_verify_nodes_see_host_data does not exec a sibling cluster's node (#817 review)" {
   mkdir -p "$HOST_DATA_DIR"
+  TB_STORAGE_MODE=hostpath   # host-data probe is hostpath-only; node-local skips it (client#456)
   # End-to-end version of the above: docker HONOURS the label filter here, so a
   # sibling cluster's blind node is simply never returned and the probe passes.
   # Under the old name-substring filter it would have been listed and refused.
@@ -1741,6 +1791,7 @@ k3d-tracebloc-agent-0 agent" passthrough
 
 @test "_verify_nodes_see_host_data discards docker stderr, so chatter cannot forge a miss (#817)" {
   mkdir -p "$HOST_DATA_DIR"
+  TB_STORAGE_MODE=hostpath   # host-data probe is hostpath-only; node-local skips it (client#456)
   # The PowerShell twin had a real bug here: its bounded helper concatenates
   # stdout+stderr, and because the marker is written with no trailing newline a
   # docker warning glued onto the token INSIDE the same line and produced a FALSE
@@ -1770,6 +1821,7 @@ k3d-tracebloc-agent-0 agent" passthrough
 
 @test "_verify_nodes_see_host_data bounds both docker calls (#817 Bugbot)" {
   mkdir -p "$HOST_DATA_DIR"
+  TB_STORAGE_MODE=hostpath   # host-data probe is hostpath-only; node-local skips it (client#456)
   # A WEDGED (not stopped) daemon never returns from a bare `docker`, which would
   # freeze a headless install here with no further output — the exact failure this
   # guard exists to replace with a clear refusal. Assert the calls route through

@@ -389,6 +389,7 @@ setup() {
 # the dataset PV at /tracebloc-data and pass the host uid/gid so jobs-manager
 # runs spawned ingestion pods as the owning user (NFS writes).
 @test "install_client_helm: HOST_DATASET_DIR set -> values carry datasetPath + host uid/gid" {
+  TB_STORAGE_MODE=hostpath   # datasetPath only renders in hostpath; node-local is the default (client#456)
   HOST_DATA_DIR="$BATS_TEST_TMPDIR/data"; mkdir -p "$HOST_DATA_DIR"
   HOST_DATASET_DIR="$BATS_TEST_TMPDIR/ds"; mkdir -p "$HOST_DATASET_DIR"
   _ensure_tracebloc_dirs() { :; }
@@ -415,6 +416,26 @@ setup() {
   [ "$status" -eq 0 ] || return 1
   ! grep -q 'datasetPath:' "$HOST_DATA_DIR/values.yaml" || return 1
   ! grep -q 'HOST_UID:' "$HOST_DATA_DIR/values.yaml" || return 1
+}
+
+# D15 flip (client#456): with TB_STORAGE_MODE unset the default is node-local, so
+# the rendered values.yaml must carry the local-path storage block (no hostPath
+# PVs), not the hostpath client-storage-class. Locks the flip in at the values
+# layer — this goes red if the default is ever reverted to hostpath.
+@test "install_client_helm: DEFAULT (TB_STORAGE_MODE unset) -> node-local values block (local-path, hostPath disabled)" {
+  unset TB_STORAGE_MODE HOST_DATASET_DIR
+  HOST_DATA_DIR="$BATS_TEST_TMPDIR/data"; mkdir -p "$HOST_DATA_DIR"
+  _ensure_tracebloc_dirs() { :; }
+  _ensure_release_dirs() { :; }
+  _ensure_helm_runnable() { :; }
+  helm() { record "helm $*"; return 0; }
+  verify_credentials() { printf valid; }
+  run install_client_helm <<< $'myid\nmypw'
+  [ "$status" -eq 0 ] || return 1
+  grep -q 'name: local-path' "$HOST_DATA_DIR/values.yaml" || return 1
+  grep -qE 'hostPath:[[:space:]]*$' "$HOST_DATA_DIR/values.yaml" || return 1
+  grep -qE 'enabled: false' "$HOST_DATA_DIR/values.yaml" || return 1
+  ! grep -q 'client-storage-class' "$HOST_DATA_DIR/values.yaml" || return 1
 }
 
 @test "install_client_helm: TRACEBLOC_CLIENT_* env -> non-interactive (no prompt), writes values.yaml + helm" {
