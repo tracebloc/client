@@ -241,6 +241,14 @@ APP_NO_PROXY="localhost,127.0.0.1,mysql-client,requests-proxy-service,.svc,.svc.
 # real in-cluster TLS endpoint instead of failing DNS. `-k`: the apiserver presents
 # the cluster-CA cert (untrusted here) — we assert proxy ROUTING, not TLS trust, so
 # verification is skipped and both calls complete to a real 401.
+# §A's probe, single-sourced from e2e-common.sh so the bats suite runs the very
+# same text (see e2e_proxy_probe_snippet for WHY it loops fresh curl PROCESSES
+# instead of using curl's own --retry — backend#2350). Indented to sit inside the
+# pod manifest's literal block scalar below. Assigned to a variable, NOT inlined
+# in the heredoc: a heredoc swallows the exit status of a command substitution,
+# so the function's fail-closed guard would not stop the run from there.
+APP_PROBE_SNIPPET="$(e2e_proxy_probe_snippet "$BACKEND_HOST" | sed 's/^/          /')"
+
 echo "── one app pod: WITH the ingestion proxy env it must tunnel via the squid; with it unset it must dial direct ──"
 kubectl apply -f - <<YAML
 apiVersion: v1
@@ -265,20 +273,7 @@ spec:
       args:
         - |
           echo ">>>>> SECTION_A_WITH_PROXY_ENV"
-          # Retries ride out the startup window where the squid Deployment is
-          # rolled out (readinessProbe green) but the cluster hasn't finished
-          # wiring it up for a brand-new pod:
-          #   • --retry-connrefused: Service endpoints not yet programmed in
-          #     kube-proxy, so the first CONNECT to the ClusterIP is refused
-          #     (curl exit 7) — run 29255451968.
-          #   • --retry-all-errors: the proxy Service name isn't yet in the pod's
-          #     resolver, so curl fails with "Could not resolve proxy" (exit 5) —
-          #     a DNS error curl does NOT retry on its own (PR #349 run
-          #     29345383969). --retry-connrefused alone doesn't cover it, so §4
-          #     still flaked red until curl saw the tunnel.
-          # A genuine #119 regression (proxy env ignored / squid down) still fails
-          # ALL retries, so the guard keeps its teeth.
-          curl -k -v -sS -m 30 --retry 8 --retry-connrefused --retry-all-errors --retry-delay 2 -o /dev/null https://${BACKEND_HOST}/ 2>&1
+${APP_PROBE_SNIPPET}
           echo ">>>>> SECTION_B_PROXY_ENV_UNSET"
           env -u HTTP_PROXY -u HTTPS_PROXY -u http_proxy -u https_proxy -u NO_PROXY -u no_proxy curl -k -v -sS -m 20 -o /dev/null https://${BACKEND_HOST}/ 2>&1
           echo ">>>>> SECTION_END"
