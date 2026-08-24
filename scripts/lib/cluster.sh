@@ -124,11 +124,24 @@ _verify_nodes_see_host_data() {
   local role out st
   nodes=""
   for role in server agent; do
+    # `|| st=$?` IS LOAD-BEARING, not a style choice. install-k8s.sh runs under
+    # `set -euo pipefail` and shell options are global to the sourcing shell, so a
+    # bare `out=$(...)` is a simple command whose status is the substitution's: when
+    # docker errors, set -e exits AT THE ASSIGNMENT and everything below it —
+    # including the fail-closed branch and the `rm -f` of the probe marker — is dead
+    # code. The previous shape survived only because it ended in `|| true`.
+    #
+    # The operator would then get the ERR trap's generic record naming `docker ps`
+    # instead of the refusal, and the marker left behind in HOST_DATA_DIR: precisely
+    # the opaque failure this guard exists to replace. (@saadqbal on #817, measured
+    # both call shapes; production calls this bare from create_cluster.)
+    #
+    # `st=0` first, because `|| st=$?` leaves st untouched on success.
+    st=0
     out=$(_bounded "${TB_DOCKER_PROBE_TIMEOUT:-10}" docker ps \
             --filter "label=k3d.cluster=${CLUSTER_NAME}" \
             --filter "label=k3d.role=${role}" \
-            --format '{{.Names}}' 2>/dev/null)
-    st=$?
+            --format '{{.Names}}' 2>/dev/null) || st=$?
     # Fail closed per role: an EMPTY list is legitimate (AGENTS=0 has no agent), but
     # a docker that ERRORED tells us nothing and must not read as "none".
     if (( st != 0 )); then

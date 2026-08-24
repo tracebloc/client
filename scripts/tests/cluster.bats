@@ -1441,6 +1441,14 @@ k3d-tracebloc-agent-0 agent" passthrough
   # branch keys on the exit status and not on emptiness. Without this test that
   # distinction is invisible: the empty-list case reaches the same final error, so a
   # fail-OPEN mutation of the per-role branch stays green (measured).
+  #
+  # BUT NOTE WHAT THIS TEST CANNOT SEE, because the earlier note here claimed more
+  # than it proved (@saadqbal on #817): `run` captures the status, which SUPPRESSES
+  # `set -e`. Production calls this function BARE under `set -euo pipefail`, so a
+  # bare `out=$(docker ps …)` aborts at the assignment and this whole branch becomes
+  # dead code — and this test stays green throughout, measured against that exact
+  # shape. The reachability axis is covered by the "PRODUCTION call shape" test
+  # below; this one only covers the branch's LOGIC once reached.
   docker() {
     if [[ "$1" == "ps" ]]; then
       case "$*" in
@@ -1455,6 +1463,83 @@ k3d-tracebloc-agent-0 agent" passthrough
   run _verify_nodes_see_host_data
   [ "$status" -ne 0 ] || { echo "an unlistable role was treated as 'no nodes of that role'"; return 1; }
   [[ "$output" == *"Couldn't list the nodes"* ]] || { echo "wrong refusal: $output"; return 1; }
+}
+
+@test "_verify_nodes_see_host_data refuses under set -e too — the PRODUCTION call shape (#817)" {
+  mkdir -p "$HOST_DATA_DIR"
+  # `run` CANNOT SEE THIS CLASS OF BUG, which is why it needs its own test.
+  #
+  # install-k8s.sh runs under `set -euo pipefail`, and shell options are global to
+  # the sourcing shell. A bare `out=$(docker ps …)` is a simple command whose status
+  # is the substitution's, so when docker errors set -e exits AT THE ASSIGNMENT and
+  # every line below — the fail-closed branch, the `rm -f` of the marker — is dead.
+  # Production calls this bare (create_cluster -> install-k8s.sh:272), but `run`
+  # captures the status, which SUPPRESSES set -e and lets the branch execute. So the
+  # per-role tests above pass either way, and did while the branch was unreachable
+  # (@saadqbal on #817).
+  #
+  # Reproduce production instead: a subshell that sets the same options and calls the
+  # function BARE. The outer `|| st=$?` is on the substitution, not inside it.
+  docker() {
+    if [[ "$1" == "ps" ]]; then
+      case "$*" in
+        *label=k3d.role=server*) echo k3d-tracebloc-server-0; return 0 ;;
+        *label=k3d.role=agent*)  return 1 ;;                 # cannot tell
+      esac
+      return 0
+    fi
+    if [[ "$1" == "exec" ]]; then cat "${HOST_DATA_DIR}/.tracebloc-mount-probe" 2>/dev/null; return 0; fi
+    return 0
+  }
+  local out st=0
+  out=$( set -euo pipefail; _verify_nodes_see_host_data 2>&1 ) || st=$?
+
+  [ "$st" -ne 0 ] || { echo "did not refuse under set -e"; return 1; }
+  # THE assertion: the curated refusal must actually be reached. Without `|| st=$?`
+  # on the inner assignment this is empty — set -e aborted before the message, and
+  # the operator gets only the ERR trap's generic "docker ps" record.
+  [[ "$out" == *"Couldn't list the nodes"* ]] \
+    || { echo "fail-closed branch unreachable under set -e; got: '$out'"; return 1; }
+  # ...and the cleanup below it must have run, or the probe marker is left in the
+  # operator's data dir.
+  [ ! -f "$HOST_DATA_DIR/.tracebloc-mount-probe" ] \
+    || { echo "probe marker left behind — the rm -f was skipped"; return 1; }
+}
+
+@test "_verify_nodes_see_host_data completes the SUCCESS path under set -e too (#817)" {
+  mkdir -p "$HOST_DATA_DIR"
+  # The companion to the refusal case: a `set -e` abort on the HAPPY path would fail
+  # every install rather than just skipping a guard, so the absence of that class is
+  # worth pinning and not only the one instance that was found. Checked at the time:
+  # the `printf … || error`, the `$( … || true )` exec capture, the
+  # `[[ -n "$out" ]] && nodes+=…` append (an AND-list failure does NOT trip set -e)
+  # and the `rm -f … || true` are all safe; only the per-role assignment was not.
+  docker() {
+    if [[ "$1" == "ps" ]]; then
+      case "$*" in
+        *label=k3d.role=server*) echo k3d-tracebloc-server-0 ;;
+        *label=k3d.role=agent*)  echo k3d-tracebloc-agent-0 ;;
+      esac
+      return 0
+    fi
+    if [[ "$1" == "exec" ]]; then cat "${HOST_DATA_DIR}/.tracebloc-mount-probe" 2>/dev/null; return 0; fi
+    return 0
+  }
+  local out st=0
+  out=$( set -euo pipefail; _verify_nodes_see_host_data 2>&1 ) || st=$?
+  [ "$st" -eq 0 ] || { echo "the success path ABORTED under set -e (st=$st): '$out'"; return 1; }
+  [ ! -f "$HOST_DATA_DIR/.tracebloc-mount-probe" ] || { echo "marker left behind"; return 1; }
+}
+
+@test "_verify_nodes_see_host_data node-local skip is safe under set -e (#817)" {
+  mkdir -p "$HOST_DATA_DIR"
+  # The early return is `[[ … ]] && return 0`, whose AND-list failure in hostpath
+  # mode must not trip set -e either — an abort here would break every hostpath
+  # install before the probe even started.
+  TB_STORAGE_MODE=node-local
+  local out st=0
+  out=$( set -euo pipefail; _verify_nodes_see_host_data 2>&1 ) || st=$?
+  [ "$st" -eq 0 ] || { echo "node-local skip ABORTED under set -e: '$out'"; return 1; }
 }
 
 @test "_verify_nodes_see_host_data accepts an EMPTY agent list (AGENTS=0 is legitimate) (#817)" {
