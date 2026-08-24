@@ -7,4 +7,19 @@
 #
 # Bump this ref (and re-vendor the fixture) whenever the envelope contract
 # changes upstream. The drift gate below will tell you when that has happened.
-6293d15f7025d06bc85886df93456e62767a8d45
+# TEMPORARY PIN -- DO NOT MERGE WITH THIS LINE PRESENT.
+#
+# This is the client-runtime FEATURE-BRANCH commit for backend#2221
+# (tracebloc/client-runtime#363). That PR squash-merges, which mints a NEW sha
+# and orphans this one, so the drift gate would then fail to resolve the ref.
+#
+# Before marking this PR ready: re-pin to the post-merge develop sha and
+# re-vendor the fixture from it --
+#
+#   ref=$(git -C ../client-runtime rev-parse origin/develop)
+#   sed -i '' "s/^[0-9a-f]\{40\}$/$ref/" scripts/.client-runtime-ref
+#   cp ../client-runtime/envelope_contract.json scripts/tests/fixtures/
+#   scripts/gen-envelope-embed.sh && scripts/gen-manifest.sh
+#
+# ...then delete this block.
+592454ed126468bfe1ea6e541469fcc131a6e5b4

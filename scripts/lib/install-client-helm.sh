@@ -146,11 +146,14 @@ _existing_training_resources() {
 #
 # Regenerate after an upstream contract change:
 #   scripts/gen-envelope-embed.sh
-_TB_ENVELOPE_CONTRACT_VERSION=1
+_TB_ENVELOPE_CONTRACT_VERSION=2
 _TB_ENVELOPE_OVERHEAD_CPU_MILLI=1000
 _TB_ENVELOPE_OVERHEAD_MEM_BYTES=3221225472
 _TB_ENVELOPE_FLOOR_CPU_MILLI=1000
 _TB_ENVELOPE_FLOOR_MEM_BYTES=2147483648
+_TB_ENVELOPE_VM_RESERVE_MEM_BYTES=1073741824
+_TB_ENVELOPE_NODE_MIN_CPU_MILLI=2000
+_TB_ENVELOPE_NODE_MIN_MEM_BYTES=5368709120
 # ── end generated ───────────────────────────────────────────────────────────
 
 # Echo "cpu=N,memory=MGi" sized to the largest node, or nothing when the
@@ -163,8 +166,15 @@ _TB_ENVELOPE_FLOOR_MEM_BYTES=2147483648
 # nodeLarger ranked them (cpu, memory), so on a cluster of 8c/16Gi + 4c/32Gi
 # the installer and `tracebloc resources set` anchored on DIFFERENT nodes and
 # disagreed about the same machine. Nobody chose that; it fell out of two
-# independent implementations. Installer-provisioned clusters are single-node
-# k3d, where the orders cannot differ, so this is a no-op in the field.
+# independent implementations.
+#
+# That last sentence used to read "installer-provisioned clusters are
+# single-node k3d, where the orders cannot differ, so this is a no-op in the
+# field." It was WRONG (backend#2221): common.sh defaults SERVERS=1 AGENTS=1, so
+# the default topology is TWO nodes. The tie-break is a field no-op only because
+# both k3d node containers report identical figures -- and they do that because
+# each reports the whole Docker VM, which is the bug #2221 exists to fix. On a
+# genuinely heterogeneous cluster the order matters, which is why it is pinned.
 _machine_training_resources() {
   has kubectl || return 0
   local lines cpu mem cpu_m mem_b best_cpu=0 best_mem=0 seen=0
@@ -265,6 +275,85 @@ _machine_training_ceiling() {
   # divergence class client#766 exists to remove (Bugbot on #768).
   printf '|unschedulable'
   return 0
+}
+
+# ── the VM beneath the node containers (backend#2221) ────────────────────────
+#
+# Everything above answers "how much may one run have, given a NODE". On a k3d
+# install that premise is false: the node containers are created with
+# `NanoCpus=0 CpuQuota=0 Memory=0`, so each one honestly reports the WHOLE
+# Docker VM and the default topology (SERVERS=1 AGENTS=1) tells Kubernetes the
+# machine is twice its size. Measured on k3d v5.9.0 / k3s v1.35.5 / Docker
+# 29.5.2: a 7.75 GiB VM presented as 15.50 GiB, byte-exactly 2.000x, and two
+# pods at this installer's OWN derived envelope (cpu=9,memory=4Gi) both went
+# Running on a 10 cpu / 7.75 GiB machine.
+#
+# Two asymmetries decide the shape of the fix, and both are measured:
+#
+#   MEMORY IS CAPPABLE, AT CREATE TIME ONLY. `k3d --servers-memory/
+#   --agents-memory` works by bind-mounting a SYNTHETIC /proc/meminfo into the
+#   node container (a "fakeowner" mount) -- not via the cgroup, which kubelet
+#   never reads for capacity. `docker update --memory` on a running node moves
+#   the cgroup and leaves /proc/meminfo alone, so capacity does not budge even
+#   across a restart: an existing cluster cannot be capped in place.
+#
+#   CPU IS NOT CAPPABLE AT ALL. k3d 5.9.0 has no CPU flag, and neither
+#   `--cpus` (a CFS quota) nor `--cpuset-cpus` reaches kubelet, because cadvisor
+#   counts /sys/devices/system/cpu/present and /proc/cpuinfo and no cgroup
+#   namespaces either. So the only lever that makes cpu honest is FEWER NODE
+#   CONTAINERS -- the remedy the GPU path already chose for --gpus=all, which
+#   collapses to a single node so one physical card is advertised once.
+#
+# Echo "nodes=N,cap=BYTES,cpu_honest=0|1,viable=0|1", or NOTHING when the VM is
+# unreadable. Nothing means "I cannot answer" and a caller must not read it as
+# one node: collapsing a cluster on a failed probe is worse than leaving the
+# topology alone.
+#
+# The arithmetic is client-runtime/node_sizing.py::honest_topology; the
+# constants are embedded above and the vectors replayed by
+# scripts/tests/install-client-helm.bats. `requested` below 1 is a caller bug,
+# not a machine state: it returns 1 with no output rather than inventing a
+# topology (the PowerShell twin does the same).
+_honest_topology() {
+  local vm_cpu="$1" vm_mem="$2" requested="$3"
+  [[ "$requested" =~ ^[0-9]+$ ]] || return 1
+  (( requested >= 1 )) || return 1
+
+  local vm_cpu_m vm_mem_b
+  vm_cpu_m="$(_cpu_to_milli "$vm_cpu")"
+  vm_mem_b="$(_mem_to_bytes "$vm_mem")"
+  [[ -n "$vm_cpu_m" && -n "$vm_mem_b" ]] || return 0
+
+  # The VM cannot give the node containers everything it has: the k3d serverlb
+  # and tools containers, dockerd/containerd and the guest page cache all live
+  # outside them. Capping to the last byte starves the runtime that runs them.
+  local usable=$(( vm_mem_b - _TB_ENVELOPE_VM_RESERVE_MEM_BYTES ))
+  (( usable < 0 )) && usable=0
+
+  local fits=$(( usable / _TB_ENVELOPE_NODE_MIN_MEM_BYTES ))
+  local nodes="$requested"
+  (( fits < nodes )) && nodes=$fits
+  # Never zero: "no cluster at all" is not this function's call to make. The
+  # caller refuses on `viable=0`.
+  (( nodes < 1 )) && nodes=1
+
+  # Floored -- a cap that rounds UP is not a cap.
+  local cap=$(( usable / nodes ))
+
+  # cpu_honest is measured, not chosen: no cap makes capacity.cpu true on more
+  # than one node container.
+  local cpu_honest=0
+  (( nodes == 1 )) && cpu_honest=1
+
+  # One honest node needs the platform overhead AND the training floor. Below
+  # that the VM cannot host a run whatever it is capped to.
+  local viable=0
+  if (( fits >= 1 )) && (( vm_cpu_m >= _TB_ENVELOPE_NODE_MIN_CPU_MILLI )); then
+    viable=1
+  fi
+
+  printf 'nodes=%d,cap=%d,cpu_honest=%d,viable=%d' \
+    "$nodes" "$cap" "$cpu_honest" "$viable"
 }
 
 # The installed release's RESOURCE_PROVENANCE (nested under env:), or nothing.

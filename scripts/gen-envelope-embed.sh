@@ -40,21 +40,46 @@ command -v python3 >/dev/null 2>&1 || {
   exit 1
 }
 
-read -r VERSION OVER_CPU OVER_MEM FLOOR_CPU FLOOR_MEM < <(python3 - "$CONTRACT" <<'PY'
+# Read the contract values. The heredoc lives in a FUNCTION body, not inside
+# the `< <(...)` process substitution it feeds: bash tracks quotes while it
+# scans for the closing paren of a process substitution, so a single apostrophe
+# anywhere in the heredoc -- in a comment, even -- eats the `)` and the whole
+# script dies with "bad substitution". Found the hard way. A function body is
+# parsed normally, so the text inside is just text.
+_contract_values() {
+  python3 - "$CONTRACT" <<'PY'
 import json, sys
 c = json.load(open(sys.argv[1]))
 o, f = c["overhead"], c["floor"]
+# backend#2221: the VM beneath the node containers. per_node_minimum is
+# overhead + floor -- recorded in the contract so bash and PowerShell can embed
+# it without doing arithmetic, but DERIVED, so re-check the derivation here
+# instead of trusting the file. load_contract refuses a stale one upstream; this
+# is the same guard on the consumer side, because an embed generated from a
+# drifted contract would be wrong in two installers at once.
+n = c["topology"]["per_node_minimum"]
+for key in ["cpu_millicores", "memory_bytes"]:
+    want = o[key] + f[key]
+    if n[key] != want:
+        raise SystemExit(
+            "contract topology.per_node_minimum.%s is %r but overhead + floor "
+            "is %r; regenerate the contract upstream" % (key, n[key], want)
+        )
 vals = [
     c["contract_version"],
     o["cpu_millicores"], o["memory_bytes"],
     f["cpu_millicores"], f["memory_bytes"],
+    c["vm_reserve"]["memory_bytes"],
+    n["cpu_millicores"], n["memory_bytes"],
 ]
 for v in vals:
     if not isinstance(v, int) or v < 0:
-        raise SystemExit(f"contract value is not a non-negative int: {v!r}")
+        raise SystemExit("contract value is not a non-negative int: %r" % (v,))
 print(*vals)
 PY
-)
+}
+
+read -r VERSION OVER_CPU OVER_MEM FLOOR_CPU FLOOR_MEM VM_RESERVE NODE_MIN_CPU NODE_MIN_MEM < <(_contract_values)
 
 _fail=0
 
@@ -136,12 +161,18 @@ _set "$BASH_FILE" "_TB_ENVELOPE_" "OVERHEAD_CPU_MILLI"  "$OVER_CPU"
 _set "$BASH_FILE" "_TB_ENVELOPE_" "OVERHEAD_MEM_BYTES"  "$OVER_MEM"
 _set "$BASH_FILE" "_TB_ENVELOPE_" "FLOOR_CPU_MILLI"     "$FLOOR_CPU"
 _set "$BASH_FILE" "_TB_ENVELOPE_" "FLOOR_MEM_BYTES"     "$FLOOR_MEM"
+_set "$BASH_FILE" "_TB_ENVELOPE_" "VM_RESERVE_MEM_BYTES" "$VM_RESERVE"
+_set "$BASH_FILE" "_TB_ENVELOPE_" "NODE_MIN_CPU_MILLI"   "$NODE_MIN_CPU"
+_set "$BASH_FILE" "_TB_ENVELOPE_" "NODE_MIN_MEM_BYTES"   "$NODE_MIN_MEM"
 
 _set "$PS1_FILE" '$script:TbEnvelope' "ContractVersion"   "$VERSION"
 _set "$PS1_FILE" '$script:TbEnvelope' "OverheadCpuMilli"  "$OVER_CPU"
 _set "$PS1_FILE" '$script:TbEnvelope' "OverheadMemBytes"  "$OVER_MEM"
 _set "$PS1_FILE" '$script:TbEnvelope' "FloorCpuMilli"     "$FLOOR_CPU"
 _set "$PS1_FILE" '$script:TbEnvelope' "FloorMemBytes"     "$FLOOR_MEM"
+_set "$PS1_FILE" '$script:TbEnvelope' "VmReserveMemBytes" "$VM_RESERVE"
+_set "$PS1_FILE" '$script:TbEnvelope' "NodeMinCpuMilli"   "$NODE_MIN_CPU"
+_set "$PS1_FILE" '$script:TbEnvelope' "NodeMinMemBytes"   "$NODE_MIN_MEM"
 
 # ── the golden-vector table for the bats suite ───────────────────────────────
 #
@@ -194,6 +225,26 @@ for v in contract["vectors"]["multi_node"]:
     lines = "\\n".join(f"{n['cpu']} {n['memory']}" for n in live)
     largest = v["anchored"]["largest"]
     print(f'  "{v["label"]}|{lines}|{installer_output(largest["expected"])}"')
+print(")")
+print()
+print("# Topology vectors (backend#2221): the VM real size in, an honest node")
+print("# count and per-node memory cap out. Rows are:")
+print("#   <label>|<vm cpu>|<vm memory>|<requested nodes>|<expected output>")
+print("#")
+print("# where the expected output is what _honest_topology must PRINT --")
+print("#   nodes=N,cap=BYTES,cpu_honest=0|1,viable=0|1")
+print("# for a readable VM, and the empty string when the VM is unreadable (the")
+print("# function emits nothing, which the caller must NOT read as one node).")
+print("TB_TOPOLOGY_VECTORS=(")
+for v in contract["vectors"]["topology"]:
+    e = v["expected"]
+    if e is None:
+        out = ""
+    else:
+        out = (f"nodes={e['nodes']},cap={e['node_memory_cap_bytes']},"
+               f"cpu_honest={int(e['cpu_honest'])},viable={int(e['viable'])}")
+    print(f'  "{v["label"]}|{v["vm_cpu"]}|{v["vm_memory"]}|'
+          f'{v["requested_nodes"]}|{out}"')
 print(")")
 PY
 }

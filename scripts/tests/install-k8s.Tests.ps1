@@ -1627,6 +1627,10 @@ Describe "Envelope contract golden vectors (backend#2220)" {
     $script:TbEnvelopeOverheadMemBytes | Should -Be $script:Contract.overhead.memory_bytes
     $script:TbEnvelopeFloorCpuMilli    | Should -Be $script:Contract.floor.cpu_millicores
     $script:TbEnvelopeFloorMemBytes    | Should -Be $script:Contract.floor.memory_bytes
+    # backend#2221 -- the VM beneath the node containers.
+    $script:TbEnvelopeVmReserveMemBytes | Should -Be $script:Contract.vm_reserve.memory_bytes
+    $script:TbEnvelopeNodeMinCpuMilli   | Should -Be $script:Contract.topology.per_node_minimum.cpu_millicores
+    $script:TbEnvelopeNodeMinMemBytes   | Should -Be $script:Contract.topology.per_node_minimum.memory_bytes
   }
 
   It "every single-node golden vector replays" {
@@ -1904,6 +1908,109 @@ Describe "Envelope contract golden vectors (backend#2220)" {
       } else { $global:LASTEXITCODE = 1; "" }
     }
     Get-TrainingResources | Should -Be "cpu=2,memory=8Gi"
+  }
+}
+
+Describe "Topology contract golden vectors (backend#2221)" {
+  # The PowerShell half of the topology parity. scripts/tests/
+  # install-client-helm.bats replays the SAME contract rows through the bash
+  # twin _honest_topology, so a row added upstream forces both languages to
+  # answer it -- and both return a STRING, so the two are compared
+  # byte-for-byte rather than through two different shapes.
+  #
+  # Get-HonestTopology is pure arithmetic over two numbers: no docker, no
+  # kubectl, no branching on cluster state. So the contract vectors are the
+  # right parity mechanism for it. (installer_parity.json exists for CONTROL
+  # FLOW -- every backend#2220 divergence lived in a state that was not a clean
+  # measurement. The eventual CALLER of this function belongs there, because it
+  # will shell out to docker and branch; the arithmetic itself does neither.)
+
+  BeforeAll {
+    $script:TopologyContract =
+      Get-Content (Join-Path $PSScriptRoot "fixtures/envelope_contract.json") -Raw |
+      ConvertFrom-Json
+  }
+
+  It "the vendored contract carries topology vectors" {
+    @($script:TopologyContract.vectors.topology).Count | Should -BeGreaterThan 0
+  }
+
+  It "per_node_minimum is overhead + floor, not a fourth constant" {
+    # Recorded in the contract so this file and its bash twin can embed it
+    # without doing arithmetic on JSON -- but DERIVED. A recorded derivation
+    # nobody checks is just a fourth constant waiting to rot, which is the
+    # duplication backend#2220 spent seven PRs deleting. The generator refuses a
+    # stale one; this is the in-suite mirror.
+    $c = $script:TopologyContract
+    $c.topology.per_node_minimum.cpu_millicores |
+      Should -Be ($c.overhead.cpu_millicores + $c.floor.cpu_millicores)
+    $c.topology.per_node_minimum.memory_bytes |
+      Should -Be ($c.overhead.memory_bytes + $c.floor.memory_bytes)
+  }
+
+  It "every topology golden vector replays" {
+    $failures = @()
+    foreach ($v in $script:TopologyContract.vectors.topology) {
+      # $null expected means the VM was unreadable -- "I cannot answer", which a
+      # caller must never read as one node.
+      $want = if ($null -eq $v.expected) {
+        $null
+      } else {
+        "nodes=$($v.expected.nodes),cap=$($v.expected.node_memory_cap_bytes)," +
+        "cpu_honest=$([int][bool]$v.expected.cpu_honest),viable=$([int][bool]$v.expected.viable)"
+      }
+      $got = Get-HonestTopology -VmCpu $v.vm_cpu -VmMemory $v.vm_memory `
+                                -RequestedNodes ([int]$v.requested_nodes)
+      if ($got -ne $want) {
+        $failures += "$($v.label): want '$want' got '$got'"
+      }
+    }
+    $failures -join "`n" | Should -BeNullOrEmpty
+  }
+
+  It "an unreadable VM returns null, not a default topology" {
+    Get-HonestTopology -VmCpu "eight" -VmMemory "lots" -RequestedNodes 2 |
+      Should -BeNullOrEmpty
+  }
+
+  It "fewer than one requested node is refused" {
+    # A caller bug, not a machine state. The bash twin exits non-zero with no
+    # output for the same input.
+    Get-HonestTopology -VmCpu "8" -VmMemory "17179869184" -RequestedNodes 0 |
+      Should -BeNullOrEmpty
+  }
+
+  It "nodes x cap never exceeds the usable VM" {
+    # The invariant the whole ticket exists to establish, as a property across
+    # VM sizes rather than on the hand-picked rows above. Uncapped k3d violates
+    # sum(node capacity) <= VM by exactly the node count; nothing this function
+    # recommends may.
+    $failures = @()
+    foreach ($gib in 4, 5, 6, 7, 8, 11, 12, 16, 24, 32, 48, 64) {
+      $bytes  = [long]$gib * 1GB
+      $usable = [long][math]::Max([long]0, $bytes - $script:TbEnvelopeVmReserveMemBytes)
+      foreach ($req in 1, 2, 3, 4, 8) {
+        $got = Get-HonestTopology -VmCpu "16" -VmMemory "$bytes" -RequestedNodes $req
+        if ($null -eq $got) { $failures += "${gib}GiB/${req}: unexpected null"; continue }
+        $nodes = [long]($got -replace '^nodes=(\d+),.*$', '$1')
+        $cap   = [long]($got -replace '^.*,cap=(\d+),.*$', '$1')
+        if (($nodes * $cap) -gt $usable) {
+          $failures += "${gib}GiB/${req}: $nodes x $cap > $usable usable"
+        }
+        if ($nodes -lt 1 -or $nodes -gt $req) {
+          $failures += "${gib}GiB/${req}: $nodes nodes out of range"
+        }
+      }
+    }
+    $failures -join "`n" | Should -BeNullOrEmpty
+  }
+
+  It "a stock macOS Docker VM cannot host the shipped two-node default" {
+    # The measured case, and the reason this is not a future multi-node
+    # concern: the client defaults to SERVERS=1 AGENTS=1, so every CPU-only
+    # edge asks for exactly this and cannot have it.
+    Get-HonestTopology -VmCpu "10" -VmMemory "8321712128" -RequestedNodes 2 |
+      Should -Be "nodes=1,cap=7247970304,cpu_honest=1,viable=1"
   }
 }
 
