@@ -14,29 +14,54 @@ setup() {
   mkdir -p "$REPO/scripts/spec" "$REPO/scripts/lib"
   cp "$CF" "$REPO/scripts/check-facts.sh"
   cp "${SCRIPTS_DIR}/spec/facts.env" "$REPO/scripts/spec/facts.env"
-  # Consumers seeded to match the spec (v5.9.0 / v4.2.3 / v1.29.4-k3s1 / READY_TIMEOUT 600 — #562).
+  # Consumers seeded FROM THE COPIED SPEC, not from literals. The literals were a
+  # second copy of every pin: when backend#2448 moved K8S_VERSION 1.29.4 -> 1.36.3
+  # this whole suite went red, because the fixture disagreed with the spec it had
+  # just copied. Deriving them means a pin bump can never break these tests again —
+  # which is the same property check-facts.sh itself exists to enforce.
+  #
+  # Heredocs stay QUOTED (the bodies contain ${K8S_VERSION:-…}, which must survive
+  # verbatim), so the values go in as @@TOKENS@@ and are substituted afterwards.
+  local _k8s _k3d _helm _cuda _ready _metrics
+  _k8s="$(sed -n 's/^K8S_VERSION=\(.*\)$/\1/p'          "$REPO/scripts/spec/facts.env")"
+  _k3d="$(sed -n 's/^K3D_VERSION=\(.*\)$/\1/p'          "$REPO/scripts/spec/facts.env")"
+  _helm="$(sed -n 's/^HELM_VERSION=\(.*\)$/\1/p'        "$REPO/scripts/spec/facts.env")"
+  _cuda="$(sed -n 's/^CUDA_TAG=\(.*\)$/\1/p'            "$REPO/scripts/spec/facts.env")"
+  _ready="$(sed -n 's/^READY_TIMEOUT=\(.*\)$/\1/p'      "$REPO/scripts/spec/facts.env")"
+  _metrics="$(sed -n 's/^METRICS_WAIT_TIMEOUT=\(.*\)$/\1/p' "$REPO/scripts/spec/facts.env")"
+  # Fail closed: a spec we cannot read must not seed empty consumers that then
+  # "agree" with an empty expectation.
+  [[ -n "$_k8s" && -n "$_k3d" && -n "$_helm" && -n "$_cuda" && -n "$_ready" && -n "$_metrics" ]] \
+    || { echo "could not derive facts from the copied spec"; return 1; }
   cat > "$REPO/scripts/lib/common.sh" <<'SH'
-K8S_VERSION="${K8S_VERSION:-v1.29.4-k3s1}"
-K3D_VERSION="${K3D_VERSION:-v5.9.0}"
-HELM_VERSION="${HELM_VERSION:-v4.2.3}"
+K8S_VERSION="${K8S_VERSION:-@@K8S@@}"
+K3D_VERSION="${K3D_VERSION:-@@K3D@@}"
+HELM_VERSION="${HELM_VERSION:-@@HELM@@}"
+  K8S_VERSION    k3s image tag                   (default: @@K8S@@)
 SH
   cat > "$REPO/scripts/install-k8s.ps1" <<'PS'
-$script:K3dVersion  = if ($env:K3D_VERSION)  { $env:K3D_VERSION }  else { "v5.9.0" }
-$script:HelmVersion = if ($env:HELM_VERSION) { $env:HELM_VERSION } else { "v4.2.3" }
-$K8S_VERSION   = if ($env:K8S_VERSION)   { $env:K8S_VERSION }   else { "v1.29.4-k3s1" }
-$CUDA_BASE_TAG  = if ($env:TRACEBLOC_CUDA_BASE_TAG) { $env:TRACEBLOC_CUDA_BASE_TAG } else { "12.4.1-base-ubuntu22.04" }
-$ReadyTimeout     = if ($env:READY_TIMEOUT) { $env:READY_TIMEOUT } else { "600" }
-$script:MetricsWaitTimeout = 120
+$script:K3dVersion  = if ($env:K3D_VERSION)  { $env:K3D_VERSION }  else { "@@K3D@@" }
+$script:HelmVersion = if ($env:HELM_VERSION) { $env:HELM_VERSION } else { "@@HELM@@" }
+$K8S_VERSION   = if ($env:K8S_VERSION)   { $env:K8S_VERSION }   else { "@@K8S@@" }
+$CUDA_BASE_TAG  = if ($env:TRACEBLOC_CUDA_BASE_TAG) { $env:TRACEBLOC_CUDA_BASE_TAG } else { "@@CUDA@@" }
+$ReadyTimeout     = if ($env:READY_TIMEOUT) { $env:READY_TIMEOUT } else { "@@READY@@" }
+$script:MetricsWaitTimeout = @@METRICS@@
 $k3dArgs += @("--image", "rancher/k3s:$K8S_VERSION")
+  K8S_VERSION    k3s image tag                   (default: @@K8S@@)
 PS
   cat > "$REPO/scripts/lib/summary.sh" <<'SH'
-READY_TIMEOUT="${READY_TIMEOUT:-600}"
+READY_TIMEOUT="${READY_TIMEOUT:-@@READY@@}"
 SH
   # #553: the metrics-server APIService wait budget is a cross-OS fact — bash reads it
   # here, PowerShell from $script:MetricsWaitTimeout, both behind TB_METRICS_WAIT_S.
   cat > "$REPO/scripts/lib/install-client-helm.sh" <<'SH'
-METRICS_WAIT_TIMEOUT=120
+METRICS_WAIT_TIMEOUT=@@METRICS@@
 SH
+  # backend#2448 added the HELP-TEXT default as its own consumer row in both
+  # installers: it is the line the operator actually reads, and it used to be a
+  # restate check-facts could not see (the pin moved in code while `--help` went on
+  # advertising the old version). Seeded here so those rows have something to read.
+  #
   # cluster.sh carries the create-time k3s --image pin the #547 wiring guard checks.
   cat > "$REPO/scripts/lib/cluster.sh" <<'SH'
 K3D_ARGS+=(--image "rancher/k3s:${K8S_VERSION}")
@@ -46,21 +71,44 @@ SH
   # match the spec so a bump can't leave a GPU image tag that was never published.
   mkdir -p "$REPO/docker/k3s-cuda" "$REPO/.github/workflows"
   cat > "$REPO/docker/k3s-cuda/Dockerfile" <<'DF'
-ARG K3S_TAG="v1.29.4-k3s1"
-ARG CUDA_TAG="12.4.1-base-ubuntu22.04"
+ARG K3S_TAG="@@K8S@@"
+ARG CUDA_TAG="@@CUDA@@"
 DF
   cat > "$REPO/docker/k3s-cuda/build.sh" <<'SH'
-K3S_TAG="${K3S_TAG:-v1.29.4-k3s1}"
-CUDA_TAG="${CUDA_TAG:-12.4.1-base-ubuntu22.04}"
+K3S_TAG="${K3S_TAG:-@@K8S@@}"
+CUDA_TAG="${CUDA_TAG:-@@CUDA@@}"
 SH
   # Two defaults on purpose: the extractor must pick the k3s_tag one (v… tag) and
   # leave the cuda_tag default (12.4.1…) alone.
   cat > "$REPO/.github/workflows/build-k3s-cuda.yaml" <<'YML'
       k3s_tag:
-        default: "v1.29.4-k3s1"
+        default: "@@K8S@@"
       cuda_tag:
-        default: "12.4.1-base-ubuntu22.04"
+        default: "@@CUDA@@"
 YML
+
+  # One substitution pass over every seeded consumer.
+  SEEDED=( "$REPO/scripts/lib/common.sh" "$REPO/scripts/install-k8s.ps1"
+           "$REPO/scripts/lib/summary.sh" "$REPO/scripts/lib/install-client-helm.sh"
+           "$REPO/scripts/lib/cluster.sh" "$REPO/docker/k3s-cuda/Dockerfile"
+           "$REPO/docker/k3s-cuda/build.sh" "$REPO/.github/workflows/build-k3s-cuda.yaml" )
+  local f
+  for f in "${SEEDED[@]}"; do
+    local tmp; tmp="$(mktemp)"
+    sed -e "s|@@K8S@@|${_k8s}|g"   -e "s|@@K3D@@|${_k3d}|g" \
+        -e "s|@@HELM@@|${_helm}|g" -e "s|@@CUDA@@|${_cuda}|g" \
+        -e "s|@@READY@@|${_ready}|g" -e "s|@@METRICS@@|${_metrics}|g" "$f" > "$tmp" && mv "$tmp" "$f"
+  done
+  # Nothing may be left unsubstituted, or a consumer would "match" a token instead
+  # of a value. Scoped to the SEEDED files: a repo-wide grep also matches the
+  # copied check-facts.sh, whose own --write sed programs legitimately contain
+  # @@VAL@@ — which is a false positive that fails every test in setup.
+  ! grep -l '@@' "${SEEDED[@]}" >/dev/null 2>&1 \
+    || { echo "unsubstituted token left in: $(grep -l '@@' "${SEEDED[@]}" | tr '\n' ' ')"; return 1; }
+
+  # Exported for the drift tests below, so they mutate the value the spec actually
+  # declares rather than a literal of their own.
+  SEED_K8S="$_k8s"; SEED_K3D="$_k3d"
 }
 
 _facts() { bash "$REPO/scripts/check-facts.sh" "$@"; }
@@ -76,7 +124,7 @@ _set_spec() { local tmp; tmp="$(mktemp)"; sed "s|^$1=.*|$1=$2|" "$REPO/scripts/s
   # install-k8s.ps1 pins K8S_VERSION too (--image rancher/k3s:$K8S_VERSION), so the spec
   # must enforce it in BOTH consumers — bumping bash alone can't leave Windows stale.
   local tmp; tmp="$(mktemp)"
-  sed 's|"v1.29.4-k3s1"|"v1.30.0-k3s1"|' "$REPO/scripts/install-k8s.ps1" > "$tmp" && mv "$tmp" "$REPO/scripts/install-k8s.ps1"
+  sed "s|\"${SEED_K8S}\"|\"v0.0.1-k3s1\"|" "$REPO/scripts/install-k8s.ps1" > "$tmp" && mv "$tmp" "$REPO/scripts/install-k8s.ps1"
   run _facts --check
   [ "$status" -ne 0 ] || return 1
   [[ "$output" == *"install-k8s.ps1:K8S_VERSION"* ]] || return 1
@@ -94,7 +142,7 @@ _set_spec() { local tmp; tmp="$(mktemp)"; sed "s|^$1=.*|$1=$2|" "$REPO/scripts/s
   # Simulate the real #410: someone bumps K3D in common.sh but forgets install-k8s.ps1.
   # The spec is authoritative, so BOTH the bumped bash and the stale ps1 must be caught.
   local tmp; tmp="$(mktemp)"
-  sed 's|v5.9.0|v5.9.9|' "$REPO/scripts/lib/common.sh" > "$tmp" && mv "$tmp" "$REPO/scripts/lib/common.sh"
+  sed "s|${SEED_K3D}|v0.0.1|" "$REPO/scripts/lib/common.sh" > "$tmp" && mv "$tmp" "$REPO/scripts/lib/common.sh"
   run _facts --check
   [ "$status" -ne 0 ] || return 1   # red CI check
   [[ "$output" == *"common.sh:K3D_VERSION"* ]] || return 1
@@ -103,7 +151,7 @@ _set_spec() { local tmp; tmp="$(mktemp)"; sed "s|^$1=.*|$1=$2|" "$REPO/scripts/s
 
 @test "check-facts --check: PowerShell pin drifts from bash+spec -> RED (#435)" {
   local tmp; tmp="$(mktemp)"
-  sed 's|"v5.9.0"|"v5.8.0"|' "$REPO/scripts/install-k8s.ps1" > "$tmp" && mv "$tmp" "$REPO/scripts/install-k8s.ps1"
+  sed "s|\"${SEED_K3D}\"|\"v0.0.1\"|" "$REPO/scripts/install-k8s.ps1" > "$tmp" && mv "$tmp" "$REPO/scripts/install-k8s.ps1"
   run _facts --check
   [ "$status" -ne 0 ] || return 1
   [[ "$output" == *"install-k8s.ps1:K3dVersion"* ]] || return 1
