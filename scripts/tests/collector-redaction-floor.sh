@@ -3,8 +3,8 @@
 #  collector-redaction-floor.sh — the Collector's redaction actually redacts the
 #  secrets it claims to, proven by feeding it specimens (backend#1908).
 #
-#  WHY THIS EXISTS. The secret patterns live in THREE independent copies and
-#  nothing derives from anything:
+#  WHY THIS EXISTS. The secret patterns used to live in THREE independent copies
+#  with nothing derived from anything:
 #
 #    1. `client-runtime/controller.py`'s `_LOG_REDACTIONS` — the stated source.
 #    2. `templates/telemetry-collector-configmap.yaml`'s OTTL `replace_pattern`
@@ -12,13 +12,20 @@
 #    3. `tests/telemetry_collector_test.yaml`'s "carries all six of
 #       controller.py's secret patterns" — six hand-written FRAGMENTS of (2).
 #
-#  (3) is the one that misleads: its title asserts agreement with controller.py,
+#  (3) was the one that misled: its title asserted agreement with controller.py,
 #  and the mechanism cannot see controller.py at all. It greps the rendered
-#  config for six substrings it holds itself, so it agrees with itself and
-#  reports that as agreement with a file in another repository. Add a seventh
-#  redaction to controller.py and every one of those assertions stays green while
-#  the Collector ships the secret it does not know about. That is backend#1729
-#  rule 1 exactly, and rule 9's corollary: a list checked against itself is blind.
+#  config for six substrings it holds itself, so it agreed with itself and
+#  reported that as agreement with a file in another repository. That is
+#  backend#1729 rule 1 exactly, and rule 9's corollary: a list checked against
+#  itself is blind. It was renamed to claim only what it does.
+#
+#  (1) and (2) are now ONE declaration (backend#2378): client-runtime's
+#  log_redactions.json, vendored here as client/log_redactions.json and rendered
+#  into OTTL by the template, with the vendored bytes pinned by sha256. That is
+#  a different guarantee from this one and is checked separately, by
+#  scripts/tests/collector-redaction-derived.sh — provenance there, BEHAVIOUR
+#  here. Neither subsumes the other: a faithfully rendered declaration that
+#  redacts nothing passes there and fails here.
 #
 #  WHY IT MATTERS MORE THAN IT LOOKS. Today the Collector carries Class A only —
 #  containers this chart owns. backend#1908 opens Class B, which is TRAINING AND
@@ -42,12 +49,13 @@
 #  FAILS CLOSED. A config that cannot be rendered or parsed, or zero patterns
 #  found, is a finding — never "nothing to check, therefore fine".
 #
-#  WHAT IT STILL CANNOT SEE, stated rather than implied: copy (1). `controller.py`
-#  lives in `client-runtime` and CI checks out only this repository, so a seventh
-#  redaction added there is invisible here until someone adds its specimen below.
-#  Closing that needs one declaration both repos consume — filed separately. This
-#  guard shrinks the gap from "three copies, no checks" to "one cross-repo copy,
-#  with the behavioural floor pinned on this side".
+#  WHAT IT STILL CANNOT SEE, stated rather than implied: whether the vendored
+#  declaration has fallen BEHIND upstream. client-runtime is private and CI here
+#  checks out one repository, so a seventh redaction added there is invisible to
+#  this repo until it is vendored. That residual is held by client-runtime's own
+#  digest tripwire and by the weekly cross-repo job in
+#  .github/workflows/envelope-contract-drift.yml, and it costs a two-PR bump
+#  ritual. What is gone is the hand port: no regex is typed twice any more.
 #  EVERY SECRET IN THIS FILE IS SYNTHETIC. A guard that proves redaction works
 #  has to contain secret-SHAPED strings, and gitleaks cannot tell a specimen
 #  from a leak — this path is allowlisted in `.gitleaks.toml`, which states the

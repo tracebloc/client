@@ -3636,6 +3636,43 @@ function New-K3dCluster {
       "--wait"
     )
 
+    # cgroup v1 hosts (backend#2422). Kubernetes 1.35 flipped the kubelet's
+    # failCgroupV1 default to TRUE, so from k3s 1.35 the kubelet REFUSES TO START
+    # on a cgroup v1 or hybrid host. WSL2 defaults to HYBRID cgroups, which makes
+    # this the Windows path's problem specifically -- and k3s documents none of it,
+    # so the operator would see only a bare upstream kubelet message. Set it
+    # proactively; on a cgroup v2 host it is a no-op.
+    #
+    # GATED, and the gate is load-bearing: --fail-cgroupv1 was ADDED in kubelet
+    # 1.31, so passing it to the 1.29.4 kubelet we pin today would be an unknown
+    # flag and the kubelet would fail to start. Keep this in lockstep with the
+    # bash twin in scripts/lib/cluster.sh.
+    # NEVER cast an unvalidated string with [version] -- it THROWS, and this runs
+    # BEFORE the `latest` branch below that exists to honour that value (#806
+    # review, confirmed under pwsh). "" and "latest" are handled explicitly, the
+    # same way Test-K3sVersionDrift and the GPU gate in this file already do; a
+    # digest-only pin (:3105) is not dotted-numeric either, so the cast is guarded
+    # by a shape check rather than a try/catch.
+    #
+    # `latest` DOES emit. It is the unsupported opt-out (#547) where k3d picks the
+    # k3s version and we cannot read it, so the choice is between a flag that is
+    # harmless from 1.31 and a refusal that is fatal from 1.35. k3d is pinned at
+    # v5.9.0, whose default k3s is 1.32 -- above the flag's introduction, below the
+    # refusal -- so emitting is safe today and correct the moment k3d's default
+    # crosses 1.35. Empty stays skip: common.sh defaults K8S_VERSION to the pin, so
+    # empty only occurs in tests.
+    # `@all`, NOT `@server:*`: $AGENTS defaults to 1 and an agent runs a kubelet too
+    # (#806 Bugbot, High). Scoping to the server leaves the agent kubelet refusing on
+    # a cgroup v1 host -- WSL2's hybrid mode is exactly this path.
+    $k8sSemver = ($K8S_VERSION -replace '^v', '') -replace '[-+].*$', ''
+    if ($K8S_VERSION -eq "latest") {
+      $k3dArgs += @("--k3s-arg", "--kubelet-arg=fail-cgroupv1=false@all")
+    } elseif ($k8sSemver -match '^\d+\.\d+') {
+      if ([version]$k8sSemver -ge [version]'1.31.0') {
+        $k3dArgs += @("--k3s-arg", "--kubelet-arg=fail-cgroupv1=false@all")
+      }
+    }
+
     # backend#743: bind-mount the customer dataset volume at a distinct cluster
     # path so the chart's dataset PV points there while mysql + logs stay on the
     # local /tracebloc tree. No-op when unset.

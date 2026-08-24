@@ -234,7 +234,9 @@ When enabled, the training pod also gets three `emptyDir` mounts to host framewo
 | `/tmp` | matplotlib, numpy, and other framework scratch |
 | `/data/scratch` | per-experiment working directory — weights, model files, intermediate state (training code reads `EXPERIMENT_SCRATCH_PATH=/data/scratch` and roots its writes there) |
 
-All three mounts are tmpfs-backed emptyDirs and are destroyed with the pod.
+All three mounts are `emptyDir` volumes **backed by node disk** — not tmpfs — and are destroyed with the pod. Each carries a `sizeLimit` (backend#2223); before that they were unbounded, which is how an ephemeral-storage eviction came to be reported to a user as "CPU Overload" (backend#2053).
+
+> Disk-backed is the **correct** choice and must stay that way. `medium: Memory` would charge every file written there against the pod's *memory* limit, so a resume checkpoint (RFC §X3 writes roughly 3× model size — ~3.6 GiB for BERT-large) would OOM the very run the checkpoint exists to save. This sentence previously read "tmpfs-backed", which was simply wrong about the code; if you are tempted to "fix" the code to match an older copy of this doc, don't.
 
 ### 4.5 Storage isolation (G5, G6)
 
@@ -601,7 +603,28 @@ If the customer enables the policy on a CNI that doesn't enforce (default EKS, F
 
 ### 8.8 DoS via resource exhaustion — **out of scope**
 
-A malicious model can allocate memory / consume CPU up to the pod's resource limits. `resources.limits` are always applied: `cpu=2,memory=8Gi` by default, or whatever the operator pins via `env.RESOURCE_REQUESTS`/`env.RESOURCE_LIMITS` (both installers write that pair, sized to the machine at install time). Sizing from node allocatable (75% with the same floors, backend#664) is available but gated OFF behind `env.DERIVE_JOB_ENVELOPE` and only consulted when the pair is unset (backend#2167, backend#2250). Whichever path applies, a limit is always set — this section does not depend on which one. A pod running at 100% of its limits is expected behavior for training; OOMKill or eviction is the Kubernetes-native response. The chart does not attempt to detect or prevent resource-intensive pathological inputs.
+A malicious model can consume resources up to whatever bound applies to each one. This section used to claim a single blanket property — *"`resources.limits` are always applied"* — which was **never true of disk** and, on client-runtime images containing #378 (backend#2418), is not true of CPU either. The honest statement is per resource, and the CPU row carries a version qualifier because that row describes the *runtime image*, not this chart — see the note under the table:
+
+| Resource | Bound | Enforced by |
+|---|---|---|
+| **Memory** | Hard limit; `requests == limits` | cgroup `memory.max` → OOMKill. **Unchanged**, and load-bearing: this is what stops one tenant consuming another's memory |
+| **CPU** | **From client-runtime images containing #378 (backend#2418):** proportional share, **no ceiling**; ≥1/N under contention with N contenders. **Earlier images apply `requests == limits`** — a hard quota | cgroup `cpu.weight` on newer images, `cpu.max` on earlier ones. N is bounded by the L4.1 concurrency cap (backend#2419), not by this section |
+| **Disk** | **Not bounded at all** | Nothing. There is no `ephemeral-storage` request or limit anywhere, and the resource grammar cannot express one — backend#2223 |
+
+**Why the CPU row is version-qualified and always will be.** The chart and the runtime are versioned separately, and this row describes behaviour owned by `node_sizing.py` in the client-runtime image — not by anything the chart renders. A customer on chart 1.9.66 with an older runtime image gets the hard quota however this file reads, and upgrading the chart alone will never change that. So the qualifier is not a note about a merge window that can be deleted once client-runtime#378 lands: it stays correct before that merge, after it, and on a fleet running mixed image versions, which is the only form of the sentence that is true of every deployment at once. (Same treatment, and the same reason, as the ingestor-build ordering paragraph in §4.)
+
+Envelope provenance, for completeness: `cpu=2,memory=8Gi` by default, or whatever the operator pins via `env.RESOURCE_REQUESTS`/`env.RESOURCE_LIMITS` (both installers write that pair, sized to the machine at install time). Sizing from node allocatable is available but gated OFF behind `env.DERIVE_JOB_ENVELOPE` and only consulted when the pair is unset (backend#2167, backend#2250). The CPU row above describes the derive path; an operator-pinned `env.RESOURCE_LIMITS` is an explicit statement and still applies a hard CPU ceiling.
+
+**Why dropping the CPU ceiling does not widen the threat model.** A CPU quota looks like isolation and mostly is not:
+
+- **Memory is untouched.** The DoS vector that matters stays closed — a tenant cannot consume another's memory, OOM it, or exceed its own limit.
+- **Noisy-neighbour is bounded by construction, not by trust.** Equal weights give each of N contenders ≥1/N of CPU time whatever the code does. A quota bounds the *ceiling*; a weight bounds the *floor*, which is the property a victim actually needs.
+- **Eviction changes class, not exposure.** kubelet ranks memory-pressure eviction by usage *above* requests, and a pod whose memory request equals its need never exceeds it. `priority-class.yaml` already designates training pods the preemption victims, to protect mysql.
+- **Deliberate CPU-burning is charged, and the alignment is exact.** The compute budget meters `CPU_FLOPS_BENCHMARK × cpu_usage × time` — burning CPU is precisely what it bills. A tenant degrading a rival spends their own allocation and gets paused when it runs out (`experiment_utils.py` refuses a start at ≥99% of allocation and accumulates atomically under `select_for_update`).
+
+Rejected alternative, recorded: keeping `limits` at a generous fraction would have preserved the old sentence literally, but CPU quota throttles in **bursts** and multi-threaded processes suffer most — our pods run N dataloader workers plus a torch thread pool — so a ceiling reintroduces a fraction of the very problem backend#2418 exists to remove.
+
+A pod running at 100% of its memory limit is expected behavior for training; OOMKill or eviction is the Kubernetes-native response. The chart does not attempt to detect or prevent resource-intensive pathological inputs.
 
 ### 8.9 Cosign-bootstrap trust root on boxes without cosign — **security / operator**
 

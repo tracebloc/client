@@ -125,7 +125,7 @@ Confirm the edge now tracks the chart pin:
 
 ```bash
 kubectl get deploy -n <namespace> <release>-jobs-manager \
-  -o jsonpath='{.items[0].spec.template.spec.containers[0].env[?(@.name=="INGESTOR_IMAGE_DIGEST")].value}{"\n"}'
+  -o jsonpath='{.spec.template.spec.containers[0].env[?(@.name=="INGESTOR_IMAGE_DIGEST")].value}{"\n"}'
 ```
 
 **Canary edges.** To float one prod edge on the tag while the rest of the fleet

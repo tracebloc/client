@@ -142,6 +142,12 @@ tests:
   # secrets, and do not scrub the diagnosis — is proven behaviourally in
   # scripts/tests/collector-redaction-floor.sh, which derives the regexes from
   # the render and feeds them specimens.
+  #
+  # Since backend#2378 the statements are GENERATED from client/log_redactions.json
+  # (the one declaration, vendored from client-runtime), so these fragments are no
+  # longer a second hand copy of a hand copy — they are a cheap smoke test that the
+  # generation ran at all. That the render IS the declaration, pair for pair and in
+  # order, is scripts/tests/collector-redaction-derived.sh's job.
   - it: names all six redaction families in the rendered config
     set:
       telemetryCollector.enabled: true

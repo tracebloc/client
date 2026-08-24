@@ -39,13 +39,13 @@
         },
         "RESOURCE_REQUESTS": {
           "type": "string",
-          "pattern": "^(cpu=\\S+,memory=\\S+)?$",
-          "description": "Optional explicit resource requests for spawned training jobs. Unset: jobs-manager uses its built-in 'cpu=2,memory=8Gi' literal. The node-allocatable derivation (75%, backend#664 L0) is real but gated OFF behind DERIVE_JOB_ENVELOPE, which is only consulted when BOTH this key and its pair are unset (backend#2167, backend#2250)."
+          "pattern": "^((cpu|memory|ephemeral-storage)=[^,=\\s]+(,(cpu|memory|ephemeral-storage)=[^,=\\s]+)*)?$",
+          "description": "Optional explicit resource requests for spawned training jobs. Comma-separated key=value over a CLOSED set of dimensions: cpu, memory, ephemeral-storage (disk added by backend#2223). Order is free and any subset is allowed; an omitted dimension falls back to jobs-manager's own default. The vocabulary is closed deliberately: client-runtime parses this with a generic key=value split and no allow-list, so a typo such as 'memroy=8Gi' would reach the pod spec as a silently wrong envelope instead of an error. The previous pattern was also leakier than it looked - \\S+ matched commas, so 'cpu=2,memory=8Gi,gpu=1' validated. Unset: jobs-manager uses its built-in 'cpu=2,memory=8Gi' literal. The node-allocatable derivation (75%, backend#664 L0) is real but gated OFF behind DERIVE_JOB_ENVELOPE, which is only consulted when BOTH this key and its pair are unset (backend#2167, backend#2250)."
         },
         "RESOURCE_LIMITS": {
           "type": "string",
-          "pattern": "^(cpu=\\S+,memory=\\S+)?$",
-          "description": "Optional explicit resource limits for spawned training jobs. Unset: jobs-manager uses its built-in 'cpu=2,memory=8Gi' literal. The node-allocatable derivation (75%, backend#664 L0) is real but gated OFF behind DERIVE_JOB_ENVELOPE, which is only consulted when BOTH this key and its pair are unset (backend#2167, backend#2250)."
+          "pattern": "^((cpu|memory|ephemeral-storage)=[^,=\\s]+(,(cpu|memory|ephemeral-storage)=[^,=\\s]+)*)?$",
+          "description": "Optional explicit resource limits for spawned training jobs. Comma-separated key=value over a CLOSED set of dimensions: cpu, memory, ephemeral-storage (disk added by backend#2223). Order is free and any subset is allowed; an omitted dimension falls back to jobs-manager's own default. The vocabulary is closed deliberately: client-runtime parses this with a generic key=value split and no allow-list, so a typo such as 'memroy=8Gi' would reach the pod spec as a silently wrong envelope instead of an error. The previous pattern was also leakier than it looked - \\S+ matched commas, so 'cpu=2,memory=8Gi,gpu=1' validated. Unset: jobs-manager uses its built-in 'cpu=2,memory=8Gi' literal. The node-allocatable derivation (75%, backend#664 L0) is real but gated OFF behind DERIVE_JOB_ENVELOPE, which is only consulted when BOTH this key and its pair are unset (backend#2167, backend#2250)."
         },
         "RESOURCE_PROVENANCE": {
           "type": "string",
@@ -471,6 +471,17 @@
     "tbIngestPassword": {
       "type": "string",
       "description": "backend#1528 S1: optional operator pin for the tb_ingest account password (3-tier resolution, mirrors credmgrPassword). Empty = generate-and-persist. Set for DR / a pre-created MySQL account / forced rotation. Must be alphanumeric."
+    },
+    "bootstrapDbReparent": {
+      "type": [
+        "boolean",
+        "null"
+      ],
+      "description": "OPERATOR OVERRIDE, normally unset. When null the effective value comes from bootstrapDbReparentByEnv keyed on the resolved CLIENT_ENV, mirroring serviceDbAccounts. backend#1528 S3 (RFC-0003 D10 close-out, FINAL stage): re-parent the account-minting bootstrap DDL off the root-equivalent edgeuser onto MySQL root (client-runtime#310 reads DB_BOOTSTRAP_USER/PASSWORD), the prerequisite for REVOKE/DROP of edgeuser. Off everywhere by default; flip per environment dev-first, only after serviceDbAccounts + perExperimentDbCreds are verified on the fleet and the S0 SHOW GRANTS snapshot is captured. When on, bootstrapDbPassword is REQUIRED."
+    },
+    "bootstrapDbPassword": {
+      "type": "string",
+      "description": "backend#1528 S3: REQUIRED when bootstrapDbReparent resolves on — the password jobs-manager authenticates with as MySQL root to run the mint DDL. NO generated default (2-tier: operator pin -> existing Secret value -> Helm fails): jobs-manager authenticates as root and never runs ALTER USER root, so a random value would lock the minter out and CrashLoop it. Set to the mysql-client image's baked root password (see backend#947 for the value and its rotated replacement). NOT constrained to alphanumeric — never interpolated into DDL, only a connection parameter."
     },
     "perIngestionTables": {
       "type": "boolean",
@@ -1327,6 +1338,13 @@
     "serviceDbAccountsByEnv": {
       "type": "object",
       "description": "Per-environment default for the dedicated tb_meta/tb_ingest identities, keyed on the RESOLVED CLIENT_ENV (dev|stg|prod \u2014 documented aliases are normalized first). This is the mechanism behind #1151's 'flip per environment, dev first'; before it, that plan had no implementation and the fleet's posture could not be read in one place. backend#1752.",
+      "additionalProperties": {
+        "type": "boolean"
+      }
+    },
+    "bootstrapDbReparentByEnv": {
+      "type": "object",
+      "description": "Per-environment default for the backend#1528 S3 bootstrap re-parent (edgeuser -> root for the account-minting DDL), keyed on the RESOLVED CLIENT_ENV (dev|stg|prod \u2014 aliases normalized first). Mirrors serviceDbAccountsByEnv. This is the LAST, edgeuser-retiring step, so it is false everywhere by default; flip dev-first only after the earlier flags are verified on the fleet.",
       "additionalProperties": {
         "type": "boolean"
       }

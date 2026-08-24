@@ -479,6 +479,33 @@ _strip_paste_garbage() {
   printf '%s' "$s" | tr -d '\000-\037\177'
 }
 
+# _version_lt A B — true when dotted-numeric A < B. Pure and self-contained: no
+# `sort -V` (BSD sort predates it, and this must behave the same on macOS) and no
+# jq. Missing or non-numeric components read as 0, so "0.10" < "0.10.1" and a
+# pre-release suffix ("0.10.0-rc.1") compares as its base version.
+#
+# Lives here rather than in assess.sh (backend#2422) because cluster.sh gates a
+# kubelet flag on the k3s pin and assess.sh is sourced only conditionally.
+#
+# CALLER MUST STRIP A LEADING "v". A non-numeric leading component reads as 0, so
+# `_version_lt v1.36.3 1.31.0` is TRUE — the comparison silently inverts and a
+# version gate built on it never fires. Pass "${K8S_VERSION#v}", not
+# "$K8S_VERSION". Pinned by a test in scripts/tests/assess.bats.
+_version_lt() {
+  local a="${1%%-*}" b="${2%%-*}" i av bv
+  local -a _A _B
+  IFS=. read -r -a _A <<<"$a"
+  IFS=. read -r -a _B <<<"$b"
+  for ((i = 0; i < 3; i++)); do
+    av="${_A[i]:-0}"; bv="${_B[i]:-0}"
+    [[ "$av" =~ ^[0-9]+$ ]] || av=0
+    [[ "$bv" =~ ^[0-9]+$ ]] || bv=0
+    (( av < bv )) && return 0
+    (( av > bv )) && return 1
+  done
+  return 1
+}
+
 # Best-effort chart version of the installed client release in namespace $1
 # (e.g. "1.4.4"); empty if not found / cluster unreachable. Greps helm's CHART
 # column ("client-<ver>"), so it needs no jq.

@@ -1040,6 +1040,48 @@ _create_new_cluster() {
       --k3s-arg "--disable=local-storage@server:*"
     )
   fi
+  # cgroup v1 hosts (backend#2422). Kubernetes 1.35 flipped the kubelet's
+  # `failCgroupV1` default to TRUE, so from k3s 1.35 the kubelet REFUSES TO START
+  # on a cgroup v1 or hybrid host. That is not an exotic case for us: WSL2
+  # defaults to hybrid cgroups, and RHEL 8 / CentOS 7 / Ubuntu 20.04 are cgroup v1
+  # by default — i.e. the Windows laptops and hospital Linux boxes we install on.
+  # k3s never sets the field, so the upstream default applies, and k3s documents
+  # none of this: a customer would see only a bare upstream kubelet message with
+  # no hint that an override exists.
+  #
+  # Set it proactively so the refusal is never reached. Verified on a real
+  # v1.36.3+k3s1 cluster: k3s passes it through verbatim (`Running kubelet …
+  # --fail-cgroupv1=false …`) and the node comes up Ready with no parse complaint.
+  # On a cgroup v2 host — every current install — it is a no-op.
+  #
+  # GATED, and the gate is load-bearing: `--fail-cgroupv1` was ADDED in kubelet
+  # 1.31. Passing it to the 1.29.4 kubelet we pin today would be an unknown flag
+  # and the kubelet would fail to start — i.e. an ungated version of this line
+  # breaks every install. Note the `#v` strip: _version_lt reads a leading "v" as
+  # 0 and would invert the comparison (see common.sh).
+  #
+  # `latest` is handled EXPLICITLY rather than by parse accident (#806 review).
+  # It is the unsupported opt-out (#547) where k3d chooses the k3s version and we
+  # cannot read it, so the choice is between a flag that is harmless from 1.31 and
+  # a refusal that is fatal from 1.35 — and `latest` is the very path that produced
+  # the v1.35.5 drift incident. `K3D_VERSION` is pinned at v5.9.0, whose default
+  # k3s is 1.32 (above the flag's introduction, below the refusal), so emitting is
+  # safe today and becomes correct the moment k3d's default crosses 1.35.
+  #
+  # Everything else non-numeric — empty, a digest-only pin — still skips, because
+  # _version_lt reads a non-numeric component as 0 and therefore as below 1.31.
+  # Empty only occurs in tests: common.sh defaults K8S_VERSION to the pin.
+  # `@all`, NOT `@server:*`. AGENTS defaults to 1 (common.sh), and an agent runs a
+  # kubelet too — scoping this to the server would leave the agent kubelet refusing
+  # to start on a cgroup v1 host, so `--wait` fails or the cluster sits half-ready:
+  # the exact refusal this block exists to prevent (#806 Bugbot, High). The
+  # `--disable=` args above are `@server:*` because addon deployment is a
+  # server-only concern; a kubelet arg is not, and the two must not be copied from
+  # each other. `--kubelet-arg` is accepted by both `k3s server` and `k3s agent`.
+  if [[ "${K8S_VERSION}" == "latest" ]] || ! _version_lt "${K8S_VERSION#v}" "1.31.0"; then
+    K3D_ARGS+=(--k3s-arg "--kubelet-arg=fail-cgroupv1=false@all")
+  fi
+
   # Bounded create (#426): --wait alone has no deadline, so a stalled image
   # pull (rate-limited registry, TLS-intercepting proxy) hangs the create
   # forever. k3d's own --timeout aborts it with a real error instead; the env
