@@ -19,7 +19,7 @@
 #                                not prompted — the client is identified by its credentials)
 #    SERVERS=1                   default: 1  (control-plane nodes)
 #    AGENTS=1                    default: 1  (worker nodes)
-#    K8S_VERSION=v1.29.4-k3s1   default: v1.29.4-k3s1 (pinned + validated; "latest" is UNSUPPORTED — see #547)
+#    K8S_VERSION=v1.36.3-k3s1   default: v1.36.3-k3s1 (pinned + validated; "latest" is UNSUPPORTED — see #547)
 #    K3D_VERSION=v5.9.0          default: v5.9.0  (k3d release tag; "latest" resolves at install time)
 #    HOST_DATA_DIR=~/.tracebloc  default: ~/.tracebloc
 #    TB_STORAGE_MODE=hostpath    default: node-local  (RFC-0003 Option C; D15 flip, client#456)

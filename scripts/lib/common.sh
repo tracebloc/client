@@ -880,7 +880,7 @@ if [[ "$TB_STORAGE_MODE" == "node-local" ]]; then
 fi
 # Pinned default; an empty value falls back to this pin (`:-` treats empty and
 # unset the same — there is no opt-out to "latest" for k3s).
-K8S_VERSION="${K8S_VERSION:-v1.29.4-k3s1}"
+K8S_VERSION="${K8S_VERSION:-v1.36.3-k3s1}"
 # Pinned default; ONLY the literal K3D_VERSION=latest resolves the newest k3d
 # release at install time instead (an empty value falls back to this pin, like
 # K8S_VERSION above). The binary is fetched directly from the release and
@@ -1241,7 +1241,7 @@ Advanced configuration (environment variables):
   TB_NAMESPACE   Secure-environment name        (default: tracebloc)
   SERVERS        Control-plane nodes             (default: 1)
   AGENTS         Worker nodes                    (default: 1)
-  K8S_VERSION    k3s image tag                   (default: v1.29.4-k3s1)
+  K8S_VERSION    k3s image tag                   (default: v1.36.3-k3s1)
   K3D_VERSION    k3d release tag                 (default: v5.9.0; "latest" resolves at install time)
   HELM_VERSION   Helm release tag                (default: v4.2.3; "latest" resolves at install time)
   HOST_DATA_DIR  Persistent data directory       (default: ~/.tracebloc)

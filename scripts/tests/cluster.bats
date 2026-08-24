@@ -977,6 +977,28 @@ _stub_create_cluster_deps() {
   [[ "$output" == *"k3d cluster delete"* ]] || return 1
 }
 
+# backend#2448: the pin move makes drift the COMMON case. Every cluster that
+# predates it now warns, so the warning has to be true for THAT reader — the
+# original text named only "older/unpinned installer or K8S_VERSION=latest",
+# which is not what happened to them.
+@test "_check_existing_cluster_k8s_version: the drift warning does not misattribute a pre-pin-move cluster" {
+  local pin
+  pin="$(sed -n 's/^K8S_VERSION=\(.*\)$/\1/p' "$BATS_TEST_DIRNAME/../spec/facts.env")"
+  [[ -n "$pin" ]] || { echo "could not read the pin from facts.env"; return 1; }
+  K8S_VERSION="$pin"
+  docker() { echo "rancher/k3s:v1.29.4-k3s1"; }   # the pin BEFORE backend#2448
+  run _check_existing_cluster_k8s_version
+  [ "$status" -eq 0 ] || return 1
+  # names both versions, so the operator can see what moved
+  [[ "$output" == *"v1.29.4-k3s1"* ]] || return 1
+  [[ "$output" == *"$pin"* ]] || return 1
+  # offers the recreate remedy
+  [[ "$output" == *"k3d cluster delete"* ]] || return 1
+  # and says predating the pin is a cause, rather than blaming the operator's setup
+  [[ "$output" == *"predates the current pin"* ]] \
+    || { echo "warning still attributes drift only to an old installer / latest: $output"; return 1; }
+}
+
 @test "_check_existing_cluster_k8s_version: registry-qualified + digest suffix still compares the tag" {
   K8S_VERSION="v1.29.4-k3s1"
   docker() { echo "docker.io/rancher/k3s:v1.29.4-k3s1@sha256:deadbeef"; }
@@ -1283,11 +1305,20 @@ merge_setup() {                       # isolate HOME/KUBECONFIG from the real ma
 # the kubelet refuses to start on a cgroup v1/hybrid host — WSL2 (hybrid by
 # default) and RHEL 8 / CentOS 7 / Ubuntu 20.04. We pass the override
 # proactively, but ONLY from 1.31, because that is the release that ADDED the
-# flag: handing it to the 1.29.4 kubelet we pin today is an unknown flag and the
-# kubelet does not start. So the gate is not a nicety — an ungated version of
-# this line breaks every install on the current pin.
+# flag: handing it to a pre-1.31 kubelet is an unknown flag and the kubelet does
+# not start. So the gate is not a nicety — an ungated version of this line broke
+# every install while the pin was 1.29.4.
+#
+# The bands, since a reader will need them to interpret a failure here:
+#   < 1.31   the flag does not exist        -> must NOT be emitted
+#   1.31-1.34 exists, no refusal yet        -> emitting is harmless
+#   >= 1.35  refusal is ON by default       -> emitting is REQUIRED
+# The shipped pin is 1.36.3, i.e. the third band.
 
-@test "fail-cgroupv1: NOT passed on the currently pinned k3s (1.29.4 predates the flag)" {
+@test "fail-cgroupv1: NOT passed on a pre-1.31 k3s, which predates the flag" {
+  # 1.29.4 was the pin until backend#2448 moved it to 1.36.3. Kept as the
+  # below-the-band case; it is deliberately a LITERAL, because it stands for
+  # "any version older than the flag" rather than for whatever we ship.
   K8S_VERSION="v1.29.4-k3s1"
   run _create_new_cluster
   [ "$status" -eq 0 ] || return 1
@@ -1314,6 +1345,29 @@ merge_setup() {                       # isolate HOME/KUBECONFIG from the real ma
   [ "$status" -eq 0 ] || return 1
   run mock_calls
   [[ "$output" == *"fail-cgroupv1=false"* ]] || return 1
+}
+
+@test "fail-cgroupv1: the SHIPPED pin emits the flag — derived from facts.env, not restated" {
+  # DERIVED, because every version literal in a test is a copy that keeps passing
+  # after the real pin moves. This suite had exactly that: a test named "the
+  # currently pinned k3s" that hardcoded 1.29.4 and sailed through the 1.36
+  # migration still green, while NOTHING asserted the behaviour of the version we
+  # actually ship. facts.env is the single source of truth (check-facts.sh stamps
+  # it into every consumer), so read it.
+  #
+  # A red here means one of two things, so check which: either the gate broke, or
+  # the pin moved below 1.31 — in which case not emitting is CORRECT and this test
+  # is the one that needs revisiting (see the bands above).
+  local pin
+  pin="$(sed -n 's/^K8S_VERSION=\(.*\)$/\1/p' "$BATS_TEST_DIRNAME/../spec/facts.env")"
+  # Fail closed: an unreadable spec is a finding, not a pass.
+  [[ -n "$pin" ]] || { echo "could not read K8S_VERSION from scripts/spec/facts.env"; return 1; }
+  K8S_VERSION="$pin"
+  run _create_new_cluster
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  run mock_calls
+  [[ "$output" == *"--kubelet-arg=fail-cgroupv1=false@all"* ]] \
+    || { echo "the shipped pin ($pin) does not emit the cgroup v1 override"; return 1; }
 }
 
 @test "fail-cgroupv1: unset K8S_VERSION does not emit the flag" {
@@ -1818,4 +1872,40 @@ k3d-tracebloc-agent-0 agent" passthrough
   # one of each match is the definition itself; anything above that is a call site
   (( sh_calls >= 2 )) || { echo "bash: defined but never called (code mentions: $sh_calls)"; return 1; }
   (( ps_calls >= 2 )) || { echo "ps1: defined but never called (code mentions: $ps_calls)"; return 1; }
+}
+
+@test "the README's recreate instructions carry the same release-first step as _recreate_cluster_hint (#819)" {
+  # This PR forces a cluster REBUILD on the whole installed base (k3s's version is
+  # fixed at create time), so the README's recreate instructions are suddenly the
+  # most-followed path in the repo. The first draft of that note said only
+  # `k3d cluster delete` — and both installers explicitly warn that deleting the
+  # cluster first "strands it on your dashboard for good", because the secure
+  # environment is anchored to the cluster's identity. Following the README would
+  # have stranded the backend record for every customer this pin bump rebuilds
+  # (Bugbot on #819).
+  #
+  # DERIVED from _recreate_cluster_hint rather than restated: pull the command lines
+  # the installer actually prints and require the README to carry them. A guard that
+  # hardcoded "tracebloc delete --keep-data" would agree with itself while the hint
+  # moved on.
+  local sh="$BATS_TEST_DIRNAME/../lib/cluster.sh"
+  local readme="$BATS_TEST_DIRNAME/../../README.md"
+
+  # the release command, exactly as the hint spells it (strip the hint wrapper and
+  # the trailing parenthetical gloss)
+  local release
+  release=$(sed -n 's/^ *hint "  \(tracebloc delete [^ ]*\).*/\1/p' "$sh" | head -1)
+  [[ -n "$release" ]] || { echo "could not read the release command out of _recreate_cluster_hint"; return 1; }
+
+  grep -qF -- "$release" "$readme" \
+    || { echo "README's recreate guidance omits the release step the installer prints: '$release'"; return 1; }
+
+  # ...and it must come BEFORE the k3d delete, which is the whole point: the
+  # ordering is what protects the dashboard record.
+  local rel_line k3d_line
+  rel_line=$(grep -nF -- "$release" "$readme" | head -1 | cut -d: -f1)
+  k3d_line=$(grep -n 'k3d cluster delete' "$readme" | head -1 | cut -d: -f1)
+  [[ -n "$k3d_line" ]] || { echo "README never mentions the k3d delete"; return 1; }
+  (( rel_line < k3d_line )) \
+    || { echo "README puts the k3d delete (line $k3d_line) before the release (line $rel_line)"; return 1; }
 }

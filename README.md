@@ -70,6 +70,15 @@ irm https://tracebloc.io/i.ps1 | iex
 
 The installer pulls helper scripts from this repo at runtime — see [`scripts/install-k8s.sh`](scripts/install-k8s.sh) and [`scripts/install-k8s.ps1`](scripts/install-k8s.ps1). Those scripts are pinned to an **immutable release tag** and each is **verified against a cosign-signed manifest** before it runs; the install **fails closed** if verification can't complete (it never silently runs unverified code). See [docs/SUPPLY_CHAIN.md](docs/SUPPLY_CHAIN.md) for the integrity model and how to verify a release by hand.
 
+**Kubernetes version, and why an existing cluster keeps its old one.** New installs create the cluster on the pinned, validated k3s version (currently **v1.36.3-k3s1** — the single source of truth is [`scripts/spec/facts.env`](scripts/spec/facts.env)). **k3s's version is fixed when the cluster is created** and cannot be changed on a running one, so an existing cluster stays on whatever it was born with, even across correctly-pinned re-runs. The installer detects that and prints the version it found alongside the pin, with the recreate command — it warns, it does not refuse, so a re-run on an older cluster keeps working. To actually move onto the pinned version you have to recreate the cluster — and **release the secure environment first**, because it is anchored to the cluster's identity and deleting the cluster first strands it on your dashboard for good:
+
+```bash
+tracebloc delete --keep-data      # releases this secure environment; keeps your local data
+k3d cluster delete tracebloc      # then re-run the installer
+```
+
+(Nothing installed on this machine yet? Then just the `k3d` line.) This is the same two-step the installer itself prints when it detects a drifted cluster. Which data survives depends on the storage mode, selected by `TB_STORAGE_MODE`: in **hostpath** mode your data stays on the host under `HOST_DATA_DIR` and is rebound to the new cluster; in **node-local** mode (RFC-0003 Option C) the data lives inside the node and is destroyed with it. The installer refuses to continue if it cannot see your data directory from inside the new nodes, so a recreate cannot silently start writing into the node instead of onto your disk ([#817](https://github.com/tracebloc/client/pull/817)).
+
 **Reinstalling on a machine that still holds data.** A *new* install (one that creates a fresh cluster) will not silently adopt data left behind by an earlier install. If it finds existing data under `HOST_DATA_DIR` (default `~/.tracebloc`, both the flat and per-release layouts), it stops and asks you to choose **reuse** / **wipe** / **a different directory**. In-place upgrades that keep the existing cluster are unaffected — their data stays by design. For non-interactive runs pass `--reuse-data`, `--wipe-data`, or `--data-dir=<path>` (with no choice and no terminal the install aborts rather than adopting). This is the RFC-0003 offboard-hygiene guard ([#376](https://github.com/tracebloc/client/issues/376)).
 
 ### Helm install
