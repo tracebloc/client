@@ -6363,3 +6363,282 @@ Describe "Wait-MetricsApiService (client#553 -- the Windows installer had no wai
     }
   }
 }
+
+Describe "Assert-NodesSeeHostData (backend#2422)" {
+  # /tracebloc is the k3d bind mount of HOST_DATA_DIR. If it is not in effect,
+  # DirectoryOrCreate fabricates the dirs inside the node and the install looks
+  # healthy while storing nothing on this machine. The chart-side fix is
+  # unavailable (spec.persistentvolumesource is immutable, so `type: Directory`
+  # fails the helm upgrade of any existing release), so this probe is the guard —
+  # and it has to fail closed. Keep in step with bash _verify_nodes_see_host_data.
+  #
+  # Mocks Invoke-DockerCli, not `docker`: the probe routes through the bounded
+  # wrapper so a WEDGED daemon cannot hang a headless install (#817 Bugbot).
+  BeforeEach {
+    $script:HOST_DATA_DIR = Join-Path ([System.IO.Path]::GetTempPath()) "tb2422-$([guid]::NewGuid().ToString('N'))"
+    New-Item -ItemType Directory -Force -Path $script:HOST_DATA_DIR | Out-Null
+    $script:CLUSTER_NAME = "tracebloc"
+  }
+  AfterEach {
+    Remove-Item -Recurse -Force -Path $script:HOST_DATA_DIR -ErrorAction SilentlyContinue
+  }
+
+  # The {Code,Output} shape Invoke-DockerCli returns is written out inline in each
+  # Mock: a helper function defined here is NOT visible inside a Mock scriptblock
+  # (different scope), which fails every test with "term not recognized".
+  #
+  # Output is ONE STRING with embedded newlines, never an array -- that is what
+  # Invoke-BoundedProcess actually builds ($outTask.Result + $errTask.Result). A
+  # mock returning an array would pass while production parsed a different shape,
+  # which is testing a copy of the code instead of the code.
+  It "passes when every node sees the host tree, and leaves no probe file behind" {
+    Mock Invoke-DockerCli {
+      if ($DockerArgs[0] -eq "ps") { return ([pscustomobject]@{ Code = 0; Output = $(if ($DockerArgs -contains "label=k3d.role=server") { "k3d-tracebloc-server-0`n" } else { "k3d-tracebloc-agent-0`n" }) }) }
+      return ([pscustomobject]@{ Code = 0; Output = (Get-Content (Join-Path $script:HOST_DATA_DIR ".tracebloc-mount-probe") -Raw) })
+    }
+    { Assert-NodesSeeHostData } | Should -Not -Throw
+    Test-Path (Join-Path $script:HOST_DATA_DIR ".tracebloc-mount-probe") | Should -BeFalse
+  }
+
+  It "REFUSES when a node cannot see the host tree, and names Docker Desktop file sharing" {
+    Mock Invoke-DockerCli {
+      if ($DockerArgs[0] -eq "ps") { return ([pscustomobject]@{ Code = 0; Output = $(if ($DockerArgs -contains "label=k3d.role=server") { "k3d-tracebloc-server-0`n" } else { "" }) }) }
+      return ([pscustomobject]@{ Code = 0; Output = "" })
+    }
+    { Assert-NodesSeeHostData } | Should -Throw -ExpectedMessage "*cannot see your data directory*"
+    $err = $null
+    try { Assert-NodesSeeHostData } catch { $err = $_.Exception.Message }
+    $err | Should -BeLike "*File sharing*"
+  }
+
+  It "compares the token, not just the file's presence" {
+    # A mount pointed at the WRONG host directory still shows a file of this name
+    # from an earlier run. Presence alone would pass; content must not.
+    Mock Invoke-DockerCli {
+      if ($DockerArgs[0] -eq "ps") { return ([pscustomobject]@{ Code = 0; Output = $(if ($DockerArgs -contains "label=k3d.role=server") { "k3d-tracebloc-server-0`n" } else { "" }) }) }
+      return ([pscustomobject]@{ Code = 0; Output = "a-token-from-some-other-run" })
+    }
+    { Assert-NodesSeeHostData } | Should -Throw -ExpectedMessage "*cannot see your data directory*"
+  }
+
+  It "fails closed when no nodes can be listed" {
+    Mock Invoke-DockerCli { return ([pscustomobject]@{ Code = 0; Output = "" }) }
+    { Assert-NodesSeeHostData } | Should -Throw -ExpectedMessage "*Couldn't list the nodes*"
+  }
+
+  It "fails closed when docker ps itself fails or times out" {
+    # Code 124 is Invoke-BoundedProcess's timeout. A wedged daemon must refuse,
+    # not be read as "no nodes, carry on" — and certainly not hang (#817 Bugbot).
+    Mock Invoke-DockerCli { return ([pscustomobject]@{ Code = 124; Output = "docker ps timed out after 10s" }) }
+    { Assert-NodesSeeHostData } | Should -Throw -ExpectedMessage "*Couldn't list the nodes*"
+  }
+
+  It "fails closed when a node's docker exec fails" {
+    Mock Invoke-DockerCli {
+      if ($DockerArgs[0] -eq "ps") { return ([pscustomobject]@{ Code = 0; Output = $(if ($DockerArgs -contains "label=k3d.role=server") { "k3d-tracebloc-server-0`n" } else { "" }) }) }
+      return ([pscustomobject]@{ Code = 1; Output = "Error response from daemon" })
+    }
+    { Assert-NodesSeeHostData } | Should -Throw -ExpectedMessage "*cannot see your data directory*"
+  }
+
+  It "fails closed when ONE role's query errors (#817)" {
+    # One query per role means a per-role FAILURE is its own fail-closed decision.
+    # `server` answers, `agent` errors: we cannot tell whether there are agents to
+    # probe, so refusing is the only safe answer. An EMPTY agent list is different
+    # and legitimate (AGENTS=0), which is why the branch keys on .Code and not on
+    # emptiness — a distinction the empty-list test cannot see, since both reach the
+    # same final error (measured: a fail-open mutation stayed green without this).
+    Mock Invoke-DockerCli {
+      if ($DockerArgs[0] -eq "ps") {
+        if ($DockerArgs -contains "label=k3d.role=agent") { return ([pscustomobject]@{ Code = 1; Output = "Cannot connect to the Docker daemon" }) }
+        return ([pscustomobject]@{ Code = 0; Output = "k3d-tracebloc-server-0`n" })
+      }
+      return ([pscustomobject]@{ Code = 0; Output = (Get-Content (Join-Path $script:HOST_DATA_DIR ".tracebloc-mount-probe") -Raw) })
+    }
+    { Assert-NodesSeeHostData } | Should -Throw -ExpectedMessage "*Couldn't list the nodes*"
+  }
+
+  It "accepts an EMPTY agent list, since AGENTS=0 is legitimate (#817)" {
+    # The opposite direction: a single-node cluster genuinely has no agent and must
+    # not be refused.
+    Mock Invoke-DockerCli {
+      if ($DockerArgs[0] -eq "ps") {
+        if ($DockerArgs -contains "label=k3d.role=agent") { return ([pscustomobject]@{ Code = 0; Output = "" }) }
+        return ([pscustomobject]@{ Code = 0; Output = "k3d-tracebloc-server-0`n" })
+      }
+      return ([pscustomobject]@{ Code = 0; Output = (Get-Content (Join-Path $script:HOST_DATA_DIR ".tracebloc-mount-probe") -Raw) })
+    }
+    { Assert-NodesSeeHostData } | Should -Not -Throw
+  }
+
+  It "checks EVERY node, not just the server" {
+    # AGENTS defaults to 1 and agents run kubelets, so a training pod can land on
+    # an agent — the same @all-vs-@server trap as the cgroup v1 flag (#806).
+    Mock Invoke-DockerCli {
+      if ($DockerArgs[0] -eq "ps") { return ([pscustomobject]@{ Code = 0; Output = $(if ($DockerArgs -contains "label=k3d.role=server") { "k3d-tracebloc-server-0`n" } else { "k3d-tracebloc-agent-0`n" }) }) }
+      if ($DockerArgs[1] -like "*server-0") { return ([pscustomobject]@{ Code = 0; Output = (Get-Content (Join-Path $script:HOST_DATA_DIR ".tracebloc-mount-probe") -Raw) }) }
+      return ([pscustomobject]@{ Code = 0; Output = "" })   # the AGENT is blind
+    }
+    { Assert-NodesSeeHostData } | Should -Throw -ExpectedMessage "*agent-0*"
+  }
+
+  It "ignores the load balancer by ROLE, not by name suffix" {
+    # k3d's own k3d.role label says what each container IS. The lb is excluded
+    # because it is a `loadbalancer`, not because its name ends in -serverlb.
+    Mock Invoke-DockerCli {
+      # docker HONOURS the role filters, so a `loadbalancer` is never returned for
+      # role=server or role=agent -- excluded by construction, not by a name suffix.
+      if ($DockerArgs[0] -eq "ps") { return ([pscustomobject]@{ Code = 0; Output = $(if ($DockerArgs -contains "label=k3d.role=server") { "k3d-tracebloc-server-0`n" } else { "" }) }) }
+      return ([pscustomobject]@{ Code = 0; Output = (Get-Content (Join-Path $script:HOST_DATA_DIR ".tracebloc-mount-probe") -Raw) })
+    }
+    { Assert-NodesSeeHostData } | Should -Not -Throw
+  }
+
+  It "selects nodes by the EXACT k3d.cluster label, never a name substring (#817 review)" {
+    # `name=k3d-<cluster>-` is an unanchored SUBSTRING match, so a same-prefixed
+    # sibling (k3d-tracebloc-dev-*) would be probed too; created against a
+    # different HOST_DATA_DIR it cannot see this token and the probe would refuse
+    # THIS install while naming a node that is not ours — a false refusal
+    # (@saqlainsyed007).
+    $script:capturedArgs = $null
+    Mock Invoke-DockerCli {
+      if ($DockerArgs[0] -eq "ps") {
+        $script:capturedArgs = ($DockerArgs -join " ")
+        return ([pscustomobject]@{ Code = 0; Output = "k3d-tracebloc-server-0 server`n" })
+      }
+      return ([pscustomobject]@{ Code = 0; Output = (Get-Content (Join-Path $script:HOST_DATA_DIR ".tracebloc-mount-probe") -Raw) })
+    }
+    { Assert-NodesSeeHostData } | Should -Not -Throw
+    $script:capturedArgs | Should -BeLike "*label=k3d.cluster=tracebloc*"
+    $script:capturedArgs | Should -Not -BeLike "*name=k3d-*"
+    $script:capturedArgs | Should -BeLike "*k3d.role*"
+  }
+
+  It "bounds every docker call with a positive timeout (#817 Bugbot)" {
+    # A wedged daemon never returns from a bare `docker`, freezing a headless
+    # install with no output. Every call must carry a deadline.
+    $script:timeouts = @()
+    Mock Invoke-DockerCli {
+      $script:timeouts += $TimeoutSec
+      if ($DockerArgs[0] -eq "ps") { return ([pscustomobject]@{ Code = 0; Output = $(if ($DockerArgs -contains "label=k3d.role=server") { "k3d-tracebloc-server-0`n" } else { "" }) }) }
+      return ([pscustomobject]@{ Code = 0; Output = (Get-Content (Join-Path $script:HOST_DATA_DIR ".tracebloc-mount-probe") -Raw) })
+    }
+    { Assert-NodesSeeHostData } | Should -Not -Throw
+    $script:timeouts.Count | Should -BeGreaterOrEqual 2      # ps + one exec
+    ($script:timeouts | Where-Object { $_ -le 0 }).Count | Should -Be 0
+  }
+
+  It "isolates stdout so docker stderr cannot forge a miss (#817 @saadqbal / Bugbot)" {
+    # THE REAL BUG: Invoke-BoundedProcess returns Output = stdout + stderr concatenated
+    # (a plain string join), and the marker is written -NoNewline. So `cat` emits the
+    # token with no trailing newline and a docker warning glues onto it INSIDE THE SAME
+    # LINE -- "<token>WARNING: ..." -- which is why "take the first non-empty line" does
+    # not fix it either. The result is a FALSE REFUSAL after the cluster is already up.
+    #
+    # Tested against a REAL process, not a mock of Invoke-DockerCli: mocking the very
+    # call whose output shape is the bug would assert nothing about the fix. This runs
+    # a child that writes to BOTH streams and checks the switch actually separates them.
+    $sh = (Get-Command sh -ErrorAction SilentlyContinue)
+    if (-not $sh) { Set-ItResult -Skipped -Because "needs a POSIX sh to write both streams"; return }
+    # No spaces or quotes inside the stderr payload: Invoke-BoundedProcess quotes any
+    # argument containing whitespace, and a nested quoted string inside this -c script
+    # gets mangled by that (which is what made the first version of this test fail with
+    # a truncated payload rather than a real verdict).
+    $script = 'printf tok; printf WARNING:chatter >&2'
+
+    $merged = Invoke-BoundedProcess -FileName $sh.Source -Arguments @("-c", $script) -TimeoutSec 20
+    $merged.Code | Should -Be 0
+    $merged.Output | Should -BeLike "*WARNING*" -Because "the default must keep merging, or callers that classify stderr break"
+    # and it glues on with NO separator -- the precise mechanism of the bug, and the
+    # reason a first-non-empty-line fix cannot work
+    $merged.Output | Should -Be "tokWARNING:chatter"
+
+    $isolated = Invoke-BoundedProcess -FileName $sh.Source -Arguments @("-c", $script) -TimeoutSec 20 -StdoutOnly
+    $isolated.Code | Should -Be 0
+    $isolated.Output | Should -Be "tok"
+    $isolated.Output | Should -Not -BeLike "*WARNING*"
+  }
+
+  It "passes -StdoutOnly on BOTH docker calls, so the isolation cannot regress (#817)" {
+    # The switch above only helps if this function actually asks for it. Capture what
+    # the probe requests rather than trusting the wiring.
+    $script:sawStdoutOnly = @()
+    Mock Invoke-DockerCli {
+      $script:sawStdoutOnly += [bool]$StdoutOnly
+      if ($DockerArgs[0] -eq "ps") { return ([pscustomobject]@{ Code = 0; Output = $(if ($DockerArgs -contains "label=k3d.role=server") { "k3d-tracebloc-server-0`n" } else { "" }) }) }
+      return ([pscustomobject]@{ Code = 0; Output = (Get-Content (Join-Path $script:HOST_DATA_DIR ".tracebloc-mount-probe") -Raw) })
+    }
+    { Assert-NodesSeeHostData } | Should -Not -Throw
+    $script:sawStdoutOnly.Count | Should -BeGreaterOrEqual 2          # ps + one exec
+    ($script:sawStdoutOnly | Where-Object { -not $_ }).Count | Should -Be 0
+  }
+
+  It "passes no argument carrying a space or a quote (#817 Bugbot, High)" {
+    # THE BUG THIS EXISTS FOR. $psi.Arguments joins the args into ONE command line
+    # and quotes any whitespace-bearing value as '"' + $_ + '"' with NO escaping of
+    # inner quotes. The obvious single query --
+    #   --format "{{.Names}} {{.Label `"k3d.role`"}}"
+    # -- has both a space and quotes, so it went out with its own quotes intact and
+    # CommandLineToArgvW toggled in and out of quoting to hand docker ONE token with
+    # the inner quotes CONSUMED: `{{.Names}} {{.Label k3d.role}}`. text/template then
+    # cannot parse k3d.role as an identifier, docker exits non-zero, and the probe
+    # throws "Couldn't list the nodes" -- a FALSE REFUSAL on every Windows hostpath
+    # install, after the cluster is already up.
+    #
+    # Why no earlier test caught it: every case here mocks Invoke-DockerCli, so the
+    # quoting lives BELOW the mock and is unreachable from Pester. The property is
+    # therefore asserted at the mock boundary instead -- on the ARGUMENTS, which is
+    # the layer this suite can actually see.
+    $script:allArgs = @()
+    Mock Invoke-DockerCli {
+      $script:allArgs += ,@($DockerArgs)
+      if ($DockerArgs[0] -eq "ps") { return ([pscustomobject]@{ Code = 0; Output = $(if ($DockerArgs -contains "label=k3d.role=server") { "k3d-tracebloc-server-0`n" } else { "" }) }) }
+      return ([pscustomobject]@{ Code = 0; Output = (Get-Content (Join-Path $script:HOST_DATA_DIR ".tracebloc-mount-probe") -Raw) })
+    }
+    { Assert-NodesSeeHostData } | Should -Not -Throw
+
+    $flat = @($script:allArgs | ForEach-Object { $_ })
+    $flat.Count | Should -BeGreaterThan 0
+    # A quote in ANY argument is unsafe here, whether or not it also has a space:
+    # the quoting branch only triggers on whitespace, so a quoted value silently
+    # passes through un-escaped either way.
+    @($flat | Where-Object { $_ -like '*"*' }).Count | Should -Be 0 -Because "an inner quote is passed through unescaped"
+    @($flat | Where-Object { $_ -match '\s' }).Count  | Should -Be 0 -Because "a whitespace-bearing arg hits the unescaped quoting branch"
+    # and the scoping must still be real: both roles queried, exact cluster label
+    ($flat -contains "label=k3d.role=server") | Should -BeTrue
+    ($flat -contains "label=k3d.role=agent")  | Should -BeTrue
+    ($flat -contains "label=k3d.cluster=tracebloc") | Should -BeTrue
+  }
+
+  It "mints the token without culture-sensitive parsing (#817 Bugbot, High)" {
+    # THE FUNCTIONAL TEST CANNOT PROVE THIS HERE, and pretending otherwise was the
+    # first version of this test: on PowerShell 7 `Get-Date -UFormat %s` emits a
+    # bare integer ("1787575411"), which [double]::Parse accepts in every culture
+    # -- measured across en-US / de-DE / fr-FR, all three fine. So a de-DE
+    # round-trip passes with the bug still in place (confirmed by mutation).
+    #
+    # The bug is real on the platform this installer actually targets. It declares
+    # `#Requires -Version 5.1` and is invoked via powershell.exe (see the note at
+    # install-k8s.ps1:1896), and Windows PowerShell 5.1 emits %s WITH a fractional
+    # part. In de-DE "." is the GROUP separator, so that string either throws
+    # FormatException or -- worse -- parses to a wildly wrong number. Either way
+    # the operator gets a cryptic .NET error on an already-created cluster instead
+    # of a mount check.
+    #
+    # So this is a source guard: assert the mint does no culture-sensitive parsing
+    # at all. That is the property, it is checkable here, and it reddens under the
+    # mutation that a de-DE round-trip cannot see.
+    $src = Get-Content "$PSScriptRoot/../install-k8s.ps1" -Raw
+    $fn  = [regex]::Match($src, 'function Assert-NodesSeeHostData \{.*?\n\}', 'Singleline').Value
+    $fn | Should -Not -BeNullOrEmpty
+    # COMMENT LINES STRIPPED, or the guard trips on the comment that EXPLAINS the
+    # ban -- it names both banned constructs, so the first version of this test
+    # failed on its own documentation. Same reason scripts/tests/
+    # k3s-components-agreement.sh reads the installer with comments removed.
+    $code = ($fn -split "`r?`n" | Where-Object { $_.Trim() -notmatch '^#' }) -join "`n"
+    $code | Should -Not -Match '\[double\]::Parse'
+    $code | Should -Not -Match 'UFormat'
+    # and it must still mint SOMETHING unique per run
+    $code | Should -Match 'Get-Random'
+  }
+}

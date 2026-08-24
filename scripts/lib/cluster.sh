@@ -53,6 +53,131 @@ _ensure_tracebloc_dirs() {
   chmod -R 777 "$data_base/data" 2>/dev/null || true
 }
 
+# Prove the nodes can actually SEE the host tree before anything writes to it.
+#
+# In hostpath mode every chart PV is a hostPath onto /tracebloc/<release>/…, and
+# /tracebloc is the k3d bind mount of HOST_DATA_DIR. When that mount is not in
+# effect, nothing fails: kubelet's `DirectoryOrCreate` fabricates the directory
+# inside the node's own filesystem, the PVC Binds, the pod Runs, MySQL initialises
+# a brand-new empty datadir and the dataset dir reads as zero rows. There is no
+# event, no warning and no failed probe anywhere — the operator sees a healthy
+# install that has quietly stopped using their data. On the next `cluster delete`
+# it goes with the node.
+#
+# The obvious chart-side fix does not work: flipping the PVs to `type: Directory`
+# so kubelet refuses is REJECTED BY THE API SERVER on any existing release —
+# `spec.persistentvolumesource is immutable after creation` — so it fails the
+# `helm upgrade` of every install that already has PVs (measured on k3s v1.36.3,
+# release left in `failed`). Hence a probe here, before helm runs, where being
+# wrong costs an error message instead of a broken upgrade.
+#
+# Fails CLOSED. "Cannot tell" is a finding, not a pass: an unreadable marker, a
+# node we cannot exec into, or a node list we cannot obtain all block the install.
+# Silently proceeding is precisely the failure this exists to end.
+_verify_nodes_see_host_data() {
+  [[ "${TB_STORAGE_MODE:-hostpath}" == "node-local" ]] && return 0
+
+  local marker=".tracebloc-mount-probe"
+  # Content, not just presence: a bind mount pointed at the WRONG host directory
+  # still shows a file called .tracebloc-mount-probe from an earlier run. Only a
+  # token this invocation minted proves we are looking at this host tree now.
+  local token stamp
+  stamp="$(date +%s 2>/dev/null || echo 0)"
+  token="$$-${RANDOM}-${stamp}"
+  printf '%s' "$token" > "${HOST_DATA_DIR}/${marker}" 2>/dev/null \
+    || error "Can't write to ${HOST_DATA_DIR} — check the directory exists and you own it, then re-run."
+
+  local nodes node seen
+  # Selected by k3d's own LABELS, not by node name.
+  #
+  #   * `label=k3d.cluster=<name>` is an EXACT value match, so a same-prefixed
+  #     sibling cluster cannot leak in. `name=k3d-<name>-` is an unanchored
+  #     SUBSTRING match and would also list `k3d-<name>-dev-server-0`; if that
+  #     sibling was created against a different HOST_DATA_DIR its nodes cannot see
+  #     this token, and the probe would refuse THIS install while naming a node
+  #     that is not ours. A false refusal is the one failure mode a fail-closed
+  #     guard most has to avoid (@saqlainsyed007 on #817).
+  #   * `k3d.role` says what each container IS, so the load balancer is excluded
+  #     because it is a `loadbalancer` — not because its name happens to end in
+  #     `-serverlb`. Role is k3d's declaration; the name suffix is our guess at it.
+  #
+  # Bounded: a WEDGED (as opposed to stopped) daemon never returns from a bare
+  # `docker`, which would freeze a headless install right here with no further
+  # output — the exact failure this guard exists to replace with a clear refusal
+  # (Bugbot; same reason _docker_answers is bounded).
+  #
+  # `docker ps` lists RUNNING containers only: a created-but-stopped node cannot be
+  # exec'd and must not be mistaken for one that passed.
+  #
+  # ONE QUERY PER ROLE, letting docker AND the two label filters, rather than one
+  # query with `--format '{{.Names}} {{.Label "k3d.role"}}'` and an awk split. Bash
+  # could use the quoted format safely — it passes an array and never re-joins —
+  # but the PowerShell twin CANNOT: its $psi.Arguments joins the args and quotes any
+  # whitespace-bearing value without escaping inner quotes, so that format arrives
+  # with its quotes consumed and docker's Go template fails to parse, throwing a
+  # FALSE REFUSAL on every Windows hostpath install (#817). Keeping both halves on
+  # the shape the constrained one requires is what makes them diffable by eye; a
+  # divergence here would be a twin gap nobody notices until Windows breaks.
+  #
+  # Bonus: no role parsing, and the load balancer is excluded by construction —
+  # its role is `loadbalancer`, which is simply never queried.
+  local role out st
+  nodes=""
+  for role in server agent; do
+    # `|| st=$?` IS LOAD-BEARING, not a style choice. install-k8s.sh runs under
+    # `set -euo pipefail` and shell options are global to the sourcing shell, so a
+    # bare `out=$(...)` is a simple command whose status is the substitution's: when
+    # docker errors, set -e exits AT THE ASSIGNMENT and everything below it —
+    # including the fail-closed branch and the `rm -f` of the probe marker — is dead
+    # code. The previous shape survived only because it ended in `|| true`.
+    #
+    # The operator would then get the ERR trap's generic record naming `docker ps`
+    # instead of the refusal, and the marker left behind in HOST_DATA_DIR: precisely
+    # the opaque failure this guard exists to replace. (@saadqbal on #817, measured
+    # both call shapes; production calls this bare from create_cluster.)
+    #
+    # `st=0` first, because `|| st=$?` leaves st untouched on success.
+    st=0
+    out=$(_bounded "${TB_DOCKER_PROBE_TIMEOUT:-10}" docker ps \
+            --filter "label=k3d.cluster=${CLUSTER_NAME}" \
+            --filter "label=k3d.role=${role}" \
+            --format '{{.Names}}' 2>/dev/null) || st=$?
+    # Fail closed per role: an EMPTY list is legitimate (AGENTS=0 has no agent), but
+    # a docker that ERRORED tells us nothing and must not read as "none".
+    if (( st != 0 )); then
+      rm -f "${HOST_DATA_DIR}/${marker}" 2>/dev/null || true
+      error "Couldn't list the nodes of cluster '${CLUSTER_NAME}' to check your data directory is visible inside it. Check 'docker ps' works, then re-run."
+    fi
+    [[ -n "$out" ]] && nodes+="${out}"$'\n'
+  done
+  if [[ -z "${nodes//[[:space:]]/}" ]]; then
+    rm -f "${HOST_DATA_DIR}/${marker}" 2>/dev/null || true
+    error "Couldn't list the nodes of cluster '${CLUSTER_NAME}' to check your data directory is visible inside it. Check 'docker ps' works, then re-run."
+  fi
+
+  for node in $nodes; do
+    seen=$(_bounded "${TB_DOCKER_PROBE_TIMEOUT:-10}" docker exec "$node" cat "/tracebloc/${marker}" 2>/dev/null || true)
+    if [[ "$seen" != "$token" ]]; then
+      rm -f "${HOST_DATA_DIR}/${marker}" 2>/dev/null || true
+      error "Node '${node}' cannot see your data directory (${HOST_DATA_DIR}).
+
+  Everything would appear to install, but the secure environment would store your
+  data INSIDE the node instead of on this machine — and lose it when the cluster is
+  recreated. Refusing to continue.
+
+  Most likely causes:
+    * Docker Desktop is not sharing this path. Add it under
+      Settings -> Resources -> File sharing, then re-run.
+    * The cluster was created without the data mount. Recreate it:
+      'k3d cluster delete ${CLUSTER_NAME}' then re-run this installer.
+    * HOST_DATA_DIR changed since the cluster was created (currently ${HOST_DATA_DIR})."
+    fi
+  done
+
+  rm -f "${HOST_DATA_DIR}/${marker}" 2>/dev/null || true
+  log "Verified all ${CLUSTER_NAME} nodes see ${HOST_DATA_DIR} at /tracebloc."
+}
+
 # Modes the two SHARED hostPath dirs must end up with. Named constants because the
 # same pair is spelled out in two other places — the Windows installer's
 # $TB_SHARED_DIR_MODE/$TB_LOGS_DIR_MODE (scripts/install-k8s.ps1) and the chart's
@@ -573,6 +698,13 @@ create_cluster() {
   _merge_kubeconfig
   _export_host_no_proxy
   _wait_for_api
+
+  # Both branches above are done, so every node container is up and the bind
+  # mount (if any) is in effect — this is the first point where the question can
+  # be answered, and it is still before helm writes anything. Deliberately AFTER
+  # _handle_existing_cluster too: an adopted cluster is exactly the one that may
+  # have been created without the mount.
+  _verify_nodes_see_host_data
 }
 
 # Guarantee the cluster returns after a host reboot. On Linux this already works
