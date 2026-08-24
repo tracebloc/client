@@ -770,22 +770,40 @@ function Assert-NodesSeeHostData {
     # output -- the exact failure this guard exists to replace with a clear
     # refusal (Bugbot). `docker ps` lists RUNNING containers only, so a
     # created-but-stopped node cannot be mistaken for one that passed.
-    # -StdoutOnly, like the bash twin's 2>/dev/null. Invoke-BoundedProcess otherwise
-    # concatenates stdout+stderr into one string (see its note), and with no separator
-    # inserted a stdout that lacked its trailing newline would glue a docker warning
-    # onto the LAST node's role field -- "serverWARNING: ..." -- dropping that node
-    # from the list, so a single-node cluster would fall into "Couldn't list the
-    # nodes". Second-order here, since docker's --format terminates its output, but it
-    # is the same root cause as the exec compare below and goes away with the same fix.
-    $psr = Invoke-DockerCli -DockerArgs @(
-      "ps", "--filter", "label=k3d.cluster=$($script:CLUSTER_NAME)",
-      "--format", "{{.Names}} {{.Label `"k3d.role`"}}") -TimeoutSec 10 -StdoutOnly
+    # ONE QUERY PER ROLE, and NO ARGUMENT CONTAINS A SPACE OR A QUOTE. That is a
+    # hard requirement on this platform, not a style choice: $psi.Arguments joins
+    # the args into a single command line and quotes any whitespace-bearing value as
+    # '"' + $_ + '"' with NO escaping of inner quotes (see its note). The obvious
+    # single query -- `--format "{{.Names}} {{.Label `"k3d.role`"}}"` -- has both a
+    # space AND quotes, so it went out as
+    #     --format "{{.Names}} {{.Label "k3d.role"}}"
+    # and CommandLineToArgvW toggles in and out of quoting to yield ONE token with
+    # the inner quotes CONSUMED: `{{.Names}} {{.Label k3d.role}}`. docker then gets
+    # an intact --format whose Go template has lost the quoting on its string
+    # literal, text/template cannot parse k3d.role as an identifier, docker exits
+    # non-zero, $nodes stays empty and the probe throws "Couldn't list the nodes" --
+    # a FALSE REFUSAL on every Windows hostpath install, after the cluster is up.
+    # (@saadqbal / Bugbot on #817; the bash twin passes an array and never re-joins,
+    # so it was never exposed.)
+    #
+    # Asking docker to AND two label filters removes the need for a quoted format
+    # entirely: `{{.Names}}` alone has no space, and `label=k3d.role=server` has
+    # neither. It also drops the role parsing, and the load balancer is excluded by
+    # construction -- its role is `loadbalancer`, which is simply never queried.
+    #
+    # -StdoutOnly for the same reason as the exec call below.
     $nodes = @()
-    if ($psr.Code -eq 0) {
-      $nodes = @($psr.Output -split "`r?`n" | ForEach-Object {
-        $parts = $_.Trim() -split '\s+'
-        if ($parts.Count -ge 2 -and ($parts[1] -eq 'server' -or $parts[1] -eq 'agent')) { $parts[0] }
-      } | Where-Object { $_ })
+    foreach ($role in @("server", "agent")) {
+      $psr = Invoke-DockerCli -DockerArgs @(
+        "ps", "--filter", "label=k3d.cluster=$($script:CLUSTER_NAME)",
+        "--filter", "label=k3d.role=$role",
+        "--format", "{{.Names}}") -TimeoutSec 10 -StdoutOnly
+      # Fail closed per role: an empty list is legitimate (AGENTS=0 has no agent),
+      # but a docker that ERRORED tells us nothing and must not read as "none".
+      if ($psr.Code -ne 0) {
+        throw "Couldn't list the nodes of cluster '$($script:CLUSTER_NAME)' to check your data directory is visible inside it. Check 'docker ps' works, then re-run."
+      }
+      $nodes += @($psr.Output -split "`r?`n" | ForEach-Object { $_.Trim() } | Where-Object { $_ })
     }
     if ($nodes.Count -eq 0) {
       throw "Couldn't list the nodes of cluster '$($script:CLUSTER_NAME)' to check your data directory is visible inside it. Check 'docker ps' works, then re-run."

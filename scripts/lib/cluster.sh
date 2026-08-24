@@ -108,11 +108,36 @@ _verify_nodes_see_host_data() {
   #
   # `docker ps` lists RUNNING containers only: a created-but-stopped node cannot be
   # exec'd and must not be mistaken for one that passed.
-  nodes=$(_bounded "${TB_DOCKER_PROBE_TIMEOUT:-10}" docker ps \
+  #
+  # ONE QUERY PER ROLE, letting docker AND the two label filters, rather than one
+  # query with `--format '{{.Names}} {{.Label "k3d.role"}}'` and an awk split. Bash
+  # could use the quoted format safely — it passes an array and never re-joins —
+  # but the PowerShell twin CANNOT: its $psi.Arguments joins the args and quotes any
+  # whitespace-bearing value without escaping inner quotes, so that format arrives
+  # with its quotes consumed and docker's Go template fails to parse, throwing a
+  # FALSE REFUSAL on every Windows hostpath install (#817). Keeping both halves on
+  # the shape the constrained one requires is what makes them diffable by eye; a
+  # divergence here would be a twin gap nobody notices until Windows breaks.
+  #
+  # Bonus: no role parsing, and the load balancer is excluded by construction —
+  # its role is `loadbalancer`, which is simply never queried.
+  local role out st
+  nodes=""
+  for role in server agent; do
+    out=$(_bounded "${TB_DOCKER_PROBE_TIMEOUT:-10}" docker ps \
             --filter "label=k3d.cluster=${CLUSTER_NAME}" \
-            --format '{{.Names}} {{.Label "k3d.role"}}' 2>/dev/null \
-          | awk '$2 == "server" || $2 == "agent" { print $1 }' || true)
-  if [[ -z "$nodes" ]]; then
+            --filter "label=k3d.role=${role}" \
+            --format '{{.Names}}' 2>/dev/null)
+    st=$?
+    # Fail closed per role: an EMPTY list is legitimate (AGENTS=0 has no agent), but
+    # a docker that ERRORED tells us nothing and must not read as "none".
+    if (( st != 0 )); then
+      rm -f "${HOST_DATA_DIR}/${marker}" 2>/dev/null || true
+      error "Couldn't list the nodes of cluster '${CLUSTER_NAME}' to check your data directory is visible inside it. Check 'docker ps' works, then re-run."
+    fi
+    [[ -n "$out" ]] && nodes+="${out}"$'\n'
+  done
+  if [[ -z "${nodes//[[:space:]]/}" ]]; then
     rm -f "${HOST_DATA_DIR}/${marker}" 2>/dev/null || true
     error "Couldn't list the nodes of cluster '${CLUSTER_NAME}' to check your data directory is visible inside it. Check 'docker ps' works, then re-run."
   fi

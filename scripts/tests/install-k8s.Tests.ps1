@@ -6393,7 +6393,7 @@ Describe "Assert-NodesSeeHostData (backend#2422)" {
   # which is testing a copy of the code instead of the code.
   It "passes when every node sees the host tree, and leaves no probe file behind" {
     Mock Invoke-DockerCli {
-      if ($DockerArgs[0] -eq "ps") { return ([pscustomobject]@{ Code = 0; Output = "k3d-tracebloc-server-0 server`nk3d-tracebloc-agent-0 agent`n" }) }
+      if ($DockerArgs[0] -eq "ps") { return ([pscustomobject]@{ Code = 0; Output = $(if ($DockerArgs -contains "label=k3d.role=server") { "k3d-tracebloc-server-0`n" } else { "k3d-tracebloc-agent-0`n" }) }) }
       return ([pscustomobject]@{ Code = 0; Output = (Get-Content (Join-Path $script:HOST_DATA_DIR ".tracebloc-mount-probe") -Raw) })
     }
     { Assert-NodesSeeHostData } | Should -Not -Throw
@@ -6402,7 +6402,7 @@ Describe "Assert-NodesSeeHostData (backend#2422)" {
 
   It "REFUSES when a node cannot see the host tree, and names Docker Desktop file sharing" {
     Mock Invoke-DockerCli {
-      if ($DockerArgs[0] -eq "ps") { return ([pscustomobject]@{ Code = 0; Output = "k3d-tracebloc-server-0 server`n" }) }
+      if ($DockerArgs[0] -eq "ps") { return ([pscustomobject]@{ Code = 0; Output = $(if ($DockerArgs -contains "label=k3d.role=server") { "k3d-tracebloc-server-0`n" } else { "" }) }) }
       return ([pscustomobject]@{ Code = 0; Output = "" })
     }
     { Assert-NodesSeeHostData } | Should -Throw -ExpectedMessage "*cannot see your data directory*"
@@ -6415,7 +6415,7 @@ Describe "Assert-NodesSeeHostData (backend#2422)" {
     # A mount pointed at the WRONG host directory still shows a file of this name
     # from an earlier run. Presence alone would pass; content must not.
     Mock Invoke-DockerCli {
-      if ($DockerArgs[0] -eq "ps") { return ([pscustomobject]@{ Code = 0; Output = "k3d-tracebloc-server-0 server`n" }) }
+      if ($DockerArgs[0] -eq "ps") { return ([pscustomobject]@{ Code = 0; Output = $(if ($DockerArgs -contains "label=k3d.role=server") { "k3d-tracebloc-server-0`n" } else { "" }) }) }
       return ([pscustomobject]@{ Code = 0; Output = "a-token-from-some-other-run" })
     }
     { Assert-NodesSeeHostData } | Should -Throw -ExpectedMessage "*cannot see your data directory*"
@@ -6435,17 +6435,47 @@ Describe "Assert-NodesSeeHostData (backend#2422)" {
 
   It "fails closed when a node's docker exec fails" {
     Mock Invoke-DockerCli {
-      if ($DockerArgs[0] -eq "ps") { return ([pscustomobject]@{ Code = 0; Output = "k3d-tracebloc-server-0 server`n" }) }
+      if ($DockerArgs[0] -eq "ps") { return ([pscustomobject]@{ Code = 0; Output = $(if ($DockerArgs -contains "label=k3d.role=server") { "k3d-tracebloc-server-0`n" } else { "" }) }) }
       return ([pscustomobject]@{ Code = 1; Output = "Error response from daemon" })
     }
     { Assert-NodesSeeHostData } | Should -Throw -ExpectedMessage "*cannot see your data directory*"
+  }
+
+  It "fails closed when ONE role's query errors (#817)" {
+    # One query per role means a per-role FAILURE is its own fail-closed decision.
+    # `server` answers, `agent` errors: we cannot tell whether there are agents to
+    # probe, so refusing is the only safe answer. An EMPTY agent list is different
+    # and legitimate (AGENTS=0), which is why the branch keys on .Code and not on
+    # emptiness — a distinction the empty-list test cannot see, since both reach the
+    # same final error (measured: a fail-open mutation stayed green without this).
+    Mock Invoke-DockerCli {
+      if ($DockerArgs[0] -eq "ps") {
+        if ($DockerArgs -contains "label=k3d.role=agent") { return ([pscustomobject]@{ Code = 1; Output = "Cannot connect to the Docker daemon" }) }
+        return ([pscustomobject]@{ Code = 0; Output = "k3d-tracebloc-server-0`n" })
+      }
+      return ([pscustomobject]@{ Code = 0; Output = (Get-Content (Join-Path $script:HOST_DATA_DIR ".tracebloc-mount-probe") -Raw) })
+    }
+    { Assert-NodesSeeHostData } | Should -Throw -ExpectedMessage "*Couldn't list the nodes*"
+  }
+
+  It "accepts an EMPTY agent list, since AGENTS=0 is legitimate (#817)" {
+    # The opposite direction: a single-node cluster genuinely has no agent and must
+    # not be refused.
+    Mock Invoke-DockerCli {
+      if ($DockerArgs[0] -eq "ps") {
+        if ($DockerArgs -contains "label=k3d.role=agent") { return ([pscustomobject]@{ Code = 0; Output = "" }) }
+        return ([pscustomobject]@{ Code = 0; Output = "k3d-tracebloc-server-0`n" })
+      }
+      return ([pscustomobject]@{ Code = 0; Output = (Get-Content (Join-Path $script:HOST_DATA_DIR ".tracebloc-mount-probe") -Raw) })
+    }
+    { Assert-NodesSeeHostData } | Should -Not -Throw
   }
 
   It "checks EVERY node, not just the server" {
     # AGENTS defaults to 1 and agents run kubelets, so a training pod can land on
     # an agent — the same @all-vs-@server trap as the cgroup v1 flag (#806).
     Mock Invoke-DockerCli {
-      if ($DockerArgs[0] -eq "ps") { return ([pscustomobject]@{ Code = 0; Output = "k3d-tracebloc-server-0 server`nk3d-tracebloc-agent-0 agent`n" }) }
+      if ($DockerArgs[0] -eq "ps") { return ([pscustomobject]@{ Code = 0; Output = $(if ($DockerArgs -contains "label=k3d.role=server") { "k3d-tracebloc-server-0`n" } else { "k3d-tracebloc-agent-0`n" }) }) }
       if ($DockerArgs[1] -like "*server-0") { return ([pscustomobject]@{ Code = 0; Output = (Get-Content (Join-Path $script:HOST_DATA_DIR ".tracebloc-mount-probe") -Raw) }) }
       return ([pscustomobject]@{ Code = 0; Output = "" })   # the AGENT is blind
     }
@@ -6456,8 +6486,9 @@ Describe "Assert-NodesSeeHostData (backend#2422)" {
     # k3d's own k3d.role label says what each container IS. The lb is excluded
     # because it is a `loadbalancer`, not because its name ends in -serverlb.
     Mock Invoke-DockerCli {
-      if ($DockerArgs[0] -eq "ps") { return ([pscustomobject]@{ Code = 0; Output = "k3d-tracebloc-server-0 server`nk3d-tracebloc-lb-custom loadbalancer`n" }) }
-      if ($DockerArgs[1] -like "*lb-custom") { return ([pscustomobject]@{ Code = 1; Output = "no such path" }) }
+      # docker HONOURS the role filters, so a `loadbalancer` is never returned for
+      # role=server or role=agent -- excluded by construction, not by a name suffix.
+      if ($DockerArgs[0] -eq "ps") { return ([pscustomobject]@{ Code = 0; Output = $(if ($DockerArgs -contains "label=k3d.role=server") { "k3d-tracebloc-server-0`n" } else { "" }) }) }
       return ([pscustomobject]@{ Code = 0; Output = (Get-Content (Join-Path $script:HOST_DATA_DIR ".tracebloc-mount-probe") -Raw) })
     }
     { Assert-NodesSeeHostData } | Should -Not -Throw
@@ -6489,7 +6520,7 @@ Describe "Assert-NodesSeeHostData (backend#2422)" {
     $script:timeouts = @()
     Mock Invoke-DockerCli {
       $script:timeouts += $TimeoutSec
-      if ($DockerArgs[0] -eq "ps") { return ([pscustomobject]@{ Code = 0; Output = "k3d-tracebloc-server-0 server`n" }) }
+      if ($DockerArgs[0] -eq "ps") { return ([pscustomobject]@{ Code = 0; Output = $(if ($DockerArgs -contains "label=k3d.role=server") { "k3d-tracebloc-server-0`n" } else { "" }) }) }
       return ([pscustomobject]@{ Code = 0; Output = (Get-Content (Join-Path $script:HOST_DATA_DIR ".tracebloc-mount-probe") -Raw) })
     }
     { Assert-NodesSeeHostData } | Should -Not -Throw
@@ -6534,12 +6565,49 @@ Describe "Assert-NodesSeeHostData (backend#2422)" {
     $script:sawStdoutOnly = @()
     Mock Invoke-DockerCli {
       $script:sawStdoutOnly += [bool]$StdoutOnly
-      if ($DockerArgs[0] -eq "ps") { return ([pscustomobject]@{ Code = 0; Output = "k3d-tracebloc-server-0 server`n" }) }
+      if ($DockerArgs[0] -eq "ps") { return ([pscustomobject]@{ Code = 0; Output = $(if ($DockerArgs -contains "label=k3d.role=server") { "k3d-tracebloc-server-0`n" } else { "" }) }) }
       return ([pscustomobject]@{ Code = 0; Output = (Get-Content (Join-Path $script:HOST_DATA_DIR ".tracebloc-mount-probe") -Raw) })
     }
     { Assert-NodesSeeHostData } | Should -Not -Throw
     $script:sawStdoutOnly.Count | Should -BeGreaterOrEqual 2          # ps + one exec
     ($script:sawStdoutOnly | Where-Object { -not $_ }).Count | Should -Be 0
+  }
+
+  It "passes no argument carrying a space or a quote (#817 Bugbot, High)" {
+    # THE BUG THIS EXISTS FOR. $psi.Arguments joins the args into ONE command line
+    # and quotes any whitespace-bearing value as '"' + $_ + '"' with NO escaping of
+    # inner quotes. The obvious single query --
+    #   --format "{{.Names}} {{.Label `"k3d.role`"}}"
+    # -- has both a space and quotes, so it went out with its own quotes intact and
+    # CommandLineToArgvW toggled in and out of quoting to hand docker ONE token with
+    # the inner quotes CONSUMED: `{{.Names}} {{.Label k3d.role}}`. text/template then
+    # cannot parse k3d.role as an identifier, docker exits non-zero, and the probe
+    # throws "Couldn't list the nodes" -- a FALSE REFUSAL on every Windows hostpath
+    # install, after the cluster is already up.
+    #
+    # Why no earlier test caught it: every case here mocks Invoke-DockerCli, so the
+    # quoting lives BELOW the mock and is unreachable from Pester. The property is
+    # therefore asserted at the mock boundary instead -- on the ARGUMENTS, which is
+    # the layer this suite can actually see.
+    $script:allArgs = @()
+    Mock Invoke-DockerCli {
+      $script:allArgs += ,@($DockerArgs)
+      if ($DockerArgs[0] -eq "ps") { return ([pscustomobject]@{ Code = 0; Output = $(if ($DockerArgs -contains "label=k3d.role=server") { "k3d-tracebloc-server-0`n" } else { "" }) }) }
+      return ([pscustomobject]@{ Code = 0; Output = (Get-Content (Join-Path $script:HOST_DATA_DIR ".tracebloc-mount-probe") -Raw) })
+    }
+    { Assert-NodesSeeHostData } | Should -Not -Throw
+
+    $flat = @($script:allArgs | ForEach-Object { $_ })
+    $flat.Count | Should -BeGreaterThan 0
+    # A quote in ANY argument is unsafe here, whether or not it also has a space:
+    # the quoting branch only triggers on whitespace, so a quoted value silently
+    # passes through un-escaped either way.
+    @($flat | Where-Object { $_ -like '*"*' }).Count | Should -Be 0 -Because "an inner quote is passed through unescaped"
+    @($flat | Where-Object { $_ -match '\s' }).Count  | Should -Be 0 -Because "a whitespace-bearing arg hits the unescaped quoting branch"
+    # and the scoping must still be real: both roles queried, exact cluster label
+    ($flat -contains "label=k3d.role=server") | Should -BeTrue
+    ($flat -contains "label=k3d.role=agent")  | Should -BeTrue
+    ($flat -contains "label=k3d.cluster=tracebloc") | Should -BeTrue
   }
 
   It "mints the token without culture-sensitive parsing (#817 Bugbot, High)" {

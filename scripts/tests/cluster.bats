@@ -1344,8 +1344,12 @@ merge_setup() {                       # isolate HOME/KUBECONFIG from the real ma
 #     mode=empty       : exec returns nothing (dir exists but is not the host tree)
 #     mode=stale       : exec returns a DIFFERENT token (mount points elsewhere)
 #     mode=fail        : exec exits non-zero (cannot tell)
-# ps-output is now "<name> <role>" lines, because the probe selects on k3d's own
-# labels rather than parsing node names (see cluster.sh).
+# The probe now runs ONE `docker ps` PER ROLE (`--filter label=k3d.role=<role>`)
+# and asks only for `{{.Names}}`, so no argument carries a space or a quote — a hard
+# requirement of the PowerShell twin's command-line joining (#817). The mock therefore
+# answers based on the role filter it is handed, rather than returning "name role"
+# pairs. MOCK_PS_OUT stays "<name> <role>" lines as the fixture's SOURCE OF TRUTH and
+# is filtered per call, which keeps each test's intent readable.
 _mock_docker() {
   # GLOBALS, not locals: the docker() body below runs long after _mock_docker has
   # returned, and bash captures no closure — locals would be unset there, docker
@@ -1355,7 +1359,15 @@ _mock_docker() {
   # test below asserts its OWN message rather than just a non-zero status.)
   MOCK_PS_OUT="$1"; MOCK_MODE="$2"
   docker() {
-    if [[ "$1" == "ps" ]]; then printf '%s\n' "$MOCK_PS_OUT"; return 0; fi
+    if [[ "$1" == "ps" ]]; then
+      local want=""
+      for a in "$@"; do case "$a" in label=k3d.role=*) want="${a#label=k3d.role=}" ;; esac; done
+      # no role filter asked for -> return nothing, so a probe that forgot to scope
+      # its query cannot accidentally pass
+      [[ -n "$want" ]] || return 0
+      printf '%s\n' "$MOCK_PS_OUT" | awk -v r="$want" '$2 == r { print $1 }'
+      return 0
+    fi
     if [[ "$1" == "exec" ]]; then
       case "$MOCK_MODE" in
         passthrough) cat "${HOST_DATA_DIR}/.tracebloc-mount-probe" 2>/dev/null; return 0 ;;
@@ -1418,13 +1430,61 @@ k3d-tracebloc-agent-0 agent" passthrough
   [[ "$output" == *"Couldn't list the nodes"* ]] || return 1
 }
 
+@test "_verify_nodes_see_host_data fails closed when ONE role's query errors (#817)" {
+  mkdir -p "$HOST_DATA_DIR"
+  # The probe now runs one query per role, so a per-role FAILURE is its own case and
+  # its own fail-closed decision. Here `server` answers fine and `agent` errors: we
+  # cannot tell whether there are agents we should be probing, so refusing is the
+  # only safe answer — passing would silently check half the cluster.
+  #
+  # An EMPTY agent list is different and legitimate (AGENTS=0), which is why the
+  # branch keys on the exit status and not on emptiness. Without this test that
+  # distinction is invisible: the empty-list case reaches the same final error, so a
+  # fail-OPEN mutation of the per-role branch stays green (measured).
+  docker() {
+    if [[ "$1" == "ps" ]]; then
+      case "$*" in
+        *label=k3d.role=server*) echo k3d-tracebloc-server-0; return 0 ;;
+        *label=k3d.role=agent*)  return 1 ;;                 # cannot tell
+      esac
+      return 0
+    fi
+    if [[ "$1" == "exec" ]]; then cat "${HOST_DATA_DIR}/.tracebloc-mount-probe" 2>/dev/null; return 0; fi
+    return 0
+  }
+  run _verify_nodes_see_host_data
+  [ "$status" -ne 0 ] || { echo "an unlistable role was treated as 'no nodes of that role'"; return 1; }
+  [[ "$output" == *"Couldn't list the nodes"* ]] || { echo "wrong refusal: $output"; return 1; }
+}
+
+@test "_verify_nodes_see_host_data accepts an EMPTY agent list (AGENTS=0 is legitimate) (#817)" {
+  mkdir -p "$HOST_DATA_DIR"
+  # The other side of the same coin: a single-node cluster genuinely has no agent,
+  # and that must not be mistaken for a failure. Pins the branch to exit status
+  # rather than emptiness, from the opposite direction.
+  docker() {
+    if [[ "$1" == "ps" ]]; then
+      case "$*" in *label=k3d.role=server*) echo k3d-tracebloc-server-0 ;; esac
+      return 0                                               # agent: empty, exit 0
+    fi
+    if [[ "$1" == "exec" ]]; then cat "${HOST_DATA_DIR}/.tracebloc-mount-probe" 2>/dev/null; return 0; fi
+    return 0
+  }
+  run _verify_nodes_see_host_data
+  [ "$status" -eq 0 ] || { echo "a single-node cluster was refused: $output"; return 1; }
+}
+
 @test "_verify_nodes_see_host_data checks EVERY node, not just the server" {
   mkdir -p "$HOST_DATA_DIR"
   # AGENTS defaults to 1 and agents run kubelets, so a training pod can land on
   # an agent. A server-only probe would pass while the pod's node is blind —
   # the same @all-vs-@server trap as the cgroup v1 flag (client#806).
   docker() {
-    if [[ "$1" == "ps" ]]; then printf 'k3d-tracebloc-server-0 server\nk3d-tracebloc-agent-0 agent\n'; return 0; fi
+    if [[ "$1" == "ps" ]]; then
+      case "$*" in *label=k3d.role=server*) echo k3d-tracebloc-server-0 ;;
+                   *label=k3d.role=agent*)  echo k3d-tracebloc-agent-0 ;; esac
+      return 0
+    fi
     if [[ "$1" == "exec" ]]; then
       [[ "$2" == *server-0 ]] && { cat "${HOST_DATA_DIR}/.tracebloc-mount-probe" 2>/dev/null; return 0; }
       return 0   # the AGENT is blind
@@ -1442,7 +1502,13 @@ k3d-tracebloc-agent-0 agent" passthrough
   # requested for it and none is needed. Including it would make every hostpath
   # install fail on a container that never touches the data.
   docker() {
-    if [[ "$1" == "ps" ]]; then printf 'k3d-tracebloc-server-0 server\nk3d-tracebloc-serverlb loadbalancer\n'; return 0; fi
+    if [[ "$1" == "ps" ]]; then
+      # docker HONOURS the role filter, so a `loadbalancer` container is never
+      # returned for role=server or role=agent — the lb is excluded by construction
+      # rather than by a name-suffix exclusion.
+      case "$*" in *label=k3d.role=server*) echo k3d-tracebloc-server-0 ;; esac
+      return 0
+    fi
     if [[ "$1" == "exec" ]]; then
       [[ "$2" == *serverlb ]] && return 1        # lb genuinely has no /tracebloc
       cat "${HOST_DATA_DIR}/.tracebloc-mount-probe" 2>/dev/null; return 0
@@ -1479,9 +1545,9 @@ k3d-tracebloc-agent-0 agent" passthrough
   local argfile="$BATS_TEST_TMPDIR/psargs"; : > "$argfile"
   docker() {
     if [[ "$1" == "ps" ]]; then
-      printf '%s' "$*" > "$argfile"
-      # what docker WOULD return for the label filter: only our own cluster
-      printf 'k3d-tracebloc-server-0 server\n'
+      printf '%s\n' "$*" >> "$argfile"
+      # what docker WOULD return for the label filters: only our own cluster's server
+      case "$*" in *label=k3d.role=server*) echo k3d-tracebloc-server-0 ;; esac
       return 0
     fi
     if [[ "$1" == "exec" ]]; then cat "${HOST_DATA_DIR}/.tracebloc-mount-probe" 2>/dev/null; return 0; fi
@@ -1497,6 +1563,16 @@ k3d-tracebloc-agent-0 agent" passthrough
   # and the role must come from k3d's label, not from a name suffix
   [[ "$seen_args" == *'k3d.role'* ]] \
     || { echo "role not read from the label: $seen_args"; return 1; }
+  # NO ARGUMENT MAY CARRY A SPACE OR A QUOTE. Bash tolerates both, but the twin's
+  # command-line joining does not: it quotes a whitespace-bearing value without
+  # escaping inner quotes, and the resulting --format arrives with its quotes eaten
+  # (#817). Keeping the shapes identical is what keeps them diffable, so assert the
+  # constraint on BOTH halves rather than only where it bites.
+  grep -q '"' "$argfile" && { echo "an argument carries a quote: $seen_args"; return 1; }
+  grep -qE '\{\{[^}]* ' "$argfile" && { echo "a --format argument carries a space: $seen_args"; return 1; }
+  # both roles must be queried, or an agent could go unprobed
+  grep -q 'label=k3d.role=server' "$argfile" || { echo "server role never queried"; return 1; }
+  grep -q 'label=k3d.role=agent'  "$argfile" || { echo "agent role never queried"; return 1; }
 }
 
 @test "_verify_nodes_see_host_data does not exec a sibling cluster's node (#817 review)" {
@@ -1506,10 +1582,11 @@ k3d-tracebloc-agent-0 agent" passthrough
   # Under the old name-substring filter it would have been listed and refused.
   docker() {
     if [[ "$1" == "ps" ]]; then
+      if [[ "$*" != *"label=k3d.role=server"* ]]; then return 0; fi
       if [[ "$*" == *"label=k3d.cluster=tracebloc"* ]]; then
-        printf 'k3d-tracebloc-server-0 server\n'          # ours only
+        echo k3d-tracebloc-server-0                        # ours only
       else
-        printf 'k3d-tracebloc-server-0 server\nk3d-tracebloc-dev-server-0 server\n'
+        printf 'k3d-tracebloc-server-0\nk3d-tracebloc-dev-server-0\n'
       fi
       return 0
     fi
@@ -1541,7 +1618,10 @@ k3d-tracebloc-agent-0 agent" passthrough
   # Mutation-checked: with `2>&1` this test fails with the exact false refusal.
   docker() {
     echo "WARNING: docker chatter on stderr" >&2
-    if [[ "$1" == "ps" ]]; then printf 'k3d-tracebloc-server-0 server\n'; return 0; fi
+    if [[ "$1" == "ps" ]]; then
+      case "$*" in *label=k3d.role=server*) echo k3d-tracebloc-server-0 ;; esac
+      return 0
+    fi
     if [[ "$1" == "exec" ]]; then cat "${HOST_DATA_DIR}/.tracebloc-mount-probe" 2>/dev/null; return 0; fi
     return 0
   }
@@ -1580,8 +1660,25 @@ k3d-tracebloc-agent-0 agent" passthrough
   grep -q '^_verify_nodes_see_host_data()' "$sh" || return 1
   grep -q '^function Assert-NodesSeeHostData' "$ps1" || return 1
 
-  # Defined but never called is the failure mode this pair is most likely to
-  # regress into, so check each is actually invoked outside its own definition.
-  [[ "$(grep -c '_verify_nodes_see_host_data' "$sh")" -ge 2 ]] || return 1
-  [[ "$(grep -c 'Assert-NodesSeeHostData' "$ps1")" -ge 2 ]] || return 1
+  # Defined but never CALLED is the failure mode this pair regresses into, and the
+  # first version of this check could not see it. It counted MENTIONS with
+  # `grep -c … -ge 2`, and comments naming the function keep the count up: measured
+  # on install-k8s.ps1, deleting the real call left THREE mentions (the definition
+  # plus two comments), so the guard stayed green with the wiring gone — vacuous on
+  # exactly the regression it names (@saadqbal / Bugbot on #817).
+  #
+  # The bash half was sound only by luck — two occurrences, so removing the call
+  # took it to one — and would have become vacuous the moment anyone wrote a comment
+  # naming the function, which is precisely what happened on the ps1 side. So a
+  # threshold bump would be papering over it: the count has to be of CALL SITES.
+  #
+  # Strip comment lines before counting, the technique
+  # scripts/tests/k3s-components-agreement.sh already uses (which is why naming
+  # TB_STORAGE_MODE in a comment does not trip it), then subtract the definition.
+  local sh_calls ps_calls
+  sh_calls=$(grep -v '^[[:space:]]*#' "$sh"  | grep -c '_verify_nodes_see_host_data')
+  ps_calls=$(grep -v '^[[:space:]]*#' "$ps1" | grep -c 'Assert-NodesSeeHostData')
+  # one of each match is the definition itself; anything above that is a call site
+  (( sh_calls >= 2 )) || { echo "bash: defined but never called (code mentions: $sh_calls)"; return 1; }
+  (( ps_calls >= 2 )) || { echo "ps1: defined but never called (code mentions: $ps_calls)"; return 1; }
 }
