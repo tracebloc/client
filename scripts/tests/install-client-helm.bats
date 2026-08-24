@@ -928,8 +928,12 @@ setup() {
   export TRACEBLOC_TRAINING_RESOURCES="cpu=4,memory=16Gi"
   run install_client_helm <<< $'myid\nmypw'
   [ "$status" -eq 0 ] || return 1
-  grep -q 'RESOURCE_LIMITS: "cpu=4,memory=16Gi"' "$HOST_DATA_DIR/values.yaml"
-  grep -q 'RESOURCE_REQUESTS: "cpu=4,memory=16Gi"' "$HOST_DATA_DIR/values.yaml"
+  # backend#2418 (L0.2): requests keeps cpu, limits drops it. The two halves
+  # are no longer the same string.
+  grep -q 'RESOURCE_LIMITS: "memory=16Gi"' "$HOST_DATA_DIR/values.yaml" || return 1
+  grep -q 'RESOURCE_REQUESTS: "cpu=4,memory=16Gi"' "$HOST_DATA_DIR/values.yaml" || return 1
+  # And no cpu limit anywhere in the rendered pair.
+  ! grep -q 'RESOURCE_LIMITS: "cpu' "$HOST_DATA_DIR/values.yaml"
 }
 
 @test "install_client_helm: undeterminable machine falls back to cpu=2,memory=8Gi" {
@@ -943,7 +947,9 @@ setup() {
   unset TRACEBLOC_TRAINING_RESOURCES
   run install_client_helm <<< $'myid\nmypw'
   [ "$status" -eq 0 ] || return 1
-  grep -q 'RESOURCE_LIMITS: "cpu=2,memory=8Gi"' "$HOST_DATA_DIR/values.yaml"
+  # The literal is still the fallback ENVELOPE; only the limits half loses cpu
+  # (backend#2418).
+  grep -q 'RESOURCE_LIMITS: "memory=8Gi"' "$HOST_DATA_DIR/values.yaml" || return 1
   grep -q 'RESOURCE_REQUESTS: "cpu=2,memory=8Gi"' "$HOST_DATA_DIR/values.yaml"
 }
 
@@ -2794,4 +2800,55 @@ _arch_gate_ctx() {
   grep -q 'singleNode: true' "$lib" || return 1
   # ...and it must live in the node-local (local-path) values block.
   awk '/name: local-path/{f=1} f && /singleNode: true/{found=1} END{exit !found}' "$lib" || return 1
+}
+
+
+# ── _training_limits (backend#2418, Utilization Ladder L0.2) ─────────────────
+#
+# CPU is time-shared, so a request with NO limit is a cgroup share weight -- a
+# fraction under contention, the whole machine when idle. requests == limits
+# makes it a cpu.max QUOTA that throttles at its ceiling on a completely idle
+# box: a run sized to 7 of 8 cores was capped at 7 while the 8th sat unused.
+# Memory is not time-shared -- over the limit is an OOM kill, not a slowdown --
+# so requests == limits stays there and only cpu is dropped.
+#
+# Pinned to agree with install-k8s.ps1's Get-TrainingLimits through
+# scripts/tests/fixtures/installer_parity.json.
+
+@test "_training_limits: drops cpu and keeps memory" {
+  [ "$(_training_limits 'cpu=7,memory=29Gi')" = "memory=29Gi" ]
+}
+
+@test "_training_limits: keeps every non-cpu dimension, not just memory" {
+  # backend#2223 added ephemeral-storage; a hardcoded "memory only" filter would
+  # silently drop a disk limit and let a pod fill the node's disk.
+  [ "$(_training_limits 'cpu=7,memory=29Gi,ephemeral-storage=26Gi')" \
+      = "memory=29Gi,ephemeral-storage=26Gi" ]
+}
+
+@test "_training_limits: a size with no cpu is unchanged" {
+  [ "$(_training_limits 'memory=16Gi')" = "memory=16Gi" ]
+}
+
+@test "_training_limits: a cpu-ONLY size returns the input, never empty" {
+  # An empty RESOURCE_LIMITS reads to jobs-manager as UNSET, which since
+  # client-runtime#388 mirrors the requests side back -- resurrecting the very
+  # cpu limit this function exists to drop.
+  [ "$(_training_limits 'cpu=4')" = "cpu=4" ]
+}
+
+@test "_training_limits: trims each pair BEFORE matching cpu=" {
+  # THE TWIN DIVERGENCE THIS TEST CAUGHT. `case " cpu=7 " in cpu=*)` does not
+  # match, so without the trim an operator writing
+  # TRACEBLOC_TRAINING_RESOURCES="cpu=7, memory=29Gi" kept the cpu limit --
+  # silently, and in the dangerous direction -- while install-k8s.ps1's
+  # `.Trim()` dropped it. Same contract, two control flows: the bug class
+  # backend#2220 found five of.
+  [ "$(_training_limits ' cpu=7 , memory=29Gi ')" = "memory=29Gi" ] || return 1
+  [ "$(_training_limits 'cpu=7,,memory=29Gi')" = "memory=29Gi" ]
+}
+
+@test "_training_limits: does not eat a dimension that merely starts with cpu" {
+  # `cpu=` is matched as a prefix, so a future `cpuset=...` must survive.
+  [ "$(_training_limits 'cpu=7,cpuset=0-3,memory=29Gi')" = "cpuset=0-3,memory=29Gi" ]
 }

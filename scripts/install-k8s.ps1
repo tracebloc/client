@@ -285,6 +285,43 @@ function RefreshPath {
 $script:SpinnerFrames = @([char]0x2807, [char]0x2819, [char]0x2839, [char]0x2838, [char]0x283C, [char]0x2834, [char]0x2826, [char]0x2827, [char]0x2847, [char]0x280F)
 
 # Spin a braille spinner while a process runs, bounded by a deadline (#426):
+# The LIMITS half of a training envelope: memory only, never cpu (backend#2418,
+# Utilization Ladder L0.2). Twin of `_training_limits` in
+# scripts/lib/install-client-helm.sh -- the two are pinned to agree by
+# scripts/tests/fixtures/installer_parity.json.
+#
+# WHY THE TWO HALVES DIFFER. CPU is time-shared: `requests` with NO `limits`
+# becomes a cgroup `cpu.weight`, a share under contention and the whole machine
+# when nobody else wants it, whereas `requests == limits` becomes a `cpu.max`
+# QUOTA that throttles at its ceiling even on a completely idle box. Memory is
+# NOT time-shared -- exceeding the limit is an OOM kill, not a slowdown -- so
+# `requests == limits` remains the load-bearing safety property and does not
+# move. Guaranteed QoS is given up deliberately; the memory guarantee is what
+# mattered, and CPU burstability is what lets a second job exist at all.
+#
+# ORDERING CONSTRAINT: needs a jobs-manager that treats RESOURCE_LIMITS as the
+# COMPLETE limits envelope (client-runtime#388). An older image MERGES onto its
+# built-in cpu=2,memory=8Gi literal, so an omitted `cpu` returns as a 2-core
+# LIMIT under a 7-core REQUEST -- rejected by Kubernetes, pod never schedules.
+function Get-TrainingLimits {
+  param([string]$Size)
+  $kept = @()
+  foreach ($pair in ($Size -split ',')) {
+    $trimmed = $pair.Trim()
+    if ($trimmed -eq '') { continue }
+    if ($trimmed -like 'cpu=*') { continue }
+    $kept += $trimmed
+  }
+  # Nothing survived -- a cpu-only envelope, which is not something to guess at.
+  # Return the INPUT UNCHANGED rather than an empty string: an empty
+  # RESOURCE_LIMITS reads to jobs-manager as "unset", which since
+  # client-runtime#388 mirrors the requests side back and resurrects the very
+  # cpu limit this function exists to drop. `$Size` is never empty on a
+  # reachable path -- Get-TrainingResources' fallback chain always yields one.
+  if ($kept.Count -eq 0) { return $Size }
+  return ($kept -join ',')
+}
+
 # `k3d cluster create --wait` has no timeout of its own, so a stalled image
 # pull would otherwise spin forever. Returns $true when the process exited on
 # its own, $false on deadline expiry (the process is killed best-effort).
@@ -5513,7 +5550,7 @@ function Install-ClientHelm {
   }
   Log "Training size: $trainingSize"
   $envBlock += @"
-  RESOURCE_LIMITS: "$trainingSize"
+  RESOURCE_LIMITS: "$(Get-TrainingLimits $trainingSize)"
   RESOURCE_REQUESTS: "$trainingSize"
   # Who chose the pair above (backend#2220). Bookkeeping only -- it never changes
   # the envelope. "unknown" means the value was carried forward from before this

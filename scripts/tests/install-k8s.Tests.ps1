@@ -6642,3 +6642,47 @@ Describe "Assert-NodesSeeHostData (backend#2422)" {
     $code | Should -Match 'Get-Random'
   }
 }
+
+
+# ── Get-TrainingLimits (backend#2418, Utilization Ladder L0.2) ───────────────
+#
+# CPU is time-shared: `requests` with NO `limits` is a cgroup share weight,
+# whereas requests == limits is a cpu.max QUOTA that throttles at its ceiling on
+# a completely idle box. Memory is not time-shared -- over the limit is an OOM
+# kill -- so requests == limits stays there and only cpu is dropped.
+#
+# The bash twin is `_training_limits` in scripts/lib/install-client-helm.sh; the
+# two are pinned to agree by scripts/tests/fixtures/installer_parity.json. The
+# whitespace case below is a real divergence the bash side had and this side did
+# not: `case " cpu=7 " in cpu=*)` does not match, so an untrimmed pair kept the
+# cpu limit on Linux/macOS while `.Trim()` dropped it on Windows.
+Describe "Get-TrainingLimits" {
+  It "drops cpu and keeps memory" {
+    Get-TrainingLimits "cpu=7,memory=29Gi" | Should -Be "memory=29Gi"
+  }
+  It "keeps every non-cpu dimension, not just memory" {
+    # backend#2223 added ephemeral-storage; a "memory only" filter would silently
+    # drop a disk limit and let a pod fill the node's disk.
+    Get-TrainingLimits "cpu=7,memory=29Gi,ephemeral-storage=26Gi" |
+      Should -Be "memory=29Gi,ephemeral-storage=26Gi"
+  }
+  It "leaves a size with no cpu unchanged" {
+    Get-TrainingLimits "memory=16Gi" | Should -Be "memory=16Gi"
+  }
+  It "returns the input for a cpu-ONLY size, never empty" {
+    # An empty RESOURCE_LIMITS reads to jobs-manager as UNSET, which since
+    # client-runtime#388 mirrors the requests side back -- resurrecting the very
+    # cpu limit this function exists to drop.
+    Get-TrainingLimits "cpu=4" | Should -Be "cpu=4"
+  }
+  It "trims each pair before matching cpu=" {
+    Get-TrainingLimits " cpu=7 , memory=29Gi " | Should -Be "memory=29Gi"
+  }
+  It "skips empty pairs" {
+    Get-TrainingLimits "cpu=7,,memory=29Gi" | Should -Be "memory=29Gi"
+  }
+  It "does not eat a dimension that merely starts with cpu" {
+    Get-TrainingLimits "cpu=7,cpuset=0-3,memory=29Gi" |
+      Should -Be "cpuset=0-3,memory=29Gi"
+  }
+}

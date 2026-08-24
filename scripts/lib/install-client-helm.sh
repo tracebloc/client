@@ -258,6 +258,65 @@ _machine_training_resources() {
   printf 'cpu=%d,memory=%dGi' "$(( run_cpu_m / 1000 ))" "$(( run_mem_b / 1024 / 1024 / 1024 ))"
 }
 
+# The LIMITS half of a training envelope: memory only, never cpu (backend#2418,
+# Utilization Ladder L0.2).
+#
+# WHY THE TWO HALVES DIFFER. CPU and memory are not the same kind of resource:
+#
+#   * CPU is time-shared. A `requests` with NO `limits` becomes a cgroup
+#     `cpu.weight` -- a share of the machine under contention, and the whole
+#     machine when nobody else wants it. With `requests == limits` it becomes a
+#     `cpu.max` QUOTA instead, which throttles at the ceiling even on a
+#     completely idle box. On an 8-core machine a run sized to 7 cores was
+#     capped at 7 while the 8th sat idle, for no benefit to anyone.
+#   * Memory is NOT time-shared. There is no "borrow it back": exceeding the
+#     limit is an OOM kill. So `requests == limits` is the load-bearing safety
+#     property and it does NOT move.
+#
+# Guaranteed QoS is lost by design -- a pod is Guaranteed only when every
+# container has limits for both dimensions. That is the trade L0.2 makes: the
+# memory guarantee is what mattered, and CPU burstability is what lets a second
+# job exist at all.
+#
+# ORDERING CONSTRAINT, not optional: this requires a jobs-manager that treats
+# RESOURCE_LIMITS as the COMPLETE limits envelope (client-runtime#388). An older
+# image MERGES the parsed pairs onto its built-in cpu=2,memory=8Gi literal, so
+# an omitted `cpu` comes back as a 2-core LIMIT under a 7-core REQUEST -- which
+# Kubernetes rejects outright, and the pod never schedules. Do not ship this
+# chart to an edge whose client-runtime predates #388.
+_training_limits() {
+  local size="$1" out="" pair
+  local IFS=,
+  for pair in $size; do
+    # TRIM FIRST. `case " cpu=7 " in cpu=*)` does NOT match, so an operator who
+    # wrote `TRACEBLOC_TRAINING_RESOURCES="cpu=7, memory=29Gi"` would keep the
+    # cpu limit -- silently, and in the dangerous direction. The PowerShell twin
+    # trims via `.Trim()`, so skipping it here is also a twin DIVERGENCE: the
+    # same shared contract, two different control flows, which is the exact bug
+    # class backend#2220 found five of. jobs-manager's own parser strips too, so
+    # trimmed output is what it would have read anyway.
+    pair="${pair#"${pair%%[![:space:]]*}"}"
+    pair="${pair%"${pair##*[![:space:]]}"}"
+    [[ -n "$pair" ]] || continue
+    case "$pair" in
+      cpu=*) continue ;;
+    esac
+    out="${out:+$out,}$pair"
+  done
+  # Nothing survived the filter -- a cpu-only envelope, which is not something
+  # to guess at. Return the INPUT UNCHANGED rather than an empty string: an
+  # empty RESOURCE_LIMITS reads to jobs-manager as "unset", which since
+  # client-runtime#388 mirrors the requests side back and resurrects the very
+  # cpu limit this function exists to drop.
+  #
+  # `$size` itself is never empty on any reachable path: _training_resources'
+  # four-way fallback chain (env override -> installed release -> machine sizing
+  # -> the cpu=2,memory=8Gi literal) always yields a value. An empty input would
+  # return empty here, and that is the honest answer -- there is nothing to say
+  # about an envelope that does not exist.
+  printf '%s' "${out:-$size}"
+}
+
 # Echo "<size>|viable" or "<size>|undersized" for the largest node, or NOTHING
 # when the cluster is unreadable (backend#2220).
 #
@@ -1797,12 +1856,18 @@ install_client_helm() {
 
 env:
 $([ -n "${CLIENT_ENV:-}" ] && printf '  CLIENT_ENV: "%s"\n' "$(tb_client_env "$CLIENT_ENV")")${proxy_env_yaml}
-  # Training size: how much CPU/RAM each training run gets. One knob sets
-  # requests == limits (Guaranteed QoS; client-runtime keeps them in lockstep).
-  # Sized to this machine at install — largest node minus ~1 CPU / 3 GiB
-  # platform overhead — unless TRACEBLOC_TRAINING_RESOURCES is set or the
-  # installed release already carries a choice (backend#1236, option A).
-  RESOURCE_LIMITS: "${training_size}"
+  # Training size: how much CPU/RAM each training run gets. Sized to this
+  # machine at install — largest node minus ~1 CPU / 3 GiB platform overhead —
+  # unless TRACEBLOC_TRAINING_RESOURCES is set or the installed release already
+  # carries a choice (backend#1236, option A).
+  #
+  # THE TWO HALVES ARE NOT THE SAME STRING any more (backend#2418, L0.2):
+  # requests carries cpu AND memory, limits carries memory ONLY. CPU is
+  # time-shared, so a request with no limit is a share weight rather than a
+  # quota that throttles on an idle machine; memory is not time-shared, so
+  # requests == limits stays. See _training_limits for the full reasoning and
+  # for the client-runtime#388 ordering constraint.
+  RESOURCE_LIMITS: "$(_training_limits "${training_size}")"
   RESOURCE_REQUESTS: "${training_size}"
   # Who chose the pair above (backend#2220). Bookkeeping only — it never changes
   # the envelope. "unknown" means the value was carried forward from before this
