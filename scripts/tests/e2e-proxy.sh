@@ -253,7 +253,12 @@ spec:
       hostnames: ["${BACKEND_HOST}"]
   containers:
     - name: app
-      image: curlimages/curl:latest
+      # Pinned, and to the SAME tag as e2e_egress_positive_control's probe in
+      # lib/e2e-common.sh — this job is a candidate required status check, and a
+      # floating tag would make an external registry's next push able to block a
+      # merge. (Not a flake fix: latest and 8.20.0 were both measured under
+      # backend#2350 and behave identically here.)
+      image: curlimages/curl:8.20.0
       env:
         - { name: HTTP_PROXY,  value: "${APP_PROXY_URL}" }
         - { name: HTTPS_PROXY, value: "${APP_PROXY_URL}" }
