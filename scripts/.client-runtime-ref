@@ -7,4 +7,4 @@
 #
 # Bump this ref (and re-vendor the fixture) whenever the envelope contract
 # changes upstream. The drift gate below will tell you when that has happened.
-6293d15f7025d06bc85886df93456e62767a8d45
+48ccbac839cdcdf85a1fa55b8c0321287fcb567e

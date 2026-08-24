@@ -1259,7 +1259,7 @@ merge_setup() {                       # isolate HOME/KUBECONFIG from the real ma
   run _create_new_cluster
   [ "$status" -eq 0 ] || return 1
   run mock_calls
-  [[ "$output" == *"--kubelet-arg=fail-cgroupv1=false@server:*"* ]] || return 1
+  [[ "$output" == *"--kubelet-arg=fail-cgroupv1=false@all"* ]] || return 1
 }
 
 # MUTATION ANCHOR. _version_lt reads a leading "v" as a non-numeric component,
@@ -1277,6 +1277,45 @@ merge_setup() {                       # isolate HOME/KUBECONFIG from the real ma
 
 @test "fail-cgroupv1: unset K8S_VERSION does not emit the flag" {
   K8S_VERSION=""
+  run _create_new_cluster
+  [ "$status" -eq 0 ] || return 1
+  run mock_calls
+  [[ "$output" != *"fail-cgroupv1"* ]] || return 1
+}
+
+# `latest` EMITS, and it is decided rather than fallen into (#806 review). It is the
+# unsupported opt-out where k3d picks the k3s version and we cannot read it, so the
+# trade is a flag that is harmless from 1.31 against a refusal that is fatal from
+# 1.35 -- and `latest` is the path that produced the v1.35.5 drift incident. Pinned
+# k3d v5.9.0 defaults to k3s 1.32, above the flag and below the refusal.
+@test "fail-cgroupv1: latest emits the flag (decided, not a parse accident)" {
+  K8S_VERSION="latest"
+  run _create_new_cluster
+  [ "$status" -eq 0 ] || return 1
+  run mock_calls
+  [[ "$output" == *"--kubelet-arg=fail-cgroupv1=false@all"* ]] || return 1
+}
+
+# A digest-only pin is not dotted-numeric, so it must fall to skip rather than
+# throw or emit -- the bash half reads a non-numeric component as 0 (below 1.31),
+# and the PowerShell half now shape-checks before casting instead of letting
+# [version] throw.
+# The nodefilter is load-bearing and easy to "tidy" into the wrong thing: the
+# --disable= args beside it are @server:* because addon deployment is server-only,
+# but AGENTS defaults to 1 and an agent runs a kubelet too. @server:* would leave
+# the agent kubelet refusing to start on a cgroup v1 host -- `--wait` then fails or
+# the cluster sits half-ready, which is the refusal this whole block prevents.
+@test "fail-cgroupv1: scoped @all, never @server:* — agents run kubelets too" {
+  K8S_VERSION="v1.36.3-k3s1"
+  run _create_new_cluster
+  [ "$status" -eq 0 ] || return 1
+  run mock_calls
+  [[ "$output" == *"fail-cgroupv1=false@all"* ]] || return 1
+  [[ "$output" != *"fail-cgroupv1=false@server"* ]] || return 1
+}
+
+@test "fail-cgroupv1: an unparseable pin (digest) skips rather than emitting" {
+  K8S_VERSION="sha256:0123456789abcdef"
   run _create_new_cluster
   [ "$status" -eq 0 ] || return 1
   run mock_calls

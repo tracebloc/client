@@ -26,12 +26,13 @@ env: {
   # HTTP_PROXY_USERNAME: ""
   # HTTP_PROXY_PASSWORD: ""
   # Optional: explicit resource requests/limits for spawned training jobs.
-  # UNSET (the default): jobs-manager sizes the envelope from node allocatable
-  # capacity — cpu = max(2, floor(allocatable*0.75)), memory = max(8Gi,
-  # floor(allocatable*0.75)), requests == limits (Guaranteed QoS) — instead of
-  # the historic fixed "cpu=2,memory=8Gi" (backend#664, Utilization Ladder L0).
-  # Older client-runtime images fall back to that same literal, so leaving
-  # these unset is safe on any image. SET: pins the envelope exactly as before.
+  # UNSET (the default): jobs-manager uses its built-in "cpu=2,memory=8Gi"
+  # literal. SET: pins the envelope to exactly what you write here.
+  #
+  # This comment used to say that leaving the pair unset made jobs-manager size
+  # the envelope from node allocatable (75% of the node). It does not: that
+  # path is real but GATED OFF behind DERIVE_JOB_ENVELOPE (documented below).
+  # Unset means the literal (backend#664 L0, backend#2167, backend#2250).
   # RESOURCE_REQUESTS: "cpu=2,memory=8Gi"
   # RESOURCE_LIMITS: "cpu=2,memory=8Gi"
   # Bookkeeping only (backend#2220): WHO chose the two values above.
@@ -45,6 +46,31 @@ env: {
   # indistinguishable — and a future ladder must not silently overrule the
   # human. Leave it alone; the installer and the CLI maintain it.
   # RESOURCE_PROVENANCE: "installer"
+  # Optional, OFF by default: let jobs-manager size the training-job envelope
+  # from node allocatable capacity instead of the literal above --
+  # cpu = max(2, floor(allocatable*0.75)), memory = max(8Gi,
+  # floor(allocatable*0.75)), requests == limits (Guaranteed QoS).
+  #
+  # Effective ONLY when RESOURCE_REQUESTS *and* RESOURCE_LIMITS are both unset:
+  # an explicit envelope always wins, and this key is then inert (jobs-manager
+  # never reaches the derive branch). Note that BOTH installers write
+  # RESOURCE_* unconditionally, so on an installer-provisioned edge you must
+  # clear both keys as well as setting this one.
+  #
+  # READ THIS BEFORE TURNING IT ON (backend#2167). A ~75% Guaranteed envelope
+  # is EXCLUSIVE: any Guaranteed fraction >= 50% caps the machine at ONE
+  # concurrent training job, whatever the machine's size. And on a multi-node
+  # k3d cluster whose node containers are uncapped, every node reports the
+  # whole Docker VM (allocatable == capacity, no kube/system-reserved), so the
+  # min-across-nodes in the derivation does not save you and the OOM killer
+  # takes victims -- a k3s node container included. Turn this on to measure or
+  # to opt one edge in, not as a default. backend#2418 (CPU burstable, memory
+  # Guaranteed) and backend#2419 (a job that does not fit queues) are what make
+  # the derived envelope safe to default; until they land, this is opt-in.
+  #
+  # Truthy spellings jobs-manager accepts: "1", "true", "yes", "on"
+  # (case-insensitive). Anything else -- including "" -- is off.
+  # DERIVE_JOB_ENVELOPE: "true"
   # Optional: GPU requests for spawned jobs (defaults to "nvidia.com/gpu=1" if not provided)
   # GPU_REQUESTS: "nvidia.com/gpu=1"
   # Optional: GPU limits for spawned jobs (defaults to "nvidia.com/gpu=1" if not provided)
