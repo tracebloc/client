@@ -1344,6 +1344,8 @@ merge_setup() {                       # isolate HOME/KUBECONFIG from the real ma
 #     mode=empty       : exec returns nothing (dir exists but is not the host tree)
 #     mode=stale       : exec returns a DIFFERENT token (mount points elsewhere)
 #     mode=fail        : exec exits non-zero (cannot tell)
+# ps-output is now "<name> <role>" lines, because the probe selects on k3d's own
+# labels rather than parsing node names (see cluster.sh).
 _mock_docker() {
   # GLOBALS, not locals: the docker() body below runs long after _mock_docker has
   # returned, and bash captures no closure — locals would be unset there, docker
@@ -1368,8 +1370,8 @@ _mock_docker() {
 
 @test "_verify_nodes_see_host_data passes when every node sees the host tree" {
   mkdir -p "$HOST_DATA_DIR"
-  _mock_docker "k3d-tracebloc-server-0
-k3d-tracebloc-agent-0" passthrough
+  _mock_docker "k3d-tracebloc-server-0 server
+k3d-tracebloc-agent-0 agent" passthrough
   run _verify_nodes_see_host_data
   [ "$status" -eq 0 ] || { echo "$output"; return 1; }
   # and it must not leave its probe file behind
@@ -1378,7 +1380,7 @@ k3d-tracebloc-agent-0" passthrough
 
 @test "_verify_nodes_see_host_data REFUSES when the node cannot see the host tree" {
   mkdir -p "$HOST_DATA_DIR"
-  _mock_docker "k3d-tracebloc-server-0" empty
+  _mock_docker "k3d-tracebloc-server-0 server" empty
   run _verify_nodes_see_host_data
   [ "$status" -ne 0 ] || { echo "accepted an invisible data dir"; return 1; }
   [[ "$output" == *"cannot see your data directory"* ]] || return 1
@@ -1392,7 +1394,7 @@ k3d-tracebloc-agent-0" passthrough
   mkdir -p "$HOST_DATA_DIR"
   # A mount pointed at the WRONG host directory can still surface a file of the
   # same name from an earlier run. Presence alone would pass this; content fails.
-  _mock_docker "k3d-tracebloc-server-0" stale
+  _mock_docker "k3d-tracebloc-server-0 server" stale
   run _verify_nodes_see_host_data
   [ "$status" -ne 0 ] || { echo "a stale marker from another tree was accepted"; return 1; }
   # the SPECIFIC refusal: "cannot see your data directory", not the node-listing
@@ -1402,7 +1404,7 @@ k3d-tracebloc-agent-0" passthrough
 
 @test "_verify_nodes_see_host_data fails closed when a node cannot be exec'd" {
   mkdir -p "$HOST_DATA_DIR"
-  _mock_docker "k3d-tracebloc-server-0" fail
+  _mock_docker "k3d-tracebloc-server-0 server" fail
   run _verify_nodes_see_host_data
   [ "$status" -ne 0 ] || { echo "an unverifiable node was treated as a pass"; return 1; }
   [[ "$output" == *"cannot see your data directory"* ]] || { echo "wrong refusal: $output"; return 1; }
@@ -1422,7 +1424,7 @@ k3d-tracebloc-agent-0" passthrough
   # an agent. A server-only probe would pass while the pod's node is blind —
   # the same @all-vs-@server trap as the cgroup v1 flag (client#806).
   docker() {
-    if [[ "$1" == "ps" ]]; then printf 'k3d-tracebloc-server-0\nk3d-tracebloc-agent-0\n'; return 0; fi
+    if [[ "$1" == "ps" ]]; then printf 'k3d-tracebloc-server-0 server\nk3d-tracebloc-agent-0 agent\n'; return 0; fi
     if [[ "$1" == "exec" ]]; then
       [[ "$2" == *server-0 ]] && { cat "${HOST_DATA_DIR}/.tracebloc-mount-probe" 2>/dev/null; return 0; }
       return 0   # the AGENT is blind
@@ -1440,7 +1442,7 @@ k3d-tracebloc-agent-0" passthrough
   # requested for it and none is needed. Including it would make every hostpath
   # install fail on a container that never touches the data.
   docker() {
-    if [[ "$1" == "ps" ]]; then printf 'k3d-tracebloc-server-0\nk3d-tracebloc-serverlb\n'; return 0; fi
+    if [[ "$1" == "ps" ]]; then printf 'k3d-tracebloc-server-0 server\nk3d-tracebloc-serverlb loadbalancer\n'; return 0; fi
     if [[ "$1" == "exec" ]]; then
       [[ "$2" == *serverlb ]] && return 1        # lb genuinely has no /tracebloc
       cat "${HOST_DATA_DIR}/.tracebloc-mount-probe" 2>/dev/null; return 0
@@ -1456,9 +1458,88 @@ k3d-tracebloc-agent-0" passthrough
   TB_STORAGE_MODE=node-local
   # node-local (RFC-0003 Option C) deliberately has NO host mount — data lives on
   # k3s local-path inside the node. Probing there would fail every install.
-  _mock_docker "k3d-tracebloc-server-0" empty
+  _mock_docker "k3d-tracebloc-server-0 server" empty
   run _verify_nodes_see_host_data
   [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+}
+
+@test "_verify_nodes_see_host_data selects nodes by k3d LABEL, never by name substring (#817 review)" {
+  mkdir -p "$HOST_DATA_DIR"
+  # `name=k3d-<cluster>-` is an unanchored SUBSTRING match, so it also lists a
+  # same-prefixed sibling cluster's nodes (k3d-tracebloc-dev-server-0). If that
+  # sibling was created against a different HOST_DATA_DIR it cannot see this
+  # token, and the probe refuses THIS install while naming a node that is not
+  # ours — a FALSE REFUSAL, the one failure mode a fail-closed guard most has to
+  # avoid (@saqlainsyed007). The exact-match label filter closes it.
+  #
+  # The mock ignores --filter (it cannot implement docker's matching), so the
+  # assertion is on the ARGUMENTS: an exact k3d.cluster label, and no name filter.
+  # Recorded to a FILE, not a variable: `nodes=$(docker ps …)` runs the mock in a
+  # command-substitution SUBSHELL, so an assignment there never reaches the parent.
+  local argfile="$BATS_TEST_TMPDIR/psargs"; : > "$argfile"
+  docker() {
+    if [[ "$1" == "ps" ]]; then
+      printf '%s' "$*" > "$argfile"
+      # what docker WOULD return for the label filter: only our own cluster
+      printf 'k3d-tracebloc-server-0 server\n'
+      return 0
+    fi
+    if [[ "$1" == "exec" ]]; then cat "${HOST_DATA_DIR}/.tracebloc-mount-probe" 2>/dev/null; return 0; fi
+    return 0
+  }
+  _verify_nodes_see_host_data || { echo "probe failed unexpectedly"; return 1; }
+  local seen_args; seen_args="$(cat "$argfile")"
+  [[ -n "$seen_args" ]] || { echo "docker ps was never called"; return 1; }
+  [[ "$seen_args" == *"label=k3d.cluster=tracebloc"* ]] \
+    || { echo "not selecting on the exact cluster label: $seen_args"; return 1; }
+  [[ "$seen_args" != *"name=k3d-"* ]] \
+    || { echo "still using the substring name filter: $seen_args"; return 1; }
+  # and the role must come from k3d's label, not from a name suffix
+  [[ "$seen_args" == *'k3d.role'* ]] \
+    || { echo "role not read from the label: $seen_args"; return 1; }
+}
+
+@test "_verify_nodes_see_host_data does not exec a sibling cluster's node (#817 review)" {
+  mkdir -p "$HOST_DATA_DIR"
+  # End-to-end version of the above: docker HONOURS the label filter here, so a
+  # sibling cluster's blind node is simply never returned and the probe passes.
+  # Under the old name-substring filter it would have been listed and refused.
+  docker() {
+    if [[ "$1" == "ps" ]]; then
+      if [[ "$*" == *"label=k3d.cluster=tracebloc"* ]]; then
+        printf 'k3d-tracebloc-server-0 server\n'          # ours only
+      else
+        printf 'k3d-tracebloc-server-0 server\nk3d-tracebloc-dev-server-0 server\n'
+      fi
+      return 0
+    fi
+    if [[ "$1" == "exec" ]]; then
+      [[ "$2" == *-dev-* ]] && return 0                     # the sibling is blind
+      cat "${HOST_DATA_DIR}/.tracebloc-mount-probe" 2>/dev/null; return 0
+    fi
+    return 0
+  }
+  run _verify_nodes_see_host_data
+  [ "$status" -eq 0 ] || { echo "refused because of a sibling cluster: $output"; return 1; }
+}
+
+@test "_verify_nodes_see_host_data bounds both docker calls (#817 Bugbot)" {
+  mkdir -p "$HOST_DATA_DIR"
+  # A WEDGED (not stopped) daemon never returns from a bare `docker`, which would
+  # freeze a headless install here with no further output — the exact failure this
+  # guard exists to replace with a clear refusal. Assert the calls route through
+  # _bounded, which is the house pattern (_docker_answers does the same).
+  # Counted in a FILE: the probe's docker calls run in command-substitution
+  # subshells, so an incremented variable never reaches the parent.
+  local tally="$BATS_TEST_TMPDIR/bounded"; : > "$tally"
+  _bounded() { echo "$1" >> "$tally"; shift; "$@"; }
+  _mock_docker "k3d-tracebloc-server-0 server" passthrough
+  _verify_nodes_see_host_data || { echo "probe failed unexpectedly"; return 1; }
+  local n; n="$(wc -l < "$tally" | tr -d ' ')"
+  # one for `docker ps`, one for the single node's `docker exec`
+  [ "$n" -ge 2 ] || { echo "expected >=2 bounded docker calls, saw $n"; return 1; }
+  # and with a real timeout, not an empty/zero one that never fires
+  grep -qE '^[1-9][0-9]*$' "$tally" || { echo "bounded with a non-positive timeout: $(cat "$tally")"; return 1; }
 }
 
 @test "the mount probe exists in BOTH installers, and both are wired in (backend#2422)" {

@@ -88,16 +88,37 @@ _verify_nodes_see_host_data() {
     || error "Can't write to ${HOST_DATA_DIR} — check the directory exists and you own it, then re-run."
 
   local nodes node seen
-  # `docker ps` (running only): a created-but-stopped node cannot be exec'd and
-  # must not be mistaken for one that passed.
-  nodes=$(docker ps --filter "name=k3d-${CLUSTER_NAME}-" --format '{{.Names}}' 2>/dev/null | grep -vE -- '-serverlb$' || true)
+  # Selected by k3d's own LABELS, not by node name.
+  #
+  #   * `label=k3d.cluster=<name>` is an EXACT value match, so a same-prefixed
+  #     sibling cluster cannot leak in. `name=k3d-<name>-` is an unanchored
+  #     SUBSTRING match and would also list `k3d-<name>-dev-server-0`; if that
+  #     sibling was created against a different HOST_DATA_DIR its nodes cannot see
+  #     this token, and the probe would refuse THIS install while naming a node
+  #     that is not ours. A false refusal is the one failure mode a fail-closed
+  #     guard most has to avoid (@saqlainsyed007 on #817).
+  #   * `k3d.role` says what each container IS, so the load balancer is excluded
+  #     because it is a `loadbalancer` — not because its name happens to end in
+  #     `-serverlb`. Role is k3d's declaration; the name suffix is our guess at it.
+  #
+  # Bounded: a WEDGED (as opposed to stopped) daemon never returns from a bare
+  # `docker`, which would freeze a headless install right here with no further
+  # output — the exact failure this guard exists to replace with a clear refusal
+  # (Bugbot; same reason _docker_answers is bounded).
+  #
+  # `docker ps` lists RUNNING containers only: a created-but-stopped node cannot be
+  # exec'd and must not be mistaken for one that passed.
+  nodes=$(_bounded "${TB_DOCKER_PROBE_TIMEOUT:-10}" docker ps \
+            --filter "label=k3d.cluster=${CLUSTER_NAME}" \
+            --format '{{.Names}} {{.Label "k3d.role"}}' 2>/dev/null \
+          | awk '$2 == "server" || $2 == "agent" { print $1 }' || true)
   if [[ -z "$nodes" ]]; then
     rm -f "${HOST_DATA_DIR}/${marker}" 2>/dev/null || true
     error "Couldn't list the nodes of cluster '${CLUSTER_NAME}' to check your data directory is visible inside it. Check 'docker ps' works, then re-run."
   fi
 
   for node in $nodes; do
-    seen=$(docker exec "$node" cat "/tracebloc/${marker}" 2>/dev/null || true)
+    seen=$(_bounded "${TB_DOCKER_PROBE_TIMEOUT:-10}" docker exec "$node" cat "/tracebloc/${marker}" 2>/dev/null || true)
     if [[ "$seen" != "$token" ]]; then
       rm -f "${HOST_DATA_DIR}/${marker}" 2>/dev/null || true
       error "Node '${node}' cannot see your data directory (${HOST_DATA_DIR}).

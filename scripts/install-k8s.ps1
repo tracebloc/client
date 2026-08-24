@@ -740,16 +740,46 @@ function Assert-NodesSeeHostData {
   $marker = ".tracebloc-mount-probe"
   # Content, not presence: a mount pointed at the WRONG directory still shows a
   # file of this name from an earlier run. Only a token minted now proves it.
-  $token  = "$PID-$(Get-Random)-$([int][double]::Parse((Get-Date -UFormat %s)))"
+  # NEVER [double]::Parse a `Get-Date -UFormat %s` string: that string uses a
+  # PERIOD decimal separator while Parse uses the CURRENT CULTURE, so on de-DE /
+  # fr-FR and friends it throws FormatException before the probe even runs -- the
+  # cluster is already up and the operator gets a cryptic .NET parse error instead
+  # of a mount check (Bugbot, High). ToUnixTimeSeconds returns an integer, so
+  # nothing is parsed and no culture is involved. Same shape as the bash twin's
+  # $$-$RANDOM-$(date +%s).
+  $token  = "$PID-$(Get-Random)-$([DateTimeOffset]::UtcNow.ToUnixTimeSeconds())"
   $hostMarker = Join-Path $script:HOST_DATA_DIR $marker
   try { Set-Content -Path $hostMarker -Value $token -NoNewline -ErrorAction Stop }
   catch { throw "Can't write to $($script:HOST_DATA_DIR) -- check the directory exists and you own it, then re-run." }
 
   try {
-    # Running containers only: a created-but-stopped node cannot be exec'd and must
-    # not be mistaken for one that passed. -serverlb is k3d's proxy, not a kubelet.
-    $nodes = @(& docker ps --filter "name=k3d-$($script:CLUSTER_NAME)-" --format "{{.Names}}" 2>$null |
-               Where-Object { $_ -and $_ -notmatch '-serverlb$' })
+    # Selected by k3d's own LABELS, not by node name.
+    #
+    #   * `label=k3d.cluster=<name>` is an EXACT value match, so a same-prefixed
+    #     sibling cluster cannot leak in. `name=k3d-<name>-` is an unanchored
+    #     SUBSTRING match and would also list `k3d-<name>-dev-server-0`; if that
+    #     sibling was created against a different HOST_DATA_DIR its nodes cannot
+    #     see this token, and the probe would refuse THIS install while naming a
+    #     node that is not ours -- a false refusal, the one failure mode a
+    #     fail-closed guard most has to avoid (@saqlainsyed007 on #817).
+    #   * `k3d.role` says what each container IS, so the load balancer is excluded
+    #     because it is a `loadbalancer`, not because its name ends in `-serverlb`.
+    #
+    # Invoke-DockerCli, not a bare `docker`: a WEDGED (not stopped) daemon never
+    # returns, which would freeze a headless install right here with no further
+    # output -- the exact failure this guard exists to replace with a clear
+    # refusal (Bugbot). `docker ps` lists RUNNING containers only, so a
+    # created-but-stopped node cannot be mistaken for one that passed.
+    $psr = Invoke-DockerCli -DockerArgs @(
+      "ps", "--filter", "label=k3d.cluster=$($script:CLUSTER_NAME)",
+      "--format", "{{.Names}} {{.Label `"k3d.role`"}}") -TimeoutSec 10
+    $nodes = @()
+    if ($psr.Code -eq 0) {
+      $nodes = @($psr.Output -split "`r?`n" | ForEach-Object {
+        $parts = $_.Trim() -split '\s+'
+        if ($parts.Count -ge 2 -and ($parts[1] -eq 'server' -or $parts[1] -eq 'agent')) { $parts[0] }
+      } | Where-Object { $_ })
+    }
     if ($nodes.Count -eq 0) {
       throw "Couldn't list the nodes of cluster '$($script:CLUSTER_NAME)' to check your data directory is visible inside it. Check 'docker ps' works, then re-run."
     }
@@ -758,7 +788,8 @@ function Assert-NodesSeeHostData {
       # AGENTS defaults to 1 and agents run kubelets, so a training pod can land on
       # an agent -- every node is checked, not just the server (the same @all-vs-
       # @server trap as the cgroup v1 flag, #806).
-      $seen = (& docker exec $node cat "/tracebloc/$marker" 2>$null) -join ""
+      $r = Invoke-DockerCli -DockerArgs @("exec", $node, "cat", "/tracebloc/$marker") -TimeoutSec 10
+      $seen = if ($r.Code -eq 0) { ($r.Output -join "").Trim() } else { "" }
       if ($seen -ne $token) {
         throw @"
 Node '$node' cannot see your data directory ($($script:HOST_DATA_DIR)).
