@@ -548,17 +548,40 @@ spec:
         # floors, requests == limits / Guaranteed QoS). Older client-runtime
         # images fall back to their built-in cpu=2,memory=8Gi literal — the same
         # value this template used to inject — so chart and image can upgrade in
-        # either order without a behavior flip. When EITHER key is set the pair
-        # renders exactly as before (the missing one gets the literal): the two
-        # vars share one gate, like the GPU block below, so a half-set config
-        # never emits a lone var. The standalone installer writes explicit
-        # values (backend#1236), so the derivation path applies to chart-direct
-        # installs only.
+        # either order without a behavior flip. The standalone installer writes
+        # explicit values (backend#1236), so the derivation path applies to
+        # chart-direct installs only.
+        #
+        # EACH VAR IS EMITTED ONLY IF SET (backend#2418). This block used to fill
+        # the missing one with "cpu=2,memory=8Gi" so a half-set config never
+        # emitted a lone var. That was deliberate and it is now wrong, twice over:
+        #
+        #   * It re-created, at the CHART layer, the bug client-runtime#388 just
+        #     fixed at the RUNTIME layer. An operator setting only
+        #     RESOURCE_REQUESTS="cpu=7,memory=29Gi" got
+        #     RESOURCE_LIMITS="cpu=2,memory=8Gi" injected underneath them --
+        #     request ABOVE limit on both dimensions, which Kubernetes rejects
+        #     outright. #388 made jobs-manager mirror the given side instead, and
+        #     this template is what stopped that mirror from ever being reached.
+        #   * L0.2 (backend#2418) needs "memory Guaranteed, CPU a share weight
+        #     with no ceiling" to be expressible, which means a RESOURCE_LIMITS
+        #     with no cpu key. Filling the other side made that unsayable
+        #     through the chart.
+        #
+        # ORDERING CONSTRAINT: needs a jobs-manager that mirrors a one-sided
+        # envelope (client-runtime#388). An OLDER image merges the parsed pairs
+        # onto its built-in literal, so a lone RESOURCE_REQUESTS returns as a
+        # 2-core LIMIT under a 7-core REQUEST. Do not publish this chart ahead of
+        # a runtime carrying #388.
         {{- if or (hasKey .Values.env "RESOURCE_REQUESTS") (hasKey .Values.env "RESOURCE_LIMITS") }}
+        {{- if hasKey .Values.env "RESOURCE_REQUESTS" }}
         - name: RESOURCE_REQUESTS
-          value: {{ if hasKey .Values.env "RESOURCE_REQUESTS" }}{{ .Values.env.RESOURCE_REQUESTS | quote }}{{ else }}"cpu=2,memory=8Gi"{{ end }}
+          value: {{ .Values.env.RESOURCE_REQUESTS | quote }}
+        {{- end }}
+        {{- if hasKey .Values.env "RESOURCE_LIMITS" }}
         - name: RESOURCE_LIMITS
-          value: {{ if hasKey .Values.env "RESOURCE_LIMITS" }}{{ .Values.env.RESOURCE_LIMITS | quote }}{{ else }}"cpu=2,memory=8Gi"{{ end }}
+          value: {{ .Values.env.RESOURCE_LIMITS | quote }}
+        {{- end }}
         # backend#2220: WHO chose the pair above. Bookkeeping only -- it never
         # changes the envelope. It rides inside the same gate on purpose: a
         # provenance marker with no envelope to describe is noise, and pinning
@@ -686,15 +709,21 @@ spec:
           value: {{ printf "%s/" (dig "imageRegistry" "docker.io" (.Values.global | default dict) | default "docker.io") | quote }}
         - name: CLIENT_ENV
           value: {{ include "tracebloc.clientEnv" . | quote }}
-        # See the api container's RESOURCE_REQUESTS note (backend#664): both
-        # omitted when neither is set (jobs-manager derives from node
-        # allocatable; older images keep their built-in literal), both rendered
-        # as before when either is set.
+        # See the api container's RESOURCE_REQUESTS note (backend#664,
+        # backend#2418): both omitted when neither is set (jobs-manager derives
+        # from node allocatable; older images keep their built-in literal), and
+        # EACH emitted only if set -- no literal is injected for the other side,
+        # because doing so both blocked L0.2's cpu-less limits and re-created
+        # client-runtime#388's request-above-limit bug at the chart layer.
         {{- if or (hasKey .Values.env "RESOURCE_REQUESTS") (hasKey .Values.env "RESOURCE_LIMITS") }}
+        {{- if hasKey .Values.env "RESOURCE_REQUESTS" }}
         - name: RESOURCE_REQUESTS
-          value: {{ if hasKey .Values.env "RESOURCE_REQUESTS" }}{{ .Values.env.RESOURCE_REQUESTS | quote }}{{ else }}"cpu=2,memory=8Gi"{{ end }}
+          value: {{ .Values.env.RESOURCE_REQUESTS | quote }}
+        {{- end }}
+        {{- if hasKey .Values.env "RESOURCE_LIMITS" }}
         - name: RESOURCE_LIMITS
-          value: {{ if hasKey .Values.env "RESOURCE_LIMITS" }}{{ .Values.env.RESOURCE_LIMITS | quote }}{{ else }}"cpu=2,memory=8Gi"{{ end }}
+          value: {{ .Values.env.RESOURCE_LIMITS | quote }}
+        {{- end }}
         # backend#2220: WHO chose the pair above. Bookkeeping only -- it never
         # changes the envelope. It rides inside the same gate on purpose: a
         # provenance marker with no envelope to describe is noise, and pinning
