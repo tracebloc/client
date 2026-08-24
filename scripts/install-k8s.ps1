@@ -717,6 +717,132 @@ function Ensure-ReleaseDirs($release) {
     New-Item -ItemType Directory -Force -Path $d -ErrorAction Stop | Out-Null
   }
 }
+
+# Prove the k3d nodes can actually SEE the host tree, before helm writes anything.
+# Mirrors bash _verify_nodes_see_host_data (scripts/lib/cluster.sh) -- keep the two
+# in lockstep.
+#
+# /tracebloc is the k3d bind mount of HOST_DATA_DIR. When it is not in effect
+# NOTHING fails: kubelet's DirectoryOrCreate fabricates the dirs inside the node,
+# the PVC Binds, the pod Runs, MySQL initialises an empty datadir and the dataset
+# dir reads as zero rows -- no event, no warning, and the data goes with the node
+# on the next `cluster delete`. This is the Windows/Docker-Desktop path's problem
+# specifically: a HOST_DATA_DIR outside the shared drives yields exactly that.
+#
+# The chart-side fix is NOT available: setting the PVs to `type: Directory` so
+# kubelet refuses is rejected by the API server on any existing release
+# ("spec.persistentvolumesource is immutable after creation"), failing the helm
+# upgrade of every install that already has PVs. Measured on k3s v1.36.3.
+#
+# Fails CLOSED -- an unreadable marker, a node that cannot be exec'd, or an
+# unobtainable node list all stop the install. "Cannot tell" is a finding.
+function Assert-NodesSeeHostData {
+  $marker = ".tracebloc-mount-probe"
+  # Content, not presence: a mount pointed at the WRONG directory still shows a
+  # file of this name from an earlier run. Only a token minted now proves it.
+  # NEVER [double]::Parse a `Get-Date -UFormat %s` string: that string uses a
+  # PERIOD decimal separator while Parse uses the CURRENT CULTURE, so on de-DE /
+  # fr-FR and friends it throws FormatException before the probe even runs -- the
+  # cluster is already up and the operator gets a cryptic .NET parse error instead
+  # of a mount check (Bugbot, High). ToUnixTimeSeconds returns an integer, so
+  # nothing is parsed and no culture is involved. Same shape as the bash twin's
+  # $$-$RANDOM-$(date +%s).
+  $token  = "$PID-$(Get-Random)-$([DateTimeOffset]::UtcNow.ToUnixTimeSeconds())"
+  $hostMarker = Join-Path $script:HOST_DATA_DIR $marker
+  try { Set-Content -Path $hostMarker -Value $token -NoNewline -ErrorAction Stop }
+  catch { throw "Can't write to $($script:HOST_DATA_DIR) -- check the directory exists and you own it, then re-run." }
+
+  try {
+    # Selected by k3d's own LABELS, not by node name.
+    #
+    #   * `label=k3d.cluster=<name>` is an EXACT value match, so a same-prefixed
+    #     sibling cluster cannot leak in. `name=k3d-<name>-` is an unanchored
+    #     SUBSTRING match and would also list `k3d-<name>-dev-server-0`; if that
+    #     sibling was created against a different HOST_DATA_DIR its nodes cannot
+    #     see this token, and the probe would refuse THIS install while naming a
+    #     node that is not ours -- a false refusal, the one failure mode a
+    #     fail-closed guard most has to avoid (@saqlainsyed007 on #817).
+    #   * `k3d.role` says what each container IS, so the load balancer is excluded
+    #     because it is a `loadbalancer`, not because its name ends in `-serverlb`.
+    #
+    # Invoke-DockerCli, not a bare `docker`: a WEDGED (not stopped) daemon never
+    # returns, which would freeze a headless install right here with no further
+    # output -- the exact failure this guard exists to replace with a clear
+    # refusal (Bugbot). `docker ps` lists RUNNING containers only, so a
+    # created-but-stopped node cannot be mistaken for one that passed.
+    # ONE QUERY PER ROLE, and NO ARGUMENT CONTAINS A SPACE OR A QUOTE. That is a
+    # hard requirement on this platform, not a style choice: $psi.Arguments joins
+    # the args into a single command line and quotes any whitespace-bearing value as
+    # '"' + $_ + '"' with NO escaping of inner quotes (see its note). The obvious
+    # single query -- `--format "{{.Names}} {{.Label `"k3d.role`"}}"` -- has both a
+    # space AND quotes, so it went out as
+    #     --format "{{.Names}} {{.Label "k3d.role"}}"
+    # and CommandLineToArgvW toggles in and out of quoting to yield ONE token with
+    # the inner quotes CONSUMED: `{{.Names}} {{.Label k3d.role}}`. docker then gets
+    # an intact --format whose Go template has lost the quoting on its string
+    # literal, text/template cannot parse k3d.role as an identifier, docker exits
+    # non-zero, $nodes stays empty and the probe throws "Couldn't list the nodes" --
+    # a FALSE REFUSAL on every Windows hostpath install, after the cluster is up.
+    # (@saadqbal / Bugbot on #817; the bash twin passes an array and never re-joins,
+    # so it was never exposed.)
+    #
+    # Asking docker to AND two label filters removes the need for a quoted format
+    # entirely: `{{.Names}}` alone has no space, and `label=k3d.role=server` has
+    # neither. It also drops the role parsing, and the load balancer is excluded by
+    # construction -- its role is `loadbalancer`, which is simply never queried.
+    #
+    # -StdoutOnly for the same reason as the exec call below.
+    $nodes = @()
+    foreach ($role in @("server", "agent")) {
+      $psr = Invoke-DockerCli -DockerArgs @(
+        "ps", "--filter", "label=k3d.cluster=$($script:CLUSTER_NAME)",
+        "--filter", "label=k3d.role=$role",
+        "--format", "{{.Names}}") -TimeoutSec 10 -StdoutOnly
+      # Fail closed per role: an empty list is legitimate (AGENTS=0 has no agent),
+      # but a docker that ERRORED tells us nothing and must not read as "none".
+      if ($psr.Code -ne 0) {
+        throw "Couldn't list the nodes of cluster '$($script:CLUSTER_NAME)' to check your data directory is visible inside it. Check 'docker ps' works, then re-run."
+      }
+      $nodes += @($psr.Output -split "`r?`n" | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+    }
+    if ($nodes.Count -eq 0) {
+      throw "Couldn't list the nodes of cluster '$($script:CLUSTER_NAME)' to check your data directory is visible inside it. Check 'docker ps' works, then re-run."
+    }
+
+    foreach ($node in $nodes) {
+      # AGENTS defaults to 1 and agents run kubelets, so a training pod can land on
+      # an agent -- every node is checked, not just the server (the same @all-vs-
+      # @server trap as the cgroup v1 flag, #806).
+      # -StdoutOnly is REQUIRED here, not tidiness: the marker is written -NoNewline,
+      # so `cat` emits the token with no trailing newline and any docker stderr
+      # chatter glues onto the token INSIDE THE SAME LINE. That is why "take the first
+      # non-empty line" does not fix this -- the first line is already
+      # "<token>WARNING: ..." (@saadqbal on #817). Isolating stdout removes the
+      # possibility rather than trying to parse around it, and matches the bash twin's
+      # 2>/dev/null. A false refusal here is the single worst outcome for this guard:
+      # it would abort a perfectly good install after the cluster is up.
+      $r = Invoke-DockerCli -DockerArgs @("exec", $node, "cat", "/tracebloc/$marker") -TimeoutSec 10 -StdoutOnly
+      $seen = if ($r.Code -eq 0) { ($r.Output -join "").Trim() } else { "" }
+      if ($seen -ne $token) {
+        throw @"
+Node '$node' cannot see your data directory ($($script:HOST_DATA_DIR)).
+
+  Everything would appear to install, but the secure environment would store your
+  data INSIDE the node instead of on this machine -- and lose it when the cluster is
+  recreated. Refusing to continue.
+
+  Most likely causes:
+    * Docker Desktop is not sharing this path. Add it under
+      Settings -> Resources -> File sharing, then re-run.
+    * The cluster was created without the data mount. Recreate it:
+      'k3d cluster delete $($script:CLUSTER_NAME)' then re-run this installer.
+    * HOST_DATA_DIR changed since the cluster was created.
+"@
+      }
+    }
+  }
+  finally { Remove-Item -Path $hostMarker -Force -ErrorAction SilentlyContinue }
+}
 $CLIENT_ENV    = $env:CLIENT_ENV
 
 $GPU_VENDOR       = "none"
@@ -1877,11 +2003,26 @@ echo "NCT installed successfully."
 # (e.g. a login token) is written in-memory, never to disk/argv/logs. 5.1-safe. Returns
 # @{ Code = <int>; Output = <string> } with Code=124 on timeout.
 function Invoke-BoundedProcess {
+  # -StdoutOnly: return ONLY stdout in .Output on the success path, instead of the
+  # usual stdout+stderr concatenation.
+  #
+  # OPT-IN on purpose. The merged .Output is load-bearing for most callers -- e.g.
+  # Get-GpuBuildFailureReason classifies a docker build by matching stderr text -- so
+  # isolating it globally would break the diagnosis those callers exist to produce.
+  # But a caller that COMPARES output to an expected value cannot tolerate the merge:
+  # any client-side docker warning lands in the same string and the comparison fails.
+  # Assert-NodesSeeHostData is exactly that, and there the failure is a FALSE REFUSAL
+  # after the cluster is already up (@saadqbal / Bugbot on #817).
+  #
+  # Only the success path is isolated. The failure/timeout paths keep their merged or
+  # synthetic text, which is pure diagnostics -- and every caller checks .Code before
+  # reading .Output for a value.
   param(
     [Parameter(Mandatory)][string]$FileName,
     [Parameter(Mandatory)][string[]]$Arguments,
     [int]$TimeoutSec = 120,
-    [string]$Stdin = ""
+    [string]$Stdin = "",
+    [switch]$StdoutOnly
   )
   $psi = New-Object System.Diagnostics.ProcessStartInfo
   $psi.FileName = $FileName
@@ -1943,7 +2084,7 @@ function Invoke-BoundedProcess {
     finally { try { $proc.StandardInput.Close() } catch { } }
   }
   if ($proc.WaitForExit($TimeoutSec * 1000)) {
-    return [pscustomobject]@{ Code = $proc.ExitCode; Output = ($outTask.Result + $errTask.Result) }
+    return [pscustomobject]@{ Code = $proc.ExitCode; Output = $(if ($StdoutOnly) { $outTask.Result } else { $outTask.Result + $errTask.Result }) }
   }
   # timed out -> kill the child so it can't keep running after we've moved on
   try { $proc.Kill() } catch {}
@@ -1955,9 +2096,10 @@ function Invoke-DockerCli {
   param(
     [Parameter(Mandatory)][string[]]$DockerArgs,
     [int]$TimeoutSec = 120,
-    [string]$Stdin = ""
+    [string]$Stdin = "",
+    [switch]$StdoutOnly
   )
-  return Invoke-BoundedProcess -FileName "docker" -Arguments $DockerArgs -TimeoutSec $TimeoutSec -Stdin $Stdin
+  return Invoke-BoundedProcess -FileName "docker" -Arguments $DockerArgs -TimeoutSec $TimeoutSec -Stdin $Stdin -StdoutOnly:$StdoutOnly
 }
 
 function Confirm-DockerGpu {
@@ -3636,7 +3778,11 @@ function New-K3dCluster {
     # local-storage is disabled UNCONDITIONALLY here, where cluster.sh gates it on
     # TB_STORAGE_MODE. That is correct only because Windows is hostpath-only:
     # node-local (RFC-0003 Option C) is a Linux/k3s prototype with no Windows
-    # path, the same reason Invoke-LeftoverDataGuard above is hostpath-scoped. If
+    # path, the same reason Invoke-LeftoverDataGuard above is hostpath-scoped --
+    # and the same reason Assert-NodesSeeHostData runs unconditionally at the end
+    # of New-K3dCluster, where the bash twin gates it on TB_STORAGE_MODE (a
+    # node-local cluster has NO host mount, so probing one there would refuse
+    # every install). If
     # you add a Windows node-local path, this flag has to become conditional too
     # or every dataset PVC stays Pending against a StorageClass that does not
     # exist. scripts/tests/k3s-components-agreement.sh trips the moment this file
@@ -3918,6 +4064,13 @@ function New-K3dCluster {
   Log "kubeconfig updated -- kubectl now points to '$CLUSTER_NAME'."
 
   Set-ClusterAutostart
+
+  # Last thing cluster setup does, and the first point where the question can be
+  # answered: the nodes are up and the bind mount (if any) is in effect, and it is
+  # still before helm writes anything (backend#2422). Mirrors the bash twin, which
+  # calls _verify_nodes_see_host_data at the end of its own cluster path -- NOT
+  # from the helm install function, which is a different layer.
+  Assert-NodesSeeHostData
 }
 
 # =============================================================================
