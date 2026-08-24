@@ -1821,3 +1821,39 @@ k3d-tracebloc-agent-0 agent" passthrough
   (( sh_calls >= 2 )) || { echo "bash: defined but never called (code mentions: $sh_calls)"; return 1; }
   (( ps_calls >= 2 )) || { echo "ps1: defined but never called (code mentions: $ps_calls)"; return 1; }
 }
+
+@test "the README's recreate instructions carry the same release-first step as _recreate_cluster_hint (#819)" {
+  # This PR forces a cluster REBUILD on the whole installed base (k3s's version is
+  # fixed at create time), so the README's recreate instructions are suddenly the
+  # most-followed path in the repo. The first draft of that note said only
+  # `k3d cluster delete` — and both installers explicitly warn that deleting the
+  # cluster first "strands it on your dashboard for good", because the secure
+  # environment is anchored to the cluster's identity. Following the README would
+  # have stranded the backend record for every customer this pin bump rebuilds
+  # (Bugbot on #819).
+  #
+  # DERIVED from _recreate_cluster_hint rather than restated: pull the command lines
+  # the installer actually prints and require the README to carry them. A guard that
+  # hardcoded "tracebloc delete --keep-data" would agree with itself while the hint
+  # moved on.
+  local sh="$BATS_TEST_DIRNAME/../lib/cluster.sh"
+  local readme="$BATS_TEST_DIRNAME/../../README.md"
+
+  # the release command, exactly as the hint spells it (strip the hint wrapper and
+  # the trailing parenthetical gloss)
+  local release
+  release=$(sed -n 's/^ *hint "  \(tracebloc delete [^ ]*\).*/\1/p' "$sh" | head -1)
+  [[ -n "$release" ]] || { echo "could not read the release command out of _recreate_cluster_hint"; return 1; }
+
+  grep -qF -- "$release" "$readme" \
+    || { echo "README's recreate guidance omits the release step the installer prints: '$release'"; return 1; }
+
+  # ...and it must come BEFORE the k3d delete, which is the whole point: the
+  # ordering is what protects the dashboard record.
+  local rel_line k3d_line
+  rel_line=$(grep -nF -- "$release" "$readme" | head -1 | cut -d: -f1)
+  k3d_line=$(grep -n 'k3d cluster delete' "$readme" | head -1 | cut -d: -f1)
+  [[ -n "$k3d_line" ]] || { echo "README never mentions the k3d delete"; return 1; }
+  (( rel_line < k3d_line )) \
+    || { echo "README puts the k3d delete (line $k3d_line) before the release (line $rel_line)"; return 1; }
+}
