@@ -1523,6 +1523,32 @@ k3d-tracebloc-agent-0 agent" passthrough
   [ "$status" -eq 0 ] || { echo "refused because of a sibling cluster: $output"; return 1; }
 }
 
+@test "_verify_nodes_see_host_data discards docker stderr, so chatter cannot forge a miss (#817)" {
+  mkdir -p "$HOST_DATA_DIR"
+  # The PowerShell twin had a real bug here: its bounded helper concatenates
+  # stdout+stderr, and because the marker is written with no trailing newline a
+  # docker warning glued onto the token INSIDE the same line and produced a FALSE
+  # REFUSAL (#817).
+  #
+  # Bash is protected by `$( )` SEMANTICS, not by the `2>/dev/null` — command
+  # substitution captures stdout only, so the redirect just keeps the terminal
+  # quiet. Worth stating precisely, because the first version of this test claimed
+  # to guard the redirect and was VACUOUS: removing `2>/dev/null` changes nothing
+  # capturable and the test stayed green.
+  #
+  # What it does catch is the regression that can actually break this side —
+  # someone "helpfully" adding `2>&1` to capture diagnostics into the variable.
+  # Mutation-checked: with `2>&1` this test fails with the exact false refusal.
+  docker() {
+    echo "WARNING: docker chatter on stderr" >&2
+    if [[ "$1" == "ps" ]]; then printf 'k3d-tracebloc-server-0 server\n'; return 0; fi
+    if [[ "$1" == "exec" ]]; then cat "${HOST_DATA_DIR}/.tracebloc-mount-probe" 2>/dev/null; return 0; fi
+    return 0
+  }
+  run _verify_nodes_see_host_data
+  [ "$status" -eq 0 ] || { echo "stderr chatter caused a false refusal: $output"; return 1; }
+}
+
 @test "_verify_nodes_see_host_data bounds both docker calls (#817 Bugbot)" {
   mkdir -p "$HOST_DATA_DIR"
   # A WEDGED (not stopped) daemon never returns from a bare `docker`, which would

@@ -6497,6 +6497,51 @@ Describe "Assert-NodesSeeHostData (backend#2422)" {
     ($script:timeouts | Where-Object { $_ -le 0 }).Count | Should -Be 0
   }
 
+  It "isolates stdout so docker stderr cannot forge a miss (#817 @saadqbal / Bugbot)" {
+    # THE REAL BUG: Invoke-BoundedProcess returns Output = stdout + stderr concatenated
+    # (a plain string join), and the marker is written -NoNewline. So `cat` emits the
+    # token with no trailing newline and a docker warning glues onto it INSIDE THE SAME
+    # LINE -- "<token>WARNING: ..." -- which is why "take the first non-empty line" does
+    # not fix it either. The result is a FALSE REFUSAL after the cluster is already up.
+    #
+    # Tested against a REAL process, not a mock of Invoke-DockerCli: mocking the very
+    # call whose output shape is the bug would assert nothing about the fix. This runs
+    # a child that writes to BOTH streams and checks the switch actually separates them.
+    $sh = (Get-Command sh -ErrorAction SilentlyContinue)
+    if (-not $sh) { Set-ItResult -Skipped -Because "needs a POSIX sh to write both streams"; return }
+    # No spaces or quotes inside the stderr payload: Invoke-BoundedProcess quotes any
+    # argument containing whitespace, and a nested quoted string inside this -c script
+    # gets mangled by that (which is what made the first version of this test fail with
+    # a truncated payload rather than a real verdict).
+    $script = 'printf tok; printf WARNING:chatter >&2'
+
+    $merged = Invoke-BoundedProcess -FileName $sh.Source -Arguments @("-c", $script) -TimeoutSec 20
+    $merged.Code | Should -Be 0
+    $merged.Output | Should -BeLike "*WARNING*" -Because "the default must keep merging, or callers that classify stderr break"
+    # and it glues on with NO separator -- the precise mechanism of the bug, and the
+    # reason a first-non-empty-line fix cannot work
+    $merged.Output | Should -Be "tokWARNING:chatter"
+
+    $isolated = Invoke-BoundedProcess -FileName $sh.Source -Arguments @("-c", $script) -TimeoutSec 20 -StdoutOnly
+    $isolated.Code | Should -Be 0
+    $isolated.Output | Should -Be "tok"
+    $isolated.Output | Should -Not -BeLike "*WARNING*"
+  }
+
+  It "passes -StdoutOnly on BOTH docker calls, so the isolation cannot regress (#817)" {
+    # The switch above only helps if this function actually asks for it. Capture what
+    # the probe requests rather than trusting the wiring.
+    $script:sawStdoutOnly = @()
+    Mock Invoke-DockerCli {
+      $script:sawStdoutOnly += [bool]$StdoutOnly
+      if ($DockerArgs[0] -eq "ps") { return ([pscustomobject]@{ Code = 0; Output = "k3d-tracebloc-server-0 server`n" }) }
+      return ([pscustomobject]@{ Code = 0; Output = (Get-Content (Join-Path $script:HOST_DATA_DIR ".tracebloc-mount-probe") -Raw) })
+    }
+    { Assert-NodesSeeHostData } | Should -Not -Throw
+    $script:sawStdoutOnly.Count | Should -BeGreaterOrEqual 2          # ps + one exec
+    ($script:sawStdoutOnly | Where-Object { -not $_ }).Count | Should -Be 0
+  }
+
   It "mints the token without culture-sensitive parsing (#817 Bugbot, High)" {
     # THE FUNCTIONAL TEST CANNOT PROVE THIS HERE, and pretending otherwise was the
     # first version of this test: on PowerShell 7 `Get-Date -UFormat %s` emits a

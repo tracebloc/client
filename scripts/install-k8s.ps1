@@ -770,9 +770,16 @@ function Assert-NodesSeeHostData {
     # output -- the exact failure this guard exists to replace with a clear
     # refusal (Bugbot). `docker ps` lists RUNNING containers only, so a
     # created-but-stopped node cannot be mistaken for one that passed.
+    # -StdoutOnly, like the bash twin's 2>/dev/null. Invoke-BoundedProcess otherwise
+    # concatenates stdout+stderr into one string (see its note), and with no separator
+    # inserted a stdout that lacked its trailing newline would glue a docker warning
+    # onto the LAST node's role field -- "serverWARNING: ..." -- dropping that node
+    # from the list, so a single-node cluster would fall into "Couldn't list the
+    # nodes". Second-order here, since docker's --format terminates its output, but it
+    # is the same root cause as the exec compare below and goes away with the same fix.
     $psr = Invoke-DockerCli -DockerArgs @(
       "ps", "--filter", "label=k3d.cluster=$($script:CLUSTER_NAME)",
-      "--format", "{{.Names}} {{.Label `"k3d.role`"}}") -TimeoutSec 10
+      "--format", "{{.Names}} {{.Label `"k3d.role`"}}") -TimeoutSec 10 -StdoutOnly
     $nodes = @()
     if ($psr.Code -eq 0) {
       $nodes = @($psr.Output -split "`r?`n" | ForEach-Object {
@@ -788,7 +795,15 @@ function Assert-NodesSeeHostData {
       # AGENTS defaults to 1 and agents run kubelets, so a training pod can land on
       # an agent -- every node is checked, not just the server (the same @all-vs-
       # @server trap as the cgroup v1 flag, #806).
-      $r = Invoke-DockerCli -DockerArgs @("exec", $node, "cat", "/tracebloc/$marker") -TimeoutSec 10
+      # -StdoutOnly is REQUIRED here, not tidiness: the marker is written -NoNewline,
+      # so `cat` emits the token with no trailing newline and any docker stderr
+      # chatter glues onto the token INSIDE THE SAME LINE. That is why "take the first
+      # non-empty line" does not fix this -- the first line is already
+      # "<token>WARNING: ..." (@saadqbal on #817). Isolating stdout removes the
+      # possibility rather than trying to parse around it, and matches the bash twin's
+      # 2>/dev/null. A false refusal here is the single worst outcome for this guard:
+      # it would abort a perfectly good install after the cluster is up.
+      $r = Invoke-DockerCli -DockerArgs @("exec", $node, "cat", "/tracebloc/$marker") -TimeoutSec 10 -StdoutOnly
       $seen = if ($r.Code -eq 0) { ($r.Output -join "").Trim() } else { "" }
       if ($seen -ne $token) {
         throw @"
@@ -1970,11 +1985,26 @@ echo "NCT installed successfully."
 # (e.g. a login token) is written in-memory, never to disk/argv/logs. 5.1-safe. Returns
 # @{ Code = <int>; Output = <string> } with Code=124 on timeout.
 function Invoke-BoundedProcess {
+  # -StdoutOnly: return ONLY stdout in .Output on the success path, instead of the
+  # usual stdout+stderr concatenation.
+  #
+  # OPT-IN on purpose. The merged .Output is load-bearing for most callers -- e.g.
+  # Get-GpuBuildFailureReason classifies a docker build by matching stderr text -- so
+  # isolating it globally would break the diagnosis those callers exist to produce.
+  # But a caller that COMPARES output to an expected value cannot tolerate the merge:
+  # any client-side docker warning lands in the same string and the comparison fails.
+  # Assert-NodesSeeHostData is exactly that, and there the failure is a FALSE REFUSAL
+  # after the cluster is already up (@saadqbal / Bugbot on #817).
+  #
+  # Only the success path is isolated. The failure/timeout paths keep their merged or
+  # synthetic text, which is pure diagnostics -- and every caller checks .Code before
+  # reading .Output for a value.
   param(
     [Parameter(Mandatory)][string]$FileName,
     [Parameter(Mandatory)][string[]]$Arguments,
     [int]$TimeoutSec = 120,
-    [string]$Stdin = ""
+    [string]$Stdin = "",
+    [switch]$StdoutOnly
   )
   $psi = New-Object System.Diagnostics.ProcessStartInfo
   $psi.FileName = $FileName
@@ -2036,7 +2066,7 @@ function Invoke-BoundedProcess {
     finally { try { $proc.StandardInput.Close() } catch { } }
   }
   if ($proc.WaitForExit($TimeoutSec * 1000)) {
-    return [pscustomobject]@{ Code = $proc.ExitCode; Output = ($outTask.Result + $errTask.Result) }
+    return [pscustomobject]@{ Code = $proc.ExitCode; Output = $(if ($StdoutOnly) { $outTask.Result } else { $outTask.Result + $errTask.Result }) }
   }
   # timed out -> kill the child so it can't keep running after we've moved on
   try { $proc.Kill() } catch {}
@@ -2048,9 +2078,10 @@ function Invoke-DockerCli {
   param(
     [Parameter(Mandatory)][string[]]$DockerArgs,
     [int]$TimeoutSec = 120,
-    [string]$Stdin = ""
+    [string]$Stdin = "",
+    [switch]$StdoutOnly
   )
-  return Invoke-BoundedProcess -FileName "docker" -Arguments $DockerArgs -TimeoutSec $TimeoutSec -Stdin $Stdin
+  return Invoke-BoundedProcess -FileName "docker" -Arguments $DockerArgs -TimeoutSec $TimeoutSec -Stdin $Stdin -StdoutOnly:$StdoutOnly
 }
 
 function Confirm-DockerGpu {
@@ -3729,7 +3760,11 @@ function New-K3dCluster {
     # local-storage is disabled UNCONDITIONALLY here, where cluster.sh gates it on
     # TB_STORAGE_MODE. That is correct only because Windows is hostpath-only:
     # node-local (RFC-0003 Option C) is a Linux/k3s prototype with no Windows
-    # path, the same reason Invoke-LeftoverDataGuard above is hostpath-scoped. If
+    # path, the same reason Invoke-LeftoverDataGuard above is hostpath-scoped --
+    # and the same reason Assert-NodesSeeHostData runs unconditionally at the end
+    # of New-K3dCluster, where the bash twin gates it on TB_STORAGE_MODE (a
+    # node-local cluster has NO host mount, so probing one there would refuse
+    # every install). If
     # you add a Windows node-local path, this flag has to become conditional too
     # or every dataset PVC stays Pending against a StorageClass that does not
     # exist. scripts/tests/k3s-components-agreement.sh trips the moment this file
