@@ -847,9 +847,10 @@ setup_log_file() {
 CLUSTER_NAME="${CLUSTER_NAME:-tracebloc}"
 SERVERS="${SERVERS:-1}"
 AGENTS="${AGENTS:-1}"
-# RFC-0003 — local dataset storage model. node-local is the DEFAULT since the
-# D15 flip (client#456, epic backend#1151); the green node-local dev training run
-# closed the gate that #367 shipped this behind as a flag-gated prototype.
+# RFC-0003 — local dataset storage model. node-local is the DEFAULT as of the
+# D15 flip (client#456, epic backend#1151), superseding the flag-gated prototype
+# from #367. (D15 gates the flip on a green node-local dev training run on the dev
+# environment; that sign-off is tracked on client#456, not asserted here.)
 #   node-local (default, Option C): datasets live on k3s local-path INSIDE the
 #                          k3d node — they die with `cluster delete`, are not a
 #                          browsable host folder, and need no chmod 777. This is
