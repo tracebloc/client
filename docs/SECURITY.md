@@ -601,7 +601,7 @@ If the customer enables the policy on a CNI that doesn't enforce (default EKS, F
 
 ### 8.8 DoS via resource exhaustion — **out of scope**
 
-A malicious model can allocate memory / consume CPU up to the pod's resource limits. `resources.limits` are always applied: sized from node allocatable (75% with `cpu=2`/`memory=8Gi` floors, backend#664) unless the operator pins an explicit envelope via `env.RESOURCE_REQUESTS`/`env.RESOURCE_LIMITS`. A pod running at 100% of its limits is expected behavior for training; OOMKill or eviction is the Kubernetes-native response. The chart does not attempt to detect or prevent resource-intensive pathological inputs.
+A malicious model can allocate memory / consume CPU up to the pod's resource limits. `resources.limits` are always applied: `cpu=2,memory=8Gi` by default, or whatever the operator pins via `env.RESOURCE_REQUESTS`/`env.RESOURCE_LIMITS` (both installers write that pair, sized to the machine at install time). Sizing from node allocatable (75% with the same floors, backend#664) is available but gated OFF behind `env.DERIVE_JOB_ENVELOPE` and only consulted when the pair is unset (backend#2167, backend#2250). Whichever path applies, a limit is always set — this section does not depend on which one. A pod running at 100% of its limits is expected behavior for training; OOMKill or eviction is the Kubernetes-native response. The chart does not attempt to detect or prevent resource-intensive pathological inputs.
 
 ### 8.9 Cosign-bootstrap trust root on boxes without cosign — **security / operator**
 

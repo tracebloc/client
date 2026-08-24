@@ -298,10 +298,13 @@ tests:
 
   # backend#664 (Utilization Ladder L0, supersedes the backend#745 pin): with
   # no operator value the chart must NOT inject RESOURCE_REQUESTS /
-  # RESOURCE_LIMITS — an omitted var is what lets jobs-manager size the
-  # training-job envelope from node allocatable. Older client-runtime images
-  # fall back to their built-in cpu=2,memory=8Gi (the exact literal the chart
-  # used to inject), so omission is behavior-identical on any pre-#664 image.
+  # RESOURCE_LIMITS. Omitting them is what lets jobs-manager choose — which
+  # today means its built-in cpu=2,memory=8Gi literal (the exact literal the
+  # chart used to inject, so omission is behavior-identical on any pre-#664
+  # image), and means the node-allocatable derivation only where the operator
+  # has also opted in via DERIVE_JOB_ENVELOPE (backend#2167, backend#2250).
+  # This block asserts the omission; the DERIVE_JOB_ENVELOPE cases below assert
+  # the gate that decides what the omission resolves to.
   # Assert absence on BOTH containers that used to receive it
   # (api + pods-monitor).
   - it: omits spawned-job RESOURCE_REQUESTS/LIMITS by default (jobs-manager derives from node)
@@ -340,6 +343,99 @@ tests:
           path: spec.template.spec.containers[1].env
           content: {name: RESOURCE_PROVENANCE}
           any: true
+
+  # backend#2250: DERIVE_JOB_ENVELOPE is the gate on the L0 node-derived
+  # envelope. It has no dedicated template block on purpose — it carries no
+  # chart-side default and no derived value, so it rides the generic
+  # .Values.env passthrough exactly as GPU_VISIBLE_DEVICES does. These cases
+  # exist because that is precisely the wiring nobody could verify before: the
+  # flag was readable only by jobs_manager.py, named in no chart file, so
+  # "expose the flag" is not done until a test proves the value reaches the
+  # container. Asserted on BOTH containers — the api container is the one that
+  # runs jobs_manager.py, and pods-monitor is kept symmetric.
+  - it: omits DERIVE_JOB_ENVELOPE by default (the derive path stays gated off)
+    asserts:
+      - notContains:
+          path: spec.template.spec.containers[0].env
+          content: {name: DERIVE_JOB_ENVELOPE}
+          any: true
+      - notContains:
+          path: spec.template.spec.containers[1].env
+          content: {name: DERIVE_JOB_ENVELOPE}
+          any: true
+
+  - it: passes DERIVE_JOB_ENVELOPE through to both containers when set
+    set:
+      env:
+        DERIVE_JOB_ENVELOPE: "true"
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: DERIVE_JOB_ENVELOPE
+            value: "true"
+          count: 1
+      - contains:
+          path: spec.template.spec.containers[1].env
+          content:
+            name: DERIVE_JOB_ENVELOPE
+            value: "true"
+          count: 1
+
+  - it: emits an explicit off value rather than swallowing it
+    # "false" is not the same as unset to a reader debugging an edge: it says
+    # someone considered the gate and declined. The passthrough range skips
+    # FALSY values, and a non-empty string is truthy to Helm, so "false"
+    # survives — the assertion pins that, because the range's `$value` guard
+    # makes it a real question rather than an obvious one.
+    set:
+      env:
+        DERIVE_JOB_ENVELOPE: "false"
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: DERIVE_JOB_ENVELOPE
+            value: "false"
+          count: 1
+
+  - it: drops an empty DERIVE_JOB_ENVELOPE instead of emitting a blank gate
+    # "" is off to jobs-manager either way, so both shapes are correct at
+    # runtime; this pins WHICH one the chart produces (the passthrough's falsy
+    # guard drops it) so a future template change cannot flip it unnoticed.
+    set:
+      env:
+        DERIVE_JOB_ENVELOPE: ""
+    asserts:
+      - notContains:
+          path: spec.template.spec.containers[0].env
+          content: {name: DERIVE_JOB_ENVELOPE}
+          any: true
+
+  - it: keeps DERIVE_JOB_ENVELOPE and an explicit envelope independent
+    # The gate is inert when RESOURCE_* is set (jobs-manager never reaches the
+    # derive branch), but the chart must still ship both values untouched —
+    # silently dropping the flag here would hide the operator's intent from
+    # anyone reading the Deployment, and the runtime, not the chart, owns the
+    # precedence rule.
+    set:
+      env:
+        DERIVE_JOB_ENVELOPE: "true"
+        RESOURCE_REQUESTS: "cpu=4,memory=16Gi"
+        RESOURCE_LIMITS: "cpu=4,memory=16Gi"
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: DERIVE_JOB_ENVELOPE
+            value: "true"
+          count: 1
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: RESOURCE_REQUESTS
+            value: "cpu=4,memory=16Gi"
+          count: 1
 
   - it: defaults RESOURCE_PROVENANCE to unknown when the envelope is set without it
     # The pre-#2220 release shape. "unknown" is the honest answer, and consumers
