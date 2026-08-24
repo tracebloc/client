@@ -4166,11 +4166,14 @@ function Get-ImageMirrorYaml {
 # scripts/gen-envelope-embed.sh --check verifies the constants in CI.
 #
 # Regenerate with: scripts/gen-envelope-embed.sh
-$script:TbEnvelopeContractVersion  = 1
+$script:TbEnvelopeContractVersion  = 2
 $script:TbEnvelopeOverheadCpuMilli = 1000
 $script:TbEnvelopeOverheadMemBytes = 3221225472
 $script:TbEnvelopeFloorCpuMilli    = 1000
 $script:TbEnvelopeFloorMemBytes    = 2147483648
+$script:TbEnvelopeVmReserveMemBytes = 1073741824
+$script:TbEnvelopeNodeMinCpuMilli   = 2000
+$script:TbEnvelopeNodeMinMemBytes   = 5368709120
 # ── end generated ───────────────────────────────────────────────────────────
 
 # Set by Get-TrainingResources when the machine is readable but below the
@@ -4317,7 +4320,10 @@ function Get-TrainingResources {
         # Contract ANCHOR_LARGEST, tie-break (cpu, memory). This used to rank
         # (memory, cpu) while cli's nodeLarger ranked (cpu, memory), so the two
         # anchored on DIFFERENT nodes on a heterogeneous cluster. One order now.
-        # Installer clusters are single-node k3d, so this is a field no-op.
+        # NOT a field no-op because clusters are single-node -- they are not
+        # (backend#2221: SERVERS=1 AGENTS=1 is the default, so two nodes). It is
+        # a no-op only because both k3d node containers report IDENTICAL
+        # figures, each reporting the whole Docker VM -- the #2221 bug itself.
         if (-not $seen -or $cpuM -gt $bestCpuM -or ($cpuM -eq $bestCpuM -and $memB -gt $bestMemB)) {
           $bestMemB = $memB; $bestCpuM = $cpuM
         }
@@ -4365,6 +4371,91 @@ function Get-TrainingResources {
     }
   } catch {}
   return "cpu=2,memory=8Gi"
+}
+
+# ── the VM beneath the node containers (backend#2221) ────────────────────────
+#
+# Get-TrainingResources above answers "how much may one run have, given a
+# NODE". On a k3d install that premise is false: the node containers are
+# created with `NanoCpus=0 CpuQuota=0 Memory=0`, so each one honestly reports
+# the WHOLE Docker VM and the default topology (SERVERS=1 AGENTS=1) tells
+# Kubernetes the machine is twice its size. Measured on k3d v5.9.0 / k3s
+# v1.35.5 / Docker 29.5.2: a 7.75 GiB VM presented as 15.50 GiB, byte-exactly
+# 2.000x, and two pods at this installer's OWN derived envelope
+# (cpu=9,memory=4Gi) both went Running on a 10 cpu / 7.75 GiB machine.
+#
+# Two asymmetries decide the shape of the fix, and both are measured:
+#
+#   MEMORY IS CAPPABLE, AT CREATE TIME ONLY. `k3d --servers-memory/
+#   --agents-memory` works by bind-mounting a SYNTHETIC /proc/meminfo into the
+#   node container -- not via the cgroup, which kubelet never reads for
+#   capacity. `docker update --memory` on a running node moves the cgroup and
+#   leaves /proc/meminfo alone, so capacity does not budge even across a
+#   restart: an existing cluster cannot be capped in place.
+#
+#   CPU IS NOT CAPPABLE AT ALL. k3d 5.9.0 has no CPU flag, and neither
+#   `--cpus` (a CFS quota) nor `--cpuset-cpus` reaches kubelet, because cadvisor
+#   counts /sys/devices/system/cpu/present and /proc/cpuinfo and no cgroup
+#   namespaces either. So the only lever that makes cpu honest is FEWER NODE
+#   CONTAINERS -- the remedy the GPU path already chose for --gpus=all.
+#
+# Returns "nodes=N,cap=BYTES,cpu_honest=0|1,viable=0|1", or $null when the VM is
+# unreadable. $null means "I cannot answer" and a caller must not read it as one
+# node: collapsing a cluster on a failed probe is worse than leaving the
+# topology alone. A STRING rather than a hashtable so the bash twin and this one
+# are compared byte-for-byte by the same fixture rows.
+#
+# The arithmetic is client-runtime/node_sizing.py::honest_topology, the
+# constants are embedded above, and the vectors are replayed by
+# install-k8s.Tests.ps1. -RequestedNodes below 1 is a caller bug, not a machine
+# state: it returns $null rather than inventing a topology, matching the bash
+# twin's non-zero exit with no output.
+function Get-HonestTopology {
+  param(
+    [Parameter(Mandatory=$true)][AllowEmptyString()][string]$VmCpu,
+    [Parameter(Mandatory=$true)][AllowEmptyString()][string]$VmMemory,
+    [Parameter(Mandatory=$true)][int]$RequestedNodes
+  )
+  if ($RequestedNodes -lt 1) { return $null }
+
+  # Same unit spellings the bash twin accepts. [long] throughout: a byte count
+  # over 2^31 must not touch an Int32 path -- the #2220 lesson, where a bare 0
+  # bound [math]::Max's (Int32, Int32) overload and silently disabled machine
+  # sizing on every box with more than ~2 GiB of headroom.
+  $vmCpuM = if ($VmCpu -match '^(\d+)m$') { [long]$Matches[1] }
+            elseif ($VmCpu -match '^\d+$') { [long]$VmCpu * 1000 }
+            else { $null }
+  $vmMemB = if ($VmMemory -match '^(\d+)Ki$') { [long]$Matches[1] * 1KB }
+            elseif ($VmMemory -match '^(\d+)Mi$') { [long]$Matches[1] * 1MB }
+            elseif ($VmMemory -match '^(\d+)Gi$') { [long]$Matches[1] * 1GB }
+            elseif ($VmMemory -match '^\d+$') { [long]$VmMemory }
+            else { $null }
+  if ($null -eq $vmCpuM -or $null -eq $vmMemB) { return $null }
+
+  # The VM cannot give the node containers everything it has: the k3d serverlb
+  # and tools containers, dockerd/containerd and the guest page cache all live
+  # outside them. Capping to the last byte starves the runtime that runs them.
+  $usable = [long][math]::Max([long]0, $vmMemB - $script:TbEnvelopeVmReserveMemBytes)
+
+  $fits = [long][math]::Floor($usable / $script:TbEnvelopeNodeMinMemBytes)
+  $nodes = [long]$RequestedNodes
+  if ($fits -lt $nodes) { $nodes = $fits }
+  # Never zero: "no cluster at all" is not this function's call to make. The
+  # caller refuses on viable=0.
+  if ($nodes -lt 1) { $nodes = [long]1 }
+
+  # Floored -- a cap that rounds UP is not a cap.
+  $cap = [long][math]::Floor($usable / $nodes)
+
+  # cpu_honest is measured, not chosen: no cap makes capacity.cpu true on more
+  # than one node container.
+  $cpuHonest = if ($nodes -eq 1) { 1 } else { 0 }
+
+  # One honest node needs the platform overhead AND the training floor. Below
+  # that the VM cannot host a run whatever it is capped to.
+  $viable = if ($fits -ge 1 -and $vmCpuM -ge $script:TbEnvelopeNodeMinCpuMilli) { 1 } else { 0 }
+
+  return "nodes=$nodes,cap=$cap,cpu_honest=$cpuHonest,viable=$viable"
 }
 
 function Get-TraceblocYamlValue {
