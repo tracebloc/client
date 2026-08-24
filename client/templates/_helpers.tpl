@@ -631,6 +631,26 @@ Usage: {{ include "tracebloc.ingestorDigest" . }}
 {{- end -}}
 {{- end }}
 
+{{/*
+  Whether to re-parent the account-minting bootstrap off edgeuser onto MySQL
+  root (backend#1528 S3). Resolves identically to tracebloc.serviceDbAccounts —
+  operator override first, else the per-environment default — so the fleet's S3
+  posture reads out of one place the same way, and the CLIENT_ENV normalization
+  (backend#1723) is shared. This is the LAST, edgeuser-retiring step, so
+  bootstrapDbReparentByEnv is false everywhere by default; flip dev first only
+  after serviceDbAccounts + perExperimentDbCreds are verified on the fleet.
+*/}}
+{{- define "tracebloc.bootstrapDbReparent" -}}
+{{- $override := (default dict .Values).bootstrapDbReparent -}}
+{{- if not (kindIs "invalid" $override) -}}
+{{- if $override }}true{{ end -}}
+{{- else -}}
+{{- $env := include "tracebloc.clientEnv" . -}}
+{{- $byEnv := default dict .Values.bootstrapDbReparentByEnv -}}
+{{- if get $byEnv $env }}true{{ end -}}
+{{- end -}}
+{{- end }}
+
 {{- define "tracebloc.clientEnv" -}}
 {{- $raw := (default dict .Values.env).CLIENT_ENV | default "prod" -}}
 {{- $aliases := dict "development" "dev" "staging" "stg" "production" "prod" -}}
