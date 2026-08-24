@@ -847,21 +847,33 @@ setup_log_file() {
 CLUSTER_NAME="${CLUSTER_NAME:-tracebloc}"
 SERVERS="${SERVERS:-1}"
 AGENTS="${AGENTS:-1}"
-# RFC-0003 (client#367) — local dataset storage model. PROTOTYPE, default off.
-#   hostpath   (default) : today's model — datasets live in ~/.tracebloc on the
+# RFC-0003 — local dataset storage model. node-local is the DEFAULT as of the
+# D15 flip (client#456, epic backend#1151), superseding the flag-gated prototype
+# from #367. (D15 gates the flip on a green node-local dev training run on the dev
+# environment; that sign-off is tracked on client#456, not asserted here.)
+#   node-local (default, Option C): datasets live on k3s local-path INSIDE the
+#                          k3d node — they die with `cluster delete`, are not a
+#                          browsable host folder, and need no chmod 777. This is
+#                          the RFC-0003 goal for the local install. The flip
+#                          applies to the Linux/k3s (bash core) install path;
+#                          install-k8s.ps1 stays hostpath-only (no Windows
+#                          node-local path yet — see the D15 scope note on #456).
+#   hostpath   (opt-out) : the older model — datasets live in ~/.tracebloc on the
 #                          host, bind-mounted into the cluster; survive cluster
-#                          delete; world-writable dirs.
-#   node-local (Option C): datasets live on k3s local-path INSIDE the k3d node —
-#                          they die with `cluster delete`, are not a browsable
-#                          host folder, and need no chmod 777. This is the
-#                          RFC-0003 goal for the local install.
+#                          delete; world-writable dirs. Select with
+#                          TB_STORAGE_MODE=hostpath (still required for a
+#                          HOST_DATASET_DIR network mount).
 # C1: local-path is RWO + WaitForFirstConsumer and provisions on a single node,
 # but the shared data PVC is mounted by jobs-manager-spawned Jobs that could
 # schedule on another node with no volume. So node-local forces single-node —
 # and that means BOTH agents=0 AND servers=1: unlike a full k8s control plane,
 # k3s server nodes are schedulable, so SERVERS>1 still yields multiple nodes the
 # data PVC can't follow. Forcing agents=0 alone would leave that hole open.
-TB_STORAGE_MODE="${TB_STORAGE_MODE:-hostpath}"
+# Record whether the operator chose the mode or is getting the D15 default: the
+# existing-cluster mismatch guard phrases its remedy differently for "you set
+# node-local" vs "node-local is the default now" (client#456 review, Bugbot High).
+if [[ -n "${TB_STORAGE_MODE:-}" ]]; then TB_STORAGE_MODE_SOURCE="explicit"; else TB_STORAGE_MODE_SOURCE="default"; fi
+TB_STORAGE_MODE="${TB_STORAGE_MODE:-node-local}"
 if [[ "$TB_STORAGE_MODE" == "node-local" ]]; then
   AGENTS=0
   SERVERS=1
@@ -909,7 +921,7 @@ validate_config() {
   # storage (gone on 'cluster delete'). Combining the two is a documented follow-up
   # (backend#743 + RFC-0003); until then, refuse it rather than misroute datasets.
   [[ "$TB_STORAGE_MODE" == "node-local" && -n "${HOST_DATASET_DIR:-}" ]] \
-    && error "HOST_DATASET_DIR is not supported with TB_STORAGE_MODE=node-local (datasets would land on ephemeral in-node storage, not the export). Use the default hostpath mode for network-mount datasets."
+    && error "HOST_DATASET_DIR is not supported with TB_STORAGE_MODE=node-local (datasets would land on ephemeral in-node storage, not the export). Use hostpath mode (TB_STORAGE_MODE=hostpath) for network-mount datasets."
 
   # HOST_DATA_DIR must be under $HOME and must not be a system path (security)
   local dir="$HOST_DATA_DIR"
