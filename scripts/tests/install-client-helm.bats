@@ -1152,9 +1152,12 @@ setup() {
   [ "${#TB_ENVELOPE_VECTORS[@]}" -gt 0 ] || return 1
 
   has() { return 0; }
-  # NB: vcpu/vmem, not cpu/mem — _machine_training_resources declares `local cpu
-  # mem`, which shadows the caller's and would feed the stub empty strings. A
-  # stub that silently receives nothing is the "guards nothing" failure mode.
+  # NB: vcpu/vmem, not cpu/mem — _anchor_largest_schedulable (which
+  # _machine_training_resources calls, and which declared these before
+  # backend#2237 extracted it) declares `local cpu mem unsched`, shadowing the
+  # caller's and feeding the stub empty strings. A stub that silently receives
+  # nothing is the "guards nothing" failure mode. `unsched` joined that list
+  # when the cordon field did, so avoid it as a caller-side name too.
   local row label vcpu vmem want got failures=""
   for row in "${TB_ENVELOPE_VECTORS[@]}"; do
     IFS='|' read -r label vcpu vmem want <<< "$row"
@@ -1207,6 +1210,95 @@ setup() {
   kubectl() {
     case "$*" in
       *--request-timeout=10s*) printf '16 64GB\n8 32Gi\n' ;;
+      *) return 1 ;;
+    esac
+  }
+  run _machine_training_resources
+  [ "$output" = "cpu=7,memory=29Gi" ] || return 1
+}
+
+# ── cordoned nodes (backend#2237) ────────────────────────────────────────────
+#
+# The contract's skipped_nodes has always listed `spec.unschedulable (cordoned)`
+# and NEITHER installer honoured it: the jsonpath did not even request the field.
+# The contract's own one-cordoned-out vector did not catch that, because
+# gen-envelope-embed.sh PRE-FILTERED cordoned nodes out of the golden -- so the
+# row replayed as a lone 4c/16Gi node and the code under test was never handed a
+# cordoned one. The generator now emits the whole cluster and applies no rule of
+# its own; these are the named regressions beside that replay.
+#
+# Why it matters in the field: on a heterogeneous cluster a cordoned LARGE node
+# wins the anchor outright, the installer writes an envelope no live node can
+# satisfy, and every training pod sits Pending with no obvious cause.
+
+@test "envelope contract: a cordoned node never takes the anchor" {
+  TB_NAMESPACE=tracebloc
+  unset TRACEBLOC_TRAINING_RESOURCES
+  helm() { return 1; }
+  has() { return 0; }
+  # The 16c/64Gi box is cordoned; the live 4c/16Gi one must size the run.
+  kubectl() {
+    case "$*" in
+      *--request-timeout=10s*) printf '16 64Gi true\n4 16Gi \n' ;;
+      *) return 1 ;;
+    esac
+  }
+  run _machine_training_resources
+  [ "$output" = "cpu=3,memory=13Gi" ] || return 1
+}
+
+@test "envelope contract: cordoning the SMALL node changes nothing" {
+  TB_NAMESPACE=tracebloc
+  unset TRACEBLOC_TRAINING_RESOURCES
+  helm() { return 1; }
+  has() { return 0; }
+  # The mirror case. A filter that just dropped the largest node would pass the
+  # test above while being completely wrong; this is what makes that one mean
+  # "cordoned nodes are skipped" rather than "big nodes are skipped".
+  kubectl() {
+    case "$*" in
+      *--request-timeout=10s*) printf '16 64Gi \n4 16Gi true\n' ;;
+      *) return 1 ;;
+    esac
+  }
+  run _machine_training_resources
+  [ "$output" = "cpu=15,memory=61Gi" ] || return 1
+}
+
+@test "envelope contract: every node cordoned is UNMEASURED, not too small" {
+  TB_NAMESPACE=tracebloc
+  unset TRACEBLOC_TRAINING_RESOURCES
+  helm() { return 1; }
+  has() { return 0; }
+  kubectl() {
+    case "$*" in
+      *--request-timeout=10s*) printf '16 64Gi true\n8 32Gi true\n' ;;
+      *) return 1 ;;
+    esac
+  }
+  # Emits nothing, exactly like an unreadable cluster -- the caller keeps the
+  # literal. Warning "too small" here would blame the hardware for a cordon the
+  # operator can undo in one command.
+  run _machine_training_resources
+  [ -z "$output" ] || return 1
+  # And the ceiling helper must stay silent too, so no undersized/unschedulable
+  # warning is printed for a machine that was never measured.
+  run _machine_training_ceiling
+  [ -z "$output" ] || return 1
+}
+
+@test "envelope contract: an explicit 'false' is schedulable, not cordoned" {
+  TB_NAMESPACE=tracebloc
+  unset TRACEBLOC_TRAINING_RESOURCES
+  helm() { return 1; }
+  has() { return 0; }
+  # Unschedulable is omitempty, so in practice the field is absent or 'true'.
+  # Keying on non-emptiness rather than on 'true' would drop every node from
+  # sizing the day an API server serialises `false` -- silent and total, so it
+  # is pinned rather than assumed (backend#1729 rule 6).
+  kubectl() {
+    case "$*" in
+      *--request-timeout=10s*) printf '8 32Gi false\n' ;;
       *) return 1 ;;
     esac
   }

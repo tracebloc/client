@@ -1678,6 +1678,105 @@ Describe "Envelope contract golden vectors (backend#2220)" {
     $failures -join "`n" | Should -BeNullOrEmpty
   }
 
+  It "every MULTI-NODE golden vector replays (incl. the cordoned one)" {
+    # backend#2237. Until this existed the ps1 replayed only vectors.single_node,
+    # so the contract's multi_node block -- the ANCHOR_LARGEST selection rule,
+    # and one-cordoned-out with it -- was asserted on the bash side ONLY. The
+    # bats twin has replayed these all along; PowerShell simply never read them,
+    # which is how the ps1 could ignore spec.unschedulable while its suite was
+    # entirely green.
+    #
+    # Node lines are built from the contract's OWN node list, cordoned entries
+    # included, because the skip is the code's job to apply. The generator used
+    # to pre-filter them for the bash table and that is exactly what made the
+    # cordoned vector inert; rebuilding the filter here would reproduce the bug
+    # in the other language.
+    Mock helm { $global:LASTEXITCODE = 1; "" }
+    @($script:Contract.vectors.multi_node).Count | Should -BeGreaterThan 0
+
+    $failures = @()
+    foreach ($v in $script:Contract.vectors.multi_node) {
+      # The three fields kubectl's jsonpath emits. Unschedulable is omitempty,
+      # so a live node contributes an empty third field.
+      $nodeLines = @(
+        foreach ($n in $v.nodes) {
+          $flag = if ($n.unschedulable) { "true" } else { "" }
+          "$($n.cpu) $($n.memory) $flag"
+        }
+      )
+      $exp  = $v.anchored.largest.expected
+      $want = "cpu=$($exp.render_gi.cpu),memory=$($exp.render_gi.memory)"
+
+      $script:TbTrainingUndersized    = $false
+      $script:TbTrainingUnschedulable = $false
+      Mock kubectl {
+        if ($args -contains "--request-timeout=10s") {
+          $global:LASTEXITCODE = 0; $nodeLines
+        } else { $global:LASTEXITCODE = 1; "" }
+      }.GetNewClosure()
+
+      $got = Get-TrainingResources
+      if ($got -ne $want) {
+        $failures += "$($v.label) [$($nodeLines -join ' | ')]: want '$want' got '$got'"
+      }
+    }
+    $failures -join "`n" | Should -BeNullOrEmpty
+  }
+
+  It "a cordoned node never takes the anchor, whichever node it is" {
+    # The named regression for backend#2237, kept separate from the replay above
+    # so the failure says WHAT broke rather than which golden row moved.
+    #
+    # Both directions on purpose: a filter that simply dropped the largest node
+    # would satisfy the first assertion and be completely wrong. The second
+    # pins that a cordoned SMALL node changes nothing.
+    Mock helm { $global:LASTEXITCODE = 1; "" }
+
+    Mock kubectl {
+      if ($args -contains "--request-timeout=10s") {
+        $global:LASTEXITCODE = 0; @("16 64Gi true", "4 16Gi ")
+      } else { $global:LASTEXITCODE = 1; "" }
+    }
+    Get-TrainingResources | Should -Be "cpu=3,memory=13Gi"
+
+    Mock kubectl {
+      if ($args -contains "--request-timeout=10s") {
+        $global:LASTEXITCODE = 0; @("16 64Gi ", "4 16Gi true")
+      } else { $global:LASTEXITCODE = 1; "" }
+    }
+    Get-TrainingResources | Should -Be "cpu=15,memory=61Gi"
+  }
+
+  It "every node cordoned reads as UNMEASURED, not as too small" {
+    # The fail-safe direction. A fully-cordoned cluster must take the same
+    # branch as an unreadable one -- keep the literal, set no warning flags.
+    # Reporting `undersized` here would tell an operator their hardware is too
+    # small when the real cause is a cordon they can undo in one command.
+    Mock helm { $global:LASTEXITCODE = 1; "" }
+    Mock kubectl {
+      if ($args -contains "--request-timeout=10s") {
+        $global:LASTEXITCODE = 0; @("16 64Gi true", "8 32Gi true")
+      } else { $global:LASTEXITCODE = 1; "" }
+    }
+    Get-TrainingResources | Should -Be "cpu=2,memory=8Gi"
+    [bool]$script:TbTrainingUndersized    | Should -BeFalse
+    [bool]$script:TbTrainingUnschedulable | Should -BeFalse
+  }
+
+  It "an explicit 'false' third field is schedulable, not cordoned" {
+    # Value-domain check (backend#1729 rule 6): Unschedulable is omitempty so the
+    # field is normally absent or 'true', but keying on non-emptiness instead of
+    # on 'true' would make an API server that serialises `false` drop every node
+    # from sizing -- silent and total.
+    Mock helm { $global:LASTEXITCODE = 1; "" }
+    Mock kubectl {
+      if ($args -contains "--request-timeout=10s") {
+        $global:LASTEXITCODE = 0; @("8 32Gi false")
+      } else { $global:LASTEXITCODE = 1; "" }
+    }
+    Get-TrainingResources | Should -Be "cpu=7,memory=29Gi"
+  }
+
   It "ANCHOR_LARGEST ties break on cpu, not memory — and the bash twin agrees" {
     # The divergence backend#2220 closes: this function ranked nodes
     # (memory, cpu) and would have anchored on 4c/32Gi here, while cli's

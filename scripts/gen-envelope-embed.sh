@@ -217,12 +217,26 @@ print()
 print("# Multi-node cases pin the ANCHOR_LARGEST selection rule — the part that")
 print("# was never written down. Rows are:")
 print("#   <label>|<node lines, newline-escaped as \\n>|<expected output>")
+print("#")
+print("# A node line is the THREE whitespace-separated fields kubectl's jsonpath")
+print("# emits: '<cpu> <memory> <spec.unschedulable>'. Unschedulable is omitempty,")
+print("# so a schedulable node leaves the third field blank and its line carries a")
+print("# TRAILING SPACE — that is faithful to the wire format, not an accident.")
+print("#")
+print("# Cordoned nodes are emitted, NOT pre-filtered (backend#2237). This")
+print("# generator used to drop them here, which made the contract's whole")
+print("# 'skipped_nodes: spec.unschedulable' rule untestable: the one-cordoned-out")
+print("# row replayed as a single 4c/16Gi node, so the installer was never handed")
+print("# a cordoned node and could not be caught ignoring one. It was ignoring one.")
+print("# The golden must reproduce the CLUSTER, and let the code under test apply")
+print("# the skip — a fixture that pre-applies the rule it means to check tests the")
+print("# generator instead of the installer.")
 print("TB_ENVELOPE_ANCHOR_VECTORS=(")
 for v in contract["vectors"]["multi_node"]:
-    live = [n for n in v["nodes"] if not n.get("unschedulable")]
-    if not live:
-        continue
-    lines = "\\n".join(f"{n['cpu']} {n['memory']}" for n in live)
+    lines = "\\n".join(
+        f"{n['cpu']} {n['memory']} {'true' if n.get('unschedulable') else ''}"
+        for n in v["nodes"]
+    )
     largest = v["anchored"]["largest"]
     print(f'  "{v["label"]}|{lines}|{installer_output(largest["expected"])}"')
 print(")")

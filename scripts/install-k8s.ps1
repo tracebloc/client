@@ -4273,7 +4273,11 @@ function Get-TrainingResources {
     # full-JSON ConvertFrom-Json, mirroring the bash twin, so a parse hiccup on
     # unrelated node fields can never silently reinstate the static default
     # (Bugbot r5).
-    $lines = kubectl get nodes --request-timeout=10s -o jsonpath='{range .items[*]}{.status.allocatable.cpu}{" "}{.status.allocatable.memory}{"\n"}{end}' 2>$null
+    # THREE fields per node since backend#2237: allocatable cpu, allocatable
+    # memory, and .spec.unschedulable. The bash twin carries the same jsonpath in
+    # lib/install-client-helm.sh::_TB_NODE_JSONPATH; the two are pinned to agree
+    # by the shared cluster-state fixture, tests/fixtures/installer_parity.json.
+    $lines = kubectl get nodes --request-timeout=10s -o jsonpath='{range .items[*]}{.status.allocatable.cpu}{" "}{.status.allocatable.memory}{" "}{.spec.unschedulable}{"\n"}{end}' 2>$null
     if ($LASTEXITCODE -eq 0 -and $lines) {
       $bestMemB = [long]0; $bestCpuM = [long]0; $seen = $false
       foreach ($ln in @($lines)) {
@@ -4281,6 +4285,20 @@ function Get-TrainingResources {
         if ($parts.Count -lt 2) { continue }
         $cpuRaw = $parts[0]
         $memRaw = $parts[1]
+        # Cordoned nodes are SKIPPED, before any ranking (contract
+        # skipped_nodes: "spec.unschedulable (cordoned)"). A cordoned node
+        # accepts no new pods, so anchoring on one writes an envelope that
+        # cannot schedule -- and on a heterogeneous cluster a cordoned LARGE
+        # node wins the anchor outright, leaving every training pod Pending
+        # with no obvious cause (backend#2237).
+        #
+        # Kubernetes declares Unschedulable with `omitempty`, so a schedulable
+        # node emits an EMPTY third field and .Trim() drops it entirely --
+        # hence Count -lt 3 is the normal case, and only the literal 'true'
+        # means cordoned. Testing for 'true' rather than for non-emptiness is
+        # what keeps a future explicit `unschedulable: false` from being read
+        # as cordoned.
+        if ($parts.Count -ge 3 -and $parts[2] -eq 'true') { continue }
         # $null, NOT 0, for a quantity we cannot parse. The contract's
         # skipped_nodes says unparseable allocatable is SKIPPED, and the bash
         # twin does exactly that with an explicit `|| continue`. Coercing to 0

@@ -156,34 +156,74 @@ _TB_ENVELOPE_NODE_MIN_CPU_MILLI=2000
 _TB_ENVELOPE_NODE_MIN_MEM_BYTES=5368709120
 # ── end generated ───────────────────────────────────────────────────────────
 
-# Echo "cpu=N,memory=MGi" sized to the largest node, or nothing when the
-# cluster is unreadable / the machine cannot give a run the contract floor.
+# The node line contract, in ONE place (backend#2237).
+#
+# Three whitespace-separated fields per node: allocatable cpu, allocatable
+# memory, and `.spec.unschedulable`. Kubernetes declares Unschedulable with
+# `omitempty`, so a normal node emits nothing for the third field and the line
+# carries a trailing space; only a CORDONED node emits the literal `true`. Both
+# readers therefore test for `true` rather than for emptiness.
+#
+# Extended from two fields to three under backend#2237: the contract's
+# skipped_nodes has always said `spec.unschedulable (cordoned)` is skipped, but
+# neither installer ASKED the API for the field, so neither could honour it.
+# install-k8s.ps1's Get-TrainingResources carries the PowerShell copy of this
+# string — the two are pinned to agree by the shared cluster-state fixture,
+# scripts/tests/fixtures/installer_parity.json.
+_TB_NODE_JSONPATH='{range .items[*]}{.status.allocatable.cpu}{" "}{.status.allocatable.memory}{" "}{.spec.unschedulable}{"\n"}{end}'
+
+# ONE ranking of the cluster's nodes, shared by _machine_training_resources and
+# _machine_training_ceiling (backend#2237).
 #
 # The anchor is the contract's ANCHOR_LARGEST: a training pod takes all its
 # resources from ONE node, so this question is single-node by nature and must
 # never sum across the cluster. The tie-break is (cpu, memory) — the contract's
-# order, and a fix: this function used to rank nodes (memory, cpu) while cli's
-# nodeLarger ranked them (cpu, memory), so on a cluster of 8c/16Gi + 4c/32Gi
-# the installer and `tracebloc resources set` anchored on DIFFERENT nodes and
-# disagreed about the same machine. Nobody chose that; it fell out of two
-# independent implementations.
+# order, and a fix: this used to rank nodes (memory, cpu) while cli's nodeLarger
+# ranked them (cpu, memory), so on a cluster of 8c/16Gi + 4c/32Gi the installer
+# and `tracebloc resources set` anchored on DIFFERENT nodes and disagreed about
+# the same machine. Nobody chose that; it fell out of two independent
+# implementations.
 #
-# That last sentence used to read "installer-provisioned clusters are
-# single-node k3d, where the orders cannot differ, so this is a no-op in the
-# field." It was WRONG (backend#2221): common.sh defaults SERVERS=1 AGENTS=1, so
-# the default topology is TWO nodes. The tie-break is a field no-op only because
-# both k3d node containers report identical figures -- and they do that because
-# each reports the whole Docker VM, which is the bug #2221 exists to fix. On a
-# genuinely heterogeneous cluster the order matters, which is why it is pinned.
-_machine_training_resources() {
-  has kubectl || return 0
-  local lines cpu mem cpu_m mem_b best_cpu=0 best_mem=0 seen=0
+# Extracted under backend#2237 because the loop was written out TWICE, once per
+# caller, and the cordon skip would have had to be added to both. Two copies of
+# a selection rule is exactly how the (memory, cpu) / (cpu, memory) split above
+# happened; one copy cannot drift from itself.
+#
+# The contract's skipped_nodes, both honoured here:
+#   * spec.unschedulable (cordoned) — a cordoned node accepts no new pods, so
+#     anchoring on one writes an envelope that cannot schedule. On a
+#     heterogeneous cluster a cordoned LARGE node would otherwise win the
+#     anchor outright and every training pod would sit Pending with no obvious
+#     cause. This is NOT a no-op on installer-provisioned clusters just
+#     because they are 'single-node k3d' -- they are not: common.sh defaults
+#     SERVERS=1 AGENTS=1, so the default topology is TWO nodes
+#     (backend#2221). What makes the anchor tie-break a field no-op there
+#     is that both k3d node containers report IDENTICAL figures, because
+#     each reports the whole Docker VM -- which is the bug #2221 fixes.
+#     The cordon skip itself matters on any cluster with a cordoned node.
+#   * allocatable cpu or memory unparseable — skipped rather than coerced to 0,
+#     so a node whose memory unit we do not speak cannot take the anchor and
+#     drag a perfectly sizeable sibling down to the literal (Bugbot #766).
+#
+# Sets _TB_ANCHOR_CPU_MILLI / _TB_ANCHOR_MEM_BYTES and returns 0 when at least
+# one node was measured; returns 1 when the cluster is unreadable or no node
+# survived the skips. Callers must treat 1 as "I could not measure the machine",
+# which is NOT the same as "the machine is too small".
+_anchor_largest_schedulable() {
+  has kubectl || return 1
+  local lines cpu mem unsched cpu_m mem_b best_cpu=0 best_mem=0 seen=0
   # Bounded: a wedged API server must degrade to the static default, never
   # hang values generation (Bugbot).
-  lines="$(kubectl get nodes --request-timeout=10s -o jsonpath='{range .items[*]}{.status.allocatable.cpu}{" "}{.status.allocatable.memory}{"\n"}{end}' 2>/dev/null)" || return 0
-  [[ -n "$lines" ]] || return 0
-  while read -r cpu mem; do
+  lines="$(kubectl get nodes --request-timeout=10s -o jsonpath="$_TB_NODE_JSONPATH" 2>/dev/null)" || return 1
+  [[ -n "$lines" ]] || return 1
+  while read -r cpu mem unsched; do
     [[ -n "$cpu" && -n "$mem" ]] || continue
+    # Cordoned: skipped BEFORE ranking, so it can never win the anchor.
+    # Written `!= ... || continue`, not `== ... && continue`: the latter
+    # evaluates to 1 for every SCHEDULABLE node, which under the installer's
+    # `set -euo pipefail` aborts the whole run (the shape scripts/tests/
+    # pipefail-early-close.bats exists to catch).
+    [[ "$unsched" != "true" ]] || continue
     cpu_m="$(_cpu_to_milli "$cpu")"
     mem_b="$(_mem_to_bytes "$mem")"
     [[ -n "$cpu_m" && -n "$mem_b" ]] || continue
@@ -194,9 +234,20 @@ _machine_training_resources() {
     fi
     seen=1
   done <<< "$lines"
-  (( seen == 1 )) || return 0
-  local run_cpu_m=$(( best_cpu - _TB_ENVELOPE_OVERHEAD_CPU_MILLI ))
-  local run_mem_b=$(( best_mem - _TB_ENVELOPE_OVERHEAD_MEM_BYTES ))
+  (( seen == 1 )) || return 1
+  _TB_ANCHOR_CPU_MILLI=$best_cpu
+  _TB_ANCHOR_MEM_BYTES=$best_mem
+}
+
+# Echo "cpu=N,memory=MGi" sized to the largest schedulable node, or nothing when
+# the cluster is unreadable / the machine cannot give a run the contract floor.
+#
+# Node selection lives in _anchor_largest_schedulable; this function is the
+# arithmetic and the rendering only.
+_machine_training_resources() {
+  _anchor_largest_schedulable || return 0
+  local run_cpu_m=$(( _TB_ANCHOR_CPU_MILLI - _TB_ENVELOPE_OVERHEAD_CPU_MILLI ))
+  local run_mem_b=$(( _TB_ANCHOR_MEM_BYTES - _TB_ENVELOPE_OVERHEAD_MEM_BYTES ))
   (( run_cpu_m < 0 )) && run_cpu_m=0
   (( run_mem_b < 0 )) && run_mem_b=0
   # Below the contract floor the machine is NOT VIABLE. Emit nothing and let
@@ -222,27 +273,15 @@ _machine_training_resources() {
 # Unreadable is still unreadable and still gets the literal -- we genuinely
 # cannot do better than the historical default there. Only the "read it, it is
 # small" case changes, and it changes to a number that FITS.
+#
+# Node selection is the SAME _anchor_largest_schedulable the sizing path uses,
+# so the warning the caller prints can never describe a different node than the
+# value it wrote (backend#2237).
 _machine_training_ceiling() {
-  has kubectl || return 0
-  local lines cpu mem cpu_m mem_b best_cpu=0 best_mem=0 seen=0
-  lines="$(kubectl get nodes --request-timeout=10s -o jsonpath='{range .items[*]}{.status.allocatable.cpu}{" "}{.status.allocatable.memory}{"\n"}{end}' 2>/dev/null)" || return 0
-  [[ -n "$lines" ]] || return 0
-  while read -r cpu mem; do
-    [[ -n "$cpu" && -n "$mem" ]] || continue
-    cpu_m="$(_cpu_to_milli "$cpu")"
-    mem_b="$(_mem_to_bytes "$mem")"
-    [[ -n "$cpu_m" && -n "$mem_b" ]] || continue
-    if (( seen == 0 )) || (( cpu_m > best_cpu )) \
-       || { (( cpu_m == best_cpu )) && (( mem_b > best_mem )); }; then
-      best_cpu=$cpu_m
-      best_mem=$mem_b
-    fi
-    seen=1
-  done <<< "$lines"
-  (( seen == 1 )) || return 0
+  _anchor_largest_schedulable || return 0
 
-  local run_cpu_m=$(( best_cpu - _TB_ENVELOPE_OVERHEAD_CPU_MILLI ))
-  local run_mem_b=$(( best_mem - _TB_ENVELOPE_OVERHEAD_MEM_BYTES ))
+  local run_cpu_m=$(( _TB_ANCHOR_CPU_MILLI - _TB_ENVELOPE_OVERHEAD_CPU_MILLI ))
+  local run_mem_b=$(( _TB_ANCHOR_MEM_BYTES - _TB_ENVELOPE_OVERHEAD_MEM_BYTES ))
   (( run_cpu_m < 0 )) && run_cpu_m=0
   (( run_mem_b < 0 )) && run_mem_b=0
 

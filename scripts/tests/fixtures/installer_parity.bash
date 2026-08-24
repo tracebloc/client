@@ -4,8 +4,12 @@
 # One row per cluster state. Fields, pipe-separated:
 #   label|nodes|carried|carried_provenance|override|size|provenance|undersized|unschedulable
 #
-# `nodes` is semicolon-separated '<cpu> <memory>' pairs, exactly the lines
-# kubectl's jsonpath emits. `carried` is 'none', 'read-fails', 'read-empty',
+# `nodes` is semicolon-separated node lines, as kubectl's jsonpath emits them:
+# '<cpu> <memory>' plus an optional third field, '<spec.unschedulable>'.
+# Unschedulable is omitempty, so a schedulable node emits nothing there and
+# both readers see a two-field line -- which is why the pre-backend#2237 rows
+# below still carry two fields. Only a CORDONED node emits the literal 'true'.
+# `carried` is 'none', 'read-fails', 'read-empty',
 # or the RESOURCE_LIMITS value a previous release carries.
 # schema_version 1
 
@@ -28,4 +32,8 @@ TB_PARITY_ROWS=(
   "carried-size-junk-marker|8 32Gi|cpu=4,memory=12Gi|banana||cpu=4,memory=12Gi|unknown|0|0"
   "carried-historic-literal|8 32Gi|cpu=2,memory=8Gi|user||cpu=7,memory=29Gi|installer|0|0"
   "install-time-override|8 32Gi|none||cpu=4,memory=16Gi|cpu=4,memory=16Gi|user|0|0"
+  "cordoned-large-node-skipped|16 64Gi true;4 16Gi|none|||cpu=3,memory=13Gi|installer|0|0"
+  "cordoned-small-node-ignored|16 64Gi;4 16Gi true|none|||cpu=15,memory=61Gi|installer|0|0"
+  "all-nodes-cordoned|16 64Gi true;8 32Gi true|none|||cpu=2,memory=8Gi|installer|0|0"
+  "explicit-unschedulable-false-is-schedulable|8 32Gi false|none|||cpu=7,memory=29Gi|installer|0|0"
 )
