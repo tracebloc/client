@@ -55,13 +55,26 @@ tests:
       - hasDocuments:
           count: 0
 
-  - it: should not render when resourceMonitor is disabled
+  # WAS "should not render when resourceMonitor is disabled" (backend#2400). The
+  # namespace now has an occupant with no flag: telemetry-token-rbac.yaml renders
+  # a Role and RoleBinding here unconditionally, because the Collector's token
+  # Secret has to exist before the Collector can be enabled at all. A Role in a
+  # namespace nothing creates does not apply, so gating the namespace on a tenant
+  # would have left the deadlock in place on precisely the edges with no tenant.
+  - it: should still render when no node agent is enabled, because the token RBAC lives here
     template: templates/node-agents-namespace.yaml
     set:
       resourceMonitor: false
+      telemetryCollector:
+        enabled: false
     asserts:
       - hasDocuments:
-          count: 0
+          count: 1
+      # Still the privileged namespace, not a bare one: resource-monitor being off
+      # today does not mean it is off after the next `--set`.
+      - equal:
+          path: metadata.labels["pod-security.kubernetes.io/enforce"]
+          value: privileged
 
   - it: should not render when node-agents ns name equals release namespace
     template: templates/node-agents-namespace.yaml

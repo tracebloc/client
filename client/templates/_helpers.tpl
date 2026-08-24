@@ -631,6 +631,26 @@ Usage: {{ include "tracebloc.ingestorDigest" . }}
 {{- end -}}
 {{- end }}
 
+{{/*
+  Whether to re-parent the account-minting bootstrap off edgeuser onto MySQL
+  root (backend#1528 S3). Resolves identically to tracebloc.serviceDbAccounts —
+  operator override first, else the per-environment default — so the fleet's S3
+  posture reads out of one place the same way, and the CLIENT_ENV normalization
+  (backend#1723) is shared. This is the LAST, edgeuser-retiring step, so
+  bootstrapDbReparentByEnv is false everywhere by default; flip dev first only
+  after serviceDbAccounts + perExperimentDbCreds are verified on the fleet.
+*/}}
+{{- define "tracebloc.bootstrapDbReparent" -}}
+{{- $override := (default dict .Values).bootstrapDbReparent -}}
+{{- if not (kindIs "invalid" $override) -}}
+{{- if $override }}true{{ end -}}
+{{- else -}}
+{{- $env := include "tracebloc.clientEnv" . -}}
+{{- $byEnv := default dict .Values.bootstrapDbReparentByEnv -}}
+{{- if get $byEnv $env }}true{{ end -}}
+{{- end -}}
+{{- end }}
+
 {{- define "tracebloc.clientEnv" -}}
 {{- $raw := (default dict .Values.env).CLIENT_ENV | default "prod" -}}
 {{- $aliases := dict "development" "dev" "staging" "stg" "production" "prod" -}}
@@ -853,15 +873,31 @@ https://api.tracebloc.io/
 {{- end -}}
 
 {{/*
-  tracebloc.nodeAgentsInUse — true when anything the chart owns runs in
-  nodeAgents.namespace (backend#1906, @saadqbal's review of #779).
+  tracebloc.nodeAgentsInUse — true when a POD-BEARING tenant of
+  nodeAgents.namespace is enabled (backend#1906, @saadqbal's review of #779;
+  narrowed from "anything the chart owns" by backend#2400).
 
   ONE PREDICATE, not N readers. Five templates put something in that namespace
   and each carried its own copy of "is resource-monitor on"; when the Collector
   became a second tenant, two of them were widened and the rest were not, so the
   configuration this feature exists to enable — resourceMonitor off, Collector on
   — created the namespace, landed the DaemonSet, and left the RBAC that manages it
-  behind. Adding a third tenant should be one line here, not an audit.
+  behind. Adding a third POD-BEARING tenant should be one line here, not an audit.
+
+  "POD-BEARING" IS THE LOAD-BEARING WORD, and it is narrower than the sentence
+  this docstring used to open with. Every consumer left is about pods: RBAC that
+  patches or deletes DaemonSets there, and the image pull Secret they pull with.
+  backend#2400 added an occupant with no pods — telemetry-token-rbac.yaml's Role
+  and RoleBinding, which let jobs-manager write the Collector's token Secret
+  before anyone can enable the Collector, and therefore render unconditionally.
+  Widening this helper to cover it would make it a constant `true`: measured, that
+  grants auto-upgrade and image-refresh DaemonSet rights in a namespace that has
+  no DaemonSets (4 extra RBAC objects) and leaves a question that can only be
+  answered one way. The Namespace object no longer asks it either — with a
+  pod-less occupant always present, the namespace is always required.
+
+  So: a new occupant belongs here only if it brings PODS. One that does not gates
+  itself, and says why it does not gate on this.
 
   THE NIL-GUARD IS LOAD-BEARING, which is the other reason this is central. A bare
   `.Values.telemetryCollector.enabled` throws "nil pointer evaluating

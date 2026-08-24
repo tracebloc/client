@@ -1152,9 +1152,12 @@ setup() {
   [ "${#TB_ENVELOPE_VECTORS[@]}" -gt 0 ] || return 1
 
   has() { return 0; }
-  # NB: vcpu/vmem, not cpu/mem — _machine_training_resources declares `local cpu
-  # mem`, which shadows the caller's and would feed the stub empty strings. A
-  # stub that silently receives nothing is the "guards nothing" failure mode.
+  # NB: vcpu/vmem, not cpu/mem — _anchor_largest_schedulable (which
+  # _machine_training_resources calls, and which declared these before
+  # backend#2237 extracted it) declares `local cpu mem unsched`, shadowing the
+  # caller's and feeding the stub empty strings. A stub that silently receives
+  # nothing is the "guards nothing" failure mode. `unsched` joined that list
+  # when the cordon field did, so avoid it as a caller-side name too.
   local row label vcpu vmem want got failures=""
   for row in "${TB_ENVELOPE_VECTORS[@]}"; do
     IFS='|' read -r label vcpu vmem want <<< "$row"
@@ -1212,6 +1215,190 @@ setup() {
   }
   run _machine_training_resources
   [ "$output" = "cpu=7,memory=29Gi" ] || return 1
+}
+
+# ── cordoned nodes (backend#2237) ────────────────────────────────────────────
+#
+# The contract's skipped_nodes has always listed `spec.unschedulable (cordoned)`
+# and NEITHER installer honoured it: the jsonpath did not even request the field.
+# The contract's own one-cordoned-out vector did not catch that, because
+# gen-envelope-embed.sh PRE-FILTERED cordoned nodes out of the golden -- so the
+# row replayed as a lone 4c/16Gi node and the code under test was never handed a
+# cordoned one. The generator now emits the whole cluster and applies no rule of
+# its own; these are the named regressions beside that replay.
+#
+# Why it matters in the field: on a heterogeneous cluster a cordoned LARGE node
+# wins the anchor outright, the installer writes an envelope no live node can
+# satisfy, and every training pod sits Pending with no obvious cause.
+
+@test "envelope contract: a cordoned node never takes the anchor" {
+  TB_NAMESPACE=tracebloc
+  unset TRACEBLOC_TRAINING_RESOURCES
+  helm() { return 1; }
+  has() { return 0; }
+  # The 16c/64Gi box is cordoned; the live 4c/16Gi one must size the run.
+  kubectl() {
+    case "$*" in
+      *--request-timeout=10s*) printf '16 64Gi true\n4 16Gi \n' ;;
+      *) return 1 ;;
+    esac
+  }
+  run _machine_training_resources
+  [ "$output" = "cpu=3,memory=13Gi" ] || return 1
+}
+
+@test "envelope contract: cordoning the SMALL node changes nothing" {
+  TB_NAMESPACE=tracebloc
+  unset TRACEBLOC_TRAINING_RESOURCES
+  helm() { return 1; }
+  has() { return 0; }
+  # The mirror case. A filter that just dropped the largest node would pass the
+  # test above while being completely wrong; this is what makes that one mean
+  # "cordoned nodes are skipped" rather than "big nodes are skipped".
+  kubectl() {
+    case "$*" in
+      *--request-timeout=10s*) printf '16 64Gi \n4 16Gi true\n' ;;
+      *) return 1 ;;
+    esac
+  }
+  run _machine_training_resources
+  [ "$output" = "cpu=15,memory=61Gi" ] || return 1
+}
+
+@test "envelope contract: every node cordoned is UNMEASURED, not too small" {
+  TB_NAMESPACE=tracebloc
+  unset TRACEBLOC_TRAINING_RESOURCES
+  helm() { return 1; }
+  has() { return 0; }
+  kubectl() {
+    case "$*" in
+      *--request-timeout=10s*) printf '16 64Gi true\n8 32Gi true\n' ;;
+      *) return 1 ;;
+    esac
+  }
+  # Emits nothing, exactly like an unreadable cluster -- the caller keeps the
+  # literal. Warning "too small" here would blame the hardware for a cordon the
+  # operator can undo in one command.
+  run _machine_training_resources
+  [ -z "$output" ] || return 1
+  # And the ceiling helper must stay silent too, so no undersized/unschedulable
+  # warning is printed for a machine that was never measured.
+  run _machine_training_ceiling
+  [ -z "$output" ] || return 1
+}
+
+@test "envelope contract: an explicit 'false' is schedulable, not cordoned" {
+  TB_NAMESPACE=tracebloc
+  unset TRACEBLOC_TRAINING_RESOURCES
+  helm() { return 1; }
+  has() { return 0; }
+  # Unschedulable is omitempty, so in practice the field is absent or 'true'.
+  # Keying on non-emptiness rather than on 'true' would drop every node from
+  # sizing the day an API server serialises `false` -- silent and total, so it
+  # is pinned rather than assumed (backend#1729 rule 6).
+  kubectl() {
+    case "$*" in
+      *--request-timeout=10s*) printf '8 32Gi false\n' ;;
+      *) return 1 ;;
+    esac
+  }
+  run _machine_training_resources
+  [ "$output" = "cpu=7,memory=29Gi" ] || return 1
+}
+
+# ── the VM beneath the node containers (backend#2221) ────────────────────────
+#
+# _honest_topology is pure arithmetic over two numbers -- no kubectl, no helm,
+# no branching on cluster state -- so the contract's vectors are the right
+# parity mechanism for it, the same way they are for the envelope. (What
+# installer_parity.json exists for is CONTROL FLOW: every backend#2220
+# divergence lived in a state that was not a clean measurement. That is the
+# fixture the eventual CALLER of this function belongs in, because the caller
+# shells out to docker and branches; the arithmetic itself does neither.)
+#
+# The rows come from scripts/tests/fixtures/envelope_vectors.bash, generated by
+# scripts/gen-envelope-embed.sh from client-runtime/envelope_contract.json.
+# install-k8s.Tests.ps1 replays the SAME rows through Get-HonestTopology, so a
+# row added upstream forces both languages to answer it.
+@test "topology contract: every VM shape yields the declared topology" {
+  source "${BATS_TEST_DIRNAME}/fixtures/envelope_vectors.bash"
+  [ "${#TB_TOPOLOGY_VECTORS[@]}" -gt 0 ] || return 1
+
+  local row label vcpu vmem req want got failures=""
+  for row in "${TB_TOPOLOGY_VECTORS[@]}"; do
+    IFS='|' read -r label vcpu vmem req want <<< "$row"
+    got="$(_honest_topology "$vcpu" "$vmem" "$req")"
+    if [ "$got" != "$want" ]; then
+      failures+="  ${label} (${vcpu} / ${vmem} / want ${req} nodes): want '${want}' got '${got}'"$'\n'
+    fi
+  done
+  if [ -n "$failures" ]; then
+    printf 'topology contract drift:\n%s' "$failures" >&2
+    printf 'The embedded constants disagree with the contract. Run\n' >&2
+    printf '  scripts/gen-envelope-embed.sh\n' >&2
+    printf 'The ps1 twin replays the SAME rows -- if only one side fails, the\n' >&2
+    printf 'twins have diverged.\n' >&2
+    return 1
+  fi
+}
+
+# The table must not be silently empty -- the disconnected-guard shape
+# gen-manifest.sh warns about in its own surface check.
+@test "topology contract: the vector table covers the boundaries" {
+  source "${BATS_TEST_DIRNAME}/fixtures/envelope_vectors.bash"
+  [ "${#TB_TOPOLOGY_VECTORS[@]}" -ge 8 ] || return 1
+  # The case that motivated the ticket must be in the table by name: a stock
+  # macOS VM cannot host the topology the installer asks for by default.
+  printf '%s\n' "${TB_TOPOLOGY_VECTORS[@]}" | grep -q '^stock-macos-vm' || return 1
+  # And the unreadable case, whose expected output is EMPTY -- if that row ever
+  # grows a value, "I cannot answer" has been turned into an answer.
+  printf '%s\n' "${TB_TOPOLOGY_VECTORS[@]}" | grep -q 'vm-unparseable-memory|.*|$' || return 1
+}
+
+# An unreadable VM must not be readable as "one node". A caller that collapses a
+# cluster on a failed probe is worse than one that leaves the topology alone,
+# so the two outcomes must stay distinguishable at the boundary.
+@test "topology contract: an unreadable VM emits nothing, not a default" {
+  run _honest_topology "eight" "lots" 2
+  [ "$status" -eq 0 ] || return 1
+  [ -z "$output" ] || return 1
+}
+
+# A caller bug, not a machine state. Reported as a non-zero exit with no output
+# so it can never be mistaken for the unreadable-VM case above; the ps1 twin
+# returns $null for the same input.
+@test "topology contract: fewer than one requested node is refused" {
+  run _honest_topology 8 17179869184 0
+  [ "$status" -ne 0 ] || return 1
+  [ -z "$output" ] || return 1
+  run _honest_topology 8 17179869184 "two"
+  [ "$status" -ne 0 ] || return 1
+  [ -z "$output" ] || return 1
+}
+
+# The invariant the whole ticket exists to establish, asserted as a property
+# across VM sizes rather than on the hand-picked rows above: uncapped k3d
+# violates sum(node capacity) <= VM by exactly the node count, and nothing this
+# function recommends may.
+@test "topology contract: nodes x cap never exceeds the usable VM" {
+  local gib bytes usable out nodes cap
+  for gib in 4 5 6 7 8 11 12 16 24 32 48 64; do
+    bytes=$(( gib * 1024 * 1024 * 1024 ))
+    usable=$(( bytes - _TB_ENVELOPE_VM_RESERVE_MEM_BYTES ))
+    (( usable < 0 )) && usable=0
+    for req in 1 2 3 4 8; do
+      out="$(_honest_topology 16 "$bytes" "$req")"
+      [ -n "$out" ] || return 1
+      nodes="${out#nodes=}"; nodes="${nodes%%,*}"
+      cap="${out#*cap=}";    cap="${cap%%,*}"
+      if (( nodes * cap > usable )); then
+        printf 'VM %dGiB want %d: %d nodes x %d B > %d B usable\n' \
+          "$gib" "$req" "$nodes" "$cap" "$usable" >&2
+        return 1
+      fi
+      (( nodes >= 1 && nodes <= req )) || return 1
+    done
+  done
 }
 
 @test "envelope contract: every node unparseable emits nothing (caller falls back)" {
@@ -1281,12 +1468,22 @@ setup() {
   cp "$root/scripts/tests/fixtures/envelope_vectors.bash"   "$work/scripts/tests/fixtures/"
 
   # A different overhead, so every derived value moves.
+  #
+  # topology.per_node_minimum moves WITH it (backend#2221): it is overhead +
+  # floor, and upstream's generator recomputes it, so a vendored contract always
+  # arrives internally consistent. Recompute it here for the same reason -- this
+  # test simulates adopting a properly regenerated upstream contract, not a
+  # half-edited one. The half-edited case is its own test below, and the
+  # generator is SUPPOSED to refuse it.
   python3 - "$work/scripts/tests/fixtures/envelope_contract.json" <<'PY'
 import json, sys
 path = sys.argv[1]
 with open(path) as handle:
     contract = json.load(handle)
 contract["overhead"]["memory_bytes"] = 4 * 1024 ** 3
+minimum = contract["topology"]["per_node_minimum"]
+for key in ["cpu_millicores", "memory_bytes"]:
+    minimum[key] = contract["overhead"][key] + contract["floor"][key]
 with open(path, "w") as handle:
     json.dump(contract, handle, indent=2)
     handle.write("\n")
@@ -1333,6 +1530,55 @@ PY
   run "$work/scripts/gen-envelope-embed.sh" --check
   [ "$status" -ne 0 ] || return 1
   [[ "$output" == *"no \$script:TbEnvelopeFloorMemBytes assignment"* ]] || return 1
+}
+
+# The other half of the derivation guard (backend#2221). per_node_minimum is
+# DERIVED from overhead + floor but RECORDED in the contract, because bash and
+# PowerShell embed it and cannot do arithmetic on a JSON file. A recorded
+# derivation nobody checks is just a fourth constant waiting to rot -- the exact
+# duplication backend#2220 spent seven PRs deleting -- so the generator refuses
+# a contract where the two disagree instead of embedding the stale number into
+# BOTH installers at once.
+#
+# This is the half-vendored case: someone bumps overhead in the vendored fixture
+# by hand, or vendors a contract from a ref where the upstream generator was
+# never re-run.
+@test "envelope contract: a stale per_node_minimum is refused, not embedded" {
+  if ! command -v python3 >/dev/null 2>&1; then
+    skip "python3 not available"
+  fi
+  local root="${BATS_TEST_DIRNAME}/../.."
+  local work="${BATS_TEST_TMPDIR}/stale"
+  mkdir -p "$work/scripts/lib" "$work/scripts/tests/fixtures"
+  cp "$root/scripts/gen-envelope-embed.sh"                  "$work/scripts/"
+  cp "$root/scripts/install-k8s.ps1"                        "$work/scripts/"
+  cp "$root/scripts/lib/install-client-helm.sh"             "$work/scripts/lib/"
+  cp "$root/scripts/tests/fixtures/envelope_contract.json"  "$work/scripts/tests/fixtures/"
+  cp "$root/scripts/tests/fixtures/envelope_vectors.bash"   "$work/scripts/tests/fixtures/"
+
+  # Move overhead and leave per_node_minimum behind.
+  python3 - "$work/scripts/tests/fixtures/envelope_contract.json" <<'PY'
+import json, sys
+path = sys.argv[1]
+with open(path) as handle:
+    contract = json.load(handle)
+contract["overhead"]["memory_bytes"] = 4 * 1024 ** 3
+with open(path, "w") as handle:
+    json.dump(contract, handle, indent=2)
+    handle.write("\n")
+PY
+
+  # A REGEN (not --check) must refuse, and say what to do.
+  run "$work/scripts/gen-envelope-embed.sh"
+  [ "$status" -ne 0 ] || return 1
+  [[ "$output" == *per_node_minimum* ]] || return 1
+
+  # And it must refuse BEFORE writing anything: a generator that rewrites one
+  # installer and then dies is the Bugbot#766 failure this file exists to catch.
+  grep -qE '^_TB_ENVELOPE_OVERHEAD_MEM_BYTES[[:space:]]*=[[:space:]]*3221225472$' \
+    "$work/scripts/lib/install-client-helm.sh" || return 1
+  grep -qE '^\$script:TbEnvelopeOverheadMemBytes[[:space:]]*=[[:space:]]*3221225472$' \
+    "$work/scripts/install-k8s.ps1" || return 1
 }
 
 # ── provenance (backend#2220) ────────────────────────────────────────────────

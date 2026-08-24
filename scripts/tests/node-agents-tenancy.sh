@@ -144,8 +144,9 @@ if missing:
     sys.exit("[ERROR] with resourceMonitor off and the Collector on, "
              f"{ns_b} still holds {sorted(ds_b)} but these DaemonSet-mutating Roles "
              f"are gone: {missing}. The next `helm upgrade --atomic --wait` 403s and "
-             "rolls back, and image refresh stops silently. Gate them on "
-             '`tracebloc.nodeAgentsInUse`, not on resourceMonitor alone.')
+             "rolls back, and image refresh stops silently. Whichever gate dropped "
+             "them has to cover every tenant of that namespace; there is more than "
+             "one correct spelling and this check deliberately does not pick one.")
 
 print(f"  ok: all {len(mut_a)} DaemonSet-mutating Role(s) survive with "
       "resource-monitor off")

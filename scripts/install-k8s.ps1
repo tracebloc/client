@@ -3636,6 +3636,43 @@ function New-K3dCluster {
       "--wait"
     )
 
+    # cgroup v1 hosts (backend#2422). Kubernetes 1.35 flipped the kubelet's
+    # failCgroupV1 default to TRUE, so from k3s 1.35 the kubelet REFUSES TO START
+    # on a cgroup v1 or hybrid host. WSL2 defaults to HYBRID cgroups, which makes
+    # this the Windows path's problem specifically -- and k3s documents none of it,
+    # so the operator would see only a bare upstream kubelet message. Set it
+    # proactively; on a cgroup v2 host it is a no-op.
+    #
+    # GATED, and the gate is load-bearing: --fail-cgroupv1 was ADDED in kubelet
+    # 1.31, so passing it to the 1.29.4 kubelet we pin today would be an unknown
+    # flag and the kubelet would fail to start. Keep this in lockstep with the
+    # bash twin in scripts/lib/cluster.sh.
+    # NEVER cast an unvalidated string with [version] -- it THROWS, and this runs
+    # BEFORE the `latest` branch below that exists to honour that value (#806
+    # review, confirmed under pwsh). "" and "latest" are handled explicitly, the
+    # same way Test-K3sVersionDrift and the GPU gate in this file already do; a
+    # digest-only pin (:3105) is not dotted-numeric either, so the cast is guarded
+    # by a shape check rather than a try/catch.
+    #
+    # `latest` DOES emit. It is the unsupported opt-out (#547) where k3d picks the
+    # k3s version and we cannot read it, so the choice is between a flag that is
+    # harmless from 1.31 and a refusal that is fatal from 1.35. k3d is pinned at
+    # v5.9.0, whose default k3s is 1.32 -- above the flag's introduction, below the
+    # refusal -- so emitting is safe today and correct the moment k3d's default
+    # crosses 1.35. Empty stays skip: common.sh defaults K8S_VERSION to the pin, so
+    # empty only occurs in tests.
+    # `@all`, NOT `@server:*`: $AGENTS defaults to 1 and an agent runs a kubelet too
+    # (#806 Bugbot, High). Scoping to the server leaves the agent kubelet refusing on
+    # a cgroup v1 host -- WSL2's hybrid mode is exactly this path.
+    $k8sSemver = ($K8S_VERSION -replace '^v', '') -replace '[-+].*$', ''
+    if ($K8S_VERSION -eq "latest") {
+      $k3dArgs += @("--k3s-arg", "--kubelet-arg=fail-cgroupv1=false@all")
+    } elseif ($k8sSemver -match '^\d+\.\d+') {
+      if ([version]$k8sSemver -ge [version]'1.31.0') {
+        $k3dArgs += @("--k3s-arg", "--kubelet-arg=fail-cgroupv1=false@all")
+      }
+    }
+
     # backend#743: bind-mount the customer dataset volume at a distinct cluster
     # path so the chart's dataset PV points there while mysql + logs stay on the
     # local /tracebloc tree. No-op when unset.
@@ -4166,11 +4203,14 @@ function Get-ImageMirrorYaml {
 # scripts/gen-envelope-embed.sh --check verifies the constants in CI.
 #
 # Regenerate with: scripts/gen-envelope-embed.sh
-$script:TbEnvelopeContractVersion  = 1
+$script:TbEnvelopeContractVersion  = 2
 $script:TbEnvelopeOverheadCpuMilli = 1000
 $script:TbEnvelopeOverheadMemBytes = 3221225472
 $script:TbEnvelopeFloorCpuMilli    = 1000
 $script:TbEnvelopeFloorMemBytes    = 2147483648
+$script:TbEnvelopeVmReserveMemBytes = 1073741824
+$script:TbEnvelopeNodeMinCpuMilli   = 2000
+$script:TbEnvelopeNodeMinMemBytes   = 5368709120
 # ── end generated ───────────────────────────────────────────────────────────
 
 # Set by Get-TrainingResources when the machine is readable but below the
@@ -4270,7 +4310,11 @@ function Get-TrainingResources {
     # full-JSON ConvertFrom-Json, mirroring the bash twin, so a parse hiccup on
     # unrelated node fields can never silently reinstate the static default
     # (Bugbot r5).
-    $lines = kubectl get nodes --request-timeout=10s -o jsonpath='{range .items[*]}{.status.allocatable.cpu}{" "}{.status.allocatable.memory}{"\n"}{end}' 2>$null
+    # THREE fields per node since backend#2237: allocatable cpu, allocatable
+    # memory, and .spec.unschedulable. The bash twin carries the same jsonpath in
+    # lib/install-client-helm.sh::_TB_NODE_JSONPATH; the two are pinned to agree
+    # by the shared cluster-state fixture, tests/fixtures/installer_parity.json.
+    $lines = kubectl get nodes --request-timeout=10s -o jsonpath='{range .items[*]}{.status.allocatable.cpu}{" "}{.status.allocatable.memory}{" "}{.spec.unschedulable}{"\n"}{end}' 2>$null
     if ($LASTEXITCODE -eq 0 -and $lines) {
       $bestMemB = [long]0; $bestCpuM = [long]0; $seen = $false
       foreach ($ln in @($lines)) {
@@ -4278,6 +4322,20 @@ function Get-TrainingResources {
         if ($parts.Count -lt 2) { continue }
         $cpuRaw = $parts[0]
         $memRaw = $parts[1]
+        # Cordoned nodes are SKIPPED, before any ranking (contract
+        # skipped_nodes: "spec.unschedulable (cordoned)"). A cordoned node
+        # accepts no new pods, so anchoring on one writes an envelope that
+        # cannot schedule -- and on a heterogeneous cluster a cordoned LARGE
+        # node wins the anchor outright, leaving every training pod Pending
+        # with no obvious cause (backend#2237).
+        #
+        # Kubernetes declares Unschedulable with `omitempty`, so a schedulable
+        # node emits an EMPTY third field and .Trim() drops it entirely --
+        # hence Count -lt 3 is the normal case, and only the literal 'true'
+        # means cordoned. Testing for 'true' rather than for non-emptiness is
+        # what keeps a future explicit `unschedulable: false` from being read
+        # as cordoned.
+        if ($parts.Count -ge 3 -and $parts[2] -eq 'true') { continue }
         # $null, NOT 0, for a quantity we cannot parse. The contract's
         # skipped_nodes says unparseable allocatable is SKIPPED, and the bash
         # twin does exactly that with an explicit `|| continue`. Coercing to 0
@@ -4299,7 +4357,10 @@ function Get-TrainingResources {
         # Contract ANCHOR_LARGEST, tie-break (cpu, memory). This used to rank
         # (memory, cpu) while cli's nodeLarger ranked (cpu, memory), so the two
         # anchored on DIFFERENT nodes on a heterogeneous cluster. One order now.
-        # Installer clusters are single-node k3d, so this is a field no-op.
+        # NOT a field no-op because clusters are single-node -- they are not
+        # (backend#2221: SERVERS=1 AGENTS=1 is the default, so two nodes). It is
+        # a no-op only because both k3d node containers report IDENTICAL
+        # figures, each reporting the whole Docker VM -- the #2221 bug itself.
         if (-not $seen -or $cpuM -gt $bestCpuM -or ($cpuM -eq $bestCpuM -and $memB -gt $bestMemB)) {
           $bestMemB = $memB; $bestCpuM = $cpuM
         }
@@ -4347,6 +4408,91 @@ function Get-TrainingResources {
     }
   } catch {}
   return "cpu=2,memory=8Gi"
+}
+
+# ── the VM beneath the node containers (backend#2221) ────────────────────────
+#
+# Get-TrainingResources above answers "how much may one run have, given a
+# NODE". On a k3d install that premise is false: the node containers are
+# created with `NanoCpus=0 CpuQuota=0 Memory=0`, so each one honestly reports
+# the WHOLE Docker VM and the default topology (SERVERS=1 AGENTS=1) tells
+# Kubernetes the machine is twice its size. Measured on k3d v5.9.0 / k3s
+# v1.35.5 / Docker 29.5.2: a 7.75 GiB VM presented as 15.50 GiB, byte-exactly
+# 2.000x, and two pods at this installer's OWN derived envelope
+# (cpu=9,memory=4Gi) both went Running on a 10 cpu / 7.75 GiB machine.
+#
+# Two asymmetries decide the shape of the fix, and both are measured:
+#
+#   MEMORY IS CAPPABLE, AT CREATE TIME ONLY. `k3d --servers-memory/
+#   --agents-memory` works by bind-mounting a SYNTHETIC /proc/meminfo into the
+#   node container -- not via the cgroup, which kubelet never reads for
+#   capacity. `docker update --memory` on a running node moves the cgroup and
+#   leaves /proc/meminfo alone, so capacity does not budge even across a
+#   restart: an existing cluster cannot be capped in place.
+#
+#   CPU IS NOT CAPPABLE AT ALL. k3d 5.9.0 has no CPU flag, and neither
+#   `--cpus` (a CFS quota) nor `--cpuset-cpus` reaches kubelet, because cadvisor
+#   counts /sys/devices/system/cpu/present and /proc/cpuinfo and no cgroup
+#   namespaces either. So the only lever that makes cpu honest is FEWER NODE
+#   CONTAINERS -- the remedy the GPU path already chose for --gpus=all.
+#
+# Returns "nodes=N,cap=BYTES,cpu_honest=0|1,viable=0|1", or $null when the VM is
+# unreadable. $null means "I cannot answer" and a caller must not read it as one
+# node: collapsing a cluster on a failed probe is worse than leaving the
+# topology alone. A STRING rather than a hashtable so the bash twin and this one
+# are compared byte-for-byte by the same fixture rows.
+#
+# The arithmetic is client-runtime/node_sizing.py::honest_topology, the
+# constants are embedded above, and the vectors are replayed by
+# install-k8s.Tests.ps1. -RequestedNodes below 1 is a caller bug, not a machine
+# state: it returns $null rather than inventing a topology, matching the bash
+# twin's non-zero exit with no output.
+function Get-HonestTopology {
+  param(
+    [Parameter(Mandatory=$true)][AllowEmptyString()][string]$VmCpu,
+    [Parameter(Mandatory=$true)][AllowEmptyString()][string]$VmMemory,
+    [Parameter(Mandatory=$true)][int]$RequestedNodes
+  )
+  if ($RequestedNodes -lt 1) { return $null }
+
+  # Same unit spellings the bash twin accepts. [long] throughout: a byte count
+  # over 2^31 must not touch an Int32 path -- the #2220 lesson, where a bare 0
+  # bound [math]::Max's (Int32, Int32) overload and silently disabled machine
+  # sizing on every box with more than ~2 GiB of headroom.
+  $vmCpuM = if ($VmCpu -match '^(\d+)m$') { [long]$Matches[1] }
+            elseif ($VmCpu -match '^\d+$') { [long]$VmCpu * 1000 }
+            else { $null }
+  $vmMemB = if ($VmMemory -match '^(\d+)Ki$') { [long]$Matches[1] * 1KB }
+            elseif ($VmMemory -match '^(\d+)Mi$') { [long]$Matches[1] * 1MB }
+            elseif ($VmMemory -match '^(\d+)Gi$') { [long]$Matches[1] * 1GB }
+            elseif ($VmMemory -match '^\d+$') { [long]$VmMemory }
+            else { $null }
+  if ($null -eq $vmCpuM -or $null -eq $vmMemB) { return $null }
+
+  # The VM cannot give the node containers everything it has: the k3d serverlb
+  # and tools containers, dockerd/containerd and the guest page cache all live
+  # outside them. Capping to the last byte starves the runtime that runs them.
+  $usable = [long][math]::Max([long]0, $vmMemB - $script:TbEnvelopeVmReserveMemBytes)
+
+  $fits = [long][math]::Floor($usable / $script:TbEnvelopeNodeMinMemBytes)
+  $nodes = [long]$RequestedNodes
+  if ($fits -lt $nodes) { $nodes = $fits }
+  # Never zero: "no cluster at all" is not this function's call to make. The
+  # caller refuses on viable=0.
+  if ($nodes -lt 1) { $nodes = [long]1 }
+
+  # Floored -- a cap that rounds UP is not a cap.
+  $cap = [long][math]::Floor($usable / $nodes)
+
+  # cpu_honest is measured, not chosen: no cap makes capacity.cpu true on more
+  # than one node container.
+  $cpuHonest = if ($nodes -eq 1) { 1 } else { 0 }
+
+  # One honest node needs the platform overhead AND the training floor. Below
+  # that the VM cannot host a run whatever it is capped to.
+  $viable = if ($fits -ge 1 -and $vmCpuM -ge $script:TbEnvelopeNodeMinCpuMilli) { 1 } else { 0 }
+
+  return "nodes=$nodes,cap=$cap,cpu_honest=$cpuHonest,viable=$viable"
 }
 
 function Get-TraceblocYamlValue {

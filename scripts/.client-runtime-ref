@@ -5,6 +5,17 @@
 # open client PR. Same rule as cli/scripts/.client-ref. The weekly run is what
 # catches a pin gone stale enough to matter.
 #
-# Bump this ref (and re-vendor the fixture) whenever the envelope contract
-# changes upstream. The drift gate below will tell you when that has happened.
-6293d15f7025d06bc85886df93456e62767a8d45
+# ONE REF, TWO CONTRACTS since backend#2378. This pin governs both vendored
+# copies -- scripts/tests/fixtures/envelope_contract.json and
+# client/log_redactions.json -- so one commit describes the whole cross-repo
+# surface. (Same rule backend's scripts/.data-ingestors-ref applies to its two
+# schemas.) Bump it, and re-vendor BOTH, whenever either contract changes
+# upstream. The drift gate below will tell you when that has happened.
+#
+# CURRENTLY POINTS AT AN UNMERGED COMMIT, deliberately and temporarily: it is
+# the head of tracebloc/client-runtime#376, the PR that introduces
+# log_redactions.json. Pinning develop's tip instead would mean landing this PR
+# with a red cross-repo job, and a red gate teaches people to skip the tier.
+# RE-POINT THIS at client-runtime's develop merge SHA once #376 lands -- the
+# bytes are identical either way, so this is tidiness, not correctness.
+e4c4813e4faeba3b63e517c1781c089416f6a08d

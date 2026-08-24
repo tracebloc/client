@@ -46,7 +46,9 @@ Clearing the envelope is an **explicit, deliberate** act — a chart change cann
 do it for you, because `--reset-then-reuse-values` re-applies the stored
 user-supplied value on every upgrade. Setting the keys to `null` removes them
 (Helm deletes null-valued keys during value coalescing), which drops all three
-env vars and lets `jobs-manager` derive the envelope from node allocatable:
+env vars and returns `jobs-manager` to its built-in `cpu=2,memory=8Gi` literal
+— and, if `env.DERIVE_JOB_ENVELOPE` is also set, unblocks the node-allocatable
+derivation (read the caveat below before you do that):
 
 ```bash
 helm upgrade "$NAMESPACE" tracebloc/tracebloc -n "$NAMESPACE" \
@@ -59,7 +61,7 @@ helm upgrade "$NAMESPACE" tracebloc/tracebloc -n "$NAMESPACE" \
 Verify the three vars are gone before relying on it:
 
 ```bash
-kubectl -n "$NAMESPACE" get deploy -l app.kubernetes.io/component=jobs-manager -o yaml | grep RESOURCE_
+kubectl -n "$NAMESPACE" get deploy "$NAMESPACE-jobs-manager" -o yaml | grep RESOURCE_
 ```
 
 > **Read this before you run it.** Node-derived sizing is currently gated OFF by
@@ -68,7 +70,11 @@ kubectl -n "$NAMESPACE" get deploy -l app.kubernetes.io/component=jobs-manager -
 > experiment cannot schedule. With the gate off, clearing the keys returns the
 > edge to the fixed `cpu=2,memory=8Gi` literal — which on a machine with less
 > than ~8 GiB allocatable **cannot schedule at all**. Do not clear the keys on a
-> small machine.
+> small machine. To opt in deliberately, clear the pair **and** set the gate in
+> the same upgrade — `--set-string env.DERIVE_JOB_ENVELOPE=true`, with
+> `--set-string`, because every key under `env` is typed `string` and a bare
+> `--set ...=true` is rejected as a boolean. The key is documented in
+> `client/values.yaml` (backend#2250).
 
 ## Upgrading to 1.9.6 — the prod ingestor pin moved into chart defaults; `values-prod.yaml` removed
 
@@ -118,8 +124,8 @@ helm upgrade <release> tracebloc/client -n <namespace> \
 Confirm the edge now tracks the chart pin:
 
 ```bash
-kubectl get deploy -n <namespace> -l app.kubernetes.io/component=jobs-manager \
-  -o jsonpath='{.items[0].spec.template.spec.containers[0].env[?(@.name=="INGESTOR_IMAGE_DIGEST")].value}{"\n"}'
+kubectl get deploy -n <namespace> <release>-jobs-manager \
+  -o jsonpath='{.spec.template.spec.containers[0].env[?(@.name=="INGESTOR_IMAGE_DIGEST")].value}{"\n"}'
 ```
 
 **Canary edges.** To float one prod edge on the tag while the rest of the fleet
