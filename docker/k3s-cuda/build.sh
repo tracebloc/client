@@ -11,7 +11,7 @@
 #   PUSH              "true" to push, otherwise build+load locally
 set -euo pipefail
 
-K3S_TAG="${K3S_TAG:-v1.29.4-k3s1}"
+K3S_TAG="${K3S_TAG:-v1.36.3-k3s1}"
 CUDA_TAG="${CUDA_TAG:-12.4.1-base-ubuntu22.04}"
 IMAGE_REGISTRY="${IMAGE_REGISTRY:-ghcr.io}"
 IMAGE_REPOSITORY="${IMAGE_REPOSITORY:-tracebloc/k3s-cuda}"

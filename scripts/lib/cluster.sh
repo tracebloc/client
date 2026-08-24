@@ -908,7 +908,13 @@ _check_existing_cluster_k8s_version() {
     echo ""
     warn "The existing '$CLUSTER_NAME' cluster runs k3s '$running', not the validated pin '$K8S_VERSION'."
     hint "k3s version is fixed when the cluster is created — it can't be changed on a running cluster."
-    hint "This cluster was created by an older/unpinned installer or with K8S_VERSION=latest (#547). To move"
+    # backend#2448 made this the COMMON case rather than the exception: moving the
+    # pin 1.29.4 -> 1.36.3 marks every pre-existing cluster as drifted, and for
+    # those operators neither "older/unpinned installer" nor "K8S_VERSION=latest"
+    # is what happened — their cluster simply predates the pin move. Naming only
+    # the two original causes would tell most readers something untrue about
+    # their own machine.
+    hint "Either this cluster predates the current pin, or it was created by an unpinned installer / with K8S_VERSION=latest (#547). To move"
     hint "onto the validated version, recreate it:"
     _recreate_cluster_hint
     hint "  (hostpath mode keeps your data under ${HOST_DATA_DIR:-your data dir}; node-local mode loses in-cluster data on recreate.)"
@@ -1187,7 +1193,7 @@ _create_new_cluster() {
   # On a cgroup v2 host — every current install — it is a no-op.
   #
   # GATED, and the gate is load-bearing: `--fail-cgroupv1` was ADDED in kubelet
-  # 1.31. Passing it to the 1.29.4 kubelet we pin today would be an unknown flag
+  # 1.31. Passing it to a pre-1.31 kubelet is an unknown flag
   # and the kubelet would fail to start — i.e. an ungated version of this line
   # breaks every install. Note the `#v` strip: _version_lt reads a leading "v" as
   # 0 and would invert the comparison (see common.sh).
