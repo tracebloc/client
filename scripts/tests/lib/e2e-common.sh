@@ -89,3 +89,71 @@ e2e_egress_positive_control() {
     fail "positive control FAILED — a non-policied pod could not reach ${host}:443 (phase=${posphase:-none}). A blocked training pod would NOT be attributable to the NetworkPolicy (runner egress / target issue), so the seal-check is inconclusive — refusing to report a false PASS."
   echo "positive control OK — ${host}:443 reachable; a training-pod block is now attributable to the policy."
 }
+
+# ── e2e_proxy_probe_snippet <backend-host> [deadline_s] [delay_s] ────────────
+# Emits the in-pod shell for §A of e2e-proxy.sh — the backend call that MUST
+# traverse the squid. EMITTED rather than written inline in the pod manifest so
+# that scripts/tests/e2e-proxy-probe.bats executes THIS text and not a
+# paraphrase of it (backend#1729 rule 9: a mutation check must call the code
+# under test, not a copy).
+#
+# WHY A LOOP OF FRESH PROCESSES, and not curl's own --retry. The probe used to be
+# ONE curl carrying `--retry 8 --retry-connrefused --retry-all-errors`, above a
+# comment asserting that --retry-all-errors covered the "Could not resolve proxy"
+# case. It does not. curl caches a FAILED name resolution for the life of the
+# process, so every retry after the first is answered from that cache without
+# touching the resolver. Verbatim from both develop failures (runs 32473068472
+# and 32589039697) — 9 attempts, 8 of which logged the cache hit:
+#
+#     * Could not resolve proxy: tb-egress-squid.default.svc.cluster.local
+#     * Negative DNS entry
+#     curl: (5) Could not resolve proxy: tb-egress-squid.default.svc.cluster.local
+#
+# So exactly ONE resolver query was ever issued, about a second after the pod
+# started, and the documented protection against the cluster-DNS startup window
+# was inert: the guard turned entirely on whether CoreDNS happened to be serving
+# at that single instant. Measured 2 failures in 30 develop runs (backend#2350).
+# A new PROCESS cannot inherit the poisoned cache, which is why the retry has to
+# live out here rather than inside one curl.
+#
+# TEETH. Only exit 5 (could not resolve proxy), 6 (could not resolve host) and 7
+# (connection refused) are retried — the three symptoms of the startup window
+# (the proxy Service name not yet in the pod's resolver; Service endpoints not
+# yet programmed into kube-proxy — run 29255451968). EVERY other outcome ENDS the
+# loop, success included, so a real #119 regression (proxy env ignored, so the
+# call dials direct and succeeds with no CONNECT) still fails on the first
+# attempt instead of being retried into a slow green. A squid that is genuinely
+# down exhausts the deadline and fails.
+#
+# Every attempt prints its number, curl's exit code and the elapsed seconds, so
+# a future red says whether it waited — the old failure could not distinguish
+# "did not tunnel" from "had not tunnelled yet".
+e2e_proxy_probe_snippet() {
+  local host="${1:-}" deadline="${2:-90}" delay="${3:-2}"
+  # Fail closed (rule 3): an empty host would emit a probe of https:/// that
+  # fails for a reason having nothing to do with proxying — a red meaning
+  # nothing. Callers assign this into a variable, so `set -e` aborts on return.
+  [ -n "$host" ] || { echo "e2e_proxy_probe_snippet: backend host is required" >&2; return 2; }
+  sed -e "s|@@HOST@@|${host}|g" \
+      -e "s|@@DEADLINE@@|${deadline}|g" \
+      -e "s|@@DELAY@@|${delay}|g" <<'SNIP'
+probe_start=$(date +%s)
+probe_attempt=0
+while :; do
+  probe_attempt=$((probe_attempt+1))
+  probe_rc=0
+  curl -k -v -sS -m 30 -o /dev/null "https://@@HOST@@/" 2>&1 || probe_rc=$?
+  probe_elapsed=$(( $(date +%s) - probe_start ))
+  echo "----- probe attempt ${probe_attempt} rc=${probe_rc} elapsed=${probe_elapsed}s -----"
+  case "${probe_rc}" in
+    5|6|7) ;;
+    *) break ;;
+  esac
+  if [ "${probe_elapsed}" -ge @@DEADLINE@@ ]; then
+    echo "----- probe GAVE UP after ${probe_attempt} attempts / ${probe_elapsed}s waiting for the proxy Service name to resolve -----"
+    break
+  fi
+  sleep @@DELAY@@
+done
+SNIP
+}

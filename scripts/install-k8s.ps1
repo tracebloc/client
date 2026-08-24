@@ -1918,11 +1918,30 @@ function Invoke-BoundedProcess {
   #
   # Found on 2026-08-16: it took down `Pester (ubuntu-latest)` on client's `main` tip
   # right after a prod promotion, on a test whose assertion never ran.
-  if ($Stdin) {
-    try { $proc.StandardInput.Write($Stdin); $proc.StandardInput.Close() } catch { }
-  }
+  #
+  # DRAIN BEFORE YOU WRITE. The readers start ahead of the stdin write, not after it.
+  # With the order reversed, a child that BOTH reads stdin and writes output deadlocks
+  # whenever the payload exceeds the OS pipe buffer (~64 KiB): the child fills its
+  # stdout pipe, blocks because nobody is draining it yet, therefore stops reading
+  # stdin, therefore our Write() blocks -- and WaitForExit() below is never reached, so
+  # the HARD timeout this function exists to provide does not fire at all. Not 124:
+  # no return, ever. Measured on backend#2246 -- `/bin/cat` with a 200 KB payload and
+  # -TimeoutSec 20 ran past a 60s outer watchdog, while the same call with the readers
+  # started first returns the child's real verdict. Starting a ReadToEndAsync() before
+  # the write costs nothing and is the documented way out of the classic redirect
+  # deadlock, so the ordering is load-bearing: do not "tidy" the readers back down.
   $outTask = $proc.StandardOutput.ReadToEndAsync()
   $errTask = $proc.StandardError.ReadToEndAsync()
+  if ($Stdin) {
+    # Close() in `finally`, NOT chained after Write() in the same try. Chained, a throw
+    # from Write() skipped the Close(), so the child never got its EOF and our write
+    # handle stayed open -- and the ONE exception we actually observe here (broken pipe)
+    # is swallowed, which means the skip was silent. The swallow itself stays: see the
+    # paragraphs above for why a pipe error must not replace the child's verdict. The
+    # inner try is because Close() flushes, so it can raise the same broken pipe.
+    try { $proc.StandardInput.Write($Stdin) } catch { }
+    finally { try { $proc.StandardInput.Close() } catch { } }
+  }
   if ($proc.WaitForExit($TimeoutSec * 1000)) {
     return [pscustomobject]@{ Code = $proc.ExitCode; Output = ($outTask.Result + $errTask.Result) }
   }
