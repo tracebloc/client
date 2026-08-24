@@ -172,40 +172,70 @@ data:
             id: container-parser
 
     processors:
-      # THE REDACTION FLOOR, relocated from client-runtime controller.py's
-      # _LOG_REDACTIONS (read at client-runtime@45006ec, six patterns).
+      # THE REDACTION FLOOR — GENERATED, never hand-written (backend#2378).
       #
-      # THIS IS A CROSS-REPO SECOND COPY AND IT CANNOT BE MACHINE-CHECKED FROM
-      # HERE. The producer is Python in another repository; Helm cannot import it,
-      # so there is no derive-from-the-producer option and no test in this repo can
-      # detect drift. Stated plainly rather than dressed up: if controller.py's set
-      # grows, this does not, and nothing will say so. That is a real residual risk
-      # and it is why each pattern names what it is for.
+      # The rule "which strings must be scrubbed before a log leaves a
+      # customer's cluster" has ONE declaration: client-runtime's
+      # log_redactions.json, vendored into this chart at
+      # client/log_redactions.json and read here with `.Files.Get`. The
+      # statements below are produced from it, so there is no hand port of a
+      # regex anywhere in this repository.
       #
-      # Translated Python -> RE2 deliberately, not copied blind:
-      #   * `\1` in a replacement becomes `$1` (Go's syntax).
-      #   * `(?i)` and `(?m)` are supported by RE2 and kept.
-      #   * no pattern here uses lookaround or backreferences INSIDE the pattern,
-      #     which RE2 does not support — checked, because a silently-invalid regex
-      #     in OTTL is a processor that starts and scrubs nothing.
+      # WHAT USED TO BE HERE, and why it had to go: six OTTL calls typed out by
+      # hand from controller.py's `_LOG_REDACTIONS`. The two agreed only for as
+      # long as one person changed both in one sitting, and the comment on this
+      # line used to say so — "a cross-repo second copy that cannot be
+      # machine-checked from here". backend#1908 is what that cost: the generic
+      # pattern anchored its keyword with a word boundary on both sides, so
+      # every environment-variable spelling of a secret (AZURE_CLIENT_SECRET=,
+      # MYSQL_PASSWORD=, DJANGO_SECRET_KEY=, AWS_SECRET_ACCESS_KEY=) fell
+      # straight through, in BOTH copies, with passing tests on both sides.
+      #
+      # WHY VENDORED RATHER THAN FETCHED: client-runtime is private and
+      # GITHUB_TOKEN is repo-scoped, so nothing here can read it in a lint job
+      # without a credential — and a network read fails on the day the network
+      # is the thing that broke. Instead the bytes are vendored with their
+      # sha256 (scripts/.log-redactions.sha256) and checked locally by
+      # scripts/tests/collector-redaction-derived.sh, which also asserts that
+      # what is rendered below IS the declaration. The residual — that the
+      # vendored copy has fallen behind upstream — is held by the weekly
+      # cross-repo job and by client-runtime's own digest tripwire, and costs a
+      # two-PR bump ritual. That trade is stated in scripts/.log-redactions.sha256.
+      #
+      # Python -> RE2 is not an issue for the PATTERNS: the declaration is
+      # restricted to the subset both engines read identically (inline
+      # (?i)/(?im) flags, \b, classes, bounded repeats; no lookaround, no
+      # backreferences — RE2 has neither, and an invalid regex in OTTL is a
+      # processor that starts and scrubs nothing). client-runtime's contract
+      # test refuses a declaration that leaves that subset. The REPLACEMENTS are
+      # declared in RE2's `$1` form, which OTTL takes verbatim; controller.py
+      # translates them for python.
       transform/redaction:
         error_mode: ignore
         log_statements:
           - context: log
             statements:
-              # scheme://user:pass@host — corporate-proxy creds, DB/broker URLs.
-              - replace_pattern(body, "://[^:/@\\s]+:[^@/\\s]+@", "://***REDACTED***@")
-              # Azure / ServiceBus / Storage keys. The trailing "Name=" form
-              # (SharedAccessKeyName) is not a secret and is left intact.
-              - replace_pattern(body, "(?i)(SharedAccessKey|AccountKey)=[^;\\s\"']+", "$1=***REDACTED***")
-              # Auth headers — the whole value, to end of line.
-              - replace_pattern(body, "(?im)^(.*\\b(?:authorization|x-api-key)\\b[^:=\\n]*[:=]).*$", "$1 ***REDACTED***")
-              # Bearer / DRF Token credentials wherever they appear.
-              - replace_pattern(body, "(?i)\\b(bearer|token)\\b([\\s:=]+)[A-Za-z0-9._\\-]{12,}", "$1$2***REDACTED***")
-              # Generic secret-bearing assignments.
-              - replace_pattern(body, "(?i)\\b(password|passwd|pwd|secret|api[_-]?key|access[_-]?key|client[_-]?secret)\\b(\\s*[:=]\\s*)[^\\s\"',;]+", "$1$2***REDACTED***")
-              # AWS access key IDs.
-              - replace_pattern(body, "\\bAKIA[0-9A-Z]{16}\\b", "***REDACTED***")
+              {{- /*
+                FAILS CLOSED. `.Files.Get` returns "" for a file that is absent
+                or excluded by .helmignore, and `mustFromJson` errors on bytes
+                that are not JSON. Either way the render STOPS. A Collector that
+                came up with an empty `statements` list would report Ready and
+                export every secret it read — the one outcome this whole
+                mechanism exists to prevent — so "cannot tell" is a hard failure
+                here, not a quiet fallback to no redaction.
+              */}}
+              {{- $raw := $.Files.Get "log_redactions.json" }}
+              {{- if not $raw }}
+              {{- fail "client/log_redactions.json is missing from the chart, so the Collector's redaction floor cannot be generated. It is vendored from tracebloc/client-runtime; restore it and check scripts/.log-redactions.sha256." }}
+              {{- end }}
+              {{- $redactions := (mustFromJson $raw).redactions }}
+              {{- if not $redactions }}
+              {{- fail "client/log_redactions.json declares no redactions, so this Collector would export captured logs unscrubbed." }}
+              {{- end }}
+              {{- range $redactions }}
+              # {{ .id }}
+              - replace_pattern(body, {{ .pattern | quote }}, {{ .replacement | quote }})
+              {{- end }}
 
       batch:
         # Modest, because the destination is a Django request path rather than a

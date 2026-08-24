@@ -26,12 +26,13 @@ env: {
   # HTTP_PROXY_USERNAME: ""
   # HTTP_PROXY_PASSWORD: ""
   # Optional: explicit resource requests/limits for spawned training jobs.
-  # UNSET (the default): jobs-manager sizes the envelope from node allocatable
-  # capacity — cpu = max(2, floor(allocatable*0.75)), memory = max(8Gi,
-  # floor(allocatable*0.75)), requests == limits (Guaranteed QoS) — instead of
-  # the historic fixed "cpu=2,memory=8Gi" (backend#664, Utilization Ladder L0).
-  # Older client-runtime images fall back to that same literal, so leaving
-  # these unset is safe on any image. SET: pins the envelope exactly as before.
+  # UNSET (the default): jobs-manager uses its built-in "cpu=2,memory=8Gi"
+  # literal. SET: pins the envelope to exactly what you write here.
+  #
+  # This comment used to say that leaving the pair unset made jobs-manager size
+  # the envelope from node allocatable (75% of the node). It does not: that
+  # path is real but GATED OFF behind DERIVE_JOB_ENVELOPE (documented below).
+  # Unset means the literal (backend#664 L0, backend#2167, backend#2250).
   # RESOURCE_REQUESTS: "cpu=2,memory=8Gi"
   # RESOURCE_LIMITS: "cpu=2,memory=8Gi"
   # Bookkeeping only (backend#2220): WHO chose the two values above.
@@ -45,6 +46,31 @@ env: {
   # indistinguishable — and a future ladder must not silently overrule the
   # human. Leave it alone; the installer and the CLI maintain it.
   # RESOURCE_PROVENANCE: "installer"
+  # Optional, OFF by default: let jobs-manager size the training-job envelope
+  # from node allocatable capacity instead of the literal above --
+  # cpu = max(2, floor(allocatable*0.75)), memory = max(8Gi,
+  # floor(allocatable*0.75)), requests == limits (Guaranteed QoS).
+  #
+  # Effective ONLY when RESOURCE_REQUESTS *and* RESOURCE_LIMITS are both unset:
+  # an explicit envelope always wins, and this key is then inert (jobs-manager
+  # never reaches the derive branch). Note that BOTH installers write
+  # RESOURCE_* unconditionally, so on an installer-provisioned edge you must
+  # clear both keys as well as setting this one.
+  #
+  # READ THIS BEFORE TURNING IT ON (backend#2167). A ~75% Guaranteed envelope
+  # is EXCLUSIVE: any Guaranteed fraction >= 50% caps the machine at ONE
+  # concurrent training job, whatever the machine's size. And on a multi-node
+  # k3d cluster whose node containers are uncapped, every node reports the
+  # whole Docker VM (allocatable == capacity, no kube/system-reserved), so the
+  # min-across-nodes in the derivation does not save you and the OOM killer
+  # takes victims -- a k3s node container included. Turn this on to measure or
+  # to opt one edge in, not as a default. backend#2418 (CPU burstable, memory
+  # Guaranteed) and backend#2419 (a job that does not fit queues) are what make
+  # the derived envelope safe to default; until they land, this is opt-in.
+  #
+  # Truthy spellings jobs-manager accepts: "1", "true", "yes", "on"
+  # (case-insensitive). Anything else -- including "" -- is off.
+  # DERIVE_JOB_ENVELOPE: "true"
   # Optional: GPU requests for spawned jobs (defaults to "nvidia.com/gpu=1" if not provided)
   # GPU_REQUESTS: "nvidia.com/gpu=1"
   # Optional: GPU limits for spawned jobs (defaults to "nvidia.com/gpu=1" if not provided)
@@ -436,6 +462,17 @@ egressProxy:
 # backend#1908 lands content redaction. Widening `classAContainers` is not a
 # config tweak — it changes what leaves a customer's cluster.
 telemetryCollector:
+  # OFF BY DEFAULT, BUT THE TOKEN SECRET IS PROVISIONED ANYWAY (backend#2400), and
+  # that asymmetry is deliberate. The Collector's template REFUSES the release when
+  # its token Secret is absent, so the Secret has to be in place BEFORE this flag
+  # can be set — which it cannot be if writing it is conditional on this flag. That
+  # was a deadlock: no edge could enable the Collector at all.
+  #
+  # So jobs-manager always receives the Secret's coordinates and always holds the
+  # RBAC to write it, and flipping this to `true` on an edge that has re-
+  # authenticated at least once since upgrading is a one-step operation. A FRESH
+  # install with this already `true` is still refused, and correctly: jobs-manager
+  # has not run yet, so nothing has written the Secret.
   enabled: false
 
   # otel/opentelemetry-collector-contrib — `contrib`, not `core`, and the
@@ -1392,6 +1429,46 @@ serviceDbAccountsByEnv:
 # other characters.
 tbMetaPassword: ""
 tbIngestPassword: ""
+
+# ============================================================
+# S3 bootstrap re-parent (backend#1528 D10 close-out — final stage)
+# ============================================================
+# The account-minting DDL (CREATE USER / GRANT for tb_credmgr, tb_meta and
+# tb_ingest) still authenticates AS the root-equivalent edgeuser. While it does,
+# edgeuser cannot be REVOKEd / DROPped. This gate re-parents that mint onto MySQL
+# root — client-runtime#310's _bootstrap_db_config reads DB_BOOTSTRAP_USER /
+# DB_BOOTSTRAP_PASSWORD (both-or-neither) — which is the prerequisite for
+# retiring edgeuser. Additive to the data plane: it changes only which identity
+# runs the mint, never which the scoped accounts hold.
+#
+# This is the LAST, prod-irreversible-adjacent step of the rollout, so it is OFF
+# everywhere by default. Flip per environment, dev first, only once
+# serviceDbAccounts + perExperimentDbCreds are verified on that fleet and the S0
+# `SHOW GRANTS FOR 'edgeuser'@'%'` snapshot is captured (the rollback reference).
+#
+# UNSET by default: the effective value comes from bootstrapDbReparentByEnv
+# below, keyed on the resolved CLIENT_ENV. Set this to force one answer on an
+# edge regardless of environment (an operator override — DR, a fleet held back
+# deliberately, or a customer opt-out). Mirrors serviceDbAccounts (backend#1752).
+bootstrapDbReparent:
+
+bootstrapDbReparentByEnv:
+  dev: false
+  stg: false
+  prod: false
+
+# REQUIRED when the gate above is on: the password jobs-manager authenticates
+# with, as MySQL root, to run the mint DDL. There is NO generated default —
+# jobs-manager AUTHENTICATES as root (it never runs `ALTER USER root`), so a
+# random value the server was never told to expect would lock the minter out of
+# MySQL and CrashLoop it. Set this to the MySQL root password for the cluster —
+# the `mysql-client` image's baked default (Dockerfile.mysql_client bakes
+# MYSQL_ROOT_PASSWORD; see backend#947 for the value and its rotated replacement).
+# Helm fails the render if the gate is on and this is unset (with an existing
+# Secret value preserved across upgrades in between). NOT constrained to
+# alphanumeric — unlike the credmgr / tb_* passwords it is never interpolated
+# into DDL, only passed as a mysql-connector connection parameter.
+bootstrapDbPassword: ""
 
 # ============================================================
 # Ingestion endpoint authorization (client-runtime#21)

@@ -129,7 +129,26 @@ tests:
   # ── the redaction floor (D6 precondition 2) ──────────────────────────────
   # Reading stdout through filelog BYPASSES controller.py's app-side handler, so
   # without these the move would silently REMOVE a protection that exists today.
-  - it: carries all six of controller.py's secret patterns
+  # RENAMED, because the old title — "carries all six of controller.py's secret
+  # patterns" — asserted something this mechanism cannot see. It greps the
+  # rendered config for six substrings it holds ITSELF; controller.py is in
+  # another repository and is never read. So it agreed with itself and reported
+  # that as agreement with a file it has no access to, and a seventh redaction
+  # added over there would leave every assertion below green (backend#1729
+  # rules 1 and 9).
+  #
+  # What it does check is still worth keeping: each pattern is present in the
+  # rendered config at all. The FLOOR — that these patterns actually scrub real
+  # secrets, and do not scrub the diagnosis — is proven behaviourally in
+  # scripts/tests/collector-redaction-floor.sh, which derives the regexes from
+  # the render and feeds them specimens.
+  #
+  # Since backend#2378 the statements are GENERATED from client/log_redactions.json
+  # (the one declaration, vendored from client-runtime), so these fragments are no
+  # longer a second hand copy of a hand copy — they are a cheap smoke test that the
+  # generation ran at all. That the render IS the declaration, pair for pair and in
+  # order, is scripts/tests/collector-redaction-derived.sh's job.
+  - it: names all six redaction families in the rendered config
     set:
       telemetryCollector.enabled: true
     template: templates/telemetry-collector-configmap.yaml
@@ -398,13 +417,23 @@ tests:
           path: metadata.name
           value: tracebloc-node-agents
 
-  - it: still skips the namespace when neither tenant is enabled
+  # THE NEGATIVE HALF MOVED (backend#2400). It used to be "no tenant, no
+  # namespace", and that is no longer true: the token Role and RoleBinding occupy
+  # this namespace with no flag of their own, so the namespace is unconditional
+  # and a tenant predicate over it would be a constant `true` wearing a question
+  # mark. What still has to be pinned is the thing the old assertion was really
+  # protecting — that `nodeAgents.namespace.create` and the release-namespace
+  # collision check both still bite. Widening the namespace gate to a literal
+  # `always` reddens this.
+  - it: still skips the namespace when the operator manages it out of band
     set:
       resourceMonitor: false
+      nodeAgents:
+        namespace:
+          create: false
+          name: pre-existing-node-agents
     template: templates/node-agents-namespace.yaml
     asserts:
-      # The negative half. Without it the gate could be widened to "always" and
-      # the test above would still pass — which is the vacuity this bar rejects.
       - hasDocuments:
           count: 0
 
@@ -604,17 +633,51 @@ tests:
   # The cross-document invariant (a DaemonSet-mutating Role must exist whenever a
   # DaemonSet does) is asserted in scripts/tests/node-agents-tenancy.sh, which
   # helm-unittest cannot express. These pin the per-template half.
-  - it: grants auto-upgrade its node-agents Role with ONLY the Collector enabled
+  # AUTO-UPGRADE IS NO LONGER A WITNESS FOR THE HELPER (backend#2400, Bugbot on
+  # #801) — it stopped reading it. auto-upgrade re-applies the WHOLE chart, so its
+  # reach has to follow "does the chart put anything in that namespace", which is
+  # now unconditional; the helper answers "does a POD run there", which is a
+  # different question and the one image-refresh below still asks. While it was
+  # gated, `resourceMonitor: false` with the Collector off left the token
+  # Role/RoleBinding in a namespace auto-upgrade could not write, so the next
+  # hourly tick would 403 and ROLL BACK — the expensive form of backend#953's
+  # failure mode, and no later chart could land on that edge either.
+  #
+  # Every column, because the property is that no configuration removes the reach.
+  - it: keeps auto-upgrade's node-agents Role in every tenant configuration
+    set:
+      resourceMonitor: false
+      telemetryCollector.enabled: false
+    template: templates/auto-upgrade-rbac.yaml
+    asserts:
+      # 7 = 5 release-namespace documents plus the node-agents Role/RoleBinding
+      # PAIR. The pair is what `helm upgrade --atomic --wait` needs.
+      - hasDocuments:
+          count: 7
+
+  - it: keeps auto-upgrade's node-agents Role with only the Collector enabled
     set:
       resourceMonitor: false
       telemetryCollector.enabled: true
     template: templates/auto-upgrade-rbac.yaml
     asserts:
-      # 7 vs the 5 below: the node-agents Role/RoleBinding PAIR is the delta, and
-      # the pair is what `helm upgrade --atomic --wait` needs — without it that
-      # tick 403s and ROLLS BACK, the expensive form of backend#953's failure mode.
       - hasDocuments:
           count: 7
+
+  # The condition that IS still load-bearing here: when the two namespaces
+  # coincide the release-namespace Role already covers everything, so the pair
+  # would be redundant. Without this, the gate could be deleted outright and the
+  # two above would still pass.
+  - it: drops auto-upgrade's node-agents Role when node-agents IS the release namespace
+    set:
+      resourceMonitor: false
+      nodeAgents:
+        namespace:
+          name: tracebloc
+    template: templates/auto-upgrade-rbac.yaml
+    asserts:
+      - hasDocuments:
+          count: 5
 
   - it: grants image-refresh its node-agents Role with ONLY the Collector enabled
     set:
@@ -626,17 +689,20 @@ tests:
           count: 5
 
   # The negative half, so widening the predicate to a constant `true` cannot make
-  # the two above pass for free — which is exactly what a mutation showed it does.
-  - it: grants neither Role when the namespace has no tenant at all
+  # the positive pass for free — which is exactly what a mutation showed it does.
+  # ON IMAGE-REFRESH, not auto-upgrade: after backend#2400 auto-upgrade renders its
+  # node-agents pair in every configuration, so it can no longer witness the
+  # predicate in either direction. image-refresh still reads it, and should — it
+  # patches DaemonSets, and there are none.
+  - it: grants image-refresh no node-agents Role when the namespace has no pod tenant
     set:
       resourceMonitor: false
-    template: templates/auto-upgrade-rbac.yaml
+      telemetryCollector.enabled: false
+    template: templates/image-refresh-rbac.yaml
     asserts:
-      # 5, i.e. 7 minus the node-agents pair. Paired with the positive above so
-      # widening the predicate to a constant `true` reddens THIS one — a mutation
-      # confirmed it does.
+      # 3, i.e. 5 minus the node-agents pair.
       - hasDocuments:
-          count: 5
+          count: 3
 
   # THE `--reuse-values` NIL TRAP, on the predicate itself rather than five times
   # over. A bare `.Values.telemetryCollector.enabled` throws "nil pointer
@@ -652,13 +718,15 @@ tests:
     set:
       telemetryCollector: null
       resourceMonitor: false
-    template: templates/auto-upgrade-rbac.yaml
+    template: templates/image-refresh-rbac.yaml
     asserts:
-      # 5 = the render minus the node-agents pair: no tenant, so no Role there.
+      # 3 = the render minus the node-agents pair: no pod tenant, so no Role there.
       # Reaching this number at all means the predicate evaluated without
-      # throwing, which is the property.
+      # throwing, which is the property. Moved off auto-upgrade with the two above,
+      # for the same reason: it no longer reads the predicate, so it could reach
+      # its number without ever evaluating it.
       - hasDocuments:
-          count: 5
+          count: 3
 
   # ── the two host paths are asymmetric on purpose ────────────────────────────
   - it: fails the pod when the kubelet log path is absent, but self-creates the queue
@@ -730,21 +798,67 @@ tests:
           path: rules[1].resourceNames
           content: tracebloc-telemetry-token
 
-  - it: renders no token RBAC when the Collector is off
+  # THE GATE THAT WAS HERE IS THE HALF THAT MADE THE FIX FAIL SOFT (backend#2400).
+  # `{{- if $tcTok.enabled }}` meant jobs-manager could hold the Secret's
+  # coordinates and still be 403'd on the write — and `sync_telemetry_token_secret`
+  # logs and returns False rather than raising, so that produces a green release,
+  # a healthy jobs-manager, and no Secret. Of the three gates, this is the one
+  # whose omission would have looked like a fix.
+  - it: grants the token RBAC even when the Collector is off, so it can be turned on
     template: templates/telemetry-token-rbac.yaml
     asserts:
-      # The negative half, so the positive above cannot pass for free.
       - hasDocuments:
-          count: 0
+          count: 2
+
+  # Rendered with the SAME least privilege as when the Collector is on — this is
+  # not a broader standing grant bought to unblock the bootstrap. Split out because
+  # `documentIndex` scopes a whole test, not one assertion.
+  - it: keeps the off-state Role as narrow as the on-state one
+    template: templates/telemetry-token-rbac.yaml
+    documentIndex: 0
+    asserts:
+      - equal:
+          path: kind
+          value: Role
+      - lengthEqual:
+          path: rules
+          count: 2
+      - contains:
+          path: rules[0].verbs
+          content: create
+      - contains:
+          path: rules[1].resourceNames
+          content: tracebloc-telemetry-token
+      - contains:
+          path: rules[1].verbs
+          content: patch
+
+  - it: binds the off-state Role to the ServiceAccount that does the writing
+    template: templates/telemetry-token-rbac.yaml
+    documentIndex: 1
+    asserts:
+      - equal:
+          path: kind
+          value: RoleBinding
+      # The writer runs in the RELEASE namespace; the Role is in the node-agents
+      # one. A binding that named the wrong subject namespace would 403 exactly the
+      # way the missing Role did, and just as quietly.
+      - equal:
+          path: subjects[0].namespace
+          value: tracebloc
 
   - it: survives an explicit null telemetryCollector
     set:
       telemetryCollector: null
     template: templates/telemetry-token-rbac.yaml
     asserts:
-      # The `helm upgrade --reuse-values` trap, on the new template too.
+      # The `helm upgrade --reuse-values` trap. It bites HARDER now than when this
+      # template was gated: an operator upgrading from a chart that predates the
+      # key used to skip the file entirely, and now renders it, so
+      # `$tcTok.tokenSecret` is dereferenced on a value that may be an explicit
+      # null. Reaching two documents at all is the property.
       - hasDocuments:
-          count: 0
+          count: 2
 
   - it: passes the Secret coordinates to the container that actually writes it
     set:
@@ -781,16 +895,46 @@ tests:
             name: TELEMETRY_TOKEN_SECRET_NAME
             value: tracebloc-telemetry-token
 
-  - it: passes no Secret coordinates when the Collector is off
+  # The Secret is the daemonset's PRECONDITION, so it cannot be conditional on the
+  # daemonset (backend#2400). Asserted on all three variables rather than one: the
+  # reader refuses to guess a missing name and logs a misconfiguration instead of
+  # writing, so two-of-three is the same outcome as none.
+  - it: passes the Secret coordinates even when the Collector is off
     template: templates/jobs-manager-deployment.yaml
     asserts:
-      # The reader treats an absent namespace as "not deployed" and makes no API
-      # call at all, so this is the switch that keeps a default install inert.
-      - notContains:
+      - contains:
           path: spec.template.spec.containers[0].env
           content:
             name: TELEMETRY_TOKEN_SECRET_NAMESPACE
             value: tracebloc-node-agents
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: TELEMETRY_TOKEN_SECRET_NAME
+            value: tracebloc-telemetry-token
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: TELEMETRY_TOKEN_SECRET_KEY
+            value: token
+      # Still only on the container that runs the writer. The wrong-container
+      # mistake is silent in both directions and does not stop being possible
+      # because the gate went away.
+      - notContains:
+          path: spec.template.spec.containers[1].env
+          content:
+            name: TELEMETRY_TOKEN_SECRET_NAME
+            value: tracebloc-telemetry-token
+
+  # The bootstrap wiring is ungated; the WORKLOAD is not. If these ever stop being
+  # different questions, a default install puts a DaemonSet on every customer node.
+  - it: still ships no Collector workload when the wiring is present but the flag is off
+    templates:
+      - templates/telemetry-collector-daemonset.yaml
+      - templates/telemetry-collector-configmap.yaml
+    asserts:
+      - hasDocuments:
+          count: 0
 
   # ── the Class A lists cannot silently shrink (backend#2341) ────────────────
   # Bugbot High on the client#789 promotion. Its stated mechanism — a partial

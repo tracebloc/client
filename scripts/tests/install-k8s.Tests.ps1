@@ -1627,6 +1627,10 @@ Describe "Envelope contract golden vectors (backend#2220)" {
     $script:TbEnvelopeOverheadMemBytes | Should -Be $script:Contract.overhead.memory_bytes
     $script:TbEnvelopeFloorCpuMilli    | Should -Be $script:Contract.floor.cpu_millicores
     $script:TbEnvelopeFloorMemBytes    | Should -Be $script:Contract.floor.memory_bytes
+    # backend#2221 -- the VM beneath the node containers.
+    $script:TbEnvelopeVmReserveMemBytes | Should -Be $script:Contract.vm_reserve.memory_bytes
+    $script:TbEnvelopeNodeMinCpuMilli   | Should -Be $script:Contract.topology.per_node_minimum.cpu_millicores
+    $script:TbEnvelopeNodeMinMemBytes   | Should -Be $script:Contract.topology.per_node_minimum.memory_bytes
   }
 
   It "every single-node golden vector replays" {
@@ -1672,6 +1676,105 @@ Describe "Envelope contract golden vectors (backend#2220)" {
       }
     }
     $failures -join "`n" | Should -BeNullOrEmpty
+  }
+
+  It "every MULTI-NODE golden vector replays (incl. the cordoned one)" {
+    # backend#2237. Until this existed the ps1 replayed only vectors.single_node,
+    # so the contract's multi_node block -- the ANCHOR_LARGEST selection rule,
+    # and one-cordoned-out with it -- was asserted on the bash side ONLY. The
+    # bats twin has replayed these all along; PowerShell simply never read them,
+    # which is how the ps1 could ignore spec.unschedulable while its suite was
+    # entirely green.
+    #
+    # Node lines are built from the contract's OWN node list, cordoned entries
+    # included, because the skip is the code's job to apply. The generator used
+    # to pre-filter them for the bash table and that is exactly what made the
+    # cordoned vector inert; rebuilding the filter here would reproduce the bug
+    # in the other language.
+    Mock helm { $global:LASTEXITCODE = 1; "" }
+    @($script:Contract.vectors.multi_node).Count | Should -BeGreaterThan 0
+
+    $failures = @()
+    foreach ($v in $script:Contract.vectors.multi_node) {
+      # The three fields kubectl's jsonpath emits. Unschedulable is omitempty,
+      # so a live node contributes an empty third field.
+      $nodeLines = @(
+        foreach ($n in $v.nodes) {
+          $flag = if ($n.unschedulable) { "true" } else { "" }
+          "$($n.cpu) $($n.memory) $flag"
+        }
+      )
+      $exp  = $v.anchored.largest.expected
+      $want = "cpu=$($exp.render_gi.cpu),memory=$($exp.render_gi.memory)"
+
+      $script:TbTrainingUndersized    = $false
+      $script:TbTrainingUnschedulable = $false
+      Mock kubectl {
+        if ($args -contains "--request-timeout=10s") {
+          $global:LASTEXITCODE = 0; $nodeLines
+        } else { $global:LASTEXITCODE = 1; "" }
+      }.GetNewClosure()
+
+      $got = Get-TrainingResources
+      if ($got -ne $want) {
+        $failures += "$($v.label) [$($nodeLines -join ' | ')]: want '$want' got '$got'"
+      }
+    }
+    $failures -join "`n" | Should -BeNullOrEmpty
+  }
+
+  It "a cordoned node never takes the anchor, whichever node it is" {
+    # The named regression for backend#2237, kept separate from the replay above
+    # so the failure says WHAT broke rather than which golden row moved.
+    #
+    # Both directions on purpose: a filter that simply dropped the largest node
+    # would satisfy the first assertion and be completely wrong. The second
+    # pins that a cordoned SMALL node changes nothing.
+    Mock helm { $global:LASTEXITCODE = 1; "" }
+
+    Mock kubectl {
+      if ($args -contains "--request-timeout=10s") {
+        $global:LASTEXITCODE = 0; @("16 64Gi true", "4 16Gi ")
+      } else { $global:LASTEXITCODE = 1; "" }
+    }
+    Get-TrainingResources | Should -Be "cpu=3,memory=13Gi"
+
+    Mock kubectl {
+      if ($args -contains "--request-timeout=10s") {
+        $global:LASTEXITCODE = 0; @("16 64Gi ", "4 16Gi true")
+      } else { $global:LASTEXITCODE = 1; "" }
+    }
+    Get-TrainingResources | Should -Be "cpu=15,memory=61Gi"
+  }
+
+  It "every node cordoned reads as UNMEASURED, not as too small" {
+    # The fail-safe direction. A fully-cordoned cluster must take the same
+    # branch as an unreadable one -- keep the literal, set no warning flags.
+    # Reporting `undersized` here would tell an operator their hardware is too
+    # small when the real cause is a cordon they can undo in one command.
+    Mock helm { $global:LASTEXITCODE = 1; "" }
+    Mock kubectl {
+      if ($args -contains "--request-timeout=10s") {
+        $global:LASTEXITCODE = 0; @("16 64Gi true", "8 32Gi true")
+      } else { $global:LASTEXITCODE = 1; "" }
+    }
+    Get-TrainingResources | Should -Be "cpu=2,memory=8Gi"
+    [bool]$script:TbTrainingUndersized    | Should -BeFalse
+    [bool]$script:TbTrainingUnschedulable | Should -BeFalse
+  }
+
+  It "an explicit 'false' third field is schedulable, not cordoned" {
+    # Value-domain check (backend#1729 rule 6): Unschedulable is omitempty so the
+    # field is normally absent or 'true', but keying on non-emptiness instead of
+    # on 'true' would make an API server that serialises `false` drop every node
+    # from sizing -- silent and total.
+    Mock helm { $global:LASTEXITCODE = 1; "" }
+    Mock kubectl {
+      if ($args -contains "--request-timeout=10s") {
+        $global:LASTEXITCODE = 0; @("8 32Gi false")
+      } else { $global:LASTEXITCODE = 1; "" }
+    }
+    Get-TrainingResources | Should -Be "cpu=7,memory=29Gi"
   }
 
   It "ANCHOR_LARGEST ties break on cpu, not memory — and the bash twin agrees" {
@@ -1904,6 +2007,109 @@ Describe "Envelope contract golden vectors (backend#2220)" {
       } else { $global:LASTEXITCODE = 1; "" }
     }
     Get-TrainingResources | Should -Be "cpu=2,memory=8Gi"
+  }
+}
+
+Describe "Topology contract golden vectors (backend#2221)" {
+  # The PowerShell half of the topology parity. scripts/tests/
+  # install-client-helm.bats replays the SAME contract rows through the bash
+  # twin _honest_topology, so a row added upstream forces both languages to
+  # answer it -- and both return a STRING, so the two are compared
+  # byte-for-byte rather than through two different shapes.
+  #
+  # Get-HonestTopology is pure arithmetic over two numbers: no docker, no
+  # kubectl, no branching on cluster state. So the contract vectors are the
+  # right parity mechanism for it. (installer_parity.json exists for CONTROL
+  # FLOW -- every backend#2220 divergence lived in a state that was not a clean
+  # measurement. The eventual CALLER of this function belongs there, because it
+  # will shell out to docker and branch; the arithmetic itself does neither.)
+
+  BeforeAll {
+    $script:TopologyContract =
+      Get-Content (Join-Path $PSScriptRoot "fixtures/envelope_contract.json") -Raw |
+      ConvertFrom-Json
+  }
+
+  It "the vendored contract carries topology vectors" {
+    @($script:TopologyContract.vectors.topology).Count | Should -BeGreaterThan 0
+  }
+
+  It "per_node_minimum is overhead + floor, not a fourth constant" {
+    # Recorded in the contract so this file and its bash twin can embed it
+    # without doing arithmetic on JSON -- but DERIVED. A recorded derivation
+    # nobody checks is just a fourth constant waiting to rot, which is the
+    # duplication backend#2220 spent seven PRs deleting. The generator refuses a
+    # stale one; this is the in-suite mirror.
+    $c = $script:TopologyContract
+    $c.topology.per_node_minimum.cpu_millicores |
+      Should -Be ($c.overhead.cpu_millicores + $c.floor.cpu_millicores)
+    $c.topology.per_node_minimum.memory_bytes |
+      Should -Be ($c.overhead.memory_bytes + $c.floor.memory_bytes)
+  }
+
+  It "every topology golden vector replays" {
+    $failures = @()
+    foreach ($v in $script:TopologyContract.vectors.topology) {
+      # $null expected means the VM was unreadable -- "I cannot answer", which a
+      # caller must never read as one node.
+      $want = if ($null -eq $v.expected) {
+        $null
+      } else {
+        "nodes=$($v.expected.nodes),cap=$($v.expected.node_memory_cap_bytes)," +
+        "cpu_honest=$([int][bool]$v.expected.cpu_honest),viable=$([int][bool]$v.expected.viable)"
+      }
+      $got = Get-HonestTopology -VmCpu $v.vm_cpu -VmMemory $v.vm_memory `
+                                -RequestedNodes ([int]$v.requested_nodes)
+      if ($got -ne $want) {
+        $failures += "$($v.label): want '$want' got '$got'"
+      }
+    }
+    $failures -join "`n" | Should -BeNullOrEmpty
+  }
+
+  It "an unreadable VM returns null, not a default topology" {
+    Get-HonestTopology -VmCpu "eight" -VmMemory "lots" -RequestedNodes 2 |
+      Should -BeNullOrEmpty
+  }
+
+  It "fewer than one requested node is refused" {
+    # A caller bug, not a machine state. The bash twin exits non-zero with no
+    # output for the same input.
+    Get-HonestTopology -VmCpu "8" -VmMemory "17179869184" -RequestedNodes 0 |
+      Should -BeNullOrEmpty
+  }
+
+  It "nodes x cap never exceeds the usable VM" {
+    # The invariant the whole ticket exists to establish, as a property across
+    # VM sizes rather than on the hand-picked rows above. Uncapped k3d violates
+    # sum(node capacity) <= VM by exactly the node count; nothing this function
+    # recommends may.
+    $failures = @()
+    foreach ($gib in 4, 5, 6, 7, 8, 11, 12, 16, 24, 32, 48, 64) {
+      $bytes  = [long]$gib * 1GB
+      $usable = [long][math]::Max([long]0, $bytes - $script:TbEnvelopeVmReserveMemBytes)
+      foreach ($req in 1, 2, 3, 4, 8) {
+        $got = Get-HonestTopology -VmCpu "16" -VmMemory "$bytes" -RequestedNodes $req
+        if ($null -eq $got) { $failures += "${gib}GiB/${req}: unexpected null"; continue }
+        $nodes = [long]($got -replace '^nodes=(\d+),.*$', '$1')
+        $cap   = [long]($got -replace '^.*,cap=(\d+),.*$', '$1')
+        if (($nodes * $cap) -gt $usable) {
+          $failures += "${gib}GiB/${req}: $nodes x $cap > $usable usable"
+        }
+        if ($nodes -lt 1 -or $nodes -gt $req) {
+          $failures += "${gib}GiB/${req}: $nodes nodes out of range"
+        }
+      }
+    }
+    $failures -join "`n" | Should -BeNullOrEmpty
+  }
+
+  It "a stock macOS Docker VM cannot host the shipped two-node default" {
+    # The measured case, and the reason this is not a future multi-node
+    # concern: the client defaults to SERVERS=1 AGENTS=1, so every CPU-only
+    # edge asks for exactly this and cannot have it.
+    Get-HonestTopology -VmCpu "10" -VmMemory "8321712128" -RequestedNodes 2 |
+      Should -Be "nodes=1,cap=7247970304,cpu_honest=1,viable=1"
   }
 }
 

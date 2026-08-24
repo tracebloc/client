@@ -85,10 +85,15 @@ tests:
           path: spec.template.spec.containers[1].resources.limits.memory
           value: 512Mi
 
+  # SELECTED BY NAME, NOT BY POSITION. This was `env[0]`, and `env[0]` was
+  # CLIENT_ID only for as long as nothing was ever prepended — which stopped being
+  # true when backend#2400 ungated the telemetry token coordinates that render
+  # above it. A positional assertion in a list the chart appends to is a test that
+  # changes what it means without changing what it says.
   - it: should reference secret via helper
     asserts:
       - equal:
-          path: spec.template.spec.containers[0].env[0].valueFrom.secretKeyRef.name
+          path: spec.template.spec.containers[0].env[?(@.name=="CLIENT_ID")].valueFrom.secretKeyRef.name
           value: RELEASE-NAME-secrets
 
   - it: should use docker.io registry by default
@@ -293,10 +298,13 @@ tests:
 
   # backend#664 (Utilization Ladder L0, supersedes the backend#745 pin): with
   # no operator value the chart must NOT inject RESOURCE_REQUESTS /
-  # RESOURCE_LIMITS — an omitted var is what lets jobs-manager size the
-  # training-job envelope from node allocatable. Older client-runtime images
-  # fall back to their built-in cpu=2,memory=8Gi (the exact literal the chart
-  # used to inject), so omission is behavior-identical on any pre-#664 image.
+  # RESOURCE_LIMITS. Omitting them is what lets jobs-manager choose — which
+  # today means its built-in cpu=2,memory=8Gi literal (the exact literal the
+  # chart used to inject, so omission is behavior-identical on any pre-#664
+  # image), and means the node-allocatable derivation only where the operator
+  # has also opted in via DERIVE_JOB_ENVELOPE (backend#2167, backend#2250).
+  # This block asserts the omission; the DERIVE_JOB_ENVELOPE cases below assert
+  # the gate that decides what the omission resolves to.
   # Assert absence on BOTH containers that used to receive it
   # (api + pods-monitor).
   - it: omits spawned-job RESOURCE_REQUESTS/LIMITS by default (jobs-manager derives from node)
@@ -335,6 +343,99 @@ tests:
           path: spec.template.spec.containers[1].env
           content: {name: RESOURCE_PROVENANCE}
           any: true
+
+  # backend#2250: DERIVE_JOB_ENVELOPE is the gate on the L0 node-derived
+  # envelope. It has no dedicated template block on purpose — it carries no
+  # chart-side default and no derived value, so it rides the generic
+  # .Values.env passthrough exactly as GPU_VISIBLE_DEVICES does. These cases
+  # exist because that is precisely the wiring nobody could verify before: the
+  # flag was readable only by jobs_manager.py, named in no chart file, so
+  # "expose the flag" is not done until a test proves the value reaches the
+  # container. Asserted on BOTH containers — the api container is the one that
+  # runs jobs_manager.py, and pods-monitor is kept symmetric.
+  - it: omits DERIVE_JOB_ENVELOPE by default (the derive path stays gated off)
+    asserts:
+      - notContains:
+          path: spec.template.spec.containers[0].env
+          content: {name: DERIVE_JOB_ENVELOPE}
+          any: true
+      - notContains:
+          path: spec.template.spec.containers[1].env
+          content: {name: DERIVE_JOB_ENVELOPE}
+          any: true
+
+  - it: passes DERIVE_JOB_ENVELOPE through to both containers when set
+    set:
+      env:
+        DERIVE_JOB_ENVELOPE: "true"
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: DERIVE_JOB_ENVELOPE
+            value: "true"
+          count: 1
+      - contains:
+          path: spec.template.spec.containers[1].env
+          content:
+            name: DERIVE_JOB_ENVELOPE
+            value: "true"
+          count: 1
+
+  - it: emits an explicit off value rather than swallowing it
+    # "false" is not the same as unset to a reader debugging an edge: it says
+    # someone considered the gate and declined. The passthrough range skips
+    # FALSY values, and a non-empty string is truthy to Helm, so "false"
+    # survives — the assertion pins that, because the range's `$value` guard
+    # makes it a real question rather than an obvious one.
+    set:
+      env:
+        DERIVE_JOB_ENVELOPE: "false"
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: DERIVE_JOB_ENVELOPE
+            value: "false"
+          count: 1
+
+  - it: drops an empty DERIVE_JOB_ENVELOPE instead of emitting a blank gate
+    # "" is off to jobs-manager either way, so both shapes are correct at
+    # runtime; this pins WHICH one the chart produces (the passthrough's falsy
+    # guard drops it) so a future template change cannot flip it unnoticed.
+    set:
+      env:
+        DERIVE_JOB_ENVELOPE: ""
+    asserts:
+      - notContains:
+          path: spec.template.spec.containers[0].env
+          content: {name: DERIVE_JOB_ENVELOPE}
+          any: true
+
+  - it: keeps DERIVE_JOB_ENVELOPE and an explicit envelope independent
+    # The gate is inert when RESOURCE_* is set (jobs-manager never reaches the
+    # derive branch), but the chart must still ship both values untouched —
+    # silently dropping the flag here would hide the operator's intent from
+    # anyone reading the Deployment, and the runtime, not the chart, owns the
+    # precedence rule.
+    set:
+      env:
+        DERIVE_JOB_ENVELOPE: "true"
+        RESOURCE_REQUESTS: "cpu=4,memory=16Gi"
+        RESOURCE_LIMITS: "cpu=4,memory=16Gi"
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: DERIVE_JOB_ENVELOPE
+            value: "true"
+          count: 1
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: RESOURCE_REQUESTS
+            value: "cpu=4,memory=16Gi"
+          count: 1
 
   - it: defaults RESOURCE_PROVENANCE to unknown when the envelope is set without it
     # The pre-#2220 release shape. "unknown" is the honest answer, and consumers
@@ -714,6 +815,44 @@ tests:
                 name: RELEASE-NAME-secrets
                 key: TB_INGEST_PASSWORD
 
+  # backend#1528 S3: the bootstrap re-parent env (edgeuser -> root for the mint
+  # DDL) is flag-gated on bootstrapDbReparent so a default install is
+  # byte-identical. DB_BOOTSTRAP_USER/PASSWORD render together (both-or-neither),
+  # only on jobs-manager (the sole minter).
+  - it: bootstrap re-parent env absent by default (byte-for-byte off)
+    asserts:
+      - notContains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: DB_BOOTSTRAP_USER
+            value: "root"
+      - notContains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: DB_BOOTSTRAP_PASSWORD
+            valueFrom:
+              secretKeyRef:
+                name: RELEASE-NAME-secrets
+                key: DB_BOOTSTRAP_PASSWORD
+
+  - it: bootstrap re-parent env wired when bootstrapDbReparent is on
+    set:
+      bootstrapDbReparent: true
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: DB_BOOTSTRAP_USER
+            value: "root"
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: DB_BOOTSTRAP_PASSWORD
+            valueFrom:
+              secretKeyRef:
+                name: RELEASE-NAME-secrets
+                key: DB_BOOTSTRAP_PASSWORD
+
   # -------------------------------------------------------------------------
   # Readiness probe — backend#1779
   #
@@ -721,26 +860,56 @@ tests:
   # container Ready as soon as it was running and `kubectl rollout status`
   # reported success over a crash-loop (backend#1723, 2026-08-11).
   #
+  # The probe is `httpGet: /healthz`, NOT `tcpSocket: 8080`. It shipped as a
+  # TCP connect (client#699) only because `/healthz` was an unconditional
+  # `200 {"status":"ok"}` at the time and so could not go red;
+  # client-runtime#327 replaced it with `_healthz_report`, which 503s when
+  # authz_mount / schema / metadata_db fail. Each of those is a state where
+  # the socket IS bound — a TCP connect passes and the Service routes
+  # POST /internal/submit-ingestion-run at a pod that answers 403 or 500.
+  # The `tcpSocket` must-not-exist assertion below is what stops a revert to
+  # the weaker signal passing as "there is still a readiness probe".
+  #
   # READINESS ONLY, on purpose. Both livenessProbe and startupProbe kill the
   # container when they fail, and jobs_manager.py deliberately survives a
   # failed ingestion-server start so Service Bus polling and training keep
-  # working. The two "must not exist" tests below are the guard on that.
+  # working. /healthz depending on MySQL makes that sharper, not softer. The
+  # two "must not exist" tests below are the guard on that.
   # -------------------------------------------------------------------------
 
-  - it: should give the api container a readiness probe on the ingestion port
+  - it: should give the api container a readiness probe on GET /healthz
     template: templates/jobs-manager-deployment.yaml
     asserts:
       - isNotEmpty:
           path: spec.template.spec.containers[0].readinessProbe
-      # The port is the assertion that matters: a probe pointed anywhere else
-      # would pass `isNotEmpty` while proving nothing about the server that
-      # serves POST /internal/submit-ingestion-run.
+      # Path AND port are both load-bearing, and each is asserted separately
+      # so a failure says which half broke. `isNotEmpty` on the probe alone
+      # would pass for a probe pointed anywhere at all.
       - equal:
-          path: spec.template.spec.containers[0].readinessProbe.tcpSocket.port
+          path: spec.template.spec.containers[0].readinessProbe.httpGet.path
+          value: /healthz
+      - equal:
+          path: spec.template.spec.containers[0].readinessProbe.httpGet.port
           value: 8080
       - equal:
           path: spec.template.spec.containers[0].readinessProbe.failureThreshold
           value: 3
+
+  - it: should NOT fall back to a bare TCP connect on 8080
+    template: templates/jobs-manager-deployment.yaml
+    asserts:
+      # The specific regression this ticket exists to prevent, named as its own
+      # case rather than folded into the httpGet test. The httpGet assertions
+      # above already redden on a straight revert, so this is not there to
+      # catch a case they miss — it is there so that WHEN they redden, one of
+      # the failures says `tcpSocket expected to NOT exists` instead of three
+      # `unknown path …httpGet.*` lines that read like a typo. A revert to the
+      # weaker signal should not have to be diagnosed.
+      #
+      # It is also the one assertion that is independent of what replaced the
+      # httpGet block, so it keeps holding if the probe is ever restructured.
+      - notExists:
+          path: spec.template.spec.containers[0].readinessProbe.tcpSocket
 
   - it: should give the readiness probe room for a slow auth + migration start
     template: templates/jobs-manager-deployment.yaml
@@ -755,6 +924,19 @@ tests:
           path: spec.template.spec.containers[0].readinessProbe.periodSeconds
           value: 10
 
+  - it: should let /healthz outlive a half-open MySQL before the probe times out
+    template: templates/jobs-manager-deployment.yaml
+    asserts:
+      # Derived from the endpoint, not chosen: ping_metadata_db passes
+      # connection_timeout=2 AND read_timeout=2 (sql_utils.py), so a MySQL
+      # that completes the handshake and then stops answering takes ~4s to
+      # raise. The 3s that was fine for a TCP connect would cut that off, and
+      # a probe timeout reports "timeout" where the 503 body would have named
+      # metadata_db. Both mark the pod NotReady; only one says why.
+      - equal:
+          path: spec.template.spec.containers[0].readinessProbe.timeoutSeconds
+          value: 5
+
   - it: should NOT give the api container any probe that restarts it (deliberate)
     template: templates/jobs-manager-deployment.yaml
     asserts:
@@ -767,7 +949,12 @@ tests:
       # CrashLoopBackOff. Readiness (remove from Service) is the correct
       # response; restarting a process that is still training models is not.
       #
-      # An earlier revision of this PR shipped a startupProbe with a 150s
+      # Now that readiness is GET /healthz, this matters MORE: _healthz_report
+      # pings MySQL, and its own docstring says the result is "safe for
+      # READINESS and wrong for LIVENESS or a startupProbe" — on either of
+      # those a MySQL blip would restart jobs-manager, not just deroute it.
+      #
+      # An earlier revision of client#699 shipped a startupProbe with a 150s
       # budget and had exactly that bug. This test is why it cannot come back
       # silently.
       - notExists:
@@ -775,13 +962,13 @@ tests:
       - notExists:
           path: spec.template.spec.containers[0].startupProbe
 
-  - it: should drop the port probe when the ingestion server is disabled
+  - it: should drop the probe when the ingestion server is disabled
     template: templates/jobs-manager-deployment.yaml
     set:
       # The runtime treats ANY non-empty value as "disabled"
       # (`not os.getenv("INGESTION_HTTP_DISABLED")`), so the chart must too —
-      # otherwise the probe would wait forever on a port nothing opens and the
-      # pod would never become Ready.
+      # otherwise the probe would GET a path nothing serves and the pod would
+      # never become Ready.
       env.INGESTION_HTTP_DISABLED: "1"
     asserts:
       - notExists:
@@ -795,7 +982,10 @@ tests:
       env.INGESTION_HTTP_DISABLED: ""
     asserts:
       - equal:
-          path: spec.template.spec.containers[0].readinessProbe.tcpSocket.port
+          path: spec.template.spec.containers[0].readinessProbe.httpGet.path
+          value: /healthz
+      - equal:
+          path: spec.template.spec.containers[0].readinessProbe.httpGet.port
           value: 8080
 
   - it: should not probe the pods-monitor sidecar (no HTTP surface)
