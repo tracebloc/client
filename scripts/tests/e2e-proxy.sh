@@ -32,6 +32,33 @@ PROXY_USER="tbuser"
 PROXY_PASS="tb-Pass.123"          # contains no '@', but the URL form does: user:pass@host
 PROXY_PORT="3128"
 SQUID_NAME="tb-squid"
+
+# Pinned by DIGEST, and declared ONCE for both squids in this file (the host
+# container below and the in-cluster Deployment further down) so the two cannot
+# drift apart.
+#
+# Why pinned at all: this job is a candidate required status check, and under a
+# floating tag an external registry push can redden it on an unrelated PR with
+# nothing in the diff to explain why. Squid especially, because the hand-written
+# squid.conf below names a path INSIDE the image,
+# /usr/lib/squid/basic_ncsa_auth, and the access-log assertions further down
+# parse squid's log format -- an image rebuild can move either, and the failure
+# would surface as an unexplained red check on someone else's PR.
+#
+# Why by digest and not just the tag: Canonical publishes this image only under
+# channel suffixes (_beta / _edge) -- there is no immutable plain 6.6-24.04 --
+# and those channel tags demonstrably move: 6.6-24.04_edge carries a different
+# digest, re-pushed months after 6.6-24.04_beta. A bare tag would therefore only
+# narrow the hole this pin exists to close. The tag is kept alongside the digest
+# for readability; the digest is what actually pins.
+#
+# Behaviour-preserving by construction: this digest is what ubuntu/squid:latest
+# already resolved to when the pin was taken, so the e2e run proves the pin
+# rather than a version migration. NOTE the tag name is Canonical's channel, not
+# the upstream version -- this image ships Squid 6.13, verified with
+# "squid -v" in the image itself. Moving to the 7.2-26.04 channel is a deliberate
+# upgrade with its own run, not a side effect of pinning.
+SQUID_IMAGE="ubuntu/squid:6.6-24.04_beta@sha256:6a097f68bae708cedbabd6188d68c7e2e7a38cedd05a176e1cc0ba29e3bbe029"
 WORK="$(mktemp -d)"
 
 # shellcheck source=/dev/null
@@ -74,7 +101,7 @@ docker rm -f "$SQUID_NAME" >/dev/null 2>&1 || true
 docker run -d --name "$SQUID_NAME" -p "${PROXY_PORT}:3128" \
   -v "$WORK/squid.conf:/etc/squid/squid.conf:ro" \
   -v "$WORK/passwords:/etc/squid/passwords:ro" \
-  ubuntu/squid:latest >/dev/null
+  "$SQUID_IMAGE" >/dev/null
 
 echo "── waiting for squid + verifying auth is enforced ──"
 ready=""
@@ -113,7 +140,12 @@ for _ in $(seq 1 30); do
 done
 
 echo "── pull + run a public workload — the node must fetch it THROUGH the proxy ──"
-kubectl run e2e-probe --image=nginx:alpine --restart=Never
+# Pinned by digest for the same required-check reason as SQUID_IMAGE above.
+# Nothing here asserts anything ABOUT nginx -- it is only a public image whose
+# pull has to traverse the proxy -- so the version itself is immaterial; what
+# matters is that an upstream rebuild cannot change what this check pulls. This
+# digest is what nginx:alpine already resolved to when the pin was taken.
+kubectl run e2e-probe --image=nginx:1.31.4-alpine@sha256:db35bfc6b2951e7f8a72db5db120288c127ffaeeb4a6d4b95a26fead017d5913 --restart=Never
 kubectl wait --for=condition=Ready pod/e2e-probe --timeout=180s
 kubectl get pods -o wide
 
@@ -203,7 +235,7 @@ spec:
           hostnames: ["${BACKEND_HOST}"]
       containers:
         - name: squid
-          image: ubuntu/squid:latest
+          image: ${SQUID_IMAGE}
           ports: [{ containerPort: 3128 }]
           # Gate rollout on squid actually LISTENING, so the probe pods below
           # don't race a not-yet-bound port (the "connect refused after 1ms").
@@ -261,7 +293,19 @@ spec:
       hostnames: ["${BACKEND_HOST}"]
   containers:
     - name: app
-      image: curlimages/curl:latest
+      # Pinned, and to the SAME tag as e2e_egress_positive_control's probe in
+      # lib/e2e-common.sh, so the suite's two curl probes cannot drift apart.
+      #
+      # Why: this job is a candidate required status check, and a floating tag
+      # lets an external registry's next push block a merge here with nothing in
+      # the diff to explain why. That exposure is a property of the whole job,
+      # not of this one line -- the squid and nginx images it also pulls were
+      # digest-pinned in client#814 (backend#2446). With those and this, every
+      # image the job pulls is pinned; none of them floats.
+      #
+      # Not a flake fix: latest and 8.20.0 were both measured under backend#2350
+      # and behave identically with respect to curl's negative DNS caching.
+      image: curlimages/curl:8.20.0
       env:
         - { name: HTTP_PROXY,  value: "${APP_PROXY_URL}" }
         - { name: HTTPS_PROXY, value: "${APP_PROXY_URL}" }
