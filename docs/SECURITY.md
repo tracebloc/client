@@ -601,7 +601,26 @@ If the customer enables the policy on a CNI that doesn't enforce (default EKS, F
 
 ### 8.8 DoS via resource exhaustion — **out of scope**
 
-A malicious model can allocate memory / consume CPU up to the pod's resource limits. `resources.limits` are always applied: `cpu=2,memory=8Gi` by default, or whatever the operator pins via `env.RESOURCE_REQUESTS`/`env.RESOURCE_LIMITS` (both installers write that pair, sized to the machine at install time). Sizing from node allocatable (75% with the same floors, backend#664) is available but gated OFF behind `env.DERIVE_JOB_ENVELOPE` and only consulted when the pair is unset (backend#2167, backend#2250). Whichever path applies, a limit is always set — this section does not depend on which one. A pod running at 100% of its limits is expected behavior for training; OOMKill or eviction is the Kubernetes-native response. The chart does not attempt to detect or prevent resource-intensive pathological inputs.
+A malicious model can consume resources up to whatever bound applies to each one. This section used to claim a single blanket property — *"`resources.limits` are always applied"* — which was **never true of disk** and, since backend#2418, is no longer true of CPU either. The honest statement is per resource:
+
+| Resource | Bound | Enforced by |
+|---|---|---|
+| **Memory** | Hard limit; `requests == limits` | cgroup `memory.max` → OOMKill. **Unchanged**, and load-bearing: this is what stops one tenant consuming another's memory |
+| **CPU** | Proportional share, **no ceiling**; ≥1/N under contention with N contenders | cgroup `cpu.weight` (backend#2418). N is bounded by the L4.1 concurrency cap (backend#2419), not by this section |
+| **Disk** | **Not bounded at all** | Nothing. There is no `ephemeral-storage` request or limit anywhere, and the resource grammar cannot express one — backend#2223 |
+
+Envelope provenance, for completeness: `cpu=2,memory=8Gi` by default, or whatever the operator pins via `env.RESOURCE_REQUESTS`/`env.RESOURCE_LIMITS` (both installers write that pair, sized to the machine at install time). Sizing from node allocatable is available but gated OFF behind `env.DERIVE_JOB_ENVELOPE` and only consulted when the pair is unset (backend#2167, backend#2250). The CPU row above describes the derive path; an operator-pinned `env.RESOURCE_LIMITS` is an explicit statement and still applies a hard CPU ceiling.
+
+**Why dropping the CPU ceiling does not widen the threat model.** A CPU quota looks like isolation and mostly is not:
+
+- **Memory is untouched.** The DoS vector that matters stays closed — a tenant cannot consume another's memory, OOM it, or exceed its own limit.
+- **Noisy-neighbour is bounded by construction, not by trust.** Equal weights give each of N contenders ≥1/N of CPU time whatever the code does. A quota bounds the *ceiling*; a weight bounds the *floor*, which is the property a victim actually needs.
+- **Eviction changes class, not exposure.** kubelet ranks memory-pressure eviction by usage *above* requests, and a pod whose memory request equals its need never exceeds it. `priority-class.yaml` already designates training pods the preemption victims, to protect mysql.
+- **Deliberate CPU-burning is charged, and the alignment is exact.** The compute budget meters `CPU_FLOPS_BENCHMARK × cpu_usage × time` — burning CPU is precisely what it bills. A tenant degrading a rival spends their own allocation and gets paused when it runs out (`experiment_utils.py` refuses a start at ≥99% of allocation and accumulates atomically under `select_for_update`).
+
+Rejected alternative, recorded: keeping `limits` at a generous fraction would have preserved the old sentence literally, but CPU quota throttles in **bursts** and multi-threaded processes suffer most — our pods run N dataloader workers plus a torch thread pool — so a ceiling reintroduces a fraction of the very problem backend#2418 exists to remove.
+
+A pod running at 100% of its memory limit is expected behavior for training; OOMKill or eviction is the Kubernetes-native response. The chart does not attempt to detect or prevent resource-intensive pathological inputs.
 
 ### 8.9 Cosign-bootstrap trust root on boxes without cosign — **security / operator**
 
