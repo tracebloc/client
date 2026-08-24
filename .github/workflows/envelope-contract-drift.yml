@@ -100,8 +100,17 @@ jobs:
         # which is the exact defect class backend#1729 is about. (Caught by
         # Bugbot on #803; the script now also treats a missing helm under `CI`
         # as an ERROR, so removing this step reddens rather than halves it.)
-        # Same action, same pin as drift-checks.yaml and helm-ci.yaml.
+        # Same action, same pin as drift-checks.yaml and helm-ci.yaml — and the
+        # `version` below is the half that makes that sentence true. Without it
+        # `azure/setup-helm` defaults to `latest`, so this job would render under
+        # Helm 4.x while the REQUIRED `Source-of-truth drift` path runs the same
+        # script under v3.15.4. A render comparison passing under a Helm the
+        # required path never uses is the "green having proved less than its name
+        # claims" failure this step exists to close. (@saqlainsyed007 + Bugbot on
+        # client#803, verified against all four sibling steps.)
         uses: azure/setup-helm@1a275c3b69536ee54be43f2070a358922e12c8d4 # v4.3.1
+        with:
+          version: v3.15.4
 
       - name: The rendered redaction floor matches the vendored declaration
         # Same reason, for the second contract: prove the in-repo half before
