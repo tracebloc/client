@@ -436,6 +436,17 @@ egressProxy:
 # backend#1908 lands content redaction. Widening `classAContainers` is not a
 # config tweak — it changes what leaves a customer's cluster.
 telemetryCollector:
+  # OFF BY DEFAULT, BUT THE TOKEN SECRET IS PROVISIONED ANYWAY (backend#2400), and
+  # that asymmetry is deliberate. The Collector's template REFUSES the release when
+  # its token Secret is absent, so the Secret has to be in place BEFORE this flag
+  # can be set — which it cannot be if writing it is conditional on this flag. That
+  # was a deadlock: no edge could enable the Collector at all.
+  #
+  # So jobs-manager always receives the Secret's coordinates and always holds the
+  # RBAC to write it, and flipping this to `true` on an edge that has re-
+  # authenticated at least once since upgrading is a one-step operation. A FRESH
+  # install with this already `true` is still refused, and correctly: jobs-manager
+  # has not run yet, so nothing has written the Secret.
   enabled: false
 
   # otel/opentelemetry-collector-contrib — `contrib`, not `core`, and the

@@ -85,10 +85,15 @@ tests:
           path: spec.template.spec.containers[1].resources.limits.memory
           value: 512Mi
 
+  # SELECTED BY NAME, NOT BY POSITION. This was `env[0]`, and `env[0]` was
+  # CLIENT_ID only for as long as nothing was ever prepended — which stopped being
+  # true when backend#2400 ungated the telemetry token coordinates that render
+  # above it. A positional assertion in a list the chart appends to is a test that
+  # changes what it means without changing what it says.
   - it: should reference secret via helper
     asserts:
       - equal:
-          path: spec.template.spec.containers[0].env[0].valueFrom.secretKeyRef.name
+          path: spec.template.spec.containers[0].env[?(@.name=="CLIENT_ID")].valueFrom.secretKeyRef.name
           value: RELEASE-NAME-secrets
 
   - it: should use docker.io registry by default

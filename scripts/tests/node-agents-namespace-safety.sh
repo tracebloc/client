@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 #
 #  node-agents-namespace-safety.sh — nothing lands in the node-agents namespace
-#  unless the chart also creates it (backend#1906, backend#2274).
+#  unless the chart also creates it AND can still apply it on the next upgrade
+#  (backend#1906, backend#2274, backend#2400).
 #
 #  WHY THIS EXISTS. #779's first Bugbot finding was a DaemonSet targeting a
 #  namespace the chart never created: `telemetryCollector.enabled: true` with
@@ -14,6 +15,25 @@
 #  combination, if any rendered resource declares the node-agents namespace, the
 #  Namespace object must render too. A template that forgets its gate fails here
 #  without anyone having to notice it was added.
+#
+#  AND A SECOND IMPLICATION, WITH THE SAME SHAPE (backend#2400, Bugbot on #801). A
+#  namespace that exists is not enough: auto-upgrade re-applies the WHOLE chart on
+#  an hourly tick, and its release-namespace grant does not reach outside it. So if
+#  a combination populates that namespace, some ServiceAccount from the RELEASE
+#  namespace must hold unrestricted rights there — otherwise the tick 403s and
+#  `--atomic --wait` ROLLS BACK, which is worse than not upgrading: no LATER chart
+#  can land on that edge either, and nothing about it is red until someone looks.
+#
+#  It is here rather than in its own file because it is the same question about the
+#  same namespace, computed from the same render, and because the first implication
+#  passing while the second fails is exactly what shipped: backend#2400 ungated the
+#  Collector's token Role and the namespace with it, and left auto-upgrade's reach
+#  gated on a predicate that no longer covered the occupants. One gate moved, its
+#  pair did not — which is the same failure backend#2400 itself was fixing.
+#
+#  DERIVED, not named. The applier is not identified by name: it is whichever
+#  ServiceAccount a RoleBinding in that namespace binds to a Role granting `*` on
+#  `*`. A check that looked for "auto-upgrade" would go quiet the day it is renamed.
 #
 #  NO LIST OF TEMPLATES, GATES OR HELPERS. Three hand-maintained lists have gone
 #  stale in this area in a week — most recently a comment in
@@ -99,6 +119,38 @@ if not targets:
 
 created = {d["metadata"]["name"] for d in docs if d.get("kind") == "Namespace"}
 
+
+def unrestricted(rules):
+    """A Role that can re-apply anything, including Roles and RoleBindings.
+
+    `*` verbs are what carry escalate/bind, without which re-applying an RBAC
+    object in that namespace is refused even by a holder of every named verb.
+    """
+    return any("*" in (r.get("apiGroups") or [])
+               and "*" in (r.get("resources") or [])
+               and "*" in (r.get("verbs") or [])
+               for r in (rules or []))
+
+
+def appliers_in(ns):
+    """ServiceAccounts from the RELEASE namespace holding unrestricted rights in
+    `ns`. Chased through the binding rather than matched by name."""
+    full = {d["metadata"]["name"] for d in docs
+            if d.get("kind") == "Role"
+            and d.get("metadata", {}).get("namespace") == ns
+            and unrestricted(d.get("rules"))}
+    out = set()
+    for d in docs:
+        if (d.get("kind") != "RoleBinding"
+                or d.get("metadata", {}).get("namespace") != ns
+                or (d.get("roleRef") or {}).get("name") not in full):
+            continue
+        for sub in d.get("subjects") or []:
+            if sub.get("kind") == "ServiceAccount" and sub.get("namespace") == release_ns:
+                out.add(sub.get("name"))
+    return out
+
+
 problems = []
 summary = []
 for ns in sorted(targets):
@@ -110,7 +162,16 @@ for ns in sorted(targets):
             f"create it: {inside} — their pods and bindings target a namespace that "
             "will not exist. Whatever renders them must be gated so it cannot "
             f"render unless {ns!r} does.")
-    summary.append(f"{ns}={'created' if ns in created else 'ABSENT'}({len(inside)})")
+    who = appliers_in(ns)
+    if inside and not who:
+        problems.append(
+            f"{len(inside)} resource(s) render into {ns!r} — {inside} — but no "
+            f"ServiceAccount from {release_ns!r} holds unrestricted rights there. "
+            "auto-upgrade re-applies the whole chart from the release namespace, so "
+            "its next `helm upgrade --atomic --wait` tick 403s on these and ROLLS "
+            "BACK; no later chart lands on that edge either, and nothing goes red")
+    summary.append(f"{ns}={'created' if ns in created else 'ABSENT'}"
+                   f"({len(inside)},applier={'+'.join(sorted(who)) or 'NONE'})")
 
 print(f"   {label:<34} " + "  ".join(summary))
 # A MACHINE-READABLE COUNT, not a number scraped back out of the display line. The
@@ -150,5 +211,5 @@ if [ "$populated" -eq 0 ]; then
   exit 2
 fi
 
-echo "  ok: every populated combination also creates the namespace ($populated of 4)"
+echo "  ok: every populated combination creates the namespace and keeps it appliable ($populated of 4)"
 echo "node-agents namespace safety: green"

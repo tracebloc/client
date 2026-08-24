@@ -320,11 +320,26 @@ spec:
           every variable would be set on a process that never reads them and the
           Collector would still get no token.
 
-          Absent when the Collector is off, and the reader treats that as "nothing
-          to do" without making a single API call.
+          SET WHETHER OR NOT THE COLLECTOR IS ENABLED (backend#2400). These were
+          gated on `telemetryCollector.enabled`, and that gate deadlocked the
+          feature on every edge in the fleet: the Collector's own template REFUSES
+          the release while the Secret is absent (telemetry-collector-daemonset.yaml),
+          and the Secret was absent precisely because these were gated. Nobody
+          could take the first step.
+
+          The Secret is a PRECONDITION of the flag, so it must be written BEFORE
+          the flag — which is exactly what it cannot be if it is conditional on it.
+          Ungated, enabling the Collector is one `--set` on an edge that already
+          has the Secret, and the daemonset's `fail` guard keeps its full strength
+          because its precondition is now reachable rather than unreachable.
+
+          THE COST, stated rather than hidden: one idempotent Secret write per
+          re-authentication on every edge, and a Secret sitting unused on edges
+          that never enable the Collector. That is already a supported state on
+          the reading side — the Collector mounts this Secret `optional: true`, so
+          present-or-absent is a case it is built for.
         */}}
         {{- $tcEnv := default (dict) .Values.telemetryCollector }}
-        {{- if $tcEnv.enabled }}
         {{- $tokEnv := default (dict) $tcEnv.tokenSecret }}
         - name: TELEMETRY_TOKEN_SECRET_NAMESPACE
           value: {{ .Values.nodeAgents.namespace.name | quote }}
@@ -332,7 +347,6 @@ spec:
           value: {{ $tokEnv.name | default "tracebloc-telemetry-token" | quote }}
         - name: TELEMETRY_TOKEN_SECRET_KEY
           value: {{ $tokEnv.key | default "token" | quote }}
-        {{- end }}
         - name: CLIENT_ID
           valueFrom:
             secretKeyRef:
