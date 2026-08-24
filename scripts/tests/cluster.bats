@@ -1235,3 +1235,50 @@ merge_setup() {                       # isolate HOME/KUBECONFIG from the real ma
   [[ "$output" == *"no /tracebloc-data bind mount"* ]] || return 1
   [[ "${output%%k3d cluster delete*}" == *"tracebloc delete --keep-data"* ]] || return 1
 }
+
+# ── fail-cgroupv1: gated on the k3s pin (backend#2422) ──────────────────────
+#
+# k8s 1.35 flipped the kubelet's failCgroupV1 default to true, so from k3s 1.35
+# the kubelet refuses to start on a cgroup v1/hybrid host — WSL2 (hybrid by
+# default) and RHEL 8 / CentOS 7 / Ubuntu 20.04. We pass the override
+# proactively, but ONLY from 1.31, because that is the release that ADDED the
+# flag: handing it to the 1.29.4 kubelet we pin today is an unknown flag and the
+# kubelet does not start. So the gate is not a nicety — an ungated version of
+# this line breaks every install on the current pin.
+
+@test "fail-cgroupv1: NOT passed on the currently pinned k3s (1.29.4 predates the flag)" {
+  K8S_VERSION="v1.29.4-k3s1"
+  run _create_new_cluster
+  [ "$status" -eq 0 ] || return 1
+  run mock_calls
+  [[ "$output" != *"fail-cgroupv1"* ]] || return 1
+}
+
+@test "fail-cgroupv1: passed from 1.31.0, the release that added the flag" {
+  K8S_VERSION="v1.31.0-k3s1"
+  run _create_new_cluster
+  [ "$status" -eq 0 ] || return 1
+  run mock_calls
+  [[ "$output" == *"--kubelet-arg=fail-cgroupv1=false@server:*"* ]] || return 1
+}
+
+# MUTATION ANCHOR. _version_lt reads a leading "v" as a non-numeric component,
+# i.e. 0 — so `_version_lt v1.36.3 1.31.0` is TRUE and the gate inverts. Drop the
+# `${K8S_VERSION#v}` strip in cluster.sh and this test reddens while the two above
+# still pass, which is exactly the silent failure it exists to catch: the flag
+# would quietly stop being emitted on the versions that actually need it.
+@test "fail-cgroupv1: passed on the 1.36 migration target (pins the leading-v strip)" {
+  K8S_VERSION="v1.36.3-k3s1"
+  run _create_new_cluster
+  [ "$status" -eq 0 ] || return 1
+  run mock_calls
+  [[ "$output" == *"fail-cgroupv1=false"* ]] || return 1
+}
+
+@test "fail-cgroupv1: unset K8S_VERSION does not emit the flag" {
+  K8S_VERSION=""
+  run _create_new_cluster
+  [ "$status" -eq 0 ] || return 1
+  run mock_calls
+  [[ "$output" != *"fail-cgroupv1"* ]] || return 1
+}

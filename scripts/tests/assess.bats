@@ -854,3 +854,12 @@ _use_real_runtime_probe() {
   run -1 _try_start_docker_desktop
   ! grep -qF "LAUNCHED" <<<"$output" || return 1
 }
+
+@test "_version_lt: a leading 'v' inverts the comparison — callers must strip it" {
+  # Documents the trap rather than the intent: "v1.36.3" parses its first
+  # component as non-numeric, which reads as 0, so it compares BELOW 1.31.0.
+  # Any version gate that forgets `${VAR#v}` therefore fails silently in the
+  # permissive direction. cluster.sh's fail-cgroupv1 gate depends on this.
+  _version_lt "v1.36.3" "1.31.0" || return 1     # the trap: TRUE, though 1.36 > 1.31
+  ! _version_lt "1.36.3" "1.31.0" || return 1    # stripped: correct
+}

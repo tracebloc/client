@@ -171,24 +171,12 @@ _assess_cli_present() {
   _assess_cli_bin >/dev/null
 }
 
-# _version_lt A B — true when dotted-numeric A < B. Pure and self-contained: no
-# `sort -V` (BSD sort predates it, and this must behave the same on macOS) and no
-# jq. Missing or non-numeric components read as 0, so "0.10" < "0.10.1" and a
-# pre-release suffix ("0.10.0-rc.1") compares as its base version.
-_version_lt() {
-  local a="${1%%-*}" b="${2%%-*}" i av bv
-  local -a _A _B
-  IFS=. read -r -a _A <<<"$a"
-  IFS=. read -r -a _B <<<"$b"
-  for ((i = 0; i < 3; i++)); do
-    av="${_A[i]:-0}"; bv="${_B[i]:-0}"
-    [[ "$av" =~ ^[0-9]+$ ]] || av=0
-    [[ "$bv" =~ ^[0-9]+$ ]] || bv=0
-    (( av < bv )) && return 0
-    (( av > bv )) && return 1
-  done
-  return 1
-}
+# _version_lt moved to common.sh (backend#2422): cluster.sh needs it to gate a
+# kubelet flag on the k3s pin, and assess.sh is sourced CONDITIONALLY by
+# install-k8s.sh (`[[ -f ]]`, for stale checkouts) while common.sh is not. A
+# second copy here would be the restated-rule defect, so there is exactly one.
+# assess.sh's callers get it because install-k8s.sh sources common.sh first and
+# the bats helper's `load_lib` chains common.sh.
 
 # _assess_cli_outdated — is the installed CLI below the floor the installer will
 # actively repair? (client#707)

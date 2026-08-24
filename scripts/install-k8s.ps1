@@ -3636,6 +3636,22 @@ function New-K3dCluster {
       "--wait"
     )
 
+    # cgroup v1 hosts (backend#2422). Kubernetes 1.35 flipped the kubelet's
+    # failCgroupV1 default to TRUE, so from k3s 1.35 the kubelet REFUSES TO START
+    # on a cgroup v1 or hybrid host. WSL2 defaults to HYBRID cgroups, which makes
+    # this the Windows path's problem specifically -- and k3s documents none of it,
+    # so the operator would see only a bare upstream kubelet message. Set it
+    # proactively; on a cgroup v2 host it is a no-op.
+    #
+    # GATED, and the gate is load-bearing: --fail-cgroupv1 was ADDED in kubelet
+    # 1.31, so passing it to the 1.29.4 kubelet we pin today would be an unknown
+    # flag and the kubelet would fail to start. Keep this in lockstep with the
+    # bash twin in scripts/lib/cluster.sh.
+    $k8sSemver = ($K8S_VERSION -replace '^v', '') -replace '[-+].*$', ''
+    if ([version]$k8sSemver -ge [version]'1.31.0') {
+      $k3dArgs += @("--k3s-arg", "--kubelet-arg=fail-cgroupv1=false@server:*")
+    }
+
     # backend#743: bind-mount the customer dataset volume at a distinct cluster
     # path so the chart's dataset PV points there while mysql + logs stay on the
     # local /tracebloc tree. No-op when unset.
