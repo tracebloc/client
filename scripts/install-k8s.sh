@@ -22,10 +22,14 @@
 #    K8S_VERSION=v1.29.4-k3s1   default: v1.29.4-k3s1 (pinned + validated; "latest" is UNSUPPORTED — see #547)
 #    K3D_VERSION=v5.9.0          default: v5.9.0  (k3d release tag; "latest" resolves at install time)
 #    HOST_DATA_DIR=~/.tracebloc  default: ~/.tracebloc
-#    TB_STORAGE_MODE=node-local  default: hostpath  (RFC-0003 Option C, flag-gated)
-#                                node-local stores datasets on k3s local-path INSIDE
-#                                the node — no ~/.tracebloc host dirs, wiped on cluster
-#                                delete; forces AGENTS=0 (single-node)
+#    TB_STORAGE_MODE=hostpath    default: node-local  (RFC-0003 Option C; D15 flip, client#456)
+#                                node-local (default) stores datasets on k3s local-path
+#                                INSIDE the node — no ~/.tracebloc host dirs, wiped on
+#                                cluster delete; forces AGENTS=0/SERVERS=1 (single-node).
+#                                Set TB_STORAGE_MODE=hostpath to keep datasets in
+#                                ~/.tracebloc on the host (survive cluster delete;
+#                                required for a HOST_DATASET_DIR network mount).
+#                                Linux/k3s path only — install-k8s.ps1 is hostpath-only.
 #    CLIENT_ENV=dev              optional; if not set, CLIENT_ENV is not added to env in values
 #    TRACEBLOC_FORCE_REINSTALL=1  skip the "already set up" stop-and-check gate
 #                                and re-run every step (same as --force/--reinstall)

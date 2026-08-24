@@ -341,7 +341,9 @@ The chart **does not transport data into the cluster** — it points at data alr
 
 ### Staging on a local (hostpath) install
 
-On a laptop install (`hostPath.enabled: true`, the default for the OS installers) `/data/shared/` is just a folder on your machine — the dataset dir is `HOST_DATA_DIR\data\<dataset>` on Windows, `$HOST_DATA_DIR/data/<dataset>` on macOS/Linux — so you stage a dataset by copying it there directly (no `kubectl cp` needed).
+On a **hostpath** laptop install (`hostPath.enabled: true`) `/data/shared/` is just a folder on your machine — the dataset dir is `HOST_DATA_DIR\data\<dataset>` on Windows, `$HOST_DATA_DIR/data/<dataset>` on macOS/Linux — so you stage a dataset by copying it there directly (no `kubectl cp` needed). This is the default on Windows (`install-k8s.ps1`), and on macOS/Linux when you opt in with `TB_STORAGE_MODE=hostpath`.
+
+Since the RFC-0003 D15 flip (client#456), the macOS/Linux (k3s) installer defaults to **node-local** storage instead: datasets live inside the k3d node on k3s `local-path` with no host `/data/shared/` folder, and are wiped by `cluster delete`. There, stage data with the `kubectl cp` pattern from the ingestor README rather than by copying into a host dir.
 
 Use **idempotent** commands so re-running the step (for example after the installer got re-run) never errors on an already-staged dataset:
 

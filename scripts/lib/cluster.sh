@@ -439,7 +439,7 @@ guard_leftover_data() {
   warn "Existing tracebloc data found under ${HOST_DATA_DIR}:"
   for d in "${found[@]}"; do hint "  • ${d}"; done
   hint "A fresh install would silently adopt it, so it would not really be fresh."
-  if [[ "${TB_STORAGE_MODE:-hostpath}" == "node-local" ]]; then
+  if [[ "${TB_STORAGE_MODE:-node-local}" == "node-local" ]]; then
     hint "node-local storage keeps data inside the cluster node — this ~/.tracebloc data would be stranded, not used."
   fi
 
@@ -447,7 +447,7 @@ guard_leftover_data() {
   if [[ -z "$action" ]]; then
     if _tty_usable; then
       prompt_header "How should the installer handle it?"
-      if [[ "${TB_STORAGE_MODE:-hostpath}" == "node-local" ]]; then
+      if [[ "${TB_STORAGE_MODE:-node-local}" == "node-local" ]]; then
         # node-local can't adopt the host data (no /tracebloc bind-mount) — the
         # cluster starts empty in-node — so don't offer "reuse = adopt" here (#367).
         hint "  [r] keep  — leave the existing data on disk, unused (node-local starts empty; it is NOT adopted)"
@@ -476,7 +476,7 @@ guard_leftover_data() {
       # does NOT adopt it (the cluster starts empty in-node), matching the
       # interactive reuse branch below (Bugbot).
       local reuse_desc="adopt the existing data"
-      [[ "${TB_STORAGE_MODE:-hostpath}" == "node-local" ]] && \
+      [[ "${TB_STORAGE_MODE:-node-local}" == "node-local" ]] && \
         reuse_desc="keep the data on disk, NOT adopted (node-local starts empty in-node)"
       error "Existing data found under ${HOST_DATA_DIR} and no choice was given (no terminal). Re-run with one of:
   --reuse-data                    ${reuse_desc}
@@ -488,7 +488,7 @@ guard_leftover_data() {
 
   case "$action" in
     reuse)
-      if [[ "${TB_STORAGE_MODE:-hostpath}" == "node-local" ]]; then
+      if [[ "${TB_STORAGE_MODE:-node-local}" == "node-local" ]]; then
         # node-local starts empty in-node — the host data is NOT adopted (RFC-0003
         # §4 / #367). Keep the files on disk but say so plainly, so "reuse" never
         # silently claims an adoption that node-local can't actually do.
@@ -552,7 +552,7 @@ create_cluster() {
   # node-local (RFC-0003 Option C): no host data dirs, no bind-mount, no chmod —
   # data lives on k3s local-path inside the node. Only the hostpath model needs
   # the pre-created world-writable ~/.tracebloc dirs.
-  if [[ "${TB_STORAGE_MODE:-hostpath}" == "node-local" ]]; then
+  if [[ "${TB_STORAGE_MODE:-node-local}" == "node-local" ]]; then
     log "Storage mode: node-local — datasets live inside the cluster node (k3s local-path), not ~/.tracebloc; they are wiped on 'cluster delete'."
   else
     _ensure_tracebloc_dirs
@@ -948,7 +948,7 @@ _check_existing_cluster_storage_mode() {
 
   local cluster_is_hostpath=false
   grep -qx '/tracebloc' <<<"$mounts" && cluster_is_hostpath=true
-  local want="${TB_STORAGE_MODE:-hostpath}"
+  local want="${TB_STORAGE_MODE:-node-local}"
 
   if [[ "$want" == "node-local" && "$cluster_is_hostpath" == true ]]; then
     echo ""
@@ -960,7 +960,7 @@ _check_existing_cluster_storage_mode() {
     error "Existing cluster's storage topology (hostpath) does not match TB_STORAGE_MODE=node-local — refusing to install onto a cluster with no matching StorageClass."
   elif [[ "$want" == "hostpath" && "$cluster_is_hostpath" == false ]]; then
     echo ""
-    warn "TB_STORAGE_MODE=hostpath (default), but the existing '$CLUSTER_NAME' cluster was built for node-local storage."
+    warn "TB_STORAGE_MODE=hostpath, but the existing '$CLUSTER_NAME' cluster was built for node-local storage."
     hint "That cluster has no /tracebloc bind mount, so hostPath volumes would land on ephemeral in-node storage"
     hint "(lost on 'cluster delete'), not ~/.tracebloc. Storage topology is fixed at create time; recreate to switch:"
     _recreate_cluster_hint
@@ -1027,7 +1027,7 @@ _create_new_cluster() {
   # hostPath PVs). node-local model (RFC-0003 Option C): no host bind-mount, and
   # KEEP k3s local-storage so its `local-path` StorageClass provisions the
   # dataset volumes inside the node — data then dies with the cluster.
-  if [[ "${TB_STORAGE_MODE:-hostpath}" == "node-local" ]]; then
+  if [[ "${TB_STORAGE_MODE:-node-local}" == "node-local" ]]; then
     K3D_ARGS+=(
       --k3s-arg "--disable=traefik@server:*"
       --k3s-arg "--disable=servicelb@server:*"

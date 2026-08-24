@@ -133,6 +133,7 @@ setup() {
 
 # ── HOST_DATASET_DIR: second bind-mount + dataset dir split (backend#743) ────
 @test "_create_new_cluster: HOST_DATASET_DIR unset -> single /tracebloc mount" {
+  TB_STORAGE_MODE=hostpath   # bind-mounts are a hostpath feature; node-local is the default (client#456)
   run _create_new_cluster
   [ "$status" -eq 0 ] || return 1
   run mock_calls
@@ -141,6 +142,7 @@ setup() {
 }
 
 @test "_create_new_cluster: HOST_DATASET_DIR set -> adds a distinct /tracebloc-data mount" {
+  TB_STORAGE_MODE=hostpath   # HOST_DATASET_DIR is hostpath-only; node-local is the default (client#456)
   HOST_DATASET_DIR="$BATS_TEST_TMPDIR/ds"; mkdir -p "$HOST_DATASET_DIR"
   run _create_new_cluster
   [ "$status" -eq 0 ] || return 1
@@ -160,12 +162,27 @@ setup() {
   [[ "$output" != *"--disable=local-storage"* ]] || return 1        # keep local-path provisioner
 }
 
-@test "_create_new_cluster: hostpath (default) -> bind-mount + disables local-storage" {
+@test "_create_new_cluster: hostpath (explicit opt-out) -> bind-mount + disables local-storage" {
+  TB_STORAGE_MODE=hostpath
   run _create_new_cluster
   [ "$status" -eq 0 ] || return 1
   run mock_calls
   [[ "$output" == *"${HOST_DATA_DIR}:/tracebloc@all"* ]] || return 1
   [[ "$output" == *"--disable=local-storage"* ]] || return 1
+}
+
+# D15 flip (client#456): with TB_STORAGE_MODE unset, the default is now node-local,
+# so a bare _create_new_cluster must take the node-local branch — no host
+# bind-mount and k3s local-storage kept. This is the assertion that would go red
+# if the default were ever flipped back to hostpath.
+@test "_create_new_cluster: DEFAULT (TB_STORAGE_MODE unset) -> node-local (no bind-mount, keeps local-storage)" {
+  unset TB_STORAGE_MODE
+  run _create_new_cluster
+  [ "$status" -eq 0 ] || return 1
+  run mock_calls
+  [[ "$output" == *"k3d cluster create"* ]] || return 1
+  [[ "$output" != *"/tracebloc@all"* ]] || return 1                 # no ~/.tracebloc bind-mount
+  [[ "$output" != *"--disable=local-storage"* ]] || return 1        # keep local-path provisioner
 }
 
 # ── k3s component disablement: the EXACT set, derived ───────────────────────
@@ -209,6 +226,7 @@ _recorded_disables() {
 }
 
 @test "_create_new_cluster: hostpath disables EXACTLY traefik + servicelb + local-storage" {
+  TB_STORAGE_MODE=hostpath
   run _create_new_cluster
   [ "$status" -eq 0 ] || return 1
   run _recorded_disables
@@ -223,6 +241,7 @@ _recorded_disables() {
   # else moved. Keeps the two branches from drifting apart on a component neither
   # test names.
   local hostpath nodelocal expected
+  TB_STORAGE_MODE=hostpath
   _create_new_cluster
   hostpath="$(_recorded_disables)"
   # Guard the subtraction below: if hostpath ever stopped disabling local-storage,
