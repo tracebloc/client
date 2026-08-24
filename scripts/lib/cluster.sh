@@ -952,12 +952,22 @@ _check_existing_cluster_storage_mode() {
 
   if [[ "$want" == "node-local" && "$cluster_is_hostpath" == true ]]; then
     echo ""
-    warn "TB_STORAGE_MODE=node-local, but the existing '$CLUSTER_NAME' cluster was built for hostpath storage."
-    hint "That cluster disabled k3s local-storage, so the requested 'local-path' StorageClass does not exist —"
-    hint "PVCs would stay Pending. Storage topology is fixed at create time; recreate the cluster for node-local:"
+    # After the D15 flip (client#456) this branch fires on an unmodified re-run of
+    # every pre-existing hostpath install, not just someone who asked for
+    # node-local — so name the source and lead with the keep-your-cluster remedy
+    # (set hostpath), not a recreate they never asked for (Bugbot High + review).
+    if [[ "${TB_STORAGE_MODE_SOURCE:-default}" == "explicit" ]]; then
+      warn "TB_STORAGE_MODE=node-local, but the existing '$CLUSTER_NAME' cluster was built for hostpath storage."
+    else
+      warn "node-local is the default now (RFC-0003 D15), but the existing '$CLUSTER_NAME' cluster was built for hostpath storage."
+    fi
+    hint "That cluster disabled k3s local-storage, so the 'local-path' StorageClass node-local needs does not exist — PVCs would stay Pending."
+    hint "To keep using your existing hostpath cluster, just re-run with the old mode — no recreate needed:"
+    hint "  TB_STORAGE_MODE=hostpath  re-run this installer."
+    hint "Or, to move this cluster to node-local (storage topology is fixed at create time), recreate it:"
     _recreate_cluster_hint "TB_STORAGE_MODE=node-local  "
     echo ""
-    error "Existing cluster's storage topology (hostpath) does not match TB_STORAGE_MODE=node-local — refusing to install onto a cluster with no matching StorageClass."
+    error "Existing cluster's storage topology (hostpath) does not match node-local — set TB_STORAGE_MODE=hostpath to keep it, or recreate for node-local."
   elif [[ "$want" == "hostpath" && "$cluster_is_hostpath" == false ]]; then
     echo ""
     warn "TB_STORAGE_MODE=hostpath, but the existing '$CLUSTER_NAME' cluster was built for node-local storage."

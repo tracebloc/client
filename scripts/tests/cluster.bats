@@ -575,13 +575,29 @@ _require_setgid_sticky() {
 }
 
 @test "_check_existing_cluster_storage_mode: node-local onto hostpath cluster -> fail fast (no local-path SC)" {
-  TB_STORAGE_MODE=node-local
+  TB_STORAGE_MODE=node-local; TB_STORAGE_MODE_SOURCE=explicit
   docker() { printf '%s\n' /tracebloc; }                    # hostpath cluster
   run _check_existing_cluster_storage_mode
   [ "$status" -ne 0 ] || return 1
   [[ "$output" == *"built for hostpath storage"* ]] || return 1
   [[ "$output" == *"Pending"* ]] || return 1
   [[ "$output" == *"k3d cluster delete"* ]] || return 1
+  [[ "$output" == *"TB_STORAGE_MODE=node-local"* ]] || return 1   # explicit set is named as the operator's choice
+  [[ "$output" == *"TB_STORAGE_MODE=hostpath"* ]] || return 1     # keep-your-cluster opt-out offered (client#456 Bugbot High)
+}
+
+# client#456 Bugbot High: after the flip this branch fires on an unmodified re-run
+# of every existing hostpath install (mode came from the default, not the
+# operator). The message must say so AND offer the hostpath opt-out, not only a
+# recreate the operator never asked for.
+@test "_check_existing_cluster_storage_mode: DEFAULT node-local onto hostpath cluster -> names the default + offers hostpath opt-out" {
+  TB_STORAGE_MODE=node-local; TB_STORAGE_MODE_SOURCE=default
+  docker() { printf '%s\n' /tracebloc; }                    # hostpath cluster
+  run _check_existing_cluster_storage_mode
+  [ "$status" -ne 0 ] || return 1
+  [[ "$output" == *"default now"* ]] || return 1                  # phrased as the new default, not "you set node-local"
+  [[ "$output" != *"TB_STORAGE_MODE=node-local, but"* ]] || return 1  # NOT the "you set it" opener
+  [[ "$output" == *"TB_STORAGE_MODE=hostpath"* ]] || return 1     # keep the existing hostpath cluster, no recreate
 }
 
 @test "_check_existing_cluster_storage_mode: hostpath onto node-local cluster -> fail fast (ephemeral)" {

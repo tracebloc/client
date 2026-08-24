@@ -868,6 +868,10 @@ AGENTS="${AGENTS:-1}"
 # and that means BOTH agents=0 AND servers=1: unlike a full k8s control plane,
 # k3s server nodes are schedulable, so SERVERS>1 still yields multiple nodes the
 # data PVC can't follow. Forcing agents=0 alone would leave that hole open.
+# Record whether the operator chose the mode or is getting the D15 default: the
+# existing-cluster mismatch guard phrases its remedy differently for "you set
+# node-local" vs "node-local is the default now" (client#456 review, Bugbot High).
+if [[ -n "${TB_STORAGE_MODE:-}" ]]; then TB_STORAGE_MODE_SOURCE="explicit"; else TB_STORAGE_MODE_SOURCE="default"; fi
 TB_STORAGE_MODE="${TB_STORAGE_MODE:-node-local}"
 if [[ "$TB_STORAGE_MODE" == "node-local" ]]; then
   AGENTS=0
