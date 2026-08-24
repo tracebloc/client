@@ -136,6 +136,68 @@ for bad in staging development production dev-1 PROD totallyBogus; do
   expect_reject "channelTags.$bad" "$SCHEMA_ERR" --set "images.ingestor.channelTags.$bad=9.9"
 done
 
+echo "== RESOURCE_REQUESTS / RESOURCE_LIMITS: the dimension vocabulary is closed =="
+# backend#2223 widened the grammar past cpu/memory to admit ephemeral-storage.
+# The vocabulary stays CLOSED on purpose: client-runtime parses this env value
+# with a bare `key, value = pair.split("=")` and NO allow-list, so an
+# unrecognised key does not error there -- it lands in the pod spec as a
+# silently wrong envelope. The schema is the only place a typo can be caught.
+#
+# Written through a VALUES FILE, not `--set`. `--set` splits on commas itself,
+# so `--set env.RESOURCE_REQUESTS=cpu=2,` reaches the schema as `cpu=2` and a
+# trailing-comma test passes for the wrong reason. That trap cost a false
+# "accepted" while developing this.
+resource_values_file() { # $1 = key, $2 = value -> path to a temp values file
+  local f; f="$(mktemp)"
+  printf 'env:\n  %s: "%s"\n' "$1" "$2" > "$f"
+  echo "$f"
+}
+
+expect_resource_render() { # <label> <key> <value>
+  local label="$1" key="$2" value="$3" f out
+  f="$(resource_values_file "$key" "$value")"
+  checks=$((checks + 1))
+  if out="$(helm template vocab "$CHART" -f "$VALUES" -f "$f" 2>&1)"; then
+    echo "  ok    $label"
+  else
+    fails=$((fails + 1))
+    echo "  FAIL  $label: expected accept, got: $(head -3 <<<"$out" | tr '\n' ' ')"
+  fi
+  rm -f "$f"
+}
+
+expect_resource_reject() { # <label> <key> <value>
+  local label="$1" key="$2" value="$3" f out
+  f="$(resource_values_file "$key" "$value")"
+  checks=$((checks + 1))
+  if out="$(helm template vocab "$CHART" -f "$VALUES" -f "$f" 2>&1)"; then
+    fails=$((fails + 1))
+    echo "  FAIL  $label: expected a rejection, but the chart rendered"
+  elif grep -qF "$SCHEMA_ERR" <<<"$out"; then
+    echo "  ok    $label (rejected)"
+  else
+    fails=$((fails + 1))
+    echo "  FAIL  $label: rejected for the wrong reason: $(head -3 <<<"$out" | tr '\n' ' ')"
+  fi
+  rm -f "$f"
+}
+
+for key in RESOURCE_REQUESTS RESOURCE_LIMITS; do
+  # Accepted: today's installer value, the new dimension, any subset, any order.
+  expect_resource_render "$key cpu+memory (installer's value)" "$key" "cpu=2,memory=8Gi"
+  expect_resource_render "$key with ephemeral-storage"         "$key" "cpu=2,memory=8Gi,ephemeral-storage=20Gi"
+  expect_resource_render "$key disk only"                      "$key" "ephemeral-storage=20Gi"
+  expect_resource_render "$key reordered"                      "$key" "memory=8Gi,cpu=2"
+  expect_resource_render "$key empty (unset)"                  "$key" ""
+
+  # Rejected: the typo is the whole reason the list is closed.
+  expect_resource_reject "$key typo 'memroy'"                  "$key" "memroy=8Gi"
+  expect_resource_reject "$key unknown dimension 'gpu'"        "$key" "cpu=2,memory=8Gi,gpu=1"
+  expect_resource_reject "$key empty value"                    "$key" "cpu="
+  expect_resource_reject "$key trailing comma"                 "$key" "cpu=2,"
+  expect_resource_reject "$key space instead of ="             "$key" "cpu 2,memory=8Gi"
+done
+
 echo
 if (( fails )); then
   echo "chart-env-vocabulary: $fails of $checks checks FAILED"
