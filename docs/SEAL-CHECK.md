@@ -155,7 +155,7 @@ on the live cluster when the corresponding check runs.*
 
 | Guarantee | k3d local (k3s) | EKS | AKS | OpenShift | bare metal |
 |---|---|---|---|---|---|
-| Training egress blocked (NetworkPolicy) | **Substrate verified; full-probe run pending** — k3s enforces egress NetworkPolicy (k3d v5.8.3 / k3s v1.33.6+k3s1, 2026-07-30; see §8.4 Status), full-chart `egress-enforcement` probe run not yet recorded | Conditional on CNI (VPC CNI netpol agent / Calico / Cilium) — **verified** by `egress-enforcement` once the lockdown is flipped | Conditional on CNI (Azure NPM / Calico) — **verified** by `egress-enforcement` once the lockdown is flipped | OVN-Kubernetes enforces by default — still **verified** by `egress-enforcement` | Conditional on CNI (Flannel alone does not enforce) — **verified** by `egress-enforcement` |
+| Training egress blocked (NetworkPolicy) | **Substrate verified; full-probe run pending** — k3s enforces egress NetworkPolicy (k3d v5.8.3 / k3s v1.33.6+k3s1, 2026-07-30; see §8.4 Status), full-chart `egress-enforcement` probe run not yet recorded | **Substrate verified; full-probe run pending** — dev fleet `tb-client-dev-templates` runs the VPC CNI netpol agent (v1.2.7, `--enable-network-policy=true`, mode `standard`, 2026-08-24; see EKS Status below), full-chart `egress-enforcement` probe not recorded (per-fleet lockdown held — client-runtime#199). Other EKS CNIs (Calico / Cilium) — **verified** by `egress-enforcement` once the lockdown is flipped | Conditional on CNI (Azure NPM / Calico) — **verified** by `egress-enforcement` once the lockdown is flipped | OVN-Kubernetes enforces by default — still **verified** by `egress-enforcement` | Conditional on CNI (Flannel alone does not enforce) — **verified** by `egress-enforcement` |
 | Backend reachability (required egress) | **Verified** by `backend-reachability` | **Verified** | **Verified** | **Verified** | **Verified** |
 | Storage on the declared class, bound | **Verified** by `storage-assertions` | **Verified** | **Verified** | **Verified** (PV scan degraded if `clusterScope=false`) | **Verified** |
 | No unmanaged hostPath backing (dynamic mode) | **Verified** once the Option C flip lands (today's installer still declares hostPath mode → sub-check SKIPs, honestly) | **Verified** | **Verified** | **Verified** with `clusterScope=true`; partial (name check + explicit WARNING) otherwise | n/a — hostPath *is* the declared model (SKIP) |
@@ -236,6 +236,42 @@ still to be recorded here (pass/fail, k3s/k3d versions, date) and folded into
 the RFC-0003 §8.3 matrix. The **substrate** enforcement it builds on is already
 verified — see the Status note at the top of this section (the single record
 of that run).
+
+## EKS substrate verification — dev fleet `tb-client-dev-templates`
+
+> **Status (2026-08-24): substrate VERIFIED; the full-chart `egress-enforcement`
+> probe run is intentionally NOT yet recorded — the per-fleet lockdown flip is
+> HELD, so the fleet stays UNSEALED for the egress guarantee until the flip and
+> probe are run.** This note is the single record of the substrate verification.
+
+Fleet: release `tracebloc` / namespace `tracebloc-templates` (chart
+`client-1.9.63`) on EKS cluster `tb-client-dev-templates`.
+
+Substrate evidence (read-only inspection, no config changed): the AWS VPC CNI
+DaemonSet `kube-system/aws-node` runs the network-policy agent —
+`amazon-k8s-cni:v1.20.5-eksbuild.1` + `aws-network-policy-agent:v1.2.7-eksbuild.2`
+with `--enable-network-policy=true` and `NETWORK_POLICY_ENFORCING_MODE=standard`.
+So this cluster **does enforce** NetworkPolicy egress; the chart's
+`enforcementProbeTimeoutSeconds: 60` retry covers the standard-mode per-pod
+reconcile window. A fleet here is therefore sealable in principle — the
+`egress-enforcement` probe is expected to PASS once the lockdown is flipped.
+
+Why the flip/probe is held (RFC-0003 D6 scope guard; client-runtime#199):
+
+- This is a **mixed template-validation fleet, not CV/non-NLP** — its ingest
+  configs span `masked_language_modeling` (36), `text_classification` (15),
+  `token_classification`, `sentence_pair_classification`, `causal_language_modeling`
+  and `embeddings` alongside CV/tabular/time-series. The jobs-manager injects
+  **no** `TRANSFORMERS_OFFLINE` / `HF_HUB_OFFLINE`, so NLP templates still
+  runtime-fetch HuggingFace today. Sealing egress now would break those by
+  design (the #1501 gate) — the runbook's guard says do not flip NLP fleets
+  per-fleet. It becomes flippable once HuggingFace runtime-fetch support is
+  removed (models uploaded, offline flags set).
+- Independently, the flip here is **more than the runbook's two flags**: this
+  fleet currently sets `networkPolicy.training.enabled: false` (no training
+  NetworkPolicy is rendered — `kubectl get netpol -A` is empty), so a future
+  flip must additionally set `networkPolicy.training.enabled=true` before
+  `routeWorkloads=true` / `allowExternalHttps=false`.
 
 ## Runbook: flip the §8.2 egress lockdown on a real fleet
 
