@@ -59,7 +59,7 @@ helm upgrade "$NAMESPACE" tracebloc/tracebloc -n "$NAMESPACE" \
 Verify the three vars are gone before relying on it:
 
 ```bash
-kubectl -n "$NAMESPACE" get deploy -l app.kubernetes.io/component=jobs-manager -o yaml | grep RESOURCE_
+kubectl -n "$NAMESPACE" get deploy "$NAMESPACE-jobs-manager" -o yaml | grep RESOURCE_
 ```
 
 > **Read this before you run it.** Node-derived sizing is currently gated OFF by
@@ -118,7 +118,7 @@ helm upgrade <release> tracebloc/client -n <namespace> \
 Confirm the edge now tracks the chart pin:
 
 ```bash
-kubectl get deploy -n <namespace> -l app.kubernetes.io/component=jobs-manager \
+kubectl get deploy -n <namespace> <release>-jobs-manager \
   -o jsonpath='{.items[0].spec.template.spec.containers[0].env[?(@.name=="INGESTOR_IMAGE_DIGEST")].value}{"\n"}'
 ```
 

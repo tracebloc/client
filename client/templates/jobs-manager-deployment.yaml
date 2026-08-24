@@ -206,15 +206,30 @@ spec:
         # `kubectl rollout status` printed "successfully rolled out" while the
         # pod was crash-looping (4 restarts in 72s, 2026-08-11 / backend#1723).
         #
-        # Why a PORT probe is the right signal here, and not GET /healthz:
-        # jobs-manager opens 8080 only at the END of a successful start — it
-        # authenticates against the backend first and exits(1) on failure
-        # (jobs_manager.py: auth at main() then run_server_in_thread ~140 lines
-        # later), and create_app() runs the ingestion_runs migration against
-        # MySQL on the way up. So "8080 accepts a connection" already implies
-        # backend auth succeeded and MySQL was reachable. `/healthz` is an
-        # unconditional `200 {"status":"ok"}` and would add no information over
-        # the TCP connect — the evidence is in reaching the port at all.
+        # Why GET /healthz and not a bare TCP connect to 8080:
+        # this probe first shipped as `tcpSocket: 8080` (client#699) because at
+        # that time `/healthz` was an unconditional `200 {"status":"ok"}` — a
+        # probe pointed at it could not go red, so it would have added nothing
+        # over the TCP connect while looking like a check. client-runtime#327
+        # replaced that endpoint with `_healthz_report`, which returns 200 only
+        # when all three of its checks pass and 503
+        # (`{"status":"unavailable","failed":[…]}`) when any of them fails:
+        #
+        #   authz_mount   the ingestion-authz ConfigMap this pod mounts below
+        #                 is readable. If it is NOT mounted, load_authz_policy
+        #                 falls back to a deny-all empty policy and every
+        #                 caller gets 403 — forever, from a pod that binds 8080
+        #                 and answers a TCP connect perfectly.
+        #   schema        the vendored ingest schema validator is loaded.
+        #   metadata_db   MySQL answers `SELECT 1`. Every submission does a
+        #                 find_ingestion_run/record_ingestion_run round trip.
+        #
+        # Those are the states a TCP connect cannot see: the socket is bound in
+        # all of them, and the Service routes
+        # POST /internal/submit-ingestion-run at a pod that cannot serve it.
+        # An EMPTY authz policy is deliberately NOT a failure — `allowed: []`
+        # is this chart's fail-safe render for an operator who has not
+        # configured ingestion yet, so a fresh edge is legitimately Ready.
         #
         # Gated on INGESTION_HTTP_DISABLED because the runtime gates the server
         # on it, with the same truthiness: `not os.getenv(...)` treats ANY
@@ -222,13 +237,15 @@ spec:
         # truthy to Helm. Without this gate, an operator setting that env var
         # would get a pod that never becomes Ready.
         readinessProbe:
-          tcpSocket:
+          httpGet:
+            path: /healthz
             port: 8080
           # The probe that fixes the false-green: the jobs-manager Service must
           # not route POST /internal/submit-ingestion-run at a pod whose server
           # is not listening ("connection refused to that pod's 8080, x16
-          # tasks" in the 2026-08-11 run), and `kubectl rollout status` must not
-          # call the Deployment available until it is.
+          # tasks" in the 2026-08-11 run) — or listening and unable to serve —
+          # and `kubectl rollout status` must not call the Deployment available
+          # until it is.
           #
           # initialDelaySeconds covers the slow start without any consequence
           # if it is not enough: this container retries backend auth and then
@@ -237,7 +254,14 @@ spec:
           # point — see the note below.
           initialDelaySeconds: 10
           periodSeconds: 10
-          timeoutSeconds: 3
+          # 5s, not the 3s the tcpSocket probe used, because /healthz now does
+          # real work: ping_metadata_db passes connection_timeout=2 AND
+          # read_timeout=2, so a half-open MySQL can take ~4s to raise. That
+          # helper's docstring is explicit the check must finish inside the
+          # probe's budget — a probe that times out reports "timeout", not
+          # "database down", and the two want different operator responses.
+          # Both outcomes mark the pod NotReady; only one of them says why.
+          timeoutSeconds: 5
           failureThreshold: 3
         # READINESS ONLY — no livenessProbe AND no startupProbe, deliberately.
         # backend#1779 asks for this to be a recorded decision, so here it is.
@@ -256,7 +280,14 @@ spec:
         # removes the pod from the Service, which is the part that needs to
         # happen. Restarting a process that is still training models is not.
         #
-        # (An earlier revision of this PR did add a startupProbe with a 150s
+        # Moving to /healthz STRENGTHENS that argument rather than weakening
+        # it. _healthz_report's own docstring says so: its metadata_db check
+        # makes the answer depend on MySQL, "safe for READINESS and wrong for
+        # LIVENESS or a startupProbe" — a MySQL blip on a liveness probe would
+        # not just deroute this pod, it would restart it, and take Service Bus
+        # polling and training submission down with it.
+        #
+        # (An earlier revision of client#699 did add a startupProbe with a 150s
         # budget, which had exactly that bug — it was caught in review. Do not
         # reintroduce one without also changing jobs_manager.py's decision.)
         {{- end }}
@@ -289,11 +320,26 @@ spec:
           every variable would be set on a process that never reads them and the
           Collector would still get no token.
 
-          Absent when the Collector is off, and the reader treats that as "nothing
-          to do" without making a single API call.
+          SET WHETHER OR NOT THE COLLECTOR IS ENABLED (backend#2400). These were
+          gated on `telemetryCollector.enabled`, and that gate deadlocked the
+          feature on every edge in the fleet: the Collector's own template REFUSES
+          the release while the Secret is absent (telemetry-collector-daemonset.yaml),
+          and the Secret was absent precisely because these were gated. Nobody
+          could take the first step.
+
+          The Secret is a PRECONDITION of the flag, so it must be written BEFORE
+          the flag — which is exactly what it cannot be if it is conditional on it.
+          Ungated, enabling the Collector is one `--set` on an edge that already
+          has the Secret, and the daemonset's `fail` guard keeps its full strength
+          because its precondition is now reachable rather than unreachable.
+
+          THE COST, stated rather than hidden: one idempotent Secret write per
+          re-authentication on every edge, and a Secret sitting unused on edges
+          that never enable the Collector. That is already a supported state on
+          the reading side — the Collector mounts this Secret `optional: true`, so
+          present-or-absent is a case it is built for.
         */}}
         {{- $tcEnv := default (dict) .Values.telemetryCollector }}
-        {{- if $tcEnv.enabled }}
         {{- $tokEnv := default (dict) $tcEnv.tokenSecret }}
         - name: TELEMETRY_TOKEN_SECRET_NAMESPACE
           value: {{ .Values.nodeAgents.namespace.name | quote }}
@@ -301,7 +347,6 @@ spec:
           value: {{ $tokEnv.name | default "tracebloc-telemetry-token" | quote }}
         - name: TELEMETRY_TOKEN_SECRET_KEY
           value: {{ $tokEnv.key | default "token" | quote }}
-        {{- end }}
         - name: CLIENT_ID
           valueFrom:
             secretKeyRef:
