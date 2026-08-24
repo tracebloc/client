@@ -139,7 +139,8 @@ if ! command -v helm >/dev/null 2>&1; then
 fi
 
 CHK="$(mktemp -t redaction-derived.XXXXXX)"
-trap 'rm -f "$CHK"' EXIT
+HELM_ERR="$(mktemp -t redaction-helm.XXXXXX)"
+trap 'rm -f "$CHK" "$HELM_ERR"' EXIT
 cat >"$CHK" <<'PY'
 import json
 import pathlib
@@ -224,9 +225,26 @@ print(f"  ok: all {len(rendered)} rendered statement(s) are the declared "
       "redactions, in order")
 PY
 
-helm template t "$CHART" \
+# helm's stderr is CAPTURED, not discarded. The template's `fail` strings name
+# the cause and the fix by hand ("... is missing from the chart ... restore it
+# and check scripts/.log-redactions.sha256"); `2>/dev/null` rendered every one
+# of them unreachable. Worse, it made the guard MISDIRECT: step 1 checks the
+# declaration on DISK and prints `ok`, so an operator saw `ok: ...matches...`
+# one line above `found 0 ConfigMaps` and went hunting through the ConfigMap
+# template, while the actual cause was that helm could not READ the file (a
+# .helmignore entry — the exclusion the template's own comment calls out).
+# Reproduced end to end before and after. Never a fail-open (pipefail still
+# exits 1); purely which file the 2am reader is sent to.
+# (Reported by @saadqbal on client#803.)
+if ! helm template t "$CHART" \
   --set clientId=x --set clientPassword=y \
   --set storageClass.create=false \
-  --set telemetryCollector.enabled=true 2>/dev/null | python3 "$CHK" "$DECLARATION"
+  --set telemetryCollector.enabled=true 2>"$HELM_ERR" | python3 "$CHK" "$DECLARATION"; then
+  # Only the kubeconfig-permissions noise is filtered; everything else helm said
+  # reaches the operator. `|| true` because grep exits 1 on no match, and an
+  # empty stderr must not turn this into a different failure than the real one.
+  grep -v '^WARNING: Kubernetes configuration file is' "$HELM_ERR" >&2 || true
+  exit 1
+fi
 
 echo "collector redaction derived: green"
