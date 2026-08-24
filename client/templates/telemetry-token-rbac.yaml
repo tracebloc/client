@@ -1,0 +1,124 @@
+{{- $tcTok := default (dict) .Values.telemetryCollector -}}
+{{- $tokSecret := default (dict) $tcTok.tokenSecret -}}
+{{- $tokName := $tokSecret.name | default "tracebloc-telemetry-token" -}}
+{{- /*
+  Lets jobs-manager write and REFRESH the edge Collector's ingest token
+  (backend#2274). The Collector reads its credential through `bearertokenauth`'s
+  `filename` from a projected Secret; jobs-manager is what puts it there, using
+  the same DRF token it already sends as `Authorization: Token <token>`.
+
+  NOT GATED AT ALL — not on `telemetryCollector.enabled`, not on
+  `tracebloc.nodeAgentsInUse`, not on `nodeAgents.namespace` differing from the
+  release namespace. Each absence has its own reason and they are not the same
+  reason, so all three are stated.
+
+  NOT ON `telemetryCollector.enabled` (backend#2400). It was, and that gate was
+  half of a deadlock that made the Collector impossible to turn on anywhere: the
+  daemonset refuses the release until the Secret exists, jobs-manager only writes
+  the Secret when it has the env, and the env only appeared once the Collector was
+  on. Ungating the env alone would not have fixed it — jobs-manager would have
+  attempted the write and been 403'd here, and `sync_telemetry_token_secret` fails
+  SOFT (it logs, returns False, never raises), so the release would have gone out
+  looking fixed and still produced no Secret. The grant has to precede the flag for
+  the same reason the Secret does.
+
+  NOT ON `tracebloc.nodeAgentsInUse`. That helper answers "does a POD-BEARING
+  tenant run in the node-agents namespace" — which is the question its consumers
+  ask, because they exist to manage DaemonSets and to pull their images. This Role
+  grants no pod anything; it lets jobs-manager, which runs in the RELEASE
+  namespace, put one Secret into the node-agents namespace so the Collector CAN be
+  turned on later. Gating it on a pod-bearing tenant would restore the deadlock on
+  exactly the edges that have none.
+
+  NOT ON `nodeAgents.namespace` differing from the release namespace. The sibling
+  node-agents Roles carry that condition because the release-namespace grant
+  already covers them when the two coincide. This one is not covered either way
+  (see the verb note below). The Role name is release-scoped, so it cannot collide
+  when they do coincide.
+
+  NOT ENUMERATING THE HELPER'S CONSUMERS, deliberately. A previous version of this
+  comment named four files: it included secrets.yaml, which does not gate on the
+  helper at all, and omitted auto-upgrade-rbac.yaml, which does. "Four" was right
+  only by coincidence, one in and one out — the same nearly-right-comment failure
+  this file was edited to fix, one round later. A list a reader can reproduce with
+  `git grep -l nodeAgentsInUse client/templates` does not need to be written down,
+  and written down it can only rot. (@saadqbal, reviews of #784 and #787.)
+
+  WHAT AN EDGE THAT NEVER ENABLES THE COLLECTOR PAYS: a Role and a RoleBinding
+  that nothing exercises beyond one Secret write per re-authentication. The grant
+  is the same least-privilege pair either way — `create` namespace-scoped because
+  the API server cannot name-match an object that does not exist yet, `get`/`patch`
+  pinned to this one Secret — so leaving it rendered widens nothing.
+
+  THE MISSING VERB IS IN BOTH OF jobs-manager's SECRETS RULES, not just the
+  cluster-wide one. In rbac.yaml, both the ClusterRole (`clusterScope: true`) and
+  the namespaced Role (the `clusterScope: false` branch) carry a
+  `resources: ["configmaps", "secrets"]` rule whose verbs are `["create", "get"]`
+  with no `patch`. So the create succeeds and every REFRESH 403s on either install
+  shape — an earlier version of this comment said "cluster-wide rule" in the
+  singular and would have sent someone reading the `clusterScope: false` path
+  looking for a difference that is not there. A Role in the node-agents namespace
+  grants `patch` there regardless of which branch renders, which is why the fix is
+  the same for both.
+
+  Identified by branch and rule rather than by line number on purpose: cross-file
+  line numbers in a comment drift the first time rbac.yaml gains a rule, and the
+  first version of this pointed at the `resources:` lines while making a claim
+  about verbs.
+
+  WHY `patch` MATTERS ENOUGH TO ADD A ROLE FOR. `bearertokenauth` watches the
+  projected file, so a rotated token is picked up with no Collector restart — but
+  only if something updates the Secret. Without `patch`, the Collector works until
+  the first token rotation and then 401s on every export, buffering to disk until
+  the cap. That failure needs no code change to appear; it arrives on its own.
+
+  TWO RULES, because `resourceNames` IS NOT HONOURED FOR `create`: the API server
+  cannot match a name that does not exist yet. So `create` is namespace-scoped and
+  `get`/`patch` are pinned to this one Secret — which is the tighter half, and the
+  one that would otherwise let jobs-manager rewrite any Secret in the namespace.
+  Same shape and same reason as image-refresh-rbac.yaml's collection-verb split.
+*/}}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "tracebloc.telemetryCollectorName" . }}-token
+  namespace: {{ .Values.nodeAgents.namespace.name }}
+  annotations:
+    meta.helm.sh/release-name: {{ .Release.Name }}
+    meta.helm.sh/release-namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "tracebloc.labels" . | nindent 4 }}
+    app.kubernetes.io/component: telemetry-collector
+rules:
+  # `create` cannot be name-scoped (see above). Namespace-scoped, create-only.
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["create"]
+  # The refresh path, pinned to the one Secret this feature owns.
+  - apiGroups: [""]
+    resources: ["secrets"]
+    resourceNames: [{{ $tokName | quote }}]
+    verbs: ["get", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "tracebloc.telemetryCollectorName" . }}-token
+  namespace: {{ .Values.nodeAgents.namespace.name }}
+  annotations:
+    meta.helm.sh/release-name: {{ .Release.Name }}
+    meta.helm.sh/release-namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "tracebloc.labels" . | nindent 4 }}
+    app.kubernetes.io/component: telemetry-collector
+subjects:
+  # jobs-manager's ServiceAccount, which lives in the RELEASE namespace — the
+  # Role and RoleBinding are the only things in the node-agents namespace.
+  - kind: ServiceAccount
+    name: {{ include "tracebloc.serviceAccountName" . }}
+    namespace: {{ .Release.Namespace }}
+roleRef:
+  kind: Role
+  name: {{ include "tracebloc.telemetryCollectorName" . }}-token
+  apiGroup: rbac.authorization.k8s.io

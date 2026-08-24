@@ -10,7 +10,6 @@
 
   Gated on:
     nodeAgents.namespace.create                   - skip when managing the namespace out-of-band
-    resourceMonitor != false                      - skip when the DaemonSet is disabled
     nodeAgents.namespace.name != Release.Namespace - skip when the operator
         has pointed node-agents back at the release namespace. Otherwise this
         template would stamp `privileged` PSA labels onto the release
@@ -24,7 +23,29 @@
   prevents race conditions where a DaemonSet from a concurrent install
   lands in the not-yet-relabelled namespace.
 */}}
-{{- if and (ne .Values.resourceMonitor false) .Values.nodeAgents.namespace.create (ne .Values.nodeAgents.namespace.name .Release.Namespace) }}
+{{- /*
+  NO TENANT CONDITION AT ALL, and that is the change backend#2400 made here.
+
+  The history is worth keeping because it explains why the condition kept moving.
+  It was `resourceMonitor != false`; the Collector became a second tenant
+  (backend#1906) and with `resourceMonitor: false` + `telemetryCollector.enabled:
+  true` its DaemonSet targeted a namespace this chart never created, so the
+  condition widened to `tracebloc.nodeAgentsInUse` (Bugbot on #779). backend#2400
+  added a THIRD occupant that has no flag to widen to: telemetry-token-rbac.yaml
+  renders a Role and RoleBinding here unconditionally, because the Collector's
+  token Secret has to exist BEFORE anyone can enable the Collector.
+
+  So the chart now always puts something in this namespace, and a predicate over
+  the tenants would be a constant `true` dressed up as a question. It is dropped
+  rather than extended. `tracebloc.nodeAgentsInUse` is deliberately NOT widened to
+  cover this: it still gates DaemonSet-managing RBAC and the mirrored pull Secret,
+  none of which an occupant with no pods needs, and making it constant would have
+  granted auto-upgrade and image-refresh DaemonSet rights in a namespace with no
+  DaemonSets (measured: 4 extra RBAC objects, backend#2400).
+
+  The remaining two conditions are unchanged and both still bite — see above.
+*/}}
+{{- if and .Values.nodeAgents.namespace.create (ne .Values.nodeAgents.namespace.name .Release.Namespace) }}
 apiVersion: v1
 kind: Namespace
 metadata:

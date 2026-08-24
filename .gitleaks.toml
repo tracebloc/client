@@ -12,3 +12,18 @@ regexTarget = "match"
 regexes = [
   '''curl -u \$CANARY:hunter2''',
 ]
+
+# scripts/tests/collector-redaction-floor.sh proves the Collector's redaction
+# actually scrubs secrets, which it can only do by CONTAINING secret-shaped
+# strings — one specimen per class of secret we redact (backend#1908). Every
+# value in it is fabricated and exists nowhere else.
+#
+# PATH-SCOPED, and the cost is stated rather than glossed: a real secret pasted
+# into THIS ONE FILE later would not be caught. That is acceptable here because
+# the file is a fixture whose entire content is specimens, it is short, and its
+# diff is read on every change — whereas suppressing the RULE, or baselining the
+# findings, would reach further and decay less visibly. Inline `gitleaks:allow`
+# markers were tried first and are not honoured by this pipeline.
+paths = [
+  '''^scripts/tests/collector-redaction-floor\.sh$''',
+]

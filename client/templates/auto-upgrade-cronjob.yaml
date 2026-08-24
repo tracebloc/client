@@ -166,6 +166,11 @@ spec:
             app.kubernetes.io/component: auto-upgrade
         spec:
           serviceAccountName: {{ include "tracebloc.autoUpgradeName" . }}
+          # NEEDED. auto-upgrade-rbac.yaml binds this SA to a Role over `*` in the
+          # release namespace plus a ClusterRole over namespaces, PVs,
+          # StorageClasses and RBAC — it runs `helm upgrade`, which rewrites the
+          # release. Without the token the CronJob cannot upgrade anything.
+          automountServiceAccountToken: true
           restartPolicy: OnFailure
           {{- if include "tracebloc.useImagePullSecrets" . }}
           imagePullSecrets:

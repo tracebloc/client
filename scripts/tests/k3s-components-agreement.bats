@@ -37,9 +37,22 @@ write_ps1() {
     for c in $set_; do echo "      \"--k3s-arg\", \"--disable=${c}@server:*\","; done
     echo ')'; } > "$ROOT/scripts/install-k8s.ps1"
 }
-# $1 = comment opener ({{/* or {{- /*), $2 = "code" to include code, else omitted
+# $1 = comment opener ({{/* or {{- /*), $2 = "code" to include code, else omitted.
+# Pass '' for $1 to take the default opener with a non-default mode.
+#
+# The default is the PLAIN spelling `{{/*`, and it is emitted LITERALLY. It was
+# written `"${1:-\{\{/\*}"`, and bash keeps those backslashes inside double
+# quotes, so the fixture carried a 7-byte `\{\{/\*` line instead — a string the
+# stripper's opener cannot match, in which `{{` never even appears adjacently.
+# Every default-opener case therefore ran against a file nothing was stripped
+# from: the poison prose below stayed in ds_body and satisfied check 3 on its
+# own, so the lookup and fail it merely describes never had to be there
+# (client#788; the unreachable-fixture + redundant-mechanism pair in
+# .cursor/BUGBOT.md). Keep this single-quoted — a backslash here silently
+# disarms every default-opener case below.
 write_ds() {
-  local opener="${1:-\{\{/\*}" mode="${2:-code}"
+  local opener="${1-}" mode="${2:-code}"
+  [ -n "$opener" ] || opener='{{/*'
   { printf '%s\n' "$opener"
     echo '  Pre-flight prose naming v1beta1.metrics.k8s.io and saying it will fail hard.'
     echo '*/}}'
@@ -64,6 +77,11 @@ write_ds_code_below_chomped_block() {
 }
 
 # ── the happy path, so every "catches X" below means something ───────────────
+#
+# This is the GREEN half of the default-opener pair: with the block actually
+# stripped, the lookup and the fail below it are the only things left that can
+# satisfy check 3. It reddens if the stripper over-strips and eats them; its
+# red sibling, further down, is what reddens if the strip stops happening.
 
 @test "agreeing installers with the coupling intact exit 0" {
   write_bash; write_ps1; write_ds
@@ -95,11 +113,40 @@ write_ds_code_below_chomped_block() {
 }
 
 # ── the coupling that makes check 2 worth having ─────────────────────────────
+#
+# Each opener spelling is exercised as a PAIR, and only the pair says anything
+# about the strip. Stripping only ever REMOVES lines, and every check-3 finding
+# fires on an ABSENCE, so an under-stripping stripper can only ever turn a
+# finding into a pass: the green half of a pair cannot see one, no matter what
+# it asserts. The red half — poison prose present, coupling deleted — is the
+# half that reddens when the opener stops matching, because the prose then
+# stands in for the code it merely describes. The green half covers the opposite
+# failure, an over-stripping stripper that eats the code below the block
+# (client#764). Neither half alone is a test of the stripper.
 
-@test "catches the chart no longer looking up the APIService" {
-  write_bash; write_ps1; write_ds '{{/*' nocode
+# The fixture's own quoting, asserted directly rather than assumed: the pattern
+# below is written out here independently of write_ds, so a re-escaped opener
+# cannot agree with itself (backend#1729 rule 9).
+@test "the default opener reaches the stripper: a literal {{/* line, no backslashes" {
+  local ds
+  write_ds
+  ds="$ROOT/client/templates/resource-monitor-daemonset.yaml"
+  grep -qxF '{{/*' "$ds" || {
+    echo "the default fixture's opener is not a literal {{/*, so the stripper cannot match it:"
+    sed -n '1p' "$ds"
+    return 1
+  }
+}
+
+@test "catches the chart no longer looking up the APIService (default opener {{/*)" {
+  write_bash; write_ps1; write_ds '' nocode
   run_guard
-  [ "$status" -eq 1 ] || return 1
+  [ "$status" -eq 1 ] || { echo "FAIL-OPEN: the prose satisfied check 3"; echo "$output"; return 1; }
+  # Which refusal, not just that one happened: exit 1 is also how a disagreeing
+  # pair of installers reports, and that is not what this case is about
+  # (backend#1729 rule 10).
+  [[ "$output" == *"no longer looks up v1beta1.metrics.k8s.io"* ]] || {
+    echo "exit 1, but not for the missing coupling:"; echo "$output"; return 1; }
 }
 
 # THE BUGBOT REGRESSION (client#764). Same removal, but the header comment uses
@@ -110,6 +157,8 @@ write_ds_code_below_chomped_block() {
   write_bash; write_ps1; write_ds '{{- /*' nocode
   run_guard
   [ "$status" -eq 1 ] || { echo "FAIL-OPEN: prose satisfied the check"; echo "$output"; return 1; }
+  [[ "$output" == *"no longer looks up v1beta1.metrics.k8s.io"* ]] || {
+    echo "exit 1, but not for the missing coupling:"; echo "$output"; return 1; }
 }
 
 @test "the chomping opener does not break the CLEAN case either" {

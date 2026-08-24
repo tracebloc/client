@@ -26,12 +26,13 @@ env: {
   # HTTP_PROXY_USERNAME: ""
   # HTTP_PROXY_PASSWORD: ""
   # Optional: explicit resource requests/limits for spawned training jobs.
-  # UNSET (the default): jobs-manager sizes the envelope from node allocatable
-  # capacity — cpu = max(2, floor(allocatable*0.75)), memory = max(8Gi,
-  # floor(allocatable*0.75)), requests == limits (Guaranteed QoS) — instead of
-  # the historic fixed "cpu=2,memory=8Gi" (backend#664, Utilization Ladder L0).
-  # Older client-runtime images fall back to that same literal, so leaving
-  # these unset is safe on any image. SET: pins the envelope exactly as before.
+  # UNSET (the default): jobs-manager uses its built-in "cpu=2,memory=8Gi"
+  # literal. SET: pins the envelope to exactly what you write here.
+  #
+  # This comment used to say that leaving the pair unset made jobs-manager size
+  # the envelope from node allocatable (75% of the node). It does not: that
+  # path is real but GATED OFF behind DERIVE_JOB_ENVELOPE (documented below).
+  # Unset means the literal (backend#664 L0, backend#2167, backend#2250).
   # RESOURCE_REQUESTS: "cpu=2,memory=8Gi"
   # RESOURCE_LIMITS: "cpu=2,memory=8Gi"
   # Bookkeeping only (backend#2220): WHO chose the two values above.
@@ -45,6 +46,31 @@ env: {
   # indistinguishable — and a future ladder must not silently overrule the
   # human. Leave it alone; the installer and the CLI maintain it.
   # RESOURCE_PROVENANCE: "installer"
+  # Optional, OFF by default: let jobs-manager size the training-job envelope
+  # from node allocatable capacity instead of the literal above --
+  # cpu = max(2, floor(allocatable*0.75)), memory = max(8Gi,
+  # floor(allocatable*0.75)), requests == limits (Guaranteed QoS).
+  #
+  # Effective ONLY when RESOURCE_REQUESTS *and* RESOURCE_LIMITS are both unset:
+  # an explicit envelope always wins, and this key is then inert (jobs-manager
+  # never reaches the derive branch). Note that BOTH installers write
+  # RESOURCE_* unconditionally, so on an installer-provisioned edge you must
+  # clear both keys as well as setting this one.
+  #
+  # READ THIS BEFORE TURNING IT ON (backend#2167). A ~75% Guaranteed envelope
+  # is EXCLUSIVE: any Guaranteed fraction >= 50% caps the machine at ONE
+  # concurrent training job, whatever the machine's size. And on a multi-node
+  # k3d cluster whose node containers are uncapped, every node reports the
+  # whole Docker VM (allocatable == capacity, no kube/system-reserved), so the
+  # min-across-nodes in the derivation does not save you and the OOM killer
+  # takes victims -- a k3s node container included. Turn this on to measure or
+  # to opt one edge in, not as a default. backend#2418 (CPU burstable, memory
+  # Guaranteed) and backend#2419 (a job that does not fit queues) are what make
+  # the derived envelope safe to default; until they land, this is opt-in.
+  #
+  # Truthy spellings jobs-manager accepts: "1", "true", "yes", "on"
+  # (case-insensitive). Anything else -- including "" -- is off.
+  # DERIVE_JOB_ENVELOPE: "true"
   # Optional: GPU requests for spawned jobs (defaults to "nvidia.com/gpu=1" if not provided)
   # GPU_REQUESTS: "nvidia.com/gpu=1"
   # Optional: GPU limits for spawned jobs (defaults to "nvidia.com/gpu=1" if not provided)
@@ -416,6 +442,138 @@ egressProxy:
     limits:
       cpu: "500m"
       memory: "256Mi"
+
+# -- Edge telemetry Collector (RFC-BACKEND-1872 D6/D7, backend#1906).
+# An OpenTelemetry Collector DaemonSet that reads Class A container stdout with a
+# `filelog` receiver and forwards it to the tracebloc backend's ingest endpoint.
+#
+# SHIPS DISABLED, and that is a deliberate safety decision rather than caution.
+# The exporter authenticates with a token this chart does not create: it is
+# written into a Secret by jobs-manager, which does not do so yet (tracked
+# separately). Enabling the Collector before that Secret exists would put a
+# DaemonSet on every customer node spooling to disk with nothing it can deliver —
+# filling toward the 1 GiB cap per node for no benefit, which is precisely the
+# "telemetry must never be the reason a node fills" risk D7 exists to bound.
+# Same posture as `egressProxy.routeWorkloads`: the component ships inert and is
+# flipped per fleet once its prerequisite is in place.
+#
+# CLASS A ONLY (D12). The receiver is scoped to the control-plane containers this
+# chart owns; training and ingestion pods are Class B and stay out until
+# backend#1908 lands content redaction. Widening `classAContainers` is not a
+# config tweak — it changes what leaves a customer's cluster.
+telemetryCollector:
+  # OFF BY DEFAULT, BUT THE TOKEN SECRET IS PROVISIONED ANYWAY (backend#2400), and
+  # that asymmetry is deliberate. The Collector's template REFUSES the release when
+  # its token Secret is absent, so the Secret has to be in place BEFORE this flag
+  # can be set — which it cannot be if writing it is conditional on this flag. That
+  # was a deadlock: no edge could enable the Collector at all.
+  #
+  # So jobs-manager always receives the Secret's coordinates and always holds the
+  # RBAC to write it, and flipping this to `true` on an edge that has re-
+  # authenticated at least once since upgrading is a one-step operation. A FRESH
+  # install with this already `true` is still refused, and correctly: jobs-manager
+  # has not run yet, so nothing has written the Secret.
+  enabled: false
+
+  # otel/opentelemetry-collector-contrib — `contrib`, not `core`, and the
+  # distinction is load-bearing: `filelog`, `bearertokenauth` and `file_storage`
+  # are all contrib components and none of them exist in the core distribution.
+  # THE TAG HAS A FEATURE FLOOR, and 0.109.0 was below it — the first version of
+  # this block pinned that and would not have started at all.
+  #
+  # `block_on_overflow` replaced the older `blocking` option upstream in
+  # 2025-03 (deprecated) / 2025-06 (removed), i.e. around 0.122-0.128, and
+  # `sizer: bytes` on a PERSISTENT queue is later still (~0.130). The Collector
+  # rejects unknown configuration keys, so an older image does not silently
+  # ignore them — it fails to start, on every node.
+  #
+  # `tests/telemetry_collector_test.yaml` asserts the pinned minor is at or above
+  # that floor, so the pin cannot drift back below the config it has to run.
+  image:
+    registry: docker.io
+    repository: otel/opentelemetry-collector-contrib
+    tag: "0.159.0"
+    digest: ""
+
+  # 500m/512Mi per D7's table. The existing node agent runs 200m/256Mi, which a
+  # filelog collector over node stdout will not fit.
+  resources:
+    requests:
+      cpu: "100m"
+      memory: "128Mi"
+    limits:
+      cpu: "500m"
+      memory: "512Mi"
+
+  # The containers whose stdout is collected — CONTAINER names, taken from the
+  # rendered chart, not workload or image names. The first version of this list
+  # invented `tracebloc-jobs-manager`, `egress-proxy` and `requests-proxy`, none
+  # of which exist: `filelog`'s include globs match the kubelet's on-disk path,
+  # which carries the CONTAINER name, so the Collector would have run, reported
+  # healthy, and shipped nothing. (Bugbot on #779.)
+  #
+  # Mapped from D6's Class A list, which is the authority on membership:
+  #   controller.py     -> pods-monitor-container  (Dockerfile.controller)
+  #   jobs-manager      -> api                     (Dockerfile.jobs_manager)
+  #   the egress proxy  -> squid
+  #   resource-monitor  -> tracebloc-resource-monitor, and it lives in a
+  #                        DIFFERENT namespace — hence the second list below.
+  #
+  # `proxy` (requests-proxy) is deliberately absent: it runs the jobs-manager
+  # image but is not in D6's Class A list, and adding a container because it
+  # happens to share an image is how a class boundary stops meaning anything.
+  classAContainers:
+    - api
+    - pods-monitor-container
+    - squid
+
+  # Class A containers that run in the node-agents namespace rather than the
+  # release namespace. Separate list rather than a magic value inside the one
+  # above: the namespace is part of the path, and a single `.Release.Namespace`
+  # scope silently missed resource-monitor entirely.
+  classANodeAgentContainers:
+    - tracebloc-resource-monitor
+
+  # Where the kubelet writes container stdout. Overridable because it is not
+  # universal — k3s and some distributions differ — and a wrong path yields a
+  # Collector that runs, reports healthy, and collects nothing.
+  hostLogsPath: /var/log/pods
+
+  # The Secret jobs-manager writes the ingest token into, and the key inside it.
+  # Read through `bearertokenauth`'s `filename`, which watches the projected file
+  # (credentialsfile.ValueResolver + WithOnChange upstream), so a rotated token is
+  # picked up without restarting the Collector.
+  tokenSecret:
+    name: tracebloc-telemetry-token
+    key: token
+
+  # `Token`, NOT `Bearer`. The edge authenticates to the backend with a DRF user
+  # token (`Authorization: Token <key>`, see client-runtime jobs_manager.py), and
+  # the ingest endpoint accepts it via `TokenAuthentication` under
+  # `IsAuthenticatedEdge`. The extension's default scheme is `Bearer`, which is
+  # the OTHER credential type (`ClientAccessToken`) — sending the wrong keyword
+  # 401s silently, so this is set explicitly rather than defaulted.
+  authScheme: Token
+
+  # D7's bounds. ONE bound: the byte cap.
+  buffer:
+    # 1 GiB — 10% of the smallest disk the installer accepts, so the buffer can
+    # never be the reason a node fills.
+    maxSizeBytes: 1073741824
+    # DROP-NEWEST, and it is named here rather than left to a default because D7
+    # was AMENDED to it (rfcs#36): `exporterhelper` sheds at the ENTRANCE and has
+    # no evict-oldest option (upstream #12788, open). So a long outage is
+    # observable at its START and dark at its end. That is the inverse of what an
+    # operator expects, which is why the drop COUNT is load-bearing here rather
+    # than incidental — it is the only signal separating a quiet edge from a
+    # shedding one.
+    blockOnOverflow: false
+
+  # Retry forever. A second, time-based bound silently overrides the byte cap,
+  # because under `exporterhelper` a batch past `max_elapsed_time` is DROPPED
+  # rather than requeued — so the shorter bound wins and the cap stops meaning
+  # anything. D7: one bound.
+  retryMaxElapsedTime: 0
 
 # -- Container image pinning.
 # For each image, set `digest` to a sha256 (e.g. "sha256:abc123...") to pin

@@ -40,17 +40,37 @@
         "RESOURCE_REQUESTS": {
           "type": "string",
           "pattern": "^(cpu=\\S+,memory=\\S+)?$",
-          "description": "Optional explicit resource requests for spawned training jobs. Unset: jobs-manager derives the envelope from node allocatable (75% with cpu=2/memory=8Gi floors, backend#664); older images fall back to 'cpu=2,memory=8Gi'."
+          "description": "Optional explicit resource requests for spawned training jobs. Unset: jobs-manager uses its built-in 'cpu=2,memory=8Gi' literal. The node-allocatable derivation (75%, backend#664 L0) is real but gated OFF behind DERIVE_JOB_ENVELOPE, which is only consulted when BOTH this key and its pair are unset (backend#2167, backend#2250)."
         },
         "RESOURCE_LIMITS": {
           "type": "string",
           "pattern": "^(cpu=\\S+,memory=\\S+)?$",
-          "description": "Optional explicit resource limits for spawned training jobs. Unset: jobs-manager derives the envelope from node allocatable (75% with cpu=2/memory=8Gi floors, backend#664); older images fall back to 'cpu=2,memory=8Gi'."
+          "description": "Optional explicit resource limits for spawned training jobs. Unset: jobs-manager uses its built-in 'cpu=2,memory=8Gi' literal. The node-allocatable derivation (75%, backend#664 L0) is real but gated OFF behind DERIVE_JOB_ENVELOPE, which is only consulted when BOTH this key and its pair are unset (backend#2167, backend#2250)."
         },
         "RESOURCE_PROVENANCE": {
           "type": "string",
-          "enum": ["installer", "user", "unknown", ""],
+          "enum": [
+            "installer",
+            "user",
+            "unknown",
+            ""
+          ],
           "description": "Who chose RESOURCE_REQUESTS/RESOURCE_LIMITS: 'installer' (sized to this machine at install), 'user' (an explicit 'tracebloc resources set'), or 'unknown' (a value carried forward from before this key existed, so provenance is genuinely unknowable). Read-only bookkeeping for backend#2220 - it never changes the envelope, it records who picked it, so a future ladder can re-derive an installer-written value without ever overriding a deliberate human choice."
+        },
+        "DERIVE_JOB_ENVELOPE": {
+          "type": "string",
+          "enum": [
+            "1",
+            "true",
+            "yes",
+            "on",
+            "0",
+            "false",
+            "no",
+            "off",
+            ""
+          ],
+          "description": "Opt in to the node-derived training-job envelope (backend#664 Utilization Ladder L0): cpu = max(2, floor(allocatable*0.75)), memory = max(8Gi, floor(allocatable*0.75)), requests == limits. OFF by default and consulted ONLY when RESOURCE_REQUESTS and RESOURCE_LIMITS are both unset - an explicit envelope always wins, and both installers write that pair unconditionally, so opting an installer-provisioned edge in means clearing both keys too. Turning it on caps the machine at ONE concurrent training job (any Guaranteed fraction >= 50% does), and on an uncapped multi-node k3d cluster every node over-reports the whole Docker VM, so the derivation's min-across-nodes does not protect you (backend#2167). The vocabulary is CLOSED and lowercase: jobs-manager itself lower-cases and strips, so 'True' would also work at runtime, but pinning lowercase here means a typo ('ture') is rejected at install time instead of silently leaving the flag off - the silent-off failure is precisely why backend#2250 exists. Narrowing the accepted set can never make the runtime do something this schema forbade; do not widen it to 'fix' the asymmetry."
         },
         "GPU_REQUESTS": {
           "type": "string",
@@ -91,7 +111,11 @@
             },
             "vendor": {
               "type": "string",
-              "enum": ["", "nvidia", "amd"],
+              "enum": [
+                "",
+                "nvidia",
+                "amd"
+              ],
               "description": "Which vendor plugin to render when enabled; required non-empty when enabled is true."
             },
             "namespace": {
@@ -102,19 +126,37 @@
             "nvidia": {
               "type": "object",
               "properties": {
-                "registry": { "type": "string" },
-                "repository": { "type": "string", "minLength": 1 },
-                "tag": { "type": "string" },
-                "digest": { "type": "string" }
+                "registry": {
+                  "type": "string"
+                },
+                "repository": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "tag": {
+                  "type": "string"
+                },
+                "digest": {
+                  "type": "string"
+                }
               }
             },
             "amd": {
               "type": "object",
               "properties": {
-                "registry": { "type": "string" },
-                "repository": { "type": "string", "minLength": 1 },
-                "tag": { "type": "string" },
-                "digest": { "type": "string" }
+                "registry": {
+                  "type": "string"
+                },
+                "repository": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "tag": {
+                  "type": "string"
+                },
+                "digest": {
+                  "type": "string"
+                }
               }
             }
           }
@@ -187,7 +229,10 @@
       }
     },
     "singleNode": {
-      "type": ["boolean", "null"],
+      "type": [
+        "boolean",
+        "null"
+      ],
       "default": null,
       "description": "Cluster topology: does this cluster have a single schedulable node? Gates the AUTO-mode single-replica PodDisruptionBudgets (a minAvailable:1 PDB is undrainable on one node). null => default to hostPath.enabled; true/false => explicit. Deliberately separate from env.SINGLE_NODE (GPU->CPU fallback, which may be true on a fixed multi-node cluster). The installer sets true for node-local single-node k3d (client#560)."
     },
@@ -956,7 +1001,10 @@
           "type": "object",
           "properties": {
             "create": {
-              "type": ["boolean", "null"],
+              "type": [
+                "boolean",
+                "null"
+              ],
               "default": null,
               "description": "null (default) = auto: render on multi-node CSI (hostPath.enabled=false), skip on single-node/bare-metal (hostPath.enabled=true). true = force render, false = never render. See tracebloc/client#560."
             }
@@ -966,7 +1014,10 @@
           "type": "object",
           "properties": {
             "create": {
-              "type": ["boolean", "null"],
+              "type": [
+                "boolean",
+                "null"
+              ],
               "default": null,
               "description": "null (default) = auto: render on multi-node CSI (hostPath.enabled=false), skip on single-node/bare-metal (hostPath.enabled=true). true = force render, false = never render. See tracebloc/client#560."
             }
@@ -1250,11 +1301,15 @@
       "allOf": [
         {
           "if": {
-            "required": ["existingSecret"]
+            "required": [
+              "existingSecret"
+            ]
           },
           "then": {
             "properties": {
-              "create": { "const": false }
+              "create": {
+                "const": false
+              }
             }
           }
         },
@@ -1292,6 +1347,105 @@
       "description": "Per-environment default for the backend#1528 S3 bootstrap re-parent (edgeuser -> root for the account-minting DDL), keyed on the RESOLVED CLIENT_ENV (dev|stg|prod \u2014 aliases normalized first). Mirrors serviceDbAccountsByEnv. This is the LAST, edgeuser-retiring step, so it is false everywhere by default; flip dev-first only after the earlier flags are verified on the fleet.",
       "additionalProperties": {
         "type": "boolean"
+      }
+    },
+    "telemetryCollector": {
+      "type": [
+        "object",
+        "null"
+      ],
+      "required": [
+        "classAContainers",
+        "classANodeAgentContainers"
+      ],
+      "description": "Edge telemetry Collector (RFC-BACKEND-1872 D6/D7, backend#1906). An OpenTelemetry Collector DaemonSet reading Class A container stdout and forwarding to the backend's ingest endpoint. Ships DISABLED: its exporter authenticates with a Secret jobs-manager writes (backend#2274), and enabling it first spools to every node's disk with nothing to deliver. `type` allows null so `--reuse-values` from a release predating this block validates.",
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "default": false
+        },
+        "image": {
+          "type": "object",
+          "properties": {
+            "registry": {
+              "type": "string"
+            },
+            "repository": {
+              "type": "string"
+            },
+            "tag": {
+              "type": "string",
+              "description": "Must be >= 0.130: `block_on_overflow` and `sizer: bytes` on a persistent queue do not exist below it, and the Collector rejects unknown config keys rather than ignoring them."
+            },
+            "digest": {
+              "type": "string"
+            }
+          }
+        },
+        "resources": {
+          "type": "object"
+        },
+        "classAContainers": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "string"
+          },
+          "description": "CONTAINER names (not workload names) in the RELEASE namespace whose stdout is collected. Class A per D12. Verified against the rendered chart by scripts/tests/collector-class-a-agreement.sh."
+        },
+        "classANodeAgentContainers": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "string"
+          },
+          "description": "Class A containers in nodeAgents.namespace rather than the release namespace \u2014 the namespace is part of the filelog path."
+        },
+        "hostLogsPath": {
+          "type": "string",
+          "minLength": 1
+        },
+        "tokenSecret": {
+          "type": "object",
+          "properties": {
+            "name": {
+              "type": "string",
+              "minLength": 1
+            },
+            "key": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        },
+        "authScheme": {
+          "type": "string",
+          "enum": [
+            "Token",
+            "Bearer"
+          ],
+          "description": "`Token` for the edge's DRF user token, which the ingest endpoint accepts via TokenAuthentication. `Bearer` is the ClientAccessToken type and 401s silently \u2014 a CLOSED set so a typo cannot pick a third."
+        },
+        "buffer": {
+          "type": "object",
+          "properties": {
+            "maxSizeBytes": {
+              "type": "integer",
+              "minimum": 1,
+              "description": "D7's byte cap. 1 GiB default."
+            },
+            "blockOnOverflow": {
+              "type": "boolean",
+              "default": false,
+              "description": "false = drop-newest, per D7's 2026-08-20 amendment. true stalls the pipeline and relocates loss to kubelet rotation, uncounted."
+            }
+          }
+        },
+        "retryMaxElapsedTime": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "0 = retry forever, so the byte cap is the ONLY bound. Any positive value silently overrides it."
+        }
       }
     }
   }

@@ -835,3 +835,80 @@ can be kept above the configured helm timeout.
 {{- end -}}
 {{- $total -}}
 {{- end -}}
+
+{{/*
+  tracebloc.telemetryCollectorName — the edge Collector's resource name
+  (backend#1906). Same shape as tracebloc.resourceMonitorName: release-scoped, so
+  two releases on one cluster do not collide in the shared node-agents namespace.
+*/}}
+{{- define "tracebloc.telemetryCollectorName" -}}
+{{- printf "%s-telemetry-collector" .Release.Name | trunc 63 | trimSuffix "-" -}}
+{{- end -}}
+
+{{/*
+  tracebloc.backendUrl — the tracebloc API base URL for this CLIENT_ENV, with a
+  trailing slash.
+
+  Resolved through `tracebloc.clientEnv` rather than the raw value, so a
+  documented alias (`staging`) lands on the same host as its canonical form and
+  cannot silently route an install at the wrong backend — the backend#1745 defect.
+
+  A FOURTH COPY OF THIS MAPPING, and saying so is the point. It also lives in
+  `scripts/lib/install-client-helm.sh::_backend_url`,
+  `scripts/lib/preflight.sh::_pf_backend_host`, and inline in
+  `templates/egress-reachability-check.yaml`. Helm cannot read the shell ones and
+  they cannot read this, so there is no single source available here; this is the
+  single source for TEMPLATES, and pointing the reachability check at it is a
+  refactor that belongs in its own PR rather than riding on a feature.
+*/}}
+{{- define "tracebloc.backendUrl" -}}
+{{- $env := include "tracebloc.clientEnv" . -}}
+{{- if eq $env "dev" -}}
+https://dev-api.tracebloc.io/
+{{- else if eq $env "stg" -}}
+https://stg-api.tracebloc.io/
+{{- else -}}
+https://api.tracebloc.io/
+{{- end -}}
+{{- end -}}
+
+{{/*
+  tracebloc.nodeAgentsInUse — true when a POD-BEARING tenant of
+  nodeAgents.namespace is enabled (backend#1906, @saadqbal's review of #779;
+  narrowed from "anything the chart owns" by backend#2400).
+
+  ONE PREDICATE, not N readers. Five templates put something in that namespace
+  and each carried its own copy of "is resource-monitor on"; when the Collector
+  became a second tenant, two of them were widened and the rest were not, so the
+  configuration this feature exists to enable — resourceMonitor off, Collector on
+  — created the namespace, landed the DaemonSet, and left the RBAC that manages it
+  behind. Adding a third POD-BEARING tenant should be one line here, not an audit.
+
+  "POD-BEARING" IS THE LOAD-BEARING WORD, and it is narrower than the sentence
+  this docstring used to open with. Every consumer left is about pods: RBAC that
+  patches or deletes DaemonSets there, and the image pull Secret they pull with.
+  backend#2400 added an occupant with no pods — telemetry-token-rbac.yaml's Role
+  and RoleBinding, which let jobs-manager write the Collector's token Secret
+  before anyone can enable the Collector, and therefore render unconditionally.
+  Widening this helper to cover it would make it a constant `true`: measured, that
+  grants auto-upgrade and image-refresh DaemonSet rights in a namespace that has
+  no DaemonSets (4 extra RBAC objects) and leaves a question that can only be
+  answered one way. The Namespace object no longer asks it either — with a
+  pod-less occupant always present, the namespace is always required.
+
+  So: a new occupant belongs here only if it brings PODS. One that does not gates
+  itself, and says why it does not gate on this.
+
+  THE NIL-GUARD IS LOAD-BEARING, which is the other reason this is central. A bare
+  `.Values.telemetryCollector.enabled` throws "nil pointer evaluating
+  interface {}.enabled" for anyone running `helm upgrade --reuse-values` from a
+  chart that predates the key — a very common operator habit, and it fails before
+  a single resource lands. Guarded once here instead of five times.
+
+  Emits the string "true" or nothing, so callers use it as
+  `(include "tracebloc.nodeAgentsInUse" .)` inside an `and`.
+*/}}
+{{- define "tracebloc.nodeAgentsInUse" -}}
+{{- $tc := default (dict) .Values.telemetryCollector -}}
+{{- if or (ne .Values.resourceMonitor false) $tc.enabled }}true{{ end -}}
+{{- end -}}

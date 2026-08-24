@@ -170,19 +170,36 @@ roleRef:
   kind: ClusterRole
   name: {{ include "tracebloc.autoUpgradeName" . }}
   apiGroup: rbac.authorization.k8s.io
-{{- if and (ne .Values.resourceMonitor false) (ne .Values.nodeAgents.namespace.name .Release.Namespace) }}
+{{- if ne .Values.nodeAgents.namespace.name .Release.Namespace }}
 {{/*
   backend#953 (Bugbot): when node-agents run in their OWN namespace (the
   default `tracebloc-node-agents`), the chart also templates namespaced objects
   there — resource-monitor DaemonSet + ServiceAccount (+ SCC on OpenShift), the
-  optional registry Secret, and the image-refresh Role/RoleBinding — all gated
-  on `resourceMonitor != false`. The release-namespace Role above does NOT reach
-  that namespace, so after the cluster-admin cutover a `helm upgrade --atomic
-  --wait` tick would 403 on those objects and auto-upgrade could not land. Grant
-  the same confined full control in the node-agents namespace, rendered only
-  when it is a SEPARATE namespace and resource-monitor is enabled (i.e. exactly
-  when those objects exist). `*` verbs include escalate/bind, so the
-  image-refresh Role/RoleBinding in that namespace can be re-applied on upgrade.
+  optional registry Secret, the image-refresh Role/RoleBinding, and the
+  Collector's token Role/RoleBinding. The release-namespace Role above does NOT
+  reach that namespace, so a `helm upgrade --atomic --wait` tick would 403 on
+  those objects and auto-upgrade could not land. Grant the same confined full
+  control there. `*` verbs include escalate/bind, so a Role/RoleBinding in that
+  namespace can be re-applied on upgrade.
+
+  NO TENANT CONDITION (backend#2400, Bugbot on #801). This carried
+  `tracebloc.nodeAgentsInUse` and a comment claiming it rendered "exactly when
+  those objects exist" — a restatement of another template's gate, and it went
+  false the moment backend#2400 made the token Role/RoleBinding render with no
+  flag at all. On `resourceMonitor: false` with the Collector off, the chart then
+  put two objects in that namespace that auto-upgrade could not apply, so the next
+  hourly tick would 403 and ROLL BACK, and no later chart could land on that edge
+  either. That is the same paired-construct break backend#2400 exists to fix, one
+  template over.
+
+  THIS TRACKS THE APPLIER, NOT THE TENANTS. auto-upgrade re-applies the WHOLE
+  chart, so its reach has to follow "does the chart put anything there", which is
+  now unconditional — not "does a pod run there", which is what
+  `tracebloc.nodeAgentsInUse` answers and what image-refresh below still needs.
+  The remaining condition is the one that is actually load-bearing: when the two
+  namespaces coincide, the release-namespace Role above already covers it.
+  scripts/tests/node-agents-namespace-safety.sh asserts the implication rather
+  than the spelling, so a future occupant cannot re-open this by accident.
 */}}
 ---
 apiVersion: rbac.authorization.k8s.io/v1

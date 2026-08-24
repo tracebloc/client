@@ -128,15 +128,28 @@ data:
     # refresh for ALL FOUR workloads while every tick exits 0 and the CronJob
     # stays green. Nobody looks at a green CronJob.
     #
-    # This is reachable without anything crashing. jobs-manager's readiness
-    # probe (jobs-manager-deployment.yaml) is a TCP connect to 8080, and
-    # jobs_manager.py CATCHES a failed run_server_in_thread on purpose so
-    # Service Bus polling and training survive. The pod then runs forever,
-    # useful, and never Ready -- so `rollout status` never settles. Measured
-    # triggers, all operator-reachable: a malformed ingestion-authz.yaml
-    # (load_authz_policy raises), edgeuser losing CREATE/ALTER on the
-    # ingestion_runs table (ensure_ingestion_runs_table raises), or 8080
-    # already bound (make_server binds in _ServerThread.__init__).
+    # This is reachable without anything crashing. jobs_manager.py CATCHES a
+    # failed run_server_in_thread on purpose so Service Bus polling and
+    # training survive, and the chart ships readiness ONLY (no liveness, no
+    # startupProbe -- both would kill that useful pod). So the pod can run
+    # forever, useful, and never Ready -- and `rollout status` never settles.
+    # Measured triggers, all operator-reachable, from when the probe was a TCP
+    # connect to 8080: a malformed ingestion-authz.yaml (load_authz_policy
+    # raises), edgeuser losing CREATE/ALTER on the ingestion_runs table
+    # (ensure_ingestion_runs_table raises), or 8080 already bound (make_server
+    # binds in _ServerThread.__init__).
+    #
+    # backend#1779 repointed that probe at `GET /healthz`, which now reports
+    # authz_mount / schema / metadata_db and answers 503 when any of them
+    # fails. That WIDENS the set of never-settles states this counter has to
+    # absorb: a pod whose ingestion-authz ConfigMap is not mounted, or that
+    # cannot reach MySQL, is now NotReady where it used to answer the TCP
+    # connect and be Ready. Those are real breakages -- pausing image refresh
+    # while one is in progress is correct, and this ceiling is what turns a
+    # long one into a loud ERROR instead of a silent freeze. The MySQL case is
+    # the new one worth knowing about: a MySQL outage lasting more than
+    # MAX_SKIP_TICKS ticks (~2h by default) will trip this guard, and the
+    # remediation is to fix MySQL, not to raise the ceiling.
     #
     # The flap counter above CANNOT cover this: it counts failed ROLLOUTS, and
     # everything after the settled guard is unreachable when the deployment
@@ -328,9 +341,14 @@ data:
           # on its own.
           log "ERROR: deployment/${DEPLOYMENT_NAME} has been unsettled for ${skips} consecutive ticks (>= MAX_SKIP_TICKS=${MAX_SKIP_TICKS}). IMAGE REFRESH IS FROZEN, and not only for jobs-manager: deployment/${REQUESTS_PROXY_DEPLOYMENT} and daemonset/${RESOURCE_MONITOR_DAEMONSET} are reconciled after this guard, so they have received NO image updates either."
           log "  MANUAL ATTENTION NEEDED. Most likely the jobs-manager pod is Running but never Ready, which the readiness probe reports and nothing kills:"
-          log "    kubectl -n ${RELEASE_NAMESPACE} get pods -l app.kubernetes.io/component=jobs-manager"
+          log "    kubectl -n ${RELEASE_NAMESPACE} get pods -l app=manager"
           log "    kubectl -n ${RELEASE_NAMESPACE} logs deployment/${DEPLOYMENT_NAME} -c api | grep -i 'ingestion HTTP server'"
+          log "    kubectl -n ${RELEASE_NAMESPACE} describe pod -l app=manager | grep -A2 'Readiness probe failed'"
           log "  A 'Failed to start ingestion HTTP server' line means 8080 never opened: check ingestion-authz.yaml parses, that the DB user may create the ingestion_runs table, and that 8080 is free. Refresh resumes by itself once the pod goes Ready."
+          log "  The probe is GET /healthz (backend#1779), so 8080 may be open and the probe still red. The kubelet event above reports only the STATUS CODE -- it never carries the response body -- so a 503 there tells you the probe failed, not which dependency did. Read the body yourself:"
+          log "    kubectl -n ${RELEASE_NAMESPACE} port-forward deployment/${DEPLOYMENT_NAME} 8080:8080   # then, in another shell:"
+          log "    curl -s localhost:8080/healthz   # {\"failed\":[...]} names authz_mount (ingestion-authz ConfigMap not mounted), schema, or metadata_db (MySQL unreachable)"
+          log "  port-forward works on a NotReady pod -- readiness gates Service endpoints, not port-forward. Fix the named dependency; do not raise MAX_SKIP_TICKS."
           exit 1
         fi
 
@@ -642,6 +660,9 @@ spec:
             app.kubernetes.io/component: image-refresh
         spec:
           serviceAccountName: {{ include "tracebloc.imageRefreshName" . }}
+          # NEEDED. image-refresh-rbac.yaml binds this SA to Roles that patch
+          # Deployments and DaemonSets — the rollout it exists to trigger.
+          automountServiceAccountToken: true
           restartPolicy: OnFailure
           {{- if include "tracebloc.useImagePullSecrets" . }}
           imagePullSecrets:
