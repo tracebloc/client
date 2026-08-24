@@ -763,8 +763,8 @@ function Assert-NodesSeeHostData {
         throw @"
 Node '$node' cannot see your data directory ($($script:HOST_DATA_DIR)).
 
-  Everything would appear to install, but the workspace would store your data
-  INSIDE the node instead of on this machine -- and lose it when the cluster is
+  Everything would appear to install, but the secure environment would store your
+  data INSIDE the node instead of on this machine -- and lose it when the cluster is
   recreated. Refusing to continue.
 
   Most likely causes:
