@@ -39,13 +39,13 @@
         },
         "RESOURCE_REQUESTS": {
           "type": "string",
-          "pattern": "^(cpu=\\S+,memory=\\S+)?$",
-          "description": "Optional explicit resource requests for spawned training jobs. Unset: jobs-manager uses its built-in 'cpu=2,memory=8Gi' literal. The node-allocatable derivation (75%, backend#664 L0) is real but gated OFF behind DERIVE_JOB_ENVELOPE, which is only consulted when BOTH this key and its pair are unset (backend#2167, backend#2250)."
+          "pattern": "^((cpu|memory|ephemeral-storage)=[^,=\\s]+(,(cpu|memory|ephemeral-storage)=[^,=\\s]+)*)?$",
+          "description": "Optional explicit resource requests for spawned training jobs. Comma-separated key=value over a CLOSED set of dimensions: cpu, memory, ephemeral-storage (disk added by backend#2223). Order is free and any subset is allowed; an omitted dimension falls back to jobs-manager's own default. The vocabulary is closed deliberately: client-runtime parses this with a generic key=value split and no allow-list, so a typo such as 'memroy=8Gi' would reach the pod spec as a silently wrong envelope instead of an error. The previous pattern was also leakier than it looked - \\S+ matched commas, so 'cpu=2,memory=8Gi,gpu=1' validated. Unset: jobs-manager uses its built-in 'cpu=2,memory=8Gi' literal. The node-allocatable derivation (75%, backend#664 L0) is real but gated OFF behind DERIVE_JOB_ENVELOPE, which is only consulted when BOTH this key and its pair are unset (backend#2167, backend#2250)."
         },
         "RESOURCE_LIMITS": {
           "type": "string",
-          "pattern": "^(cpu=\\S+,memory=\\S+)?$",
-          "description": "Optional explicit resource limits for spawned training jobs. Unset: jobs-manager uses its built-in 'cpu=2,memory=8Gi' literal. The node-allocatable derivation (75%, backend#664 L0) is real but gated OFF behind DERIVE_JOB_ENVELOPE, which is only consulted when BOTH this key and its pair are unset (backend#2167, backend#2250)."
+          "pattern": "^((cpu|memory|ephemeral-storage)=[^,=\\s]+(,(cpu|memory|ephemeral-storage)=[^,=\\s]+)*)?$",
+          "description": "Optional explicit resource limits for spawned training jobs. Comma-separated key=value over a CLOSED set of dimensions: cpu, memory, ephemeral-storage (disk added by backend#2223). Order is free and any subset is allowed; an omitted dimension falls back to jobs-manager's own default. The vocabulary is closed deliberately: client-runtime parses this with a generic key=value split and no allow-list, so a typo such as 'memroy=8Gi' would reach the pod spec as a silently wrong envelope instead of an error. The previous pattern was also leakier than it looked - \\S+ matched commas, so 'cpu=2,memory=8Gi,gpu=1' validated. Unset: jobs-manager uses its built-in 'cpu=2,memory=8Gi' literal. The node-allocatable derivation (75%, backend#664 L0) is real but gated OFF behind DERIVE_JOB_ENVELOPE, which is only consulted when BOTH this key and its pair are unset (backend#2167, backend#2250)."
         },
         "RESOURCE_PROVENANCE": {
           "type": "string",

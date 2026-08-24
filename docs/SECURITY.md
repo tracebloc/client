@@ -234,7 +234,9 @@ When enabled, the training pod also gets three `emptyDir` mounts to host framewo
 | `/tmp` | matplotlib, numpy, and other framework scratch |
 | `/data/scratch` | per-experiment working directory — weights, model files, intermediate state (training code reads `EXPERIMENT_SCRATCH_PATH=/data/scratch` and roots its writes there) |
 
-All three mounts are tmpfs-backed emptyDirs and are destroyed with the pod.
+All three mounts are `emptyDir` volumes **backed by node disk** — not tmpfs — and are destroyed with the pod. Each carries a `sizeLimit` (backend#2223); before that they were unbounded, which is how an ephemeral-storage eviction came to be reported to a user as "CPU Overload" (backend#2053).
+
+> Disk-backed is the **correct** choice and must stay that way. `medium: Memory` would charge every file written there against the pod's *memory* limit, so a resume checkpoint (RFC §X3 writes roughly 3× model size — ~3.6 GiB for BERT-large) would OOM the very run the checkpoint exists to save. This sentence previously read "tmpfs-backed", which was simply wrong about the code; if you are tempted to "fix" the code to match an older copy of this doc, don't.
 
 ### 4.5 Storage isolation (G5, G6)
 
