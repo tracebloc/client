@@ -19,12 +19,17 @@
 #      * Negative DNS entry
 #      curl: (5) Could not resolve proxy: tb-egress-squid...
 #
-#  Confirmed A/B in curlimages/curl:latest (the image the pod runs), with the
-#  proxy name made resolvable 4 s into the run: the one-process form failed all
+#  Confirmed A/B in curlimages/curl:latest, with the proxy name made resolvable
+#  4 s into the run: the one-process form failed all
 #  9 attempts on the stale negative entry, while the fresh-process loop
 #  re-resolved on the very next attempt. So the guard's documented protection
 #  was inert and the whole check turned on a single resolver query issued about
 #  a second after the pod started.
+#
+#  The pod now runs curlimages/curl:8.20.0, not :latest (pinned in client#813).
+#  The A/B above was measured on BOTH tags and they behave identically on the
+#  negative-caching point, so the finding still holds for the pinned image --
+#  the pin was supply-chain hygiene, not part of this fix.
 #
 #  WHAT IS PINNED HERE. Not "the mutation" — the requirement, in both
 #  directions (backend#1729 rule 6):

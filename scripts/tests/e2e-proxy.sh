@@ -293,7 +293,19 @@ spec:
       hostnames: ["${BACKEND_HOST}"]
   containers:
     - name: app
-      image: curlimages/curl:latest
+      # Pinned, and to the SAME tag as e2e_egress_positive_control's probe in
+      # lib/e2e-common.sh, so the suite's two curl probes cannot drift apart.
+      #
+      # Why: this job is a candidate required status check, and a floating tag
+      # lets an external registry's next push block a merge here with nothing in
+      # the diff to explain why. That exposure is a property of the whole job,
+      # not of this one line -- the squid and nginx images it also pulls were
+      # digest-pinned in client#814 (backend#2446). With those and this, every
+      # image the job pulls is pinned; none of them floats.
+      #
+      # Not a flake fix: latest and 8.20.0 were both measured under backend#2350
+      # and behave identically with respect to curl's negative DNS caching.
+      image: curlimages/curl:8.20.0
       env:
         - { name: HTTP_PROXY,  value: "${APP_PROXY_URL}" }
         - { name: HTTPS_PROXY, value: "${APP_PROXY_URL}" }
