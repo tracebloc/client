@@ -5304,8 +5304,85 @@ Describe "Bounded process survives a child that closes stdin first (broken pipe)
   It "the stdin write is guarded, like Start and Kill already were (source guard)" {
     # Belt and braces to the behavioural case above: if someone unwraps the try/catch,
     # this fails even on a machine where the race happens not to fire.
+    #
+    # Matches the WRITE GUARD ONLY. It deliberately does not pin the statement that
+    # follows Write() inside the try: the previous version of this assertion was one
+    # literal blob covering `Write(...); Close()` together, so it spoke for two
+    # independent properties at once and had to be rewritten to change either. The
+    # Close() placement is asserted on its own, below.
     $fn = (($script:BPSRC -split 'function Invoke-BoundedProcess')[1] -split '\nfunction ')[0]
-    $fn | Should -Match 'try \{ \$proc\.StandardInput\.Write\(\$Stdin\); \$proc\.StandardInput\.Close\(\) \} catch'
+    $fn | Should -Match '\$proc\.StandardInput\.Write\(\$Stdin\)'
+    $fn | Should -Match 'try \{ \$proc\.StandardInput\.Write\(\$Stdin\) \} catch'
+  }
+
+  It "stdin is closed even when the write throws -- Close() is in a finally (backend#2246)" {
+    # Chained as `try { Write(...); Close() } catch { }`, a throw from Write() skipped
+    # Close() entirely: the child never received EOF and our write handle stayed open.
+    # Because the one exception actually seen here (broken pipe) is swallowed by design,
+    # the skip was silent. Asserting the `finally` is what makes it non-silent.
+    $fn = (($script:BPSRC -split 'function Invoke-BoundedProcess')[1] -split '\nfunction ')[0]
+    $fn | Should -Match 'finally \{ try \{ \$proc\.StandardInput\.Close\(\) \} catch \{ \} \}'
+    # ...and NOT back inside the same try as the write, which is the shape that regressed.
+    $fn | Should -Not -Match 'Write\(\$Stdin\); \$proc\.StandardInput\.Close\(\)'
+  }
+
+  It "stdout is drained BEFORE the stdin write, so a chatty child cannot deadlock (backend#2246)" {
+    # ORDERING GUARD, derived by position from the real function body rather than from a
+    # transcription of it: the ReadToEndAsync() that drains stdout must appear ahead of
+    # the stdin write. Reversed -- which is how this shipped -- a child that both reads
+    # stdin and writes output wedges: it fills its stdout pipe, stops reading stdin, our
+    # Write() blocks, and WaitForExit() is never reached, so -TimeoutSec never fires at
+    # all. The behavioural proof is the case below; this catches a reorder on any
+    # platform, including one where the deadlock case is skipped.
+    $fn = (($script:BPSRC -split 'function Invoke-BoundedProcess')[1] -split '\nfunction ')[0]
+    $drain = $fn.IndexOf('$proc.StandardOutput.ReadToEndAsync()')
+    $write = $fn.IndexOf('$proc.StandardInput.Write($Stdin)')
+    # Fail closed: if either anchor is gone this function has been restructured, and an
+    # index of -1 must read as "cannot tell", never as agreement (a bare -lt would let
+    # two missing anchors compare equal and pass).
+    $drain | Should -BeGreaterThan -1 -Because 'the stdout drain anchor must exist to be ordered'
+    $write | Should -BeGreaterThan -1 -Because 'the stdin write anchor must exist to be ordered'
+    $drain | Should -BeLessThan $write -Because 'draining stdout after the stdin write is the deadlock'
+  }
+
+  # Skip condition is the ACTUAL precondition -- "is there a /bin/cat to run" -- not a
+  # platform guess. `-Skip:$IsWindows` would have been wrong twice: $IsWindows does not
+  # exist under Windows PowerShell 5.1 (the version install.ps1 pins), so it evaluates
+  # $null there, the test would run, /bin/cat would not exist, and a missing binary would
+  # be reported as this deadlock regressing.
+  It "a chatty child that reads stdin returns its real verdict, not a hang (backend#2246)" -Skip:(-not (Test-Path '/bin/cat')) {
+    # THE DEADLOCK, REPRODUCED. `cat` reads stdin AND echoes every byte to stdout, and
+    # stdout is redirected -- the exact shape of the caller Bugbot named, `docker exec -i
+    # <node> sh`, where the shell consumes a script on stdin and the script prints.
+    #
+    # 200 KB deliberately exceeds the ~64 KiB OS pipe buffer. A payload that FITS the
+    # buffer cannot deadlock and would pass with the bug present, which is why the
+    # existing broken-pipe case above does not cover this one despite also being 200 KB:
+    # `/usr/bin/true` produces no output, so there is no stdout backpressure.
+    #
+    # Run in a JOB with an OUTER watchdog because the failure is an unbounded HANG, not a
+    # 124 -- a direct call would hang the whole Pester run rather than fail this test.
+    # Measured before the fix: past 60s with -TimeoutSec 20. After: ~0.2s.
+    $job = Start-Job -ScriptBlock {
+      param($src)
+      $fn = (($src -split 'function Invoke-BoundedProcess')[1] -split '\nfunction ')[0]
+      Invoke-Expression "function Invoke-BoundedProcess $fn"
+      $r = Invoke-BoundedProcess -FileName "/bin/cat" -Arguments @("-") -Stdin ("x" * 200000) -TimeoutSec 20
+      [pscustomobject]@{ Code = $r.Code; OutLen = "$($r.Output)".Length }
+    } -ArgumentList $script:BPSRC
+    $finished = Wait-Job $job -Timeout 60
+    $res = if ($finished) { Receive-Job $job } else { $null }
+    Stop-Job $job -ErrorAction SilentlyContinue
+    Remove-Job $job -Force -ErrorAction SilentlyContinue
+
+    # Name the specific failure. "It hung" and "it returned 124" are different defects and
+    # this must not report one as the other.
+    $finished | Should -Not -BeNullOrEmpty -Because 'the call deadlocked: it outlived a 60s watchdog despite -TimeoutSec 20'
+    $res.Code | Should -Not -Be 124 -Because 'a bounded write should not have to be killed by the timeout'
+    $res.Code | Should -Be 0 -Because "cat should exit 0; got $($res.Code)"
+    # And the payload really round-tripped -- proof the child was drained, not merely that
+    # something returned quickly.
+    $res.OutLen | Should -Be 200000 -Because "the full payload must come back; got $($res.OutLen) bytes"
   }
 }
 
