@@ -53,6 +53,72 @@ _ensure_tracebloc_dirs() {
   chmod -R 777 "$data_base/data" 2>/dev/null || true
 }
 
+# Prove the nodes can actually SEE the host tree before anything writes to it.
+#
+# In hostpath mode every chart PV is a hostPath onto /tracebloc/<release>/…, and
+# /tracebloc is the k3d bind mount of HOST_DATA_DIR. When that mount is not in
+# effect, nothing fails: kubelet's `DirectoryOrCreate` fabricates the directory
+# inside the node's own filesystem, the PVC Binds, the pod Runs, MySQL initialises
+# a brand-new empty datadir and the dataset dir reads as zero rows. There is no
+# event, no warning and no failed probe anywhere — the operator sees a healthy
+# install that has quietly stopped using their data. On the next `cluster delete`
+# it goes with the node.
+#
+# The obvious chart-side fix does not work: flipping the PVs to `type: Directory`
+# so kubelet refuses is REJECTED BY THE API SERVER on any existing release —
+# `spec.persistentvolumesource is immutable after creation` — so it fails the
+# `helm upgrade` of every install that already has PVs (measured on k3s v1.36.3,
+# release left in `failed`). Hence a probe here, before helm runs, where being
+# wrong costs an error message instead of a broken upgrade.
+#
+# Fails CLOSED. "Cannot tell" is a finding, not a pass: an unreadable marker, a
+# node we cannot exec into, or a node list we cannot obtain all block the install.
+# Silently proceeding is precisely the failure this exists to end.
+_verify_nodes_see_host_data() {
+  [[ "${TB_STORAGE_MODE:-hostpath}" == "node-local" ]] && return 0
+
+  local marker=".tracebloc-mount-probe"
+  # Content, not just presence: a bind mount pointed at the WRONG host directory
+  # still shows a file called .tracebloc-mount-probe from an earlier run. Only a
+  # token this invocation minted proves we are looking at this host tree now.
+  local token stamp
+  stamp="$(date +%s 2>/dev/null || echo 0)"
+  token="$$-${RANDOM}-${stamp}"
+  printf '%s' "$token" > "${HOST_DATA_DIR}/${marker}" 2>/dev/null \
+    || error "Can't write to ${HOST_DATA_DIR} — check the directory exists and you own it, then re-run."
+
+  local nodes node seen
+  # `docker ps` (running only): a created-but-stopped node cannot be exec'd and
+  # must not be mistaken for one that passed.
+  nodes=$(docker ps --filter "name=k3d-${CLUSTER_NAME}-" --format '{{.Names}}' 2>/dev/null | grep -vE -- '-serverlb$' || true)
+  if [[ -z "$nodes" ]]; then
+    rm -f "${HOST_DATA_DIR}/${marker}" 2>/dev/null || true
+    error "Couldn't list the nodes of cluster '${CLUSTER_NAME}' to check your data directory is visible inside it. Check 'docker ps' works, then re-run."
+  fi
+
+  for node in $nodes; do
+    seen=$(docker exec "$node" cat "/tracebloc/${marker}" 2>/dev/null || true)
+    if [[ "$seen" != "$token" ]]; then
+      rm -f "${HOST_DATA_DIR}/${marker}" 2>/dev/null || true
+      error "Node '${node}' cannot see your data directory (${HOST_DATA_DIR}).
+
+  Everything would appear to install, but the workspace would store your data
+  INSIDE the node instead of on this machine — and lose it when the cluster is
+  recreated. Refusing to continue.
+
+  Most likely causes:
+    * Docker Desktop is not sharing this path. Add it under
+      Settings -> Resources -> File sharing, then re-run.
+    * The cluster was created without the data mount. Recreate it:
+      'k3d cluster delete ${CLUSTER_NAME}' then re-run this installer.
+    * HOST_DATA_DIR changed since the cluster was created (currently ${HOST_DATA_DIR})."
+    fi
+  done
+
+  rm -f "${HOST_DATA_DIR}/${marker}" 2>/dev/null || true
+  log "Verified all ${CLUSTER_NAME} nodes see ${HOST_DATA_DIR} at /tracebloc."
+}
+
 # Modes the two SHARED hostPath dirs must end up with. Named constants because the
 # same pair is spelled out in two other places — the Windows installer's
 # $TB_SHARED_DIR_MODE/$TB_LOGS_DIR_MODE (scripts/install-k8s.ps1) and the chart's
@@ -573,6 +639,13 @@ create_cluster() {
   _merge_kubeconfig
   _export_host_no_proxy
   _wait_for_api
+
+  # Both branches above are done, so every node container is up and the bind
+  # mount (if any) is in effect — this is the first point where the question can
+  # be answered, and it is still before helm writes anything. Deliberately AFTER
+  # _handle_existing_cluster too: an adopted cluster is exactly the one that may
+  # have been created without the mount.
+  _verify_nodes_see_host_data
 }
 
 # Guarantee the cluster returns after a host reboot. On Linux this already works

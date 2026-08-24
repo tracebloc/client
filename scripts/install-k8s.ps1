@@ -717,6 +717,68 @@ function Ensure-ReleaseDirs($release) {
     New-Item -ItemType Directory -Force -Path $d -ErrorAction Stop | Out-Null
   }
 }
+
+# Prove the k3d nodes can actually SEE the host tree, before helm writes anything.
+# Mirrors bash _verify_nodes_see_host_data (scripts/lib/cluster.sh) -- keep the two
+# in lockstep.
+#
+# /tracebloc is the k3d bind mount of HOST_DATA_DIR. When it is not in effect
+# NOTHING fails: kubelet's DirectoryOrCreate fabricates the dirs inside the node,
+# the PVC Binds, the pod Runs, MySQL initialises an empty datadir and the dataset
+# dir reads as zero rows -- no event, no warning, and the data goes with the node
+# on the next `cluster delete`. This is the Windows/Docker-Desktop path's problem
+# specifically: a HOST_DATA_DIR outside the shared drives yields exactly that.
+#
+# The chart-side fix is NOT available: setting the PVs to `type: Directory` so
+# kubelet refuses is rejected by the API server on any existing release
+# ("spec.persistentvolumesource is immutable after creation"), failing the helm
+# upgrade of every install that already has PVs. Measured on k3s v1.36.3.
+#
+# Fails CLOSED -- an unreadable marker, a node that cannot be exec'd, or an
+# unobtainable node list all stop the install. "Cannot tell" is a finding.
+function Assert-NodesSeeHostData {
+  $marker = ".tracebloc-mount-probe"
+  # Content, not presence: a mount pointed at the WRONG directory still shows a
+  # file of this name from an earlier run. Only a token minted now proves it.
+  $token  = "$PID-$(Get-Random)-$([int][double]::Parse((Get-Date -UFormat %s)))"
+  $hostMarker = Join-Path $script:HOST_DATA_DIR $marker
+  try { Set-Content -Path $hostMarker -Value $token -NoNewline -ErrorAction Stop }
+  catch { throw "Can't write to $($script:HOST_DATA_DIR) -- check the directory exists and you own it, then re-run." }
+
+  try {
+    # Running containers only: a created-but-stopped node cannot be exec'd and must
+    # not be mistaken for one that passed. -serverlb is k3d's proxy, not a kubelet.
+    $nodes = @(& docker ps --filter "name=k3d-$($script:CLUSTER_NAME)-" --format "{{.Names}}" 2>$null |
+               Where-Object { $_ -and $_ -notmatch '-serverlb$' })
+    if ($nodes.Count -eq 0) {
+      throw "Couldn't list the nodes of cluster '$($script:CLUSTER_NAME)' to check your data directory is visible inside it. Check 'docker ps' works, then re-run."
+    }
+
+    foreach ($node in $nodes) {
+      # AGENTS defaults to 1 and agents run kubelets, so a training pod can land on
+      # an agent -- every node is checked, not just the server (the same @all-vs-
+      # @server trap as the cgroup v1 flag, #806).
+      $seen = (& docker exec $node cat "/tracebloc/$marker" 2>$null) -join ""
+      if ($seen -ne $token) {
+        throw @"
+Node '$node' cannot see your data directory ($($script:HOST_DATA_DIR)).
+
+  Everything would appear to install, but the workspace would store your data
+  INSIDE the node instead of on this machine -- and lose it when the cluster is
+  recreated. Refusing to continue.
+
+  Most likely causes:
+    * Docker Desktop is not sharing this path. Add it under
+      Settings -> Resources -> File sharing, then re-run.
+    * The cluster was created without the data mount. Recreate it:
+      'k3d cluster delete $($script:CLUSTER_NAME)' then re-run this installer.
+    * HOST_DATA_DIR changed since the cluster was created.
+"@
+      }
+    }
+  }
+  finally { Remove-Item -Path $hostMarker -Force -ErrorAction SilentlyContinue }
+}
 $CLIENT_ENV    = $env:CLIENT_ENV
 
 $GPU_VENDOR       = "none"
@@ -3899,6 +3961,13 @@ function New-K3dCluster {
   Log "kubeconfig updated -- kubectl now points to '$CLUSTER_NAME'."
 
   Set-ClusterAutostart
+
+  # Last thing cluster setup does, and the first point where the question can be
+  # answered: the nodes are up and the bind mount (if any) is in effect, and it is
+  # still before helm writes anything (backend#2422). Mirrors the bash twin, which
+  # calls _verify_nodes_see_host_data at the end of its own cluster path -- NOT
+  # from the helm install function, which is a different layer.
+  Assert-NodesSeeHostData
 }
 
 # =============================================================================

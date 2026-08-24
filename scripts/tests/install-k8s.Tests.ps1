@@ -6286,3 +6286,83 @@ Describe "Wait-MetricsApiService (client#553 -- the Windows installer had no wai
     }
   }
 }
+
+Describe "Assert-NodesSeeHostData (backend#2422)" {
+  # /tracebloc is the k3d bind mount of HOST_DATA_DIR. If it is not in effect,
+  # DirectoryOrCreate fabricates the dirs inside the node and the install looks
+  # healthy while storing nothing on this machine. The chart-side fix is
+  # unavailable (spec.persistentvolumesource is immutable, so `type: Directory`
+  # fails the helm upgrade of any existing release), so this probe is the guard —
+  # and it has to fail closed. Keep in step with bash _verify_nodes_see_host_data.
+  BeforeEach {
+    $script:HOST_DATA_DIR = Join-Path ([System.IO.Path]::GetTempPath()) "tb2422-$([guid]::NewGuid().ToString('N'))"
+    New-Item -ItemType Directory -Force -Path $script:HOST_DATA_DIR | Out-Null
+    $script:CLUSTER_NAME = "tracebloc"
+  }
+  AfterEach {
+    Remove-Item -Recurse -Force -Path $script:HOST_DATA_DIR -ErrorAction SilentlyContinue
+  }
+
+  It "passes when every node sees the host tree, and leaves no probe file behind" {
+    Mock docker {
+      if ($args[0] -eq "ps") { return @("k3d-tracebloc-server-0", "k3d-tracebloc-agent-0") }
+      if ($args[0] -eq "exec") { return (Get-Content (Join-Path $script:HOST_DATA_DIR ".tracebloc-mount-probe") -Raw) }
+    }
+    { Assert-NodesSeeHostData } | Should -Not -Throw
+    Test-Path (Join-Path $script:HOST_DATA_DIR ".tracebloc-mount-probe") | Should -BeFalse
+  }
+
+  It "REFUSES when a node cannot see the host tree, and names Docker Desktop file sharing" {
+    Mock docker {
+      if ($args[0] -eq "ps") { return @("k3d-tracebloc-server-0") }
+      if ($args[0] -eq "exec") { return $null }
+    }
+    { Assert-NodesSeeHostData } | Should -Throw -ExpectedMessage "*cannot see your data directory*"
+    # The remedy must name the likeliest Windows cause, or the operator has
+    # nothing to act on.
+    $err = $null
+    try { Assert-NodesSeeHostData } catch { $err = $_.Exception.Message }
+    $err | Should -BeLike "*File sharing*"
+  }
+
+  It "compares the token, not just the file's presence" {
+    # A mount pointed at the WRONG host directory still shows a file of this name
+    # from an earlier run. Presence alone would pass; content must not.
+    Mock docker {
+      if ($args[0] -eq "ps") { return @("k3d-tracebloc-server-0") }
+      if ($args[0] -eq "exec") { return "a-token-from-some-other-run" }
+    }
+    { Assert-NodesSeeHostData } | Should -Throw -ExpectedMessage "*cannot see your data directory*"
+  }
+
+  It "fails closed when no nodes can be listed" {
+    Mock docker { if ($args[0] -eq "ps") { return @() } }
+    { Assert-NodesSeeHostData } | Should -Throw -ExpectedMessage "*Couldn't list the nodes*"
+  }
+
+  It "checks EVERY node, not just the server" {
+    # AGENTS defaults to 1 and agents run kubelets, so a training pod can land on
+    # an agent — the same @all-vs-@server trap as the cgroup v1 flag (#806).
+    Mock docker {
+      if ($args[0] -eq "ps") { return @("k3d-tracebloc-server-0", "k3d-tracebloc-agent-0") }
+      if ($args[0] -eq "exec") {
+        if ($args[1] -like "*server-0") { return (Get-Content (Join-Path $script:HOST_DATA_DIR ".tracebloc-mount-probe") -Raw) }
+        return $null   # the AGENT is blind
+      }
+    }
+    { Assert-NodesSeeHostData } | Should -Throw -ExpectedMessage "*agent-0*"
+  }
+
+  It "ignores the k3d load balancer" {
+    # k3d-<cluster>-serverlb is a proxy container, not a kubelet: no bind mount is
+    # requested for it and none is needed. Probing it would fail every install.
+    Mock docker {
+      if ($args[0] -eq "ps") { return @("k3d-tracebloc-server-0", "k3d-tracebloc-serverlb") }
+      if ($args[0] -eq "exec") {
+        if ($args[1] -like "*serverlb") { return $null }
+        return (Get-Content (Join-Path $script:HOST_DATA_DIR ".tracebloc-mount-probe") -Raw)
+      }
+    }
+    { Assert-NodesSeeHostData } | Should -Not -Throw
+  }
+}

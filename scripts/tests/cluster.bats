@@ -822,6 +822,12 @@ _stub_create_cluster_deps() {
   _merge_kubeconfig()        { :; }
   _export_host_no_proxy()    { :; }
   _wait_for_api()            { :; }
+  # Stubbed explicitly, not just skipped by TB_STORAGE_MODE above: these tests
+  # assert DOCKER_HOST wiring, and the probe shells out to docker. It happens to
+  # return early in node-local mode today, so this line is belt-and-braces — but
+  # it means changing the storage mode here can't silently start exercising it
+  # (backend#2422).
+  _verify_nodes_see_host_data() { :; }
 }
 
 @test "create_cluster: rootless active -> DOCKER_HOST targets the rootless socket before k3d runs" {
@@ -1320,4 +1326,155 @@ merge_setup() {                       # isolate HOME/KUBECONFIG from the real ma
   [ "$status" -eq 0 ] || return 1
   run mock_calls
   [[ "$output" != *"fail-cgroupv1"* ]] || return 1
+}
+
+# ── _verify_nodes_see_host_data (backend#2422) ──────────────────────────────
+#
+# In hostpath mode /tracebloc is the k3d bind mount of HOST_DATA_DIR. If it is
+# not in effect, DirectoryOrCreate fabricates the dirs inside the node: PVC
+# Bound, pod Running, MySQL on an empty datadir, no error anywhere. The
+# chart-side fix (type: Directory) is impossible on an existing release —
+# spec.persistentvolumesource is immutable, so it fails the helm upgrade — so
+# this probe has to catch it, and has to fail CLOSED.
+
+# Mock the pair of docker verbs the probe uses. `ps` lists nodes; `exec … cat`
+# returns whatever the fake node "sees" at /tracebloc/<marker>.
+#   _mock_docker <ps-output> <mode>
+#     mode=passthrough : exec returns the real marker file (mount works)
+#     mode=empty       : exec returns nothing (dir exists but is not the host tree)
+#     mode=stale       : exec returns a DIFFERENT token (mount points elsewhere)
+#     mode=fail        : exec exits non-zero (cannot tell)
+_mock_docker() {
+  # GLOBALS, not locals: the docker() body below runs long after _mock_docker has
+  # returned, and bash captures no closure — locals would be unset there, docker
+  # ps would print nothing, and every test would take the "cannot list nodes"
+  # branch. Which is non-zero, so the REFUSAL tests would pass while exercising
+  # the wrong refusal entirely. (Caught by tests 1-2 failing; hence each refusal
+  # test below asserts its OWN message rather than just a non-zero status.)
+  MOCK_PS_OUT="$1"; MOCK_MODE="$2"
+  docker() {
+    if [[ "$1" == "ps" ]]; then printf '%s\n' "$MOCK_PS_OUT"; return 0; fi
+    if [[ "$1" == "exec" ]]; then
+      case "$MOCK_MODE" in
+        passthrough) cat "${HOST_DATA_DIR}/.tracebloc-mount-probe" 2>/dev/null; return 0 ;;
+        empty)       return 0 ;;
+        stale)       printf 'a-token-from-some-other-run'; return 0 ;;
+        fail)        return 1 ;;
+      esac
+    fi
+    return 0
+  }
+}
+
+@test "_verify_nodes_see_host_data passes when every node sees the host tree" {
+  mkdir -p "$HOST_DATA_DIR"
+  _mock_docker "k3d-tracebloc-server-0
+k3d-tracebloc-agent-0" passthrough
+  run _verify_nodes_see_host_data
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  # and it must not leave its probe file behind
+  [ ! -f "$HOST_DATA_DIR/.tracebloc-mount-probe" ] || return 1
+}
+
+@test "_verify_nodes_see_host_data REFUSES when the node cannot see the host tree" {
+  mkdir -p "$HOST_DATA_DIR"
+  _mock_docker "k3d-tracebloc-server-0" empty
+  run _verify_nodes_see_host_data
+  [ "$status" -ne 0 ] || { echo "accepted an invisible data dir"; return 1; }
+  [[ "$output" == *"cannot see your data directory"* ]] || return 1
+  # the remedy has to name Docker Desktop file sharing — the likeliest cause on
+  # the Mac/Windows laptops this guard exists for
+  [[ "$output" == *"File sharing"* ]] || return 1
+  [ ! -f "$HOST_DATA_DIR/.tracebloc-mount-probe" ] || return 1
+}
+
+@test "_verify_nodes_see_host_data compares the token, not just the file's presence" {
+  mkdir -p "$HOST_DATA_DIR"
+  # A mount pointed at the WRONG host directory can still surface a file of the
+  # same name from an earlier run. Presence alone would pass this; content fails.
+  _mock_docker "k3d-tracebloc-server-0" stale
+  run _verify_nodes_see_host_data
+  [ "$status" -ne 0 ] || { echo "a stale marker from another tree was accepted"; return 1; }
+  # the SPECIFIC refusal: "cannot see your data directory", not the node-listing
+  # one. A bare non-zero check here passed even when the mock was broken.
+  [[ "$output" == *"cannot see your data directory"* ]] || { echo "wrong refusal: $output"; return 1; }
+}
+
+@test "_verify_nodes_see_host_data fails closed when a node cannot be exec'd" {
+  mkdir -p "$HOST_DATA_DIR"
+  _mock_docker "k3d-tracebloc-server-0" fail
+  run _verify_nodes_see_host_data
+  [ "$status" -ne 0 ] || { echo "an unverifiable node was treated as a pass"; return 1; }
+  [[ "$output" == *"cannot see your data directory"* ]] || { echo "wrong refusal: $output"; return 1; }
+}
+
+@test "_verify_nodes_see_host_data fails closed when no nodes can be listed" {
+  mkdir -p "$HOST_DATA_DIR"
+  _mock_docker "" fail
+  run _verify_nodes_see_host_data
+  [ "$status" -ne 0 ] || { echo "an empty node list was treated as a pass"; return 1; }
+  [[ "$output" == *"Couldn't list the nodes"* ]] || return 1
+}
+
+@test "_verify_nodes_see_host_data checks EVERY node, not just the server" {
+  mkdir -p "$HOST_DATA_DIR"
+  # AGENTS defaults to 1 and agents run kubelets, so a training pod can land on
+  # an agent. A server-only probe would pass while the pod's node is blind —
+  # the same @all-vs-@server trap as the cgroup v1 flag (client#806).
+  docker() {
+    if [[ "$1" == "ps" ]]; then printf 'k3d-tracebloc-server-0\nk3d-tracebloc-agent-0\n'; return 0; fi
+    if [[ "$1" == "exec" ]]; then
+      [[ "$2" == *server-0 ]] && { cat "${HOST_DATA_DIR}/.tracebloc-mount-probe" 2>/dev/null; return 0; }
+      return 0   # the AGENT is blind
+    fi
+    return 0
+  }
+  run _verify_nodes_see_host_data
+  [ "$status" -ne 0 ] || { echo "only the server was checked"; return 1; }
+  [[ "$output" == *"agent-0"* ]] || { echo "did not name the blind node: $output"; return 1; }
+}
+
+@test "_verify_nodes_see_host_data ignores the k3d load balancer" {
+  mkdir -p "$HOST_DATA_DIR"
+  # k3d-<cluster>-serverlb is a proxy container, not a kubelet — no bind mount is
+  # requested for it and none is needed. Including it would make every hostpath
+  # install fail on a container that never touches the data.
+  docker() {
+    if [[ "$1" == "ps" ]]; then printf 'k3d-tracebloc-server-0\nk3d-tracebloc-serverlb\n'; return 0; fi
+    if [[ "$1" == "exec" ]]; then
+      [[ "$2" == *serverlb ]] && return 1        # lb genuinely has no /tracebloc
+      cat "${HOST_DATA_DIR}/.tracebloc-mount-probe" 2>/dev/null; return 0
+    fi
+    return 0
+  }
+  run _verify_nodes_see_host_data
+  [ "$status" -eq 0 ] || { echo "the load balancer was probed: $output"; return 1; }
+}
+
+@test "_verify_nodes_see_host_data is skipped in node-local mode (no bind mount by design)" {
+  mkdir -p "$HOST_DATA_DIR"
+  TB_STORAGE_MODE=node-local
+  # node-local (RFC-0003 Option C) deliberately has NO host mount — data lives on
+  # k3s local-path inside the node. Probing there would fail every install.
+  _mock_docker "k3d-tracebloc-server-0" empty
+  run _verify_nodes_see_host_data
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+}
+
+@test "the mount probe exists in BOTH installers, and both are wired in (backend#2422)" {
+  # Five twin divergences were found one at a time across backend#2220, one of
+  # which had silently disabled machine sizing on Windows with nothing failing.
+  # A guard that exists in only one language leaves the other half of the fleet
+  # with the silent-empty-datadir mode — and Windows/Docker Desktop is where the
+  # unshared-path cause is MOST likely. Assert presence and wiring, in both.
+  local sh="$BATS_TEST_DIRNAME/../lib/cluster.sh"
+  local ps1="$BATS_TEST_DIRNAME/../install-k8s.ps1"
+
+  grep -q '^_verify_nodes_see_host_data()' "$sh" || return 1
+  grep -q '^function Assert-NodesSeeHostData' "$ps1" || return 1
+
+  # Defined but never called is the failure mode this pair is most likely to
+  # regress into, so check each is actually invoked outside its own definition.
+  [[ "$(grep -c '_verify_nodes_see_host_data' "$sh")" -ge 2 ]] || return 1
+  [[ "$(grep -c 'Assert-NodesSeeHostData' "$ps1")" -ge 2 ]] || return 1
 }
