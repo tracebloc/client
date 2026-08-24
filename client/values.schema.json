@@ -40,12 +40,12 @@
         "RESOURCE_REQUESTS": {
           "type": "string",
           "pattern": "^(cpu=\\S+,memory=\\S+)?$",
-          "description": "Optional explicit resource requests for spawned training jobs. Unset: jobs-manager derives the envelope from node allocatable (75% with cpu=2/memory=8Gi floors, backend#664); older images fall back to 'cpu=2,memory=8Gi'."
+          "description": "Optional explicit resource requests for spawned training jobs. Unset: jobs-manager uses its built-in 'cpu=2,memory=8Gi' literal. The node-allocatable derivation (75%, backend#664 L0) is real but gated OFF behind DERIVE_JOB_ENVELOPE, which is only consulted when BOTH this key and its pair are unset (backend#2167, backend#2250)."
         },
         "RESOURCE_LIMITS": {
           "type": "string",
           "pattern": "^(cpu=\\S+,memory=\\S+)?$",
-          "description": "Optional explicit resource limits for spawned training jobs. Unset: jobs-manager derives the envelope from node allocatable (75% with cpu=2/memory=8Gi floors, backend#664); older images fall back to 'cpu=2,memory=8Gi'."
+          "description": "Optional explicit resource limits for spawned training jobs. Unset: jobs-manager uses its built-in 'cpu=2,memory=8Gi' literal. The node-allocatable derivation (75%, backend#664 L0) is real but gated OFF behind DERIVE_JOB_ENVELOPE, which is only consulted when BOTH this key and its pair are unset (backend#2167, backend#2250)."
         },
         "RESOURCE_PROVENANCE": {
           "type": "string",
@@ -56,6 +56,21 @@
             ""
           ],
           "description": "Who chose RESOURCE_REQUESTS/RESOURCE_LIMITS: 'installer' (sized to this machine at install), 'user' (an explicit 'tracebloc resources set'), or 'unknown' (a value carried forward from before this key existed, so provenance is genuinely unknowable). Read-only bookkeeping for backend#2220 - it never changes the envelope, it records who picked it, so a future ladder can re-derive an installer-written value without ever overriding a deliberate human choice."
+        },
+        "DERIVE_JOB_ENVELOPE": {
+          "type": "string",
+          "enum": [
+            "1",
+            "true",
+            "yes",
+            "on",
+            "0",
+            "false",
+            "no",
+            "off",
+            ""
+          ],
+          "description": "Opt in to the node-derived training-job envelope (backend#664 Utilization Ladder L0): cpu = max(2, floor(allocatable*0.75)), memory = max(8Gi, floor(allocatable*0.75)), requests == limits. OFF by default and consulted ONLY when RESOURCE_REQUESTS and RESOURCE_LIMITS are both unset - an explicit envelope always wins, and both installers write that pair unconditionally, so opting an installer-provisioned edge in means clearing both keys too. Turning it on caps the machine at ONE concurrent training job (any Guaranteed fraction >= 50% does), and on an uncapped multi-node k3d cluster every node over-reports the whole Docker VM, so the derivation's min-across-nodes does not protect you (backend#2167). The vocabulary is CLOSED and lowercase: jobs-manager itself lower-cases and strips, so 'True' would also work at runtime, but pinning lowercase here means a typo ('ture') is rejected at install time instead of silently leaving the flag off - the silent-off failure is precisely why backend#2250 exists. Narrowing the accepted set can never make the runtime do something this schema forbade; do not widen it to 'fix' the asymmetry."
         },
         "GPU_REQUESTS": {
           "type": "string",
