@@ -111,12 +111,30 @@ print(f"  ok: {declaration} matches {pin} "
 PY
 
 # ── 3: what the chart renders IS the declaration ─────────────────────────────
-# The render half needs helm. Same convention as the other chart guards: CI
-# always has it, a dev box may not. The provenance half above has already run
-# unconditionally, so a missing helm degrades this guard rather than skipping it.
+# The render half needs helm. A dev box may not have it; every CI job that runs
+# this one does (`azure/setup-helm`, pinned identically in drift-checks.yaml,
+# helm-ci.yaml and envelope-contract-drift.yml).
+#
+# SO THE SKIP IS SCOPED TO A DEV BOX, and is an ERROR anywhere it would make a
+# green check into a claim nobody proved. Bugbot found the first instance of
+# exactly that on this PR: a workflow step named "the rendered redaction floor
+# matches the vendored declaration", in a job that had no helm, going green
+# having compared nothing. `REQUIRE_HELM=1` forces the strict path; `CI` (which
+# GitHub Actions always sets) turns it on by itself, so a future removal of a
+# `Set up Helm` step reddens rather than quietly halving this guard.
 if ! command -v helm >/dev/null 2>&1; then
+  if [ -n "${REQUIRE_HELM:-}" ] || [ -n "${CI:-}" ]; then
+    echo "[ERROR] helm is not installed, so the render comparison cannot run —" >&2
+    echo "        and 'cannot tell' is a finding here, not a pass. This guard is" >&2
+    echo "        only half of itself without it: the vendored bytes were checked," >&2
+    echo "        what the chart actually renders was not. Add the pinned" >&2
+    echo "        azure/setup-helm step to this job, or unset CI/REQUIRE_HELM if" >&2
+    echo "        you are deliberately running the provenance half alone." >&2
+    exit 1
+  fi
   echo "[SKIP] helm not installed — the render comparison did not run (the "
-  echo "       vendored-bytes check above did)."
+  echo "       vendored-bytes check above did). Set REQUIRE_HELM=1 to make this "
+  echo "       a failure."
   exit 0
 fi
 

@@ -93,10 +93,22 @@ jobs:
         # not be reported as a cross-repo drift.
         run: scripts/gen-envelope-embed.sh --check
 
+      - name: Set up Helm
+        # REQUIRED BY THE STEP BELOW, not decoration. Without helm that script
+        # can only check the vendored bytes and skips the render comparison —
+        # so the step would go green having proved less than its name claims,
+        # which is the exact defect class backend#1729 is about. (Caught by
+        # Bugbot on #803; the script now also treats a missing helm under `CI`
+        # as an ERROR, so removing this step reddens rather than halves it.)
+        # Same action, same pin as drift-checks.yaml and helm-ci.yaml.
+        uses: azure/setup-helm@1a275c3b69536ee54be43f2070a358922e12c8d4 # v4.3.1
+
       - name: The rendered redaction floor matches the vendored declaration
         # Same reason, for the second contract: prove the in-repo half before
         # blaming the other repository. This is the same script the required
         # `Source-of-truth drift` job runs.
+        env:
+          REQUIRE_HELM: "1"
         run: bash scripts/tests/collector-redaction-derived.sh
 
       - name: Mint a read-only installation token for client-runtime
