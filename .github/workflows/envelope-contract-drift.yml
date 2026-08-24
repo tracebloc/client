@@ -1,4 +1,4 @@
-name: Envelope contract drift (cross-repo)
+name: Cross-repo contract drift
 
 # The training-envelope arithmetic has ONE definition —
 # client-runtime/node_sizing.py::envelope_from_allocatable, with its constants
@@ -26,6 +26,21 @@ name: Envelope contract drift (cross-repo)
 # tracebloc/client-runtime is PRIVATE, so unlike cli's chart-drift (which reads
 # the public tracebloc/client with no token) this needs an App installation
 # token, scoped to that one repo with contents:read.
+#
+# ── the SECOND contract, added by backend#2378 ──────────────────────────────
+# The log-redaction rule — which strings must be scrubbed before a log leaves a
+# customer's cluster — is declared once, in client-runtime/log_redactions.json.
+# This chart vendors it at client/log_redactions.json and GENERATES the
+# Collector's OTTL statements from it, so the hand port that used to sit in
+# telemetry-collector-configmap.yaml is gone.
+#
+# The in-repo half of that guarantee is checked by the REQUIRED drift job
+# (scripts/tests/collector-redaction-derived.sh: vendored bytes match their
+# pinned sha256, and what renders IS the declaration) — locally, with no
+# network, because a lint gate that needs the network fails on the day the
+# network is what broke. What this job adds is the one question that cannot be
+# answered from inside this repository: has upstream MOVED ON without the
+# vendored copy following? Same lane, same token, same pin — one more contract.
 
 on:
   schedule:
@@ -40,6 +55,10 @@ on:
       - "scripts/.client-runtime-ref"
       - "scripts/tests/fixtures/envelope_contract.json"
       - "scripts/tests/fixtures/envelope_vectors.bash"
+      - "client/log_redactions.json"
+      - "scripts/.log-redactions.sha256"
+      - "scripts/tests/collector-redaction-derived.sh"
+      - "client/templates/telemetry-collector-configmap.yaml"
       - ".github/workflows/envelope-contract-drift.yml"
 
 permissions:
@@ -73,6 +92,33 @@ jobs:
         # Runs FIRST and without the network: an in-repo inconsistency should
         # not be reported as a cross-repo drift.
         run: scripts/gen-envelope-embed.sh --check
+
+      - name: Set up Helm
+        # REQUIRED BY THE STEP BELOW, not decoration. Without helm that script
+        # can only check the vendored bytes and skips the render comparison —
+        # so the step would go green having proved less than its name claims,
+        # which is the exact defect class backend#1729 is about. (Caught by
+        # Bugbot on #803; the script now also treats a missing helm under `CI`
+        # as an ERROR, so removing this step reddens rather than halves it.)
+        # Same action, same pin as drift-checks.yaml and helm-ci.yaml — and the
+        # `version` below is the half that makes that sentence true. Without it
+        # `azure/setup-helm` defaults to `latest`, so this job would render under
+        # Helm 4.x while the REQUIRED `Source-of-truth drift` path runs the same
+        # script under v3.15.4. A render comparison passing under a Helm the
+        # required path never uses is the "green having proved less than its name
+        # claims" failure this step exists to close. (@saqlainsyed007 + Bugbot on
+        # client#803, verified against all four sibling steps.)
+        uses: azure/setup-helm@1a275c3b69536ee54be43f2070a358922e12c8d4 # v4.3.1
+        with:
+          version: v3.15.4
+
+      - name: The rendered redaction floor matches the vendored declaration
+        # Same reason, for the second contract: prove the in-repo half before
+        # blaming the other repository. This is the same script the required
+        # `Source-of-truth drift` job runs.
+        env:
+          REQUIRE_HELM: "1"
+        run: bash scripts/tests/collector-redaction-derived.sh
 
       - name: Mint a read-only installation token for client-runtime
         id: token
@@ -119,6 +165,64 @@ jobs:
             exit 1
           fi
           echo "vendored contract is identical to client-runtime@$PINNED_REF"
+
+      - name: The vendored redaction declaration matches upstream
+        env:
+          PINNED_REF: ${{ steps.pin.outputs.ref }}
+        run: |
+          upstream="client-runtime/log_redactions.json"
+          vendored="client/log_redactions.json"
+          if [ ! -f "$upstream" ]; then
+            echo "::error::$upstream is missing at $PINNED_REF. Either the pin"
+            echo "predates backend#2378 (bump scripts/.client-runtime-ref to a"
+            echo "client-runtime commit that carries the declaration), or the"
+            echo "declaration was renamed upstream. Absent is a FINDING here:"
+            echo "this job cannot tell 'no drift' from 'nothing to compare'."
+            exit 1
+          fi
+          if ! diff -u "$vendored" "$upstream"; then
+            echo "::error file=client/log_redactions.json::the vendored log-redaction declaration has drifted from tracebloc/client-runtime@$PINNED_REF"
+            echo ""
+            echo "This is the two-PR bump ritual's second PR, not yet landed."
+            echo "To adopt the upstream change:"
+            echo "  1. cp <client-runtime>/log_redactions.json client/"
+            echo "  2. cp the digest line from <client-runtime>/.log-redactions.sha256"
+            echo "     into scripts/.log-redactions.sha256"
+            echo "  3. update the SHA in scripts/.client-runtime-ref"
+            echo "  4. bump Chart.yaml version AND appVersion (chart content changed)"
+            echo "  5. make drift  # the redaction guards re-derive from the new file"
+            exit 1
+          fi
+          echo "vendored redaction declaration is identical to client-runtime@$PINNED_REF"
+
+      - name: The two repos pin the same digest
+        env:
+          PINNED_REF: ${{ steps.pin.outputs.ref }}
+        # Belt and braces, and it catches a real shape: the JSON could be copied
+        # across while the digest line was not, leaving this repo's local guard
+        # comparing new bytes to an old pin. Both sides parse the same way --
+        # first non-comment, non-blank line.
+        run: |
+          _digest() {
+            grep -vE '^[[:space:]]*(#|$)' "$1" | head -1 | tr -d '[:space:]'
+          }
+          for f in client-runtime/.log-redactions.sha256 scripts/.log-redactions.sha256; do
+            if [ ! -f "$f" ]; then
+              echo "::error::$f is missing -- a digest pin that cannot be read is a finding"
+              exit 1
+            fi
+          done
+          ours="$(_digest scripts/.log-redactions.sha256)"
+          theirs="$(_digest client-runtime/.log-redactions.sha256)"
+          if [ -z "$ours" ] || [ -z "$theirs" ]; then
+            echo "::error::a digest pin carries no digest line"
+            exit 1
+          fi
+          if [ "$ours" != "$theirs" ]; then
+            echo "::error file=scripts/.log-redactions.sha256::digest pins disagree -- ours $ours, client-runtime@$PINNED_REF $theirs"
+            exit 1
+          fi
+          echo "both repos pin $ours"
 
       - name: The upstream arithmetic still produces these vectors
         # Belt and braces: the vendored file could match upstream byte-for-byte

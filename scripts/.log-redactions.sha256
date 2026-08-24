@@ -1,0 +1,28 @@
+# sha256 of the VENDORED log-redaction declaration, client/log_redactions.json
+# (backend#2378).
+#
+# ONE DECLARATION, TWO REPOS. The rule "which strings must be scrubbed before a
+# log leaves a customer's cluster" is declared once, in
+# tracebloc/client-runtime's log_redactions.json, because that repo's
+# controller.py has always been where it originated. This chart VENDORS that
+# file byte-for-byte into client/log_redactions.json and GENERATES the
+# Collector's OTTL replace_pattern statements from it -- so the hand port that
+# used to live in telemetry-collector-configmap.yaml no longer exists.
+#
+# WHY A DIGEST AND NOT A FETCH. client-runtime is PRIVATE and GITHUB_TOKEN is
+# repo-scoped, so no lint job here can read that file without a credential --
+# and a network read fails on exactly the day the network is what broke. This
+# digest is copied from upstream's own .log-redactions.sha256, and
+# scripts/tests/collector-redaction-derived.sh checks the vendored bytes
+# against it locally, with no network and no token. A hand-edited vendored copy
+# reddens the REQUIRED "Source-of-truth drift" check immediately.
+#
+# THE HONEST COST: adopting an upstream change is a TWO-PR ritual. Land it in
+# client-runtime first (its own digest test refuses to let that half land
+# quietly), then here: copy the file, copy the digest into this file, bump
+# scripts/.client-runtime-ref to the merged SHA, and bump Chart.yaml. The
+# weekly cross-repo job (.github/workflows/envelope-contract-drift.yml) is what
+# notices if step two never happened.
+#
+# Format: the first non-comment, non-blank line is the digest.
+5a804b4c13a5ab0571de9419b5e5ce1b63eea1746a0b23ca85f9f8dac4698336
