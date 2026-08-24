@@ -601,13 +601,15 @@ If the customer enables the policy on a CNI that doesn't enforce (default EKS, F
 
 ### 8.8 DoS via resource exhaustion — **out of scope**
 
-A malicious model can consume resources up to whatever bound applies to each one. This section used to claim a single blanket property — *"`resources.limits` are always applied"* — which was **never true of disk** and, since backend#2418, is no longer true of CPU either. The honest statement is per resource:
+A malicious model can consume resources up to whatever bound applies to each one. This section used to claim a single blanket property — *"`resources.limits` are always applied"* — which was **never true of disk** and, on client-runtime images containing #378 (backend#2418), is not true of CPU either. The honest statement is per resource, and the CPU row carries a version qualifier because that row describes the *runtime image*, not this chart — see the note under the table:
 
 | Resource | Bound | Enforced by |
 |---|---|---|
 | **Memory** | Hard limit; `requests == limits` | cgroup `memory.max` → OOMKill. **Unchanged**, and load-bearing: this is what stops one tenant consuming another's memory |
-| **CPU** | Proportional share, **no ceiling**; ≥1/N under contention with N contenders | cgroup `cpu.weight` (backend#2418). N is bounded by the L4.1 concurrency cap (backend#2419), not by this section |
+| **CPU** | **From client-runtime images containing #378 (backend#2418):** proportional share, **no ceiling**; ≥1/N under contention with N contenders. **Earlier images apply `requests == limits`** — a hard quota | cgroup `cpu.weight` on newer images, `cpu.max` on earlier ones. N is bounded by the L4.1 concurrency cap (backend#2419), not by this section |
 | **Disk** | **Not bounded at all** | Nothing. There is no `ephemeral-storage` request or limit anywhere, and the resource grammar cannot express one — backend#2223 |
+
+**Why the CPU row is version-qualified and always will be.** The chart and the runtime are versioned separately, and this row describes behaviour owned by `node_sizing.py` in the client-runtime image — not by anything the chart renders. A customer on chart 1.9.66 with an older runtime image gets the hard quota however this file reads, and upgrading the chart alone will never change that. So the qualifier is not a note about a merge window that can be deleted once client-runtime#378 lands: it stays correct before that merge, after it, and on a fleet running mixed image versions, which is the only form of the sentence that is true of every deployment at once. (Same treatment, and the same reason, as the ingestor-build ordering paragraph in §4.)
 
 Envelope provenance, for completeness: `cpu=2,memory=8Gi` by default, or whatever the operator pins via `env.RESOURCE_REQUESTS`/`env.RESOURCE_LIMITS` (both installers write that pair, sized to the machine at install time). Sizing from node allocatable is available but gated OFF behind `env.DERIVE_JOB_ENVELOPE` and only consulted when the pair is unset (backend#2167, backend#2250). The CPU row above describes the derive path; an operator-pinned `env.RESOURCE_LIMITS` is an explicit statement and still applies a hard CPU ceiling.
 
