@@ -1068,6 +1068,24 @@ _reconcile_adopted_client() {
   info "This machine already runs a tracebloc client — reconciling '${_rel}' (namespace '${_ns}') in place."
 
   _ensure_helm_runnable
+
+  # backend#2146: the arch gate belongs on the adopt path too, BEFORE the engine is
+  # deployed. Reconcile reuses the release's stored values (--reuse-values), so the
+  # engine that will run is whatever the release already pins — read THAT (never a
+  # fresh resolution, which could pick 8.4 on an arm64 host while Helm keeps the
+  # release's amd64-only 5.7) and ask the same question the normal install path
+  # asks. Without it, an arm64 host with no amd64 emulation adopting a 5.7 release
+  # reported success and then CrashLooped: preflight had classified the machine as
+  # fresh-8.4, so its early gate waved it through. existing-release is the accurate
+  # reason (a live Helm release, not host files — see _assert_engine_runs_on_this_arch).
+  if _release_pins_mysql_84 "$_rel" "$_ns"; then
+    TB_MYSQL_ENGINE_RESOLVED="8.4"
+  else
+    TB_MYSQL_ENGINE_RESOLVED="5.7"
+  fi
+  TB_MYSQL_ENGINE_REASON="existing-release"
+  _assert_engine_runs_on_this_arch
+
   local chart_ref=""
   _resolve_chart_ref
 
@@ -1331,6 +1349,48 @@ _client_values_file() { echo "${TRACEBLOC_VALUES_FILE:-${HOST_DATA_DIR}/values.y
 # HOST_DATA_DIR/<namespace>/mysql.
 _client_default_namespace() { _sanitize_workspace_name "${TB_NAMESPACE:-tracebloc}"; }
 
+# Whether the values on STDIN pin the MySQL 8.4 engine (images.mysqlClient.tag is
+# 8.4). Reads STDIN so a caller can STREAM a file (`< values.yaml`) instead of
+# slurping it into a variable — the 60k-line fixture behind backend#1778 is why
+# the sticky rule never built the whole file into memory. The ONE reader three
+# callers share so they cannot drift on what "pins 8.4" means: the sticky rule
+# below, the dev-mode TRACEBLOC_VALUES_FILE arch gate, and the adopt-reconcile
+# arch gate (both backend#2146). Matches BOTH the quoted form our heredoc writes
+# (tag: "8.4") and the unquoted form `helm get values` re-serializes (tag: 8.4 —
+# the #200 quote-stripping lesson), so it reads a live release's values as well as
+# a file. The -A 3 window keeps a `tag:` on some OTHER image from matching, exactly
+# as the sticky grep it replaces did.
+#
+# Capture-then-match, never `grep -A 3 … | grep -q` (backend#1778): the second grep
+# would close the pipe on its first hit, SIGPIPE the first, and pipefail would turn
+# that into 141 — read as "not 8.4", so an 8.4 machine would resolve to 5.7 and
+# point MySQL 5.7 at an 8.4 datadir. `grep -A 3` alone reads to EOF, so a producer
+# piping INTO this (helm get values) never takes SIGPIPE either.
+_values_pin_mysql_84() {
+  local _block
+  _block="$(grep -A 3 'mysqlClient:' 2>/dev/null || true)"
+  case "$_block" in
+    *'tag: "8.4"'*|*'tag: 8.4'*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# Whether the live Helm release <rel> in namespace <ns> runs the MySQL 8.4 engine,
+# read from its STORED values — adopt/reconcile keeps those via --reuse-values, so
+# this is the engine that will actually run, not a fresh resolution. Bounded the
+# way _existing_training_values bounds its read: `helm get values` has no request
+# timeout, so gate it behind a bounded namespace probe and let a wedged API degrade
+# to "not 8.4" (→ the 5.7 arch gate) instead of hanging. Unreadable is deliberately
+# fail-closed: refuse an arm64 reconcile we cannot prove is 8.4 rather than report
+# success and CrashLoop (the stance backend#2146 is about).
+_release_pins_mysql_84() {
+  local _rel="$1" _ns="$2" _vals
+  [[ -n "$_rel" && -n "$_ns" ]] || return 1
+  kubectl get namespace "$_ns" --request-timeout=5s >/dev/null 2>&1 || return 1
+  _vals="$(helm get values "$_rel" -n "$_ns" 2>/dev/null || true)"
+  _values_pin_mysql_84 <<<"$_vals"
+}
+
 # The engine decision itself, with NO logging and NO globals set, so a second
 # caller can ask this rule a question instead of restating it (backend#2047:
 # preflight's arch gate refused a fresh arm64 install that this rule was about
@@ -1351,17 +1411,11 @@ _mysql_engine_decision() {
     *) echo "invalid ${requested}"; return 0 ;;
   esac
   # Sticky: an edge that opted into 8.4 stays there on every later re-run.
-  # Capture-then-match (backend#1778): `grep -A 3 … | grep -q` lets the second
-  # grep close the pipe on its first hit, SIGPIPE'ing the first, and pipefail
-  # turns that into 141 — which the `if` reads as "not 8.4". A machine that opted
-  # into 8.4 would then resolve to 5.7 and point MySQL 5.7 at an 8.4 datadir.
-  local _mysql_block=""
-  if [[ -f "${values_file:-}" ]]; then
-    _mysql_block="$(grep -A 3 'mysqlClient:' "${values_file}" 2>/dev/null || true)"
+  # _values_pin_mysql_84 streams the file (never slurps it) and owns the
+  # capture-then-match reasoning behind not piping into `grep -q` (backend#1778).
+  if [[ -f "${values_file:-}" ]] && _values_pin_mysql_84 < "${values_file}"; then
+    echo "8.4 sticky"; return 0
   fi
-  case "$_mysql_block" in
-    *'tag: "8.4"'*) echo "8.4 sticky"; return 0 ;;
-  esac
   # Never auto-flip existing state: a found release or real datadir content
   # means a 5.7-format datadir may exist, and 8.4 refuses to open it. Two
   # DISTINCT triggers, ordered MOST-SPECIFIC FIRST because their remedy differs:
@@ -1614,6 +1668,18 @@ install_client_helm() {
     TB_NAMESPACE="${TB_NAMESPACE:-tracebloc}"
     info "Dev mode: using caller-provided values file"
     log "Using values file: $values_file (namespace: $TB_NAMESPACE)"
+    # backend#2146: gate the arch on the dev-mode path too, BEFORE helm deploys.
+    # We install the caller's file as-is, so the engine that will run is whatever
+    # the file declares — read THAT (do NOT re-resolve: a fresh resolution could
+    # pick 8.4 while the file pins the amd64-only 5.7) and ask the same question
+    # the normal path asks below.
+    if _values_pin_mysql_84 < "$values_file"; then
+      TB_MYSQL_ENGINE_RESOLVED="8.4"
+    else
+      TB_MYSQL_ENGINE_RESOLVED="5.7"
+    fi
+    TB_MYSQL_ENGINE_REASON="values-file"
+    _assert_engine_runs_on_this_arch
   else
 
   local use_existing=""
