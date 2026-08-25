@@ -399,3 +399,41 @@ calls() { cat "$MOCK_CALLS"; }
   [[ "$output" == *"profile 'profile2'"* ]] || return 1
   [[ "$output" != *"\\'"* ]] || return 1
 }
+
+# ── the sub-floor explanation: right culprit, and it actually prints ────────
+
+@test "REGRESSION: the sub-floor hint prints even when the VM is ALREADY at that target" {
+  # It used to sit after the `target_gb > current_gb` guard, so a VM already at the
+  # inadequate target returned silently — and the one-shot explanation never
+  # printed for the case that needs it most (Bugbot on #832).
+  REPLY_IN="y" MEM_KB=$(( 4 * 1024 * 1024 )) TARGET_GB=4 run _offer_colima_memory_raise
+  [ "$status" -eq 0 ] || return 1
+  [[ "$output" == *"cannot spare 5 GB"* ]] || return 1
+  run bash -c "grep -c '^colima ' '$MOCK_CALLS' || true"
+  [ "$output" = "0" ] || return 1
+}
+
+@test "REGRESSION: a sub-floor COLIMA_MEMORY blames the override, not the Mac" {
+  # Blaming the machine for an operator's own choice sends them to buy hardware
+  # they do not need. Two different problems, two messages.
+  COLIMA_MEMORY=4 REPLY_IN="y" MEM_KB=$(( 3 * 1024 * 1024 )) run _offer_colima_memory_raise
+  [ "$status" -eq 0 ] || return 1
+  [[ "$output" == *"COLIMA_MEMORY is set to 4 GB"* ]] || return 1
+  [[ "$output" != *"larger machine"* ]] || return 1
+}
+
+@test "a sub-floor DERIVED target still blames the machine" {
+  # The other side of the same split: with no override, the machine really is the
+  # constraint and saying so is the honest answer.
+  REPLY_IN="y" MEM_KB=$(( 3 * 1024 * 1024 )) TARGET_GB=4 run _offer_colima_memory_raise
+  [[ "$output" == *"larger machine"* ]] || return 1
+  [[ "$output" != *"COLIMA_MEMORY"* ]] || return 1
+}
+
+@test "a healthy VM gets no sub-floor lecture at all" {
+  # The reorder must not have moved the explanation ahead of the "is it short"
+  # check — a VM above the floor has nothing to be told.
+  REPLY_IN="y" MEM_KB=$(( 8 * 1024 * 1024 )) TARGET_GB=4 run _offer_colima_memory_raise
+  [[ "$output" != *"cannot spare"* ]] || return 1
+  [[ "$output" != *"COLIMA_MEMORY"* ]] || return 1
+}

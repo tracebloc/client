@@ -274,21 +274,35 @@ _offer_colima_memory_raise() {
   target_gb="${COLIMA_MEMORY:-$(_macos_vm_mem_gb)}"
   [[ "$target_gb" =~ ^[0-9]+$ && "$target_gb" -gt 0 ]] || return 0
 
-  # Only when it is actually short, and only when the raise is worth a restart.
-  # The same comparison preflight.sh:291 makes, for the same reason.
+  # Only when it is actually short. The same comparison preflight.sh:291 makes,
+  # for the same reason.
   (( current_mib < PF_MIN_MEM_GB * 1024 - PF_VM_MEM_GRACE_MIB )) || return 0
-  (( target_gb > current_gb )) || return 0
 
-  # AND ONLY WHEN THE RAISE WOULD ACTUALLY CLEAR THE FLOOR (@LukasWodka on #832).
+  # THE SUB-FLOOR EXPLANATION COMES BEFORE THE "worth a restart" GUARD (Cursor
+  # Bugbot on #832). It used to sit after `(( target_gb > current_gb ))`, so a VM
+  # ALREADY at the inadequate target returned silently and the one-shot
+  # explanation -- the whole point of this branch -- never printed for the case
+  # that needs it most.
+  #
   # `_macos_vm_mem_gb` applies the host cap AFTER the safe floor
-  # (preflight.sh:189-192), so on a small host the "target" comes back BELOW the
-  # floor -- a 6 GB Mac yields 4 against a floor of 5. Offering that would prompt
-  # for a restart that cannot fix the problem, and re-prompt on every run, because
-  # the machine is the constraint rather than the setting. Say so once instead.
+  # (preflight.sh:189-192), so on a small host the target comes back BELOW the
+  # floor: a 6 GB Mac yields 4 against a floor of 5. Raising to that cannot fix
+  # anything, so say why once instead of prompting forever.
+  #
+  # AND IT NAMES THE RIGHT CULPRIT. `target_gb` can come from COLIMA_MEMORY, in
+  # which case blaming the Mac is wrong -- the operator chose a sub-floor budget
+  # and only they can raise it. Two different problems deserve two messages.
   if (( target_gb < PF_MIN_MEM_GB )); then
-    hint "This Mac cannot spare ${PF_MIN_MEM_GB} GB for Docker (the most it can give is ${target_gb} GB), so raising the VM would not fix it. Training needs a larger machine."
+    if [[ -n "${COLIMA_MEMORY:-}" ]]; then
+      hint "COLIMA_MEMORY is set to ${COLIMA_MEMORY} GB, below the ${PF_MIN_MEM_GB} GB tracebloc needs to train. Raise or unset it."
+    else
+      hint "This Mac cannot spare ${PF_MIN_MEM_GB} GB for Docker (the most it can give is ${target_gb} GB), so raising the VM would not fix it. Training needs a larger machine."
+    fi
     return 0
   fi
+
+  # Only when the raise is worth a restart.
+  (( target_gb > current_gb )) || return 0
 
   local cmd="colima stop && colima start --memory ${target_gb}"
   warn "Docker's Colima VM has ${current_gb} GB — below the ${PF_MIN_MEM_GB} GB tracebloc needs to train."
