@@ -238,6 +238,25 @@ nodeAgents:
     create: true
     name: tracebloc-node-agents
 
+  # -- Run the metrics-server preflight's AUTHORITATIVE check (client#2469).
+  #
+  # resource-monitor polls metrics.k8s.io, so the chart refuses to install it when
+  # that API is absent -- the pod would stay Running and healthy-looking forever
+  # while never reaching send_heartbeat, so the render is the last loud moment.
+  #
+  # The check normally costs nothing: a `metrics-server` Deployment in kube-system
+  # answers it, and any namespace admin can read that. This flag governs only the
+  # FALLBACK, a cluster-scoped APIService lookup used when that Deployment is not
+  # found -- and Kubernetes' built-in `admin` ClusterRole cannot read APIServices,
+  # so for such a caller helm RAISES rather than returning empty and the whole
+  # upgrade dies, resource-monitor or not.
+  #
+  # Set false only when BOTH are true: metrics-server is installed under a name
+  # this probe does not recognise, AND the caller cannot read APIServices. The
+  # DaemonSet's `tracebloc.io/metrics-server-preflight` annotation records which
+  # path decided, so a skip is never mistaken for a pass.
+  metricsServerPreflight: true
+
 # -- OpenShift-specific settings
 openshift:
   # Create a SecurityContextConstraints allowing hostPath for the resource monitor

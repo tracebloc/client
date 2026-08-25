@@ -19,12 +19,44 @@
   That is the whole argument for the `fail` below: this is the last point where
   the problem is loud.
 */}}
+{{/*
+  THREE OUTCOMES, NOT TWO (client#2469). The comment above used to say `lookup`
+  "returns empty during `helm template`", which is true, and then treated
+  connected-and-permitted as the only other case. There is a third: connected and
+  FORBIDDEN, which RAISES rather than returning empty, and helm has no way to catch
+  it.
+
+  `APIService` is cluster-scoped, and Kubernetes' built-in `admin` ClusterRole does
+  not include it. So an operator whose EKS access entry is AmazonEKSAdminPolicy
+  rather than AmazonEKSClusterAdminPolicy could not `helm upgrade` this chart AT
+  ALL -- not this DaemonSet, the whole release -- and the error named
+  resource-monitor and metrics-server, so the obvious first reading was "metrics-server
+  is broken" when metrics-server was fine and the caller's RBAC was the problem.
+
+  So: ask something the caller can definitely read FIRST. `metrics-server` is a
+  namespaced Deployment, and any namespace admin can get it. When it is there, the
+  API is registered and we never make the privileged call. Only when the cheap probe
+  comes up empty do we fall back to the authoritative one -- and by then there is a
+  real problem worth a privileged answer.
+
+  `nodeAgents.metricsServerPreflight: false` skips the fallback for the residual
+  case: metrics-server installed under a name this probe does not recognise, by a
+  caller who cannot read APIServices. It does NOT skip silently -- see the
+  annotation on the DaemonSet below, which records which path decided.
+*/}}
 {{- $probe := lookup "v1" "Namespace" "" "kube-system" -}}
+{{- $preflight := "skipped-offline" -}}
 {{- if $probe -}}
-{{- $metrics := lookup "apiregistration.k8s.io/v1" "APIService" "" "v1beta1.metrics.k8s.io" -}}
-{{- if not $metrics -}}
-{{- fail "resourceMonitor is enabled but the metrics.k8s.io/v1beta1 API is not registered. Install metrics-server (https://github.com/kubernetes-sigs/metrics-server) or set resourceMonitor: false. See SECURITY.md." -}}
-{{- end -}}
+  {{- if lookup "apps/v1" "Deployment" "kube-system" "metrics-server" -}}
+    {{- $preflight = "satisfied-by-deployment-probe" -}}
+  {{- else if not (default true .Values.nodeAgents.metricsServerPreflight) -}}
+    {{- $preflight = "skipped-by-values" -}}
+  {{- else -}}
+    {{- if not (lookup "apiregistration.k8s.io/v1" "APIService" "" "v1beta1.metrics.k8s.io") -}}
+      {{- fail "resourceMonitor is enabled but the metrics.k8s.io/v1beta1 API is not registered, and no metrics-server Deployment was found in kube-system. Install metrics-server (https://github.com/kubernetes-sigs/metrics-server) or set resourceMonitor: false. See SECURITY.md.\n\nIf THIS line was instead an `apiservices ... is forbidden` error, the problem is the caller's RBAC, not metrics-server: APIService is cluster-scoped and the built-in `admin` ClusterRole excludes it. Set nodeAgents.metricsServerPreflight: false to skip this check, or run the upgrade with cluster-scope read on apiservices." -}}
+    {{- end -}}
+    {{- $preflight = "satisfied-by-apiservice" -}}
+  {{- end -}}
 {{- end }}
 apiVersion: apps/v1
 kind: DaemonSet
@@ -34,6 +66,9 @@ metadata:
   annotations:
     meta.helm.sh/release-name: {{ .Release.Name }}
     meta.helm.sh/release-namespace: {{ .Release.Namespace }}
+    # WHICH check decided this render. A skipped preflight must not be
+    # indistinguishable from a passed one (client#2469).
+    tracebloc.io/metrics-server-preflight: {{ $preflight | quote }}
   labels:
     {{- include "tracebloc.labels" . | nindent 4 }}
     app: {{ include "tracebloc.resourceMonitorName" . }}

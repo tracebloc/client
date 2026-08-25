@@ -213,3 +213,42 @@ tests:
       - equal:
           path: spec.template.spec.containers[0].name
           value: tracebloc-resource-monitor
+
+  # ── the preflight cannot lock an operator out (client#2469) ───────────────
+  # `lookup` has THREE outcomes, not two: sees the cluster, returns empty, or
+  # RAISES on forbidden. APIService is cluster-scoped and the built-in `admin`
+  # ClusterRole excludes it, so the old unconditional lookup meant a namespace
+  # admin could not `helm upgrade` the chart at all -- and the error blamed
+  # metrics-server. helm-unittest renders offline, where `lookup` is always empty,
+  # so these assert the properties that hold WITHOUT a cluster: the outcome is
+  # always recorded, and a skip is never silent.
+  - it: records which preflight path decided, so a skip is not mistaken for a pass
+    template: templates/resource-monitor-daemonset.yaml
+    asserts:
+      - exists:
+          path: metadata.annotations["tracebloc.io/metrics-server-preflight"]
+
+  - it: renders offline rather than failing, and says the check was not run
+    template: templates/resource-monitor-daemonset.yaml
+    asserts:
+      - equal:
+          path: metadata.annotations["tracebloc.io/metrics-server-preflight"]
+          value: skipped-offline
+
+  - it: still renders with the preflight opted out
+    template: templates/resource-monitor-daemonset.yaml
+    set:
+      nodeAgents:
+        metricsServerPreflight: false
+    asserts:
+      - exists:
+          path: metadata.annotations["tracebloc.io/metrics-server-preflight"]
+
+  - it: keeps the DaemonSet itself unchanged by the preflight rework
+    template: templates/resource-monitor-daemonset.yaml
+    asserts:
+      - isKind:
+          of: DaemonSet
+      - equal:
+          path: metadata.namespace
+          value: tracebloc-node-agents
