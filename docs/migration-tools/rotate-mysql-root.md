@@ -54,7 +54,9 @@ NEWPW=$(kubectl -n "$NS" get secret "$REL"-secrets -o jsonpath='{.data.MYSQL_ROO
 # `sh -s` reads the script from stdin; CURPW/NEWPW are expanded LOCALLY into that
 # stdin stream, so they reach the pod over the exec channel — never in any argv.
 kubectl -n "$NS" exec -i "$POD" -- sh -s <<SCRIPT
+set -e                                    # a failed ALTER must abort, not report success
 umask 077
+trap 'rm -f /tmp/rot.cnf' EXIT            # always wipe the password file, even on failure
 cat > /tmp/rot.cnf <<CNF
 [client]
 user=root
@@ -65,27 +67,41 @@ ALTER USER 'root'@'%'         IDENTIFIED BY '${NEWPW}';
 ALTER USER 'root'@'localhost' IDENTIFIED BY '${NEWPW}';
 FLUSH PRIVILEGES;
 SQL
-rm -f /tmp/rot.cnf
+echo "rotation applied"
 SCRIPT
 ```
+
+`set -e` + the EXIT trap are load-bearing: without `set -e` a failed `ALTER`
+would still exit 0 (the trailing cleanup succeeds), so `kubectl exec` reports
+success while root silently stays on the old password and the Secret diverges.
+A non-zero exit here means the rotation did **not** take — stop and investigate.
 
 ## Verify (all must hold before moving to the next fleet)
 
 Same stdin/`--defaults-extra-file` discipline — no password in argv.
 
 ```bash
-# 1. the OLD password no longer authenticates (expect: ERROR 1045 Access denied)
+# 1. the OLD password no longer authenticates. Here success = mysql FAILS, so we
+#    invert the test explicitly (a bare mysql call would abort under set -e on the
+#    very outcome we want): prints OK and exits 0 only when the old pw is rejected.
 kubectl -n "$NS" exec -i "$POD" -- sh -s <<SCRIPT
-umask 077; printf '[client]\nuser=root\npassword=%s\n' '${CURPW}' > /tmp/v.cnf
-mysql --defaults-extra-file=/tmp/v.cnf -e 'SELECT 1'; echo "exit=\$?"
-rm -f /tmp/v.cnf
+umask 077
+trap 'rm -f /tmp/v.cnf' EXIT
+printf '[client]\nuser=root\npassword=%s\n' '${CURPW}' > /tmp/v.cnf
+if mysql --defaults-extra-file=/tmp/v.cnf -e 'SELECT 1' >/dev/null 2>&1; then
+  echo 'FAIL: old password still authenticates — rotation did NOT take'; exit 1
+fi
+echo 'OK: old password rejected'
 SCRIPT
 
-# 2. the NEW password does (expect: root@localhost)
+# 2. the NEW password does (expect: root@localhost). set -e so a failure here
+#    (new pw doesn't work) exits non-zero instead of looking fine.
 kubectl -n "$NS" exec -i "$POD" -- sh -s <<SCRIPT
-umask 077; printf '[client]\nuser=root\npassword=%s\n' '${NEWPW}' > /tmp/v.cnf
+set -e
+umask 077
+trap 'rm -f /tmp/v.cnf' EXIT
+printf '[client]\nuser=root\npassword=%s\n' '${NEWPW}' > /tmp/v.cnf
 mysql --defaults-extra-file=/tmp/v.cnf -e 'SELECT CURRENT_USER()'
-rm -f /tmp/v.cnf
 SCRIPT
 
 # 3. the platform is unaffected — heartbeat still sees the FULL dataset count,
