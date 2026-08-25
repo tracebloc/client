@@ -59,6 +59,7 @@ umask 077
 trap 'rm -f /tmp/rot.cnf' EXIT            # always wipe the password file, even on failure
 cat > /tmp/rot.cnf <<CNF
 [client]
+host=127.0.0.1
 user=root
 password=${CURPW}
 CNF
@@ -76,31 +77,42 @@ would still exit 0 (the trailing cleanup succeeds), so `kubectl exec` reports
 success while root silently stays on the old password and the Secret diverges.
 A non-zero exit here means the rotation did **not** take — stop and investigate.
 
+**Every `mysql` call connects over TCP (`host=127.0.0.1`), never the default unix
+socket.** This image writes its socket to `/var/lib/mysql/mysql.sock`, not the
+client default, so a socket connection can't reach a healthy `mysqld` — the same
+reason the deployment probes are pinned to `-h 127.0.0.1`. TCP as `root` matches
+`root@'%'`; make sure mysqld has finished restarting after the gate-on roll
+before running these.
+
 ## Verify (all must hold before moving to the next fleet)
 
-Same stdin/`--defaults-extra-file` discipline — no password in argv.
+Same stdin / `--defaults-extra-file` / TCP discipline — no password in argv.
 
 ```bash
-# 1. the OLD password no longer authenticates. Here success = mysql FAILS, so we
-#    invert the test explicitly (a bare mysql call would abort under set -e on the
-#    very outcome we want): prints OK and exits 0 only when the old pw is rejected.
+# 1. the OLD password no longer AUTHENTICATES. Distinguish a real rejection
+#    (ERROR 1045, access denied) from a connection error (mysqld restarting,
+#    wrong host): only 1045 proves rotation took. A bare "any failure = rejected"
+#    check is fail-open — a 2003 would masquerade as success.
 kubectl -n "$NS" exec -i "$POD" -- sh -s <<SCRIPT
 umask 077
 trap 'rm -f /tmp/v.cnf' EXIT
-printf '[client]\nuser=root\npassword=%s\n' '${CURPW}' > /tmp/v.cnf
-if mysql --defaults-extra-file=/tmp/v.cnf -e 'SELECT 1' >/dev/null 2>&1; then
+printf '[client]\nhost=127.0.0.1\nuser=root\npassword=%s\n' '${CURPW}' > /tmp/v.cnf
+if err=\$(mysql --defaults-extra-file=/tmp/v.cnf -e 'SELECT 1' 2>&1); then
   echo 'FAIL: old password still authenticates — rotation did NOT take'; exit 1
 fi
-echo 'OK: old password rejected'
+case "\$err" in
+  *1045*) echo 'OK: old password rejected (access denied)';;
+  *)      echo "INCONCLUSIVE: not a 1045 rejection — investigate: \$err"; exit 1;;
+esac
 SCRIPT
 
-# 2. the NEW password does (expect: root@localhost). set -e so a failure here
-#    (new pw doesn't work) exits non-zero instead of looking fine.
+# 2. the NEW password does (expect: root@%). set -e so a failure here
+#    (new pw doesn't work, or mysqld unreachable) exits non-zero, not "fine".
 kubectl -n "$NS" exec -i "$POD" -- sh -s <<SCRIPT
 set -e
 umask 077
 trap 'rm -f /tmp/v.cnf' EXIT
-printf '[client]\nuser=root\npassword=%s\n' '${NEWPW}' > /tmp/v.cnf
+printf '[client]\nhost=127.0.0.1\nuser=root\npassword=%s\n' '${NEWPW}' > /tmp/v.cnf
 mysql --defaults-extra-file=/tmp/v.cnf -e 'SELECT CURRENT_USER()'
 SCRIPT
 
