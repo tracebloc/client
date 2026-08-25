@@ -123,6 +123,22 @@ spec:
       - image: {{ include "tracebloc.image" (dict "repository" (.Values.images.mysqlClient.repository | default "tracebloc/mysql-client") "tag" (.Values.images.mysqlClient.tag | default "prod") "digest" .Values.images.mysqlClient.digest "registry" (dig "imageRegistry" "docker.io" (.Values.global | default dict))) | quote }}
         imagePullPolicy: IfNotPresent
         name: mysql-client
+        {{- if (include "tracebloc.rotateMysqlRoot" .) }}
+        # backend#947 / backend#1528 Phase 0: chart-managed root password so a
+        # FRESH datadir is born with a generated password instead of the image's
+        # baked literal. On an EXISTING datadir the mysql entrypoint ignores this
+        # (root's password lives in mysql.user) — the one-time `ALTER USER 'root'`
+        # rollout step aligns those to this same Secret value. Rendered only when
+        # the rotation gate is on; a default install is byte-identical (it keeps
+        # relying on the image's baked default). Probes use `mysqladmin ping`,
+        # which needs no auth, so this env change never disturbs them.
+        env:
+        - name: MYSQL_ROOT_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: {{ include "tracebloc.secretName" . }}
+              key: MYSQL_ROOT_PASSWORD
+        {{- end }}
         securityContext:
           runAsNonRoot: true
           runAsUser: 999
