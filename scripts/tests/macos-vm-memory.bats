@@ -224,8 +224,32 @@ calls() { cat "$MOCK_CALLS"; }
   [ "$output" = "0" ] || return 1
 }
 
-@test "a colima-prefixed context still counts as Colima" {
+@test "REGRESSION: a NAMED colima profile declines rather than restarting default" {
+  # THIS TEST USED TO PIN THE WRONG REQUIREMENT (@LukasWodka on #832). It asserted
+  # that a `colima-profile2` context ran the profile-LESS `colima stop` — which is
+  # exactly the bug: `colima stop` / `colima start` with no `--profile` act on
+  # **default**, so the budget was measured on profile2 and the restart landed on a
+  # VM the user was not using. It was a mutation-proof test of the wrong behaviour,
+  # which is why it read as coverage.
   DOCKER_CTX="colima-profile2" REPLY_IN="y" MEM_KB=$((2 * 1024 * 1024)) TARGET_GB=8 \
+    run _offer_colima_memory_raise
+  [ "$status" -eq 0 ] || return 1
+  run bash -c "grep -c '^colima ' '$MOCK_CALLS' || true"
+  [ "$output" = "0" ] || return 1
+}
+
+@test "the named-profile decline names the command that WOULD work" {
+  # Declining in silence would leave an operator with a real, fixable problem and
+  # no way to see it. The hint carries --profile, which is the part this function
+  # cannot safely run itself.
+  DOCKER_CTX="colima-profile2" REPLY_IN="y" MEM_KB=$((2 * 1024 * 1024)) TARGET_GB=8 \
+    run _offer_colima_memory_raise
+  [[ "$output" == *"--profile profile2"* ]] || return 1
+}
+
+@test "the default colima context still acts" {
+  # The narrowing must not have closed the case the feature exists for.
+  DOCKER_CTX="colima" REPLY_IN="y" MEM_KB=$((2 * 1024 * 1024)) TARGET_GB=8 \
     MEM_KB_AFTER=$((8 * 1024 * 1024)) run _offer_colima_memory_raise
   run bash -c "grep -c '^colima stop$' '$MOCK_CALLS' || true"
   [ "$output" = "1" ] || return 1
@@ -241,14 +265,21 @@ calls() { cat "$MOCK_CALLS"; }
   colima() {
     record "colima $*"
     # The sized start fails; a plain start (recovery) succeeds.
-    if [[ "$1" == "start" && "$2" == "--memory" ]]; then return 1; fi
+    # The SIZED start fails; the recovery start (at the smaller, measured size)
+    # succeeds. Keyed on the value so the two are distinguishable.
+    if [[ "$1" == "start" && "$3" == "8" ]]; then return 1; fi
     [[ "$1" == "start" ]] && RESTARTED=1
     return 0
   }
   REPLY_IN="y" MEM_KB=$((2 * 1024 * 1024)) TARGET_GB=8 run _offer_colima_memory_raise
   [ "$status" -eq 0 ] || return 1
-  run bash -c "grep -c '^colima start$' '$MOCK_CALLS' || true"
+  # EXPLICITLY at the measured size, not a bare `colima start` (Bugbot High): a
+  # bare retry relies on the previous config still being on disk, and Colima may
+  # already have persisted the rejected --memory.
+  run bash -c "grep -c '^colima start --memory 2$' '$MOCK_CALLS' || true"
   [ "$output" = "1" ] || return 1
+  run bash -c "grep -c '^colima start$' '$MOCK_CALLS' || true"
+  [ "$output" = "0" ] || return 1
 }
 
 @test "REGRESSION: a failed start AND a failed recovery is a hard failure" {
@@ -263,7 +294,8 @@ calls() { cat "$MOCK_CALLS"; }
   colima() { record "colima $*"; [[ "$1" == "start" ]] && return 1; return 0; }
   REPLY_IN="y" MEM_KB=$((2 * 1024 * 1024)) TARGET_GB=8 run _offer_colima_memory_raise
   run bash -c "grep '^error ' '$MOCK_CALLS'"
-  [[ "$output" == *"colima start"* ]] || return 1
+  # The GUIDANCE has to carry the size too, or it repeats the config that failed.
+  [[ "$output" == *"colima start --memory 2"* ]] || return 1
   [[ "$output" == *"Docker is down"* ]] || return 1
 }
 

@@ -210,10 +210,26 @@ _install_docker_colima() {
 # so it names the runtime the measured budget actually belongs to. Anything
 # unreadable answers "not Colima", which declines to act -- the safe direction for
 # a function whose action stops a container runtime.
+#
+# EXACTLY `colima`, NOT `colima-*` (Cursor Bugbot High + @LukasWodka +
+# @saqlainsyed007 on #832). An earlier version accepted named profiles, which was
+# half a feature: every command in the raise path runs profile-less, and `colima
+# stop` / `colima start` with no `--profile` act on **default**. So an active
+# context of `colima-profile2` measured profile2's VM and restarted `default` --
+# stopping a VM the user was not using, activating its context, and leaving the
+# measured one untouched. Same class as the wrong-runtime bug this guard was added
+# to fix, one level in.
+#
+# Declining is the smaller and more defensible of the two fixes, and it is the same
+# reasoning this function already applies to an unreadable context: a named profile
+# is another "I cannot act on this safely" case. It also settles @saqlainsyed007's
+# second site -- `_colima_instance_exists` is true if ANY instance exists, so it
+# never established that the instance about to be stopped is the one measured.
+# Requiring the default context makes those the same instance by construction.
 _colima_is_active_runtime() {
   local ctx
   ctx="$(docker context show 2>/dev/null)" || return 1
-  case "$ctx" in colima|colima-*) return 0 ;; *) return 1 ;; esac
+  [ "$ctx" = "colima" ]
 }
 
 _offer_colima_memory_raise() {
@@ -221,7 +237,19 @@ _offer_colima_memory_raise() {
   has colima || return 0
   _colima_instance_exists || return 0
   # The measured budget must belong to the runtime we are about to restart.
-  _colima_is_active_runtime || return 0
+  if ! _colima_is_active_runtime; then
+    # Say so for the one case an operator can act on themselves, rather than
+    # skipping in silence: a named profile is a deliberate setup, and the command
+    # that would work on it is not the one this function runs.
+    local _ctx
+    _ctx="$(docker context show 2>/dev/null)" || _ctx=""
+    case "$_ctx" in
+      colima-*)
+        hint "Docker is using the Colima profile '\''${_ctx#colima-}'\''. Raise it yourself with: colima stop --profile ${_ctx#colima-} && colima start --profile ${_ctx#colima-} --memory <GB>"
+        ;;
+    esac
+    return 0
+  fi
 
   local current_kb target_gb current_gb
   current_kb="$(_pf_runtime_mem_kb)"
@@ -278,15 +306,29 @@ _offer_colima_memory_raise() {
     #
     # Try the plain start first: the most likely cause is the machine cannot honour
     # the larger budget, and the VM that was working a moment ago still can.
-    warn "Colima would not start with ${target_gb} GB; restoring the previous VM."
-    if spin_cmd_bounded 900 "Restoring the Docker runtime…" colima start; then
+    # RESTORED EXPLICITLY, not implicitly (Cursor Bugbot High + both reviewers on
+    # #832). A bare `colima start` relies on the previous configuration still being
+    # on disk, and this function has no evidence of that -- Bugbot reads Colima as
+    # persisting CLI flags before the VM boots, which would make a bare retry the
+    # same failing size and leave Docker down. Passing the size we measured is
+    # correct under either reading and costs nothing.
+    #
+    # It rounds DOWN by a few hundred MiB, and that is an accepted trade rather than
+    # an oversight: `current_gb` comes from MemTotal, which a guest reports below its
+    # configured size. Reading the configured value would mean parsing
+    # ~/.colima/<profile>/colima.yaml -- and this PR already declined to guess
+    # Docker Desktop's on-disk schema for exactly that reason, so guessing Colima's
+    # would be inconsistent. This is a recovery path whose job is to get Docker
+    # back, not to restore byte-exact sizing.
+    warn "Colima would not start with ${target_gb} GB; restoring the previous VM at ${current_gb} GB."
+    if spin_cmd_bounded 900 "Restoring the Docker runtime…" colima start --memory "$current_gb"; then
       warn "Docker is back at ${current_gb} GB. Raise it manually when the machine can spare it: ${cmd}"
       return 0
     fi
     # Recovery failed too. HARD FAIL rather than continue: every later step needs
     # Docker, this function is what stopped it, and a run that proceeds from here
     # fails later with a message about something else entirely.
-    error "Colima did not restart after the memory change and Docker is down. Recover with: colima start (or 'colima delete && colima start' if the VM is wedged), then re-run the installer."
+    error "Colima did not restart after the memory change and Docker is down. Recover with: colima start --memory ${current_gb} (or 'colima delete && colima start' if the VM is wedged), then re-run the installer."
   fi
 
   # RE-PROBED, not assumed. A start that succeeded and a VM that grew are
