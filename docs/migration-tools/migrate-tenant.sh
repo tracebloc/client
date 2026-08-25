@@ -20,7 +20,10 @@
 #    TENANT_CONFIG  path to tenant-config.env (default: ./tenant-config.env)
 #    CTX            kubectl/helm --context (default: the prod EKS context)
 #    CHART_PATH     local chart dir (default: ./client, run from repo root)
-#    MYSQL_ROOT_PW  mysqldump root password (default: image-baked legacy pw)
+#    MYSQL_ROOT_PW  mysqldump root password. On a fleet where the chart manages
+#                   root (rotateMysqlRoot on, backend#947) this is the generated
+#                   value in the mysql-client Secret's MYSQL_ROOT_PASSWORD key;
+#                   otherwise it is the image-baked legacy pw.
 # =============================================================================
 set -euo pipefail
 
@@ -41,9 +44,12 @@ source "$CONFIG"
 [[ -n "${EFS_FS_OVERRIDE:-}" ]] && EFS_FS="$EFS_FS_OVERRIDE"
 [[ -n "${EFS_FS:-}" ]] || { echo "EFS_FS must be set in $CONFIG or via EFS_FS_OVERRIDE env" >&2; exit 2; }
 
-# MYSQL_ROOT_PW must come from the env or tenant-config.env. It's the
-# legacy image-baked root password that mysqldump needs. Refuse to run
-# without it rather than hardcode a default — keeps secrets out of git.
+# MYSQL_ROOT_PW must come from the env or tenant-config.env — the root password
+# mysqldump authenticates with. On a fleet where the chart manages root
+# (rotateMysqlRoot on, backend#947) this is the generated value in the
+# mysql-client Secret's MYSQL_ROOT_PASSWORD key; otherwise it's the legacy
+# image-baked password. Refuse to run without it rather than hardcode a default
+# — keeps secrets out of git.
 # Also reject the literal __PLACEHOLDER__ shipped in the example so an
 # unfilled config fails fast here instead of mid-Phase-1 with an opaque
 # "Access denied" from mysqldump inside kubectl exec.
