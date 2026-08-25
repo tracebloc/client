@@ -6559,6 +6559,29 @@ Describe "Assert-NodesSeeHostData (backend#2422)" {
     $isolated.Output | Should -Not -BeLike "*WARNING*"
   }
 
+  It "keeps merged stderr on a NON-ZERO exit even under -StdoutOnly (client#828)" {
+    # THE CONTRACT: -StdoutOnly isolates stdout ONLY on the success path (exit 0).
+    # A non-zero exit is a failure path and must return the merged stdout+stderr so
+    # the caller still has the child's diagnostics -- gating isolation on the switch
+    # alone silently discarded stderr, making a failed child look like it produced
+    # nothing rather than like the helper threw its stderr away (client#828).
+    #
+    # Real child, not a mock: the return-shape on failure IS the fix, so a mock of
+    # Invoke-DockerCli would assert nothing. The child exits 3 after writing to BOTH
+    # streams; the stderr payload has no space/quote for the same quoting reason as
+    # the success-path test above.
+    $sh = (Get-Command sh -ErrorAction SilentlyContinue)
+    if (-not $sh) { Set-ItResult -Skipped -Because "needs a POSIX sh to write both streams"; return }
+    $script = 'printf tok; printf WARNING:boom >&2; exit 3'
+
+    $failed = Invoke-BoundedProcess -FileName $sh.Source -Arguments @("-c", $script) -TimeoutSec 20 -StdoutOnly
+    $failed.Code | Should -Be 3
+    # stderr SURVIVES the failure despite -StdoutOnly -- the whole point of #828
+    $failed.Output | Should -BeLike "*WARNING*" -Because "a failing -StdoutOnly caller still needs the child's stderr diagnostics (client#828)"
+    # and it is the same merged string a non-isolated failing call would return
+    $failed.Output | Should -Be "tokWARNING:boom"
+  }
+
   It "passes -StdoutOnly on BOTH docker calls, so the isolation cannot regress (#817)" {
     # The switch above only helps if this function actually asks for it. Capture what
     # the probe requests rather than trusting the wiring.
