@@ -104,13 +104,45 @@ SAFE_PS1='      $k3dArgs += @("--k3s-arg", "--kubelet-arg=fail-cgroupv1=false@al
 
 # --- the two installers must agree -----------------------------------------
 
-@test "an allowlisted arg dropped from one twin is still a finding" {
-  # Both sides are individually allowlist-clean here, so this is NOT check 1
-  # restated: one platform would ship a differently-configured kubelet, and the
-  # gate on this flag is version-dependent, so the drop is easy to miss.
+@test "the two installers disagreeing produces the PARITY finding, by name" {
+  # THE POINT OF ASSERTING THE MESSAGE, not just a non-zero status: an earlier
+  # version of this test set the ps1 fixture to a bare comment, which code_of
+  # strips to empty, so the guard fail_closed'd (exit 2) BEFORE the parity branch
+  # ran -- and `status -ne 0` could not tell that apart from the exit 1 parity
+  # gives. Check 2 could be deleted outright and the suite stayed green: vacuous,
+  # by this suite's own standard. Found in review by @saqlainsyed007.
+  #
+  # Both fixtures are non-empty so the parse succeeds and execution reaches
+  # check 2. Check 1 also fires here (ps1's extra arg is not allowlisted) and
+  # that is unavoidable: with one entry on the allowlist there is no way for two
+  # DIFFERENT non-empty arg sets to both be allowlist-clean. Hence the assertion
+  # on the parity text specifically -- it is what distinguishes the two checks.
+  _fixture "$SAFE_BASH" "$SAFE_PS1
+      \$k3dArgs += @(\"--k3s-arg\", \"--kubelet-arg=some-other-setting=1@all\")"
+  _run_guard
+  [ "$status" -eq 1 ] || { echo "$output"; return 1; }
+  [[ "$output" == *"pass different kubelet args"* ]] || { echo "$output"; return 1; }
+  [[ "$output" == *"installer_parity.json"* ]] || { echo "$output"; return 1; }
+}
+
+@test "the parity finding lists BOTH sides, so a reviewer knows which twin to open" {
+  _fixture "$SAFE_BASH" "$SAFE_PS1
+      \$k3dArgs += @(\"--k3s-arg\", \"--kubelet-arg=some-other-setting=1@all\")"
+  _run_guard
+  [[ "$output" == *"cluster.sh     : fail-cgroupv1"* ]] || { echo "$output"; return 1; }
+  [[ "$output" == *"install-k8s.ps1: fail-cgroupv1 some-other-setting"* ]] || { echo "$output"; return 1; }
+}
+
+@test "an allowlisted arg dropped from one twin fails CLOSED, not as a parity finding" {
+  # The realistic shape of a one-sided drop, and the guard classifies it as a
+  # stale-parse rather than a disagreement -- because a file that passes no
+  # kubelet args at all cannot be distinguished from a parser that stopped
+  # matching. Pinned so the classification is a choice on the record: exit 2 with
+  # "parsed NO", which sends a human to look, not exit 1 blaming parity.
   _fixture "$SAFE_BASH" '      # nothing here'
   _run_guard
-  [ "$status" -ne 0 ] || { echo "$output"; return 1; }
+  [ "$status" -eq 2 ] || { echo "$output"; return 1; }
+  [[ "$output" == *"parsed NO"* ]] || { echo "$output"; return 1; }
 }
 
 # --- fail closed ------------------------------------------------------------
