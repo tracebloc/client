@@ -323,8 +323,16 @@ _training_limits() {
     pair="${pair#"${pair%%[![:space:]]*}"}"
     pair="${pair%"${pair##*[![:space:]]}"}"
     [[ -n "$pair" ]] || continue
+    # CASE-INSENSITIVE, via character classes rather than `${pair,,}` — this
+    # bootstrap has to run under macOS's bash 3.2, which has no case conversion.
+    #
+    # A twin DIVERGENCE otherwise (review on client#820): PowerShell's
+    # `-like 'cpu=*'` is case-insensitive, so `CPU=7,memory=29Gi` dropped the
+    # cpu limit on Windows and kept it on Linux/macOS. Same class as the
+    # whitespace-trim divergence, and every parity fixture row is lowercase, so
+    # nothing pinned it.
     case "$pair" in
-      cpu=*) continue ;;
+      [Cc][Pp][Uu]=*) continue ;;
     esac
     out="${out:+$out,}$pair"
   done

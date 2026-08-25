@@ -2926,3 +2926,90 @@ _arch_gate_ctx() {
   [[ "$_TB_TRAINING_SIZE" == cpu=* ]] || return 1
   [ "$_TB_TRAINING_SIZE" != "memory=8Gi" ] || return 1
 }
+
+
+@test "_training_limits: matches cpu= case-INSENSITIVELY, like the ps1 twin" {
+  # Twin divergence caught in review on client#820: PowerShell's
+  # `-like 'cpu=*'` is case-insensitive, so `CPU=7,...` dropped the cpu limit on
+  # Windows and KEPT it on Linux/macOS. Character classes rather than
+  # `${pair,,}` because macOS ships bash 3.2, which has no case conversion.
+  [ "$(_training_limits 'CPU=7,memory=29Gi')" = "memory=29Gi" ] || return 1
+  [ "$(_training_limits 'Cpu=7,memory=29Gi')" = "memory=29Gi" ] || return 1
+  # ...and a differently-cased NON-cpu dimension still survives.
+  [ "$(_training_limits 'CPU=7,CPUSET=0-3,memory=29Gi')" = "CPUSET=0-3,memory=29Gi" ] || return 1
+}
+
+# ── the ROUND TRIP: write values, read them back, carry (review on client#820) ─
+#
+# The reviewer's point, and it is the right one: `_training_limits` was well
+# covered in isolation and the round trip is what broke. Every test wrote OR
+# read; none did both, so a writer change that poisoned the reader passed
+# everything. This test installs, feeds the generated values file back through
+# the carry reader, and asserts the envelope survives with its cpu request.
+
+@test "round trip: install, re-read, and the carried envelope still has cpu" {
+  HOST_DATA_DIR="$BATS_TEST_TMPDIR/data"; mkdir -p "$HOST_DATA_DIR"
+  _ensure_tracebloc_dirs() { :; }
+  _ensure_release_dirs() { :; }
+  _ensure_helm_runnable() { :; }
+  helm() { record "helm $*"; return 0; }
+  verify_credentials() { printf valid; }
+  export TRACEBLOC_TRAINING_RESOURCES="cpu=7,memory=29Gi"
+  run install_client_helm <<< $'myid\nmypw'
+  [ "$status" -eq 0 ] || return 1
+
+  # What the FIRST install wrote: the two halves now differ.
+  grep -q 'RESOURCE_LIMITS: "memory=29Gi"' "$HOST_DATA_DIR/values.yaml" || return 1
+  grep -q 'RESOURCE_REQUESTS: "cpu=7,memory=29Gi"' "$HOST_DATA_DIR/values.yaml" || return 1
+
+  # Now the REINSTALL: hand that very file back as the installed release's
+  # values, exactly as `helm get values` would.
+  unset TRACEBLOC_TRAINING_RESOURCES
+  TB_NAMESPACE=tracebloc
+  kubectl() { return 0; }
+  helm() { cat "$HOST_DATA_DIR/values.yaml"; }
+
+  run _existing_training_resources
+  [ "$status" -eq 0 ] || return 1
+  # MUTATION: read RESOURCE_LIMITS in _existing_training_values and this
+  # reddens with 'memory=29Gi' -- an envelope carrying no cpu request at all.
+  [ "$output" = "cpu=7,memory=29Gi" ] || return 1
+  [[ "$output" == cpu=* ]] || return 1
+}
+
+@test "round trip: a default install re-reads as the literal, so it re-sizes" {
+  # The second half of the same bug. A default install writes
+  # RESOURCE_LIMITS: "memory=8Gi", and the historic-default gate compares
+  # against `cpu=2,memory=8Gi`. Reading the limits half would make the default
+  # look like a deliberate choice and machine sizing would never run again --
+  # keeping an unschedulable 8Gi on exactly the machines this sizing exists to
+  # fix.
+  HOST_DATA_DIR="$BATS_TEST_TMPDIR/data"; mkdir -p "$HOST_DATA_DIR"
+  _ensure_tracebloc_dirs() { :; }
+  _ensure_release_dirs() { :; }
+  _ensure_helm_runnable() { :; }
+  helm() { record "helm $*"; return 0; }
+  kubectl() { return 1; }   # cluster unreadable -> the static literal
+  verify_credentials() { printf valid; }
+  unset TRACEBLOC_TRAINING_RESOURCES
+  run install_client_helm <<< $'myid\nmypw'
+  [ "$status" -eq 0 ] || return 1
+  grep -q 'RESOURCE_REQUESTS: "cpu=2,memory=8Gi"' "$HOST_DATA_DIR/values.yaml" || return 1
+
+  TB_NAMESPACE=tracebloc
+  kubectl() { return 0; }
+  helm() { cat "$HOST_DATA_DIR/values.yaml"; }
+
+  # The reader returns the FULL literal — cpu included. That is the whole point:
+  # reading the memory-only limits half would yield `memory=8Gi`, which the gate
+  # at :546 compares against `cpu=2,memory=8Gi`, fails to match, and then treats
+  # as a deliberate human choice.
+  run _existing_training_resources
+  [ "$status" -eq 0 ] || return 1
+  [ "$output" = "cpu=2,memory=8Gi" ] || return 1
+
+  # And the gate therefore still refuses it: the size is machine-derived, so the
+  # provenance is `installer` rather than a carried `unknown`/`user`.
+  _resolve_training_size
+  [ "$_TB_TRAINING_PROVENANCE" = "installer" ] || return 1
+}

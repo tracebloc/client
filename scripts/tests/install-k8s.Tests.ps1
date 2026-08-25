@@ -6675,6 +6675,17 @@ Describe "Get-TrainingLimits" {
     # cpu limit this function exists to drop.
     Get-TrainingLimits "cpu=4" | Should -Be "cpu=4"
   }
+  It "matches cpu= case-insensitively, and the bash twin now agrees" {
+    # Divergence caught in review on client#820: this side's `-like` was
+    # already case-insensitive while bash's `case cpu=*)` was not, so
+    # `CPU=7,...` kept the cpu limit on Linux/macOS and dropped it here. Bash
+    # now uses [Cc][Pp][Uu] character classes (macOS ships bash 3.2, which has
+    # no `${var,,}`).
+    Get-TrainingLimits "CPU=7,memory=29Gi" | Should -Be "memory=29Gi"
+    Get-TrainingLimits "Cpu=7,memory=29Gi" | Should -Be "memory=29Gi"
+    Get-TrainingLimits "CPU=7,CPUSET=0-3,memory=29Gi" |
+      Should -Be "CPUSET=0-3,memory=29Gi"
+  }
   It "trims each pair before matching cpu=" {
     Get-TrainingLimits " cpu=7 , memory=29Gi " | Should -Be "memory=29Gi"
   }
