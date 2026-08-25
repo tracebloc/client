@@ -88,25 +88,38 @@ done <<<"$priv_kinds"
 # passes when the lookup sits ABOVE that `if` -- which is the original lockout,
 # unchanged. The lookup has to be reachable only through the gate's else branch,
 # so: gate < else < lookup, all on code lines. (Bugbot Medium on client#823.)
-line_of() {
-  local all=""
-  all="$(grep -nE "$1" <<<"$code")" || true
+# FAIL-CLOSED BY CONSTRUCTION, not by remembering. The previous shape was a
+# `line_of` that could return empty plus a separate `[ -n ... ] || fail` beside
+# each call -- and one of the three calls did not get one. With that variable
+# empty, `[ 98 -ge "" ]` prints "integer expression expected" and returns 2, but
+# it is the condition of an `if`, so errexit is suppressed by design, the branch
+# is simply not taken, `fail` is never reached, and the script runs on to print
+# GREEN. A required guard reporting a pass for a check it did not perform.
+#
+# That is the THIRD fail-open hole in this one file (the untrimmed match, the
+# pipefail early-close, this) and every one of them was the guard failing while
+# the guarded thing was fine. So the helper now refuses on its own behalf: there
+# is no way to call it and forget the check. (@saadqbal + Bugbot on client#823.)
+require_line() {
+  local pattern="$1" what="$2" all=""
+  all="$(grep -nE "$pattern" <<<"$code")" || true
   all="${all%%$'\n'*}"
-  printf '%s' "${all%%:*}"
+  all="${all%%:*}"
+  case "$all" in
+    ''|*[!0-9]*) fail "could not locate $what in $(basename "$tpl").
+   Either the preflight was removed -- then delete this guard deliberately, in the
+   same change -- or it changed shape and this check can no longer see it. Not
+   knowing is a finding, not a pass." ;;
+  esac
+  printf '%s' "$all"
 }
 
-gate_line="$(line_of '^[[:space:]]*\{\{-?[[:space:]]*if .*metricsServerPreflight')"
-[ -n "$gate_line" ] || fail \
-"no values gate on the APIService lookup. nodeAgents.metricsServerPreflight is the
-   only escape hatch for a caller who cannot read APIServices; without a real
-   \`if\` on it the flag is inert while looking present."
-
-else_line="$(line_of '^[[:space:]]*\{\{-?[[:space:]]*else[[:space:]]*-?\}\}')"
-api_line="$(line_of 'lookup "apiregistration.k8s.io/v1" "APIService"')"
-
-[ -n "$else_line" ] || fail \
-"the metricsServerPreflight gate has no \`else\` branch, so this guard cannot tell
-   which side the APIService lookup is on. Not knowing is a finding."
+gate_line="$(require_line '^[[:space:]]*\{\{-?[[:space:]]*if .*metricsServerPreflight' \
+  'the nodeAgents.metricsServerPreflight gate -- the only escape hatch for a caller who cannot read APIServices')"
+else_line="$(require_line '^[[:space:]]*\{\{-?[[:space:]]*else[[:space:]]*-?\}\}' \
+  "the gate's else branch, without which this guard cannot tell which side the APIService lookup is on")"
+api_line="$(require_line 'lookup "apiregistration.k8s.io/v1" "APIService"' \
+  'the APIService lookup')"
 
 if [ "$gate_line" -ge "$api_line" ] || [ "$else_line" -ge "$api_line" ] || [ "$gate_line" -ge "$else_line" ]; then
   fail "the APIService lookup (line $api_line) is not reached through the
