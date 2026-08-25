@@ -28,11 +28,22 @@ fail() { echo "[ERROR] $*" >&2; exit 1; }
 
 echo "== preflight is not privilege-gated =="
 
-priv_line="$(grep -n 'lookup "apiregistration.k8s.io/v1" "APIService"' "$tpl" | head -1 | cut -d: -f1 || true)"
+# Capture-then-slice, not `grep ... | head -1`: piping into an early-closing
+# reader under this file's `set -euo pipefail` aborts the guard on SIGPIPE, which
+# scripts/tests/pipefail-early-close.bats forbids tree-wide. Same idiom as
+# node-jsonpath-agreement.sh.
+first_line_of() {
+  local all=""
+  all="$(grep -n "$1" "$2")" || true
+  all="${all%%$'\n'*}"
+  printf '%s' "${all%%:*}"
+}
+
+priv_line="$(first_line_of 'lookup "apiregistration.k8s.io/v1" "APIService"' "$tpl")"
 [ -n "$priv_line" ] || fail \
 "no APIService lookup found in $(basename "$tpl"). Either the preflight was removed -- then delete this check too, deliberately -- or it changed shape and this check can no longer see it. Not knowing is a finding."
 
-cheap_line="$(grep -n 'lookup "apps/v1" "Deployment" "kube-system" "metrics-server"' "$tpl" | head -1 | cut -d: -f1 || true)"
+cheap_line="$(first_line_of 'lookup "apps/v1" "Deployment" "kube-system" "metrics-server"' "$tpl")"
 [ -n "$cheap_line" ] || fail \
 "the APIService lookup at line $priv_line is not preceded by a metrics-server Deployment probe. A caller with only namespace-scoped admin cannot read APIServices, so helm RAISES and the entire upgrade dies. Probe something the caller can read first (client#2469)."
 
@@ -64,7 +75,8 @@ grep -q 'resources: \["deployments"\]' "$rbac" || fail \
 grep -q 'resourceNames: \["metrics-server"\]' "$rbac" || fail \
 "the deployments grant is not restricted with resourceNames: [\"metrics-server\"]. The preflight reads exactly one object, so a cluster-wide Deployment read buys nothing and reopens the workload-read blast radius backend#953 removed (Bugbot on client#823)."
 
-if grep -A3 'resources: \["deployments"\]' "$rbac" | grep -qE 'verbs:.*"(list|watch)"'; then
+deployments_rule="$(grep -A3 'resources: \["deployments"\]' "$rbac")" || true
+if grep -qE 'verbs:.*"(list|watch)"' <<<"$deployments_rule"; then
   fail "the deployments grant includes list or watch. resourceNames does not restrict collection verbs -- Kubernetes ignores it for list/watch -- so those would grant enumeration of every Deployment in the cluster. A named get is all the preflight needs."
 fi
 
