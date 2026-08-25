@@ -52,30 +52,38 @@ for end in range(start, len(lines)):
         depth -= 1
         if depth == 0: break
 body = "\n".join(l[6:] if l.startswith(" " * 6) else l.lstrip() for l in lines[start:end + 1])
-# drop the trailing `continue` so the branch can run outside a loop
-body = body.replace("\ncontinue\n", "\n")
 open(sys.argv[2], "w").write(body)
 PYX
 }
 teardown() { rm -rf "$TMP"; }
 
-# Runs the shipped branch with the registry stubbed. $1 = the values pin,
-# $2 = what the tag currently resolves to ("" means unresolvable).
+# Runs the shipped branch with the registry stubbed.
+#   $1 = the values pin        $2 = what the tag resolves to ("" = unresolvable)
+#   $3 = an existing stale-pin annotation, if any
+#
+# The branch is wrapped in a ONE-ITERATION loop rather than having its `continue`
+# statements stripped. Stripping them silently changed control flow -- the early
+# "not a values pin" skip fell through into the comparison -- so the harness was
+# testing a shape that does not ship. A loop runs the real thing.
 run_branch() {
   cat > "$TMP/harness.sh" <<EOF
 set -eu
-pinned=1
 repo="tracebloc/jobs-manager"
 IMAGE_TAG="dev"
+pinned=1
 pin_digest="\${1:-}"
 STUB_LATEST="\${2:-}"
+EXISTING_ANNOTATION="\${3:-}"
 annotate_args=""
 log() { printf '%s\n' "\$*"; }
 get_latest_digest() { [ -n "\$STUB_LATEST" ] && printf '%s' "\$STUB_LATEST"; }
-$(cat "$TMP/branch.sh")
+get_annotation() { [ -n "\$EXISTING_ANNOTATION" ] && printf '%s' "\$EXISTING_ANNOTATION"; }
+for _once in 1; do
+$(sed 's/^/  /' "$TMP/branch.sh")
+done
 printf 'ANNOTATE:%s\n' "\$annotate_args"
 EOF
-  sh "$TMP/harness.sh" "$1" "$2"
+  sh "$TMP/harness.sh" "$1" "$2" "${3:-}"
 }
 
 @test "a pin matching the current tag is reported CURRENT, not silently skipped" {
@@ -120,14 +128,34 @@ EOF
   [[ "$output" != *"PIN IS STALE"* ]] || return 1
 }
 
-@test "a pin the tick cannot see is a finding, not agreement" {
-  run run_branch "" "sha256:bbb"
-  [ "$status" -eq 0 ] || return 1
-  [[ "$output" == *"cannot compare"* ]] || return 1
-  [[ "$output" != *"pin is CURRENT"* ]] || return 1
-}
-
 @test "the branch never fails the tick — telemetry pinning must not stop a refresh" {
   run run_branch "sha256:aaa" "sha256:bbb"
   [ "$status" -eq 0 ] || return 1
+}
+
+@test "a pin flag with no pin value is a quiet skip, not a recurring false finding" {
+  # resourceMonitor: false also sets PINNED=1 with an empty pin. Reporting it
+  # would put "cannot compare" in every healthy edge's log on every tick.
+  run run_branch "" "sha256:bbb" || return 1
+  [ "$status" -eq 0 ] || return 1
+  [[ "$output" == *"nothing to compare"* ]] || return 1
+  [[ "$output" != *"is a finding"* ]] || return 1
+  [[ "$output" != *"PIN IS STALE"* ]] || return 1
+}
+
+@test "CURRENT clears a previous stale-pin annotation, so it does not outlive the problem" {
+  run run_branch "sha256:aaa" "sha256:aaa" "sha256:old" || return 1
+  [[ "$output" == *"tracebloc.io/stale-pin-jobs-manager-"* ]] || return 1
+}
+
+@test "CURRENT with no existing annotation makes no write at all" {
+  run run_branch "sha256:aaa" "sha256:aaa" "" || return 1
+  [[ "$output" == *"ANNOTATE:"* ]] || return 1
+  [[ "$output" != *"stale-pin-jobs-manager-"* ]] || return 1
+}
+
+@test "an unresolvable tag leaves the last known state rather than asserting agreement" {
+  run run_branch "sha256:aaa" "" "sha256:old" || return 1
+  [[ "$output" == *"last KNOWN state"* ]] || return 1
+  [[ "$output" != *"stale-pin-jobs-manager-"* ]] || return 1
 }

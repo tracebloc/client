@@ -426,6 +426,22 @@ data:
       log "checking ${repo}:${IMAGE_TAG} (annotation=${key})"
 
       if [ "$pinned" = "1" ]; then
+        # A values digest pin is not the only reason to skip. resource-monitor
+        # also reports "pinned" when `resourceMonitor: false` disables the
+        # DaemonSet -- there is no workload to reconcile -- and that path carries
+        # no pin value. PINNED=1 with an empty pin is therefore that case by
+        # construction, and there is no pin to go stale: nothing to compare and
+        # nothing to report.
+        #
+        # Reporting it anyway would have put "cannot compare, which is a finding"
+        # in the log of every healthy edge that disables the DaemonSet, on every
+        # tick -- training operators to ignore the real stale-pin warning this
+        # branch exists to raise. (Bugbot Medium on client#824.)
+        if [ -z "$pin_digest" ]; then
+          log "  skipped for this image (not a values digest pin -- nothing to compare)"
+          continue
+        fi
+
         # HONOUR the pin -- an explicit operator pin outranks auto-refresh, and
         # that is correct. But COMPARE anyway and say what we found: nothing else
         # in this system ever revisits a pin, so a stale one is invisible until a
@@ -435,13 +451,22 @@ data:
         # One registry call, the same one every unpinned image already makes, and
         # it changes no behaviour: `continue` still ends this image's tick either
         # way. Only the reporting is new.
+        stale_key="tracebloc.io/stale-pin-${repo#*/}"
         pin_latest="$(get_latest_digest "$repo" "$IMAGE_TAG" "docker.io" || true)"
-        if [ -z "$pin_digest" ]; then
-          log "  pinned by digest in values; skipping (pin value not visible to this tick -- cannot compare, which is a finding)"
-        elif [ -z "$pin_latest" ]; then
+        if [ -z "$pin_latest" ]; then
           log "  pinned by digest in values; skipping (could not resolve ${IMAGE_TAG} to compare -- not knowing is a finding, not agreement)"
+          log "        leaving any existing ${stale_key} as the last KNOWN state rather than asserting agreement"
         elif [ "$pin_latest" = "$pin_digest" ]; then
           log "  pinned by digest in values; skipping (pin is CURRENT for ${IMAGE_TAG})"
+          # CLEAR the finding when it stops being true. A write-only annotation
+          # outlives the problem it reports and becomes a permanent false finding
+          # -- the opposite of the durable signal this is for. Only when one is
+          # actually present, so a healthy tick makes no extra write.
+          # (@saqlainsyed007 + Bugbot on client#824.)
+          if [ -n "$(get_annotation "$stale_key" || true)" ]; then
+            log "        clearing a previous ${stale_key}: the pin is current again"
+            annotate_args="$annotate_args ${stale_key}-"
+          fi
         else
           log "  WARN: PIN IS STALE. values pin ${pin_digest}"
           log "        but ${repo}:${IMAGE_TAG} now resolves to ${pin_latest}."
@@ -451,10 +476,21 @@ data:
           log "        in values (backend#2458)."
           # Queryable after the log ages out, on the same object the refresh
           # annotations use, so `kubectl describe` shows pin state beside refresh state.
-          annotate_args="$annotate_args tracebloc.io/stale-pin-${repo#*/}=${pin_latest}"
+          annotate_args="$annotate_args ${stale_key}=${pin_latest}"
         fi
         continue
       fi
+
+        # The image is NOT pinned. If a previous tick recorded a stale pin, the
+        # operator has since taken the remediation this branch prescribes, so the
+        # finding must go with it -- otherwise clearing the pin orphans the
+        # annotation forever, since the branch that wrote it stops running.
+        # (@saqlainsyed007 on client#824.)
+        unpinned_stale_key="tracebloc.io/stale-pin-${repo#*/}"
+        if [ -n "$(get_annotation "$unpinned_stale_key" || true)" ]; then
+          log "  clearing ${unpinned_stale_key}: this image is no longer pinned"
+          annotate_args="$annotate_args ${unpinned_stale_key}-"
+        fi
 
       latest="$(get_latest_digest "$repo" "$IMAGE_TAG" "docker.io" || true)"
       if [ -z "$latest" ]; then
