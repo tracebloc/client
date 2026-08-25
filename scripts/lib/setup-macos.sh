@@ -163,6 +163,248 @@ _install_docker_colima() {
   success "Docker running."
 }
 
+# Offer to raise an EXISTING Colima VM that is below the training floor
+# (backend#2221). Returns 0 whether or not anything was changed -- this is an
+# offer, never a gate.
+#
+# WHY THIS EXISTS. #428 sizes a FRESH Colima VM from physical RAM, so a first
+# install already gets a sensible budget. An existing VM does not: the installer
+# starts it as-is, preflight warns that it is too small, and the user is left to
+# fix it by hand. That warning is the state backend#2221 calls out -- *"the
+# installer states an absolute minimum VM allocation and offers to fix it. We
+# already write .wslconfig on Windows; macOS needs the equivalent."*
+#
+# WHY COLIMA AND NOT DOCKER DESKTOP, which is the asymmetry to understand here.
+# Colima is a CLI with documented flags: `colima stop && colima start --memory N`
+# is a supported operation whose effect can be MEASURED afterwards. Docker
+# Desktop's VM size lives in a settings file whose schema is version-dependent
+# and, on a default install, does not contain a memory key at all -- Docker only
+# persists what the user has changed (verified on macOS 15 / Docker Desktop:
+# settings-store.json held ten keys and none of them was memory). Writing a
+# guessed key name there would produce an installer that SAYS it raised the VM
+# and did nothing, which is worse than the instruction it replaced. So Docker
+# Desktop keeps the instruction that preflight already prints, and this path is
+# deliberately Colima-only.
+#
+# CONSENT IS REQUIRED, because this stops the user's container runtime -- every
+# running container goes down. The ticket asks for it explicitly and it is the
+# right bar for a destructive-adjacent action:
+#   * no usable TTY (CI, `curl | bash`) -> print the manual command and return.
+#     A non-interactive run must never restart a runtime nobody asked it to.
+#   * default is NO. A bare Enter declines.
+#   * TRACEBLOC_ASSUME_YES=1 opts in for an unattended install that WANTS this.
+#
+# AND IT RE-PROBES. The success line is emitted only after `docker info` reports
+# the new figure, because "I ran the command" and "the VM is bigger" are
+# different claims and only the second one is worth printing.
+# Is Colima the runtime `docker` is actually talking to?
+#
+# WHY THIS IS NOT THE SAME QUESTION as "is Colima installed and does an instance
+# exist" (Cursor Bugbot Medium on #832). A headless Mac can have Docker Desktop up
+# via VNC AND a leftover, stopped Colima instance. The memory figure then comes
+# from DESKTOP's VM, while a "yes" would stop/start Colima and switch the docker
+# context to it -- solving a problem the user does not have, on a runtime they were
+# not using, and moving their Docker out from under them.
+#
+# The active CONTEXT is the honest signal: it is what `docker` resolves through,
+# so it names the runtime the measured budget actually belongs to. Anything
+# unreadable answers "not Colima", which declines to act -- the safe direction for
+# a function whose action stops a container runtime.
+#
+# EXACTLY `colima`, NOT `colima-*` (Cursor Bugbot High + @LukasWodka +
+# @saqlainsyed007 on #832). An earlier version accepted named profiles, which was
+# half a feature: every command in the raise path runs profile-less, and `colima
+# stop` / `colima start` with no `--profile` act on **default**. So an active
+# context of `colima-profile2` measured profile2's VM and restarted `default` --
+# stopping a VM the user was not using, activating its context, and leaving the
+# measured one untouched. Same class as the wrong-runtime bug this guard was added
+# to fix, one level in.
+#
+# Declining is the smaller and more defensible of the two fixes, and it is the same
+# reasoning this function already applies to an unreadable context: a named profile
+# is another "I cannot act on this safely" case. It also settles @saqlainsyed007's
+# second site -- `_colima_instance_exists` is true if ANY instance exists, so it
+# never established that the instance about to be stopped is the one measured.
+# Requiring the default context makes those the same instance by construction.
+_colima_is_active_runtime() {
+  local ctx
+  ctx="$(docker context show 2>/dev/null)" || return 1
+  [ "$ctx" = "colima" ]
+}
+
+_offer_colima_memory_raise() {
+  [[ "${OS:-$(uname -s)}" == "Darwin" ]] || return 0
+  has colima || return 0
+  _colima_instance_exists || return 0
+  # The measured budget must belong to the runtime we are about to restart.
+  if ! _colima_is_active_runtime; then
+    # Say so for the one case an operator can act on themselves, rather than
+    # skipping in silence: a named profile is a deliberate setup, and the command
+    # that would work on it is not the one this function runs.
+    local _ctx
+    _ctx="$(docker context show 2>/dev/null)" || _ctx=""
+    case "$_ctx" in
+      colima-*)
+        # Plain single quotes: the '\'' concatenation idiom is for a SINGLE-quoted
+        # string, and inside double quotes it emits a literal backslash (Bugbot).
+        hint "Docker is using the Colima profile '${_ctx#colima-}'. Raise it yourself with: colima stop --profile ${_ctx#colima-} && colima start --profile ${_ctx#colima-} --memory <GB>"
+        ;;
+    esac
+    return 0
+  fi
+
+  local current_kb current_mib target_gb current_gb
+  current_kb="$(_pf_runtime_mem_kb)"
+  [[ "$current_kb" =~ ^[0-9]+$ && "$current_kb" -gt 0 ]] || return 0
+  current_mib=$(( current_kb / 1024 ))
+  # GRADED IN MiB WITH THE GRACE, never rounded to whole GB first (Cursor Bugbot
+  # High on #832). preflight.sh says why in its own words: "a VM configured to
+  # exactly the documented floor reports a few hundred MiB less as guest MemTotal,
+  # and rounding that to whole GB first would misgrade it as sub-floor". I did
+  # exactly that -- so a Colima VM set to the documented 5 GB floor reported ~4.7
+  # GiB, truncated to 4, and this path prompted to "fix" a healthy runtime. Under
+  # TRACEBLOC_ASSUME_YES=1 it would have restarted one unasked.
+  #
+  # `_pf_display_gb_from_mib` adds the grace back before dividing, so `current_gb`
+  # is the CONFIGURED size rather than the guest's short report. That also settles
+  # @LukasWodka's round-down wrinkle on the recovery path for free: restoring at
+  # this figure restores what the VM was actually set to, so the accepted
+  # "restores slightly smaller" trade is no longer being made at all.
+  current_gb="$(_pf_display_gb_from_mib "$current_mib")"
+  target_gb="${COLIMA_MEMORY:-$(_macos_vm_mem_gb)}"
+  [[ "$target_gb" =~ ^[0-9]+$ && "$target_gb" -gt 0 ]] || return 0
+
+  # Only when it is actually short. The same comparison preflight.sh:291 makes,
+  # for the same reason.
+  (( current_mib < PF_MIN_MEM_GB * 1024 - PF_VM_MEM_GRACE_MIB )) || return 0
+
+  # THE SUB-FLOOR EXPLANATION COMES BEFORE THE "worth a restart" GUARD (Cursor
+  # Bugbot on #832). It used to sit after `(( target_gb > current_gb ))`, so a VM
+  # ALREADY at the inadequate target returned silently and the one-shot
+  # explanation -- the whole point of this branch -- never printed for the case
+  # that needs it most.
+  #
+  # `_macos_vm_mem_gb` applies the host cap AFTER the safe floor
+  # (preflight.sh:189-192), so on a small host the target comes back BELOW the
+  # floor: a 6 GB Mac yields 4 against a floor of 5. Raising to that cannot fix
+  # anything, so say why once instead of prompting forever.
+  #
+  # AND IT NAMES THE RIGHT CULPRIT. `target_gb` can come from COLIMA_MEMORY, in
+  # which case blaming the Mac is wrong -- the operator chose a sub-floor budget
+  # and only they can raise it. Two different problems deserve two messages.
+  if (( target_gb < PF_MIN_MEM_GB )); then
+    if [[ -n "${COLIMA_MEMORY:-}" ]]; then
+      hint "COLIMA_MEMORY is set to ${COLIMA_MEMORY} GB, below the ${PF_MIN_MEM_GB} GB tracebloc needs to train. Raise or unset it."
+    else
+      hint "This Mac cannot spare ${PF_MIN_MEM_GB} GB for Docker (the most it can give is ${target_gb} GB), so raising the VM would not fix it. Training needs a larger machine."
+    fi
+    return 0
+  fi
+
+  # NO "is the raise worth a restart" GUARD HERE, and its absence is deliberate.
+  # `(( target_gb > current_gb ))` used to sit on this line and is now UNREACHABLE:
+  # reaching it requires the VM to be raw-short (`current_mib < floor*1024 - grace`)
+  # AND the target to clear the floor, and those two cannot both hold. With
+  # grace=512 and floor=5, short means `current_mib < 4608`, so
+  # `current_gb = (current_mib + 512)/1024` is at most 4 while the target is at
+  # least 5 -- the comparison is always true. Bugbot asked for a fixture that
+  # exercises the line; no such fixture exists, so the line goes instead. The
+  # sub-floor branch above is what actually rejects an unhelpful target.
+
+  local cmd="colima stop && colima start --memory ${target_gb}"
+  warn "Docker's Colima VM has ${current_gb} GB — below the ${PF_MIN_MEM_GB} GB tracebloc needs to train."
+
+  if [[ "${TRACEBLOC_ASSUME_YES:-}" != "1" ]]; then
+    if ! _tty_usable; then
+      hint "Raise it with: ${cmd}"
+      return 0
+    fi
+    local reply=""
+    prompt_header "Raise the Colima VM to ${target_gb} GB now?"
+    hint "This STOPS the VM — every running container goes down — then starts it with more memory."
+    _read_sanitized "  Raise it? [y/N] " reply
+    case "$reply" in
+      [Yy]|[Yy][Ee][Ss]) ;;
+      *) hint "Left alone. Raise it later with: ${cmd}"; return 0 ;;
+    esac
+  fi
+
+  # Bounded like every other colima call here (#561): a wedged VZ VM must not
+  # hang the install forever.
+  if ! spin_cmd_bounded 900 "Stopping the Docker runtime…" colima stop; then
+    # "LEFT AS IT WAS" HAS TO BE CHECKED, NOT ASSUMED (Cursor Bugbot High on #832).
+    # A failed `colima stop` is one thing; a TIMED-OUT one is another, and the
+    # bounded wrapper reports both the same way. A timeout can leave the VM
+    # half-down, so claiming the VM is untouched and returning 0 lets the install
+    # continue against a dead runtime -- the same failure the start path already
+    # owns, one branch over.
+    # BOUNDED, via the house helper (Cursor Bugbot High on #832). A bare `docker
+    # info` here is the worst possible place for an unbounded probe: this branch
+    # is reached precisely when a timed-out stop may have left the VM half-down,
+    # which is also when the daemon is most likely wedged. `_docker_answers`
+    # (common.sh) wraps it in `_bounded`, and assess.sh's header already states
+    # the rule -- "a wedged daemon cannot hang assess". Same applies here.
+    if _docker_answers; then
+      warn "Could not stop Colima; the VM is still running. Raise it manually: ${cmd}"
+      return 0
+    fi
+    warn "Colima did not stop cleanly and Docker is not responding; restoring it."
+    if spin_cmd_bounded 900 "Restoring the Docker runtime…" colima start --memory "$current_gb"; then
+      warn "Docker is back at ${current_gb} GB. Raise it manually when you can: ${cmd}"
+      return 0
+    fi
+    error "Colima did not stop cleanly and would not restart, so Docker is down. Recover with: colima start --memory ${current_gb} (or 'colima delete && colima start' if the VM is wedged), then re-run the installer."
+  fi
+  if ! spin_cmd_bounded 900 "Starting it with ${target_gb} GB…" colima start --memory "$target_gb"; then
+    # WE STOPPED IT, SO WE OWN GETTING IT BACK (Cursor Bugbot High on #832). The
+    # first version warned and returned 0, so the install carried on with Docker
+    # DOWN -- and on the already-running headless path control then fell through
+    # to Docker Desktop startup, so the operator got a Desktop error on a Colima
+    # machine instead of a recoverable Colima failure.
+    #
+    # Try the plain start first: the most likely cause is the machine cannot honour
+    # the larger budget, and the VM that was working a moment ago still can.
+    # RESTORED EXPLICITLY, not implicitly (Cursor Bugbot High + both reviewers on
+    # #832). A bare `colima start` relies on the previous configuration still being
+    # on disk, and this function has no evidence of that -- Bugbot reads Colima as
+    # persisting CLI flags before the VM boots, which would make a bare retry the
+    # same failing size and leave Docker down. Passing the size we measured is
+    # correct under either reading and costs nothing.
+    #
+    # It rounds DOWN by a few hundred MiB, and that is an accepted trade rather than
+    # an oversight: `current_gb` comes from MemTotal, which a guest reports below its
+    # configured size. Reading the configured value would mean parsing
+    # ~/.colima/<profile>/colima.yaml -- and this PR already declined to guess
+    # Docker Desktop's on-disk schema for exactly that reason, so guessing Colima's
+    # would be inconsistent. This is a recovery path whose job is to get Docker
+    # back, not to restore byte-exact sizing.
+    warn "Colima would not start with ${target_gb} GB; restoring the previous VM at ${current_gb} GB."
+    if spin_cmd_bounded 900 "Restoring the Docker runtime…" colima start --memory "$current_gb"; then
+      warn "Docker is back at ${current_gb} GB. Raise it manually when the machine can spare it: ${cmd}"
+      return 0
+    fi
+    # Recovery failed too. HARD FAIL rather than continue: every later step needs
+    # Docker, this function is what stopped it, and a run that proceeds from here
+    # fails later with a message about something else entirely.
+    error "Colima did not restart after the memory change and Docker is down. Recover with: colima start --memory ${current_gb} (or 'colima delete && colima start' if the VM is wedged), then re-run the installer."
+  fi
+
+  # RE-PROBED, not assumed. A start that succeeded and a VM that grew are
+  # different facts, and only the second is worth a success line.
+  local new_kb new_gb
+  new_kb="$(_pf_runtime_mem_kb)"
+  # Same grace-aware arithmetic as the grading above: truncating here would let a
+  # raise that landed exactly ON the floor report that nothing grew.
+  if [[ "$new_kb" =~ ^[0-9]+$ ]] &&
+     (( $(_pf_display_gb_from_mib "$(( new_kb / 1024 ))") > current_gb )); then
+    new_gb="$(_pf_display_gb_from_mib "$(( new_kb / 1024 ))")"
+    success "Colima VM raised to ${new_gb} GB."
+  else
+    warn "Colima restarted but still reports ${current_gb} GB. Check 'colima status' and raise it manually: ${cmd}"
+  fi
+  return 0
+}
+
 # Verify a downloaded Docker.dmg against Docker's published checksums.txt.
 # FAIL CLOSED (#629): aborts on a checksum mismatch AND on an unfetchable
 # checksum — matching kubectl / k3d / helm, which also fetch their checksum over
@@ -216,6 +458,23 @@ install_docker_desktop() {
   # If Docker is already running (e.g. started via VNC earlier), skip detection.
   if ! _has_gui_session && ! docker info &>/dev/null 2>&1; then
     _install_docker_colima
+    # AFTER the runtime is up, so `docker info` can be read (backend#2221). A
+    # fresh VM is already sized from physical RAM (#428) and this is a no-op on
+    # it; an EXISTING under-sized VM is the case that had nothing but a warning.
+    _offer_colima_memory_raise
+    return
+  fi
+  # The already-running case: on a headless Mac whose Colima VM was started
+  # earlier (VNC, a previous install) the branch above is skipped entirely, so
+  # the offer has to be made here too or the exact machine that needs it -- one
+  # with an old, small VM -- never sees it.
+  if ! _has_gui_session; then
+    _offer_colima_memory_raise
+    # RETURN, so a headless Colima machine never falls through into the Docker
+    # Desktop arch-detection below (Cursor Bugbot, twice). Docker is already up on
+    # this path -- that is the condition that got us here -- so there is nothing
+    # for the Desktop branch to do except produce a Desktop error on a machine
+    # that runs Colima.
     return
   fi
 
@@ -752,6 +1011,18 @@ install_macos() {
     info "Using the container runtime already on this machine — no administrator rights needed."
     log "step b: tier 0 — skipping admin, sudo, Homebrew and Docker Desktop"
     assert_amd64_emulation    # Docker is up by definition here (#433)
+    # THE TIER 0 CALL IS THE ONE THAT MATTERS (Cursor Bugbot High on #832). An
+    # already-running Colima VM is exactly what Tier 0 classifies
+    # (PROBE_RUNTIME_USABLE=1), and this branch RETURNS before
+    # install_docker_desktop -- where the offer used to live exclusively. So the
+    # feature never fired on the only machines it is for: an existing, under-sized
+    # VM still got nothing but the preflight warning. The "already-running headless"
+    # branch in install_docker_desktop was dead in practice, because Tier 0 catches
+    # that machine first.
+    #
+    # Placed BEFORE the tool install so the consent prompt comes early, rather than
+    # after a long download the user then has to sit through twice.
+    _offer_colima_memory_raise
     install_macos_cli_tools
     log "step b: cli tools ready (tier 0)"
     # Autostart stays best-effort here AND must make NO sudo call (client#704):
