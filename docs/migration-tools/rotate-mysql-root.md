@@ -33,38 +33,60 @@ literal (re-introducing it) or hit a chicken/egg once rotated.
 
 ## Rotate (per fleet: dev → stg → prod)
 
-Run from a shell with `kubectl` access to the fleet. Do **not** pass the password
-as `-p<value>` (it shows in `ps`); use `MYSQL_PWD` and read the target from the
-Secret so the literal is never typed.
+Run from a shell with `kubectl` access to the fleet. **No password ever touches a
+process's argv** — not as `-p<value>` and not embedded in a `sh -c` string (both
+show in the node's `ps`). Instead every secret travels only over the `exec` stdin
+stream (encrypted): the auth password via a mode-600 `--defaults-extra-file`
+written and deleted inside the pod, and the new password via `mysql`'s own stdin.
+
+Both values here are alphanumeric (the chart generates `randAlphaNum`; keep any
+`mysqlRootPassword` pin alphanumeric too), so the single-quoted SQL below is safe.
 
 ```bash
-NS=<ns>; REL=<release>; POD=$(kubectl -n "$NS" get pod -l app=mysql-client -o name | head -1)
+NS=<ns>; REL=<release>
+POD=$(kubectl -n "$NS" get pod -l app=mysql-client -o name | head -1); POD=${POD#pod/}
 
-# The new password the chart generated (never printed):
+# NEWPW = the value the chart generated (read from the Secret, never printed).
+# CURPW = the fleet's CURRENT root password (baked literal on an unrotated fleet,
+#         from the S0 snapshot / secret manager). Export both; never commit them.
 NEWPW=$(kubectl -n "$NS" get secret "$REL"-secrets -o jsonpath='{.data.MYSQL_ROOT_PASSWORD}' | base64 -d)
 
-# Align the live account to it. Authenticate as root@localhost over the socket
-# with the CURRENT password (MYSQL_PWD), set the new one for both hosts:
-kubectl -n "$NS" exec -i "${POD#pod/}" -- sh -c \
-  'MYSQL_PWD="$CURPW" mysql -uroot -N <<SQL
-ALTER USER "root"@"%"         IDENTIFIED BY "'"$NEWPW"'";
-ALTER USER "root"@"localhost" IDENTIFIED BY "'"$NEWPW"'";
+# `sh -s` reads the script from stdin; CURPW/NEWPW are expanded LOCALLY into that
+# stdin stream, so they reach the pod over the exec channel — never in any argv.
+kubectl -n "$NS" exec -i "$POD" -- sh -s <<SCRIPT
+umask 077
+cat > /tmp/rot.cnf <<CNF
+[client]
+user=root
+password=${CURPW}
+CNF
+mysql --defaults-extra-file=/tmp/rot.cnf <<SQL
+ALTER USER 'root'@'%'         IDENTIFIED BY '${NEWPW}';
+ALTER USER 'root'@'localhost' IDENTIFIED BY '${NEWPW}';
 FLUSH PRIVILEGES;
-SQL' CURPW="$CURPW"
+SQL
+rm -f /tmp/rot.cnf
+SCRIPT
 ```
-
-(`CURPW` = the fleet's current root password — the baked literal on an unrotated
-fleet, from the S0 snapshot / secret manager, exported in your shell, never
-committed.)
 
 ## Verify (all must hold before moving to the next fleet)
 
+Same stdin/`--defaults-extra-file` discipline — no password in argv.
+
 ```bash
 # 1. the OLD password no longer authenticates (expect: ERROR 1045 Access denied)
-kubectl -n "$NS" exec "${POD#pod/}" -- sh -c 'MYSQL_PWD="$CURPW" mysql -uroot -e "SELECT 1"' CURPW="$CURPW" ; echo "exit=$?"
+kubectl -n "$NS" exec -i "$POD" -- sh -s <<SCRIPT
+umask 077; printf '[client]\nuser=root\npassword=%s\n' '${CURPW}' > /tmp/v.cnf
+mysql --defaults-extra-file=/tmp/v.cnf -e 'SELECT 1'; echo "exit=\$?"
+rm -f /tmp/v.cnf
+SCRIPT
 
-# 2. the NEW password does
-kubectl -n "$NS" exec "${POD#pod/}" -- sh -c 'MYSQL_PWD="$NEWPW" mysql -uroot -e "SELECT CURRENT_USER()"' NEWPW="$NEWPW"
+# 2. the NEW password does (expect: root@localhost)
+kubectl -n "$NS" exec -i "$POD" -- sh -s <<SCRIPT
+umask 077; printf '[client]\nuser=root\npassword=%s\n' '${NEWPW}' > /tmp/v.cnf
+mysql --defaults-extra-file=/tmp/v.cnf -e 'SELECT CURRENT_USER()'
+rm -f /tmp/v.cnf
+SCRIPT
 
 # 3. the platform is unaffected — heartbeat still sees the FULL dataset count,
 #    ingestion/training/mint still green (the #1528 acceptance gate). Watch a
