@@ -163,6 +163,98 @@ _install_docker_colima() {
   success "Docker running."
 }
 
+# Offer to raise an EXISTING Colima VM that is below the training floor
+# (backend#2221). Returns 0 whether or not anything was changed -- this is an
+# offer, never a gate.
+#
+# WHY THIS EXISTS. #428 sizes a FRESH Colima VM from physical RAM, so a first
+# install already gets a sensible budget. An existing VM does not: the installer
+# starts it as-is, preflight warns that it is too small, and the user is left to
+# fix it by hand. That warning is the state backend#2221 calls out -- *"the
+# installer states an absolute minimum VM allocation and offers to fix it. We
+# already write .wslconfig on Windows; macOS needs the equivalent."*
+#
+# WHY COLIMA AND NOT DOCKER DESKTOP, which is the asymmetry to understand here.
+# Colima is a CLI with documented flags: `colima stop && colima start --memory N`
+# is a supported operation whose effect can be MEASURED afterwards. Docker
+# Desktop's VM size lives in a settings file whose schema is version-dependent
+# and, on a default install, does not contain a memory key at all -- Docker only
+# persists what the user has changed (verified on macOS 15 / Docker Desktop:
+# settings-store.json held ten keys and none of them was memory). Writing a
+# guessed key name there would produce an installer that SAYS it raised the VM
+# and did nothing, which is worse than the instruction it replaced. So Docker
+# Desktop keeps the instruction that preflight already prints, and this path is
+# deliberately Colima-only.
+#
+# CONSENT IS REQUIRED, because this stops the user's container runtime -- every
+# running container goes down. The ticket asks for it explicitly and it is the
+# right bar for a destructive-adjacent action:
+#   * no usable TTY (CI, `curl | bash`) -> print the manual command and return.
+#     A non-interactive run must never restart a runtime nobody asked it to.
+#   * default is NO. A bare Enter declines.
+#   * TRACEBLOC_ASSUME_YES=1 opts in for an unattended install that WANTS this.
+#
+# AND IT RE-PROBES. The success line is emitted only after `docker info` reports
+# the new figure, because "I ran the command" and "the VM is bigger" are
+# different claims and only the second one is worth printing.
+_offer_colima_memory_raise() {
+  [[ "${OS:-$(uname -s)}" == "Darwin" ]] || return 0
+  has colima || return 0
+  _colima_instance_exists || return 0
+
+  local current_kb target_gb current_gb
+  current_kb="$(_pf_runtime_mem_kb)"
+  [[ "$current_kb" =~ ^[0-9]+$ && "$current_kb" -gt 0 ]] || return 0
+  current_gb=$(( current_kb / 1024 / 1024 ))
+  target_gb="${COLIMA_MEMORY:-$(_macos_vm_mem_gb)}"
+  [[ "$target_gb" =~ ^[0-9]+$ && "$target_gb" -gt 0 ]] || return 0
+
+  # Only when it is actually short, and only when the raise is worth a restart.
+  (( current_gb < PF_MIN_MEM_GB )) || return 0
+  (( target_gb > current_gb )) || return 0
+
+  local cmd="colima stop && colima start --memory ${target_gb}"
+  warn "Docker's Colima VM has ${current_gb} GB — below the ${PF_MIN_MEM_GB} GB tracebloc needs to train."
+
+  if [[ "${TRACEBLOC_ASSUME_YES:-}" != "1" ]]; then
+    if ! _tty_usable; then
+      hint "Raise it with: ${cmd}"
+      return 0
+    fi
+    local reply=""
+    prompt_header "Raise the Colima VM to ${target_gb} GB now?"
+    hint "This STOPS the VM — every running container goes down — then starts it with more memory."
+    _read_sanitized "  Raise it? [y/N] " reply
+    case "$reply" in
+      [Yy]|[Yy][Ee][Ss]) ;;
+      *) hint "Left alone. Raise it later with: ${cmd}"; return 0 ;;
+    esac
+  fi
+
+  # Bounded like every other colima call here (#561): a wedged VZ VM must not
+  # hang the install forever.
+  spin_cmd_bounded 900 "Stopping the Docker runtime…" colima stop || {
+    warn "Could not stop Colima; leaving the VM as it was. Raise it manually: ${cmd}"
+    return 0
+  }
+  spin_cmd_bounded 900 "Starting it with ${target_gb} GB…" colima start --memory "$target_gb" || {
+    warn "Colima did not start with ${target_gb} GB. Start it manually: ${cmd}"
+    return 0
+  }
+
+  # RE-PROBED, not assumed. A start that succeeded and a VM that grew are
+  # different facts, and only the second is worth a success line.
+  local new_kb new_gb
+  new_kb="$(_pf_runtime_mem_kb)"
+  if [[ "$new_kb" =~ ^[0-9]+$ ]] && (( new_kb / 1024 / 1024 > current_gb )); then
+    new_gb=$(( new_kb / 1024 / 1024 ))
+    success "Colima VM raised to ${new_gb} GB."
+  else
+    warn "Colima restarted but still reports ${current_gb} GB. Check 'colima status' and raise it manually: ${cmd}"
+  fi
+  return 0
+}
+
 # Verify a downloaded Docker.dmg against Docker's published checksums.txt.
 # FAIL CLOSED (#629): aborts on a checksum mismatch AND on an unfetchable
 # checksum — matching kubectl / k3d / helm, which also fetch their checksum over
@@ -216,7 +308,18 @@ install_docker_desktop() {
   # If Docker is already running (e.g. started via VNC earlier), skip detection.
   if ! _has_gui_session && ! docker info &>/dev/null 2>&1; then
     _install_docker_colima
+    # AFTER the runtime is up, so `docker info` can be read (backend#2221). A
+    # fresh VM is already sized from physical RAM (#428) and this is a no-op on
+    # it; an EXISTING under-sized VM is the case that had nothing but a warning.
+    _offer_colima_memory_raise
     return
+  fi
+  # The already-running case: on a headless Mac whose Colima VM was started
+  # earlier (VNC, a previous install) the branch above is skipped entirely, so
+  # the offer has to be made here too or the exact machine that needs it -- one
+  # with an old, small VM -- never sees it.
+  if ! _has_gui_session; then
+    _offer_colima_memory_raise
   fi
 
   # Detect real hardware — sysctl is immune to Rosetta translation
