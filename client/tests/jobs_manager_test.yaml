@@ -513,34 +513,109 @@ tests:
   # sets only one still renders the PAIR (the missing one gets the historic
   # literal, exactly as the always-inject template did) — a lone
   # RESOURCE_REQUESTS/RESOURCE_LIMITS env var must never be emitted.
-  - it: pairs the literal when only one of RESOURCE_REQUESTS/LIMITS is set
+  # backend#2418. This used to assert the OPPOSITE — that the unset side was
+  # filled with "cpu=2,memory=8Gi" so a half-set config never emitted a lone
+  # var. That injection re-created, at the chart layer, the request-above-limit
+  # bug client-runtime#388 fixed at the runtime layer, and it made L0.2's
+  # cpu-less RESOURCE_LIMITS unsayable through the chart. The var is now emitted
+  # only if set, and jobs-manager mirrors the given side (#388).
+  - it: emits ONLY the var that is set, never a literal for the other side
     set:
       env:
         RESOURCE_LIMITS: "cpu=4,memory=16Gi"
+    asserts:
+      # The house absence idiom — name only, `any: true` — so this pins
+      # `hasKey` rather than one particular injected value. Asserting only
+      # `notContains` the historic pair would stay green if the unset var were
+      # emitted with ANY other value, including empty (Bugbot on client#821).
+      - notContains:
+          path: spec.template.spec.containers[0].env
+          content: {name: RESOURCE_REQUESTS}
+          any: true
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: RESOURCE_LIMITS
+            value: "cpu=4,memory=16Gi"
+          count: 1
+      - notContains:
+          path: spec.template.spec.containers[1].env
+          content: {name: RESOURCE_REQUESTS}
+          any: true
+      - contains:
+          path: spec.template.spec.containers[1].env
+          content:
+            name: RESOURCE_LIMITS
+            value: "cpu=4,memory=16Gi"
+          count: 1
+
+  # The mirror case, and the one that was actually INVALID before: requests
+  # alone got limits={cpu:2, memory:8Gi} injected underneath it, i.e. a request
+  # ABOVE its limit on both dimensions, which Kubernetes rejects outright.
+  - it: a lone RESOURCE_REQUESTS is not given a smaller limit underneath it
+    set:
+      env:
+        RESOURCE_REQUESTS: "cpu=7,memory=29Gi"
     asserts:
       - contains:
           path: spec.template.spec.containers[0].env
           content:
             name: RESOURCE_REQUESTS
-            value: "cpu=2,memory=8Gi"
+            value: "cpu=7,memory=29Gi"
+          count: 1
+      - notContains:
+          path: spec.template.spec.containers[0].env
+          content: {name: RESOURCE_LIMITS}
+          any: true
+      - contains:
+          path: spec.template.spec.containers[1].env
+          content:
+            name: RESOURCE_REQUESTS
+            value: "cpu=7,memory=29Gi"
+          count: 1
+      - notContains:
+          path: spec.template.spec.containers[1].env
+          content: {name: RESOURCE_LIMITS}
+          any: true
+
+  # THE L0.2 SHAPE, end to end through the chart (backend#2418): what the
+  # installer writes after client#820. Memory Guaranteed, no cpu ceiling.
+  #
+  # NOTE ON WHAT THIS DOES AND DOES NOT PROVE (Bugbot on client#821). Both keys
+  # are set here, so this case does NOT exercise the branch this PR changes —
+  # the old template passed a both-keys-set pair through verbatim too, and
+  # restoring the injection would leave every assertion below green. It is a
+  # regression guard on the installer's shape, nothing more, and it is kept for
+  # that. The branch itself is covered by the two one-sided cases above.
+  #
+  # This also corrects a claim in this PR's own reasoning: the cpu-less limits
+  # envelope was NOT "unsayable" through the chart. With both keys set it always
+  # rendered as written. What the injection broke was the ONE-SIDED case — and
+  # with it, client-runtime#388's mirroring, which no chart-direct install could
+  # ever reach.
+  - it: passes through the installer's L0.2 envelope verbatim (regression guard)
+    set:
+      env:
+        RESOURCE_REQUESTS: "cpu=7,memory=29Gi"
+        RESOURCE_LIMITS: "memory=29Gi"
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: RESOURCE_REQUESTS
+            value: "cpu=7,memory=29Gi"
           count: 1
       - contains:
           path: spec.template.spec.containers[0].env
           content:
             name: RESOURCE_LIMITS
-            value: "cpu=4,memory=16Gi"
-          count: 1
-      - contains:
-          path: spec.template.spec.containers[1].env
-          content:
-            name: RESOURCE_REQUESTS
-            value: "cpu=2,memory=8Gi"
+            value: "memory=29Gi"
           count: 1
       - contains:
           path: spec.template.spec.containers[1].env
           content:
             name: RESOURCE_LIMITS
-            value: "cpu=4,memory=16Gi"
+            value: "memory=29Gi"
           count: 1
 
   - it: does not render PER_INGESTION_TABLES by default (RFC-0003 D16 knob off)

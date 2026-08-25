@@ -6642,3 +6642,107 @@ Describe "Assert-NodesSeeHostData (backend#2422)" {
     $code | Should -Match 'Get-Random'
   }
 }
+
+
+# ── Get-TrainingLimits (backend#2418, Utilization Ladder L0.2) ───────────────
+#
+# CPU is time-shared: `requests` with NO `limits` is a cgroup share weight,
+# whereas requests == limits is a cpu.max QUOTA that throttles at its ceiling on
+# a completely idle box. Memory is not time-shared -- over the limit is an OOM
+# kill -- so requests == limits stays there and only cpu is dropped.
+#
+# The bash twin is `_training_limits` in scripts/lib/install-client-helm.sh; the
+# two are pinned to agree by scripts/tests/fixtures/installer_parity.json. The
+# whitespace case below is a real divergence the bash side had and this side did
+# not: `case " cpu=7 " in cpu=*)` does not match, so an untrimmed pair kept the
+# cpu limit on Linux/macOS while `.Trim()` dropped it on Windows.
+Describe "Get-TrainingLimits" {
+  It "drops cpu and keeps memory" {
+    Get-TrainingLimits "cpu=7,memory=29Gi" | Should -Be "memory=29Gi"
+  }
+  It "keeps every non-cpu dimension, not just memory" {
+    # backend#2223 added ephemeral-storage; a "memory only" filter would silently
+    # drop a disk limit and let a pod fill the node's disk.
+    Get-TrainingLimits "cpu=7,memory=29Gi,ephemeral-storage=26Gi" |
+      Should -Be "memory=29Gi,ephemeral-storage=26Gi"
+  }
+  It "leaves a size with no cpu unchanged" {
+    Get-TrainingLimits "memory=16Gi" | Should -Be "memory=16Gi"
+  }
+  It "returns the input for a cpu-ONLY size, never empty" {
+    # An empty RESOURCE_LIMITS reads to jobs-manager as UNSET, which since
+    # client-runtime#388 mirrors the requests side back -- resurrecting the very
+    # cpu limit this function exists to drop.
+    Get-TrainingLimits "cpu=4" | Should -Be "cpu=4"
+  }
+  It "matches cpu= case-insensitively, and the bash twin now agrees" {
+    # Divergence caught in review on client#820: this side's `-like` was
+    # already case-insensitive while bash's `case cpu=*)` was not, so
+    # `CPU=7,...` kept the cpu limit on Linux/macOS and dropped it here. Bash
+    # now uses [Cc][Pp][Uu] character classes (macOS ships bash 3.2, which has
+    # no `${var,,}`).
+    Get-TrainingLimits "CPU=7,memory=29Gi" | Should -Be "memory=29Gi"
+    Get-TrainingLimits "Cpu=7,memory=29Gi" | Should -Be "memory=29Gi"
+    Get-TrainingLimits "CPU=7,CPUSET=0-3,memory=29Gi" |
+      Should -Be "CPUSET=0-3,memory=29Gi"
+  }
+  It "trims each pair before matching cpu=" {
+    Get-TrainingLimits " cpu=7 , memory=29Gi " | Should -Be "memory=29Gi"
+  }
+  It "skips empty pairs" {
+    Get-TrainingLimits "cpu=7,,memory=29Gi" | Should -Be "memory=29Gi"
+  }
+  It "does not eat a dimension that merely starts with cpu" {
+    Get-TrainingLimits "cpu=7,cpuset=0-3,memory=29Gi" |
+      Should -Be "cpuset=0-3,memory=29Gi"
+  }
+}
+
+
+# ── the carry path after L0.2 (backend#2418, Bugbot High on client#820) ──────
+#
+# `RESOURCE_LIMITS` stopped being the whole envelope, so a reader taking the
+# carried size from it broke REINSTALL two ways: the size came back as
+# `memory=29Gi` and was written into RESOURCE_REQUESTS (dropping the cpu
+# request), and the historic-literal gate stopped matching so the post-filter
+# default was mistaken for a deliberate choice. The reader now prefers
+# RESOURCE_REQUESTS and falls back to LIMITS. Bash twin:
+# `_existing_training_values`.
+Describe "Get-TrainingResources carry path (backend#2418)" {
+  BeforeEach { $env:TRACEBLOC_TRAINING_RESOURCES = $null; $script:TB_NAMESPACE = "tracebloc" }
+  AfterEach { $script:TB_NAMESPACE = $null }
+
+  It "carries RESOURCE_REQUESTS, not the memory-only RESOURCE_LIMITS" {
+    Mock kubectl { $global:LASTEXITCODE = 0 }
+    Mock helm {
+      $global:LASTEXITCODE = 0
+      '{"env":{"RESOURCE_LIMITS":"memory=29Gi","RESOURCE_REQUESTS":"cpu=7,memory=29Gi","RESOURCE_PROVENANCE":"user"}}'
+    }
+    Get-TrainingResources | Should -Be "cpu=7,memory=29Gi"
+  }
+
+  It "falls back to RESOURCE_LIMITS when REQUESTS is absent" {
+    Mock kubectl { $global:LASTEXITCODE = 0 }
+    Mock helm {
+      $global:LASTEXITCODE = 0
+      '{"env":{"RESOURCE_LIMITS":"cpu=4,memory=12Gi"}}'
+    }
+    Get-TrainingResources | Should -Be "cpu=4,memory=12Gi"
+  }
+
+  It "still refuses to carry the historic literal" {
+    # The gate that keeps an unschedulable 8Gi off the machines this sizing
+    # exists to fix. It compares the FULL envelope, which only works because
+    # the reader takes RESOURCE_REQUESTS.
+    Mock kubectl { $global:LASTEXITCODE = 0 }
+    Mock helm {
+      $global:LASTEXITCODE = 0
+      '{"env":{"RESOURCE_LIMITS":"memory=8Gi","RESOURCE_REQUESTS":"cpu=2,memory=8Gi"}}'
+    }
+    # Not carried: the answer is machine-derived, so it still names a cpu
+    # dimension. Asserting only "not the literal" would pass vacuously under
+    # the mutation this test exists to catch.
+    Get-TrainingResources | Should -Not -Be "memory=8Gi"
+    Get-TrainingResources | Should -Match '^cpu='
+  }
+}
