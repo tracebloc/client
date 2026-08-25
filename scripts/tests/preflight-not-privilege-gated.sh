@@ -48,5 +48,20 @@ grep -q 'tracebloc.io/metrics-server-preflight' "$tpl" || fail \
 
 echo "  ok: metrics-server Deployment probe (line $cheap_line) precedes the APIService lookup (line $priv_line)"
 echo "  ok: nodeAgents.metricsServerPreflight opt-out present"
+# The probe is only cheap if the caller that actually renders on every tick can
+# READ it. After the cluster-admin cutover that caller is the auto-upgrade
+# ServiceAccount, so a probe outside its scoped role is a 403 -> helm raises ->
+# `--atomic` rolls the tick back: a lockout on the UNATTENDED path, strictly worse
+# than the human-hits-it-once lockout the probe exists to fix. (@saadqbal, client#823.)
+rbac="$repo_root/client/templates/auto-upgrade-rbac.yaml"
+[ -f "$rbac" ] || fail "$rbac is missing -- cannot check the caller's reads, which is a finding"
+
+grep -q 'resources: \["deployments"\]' "$rbac" || fail \
+"the auto-upgrade scoped role does not grant 'deployments', but the preflight probes a metrics-server Deployment FIRST. Every hourly auto-upgrade tick would 403 on that probe and roll back under --atomic. Grant it in auto-upgrade-rbac.yaml (client#823)."
+
+grep -q 'resources: \["apiservices"\]' "$rbac" || fail \
+"the auto-upgrade scoped role does not grant 'apiservices', so the preflight's authoritative fallback would 403 on any cluster where the Deployment probe finds nothing (backend#953)."
+
 echo "  ok: the deciding path is recorded on the object"
+echo "  ok: the auto-upgrade role grants BOTH reads the preflight can make"
 echo "preflight not privilege-gated: green"

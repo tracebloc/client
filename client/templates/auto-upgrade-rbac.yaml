@@ -132,12 +132,31 @@ rules:
     resources: ["clusterroles", "clusterrolebindings"]
     verbs:
       ["get", "list", "watch", "create", "update", "patch", "delete", "escalate", "bind"]
-  # resource-monitor-daemonset.yaml pre-flights metrics-server with a helm
-  # `lookup` of the v1beta1.metrics.k8s.io APIService. After the cluster-admin
-  # cutover the scoped SA runs that lookup during `helm upgrade`; a 403 makes
-  # `lookup` return empty, which the template's `fail` misreads as
-  # "metrics-server missing" and aborts every subsequent auto-upgrade tick.
-  # Read-only access to apiservices lets the lookup resolve (backend#953 Bugbot).
+  # resource-monitor-daemonset.yaml pre-flights metrics-server during
+  # `helm upgrade`, and after the cluster-admin cutover this scoped SA is what
+  # runs it. BOTH reads below are load-bearing; missing either aborts every
+  # subsequent auto-upgrade tick.
+  #
+  # CORRECTION (backend#2469): this comment used to say a 403 makes `lookup`
+  # "return empty, which the template's `fail` misreads as metrics-server
+  # missing". That is WRONG, and the difference matters. A forbidden `lookup`
+  # RAISES -- helm aborts the render with `error calling lookup: ... is
+  # forbidden` and never reaches the `fail`, so the whole release dies rather
+  # than producing a misleading message. Measured, with the error text, while
+  # enabling the edge Collector on tb-client-dev-templates. `lookup` has three
+  # outcomes, not two: sees the cluster, returns empty (offline), or raises.
+  #
+  # `deployments` is the CHEAP probe the preflight tries first, precisely so a
+  # caller holding only namespace-scoped admin -- who cannot read apiservices at
+  # all -- can still render the chart. It must be granted here or this SA 403s on
+  # that probe and `--atomic` rolls back every hourly tick: a lockout on the
+  # UNATTENDED path, strictly worse than the human-hits-it-once lockout
+  # backend#2469 set out to fix. (@saadqbal on client#823.)
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["get", "list", "watch"]
+  # The AUTHORITATIVE fallback, used only when the Deployment probe finds
+  # nothing (backend#953 Bugbot).
   - apiGroups: ["apiregistration.k8s.io"]
     resources: ["apiservices"]
     verbs: ["get", "list", "watch"]

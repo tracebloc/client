@@ -49,7 +49,14 @@
 {{- if $probe -}}
   {{- if lookup "apps/v1" "Deployment" "kube-system" "metrics-server" -}}
     {{- $preflight = "satisfied-by-deployment-probe" -}}
-  {{- else if not (default true .Values.nodeAgents.metricsServerPreflight) -}}
+  {{/*
+    hasKey, NOT `default`. Sprig's `default` treats boolean FALSE as empty, so
+    `default true false` returns TRUE -- metricsServerPreflight: false would never
+    have taken this branch and the opt-out would have been inert while looking
+    present. Exactly the "mechanism that appears to verify something but is not
+    connected to it" shape backend#1729 is about. (Bugbot Medium on client#823.)
+  */}}
+  {{- else if and (hasKey (default dict .Values.nodeAgents) "metricsServerPreflight") (not .Values.nodeAgents.metricsServerPreflight) -}}
     {{- $preflight = "skipped-by-values" -}}
   {{- else -}}
     {{- if not (lookup "apiregistration.k8s.io/v1" "APIService" "" "v1beta1.metrics.k8s.io") -}}
