@@ -563,10 +563,14 @@ spec:
         #     request ABOVE limit on both dimensions, which Kubernetes rejects
         #     outright. #388 made jobs-manager mirror the given side instead, and
         #     this template is what stopped that mirror from ever being reached.
-        #   * L0.2 (backend#2418) needs "memory Guaranteed, CPU a share weight
-        #     with no ceiling" to be expressible, which means a RESOURCE_LIMITS
-        #     with no cpu key. Filling the other side made that unsayable
-        #     through the chart.
+        #   * L0.2 (backend#2418) writes a RESOURCE_LIMITS with no cpu key. That
+        #     shape was ALWAYS expressible when both keys are set -- which is
+        #     what the installer does -- so this change is not what unblocked
+        #     L0.2, and an earlier version of this comment claimed otherwise
+        #     (Bugbot on client#821). What the injection did break is the
+        #     ONE-SIDED case: a chart-direct operator could not express "memory
+        #     Guaranteed, CPU unlimited" by setting limits alone, because
+        #     requests came back as the literal underneath it.
         #
         # ORDERING CONSTRAINT: needs a jobs-manager that mirrors a one-sided
         # envelope (client-runtime#388). An OLDER image merges the parsed pairs
@@ -713,8 +717,10 @@ spec:
         # backend#2418): both omitted when neither is set (jobs-manager derives
         # from node allocatable; older images keep their built-in literal), and
         # EACH emitted only if set -- no literal is injected for the other side,
-        # because doing so both blocked L0.2's cpu-less limits and re-created
-        # client-runtime#388's request-above-limit bug at the chart layer.
+        # because doing so re-created client-runtime#388's request-above-limit
+        # bug at the chart layer and made the ONE-SIDED L0.2 envelope
+        # inexpressible. (A both-keys-set pair, which is what the installer
+        # writes, always rendered verbatim -- see the api container's note.)
         {{- if or (hasKey .Values.env "RESOURCE_REQUESTS") (hasKey .Values.env "RESOURCE_LIMITS") }}
         {{- if hasKey .Values.env "RESOURCE_REQUESTS" }}
         - name: RESOURCE_REQUESTS
