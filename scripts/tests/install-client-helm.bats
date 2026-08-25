@@ -2872,3 +2872,57 @@ _arch_gate_ctx() {
   # `cpu=` is matched as a prefix, so a future `cpuset=...` must survive.
   [ "$(_training_limits 'cpu=7,cpuset=0-3,memory=29Gi')" = "cpuset=0-3,memory=29Gi" ] || return 1
 }
+
+
+# ── the carry path after L0.2 (backend#2418, Bugbot High on client#820) ──────
+#
+# `RESOURCE_LIMITS` stopped being the whole envelope, so a reader that took the
+# carried size from it broke REINSTALL two ways:
+#   * the carried size came back as `memory=29Gi` and was written into
+#     RESOURCE_REQUESTS -- silently dropping the cpu request;
+#   * the historic-literal gate compares against `cpu=2,memory=8Gi`, so a
+#     carried `memory=8Gi` stopped matching and the post-filter default was
+#     mistaken for a deliberate human choice, never re-sized.
+# The reader now prefers RESOURCE_REQUESTS and falls back to LIMITS.
+
+@test "_existing_training_values: carries REQUESTS, not the memory-only LIMITS" {
+  TB_NAMESPACE=tracebloc
+  kubectl() { return 0; }
+  helm() {
+    printf 'env:\n  RESOURCE_LIMITS: "memory=29Gi"\n  RESOURCE_REQUESTS: "cpu=7,memory=29Gi"\n  RESOURCE_PROVENANCE: user\n'
+  }
+  run _existing_training_resources
+  [ "$status" -eq 0 ] || return 1
+  # MUTATION: read RESOURCE_LIMITS here and this reddens with 'memory=29Gi',
+  # i.e. an envelope with no cpu request at all.
+  [ "$output" = "cpu=7,memory=29Gi" ] || return 1
+}
+
+@test "_existing_training_values: falls back to LIMITS when REQUESTS is absent" {
+  # A release installed before requests was written, or a chart-direct install
+  # that set only the one key.
+  TB_NAMESPACE=tracebloc
+  kubectl() { return 0; }
+  helm() { printf 'env:\n  RESOURCE_LIMITS: "cpu=4,memory=12Gi"\n'; }
+  run _existing_training_resources
+  [ "$status" -eq 0 ] || return 1
+  [ "$output" = "cpu=4,memory=12Gi" ] || return 1
+}
+
+@test "_existing_training_values: the historic literal is still not carried" {
+  # The gate that keeps an unschedulable 8Gi off the machines this sizing exists
+  # to fix. It compares the FULL envelope, which only works because the reader
+  # takes RESOURCE_REQUESTS.
+  TB_NAMESPACE=tracebloc
+  kubectl() { return 0; }
+  helm() {
+    printf 'env:\n  RESOURCE_LIMITS: "memory=8Gi"\n  RESOURCE_REQUESTS: "cpu=2,memory=8Gi"\n'
+  }
+  _resolve_training_size
+  # Not carried at all -- the machine is re-sized, so the result still names a
+  # cpu dimension. Asserting `!= cpu=2,memory=8Gi` alone would pass vacuously
+  # under the very mutation this test exists to catch, because reading the
+  # memory-only LIMITS yields `memory=8Gi`, which is also != the literal.
+  [[ "$_TB_TRAINING_SIZE" == cpu=* ]] || return 1
+  [ "$_TB_TRAINING_SIZE" != "memory=8Gi" ] || return 1
+}

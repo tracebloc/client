@@ -97,10 +97,34 @@ _existing_training_values() {
   kubectl get namespace "$ns" --request-timeout=5s >/dev/null 2>&1 || return 0
   out="$(helm get values "$ns" -n "$ns" 2>/dev/null)" || return 0
   [[ -n "$out" ]] || return 0
+  # READ RESOURCE_REQUESTS, FALL BACK TO RESOURCE_LIMITS (backend#2418, Bugbot
+  # High on client#820).
+  #
+  # This used to read RESOURCE_LIMITS only, which was fine while both fields
+  # held the same string. Since L0.2 the limits half is memory-only, so reading
+  # it here breaks a REINSTALL two ways:
+  #
+  #   * the carried "size" comes back as `memory=29Gi`, and the caller writes
+  #     that into RESOURCE_REQUESTS — silently DROPPING the cpu request, so the
+  #     pod asks for no CPU share at all;
+  #   * the historic-literal gate below compares against `cpu=2,memory=8Gi`, so
+  #     a carried `memory=8Gi` no longer matches. The post-filter default is
+  #     then mistaken for a deliberate human choice and the machine is never
+  #     re-sized.
+  #
+  # RESOURCE_REQUESTS still carries the WHOLE envelope, so it is the field to
+  # read. LIMITS remains the fallback for a release installed before requests
+  # was written, or a chart-direct install that set only that key.
   size="$(printf '%s\n' "$out" | awk '
-    /^[[:space:]]*RESOURCE_LIMITS:/ {
+    /^[[:space:]]*RESOURCE_REQUESTS:/ {
       sub(/^[^:]*:[[:space:]]*/, ""); gsub(/"/, ""); print; exit
     }')"
+  if [[ -z "$size" ]]; then
+    size="$(printf '%s\n' "$out" | awk '
+      /^[[:space:]]*RESOURCE_LIMITS:/ {
+        sub(/^[^:]*:[[:space:]]*/, ""); gsub(/"/, ""); print; exit
+      }')"
+  fi
   # No carried size means nothing to attribute; the caller sizes the machine.
   [[ -n "$size" ]] || return 0
   prov="$(printf '%s\n' "$out" | awk '
@@ -114,8 +138,9 @@ _existing_training_values() {
   printf '%s|%s' "$size" "$prov"
 }
 
-# The installed release's RESOURCE_LIMITS, or nothing. Thin reader over the one
-# shared lookup, kept because it is the tested, readable entry point.
+# The installed release's carried ENVELOPE (RESOURCE_REQUESTS, or LIMITS when
+# that is absent), or nothing. Thin reader over the one shared lookup, kept
+# because it is the tested, readable entry point.
 _existing_training_resources() {
   local v
   v="$(_existing_training_values)"

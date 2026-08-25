@@ -6686,3 +6686,52 @@ Describe "Get-TrainingLimits" {
       Should -Be "cpuset=0-3,memory=29Gi"
   }
 }
+
+
+# ── the carry path after L0.2 (backend#2418, Bugbot High on client#820) ──────
+#
+# `RESOURCE_LIMITS` stopped being the whole envelope, so a reader taking the
+# carried size from it broke REINSTALL two ways: the size came back as
+# `memory=29Gi` and was written into RESOURCE_REQUESTS (dropping the cpu
+# request), and the historic-literal gate stopped matching so the post-filter
+# default was mistaken for a deliberate choice. The reader now prefers
+# RESOURCE_REQUESTS and falls back to LIMITS. Bash twin:
+# `_existing_training_values`.
+Describe "Get-TrainingResources carry path (backend#2418)" {
+  BeforeEach { $env:TRACEBLOC_TRAINING_RESOURCES = $null; $script:TB_NAMESPACE = "tracebloc" }
+  AfterEach { $script:TB_NAMESPACE = $null }
+
+  It "carries RESOURCE_REQUESTS, not the memory-only RESOURCE_LIMITS" {
+    Mock kubectl { $global:LASTEXITCODE = 0 }
+    Mock helm {
+      $global:LASTEXITCODE = 0
+      '{"env":{"RESOURCE_LIMITS":"memory=29Gi","RESOURCE_REQUESTS":"cpu=7,memory=29Gi","RESOURCE_PROVENANCE":"user"}}'
+    }
+    Get-TrainingResources | Should -Be "cpu=7,memory=29Gi"
+  }
+
+  It "falls back to RESOURCE_LIMITS when REQUESTS is absent" {
+    Mock kubectl { $global:LASTEXITCODE = 0 }
+    Mock helm {
+      $global:LASTEXITCODE = 0
+      '{"env":{"RESOURCE_LIMITS":"cpu=4,memory=12Gi"}}'
+    }
+    Get-TrainingResources | Should -Be "cpu=4,memory=12Gi"
+  }
+
+  It "still refuses to carry the historic literal" {
+    # The gate that keeps an unschedulable 8Gi off the machines this sizing
+    # exists to fix. It compares the FULL envelope, which only works because
+    # the reader takes RESOURCE_REQUESTS.
+    Mock kubectl { $global:LASTEXITCODE = 0 }
+    Mock helm {
+      $global:LASTEXITCODE = 0
+      '{"env":{"RESOURCE_LIMITS":"memory=8Gi","RESOURCE_REQUESTS":"cpu=2,memory=8Gi"}}'
+    }
+    # Not carried: the answer is machine-derived, so it still names a cpu
+    # dimension. Asserting only "not the literal" would pass vacuously under
+    # the mutation this test exists to catch.
+    Get-TrainingResources | Should -Not -Be "memory=8Gi"
+    Get-TrainingResources | Should -Match '^cpu='
+  }
+}

@@ -4485,7 +4485,18 @@ function Get-CarriedTrainingValues {
     $valsJson = (helm get values $TB_NAMESPACE -n $TB_NAMESPACE -o json 2>$null) | Out-String
     if ($LASTEXITCODE -ne 0 -or -not $valsJson.Trim()) { return $null }
     $vals = $valsJson | ConvertFrom-Json
-    $prev = $vals.env.RESOURCE_LIMITS
+    # READ RESOURCE_REQUESTS, FALL BACK TO RESOURCE_LIMITS (backend#2418, Bugbot
+    # High on client#820). This read RESOURCE_LIMITS only, which was fine while
+    # both fields held the same string. Since L0.2 the limits half is
+    # memory-only, so reading it here breaks a REINSTALL two ways: the carried
+    # "size" comes back as `memory=29Gi` and is written into RESOURCE_REQUESTS,
+    # DROPPING the cpu request; and the historic-literal gate below no longer
+    # matches, so the post-filter default is mistaken for a deliberate choice
+    # and the machine is never re-sized. RESOURCE_REQUESTS still carries the
+    # whole envelope; LIMITS stays the fallback for a release installed before
+    # requests was written, or a chart-direct install that set only that key.
+    $prev = $vals.env.RESOURCE_REQUESTS
+    if (-not $prev) { $prev = $vals.env.RESOURCE_LIMITS }
     # The historic static default was the ABSENCE of a choice -- carrying it
     # would keep the unschedulable 8Gi on exactly the machines this sizing
     # exists to fix (Bugbot). Only a differing value survives re-install.
