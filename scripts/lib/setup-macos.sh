@@ -301,8 +301,15 @@ _offer_colima_memory_raise() {
     return 0
   fi
 
-  # Only when the raise is worth a restart.
-  (( target_gb > current_gb )) || return 0
+  # NO "is the raise worth a restart" GUARD HERE, and its absence is deliberate.
+  # `(( target_gb > current_gb ))` used to sit on this line and is now UNREACHABLE:
+  # reaching it requires the VM to be raw-short (`current_mib < floor*1024 - grace`)
+  # AND the target to clear the floor, and those two cannot both hold. With
+  # grace=512 and floor=5, short means `current_mib < 4608`, so
+  # `current_gb = (current_mib + 512)/1024` is at most 4 while the target is at
+  # least 5 -- the comparison is always true. Bugbot asked for a fixture that
+  # exercises the line; no such fixture exists, so the line goes instead. The
+  # sub-floor branch above is what actually rejects an unhelpful target.
 
   local cmd="colima stop && colima start --memory ${target_gb}"
   warn "Docker's Colima VM has ${current_gb} GB — below the ${PF_MIN_MEM_GB} GB tracebloc needs to train."
@@ -324,10 +331,24 @@ _offer_colima_memory_raise() {
 
   # Bounded like every other colima call here (#561): a wedged VZ VM must not
   # hang the install forever.
-  spin_cmd_bounded 900 "Stopping the Docker runtime…" colima stop || {
-    warn "Could not stop Colima; leaving the VM as it was. Raise it manually: ${cmd}"
-    return 0
-  }
+  if ! spin_cmd_bounded 900 "Stopping the Docker runtime…" colima stop; then
+    # "LEFT AS IT WAS" HAS TO BE CHECKED, NOT ASSUMED (Cursor Bugbot High on #832).
+    # A failed `colima stop` is one thing; a TIMED-OUT one is another, and the
+    # bounded wrapper reports both the same way. A timeout can leave the VM
+    # half-down, so claiming the VM is untouched and returning 0 lets the install
+    # continue against a dead runtime -- the same failure the start path already
+    # owns, one branch over.
+    if docker info >/dev/null 2>&1; then
+      warn "Could not stop Colima; the VM is still running. Raise it manually: ${cmd}"
+      return 0
+    fi
+    warn "Colima did not stop cleanly and Docker is not responding; restoring it."
+    if spin_cmd_bounded 900 "Restoring the Docker runtime…" colima start --memory "$current_gb"; then
+      warn "Docker is back at ${current_gb} GB. Raise it manually when you can: ${cmd}"
+      return 0
+    fi
+    error "Colima did not stop cleanly and would not restart, so Docker is down. Recover with: colima start --memory ${current_gb} (or 'colima delete && colima start' if the VM is wedged), then re-run the installer."
+  fi
   if ! spin_cmd_bounded 900 "Starting it with ${target_gb} GB…" colima start --memory "$target_gb"; then
     # WE STOPPED IT, SO WE OWN GETTING IT BACK (Cursor Bugbot High on #832). The
     # first version warned and returned 0, so the install carried on with Docker
@@ -443,6 +464,12 @@ install_docker_desktop() {
   # with an old, small VM -- never sees it.
   if ! _has_gui_session; then
     _offer_colima_memory_raise
+    # RETURN, so a headless Colima machine never falls through into the Docker
+    # Desktop arch-detection below (Cursor Bugbot, twice). Docker is already up on
+    # this path -- that is the condition that got us here -- so there is nothing
+    # for the Desktop branch to do except produce a Desktop error on a machine
+    # that runs Colima.
+    return
   fi
 
   # Detect real hardware — sysctl is immune to Rosetta translation

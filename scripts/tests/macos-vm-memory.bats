@@ -62,7 +62,10 @@ setup() {
     fi
     return 0
   }
-  # error() exits in production; record it so a hard-fail is assertable.
+  # error() EXITS in production; this records and returns so a hard-fail is
+  # assertable. The divergence matters: after a stubbed error the function keeps
+  # running, so tests must assert on the message they expect rather than on how
+  # many errors were raised.
   error() { record "error $*"; return 1; }
   _read_sanitized() { printf -v "$2" '%s' "${REPLY_IN:-}"; }
   PF_MIN_MEM_GB=5
@@ -107,7 +110,12 @@ calls() { cat "$MOCK_CALLS"; }
   [ "$output" = "0" ] || return 1
 }
 
-@test "a target no bigger than the current size is not worth a restart" {
+# RELABELLED, not deleted (Bugbot Medium on #832). This used to name the
+# `target_gb > current_gb` guard, which my sub-floor reorder made unreachable — so
+# the test kept passing while the line it was named for could no longer run.
+# The scenario is still worth covering; the mechanism that now handles it is the
+# sub-floor branch, and the name says so.
+@test "a sub-floor target is rejected by the sub-floor branch, not by a restart-worth check" {
   REPLY_IN="y" MEM_KB=$((4 * 1024 * 1024)) TARGET_GB=4 run _offer_colima_memory_raise
   [ "$status" -eq 0 ] || return 1
   run bash -c "grep -c '^colima ' '$MOCK_CALLS' || true"
@@ -436,4 +444,42 @@ calls() { cat "$MOCK_CALLS"; }
   REPLY_IN="y" MEM_KB=$(( 8 * 1024 * 1024 )) TARGET_GB=4 run _offer_colima_memory_raise
   [[ "$output" != *"cannot spare"* ]] || return 1
   [[ "$output" != *"COLIMA_MEMORY"* ]] || return 1
+}
+
+
+# ── a failed STOP is owned too, not just a failed start (Bugbot High) ───────
+
+@test "REGRESSION: a failed stop that left Docker up is reported and left alone" {
+  # A genuine "could not stop" with the VM still running is the benign case: say so
+  # and change nothing.
+  colima() { record "colima $*"; [[ "$1" == "stop" ]] && return 1; return 0; }
+  REPLY_IN="y" MEM_KB=$(( 2 * 1024 * 1024 )) TARGET_GB=8 run _offer_colima_memory_raise
+  [ "$status" -eq 0 ] || return 1
+  [[ "$output" == *"still running"* ]] || return 1
+  run bash -c "grep -c '^colima start' '$MOCK_CALLS' || true"
+  [ "$output" = "0" ] || return 1
+}
+
+@test "REGRESSION: a failed stop that took Docker DOWN triggers recovery" {
+  # The dangerous case, and the one the old handler mishandled: a TIMED-OUT stop
+  # can leave the VM half-down, and the bounded wrapper reports that identically
+  # to a clean refusal. "Left as it was" has to be checked, not assumed.
+  colima() { record "colima $*"; [[ "$1" == "stop" ]] && return 1; [[ "$1" == "start" ]] && RESTARTED=1; return 0; }
+  docker() { record "docker $*"; if [[ "$1" == "context" ]]; then printf 'colima'; return 0; fi; return 1; }
+  REPLY_IN="y" MEM_KB=$(( 2 * 1024 * 1024 )) TARGET_GB=8 run _offer_colima_memory_raise
+  [ "$status" -eq 0 ] || return 1
+  run bash -c "grep -c '^colima start --memory 2$' '$MOCK_CALLS' || true"
+  [ "$output" = "1" ] || return 1
+}
+
+@test "REGRESSION: a failed stop AND a failed recovery is a hard failure" {
+  colima() { record "colima $*"; return 1; }
+  docker() { record "docker $*"; if [[ "$1" == "context" ]]; then printf 'colima'; return 0; fi; return 1; }
+  REPLY_IN="y" MEM_KB=$(( 2 * 1024 * 1024 )) TARGET_GB=8 run _offer_colima_memory_raise
+  # ASSERTED ON THE MESSAGE, NOT A COUNT. `error` EXITS in production, so the real
+  # run stops here — but the harness stub returns, so execution carries on into the
+  # start path and errors a second time. Counting would pin a harness artifact
+  # rather than the behaviour; the stop-failure text is the behaviour.
+  run bash -c "grep -c 'did not stop cleanly and would not restart' '$MOCK_CALLS' || true"
+  [ "$output" = "1" ] || return 1
 }
