@@ -40,15 +40,33 @@ fail() { echo "[ERROR] $*" >&2; exit 1; }
 
 echo "== preflight locks nobody out =="
 
-# STRIP COMMENTS FIRST. The previous version grepped the whole file for
-# `metricsServerPreflight`, and that string also appears in the explanatory
-# comment -- so deleting the real `else if` still went green. A guard that a
-# comment can satisfy is not a guard. (Bugbot Medium on client#823.)
-code="$(sed -e 's/{{\/\*.*\*\/}}//g' "$tpl" | awk '
-  /\{\{\/\*/ { inc=1 }
-  !inc       { print }
-  /\*\/\}\}/ { inc=0 }
-')"
+# BLANK the comment lines, do not delete them: the ordering checks below need the
+# ORIGINAL line numbers, and deleting would shift them.
+#
+# Both delimiter forms, because this template uses both: `{{/*` and `{{- /*` to
+# open, `*/}}` and `*/ -}}` to close. The first version of this stripper matched
+# only the un-trimmed pair, so it either leaked prose into the greps or -- on a
+# `*/ -}}` closer it could not see -- swallowed the rest of the file and passed on
+# an empty parse. Both directions are silent. (Bugbot Medium on client#823.)
+code="$(awk '
+  {
+    line = $0
+    opens  = (line ~ /\{\{-?[[:space:]]*\/\*/)
+    closes = (line ~ /\*\/[[:space:]]*-?\}\}/)
+    if (inc) { print ""; if (closes) inc = 0; next }
+    if (opens && closes) { print ""; next }
+    if (opens) { inc = 1; print ""; next }
+    print line
+  }
+  END { if (inc) exit 3 }
+' "$tpl")" || fail \
+"an unterminated helm comment block in $(basename "$tpl") -- the stripper reached EOF
+   still inside one. Refusing to grep a file it cannot parse, because an over-eager
+   strip leaves an empty parse that compares equal to anything."
+
+[ -n "${code//[[:space:]]/}" ] || fail \
+"stripping comments left no code at all in $(basename "$tpl"). That is a parse
+   failure, not a clean template."
 
 # 1. The ONLY privileged lookup is the already-granted APIService one.
 priv_kinds="$(grep -oE 'lookup "[^"]+" "[^"]+"' <<<"$code" | sort -u || true)"
@@ -66,10 +84,36 @@ while IFS= read -r call; do
 done <<<"$priv_kinds"
 
 # 2. That one call is gated by the values flag -- asserted on CODE, not comments.
-grep -qE '^\s*\{\{-?\s*if .*metricsServerPreflight' <<<"$code" || fail \
+# ORDERING, not mere presence. Asking only "does some `if` mention the key"
+# passes when the lookup sits ABOVE that `if` -- which is the original lockout,
+# unchanged. The lookup has to be reachable only through the gate's else branch,
+# so: gate < else < lookup, all on code lines. (Bugbot Medium on client#823.)
+line_of() {
+  local all=""
+  all="$(grep -nE "$1" <<<"$code")" || true
+  all="${all%%$'\n'*}"
+  printf '%s' "${all%%:*}"
+}
+
+gate_line="$(line_of '^[[:space:]]*\{\{-?[[:space:]]*if .*metricsServerPreflight')"
+[ -n "$gate_line" ] || fail \
 "no values gate on the APIService lookup. nodeAgents.metricsServerPreflight is the
    only escape hatch for a caller who cannot read APIServices; without a real
    \`if\` on it the flag is inert while looking present."
+
+else_line="$(line_of '^[[:space:]]*\{\{-?[[:space:]]*else[[:space:]]*-?\}\}')"
+api_line="$(line_of 'lookup "apiregistration.k8s.io/v1" "APIService"')"
+
+[ -n "$else_line" ] || fail \
+"the metricsServerPreflight gate has no \`else\` branch, so this guard cannot tell
+   which side the APIService lookup is on. Not knowing is a finding."
+
+if [ "$gate_line" -ge "$api_line" ] || [ "$else_line" -ge "$api_line" ] || [ "$gate_line" -ge "$else_line" ]; then
+  fail "the APIService lookup (line $api_line) is not reached through the
+   metricsServerPreflight gate (line $gate_line) and its else (line $else_line).
+   Expected gate < else < lookup. As ordered, setting the flag false does not skip
+   the privileged call -- which is the lockout backend#2469 exists to fix, intact."
+fi
 
 # 3. A skipped check must not look like a passed one.
 grep -q 'tracebloc.io/metrics-server-preflight' <<<"$code" || fail \
