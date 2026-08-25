@@ -133,6 +133,20 @@ EOF
   [ "$status" -eq 0 ] || return 1
 }
 
+@test "the disabled-monitor exit clears a prior stale-pin finding too" {
+  # A stale pin can be remediated INTO this state: drop the digest AND set
+  # resourceMonitor: false. Fixing only the CURRENT and unpinned exits would leave
+  # the same write-only annotation, just harder to reach. (Bugbot on client#824.)
+  run run_branch "" "sha256:bbb" "sha256:old" || return 1
+  [ "$status" -eq 0 ] || return 1
+  [[ "$output" == *"tracebloc.io/stale-pin-jobs-manager-"* ]] || return 1
+}
+
+@test "the disabled-monitor exit makes no write when there is nothing to clear" {
+  run run_branch "" "sha256:bbb" "" || return 1
+  [[ "$output" != *"stale-pin-jobs-manager-"* ]] || return 1
+}
+
 @test "a pin flag with no pin value is a quiet skip, not a recurring false finding" {
   # resourceMonitor: false also sets PINNED=1 with an empty pin. Reporting it
   # would put "cannot compare" in every healthy edge's log on every tick.

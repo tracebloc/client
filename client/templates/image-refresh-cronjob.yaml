@@ -439,6 +439,17 @@ data:
         # branch exists to raise. (Bugbot Medium on client#824.)
         if [ -z "$pin_digest" ]; then
           log "  skipped for this image (not a values digest pin -- nothing to compare)"
+          # THE THIRD EXIT, and it needs the same clear as the other two. A prior
+          # stale pin can be remediated INTO this state -- drop the digest and set
+          # `resourceMonitor: false` -- and without this the finding outlives the
+          # problem exactly as it did before the clear paths were added. Fixing two
+          # of three exits leaves the same write-only annotation, just harder to
+          # reach. (Bugbot Medium on client#824.)
+          disabled_stale_key="tracebloc.io/stale-pin-${repo#*/}"
+          if [ -n "$(get_annotation "$disabled_stale_key" || true)" ]; then
+            log "        clearing ${disabled_stale_key}: this image is no longer pinned by a digest"
+            annotate_args="$annotate_args ${disabled_stale_key}-"
+          fi
           continue
         fi
 
