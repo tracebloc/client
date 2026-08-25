@@ -152,9 +152,23 @@ rules:
   # that probe and `--atomic` rolls back every hourly tick: a lockout on the
   # UNATTENDED path, strictly worse than the human-hits-it-once lockout
   # backend#2469 set out to fix. (@saadqbal on client#823.)
+  #
+  # NAMED get, not cluster-wide list/watch. The preflight reads exactly one
+  # object -- the metrics-server Deployment -- so `list`/`watch` on every
+  # Deployment in every namespace would reopen the workload-read blast radius
+  # backend#953 closed, to buy nothing. resourceNames restricts this to a GET of
+  # a resource with that name. (Bugbot Medium on client#823.)
+  #
+  # WHY NOT a namespaced Role in kube-system, which would be narrower still: the
+  # scoped SA can only create Roles there via the gpu-device-plugin block below,
+  # which is gated on `$dp.enabled`. An unconditional kube-system Role would
+  # therefore 403 on upgrade for every install with the device plugin off --
+  # trading this grant for a new lockout on the unattended path, which is the
+  # exact mistake this PR already made once.
   - apiGroups: ["apps"]
     resources: ["deployments"]
-    verbs: ["get", "list", "watch"]
+    resourceNames: ["metrics-server"]
+    verbs: ["get"]
   # The AUTHORITATIVE fallback, used only when the Deployment probe finds
   # nothing (backend#953 Bugbot).
   - apiGroups: ["apiregistration.k8s.io"]

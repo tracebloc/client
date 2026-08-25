@@ -59,6 +59,15 @@ rbac="$repo_root/client/templates/auto-upgrade-rbac.yaml"
 grep -q 'resources: \["deployments"\]' "$rbac" || fail \
 "the auto-upgrade scoped role does not grant 'deployments', but the preflight probes a metrics-server Deployment FIRST. Every hourly auto-upgrade tick would 403 on that probe and roll back under --atomic. Grant it in auto-upgrade-rbac.yaml (client#823)."
 
+# ...but NARROWLY. The preflight reads one named object; a cluster-wide
+# list/watch on every Deployment reopens the blast radius backend#953 closed.
+grep -q 'resourceNames: \["metrics-server"\]' "$rbac" || fail \
+"the deployments grant is not restricted with resourceNames: [\"metrics-server\"]. The preflight reads exactly one object, so a cluster-wide Deployment read buys nothing and reopens the workload-read blast radius backend#953 removed (Bugbot on client#823)."
+
+if grep -A3 'resources: \["deployments"\]' "$rbac" | grep -qE 'verbs:.*"(list|watch)"'; then
+  fail "the deployments grant includes list or watch. resourceNames does not restrict collection verbs -- Kubernetes ignores it for list/watch -- so those would grant enumeration of every Deployment in the cluster. A named get is all the preflight needs."
+fi
+
 grep -q 'resources: \["apiservices"\]' "$rbac" || fail \
 "the auto-upgrade scoped role does not grant 'apiservices', so the preflight's authoritative fallback would 403 on any cluster where the Deployment probe finds nothing (backend#953)."
 
