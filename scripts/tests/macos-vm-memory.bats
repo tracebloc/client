@@ -52,6 +52,18 @@ setup() {
   }
   _macos_vm_mem_gb() { printf '%s' "${TARGET_GB:-8}"; }
   _tty_usable() { [[ "${TTY_OK:-1}" == "1" ]]; }
+  # The active runtime. Defaults to colima so the existing tests keep their
+  # meaning; DOCKER_CTX="desktop" exercises the wrong-runtime guard.
+  docker() {
+    record "docker $*"
+    if [[ "$1" == "context" && "$2" == "show" ]]; then
+      printf '%s' "${DOCKER_CTX:-colima}"
+      return "${DOCKER_CTX_RC:-0}"
+    fi
+    return 0
+  }
+  # error() exits in production; record it so a hard-fail is assertable.
+  error() { record "error $*"; return 1; }
   _read_sanitized() { printf -v "$2" '%s' "${REPLY_IN:-}"; }
   PF_MIN_MEM_GB=5
   unset COLIMA_MEMORY TRACEBLOC_ASSUME_YES
@@ -85,15 +97,20 @@ calls() { cat "$MOCK_CALLS"; }
 }
 
 @test "an unreadable VM size is not guessed at" {
+  # Asserts no colima ACTION rather than no calls at all: the read-only
+  # `docker context show` probe legitimately runs before this point, so an
+  # empty-log assertion would fail for a reason that is not the behaviour.
   REPLY_IN="y" MEM_KB="" run _offer_colima_memory_raise
   [ "$status" -eq 0 ] || return 1
-  [ ! -s "$MOCK_CALLS" ] || return 1
+  run bash -c "grep -c '^colima ' '$MOCK_CALLS' || true"
+  [ "$output" = "0" ] || return 1
 }
 
 @test "a target no bigger than the current size is not worth a restart" {
   REPLY_IN="y" MEM_KB=$((4 * 1024 * 1024)) TARGET_GB=4 run _offer_colima_memory_raise
   [ "$status" -eq 0 ] || return 1
-  [ ! -s "$MOCK_CALLS" ] || return 1
+  run bash -c "grep -c '^colima ' '$MOCK_CALLS' || true"
+  [ "$output" = "0" ] || return 1
 }
 
 @test "it only runs on Darwin" {
@@ -182,4 +199,70 @@ calls() { cat "$MOCK_CALLS"; }
     MEM_KB_AFTER=$((16 * 1024 * 1024)) run _offer_colima_memory_raise
   run bash -c "grep -c '^colima start --memory 16$' '$MOCK_CALLS' || true"
   [ "$output" = "1" ] || return 1
+}
+
+
+# ── it must not act on the wrong runtime (Bugbot Medium) ───────────────────
+
+@test "REGRESSION: Docker Desktop's budget does not trigger a Colima restart" {
+  # A headless Mac can have Desktop up via VNC AND a stale Colima instance. The
+  # memory figure then belongs to DESKTOP, while a yes would stop/start Colima and
+  # switch the docker context to it — fixing a problem the user does not have, on
+  # a runtime they were not using.
+  DOCKER_CTX="desktop" REPLY_IN="y" MEM_KB=$((2 * 1024 * 1024)) TARGET_GB=8 \
+    run _offer_colima_memory_raise
+  [ "$status" -eq 0 ] || return 1
+  run bash -c "grep -c '^colima stop$' '$MOCK_CALLS' || true"
+  [ "$output" = "0" ] || return 1
+}
+
+@test "an unreadable docker context declines to act" {
+  # The safe direction for a function whose action stops a container runtime.
+  DOCKER_CTX_RC=1 REPLY_IN="y" MEM_KB=$((2 * 1024 * 1024)) TARGET_GB=8 \
+    run _offer_colima_memory_raise
+  run bash -c "grep -c '^colima stop$' '$MOCK_CALLS' || true"
+  [ "$output" = "0" ] || return 1
+}
+
+@test "a colima-prefixed context still counts as Colima" {
+  DOCKER_CTX="colima-profile2" REPLY_IN="y" MEM_KB=$((2 * 1024 * 1024)) TARGET_GB=8 \
+    MEM_KB_AFTER=$((8 * 1024 * 1024)) run _offer_colima_memory_raise
+  run bash -c "grep -c '^colima stop$' '$MOCK_CALLS' || true"
+  [ "$output" = "1" ] || return 1
+}
+
+# ── a failed raise must not leave Docker dead (Bugbot High) ───────────────
+
+@test "REGRESSION: a failed start restores the previous VM" {
+  # WE stopped it, so we own getting it back. The first version warned and
+  # returned 0, so the install carried on with Docker DOWN — and on the
+  # already-running headless path control then fell through to Docker Desktop
+  # startup, giving a Desktop error on a Colima machine.
+  colima() {
+    record "colima $*"
+    # The sized start fails; a plain start (recovery) succeeds.
+    if [[ "$1" == "start" && "$2" == "--memory" ]]; then return 1; fi
+    [[ "$1" == "start" ]] && RESTARTED=1
+    return 0
+  }
+  REPLY_IN="y" MEM_KB=$((2 * 1024 * 1024)) TARGET_GB=8 run _offer_colima_memory_raise
+  [ "$status" -eq 0 ] || return 1
+  run bash -c "grep -c '^colima start$' '$MOCK_CALLS' || true"
+  [ "$output" = "1" ] || return 1
+}
+
+@test "REGRESSION: a failed start AND a failed recovery is a hard failure" {
+  # Continuing here would fail later with a message about something else entirely.
+  colima() { record "colima $*"; [[ "$1" == "start" ]] && return 1; return 0; }
+  REPLY_IN="y" MEM_KB=$((2 * 1024 * 1024)) TARGET_GB=8 run _offer_colima_memory_raise
+  run bash -c "grep -c '^error ' '$MOCK_CALLS' || true"
+  [ "$output" = "1" ] || return 1
+}
+
+@test "the hard failure names how to recover" {
+  colima() { record "colima $*"; [[ "$1" == "start" ]] && return 1; return 0; }
+  REPLY_IN="y" MEM_KB=$((2 * 1024 * 1024)) TARGET_GB=8 run _offer_colima_memory_raise
+  run bash -c "grep '^error ' '$MOCK_CALLS'"
+  [[ "$output" == *"colima start"* ]] || return 1
+  [[ "$output" == *"Docker is down"* ]] || return 1
 }

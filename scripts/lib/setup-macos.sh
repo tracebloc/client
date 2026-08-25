@@ -197,10 +197,31 @@ _install_docker_colima() {
 # AND IT RE-PROBES. The success line is emitted only after `docker info` reports
 # the new figure, because "I ran the command" and "the VM is bigger" are
 # different claims and only the second one is worth printing.
+# Is Colima the runtime `docker` is actually talking to?
+#
+# WHY THIS IS NOT THE SAME QUESTION as "is Colima installed and does an instance
+# exist" (Cursor Bugbot Medium on #832). A headless Mac can have Docker Desktop up
+# via VNC AND a leftover, stopped Colima instance. The memory figure then comes
+# from DESKTOP's VM, while a "yes" would stop/start Colima and switch the docker
+# context to it -- solving a problem the user does not have, on a runtime they were
+# not using, and moving their Docker out from under them.
+#
+# The active CONTEXT is the honest signal: it is what `docker` resolves through,
+# so it names the runtime the measured budget actually belongs to. Anything
+# unreadable answers "not Colima", which declines to act -- the safe direction for
+# a function whose action stops a container runtime.
+_colima_is_active_runtime() {
+  local ctx
+  ctx="$(docker context show 2>/dev/null)" || return 1
+  case "$ctx" in colima|colima-*) return 0 ;; *) return 1 ;; esac
+}
+
 _offer_colima_memory_raise() {
   [[ "${OS:-$(uname -s)}" == "Darwin" ]] || return 0
   has colima || return 0
   _colima_instance_exists || return 0
+  # The measured budget must belong to the runtime we are about to restart.
+  _colima_is_active_runtime || return 0
 
   local current_kb target_gb current_gb
   current_kb="$(_pf_runtime_mem_kb)"
@@ -237,10 +258,25 @@ _offer_colima_memory_raise() {
     warn "Could not stop Colima; leaving the VM as it was. Raise it manually: ${cmd}"
     return 0
   }
-  spin_cmd_bounded 900 "Starting it with ${target_gb} GB…" colima start --memory "$target_gb" || {
-    warn "Colima did not start with ${target_gb} GB. Start it manually: ${cmd}"
-    return 0
-  }
+  if ! spin_cmd_bounded 900 "Starting it with ${target_gb} GB…" colima start --memory "$target_gb"; then
+    # WE STOPPED IT, SO WE OWN GETTING IT BACK (Cursor Bugbot High on #832). The
+    # first version warned and returned 0, so the install carried on with Docker
+    # DOWN -- and on the already-running headless path control then fell through
+    # to Docker Desktop startup, so the operator got a Desktop error on a Colima
+    # machine instead of a recoverable Colima failure.
+    #
+    # Try the plain start first: the most likely cause is the machine cannot honour
+    # the larger budget, and the VM that was working a moment ago still can.
+    warn "Colima would not start with ${target_gb} GB; restoring the previous VM."
+    if spin_cmd_bounded 900 "Restoring the Docker runtime…" colima start; then
+      warn "Docker is back at ${current_gb} GB. Raise it manually when the machine can spare it: ${cmd}"
+      return 0
+    fi
+    # Recovery failed too. HARD FAIL rather than continue: every later step needs
+    # Docker, this function is what stopped it, and a run that proceeds from here
+    # fails later with a message about something else entirely.
+    error "Colima did not restart after the memory change and Docker is down. Recover with: colima start (or 'colima delete && colima start' if the VM is wedged), then re-run the installer."
+  fi
 
   # RE-PROBED, not assumed. A start that succeeded and a VM that grew are
   # different facts, and only the second is worth a success line.
