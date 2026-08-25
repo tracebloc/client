@@ -62,6 +62,10 @@ setup() {
     fi
     return 0
   }
+  # The bounded docker probe the stop-failure handler uses. Stubbed separately
+  # from `docker` so a test can say "the daemon is wedged/down" without also
+  # breaking `docker context show`, which the runtime guard needs.
+  _docker_answers() { record "_docker_answers"; return "${DOCKER_UP_RC:-0}"; }
   # error() EXITS in production; this records and returns so a hard-fail is
   # assertable. The divergence matters: after a stubbed error the function keeps
   # running, so tests must assert on the message they expect rather than on how
@@ -465,7 +469,7 @@ calls() { cat "$MOCK_CALLS"; }
   # can leave the VM half-down, and the bounded wrapper reports that identically
   # to a clean refusal. "Left as it was" has to be checked, not assumed.
   colima() { record "colima $*"; [[ "$1" == "stop" ]] && return 1; [[ "$1" == "start" ]] && RESTARTED=1; return 0; }
-  docker() { record "docker $*"; if [[ "$1" == "context" ]]; then printf 'colima'; return 0; fi; return 1; }
+  DOCKER_UP_RC=1
   REPLY_IN="y" MEM_KB=$(( 2 * 1024 * 1024 )) TARGET_GB=8 run _offer_colima_memory_raise
   [ "$status" -eq 0 ] || return 1
   run bash -c "grep -c '^colima start --memory 2$' '$MOCK_CALLS' || true"
@@ -474,7 +478,7 @@ calls() { cat "$MOCK_CALLS"; }
 
 @test "REGRESSION: a failed stop AND a failed recovery is a hard failure" {
   colima() { record "colima $*"; return 1; }
-  docker() { record "docker $*"; if [[ "$1" == "context" ]]; then printf 'colima'; return 0; fi; return 1; }
+  DOCKER_UP_RC=1
   REPLY_IN="y" MEM_KB=$(( 2 * 1024 * 1024 )) TARGET_GB=8 run _offer_colima_memory_raise
   # ASSERTED ON THE MESSAGE, NOT A COUNT. `error` EXITS in production, so the real
   # run stops here — but the harness stub returns, so execution carries on into the

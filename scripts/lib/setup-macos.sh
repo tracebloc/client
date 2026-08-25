@@ -338,7 +338,13 @@ _offer_colima_memory_raise() {
     # half-down, so claiming the VM is untouched and returning 0 lets the install
     # continue against a dead runtime -- the same failure the start path already
     # owns, one branch over.
-    if docker info >/dev/null 2>&1; then
+    # BOUNDED, via the house helper (Cursor Bugbot High on #832). A bare `docker
+    # info` here is the worst possible place for an unbounded probe: this branch
+    # is reached precisely when a timed-out stop may have left the VM half-down,
+    # which is also when the daemon is most likely wedged. `_docker_answers`
+    # (common.sh) wraps it in `_bounded`, and assess.sh's header already states
+    # the rule -- "a wedged daemon cannot hang assess". Same applies here.
+    if _docker_answers; then
       warn "Could not stop Colima; the VM is still running. Raise it manually: ${cmd}"
       return 0
     fi
